@@ -265,10 +265,12 @@ func TestListFilterParametersReachTheStorageFilter(t *testing.T) {
 }
 
 // TestListFilterTimeBoundsAreNormalizedToUTC: a bound carrying an offset
-// reaches storage as the SAME instant in UTC. The storage layer formats a bound
-// in its own zone and a zone-less timestamp column reads only the wall clock,
-// so an un-normalized `+02:00` bound would compare two hours off. Every bound
-// on the operation goes through the one decoder, the created bounds included.
+// reaches storage as the SAME instant in UTC. A zone-less timestamp column reads
+// only a literal's wall clock, so a `+02:00` bound spelled as-is would compare
+// two hours off; sqlbuild binds every range bound in UTC for that reason, and
+// this decode is the route's own guard, so the value it hands storage is
+// already the UTC instant. Every bound on the operation goes through the one
+// decoder, the created bounds included.
 func TestListFilterTimeBoundsAreNormalizedToUTC(t *testing.T) {
 	want := time.Date(2026, 3, 4, 3, 6, 7, 0, time.UTC)
 	for _, param := range []string{

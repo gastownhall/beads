@@ -8,12 +8,14 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -350,6 +352,224 @@ func TestHealthz(t *testing.T) {
 	}
 }
 
+// TestEveryResponseCarriesTheResponseWideHeaders holds what withRequestContext
+// sets before routing to every answer that passes through it, not only to the
+// liveness probe's. (net/http still answers a few requests itself, such as
+// `OPTIONS *` and an oversized header block, without reaching the middleware;
+// those are out of this test's reach.) TestHealthz pins Cache-Control on one
+// row, with Header.Get; every other row has it only because the middleware
+// wraps the whole mux, so the header narrowed into s.route (which the
+// catch-all, the custom-method dispatcher's refusal and the Host check never
+// reach), the events page or stream writer overwriting it, any success writer
+// appending to it, or the panic answer or a 401 or Retry-After problem dropping
+// it would each leave that test green. A row mounted outside the middleware is
+// caught only indirectly elsewhere (by the request_id its 401 lacks), and not
+// at all for an auth-exempt row; this test checks the header itself on every
+// row. A header set by one handler on its own success path is beyond the
+// refusal probe by design.
+//
+// THE PROBE IS AN UNKNOWN QUERY PARAMETER. The document promises every
+// operation refuses one at its own door with a 400, so each row answers with
+// no database work and no fake that has to answer every operation. Each case
+// asserts that refusal, naming the probe: a row that stopped refusing would
+// otherwise pass on the fake's panic answer, which carries the same headers,
+// or fail with a 200 that the request_id check blames on the middleware. The
+// request line naming the row's op is what proves the refusal is THAT row's:
+// a substitution that missed and landed on another row would draw that row's
+// identical refusal and pass for the wrong reason (one that landed on a 404
+// already fails the refusal check).
+func TestEveryResponseCarriesTheResponseWideHeaders(t *testing.T) {
+	// What every answer must carry. Cache-Control: no-store is the requirement
+	// itself (no client or intermediary may cache an answer about live work),
+	// not a copy of what the middleware sets today. If withRequestContext stops
+	// setting it, the remedy is to restore it there, not to drop it from this
+	// list or to set it in each writer: the checks below catch a drop only on
+	// the answers they sample. Values, not Get, so a second Cache-Control line
+	// appended beside no-store fails too.
+	responseWide := http.Header{"Cache-Control": {"no-store"}}
+	check := func(t *testing.T, resp *http.Response) {
+		t.Helper()
+		for name, want := range responseWide {
+			if got := resp.Header.Values(name); !slices.Equal(got, want) {
+				t.Errorf("%s = %q, want %q", name, got, want)
+			}
+		}
+	}
+
+	ts := newTestServer(t, Config{})
+	// The pin runs one way, so following it can only add coverage: a header the
+	// middleware sets fails here until responseWide lists it, and is then held,
+	// value and all, to every answer below. It never asks for a listed header to
+	// go or to change its value. Cache-Control: no-store is additionally required
+	// of the middleware itself, against a literal rather than responseWide, so no
+	// edit to the list satisfies it: answers no case below samples (net/http's
+	// own path-cleaning redirects, among others) carry it only from there.
+	{
+		rec := httptest.NewRecorder()
+		ts.Server.withRequestContext(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})).
+			ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+		for name, got := range rec.Header() {
+			if _, listed := responseWide[name]; !listed {
+				t.Errorf("withRequestContext sets %s = %q, which responseWide does not list; add it to responseWide so every answer below is held to it", name, got)
+			}
+		}
+		if got := rec.Header().Values("Cache-Control"); !slices.Equal(got, []string{"no-store"}) {
+			t.Errorf("withRequestContext sets Cache-Control = %q, want [\"no-store\"]: answers no case below samples (net/http's own redirects) carry it only from the middleware; restore it there", got)
+		}
+	}
+
+	const probe = "header_probe"
+	for _, rt := range routeTable {
+		path := strings.NewReplacer(
+			"{id}", "bd-1",
+			"{key}", "k",
+			"{"+customMethodPathValue+"}", "bd-1"+rt.customMethod,
+		).Replace(rt.pattern) + "?" + probe + "=1"
+		t.Run(rt.op, func(t *testing.T) {
+			resp := ts.do(t, rt.method, path, nil)
+			check(t, resp)
+			body := decodeBody(t, resp)
+			if resp.StatusCode != http.StatusBadRequest || body["code"] != string(CodeInvalidArgument) ||
+				body["reason"] != string(ReasonUnknownParameter) || body["param"] != probe {
+				t.Fatalf("%s %s = %d %v/%v naming %v, want %d %s/%s naming %s: the probe no longer reaches %s's own refusal",
+					rt.method, path, resp.StatusCode, body["code"], body["reason"], body["param"],
+					http.StatusBadRequest, CodeInvalidArgument, ReasonUnknownParameter, probe, rt.op)
+			}
+			id, _ := body["request_id"].(string)
+			if id == "" {
+				t.Fatalf("%s %s: no request_id, so the answer never passed through withRequestContext", rt.method, path)
+			}
+			line := findLogLine(t, ts.stderr.String(), "request_id="+id+" ")
+			if !strings.Contains(line, " op="+rt.op+" ") {
+				t.Errorf("%s %s was answered by another row, so this case says nothing about %s:\n%s",
+					rt.method, path, rt.op, line)
+			}
+		})
+	}
+
+	// The answers no row owns pass through withRequestContext and nothing else,
+	// so they are what fails if the header moves to a narrower layer. Each one
+	// asserts where it landed, mirroring the row loop's op guard: a case whose
+	// precondition drifted would otherwise quietly probe a row instead.
+	for _, tc := range []struct {
+		name, method, path, host string
+		status                   int
+		code                     Code
+	}{
+		// No API version can ever claim this path.
+		{"unrouted path", http.MethodGet, "/no-such-route", "", http.StatusNotFound, CodeNotFound},
+		{"unregistered custom method", http.MethodPost, "/v0/beads/issues/bd-1:nosuchverb", "", http.StatusNotFound, CodeNotFound},
+		{"refused Host", http.MethodGet, "/healthz", "rebind.example", http.StatusBadRequest, CodeInvalidArgument},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var header http.Header
+			if tc.host != "" {
+				header = http.Header{"Host": {tc.host}}
+			}
+			resp := ts.do(t, tc.method, tc.path, header)
+			check(t, resp)
+			body := decodeBody(t, resp)
+			if resp.StatusCode != tc.status || body["code"] != string(tc.code) {
+				t.Fatalf("%s %s = %d %v, want %d %s: the case no longer reaches the answer it exists to hold",
+					tc.method, tc.path, resp.StatusCode, body["code"], tc.status, tc.code)
+			}
+			id, _ := body["request_id"].(string)
+			if id == "" {
+				t.Fatalf("%s %s: no request_id, so the answer never passed through withRequestContext", tc.method, tc.path)
+			}
+			if line := findLogLine(t, ts.stderr.String(), "request_id="+id+" "); !strings.Contains(line, ` op="" `) {
+				t.Errorf("%s %s was answered by a row, so this case no longer holds the answers no row owns:\n%s",
+					tc.method, tc.path, line)
+			}
+		})
+	}
+
+	// ServeMux answers a non-canonical path itself with a redirect, inside
+	// withRequestContext but through none of the writers, so this answer carries
+	// the header only if the middleware sets it. ts.client follows redirects;
+	// this client stops at the first answer so the redirect itself is checked.
+	t.Run("mux path-cleaning redirect", func(t *testing.T) {
+		noFollow := *ts.client
+		noFollow.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+		req, err := http.NewRequest(http.MethodGet, ts.base+"//healthz", nil)
+		if err != nil {
+			t.Fatalf("new request: %v", err)
+		}
+		resp, err := noFollow.Do(req)
+		if err != nil {
+			t.Fatalf("GET //healthz: %v", err)
+		}
+		t.Cleanup(func() { _ = resp.Body.Close() })
+		if resp.StatusCode != http.StatusTemporaryRedirect || resp.Header.Get("Location") != "/healthz" {
+			t.Fatalf("GET //healthz = %d Location %q, want %d to /healthz: the case no longer reaches ServeMux's own redirect",
+				resp.StatusCode, resp.Header.Get("Location"), http.StatusTemporaryRedirect)
+		}
+		check(t, resp)
+	})
+
+	// A handler can still overwrite or append to the header on its own success
+	// path, which no refusal above reaches. There are three success writers:
+	// writeJSON (every row's 200 except the two event reads), writeEventsPage
+	// (listEvents' 200) and the events:watch stream, where the usual SSE idiom,
+	// `no-cache`, would replace no-store with something weaker;
+	// eventStream.open leaves Cache-Control alone on purpose.
+	t.Run("plain JSON success", func(t *testing.T) {
+		resp := ts.do(t, http.MethodGet, "/healthz", nil)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want 200", resp.StatusCode)
+		}
+		check(t, resp)
+	})
+	t.Run(OpListEvents+" page success", func(t *testing.T) {
+		resp := watchServer(t, &liveEventsJournal{}).do(t, http.MethodGet, "/v0/beads/events?since=0", nil)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want 200", resp.StatusCode)
+		}
+		check(t, resp)
+	})
+	t.Run(OpWatchEvents+" open stream", func(t *testing.T) {
+		ws := openWatch(t, watchServer(t, &liveEventsJournal{}), "/v0/beads/events:watch?since=0", nil)
+		check(t, ws.resp)
+	})
+
+	// The panic answer is written by the middleware's own recovery, after a
+	// handler may have half-set headers, so it has header handling of its own
+	// that no row's answer exercises.
+	t.Run("panic answer", func(t *testing.T) {
+		boom := route{op: "boom", bypassSemaphore: true, handler: func(*Server, http.ResponseWriter, *http.Request) {
+			panic("boom")
+		}}
+		rec := httptest.NewRecorder()
+		ts.Server.withRequestContext(ts.Server.route(boom)).
+			ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+		if rec.Code != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want 500", rec.Code)
+		}
+		check(t, rec.Result())
+	})
+
+	// Write has header handling that only some codes reach: the challenge on a
+	// 401 and Retry-After on the retryable 503s. The row probes above all answer
+	// 400, so every code in the vocabulary is written here through s.fail, the
+	// path every refusal takes, with Retry-After where the server sets it.
+	for _, code := range slices.Sorted(maps.Keys(codeStatus)) {
+		t.Run("problem "+string(code), func(t *testing.T) {
+			res := newResult(code, "header probe")
+			if code.Status() == http.StatusServiceUnavailable {
+				res.RetryAfterSeconds = 1
+			}
+			rec := httptest.NewRecorder()
+			ts.Server.withRequestContext(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				ts.Server.fail(w, r, res)
+			})).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+			if rec.Code != code.Status() {
+				t.Fatalf("status = %d, want %d", rec.Code, code.Status())
+			}
+			check(t, rec.Result())
+		})
+	}
+}
+
 // TestHealthzStaysUpWhileTheDatabaseIsDown pins the property that makes
 // /healthz liveness-only, and the reason /context shares it: neither touches
 // the provider, so both answer while every database slot is held or the
@@ -636,11 +856,11 @@ func TestCapabilitiesAdvertiseEveryImplementedOperation(t *testing.T) {
 	// same list. Both are spelled literally here to keep this an independent
 	// oracle rather than a second call to the code under test.
 	want = append(want, "project.enforce", "issues.batchApplyLarge", "issues.list.sort", "issues.count.scope",
-		"issues.sweep.wispsPlane", "issues.sweep.liveDependents", "issues.sweep.limit",
+		"issues.sweep.wispsPlane", "issues.sweep.liveDependents", "issues.sweep.limit", "issues.sweep.retainIds", "issues.sweep.retainedTypes",
 		"issues.batchApply.depAddLineage", "issues.update.allowTemplate", "issues.create.defaultPriority",
 		"issues.close.autoCloseMolecule", "issues.list.search",
 		"issues.list.noAssignee", "issues.list.title", "issues.list.ids", "issues.update.persistence", "dependencies.blocking.isBlocked", "issues.update.claim",
-		"issues.create.gates", "issues.update.gates", "issues.list.filters")
+		"issues.create.gates", "issues.update.gates", "issues.list.filters", "issues.arrivalSeq")
 	slices.Sort(want)
 	if !slices.Equal(got, want) {
 		t.Errorf("capabilities = %v, want %v", got, want)
@@ -1273,6 +1493,124 @@ func TestStartupLines(t *testing.T) {
 		t.Errorf("ConnMaxIdleTime = %s, want 20s below Dolt's supported 30s wait_timeout",
 			provider.limits.ConnMaxIdleTime)
 	}
+}
+
+// TestStartupEventPublishesTheAdvertisedCapabilitiesAndSource pins the whole
+// event=startup line of a provider- or roles-backed server: its field sequence,
+// its database-source label, and a capabilities field that is the handshake's
+// list verbatim.
+//
+// TestStartupLines and TestStartupNamesTheDatabaseSource check fields by
+// substring, and neither reads capabilities at all. So a server could print one
+// list and advertise another, or a new kind of database source could relabel
+// this line, and both would stay green. The line is how an operator learns
+// what a server answers before any client connects, so it is pinned exactly:
+// changing it should take a deliberate edit to this test, not happen as a side
+// effect of adding a source.
+func TestStartupEventPublishesTheAdvertisedCapabilitiesAndSource(t *testing.T) {
+	workspace := domain.ContextInfo{RepoRoot: "/w/repo", BeadsDir: "/w/repo/.beads", Database: "beads"}
+	for _, tc := range []struct {
+		name   string
+		cfg    Config
+		source string
+	}{
+		{"provider", Config{Provider: &tunableProvider{}}, "provider"},
+		{"provider with the external-dependency policy", Config{Provider: &tunableProvider{}, ExternalDependencyPolicy: true}, "provider"},
+		{"roles", rolesConfig(Config{}), "roles"},
+		{"roles with the external-dependency policy", rolesConfig(Config{ExternalDependencyPolicy: true}), "roles"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := tc.cfg
+			cfg.Mode = "server (external dolt)"
+			cfg.Workspace = workspace
+			ts := newTestServer(t, cfg)
+
+			var advertised []string
+			caps, _ := decodeBody(t, ts.get(t, "/v0/beads/context"))["capabilities"].([]any)
+			for _, c := range caps {
+				advertised = append(advertised, c.(string))
+			}
+			if len(advertised) == 0 {
+				t.Fatal("the handshake advertises no capabilities; comparing the startup line against it would pass for an empty one")
+			}
+			// The conditional token is in the list exactly when the case asks
+			// for it, so the policy rows really cover a list that differs.
+			if got := slices.Contains(advertised, CapExternalDependencies); got != cfg.ExternalDependencyPolicy {
+				t.Fatalf("handshake advertises %s = %v, want %v", CapExternalDependencies, got, cfg.ExternalDependencyPolicy)
+			}
+
+			line := findLogLine(t, ts.stderr.String(), "event=startup")
+			keys, fields := eventFields(t, line)
+			want := []struct{ key, value string }{
+				{"event", "startup"},
+				{"addr", ts.Addr()},
+				{"mode", cfg.Mode},
+				{"db", tc.source},
+				{"workspace", workspace.RepoRoot},
+				{"beads_dir", workspace.BeadsDir},
+				{"database", workspace.Database},
+				{"host_allowlist", "127.0.0.1,::1,localhost"},
+				{"capabilities", strings.Join(advertised, ",")},
+				{"auth", "none"},
+			}
+			var wantKeys []string
+			for _, w := range want {
+				wantKeys = append(wantKeys, w.key)
+				if got := fields[w.key]; got != w.value {
+					t.Errorf("startup %s = %q, want %q", w.key, got, w.value)
+				}
+			}
+			if !slices.Equal(keys, wantKeys) {
+				t.Errorf("startup fields = %v, want %v\n%s", keys, wantKeys, line)
+			}
+		})
+	}
+}
+
+// eventFields splits one event line back into its fields, in order: the
+// inverse of Server.event, where every value is a bare token or a Go-quoted
+// string (logValue). The log prefix before "event=" is dropped.
+func eventFields(t *testing.T, line string) ([]string, map[string]string) {
+	t.Helper()
+	start := strings.Index(line, "event=")
+	if start < 0 {
+		t.Fatalf("not an event line: %q", line)
+	}
+	rest := line[start:]
+	var keys []string
+	fields := map[string]string{}
+	for rest != "" {
+		key, value, ok := strings.Cut(rest, "=")
+		if !ok || key == "" || strings.ContainsAny(key, ` "`) {
+			t.Fatalf("malformed field at %q in %q", rest, line)
+		}
+		if strings.HasPrefix(value, `"`) {
+			quoted, err := strconv.QuotedPrefix(value)
+			if err != nil {
+				t.Fatalf("malformed quoted value at %q in %q: %v", value, line, err)
+			}
+			unquoted, err := strconv.Unquote(quoted)
+			if err != nil {
+				t.Fatalf("unquote %s: %v", quoted, err)
+			}
+			rest = value[len(quoted):]
+			value = unquoted
+			if rest != "" {
+				if rest[0] != ' ' {
+					t.Fatalf("field %s is not followed by a space in %q", key, line)
+				}
+				rest = rest[1:]
+			}
+		} else {
+			value, rest, _ = strings.Cut(value, " ")
+		}
+		if _, dup := fields[key]; dup {
+			t.Fatalf("field %s appears twice in %q", key, line)
+		}
+		keys = append(keys, key)
+		fields[key] = value
+	}
+	return keys, fields
 }
 
 // TestPoolLimitsUnavailableIsAnnounced: running unbounded is a decision, so it

@@ -80,4 +80,11 @@ func TestApplyProviderOptions(t *testing.T) {
 	if got := applyProviderOptions([]ProviderOption{WithProxiedServerMode()}); !got.proxiedServerMode || got.preview || got.readOnly {
 		t.Fatalf("applyProviderOptions(WithProxiedServerMode()) = %+v, want only proxiedServerMode set", got)
 	}
+	// Rotation is off unless the caller says it owns the server log.
+	if applyProviderOptions(nil).rotateServerLog {
+		t.Fatal("applyProviderOptions(nil).rotateServerLog = true, want false")
+	}
+	if got := applyProviderOptions([]ProviderOption{WithServerLogRotation()}); got != (providerOptions{rotateServerLog: true}) {
+		t.Fatalf("applyProviderOptions(WithServerLogRotation()) = %+v, want only rotateServerLog set", got)
+	}
 }

@@ -280,6 +280,11 @@ func (e *NotFoundError) Unwrap() error { return ErrNotFound }
 // left pointing at an absent row, or left blocked by one, is the state the
 // unforced guard exists to prevent a caller from creating by hand.
 //
+// A DELETION RETIRES NO ID. The ids it erases stay reusable: a later create
+// naming one succeeds and writes a fresh row. Only a retaining sweep
+// (SweepRequest.RetainIDs) leaves a tombstone behind, so a row whose id is an
+// idempotency key must never be erased through this role.
+//
 // Deterministic request-validation failures match ErrValidation. Result values
 // are unspecified when error is non-nil.
 type Deleter interface {

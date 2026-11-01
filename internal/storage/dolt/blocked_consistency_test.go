@@ -1164,3 +1164,188 @@ func TestParentChildCascade_InheritedBitStillCascades(t *testing.T) {
 		t.Errorf("inconsistencies after repair = %d, want 0", n)
 	}
 }
+
+// staleParentArms are the parent kinds and statuses of the #7626 tests: a
+// closed or pinned row is never blocked, but a merge that closes or pins it
+// without a recompute may leave its stored is_blocked at 1.
+var staleParentArms = []struct {
+	name   string
+	table  string // the parent's table
+	wisp   bool
+	status types.Status
+}{
+	{"issue_closed", "issues", false, types.StatusClosed},
+	{"issue_pinned", "issues", false, types.StatusPinned},
+	{"wisp_closed", "wisps", true, types.StatusClosed},
+	{"wisp_pinned", "wisps", true, types.StatusPinned},
+}
+
+// plantStaleParent sets a parent's status and is_blocked = 1 directly, standing
+// in for a merge that closed or pinned it without recomputing it.
+func plantStaleParent(ctx context.Context, t *testing.T, store *DoltStore, table, id string, status types.Status) {
+	t.Helper()
+	//nolint:gosec // G201: table is a hardcoded "issues" or "wisps" from callers.
+	if _, err := store.db.ExecContext(ctx,
+		"UPDATE "+table+" SET status = ?, is_blocked = 1 WHERE id = ?", string(status), id); err != nil {
+		t.Fatalf("plant stale %s parent %s: %v", status, id, err)
+	}
+}
+
+// A closed or pinned parent with a stale is_blocked = 1 must not darken its
+// open children when a write path recomputes them (gastownhall/beads#7626):
+// adding a new child under it, or closing and reopening an existing one. The
+// parent's own bit is outside every write's scope, so it stays stale; the
+// children must not read it.
+func TestParentChildCascade_StaleBitOnClosedOrPinnedParent(t *testing.T) {
+	for _, arm := range staleParentArms {
+		t.Run(arm.name, func(t *testing.T) {
+			store, cleanup := setupTestStore(t)
+			defer cleanup()
+			ctx, cancel := testContext(t)
+			defer cancel()
+
+			p, c1, c2 := "sp-p", "sp-c1", "sp-c2"
+			if arm.wisp {
+				createWisp(t, ctx, store, p)
+			} else {
+				createPerm(t, ctx, store, p)
+			}
+			createPerm(t, ctx, store, c1)
+			addDependencyWithMeta(t, ctx, store, c1, p, types.DepParentChild, "")
+			plantStaleParent(ctx, t, store, arm.table, p, arm.status)
+			if getIsBlocked(t, ctx, store, "issues", c1) {
+				t.Fatalf("precondition: %s is_blocked = 1 before any write reached it", c1)
+			}
+
+			createPerm(t, ctx, store, c2)
+			addDependencyWithMeta(t, ctx, store, c2, p, types.DepParentChild, "")
+			if err := store.CloseIssue(ctx, c1, "done", "tester", ""); err != nil {
+				t.Fatalf("close %s: %v", c1, err)
+			}
+			if err := store.ReopenIssue(ctx, c1, "", "tester"); err != nil {
+				t.Fatalf("reopen %s: %v", c1, err)
+			}
+
+			for _, id := range []string{c1, c2} {
+				if getIsBlocked(t, ctx, store, "issues", id) {
+					t.Errorf("%s is_blocked = 1 under a %s parent with a stale bit", id, arm.status)
+				}
+			}
+			// The writes never reach the parent, so its bit is still stale:
+			// the children did not come bright by the parent being repaired.
+			if !getIsBlocked(t, ctx, store, arm.table, p) {
+				t.Errorf("%s is_blocked = 0; the write paths were not expected to reach it", p)
+			}
+
+			ready, err := store.GetReadyWork(ctx, types.WorkFilter{Status: types.StatusOpen})
+			if err != nil {
+				t.Fatalf("GetReadyWork: %v", err)
+			}
+			seen := map[string]bool{}
+			for _, issue := range ready {
+				seen[issue.ID] = true
+			}
+			for _, id := range []string{c1, c2} {
+				if !seen[id] {
+					t.Errorf("%s missing from ready work under a %s parent with a stale bit", id, arm.status)
+				}
+			}
+
+			if arm.wisp {
+				// A wisp child reaches the wisp parent through wisp_dependencies.
+				createWisp(t, ctx, store, "sp-w")
+				addDependencyWithMeta(t, ctx, store, "sp-w", p, types.DepParentChild, "")
+				if getIsBlocked(t, ctx, store, "wisps", "sp-w") {
+					t.Errorf("wisp child sp-w is_blocked = 1 under a %s wisp parent with a stale bit", arm.status)
+				}
+			}
+		})
+	}
+}
+
+// The doctor's count and the full repair over the same #7626 state, planted
+// with no write in between: the children read 0, which is right, so the only
+// inconsistent row is the parent's own stale bit. The count must name just
+// that row, and the repair must correct just that row rather than mark the
+// children in one pass and unmark them in the next.
+func TestRecomputeAllIsBlocked_StaleBitOnClosedOrPinnedParent(t *testing.T) {
+	for _, arm := range staleParentArms {
+		t.Run(arm.name, func(t *testing.T) {
+			store, cleanup := setupTestStore(t)
+			defer cleanup()
+			ctx, cancel := testContext(t)
+			defer cancel()
+
+			p, children := "rp-p", []string{"rp-c1", "rp-c2"}
+			if arm.wisp {
+				createWisp(t, ctx, store, p)
+			} else {
+				createPerm(t, ctx, store, p)
+			}
+			for _, c := range children {
+				createPerm(t, ctx, store, c)
+				addDependencyWithMeta(t, ctx, store, c, p, types.DepParentChild, "")
+			}
+			plantStaleParent(ctx, t, store, arm.table, p, arm.status)
+
+			if n := countInconsistencies(ctx, t, store.db); n != 1 {
+				t.Errorf("doctor count = %d, want 1 (the %s parent's own stale bit)", n, arm.status)
+			}
+			if changed := recomputeAll(ctx, t, store.db); changed != 1 {
+				t.Errorf("full repair corrected %d rows, want 1 (the %s parent's own stale bit)", changed, arm.status)
+			}
+			if getIsBlocked(t, ctx, store, arm.table, p) {
+				t.Errorf("after repair: %s is_blocked = 1, want 0", p)
+			}
+			for _, c := range children {
+				if getIsBlocked(t, ctx, store, "issues", c) {
+					t.Errorf("after repair: %s is_blocked = 1, want 0", c)
+				}
+			}
+			assertConvergedAndStable(ctx, t, store)
+		})
+	}
+}
+
+// The close-gate walk reads the same stored bit (gastownhall/beads#7626).
+// OwnGateUnderExogenousParent's shape: Q blocks on outside X, pc P -> Q, P
+// blocks on its own child C. Then Q is closed or pinned by a merge that leaves
+// its bit at 1 and its reason row in place. Q is never blocked, so nothing
+// above P is, and a recompute that reaches C but not Q must bring C bright:
+// the walk must not meet Q as a blocked parent that is not explained and drop
+// P's gate from the explained set.
+func TestParentChildCascade_StaleBitOnClosedOrPinnedGateParent(t *testing.T) {
+	for _, status := range []types.Status{types.StatusClosed, types.StatusPinned} {
+		t.Run(string(status), func(t *testing.T) {
+			store, cleanup := setupTestStore(t)
+			defer cleanup()
+			ctx, cancel := testContext(t)
+			defer cancel()
+
+			for _, id := range []string{"sg-x", "sg-q", "sg-p", "sg-c"} {
+				createPerm(t, ctx, store, id)
+			}
+			addDependencyWithMeta(t, ctx, store, "sg-q", "sg-x", types.DepBlocks, "")
+			addDependencyWithMeta(t, ctx, store, "sg-p", "sg-q", types.DepParentChild, "")
+			addDependencyWithMeta(t, ctx, store, "sg-p", "sg-c", types.DepBlocks, "")
+			addDepSkippingCycleCheck(ctx, t, store, "sg-c", "sg-p", types.DepParentChild)
+			assertBlockedFlags(ctx, t, store, "own gate under an exogenously blocked parent", map[string]bool{
+				"sg-x": false, "sg-q": true, "sg-p": true, "sg-c": true,
+			})
+
+			plantStaleParent(ctx, t, store, "issues", "sg-q", status)
+			recomputeScoped(ctx, t, store.db, "sg-c")
+			assertBlockedFlags(ctx, t, store, "scoped recompute of c under a stale "+string(status)+" q", map[string]bool{
+				"sg-q": true,  // outside the batch, so still stale,
+				"sg-p": true,  // P still waits on C,
+				"sg-c": false, // and nothing above P is blocked.
+			})
+
+			recomputeAll(ctx, t, store.db)
+			assertBlockedFlags(ctx, t, store, "after full repair", map[string]bool{
+				"sg-x": false, "sg-q": false, "sg-p": true, "sg-c": false,
+			})
+			assertConvergedAndStable(ctx, t, store)
+		})
+	}
+}

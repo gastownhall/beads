@@ -552,7 +552,10 @@ type ReopenResult struct {
 type Lifecycle interface {
 	// Create validates and commits the complete request as one atomic mutation.
 	// It is create-only across issues and wisps: an occupied ID returns
-	// ErrAlreadyExists and leaves persistent state unchanged. A refusal or
+	// ErrAlreadyExists and leaves persistent state unchanged. An id a
+	// retaining sweep retired (SweepRequest.RetainIDs) returns
+	// *IdempotencyExpiredError and leaves persistent state unchanged; it is
+	// never ErrAlreadyExists and never ErrValidation. A refusal or
 	// validation error also leaves no partial persistent state.
 	Create(context.Context, CreateRequest) (CreateResult, error)
 	// Update validates guards and commits the complete request as one atomic

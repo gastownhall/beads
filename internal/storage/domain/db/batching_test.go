@@ -329,6 +329,76 @@ func (s *testSuite) TestBulkReadersBatch() {
 		s.Equal([]string{ids[queryBatchSize-1]}, info.Blocks[ids[queryBatchSize]])
 	})
 
+	s.Run("DuplicateIDsAcrossBatches", func() {
+		// The same ids requested twice land in different batches. A single
+		// IN list is a set, so the merged result must match the unique-id
+		// read exactly: no relation, label, comment or issue row may be
+		// dropped or repeated.
+		dup := append(append([]string(nil), ids...), ids...)
+		issues := NewIssueSQLRepository(rec)
+		repo := &issueSQLRepositoryImpl{runner: rec}
+
+		wantComments, err := comments.ListByIssueIDs(s.Ctx(), ids, domain.CommentOpts{})
+		s.Require().NoError(err)
+		gotComments, err := comments.ListByIssueIDs(s.Ctx(), dup, domain.CommentOpts{})
+		s.Require().NoError(err)
+		s.Equal(wantComments, gotComments, "comments")
+
+		wantCounts, err := comments.CountsByIssueIDs(s.Ctx(), ids, domain.CommentOpts{})
+		s.Require().NoError(err)
+		gotCounts, err := comments.CountsByIssueIDs(s.Ctx(), dup, domain.CommentOpts{})
+		s.Require().NoError(err)
+		s.Equal(wantCounts, gotCounts, "comment counts")
+
+		wantLabels, err := labels.ListByIssueIDs(s.Ctx(), ids, domain.LabelOpts{})
+		s.Require().NoError(err)
+		gotLabels, err := labels.ListByIssueIDs(s.Ctx(), dup, domain.LabelOpts{})
+		s.Require().NoError(err)
+		s.Equal(wantLabels, gotLabels, "labels")
+
+		both := domain.DepListOpts{Direction: domain.DepDirectionBoth}
+		wantDeps, err := deps.ListByIssueIDs(s.Ctx(), ids, both)
+		s.Require().NoError(err)
+		gotDeps, err := deps.ListByIssueIDs(s.Ctx(), dup, both)
+		s.Require().NoError(err)
+		s.Equal(wantDeps, gotDeps, "dependency records, both directions")
+
+		wantDepCounts, err := deps.CountsByIssueIDs(s.Ctx(), ids, domain.DepCountsOpts{})
+		s.Require().NoError(err)
+		gotDepCounts, err := deps.CountsByIssueIDs(s.Ctx(), dup, domain.DepCountsOpts{})
+		s.Require().NoError(err)
+		s.Equal(wantDepCounts, gotDepCounts, "dependency counts")
+
+		wantBlocking, err := deps.GetBlockingInfo(s.Ctx(), ids, domain.DepListOpts{})
+		s.Require().NoError(err)
+		gotBlocking, err := deps.GetBlockingInfo(s.Ctx(), dup, domain.DepListOpts{})
+		s.Require().NoError(err)
+		s.Equal(wantBlocking, gotBlocking, "blocking info")
+
+		gotIssues, err := issues.GetByIDs(s.Ctx(), dup, domain.IssueTableOpts{})
+		s.Require().NoError(err)
+		gotIssueIDs := make([]string, 0, len(gotIssues))
+		for _, iss := range gotIssues {
+			gotIssueIDs = append(gotIssueIDs, iss.ID)
+		}
+		wantIssueIDs := make([]string, 0, len(seeded))
+		for _, i := range seeded {
+			wantIssueIDs = append(wantIssueIDs, ids[i])
+		}
+		s.ElementsMatch(wantIssueIDs, gotIssueIDs, "GetByIDs returns each issue once")
+
+		labelsByID, err := repo.getLabelsFromTable(s.Ctx(), "labels", dup)
+		s.Require().NoError(err)
+		s.Equal(wantLabels, labelsByID, "issue-search label hydration")
+
+		wantDepRecs, err := repo.getDependencyRecordsFromTable(s.Ctx(), "dependencies", ids)
+		s.Require().NoError(err)
+		gotDepRecs, err := repo.getDependencyRecordsFromTable(s.Ctx(), "dependencies", dup)
+		s.Require().NoError(err)
+		s.Equal(wantDepRecs, gotDepRecs, "issue-search dependency hydration")
+		rec.reset()
+	})
+
 	s.Run("LoadStatusByID", func() {
 		repo := &dependencySQLRepositoryImpl{runner: rec}
 		idSet := make(map[string]struct{}, len(ids))

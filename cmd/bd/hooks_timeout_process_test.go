@@ -9,11 +9,14 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
 
-const hookProcessBDStub = `#!/bin/sh
+// hookProcessBDArgvReport is the start of the scripted bd stand-ins that exit
+// at once: it prints the argv bd received, for assertHookProcessBDInvocation.
+const hookProcessBDArgvReport = `#!/bin/sh
 printf 'bd-argc=%s\n' "$#"
 _bd_test_index=0
 for _bd_test_arg
@@ -21,20 +24,54 @@ do
   printf 'bd-arg-%s=<%s>\n' "$_bd_test_index" "$_bd_test_arg"
   _bd_test_index=$((_bd_test_index + 1))
 done
-exit "${HOOK_TEST_BD_EXIT:-0}"
 `
 
-// hookProcessLongRunningBDStub stands in for a bd that never returns, so the
-// expiry subtests can prove the timeout helper reaps it. It sleeps instead of
-// busy-looping and bounds itself: when a test run is killed before the helper
-// fires (the harness reaches the helper by pid before its child), the orphan
-// idles for at most a minute and exits on its own instead of spinning at 100%
-// CPU forever with ppid 1. Exit 97 is outside every code the hook normalizes,
-// so a run that outlives the helper still fails the test. The sleep runs with
-// its stdio detached: when the helper signals only the stub (Perl's alarm hits
-// the exec'd process, not a group), the orphaned sleep must not keep the test's
-// output pipe open past exec.Cmd.WaitDelay.
+const hookProcessBDStub = hookProcessBDArgvReport + `exit "${HOOK_TEST_BD_EXIT:-0}"
+`
+
+// hookProcessKilledBDStub dies by SIGKILL after it reports its argv, as an
+// OOM-killed bd does. A supervisor must report that death as 128+9, not as an
+// exit status that a git hook reads as success.
+const hookProcessKilledBDStub = hookProcessBDArgvReport + `kill -KILL $$
+`
+
+// hookProcessLongRunningBDStub stands in for a bd stuck on work it runs in a
+// child process: runChainedHook runs the .old hook, pre-commit runs bd export,
+// and post-merge and post-checkout run bd import. It reacts to signals the way
+// the real bd does there, so the expiry subtests prove the timeout helper
+// stops bd and not only a stand-in:
+//   - It ignores SIGALRM, which the Go runtime catches and takes no action
+//     on. A stand-in that died on SIGALRM hid GH#7753.
+//   - It catches SIGTERM and keeps waiting, as setupGracefulShutdown does on
+//     the first signal. A stand-in that died on SIGTERM hid a supervisor that
+//     signaled bd alone.
+//   - It waits on a foreground child that only a signal to bd's process group
+//     reaches.
+//
+// When that child is gone the stub exits 97, outside every code the hook
+// normalizes, so a helper that passes bd's late status through still fails the
+// test. The child prints its pid, so a subtest can check that it did not
+// outlive the hook, and runs with its stdio detached, so an orphan cannot hold
+// the test's output pipe open past exec.Cmd.WaitDelay. It sleeps 10 seconds:
+// when a test run is killed before the helper fires (the harness reaches the
+// helper by pid before its child), the orphan exits on its own.
 const hookProcessLongRunningBDStub = `#!/bin/sh
+trap '' ALRM
+trap 'printf "bd-caught-TERM\n"' TERM
+printf 'long-running-bd-started\n'
+/bin/sh -c 'printf "bd-child-pid=%s\n" "$$"; exec "$1" 10 </dev/null >/dev/null 2>&1' bd-child "${HOOK_TEST_SLEEP:?}"
+exit 97
+`
+
+// hookProcessTERMResistantBDStub stands in for a bd stuck in its own process
+// rather than in a child. It catches SIGTERM and carries on after the group
+// signal has ended its current child, so only the Perl supervisor's SIGKILL,
+// hookTimeoutKillAfterSeconds after the deadline, stops it. Like
+// hookProcessLongRunningBDStub it ignores SIGALRM, and it bounds itself: it
+// idles in one-second sleeps, with stdio detached, for at most a minute.
+const hookProcessTERMResistantBDStub = `#!/bin/sh
+trap '' ALRM
+trap 'printf "bd-caught-TERM\n"' TERM
 printf 'long-running-bd-started\n'
 _bd_test_tick=0
 while [ "$_bd_test_tick" -lt 60 ]; do
@@ -43,6 +80,23 @@ while [ "$_bd_test_tick" -lt 60 ]; do
 done
 exit 97
 `
+
+// hookProcessForwardingBDStub stands in for a bd that waits on a child when a
+// signal reaches the hook's process group but not bd's own group, as a Ctrl-C
+// does. Its child waits a second, so the supervisor has installed its
+// handlers, then sends the signal to the supervisor (the stub's $PPID) and
+// sleeps. Only a supervisor that passes the signal on to bd's whole process
+// group ends that sleep early. The stub then reports the signal and exits 37,
+// and the hook must return that status as bd's own: not a timeout, and not the
+// supervisor's death by the signal.
+func hookProcessForwardingBDStub(signal string) string {
+	return `#!/bin/sh
+trap 'printf "bd-caught-` + signal + `\n"' ` + signal + `
+printf 'forwarding-bd-started\n'
+/bin/sh -c '"$2" 1; kill -` + signal + ` "$1"; exec "$2" 10 </dev/null >/dev/null 2>&1' bd-child "$PPID" "${HOOK_TEST_SLEEP:?}"
+exit 37
+`
+}
 
 const hookProcessGNUTimeoutStub = `#!/bin/sh
 if [ "${1-}" = "--version" ]; then
@@ -144,8 +198,11 @@ func TestGeneratedHookTimeoutProcessBoundary(t *testing.T) {
 	t.Run("shell options preserve argv and status", testHookProcessShellOptions)
 	t.Run("POSIX sh preserves argv and status", testHookProcessPOSIXShell)
 	t.Run("reserved statuses are backend scoped", testHookProcessReservedStatuses)
-	t.Run("real coreutils timeout expires a responsive child", testHookProcessRealTimeoutExpiry)
-	t.Run("real Perl alarm expires a responsive child", testHookProcessRealPerlExpiry)
+	t.Run("real coreutils timeout stops bd and the child it waits on", testHookProcessRealTimeoutExpiry)
+	t.Run("real Perl supervisor stops bd and the child it waits on", testHookProcessRealPerlExpiry)
+	t.Run("real Perl supervisor kills a bd that survives TERM", testHookProcessRealPerlKillAfter)
+	t.Run("real Perl supervisor forwards signals to bd's process group", testHookProcessRealPerlForwardsSignals)
+	t.Run("real Perl supervisor preserves argv and status", testHookProcessRealPerlStatuses)
 	t.Run("Windows checkout rejects System32 timeout", testHookProcessWindowsSystemTimeoutCheckout)
 }
 
@@ -368,7 +425,7 @@ func testHookProcessRealTimeoutExpiry(t *testing.T) {
 		t.Fatalf("generated hook exit = %d, want normalized timeout success\n%s", result.exitCode, result.output)
 	}
 	if !strings.Contains(result.output, "long-running-bd-started") || !strings.Contains(result.output, "timed out after 1s") {
-		t.Fatalf("%s did not expire and normalize the responsive child\n%s", helperName, result.output)
+		t.Fatalf("%s did not stop and normalize the TERM-catching bd\n%s", helperName, result.output)
 	}
 	maxElapsed := 9 * time.Second
 	if result.elapsed > maxElapsed {
@@ -376,30 +433,127 @@ func testHookProcessRealTimeoutExpiry(t *testing.T) {
 	}
 }
 
+// hookProcessPerlSignalSkip is why the subtests that signal bd through the real
+// Perl supervisor do not run on Windows.
+const hookProcessPerlSignalSkip = "Git Bash normally selects its bundled GNU timeout; whether MSYS Perl can signal a native bd.exe is unverified"
+
 func testHookProcessRealPerlExpiry(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("Git for Windows Perl does not reliably preserve alarm across exec; GNU timeout is the normal Git Bash backend")
+		t.Skip(hookProcessPerlSignalSkip)
 	}
-	perlDir := findHookProcessPerl(t)
-	timeout := "1"
-	result := runGeneratedHookProcess(t, hookProcessCase{
-		fixtures: []hookProcessFixture{
-			{name: "timeout", body: hookProcessIncompatibleTimeoutStub},
-			{name: "gtimeout", body: hookProcessIncompatibleGtimeoutStub},
-		},
-		bdBody:    hookProcessLongRunningBDStub,
-		timeout:   &timeout,
-		pathTail:  perlDir,
-		sleepPath: findHookProcessSleep(t),
-	})
+	result := runHookProcessRealPerl(t, hookProcessLongRunningBDStub, "1")
 	if result.exitCode != 0 {
-		t.Fatalf("generated hook exit = %d, want normalized Perl alarm success\n%s", result.exitCode, result.output)
+		t.Fatalf("generated hook exit = %d, want normalized Perl supervisor timeout success\n%s", result.exitCode, result.output)
 	}
-	if !strings.Contains(result.output, "long-running-bd-started") || !strings.Contains(result.output, "timed out after 1s") {
-		t.Fatalf("real Perl did not expire and normalize the responsive child\n%s", result.output)
+	for _, want := range []string{"long-running-bd-started", "bd-caught-TERM", "timed out after 1s"} {
+		if !strings.Contains(result.output, want) {
+			t.Fatalf("real Perl did not stop and normalize the TERM-catching bd: output missing %q\n%s", want, result.output)
+		}
 	}
 	if result.elapsed > 9*time.Second {
 		t.Errorf("Perl expiry took %s, want at most 9s", result.elapsed)
+	}
+	assertHookProcessChildStopped(t, result.output)
+}
+
+// testHookProcessRealPerlKillAfter drives the real Perl supervisor with a bd
+// that the deadline SIGTERM does not stop: the supervisor must follow up with
+// SIGKILL and still report the timeout.
+func testHookProcessRealPerlKillAfter(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip(hookProcessPerlSignalSkip)
+	}
+	result := runHookProcessRealPerl(t, hookProcessTERMResistantBDStub, "1")
+	if result.exitCode != 0 {
+		t.Fatalf("generated hook exit = %d, want normalized Perl supervisor timeout success\n%s", result.exitCode, result.output)
+	}
+	for _, want := range []string{"long-running-bd-started", "bd-caught-TERM", "timed out after 1s"} {
+		if !strings.Contains(result.output, want) {
+			t.Fatalf("real Perl did not kill and normalize the TERM-resistant bd: output missing %q\n%s", want, result.output)
+		}
+	}
+	// SIGTERM at 1s, then SIGKILL hookTimeoutKillAfterSeconds later.
+	if result.elapsed > 9*time.Second {
+		t.Errorf("Perl SIGKILL follow-up took %s, want at most 9s", result.elapsed)
+	}
+}
+
+// testHookProcessRealPerlForwardsSignals sends each signal bd shuts down on to
+// the real Perl supervisor only, as a Ctrl-C or a hangup reaches the hook's
+// process group and not bd's. The supervisor must pass it on to bd's group and
+// then return bd's own status.
+func testHookProcessRealPerlForwardsSignals(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip(hookProcessPerlSignalSkip)
+	}
+	for _, signal := range []string{"HUP", "INT", "TERM"} {
+		t.Run(signal, func(t *testing.T) {
+			result := runHookProcessRealPerl(t, hookProcessForwardingBDStub(signal), "60")
+			if result.exitCode != 37 {
+				t.Fatalf("generated hook exit = %d, want bd's own status 37 after the forwarded %s\n%s", result.exitCode, signal, result.output)
+			}
+			if !strings.Contains(result.output, "bd-caught-"+signal) {
+				t.Errorf("bd never received the forwarded %s\n%s", signal, result.output)
+			}
+			if strings.Contains(result.output, "timed out after") {
+				t.Errorf("a forwarded %s was reported as a timeout\n%s", signal, result.output)
+			}
+			// The child sleeps 10 seconds unless the signal reached bd's group.
+			if result.elapsed > 9*time.Second {
+				t.Errorf("forwarded %s took %s to stop bd's child, want at most 9s", signal, result.elapsed)
+			}
+		})
+	}
+}
+
+// testHookProcessRealPerlStatuses drives the generated Perl supervisor with a
+// bd that exits before the deadline: the supervisor's waitpid/exit mapping must
+// hand bd's argv through unchanged and forward its status to the same
+// normalization the other backends use.
+func testHookProcessRealPerlStatuses(t *testing.T) {
+	perlDir := findHookProcessPerl(t)
+	args := []string{"argument with space", "second-argument"}
+	tests := []struct {
+		name          string
+		bdBody        string
+		bdExit        int
+		wantExit      int
+		wantWarning   bool
+		wantDBWarning bool
+	}{
+		{name: "success continues", bdExit: 0},
+		{name: "database-not-initialized is skipped", bdExit: 3, wantDBWarning: true},
+		{name: "other status is preserved", bdExit: 37, wantExit: 37},
+		{name: "124 is preserved", bdExit: 124, wantExit: 124},
+		{name: "142 is reported as a timeout", bdExit: 142, wantWarning: true},
+		{name: "death by SIGKILL is reported as 137", bdBody: hookProcessKilledBDStub, wantExit: 137},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.bdBody != "" && runtime.GOOS == "windows" {
+				t.Skip("whether MSYS Perl sees an MSYS process's signal death is unverified")
+			}
+			result := runGeneratedHookProcess(t, hookProcessCase{
+				fixtures: []hookProcessFixture{
+					{name: "timeout", body: hookProcessIncompatibleTimeoutStub},
+					{name: "gtimeout", body: hookProcessIncompatibleGtimeoutStub},
+				},
+				bdBody:   tt.bdBody,
+				bdExit:   tt.bdExit,
+				pathTail: perlDir,
+				args:     args,
+			})
+			if result.exitCode != tt.wantExit {
+				t.Errorf("generated hook exit = %d, want %d\n%s", result.exitCode, tt.wantExit, result.output)
+			}
+			if got := strings.Contains(result.output, "timed out after"); got != tt.wantWarning {
+				t.Errorf("timeout warning presence = %v, want %v\n%s", got, tt.wantWarning, result.output)
+			}
+			if got := strings.Contains(result.output, "database not initialized"); got != tt.wantDBWarning {
+				t.Errorf("database warning presence = %v, want %v\n%s", got, tt.wantDBWarning, result.output)
+			}
+			assertHookProcessBDInvocation(t, result.output, "pre-push", args...)
+		})
 	}
 }
 
@@ -550,6 +704,48 @@ shift
 		exitCode = exitErr.ExitCode()
 	}
 	return hookProcessResult{output: string(output), exitCode: exitCode, elapsed: elapsed}
+}
+
+// runHookProcessRealPerl runs the generated hook with bdBody standing in for
+// bd, on the host's real Perl backend: both timeout candidates are
+// incompatible, so the shim falls through to the perl on the PATH tail.
+func runHookProcessRealPerl(t *testing.T, bdBody, timeout string) hookProcessResult {
+	t.Helper()
+	return runGeneratedHookProcess(t, hookProcessCase{
+		fixtures: []hookProcessFixture{
+			{name: "timeout", body: hookProcessIncompatibleTimeoutStub},
+			{name: "gtimeout", body: hookProcessIncompatibleGtimeoutStub},
+		},
+		bdBody:    bdBody,
+		timeout:   &timeout,
+		pathTail:  findHookProcessPerl(t),
+		sleepPath: findHookProcessSleep(t),
+	})
+}
+
+// assertHookProcessChildStopped fails when the child that
+// hookProcessLongRunningBDStub waits on is still running after the hook
+// returned: the timeout helper stopped bd but left bd's work running. It kills
+// a survivor so the failure does not leak it.
+func assertHookProcessChildStopped(t *testing.T, output string) {
+	t.Helper()
+	_, rest, ok := strings.Cut(output, "bd-child-pid=")
+	if !ok {
+		t.Fatalf("output missing the bd child's pid\n%s", output)
+	}
+	line, _, _ := strings.Cut(rest, "\n")
+	pid, err := strconv.Atoi(strings.TrimSpace(line))
+	if err != nil {
+		t.Fatalf("parse the bd child's pid %q: %v", line, err)
+	}
+	child, err := os.FindProcess(pid)
+	if err != nil {
+		return
+	}
+	if child.Signal(syscall.Signal(0)) == nil {
+		_ = child.Kill()
+		t.Errorf("bd's child %d was still running after the hook returned\n%s", pid, output)
+	}
 }
 
 // findHookProcessCoreutilsTimeout mirrors the generated shim's identity

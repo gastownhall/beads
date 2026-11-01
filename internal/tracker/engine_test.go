@@ -3111,28 +3111,17 @@ func TestEngineCreateDependencies_UnresolvableRef(t *testing.T) {
 	tracker := newMockTracker("test")
 	engine := NewEngine(tracker, store, "test-actor")
 
-	// Both external refs don't exist — should generate warnings
+	// Neither external ref names a local issue: the pull did not import them,
+	// which DoltStore reports as storage.ErrNotFound. That is not a failure,
+	// so it adds no warning and no error count.
 	deps := []DependencyInfo{
 		{FromExternalID: "https://test.test/MISSING-1", ToExternalID: "https://test.test/MISSING-2", Type: string(types.DepBlocks)},
 	}
-	errCount := engine.createDependencies(ctx, deps)
-	if errCount == 0 {
-		t.Error("expected errCount > 0 for unresolvable external refs")
+	if errCount := engine.createDependencies(ctx, deps); errCount != 0 {
+		t.Errorf("createDependencies = %d errors, want 0 for refs the pull did not import", errCount)
 	}
-
-	// Warnings should be collected
-	if len(engine.warnings) == 0 {
-		t.Error("expected warnings for unresolvable refs, got none")
-	}
-	found := false
-	for _, w := range engine.warnings {
-		if strings.Contains(w, "MISSING-1") || strings.Contains(w, "resolve") {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Errorf("expected warning about unresolvable ref, got: %v", engine.warnings)
+	if len(engine.warnings) != 0 {
+		t.Errorf("warnings = %v, want none", engine.warnings)
 	}
 }
 

@@ -14,7 +14,9 @@ go_library(
     importpath = "github.com/steveyegge/beads/internal/storage/doltutil",
     visibility = ["//:__subpackages__"],
     deps = [
+        "//internal/configfile",
         "//internal/doltremote",
+        "//internal/remedy",
         "//internal/remotecache",
         "//internal/storage",
         "@com_github_go_sql_driver_mysql//:mysql",

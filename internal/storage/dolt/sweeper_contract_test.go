@@ -86,7 +86,22 @@ func TestSweeperContract(t *testing.T) {
 // accessor.
 func newDoltSweeperFixture(t *testing.T, prefix string) (conformance.SweeperFixture, context.Context, func()) {
 	t.Helper()
+	fixture, _, ctx, stop := newDoltSweeperFixtureOnStore(t, prefix)
+	return fixture, ctx, stop
+}
+
+// newDoltSweeperFixtureOnStore is newDoltSweeperFixture also handing back the
+// store, for a contract that composes more of its roles beside the sweeper.
+func newDoltSweeperFixtureOnStore(t *testing.T, prefix string) (conformance.SweeperFixture, *DoltStore, context.Context, func()) {
+	t.Helper()
 	store, storeCleanup := setupTestStore(t)
+	return newDoltSweeperFixtureFor(t, store, storeCleanup, prefix)
+}
+
+// newDoltSweeperFixtureFor is newDoltSweeperFixtureOnStore over a store the
+// caller set up, which storeCleanup tears down.
+func newDoltSweeperFixtureFor(t *testing.T, store *DoltStore, storeCleanup func(), prefix string) (conformance.SweeperFixture, *DoltStore, context.Context, func()) {
+	t.Helper()
 	ctx, cancel := testContext(t)
 	stop := func() {
 		cancel()
@@ -139,5 +154,5 @@ func newDoltSweeperFixture(t *testing.T, prefix string) (conformance.SweeperFixt
 			})
 			return err
 		},
-	}, ctx, stop
+	}, store, ctx, stop
 }

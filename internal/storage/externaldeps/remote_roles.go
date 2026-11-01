@@ -253,6 +253,7 @@ type remoteClaimer struct {
 // a server that applies the policy, externalBlockersFor reads nothing and the
 // claim goes through untouched.
 func (c *remoteClaimer) Claim(ctx context.Context, req issueops.ClaimRequest) (issueops.ClaimResult, error) {
+	ctx = storage.WithLivePolicyProbe(ctx)
 	blockers, err := c.policy.externalBlockersFor(ctx, []string{req.IssueID})
 	if err != nil {
 		return issueops.ClaimResult{}, err
@@ -286,6 +287,7 @@ type remoteReadyClaimer struct {
 // set, so the second pass reads the candidates behind them. Only a claim that
 // tried candidates and won none is an error.
 func (c *remoteReadyClaimer) ClaimNext(ctx context.Context, req issueops.ClaimNextRequest) (issueops.ClaimNextResult, error) {
+	ctx = storage.WithLivePolicyProbe(ctx)
 	// externallyBlockedIDs is empty against a server that applies the policy
 	// (loadBlockingState's probe), so that server's atomic claim answers.
 	blocked, err := c.policy.externallyBlockedIDs(ctx)
@@ -527,6 +529,7 @@ type remoteBatchCloser struct {
 // externalBlockersFor reads nothing and the whole request goes through
 // untouched.
 func (c *remoteBatchCloser) CloseBatch(ctx context.Context, request issueops.CloseBatchRequest) (issueops.CloseBatchResult, error) {
+	ctx = storage.WithLivePolicyProbe(ctx)
 	if request.ClaimNext != nil {
 		return c.closeAndClaimNext(ctx, request)
 	}

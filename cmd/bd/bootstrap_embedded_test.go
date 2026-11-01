@@ -295,3 +295,49 @@ func TestEmbeddedBootstrapConcurrent(t *testing.T) {
 		}
 	}
 }
+
+// TestEmbeddedBootstrapCloneFailureScrubsCredentials pins the credential scrub
+// at the "Bootstrap failed:" print site (mc-gcmer). An unencoded "#" or "?" in
+// the password ends the URL's authority early, so the remote is not a forge
+// and is cloned as configured. The clone error then carries the password
+// twice: sanitizeURL passes a URL net/url cannot parse through unchanged, and
+// Dolt's "invalid remote url:" repeats it.
+func TestEmbeddedBootstrapCloneFailureScrubsCredentials(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+
+	for _, tc := range []struct{ name, password string }{
+		{"hash", "pa#ss"},
+		{"question_mark", "pa?ss"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			initGitRepoAt(t, dir)
+			beadsDir := filepath.Join(dir, ".beads")
+			if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+				t.Fatalf("mkdir .beads: %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte("{}"), 0o644); err != nil {
+				t.Fatalf("write metadata.json: %v", err)
+			}
+			seedSyncRemote(t, beadsDir, "https://alice:"+tc.password+"@github.com/org/db")
+
+			cmd := exec.Command(bd, "bootstrap", "--yes")
+			cmd.Dir = dir
+			cmd.Env = bdEnv(dir)
+			stdout, stderr, err := runCommandBuffers(t, cmd)
+			// A failure before the clone would pass the leak check below
+			// without reaching the print site.
+			if err == nil || !strings.Contains(stderr.String(), "Bootstrap failed: clone from remote:") {
+				t.Fatalf("bootstrap should fail at the clone, got err=%v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+			}
+			if strings.Contains(stdout.String()+stderr.String(), tc.password) {
+				t.Errorf("bootstrap printed the sync.remote password %q:\nstdout:\n%s\nstderr:\n%s", tc.password, stdout.String(), stderr.String())
+			}
+		})
+	}
+}

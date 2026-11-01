@@ -28,10 +28,13 @@ const (
 	bazelDoltRaceConfig  = "dolt-race"
 	// Mode remote, on every event that reaches it (same-repo pull requests,
 	// merge groups, push, nightly, dispatch, bazel-farm.yml's authorized
-	// call): exactly where the members do not run.
+	// call): exactly where the members do not run. Its actual if adds the
+	// caller's dolt-tiers switch (withDoltTiers), which pr.yml turns off on
+	// a merge group.
 	bazelDoltRaceJobIf = "${{ needs.rbe.outputs.mode == 'remote' }}"
 	// The members: their pre-union rules (bazel-test's skip rule; remote
-	// execution only), minus mode remote.
+	// execution only), minus mode remote (and, in their actual ifs, plus the
+	// dolt-tiers switch).
 	bazelDoltMemberIf    = "${{ needs.rbe.outputs.mode != 'skip' && needs.rbe.outputs.mode != 'remote' }}"
 	bazelProxiedMemberIf = "${{ needs.rbe.outputs.enabled == 'true' && needs.rbe.outputs.mode != 'remote' }}"
 )
@@ -107,26 +110,47 @@ func bazelLaneReporter(lanes map[string]map[string]bool, lane, mode string) stri
 var (
 	bazelCallOutputsMu    sync.Mutex
 	bazelCallOutputsCache map[string]string
+	// bazel.yml's workflow_call input defaults, read with the outputs.
+	bazelCallInputDefaults map[string]string
 )
 
 // bazelCallOutputValue evaluates bazel.yml's workflow_call output name with
 // jobs (job -> its result output; missing or "" = not reported), the way
-// GitHub does: what pr.yml's needs.bazel.outputs.<name> reads.
+// GitHub does: what pr.yml's needs.bazel.outputs.<name> reads, for a call
+// that leaves every input at its default.
 func bazelCallOutputValue(t *testing.T, name string, jobs map[string]string) string {
+	t.Helper()
+	return bazelCallOutputValueIn(t, name, jobs, nil)
+}
+
+// bazelCallOutputValueIn is bazelCallOutputValue for a call with these
+// inputs (the caller's with; an input it does not pass takes its default):
+// an output may read the inputs too (dolt-tiers, what the call ran).
+func bazelCallOutputValueIn(t *testing.T, name string, jobs, with map[string]string) string {
 	t.Helper()
 	bazelCallOutputsMu.Lock()
 	if bazelCallOutputsCache == nil {
-		bazelCallOutputsCache = map[string]string{}
-		for n, out := range readBazelWorkflowCall(t).Outputs {
+		call := readBazelWorkflowCall(t)
+		bazelCallOutputsCache, bazelCallInputDefaults = map[string]string{}, map[string]string{}
+		for n, out := range call.Outputs {
 			bazelCallOutputsCache[n] = out.Value
+		}
+		for n, in := range call.Inputs {
+			bazelCallInputDefaults[n] = in.Default
 		}
 	}
 	expr, ok := bazelCallOutputsCache[name]
+	ctx := map[string]string{}
+	for input, v := range bazelCallInputDefaults {
+		ctx["inputs."+input] = v
+	}
 	bazelCallOutputsMu.Unlock()
 	if !ok {
 		t.Fatalf("%s has no workflow_call output %s", bazelWorkflowName, name)
 	}
-	ctx := map[string]string{}
+	for input, v := range with {
+		ctx["inputs."+input] = v
+	}
 	for _, m := range regexp.MustCompile(`jobs\.([A-Za-z0-9_-]+)\.outputs\.([A-Za-z0-9_-]+)`).FindAllStringSubmatch(expr, -1) {
 		// Every job.outputs reference in a lane's own workflow_call output
 		// expression carries that job's conclusion for gating purposes,
@@ -226,9 +250,10 @@ func bazelUnionEffectiveJobs(t *testing.T, rc, unionConfig string) int {
 // Every flag stays a member's own, so each member target's test action is
 // unchanged: `bazel aquery 'mnemonic("TestRunner", ...)'` over each member's
 // targets gives byte-identical actions (key, argv, env, outputs) under the
-// member config and under the union, 27 + 35 = 62 (item 5 A1b). Both arms
-// run, the mode deciding which, so drift between them would split results
-// by mode: a flag added to a member must be added to the union too.
+// member config and under the union (item 5 A1b, 62 actions then; today's
+// count is bazelDoltRaceTestActions). Both arms run, the mode deciding
+// which, so drift between them would split results by mode: a flag added to
+// a member must be added to the union too.
 func TestBazelDoltRaceConfigIsMemberUnion(t *testing.T) {
 	rc := readPolicyFile(t, bazelPolicyRoot(t), ".bazelrc")
 	const tagPrefix = "test --test_tag_filters="
@@ -336,8 +361,8 @@ func TestBazelDoltRaceIsGated(t *testing.T) {
 	workflow := readCIWorkflow(t, bazelWorkflowName)
 	job := workflow.job(t, bazelDoltRaceJobName)
 
-	if job.If != bazelDoltRaceJobIf {
-		t.Errorf("%s if: %q, want %q", bazelDoltRaceJobName, job.If, bazelDoltRaceJobIf)
+	if want := withDoltTiers(bazelDoltRaceJobIf); job.If != want {
+		t.Errorf("%s if: %q, want %q", bazelDoltRaceJobName, job.If, want)
 	}
 	if job.ContinueOnError {
 		t.Errorf("%s: continue-on-error hides the dolt-server and proxied tiers' failures from pr.yml's ci-gate", bazelDoltRaceJobName)
@@ -435,10 +460,11 @@ func TestBazelDoltRaceJobTimeouts(t *testing.T) {
 // member's gate id is reported by exactly one job wherever that member ran
 // before the union (bazel-doltserver: every mode but skip; bazel-proxied:
 // the remote-executing modes) and by none elsewhere, so bazel-gate.sh's
-// per-mode skips are unchanged. The workflow_call outputs, evaluated as
-// GitHub does, carry the running arm's result: a failed or cancelled union
-// reds both ids, and a union that never reported reads as skipped, which no
-// mode it runs in allows.
+// per-mode skips are unchanged. A caller's dolt-tiers "off" (pr.yml on a
+// merge group) stops both arms in every mode. The workflow_call outputs,
+// evaluated as GitHub does, carry the running arm's result: a failed or
+// cancelled union reds both ids, and a union that never reported reads as
+// skipped, which no mode it runs in allows.
 func TestBazelDoltRaceArmsExactlyOnePerMode(t *testing.T) {
 	workflow := readCIWorkflow(t, bazelWorkflowName)
 	union := workflow.job(t, bazelDoltRaceJobName)
@@ -453,43 +479,48 @@ func TestBazelDoltRaceArmsExactlyOnePerMode(t *testing.T) {
 		t.Fatalf("members %v, want bazelUnionLanes' %v", got, bazelUnionLanes[bazelDoltRaceJobName])
 	}
 	for name, m := range members {
-		if got := workflow.job(t, name).If; got != m.ifExpr {
-			t.Errorf("%s if = %q, want %q", name, got, m.ifExpr)
+		if got, want := workflow.job(t, name).If, withDoltTiers(m.ifExpr); got != want {
+			t.Errorf("%s if = %q, want %q", name, got, want)
 		}
 	}
 	for _, mode := range bazelRBEModes {
 		for _, event := range []string{"pull_request", "merge_group", "pull_request_target", "push", "schedule", "workflow_dispatch"} {
-			ctx := map[string]string{
-				"needs.rbe.outputs.mode":    mode,
-				"needs.rbe.outputs.enabled": bazelModeEnabled(mode),
-				"github.event_name":         event,
-			}
-			unionRuns := evalRRCIf(t, union.If, ctx)
-			if unionRuns != (mode == "remote") {
-				t.Errorf("mode %s, %s: %s runs = %v, want %v", mode, event, bazelDoltRaceJobName, unionRuns, mode == "remote")
-			}
-			for name, m := range members {
-				runs := evalRRCIf(t, workflow.job(t, name).If, ctx)
-				if unionRuns && runs {
-					t.Errorf("mode %s, %s: %s and %s both run", mode, event, bazelDoltRaceJobName, name)
+			for _, dolt := range []string{"", "on", "off"} {
+				ctx := map[string]string{
+					"needs.rbe.outputs.mode":    mode,
+					"needs.rbe.outputs.enabled": bazelModeEnabled(mode),
+					"github.event_name":         event,
 				}
-				if got, want := unionRuns || runs, m.before(mode); got != want {
-					t.Errorf("mode %s, %s: %s's tier reported by a job = %v, want %v (where it ran before the union)", mode, event, name, got, want)
+				if dolt != "" {
+					ctx["inputs.dolt-tiers"] = dolt // "": push and dispatch, no input
 				}
-				for _, res := range []string{"success", "failure", "cancelled", ""} {
-					jobs := map[string]string{}
-					switch {
-					case unionRuns:
-						jobs[bazelDoltRaceJobName] = res
-					case runs:
-						jobs[name] = res
+				unionRuns := evalRRCIf(t, union.If, ctx)
+				if want := mode == "remote" && dolt != "off"; unionRuns != want {
+					t.Errorf("mode %s, %s, dolt-tiers %q: %s runs = %v, want %v", mode, event, dolt, bazelDoltRaceJobName, unionRuns, want)
+				}
+				for name, m := range members {
+					runs := evalRRCIf(t, workflow.job(t, name).If, ctx)
+					if unionRuns && runs {
+						t.Errorf("mode %s, %s: %s and %s both run", mode, event, bazelDoltRaceJobName, name)
 					}
-					want := res
-					if !unionRuns && !runs {
-						want = ""
+					if got, want := unionRuns || runs, m.before(mode) && dolt != "off"; got != want {
+						t.Errorf("mode %s, %s, dolt-tiers %q: %s's tier reported by a job = %v, want %v (where it ran before the union, unless the caller turned the Dolt tiers off)", mode, event, dolt, name, got, want)
 					}
-					if got := bazelCallOutputValue(t, name, jobs); got != want {
-						t.Errorf("mode %s, %s, reporting job %q: output %s = %q, want %q", mode, event, res, name, got, want)
+					for _, res := range []string{"success", "failure", "cancelled", ""} {
+						jobs := map[string]string{}
+						switch {
+						case unionRuns:
+							jobs[bazelDoltRaceJobName] = res
+						case runs:
+							jobs[name] = res
+						}
+						want := res
+						if !unionRuns && !runs {
+							want = ""
+						}
+						if got := bazelCallOutputValue(t, name, jobs); got != want {
+							t.Errorf("mode %s, %s, reporting job %q: output %s = %q, want %q", mode, event, res, name, got, want)
+						}
 					}
 				}
 			}
@@ -502,9 +533,13 @@ func TestBazelDoltRaceArmsExactlyOnePerMode(t *testing.T) {
 	}
 }
 
-// bazelDoltRaceTestActions: the union's test actions, 27 dolt-server + 35
-// proxied-server (aquery, item 5 A1b), each a target's shard.
-const bazelDoltRaceTestActions = 62
+// bazelDoltRaceTestActions: the union's test actions, 27 dolt-server + 37
+// proxied-server, each a target's shard (62 when item 5 A1b aquery-verified
+// them; 64 since bd_managed_local_test runs as 3 shards). That is exactly
+// --jobs=64, so the union has no headroom: a 4th managed-local shard, or any
+// new test action in either tier, would make 65 and needs a --jobs or
+// shard-count change first.
+const bazelDoltRaceTestActions = 64
 
 // TestBazelDoltRaceFitsTheJobsBudget pins the one-wave rule (closed PR
 // #7542): a union's total test actions must fit in the effective --jobs so

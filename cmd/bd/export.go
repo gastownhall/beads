@@ -208,6 +208,7 @@ func runExportFromSource(ctx context.Context, src exportSource) error {
 		// NULL datetime columns scanned as time.Time{} (year 0001) cause
 		// MarshalJSON to fail with "year outside of range [0,9999]". (GH#2488)
 		sanitizeZeroTime(issue)
+		stripCloneLocalFields(issue)
 
 		record := &exportIssueRecord{
 			RecordType: "issue",
@@ -368,6 +369,16 @@ func sanitizeZeroTime(issue *types.Issue) {
 	if issue.UpdatedAt.IsZero() {
 		issue.UpdatedAt = epoch
 	}
+}
+
+// stripCloneLocalFields clears the issue fields whose values are only
+// meaningful in the workspace that assigned them, so JSONL interchange never
+// carries them. arrival_seq is the events-journal seq of the row's create
+// record in THIS clone (types.Issue.ArrivalSeq): written to a git-tracked file
+// it would reach clones whose counter never produced it. Every export record
+// builder calls it beside sanitizeZeroTime.
+func stripCloneLocalFields(issue *types.Issue) {
+	issue.ArrivalSeq = 0
 }
 
 // filterOutPollution removes issues that look like test/pollution records.

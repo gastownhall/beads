@@ -189,8 +189,9 @@ test:doltserver-proxied --norun_validations
 # applies to no dolt-server target; the eviction retry count is what
 # doltserver gets from --config=sole-run wherever it executes remotely;
 # test_summary, local_test_jobs and remote_download_regex are not in any action
-# key. So each member target's test action is unchanged (aquery: all 62
-# TestRunner actions byte-identical), and whichever arm the mode picks shares
+# key. So each member target's test action is unchanged (aquery at the
+# cutover: all 62 TestRunner actions byte-identical; 64 since
+# bd_managed_local_test's 3 shards), and whichever arm the mode picks shares
 # cached results with the other. The member configs stay for those modes, make
 # and developers.
 test:dolt-race --@rules_go//go/config:race

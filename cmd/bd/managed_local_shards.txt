@@ -1,0 +1,43 @@
+# Shards of //cmd/bd:bd_managed_local_test, its whole test selection, read by
+# tools/bazel/go_test_offline.sh --shard-manifest: one "<shard> <TestName>"
+# line per test, shards 1..N with N the target's shard_count, and Bazel shard
+# k runs exactly the tests on lines "k ...". A TestManagedLocalProxied* test
+# not listed here runs nowhere, so scripts/managed_local_lane_test.go fails
+# until it is added: to the shard with the fewest seconds below, whose figure
+# then gets the test's seconds.
+#
+# Balanced longest-first by tools/bazel/pin_shards.py --shards 3
+# --min-seconds 0 over one unsharded --config=doltserver-proxied run of the
+# target on rbe-west (2026-10-23): 21 tests, 190s together, the longest
+# TestManagedLocalProxiedTrackerUOWConformance at 35s. To rebalance, run the
+# target, pass its bazel-testlogs directory to pin_shards.py the same way,
+# and copy its lines and per-shard seconds here. 3 shards, not 4: every
+# --config=dolt-race test action must start in the first wave of its
+# --jobs=64 (scripts/bazel_dolt_race_test.go), which 4 would overrun by one.
+# TestManagedLocalProxiedCapabilityMatrix was added afterwards on shard 1 at
+# its local measurement (~35s), still under the lane's ~130-160s tail.
+# Seconds per shard: 98 63 63
+#
+# <shard> <TestName>
+1 TestManagedLocalProxiedAutoBackup
+1 TestManagedLocalProxiedBackupRoundTrip
+1 TestManagedLocalProxiedCapabilityMatrix
+1 TestManagedLocalProxiedDoltStartRefusesOverLiveProxy
+1 TestManagedLocalProxiedDoltStartRefusesWithProxyDown
+1 TestManagedLocalProxiedStopStartInterleave
+1 TestManagedLocalProxiedTrackerUOWConformance
+2 TestManagedLocalProxiedBackendCleanExitRetiresProxy
+2 TestManagedLocalProxiedDoltLifecycleLeavesOtherTopologiesAlone
+2 TestManagedLocalProxiedForeignListenerNotAdopted
+2 TestManagedLocalProxiedLifecycleSmoke
+2 TestManagedLocalProxiedListenerPolicy
+2 TestManagedLocalProxiedMoleculeFrontDoorPositive
+2 TestManagedLocalProxiedNProcessColdStartConvergence
+3 TestManagedLocalProxiedBackupRestoreRefusedWhileAttached
+3 TestManagedLocalProxiedBackupRestoreReopenFailure
+3 TestManagedLocalProxiedDoltStatusReportsLiveTopology
+3 TestManagedLocalProxiedLegacyRecordFailClosed
+3 TestManagedLocalProxiedOrphanBackendReaped
+3 TestManagedLocalProxiedOutageReconnectContract
+3 TestManagedLocalProxiedPurgeWispsPlaneRetention
+3 TestManagedLocalProxiedReusedPidNeverKilled

@@ -83,6 +83,7 @@ func (l *lifecycle) Create(ctx context.Context, request publicops.CreateRequest)
 }
 
 func (l *lifecycle) Update(ctx context.Context, request publicops.UpdateRequest) (publicops.UpdateResult, error) {
+	ctx = storage.WithLivePolicyProbe(ctx)
 	if request.Claim {
 		if err := l.policy.guardExternalClose(ctx, request.IssueID, false); err != nil {
 			return publicops.UpdateResult{}, err
@@ -97,6 +98,7 @@ func (l *lifecycle) Update(ctx context.Context, request publicops.UpdateRequest)
 }
 
 func (l *lifecycle) Close(ctx context.Context, request publicops.CloseRequest) (publicops.CloseResult, error) {
+	ctx = storage.WithLivePolicyProbe(ctx)
 	if err := l.policy.guardExternalClose(ctx, request.IssueID, request.Force); err != nil {
 		return publicops.CloseResult{}, err
 	}
@@ -561,6 +563,7 @@ type readyCounterWrapper interface {
 // compare-and-swap claim operation. Cross-project state cannot be atomic with
 // the local claim, but local claim ownership remains race-safe.
 func (s *Store) ClaimReadyIssue(ctx context.Context, filter types.WorkFilter, actor string) (*types.Issue, error) {
+	ctx = storage.WithLivePolicyProbe(ctx)
 	state, err := s.loadBlockingState(ctx)
 	if err != nil {
 		return nil, err
@@ -905,6 +908,7 @@ func (s *Store) IsBlockedBatch(ctx context.Context, issueIDs []string) (map[stri
 // that serves its roles refuses this method; bd close goes through
 // remoteBatchCloser (remote_roles.go) there.
 func (s *Store) CloseIssueChecked(ctx context.Context, issueID, actor string, opts storage.CloseIssueOptions) (storage.CloseIssueResult, error) {
+	ctx = storage.WithLivePolicyProbe(ctx)
 	if !opts.Force {
 		issue, err := s.inner.GetIssue(ctx, issueID)
 		if err != nil {

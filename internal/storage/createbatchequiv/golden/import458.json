@@ -25,16 +25,16 @@
       "sha256": "9fd68da3b9386eec784e7aa73e4a84c00f5eac6d0cd5189baebc4a6889fb8b69"
     },
     "issue_versions": {
-      "rows": 398,
-      "sha256": "92a48b220cd3ccf4348a0879729e00f2a76f365c8861e527964fd7787043d013"
+      "rows": 394,
+      "sha256": "f8f85d333902058116ce0bbd344fe728217e49e1c4557a64d82ebaa1978d7b6d"
     },
     "issues": {
       "rows": 404,
       "sha256": "d4245c8b62b007795d9c7f293f30ac0f341ffc541cf50aa319a24c8cbed3505a"
     },
     "issues_updated_at": {
-      "rows": 401,
-      "sha256": "a256b57e6a67ca0717d1200b4ad867abc1ccff8f9b088bc6c331c18fa6915c7f"
+      "rows": 403,
+      "sha256": "de6dbabb1bdd928fe633356cf3199f6124f440168c9ef9d56d76eea9fff0df02"
     },
     "labels": {
       "rows": 1166,

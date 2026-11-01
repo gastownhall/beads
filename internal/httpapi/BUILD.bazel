@@ -67,6 +67,7 @@ go_test(
     name = "httpapi_test",
     srcs = [
         "advance_molecule_test.go",
+        "arrival_seq_test.go",
         "auth_test.go",
         "batch_apply_test.go",
         "batch_close_test.go",

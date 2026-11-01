@@ -63,6 +63,18 @@ func TestSourceRendersTheCredentialsFileRungWithHostPort(t *testing.T) {
 	}
 }
 
+func TestSourceNamesBothCredentialsFileSectionsForAnIPv6Host(t *testing.T) {
+	// An IPv6 endpoint's section is spelled [[::1]:8080] or [::1:8080], and the
+	// rung reads the first that sets a password, so Source names both, in the
+	// order the rung tries them, rather than one the file may not have.
+	p := NewBearerProvider(mustURL(t, "http://[::1]:8080"))
+	p.resolved = true
+	p.source = credentialsFileSourceName
+	if got, want := p.Source(), "the credentials file [[::1]:8080] or [::1:8080]"; got != want {
+		t.Errorf("Source() = %q, want %q", got, want)
+	}
+}
+
 func TestSourceIsEmptyWithNoCredentialConfigured(t *testing.T) {
 	// The loopback no-auth posture: the ladder yields nothing, so there is no
 	// source to name and a 401 stays unadorned.

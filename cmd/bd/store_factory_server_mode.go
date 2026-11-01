@@ -16,7 +16,7 @@ import (
 // Every factory call site with the GH#6551 gap lives in a build-tagged file:
 // newDoltStoreFromConfig and its read-only sibling in store_factory.go
 // (//go:build cgo), and their twins newDoltStoreFromConfig /
-// newReadOnlyStoreFromConfig in store_factory_nocgo.go (//go:build !cgo). A
+// openNonMutatingStoreFromConfig in store_factory_nocgo.go (//go:build !cgo). A
 // helper placed behind either tag could only ever reach half of them, so
 // "centralizing the check" would have been a claim the build tags falsify --
 // and .goreleaser.yml ships three CGO_ENABLED=0 targets, the build where a

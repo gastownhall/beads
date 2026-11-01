@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
@@ -32,9 +33,9 @@ import (
 //
 // What lives here is everything that genuinely needs the filter as a value:
 // the recursive --parent tree walk, which re-parents a copy of it at every
-// level; the --watch poll loop, which re-runs the same filter on a ticker; the
-// proxied route's builder call, which has to name the type to hand the filter
-// back; and --current, which resolves an id from a deliberately BARE filter
+// level; the --watch poll loop, which re-runs the same filter after every poll
+// interval; the proxied route's builder call, which has to name the type to
+// hand the filter back; and --current, which resolves an id from a deliberately BARE filter
 // that must not pick up the default listing's exclusions.
 //
 // The list is SHORTER by everything it no longer holds. `bd list`'s page is
@@ -99,32 +100,28 @@ func getHierarchicalChildren(ctx context.Context, store storage.DoltStorage, dbP
 	return treeIssues, nil
 }
 
-// findAllDescendants recursively finds all descendants using parent filtering.
-// baseFilter carries CLI filters (--type, --status, etc.) so the tree respects them.
+// findAllDescendants finds all descendants using parent filtering, adding each
+// to result the first time it is seen. baseFilter carries CLI filters (--type,
+// --status, etc.) so the tree respects them. The walk is
+// storage.SearchDescendants: one read transaction on a store that offers it
+// (the embedded and Dolt server stores), so a `bd list --watch --parent`
+// refresh opens the embedded engine once rather than once per tree node and
+// leaves room for other bd commands (GH#3415); node by node otherwise.
 func findAllDescendants(ctx context.Context, store storage.DoltStorage, dbPath string, parentID string, baseFilter types.IssueFilter, result map[string]*types.Issue) error {
-	var children []*types.Issue
+	var found []*types.Issue
 	err := withStorage(ctx, store, dbPath, func(s storage.DoltStorage) error {
-		filter := baseFilter
-		filter.ParentID = &parentID
-		filter.Limit = 0 // unlimited per level to avoid truncating the tree walk
 		var err error
-		children, err = s.SearchIssues(ctx, "", filter)
+		found, err = storage.SearchDescendants(ctx, s, parentID, baseFilter)
 		return err
 	})
 	if err != nil {
 		return err
 	}
-
-	for _, child := range children {
-		if _, exists := result[child.ID]; !exists {
-			result[child.ID] = child
-			err = findAllDescendants(ctx, store, dbPath, child.ID, baseFilter, result)
-			if err != nil {
-				return err
-			}
+	for _, issue := range found {
+		if _, ok := result[issue.ID]; !ok {
+			result[issue.ID] = issue
 		}
 	}
-
 	return nil
 }
 
@@ -210,27 +207,55 @@ func watchIssues(ctx context.Context, store storage.DoltStorage, filter types.Is
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(sigChan)
 
-	pollInterval := 2 * time.Second
-	ticker := time.NewTicker(pollInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-sigChan:
-			fmt.Fprintf(os.Stderr, "\nStopped watching.\n")
-			return nil
-		case <-ticker.C:
+	listWatchLoop(sigChan, func() <-chan time.Time { return time.After(listWatchPollInterval) }, lastSnapshot,
+		func() ([]*types.Issue, bool, error) {
 			issues, err := loadWatchedIssues(ctx, store, filter, ready, parentID, sortBy, reverse)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error refreshing issues: %v\n", err)
-				continue
+				return nil, false, err
 			}
 			issues, truncated := workapi.FinishPage(issues, "", false, effectiveLimit, false)
+			return issues, truncated, nil
+		},
+		func(issues []*types.Issue, truncated bool) {
+			displayWatchedIssueList(ctx, store, issues, truncated, ready, statusSelector, sortBy, reverse)
+			printTruncationHint(truncated, effectiveLimit)
+		})
+	return nil
+}
+
+// listWatchPollInterval is how long `bd list --watch` waits after each
+// refresh, on both routes.
+const listWatchPollInterval = 2 * time.Second
+
+// listWatchLoop is `bd list --watch`'s refresh loop on both routes
+// (watchIssues and proxiedListWatchLoop). poll is called each time the loop
+// starts waiting, which is after the previous refresh (and any redraw) has
+// returned, so every refresh is followed by a full poll interval. A
+// fixed-rate ticker instead started the next refresh the moment a slow one
+// returned, and a large watched --parent tree then kept the embedded store
+// busy almost continuously, stalling every other bd command (GH#3415). It also
+// means a stop that arrives during a refresh always wins: the wait requested
+// after that refresh has not fired yet.
+//
+// A refresh that fails reports on stderr and keeps the last snapshot on
+// screen; one whose snapshot changed is redrawn, followed by the banner.
+func listWatchLoop(stop <-chan os.Signal, poll func() <-chan time.Time, lastSnapshot string,
+	refresh func() ([]*types.Issue, bool, error), redraw func(issues []*types.Issue, truncated bool)) {
+	for {
+		select {
+		case <-stop:
+			fmt.Fprintf(os.Stderr, "\nStopped watching.\n")
+			return
+		case <-poll():
+			issues, truncated, err := refresh()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error refreshing issues: %s\n", remedy.PrintedMessage(err))
+				continue
+			}
 			snap := issueSnapshot(issues)
 			if snap != lastSnapshot {
 				lastSnapshot = snap
-				displayWatchedIssueList(ctx, store, issues, truncated, ready, statusSelector, sortBy, reverse)
-				printTruncationHint(truncated, effectiveLimit)
+				redraw(issues, truncated)
 				fmt.Fprintf(os.Stderr, "\nWatching for changes... (Press Ctrl+C to exit)\n")
 			}
 		}

@@ -2,9 +2,14 @@ package github
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -375,5 +380,150 @@ func TestValidate(t *testing.T) {
 	tr.client = &Client{} // Set client
 	if err := tr.Validate(); err != nil {
 		t.Errorf("Validate() on initialized tracker returned error: %v", err)
+	}
+}
+
+// createStateServer is a recording GitHub API stub for the create path. POST
+// /repos/o/r/issues answers an open issue #42; PATCH /repos/o/r/issues/42
+// answers closeStatus with the issue closed (or an error body when
+// closeStatus is not 200). Each request is recorded as "METHOD path" with its
+// decoded JSON body.
+type createStateServer struct {
+	closeStatus int
+	calls       []string
+	bodies      []map[string]interface{}
+}
+
+func newCreateStateServer(t *testing.T, closeStatus int) (*createStateServer, *Tracker) {
+	t.Helper()
+	rec := &createStateServer{closeStatus: closeStatus}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]interface{}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		rec.calls = append(rec.calls, r.Method+" "+r.URL.Path)
+		rec.bodies = append(rec.bodies, body)
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/issues":
+			// GitHub's create-issue API ignores state: new issues are open.
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"id": 100, "number": 42, "state": "open",
+				"html_url": "https://github.com/o/r/issues/42",
+			})
+		case r.Method == http.MethodPatch && r.URL.Path == "/repos/o/r/issues/42":
+			if rec.closeStatus != http.StatusOK {
+				w.WriteHeader(rec.closeStatus)
+				_, _ = w.Write([]byte(`{"message":"Validation Failed"}`))
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"id": 100, "number": 42, "state": "closed",
+				"closed_at": "2026-01-02T03:04:05Z",
+				"html_url":  "https://github.com/o/r/issues/42",
+			})
+		default:
+			http.Error(w, "unexpected "+r.Method+" "+r.URL.Path, http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(server.Close)
+	return rec, &Tracker{
+		client: NewClient("tok", "o", "r").WithBaseURL(server.URL),
+		config: DefaultMappingConfig(),
+	}
+}
+
+// TestCreateIssue_ClosedLocalIssueLandsClosed reproduces gastownhall/beads#5486:
+// pushing a locally closed issue that has never been synced creates it on
+// GitHub, but the create POST cannot carry a state, so the issue lands OPEN.
+// The engine then records the push hash of the closed local issue, so later
+// --push-only runs skip it as already in sync and the drift is never repaired.
+// Creating a closed issue must leave the GitHub issue closed.
+func TestCreateIssue_ClosedLocalIssueLandsClosed(t *testing.T) {
+	rec, tr := newCreateStateServer(t, http.StatusOK)
+	closedAt := time.Now()
+	issue := &types.Issue{
+		ID: "bd-1", Title: "Done already", Description: "body",
+		IssueType: types.TypeTask, Priority: 2,
+		Status: types.StatusClosed, ClosedAt: &closedAt, CloseReason: "done",
+	}
+
+	got, err := tr.CreateIssue(context.Background(), issue)
+	if err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+	want := []string{"POST /repos/o/r/issues", "PATCH /repos/o/r/issues/42"}
+	if !slices.Equal(rec.calls, want) {
+		t.Fatalf("requests = %v, want %v", rec.calls, want)
+	}
+	if st, _ := rec.bodies[1]["state"].(string); st != "closed" {
+		t.Errorf("follow-up PATCH state = %q, want %q (body %v)", st, "closed", rec.bodies[1])
+	}
+	if got.State != "closed" {
+		t.Errorf("returned State = %q, want %q", got.State, "closed")
+	}
+	if len(got.Warnings) != 0 {
+		t.Errorf("returned Warnings = %v, want none", got.Warnings)
+	}
+}
+
+// TestCreateIssue_NonClosedSkipsClose guards the follow-up close against
+// over-closing: only a closed bead gets the state PATCH after create.
+func TestCreateIssue_NonClosedSkipsClose(t *testing.T) {
+	for _, status := range []types.Status{types.StatusOpen, types.StatusInProgress, types.StatusBlocked, types.StatusDeferred} {
+		t.Run(string(status), func(t *testing.T) {
+			rec, tr := newCreateStateServer(t, http.StatusOK)
+			issue := &types.Issue{
+				ID: "bd-1", Title: "Still going", Description: "body",
+				IssueType: types.TypeTask, Priority: 2, Status: status,
+			}
+
+			got, err := tr.CreateIssue(context.Background(), issue)
+			if err != nil {
+				t.Fatalf("CreateIssue: %v", err)
+			}
+			want := []string{"POST /repos/o/r/issues"}
+			if !slices.Equal(rec.calls, want) {
+				t.Fatalf("requests = %v, want %v", rec.calls, want)
+			}
+			if got.State != "open" {
+				t.Errorf("returned State = %q, want %q", got.State, "open")
+			}
+		})
+	}
+}
+
+// TestCreateIssue_FailedCloseSurfacesWarning pins the partial-success
+// contract: when the follow-up close fails, CreateIssue still returns the
+// created issue (so the bead keeps its external_ref and no duplicate is made
+// on the next push) and reports the failed close as a warning.
+func TestCreateIssue_FailedCloseSurfacesWarning(t *testing.T) {
+	// 422 is not retried by the client, unlike 5xx.
+	rec, tr := newCreateStateServer(t, http.StatusUnprocessableEntity)
+	closedAt := time.Now()
+	issue := &types.Issue{
+		ID: "bd-1", Title: "Done already", Description: "body",
+		IssueType: types.TypeTask, Priority: 2,
+		Status: types.StatusClosed, ClosedAt: &closedAt, CloseReason: "done",
+	}
+
+	got, err := tr.CreateIssue(context.Background(), issue)
+	if err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+	want := []string{"POST /repos/o/r/issues", "PATCH /repos/o/r/issues/42"}
+	if !slices.Equal(rec.calls, want) {
+		t.Fatalf("requests = %v, want %v", rec.calls, want)
+	}
+	if got.Identifier != "42" || got.URL != "https://github.com/o/r/issues/42" {
+		t.Errorf("returned Identifier/URL = %q/%q, want the created issue #42", got.Identifier, got.URL)
+	}
+	if got.State != "open" {
+		t.Errorf("returned State = %q, want %q", got.State, "open")
+	}
+	if len(got.Warnings) != 1 {
+		t.Fatalf("returned Warnings = %v, want exactly one", got.Warnings)
+	}
+	if w := got.Warnings[0]; !strings.Contains(w, "#42") || !strings.Contains(w, "failed to close") {
+		t.Errorf("warning = %q, want it to name #42 and the failed close", w)
 	}
 }

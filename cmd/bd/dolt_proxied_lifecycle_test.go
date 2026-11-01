@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -41,6 +42,7 @@ func TestExternalDoltEndpoint(t *testing.T) {
 	}{
 		{"tcp", configfile.ExternalDoltConfig{Host: "127.0.0.1", Port: 3310}, "127.0.0.1:3310"},
 		{"ipv6", configfile.ExternalDoltConfig{Host: "::1", Port: 3310}, "[::1]:3310"},
+		{"ipv6 bracketed", configfile.ExternalDoltConfig{Host: "[::1]", Port: 3310}, "[::1]:3310"},
 		{"socket wins", configfile.ExternalDoltConfig{Socket: "/tmp/dolt.sock"}, "unix:/tmp/dolt.sock"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -104,6 +106,28 @@ func TestCollectProxiedDoltStatusExternalTopology(t *testing.T) {
 	}
 	if status.IdleTimeout != "45s" {
 		t.Errorf("idle_timeout = %q, want %q", status.IdleTimeout, "45s")
+	}
+}
+
+// TestCollectProxiedDoltStatusLegacySidecarReportsDefaultIdleTimeout covers a
+// workspace provisioned before the sidecar persisted its effective idle
+// timeout: the key is absent on disk, yet the proxy still reaps at the default.
+// Status must report that default as it does for a fresh workspace, not drop
+// the field as if no timeout applied (bd-mnhq6).
+func TestCollectProxiedDoltStatusLegacySidecarReportsDefaultIdleTimeout(t *testing.T) {
+	beadsDir := t.TempDir()
+	root := filepath.Join(beadsDir, "dolt")
+	t.Setenv("BEADS_PROXIED_SERVER_ROOT_PATH", root)
+	if err := os.WriteFile(configfile.ProxiedServerClientInfoPath(beadsDir), []byte(`{}`), 0o600); err != nil {
+		t.Fatalf("seed legacy sidecar: %v", err)
+	}
+
+	status, err := collectProxiedDoltStatus(beadsDir)
+	if err != nil {
+		t.Fatalf("collectProxiedDoltStatus: %v", err)
+	}
+	if want := configfile.DefaultProxyIdleTimeout.String(); status.IdleTimeout != want {
+		t.Errorf("idle_timeout = %q, want %q", status.IdleTimeout, want)
 	}
 }
 

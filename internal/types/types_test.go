@@ -2045,3 +2045,36 @@ func TestCheckFieldLen(t *testing.T) {
 		t.Errorf("CheckFieldLen(256 runes) = %v, want errors.Is(ErrFieldTooLong)", err)
 	}
 }
+
+// TestArrivalSeqSerializesOnlyWhenStamped pins the wire shape of the stamp the
+// journal's create seam writes on a wisp row: absent when there is none (so
+// every unstamped row, and every reader that predates the member, sees exactly
+// what it saw before), the number when there is one, and no part of the
+// content identity — a stamp is assigned by storage, not authored.
+func TestArrivalSeqSerializesOnlyWhenStamped(t *testing.T) {
+	unstamped, err := json.Marshal(Issue{ID: "test-1", Title: "t"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(unstamped), "arrival_seq") {
+		t.Errorf("an unstamped issue serializes arrival_seq: %s", unstamped)
+	}
+	stamped, err := json.Marshal(Issue{ID: "test-1", Title: "t", ArrivalSeq: 42})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(stamped), `"arrival_seq":42`) {
+		t.Errorf("a stamped issue does not serialize arrival_seq 42: %s", stamped)
+	}
+	var back Issue
+	if err := json.Unmarshal(stamped, &back); err != nil || back.ArrivalSeq != 42 {
+		t.Errorf("round trip = %d, %v; want 42", back.ArrivalSeq, err)
+	}
+
+	a := Issue{ID: "test-1", Title: "t", Status: StatusOpen}
+	b := a
+	b.ArrivalSeq = 7
+	if a.ComputeContentHash() != b.ComputeContentHash() {
+		t.Error("arrival_seq changed the content hash; it is storage-assigned metadata, not content")
+	}
+}

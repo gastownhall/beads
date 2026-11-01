@@ -13,10 +13,13 @@ func (s *testSuite) TestChildCounterSQLRepository() {
 		s.Run("EmptyParentIDIsRejected", s.childCounterEmptyParent)
 		s.Run("MissingParentFailsFK", s.childCounterFKViolation)
 		s.Run("CounterRowPersisted", s.childCounterRowPersisted)
+		s.Run("SkipsARetiredChild", s.childCounterSkipsRetiredChild)
+		s.Run("SkipsAChildRetiredFromTheWispsPlane", s.childCounterSkipsWispRetiredChild)
 		s.Run("Wisp", func() {
 			s.Run("RoutesToWispCounterAndWispsTable", s.childCounterWispRouting)
 			s.Run("WispCounterIsolatedFromPermanent", s.childCounterWispIsolated)
 			s.Run("WispRecoversFromStaleCounter", s.childCounterWispStaleRecovery)
+			s.Run("WispSkipsARetiredChild", s.childCounterWispSkipsRetiredChild)
 		})
 	})
 }
@@ -147,4 +150,44 @@ func (s *testSuite) childCounterWispStaleRecovery() {
 	id, err := s.childCounterRepo().NextChildID(s.Ctx(), "bd-cc-ws-stale", domain.ChildCounterOpts{UseWispsTable: true})
 	s.Require().NoError(err)
 	s.Equal("bd-cc-ws-stale.5", id)
+}
+
+// seedTombstone retires id into table (id_tombstones or wisp_id_tombstones)
+// the way a retaining sweep does, with no row and no counter left behind.
+func (s *testSuite) seedTombstone(table, id string) {
+	_, err := s.Runner().ExecContext(s.Ctx(),
+		"INSERT INTO "+table+" (id, closed_at) VALUES (?, ?)",
+		id, "2026-03-01 12:00:00")
+	s.Require().NoError(err)
+}
+
+// A retaining sweep deleted the highest child and kept only its tombstone, and
+// the parent has no counter row (a database written before GH#4750, or an
+// explicit child created through a door that does not advance it): the
+// tombstone is the only record that the suffix was used, so it is taken.
+func (s *testSuite) childCounterSkipsRetiredChild() {
+	s.seedIssueRow("bd-cc-retired")
+	s.seedIssueRow("bd-cc-retired.1")
+	s.seedTombstone("id_tombstones", "bd-cc-retired.3")
+	id, err := s.childCounterRepo().NextChildID(s.Ctx(), "bd-cc-retired", domain.ChildCounterOpts{})
+	s.Require().NoError(err)
+	s.Equal("bd-cc-retired.4", id, "a retired child suffix must count as taken, not be minted again")
+}
+
+// A child can be swept from the other plane than its parent's (a durable
+// parent's wisp child), so both tombstone tables count.
+func (s *testSuite) childCounterSkipsWispRetiredChild() {
+	s.seedIssueRow("bd-cc-wretired")
+	s.seedTombstone("wisp_id_tombstones", "bd-cc-wretired.2")
+	id, err := s.childCounterRepo().NextChildID(s.Ctx(), "bd-cc-wretired", domain.ChildCounterOpts{})
+	s.Require().NoError(err)
+	s.Equal("bd-cc-wretired.3", id, "a child retired from the wisps plane must count as taken too")
+}
+
+func (s *testSuite) childCounterWispSkipsRetiredChild() {
+	s.seedWispRow("bd-cc-ws-retired")
+	s.seedTombstone("wisp_id_tombstones", "bd-cc-ws-retired.5")
+	id, err := s.childCounterRepo().NextChildID(s.Ctx(), "bd-cc-ws-retired", domain.ChildCounterOpts{UseWispsTable: true})
+	s.Require().NoError(err)
+	s.Equal("bd-cc-ws-retired.6", id)
 }

@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads"
 	"github.com/steveyegge/beads/issueops"
@@ -393,5 +394,37 @@ func TestCheckDottedChildDependency(t *testing.T) {
 				t.Fatalf("message = %q, want %q", err.Error(), want)
 			}
 		})
+	}
+}
+
+// TestIdempotencyExpiredContractShape pins the refusal a create of a retired
+// id raises: its own sentinel, never ErrAlreadyExists or ErrValidation, a
+// message naming the id and the closed_at, and one code constant shared by the
+// wire and the CLI.
+func TestIdempotencyExpiredContractShape(t *testing.T) {
+	closedAt := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
+	var err error = &issueops.IdempotencyExpiredError{ID: "bd-op-1", ClosedAt: closedAt}
+	if !errors.Is(err, issueops.ErrIdempotencyExpired) {
+		t.Fatalf("IdempotencyExpiredError does not match ErrIdempotencyExpired: %v", err)
+	}
+	if errors.Is(err, issueops.ErrAlreadyExists) || errors.Is(err, issueops.ErrValidation) {
+		t.Fatalf("IdempotencyExpiredError matches ErrAlreadyExists or ErrValidation: %v", err)
+	}
+	var typed *issueops.IdempotencyExpiredError
+	if !errors.As(fmt.Errorf("create: %w", err), &typed) || typed.ID != "bd-op-1" || !typed.ClosedAt.Equal(closedAt) {
+		t.Fatalf("errors.As through a wrap = %+v, want the id and closed_at", typed)
+	}
+	if got := err.Error(); !strings.Contains(got, "bd-op-1") || !strings.Contains(got, "2026-03-01T12:00:00Z") || !strings.Contains(got, "never runs again") {
+		t.Errorf("IdempotencyExpiredError = %q, want the id, the RFC3339 closed_at and the never-again clause", got)
+	}
+	unknown := (&issueops.IdempotencyExpiredError{ID: "bd-op-2"}).Error()
+	if strings.Contains(unknown, "closed") {
+		t.Errorf("IdempotencyExpiredError without a closed_at = %q, want no closed clause", unknown)
+	}
+	if issueops.IdempotencyExpiredCode != "idempotency_expired" {
+		t.Errorf("IdempotencyExpiredCode = %q, want idempotency_expired", issueops.IdempotencyExpiredCode)
+	}
+	if beads.ErrIdempotencyExpired != issueops.ErrIdempotencyExpired {
+		t.Error("beads.ErrIdempotencyExpired is not the issueops sentinel")
 	}
 }

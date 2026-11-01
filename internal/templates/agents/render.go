@@ -52,12 +52,31 @@ type RenderOpts struct {
 	// NoPush indicates the rig is declared local-only (no-push: true in config).
 	// When true, "bd dolt push" is omitted regardless of HasRemote.
 	NoPush bool
+	// UserLevel words the section for a user-level instructions file, such as
+	// ~/.claude/CLAUDE.md, that the agent loads in every repository: instead
+	// of stating that the current project uses bd, it applies only in
+	// repositories that do, and so do its task-tracking rules.
+	UserLevel bool
+}
+
+// omitsDoltPush reports whether rendered instructions leave out "bd dolt push":
+// no Dolt remote is configured, or the workspace is declared no-push. The
+// managed section and the AGENTS.md template around it share this rule.
+func (o RenderOpts) omitsDoltPush() bool {
+	return !o.HasRemote || o.NoPush
 }
 
 // DefaultRenderOpts returns opts that assume a remote is configured,
 // preserving backward-compatible behavior for callers that don't pass opts.
 func DefaultRenderOpts() RenderOpts {
 	return RenderOpts{HasRemote: true}
+}
+
+// UserLevelRenderOpts returns the fixed opts for a user-level instructions
+// file. No one repository's beads config applies to it, so it assumes a
+// remote, as DefaultRenderOpts does.
+func UserLevelRenderOpts() RenderOpts {
+	return RenderOpts{HasRemote: true, UserLevel: true}
 }
 
 // RenderSection returns the beads integration section for the given profile,
@@ -214,12 +233,35 @@ func templateBodyWithOpts(profile Profile, opts RenderOpts) string {
 		body = strings.TrimSuffix(body, "\n<!-- END BEADS INTEGRATION -->")
 	}
 
-	if !opts.HasRemote || opts.NoPush {
+	if opts.omitsDoltPush() {
 		body = stripDoltPushReferences(body)
+	}
+	if opts.UserLevel {
+		body = userLevelWording.Replace(body)
 	}
 
 	return body
 }
+
+// userLevelScope opens a user-level section: the agent loads that file in
+// every repository, including ones that do not use beads.
+const userLevelScope = "This Beads block applies only in beads repositories: repositories that use **bd (beads)** for issue tracking, with a `.beads/` directory. Ignore it in any other repository."
+
+// userLevelWording rewords the lines of both profiles' bodies that state the
+// current project uses bd, or that set a task-tracking rule with no condition,
+// so they apply only in beads repositories (RenderOpts.UserLevel).
+var userLevelWording = strings.NewReplacer(
+	"This project uses **bd (beads)** for issue tracking. Run `bd prime`",
+	userLevelScope+" In a beads repository, run `bd prime`",
+	"- Use `bd` for ALL task tracking",
+	"- In a beads repository, use `bd` for ALL task tracking",
+	"- Use `bd remember` for durable project facts",
+	"- In a beads repository, use `bd remember` for durable project facts",
+	"**IMPORTANT**: This project uses **bd (beads)** for ALL issue tracking.",
+	userLevelScope+"\n\n**IMPORTANT**: In a beads repository, use **bd (beads)** for ALL issue tracking.",
+	"- ✅ Use bd for ALL task tracking",
+	"- ✅ In a beads repository, use bd for ALL task tracking",
+)
 
 func normalizeEmbeddedMarkdown(content string) string {
 	return strings.TrimRight(strings.ReplaceAll(content, "\r\n", "\n"), "\n")

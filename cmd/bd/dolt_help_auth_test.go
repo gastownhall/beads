@@ -39,3 +39,31 @@ func TestDoltHelpDescribesEmbeddedDefault(t *testing.T) {
 		}
 	}
 }
+
+// GH#5969: hash-derived per-project ports were removed in v0.60.0 (GH#2415).
+// The help must describe the OS-assigned port, that stop discards it, and
+// dolt.port as the pin; the env var and `bd dolt set port` would make the
+// server externally managed.
+func TestDoltStartHelpDescribesPortAllocation(t *testing.T) {
+	help := strings.Join(strings.Fields(doltStartCmd.Long), " ")
+	if strings.Contains(help, "derived from the project path") {
+		t.Error("dolt start help still describes a port derived from the project path")
+	}
+	for _, needle := range []string{
+		"free port the OS assigns",
+		".beads/dolt-server.port",
+		"'bd dolt stop' removes",
+		"dolt.port",
+		".beads/config.local.yaml",
+		"'bd dolt show'",
+	} {
+		if !strings.Contains(help, needle) {
+			t.Errorf("dolt start help missing %q:\n%s", needle, doltStartCmd.Long)
+		}
+	}
+	for _, avoid := range []string{"BEADS_DOLT_SERVER_PORT", "bd dolt set port"} {
+		if strings.Contains(help, avoid) {
+			t.Errorf("dolt start help recommends %q, which marks the server externally managed", avoid)
+		}
+	}
+}

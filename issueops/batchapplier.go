@@ -69,7 +69,9 @@ type CreateItem struct {
 	//
 	// AN EXPLICIT ID IS CREATE-ONLY, as it is for Lifecycle.Create: an id that
 	// already names a row is ErrAlreadyExists and the WHOLE request is refused,
-	// because this role is all or nothing.
+	// because this role is all or nothing. An id a retaining sweep retired is
+	// *IdempotencyExpiredError (wrapped in the item's *ItemError), with the
+	// same whole-request refusal.
 	//
 	// Ephemeral and NoHistory are read PER ITEM, so one request may create
 	// durable issues and ephemeral ones together. The two planes hold their
@@ -609,6 +611,7 @@ type BatchApplier interface {
 	// EVERY REFUSAL IS THE REQUEST'S. A refusal raised by an item arrives as an
 	// *ItemError naming that item's index, kind, key and resolved id, wrapping
 	// the verb's own typed refusal — so ErrAlreadyExists for an occupied id,
+	// *IdempotencyExpiredError for a retired one,
 	// ErrVersionMismatch, ErrStatusMismatch and ErrAssigneeMismatch for a
 	// precondition, *DependencyTypeConflictError, ErrDependencyCycle,
 	// *DependencyHierarchyConflictError and the endpoint-not-found errors for

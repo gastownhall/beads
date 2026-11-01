@@ -1,6 +1,6 @@
 ---
 title: "bd ship"
-description: "Ship a capability to satisfy cross-project dependencies."
+description: "Publish a capability for cross-project dependencies"
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}

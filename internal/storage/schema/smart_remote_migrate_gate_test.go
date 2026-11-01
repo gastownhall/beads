@@ -30,12 +30,13 @@ func hashRows(hashes map[int]string) *sqlmock.Rows {
 	return rows
 }
 
-// expectSmartRemoteRead mocks the smart router's local hash and branch reads,
-// historical shape probes, and remote content hash read.
+// expectSmartRemoteRead mocks the smart router's local shape probes and hash
+// read, branch read, historical shape probes, and remote content hash read.
 func expectSmartRemoteReadForRemote(mock sqlmock.Sqlmock, remoteName string, local, remote map[int]string) {
 	if remoteName == "" {
 		remoteName = smartGateDefaultRemote
 	}
+	expectHeadContentHashProbes(mock)
 	mock.ExpectQuery(`SELECT version, content_hash FROM schema_migrations$`).
 		WillReturnRows(hashRows(local))
 	mock.ExpectQuery(`SELECT active_branch\(\)`).
@@ -243,6 +244,7 @@ func TestSmartGateRouting(t *testing.T) {
 		db, mock, _ := sqlmock.New()
 		defer db.Close()
 		expectSmartFiringGate(mock, floor)
+		expectHeadContentHashProbes(mock)
 		mock.ExpectQuery(`SELECT version, content_hash FROM schema_migrations$`).
 			WillReturnRows(hashRows(map[int]string{floor: "h"}))
 		mock.ExpectQuery(`SELECT active_branch\(\)`).
@@ -272,6 +274,7 @@ func TestSmartGateRouting(t *testing.T) {
 		db, mock, _ := sqlmock.New()
 		defer db.Close()
 		expectSmartFiringGate(mock, floor)
+		expectHeadContentHashProbes(mock)
 		mock.ExpectQuery(`SELECT version, content_hash FROM schema_migrations$`).
 			WillReturnRows(sqlmock.NewRows([]string{"version", "content_hash"}))
 

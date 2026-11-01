@@ -10,27 +10,61 @@
 # beads remote-execution run stops in bazel.yml's rbe-job preflight
 # (tools/rbe/worker-env-sync) until the copy catches up. nightly.yml's
 # rbe-worker-env-sync job already opens a ci/infra issue for a human to fix;
-# this instead opens the fix itself, every 15 minutes, so the gap is
-# minutes, not until someone reads the issue.
+# this instead opens the fix itself.
+#
+# WHEN: gascity sends repository_dispatch gascity-worker-env-repinned
+# (client_payload: {sha, pin}) within about a minute of a push to its main
+# that moves the pin, so the sync PR opens as soon as the re-pin lands
+# rather than up to 15 minutes later; the 15-minute cron stays as the
+# backstop (a dispatch gascity never sent, or one this run lost), and
+# workflow_dispatch for a manual run. One run at a time, never cancelled:
+# a dispatch and a cron run can start together, and both would push the
+# same branch.
+#
+# WHICH COMMIT: the pick step resolves gascity main to a commit once
+# (tools/rbe/worker-env-sync-ref: git ls-remote, never the raw CDN's branch
+# URL, which serves the previous pin for up to 5 minutes after a push), and
+# the comparison and the copy both read that commit. A dispatch's
+# client_payload.sha is used only while it is still main's head; anything
+# else compares with main's head.
 #
 # tools/rbe/worker-env-sync only detects the mismatch (exit 1) or that it
 # could not compare with gascity (exit 2, e.g. GitHub is briefly
 # unreachable; the next run retries). The write half, tools/rbe/worker-env-
 # sync-copy, runs only after that exit-1 detection, on a checkout already in
 # hand -- so a transient gascity outage can turn "in step" into "unknown",
-# never into an unwanted write.
+# never into an unwanted write. A run that finds its copy already on the
+# sync branch pushes nothing (#7533), so every run while the PR waits is a
+# no-op, not a failed push.
 #
 # TWO TOKENS, ONE JOB EACH: GitHub never runs checks on a PR a plain
 # GITHUB_TOKEN opens (its loop-prevention rule), so this needs a GitHub App
 # token to open the PR. The gastownhall-autofix App (contents:write only on
 # this repo) mints push-token and does the git push of the fixed branch
 # (bot/worker-env-sync); it cannot open, label or merge a PR. The separate
-# gascity-autofix App (pull-requests:write only, no contents) mints pr-token
-# and does everything PR-shaped: create/update, the status/needs-review-auto
-# label, and arming auto-merge. Splitting them means a bug in the PR-shaped
-# half can never push a commit, and a bug in the push half can never touch a
-# PR; neither token can do the other's job even by accident. Both Apps'
-# credentials are secrets of the same `autofix` environment.
+# gascity-autofix App mints pr-token narrowed to pull-requests:write (no
+# contents, whatever else the App is granted for
+# worker-env-sync-automerge.yml) and does everything PR-shaped:
+# create/update and the status/needs-review-auto label. Splitting them
+# means a bug in the PR-shaped half can never push a commit, and a bug in
+# the push half can never touch a PR; neither token can do the other's job
+# even by accident. Both Apps' credentials are secrets of the same
+# `autofix` environment.
+#
+# HOW IT LANDS: with repository variable WORKER_ENV_SYNC_AUTOMERGE set to
+# 'true', the PR opens with no review label: worker-env-sync-automerge.yml
+# verifies it is exactly this copy (its author, branch, commits and pusher,
+# its two files, and both against gascity main) and, once main's required
+# checks pass on that head, queues it, so the merge queue lands it with no
+# review. Unset (or
+# anything else), the PR is labeled status/needs-review-auto: the automated
+# review workflow picks it up, and once that review passes the merge
+# workflow queues it (CONTRIBUTING.md's status/* labels; #7746 landed that
+# way) -- today's path, and the rollback. Nothing here merges the PR or
+# arms auto-merge either way, and nothing could: GitHub's
+# enablePullRequestAutoMerge wants contents:write and pull-requests:write
+# on one token (pr-token alone gets "Resource not accessible by
+# integration"), the push-plus-PR token the split above exists to rule out.
 #
 # peter-evans/create-pull-request takes one token for the whole push+PR
 # flow, so it cannot honor this split; this uses plain git for the push and
@@ -39,25 +73,32 @@
 # like shell (a title or body containing `` ` `` or `$`) is data to the
 # shell, not something GitHub's expression syntax or the shell re-parses.
 #
-# SECURITY: schedule and workflow_dispatch are never fork events (no
-# pull_request trigger here at all), so neither App's private key -- secrets
-# of the `autofix` environment, whose deployment-branch policy allows only
-# main -- is ever readable by a fork. The guard on github.repository is
-# defense in depth for a fork of this repo, where the secrets would not
-# exist anyway. Both mint steps run only once worker-env-sync has already
-# found a real mismatch, so a run that is in step or can't compare asks
-# neither App for a token. gh pr merge --auto only arms GitHub's native
-# auto-merge (it still waits for every required check and the branch
-# protection rule); it does not merge anything itself.
+# SECURITY: schedule, workflow_dispatch and repository_dispatch are never
+# fork events (no pull_request trigger here at all; repository_dispatch
+# needs a token with write access to this repository), so neither App's
+# private key -- secrets of the `autofix` environment, whose
+# deployment-branch policy allows only main -- is ever readable by a fork.
+# The dispatch's payload is data: its sha picks a commit only by matching
+# gascity main's head, and is never echoed unless it is 40 hex digits. The
+# guard on github.repository is defense in depth for a fork of this repo,
+# where the secrets would not exist anyway. Both mint steps run only once
+# worker-env-sync has already found a real mismatch, so a run that is in
+# step or can't compare asks neither App for a token.
 name: rbe worker-env autosync
 
 on:
+  repository_dispatch:
+    types: [gascity-worker-env-repinned]
   schedule:
     - cron: "*/15 * * * *"
   workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: worker-env-autosync
+  cancel-in-progress: false
 
 jobs:
   autosync:
@@ -67,8 +108,8 @@ jobs:
     timeout-minutes: 10
     # Grants the job read access to this environment's secrets (both Apps'
     # id and private key); its deployment-branch policy restricts that to
-    # jobs running on main, which schedule and workflow_dispatch on this
-    # repo always are.
+    # jobs running on main, which schedule, workflow_dispatch and
+    # repository_dispatch on this repo always are.
     environment: autofix
     permissions:
       contents: read
@@ -77,21 +118,50 @@ jobs:
         with:
           persist-credentials: false
 
+      # The one gascity commit the comparison and the copy read (see WHICH
+      # COMMIT above). A malformed payload sha is never echoed: a newline in
+      # it could start a workflow command. Never fails: when main cannot be
+      # resolved, ref stays main and the comparison reports "unknown".
+      - name: Pick the gascity commit to compare with
+        id: ref
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PAYLOAD_SHA: ${{ github.event.client_payload.sha }}
+        run: |
+          ref=main
+          if head="$(tools/rbe/worker-env-sync-ref main)"; then
+            ref=$head
+          fi
+          if [ "$EVENT_NAME" = repository_dispatch ]; then
+            if ! [[ $PAYLOAD_SHA =~ ^[0-9a-f]{40}$ ]]; then
+              echo "::warning::repository_dispatch's client_payload.sha is not a 40-hex commit; comparing with gascity main ($ref)."
+            elif [ "$PAYLOAD_SHA" = "$ref" ]; then
+              echo "repository_dispatch: gascity main is at $PAYLOAD_SHA, the commit gascity reported."
+            else
+              echo "::notice::repository_dispatch named gascity commit $PAYLOAD_SHA, which is not gascity main's head ($ref); comparing with main's head."
+            fi
+          fi
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
       # Never fails the step itself: rc is the signal every later step
       # gates on (1, a real mismatch; 2, gascity unreachable -- the next
       # scheduled run retries; 0, in step). A run every 15 minutes failing
-      # red for however long a mismatch takes to review and merge would be
-      # noise, not signal.
+      # red for however long a mismatch takes to land would be noise, not
+      # signal.
       - name: Compare the worker-env manifest and pin with gascity's main
         id: sync
+        env:
+          REF: ${{ steps.ref.outputs.ref }}
         run: |
           rc=0
-          tools/rbe/worker-env-sync main || rc=$?
+          tools/rbe/worker-env-sync "$REF" || rc=$?
           echo "rc=$rc" >> "$GITHUB_OUTPUT"
 
       - name: Copy gascity main's worker-env manifest and pin
         if: steps.sync.outputs.rc == '1'
-        run: tools/rbe/worker-env-sync-copy main
+        env:
+          REF: ${{ steps.ref.outputs.ref }}
+        run: tools/rbe/worker-env-sync-copy "$REF"
 
       - name: Confirm only the worker-env files moved
         if: steps.sync.outputs.rc == '1'
@@ -119,7 +189,7 @@ jobs:
           permission-contents: write
 
       # pull-requests:write only, on this repo alone: all it can do is
-      # open, label and arm auto-merge on a PR -- never push a commit.
+      # open, edit and label a PR -- never push a commit or arm auto-merge.
       - name: Mint PR token (gascity-autofix)
         id: pr-token
         if: steps.sync.outputs.rc == '1'
@@ -132,9 +202,20 @@ jobs:
           permission-pull-requests: write
 
       # push-token alone; it cannot see a PR exists, let alone touch one.
-      # Leased to the branch: a force-with-lease scoped to refs/heads/
-      # bot/worker-env-sync only, so a push can never move any other ref.
+      # Idempotent and leased (#7533): the step reads the sync branch's tip
+      # from the push URL itself and, when that commit already carries this
+      # copy, makes no commit and no push, so every run while main's pin is
+      # stale (and the PR waits) is a no-op instead of failing on "stale
+      # info" (#7458). Otherwise it pushes under a lease on the tip it read,
+      # scoped to refs/heads/bot/worker-env-sync alone (an empty lease:
+      # create the branch only if it does not exist), so a branch that moved
+      # in between is never overwritten. A failed or ambiguous read stops
+      # the step before any commit. git's stderr is dropped where the
+      # credential-bearing URL could appear in it. pushed=1 is written only
+      # once the push has landed, and tells the PR step this run put a new
+      # commit on the branch.
       - name: Commit and push the sync branch
+        id: push
         if: steps.sync.outputs.rc == '1'
         env:
           PUSH_TOKEN: ${{ steps.push-token.outputs.token }}
@@ -146,16 +227,77 @@ jobs:
           GIT_COMMITTER_NAME: gastownhall-autofix[bot]
           GIT_COMMITTER_EMAIL: gastownhall-autofix[bot]@users.noreply.github.com
         run: |
-          git checkout -B "$BRANCH"
+          push_url="https://x-access-token:${PUSH_TOKEN}@github.com/${REPO}.git"
+          ref="refs/heads/$BRANCH"
+          remote_sha=""
+          if remote="$(git ls-remote --exit-code --refs "$push_url" "$ref" 2>/dev/null)"; then
+            remote_sha="${remote%%$'\t'*}"
+            # ls-remote matches a pattern against a ref's trailing path
+            # components, so refs/heads/x/refs/heads/$BRANCH would match too.
+            if [ "$remote" != "$remote_sha"$'\t'"$ref" ]; then
+              echo "::error::Unexpected sync branch response; nothing pushed."
+              exit 1
+            fi
+          else
+            rc=$?
+            if [ "$rc" -ne 2 ]; then
+              echo "::error::Could not read the sync branch; nothing pushed."
+              exit "$rc"
+            fi
+          fi
+
           git add platforms/BUILD.bazel tools/rbe/worker-env.txt
+          if [ -n "$remote_sha" ]; then
+            # Fetch the observed commit, not a ref that may have moved since
+            # ls-remote. Never consult origin's unrelated tracking refs.
+            if ! git fetch --quiet --no-tags --depth=1 "$push_url" "$remote_sha" 2>/dev/null; then
+              echo "::error::Could not fetch the observed sync commit; nothing pushed."
+              exit 1
+            fi
+            if git diff --cached --quiet "$remote_sha" -- platforms/BUILD.bazel tools/rbe/worker-env.txt; then
+              echo "worker-env autosync: desired files already on the sync branch; nothing pushed."
+              exit 0
+            else
+              rc=$?
+              if [ "$rc" -ne 1 ]; then
+                echo "::error::Could not compare the sync files; nothing pushed."
+                exit "$rc"
+              fi
+            fi
+          fi
+
+          git checkout -B "$BRANCH"
           git commit -m "$COMMIT_SUBJECT"
-          git push "https://x-access-token:${PUSH_TOKEN}@github.com/${REPO}.git" \
-            "HEAD:refs/heads/$BRANCH" "--force-with-lease=refs/heads/$BRANCH"
+          if ! git push --quiet "$push_url" "HEAD:$ref" "--force-with-lease=$ref:$remote_sha" 2>/dev/null; then
+            echo "::error::Sync push failed: the branch moved or the remote refused the write."
+            exit 1
+          fi
+          echo "pushed=1" >> "$GITHUB_OUTPUT"
 
       # pr-token alone; it cannot push a commit, only act on the PR the
-      # step above already pushed.
+      # step above already pushed. It labels only a PR it opens itself, in
+      # the gh pr create call: the review pipeline swaps $LABEL for
+      # status/reviewing when the review starts, so adding it to an open PR
+      # would request a second review of a PR whose review is running,
+      # failed, or done. Every run that gets past the push step reaches this
+      # step, and the push step finishes without pushing once the branch
+      # already carries the copy, so that is every run while main's pin is
+      # stale -- the whole time the PR waits on that review. An open PR is
+      # edited only when this run pushed a new commit to it (pushed=1);
+      # otherwise it is left as it is. Not gated on pushed itself: a run
+      # that pushed nothing still opens a PR for a sync branch that has
+      # none. An open PR with no review-pipeline label (none of the review
+      # and merge labels in CONTRIBUTING.md's pull request pipeline table,
+      # nor status/awaiting-approval; its label was lost, or a maintainer
+      # removed it) is never relabeled from here, since a review could be
+      # mid-swap; the run warns so a human can label it. Only a same-repo
+      # PR counts as the sync PR: gh pr list --head matches the branch name
+      # alone, so a fork PR from a branch of the same name would match too.
+      # With WORKER_ENV_SYNC_AUTOMERGE == 'true' (see HOW IT LANDS) it
+      # labels nothing at all, so the review pipeline leaves the PR to
+      # worker-env-sync-automerge.yml, and an unlabeled open PR is expected,
+      # not warned about.
       - name: Open or update the sync PR
-        id: pr
         if: steps.sync.outputs.rc == '1'
         env:
           GH_TOKEN: ${{ steps.pr-token.outputs.token }}
@@ -163,34 +305,49 @@ jobs:
           BRANCH: bot/worker-env-sync
           TITLE: "build(rbe): sync worker-env pin with gascity main"
           LABEL: status/needs-review-auto
+          AUTOMERGE: ${{ vars.WORKER_ENV_SYNC_AUTOMERGE }}
+          GASCITY_REF: ${{ steps.ref.outputs.ref }}
+          PUSHED: ${{ steps.push.outputs.pushed }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
+          if [ "$AUTOMERGE" = true ]; then
+            lands="Nothing labels it for review: worker-env-sync-automerge.yml verifies that it is exactly this copy (its author, branch, commits and pusher, its two files, and both against gascity main) and, once CI Gate / Required and PR Risk Gate / Required pass on that head, queues it."
+          else
+            lands="Nothing arms auto-merge: it is labeled \`$LABEL\`, and once the automated review passes, the merge workflow queues it."
+          fi
           body="$(cat <<BODY
           rbe-west's pool workers advertise gastownhall/gascity main's worker-env
           pin; beads' copy (\`tools/rbe/worker-env.txt\` and the
           \`platforms/BUILD.bazel\` pin) had fallen out of step, so beads' remote
           actions were queueing on a pin no worker serves
-          (\`tools/rbe/worker-env-sync main\`, run $RUN_URL).
+          (\`tools/rbe/worker-env-sync\`, run $RUN_URL).
 
-          This copies gascity main's manifest and pin byte for byte, same as
-          #7419. Auto-merge is armed: it lands once the automated review and the
-          rest of the required checks are green.
+          This copies gascity's manifest and pin at gastownhall/gascity@$GASCITY_REF
+          byte for byte, same as #7419. $lands
           BODY
           )"
-          number="$(gh pr list --repo "$REPO" --head "$BRANCH" --base main --state open --json number --jq '.[0].number')"
-          if [ -n "$number" ]; then
+          # "<number> <count of review-pipeline labels>" for the open sync
+          # PR, or nothing when there is none. A fork PR (isCrossRepository)
+          # from a branch named $BRANCH is never the sync PR. Triage labels
+          # (status/needs-triage, which triage-label.yml adds to every PR it
+          # sees opened, and the rest) and status/needs-bugflow are not
+          # review-pipeline labels.
+          found="$(gh pr list --repo "$REPO" --head "$BRANCH" --base main --state open --json number,labels,isCrossRepository \
+            --jq 'map(select(.isCrossRepository | not)) | .[0] // empty | "\(.number) \([.labels[].name | select(IN("status/needs-review", "status/needs-review-auto", "status/reviewing", "status/awaiting-approval", "status/review-failed", "status/merge-ready", "status/merge-queued", "status/merge-failed"))] | length)"')"
+          number="${found%% *}"
+          if [ -z "$number" ]; then
+            if [ "$AUTOMERGE" = true ]; then
+              gh pr create --repo "$REPO" --base main --head "$BRANCH" --title "$TITLE" --body "$body"
+            else
+              gh pr create --repo "$REPO" --base main --head "$BRANCH" --title "$TITLE" --body "$body" --label "$LABEL"
+            fi
+            exit 0
+          fi
+          if [ "$PUSHED" = 1 ]; then
             gh pr edit "$number" --repo "$REPO" --title "$TITLE" --body "$body"
           else
-            gh pr create --repo "$REPO" --base main --head "$BRANCH" --title "$TITLE" --body "$body"
-            number="$(gh pr list --repo "$REPO" --head "$BRANCH" --base main --state open --json number --jq '.[0].number')"
+            echo "worker-env autosync: sync PR #$number already carries this copy; left as it is."
           fi
-          gh pr edit "$number" --repo "$REPO" --add-label "$LABEL"
-          echo "number=$number" >> "$GITHUB_OUTPUT"
-
-      - name: Enable auto-merge
-        if: steps.sync.outputs.rc == '1' && steps.pr.outputs.number
-        env:
-          GH_TOKEN: ${{ steps.pr-token.outputs.token }}
-          REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ steps.pr.outputs.number }}
-        run: gh pr merge --auto --squash --repo "$REPO" "$PR_NUMBER"
+          if [ "$AUTOMERGE" != true ] && [ "${found#* }" = 0 ]; then
+            echo "::warning::sync PR #$number carries no review-pipeline status/* label, so no review or merge will pick it up; add $LABEL to it by hand (this workflow never labels an open PR, since that could request a second review)."
+          fi

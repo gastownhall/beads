@@ -90,6 +90,12 @@ func (l *httpLifecycle) Create(ctx context.Context, req issueops.CreateRequest) 
 		if req.Issue != nil && req.Issue.ID != "" && errors.Is(err, issueops.ErrAlreadyExists) {
 			return issueops.CreateResult{}, fmt.Errorf("%s: %w", req.Issue.ID, err)
 		}
+		// The same for a retired id: the 410 names the member, not the id, so
+		// the typed refusal gets the caller's own id back.
+		var expired *issueops.IdempotencyExpiredError
+		if req.Issue != nil && errors.As(err, &expired) && expired.ID == "" {
+			expired.ID = req.Issue.ID
+		}
 		return issueops.CreateResult{}, err
 	}
 	return issueops.CreateResult{Issue: issue}, nil

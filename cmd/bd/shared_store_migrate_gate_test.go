@@ -200,3 +200,144 @@ func TestSharedServerVersionBumpDoesNotPromoteCursor(t *testing.T) {
 		t.Fatalf("cursor = %d after bd migrate schema, want %d", got, schema.LatestVersion())
 	}
 }
+
+// TestServerModeReadRefusesASchemaItsReadsCannotQuery is the other half of the
+// upgrade window above. There the database was behind by its cursor alone and
+// `bd list` had to keep working. Here it is behind for real: the database a
+// previous release migrated has no arrival_seq column, which this binary's
+// issue reads select. A read-only open never migrates, so without a check at
+// open `bd list` failed on the unknown column. It must refuse at open instead,
+// naming the remedy, and that remedy must converge.
+func TestServerModeReadRefusesASchemaItsReadsCannotQuery(t *testing.T) {
+	if testDoltServerPort == 0 {
+		t.Skip("Dolt test server not available, skipping")
+	}
+
+	repo := t.TempDir()
+	beadsDir := filepath.Join(repo, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("create .beads: %v", err)
+	}
+	database := uniqueTestDBName(t)
+	if err := (&configfile.Config{
+		Backend:        configfile.BackendDolt,
+		DoltMode:       configfile.DoltModeServer,
+		DoltServerHost: "127.0.0.1",
+		DoltServerPort: testDoltServerPort,
+		DoltDatabase:   database,
+	}).Save(beadsDir); err != nil {
+		t.Fatalf("save metadata: %v", err)
+	}
+
+	ctx := context.Background()
+	store, err := dolt.New(ctx, &dolt.Config{
+		Path:            filepath.Join(beadsDir, "dolt"),
+		BeadsDir:        beadsDir,
+		ServerHost:      "127.0.0.1",
+		ServerPort:      testDoltServerPort,
+		Database:        database,
+		CreateIfMissing: true,
+	})
+	if err != nil {
+		t.Fatalf("create test store: %v", err)
+	}
+	if err := store.SetConfig(ctx, "issue_prefix", "rdb"); err != nil {
+		t.Fatalf("set issue_prefix: %v", err)
+	}
+	now := time.Now()
+	if err := store.CreateIssue(ctx, &types.Issue{
+		ID:        "rdb-1",
+		Title:     "Readable once migrated",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}, "test-user"); err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close setup store: %v", err)
+	}
+	t.Cleanup(func() { dropTestDatabase(database, testDoltServerPort) })
+
+	admin, err := sql.Open("mysql", doltutil.ServerDSN{
+		Host: "127.0.0.1", Port: testDoltServerPort, User: "root", Database: database,
+	}.String())
+	if err != nil {
+		t.Fatalf("connect to test dolt server: %v", err)
+	}
+	t.Cleanup(func() { admin.Close() })
+
+	// The v72 shape a previous release leaves: 0073 and 0074 never ran, so
+	// neither plane has the column, neither id tombstone table exists and the
+	// cursor stops at 72. Committed, as that release's own migration pass
+	// committed it.
+	for _, stmt := range []string{
+		"ALTER TABLE issues DROP COLUMN arrival_seq",
+		"ALTER TABLE wisps DROP COLUMN arrival_seq",
+		"DROP TABLE id_tombstones",
+		"DROP TABLE wisp_id_tombstones",
+		"DELETE FROM schema_migrations WHERE version >= 73",
+		"CALL DOLT_COMMIT('-Am', 'test: the schema a v72 release leaves')",
+	} {
+		if _, err := admin.ExecContext(ctx, stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	if schema.LatestVersion() != 74 {
+		t.Fatalf("this fixture rebuilds the v72 shape for migrations 0073 (arrival_seq, which this binary's reads select) and 0074 (the id tombstone tables); LatestVersion() = %d, retarget it", schema.LatestVersion())
+	}
+
+	bd := buildBDForInitTests(t)
+	run := func(args ...string) (string, string, int) {
+		t.Helper()
+		cmd := exec.Command(bd, args...)
+		cmd.Dir = repo
+		cmd.Env = append(filteredEnvForContextBinding("BEADS_DIR", "BEADS_DB", "BD_DB",
+			"BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_SERVER_DATABASE", schema.AllowRemoteMigrateEnv,
+			schema.AllowMigrateEnv, "BD_IGNORE_SCHEMA_SKEW"),
+			"HOME="+t.TempDir(),
+			"XDG_CONFIG_HOME="+t.TempDir(),
+			"BEADS_TEST_MODE=1",
+			"BEADS_TEST_SERVER=1",
+			"BEADS_DIR="+beadsDir,
+			schema.AllowRemoteMigrateEnv+"=0",
+		)
+		var stdout, stderr strings.Builder
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		code := 0
+		if err := cmd.Run(); err != nil {
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) {
+				t.Fatalf("running bd %v: %v", args, err)
+			}
+			code = exitErr.ExitCode()
+		}
+		return stdout.String(), stderr.String(), code
+	}
+
+	for _, args := range [][]string{{"list"}, {"show", "rdb-1"}, {"ready"}} {
+		stdout, stderr, code := run(args...)
+		if code == 0 {
+			t.Fatalf("bd %v succeeded on a schema its reads cannot query\nstdout:\n%s\nstderr:\n%s", args, stdout, stderr)
+		}
+		if !strings.Contains(stderr, "schema version mismatch: database is at v72, binary expects v74") ||
+			!strings.Contains(stderr, "bd migrate schema") {
+			t.Errorf("bd %v refusal does not name the behind schema and its remedy:\n%s", args, stderr)
+		}
+		if strings.Contains(stderr, "column") {
+			t.Errorf("bd %v reached a query and failed on the missing column instead of refusing at open:\n%s", args, stderr)
+		}
+	}
+
+	stdout, stderr, code := run("migrate", "schema")
+	if code != 0 {
+		t.Fatalf("bd migrate schema exit = %d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	stdout, stderr, code = run("list")
+	if code != 0 || !strings.Contains(stdout, "rdb-1") {
+		t.Fatalf("bd list after bd migrate schema: exit %d, want the issue listed\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+}

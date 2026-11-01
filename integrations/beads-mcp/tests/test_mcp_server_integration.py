@@ -208,6 +208,152 @@ async def test_update_issue_tool(mcp_client):
 
 
 @pytest.mark.asyncio
+async def test_update_open_on_open_issue_applies_fields(mcp_client):
+    """update(status="open") on an open issue applies the other fields (GH#6872)."""
+    import json
+
+    create_result = await mcp_client.call_tool(
+        "create", {"title": "Open issue", "priority": 2, "issue_type": "task", "brief": False}
+    )
+    issue_id = json.loads(create_result.content[0].text)["id"]
+
+    update_result = await mcp_client.call_tool(
+        "update",
+        {"issue_id": issue_id, "status": "open", "description": "desc via MCP", "priority": 0, "brief": False},
+    )
+
+    updated = json.loads(update_result.content[0].text)
+    assert updated["id"] == issue_id
+    assert updated["status"] == "open"
+    assert updated["description"] == "desc via MCP"
+    assert updated["priority"] == 0
+
+
+@pytest.mark.asyncio
+async def test_update_open_on_deferred_issue(mcp_client):
+    """update(status="open", title=...) on a deferred issue undefers and retitles in one call (GH#6872)."""
+    import json
+
+    create_result = await mcp_client.call_tool(
+        "create", {"title": "Deferred issue", "priority": 2, "issue_type": "task", "brief": False}
+    )
+    issue_id = json.loads(create_result.content[0].text)["id"]
+    await mcp_client.call_tool("update", {"issue_id": issue_id, "status": "deferred"})
+
+    update_result = await mcp_client.call_tool(
+        "update", {"issue_id": issue_id, "status": "open", "title": "retitled", "brief": False}
+    )
+
+    updated = json.loads(update_result.content[0].text)
+    assert updated["id"] == issue_id
+    assert updated["status"] == "open"
+    assert updated["title"] == "retitled"
+
+
+@pytest.mark.asyncio
+async def test_update_open_on_closed_issue_reopens_and_applies_fields(mcp_client):
+    """update(status="open") on a closed issue reopens it (notes = reason) and applies other fields (GH#6872)."""
+    import json
+
+    create_result = await mcp_client.call_tool(
+        "create", {"title": "Closed issue", "priority": 2, "issue_type": "task", "brief": False}
+    )
+    issue_id = json.loads(create_result.content[0].text)["id"]
+    await mcp_client.call_tool("close", {"issue_id": issue_id, "reason": "Done"})
+
+    update_result = await mcp_client.call_tool(
+        "update",
+        {"issue_id": issue_id, "status": "open", "notes": "Found regression", "description": "D", "brief": False},
+    )
+
+    # One issue, the same shape as on an issue that was not closed.
+    updated = json.loads(update_result.content[0].text)
+    assert isinstance(updated, dict)
+    assert updated["id"] == issue_id
+    assert updated["status"] == "open"
+    assert updated["closed_at"] is None
+    assert updated["description"] == "D"
+
+    show_result = await mcp_client.call_tool("show", {"issue_id": issue_id})
+    shown = json.loads(show_result.content[0].text)
+    assert shown["status"] == "open"
+    assert shown["closed_at"] is None
+    assert shown["description"] == "D"
+
+
+@pytest.mark.parametrize("fields", [{}, {"description": "D"}])
+@pytest.mark.parametrize("closed", [True, False])
+@pytest.mark.asyncio
+async def test_update_open_brief_returns_one_result(mcp_client, closed, fields):
+    """update(status="open") returns one OperationResult whether or not the issue was closed (GH#6872)."""
+    import json
+
+    create_result = await mcp_client.call_tool(
+        "create", {"title": "Brief open", "priority": 2, "issue_type": "task", "brief": False}
+    )
+    issue_id = json.loads(create_result.content[0].text)["id"]
+    if closed:
+        await mcp_client.call_tool("close", {"issue_id": issue_id, "reason": "Done"})
+
+    update_result = await mcp_client.call_tool("update", {"issue_id": issue_id, "status": "open", **fields})
+
+    data = json.loads(update_result.content[0].text)
+    assert isinstance(data, dict)
+    assert data["id"] == issue_id
+    assert data["action"] == "updated"
+
+
+@pytest.mark.asyncio
+async def test_update_open_on_dated_defer_clears_defer_until(mcp_client, bd_executable, temp_db):
+    """update(status="open") on an issue deferred until a future date makes it ready again (GH#6872)."""
+    import asyncio
+    import json
+
+    create_result = await mcp_client.call_tool(
+        "create", {"title": "Snoozed issue", "priority": 2, "issue_type": "task", "brief": False}
+    )
+    issue_id = json.loads(create_result.content[0].text)["id"]
+
+    async def run_bd(*args: str) -> str:
+        env = os.environ.copy()
+        env.pop("BEADS_DB", None)
+        env.pop("BEADS_DIR", None)
+        process = await asyncio.create_subprocess_exec(
+            bd_executable,
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+            cwd=os.path.dirname(temp_db),
+        )
+        stdout, stderr = await process.communicate()
+        assert process.returncode == 0, stderr.decode()
+        return stdout.decode()
+
+    async def ready_ids() -> list[str]:
+        result = await mcp_client.call_tool("ready", {"limit": 100})
+        if not result.content:  # an empty ready list comes back as no content at all
+            return []
+        return [issue["id"] for issue in json.loads(result.content[0].text)]
+
+    # MCP has no defer tool: defer it the way a human would.
+    await run_bd("defer", issue_id, "--until", "2099-01-01")
+    assert issue_id not in await ready_ids()
+
+    update_result = await mcp_client.call_tool(
+        "update", {"issue_id": issue_id, "status": "open", "title": "retitled", "brief": False}
+    )
+
+    updated = json.loads(update_result.content[0].text)
+    assert updated["status"] == "open"
+    assert updated["title"] == "retitled"
+    shown = json.loads(await run_bd("show", issue_id, "--json"))
+    shown = shown[0] if isinstance(shown, list) else shown
+    assert shown.get("defer_until") is None
+    assert issue_id in await ready_ids()
+
+
+@pytest.mark.asyncio
 async def test_claim_issue_tool(mcp_client):
     """Test claim_issue tool."""
     import json
@@ -274,6 +420,27 @@ async def test_reopen_issue_tool(mcp_client):
     assert reopened["id"] == issue_id
     assert reopened["status"] == "open"
     assert reopened["closed_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_reopen_not_closed_issue_tool_errors(mcp_client):
+    """reopen on an issue that is not closed fails with a clear error (GH#6872)."""
+    import json
+
+    from fastmcp.exceptions import ToolError
+
+    create_result = await mcp_client.call_tool(
+        "create", {"title": "Open issue", "priority": 1, "issue_type": "task", "brief": False}
+    )
+    issue_id = json.loads(create_result.content[0].text)["id"]
+
+    with pytest.raises(ToolError) as exc_info:
+        await mcp_client.call_tool("reopen", {"issue_ids": [issue_id]})
+
+    message = str(exc_info.value)
+    assert issue_id in message
+    assert "not closed" in message
+    assert "Invalid response" not in message
 
 
 @pytest.mark.asyncio

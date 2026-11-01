@@ -142,6 +142,34 @@ func TestEmbeddedUndefer(t *testing.T) {
 			t.Errorf("expected defer_until cleared after undefer, got %v", deferUntil)
 		}
 	})
+
+	// ===== Partial ID (mc-qec7j) =====
+
+	t.Run("undefer_partial_id_notice_once", func(t *testing.T) {
+		// An explicit ID keeps the abbreviation unambiguous in this workspace.
+		issue := bdCreate(t, bd, dir, "Undefer partial ID", "--type", "task", "--id", "ud-qec7jnotice")
+		bdDefer(t, bd, dir, issue.ID)
+
+		// Every argument is resolved before any write, so one unresolvable
+		// argument still aborts the whole command.
+		if stderr, err := bdStderrAllowError(t, bd, dir, "undefer", "qec7jnot", "ud-qec7jmissing"); err == nil {
+			t.Errorf("bd undefer with an unresolvable ID succeeded; want a non-zero exit\nstderr:\n%s", stderr)
+		}
+		if s := getIssueStatus(t, bd, dir, issue.ID); s != "deferred" {
+			t.Errorf("aborted bd undefer changed %s to %q; want it left deferred", issue.ID, s)
+		}
+
+		stderr, err := bdStderrAllowError(t, bd, dir, "undefer", "qec7jnot")
+		if err != nil {
+			t.Fatalf("bd undefer qec7jnot failed: %v\nstderr:\n%s", err, stderr)
+		}
+		if n := strings.Count(stderr, `"qec7jnot" is not an exact issue ID`); n != 1 {
+			t.Errorf("partial-ID notice printed %d times; want exactly once\nstderr:\n%s", n, stderr)
+		}
+		if s := getIssueStatus(t, bd, dir, issue.ID); s != "open" {
+			t.Errorf("expected status=open after undefer, got %q", s)
+		}
+	})
 }
 
 // TestEmbeddedUndeferConcurrent exercises undefer operations concurrently.

@@ -13,11 +13,11 @@ import (
 	"github.com/steveyegge/beads/internal/validation"
 )
 
-// TestSpawnMolecule_PreservesStepLabels verifies that a cooked formula with
+// TestEmbeddedSpawnMolecule_PreservesStepLabels verifies that a cooked formula with
 // per-step labels results in spawned issues whose labels are persisted to the
 // database. Regression for labels being silently dropped by cloneSubgraph in
 // the same shape as the metadata bug fixed by gastownhall/beads#3341.
-func TestSpawnMolecule_PreservesStepLabels(t *testing.T) {
+func TestEmbeddedSpawnMolecule_PreservesStepLabels(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -74,9 +74,9 @@ func TestSpawnMolecule_PreservesStepLabels(t *testing.T) {
 	}
 }
 
-// TestSpawnMolecule_SubstitutesTemplatedStepFields is the cook -> pour
+// TestEmbeddedSpawnMolecule_SubstitutesTemplatedStepFields is the cook -> pour
 // regression test for GH#5110 (labels, metadata) and GH#5754 (assignee).
-// TestSpawnMolecule_PreservesStepLabels above fixed labels being dropped
+// TestEmbeddedSpawnMolecule_PreservesStepLabels above fixed labels being dropped
 // entirely, but its labels carry no {{vars}}, so the missing substitution went
 // unnoticed: the labels ARE carried through - just literal, which silently
 // stops matching every label query downstream.
@@ -85,7 +85,7 @@ func TestSpawnMolecule_PreservesStepLabels(t *testing.T) {
 // spawned bead unclosable by the actor that poured it, so the molecule can
 // never advance - which is what the AssigneeMatches assertion pins, not just
 // the string value.
-func TestSpawnMolecule_SubstitutesTemplatedStepFields(t *testing.T) {
+func TestEmbeddedSpawnMolecule_SubstitutesTemplatedStepFields(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}

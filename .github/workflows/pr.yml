@@ -12,12 +12,26 @@ on:
   # checks_requested is the queue asking for those checks; pinned
   # explicitly (scripts/ci_merge_queue_test.go). The concurrency group
   # below keys a merge group on its own gh-readonly-queue/* ref, so queue
-  # runs never cancel each other or a PR's own runs.
+  # runs never cancel each other or a PR's own runs. A merge group runs the
+  # fast set only (the scope job below): no Windows or macOS job, and the
+  # Bazel call without its Dolt-tier lanes.
   merge_group:
     types: [ checks_requested ]
+  # The post-merge complement: the Windows and macOS jobs a merge group
+  # skipped run on every push to main. The queue lands a batch of entries
+  # as one push of its last entry (main fast-forwards to that entry's tested
+  # merge-group commit, the same tree), so a push head's tree contains every
+  # entry of its batch; an earlier entry gets the complement only as part
+  # of it. bazel.yml's own push run is every Bazel lane, so this run calls
+  # none. A red push run opens the ci/main-red issue (main-ci-alert.yml).
+  push:
+    branches: [ main ]
 
+# A push to main keys on its commit: no push's complement run cancels
+# another's or waits behind it (GitHub cancels a group's pending run when a
+# newer one queues).
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || (github.event_name == 'push' && github.sha) || github.ref }}
   cancel-in-progress: true
 
 env:
@@ -38,9 +52,43 @@ env:
   # lane runs the same integration-build bd_test without the dolt skip, so
   # each cmd/bd test runs once. Rollback: commit "false" here and false in
   # that input together; bazel-integration runs bd_test again on the next run.
+  # The flag decides only what this gate requires: a merge group skips the
+  # tier (the scope's dolt-tiers), and main's push run of bazel.yml fails on
+  # a cmd/bd tier failure either way (bazel-dolt-int's last step).
   BAZEL_CMD_DOLT_REQUIRED: "true"
 
 jobs:
+
+  # What this event runs (.github/scripts/ci-scope.sh, the same job as
+  # pr-risk.yml's): a pull request everything; a merge group the fast set
+  # (linux: the Linux jobs and the Bazel call, dolt-tiers off: no Dolt-tier
+  # lane; no platforms job, no advisory report); a push to main the
+  # complement (platforms: the Windows and macOS jobs). Every other job
+  # needs it and runs on one of its switches, and ci-gate excuses a skip
+  # only where it says so (engdocs/CI_REQUIRED_CHECK_TOPOLOGY.md, "Merge
+  # Queue"). The one place that reads the event; only the script is checked
+  # out.
+  scope:
+    name: Scope
+    runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      platforms: ${{ steps.decide.outputs.platforms }}
+      dolt-tiers: ${{ steps.decide.outputs.dolt-tiers }}
+      linux: ${{ steps.decide.outputs.linux }}
+      advisory: ${{ steps.decide.outputs.advisory }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/scripts/ci-scope.sh
+          sparse-checkout-cone-mode: false
+
+      - name: Decide what this event runs
+        id: decide
+        run: bash .github/scripts/ci-scope.sh decide
 
   # The checks that need the PR's base commit, so no hermetic Bazel target
   # can hold them: check-migration-hygiene.sh's delta half (C: shipped
@@ -60,6 +108,8 @@ jobs:
   # output.
   fast-checks:
     name: Fast checks (frozen migrations, .beads diff)
+    needs: scope
+    if: ${{ needs.scope.outputs.linux == 'true' }}
     runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     timeout-minutes: 10
     outputs:
@@ -126,15 +176,19 @@ jobs:
   # pr-preflight-platforms, not here.
   # Blacksmith Windows (blacksmith-4vcpu-windows-2025: GitHub's windows-2025
   # image minus the full Visual Studio IDE/EdgeDriver/WinAppDriver, VS Build
-  # Tools 2022 present, no Linux Docker) for every PR and merge group, forks
-  # and Dependabot included (ga-96smfk.22): Windows and macOS jobs run on
-  # Blacksmith, everything Linux under Bazel on rbe-west. The first step
-  # builds ./cmd/bd with CGO_ENABLED=1 (embedded Dolt); the toolchain
-  # diagnostic step below prints which cgo toolchain backs it. Since
+  # Tools 2022 present, no Linux Docker) for every PR, forks and Dependabot
+  # included (ga-96smfk.22), and every push to main: Windows and macOS jobs
+  # run on Blacksmith, everything Linux under Bazel on rbe-west. A merge
+  # group skips the Windows and macOS jobs (the scope job's platforms
+  # switch); the push to main that lands it (with its batch) runs them.
+  # The first step builds ./cmd/bd with CGO_ENABLED=1 (embedded Dolt); the
+  # toolchain diagnostic step below prints which cgo toolchain backs it. Since
   # ga-96smfk.22 this job (not a cross-compiled "-prebuilt" twin) is the
   # required run of these tests.
   test-windows-liveness:
     name: Test (Windows) cmd/bd liveness regression
+    needs: scope
+    if: ${{ needs.scope.outputs.platforms == 'true' }}
     runs-on: ${{ 'blacksmith-4vcpu-windows-2025' }}
     # F7b review fix (S6): raised from 15 to 20, matching open PR #7143's own
     # measurement on this exact job (retained runs take about 8m; one run's
@@ -252,6 +306,8 @@ jobs:
   # carries none of test-windows-liveness's cgo-toolchain risk.
   test-windows-small:
     name: Test (Windows) small packages (doltversion, dbproxy server)
+    needs: scope
+    if: ${{ needs.scope.outputs.platforms == 'true' }}
     runs-on: ${{ 'blacksmith-2vcpu-windows-2025' }}
     timeout-minutes: 15
     steps:
@@ -308,6 +364,8 @@ jobs:
   # Blacksmith confirms/enables it.
   worktree-remove-windows:
     name: Worktree remove boundary (Windows)
+    needs: scope
+    if: ${{ needs.scope.outputs.platforms == 'true' }}
     runs-on: ${{ 'blacksmith-4vcpu-windows-2025' }}
     timeout-minutes: 15
     steps:
@@ -370,6 +428,8 @@ jobs:
   # builds bd), so there is no GitHub-saved cache to lose here.
   check-doc-flags:
     name: Check doc flags freshness
+    needs: scope
+    if: ${{ needs.scope.outputs.linux == 'true' }}
     runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     timeout-minutes: 15
     steps:
@@ -416,8 +476,9 @@ jobs:
   # (integration lane: the doc-freshness suite under -required-suite) and
   # //scripts/gitattributespolicy:gitattributespolicy_required_host_test
   # (-required-host -expected-goos linux), both on rbe-west's Linux workers.
-  # The macOS and Windows legs stay here, on Blacksmith for every PR and
-  # merge group, forks and Dependabot included (ga-96smfk.22). Each leg's
+  # The macOS and Windows legs stay here, on Blacksmith for every PR, forks
+  # and Dependabot included (ga-96smfk.22), and every push to main (a merge
+  # group skips them: the scope job's platforms switch). Each leg's
   # `include` entry names its Blacksmith label in `runner` (`os` keeps the
   # check names stable and selects the Windows-only steps). Every leg
   # restores a non-race Go build cache seeded by main.yml's push-to-main
@@ -428,6 +489,8 @@ jobs:
   # compile.
   check-doc-freshness-platforms:
     name: Check doc freshness (${{ matrix.os }})
+    needs: scope
+    if: ${{ needs.scope.outputs.platforms == 'true' }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 10
     strategy:
@@ -510,6 +573,8 @@ jobs:
   # queued 63s for the larger runner and finished at 144s vs 129s here.
   pr-preflight-platforms:
     name: PR preflight process (${{ matrix.os }})
+    needs: scope
+    if: ${{ needs.scope.outputs.platforms == 'true' }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     strategy:
@@ -560,6 +625,19 @@ jobs:
         env:
           GOCACHE: ${{ runner.temp }}/go-cache/non-race
         run: go test '-tags=integration,gms_pure_go' -count=1 -run '^TestPRPreflight' ./scripts
+
+      # The CI scripts' tests run them under the host's bash, and macOS's
+      # /bin/bash is 3.2 (no mapfile; an empty "${arr[@]}" trips set -u).
+      # main.yml's Test (macOS) runs this package only after a merge, so a
+      # PR that broke it on macOS merged green (#7818). Running it here puts
+      # that break behind the required CI gate.
+      # TestPRWorkflowRunsScriptsPackageOnMacOS pins this step.
+      - name: Run the scripts package on macOS's Bash
+        if: matrix.os == 'macos-latest'
+        shell: bash
+        env:
+          GOCACHE: ${{ runner.temp }}/go-cache/non-race
+        run: go test '-tags=gms_pure_go' -count=1 ./scripts
 
       - name: Check native user config diagnostics
         shell: bash
@@ -682,6 +760,8 @@ jobs:
   # and refactoring payoff.
   advisory-reports:
     name: Advisory reports (examples build, complexity)
+    needs: scope
+    if: ${{ needs.scope.outputs.advisory == 'true' }}
     runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     # Review N-2 (2026-10-03): step timeouts sum to 42 min; 60 (not 45) keeps
     # job setup/post overhead from turning a stacked near-timeout stall into a
@@ -797,90 +877,166 @@ jobs:
   # reinstate a PR-side mirror rather than relying on main.yml alone.
 
   # F7a: fold of a 3-host matrix (native, msys2, cygwin) into one sequential
-  # job on a single windows-latest runner. Review SF-1 (2026-10-03): only the
-  # Cygwin *setup* step keeps `continue-on-error: true` (a flaky installer
-  # download is infrastructure noise, not a code failure). The native and
-  # msys2 install/exercise steps and the Cygwin *exercise* step carry no
-  # continue-on-error, so a genuine failure in any of them already fails the
-  # job on its own - no hand-written aggregator step needed. Each of those
-  # steps keeps `if: ${{ !cancelled() }}` (plus a check that its own leg's
-  # setup succeeded) so a failure in one leg does not stop the later legs
-  # from attempting to run - the fail-fast: false behavior the matrix used to
-  # give for free.
-  # Blacksmith Windows (blacksmith-4vcpu-windows-2025) for every PR.
+  # job. Review SF-1 (2026-10-03): only the Cygwin *setup* steps carry
+  # `continue-on-error: true` (a Cygwin setup failure is infrastructure
+  # noise, not a code failure). The native and MSYS2 steps and the Cygwin
+  # *exercise* step carry none, so a genuine failure in any of them fails the
+  # job on its own - no hand-written aggregator step needed. Each leg's steps
+  # keep `if: ${{ !cancelled() }}` (plus a check that the leg's own setup
+  # succeeded), so a failure in one leg does not stop the later legs from
+  # running - the fail-fast: false behavior the matrix used to give for free.
   #
-  # RISK (unverified from this sandbox, flagged in the F7b report): the
-  # native-Make step below assumes Chocolatey is preinstalled (`choco
-  # install ...`), as it is on GitHub's windows-latest image. Blacksmith's
-  # windows-2025 image is documented as GitHub's windows-2025 minus the full
-  # Visual Studio IDE/EdgeDriver/WinAppDriver; Chocolatey is a base-image
-  # tool unrelated to those, so it is expected to still be present, but this
-  # is not independently confirmed. The msys2/setup-msys2 and
-  # cygwin/cygwin-install-action steps download their own tooling and do not
-  # depend on any preinstalled image contents, so they carry no equivalent
-  # risk. If only the native-Make step fails here, that is the gap to roll
-  # back on (revert this runs-on line to the literal `windows-latest`).
+  # Blacksmith Windows (blacksmith-4vcpu-windows-2025) for every PR and merge
+  # group. No leg installs from the network on the common path: Chocolatey's
+  # 503s, MSYS2's slow mirrors and a DNS failure failed this job 28 times in
+  # two weeks of October 2026, 8 of them merge-queue ejections.
+  # - native: native-make.ps1 takes the image's MinGW-w64 GNU Make 4.4.1
+  #   (C:\mingw64\bin\mingw32-make.exe, from GitHub's windows-2025 image that
+  #   Blacksmith's is built on), else Chocolatey's make 4.4.1 binary from the
+  #   main-saved cache (SHA-256 pinned), else `choco install` (3 bounded
+  #   attempts with backoff), and puts it first on PATH as make.exe.
+  # - MSYS2: the image's C:\msys64, not a downloaded one. msys2-packages.sh
+  #   installs git and make from the main-saved package files: pacman
+  #   resolves them against the image's own sync database (never refreshed),
+  #   downloads only what the cache lacks (3 bounded attempts), checks every
+  #   signature and installs.
+  # - Cygwin (not on the image): cygwin-offline.ps1 installs from the
+  #   main-saved package tree with Cygwin's setup in local mode, after
+  #   checking setup's Authenticode signature; setup checks the signed
+  #   setup.zst and every archive's hash. If there is no cache or that fails,
+  #   cygwin-install-action downloads as before.
+  # main.yml's windows-make-shell-toolchains (push to main, this label) is
+  # the only writer of those caches; this job restores only. Before that
+  # saver has run on main, and in a PR that changes a cache key, the MSYS2
+  # and Cygwin legs (and the native leg on an image without MinGW-w64) take
+  # their network fallback. Pinned by ci_windows_make_shell_test.go,
+  # TestPRWindowsMakeShellLegsFailTheJob and
+  # TestPRWindowsMakeShellSetupStepsHaveTimeouts.
   windows-make-shell:
     name: Windows Make shell (native, msys2, cygwin)
+    needs: scope
+    if: ${{ needs.scope.outputs.platforms == 'true' }}
     runs-on: ${{ 'blacksmith-4vcpu-windows-2025' }}
-    timeout-minutes: 30
+    # Above the step caps' sum (34) plus 5 minutes for the uncapped steps, so
+    # a fallback that runs to its cap fails its own step and the later legs
+    # still run (TestWindowsMakeShellNetworkFallbacksAreBoundedAndRetried).
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
-      # F7b review fix (S9): print the preinstalled tool versions this job
-      # depends on before relying on them, so a Blacksmith image gap (see the
-      # RISK comment above) surfaces here instead of failing deep in a later
-      # step with an opaque "command not found".
+      # F7b review fix (S9): print what the legs rely on from the image (every
+      # GNU Make, C:\msys64 and its packages, Cygwin roots, Chocolatey) before
+      # relying on it, so an image change surfaces here instead of deep in a
+      # later step. Never fails, and runs no go: the image's go downloads
+      # go.mod's toolchain first.
       - name: Check Windows tooling diagnostics
         shell: pwsh
-        run: |
-          Write-Output "::group::choco"
-          choco --version
-          Write-Output "::endgroup::"
-          Write-Output "::group::go env (CGO_ENABLED, CC)"
-          go env CGO_ENABLED CC
-          Write-Output "::endgroup::"
+        run: ./scripts/ci/windows-make-shell/diagnostics.ps1
+
+      - name: Compute toolchain cache keys
+        id: toolchain-keys
+        shell: pwsh
+        run: ./scripts/ci/windows-make-shell/cache-keys.ps1
+
+      # Restore-only, like every restore here: main.yml's saver writes it. A
+      # stalled cache download is abandoned after a minute as a miss.
+      - name: Restore cached native GNU Make
+        id: native-make-cache
+        if: ${{ !cancelled() }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        env:
+          SEGMENT_DOWNLOAD_TIMEOUT_MINS: "1"
+        with:
+          path: ${{ runner.temp }}/make-shell/native
+          key: beads-make-shell-native-v1-${{ runner.os }}-${{ runner.arch }}-make-4.4.1-cc6dc291113d
 
       - name: Install native GNU Make
         id: install-native
         if: ${{ !cancelled() }}
+        timeout-minutes: 8
         shell: pwsh
-        run: choco install make --version=4.4.1 --yes --no-progress
+        env:
+          NATIVE_MAKE_CACHE: ${{ runner.temp }}/make-shell/native
+        run: ./scripts/ci/windows-make-shell/native-make.ps1 -Mode Install -CacheDir $env:NATIVE_MAKE_CACHE
 
-      # F7b review fix (B1): msys2/setup-msys2 caches its installed packages
-      # by default (action.yml: cache.default = true), which means this step
-      # would SAVE an actions/cache entry from a same-repo PR the moment it
-      # moved onto a Blacksmith runner -- confirmed via a real GitHub cache
-      # list entry (msys2-pkgs-upd:false-conf:...) with a
-      # refs/pull/.../merge ref. `runner.environment == 'github-hosted'`
-      # disables that implicit save on Blacksmith (fail-closed: only the
-      # literal "github-hosted" value keeps caching on, matching the
-      # fail-closed convention F7c review fix N1 set for actions/setup-go's
-      # own `cache` input). Pinned by
-      # TestBlacksmithReachablePRJobsDisableDefaultCachingActions.
-      - name: Set up MSYS2 GNU Make
-        id: install-msys2
+      # release: false uses the image's C:\msys64 instead of downloading MSYS2
+      # from GitHub; no update and no install here (msys2-packages.sh installs,
+      # with retries, against the image's sync database). F7b review fix
+      # (B1): setup-msys2's own package cache would SAVE an actions/cache
+      # entry from a PR on Blacksmith, so it is off
+      # (TestBlacksmithReachablePRJobsDisableDefaultCachingActions).
+      - name: Set up preinstalled MSYS2
+        id: msys2-shell
         if: ${{ !cancelled() }}
-        timeout-minutes: 10
+        timeout-minutes: 3
         uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2.32.0
         with:
           msystem: MSYS
-          install: git make
           path-type: minimal
-          cache: ${{ runner.environment == 'github-hosted' }}
+          release: false
+          update: false
+          cache: false
+
+      - name: Restore MSYS2 package cache
+        id: msys2-cache
+        if: ${{ !cancelled() && steps.toolchain-keys.outputs.msys2-sync-db != '' }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        env:
+          SEGMENT_DOWNLOAD_TIMEOUT_MINS: "1"
+        with:
+          path: ${{ runner.temp }}/make-shell/msys2
+          key: beads-make-shell-msys2-v1-${{ runner.os }}-${{ runner.arch }}-git-make-${{ steps.toolchain-keys.outputs.msys2-sync-db }}
+          restore-keys: beads-make-shell-msys2-v1-${{ runner.os }}-${{ runner.arch }}-git-make-
+
+      # git as well as make: the Makefile runs `git rev-parse` while parsing.
+      - name: Install MSYS2 GNU Make
+        id: install-msys2
+        if: ${{ !cancelled() && steps.msys2-shell.outcome == 'success' }}
+        timeout-minutes: 8
+        shell: msys2 {0}
+        env:
+          MSYS2_PACKAGE_CACHE: ${{ runner.temp }}/make-shell/msys2
+          MSYS2_PACKAGE_CACHE_HIT: ${{ steps.msys2-cache.outputs.cache-hit }}
+        run: bash scripts/ci/windows-make-shell/msys2-packages.sh git make
+
+      # This month's snapshot, or before main's saver has refreshed it, the
+      # newest older one: any of them installs offline.
+      - name: Restore Cygwin package cache
+        id: cygwin-cache
+        if: ${{ !cancelled() }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        env:
+          SEGMENT_DOWNLOAD_TIMEOUT_MINS: "1"
+        with:
+          path: ${{ runner.temp }}/make-shell/cygwin
+          key: beads-make-shell-cygwin-v1-${{ runner.os }}-${{ runner.arch }}-git-make-${{ steps.toolchain-keys.outputs.month }}
+          restore-keys: beads-make-shell-cygwin-v1-${{ runner.os }}-${{ runner.arch }}-git-make-
+
+      # A failure here (a corrupt or unverifiable cache) only hands over to
+      # the online installer below; the failed step stays visible.
+      - name: Install Cygwin GNU Make from the package cache
+        id: cygwin-cached
+        if: ${{ !cancelled() && steps.cygwin-cache.outputs.cache-matched-key != '' }}
+        continue-on-error: true
+        timeout-minutes: 5
+        shell: pwsh
+        env:
+          CYGWIN_PACKAGE_CACHE: ${{ runner.temp }}/make-shell/cygwin
+        run: ./scripts/ci/windows-make-shell/cygwin-offline.ps1 -Mode Install -CacheDir $env:CYGWIN_PACKAGE_CACHE -Root (Join-Path $env:RUNNER_TEMP 'cygwin')
 
       - name: Set up Cygwin GNU Make
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.cygwin-cached.outcome != 'success' }}
         id: cygwin
-        # cygwin-install-action downloads setup-x86_64.exe from cygwin.com. That
-        # download times out often enough to red the required check for a reason
-        # unrelated to the change under test. Treat a setup failure as a
-        # (non-blocking) warning: the smoke step below is gated on this step
-        # succeeding, so a genuine Cygwin Make regression still fails loudly,
-        # while a flaky installer download only skips the leg with a warning.
-        # Review SF-2 (2026-10-03): a 10-minute step timeout caps how long a
-        # hung download can block the native/msys2 legs' exercise steps
-        # behind it, instead of consuming the whole 30-minute job timeout.
+        # The network fallback when the package cache was missing or failed.
+        # cygwin-install-action downloads setup-x86_64.exe from cygwin.com and
+        # the packages from a mirror, often slowly enough to red the required
+        # check for a reason unrelated to the change under test. Treat a
+        # setup failure as a (non-blocking) warning: the smoke step below is
+        # gated on a Cygwin setup succeeding, so a genuine Cygwin Make
+        # regression still fails loudly, while a flaky download only skips
+        # the leg with a warning. Review SF-2 (2026-10-03): a 10-minute step
+        # timeout caps how long a hung download can block the exercise steps
+        # behind it, instead of consuming the whole 40-minute job timeout.
         continue-on-error: true
         timeout-minutes: 10
         uses: cygwin/cygwin-install-action@3f0a3f9f988f7e96b8c18098ae05eaec175f5b52 # v6
@@ -892,7 +1048,7 @@ jobs:
         if: ${{ !cancelled() && steps.cygwin.outcome == 'failure' }}
         shell: bash
         run: |
-          echo "::warning title=Cygwin Make-shell leg skipped::cygwin-install-action could not download the Cygwin installer (network flake); skipping the Cygwin-hosted Make smoke test. This is an infrastructure failure, not a code failure."
+          echo "::warning title=Cygwin Make-shell leg skipped::No Cygwin install: the main-saved package cache was missing or failed, and cygwin-install-action could not download Cygwin (network flake); skipping the Cygwin-hosted Make smoke test. This is an infrastructure failure, not a code failure."
 
       - name: Exercise native Windows Make
         id: native
@@ -1271,14 +1427,15 @@ jobs:
 
       - name: Exercise Cygwin-hosted Make
         id: cygwin-test
-        # Only run when the Cygwin toolchain actually installed; a skipped install
-        # (download flake) leaves this leg un-exercised rather than failing on a
-        # missing bash. A real install success followed by a Make regression here
-        # still fails the job as before.
-        if: ${{ !cancelled() && steps.cygwin.outcome == 'success' }}
+        # Only run when a Cygwin toolchain actually installed (from the package
+        # cache or the online installer), in that install's root; a skipped
+        # install (download flake) leaves this leg un-exercised rather than
+        # failing on a missing bash. A real install success followed by a Make
+        # regression here still fails the job as before.
+        if: ${{ !cancelled() && (steps.cygwin-cached.outcome == 'success' || steps.cygwin.outcome == 'success') }}
         shell: pwsh
         env:
-          CYGWIN_ROOT: ${{ steps.cygwin.outputs.root }}
+          CYGWIN_ROOT: ${{ steps.cygwin-cached.outputs.root || steps.cygwin.outputs.root }}
         run: |
           $ErrorActionPreference = 'Stop'
           $bash = Join-Path $env:CYGWIN_ROOT 'bin\bash.exe'
@@ -1334,19 +1491,26 @@ jobs:
   # storage tiers that pr-risk.yml used to run, integration and the cmd/bd
   # Dolt-server tier).
   # ci-gate requires each of them to have run remotely on rbe-west and
-  # passed, on every pull_request and merge group: same-repo PRs and merge
-  # groups in mode remote, fork and Dependabot PRs through rbe-west's mint
-  # (rbe-fork, modes fork-ro/fork-rw). Mode skip (the farm switch off) or
-  # cache (no secret, or rbe-fork closed or refusing) is red, never a silent
-  # pass with fewer tests. bazel.yml has no pull_request/merge_group trigger
-  # of its own: this call is its only PR run. It gets the four RBE secrets
-  # and the pre-warm app key and nothing else. Test results are cached: a PR
-  # or merge group re-runs only tests whose inputs changed (nightly re-runs
-  # everything; .bazelrc test:fresh). Its bd artifact
+  # passed: every lane on every pull_request, every lane but the Dolt tiers
+  # on a merge group (the scope passes dolt-tiers "off" there, and the call
+  # reports it back for ci-gate to check; main's push run of bazel.yml runs
+  # them after the merge). Same-repo PRs and merge groups run in mode
+  # remote, fork and Dependabot PRs through rbe-west's mint (rbe-fork,
+  # modes fork-ro/fork-rw). Mode skip (the farm switch off) or local (no
+  # secret, or rbe-fork closed or refusing) is red, never a silent pass
+  # with fewer tests. bazel.yml has no pull_request/merge_group trigger of
+  # its own: this call is its only PR run. A push to main skips the call
+  # (the scope's linux switch): bazel.yml's own push run is every lane, and
+  # its rrc-seed mints only for a main-push bazel.yml token. It gets the
+  # four RBE secrets and the pre-warm app key and nothing else. Test results
+  # are cached: a PR or merge group re-runs only tests whose inputs changed
+  # (nightly re-runs everything; .bazelrc test:fresh). Its bd artifact
   # (bazel-ci-build-artifacts) is kept for debugging; F3: the package gates
   # build their own bd via this call's rbe job.
   bazel:
     name: Bazel
+    needs: scope
+    if: ${{ needs.scope.outputs.linux == 'true' }}
     # A called workflow's job gets at most this call's token permissions, and
     # GitHub checks them when the run starts, even for a job whose if: skips
     # it (startup_failure otherwise; gascity #7478): bazel.yml's rrc-seed asks
@@ -1375,6 +1539,11 @@ jobs:
       # F3: only pr.yml opts in; the package-mcp/package-npm jobs run inside
       # this call, needing only its rbe job.
       package-gates: "on"
+      # "off" on a merge group: no Dolt-tier lane (embedded, dolt-race and
+      # dolt-int, and their members outside mode remote). With
+      # cmd-dolt-required above that leaves the integration build's
+      # //cmd/bd:bd_test to main's push run too.
+      dolt-tiers: ${{ needs.scope.outputs.dolt-tiers }}
 
   ci-gate:
     name: CI Gate / Required
@@ -1389,6 +1558,7 @@ jobs:
     # minutes too.
     timeout-minutes: 10
     needs:
+      - scope
       - fast-checks
       - test-windows-liveness
       - worktree-remove-windows
@@ -1405,6 +1575,7 @@ jobs:
         env:
           CI_GATE_NAME: PR baseline gate
           CI_GATE_REQUIRED: >-
+            SCOPE
             FAST_CHECKS
             CHECK_MIGRATION_HYGIENE
             CHECK_NO_BEADS_CHANGES
@@ -1425,6 +1596,46 @@ jobs:
             BAZEL_DOLTSERVER
             BAZEL_PROXIED
             BAZEL_SERVER_STORAGE
+            BAZEL_REMOTE
+          # The scope job (.github/scripts/ci-scope.sh): SCOPE (set by the
+          # run script) is its result, red when its outputs are missing or
+          # are not one event's row. It alone excuses a skip: of the ids
+          # listed below for the switch it turned off, and (through
+          # bazel-gate.sh) of the Dolt-tier lanes. A pull request excuses
+          # nothing.
+          SCOPE_RESULT: ${{ needs.scope.result }}
+          SCOPE_PLATFORMS: ${{ needs.scope.outputs.platforms }}
+          SCOPE_DOLT_TIERS: ${{ needs.scope.outputs.dolt-tiers }}
+          SCOPE_LINUX: ${{ needs.scope.outputs.linux }}
+          SCOPE_ADVISORY: ${{ needs.scope.outputs.advisory }}
+          # platforms false (a merge group): the Windows and macOS jobs,
+          # which main's push run runs.
+          CI_SCOPE_PLATFORMS_IDS: >-
+            TEST_WINDOWS_LIVENESS
+            WORKTREE_REMOVE_WINDOWS
+            CHECK_DOC_FRESHNESS_PLATFORMS
+            PR_PREFLIGHT_PLATFORMS
+            WINDOWS_MAKE_SHELL
+          # linux false (a push to main): the Linux jobs, which the merge
+          # group ran on the same tree, and the whole Bazel call, which
+          # bazel.yml's own push run replaces.
+          CI_SCOPE_LINUX_IDS: >-
+            FAST_CHECKS
+            CHECK_MIGRATION_HYGIENE
+            CHECK_NO_BEADS_CHANGES
+            CHECK_DOC_FLAGS
+            PACKAGE_MCP
+            PACKAGE_NPM
+            BAZEL
+            BAZEL_TEST
+            BAZEL_PURE
+            BAZEL_RELEASE_CROSS
+            BAZEL_EMBEDDED
+            BAZEL_INTEGRATION
+            BAZEL_DOLTSERVER
+            BAZEL_PROXIED
+            BAZEL_SERVER_STORAGE
+            BAZEL_CMD_DOLT
             BAZEL_REMOTE
           # fast-checks' two base-diff steps; each token reads that step's
           # outcome (via the job's outputs), with a 'skipped' fallback for a
@@ -1467,11 +1678,13 @@ jobs:
           # "true": see the run script.
           BAZEL_CMD_DOLT: ${{ needs.bazel.outputs.bazel-cmd-dolt || 'skipped' }}
           # Inputs of bazel-gate.sh, which sets BAZEL (the call's aggregate,
-          # red on a missing or inconsistent mode) and the expected skips
-          # from bazel.yml's own rbe job decision.
+          # red on a missing or inconsistent mode) and BAZEL_REMOTE, and the
+          # expected skips from bazel.yml's own rbe job decision and, for
+          # the Dolt-tier lanes, from what the call reports it ran.
           BAZEL_CALL: ${{ needs.bazel.result }}
           BAZEL_RBE_MODE: ${{ needs.bazel.outputs.rbe-mode }}
           BAZEL_RBE_ENABLED: ${{ needs.bazel.outputs.rbe-enabled }}
+          BAZEL_DOLT_TIERS: ${{ needs.bazel.outputs.dolt-tiers }}
         run: |
           skipped_ok=""
           # The cmd/bd Dolt-server tier (bazel.yml's bazel-cmd-dolt) is
@@ -1481,11 +1694,19 @@ jobs:
             CI_GATE_REQUIRED="$CI_GATE_REQUIRED BAZEL_CMD_DOLT"
           fi
           export CI_GATE_REQUIRED
+          # The scope: its result, and the jobs it turned off for this event
+          # (the CI_SCOPE_*_IDS above: none on a pull request, the Windows
+          # and macOS jobs on a merge group, the Linux jobs and the Bazel
+          # call on a push to main).
+          SCOPE="$(bash .github/scripts/ci-scope.sh result)"
+          export SCOPE
+          skipped_ok="$skipped_ok $(bash .github/scripts/ci-scope.sh skips)"
           # Bazel lanes skipped by design in the call's execution mode (all
           # of them in mode skip, the remote-only embedded, proxied and
-          # server-storage tiers in modes local and cache, and integration
-          # in mode local), and the aggregate unless the mode is missing or
-          # invalid.
+          # server-storage tiers in modes local and cache (cache: rbe=cache
+          # dispatches only, never a PR), and integration in mode local), the Dolt-tier lanes when the scope turned them
+          # off and the call reports it ran without them (a merge group),
+          # and the aggregate unless the mode is missing or invalid.
           skipped_ok="$skipped_ok $(bash .github/scripts/bazel-gate.sh skips)"
           BAZEL="$(bash .github/scripts/bazel-gate.sh aggregate)"
           export BAZEL
@@ -1493,14 +1714,21 @@ jobs:
           # (there is no legacy job to fall back to), so on every pull_request
           # and merge group they must have run remotely on rbe-west: mode
           # remote, or fork-ro/fork-rw through rbe-fork for a PR without the
-          # CI secrets; mode skip (the farm switch off) or cache (no
+          # CI secrets; mode skip (the farm switch off) or local (no
           # secret, or rbe-fork closed or refusing) is red whatever
           # bazel-gate.sh's skip list allows; each lane's own result is
-          # required above.
-          BAZEL_REMOTE=success
-          if [[ ! "$BAZEL_RBE_MODE" =~ ^(remote|fork-ro|fork-rw)$ ]]; then
-            BAZEL_REMOTE=not-run-remotely
-            echo "::error::The Bazel lanes did not run remotely on rbe-west (mode '${BAZEL_RBE_MODE:-none}'); they are this PR's only run of the Linux Go test tiers. In mode cache on a PR without the CI secrets, rbe-fork was closed or refused this run: re-run all jobs later."
+          # required above. A push to main's run never starts the call
+          # (skipped, which only its scope excuses). A fork repository's own
+          # CI (owner id not gastownhall's 255961667, bazel.yml's FORK_REPO)
+          # is always mode local, so a re-run never turns it green: the
+          # message says so instead of asking for one.
+          BAZEL_REMOTE="$(bash .github/scripts/bazel-gate.sh remote)"
+          if [[ "$BAZEL_REMOTE" == not-run-remotely ]]; then
+            if [[ "${GITHUB_REPOSITORY_OWNER_ID:-}" != 255961667 ]]; then
+              echo "::error::The Bazel lanes did not run remotely on rbe-west (mode '${BAZEL_RBE_MODE:-none}'): this is a fork repository's own CI ($GITHUB_REPOSITORY), which always runs them in mode local, so this gate stays red here and a re-run will not change that. Open the pull request against gastownhall/beads to run them on rbe-west."
+            else
+              echo "::error::The Bazel lanes did not run remotely on rbe-west (mode '${BAZEL_RBE_MODE:-none}'); they are this PR's only run of the Linux Go test tiers. In mode local on a PR without the CI secrets, rbe-fork was closed or refused this run: re-run all jobs later."
+            fi
           fi
           export BAZEL_REMOTE
           export CI_GATE_SKIPPED_OK="$skipped_ok"

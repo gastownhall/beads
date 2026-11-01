@@ -128,6 +128,7 @@ func TestSchemaParityAuxiliaryTables(t *testing.T) {
 		{"dependencies", "wisp_dependencies"},
 		{"events", "wisp_events"},
 		{"comments", "wisp_comments"},
+		{"id_tombstones", "wisp_id_tombstones"},
 	}
 
 	for _, pair := range pairs {

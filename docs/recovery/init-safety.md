@@ -432,7 +432,14 @@ rows rarely apply there.
   Keep it there. It was previously assigned next to the guard it gates, which
   is downstream of the proxied dispatch, and the flag was therefore inert on
   that one route while the refusal still told the operator to pass it.
-- `bd bootstrap` has its own separate mode-blind create path.
+- `bd bootstrap` has its own separate create path. When the workspace's own
+  `metadata.json` selects a Dolt server (the server-mode test workspace
+  discovery uses), its init and jsonl-import actions create the database on
+  that server (resolved as later commands resolve it) and write nothing to a
+  database the server already holds; its restore action refuses in server
+  mode before creating anything, and does not restore over a database the
+  server already holds. Elsewhere, including shared-server mode named only
+  by `dolt.shared-server` in a config.yaml, it uses the embedded store.
 
 ---
 

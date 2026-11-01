@@ -91,7 +91,10 @@ func resolveBeadsDirForDBPath(dbPath string) string {
 	}
 
 	for _, beadsDir := range candidates {
-		cfg, err := configfile.Load(beadsDir)
+		// Read-only: --db, BEADS_DB and create --repo resolve their target
+		// here before command admission classifies it, and configfile.Load
+		// would migrate a candidate's legacy config.json on the way.
+		cfg, err := configfile.LoadForDiscovery(beadsDir)
 		if err != nil || cfg == nil {
 			continue
 		}

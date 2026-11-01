@@ -145,10 +145,9 @@ type AnchorEdgeCount struct {
 	// `wisp_dependencies` according to which plane its SOURCE sits on, and this
 	// count is the total across the two — so a durable issue's dependent count
 	// includes the wisps that depend on it, and a wisp's dependency count
-	// includes the durable issues it depends on. That is the shipped answer of
-	// every raw count this role covers and of the domain body behind the
-	// unit-of-work leg (CountDependencyEdgesInTx), and it is what makes the
-	// number agree with the row list a caller gets from the matching read.
+	// includes the durable issues it depends on. While every edge sits in one
+	// plane, that total is also the answer of every raw count this role covers,
+	// and it agrees with the row list a caller gets from the matching read.
 	//
 	// It is a SUM over the two planes and NOT a distinct count of edge rows. The
 	// two are the same number unless one row id is present in both tables, which
@@ -163,9 +162,14 @@ type AnchorEdgeCount struct {
 	// derived from (issue_id, target) and omit the table, so a wisp PROMOTED to
 	// durable, or two Dolt clones MERGED, leave one logical edge in both tables.
 	// TestDependentRecordsCrossTableCollision constructs exactly that state and
-	// names those two paths. What this role promises against it is the sum, the
-	// same answer the raw counts give, and a caller that needs the distinct
-	// total is asking CountDependentRecords' question rather than this one.
+	// names those two paths. What this role promises against it is the sum,
+	// which CountDependentsByStatus and the batched dependent_count of `bd list`
+	// and `bd search` (sqlbuild.SearchCountsSQL) also give. The per-anchor counts
+	// beside `bd show` do not: CountDependents and CountDependencies, and the
+	// domain body behind the unit-of-work leg (CountDependencyEdgesInTx), count
+	// each distinct far end once, so they agree with the listing (bd-cif6y4). A
+	// caller that needs that total asks them, and one that needs distinct edge
+	// rows asks CountDependentRecords.
 	//
 	// A missing anchor counts 0.
 	Count int64

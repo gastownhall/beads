@@ -47,7 +47,8 @@ exports_files(
 )
 
 # sh_test src that runs an existing go_test binary with no network but
-# loopback (see the script header), e.g. //cmd/bd:bd_managed_local_test.
+# loopback, optionally sharded by a test manifest (see the script header),
+# e.g. //cmd/bd:bd_managed_local_test.
 exports_files(
     ["go_test_offline.sh"],
     visibility = ["//visibility:public"],
@@ -222,6 +223,7 @@ release_cross_build(
         "//internal/httpclient/wire:wire",
         "//internal/httpclient:httpclient",
         "//internal/idgen:idgen",
+        "//internal/initprocs:initprocs",
         "//internal/jira:jira",
         "//internal/linear:linear",
         "//internal/lockfile:lockfile",
@@ -234,6 +236,7 @@ release_cross_build(
         "//internal/procid:procid",
         "//internal/query:query",
         "//internal/recipes:recipes",
+        "//internal/remedy:remedy",
         "//internal/remotecache:remotecache",
         "//internal/routing:routing",
         "//internal/storage/backendnames:backendnames",
@@ -259,6 +262,7 @@ release_cross_build(
         "//internal/storage/externaldeps:externaldeps",
         "//internal/storage/fs:fs",
         "//internal/storage/git:git",
+        "//internal/storage/historyoffequiv:historyoffequiv",
         "//internal/storage/issueops:issueops",
         "//internal/storage/journalscan:journalscan",
         "//internal/storage/kvkeys:kvkeys",
@@ -280,6 +284,7 @@ release_cross_build(
         "//internal/testutil/credentialcmd:credentialcmd",
         "//internal/testutil/fixtures:fixtures",
         "//internal/testutil/integration:integration",
+        "//internal/testutil/legacyworkspace:legacyworkspace",
         "//internal/testutil:testutil",
         "//internal/timeparsing:timeparsing",
         "//internal/tracker/conformance:conformance",
@@ -290,6 +295,7 @@ release_cross_build(
         "//internal/utils:utils",
         "//internal/validation:validation",
         "//internal/versioncheck:versioncheck",
+        "//internal/versionedhistory:versionedhistory",
         "//internal/workapi/storecounter:storecounter",
         "//internal/workapi/storequerier:storequerier",
         "//internal/workapi/storereader:storereader",

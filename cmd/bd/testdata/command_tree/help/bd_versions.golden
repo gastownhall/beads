@@ -1,0 +1,60 @@
+List the versions recorded for a bead by versioned history.
+
+Recording is off by default. Turn it on with:
+
+  bd config set versioned-history.enabled true
+
+That writes the setting into the store, so every client of that store agrees
+about whether a write is recorded, and it is the setting this command reports.
+BD_VERSIONED_HISTORY_ENABLED=1 (or a value in config.yaml) also turns recording
+on for the writes a process makes, but it says nothing about the store, and
+this command only reads, so it does not consult them.
+
+Either source turning it on is enough for a writer; neither can switch the
+other off. The consequence worth knowing: once the store setting says on,
+BD_VERSIONED_HISTORY_ENABLED=0 will not turn recording off for one run. Turn
+it off where it was turned on:
+
+  bd config set versioned-history.enabled false
+
+Only beads created while recording is on, or that enter the issues plane
+while it is on (a wisp promoted or made persistent), are versioned. A bead
+already on the issues plane when recording was turned on is legacy: editing
+it records nothing (the write fence, design §16.2b), and nothing is
+backfilled.
+
+Turning recording off does not hide what was already recorded — this command
+still lists it, and says that recording is currently off.
+
+A caution while the feature is young: keep recording ON for every writer of a
+shared store, or leave it off for all of them. A write from a client with
+recording off advances nothing, and the next recorded write mints a version
+that absorbs that unrecorded change under its own actor — the revisions stay
+contiguous and the listing looks gapless when it is not.
+
+Examples:
+  bd versions bd-123
+  bd versions bd-123 --json
+
+Usage:
+  bd versions <id> [flags]
+
+Flags:
+  -h, --help   help for versions
+
+Global Flags:
+      --actor string              Actor name for audit trail (default: $BEADS_ACTOR, git user.name, $USER)
+      --cpu-profile               Generate CPU profile for performance analysis
+      --database string           Run against a different server database for this invocation, without changing the project's configured database (proxied-server mode only)
+      --db string                 Database path (default: auto-discover .beads/*.db). In proxied-server mode, a value that isn't an existing path is treated as a database name override (see --database)
+  -C, --directory string          Change to this directory before running the command (like git -C)
+      --dolt-auto-commit string   Dolt auto-commit policy (off|on|batch). 'on': commit after each write. 'batch': defer commits to bd dolt commit; uncommitted changes persist in the working set until then (a live batch-mode bd process also flushes on SIGTERM/SIGHUP, except in proxied-server mode, where bd dolt commit is the only flush point). In proxied-server mode the deferral covers the writes the CLI makes on that route, including config and version metadata; explicit commit points (bd batch, bd mol bond/pour/squash, bd mol wisp create, and the wisp half of bd mol burn) still commit, and a bd serve process on the same database is unaffected. Default: on. Override via config key dolt.auto-commit
+      --global                    Use the global shared-server database (beads_global)
+      --ignore-schema-skew        Proceed despite forward schema drift (some queries may fail)
+      --json                      Output in JSON format
+      --mem-profile string        Write heap profile to FILE on exit (also respects BEADS_MEM_PROFILE)
+      --no-color                  Disable color output (also: NO_COLOR=1 or CLICOLOR=0)
+  -q, --quiet                     Suppress non-essential output (errors only)
+      --readonly                  Read-only mode: block write operations (for worker sandboxes)
+      --sandbox                   Sandbox mode: disables Dolt auto-push
+  -v, --verbose                   Enable verbose/debug output

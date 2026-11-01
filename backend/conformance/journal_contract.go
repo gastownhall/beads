@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"math"
+	"sort"
 	"testing"
 
 	storeops "github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/journalops"
 )
 
@@ -113,6 +115,10 @@ type JournalFixture struct {
 	// Mutations is one hook per journaled op — see JournalMutations, which
 	// states why the kit is exhaustive rather than a sample.
 	Mutations JournalMutations
+	// Arrival drives the arrival_seq cases (journal_arrival_contract.go): the
+	// create sequence the journal stamps on a wisp-plane row. nil skips every
+	// one of them, by name.
+	Arrival *JournalArrivalHooks
 }
 
 // JournalMutations is the mutation kit: one hook per op the engine journals,
@@ -419,6 +425,433 @@ func RunJournalHeadSurvivesAFullPrune(t *testing.T, ctx context.Context, fixture
 	if next.Rows[0].Seq != head+1 {
 		t.Errorf("the first record after a full prune is seq %d, want %d: a seq that restarted would "+
 			"hand a consumer numbers it has already processed", next.Rows[0].Seq, head+1)
+	}
+}
+
+// THE ARRIVAL CASES. The twelve cases below pin the arrival_seq stamp; their
+// hooks, helpers and the contract's statement are in
+// journal_arrival_contract.go. They are declared HERE, between the pruning
+// cases and RunJournalEveryMutationKindLandsARow, because the role table runs
+// cases in declaration order and that case must stay last.
+
+// RunJournalArrivalStampsAWispCreateWithItsRecordSeq pins the definition: a
+// wisp created while the workspace journals carries the seq of its own create
+// record, the record's post-image carries the same value, and successive
+// creates are stamped in the order they committed.
+func RunJournalArrivalStampsAWispCreateWithItsRecordSeq(t *testing.T, ctx context.Context, fixture JournalFixture) {
+	hooks := arrivalHooks(t, fixture)
+	baseline := journalBaseline(t, ctx, fixture)
+	ids := arrivalIDs(fixture, "stamp", 3)
+	for _, id := range ids {
+		created := arrivalCreateWisp(t, ctx, hooks, id)
+		if created.ArrivalSeq == 0 {
+			t.Errorf("creating wisp %s returned no arrival_seq: the create's own result is what a caller "+
+				"caches, and an unstamped one leaves it at 0 until its next read", id)
+		}
+	}
+	page := journalRead(t, ctx, fixture, baseline, 0)
+	var prev int64
+	for _, id := range ids {
+		record := arrivalCreateRecord(t, page.Rows, id)
+		got := arrivalGet(t, ctx, hooks, id).ArrivalSeq
+		if got != record.Seq {
+			t.Errorf("%s arrival_seq = %d, want %d: the stamp IS the seq of the row's create record", id, got, record.Seq)
+		}
+		if post := arrivalPostImage(t, record); post != record.Seq {
+			t.Errorf("%s create record (seq %d) carries arrival_seq %d in its post-image: the record must "+
+				"describe the row it stamped", id, record.Seq, post)
+		}
+		if got <= prev {
+			t.Errorf("%s arrival_seq = %d, not above its predecessor's %d: stamps follow commit order", id, got, prev)
+		}
+		prev = got
+	}
+}
+
+// RunJournalArrivalOrdersABatchByItem pins the order inside one transaction:
+// a batch stamps its items in the order the caller listed them, not in id
+// order and not in any order the engine finds convenient. Ids are chosen so
+// that the two disagree.
+func RunJournalArrivalOrdersABatchByItem(t *testing.T, ctx context.Context, fixture JournalFixture) {
+	hooks := arrivalHooks(t, fixture)
+	if hooks.CreateWispBatch == nil {
+		t.Skip("this leg supplies no batch wisp create (JournalArrivalHooks.CreateWispBatch)")
+	}
+	baseline := journalBaseline(t, ctx, fixture)
+	ids := []string{
+		fixture.IssuePrefix + "-batch-c",
+		fixture.IssuePrefix + "-batch-a",
+		fixture.IssuePrefix + "-batch-b",
+	}
+	if err := hooks.CreateWispBatch(ctx, ids); err != nil {
+		t.Fatalf("batch-creating %v: %v", ids, err)
+	}
+	page := journalRead(t, ctx, fixture, baseline, 0)
+	var prev int64
+	for _, id := range ids {
+		got := arrivalGet(t, ctx, hooks, id).ArrivalSeq
+		if record := arrivalCreateRecord(t, page.Rows, id); got != record.Seq {
+			t.Errorf("%s arrival_seq = %d, want its create record's seq %d", id, got, record.Seq)
+		}
+		if got <= prev {
+			t.Errorf("batch item %s arrival_seq = %d, not above the previous item's %d: a batch stamps in "+
+				"item order", id, got, prev)
+		}
+		prev = got
+	}
+}
+
+// RunJournalArrivalIsOnEveryReadPath pins that the stamp is a property of the
+// ROW, so every way of reading the row returns it: the create's own result, a
+// get, a full and a brief list, and the post-image of a later record.
+func RunJournalArrivalIsOnEveryReadPath(t *testing.T, ctx context.Context, fixture JournalFixture) {
+	hooks := arrivalHooks(t, fixture)
+	baseline := journalBaseline(t, ctx, fixture)
+	id := fixture.IssuePrefix + "-reads-a"
+	created := arrivalCreateWisp(t, ctx, hooks, id)
+	want := arrivalCreateRecord(t, journalRead(t, ctx, fixture, baseline, 0).Rows, id).Seq
+
+	if created.ArrivalSeq != want {
+		t.Errorf("the create result carries arrival_seq %d, want %d", created.ArrivalSeq, want)
+	}
+	if got := arrivalGet(t, ctx, hooks, id).ArrivalSeq; got != want {
+		t.Errorf("get: arrival_seq = %d, want %d", got, want)
+	}
+	for _, brief := range []bool{false, true} {
+		items, err := hooks.List(ctx, []string{id}, brief)
+		if err != nil {
+			t.Fatalf("listing %s (brief %v): %v", id, brief, err)
+		}
+		if len(items) != 1 {
+			t.Fatalf("listing %s (brief %v) returned %d rows", id, brief, len(items))
+		}
+		if items[0].ArrivalSeq != want {
+			t.Errorf("list (brief %v): arrival_seq = %d, want %d", brief, items[0].ArrivalSeq, want)
+		}
+	}
+
+	before := journalHead(t, ctx, fixture)
+	if err := hooks.Update(ctx, id); err != nil {
+		t.Fatalf("updating %s: %v", id, err)
+	}
+	updated := journalRead(t, ctx, fixture, before, 0)
+	var sawUpdate bool
+	for _, row := range updated.Rows {
+		if row.IssueID != id || row.Op != "update" {
+			continue
+		}
+		sawUpdate = true
+		if got := arrivalPostImage(t, row); got != want {
+			t.Errorf("the update record (seq %d) post-image carries arrival_seq %d, want %d", row.Seq, got, want)
+		}
+	}
+	if !sawUpdate {
+		t.Fatalf("updating %s journaled no update record: %v", id, journalOpsOf(updated.Rows))
+	}
+}
+
+// RunJournalArrivalNeverChanges pins that nothing after the create moves the
+// stamp: not an update, a close, a reopen, a comment, nor a dependency edge
+// arriving and leaving. A stamp that moved would reorder a consumer's queue
+// every time a row was touched.
+func RunJournalArrivalNeverChanges(t *testing.T, ctx context.Context, fixture JournalFixture) {
+	hooks := arrivalHooks(t, fixture)
+	journalBaseline(t, ctx, fixture)
+	subject := fixture.IssuePrefix + "-still-a"
+	other := fixture.IssuePrefix + "-still-b"
+	arrivalCreateWisp(t, ctx, hooks, other)
+	want := arrivalCreateWisp(t, ctx, hooks, subject).ArrivalSeq
+	if want == 0 {
+		t.Fatalf("wisp %s was created unstamped", subject)
+	}
+	steps := []struct {
+		what string
+		run  func() error
+	}{
+		{"an update", func() error { return hooks.Update(ctx, subject) }},
+		{"a comment", func() error { return hooks.Comment(ctx, subject, "a comment") }},
+		{"a dependency add", func() error { return hooks.AddDependency(ctx, subject, other) }},
+		{"a dependency remove", func() error { return hooks.RemoveDependency(ctx, subject, other) }},
+		{"a close", func() error { return hooks.Close(ctx, subject) }},
+	}
+	if hooks.Reopen != nil {
+		steps = append(steps, struct {
+			what string
+			run  func() error
+		}{"a reopen", func() error { return hooks.Reopen(ctx, subject) }})
+	}
+	for _, step := range steps {
+		if err := step.run(); err != nil {
+			t.Fatalf("%s on %s: %v", step.what, subject, err)
+		}
+		if got := arrivalGet(t, ctx, hooks, subject).ArrivalSeq; got != want {
+			t.Errorf("after %s, arrival_seq = %d, want %d: the stamp never changes while the row stays on "+
+				"the wisp plane", step.what, got, want)
+		}
+	}
+}
+
+// RunJournalArrivalOnlyWhileJournaling pins the activation rule: a workspace
+// that does not journal stamps nothing (and pays nothing), turning the
+// journal on does not backfill rows created before, and the first create after
+// it is stamped.
+func RunJournalArrivalOnlyWhileJournaling(t *testing.T, ctx context.Context, fixture JournalFixture) {
+	hooks := arrivalHooks(t, fixture)
+	journalBaseline(t, ctx, fixture)
+	before := fixture.IssuePrefix + "-active-a"
+	after := fixture.IssuePrefix + "-active-b"
+
+	fixture.SetJournalEnabled(false)
+	created := arrivalCreateWisp(t, ctx, hooks, before)
+	fixture.SetJournalEnabled(true)
+	if created.ArrivalSeq != 0 {
+		t.Errorf("a wisp created with the journal off returned arrival_seq %d, want none", created.ArrivalSeq)
+	}
+	if got := arrivalGet(t, ctx, hooks, before).ArrivalSeq; got != 0 {
+		t.Errorf("a wisp created with the journal off reads arrival_seq %d after the journal came on, want "+
+			"none: activation stamps nothing retroactively", got)
+	}
+	if got := arrivalCreateWisp(t, ctx, hooks, after).ArrivalSeq; got == 0 {
+		t.Errorf("the first wisp created after the journal came on is unstamped")
+	}
+}
+
+// RunJournalArrivalOnlyOnTheWispPlane pins the plane rule: the stamp is
+// defined on the clone-local wisp plane only, so a durable create carries
+// none, and promoting a stamped wisp onto the durable plane clears it.
+func RunJournalArrivalOnlyOnTheWispPlane(t *testing.T, ctx context.Context, fixture JournalFixture) {
+	hooks := arrivalHooks(t, fixture)
+	journalBaseline(t, ctx, fixture)
+	durable := fixture.IssuePrefix + "-plane-a"
+	if err := fixture.Mutations.Create(ctx, durable); err != nil {
+		t.Fatalf("creating durable %s: %v", durable, err)
+	}
+	if got := arrivalGet(t, ctx, hooks, durable).ArrivalSeq; got != 0 {
+		t.Errorf("durable %s carries arrival_seq %d, want none: the durable plane replicates, and a "+
+			"clone-local number means nothing on another clone", durable, got)
+	}
+	if hooks.Promote == nil {
+		return
+	}
+	promoted := fixture.IssuePrefix + "-plane-b"
+	if got := arrivalCreateWisp(t, ctx, hooks, promoted).ArrivalSeq; got == 0 {
+		t.Fatalf("wisp %s was created unstamped", promoted)
+	}
+	if err := hooks.Promote(ctx, promoted); err != nil {
+		t.Fatalf("promoting %s: %v", promoted, err)
+	}
+	if got := arrivalGet(t, ctx, hooks, promoted).ArrivalSeq; got != 0 {
+		t.Errorf("promoted %s carries arrival_seq %d, want none: leaving the wisp plane clears it", promoted, got)
+	}
+}
+
+// RunJournalArrivalRecoversCreateOrderAfterTruncation is the reason the stamp
+// exists. Five wisps are created in an order their ids sort AGAINST, the
+// journal is pruned past every one of their records — so a reader resuming
+// from before them is refused with the typed truncation — and sorting the
+// surviving rows by arrival_seq alone reproduces the order the creates
+// committed in, with each value equal to the seq its pruned record had.
+func RunJournalArrivalRecoversCreateOrderAfterTruncation(t *testing.T, ctx context.Context, fixture JournalFixture) {
+	hooks := arrivalHooks(t, fixture)
+	baseline := journalBaseline(t, ctx, fixture)
+	created := make([]string, 0, 5)
+	for _, marker := range []string{"e", "d", "c", "b", "a"} {
+		id := fixture.IssuePrefix + "-order-" + marker
+		arrivalCreateWisp(t, ctx, hooks, id)
+		created = append(created, id)
+	}
+	page := journalRead(t, ctx, fixture, baseline, 0)
+	recorded := map[string]int64{}
+	for _, id := range created {
+		recorded[id] = arrivalCreateRecord(t, page.Rows, id).Seq
+	}
+
+	journalPrune(t, ctx, fixture, page.Head+1)
+	_ = journalRequireTruncated(t, "reading from before the pruned creates", journalReadErr(ctx, fixture, baseline, 0))
+
+	rows, err := hooks.List(ctx, created, false)
+	if err != nil {
+		t.Fatalf("listing %v: %v", created, err)
+	}
+	if len(rows) != len(created) {
+		t.Fatalf("listing %v returned %d rows, want %d", created, len(rows), len(created))
+	}
+	sort.SliceStable(rows, func(i, j int) bool { return rows[i].ArrivalSeq < rows[j].ArrivalSeq })
+	for i, row := range rows {
+		if row.ID != created[i] {
+			t.Errorf("position %d by arrival_seq is %s, want %s: sorting by the stamp must reproduce the "+
+				"create order %v", i, row.ID, created[i], created)
+		}
+		if row.ArrivalSeq != recorded[row.ID] {
+			t.Errorf("%s arrival_seq = %d, want %d, the seq its now-pruned create record had", row.ID,
+				row.ArrivalSeq, recorded[row.ID])
+		}
+	}
+}
+
+// RunJournalArrivalIsNeverReused pins uniqueness across a delete: re-creating
+// a deleted id is a NEW arrival and takes a new, higher stamp, never the one
+// the deleted row carried.
+func RunJournalArrivalIsNeverReused(t *testing.T, ctx context.Context, fixture JournalFixture) {
+	hooks := arrivalHooks(t, fixture)
+	journalBaseline(t, ctx, fixture)
+	id := fixture.IssuePrefix + "-reuse-a"
+	first := arrivalCreateWisp(t, ctx, hooks, id).ArrivalSeq
+	if first == 0 {
+		t.Fatalf("wisp %s was created unstamped", id)
+	}
+	if err := fixture.Mutations.Delete(ctx, id); err != nil {
+		t.Fatalf("deleting %s: %v", id, err)
+	}
+	second := arrivalCreateWisp(t, ctx, hooks, id).ArrivalSeq
+	if second <= first {
+		t.Errorf("re-creating %s stamped %d after its deleted row carried %d: a stamp is never reused", id, second, first)
+	}
+}
+
+// RunJournalArrivalIgnoresSuppliedValues pins that only storage assigns the
+// stamp: a create or an import that claims one stores its own (or none),
+// never the claimed value.
+func RunJournalArrivalIgnoresSuppliedValues(t *testing.T, ctx context.Context, fixture JournalFixture) {
+	hooks := arrivalHooks(t, fixture)
+	if hooks.CreateWispClaiming == nil && hooks.Import == nil {
+		t.Skip("this leg supplies neither a claiming create nor an import (JournalArrivalHooks)")
+	}
+	baseline := journalBaseline(t, ctx, fixture)
+	var ids []string
+	if hooks.CreateWispClaiming != nil {
+		id := fixture.IssuePrefix + "-forged-a"
+		if err := hooks.CreateWispClaiming(ctx, id, arrivalForgedSeq); err != nil {
+			t.Fatalf("creating %s claiming arrival_seq %d: %v", id, arrivalForgedSeq, err)
+		}
+		ids = append(ids, id)
+	}
+	if hooks.Import != nil {
+		id := fixture.IssuePrefix + "-forged-b"
+		issue := &types.Issue{
+			ID: id, Title: "t-" + id, IssueType: types.TypeTask, Status: types.StatusOpen, Priority: 2,
+			Ephemeral: true, ArrivalSeq: arrivalForgedSeq + 1,
+		}
+		if err := hooks.Import(ctx, issue); err != nil {
+			t.Fatalf("importing %s claiming arrival_seq %d: %v", id, arrivalForgedSeq+1, err)
+		}
+		ids = append(ids, id)
+	}
+	page := journalRead(t, ctx, fixture, baseline, 0)
+	for _, id := range ids {
+		got := arrivalGet(t, ctx, hooks, id).ArrivalSeq
+		if got >= arrivalForgedSeq {
+			t.Errorf("%s stored arrival_seq %d, the value its request claimed: only storage assigns it", id, got)
+			continue
+		}
+		if record, ok := arrivalFindCreateRecord(page.Rows, id); ok && got != record.Seq {
+			t.Errorf("%s arrival_seq = %d, want its create record's seq %d", id, got, record.Seq)
+		}
+	}
+}
+
+// RunJournalArrivalReimportKeepsTheStamp pins that a synthetic create never
+// moves a stamp. Re-importing a row that already exists is an upsert, and the
+// journal records it as a create (the importer cannot tell a consumer the row
+// was there before); that record must not restamp the row. It carries its own,
+// higher seq, and its post-image repeats the stamp the row already had.
+func RunJournalArrivalReimportKeepsTheStamp(t *testing.T, ctx context.Context, fixture JournalFixture) {
+	hooks := arrivalHooks(t, fixture)
+	if hooks.Import == nil {
+		t.Skip("this leg supplies no import (JournalArrivalHooks.Import)")
+	}
+	journalBaseline(t, ctx, fixture)
+	id := fixture.IssuePrefix + "-reimport-a"
+	stamp := arrivalCreateWisp(t, ctx, hooks, id).ArrivalSeq
+	if stamp == 0 {
+		t.Fatalf("wisp %s was created unstamped", id)
+	}
+	again := arrivalGet(t, ctx, hooks, id)
+	again.Title = "re-imported " + id
+	before := journalHead(t, ctx, fixture)
+	if err := hooks.Import(ctx, again); err != nil {
+		t.Fatalf("re-importing stamped wisp %s: %v", id, err)
+	}
+	if got := arrivalGet(t, ctx, hooks, id).ArrivalSeq; got != stamp {
+		t.Errorf("re-importing %s moved its arrival_seq from %d to %d: a synthetic create never restamps a row",
+			id, stamp, got)
+	}
+	record := arrivalCreateRecord(t, journalRead(t, ctx, fixture, before, 0).Rows, id)
+	if record.Seq == stamp {
+		t.Errorf("the re-import's create record reused seq %d, the row's stamp", record.Seq)
+	}
+	if post := arrivalPostImage(t, record); post != stamp {
+		t.Errorf("the re-import's create record (seq %d) carries arrival_seq %d in its post-image, want the "+
+			"row's unchanged %d", record.Seq, post, stamp)
+	}
+}
+
+// RunJournalArrivalFirstCreateRecordStampsAnUnstampedRow pins the first-record
+// rule: a wisp created while the journal was off has no stamp and no create
+// record, so the first create record journaled for it — here a re-import once
+// the journal is on — is the one that stamps it, with that record's seq.
+func RunJournalArrivalFirstCreateRecordStampsAnUnstampedRow(t *testing.T, ctx context.Context, fixture JournalFixture) {
+	hooks := arrivalHooks(t, fixture)
+	if hooks.Import == nil {
+		t.Skip("this leg supplies no import (JournalArrivalHooks.Import)")
+	}
+	journalBaseline(t, ctx, fixture)
+	id := fixture.IssuePrefix + "-first-a"
+	fixture.SetJournalEnabled(false)
+	created, err := hooks.CreateWisp(ctx, id)
+	fixture.SetJournalEnabled(true)
+	if err != nil {
+		t.Fatalf("creating wisp %s with the journal off: %v", id, err)
+	}
+	if created.ArrivalSeq != 0 {
+		t.Fatalf("a wisp created with the journal off returned arrival_seq %d, want none", created.ArrivalSeq)
+	}
+	again := arrivalGet(t, ctx, hooks, id)
+	again.Title = "re-imported " + id
+	before := journalHead(t, ctx, fixture)
+	if err := hooks.Import(ctx, again); err != nil {
+		t.Fatalf("re-importing unstamped wisp %s: %v", id, err)
+	}
+	record := arrivalCreateRecord(t, journalRead(t, ctx, fixture, before, 0).Rows, id)
+	if got := arrivalGet(t, ctx, hooks, id).ArrivalSeq; got != record.Seq {
+		t.Errorf("%s arrival_seq = %d after its first create record (seq %d): the first create record "+
+			"journaled for an unstamped row stamps it", id, got, record.Seq)
+	}
+	if post := arrivalPostImage(t, record); post != record.Seq {
+		t.Errorf("the stamping record (seq %d) carries arrival_seq %d in its post-image", record.Seq, post)
+	}
+}
+
+// RunJournalArrivalRenameKeepsTheStamp pins the rename half of the synthetic
+// create rule: a rename journals delete(old) + create(new), and the create
+// must carry the row's existing stamp rather than restamp it.
+func RunJournalArrivalRenameKeepsTheStamp(t *testing.T, ctx context.Context, fixture JournalFixture) {
+	hooks := arrivalHooks(t, fixture)
+	if hooks.Rename == nil {
+		t.Skip("this leg supplies no id rename (JournalArrivalHooks.Rename)")
+	}
+	journalBaseline(t, ctx, fixture)
+	from := fixture.IssuePrefix + "-rename-a"
+	to := fixture.IssuePrefix + "-rename-b"
+	stamp := arrivalCreateWisp(t, ctx, hooks, from).ArrivalSeq
+	if stamp == 0 {
+		t.Fatalf("wisp %s was created unstamped", from)
+	}
+	before := journalHead(t, ctx, fixture)
+	if err := hooks.Rename(ctx, from, to); err != nil {
+		t.Fatalf("renaming stamped wisp %s to %s: %v", from, to, err)
+	}
+	if got := arrivalGet(t, ctx, hooks, to).ArrivalSeq; got != stamp {
+		t.Errorf("renaming %s to %s moved its arrival_seq from %d to %d: a rename never restamps a row",
+			from, to, stamp, got)
+	}
+	record := arrivalCreateRecord(t, journalRead(t, ctx, fixture, before, 0).Rows, to)
+	if record.Seq == stamp {
+		t.Errorf("the rename's create record reused seq %d, the row's stamp", record.Seq)
+	}
+	if post := arrivalPostImage(t, record); post != stamp {
+		t.Errorf("the rename's create record (seq %d) carries arrival_seq %d in its post-image, want the "+
+			"row's unchanged %d", record.Seq, post, stamp)
 	}
 }
 

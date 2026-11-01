@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -325,4 +326,42 @@ type chmodErrorHandle struct {
 
 func (h *chmodErrorHandle) Chmod(os.FileMode) error {
 	return h.err
+}
+
+// TestCheckBeadsDirPermissions_QuotesThePathInTheRemedy pins the
+// remedy-printing invariant at the permissions warning: its chmod command
+// takes the path as one shell word (quoted when it holds a space), and a
+// path holding a control character is named escaped and left out of the
+// command.
+func TestCheckBeadsDirPermissions_QuotesThePathInTheRemedy(t *testing.T) {
+	capture := func(dir string) string {
+		t.Helper()
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		old := os.Stderr
+		r, w, _ := os.Pipe()
+		os.Stderr = w
+		CheckBeadsDirPermissions(dir)
+		w.Close()
+		os.Stderr = old
+		var buf bytes.Buffer
+		buf.ReadFrom(r)
+		return buf.String()
+	}
+	spaced := filepath.Join(t.TempDir(), "my project", ".beads")
+	if got, want := capture(spaced), "Run: chmod 700 '"+spaced+"'\n"; !strings.HasSuffix(got, want) {
+		t.Errorf("warning = %q, want it to end %q", got, want)
+	}
+	hostile := filepath.Join(t.TempDir(), "x\r\x1b[2Kchmod 777 ~", ".beads")
+	got := capture(hostile)
+	if strings.ContainsAny(got, "\r\x1b") || !strings.Contains(got, `\x1b[2Kchmod`) {
+		t.Errorf("warning = %q, want the path named escaped", got)
+	}
+	if strings.Contains(got, "Run: chmod 700 /") {
+		t.Errorf("warning = %q pastes a path that does not print as itself into chmod", got)
+	}
 }

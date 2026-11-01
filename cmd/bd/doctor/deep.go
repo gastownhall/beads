@@ -482,6 +482,9 @@ func PrintDeepValidationResult(result DeepValidationResult) {
 	fmt.Printf("Scanned: %d issues, %d dependencies\n\n", result.TotalIssues, result.TotalDependencies)
 
 	for _, check := range result.AllChecks {
+		// Detail names IDs from pulled rows: spelled as every check printer
+		// spells a check.
+		check = check.Printed()
 		var icon string
 		switch check.Status {
 		case StatusOK:

@@ -202,15 +202,18 @@ func TestSweepDoesNotWriteThroughTheCallersCutoff(t *testing.T) {
 func TestSweepResultCarriesEveryWireMember(t *testing.T) {
 	remaining := int64(13)
 	liveDependent := 14
+	retentionRequired := 15
+	retainIDs := true
 	w := &stubWire{swept: &apigen.SweepResult{
 		DryRun: true, Swept: 3, Dependencies: 4, Labels: 5, Events: 6,
 		Skipped: apigen.SweepSkips{
 			Pinned: 7, Referenced: 8, NotClosed: 9,
 			UnknownClosedAt: 10, ClosedAtOrAfterCutoff: 11, Unreadable: 12,
-			LiveDependent: &liveDependent,
+			LiveDependent: &liveDependent, RetentionRequired: &retentionRequired,
 		},
 		ReferencedIds: &[]string{"bd-1"},
 		Remaining:     &remaining,
+		RetainIds:     &retainIDs,
 	}}
 	result, err := bulkSweeper(t, w).Sweep(t.Context(), issueops.SweepRequest{Tier: issueops.SweepEphemeral})
 	if err != nil {
@@ -236,7 +239,7 @@ func TestSweepResultCarriesEveryWireMember(t *testing.T) {
 // rather than a query.
 func TestSweepSendsTheS4MembersOnceTheServerAdvertisesThem(t *testing.T) {
 	served := &apigen.ContextResponse{Capabilities: []string{
-		wire.CapSweepWispsPlane, wire.CapSweepLiveDependents, wire.CapSweepLimit,
+		wire.CapSweepWispsPlane, wire.CapSweepLiveDependents, wire.CapSweepLimit, wire.CapSweepRetainIDs, wire.CapSweepRetainedTypes,
 	}}
 
 	t.Run("wisps-plane tier", func(t *testing.T) {
@@ -284,6 +287,36 @@ func TestSweepSendsTheS4MembersOnceTheServerAdvertisesThem(t *testing.T) {
 			t.Errorf("limit = %v, want 5", w.lastSweep.Limit)
 		}
 	})
+
+	t.Run("retain_ids", func(t *testing.T) {
+		w := &stubWire{}
+		sweeper, err := New(testTarget(t), w, served).Sweeper()
+		if err != nil {
+			t.Fatalf("Sweeper(): %v", err)
+		}
+		if _, err := sweeper.Sweep(t.Context(), issueops.SweepRequest{
+			Tier: issueops.SweepWispsPlane, IDPattern: "bd-op-*", RetainIDs: true,
+		}); err != nil {
+			t.Fatalf("Sweep(): %v", err)
+		}
+		if w.lastSweep.RetainIds == nil || !*w.lastSweep.RetainIds {
+			t.Errorf("retain_ids = %v, want true", w.lastSweep.RetainIds)
+		}
+	})
+
+	t.Run("a plain sweep sends no retain_ids", func(t *testing.T) {
+		w := &stubWire{}
+		sweeper, err := New(testTarget(t), w, served).Sweeper()
+		if err != nil {
+			t.Fatalf("Sweep(): %v", err)
+		}
+		if _, err := sweeper.Sweep(t.Context(), issueops.SweepRequest{Tier: issueops.SweepEphemeral}); err != nil {
+			t.Fatalf("Sweep(): %v", err)
+		}
+		if w.lastSweep.RetainIds != nil {
+			t.Errorf("retain_ids = %v on a plain sweep, want the member absent", *w.lastSweep.RetainIds)
+		}
+	})
 }
 
 // TestSweepRefusesTheS4MembersWhenTheServerLacksTheCapability is the skew half:
@@ -301,6 +334,9 @@ func TestSweepRefusesTheS4MembersWhenTheServerLacksTheCapability(t *testing.T) {
 		{"wisps-plane tier", issueops.SweepRequest{Tier: issueops.SweepWispsPlane}, wire.CapSweepWispsPlane},
 		{"protect_live_dependents", issueops.SweepRequest{Tier: issueops.SweepDurable, ProtectLiveDependents: true}, wire.CapSweepLiveDependents},
 		{"limit", issueops.SweepRequest{Tier: issueops.SweepDurable, Limit: 5}, wire.CapSweepLimit},
+		// The refusal that matters most: a sweep that dropped the member to get
+		// past an older server would leave every swept id reusable.
+		{"retain_ids", issueops.SweepRequest{Tier: issueops.SweepDurable, IDPattern: "*", RetainIDs: true}, wire.CapSweepRetainIDs},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w := &stubWire{}
@@ -330,9 +366,11 @@ func TestSweepRefusesTheS4MembersWhenTheServerLacksTheCapability(t *testing.T) {
 
 	// The converse: a plain ephemeral/durable sweep with neither new boolean
 	// nor a limit dials normally against the same masked server — the gate
-	// guards the three additions, not the operation.
+	// guards the three additions, not the operation. (The masked server also
+	// lacks issues.sweep.retainedTypes, so the client reads types.retained
+	// first; it is unset here.)
 	t.Run("no S4 member set dials normally", func(t *testing.T) {
-		w := &stubWire{}
+		w := &stubWire{settings: map[string]string{}}
 		sweeper, err := New(testTarget(t), w, masked).Sweeper()
 		if err != nil {
 			t.Fatalf("Sweeper(): %v", err)
@@ -340,8 +378,91 @@ func TestSweepRefusesTheS4MembersWhenTheServerLacksTheCapability(t *testing.T) {
 		if _, err := sweeper.Sweep(t.Context(), issueops.SweepRequest{Tier: issueops.SweepDurable}); err != nil {
 			t.Fatalf("Sweep(): %v", err)
 		}
+		if len(w.calls) != 2 || w.calls[1] != "sweepIssues" {
+			t.Errorf("calls = %v, want the types.retained read and then one sweep", w.calls)
+		}
+	})
+}
+
+// TestAPlainSweepAgainstAServerWithoutRetainedTypesReadsTheSetting is the
+// client's defense in depth for types.retained. A server that does not
+// advertise issues.sweep.retainedTypes holds nothing back by type, so a plain
+// sweep sent to it would delete retained-type rows with no tombstone and no
+// signal. Against such a server the client reads the workspace's
+// types.retained first (one getSetting) and refuses the sweep, before dialing
+// it, when the setting names a type — the local refusal invariant 8 gives
+// retain_ids. A server that advertises the token, a retaining sweep, and an
+// unset setting all dial as before; a failed read fails the sweep.
+func TestAPlainSweepAgainstAServerWithoutRetainedTypesReadsTheSetting(t *testing.T) {
+	older := &apigen.ContextResponse{Capabilities: []string{"issues.sweep", wire.CapSweepRetainIDs}}
+	current := &apigen.ContextResponse{Capabilities: []string{"issues.sweep", wire.CapSweepRetainIDs, wire.CapSweepRetainedTypes}}
+	plain := issueops.SweepRequest{Tier: issueops.SweepDurable, IDPattern: "bd-*"}
+	sweep := func(t *testing.T, w *stubWire, served *apigen.ContextResponse, req issueops.SweepRequest) error {
+		t.Helper()
+		sweeper, err := New(testTarget(t), w, served).Sweeper()
+		if err != nil {
+			t.Fatalf("Sweeper(): %v", err)
+		}
+		_, err = sweeper.Sweep(t.Context(), req)
+		return err
+	}
+
+	t.Run("a retained type refuses before the dial", func(t *testing.T) {
+		w := &stubWire{settings: map[string]string{issueops.SettingKeyTypesRetained: "op"}}
+		err := sweep(t, w, older, plain)
+		var unsup *storage.ErrUnsupported
+		if !errors.As(err, &unsup) || unsup.Capability != wire.CapSweepRetainedTypes {
+			t.Fatalf("Sweep error = %v, want an unsupported-capability refusal naming %s", err, wire.CapSweepRetainedTypes)
+		}
+		for _, want := range []string{"types.retained", `"op"`, "--retain-ids", "upgrade the server"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("Sweep error = %q, want it to name %s so the operator knows the remedy", err, want)
+			}
+		}
+		if !reflect.DeepEqual(w.calls, []string{wire.OpGetSetting}) {
+			t.Errorf("calls = %v, want only the setting read: the sweep must never be dialed", w.calls)
+		}
+	})
+
+	t.Run("an unset setting dials", func(t *testing.T) {
+		w := &stubWire{settings: map[string]string{}}
+		if err := sweep(t, w, older, plain); err != nil {
+			t.Fatalf("Sweep(): %v", err)
+		}
+		if len(w.calls) != 2 || w.calls[0] != wire.OpGetSetting {
+			t.Errorf("calls = %v, want the setting read and then the sweep", w.calls)
+		}
+	})
+
+	t.Run("a failed read fails the sweep", func(t *testing.T) {
+		w := &stubWire{settings: map[string]string{}, errs: []error{errors.New("connection reset")}}
+		if err := sweep(t, w, older, plain); err == nil || !strings.Contains(err.Error(), issueops.SettingKeyTypesRetained) {
+			t.Fatalf("Sweep error = %v, want the read failure naming %s", err, issueops.SettingKeyTypesRetained)
+		}
 		if len(w.calls) != 1 {
-			t.Errorf("dialed %d times, want 1", len(w.calls))
+			t.Errorf("calls = %v, want only the failed read", w.calls)
+		}
+	})
+
+	t.Run("a server that advertises the token is not asked", func(t *testing.T) {
+		w := &stubWire{settings: map[string]string{issueops.SettingKeyTypesRetained: "op"}}
+		if err := sweep(t, w, current, plain); err != nil {
+			t.Fatalf("Sweep(): %v", err)
+		}
+		if len(w.calls) != 1 || w.calls[0] == wire.OpGetSetting {
+			t.Errorf("calls = %v, want the sweep alone", w.calls)
+		}
+	})
+
+	t.Run("a retaining sweep is not asked", func(t *testing.T) {
+		w := &stubWire{settings: map[string]string{issueops.SettingKeyTypesRetained: "op"}}
+		retaining := plain
+		retaining.RetainIDs = true
+		if err := sweep(t, w, older, retaining); err != nil {
+			t.Fatalf("Sweep(): %v", err)
+		}
+		if len(w.calls) != 1 || w.calls[0] == wire.OpGetSetting {
+			t.Errorf("calls = %v, want the sweep alone: a retaining sweep holds nothing back by type", w.calls)
 		}
 	})
 }

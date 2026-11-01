@@ -34,6 +34,7 @@ go_test(
         "blocked_lister_test.go",
         "blocking_annotator_batch_test.go",
         "decorator_test.go",
+        "live_probe_test.go",
         "ready_wake_test.go",
         "remote_roles_composition_test.go",
         "remote_roles_test.go",

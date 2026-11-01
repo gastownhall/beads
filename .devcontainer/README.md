@@ -2,7 +2,7 @@
 
 This devcontainer configuration provides a fully-configured development environment for beads with:
 
-- Go 1.23 development environment
+- Go 1.27 development environment
 - bd CLI built and installed from source
 - Git hooks automatically installed
 - All dependencies pre-installed

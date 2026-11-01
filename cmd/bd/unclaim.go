@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -82,7 +83,7 @@ Examples:
 			// unclaim commits where the issue lives (as bd update --claim does).
 			result, err := resolveAndGetIssueForMutation(ctx, store, id)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error resolving %s: %v\n", id, err)
+				fmt.Fprintf(os.Stderr, "Error resolving %s: %s\n", id, remedy.PrintedMessage(err))
 				hasError = true
 				continue
 			}
@@ -96,7 +97,7 @@ Examples:
 				unclaimErr = issueStore.UnclaimIssue(ctx, fullID, currentActor(), force)
 			}
 			if unclaimErr != nil {
-				fmt.Fprintf(os.Stderr, "Error unclaiming %s: %v\n", fullID, unclaimErr)
+				fmt.Fprintf(os.Stderr, "Error unclaiming %s: %s\n", fullID, remedy.PrintedMessage(unclaimErr))
 				hasError = true
 				// An unclaim whose routed commit failed left its release in
 				// the target's working set, where this run finds the issue

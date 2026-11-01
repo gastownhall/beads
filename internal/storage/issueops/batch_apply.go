@@ -194,6 +194,9 @@ type appliedEdge struct {
 // apply runs the three phases in order: the items, the metadata splice, the end
 // gate.
 func (r *applyBatchRun) apply(ctx context.Context, tx *sql.Tx) error {
+	if err := coordinateApplyBatchCreatesInTx(ctx, tx, r.plan); err != nil {
+		return err
+	}
 	for i := range r.plan.Items {
 		if err := r.applyItem(ctx, tx, i); err != nil {
 			return err
@@ -203,6 +206,23 @@ func (r *applyBatchRun) apply(ctx context.Context, tx *sql.Tx) error {
 		return err
 	}
 	return r.runEndGate(ctx, tx)
+}
+
+// coordinateApplyBatchCreatesInTx takes the coordination cell of every
+// explicit create id in the plan in ONE sorted write, before the first item
+// runs. Each create item then meets a cell the transaction already holds
+// instead of taking cells one item at a time in item order, which could
+// deadlock against a retaining sweep, an upsert batch or an import holding a
+// sorted cell set (see CoordinateIDCreatesInTx). A generated id is not known
+// yet and takes its own cell when its item mints it.
+func coordinateApplyBatchCreatesInTx(ctx context.Context, tx *sql.Tx, plan storage.ApplyBatchPlan) error {
+	var ids []string
+	for _, item := range plan.Items {
+		if item.Kind == publicops.ItemCreate && item.Create != nil && item.Create.Issue != nil && item.Create.Issue.ID != "" {
+			ids = append(ids, item.Create.Issue.ID)
+		}
+	}
+	return CoordinateIDCreatesInTx(ctx, tx, ids)
 }
 
 // applyItem applies one item and records its outcome at its own index.

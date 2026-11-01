@@ -37,6 +37,7 @@ go_test(
         "e2e_export_test.go",
         "e2e_gates_test.go",
         "e2e_heartbeat_test.go",
+        "e2e_link_test.go",
         "e2e_list_filters_test.go",
         "e2e_list_page_edges_test.go",
         "e2e_mol_test.go",
@@ -68,6 +69,7 @@ go_test(
         "//internal/storage/embeddeddolt",
         "//internal/storage/issueops",
         "//internal/testutil/bazeltest",
+        "//internal/testutil/legacyworkspace",
     ],
 )
 
@@ -78,25 +80,32 @@ go_test(
 # http_test's `env` (go_test_pinned_shard.sh, like go_test_variant.sh, does
 # not inherit it).
 #
-# Shard count: the package's tests are serial, and as one shard the target
-# ran 235-394s on the lane's executors (2026-10-10..13), the embedded lane's
-# longest action in most runs where it executed; the lane's other shards end
-# by ~90-125s. The 19 TestE2E_* cases that take >= 3s are pinned
-# (tools/bazel/go_test_pinned_shard.sh, served_pinned_shards.txt from
-# tools/bazel/pin_shards.py --shards 6 --min-seconds 3) onto 6 shards, and
-# the binary's round-robin runs the other ~28 (well under a second
-# together) in the 7th. The durations are the maximum over two sharded runs
-# of the lane (bazel.yml's bazel-embedded-served-testxml artifact): 11-90s
-# each, ~770s together. The same test's time varied 2-5x between those runs
-# with the executors' load, and sharded runs took up to 2x what the
-# single-shard runs did, so size the pins from sharded runs of the lane,
-# never from a single-shard or local one.
-# Regenerate the manifest from PR runs' bazel-embedded-served-testxml
-# artifacts (each http_served_test directory holds shard_*_of_7/test.xml;
-# pass several runs, pin_shards.py takes each test's maximum):
-#   python3 tools/bazel/pin_shards.py --shards 6 --min-seconds 3 \
+# Shard count: the package's tests are serial. The 32 TestE2E_* cases
+# measured at >= 3s are pinned (tools/bazel/go_test_pinned_shard.sh,
+# served_pinned_shards.txt from tools/bazel/pin_shards.py --shards 10
+# --min-seconds 3 --record-measured --tests-in backend/http) onto 10 shards,
+# and the binary's round-robin deals every other test over the last 4: the
+# 30 the manifest lists rr (about a second together) and any test added
+# since. The
+# durations are each test's maximum over 35 PR runs of the lane on
+# 2026-10-23..24 (bazel.yml's bazel-embedded-served-testxml artifact, 29
+# distinct executions of each shard): 18-174s a test. The slowest,
+# TestE2E_BlockedFlagsOverHTTP (117s median), alone sets the longest shard;
+# replayed over those runs the longest shard takes ~125s at the median run
+# and ~143s at p90. The same test's time varies 2-4x between runs with the
+# executors' load, so size the pins from sharded CI runs of the lane, never
+# from a local one.
+# With one round-robin shard (shard_count 7, pins of 2026-10-13) every test
+# added later landed in it, and by 2026-10-23 it ran 314-633s, the lane's
+# last action. scripts/pinned_shards_sources_test.go fails once more than 2
+# tests per round-robin shard are listed neither pinned nor rr (added since
+# the measurement), and prints the command that regenerates the manifest
+# (needs gh and the network; --tests-in drops what the runs measured that
+# this checkout does not define, renamed or other branches' tests):
+#   python3 tools/bazel/pin_shards.py --shards 10 --min-seconds 3 \
+#       --record-measured --tests-in backend/http \
 #       --write backend/http/served_pinned_shards.txt \
-#       <run1>/http_served_test <run2>/http_served_test
+#       $(tools/bazel/fetch_served_testxml.sh 30 "$(mktemp -d)")
 #
 # Tags:
 #   embedded: the embedded-Dolt tier; excluded from --config=prcore/ci,
@@ -125,7 +134,7 @@ sh_test(
         "BEADS_TEST_BD_BINARY": "$(rlocationpath //cmd/bd:bd_for_tests)",
         "BEADS_TEST_EMBEDDED_DOLT": "1",
     },
-    shard_count = 7,
+    shard_count = 14,
     tags = ["embedded"],
 )
 

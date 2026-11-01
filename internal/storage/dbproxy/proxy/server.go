@@ -18,6 +18,7 @@ import (
 	"github.com/cenkalti/backoff/v4"
 	"golang.org/x/sync/errgroup"
 
+	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/lockfile"
 	"github.com/steveyegge/beads/internal/procid"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/identity"
@@ -46,6 +47,12 @@ type ProxyOpts struct {
 	// against it; tests use Snapshot() to assert. Production code should
 	// leave this nil.
 	Stats *Stats
+	// TraceConnections writes the per-connection trace lines (accept,
+	// handleConn start/end, backend dial ok, copy done) to proxy.log. Every
+	// bd command opens connections through the proxy, so these lines are
+	// off by default; db-proxy-child sets this from BD_DEBUG. Lifecycle and
+	// error lines are always written.
+	TraceConnections bool
 }
 
 type proxyServer struct {
@@ -55,6 +62,8 @@ type proxyServer struct {
 	server      server.DatabaseServer
 	stats       *Stats
 	stopEpoch   string
+
+	traceConnections bool
 
 	// reportUpstreamOutage answers a connection whose upstream is not
 	// serving with a MySQL error instead of a bare close; see
@@ -107,12 +116,22 @@ func NewProxyServer(opts ProxyOpts) *proxyServer {
 		stats:       opts.Stats,
 		stopEpoch:   opts.StopEpoch,
 
+		traceConnections: opts.TraceConnections,
+
 		reportUpstreamOutage: reportsUpstreamOutage(opts.Server),
 	}
 }
 
 func (p *proxyServer) tracef(format string, args ...any) {
 	p.logger.Printf(format, args...)
+}
+
+// connTracef writes a per-connection trace line, only when TraceConnections
+// is set. Lifecycle and error lines use tracef and are always written.
+func (p *proxyServer) connTracef(format string, args ...any) {
+	if p.traceConnections {
+		p.logger.Printf(format, args...)
+	}
 }
 
 func (p *proxyServer) ListenAndServe(parentCtx context.Context) error {
@@ -152,6 +171,9 @@ func (p *proxyServer) ListenAndServe(parentCtx context.Context) error {
 	}
 
 	logPath := filepath.Join(p.rootDir, LogFileName)
+	// forkExecChild already rotated it for a spawned proxy; this covers
+	// in-process callers and is a no-op on the fresh file otherwise.
+	doltserver.MaybeRotateLogFile(logPath)
 	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600) // #nosec G304 -- logPath is derived from operator-supplied config, not untrusted request input
 	if err != nil {
 		return fmt.Errorf("open proxy log %q: %w", logPath, err)
@@ -442,7 +464,7 @@ func (p *proxyServer) acceptLoop(ctx context.Context) error {
 			_ = tc.SetKeepAlive(true)
 			_ = tc.SetKeepAlivePeriod(tcpKeepAlivePeriod)
 		}
-		p.tracef("acceptLoop accepted (remote=%s)", conn.RemoteAddr())
+		p.connTracef("acceptLoop accepted (remote=%s)", conn.RemoteAddr())
 		p.stats.IncAccept()
 		p.conns.Go(func() error {
 			return p.handleConn(ctx, conn)
@@ -452,11 +474,11 @@ func (p *proxyServer) acceptLoop(ctx context.Context) error {
 
 func (p *proxyServer) handleConn(ctx context.Context, client net.Conn) error {
 	addr := client.RemoteAddr()
-	p.tracef("handleConn(%s) start", addr)
+	p.connTracef("handleConn(%s) start", addr)
 	p.activeConns.Add(1)
 	defer func() {
 		p.activeConns.Add(-1)
-		p.tracef("handleConn(%s) end (active=%d)", addr, p.activeConns.Load())
+		p.connTracef("handleConn(%s) end (active=%d)", addr, p.activeConns.Load())
 	}()
 
 	p.stats.IncBackendDialAttempt()
@@ -472,7 +494,7 @@ func (p *proxyServer) handleConn(ctx context.Context, client net.Conn) error {
 		_ = client.Close()
 		return err
 	}
-	p.tracef("handleConn(%s) backend dial ok", addr)
+	p.connTracef("handleConn(%s) backend dial ok", addr)
 	p.stats.IncBackendDialSuccess()
 	p.stats.IncHandledConn()
 
@@ -497,7 +519,7 @@ func (p *proxyServer) handleConn(ctx context.Context, client net.Conn) error {
 		defer func() { _ = client.Close() }()
 		n, err := io.Copy(backend, client)
 		p.stats.AddBytesClientToBackend(n)
-		p.tracef("handleConn(%s) client→backend done (n=%d, err=%v)", addr, n, err)
+		p.connTracef("handleConn(%s) client→backend done (n=%d, err=%v)", addr, n, err)
 		return err
 	})
 	g.Go(func() error {
@@ -506,7 +528,7 @@ func (p *proxyServer) handleConn(ctx context.Context, client net.Conn) error {
 		defer func() { _ = client.Close() }()
 		n, err := io.Copy(client, backend)
 		p.stats.AddBytesBackendToClient(n)
-		p.tracef("handleConn(%s) backend→client done (n=%d, err=%v)", addr, n, err)
+		p.connTracef("handleConn(%s) backend→client done (n=%d, err=%v)", addr, n, err)
 		// A MySQL server speaks first, so a backend that reaches EOF having
 		// sent nothing never served this connection: a front whose own
 		// target is gone, or a server at its connection limit or shutting

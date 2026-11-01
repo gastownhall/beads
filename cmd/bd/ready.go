@@ -179,6 +179,9 @@ This is useful for agents executing molecules to see which steps can run next.`,
 			return nil
 		}
 
+		if jsonOutput && readyJSONPrintsNoTotal(activeStore) {
+			return runReadyJSONWithoutTotal(ctx, activeStore, filter)
+		}
 		if jsonOutput {
 			// The page and the size of the whole ready set come back from ONE
 			// read transaction: the total rides the page's own ID query, so a
@@ -428,6 +431,65 @@ var blockedCmd = &cobra.Command{
 		}
 		return nil
 	},
+}
+
+// readyJSONPrintsNoTotal reports whether `bd ready --json` should skip sizing
+// the whole ready set. Without BD_JSON_ENVELOPE the total only decorates the
+// stderr hint. A local store takes it in the page's own transaction, so the
+// hint keeps it there; a remote backend pays a second request
+// (countReadyWork) for it, so the hint goes without.
+func readyJSONPrintsNoTotal(activeStore storage.DoltStorage) bool {
+	return !jsonEnvelopeEnabled() && storeIsRemoteBackend(activeStore)
+}
+
+// runReadyJSONWithoutTotal lists one row past the limit, which says whether
+// the limit hid anything: all the hint needs. A cap at or below the limit
+// would count that extra row against it, so such a listing keeps the counted
+// path and its refusal exactly as before.
+func runReadyJSONWithoutTotal(ctx context.Context, activeStore storage.DoltStorage, filter types.WorkFilter) error {
+	limit := filter.Limit
+	var results []*types.IssueWithCounts
+	var total int
+	var err error
+	if limit > 0 && filter.MaxRows > 0 && filter.MaxRows <= limit {
+		results, total, err = activeStore.GetReadyWorkWithCountsAndTotal(ctx, filter)
+	} else {
+		if limit > 0 {
+			filter.Limit = limit + 1
+		}
+		results, err = activeStore.GetReadyWorkWithCounts(ctx, filter)
+		total = len(results)
+	}
+	if err != nil {
+		if capErr := handleMaxRowsError(err); capErr != nil {
+			return capErr
+		}
+		return HandleErrorRespectJSON("%v", err)
+	}
+	truncated := limit > 0 && len(results) >= limit && total > limit
+	if len(results) > limit && limit > 0 {
+		results = results[:limit]
+	}
+	if results == nil {
+		results = []*types.IssueWithCounts{}
+	}
+	if err := outputJSON(results); err != nil {
+		return err
+	}
+	if truncated {
+		fmt.Fprintf(os.Stderr, "%s Use --limit 0 for all, or --limit N to raise the cap.\n", readyHiddenHint(len(results)))
+	}
+	return nil
+}
+
+// readyHiddenHint is the truncation hint for a page whose total is unknown:
+// how many rows are shown, and that the limit hid more.
+func readyHiddenHint(shown int) string {
+	noun := "issues"
+	if shown == 1 {
+		noun = "issue"
+	}
+	return fmt.Sprintf("Showing %d ready %s; more matched but were hidden by --limit.", shown, noun)
 }
 
 // readyTotal sizes the whole ready set for the request `bd ready` just listed

@@ -48,6 +48,7 @@ func TestEveryRepositoryMutatorJournals(t *testing.T) {
 	// change.
 	emitCalls := map[string]bool{
 		"RecordEventInTx":                       true,
+		"RecordCreateEventInTx":                 true,
 		"RecordDeleteInTx":                      true,
 		"RecordDepEventInTx":                    true,
 		"RecordCommentEventInTx":                true,

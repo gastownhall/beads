@@ -5,9 +5,16 @@ import (
 	"errors"
 	"math/rand"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/beads/cmd/bd/doctor"
+	"github.com/steveyegge/beads/cmd/bd/setup"
 )
 
 type tipMetadataWrite struct {
@@ -799,4 +806,119 @@ func TestClaudeSetupTipCondition(t *testing.T) {
 	// If setup is complete, should be false; if not complete, should be true
 	// Just verify it returns a valid boolean
 	_ = conditionResult
+}
+
+// TestClaudeSetupReadersAgree pins that bd doctor's Claude Integration check
+// and the claude_setup tip read Claude Code's settings as bd setup claude
+// --check does, on the same fixtures: the beads plugin by Claude Code's
+// settings precedence (managed settings, the repository root's local
+// settings, the current directory's, the project's, then the user's), and
+// only a plugin named beads; and a bd prime hook in the project's settings,
+// the repository root's local settings or the user's as well (#7774's
+// review). bd doctor reports the same for the directory it checks when it
+// runs elsewhere, in a separate checkout or in the repository that encloses
+// a nested one, whose cached git context is not that directory's (#7802's
+// review).
+func TestClaudeSetupReadersAgree(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skipf("git not available: %v", err)
+	}
+	const (
+		on       = `{"enabledPlugins": {"beads@beads-marketplace": true}}`
+		off      = `{"enabledPlugins": {"beads@beads-marketplace": false}}`
+		decoy    = `{"enabledPlugins": {"design-to-beads@xexr-marketplace": true}}`
+		hook     = `{"hooks": {"SessionStart": [{"matcher": "", "hooks": [{"type": "command", "command": "bd prime --hook-json"}]}]}}`
+		offHook  = `{"enabledPlugins": {"beads@beads-marketplace": false}, "hooks": {"SessionStart": [{"matcher": "", "hooks": [{"type": "command", "command": "bd prime --hook-json"}]}]}}`
+		user     = "home/.claude/settings.json"
+		project  = "repo/.claude/settings.json"
+		local    = "repo/.claude/settings.local.json"
+		managed  = "managed/managed-settings.json"
+		repoDir  = "repo"
+		subDir   = "repo/sub"
+		nested   = "repo/nested"
+		otherDir = "other"
+		pluginOn = "Plugin installed"
+	)
+	cases := []struct {
+		name  string
+		files map[string]string
+		dir   string
+		// plugin: the beads plugin runs bd prime in dir. hooks: bd prime
+		// runs there, from the plugin or a hook.
+		plugin, hooks bool
+	}{
+		{"the local settings turn off a user plugin", map[string]string{user: on, local: off}, repoDir, false, false},
+		{"the project's settings turn off a user plugin", map[string]string{user: on, project: off}, repoDir, false, false},
+		{"managed settings enable it", map[string]string{managed: on}, repoDir, true, true},
+		{"managed settings turn off a user plugin", map[string]string{managed: off, user: on}, repoDir, false, false},
+		{"the repository root's local settings enable it in a subdirectory", map[string]string{local: on}, subDir, true, true},
+		{"a hook only in the repository root's local settings, in a subdirectory", map[string]string{local: hook}, subDir, false, true},
+		{"a nested repository does not read the enclosing one's local settings", map[string]string{user: on, local: off}, nested, true, true},
+		{"a plugin named design-to-beads is not the beads plugin", map[string]string{user: decoy}, repoDir, false, false},
+		{"the project's settings enable it", map[string]string{project: on}, repoDir, true, true},
+		{"a project hook where the project turns off a user plugin", map[string]string{user: on, project: offHook}, repoDir, false, true},
+		{"the hook bd setup claude --global writes", map[string]string{user: hook}, repoDir, false, true},
+		{"no settings", nil, repoDir, false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.dir == subDir && runtime.GOOS == "windows" {
+				t.Skip("Claude Code keeps settings.local.json beside settings.json on Windows")
+			}
+			root, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatalf("resolve temp dir: %v", err)
+			}
+			for _, dir := range []string{"home", subDir} {
+				if err := os.MkdirAll(filepath.Join(root, dir), 0o755); err != nil {
+					t.Fatalf("mkdir: %v", err)
+				}
+			}
+			for _, repo := range []string{repoDir, nested, otherDir} {
+				if out, err := exec.Command("git", "init", "-q", filepath.Join(root, repo)).CombinedOutput(); err != nil {
+					t.Fatalf("git init: %v\n%s", err, out)
+				}
+			}
+			for path, body := range tc.files {
+				path = filepath.Join(root, path)
+				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+					t.Fatalf("mkdir: %v", err)
+				}
+				if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+					t.Fatalf("write %s: %v", path, err)
+				}
+			}
+			t.Setenv("HOME", filepath.Join(root, "home"))
+			t.Setenv("USERPROFILE", filepath.Join(root, "home"))
+			t.Cleanup(setup.SetClaudeManagedSettingsDirForTest(filepath.Join(root, "managed")))
+			dir := filepath.Join(root, tc.dir)
+			t.Chdir(dir)
+			resetRepoCachesForTest(t)
+
+			check := captureStdout(t, func() error {
+				_ = setup.CheckClaude() // a missing hook or CLAUDE.md section is an error; the output says which
+				return nil
+			})
+			if got := strings.Contains(check, "Hooks provided by beads plugin"); got != tc.plugin {
+				t.Errorf("--check reports the plugin = %v, want %v:\n%s", got, tc.plugin, check)
+			}
+			if got := !strings.Contains(check, "No hooks installed"); got != tc.hooks {
+				t.Errorf("--check reports hooks = %v, want %v:\n%s", got, tc.hooks, check)
+			}
+			if got := isClaudeSetupComplete(); got != tc.hooks {
+				t.Errorf("the claude_setup tip counts setup complete = %v, want %v", got, tc.hooks)
+			}
+			for _, from := range []string{tc.dir, otherDir, repoDir} {
+				t.Chdir(filepath.Join(root, from))
+				resetRepoCaches()
+				msg := doctor.CheckClaude(dir).Message
+				if got := msg == pluginOn; got != tc.plugin {
+					t.Errorf("bd doctor run in %s reports the plugin = %v (%q), want %v", from, got, msg, tc.plugin)
+				}
+				if got := msg == pluginOn || msg == "Hooks installed (CLI mode)"; got != tc.hooks {
+					t.Errorf("bd doctor run in %s reports hooks = %v (%q), want %v", from, got, msg, tc.hooks)
+				}
+			}
+		})
+	}
 }

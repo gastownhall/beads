@@ -2,11 +2,14 @@ package main
 
 import (
 	"errors"
+	"flag"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -15,6 +18,7 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/git"
+	"github.com/steveyegge/beads/internal/initprocs"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/migration"
 	"github.com/steveyegge/beads/internal/testutil"
@@ -38,6 +42,13 @@ var beforeTestsHook func() func()
 // internal test binary directly), testTempRoot is empty and helpers
 // fall back to os.TempDir().
 var testTempRoot string
+
+// testBDBuildDir is the temp dir cli_fast_test.go's init() builds the bd
+// binary into when no prebuilt one is supplied. init() runs before TestMain
+// pins testTempRoot, so the dir lands in the system temp dir and the
+// testMainInner defer does not reach it; TestMain removes it explicitly.
+// Each build is ~200MB, so leaking it on every run fills shared hosts.
+var testBDBuildDir string
 
 // testTempDir returns os.MkdirTemp under testTempRoot when it is set,
 // otherwise it falls back to the system temp dir (os.MkdirTemp's
@@ -78,11 +89,21 @@ const suiteRootPrefix = "beads-bd-tests-"
 // Guardrail: ensure the cmd/bd test suite does not touch the real repo .beads state.
 // Disable with BEADS_TEST_GUARD_DISABLE=1 (useful when running tests while actively using beads).
 func TestMain(m *testing.M) {
+	// main() is not run here, so hand back the Ps initprocs held during init,
+	// and the -test.parallel default testing derived from the capped count.
+	// An explicit -test.parallel is parsed later, by m.Run, and still wins.
+	initprocs.Done()
+	if f := flag.Lookup("test.parallel"); f != nil {
+		_ = f.Value.Set(strconv.Itoa(runtime.GOMAXPROCS(0)))
+	}
 	if code, ok := credentialcmd.Dispatch(); ok {
 		os.Exit(code)
 	}
 	// Delegate to testMainInner so defers run before os.Exit.
 	code := testMainInner(m)
+	if testBDBuildDir != "" {
+		_ = os.RemoveAll(testBDBuildDir)
+	}
 	if err := credentialcmd.Cleanup(); err != nil {
 		fmt.Fprintf(os.Stderr, "credential command fixture cleanup: %v\n", err)
 		code = 1

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/formula"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -316,7 +318,7 @@ func persistCookFormula(ctx context.Context, resolved *formula.Formula, protoID 
 	existingProto, err := store.GetIssue(ctx, protoID)
 	if err == nil && existingProto != nil {
 		if !force {
-			return fmt.Errorf("proto %s already exists (use --force to replace)", protoID)
+			return fmt.Errorf("proto %s already exists (use --force to replace)", remedy.PrintedValue(protoID))
 		}
 		// Delete existing proto and its children
 		if err := deleteProtoSubgraph(ctx, store, protoID); err != nil {
@@ -340,16 +342,27 @@ func persistCookFormula(ctx context.Context, resolved *formula.Formula, protoID 
 		})
 	}
 
-	fmt.Printf("%s Cooked proto: %s\n", ui.RenderPass("✓"), result.ProtoID)
-	fmt.Printf("  Created %d issues\n", result.Created)
+	printCookedProto(result.ProtoID, result.Created, vars, bondPoints)
+	return nil
+}
+
+// printCookedProto prints bd cook --persist's summary and its bd mol pour
+// hint. The proto ID is the formula file's own formula field, which a
+// committed .beads/formulas file sets: it is named escaped, and goes into
+// the hint as one shell word or a placeholder named beside it. The bond
+// point IDs printed above the hint come from the same file and are named
+// escaped too.
+func printCookedProto(protoID string, created int, vars, bondPoints []string) {
+	fmt.Printf("%s Cooked proto: %s\n", ui.RenderPass("✓"), remedy.PrintedValue(protoID))
+	fmt.Printf("  Created %d issues\n", created)
 	if len(vars) > 0 {
 		fmt.Printf("  Variables: %s\n", strings.Join(vars, ", "))
 	}
 	if len(bondPoints) > 0 {
-		fmt.Printf("  Bond points: %s\n", strings.Join(bondPoints, ", "))
+		fmt.Printf("  Bond points: %s\n", remedy.PrintedList(bondPoints, ", "))
 	}
-	fmt.Printf("\nTo use: bd mol pour %s --var <name>=<value>\n", result.ProtoID)
-	return nil
+	proto, note := remedy.CommandArg(runtime.GOOS, protoID, "<proto>")
+	fmt.Printf("\nTo use: bd mol pour %s --var <name>=<value>%s\n", proto, note)
 }
 
 func runCook(cmd *cobra.Command, args []string) error {
@@ -470,8 +483,9 @@ func cookFormulaToSubgraph(f *formula.Formula, protoID string) (*TemplateSubgrap
 	collectSteps(f.Steps, protoID, idMapping, issueMap, &issues, &deps, nil) // nil = keep labels on issues
 
 	// Collect dependencies from depends_on using the idMapping built above
+	exitGates := exitGateCompanions(f.Steps, idMapping)
 	for _, step := range f.Steps {
-		collectDependencies(step, idMapping, &deps)
+		collectDependencies(step, idMapping, exitGates, &deps)
 	}
 
 	return &TemplateSubgraph{
@@ -483,7 +497,8 @@ func cookFormulaToSubgraph(f *formula.Formula, protoID string) (*TemplateSubgrap
 }
 
 // createGateIssue creates a gate issue for a step with a Gate field.
-// Gate issues have type=gate and block the step they guard.
+// Gate issues have type=gate. collectSteps wires them to block the step they
+// guard, or, for a step declared type = "gate", to be blocked by it.
 // Returns the gate issue and its ID.
 func createGateIssue(step *formula.Step, parentID string) *types.Issue {
 	if step.Gate == nil {
@@ -609,6 +624,15 @@ func processStepToIssue(step *formula.Step, parentID string) *types.Issue {
 	return issue
 }
 
+// isExitGateStep reports whether a step is declared type = "gate" and has a
+// [steps.gate] block. Such a step is the preparation work for its companion
+// gate: cook makes the step a task that blocks the companion (an exit-gate),
+// instead of the companion blocking the step (an entry-gate, every other
+// step with a Gate) (GH#3316).
+func isExitGateStep(step *formula.Step) bool {
+	return step.Gate != nil && strings.TrimSpace(step.Type) == string(types.TypeGate)
+}
+
 // collectSteps collects issues and dependencies for steps and their children.
 // This is the unified implementation used by both DB-persisted and in-memory cooking.
 //
@@ -626,6 +650,12 @@ func collectSteps(steps []*formula.Step, parentID string,
 
 	for _, step := range steps {
 		issue := processStepToIssue(step, parentID)
+		exitGate := isExitGateStep(step)
+		if exitGate {
+			// The step is the prep work for its companion gate; as a
+			// TypeGate bead it would be hidden from ready work (GH#3316).
+			issue.IssueType = types.TypeTask
+		}
 		*issues = append(*issues, issue)
 
 		// Build mappings
@@ -676,12 +706,21 @@ func collectSteps(steps []*formula.Step, parentID string,
 				Type:        types.DepParentChild,
 			})
 
-			// Step depends on gate (gate blocks the step)
-			*deps = append(*deps, &types.Dependency{
-				IssueID:     issue.ID,
-				DependsOnID: gateIssue.ID,
-				Type:        types.DepBlocks,
-			})
+			if exitGate {
+				// Exit-gate: the step's task blocks its gate (GH#3316)
+				*deps = append(*deps, &types.Dependency{
+					IssueID:     gateIssue.ID,
+					DependsOnID: issue.ID,
+					Type:        types.DepBlocks,
+				})
+			} else {
+				// Entry-gate: step depends on gate (gate blocks the step)
+				*deps = append(*deps, &types.Dependency{
+					IssueID:     issue.ID,
+					DependsOnID: gateIssue.ID,
+					Type:        types.DepBlocks,
+				})
+			}
 		}
 
 		// Recursively collect children
@@ -986,8 +1025,9 @@ func cookFormula(ctx context.Context, s storage.DoltStorage, f *formula.Formula,
 	})
 
 	// Collect dependencies from depends_on
+	exitGates := exitGateCompanions(f.Steps, idMapping)
 	for _, step := range f.Steps {
-		collectDependencies(step, idMapping, &deps)
+		collectDependencies(step, idMapping, exitGates, &deps)
 	}
 
 	// Create issues, labels, and dependencies in a single atomic transaction.
@@ -1033,9 +1073,38 @@ func cookFormula(ctx context.Context, s storage.DoltStorage, f *formula.Formula,
 	}, nil
 }
 
+// exitGateCompanions returns step.ID → companion gate issue ID for every
+// step declared type = "gate" with a Gate (see isExitGateStep), or nil when
+// there is none. collectDependencies makes a step that references such a
+// step wait for both its task and its companion: gate check and resolve
+// close a gate without looking at its blockers, so the companion alone can
+// close while the task is still open (GH#3316).
+func exitGateCompanions(steps []*formula.Step, idMapping map[string]string) map[string]string {
+	var companions map[string]string
+	var walk func([]*formula.Step)
+	walk = func(steps []*formula.Step) {
+		for _, step := range steps {
+			if isExitGateStep(step) {
+				if gateIssueID, ok := idMapping["gate-"+step.ID]; ok {
+					if companions == nil {
+						companions = make(map[string]string)
+					}
+					companions[step.ID] = gateIssueID
+				}
+			}
+			walk(step.Children)
+		}
+	}
+	walk(steps)
+	return companions
+}
+
 // collectDependencies collects blocking dependencies from depends_on, needs, and waits_for fields.
 // This is the shared implementation used by both DB-persisted and in-memory subgraph cooking.
-func collectDependencies(step *formula.Step, idMapping map[string]string, deps *[]*types.Dependency) {
+// exitGates maps an exit-gate step's ID to its companion gate issue ID (see
+// exitGateCompanions; nil when the formula has none): a step that references
+// an exit-gate step also gets a blocks edge onto its companion.
+func collectDependencies(step *formula.Step, idMapping, exitGates map[string]string, deps *[]*types.Dependency) {
 	issueID := idMapping[step.ID]
 
 	// Pre-compute the waits_for spawner so we can dedupe against depends_on
@@ -1065,44 +1134,54 @@ func collectDependencies(step *formula.Step, idMapping map[string]string, deps *
 	// (GH#3783 review gap).
 	var waitsForCollapsedBlocks bool
 
-	// Process depends_on field
-	for _, depID := range step.DependsOn {
-		if depID == waitsForSpawnerStepID {
+	// The waits_for spawner is compared by resolved issue ID, and blocks
+	// targets are emitted once each: a reference to an exit-gate step S adds
+	// S's companion, which the dependent may also list as gate-S, and
+	// storage rejects a second edge on the same pair.
+	var waitsForSpawnerIssueID string
+	if waitsForSpawnerStepID != "" {
+		waitsForSpawnerIssueID = idMapping[waitsForSpawnerStepID]
+	}
+	blocksTargets := make(map[string]bool)
+	addBlocksEdge := func(targetIssueID string) {
+		if targetIssueID == waitsForSpawnerIssueID {
 			// This target is also the waits_for spawner; the DepWaitsFor edge
 			// emitted below subsumes the blocking semantics for this pair.
 			waitsForCollapsedBlocks = true
-			continue
+			return
 		}
-		depIssueID, ok := idMapping[depID]
-		if !ok {
-			continue // Will be caught during validation
+		if blocksTargets[targetIssueID] {
+			return
 		}
+		blocksTargets[targetIssueID] = true
 
 		*deps = append(*deps, &types.Dependency{
 			IssueID:     issueID,
-			DependsOnID: depIssueID,
+			DependsOnID: targetIssueID,
 			Type:        types.DepBlocks,
 		})
+	}
+	addBlocks := func(targetStepID string) {
+		targetIssueID, ok := idMapping[targetStepID]
+		if !ok {
+			return // Will be caught during validation
+		}
+		addBlocksEdge(targetIssueID)
+		// A reference to an exit-gate step waits for its task and for its
+		// companion gate (GH#3316).
+		if gateIssueID, ok := exitGates[targetStepID]; ok {
+			addBlocksEdge(gateIssueID)
+		}
+	}
+
+	// Process depends_on field
+	for _, depID := range step.DependsOn {
+		addBlocks(depID)
 	}
 
 	// Process needs field - simpler alias for sibling dependencies
 	for _, needID := range step.Needs {
-		if needID == waitsForSpawnerStepID {
-			// This target is also the waits_for spawner; the DepWaitsFor edge
-			// emitted below subsumes the blocking semantics for this pair.
-			waitsForCollapsedBlocks = true
-			continue
-		}
-		needIssueID, ok := idMapping[needID]
-		if !ok {
-			continue // Will be caught during validation
-		}
-
-		*deps = append(*deps, &types.Dependency{
-			IssueID:     issueID,
-			DependsOnID: needIssueID,
-			Type:        types.DepBlocks,
-		})
+		addBlocks(needID)
 	}
 
 	// Process waits_for field - fanout gate dependency
@@ -1122,12 +1201,18 @@ func collectDependencies(step *formula.Step, idMapping map[string]string, deps *
 			if err == nil {
 				*deps = append(*deps, dep)
 			}
+			// An exit-gate spawner's children are bonded under its task,
+			// which the waits-for edge names; the waiter also waits for the
+			// companion gate (GH#3316).
+			if gateIssueID, ok := exitGates[waitsForSpawnerStepID]; ok {
+				addBlocksEdge(gateIssueID)
+			}
 		}
 	}
 
 	// Recursively handle children
 	for _, child := range step.Children {
-		collectDependencies(child, idMapping, deps)
+		collectDependencies(child, idMapping, exitGates, deps)
 	}
 }
 

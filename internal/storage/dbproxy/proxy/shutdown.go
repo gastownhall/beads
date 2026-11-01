@@ -136,6 +136,7 @@ func ControlFilePaths(rootDir string) []string {
 		filepath.Join(rootDir, PIDFileName),
 		filepath.Join(rootDir, LockFileName),
 		filepath.Join(rootDir, LogFileName),
+		filepath.Join(rootDir, LogFileName+".1"), // startup rotation's single generation
 		filepath.Join(rootDir, identity.SecretFileName),
 		filepath.Join(rootDir, spawnMarkerFileName),
 		filepath.Join(rootDir, stopEpochFileName),

@@ -1,6 +1,6 @@
 ---
 title: "bd lint"
-description: "Check issues for missing recommended sections based on issue type."
+description: "Check issues for missing template sections"
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
@@ -15,8 +15,13 @@ Section requirements by type:
   bug:      Steps to Reproduce, Acceptance Criteria
   task:     Acceptance Criteria
   feature:  Acceptance Criteria
-  epic:     Success Criteria
+  epic:     Success Criteria (or Acceptance Criteria)
   chore:    (none)
+
+Additional per-type sections can be required via config; they are ADDITIVE
+to the built-ins above (built-in requirements are never relaxed):
+
+  bd config set lint.sections.epic "Standards scorecard, Cost"
 
 Examples:
   bd lint                    # Lint all open issues
@@ -34,5 +39,5 @@ bd lint [issue-id...] [flags]
 
 ```
   -s, --status string   Filter by status (default: open, use 'all' for all)
-  -t, --type string     Filter by issue type (bug, task, feature, epic)
+  -t, --type string     Filter by issue type (bug, task, feature, epic, decision, spike, story, chore, milestone)
 ```

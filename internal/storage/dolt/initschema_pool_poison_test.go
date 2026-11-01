@@ -345,3 +345,76 @@ func TestShowTablesProbes_SeeIgnoredTablesInAnyCase(t *testing.T) {
 	}
 	requireCursors("bd_events_seq stored as BD_EVENTS_SEQ")
 }
+
+// TestReadMigrationContentHashes_PoolSeesLaterTables is the be-bv7x shape for
+// the HEAD read of the migration content hashes (bd-21dc1). `bd doctor` runs
+// that read on a database it never migrates, where the cursor table can be
+// absent, or present from before #4259 without content_hash. A SELECT that
+// fails on either shape pins the pooled session to its pre-statement catalog
+// on the Dolt releases bd runs against (see
+// TestSentinelColumnProbe_PoolSeesLaterTables), so the read has to report both
+// as missing objects without sending a statement that fails.
+//
+// The pool under test holds one connection, so the session the read ran on is
+// the session the follow-up read lands on.
+func TestReadMigrationContentHashes_PoolSeesLaterTables(t *testing.T) {
+	skipIfNoDolt(t)
+
+	admin, err := sql.Open("mysql", doltutil.ServerDSN{Host: "127.0.0.1", Port: testServerPort, User: "root"}.String())
+	if err != nil {
+		t.Fatalf("open admin connection: %v", err)
+	}
+	defer admin.Close()
+
+	tests := []struct {
+		name   string
+		cursor string // DDL for the cursor's shape; empty when the table is absent
+	}{
+		{name: "cursor table absent"},
+		{name: "content_hash column absent", cursor: "CREATE TABLE schema_migrations (version INT PRIMARY KEY)"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := testContext(t)
+			defer cancel()
+
+			dbName := uniqueTestDBName(t)
+			if _, err := admin.ExecContext(ctx, "CREATE DATABASE `"+dbName+"`"); err != nil {
+				t.Fatalf("create database: %v", err)
+			}
+			defer func() {
+				dropCtx, dropCancel := context.WithTimeout(context.Background(), 5*testTimeout)
+				defer dropCancel()
+				_, _ = admin.ExecContext(dropCtx, "DROP DATABASE IF EXISTS `"+dbName+"`")
+			}()
+
+			pool, err := sql.Open("mysql", doltutil.ServerDSN{
+				Host: "127.0.0.1", Port: testServerPort, User: "root", Database: dbName,
+			}.String())
+			if err != nil {
+				t.Fatalf("open single-connection pool: %v", err)
+			}
+			defer pool.Close()
+			pool.SetMaxOpenConns(1)
+			pool.SetMaxIdleConns(1)
+			if tc.cursor != "" {
+				if _, err := pool.ExecContext(ctx, tc.cursor); err != nil {
+					t.Fatalf("create the cursor table: %v", err)
+				}
+			}
+
+			_, err = schema.ReadMigrationContentHashes(ctx, pool, "")
+			if err == nil || !schema.MissingMigrationObjectErr(err) {
+				t.Fatalf("ReadMigrationContentHashes(HEAD) error = %v, want a missing-object error", err)
+			}
+
+			if _, err := admin.ExecContext(ctx, "CREATE TABLE `"+dbName+"`.later_tbl (id INT PRIMARY KEY)"); err != nil {
+				t.Fatalf("create table: %v", err)
+			}
+			var count int
+			if err := pool.QueryRowContext(ctx, "SELECT COUNT(*) FROM later_tbl").Scan(&count); err != nil {
+				t.Fatalf("the pooled session that ran the HEAD read cannot see a table created after it (be-bv7x pin): %v", err)
+			}
+		})
+	}
+}

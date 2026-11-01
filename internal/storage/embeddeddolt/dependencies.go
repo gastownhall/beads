@@ -5,6 +5,7 @@ package embeddeddolt
 import (
 	"context"
 	"database/sql"
+	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
@@ -94,4 +95,18 @@ func (s *EmbeddedDoltStore) DetectCycles(ctx context.Context) ([][]*types.Issue,
 		return err
 	})
 	return result, err
+}
+
+// RetiredIssueIDs returns which of ids a retaining retention sweep retired,
+// with the closed_at each tombstone recorded (issueops.RetiredIDsInTx). The
+// import dry run reads it so its preview skips a retired row as the real
+// import does.
+func (s *EmbeddedDoltStore) RetiredIssueIDs(ctx context.Context, ids []string) (map[string]time.Time, error) {
+	var retired map[string]time.Time
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		retired, err = issueops.RetiredIDsInTx(ctx, tx, ids)
+		return err
+	})
+	return retired, err
 }

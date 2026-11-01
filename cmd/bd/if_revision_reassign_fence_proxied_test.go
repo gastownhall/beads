@@ -48,7 +48,7 @@ func proxiedRevStr(rev int64) string { return strconv.FormatInt(rev, 10) }
 // TestProxiedServerIfRevisionOutranksReassignFence pins mc-zndi7.74 on the
 // proxied-server route, the topology where this race actually happens: every
 // shared-dolt-server clone writes through it. See
-// TestIfRevisionOutranksReassignFenceCLI's doc for the full race shape —
+// TestEmbeddedIfRevisionOutranksReassignFenceCLI's doc for the full race shape —
 // this is the same scenario, proved against the real shared Dolt server
 // instead of embedded Dolt.
 func TestProxiedServerIfRevisionOutranksReassignFence(t *testing.T) {

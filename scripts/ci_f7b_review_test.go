@@ -66,11 +66,12 @@ func TestBlacksmithReachablePRJobsDisableDefaultCachingActions(t *testing.T) {
 }
 
 // blacksmithSaverJobs are main.yml's push-to-main-only jobs that seed a
-// Blacksmith-selection GOCACHE a same-repo PR or merge_group job restores
-// from: F7b's Windows saver (B2), the macOS saver, and the Blacksmith macOS
-// `test` job (which saves its own race cache).
+// Blacksmith-selection cache a same-repo PR or merge_group job restores
+// from: F7b's Windows saver (B2), the macOS saver, the Blacksmith macOS
+// `test` job (which saves its own race cache), and the toolchain saver of
+// pr.yml's windows-make-shell.
 var blacksmithSaverJobs = []string{
-	"test-windows", "blacksmith-macos-go-build-cache", "test",
+	"test-windows", "blacksmith-macos-go-build-cache", "test", "windows-make-shell-toolchains",
 }
 
 // TestBlacksmithSaverJobsGuardedAgainstPullRequest is the B2 fix's pin: each

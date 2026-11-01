@@ -6,6 +6,7 @@ package main
 // reuse create_deps_atomic_test.go's hermetic environment and output helpers.
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -135,4 +136,141 @@ Ephemeral body.
 			t.Errorf("the declared edge was not written; dependents of %s:\n%s", blocker, out)
 		}
 	})
+
+	// GH#7508: depends-on: and blocked-by: are --deps aliases for a blocking
+	// edge. The file used to store them as literal, non-gating types, so the
+	// issue stayed in bd ready while bd show printed the edge.
+	t.Run("deps_alias_spellings_gate_like_the_deps_flag", func(t *testing.T) {
+		target := createMarkdownDepTarget(t, bd, dir, "alias spelling target 7508")
+		plan := writeMarkdownPlan(t, dir, "aliases.md", `## Alias case bare id 7508
+
+### Deps
+`+target+`
+
+## Alias case depends-on 7508
+
+### Deps
+depends-on:`+target+`
+
+## Alias case blocked-by 7508
+
+### Deps
+blocked-by:`+target+`
+`)
+		runCreateDepsBD(t, bd, dir, "create", "--file", plan)
+		blocked := runCreateDepsBD(t, bd, dir, "blocked", "--json")
+		ready := runCreateDepsBD(t, bd, dir, "ready", "--json", "--limit", "0")
+		for _, title := range []string{"Alias case bare id 7508", "Alias case depends-on 7508", "Alias case blocked-by 7508"} {
+			if !strings.Contains(blocked, title) {
+				t.Errorf("%q is not in bd blocked; its edge on %s does not gate:\n%s", title, target, blocked)
+			}
+			if strings.Contains(ready, title) {
+				t.Errorf("%q is in bd ready although it depends on open %s", title, target)
+			}
+		}
+	})
+
+	// GH#7508: --deps blocks:<id> makes <id> depend on the new issue. The file
+	// used to write the opposite edge from the same string.
+	t.Run("blocks_spelling_reverses_like_the_deps_flag", func(t *testing.T) {
+		target := createMarkdownDepTarget(t, bd, dir, "blocks spelling target 7508")
+		plan := writeMarkdownPlan(t, dir, "blocks.md", `## Blocks spelling blocker 7508
+
+### Deps
+blocks:`+target+`
+`)
+		runCreateDepsBD(t, bd, dir, "create", "--file", plan)
+		blocked := runCreateDepsBD(t, bd, dir, "blocked", "--json")
+		ready := runCreateDepsBD(t, bd, dir, "ready", "--json", "--limit", "0")
+		if !strings.Contains(blocked, "blocks spelling target 7508") {
+			t.Errorf("target %s is not in bd blocked; blocks: did not make it depend on the new issue:\n%s", target, blocked)
+		}
+		if strings.Contains(blocked, "Blocks spelling blocker 7508") {
+			t.Errorf("the blocks: template is in bd blocked; its edge points the wrong way:\n%s", blocked)
+		}
+		if !strings.Contains(ready, "Blocks spelling blocker 7508") {
+			t.Errorf("the blocks: template is not in bd ready:\n%s", ready)
+		}
+	})
+
+	// GH#7508: a type --deps refuses (a misspelling or a custom type) used to
+	// pass the file's own length check and land as a non-gating edge. It now
+	// refuses the whole file, like any other refused template.
+	t.Run("a_dep_type_deps_refuses_refuses_the_whole_file", func(t *testing.T) {
+		target := createMarkdownDepTarget(t, bd, dir, "refused type target 7508")
+		for _, depType := range []string{"blokcs", "implements"} {
+			good := "Lands beside the " + depType + " refusal 7508"
+			bad := "Names the " + depType + " type 7508"
+			plan := writeMarkdownPlan(t, dir, depType+".md", `## `+good+`
+
+### Deps
+`+target+`
+
+## `+bad+`
+
+### Deps
+`+depType+`:`+target+`
+`)
+			out, err := runCreateDepsBDRaw(bd, dir, "create", "--file", plan)
+			if err == nil {
+				t.Fatalf("create --file with %s:%s exited 0; output:\n%s", depType, target, out)
+			}
+			for _, want := range []string{"unknown dependency type", depType, bad} {
+				if !strings.Contains(out, want) {
+					t.Errorf("create --file with %s:%s output = %q, want %q", depType, target, out, want)
+				}
+			}
+			titles := createDepsIssueTitles(t, bd, dir)
+			for _, title := range []string{good, bad} {
+				if titles[title] {
+					t.Errorf("issue %q persisted although the file was refused", title)
+				}
+			}
+		}
+	})
+
+	// GH#7508: once the aliases mean blocks, one edge spelled three ways is
+	// three identical edges, which the create role refuses as duplicates.
+	// --deps dedupes them; so does the file.
+	t.Run("a_repeated_edge_is_written_once", func(t *testing.T) {
+		target := createMarkdownDepTarget(t, bd, dir, "repeated edge target 7508")
+		const title = "Repeats one edge three ways 7508"
+		plan := writeMarkdownPlan(t, dir, "repeated.md", `## `+title+`
+
+### Deps
+depends-on:`+target+`, blocked-by:`+target+`, `+target+`
+`)
+		runCreateDepsBD(t, bd, dir, "create", "--file", plan)
+		out := runCreateDepsBD(t, bd, dir, "dep", "list", target, "--direction=up", "--json")
+		var dependents []struct {
+			Title          string `json:"title"`
+			DependencyType string `json:"dependency_type"`
+		}
+		if err := json.Unmarshal([]byte(out[strings.Index(out, "["):]), &dependents); err != nil {
+			t.Fatalf("parse bd dep list --json: %v\n%s", err, out)
+		}
+		var edges []string
+		for _, d := range dependents {
+			if d.Title == title {
+				edges = append(edges, d.DependencyType)
+			}
+		}
+		if len(edges) != 1 || edges[0] != "blocks" {
+			t.Errorf("edges from %q to %s = %v, want exactly one blocks edge:\n%s", title, target, edges, out)
+		}
+		if blocked := runCreateDepsBD(t, bd, dir, "blocked", "--json"); !strings.Contains(blocked, title) {
+			t.Errorf("%q is not in bd blocked:\n%s", title, blocked)
+		}
+	})
+}
+
+// createMarkdownDepTarget creates a fresh open issue for a file's edges to
+// name, so no other subtest's edge can satisfy a ready/blocked check.
+func createMarkdownDepTarget(t *testing.T, bd, dir, title string) string {
+	t.Helper()
+	id := strings.TrimSpace(runCreateDepsBD(t, bd, dir, "create", title, "--silent"))
+	if id == "" {
+		t.Fatalf("create %q returned empty ID", title)
+	}
+	return id
 }

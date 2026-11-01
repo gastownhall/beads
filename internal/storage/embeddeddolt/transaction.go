@@ -50,11 +50,12 @@ func (s *EmbeddedDoltStore) runTransactionWithMessage(ctx context.Context, fn fu
 	}); err != nil {
 		return err
 	}
+	afterSQLCommit()
 
 	// Anything the body minted ran with versioned history scoped on this
 	// store's transaction (withConn), so its version rows must be staged with
 	// the mutation they describe rather than left dirty in the working set.
-	tracker.MarkVersionedHistoryDirty(s.versionedHistoryEnabled.Load())
+	tracker.MarkVersionedHistoryDirty(s.versionedHistory.Enabled())
 
 	// Create a Dolt version commit from the working set changes.
 	if commitMsg != "" && len(tracker.DirtyTables()) > 0 {
@@ -66,6 +67,11 @@ func (s *EmbeddedDoltStore) runTransactionWithMessage(ctx context.Context, fn fu
 	}
 	return nil
 }
+
+// afterSQLCommit runs between runTransactionWithMessage's SQL commit and the
+// Dolt commit that publishes it. It is a no-op outside tests, which use it to
+// fail the publication of a write whose rows have already landed.
+var afterSQLCommit = func() {}
 
 func wrapCommitIndeterminate(op string, err error) error {
 	return fmt.Errorf("%s: %w: %w", op, err, storage.ErrCommitIndeterminate)

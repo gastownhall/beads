@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -102,6 +103,34 @@ func TestCheckConfigSetSideEffects_UnknownKey(t *testing.T) {
 	effects := checkConfigSetSideEffects("some.random.key", "value")
 	if len(effects) != 0 {
 		t.Errorf("expected 0 effects for unknown key, got %d", len(effects))
+	}
+}
+
+// versioned-history.enabled is a row of the store's config table, which
+// replicates on `bd dolt push` and `bd dolt pull`, and the feature is single
+// writer only. `bd config set ... true` is the moment someone turns it on, so it
+// is where that caveat belongs -- said once, at the command that has the effect.
+func TestVersionedHistoryConfigSetHintsAboutReplicationAndSingleWriter(t *testing.T) {
+	for _, on := range []string{"true", "TRUE", " true ", "1", "t"} {
+		effects := checkConfigSetSideEffects(versionedHistorySettingKey, on)
+		if len(effects) != 1 {
+			t.Errorf("value %q turns recording on: expected 1 hint, got %d", on, len(effects))
+			continue
+		}
+		for _, want := range []string{"replicates", "single writer"} {
+			if !strings.Contains(strings.ToLower(effects[0].Message), want) {
+				t.Errorf("value %q: the hint does not mention %q: %s", on, want, effects[0].Message)
+			}
+		}
+	}
+	// Turning it off, or anything that does not turn it on, needs no caveat.
+	for _, off := range []string{"false", "0", "", "off", "nonsense"} {
+		if effects := checkConfigSetSideEffects(versionedHistorySettingKey, off); len(effects) != 0 {
+			t.Errorf("value %q does not turn recording on: expected no hint, got %d", off, len(effects))
+		}
+	}
+	if effects := checkConfigUnsetSideEffects(versionedHistorySettingKey); len(effects) != 0 {
+		t.Errorf("unsetting the key needs no hint, got %d", len(effects))
 	}
 }
 

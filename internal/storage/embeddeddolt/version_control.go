@@ -294,6 +294,19 @@ func (s *EmbeddedDoltStore) CommitExists(ctx context.Context, commitHash string)
 	return exists, err
 }
 
+var _ storage.HeadHasher = (*EmbeddedDoltStore)(nil)
+
+// GetHeadHashes returns the HEAD commit hash and the hash of its root value.
+// Implements storage.HeadHasher.
+func (s *EmbeddedDoltStore) GetHeadHashes(ctx context.Context) (commit, root string, err error) {
+	err = s.withDBConn(ctx, func(db versioncontrolops.DBConn) error {
+		var readErr error
+		commit, root, readErr = versioncontrolops.HeadHashes(ctx, db)
+		return readErr
+	})
+	return commit, root, err
+}
+
 // HistoricalIssueIDs reports which of ids appear in HEAD's committed history
 // of the issues table. Implements storage.HistoryPresence.
 //

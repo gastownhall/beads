@@ -15,11 +15,15 @@
 # the wild: dash, bash, busybox ash), a PATH of exactly one timeout
 # implementation — under the name `timeout`, or for the multicall ones also
 # under `gtimeout` alone — plus optionally perl, BEADS_HOOK_TIMEOUT=1, and a
-# fake `bd` that blocks on a held-open fifo until a helper kills it. The fake
-# records the signal that killed it, which is how the test asserts the backend
-# and not just "it finished":
+# fake `bd` that waits on a child blocked on a held-open fifo. It reacts to
+# signals like a real bd waiting on a chained hook or a bd export/import
+# child: it ignores ALRM (the Go runtime catches SIGALRM and takes no action,
+# GH#7753), and it catches the first TERM and keeps waiting
+# (setupGracefulShutdown), so only a backend that signals bd's whole process
+# group ends the wait. The fake records the signal it caught, which is how the
+# test asserts the backend and not just "it finished":
 #   coreutils backend → TERM from timeout, shim reports the deadline, exit 0
-#   perl backend      → ALRM from perl's alarm, same report, exit 0
+#   perl backend      → TERM from the perl supervisor, same report, exit 0
 #   no backend        → the fake returns at once; shim warns it is running
 #                       without a deadline, exit 0
 # A non-zero hook exit blocks the user's push, so every case asserts exit 0.
@@ -66,6 +70,7 @@ require_tool() {
 dash="$(require_tool dash)"
 bash_bin="$(require_tool bash)"
 perl="$(require_tool perl)"
+cat_bin="$(require_tool cat)"
 gnu_timeout="$(require_tool timeout)"
 case "$("$gnu_timeout" --version 2>/dev/null | head -n 1)" in
     "timeout (GNU coreutils) "*) ;;
@@ -98,16 +103,19 @@ for want in pre-commit post-merge pre-push post-checkout prepare-commit-msg; do
     [[ -f "$shims/$want" ]] || { echo "FAIL: .githooks/$want is not in the test's data" >&2; exit 1; }
 done
 
-# 2. The fake bd the shim will find on its restricted PATH. It blocks until
-#    killed and records the signal, re-raising it so it dies the way a real bd
-#    would (143 / 142), not by a made-up exit code.
+# 2. The fake bd the shim will find on its restricted PATH. Like a real bd it
+#    records a TERM and keeps waiting, and it ignores ALRM as the Go runtime
+#    does. It waits on a child process, cat reading the fifo, which only a
+#    signal to bd's whole process group stops; the read builtin would not do,
+#    because a TERM to the fake alone interrupts it. cat comes by absolute
+#    path: the shim's PATH holds only the commands under test.
 fake="$tmp/fakebin"
 mkdir -p "$fake"
 cat > "$fake/bd" <<'FAKE'
 #!/bin/sh
-trap 'echo TERM > "$FAKE_BD_SIGNAL"; trap - TERM; kill -TERM $$' TERM
-trap 'echo ALRM > "$FAKE_BD_SIGNAL"; trap - ALRM; kill -ALRM $$' ALRM
-[ -n "$FAKE_BD_BLOCK" ] && read -r _
+trap 'echo TERM > "$FAKE_BD_SIGNAL"' TERM
+trap '' ALRM
+[ -n "$FAKE_BD_BLOCK" ] && "$FAKE_BD_CAT" >/dev/null 2>&1
 exit 0
 FAKE
 chmod +x "$fake/bd"
@@ -162,7 +170,7 @@ run_case() {
     [[ "$backend" == none ]] && block=
     local signal_file="$case_dir/signal" rc=0 case_out signal verdict=ok
     case_out=$("$gnu_timeout" 10 env PATH="$path" BEADS_HOOK_TIMEOUT=1 \
-        FAKE_BD_BLOCK="$block" FAKE_BD_SIGNAL="$signal_file" \
+        FAKE_BD_BLOCK="$block" FAKE_BD_SIGNAL="$signal_file" FAKE_BD_CAT="$cat_bin" \
         "$case_dir/bin/sh" "$shims/$hook" origin https://example.invalid 2>&1 <&3) || rc=$?
     signal=$(cat "$signal_file" 2>/dev/null || true)
     if [[ "$rc" -eq 124 ]]; then
@@ -177,7 +185,7 @@ run_case() {
                 ;;
             perl)
                 [[ "$case_out" == *"timed out after 1s"* ]] || verdict="FAIL: no deadline report: $case_out"
-                [[ "$signal" == ALRM ]] || verdict="FAIL: expected perl alarm (ALRM), fake saw '$signal'"
+                [[ "$signal" == TERM ]] || verdict="FAIL: expected perl supervisor (TERM), fake saw '$signal'"
                 ;;
             none)
                 [[ "$case_out" == *"running without timeout"* ]] || verdict="FAIL: no unbounded warning: $case_out"

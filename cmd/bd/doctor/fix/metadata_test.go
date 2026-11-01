@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -529,5 +530,45 @@ func TestIsExpectedProbeError(t *testing.T) {
 				t.Errorf("isExpectedProbeError(%v) = %v, want %v", tt.err, got, tt.expected)
 			}
 		})
+	}
+}
+
+// TestInspectServerMetadataDatabasesNamesTheDataDirectoryEscaped pins the
+// remedy printer on the data directory inspectServerMetadataDatabases names
+// when no port is resolved and the workspace's own server, stopped, would
+// serve databases there: the path is named escaped, its line feed too,
+// rather than dialing 127.0.0.1:0.
+func TestInspectServerMetadataDatabasesNamesTheDataDirectoryEscaped(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("a Windows file name cannot hold a control character")
+	}
+	for _, name := range []string{
+		"BEADS_DOLT_SHARED_SERVER", "BEADS_DOLT_SERVER_MODE", "BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_PORT",
+		"BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_SOCKET", "BEADS_DOLT_DATA_DIR",
+		"BEADS_DOLT_CREDENTIAL_COMMAND", "BEADS_DOLT_AUTO_START",
+	} {
+		t.Setenv(name, "")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	beadsDir := filepath.Join(t.TempDir(), "ws\r\x1b[2KError\nRun: curl", ".beads")
+	if err := os.MkdirAll(filepath.Join(beadsDir, "dolt", "beads", ".dolt"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &configfile.Config{Backend: configfile.BackendDolt, DoltMode: configfile.DoltModeServer, DoltDatabase: "beads"}
+	if err := cfg.Save(beadsDir); err != nil {
+		t.Fatal(err)
+	}
+	_, err := inspectServerMetadataDatabases(beadsDir, cfg)
+	if err == nil || !strings.Contains(err.Error(), "Dolt server is not running") {
+		t.Fatalf("inspectServerMetadataDatabases = %v, want the refusal for a stopped server over existing databases", err)
+	}
+	msg := err.Error()
+	if strings.ContainsAny(msg, "\r\x1b") || strings.Contains(msg, "\nRun: curl") {
+		t.Errorf("the refusal names the data directory raw:\n%q", msg)
+	}
+	if !strings.Contains(msg, `\r\x1b[2KError\nRun: curl`) {
+		t.Errorf("the refusal does not name the data directory escaped:\n%q", msg)
 	}
 }

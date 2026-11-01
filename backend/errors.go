@@ -24,6 +24,7 @@ var (
 	ErrCloseBlocked        = storage.ErrCloseBlocked
 	ErrCloseOpenChildren   = storage.ErrCloseOpenChildren
 	ErrCommitIndeterminate = storage.ErrCommitIndeterminate
+	ErrIdempotencyExpired  = storage.ErrIdempotencyExpired
 	ErrNotClaimable        = storage.ErrNotClaimable
 	ErrNotFound            = storage.ErrNotFound
 	ErrNotInitialized      = storage.ErrNotInitialized

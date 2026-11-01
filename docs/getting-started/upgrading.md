@@ -204,7 +204,9 @@ upgrade prints nothing at all. Silence there is not a stall either.
 Migration 0059 can mark issues as blocked when they are not, which drops them
 out of `bd ready` without any error
 ([#7037](https://github.com/gastownhall/beads/issues/7037)). It happens on a
-Dolt server older than 2.4.0, and the embedded engine is likely affected too.
+Dolt server older than 2.4.0, and the embedded engine of `bd` releases that
+link Dolt older than 2.4.0 (every release through v1.3.x) is likely affected
+too.
 Once a database has migrated, run this once for that database on every clone:
 
 ```bash

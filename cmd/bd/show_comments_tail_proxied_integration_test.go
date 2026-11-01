@@ -11,8 +11,8 @@ import (
 
 // Route tests for `bd show --comments-tail N` (#6618 follow-up, bd-6gl9h7):
 // the shared fixtures and the proxied routes live here; the direct routes
-// are in show_comments_tail_embedded_test.go, which the embedded cmd shard
-// manifest discovers by its *_embedded_test.go name.
+// are in show_comments_tail_embedded_test.go, whose TestEmbedded* names put
+// them in the embedded cmd shard manifest.
 //
 // show_comments_tail_test.go pins printComments and renderWatchComments by
 // calling them directly, so a regression that passed 0 at any of the three

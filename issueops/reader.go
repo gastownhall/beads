@@ -396,9 +396,10 @@ type ListRequest struct {
 	// GetDescendantIDsInTx (GH#3396); on the ReadyFlag arm this field crosses
 	// to that query and resolves recursively there.
 	// The recursive tree that `bd list --parent X` renders by DEFAULT comes
-	// from cmd/bd/list_show_filter_modes.go's findAllDescendants re-running
-	// this clause against the store once per level and accumulating the
-	// results client-side, not from this field answering a deeper question.
+	// from cmd/bd/list_show_filter_modes.go's findAllDescendants, whose walk
+	// (storage.WalkDescendants) re-runs this clause against the store once per
+	// level and accumulates the results client-side, not from this field
+	// answering a deeper question.
 	// --flat, --json and --format skip that walk and return exactly this
 	// field's answer, which is why the flat listing is the invocation that
 	// agrees with `bd count --parent X`'s cardinality.

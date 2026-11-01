@@ -33,7 +33,9 @@ func resolveProxiedTopology(beadsDir string) ProxyTopology {
 	if beadsDir == "" {
 		return ProxyTopologyUnknown
 	}
-	cfg, err := configfile.Load(beadsDir)
+	// Read in place, never migrated: this classification runs before
+	// admission (bd doctor), and must not rewrite a legacy config.json.
+	cfg, err := configfile.LoadForDiscovery(beadsDir)
 	if err != nil {
 		return ProxyTopologyUnknown
 	}

@@ -8,6 +8,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/audit"
 	"github.com/steveyegge/beads/internal/debug"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/issueops"
@@ -33,7 +34,7 @@ func runCloseDirectIfRevision(ctx context.Context, id, reason string, force bool
 		if reported, ok := reportIfRevisionTargetGone("closing", id, err, &expectedVersion); ok {
 			return reported
 		}
-		fmt.Fprintf(os.Stderr, "Error resolving %s: %v\n", id, err)
+		fmt.Fprintf(os.Stderr, "Error resolving %s: %s\n", id, remedy.PrintedMessage(err))
 		return &exitError{Code: 1}
 	}
 	defer result.Close()
@@ -48,7 +49,7 @@ func runCloseDirectIfRevision(ctx context.Context, id, reason string, force bool
 	}
 	ops, err := writeOps(result.Store)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error closing %s: %v\n", id, err)
+		fmt.Fprintf(os.Stderr, "Error closing %s: %s\n", id, remedy.PrintedMessage(err))
 		return &exitError{Code: 1}
 	}
 

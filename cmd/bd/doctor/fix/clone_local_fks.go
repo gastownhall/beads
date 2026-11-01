@@ -50,14 +50,15 @@ type SeveredCloneLocalFK struct {
 }
 
 // ScanSeveredCloneLocalFKs reports which clone-local FKs are missing from the
-// live schema. Used by CheckCloneLocalFKs in the doctor package.
+// live schema of the server its fix writes (openScanDB). Used by
+// CheckCloneLocalFKs in the doctor package.
 func ScanSeveredCloneLocalFKs(path string) ([]SeveredCloneLocalFK, error) {
 	beadsDir, err := resolvedWorkspaceBeadsDir(path)
 	if err != nil {
 		return nil, err
 	}
 
-	db, _, err := openDoltDB(beadsDir)
+	db, _, err := openDoltScanDB(beadsDir)
 	if err != nil {
 		return nil, err
 	}
@@ -120,8 +121,7 @@ func CloneLocalFKEnforcement(path string, verbose bool) error {
 
 	db, cfg, err := openDoltDB(beadsDir)
 	if err != nil {
-		fmt.Printf("  Clone-local FK fix skipped (%v)\n", err)
-		return nil
+		return skipFix(err)
 	}
 	defer db.Close()
 

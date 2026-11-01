@@ -12,7 +12,6 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 
-	"github.com/steveyegge/beads/internal/idgen"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
@@ -739,8 +738,8 @@ func (s *DoltStore) deleteIssues(ctx context.Context, ids []string, cascade bool
 	// to avoid write timeout on large sets — see bd-2ehd, ff-tqm).
 	ephIDs, regularIDs := s.partitionByWispStatus(ctx, ids)
 	wispDeleteCount := 0
+	var activeWispIDs []string
 	if len(ephIDs) > 0 {
-		var activeWispIDs []string
 		for _, eid := range ephIDs {
 			if s.isActiveWisp(ctx, eid) {
 				activeWispIDs = append(activeWispIDs, eid)
@@ -763,7 +762,9 @@ func (s *DoltStore) deleteIssues(ctx context.Context, ids []string, cascade bool
 	var result *types.DeleteIssuesResult
 	if err := s.withWriteTx(ctx, func(tx *sql.Tx) error {
 		// storage.DeleteIssues carries no actor, so the journal rows record none.
-		r, err := issueops.DeleteIssuesInTx(ctx, tx, ids, cascade, force, dryRun, "")
+		// The wisps peeled off above stay part of the request for the
+		// dependents guard, in a dry run too, where they are not deleted first.
+		r, err := issueops.DeleteIssuesBesideWispsInTx(ctx, tx, ids, activeWispIDs, cascade, force, dryRun, "")
 		if err != nil {
 			result = r
 			return err
@@ -806,138 +807,6 @@ func doltBuildSQLInClause(ids []string) (string, []interface{}) {
 
 func recordEvent(ctx context.Context, tx *sql.Tx, issueID string, eventType types.EventType, actor, oldValue, newValue string) error {
 	return wrapExecError("record event", issueops.RecordFullEventInTable(ctx, tx, "events", issueID, eventType, actor, oldValue, newValue))
-}
-
-// seedCounterFromExistingIssuesTx scans existing issues to find the highest numeric suffix
-// for the given prefix, then seeds the issue_counter table if no row exists yet.
-// This is called when counter mode is first enabled on a repo that already has issues,
-// to prevent counter collisions with manually-created sequential IDs (GH#2002).
-// It is idempotent: if a counter row already exists for this prefix, it does nothing.
-func seedCounterFromExistingIssuesTx(ctx context.Context, tx *sql.Tx, prefix string) error {
-	// Check whether a counter row already exists for this prefix.
-	// If it does, we must not overwrite it (the counter may already be in use).
-	var existing int
-	err := tx.QueryRowContext(ctx, "SELECT last_id FROM issue_counter WHERE prefix = ?", prefix).Scan(&existing)
-	if err == nil {
-		// Row exists - counter is already initialized, nothing to do.
-		return nil
-	}
-	if err != sql.ErrNoRows {
-		return fmt.Errorf("failed to check issue_counter for prefix %q: %w", prefix, err)
-	}
-
-	// No counter row yet. Scan existing issues to find the highest numeric suffix.
-	likePattern := prefix + "-%"
-	rows, err := tx.QueryContext(ctx, "SELECT id FROM issues WHERE id LIKE ?", likePattern)
-	if err != nil {
-		return fmt.Errorf("failed to query existing issues for prefix %q: %w", prefix, err)
-	}
-	defer rows.Close()
-
-	maxNum := 0
-	prefixDash := prefix + "-"
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return fmt.Errorf("failed to scan issue id: %w", err)
-		}
-		// Strip the prefix and attempt to parse the remainder as an integer.
-		suffix := strings.TrimPrefix(id, prefixDash)
-		if suffix == id {
-			// id did not start with prefix- (should not happen given LIKE, but be safe)
-			continue
-		}
-		var num int
-		if _, parseErr := fmt.Sscanf(suffix, "%d", &num); parseErr == nil && fmt.Sprintf("%d", num) == suffix {
-			if num > maxNum {
-				maxNum = num
-			}
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("failed to iterate existing issues for prefix %q: %w", prefix, err)
-	}
-
-	// Only insert a seed row if we found at least one numeric ID.
-	// If no numeric IDs exist, the counter will naturally start at 1 on first use.
-	if maxNum > 0 {
-		_, err = tx.ExecContext(ctx,
-			"INSERT INTO issue_counter (prefix, last_id) VALUES (?, ?)",
-			prefix, maxNum)
-		if err != nil {
-			return fmt.Errorf("failed to seed issue_counter for prefix %q at %d: %w", prefix, maxNum, err)
-		}
-	}
-
-	return nil
-}
-
-// nextCounterIDTx atomically increments and returns the next sequential issue ID
-// for the given prefix within an existing transaction. Returns the full ID string
-// (e.g., "bd-1"). Used by both generateIssueID and generateIssueIDInTable.
-func nextCounterIDTx(ctx context.Context, tx *sql.Tx, prefix string) (string, error) {
-	// Increment atomically at the DB level to avoid duplicate IDs under
-	// concurrent transactions (GH#2002). "last_id = last_id + 1" is evaluated
-	// by the DB engine atomically within Dolt's MVCC.
-
-	// Attempt atomic increment of an existing counter row.
-	res, err := tx.ExecContext(ctx, "UPDATE issue_counter SET last_id = last_id + 1 WHERE prefix = ?", prefix)
-	if err != nil {
-		return "", fmt.Errorf("failed to increment issue counter for prefix %q: %w", prefix, err)
-	}
-
-	rowsAffected, err := res.RowsAffected()
-	if err != nil {
-		return "", fmt.Errorf("failed to check rows affected for issue counter prefix %q: %w", prefix, err)
-	}
-
-	if rowsAffected == 0 {
-		// No counter row yet - seed from existing issues before proceeding to
-		// avoid collisions with manually-created sequential IDs (GH#2002).
-		if seedErr := seedCounterFromExistingIssuesTx(ctx, tx, prefix); seedErr != nil {
-			return "", fmt.Errorf("failed to seed issue counter for prefix %q: %w", prefix, seedErr)
-		}
-		// Retry the atomic increment after seeding.
-		res, err = tx.ExecContext(ctx, "UPDATE issue_counter SET last_id = last_id + 1 WHERE prefix = ?", prefix)
-		if err != nil {
-			return "", fmt.Errorf("failed to increment issue counter after seeding for prefix %q: %w", prefix, err)
-		}
-		rowsAffected, err = res.RowsAffected()
-		if err != nil {
-			return "", fmt.Errorf("failed to check rows affected after seeding for prefix %q: %w", prefix, err)
-		}
-		if rowsAffected == 0 {
-			// Seeding found no existing numeric IDs -- insert the initial row.
-			_, err = tx.ExecContext(ctx, "INSERT INTO issue_counter (prefix, last_id) VALUES (?, 1)", prefix)
-			if err != nil {
-				return "", fmt.Errorf("failed to insert initial issue counter for prefix %q: %w", prefix, err)
-			}
-		}
-	}
-
-	// Read back the value that was atomically set by the DB engine.
-	var nextID int
-	err = tx.QueryRowContext(ctx, "SELECT last_id FROM issue_counter WHERE prefix = ?", prefix).Scan(&nextID)
-	if err != nil {
-		return "", fmt.Errorf("failed to read issue counter after increment for prefix %q: %w", prefix, err)
-	}
-	return fmt.Sprintf("%s-%d", prefix, nextID), nil
-}
-
-// isCounterModeTx checks whether issue_id_mode=counter is configured.
-func isCounterModeTx(ctx context.Context, tx *sql.Tx) (bool, error) {
-	var idMode string
-	err := tx.QueryRowContext(ctx, "SELECT value FROM config WHERE `key` = ?", "issue_id_mode").Scan(&idMode)
-	if err != nil && err != sql.ErrNoRows {
-		return false, fmt.Errorf("failed to read issue_id_mode config: %w", err)
-	}
-	return idMode == "counter", nil
-}
-
-// generateHashID creates a hash-based ID for a top-level issue.
-// Uses base36 encoding (0-9, a-z) for better information density than hex.
-func generateHashID(prefix, title, description, creator string, timestamp time.Time, length, nonce int) string {
-	return idgen.GenerateHashID(prefix, title, description, creator, timestamp, length, nonce)
 }
 
 // Thin wrappers around exported issueops functions, kept for internal callers.

@@ -13,6 +13,27 @@ import (
 type PersistenceMoveResult struct {
 	Changed       bool
 	ChangedTables map[string]bool
+	// EnteredIssuesPlane reports that the move took the row out of the wisps
+	// table into issues. A same-plane repair does not set it: that row keeps
+	// its own participation.
+	EnteredIssuesPlane bool
+	// RestoredParticipation reports that the row entered the issues plane
+	// carrying the participation a demotion recorded for it while versioned
+	// history was on (carryParticipationInTx), and that the move put it back
+	// on the new issues row: a legacy row is legacy again, a participating
+	// row has its generation again.
+	RestoredParticipation bool
+}
+
+// BeginsHistory reports whether the move's mint is create-shaped (design
+// §16.2b): the row entered the issues plane carrying no participation (it
+// began as a wisp, or became one while history was off), so its issues row
+// is new and its next version is its first. A row that arrived with its
+// participation restored keeps it, and mints update-shaped, so a legacy row
+// stays legacy (R2.3). A caller that mints for the move itself, as
+// ExecuteUpdate does, reads this to pick the entry point.
+func (r PersistenceMoveResult) BeginsHistory() bool {
+	return r.EnteredIssuesPlane && !r.RestoredParticipation
 }
 
 // MoveIssuePersistenceInTx moves a complete issue aggregate to the requested
@@ -44,9 +65,23 @@ func moveIssuePersistenceInTx(ctx context.Context, tx DBTX, current *types.Issue
 		}
 		return PersistenceMoveResult{}, err
 	}
-	sourceWisp, err := isActiveWispForPersistenceMove(ctx, tx, current.ID)
+	// A move re-inserts the row into the other plane, so it takes the id's
+	// create coordination cell BEFORE it reads where the row lives
+	// (CoordinateIDCreatesInTx). Against a retaining sweep of the same row:
+	// a move that comes second reads after the sweep's commit and finds no
+	// row; a move that comes first makes the sweep conflict and retry.
+	// Without the cell both could delete the source row (identical deletes
+	// merge cleanly on Dolt), the move's insert would land in the other
+	// plane, and the sweep's tombstone would sit beside a live row.
+	if err := CoordinateIDCreatesInTx(ctx, tx, []string{current.ID}); err != nil {
+		return PersistenceMoveResult{}, err
+	}
+	sourceWisp, found, err := locatePersistenceMoveRow(ctx, tx, current.ID)
 	if err != nil {
 		return PersistenceMoveResult{}, err
+	}
+	if !found {
+		return PersistenceMoveResult{}, fmt.Errorf("move issue persistence: %w: %s", storage.ErrNotFound, current.ID)
 	}
 	targetWisp := ephemeral || noHistory
 	if sourceWisp == targetWisp && current.Ephemeral == ephemeral && current.NoHistory == noHistory && current.StorageClass.Normalize() == storageClass.Normalize() {
@@ -81,7 +116,11 @@ func moveIssuePersistenceInTx(ctx context.Context, tx DBTX, current *types.Issue
 			return PersistenceMoveResult{}, err
 		}
 		// Versioned only on the issues plane; a wisp-plane normalize keeps
-		// the wisp exclusion.
+		// the wisp exclusion. Unlike a move, this mint stays update-shaped
+		// (design §16.2b): the row already lives on the issues plane and
+		// keeps its own participation_generation. A row created with the flag
+		// on proceeds; a legacy row stays legacy, since a repair is an
+		// ordinary write and must not promote it (R2.3).
 		if mintVersion && !targetWisp {
 			if err := RecordVersionInTx(ctx, tx, current.ID, actor); err != nil {
 				return PersistenceMoveResult{}, err
@@ -98,6 +137,13 @@ func moveIssuePersistenceInTx(ctx context.Context, tx DBTX, current *types.Issue
 	move.Ephemeral, move.NoHistory, move.StorageClass, move.RowVersion = ephemeral, noHistory, storageClass, FreshRowLock()
 	if err := InsertIssueStrictInTx(ctx, tx, persistenceIssueTable(targetWisp), &move); err != nil {
 		return PersistenceMoveResult{}, fmt.Errorf("insert moved issue %s: %w", current.ID, err)
+	}
+	// Both rows exist until the source is deleted below, so this is where the
+	// row's participation crosses the planes: recorded on the wisps row by a
+	// demotion, restored onto the new issues row by the move back out.
+	restored, err := carryParticipationInTx(ctx, tx, current.ID, targetWisp)
+	if err != nil {
+		return PersistenceMoveResult{}, err
 	}
 	auxTables, err := copyPersistenceAuxiliary(ctx, tx, current.ID, sourceWisp, targetWisp)
 	if err != nil {
@@ -154,13 +200,24 @@ func moveIssuePersistenceInTx(ctx context.Context, tx DBTX, current *types.Issue
 	// The bead keeps its ID across a plane move; only where it is stored
 	// changes. Journal one update carrying the moved snapshot, after derived
 	// blocked-state maintenance has settled. A move INTO the issues plane
-	// then mints the row's first version there, after its auxiliary copies
-	// and retargeted edges exist; a move into the wisp plane mints nothing.
+	// then mints, after its auxiliary copies and retargeted edges exist; a
+	// move into the wisp plane mints nothing. A row that carried no
+	// participation mints its first version create-shaped (design §16.2b):
+	// its issues row was inserted above without participation_generation, so
+	// the update-shaped entry would fence it as legacy. A row whose
+	// participation the move restored mints update-shaped, as any write to it
+	// on the issues plane would: a legacy row stays legacy (R2.3).
 	if err := RecordEventInTx(ctx, tx, EventUpdate, current.ID, actor); err != nil {
 		return PersistenceMoveResult{}, err
 	}
+	result.EnteredIssuesPlane = !targetWisp
+	result.RestoredParticipation = !targetWisp && restored
 	if mintVersion && !targetWisp {
-		if err := RecordVersionInTx(ctx, tx, current.ID, actor); err != nil {
+		if result.BeginsHistory() {
+			if err := RecordVersionForCreateInTx(ctx, tx, current.ID, actor); err != nil {
+				return PersistenceMoveResult{}, err
+			}
+		} else if err := RecordVersionInTx(ctx, tx, current.ID, actor); err != nil {
 			return PersistenceMoveResult{}, err
 		}
 	}
@@ -214,18 +271,21 @@ func copyPersistenceAuxiliary(ctx context.Context, tx DBTX, id string, sourceWis
 	return changed, nil
 }
 
-func isActiveWispForPersistenceMove(ctx context.Context, tx DBTX, id string) (bool, error) {
+// locatePersistenceMoveRow reports which plane holds id (wisp true for the
+// wisps table) and whether any does. A row in neither is one deleted after the
+// caller read it, which a move must not re-create.
+func locatePersistenceMoveRow(ctx context.Context, tx DBTX, id string) (wisp, found bool, err error) {
 	var wispCount, issueCount int
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM wisps WHERE id = ?`, id).Scan(&wispCount); err != nil {
-		return false, fmt.Errorf("locate issue persistence plane: %w", err)
+		return false, false, fmt.Errorf("locate issue persistence plane: %w", err)
 	}
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM issues WHERE id = ?`, id).Scan(&issueCount); err != nil {
-		return false, fmt.Errorf("locate issue persistence plane: %w", err)
+		return false, false, fmt.Errorf("locate issue persistence plane: %w", err)
 	}
 	if issueCount > 0 && wispCount > 0 {
-		return false, fmt.Errorf("locate issue persistence plane: ID %q exists in both issues and wisps", id)
+		return false, false, fmt.Errorf("locate issue persistence plane: ID %q exists in both issues and wisps", id)
 	}
-	return wispCount > 0, nil
+	return wispCount > 0, wispCount+issueCount > 0, nil
 }
 
 func persistenceAuxTables(wisp bool) []string {

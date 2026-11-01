@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/httpapi/apigen"
 	"github.com/steveyegge/beads/internal/storage"
@@ -882,6 +883,17 @@ func TestApplyBatchMapsTheRolesTypedRefusalsOntoTheDocumentedCodes(t *testing.T)
 			err:        itemErr(0, issueops.ItemCreate, "root", "", storage.ErrAlreadyExists),
 			wantStatus: http.StatusConflict,
 			wantCode:   "already_exists",
+			wantParam:  "items[0].create.id",
+		},
+		{
+			// A 410, not the occupied id's 409: the id was retired by a
+			// retaining sweep, so there is no row to read and adopt, and the
+			// identical request can never succeed.
+			name: "a retired explicit id",
+			err: itemErr(0, issueops.ItemCreate, "root", "",
+				&issueops.IdempotencyExpiredError{ID: "bd-op-1", ClosedAt: time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)}),
+			wantStatus: http.StatusGone,
+			wantCode:   "idempotency_expired",
 			wantParam:  "items[0].create.id",
 		},
 		{

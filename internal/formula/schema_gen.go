@@ -367,7 +367,9 @@ intent (e.g. "mail_only"). Opaque to bd; consumed by downstream tools.`,
 		Name: "Gate",
 		Doc: `Gate defines an async wait condition for formula steps.
 When a step has a Gate, bd cook creates a gate issue that blocks the step.
-The gate must be closed (manually or via watchers) to unblock the step.`,
+The gate must be closed (manually or via watchers) to unblock the step.
+For a step declared type = "gate" the direction is reversed: the step's
+task blocks the gate, and steps referencing the step wait on both.`,
 		Fields: []FieldDoc{
 			{
 				Name:     "Type",
@@ -751,8 +753,11 @@ Evaluated at cook/pour time via FilterStepsByCondition.`,
 				Type:     "*Gate",
 				JSONName: "gate",
 				Doc: `Gate defines an async wait condition for this step.
-When set, bd cook creates a gate issue that blocks this step.
-Close the gate issue (bd close bd-xxx.gate-stepid) to unblock.`,
+When set, bd cook creates a companion gate issue that blocks this step
+(an entry-gate). Close the gate issue (bd close bd-xxx.gate-stepid) to
+unblock. If the step is declared type = "gate", the companion is an
+exit-gate instead: the step becomes a task that blocks the companion,
+and steps that reference the step id wait for both (GH#3316).`,
 			},
 			{
 				Name:     "Loop",

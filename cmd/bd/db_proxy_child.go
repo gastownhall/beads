@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/server"
 )
@@ -60,13 +61,7 @@ not intended to be invoked directly by users.`,
 		}
 		defer func() { _ = srv.Stop(context.Background()) }()
 
-		p := proxy.NewProxyServer(proxy.ProxyOpts{
-			RootDir:     dbProxyChildRoot,
-			Port:        dbProxyChildPort,
-			IdleTimeout: dbProxyChildIdleTimeout,
-			Server:      srv,
-			StopEpoch:   dbProxyChildStopEpoch,
-		})
+		p := proxy.NewProxyServer(dbProxyChildProxyOpts(srv))
 		if err := p.ListenAndServe(cmd.Context()); err != nil {
 			if errors.Is(err, proxy.ErrLockHeld) {
 				return &exitError{Code: proxy.LockHeldExitCode}
@@ -75,6 +70,20 @@ not intended to be invoked directly by users.`,
 		}
 		return nil
 	},
+}
+
+// dbProxyChildProxyOpts builds the child's proxy options from its flags.
+func dbProxyChildProxyOpts(srv server.DatabaseServer) proxy.ProxyOpts {
+	return proxy.ProxyOpts{
+		RootDir:     dbProxyChildRoot,
+		Port:        dbProxyChildPort,
+		IdleTimeout: dbProxyChildIdleTimeout,
+		Server:      srv,
+		StopEpoch:   dbProxyChildStopEpoch,
+		// The child inherits BD_DEBUG from the spawning bd; its
+		// PersistentPreRun is a no-op, so --verbose never reaches it.
+		TraceConnections: debug.Enabled(),
+	}
 }
 
 func newDatabaseServer(backend proxy.Backend, rootDir, configPath, logPath, doltBin, database string, external configfile.ExternalDoltConfig) (server.DatabaseServer, error) {

@@ -29,6 +29,7 @@ go_library(
         "//internal/storage",
         "//internal/storage/issueops",
         "//internal/storage/kvkeys",
+        "//internal/storage/schema",
     ],
 )
 
@@ -42,6 +43,7 @@ go_test(
         "conflicts_test.go",
         "fastforward_test.go",
         "gc_test.go",
+        "mergesettle_draincall_regression_test.go",
         "remotes_githooks_test.go",
         "remotes_gittrace_test.go",
         "remotes_test.go",

@@ -16,6 +16,13 @@ import (
 // downgrading the case to a blunt refusal.
 const dataBehindFallbackReason = "data-behind"
 
+// unreadableStateFallbackReason is the literal for the smart gate's
+// unreadable-remote-state fallback, unexported in schema for the same reason.
+// The fixture using it is guarded by its own UserMessage carrying the note
+// this reason selects, so a drift here fails as a broken fixture rather than
+// as a dropped note.
+const unreadableStateFallbackReason = "unreadable-remote-state"
+
 func TestLenientGateWarningBody_ShapedDecisions(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -109,6 +116,9 @@ func TestLenientGateWarning_ComposedOutput(t *testing.T) {
 		gateErr        *schema.RemoteMigrateGateError
 		wantDataBehind bool
 		wantBody       string
+		// wantNotes are lines the gate's UserMessage appends after its
+		// body, which server mode's warning therefore carries too.
+		wantNotes []string
 	}{
 		{
 			name: "blunt refusal",
@@ -118,6 +128,37 @@ func TestLenientGateWarning_ComposedOutput(t *testing.T) {
 				Pending:        1,
 			},
 			wantBody: "designated migrator",
+		},
+		{
+			// bd-1z1pc: the blunt arm swaps UserMessage's body for the
+			// shorter shared guidance, and must not drop the note naming
+			// why the smart gate fell back to this stop along with it.
+			// Decision stays empty and FallbackReason is set: the note is
+			// empty by design on the shaped decisions, so only a fallback
+			// stop reaches the arm that dropped it.
+			name: "blunt smart-gate fallback",
+			gateErr: &schema.RemoteMigrateGateError{
+				CurrentVersion: 41,
+				LatestVersion:  42,
+				Pending:        1,
+				FallbackReason: unreadableStateFallbackReason,
+			},
+			wantBody:  "designated migrator",
+			wantNotes: []string{"Smart gate (#4516): it could not read the remote's cached schema state"},
+		},
+		{
+			// The other note UserMessage appends after its body, dropped by
+			// the same arm: a typo'd consent variable must not leave the
+			// operator believing they had unlocked the migration.
+			name: "blunt unrecognized consent env",
+			gateErr: &schema.RemoteMigrateGateError{
+				CurrentVersion:  41,
+				LatestVersion:   42,
+				Pending:         1,
+				UnrecognizedEnv: "yes",
+			},
+			wantBody:  "designated migrator",
+			wantNotes: []string{schema.AllowRemoteMigrateEnv + "=yes is set but was not recognized"},
 		},
 		{
 			name: "data-behind fallback",
@@ -170,6 +211,14 @@ func TestLenientGateWarning_ComposedOutput(t *testing.T) {
 		if got := shape.gateErr.IsDataBehind(); got != shape.wantDataBehind {
 			t.Fatalf("%s fixture: IsDataBehind() = %v, want %v — the fixture no longer builds the shape it names", shape.name, got, shape.wantDataBehind)
 		}
+		// UserMessage is what server mode's lenient warning prints for the
+		// same stop (dolt.warnLenientOpenRefusal), so a wanted note it lacks
+		// is a broken fixture, not a dropped note.
+		for _, note := range shape.wantNotes {
+			if msg := shape.gateErr.UserMessage(); !strings.Contains(msg, note) {
+				t.Fatalf("%s fixture: UserMessage() lacks %q — the fixture no longer builds the shape it names; got:\n%s", shape.name, note, msg)
+			}
+		}
 		for _, intent := range intents {
 			t.Run(shape.name+"/"+intent.name, func(t *testing.T) {
 				got := lenientGateWarning(intent.intent, shape.gateErr)
@@ -198,6 +247,11 @@ func TestLenientGateWarning_ComposedOutput(t *testing.T) {
 				}
 				if !strings.Contains(got, shape.wantBody) {
 					t.Errorf("composed warning is missing the %s body text %q; got:\n%s", shape.name, shape.wantBody, got)
+				}
+				for _, note := range shape.wantNotes {
+					if !strings.Contains(got, note) {
+						t.Errorf("composed warning dropped the note %q that server mode prints for the same stop; got:\n%s", note, got)
+					}
 				}
 			})
 		}

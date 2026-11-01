@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"testing"
 
@@ -1032,11 +1033,12 @@ func TestResolvePartialID_WispSubstringCollision(t *testing.T) {
 }
 
 // TestResolvePartialID_WispLastSegment verifies that a bare wisp hash resolves
-// to its wisp ("t3st" finds "bd-wisp-t3st") through the wisp fallback's exact
-// branch, even beside a longer wisp hash it abbreviates. The Dolt store merges
-// wisps into the unfiltered search, so a matcher that let the first loop claim
+// to its wisp ("t3st" finds "bd-wisp-t3st") as an exact hash match, even
+// beside a longer wisp hash it abbreviates. The Dolt store merges wisps into
+// the unfiltered search, so a matcher that let the first loop claim
 // "wisp-t3st" as an abbreviation of "t3st" would make this lookup ambiguous
-// with bd-wisp-t3stzz instead of exact.
+// with bd-wisp-t3stzz instead of exact. The wisp fallback then lists the wisp
+// a second time, and it must still count once.
 func TestResolvePartialID_WispLastSegment(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)
@@ -1074,5 +1076,57 @@ func TestResolvePartialID_WispLastSegment(t *testing.T) {
 	}
 	if result != "bd-wisp-t3st" {
 		t.Errorf("utils.ResolvePartialID(%q) = %q; want %q", "t3st", result, "bd-wisp-t3st")
+	}
+}
+
+// TestResolvePartialID_SharedHashAcrossPrefixes is the Dolt-store side of the
+// fake-store test of the same name (mc-ke8mg). A hash that two prefixes share
+// is ambiguous for both resolvers, whether the candidates are two issues or an
+// issue and a wisp. The store merges wisps into the resolver's first search,
+// so that is where the issue and the wisp meet. A hash only one wisp uses
+// still resolves, though both searches list that wisp.
+func TestResolvePartialID_SharedHashAcrossPrefixes(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+
+	for _, iss := range []*types.Issue{
+		{ID: "hacker-news-abc123", Title: "Issue sharing a hash"},
+		{ID: "ops-abc123", Title: "Issue sharing a hash"},
+		{ID: "ops-t3st", Title: "Issue sharing a hash with a wisp"},
+		{ID: "hacker-news-wisp-t3st", Title: "Wisp sharing a hash with an issue", Ephemeral: true},
+		{ID: "ops-wisp-x9y8", Title: "Wisp with a hash of its own", Ephemeral: true},
+	} {
+		iss.Status = types.StatusOpen
+		iss.Priority = 2
+		iss.IssueType = types.TypeTask
+		if err := store.CreateIssue(ctx, iss, "test"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.SetConfig(ctx, "allowed_prefixes", "hacker-news,ops"); err != nil {
+		t.Fatal(err)
+	}
+
+	resolvers := []struct {
+		name    string
+		resolve func(context.Context, utils.PartialIDResolverStore, string) (string, error)
+	}{
+		{"ResolvePartialID", utils.ResolvePartialID},
+		{"ResolvePartialIDExact", utils.ResolvePartialIDExact},
+	}
+	ambiguous := map[string]string{
+		"abc123": "ambiguous issue ID: \"abc123\" matches 2 issues: [hacker-news-abc123 ops-abc123]\nUse the full ID to disambiguate",
+		"t3st":   "ambiguous issue ID: \"t3st\" matches 2 issues: [hacker-news-wisp-t3st ops-t3st]\nUse the full ID to disambiguate",
+	}
+	for _, r := range resolvers {
+		for input, want := range ambiguous {
+			got, err := r.resolve(ctx, store, input)
+			if !errors.Is(err, utils.ErrAmbiguousID) || err.Error() != want {
+				t.Errorf("%s(%q) = (%q, %v); want error %q", r.name, input, got, err, want)
+			}
+		}
+		if got, err := r.resolve(ctx, store, "x9y8"); err != nil || got != "ops-wisp-x9y8" {
+			t.Errorf("%s(%q) = (%q, %v); want (%q, nil)", r.name, "x9y8", got, err, "ops-wisp-x9y8")
+		}
 	}
 }

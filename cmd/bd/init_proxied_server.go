@@ -66,9 +66,10 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 	// proxied-server mode (in.externalConfig == nil): external mode talks
 	// to a remote/pre-existing dolt sql-server over the network and never
 	// spawns a local dolt binary, so it has nothing to preflight here.
-	// Failing here means a missing/broken dolt produces a clean preflight
-	// error instead of a half-initialized .beads/ directory from a later
-	// failure in newManagedProxiedServerUOWProvider.
+	// Failing here means a missing/broken dolt, or one older than
+	// doltversion.RequiredMin, produces a clean preflight error instead of
+	// a half-initialized .beads/ directory from a later failure in
+	// newManagedProxiedServerUOWProvider.
 	//
 	// Shares resolveAndProbeDolt (uow_factory.go) with
 	// newManagedProxiedServerUOWProvider, which this same `bd init

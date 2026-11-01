@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -18,6 +19,7 @@ import (
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/gitenv"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
 )
@@ -48,15 +50,27 @@ func hookSectionEndLine() string {
 	return fmt.Sprintf("%s v%s ---", hookSectionEndPrefix, Version)
 }
 
-// hookTimeoutSeconds is the soft deadline for a beads hook. GNU timeout sends
-// SIGTERM at the deadline, while Perl's alarm terminates the direct bd process.
-// Neither backend promises containment of TERM-resistant descendant work. When
-// neither helper is available, the generated hook warns that it is unbounded.
+// hookTimeoutSeconds is the soft deadline for a beads hook. Both backends send
+// SIGTERM at the deadline to bd and its process group. The group matters: bd
+// catches its first SIGTERM and keeps waiting (setupGracefulShutdown), and the
+// work it waits on, the chained .old hook and the bd export/import children,
+// runs in child processes that only a group signal reaches. The Perl backend
+// must supervise bd rather than alarm+exec it, because the Go runtime catches
+// SIGALRM and takes no action (GH#7753). Only the Perl backend follows up with
+// SIGKILL (hookTimeoutKillAfterSeconds); under coreutils timeout a bd that
+// outlives the SIGTERM keeps the hook waiting. A process that ignores SIGTERM
+// can outlive the hook under either backend. When neither helper is available,
+// the generated hook warns that it is unbounded.
 // The default is 300 seconds (5 minutes) to accommodate chained hooks — e.g.
 // pre-commit framework pipelines that run linters, type-checkers, and builds
 // inside `bd hooks run` via the `.old` hook chain (GH#2732).
 // The value can be overridden via the BEADS_HOOK_TIMEOUT environment variable.
 const hookTimeoutSeconds = 300
+
+// hookTimeoutKillAfterSeconds is how long the Perl backend waits after the
+// deadline SIGTERM before it sends SIGKILL to a bd that is still running, and
+// to its process group.
+const hookTimeoutKillAfterSeconds = 2
 
 // generateHookSection returns the marked section content for a given hook name.
 // The section is self-contained: it checks for bd availability, runs the hook
@@ -77,6 +91,14 @@ const hookTimeoutSeconds = 300
 //     coreutils) ..."), and the uutils multicall dispatches on the argv[0]
 //     suffix and then prints the canonical name ("timeout (uutils coreutils)
 //     ..." when invoked as gtimeout). checks.nix runs that case.
+//   - The Perl fallback forks bd into a process group of its own and arms the
+//     alarm in the parent only; alarm+exec would hand SIGALRM to bd, which
+//     ignores it (GH#7753). On expiry it sends the group SIGTERM, then SIGKILL
+//     hookTimeoutKillAfterSeconds later if bd is still running, and exits 142
+//     once bd is reaped. A bd that exits before the deadline keeps its own
+//     status. SIGHUP, SIGINT and SIGTERM that reach the supervisor are passed
+//     on to the group: a Ctrl-C signals the terminal's process group, which no
+//     longer holds bd.
 //   - If the beads database is not initialized (exit code 3), the hook exits
 //     successfully with a warning so that git operations are not blocked.
 func generateHookSection(hookName string) string {
@@ -114,7 +136,20 @@ func generateHookSection(hookName string) string {
 		"    fi\n" +
 		"  elif command -v perl >/dev/null 2>&1; then\n" +
 		"    _bd_timeout_backend=perl\n" +
-		"    if perl -e 'alarm shift; exec @ARGV' -- \"$_bd_timeout\" bd hooks run " + hookName + " \"$@\"; then\n" +
+		"    if perl -e '\n" +
+		"      my $t = shift;\n" +
+		"      my $pid = fork;\n" +
+		"      defined $pid or die \"beads: fork failed: $!\\n\";\n" +
+		"      if (!$pid) { setpgrp(0, 0); exec { $ARGV[0] } @ARGV; warn \"beads: cannot run $ARGV[0]: $!\\n\"; exit 127 }\n" +
+		"      my ($sig, $sent, $done) = (\"TERM\", 0, 0);\n" +
+		"      $SIG{ALRM} = sub { return if $done; kill $sig, -$pid; ($sig, $sent) = (\"KILL\", 1); alarm " + fmt.Sprintf("%d", hookTimeoutKillAfterSeconds) + " };\n" +
+		"      $SIG{$_} = sub { kill $_[0], -$pid unless $done } for qw(HUP INT TERM);\n" +
+		"      alarm $t;\n" +
+		"      $done = waitpid $pid, 0;\n" +
+		"      alarm 0;\n" +
+		"      exit 142 if $sent;\n" +
+		"      exit($? & 127 ? 128 + ($? & 127) : $? >> 8);\n" +
+		"    ' -- \"$_bd_timeout\" bd hooks run " + hookName + " \"$@\"; then\n" +
 		"      _bd_exit=0\n" +
 		"    else\n" +
 		"      _bd_exit=$?\n" +
@@ -2267,7 +2302,10 @@ func warnJSONLWithoutDoltRemote(reason string) {
 	fmt.Fprintf(os.Stderr, "beads: %s warning: no Dolt remote configured.\n", reason)
 	fmt.Fprintln(os.Stderr, "beads: .beads/issues.jsonl is an export, not cross-machine sync or source of truth.")
 	if originURL, err := gitOriginGetURL(); err == nil && originURL != "" {
-		fmt.Fprintf(os.Stderr, "beads: repair: bd dolt remote add origin %s && bd dolt push\n", normalizeRemoteURL(originURL))
+		// The URL is the git origin, set by whoever cloned the repository:
+		// it goes into the command only as one shell word.
+		url, note := remedy.CommandArg(runtime.GOOS, normalizeRemoteURL(originURL), "<url>")
+		fmt.Fprintf(os.Stderr, "beads: repair: bd dolt remote add origin %s && bd dolt push%s\n", url, note)
 		return
 	}
 	fmt.Fprintln(os.Stderr, "beads: repair: add a git origin, then run 'bd dolt remote add origin <git-remote-url>' and 'bd dolt push'.")

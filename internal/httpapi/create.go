@@ -411,6 +411,7 @@ func gateFieldParam(err error) (string, string, bool) {
 // only (gateFieldParam).
 func (s *Server) failCreateIssue(w http.ResponseWriter, r *http.Request, err error) {
 	var hierarchy *issueops.DependencyHierarchyConflictError
+	var expired *issueops.IdempotencyExpiredError
 	// The 409 constructors take no param, and the document promises one on
 	// every problem but the body that failed to parse, so the conflicts name
 	// the member that earned them here.
@@ -420,6 +421,15 @@ func (s *Server) failCreateIssue(w http.ResponseWriter, r *http.Request, err err
 	}
 
 	switch {
+	// A RETIRED explicit id is a 410, matched first and by its own type: it is
+	// neither a validation failure nor an occupied id, and ClassifyError is not
+	// widened to know it because only the create operations can raise it.
+	case errors.As(err, &expired):
+		s.refusedCreateIssue(r, err)
+		s.fail(w, r, named(newResult(CodeIdempotencyExpired,
+			"`id` was retired by a retention sweep; the create that used it already happened and nothing was created").
+			WithClosedAt(expired.ClosedAt), "id"))
+
 	// An occupied explicit id is a 409: the body is well-formed and stays
 	// well-formed, and what refuses it is STATE the client cannot see without
 	// reading it — so recovery is to look at that state (adopt the row with

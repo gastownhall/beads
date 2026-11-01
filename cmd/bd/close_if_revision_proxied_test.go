@@ -10,7 +10,7 @@ import (
 )
 
 // TestProxiedServerIfRevisionCloseReplaysMoleculeAutoClose is
-// TestIfRevisionCloseReplaysMoleculeAutoClose's proxied-server twin, pinning
+// TestEmbeddedIfRevisionCloseReplaysMoleculeAutoClose's proxied-server twin, pinning
 // mc-zndi7.75 item 1 on the route `bd serve` actually runs:
 // runCloseProxiedIfRevision bypasses the batch entirely (A8, beads#4682), so
 // it must re-drive molecule auto-close itself via its own post-close unit of
@@ -53,7 +53,7 @@ func TestProxiedServerIfRevisionCloseReplaysMoleculeAutoClose(t *testing.T) {
 }
 
 // TestProxiedServerIfRevisionCloseWarnsOnForcedOpenChildren is
-// TestIfRevisionCloseWarnsOnForcedOpenChildren's proxied-server twin, pinning
+// TestEmbeddedIfRevisionCloseWarnsOnForcedOpenChildren's proxied-server twin, pinning
 // mc-zndi7.75 item 3 on the proxied route.
 func TestProxiedServerIfRevisionCloseWarnsOnForcedOpenChildren(t *testing.T) {
 	requireSharedProxiedServer(t)

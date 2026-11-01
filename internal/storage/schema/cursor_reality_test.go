@@ -640,7 +640,7 @@ func TestSentinelFlooredTablesAreCreatedByTheSeries(t *testing.T) {
 	}
 
 	for _, st := range ignoredSource.sentinelFlooredTables {
-		// Detect both creation shapes and accept whichever the series actually
+		// Detect every creation shape and accept whichever the series actually
 		// uses, rather than keying on the table's name: the PREPAREd
 		// conditional CREATE is required of any creator whose table carries a
 		// named, database-unique constraint (ignored/0019's own comment), so a
@@ -651,9 +651,15 @@ func TestSentinelFlooredTablesAreCreatedByTheSeries(t *testing.T) {
 		prepared := findVersion(regexp.MustCompile(
 			`(?i)IF\(@\w+\s*=\s*0,\s*'CREATE TABLE ` + regexp.QuoteMeta(st.table) + `\s*\(`))
 		temp := findVersion(regexp.MustCompile(regexp.QuoteMeta("__temp__" + st.table)))
+		// The third shape: a plain IF NOT EXISTS create, which is enough for a
+		// table carrying no named constraint (ignored/0030).
+		ifNotExists := findVersion(regexp.MustCompile(
+			`(?i)CREATE TABLE IF NOT EXISTS ` + regexp.QuoteMeta(st.table) + `\s*\(`))
 		creator := prepared
-		if creator == 0 || (temp != 0 && temp < creator) {
-			creator = temp
+		for _, candidate := range []int{temp, ifNotExists} {
+			if creator == 0 || (candidate != 0 && candidate < creator) {
+				creator = candidate
+			}
 		}
 		if creator == 0 {
 			t.Errorf("sentinel floored table %q is never created by the %s series; re-running it could not repair that table",

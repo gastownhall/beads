@@ -22,6 +22,12 @@
 // restart. Implementing true runtime rotation would require either
 // (a) a streaming goroutine owning the pipe, or (b) copy-truncate, which
 // races with the child's append writes. Both are out of scope for this fix.
+//
+// Proxied-server mode applies the same startup rename to .beads/dolt/proxy.log
+// and the default proxied server.log (never an operator-chosen log path)
+// through MaybeRotateLogFile, called from dbproxy/proxy's forkExecChild
+// (under proxy.lock, before the child's stdout fd is opened) and
+// ListenAndServe (before proxy.log is opened).
 
 package doltserver
 
@@ -100,19 +106,25 @@ func rotateLogIfOversized(primary string, maxBytes int64) (bool, error) {
 	return true, nil
 }
 
-// maybeRotateLog is the convenience wrapper used by Start(). It rotates the
-// dolt-server log if it is oversized and emits a debug message on both
-// rotation and error paths. It never returns an error — rotation is
-// best-effort and must not block server startup.
+// maybeRotateLog is the convenience wrapper used by Start() for
+// dolt-server.log under beadsDir.
 func maybeRotateLog(beadsDir string) {
-	primary := logPath(beadsDir)
+	MaybeRotateLogFile(logPath(beadsDir))
+}
+
+// MaybeRotateLogFile applies the startup rotation policy above to the log at
+// path: if it is larger than the effective ceiling it is renamed to
+// <path>.1. It emits a debug message on both rotation and error paths and
+// never returns an error — rotation is best-effort and must not block server
+// startup. Callers must invoke it before any writer has the file open.
+func MaybeRotateLogFile(path string) {
 	max := maxLogBytes()
-	rotated, err := rotateLogIfOversized(primary, max)
+	rotated, err := rotateLogIfOversized(path, max)
 	if err != nil {
-		debug.Logf("doltserver: log rotation failed for %s: %v", primary, err)
+		debug.Logf("doltserver: log rotation failed for %s: %v", path, err)
 		return
 	}
 	if rotated {
-		debug.Logf("doltserver: rotated %s -> %s (exceeded %d bytes)", primary, rotatedLogPath(primary), max)
+		debug.Logf("doltserver: rotated %s -> %s (exceeded %d bytes)", path, rotatedLogPath(path), max)
 	}
 }

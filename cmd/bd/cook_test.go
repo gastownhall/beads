@@ -5,8 +5,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -839,6 +841,449 @@ func TestCookFormulaToSubgraph_GateParentChild(t *testing.T) {
 		for _, dep := range subgraph.Dependencies {
 			t.Logf("  %s -> %s (%s)", dep.IssueID, dep.DependsOnID, dep.Type)
 		}
+	}
+}
+
+// cookGateFormulaTOML cooks a TOML formula through the same load, resolve,
+// control-flow and cook path pour uses (resolveAndCookFormulaWithVars).
+func cookGateFormulaTOML(t *testing.T, name, src string) *TemplateSubgraph {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, name+".formula.toml"), []byte(src), 0o600); err != nil {
+		t.Fatalf("write formula: %v", err)
+	}
+	sg, err := resolveAndCookFormulaWithVars(name, []string{dir}, nil)
+	if err != nil {
+		t.Fatalf("cook %q: %v", name, err)
+	}
+	return sg
+}
+
+// blocksEdgesFrom returns the DepBlocks targets of issueID in subgraph order.
+func blocksEdgesFrom(sg *TemplateSubgraph, issueID string) []string {
+	var out []string
+	for _, d := range sg.Dependencies {
+		if d.IssueID == issueID && d.Type == types.DepBlocks {
+			out = append(out, d.DependsOnID)
+		}
+	}
+	return out
+}
+
+// TestCookFormulaToSubgraph_EntryGateWiring pins the entry-gate form that
+// GH#3316 leaves unchanged: a [steps.gate] on a step that is not declared
+// type = "gate" spawns a companion that blocks the step.
+func TestCookFormulaToSubgraph_EntryGateWiring(t *testing.T) {
+	gates := map[string]string{
+		"human":  `{ type = "human" }`,
+		"gh:run": `{ type = "gh:run", id = "ci", repo = "acme/widgets" }`,
+		"timer":  `{ type = "timer", timeout = "1h" }`,
+	}
+	stepTypes := map[string]string{
+		"untyped":        "",
+		"task":           `type = "task"`,
+		"noncanonical-G": `type = "Gate"`,
+	}
+	for gateName, gateSrc := range gates {
+		for typeName, typeLine := range stepTypes {
+			t.Run(gateName+"/"+typeName, func(t *testing.T) {
+				src := `formula = "entry-gate"
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "wait"
+title = "Wait then work"
+` + typeLine + `
+gate = ` + gateSrc + "\n"
+				sg := cookGateFormulaTOML(t, "entry-gate", src)
+				stepID, gateID := "entry-gate.wait", "entry-gate.gate-wait"
+				gate := sg.IssueMap[gateID]
+				if gate == nil || gate.IssueType != types.TypeGate {
+					t.Fatalf("companion %s missing or not a gate: %+v (issues %v)", gateID, gate, allIssueIDs(sg))
+				}
+				if gate.AwaitType != gateName {
+					t.Errorf("companion AwaitType = %q, want %q", gate.AwaitType, gateName)
+				}
+				if got := blocksEdgesFrom(sg, stepID); len(got) != 1 || got[0] != gateID {
+					t.Errorf("step blocks edges = %v, want [%s]", got, gateID)
+				}
+				if got := blocksEdgesFrom(sg, gateID); len(got) != 0 {
+					t.Errorf("companion must not block on the step; got blocks edges %v", got)
+				}
+			})
+		}
+	}
+}
+
+// gateTypedReproTOML is the GH#3316 repro: a prep task, a type = "gate"
+// step carrying a human [steps.gate], and a step that depends on it.
+const gateTypedReproTOML = `formula = "gate-repro"
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "prep"
+title = "Prep evidence"
+type = "task"
+assignee = "worker"
+
+[[steps]]
+id = "agree"
+title = "Human approves"
+description = "Gather evidence and write the decision template"
+type = "gate"
+assignee = "pa-agent"
+labels = ["needs-human"]
+depends_on = ["prep"]
+gate = { type = "human" }
+
+[[steps]]
+id = "execute"
+title = "Do the thing"
+type = "task"
+depends_on = ["agree"]
+`
+
+// TestCookFormulaToSubgraph_GateTypedStep covers the exit-gate form
+// (GH#3316): a step declared type = "gate" with a [steps.gate] block is
+// prep work whose task bead blocks the companion gate, not the reverse.
+func TestCookFormulaToSubgraph_GateTypedStep(t *testing.T) {
+	t.Run("issue_repro", func(t *testing.T) {
+		sg := cookGateFormulaTOML(t, "gate-repro", gateTypedReproTOML)
+		taskID, gateID, prepID := "gate-repro.agree", "gate-repro.gate-agree", "gate-repro.prep"
+
+		task := sg.IssueMap[taskID]
+		if task == nil {
+			t.Fatalf("task %s missing; issues %v", taskID, allIssueIDs(sg))
+		}
+		// The prep bead must be a type bd ready includes; gate is excluded
+		// from ready work (sqlbuild.ReadyWorkExcludeTypes).
+		if task.IssueType != types.TypeTask {
+			t.Errorf("task IssueType = %q, want %q", task.IssueType, types.TypeTask)
+		}
+		if task.Title != "Human approves" || task.Assignee != "pa-agent" ||
+			task.Description != "Gather evidence and write the decision template" {
+			t.Errorf("task lost step fields: title=%q assignee=%q desc=%q", task.Title, task.Assignee, task.Description)
+		}
+		if len(task.Labels) != 1 || task.Labels[0] != "needs-human" {
+			t.Errorf("task labels = %v, want [needs-human]", task.Labels)
+		}
+		if task.AwaitType != "" {
+			t.Errorf("task AwaitType = %q, want empty (await fields belong to the companion)", task.AwaitType)
+		}
+
+		gate := sg.IssueMap[gateID]
+		if gate == nil || gate.IssueType != types.TypeGate || gate.AwaitType != "human" {
+			t.Fatalf("companion %s = %+v, want a human gate", gateID, gate)
+		}
+
+		if got := blocksEdgesFrom(sg, gateID); len(got) != 1 || got[0] != taskID {
+			t.Errorf("companion blocks edges = %v, want [%s] (task blocks gate)", got, taskID)
+		}
+		if got := blocksEdgesFrom(sg, taskID); len(got) != 1 || got[0] != prepID {
+			t.Errorf("task blocks edges = %v, want only its declared depends_on [%s]", got, prepID)
+		}
+	})
+
+	// AC-3: a reference to a gate-typed step waits for its task and for its
+	// companion. The task edge holds the order when gate check or resolve
+	// closes the companion while the task is still open.
+	t.Run("references_wait_for_task_and_companion", func(t *testing.T) {
+		// Built in Go, not TOML: formula validation rejects "gate-s" as an
+		// unknown step id, but cookFormulaToSubgraph callers can still pass
+		// it, and it must not produce a duplicate edge.
+		f := &formula.Formula{
+			Formula: "gate-refs",
+			Version: 1,
+			Type:    formula.TypeWorkflow,
+			Steps: []*formula.Step{
+				{ID: "s", Title: "Prep for approval", Type: "gate", Gate: &formula.Gate{Type: "human"}},
+				{ID: "by-depends-on", Title: "depends_on", DependsOn: []string{"s"}},
+				{ID: "by-needs", Title: "needs", Needs: []string{"s"}},
+				{ID: "by-both-ids", Title: "depends_on step and gate key", DependsOn: []string{"s", "gate-s"}},
+				{ID: "unrelated", Title: "No reference"},
+			},
+		}
+		sg, err := cookFormulaToSubgraph(f, "gate-refs")
+		if err != nil {
+			t.Fatalf("cookFormulaToSubgraph: %v", err)
+		}
+		taskID, gateID := "gate-refs.s", "gate-refs.gate-s"
+		want := []string{taskID, gateID}
+		for _, dependent := range []string{"by-depends-on", "by-needs", "by-both-ids"} {
+			if got := blocksEdgesFrom(sg, "gate-refs."+dependent); !slices.Equal(got, want) {
+				t.Errorf("%s blocks edges = %v, want exactly %v", dependent, got, want)
+			}
+		}
+		if got := blocksEdgesFrom(sg, "gate-refs.unrelated"); len(got) != 0 {
+			t.Errorf("unrelated blocks edges = %v, want none", got)
+		}
+		blockedBy := func(targetID string) []string {
+			var out []string
+			for _, d := range sg.Dependencies {
+				if d.DependsOnID == targetID && d.Type == types.DepBlocks {
+					out = append(out, d.IssueID)
+				}
+			}
+			return out
+		}
+		if got := blockedBy(gateID); len(got) != 3 {
+			t.Errorf("issues blocked by the companion = %v, want the three referencing steps", got)
+		}
+		// The three referencing steps, plus the companion itself.
+		if got := blockedBy(taskID); len(got) != 4 || !slices.Contains(got, gateID) {
+			t.Errorf("issues blocked by the task = %v, want the companion and the three referencing steps", got)
+		}
+	})
+
+	t.Run("issue_repro_downstream", func(t *testing.T) {
+		sg := cookGateFormulaTOML(t, "gate-repro", gateTypedReproTOML)
+		want := []string{"gate-repro.agree", "gate-repro.gate-agree"}
+		if got := blocksEdgesFrom(sg, "gate-repro.execute"); !slices.Equal(got, want) {
+			t.Errorf("execute blocks edges = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("child_step_referenced_by_sibling", func(t *testing.T) {
+		sg := cookGateFormulaTOML(t, "gate-child", `formula = "gate-child"
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "phase"
+title = "Phase"
+
+[[steps.children]]
+id = "review"
+title = "Prep review"
+type = "gate"
+gate = { type = "human" }
+
+[[steps.children]]
+id = "apply"
+title = "Apply"
+needs = ["review"]
+`)
+		taskID, gateID := "gate-child.phase.review", "gate-child.phase.gate-review"
+		if sg.IssueMap[gateID] == nil {
+			t.Fatalf("companion %s missing; issues %v", gateID, allIssueIDs(sg))
+		}
+		if got := blocksEdgesFrom(sg, gateID); len(got) != 1 || got[0] != taskID {
+			t.Errorf("companion blocks edges = %v, want [%s]", got, taskID)
+		}
+		if got, want := blocksEdgesFrom(sg, "gate-child.phase.apply"), []string{taskID, gateID}; !slices.Equal(got, want) {
+			t.Errorf("apply blocks edges = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("loop_body_step", func(t *testing.T) {
+		sg := cookGateFormulaTOML(t, "gate-loop", `formula = "gate-loop"
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "round"
+title = "Rounds"
+
+[steps.loop]
+count = 2
+
+[[steps.loop.body]]
+id = "review"
+title = "Prep review"
+type = "gate"
+gate = { type = "human" }
+
+[[steps.loop.body]]
+id = "apply"
+title = "Apply"
+needs = ["review"]
+`)
+		for _, iter := range []string{"iter1", "iter2"} {
+			taskID := "gate-loop.round." + iter + ".review"
+			gateID := "gate-loop.gate-round." + iter + ".review"
+			if sg.IssueMap[gateID] == nil {
+				t.Fatalf("companion %s missing; issues %v", gateID, allIssueIDs(sg))
+			}
+			if got := blocksEdgesFrom(sg, gateID); len(got) != 1 || got[0] != taskID {
+				t.Errorf("companion blocks edges = %v, want [%s]", got, taskID)
+			}
+			if got, want := blocksEdgesFrom(sg, "gate-loop.round."+iter+".apply"), []string{taskID, gateID}; !slices.Equal(got, want) {
+				t.Errorf("%s apply blocks edges = %v, want %v; deps %v", iter, got, want, allDeps(sg))
+			}
+		}
+	})
+
+	// A waits_for spawner that is a gate-typed step resolves to its task,
+	// where the fanout's children are bonded; the waiter also blocks on the
+	// companion. A collapsed needs entry keeps also_blocks on the task edge.
+	for name, tc := range map[string]struct {
+		waiter     string
+		alsoBlocks bool
+	}{
+		"children_of":        {waiter: `waits_for = "children-of(fanout)"`},
+		"needs_all_children": {waiter: "needs = [\"fanout\"]\nwaits_for = \"all-children\"", alsoBlocks: true},
+	} {
+		t.Run("waits_for_spawner/"+name, func(t *testing.T) {
+			sg := cookGateFormulaTOML(t, "gate-fan", `formula = "gate-fan"
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "fanout"
+title = "Spawn workers for review"
+type = "gate"
+gate = { type = "human" }
+
+[[steps]]
+id = "summarize"
+title = "Summarize the workers"
+`+tc.waiter+"\n")
+			taskID, gateID, waiterID := "gate-fan.fanout", "gate-fan.gate-fanout", "gate-fan.summarize"
+			var waitsFor []*types.Dependency
+			for _, d := range sg.Dependencies {
+				if d.IssueID == waiterID && d.Type == types.DepWaitsFor {
+					waitsFor = append(waitsFor, d)
+				}
+			}
+			if len(waitsFor) != 1 || waitsFor[0].DependsOnID != taskID {
+				t.Fatalf("summarize needs one waits-for edge onto the task %s; deps %v", taskID, allDeps(sg))
+			}
+			var meta types.WaitsForMeta
+			if err := json.Unmarshal([]byte(waitsFor[0].Metadata), &meta); err != nil {
+				t.Fatalf("waits-for metadata %q: %v", waitsFor[0].Metadata, err)
+			}
+			if meta.AlsoBlocks != tc.alsoBlocks {
+				t.Errorf("waits-for also_blocks = %v, want %v (metadata %s)", meta.AlsoBlocks, tc.alsoBlocks, waitsFor[0].Metadata)
+			}
+			if got, want := blocksEdgesFrom(sg, waiterID), []string{gateID}; !slices.Equal(got, want) {
+				t.Errorf("summarize blocks edges = %v, want %v", got, want)
+			}
+		})
+	}
+
+	// AC-6: the companion carries the gate's await fields and repo selector;
+	// the task keeps the step's own metadata.
+	for _, gateType := range []string{"gh:run", "gh:pr"} {
+		t.Run("github_gate_fields/"+gateType, func(t *testing.T) {
+			sg := cookGateFormulaTOML(t, "gate-gh", `formula = "gate-gh"
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "release"
+title = "Cut the release"
+type = "gate"
+
+[steps.metadata]
+owner = "release-team"
+
+[steps.gate]
+type = "`+gateType+`"
+id = "release.yml"
+timeout = "30m"
+repo = "acme/widgets"
+`)
+			taskID, gateID := "gate-gh.release", "gate-gh.gate-release"
+			var gates []string
+			for _, i := range sg.Issues {
+				if i.IssueType == types.TypeGate {
+					gates = append(gates, i.ID)
+				}
+			}
+			if len(gates) != 1 || gates[0] != gateID {
+				t.Fatalf("gate issues = %v, want exactly [%s]", gates, gateID)
+			}
+			gate, task := sg.IssueMap[gateID], sg.IssueMap[taskID]
+			if gate.AwaitType != gateType || gate.AwaitID != "release.yml" || gate.Timeout != 30*time.Minute {
+				t.Errorf("companion await = (%q, %q, %v), want (%q, release.yml, 30m)", gate.AwaitType, gate.AwaitID, gate.Timeout, gateType)
+			}
+			var gateMeta map[string]string
+			if err := json.Unmarshal(gate.Metadata, &gateMeta); err != nil || gateMeta["repo"] != "acme/widgets" {
+				t.Errorf("companion metadata = %s (err %v), want repo acme/widgets", gate.Metadata, err)
+			}
+			if task.AwaitType != "" || task.AwaitID != "" || task.Timeout != 0 {
+				t.Errorf("task await = (%q, %q, %v), want empty", task.AwaitType, task.AwaitID, task.Timeout)
+			}
+			var taskMeta map[string]any
+			if err := json.Unmarshal(task.Metadata, &taskMeta); err != nil || taskMeta["owner"] != "release-team" {
+				t.Errorf("task metadata = %s (err %v), want owner release-team", task.Metadata, err)
+			}
+			if _, ok := taskMeta["repo"]; ok {
+				t.Errorf("task metadata = %s, repo belongs on the companion", task.Metadata)
+			}
+		})
+	}
+}
+
+// TestCookFormulaToSubgraph_BareGateStepType pins that a step declared
+// type = "gate" without a [steps.gate] block stays a single wait-only gate
+// bead: no companion, no await fields, no extra blocks edge (GH#3316).
+func TestCookFormulaToSubgraph_BareGateStepType(t *testing.T) {
+	sg := cookGateFormulaTOML(t, "bare-gate", `formula = "bare-gate"
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "hold"
+title = "Hold for sign-off"
+type = "gate"
+`)
+	if len(sg.Issues) != 2 {
+		t.Fatalf("issues = %v, want root + hold", allIssueIDs(sg))
+	}
+	hold := sg.IssueMap["bare-gate.hold"]
+	if hold == nil || hold.IssueType != types.TypeGate {
+		t.Fatalf("hold = %+v, want a gate bead", hold)
+	}
+	if hold.AwaitType != "" || hold.AwaitID != "" || hold.Timeout != 0 {
+		t.Errorf("hold await fields = (%q, %q, %v), want empty", hold.AwaitType, hold.AwaitID, hold.Timeout)
+	}
+	for _, d := range sg.Dependencies {
+		if d.Type == types.DepBlocks {
+			t.Errorf("unexpected blocks edge %s -> %s", d.IssueID, d.DependsOnID)
+		}
+	}
+}
+
+// TestCollectStepsGateDirection pins GH#3316 (bd-4nndgi) at the
+// collectSteps level: for a step declared type = "gate" the task is the
+// preparation work for its companion gate, so the task blocks the gate.
+// The triage version of this test dropped Type: "gate" and asserted the
+// flip for every [steps.gate]; that contradicts the documented entry-gate
+// form (TestCookFormulaToSubgraph_EntryGateWiring), so it pins only the
+// gate-typed shape.
+func TestCollectStepsGateDirection(t *testing.T) {
+	steps := []*formula.Step{
+		{ID: "agree", Title: "Human approves", Type: "gate", Gate: &formula.Gate{Type: "human"}},
+	}
+	idMapping := make(map[string]string)
+	var issues []*types.Issue
+	var deps []*types.Dependency
+	collectSteps(steps, "mol-x", idMapping, nil, &issues, &deps, nil)
+
+	taskID, gateID := idMapping["agree"], idMapping["gate-agree"]
+	if taskID != "mol-x.agree" || gateID != "mol-x.gate-agree" {
+		t.Fatalf("idMapping = %v, want agree→mol-x.agree, gate-agree→mol-x.gate-agree", idMapping)
+	}
+	var taskBlocksGate, gateBlocksTask bool
+	for _, d := range deps {
+		if d.Type != types.DepBlocks {
+			continue
+		}
+		if d.IssueID == gateID && d.DependsOnID == taskID {
+			taskBlocksGate = true
+		}
+		if d.IssueID == taskID && d.DependsOnID == gateID {
+			gateBlocksTask = true
+		}
+	}
+	if gateBlocksTask {
+		t.Errorf("task %s depends on its gate %s: gate blocks its own prep task (inverted edge)", taskID, gateID)
+	}
+	if !taskBlocksGate {
+		t.Errorf("gate %s does not depend on task %s: want task --blocks--> gate", gateID, taskID)
 	}
 }
 

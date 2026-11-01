@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -176,12 +178,16 @@ func runMolCurrent(ctx context.Context, s storage.DoltStorage, resolve func(cont
 	return nil
 }
 
-// printMoleculeProgress prints the progress in human-readable format
+// printMoleculeProgress prints the progress in human-readable format. The
+// molecule and its steps are read from the store, which holds a
+// collaborator's issues after bd dolt pull: an ID is named by printedIssueID
+// and a title or assignee by remedy.PrintedValue, so none can redraw a hint
+// printed with it or before it.
 func printMoleculeProgress(mol *MoleculeProgress) {
-	fmt.Printf("You're working on molecule %s\n", ui.RenderAccent(mol.MoleculeID))
-	fmt.Printf("  %s\n", mol.MoleculeTitle)
+	fmt.Printf("You're working on molecule %s\n", ui.RenderAccent(printedIssueID(mol.MoleculeID)))
+	fmt.Printf("  %s\n", remedy.PrintedValue(mol.MoleculeTitle))
 	if mol.Assignee != "" {
-		fmt.Printf("  Assigned to: %s\n", mol.Assignee)
+		fmt.Printf("  Assigned to: %s\n", remedy.PrintedValue(mol.Assignee))
 	}
 	fmt.Println()
 
@@ -191,15 +197,18 @@ func printMoleculeProgress(mol *MoleculeProgress) {
 		if step.IsCurrent {
 			marker = " <- YOU ARE HERE"
 		}
-		fmt.Printf("  %s %s: %s%s\n", statusIcon, step.Issue.ID, step.Issue.Title, marker)
+		fmt.Printf("  %s %s: %s%s\n", statusIcon, printedIssueID(step.Issue.ID), remedy.PrintedValue(step.Issue.Title), marker)
 	}
 
 	fmt.Println()
 	fmt.Printf("Progress: %d/%d steps complete\n", mol.Completed, mol.Total)
 
+	// Each step ID in these hints goes into its command as one shell word,
+	// or as a placeholder named escaped after it.
 	if mol.NextStep != nil && mol.CurrentStep == nil {
-		fmt.Printf("\nNext ready: %s - %s\n", mol.NextStep.ID, mol.NextStep.Title)
-		fmt.Printf("  Start with: bd update %s --claim\n", mol.NextStep.ID)
+		fmt.Printf("\nNext ready: %s - %s\n", printedIssueID(mol.NextStep.ID), remedy.PrintedValue(mol.NextStep.Title))
+		step, note := remedy.CommandArg(runtime.GOOS, mol.NextStep.ID, "<step-id>")
+		fmt.Printf("  Start with: bd update %s --claim%s\n", step, note)
 	}
 
 	// Show hint about viewing step instructions
@@ -210,8 +219,20 @@ func printMoleculeProgress(mol *MoleculeProgress) {
 		hintStepID = mol.NextStep.ID
 	}
 	if hintStepID != "" {
-		fmt.Printf("\n%s Run `bd show %s` to see detailed instructions.\n", ui.RenderAccent("💡"), hintStepID)
+		printStepInstructionsHint(hintStepID)
 	}
+}
+
+// printStepInstructionsHint prints the hint that names the bd show command
+// for a step's instructions. The step ID is read from the store, so it goes
+// into the command as one shell word, or as a placeholder named escaped
+// after it (remedy.CommandArg). The command is not put between backticks:
+// sh, bash and zsh run a pasted `...` as a command substitution, which a
+// backtick in the quoted ID would end, leaving the rest of the ID, such as a
+// ;-separated command, to run.
+func printStepInstructionsHint(stepID string) {
+	step, note := remedy.CommandArg(runtime.GOOS, stepID, "<step-id>")
+	fmt.Printf("\n%s Run bd show %s%s to see detailed instructions.\n", ui.RenderAccent("💡"), step, note)
 }
 
 // getStatusIcon returns the icon for a step status
@@ -239,15 +260,19 @@ type ContinueResult struct {
 	MoleculeID   string       `json:"molecule_id,omitempty"`
 }
 
-// PrintContinueResult prints the result of advancing to the next step
+// PrintContinueResult prints the result of advancing to the next step. The
+// molecule and step are read from the store: an ID goes into a command as
+// one shell word, or as a placeholder named escaped after it, and is named
+// beside one by printedIssueID, and a title by remedy.PrintedValue.
 func PrintContinueResult(result *ContinueResult) {
 	if result == nil {
 		return
 	}
 
 	if result.MolComplete {
-		fmt.Printf("\n%s Molecule %s complete! All steps closed.\n", ui.RenderPass("✓"), result.MoleculeID)
-		fmt.Println("Consider: bd mol squash " + result.MoleculeID + " --summary '...'")
+		fmt.Printf("\n%s Molecule %s complete! All steps closed.\n", ui.RenderPass("✓"), printedIssueID(result.MoleculeID))
+		mol, note := remedy.CommandArg(runtime.GOOS, result.MoleculeID, "<molecule-id>")
+		fmt.Printf("Consider: bd mol squash %s --summary '...'%s\n", mol, note)
 		return
 	}
 
@@ -257,12 +282,13 @@ func PrintContinueResult(result *ContinueResult) {
 	}
 
 	fmt.Printf("\nNext ready in molecule:\n")
-	fmt.Printf("  %s: %s\n", result.NextStep.ID, result.NextStep.Title)
+	fmt.Printf("  %s: %s\n", printedIssueID(result.NextStep.ID), remedy.PrintedValue(result.NextStep.Title))
 
 	if result.AutoAdvanced {
 		fmt.Printf("\n%s Marked in_progress (use --no-auto to skip)\n", ui.RenderWarn("→"))
 	} else {
-		fmt.Printf("\nStart with: bd update %s --claim\n", result.NextStep.ID)
+		step, note := remedy.CommandArg(runtime.GOOS, result.NextStep.ID, "<step-id>")
+		fmt.Printf("\nStart with: bd update %s --claim%s\n", step, note)
 	}
 }
 
@@ -306,9 +332,12 @@ func filterStepsByRange(steps []*StepStatus, start, end int) []*StepStatus {
 }
 
 // printLargeMoleculeSummary prints a summary for molecules with many steps.
+// The molecule ID is the one its argument resolved to in the store, and the
+// title and step ID are read from it: an ID is named by printedIssueID and
+// the title by remedy.PrintedValue.
 func printLargeMoleculeSummary(stats *types.MoleculeProgressStats) {
-	fmt.Printf("Molecule: %s\n", ui.RenderAccent(stats.MoleculeID))
-	fmt.Printf("  %s\n", stats.MoleculeTitle)
+	fmt.Printf("Molecule: %s\n", ui.RenderAccent(printedIssueID(stats.MoleculeID)))
+	fmt.Printf("  %s\n", remedy.PrintedValue(stats.MoleculeTitle))
 	fmt.Println()
 
 	// Progress summary
@@ -319,7 +348,7 @@ func printLargeMoleculeSummary(stats *types.MoleculeProgressStats) {
 	fmt.Printf("Progress: %d / %d steps (%.1f%%)\n", stats.Completed, stats.Total, percent)
 
 	if stats.CurrentStepID != "" {
-		fmt.Printf("Current step: %s\n", stats.CurrentStepID)
+		fmt.Printf("Current step: %s\n", printedIssueID(stats.CurrentStepID))
 	} else if stats.InProgress > 0 {
 		fmt.Printf("In progress: %d step(s)\n", stats.InProgress)
 	}
@@ -328,13 +357,19 @@ func printLargeMoleculeSummary(stats *types.MoleculeProgressStats) {
 	fmt.Printf("%s This molecule has %d steps (threshold: %d).\n",
 		ui.RenderWarn("Note:"), stats.Total, LargeMoleculeThreshold)
 	fmt.Println("To view steps, use one of:")
-	fmt.Printf("  bd mol current %s --limit 50        # First 50 steps\n", stats.MoleculeID)
-	fmt.Printf("  bd mol current %s --range 1-50     # Steps 1-50\n", stats.MoleculeID)
-	fmt.Printf("  bd mol progress %s                 # Efficient progress summary\n", stats.MoleculeID)
+	// Each ID goes into its command as one shell word, or as a placeholder
+	// named escaped after it.
+	mol, note := remedy.CommandArg(runtime.GOOS, stats.MoleculeID, "<molecule-id>")
+	fmt.Printf("  bd mol current %s --limit 50        # First 50 steps\n", mol)
+	fmt.Printf("  bd mol current %s --range 1-50     # Steps 1-50\n", mol)
+	fmt.Printf("  bd mol progress %s                 # Efficient progress summary\n", mol)
+	if note != "" {
+		fmt.Println(note)
+	}
 
 	// Show hint about viewing step instructions
 	if stats.CurrentStepID != "" {
-		fmt.Printf("\n%s Run `bd show %s` to see detailed instructions.\n", ui.RenderAccent("💡"), stats.CurrentStepID)
+		printStepInstructionsHint(stats.CurrentStepID)
 	}
 }
 

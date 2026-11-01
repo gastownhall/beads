@@ -55,12 +55,6 @@ func listCLIRemotesTimeout(dbPath string) time.Duration {
 	return listCLIRemotesTimeoutHealthy
 }
 
-// ShellQuote returns s wrapped in single quotes with any embedded single
-// quotes escaped, making it safe to interpolate into a shell command string.
-func ShellQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
-}
-
 // IsSSHURL returns true if the URL uses SSH transport.
 // Matches git+ssh://, ssh://, and git@host: patterns.
 func IsSSHURL(url string) bool {

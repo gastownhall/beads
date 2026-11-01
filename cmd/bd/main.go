@@ -31,9 +31,11 @@ import (
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/hooks"
 	"github.com/steveyegge/beads/internal/httpclient"
+	"github.com/steveyegge/beads/internal/initprocs"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/migration"
 	"github.com/steveyegge/beads/internal/molecules"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/remotecache"
 	"github.com/steveyegge/beads/internal/routing"
 	"github.com/steveyegge/beads/internal/storage"
@@ -320,7 +322,12 @@ func commandMemoizesReads(cmd *cobra.Command) bool {
 // It mirrors dolt.applyResolvedConfig, which this hand-built doltCfg path
 // bypasses.
 func resolveDoltServerConnection(ctx context.Context, beadsDir string, fileCfg *configfile.Config, doltCfg *dolt.Config) error {
-	doltCfg.ServerHost = fileCfg.GetDoltServerHost()
+	// An IPv6 host may be configured bracketed ("[::1]") as well as bare. The
+	// store and `bd serve` (its socket-fallback probe and its proxy's
+	// ExternalDoltServer) both dial with doltutil.ServerAddr, which accepts
+	// either, but they also key, name and compare the server by this host, so
+	// hand them the bare form.
+	doltCfg.ServerHost = configfile.UnbracketHost(fileCfg.GetDoltServerHost())
 	// Port 0 is fine here — auto-start will resolve it. Use the shared helper
 	// rather than DefaultConfig(...).Port: this hand-built doltCfg is handed
 	// straight to dolt.New, and a port arriving there without its source is
@@ -856,10 +863,11 @@ func prepareSelectedCommandContext(beadsDir string, loadEnv bool) {
 	}
 	config.CheckBeadsDirPermissions(beadsDir)
 	if err := loadServerModeFromBeadsDir(beadsDir); err != nil {
-		// Warn, don't fatal: this context also serves no-DB commands —
-		// doctor, init, bootstrap, config — which are exactly the repair
-		// paths for a corrupt metadata.json. Data commands stay protected
-		// by the hard error at store init and in the store factories.
+		// Warn, don't fatal: the commands workspace admission exempts,
+		// such as bd version and help, still run. Admission
+		// (guardLegacyUpgradeWorkspace) then refuses every other command,
+		// doctor, init and bootstrap included, and the store factories
+		// refuse too, so the repair is fixing or restoring the file by hand.
 		fmt.Fprintf(os.Stderr, "warning: %v\n", err)
 	}
 }
@@ -926,9 +934,27 @@ func resolveCommandBeadsDir(dbPath string) string {
 		return beadsDir
 	}
 
+	// A dbPath that is a .beads directory, or lies directly inside one, names
+	// that directory, even before it exists: the directory form of --db and
+	// BEADS_DB (GH#2548), the workspace bd import sets up where none was
+	// found, or a create --repo target with no .beads yet. Climbing past it
+	// would bind whatever .beads lies above: one discovery never reached, or
+	// the user-global ~/.beads it passes over (GH#4402). For ~/.beads itself
+	// the climb would start at the home directory and end there, binding the
+	// home directory.
+	if filepath.Base(dbPath) == ".beads" {
+		return filepath.Clean(dbPath)
+	}
+	if parent := filepath.Dir(dbPath); filepath.Base(parent) == ".beads" {
+		return parent
+	}
+
 	bound := ceiling.For(filepath.Dir(dbPath))
 	for dir := filepath.Dir(dbPath); dir != "" && dir != filepath.Dir(dir) && !bound.Excludes(dir); dir = filepath.Dir(dir) {
 		candidate := filepath.Join(dir, ".beads")
+		if climbEndsAtAccountHome(dir, candidate, dbPath) {
+			break
+		}
 		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
 			return candidate
 		}
@@ -937,6 +963,22 @@ func resolveCommandBeadsDir(dbPath string) string {
 	// No candidate matched — fall back to parent directory of the db path.
 	// This handles bootstrap/init where no metadata.json exists yet.
 	return filepath.Dir(dbPath)
+}
+
+// climbEndsAtAccountHome reports whether resolveCommandBeadsDir's climb from
+// dbPath ends at dir instead of binding candidate, dir's .beads: dir is the
+// account home, whose .beads is the user-global directory discovery passes
+// over (GH#4402), dbPath does not lie inside that directory (one naming it,
+// or a path directly in it, never reaches the climb), and the home
+// directory is not a repository root (a dotfiles repository's .beads is its
+// own). An explicit --db, BEADS_DB or bd import target under the home
+// directory that does not exist yet then binds the directory it names, not
+// ~/.beads, and nothing above the home directory either, as bd bootstrap's
+// parent-config walk ends there.
+func climbEndsAtAccountHome(dir, candidate, dbPath string) bool {
+	return beads.IsAccountHomeDir(dir) &&
+		!strings.HasPrefix(dbPath, candidate+string(filepath.Separator)) &&
+		!isGitWorkTreeRoot(dir)
 }
 
 // resolveConfiguredActor returns the actor implied by env/config when no
@@ -1558,10 +1600,11 @@ var rootCmd = &cobra.Command{
 			if os.Getenv("BEADS_DIR") == "" {
 				loadEnvironment()
 				if err := loadServerModeFromConfig(); err != nil {
-					// Warn, don't fatal: skipsStoreInit commands (doctor,
-					// init, bootstrap, version, ...) never select a store,
-					// and several of them are the repair path for the very
-					// corruption being reported.
+					// Warn, don't fatal, as prepareSelectedCommandContext
+					// does: the commands admission exempts still run, and
+					// admission refuses the rest (guardLegacyNoStoreCommand
+					// below; doctor, init and bootstrap run the guard
+					// themselves).
 					fmt.Fprintf(os.Stderr, "warning: %v\n", err)
 				}
 			}
@@ -1578,6 +1621,9 @@ var rootCmd = &cobra.Command{
 				}
 			}
 			if err := guardLegacyNoStoreCommand(cmd, beadsDir); err != nil {
+				if isUnsupportedWorkspaceFormat(err) {
+					return handleWorkspaceGuardError(err)
+				}
 				isMigrationCommand := false
 				for current := cmd; current != nil; current = current.Parent() {
 					if current.Name() == "migrate" {
@@ -1637,7 +1683,7 @@ var rootCmd = &cobra.Command{
 				prepareSelectedCommandContext(bd, true)
 				refreshBoundCommandConfig(cmd)
 				if guardErr := guardLegacyUpgradeWorkspace(bd); guardErr != nil {
-					return HandleError("%v", guardErr)
+					return handleWorkspaceGuardError(guardErr)
 				}
 				cfg, cfgErr := configfile.LoadForDiscovery(bd)
 				if cfgErr != nil || cfg != nil && (cfg.IsDoltProxiedServerMode() ||
@@ -1658,11 +1704,12 @@ var rootCmd = &cobra.Command{
 					dbPath = bd
 				}
 			} else if guardErr := guardUndiscoveredLegacyWorkspace(); guardErr != nil {
-				return HandleError("%v", guardErr)
+				return handleWorkspaceGuardError(guardErr)
 			}
 		}
 
 		// Initialize database path
+		fallbackBeadsDir := "" // the workspace import/setup set up when none is found
 		if dbPath == "" {
 			// Use public API to find database (same logic as extensions)
 			if foundDB := beads.FindDatabasePath(); foundDB != "" {
@@ -1709,10 +1756,11 @@ var rootCmd = &cobra.Command{
 				}
 
 				if dbPath == "" && cmd.Name() != "import" && cmd.Name() != "setup" {
-					// No database found - provide context-aware error message
-					fmt.Fprintf(os.Stderr, "Error: no beads database found\n")
-					fmt.Fprintf(os.Stderr, "Hint: %s\n", diagHint())
-					fmt.Fprintf(os.Stderr, "      or set BEADS_DIR to point to your .beads directory\n")
+					// No database found - provide context-aware error message.
+					// GH#4402: when discovery passed over the user's own
+					// ~/.beads, the refusal names it, so a misdirected write
+					// is visible and the opt-in is one paste away.
+					printNoDatabaseRefusal()
 					return SilentExit()
 				}
 
@@ -1732,18 +1780,39 @@ var rootCmd = &cobra.Command{
 						targetBeadsDir = beads.ExplicitBeadsDir()
 					}
 					if targetBeadsDir == "" {
+						// GH#4402: the working directory's own .beads is
+						// the fallback, except where discovery passes over
+						// the user-global ~/.beads. In the home directory
+						// the fallback is that directory, so bd import
+						// would write into the global database. Outside a
+						// repository, where discovery passed over a
+						// user-level workspace (SkippedUserGlobalBeadsDir),
+						// bd import refuses with the note that names it, as
+						// every other command run there does.
+						if cwd, err := os.Getwd(); (err == nil && beads.SkipsUserGlobalBeadsAt(cwd)) ||
+							beads.SkippedUserGlobalBeadsDir() != "" {
+							printNoDatabaseRefusal()
+							return SilentExit()
+						}
 						targetBeadsDir = ".beads"
 					}
 					dbPath = utils.CanonicalizePath(filepath.Join(targetBeadsDir, beads.CanonicalDatabaseName))
+					// Bind the directory chosen here: resolveCommandBeadsDir
+					// would climb from a BEADS_DIR not named .beads to the
+					// nearest .beads above it.
+					fallbackBeadsDir = filepath.Dir(dbPath)
 				}
 			}
 		}
 
-		beadsDir := resolveCommandBeadsDir(dbPath)
+		beadsDir := fallbackBeadsDir
+		if beadsDir == "" {
+			beadsDir = resolveCommandBeadsDir(dbPath)
+		}
 		prepareSelectedCommandContext(beadsDir, true)
 		refreshBoundCommandConfig(cmd)
 		if guardErr := guardLegacyUpgradeWorkspace(beadsDir); guardErr != nil {
-			return HandleError("%v", guardErr)
+			return handleWorkspaceGuardError(guardErr)
 		}
 
 		// Workspace operation gate: every command that reaches this point
@@ -1952,6 +2021,11 @@ var rootCmd = &cobra.Command{
 			// preview: the store is genuinely writable underneath, so the
 			// lazy defer-wake sweep may still run (be-vbhpf).
 			ClassifiedRead: policy.readOnly && !readonlyMode && !previewMode,
+			// A read-only or gateway open does not migrate, so a schema too
+			// old for this binary's issue reads is refused at open instead of
+			// failing each read on an unknown column. Not for a preview,
+			// which reports an incompatibility through its own query.
+			RequireReadableSchema: !previewMode,
 		}
 
 		// Load config to get database name and server connection settings.
@@ -2749,8 +2823,14 @@ func flushBatchCommitOnShutdown() {
 // run, not a workspace problem. It must stay narrow: any other previewErr
 // (unreachable server, bad config, ...) has to refuse rather than silently
 // wave the real, mutating open through (be-3bt2e).
+//
+// So it matches the embedded store's own no-database error, and only when the
+// cause is a missing data dir — not any ENOENT. A dial to a configured unix
+// socket whose server is down satisfies errors.Is(err, os.ErrNotExist) too,
+// as does a data dir missing an internal file, and neither is a first run
+// (bd-wlygc).
 func isBootstrapPreviewErr(err error) bool {
-	return errors.Is(err, os.ErrNotExist)
+	return errors.Is(err, embeddeddolt.ErrNoEmbeddedDatabase) && errors.Is(err, os.ErrNotExist)
 }
 
 // refuseUnverifiablePreviewOpen renders the identity gate's refusal when the
@@ -2782,7 +2862,7 @@ func isBootstrapPreviewErr(err error) bool {
 // Extracted from the gate's default arm so both halves are directly testable
 // without standing up a forward-drifted workspace; the wire itself is pinned on
 // the embedded tier by
-// TestIdentityGateRendersSchemaSkewFromForwardDriftedWorkspace.
+// TestEmbeddedIdentityGateRendersSchemaSkewFromForwardDriftedWorkspace.
 func refuseUnverifiablePreviewOpen(previewErr error) error {
 	if handleFreshCloneError(previewErr) {
 		return SilentExit()
@@ -2878,6 +2958,7 @@ func validateWorkspaceIdentity(ctx context.Context, s storage.DoltStorage, beads
 }
 
 func main() {
+	initprocs.Done()
 	// BD_NAME overrides the binary name in help text (e.g. BD_NAME=ops makes
 	// "ops --help" show "ops" instead of "bd"). Useful for multi-instance
 	// setups where wrapper scripts set BEADS_DIR for routing.
@@ -2891,6 +2972,11 @@ func main() {
 	rootCmd.InitDefaultHelpCmd()
 	registerHelpAllFlag()
 
+	// Cobra prints a command's returned error itself ("Error: ...") unless
+	// the command silences it: that line goes through the same backstop as
+	// bd's own error printers (HandleError), since an error can repeat a value
+	// a cloned repository sets.
+	rootCmd.SetErr(remedy.TextWriter(os.Stderr))
 	executedCmd, err := rootCmd.ExecuteC()
 
 	// Let this command's fire-and-forget hooks finish, for the same
@@ -2911,7 +2997,7 @@ func main() {
 			os.Exit(code)
 		}
 		if executedCmd != nil && executedCmd.SilenceErrors {
-			fmt.Fprintf(os.Stderr, "Error: %s\n", err.Error())
+			fmt.Fprintf(os.Stderr, "Error: %s\n", remedy.PrintedText(err.Error()))
 		}
 		os.Exit(1)
 	}

@@ -63,9 +63,9 @@ func seedWalkTree(t *testing.T, ctx context.Context, e *servedEnv) {
 
 // walkOverBoth runs one level of the walk against both stores.
 //
-// It reproduces findAllDescendants' own mutation exactly — a value copy of the
-// built filter with ParentID re-pointed and Limit zeroed — because the whole
-// question is whether the filter the CLI hands the store crosses intact.
+// It reproduces storage.WalkDescendants' own mutation exactly — a value copy of
+// the built filter with ParentID re-pointed and Limit zeroed — because the
+// whole question is whether the filter the CLI hands the store crosses intact.
 func walkOverBoth(t *testing.T, ctx context.Context, e *servedEnv, in issueops.ListRequest, parent string) (local, remote []string, remoteErr error) {
 	t.Helper()
 	cfg, err := workapi.LoadStoreListConfig(ctx, e.reference)

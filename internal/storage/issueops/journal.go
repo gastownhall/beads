@@ -7,8 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
+
+	gmssql "github.com/dolthub/go-mysql-server/sql"
+	mysql "github.com/go-sql-driver/mysql"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dberrors"
@@ -310,17 +314,57 @@ func recordBlockedJournalChanges(
 // ambient context, so a new call site cannot compile without deciding
 // attribution.
 func RecordEventInTx(ctx context.Context, tx DBTX, op EventOp, issueID, actor string) error {
-	if !journalEnabled(ctx, tx) {
-		return nil
+	_, err := recordIssueEventInTx(ctx, tx, op, issueID, actor)
+	return err
+}
+
+// RecordCreateEventInTx is RecordEventInTx(EventCreate) for the create seams
+// that write the stored row back onto the caller's issue (finishCreateIssueInTx
+// and the unit-of-work repository's Insert): once the record is journaled it
+// hands the row's arrival_seq back onto issue — the stamp this record just
+// wrote, or the one an earlier record left on a row an import upsert rewrote —
+// so the struct a caller keeps describes the row it created. The insert paths
+// zero the field on the way in (PrepareIssueForInsert), so without this a
+// caller that keeps its struct, as the public storage API's CreateIssue,
+// CreateIssues and Transaction.CreateIssue callers do, reads every stamped
+// wisp as unstamped. With the journal off nothing is recorded or stamped, and
+// the field stays zero.
+func RecordCreateEventInTx(ctx context.Context, tx DBTX, issue *types.Issue, actor string) error {
+	recorded, err := recordIssueEventInTx(ctx, tx, EventCreate, issue.ID, actor)
+	if err != nil {
+		return err
 	}
-	issue, err := getJournalIssueInTx(ctx, tx, issueID)
+	if recorded != nil {
+		issue.ArrivalSeq = recorded.ArrivalSeq
+	}
+	return nil
+}
+
+// recordIssueEventInTx is RecordEventInTx's body. It returns the snapshot it
+// journaled — nil when the journal is off — whose ArrivalSeq is the row's
+// stamp once the record is written.
+func recordIssueEventInTx(ctx context.Context, tx DBTX, op EventOp, issueID, actor string) (*types.Issue, error) {
+	if !journalEnabled(ctx, tx) {
+		return nil, nil
+	}
+	issue, table, err := getJournalIssueInTx(ctx, tx, issueID)
 	if err != nil {
 		// The row should exist for a non-delete op; a missing row means the
 		// mutation and the journal disagree, so fail the transaction rather than
 		// record a hole.
-		return fmt.Errorf("journal: snapshot %s for %s: %w", op, issueID, err)
+		return nil, fmt.Errorf("journal: snapshot %s for %s: %w", op, issueID, err)
 	}
-	return insertEventRow(ctx, tx, op, issueID, issue, nil, nil, actor)
+	// A create of a wisp-plane row stamps the row with its create record's seq
+	// (arrival_seq). Only a row that has no stamp yet takes one — the first
+	// create record journaled for it — so a rename or an import upsert, which
+	// journal a synthetic create for a row that already exists, never move a
+	// stamp. issues rows are never stamped: that table replicates, and a
+	// clone-local number has no meaning on another clone (migration 0073).
+	stamp := op == EventCreate && table == "wisps" && issue.ArrivalSeq == 0
+	if err := insertEventRow(ctx, tx, op, issueID, issue, nil, nil, actor, stamp); err != nil {
+		return nil, err
+	}
+	return issue, nil
 }
 
 // RecordDeleteInTx records a delete for issueID with a null issue payload (the
@@ -330,7 +374,7 @@ func RecordDeleteInTx(ctx context.Context, tx DBTX, issueID, actor string) error
 	if !journalEnabled(ctx, tx) {
 		return nil
 	}
-	return insertEventRow(ctx, tx, EventDelete, issueID, nil, nil, nil, actor)
+	return insertEventRow(ctx, tx, EventDelete, issueID, nil, nil, nil, actor, false)
 }
 
 // journalableDeletesInTx narrows ids to the ones that actually exist in table,
@@ -355,16 +399,16 @@ func RecordDepEventInTx(ctx context.Context, tx DBTX, op EventOp, issueID, kind,
 	if !journalEnabled(ctx, tx) {
 		return nil
 	}
-	issue, err := getJournalIssueInTx(ctx, tx, issueID)
+	issue, _, err := getJournalIssueInTx(ctx, tx, issueID)
 	if err != nil {
 		// The dependency source may itself have been deleted (cascade); record
 		// the edge change with a null snapshot rather than failing.
 		if errors.Is(err, storage.ErrNotFound) {
-			return insertEventRow(ctx, tx, op, issueID, nil, &EventDep{Kind: kind, Target: target, Metadata: metadata}, nil, actor)
+			return insertEventRow(ctx, tx, op, issueID, nil, &EventDep{Kind: kind, Target: target, Metadata: metadata}, nil, actor, false)
 		}
 		return fmt.Errorf("journal: snapshot %s for %s: %w", op, issueID, err)
 	}
-	return insertEventRow(ctx, tx, op, issueID, issue, &EventDep{Kind: kind, Target: target, Metadata: metadata}, nil, actor)
+	return insertEventRow(ctx, tx, op, issueID, issue, &EventDep{Kind: kind, Target: target, Metadata: metadata}, nil, actor, false)
 }
 
 // RecordCommentEventInTx records a replayable structured or audit comment. The
@@ -374,18 +418,20 @@ func RecordCommentEventInTx(ctx context.Context, tx DBTX, issueID string, commen
 	if !journalEnabled(ctx, tx) {
 		return nil
 	}
-	issue, err := getJournalIssueInTx(ctx, tx, issueID)
+	issue, _, err := getJournalIssueInTx(ctx, tx, issueID)
 	if err != nil {
 		return fmt.Errorf("journal: snapshot comment for %s: %w", issueID, err)
 	}
-	return insertEventRow(ctx, tx, EventCommentWrite, issueID, issue, nil, comment, comment.Author)
+	return insertEventRow(ctx, tx, EventCommentWrite, issueID, issue, nil, comment, comment.Author, false)
 }
 
 // getJournalIssueInTx augments the normal issue snapshot with the persisted
 // readiness projection. is_blocked is deliberately not part of ordinary issue
 // hydration, but it is required in a journal snapshot because a dependency
-// delta must be replayable without re-running graph maintenance.
-func getJournalIssueInTx(ctx context.Context, tx DBTX, issueID string) (*types.Issue, error) {
+// delta must be replayable without re-running graph maintenance. It also
+// reports which table the row was read from, which decides whether a create
+// record stamps the row's arrival_seq.
+func getJournalIssueInTx(ctx context.Context, tx DBTX, issueID string) (*types.Issue, string, error) {
 	for _, candidate := range []struct {
 		issueTable string
 		labelTable string
@@ -401,17 +447,17 @@ func getJournalIssueInTx(ctx context.Context, tx DBTX, issueID string) (*types.I
 			if optionalBlockedTable(candidate.issueTable) && isTableNotExistError(err) {
 				continue
 			}
-			return nil, err
+			return nil, "", err
 		}
 		var blocked int
 		//nolint:gosec // candidate.issueTable is one of the two hardcoded values above.
 		if err := tx.QueryRowContext(ctx, fmt.Sprintf("SELECT is_blocked FROM %s WHERE id = ?", candidate.issueTable), issueID).Scan(&blocked); err != nil {
-			return nil, fmt.Errorf("journal: read is_blocked for %s: %w", issueID, err)
+			return nil, "", fmt.Errorf("journal: read is_blocked for %s: %w", issueID, err)
 		}
 		issue.IsBlocked = blocked != 0
-		return issue, nil
+		return issue, candidate.issueTable, nil
 	}
-	return nil, fmt.Errorf("%w: issue %s", storage.ErrNotFound, issueID)
+	return nil, "", fmt.Errorf("%w: issue %s", storage.ErrNotFound, issueID)
 }
 
 // insertEventRow performs the actual INSERT. It is the ONE seam both write
@@ -420,15 +466,15 @@ func getJournalIssueInTx(ctx context.Context, tx DBTX, issueID string) (*types.I
 // (non-dependency ops). ts is the insert time, stamped inside the committing
 // transaction. actor is stored as-is — "" for the genuinely unattributable
 // paths — in the NOT NULL DEFAULT ” actor column.
-func insertEventRow(ctx context.Context, tx DBTX, op EventOp, issueID string, issue *types.Issue, dep *EventDep, comment *EventComment, actor string) error {
-	var issueJSON any
-	if issue != nil {
-		b, err := json.Marshal(issue)
-		if err != nil {
-			return fmt.Errorf("journal: marshal issue %s: %w", issueID, err)
-		}
-		issueJSON = string(b)
-	}
+//
+// stamp asks for the create record's seq to be written onto the wisps row as
+// its arrival_seq (only recordIssueEventInTx, RecordEventInTx's body, passes
+// true, and only for a create of an unstamped wisp-plane row). The stamp is
+// written after the seq is drawn and before the snapshot is marshaled, so the
+// record's post-image carries the value it stamped — record.seq ==
+// row.arrival_seq == post-image.arrival_seq — and the counter is held for one
+// extra statement, not for a second counter.
+func insertEventRow(ctx context.Context, tx DBTX, op EventOp, issueID string, issue *types.Issue, dep *EventDep, comment *EventComment, actor string, stamp bool) error {
 	var depJSON any
 	if dep != nil {
 		b, err := json.Marshal(dep)
@@ -445,7 +491,24 @@ func insertEventRow(ctx context.Context, tx DBTX, op EventOp, issueID string, is
 		}
 		commentJSON = string(b)
 	}
-	insert := func(seq int64) error {
+	// record writes the journal row at seq. prior is the stamp an earlier
+	// attempt in this transaction already wrote (0 for none), which the retry
+	// below moves rather than leaving behind.
+	record := func(seq, prior int64) error {
+		if stamp {
+			if err := stampArrivalSeqInTx(ctx, tx, issueID, seq, prior); err != nil {
+				return err
+			}
+			issue.ArrivalSeq = seq
+		}
+		var issueJSON any
+		if issue != nil {
+			b, err := json.Marshal(issue)
+			if err != nil {
+				return fmt.Errorf("journal: marshal issue %s: %w", issueID, err)
+			}
+			issueJSON = string(b)
+		}
 		_, err := tx.ExecContext(ctx, `
 			INSERT INTO bd_events_journal (seq, ts, op, issue_id, actor, issue_json, dep_json, comment_json)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -457,50 +520,148 @@ func insertEventRow(ctx context.Context, tx DBTX, op EventOp, issueID string, is
 	if err != nil {
 		return err
 	}
-	if err := insert(seq); err != nil {
-		// A duplicate seq means the counter is BEHIND the journal — it was
-		// restored, hand-edited, or copied from another workspace. Left alone
-		// that wedges the instance permanently: every later mutation re-mints
-		// the same taken seq and fails, and because the journal row shares the
-		// mutation's transaction, the user's write fails with it. Raise the
-		// counter past the high-water mark and retry exactly once; a second
-		// duplicate is a real bug and must surface, not spin.
-		if !dberrors.IsDuplicateKey(err) {
+	if err := record(seq, 0); err != nil {
+		// A duplicate seq means the counter is BEHIND a value it already handed
+		// out — a journal row's seq, or a wisps row's arrival_seq stamp (which
+		// outlives its record once the journal is pruned). It was restored,
+		// hand-edited, or copied from another workspace. Left alone that wedges
+		// the instance permanently: every later mutation re-mints the same taken
+		// seq and fails, and because the journal row shares the mutation's
+		// transaction, the user's write fails with it. Raise the counter past
+		// both high-water marks and retry exactly once; a second duplicate is a
+		// real bug and must surface, not spin. The retry moves a stamp the
+		// failed attempt already wrote (prior), since a stamp that landed before
+		// its journal INSERT collided names a seq this record will not carry.
+		if !isSeqCollision(err) {
 			return fmt.Errorf("journal: record %s for %s: %w", op, issueID, err)
 		}
 		if healErr := healEventSeqCounter(ctx, tx); healErr != nil {
 			return healErr
 		}
-		seq, err = nextEventSeq(ctx, tx)
+		retry, err := nextEventSeq(ctx, tx)
 		if err != nil {
 			return err
 		}
-		if err := insert(seq); err != nil {
+		if err := record(retry, seq); err != nil {
 			return fmt.Errorf("journal: record %s for %s after seq counter heal: %w", op, issueID, err)
 		}
 	}
 	return nil
 }
 
+// stampArrivalSeqInTx writes seq onto the wisps row issueID as its arrival_seq.
+// It is the ONLY writer of arrival_seq (TestArrivalSeqIsWrittenOnlyByTheJournalSeam):
+// the generic insert, upsert and move paths never bind the column, so no value
+// a caller supplies is ever stored.
+//
+// The predicate admits the unstamped row, or the row carrying prior — the stamp
+// an earlier attempt in this same transaction wrote before its journal INSERT
+// collided — and nothing else, so a stamp is never overwritten once its record
+// exists. It writes no other column: updated_at is self-assigned because the
+// column carries ON UPDATE CURRENT_TIMESTAMP on Dolt, and row_lock,
+// current_revision and content_hash are left alone, so the revision a caller
+// reads right after its create still passes its compare-and-set.
+//
+// Exactly one row must match. Zero would mean the record about to be written
+// claims a stamp the row does not carry, which fails the transaction rather
+// than journal a false post-image.
+func stampArrivalSeqInTx(ctx context.Context, tx DBTX, issueID string, seq, prior int64) error {
+	res, err := tx.ExecContext(ctx, `
+		UPDATE wisps SET arrival_seq = ?, updated_at = updated_at
+		WHERE id = ? AND (arrival_seq IS NULL OR arrival_seq = ?)
+	`, seq, issueID, prior)
+	if err != nil {
+		return fmt.Errorf("journal: stamp arrival_seq %d on %s: %w", seq, issueID, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("journal: stamp arrival_seq %d on %s: rows affected: %w", seq, issueID, err)
+	}
+	if n != 1 {
+		return fmt.Errorf("journal: stamp arrival_seq %d on %s matched %d rows, want 1: the row is missing or already stamped", seq, issueID, n)
+	}
+	return nil
+}
+
+// isSeqCollision reports whether err is a uniqueness violation on a value the
+// seq counter handed out: the journal's seq primary key, or the wisps
+// arrival_seq unique index. dberrors.IsDuplicateKey covers MySQL/Dolt server
+// (1062/1586) and the embedded engine's primary-key text. The embedded engine
+// reports a UNIQUE-index violation with its own error kind, but Kind.Is does
+// not unwrap, and the stamp's violation arrives wrapped (stampArrivalSeqInTx's
+// %w), so the kind arms match only a bare error: the "duplicate unique key"
+// text is what recognizes the wrapped one.
+func isSeqCollision(err error) bool {
+	return dberrors.IsDuplicateKey(err) || gmssql.ErrUniqueKeyViolation.Is(err) || gmssql.ErrPrimaryKeyViolation.Is(err) ||
+		strings.Contains(strings.ToLower(err.Error()), "duplicate unique key")
+}
+
 // healEventSeqCounter seeds the counter row if it is missing and raises it to
-// the journal's high-water mark, so the next allocation cannot collide. VALUES +
-// GREATEST, not INSERT ... SELECT MAX(): in Dolt a literal+aggregate SELECT over
-// an empty table yields zero rows, so an INSERT ... SELECT would seed nothing on
-// a fresh journal. GREATEST also makes this safe to call on a counter that is
-// already ahead — it never moves the counter backwards.
+// the high-water mark of every value it has ever handed out, so the next
+// allocation cannot collide. That is the journal's MAX(seq) and the highest
+// wisps.arrival_seq: a stamp IS a journal seq (see stampArrivalSeqInTx) and it
+// outlives its record once the journal is pruned, so a counter healed to the
+// journal alone could re-mint a value a row already carries. VALUES + GREATEST,
+// not INSERT ... SELECT MAX(): in Dolt a literal+aggregate SELECT over an empty
+// table yields zero rows, so an INSERT ... SELECT would seed nothing on a fresh
+// journal. GREATEST also makes this safe to call on a counter that is already
+// ahead — it never moves the counter backwards.
+//
+// A workspace whose wisps table, or its arrival_seq column, is missing (a
+// drifted clone whose ignored series has not materialized them) has no stamps
+// to clear, so the heal falls back to the journal alone: on MySQL and Dolt a
+// failed statement leaves the transaction usable, so the second UPDATE runs in
+// the same transaction as the first.
 func healEventSeqCounter(ctx context.Context, tx DBTX) error {
 	if _, err := tx.ExecContext(ctx, "INSERT IGNORE INTO bd_events_seq (id, next_seq) VALUES (0, 0)"); err != nil {
 		return fmt.Errorf("journal: seed seq counter: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `
+	_, err := tx.ExecContext(ctx, `
 		UPDATE bd_events_seq
-		SET next_seq = GREATEST(next_seq, COALESCE((SELECT MAX(seq) FROM bd_events_journal), 0))
+		SET next_seq = GREATEST(next_seq,
+			COALESCE((SELECT MAX(seq) FROM bd_events_journal), 0),
+			COALESCE((SELECT MAX(arrival_seq) FROM wisps), 0))
 		WHERE id = 0
-	`); err != nil {
+	`)
+	if err != nil && isMissingArrivalSeqSource(err) {
+		_, err = tx.ExecContext(ctx, `
+			UPDATE bd_events_seq
+			SET next_seq = GREATEST(next_seq, COALESCE((SELECT MAX(seq) FROM bd_events_journal), 0))
+			WHERE id = 0
+		`)
+	}
+	if err != nil {
 		return fmt.Errorf("journal: raise seq counter to high-water mark: %w", err)
 	}
 	return nil
 }
+
+// isMissingArrivalSeqSource reports whether err means the heal's wisps term
+// cannot be evaluated because the wisps table or its arrival_seq column does not
+// exist — the drifted-clone case healEventSeqCounter falls back on. Any other
+// failure is returned by the heal rather than retried without the term.
+func isMissingArrivalSeqSource(err error) bool {
+	if dberrors.IsMissingTable(err, "wisps") {
+		return true
+	}
+	var mysqlErr *mysql.MySQLError
+	if errors.As(err, &mysqlErr) && mysqlErr.Number == mysqlUnknownColumn {
+		return true
+	}
+	if gmssql.ErrColumnNotFound.Is(err) {
+		return true
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "arrival_seq") &&
+		(strings.Contains(s, "could not be found") || strings.Contains(s, "unknown column"))
+}
+
+// mysqlUnknownColumn is ER_BAD_FIELD_ERROR, MySQL's "Unknown column" code. Dolt's
+// sql-server does not send it for a column the table lacks: 2.6 answers with
+// error 1105 and the text `column "arrival_seq" could not be found in any table
+// in scope`, so isMissingArrivalSeqSource's text match is what recognizes it
+// there, and must stay.
+const mysqlUnknownColumn = 1054
 
 // nextEventSeq allocates the next journal sequence number from the single-row
 // bd_events_seq counter, INSIDE the caller's transaction. Incrementing the

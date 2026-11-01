@@ -238,7 +238,16 @@ func (s *DoltStore) DemoteToWisp(ctx context.Context, id string, updates map[str
 // the demotion commit. Extracted so UpdateIssueChecked can wrap it with an
 // atomic version precondition in the same transaction; DemoteToWisp's behavior
 // is unchanged.
+//
+// It takes the id's create-coordination cell before its first read of the
+// row, as the shared persistence move and promotion do: a retaining sweep takes
+// the same cell before it deletes and tombstones the row, so the demotion
+// either commits first or finds the row gone, and never re-inserts into wisps
+// a row the sweep retired.
 func (s *DoltStore) demoteToWispInTx(ctx context.Context, tx *sql.Tx, id string, updates map[string]interface{}, actor string) error {
+	if err := issueops.CoordinateIDCreatesInTx(ctx, tx, []string{id}); err != nil {
+		return fmt.Errorf("coordinate demotion of %s: %w", id, err)
+	}
 	if _, err := issueops.UpdateIssueWithoutEventInTx(ctx, tx, id, updates, actor); err != nil {
 		return fmt.Errorf("update issue before demotion: %w", err)
 	}
@@ -250,6 +259,12 @@ func (s *DoltStore) demoteToWispInTx(ctx context.Context, tx *sql.Tx, id string,
 
 	if err := insertIssueTxIntoTable(ctx, tx, "wisps", issue); err != nil {
 		return fmt.Errorf("failed to insert issue into wisps: %w", err)
+	}
+	// Carry the row's versioned-history participation onto the wisps row
+	// while the issues row still exists, so a move back out restores it
+	// rather than starting history for a legacy row (R2.3).
+	if err := issueops.CarryParticipationToWispInTx(ctx, tx, id); err != nil {
+		return err
 	}
 
 	if _, err := tx.ExecContext(ctx, `
@@ -381,7 +396,7 @@ func (s *DoltStore) doltAddAndCommitInTx(ctx context.Context, tx *sql.Tx, tables
 	if issueops.VersionCommitDeferred(ctx) {
 		return nil
 	}
-	for _, table := range s.withVersionedHistoryTables(tables) {
+	for _, table := range s.withVersionedHistoryTables(ctx, tx, tables) {
 		if err := schema.DrainCall(ctx, tx, "CALL DOLT_ADD(?)", table); err != nil {
 			return fmt.Errorf("dolt add %s: %w", table, err)
 		}

@@ -34,16 +34,21 @@ func TestDoctorRejectsCorruptMetadataBeforeSharedServerChecks(t *testing.T) {
 		"BEADS_NO_DAEMON=1",
 		"BD_DISABLE_METRICS=1",
 	)
-	out, err := cmd.CombinedOutput()
+	stdout, stderr, err := runCommandBuffers(t, cmd)
 	if err == nil {
-		t.Fatalf("doctor unexpectedly ran shared-server checks with corrupt metadata:\n%s", out)
+		t.Fatalf("doctor unexpectedly ran shared-server checks with corrupt metadata:\nstdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
 	}
 
-	message := strings.ToLower(string(out))
-	for _, want := range []string{"metadata.json", "parsing config", "no storage database was opened or modified"} {
-		if !strings.Contains(message, want) {
-			t.Errorf("doctor corrupt-metadata error missing %q:\n%s", want, out)
+	// Binding the workspace warns, naming the file, before doctor runs, so
+	// the refusal is checked on its own Error line, not on that warning.
+	warning := firstLineWithPrefix(stderr.String(), "warning: ")
+	for _, want := range []string{"metadata.json", "parsing config:", "no storage database was opened or modified"} {
+		if !strings.Contains(warning, want) {
+			t.Errorf("doctor corrupt-metadata warning missing %q:\n%s", want, stderr.String())
 		}
+	}
+	if refusal := firstLineWithPrefix(stderr.String(), "Error: "); !strings.Contains(refusal, "parsing config:") {
+		t.Errorf("doctor's Error line does not refuse the unparsable metadata (parsing config:), got %q:\nstdout:\n%s\nstderr:\n%s", refusal, stdout.String(), stderr.String())
 	}
 
 	after, readErr := os.ReadFile(metadataPath)

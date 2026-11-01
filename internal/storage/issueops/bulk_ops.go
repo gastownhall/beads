@@ -239,8 +239,18 @@ func DeleteIssuesBySourceRepoInTx(ctx context.Context, tx *sql.Tx, sourceRepo st
 	return int(rowsAffected), nil
 }
 
+// UpdateIssueIDInTx renames the live row oldID to newID, in whichever plane
+// holds it, carrying its edges and lease and journaling the change. A newID a
+// retaining sweep retired is refused with *IdempotencyExpiredError before
+// anything is written: the rename takes newID's create-coordination cell and
+// probes the tombstones first, so it cannot commit a live row beside a
+// tombstone, racing sweep or not.
+//
 //nolint:gosec // G201: table names are hardcoded
 func UpdateIssueIDInTx(ctx context.Context, tx *sql.Tx, oldID, newID string, issue *types.Issue, actor string) error {
+	if err := RefuseRetiredIDInTx(ctx, tx, newID); err != nil {
+		return err
+	}
 	// Capture the edges under the OLD id before the rename rewrites them; they
 	// are what the journal replays as a remove/re-add pair around the identity
 	// change.

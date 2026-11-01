@@ -1,5 +1,7 @@
 package main
 
+import "github.com/steveyegge/beads/internal/configfile"
+
 // initRemoteCloneDisposition describes how init continues after a remote clone
 // attempt. It deliberately owns only the clone result policy; callers retain
 // all output, state, and remote-safety decisions.
@@ -43,7 +45,9 @@ func detectInitRemoteHostConflict(configHost, envHost, configPort, envPort strin
 		effectiveHost = envHost
 		hostSource = "environment"
 	}
-	if effectiveHost == "" || isLocalHost(effectiveHost) {
+	// Machine locality, as mode inference asks it (HostImpliesServerMode),
+	// not ownership: a host of this machine is no server intent.
+	if effectiveHost == "" || configfile.IsLocalHostString(effectiveHost) {
 		return nil
 	}
 	return &initRemoteHostConflict{

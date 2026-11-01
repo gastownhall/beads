@@ -124,7 +124,7 @@ func runReadyProxiedList(ctx context.Context, uw uow.UnitOfWork, in readyInput) 
 		}
 		_ = outputJSONWithPagination(results, pag)
 		if truncated {
-			fmt.Fprintf(os.Stderr, "Showing %d ready issues; more matched but were hidden by --limit. Use --limit 0 for all, or --limit N to raise the cap.\n", len(results))
+			fmt.Fprintf(os.Stderr, "%s Use --limit 0 for all, or --limit N to raise the cap.\n", readyHiddenHint(len(results)))
 		}
 		return nil
 	}
@@ -174,7 +174,7 @@ func runReadyProxiedList(ctx context.Context, uw uow.UnitOfWork, in readyInput) 
 	}
 
 	if truncated {
-		fmt.Printf("%s\n\n", ui.RenderMuted(fmt.Sprintf("Showing %d ready issues; more matched but were hidden by --limit. Use --limit 0 for all, or --limit N to raise the cap.", len(issues))))
+		fmt.Printf("%s\n\n", ui.RenderMuted(readyHiddenHint(len(issues))+" Use --limit 0 for all, or --limit N to raise the cap."))
 	}
 	return nil
 }

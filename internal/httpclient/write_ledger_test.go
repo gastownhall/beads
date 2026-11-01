@@ -430,6 +430,8 @@ func writeShapes() []writeShape {
 				"DryRun":                member("dry_run"),
 				"ProtectLiveDependents": member("protect_live_dependents"),
 				"Limit":                 member("limit"),
+				// Behind CapSweepRetainIDs, refused locally without it.
+				"RetainIDs": member("retain_ids"),
 			},
 		},
 		{
