@@ -56,7 +56,7 @@ bd stores issue data locally in a Dolt database (`.beads/dolt/`), which is gitig
 
 - bd uses standard git operations (no custom protocols)
 - Export/import operations read and write local files only
-- No network communication except through git and the Dolt dependency (see Network & Privacy below)
+- No network communication except through git, the Dolt dependency, and the telemetry/version-check calls documented below (see Network & Privacy below)
 - Git hooks (if used) run with your local user permissions
 
 ### Network & Privacy
@@ -75,11 +75,13 @@ Check the current status with `bd metrics`. To disable:
 bd metrics off
 
 # Method 2: Environment variable (per-session or export in shell profile)
-export DO_NOT_TRACK=1
+export BD_DISABLE_METRICS=1   # or the DO_NOT_TRACK=1 convention
 ```
 
 `bd metrics example` shows the exact payload shape. `BEADS_METRICS_ENDPOINT`
-overrides the collection endpoint.
+overrides the collection endpoint. `BD_DISABLE_EVENT_FLUSH=1` stops bd's own
+detached send-metrics child from flushing queued events — they're still
+written to disk, just not sent.
 
 **Dolt's own metrics.** The **Dolt** database engine (a beads dependency)
 separately collects its own usage metrics by default, contacting
@@ -91,8 +93,11 @@ disable Dolt metrics collection, use either method:
 dolt config --global --add metrics.disabled true
 
 # Method 2: Environment variable (per-session or export in shell profile)
-export BD_DISABLE_EVENT_FLUSH=1
+export DOLT_DISABLE_EVENT_FLUSH=1
 ```
+
+As with bd's own flag above, this stops Dolt from *sending* events —
+they're still written to disk; `metrics.disabled true` is the full off switch.
 
 Both settings use the key name `metrics.disabled`, but in two different
 config files (`~/.config/bd/config.yaml` for bd, Dolt's own global config
