@@ -2081,6 +2081,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   failed to lex (`title=größe`: `unexpected character '¶'`) or was mangled
   (`label=fête`). The lexer now decodes UTF-8 and keeps values exactly as
   typed (#7539).
+- `bd linear sync --push` no longer sends issues to a Linear state just
+  because it is named after its own type. With the type map from
+  `bd linear --help` (`completed` and `canceled` both mapped to `closed`), a
+  state named "Canceled" matched by name and won, so every closed issue went
+  to "Canceled" while "Done" was also mapped. Such a state now resolves
+  through the type map, so the push stops with the ambiguity error that
+  names `linear.outbound_state_map.<status>` (#3288).
 - `bd create --file` and other batch creates no longer fail with "issue
   already exists" on an id bd generated itself. The batch chose every id
   before it wrote any row, so two of its items could be handed the same short

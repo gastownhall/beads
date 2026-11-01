@@ -781,6 +781,50 @@ func TestResolveStateIDForBeadsStatusPrefersExplicitStateName(t *testing.T) {
 	}
 }
 
+// Regression GH#3288: with the type map from `bd linear --help`, a state
+// named after its own type must not win the push by name. Otherwise every
+// closed issue lands in "Canceled" while "Done" is also mapped to closed.
+func TestResolveTypeKeyNameCollision(t *testing.T) {
+	cache := &StateCache{
+		States: []State{
+			{ID: "state-backlog", Name: "Backlog", Type: "backlog"},
+			{ID: "state-todo", Name: "Todo", Type: "unstarted"},
+			{ID: "state-done", Name: "Done", Type: "completed"},
+			{ID: "state-canceled", Name: "Canceled", Type: "canceled"},
+		},
+	}
+	config := DefaultMappingConfig()
+	for k, v := range map[string]string{
+		"backlog": "open", "unstarted": "open", "completed": "closed", "canceled": "closed",
+	} {
+		config.ExplicitStateMap[k] = v
+	}
+
+	for _, tc := range []struct {
+		status types.Status
+		want   string
+	}{
+		{types.StatusOpen, "Backlog, Todo"},
+		{types.StatusClosed, "Done, Canceled"},
+	} {
+		got, err := ResolveStateIDForBeadsStatus(cache, tc.status, config)
+		if err == nil || !strings.Contains(err.Error(), "type fallback is ambiguous") || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: got (%q, %v), want type fallback ambiguous across %s", tc.status, got, err, tc.want)
+		}
+	}
+
+	// A single state of the mapped type still resolves by type.
+	delete(config.ExplicitStateMap, "completed")
+	if got, err := ResolveStateIDForBeadsStatus(cache, types.StatusClosed, config); err != nil || got != "state-canceled" {
+		t.Fatalf("canceled only: got (%q, %v), want state-canceled", got, err)
+	}
+	// A name key that is not a type still wins over the type pass.
+	config.ExplicitStateMap["done"] = "closed"
+	if got, err := ResolveStateIDForBeadsStatus(cache, types.StatusClosed, config); err != nil || got != "state-done" {
+		t.Fatalf("done name key: got (%q, %v), want state-done", got, err)
+	}
+}
+
 func TestResolveStateIDForBeadsStatusOutboundOverrideResolvesAmbiguousType(t *testing.T) {
 	// Reproduces the be-9gt scenario: Linear's default workspace has two
 	// "started"-type states. Without an outbound override the push would error
