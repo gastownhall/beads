@@ -1482,6 +1482,8 @@ go_test(
         "//internal/worktreeremove",
         "//issueops",
         "//memoryops",
+        "@com_github_anthropics_anthropic_sdk_go//:anthropic-sdk-go",
+        "@com_github_anthropics_anthropic_sdk_go//option",
         "@com_github_charmbracelet_x_ansi//:ansi",
         "@com_github_data_dog_go_sqlmock//:go-sqlmock",
         "@com_github_dolthub_dolt_go//libraries/doltcore/servercfg",

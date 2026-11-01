@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -343,5 +345,51 @@ func TestBytesWriterAppends(t *testing.T) {
 	}
 	if got := string(w.buf); got != "hello world" {
 		t.Fatalf("unexpected buffer content: %q", got)
+	}
+}
+
+// fakeMessagesServer serves one canned Messages API reply with the given content blocks.
+func fakeMessagesServer(t *testing.T, content string) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"id":"msg_1","type":"message","role":"assistant","model":"m","stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1},"content":%s}`, content)
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("MINIMAX_API_KEY", "")
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config initialize: %v", err)
+	}
+	config.Set("ai.api_key", "")
+	config.Set("ai.base_url", srv.URL)
+	t.Cleanup(func() { config.Set("ai.base_url", "") })
+}
+
+// A reply that leads with a thinking block must still yield its text (#7515).
+func TestCallWithRetry_SkipsLeadingThinkingBlock(t *testing.T) {
+	fakeMessagesServer(t, `[{"type":"thinking","thinking":"hmm","signature":"sig"},{"type":"text","text":"the summary"}]`)
+	client, err := newHaikuClient("test-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := client.callWithRetry(context.Background(), "prompt")
+	if err != nil {
+		t.Fatalf("callWithRetry: %v", err)
+	}
+	if got != "the summary" {
+		t.Fatalf("got %q, want %q", got, "the summary")
+	}
+}
+
+func TestCallWithRetry_NoTextBlock(t *testing.T) {
+	fakeMessagesServer(t, `[{"type":"thinking","thinking":"hmm","signature":"sig"}]`)
+	client, err := newHaikuClient("test-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.callWithRetry(context.Background(), "prompt")
+	if err == nil || !strings.Contains(err.Error(), "no text block") {
+		t.Fatalf("err = %v, want no text block error", err)
 	}
 }
