@@ -68,6 +68,59 @@ func TestPingWithRetryRetriesTheProxyOutageReportOnlyBriefly(t *testing.T) {
 			t.Fatalf("pingWithRetry() error = %v, want nil", err)
 		}
 	})
+
+	t.Run("a report at or after the window ends the retries with that report", func(t *testing.T) {
+		const window = 100 * time.Millisecond
+		shortOutageWindow(t, window)
+		p := &fakePinger{t: t, errs: []error{proxyOutageErr(), proxyOutageErr()}}
+		bo := testPingBackOff()
+		bo.RandomizationFactor = 0
+		bo.InitialInterval = time.Second // far past the window: only the clamp lands attempt two at its end
+		bo.MaxElapsedTime = 30 * time.Second
+		start := time.Now()
+		err := pingWithRetry(context.Background(), p, bo, testPingAttemptTimeout)
+		elapsed := time.Since(start)
+		if !proxy.IsUpstreamOutageError(err) {
+			t.Fatalf("pingWithRetry() error = %v, want the proxy's outage report", err)
+		}
+		if p.calls != 2 {
+			t.Fatalf("PingContext called %d times, want exactly 2", p.calls)
+		}
+		if elapsed < window || elapsed > 600*time.Millisecond {
+			t.Fatalf("gave up after %s, want just past the %s window", elapsed, window)
+		}
+	})
+
+	t.Run("an ordinary error between reports keeps the first report's window", func(t *testing.T) {
+		shortOutageWindow(t, 50*time.Millisecond)
+		p := &fakePinger{t: t, errs: []error{proxyOutageErr(), mysql.ErrInvalidConn, proxyOutageErr()}}
+		bo := testPingBackOff()
+		bo.RandomizationFactor = 0
+		bo.InitialInterval = 100 * time.Millisecond
+		bo.MaxElapsedTime = 30 * time.Second
+		err := pingWithRetry(context.Background(), p, bo, testPingAttemptTimeout)
+		if !proxy.IsUpstreamOutageError(err) {
+			t.Fatalf("pingWithRetry() error = %v, want the proxy's outage report", err)
+		}
+		if p.calls != 3 {
+			t.Fatalf("PingContext called %d times, want exactly 3", p.calls)
+		}
+	})
+
+	t.Run("a spent wrapped budget stops right after an outage report", func(t *testing.T) {
+		shortOutageWindow(t, time.Second)
+		p := &fakePinger{t: t, errs: []error{proxyOutageErr()}}
+		bo := testPingBackOff()
+		bo.RandomizationFactor = 0
+		bo.MaxElapsedTime = time.Microsecond // the wrapped policy returns Stop on its first NextBackOff
+		err := pingWithRetry(context.Background(), p, bo, testPingAttemptTimeout)
+		if !proxy.IsUpstreamOutageError(err) {
+			t.Fatalf("pingWithRetry() error = %v, want the proxy's outage report", err)
+		}
+		if p.calls != 1 {
+			t.Fatalf("PingContext called %d times, want the single scripted attempt", p.calls)
+		}
+	})
 }
 
 // TestPingWithRetryKeepsBackingOffAfterTheOutageWindowForOtherTransientErrors
