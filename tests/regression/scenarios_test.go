@@ -1547,6 +1547,17 @@ func TestDiamondDependency(t *testing.T) {
 // on an issue that has labels, deps, and comments, verifying that updating
 // scalar fields never clobbers relational data.
 func TestUpdateDoesNotClobberRelationalData(t *testing.T) {
+	// The pinned baseline predates the assignee-reason gate (house PR #68):
+	// its update refuses nothing, but it also does not know --reason, so the
+	// scenario cannot run identically on both binaries. Probe per the house
+	// pattern (TestDeleteAndRestoreRoundTrip) and skip when baseline lacks
+	// the flag; the candidate-side coverage lives in the protocol suite.
+	bWS := newWorkspace(t, baselineBin)
+	probe := bWS.create("--title", "reason probe", "--type", "task")
+	if _, err := bWS.tryRun("update", probe, "--assignee", "probe", "--reason", "probe"); err != nil {
+		t.Skip("pre-existing behavior (baseline): pinned release predates update --reason (PR #68)")
+	}
+
 	compareExports(t, func(w *workspace) {
 		id1 := w.create("--title", "Data-rich issue", "--type", "feature", "--priority", "1")
 		id2 := w.create("--title", "Dep target", "--type", "task")
@@ -1561,7 +1572,7 @@ func TestUpdateDoesNotClobberRelationalData(t *testing.T) {
 		w.run("update", id1, "--title", "Data-rich issue v2")
 		w.run("update", id1, "--priority", "0")
 		w.run("update", id1, "--description", "Updated description")
-		w.run("update", id1, "--assignee", "alice")
+		w.run("update", id1, "--assignee", "alice", "--reason", "contract test: assignee for clobber check")
 		w.run("update", id1, "--notes", "Updated notes")
 	})
 }

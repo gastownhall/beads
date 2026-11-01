@@ -29,7 +29,7 @@ func TestUpdateClosePolicyDirectForceStillFencesAssigneeTransfer(t *testing.T) {
 	})
 
 	// Without --force the fence holds.
-	env.setFlags(updateCmd, map[string]string{"assignee": "thief"})
+	env.setFlags(updateCmd, map[string]string{"assignee": "thief", "reason": "contract test: attempt transfer"})
 	if res := env.run(updateCmd, "test-ucpa"); res.exitCode == 0 {
 		t.Fatalf("unforced transfer succeeded; the fence is gone\nstderr:\n%s", res.stderr)
 	}
@@ -38,7 +38,7 @@ func TestUpdateClosePolicyDirectForceStillFencesAssigneeTransfer(t *testing.T) {
 	}
 
 	// With it, the transfer is authorized.
-	env.setFlags(updateCmd, map[string]string{"assignee": "thief", "force": "true"})
+	env.setFlags(updateCmd, map[string]string{"assignee": "thief", "force": "true", "reason": "contract test: forced transfer"})
 	if res := env.run(updateCmd, "test-ucpa"); res.exitCode != 0 {
 		t.Fatalf("forced transfer exit = %d, want 0\nstderr:\n%s", res.exitCode, res.stderr)
 	}
