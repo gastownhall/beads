@@ -138,6 +138,35 @@ func TestPingWithRetryOrdinaryTransientErrorInsideTheWindowKeepsItsOwnInterval(t
 	}
 }
 
+// TestPingWithRetryReachesARecoveryAfterTheOutageWindow: the outage report is
+// followed by ordinary transient errors whose recovery lands well after the
+// outage window. Those errors keep the wrapped policy's schedule, so
+// pingWithRetry is still retrying — its schedule not prematurely spent — when
+// the server returns at 200ms. Recovery is time-based: a call-count recovery
+// would also pass inside the bug's zero-wait spin.
+func TestPingWithRetryReachesARecoveryAfterTheOutageWindow(t *testing.T) {
+	shortOutageWindow(t, 10*time.Millisecond)
+	start := time.Now()
+	var calls atomic.Int64
+	p := pingerFunc(func(context.Context) error {
+		if calls.Add(1) == 1 {
+			return proxyOutageErr()
+		}
+		if time.Since(start) < 200*time.Millisecond {
+			return mysql.ErrInvalidConn
+		}
+		return nil
+	})
+	bo := testPingBackOff()
+	bo.RandomizationFactor = 0
+	bo.InitialInterval = 10 * time.Millisecond
+	// The multiplier (1.5) and MaxInterval (60s) stay at the policy defaults.
+	bo.MaxElapsedTime = 2 * time.Second
+	if err := pingWithRetry(context.Background(), p, bo, testPingAttemptTimeout); err != nil {
+		t.Fatalf("pingWithRetry() error = %v, want nil once the server returned at 200ms", err)
+	}
+}
+
 type pingerFunc func(context.Context) error
 
 func (f pingerFunc) PingContext(ctx context.Context) error { return f(ctx) }
