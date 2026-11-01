@@ -4966,6 +4966,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   make, and the `--json` payload for a yaml-only key carries a `changed` boolean
   so the machine branch can tell an absent key from an unpopulated field.
 
+### Fixed
+
+- **`bd compact` no longer discards a write that reaches `main` while it
+  runs.** The Dolt-history compaction finished by hard-resetting `main`
+  onto the rebuilt history, which replaced `main`'s working and staged
+  roots: a row `main` held between its SQL commit and its `DOLT_COMMIT`
+  (or a whole batch under batched auto-commit), or a commit another
+  session landed during the rebuild, was silently destroyed after its
+  writer had been told it succeeded. The final reset is now a soft one,
+  and whatever it leaves staged is committed by one follow-up commit, so
+  `main` is never left dirty: uncommitted rows stay pending and out of
+  `main`'s history, a commit that lands mid-compaction is folded into that
+  follow-up commit (its rows are kept, its own hash and message are not),
+  and changes a writer already staged can fold into it too. `bd flatten`
+  and the merge-settle path behind `bd dolt pull` / `bd sync` still
+  hard-reset (#7789, reported by @csauer02-personal-user).
+
 ### Security
 
 - **Raised the `golang.org/x/net` floor to `v0.60.0` and `golang.org/x/crypto`

@@ -242,10 +242,12 @@ database after a restart, with a healthy database on the same server as the
 control. A restart re-rolls the dice for every database, though, so the
 durable fix is to move to the pinned version.
 
-This matters because `bd flatten` and the Dolt-history compaction in
-`bd admin compact` both finish by hard-resetting `main` onto a temporary
-branch, and the merge-settle path behind `bd dolt pull` / `bd sync` falls
-back to a hard reset when it has to abandon a merge. See
+This matters because `bd flatten` finishes by hard-resetting `main` onto a
+temporary branch, and the merge-settle path behind `bd dolt pull` / `bd sync`
+falls back to a hard reset when it has to abandon a merge. `bd compact`, the
+Dolt-history compaction, hard-reset the same way until its final reset became
+a soft one, which also keeps a write that reaches `main` while a compaction
+runs instead of destroying it — see
 [Maintenance](#maintenance--bd-prune-and-bd-purge).
 
 ### New Project
@@ -389,12 +391,17 @@ transient. For full Dolt storage reclaim after deleting many rows, follow
 with `bd flatten`.
 
 **On Dolt 2.3.x, storage-reclaim operations can fail partway.** `bd flatten`
-and the Dolt-history compaction in `bd admin compact` both build a temporary
-branch and then hard-reset `main` onto it, and the merge-settle path behind
-`bd dolt pull` / `bd sync` falls back to a hard reset when it abandons a
-merge. On an affected database that hard reset returns
-`Error 1105 (HY000): context canceled`: `bd flatten` and `bd admin compact`
-stop at that step, and an abandoned merge is left without its rollback. See
+builds a temporary branch and then hard-resets `main` onto it, and the
+merge-settle path behind `bd dolt pull` / `bd sync` falls back to a hard
+reset when it abandons a merge. On an affected database that hard reset
+returns `Error 1105 (HY000): context canceled`: `bd flatten` stops at that
+step, and an abandoned merge is left without its rollback. `bd compact`, the
+Dolt-history compaction, no longer belongs to this group: its final reset
+onto the rebuilt history is a soft one, so a write that reaches `main` while
+the compaction runs survives it. Uncommitted rows stay pending and out of
+`main`'s history; a commit that lands mid-compaction is folded into one
+extra commit (its rows are kept, its own hash and message are not), and
+changes a writer already staged can fold into that commit too. See
 [Which Dolt version to install](#which-dolt-version-to-install) for the check
 and the fix.
 

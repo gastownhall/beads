@@ -43,9 +43,17 @@ const (
 	csrBoundaryMsg = "csr: boundary t5"
 	csrRecent1Msg  = "csr: recent u11"
 	csrRecent2Msg  = "csr: recent cfg and t6"
+	csrWriterMsg   = "csr: writer lands t600"
+	csrReplayMsg   = "csr: writer lands t650 mid-replay"
+	csrConsumerMsg = "csr: concurrent consumer takes the staging"
 
 	// csrSquashMsg is the base commit Compact writes for oldCommits=3.
 	csrSquashMsg = "compact: squash 3 commits into base snapshot"
+
+	// csrFollowUpMsg is the message of the commit Compact adds when the
+	// soft reset leaves anything staged on main. It must stay in sync with
+	// compact.go: the log assertions below pin it.
+	csrFollowUpMsg = "compact: commit changes that reached main during compaction"
 )
 
 // csrEnv is a fresh database on its own Dolt server carrying that history,
@@ -264,8 +272,14 @@ type csrHookConn struct {
 	// onMainReset runs just before the final DOLT_RESET(..., 'compact-tmp')
 	// is forwarded: the window between the finished rebuild and the reset.
 	onMainReset func(ctx context.Context) error
+	// onCherryPick runs just before the first cherry-pick is forwarded.
+	onCherryPick func(ctx context.Context) error
+	// beforeFollowUp runs after Compact's staged check and just before the
+	// follow-up commit is forwarded.
+	beforeFollowUp func(ctx context.Context) error
 
 	mainResets int // final resets seen
+	followUps  int // follow-up commit CALLs seen (forwarded or failed)
 }
 
 func (c *csrHookConn) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
@@ -277,7 +291,29 @@ func (c *csrHookConn) ExecContext(ctx context.Context, query string, args ...any
 			}
 		}
 	}
+	if c.onCherryPick != nil && strings.Contains(query, "DOLT_CHERRY_PICK") {
+		hook := c.onCherryPick
+		c.onCherryPick = nil // first cherry-pick only
+		if err := hook(ctx); err != nil {
+			return nil, fmt.Errorf("csr hook before cherry-pick: %w", err)
+		}
+	}
 	return c.DBConn.ExecContext(ctx, query, args...)
+}
+
+// QueryContext intercepts the drained follow-up commit. It is the only
+// DOLT_COMMIT('-m', ...) (single -m) Compact issues — the squashed base
+// commits with '-Am' — so match on that alone, not on the message text.
+func (c *csrHookConn) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+	if strings.Contains(query, "DOLT_COMMIT('-m'") {
+		c.followUps++
+		if c.beforeFollowUp != nil {
+			if err := c.beforeFollowUp(ctx); err != nil {
+				return nil, fmt.Errorf("csr hook before follow-up commit: %w", err)
+			}
+		}
+	}
+	return c.DBConn.QueryContext(ctx, query, args...)
 }
 
 // pendingWorkingSet leaves in main's working set, uncommitted, what bd
@@ -293,8 +329,9 @@ func (e *csrEnv) pendingWorkingSet() {
 
 // assertPendingSurvive is AC-1's contract after a successful Compact: the
 // values are still on main, they never entered main's HEAD snapshot, and
-// they are still pending.
-func (e *csrEnv) assertPendingSurvive() {
+// they are still pending. wantTAtHead is t's row count at HEAD (the history
+// plus whatever the test's racing write got committed into HEAD).
+func (e *csrEnv) assertPendingSurvive(wantTAtHead int) {
 	e.t.Helper()
 	verify := e.verifyConn()
 
@@ -315,8 +352,8 @@ func (e *csrEnv) assertPendingSurvive() {
 		e.t.Errorf("config at HEAD = %q, want the committed %q", got, "cv1")
 	}
 	// Sanity on the compaction itself: the committed data is all still in HEAD.
-	if got := e.queryInt(verify, "SELECT COUNT(*) FROM t AS OF 'HEAD'"); got != 6 {
-		e.t.Errorf("t at HEAD has %d rows, want 6", got)
+	if got := e.queryInt(verify, "SELECT COUNT(*) FROM t AS OF 'HEAD'"); got != wantTAtHead {
+		e.t.Errorf("t at HEAD has %d rows, want %d", got, wantTAtHead)
 	}
 
 	st := e.status(verify)
@@ -348,7 +385,7 @@ func TestCompactKeepsUncommittedChanges(t *testing.T) {
 			t.Fatalf("Compact issued %d final resets, want 1", hooked.mainResets)
 		}
 
-		e.assertPendingSurvive()
+		e.assertPendingSurvive(6)
 	})
 
 	// The same shape, but the write publishes in the microseconds between
@@ -371,7 +408,7 @@ func TestCompactKeepsUncommittedChanges(t *testing.T) {
 			t.Fatalf("Compact issued %d final resets, want 1", hooked.mainResets)
 		}
 
-		e.assertPendingSurvive()
+		e.assertPendingSurvive(6)
 		verify := e.verifyConn()
 		if got := e.queryInt(verify, "SELECT COUNT(*) FROM u WHERE id = 800"); got != 1 {
 			e.t.Errorf("row 800 in u on main: present=%t, want present=true (the reset discarded a write that landed just before it)", got == 1)
@@ -382,5 +419,182 @@ func TestCompactKeepsUncommittedChanges(t *testing.T) {
 		if staged := e.status(verify)["u"]; staged {
 			e.t.Errorf("dolt_status[u] staged=%t, want unstaged", staged)
 		}
+	})
+}
+
+// writerLandsCommit is the racing writer: on its own session it commits a t
+// row to main and returns the hash of the commit it landed.
+func (e *csrEnv) writerLandsCommit(id int, val, msg string) string {
+	e.t.Helper()
+	e.exec(e.writer, "INSERT INTO t (id, val) VALUES (?, ?)", id, val)
+	e.exec(e.writer, "CALL DOLT_ADD('t')")
+	e.exec(e.writer, "CALL DOLT_COMMIT('-m', ?)", msg)
+	return e.queryString(e.writer, "SELECT commit_hash FROM dolt_log LIMIT 1")
+}
+
+// TestCompactKeepsCommitLandingBeforeMainMoves (AC-2): a commit another
+// session lands on main after the rebuild, immediately before the final
+// reset, must end up in main's HEAD through exactly one follow-up commit —
+// folded, without its own hash or message — while unrelated working-only
+// changes stay pending.
+func TestCompactKeepsCommitLandingBeforeMainMoves(t *testing.T) {
+	t.Run("row committed immediately before the reset", func(t *testing.T) {
+		e := newCsrEnv(t)
+		e.pendingWorkingSet()
+
+		var landed string
+		hooked := &csrHookConn{
+			DBConn: e.compactConn(),
+			onMainReset: func(ctx context.Context) error {
+				landed = e.writerLandsCommit(600, "landed", csrWriterMsg)
+				return nil
+			},
+		}
+		if err := e.compact(hooked); err != nil {
+			t.Fatalf("Compact: %v", err)
+		}
+		if hooked.mainResets != 1 {
+			t.Fatalf("Compact issued %d final resets, want 1", hooked.mainResets)
+		}
+
+		verify := e.verifyConn()
+		if got := e.queryInt(verify, "SELECT COUNT(*) FROM t WHERE id = 600"); got != 1 {
+			t.Errorf("row 600 in t on main: present=%t, want present=true (the reset discarded a committed write)", got == 1)
+		}
+		if got := e.queryInt(verify, "SELECT COUNT(*) FROM t AS OF 'HEAD' WHERE id = 600"); got != 1 {
+			t.Errorf("row 600 in t at HEAD: %d, want 1 (a write that landed during compaction must reach HEAD through the follow-up commit)", got)
+		}
+
+		// History: the follow-up sits directly above the last replayed
+		// commit, and the landed commit's own message is gone (folded).
+		commits := e.log(verify)
+		wantMsgs := []string{csrFollowUpMsg, csrRecent2Msg, csrRecent1Msg, csrSquashMsg}
+		if len(commits) != len(wantMsgs)+1 {
+			t.Fatalf("dolt_log has %d commits, want %d: %+v", len(commits), len(wantMsgs)+1, commits)
+		}
+		for i, want := range wantMsgs {
+			if commits[i].message != want {
+				t.Errorf("dolt_log[%d] = %q, want %q", i, commits[i].message, want)
+			}
+		}
+
+		// Nothing else was staged, so HEAD's tables equal the tree the
+		// writer landed.
+		for _, table := range []string{"t", "u", "config"} {
+			atHead := e.queryInt(verify, "SELECT COUNT(*) FROM `"+table+"` AS OF 'HEAD'")
+			atLanded := e.queryInt(verify, "SELECT COUNT(*) FROM `"+table+"` AS OF '"+landed+"'")
+			if atHead != atLanded {
+				t.Errorf("%s at HEAD has %d rows, want the landed tree's %d", table, atHead, atLanded)
+			}
+		}
+
+		// The unrelated working-only changes are still pending.
+		e.assertPendingSurvive(7)
+	})
+
+	// Already-staged changes fold into the follow-up too (the design's
+	// accepted boundary), while an unstaged edit to the same table stays
+	// pending.
+	t.Run("pre-staged row folds, unstaged edit in the same table stays pending", func(t *testing.T) {
+		e := newCsrEnv(t)
+		e.exec(e.setup, "INSERT INTO t (id, val) VALUES (750, 'pre-staged')")
+		e.exec(e.setup, "CALL DOLT_ADD('t')")
+		e.exec(e.setup, "INSERT INTO t (id, val) VALUES (800, 'unstaged-edit')")
+
+		hooked := &csrHookConn{DBConn: e.compactConn()}
+		if err := e.compact(hooked); err != nil {
+			t.Fatalf("Compact: %v", err)
+		}
+
+		verify := e.verifyConn()
+		if got := e.queryInt(verify, "SELECT COUNT(*) FROM t AS OF 'HEAD' WHERE id = 750"); got != 1 {
+			t.Errorf("pre-staged row 750 at HEAD: %d, want 1 (already-staged changes fold into the follow-up)", got)
+		}
+		if got := e.queryInt(verify, "SELECT COUNT(*) FROM t WHERE id = 800"); got != 1 {
+			t.Errorf("unstaged row 800 on main: present=%t, want present=true", got == 1)
+		}
+		if got := e.queryInt(verify, "SELECT COUNT(*) FROM t AS OF 'HEAD' WHERE id = 800"); got != 0 {
+			t.Errorf("unstaged row 800 at HEAD: %d, want 0 (unstaged edits stay pending)", got)
+		}
+		if staged := e.status(verify)["t"]; staged {
+			t.Errorf("dolt_status[t] staged=%t, want unstaged (the follow-up committed the staged root)", staged)
+		}
+		if commits := e.log(verify); len(commits) == 0 || commits[0].message != csrFollowUpMsg {
+			t.Errorf("dolt_log[0] = %+v, want the follow-up commit %q on top", commits, csrFollowUpMsg)
+		}
+	})
+
+	// A second writer can take the staged set between Compact's check and
+	// its follow-up commit; the nothing-to-commit that follows must be
+	// tolerated, and the row still reaches HEAD through the consumer's
+	// commit.
+	t.Run("another writer consumes the staging between check and commit", func(t *testing.T) {
+		e := newCsrEnv(t)
+		e.pendingWorkingSet()
+
+		hooked := &csrHookConn{
+			DBConn: e.compactConn(),
+			onMainReset: func(ctx context.Context) error {
+				e.writerLandsCommit(600, "landed", csrWriterMsg)
+				return nil
+			},
+			beforeFollowUp: func(ctx context.Context) error {
+				e.exec(e.writer, "CALL DOLT_COMMIT('-m', ?)", csrConsumerMsg)
+				return nil
+			},
+		}
+		if err := e.compact(hooked); err != nil {
+			t.Fatalf("Compact: %v (a nothing-to-commit follow-up must be tolerated)", err)
+		}
+		if hooked.followUps != 1 {
+			t.Fatalf("Compact issued %d follow-up commits, want 1", hooked.followUps)
+		}
+
+		verify := e.verifyConn()
+		if got := e.queryInt(verify, "SELECT COUNT(*) FROM t AS OF 'HEAD' WHERE id = 600"); got != 1 {
+			t.Errorf("row 600 in t at HEAD: %d, want 1 (the consumer's commit keeps it)", got)
+		}
+		if commits := e.log(verify); len(commits) == 0 || commits[0].message != csrConsumerMsg {
+			t.Errorf("dolt_log[0] = %+v, want the consumer's %q on top", commits, csrConsumerMsg)
+		}
+		for _, c := range e.log(verify) {
+			if c.message == csrFollowUpMsg {
+				t.Errorf("dolt_log contains the follow-up %q; want none (nothing was left to commit)", c.message)
+			}
+		}
+		e.assertPendingSurvive(7)
+	})
+
+	// The same preservation for a commit that lands while Compact is still
+	// replaying recent commits onto the temp branch.
+	t.Run("commit injected during the replay survives, folded", func(t *testing.T) {
+		e := newCsrEnv(t)
+		e.pendingWorkingSet()
+
+		hooked := &csrHookConn{
+			DBConn: e.compactConn(),
+			onCherryPick: func(ctx context.Context) error {
+				e.writerLandsCommit(650, "mid-replay", csrReplayMsg)
+				return nil
+			},
+		}
+		if err := e.compact(hooked); err != nil {
+			t.Fatalf("Compact: %v", err)
+		}
+
+		verify := e.verifyConn()
+		if got := e.queryInt(verify, "SELECT COUNT(*) FROM t AS OF 'HEAD' WHERE id = 650"); got != 1 {
+			t.Errorf("row 650 in t at HEAD: %d, want 1 (a commit landing mid-replay is folded into the follow-up)", got)
+		}
+		commits := e.log(verify)
+		if len(commits) == 0 || commits[0].message != csrFollowUpMsg {
+			t.Errorf("dolt_log[0] = %+v, want the follow-up commit %q on top", commits, csrFollowUpMsg)
+		}
+		for _, c := range commits {
+			if c.message == csrReplayMsg {
+				t.Errorf("dolt_log keeps the landed commit's own message %q; want it folded away (identity loss is the accepted trade-off)", c.message)
+			}
+		}
+		e.assertPendingSurvive(7)
 	})
 }

@@ -3,6 +3,9 @@ package versioncontrolops
 import (
 	"context"
 	"fmt"
+
+	"github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/steveyegge/beads/internal/storage/schema"
 )
 
 // Compact squashes old Dolt commits into a single base commit while preserving
@@ -16,7 +19,11 @@ import (
 //     while the rebuild ran — an uncommitted working-set row, or a commit
 //     landing in the window before the reset — survives in main's staged
 //     and working roots instead of being destroyed)
-//  7. Delete temp branch
+//  7. Commit whatever the reset left staged, so main is never left dirty.
+//     A commit that landed during the rebuild is folded in: its rows
+//     survive, its own hash and message do not. Already-staged changes can
+//     fold in too; unstaged working-set changes stay pending.
+//  8. Delete temp branch
 //
 // Callers should run PruneRemoteRefs and then DoltGC afterward to reclaim disk
 // space — remote-tracking refs still anchor the pre-compact chain, and GC
@@ -86,6 +93,25 @@ func Compact(ctx context.Context, conn DBConn, initialHash, boundaryHash string,
 	if err := execSQL("reset main to compacted", "CALL DOLT_RESET('--soft', 'compact-tmp')"); err != nil {
 		return err
 	}
+
+	// The soft reset kept main's staged root, so whatever dolt_status now
+	// reports as staged is exactly what reached main outside the compaction
+	// plan: commit it, so main is never left dirty and a landed write is
+	// reachable from HEAD. No DOLT_ADD: staging nothing extra keeps
+	// unstaged working-set changes (a batch waiting for its DOLT_COMMIT,
+	// ignored tables) pending, as their writers left them. Another writer
+	// can consume the staged set between the check and the commit; the
+	// nothing-to-commit that follows is benign and tolerated.
+	staged, err := issueops.HasStagedChanges(ctx, conn)
+	if err != nil {
+		return fmt.Errorf("compact step %q: %w", "check staged changes after reset", err)
+	}
+	if staged {
+		if err := schema.DrainCall(ctx, conn, "CALL DOLT_COMMIT('-m', ?)", "compact: commit changes that reached main during compaction"); err != nil && !issueops.IsNothingToCommitError(err) {
+			return fmt.Errorf("compact step %q: %w", "commit changes that reached main during compaction", err)
+		}
+	}
+
 	if err := execSQL("delete temp branch", "CALL DOLT_BRANCH('-D', 'compact-tmp')"); err != nil {
 		return err
 	}
