@@ -474,6 +474,27 @@ func TestBackupStatusAndListWorkInReadonlyMode(t *testing.T) {
 	}
 }
 
+// TestSQLReadonlyRefusesDoltWriteFunction is the readonly gate for `bd sql`
+// statements that read like a SELECT but call a Dolt function that may write
+// (GH#6230). Such a statement must be refused before it reaches the server; a
+// SELECT that touches Dolt only through a system table still runs.
+func TestSQLReadonlyRefusesDoltWriteFunction(t *testing.T) {
+	w := newServerReadonlyGateWorkspace(t)
+
+	stdout, stderr, code := w.run(t, "sql", "--readonly", "SELECT DOLT_COMMIT('-Am','gate')")
+	if code != 1 || !strings.Contains(stderr, "operation 'sql' is not allowed in read-only mode") {
+		t.Errorf("SELECT DOLT_COMMIT under --readonly should be refused (exit %d, want 1):\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	if strings.Contains(stderr, "not found") {
+		t.Errorf("SELECT DOLT_COMMIT reached the server instead of being refused first:\nstderr:\n%s", stderr)
+	}
+
+	stdout, stderr, code = w.run(t, "sql", "--readonly", "SELECT COUNT(*) FROM dolt_log")
+	if code != 0 || strings.Contains(stderr, "not allowed in read-only mode") {
+		t.Errorf("a dolt_log read under --readonly should run (exit %d):\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+}
+
 // TestDoctorMaintenanceSkippedInReadonlyMode is the readonly twin of
 // TestDoctorMaintenanceSkippedDuringMigrationFreeze — see that test for why
 // plain `bd doctor` had hidden writes at all, and for the shared-server setup.

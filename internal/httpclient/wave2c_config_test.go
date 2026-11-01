@@ -19,15 +19,15 @@ import (
 // The unit half of client wave 2c's config writes: what the client SENDS, and
 // which refusals it raises without dialing at all.
 //
-// The served tier runs the whole twenty-one-case contract and three pins of its
+// The served tier runs the whole twenty-two-case contract and three pins of its
 // own, so what is left here is the two facts a correct server hides. A client
 // that skipped its own validation would still pass every contract case — the
-// server refuses the same three requests at the edge — while spending a round
-// trip to be told what the role's own contract already calls invalid, and
-// binding the classification to a problem body a future server release might
-// spell differently. And a client that sent the wrong METHOD or the wrong PATH
-// would fail loudly against a server but says nothing about which of the two was
-// wrong; a recorded request does.
+// server refuses the same requests, at its edge or in its role — while
+// spending a round trip to be told what the role's own contract already calls
+// invalid, and binding the classification to a problem body a future server
+// release might spell differently. And a client that sent the wrong METHOD or
+// the wrong PATH would fail loudly against a server but says nothing about
+// which of the two was wrong; a recorded request does.
 
 // TestSettingWriteValidationMatchesTheSharedValidator is the drift pin for the
 // one validator this package had to copy.
@@ -38,15 +38,16 @@ import (
 // for the same reason. Driving both bodies over one table is what makes them
 // agree case by case rather than in prose.
 //
-// THE VALUE IS PART OF THE TABLE, not only the key, because two of the four
-// rules are about a value: `status.custom` is projected into a lookup table reads
+// THE VALUE IS PART OF THE TABLE, not only the key, because three of the rules
+// are about a value: its length, counted in BYTES where the key's is counted in
+// characters; `status.custom`, which is projected into a lookup table reads
 // consult first, so a value that cannot be projected must not become a row; and
-// `types.retained` is read by every sweep, so a value the type-list parse would
-// read as other than the list written must not become one either. That rule
-// calls the shared validator through its storageops delegate rather than
-// restating it; its rows still put a refused and an accepted value on each of
-// the validator's rules, so a client that stopped calling it, or called it on
-// the wrong key, fails a row.
+// `types.retained`, which is read by every sweep, so a value the type-list
+// parse would read as other than the list written must not become one either.
+// That rule calls the shared validator through its storageops delegate rather
+// than restating it; its rows still put a refused and an accepted value on each
+// of the validator's rules, so a client that stopped calling it, or called it
+// on the wrong key, fails a row.
 func TestSettingWriteValidationMatchesTheSharedValidator(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -80,6 +81,11 @@ func TestSettingWriteValidationMatchesTheSharedValidator(t *testing.T) {
 		{"a retained array of numbers", issueops.SettingKeyTypesRetained, "[1]"},
 		{"a retained name with a space", issueops.SettingKeyTypesRetained, "op fact"},
 		{"a retained quoted name", issueops.SettingKeyTypesRetained, `"op"`},
+		{"a key of exactly the column's characters", strings.Repeat("\u00e9", types.MaxFieldLen), "v"},
+		{"a key past the column", strings.Repeat("k", types.MaxFieldLen+1), "v"},
+		{"a value of exactly the column's bytes", "custom.big", strings.Repeat("v", types.MaxTextBytes)},
+		{"a value past the column", "custom.big", strings.Repeat("v", types.MaxTextBytes+1)},
+		{"a value past the column in bytes but not in characters", "custom.big", strings.Repeat("\u00e9", types.MaxTextBytes/2+1)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			mine := validateSettingWrite(tc.key, tc.value)
@@ -141,6 +147,14 @@ func TestConfigWritesRefuseBeforeTheDial(t *testing.T) {
 		}},
 		{"set of a retained value that names no type", func(c issueops.WorkspaceConfig) error {
 			_, err := c.SetSetting(context.Background(), issueops.SetSettingRequest{Key: issueops.SettingKeyTypesRetained, Value: "null"})
+			return err
+		}},
+		{"set of a value past the column", func(c issueops.WorkspaceConfig) error {
+			_, err := c.SetSetting(context.Background(), issueops.SetSettingRequest{Key: "custom.big", Value: strings.Repeat("v", types.MaxTextBytes+1)})
+			return err
+		}},
+		{"set of a key past the column", func(c issueops.WorkspaceConfig) error {
+			_, err := c.SetSetting(context.Background(), issueops.SetSettingRequest{Key: "custom." + strings.Repeat("k", types.MaxFieldLen), Value: "v"})
 			return err
 		}},
 		{"unset with an empty key", func(c issueops.WorkspaceConfig) error {
@@ -285,45 +299,4 @@ func settingsOver(t *testing.T, w WireClient) issueops.WorkspaceConfig {
 		t.Fatalf("WorkspaceConfig(): %v", err)
 	}
 	return settings
-}
-
-// TestConfigWriteBoundsAreNotRestatedClientSide is the observable half of
-// L-config-bounds, and it exists because the served pin cannot make it.
-//
-// Over http an oversized value and an oversized key both come back as
-// ErrValidation whether this client refused them or the operation did, so the
-// served case that measures the divergence against a local leg passes either
-// way — a client that had quietly grown its own copy of the two bounds would
-// look identical there. What separates them is whether the request LEFT: the
-// ledger row says these are the SERVER's rules, one release away from moving, so
-// a client that refused them locally would be a second copy free to drift, and
-// would refuse tomorrow's server a request it would have taken.
-//
-// The four rules this client DOES apply are refused before the dial by the
-// case above, so the two together say exactly where the line is.
-func TestConfigWriteBoundsAreNotRestatedClientSide(t *testing.T) {
-	for _, tc := range []struct {
-		name  string
-		key   string
-		value string
-	}{
-		{"a value past the column", "custom.big", strings.Repeat("v", types.MaxTextBytes+1)},
-		{"a key past the column", "custom." + strings.Repeat("k", types.MaxFieldLen), "v"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			store, w := recordingStore(t)
-			settings, err := store.WorkspaceConfig()
-			if err != nil {
-				t.Fatalf("WorkspaceConfig(): %v", err)
-			}
-			if _, err := settings.SetSetting(context.Background(), issueops.SetSettingRequest{Key: tc.key, Value: tc.value}); err != nil {
-				t.Fatalf("SetSetting = %v, want the request to travel and the SERVER to refuse it", err)
-			}
-			if len(w.dispatched) != 1 || w.dispatched[0] != wire.OpSetSetting {
-				t.Errorf("the write dialed %v, want exactly [%s]: the length rules are the operation's, and a "+
-					"client-side copy of them is one release away from refusing a request a newer server would take",
-					w.dispatched, wire.OpSetSetting)
-			}
-		})
-	}
 }

@@ -805,6 +805,7 @@ var roleContractCases = []roleContract{
 		RunWorkspaceConfigRefusesTheProtectedKeyOnSet,
 		RunWorkspaceConfigUnsetDoesNotRefuseTheProtectedKey,
 		RunWorkspaceConfigRefusesAnUnparseableCustomStatus,
+		RunWorkspaceConfigBoundsTheKeyAndTheValueOnSet,
 		RunWorkspaceConfigProjectsCustomStatuses,
 		RunWorkspaceConfigProjectsCustomTypes,
 		RunWorkspaceConfigUnsetLeavesTheProjectionBehind,
