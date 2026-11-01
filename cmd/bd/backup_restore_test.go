@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -18,6 +19,7 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 	"github.com/steveyegge/beads/internal/testutil"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -342,6 +344,130 @@ func TestBackupRestoreStrictReadonlyServerMode(t *testing.T) {
 			assertWorkspaceUnchanged(t, dir, before)
 			if got := issueCount(t, dir, env); got != 3 {
 				t.Errorf("issue count after the refused restore = %d, want 3: the restore replaced the store", got)
+			}
+		})
+	}
+}
+
+// newOwnDatabaseStore opens a store on its own database on the test server,
+// never the suite's shared branch-per-test database: a restore replaces the
+// whole database, and one that ran by mistake must not take the suite's down.
+func newOwnDatabaseStore(t *testing.T, prefix string) *dolt.DoltStore {
+	t.Helper()
+	if testDoltServerPort == 0 {
+		t.Skip("Dolt test server not available")
+	}
+	if testutil.DoltContainerCrashed() {
+		t.Skipf("Dolt test server crashed: %v", testutil.DoltContainerCrashError())
+	}
+	ensureTestMode(t)
+
+	ctx := context.Background()
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	database := uniqueTestDBName(t)
+	writeTestMetadata(t, filepath.Join(beadsDir, "dolt"), database)
+	doltNewMutex.Lock()
+	s, err := dolt.New(ctx, &dolt.Config{
+		Path:            filepath.Join(beadsDir, "dolt"),
+		BeadsDir:        beadsDir,
+		ServerHost:      "127.0.0.1",
+		ServerPort:      testDoltServerPort,
+		Database:        database,
+		CreateIfMissing: true,
+	})
+	doltNewMutex.Unlock()
+	if err != nil {
+		t.Fatalf("create the server-mode database: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = s.Close()
+		dropTestDatabase(database, testDoltServerPort)
+	})
+	if err := s.SetConfig(ctx, "issue_prefix", prefix); err != nil {
+		t.Fatalf("set issue_prefix: %v", err)
+	}
+	return s
+}
+
+// seedRestoreIssue creates an open task id titled title in s and commits it.
+func seedRestoreIssue(t *testing.T, s *dolt.DoltStore, id, title string) {
+	t.Helper()
+	ctx := context.Background()
+	now := time.Now()
+	if err := s.CreateIssue(ctx, &types.Issue{
+		ID:        id,
+		Title:     title,
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}, "test-user"); err != nil {
+		t.Fatalf("create issue %s: %v", id, err)
+	}
+	if err := s.Commit(ctx, "seed "+id); err != nil && !strings.Contains(err.Error(), "nothing to commit") {
+		t.Fatalf("commit %s: %v", id, err)
+	}
+}
+
+// TestBackupRestoreRefusesSourceWithoutBackup is the sql-server counterpart of
+// TestEmbeddedBackupRestoreRefusesSourceWithoutBackup (GH#7098). A force
+// restore from a directory without a Dolt manifest must return an error
+// wrapping ErrNoBackup before any restore SQL reaches the server, through both
+// the store method SDK callers use and the command's runBackupRestore, and
+// leave the issues, the configuration and the current commit as they were.
+func TestBackupRestoreRefusesSourceWithoutBackup(t *testing.T) {
+	t.Run("store_without_connection", func(t *testing.T) {
+		// A zero DoltStore has no server to reach: the refusal must come from
+		// the source check alone, before a restore connection is opened.
+		err := (&dolt.DoltStore{}).RestoreDatabase(context.Background(), t.TempDir(), true)
+		if !errors.Is(err, versioncontrolops.ErrNoBackup) {
+			t.Fatalf("RestoreDatabase on a store without a connection = %v, want ErrNoBackup before any connection", err)
+		}
+	})
+
+	s := newOwnDatabaseStore(t, "nb")
+	ctx := context.Background()
+	seedRestoreIssue(t, s, "nb-1", "survives the refused restore A")
+	seedRestoreIssue(t, s, "nb-2", "survives the refused restore B")
+
+	commitBefore, err := s.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("GetCurrentCommit: %v", err)
+	}
+
+	source := t.TempDir()
+	if err := os.WriteFile(filepath.Join(source, "issues.jsonl"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name    string
+		restore func() error
+	}{
+		{"store_method", func() error { return s.RestoreDatabase(ctx, source, true) }},
+		{"run_backup_restore", func() error { return runBackupRestore(ctx, s, source, true) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.restore()
+			if !errors.Is(err, versioncontrolops.ErrNoBackup) {
+				t.Errorf("restore from %s = %v, want an error wrapping ErrNoBackup", source, err)
+			}
+
+			for _, id := range []string{"nb-1", "nb-2"} {
+				if _, err := s.GetIssue(ctx, id); err != nil {
+					t.Errorf("issue %s unreadable after the refused restore: %v", id, err)
+				}
+			}
+			if prefix, err := s.GetConfig(ctx, "issue_prefix"); err != nil || prefix != "nb" {
+				t.Errorf("issue_prefix after the refused restore = %q, %v; want %q", prefix, err, "nb")
+			}
+			if commit, err := s.GetCurrentCommit(ctx); err != nil || commit != commitBefore {
+				t.Errorf("current commit after the refused restore = %q, %v; want %q", commit, err, commitBefore)
+			}
+			entries, err := os.ReadDir(source)
+			if err != nil || len(entries) != 1 || entries[0].Name() != "issues.jsonl" {
+				t.Errorf("source %s changed across the refused restore: %v, %v", source, entries, err)
 			}
 		})
 	}
