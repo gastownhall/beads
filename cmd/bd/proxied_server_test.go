@@ -20,7 +20,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// withListenerOwnershipProvable makes renderProxiedServerConfig see provable
+// as this host's answer to whether it can prove listener ownership.
+func withListenerOwnershipProvable(t *testing.T, provable bool) {
+	t.Helper()
+	orig := listenerOwnershipProvable
+	listenerOwnershipProvable = func() bool { return provable }
+	t.Cleanup(func() { listenerOwnershipProvable = orig })
+}
+
 func TestRenderProxiedServerConfig_RoundTrips(t *testing.T) {
+	withListenerOwnershipProvable(t, true)
 	body, err := renderProxiedServerConfig(54321)
 	require.NoError(t, err)
 
@@ -33,17 +43,39 @@ func TestRenderProxiedServerConfig_RoundTrips(t *testing.T) {
 }
 
 // TestRenderProxiedServerConfig_QuietLogLevel pins why the generated config
-// is at warning: dolt logs every NewConnection/ConnectionClosed at info, and
-// every bd command opens connections through the proxy, so at info a
-// long-running proxied server.log grows with each command. The level must
-// still let dolt report warnings and errors.
+// is at warning where listener ownership is provable: dolt logs every
+// NewConnection/ConnectionClosed at info, and every bd command opens
+// connections through the proxy, so at info a long-running proxied
+// server.log grows with each command. The level must still let dolt report
+// warnings and errors.
 func TestRenderProxiedServerConfig_QuietLogLevel(t *testing.T) {
+	withListenerOwnershipProvable(t, true)
 	body, err := renderProxiedServerConfig(54321)
 	require.NoError(t, err)
 	cfg, err := servercfg.NewYamlConfig(body)
 	require.NoError(t, err)
 	assert.False(t, doltserver.LogLevelEmitsReadyLine(cfg.LogLevel()), "generated log level %q still logs info lines", cfg.LogLevel())
 	assert.Contains(t, []servercfg.LogLevel{servercfg.LogLevel_Warning, servercfg.LogLevel_Error}, cfg.LogLevel())
+}
+
+// TestRenderProxiedServerConfig_KeepsReadyLineWhereOwnershipIsUnprovable
+// pins the generated level on a host that cannot prove listener ownership
+// (Windows, WSL1, some sandboxes): a level that hides dolt's ready line
+// would leave the proxied DoltServer taking any listener on its port for
+// the dolt it started, so the config keeps a level that logs the ready line,
+// and its port stays one Beads may move off.
+func TestRenderProxiedServerConfig_KeepsReadyLineWhereOwnershipIsUnprovable(t *testing.T) {
+	withListenerOwnershipProvable(t, false)
+	body, err := renderProxiedServerConfig(40001)
+	require.NoError(t, err)
+	cfg, err := servercfg.NewYamlConfig(body)
+	require.NoError(t, err)
+	assert.Equal(t, servercfg.LogLevel_Info, cfg.LogLevel())
+	assert.True(t, doltserver.LogLevelEmitsReadyLine(cfg.LogLevel()), "generated log level %q hides dolt's ready line", cfg.LogLevel())
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, body, 0o600))
+	assert.NoError(t, managedPortConflictPolicy(path, 40001), "a port Beads chose must stay movable at either level")
 }
 
 func TestRenderProxiedServerConfig_ArchiveLevel(t *testing.T) {
@@ -1299,6 +1331,7 @@ func replaceOnce(t *testing.T, s, old, new string) string {
 }
 
 func TestManagedPortConflictPolicy_AllowsBeadsChosenPort(t *testing.T) {
+	withListenerOwnershipProvable(t, true)
 	for _, tc := range []struct {
 		name string
 		body func(t *testing.T) []byte

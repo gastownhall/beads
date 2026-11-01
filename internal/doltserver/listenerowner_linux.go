@@ -13,40 +13,46 @@ import (
 	"strings"
 )
 
-// procRoot is where listenerOwnership reads /proc; tests point it at a fake
+// procRoot is where classifyListener reads /proc; tests point it at a fake
 // tree.
 var procRoot = "/proc"
 
-// listenerOwnership reports whether a TCP listener on port belongs to pid or
+// classifyListener reports whether a TCP listener on port belongs to pid or
 // one of its descendants. Descendants cover a dolt behind a wrapper script
 // that does not exec; finding them needs task/*/children
 // (CONFIG_PROC_CHILDREN), and without it such a wrapper's dolt is not seen as
 // the child's.
 //
-// known is false when /proc cannot answer, and the caller then falls back to
-// weaker readiness evidence:
+// It is OwnershipUnknown when /proc cannot answer:
 //   - /proc is not this process's PID namespace's (/proc/self is not us);
 //   - the child's descriptors cannot be read (permissions, hardening);
-//   - no listener on port is listed at all, although one just answered:
-//     /proc/net/tcp is incomplete here (WSL1, some sandboxes) or the
-//     connection is forwarded elsewhere.
+//   - /proc/net/tcp cannot be read.
+//
+// It is OwnershipUnlisted when no listener on port is listed at all,
+// although one just answered: /proc/net/tcp is incomplete here (WSL1, some
+// sandboxes), or the listener is outside this network namespace and reached
+// through a forward (WSL2's mirrored networking shares the port space with
+// Windows).
 //
 // A child that no longer exists is known not to own anything.
-func listenerOwnership(pid, port int) (owned, known bool) {
+func classifyListener(pid, port int) Ownership {
 	if procRoot == "/proc" {
 		if self, err := os.Readlink("/proc/self"); err != nil || self != strconv.Itoa(os.Getpid()) {
-			return false, false
+			return OwnershipUnknown
 		}
 	}
 	if _, err := os.ReadDir(filepath.Join(procRoot, strconv.Itoa(pid), "fd")); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return false, true
+			return OwnershipForeign
 		}
-		return false, false
+		return OwnershipUnknown
 	}
 	inodes, err := listeningSocketInodes(port)
-	if err != nil || len(inodes) == 0 {
-		return false, false
+	if err != nil {
+		return OwnershipUnknown
+	}
+	if len(inodes) == 0 {
+		return OwnershipUnlisted
 	}
 	seen := map[int]bool{}
 	queue := []int{pid}
@@ -58,11 +64,11 @@ func listenerOwnership(pid, port int) (owned, known bool) {
 		}
 		seen[p] = true
 		if processHoldsSocket(p, inodes) {
-			return true, true
+			return OwnershipOwned
 		}
 		queue = append(queue, childPIDs(p)...)
 	}
-	return false, true
+	return OwnershipForeign
 }
 
 // listeningSocketInodes returns the socket inodes of TCP listeners on port,
