@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"testing"
 
@@ -270,4 +271,74 @@ func TestEmbeddedIgnoredMigration0031RestoresAfterLostTable(t *testing.T) {
 	requireContent(t, got, preflipSeededContent())
 	requireDerivedIDs(t, got)
 	assertEventsAbsentFromStatus(t, ctx, conn)
+}
+
+// TestEmbeddedIgnoredMigration0031KeepsExistingRows pins the reconcile: rows
+// already live keep their ids whatever those ids are (legacy, or an id that
+// is neither legacy nor derived), a row with no pre-upgrade counterpart is
+// left alone, and only the missing copies of a content are added, under the
+// lowest derived ids no live row holds.
+func TestEmbeddedIgnoredMigration0031KeepsExistingRows(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+
+	dataDir := seedMainSchemaAt(t, ctx, 61)
+	conn, closeConn := openPinnedConn(t, ctx, dataDir)
+	defer closeConn()
+	seedPreflipEvents(t, ctx, conn)
+	if _, err := schema.MigrateUp(ctx, conn); err != nil {
+		t.Fatalf("MigrateUp (migrator): %v", err)
+	}
+
+	// Lose the unique 'created' row and one copy of the duplicate pair,
+	// re-id a surviving row, and record a post-flip event.
+	execFrozenGuard(t, ctx, conn, `
+DELETE FROM events WHERE id IN ('legacy-1', 'legacy-3');
+UPDATE events SET id = 'kept-custom-id' WHERE id = 'legacy-4';
+INSERT INTO events (issue_id, event_type, actor, old_value, new_value, comment, created_at, id) VALUES
+  ('pre-2', 'closed', 'dave', NULL, NULL, NULL, '2026-08-01 08:00:00', 'evt-post-1');
+`)
+	mustExecOn(t, ctx, conn, "DELETE FROM ignored_schema_migrations WHERE version = 31")
+	before := liveEvents(t, ctx, conn)
+	if n := len(before); n != 4 {
+		t.Fatalf("setup left %d distinct contents, want 4: %v", n, before)
+	}
+
+	if _, err := schema.MigrateUp(ctx, conn); err != nil {
+		t.Fatalf("MigrateUp (restore): %v", err)
+	}
+	after := liveEvents(t, ctx, conn)
+
+	want := preflipSeededContent()
+	v := func(s string) sql.NullString { return sql.NullString{String: s, Valid: true} }
+	null := sql.NullString{}
+	postFlip := rowid.Digest([]sql.NullString{v("pre-2"), v("closed"), v("dave"), null, null, null, v("2026-08-01 08:00:00")})
+	want[postFlip] = 1
+	requireContent(t, after, want)
+
+	for digest, ids := range before {
+		for _, id := range ids {
+			if !slices.Contains(after[digest], id) {
+				t.Fatalf("live row %s (content %s) did not survive the restore; after = %v", id, digest[:12], after[digest])
+			}
+		}
+	}
+	created := rowid.Digest([]sql.NullString{v("pre-1"), v("created"), v("alice"), null, null, null, v("2026-07-01 10:00:00")})
+	if got, wantID := after[created], rowid.New("events", 0, created); len(got) != 1 || got[0] != wantID {
+		t.Fatalf("restored 'created' row ids = %v, want [%s]", got, wantID)
+	}
+	dup := rowid.Digest([]sql.NullString{v("pre-1"), v("commented"), v("bob"), null, null, v("same words"), v("2026-07-01 11:00:00")})
+	if got, wantIDs := after[dup], []string{"legacy-2", rowid.New("events", 0, dup)}; !sameStrings(got, wantIDs) {
+		t.Fatalf("duplicate pair ids = %v, want the survivor plus one derived copy %v", got, wantIDs)
+	}
+	if !ignoredCursorHas(t, ctx, conn, 31) {
+		t.Fatal("ignored cursor does not record 0031 after the restore")
+	}
+}
+
+func sameStrings(a, b []string) bool {
+	a, b = slices.Clone(a), slices.Clone(b)
+	slices.Sort(a)
+	slices.Sort(b)
+	return slices.Equal(a, b)
 }
