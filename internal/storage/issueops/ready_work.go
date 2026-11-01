@@ -41,6 +41,31 @@ func buildReadyWorkOrder(policy types.SortPolicy) sqlbuild.ReadyWorkOrder {
 	return sqlbuild.BuildReadyWorkOrder(policy, "created_at", "priority")
 }
 
+func getActiveCustomStatusesInTx(ctx context.Context, tx DBTX) ([]string, error) {
+	rows, err := tx.QueryContext(ctx, "SELECT name FROM custom_statuses WHERE category = 'active' ORDER BY name")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		if name != "" {
+			out = append(out, name)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if out == nil {
+		out = []string{}
+	}
+	return out, nil
+}
+
 // buildReadyWorkPredicates computes the ID sets the ready-work WHERE clause
 // needs (children of deferred parents, parent descendants, the family's
 // stale-flagged rows), then delegates the clause text to sqlbuild so both
@@ -70,6 +95,12 @@ func buildReadyWorkPredicates(ctx context.Context, tx DBTX, filter types.WorkFil
 		return nil, fmt.Errorf("get ready work: stale blocked flags in %s: %w", tables.Main, err)
 	}
 	inputs.StaleBlockedIDs = map[string][]string{tables.Main: staleIDs}
+	if filter.Status == types.StatusOpen {
+		activeStatuses, asErr := getActiveCustomStatusesInTx(ctx, tx)
+		if asErr == nil {
+			inputs.ActiveCustomStatuses = activeStatuses
+		}
+	}
 	return buildReadyWorkPredicatesFrom(filter, tables, inputs)
 }
 

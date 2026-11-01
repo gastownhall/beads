@@ -50,6 +50,13 @@ func (r *issueSQLRepositoryImpl) buildReadyWorkPredicates(ctx context.Context, f
 		inputs.ParentDescendantIDs = descendantIDs
 	}
 
+	if filter.Status == types.StatusOpen {
+		activeStatuses, asErr := r.getActiveCustomStatuses(ctx)
+		if asErr == nil {
+			inputs.ActiveCustomStatuses = activeStatuses
+		}
+	}
+
 	whereSQL, args, err := sqlbuild.BuildReadyWorkWhere(filter, tables, inputs)
 	if err != nil {
 		return nil, err
@@ -75,6 +82,31 @@ func (r *issueSQLRepositoryImpl) staleBlockedIDs(ctx context.Context, tables fil
 		return nil, err
 	}
 	return ids, nil
+}
+
+func (r *issueSQLRepositoryImpl) getActiveCustomStatuses(ctx context.Context) ([]string, error) {
+	rows, err := r.runner.QueryContext(ctx, "SELECT name FROM custom_statuses WHERE category = 'active' ORDER BY name")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		if name != "" {
+			out = append(out, name)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if out == nil {
+		out = []string{}
+	}
+	return out, nil
 }
 
 type deferredParentEdge struct {

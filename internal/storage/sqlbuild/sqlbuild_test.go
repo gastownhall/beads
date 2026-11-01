@@ -709,6 +709,69 @@ func TestBuildReadyWorkWhereStatusFilter(t *testing.T) {
 	}
 }
 
+func TestBuildReadyWorkWhereActiveCustomStatuses(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name            string
+		active          []string
+		wantClause      string
+		rejectClause    string
+		wantLeadingArgs []any
+	}{
+		{
+			name:            "ResolvedEmptyActiveStatuses",
+			active:          []string{},
+			wantClause:      "status = ?",
+			rejectClause:    "custom_statuses",
+			wantLeadingArgs: []any{"open"},
+		},
+		{
+			name:            "ResolvedActiveStatusesSingle",
+			active:          []string{"phase-active"},
+			wantClause:      "status IN (?,?)",
+			rejectClause:    "custom_statuses",
+			wantLeadingArgs: []any{"open", "phase-active"},
+		},
+		{
+			name:            "ResolvedActiveStatusesMultipleDedup",
+			active:          []string{"phase-active", "open", "phase-accepted"},
+			wantClause:      "status IN (?,?,?)",
+			rejectClause:    "custom_statuses",
+			wantLeadingArgs: []any{"open", "phase-active", "phase-accepted"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			where, args, err := BuildReadyWorkWhere(
+				types.WorkFilter{Status: types.StatusOpen},
+				IssuesFilterTables,
+				ReadyWorkWhereInputs{ActiveCustomStatuses: tt.active},
+			)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !strings.Contains(where, tt.wantClause) {
+				t.Errorf("status clause %q missing.\n where = %s", tt.wantClause, where)
+			}
+			if tt.rejectClause != "" && strings.Contains(where, tt.rejectClause) {
+				t.Errorf("unexpected status clause %q present.\n where = %s", tt.rejectClause, where)
+			}
+			if len(args) < len(tt.wantLeadingArgs) {
+				t.Fatalf("args = %v, want at least the %d leading status args %v", args, len(tt.wantLeadingArgs), tt.wantLeadingArgs)
+			}
+			for i, want := range tt.wantLeadingArgs {
+				if args[i] != want {
+					t.Errorf("args[%d] = %v, want %v", i, args[i], want)
+				}
+			}
+		})
+	}
+}
+
 // TestOptionalWispTable pins the set a wisp query may treat as "no wisps".
 // leases and wisp_labels are joined or hydrated by that query but are not the
 // wisp plane being absent, so tolerating them turns a broken database into an
