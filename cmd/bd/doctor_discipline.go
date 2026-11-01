@@ -10,6 +10,7 @@ import (
 	"github.com/steveyegge/beads/internal/seats"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/internal/workapi"
 )
 
 // disciplineMissThreshold mirrors the audit's chronic-miss bar: at ten misses
@@ -30,7 +31,7 @@ func runDisciplineCheck(path string) error {
 	}
 
 	issues := liveIssuesForDiscipline()
-	reg := registryForDiscipline(path)
+	reg := registryForDiscipline()
 	checks := disciplineChecks(issues, reg, time.Now().UTC())
 
 	if jsonOutput {
@@ -74,8 +75,7 @@ func liveIssuesForDiscipline() []*types.Issue {
 	if store == nil {
 		return nil
 	}
-	live := []types.Status{types.StatusOpen, types.StatusInProgress, types.StatusBlocked, types.StatusDeferred}
-	rows, err := store.SearchIssues(rootCtx, "", types.IssueFilter{Statuses: live, Limit: 100000})
+	rows, err := store.SearchIssues(rootCtx, "", workapi.BuildDisciplineFilter())
 	if err != nil {
 		return nil
 	}
@@ -85,7 +85,7 @@ func liveIssuesForDiscipline() []*types.Issue {
 // registryForDiscipline loads the seat registry from the workspace's notify
 // dir; an unreadable registry degrades identity metrics to unknown rather
 // than failing the whole check.
-func registryForDiscipline(path string) seats.Registry {
+func registryForDiscipline() seats.Registry {
 	o, err := openNotifyOutbox()
 	if err != nil {
 		return nil
@@ -117,15 +117,15 @@ func disciplineChecks(issues []*types.Issue, reg seats.Registry, now time.Time) 
 		checks = append(checks, doctorCheck{Name: name, Status: st, Message: msg, Detail: detail, Fix: fix, Category: "Discipline"})
 	}
 
-	resolve := func(name string) (string, seats.Seat, bool) {
+	resolve := func(name string) (seats.Seat, bool) {
 		if reg == nil || strings.TrimSpace(name) == "" {
-			return "", seats.Seat{}, false
+			return seats.Seat{}, false
 		}
 		id, err := reg.Resolve(name)
 		if err != nil {
-			return "", seats.Seat{}, false
+			return seats.Seat{}, false
 		}
-		return id, reg[id], true
+		return reg[id], true
 	}
 
 	var claimless, unresolvable, deadSeat, ownerSeatShaped, machineAssigned, overdue, highMiss int
@@ -155,7 +155,7 @@ func disciplineChecks(issues []*types.Issue, reg seats.Registry, now time.Time) 
 			if seats.MachineActor(assignee) != "" {
 				machineAssigned++
 				machineIDs = append(machineIDs, it.ID)
-			} else if _, seat, ok := resolve(assignee); ok {
+			} else if seat, ok := resolve(assignee); ok {
 				if seat.Liveness == seats.Dead {
 					deadSeat++
 					deadIDs = append(deadIDs, it.ID)
@@ -166,7 +166,7 @@ func disciplineChecks(issues []*types.Issue, reg seats.Registry, now time.Time) 
 			}
 		}
 		if o := strings.TrimSpace(it.Owner); o != "" {
-			if _, _, ok := resolve(o); ok {
+			if _, ok := resolve(o); ok {
 				ownerSeatShaped++
 			}
 		}
