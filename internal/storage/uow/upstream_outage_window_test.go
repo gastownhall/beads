@@ -3,6 +3,7 @@ package uow
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"io"
 	"net"
 	"sync"
@@ -67,6 +68,78 @@ func TestPingWithRetryRetriesTheProxyOutageReportOnlyBriefly(t *testing.T) {
 			t.Fatalf("pingWithRetry() error = %v, want nil", err)
 		}
 	})
+}
+
+// TestPingWithRetryKeepsBackingOffAfterTheOutageWindowForOtherTransientErrors:
+// an upstream-outage report clamps only the wait that follows it. A later
+// ordinary transient error waits the wrapped backoff's own interval, both
+// inside the outage window and after it has passed; clamping those waits to a
+// past deadline made them zero and spun the retry loop at CPU rate (#7183).
+func TestPingWithRetryKeepsBackingOffAfterTheOutageWindowForOtherTransientErrors(t *testing.T) {
+	t.Run("after the window the waits do not collapse to zero", func(t *testing.T) {
+		shortOutageWindow(t, 10*time.Millisecond)
+		var calls atomic.Int64
+		p := pingerFunc(func(context.Context) error {
+			if calls.Add(1) == 1 {
+				return proxyOutageErr()
+			}
+			return mysql.ErrInvalidConn
+		})
+		bo := testPingBackOff()
+		bo.RandomizationFactor = 0
+		bo.InitialInterval = 20 * time.Millisecond
+		// Capped below the budget, so only the budget ends the retries: an
+		// uncapped schedule could Stop after a few zero waits and hide a spin.
+		bo.MaxInterval = 50 * time.Millisecond
+		bo.MaxElapsedTime = 500 * time.Millisecond
+		err := pingWithRetry(context.Background(), p, bo, testPingAttemptTimeout)
+		if !errors.Is(err, mysql.ErrInvalidConn) {
+			t.Fatalf("pingWithRetry() error = %v, want %v once the budget is spent", err, mysql.ErrInvalidConn)
+		}
+		// Waits of 20-50ms over a 500ms budget make about a dozen attempts; a
+		// zero wait makes tens of thousands.
+		if n := calls.Load(); n > 30 {
+			t.Fatalf("PingContext called %d times in a 500ms budget, want a backoff (<= 30 calls)", n)
+		}
+	})
+
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"invalid connection", mysql.ErrInvalidConn},
+		{"EOF", io.EOF},
+		{"dial error", &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connection refused")}},
+	} {
+		t.Run("inside the window the wait after "+tc.name+" is its full interval", func(t *testing.T) {
+			shortOutageWindow(t, 300*time.Millisecond)
+			errs := []error{proxyOutageErr(), tc.err, nil}
+			var at []time.Time
+			p := pingerFunc(func(context.Context) error {
+				at = append(at, time.Now())
+				if len(at) > len(errs) {
+					t.Fatalf("PingContext called %d times, only %d responses scripted", len(at), len(errs))
+				}
+				return errs[len(at)-1]
+			})
+			bo := testPingBackOff()
+			bo.RandomizationFactor = 0
+			bo.InitialInterval = 200 * time.Millisecond
+			bo.Multiplier = 1.5
+			bo.MaxElapsedTime = 30 * time.Second
+			if err := pingWithRetry(context.Background(), p, bo, testPingAttemptTimeout); err != nil {
+				t.Fatalf("pingWithRetry() error = %v, want nil", err)
+			}
+			if len(at) != 3 {
+				t.Fatalf("PingContext called %d times, want 3", len(at))
+			}
+			// The second wait is 300ms; clamped to the outage window it would
+			// be the ~100ms the window had left.
+			if gap := at[2].Sub(at[1]); gap < 250*time.Millisecond {
+				t.Fatalf("waited %s after the %s, want the backoff's 300ms interval", gap, tc.name)
+			}
+		})
+	}
 }
 
 type pingerFunc func(context.Context) error
