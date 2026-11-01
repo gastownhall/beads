@@ -157,6 +157,7 @@ go_test(
         "notifying_integration_test.go",
         "notifying_parity_test.go",
         "notifying_test.go",
+        "outage_backoff_repro_test.go",
         "preview_provider_test.go",
         "querier_contract_test.go",
         "reader_contract_test.go",

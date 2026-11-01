@@ -3,6 +3,7 @@ package uow
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"io"
 	"net"
 	"sync"
@@ -67,6 +68,74 @@ func TestPingWithRetryRetriesTheProxyOutageReportOnlyBriefly(t *testing.T) {
 			t.Fatalf("pingWithRetry() error = %v, want nil", err)
 		}
 	})
+}
+
+// TestPingWithRetryKeepsBackingOffAfterTheOutageWindowForOtherTransientErrors
+// keeps the contributor's regression name (PR #7196): one upstream-outage
+// report arms the outage window, and every later attempt fails with an
+// ordinary transient error. Those later waits must follow the wrapped
+// exponential backoff; before the fix each was clamped to the now-past
+// outage deadline — zero — and the retry spun at CPU rate until the rest of
+// the budget was spent (#7183). MaxInterval is pinned below the budget so
+// only Stop can end a zero-wait loop: an interval allowed to grow past the
+// budget would stop after a few immediate calls and pass a loose count even
+// against the bug.
+func TestPingWithRetryKeepsBackingOffAfterTheOutageWindowForOtherTransientErrors(t *testing.T) {
+	shortOutageWindow(t, 10*time.Millisecond)
+	var calls atomic.Int64
+	p := pingerFunc(func(context.Context) error {
+		if calls.Add(1) == 1 {
+			return proxyOutageErr()
+		}
+		return mysql.ErrInvalidConn
+	})
+	bo := testPingBackOff()
+	bo.RandomizationFactor = 0
+	bo.InitialInterval = 20 * time.Millisecond
+	bo.MaxInterval = 50 * time.Millisecond
+	bo.MaxElapsedTime = 500 * time.Millisecond
+	err := pingWithRetry(context.Background(), p, bo, testPingAttemptTimeout)
+	if !errors.Is(err, mysql.ErrInvalidConn) {
+		t.Fatalf("pingWithRetry() error = %v, want the invalid-connection sentinel", err)
+	}
+	if n := calls.Load(); n > 30 {
+		t.Fatalf("PingContext called %d times in a 500ms budget, want a backoff (<= 30 calls)", n)
+	}
+}
+
+// TestPingWithRetryOrdinaryTransientErrorInsideTheWindowKeepsItsOwnInterval:
+// an ordinary transient error between the outage report and recovery must
+// wait the wrapped policy's own next interval. Before the fix that wait was
+// clamped to the outage window's remainder (~100ms here) instead of the
+// policy's 300ms second interval.
+func TestPingWithRetryOrdinaryTransientErrorInsideTheWindowKeepsItsOwnInterval(t *testing.T) {
+	shortOutageWindow(t, 300*time.Millisecond)
+	var at []time.Time
+	p := pingerFunc(func(context.Context) error {
+		at = append(at, time.Now())
+		switch len(at) {
+		case 1:
+			return proxyOutageErr()
+		case 2:
+			return mysql.ErrInvalidConn
+		default:
+			return nil
+		}
+	})
+	bo := testPingBackOff()
+	bo.RandomizationFactor = 0
+	bo.InitialInterval = 200 * time.Millisecond
+	// The default 1.5 multiplier makes the second interval 300ms.
+	bo.MaxElapsedTime = 30 * time.Second
+	if err := pingWithRetry(context.Background(), p, bo, testPingAttemptTimeout); err != nil {
+		t.Fatalf("pingWithRetry() error = %v, want nil", err)
+	}
+	if len(at) != 3 {
+		t.Fatalf("PingContext called %d times, want 3", len(at))
+	}
+	if gap := at[2].Sub(at[1]); gap < 250*time.Millisecond {
+		t.Fatalf("wait after the ordinary transient error was %s, want the policy's own ~300ms interval", gap)
+	}
 }
 
 type pingerFunc func(context.Context) error
