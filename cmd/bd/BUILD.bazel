@@ -1116,6 +1116,7 @@ go_test(
         "proxied_outage_reconnect_integration_test.go",
         "proxied_server_test.go",
         "proxied_shared_harness_test.go",
+        "proxied_unjoined_clone_refusal_test.go",
         "proxied_workflow_refusal_frontdoor_test.go",
         "proxy_capability_test.go",
         "prune_embedded_test.go",
