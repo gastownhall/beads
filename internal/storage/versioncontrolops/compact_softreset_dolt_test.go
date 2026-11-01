@@ -471,3 +471,38 @@ func TestCompactKeepsCommitLandingBeforeMainMoves(t *testing.T) {
 		f.wantStatus("u:false")
 	})
 }
+
+// AC-3: a quiet compaction keeps main's tree, replaces the old commits with
+// one squashed base and adds no follow-up commit.
+func TestCompactQuietRunAddsNoCommit(t *testing.T) {
+	port := startCompactTestServer(t)
+
+	t.Run("clean working set", func(t *testing.T) {
+		f := newCompactFixture(t, port)
+		if err := f.compact(&compactHookConn{}); err != nil {
+			t.Fatalf("Compact: %v", err)
+		}
+		f.wantLog(replayedLog)
+		f.wantHeadTree(f.head)
+		f.wantStatus()
+		if n := f.count("SELECT COUNT(*) FROM dolt_status"); n != 0 {
+			t.Fatalf("dolt_status has %d rows after a quiet Compact, want none", n)
+		}
+		f.wantNoTempBranch()
+	})
+
+	t.Run("only ignored tables dirty", func(t *testing.T) {
+		f := newCompactFixture(t, port)
+		f.exec(f.db, "CREATE TABLE scratch_x (id INT PRIMARY KEY)", "INSERT INTO scratch_x VALUES (1)")
+
+		if err := f.compact(&compactHookConn{}); err != nil {
+			t.Fatalf("Compact: %v", err)
+		}
+		f.wantLog(replayedLog)
+		f.wantHeadTree(f.head)
+		f.wantStatus()
+		if n := f.count("SELECT COUNT(*) FROM scratch_x"); n != 1 {
+			t.Fatalf("ignored scratch_x row on main: present=false, want present=true")
+		}
+	})
+}
