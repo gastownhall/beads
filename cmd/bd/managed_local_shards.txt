@@ -16,7 +16,9 @@
 # --jobs=64 (scripts/bazel_dolt_race_test.go), which 4 would overrun by one.
 # TestManagedLocalProxiedCapabilityMatrix was added afterwards on shard 1 at
 # its local measurement (~35s), still under the lane's ~130-160s tail.
-# Seconds per shard: 98 63 63
+# TestManagedLocalProxiedBackupRestoreRefusesSourceWithoutBackup was added
+# afterwards on shard 3 at its rbe-west measurement (~5s).
+# Seconds per shard: 98 63 68
 #
 # <shard> <TestName>
 1 TestManagedLocalProxiedAutoBackup
@@ -34,6 +36,7 @@
 2 TestManagedLocalProxiedMoleculeFrontDoorPositive
 2 TestManagedLocalProxiedNProcessColdStartConvergence
 3 TestManagedLocalProxiedBackupRestoreRefusedWhileAttached
+3 TestManagedLocalProxiedBackupRestoreRefusesSourceWithoutBackup
 3 TestManagedLocalProxiedBackupRestoreReopenFailure
 3 TestManagedLocalProxiedDoltStatusReportsLiveTopology
 3 TestManagedLocalProxiedLegacyRecordFailClosed
