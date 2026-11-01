@@ -808,18 +808,13 @@ func (s *EmbeddedDoltStore) BackupDatabase(ctx context.Context, dir string) erro
 }
 
 // RestoreDatabase restores the database from a Dolt backup at dir.
-// The dir must exist locally and contain a valid Dolt backup.
-// When force is true, an existing database is overwritten.
+// The dir must exist locally and contain a valid Dolt backup, which
+// RestoreSourceURL checks before this store opens a connection: the engine
+// replaces the database on a force restore before it discovers a source that
+// holds none (GH#7098). When force is true, an existing database is
+// overwritten.
 func (s *EmbeddedDoltStore) RestoreDatabase(ctx context.Context, dir string, force bool) error {
-	info, err := os.Stat(dir)
-	if err != nil {
-		return fmt.Errorf("backup source does not exist: %w", err)
-	}
-	if !info.IsDir() {
-		return fmt.Errorf("backup source is not a directory: %s", dir)
-	}
-
-	backupURL, err := versioncontrolops.DirToFileURL(dir)
+	backupURL, err := versioncontrolops.RestoreSourceURL(dir)
 	if err != nil {
 		return err
 	}

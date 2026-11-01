@@ -218,6 +218,91 @@ func TestEmbeddedBackupConcurrent(t *testing.T) {
 	}
 }
 
+// TestEmbeddedBackupRestoreRefusesSourceWithoutBackup pins GH#7098: a restore
+// whose source is an existing local directory that holds no Dolt backup must
+// be refused before DOLT_BACKUP drops the live database. Every case asserts
+// the postcondition — the workspace still answers with its issues and its
+// configuration — even when the command's own diagnostic is wrong, so a
+// regression demonstrates data loss, not merely an error-text mismatch.
+func TestEmbeddedBackupRestoreRefusesSourceWithoutBackup(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt backup tests")
+	}
+
+	bd := buildEmbeddedBD(t)
+
+	// requireNoManifest pins each case's precondition — the source holds no
+	// Dolt backup — so a setup command that silently created a valid backup
+	// cannot turn this refusal test into a restore test.
+	requireNoManifest := func(t *testing.T, source string) {
+		t.Helper()
+		if _, err := os.Stat(filepath.Join(source, "manifest")); !os.IsNotExist(err) {
+			t.Fatalf("precondition: %s must hold no backup manifest, stat err = %v", source, err)
+		}
+	}
+
+	t.Run("empty_dir", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "bkempty")
+		id := bdCreateSilent(t, bd, dir, "survives failed restore")
+
+		emptySource := t.TempDir()
+		requireNoManifest(t, emptySource)
+
+		out := bdBackupFail(t, bd, dir, "restore", "--force", emptySource)
+		if !strings.Contains(out, "no Dolt backup found") {
+			t.Errorf("refusal should say no Dolt backup was found, got:\n%s", out)
+		}
+		if !strings.Contains(out, emptySource) {
+			t.Errorf("refusal should name the source directory %s, got:\n%s", emptySource, out)
+		}
+
+		// The refused restore leaves the source exactly as it was.
+		entries, err := os.ReadDir(emptySource)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) != 0 {
+			t.Errorf("refused restore changed the source directory: %d entries", len(entries))
+		}
+
+		// The live workspace still holds its issue and its configuration.
+		if out := bdRunOK(t, bd, dir, "show", id, "--json"); !strings.Contains(out, "survives failed restore") {
+			t.Fatalf("issue %s missing after the refused restore: %s", id, out)
+		}
+		bdRunOK(t, bd, dir, "config", "list", "--json")
+		if got := len(bdListJSON(t, bd, dir)); got != 1 {
+			t.Errorf("issue count after the refused restore = %d, want 1", got)
+		}
+	})
+
+	// The no-argument form reads the default backup directory, which the CLI
+	// creates when it does not exist, so a never-synced default directory is
+	// the same defect's most direct trigger.
+	t.Run("default_dir_never_synced", func(t *testing.T) {
+		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "bkdef")
+		id := bdCreateSilent(t, bd, dir, "survives refused default-dir restore")
+
+		defaultBackup := filepath.Join(beadsDir, "backup")
+		requireNoManifest(t, defaultBackup)
+
+		out := bdBackupFail(t, bd, dir, "restore", "--force")
+		if !strings.Contains(out, "no Dolt backup found") {
+			t.Errorf("refusal should say no Dolt backup was found, got:\n%s", out)
+		}
+		if !strings.Contains(out, defaultBackup) {
+			t.Errorf("refusal should name the default backup directory %s, got:\n%s", defaultBackup, out)
+		}
+
+		if out := bdRunOK(t, bd, dir, "show", id, "--json"); !strings.Contains(out, "survives refused default-dir restore") {
+			t.Fatalf("issue %s missing after the refused restore: %s", id, out)
+		}
+		bdRunOK(t, bd, dir, "config", "list", "--json")
+		if got := len(bdListJSON(t, bd, dir)); got != 1 {
+			t.Errorf("issue count after the refused restore = %d, want 1", got)
+		}
+	})
+}
+
 // TestEmbeddedBackupRestoreStrictReadonly pins the refusal of a strict
 // --readonly restore. A restore replaces the store, so CheckReadonly must stop
 // it with the standard message before the command takes the exclusive workspace
