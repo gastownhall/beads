@@ -9,7 +9,9 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/formula"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/issueops"
 )
 
 func TestParseDistillVar(t *testing.T) {
@@ -1400,7 +1402,7 @@ func TestGetMoleculeProgress(t *testing.T) {
 	}
 
 	// Get progress
-	progress, err := getMoleculeProgress(ctx, s, root.ID)
+	progress, err := viewMoleculeProgress(ctx, s, root.ID)
 	if err != nil {
 		t.Fatalf("getMoleculeProgress failed: %v", err)
 	}
@@ -1486,19 +1488,19 @@ func TestFindParentMolecule(t *testing.T) {
 	}
 
 	// Find parent molecule from grandchild
-	moleculeID := findParentMolecule(ctx, s, grandchild.ID)
+	moleculeID := mustFindParentMolecule(t, ctx, s, grandchild.ID)
 	if moleculeID != root.ID {
 		t.Errorf("findParentMolecule(grandchild) = %q, want %q", moleculeID, root.ID)
 	}
 
 	// Find parent molecule from child
-	moleculeID = findParentMolecule(ctx, s, child.ID)
+	moleculeID = mustFindParentMolecule(t, ctx, s, child.ID)
 	if moleculeID != root.ID {
 		t.Errorf("findParentMolecule(child) = %q, want %q", moleculeID, root.ID)
 	}
 
 	// Find parent molecule from root
-	moleculeID = findParentMolecule(ctx, s, root.ID)
+	moleculeID = mustFindParentMolecule(t, ctx, s, root.ID)
 	if moleculeID != root.ID {
 		t.Errorf("findParentMolecule(root) = %q, want %q", moleculeID, root.ID)
 	}
@@ -1515,7 +1517,7 @@ func TestFindParentMolecule(t *testing.T) {
 	}
 
 	// Should return empty for orphan
-	moleculeID = findParentMolecule(ctx, s, orphan.ID)
+	moleculeID = mustFindParentMolecule(t, ctx, s, orphan.ID)
 	if moleculeID != "" {
 		t.Errorf("findParentMolecule(orphan) = %q, want empty", moleculeID)
 	}
@@ -1587,7 +1589,10 @@ func TestFindParentMoleculesBatch(t *testing.T) {
 	}
 
 	// Batch-find molecule roots for all issues at once
-	roots := findParentMolecules(ctx, s, []string{grandchild.ID, child.ID, root.ID, orphan.ID})
+	roots, err := moleculeRootsOf(ctx, s, []string{grandchild.ID, child.ID, root.ID, orphan.ID})
+	if err != nil {
+		t.Fatalf("findParentMolecules: %v", err)
+	}
 
 	if got := roots[grandchild.ID]; got != root.ID {
 		t.Errorf("findParentMolecules[grandchild] = %q, want %q", got, root.ID)
@@ -1602,9 +1607,9 @@ func TestFindParentMoleculesBatch(t *testing.T) {
 		t.Errorf("findParentMolecules[orphan] = %q, want empty", got)
 	}
 
-	// Empty input should return nil
-	if result := findParentMolecules(ctx, s, nil); result != nil {
-		t.Errorf("findParentMolecules(nil) = %v, want nil", result)
+	// Empty input answers no roots.
+	if result, err := moleculeRootsOf(ctx, s, nil); err != nil || len(result) != 0 {
+		t.Errorf("MoleculeRoots(nil) = %v, %v, want none", result, err)
 	}
 }
 
@@ -1668,12 +1673,15 @@ func TestFindParentMolecule_RootShapes(t *testing.T) {
 			if tt.isMolecule {
 				wantSingle = root.ID
 			}
-			if got := findParentMolecule(ctx, s, child.ID); got != wantSingle {
+			if got := mustFindParentMolecule(t, ctx, s, child.ID); got != wantSingle {
 				t.Errorf("findParentMolecule(child) = %q, want %q", got, wantSingle)
 			}
 
 			wantBatch := map[string]string{child.ID: wantSingle}
-			gotBatch := findParentMolecules(ctx, s, []string{child.ID})
+			gotBatch, err := moleculeRootsOf(ctx, s, []string{child.ID})
+			if err != nil {
+				t.Fatalf("findParentMolecules: %v", err)
+			}
 			if got := gotBatch[child.ID]; got != wantBatch[child.ID] {
 				t.Errorf("findParentMolecules(child) = %q, want %q", got, wantBatch[child.ID])
 			}
@@ -1733,7 +1741,7 @@ func TestAdvanceToNextStep_PouredMolecule(t *testing.T) {
 		t.Fatalf("Failed to add blocking dep: %v", err)
 	}
 
-	result, err := AdvanceToNextStep(ctx, newStandaloneStoreMolWriter(s), step1.ID, true, "test")
+	result, err := advanceForTest(ctx, s, step1.ID, true, "test")
 	if err != nil {
 		t.Fatalf("AdvanceToNextStep failed: %v", err)
 	}
@@ -1815,7 +1823,7 @@ func TestFindHookedMolecules(t *testing.T) {
 	}
 
 	// Test: findHookedMolecules should find the molecule for this agent
-	molecules := findHookedMolecules(ctx, s, "test-agent")
+	molecules := mustFindHookedMolecules(t, ctx, s, "test-agent")
 	if len(molecules) != 1 {
 		t.Fatalf("findHookedMolecules() got %d molecules, want 1", len(molecules))
 	}
@@ -1824,13 +1832,13 @@ func TestFindHookedMolecules(t *testing.T) {
 	}
 
 	// Test: different agent should not find the molecule
-	molecules = findHookedMolecules(ctx, s, "other-agent")
+	molecules = mustFindHookedMolecules(t, ctx, s, "other-agent")
 	if len(molecules) != 0 {
 		t.Errorf("findHookedMolecules(other-agent) got %d molecules, want 0", len(molecules))
 	}
 
 	// Test: no agent filter should find the molecule
-	molecules = findHookedMolecules(ctx, s, "")
+	molecules = mustFindHookedMolecules(t, ctx, s, "")
 	if len(molecules) != 1 {
 		t.Errorf("findHookedMolecules('') got %d molecules, want 1", len(molecules))
 	}
@@ -1890,7 +1898,7 @@ func TestAdvanceToNextStep(t *testing.T) {
 	}
 
 	// Advance from step1 (just closed) without auto-claim
-	result, err := AdvanceToNextStep(ctx, newStandaloneStoreMolWriter(s), step1.ID, false, "test")
+	result, err := advanceForTest(ctx, s, step1.ID, false, "test")
 	if err != nil {
 		t.Fatalf("AdvanceToNextStep failed: %v", err)
 	}
@@ -1916,7 +1924,7 @@ func TestAdvanceToNextStep(t *testing.T) {
 	}
 
 	// Now test with auto-claim
-	result, err = AdvanceToNextStep(ctx, newStandaloneStoreMolWriter(s), step1.ID, true, "test")
+	result, err = advanceForTest(ctx, s, step1.ID, true, "test")
 	if err != nil {
 		t.Fatalf("AdvanceToNextStep with auto-claim failed: %v", err)
 	}
@@ -1967,7 +1975,7 @@ func TestAdvanceToNextStepMoleculeComplete(t *testing.T) {
 	}
 
 	// Advance from the only step (molecule should be complete)
-	result, err := AdvanceToNextStep(ctx, newStandaloneStoreMolWriter(s), step1.ID, false, "test")
+	result, err := advanceForTest(ctx, s, step1.ID, false, "test")
 	if err != nil {
 		t.Fatalf("AdvanceToNextStep failed: %v", err)
 	}
@@ -2000,7 +2008,7 @@ func TestAdvanceToNextStepOrphanIssue(t *testing.T) {
 	}
 
 	// Advance should return nil (not part of molecule)
-	result, err := AdvanceToNextStep(ctx, newStandaloneStoreMolWriter(s), orphan.ID, false, "test")
+	result, err := advanceForTest(ctx, s, orphan.ID, false, "test")
 	if err != nil {
 		t.Fatalf("AdvanceToNextStep failed: %v", err)
 	}
@@ -2083,7 +2091,7 @@ func TestAdvanceToNextStepConcurrentClaim(t *testing.T) {
 	// Now our agent tries to advance with autoClaim — step2 was identified as
 	// ready during the read phase, but it's already in_progress. The function
 	// should fall back to step3.
-	result, err := AdvanceToNextStep(ctx, newStandaloneStoreMolWriter(s), step1.ID, true, "our-agent")
+	result, err := advanceForTest(ctx, s, step1.ID, true, "our-agent")
 	if err != nil {
 		t.Fatalf("AdvanceToNextStep failed: %v", err)
 	}
@@ -2169,7 +2177,7 @@ func TestAdvanceToNextStepAllClaimed(t *testing.T) {
 	}
 
 	// Advance with autoClaim — should fail gracefully (no steps to claim)
-	result, err := AdvanceToNextStep(ctx, newStandaloneStoreMolWriter(s), step1.ID, true, "our-agent")
+	result, err := advanceForTest(ctx, s, step1.ID, true, "our-agent")
 	if err != nil {
 		t.Fatalf("AdvanceToNextStep failed: %v", err)
 	}
@@ -2846,43 +2854,6 @@ func TestAnalyzeMoleculeParallelMultipleArms(t *testing.T) {
 	}
 }
 
-// TestCalculateBlockingDepths tests the depth calculation
-func TestCalculateBlockingDepths(t *testing.T) {
-	// Create chain: root -> step1 -> step2 -> step3
-	root := &types.Issue{ID: "root", Status: types.StatusOpen}
-	step1 := &types.Issue{ID: "step1", Status: types.StatusOpen}
-	step2 := &types.Issue{ID: "step2", Status: types.StatusOpen}
-	step3 := &types.Issue{ID: "step3", Status: types.StatusOpen}
-
-	subgraph := &MoleculeSubgraph{
-		Root:     root,
-		Issues:   []*types.Issue{root, step1, step2, step3},
-		IssueMap: map[string]*types.Issue{"root": root, "step1": step1, "step2": step2, "step3": step3},
-	}
-
-	blockedBy := map[string]map[string]bool{
-		"root":  {},
-		"step1": {"root": true},
-		"step2": {"step1": true},
-		"step3": {"step2": true},
-	}
-
-	depths := calculateBlockingDepths(subgraph, blockedBy)
-
-	if depths["root"] != 0 {
-		t.Errorf("root depth = %d, want 0", depths["root"])
-	}
-	if depths["step1"] != 1 {
-		t.Errorf("step1 depth = %d, want 1", depths["step1"])
-	}
-	if depths["step2"] != 2 {
-		t.Errorf("step2 depth = %d, want 2", depths["step2"])
-	}
-	if depths["step3"] != 3 {
-		t.Errorf("step3 depth = %d, want 3", depths["step3"])
-	}
-}
-
 // TestSpawnMoleculeEphemeralFlag verifies that spawnMolecule with ephemeral=true
 // creates issues with the Ephemeral flag set (bd-phin)
 func TestSpawnMoleculeEphemeralFlag(t *testing.T) {
@@ -3369,4 +3340,71 @@ func TestPourRootNoVars(t *testing.T) {
 	if spawnedRoot.Description != "Release workflow for version bumps" {
 		t.Errorf("Root description should be formula desc, got: %q", spawnedRoot.Description)
 	}
+}
+
+// The molecule tests below drive the library's molecule rules through the
+// store's own roles — the path every route takes — via these thin shims.
+
+func testMolRoles(t *testing.T, s storage.DoltStorage) moleculeRoles {
+	t.Helper()
+	roles, err := directMoleculeRoles(s)
+	if err != nil {
+		t.Fatalf("directMoleculeRoles: %v", err)
+	}
+	return roles
+}
+
+func mustFindParentMolecule(t *testing.T, ctx context.Context, s storage.DoltStorage, id string) string {
+	t.Helper()
+	got, err := issueops.MoleculeRoot(ctx, testMolRoles(t, s).molecule, id)
+	if err != nil {
+		t.Fatalf("MoleculeRoot(%s): %v", id, err)
+	}
+	return got
+}
+
+func moleculeRootsOf(ctx context.Context, s storage.DoltStorage, ids []string) (map[string]string, error) {
+	roles, err := directMoleculeRoles(s)
+	if err != nil {
+		return nil, err
+	}
+	return issueops.MoleculeRoots(ctx, roles.molecule, ids)
+}
+
+func viewMoleculeProgress(ctx context.Context, s storage.DoltStorage, id string) (*MoleculeProgress, error) {
+	roles, err := directMoleculeRoles(s)
+	if err != nil {
+		return nil, err
+	}
+	view, err := issueops.ViewMolecule(ctx, roles.molecule, id)
+	if err != nil {
+		return nil, err
+	}
+	return moleculeProgressOf(view), nil
+}
+
+func mustFindHookedMolecules(t *testing.T, ctx context.Context, s storage.DoltStorage, agent string) []*MoleculeProgress {
+	t.Helper()
+	roles := testMolRoles(t, s)
+	ids, err := issueops.ActiveMoleculeIDs(ctx, roles.reader, roles.molecule, agent)
+	if err != nil {
+		t.Fatalf("ActiveMoleculeIDs(%q): %v", agent, err)
+	}
+	got, err := viewMolecules(ctx, roles, ids)
+	if err != nil {
+		t.Fatalf("viewMolecules(%q): %v", agent, err)
+	}
+	return got
+}
+
+func advanceForTest(ctx context.Context, s storage.DoltStorage, closedStepID string, autoClaim bool, actor string) (*ContinueResult, error) {
+	stepper, err := s.MoleculeStepper()
+	if err != nil {
+		return nil, err
+	}
+	result, err := stepper.Advance(ctx, issueops.AdvanceRequest{Actor: actor, ClosedStepID: closedStepID, AutoClaim: autoClaim})
+	if err != nil {
+		return nil, err
+	}
+	return continueResultOf(result), nil
 }

@@ -61,3 +61,24 @@ func TestDoltServerDSN_TLS(t *testing.T) {
 		}
 	})
 }
+
+// TestDoltServerDSNIPv6Host pins the address the driver dials for an IPv6
+// listener host, which a managed proxied server's listener.host may be:
+// "[::1]:3306", not "::1:3306" or "[[::1]]:3306", whether the host is written
+// bare or bracketed. An IPv4 address joins as it always has.
+func TestDoltServerDSNIPv6Host(t *testing.T) {
+	for _, tc := range []struct{ host, want string }{
+		{"::1", "[::1]:3306"},
+		{"[::1]", "[::1]:3306"},
+		{"127.0.0.1", "127.0.0.1:3306"},
+	} {
+		dsn := DoltServerDSN{Host: tc.host, Port: 3306, User: "root"}.String()
+		cfg, err := mysql.ParseDSN(dsn)
+		if err != nil {
+			t.Fatalf("ParseDSN(%q) failed: %v", dsn, err)
+		}
+		if cfg.Addr != tc.want {
+			t.Errorf("host %q: DSN %q dials %q, want %q", tc.host, dsn, cfg.Addr, tc.want)
+		}
+	}
+}

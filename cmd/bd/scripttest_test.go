@@ -28,9 +28,25 @@ func TestScripts(t *testing.T) {
 	exeName := "bd"
 	binDir := t.TempDir()
 	exe := filepath.Join(binDir, exeName)
-	if prebuilt, err := findPrebuiltBDBinary(); err == nil && prebuilt != "" && filepath.Base(prebuilt) == exeName {
-		exe = prebuilt
-		binDir = filepath.Dir(prebuilt)
+	prebuilt, err := findPrebuiltBDBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prebuilt != "" {
+		// Under Bazel this is always non-empty (bazeltest.PrebuiltBD), so the
+		// `go build` fallback below never runs there -- but its basename may
+		// not be literally "bd" (the injected //cmd/bd:bd_for_tests runfile),
+		// and the scripts below invoke plain `bd` via sh -c, so symlink it
+		// under the expected name rather than falling through to a host `go
+		// build` that would otherwise still run under Bazel on a basename
+		// mismatch (the exact worker-dependent failure this scan guards
+		// against: f4-spec.md §9).
+		if filepath.Base(prebuilt) == exeName {
+			exe = prebuilt
+			binDir = filepath.Dir(prebuilt)
+		} else if err := os.Symlink(prebuilt, exe); err != nil {
+			t.Fatalf("symlink prebuilt bd binary: %v", err)
+		}
 	} else if err := goBuildBDCommand(exe).Run(); err != nil {
 		t.Fatal(err)
 	}

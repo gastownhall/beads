@@ -2,12 +2,15 @@ package doctor
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/testutil"
 )
 
 func TestIsValidIdentifier(t *testing.T) {
@@ -52,6 +55,20 @@ func TestCheckServerReachable_UnreachableHost(t *testing.T) {
 	}
 	if check.Category != CategoryFederation {
 		t.Errorf("Category = %q, want %q", check.Category, CategoryFederation)
+	}
+}
+
+// TestCheckServerReachableIPv6Host pins bd doctor --server's reachability
+// probe to the address the store dials for an IPv6 server host configured bare
+// ("::1") or bracketed ("[::1]"): [::1]:port, never [[::1]]:port.
+func TestCheckServerReachableIPv6Host(t *testing.T) {
+	port, _ := testutil.IPv6LoopbackListener(t)
+	want := "Connected to " + net.JoinHostPort("::1", strconv.Itoa(port))
+	for _, host := range []string{"::1", "[::1]"} {
+		check := checkServerReachable(host, port)
+		if check.Status != StatusOK || check.Message != want {
+			t.Errorf("checkServerReachable(%q) = %s %q (%s), want %s %q", host, check.Status, check.Message, check.Detail, StatusOK, want)
+		}
 	}
 }
 
@@ -199,9 +216,9 @@ func TestCheckDoltVersion_Unreachable(t *testing.T) {
 }
 
 // TestRunDoltServerDiagnostics_Unreachable exercises the credential-resolution
-// branch in runDoltServerDiagnostics (bd-h5k7). metadata.json is loaded so
-// that user / tls / password are pulled from configfile.Load before the DSN
-// is built and the ping fails against the unreachable port.
+// branch in runDoltServerDiagnostics (bd-h5k7): the loaded metadata.json's
+// user / tls / password build the DSN before the ping fails against the
+// unreachable port.
 func TestRunDoltServerDiagnostics_Unreachable(t *testing.T) {
 	beadsDir := t.TempDir()
 
@@ -218,8 +235,13 @@ func TestRunDoltServerDiagnostics_Unreachable(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	cfg, err := configfile.Load(beadsDir)
+	if err != nil || cfg == nil {
+		t.Fatalf("load metadata.json: %v", err)
+	}
+
 	metrics := &DoltPerfMetrics{}
-	err := runDoltServerDiagnostics(metrics, "127.0.0.1", 1, "beads", beadsDir)
+	err = runDoltServerDiagnostics(metrics, cfg, "127.0.0.1", 1)
 	if err == nil {
 		t.Fatal("expected error connecting to unreachable server")
 	}
@@ -228,5 +250,39 @@ func TestRunDoltServerDiagnostics_Unreachable(t *testing.T) {
 	}
 	if !metrics.ServerMode {
 		t.Error("expected ServerMode=true")
+	}
+}
+
+// TestDoltVersionFloorCheck pins `bd doctor --server`'s Dolt Version check to
+// the floor every server-mode open enforces: below 2.6.0 is an error whose
+// fix is the upgrade; a version that does not parse is not refused.
+func TestDoltVersionFloorCheck(t *testing.T) {
+	for _, tc := range []struct {
+		version string
+		want    string
+	}{
+		{"2.6.0", StatusOK},
+		{"2.7.1", StatusOK},
+		{"2.5.1", StatusError},
+		{"2.1.8", StatusError},
+		{"SET_BY_INIT", StatusOK},
+	} {
+		t.Run(tc.version, func(t *testing.T) {
+			check := doltVersionFloorCheck(tc.version, "dolt sql-server at 127.0.0.1:3307")
+			if check.Status != tc.want {
+				t.Fatalf("doltVersionFloorCheck(%q).Status = %q, want %q (%+v)", tc.version, check.Status, tc.want, check)
+			}
+			if check.Status == StatusError {
+				for _, want := range []string{tc.version, "2.6.0"} {
+					if !strings.Contains(check.Message, want) {
+						t.Errorf("Message = %q, want it to mention %q", check.Message, want)
+					}
+				}
+				if !strings.Contains(check.Fix, "Upgrade") || !strings.Contains(check.Detail, "release notes") ||
+					!strings.Contains(check.Detail, "127.0.0.1:3307") {
+					t.Errorf("Fix/Detail = %q / %q, want upgrade advice and release notes", check.Fix, check.Detail)
+				}
+			}
+		})
 	}
 }

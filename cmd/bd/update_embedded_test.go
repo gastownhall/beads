@@ -243,6 +243,73 @@ func TestEmbeddedUpdateRoutedStoreCommitsTargetHead(t *testing.T) {
 	}
 }
 
+// TestEmbeddedRoutedWriteMissDoesNotCreateTargetDatabase pins that a routed
+// write whose id misses leaves an embedded target that has not been
+// bootstrapped yet without a database. The routed open runs before the lookup
+// it serves, so a database it created would outlive the miss, and `bd
+// bootstrap` there would then take it for the real one and skip the clone.
+// tgt-zzzz takes the prefix route and src-zzzz the maintainer auto-route; both
+// lead to the same fresh clone.
+func TestEmbeddedRoutedWriteMissDoesNotCreateTargetDatabase(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt update tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "src")
+
+	targetDir := filepath.Join(dir, "fresh-clone")
+	if err := os.MkdirAll(targetDir, 0750); err != nil {
+		t.Fatal(err)
+	}
+	initGitRepoAt(t, targetDir)
+	targetBeadsDir := filepath.Join(targetDir, ".beads")
+	writeEmbeddedMetadata(t, targetBeadsDir, "tgt")
+
+	route := `{"prefix":"tgt-","path":"fresh-clone"}` + "\n"
+	if err := os.WriteFile(filepath.Join(beadsDir, "routes.jsonl"), []byte(route), 0644); err != nil {
+		t.Fatalf("write routes.jsonl: %v", err)
+	}
+	roleCmd := gitCommand("config", "beads.role", "maintainer")
+	roleCmd.Dir = dir
+	if out, err := roleCmd.CombinedOutput(); err != nil {
+		t.Fatalf("git config beads.role: %v\n%s", err, out)
+	}
+
+	env := bdEnv(dir)
+	runBD := func(args ...string) (string, error) {
+		cmd := exec.Command(bd, args...)
+		cmd.Dir = dir
+		cmd.Env = env
+		out, err := cmd.CombinedOutput()
+		return string(out), err
+	}
+	for _, args := range [][]string{
+		{"config", "set", "routing.mode", "auto"},
+		{"config", "set", "routing.maintainer", targetDir},
+	} {
+		if out, err := runBD(args...); err != nil {
+			t.Fatalf("bd %s failed: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+
+	for _, args := range [][]string{
+		{"update", "tgt-zzzz", "--priority", "0"},
+		{"close", "tgt-zzzz"},
+		{"update", "src-zzzz", "--priority", "0"},
+		{"close", "src-zzzz"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			out, err := runBD(args...)
+			requireNoEmbeddedDatabase(t, targetBeadsDir)
+			if err == nil || !strings.Contains(out, "no embedded database") {
+				t.Fatalf("err = %v, want the routed open's refusal\n%s", err, out)
+			}
+		})
+	}
+}
+
 // The TestEmbeddedUpdateFields* and TestEmbeddedUpdateLifecycle* tests were
 // split from TestEmbeddedUpdate (originally ~267s, measured under
 // --config=embedded), first into TestEmbeddedUpdateFields and

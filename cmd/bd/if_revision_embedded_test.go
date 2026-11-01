@@ -55,10 +55,10 @@ func bdShowRevision(t *testing.T, bd, dir, id string) int64 {
 
 func revStr(rev int64) string { return strconv.FormatInt(rev, 10) }
 
-// TestIfRevisionAdvertisedOnFourVerbs pins T4.1: --if-revision is a real,
+// TestEmbeddedIfRevisionAdvertisedOnFourVerbs pins T4.1: --if-revision is a real,
 // documented flag on all four verbs A8 adds it to, not an undocumented side
 // channel a caller has to discover by reading source.
-func TestIfRevisionAdvertisedOnFourVerbs(t *testing.T) {
+func TestEmbeddedIfRevisionAdvertisedOnFourVerbs(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -77,11 +77,11 @@ func TestIfRevisionAdvertisedOnFourVerbs(t *testing.T) {
 	}
 }
 
-// TestIfRevisionMatchAndMismatch pins T4.2 across all four verbs: a stale
+// TestEmbeddedIfRevisionMatchAndMismatch pins T4.2 across all four verbs: a stale
 // --if-revision token exits ExitGuardMismatch (13) and writes nothing at all
 // (not the field, not the revision itself); the same token, once it is the
 // issue's CURRENT revision, applies the write and the revision moves again.
-func TestIfRevisionMatchAndMismatch(t *testing.T) {
+func TestEmbeddedIfRevisionMatchAndMismatch(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -196,7 +196,7 @@ func TestIfRevisionMatchAndMismatch(t *testing.T) {
 	})
 }
 
-// TestIfRevisionDeletePreflightGoneIsPreconditionFailed pins mc-zndi7.81: `bd
+// TestEmbeddedIfRevisionDeletePreflightGoneIsPreconditionFailed pins mc-zndi7.81: `bd
 // delete`'s single-id path resolves the row with resolveAndGetIssueForMutation
 // BEFORE calling deleter.Delete() and the per-id lock fence #7244 added. On a
 // real Dolt sql-server, a same-token --if-revision racer that loses that fence
@@ -211,7 +211,7 @@ func TestIfRevisionMatchAndMismatch(t *testing.T) {
 // winning racer's delete would), then present that now-stale token. The
 // pre-flight existence check must fail exactly the same way a mid-guard
 // version mismatch does.
-func TestIfRevisionDeletePreflightGoneIsPreconditionFailed(t *testing.T) {
+func TestEmbeddedIfRevisionDeletePreflightGoneIsPreconditionFailed(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -245,7 +245,184 @@ func TestIfRevisionDeletePreflightGoneIsPreconditionFailed(t *testing.T) {
 	}
 }
 
-// TestIfRevisionCascadeDelete pins mc-zndi7.76 (gap 4): a single named id with
+// TestEmbeddedIfRevisionDeletePreflightGoneParentIsPreconditionFailed is the
+// test above with a gone id that is still the start of a surviving one: a
+// deleted parent whose orphaned child (<parent>.1) outlives it. `bd delete`
+// resolves exactly, so the parent's id is refused as an abbreviation of the
+// child rather than resolved to it, and under --if-revision that refusal must
+// be the same lost race (exit 13, "precondition failed") on the single-id path
+// and on --cascade's deleteBatch path, with the child untouched. The
+// TestEmbedded name is what puts this test in a CI lane
+// (.github/scripts/embedded-test-shard.sh); under any other name it skips
+// everywhere.
+func TestEmbeddedIfRevisionDeletePreflightGoneParentIsPreconditionFailed(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "pg")
+
+	parent := bdCreate(t, bd, dir, "Gone parent", "--type", "task")
+	child := bdCreate(t, bd, dir, "Surviving child", "--type", "task", "--parent", parent.ID)
+	if !strings.HasPrefix(child.ID, parent.ID) {
+		t.Fatalf("child id %s does not begin with its parent's id %s; this test needs it to", child.ID, parent.ID)
+	}
+	rev0 := bdShowRevision(t, bd, dir, parent.ID)
+
+	bdDelete(t, bd, dir, parent.ID, "--force")
+	// The parent is gone, yet a read still takes its id as an abbreviation and
+	// resolves it to the child: the id a delete must not resolve the same way.
+	if got := bdShow(t, bd, dir, parent.ID); got.ID != child.ID {
+		t.Fatalf("bd show %s after its delete returned %s; want the surviving child %s", parent.ID, got.ID, child.ID)
+	}
+
+	for _, extra := range [][]string{nil, {"--cascade"}} {
+		args := append([]string{"delete", parent.ID, "--if-revision", revStr(rev0), "--force"}, extra...)
+		out, code := bdRunFailCode(t, bd, dir, args...)
+		if code != ExitGuardMismatch {
+			t.Errorf("bd %s exit code = %d, want %d\n%s", strings.Join(args, " "), code, ExitGuardMismatch, out)
+		}
+		if !strings.Contains(out, "precondition failed") {
+			t.Errorf("bd %s should say \"precondition failed\", got:\n%s", strings.Join(args, " "), out)
+		}
+		if strings.Contains(out, "not found") {
+			t.Errorf("bd %s leaked the unguarded refusal instead of the guard envelope:\n%s", strings.Join(args, " "), out)
+		}
+	}
+	if got := bdShow(t, bd, dir, child.ID); got.ID != child.ID {
+		t.Errorf("bd show %s returned %s; want the child untouched", child.ID, got.ID)
+	}
+}
+
+// TestEmbeddedIfRevisionPreflightGoneIsPreconditionFailedOnEveryVerb pins
+// ga-vnycm2.10, the close/update/assign/reopen half of mc-zndi7.81: `bd
+// close`, `bd update`, `bd assign` and `bd reopen` each resolve the row with
+// resolveAndGetIssueForMutation BEFORE their guarded write, exactly as `bd
+// delete` does (and `bd delete --cascade`, through deleteBatch). A guarded
+// write that races a winning `bd delete` on a real Dolt sql-server
+// (TestSharedServerDeleteIfRevisionSingleWinner/delete_vs_close and
+// delete_vs_update) finds the row already gone right there and, pre-fix,
+// exited 1 with an unclassified "no issue found matching" instead of the
+// ExitGuardMismatch (13) precondition_failed the same loser gets when the
+// delete lands one step later, inside its guarded write. The deterministic
+// reproduction is the delete test's: delete the row out from under a
+// --if-revision token, then present that token.
+//
+// TestProxiedServerIfRevisionTargetGoneIsPreconditionFailed
+// (if_revision_proxied_close_delete_test.go) is this test's proxied-server-leg
+// twin. The TestEmbedded name is what puts this test in a CI lane
+// (.github/scripts/embedded-test-shard.sh); under any other name it skips
+// everywhere.
+func TestEmbeddedIfRevisionPreflightGoneIsPreconditionFailedOnEveryVerb(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "pv")
+
+	for _, tc := range []struct {
+		verb string
+		args func(id, rev string) []string
+	}{
+		{"close", func(id, rev string) []string { return []string{"close", id, "--if-revision", rev, "--reason", "gone"} }},
+		{"update", func(id, rev string) []string {
+			return []string{"update", id, "--if-revision", rev, "--spec-id", "gone"}
+		}},
+		{"assign", func(id, rev string) []string { return []string{"assign", id, "someone", "--if-revision", rev} }},
+		{"reopen", func(id, rev string) []string { return []string{"reopen", id, "--if-revision", rev} }},
+		{"delete", func(id, rev string) []string { return []string{"delete", id, "--force", "--if-revision", rev} }},
+		{"delete_cascade", func(id, rev string) []string {
+			return []string{"delete", id, "--cascade", "--force", "--if-revision", rev}
+		}},
+	} {
+		t.Run(tc.verb, func(t *testing.T) {
+			issue := bdCreate(t, bd, dir, "Preflight gone "+tc.verb, "--type", "task")
+			rev0 := bdShowRevision(t, bd, dir, issue.ID)
+
+			// Stand in for the winning delete racer.
+			bdDelete(t, bd, dir, issue.ID, "--force")
+			bdShowFail(t, bd, dir, issue.ID)
+
+			out, code := bdRunFailCode(t, bd, dir, tc.args(issue.ID, revStr(rev0))...)
+			if code != ExitGuardMismatch {
+				t.Errorf("preflight-gone --if-revision %s exit code = %d, want %d\n%s", tc.verb, code, ExitGuardMismatch, out)
+			}
+			if !strings.Contains(out, "precondition failed: issue no longer exists") {
+				t.Errorf("preflight-gone %s should say \"precondition failed: issue no longer exists\", got:\n%s", tc.verb, out)
+			}
+			// Every verb's own not-found wording: "no issue found matching"
+			// (the direct resolution), "issue <id> not found" (delete's
+			// fallback), "issues not found: <id>" (deleteBatch).
+			if strings.Contains(out, "no issue found matching") || strings.Contains(out, "not found") {
+				t.Errorf("preflight-gone %s leaked the raw, unclassified resolution error instead of the guard envelope:\n%s", tc.verb, out)
+			}
+		})
+
+		// A parent deleted while two of its children survive is gone the same
+		// way, but the abbreviating resolution the other four verbs share
+		// refuses its id as ambiguous, since it is the start of both
+		// children's ids, rather than reporting it missing. bd delete resolves
+		// exactly; its shape is
+		// TestEmbeddedIfRevisionDeletePreflightGoneParentIsPreconditionFailed.
+		if strings.HasPrefix(tc.verb, "delete") {
+			continue
+		}
+		t.Run(tc.verb+"_parent_with_surviving_children", func(t *testing.T) {
+			parent := bdCreate(t, bd, dir, "Gone parent "+tc.verb, "--type", "task")
+			for range 2 {
+				bdCreate(t, bd, dir, "Surviving child "+tc.verb, "--type", "task", "--parent", parent.ID)
+			}
+			rev0 := bdShowRevision(t, bd, dir, parent.ID)
+
+			bdDelete(t, bd, dir, parent.ID, "--force")
+
+			out, code := bdRunFailCode(t, bd, dir, tc.args(parent.ID, revStr(rev0))...)
+			if code != ExitGuardMismatch {
+				t.Errorf("--if-revision %s of a deleted parent exit code = %d, want %d\n%s", tc.verb, code, ExitGuardMismatch, out)
+			}
+			if !strings.Contains(out, "precondition failed: issue no longer exists") {
+				t.Errorf("--if-revision %s of a deleted parent should say \"precondition failed: issue no longer exists\", got:\n%s", tc.verb, out)
+			}
+			if strings.Contains(out, "ambiguous") {
+				t.Errorf("--if-revision %s of a deleted parent leaked the unclassified ambiguity refusal instead of the guard envelope:\n%s", tc.verb, out)
+			}
+		})
+	}
+
+	// Without --if-revision there is no guard to report through: a missing
+	// id stays the ordinary not-found failure (exit 1), unchanged.
+	t.Run("unguarded_close_still_not_found", func(t *testing.T) {
+		out, code := bdRunFailCode(t, bd, dir, "close", "pv-doesnotexist", "--reason", "gone")
+		if code != 1 {
+			t.Errorf("unguarded close of a missing id exit code = %d, want 1\n%s", code, out)
+		}
+		if strings.Contains(out, "precondition failed") {
+			t.Errorf("unguarded close of a missing id must not report a guard outcome:\n%s", out)
+		}
+	})
+
+	// deleteBatch's not-found error now carries the storage.ErrNotFound
+	// sentinel the guarded cascade classifies; unguarded, it still prints the
+	// same flat list.
+	t.Run("unguarded_cascade_delete_still_not_found", func(t *testing.T) {
+		out, code := bdRunFailCode(t, bd, dir, "delete", "pv-doesnotexist", "--cascade", "--force")
+		if code != 1 {
+			t.Errorf("unguarded cascade delete of a missing id exit code = %d, want 1\n%s", code, out)
+		}
+		if !strings.Contains(out, "issues not found: pv-doesnotexist") {
+			t.Errorf("unguarded cascade delete of a missing id should say \"issues not found: pv-doesnotexist\", got:\n%s", out)
+		}
+		if strings.Contains(out, "precondition failed") {
+			t.Errorf("unguarded cascade delete of a missing id must not report a guard outcome:\n%s", out)
+		}
+	})
+}
+
+// TestEmbeddedIfRevisionCascadeDelete pins mc-zndi7.76 (gap 4): a single named id with
 // --cascade takes the SAME deleteBatch path a multi-id delete does
 // (cmd/bd/delete.go:105, "len(issueIDs) > 1 || cascade"), which is the only
 // way a single-id --if-revision request ever reaches deleteBatch's own
@@ -254,8 +431,11 @@ func TestIfRevisionDeletePreflightGoneIsPreconditionFailed(t *testing.T) {
 // here). A stale guard must refuse the WHOLE cascade — the dependent survives
 // right alongside the named parent — on both the real run and the unconfirmed
 // --dry-run preview, which reports the same conditional-write envelope rather
-// than falling through to the generic preview-with-error path.
-func TestIfRevisionCascadeDelete(t *testing.T) {
+// than falling through to the generic preview-with-error path. A target that a
+// concurrent delete removed before deleteBatch resolves it is
+// TestEmbeddedIfRevisionPreflightGoneIsPreconditionFailedOnEveryVerb's
+// delete_cascade row.
+func TestEmbeddedIfRevisionCascadeDelete(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -309,11 +489,11 @@ func TestIfRevisionCascadeDelete(t *testing.T) {
 	bdShowFail(t, bd, dir, child.ID)
 }
 
-// TestIfRevisionComposesWithIfAssigneeIfStatus pins T4.5: on `bd update`,
+// TestEmbeddedIfRevisionComposesWithIfAssigneeIfStatus pins T4.5: on `bd update`,
 // --if-revision composes with --if-assignee/--if-status as a conjunction —
 // every guard present must hold, not just one of them, regardless of which
 // guard happens to be the stale one.
-func TestIfRevisionComposesWithIfAssigneeIfStatus(t *testing.T) {
+func TestEmbeddedIfRevisionComposesWithIfAssigneeIfStatus(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -366,13 +546,13 @@ func TestIfRevisionComposesWithIfAssigneeIfStatus(t *testing.T) {
 	})
 }
 
-// TestIfRevisionRejectsLabelAndParentEdits pins T4.6: `bd update --if-revision`
+// TestEmbeddedIfRevisionRejectsLabelAndParentEdits pins T4.6: `bd update --if-revision`
 // (alone or composed with --if-assignee/--if-status) refuses when the ONLY
 // edit riding with it is a label or parent change, because those edits do not
 // run inside the guarded issues-row write. Refused before any write, exit 1
 // (a flag-validation refusal, never 13 — 13 is reserved for an actual stale
 // guard).
-func TestIfRevisionRejectsLabelAndParentEdits(t *testing.T) {
+func TestEmbeddedIfRevisionRejectsLabelAndParentEdits(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -412,12 +592,12 @@ func TestIfRevisionRejectsLabelAndParentEdits(t *testing.T) {
 	})
 }
 
-// TestIfRevisionMultiIDRejected pins T4.8 on the three verbs that accept more
+// TestEmbeddedIfRevisionMultiIDRejected pins T4.8 on the three verbs that accept more
 // than one id (assign is cobra.ExactArgs(2): id + assignee, so it can never
 // carry a second id). A single --if-revision token names one row's version;
 // refused before any write rather than applying it to only the first id a
 // batch happens to resolve.
-func TestIfRevisionMultiIDRejected(t *testing.T) {
+func TestEmbeddedIfRevisionMultiIDRejected(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -483,14 +663,14 @@ func TestIfRevisionMultiIDRejected(t *testing.T) {
 	})
 }
 
-// TestRevisionRemintMatrix pins T4.10: the revision is a token over the
+// TestEmbeddedRevisionRemintMatrix pins T4.10: the revision is a token over the
 // issues-row write, not over "anything happened to this id". A field update,
 // a metadata edit, a close and a reopen must each mint a fresh revision (so a
 // caller who read one of those as "no-op" cannot keep replaying a now-stale
 // --if-revision); a label edit, a dependency edit and the derived is_blocked
 // flag must NOT, because none of those touch the issues-row write the token
 // guards.
-func TestRevisionRemintMatrix(t *testing.T) {
+func TestEmbeddedRevisionRemintMatrix(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}

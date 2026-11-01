@@ -5,6 +5,8 @@ package httpclient
 import (
 	"context"
 	"net/http"
+	"slices"
+	"strings"
 
 	"github.com/steveyegge/beads/internal/httpapi/apigen"
 	"github.com/steveyegge/beads/internal/httpclient/encode"
@@ -32,10 +34,18 @@ type httpReader struct{ store *Store }
 // server's own has_more ARE the page contract. An Offset is refused by the
 // encoder rather than dropped — ready work carries no keyset position, so there
 // is no honest way to page it (E-ReadyRequest.Offset).
+//
+// An explicit Limit of 0 (unlimited) is NOT sent as `limit=0`: it becomes one
+// request bounded at the client cap plus one, refused past the cap rather than
+// truncated (unlimited_read.go).
 func (r httpReader) Ready(ctx context.Context, req issueops.ReadyRequest) (issueops.IssuePage, error) {
 	params, err := encode.ReadyParams(req)
 	if err != nil {
 		return issueops.IssuePage{}, r.store.inexpressible("Reader.Ready", err)
+	}
+	readCap, err := boundUnlimitedPage(params, req.Limit != nil && *req.Limit == 0)
+	if err != nil {
+		return issueops.IssuePage{}, err
 	}
 	var body apigen.ReadyPage
 	if err := r.store.dispatch(ctx, wire.Request{
@@ -46,16 +56,85 @@ func (r httpReader) Ready(ctx context.Context, req issueops.ReadyRequest) (issue
 	}, &body); err != nil {
 		return issueops.IssuePage{}, err
 	}
+	if err := checkUnlimitedPage(wire.OpListReadyWork, readCap, len(body.Items), body.HasMore); err != nil {
+		return issueops.IssuePage{}, err
+	}
 	return issueops.IssuePage{Items: wireRows(body.Items, req.Brief), HasMore: body.HasMore}, nil
 }
 
 // List serves listIssues, through the pager in list_walk.go.
+//
+// `--title-contains` is folded onto `title` first (encode.FoldTitleContains:
+// the two compile to one predicate), so it is gated by issues.list.title like
+// `--title` is, and refused before the dial against a server without it.
 func (r httpReader) List(ctx context.Context, req issueops.ListRequest) (issueops.IssuePage, error) {
+	req = encode.FoldTitleContains(req)
+	if err := r.refuseUnservedListFilters(ctx, req); err != nil {
+		return issueops.IssuePage{}, err
+	}
 	params, err := encode.ListParams(req)
 	if err != nil {
 		return issueops.IssuePage{}, r.store.inexpressible("Reader.List", err)
 	}
 	return r.store.walkIssues(ctx, params, req)
+}
+
+// tokenedListFilters are the ListRequest members listIssues carries only on a
+// server advertising a behavior token of their own, each with that token:
+// `bd search`'s text (S26), `bd list --title`, `--id` and `--no-assignee`
+// (S15b), and the rest of `bd list`'s filters behind issues.list.filters.
+// `--title-contains` is folded onto TitleSearch first
+// (encode.FoldTitleContains), so alone it is gated by issues.list.title;
+// only one that differs from `--title` keeps TitleContains, which rides
+// `title_contains` with the filters.
+// Order decides which token a request carrying several names; each refusal is
+// complete on its own, so any order is honest.
+var tokenedListFilters = []struct {
+	token string
+	set   func(issueops.ListRequest) bool
+}{
+	{wire.CapListSearch, func(r issueops.ListRequest) bool { return r.Query != "" }},
+	{wire.CapListNoAssignee, func(r issueops.ListRequest) bool { return r.NoAssignee }},
+	{wire.CapListTitle, func(r issueops.ListRequest) bool { return r.TitleSearch != "" }},
+	// An id set naming no id (only commas and blanks) sends no `id`, so it
+	// needs no token.
+	{wire.CapListIDs, func(r issueops.ListRequest) bool {
+		return strings.TrimSpace(strings.ReplaceAll(r.IDFilter, ",", "")) != ""
+	}},
+	// The rest of `bd list`'s filter vocabulary, one token for the set: the
+	// members are encode.ListFiltersMembers, the same list the encoder emits
+	// from, so a member cannot ride the wire without asking for the token.
+	{wire.CapListFilters, encode.ListFiltersSet},
+}
+
+// refuseUnservedListFilters is the pre-dial gate for the tokened members. An
+// older server answers each one's parameter with 400 unknown_parameter, so a
+// request carrying one against a server that does not advertise its token is
+// refused HERE, with the typed capability error naming that token: never a
+// round trip that is refused anyway, and never a wider listing (the
+// unsearched one, every in-progress bead instead of the unassigned ones, the
+// whole workspace instead of an id set) passed off as the answer.
+//
+// listIssues is a baseline operation, so dispatch preflights nothing for it;
+// this is the one handshake a tokened request costs, and a request without
+// any of these members never asks for it.
+func (r httpReader) refuseUnservedListFilters(ctx context.Context, req issueops.ListRequest) error {
+	var snap *apigen.ContextResponse
+	for _, f := range tokenedListFilters {
+		if !f.set(req) {
+			continue
+		}
+		if snap == nil {
+			var err error
+			if snap, err = r.store.snapshot(ctx); err != nil {
+				return err
+			}
+		}
+		if snap == nil || !slices.Contains(snap.Capabilities, f.token) {
+			return r.store.unsupportedCapability("Reader.List", f.token)
+		}
+	}
+	return nil
 }
 
 // Get serves getIssue, including the two landed include parameters that retired

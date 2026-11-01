@@ -352,7 +352,6 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 	if err != nil {
 		return nil, fmt.Errorf("searching local issues: %w", err)
 	}
-	localByExternalIdentifier := make(map[string]*types.Issue, len(localIssues))
 	localByID := make(map[string]*types.Issue, len(localIssues))
 	for _, localIssue := range localIssues {
 		if localIssue == nil {
@@ -361,18 +360,6 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 		if localID := strings.TrimSpace(localIssue.ID); localID != "" {
 			localByID[localID] = localIssue
 		}
-		if localIssue == nil || localIssue.ExternalRef == nil {
-			continue
-		}
-		localRef := strings.TrimSpace(*localIssue.ExternalRef)
-		if localRef == "" || !e.Tracker.IsExternalRef(localRef) {
-			continue
-		}
-		identifier := e.Tracker.ExtractIdentifier(localRef)
-		if identifier == "" {
-			continue
-		}
-		localByExternalIdentifier[identifier] = localIssue
 	}
 
 	prelinkedHydrateIDs := make(map[string]bool)
@@ -432,6 +419,7 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 		}
 	}
 
+	fallback := e.newPullFallbackIndex(localIssues, extIssues)
 	mapper := e.Tracker.FieldMapper()
 	var pendingDeps []DependencyInfo
 	var dryRunIssues []*types.Issue
@@ -450,10 +438,7 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 		ref := e.Tracker.BuildExternalRef(&extIssue)
 		existing, _ := e.Store.GetIssueByExternalRef(ctx, ref)
 		if existing == nil && ref != "" {
-			identifier := e.Tracker.ExtractIdentifier(ref)
-			if identifier != "" {
-				existing = localByExternalIdentifier[identifier]
-			}
+			existing = fallback.match(&extIssue, ref)
 		}
 		conv := mapper.IssueToBeads(&extIssue)
 		if conv == nil || conv.Issue == nil {
@@ -505,6 +490,11 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 			dryRunIssue := *conv.Issue
 			if strings.TrimSpace(ref) != "" {
 				dryRunIssue.ExternalRef = strPtr(ref)
+			}
+			// The pull writes a matched issue to the local issue it matched,
+			// so a preview endpoint naming the new ref resolves to that one.
+			if existing != nil {
+				dryRunIssue.ID = existing.ID
 			}
 			dryRunIssues = append(dryRunIssues, &dryRunIssue)
 		}
@@ -674,6 +664,143 @@ func appendFilteredDependencies(dst []DependencyInfo, deps []DependencyInfo, all
 		dst = append(dst, dep)
 	}
 	return dst
+}
+
+// matchKey returns the key under which a pull matches ref to a local issue
+// when the exact external_ref lookup misses. Trackers whose identifiers are
+// not unique across a pull's namespace supply it via MatchKeyer; the rest
+// match by ExtractIdentifier.
+func (e *Engine) matchKey(ref string) string {
+	if mk, ok := e.Tracker.(MatchKeyer); ok {
+		return mk.MatchKey(ref)
+	}
+	return e.Tracker.ExtractIdentifier(ref)
+}
+
+// pullFallbackIndex holds the local issues a pull falls back to when the exact
+// external_ref lookup misses: by identity key (IdentityKeyer) and, for local
+// issues that have none, by match key.
+type pullFallbackIndex struct {
+	identities IdentityKeyer // nil when the tracker records no identity
+	matchKey   func(ref string) string
+	byIdentity map[string]*types.Issue
+	byMatchKey map[string]*types.Issue
+	// exactRef maps the ID of each local issue whose external_ref is the ref
+	// of an issue in this pull to that ref. The exact lookup gives the local
+	// issue to that remote issue, so no other remote issue falls back to it,
+	// whichever of the two the pull processes first: a pull never writes two
+	// remote issues to one local issue.
+	exactRef map[string]string
+}
+
+// newPullFallbackIndex indexes localIssues for a pull of extIssues. It runs
+// after the fetch, since LocalIdentityKey may use what the fetch showed.
+func (e *Engine) newPullFallbackIndex(localIssues []*types.Issue, extIssues []TrackerIssue) pullFallbackIndex {
+	identities, _ := e.Tracker.(IdentityKeyer)
+	idx := pullFallbackIndex{
+		identities: identities,
+		matchKey:   e.matchKey,
+		byIdentity: e.identityIndex(localIssues),
+		byMatchKey: make(map[string]*types.Issue, len(localIssues)),
+		exactRef:   e.exactPullRefs(localIssues, extIssues),
+	}
+	for _, localIssue := range localIssues {
+		localRef, ok := e.trackerRef(localIssue)
+		if !ok {
+			continue
+		}
+		if identities != nil && idx.byIdentity[identities.LocalIdentityKey(localIssue)] == localIssue {
+			continue
+		}
+		if key := e.matchKey(localRef); key != "" {
+			idx.byMatchKey[key] = localIssue
+		}
+	}
+	return idx
+}
+
+// trackerRef returns issue's trimmed external_ref and whether it is one of the
+// tracker's refs.
+func (e *Engine) trackerRef(issue *types.Issue) (string, bool) {
+	if issue == nil || issue.ExternalRef == nil {
+		return "", false
+	}
+	ref := strings.TrimSpace(*issue.ExternalRef)
+	return ref, ref != "" && e.Tracker.IsExternalRef(ref)
+}
+
+// identityIndex maps each identity key (IdentityKeyer) that exactly one of
+// issues holds to that issue. A key two issues hold maps to neither: a pull
+// never rewrites a recorded identity, so a bead an older pull relinked to
+// another issue keeps the identity of the issue it was created for, which
+// that issue's own bead holds too.
+func (e *Engine) identityIndex(issues []*types.Issue) map[string]*types.Issue {
+	byIdentity := make(map[string]*types.Issue)
+	identities, ok := e.Tracker.(IdentityKeyer)
+	if !ok {
+		return byIdentity
+	}
+	shared := make(map[string]bool)
+	for _, issue := range issues {
+		if _, ok := e.trackerRef(issue); !ok {
+			continue
+		}
+		key := identities.LocalIdentityKey(issue)
+		if key == "" || shared[key] {
+			continue
+		}
+		if _, held := byIdentity[key]; held {
+			delete(byIdentity, key)
+			shared[key] = true
+			continue
+		}
+		byIdentity[key] = issue
+	}
+	return byIdentity
+}
+
+// exactPullRefs maps the ID of each local issue whose external_ref is the ref
+// of one of extIssues to that ref: the exact lookup gives it to that issue.
+func (e *Engine) exactPullRefs(localIssues []*types.Issue, extIssues []TrackerIssue) map[string]string {
+	pulled := make(map[string]bool, len(extIssues))
+	for i := range extIssues {
+		pulled[e.Tracker.BuildExternalRef(&extIssues[i])] = true
+	}
+	exact := make(map[string]string)
+	for _, localIssue := range localIssues {
+		if localIssue == nil || localIssue.ExternalRef == nil || *localIssue.ExternalRef == "" {
+			continue
+		}
+		if pulled[*localIssue.ExternalRef] {
+			exact[localIssue.ID] = *localIssue.ExternalRef
+		}
+	}
+	return exact
+}
+
+// match returns the local issue that the pulled issue extIssue, whose external
+// ref is ref, falls back to, or nil. It skips a local issue whose external_ref
+// is another pulled issue's ref.
+func (idx pullFallbackIndex) match(extIssue *TrackerIssue, ref string) *types.Issue {
+	if idx.identities != nil {
+		if local := idx.byIdentity[idx.identities.RemoteIdentityKey(extIssue)]; idx.free(local, ref) {
+			return local
+		}
+	}
+	if local := idx.byMatchKey[idx.matchKey(ref)]; idx.free(local, ref) {
+		return local
+	}
+	return nil
+}
+
+// free reports whether local may be the fallback match of the remote issue
+// whose ref is ref: no other issue of this pull takes it by its exact ref.
+func (idx pullFallbackIndex) free(local *types.Issue, ref string) bool {
+	if local == nil {
+		return false
+	}
+	exact, ok := idx.exactRef[local.ID]
+	return !ok || exact == ref
 }
 
 func (e *Engine) fetchPrelinkedIssues(ctx context.Context, fetched []TrackerIssue, localIssues []*types.Issue, lastSync *time.Time) ([]TrackerIssue, map[string]bool, error) {
@@ -1370,13 +1497,13 @@ func (e *Engine) createDependencies(ctx context.Context, deps []DependencyInfo) 
 
 	errCount := 0
 	for _, dep := range deps {
-		fromIssue, err := resolveIssue(ctx, dep.FromExternalID)
+		fromIssue, err := resolveIssue(ctx, dep.FromExternalID, dep.FromIdentityKey)
 		if err != nil {
 			e.warn("Failed to resolve dependency source %s: %v", dep.FromExternalID, err)
 			errCount++
 			continue
 		}
-		toIssue, err := resolveIssue(ctx, dep.ToExternalID)
+		toIssue, err := resolveIssue(ctx, dep.ToExternalID, dep.ToIdentityKey)
 		if err != nil {
 			e.warn("Failed to resolve dependency target %s: %v", dep.ToExternalID, err)
 			errCount++
@@ -1417,12 +1544,12 @@ func (e *Engine) previewDependencies(ctx context.Context, deps []DependencyInfo,
 	wouldCreate := 0
 	pending := make(map[string]struct{}, len(deps))
 	for _, dep := range deps {
-		fromIssue, err := resolveIssue(ctx, dep.FromExternalID)
+		fromIssue, err := resolveIssue(ctx, dep.FromExternalID, dep.FromIdentityKey)
 		if err != nil {
 			e.warn("Failed to resolve dependency source %s: %v", dep.FromExternalID, err)
 			continue
 		}
-		toIssue, err := resolveIssue(ctx, dep.ToExternalID)
+		toIssue, err := resolveIssue(ctx, dep.ToExternalID, dep.ToIdentityKey)
 		if err != nil {
 			e.warn("Failed to resolve dependency target %s: %v", dep.ToExternalID, err)
 			continue
@@ -1457,11 +1584,19 @@ func pendingDependencyPreviewKey(fromID, toID, depType string) string {
 	}, "\x00")
 }
 
-func (e *Engine) dependencyIssueResolver(ctx context.Context, extraIssues []*types.Issue) (func(context.Context, string) (*types.Issue, error), error) {
+// dependencyIssueResolver returns a function that resolves a dependency
+// endpoint, named by its external ref and identity key, to a local issue: by
+// the exact ref, then by the identity key (IdentityKeyer), then by match key.
+// That is the order a pull matches issues in, so an endpoint resolves to the
+// issue the pull wrote for it.
+func (e *Engine) dependencyIssueResolver(ctx context.Context, extraIssues []*types.Issue) (func(ctx context.Context, externalID, identityKey string) (*types.Issue, error), error) {
 	issues, searchErr := e.Store.SearchIssues(ctx, "", types.IssueFilter{})
 	if searchErr != nil {
 		return nil, searchErr
 	}
+	// Dry-run issues carry the refs a pull would write, so the stored issues
+	// alone hold the identities a moved endpoint can still be found by.
+	byIdentity := e.identityIndex(issues)
 	issues = append(issues, extraIssues...)
 
 	byExternal := make(map[string]*types.Issue, len(issues)*2)
@@ -1479,7 +1614,7 @@ func (e *Engine) dependencyIssueResolver(ctx context.Context, extraIssues []*typ
 		if !e.Tracker.IsExternalRef(ref) {
 			continue
 		}
-		identifier := strings.TrimSpace(e.Tracker.ExtractIdentifier(ref))
+		identifier := strings.TrimSpace(e.matchKey(ref))
 		if identifier != "" {
 			if _, exists := byExternal[identifier]; !exists {
 				byExternal[identifier] = candidate
@@ -1491,7 +1626,7 @@ func (e *Engine) dependencyIssueResolver(ctx context.Context, extraIssues []*typ
 		}
 	}
 
-	return func(ctx context.Context, externalID string) (*types.Issue, error) {
+	return func(ctx context.Context, externalID, identityKey string) (*types.Issue, error) {
 		externalID = strings.TrimSpace(externalID)
 		if externalID == "" {
 			return nil, nil
@@ -1502,11 +1637,15 @@ func (e *Engine) dependencyIssueResolver(ctx context.Context, extraIssues []*typ
 		if issue := byExternal[strings.ToLower(externalID)]; issue != nil {
 			return issue, nil
 		}
+		if issue := byIdentity[identityKey]; issue != nil {
+			return issue, nil
+		}
 		// Tracker refs come in URL variants (e.g. Linear URLs with and
-		// without the title slug); match on the extracted identifier the
-		// same way the index above was built.
+		// without the title slug); match on the same key the index above
+		// was built with, which a MatchKeyer qualifies (GitLab IIDs repeat
+		// across projects).
 		if e.Tracker.IsExternalRef(externalID) {
-			if identifier := strings.TrimSpace(e.Tracker.ExtractIdentifier(externalID)); identifier != "" {
+			if identifier := strings.TrimSpace(e.matchKey(externalID)); identifier != "" {
 				if issue := byExternal[identifier]; issue != nil {
 					return issue, nil
 				}
@@ -1516,7 +1655,13 @@ func (e *Engine) dependencyIssueResolver(ctx context.Context, extraIssues []*typ
 			}
 		}
 		if strings.Contains(externalID, "://") {
-			return e.Store.GetIssueByExternalRef(ctx, externalID)
+			issue, err := e.Store.GetIssueByExternalRef(ctx, externalID)
+			if errors.Is(err, storage.ErrNotFound) {
+				// An endpoint no local issue names is one the pull did not
+				// import, which callers skip without an error.
+				return nil, nil
+			}
+			return issue, err
 		}
 		return nil, nil
 	}, nil

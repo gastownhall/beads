@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/steveyegge/beads/cmd/bd/doctor"
@@ -29,8 +30,9 @@ func runArtifactsCheck(path string, clean bool, yes bool) error {
 
 	if jsonOutput {
 		// GH#2438: When --clean is also set, perform cleanup before outputting JSON.
+		// Its progress goes to stderr, so stdout holds only the JSON document.
 		if clean && report.SafeDeleteCount > 0 {
-			if err := fix.ClassicArtifacts(path); err != nil {
+			if err := fix.ClassicArtifacts(path, os.Stderr); err != nil {
 				return HandleError("during cleanup: %v", err)
 			}
 			report, err = doctor.ScanForArtifacts(path)
@@ -123,7 +125,7 @@ func runArtifactsCheck(path string, clean bool, yes bool) error {
 		}
 	}
 
-	if err := fix.ClassicArtifacts(path); err != nil {
+	if err := fix.ClassicArtifacts(path, os.Stdout); err != nil {
 		return HandleError("during cleanup: %v", err)
 	}
 	return nil

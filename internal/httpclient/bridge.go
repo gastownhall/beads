@@ -5,6 +5,7 @@ package httpclient
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 
@@ -116,6 +117,17 @@ func (s *Store) readyBridgePage(ctx context.Context, op string, filter types.Wor
 	if err != nil {
 		return nil, false, s.inexpressible(op, err)
 	}
+	// A legacy filter spells unlimited as Limit <= 0, and the encoder therefore
+	// emits no `limit` for it — which the server reads as ITS default of 100,
+	// not as unlimited. That was a silent cap on every `bd ready --limit 0`
+	// (and every gc routed-pool queue read through it). The pager decides the
+	// bound instead: the client cap plus one, refused past the cap rather than
+	// truncated, and never the wire's own `limit=0` (unlimited_read.go).
+	readCap, err := boundUnlimitedPage(params, filter.Limit <= 0)
+	if err != nil {
+		return nil, false, err
+	}
+	readCap = tightenUnlimitedPage(params, readCap, filter.MaxRows)
 	var body apigen.ReadyPage
 	if err := s.dispatch(ctx, wire.Request{
 		Op:     wire.OpListReadyWork,
@@ -140,19 +152,22 @@ func (s *Store) readyBridgePage(ctx context.Context, op string, filter types.Wor
 			Source: filter.MaxRowsSource,
 		}
 	}
+	if err := checkUnlimitedPage(wire.OpListReadyWork, readCap, len(rows), body.HasMore); err != nil {
+		return nil, false, err
+	}
 	return rows, body.HasMore, nil
 }
 
 // GetIssue serves getIssue. It is the `bd list --parent` walk's
 // parent-existence probe and the molecule loader's read half.
 //
-// A MISS IS (nil, nil), NOT AN ERROR. That is the raw method's own contract and
-// the walk depends on it: getHierarchicalChildren reads a nil result as "parent
-// issue not found" and prints that, where an error would print the transport's
-// vocabulary instead.
+// A MISS IS storage.ErrNotFound (issueops.ErrNotFound), wrapped exactly as the local stores wrap it
+// (issueops.GetIssueInTx: "not found: issue <id>"), so a caller written against
+// the backend contract — `errors.Is(err, storage.ErrNotFound)` — reads an http
+// miss the same as a local one. The empty id is a miss too, as it is locally.
 func (s *Store) GetIssue(ctx context.Context, id string) (*types.Issue, error) {
 	if id == "" {
-		return nil, nil
+		return nil, issueNotFound(id)
 	}
 	path, err := wire.IssuePath(id)
 	if err != nil {
@@ -170,7 +185,7 @@ func (s *Store) GetIssue(ctx context.Context, id string) (*types.Issue, error) {
 		IssueID: id,
 	}, &details)
 	if errors.Is(err, issueops.ErrNotFound) {
-		return nil, nil
+		return nil, issueNotFound(id)
 	}
 	if err != nil {
 		return nil, err
@@ -194,4 +209,9 @@ func (s *Store) GetIssue(ctx context.Context, id string) (*types.Issue, error) {
 	}
 	issue.RowVersion = version
 	return &issue, nil
+}
+
+// issueNotFound is the raw GetIssue miss, spelled as the local stores spell it.
+func issueNotFound(id string) error {
+	return fmt.Errorf("%w: issue %s", issueops.ErrNotFound, id)
 }

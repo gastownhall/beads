@@ -46,7 +46,7 @@ endif
 .PHONY: all build doctor-build test test-icu-path test-full-cgo test-regression test-upgrade test-cross-version test-migration corpus-regen githooks-regen bench bench-quick clean clean-test-tmp install install-force help check-up-to-date fmt fmt-check check-testing-short
 .PHONY: lint lint-changed vet
 .PHONY: check check-go test-go check-docs-go
-.PHONY: ci-pr-core ci-pr-lint ci-complexity ci-complexity-diff ci-complexity-check ci-package-mcp ci-package-npm
+.PHONY: ci-pr-core ci-pr-lint ci-complexity ci-complexity-diff ci-complexity-check ci-package-mcp ci-package-npm nogo-ownership
 .PHONY: api-gen api-check
 .PHONY: bazel-sync bazel-sync-check
 
@@ -236,6 +236,16 @@ ci-pr-core:
 # --config=nogo; nothing is linked).
 ci-pr-lint:
 	@./scripts/ci/pr-lint.sh
+
+# nogo-ownership is a dynamic, advisory cross-check (not part of the required
+# //scripts static suite, which cannot shell out to Bazel): it asks real
+# `bazel aquery` whether the nogo owner lane for each configuration group
+# (today: race, bazel-test/--config=ci) really does validate every file a
+# non-owner lane (embedded, doltserver, doltserver-proxied, dolt-race, which
+# pass --norun_validations) compiles. See tools/bazel/nogo_ownership.py and
+# scripts/nogo_lint_policy_test.go's nogoConfigurations table.
+nogo-ownership:
+	@python3 tools/bazel/nogo_ownership.py
 
 # The CI lint gate: native, plus //tools/bazel:release_cross for windows/amd64
 # and darwin/arm64 (BD_LINT_TARGETS selects; scripts/pr-lint).

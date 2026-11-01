@@ -31,8 +31,8 @@
 // # Where this plumbing deliberately differs from the DoltStorage one
 //
 // Every per-verb firing rule below is matched 1:1 against the decorator that
-// implements it (each override cites its twin). These five are the exceptions,
-// and they are listed here rather than argued in five places:
+// implements it (each override cites its twin). These four are the exceptions,
+// and they are listed here rather than argued in four places:
 //
 //  1. LABEL MULTIPLICITY ON CREATE. The DoltStorage chain replays a legacy
 //     sequence for a create that carries labels: on_create with the labels
@@ -61,16 +61,7 @@
 //     that writes nothing; the DoltStorage plumbing passes the precondition
 //     into the close. See specWrites.
 //
-//  5. THE PROMOTION COMMENT. `bd promote` records an audit comment on the
-//     promoted issue, and this plumbing's one comment verb fires on_update for
-//     it. The DoltStorage route writes that comment through the legacy
-//     AddComment, which the decorator wraps only INSIDE a transaction
-//     (hookTrackingTransaction.AddComment) and not at the store level, where
-//     promote calls it — so an embedded promote fires nothing. One verb cannot
-//     tell which caller it is serving, and "a comment landed" is the on_update
-//     this vocabulary has.
-//
-// A sixth is not a divergence but is worth stating: a unit of work whose commit
+// A fifth is not a divergence but is worth stating: a unit of work whose commit
 // message is empty is ROLLED BACK by RunTxResult, and a rolled-back attempt
 // fires nothing — so a write that lands nothing reports nothing, on both
 // plumbings.
@@ -242,6 +233,10 @@ func (p *notifyingProvider) BatchGetter() (publicops.BatchGetter, error) {
 	return NewBatchGetter(p)
 }
 
+func (p *notifyingProvider) MoleculeStepper() (publicops.MoleculeStepper, error) {
+	return NewMoleculeStepper(p)
+}
+
 func (p *notifyingProvider) Counter() (publicops.Counter, error) { return NewCounter(p) }
 
 func (p *notifyingProvider) ReadyCounter() (publicops.ReadyCounter, error) {
@@ -311,6 +306,20 @@ func (p *notifyingProvider) Releaser() (publicops.Releaser, error) { return NewR
 
 func (p *notifyingProvider) LeaseReclaimer() (publicops.LeaseReclaimer, error) {
 	return NewLeaseReclaimer(p)
+}
+
+// Heartbeater builds the lease refresh over THIS provider. recordingIssueUC
+// declares RenewLease: a refresh records nothing (it writes only the
+// ephemeral lease row), and a re-arm records an update, the hook
+// storage.HookFiringStore.Heartbeater fires for it on the DoltStorage chain.
+func (p *notifyingProvider) Heartbeater() (publicops.Heartbeater, error) {
+	return NewHeartbeater(p)
+}
+
+// BlockedLister builds the blocked listing over THIS provider. It is a read:
+// nothing is recorded and no hook fires.
+func (p *notifyingProvider) BlockedLister() (publicops.BlockedLister, error) {
+	return NewBlockedLister(p)
 }
 
 func (p *notifyingProvider) Memories() (memoryops.Memories, error) { return NewMemories(p) }
@@ -409,6 +418,7 @@ var (
 	_ TreeWalkerSource          = (*notifyingProvider)(nil)
 	_ GraphCounterSource        = (*notifyingProvider)(nil)
 	_ BatchGetterSource         = (*notifyingProvider)(nil)
+	_ MoleculeStepperSource     = (*notifyingProvider)(nil)
 	_ CounterSource             = (*notifyingProvider)(nil)
 	_ ReadyCounterSource        = (*notifyingProvider)(nil)
 	_ ReadyClaimerSource        = (*notifyingProvider)(nil)
@@ -428,6 +438,8 @@ var (
 	_ VersionReconcilerSource   = (*notifyingProvider)(nil)
 	_ MemoriesSource            = (*notifyingProvider)(nil)
 	_ LeaseReclaimerSource      = (*notifyingProvider)(nil)
+	_ HeartbeaterSource         = (*notifyingProvider)(nil)
+	_ BlockedListerSource       = (*notifyingProvider)(nil)
 	_ EventsJournalCursorSource = (*notifyingProvider)(nil)
 )
 
@@ -480,6 +492,22 @@ func (u *notifyingUOW) CommentUseCase() domain.CommentUseCase {
 // committed mutation always succeeds.
 func (u *notifyingUOW) Commit(ctx context.Context, message string) error {
 	if err := u.UnitOfWork.Commit(ctx, message); err != nil {
+		return err
+	}
+	entries := u.rec.drain()
+	if u.sinks.Hook == nil {
+		return nil
+	}
+	for _, entry := range entries {
+		u.sinks.Hook.Run(entry.event, entry.issue)
+	}
+	return nil
+}
+
+// CommitScoped is Commit for a scoped version commit (see ScopedCommitter):
+// commit through the chain beneath, then fire the buffered hooks.
+func (u *notifyingUOW) CommitScoped(ctx context.Context, tables []string, message string) error {
+	if err := commitScoped(ctx, u.UnitOfWork, tables, message); err != nil {
 		return err
 	}
 	entries := u.rec.drain()
@@ -1011,6 +1039,20 @@ func (u *recordingIssueUC) ReleaseIssue(ctx context.Context, req publicops.Relea
 	}
 	u.rec.record(opUpdate, u.snap.anyPlane(ctx, req.IssueID))
 	return result, wrote, nil
+}
+
+// RenewLease records an update for a heartbeat that re-armed a lease (a
+// mutation: row_lock, updated_at, event, journal, version) and nothing for a
+// refresh, which writes only the ephemeral lease row. It is DECLARED for
+// ReleaseIssue's reason: an inherited accessor would compile and record
+// nothing, silently dropping the re-arm's hook.
+func (u *recordingIssueUC) RenewLease(ctx context.Context, request publicops.HeartbeatRequest) (publicops.HeartbeatResult, error) {
+	result, err := u.IssueUseCase.RenewLease(ctx, request)
+	if err != nil || !result.Rearmed {
+		return result, err
+	}
+	u.rec.record(opUpdate, u.snap.issue(ctx, result.IssueID))
+	return result, nil
 }
 
 // Reclaim records an update for every lease the sweep reverted.

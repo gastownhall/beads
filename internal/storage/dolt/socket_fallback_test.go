@@ -69,6 +69,22 @@ func TestResolveSocketTransport_SocketDownTCPUp_FallsBack(t *testing.T) {
 	}
 }
 
+// An IPv6 host given in either spelling probes the same [::1]:port for the
+// TCP fallback. ResolveSocketTransport is exported and `bd serve` calls it, so
+// it must not depend on the caller having stripped the brackets first.
+func TestResolveSocketTransport_SocketDownTCPUp_IPv6HostEitherSpelling(t *testing.T) {
+	for _, host := range []string{"::1", "[::1]"} {
+		t.Run(host, func(t *testing.T) {
+			withStubbedDialProbe(t, map[string]bool{
+				"tcp|[::1]:52756": true,
+			})
+			if got := ResolveSocketTransport("/tmp/mysql.sock", host, 52756, 100*time.Millisecond); got != "" {
+				t.Errorf("ResolveSocketTransport(host %q) = %q, want the TCP fallback (empty socket)", host, got)
+			}
+		})
+	}
+}
+
 // Socket down AND TCP down → keep the socket so the normal error path reports
 // the outage with its socket-specific hint (no silent transport swap).
 func TestResolveSocketTransport_BothDown_KeepsSocket(t *testing.T) {

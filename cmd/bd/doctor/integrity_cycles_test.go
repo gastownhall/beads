@@ -87,6 +87,19 @@ func TestDependencyCycleNodes(t *testing.T) {
 			},
 			want: nil,
 		},
+		{
+			// #3445: the same edge can reach the adjacency map twice (a
+			// both-table duplicate edge feeding LoadDependencyEdges), and a
+			// repeated successor must stay what one successor is: a path,
+			// never a cycle. This pins the 1.0.2 phantom-cycle report
+			// ("bd doctor reports a cycle, bd dep cycles reports none") out.
+			name: "duplicate successors are not a cycle",
+			edges: map[string][]string{
+				"a": {"b", "b"},
+				"b": {"c"},
+			},
+			want: nil,
+		},
 	}
 
 	for _, tt := range tests {

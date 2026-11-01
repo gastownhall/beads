@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/httpapi/apigen"
 	"github.com/steveyegge/beads/internal/storage"
@@ -144,10 +145,11 @@ func TestApplyBatchForwardsEveryLevelOfTheDocumentedBody(t *testing.T) {
 	if create.Issue.Priority != 1 {
 		t.Errorf("create.priority = %d, want 1", create.Issue.Priority)
 	}
-	// created_by is stamped from the trimmed actor, createIssue's rule: the
-	// role copies the issue's and never stamps one itself.
-	if create.Issue.CreatedBy != "alice" {
-		t.Errorf("create.created_by = %q, want the actor %q", create.Issue.CreatedBy, "alice")
+	// created_by is not the handler's to stamp: the item reaches the role
+	// without one, and the role defaults it to the request's actor
+	// (backend/conformance's batch-apply contract pins that half).
+	if create.Issue.CreatedBy != "" {
+		t.Errorf("create.created_by = %q, want it left to the role", create.Issue.CreatedBy)
 	}
 	if create.Issue.EstimatedMinutes == nil || *create.Issue.EstimatedMinutes != 30 {
 		t.Errorf("create.estimated_minutes = %v, want 30", create.Issue.EstimatedMinutes)
@@ -881,6 +883,17 @@ func TestApplyBatchMapsTheRolesTypedRefusalsOntoTheDocumentedCodes(t *testing.T)
 			err:        itemErr(0, issueops.ItemCreate, "root", "", storage.ErrAlreadyExists),
 			wantStatus: http.StatusConflict,
 			wantCode:   "already_exists",
+			wantParam:  "items[0].create.id",
+		},
+		{
+			// A 410, not the occupied id's 409: the id was retired by a
+			// retaining sweep, so there is no row to read and adopt, and the
+			// identical request can never succeed.
+			name: "a retired explicit id",
+			err: itemErr(0, issueops.ItemCreate, "root", "",
+				&issueops.IdempotencyExpiredError{ID: "bd-op-1", ClosedAt: time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)}),
+			wantStatus: http.StatusGone,
+			wantCode:   "idempotency_expired",
 			wantParam:  "items[0].create.id",
 		},
 		{

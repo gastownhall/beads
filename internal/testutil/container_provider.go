@@ -39,9 +39,11 @@ func NewContainerProvider() (*ContainerProvider, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), serverStartTimeout)
 	defer cancel()
 
+	reapStaleDoltContainers()
 	ctr, err := dolt.Run(ctx, DoltDockerImage,
 		dolt.WithDatabase("beads_test"),
 		testcontainers.WithEnv(map[string]string{"DOLT_ROOT_HOST": "%"}),
+		ownerLabels(),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("starting Dolt container: %w", err)

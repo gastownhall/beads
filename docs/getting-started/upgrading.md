@@ -204,7 +204,9 @@ upgrade prints nothing at all. Silence there is not a stall either.
 Migration 0059 can mark issues as blocked when they are not, which drops them
 out of `bd ready` without any error
 ([#7037](https://github.com/gastownhall/beads/issues/7037)). It happens on a
-Dolt server older than 2.4.0, and the embedded engine is likely affected too.
+Dolt server older than 2.4.0, and the embedded engine of `bd` releases that
+link Dolt older than 2.4.0 (every release through v1.3.x) is likely affected
+too.
 Once a database has migrated, run this once for that database on every clone:
 
 ```bash
@@ -284,7 +286,9 @@ There is one exception, and the gate names it when it applies: if the stop is
 the *data-behind* one — this clone is level with the remote on schema but is
 missing commits it has not pulled — then `bd dolt pull` is the remedy and is
 allowed through, because migrating before that pull is what wedges the clone.
-See [Clone behind the remote](#clone-behind-the-remote). Every other
+A proxied-server workspace refuses `bd dolt pull` outright, so there the pull
+runs on the server host instead. See
+[Clone behind the remote](#clone-behind-the-remote). Every other
 pending-migration refusal still blocks the pull, so the ordering rule above is
 what to plan for.
 
@@ -384,6 +388,8 @@ It runs in both server and embedded modes.
 
 This is the one pending-migration stop whose remedy is a `bd dolt pull`, and
 the one the gate links here rather than to the migrate-or-adopt recipe above.
+A proxied-server workspace refuses that pull, so it runs on the server host
+instead; the last part of this section covers that case.
 
 It fires when the clone is **level with the remote on schema but behind it in
 data** — the remote has commits this clone has not pulled. On schema alone the
@@ -429,6 +435,25 @@ configured — the behind-ness is read from the remote-tracking ref — and the
 bare `bd migrate schema` consent applies only to a shared database with *no*
 remote. It is safe at this point and only at this point: the pull has already
 landed the commits the clone was missing.
+
+**In proxied-server mode** the database is shared too, so the same two steps
+apply, but they run from two places. The workspace refuses `bd dolt pull`
+(`proxy.dolt_pull.unsupported`) and `bd conflicts`, so the pull, and any
+conflict resolution it needs, runs where the database lives: on the server
+host, from a workspace with direct database access. The consent step can then
+be run from the proxied workspace, but only once that pull has landed:
+
+```bash
+bd dolt pull                     # on the server host, with direct database access
+bd migrate schema --force        # then, from the proxied workspace
+```
+
+Nothing in the proxied workspace enforces that order. It refuses the bare
+`bd migrate` verb but not `bd migrate schema --force`, and
+`BD_ALLOW_REMOTE_MIGRATE=1` grants the same consent to any command. Both are
+honored before this stop is reached, so the stop never sees them: run either
+one before the pull and it migrates the database while it is still behind.
+Do not reach for either to get past the stop.
 
 ### Shared servers
 
@@ -490,7 +515,7 @@ there: do step 2 from a client that is already set up, or join and migrate in
 one step with `BD_ALLOW_REMOTE_MIGRATE=1 bd init …`.
 
 The same rules apply in **proxied-server mode**, which is a shared server
-reached through a local proxy. Two differences worth knowing:
+reached through a local proxy. Three differences worth knowing:
 
 - read commands print a warning and keep serving the current schema, rather
   than the read simply not touching it;
@@ -498,7 +523,10 @@ reached through a local proxy. Two differences worth knowing:
   because a daemon has no operator to consent for it. Reconcile the schema
   first with step 2, then start the daemon — or, for an unattended service,
   put `BD_ALLOW_REMOTE_MIGRATE=1` in its environment as an explicit, auditable
-  standing consent.
+  standing consent;
+- the data-behind stop's remedy, `bd dolt pull`, cannot be run from the
+  proxied workspace: run it on the server host first, then consent from the
+  proxied workspace (see [Clone behind the remote](#clone-behind-the-remote)).
 
 ## Cross-era Upgrades
 

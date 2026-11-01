@@ -10,6 +10,14 @@ import (
 
 //nolint:gosec // G201: table names are hardcoded constants
 func PromoteFromEphemeralInTx(ctx context.Context, tx DBTX, id string, actor string) error {
+	// Promotion re-inserts the wisp into the issues plane, so it takes the
+	// id's create coordination cell before it reads the wisp, for the reason
+	// moveIssuePersistenceInTx gives: a retaining sweep of the same wisp
+	// either commits first, and the read below finds no wisp, or conflicts
+	// and retries.
+	if err := CoordinateIDCreatesInTx(ctx, tx, []string{id}); err != nil {
+		return err
+	}
 	if !IsActiveWispInTx(ctx, tx, id) {
 		return fmt.Errorf("wisp %s not found", id)
 	}
@@ -53,8 +61,18 @@ func PromoteFromEphemeralInTx(ctx context.Context, tx DBTX, id string, actor str
 	if err := PrepareIssueForInsert(issue, types.CustomStatusNames(customStatuses), customTypes); err != nil {
 		return fmt.Errorf("promote wisp to issues: %w", err)
 	}
-	if _, _, err := InsertIssueIfNew(ctx, tx, "issues", issue, storage.BatchCreateOptions{}); err != nil {
+	isNew, _, err := InsertIssueIfNew(ctx, tx, "issues", issue, storage.BatchCreateOptions{})
+	if err != nil {
 		return fmt.Errorf("promote wisp to issues: %w", err)
+	}
+	// Restore the participation a demotion recorded on the wisps row, while
+	// that row still exists. Only an issues row this promotion inserted takes
+	// it: an existing one (dual presence, below) keeps its own.
+	restored := false
+	if isNew {
+		if restored, err = carryParticipationInTx(ctx, tx, id, false); err != nil {
+			return err
+		}
 	}
 
 	if _, err := tx.ExecContext(ctx, `
@@ -134,9 +152,23 @@ func PromoteFromEphemeralInTx(ctx context.Context, tx DBTX, id string, actor str
 	// maintenance has settled — and mint its first version: the promoted row
 	// is new durable state on the issues plane (a wisp is never versioned, so
 	// nothing precedes it), minted once after its labels, dependencies and
-	// comments have been copied across.
+	// comments have been copied across. That makes the mint create-shaped
+	// (design §16.2b): the issues row inserted above has no
+	// participation_generation, since a row that began as a wisp never
+	// declares one, and the update-shaped entry would read that NULL as legacy
+	// and skip this mint and every later one. Two exceptions mint
+	// update-shaped. An id the issues plane already held (GH#4455 records such
+	// dual presence): GetIssueInTx read that row, the upsert resolved to it,
+	// and it keeps whatever participation it had, as finishCreateIssueInTx's
+	// mint does for a create that resolved to an existing row. And a row a
+	// demotion took off the issues plane while history was on: its
+	// participation was restored above, so a legacy row stays legacy. Stamping
+	// either would promote a legacy record (R2.3).
 	if err := RecordEventInTx(ctx, tx, EventUpdate, id, actor); err != nil {
 		return err
+	}
+	if isNew && !restored {
+		return RecordVersionForCreateInTx(ctx, tx, id, actor)
 	}
 	return RecordVersionInTx(ctx, tx, id, actor)
 }

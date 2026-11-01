@@ -1,8 +1,8 @@
 package main
 
 import (
+	"context"
 	"fmt"
-	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -10,6 +10,7 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
+	"github.com/steveyegge/beads/issueops"
 )
 
 var (
@@ -20,6 +21,10 @@ var molShowCmd = &cobra.Command{
 	Use:   "show <molecule-id>",
 	Short: "Show molecule details",
 	Long: `Show molecule structure and details.
+
+A molecule's steps are the issues linked to its root by parent-child
+dependencies (bd create --parent, bd mol pour); an id that merely looks
+hierarchical, like bd-xyz.4, does not make an issue a step.
 
 The --parallel flag highlights parallelizable steps:
   - Steps with no blocking dependencies can run in parallel
@@ -54,16 +59,33 @@ Example:
 			return HandleErrorRespectJSON("molecule '%s' not found", args[0])
 		}
 
-		subgraph, err := loadTemplateSubgraph(ctx, store, moleculeID)
+		roles, err := directMoleculeRoles(store)
 		if err != nil {
 			return HandleErrorRespectJSON("loading molecule: %v", err)
 		}
-
-		if molShowParallel {
-			return showMoleculeWithParallel(subgraph)
-		}
-		return showMolecule(subgraph)
+		return runMolShow(ctx, roles, moleculeID)
 	},
+}
+
+// runMolShow loads the molecule through the library's one molecule read
+// (issueops.LoadMolecule, over the route's roles) and renders it. Membership
+// is the parent-child edge on every route, as for mol current, mol progress
+// and ready --mol.
+func runMolShow(ctx context.Context, roles moleculeRoles, moleculeID string) error {
+	graph, err := issueops.LoadMolecule(ctx, roles.molecule, moleculeID)
+	if err != nil {
+		return HandleErrorRespectJSON("loading molecule: %v", err)
+	}
+	subgraph := &MoleculeSubgraph{
+		Root:         graph.Root,
+		Issues:       graph.Issues,
+		Dependencies: graph.Dependencies,
+		IssueMap:     graph.IssueMap,
+	}
+	if molShowParallel {
+		return showMoleculeWithParallel(subgraph)
+	}
+	return showMolecule(subgraph)
 }
 
 func showMolecule(subgraph *MoleculeSubgraph) error {
@@ -150,272 +172,22 @@ func formatBondType(bondType string) string {
 	}
 }
 
-// ParallelInfo holds parallel analysis information for a step
-type ParallelInfo struct {
-	StepID        string   `json:"step_id"`
-	Status        string   `json:"status"`
-	IsReady       bool     `json:"is_ready"`       // Can start now (no blocking deps)
-	ParallelGroup string   `json:"parallel_group"` // Group ID (steps with same group can parallelize)
-	BlockedBy     []string `json:"blocked_by"`     // IDs of open steps blocking this one
-	Blocks        []string `json:"blocks"`         // IDs of steps this one blocks
-	CanParallel   []string `json:"can_parallel"`   // IDs of steps that can run in parallel with this
-}
+// ParallelInfo is a step's readiness and parallelism, as the library's
+// molecule analysis answers it.
+type ParallelInfo = issueops.MoleculeStepInfo
 
-// ParallelAnalysis holds the complete parallel analysis for a molecule
-type ParallelAnalysis struct {
-	MoleculeID     string                   `json:"molecule_id"`
-	TotalSteps     int                      `json:"total_steps"`
-	ReadySteps     int                      `json:"ready_steps"`
-	ParallelGroups map[string][]string      `json:"parallel_groups"` // group ID -> step IDs
-	Steps          map[string]*ParallelInfo `json:"steps"`
-}
+// ParallelAnalysis is the readiness and parallelism of a whole molecule.
+type ParallelAnalysis = issueops.MoleculeAnalysis
 
-// analyzeMoleculeParallel performs parallel detection on a molecule subgraph.
-// Returns analysis of which steps can run in parallel.
+// analyzeMoleculeParallel runs the library's molecule analysis
+// (issueops.AnalyzeMolecule) over a loaded template subgraph.
 func analyzeMoleculeParallel(subgraph *MoleculeSubgraph) *ParallelAnalysis {
-	analysis := &ParallelAnalysis{
-		MoleculeID:     subgraph.Root.ID,
-		TotalSteps:     len(subgraph.Issues),
-		ParallelGroups: make(map[string][]string),
-		Steps:          make(map[string]*ParallelInfo),
-	}
-
-	// Build dependency maps
-	// blockedBy[id] = set of issue IDs that block this issue
-	// blocks[id] = set of issue IDs that this issue blocks
-	blockedBy := make(map[string]map[string]bool)
-	blocks := make(map[string]map[string]bool)
-	parentChildren := make(map[string][]string)
-
-	for _, issue := range subgraph.Issues {
-		blockedBy[issue.ID] = make(map[string]bool)
-		blocks[issue.ID] = make(map[string]bool)
-	}
-
-	// Build child index for waits-for gate evaluation.
-	for _, dep := range subgraph.Dependencies {
-		if dep.Type == types.DepParentChild {
-			parentChildren[dep.DependsOnID] = append(parentChildren[dep.DependsOnID], dep.IssueID)
-		}
-	}
-
-	// Process dependencies to find blocking relationships
-	for _, dep := range subgraph.Dependencies {
-		switch dep.Type {
-		case types.DepBlocks, types.DepConditionalBlocks:
-			// dep.IssueID depends on (is blocked by) dep.DependsOnID
-			if _, ok := blockedBy[dep.IssueID]; ok {
-				blockedBy[dep.IssueID][dep.DependsOnID] = true
-			}
-			if _, ok := blocks[dep.DependsOnID]; ok {
-				blocks[dep.DependsOnID][dep.IssueID] = true
-			}
-		case types.DepWaitsFor:
-			children := parentChildren[dep.DependsOnID]
-			if len(children) == 0 {
-				continue
-			}
-
-			gate := types.ParseWaitsForGateMetadata(dep.Metadata)
-			if gate == types.WaitsForAnyChildren {
-				hasClosedChild := false
-				for _, childID := range children {
-					child := subgraph.IssueMap[childID]
-					if child != nil && child.Status == types.StatusClosed {
-						hasClosedChild = true
-						break
-					}
-				}
-				if hasClosedChild {
-					continue
-				}
-			}
-
-			// For all-children (and unresolved any-children), each open child blocks the gate.
-			for _, childID := range children {
-				child := subgraph.IssueMap[childID]
-				if child == nil || child.Status == types.StatusClosed {
-					continue
-				}
-
-				if _, ok := blockedBy[dep.IssueID]; ok {
-					blockedBy[dep.IssueID][childID] = true
-				}
-				if _, ok := blocks[childID]; ok {
-					blocks[childID][dep.IssueID] = true
-				}
-			}
-		}
-	}
-
-	// Identify which steps are ready (no open blockers)
-	readySteps := make(map[string]bool)
-	for _, issue := range subgraph.Issues {
-		info := &ParallelInfo{
-			StepID:    issue.ID,
-			Status:    string(issue.Status),
-			BlockedBy: []string{},
-			Blocks:    []string{},
-		}
-
-		// Check what blocks this step
-		for blockerID := range blockedBy[issue.ID] {
-			blocker := subgraph.IssueMap[blockerID]
-			if blocker != nil && blocker.Status != types.StatusClosed {
-				info.BlockedBy = append(info.BlockedBy, blockerID)
-			}
-		}
-
-		// Check what this step blocks
-		for blockedID := range blocks[issue.ID] {
-			info.Blocks = append(info.Blocks, blockedID)
-		}
-
-		// A step is ready if it's open/in_progress and has no open blockers
-		info.IsReady = (issue.Status == types.StatusOpen || issue.Status == types.StatusInProgress) &&
-			len(info.BlockedBy) == 0
-
-		if info.IsReady {
-			readySteps[issue.ID] = true
-			analysis.ReadySteps++
-		}
-
-		// Sort for consistent output
-		sort.Strings(info.BlockedBy)
-		sort.Strings(info.Blocks)
-
-		analysis.Steps[issue.ID] = info
-	}
-
-	// Identify parallel groups: steps that can run concurrently
-	// Two steps can parallelize if:
-	// 1. Both are ready (or will be ready at same time)
-	// 2. Neither blocks the other (directly or transitively)
-	// 3. They share the same blocking depth (distance from root)
-
-	// Calculate blocking depth for each step
-	depths := calculateBlockingDepths(subgraph, blockedBy)
-
-	// Group steps by depth - steps at same depth can potentially parallelize
-	depthGroups := make(map[int][]string)
-	for id, depth := range depths {
-		depthGroups[depth] = append(depthGroups[depth], id)
-	}
-
-	// For each depth level, identify parallel groups
-	groupCounter := 0
-	for depth := 0; depth <= len(subgraph.Issues); depth++ {
-		stepsAtDepth := depthGroups[depth]
-		if len(stepsAtDepth) == 0 {
-			continue
-		}
-
-		// Group steps that can parallelize (no blocking between them)
-		// Use union-find approach: start with each step in its own group
-		parent := make(map[string]string)
-		for _, id := range stepsAtDepth {
-			parent[id] = id
-		}
-
-		find := func(x string) string {
-			for parent[x] != x {
-				parent[x] = parent[parent[x]]
-				x = parent[x]
-			}
-			return x
-		}
-
-		union := func(x, y string) {
-			px, py := find(x), find(y)
-			if px != py {
-				parent[px] = py
-			}
-		}
-
-		// Merge steps that CAN parallelize (no mutual blocking)
-		for i, id1 := range stepsAtDepth {
-			for j := i + 1; j < len(stepsAtDepth); j++ {
-				id2 := stepsAtDepth[j]
-				// Can parallelize if neither blocks the other
-				if !blocks[id1][id2] && !blocks[id2][id1] &&
-					!blockedBy[id1][id2] && !blockedBy[id2][id1] {
-					union(id1, id2)
-				}
-			}
-		}
-
-		// Collect groups
-		groups := make(map[string][]string)
-		for _, id := range stepsAtDepth {
-			root := find(id)
-			groups[root] = append(groups[root], id)
-		}
-
-		// Assign group names and record can_parallel relationships
-		for _, members := range groups {
-			if len(members) > 1 {
-				groupCounter++
-				groupName := fmt.Sprintf("group-%d", groupCounter)
-				analysis.ParallelGroups[groupName] = members
-
-				// Update each step's parallel info
-				for _, id := range members {
-					info := analysis.Steps[id]
-					info.ParallelGroup = groupName
-					// Record all other members as can_parallel
-					for _, otherId := range members {
-						if otherId != id {
-							info.CanParallel = append(info.CanParallel, otherId)
-						}
-					}
-					sort.Strings(info.CanParallel)
-				}
-			}
-		}
-	}
-
-	return analysis
-}
-
-// calculateBlockingDepths calculates the "blocking depth" of each step.
-// Depth 0 = no blockers, Depth 1 = blocked by depth-0 steps, etc.
-func calculateBlockingDepths(subgraph *MoleculeSubgraph, blockedBy map[string]map[string]bool) map[string]int {
-	depths := make(map[string]int)
-	visited := make(map[string]bool)
-
-	var calculateDepth func(id string) int
-	calculateDepth = func(id string) int {
-		if d, ok := depths[id]; ok {
-			return d
-		}
-		if visited[id] {
-			// Cycle detected, return 0 to break
-			return 0
-		}
-		visited[id] = true
-
-		maxBlockerDepth := -1
-		for blockerID := range blockedBy[id] {
-			// Only count open blockers
-			blocker := subgraph.IssueMap[blockerID]
-			if blocker != nil && blocker.Status != types.StatusClosed {
-				blockerDepth := calculateDepth(blockerID)
-				if blockerDepth > maxBlockerDepth {
-					maxBlockerDepth = blockerDepth
-				}
-			}
-		}
-
-		depth := maxBlockerDepth + 1
-		depths[id] = depth
-		return depth
-	}
-
-	for _, issue := range subgraph.Issues {
-		calculateDepth(issue.ID)
-	}
-
-	return depths
+	return issueops.AnalyzeMolecule(&issueops.MoleculeGraph{
+		Root:         subgraph.Root,
+		Issues:       subgraph.Issues,
+		Dependencies: subgraph.Dependencies,
+		IssueMap:     subgraph.IssueMap,
+	})
 }
 
 func showMoleculeWithParallel(subgraph *MoleculeSubgraph) error {

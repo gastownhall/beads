@@ -181,6 +181,11 @@ func TestDialOptionsForFileBypassesEnvEntirely(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DialOptionsForFile: %v", err)
 	}
+	// u names the server as "localhost" (so SNI is sent) even though
+	// startServer actually bound 127.0.0.1; without pinning the dial to
+	// tcp4, the default dual-stack dialer can race an unrelated ::1 listener
+	// and flake. See forceIPv4Loopback's doc for the full mechanism.
+	forceIPv4Loopback(t, opts.HTTPClient.Transport)
 	// Target.CAFile is deliberately left empty, mirroring cmd/bd's connect
 	// verification call.
 	target := Target{BaseURL: u}

@@ -62,12 +62,29 @@ func TestInitSchemaPreviewMissingDatabaseFailsClosed(t *testing.T) {
 }
 
 // TestApplyProviderOptions keeps the option plumbing honest: the ordinary
-// callers pass nothing and must stay on the mutating open.
+// callers pass nothing and must stay on the mutating open, and only an open
+// that asks for it is treated as proxied-server mode.
 func TestApplyProviderOptions(t *testing.T) {
-	if got := applyProviderOptions(nil); got.preview {
+	got := applyProviderOptions(nil)
+	if got.preview {
 		t.Fatal("applyProviderOptions(nil).preview = true, want false")
+	}
+	if got.proxiedServerMode {
+		t.Fatal("applyProviderOptions(nil).proxiedServerMode = true, want false")
 	}
 	if got := applyProviderOptions([]ProviderOption{WithPreview()}); !got.preview {
 		t.Fatal("applyProviderOptions(WithPreview()).preview = false, want true")
+	}
+	// The proxied marker changes what a refusal says, not how the open
+	// behaves, so it must not switch on either open posture as well.
+	if got := applyProviderOptions([]ProviderOption{WithProxiedServerMode()}); !got.proxiedServerMode || got.preview || got.readOnly {
+		t.Fatalf("applyProviderOptions(WithProxiedServerMode()) = %+v, want only proxiedServerMode set", got)
+	}
+	// Rotation is off unless the caller says it owns the server log.
+	if applyProviderOptions(nil).rotateServerLog {
+		t.Fatal("applyProviderOptions(nil).rotateServerLog = true, want false")
+	}
+	if got := applyProviderOptions([]ProviderOption{WithServerLogRotation()}); got != (providerOptions{rotateServerLog: true}) {
+		t.Fatalf("applyProviderOptions(WithServerLogRotation()) = %+v, want only rotateServerLog set", got)
 	}
 }

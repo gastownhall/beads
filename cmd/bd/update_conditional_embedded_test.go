@@ -32,7 +32,7 @@ func bdUpdateFailCode(t *testing.T, bd, dir string, args ...string) (string, int
 	return string(out), ee.ExitCode()
 }
 
-// TestUpdateIfGuardsCLI drives the bd-wsqvw conditional-update guards
+// TestEmbeddedUpdateIfGuardsCLI drives the bd-wsqvw conditional-update guards
 // (`bd update --if-assignee/--if-status`) end-to-end against the embedded Dolt
 // backend. The guarded update must be a compare-and-set, not a
 // read-then-clobber: a stale guard exits nonzero naming the actual state and
@@ -40,7 +40,7 @@ func bdUpdateFailCode(t *testing.T, bd, dir string, args ...string) (string, int
 // "expected unassigned" guard, not "no guard". Covers the two wheelhouse
 // transitions no other verb expresses: reassign X→Y (park) and claim-on-behalf
 // with a status guard (restore).
-func TestUpdateIfGuardsCLI(t *testing.T) {
+func TestEmbeddedUpdateIfGuardsCLI(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -138,13 +138,13 @@ func TestUpdateIfGuardsCLI(t *testing.T) {
 	})
 }
 
-// TestUpdateIfGuardsFlagValidation drives the CLI-surface rules that keep the
+// TestEmbeddedUpdateIfGuardsFlagValidation drives the CLI-surface rules that keep the
 // guard contract unambiguous: guards cannot combine with --claim (which is its
 // own compare-and-set), guards require a field update to ride on (label-only
 // edits run outside the guarded transaction), and an --if-status typo is
 // rejected up front instead of mismatching forever. Every rejection must write
 // nothing.
-func TestUpdateIfGuardsFlagValidation(t *testing.T) {
+func TestEmbeddedUpdateIfGuardsFlagValidation(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}

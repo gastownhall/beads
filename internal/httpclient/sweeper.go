@@ -4,11 +4,13 @@ package httpclient
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/httpapi/apigen"
 	"github.com/steveyegge/beads/internal/httpclient/wire"
+	storageops "github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/issueops"
 )
 
@@ -113,6 +115,12 @@ func (s *httpSweeper) Sweep(ctx context.Context, req issueops.SweepRequest) (res
 		limit := int64(req.Limit)
 		body.Limit = &limit
 	}
+	if req.RetainIDs {
+		// Sent only when asked: refuseUnservedSweep has already proven the
+		// server advertises the token, and an absent member is what an
+		// older-server-compatible plain sweep has always sent.
+		body.RetainIds = &req.RetainIDs
+	}
 
 	res, err := s.wire.SweepIssues(ctx, body)
 	if err != nil {
@@ -124,13 +132,18 @@ func (s *httpSweeper) Sweep(ctx context.Context, req issueops.SweepRequest) (res
 // refuseUnservedSweep checks each of the three S4 additions against the
 // handshake snapshot, independently — a caller may ask for any subset of
 // them, and an older server may serve none, some, or (not yet, but
-// structurally possible) only some of the three. A request using none of
-// them never consults the snapshot at all, the same short-circuit
-// refuseUnservedScope uses for Count.
+// structurally possible) only some of the three. Every sweep takes the
+// snapshot, including one that uses none of them: a plain sweep is checked
+// against issues.sweep.retainedTypes below.
+//
+// RetainIDs is the fourth, and the one whose refusal matters most: a server
+// that predates the token would 400 the member, but a client that dropped it
+// to get past that would run a sweep leaving every swept id reusable — the
+// exact re-execution the caller asked retention to rule out.
+//
+// A PLAIN sweep against a server without issues.sweep.retainedTypes goes on to
+// refuseAnUnguardedPlainSweep.
 func (s *httpSweeper) refuseUnservedSweep(ctx context.Context, tier apigen.SweepRequestTier, req issueops.SweepRequest) error {
-	if tier != apigen.WispsPlane && !req.ProtectLiveDependents && req.Limit == 0 {
-		return nil
-	}
 	snap, err := s.store.snapshot(ctx)
 	if err != nil {
 		return err
@@ -151,6 +164,39 @@ func (s *httpSweeper) refuseUnservedSweep(ctx context.Context, tier apigen.Sweep
 	}
 	if req.Limit != 0 && !slices.Contains(capabilities, wire.CapSweepLimit) {
 		return s.store.unsupportedCapability("Sweeper.Sweep", wire.CapSweepLimit)
+	}
+	if req.RetainIDs && !slices.Contains(capabilities, wire.CapSweepRetainIDs) {
+		return s.store.unsupportedCapability("Sweeper.Sweep", wire.CapSweepRetainIDs)
+	}
+	if !req.RetainIDs && !slices.Contains(capabilities, wire.CapSweepRetainedTypes) {
+		return s.refuseAnUnguardedPlainSweep(ctx)
+	}
+	return nil
+}
+
+// refuseAnUnguardedPlainSweep is the client's defense in depth for the
+// workspace's types.retained setting (issueops.SettingKeyTypesRetained), run
+// only for a plain sweep against a server that does not advertise
+// issues.sweep.retainedTypes. Such a server holds nothing back by type, so the
+// sweep would delete the rows of a retained type with no tombstone — and, the
+// response member being absent, with no signal either. One getSetting reads
+// the setting the server's workspace stores; if it names a type the sweep is
+// refused before the dial, as invariant 8 refuses retain_ids locally. A read
+// error fails the sweep: a sweep that cannot tell which rows are keys must not
+// guess that none are. A server that advertises the token, and a retaining
+// sweep, which holds nothing back by type anywhere, never pay the read.
+func (s *httpSweeper) refuseAnUnguardedPlainSweep(ctx context.Context) error {
+	value, err := s.store.GetConfig(ctx, issueops.SettingKeyTypesRetained)
+	if err != nil {
+		return fmt.Errorf("reading %s before a plain sweep against a server without %s: %w",
+			issueops.SettingKeyTypesRetained, wire.CapSweepRetainedTypes, err)
+	}
+	// The one read of the setting (storageops.RetainedTypesFromSetting is
+	// workapi.RetainedTypesFromSetting, which this package may not import):
+	// the types the server's sweep would hold back.
+	if len(storageops.RetainedTypesFromSetting(value)) > 0 {
+		return fmt.Errorf("%s names %q, which this server's sweeps would delete without retiring their ids; re-run with --retain-ids or upgrade the server: %w",
+			issueops.SettingKeyTypesRetained, value, s.store.unsupportedCapability("Sweeper.Sweep", wire.CapSweepRetainedTypes))
 	}
 	return nil
 }
@@ -181,8 +227,16 @@ func sweepResult(res *apigen.SweepResult) issueops.SweepResult {
 	if res.Skipped.LiveDependent != nil {
 		out.Skipped.LiveDependent = *res.Skipped.LiveDependent
 	}
+	if res.Skipped.RetentionRequired != nil {
+		// Absent from a server predating issues.sweep.retainedTypes, which
+		// holds nothing back by type: 0 is then the true count.
+		out.Skipped.RetentionRequired = *res.Skipped.RetentionRequired
+	}
 	if res.Remaining != nil {
 		out.Remaining = int(*res.Remaining)
+	}
+	if res.RetainIds != nil {
+		out.RetainIDs = *res.RetainIds
 	}
 	if res.ReferencedIds != nil {
 		out.ReferencedIDs = append([]string(nil), *res.ReferencedIds...)

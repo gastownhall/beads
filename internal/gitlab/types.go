@@ -143,12 +143,17 @@ type Label struct {
 	SubscribedBoolean bool   `json:"subscribed,omitempty"`
 }
 
-// IssueLink represents a link between two issues.
+// IssueLink represents a link between two issues. The issue-links list API
+// returns each linked issue itself (IID, ProjectID, WebURL, LinkType from the
+// listed issue's side); the single-link API returns SourceIssue and
+// TargetIssue.
 type IssueLink struct {
 	SourceIssue *Issue `json:"source_issue"`
 	TargetIssue *Issue `json:"target_issue"`
 	IID         int    `json:"iid,omitempty"`
-	LinkType    string `json:"link_type"` // "relates_to", "blocks", "is_blocked_by"
+	ProjectID   int    `json:"project_id,omitempty"` // the linked issue's project, which a rename keeps
+	WebURL      string `json:"web_url,omitempty"`    // names the linked issue's project
+	LinkType    string `json:"link_type"`            // "relates_to", "blocks", "is_blocked_by"
 }
 
 // Project represents a GitLab project.
@@ -235,6 +240,10 @@ type IssueConversion struct {
 type DependencyInfo struct {
 	FromGitLabIID int    // GitLab IID of the dependent issue
 	ToGitLabIID   int    // GitLab IID of the dependency target
+	FromProjectID int    // project ID of the dependent issue, 0 if GitLab sent none
+	ToProjectID   int    // project ID of the dependency target, 0 if GitLab sent none
+	FromRef       string // web_url of the dependent issue, "" if GitLab sent none
+	ToRef         string // web_url of the dependency target, "" if GitLab sent none
 	Type          string // Beads dependency type (blocks, related, parent-child)
 }
 

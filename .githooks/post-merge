@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-# --- BEGIN BEADS INTEGRATION v1.3.0 ---
+# --- BEGIN BEADS INTEGRATION v1.3.2 ---
 # This section is managed by beads. Do not remove these markers.
 if command -v bd >/dev/null 2>&1; then
   export BD_GIT_HOOK=1
@@ -33,7 +33,20 @@ if command -v bd >/dev/null 2>&1; then
     fi
   elif command -v perl >/dev/null 2>&1; then
     _bd_timeout_backend=perl
-    if perl -e 'alarm shift; exec @ARGV' -- "$_bd_timeout" bd hooks run post-merge "$@"; then
+    if perl -e '
+      my $t = shift;
+      my $pid = fork;
+      defined $pid or die "beads: fork failed: $!\n";
+      if (!$pid) { setpgrp(0, 0); exec { $ARGV[0] } @ARGV; warn "beads: cannot run $ARGV[0]: $!\n"; exit 127 }
+      my ($sig, $sent, $done) = ("TERM", 0, 0);
+      $SIG{ALRM} = sub { return if $done; kill $sig, -$pid; ($sig, $sent) = ("KILL", 1); alarm 2 };
+      $SIG{$_} = sub { kill $_[0], -$pid unless $done } for qw(HUP INT TERM);
+      alarm $t;
+      $done = waitpid $pid, 0;
+      alarm 0;
+      exit 142 if $sent;
+      exit($? & 127 ? 128 + ($? & 127) : $? >> 8);
+    ' -- "$_bd_timeout" bd hooks run post-merge "$@"; then
       _bd_exit=0
     else
       _bd_exit=$?
@@ -56,4 +69,4 @@ if command -v bd >/dev/null 2>&1; then
   fi
   if [ "$_bd_exit" -ne 0 ]; then exit "$_bd_exit"; fi
 fi
-# --- END BEADS INTEGRATION v1.3.0 ---
+# --- END BEADS INTEGRATION v1.3.2 ---

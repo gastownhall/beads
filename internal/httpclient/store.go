@@ -18,9 +18,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 
 	"github.com/steveyegge/beads/internal/httpapi/apigen"
+	"github.com/steveyegge/beads/internal/httpclient/wire"
 	"github.com/steveyegge/beads/internal/storage"
 )
 
@@ -44,6 +46,7 @@ type Store struct {
 	target Target
 	wire   WireClient
 	local  *localMetadata
+	policy *policyCache
 
 	// mu guards the lazily fetched handshake snapshot. D6 makes the context
 	// fetch lazy (first post-baseline dispatch) and cached for the process, so
@@ -72,6 +75,70 @@ type Store struct {
 // behind them are removed rather than stubbed, since inventing the OSS
 // interfaces here would assert a maintenance contract no OSS caller checks.
 var _ storage.DoltStorage = (*Store)(nil)
+
+// IsRemoteBackendStore satisfies storage.RemoteBackendStore. The
+// external-dependency policy decorator reads it to compose its role views over
+// this store's own roles (its legacy method seam is mostly stubs); it decides
+// whether to stand down through ServerEnforcesExternalDependencyPolicy below,
+// never through this marker.
+func (s *Store) IsRemoteBackendStore() bool { return true }
+
+var _ storage.RemoteBackendStore = (*Store)(nil)
+
+// ServerEnforcesExternalDependencyPolicy satisfies
+// storage.ExternalDependencyPolicyProber (design 3.6): it answers whether the
+// server this store dials already enforces bd's external-dependency policy
+// itself, by checking the handshake for wire.CapExternalDependencies.
+//
+// It propagates a handshake error rather than swallowing it to false, the
+// same asymmetry servesBatchClose documents: this probe gates whether the
+// external-deps DECORATOR runs its own enforcement at all, so an unresolved
+// "does the server already enforce this" has to fail the caller, not silently
+// resolve to "no, so enforce here" (which happens to be safe for THIS probe's
+// specific true/false meaning but would still hide a transport failure behind
+// a policy decision) or to "yes, so skip" (which would be the actual bug this
+// interface exists to prevent — the policy must never be silently skipped).
+//
+// A store opened from a workspace answers a read from the policy cache
+// (policy_cache.go) while it is fresh, so a short-lived command whose own
+// requests need no handshake does not dial one just for this. A claim or a
+// close (storage.WithLivePolicyProbe) always asks the server: it handshakes
+// anyway, and a stale answer must not stand down its client-side refusal. A
+// handshake this process already holds wins over the cache and refreshes it.
+func (s *Store) ServerEnforcesExternalDependencyPolicy(ctx context.Context) (bool, error) {
+	if s.cachedSnapshot() == nil && !storage.LivePolicyProbe(ctx) {
+		if enforced, ok := s.policy.load(); ok {
+			return enforced, nil
+		}
+	}
+	snap, err := s.snapshot(ctx)
+	if err != nil {
+		return false, err
+	}
+	if snap == nil {
+		return false, nil
+	}
+	enforced := slices.Contains(snap.Capabilities, wire.CapExternalDependencies)
+	s.policy.store(enforced)
+	return enforced, nil
+}
+
+var _ storage.ExternalDependencyPolicyProber = (*Store)(nil)
+
+// ExcludeIDsUnsupported satisfies storage.ExcludeIDsUnsupportedStore: the v0
+// wire's listReadyWork and countReadyWork operations publish no id-exclusion
+// parameter, so encode.ReadyBridgeParams / ReadyBridgeCountParams refuse any
+// types.WorkFilter carrying ExcludeIDs outright (D8/D9, L12) rather than
+// silently widening the result. Reporting true here — unconditionally, since
+// the gap is in the wire shape, not in any per-call state — lets the
+// external-deps decorator fall back to filtering its OWN additional
+// exclusions (unsatisfied external:<project>:<capability> blockers) client
+// side instead of folding them into the filter it hands this store, so design
+// 3.6's policy still runs against a server that does not advertise
+// wire.CapExternalDependencies rather than tripping this store's refusal.
+func (s *Store) ExcludeIDsUnsupported() bool { return true }
+
+var _ storage.ExcludeIDsUnsupportedStore = (*Store)(nil)
 
 // New builds the store around an already-resolved target and transport.
 //
@@ -129,12 +196,13 @@ func open(ctx context.Context, beadsDir string) (storage.DoltStorage, error) {
 	if dialer == nil {
 		return nil, fmt.Errorf("%w: cannot dial %s", ErrNoTransport, target)
 	}
-	wire, err := dialer(ctx, target)
+	wire, err := dialShared(ctx, dialer, beadsDir, target)
 	if err != nil {
 		return nil, err
 	}
 	s := New(target, wire, nil)
 	s.local = newLocalMetadata(beadsDir)
+	s.policy = newPolicyCache(target)
 	return s, nil
 }
 
@@ -197,3 +265,10 @@ func (s *Store) CommitAll(_ context.Context, _ string) (bool, error) { return fa
 // CommitPending reports nothing pending, for the same reason: write paths call
 // it opportunistically and must not error.
 func (s *Store) CommitPending(_ context.Context, _ string) (bool, error) { return false, nil }
+
+// CommitConfigOnly and CommitConfigUserKVOnly, the scoped commits after a
+// config or memory write (GH#4078), join the family for the same D3 reason:
+// the write is durable once the server answers, so there is nothing to flush,
+// and refusing would fail a command whose write already landed.
+func (s *Store) CommitConfigOnly(_ context.Context, _ string) error       { return nil }
+func (s *Store) CommitConfigUserKVOnly(_ context.Context, _ string) error { return nil }

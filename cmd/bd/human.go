@@ -302,6 +302,12 @@ Examples:
 		targetStore := result.Store
 
 		if issue.Status == "closed" {
+			// A response whose routed commit failed left its close in the
+			// target's working set, where this run finds the issue closed.
+			// Nothing else commits a routed target, so commit the close here.
+			if err := commitRoutedWrite(ctx, result, "human respond"); err != nil {
+				return HandleErrorRespectJSON("issue %s is already closed; committing its routed close failed: %v", resolvedID, err)
+			}
 			return HandleErrorRespectJSON("issue %s is already closed", resolvedID)
 		}
 
@@ -314,6 +320,10 @@ Examples:
 
 		if err := targetStore.CloseIssue(ctx, resolvedID, "Responded", currentActor(), ""); err != nil {
 			return HandleErrorRespectJSON("closing bead: %v", err)
+		}
+
+		if err := commitRoutedWrite(ctx, result, "human respond"); err != nil {
+			return HandleErrorRespectJSON("committing response to %s: %v", resolvedID, err)
 		}
 
 		fmt.Printf("%s Bead %s closed with response.\n", ui.RenderPass("✔"), resolvedID)
@@ -398,6 +408,10 @@ Examples:
 		targetStore := result.Store
 
 		if issue.Status == "closed" {
+			// As in respond: commit a dismissal whose routed commit failed.
+			if err := commitRoutedWrite(ctx, result, "human dismiss"); err != nil {
+				return HandleErrorRespectJSON("issue %s is already closed; committing its routed close failed: %v", resolvedID, err)
+			}
 			return HandleErrorRespectJSON("issue %s is already closed", resolvedID)
 		}
 
@@ -405,6 +419,10 @@ Examples:
 
 		if err := targetStore.CloseIssue(ctx, resolvedID, closeReason, currentActor(), ""); err != nil {
 			return HandleErrorRespectJSON("closing bead: %v", err)
+		}
+
+		if err := commitRoutedWrite(ctx, result, "human dismiss"); err != nil {
+			return HandleErrorRespectJSON("committing dismissal of %s: %v", resolvedID, err)
 		}
 
 		fmt.Printf("%s Bead %s dismissed.\n", ui.RenderPass("✔"), resolvedID)

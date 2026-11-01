@@ -24,7 +24,7 @@ import (
 // pinning.go proves those three are aliases; only this test proves the document
 // still describes them.
 // The import path is per-entry rather than one constant, because the canonical
-// structs do not all live in one package: nine are internal/types, and the
+// structs do not all live in one package: ten are internal/types, and the
 // three that are not — the cycle pair and IssueBlocking — live in the role
 // package issueops, where the results of issueops.CycleDetector and
 // issueops.BlockingAnnotator are declared, and EventRecord lives in
@@ -46,6 +46,7 @@ var pinnedSchemas = []struct {
 	{"Comment", "types.Comment", canonicalTypesImport, types.Comment{}},
 	{"BondRef", "types.BondRef", canonicalTypesImport, types.BondRef{}},
 	{"Statistics", "types.Statistics", canonicalTypesImport, types.Statistics{}},
+	{"BlockedIssue", "types.BlockedIssue", canonicalTypesImport, types.BlockedIssue{}},
 	{"Cycle", "issueops.Cycle", canonicalRolesImport, issueops.Cycle{}},
 	{"CycleMember", "issueops.CycleMember", canonicalRolesImport, issueops.CycleMember{}},
 	{"IssueBlocking", "issueops.IssueBlocking", canonicalRolesImport, issueops.IssueBlocking{}},

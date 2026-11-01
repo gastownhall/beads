@@ -67,6 +67,16 @@ const (
 	publicRBEForkPinLine = `ENDPOINT_RE=${RBE_FORK_ENDPOINT_RE:-'^` + "grpc" + `s://rbe-fork\.ops\.gascity\.com:8444$'}`
 )
 
+// publicRRCWriterPin: rrc-writer-credential.sh (a byte copy of gascity's)
+// pins the one endpoint rbe-west's mint may hand the remote repo contents
+// cache writer (rbe-west, :443), so a compromised mint cannot point the
+// writer's uploads elsewhere. Public, no credential: allowed as exactly
+// this line, in exactly that file.
+const (
+	publicRRCWriterPinFile = ".github/scripts/rrc-writer-credential.sh"
+	publicRRCWriterPinLine = `ENDPOINT_RE=${RBE_RRC_ENDPOINT_RE:-'^` + "grpc" + `s://rbe-west\.ops\.gascity\.com(:443)?$'}`
+)
+
 type endpointHit struct {
 	path string
 	line int
@@ -121,7 +131,8 @@ func findRemoteEndpoints(path string, content []byte, strict bool) []endpointHit
 		if path == ".bazelrc" && publicForkCacheLines[strings.TrimSpace(line)] {
 			continue
 		}
-		if path == publicRBEForkPinFile && line == publicRBEForkPinLine {
+		if path == publicRBEForkPinFile && line == publicRBEForkPinLine ||
+			path == publicRRCWriterPinFile && line == publicRRCWriterPinLine {
 			continue
 		}
 		for _, re := range flagRes {

@@ -33,7 +33,7 @@ func TestBundleMigrationsWithPreparedALTERAreOverriddenOrJustified(t *testing.T)
 		t.Errorf(`%s reaches the CLI fresh bundle with a PREPARE'd ALTER TABLE:%s
 
 The Dolt CLI batch path silently no-ops it while EXECUTE reports success
-(dolthub/dolt#11345, fixed in 2.3.0 but the CLI is pinned to 2.2.0), so the
+(dolthub/dolt#11345, fixed in 2.3.0 but still present in older CLIs), so the
 bundle would be missing this schema change while the runtime has it.
 
 Either register a direct-DDL override for %s in cliCompatibleMigrationSQL

@@ -45,9 +45,6 @@ func (w *recordingMolWriter) DeleteIssue(context.Context, string, string) error 
 func (w *recordingMolWriter) SetConfig(context.Context, string, string) error {
 	panic("SetConfig: not part of the proto+proto bond")
 }
-func (w *recordingMolWriter) ClaimStepIfOpen(context.Context, string, string) error {
-	panic("ClaimStepIfOpen: not part of the proto+proto bond")
-}
 
 // TestBondProtoProtoLabelsTheCompoundAtCreation pins the property that makes
 // the compound's molecule label unable to land in the wrong plane: it travels

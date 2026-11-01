@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	mysql "github.com/go-sql-driver/mysql"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -284,4 +285,135 @@ func TestDoltServerTxRunTxWithDeferredContextSkipsDoltCommit(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, mock.ExpectationsWereMet())
 	assert.Equal(t, 1, p.db.Stats().OpenConnections)
+}
+
+// matchHasStaged matches the staged-set check issueops.HasStagedChanges runs
+// before CommitScoped's DOLT_COMMIT('-m').
+const matchHasStaged = `SELECT COUNT\(\*\) FROM dolt_status WHERE staged = 1`
+
+// expectScopedDoltCommit arms one attempt of CommitScoped's Dolt commit: a
+// DOLT_ADD per table, the staged-set check reporting staged rows, and, when
+// something is staged, a DOLT_COMMIT('-m') answering commitErr.
+func expectScopedDoltCommit(mock sqlmock.Sqlmock, tables []string, staged int, message string, commitErr error) {
+	for _, table := range tables {
+		mock.ExpectQuery(`CALL DOLT_ADD\(\?\)`).WithArgs(table).
+			WillReturnRows(sqlmock.NewRows([]string{"status"}).AddRow(0))
+	}
+	mock.ExpectQuery(matchHasStaged).WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(staged))
+	if staged == 0 {
+		return
+	}
+	commit := mock.ExpectQuery(`CALL DOLT_COMMIT\('-m', \?\)`).WithArgs(message)
+	if commitErr != nil {
+		commit.WillReturnError(commitErr)
+	} else {
+		commit.WillReturnRows(sqlmock.NewRows([]string{"hash"}).AddRow("c0ffee"))
+	}
+}
+
+// TestDoltServerTxCommitScopedCommitsSQLBeforeDoltCommit pins the
+// LatentLabsSpace/NEXUS#92 ordering on the uow leg: CommitScoped ends the SQL
+// transaction with a plain COMMIT and only then stages and Dolt-commits its
+// tables, on the same pinned session. Staged inside the open transaction,
+// DOLT_ADD builds the Dolt commit from the transaction's start snapshot and
+// writes a concurrent writer's committed rows back to their old values.
+func TestDoltServerTxCommitScopedCommitsSQLBeforeDoltCommit(t *testing.T) {
+	p, mock := newMockTxProvider(t)
+	mock.ExpectExec("START TRANSACTION").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(matchPlainCommit).WillReturnResult(sqlmock.NewResult(0, 0))
+	expectScopedDoltCommit(mock, []string{"events", "issues"}, 2, "bd: re-arm lease x", nil)
+
+	tx, err := p.BeginTx(context.Background())
+	require.NoError(t, err)
+
+	require.NoError(t, tx.(ScopedCommitter).CommitScoped(context.Background(), []string{"events", "issues"}, "bd: re-arm lease x"))
+	require.NoError(t, mock.ExpectationsWereMet(), "the SQL COMMIT must come first, then DOLT_ADD per table and DOLT_COMMIT('-m')")
+	assert.Equal(t, 1, p.db.Stats().OpenConnections, "a cleanly committed session may return to the pool")
+	require.ErrorContains(t, tx.Commit(context.Background(), ""), "already done")
+}
+
+// TestDoltServerTxCommitScopedSwallowsAFailedDoltCommit: once the SQL COMMIT
+// has landed the write is durable, so a Dolt commit that fails after it must
+// not fail CommitScoped (RunTxScoped would replay a committed unit of work).
+// The session, whose state the failed statement leaves unknown, is discarded.
+func TestDoltServerTxCommitScopedSwallowsAFailedDoltCommit(t *testing.T) {
+	p, mock := newMockTxProvider(t)
+	mock.ExpectExec("START TRANSACTION").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(matchPlainCommit).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(`CALL DOLT_ADD\(\?\)`).WithArgs("issues").WillReturnError(errors.New("dolt add exploded"))
+
+	tx, err := p.BeginTx(context.Background())
+	require.NoError(t, err)
+
+	require.NoError(t, tx.(ScopedCommitter).CommitScoped(context.Background(), []string{"issues"}, "bd: re-arm lease x"),
+		"a committed write must not be reported as failed")
+	require.NoError(t, mock.ExpectationsWereMet(), "a failure other than a conflict is not retried")
+	assert.Equal(t, 0, p.db.Stats().OpenConnections, "the session must be discarded, not pooled")
+	require.ErrorContains(t, tx.Commit(context.Background(), ""), "already done")
+}
+
+// TestDoltServerTxCommitScopedRetriesAConflictedDoltCommit: outside a
+// transaction, a Dolt commit that conflicts with a concurrent writer is rolled
+// back as an @@autocommit merge conflict (1105), not 1213, and is retried like
+// one.
+func TestDoltServerTxCommitScopedRetriesAConflictedDoltCommit(t *testing.T) {
+	p, mock := newMockTxProvider(t)
+	mock.ExpectExec("START TRANSACTION").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(matchPlainCommit).WillReturnResult(sqlmock.NewResult(0, 0))
+	conflict := &mysql.MySQLError{Number: 1105, Message: "Merge conflict detected, @autocommit transaction rolled back"}
+	expectScopedDoltCommit(mock, []string{"issues"}, 1, "bd: re-arm lease x", conflict)
+	expectScopedDoltCommit(mock, []string{"issues"}, 1, "bd: re-arm lease x", nil)
+
+	tx, err := p.BeginTx(context.Background())
+	require.NoError(t, err)
+
+	require.NoError(t, tx.(ScopedCommitter).CommitScoped(context.Background(), []string{"issues"}, "bd: re-arm lease x"))
+	require.NoError(t, mock.ExpectationsWereMet(), "the conflicted attempt must be staged and committed again")
+	assert.Equal(t, 1, p.db.Stats().OpenConnections, "a session whose retry committed may return to the pool")
+}
+
+// TestDoltServerTxCommitScopedReturnsASerializationFailure: a serialization
+// failure of the SQL COMMIT is returned for RunTxScoped to redo the whole unit
+// of work, and no Dolt commit follows a COMMIT that did not land.
+func TestDoltServerTxCommitScopedReturnsASerializationFailure(t *testing.T) {
+	p, mock := newMockTxProvider(t)
+	mock.ExpectExec("START TRANSACTION").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(matchPlainCommit).WillReturnError(&mysql.MySQLError{Number: 1213, Message: "serialization failure"})
+
+	tx, err := p.BeginTx(context.Background())
+	require.NoError(t, err)
+
+	err = tx.(ScopedCommitter).CommitScoped(context.Background(), []string{"issues"}, "bd: re-arm lease x")
+	require.True(t, isSerializationError(err), "err = %v, want the serialization failure", err)
+	require.NoError(t, mock.ExpectationsWereMet(), "nothing may be staged or committed after a failed COMMIT")
+}
+
+// TestDoltServerTxCommitScopedMakesNoEmptyDoltCommit: a concurrent writer's
+// Dolt commit can take this transaction's rows before its own Dolt commit
+// runs, seen either before the commit (nothing staged) or by it ("nothing to
+// commit"). Neither is a failure: unlike Commit's in-transaction commit, the
+// rows are already committed.
+func TestDoltServerTxCommitScopedMakesNoEmptyDoltCommit(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		staged    int
+		commitErr error
+	}{
+		{name: "nothing staged", staged: 0},
+		{name: "nothing to commit", staged: 1, commitErr: errors.New("nothing to commit")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, mock := newMockTxProvider(t)
+			mock.ExpectExec("START TRANSACTION").WillReturnResult(sqlmock.NewResult(0, 0))
+			mock.ExpectExec(matchPlainCommit).WillReturnResult(sqlmock.NewResult(0, 0))
+			expectScopedDoltCommit(mock, []string{"issues"}, tc.staged, "bd: re-arm lease x", tc.commitErr)
+
+			tx, err := p.BeginTx(context.Background())
+			require.NoError(t, err)
+
+			require.NoError(t, tx.(ScopedCommitter).CommitScoped(context.Background(), []string{"issues"}, "bd: re-arm lease x"))
+			require.NoError(t, mock.ExpectationsWereMet())
+			assert.Equal(t, 1, p.db.Stats().OpenConnections, "the session is clean and may return to the pool")
+		})
+	}
 }

@@ -82,10 +82,12 @@ func bazelEmbeddedCmdParts(t *testing.T) []embeddedCmdPart {
 // bazelEmbeddedCmdShardCount returns the shard total of the bazel-embedded
 // lane's cmd/bd manifest block, which embeddedCmdTargets split between them
 // (bazelEmbeddedCmdParts): the single source of truth for the Bazel-only
-// lane's cmd/bd shard split (slice F1), which no longer has to equal PR
+// lane's cmd/bd shard split (slice F1). It no longer has to equal PR
 // Risk's/main.yml's legacy "Test (Embedded Dolt Cmd N/20)" fork/push jobs'
-// matrix size — mirrors bazelProxiedShardCount (F2; see that function's doc
-// comment below for the shared rationale, not repeated here).
+// matrix size — those jobs, and the frozen 20-shard block they read, have
+// since been deleted (see engdocs/TESTING.md) — mirrors bazelProxiedShardCount
+// (F2; see that function's doc comment below for the shared rationale, not
+// repeated here).
 func bazelEmbeddedCmdShardCount(t *testing.T) int {
 	t.Helper()
 	return bazelEmbeddedCmdParts(t)[0].total

@@ -108,9 +108,9 @@ func applyUpdateProxiedOne(ctx context.Context, id string, in *updateInput) (*ty
 	if err != nil {
 		return nil, nil, HandleError("%v", err)
 	}
-	before, fail := proxiedUpdateTarget(ctx, id, in)
-	if fail != nil {
-		return nil, fail, nil
+	before, fail, err := proxiedUpdateTarget(ctx, id, in)
+	if err != nil || fail != nil {
+		return nil, fail, err
 	}
 	patch, err := proxiedUpdatePatch(in, before)
 	if err != nil {
@@ -195,21 +195,29 @@ func applyUpdateProxiedOne(ctx context.Context, id string, in *updateInput) (*ty
 // --notes is about to replace existing notes, and whether --defer="" should
 // also clear a deferred status. It no longer reads the pre-state to decide a
 // hook: a status-crossing update fires on_update and nothing else, from the
-// plumbing, exactly as it does on the embedded path.
-func proxiedUpdateTarget(ctx context.Context, id string, in *updateInput) (*types.Issue, *updateIDFailure) {
+// plumbing, exactly as it does on the embedded path. The error is non-nil
+// only for an --if-revision guard outcome it has already reported, which the
+// caller returns as the command's exit error.
+func proxiedUpdateTarget(ctx context.Context, id string, in *updateInput) (*types.Issue, *updateIDFailure, error) {
 	rd, err := proxiedIssueReader()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error resolving %s: %v\n", id, err)
-		return nil, &updateIDFailure{ID: id, Error: fmt.Sprintf("resolving issue: %v", err)}
+		return nil, &updateIDFailure{ID: id, Error: fmt.Sprintf("resolving issue: %v", err)}, nil
 	}
 	details, err := rd.Get(ctx, issueops.GetRequest{ID: id})
 	if err != nil {
+		// A guarded update that lost to a concurrent `bd delete` committing
+		// before this pre-read is the same lost race as one committing inside
+		// the guarded write: report it through the guard envelope.
+		if reported, ok := reportIfRevisionTargetGone("updating", id, err, in.ifRevision); ok {
+			return nil, nil, reported
+		}
 		if errors.Is(err, issueops.ErrNotFound) {
 			fmt.Fprintf(os.Stderr, "Issue %s not found\n", id)
-			return nil, &updateIDFailure{ID: id, Error: "issue not found"}
+			return nil, &updateIDFailure{ID: id, Error: "issue not found"}, nil
 		}
 		fmt.Fprintf(os.Stderr, "Error resolving %s: %v\n", id, err)
-		return nil, &updateIDFailure{ID: id, Error: fmt.Sprintf("resolving issue: %v", err)}
+		return nil, &updateIDFailure{ID: id, Error: fmt.Sprintf("resolving issue: %v", err)}, nil
 	}
 	current := &details.Issue
 	// The template guard is the role's, enforced inside the mutation;
@@ -227,10 +235,10 @@ func proxiedUpdateTarget(ctx context.Context, id string, in *updateInput) (*type
 		if err := validateIssueReassignable(id, current, currentActor(), newAssignee,
 			proxiedClaimPoolAliases(ctx), in.force); err != nil {
 			fmt.Fprintf(os.Stderr, "%s\n", err)
-			return nil, &updateIDFailure{ID: id, Error: err.Error()}
+			return nil, &updateIDFailure{ID: id, Error: err.Error()}, nil
 		}
 	}
-	return current, nil
+	return current, nil, nil
 }
 
 // proxiedClaimPoolAliases is uowClaimPoolAliases for a caller that owns no unit

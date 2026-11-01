@@ -14,6 +14,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/beads/internal/doltversion"
 )
 
 // These names match fakedolt_test.go, which TestMain dispatches to.
@@ -24,6 +26,7 @@ const (
 	testFakeDoltExitEnv     = "BEADS_TEST_FAKE_DOLT_EXIT"
 	testFakeDoltReadyEnv    = "BEADS_TEST_FAKE_DOLT_READY"
 	testFakeDoltLaunchesEnv = "BEADS_TEST_FAKE_DOLT_LAUNCHES"
+	testFakeDoltVersionEnv  = "BEADS_TEST_FAKE_DOLT_VERSION"
 	// testFakeDoltDelay is the fake dolt's startup time. It is longer than
 	// the 200ms "did it exit immediately?" check Start used to rely on, which
 	// is the window that let a foreign listener's greeting pass as ready.
@@ -345,6 +348,27 @@ func assertNoStateFiles(t *testing.T, beadsDir string) {
 	}
 }
 
+// TestStart_RefusesDoltBelowRequiredMin drives the real Start with a fake
+// dolt that reports a release below doltversion.RequiredMin: Start refuses
+// the binary before it launches a sql-server on it, naming the binary and the
+// version, and leaves no server state behind.
+func TestStart_RefusesDoltBelowRequiredMin(t *testing.T) {
+	beadsDir, launches := fakeStartWorkspace(t)
+	t.Setenv(testFakeDoltVersionEnv, "2.5.1")
+
+	state, err := startForTest(t, beadsDir)
+	if !errors.Is(err, doltversion.ErrBelowRequiredMin) {
+		t.Fatalf("Start = (%+v, %v), want ErrBelowRequiredMin", state, err)
+	}
+	if !strings.Contains(err.Error(), "dolt binary") || !strings.Contains(err.Error(), "2.5.1") {
+		t.Errorf("Start = %q, want it to name the dolt binary and the version it reported", err)
+	}
+	if got := launchedPorts(t, launches); len(got) != 0 {
+		t.Errorf("launched a sql-server on %v, want none", got)
+	}
+	assertNoStateFiles(t, beadsDir)
+}
+
 // TestStart_RecoversWhenEphemeralPortIsTaken drives the real Start with a
 // fake dolt whose first ephemeral port is held by a foreign greeter that took
 // it between allocation and bind. Start must not adopt the foreign listener;
@@ -523,6 +547,69 @@ func TestStart_PortFilePortMovesOutsideSharedMode(t *testing.T) {
 	}
 	if got := readPortFile(beadsDir); got != state.Port {
 		t.Errorf("port file = %d, want the new port %d", got, state.Port)
+	}
+}
+
+// TestStop_StopsServerStartedHereWhenProcessListUnreadable repeats the undo
+// of newServerMode's fail-closed auto-start (GH#4052) where the process list
+// cannot be read (GH#7214): snapshot the port file, start a server, stop it,
+// restore the snapshot. Stop must accept the server this process launched.
+// When it refused, the restore left that server's pid file beside the earlier
+// port, or beside no port file, and the server kept running.
+func TestStop_StopsServerStartedHereWhenProcessListUnreadable(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		stale bool // a dead earlier server's pid and port files
+	}{
+		{name: "no state files before the start"},
+		{name: "stale state files before the start", stale: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			beadsDir, _ := fakeStartWorkspace(t)
+			if tc.stale {
+				if err := writeServerStateFiles(beadsDir, 99999999, freeLoopbackPort(t)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			stubProcessList(t, func() ([]int, error) { return nil, errProcessListUnreadable })
+
+			snap, err := SnapshotPortFile(beadsDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, startedByUs, err := EnsureRunningDetailed(beadsDir); err != nil || !startedByUs {
+				t.Fatalf("EnsureRunningDetailed = (startedByUs %v, %v), want a server started", startedByUs, err)
+			}
+			b, err := os.ReadFile(pidPath(beadsDir))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var pid int
+			if _, err := fmt.Sscan(string(b), &pid); err != nil || pid <= 0 {
+				t.Fatalf("pid file %q: %v", b, err)
+			}
+			t.Cleanup(func() {
+				if p, findErr := os.FindProcess(pid); findErr == nil {
+					_ = p.Kill()
+				}
+			})
+
+			if err := Stop(beadsDir); err != nil {
+				t.Errorf("Stop = %v, want the server this process started stopped", err)
+			}
+			if err := RestorePortFile(beadsDir, snap); err != nil {
+				t.Fatal(err)
+			}
+			if isProcessAlive(pid) {
+				t.Errorf("server PID %d is still running", pid)
+			}
+			if _, err := os.Stat(pidPath(beadsDir)); !os.IsNotExist(err) {
+				t.Errorf("pid file kept beside the restored port file, stat err = %v", err)
+			}
+			if got, err := SnapshotPortFile(beadsDir); err != nil || got.Existed != snap.Existed || string(got.Data) != string(snap.Data) {
+				t.Errorf("port file = %+v (%v), want the snapshot %+v", got, err, snap)
+			}
+		})
 	}
 }
 

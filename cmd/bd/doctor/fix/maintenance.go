@@ -6,8 +6,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/workapi"
+	"github.com/steveyegge/beads/issueops"
 )
 
 // StaleClosedIssues deletes stale closed issues.
@@ -37,6 +40,7 @@ func StaleClosedIssues(path string) error {
 		fmt.Println("  Stale closed issues cleanup disabled (set stale_closed_issues_days to enable)")
 		return nil
 	}
+	warnIgnoredYAMLRetainedTypes()
 
 	// Open database using factory to respect backend configuration (bd-m2jr:
 	// SQLite fallback fix). This handler DELETES issues, so it opens through
@@ -56,19 +60,18 @@ func StaleClosedIssues(path string) error {
 		ClosedBefore: &cutoff,
 	}
 
-	issues, err := store.SearchIssues(ctx, "", filter)
+	// The retained types are read from the workspace database the deletes go
+	// to, on the snapshot the closed issues are read from. A read error fails
+	// the fix: deleting on a guess would take beads whose ids must be retired,
+	// and this fix retires none.
+	issues, retainedSetting, err := store.SearchIssuesWithConfig(ctx, "", filter, issueops.SettingKeyTypesRetained)
 	if err != nil {
 		return fmt.Errorf("failed to query issues: %w", err)
 	}
+	deletable, skipped, retained := selectStaleClosed(issues, retainedSetting)
 
-	// Filter out pinned issues and delete the rest
-	var deleted, skipped int
-	for _, issue := range issues {
-		if issue.Pinned {
-			skipped++
-			continue
-		}
-
+	var deleted int
+	for _, issue := range deletable {
 		if err := store.DeleteIssue(ctx, issue.ID); err != nil {
 			fmt.Printf("  Warning: failed to delete %s: %v\n", issue.ID, err)
 			continue
@@ -76,7 +79,7 @@ func StaleClosedIssues(path string) error {
 		deleted++
 	}
 
-	if deleted == 0 && skipped == 0 {
+	if deleted == 0 && skipped == 0 && retained == 0 {
 		fmt.Println("  No stale closed issues to clean up")
 	} else {
 		if deleted > 0 {
@@ -85,9 +88,40 @@ func StaleClosedIssues(path string) error {
 		if skipped > 0 {
 			fmt.Printf("  Skipped %d pinned issue(s)\n", skipped)
 		}
+		if retained > 0 {
+			fmt.Printf("  Kept %d closed issue(s) of a retained type (types.retained) — only bd prune/purge --retain-ids deletes them\n", retained)
+		}
 	}
 
 	return nil
+}
+
+// selectStaleClosed narrows the stale closed issues to the ones the fix may
+// delete: pinned issues are skipped, and so are issues of a type the
+// workspace retains (retainedSetting is the stored value of types.retained).
+// The fix deletes row by row and writes no tombstone, so a retained issue's id
+// — an idempotency key — is never its to free.
+func selectStaleClosed(issues []*types.Issue, retainedSetting string) (deletable []*types.Issue, pinned, retained int) {
+	unpinned := make([]*types.Issue, 0, len(issues))
+	for _, issue := range issues {
+		if issue.Pinned {
+			pinned++
+			continue
+		}
+		unpinned = append(unpinned, issue)
+	}
+	deletable, retained = workapi.PartitionSweepRetainedTypes(unpinned, workapi.RetainedTypesFromSetting(retainedSetting))
+	return deletable, pinned, retained
+}
+
+// warnIgnoredYAMLRetainedTypes prints config.RetainedTypesYAMLWarning, if
+// there is one, before the fix selects: like the other commands that honor
+// types.retained, it reads the setting from the workspace database only, so a
+// key in config.yaml protects nothing from it.
+func warnIgnoredYAMLRetainedTypes() {
+	if msg := config.RetainedTypesYAMLWarning(); msg != "" {
+		fmt.Printf("  Warning: %s\n", msg)
+	}
 }
 
 // PatrolPollution deletes patrol digest and session ended beads that pollute the database.

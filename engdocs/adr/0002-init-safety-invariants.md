@@ -105,7 +105,13 @@ bd bootstrap                    adopt remote — signposted by init refusal
 10   ExitRemoteDivergenceRefused   local-source init without --discard-remote
 11   ExitLocalExistsRefused        existing local data, declined destroy confirm
 12   ExitDestroyTokenMissing       --discard-remote without valid --destroy-token
+15   ExitHomeDirRefused            run in an untracked home dir, no caller BEADS_DIR
 ```
+
+10/11/12, with 130 for a canceled prompt, are the codes protocol v0 §E3
+freezes (pinned in `cmd/bd/protocol/exit_codes_init_test.go`). 15 is stable
+in-repo but not §E3-frozen (GH#4635); it skips 13 and 14, which bd already
+uses for `ExitGuardMismatch` and `ExitMigrationFrozen`.
 
 ### Deprecation cycle
 

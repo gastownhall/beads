@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/storage"
 )
 
 type fakeAutoPushTarget struct {
@@ -265,6 +266,152 @@ func TestLoadPushState_CorruptJSON(t *testing.T) {
 	if err == nil {
 		t.Error("loadPushState with corrupt JSON: expected error, got nil")
 	}
+}
+
+// fakeAutoPushStore is a minimal DoltStorage stand-in for the no-git-ops
+// auto-push pin (GH#3463). It embeds a nil DoltStorage for the identity
+// assertion in maybeAutoPush (UnwrapStore cannot peel it and the fake is not
+// a LifecycleManager, so IsClosed is never consulted) and overrides only the
+// methods the auto-push path touches. HasRemote reports an "origin" remote
+// although the current code never asks: the pre-#3446 auto-detect did ask,
+// so restoring that behavior makes this test observe a real push instead of
+// panicking on the nil embed.
+type fakeAutoPushStore struct {
+	storage.DoltStorage
+	commit    string
+	pushCalls int
+}
+
+func (f *fakeAutoPushStore) GetCurrentCommit(context.Context) (string, error) { return f.commit, nil }
+func (f *fakeAutoPushStore) HasRemote(_ context.Context, _ string) (bool, error) {
+	return true, nil
+}
+func (f *fakeAutoPushStore) Push(context.Context) error {
+	f.pushCalls++
+	return nil
+}
+
+// setupNoGitOpsAutoPushWorkspace builds a temp workspace whose
+// .beads/config.yaml holds configYAML, points BEADS_DIR and the user-level
+// config roots at temp locations so nothing leaks in or out, (re)initializes
+// config, and installs a fake store. It returns the .beads dir and the
+// installed store.
+func setupNoGitOpsAutoPushWorkspace(t *testing.T, configYAML string) (string, *fakeAutoPushStore) {
+	t.Helper()
+
+	tmp := t.TempDir()
+	beadsDir := filepath.Join(tmp, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range map[string]string{
+		"metadata.json": `{}`,
+		"config.yaml":   configYAML,
+	} {
+		if err := os.WriteFile(filepath.Join(beadsDir, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("BEADS_DIR", beadsDir)
+
+	// Fence out user-level config so a developer's own ~/.config/bd/config.yaml
+	// cannot leak dolt.auto-push or dolt.local-only into the subtest.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	// GetValueSource counts set-but-empty env vars as explicit, so unset the
+	// keys rather than setting them empty. t.Setenv first registers the
+	// restore of the original values as a subtest cleanup.
+	for _, key := range []string{"BD_DOLT_AUTO_PUSH", "BD_DOLT_LOCAL_ONLY"} {
+		t.Setenv(key, "")
+		os.Unsetenv(key)
+	}
+
+	config.ResetForTesting()
+	t.Cleanup(config.ResetForTesting)
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize: %v", err)
+	}
+	if !config.GetBool("no-git-ops") {
+		t.Fatal("precondition: no-git-ops must be read from the workspace config.yaml")
+	}
+
+	fake := &fakeAutoPushStore{commit: "deadbeef"}
+	prev := getStore()
+	setStore(fake)
+	t.Cleanup(func() { setStore(prev) })
+
+	return beadsDir, fake
+}
+
+// TestMaybeAutoPush_NoGitOpsDoesNotPush pins the GH#3463 contract that holds
+// since auto-push became explicit opt-in (#3446): no-git-ops hides bd's own
+// git activity (the bd prime close protocol), it does not stop Dolt remote
+// sync. An explicit dolt.auto-push opt-in still pushes, while
+// dolt.local-only — the switch that does govern Dolt networking — never
+// does. The fake store reports an "origin" remote, so if the old
+// push-whenever-origin-exists auto-detect ever comes back, this test fails
+// instead of silently passing.
+func TestMaybeAutoPush_NoGitOpsDoesNotPush(t *testing.T) {
+	// Cannot be parallel: mutates env vars, config, and the store global.
+
+	t.Run("auto_push_unset", func(t *testing.T) {
+		// The reporter's setup (GH#3463): no-git-ops set, dolt.auto-push
+		// never opted in. Nothing may touch the remote or the push state.
+		beadsDir, fake := setupNoGitOpsAutoPushWorkspace(t, "no-git-ops: true\n")
+		if src := config.GetValueSource("dolt.auto-push"); src != config.SourceDefault {
+			t.Fatalf("precondition: dolt.auto-push source = %v, want %s", src, config.SourceDefault)
+		}
+
+		maybeAutoPush(context.Background())
+
+		if fake.pushCalls != 0 {
+			t.Errorf("Push calls = %d, want 0 (no-git-ops with dolt.auto-push unset must not push; GH#3463)", fake.pushCalls)
+		}
+		if _, err := os.Stat(filepath.Join(beadsDir, "push-state.json")); err == nil {
+			t.Error("push-state.json was created although auto-push never ran")
+		}
+	})
+
+	t.Run("explicit_auto_push", func(t *testing.T) {
+		// no-git-ops does not override an explicit dolt.auto-push opt-in:
+		// a stealth workspace that deliberately configured replication
+		// keeps it (GH#3463 expected behavior, second bullet).
+		beadsDir, fake := setupNoGitOpsAutoPushWorkspace(t, "no-git-ops: true\ndolt:\n  auto-push: true\n")
+		if !config.GetBool("dolt.auto-push") {
+			t.Fatal("precondition: dolt.auto-push must be read from the workspace config.yaml")
+		}
+
+		maybeAutoPush(context.Background())
+
+		if fake.pushCalls != 1 {
+			t.Fatalf("Push calls = %d, want 1 (no-git-ops must not override an explicit dolt.auto-push opt-in)", fake.pushCalls)
+		}
+		if _, err := os.Stat(filepath.Join(beadsDir, "push-state.json")); err != nil {
+			t.Fatalf("push-state.json must exist after a successful auto-push: %v", err)
+		}
+
+		// The debounce window must hold for an immediate second tick.
+		maybeAutoPush(context.Background())
+		if fake.pushCalls != 1 {
+			t.Errorf("Push calls after an immediate second tick = %d, want 1 (debounce interval still open)", fake.pushCalls)
+		}
+	})
+
+	t.Run("local_only_wins", func(t *testing.T) {
+		// dolt.local-only is the switch that governs Dolt networking: even an
+		// explicit auto-push opt-in must not push while it is set.
+		_, fake := setupNoGitOpsAutoPushWorkspace(t, "no-git-ops: true\ndolt:\n  auto-push: true\n  local-only: true\n")
+		if !config.GetBool("dolt.local-only") {
+			t.Fatal("precondition: dolt.local-only must be read from the workspace config.yaml")
+		}
+
+		maybeAutoPush(context.Background())
+
+		if fake.pushCalls != 0 {
+			t.Errorf("Push calls = %d, want 0 (dolt.local-only suppresses auto-push even when opted in)", fake.pushCalls)
+		}
+	})
 }
 
 // TestPushedCommitForState pins the push-state hash recorded after a successful

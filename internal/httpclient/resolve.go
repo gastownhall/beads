@@ -50,7 +50,13 @@ func (e *PartialIDSearchError) Error() string {
 		"check the id or use a local workspace", e.Input, e.ServerURL)
 }
 
-func (e *PartialIDSearchError) Unwrap() []error { return []error{e.Unsup, ErrPartialIDSearch} }
+// Unwrap also names issueops.ErrNotFound: the one thing the client does know
+// is that no row has exactly this id, and a caller classifying the outcome
+// (bd show's "Issue X not found", the routed-lookup fallbacks) must read it as
+// a miss rather than as a backend fault (S6b).
+func (e *PartialIDSearchError) Unwrap() []error {
+	return []error{e.Unsup, ErrPartialIDSearch, issueops.ErrNotFound}
+}
 
 func (s *Store) partialIDSearch(op, input string) error {
 	e := &PartialIDSearchError{Input: input, ServerURL: s.target.String()}
@@ -59,6 +65,20 @@ func (s *Store) partialIDSearch(op, input string) error {
 	}
 	return e
 }
+
+// SearchIssueIDs is the resolver's substring id search, which has no wire
+// operation: it answers D11's partial-id refusal (a not-found, see
+// PartialIDSearchError.Unwrap) without dialing, rather than the generic stub's
+// bare "not supported".
+func (s *Store) SearchIssueIDs(_ context.Context, query string, _ types.IssueFilter) ([]string, error) {
+	return nil, s.partialIDSearch("SearchIssueIDs", query)
+}
+
+// ExactIDLookupOnly satisfies utils.ExactIDLookupStore: with no substring
+// search on the wire, the resolver stops at its exact lookups, so a missing
+// id is a not-found after one getIssue instead of a prefix-vocabulary read,
+// a repeated probe and a refused search.
+func (s *Store) ExactIDLookupOnly() bool { return true }
 
 // SearchIssues serves the two shapes the v0 wire can express and refuses every
 // other one.
@@ -150,8 +170,9 @@ func (s *Store) getIssuesByExactID(ctx context.Context, ids []string) ([]*types.
 // The CLI asks each level for every descendant (Limit=0 per level), and
 // unlimited maps to PAGING TO EXHAUSTION rather than to the wire's `limit=0`,
 // which a non-loopback server refuses outright. The recursion itself belongs to
-// the caller — findAllDescendants re-parents the filter at every level — so
-// this answers one level.
+// the caller — storage.WalkDescendants, findAllDescendants' walk for a store
+// without storage.DescendantSearcher, re-parents the filter at every level —
+// so this answers one level.
 func (s *Store) walkDescendants(ctx context.Context, plan encode.SearchPlan) ([]*types.Issue, error) {
 	// Not projected: a descendant walk hands its rows back as whole issues, and
 	// a caller of the hierarchy has no way to learn a body was withheld.

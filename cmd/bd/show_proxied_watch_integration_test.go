@@ -108,6 +108,72 @@ func (w *watchBannerWriter) waitForQuiet(idle, timeout time.Duration, exited <-c
 	}
 }
 
+// showWatch is one running `bd … show … --watch` child: its stdout and stderr
+// (locked writers, since a test reads them while the child is still writing)
+// and the channel its Wait closes. startShowWatch creates it; interrupt stops
+// it. The start / first-render / SIGINT / bounded-exit choreography lives here
+// once, so TestProxiedServerShowWatch and the --comments-tail route tests
+// (runShowWatchOnce) cannot drift apart.
+type showWatch struct {
+	args    string
+	cmd     *exec.Cmd
+	stdout  *watchBannerWriter
+	stderr  *watchBannerWriter
+	exited  chan struct{}
+	waitErr error
+}
+
+// startShowWatch starts `bd <argv>` (the caller passes "show", the id and
+// --watch, plus any global flags) in dir with env, registers a kill-and-reap
+// cleanup, and returns once the first render banner has landed on stderr. The
+// banner only proves the render STARTED: stdout is an independent pipe, so a
+// caller that reads stdout waits for it to go quiet (waitForQuiet) first.
+func startShowWatch(t *testing.T, bd, dir string, env []string, argv ...string) *showWatch {
+	t.Helper()
+	w := &showWatch{
+		args:   strings.Join(argv, " "),
+		stdout: &watchBannerWriter{renders: make(chan int, 1)},
+		stderr: &watchBannerWriter{renders: make(chan int, 1)},
+		exited: make(chan struct{}),
+	}
+	w.cmd = exec.Command(bd, argv...)
+	w.cmd.Dir = dir
+	w.cmd.Env = env
+	w.cmd.Stdout = w.stdout
+	w.cmd.Stderr = w.stderr
+	if err := w.cmd.Start(); err != nil {
+		t.Fatalf("start bd %s: %v", w.args, err)
+	}
+	go func() {
+		w.waitErr = w.cmd.Wait()
+		close(w.exited)
+	}()
+	t.Cleanup(func() {
+		_ = w.cmd.Process.Kill()
+		<-w.exited
+	})
+	if !w.stderr.waitForRender(1, 60*time.Second, w.exited) {
+		t.Fatalf("bd %s never started watching\nstdout:\n%s\nstderr:\n%s", w.args, w.stdout.String(), w.stderr.String())
+	}
+	return w
+}
+
+// interrupt sends SIGINT and requires the watch to exit 0 within 30s.
+func (w *showWatch) interrupt(t *testing.T) {
+	t.Helper()
+	if err := w.cmd.Process.Signal(syscall.SIGINT); err != nil {
+		t.Fatalf("signal bd %s: %v", w.args, err)
+	}
+	select {
+	case <-w.exited:
+		if w.waitErr != nil {
+			t.Fatalf("bd %s exited with %v after SIGINT, want 0\nstderr:\n%s", w.args, w.waitErr, w.stderr.String())
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatalf("bd %s ignored SIGINT\nstderr:\n%s", w.args, w.stderr.String())
+	}
+}
+
 // TestProxiedServerShowWatch pins `bd show --watch` under --proxied-server to
 // the direct route's contract: render once, redraw when the issue's
 // status/updated_at snapshot changes, and stop cleanly on SIGINT. Proxied mode
@@ -123,51 +189,19 @@ func TestProxiedServerShowWatch(t *testing.T) {
 		p := newSharedProxiedProject(t, bd, "swr")
 		issue := bdProxiedCreate(t, bd, p.dir, "Watch me", "--type", "task")
 
-		var stdout bytes.Buffer
-		stderr := &watchBannerWriter{renders: make(chan int, 1)}
-		cmd := exec.Command(bd, "show", issue.ID, "--watch")
-		cmd.Dir = p.dir
-		cmd.Env = bdProxiedEnv(p.dir)
-		cmd.Stdout = &stdout
-		cmd.Stderr = stderr
-		if err := cmd.Start(); err != nil {
-			t.Fatalf("start bd show --watch: %v", err)
-		}
-		var waitErr error
-		exited := make(chan struct{})
-		go func() {
-			waitErr = cmd.Wait()
-			close(exited)
-		}()
-		t.Cleanup(func() {
-			_ = cmd.Process.Kill()
-			<-exited
-		})
-
-		if !stderr.waitForRender(1, 60*time.Second, exited) {
-			t.Fatalf("bd show --watch never started watching\nstdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
-		}
+		w := startShowWatch(t, bd, p.dir, bdProxiedEnv(p.dir), "show", issue.ID, "--watch")
+		stdout, stderr := w.stdout, w.stderr
 		if strings.Contains(stderr.String(), "not supported") {
 			t.Fatalf("bd show --watch refused under --proxied-server:\n%s", stderr.String())
 		}
 
 		bdProxiedUpdateOne(t, bd, p.dir, issue.ID, "--status", "in_progress")
 
-		if !stderr.waitForRender(2, 60*time.Second, exited) {
+		if !stderr.waitForRender(2, 60*time.Second, w.exited) {
 			t.Fatalf("bd show --watch did not redraw after the status change\nstdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
 		}
 
-		if err := cmd.Process.Signal(syscall.SIGINT); err != nil {
-			t.Fatalf("signal bd show --watch: %v", err)
-		}
-		select {
-		case <-exited:
-			if waitErr != nil {
-				t.Fatalf("bd show --watch exited with %v after SIGINT, want 0\nstderr:\n%s", waitErr, stderr.String())
-			}
-		case <-time.After(30 * time.Second):
-			t.Fatalf("bd show --watch ignored SIGINT\nstderr:\n%s", stderr.String())
-		}
+		w.interrupt(t)
 		if !strings.Contains(stderr.String(), "Stopped watching.") {
 			t.Errorf("stderr lacks the stop line:\n%s", stderr.String())
 		}
@@ -189,30 +223,8 @@ func TestProxiedServerShowWatch(t *testing.T) {
 		p := newSharedProxiedProject(t, bd, "swd")
 		issue := bdProxiedCreate(t, bd, p.dir, "Watch then delete", "--type", "task")
 
-		// Locked: stdout is read while the child is still writing to it.
-		stdout := &watchBannerWriter{renders: make(chan int, 1)}
-		stderr := &watchBannerWriter{renders: make(chan int, 1)}
-		cmd := exec.Command(bd, "--json", "show", issue.ID, "--watch")
-		cmd.Dir = p.dir
-		cmd.Env = bdProxiedEnv(p.dir)
-		cmd.Stdout = stdout
-		cmd.Stderr = stderr
-		if err := cmd.Start(); err != nil {
-			t.Fatalf("start bd show --watch: %v", err)
-		}
-		exited := make(chan struct{})
-		go func() {
-			_ = cmd.Wait()
-			close(exited)
-		}()
-		t.Cleanup(func() {
-			_ = cmd.Process.Kill()
-			<-exited
-		})
-
-		if !stderr.waitForRender(1, 60*time.Second, exited) {
-			t.Fatalf("bd show --watch never started watching\nstdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
-		}
+		w := startShowWatch(t, bd, p.dir, bdProxiedEnv(p.dir), "--json", "show", issue.ID, "--watch")
+		stdout, stderr, exited := w.stdout, w.stderr, w.exited
 		// The banner only proves the render STARTED (it is printed right
 		// after render() returns, on an independent pipe from stdout); wait
 		// for stdout itself to go idle before trusting its length as a

@@ -85,5 +85,28 @@ func ExecuteBlockingAnnotation(ctx context.Context, tx DBTX, request publicops.B
 	if err != nil {
 		return publicops.BlockingResult{}, err
 	}
-	return FinishBlockingAnnotation(anchors, blockedBy, blocks, parent), nil
+	result := FinishBlockingAnnotation(anchors, blockedBy, blocks, parent)
+	if request.IncludeIsBlocked {
+		flags, err := IsBlockedBatchInTx(ctx, tx, anchors)
+		if err != nil {
+			return publicops.BlockingResult{}, err
+		}
+		ApplyBlockedFlags(&result, flags)
+	}
+	return result, nil
+}
+
+// ApplyBlockedFlags stamps BlockingRequest.IncludeIsBlocked's answer onto a
+// finished annotation: each item whose id has a row in flags gets that row's
+// stored transitive is_blocked flag, and an item with none keeps a nil flag.
+// It is shared by every body that answers the role, so "absent from flags"
+// means "no row" on all of them.
+func ApplyBlockedFlags(result *publicops.BlockingResult, flags map[string]bool) {
+	for i := range result.Items {
+		blocked, ok := flags[result.Items[i].ID]
+		if !ok {
+			continue
+		}
+		result.Items[i].IsBlocked = &blocked
+	}
 }

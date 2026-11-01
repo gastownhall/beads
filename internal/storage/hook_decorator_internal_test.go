@@ -586,3 +586,87 @@ func TestHookFiringStoreIssueLifecycleTransactionReopenForwardsCommitOnly(t *tes
 		}
 	})
 }
+
+// probingHookRunner is a recordingHookRunner that also answers the probe
+// hookConfigured asks a real hooks.Runner, and records each event it was asked
+// about.
+type probingHookRunner struct {
+	recordingHookRunner
+	exists map[string]bool
+	probed []string
+}
+
+func (r *probingHookRunner) HookExists(event string) bool {
+	r.probed = append(r.probed, event)
+	return r.exists[event]
+}
+
+// countingHookStore counts the re-reads the decorator makes to build a payload.
+type countingHookStore struct {
+	fakeHookStore
+	gets *int
+}
+
+func (s countingHookStore) GetIssue(ctx context.Context, id string) (*types.Issue, error) {
+	*s.gets++
+	return s.fakeHookStore.GetIssue(ctx, id)
+}
+
+// The real runner answers the probe hookConfigured asks. A runner that cannot
+// is assumed to hold a hook for every event, and the decorator would re-read
+// after every write.
+var _ interface{ HookExists(string) bool } = (*hooks.Runner)(nil)
+
+// TestHookFiringStoreReReadsOnlyForAnEventWithAHook (mc-5dkzp): the by-id
+// paths re-read the issue to build a hook's payload, which over an http
+// workspace is a round trip the command pays after its write. The decorator
+// asks the runner about the event it is about to fire — that event, not
+// another — and re-reads and fires only when a hook for it exists.
+func TestHookFiringStoreReReadsOnlyForAnEventWithAHook(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		exists map[string]bool
+		fires  bool
+	}{
+		{"on_update exists", map[string]bool{hooks.EventUpdate: true}, true},
+		{"every hook but on_update", map[string]bool{hooks.EventCreate: true, hooks.EventClose: true}, false},
+		{"no hooks", nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := &probingHookRunner{exists: tc.exists}
+			gets := 0
+			inner := countingHookStore{
+				fakeHookStore: fakeHookStore{issues: map[string]*types.Issue{"bd-1": {ID: "bd-1", Title: "hooked"}}},
+				gets:          &gets,
+			}
+			store := &HookFiringStore{DoltStorage: inner, inner: inner, runner: runner}
+
+			store.CompleteIssueOperationComment(context.Background(), "bd-1")    // re-reads the row
+			store.CompleteIssueOperationDependency(context.Background(), "bd-1") // re-reads the row and its edges
+
+			if want := []string{hooks.EventUpdate, hooks.EventUpdate}; !reflect.DeepEqual(runner.probed, want) {
+				t.Fatalf("probed %v, want %v: the decorator must ask about the event it fires", runner.probed, want)
+			}
+			wantGets, wantEvents := 0, []string(nil)
+			if tc.fires {
+				wantGets, wantEvents = 2, []string{hooks.EventUpdate, hooks.EventUpdate}
+			}
+			if gets != wantGets || !reflect.DeepEqual(runner.events, wantEvents) {
+				t.Fatalf("re-read %d times and fired %v; want %d re-reads and %v", gets, runner.events, wantGets, wantEvents)
+			}
+		})
+	}
+
+	// The same through a real runner over a hooks directory with nothing in it.
+	gets := 0
+	inner := countingHookStore{
+		fakeHookStore: fakeHookStore{issues: map[string]*types.Issue{"bd-1": {ID: "bd-1"}}},
+		gets:          &gets,
+	}
+	store := NewHookFiringStore(inner, hooks.NewRunner(t.TempDir()))
+	store.CompleteIssueOperationComment(context.Background(), "bd-1")
+	store.CompleteIssueOperationDependency(context.Background(), "bd-1")
+	if gets != 0 {
+		t.Fatalf("with no hook installed the decorator re-read the row %d times; want none", gets)
+	}
+}

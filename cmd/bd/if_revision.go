@@ -11,12 +11,13 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/utils"
 	"github.com/steveyegge/beads/issueops"
 )
 
 // ifRevisionFlagHelp is the shared half of --if-revision's --help text across
-// `bd update`, `bd close`, `bd assign` and `bd delete`: the value syntax, the
-// one-id rule and the exit-code contract. Each verb appends what is specific
+// `bd update`, `bd close`, `bd assign`, `bd delete` and `bd reopen`: the value
+// syntax, the one-id rule and the exit-code contract. Each verb appends what is specific
 // to it (close has no other guards to compose with; update composes with
 // --if-assignee/--if-status).
 const ifRevisionFlagHelp = "Apply the write only if the issue's current revision equals this value (the decimal int64 from `bd show --json`'s \"revision\" field). One id only: refused before any write when combined with more than one issue id. A mismatch writes nothing and exits 13 (vs 1 for other failures)."
@@ -82,18 +83,18 @@ func classifyIfRevisionFailure(err error, ifRevision *int64) (code, reason strin
 	case errors.As(err, &vme):
 		return ifRevisionCodePreconditionFailed, "revision mismatch", &vme.Expected, &vme.Current, true
 	case errors.Is(err, storage.ErrNotFound):
-		// The row named by a single-id --if-revision write no longer exists.
-		// The plain CLI routes refuse a genuine typo earlier, via
-		// resolveAndGetIssueForMutation, before this guard ever runs — so in
-		// practice this fires either on a route with no such pre-check (the
-		// proxied routes) or, for a guarded delete racing an identical delete
-		// on a Dolt sql-server (mc-zndi7.73), on the same-token loser that
-		// re-checks after the winner's delete has already landed. Both are
-		// the same precondition failure from this guard's point of view:
-		// the exact revision the caller named is gone, so there is nothing
-		// left to compare it against. current is omitted (nothing to
-		// report); expected falls back to the caller's own --if-revision
-		// value, same as the bare storage.ErrVersionMismatch case below.
+		// The row named by a single-id --if-revision write no longer exists:
+		// a guarded write that lost to a concurrent delete (mc-zndi7.73),
+		// observed either inside the guarded write or at the verb's
+		// pre-flight resolution (reportIfRevisionTargetGone). Both are the
+		// same precondition failure from this guard's point of view: the
+		// exact revision the caller named is gone, so there is nothing left
+		// to compare it against. A mistyped id under --if-revision reports
+		// the same way — the CLI cannot tell "never existed" from "deleted
+		// a moment ago", and either way the named revision is not current.
+		// current is omitted (nothing to report); expected falls back to the
+		// caller's own --if-revision value, same as the bare
+		// storage.ErrVersionMismatch case below.
 		return ifRevisionCodePreconditionFailed, "issue no longer exists", ifRevision, nil, true
 	case errors.Is(err, storage.ErrAssigneeMismatch):
 		return ifRevisionCodePreconditionFailed, "assignee mismatch", nil, nil, true
@@ -110,6 +111,43 @@ func classifyIfRevisionFailure(err error, ifRevision *int64) (code, reason strin
 		return ifRevisionCodeUnsupported, "", nil, nil, true
 	}
 	return "", "", nil, nil, false
+}
+
+// reportIfRevisionTargetGone reports a single-id --if-revision write whose
+// pre-flight resolution (resolveAndGetIssueForMutation on the direct route,
+// the advisory pre-read on the proxied route) found no row. Every guarded
+// verb resolves the row BEFORE its guarded write, so a racer that loses to a
+// concurrent `bd delete` sees the row vanish either here or inside the guarded
+// write, depending only on which side of the delete's commit its resolution
+// lands (mc-zndi7.81 for delete, ga-vnycm2.10 for close/update/assign/reopen).
+// Both are the same outcome — the revision the caller named is gone — so both
+// report precondition_failed / ExitGuardMismatch with the reason "issue no
+// longer exists". With no --if-revision there is no guard to report through,
+// and any other resolution failure is not a guard outcome; ok is false for
+// both and the caller's ordinary failure handling applies unchanged. `bd
+// delete --cascade` resolves through deleteBatch instead: its not-found error
+// and its abbreviation refusal both keep the storage.ErrNotFound sentinel, so
+// the caller's reportIfRevisionFailure classifies them the same way.
+//
+// err is matched with isNotFoundErr, which also accepts ResolvePartialID's
+// unwrapped "no issue found matching" text, or as one of the resolvers' two
+// refusals, which name no row either, so each is the same gone target:
+// utils.ErrAbbreviatedIDNotAllowed (under `bd delete`'s exact resolution, an
+// id that is only the start of other ids, such as a deleted parent whose
+// child survives) and utils.ErrAmbiguousID (an id that matches several, such
+// as a deleted parent whose children survive under the other verbs'
+// abbreviating resolution, or a gone id whose hash two other prefixes hold).
+// The resolvers look the id up exactly before either refusal, so neither is
+// returned for an id a row still carries; a typed abbreviation that meets one
+// reports like a mistyped id (classifyIfRevisionFailure). Every match is
+// reported as the literal storage.ErrNotFound sentinel
+// classifyIfRevisionFailure matches via errors.Is.
+func reportIfRevisionTargetGone(action, id string, err error, ifRevision *int64) (reportedErr error, ok bool) {
+	gone := isNotFoundErr(err) || errors.Is(err, utils.ErrAbbreviatedIDNotAllowed) || errors.Is(err, utils.ErrAmbiguousID)
+	if ifRevision == nil || !gone {
+		return nil, false
+	}
+	return reportIfRevisionFailure(action, id, storage.ErrNotFound, ifRevision)
 }
 
 // ifRevisionFailureBody is the machine JSON this CLI attaches to a refused

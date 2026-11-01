@@ -1,6 +1,6 @@
 ---
 title: "bd find-duplicates"
-description: "Find issues that are semantically similar but not exact duplicates."
+description: "Find semantically similar issues using text analysis or AI"
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
@@ -15,13 +15,13 @@ with different wording.
 
 Approaches:
   mechanical  Token-based text similarity (default, no API key needed)
-  ai          LLM-based semantic comparison (requires ANTHROPIC_API_KEY or ai.api_key)
+  ai          LLM-based semantic comparison (requires ANTHROPIC_API_KEY, MINIMAX_API_KEY, or ai.api_key)
 
 The mechanical approach tokenizes titles and descriptions, then computes
 Jaccard similarity between all issue pairs. It's fast and free but may
 miss semantically similar issues with very different wording.
 
-The AI approach sends candidate pairs to Claude for semantic comparison.
+The AI approach sends candidate pairs to an Anthropic-compatible model for semantic comparison.
 It first uses mechanical pre-filtering to reduce the number of API calls,
 then asks the LLM to judge whether the remaining pairs are true duplicates.
 
@@ -43,6 +43,7 @@ bd find-duplicates [flags]
 
 ```
   -n, --limit int         Maximum number of pairs to show (default 50)
+      --max-rows int      Hard upper bound on rows fetched from storage. Returns a non-zero exit (code 2) and an error to stderr if exceeded. 0 disables (the default). Overrides BEADS_MAX_ROWS for this invocation. Useful in CI/agent rigs that want a circuit breaker against pathological queries. Not supported under --proxied-server: an explicit --max-rows or BEADS_MAX_ROWS cap errors out rather than silently going unenforced.
       --method string     Detection method: mechanical, ai (default "mechanical")
       --model string      AI model to use (only with --method ai; default from config ai.model)
   -s, --status string     Filter by status (default: non-closed)

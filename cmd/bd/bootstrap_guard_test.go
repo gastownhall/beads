@@ -60,6 +60,21 @@ func TestIsGitCodeRepoURL(t *testing.T) {
 		// SCP-style to non-forge — allowed
 		{"git@my-dolt.example.com:org/db", false},
 
+		// Userinfo before a forge host is stripped, in either URL form
+		{"ssh://git@github.com/org/db", true},
+		{"https://x-access-token:secret@github.com/org/db", true},
+		{"git@github.com:org/db", true},
+		// ...through the last "@" of the host part, as net/url (and so Dolt) reads it
+		{"https://a@b@github.com/org/db", true},
+		{"a@b@github.com:org/db", true},
+
+		// An "@" outside the host part never selects the host (mc-gcmer)
+		{"https://my-dolt.example.com/x@github.com/path", false},
+		{"https://my-dolt.example.com?x@github.com", false},
+		{"https://my-dolt.example.com#x@github.com", false},
+		{"my-dolt.example.com:org/x@github.com:db", false},
+		{"./backups/me@github.com:db", false},
+
 		// Edge: empty string
 		{"", false},
 	}
@@ -121,6 +136,9 @@ var forgeSyncRemoteForms = []struct {
 	{"already git+https", "git+https://github.com/org/repo.git", "git+https://github.com/org/repo.git"},
 	{"git+ssh without user", "git+ssh://github.com/org/repo.git", "git+ssh://github.com/org/repo.git"},
 	{"gitlab", "https://gitlab.com/group/repo.git", "git+https://gitlab.com/group/repo.git"},
+	// No .git suffix, so only the host can make it a forge: github.com, after
+	// the last "@" of the authority (mc-gcmer).
+	{"multi-@ userinfo", "https://a@b@github.com/org/repo", "git+https://a@b@github.com/org/repo"},
 }
 
 // newForgeSyncRemoteWorkspace builds a workspace whose config.yaml carries
@@ -474,6 +492,9 @@ func TestDetectBootstrapAction_BlockedIsDerivedNotInherited(t *testing.T) {
 		cfg.DoltMode = configfile.DoltModeServer
 		cfg.DoltDatabase = "mydb"
 		cfg.DoltDataDir = doltDataDir
+		// The workspace names its server's port, so there is a server to
+		// probe; with none named bootstrap probes nothing.
+		cfg.DoltServerPort = 13307
 		// Never created: this is the "fresh clone, .beads synthesized" path.
 		return filepath.Join(tmpDir, ".beads"), cfg
 	}
@@ -710,6 +731,11 @@ func TestDetectBootstrapAction_ServerTransientRestart_DBFoundAfterRetry(t *testi
 	cfg.DoltMode = configfile.DoltModeServer
 	cfg.DoltDatabase = "mydb"
 	cfg.DoltDataDir = doltDataDir
+	// The workspace names its server's port, never inheriting one: the Dolt
+	// test server exports BEADS_DOLT_PORT/BEADS_DOLT_SERVER_PORT when it is
+	// up, and with no port named bootstrap probes nothing.
+	cfg.DoltServerPort = 13307
+	t.Setenv("BEADS_DOLT_PORT", "")
 
 	// Simulate a restart: DB absent for first 2 probes, then found.
 	callCount := 0

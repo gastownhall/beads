@@ -9,6 +9,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/routing"
 	"github.com/steveyegge/beads/internal/storage"
 )
@@ -31,12 +32,30 @@ func resolveRoutingConfigValue(key string, dbValues map[string]string) string {
 	return strings.TrimSpace(dbValues[key])
 }
 
+// routingSettingsStore is the store whose settings document may supply the
+// routing.* and contributor.* keys, or nil when none may.
+//
+// A remote backend's settings are one document shared by every client of the
+// server, and the routing targets are LOCAL filesystem paths, which such a
+// document cannot name for every machine reading it. Contributor routing for a
+// remote workspace is therefore configured locally (config.yaml / env) only:
+// `bd create`'s routing decision and the lookup fallback a missing id takes
+// read the same local-only answer, and neither pays a settings round trip to
+// learn it (S6b).
+func routingSettingsStore(store storage.DoltStorage) storage.DoltStorage {
+	if store == nil || storeIsRemoteBackend(store) {
+		return nil
+	}
+	return store
+}
+
 func getRoutingConfigValue(ctx context.Context, store storage.DoltStorage, key string) string {
 	if src := config.GetValueSource(key); src != config.SourceDefault {
 		if value := strings.TrimSpace(config.GetString(key)); value != "" {
 			return value
 		}
 	}
+	store = routingSettingsStore(store)
 	if store == nil {
 		return ""
 	}
@@ -50,7 +69,8 @@ func getRoutingConfigValue(ctx context.Context, store storage.DoltStorage, key s
 
 func determineAutoRoutedRepoPath(ctx context.Context, store storage.DoltStorage) (string, routing.RoutingRule) {
 	var dbValues map[string]string
-	if store != nil {
+	// Local-only for a remote backend: see routingSettingsStore.
+	if store = routingSettingsStore(store); store != nil {
 		all, allErr := store.GetAllConfig(ctx)
 		if allErr != nil {
 			debug.Logf("DEBUG: failed to read config from store: %v\n", allErr)
@@ -156,6 +176,20 @@ func printContributorRoutingNotice(ctx context.Context, localStore storage.DoltS
 // returned routing.RoutingRule identifies which rule matched, for callers
 // that print a routing notice.
 func openRoutedReadStore(ctx context.Context, store storage.DoltStorage) (storage.DoltStorage, bool, routing.RoutingRule, error) {
+	return openAutoRoutedStore(ctx, store, false)
+}
+
+// openAutoRoutedStore opens the target selected by auto-routing. Every rule,
+// maintainer, contributor and default alike, opens writable when writable is
+// set, for write-intent callers (resolveAndGetIssueForMutation and its exact
+// twin, bd close target resolution) that commit the change where the issue
+// lives. A contributor's target is their own planning repository, the one bd
+// create already writes to, so a planning issue is claimed, commented on and
+// closed there (GH#2345, beads-0km). Reads stay read-only.
+//
+// The target opens its own dolt_database, as a prefix route does
+// (openRoutedTargetStore, autoRouteTargetDatabase).
+func openAutoRoutedStore(ctx context.Context, store storage.DoltStorage, writable bool) (storage.DoltStorage, bool, routing.RoutingRule, error) {
 	repoPath, rule := determineAutoRoutedRepoPath(ctx, store)
 	if repoPath == "" || repoPath == "." {
 		return nil, false, routing.RuleNone, nil
@@ -163,9 +197,20 @@ func openRoutedReadStore(ctx context.Context, store storage.DoltStorage) (storag
 
 	targetRepoPath := routing.ExpandPath(repoPath)
 	targetBeadsDir := filepath.Join(targetRepoPath, ".beads")
-	targetStore, err := newReadOnlyStoreFromConfig(ctx, targetBeadsDir)
+	// Refuse what admission refuses from the target's own contents first, as
+	// the open below would: a write's dolt_database lookup would otherwise
+	// report a historical SQLite or legacy Dolt target as a missing
+	// dolt_database field.
+	if _, err := admitForeignWorkspace(targetBeadsDir); err != nil {
+		return nil, false, rule, fmt.Errorf("failed to open routed store at %s: %w", remedy.PrintedValue(targetRepoPath), err)
+	}
+	database, err := autoRouteTargetDatabase(targetBeadsDir, writable)
 	if err != nil {
-		return nil, false, rule, fmt.Errorf("failed to open routed store at %s: %w", targetRepoPath, err)
+		return nil, false, rule, fmt.Errorf("failed to open routed store at %s: target has no dolt_database configured: %w", remedy.PrintedValue(targetRepoPath), err)
+	}
+	targetStore, err := openRoutedTargetStore(ctx, targetBeadsDir, database, writable)
+	if err != nil {
+		return nil, false, rule, fmt.Errorf("failed to open routed store at %s: %w", remedy.PrintedValue(targetRepoPath), err)
 	}
 	return wireExternalDependencyPolicy(targetStore), true, rule, nil
 }

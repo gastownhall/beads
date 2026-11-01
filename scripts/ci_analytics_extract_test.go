@@ -18,13 +18,18 @@ import (
 // fix on top of the final squashed-to-one-commit S2 history at
 // 00161373bc7bbfcef8d6a05ac5ce70409fc7f2ac: negative protobuf durations were
 // decoded as unsigned, so the collector rejected roughly 22% of artifacts on
-// remote_queue_ms. The fixtures are generated under env -i and committed
+// remote_queue_ms. Re-vendored at gascity commit
+// 2ddde0d94be15d95086cc2bcb169303ea1243456
+// (fix/ci-analytics-clamp-test-timings, extractor 1.1.1): BEP test timings
+// kept their sign, so a remote test's -1 ms queueTime (clock skew) still
+// rejected 17-32% of artifacts on tests[].results[].queue_ms. The fixtures
+// are generated under env -i and committed
 // with the compact exec log decompressed (*.binpb), never a zstd frame, so
 // nothing opaque reaches version control, the same way
 // tools/rbe/cache-zstd-probe.sh is a byte copy. gascity is canonical for
 // this pair; TestCIAnalyticsExtractorIsPinnedToGascity below pins both
 // files' sha256 so a local edit here is caught instead of silently
-// drifting out of lockstep. The vendored test file's own 67 cases (run in
+// drifting out of lockstep. The vendored test file's own 70 cases (run in
 // place by TestCIAnalyticsExtractUnitTests) now include the
 // mismatched-invocation-id and truncated-BEP cases beads originally added
 // (test_beads_mismatch_fixture_reports_mismatch,
@@ -43,11 +48,11 @@ func ciAnalyticsTestdataDir(root string) string {
 }
 
 // ciAnalyticsExtractSHA256 and ciAnalyticsExtractUnitTestSHA256 pin the
-// vendored files' content, computed from gascity's signed-durations fix at
-// 9865cc045aee1391dbcc7eac99339c26e3a5ce71.
+// vendored files' content, computed from gascity's test-timing clamp at
+// 2ddde0d94be15d95086cc2bcb169303ea1243456 (extractor 1.1.1).
 const (
-	ciAnalyticsExtractSHA256         = "be6d187804f8b44a75af40113fef97c37476923a1c6a0966d6216a791935c674"
-	ciAnalyticsExtractUnitTestSHA256 = "7e67b54b0e6d374efed899c8cae448f75effcdd1210b053e242a3ff51f1c8992"
+	ciAnalyticsExtractSHA256         = "1d0049bc37d957a73c6c6f808d6103ddad290a8dd053980ec9f97d4750bed2b7"
+	ciAnalyticsExtractUnitTestSHA256 = "42331bf3e5ce5e650f62f7c00913b0155416352360e3b1d99be58e5508d22f9f"
 	// ciAnalyticsTestdataSHA256 pins testdata/ci_analytics/** as a whole
 	// (regen.sh, mismatch.bep.jsonl, poisoned-bep.json and real/*): a sha256
 	// over every file's slash-joined relative path and bytes, each
@@ -57,7 +62,8 @@ const (
 	// individually-edited fixture that a single-file sha256 (the two
 	// above) can't. The signed-durations fix (9865cc045aee) touches only
 	// the extractor and its unit test, not testdata/ci_analytics/, so this
-	// pin is unchanged and was re-verified against gascity's tree.
+	// pin is unchanged and was re-verified against gascity's tree. The
+	// test-timing clamp (2ddde0d94be1) likewise leaves testdata alone.
 	ciAnalyticsTestdataSHA256 = "dc9ac595df095ef8fe1b965d0e2a8d0b0e5694c3122208891d27655bcc2285d5"
 )
 
@@ -120,7 +126,7 @@ func TestCIAnalyticsExtractorIsPinnedToGascity(t *testing.T) {
 		}
 		sum := sha256.Sum256(raw)
 		if got := hex.EncodeToString(sum[:]); got != tc.want {
-			t.Errorf("%s sha256 = %s, want %s (gascity ci/analytics-extract-signed-durations @ 9865cc045aee1391dbcc7eac99339c26e3a5ce71): "+
+			t.Errorf("%s sha256 = %s, want %s (gascity fix/ci-analytics-clamp-test-timings @ 2ddde0d94be15d95086cc2bcb169303ea1243456, extractor 1.1.1): "+
 				"either this file drifted from gascity's canonical copy, or gascity changed it "+
 				"and this pin (and the vendored copy) needs updating to match", tc.path, got, tc.want)
 		}
@@ -133,7 +139,7 @@ func TestCIAnalyticsExtractorIsPinnedToGascity(t *testing.T) {
 	}
 }
 
-// TestCIAnalyticsExtractUnitTests runs gascity's own 67 unittest cases
+// TestCIAnalyticsExtractUnitTests runs gascity's own 70 unittest cases
 // in-place against the vendored extractor: the real Bazel 9.2.0 fixtures
 // (testdata/ci_analytics/real/*, regenerated under env -i after the S2
 // leak), the synthetic remote/cache-hit exec log built by the test's own

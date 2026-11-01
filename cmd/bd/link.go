@@ -5,7 +5,6 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
-	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/issueops"
@@ -64,8 +63,10 @@ Examples:
 		defer toCleanup()
 
 		dt := types.DependencyType(depType)
-		// bd link writes through the store's own dependency verb rather than
-		// the DependencyEditor role, so it asks the role's rule directly.
+		// link's own checks run before anything is written, and over http
+		// before the dial: the dotted-child rule (the role raises it too) and
+		// the type's length. Unlike `bd dep add`, link takes any type a
+		// workspace spells, so it never asks validateDependencyType.
 		if err := issueops.CheckDottedChildDependency(fromID, toID, dt); err != nil {
 			return HandleErrorRespectJSON("%v", err)
 		}
@@ -74,13 +75,25 @@ Examples:
 			return HandleErrorRespectJSON("invalid dependency type %q: must be non-empty and at most %d characters", depType, types.MaxDependencyTypeLen)
 		}
 
-		dep := &types.Dependency{
-			IssueID:     fromID,
-			DependsOnID: toID,
-			Type:        dt,
+		opsCtx, err := issueOpsContext(ctx)
+		if err != nil {
+			return HandleErrorRespectJSON("%v", err)
+		}
+		// Read the titles while the resolution's reads are fresh, as `bd dep
+		// add` does: an edge changes neither title, and over http a lookup
+		// after the write would be two more round trips.
+		var fromTitle, toTitle string
+		if !jsonOutput {
+			fromTitle, toTitle = lookupTitle(fromID), lookupTitle(toID)
 		}
 
-		if err := fromStore.AddDependencyWithOptions(ctx, dep, currentActor(), storage.DependencyAddOptions{EmitEvent: true}); err != nil {
+		// The write goes through the DependencyEditor role, the route `bd dep
+		// add` takes, so it is served on every backend: a local store and an
+		// http workspace alike (the http client refuses the raw
+		// AddDependencyWithOptions by design). The role records the
+		// dependency_added event the raw verb's EmitEvent did.
+		edge := issueops.DependencyEdge{IssueID: fromID, DependsOnID: toID, Type: dt}
+		if err := addDependencyEdgesDirect(opsCtx, fromStore, []issueops.DependencyEdge{edge}, false); err != nil {
 			return HandleErrorRespectJSON("%v", err)
 		}
 
@@ -104,7 +117,7 @@ Examples:
 			})
 		}
 		fmt.Printf("%s Linked: %s depends on %s (%s)\n",
-			ui.RenderPass("✓"), formatFeedbackIDParen(fromID, lookupTitle(fromID)), formatFeedbackIDParen(toID, lookupTitle(toID)), depType)
+			ui.RenderPass("✓"), formatFeedbackIDParen(fromID, fromTitle), formatFeedbackIDParen(toID, toTitle), depType)
 		return nil
 	},
 }

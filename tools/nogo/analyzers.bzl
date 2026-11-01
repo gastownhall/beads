@@ -14,7 +14,7 @@ This is the single list of analyzers `//tools/nogo` runs on every Go compile:
     .golangci.yml's linters.enable.
 """
 
-# cmd/go's defaultVetFlags (Go 1.26), as analyzer names (-bool is "bools",
+# cmd/go's defaultVetFlags (Go 1.27), as analyzer names (-bool is "bools",
 # -buildtags "buildtag").
 VET_PASSES = [
     "atomic",
@@ -26,6 +26,7 @@ VET_PASSES = [
     "nilfunc",
     "printf",
     "slog",
+    "stdversion",
     "stringintconv",
     "tests",
 ]

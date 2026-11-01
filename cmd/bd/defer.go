@@ -82,7 +82,10 @@ Examples:
 
 		ctx := rootCtx
 
-		_, err := utils.ResolvePartialIDs(ctx, store, args)
+		// Resolve every argument before any write so one bad ID aborts the
+		// command. The loop reuses these IDs: resolving again would repeat
+		// the partial-ID notice (mc-qec7j).
+		resolvedIDs, err := utils.ResolvePartialIDs(ctx, store, args)
 		if err != nil {
 			return HandleError("%v", err)
 		}
@@ -93,13 +96,7 @@ Examples:
 			return HandleErrorWithHint("database not initialized", diagHint())
 		}
 
-		for _, id := range args {
-			fullID, err := utils.ResolvePartialID(ctx, store, id)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error resolving %s: %v\n", id, err)
-				continue
-			}
-
+		for _, fullID := range resolvedIDs {
 			updates := map[string]interface{}{
 				"status": string(types.StatusDeferred),
 			}

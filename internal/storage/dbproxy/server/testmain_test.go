@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"regexp"
+	"slices"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/doltserver"
@@ -118,6 +119,16 @@ func testMainInner(m *testing.M) int {
 	// scripts/test.sh, a second `go test`), are left untouched.
 	doltserver.SweepDeadSuiteRoots(os.TempDir(), suiteRootPrefix)
 
+	// Stop every dolt this suite runs (each inherits the environment) from
+	// forking a detached `dolt send-metrics` child on exit; that child
+	// outlives the test and races t.TempDir's RemoveAll of HOME. See
+	// TestSuiteDisablesDoltEventFlush. tools/bazel/test_env.sh exports the
+	// same for Bazel; this covers plain `go test` (macOS CI, local runs).
+	if err := os.Setenv("DOLT_DISABLE_EVENT_FLUSH", "1"); err != nil {
+		fmt.Fprintf(os.Stderr, "FATAL: set DOLT_DISABLE_EVENT_FLUSH: %v\n", err)
+		return 1
+	}
+
 	// Pin TMPDIR under a suite-owned root so every t.TempDir() — including
 	// each server's rootDir, which is its working directory — is nested under
 	// something the sweeps may vouch for.
@@ -153,5 +164,20 @@ func TestTempDirLandsUnderSuiteSweepRoot(t *testing.T) {
 	dir := t.TempDir()
 	if !testutil.PathUnderSuiteRoot(dir, suiteTempRoot) {
 		t.Fatalf("t.TempDir() %q is not under suiteTempRoot %q", dir, suiteTempRoot)
+	}
+}
+
+// TestSuiteDisablesDoltEventFlush guards the DOLT_DISABLE_EVENT_FLUSH export
+// in testMainInner. Without it, every `dolt sql-server` this suite stops
+// cleanly (SIGTERM) forks a detached `dolt send-metrics` child on exit. That
+// child outlives the test, re-creates and rewrites <HOME>/.dolt/eventsData
+// (HOME is a t.TempDir()), and races t.TempDir's RemoveAll, which fails the
+// test with "TempDir RemoveAll cleanup: ... directory not empty". Plain
+// `go test` on macOS (main.yml's Test (macOS) job) hit it on roughly half the
+// pushes to main; Bazel never did only because tools/bazel/test_env.sh
+// exports the same variable.
+func TestSuiteDisablesDoltEventFlush(t *testing.T) {
+	if !slices.Contains(doltserver.ServerSpawnEnv(), "DOLT_DISABLE_EVENT_FLUSH=1") {
+		t.Fatal("dolt sql-server would be spawned without DOLT_DISABLE_EVENT_FLUSH=1; its detached send-metrics child races t.TempDir cleanup")
 	}
 }

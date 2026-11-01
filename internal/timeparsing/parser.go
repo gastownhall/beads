@@ -87,8 +87,13 @@ func applyDuration(base time.Time, amount int, unit string) time.Time {
 	}
 }
 
-// isCompactDuration returns true if the string matches compact duration syntax.
-func isCompactDuration(s string) bool {
+// IsCompactDuration reports whether s is in the compact duration syntax that
+// ParseCompactDuration parses; only an amount too large for an int matches it
+// and still fails to parse. Callers that classify a compact duration without
+// parsing it (the query lexer) use this instead of keeping their own copy of
+// the unit set, so a unit added to compactDurationRe reaches them with no edit
+// of theirs.
+func IsCompactDuration(s string) bool {
 	return compactDurationRe.MatchString(s)
 }
 

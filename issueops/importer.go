@@ -58,7 +58,7 @@ type SkippedDependency struct {
 // ImportBatchResult reports what one import batch landed.
 type ImportBatchResult struct {
 	// Created counts the rows the batch wrote — inserts and rewrites alike —
-	// excluding stale-rejected rows.
+	// excluding stale-rejected and retired rows.
 	Created int
 	// MemoriesImported counts the memory records written.
 	MemoriesImported int
@@ -67,6 +67,11 @@ type ImportBatchResult struct {
 	StaleRejectedIDs []string
 	// SkippedDependencies lists the edges dropped by the batch, deduplicated.
 	SkippedDependencies []SkippedDependency
+	// RetiredIDs lists rows the batch did not write because a retaining
+	// retention sweep retired their id (SweepRequest.RetainIDs): an import
+	// never resurrects a swept row. Deduplicated, in the order the batch
+	// carried them. Created does not count them.
+	RetiredIDs []string
 	// PrefixSynced reports that the batch wrote the stored issue_prefix to
 	// SyncIssuePrefix — either seeding it, when the config table carried no
 	// prefix at all, or rewriting a stored value that disagreed.

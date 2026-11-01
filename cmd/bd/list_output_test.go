@@ -2,9 +2,12 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"errors"
+	"fmt"
 	"io"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -62,6 +65,117 @@ func TestOutputDotFormatExactBytes(t *testing.T) {
 `
 	if got := out.String(); got != want {
 		t.Fatalf("DOT output bytes differ\ngot:\n%q\nwant:\n%q", got, want)
+	}
+}
+
+// TestOutputDotFormatCanonicalOrder pins that the DOT rendering is a function
+// of the graph alone. The page it is handed is in display order (priority,
+// then created_at DESC at one-second precision, then id), so the same two
+// equal-priority issues arrive in either order depending on whether they were
+// created in the same second; and the proxied route's edge read does not order
+// one issue's edges. Every order of the page, with each issue's edges either
+// way round, must print these bytes: nodes by id, edges by source, target and
+// type, all in byte order (so dot-10 sorts before dot-2). It also pins that the
+// caller's page and edge slices are not reordered.
+func TestOutputDotFormatCanonicalOrder(t *testing.T) {
+	t.Parallel()
+
+	issues := []*types.Issue{
+		{ID: "dot-2", Title: "Two", Status: types.StatusInProgress, Priority: 0, IssueType: types.TypeBug},
+		{ID: "dot-10", Title: "Ten", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeEpic},
+		{ID: "dot-1", Title: "One", Status: types.StatusClosed, Priority: 2, IssueType: types.TypeTask},
+	}
+	edges := map[string][]*types.Dependency{
+		"dot-2": {
+			{IssueID: "dot-2", DependsOnID: "dot-10", Type: types.DepRelated},
+			{IssueID: "dot-2", DependsOnID: "dot-unlisted", Type: types.DepBlocks},
+			{IssueID: "dot-2", DependsOnID: "dot-1", Type: types.DepBlocks},
+		},
+		"dot-1": {{IssueID: "dot-1", DependsOnID: "dot-10", Type: types.DepParentChild}},
+	}
+	const want = `digraph dependencies {
+  rankdir=TB;
+  node [shape=box, style=rounded];
+
+  "dot-1" [label="dot-1\n[task P2]\nOne\n(closed)", style="rounded,filled", fillcolor="lightgray", fontcolor="dimgray"];
+  "dot-10" [label="dot-10\n[epic P1]\nTen\n(open)", style="rounded,filled", fillcolor="white", fontcolor="black"];
+  "dot-2" [label="dot-2\n[bug P0]\nTwo\n(in_progress)", style="rounded,filled", fillcolor="lightyellow", fontcolor="black"];
+
+  "dot-1" -> "dot-10" [label="parent-child", color=blue, style=solid];
+  "dot-2" -> "dot-1" [label="blocks", color=red, style=bold];
+  "dot-2" -> "dot-10" [label="related", color=gray, style=dashed];
+}
+`
+	for _, perm := range [][]int{{0, 1, 2}, {0, 2, 1}, {1, 0, 2}, {1, 2, 0}, {2, 0, 1}, {2, 1, 0}} {
+		for _, reversed := range []bool{false, true} {
+			page := []*types.Issue{issues[perm[0]], issues[perm[1]], issues[perm[2]]}
+			pageEdges := map[string][]*types.Dependency{}
+			for id, deps := range edges {
+				deps = slices.Clone(deps)
+				if reversed {
+					slices.Reverse(deps)
+				}
+				pageEdges[id] = deps
+			}
+			wantPage := slices.Clone(page)
+			wantEdges := map[string][]*types.Dependency{}
+			for id, deps := range pageEdges {
+				wantEdges[id] = slices.Clone(deps)
+			}
+
+			var out bytes.Buffer
+			if err := outputDotFormat(&out, page, pageEdges); err != nil {
+				t.Fatalf("outputDotFormat: %v", err)
+			}
+			name := fmt.Sprintf("page order %v, edges reversed %v", perm, reversed)
+			if got := out.String(); got != want {
+				t.Errorf("%s: DOT output bytes differ\ngot:\n%s\nwant:\n%s", name, got, want)
+			}
+			if !slices.Equal(page, wantPage) {
+				t.Errorf("%s: outputDotFormat reordered the caller's page", name)
+			}
+			for id, deps := range wantEdges {
+				if !slices.Equal(pageEdges[id], deps) {
+					t.Errorf("%s: outputDotFormat reordered the caller's edges of %s", name, id)
+				}
+			}
+		}
+	}
+}
+
+// dotNodeDecl and dotEdgeDecl match the node and edge lines outputDotFormat
+// writes.
+var (
+	dotNodeDecl = regexp.MustCompile(`(?m)^  "([^"]+)" \[label=`)
+	dotEdgeDecl = regexp.MustCompile(`(?m)^  "([^"]+)" -> "([^"]+)" \[label="([^"]+)"`)
+)
+
+// assertDotCanonicalOrder is TestOutputDotFormatCanonicalOrder's check for a
+// real `bd list --format dot` run: nodes in byte order of id, edges in byte
+// order of source, target and type. The embedded and proxied list seeds mint
+// their ids across five priorities, so a rendering that followed the page's
+// priority order fails it.
+func assertDotCanonicalOrder(t *testing.T, out string) {
+	t.Helper()
+	var nodes []string
+	for _, m := range dotNodeDecl.FindAllStringSubmatch(out, -1) {
+		nodes = append(nodes, m[1])
+	}
+	if len(nodes) < 2 {
+		t.Fatalf("dot output declares %d nodes, want every listed issue:\n%s", len(nodes), out)
+	}
+	if !slices.IsSorted(nodes) {
+		t.Errorf("dot output declares its nodes out of id order: %v", nodes)
+	}
+	type edge struct{ from, to, typ string }
+	var edges []edge
+	for _, m := range dotEdgeDecl.FindAllStringSubmatch(out, -1) {
+		edges = append(edges, edge{m[1], m[2], m[3]})
+	}
+	if !slices.IsSortedFunc(edges, func(a, b edge) int {
+		return cmp.Or(cmp.Compare(a.from, b.from), cmp.Compare(a.to, b.to), cmp.Compare(a.typ, b.typ))
+	}) {
+		t.Errorf("dot output declares its edges out of (source, target, type) order: %v", edges)
 	}
 }
 

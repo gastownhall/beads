@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
@@ -211,7 +212,7 @@ var doneTodoCmd = &cobra.Command{
 		for _, issueID := range args {
 			issue, err := getStore().GetIssue(ctx, issueID)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: failed to get issue %s: %v\n", issueID, err)
+				fmt.Fprintf(os.Stderr, "Error: failed to get issue %s: %s\n", issueID, remedy.PrintedMessage(err))
 				continue
 			}
 			if issue == nil {

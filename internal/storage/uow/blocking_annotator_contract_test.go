@@ -72,6 +72,9 @@ func TestBlockingAnnotatorContract(t *testing.T) {
 	t.Run("WritesNothing", func(t *testing.T) {
 		conformance.RunBlockingAnnotatorWritesNothing(t, ctx, fixture)
 	})
+	t.Run("ReportsTheTransitiveBlockedFlag", func(t *testing.T) {
+		conformance.RunBlockingAnnotatorReportsTheTransitiveBlockedFlag(t, ctx, fixture)
+	})
 }
 
 func newUOWBlockingAnnotatorFixture(t *testing.T, ctx context.Context, prefix string) conformance.BlockingAnnotatorFixture {

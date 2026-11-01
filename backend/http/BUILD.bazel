@@ -1,0 +1,200 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
+go_library(
+    name = "http",
+    srcs = [
+        "attach.go",
+        "credential.go",
+        "errors.go",
+        "http.go",
+        "target.go",
+    ],
+    importpath = "github.com/steveyegge/beads/backend/http",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//backend",
+        "//internal/configfile",
+        "//internal/gitignore",
+        "//internal/httpapi/apigen",
+        "//internal/httpclient",
+        "//internal/httpclient/wire",
+        "//internal/storage/backends",
+    ],
+)
+
+go_test(
+    name = "http_test",
+    # The served e2e cases run ~4-5 min on the farm under
+    # BEADS_TEST_EMBEDDED_DOLT=1, past the medium 300s action limit.
+    size = "large",
+    timeout = "long",
+    srcs = [
+        "attach_test.go",
+        "e2e_blocked_flags_test.go",
+        "e2e_blocked_test.go",
+        "e2e_cli_test.go",
+        "e2e_export_test.go",
+        "e2e_gates_test.go",
+        "e2e_heartbeat_test.go",
+        "e2e_link_test.go",
+        "e2e_list_filters_test.go",
+        "e2e_list_page_edges_test.go",
+        "e2e_mol_test.go",
+        "e2e_promote_test.go",
+        "e2e_read_your_own_write_test.go",
+        "e2e_recompute_blocked_test.go",
+        "e2e_remote_roles_test.go",
+        "e2e_request_budget_test.go",
+        "e2e_search_test.go",
+        "e2e_show_current_test.go",
+        "e2e_show_single_fetch_test.go",
+        "open_test.go",
+        "per_open_credential_test.go",
+        "register_test.go",
+    ],
+    # The e2e files exec the real bd (bazeltest.PrebuiltBD); they run under
+    # BEADS_TEST_EMBEDDED_DOLT=1 and skip otherwise.
+    data = ["//cmd/bd:bd_for_tests"],
+    env = {"BEADS_TEST_BD_BINARY": "$(rlocationpath //cmd/bd:bd_for_tests)"},
+    deps = [
+        ":http",
+        "//backend",
+        "//internal/configfile",
+        "//internal/httpapi",
+        "//internal/httpclient",
+        "//internal/storage",
+        "//internal/storage/backends",
+        "//internal/storage/domain",
+        "//internal/storage/embeddeddolt",
+        "//internal/storage/issueops",
+        "//internal/testutil/bazeltest",
+        "//internal/testutil/legacyworkspace",
+    ],
+)
+
+# http_test again, with the e2e tier on: BEADS_TEST_EMBEDDED_DOLT=1 starts the
+# in-process server over embedded Dolt and BEADS_HTTP_TEST_REQUIRED=1 turns a
+# skip of that tier into a failure. http_test alone skips the TestE2E_* cases
+# in every lane, because no lane sets those variables for it. It repeats
+# http_test's `env` (go_test_pinned_shard.sh, like go_test_variant.sh, does
+# not inherit it).
+#
+# Shard count: the package's tests are serial. The 32 TestE2E_* cases
+# measured at >= 3s are pinned (tools/bazel/go_test_pinned_shard.sh,
+# served_pinned_shards.txt from tools/bazel/pin_shards.py --shards 10
+# --min-seconds 3 --record-measured --tests-in backend/http) onto 10 shards,
+# and the binary's round-robin deals every other test over the last 4: the
+# 30 the manifest lists rr (about a second together) and any test added
+# since. The
+# durations are each test's maximum over 35 PR runs of the lane on
+# 2026-10-23..24 (bazel.yml's bazel-embedded-served-testxml artifact, 29
+# distinct executions of each shard): 18-174s a test. The slowest,
+# TestE2E_BlockedFlagsOverHTTP (117s median), alone sets the longest shard;
+# replayed over those runs the longest shard takes ~125s at the median run
+# and ~143s at p90. The same test's time varies 2-4x between runs with the
+# executors' load, so size the pins from sharded CI runs of the lane, never
+# from a local one.
+# With one round-robin shard (shard_count 7, pins of 2026-10-13) every test
+# added later landed in it, and by 2026-10-23 it ran 314-633s, the lane's
+# last action. scripts/pinned_shards_sources_test.go fails once more than 2
+# tests per round-robin shard are listed neither pinned nor rr (added since
+# the measurement), and prints the command that regenerates the manifest
+# (needs gh and the network; --tests-in drops what the runs measured that
+# this checkout does not define, renamed or other branches' tests):
+#   python3 tools/bazel/pin_shards.py --shards 10 --min-seconds 3 \
+#       --record-measured --tests-in backend/http \
+#       --write backend/http/served_pinned_shards.txt \
+#       $(tools/bazel/fetch_served_testxml.sh 30 "$(mktemp -d)")
+#
+# Tags:
+#   embedded: the embedded-Dolt tier; excluded from --config=prcore/ci,
+#     selected by --config=embedded.
+sh_test(
+    name = "http_served_test",
+    size = "large",
+    # -test.timeout=19m fires (with a goroutine dump) before Bazel's 1200s
+    # action limit (eternal under --config=embedded).
+    timeout = "eternal",
+    srcs = ["//tools/bazel:go_test_pinned_shard.sh"],
+    args = [
+        "$(rootpath :served_pinned_shards.txt)",
+        "$(rootpath :http_test)",
+        "-test.v",
+        "-test.count=1",
+        "-test.timeout=19m",
+    ],
+    data = [
+        "served_pinned_shards.txt",
+        ":http_test",
+        "//cmd/bd:bd_for_tests",
+    ],
+    env = {
+        "BEADS_HTTP_TEST_REQUIRED": "1",
+        "BEADS_TEST_BD_BINARY": "$(rlocationpath //cmd/bd:bd_for_tests)",
+        "BEADS_TEST_EMBEDDED_DOLT": "1",
+    },
+    shard_count = 14,
+    tags = ["embedded"],
+)
+
+# --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "repo_doc_files",
+    srcs = glob(
+        [
+            "**/*.md",
+            "**/*.mdx",
+        ],
+        allow_empty = True,
+        exclude = ["**/node_modules/**"],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = [
+            "**/*_test.go",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
+        exclude = ["**/node_modules/**"],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_other_files",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.db",
+            "**/*.exe",
+            "**/*.go",
+            "**/*.md",
+            "**/*.mdx",
+            "**/*.out",
+            "**/*.prof",
+            "**/*.pyc",
+            "**/*.test",
+            "**/__pycache__/**",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+# --- end repo_files ---

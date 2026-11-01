@@ -133,6 +133,12 @@ func TestEmbeddedReaderListEmptyPageIsWellFormed(t *testing.T) {
 	conformance.RunReaderListEmptyPageIsWellFormed(t, ctx, newEmbeddedReaderFixture(t, "rdr"))
 }
 
+func TestEmbeddedReaderListQueryMatchesTheTitleOrTheID(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	conformance.RunReaderListQueryMatchesTheTitleOrTheID(t, ctx, newEmbeddedReaderFixture(t, "rdr"))
+}
+
 func TestEmbeddedReaderGetResolvesTheExactIDAcrossBothPlanes(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
 	ctx := t.Context()
@@ -241,6 +247,18 @@ func TestEmbeddedReaderListWispTypeNarrowsTheAdmittedPlaneRatherThanAdmittingIt(
 	conformance.RunReaderListWispTypeNarrowsTheAdmittedPlaneRatherThanAdmittingIt(t, ctx, newEmbeddedReaderFixture(t, "rdr"))
 }
 
+func TestEmbeddedReaderListTimeBoundsAreStrictAndWholeSecond(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	conformance.RunReaderListTimeBoundsAreStrictAndWholeSecond(t, ctx, newEmbeddedReaderFixture(t, "rdr"))
+}
+
+func TestEmbeddedReaderListFilterFamiliesNarrowToTheirRows(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	conformance.RunReaderListFilterFamiliesNarrowToTheirRows(t, ctx, newEmbeddedReaderFixture(t, "rdr"))
+}
+
 func TestEmbeddedReaderListBriefDropsTheFreeFormTextAndNothingElse(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
 	ctx := t.Context()
@@ -276,5 +294,6 @@ func newEmbeddedReaderFixture(t *testing.T, prefix string) conformance.ReaderFix
 			_, err := te.store.AddIssueComment(ctx, issueID, author, text)
 			return err
 		},
+		PromoteWisp: te.store.PromoteFromEphemeral,
 	}
 }

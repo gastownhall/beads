@@ -63,8 +63,9 @@ SCHEMA_VERSION = 1
 # Bumped alongside the signed-duration fix below, so S4 can tell a
 # fixed-up artifact (no more 2^63/2^64-scale decoy durations from a
 # negative queue/exec/setup/upload time decoded as unsigned) from one
-# produced by the earlier, buggy extractor.
-EXTRACTOR_VERSION = "1.1.0"
+# produced by the earlier, buggy extractor. 1.1.1 also clamps BEP test
+# timings (build_tests), so a skewed remote test no longer reports -1 ms.
+EXTRACTOR_VERSION = "1.1.1"
 
 # A per-spawn duration (Duration.seconds*1000 + Duration.nanos//1e6, after
 # signed decoding) above this is treated as corrupt, not a real build: a
@@ -961,6 +962,10 @@ def build_tests(events):
                 duration_ms = as_duration_ms(tr.get("testAttemptDuration"))
                 if duration_ms is None:
                     duration_ms = as_int(tr.get("testAttemptDurationMillis"))
+                # BEP Durations keep their sign. rbe-west's scheduler and a worker disagree by about
+                # a millisecond, so a remotely executed test reports queueTime "-0.000612s" (-1 ms):
+                # clamp like dur_ms() does for exec-log spawns (the collector rejects negatives).
+                duration_ms = _clamp_duration_ms(duration_ms)
                 queue_ms = fetch_ms = exec_ms = 0
                 # Per-test timing lives under testResult.executionInfo.
                 # timingBreakdown, not a top-level testResult.timingBreakdown
@@ -975,6 +980,7 @@ def build_tests(events):
                     ms = as_duration_ms(child.get("time"))
                     if ms is None:
                         continue
+                    ms = _clamp_duration_ms(ms)
                     if name == "queueTime":
                         queue_ms = ms
                     elif name == "fetchTime":

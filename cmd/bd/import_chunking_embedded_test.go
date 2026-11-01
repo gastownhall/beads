@@ -84,7 +84,7 @@ func provisionChunkStore(t *testing.T) storage.DoltStorage {
 // End-to-end against the real engine: a mid-import failure leaves a committed,
 // queryable prefix, and re-running the same import converges — every row
 // present, cross-chunk dependencies wired, no duplicated events.
-func TestImportChunkedRealStoreResumeConverges(t *testing.T) {
+func TestEmbeddedImportChunkedRealStoreResumeConverges(t *testing.T) {
 	requireEmbeddedDolt(t)
 	setImportChunkSize(t, 5)
 	recordImportPauses(t)
@@ -179,7 +179,7 @@ func TestImportChunkedRealStoreResumeConverges(t *testing.T) {
 // edges its import file declares must be visible too. This is the red-team
 // ready-window finding: the previous two-phase layout committed every row
 // dep-less first, so `bd ready` mid-import offered blocked work for dispatch.
-func TestImportChunkedNoReadyWindowAtAnyFreezePoint(t *testing.T) {
+func TestEmbeddedImportChunkedNoReadyWindowAtAnyFreezePoint(t *testing.T) {
 	requireEmbeddedDolt(t)
 	setImportChunkSize(t, 5)
 	recordImportPauses(t)
@@ -251,7 +251,7 @@ func TestImportChunkedNoReadyWindowAtAnyFreezePoint(t *testing.T) {
 // but the no-ready-window invariant must hold there too — otherwise the
 // dependent commits ready-without-blocker for the rest of the import. Regression
 // for the attempt-1 review finding.
-func TestImportChunkedNoReadyWindowWithReadinessEdgeIntoCycle(t *testing.T) {
+func TestEmbeddedImportChunkedNoReadyWindowWithReadinessEdgeIntoCycle(t *testing.T) {
 	requireEmbeddedDolt(t)
 	setImportChunkSize(t, 5)
 	recordImportPauses(t)
@@ -339,7 +339,7 @@ func TestImportChunkedNoReadyWindowWithReadinessEdgeIntoCycle(t *testing.T) {
 // Ordering the spawner inline with the waiter is not enough; every in-batch
 // child of a waited spawner must be emitted no later than the waiter. Regression
 // for the attempt-2 review blocker.
-func TestImportChunkedWaitsForChildImportedLaterStaysBlocked(t *testing.T) {
+func TestEmbeddedImportChunkedWaitsForChildImportedLaterStaysBlocked(t *testing.T) {
 	requireEmbeddedDolt(t)
 	setImportChunkSize(t, 5)
 	recordImportPauses(t)
@@ -421,7 +421,7 @@ func (r *raceInjectingStore) CreateIssuesWithFullOptions(ctx context.Context, is
 // the row away). The dependency pass must wire edges for every row phase 1
 // accepted, regardless of later row-level updates, and must not clobber the
 // concurrent write.
-func TestImportChunkedConcurrentUpdateKeepsDeferredDeps(t *testing.T) {
+func TestEmbeddedImportChunkedConcurrentUpdateKeepsDeferredDeps(t *testing.T) {
 	requireEmbeddedDolt(t)
 	setImportChunkSize(t, 5)
 	recordImportPauses(t)
@@ -483,7 +483,7 @@ func TestImportChunkedConcurrentUpdateKeepsDeferredDeps(t *testing.T) {
 // update racing the import must leave the blocking edge intact. With ordered
 // inline wiring the row and its edge commit atomically, so no interleaving of
 // row-level updates can separate them.
-func TestImportChunkedConcurrentUpdateKeepsBlockingDeps(t *testing.T) {
+func TestEmbeddedImportChunkedConcurrentUpdateKeepsBlockingDeps(t *testing.T) {
 	requireEmbeddedDolt(t)
 	setImportChunkSize(t, 5)
 	recordImportPauses(t)
@@ -532,7 +532,7 @@ func TestImportChunkedConcurrentUpdateKeepsBlockingDeps(t *testing.T) {
 // the pre-filter read and the row's chunk), the snapshot's deferred deps must
 // stay out too. This is why the dependency pass cannot simply run everything
 // with ConflictSkip: it must be restricted to rows phase 1 accepted.
-func TestImportChunkedStaleRejectedRowKeepsDeferredDepsOut(t *testing.T) {
+func TestEmbeddedImportChunkedStaleRejectedRowKeepsDeferredDepsOut(t *testing.T) {
 	requireEmbeddedDolt(t)
 	setImportChunkSize(t, 5)
 	recordImportPauses(t)
@@ -593,7 +593,7 @@ func TestImportChunkedStaleRejectedRowKeepsDeferredDepsOut(t *testing.T) {
 // straddling a chunk boundary must be wired, not skip-reported, and a
 // same-bucket wisp -> wisp edge straddling the same boundary must survive as
 // before. Every export→import used to lose such edges for good.
-func TestImportChunkedMixedRegularWispCrossBucketEdgesWired(t *testing.T) {
+func TestEmbeddedImportChunkedMixedRegularWispCrossBucketEdgesWired(t *testing.T) {
 	requireEmbeddedDolt(t)
 	setImportChunkSize(t, 5)
 	recordImportPauses(t)
@@ -696,7 +696,7 @@ func TestImportChunkedMixedRegularWispCrossBucketEdgesWired(t *testing.T) {
 // durable and the deferred one is not yet; re-running the same import must
 // backfill it with nothing skip-reported, and a further run must be a no-op
 // for the edges.
-func TestImportChunkedCrossBucketBlocksEdgesResumeBackfills(t *testing.T) {
+func TestEmbeddedImportChunkedCrossBucketBlocksEdgesResumeBackfills(t *testing.T) {
 	requireEmbeddedDolt(t)
 	setImportChunkSize(t, 4)
 	recordImportPauses(t)

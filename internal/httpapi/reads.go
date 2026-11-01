@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -84,7 +85,7 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 	}
 	page, err := rd.Ready(r.Context(), req)
 	if err != nil {
-		s.failReadErr(w, r, err)
+		s.failRegexReadErr(w, r, err, req.LabelRegex)
 		return
 	}
 	writeJSON(w, apigen.ReadyPage{
@@ -154,7 +155,7 @@ func (s *Server) handleCountReady(w http.ResponseWriter, r *http.Request) {
 	}
 	result, err := counter.CountReady(r.Context(), req)
 	if err != nil {
-		s.failReadErr(w, r, err)
+		s.failRegexReadErr(w, r, err, req.LabelRegex)
 		return
 	}
 	writeJSON(w, apigen.ReadyCount{Total: result.Total})
@@ -230,14 +231,11 @@ func countFilters(q *query) issueops.CountRequest {
 		// into it, a plane-only count would also lose its templates and gates.
 		IncludeEphemeral: q.boolean("include_ephemeral"),
 
-		// The four scope fields behind `issues.count.scope` (S8): ParentID and
-		// ExcludeTypes are read exactly as the listing reads them (q.str("parent"),
-		// q.list("exclude_type")), because the role documents its own ParentID and
-		// ExcludeTypes as spelling ListRequest's fields identically. NoParent and
-		// ExcludeStatus have no listing counterpart to mirror — NoParent is a new
-		// boolean switch and ExcludeStatus is a Count-only capability the listing
-		// never exposed — so both are read with this file's own conventions for
-		// their kind (q.boolean, q.list) rather than a listing precedent.
+		// The four scope fields behind `issues.count.scope` (S8), each read
+		// exactly as the listing reads its twin, because the role documents
+		// them as ListRequest's fields under the same names. NoParent and
+		// ExcludeStatus were Count-only when S8 added them; the listing took
+		// both later, behind `issues.list.filters`.
 		ParentID:      q.str("parent"),
 		NoParent:      q.boolean("no_parent"),
 		ExcludeTypes:  q.list("exclude_type"),
@@ -355,12 +353,23 @@ func (s *Server) handleListIssues(w http.ResponseWriter, r *http.Request) {
 		Status:    q.csv("status"),
 		IssueType: q.str("type"),
 		Assignee:  q.str("assignee"),
+		// `bd list --no-assignee`, behind issues.list.noAssignee
+		// (CapIssuesListNoAssignee).
+		NoAssignee: q.boolean("no_assignee"),
 
 		Labels:        q.list("label"),
 		LabelsAny:     q.list("label_any"),
 		ExcludeLabels: q.list("exclude_label"),
 
 		ParentID: q.str("parent"),
+
+		// `bd list --title`, behind issues.list.title (CapIssuesListTitle).
+		TitleSearch: q.str("title"),
+		// `bd list --id`, behind issues.list.ids (CapListIDs). The id scope
+		// arrives as a repeated parameter and reaches the role as the
+		// comma-separated set issueops.ListRequest.IDFilter is. The join is
+		// lossless only because listIDFilter refuses a comma inside a value.
+		IDFilter: listIDFilter(q),
 
 		Brief:            q.boolean("brief"),
 		AllFlag:          q.boolean("all"),
@@ -375,8 +384,12 @@ func (s *Server) handleListIssues(w http.ResponseWriter, r *http.Request) {
 		MetadataFields: q.metadataFields("metadata_field"),
 		HasMetadataKey: q.str("has_metadata_key"),
 
+		// `bd search`'s text, behind issues.list.search (CapIssuesListSearch).
+		Query: q.str("q"),
+
 		Limit: q.limit(),
 	}
+	listFilterParams(q, &req)
 
 	// THE ORDER AND THE CURSOR ARE ONE DECISION. Each served order is a keyset
 	// contract — its own position shape and its own strictly-after predicate —
@@ -424,7 +437,7 @@ func (s *Server) handleListIssues(w http.ResponseWriter, r *http.Request) {
 	}
 	page, err := rd.List(r.Context(), req)
 	if err != nil {
-		s.failReadErr(w, r, err)
+		s.failRegexReadErr(w, r, err, req.LabelRegex)
 		return
 	}
 
@@ -444,6 +457,154 @@ func (s *Server) handleListIssues(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, body)
+}
+
+// listFilterParams decodes the rest of `bd list`'s filter vocabulary, the
+// members behind issues.list.filters (CapIssuesListFilters), into the request
+// the Reader role reads.
+//
+// It is DECODE ONLY. Every member reaches the role as the value the caller
+// sent, and workapi.BuildListFilter stays the one interpreter: how PinnedFlag
+// meets AllFlag and Status, what a type exclusion normalizes to, what a bound
+// compares against — all of that is the role's, on every route. The names are
+// countIssues' wherever that operation already spells the member (countFilters
+// above), so the same filter has one name on both operations.
+//
+// The two closed vocabularies are refused HERE with a 400 naming the
+// parameter, as `bd list --mol-type` / `--wisp-type` refuse at the CLI: the
+// role would match nothing for an unknown value, which a caller would read as
+// "no such rows" rather than "no such type".
+//
+// It is a function of its own, beside countFilters, so a test can drive it
+// over an empty query and read back the exact parameter set it asks for.
+func listFilterParams(q *query, req *issueops.ListRequest) {
+	req.TitleContains = q.str("title_contains")
+	req.DescContains = q.str("desc_contains")
+	req.NotesContains = q.str("notes_contains")
+	req.ExternalContains = q.str("external_contains")
+	req.ExternalRef = q.str("external_ref")
+	req.SpecPrefix = q.str("spec")
+	req.LabelPattern = q.str("label_pattern")
+	req.LabelRegex = q.str("label_regex")
+
+	req.UpdatedAfter = q.timestamp("updated_after")
+	req.UpdatedBefore = q.timestamp("updated_before")
+	req.ClosedAfter = q.timestamp("closed_after")
+	req.ClosedBefore = q.timestamp("closed_before")
+	req.DeferAfter = q.timestamp("defer_after")
+	req.DeferBefore = q.timestamp("defer_before")
+	req.DueAfter = q.timestamp("due_after")
+	req.DueBefore = q.timestamp("due_before")
+
+	req.Priority = q.integer("priority")
+	req.PriorityMin = q.integer("priority_min")
+	req.PriorityMax = q.integer("priority_max")
+
+	req.EmptyDesc = q.boolean("empty_description")
+	req.NoLabels = q.boolean("no_labels")
+	req.NoParent = q.boolean("no_parent")
+	req.ExcludeTypes = q.list("exclude_type")
+	// Validated by the role against the workspace's status vocabulary; an
+	// unknown name is a 400 on this parameter (invalidFilterParam), never an
+	// exclusion that silently excludes nothing.
+	req.ExcludeStatus = q.list("exclude_status")
+
+	req.PinnedFlag = q.boolean("pinned")
+	req.NoPinnedFlag = q.boolean("no_pinned")
+	req.DeferredFlag = q.boolean("deferred")
+	// `now` is THIS server's clock: the role compares due_at against the time
+	// the query runs, which over http is the server's rather than the
+	// invoking process's. The document says so on the parameter.
+	req.OverdueFlag = q.boolean("overdue")
+
+	if v, ok := closedEnum(q, "mol_type", molTypeNames()); ok {
+		mt := issueops.MolType(v)
+		req.MolType = &mt
+	}
+	if v, ok := closedEnum(q, "wisp_type", wispTypeNames()); ok {
+		wt := issueops.WispType(v)
+		req.WispType = &wt
+	}
+}
+
+// closedEnum reads an optional closed-vocabulary parameter. PRESENT-BUT-EMPTY
+// is refused with the unknown values rather than read as absent: an empty
+// pointer member on the role is a real empty-string predicate, so a client that sent
+// one and saw it treated as absent would get the wider listing.
+func closedEnum(q *query, name string, allowed []string) (string, bool) {
+	if !q.has(name) {
+		return "", false
+	}
+	v := q.oneOf(name, "", allowed...)
+	if v == "" {
+		q.invalid(name, fmt.Sprintf("an empty value is not one of %s", strings.Join(allowed, ", ")))
+		return "", false
+	}
+	return v, true
+}
+
+// molTypeNames and wispTypeNames are the closed vocabularies mol_type and
+// wisp_type accept, read off the types package's own lists so the spec's enum
+// (held equal by TestListFilterEnumsMatchTheTypesVocabulary) and this server
+// cannot drift from what `bd list` validates.
+func molTypeNames() []string { return enumNames(types.ValidMolTypes()) }
+
+func wispTypeNames() []string { return enumNames(types.ValidWispTypes()) }
+
+func enumNames[T ~string](vals []T) []string {
+	out := make([]string, len(vals))
+	for i, v := range vals {
+		out[i] = string(v)
+	}
+	return out
+}
+
+// maxListIDs bounds listIssues' repeatable `id` filter. It is the spec's
+// `maxItems`, and TestListIDsBoundMatchesTheSpec holds the two together.
+const maxListIDs = 200
+
+// listIDFilter decodes listIssues' repeatable `id` filter into the comma-separated
+// set issueops.ListRequest.IDFilter takes. The contract is bd-enterprise's
+// (E9-S2), adopted unchanged.
+//
+// Every value is bounded the way a path id is (customMethodTarget): longer than
+// the column holds, or carrying a control character, names no row that can
+// exist. Unlike the path, a malformed value here is a 400 naming `id` rather
+// than a 404 — there is no single resource to be missing — and two more shapes
+// are refused because of what the role does with the joined set: a COMMA,
+// because the role splits the set on commas and a value carrying one would
+// silently address two ids the caller never named; and LEADING OR TRAILING
+// WHITESPACE, because the role trims every member, so a padded value would
+// silently address the trimmed id — a different one from the id named.
+func listIDFilter(q *query) string {
+	vals := q.list("id")
+	if len(vals) == 0 {
+		return ""
+	}
+	if len(vals) > maxListIDs {
+		q.invalid("id", fmt.Sprintf("at most %d id values per request; got %d", maxListIDs, len(vals)))
+		return ""
+	}
+	for _, id := range vals {
+		switch {
+		case strings.TrimSpace(id) == "":
+			q.invalid("id", "an id value is empty")
+			return ""
+		case strings.Contains(id, ","):
+			q.invalid("id", fmt.Sprintf("%q carries a comma; repeat the parameter once per id instead", id))
+			return ""
+		case strings.ContainsFunc(id, isControlChar):
+			q.invalid("id", "an id value carries a control character")
+			return ""
+		case strings.TrimSpace(id) != id:
+			q.invalid("id", fmt.Sprintf("%q has leading or trailing whitespace; send the canonical id", id))
+			return ""
+		case types.CheckFieldLen("id", id) != nil:
+			q.invalid("id", fmt.Sprintf("an id value is longer than %d characters", types.MaxFieldLen))
+			return ""
+		}
+	}
+	return strings.Join(vals, ",")
 }
 
 // handleQueryIssues answers GET /v0/beads/issues:query.
@@ -560,6 +721,11 @@ func (s *Server) acceptQuery(w http.ResponseWriter, r *http.Request, q *query) b
 // unlimited read buffers the whole active set and its JSON encoding inside one
 // shared process, which must not be reachable by arbitrary network peers.
 //
+// The blocked listing (handleListBlocked) never reaches this check: it takes
+// no limit at all, like `bd blocked`, so it answers its whole set on every
+// bind. That set is the blocked one, not the whole active one; see the
+// operation's description and engdocs/SERVE_RUNBOOK.md.
+//
 // The bind mode is deliberately NOT advertised in ContextResponse. A client
 // that wants an unlimited read asks for one and, on this 400, re-issues with
 // an explicit limit; it is a client-side fix, never a retry.
@@ -591,6 +757,41 @@ func (s *Server) failReadErr(w http.ResponseWriter, r *http.Request, err error) 
 	s.failErr(w, r, err)
 }
 
+// invalidRegexMessage is the SQL engine's refusal of a pattern it cannot
+// compile (Dolt, embedded and server alike: `Error 1105 (HY000): the given
+// regular expression is invalid`).
+const invalidRegexMessage = "regular expression is invalid"
+
+// failRegexReadErr is failReadErr for the operations that carry `label_regex`.
+//
+// The pattern is compiled by the DATABASE, in its own regex dialect, so the
+// handler cannot validate it up front without refusing patterns the local
+// route accepts. What it can do is attribute the database's compile refusal
+// to the parameter that caused it: a request that SENT a regex and earned the
+// engine's invalid-pattern error is the caller's typo, a 400 on label_regex,
+// not a 500 that pages as a server fault. Any other failure, or this text on
+// a request with no regex, keeps failReadErr's classification.
+func (s *Server) failRegexReadErr(w http.ResponseWriter, r *http.Request, err error, labelRegex string) {
+	if s.refuseUncompilableRegex(w, r, err, labelRegex) {
+		return
+	}
+	s.failReadErr(w, r, err)
+}
+
+// refuseUncompilableRegex answers err as that 400 on label_regex when it is
+// the database's compile refusal of the pattern the request sent, and reports
+// whether it did. It is split out for claimNext, which shares the ready
+// listing's filter but not its failure mapping.
+func (s *Server) refuseUncompilableRegex(w http.ResponseWriter, r *http.Request, err error, labelRegex string) bool {
+	if labelRegex == "" || !strings.Contains(err.Error(), invalidRegexMessage) {
+		return false
+	}
+	requestInfo(r.Context()).refuse("label_regex")
+	s.fail(w, r, InvalidArgument("label_regex", ReasonInvalidValue,
+		fmt.Sprintf("%q is not a regular expression the database can compile", labelRegex)))
+	return true
+}
+
 // invalidFilterParam maps a filter-construction failure back to the query
 // parameter that caused it.
 //
@@ -620,6 +821,10 @@ func invalidFilterParam(err error) (string, bool) {
 		return "exclude_status", true
 	case strings.HasPrefix(msg, "--parent and --no-parent are mutually exclusive"):
 		return "no_parent", true
+	// The listing role's refusal of the pinned pair (issues.list.filters):
+	// the same sentence `bd list --pinned --no-pinned` refuses with.
+	case strings.HasPrefix(msg, "--pinned and --no-pinned are mutually exclusive"):
+		return "no_pinned", true
 	case strings.HasPrefix(msg, "invalid issue type "):
 		return "type", true
 	case strings.HasPrefix(msg, "invalid sort policy "):

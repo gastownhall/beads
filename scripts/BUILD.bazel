@@ -35,31 +35,42 @@ go_test(
     srcs = [
         "bazel_autofix_push_test.go",
         "bazel_cache_mode_test.go",
+        "bazel_dolt_int_test.go",
+        "bazel_dolt_race_test.go",
         "bazel_farm_workflow_test.go",
         "bazel_fork_mode_test.go",
         "bazel_go_repository_tools_test.go",
         "bazel_hermetic_cc_test.go",
+        "bazel_invocations_test.go",
         "bazel_policy_test.go",
         "bazel_rbe_prewarm_test.go",
+        "bazel_rrc_test.go",
         "ci_actions_policy_test.go",
         "ci_analytics_workflow_test.go",
         "ci_blacksmith_runner_test.go",
         "ci_f7b_review_test.go",
         "ci_f7c_advisory_test.go",
+        "ci_merge_group_scope_test.go",
         "ci_merge_queue_test.go",
         "ci_workflow_apt_get_timeout_test.go",
+        "ci_workflow_core_test.go",
         "ci_workflow_test.go",
         "embedded_shard_count_test.go",
         "host_tools_test.go",
+        "main_ci_alert_test.go",
         "makefile_bazel_primary_test.go",
         "migration_corpus_bazel_test.go",
+        "nogo_integration_step_script_test.go",
         "nogo_lint_policy_test.go",
+        "offline_shards_test.go",
         "pinned_shards_helpers_test.go",
         "pinned_shards_test.go",
         "pr_lanes_bazel_coverage_test.go",
         "pr_risk_bazel_coverage_test.go",
         "rbe_worker_env_test.go",
         "repo_helpers_test.go",
+        "worker_env_autosync_test.go",
+        "worker_env_sync_automerge_test.go",
     ],  # keep
     data = [
         "//:repo_other_files",
@@ -68,11 +79,48 @@ go_test(
         "@go_sdk//:files",
     ],
     # The Go SDK is go.mod's toolchain, whatever go the executor has on PATH.
+    # No //:repo_go_srcs here (F5 S2, cost fix, independent review of #7486):
+    # T4 (TestNogoIntegrationStepCoversItsConfiguration) and the
+    # unvalidated_integration_tests.txt exactness check moved to their own
+    # :nogo_integration_scan_test target below, which alone depends on
+    # //:repo_go_srcs and //:repo_go_test_srcs, so a Go-only change no longer
+    # re-runs the rest of this suite too.
     env = {"BEADS_TEST_GO": "$(rlocationpath @go_sdk//:bin/go)"},
     deps = [
+        "//internal/configfile",
+        "//internal/doltversion",
         "//internal/formula",
         "//internal/testutil/bazeltest",
         "//scripts/internal/testbash",
+        "@in_gopkg_yaml_v3//:yaml_v3",
+    ],
+)
+
+# T4 (TestNogoIntegrationStepCoversItsConfiguration) and T6
+# (TestUnvalidatedIntegrationTestsFileIsExact, independent review of #7486
+# must-fix 6): both source-scan every tracked .go file (test and non-test)
+# for the "integration" build tag, so they alone depend on //:repo_go_srcs
+# and //:repo_go_test_srcs. Carved out of scripts_test (cost fix, same
+# review): with this data in scripts_test, any Go-only change re-ran the
+# whole nogo-policy suite, raising scripts_test's rerun rate from 73% to 91%
+# of main commits. bazel_invocations_test.go and ci_workflow_core_test.go are
+# helper-only files (no Test functions) shared with scripts_test, so neither
+# copy duplicates the other's parsing logic.
+go_test(
+    name = "nogo_integration_scan_test",
+    srcs = [
+        "bazel_invocations_test.go",
+        "ci_workflow_core_test.go",
+        "nogo_integration_scan_test.go",
+        "repo_helpers_test.go",
+    ],  # keep
+    data = [
+        "//:repo_go_srcs",
+        "//:repo_go_test_srcs",
+        "//:repo_other_files",
+    ],
+    deps = [
+        "//internal/testutil/bazeltest",
         "@in_gopkg_yaml_v3//:yaml_v3",
     ],
 )
@@ -93,6 +141,8 @@ go_test(
         "conformance_script_test.go",
         "host_tools_test.go",
         "install_dolt_test.go",
+        "install_sh_test.go",
+        "oracle_a_script_test.go",
         "pr_preflight_test.go",
         "pre_push_suite_test.go",
         "pull_dolt_image_test.go",
@@ -100,6 +150,8 @@ go_test(
         "repo_helpers_test.go",
         "required_suite_test.go",
         "test_script_test.go",
+        "update_nix_vendorhash_test.go",
+        "update_nix_vendorhash_unix_test.go",
         "upgrade_smoke_loop_test.go",
     ],
     data = [
@@ -107,6 +159,7 @@ go_test(
         "//:.buildflags",
         "//:.githooks/pre-push",
         "//:.test-skip",
+        "//:tests/oracle-a/run-oracle-a.sh",
         "//internal/httpclient:repo_other_files",
         "//test/conformance:repo_go_test_srcs",
         "//test/conformance:repo_other_files",
@@ -131,11 +184,13 @@ go_test(
     name = "go_test_sources_test",
     srcs = [
         "bazel_skip_allowlist_test.go",
+        "embedded_lane_coverage_test.go",
         "embedded_shard_count_test.go",
         "host_tools_test.go",
         "managed_local_lane_test.go",
         "pinned_shards_helpers_test.go",
         "pinned_shards_sources_test.go",
+        "proxied_lane_coverage_test.go",
         "repo_helpers_test.go",
         "scripts_targets_test.go",
         "shard_manifest_test.go",
@@ -159,6 +214,8 @@ go_test(
         "//:.github/scripts/server-storage-test-shards.txt",
         "//:nested_go_modules",
         "//:repo_go_test_srcs",
+        "//backend/http:repo_other_files",
+        "//backend/http/corpus:repo_other_files",
         "//cmd/bd:repo_other_files",
         "//internal/httpclient:repo_other_files",
         "//internal/storage/dolt:repo_other_files",
@@ -170,10 +227,20 @@ go_test(
     deps = ["//internal/testutil/bazeltest"],
 )
 
-# check-testing-short.sh over every Go file, test and non-test.
+# check-testing-short.sh over every Go file, test and non-test, plus the
+# Go-exec half of the host-go-under-Bazel policy (host_tool_exec_policy_test.go
+# scans //:repo_go_srcs and //:repo_go_test_srcs for a literal go/gofmt exec),
+# plus the Dolt host policy (dolt_host_policy_test.go scans //:repo_go_srcs
+# for host spellings interpreted outside internal/configfile/dolt_host.go).
+# The shell-script half (host_tool_shell_policy_test.go) is its own
+# :shell_host_tool_policy_test below: it reads a fixed, narrow list of shell
+# scripts, not every Go source file, so it would otherwise pay this target's
+# full re-run cost for files it never looks at.
 go_test(
     name = "go_sources_test",
     srcs = [
+        "dolt_host_policy_test.go",
+        "host_tool_exec_policy_test.go",
         "repo_helpers_test.go",
         "testing_short_tree_test.go",
     ],
@@ -181,6 +248,55 @@ go_test(
         "check-testing-short.sh",
         "//:repo_go_srcs",
         "//:repo_go_test_srcs",
+    ],
+    deps = [
+        "//internal/configfile",
+        "//internal/testutil/bazeltest",
+    ],
+)
+
+# The shell-script half of the host-go-under-Bazel policy
+# (host_tool_shell_policy_test.go: see its package comment for shellPolicyScope
+# and the detection tradeoffs). Split out of go_sources_test (which otherwise
+# re-ran on every Go-source change to serve only this file) with data limited
+# to exactly the shell scripts shellPolicyScope names -- no BUILD.bazel/.bzl
+# walk, and so no //:repo_other_files: TestShellPolicyScopeCoversBazelShellData
+# (dropped; see that test's old doc comment in version control) could not
+# parse a `//pkg:file.sh` label or a glob() either, so paying 758 extra input
+# files and ~4 points of cache-rerun rate across the whole repo for a walk
+# that demonstrably still missed real in-scope scripts was not worth it.
+go_test(
+    name = "shell_host_tool_policy_test",
+    srcs = [
+        "host_tool_shell_policy_test.go",
+        "repo_helpers_test.go",
+    ],
+    data = [
+        "check-build-tags.sh",
+        "check-doc-freshness.sh",
+        "check-go-install-guidance.sh",
+        "check-migration-hygiene.sh",
+        "check-testing-short.sh",
+        "check-versions.sh",
+        "check-winget-portable-alias.sh",
+        "check-workapi-frontend-boundary.sh",
+        "ci/fmt-check.sh",
+        "ci/gofmt-bin.sh",
+        "ci/pr-lint.sh",
+        "conformance.sh",
+        "migrate-legacy-to-current.sh",
+        "migration-test/historical-dolt-upgrade-test.sh",
+        "migration-test/legacy-bridge-test.sh",
+        "migration-test/lib/binary.sh",
+        "release.sh",
+        "test.sh",
+        "upgrade-smoke-test.sh",
+        "//:.github/scripts/embedded-storage-test-shard.sh",
+        "//:.github/scripts/embedded-test-shard.sh",
+        "//:.github/scripts/proxied-test-shard.sh",
+        "//:.github/scripts/server-storage-test-shard.sh",
+        "//scripts/repochecks:run_check.sh",
+        "//scripts/repochecks:types_gen_drift_test.sh",
     ],
     deps = ["//internal/testutil/bazeltest"],
 )

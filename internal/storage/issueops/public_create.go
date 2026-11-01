@@ -47,6 +47,12 @@ func ValidatePublicCreateRequest(request publicops.CreateRequest) error {
 	if err := types.CheckFieldLen("parent ID", request.ParentID); err != nil {
 		return publicCreateValidationError(fmt.Errorf("create: %w", err))
 	}
+	// The gate members, as a *publicops.GateFieldError naming the member so a
+	// front door can point at it. Here rather than in PreparePublicCreateRequest
+	// alone so the unit-of-work backend's early check refuses it too.
+	if err := ValidateGateFields(request.Issue); err != nil {
+		return err
+	}
 	if err := ValidateCreatePriority(request.Issue.Priority, request.DefaultPriority); err != nil {
 		return err
 	}
@@ -83,6 +89,14 @@ func PreparePublicCreateRequest(request publicops.CreateRequest, context PublicC
 	if request.DefaultPriority {
 		issue.Priority = publicops.DefaultCreatePriority
 	}
+	// created_by defaults to the request's actor, here and nowhere else: every
+	// create shape (Lifecycle.Create, BatchCreator items, batch-apply create
+	// items) prepares through this function, so the CLI, the HTTP handlers and
+	// a library caller all store the same creator for the same request. An
+	// explicit CreatedBy is kept.
+	if issue.CreatedBy == "" {
+		issue.CreatedBy = request.Actor
+	}
 	if issue.ID != "" && !request.ForceIDPrefix {
 		// The caller's prefix wins when it supplied one; see
 		// CreateRequest.IDPrefix for why a front door may know better than the
@@ -116,6 +130,11 @@ func PreparePublicCreateRequest(request publicops.CreateRequest, context PublicC
 // public-create failures and leaves infrastructure and commit errors intact.
 func ClassifyPublicCreateError(err error) error {
 	if err == nil || errors.Is(err, storage.ErrValidation) || errors.Is(err, storage.ErrAlreadyExists) {
+		return err
+	}
+	// A retired id is its own refusal: neither a validation failure nor an
+	// occupied id, and it must reach the caller as the typed error it is.
+	if errors.Is(err, publicops.ErrIdempotencyExpired) {
 		return err
 	}
 	var conflict *domain.DependencyTypeConflictError

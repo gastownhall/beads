@@ -36,8 +36,8 @@ import (
 
 // getIssueDetails is the shared dial behind the three include-bearing reads: GET
 // the issue-detail path with the caller's query and decode types.IssueDetails,
-// exactly as bridge.go's GetIssue does. A 404 is (nil, nil) rather than an
-// error, so each read maps its own empty answer onto it.
+// as bridge.go's GetIssue does. A 404 is (nil, nil) rather than an error here,
+// unlike GetIssue's miss, so each read maps its own empty answer onto it.
 func (s *Store) getIssueDetails(ctx context.Context, id string, query url.Values) (*types.IssueDetails, error) {
 	if id == "" {
 		return nil, nil
@@ -73,7 +73,11 @@ func (s *Store) getIssueDetails(ctx context.Context, id string, query url.Values
 // second dial here would be a second copy of that correction.
 func (s *Store) GetLabels(ctx context.Context, id string) ([]string, error) {
 	issue, err := s.GetIssue(ctx, id)
-	if err != nil || issue == nil {
+	if errors.Is(err, issueops.ErrNotFound) {
+		// The local read answers a nonexistent id with no labels, not an error.
+		return nil, nil
+	}
+	if err != nil {
 		return nil, err
 	}
 	return issue.Labels, nil

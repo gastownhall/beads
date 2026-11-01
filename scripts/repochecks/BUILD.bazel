@@ -355,6 +355,17 @@ sh_test(
     },
 )
 
+# Readable by //scripts:go_sources_test's host_tool_shell_policy_test.go,
+# which scans every sh_test PROGRAM/srcs this package runs under Bazel for
+# ungated bare host-`go` execs (f4-spec.md §9).
+exports_files(
+    [
+        "run_check.sh",
+        "types_gen_drift_test.sh",
+    ],
+    visibility = ["//scripts:__pkg__"],
+)
+
 # --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
 
 filegroup(

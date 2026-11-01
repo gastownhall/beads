@@ -91,16 +91,21 @@ func (s ignoredCursorState) reconcileNeeded() bool {
 	return s.needsUntrack || s.strayScratch
 }
 
-// readIgnoredCursorState answers both halves of the gate in two
-// always-succeeding reads. That property is not incidental: a Dolt session
-// that issues a FAILING statement stays pinned to its pre-statement catalog
-// snapshot for the rest of its pooled life (be-bv7x), and this runs on every
-// writable open and every lock-free fast-path evaluation.
+// readIgnoredCursorState answers both halves of the gate. On a healthy
+// database that is two SHOW TABLES listings, HEAD's and the working set's; a
+// dolt_ignore read joins them only when the cursor is tracked at HEAD. None of
+// them may fail, and that is not incidental: a Dolt session that issues a
+// FAILING statement stays pinned to its pre-statement catalog snapshot for the
+// rest of its pooled life (be-bv7x), and this runs on every writable open and
+// every lock-free fast-path evaluation. A SHOW TABLES listing fails with no
+// database selected (1105) and on a session whose database was dropped (1049),
+// so both callers must already have the session on the target database; a
+// session that may have no usable database needs tableInCurrentDatabase.
 //
 // qualifier is the identifier-quoted database name selectTargetDatabase
 // returned, or empty when the session is already on the target database. The
-// scratch probe needs no qualifier: it reads information_schema against
-// DATABASE(), which both callers have already put on the target.
+// scratch probe takes no qualifier: it lists the session's current database,
+// which both callers have already made the target.
 func readIgnoredCursorState(ctx context.Context, db DBConn, qualifier string) (ignoredCursorState, error) {
 	var state ignoredCursorState
 
@@ -110,7 +115,10 @@ func readIgnoredCursorState(ctx context.Context, db DBConn, qualifier string) (i
 	}
 	state.needsUntrack = needsUntrack
 
-	stray, err := schemaTableExists(ctx, db, ignoredCursorUntrackTempTable)
+	// Both callers have the session on the target database (alreadyConverged
+	// after selectTargetDatabase, MigrateUp after its preparation), so this
+	// per-open read takes the SHOW TABLES prober.
+	stray, err := showTableExists(ctx, db, ignoredCursorUntrackTempTable)
 	if err != nil {
 		return state, fmt.Errorf("probing %s: %w", ignoredCursorUntrackTempTable, err)
 	}

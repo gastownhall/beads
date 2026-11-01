@@ -387,13 +387,16 @@ func TestProxiedServerHistoryRemoteSupportedFrontDoorParity(t *testing.T) {
 	}
 }
 
-func TestHistoryRemoteSupportedDirectAndProxiedParity(t *testing.T) {
+func TestProxiedServerHistoryRemoteSupportedDirectParity(t *testing.T) {
 	if os.Getenv("BEADS_TEST_PROXIED_SERVER") != "1" {
 		t.Skip("set BEADS_TEST_PROXIED_SERVER=1 to run direct/server parity")
 	}
 	bd := buildEmbeddedBD(t)
 	direct := newDirectHistoryProject(t, bd, "hp_direct")
-	proxied := newSharedProxiedProject(t, bd, "hp_proxy")
+	// Root, not the database-scoped user: exerciseHistoryParity's `bd dolt
+	// remote remove` needs DOLT_REMOTE, a server-wide privilege (#7436 moved
+	// the other remote-removing tests to root; this one ran in no lane then).
+	proxied := newSharedProxiedRootProject(t, bd, "hp_proxy")
 
 	directIssue := createDirectHistoryIssue(t, bd, direct)
 	proxyIssue := bdProxiedCreate(t, bd, proxied.dir, "history parity")

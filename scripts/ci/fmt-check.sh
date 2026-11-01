@@ -15,9 +15,29 @@ cd "$REPO_ROOT"
 GOFMT_BIN="$("$SCRIPT_DIR/gofmt-bin.sh")"
 
 describe_gofmt() {
-    local bin="$1" version=""
-    if command -v go >/dev/null 2>&1; then
-        version="$(go version "$bin" 2>/dev/null | awk '{ print $NF }')"
+    local bin="$1" version="" go_bin=""
+    if [[ -n "${TEST_SRCDIR:-}" ]]; then
+        # Under `bazel test` a bare `go` on PATH can be the farm's exit-127
+        # mask for the host toolchain, so only call a go binary the test
+        # explicitly declared as data: BEADS_TEST_GO, set the same way
+        # scripts/prlintmake:prlintmake_test wires in the registered SDK's go
+        # ($(rlocationpath @go_sdk//:bin/go)). A caller that did not wire it
+        # up (e.g. scripts/repochecks:fmt_test) just gets the version-less
+        # fallback below, never a PATH `go`.
+        if [[ -n "${BEADS_TEST_GO:-}" ]]; then
+            local candidate="$BEADS_TEST_GO"
+            if [[ "$candidate" != /* ]]; then
+                candidate="$TEST_SRCDIR/$candidate"
+            fi
+            if [[ -x "$candidate" ]]; then
+                go_bin="$candidate"
+            fi
+        fi
+    elif command -v go >/dev/null 2>&1; then
+        go_bin="go"
+    fi
+    if [[ -n "$go_bin" ]]; then
+        version="$("$go_bin" version "$bin" 2>/dev/null | awk '{ print $NF }')"
     fi
     if [[ -n "$version" ]]; then
         printf '%s (%s)' "$version" "$bin"

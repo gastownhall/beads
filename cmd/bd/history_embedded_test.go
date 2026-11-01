@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -401,5 +403,130 @@ func TestEmbeddedHistoryConcurrent(t *testing.T) {
 		if r.err != nil && !strings.Contains(r.err.Error(), "one writer at a time") {
 			t.Errorf("worker %d failed: %v", r.worker, r.err)
 		}
+	}
+}
+
+// doltCommitHashPattern is a full Dolt commit hash: 32 characters of Dolt's
+// base32 alphabet. It is what `bd show --as-of` takes, and a prefix is not.
+var doltCommitHashPattern = regexp.MustCompile(`^[0-9a-v]{32}$`)
+
+// issueVersionOnlyKeys are fields of a recorded version (`bd versions --json`,
+// storage.IssueVersion) that neither the Dolt-commit history nor the Dolt AS OF
+// read has.
+var issueVersionOnlyKeys = []string{"local_revision", "epoch", "change_actor", "change_at", "attribution_status", "removed_restriction", "state_bytes"}
+
+// TestEmbeddedHistoryAndShowAsOfReadDoltCommits pins what `bd history <id>` and
+// `bd show <id> --as-of <ref>` read in an ordinary workspace whose store records
+// versioned history, so both planes hold the same issue:
+//   - `bd history <id> --json` is the Dolt-commit history: an array, newest first,
+//     of {CommitHash, Committer, CommitDate, Issue} entries, each CommitHash a full
+//     Dolt commit hash and each Issue the row as that commit left it. No field of a
+//     recorded version appears, and the text output names the same full hashes.
+//   - `bd show <id> --as-of <hash>`, with a hash from `bd history`, is the Dolt AS OF
+//     read: the issue as that commit left it, in show's JSON shape (an array of
+//     issues), not a recorded version. A branch name is a ref too: --as-of main
+//     reads the branch head.
+//
+// Recorded versions are a separate plane with its own command (`bd versions`) and
+// its own as-of read (R7.1, over issue_versions), which takes an instant or a
+// version address and not a Dolt ref. Recording them must change neither answer.
+func TestEmbeddedHistoryAndShowAsOfReadDoltCommits(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "hd")
+	bdConfig(t, bd, dir, "set", "versioned-history.enabled", "true")
+
+	id := bdCreateSilent(t, bd, dir, "Before title", "--type", "task")
+	bdUpdate(t, bd, dir, id, "--title", "After title")
+
+	// Both planes hold this issue: versions were recorded for it.
+	var recorded struct {
+		Recording bool              `json:"recording"`
+		Versions  []json.RawMessage `json:"versions"`
+	}
+	if out, stderr, exit := bdRunStreams(t, bd, dir, "versions", id, "--json"); exit != 0 || json.Unmarshal([]byte(out), &recorded) != nil || !recorded.Recording || len(recorded.Versions) == 0 {
+		t.Fatalf("bd versions %s --json (exit %d) did not report recorded versions, so this test would not tell the planes apart\nstdout:\n%s\nstderr:\n%s", id, exit, out, stderr)
+	}
+
+	historyJSON := bdHistory(t, bd, dir, id, "--json")
+	var entries []map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(historyJSON), &entries); err != nil {
+		t.Fatalf("bd history %s --json is not a JSON array: %v\n%s", id, err, historyJSON)
+	}
+	if len(entries) < 2 {
+		t.Fatalf("bd history %s --json has %d entries, want one for each of the create and the update:\n%s", id, len(entries), historyJSON)
+	}
+	type snapshot struct {
+		ID    string `json:"id"`
+		Title string `json:"title"`
+	}
+	hashes := make([]string, len(entries))
+	titles := make([]string, len(entries))
+	for i, entry := range entries {
+		keys := make([]string, 0, len(entry))
+		for key := range entry {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		if got := strings.Join(keys, ","); got != "CommitDate,CommitHash,Committer,Issue" {
+			t.Errorf("bd history entry %d has keys %s, want the Dolt-commit entry CommitDate,CommitHash,Committer,Issue", i, got)
+		}
+		if err := json.Unmarshal(entry["CommitHash"], &hashes[i]); err != nil || !doltCommitHashPattern.MatchString(hashes[i]) {
+			t.Errorf("bd history entry %d CommitHash %s is not a full Dolt commit hash", i, entry["CommitHash"])
+		}
+		var issue snapshot
+		if err := json.Unmarshal(entry["Issue"], &issue); err != nil || issue.ID != id {
+			t.Errorf("bd history entry %d Issue %s is not a snapshot of %s", i, entry["Issue"], id)
+		}
+		titles[i] = issue.Title
+	}
+	if titles[0] != "After title" || titles[len(titles)-1] != "Before title" {
+		t.Fatalf("bd history %s titles newest first are %q, want %q first and %q last", id, titles, "After title", "Before title")
+	}
+	for _, key := range issueVersionOnlyKeys {
+		if strings.Contains(historyJSON, `"`+key+`"`) {
+			t.Errorf("bd history %s --json carries %q, a field of a recorded version:\n%s", id, key, historyJSON)
+		}
+	}
+	text := bdHistory(t, bd, dir, id)
+	for _, hash := range hashes {
+		if !strings.Contains(text, hash) {
+			t.Errorf("bd history %s text output does not name the full commit hash %s:\n%s", id, hash, text)
+		}
+	}
+
+	// show --as-of reads the Dolt commit the history named.
+	first := hashes[len(hashes)-1]
+	asOfJSON := func(ref string) snapshot {
+		t.Helper()
+		out, stderr, exit := bdRunStreams(t, bd, dir, "show", id, "--as-of", ref, "--json")
+		var shown []map[string]json.RawMessage
+		if exit != 0 || json.Unmarshal([]byte(out), &shown) != nil || len(shown) != 1 {
+			t.Fatalf("bd show %s --as-of %s --json exited %d, want an array of one issue\nstdout:\n%s\nstderr:\n%s", id, ref, exit, out, stderr)
+		}
+		for _, key := range issueVersionOnlyKeys {
+			if _, ok := shown[0][key]; ok {
+				t.Errorf("bd show %s --as-of %s --json carries %q, a field of a recorded version:\n%s", id, ref, key, out)
+			}
+		}
+		var issues []snapshot
+		if err := json.Unmarshal([]byte(out), &issues); err != nil {
+			t.Fatalf("bd show %s --as-of %s --json: %v\n%s", id, ref, err, out)
+		}
+		return issues[0]
+	}
+	if got := asOfJSON(first); got.ID != id || got.Title != "Before title" {
+		t.Errorf("bd show %s --as-of %s (its first commit) read %+v, want the issue titled %q", id, first, got, "Before title")
+	}
+	if got := asOfJSON("main"); got.ID != id || got.Title != "After title" {
+		t.Errorf("bd show %s --as-of main read %+v, want the branch head's title %q", id, got, "After title")
+	}
+	human := bdShowRaw(t, bd, dir, id, "--as-of", first)
+	if !strings.Contains(human, "as of "+first) || !strings.Contains(human, "Before title") || strings.Contains(human, "After title") {
+		t.Errorf("bd show %s --as-of %s text output does not show the first commit's issue under that ref:\n%s", id, first, human)
 	}
 }

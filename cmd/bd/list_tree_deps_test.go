@@ -1,8 +1,10 @@
 package main
 
 import (
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/types"
@@ -80,6 +82,48 @@ func TestOrderSiblingsByDeps_OutOfGroupEdgeIgnored(t *testing.T) {
 	// Falls back to priority: b (P1) before a (P2).
 	if indexOf(got, "pa-b") > indexOf(got, "pa-a") {
 		t.Fatalf("expected priority order b,a for out-of-group edge, got %v", got)
+	}
+}
+
+// closedSibling builds a sibling closed hoursAgo hours before a fixed instant,
+// so --sort closed (newest first) orders it independently of priority and ID.
+func closedSibling(id string, priority, hoursAgo int) *types.Issue {
+	at := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC).Add(-time.Duration(hoursAgo) * time.Hour)
+	return &types.Issue{ID: id, Priority: priority, ClosedAt: &at}
+}
+
+func TestOrderSiblingsByDeps_ReadySetFollowsCallerCompare(t *testing.T) {
+	// b depends on a. Newest-closed first is b, u, a, v; priority order is
+	// v, a, u, b. The initial ready set {a, u, v} must follow the caller's
+	// compare (u, a, v), and once a frees b the re-sorted ready set must put
+	// the newer b ahead of v.
+	a := closedSibling("pa-a", 1, 3)
+	b := closedSibling("pa-b", 3, 1)
+	u := closedSibling("pa-u", 2, 2)
+	v := closedSibling("pa-v", 0, 4)
+	deps := map[string][]*types.Dependency{"pa-b": {schedDep("pa-b", "pa-a")}}
+
+	got := idsOf(orderSiblingsByDeps([]*types.Issue{b, a, v, u}, deps, compareIssuesForTree("closed", false)))
+	want := []string{"pa-u", "pa-a", "pa-b", "pa-v"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("--sort closed ready set: got %v, want %v", got, want)
+	}
+}
+
+func TestOrderSiblingsByDeps_CycleFallbackFollowsCallerCompare(t *testing.T) {
+	// x <-> y cycle: x wins on priority and ID, but y closed more recently, so
+	// the cycle fallback under --sort closed must emit y first.
+	x := closedSibling("pa-x", 0, 2)
+	y := closedSibling("pa-y", 1, 1)
+	deps := map[string][]*types.Dependency{
+		"pa-x": {schedDep("pa-x", "pa-y")},
+		"pa-y": {schedDep("pa-y", "pa-x")},
+	}
+
+	got := idsOf(orderSiblingsByDeps([]*types.Issue{x, y}, deps, compareIssuesForTree("closed", false)))
+	want := []string{"pa-y", "pa-x"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("--sort closed cycle fallback: got %v, want %v", got, want)
 	}
 }
 

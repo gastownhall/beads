@@ -15,8 +15,9 @@ import (
 // window onward. The fix deletes the orphans and re-adds each constraint in
 // place.
 //
-// This check does not require CGO: it queries via MySQL wire protocol using
-// the same dolt-server connection as the fix package.
+// This check does not require CGO: it queries via MySQL wire protocol the
+// dolt server its fix writes, or the socket of a server only a unix socket
+// names, where the fix does not run (fix.ScanSeveredCloneLocalFKs).
 func CheckCloneLocalFKs(path string) DoctorCheck {
 	severed, err := fix.ScanSeveredCloneLocalFKs(path)
 	if err != nil {

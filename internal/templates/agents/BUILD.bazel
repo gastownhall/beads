@@ -20,8 +20,10 @@ go_test(
     name = "agents_test",
     srcs = [
         "agents_test.go",
+        "golden_test.go",
         "render_test.go",
     ],
+    data = glob(["testdata/**"]),
     embed = [":agents"],
 )
 

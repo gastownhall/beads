@@ -75,8 +75,10 @@ func (r *contextRepositoryImpl) BackendConfig(ctx context.Context) (domain.Backe
 	}, nil
 }
 
+// ServerPort is the port the store dials (doltserver.ResolveEndpoint), the
+// legacy BEADS_DOLT_PORT included, as bd context's direct route resolves it.
 func (r *contextRepositoryImpl) ServerPort(ctx context.Context) (int, error) {
-	return doltserver.DefaultConfig(r.beadsDir(ctx)).Port, nil
+	return doltserver.ResolveEndpoint(r.beadsDir(ctx), nil).Port, nil
 }
 
 func (r *contextRepositoryImpl) ProxiedServerRoot(ctx context.Context) (string, error) {

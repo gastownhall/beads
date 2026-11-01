@@ -28,6 +28,17 @@ func ProxiedServerClientInfoPath(beadsDir string) string {
 	return filepath.Join(beadsDir, ProxiedServerClientInfoFileName)
 }
 
+// EffectiveProxyIdleTimeout resolves the zero "use the default" sentinel to
+// DefaultProxyIdleTimeout. Every other value is already effective and is
+// returned unchanged; a negative value means "never" and must not be swept
+// into the default.
+func EffectiveProxyIdleTimeout(d time.Duration) time.Duration {
+	if d == 0 {
+		return DefaultProxyIdleTimeout
+	}
+	return d
+}
+
 func LoadProxiedServerClientInfo(beadsDir string) (*ProxiedServerClientInfo, error) {
 	path := ProxiedServerClientInfoPath(beadsDir)
 	data, err := os.ReadFile(path) // #nosec G304 - controlled path
@@ -41,6 +52,10 @@ func LoadProxiedServerClientInfo(beadsDir string) (*ProxiedServerClientInfo, err
 	if err := json.Unmarshal(data, &info); err != nil {
 		return nil, fmt.Errorf("parsing %s: %w", ProxiedServerClientInfoFileName, err)
 	}
+	// Sidecars written before Save persisted the effective value omit the key,
+	// and nothing rewrites them. Resolve it on read too, so a pre-upgrade
+	// workspace reports the timeout bd applies rather than an absent one.
+	info.IdleTimeout = EffectiveProxyIdleTimeout(info.IdleTimeout)
 	return &info, nil
 }
 
@@ -52,9 +67,7 @@ func SaveProxiedServerClientInfo(beadsDir string, info *ProxiedServerClientInfo)
 	// value so sidecar consumers do not need bd's source code to interpret an
 	// absent key. Update the caller's plan too: migration resume compares the
 	// in-memory plan with the sidecar after this write.
-	if info.IdleTimeout == 0 {
-		info.IdleTimeout = DefaultProxyIdleTimeout
-	}
+	info.IdleTimeout = EffectiveProxyIdleTimeout(info.IdleTimeout)
 	data, err := json.MarshalIndent(info, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshaling %s: %w", ProxiedServerClientInfoFileName, err)

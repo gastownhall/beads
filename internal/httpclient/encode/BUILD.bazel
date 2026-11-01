@@ -7,6 +7,8 @@ go_library(
         "ledger.go",
         "ledger_fields.go",
         "ledger_render.go",
+        "list_filters.go",
+        "list_fold.go",
         "parentwalk.go",
         "skew.go",
         "table.go",
@@ -25,6 +27,8 @@ go_test(
     srcs = [
         "bijection_test.go",
         "ledger_render_test.go",
+        "list_filters_test.go",
+        "list_fold_test.go",
         "oracle_test.go",
         "parentwalk_test.go",
         "roundtrip_test.go",

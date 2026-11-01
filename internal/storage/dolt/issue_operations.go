@@ -152,6 +152,7 @@ func nonCoordinationPatchSignals(patch issueops.IssuePatch) []bool {
 		patch.AppendNotes.Set,
 		patch.SpecID.Set,
 		patch.AwaitID.Set,
+		patch.Waiters.Set,
 		patch.Priority.Set,
 		patch.IssueType.Set,
 		patch.Owner.Set,

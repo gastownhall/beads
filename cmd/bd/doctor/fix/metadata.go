@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
@@ -224,8 +226,7 @@ func FixMissingDoltDatabase(path string) error {
 	// schema across the server, it does not delete or mutate anything.
 	db, _, err := openDoltDB(beadsDir)
 	if err != nil {
-		fmt.Printf("  dolt_database fix skipped (server not reachable: %v)\n", err)
-		return nil
+		return skipFix(err)
 	}
 	defer db.Close()
 
@@ -421,7 +422,35 @@ func reconcileAuthoritativeServerMetadata(cfg *configfile.Config, databases []se
 }
 
 func inspectServerMetadataDatabases(beadsDir string, cfg *configfile.Config) ([]serverDatabaseMetadata, error) {
-	db, err := openServerCatalogDB(beadsDir, cfg)
+	// The catalog read is of the server the store dials, so the guard below
+	// and the dial take one endpoint (doltserver.ResolveEndpoint).
+	ep := doltserver.ResolveEndpoint(beadsDir, cfg)
+	// With no address there is no server catalog to read: never dial
+	// 127.0.0.1:0. When a bd command will start the workspace's own server,
+	// its databases are the ones in the data directory that server will
+	// serve; with none there (a fresh clone of a `bd init --server` project,
+	// before its first open) there is nothing to reconcile. Otherwise the
+	// reconcile cannot run, and says why: every store open refuses too, with
+	// this advice, or the server is merely stopped over existing databases.
+	if !ep.Dialable() {
+		if !ep.BDStartsServer() {
+			return nil, ep.UnresolvedError()
+		}
+		dataDir := doltserver.ResolveDoltDir(beadsDir)
+		if !dataDirHoldsDatabase(dataDir) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("this workspace's Dolt server is not running, so the databases in %s could not be read to reconcile metadata.json; "+
+			"start the server with 'bd dolt start' (or any bd command), then re-run this command", remedy.PrintedValue(dataDir))
+	}
+	// A server only a unix socket names has no port, and the catalog read
+	// stays TCP-only (openServerCatalogDB): refuse it here, never dial
+	// 127.0.0.1:0. bd bootstrap's later steps cannot reach such a server yet
+	// either, so bootstrap stops at this reconcile and writes nothing.
+	if !ep.Resolved() {
+		return nil, errors.New("only a unix socket names this workspace's Dolt server (no port resolved), and the metadata reconcile does not read a server's catalog over a socket yet")
+	}
+	db, err := openServerCatalogDB(ep)
 	if err != nil {
 		return nil, fmt.Errorf("server metadata probe failed: %w", err)
 	}
@@ -520,14 +549,40 @@ func isExpectedProbeError(err error) bool {
 	return false
 }
 
-func openServerCatalogDB(beadsDir string, cfg *configfile.Config) (*sql.DB, error) {
-	port := doltserver.DefaultConfig(beadsDir).Port
+// openServerCatalogDB opens the catalog of the server at ep, the endpoint the
+// store dials: its port (DialConfig's, the legacy BEADS_DOLT_PORT included,
+// which DefaultConfig leaves out) and the password keyed to that port. With
+// DefaultConfig's port a workspace only BEADS_DOLT_PORT names had its catalog
+// read at 127.0.0.1:0, or at a port file's server no store open dials.
+//
+// It dials TCP only; inspectServerMetadataDatabases refuses a socket-only
+// server before calling it. Like openFixDB, it does not check the server
+// against doltversion.RequiredMin: bd doctor --fix is exempt from the floor.
+func openServerCatalogDB(ep doltserver.Endpoint) (*sql.DB, error) {
 	connStr := doltutil.ServerDSN{
-		Host:     cfg.GetDoltServerHost(),
-		Port:     port,
-		User:     cfg.GetDoltServerUser(),
-		Password: cfg.GetDoltServerPasswordForPort(port),
-		TLS:      cfg.GetDoltServerTLS(),
+		Host:     ep.Host,
+		Port:     ep.Port,
+		User:     ep.User,
+		Password: ep.Password(),
+		TLS:      ep.TLS,
 	}.String()
 	return sql.Open("mysql", connStr)
+}
+
+// dataDirHoldsDatabase reports whether dir, a Dolt server's data directory,
+// holds a database: a subdirectory with a .dolt directory.
+func dataDirHoldsDatabase(dir string) bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		if info, err := os.Stat(filepath.Join(dir, entry.Name(), ".dolt")); err == nil && info.IsDir() {
+			return true
+		}
+	}
+	return false
 }

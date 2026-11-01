@@ -168,7 +168,35 @@ func (r httpEdgeReader) ReadEdges(ctx context.Context, req issueops.EdgeReadRequ
 	if len(ids) == 0 {
 		return issueops.EdgeReadResult{Anchors: []issueops.AnchorEdges{}}, nil
 	}
+	// The ROLE has no anchor cap; the OPERATION refuses more than
+	// maxEdgeReadAnchors per request. Splitting is therefore this transport's
+	// job, never the caller's: each chunk is one round trip and the answers
+	// concatenate in request order. A read loses nothing by being split — the
+	// one property it gives up is the single snapshot across chunks, which
+	// per-anchor answers do not rely on.
+	if len(ids) > maxEdgeReadAnchors {
+		anchors := make([]issueops.AnchorEdges, 0, len(ids))
+		for start := 0; start < len(ids); start += maxEdgeReadAnchors {
+			end := min(start+maxEdgeReadAnchors, len(ids))
+			part, err := r.readEdgeChunk(ctx, ids[start:end], req.Types)
+			if err != nil {
+				return issueops.EdgeReadResult{}, err
+			}
+			anchors = append(anchors, part.Anchors...)
+		}
+		return issueops.EdgeReadResult{Anchors: anchors}, nil
+	}
+	return r.readEdgeChunk(ctx, ids, req.Types)
+}
 
+// maxEdgeReadAnchors is the listDependencies operation's cap on `issue_id`
+// values (maxDependencyAnchors in internal/httpapi), redeclared because a
+// client does not import the server.
+const maxEdgeReadAnchors = 100
+
+// readEdgeChunk answers at most maxEdgeReadAnchors distinct ids in one call.
+func (r httpEdgeReader) readEdgeChunk(ctx context.Context, ids []string, edgeTypes []types.DependencyType) (issueops.EdgeReadResult, error) {
+	req := issueops.EdgeReadRequest{IDs: ids, Types: edgeTypes}
 	q := url.Values{}
 	for _, id := range ids {
 		q.Add("issue_id", id)
@@ -273,6 +301,106 @@ func (s *Store) GetDependencyRecords(ctx context.Context, id string) ([]*types.D
 // thing on the same collection — which is exactly why the client refuses at it
 // rather than chunking past it. See httpGraphCounter.CountEdges.
 const maxEdgeCountAnchors = 100
+
+// GetAllDependencyRecords answers storage.DoltStorage's broad, unfiltered
+// dependency dump: every stored edge, grouped by its owning issue's id — the
+// same shape issueops.GetAllDependencyRecordsInTx returns for a local
+// backend.
+//
+// It overrides the unsupported_gen.go stub (design 3.6, HIGH-1): the
+// external-deps decorator's loadBlockingState falls back to this method
+// whenever the inner store implements neither
+// storage.ExternalDependencyPolicyProber-reported server enforcement nor the
+// narrower storage.ExternalDependencyQueryStore, which is exactly this
+// backend's shape against a server that does NOT advertise
+// wire.CapExternalDependencies. Refusing here (the old unsupported behavior)
+// would make `bd ready`/`bd close`/claim hard-fail against such a server
+// instead of correctly enforcing the policy client-side — the regression
+// HIGH-1 reports.
+//
+// There is no single wire operation for "every dependency in the workspace":
+// listDependencies is anchored at up to maxEdgeCountAnchors ids per call, so
+// this walks every issue id over the full-exhaustion list (allIssueIDs) and
+// reads its edges back in chunks of that size. It is O(issues/100) requests,
+// which only this fallback path ever pays — a server that advertises the
+// capability, or that implements the narrower query, never reaches this
+// method.
+func (s *Store) GetAllDependencyRecords(ctx context.Context) (map[string][]*types.Dependency, error) {
+	ids, err := s.allIssueIDs(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list all issue ids: %w", err)
+	}
+	result := make(map[string][]*types.Dependency)
+	for _, chunk := range chunkStrings(ids, maxEdgeCountAnchors) {
+		q := url.Values{}
+		for _, id := range chunk {
+			q.Add("issue_id", id)
+		}
+		var body apigen.DependencyEdges
+		if err := s.dispatch(ctx, wire.Request{
+			Op:     wire.OpListDependencies,
+			Method: http.MethodGet,
+			Path:   wire.PathDependencies,
+			Query:  q,
+		}, &body); err != nil {
+			return nil, err
+		}
+		for i := range body.Items {
+			edge := &body.Items[i]
+			result[edge.IssueID] = append(result[edge.IssueID], edge)
+		}
+	}
+	return result, nil
+}
+
+// allIssueIDs enumerates every issue id in the workspace, regardless of
+// status or kind: closed, templates, gates, infra and ephemeral/wisp issues
+// are all included (the list operation's narrower defaults otherwise exclude
+// several of those), because a dependency row can be owned by any of them and
+// GetAllDependencyRecords promises the whole table, not the default `bd
+// list` view of it.
+//
+// want=0, maxRows=0 walks fetchIssuePages to full exhaustion rather than one
+// page.
+func (s *Store) allIssueIDs(ctx context.Context) ([]string, error) {
+	q := url.Values{
+		"all":               {"true"},
+		"include_templates": {"true"},
+		"include_gates":     {"true"},
+		"include_infra":     {"true"},
+		"include_ephemeral": {"true"},
+	}
+	rows, err := s.fetchIssuePages(ctx, q, true, 0, 0, "", nil)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(rows))
+	for _, row := range rows {
+		if row == nil || row.Issue == nil || row.ID == "" {
+			continue
+		}
+		ids = append(ids, row.ID)
+	}
+	return ids, nil
+}
+
+// chunkStrings splits ids into slices of at most size, preserving order. size
+// must be positive; the last chunk may be shorter.
+func chunkStrings(ids []string, size int) [][]string {
+	if len(ids) == 0 {
+		return nil
+	}
+	chunks := make([][]string, 0, (len(ids)+size-1)/size)
+	for len(ids) > 0 {
+		n := size
+		if n > len(ids) {
+			n = len(ids)
+		}
+		chunks = append(chunks, ids[:n])
+		ids = ids[n:]
+	}
+	return chunks
+}
 
 // httpGraphCounter serves CountEdges from countDependencyEdges — the
 // TWENTY-SECOND wire-backed accessor, and the only role on this surface whose
@@ -411,6 +539,19 @@ func (a httpBlockingAnnotator) AnnotateBlocking(ctx context.Context, req issueop
 	q := url.Values{}
 	for _, id := range ids {
 		q.Add("issue_id", id)
+	}
+	if req.IncludeIsBlocked {
+		// Refused before the dial against a server that does not advertise
+		// the parameter: it would answer unknown_parameter, and an answer
+		// without the flag must never pass for "nothing is blocked".
+		served, err := a.store.servesCapability(ctx, wire.CapBlockingIsBlocked)
+		if err != nil {
+			return issueops.BlockingResult{}, err
+		}
+		if !served {
+			return issueops.BlockingResult{}, a.store.unsupportedCapability("BlockingAnnotator.AnnotateBlocking", wire.CapBlockingIsBlocked)
+		}
+		q.Set("is_blocked", "true")
 	}
 
 	var body apigen.BlockingAnnotations

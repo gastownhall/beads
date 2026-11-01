@@ -1,6 +1,6 @@
 ---
 title: "bd stale"
-description: "Show issues that haven't been updated recently and may need attention."
+description: "Show stale issues (not updated recently)"
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
@@ -20,7 +20,10 @@ bd stale [flags]
 **Flags:**
 
 ```
-  -d, --days int        Issues not updated in this many days (default 30)
-  -n, --limit int       Maximum issues to show (default 50)
-  -s, --status string   Filter by status (open|in_progress|blocked|deferred)
+  -d, --days int                Issues not updated in this many days (default 30)
+      --exclude-label strings   Exclude issues that have ANY of these labels
+  -l, --label strings           Filter by labels (AND: must have ALL). Can combine with --label-any
+      --label-any strings       Filter by labels (OR: must have AT LEAST ONE). Can combine with --label
+  -n, --limit int               Maximum issues to show (default 50)
+  -s, --status string           Filter by status (open|in_progress|blocked|deferred)
 ```

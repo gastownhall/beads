@@ -93,6 +93,10 @@ func TestApplyResolvedServerPort(t *testing.T) {
 // promotes the port file to authoritative and the env read below is skipped.
 func TestApplyResolvedServerPortChainsThroughApplyConfigDefaults(t *testing.T) {
 	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	// ApplyResolvedServerPort applies the legacy BEADS_DOLT_PORT itself
+	// (DialConfig); an ambient value from the test server must not decide
+	// the port before this test sets its own below.
+	t.Setenv("BEADS_DOLT_PORT", "")
 	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
 	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
 	t.Setenv("BEADS_TEST_MODE", "")

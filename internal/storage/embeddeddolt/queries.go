@@ -20,6 +20,8 @@ func (s *EmbeddedDoltStore) WakeExpiredDefersAdvisory(ctx context.Context) {
 }
 
 var _ storage.ExpiredDeferWaker = (*EmbeddedDoltStore)(nil)
+var _ storage.DescendantSearcher = (*EmbeddedDoltStore)(nil)
+var _ storage.IssuesWithConfigSearcher = (*EmbeddedDoltStore)(nil)
 
 // wakeExpiredDefers runs the lazy defer-wake sweep (issueops.WakeExpiredDefersInTx)
 // in its own write transaction before a ready-work read. Advisory by contract:

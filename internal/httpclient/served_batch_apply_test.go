@@ -221,11 +221,13 @@ func TestServedBatchApplyLandsAnIdempotencyRecordWithItsWork(t *testing.T) {
 func TestServedBatchApplyBoundsTheItemCount(t *testing.T) {
 	fixture := newServedBatchApplyFixture(t, "hba23")
 	if raceEnabled {
-		// Under -race the full 1000-item apply outlasts the client's 60s
-		// per-request timeout (wire.DefaultTimeout) on the embedded lane's
-		// executors, so only the "at bound" half's applied count drops, to
-		// 150 (the whole case then took 26s there), as the embedded tier's
-		// own TestBatchApplyContract does; see
+		// Under -race the full 1000-item apply is far too slow for the
+		// embedded lane's executors: the embedded tier measured it at
+		// 903-945s (RunBatchApplyBoundsTheItemCountAtScale's doc), past both
+		// the server's 5-minute large-apply budget and the client's
+		// wire.LargeApplyTimeout. So only the "at bound" half's applied count
+		// drops, to 150 (the whole case then took 26s there), as the embedded
+		// tier's own TestBatchApplyContract does; see
 		// RunBatchApplyBoundsTheItemCountAtScale for what that leaves pinned.
 		// The refusing half still sends MaxApplyBatchItems+1 over the wire,
 		// and scripts/conformance.sh runs the full size without -race.
@@ -271,6 +273,13 @@ func TestServedBatchApplyRefusesADottedChildGatedOnItsOwnParent(t *testing.T) {
 
 func TestServedBatchApplyAppliesTheDefaultPriority(t *testing.T) {
 	conformance.RunBatchApplyAppliesTheDefaultPriority(t, t.Context(), newServedBatchApplyFixture(t, "hbaprio"))
+}
+
+// TestServedBatchApplyCarriesTheGateMembers RUNS: the
+// served Config advertises issues.create.gates and issues.update.gates, and
+// this client sends the gate members on both create and update items.
+func TestServedBatchApplyCarriesTheGateMembers(t *testing.T) {
+	conformance.RunBatchApplyCarriesTheGateMembers(t, t.Context(), newServedBatchApplyFixture(t, "hbagate"))
 }
 
 // TestServedBatchApplyStampsSpawnerIDOnlyWhenNamed wires the dep_add
@@ -379,7 +388,7 @@ func TestServedBatchApplyRefusesAMetadataRefWithoutNamingTheKey(t *testing.T) {
 		t.Fatalf("the same plan with a declared key refused: %v", err)
 	}
 	var metadata string
-	if err := fixture.QueryScalar(ctx, "SELECT COALESCE(metadata, '') FROM issues WHERE id = ?", []any{id}, &metadata); err != nil {
+	if err := fixture.QueryScalar(ctx, "SELECT COALESCE(CAST(metadata AS CHAR), '') FROM issues WHERE id = ?", []any{id}, &metadata); err != nil {
 		t.Fatalf("reading the spliced metadata: %v", err)
 	}
 	if !strings.Contains(metadata, peer) {
@@ -600,8 +609,10 @@ func TestServedBatchApplyGcCloseWithMetadataIfMatch(t *testing.T) {
 func batchApplyColumnDirect(t *testing.T, ctx context.Context, fixture *conformance.BatchApplyFixture, column, id string) string {
 	t.Helper()
 	var value string
+	// CAST AS CHAR first so PostgreSQL never types COALESCE's '' as jsonb
+	// (22P02 at PREPARE); see batchApplyEdgeMetadata in backend/conformance.
 	//nolint:gosec // G201: column is one of this file's own hardcoded names.
-	query := "SELECT COALESCE(" + column + ", '') FROM issues WHERE id = ?"
+	query := "SELECT COALESCE(CAST(" + column + " AS CHAR), '') FROM issues WHERE id = ?"
 	if err := fixture.QueryScalar(ctx, query, []any{id}, &value); err != nil {
 		t.Fatalf("reading issues.%s for %s: %v", column, id, err)
 	}
@@ -675,7 +686,7 @@ func TestServedBatchApplyGcApplyGraphPlan(t *testing.T) {
 	}
 
 	var metadata string
-	if err := fixture.QueryScalar(ctx, "SELECT COALESCE(metadata, '') FROM issues WHERE id = ?", []any{task}, &metadata); err != nil {
+	if err := fixture.QueryScalar(ctx, "SELECT COALESCE(CAST(metadata AS CHAR), '') FROM issues WHERE id = ?", []any{task}, &metadata); err != nil {
 		t.Fatalf("reading the spliced metadata: %v", err)
 	}
 	if !strings.Contains(metadata, result.Keys["epic"]) {
@@ -699,7 +710,7 @@ func TestServedBatchApplyGcApplyGraphPlan(t *testing.T) {
 	}
 
 	var waitsFor, thread string
-	const lineageQuery = `SELECT COALESCE(metadata, ''), COALESCE(thread_id, '') FROM dependencies
+	const lineageQuery = `SELECT COALESCE(CAST(metadata AS CHAR), ''), COALESCE(thread_id, '') FROM dependencies
 		WHERE issue_id = ? AND type = ? AND COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) = ?`
 	if err := fixture.QueryScalar(ctx, lineageQuery, []any{epic, "waits-for", blocker}, &waitsFor, &thread); err != nil {
 		t.Fatalf("reading the waits-for edge epic->blocker: %v", err)

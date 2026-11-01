@@ -104,6 +104,17 @@ test:embedded --remote_download_regex=.*/test\.xml$
 # jobs, which never retried. Evicted inputs fail the step instead; a
 # visible "Re-run failed jobs" retries it.
 test:embedded --experimental_remote_cache_eviction_retries=0
+# The race configuration's nogo validations run once, in bazel.yml's `test`
+# lane (`bazel test //... --config=ci`), which is a strict superset of every
+# race-group lane's RunNogo/ValidateNogo keys. --norun_validations is a
+# build-request option, not a configuration flag: it changes no action key
+# (compile, link and nogo actions are shared with `test` through the action
+# cache; test results are not, since each lane's test actions carry its own
+# test env and args) and discards no analysis; it only skips re-running nogo's
+# validation actions that the owner lane already runs on this configuration.
+# scripts/nogo_lint_policy_test.go's TestNogoConfigurationsHaveOneValidatingLane
+# pins `test` as this configuration's sole validating lane.
+test:embedded --norun_validations
 
 # Dolt-server lane: what pr.yml's retired container-backed jobs ("Test
 # (storage domain + uow)" and "Contract corpus") ran, but every dolt
@@ -127,6 +138,9 @@ test:doltserver --test_arg=-test.parallel=4
 # runner shape; remote workers are not limited by it.
 test:doltserver --local_test_jobs=4
 test:doltserver --remote_download_regex=.*/test\.(log|xml)$
+# Race-group nogo is owned by the `test` lane; see test:embedded's comment
+# above.
+test:doltserver --norun_validations
 
 # Proxied-server tier: PR Risk's "Test (Proxied Dolt Cmd N/15)" jobs, as
 # //cmd/bd:bd_proxied_test and //cmd/bd:bd_managed_local_test (the
@@ -160,6 +174,41 @@ test:doltserver-proxied --remote_download_regex=.*/test\.(log|xml)$
 # jobs, which never retried. Evicted inputs fail the step instead; a
 # visible "Re-run failed jobs" retries it.
 test:doltserver-proxied --experimental_remote_cache_eviction_retries=0
+# Race-group nogo is owned by the `test` lane; see test:embedded's comment
+# above.
+test:doltserver-proxied --norun_validations
+
+# dolt-server + proxied union (item 5): bazel.yml's bazel-dolt-race job runs
+# both tiers in one invocation in mode remote, in place of the bazel-doltserver
+# and bazel-proxied lanes, which still run --config=doltserver and
+# --config=doltserver-proxied in every other mode. Exactly the union of the two
+# member configs' lines, with one tag filter naming both tiers
+# (scripts/bazel_dolt_race_test.go). Every other flag is the same in both
+# members or outside any action key for the other: the race build,
+# -test.parallel=4 and GO_TEST_WRAP_TESTV=1 are common; the eternal timeout
+# applies to no dolt-server target; the eviction retry count is what
+# doltserver gets from --config=sole-run wherever it executes remotely;
+# test_summary, local_test_jobs and remote_download_regex are not in any action
+# key. So each member target's test action is unchanged (aquery at the
+# cutover: all 62 TestRunner actions byte-identical; 64 since
+# bd_managed_local_test's 3 shards), and whichever arm the mode picks shares
+# cached results with the other. The member configs stay for those modes, make
+# and developers.
+test:dolt-race --@rules_go//go/config:race
+test:dolt-race --test_tag_filters=dolt-server,dolt-server-proxied
+test:dolt-race --build_tests_only
+test:dolt-race --keep_going
+test:dolt-race --test_summary=terse
+test:dolt-race --test_timeout=-1,-1,-1,1200
+test:dolt-race --test_env=GO_TEST_WRAP_TESTV=1
+test:dolt-race --test_arg=-test.parallel=4
+test:dolt-race --local_test_jobs=4
+test:dolt-race --remote_download_regex=.*/test\.(log|xml)$
+test:dolt-race --experimental_remote_cache_eviction_retries=0
+# The union carries its members' --norun_validations line
+# (TestBazelDoltRaceConfigIsMemberUnion needs no change: both members and the
+# union carry the same line).
+test:dolt-race --norun_validations
 
 # Server-Dolt storage tier: PR Risk's "Test (Server Dolt Conformance)" and
 # "Test (Server Dolt Full Suite N/16)" jobs, as
@@ -187,6 +236,21 @@ test:doltserver-integration --test_env=GO_TEST_WRAP_TESTV=1
 test:doltserver-integration --test_arg=-test.parallel=4
 test:doltserver-integration --local_test_jobs=4
 test:doltserver-integration --remote_download_regex=.*/test\.(log|xml)$
+# F5 S2 Variant A: this configuration (integration, doltserver-integration,
+# doltserver-cmd -- the same fingerprint, race=true plus
+# tags=gms_pure_go,integration) has no full-lane owner. Its nogo runs once,
+# narrowly, in bazel.yml's bazel-integration job: a `bazel build
+# --output_groups=nogo_fix` step over //internal/testutil/integration only
+# (the configuration's non-test library; the 56 integration-tagged _test.go
+# files this loses vet/lint coverage on are listed in
+# tools/nogo/unvalidated_integration_tests.txt, f5-spec.md §3/§5 S2).
+# --norun_validations is a build-request option, not a configuration flag:
+# it changes no action key and discards no analysis; it only skips
+# re-running nogo's validation actions, which bazel-integration's nogo-only
+# step already runs for this configuration's library files.
+# scripts/nogo_lint_policy_test.go's TestNogoConfigurationsHaveOneValidatingLane
+# pins the nogo-only step as this configuration's sole validating lane.
+test:doltserver-integration --norun_validations
 # Since D2 step 2 this lane is the tier's only pre-merge run on same-repo
 # PRs. Results are cached like every lane's (nightly: --config=fresh).
 # No whole-invocation retry on a remote cache eviction ("Lost inputs"):
@@ -217,13 +281,68 @@ test:doltserver-cmd --keep_going
 test:doltserver-cmd --test_summary=terse
 test:doltserver-cmd --test_timeout=-1,-1,-1,1200
 # As in --config=integration: Go's own timeout fires first and dumps every
-# goroutine to test.log, which Bazel's kill at 1200s does not.
-test:doltserver-cmd --test_arg=-test.timeout=19m
+# goroutine to test.log, which Bazel's kill at 1200s does not. Item 5 A2: the
+# -test.timeout=19m arg and the BEADS_TEST_REQUIRE_EXCLUDE_PERMISSION env moved
+# onto //cmd/bd:bd_dolt_server_test's and //tests/regression:regression_test's
+# own args/env (the rules), so --config=dolt-int below does not need them:
+# without the move, server-storage's 15m Go timeout would become 19m under
+# the union, and the env would leak into server-storage's targets. The final
+# argv and environment Bazel assembles (target args, then -test.timeout=19m,
+# then this config's own -test.parallel=4 test_arg; same env map either way)
+# are unchanged, so the remote action digest -- what RBE's cache keys on --
+# is unaffected and cached results should carry over. This IS a local
+# actionKey change for these two targets' 46 actions: --test_env is part of
+# the build configuration's own fingerprint, picked up by every target
+# analyzed under that configuration, unlike a target's own env attribute,
+# which only the target carries. To be confirmed in practice by the first
+# merge group's tests_cached == tests_total in ci-analytics, not claimed here
+# as already observed.
 test:doltserver-cmd --test_arg=-test.parallel=4
-test:doltserver-cmd --test_env=BEADS_TEST_REQUIRE_EXCLUDE_PERMISSION=1
 test:doltserver-cmd --test_env=GO_TEST_WRAP_TESTV=1
 test:doltserver-cmd --local_test_jobs=4
 test:doltserver-cmd --remote_download_regex=.*/test\.(log|xml)$
+# F5 S2 Variant A: same configuration as --config=integration /
+# doltserver-integration above; see that block's comment for the owner
+# (bazel-integration's nogo-only step over //internal/testutil/integration).
+test:doltserver-cmd --norun_validations
+
+# server-storage + cmd-dolt union (item 5 A2): bazel.yml's bazel-dolt-int job
+# runs both tiers in one invocation in mode remote, in place of the
+# bazel-server-storage and bazel-cmd-dolt jobs, which still run
+# --config=doltserver-integration and --config=doltserver-cmd in every other
+# mode (fork-ro, fork-rw, cache, local): there one client does both tiers'
+# work with no in-flight deduplication, so a union would cost the sum of the
+# tiers instead of the max. Exactly the union of the two member configs'
+# lines above, with one tag filter naming both members' tags
+# (scripts/bazel_dolt_int_test.go). Every other flag is the same in both
+# members: the race build, tags=gms_pure_go,integration, keep_going,
+# test_summary, the eternal 1200s timeout, GO_TEST_WRAP_TESTV=1,
+# -test.parallel=4, local_test_jobs, remote_download_regex and
+# norun_validations. So each member target's test action is unchanged in the
+# sense that matters for caching (aquery: all 63 TestRunner actions' remote
+# action digests are byte-identical, the key RBE's cache lookups use), though
+# each action's local actionKey differs since these flags now reach the
+# target via its own env/args rather than the member's build configuration.
+# Cached results carry over both ways regardless.
+# New for cmd-dolt here: --experimental_remote_cache_eviction_retries=0.
+# server-storage already has it (above); cmd-dolt did not (it has no
+# --config=sole-run of its own, unlike doltserver). Adding it to the union is
+# stricter for cmd-dolt (no whole-invocation retry on a remote cache
+# eviction) and policy-conformant with sole-run semantics; the eviction
+# allowlist in pr_risk_bazel_coverage_test.go records the new line.
+build:dolt-int --@rules_go//go/config:tags=gms_pure_go,integration
+test:dolt-int --@rules_go//go/config:race
+test:dolt-int --test_tag_filters=dolt-server-integration,dolt-server-cmd
+test:dolt-int --build_tests_only
+test:dolt-int --keep_going
+test:dolt-int --test_summary=terse
+test:dolt-int --test_timeout=-1,-1,-1,1200
+test:dolt-int --test_env=GO_TEST_WRAP_TESTV=1
+test:dolt-int --test_arg=-test.parallel=4
+test:dolt-int --local_test_jobs=4
+test:dolt-int --remote_download_regex=.*/test\.(log|xml)$
+test:dolt-int --norun_validations
+test:dolt-int --experimental_remote_cache_eviction_retries=0
 
 # Integration lane: the `go test` main.yml's former "Main Linux integration"
 # jobs ran on push (this lane replaced them, and nightly.yml's retired Full
@@ -268,6 +387,13 @@ test:integration --test_env=GO_TEST_WRAP_TESTV=1
 # equivalence.py / check_testcases.py right after each lane's own
 # `bazel test`, before the other lane runs (or give the lanes separate jobs).
 test:integration --remote_download_regex=.*/test\.xml$
+# F5 S2 Variant A: same configuration as --config=doltserver-integration /
+# doltserver-cmd above; see that block's comment for the owner
+# (bazel-integration's nogo-only step over //internal/testutil/integration).
+# The 56 integration-tagged _test.go files this configuration no longer
+# validates in any full lane are the accepted loss, listed in
+# tools/nogo/unvalidated_integration_tests.txt.
+test:integration --norun_validations
 
 # Pure-Go lane: pr.yml's "Check pure-Go and js/wasm boundaries
 # (CGO_ENABLED=0)" job. CGO is off for every Go target (rules_go drops
@@ -294,11 +420,15 @@ build:js-wasm --use_target_platform_for_tests
 build:js-wasm --remote_download_outputs=toplevel
 
 # nogo (//tools/nogo: go test's vet checks plus the golangci-lint linters
-# .golangci.yml enables) runs beside every Go compile of every lane, so any
-# `bazel build`/`bazel test` fails on a finding. --config=nogo asks for the
-# analysis alone (the nogo_fix output group; nothing is linked), in the race
-# configuration bazel.yml's unit lane (test:ci) builds, so a local run reuses
-# CI's remote cache. make lint, scripts/pr-lint and the pre-commit hook use it.
+# .golangci.yml enables) runs beside every Go compile, so `bazel build`/
+# `bazel test` fails on a finding -- in bazel.yml's one validating (owner)
+# lane per configuration (since F5 S1: a race-group non-owner lane reuses
+# its owner's nogo results instead of re-running them; see
+# scripts/nogo_lint_policy_test.go's nogoConfigurations table).
+# --config=nogo asks for the analysis alone (the nogo_fix output group;
+# nothing is linked), in the race configuration bazel.yml's unit lane
+# (test:ci) builds, so a local run reuses CI's remote cache. make lint,
+# scripts/pr-lint and the pre-commit hook use it.
 build:nogo --@rules_go//go/config:race
 build:nogo --keep_going
 build:nogo --output_groups=nogo_fix

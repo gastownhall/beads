@@ -43,9 +43,13 @@ type FixGate struct {
 
 	DBVersion     int // max applied schema_migrations version (0 if unknown)
 	BinaryVersion int // schema.LatestVersion() for this binary
-	Reason        string
-	Ahead         bool // DB schema newer than this binary
-	Pending       bool // binary knows migrations the DB has not applied
+	// Reason names the command it withholds in single quotes, never
+	// backticks: SanitizeFixRecommendation writes it into the advice bd doctor
+	// --agent shows as a code span, and a pasted backtick there would start a
+	// command substitution running that very 'bd doctor --fix'.
+	Reason  string
+	Ahead   bool // DB schema newer than this binary
+	Pending bool // binary knows migrations the DB has not applied
 }
 
 // AssessSchemaFixGate compares schema_migrations to this binary. It yields one
@@ -88,7 +92,7 @@ func AssessSchemaFixGate(path string) FixGate {
 			DBPresent:     true,
 			AllowFSFix:    true,
 			Reason: "database exists but could not be opened, so its schema version is unknown; " +
-				"`bd doctor --fix` may apply migrations blind — start the database and re-run",
+				"'bd doctor --fix' may apply migrations blind — start the database and re-run",
 		}
 	}
 	defer db.Close()
@@ -100,7 +104,7 @@ func AssessSchemaFixGate(path string) FixGate {
 		DBPresent:     true,
 		AllowFSFix:    true,
 		Reason: "database schema version could not be determined; " +
-			"`bd doctor --fix` may apply migrations blind — resolve the database state first",
+			"'bd doctor --fix' may apply migrations blind — resolve the database state first",
 	}
 
 	ctx := context.Background()
@@ -123,14 +127,14 @@ func AssessSchemaFixGate(path string) FixGate {
 		gate.Ahead = true
 		gate.Reason = fmt.Sprintf(
 			"database schema is at v%d, this binary knows up to v%d (%s ahead). "+
-				"`bd doctor --fix` can write/migrate and is unsafe on a newer schema — upgrade bd first",
+				"'bd doctor --fix' can write/migrate and is unsafe on a newer schema — upgrade bd first",
 			dbVer, binary, pluralMigrations(dbVer-binary),
 		)
 	case dbVer < binary:
 		gate.Pending = true
 		gate.Reason = fmt.Sprintf(
 			"database schema is at v%d, this binary expects v%d (%s pending). "+
-				"`bd doctor --fix` may apply write migrations — upgrade/migrate deliberately, not as a cosmetic tip",
+				"'bd doctor --fix' may apply write migrations — upgrade/migrate deliberately, not as a cosmetic tip",
 			dbVer, binary, pluralMigrations(binary-dbVer),
 		)
 	default:

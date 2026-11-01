@@ -25,7 +25,7 @@ func bdShowSucceeds(t *testing.T, bd, dir, id string) bool {
 	return true
 }
 
-// TestWispGCPurgeClosedDoesNotCascadeIntoLiveSteps is the regression test for
+// TestEmbeddedWispGCPurgeClosedDoesNotCascadeIntoLiveSteps is the regression test for
 // the patrol self-destruct bug: `bd mol wisp gc --closed --force` on a
 // molecule that has closed its first step deleted the ENTIRE molecule.
 //
@@ -39,7 +39,7 @@ func bdShowSucceeds(t *testing.T, bd, dir, id string) bool {
 // The closed set is complete: every closed, non-pinned, non-infra wisp is
 // already a GC candidate. Cascade can only ever add NON-closed dependents to
 // the batch — exactly the live steps it must not touch.
-func TestWispGCPurgeClosedDoesNotCascadeIntoLiveSteps(t *testing.T) {
+func TestEmbeddedWispGCPurgeClosedDoesNotCascadeIntoLiveSteps(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -91,10 +91,10 @@ func TestWispGCPurgeClosedDoesNotCascadeIntoLiveSteps(t *testing.T) {
 	t.Error("open molecule root was deleted by purgeClosed")
 }
 
-// TestWispGCPurgeClosedStillPurgesFullyClosedMolecules guards the other side
+// TestEmbeddedWispGCPurgeClosedStillPurgesFullyClosedMolecules guards the other side
 // of the fix: when EVERY step is closed, gc --closed --force must still remove
 // the whole molecule. Restricting cascade must not break complete cleanup.
-func TestWispGCPurgeClosedStillPurgesFullyClosedMolecules(t *testing.T) {
+func TestEmbeddedWispGCPurgeClosedStillPurgesFullyClosedMolecules(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}

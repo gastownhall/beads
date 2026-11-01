@@ -143,7 +143,7 @@ func TestApplyBatchRefusesEveryMemberTheWireExcludes(t *testing.T) {
 		}
 	})
 
-	t.Run("the patch's own excluded member refuses, and the four shared ones cite their existing rows", func(t *testing.T) {
+	t.Run("the patch's own excluded member refuses, and the shared ones cite their existing rows", func(t *testing.T) {
 		for _, test := range []struct {
 			member string
 			row    string
@@ -155,12 +155,14 @@ func TestApplyBatchRefusesEveryMemberTheWireExcludes(t *testing.T) {
 			{"SpecID", "W-IssuePatch.SpecID", issueops.IssuePatch{
 				SpecID: issueops.Field[string]{Set: true, Value: "spec-1"},
 			}},
-			{"AwaitID", "W-IssuePatch.AwaitID", issueops.IssuePatch{
-				AwaitID: issueops.Field[string]{Set: true, Value: "await-1"},
-			}},
 			{"ClosedBySession", "W-IssuePatch.ClosedBySession", issueops.IssuePatch{
 				ClosedBySession: issueops.Field[string]{Set: true, Value: "sess-1"},
 			}},
+			// AwaitID and Waiters WERE here: both are carried behind
+			// issues.update.gates (W-IssuePatch.AwaitID retired).
+			// TestUpdateSendsTheGateMembersToAServerThatAdvertisesThem
+			// and TestUpdateRefusesTheGateMembersAgainstAServerWithoutTheToken
+			// are the positive assertion and the pre-dial capability refusal.
 			{"Persistence", "W-IssuePatch.Persistence", issueops.IssuePatch{
 				Persistence: issueops.Field[issueops.PersistenceMode]{Set: true, Value: types.PersistenceModeEphemeral},
 			}},

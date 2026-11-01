@@ -490,6 +490,15 @@ func TestSpecCapabilityVocabularyMatchesTheRouteTable(t *testing.T) {
 	for _, token := range Capabilities() {
 		served[token] = true
 	}
+	// The conditional tokens are documented in the same paragraph. Their
+	// snake_case segment is outside capabilityToken's shape, so each is looked
+	// for verbatim.
+	for _, token := range conditionalCapabilities {
+		served[token] = true
+		if strings.Contains(desc, "`"+token+"`") {
+			documented[token] = true
+		}
+	}
 
 	if missing := diff(served, documented); len(missing) > 0 {
 		t.Errorf("this build serves capabilities the document does not enumerate: %v\n"+

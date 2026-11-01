@@ -490,6 +490,12 @@ func RunLifecycleCreateWritesEveryScalarField(t *testing.T, ctx context.Context,
 		t.Errorf("%s created_at = %v after a create that named none, want a stamp between %v and %v — a bare non-empty check would accept the zero time",
 			stamped, autoStamp, lower, upper)
 	}
+	// And no created_by: the request's actor is the creator (CreateRequest.Issue),
+	// stamped by the role itself, so a library caller and every front door store
+	// the same value for the same request.
+	if got := lifecycleCreateRow(t, ctx, fixture, stamped).CreatedBy; got != "writer" {
+		t.Errorf("%s created_by = %q after a create that named none, want the request's actor %q", stamped, got, "writer")
+	}
 
 	want := []lifecycleCreateMember{
 		{"title", "created title"},

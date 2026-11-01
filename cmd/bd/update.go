@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/beads/internal/audit"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	storageissueops "github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/timeparsing"
@@ -145,11 +146,18 @@ pointless).`,
 		// was given without an explicit --status, to flip status=deferred back
 		// to open (matches the help text's "show in bd ready immediately").
 		var clearDeferStatus bool
+		// explicitSession: --session was typed (rather than inherited from
+		// CLAUDE_SESSION_ID), so omitting it on a store that cannot carry it
+		// is said out loud (remote_backend.go).
+		var explicitSession bool
 
 		if cmd.Flags().Changed("status") {
 			status, _ := cmd.Flags().GetString("status")
 			var customStatuses []string
-			if store != nil {
+			// A built-in status is valid whatever the custom vocabulary says,
+			// so only a non-built-in one pays for reading it: over http that
+			// read is a gateway round trip (bts-xpw.3.14.6).
+			if store != nil && !types.Status(status).IsValid() {
 				cs, err := store.GetCustomStatuses(rootCtx)
 				if err != nil {
 					if !jsonOutput {
@@ -167,6 +175,7 @@ pointless).`,
 			// If status is being set to closed, include session if provided
 			if status == "closed" {
 				session, _ := cmd.Flags().GetString("session")
+				explicitSession = session != ""
 				if session == "" {
 					session = os.Getenv("CLAUDE_SESSION_ID")
 				}
@@ -438,6 +447,7 @@ pointless).`,
 
 		updatedIssues := []*types.Issue{}
 		var firstUpdatedID string // Track first successful update for last-touched
+		var warnedSessionOmitted bool
 		var failures []updateIDFailure
 		recordFailure := func(id, reason string) {
 			failures = append(failures, updateIDFailure{ID: id, Error: reason})
@@ -478,7 +488,14 @@ pointless).`,
 				if result != nil {
 					result.Close()
 				}
-				fmt.Fprintf(os.Stderr, "Error resolving %s: %v\n", id, err)
+				// A concurrent `bd delete` that commits before this
+				// resolution is the same lost race as one that commits
+				// inside the guarded write below. requireSingleIfRevisionID
+				// guarantees this is the only id, so nothing is pending.
+				if reported, ok := reportIfRevisionTargetGone("updating", id, err, ifRevision); ok {
+					return reported
+				}
+				fmt.Fprintf(os.Stderr, "Error resolving %s: %s\n", id, remedy.PrintedMessage(err))
 				recordFailure(id, fmt.Sprintf("resolving issue: %v", err))
 				continue
 			}
@@ -527,6 +544,19 @@ pointless).`,
 			// earlier transaction) silently erased concurrent writers' keys —
 			// both processes exited 0, one process's committed write vanished.
 			patch := basePatch
+			// S6d: a store whose wire cannot carry closed_by_session still
+			// closes; the session is attribution only (remote_backend.go).
+			if patch.ClosedBySession.Set && !storeCarriesCallerAttribution(issueStore) {
+				patch.ClosedBySession = issueops.Field[string]{}
+				if !warnedSessionOmitted {
+					warnedSessionOmitted = true
+					if explicitSession {
+						fmt.Fprintf(os.Stderr, "%s --session is not recorded: this backend's update cannot carry closed_by_session (bd close --session records it)\n", ui.RenderWarn("!"))
+					} else {
+						fmt.Fprintf(os.Stderr, "%s CLAUDE_SESSION_ID is not recorded as closed_by_session: this backend's update cannot carry it (bd close records it)\n", ui.RenderWarn("!"))
+					}
+				}
+			}
 			// GH#3233: --defer="" restores ready visibility only if the issue
 			// was actually deferred. Other statuses (blocked, in_progress, …)
 			// shouldn't be clobbered just because defer_until was stale.
@@ -535,7 +565,7 @@ pointless).`,
 			}
 			ops, err := writeOps(issueStore)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error updating %s: %v\n", id, err)
+				fmt.Fprintf(os.Stderr, "Error updating %s: %s\n", id, remedy.PrintedMessage(err))
 				recordFailure(id, fmt.Sprintf("updating issue: %v", err))
 				closeIfUnmutated(result)
 				continue
@@ -585,7 +615,7 @@ pointless).`,
 					failureText = refusal.Error()
 					fmt.Fprintf(os.Stderr, "%s\n", refusal)
 				} else {
-					fmt.Fprintf(os.Stderr, "Error updating %s: %v\n", id, updateErr)
+					fmt.Fprintf(os.Stderr, "Error updating %s: %s\n", id, remedy.PrintedMessage(updateErr))
 				}
 				failures = append(failures, updateIDFailure{
 					ID:            id,
@@ -946,7 +976,7 @@ func reportUpdateFailures(failures []updateIDFailure, total int) error {
 	} else {
 		fmt.Fprintf(os.Stderr, "Error: %s\n", msg)
 		for _, f := range failures {
-			fmt.Fprintf(os.Stderr, "  %s: %s\n", f.ID, f.Error)
+			fmt.Fprintf(os.Stderr, "  %s: %s\n", f.ID, remedy.PrintedText(f.Error))
 		}
 	}
 	allGuard := len(failures) > 0
@@ -1003,7 +1033,7 @@ func updateGuardsFromFlags(cmd *cobra.Command, claimFlag bool, updates map[strin
 	if cmd.Flags().Changed("if-status") {
 		v, _ := cmd.Flags().GetString("if-status")
 		var customStatuses []string
-		if store != nil {
+		if store != nil && !types.Status(v).IsValid() {
 			if cs, csErr := store.GetCustomStatuses(rootCtx); csErr == nil {
 				customStatuses = cs
 			}

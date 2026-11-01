@@ -137,6 +137,8 @@ func roundTripCases() []roundTripCase {
 	// survives the crossing only when the caller already held it in UTC is an
 	// encoder that works by luck.
 	zoned := time.Date(2025, 12, 31, 23, 59, 59, 0, time.FixedZone("KST", 9*3600))
+	molType := issueops.MolType("patrol")
+	wispType := issueops.WispType("gc_report")
 
 	zero, five := 0, 5
 	assignee, parent := "agent-7", "bd-epic1"
@@ -176,12 +178,18 @@ func roundTripCases() []roundTripCase {
 		Status:    "open,in_progress",
 		IssueType: "bug",
 		Assignee:  "agent-7",
+		// Beside Assignee on purpose: the wire carries both as written and the
+		// role decides what the pair means.
+		NoAssignee: true,
 
 		Labels:        []string{"alpha", "beta"},
 		LabelsAny:     []string{"gamma"},
 		ExcludeLabels: []string{"delta", "epsilon"},
 
-		ParentID: "bd-epic1",
+		ParentID:    "bd-epic1",
+		Query:       "login bug",
+		TitleSearch: "Routed open task",
+		IDFilter:    "bd-1,bd-wisp-9,bd-42",
 
 		AllFlag:          true,
 		IncludeTemplates: true,
@@ -197,6 +205,40 @@ func roundTripCases() []roundTripCase {
 
 		Brief: true,
 		Limit: &five,
+
+		// The issues.list.filters vocabulary, every member at once. The pinned
+		// pair and parent/no-parent are contradictions the ROLE refuses; the
+		// wire carries them as written, and that is all this gate asks.
+		TitleContains:    "routed",
+		DescContains:     "repro",
+		NotesContains:    "handoff",
+		ExternalContains: "gh-",
+		ExternalRef:      "gh-42",
+		SpecPrefix:       "docs/",
+		LabelPattern:     "tech-*",
+		LabelRegex:       "tech-(debt|legacy)",
+		UpdatedAfter:     &subSecond,
+		UpdatedBefore:    &zoned,
+		ClosedAfter:      &zoned,
+		ClosedBefore:     &subSecond,
+		DeferAfter:       &subSecond,
+		DeferBefore:      &zoned,
+		DueAfter:         &zoned,
+		DueBefore:        &subSecond,
+		Priority:         &zero,
+		PriorityMin:      &zero,
+		PriorityMax:      &five,
+		EmptyDesc:        true,
+		NoLabels:         true,
+		NoParent:         true,
+		ExcludeTypes:     []string{"epic", "chore,bug"},
+		ExcludeStatus:    []string{"blocked", "deferred,in_progress"},
+		PinnedFlag:       true,
+		NoPinnedFlag:     true,
+		DeferredFlag:     true,
+		OverdueFlag:      true,
+		MolType:          &molType,
+		WispType:         &wispType,
 	}
 
 	workEverything := types.WorkFilter{

@@ -7,6 +7,8 @@ go_library(
         "container_provider.go",
         "container_provider_windows.go",
         "dockercontext.go",
+        "doltlock.go",
+        "git_env.go",
         "git_test_hooks.go",
         "localdoltserver.go",
         "localdoltserver_linux.go",
@@ -14,6 +16,7 @@ go_library(
         "suite_temp.go",
         "testdoltbranch.go",
         "testdoltcommon.go",
+        "testdoltreap.go",
         "testdoltserver.go",
         "testdoltserver_windows.go",
         "tmpfs.go",
@@ -21,6 +24,8 @@ go_library(
     importpath = "github.com/steveyegge/beads/internal/testutil",
     visibility = ["//:__subpackages__"],
     deps = [
+        "//internal/execenv",
+        "//internal/lockfile",
         "//internal/storage/doltutil",
         "//internal/testutil/bazeltest",
         "@com_github_go_sql_driver_mysql//:mysql",
@@ -108,12 +113,14 @@ go_test(
     name = "testutil_test",
     srcs = [
         "dockercontext_test.go",
+        "git_env_test.go",
         "gm2g3g5r_failopen_test.go",
         "gm2g3g5r_failopen_unix_test.go",
         "gm2g3g5r_failopen_windows_test.go",
         "localdoltserver_test.go",
         "suite_temp_test.go",
         "testdoltbranch_test.go",
+        "testdoltreap_test.go",
         "testdoltserver_env_test.go",
         "testdoltserver_unreachable_test.go",
         "tmpfs_test.go",
@@ -123,7 +130,69 @@ go_test(
     deps = [
         "//internal/storage/doltutil",
         "@com_github_go_sql_driver_mysql//:mysql",
-    ],
+    ] + select({
+        "@rules_go//go/platform:aix": [
+            "@com_github_testcontainers_testcontainers_go//:testcontainers-go",
+            "@com_github_testcontainers_testcontainers_go_modules_dolt//:dolt",
+        ],
+        "@rules_go//go/platform:android": [
+            "@com_github_testcontainers_testcontainers_go//:testcontainers-go",
+            "@com_github_testcontainers_testcontainers_go_modules_dolt//:dolt",
+        ],
+        "@rules_go//go/platform:darwin": [
+            "@com_github_testcontainers_testcontainers_go//:testcontainers-go",
+            "@com_github_testcontainers_testcontainers_go_modules_dolt//:dolt",
+        ],
+        "@rules_go//go/platform:dragonfly": [
+            "@com_github_testcontainers_testcontainers_go//:testcontainers-go",
+            "@com_github_testcontainers_testcontainers_go_modules_dolt//:dolt",
+        ],
+        "@rules_go//go/platform:freebsd": [
+            "@com_github_testcontainers_testcontainers_go//:testcontainers-go",
+            "@com_github_testcontainers_testcontainers_go_modules_dolt//:dolt",
+        ],
+        "@rules_go//go/platform:illumos": [
+            "@com_github_testcontainers_testcontainers_go//:testcontainers-go",
+            "@com_github_testcontainers_testcontainers_go_modules_dolt//:dolt",
+        ],
+        "@rules_go//go/platform:ios": [
+            "@com_github_testcontainers_testcontainers_go//:testcontainers-go",
+            "@com_github_testcontainers_testcontainers_go_modules_dolt//:dolt",
+        ],
+        "@rules_go//go/platform:js": [
+            "@com_github_testcontainers_testcontainers_go//:testcontainers-go",
+            "@com_github_testcontainers_testcontainers_go_modules_dolt//:dolt",
+        ],
+        "@rules_go//go/platform:linux": [
+            "@com_github_testcontainers_testcontainers_go//:testcontainers-go",
+            "@com_github_testcontainers_testcontainers_go_modules_dolt//:dolt",
+        ],
+        "@rules_go//go/platform:netbsd": [
+            "@com_github_testcontainers_testcontainers_go//:testcontainers-go",
+            "@com_github_testcontainers_testcontainers_go_modules_dolt//:dolt",
+        ],
+        "@rules_go//go/platform:openbsd": [
+            "@com_github_testcontainers_testcontainers_go//:testcontainers-go",
+            "@com_github_testcontainers_testcontainers_go_modules_dolt//:dolt",
+        ],
+        "@rules_go//go/platform:osx": [
+            "@com_github_testcontainers_testcontainers_go//:testcontainers-go",
+            "@com_github_testcontainers_testcontainers_go_modules_dolt//:dolt",
+        ],
+        "@rules_go//go/platform:plan9": [
+            "@com_github_testcontainers_testcontainers_go//:testcontainers-go",
+            "@com_github_testcontainers_testcontainers_go_modules_dolt//:dolt",
+        ],
+        "@rules_go//go/platform:qnx": [
+            "@com_github_testcontainers_testcontainers_go//:testcontainers-go",
+            "@com_github_testcontainers_testcontainers_go_modules_dolt//:dolt",
+        ],
+        "@rules_go//go/platform:solaris": [
+            "@com_github_testcontainers_testcontainers_go//:testcontainers-go",
+            "@com_github_testcontainers_testcontainers_go_modules_dolt//:dolt",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 # testutil_test on the dolt-server lane: the package's own tests of the

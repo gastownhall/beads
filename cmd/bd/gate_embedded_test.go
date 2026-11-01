@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -753,6 +754,169 @@ func TestEmbeddedGateCreateBeadCheck(t *testing.T) {
 			t.Errorf("gate on a never-seen await_id: status=%s, want open", got.Status)
 		}
 	})
+}
+
+// templateGateFormula is a proto with a gh:run, a bead and a timer gate step;
+// await-ci is beads-release's own shape. bd cook --persist writes each step's
+// gate as a template gate, <proto>.gate-<step>, which ListGates lists with the
+// open gates. %[1]s is the formula name and %[2]s the bead gate's target.
+const templateGateFormula = `formula = "%[1]s"
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "await-ci"
+title = "Await CI"
+type = "task"
+
+[steps.gate]
+type = "gh:run"
+id = "release.yml"
+
+[[steps]]
+id = "await-bead"
+title = "Await bead"
+type = "task"
+
+[steps.gate]
+type = "bead"
+id = "%[2]s"
+
+[[steps]]
+id = "await-timer"
+title = "Await timer"
+type = "task"
+
+[steps.gate]
+type = "timer"
+timeout = "1ms"
+`
+
+// TestEmbeddedGateCheckSkipsTemplateGates sweeps a workspace holding a
+// persisted proto. Its gates are blueprints that every pour copies: checking
+// one failed the sweep on the template guard (after asking GitHub for the
+// gh:run gate's run), and the expired timer gate was closed in the proto. The
+// sweep must leave all three untouched and still check the ordinary gate.
+func TestEmbeddedGateCheckSkipsTemplateGates(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "gk")
+	fs := openStore(t, beadsDir, "gk")
+	if err := fs.SetConfig(t.Context(), "types.custom", `["gate"]`); err != nil {
+		t.Fatalf("SetConfig: %v", err)
+	}
+	fs.Close()
+
+	target := bdCreate(t, bd, dir, "Awaited bead", "--type", "task")
+	formulaPath := filepath.Join(dir, "gk-proto.formula.toml")
+	if err := os.WriteFile(formulaPath, []byte(fmt.Sprintf(templateGateFormula, "gk-proto", target.ID)), 0o600); err != nil {
+		t.Fatalf("write formula: %v", err)
+	}
+	bdCommand(t, bd, dir, "cook", formulaPath, "--persist")
+	live := createBeadGate(t, bd, dir, target.ID)
+
+	// The fake gh records every call, so a template gh:run gate that reaches
+	// GitHub shows up in ghLog.
+	binDir := t.TempDir()
+	ghLog := filepath.Join(binDir, "gh.log")
+	gh := fmt.Sprintf("#!/bin/sh\necho \"$*\" >> '%s'\nexit 3\n", ghLog)
+	if err := os.WriteFile(filepath.Join(binDir, "gh"), []byte(gh), 0o755); err != nil {
+		t.Fatalf("write fake gh: %v", err)
+	}
+
+	cmd := exec.Command(bd, "gate", "check")
+	cmd.Dir = dir
+	cmd.Env = append(bdEnv(dir), "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	stdout, stderr, err := runCommandBuffers(t, cmd)
+	if err != nil {
+		t.Fatalf("bd gate check over a persisted proto: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+	if out := stdout.String(); !strings.Contains(out, "Checked 1 gates") {
+		t.Errorf("bd gate check output:\n%s\nwant only %s checked", out, live.ID)
+	}
+	if calls, err := os.ReadFile(ghLog); err == nil {
+		t.Errorf("the template gh:run gate ran gh: %s", calls)
+	}
+
+	for _, tpl := range []struct{ step, awaitID string }{
+		{"await-ci", "release.yml"},
+		{"await-bead", target.ID},
+		{"await-timer", ""},
+	} {
+		id := "gk-proto.gate-" + tpl.step
+		got := bdShow(t, bd, dir, id)
+		if !got.IsTemplate {
+			t.Fatalf("%s is not a template: the cook did not persist the proto's gates", id)
+		}
+		if got.Status != types.StatusOpen || got.AwaitID != tpl.awaitID || strings.Contains(string(got.Metadata), beadGateSeenKey) {
+			t.Errorf("template gate %s: status=%s await_id=%q metadata=%s, want it untouched (open, await_id %q, no sighting)",
+				id, got.Status, got.AwaitID, got.Metadata, tpl.awaitID)
+		}
+	}
+	if got := bdShow(t, bd, dir, live.ID); !strings.Contains(string(got.Metadata), beadGateSeenKey) {
+		t.Errorf("gate %s on an open target: metadata=%s, want the sighting recorded", live.ID, got.Metadata)
+	}
+}
+
+// TestEmbeddedGateCheckLimitCountsOnlyLiveGates puts a persisted proto's gates
+// ahead of a live one in the listing order and checks with --limit 1. The
+// template skip used to run after the limit cut the page, so the one row was a
+// template, the sweep printed "No open gates found." and exited 0, and the live
+// gate was never checked. The query now leaves templates out before the cut.
+func TestEmbeddedGateCheckLimitCountsOnlyLiveGates(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "gl")
+	fs := openStore(t, beadsDir, "gl")
+	if err := fs.SetConfig(t.Context(), "types.custom", `["gate"]`); err != nil {
+		t.Fatalf("SetConfig: %v", err)
+	}
+	fs.Close()
+
+	task := bdCreate(t, bd, dir, "Task behind an expired timer", "--type", "task")
+	out := bdGate(t, bd, dir, "create", "--blocks", task.ID, "--type", "timer", "--timeout", "1ms", "--json")
+	var live types.Issue
+	if start := strings.Index(out, "{"); start < 0 || json.Unmarshal([]byte(out[start:]), &live) != nil || live.ID == "" {
+		t.Fatalf("bd gate create --type=timer --json: no gate in output:\n%s", out)
+	}
+	// The listing orders by priority first, so at P4 the live gate sorts after
+	// every P2 template gate the cook writes, whatever their created_at.
+	bdCommand(t, bd, dir, "update", live.ID, "--priority", "4")
+
+	target := bdCreate(t, bd, dir, "Awaited bead", "--type", "task")
+	formulaPath := filepath.Join(dir, "gl-proto.formula.toml")
+	if err := os.WriteFile(formulaPath, []byte(fmt.Sprintf(templateGateFormula, "gl-proto", target.ID)), 0o600); err != nil {
+		t.Fatalf("write formula: %v", err)
+	}
+	bdCommand(t, bd, dir, "cook", formulaPath, "--persist")
+
+	// bd gate list still lists templates: its first row is one, so a cut at
+	// one row taken before the template skip leaves the sweep nothing.
+	if first := bdGateListJSON(t, bd, dir, "--limit", "1"); len(first) != 1 || !strings.HasPrefix(fmt.Sprint(first[0]["id"]), "gl-proto.gate-") {
+		t.Fatalf("bd gate list --limit 1 = %v, want one of gl-proto's template gates first", first)
+	}
+
+	out = bdGate(t, bd, dir, "check", "--limit", "1")
+	if !strings.Contains(out, "Checked 1 gates: 1 resolved") {
+		t.Errorf("bd gate check --limit 1 output:\n%s\nwant %s checked and resolved", out, live.ID)
+	}
+	if got := bdShow(t, bd, dir, live.ID); got.Status != types.StatusClosed {
+		t.Errorf("live expired timer gate %s status = %s, want closed", live.ID, got.Status)
+	}
+	for _, step := range []string{"await-ci", "await-bead", "await-timer"} {
+		id := "gl-proto.gate-" + step
+		if got := bdShow(t, bd, dir, id); !got.IsTemplate || got.Status != types.StatusOpen {
+			t.Errorf("template gate %s: is_template=%v status=%s, want an open template", id, got.IsTemplate, got.Status)
+		}
+	}
 }
 
 func TestEmbeddedGateCreateBeadRename(t *testing.T) {

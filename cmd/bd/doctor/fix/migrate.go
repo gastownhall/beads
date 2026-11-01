@@ -29,6 +29,19 @@ func DatabaseVersion(path string) error {
 
 // DatabaseVersionWithBdVersion is like DatabaseVersion but accepts an explicit
 // bd version string for setting the bd_version metadata field.
+//
+// Without the local database directory it opens the configured database,
+// creating it if it is missing, and imports issues.jsonl into a database that
+// open created (dolt.DoltStore.CreatedDatabase) or found with no issues. A
+// server-mode workspace keeps its database on the server and has no such
+// directory in a fresh clone or on another machine, so the directory's
+// absence does not mean the database is missing, and importing the tracked
+// issues.jsonl (a snapshot that can be older than the server's rows) into a
+// database with issues would overwrite them. A database the open found gets
+// the import only when it has no issues (importIntoFoundDatabase), and then
+// the local directory and the metadata update an existing one gets. A failed
+// count or import leaves both undone, so bd doctor still reports the problem
+// and the repair's next run comes back here and counts again.
 func DatabaseVersionWithBdVersion(path string, bdVersion string) error {
 	beadsDir, err := resolvedWorkspaceBeadsDir(path)
 	if err != nil {
@@ -50,12 +63,12 @@ func DatabaseVersionWithBdVersion(path string, bdVersion string) error {
 	ctx := context.Background()
 
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
-		// No database - create a new Dolt store. Creation is this branch's
-		// explicit purpose, so opt out of the dolt.New create-guard
-		// (bd-kjfsq: without CreateIfMissing the guard fails the fix with
-		// "database not found" on exactly the fresh clones it exists for).
-		fmt.Println("  → No database found, creating Dolt store...")
-
+		// No local database directory - open the database, creating it if it
+		// is missing. Creation is this branch's explicit purpose, so opt out
+		// of the dolt.New create-guard (bd-kjfsq: without CreateIfMissing the
+		// guard fails the fix with "database not found" on exactly the fresh
+		// clones it exists for).
+		//
 		// Bead-mutating: the branch below imports every issue in the JSONL, so
 		// it opens through the activating factory and those creates journal.
 		store, err := openBeadMutatingStoreCreating(ctx, beadsDir)
@@ -64,11 +77,29 @@ func DatabaseVersionWithBdVersion(path string, bdVersion string) error {
 		}
 		defer func() { _ = store.Close() }()
 
-		// Create local marker directory so FindDatabasePath can discover the
-		// database. Server mode doesn't create it automatically (bd-u8rda).
-		if mkErr := os.MkdirAll(dbPath, 0o750); mkErr != nil {
-			fmt.Printf("  Warning: failed to create dolt marker dir: %v\n", mkErr)
+		jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+		_, jsonlErr := os.Stat(jsonlPath)
+
+		if !store.CreatedDatabase() {
+			// The open found the database on its server: only the local
+			// directory was missing. Never import the tracked issues.jsonl
+			// over its rows. Create the directory only once the import is
+			// done: a run that finds it takes the existing-database path
+			// below, which never imports, so a failed import would never be
+			// retried.
+			fmt.Println("  → Database already exists on the server")
+			if jsonlErr == nil {
+				if err := importIntoFoundDatabase(ctx, store, jsonlPath); err != nil {
+					return err
+				}
+			}
+			createDoltMarkerDir(dbPath)
+			fmt.Println("  → Updating database metadata...")
+			return updateDatabaseMetadata(ctx, store, bdVersion)
 		}
+
+		fmt.Println("  → No database found, creating Dolt store...")
+		createDoltMarkerDir(dbPath)
 
 		// Set version metadata if provided
 		if bdVersion != "" {
@@ -82,8 +113,7 @@ func DatabaseVersionWithBdVersion(path string, bdVersion string) error {
 		// Import from JSONL if present (fresh clone with committed issues).
 		// This closes the chicken-and-egg gap where doctor --fix creates an
 		// empty Dolt store and then bd init refuses because the store exists.
-		jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
-		if _, statErr := os.Stat(jsonlPath); statErr == nil {
+		if jsonlErr == nil {
 			count, importErr := importJSONLIntoStore(ctx, store, jsonlPath)
 			if importErr != nil {
 				fmt.Printf("  Warning: failed to import from JSONL: %v\n", importErr)
@@ -104,6 +134,48 @@ func DatabaseVersionWithBdVersion(path string, bdVersion string) error {
 	}
 	defer func() { _ = store.Close() }()
 
+	return updateDatabaseMetadata(ctx, store, bdVersion)
+}
+
+// importIntoFoundDatabase imports issues.jsonl into a database the Database
+// repair's open found on its server only when that database has no issues,
+// as FreshCloneImport imports only into an empty store: such a database has
+// no rows for the tracked copy to overwrite. That is a database bd init
+// --server created without --from-jsonl, or one whose every issue was
+// deleted, which the import recreates: a delete leaves no row, so the count
+// cannot tell the two apart. A database with issues gets no import, and
+// neither does one whose issues cannot be counted: the repair fails instead.
+func importIntoFoundDatabase(ctx context.Context, store *dolt.DoltStore, jsonlPath string) error {
+	var issueCount int
+	if err := store.DB().QueryRowContext(ctx, "SELECT COUNT(*) FROM issues").Scan(&issueCount); err != nil {
+		return fmt.Errorf("failed to count the database's issues, so issues.jsonl was not imported: %w", err)
+	}
+	if issueCount > 0 {
+		fmt.Printf("  → Not importing issues.jsonl over its %d issues\n", issueCount)
+		return nil
+	}
+
+	fmt.Println("  → Database has no issues, importing issues.jsonl...")
+	count, err := importJSONLIntoStore(ctx, store, jsonlPath)
+	if err != nil {
+		return fmt.Errorf("failed to import from JSONL: %w", err)
+	}
+	fmt.Printf("  → Imported %d issues from issues.jsonl\n", count)
+	return nil
+}
+
+// createDoltMarkerDir creates the local marker directory so FindDatabasePath
+// can discover the database. Server mode doesn't create it automatically
+// (bd-u8rda).
+func createDoltMarkerDir(dbPath string) {
+	if err := os.MkdirAll(dbPath, 0o750); err != nil {
+		fmt.Printf("  Warning: failed to create dolt marker dir: %v\n", err)
+	}
+}
+
+// updateDatabaseMetadata records bdVersion as the database's bd_version and,
+// when the database has no issue_prefix, sets the one its issues use.
+func updateDatabaseMetadata(ctx context.Context, store *dolt.DoltStore, bdVersion string) error {
 	// Update bd_version if provided (clone-local, dolt-ignored)
 	if bdVersion != "" {
 		if err := store.SetLocalMetadata(ctx, "bd_version", bdVersion); err != nil {
@@ -154,7 +226,9 @@ func FreshCloneImport(path string, bdVersion string) error {
 	// Check if Dolt store exists
 	doltDir := getDatabasePath(beadsDir)
 	if _, err := os.Stat(doltDir); os.IsNotExist(err) {
-		// No Dolt store — delegate to Database fix which creates store + imports
+		// No Dolt store — delegate to Database fix, which creates the store
+		// and imports into it, and imports into a database it finds on the
+		// server only when that has no issues.
 		return DatabaseVersionWithBdVersion(path, bdVersion)
 	}
 

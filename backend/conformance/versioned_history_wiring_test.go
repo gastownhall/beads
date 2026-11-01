@@ -129,5 +129,14 @@ func TestVersionedHistoryPhase0RunsInFullSkipMode(t *testing.T) {
 		t.Run("EpochBumpVoidsOnlyAddressesOfVersionsNoLongerServed", func(t *testing.T) {
 			RunEpochBumpVoidsOnlyAddressesOfVersionsNoLongerServed(t, ctx, fixture)
 		})
+		t.Run("TokenSchemeChangeCarriesLiveAddressesAndOnlyThose", func(t *testing.T) {
+			RunTokenSchemeChangeCarriesLiveAddressesAndOnlyThose(t, ctx, fixture)
+		})
+		t.Run("ACarriedAddressKeepsResolvingAcrossLaterBumps", func(t *testing.T) {
+			RunACarriedAddressKeepsResolvingAcrossLaterBumps(t, ctx, fixture)
+		})
+		t.Run("ALostAddressStaysGoneAcrossASchemeChange", func(t *testing.T) {
+			RunALostAddressStaysGoneAcrossASchemeChange(t, ctx, fixture)
+		})
 	})
 }

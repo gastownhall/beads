@@ -5,6 +5,10 @@
 //!
 //! Goldens must exist (run `ORACLE_REFERENCE_BD=/abs/path/to/bd capture_golden`
 //! first). Scenarios without a golden are reported as `no-golden` (skipped).
+//!
+//! Every in-scope failure is also written to `ORACLE_FAILURES_FILE`. Unset, that
+//! is the fixed `/tmp/oracle-a-failures.txt`, which concurrent runs on one host
+//! share; `run-oracle-a.sh` points it into its own per-run scratch dir.
 
 use bd_conformance::differential::{diff, run_scenario, Trace};
 use bd_conformance::scenarios;
@@ -128,7 +132,32 @@ fn main() {
         println!("  {verb:<12} {n}");
     }
     // Dump ALL in-scope failures to a file for offline categorization.
-    let dump = PathBuf::from("/tmp/oracle-a-failures.txt");
+    let dump = failures_file(std::env::var_os("ORACLE_FAILURES_FILE"));
     let _ = std::fs::write(&dump, in_first_fails.join("\n"));
     println!("\nall {} in-scope failures written to {}", in_first_fails.len(), dump.display());
+}
+
+/// Where `main` dumps the in-scope failures: `ORACLE_FAILURES_FILE` when set and
+/// non-empty, else the historical fixed path (shared by every run on the host).
+fn failures_file(var: Option<std::ffi::OsString>) -> PathBuf {
+    var.filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/tmp/oracle-a-failures.txt"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsString;
+
+    #[test]
+    fn failures_file_honors_env_and_falls_back_to_fixed_path() {
+        let fixed = PathBuf::from("/tmp/oracle-a-failures.txt");
+        assert_eq!(failures_file(None), fixed);
+        assert_eq!(failures_file(Some(OsString::new())), fixed);
+        assert_eq!(
+            failures_file(Some(OsString::from("/scratch/run-1/oracle-a-failures.txt"))),
+            PathBuf::from("/scratch/run-1/oracle-a-failures.txt")
+        );
+    }
 }

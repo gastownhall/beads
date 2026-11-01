@@ -101,6 +101,8 @@ EXIT CODES
         over existing issues) without a valid --destroy-token
         (non-interactive mode); also returned when the interactive
         --discard-remote typed-token confirmation is declined
+  15    refused: run directly in your home directory, which is not itself
+        a git repository, with no BEADS_DIR named by the caller
 
 RECOVERY
 

@@ -12,17 +12,17 @@ You need two tools installed on every machine:
 | Tool | Version | Install |
 |------|---------|---------|
 | **bd** (beads CLI) | 0.59.0+ | See [Installation](/getting-started/installation) |
-| **Dolt** | A specific pinned version, not "latest" | See [Which Dolt version to install](/architecture/dolt#which-dolt-version-to-install) |
+| **Dolt** | 2.6.0 or newer (`bd` refuses older); install the pinned version, not "latest" | See [Which Dolt version to install](/architecture/dolt#which-dolt-version-to-install) |
 
 Verify both are installed:
 
 ```bash
 bd version     # must be 0.59.0+
-dolt version   # must match the pinned version
+dolt version   # must match the pinned version (2.6.0 or newer)
 ```
 
-Install a specific Dolt version rather than `releases/latest`. On Dolt 2.3.x a
-few percent of freshly created databases come up with `CALL
+Install a specific Dolt version rather than `releases/latest`. On Dolt 2.3.0
+and 2.3.1 a few percent of freshly created databases come up with `CALL
 DOLT_RESET('--hard')` broken for the life of the server process, which breaks
 `bd flatten`, `bd admin compact` and the rollback behind `bd dolt pull`;
 separately, the upstream `latest` URL can resolve to a *lower* version than

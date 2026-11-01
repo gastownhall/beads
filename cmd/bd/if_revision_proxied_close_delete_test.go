@@ -11,15 +11,15 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// TestProxiedIfRevisionCloseMismatchRefuses pins mc-zndi7.76 (gap 4 / mutant
+// TestProxiedServerIfRevisionCloseMismatchRefuses pins mc-zndi7.76 (gap 4 / mutant
 // MD2): close_if_revision.go's proxied route wires ExpectedVersion into both
 // of its SingleIssueUpdate calls (the plain close and the --force one), but
 // until now nothing on the proxied route ever gave it a STALE token --
-// TestProxiedIfRevisionCloseReplaysMoleculeAutoClose and
-// TestProxiedIfRevisionCloseWarnsOnForcedOpenChildren only ever close with the
+// TestProxiedServerIfRevisionCloseReplaysMoleculeAutoClose and
+// TestProxiedServerIfRevisionCloseWarnsOnForcedOpenChildren only ever close with the
 // current revision. A stale guard must refuse the close outright, before any
 // write, on the real shared Dolt server.
-func TestProxiedIfRevisionCloseMismatchRefuses(t *testing.T) {
+func TestProxiedServerIfRevisionCloseMismatchRefuses(t *testing.T) {
 	requireSharedProxiedServer(t)
 	t.Parallel()
 	bd := buildEmbeddedBD(t)
@@ -50,12 +50,12 @@ func TestProxiedIfRevisionCloseMismatchRefuses(t *testing.T) {
 	}
 }
 
-// TestProxiedIfRevisionDeleteMatchAndMismatch pins mc-zndi7.76 (gap 4 / mutant
+// TestProxiedServerIfRevisionDeleteMatchAndMismatch pins mc-zndi7.76 (gap 4 / mutant
 // MD4): delete_proxied_server.go wires ExpectedVersion: ifRevision into the
 // issueops.DeleteRequest it sends to the real Deleter, but no proxied test
 // gave --if-revision to delete at all before now. A matching guard deletes
 // the row; a stale guard refuses, and the row survives.
-func TestProxiedIfRevisionDeleteMatchAndMismatch(t *testing.T) {
+func TestProxiedServerIfRevisionDeleteMatchAndMismatch(t *testing.T) {
 	requireSharedProxiedServer(t)
 	t.Parallel()
 	bd := buildEmbeddedBD(t)
@@ -96,5 +96,88 @@ func TestProxiedIfRevisionDeleteMatchAndMismatch(t *testing.T) {
 
 		bdProxiedDelete(t, bd, p.dir, issue.ID, "--force", "--if-revision", proxiedRevStr(rev))
 		assertRowAbsent(t, db, "issues", issue.ID)
+	})
+}
+
+// TestProxiedServerIfRevisionTargetGoneIsPreconditionFailed is the proxied-route
+// twin of TestEmbeddedIfRevisionPreflightGoneIsPreconditionFailedOnEveryVerb
+// (ga-vnycm2.10): a guarded close, update, assign, reopen or delete whose row
+// a concurrent `bd delete` already removed must report precondition_failed /
+// ExitGuardMismatch, whichever step (the advisory pre-read or the guarded
+// write) first observes the row gone — never an unclassified "not found"
+// exit 1. TestProxiedServerDeleteIfRevisionSingleWinner's delete_vs_close and
+// delete_vs_update race exactly this; here the winning delete runs first, so
+// the outcome is deterministic.
+func TestProxiedServerIfRevisionTargetGoneIsPreconditionFailed(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
+	p := newSharedProxiedProject(t, bd, "ivtg")
+
+	for _, tc := range []struct {
+		verb string
+		args func(id, rev string) []string
+	}{
+		{"close", func(id, rev string) []string { return []string{"close", id, "--if-revision", rev, "--reason", "gone"} }},
+		{"update", func(id, rev string) []string {
+			return []string{"update", id, "--if-revision", rev, "--spec-id", "gone"}
+		}},
+		{"assign", func(id, rev string) []string { return []string{"assign", id, "someone", "--if-revision", rev} }},
+		{"reopen", func(id, rev string) []string { return []string{"reopen", id, "--if-revision", rev} }},
+		{"delete", func(id, rev string) []string { return []string{"delete", id, "--force", "--if-revision", rev} }},
+		{"delete_cascade", func(id, rev string) []string {
+			return []string{"delete", id, "--cascade", "--force", "--if-revision", rev}
+		}},
+	} {
+		t.Run(tc.verb, func(t *testing.T) {
+			t.Parallel()
+			issue := bdProxiedCreate(t, bd, p.dir, "Proxied guarded "+tc.verb+" vs deleted row")
+			rev0 := bdProxiedShowRevision(t, bd, p.dir, issue.ID)
+			bdProxiedDelete(t, bd, p.dir, issue.ID, "--force")
+
+			stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, tc.args(issue.ID, proxiedRevStr(rev0))...)
+			if err == nil {
+				t.Fatalf("--if-revision %s of a deleted row should have failed, got:\nstdout:\n%s\nstderr:\n%s", tc.verb, stdout, stderr)
+			}
+			var ee *exec.ExitError
+			if !errors.As(err, &ee) {
+				t.Fatalf("--if-revision %s of a deleted row failed without an exit code: %v", tc.verb, err)
+			}
+			out := stdout + stderr
+			if ee.ExitCode() != ExitGuardMismatch {
+				t.Errorf("--if-revision %s of a deleted row exit code = %d, want %d\n%s", tc.verb, ee.ExitCode(), ExitGuardMismatch, out)
+			}
+			if !strings.Contains(out, "precondition failed: issue no longer exists") {
+				t.Errorf("--if-revision %s of a deleted row should say \"precondition failed: issue no longer exists\", got:\n%s", tc.verb, out)
+			}
+			// Every route's own not-found wording: "Issue <id> not found"
+			// (reportIssueLookupFailure), "issue <id> not found" (assign's
+			// pre-read), "issues not found: <id>" (the delete role).
+			if strings.Contains(out, "not found") {
+				t.Errorf("--if-revision %s of a deleted row leaked the raw, unclassified lookup error instead of the guard envelope:\n%s", tc.verb, out)
+			}
+		})
+	}
+
+	// Without --if-revision there is no guard to report through. The assign
+	// pre-read wraps storage.ErrNotFound for the guarded case; unguarded, its
+	// rendered text must stay the "issue <id> not found" it always printed.
+	t.Run("unguarded_assign_still_not_found", func(t *testing.T) {
+		t.Parallel()
+		stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "assign", "ivtg-doesnotexist", "someone")
+		var ee *exec.ExitError
+		if !errors.As(err, &ee) {
+			t.Fatalf("unguarded assign of a missing id should exit non-zero, got err=%v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		}
+		out := stdout + stderr
+		if ee.ExitCode() != 1 {
+			t.Errorf("unguarded assign of a missing id exit code = %d, want 1\n%s", ee.ExitCode(), out)
+		}
+		if !strings.Contains(out, "issue ivtg-doesnotexist not found") {
+			t.Errorf("unguarded assign of a missing id should say \"issue ivtg-doesnotexist not found\", got:\n%s", out)
+		}
+		if strings.Contains(out, "precondition failed") {
+			t.Errorf("unguarded assign of a missing id must not report a guard outcome:\n%s", out)
+		}
 	})
 }

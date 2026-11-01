@@ -25,14 +25,22 @@
 # cert path) and outside BAZEL_CI_CACHE_DIR (the runner cache must never store
 # credentials). The endpoint is masked in the job log.
 #
-# BAZEL_FORK_CACHE=true (bazel.yml mode "cache": rbe=cache dispatches, and
-# fork/Dependabot runs while rbe-fork is closed) appends --config=fork-cache:
+# BAZEL_FORK_CACHE=true (bazel.yml mode "cache": rbe=cache dispatches, whose
+# lanes run on Blacksmith; rbe-cache refuses GitHub-hosted runners, so fork
+# and Dependabot runs while rbe-fork is closed are mode local) appends
+# --config=fork-cache:
 # .bazelrc's credential-free, read-only rbe-west cache. While that cache
 # advertises zstd (cache-zstd-probe.sh asks its GetCapabilities; any failure
 # means no) it also asks for zstd transfers (--remote_cache_compression). A
 # probe, not a repository variable: fork pull_request runs see no vars. No
 # other mode ever asks, because only the anonymous cache can advertise zstd,
-# and Bazel refuses a remote that does not.
+# and Bazel refuses a remote that does not. With BAZEL_RRC_READ=true too
+# (bazel.yml's remote repo contents cache readers alone: the jobs whose
+# configs rrc-lane-commands.txt seeds), and while rbe-cache answers
+# (cache-rrc-probe.sh, which also holds the committed kill switch), it reads
+# Bazel's remote repo contents cache, as those jobs' trusted readers do: the
+# trees rrc-seed wrote on main pushes, through rbe-cache's anonymous AC and
+# CAS reads. The job's step summary says whether it reads, and why.
 #
 # RBE_FORK_CERT_FILE + RBE_FORK_KEY_FILE + RBE_FORK_ENDPOINT + RBE_FORK_INSTANCE
 # (bazel.yml modes fork-ro/fork-rw: fork-credential.sh's outputs, a
@@ -94,6 +102,7 @@ key="${RBE_TLS_KEY:-}"
 ca="${RBE_TLS_CA:-}"
 instance="${RBE_INSTANCE:-}"
 fork_cache="${BAZEL_FORK_CACHE:-}"
+rrc_reader="${BAZEL_RRC_READ:-}"
 fork_cert="${RBE_FORK_CERT_FILE:-}"
 fork_key="${RBE_FORK_KEY_FILE:-}"
 fork_endpoint="${RBE_FORK_ENDPOINT:-}"
@@ -113,6 +122,13 @@ case "$fork_cache" in
 "" | true) ;;
 *)
 	echo "setup-bazel: BAZEL_FORK_CACHE must be \"true\" or empty, got \"$fork_cache\"" >&2
+	exit 1
+	;;
+esac
+case "$rrc_reader" in
+"" | true) ;;
+*)
+	echo "setup-bazel: BAZEL_RRC_READ must be \"true\" or empty, got \"$rrc_reader\"" >&2
 	exit 1
 	;;
 esac
@@ -227,13 +243,37 @@ elif [[ "$set_fields" -ne 0 ]]; then
 	echo "setup-bazel: remote execution is partially configured; BAZEL_REMOTE_EXECUTOR, RBE_TLS_CERT and RBE_TLS_KEY must be set together (or none, for local execution)" >&2
 	exit 1
 elif [[ "$fork_cache" == true ]]; then
+	# The remote repo contents cache, read-only, for the jobs that opt in
+	# (BAZEL_RRC_READ: only their configs are seeded), while rbe-cache
+	# answers and the probe's kill switch (fork_rrc_read) is on. With the
+	# startup flag set and the cache unreachable, every repository first
+	# fails a lookup (gascity engdocs/design/bazel-remote-repo-contents-cache.md,
+	# R6), so a closed or down rbe-cache gets no lines, and a notice says
+	# why. That holds at probe time only: after loading, Bazel fetches the
+	# files lazily, and losing rbe-cache then fails the command (R4). Both
+	# lines are key neutral, as for the trusted readers; fork-cache uploads
+	# nothing, and rbe-cache refuses every write.
+	rrc_read=false
+	if [[ "$rrc_reader" != true ]]; then
+		why="not a remote repo contents cache reader (no BAZEL_RRC_READ)"
+	elif why=$(bash "$(dirname "${BASH_SOURCE[0]}")/cache-rrc-probe.sh" 2>&1); then
+		rrc_read=true
+		echo "$why"
+	else
+		echo "::notice title=No remote repo contents cache::$why"
+	fi
+	echo "Fork cache remote repo contents cache read: **$([[ "$rrc_read" == true ]] && echo on || echo off)** (${why#rbe-cache rrc probe: })" >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
 	# zstd for the anonymous cache's transfers while it advertises zstd:
-	# transport only, so action keys are unchanged. The probe never fails
-	# this script; it only decides the line.
+	# transport only, so action keys are unchanged. The probes never fail
+	# this script; they only decide the lines.
 	{
 		echo "build --config=fork-cache"
 		if bash "$(dirname "${BASH_SOURCE[0]}")/cache-zstd-probe.sh"; then
 			echo "build:fork-cache --remote_cache_compression"
+		fi
+		if [[ "$rrc_read" == true ]]; then
+			echo "startup --experimental_remote_repo_contents_cache"
+			echo "common --loading_phase_threads=64"
 		fi
 	} >>"$rc"
 	cache=true

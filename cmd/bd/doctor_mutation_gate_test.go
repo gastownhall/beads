@@ -9,16 +9,28 @@
 // beside the rest of the freeze suite; both halves share the helpers below and
 // the hermetic subprocess harness declared there.
 //
+// The same gate for `bd backup init`, `backup remove`, `backup sync` and
+// `bd import` sits further down, between the doctor tests it mirrors.
+//
 // This file MUST NOT carry a cgo build tag: it drives a bd binary built with
-// the gms_pure_go tag via subprocess, and asserts only on files and output.
+// the gms_pure_go tag via subprocess, and asserts on files and output (and, for
+// the server rows of the backup/import tests, on the Dolt test server's tables).
 
 package main
 
 import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
 
 // doctorMutationSurface is one class of doctor invocation that mutates the
@@ -122,6 +134,306 @@ func TestDoctorMutationBlockedInReadonlyMode(t *testing.T) {
 	}
 }
 
+// The backup and import commands: the same gate, a different failure.
+//
+// `bd backup init`, `backup remove`, `backup sync` and `bd import` never called
+// CheckReadonly, so strict --readonly only held as far as the store underneath
+// happened to refuse. An embedded store is opened read-only, so those commands
+// failed, but with the storage layer's text rather than the standard refusal,
+// and `backup sync` took the backup lock first and left .beads/backup.lock
+// behind. A server-mode store has no such floor: the same commands ran to
+// completion and rewrote or emptied the backup registry, wrote the backup
+// destination, or imported issues. So every row runs in both flavours, and the
+// checks go past the file tree: a server-mode import leaves .beads untouched
+// even when it succeeds, so the issue count and the registry are compared too.
+//
+// `backup status` and `list` only read, and stay allowed;
+// TestBackupStatusAndListWorkInReadonlyMode pins that. `bd backup` on its own is
+// a command group that only prints help, and is left as it is.
+
+// backupImportSurface is one command that strict --readonly must refuse.
+type backupImportSurface struct {
+	name string
+	// args are the command and its arguments; the test appends the global flags.
+	args []string
+	// op is the operation label the gate reports.
+	op string
+}
+
+func backupImportSurfaces(w *readonlyGateWorkspace) []backupImportSurface {
+	return []backupImportSurface{
+		// A destination other than the registered one, so a run that goes
+		// through shows up as a changed registry.
+		{name: "backup-init", args: []string{"backup", "init", filepath.Join(w.dir, "other-backup-dest")}, op: "backup init"},
+		{name: "backup-remove", args: []string{"backup", "remove"}, op: "backup remove"},
+		{name: "backup-sync", args: []string{"backup", "sync"}, op: "backup sync"},
+		{name: "import", args: []string{"import", w.importFile}, op: "import"},
+		// A preview writes nothing, but strict --readonly already refuses
+		// `create --dry-run`, so import's is refused the same way.
+		{name: "import-dry-run", args: []string{"import", "--dry-run", w.importFile}, op: "import"},
+	}
+}
+
+// readonlyGateFlagSets are the global flag combinations every row runs under.
+// --sandbox changes how bd treats the store (it disables auto-push); the gate
+// has to hold with it as well.
+var readonlyGateFlagSets = []struct {
+	name  string
+	flags []string
+}{
+	{name: "readonly", flags: []string{"--readonly"}},
+	{name: "readonly-sandbox", flags: []string{"--readonly", "--sandbox"}},
+}
+
+// readonlyGateFlavours are the two stores the gate has to hold over.
+var readonlyGateFlavours = []struct {
+	name  string
+	setup func(*testing.T) *readonlyGateWorkspace
+}{
+	{name: "embedded", setup: newEmbeddedReadonlyGateWorkspace},
+	{name: "server", setup: newServerReadonlyGateWorkspace},
+}
+
+// readonlyGateWorkspace is an initialized workspace holding one issue and one
+// registered backup, plus what a refused command has to leave alone.
+type readonlyGateWorkspace struct {
+	bd, dir    string
+	prefix     string
+	dest       string // directory behind the registered default backup
+	importFile string // a one-issue JSONL file for `bd import`
+	// Server flavour only: the shared test server and this workspace's database
+	// on it. A zero port means the embedded flavour.
+	port     int
+	database string
+}
+
+// readonlyGateState is everything a refused command could have changed.
+type readonlyGateState struct {
+	tree     readonlyTreeSnapshot // the whole .beads directory
+	dest     readonlyTreeSnapshot // the backup destination
+	issues   int                  // what `bd list` reports
+	registry string               // server flavour only: dolt_backups as name=url rows
+}
+
+func newEmbeddedReadonlyGateWorkspace(t *testing.T) *readonlyGateWorkspace {
+	t.Helper()
+	bd, dir := setupMigrationFreezeWorkspace(t)
+	w := &readonlyGateWorkspace{bd: bd, dir: dir, prefix: "test"}
+	w.seed(t)
+	return w
+}
+
+// newServerReadonlyGateWorkspace is the same workspace on the shared Dolt test
+// server. The default lane starts none, so it skips there, as the other
+// server-mode readonly test in this package does.
+func newServerReadonlyGateWorkspace(t *testing.T) *readonlyGateWorkspace {
+	t.Helper()
+	port, err := strconv.Atoi(os.Getenv("BEADS_DOLT_PORT"))
+	if err != nil || port <= 0 {
+		t.Skip("shared Dolt test server is unavailable")
+	}
+	dir := t.TempDir()
+	bd := buildBDForInitTests(t)
+	runGitForBootstrapTest(t, dir, "init", "-q")
+	runGitForBootstrapTest(t, dir, "config", "core.hooksPath", ".git/hooks")
+
+	// The prefix names the database on the shared server, so it must be unique.
+	prefix := "rog" + strings.TrimPrefix(uniqueTestDBName(t), "testdb_")
+	stdout, stderr, code := runBDMigrationFreeze(t, bd, dir, "init", "--server", "--server-host", "127.0.0.1",
+		"--server-port", strconv.Itoa(port), "--external", "--prefix", prefix,
+		"--quiet", "--non-interactive", "--skip-hooks", "--skip-agents")
+	if code != 0 {
+		t.Fatalf("bd init --server failed (exit %d):\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	var meta struct {
+		Database string `json:"dolt_database"`
+	}
+	data, err := os.ReadFile(filepath.Join(dir, ".beads", "metadata.json"))
+	if err != nil {
+		t.Fatalf("reading metadata.json: %v", err)
+	}
+	if err := json.Unmarshal(data, &meta); err != nil || meta.Database == "" {
+		t.Fatalf("metadata.json names no dolt_database (%v):\n%s", err, data)
+	}
+	t.Cleanup(func() {
+		db, err := sql.Open("mysql", doltutil.ServerDSN{Host: "127.0.0.1", Port: port, User: "root"}.String())
+		if err != nil {
+			return
+		}
+		defer db.Close()
+		_, _ = db.ExecContext(context.Background(), fmt.Sprintf("DROP DATABASE IF EXISTS `%s`", meta.Database)) //nolint:gosec // generated test name
+	})
+
+	w := &readonlyGateWorkspace{bd: bd, dir: dir, prefix: prefix, port: port, database: meta.Database}
+	w.seed(t)
+	return w
+}
+
+// seed gives the workspace one issue, one registered backup and a JSONL file
+// whose single issue is not in the workspace yet.
+func (w *readonlyGateWorkspace) seed(t *testing.T) {
+	t.Helper()
+	w.dest = filepath.Join(w.dir, "backup-dest")
+	w.importFile = filepath.Join(w.dir, "import.jsonl")
+	record := fmt.Sprintf(`{"id":"%s-gate1","title":"imported under readonly","status":"open","priority":2,"issue_type":"task","created_at":"2026-01-01T00:00:00Z"}`+"\n", w.prefix)
+	if err := os.WriteFile(w.importFile, []byte(record), 0o644); err != nil {
+		t.Fatalf("writing %s: %v", w.importFile, err)
+	}
+	if stdout, stderr, code := w.run(t, "create", "seed issue", "-p", "2"); code != 0 {
+		t.Fatalf("bd create failed (exit %d):\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	w.registerBackup(t)
+}
+
+func (w *readonlyGateWorkspace) run(t *testing.T, args ...string) (stdout, stderr string, exitCode int) {
+	t.Helper()
+	return runBDMigrationFreeze(t, w.bd, w.dir, args...)
+}
+
+// registerBackup points the default backup at w.dest. Rows call it before each
+// run: a row that went through when it should have been refused may have moved
+// or removed the backup, and the next row still needs one to be refused against.
+func (w *readonlyGateWorkspace) registerBackup(t *testing.T) {
+	t.Helper()
+	if stdout, stderr, code := w.run(t, "backup", "init", "file://"+w.dest); code != 0 {
+		t.Fatalf("bd backup init failed (exit %d):\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+}
+
+func (w *readonlyGateWorkspace) state(t *testing.T) readonlyGateState {
+	t.Helper()
+	// Count the issues first: that is itself a strict --readonly read, so
+	// anything it creates lazily exists before the snapshot instead of showing
+	// up in it as a change.
+	s := readonlyGateState{issues: w.issueCount(t)}
+	s.tree = snapshotReadonlyTree(t, filepath.Join(w.dir, ".beads"))
+	s.dest = snapshotReadonlyTree(t, w.dest)
+	if w.port != 0 {
+		s.registry = w.backupRegistry(t)
+	}
+	return s
+}
+
+func (w *readonlyGateWorkspace) issueCount(t *testing.T) int {
+	t.Helper()
+	stdout, stderr, code := w.run(t, "list", "--json", "--readonly")
+	if code != 0 {
+		t.Fatalf("bd list failed (exit %d):\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	var issues []json.RawMessage
+	if err := json.Unmarshal([]byte(stdout), &issues); err != nil {
+		t.Fatalf("bd list --json is not a JSON array: %v\n%s", err, stdout)
+	}
+	return len(issues)
+}
+
+// backupRegistry reads the backups the server has registered for this
+// workspace's database. No bd command prints them, and the file tree never
+// shows them, so a refused run is checked against the server itself.
+func (w *readonlyGateWorkspace) backupRegistry(t *testing.T) string {
+	t.Helper()
+	db, err := sql.Open("mysql", doltutil.ServerDSN{Host: "127.0.0.1", Port: w.port, User: "root", Database: w.database}.String())
+	if err != nil {
+		t.Fatalf("connecting to the test server: %v", err)
+	}
+	defer db.Close()
+	rows, err := db.QueryContext(context.Background(), "SELECT name, url FROM dolt_backups ORDER BY name")
+	if err != nil {
+		t.Fatalf("reading dolt_backups: %v", err)
+	}
+	defer rows.Close()
+	var lines []string
+	for rows.Next() {
+		var name, url string
+		if err := rows.Scan(&name, &url); err != nil {
+			t.Fatalf("scanning dolt_backups: %v", err)
+		}
+		lines = append(lines, name+"="+url)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("reading dolt_backups: %v", err)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// assertUnchanged proves a refusal happened before any mutation, not merely
+// that the refusal text was printed.
+func (w *readonlyGateWorkspace) assertUnchanged(t *testing.T, before readonlyGateState) {
+	t.Helper()
+	after := w.state(t)
+	if diff := readonlyTreeDiff(before.tree, after.tree); len(diff) > 0 {
+		t.Errorf("a refused run changed .beads:\n  %s", strings.Join(diff, "\n  "))
+	}
+	if diff := readonlyTreeDiff(before.dest, after.dest); len(diff) > 0 {
+		t.Errorf("a refused run changed the backup destination:\n  %s", strings.Join(diff, "\n  "))
+	}
+	if after.issues != before.issues {
+		t.Errorf("a refused run changed the issue count: %d -> %d", before.issues, after.issues)
+	}
+	if after.registry != before.registry {
+		t.Errorf("a refused run changed the backup registry:\nbefore:\n%s\nafter:\n%s", before.registry, after.registry)
+	}
+}
+
+// readonlyTreeDiff names what differs between two snapshots, so a leaked
+// mutation reads as "+ backup.lock" rather than as two opaque hash maps.
+func readonlyTreeDiff(before, after readonlyTreeSnapshot) []string {
+	var diff []string
+	if before.Exists != after.Exists {
+		diff = append(diff, fmt.Sprintf("exists: %t -> %t", before.Exists, after.Exists))
+	}
+	for path, was := range before.Entries {
+		if now, ok := after.Entries[path]; !ok {
+			diff = append(diff, "- "+path)
+		} else if now != was {
+			diff = append(diff, "~ "+path)
+		}
+	}
+	for path := range after.Entries {
+		if _, ok := before.Entries[path]; !ok {
+			diff = append(diff, "+ "+path)
+		}
+	}
+	sort.Strings(diff)
+	return diff
+}
+
+// TestBackupAndImportBlockedInReadonlyMode is the readonly gate for the backup
+// and import commands. One workspace per flavour serves every row; each row
+// re-registers the backup first, so none depends on what the previous one did.
+func TestBackupAndImportBlockedInReadonlyMode(t *testing.T) {
+	for _, flavour := range readonlyGateFlavours {
+		t.Run(flavour.name, func(t *testing.T) {
+			w := flavour.setup(t)
+			for _, tt := range backupImportSurfaces(w) {
+				t.Run(tt.name, func(t *testing.T) {
+					for _, flagSet := range readonlyGateFlagSets {
+						t.Run(flagSet.name, func(t *testing.T) {
+							w.registerBackup(t)
+							before := w.state(t)
+
+							args := append(append([]string{}, tt.args...), flagSet.flags...)
+							stdout, stderr, code := w.run(t, args...)
+
+							want := "Error: operation '" + tt.op + "' is not allowed in read-only mode\n"
+							if code != 1 {
+								t.Errorf("exit code = %d, want 1\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+							}
+							if stderr != want {
+								t.Errorf("stderr is not exactly the standard refusal\ngot:  %q\nwant: %q", stderr, want)
+							}
+							if stdout != "" {
+								t.Errorf("stdout should be empty when the command is refused, got:\n%s", stdout)
+							}
+							w.assertUnchanged(t, before)
+						})
+					}
+				})
+			}
+		})
+	}
+}
+
 // TestDoctorDiagnosisWorksInReadonlyMode pins the other half of the contract:
 // the gate keys on --fix/--clean alone, so every diagnosis mode still runs
 // under --readonly. Diagnosing a sandboxed workspace is the whole point.
@@ -138,6 +450,25 @@ func TestDoctorDiagnosisWorksInReadonlyMode(t *testing.T) {
 			stdout, stderr, _ := runBDMigrationFreeze(t, bd, dir, append(args, "--readonly")...)
 			if strings.Contains(stderr, "not allowed in read-only mode") {
 				t.Errorf("bd %v was refused under --readonly but mutates nothing:\nstderr:\n%s\nstdout:\n%s", args, stderr, stdout)
+			}
+		})
+	}
+}
+
+// TestBackupStatusAndListWorkInReadonlyMode is the control for the backup and
+// import gate: it keys on the commands that write, so `backup status` and
+// `list` still run under --readonly, in both flavours.
+func TestBackupStatusAndListWorkInReadonlyMode(t *testing.T) {
+	for _, flavour := range readonlyGateFlavours {
+		t.Run(flavour.name, func(t *testing.T) {
+			w := flavour.setup(t)
+			for _, args := range [][]string{{"backup", "status"}, {"list"}} {
+				t.Run(strings.Join(args, "_"), func(t *testing.T) {
+					stdout, stderr, code := w.run(t, append(append([]string{}, args...), "--readonly")...)
+					if code != 0 || strings.Contains(stderr, "not allowed in read-only mode") {
+						t.Errorf("bd %v under --readonly should run (exit %d):\nstdout:\n%s\nstderr:\n%s", args, code, stdout, stderr)
+					}
+				})
 			}
 		})
 	}

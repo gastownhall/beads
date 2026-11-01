@@ -19,18 +19,25 @@ beads_test_env_enter() {
     export BEADS_TEST_ENV_ROOT="$root"
     export BEADS_TEST_ENV_ACTIVE=1
 
-    if [[ -z "${GOCACHE:-}" ]]; then
-        local go_cache
-        go_cache="$(go env GOCACHE 2>/dev/null || true)"
-        if [[ -n "$go_cache" ]]; then
-            export GOCACHE="$go_cache"
+    # Under `bazel test` (TEST_SRCDIR set) a bare `go` on PATH can be the
+    # farm's exit-127 mask for the host toolchain, and nothing downstream of
+    # this wrapper in that mode builds Go code or needs a cache directory
+    # (scripts/test.sh's prebuilt-test-binary path runs a binary Bazel already
+    # built), so skip the probe entirely rather than risk invoking it.
+    if [[ -z "${TEST_SRCDIR:-}" ]]; then
+        if [[ -z "${GOCACHE:-}" ]]; then
+            local go_cache
+            go_cache="$(go env GOCACHE 2>/dev/null || true)"
+            if [[ -n "$go_cache" ]]; then
+                export GOCACHE="$go_cache"
+            fi
         fi
-    fi
-    if [[ -z "${GOMODCACHE:-}" ]]; then
-        local go_mod_cache
-        go_mod_cache="$(go env GOMODCACHE 2>/dev/null || true)"
-        if [[ -n "$go_mod_cache" ]]; then
-            export GOMODCACHE="$go_mod_cache"
+        if [[ -z "${GOMODCACHE:-}" ]]; then
+            local go_mod_cache
+            go_mod_cache="$(go env GOMODCACHE 2>/dev/null || true)"
+            if [[ -n "$go_mod_cache" ]]; then
+                export GOMODCACHE="$go_mod_cache"
+            fi
         fi
     fi
 

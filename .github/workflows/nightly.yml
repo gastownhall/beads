@@ -25,6 +25,18 @@ jobs:
   # engdocs/CI_REQUIRED_CHECK_TOPOLOGY.md).
   bazel:
     name: Bazel (fresh, full detail)
+    # A called workflow's job gets at most this call's token permissions, and
+    # GitHub checks them when the run starts, even for a job whose if: skips
+    # it (startup_failure otherwise; gascity #7478): bazel.yml's rrc-seed asks
+    # id-token: write (push to main only) and rrc-verify issues: write
+    # (schedule and dispatch only). rrc-verify runs here (its alert issue);
+    # rrc-seed never does, every other bazel.yml job keeps contents: read,
+    # and rbe-west's mint refuses any OIDC token but a main-push bazel.yml one
+    # (scripts/bazel_rrc_test.go, TestBazelWorkflowCallersGrantEveryRequestedPermission).
+    permissions:
+      contents: read
+      id-token: write
+      issues: write
     uses: ./.github/workflows/bazel.yml
     secrets:
       RBE_WEST_EXECUTOR: ${{ secrets.RBE_WEST_EXECUTOR }}

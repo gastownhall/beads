@@ -1,0 +1,68 @@
+# How a red main surfaces (engdocs/CI_REQUIRED_CHECK_TOPOLOGY.md, "Merge
+# Queue"). A merge group runs the fast build and unit set only: the Windows,
+# macOS and Nix jobs and the Dolt-tier Bazel lanes first run on main's push,
+# after the merge (pr.yml's and pr-risk.yml's push runs, bazel.yml's own push
+# run). When one of those push runs, or main.yml's, ends red, this opens the
+# ci/main-red issue (one at a time: later reds comment on it) naming every PR
+# of the pushed range as a candidate (the queue lands a batch as one push),
+# and, when the run turns that workflow red, comments on each of them; when
+# the workflow is green again it says so, and it closes the issue once no
+# tracked workflow's latest push run on main is red
+# (.github/scripts/main-ci-alert.sh).
+#
+# workflow_run runs this file, and the script from the default branch's head,
+# never a PR's copy. It acts only on this repository's push runs on main (a
+# fork PR from the fork's own main branch also reports head_branch main). It
+# reads the run's metadata and job list (actions: read) and the pushed
+# commits' subjects (contents: read), fetches nothing the reported run
+# produced and runs none of its code, and writes only the issue and the PR
+# comments. Policy: scripts/main_ci_alert_test.go.
+name: Main CI alert
+
+on:
+  workflow_run:
+    workflows: ["PR", "PR Risk", "Bazel", "Main"]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  alert:
+    name: Report main's push CI
+    if: github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read # the sparse checkout of the script; the pushed range's commits
+      issues: write # the ci/main-red issue
+      pull-requests: write # the comments on the candidate PRs
+      actions: read # the run's jobs, and each tracked workflow's latest push runs
+    # One at a time: two reds finishing together must not both open an
+    # issue. queue: max keeps every waiting run (by default a group keeps
+    # one pending run and cancels the rest); it cannot be combined with
+    # cancel-in-progress.
+    concurrency:
+      group: main-ci-alert
+      queue: max
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          sparse-checkout: .github/scripts/main-ci-alert.sh
+          sparse-checkout-cone-mode: false
+
+      - name: Open, update or close the ci/main-red issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+          RUN_CREATED_AT: ${{ github.event.workflow_run.created_at }}
+          RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          HEAD_COMMIT_MESSAGE: ${{ github.event.workflow_run.head_commit.message }}
+        run: bash .github/scripts/main-ci-alert.sh

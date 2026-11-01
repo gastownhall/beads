@@ -112,7 +112,10 @@ func (s *Store) SetLocalMetadata(_ context.Context, key, value string) error {
 // A wrong-server handshake is the one error that must NOT collapse to that
 // benign skip (ga-b8ddd.11, Option C): the mismatch carries the id the server
 // actually owns, so handing that Got value back is what lets cmd/bd's
-// validateWorkspaceIdentity compare it against metadata.json and FIRE the
+// validateWorkspaceIdentity compare it against the workspace's expected
+// project id — the sidecar's ExpectProjectID for this backend, not
+// metadata.json (bee-ghosttrack CHANGES_REQUESTED on #7288: metadata.json's
+// project_id is not kept current across `bd connect`) — and FIRE the
 // identity check — the write is refused, exit 1. What this path does NOT surface
 // is the wire ProjectMismatchError's own text: only the Got id survives this
 // method, so the server URL, database, repo root and recovery clause it carries

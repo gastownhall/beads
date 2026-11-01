@@ -133,12 +133,18 @@ func closeDirectBatches(items []closeDirectItem) []closeDirectBatch {
 //
 // claimNext rides on the batch of claimStore and no other, because --claim-next
 // hands out ONE claim however many stores the ids spanned.
-func closeDirectRequest(batch closeDirectBatch, session string, force bool, claimStore storage.DoltStorage, claimNext *issueops.ReadyRequest) issueops.CloseBatchRequest {
+func closeDirectRequest(ctx context.Context, batch closeDirectBatch, session string, force bool, claimStore storage.DoltStorage, claimNext *issueops.ReadyRequest) issueops.CloseBatchRequest {
 	request := issueops.CloseBatchRequest{
 		Actor:   currentActor(),
 		Items:   make([]issueops.BatchCloseItem, 0, len(batch.items)),
 		Session: session,
 		Force:   force,
+		// bd closes a molecule's root when its last step closes; the library
+		// does it inside the batch's transaction. Opt-in at the library so an
+		// orchestrator with its own molecule lifecycle is not doubled, and
+		// asked for only where the store serves it (a remote server that does
+		// not advertise it owns the molecule's auto-close).
+		AutoCloseMolecule: storage.ServesMoleculeAutoClose(ctx, batch.store),
 	}
 	if claimNext != nil && batch.store == claimStore {
 		request.ClaimNext = claimNext
@@ -164,7 +170,7 @@ func closeDirectRun(ctx context.Context, batches []closeDirectBatch, argCount in
 	var claimed *types.IssueWithCounts
 
 	for _, batch := range batches {
-		result, err := closeDirectCloseBatch(ctx, batch.store, closeDirectRequest(batch, session, force, claimStore, claimNext))
+		result, err := closeDirectCloseBatch(ctx, batch.store, closeDirectRequest(ctx, batch, session, force, claimStore, claimNext))
 		if err != nil {
 			for _, item := range batch.items {
 				refused := issueops.CloseOutcome{IssueID: item.id, Err: err}

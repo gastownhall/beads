@@ -25,6 +25,13 @@ type CredentialProvider interface {
 	// A no-auth deployment — the loopback-trust OSS server, which has no token
 	// file at all — returns nil without modifying req.
 	//
+	// It is called once per request the client builds, not once per attempt:
+	// a replayable request whose first attempt stalls or has its connection
+	// reset is resent once with the headers Authorize set, up to the client's
+	// overall timeout later (see Client.roundTrip). A provider whose
+	// credentials are single-use or expire within that window should expect
+	// the resend to draw a 401, which reaches Refresh like any other.
+	//
 	// The error must not carry the credential: it travels into the client's own
 	// error text, which reaches logs and terminals.
 	Authorize(ctx context.Context, req *http.Request) error

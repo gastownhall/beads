@@ -11,6 +11,7 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/migration"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/ui"
 )
 
@@ -126,7 +127,7 @@ func HandleProxyCapabilityError(err error) error {
 		enc.SetIndent("", "  ")
 		_ = enc.Encode(buildJSONCapabilityError(capErr))
 	} else {
-		fmt.Fprintf(os.Stderr, "Error: %s\n", capErr.Message)
+		fmt.Fprintf(os.Stderr, "Error: %s\n", remedy.PrintedText(capErr.Message))
 	}
 	return &exitError{Code: code}
 }
@@ -143,8 +144,14 @@ func jsonStdoutError(message, hint string) {
 	_ = encoder.Encode(buildJSONError(message, hint))
 }
 
+// HandleError prints "Error: " and the formatted message to stderr, and
+// returns the exit error that reports it. Like every printer here it spells
+// the message through remedy.PrintedText: an error can repeat a value a
+// cloned repository sets (a routed path, a dial error naming dolt.host, a
+// clone error naming sync.remote), and a carriage return or escape in it
+// would redraw the line, and the remedy beside it, that the user reads.
 func HandleError(format string, args ...interface{}) error {
-	fmt.Fprintf(os.Stderr, "Error: "+format+"\n", args...)
+	fmt.Fprintf(os.Stderr, "Error: %s\n", remedy.PrintedText(fmt.Sprintf(format, args...)))
 	return &exitError{Code: 1}
 }
 
@@ -160,8 +167,8 @@ func HandleErrorWithHint(message, hint string) error {
 	if jsonOutput {
 		jsonStderrError(message, hint)
 	} else {
-		fmt.Fprintf(os.Stderr, "Error: %s\n", message) //nolint:gosec // G705: stderr, not a browser context
-		fmt.Fprintf(os.Stderr, "Hint: %s\n", hint)     //nolint:gosec // G705: stderr, not a browser context
+		fmt.Fprintf(os.Stderr, "Error: %s\n", remedy.PrintedText(message)) //nolint:gosec // G705: stderr, not a browser context
+		fmt.Fprintf(os.Stderr, "Hint: %s\n", remedy.PrintedText(hint))     //nolint:gosec // G705: stderr, not a browser context
 	}
 	return &exitError{Code: 1}
 }
@@ -170,8 +177,8 @@ func HandleErrorWithHintRespectJSON(message, hint string) error {
 	if jsonOutput {
 		jsonStdoutError(message, hint)
 	} else {
-		fmt.Fprintf(os.Stderr, "Error: %s\n", message)
-		fmt.Fprintf(os.Stderr, "Hint: %s\n", hint)
+		fmt.Fprintf(os.Stderr, "Error: %s\n", remedy.PrintedText(message))
+		fmt.Fprintf(os.Stderr, "Hint: %s\n", remedy.PrintedText(hint))
 	}
 	return &exitError{Code: 1}
 }
@@ -181,7 +188,7 @@ func SilentExit() error {
 }
 
 func WarnError(format string, args ...interface{}) {
-	fmt.Fprintf(os.Stderr, "Warning: "+format+"\n", args...)
+	fmt.Fprintf(os.Stderr, "Warning: %s\n", remedy.PrintedText(fmt.Sprintf(format, args...)))
 }
 
 // ExitMigrationFrozen is the exit code for a write refused because a
@@ -328,8 +335,8 @@ func migrationFreezeRefusal(operation string, res migration.Result) error {
 //
 // Without the suppression a freeze refusal on any command that does not set
 // SilenceErrors/SilenceUsage statically — duplicate, supersede, dep
-// relate/unrelate, backup init/sync/remove/restore, ado sync, migrate-personal,
-// batch — is followed by "Error: exit code 14" (exitError's placeholder text)
+// relate/unrelate, backup init/sync/remove/restore, ado sync, batch — is
+// followed by "Error: exit code 14" (exitError's placeholder text)
 // and a full usage dump, so a clean refusal reads like a syntax error. Setting
 // the flags here rather than on each command covers the ones added after this
 // comment too. main() exits on the exitError before its own SilenceErrors

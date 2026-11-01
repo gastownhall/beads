@@ -87,6 +87,12 @@ func TestLifecycleUpdateContract(t *testing.T) {
 	t.Run("PersistentPreservesUnversionedClass", func(t *testing.T) {
 		conformance.RunLifecycleUpdatePersistentPreservesUnversionedClass(t, ctx, fixture)
 	})
+	t.Run("WispModesRefuseAnUnversionedRow", func(t *testing.T) {
+		conformance.RunLifecycleUpdateWispModesRefuseAnUnversionedRow(t, ctx, fixture)
+	})
+	t.Run("PersistentPromotesAWisp", func(t *testing.T) {
+		conformance.RunLifecycleUpdatePersistentPromotesAWisp(t, ctx, fixture)
+	})
 	t.Run("ProvenanceLabelsHistory", func(t *testing.T) {
 		conformance.RunLifecycleUpdateProvenanceLabelsHistory(t, ctx, fixture)
 	})
@@ -95,6 +101,12 @@ func TestLifecycleUpdateContract(t *testing.T) {
 	})
 	t.Run("AllowTemplateEditsATemplate", func(t *testing.T) {
 		conformance.RunLifecycleUpdateAllowTemplateEditsATemplate(t, ctx, fixture)
+	})
+	t.Run("PatchesTheGateMembers", func(t *testing.T) {
+		conformance.RunLifecycleUpdatePatchesTheGateMembers(t, ctx, fixture)
+	})
+	t.Run("BoundsTheGateMembers", func(t *testing.T) {
+		conformance.RunLifecycleUpdateBoundsTheGateMembers(t, ctx, fixture)
 	})
 }
 

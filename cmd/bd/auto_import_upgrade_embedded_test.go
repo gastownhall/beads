@@ -385,3 +385,62 @@ func TestEmbeddedAutoImportFallback_ConflictSkip_EmptyDBImportsAll(t *testing.T)
 		}
 	}
 }
+
+// TestEmbeddedAutoImportFallback_ConflictSkip_SkipsRetiredRows pins the
+// server-mode fallback importer (importFromLocalJSONLConflictSkip) on the
+// database a retaining sweep emptied, which still counts as empty: the
+// retired row is skipped and counted apart, never as imported, while a fresh
+// row from the same file still lands.
+func TestEmbeddedAutoImportFallback_ConflictSkip_SkipsRetiredRows(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "cr")
+	retired := bdCreate(t, bd, dir, "retire me", "--id", "cr-keyed1").ID
+	bdClose(t, bd, dir, retired)
+	prune := exec.Command(bd, "prune", "--pattern", retired, "--retain-ids", "--force")
+	prune.Dir = dir
+	prune.Env = bdEnv(dir)
+	if out, err := prune.CombinedOutput(); err != nil {
+		t.Fatalf("bd prune --retain-ids failed: %v\n%s", err, out)
+	}
+
+	const fresh = "cr-fresh1"
+	now := time.Now().UTC()
+	jsonlIssues := []types.Issue{
+		{ID: retired, Title: "resurrect me", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, CreatedAt: now, UpdatedAt: now},
+		{ID: fresh, Title: "freshly imported", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, CreatedAt: now, UpdatedAt: now},
+	}
+	var lines []string
+	for _, issue := range jsonlIssues {
+		b, err := json.Marshal(issue)
+		if err != nil {
+			t.Fatalf("marshal fixture: %v", err)
+		}
+		lines = append(lines, string(b))
+	}
+	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+	if err := os.WriteFile(jsonlPath, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	store := openStore(t, beadsDir, "cr")
+	ctx := context.Background()
+
+	res, err := importFromLocalJSONLConflictSkip(ctx, store, jsonlPath)
+	if err != nil {
+		t.Fatalf("importFromLocalJSONLConflictSkip: %v", err)
+	}
+	if res.Issues != 1 || res.Retired != 1 {
+		t.Errorf("importFromLocalJSONLConflictSkip = {Issues:%d Retired:%d}, want {1 1}: the retired row is skipped and reported, not imported", res.Issues, res.Retired)
+	}
+	if got, err := store.GetIssue(ctx, retired); err == nil {
+		t.Errorf("the conflict-skip import resurrected the retired id %s: %+v", retired, got)
+	}
+	if _, err := store.GetIssue(ctx, fresh); err != nil {
+		t.Errorf("fresh row %s was not imported: %v", fresh, err)
+	}
+}

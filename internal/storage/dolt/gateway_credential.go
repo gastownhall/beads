@@ -2,11 +2,9 @@ package dolt
 
 import (
 	"context"
-	"fmt"
-	"strings"
 
 	"github.com/steveyegge/beads/internal/configfile"
-	"github.com/steveyegge/beads/internal/creds"
+	"github.com/steveyegge/beads/internal/doltserver"
 )
 
 // ApplyGatewayCredential resolves the server credential command
@@ -31,31 +29,16 @@ func ApplyGatewayCredential(ctx context.Context, fileCfg *configfile.Config, cfg
 	if cfg.ServerUser != "" {
 		return false, nil
 	}
-	cred, ok, err := creds.ResolveLadder(ctx, creds.CommandSource{
-		Command: fileCfg.GetDoltCredentialCommand(),
-		Kind:    creds.KindIdentity,
-		Label:   "BEADS_DOLT_CREDENTIAL_COMMAND",
-	})
+	// The token resolution is doltserver.GatewayIdentity's, which a dial
+	// through the endpoint presents too (doltserver.Endpoint.WithIdentity).
+	token, ok, err := doltserver.GatewayIdentity(ctx, fileCfg.GetDoltCredentialCommand())
 	if err != nil {
 		return false, err
 	}
 	if !ok {
 		return false, nil
 	}
-	// Defense in depth: the token is presented AS the username, so a non-identity
-	// credential must never reach this slot.
-	if cred.Kind != creds.KindIdentity {
-		return false, fmt.Errorf("dolt: credential from %s is not an identity; refusing to present it as the connection username", cred.Source)
-	}
-	// The token becomes the DSN username; the go-sql-driver grammar has no escaping for
-	// the user field, so a ':' '@' or '/' would silently mis-split it into user/password.
-	// Reject rather than connect with a mangled identity. (JWTs are base64url + '.', safe.)
-	if strings.ContainsAny(cred.Value, ":@/") {
-		return false, fmt.Errorf("dolt: credential from %s contains a character (:, @, or /) that cannot be placed in the connection username", cred.Source)
-	}
-	// cred.Username (a dynamic user/password pair) is meaningless here: the token IS the
-	// username. Ignored deliberately.
-	cfg.ServerUser = cred.Value
+	cfg.ServerUser = token
 	cfg.Gateway = true
 	cfg.DisableAutoStart = true
 	return true, nil

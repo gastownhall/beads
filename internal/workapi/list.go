@@ -194,6 +194,20 @@ func BuildListFilter(in issueops.ListRequest, cfg ListConfig) (types.IssueFilter
 	if err := issueops.ValidateReadyFlagScope(in); err != nil {
 		return types.IssueFilter{}, err
 	}
+	// The pinned pair is a contradiction, refused here rather than in any one
+	// frontend so every route agrees: the CLI refuses it at flag parse, and a
+	// served listing carries both members (issues.list.filters), where the
+	// branch below used to let PinnedFlag win silently.
+	if in.PinnedFlag && in.NoPinnedFlag {
+		return types.IssueFilter{}, fmt.Errorf("--pinned and --no-pinned are mutually exclusive%.0w", issueops.ErrValidation)
+	}
+	// The parent pair likewise, in the sentence `bd list` and BuildCountFilter
+	// refuse it with: a served listing carries no_parent beside parent
+	// (issues.list.filters), and ANDing the two answered only the edge-less
+	// rows under the parent's dotted id instead of refusing.
+	if in.ParentID != "" && in.NoParent {
+		return types.IssueFilter{}, fmt.Errorf("--parent and --no-parent are mutually exclusive%.0w", issueops.ErrValidation)
+	}
 
 	filter := types.IssueFilter{
 		Limit: SQLLimit(in),
@@ -248,6 +262,16 @@ func BuildListFilter(in issueops.ListRequest, cfg ListConfig) (types.IssueFilter
 		}
 		filter.ExcludeStatus = excludeStatuses
 	}
+	// The caller's own exclusions (ListRequest.ExcludeStatus) are APPENDED to
+	// the defaults above, never in place of them: excluding `blocked` must not
+	// re-admit closed rows. They apply on every arm, AllFlag and an explicit
+	// Status included, which is what lets a caller drop closed history
+	// (AllFlag with ExcludeStatus "closed") without enumerating every status.
+	excluded, err := ParseExcludeStatus(in.ExcludeStatus, cfg.CustomStatusNames())
+	if err != nil {
+		return filter, err
+	}
+	filter.ExcludeStatus = append(filter.ExcludeStatus, excluded...)
 
 	if in.Priority != nil {
 		p := *in.Priority
@@ -367,11 +391,6 @@ func BuildListFilter(in issueops.ListRequest, cfg ListConfig) (types.IssueFilter
 		}
 	}
 
-	if cfg.IsInfra(in.IssueType) {
-		ephemeral := true
-		filter.Ephemeral = &ephemeral
-	}
-
 	if in.ParentID != "" {
 		pid := in.ParentID
 		filter.ParentID = &pid
@@ -415,7 +434,8 @@ func BuildListFilter(in issueops.ListRequest, cfg ListConfig) (types.IssueFilter
 // account of WHAT IT IS, so that a "show everything" frontend has exactly one
 // thing to skip. Two kinds live here: the type-level exclusions that make the
 // default listing show durable work only (templates, gates, infra types), and
-// the plane decision — whether the wisps TABLE is read at all.
+// the plane decision — whether the wisps TABLE is read at all, and for a named
+// infra type whether only its ephemeral rows are.
 //
 // IncludeAllTypes lifts them ALL by skipping this function entirely, which is
 // what makes it future-proof: a suppression added here is automatically lifted
@@ -442,13 +462,27 @@ func applyTypeSuppressions(in issueops.ListRequest, cfg ListConfig, filter *type
 
 	// The plane bit. Three requests admit the wisp table: an explicit
 	// IncludeEphemeral, IncludeInfra (which admits the plane AND drops the
-	// infra-type exclusions above), and naming an infra type (which routed to
-	// the plane alone in BuildListFilter). Everything else is the durable
-	// listing. IncludeAllTypes is a fourth, via the early return above — it is
-	// the union of these flags, so it must decide the plane too, not only the
-	// type exclusions.
+	// infra-type exclusions above), and naming an infra type (which narrows to
+	// its ephemeral rows, below). Everything else is the durable listing.
+	// IncludeAllTypes is a fourth, via the early return above — it is the union
+	// of these flags, so it must decide the plane too, not only the type
+	// exclusions.
 	if !in.IncludeEphemeral && !in.IncludeInfra && (in.IssueType == "" || !cfg.IsInfra(in.IssueType)) {
 		filter.SkipWisps = true
+	}
+
+	// Naming an infra type narrows the read to its EPHEMERAL rows alone, which
+	// is where creating one puts it. IncludeEphemeral lifts that narrowing,
+	// because it promises the durable answer PLUS the plane, never the plane
+	// instead: an infra-typed row can still be durable — a promoted wisp, an
+	// issue retyped after it was created, or one written before its type
+	// joined types.infra — and while the narrowing held, `bd search --type
+	// message` (whose scope sets the flag) dropped exactly those rows with exit
+	// 0. IncludeInfra alone keeps the narrowing, and BuildCountFilter's
+	// IncludeInfra arm mirrors both halves (GH#4387).
+	if cfg.IsInfra(in.IssueType) && !in.IncludeEphemeral {
+		ephemeral := true
+		filter.Ephemeral = &ephemeral
 	}
 }
 

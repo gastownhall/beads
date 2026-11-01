@@ -43,11 +43,15 @@ func (t *DirtyTableTracker) DirtyTables() map[string]bool {
 // twice, not one value threaded through: the scope call reads it when the
 // transaction opens, this one reads it again after the body has run. So the
 // staging set and the minting behavior cannot disagree only as long as
-// activation does not change mid-operation — a SetVersionedHistoryEnabled
-// flip landing in that window mints rows under the scope and then declines to
-// stage them. Activation is wiring-time configuration with no non-test caller
-// today, so this is an invariant to preserve rather than a live defect; latch
-// the flag once per operation and pass the bool if that ever stops holding.
+// activation does not turn OFF mid-operation — a flip from on to off landing in
+// that window mints rows under the scope and then declines to stage them.
+// Activation can change after wiring now, but only the other way: a deferred
+// read (storage.VersionedHistoryDeferrer) answers a pending switch at a write
+// transaction's scope, before its body runs, and only ever turns it on
+// (issueops.VersionedHistorySwitch). A concurrent operation scoped off can see
+// its staging widen, which stages tables that may be clean, the free direction
+// below. SetVersionedHistoryEnabled(false) has no non-test caller; latch the
+// flag once per operation and pass the bool if that ever stops holding.
 //
 // A tracker with nothing dirty is left alone. Minting only happens alongside a
 // mutation, so an empty set means no mutation ran; adding tables there would

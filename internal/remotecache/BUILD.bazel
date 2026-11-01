@@ -11,9 +11,11 @@ go_library(
     deps = [
         "//internal/configfile",
         "//internal/debug",
+        "//internal/doltversion",
         "//internal/githooksenv",
         "//internal/gittraceenv",
         "//internal/lockfile",
+        "//internal/remedy",
         "//internal/storage",
     ],
 )
@@ -24,9 +26,13 @@ go_test(
         "cache_test.go",
         "doltcmd_test.go",
         "url_test.go",
+        "version_floor_test.go",
     ],
     embed = [":remotecache"],
-    deps = ["//internal/githooksenv"],
+    deps = [
+        "//internal/doltversion",
+        "//internal/githooksenv",
+    ],
 )
 
 # --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---

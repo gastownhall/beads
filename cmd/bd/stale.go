@@ -33,7 +33,7 @@ This helps identify:
 		days, _ := cmd.Flags().GetInt("days")
 		status, _ := cmd.Flags().GetString("status")
 		limit, _ := cmd.Flags().GetInt("limit")
-		// Normalized for the reason blockedFilterFromFlags gives: these are
+		// Normalized for the reason blockedRequestFromFlags gives: these are
 		// exact-match clauses, and every sibling label filter trims its input
 		// before building them.
 		rawLabels, _ := cmd.Flags().GetStringSlice("label")

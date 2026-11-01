@@ -126,13 +126,14 @@ func ExecuteEdgeCount(ctx context.Context, tx DBTX, request publicops.EdgeCountR
 // tallyEdgesInTx counts the matching edges per anchor across both dependency
 // planes, batched at queryBatchSize.
 //
-// It SUMS the two planes rather than counting distinct row ids, which is the
-// shipped answer of every raw count this role covers (dolt/counts.go's
-// CountDependents, CountDependencies and CountDependentsByStatus) and of
-// CountDependencyEdgesInTx, the domain body behind `bd show`'s counts on the
-// unit-of-work leg. CountDependentRecordsInTx de-duplicates instead, because it
-// must agree with a keyset PAGE of the same rows; a cardinality has no page and
-// has never de-duplicated.
+// It SUMS the two planes rather than counting distinct far ends, which is the
+// shipped answer of the raw counts this role covers (dolt/counts.go's
+// CountDependentsByStatus) and of the batched graph counter. The per-anchor
+// counts behind `bd show` (CountDependents, CountDependencies and
+// CountDependencyEdgesInTx) count each distinct far end once instead, so they
+// agree with the listing beside them when an edge sits in both planes
+// (bd-cif6y4). CountDependentRecordsInTx de-duplicates on the row id, because
+// it must agree with a keyset PAGE of the same rows.
 func tallyEdgesInTx(ctx context.Context, tx DBTX, anchors []string, request publicops.EdgeCountRequest) (map[string]int64, error) {
 	tallies := make(map[string]int64, len(anchors))
 	for _, plane := range edgeCountPlanes {

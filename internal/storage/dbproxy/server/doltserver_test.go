@@ -301,6 +301,46 @@ func TestDoltServer_DSN(t *testing.T) {
 	assert.Empty(t, parsedEmpty.Passwd)
 }
 
+// TestDoltServer_DialIPv6ListenerHost pins the address a managed server's
+// Dial, which its readiness check polls, reaches for a listener.host at the
+// IPv6 loopback, written bare or bracketed: [::1]:port, the address its DSN
+// names, never [[::1]]:port.
+func TestDoltServer_DialIPv6ListenerHost(t *testing.T) {
+	ln, err := net.Listen("tcp", "[::1]:0")
+	if err != nil {
+		t.Skipf("IPv6 loopback not available: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			c, aerr := ln.Accept()
+			if aerr != nil {
+				return
+			}
+			_ = c.Close()
+		}
+	}()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	for _, host := range []string{"::1", "[::1]"} {
+		t.Run(host, func(t *testing.T) {
+			cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+			body := fmt.Sprintf("listener:\n  host: %q\n  port: %d\n", host, port)
+			require.NoError(t, os.WriteFile(cfgPath, []byte(body), 0o600))
+			s, err := server.NewDoltServer("dolt", t.TempDir(), cfgPath, "", 0, "")
+			require.NoError(t, err)
+
+			conn, err := s.Dial(context.Background())
+			require.NoError(t, err, "listener.host %q must dial [::1]:%d", host, port)
+			_ = conn.Close()
+
+			parsed, err := mysqldrv.ParseDSN(s.DSN(context.Background(), "", "root", ""))
+			require.NoError(t, err)
+			assert.Equal(t, fmt.Sprintf("[::1]:%d", port), parsed.Addr, "listener.host %q", host)
+		})
+	}
+}
+
 func TestDoltServer_StartStop_HappyPath(t *testing.T) {
 	s, rootDir := newDoltServer(t)
 	ctx := context.Background()

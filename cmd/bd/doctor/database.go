@@ -471,6 +471,12 @@ func FixDatabaseConfig(path string) error {
 // getDatabasePath returns the actual database directory path, respecting dolt_data_dir.
 // When dolt_data_dir is configured (e.g. ext4 redirect for WSL), the database lives
 // outside .beads/dolt/ — this function resolves the correct location.
+//
+// It reads the metadata with configfile.Load, which migrates a legacy
+// config.json into metadata.json, so pass only the workspace doctor runs in,
+// which command admission has checked. Read a .beads that admission never saw,
+// such as a nested one the Classic Artifacts walk reaches, with
+// configfile.LoadAndCheckWorkspaceFormat instead.
 func getDatabasePath(beadsDir string) string {
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil || cfg == nil {

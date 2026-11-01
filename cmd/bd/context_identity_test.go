@@ -138,3 +138,42 @@ func directContextSnapshot(t *testing.T, beadsDir string) domain.ContextInfo {
 	}
 	return snapshot
 }
+
+// TestContextRoutesNameThePortTheStoreDials pins both bd context routes to
+// the port the store dials for a server-mode workspace whose server only the
+// legacy BEADS_DOLT_PORT names. Both took DefaultConfig's port, which leaves
+// that variable out, and named 127.0.0.1:0 (#7841 review).
+// TestContextRoutesNameOneWorkspaceTheSameWay compares the published fields,
+// which leave the endpoint out.
+func TestContextRoutesNameThePortTheStoreDials(t *testing.T) {
+	const legacy = 13307
+	endpointCredentialsEnv(t, nil)
+	t.Setenv("BEADS_DOLT_PORT", "13307")
+	dir := t.TempDir()
+	initGitRepoAt(t, dir)
+	beadsDir := filepath.Join(dir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	cfg := &configfile.Config{Backend: configfile.BackendDolt, DoltMode: configfile.DoltModeServer, DoltDatabase: "context_port"}
+	if err := cfg.Save(beadsDir); err != nil {
+		t.Fatalf("save metadata.json: %v", err)
+	}
+	t.Chdir(dir)
+	t.Setenv("BEADS_DIR", beadsDir)
+	resetRepoCachesForTest(t)
+
+	provider, err := contextinfo.NewContextProvider(dir, Version).ContextUseCase().GetContextInfo(t.Context())
+	if err != nil {
+		t.Fatalf("provider route: %v", err)
+	}
+	direct := directContextSnapshot(t, beadsDir)
+	for route, port := range map[string]int{
+		"the contextinfo provider (bd context in proxied mode)": provider.ServerPort,
+		"the direct route (bd context)":                         direct.ServerPort,
+	} {
+		if port != legacy {
+			t.Errorf("%s names port %d, want %d, the port the store dials", route, port, legacy)
+		}
+	}
+}

@@ -227,18 +227,8 @@ func (unsupportedDoltStorage) ForcePush(_ context.Context) (err error) {
 	return
 }
 
-func (unsupportedDoltStorage) GetAllDependencyRecords(_ context.Context) (_ map[string][]*types.Dependency, err error) {
-	err = errUnsupported("GetAllDependencyRecords")
-	return
-}
-
 func (unsupportedDoltStorage) GetAllEventsSince(_ context.Context, _ time.Time) (_ []*types.Event, err error) {
 	err = errUnsupported("GetAllEventsSince")
-	return
-}
-
-func (unsupportedDoltStorage) GetBlockedIssues(_ context.Context, _ types.WorkFilter) (_ []*types.BlockedIssue, err error) {
-	err = errUnsupported("GetBlockedIssues")
 	return
 }
 
@@ -407,11 +397,6 @@ func (unsupportedDoltStorage) HasRemote(_ context.Context, _ string) (_ bool, er
 	return
 }
 
-func (unsupportedDoltStorage) HeartbeatIssue(_ context.Context, _ string, _ string) (err error) {
-	err = errUnsupported("HeartbeatIssue")
-	return
-}
-
 func (unsupportedDoltStorage) History(_ context.Context, _ string) (_ []*storage.HistoryEntry, err error) {
 	err = errUnsupported("History")
 	return
@@ -429,11 +414,6 @@ func (unsupportedDoltStorage) InitVerifier() (_ issueops.InitVerifier, err error
 
 func (unsupportedDoltStorage) IsBlocked(_ context.Context, _ string) (_ bool, _ []string, err error) {
 	err = errUnsupported("IsBlocked")
-	return
-}
-
-func (unsupportedDoltStorage) IsBlockedBatch(_ context.Context, _ []string) (_ map[string]bool, err error) {
-	err = errUnsupported("IsBlockedBatch")
 	return
 }
 
@@ -642,11 +622,6 @@ func (unsupportedDoltStorage) RunInTransaction(_ context.Context, _ string, _ fu
 	return
 }
 
-func (unsupportedDoltStorage) SearchIssueIDs(_ context.Context, _ string, _ types.IssueFilter) (_ []string, err error) {
-	err = errUnsupported("SearchIssueIDs")
-	return
-}
-
 func (unsupportedDoltStorage) SearchIssueSummaries(_ context.Context, _ string, _ types.IssueFilter) (_ []*types.IssueSummary, err error) {
 	err = errUnsupported("SearchIssueSummaries")
 	return
@@ -742,4 +717,4 @@ func (unsupportedDoltStorage) VersionReconciler() (_ issueops.VersionReconciler,
 	return
 }
 
-// NOTE: partial shell (145 of 200 methods generated; 55 left to this package's hand-written set).
+// NOTE: partial shell (140 of 205 methods generated; 65 left to this package's hand-written set).
