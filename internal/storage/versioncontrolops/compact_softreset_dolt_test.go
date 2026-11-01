@@ -598,3 +598,82 @@ func TestCompactKeepsCommitLandingBeforeMainMoves(t *testing.T) {
 		e.assertPendingSurvive(7)
 	})
 }
+
+// assertQuietHistory pins AC-3's history: the initial commit, the squashed
+// base and the replayed recent commits, and nothing else — in particular no
+// follow-up commit.
+func (e *csrEnv) assertQuietHistory() {
+	e.t.Helper()
+	verify := e.verifyConn()
+	commits := e.log(verify)
+	wantMsgs := []string{csrRecent2Msg, csrRecent1Msg, csrSquashMsg}
+	if len(commits) != len(wantMsgs)+1 {
+		e.t.Fatalf("dolt_log has %d commits, want %d: %+v", len(commits), len(wantMsgs)+1, commits)
+	}
+	for i, want := range wantMsgs {
+		if commits[i].message != want {
+			e.t.Errorf("dolt_log[%d] = %q, want %q", i, commits[i].message, want)
+		}
+	}
+	for _, c := range commits {
+		if c.message == csrFollowUpMsg {
+			e.t.Errorf("dolt_log contains the follow-up commit %q; want none on a quiet run", c.message)
+		}
+	}
+
+	// The pre-compaction HEAD tree is preserved: every committed table has
+	// exactly the rows it had at the head Compact started from.
+	for _, table := range []string{"t", "u", "config"} {
+		atHead := e.queryInt(verify, "SELECT COUNT(*) FROM `"+table+"` AS OF 'HEAD'")
+		before := e.queryInt(verify, "SELECT COUNT(*) FROM `"+table+"` AS OF '"+e.preCompactHead+"'")
+		if atHead != before {
+			e.t.Errorf("%s at HEAD has %d rows, want the pre-compaction %d", table, atHead, before)
+		}
+	}
+	if st := e.status(verify); len(st) != 0 {
+		e.t.Errorf("dolt_status = %v, want empty", st)
+	}
+}
+
+// TestCompactQuietRunAddsNoCommit (AC-3): on a clean working set with no
+// concurrent writer, a successful compaction preserves the pre-compaction
+// HEAD tree, leaves exactly the initial commit, the squashed base and the
+// replayed recent commits — no follow-up commit — and an empty dolt_status.
+// This is the regression guard for the soft reset's quiet path: the
+// follow-up commit exists only when the reset actually left something
+// staged.
+func TestCompactQuietRunAddsNoCommit(t *testing.T) {
+	t.Run("clean working set, no concurrent writer", func(t *testing.T) {
+		e := newCsrEnv(t)
+
+		hooked := &csrHookConn{DBConn: e.compactConn()}
+		if err := e.compact(hooked); err != nil {
+			t.Fatalf("Compact: %v", err)
+		}
+		if hooked.followUps != 0 {
+			t.Fatalf("Compact issued %d follow-up commits, want 0 on a quiet run", hooked.followUps)
+		}
+
+		e.assertQuietHistory()
+	})
+
+	// Dirt that dolt_ignore hides cannot be staged, so it must not earn a
+	// follow-up commit either; the row itself stays where it was.
+	t.Run("ignored table dirt only", func(t *testing.T) {
+		e := newCsrEnv(t)
+		e.exec(e.setup, "INSERT INTO ignoredprobe VALUES (1)")
+
+		hooked := &csrHookConn{DBConn: e.compactConn()}
+		if err := e.compact(hooked); err != nil {
+			t.Fatalf("Compact: %v", err)
+		}
+		if hooked.followUps != 0 {
+			t.Fatalf("Compact issued %d follow-up commits, want 0 when only a dolt_ignore'd table is dirty", hooked.followUps)
+		}
+
+		e.assertQuietHistory()
+		if got := e.queryInt(e.verifyConn(), "SELECT COUNT(*) FROM ignoredprobe WHERE id = 1"); got != 1 {
+			e.t.Errorf("row 1 in ignoredprobe on main: present=%t, want present=true", got == 1)
+		}
+	})
+}
