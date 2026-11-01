@@ -26,6 +26,8 @@ type deleteInput struct {
 	// refuses it alongside more than one id before gatherDeleteInput's caller ever
 	// reaches the role.
 	ifRevision *int64
+	// threadGuard is --if-threads's guard, or nil (see loadDeleteThreadGuard).
+	threadGuard *issueops.ThreadGuard
 }
 
 func gatherDeleteInput(cmd *cobra.Command, args []string) (*deleteInput, error) {
@@ -48,6 +50,12 @@ func gatherDeleteInput(cmd *cobra.Command, args []string) (*deleteInput, error) 
 	in.cascade, _ = cmd.Flags().GetBool("cascade")
 	in.force, _ = cmd.Flags().GetBool("force")
 	in.dryRun, _ = cmd.Flags().GetBool("dry-run")
+	guardPath, _ := cmd.Flags().GetString("if-threads")
+	guard, err := loadDeleteThreadGuard(guardPath, cmd.Flags().Changed("if-threads"), in.force, in.cascade)
+	if err != nil {
+		return nil, err
+	}
+	in.threadGuard = guard
 	in.jsonOutput = jsonOutput
 	in.quiet = isQuiet()
 	return in, nil
@@ -108,6 +116,7 @@ func runDeleteProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 		Force:           in.force,
 		DryRun:          in.dryRun || !in.force,
 		ExpectedVersion: ifRevision,
+		ThreadGuard:     in.threadGuard,
 	}
 	result, err := deleter.Delete(ctx, request)
 	// A8 (beads#4682): a guard mismatch is reported through the dedicated
@@ -119,6 +128,10 @@ func runDeleteProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 		if reported, ok := reportIfRevisionFailure("deleting", in.ids[0], err, in.ifRevision); ok {
 			return reported
 		}
+	}
+	// A thread-guard refusal reads the same on every route, preview or not.
+	if mismatch := threadGuardMismatch(err); mismatch != nil {
+		return reportThreadGuardMismatch(mismatch)
 	}
 	// THE GUARD REFUSAL IS NOT A BARE ERROR HERE. Classic renders the preview
 	// and THEN the refusal, which is what tells the caller both what would go

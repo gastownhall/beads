@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/steveyegge/beads/internal/migration"
 	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/issueops"
 )
 
 type exitError struct {
@@ -21,6 +23,58 @@ type exitError struct {
 
 func (e *exitError) Error() string {
 	return fmt.Sprintf("exit code %d", e.Code)
+}
+
+// threadGuardMismatch returns the `bd delete --if-threads` refusal err
+// carries, or nil.
+func threadGuardMismatch(err error) *issueops.ThreadGuardMismatchError {
+	var mismatch *issueops.ThreadGuardMismatchError
+	if errors.As(err, &mismatch) {
+		return mismatch
+	}
+	return nil
+}
+
+// reportThreadGuardMismatch renders a thread-guard refusal on stderr and
+// returns the ExitGuardMismatch exit: the archived threads changed, nothing
+// was deleted, and retrying the same guard is pointless. In --json mode the
+// report is one compact JSON line, the last on stderr, carrying every failed
+// thread and check; in text mode it names each one on its own line. Every
+// route renders the refusal here, so all three say the same thing.
+func reportThreadGuardMismatch(mismatch *issueops.ThreadGuardMismatchError) error {
+	if jsonOutput {
+		inner := map[string]interface{}{
+			"error":          mismatch.Error(),
+			"failed_threads": mismatch.Failed,
+			"guard_mismatch": true,
+		}
+		var payload interface{}
+		if jsonEnvelopeEnabled() {
+			payload = map[string]interface{}{
+				"schema_version": JSONSchemaVersion,
+				"data":           inner,
+			}
+		} else {
+			inner["schema_version"] = JSONSchemaVersion
+			payload = inner
+		}
+		data, err := json.Marshal(payload)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", mismatch)
+		} else {
+			fmt.Fprintln(os.Stderr, string(data))
+		}
+		return &exitError{Code: ExitGuardMismatch}
+	}
+	fmt.Fprintf(os.Stderr, "Error: %s: nothing was deleted\n", issueops.ErrThreadGuardMismatch)
+	for _, f := range mismatch.Failed {
+		subject := "thread " + f.Root
+		if f.Root == "" {
+			subject = "request"
+		}
+		fmt.Fprintf(os.Stderr, "  %s: %s check failed: %s\n", subject, f.Check, strings.Join(f.IDs, ", ")) //nolint:gosec // G705: stderr, not a browser context
+	}
+	return &exitError{Code: ExitGuardMismatch}
 }
 
 func exitCodeFromError(err error) (int, bool) {

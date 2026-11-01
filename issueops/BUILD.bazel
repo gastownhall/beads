@@ -45,6 +45,7 @@ go_library(
         "statsreporter.go",
         "sweeper.go",
         "template_errors.go",
+        "thread_guard.go",
         "treewalker.go",
         "versionreconciler.go",
         "workspaceconfig.go",

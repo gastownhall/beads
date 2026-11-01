@@ -375,6 +375,7 @@ go_test(
         "sweeper_typed_wisp_test.go",
         "testmain_helper_sentinel_test.go",
         "testmain_test.go",
+        "thread_guard_test.go",
         "transaction_borrow_test.go",
         "transaction_ignored_checkout_test.go",
         "transaction_phase_test.go",

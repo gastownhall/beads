@@ -177,6 +177,7 @@ go_test(
         "team_server_integration_test.go",
         "team_server_schema_test.go",
         "testmain_test.go",
+        "thread_guard_test.go",
         "tree_walker_contract_test.go",
         "tx_test.go",
         "upstream_outage_window_test.go",

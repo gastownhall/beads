@@ -709,6 +709,7 @@ go_test(
         "delete_embedded_test.go",
         "delete_exact_id_test.go",
         "delete_if_revision_proxied_concurrency_test.go",
+        "delete_if_threads_test.go",
         "delete_input_test.go",
         "delete_proxied_integration_test.go",
         "delete_proxied_server_output_test.go",

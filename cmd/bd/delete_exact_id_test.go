@@ -16,7 +16,8 @@ import (
 // deleteExactStubStore is the store `bd delete` resolves and deletes through,
 // reduced to the calls its direct route makes: the resolver's exact-id probe
 // (SearchIssues with IDs) and its substring search (SearchIssueIDs), the
-// prefix config, GetIssue, the preview's dependency reads, and Deleter. The
+// prefix config, GetIssue, the batch path's GetIssuesByIDs, the preview's
+// dependency reads, and Deleter. The
 // embedded nil DoltStorage makes any other call panic, so a test that wanders
 // off this path fails loudly instead of passing on a default. No cgo, no
 // Dolt server: the same shape as bulkDepStubStore in dep_add_target_test.go.
@@ -69,6 +70,19 @@ func (s *deleteExactStubStore) GetIssue(_ context.Context, id string) (*types.Is
 		return &types.Issue{ID: id, Title: "issue " + id}, nil
 	}
 	return nil, storage.ErrNotFound
+}
+
+// GetIssuesByIDs is the batch path's one read of the ids stored exactly under
+// themselves; an id that only abbreviates one matches nothing here, as in the
+// real store.
+func (s *deleteExactStubStore) GetIssuesByIDs(_ context.Context, ids []string) ([]*types.Issue, error) {
+	var out []*types.Issue
+	for _, id := range ids {
+		if slices.Contains(s.ids, id) {
+			out = append(out, &types.Issue{ID: id, Title: "issue " + id})
+		}
+	}
+	return out, nil
 }
 
 func (s *deleteExactStubStore) GetDependencies(context.Context, string) ([]*types.Issue, error) {

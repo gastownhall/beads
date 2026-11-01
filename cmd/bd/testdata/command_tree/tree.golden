@@ -1505,11 +1505,39 @@ bd delete
     |
     | Force: Delete and orphan dependents
     |   bd delete bd-1 --force
+    |
+    | GUARDED DELETION OF ARCHIVED THREADS (--if-threads):
+    |   bd delete --force --from-file ids.txt --if-threads guard.json
+    |
+    | The guard file is JSON:
+    |   {"cutoff": "<RFC3339>", "member_label": "...", "exclude_label": "...",
+    |    "edge": "replies-to",
+    |    "threads": [{"root": "<id>",
+    |                 "members": [{"id": "...", "revision": "<sha256>"}]}]}
+    |
+    | Each revision is the "revision" field 'bd image' printed when the thread was
+    | archived. Inside the deleting transaction, before any row changes, every
+    | listed thread must still be exactly what was archived:
+    |   membership   the beads joined to root by edge dependencies (either
+    |                direction, skipping beads labelled exclude_label) are exactly
+    |                the listed members
+    |   revision     every member's current image revision is the listed one
+    |   eligibility  every member carries member_label, is a wisp, is closed, and
+    |                closed before cutoff
+    |   coverage     every requested id carrying member_label is a listed member
+    | If any check fails nothing is deleted and bd exits 13 (the guard-mismatch
+    | exit code 'bd update --if-assignee' uses), naming each failed thread and
+    | check on stderr. With --json the last stderr line is
+    |   {"error": "...", "failed_threads": [{"root": "...", "check": "...",
+    |    "ids": ["..."]}], "guard_mismatch": true}
+    | --if-threads requires --force and refuses --cascade (exit 1). With --dry-run
+    | the same guard runs in the preview's read and exits 13 the same way.
   flag --cascade type=bool default="false" usage="Recursively delete all dependent issues"
   flag --dry-run type=bool default="false" usage="Preview what would be deleted without making changes"
   flag --force -f type=bool default="false" usage="Actually delete (without this flag, shows preview)"
   flag --from-file type=string default="" usage="Read issue IDs from file (one per line)"
   flag --if-revision type=string default="" usage="Apply the write only if the issue's current revision equals this value (the decimal int64 from `bd show --json`'s \"revision\" field). One id only: refused before any write when combined with more than one issue id. A mismatch writes nothing and exits 13 (vs 1 for other failures)."
+  flag --if-threads type=string default="" usage="Delete only if the archived threads in this JSON guard file are unchanged (exit 13 otherwise; requires --force)"
 
 bd dep
   use: "dep [issue-id]"

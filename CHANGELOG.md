@@ -26,6 +26,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `issueops.Image` and the `Imager` role on the direct, embedded and UOW
   stores; `ImageInTx`, `CanonicalImageJSON` and `ComputeImageRevision` in
   `internal/storage/issueops`.
+- **`bd delete --force --from-file <ids> --if-threads <guard.json>`** deletes
+  only if every archived mail thread in the guard file is unchanged: its
+  membership over the guard's edge type, each member's `bd image` revision,
+  each member's eligibility (member label, wisp, closed before the cutoff), and
+  coverage of every member-labelled id in the request. The guard runs inside
+  the deleting transaction on the direct, embedded and proxied-server routes.
+  Otherwise nothing changes and it exits 13; under `--json` the last stderr
+  line is a JSON report with `"guard_mismatch": true` and `failed_threads`. It
+  needs `--force` and refuses `--cascade` and an empty path (exit 1). With
+  `--dry-run` the same guard runs and fails the same way. The check walks all
+  thread roots at once, one level at a time, so its statement count does not
+  grow with the number of threads. Library: `issueops.ThreadGuard` on
+  `DeleteRequest` and `ErrThreadGuardMismatch`; `CheckThreadGuardInTx` in
+  `internal/storage/issueops`.
 - **`arrival_seq`, a commit-ordered create sequence on wisp-plane rows.**
   While a workspace journals, every `ephemeral` or `no_history` bead it creates
   is stamped with the `seq` of its own `create` journal record, in the same
