@@ -1003,6 +1003,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   through `RunLifecycleCreateAppliesTheDefaultPriority`,
   `RunBatchCreatorAppliesTheDefaultPriority` and
   `RunBatchApplyAppliesTheDefaultPriority`.
+- **BREAKING: commands run outside a project no longer use the user's global
+  `~/.beads` workspace** (#4402). Upward discovery used to walk past the
+  repository boundary all the way to the home directory, and a `~/.beads`
+  holding a legacy `config.yaml` or a database counted as a workspace, so a
+  command like `bd remember` issued from the wrong directory wrote to the
+  global database with no warning. Discovery now passes over the home
+  directory's own `.beads` — and a redirect inside it — unless the home
+  directory itself is the repository root (a dotfiles repository). It also
+  stops at the home directory instead of climbing above it, except within a
+  repository that encloses the home directory, so a `.beads` up there
+  (`/home/.beads`, `/.beads`) is not adopted in place of `~/.beads`. The
+  `github.com/steveyegge/beads` package's `FindBeadsDir`, `FindDatabasePath`
+  and `FindAllDatabases` follow the same rules. `bd import` no longer falls
+  back to `~/.beads` either. Run from the home directory, or from a directory
+  under it outside any repository while `~/.beads` holds a workspace, it
+  refuses like the other commands there; anywhere else, a linked worktree
+  included, the workspace it sets up when it finds none is the working
+  directory's own `.beads`, never one above it, and a `BEADS_DIR` naming a
+  directory not set up yet gets that directory. `bd bootstrap` in a project
+  with no `metadata.json` of its own no longer inherits the database name and
+  server of `~/.beads/metadata.json`. A refused command says
+  `no beads database found`; when `~/.beads` holds a workspace (a database,
+  `metadata.json` or a redirect), that refusal and `bd where` name it when run
+  from the home directory or outside a repository. The home directory is the
+  account's, the one `bd init`'s home guard protects, so a test harness or
+  sandbox that points `HOME` at its own scratch workspace keeps using that
+  workspace. Hooks that run `bd prime` outside a project stop priming from
+  `~/.beads` unless they name it.
+  **Migration:** to keep using `~/.beads`, name it for each command that
+  should use it: `BEADS_DIR=~/.beads bd remember "..."`, or an alias such as
+  `alias bdg='BEADS_DIR=~/.beads bd'`. Do not export `BEADS_DIR` for this: an
+  exported `BEADS_DIR` overrides every project's own `.beads`.
+  `--db`/`BEADS_DB` naming `~/.beads` or a path inside it still select it
+  (one naming a directory under the home directory that does not exist yet
+  gets that directory, not `~/.beads`), and a project's own `.beads/redirect`
+  pointing at it keeps working.
 - **For a Dolt server on another machine, the legacy `BEADS_DOLT_PORT` no
   longer overrides a configured port.** It replaced the port that
   `config.yaml` `dolt.port`, the data directory's `listener.port` or
