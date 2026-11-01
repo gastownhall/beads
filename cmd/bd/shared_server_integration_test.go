@@ -142,6 +142,7 @@ func TestSharedServerConcurrent(t *testing.T) {
 			t.Fatal(err)
 		}
 		env := append(append([]string{}, baseEnv...),
+			"TMPDIR="+os.TempDir(),
 			"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_SYSTEM="+os.DevNull,
 			"GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_TEMPLATE_DIR="+t.TempDir())
 		for _, entry := range env {
