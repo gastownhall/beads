@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cenkalti/backoff/v4"
 	"github.com/go-sql-driver/mysql"
 
 	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
@@ -139,6 +140,37 @@ func TestPingWithRetryKeepsBackingOffAfterTheOutageWindowForOtherTransientErrors
 				t.Fatalf("waited %s after the %s, want the backoff's 300ms interval", gap, tc.name)
 			}
 		})
+	}
+}
+
+// TestPingWithRetryRecoversAfterTheOutageWindowFromOtherTransientErrors: one
+// outage report, then invalid connections until the server answers 200ms
+// later. A deterministic schedule waits 10, 15, 22.5, ... ms and reaches the
+// recovery at about 218ms. Zero waits after the window instead advance the
+// exponential schedule without sleeping until elapsed time plus the next
+// interval passes the 2s budget, and give up long before 200ms.
+func TestPingWithRetryRecoversAfterTheOutageWindowFromOtherTransientErrors(t *testing.T) {
+	shortOutageWindow(t, 10*time.Millisecond)
+	const recoverAfter = 200 * time.Millisecond
+	var first time.Time
+	p := pingerFunc(func(context.Context) error {
+		if first.IsZero() {
+			first = time.Now()
+			return proxyOutageErr()
+		}
+		// Recovery is by elapsed time, not attempt count: a zero-wait loop
+		// can make any number of attempts in no time at all.
+		if time.Since(first) < recoverAfter {
+			return mysql.ErrInvalidConn
+		}
+		return nil
+	})
+	bo := backoff.NewExponentialBackOff()
+	bo.RandomizationFactor = 0
+	bo.InitialInterval = 10 * time.Millisecond
+	bo.MaxElapsedTime = 2 * time.Second
+	if err := pingWithRetry(context.Background(), p, bo, testPingAttemptTimeout); err != nil {
+		t.Fatalf("pingWithRetry() error = %v, want recovery %s after the outage report", err, recoverAfter)
 	}
 }
 
