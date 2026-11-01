@@ -361,6 +361,7 @@ go_test(
         "update_force_close_policy_test.go",
         "update_guards_test.go",
         "update_same_status_test.go",
+        "verify_identity_read_error_test.go",
         "version_commit_deferred_test.go",
         "version_reconciler_contract_test.go",
         "version_scope_completeness_test.go",
