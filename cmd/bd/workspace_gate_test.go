@@ -437,6 +437,16 @@ func TestAcquireCommandWorkspaceGatesQueuesBehindWaitingInit(t *testing.T) {
 	if !queued() {
 		t.Fatal("bd init never queued for the gate")
 	}
+	// The intent lock is taken before its sidecar is written, and the notice
+	// below reads the sidecar once: wait for it too, or the notice can land
+	// in that gap and name no one.
+	intentInfo := inflight.Path() + ".intent.info"
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(intentInfo); err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 
 	// A new ordinary command must not jump the queue: it defers for its
 	// budget (the notice names the queued init), then its final attempt
