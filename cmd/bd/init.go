@@ -3204,7 +3204,7 @@ func guardExplicitBeadsDirProjectRoot() error {
 		return nil
 	}
 
-	return fmt.Errorf("BEADS_DIR=%q points to a project root, not its beads workspace; use BEADS_DIR=%q", explicit, nested)
+	return fmt.Errorf("BEADS_DIR=%s points to a project root, not its beads workspace; use BEADS_DIR=%s", explicit, nested)
 }
 
 // existingWorkspaceDBName returns the Dolt database name explicitly recorded

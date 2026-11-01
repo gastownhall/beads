@@ -56,7 +56,7 @@ func testExplicitBeadsDirIsAuthoritative(t *testing.T, bd string, mode explicitB
 		t.Fatal(err)
 	}
 	if mode.proxied {
-		for _, root := range []string{filepath.Join(parentBeadsDir, "dolt"), filepath.Join(explicit, "dolt")} {
+		for _, root := range []string{filepath.Join(parentBeadsDir, "dolt"), filepath.Join(explicit, "dolt"), filepath.Join(parent, "dolt")} {
 			root := root
 			t.Cleanup(func() {
 				if _, err := os.Stat(root); err != nil {
