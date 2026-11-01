@@ -95,10 +95,14 @@ func Compact(ctx context.Context, conn DBConn, initialHash, boundaryHash string,
 	// already staged when Compact ran join this commit too. The landed commit
 	// does not keep its own hash or message on main: compaction rewrites that
 	// history anyway.
-	const followupStep = "commit changes that reached main"
+	//
+	// main has already moved when either step below fails, so the error says
+	// so; the caller stops before garbage collection.
 	staged, err := issueops.HasStagedChanges(ctx, conn)
 	if err != nil {
-		return fmt.Errorf("compact step %q: %w", followupStep, err)
+		return fmt.Errorf("compact step %q: main already points at the compacted history and kept its working set; "+
+			"inspect main's pending changes and commit them with `bd dolt commit` when ready: %w",
+			"check main for changes", err)
 	}
 	if staged {
 		err = schema.DrainCall(ctx, conn, "CALL DOLT_COMMIT('-m', ?)",
@@ -106,7 +110,10 @@ func Compact(ctx context.Context, conn DBConn, initialHash, boundaryHash string,
 		// Another writer committing main's staged set first leaves nothing
 		// to commit, which is the outcome this step wants.
 		if err != nil && !issueops.IsNothingToCommitError(err) {
-			return fmt.Errorf("compact step %q: %w", followupStep, err)
+			return fmt.Errorf("compact step %q: main already points at the compacted history and the changes "+
+				"that reached it during compaction are still staged; inspect them and commit them with "+
+				"`bd dolt commit` when ready: %w",
+				"commit changes that reached main", err)
 		}
 	}
 

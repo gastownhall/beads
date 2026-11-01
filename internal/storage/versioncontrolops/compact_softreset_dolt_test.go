@@ -3,6 +3,7 @@ package versioncontrolops
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"sync/atomic"
@@ -504,5 +505,68 @@ func TestCompactQuietRunAddsNoCommit(t *testing.T) {
 		if n := f.count("SELECT COUNT(*) FROM scratch_x"); n != 1 {
 			t.Fatalf("ignored scratch_x row on main: present=false, want present=true")
 		}
+	})
+}
+
+// AC-4: when the follow-up commit fails, Compact says which step failed and
+// that main already moved, keeps the landed row staged, and removes
+// compact-tmp.
+func TestCompactFollowupFailureKeepsChangesStaged(t *testing.T) {
+	port := startCompactTestServer(t)
+
+	t.Run("follow-up commit fails", func(t *testing.T) {
+		f := newCompactFixture(t, port)
+		writer := f.conn()
+		injected := errors.New("injected follow-up commit failure")
+
+		hook := &compactHookConn{
+			beforeExec:         onceBeforeFinalReset(func() { f.landRow(writer) }),
+			failFollowupCommit: injected,
+		}
+		err := f.compact(hook)
+		if err == nil {
+			t.Fatalf("Compact succeeded, want the follow-up commit's failure")
+		}
+		if !errors.Is(err, injected) {
+			t.Fatalf("Compact error = %v, want it to wrap %v", err, injected)
+		}
+		for _, want := range []string{"commit changes that reached main", "compacted history", "still staged", "bd dolt commit"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("Compact error = %q, want it to mention %q", err, want)
+			}
+		}
+
+		f.wantLog(replayedLog)
+		f.wantStatus("t:true")
+		if n := f.count("SELECT COUNT(*) FROM t WHERE id = 600"); n != 1 {
+			t.Fatalf("landed t row 600 on main: present=false, want present=true")
+		}
+		f.wantNoTempBranch()
+	})
+
+	t.Run("staged check fails", func(t *testing.T) {
+		f := newCompactFixture(t, port)
+		writer := f.conn()
+
+		hook := &compactHookConn{
+			beforeExec:      onceBeforeFinalReset(func() { f.landRow(writer) }),
+			failStagedCheck: true,
+		}
+		err := f.compact(hook)
+		if err == nil {
+			t.Fatalf("Compact succeeded, want the staged check's failure")
+		}
+		for _, want := range []string{"check main for changes", "compacted history", "bd dolt commit"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("Compact error = %q, want it to mention %q", err, want)
+			}
+		}
+		if strings.Contains(err.Error(), "still staged") {
+			t.Fatalf("Compact error = %q claims staged changes it never read", err)
+		}
+
+		f.wantLog(replayedLog)
+		f.wantStatus("t:true")
+		f.wantNoTempBranch()
 	})
 }
