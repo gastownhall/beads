@@ -172,12 +172,13 @@ Current PR-related workflow names:
   Runs on pushes to `main`. Contains only what rbe-west cannot run: the macOS
   `go test -race -short` suite and the Windows smoke build on Blacksmith, and
   the push-to-main savers of the GOCACHEs pr.yml's Windows and macOS jobs
-  restore. Every Linux check it used to repeat (migration hygiene, build
-  tags, versions, doc flags, gofmt, the PR policy wrapper, the package gates
-  and the Linux cache seeders) is gated before the merge by the merge
-  queue's `pr.yml` run of the same commit, the Nix flake check runs in
-  `pr-risk.yml`'s push run, and `bazel.yml`'s push run re-runs the Bazel
-  targets (ga-96smfk.22).
+  restore and of the Make toolchains `windows-make-shell` installs offline
+  (`windows-make-shell-toolchains`). Every Linux check it used to repeat
+  (migration hygiene, build tags, versions, doc flags, gofmt, the PR policy
+  wrapper, the package gates and the Linux cache seeders) is gated before
+  the merge by the merge queue's `pr.yml` run of the same commit, the Nix
+  flake check runs in `pr-risk.yml`'s push run, and `bazel.yml`'s push run
+  re-runs the Bazel targets (ga-96smfk.22).
 - `.github/workflows/nightly.yml`: `Nightly`
   Runs at 02:00 UTC. Calls `bazel.yml` with `fresh-test-results: true` (every
   test re-executed, no cached results) and checks the rbe-west worker-env
@@ -1754,8 +1755,24 @@ macOS jobs; `release.yml` stays on `macos-latest`.
   `scripts/ci/warm-non-race-cache.sh`. main.yml's `test` job (the macOS
   full suite) runs on the same label and restores its caches. main.yml's
   `test-windows` seeds the Windows legs the same way.
+- **Toolchains.** `windows-make-shell` installs nothing from the network on
+  the common path (`scripts/ci/windows-make-shell/`): native GNU Make is the
+  image's MinGW-w64 `mingw32-make.exe` 4.4.1, else Chocolatey's make 4.4.1
+  binary from a cache, else `choco install` with retries, either one only
+  with its pinned SHA-256;
+  MSYS2 is the image's `C:\msys64`, with `git` and `make` installed from
+  cached, signature-checked package files resolved against the image's own
+  sync database; Cygwin installs offline from a cached package tree (signed
+  `setup.zst`, Authenticode-checked setup), else through
+  cygwin-install-action as before. main.yml's `windows-make-shell-toolchains`
+  is the only writer of those caches: same label, push-to-main-only guard,
+  keys that change only with the pinned binary, the image's MSYS2 sync
+  database and the UTC month, and a save only after its seed step proved
+  the cache holds what an install needs (for MSYS2, every package file the
+  install resolves to, even one the image already has installed).
 - **Pins.** `TestBlacksmithWindowsMacOSRunsOnEveryEvent`,
   `TestBlacksmithMacOSSaverMatchesPRLegs`,
+  `TestWindowsMakeShellToolchainSaverMatchesPRJob`,
   `TestBlacksmithSaverJobsGuardedAgainstPullRequest`,
   `TestBlacksmithSaverCacheKeysAreNotPerCommit`,
   `TestBlacksmithReachablePRJobsDisableDefaultCachingActions` and

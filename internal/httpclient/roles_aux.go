@@ -222,27 +222,38 @@ func validateSettingKey(key string) error {
 }
 
 // validateSettingWrite is the role's own write rules, restated: the key rule
-// above, the protected key, the one value whose shape is checked because it is
-// PROJECTED rather than merely stored, and the one checked because it is a
-// SAFETY rule every sweep reads (types.retained, whose check is the shared
-// syntax validator itself rather than a restatement of it).
+// above, the two storage length bounds, the protected key, the one value whose
+// shape is checked because it is PROJECTED rather than merely stored, and the
+// one checked because it is a SAFETY rule every sweep reads (types.retained,
+// whose check is the shared syntax validator itself rather than a restatement
+// of it).
 //
-// ALL FOUR ARE THE ROLE'S AND NOT THE SERVER'S, which is the line this function
-// draws and the reason it stops where it does. The server applies its own EDGE
-// bounds on top — a key past 255 characters on the write (but not on the
-// remove), a value past types.MaxTextBytes BYTES, a media type — and this client
-// restates none of them: those are one server release away from moving, and a
-// second copy here would either drift or refuse a request a newer server would
-// take. They travel as the 400 the mapper turns into the same ErrValidation, and
-// the difference that makes to a local leg is ledgered (L-config-bounds).
+// ALL OF THEM ARE THE ROLE'S AND NOT THE SERVER'S, which is the line this
+// function draws and the reason it stops where it does. The length bounds — a
+// key past types.MaxFieldLen characters on the write (but not on the remove), a
+// value past types.MaxTextBytes BYTES — used to be the server's EDGE alone and
+// were ledgered as such (L-config-bounds, now retired): they moved onto
+// workapi.ValidateSettingWrite, so every leg refuses them, and from then on
+// they are restated here for the same reason as the rest. The server's other
+// edge rules — a media type, the body's own size — are still its own and are
+// not restated.
 //
-// The four below cannot travel that way for the reason every restated role rule
+// They cannot travel as the server's 400 for the reason every restated role rule
 // on this seam cannot: a request the role's own contract calls invalid must not
 // spend a round trip to be told so, and must not bind its classification to a
 // problem body a future server release might spell differently.
 func validateSettingWrite(key, value string) error {
 	if err := validateSettingKey(key); err != nil {
 		return err
+	}
+	// Storage's own constants, counted the way each column counts: the key in
+	// characters, the value in bytes. Both carry types.ErrFieldTooLong beside
+	// ErrValidation, as the role's refusal does.
+	if err := types.CheckFieldLen("config key", key); err != nil {
+		return fmt.Errorf("%w: %w", issueops.ErrValidation, err)
+	}
+	if err := types.CheckTextLen("config value", value); err != nil {
+		return fmt.Errorf("%w: %w", issueops.ErrValidation, err)
 	}
 	// The prefix is owned by `bd init --prefix`, `bd bootstrap` and
 	// `bd rename-prefix`, each of which does work this plane cannot: rewriting

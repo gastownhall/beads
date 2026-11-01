@@ -2096,6 +2096,14 @@ func isNonInteractiveBootstrap(flagValue bool) bool {
 // An ancestor holding the graph format marker without metadata it can read is
 // a graph workspace, refused like one whose metadata declares graph_mode,
 // rather than skipped or reported as a metadata load failure.
+//
+// The walk ends at the home directory: $HOME, or the account home
+// (beads.IsAccountHomeDir) when $HOME points elsewhere. The account home's
+// .beads is the user-global directory that workspace discovery passes over
+// (GH#4402), not an enclosing workspace, so it is not examined either, and a
+// project under the home directory does not inherit its database name or
+// server. Only when the home directory is itself a repository root (a
+// dotfiles repository) is its .beads that repository's own, and examined.
 func findParentConfig(beadsDir string) (*configfile.Config, error) {
 	// Start from the parent of beadsDir's enclosing directory.
 	// beadsDir is typically "<project>/.beads", so we start from <project>'s parent.
@@ -2111,6 +2119,12 @@ func findParentConfig(beadsDir string) (*configfile.Config, error) {
 	origin := utils.CanonicalizePath(filepath.Dir(beadsDir))
 	walk := beads.NewAncestorDirWalk(start, origin)
 	for dir, ok := walk.Next(); ok; dir, ok = walk.Next() {
+		// GH#4402: the user-global ~/.beads is no parent workspace; the walk
+		// ends without examining it.
+		atAccountHome := beads.IsAccountHomeDir(dir)
+		if atAccountHome && !isGitWorkTreeRoot(dir) {
+			break
+		}
 		candidate := filepath.Join(dir, ".beads")
 		cfg, err := configfile.LoadForDiscovery(candidate)
 		if (err != nil || cfg == nil) && hasGraphFormatMarker(candidate) {
@@ -2129,8 +2143,8 @@ func findParentConfig(beadsDir string) (*configfile.Config, error) {
 			return cfg, nil
 		}
 
-		// Don't search above $HOME
-		if homeDir != "" && dir == homeDir {
+		// Don't search above the home directory
+		if atAccountHome || (homeDir != "" && dir == homeDir) {
 			break
 		}
 

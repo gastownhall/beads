@@ -496,8 +496,11 @@ jobs:
     # never forks) get the org's Blacksmith pool; a pull_request_target farm
     # run and any fork or Dependabot PR stay on GitHub-hosted runners. This
     # job reads no repository code and holds no secret value (see below), so
-    # Blacksmith sees nothing sensitive either way.
-    runs-on: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    # Blacksmith sees nothing sensitive either way. Only in gastownhall
+    # (github.repository_owner_id 255961667): a fork repository's own CI has
+    # no Blacksmith, and its pushes and dispatches would queue for a day
+    # instead of reaching mode local.
+    runs-on: ${{ github.repository_owner_id == '255961667' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     timeout-minutes: 5
     outputs:
       enabled: ${{ steps.decide.outputs.enabled }}
@@ -516,8 +519,9 @@ jobs:
       # (not mode cache: rbe-cache refuses GitHub-hosted runners).
       # FORK_REPO: the run is a fork repository's own CI (a push to the fork,
       # a PR within it, a dispatch there): github.repository's owner is not
-      # gastownhall. Fork PRs into beads run here with github.repository
-      # gastownhall/beads, so FORK_REPO is false for them.
+      # gastownhall, by its id (255961667), so an org rename cannot turn
+      # upstream into a fork. Fork PRs into beads run here with
+      # github.repository gastownhall/beads, so FORK_REPO is false for them.
       - name: Decide remote execution
         id: decide
         env:
@@ -526,7 +530,7 @@ jobs:
           RBE_INPUT_CACHE: ${{ inputs.rbe == 'cache' }}
           PULL_REQUEST: ${{ github.event_name == 'pull_request' }}
           FORK: ${{ github.event.pull_request.head.repo.fork == true }}
-          FORK_REPO: ${{ github.repository_owner != 'gastownhall' }}
+          FORK_REPO: ${{ github.repository_owner_id != '255961667' }}
           DEPENDABOT: ${{ github.actor == 'dependabot[bot]' }}
           FORK_FARM: ${{ inputs.fork-farm == 'authorized' && github.event_name == 'pull_request_target' && inputs.checkout-sha != '' }}
           HAS_EXECUTOR: ${{ secrets.RBE_WEST_EXECUTOR != '' }}

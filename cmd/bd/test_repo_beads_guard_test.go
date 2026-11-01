@@ -43,6 +43,13 @@ var beforeTestsHook func() func()
 // fall back to os.TempDir().
 var testTempRoot string
 
+// testBDBuildDir is the temp dir cli_fast_test.go's init() builds the bd
+// binary into when no prebuilt one is supplied. init() runs before TestMain
+// pins testTempRoot, so the dir lands in the system temp dir and the
+// testMainInner defer does not reach it; TestMain removes it explicitly.
+// Each build is ~200MB, so leaking it on every run fills shared hosts.
+var testBDBuildDir string
+
 // testTempDir returns os.MkdirTemp under testTempRoot when it is set,
 // otherwise it falls back to the system temp dir (os.MkdirTemp's
 // default). Use this in package-level sync.Once builders so leaked
@@ -94,6 +101,9 @@ func TestMain(m *testing.M) {
 	}
 	// Delegate to testMainInner so defers run before os.Exit.
 	code := testMainInner(m)
+	if testBDBuildDir != "" {
+		_ = os.RemoveAll(testBDBuildDir)
+	}
 	if err := credentialcmd.Cleanup(); err != nil {
 		fmt.Fprintf(os.Stderr, "credential command fixture cleanup: %v\n", err)
 		code = 1

@@ -215,6 +215,13 @@ func (s *Server) handleUnsetSetting(w http.ResponseWriter, r *http.Request) {
 //
 // It is keyed on storage's own constant rather than a second copy of the
 // schema's number, the actor precedent.
+//
+// THE ROLE APPLIES THE SAME TWO BOUNDS (workapi.ValidateSettingWrite), so a
+// write that reaches the role through any other door is refused the same way.
+// The raw config seams below the role (`bd config set-many`, an import's
+// memory records, bootstrap) are not the role's and are not bounded by it.
+// The two bounds are still checked here FIRST because this refusal names the
+// member and its length on the wire.
 func (s *Server) settingWriteKey(w http.ResponseWriter, r *http.Request) (string, bool) {
 	key, ok := s.settingKey(w, r)
 	if !ok {
