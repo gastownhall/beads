@@ -55,7 +55,7 @@ func TestCommentPingTitle(t *testing.T) {
 func TestDefaultPrompt_CommentPlaybook(t *testing.T) {
 	t.Parallel()
 	p := DefaultPrompt(Record{Kind: KindComment, Seat: "wiseman", IssueID: "fm-c", Title: "hello from firstmate"})
-	for _, want := range []string{"BEADS NOTIFY (comment)", "fm-c", "bd comments fm-c", "bd comment fm-c"} {
+	for _, want := range []string{"BEADS NOTIFY (comment)", "fm-c", "bd comments fm-c", "New comment on a bead your seat owns"} {
 		if !strings.Contains(p, want) {
 			t.Fatalf("comment prompt missing %q:\n%s", want, p)
 		}
