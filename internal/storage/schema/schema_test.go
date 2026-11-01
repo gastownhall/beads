@@ -2471,6 +2471,9 @@ func (m *mockDB) QueryRowContext(_ context.Context, _ string, _ ...any) *sql.Row
 // (0), so the repair takes its early no-op branch on both firings; any
 // OTHER QueryRowContext this pass might issue still surfaces loudly, via
 // sqlmock's own unmet/unexpected-call error rather than a silent success.
+// QueryContext answers the {ignored_schema_migrations, 31} repair's lookup of
+// main 0062's drop commit the same way: no such commit, so the pre-upgrade
+// events restore finds no source and changes nothing.
 type wispsAbsentDB struct {
 	mockDB
 	real *sql.DB
@@ -2493,6 +2496,9 @@ func newWispsAbsentDB(t *testing.T) *wispsAbsentDB {
 			WithArgs("wisps").
 			WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
 	}
+	mock.ExpectQuery(`SELECT commit_hash FROM dolt_log WHERE message = \?`).
+		WithArgs(eventsFlipDropCommitMessage).
+		WillReturnRows(sqlmock.NewRows([]string{"commit_hash"}))
 	t.Cleanup(func() {
 		if err := mock.ExpectationsWereMet(); err != nil {
 			t.Errorf("wispsAbsentDB: unmet sql expectations: %v", err)
@@ -2503,6 +2509,10 @@ func newWispsAbsentDB(t *testing.T) *wispsAbsentDB {
 
 func (w *wispsAbsentDB) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
 	return w.real.QueryRowContext(ctx, query, args...)
+}
+
+func (w *wispsAbsentDB) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+	return w.real.QueryContext(ctx, query, args...)
 }
 
 func TestRunMigrationsStderrOutput(t *testing.T) {
@@ -2581,7 +2591,8 @@ func TestRunMigrationsUsesProvidedSource(t *testing.T) {
 	// fail this test's own regression check for an unrelated reason.
 	// wispsAbsentDB answers both the {ignored_schema_migrations, 7} and
 	// {..., 15} repairs' probes (ensureWispIsBlockedForRecompute dispatches
-	// at both) instead of dodging them.
+	// at both) and the {..., 31} repair's drop-commit lookup instead of
+	// dodging them.
 	ignored, err := runMigrations(context.Background(), newWispsAbsentDB(t), ignoredSource, 0, 39, false)
 	if err != nil {
 		t.Fatalf("runMigrations(ignoredSource): %v", err)
