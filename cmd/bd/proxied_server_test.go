@@ -14,6 +14,7 @@ import (
 	"github.com/dolthub/dolt/go/libraries/doltcore/servercfg"
 	"github.com/dolthub/dolt/go/libraries/utils/filesys"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/server"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -28,7 +29,21 @@ func TestRenderProxiedServerConfig_RoundTrips(t *testing.T) {
 
 	assert.Equal(t, proxiedServerListenerHost, cfg.Host(), "Host mismatch")
 	assert.Equal(t, 54321, cfg.Port(), "Port mismatch")
-	assert.Equal(t, servercfg.LogLevel_Info, cfg.LogLevel(), "LogLevel mismatch")
+	assert.Equal(t, servercfg.LogLevel_Warning, cfg.LogLevel(), "LogLevel mismatch")
+}
+
+// TestRenderProxiedServerConfig_QuietLogLevel pins why the generated config
+// is at warning: dolt logs every NewConnection/ConnectionClosed at info, and
+// every bd command opens connections through the proxy, so at info a
+// long-running proxied server.log grows with each command. The level must
+// still let dolt report warnings and errors.
+func TestRenderProxiedServerConfig_QuietLogLevel(t *testing.T) {
+	body, err := renderProxiedServerConfig(54321)
+	require.NoError(t, err)
+	cfg, err := servercfg.NewYamlConfig(body)
+	require.NoError(t, err)
+	assert.False(t, doltserver.LogLevelEmitsReadyLine(cfg.LogLevel()), "generated log level %q still logs info lines", cfg.LogLevel())
+	assert.Contains(t, []servercfg.LogLevel{servercfg.LogLevel_Warning, servercfg.LogLevel_Error}, cfg.LogLevel())
 }
 
 func TestRenderProxiedServerConfig_ArchiveLevel(t *testing.T) {
@@ -1275,6 +1290,14 @@ func TestCutManagedPortRecord(t *testing.T) {
 	}
 }
 
+// replaceOnce is strings.Replace(s, old, new, 1) that fails the test when
+// old is absent, so a fixture edit cannot silently become a no-op.
+func replaceOnce(t *testing.T, s, old, new string) string {
+	t.Helper()
+	require.Contains(t, s, old)
+	return strings.Replace(s, old, new, 1)
+}
+
 func TestManagedPortConflictPolicy_AllowsBeadsChosenPort(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -1288,14 +1311,14 @@ func TestManagedPortConflictPolicy_AllowsBeadsChosenPort(t *testing.T) {
 		{name: "generated config edited elsewhere, port unchanged", body: func(t *testing.T) []byte {
 			b, err := renderProxiedServerConfig(40001)
 			require.NoError(t, err)
-			return []byte(strings.Replace(string(b), "log_level: info", "log_level: debug", 1))
+			return []byte(replaceOnce(t, string(b), "log_level: warning", "log_level: debug"))
 		}},
 		{name: "generated config with an environment placeholder, port unchanged", body: func(t *testing.T) []byte {
 			// The server copies the raw text, so the placeholder's value never
 			// lands in the runtime config.
 			b, err := renderProxiedServerConfig(40001)
 			require.NoError(t, err)
-			return []byte(strings.Replace(string(b), "log_level: info", "log_level: ${BD_TEST_LOG_LEVEL}", 1))
+			return []byte(replaceOnce(t, string(b), "log_level: warning", "log_level: ${BD_TEST_LOG_LEVEL}"))
 		}},
 		{name: "unedited config generated before the record existed", body: func(t *testing.T) []byte {
 			b, err := renderLegacyProxiedServerConfig(40001)
@@ -1339,7 +1362,7 @@ func TestManagedPortConflictPolicy_PinsOtherPorts(t *testing.T) {
 			body: func(t *testing.T) []byte {
 				b, err := renderLegacyProxiedServerConfig(40001)
 				require.NoError(t, err)
-				return []byte(strings.Replace(string(b), "log_level: info", "log_level: debug", 1))
+				return []byte(replaceOnce(t, string(b), "log_level: info", "log_level: debug"))
 			},
 			inUse:  40001,
 			errHas: []string{"edited by hand", "pinned", "delete"},

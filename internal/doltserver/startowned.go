@@ -125,6 +125,16 @@ func pinnedPortRemedy(cfg *Config, beadsDir string, port int) string {
 	}
 }
 
+// ListenerOwnership reports whether a TCP listener on port belongs to pid or
+// one of its descendants (linux via /proc, darwin via lsof and ps). known is
+// false where the platform or the sandbox cannot tell; callers then fall
+// back to weaker readiness evidence. The proxied-server launcher in
+// dbproxy/server uses it the way awaitOwnedListener does, for a config whose
+// log level hides dolt's ready line.
+func ListenerOwnership(pid, port int) (owned, known bool) {
+	return listenerOwnership(pid, port)
+}
+
 // startupProbe describes how awaitOwnedListener decides that the child it
 // launched is the dolt sql-server answering on host:port.
 type startupProbe struct {

@@ -116,6 +116,8 @@ type DoltServer struct {
 	keepAlivePeriod time.Duration
 
 	logFile *os.File
+	// listenerOwner is doltserver.ListenerOwnership; tests replace it.
+	listenerOwner func(pid, port int) (owned, known bool)
 	// portPolicy, when set, lets Start recover from a listener port another
 	// process holds. See SetPortConflictPolicy.
 	portPolicy PortConflictPolicy
@@ -180,6 +182,7 @@ func NewDoltServer(doltBinExec, rootDir, configPath, logFilePath string, keepAli
 		config:          cfg,
 		keepAlivePeriod: keepAlivePeriod,
 		logFile:         logFile,
+		listenerOwner:   doltserver.ListenerOwnership,
 	}, nil
 }
 
@@ -555,15 +558,18 @@ func (s *DoltServer) startAttempt(ctx context.Context, prepare bool) error {
 // A successful dial is not enough on its own: the port is chosen before dolt
 // binds it, and if another process takes it in between, the dial reaches that
 // process while dolt fails to bind and exits. So when the config's log level
-// lets dolt log its ready line (info or more verbose, which every
-// Beads-generated config uses), the dial only counts after that line has
-// appeared on this child's own output. Under a quieter log level there is no
-// such signal and the dial alone decides, as before; that is also the escape
-// hatch for a dolt whose output never carries the line (a wrapper that
-// filters it, a reworded release), which otherwise fails after
-// startReadyTimeout with an error naming the missing line. Either way, a
-// child that exits first is reported, as ErrPortInUse when it said its port
-// was taken.
+// lets dolt log its ready line (info or more verbose), the dial only counts
+// after that line has appeared on this child's own output. Under a quieter
+// log level (warning, which Beads-generated configs use so dolt does not log
+// every connection) there is no such line, and the dial counts once the
+// listener is shown to belong to the child's process tree
+// (doltserver.ListenerOwnership); a listener shown to be another process's
+// ends the wait with ErrPortInUse, and where ownership cannot be told the
+// dial alone decides. The quieter level is also the escape hatch for a dolt
+// whose output never carries the line (a wrapper that filters it, a reworded
+// release), which otherwise fails after startReadyTimeout with an error
+// naming the missing line. Either way, a child that exits first is reported,
+// as ErrPortInUse when it said its port was taken.
 //
 // There is deliberately no "answered for a while, accept anyway" fallback:
 // dolt only reaches its port check after its own startup, which under load
@@ -587,11 +593,20 @@ func (s *DoltServer) waitReady(ctx context.Context, watch *doltserver.StartupWat
 			answered = true
 		}
 		switch {
-		case err == nil && (!needReadyLine || watch.IsReady()):
+		case err == nil && needReadyLine && watch.IsReady():
 			if s.egCtx.Err() != nil {
 				return s.exitedBeforeReady(watch)
 			}
 			return nil
+		case err == nil && !needReadyLine:
+			owned, known := s.ownsListener()
+			if s.egCtx.Err() != nil {
+				return s.exitedBeforeReady(watch)
+			}
+			if owned || !known {
+				return nil
+			}
+			return fmt.Errorf("%w: another process (not dolt sql-server pid %d) holds %s", ErrPortInUse, s.pid, remedy.PrintedValue(s.listenAddr()))
 		case err != nil:
 			lastErr = err
 		default:
@@ -620,6 +635,16 @@ func (s *DoltServer) waitReady(ctx context.Context, watch *doltserver.StartupWat
 		case <-time.After(startReadyPollInterval):
 		}
 	}
+}
+
+// ownsListener reports whether the TCP listener the dial reached belongs to
+// the launched child. A unix socket listener has no port to look up, so its
+// ownership is unknown.
+func (s *DoltServer) ownsListener() (owned, known bool) {
+	if s.config.Socket() != "" || s.listenerOwner == nil {
+		return false, false
+	}
+	return s.listenerOwner(s.pid, s.config.Port())
 }
 
 // listenAddr is the address Dial and the DSN reach the server at, joined by

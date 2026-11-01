@@ -21,10 +21,16 @@ import (
 // log_level info.
 func newFakeDoltServer(t *testing.T, mode string, port int) (*DoltServer, string) {
 	t.Helper()
+	return newFakeDoltServerAtLevel(t, mode, port, "info")
+}
+
+// newFakeDoltServerAtLevel is newFakeDoltServer with the config's log_level.
+func newFakeDoltServerAtLevel(t *testing.T, mode string, port int, logLevel string) (*DoltServer, string) {
+	t.Helper()
 	t.Setenv("BEADS_TEST_FAKE_DOLT", mode)
 	rootDir := t.TempDir()
 	cfg := filepath.Join(t.TempDir(), "config.yaml")
-	require.NoError(t, os.WriteFile(cfg, []byte(fmt.Sprintf("log_level: info\nlistener:\n  host: 127.0.0.1\n  port: %d\n", port)), 0o600))
+	require.NoError(t, os.WriteFile(cfg, []byte(fmt.Sprintf("log_level: %s\nlistener:\n  host: 127.0.0.1\n  port: %d\n", logLevel, port)), 0o600))
 	s, err := NewDoltServer(os.Args[0], rootDir, cfg, filepath.Join(t.TempDir(), "server.log"), 0, "")
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -81,6 +87,56 @@ func TestDoltServer_Start_MissingReadyLineIsDiagnosed(t *testing.T) {
 	assert.Contains(t, err.Error(), "never logged \"Server ready. Accepting connections.\"")
 	assert.Contains(t, err.Error(), "although something answered")
 	assert.Contains(t, err.Error(), "log_level to warning")
+}
+
+// TestDoltServer_Start_QuietLogLevelProvesListenerOwnership pins readiness
+// for a config whose log level hides dolt's ready line (warning, which
+// Beads-generated configs use so dolt does not log every connection): a
+// greeting counts once the listener is shown to be the child's, a listener
+// shown to be another process's ends Start with ErrPortInUse (so a
+// PortConflictPolicy can move the port), and where ownership cannot be told
+// the greeting decides.
+func TestDoltServer_Start_QuietLogLevelProvesListenerOwnership(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		owned, known bool
+		wantInUse    bool
+	}{
+		{name: "owned", owned: true, known: true},
+		{name: "unknown", owned: false, known: false},
+		{name: "another process", owned: false, known: true, wantInUse: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, _ := newFakeDoltServerAtLevel(t, "silent", freeTestPort(t), "warning")
+			asked := 0
+			s.listenerOwner = func(pid, port int) (bool, bool) {
+				asked++
+				assert.Equal(t, s.pid, pid, "ownership is asked about the launched child")
+				assert.Equal(t, s.config.Port(), port)
+				return tc.owned, tc.known
+			}
+			err := s.Start(context.Background())
+			assert.Positive(t, asked, "a greeting at a quiet log level must be checked for ownership")
+			if tc.wantInUse {
+				require.Error(t, err)
+				assert.ErrorIs(t, err, ErrPortInUse)
+				assert.Contains(t, err.Error(), "another process")
+				assert.False(t, s.Running(context.Background()))
+				return
+			}
+			require.NoError(t, err)
+			assert.True(t, s.Running(context.Background()))
+		})
+	}
+}
+
+// TestDoltServer_Start_QuietLogLevelRealOwnership runs the real ownership
+// check against the fake child: on platforms that can tell (linux, darwin)
+// the child's own listener is recognized, so Start succeeds.
+func TestDoltServer_Start_QuietLogLevelRealOwnership(t *testing.T) {
+	s, _ := newFakeDoltServerAtLevel(t, "silent", freeTestPort(t), "warning")
+	require.NoError(t, s.Start(context.Background()))
+	assert.True(t, s.Running(context.Background()))
 }
 
 // TestDoltServer_Start_FakeReadyLine is the positive control for the fake.

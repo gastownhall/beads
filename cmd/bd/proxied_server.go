@@ -320,9 +320,27 @@ func validateProxiedServerLogPath(path string) error {
 	return nil
 }
 
+// proxiedServerLogLevel is the log_level of a Beads-generated proxied-server
+// config. dolt logs every NewConnection and ConnectionClosed at info, and
+// every bd command opens connections through the proxy, so at info a
+// long-running proxied server.log grows with each command. warning keeps
+// dolt's warnings and errors, as doltServerLogLevel does for server mode.
+// The level hides dolt's info-level ready line, so the proxied DoltServer
+// proves readiness by listener ownership instead (see its waitReady). To
+// debug, set log_level in the generated config: Beads never rewrites it, and
+// editing log_level does not pin its listener port.
+const proxiedServerLogLevel = servercfg.LogLevel_Warning
+
 func renderProxiedServerConfig(port int) ([]byte, error) {
+	return renderProxiedServerConfigAtLevel(port, proxiedServerLogLevel)
+}
+
+// renderProxiedServerConfigAtLevel renders the managed config at logLevel.
+// Configs generated before proxiedServerLogLevel existed used info, and
+// renderLegacyProxiedServerConfig must reproduce them byte for byte.
+func renderProxiedServerConfigAtLevel(port int, level servercfg.LogLevel) ([]byte, error) {
 	host := proxiedServerListenerHost
-	logLevel := string(servercfg.LogLevel_Info)
+	logLevel := string(level)
 	yc := &servercfg.YAMLConfig{
 		LogLevelStr: &logLevel,
 		ListenerConfig: servercfg.ListenerYAMLConfig{
@@ -359,9 +377,10 @@ func managedPortRecordLine(port int) string {
 }
 
 // renderLegacyProxiedServerConfig is renderProxiedServerConfig as it was
-// before the port record existed: the marker followed directly by the YAML.
+// before the port record existed: the marker followed directly by the YAML,
+// at log_level info.
 func renderLegacyProxiedServerConfig(port int) ([]byte, error) {
-	body, err := renderProxiedServerConfig(port)
+	body, err := renderProxiedServerConfigAtLevel(port, servercfg.LogLevel_Info)
 	if err != nil {
 		return nil, err
 	}

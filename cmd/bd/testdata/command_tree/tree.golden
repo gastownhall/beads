@@ -1441,6 +1441,7 @@ bd db-proxy-child
   flag --logpath type=string default="" usage="path the backend server should write its stdout/stderr to"
   flag --port type=int default="0" annotations={cobra_annotation_bash_completion_one_required_flag=["true"]} usage="port to listen on"
   flag --root type=string default="" annotations={cobra_annotation_bash_completion_one_required_flag=["true"]} usage="root directory holding proxy.lock, proxy.pid, proxy.log"
+  flag --rotate-logpath type=bool default="false" usage="bound --logpath's size while running (set only for a log bd owns)"
   flag --stop-epoch type=string default="" usage="stop epoch the parent observed at spawn; the proxy aborts before publishing if it advances"
 
 bd defer

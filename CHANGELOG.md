@@ -1995,6 +1995,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `bd init --proxied-server-log-path`) is not rotated. Purging the proxy's
   control files and a proxied→server migration remove the `.1` files with
   the primaries (#7527).
+- In proxied-server mode, a long-running proxy now keeps `proxy.log` and
+  the default proxied `server.log` bounded while it runs, not only when it
+  starts. Once a minute the proxy checks both files, and one over the same
+  `BEADS_DOLT_LOG_MAX_BYTES` ceiling (default 50 MB, `0` turns it off) is
+  copied to `<file>.1` and emptied in place, so the processes writing it
+  keep their open files; lines written during the copy can be lost. A server
+  log at a path you chose is still never rotated. A newly generated proxied
+  `config.yaml` also sets `log_level: warning` instead of `info`, so dolt no
+  longer writes a `NewConnection` and a `ConnectionClosed` line to
+  `server.log` for each connection a `bd` command opens. At `warning` dolt
+  does not log its ready line, so the proxy accepts the server once its
+  listening socket is shown to belong to the dolt it started (on Linux and
+  macOS), and moves a Beads-chosen port another process holds as before.
+  An existing `config.yaml` keeps its `log_level`: delete it to have it
+  regenerated, or set `log_level` yourself (for example back to `info` or
+  `debug` while debugging); editing `log_level` does not pin the port.
 - **A routed `bd create` no longer hides what a repository without
   `metadata.json` already holds.** The first `bd create` routed into such a
   repository (by any routing rule, or by an absolute or `~/`-prefixed
