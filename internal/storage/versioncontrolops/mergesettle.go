@@ -354,7 +354,7 @@ func MergeWithStrategy(ctx context.Context, db DBConn, ref, author, strategy str
 	// clean output and runs the merge-closing DOLT_COMMIT, which Dolt
 	// allows to stage nothing while the merge is active.
 	for table := range dirtyTables {
-		if _, err := db.ExecContext(ctx, "CALL DOLT_ADD(?)", table); err != nil {
+		if err := schema.DrainCall(ctx, db, "CALL DOLT_ADD(?)", table); err != nil {
 			abortMerge(ctx, db, preMergeClean)
 			return conflicts, fmt.Errorf("conflicts resolved but commit failed: %w", err)
 		}
@@ -457,7 +457,7 @@ func stageMergeResult(ctx context.Context, db DBConn) error {
 		return fmt.Errorf("list merged-but-unstaged tables: %w", err)
 	}
 	for _, table := range tables {
-		if _, err := db.ExecContext(ctx, "CALL DOLT_ADD(?)", table); err != nil {
+		if err := schema.DrainCall(ctx, db, "CALL DOLT_ADD(?)", table); err != nil {
 			return fmt.Errorf("stage merged %s: %w", table, err)
 		}
 	}
@@ -486,9 +486,9 @@ func concludeMerge(ctx context.Context, db DBConn, msg, author string) error {
 	}
 	var err error
 	if author == "" {
-		_, err = db.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?)", msg)
+		err = schema.DrainCall(ctx, db, "CALL DOLT_COMMIT('-m', ?)", msg)
 	} else {
-		_, err = db.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)", msg, author)
+		err = schema.DrainCall(ctx, db, "CALL DOLT_COMMIT('-m', ?, '--author', ?)", msg, author)
 	}
 	if issueops.IsNothingToCommitError(err) {
 		return nil

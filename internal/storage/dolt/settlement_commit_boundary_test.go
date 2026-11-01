@@ -122,10 +122,10 @@ func TestServerSettlementSQLCommitResponseLossIsIndeterminate(t *testing.T) {
 		mock.ExpectQuery(regexp.QuoteMeta("SELECT DISTINCT CASE WHEN s.table_name = CONCAT(d.from_table_name, ' -> ', d.to_table_name) THEN d.to_table_name ELSE s.table_name END FROM dolt_status s JOIN (SELECT from_table_name, to_table_name FROM dolt_diff_summary('HEAD', '0123456789abcdefghijklmnopqrstuv') UNION SELECT from_table_name, to_table_name FROM dolt_schema_diff('HEAD', '0123456789abcdefghijklmnopqrstuv')) d ON s.table_name IN (d.from_table_name, d.to_table_name, CONCAT(d.from_table_name, ' -> ', d.to_table_name)) WHERE s.staged = 0")).
 			WillReturnRows(sqlmock.NewRows([]string{"table_name"}))
 		// concludeMerge passes the commit message as a bind arg, not a
-		// string-interpolated literal.
-		mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', ?)")).
+		// string-interpolated literal, and drains the CALL (schema.DrainCall).
+		mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', ?)")).
 			WithArgs("auto-resolve merge conflicts: metadata, dependencies, schema_migrations, config, issues (field-level three-way merge), labels/comments/events (union)").
-			WillReturnResult(sqlmock.NewResult(0, 1))
+			WillReturnRows(sqlmock.NewRows([]string{"status"}))
 		responseLoss := errors.New("CLI repair SQL commit response lost")
 		mock.ExpectCommit().WillReturnError(responseLoss)
 		mock.ExpectExec(regexp.QuoteMeta("SET @@dolt_allow_commit_conflicts = 0")).

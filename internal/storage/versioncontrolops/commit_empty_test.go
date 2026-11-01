@@ -144,7 +144,7 @@ func TestConcludeMergeAbsorbsNothingToCommit(t *testing.T) {
 			db, mock := newMockDB(t)
 			mock.ExpectQuery(regexp.QuoteMeta("SELECT source_commit FROM dolt_merge_status WHERE is_merging")).
 				WillReturnRows(sqlmock.NewRows([]string{"source_commit"}))
-			mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', ?)")).
+			mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', ?)")).
 				WithArgs("conclude").
 				WillReturnError(tc.commitErr)
 
