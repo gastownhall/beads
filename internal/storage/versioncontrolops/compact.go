@@ -44,6 +44,13 @@ func Compact(ctx context.Context, conn DBConn, initialHash, boundaryHash string,
 		}
 	}()
 
+	// afterHeadMoveNote reports what has already happened when a step after the
+	// soft reset fails, and what to do with what it preserved. The head move is
+	// not rolled back — a hard reset here would destroy exactly the writes the
+	// soft reset kept — so the operator is left on main with the changes in
+	// hand, to inspect and commit deliberately.
+	const afterHeadMoveNote = "main was already reset to the compacted history; inspect the pending changes with dolt_status and commit them with `bd dolt commit` when ready"
+
 	execSQL := func(name, query string, args ...interface{}) error {
 		if _, err := conn.ExecContext(ctx, query, args...); err != nil {
 			return fmt.Errorf("compact step %q: %w", name, err)
@@ -104,11 +111,11 @@ func Compact(ctx context.Context, conn DBConn, initialHash, boundaryHash string,
 	// nothing-to-commit that follows is benign and tolerated.
 	staged, err := issueops.HasStagedChanges(ctx, conn)
 	if err != nil {
-		return fmt.Errorf("compact step %q: %w", "check staged changes after reset", err)
+		return fmt.Errorf("compact step %q failed (%s): %w", "check staged changes after reset", afterHeadMoveNote, err)
 	}
 	if staged {
 		if err := schema.DrainCall(ctx, conn, "CALL DOLT_COMMIT('-m', ?)", "compact: commit changes that reached main during compaction"); err != nil && !issueops.IsNothingToCommitError(err) {
-			return fmt.Errorf("compact step %q: %w", "commit changes that reached main during compaction", err)
+			return fmt.Errorf("compact step %q failed (%s): %w", "commit changes that reached main during compaction", afterHeadMoveNote, err)
 		}
 	}
 

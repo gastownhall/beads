@@ -3,6 +3,7 @@ package versioncontrolops
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -277,6 +278,12 @@ type csrHookConn struct {
 	// beforeFollowUp runs after Compact's staged check and just before the
 	// follow-up commit is forwarded.
 	beforeFollowUp func(ctx context.Context) error
+	// failFollowUp, when set, makes the follow-up commit fail before it
+	// executes.
+	failFollowUp error
+	// failStagedCheck makes the staged check's query fail against the real
+	// server (see QueryRowContext).
+	failStagedCheck bool
 
 	mainResets int // final resets seen
 	followUps  int // follow-up commit CALLs seen (forwarded or failed)
@@ -307,6 +314,9 @@ func (c *csrHookConn) ExecContext(ctx context.Context, query string, args ...any
 func (c *csrHookConn) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
 	if strings.Contains(query, "DOLT_COMMIT('-m'") {
 		c.followUps++
+		if c.failFollowUp != nil {
+			return nil, c.failFollowUp
+		}
 		if c.beforeFollowUp != nil {
 			if err := c.beforeFollowUp(ctx); err != nil {
 				return nil, fmt.Errorf("csr hook before follow-up commit: %w", err)
@@ -314,6 +324,17 @@ func (c *csrHookConn) QueryContext(ctx context.Context, query string, args ...an
 		}
 	}
 	return c.DBConn.QueryContext(ctx, query, args...)
+}
+
+// QueryRowContext intercepts the staged check: issueops.HasStagedChanges
+// reads through QueryRowContext, which on the wrapped *sql.Conn bypasses
+// QueryContext above. The substituted query fails against the real server,
+// so the error Compact reports is a truthful one, not a fabricated string.
+func (c *csrHookConn) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
+	if c.failStagedCheck && strings.Contains(query, "FROM dolt_status WHERE staged = 1") {
+		return c.DBConn.QueryRowContext(ctx, "SELECT COUNT(*) FROM csr_missing_staged_probe")
+	}
+	return c.DBConn.QueryRowContext(ctx, query, args...)
 }
 
 // pendingWorkingSet leaves in main's working set, uncommitted, what bd
@@ -674,6 +695,95 @@ func TestCompactQuietRunAddsNoCommit(t *testing.T) {
 		e.assertQuietHistory()
 		if got := e.queryInt(e.verifyConn(), "SELECT COUNT(*) FROM ignoredprobe WHERE id = 1"); got != 1 {
 			e.t.Errorf("row 1 in ignoredprobe on main: present=%t, want present=true", got == 1)
+		}
+	})
+}
+
+// TestCompactFollowupFailureKeepsChangesStaged (AC-4): when a commit lands
+// immediately before the reset and the follow-up commit then fails before
+// executing, Compact reports the failed step and the completed head move,
+// keeps the row staged on main, and the best-effort cleanup still removes
+// compact-tmp.
+func TestCompactFollowupFailureKeepsChangesStaged(t *testing.T) {
+	t.Run("follow-up commit fails before executing", func(t *testing.T) {
+		e := newCsrEnv(t)
+		injected := errors.New("csr: injected follow-up failure")
+		hooked := &csrHookConn{
+			DBConn:       e.compactConn(),
+			failFollowUp: injected,
+			onMainReset: func(ctx context.Context) error {
+				e.writerLandsCommit(600, "landed", csrWriterMsg)
+				return nil
+			},
+		}
+		err := e.compact(hooked)
+		if err == nil {
+			t.Fatal("Compact = nil error, want the follow-up failure reported")
+		}
+		if hooked.followUps != 1 {
+			t.Fatalf("Compact attempted %d follow-up commits, want 1", hooked.followUps)
+		}
+		for _, want := range []string{
+			"commit changes that reached main during compaction", // the failed step
+			"main was already reset to the compacted history",    // the completed head move
+		} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("Compact error %q does not report %q", err.Error(), want)
+			}
+		}
+		if !errors.Is(err, injected) {
+			t.Errorf("errors.Is(Compact error, injected) = false (%v)", err)
+		}
+
+		verify := e.verifyConn()
+		if got := e.queryInt(verify, "SELECT COUNT(*) FROM t WHERE id = 600"); got != 1 {
+			t.Errorf("row 600 in t on main: present=%t, want present=true", got == 1)
+		}
+		if staged := e.status(verify)["t"]; !staged {
+			t.Errorf("dolt_status[t] staged=%t, want staged (the row must survive for its own commit)", staged)
+		}
+		if got := e.queryInt(verify, "SELECT COUNT(*) FROM t AS OF 'HEAD' WHERE id = 600"); got != 0 {
+			t.Errorf("row 600 in t at HEAD: %d, want 0 (the follow-up never ran)", got)
+		}
+		if got := e.queryInt(verify, "SELECT COUNT(*) FROM dolt_branches WHERE name = 'compact-tmp'"); got != 0 {
+			t.Errorf("compact-tmp branches left: %d, want 0 (best-effort cleanup must remove it)", got)
+		}
+	})
+
+	// The staged check itself failing must not attempt the commit — staging
+	// was never established — and must report the same completed head move.
+	t.Run("staged check fails truthfully", func(t *testing.T) {
+		e := newCsrEnv(t)
+		hooked := &csrHookConn{
+			DBConn:          e.compactConn(),
+			failStagedCheck: true,
+			onMainReset: func(ctx context.Context) error {
+				e.writerLandsCommit(600, "landed", csrWriterMsg)
+				return nil
+			},
+		}
+		err := e.compact(hooked)
+		if err == nil {
+			t.Fatal("Compact = nil error, want the staged-check failure reported")
+		}
+		if hooked.followUps != 0 {
+			t.Fatalf("Compact attempted %d follow-up commits after the check failed, want 0", hooked.followUps)
+		}
+		for _, want := range []string{
+			"check staged changes",                            // the failed step
+			"main was already reset to the compacted history", // the completed head move
+		} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("Compact error %q does not report %q", err.Error(), want)
+			}
+		}
+
+		verify := e.verifyConn()
+		if staged := e.status(verify)["t"]; !staged {
+			t.Errorf("dolt_status[t] staged=%t, want staged (the landed row must survive the failed check)", staged)
+		}
+		if got := e.queryInt(verify, "SELECT COUNT(*) FROM dolt_branches WHERE name = 'compact-tmp'"); got != 0 {
+			t.Errorf("compact-tmp branches left: %d, want 0 (best-effort cleanup must remove it)", got)
 		}
 	})
 }
