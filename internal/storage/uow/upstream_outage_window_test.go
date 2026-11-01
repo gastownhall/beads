@@ -62,6 +62,48 @@ func TestPingWithRetryRetriesTheProxyOutageReportOnlyBriefly(t *testing.T) {
 		}
 	})
 
+	t.Run("a wait after an outage report is clamped to the window", func(t *testing.T) {
+		const window = 100 * time.Millisecond
+		shortOutageWindow(t, window)
+		p := &fakePinger{t: t, errs: []error{proxyOutageErr(), proxyOutageErr()}}
+		bo := testPingBackOff()
+		bo.RandomizationFactor = 0
+		bo.InitialInterval = time.Second // unclamped, the one wait would overrun the window tenfold
+		bo.MaxElapsedTime = 30 * time.Second
+		start := time.Now()
+		err := pingWithRetry(context.Background(), p, bo, testPingAttemptTimeout)
+		elapsed := time.Since(start)
+		if !proxy.IsUpstreamOutageError(err) {
+			t.Fatalf("pingWithRetry() error = %v, want the proxy's outage report", err)
+		}
+		if p.calls != 2 {
+			t.Fatalf("PingContext called %d times, want 2", p.calls)
+		}
+		if elapsed < window || elapsed > window+500*time.Millisecond {
+			t.Fatalf("gave up after %s, want just past the %s window", elapsed, window)
+		}
+	})
+
+	t.Run("an ordinary error between outage reports keeps the first report's deadline", func(t *testing.T) {
+		shortOutageWindow(t, 50*time.Millisecond)
+		// The outage report's wait is clamped to 50ms; the invalid
+		// connection's is the full 150ms, so the second report arrives past
+		// the first report's window and ends the retries. fakePinger fails
+		// the test on a fourth call.
+		p := &fakePinger{t: t, errs: []error{proxyOutageErr(), mysql.ErrInvalidConn, proxyOutageErr()}}
+		bo := testPingBackOff()
+		bo.RandomizationFactor = 0
+		bo.InitialInterval = 100 * time.Millisecond
+		bo.MaxElapsedTime = 30 * time.Second
+		err := pingWithRetry(context.Background(), p, bo, testPingAttemptTimeout)
+		if !proxy.IsUpstreamOutageError(err) {
+			t.Fatalf("pingWithRetry() error = %v, want the proxy's outage report", err)
+		}
+		if p.calls != 3 {
+			t.Fatalf("PingContext called %d times, want 3", p.calls)
+		}
+	})
+
 	t.Run("other transient errors keep the full budget", func(t *testing.T) {
 		shortOutageWindow(t, time.Nanosecond)
 		p := &fakePinger{t: t, errs: []error{mysql.ErrInvalidConn, mysql.ErrInvalidConn, nil}}
