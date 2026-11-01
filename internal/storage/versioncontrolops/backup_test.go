@@ -260,3 +260,141 @@ func TestBackupRestorePassesURLVerbatim(t *testing.T) {
 		}
 	}
 }
+
+// TestRestoreSourceURL pins the local-source layout check every directory
+// restore entry point shares (GH#7098): a force restore drops the target before
+// Dolt notices the source holds no backup, so a directory without a regular
+// manifest file must be refused here, wrapping ErrNoBackup, and a directory
+// with one must come back as the same URL DirToFileURL builds.
+func TestRestoreSourceURL(t *testing.T) {
+	root := t.TempDir()
+	mkdir := func(t *testing.T, path string) string {
+		t.Helper()
+		if err := os.MkdirAll(path, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	write := func(t *testing.T, path string) string {
+		t.Helper()
+		mkdir(t, filepath.Dir(path))
+		if err := os.WriteFile(path, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	symlink := func(t *testing.T, target, link string) string {
+		t.Helper()
+		mkdir(t, filepath.Dir(link))
+		if err := os.Symlink(target, link); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+		return link
+	}
+
+	for _, tc := range []struct {
+		name      string
+		dir       func(t *testing.T) string
+		noBackup  bool   // the error wraps ErrNoBackup
+		wantError string // a substring of the error; "" means success
+	}{
+		{name: "absent path", dir: func(*testing.T) string { return filepath.Join(root, "absent") },
+			wantError: "backup source does not exist"},
+		{name: "regular file", dir: func(t *testing.T) string { return write(t, filepath.Join(root, "file")) },
+			wantError: "backup source is not a directory"},
+		{name: "empty dir", dir: func(t *testing.T) string { return mkdir(t, filepath.Join(root, "empty")) },
+			noBackup: true, wantError: "no manifest"},
+		{name: "jsonl export only", dir: func(t *testing.T) string {
+			d := filepath.Join(root, "jsonl")
+			write(t, filepath.Join(d, "issues.jsonl"))
+			write(t, filepath.Join(d, "backup_state.json"))
+			return d
+		}, noBackup: true, wantError: "no manifest"},
+		{name: "manifest is a directory", dir: func(t *testing.T) string {
+			d := filepath.Join(root, "manifest-dir")
+			mkdir(t, filepath.Join(d, "manifest"))
+			return d
+		}, noBackup: true, wantError: "not a regular file"},
+		{name: "dangling manifest symlink", dir: func(t *testing.T) string {
+			d := filepath.Join(root, "dangling")
+			symlink(t, filepath.Join(root, "nowhere"), filepath.Join(d, "manifest"))
+			return d
+		}, noBackup: true, wantError: "no manifest"},
+		{name: "regular manifest", dir: func(t *testing.T) string {
+			d := filepath.Join(root, "backup")
+			write(t, filepath.Join(d, "manifest"))
+			return d
+		}},
+		{name: "symlinked manifest", dir: func(t *testing.T) string {
+			d := filepath.Join(root, "linked-manifest")
+			symlink(t, write(t, filepath.Join(root, "real-manifest", "manifest")), filepath.Join(d, "manifest"))
+			return d
+		}},
+		{name: "symlinked dir", dir: func(t *testing.T) string {
+			d := filepath.Join(root, "real-backup")
+			write(t, filepath.Join(d, "manifest"))
+			return symlink(t, d, filepath.Join(root, "links", "backup"))
+		}},
+		{name: "space percent and hash in path", dir: func(t *testing.T) string {
+			d := filepath.Join(root, "my 100% #backup")
+			write(t, filepath.Join(d, "manifest"))
+			return d
+		}},
+		{name: "url input", dir: func(*testing.T) string { return "file://" + root },
+			wantError: "backup source does not exist"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := tc.dir(t)
+			got, err := RestoreSourceURL(dir)
+			if tc.wantError == "" {
+				if err != nil {
+					t.Fatalf("RestoreSourceURL(%q): %v", dir, err)
+				}
+				want, err := DirToFileURL(dir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got != want {
+					t.Fatalf("RestoreSourceURL(%q) = %q, want DirToFileURL's %q", dir, got, want)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("RestoreSourceURL(%q) = %q, want an error containing %q", dir, got, tc.wantError)
+			}
+			if !strings.Contains(err.Error(), tc.wantError) {
+				t.Errorf("RestoreSourceURL(%q) error = %q, want it to contain %q", dir, err, tc.wantError)
+			}
+			if errors.Is(err, ErrNoBackup) != tc.noBackup {
+				t.Errorf("errors.Is(%v, ErrNoBackup) = %v, want %v", err, !tc.noBackup, tc.noBackup)
+			}
+			if tc.noBackup {
+				if !strings.Contains(err.Error(), fmt.Sprintf("%q", dir)) {
+					t.Errorf("error = %q, want it to name the source %q", err, dir)
+				}
+				if !strings.Contains(err.Error(), "refused before changing the database") {
+					t.Errorf("error = %q, want it to say the database was not changed", err)
+				}
+			}
+		})
+	}
+
+	t.Run("manifest stat denied", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root ignores directory permissions")
+		}
+		d := filepath.Join(root, "denied")
+		write(t, filepath.Join(d, "manifest"))
+		if err := os.Chmod(d, 0o600); err != nil { // readable, not traversable
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(d, 0o750) })
+		_, err := RestoreSourceURL(d)
+		if err == nil {
+			t.Fatalf("RestoreSourceURL(%q) succeeded without being able to stat its manifest", d)
+		}
+		if errors.Is(err, ErrNoBackup) || !errors.Is(err, os.ErrPermission) {
+			t.Errorf("error = %v, want the permission error wrapped, not ErrNoBackup", err)
+		}
+	})
+}

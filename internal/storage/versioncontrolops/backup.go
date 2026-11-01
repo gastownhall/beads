@@ -2,6 +2,7 @@ package versioncontrolops
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	neturl "net/url"
 	"os"
@@ -38,9 +39,52 @@ func BackupRemove(ctx context.Context, db DBConn, name string) error {
 	return nil
 }
 
+// ErrNoBackup reports that a local restore source holds no Dolt backup: the
+// directory has no regular manifest file. RestoreSourceURL returns it before
+// any restore work starts, so the database the restore would replace is left
+// as it was.
+var ErrNoBackup = errors.New("no Dolt backup found")
+
+// RestoreSourceURL checks that the local directory dir can be a restore
+// source and returns the file:// URL for it.
+//
+// A force restore drops the target database before Dolt reads the source's
+// roots, and Dolt opens a directory without a manifest as an empty store, so
+// an empty or never-synced directory would replace the live database with
+// nothing (GH#7098). Every caller that starts from a local directory goes
+// through here before it opens a restore connection or quiesces anything.
+//
+// This is a layout check only: dir must exist (symlinks followed), be a
+// directory, and hold a regular file named manifest. It does not read the
+// manifest or any chunk, so a corrupt or partial backup still reaches Dolt.
+func RestoreSourceURL(dir string) (string, error) {
+	info, err := os.Stat(dir)
+	if err != nil {
+		return "", fmt.Errorf("backup source does not exist: %w", err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("backup source is not a directory: %s", dir)
+	}
+	manifest, err := os.Stat(filepath.Join(dir, "manifest"))
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return "", fmt.Errorf("%w in %q (it has no manifest file); the restore was refused before changing the database", ErrNoBackup, dir)
+	case err != nil:
+		return "", fmt.Errorf("check backup source %q for a Dolt backup; the restore was refused before changing the database: %w", dir, err)
+	case !manifest.Mode().IsRegular():
+		return "", fmt.Errorf("%w in %q (its manifest is not a regular file); the restore was refused before changing the database", ErrNoBackup, dir)
+	}
+	return DirToFileURL(dir)
+}
+
 // BackupRestore restores a database from a backup at the given URL into
 // the named database. When force is true, an existing database with the
 // same name is overwritten. Mirrors the CLI: dolt backup restore [--force] <url> <db_name>
+//
+// It does not check the source: Dolt drops the target of a force restore
+// before it finds out the source holds no backup. A caller starting from a
+// local directory builds url with RestoreSourceURL, which refuses one that
+// holds no backup.
 func BackupRestore(ctx context.Context, db DBConn, url, dbName string, force bool) error {
 	if force {
 		if _, err := db.ExecContext(ctx, "CALL DOLT_BACKUP('restore', '--force', ?, ?)", url, dbName); err != nil {
