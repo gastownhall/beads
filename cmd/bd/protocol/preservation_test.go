@@ -87,7 +87,7 @@ func TestProtocol_ScalarUpdatePreservesRelationalData(t *testing.T) {
 	w.run("update", id1, "--title", "Data-rich issue v2")
 	w.run("update", id1, "--priority", "0")
 	w.run("update", id1, "--description", "Updated description")
-	w.run("update", id1, "--assignee", "alice")
+	w.run("update", id1, "--assignee", "alice", "--reason", "protocol contract test: assign for preservation check")
 	w.run("update", id1, "--notes", "Updated notes")
 
 	// Verify via show --json. Comment bodies are opt-in (--include-comments),

@@ -50,7 +50,7 @@ func TestProtocol_StatusUpdatePreservesAssignee(t *testing.T) {
 	w := newWorkspace(t)
 	id := w.create("--title", "Assigned work", "--type", "task")
 
-	w.run("update", id, "-a", "worker-7", "--status", "in_progress")
+	w.run("update", id, "-a", "worker-7", "--status", "in_progress", "--reason", "protocol contract test: take the unit")
 	issue := w.showJSON(id)
 	assertField(t, issue, "assignee", "worker-7")
 	assertField(t, issue, "status", "in_progress")
@@ -68,7 +68,7 @@ func TestProtocol_StatusUpdatePreservesAssignee(t *testing.T) {
 	assertFieldFloat(t, issue, "priority", 0)
 
 	// Only an explicit `-a ""` clears the assignee (D1.6).
-	w.run("update", id, "-a", "")
+	w.run("update", id, "-a", "", "--reason", "protocol contract test: clear the unit")
 	issue = w.showJSON(id)
 	if assignee, ok := issue["assignee"].(string); ok && assignee != "" {
 		t.Errorf(`D1.6: bd update -a "" left assignee = %q, want cleared`, assignee)
