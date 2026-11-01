@@ -40,8 +40,8 @@ func TestLabelSQLRepositoryMutationsTouchIssueSnapshot(t *testing.T) {
 				WillReturnRows(sqlmock.NewRows([]string{"id"}))
 			mock.ExpectExec("INSERT INTO " + tt.eventTable).WillReturnResult(sqlmock.NewResult(1, 1))
 			if !tt.skipTouch {
-				mock.ExpectExec("UPDATE "+tt.issueTable+" SET updated_at = \\?, row_lock = \\? WHERE id = \\?").
-					WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), "bd-test").
+				mock.ExpectExec("UPDATE "+tt.issueTable+" SET updated_at = \\? WHERE id = \\?").
+					WithArgs(sqlmock.AnyArg(), "bd-test").
 					WillReturnResult(sqlmock.NewResult(0, 1))
 			}
 
