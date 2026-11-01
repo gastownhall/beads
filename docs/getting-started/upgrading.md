@@ -373,6 +373,16 @@ it. In server mode the database lives under `.beads/dolt/` instead; stop the
 server and move the database outside `.beads/dolt/` (see
 [re-clone-gotchas](/recovery/init-safety#re-clone-gotchas)).
 
+Since 1.3.0 the `events` audit table is clone-local, and only the migrator's
+clone keeps its rows through that migration: a clone that adopts it (by the
+pull in step 3 or by `bd bootstrap`) starts with an empty `events` table
+([#7039](https://github.com/gastownhall/beads/issues/7039)). Releases after
+v1.3.2 refill it once, on the first open, from the clone's own pre-upgrade
+history, and print `Restored N pre-upgrade audit event(s) from this clone's
+history`. Events of issues deleted since are skipped and counted. If that
+history cannot be read, bd prints a warning naming this page and carries on;
+nothing else is lost.
+
 If a clone was instead migrated independently and `bd dolt pull` later fails
 with `cannot merge because table dependencies has different primary keys in its
 common ancestor`, the schema has already forked — follow the recovery playbook:

@@ -84,6 +84,15 @@ outcomes by reading `INFORMATION_SCHEMA`, never an exit code, and test guarded
 migrations through the embedded (cgo) engine, where `PREPARE`/`EXECUTE` behaves
 normally. See `internal/storage/embeddeddolt/migrate_frozen_guard_convergence_test.go`.
 
+**Moving a tracked table onto the dolt_ignored plane loses its rows on every
+clone but the one that migrates.** 0062 drops versioned `events`, commits the
+drop, and recreates the table ignored, refilled from a temp copy. The commit
+replicates; the refill does not. A clone that pulls the migration, or clones
+after it, gets the drop and an empty table, while its rows still sit in its own
+history at the drop commit's first parent (gastownhall/beads#7039; ignored 0031
+and `../events_preflip_seed.go` restore them). A future flip must plan the
+refill for every clone, not only the migrator's.
+
 ## Testing
 
 `sqlmock` statement-echo tests cannot exercise any of the above; they assert the
