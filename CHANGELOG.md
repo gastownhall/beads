@@ -1174,6 +1174,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `$GT_ROOT/.beads/molecules.jsonl` is template data), so it names no command
   and no credential target. Shell environment still wins over the file.
 
+- Schema migration 0053 no longer fails with `column "started_at" could not
+  be found in any table in scope` on a clone whose local `wisps` table lacks
+  `started_at` or `no_history`. Migrations 0023 and 0027 add those columns
+  only when `wisps` already exists, so a `wisps` created later from an older
+  shape reached v52 without them and the store was left at v52, refusing
+  writes. The repair registered for version 53 now adds them (#6080,
+  reported by @dmcp718).
 - `bd create --file` and other batch creates no longer fail with "issue
   already exists" on an id bd generated itself. The batch chose every id
   before it wrote any row, so two of its items could be handed the same short
