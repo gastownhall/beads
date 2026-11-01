@@ -15,6 +15,11 @@ import (
 // open with a named error, an empty _project_id keeps skipping (covered
 // end-to-end by TestCrossProject_IdentityCheck_SoftSkip_EmptyDBProjectID),
 // and the bounded retry itself really retries before anything surfaces.
+//
+// Only TestCrossProject_IdentityCheck_ReadErrorRefuses pins the split: it
+// fails on the pre-split code. The two TestWithRetry* tests pass there too.
+// They document the withRetry behavior the split relies on (a refusal is what
+// survives bounded retry), not the split itself.
 
 func TestWithRetryTransientReadErrorRetriesThenSucceeds(t *testing.T) {
 	t.Setenv("BEADS_TEST_MODE", "")
@@ -96,5 +101,10 @@ func TestCrossProject_IdentityCheck_ReadErrorRefuses(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "cannot verify project identity") {
 		t.Fatalf("expected a 'cannot verify project identity' refusal, got: %v", err)
+	}
+	// The refusal must carry its remedy, not just the bare read error
+	// (TestProjectIdentityUnverifiableError_Advice pins the full text).
+	if !strings.Contains(err.Error(), "bd init --reinit-local --database <other-name>") {
+		t.Fatalf("expected the refusal to name its remedy, got: %v", err)
 	}
 }

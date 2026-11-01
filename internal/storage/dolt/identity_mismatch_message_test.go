@@ -1,6 +1,7 @@
 package dolt
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -49,4 +50,43 @@ func TestProjectIdentityMismatchError_InitAdvice(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestProjectIdentityUnverifiableError_Advice pins the refusal for an existing
+// database whose project ID cannot be read (verifyProjectIdentity's read-error
+// branch): it must keep the read error in the chain and name only remedies that
+// get past the check. 'bd doctor' and 'bd bootstrap' reach the same check, and
+// plain 'bd init --database' stops at init's "already initialized" guard, so
+// none of them may be offered as a fix.
+func TestProjectIdentityUnverifiableError_Advice(t *testing.T) {
+	const localID, database = "project-AAAA", "clone_db"
+	readErr := errors.New("get metadata _project_id: Error 1146 (HY000): table not found: metadata")
+
+	err := projectIdentityUnverifiableError(localID, database, readErr)
+	if !errors.Is(err, readErr) {
+		t.Errorf("refusal does not wrap the read error: %v", err)
+	}
+	msg := err.Error()
+	for _, want := range []string{
+		"cannot verify project identity",
+		`"` + database + `"`,
+		localID,
+		readErr.Error(),
+		"bd dolt status",
+		"bd init --reinit-local --database <other-name>",
+		"DROP DATABASE `" + database + "`",
+		"bd init --recreate-missing",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("refusal missing %q:\n%s", want, msg)
+		}
+	}
+	for _, unwanted := range []string{
+		"run 'bd doctor --fix' or 'bd bootstrap'",
+		"bd init --database <other-name>",
+	} {
+		if strings.Contains(msg, unwanted) {
+			t.Errorf("refusal offers %q, which this check also refuses:\n%s", unwanted, msg)
+		}
+	}
 }

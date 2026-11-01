@@ -2446,7 +2446,7 @@ func (s *DoltStore) verifyProjectIdentity(ctx context.Context, beadsDir string, 
 	// read failure is not evidence of anything: fail closed and name it.
 	dbID, err := s.GetMetadata(ctx, "_project_id")
 	if err != nil {
-		return fmt.Errorf("cannot verify project identity: %w", err)
+		return projectIdentityUnverifiableError(localID, s.database, err)
 	}
 	if dbID == "" {
 		return nil // old database without project_id — skip
@@ -2503,6 +2503,37 @@ func projectIdentityMismatchError(localID, dbID, database string, openedByInit b
 			"To diagnose: bd dolt status\n"+
 			"Do NOT run 'bd init' — your data likely exists, just on a different server.",
 		localID, dbID)
+}
+
+// projectIdentityUnverifiableError builds verifyProjectIdentity's refusal when
+// metadata.json has a project_id but the existing database's cannot be read.
+//
+// The remedies are the ones that get past this check: each makes bd create the
+// database, which skips it. 'bd doctor' (a ReadOnly open) and 'bd bootstrap'
+// (a CreateIfMissing open of a database that already exists) reach the same
+// check, and plain 'bd init' / 'bd init --database' stop at its "workspace
+// already initialized" guard first, so none of them is offered.
+func projectIdentityUnverifiableError(localID, database string, readErr error) error {
+	return fmt.Errorf(
+		"cannot verify project identity — refusing to connect\n\n"+
+			"  Database: %q\n"+
+			"  Local project ID (metadata.json):  %s\n"+
+			"  Database project ID:               unreadable (%w)\n\n"+
+			"bd cannot prove this existing database belongs to this project, so it\n"+
+			"will not connect to, adopt, or migrate it.\n"+
+			"This can happen when:\n"+
+			"  - The Dolt server is restarting or unreachable (transient read\n"+
+			"    failures are retried before this refusal)\n"+
+			"  - The database exists but has no bd schema: a first bd init was\n"+
+			"    interrupted, or the database was created outside bd\n\n"+
+			"To diagnose: bd dolt status\n"+
+			"If the server was restarting, re-run the command once it is up.\n"+
+			"To fix, give this project a database bd creates itself:\n"+
+			"  - a new database:  bd init --reinit-local --database <other-name>\n"+
+			"  - if this database holds nothing you need, have a server admin run\n"+
+			"    DROP DATABASE `%s`; then run: bd init --recreate-missing\n"+
+			"'bd doctor --fix' and 'bd bootstrap' cannot repair this.",
+		database, localID, readErr, database)
 }
 
 func (s *DoltStore) verifyGlobalProjectIdentity(ctx context.Context, beadsDir string) error {
