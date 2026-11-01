@@ -74,7 +74,7 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 	// Shares resolveAndProbeDolt (uow_factory.go) with
 	// newManagedProxiedServerUOWProvider, which this same `bd init
 	// --proxied-server` invocation goes on to call a few lines below via
-	// newProxiedServerUOWProvider: the shared doltVersionWarnOnce means the
+	// newProxiedServerUOWProviderInitializing: the shared doltVersionWarnOnce means the
 	// version advisory prints at most once for the command, not once per
 	// call site.
 	if in.externalConfig == nil {
@@ -185,7 +185,9 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 		fmt.Fprintf(os.Stderr, "Warning: failed to initialize version tracking: %v\n", fsResult.LocalVersionErr)
 	}
 
-	initUOWProvider, err := newProxiedServerUOWProviderAdopting(ctx, beadsDir, "")
+	// Initializing, not Adopting: init is the one open allowed to create the
+	// managed-local store (every other open refuses an empty root).
+	initUOWProvider, err := newProxiedServerUOWProviderInitializing(ctx, beadsDir, "")
 	if err != nil {
 		return fmt.Errorf("failed to open uow provider: %v", err)
 	}
