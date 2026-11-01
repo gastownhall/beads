@@ -221,7 +221,26 @@ func DirToFileURL(dir string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolve absolute path: %w", err)
 	}
-	return "file://" + abs, nil
+	return PathToFileURL(abs), nil
+}
+
+// PathToFileURL returns the file:// URL for the absolute path abs, in the
+// form Dolt reads back as that path.
+//
+// A POSIX path is passed through: "file://" + abs. A Windows drive path
+// (C:\x or c:/x, matched by shape on every OS) becomes file:///C:/x, the form
+// Dolt's own earl.FileUrlFromPath builds. Dolt's URL parser recognizes a
+// drive only by an upper-case letter right after file:// or file:///; any
+// other spelling goes to net/url, which reads file://c:\x as host "c" with
+// the invalid port ":\x" and refuses it, so on a lower-case drive (PowerShell
+// keeps the case it was given) every backup remote registration failed
+// (#6019).
+func PathToFileURL(abs string) string {
+	if len(abs) < 3 || abs[1] != ':' || (abs[2] != '\\' && abs[2] != '/') ||
+		!(('a' <= abs[0] && abs[0] <= 'z') || ('A' <= abs[0] && abs[0] <= 'Z')) {
+		return "file://" + abs
+	}
+	return "file:///" + strings.ToUpper(abs[:1]) + strings.ReplaceAll(abs[1:], `\`, "/")
 }
 
 // ExtractAddressConflictName parses the conflicting remote name from a Dolt

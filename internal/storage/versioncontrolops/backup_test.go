@@ -40,6 +40,35 @@ func TestDirToFileURLRejectsSchemes(t *testing.T) {
 	}
 }
 
+// TestPathToFileURL pins the file:// URL built for a backup directory. A
+// Windows drive path must come out as file:///C:/...: Dolt recognizes a drive
+// only by an upper-case letter, and hands file://c:\work\... to net/url,
+// which refuses it with "invalid port" (#6019). Drive paths are matched by
+// shape, so these cases run on every OS.
+func TestPathToFileURL(t *testing.T) {
+	tests := []struct {
+		abs, want string
+	}{
+		{`c:\work\repo\.beads\backup`, "file:///C:/work/repo/.beads/backup"},
+		{`C:\work\repo\.beads\backup`, "file:///C:/work/repo/.beads/backup"},
+		{`d:/data/backup`, "file:///D:/data/backup"},
+		{"/var/backups/beads", "file:///var/backups/beads"},
+	}
+	for _, tt := range tests {
+		got := PathToFileURL(tt.abs)
+		if got != tt.want {
+			t.Errorf("PathToFileURL(%q) = %q, want %q", tt.abs, got, tt.want)
+			continue
+		}
+		u, err := neturl.Parse(got)
+		if err != nil {
+			t.Errorf("PathToFileURL(%q) = %q, which net/url refuses: %v", tt.abs, got, err)
+		} else if u.Host != "" {
+			t.Errorf("PathToFileURL(%q) = %q, which names host %q", tt.abs, got, u.Host)
+		}
+	}
+}
+
 func TestExtractAddressConflictName(t *testing.T) {
 	tests := []struct {
 		name string
