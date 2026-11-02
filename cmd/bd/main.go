@@ -2026,6 +2026,9 @@ var rootCmd = &cobra.Command{
 			// failing each read on an unknown column. Not for a preview,
 			// which reports an incompatibility through its own query.
 			RequireReadableSchema: !previewMode,
+			// A frozen command makes no lifecycle change: a server running a
+			// replaced dolt is reported, not restarted (GH#6064).
+			DisableAutoRestart: commandFreeze.Frozen(),
 		}
 
 		// Load config to get database name and server connection settings.
