@@ -337,3 +337,63 @@ func TestServerBinaryFailedReplacementReportsState(t *testing.T) {
 		})
 	}
 }
+
+// TestServerBinaryNoPermissionAdvises: an open that may not restart the
+// tracked server (auto-start off, a frozen command, a preview, strict
+// --readonly, a shared server) changes nothing: it does not ask the
+// lifecycle to replace the server, opens its session as before, and warns
+// once, naming both releases and the manual restart. The shared-server
+// warning names the clients a restart disconnects.
+func TestServerBinaryNoPermissionAdvises(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		setup  func(t *testing.T, cfg *Config)
+		shared bool
+	}{
+		{name: "auto-start disabled", setup: func(t *testing.T, _ *Config) { t.Setenv("BEADS_DOLT_AUTO_START", "0") }},
+		{name: "frozen command", setup: func(_ *testing.T, cfg *Config) { cfg.DisableAutoRestart = true }},
+		{name: "preview", setup: func(_ *testing.T, cfg *Config) { cfg.Preview = true }},
+		{name: "strict readonly", setup: func(_ *testing.T, cfg *Config) { cfg.ReadOnly = true }},
+		{name: "shared server", setup: func(t *testing.T, _ *Config) { t.Setenv("BEADS_DOLT_SHARED_SERVER", "1") }, shared: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			events := &serverBinaryEvents{}
+			cfg := serverBinaryOpen(t, events)
+			tc.setup(t, cfg)
+			port := cfg.ServerPort
+			stubServerBinary(t,
+				func(string, int, doltserver.ServerVersionFunc) doltserver.BinaryCheck { return staleServerCheck(port) },
+				func(string, int, doltserver.ServerVersionFunc) (doltserver.BinaryReplacement, error) {
+					events.add("replace")
+					return doltserver.BinaryReplacement{}, errors.New("must not be called")
+				})
+
+			stderr := captureServerBinaryStderr(t, func() {
+				for range 2 {
+					_, _ = newServerMode(context.Background(), cfg)
+				}
+			})
+			got := strings.Join(events.snapshot(), " ")
+			if strings.Contains(got, "replace") {
+				t.Errorf("events = %s, want no replacement", got)
+			}
+			if n := strings.Count(got, "conn"); n < 4 {
+				t.Errorf("events = %s, want each open's probe and session as before", got)
+			}
+			if n := strings.Count(stderr, "this command does not restart it"); n != 1 {
+				t.Fatalf("stderr has %d warnings, want one:\n%s", n, stderr)
+			}
+			for _, want := range []string{"port " + strconv.Itoa(port), "dolt 2.6.0", "/opt/dolt/bin/dolt", "is now 2.7.0", "bd dolt stop, then bd dolt start"} {
+				if !strings.Contains(stderr, want) {
+					t.Errorf("warning does not mention %q:\n%s", want, stderr)
+				}
+			}
+			if strings.Contains(stderr, "every client") != tc.shared {
+				t.Errorf("warning names the shared server's clients = %v, want %v:\n%s", !tc.shared, tc.shared, stderr)
+			}
+			if strings.Contains(stderr, "Restarted the dolt sql-server") {
+				t.Errorf("open without permission reported a restart:\n%s", stderr)
+			}
+		})
+	}
+}

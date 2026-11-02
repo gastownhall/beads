@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/steveyegge/beads/internal/doltserver"
@@ -42,6 +43,9 @@ func reconcileServerBinary(cfg *Config, beadsDir, serverDir string) (int, error)
 		return cfg.ServerPort, nil
 	}
 	if !serverBinaryMayRestart(cfg, beadsDir) {
+		if !refresh {
+			adviseStaleServer(cfg, beadsDir, serverDir, check)
+		}
 		return cfg.ServerPort, nil
 	}
 	addr := doltutil.PrintedServerAddr(cfg.ServerHost, cfg.ServerPort)
@@ -105,6 +109,39 @@ func serverDoltVersion(cfg *Config) doltserver.ServerVersionFunc {
 	}
 }
 
+// staleServerAdvised holds the servers (directory and port) this process has
+// already warned about, so a command that opens several stores warns once.
+var staleServerAdvised sync.Map
+
+// adviseStaleServer warns, once per server, that the tracked server this open
+// may not restart runs a dolt since replaced. Nothing is changed: the open
+// goes on to use the server as before.
+func adviseStaleServer(cfg *Config, beadsDir, serverDir string, check doltserver.BinaryCheck) {
+	if _, done := staleServerAdvised.LoadOrStore(fmt.Sprintf("%s:%d", serverDir, cfg.ServerPort), struct{}{}); done {
+		return
+	}
+	running := check.RunningVersion
+	if running == "" {
+		running = "an earlier release"
+	}
+	installed := "the installed dolt"
+	if check.CandidatePath != "" {
+		installed += " (" + remedy.PrintedValue(check.CandidatePath) + ")"
+	}
+	if check.CandidateVersion != "" {
+		installed += " is now " + check.CandidateVersion
+	} else {
+		installed += " has changed"
+	}
+	restart := "To restart it on the installed dolt: bd dolt stop, then bd dolt start"
+	if doltserver.IsSharedServerModeForDir(beadsDir) {
+		restart = "It is the shared server: restarting it disconnects every client and database it serves.\n" +
+			"  When that is safe: bd dolt stop, then bd dolt start"
+	}
+	fmt.Fprintf(os.Stderr, "Warning: the dolt sql-server on port %d runs dolt %s, but %s; this command does not restart it.\n  %s\n",
+		cfg.ServerPort, running, installed, restart)
+}
+
 func cannotReplaceServerError(addr string, check doltserver.BinaryCheck, reason error) error {
 	running := check.RunningVersion
 	if running == "" {
@@ -125,8 +162,12 @@ func serverBinaryCandidate(cfg *Config) bool {
 
 // serverBinaryMayRestart reports whether this open may stop and start the
 // workspace's server: the same permission auto-start has, in a workspace
-// whose server bd owns.
+// whose server bd owns, for a command that may change things (not a preview,
+// strict --readonly or a frozen command).
 func serverBinaryMayRestart(cfg *Config, beadsDir string) bool {
+	if cfg.DisableAutoRestart || cfg.Preview || (cfg.ReadOnly && !cfg.ClassifiedRead) {
+		return false
+	}
 	return serverOpenCanAutoStart(cfg) && !doltserver.IsAutoStartDisabled() &&
 		doltserver.ResolveServerMode(beadsDir) == doltserver.ServerModeOwned &&
 		!doltserver.IsSharedServerModeForDir(beadsDir)
