@@ -992,6 +992,12 @@ func migrateUpAfterReconcile(ctx context.Context, db DBConn, seedChanged bool) (
 		return 0, nil
 	}
 
+	// Suspended only once a pass is known to run, so converged opens pay
+	// nothing for it.
+	if err := suspendTransactionCommit(ctx, db); err != nil {
+		return 0, err
+	}
+
 	dirtyBeforeAll, err := dirtyTables(ctx, db, false)
 	if err != nil {
 		return 0, fmt.Errorf("reading pre-migration status: %w", err)

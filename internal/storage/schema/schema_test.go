@@ -77,6 +77,8 @@ func TestMigrateUpReturnsDirtyTablesErrorForPreExistingDirtyTable(t *testing.T) 
 	// ignoredSource.atLatest or the content-hash/backfill probes.
 	expectCursorProbe(mock, "schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", 42)
+	// A pass will run: its session's transaction-commit mode is read first.
+	expectTransactionCommitRead(mock, 0)
 
 	// dirtyTables(ctx, db, false): `dependencies` has an uncommitted, unstaged
 	// change in the working set.
