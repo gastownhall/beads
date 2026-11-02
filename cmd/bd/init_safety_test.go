@@ -460,6 +460,72 @@ func TestInitLateProbeFailureRefusesAsUnverified(t *testing.T) {
 	}
 }
 
+// TestInitReinitLocalUnreadableRemoteEmptyRemoteSucceeds demonstrates the
+// opt-out remedy the unverified refusal names (GH#7665): an explicitly
+// empty --remote suppresses ambient sync.remote config and git-origin
+// discovery, so --reinit-local against an unreadable origin initializes
+// without probing or configuring that origin. The ambient BD_SYNC_REMOTE is
+// set to an unreachable path too, so success also proves the explicit empty
+// --remote wins over ambient config rather than merely over git origin.
+func TestInitReinitLocalUnreadableRemoteEmptyRemoteSucceeds(t *testing.T) {
+	bdBin := buildBDForInitTests(t)
+
+	workDir := t.TempDir()
+	runGitForBootstrapTest(t, workDir, "init", "-b", "main")
+	runGitForBootstrapTest(t, workDir, "config", "core.hooksPath", ".git/hooks")
+	// An origin whose probe errors (missing path -> git ls-remote exit 128).
+	runGitForBootstrapTest(t, workDir, "remote", "add", "origin",
+		filepath.Join(t.TempDir(), "does-not-exist.git"))
+
+	homeDir := t.TempDir() // must differ from workDir: metrics.go caches to $HOME/.beads
+	env := hermeticInitEnv(homeDir,
+		"BD_SYNC_REMOTE="+filepath.Join(t.TempDir(), "also-missing.git"))
+
+	cmd := exec.Command(bdBin, "init", "--reinit-local", "--remote=",
+		"--prefix", "erm", "--quiet", "--non-interactive", "--skip-hooks", "--skip-agents")
+	cmd.Dir = workDir
+	cmd.Env = env
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("bd init --reinit-local --remote=\"\" against an unreadable origin failed: %v\noutput:\n%s", err, out.String())
+	}
+
+	if _, err := os.Stat(filepath.Join(workDir, ".beads")); err != nil {
+		t.Fatalf(".beads should have been created by a successful init: %v", err)
+	}
+
+	// No probe happened at all: neither the origin nor the ambient
+	// sync.remote was reachable, so any probe would have left its note.
+	if strings.Contains(out.String(), "could not verify refs/dolt/data") {
+		t.Errorf("the explicit empty --remote must suppress probing, but a probe diagnostic printed:\n%s", out.String())
+	}
+
+	// Config alone is insufficient per the fixture's contract, but check it
+	// too: a fresh workspace must not have the origin persisted as
+	// sync.remote.
+	beadsDir := filepath.Join(workDir, ".beads")
+	if got := config.GetStringFromDir(beadsDir, "sync.remote"); got != "" {
+		t.Errorf("sync.remote = %q, want empty: the explicit empty --remote must not persist a remote", got)
+	}
+
+	// The store-level view: no Dolt remote may be configured on the
+	// database init just created.
+	listCmd := exec.Command(bdBin, "dolt", "remote", "list")
+	listCmd.Dir = workDir
+	listCmd.Env = env
+	var listOut bytes.Buffer
+	listCmd.Stdout = &listOut
+	listCmd.Stderr = &listOut
+	if err := listCmd.Run(); err != nil {
+		t.Fatalf("bd dolt remote list failed: %v\noutput:\n%s", err, listOut.String())
+	}
+	if !strings.Contains(listOut.String(), "No remotes configured.") {
+		t.Errorf("no Dolt remote may be configured after --remote=\"\" init, got:\n%s", listOut.String())
+	}
+}
+
 // TestInitReinitLocalConfiguredRemoteWithDoltDataRefuses is the sibling case:
 // sync.remote (again via BD_SYNC_REMOTE, not --remote) points at a bare repo
 // that DOES have refs/dolt/data pushed to it. `bd init --reinit-local` must
