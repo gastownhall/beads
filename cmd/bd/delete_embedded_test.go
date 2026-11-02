@@ -323,6 +323,108 @@ func TestEmbeddedDeleteJSONDependencyErrorContract(t *testing.T) {
 	}
 }
 
+// cascadeContainmentFixture is issue #6301's fixture F: epic A with parent-child
+// children A.1 (open) and A.2 (closed) and grandchild A.1.1 (in_progress); the
+// unrelated epic B (with child B.1) discovered-from A; epic C's child C.1, whose
+// only blocking dependency is on A.1; and standalone S, related to A. Every
+// dependency runs from dependent to target.
+type cascadeContainmentFixture struct {
+	a, a1, a2, a11 string
+	b, b1          string
+	c, c1          string
+	s              string
+}
+
+// seedCascadeContainmentFixture writes one fixture F into the workspace. Each
+// call mints fresh rows, so several subtests can seed their own.
+func seedCascadeContainmentFixture(t *testing.T, bd, dir string) cascadeContainmentFixture {
+	t.Helper()
+	a := bdCreate(t, bd, dir, "Cascade epic A", "--type", "epic")
+	a1 := bdCreate(t, bd, dir, "Cascade A child one", "--type", "task")
+	a2 := bdCreate(t, bd, dir, "Cascade A child two", "--type", "task")
+	a11 := bdCreate(t, bd, dir, "Cascade A grandchild", "--type", "task")
+	b := bdCreate(t, bd, dir, "Cascade epic B", "--type", "epic")
+	b1 := bdCreate(t, bd, dir, "Cascade B child", "--type", "task")
+	c := bdCreate(t, bd, dir, "Cascade epic C", "--type", "epic")
+	c1 := bdCreate(t, bd, dir, "Cascade C child", "--type", "task")
+	s := bdCreate(t, bd, dir, "Cascade standalone S", "--type", "task")
+
+	// A's parent-child tree, the only edges a cascade may follow.
+	bdDepAdd(t, bd, dir, a1.ID, a.ID, "--type", "parent-child")
+	bdDepAdd(t, bd, dir, a2.ID, a.ID, "--type", "parent-child")
+	bdDepAdd(t, bd, dir, a11.ID, a1.ID, "--type", "parent-child")
+	// B's own tree, then the association that used to pull both rows in.
+	bdDepAdd(t, bd, dir, b1.ID, b.ID, "--type", "parent-child")
+	bdDepAdd(t, bd, dir, b.ID, a.ID, "--type", "discovered-from")
+	// C's tree, and the blocking edge that used to take C.1 with it.
+	bdDepAdd(t, bd, dir, c1.ID, c.ID, "--type", "parent-child")
+	bdDepAdd(t, bd, dir, c1.ID, a1.ID, "--type", "blocks")
+	// The association that used to take S with it.
+	bdDepAdd(t, bd, dir, s.ID, a.ID, "--type", "related")
+
+	bdClose(t, bd, dir, a2.ID)
+	bdUpdate(t, bd, dir, a11.ID, "--status", "in_progress")
+
+	return cascadeContainmentFixture{
+		a: a.ID, a1: a1.ID, a2: a2.ID, a11: a11.ID,
+		b: b.ID, b1: b1.ID,
+		c: c.ID, c1: c1.ID,
+		s: s.ID,
+	}
+}
+
+// bdDeleteJSON runs "bd delete" with --json and returns the decoded stdout
+// object. Fatals when the command fails or the stdout is not one JSON object.
+func bdDeleteJSON(t *testing.T, bd, dir string, args ...string) map[string]interface{} {
+	t.Helper()
+	fullArgs := append([]string{"delete", "--json"}, args...)
+	cmd := exec.Command(bd, fullArgs...)
+	cmd.Dir = dir
+	cmd.Env = append(bdEnv(dir), "BD_JSON_ENVELOPE=0")
+	stdout, stderr, err := runCommandBuffers(t, cmd)
+	if err != nil {
+		t.Fatalf("bd delete %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
+	}
+	var out map[string]interface{}
+	if err := json.Unmarshal(stdout.Bytes(), &out); err != nil {
+		t.Fatalf("bd delete %s stdout is not exactly one JSON object: %v\nstdout:\n%s", strings.Join(args, " "), err, stdout.String())
+	}
+	return out
+}
+
+// TestEmbeddedDeleteCascadeFollowsOnlyParentChild pins the containment fix for
+// issue #6301's root cause: a cascade follows parent-child edges only, so an
+// association into another epic (discovered-from, blocks, related) no longer
+// deletes that epic, its children, or a bystander with it. The previews must
+// also name every row the cascade would take — a count alone is what let the
+// 48-row deletion on v1.2.2 look like a bounded one.
+func TestEmbeddedDeleteCascadeFollowsOnlyParentChild(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "tdc")
+
+	t.Run("cascade_deletes_only_the_parent_child_descendants", func(t *testing.T) {
+		fx := seedCascadeContainmentFixture(t, bd, dir)
+
+		out := bdDeleteJSON(t, bd, dir, fx.a, "--cascade", "--force")
+		if got := out["deleted_count"]; got != float64(4) {
+			t.Fatalf("deleted_count = %v, want 4 (A, A.1, A.1.1, A.2 — the parent-child closure only)", got)
+		}
+		for _, id := range []string{fx.a, fx.a1, fx.a11, fx.a2} {
+			bdShowFail(t, bd, dir, id)
+		}
+		for _, id := range []string{fx.b, fx.b1, fx.c, fx.c1, fx.s} {
+			if got := bdShow(t, bd, dir, id); got.ID != id {
+				t.Errorf("expected %s to survive a cascade rooted at %s", id, fx.a)
+			}
+		}
+	})
+}
+
 func TestEmbeddedGetDependencies(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")

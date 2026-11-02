@@ -742,10 +742,13 @@ func TestDeleteIssuesCascadeDeletesNoHistoryWispDependent(t *testing.T) {
 	if err := store.CreateIssue(ctx, noHistory, "tester"); err != nil {
 		t.Fatalf("CreateIssue no-history child: %v", err)
 	}
+	// Parent-child: the cascade this test exercises (a cross-plane dependent
+	// taken with its parent, issue #6301's containment closure) only follows
+	// parent-child edges.
 	if err := store.AddDependency(ctx, &types.Dependency{
 		IssueID:     "mixed-delete-cascade-wisp-child",
 		DependsOnID: "mixed-delete-cascade-parent",
-		Type:        types.DepBlocks,
+		Type:        types.DepParentChild,
 	}, "tester"); err != nil {
 		t.Fatalf("AddDependency wisp child: %v", err)
 	}

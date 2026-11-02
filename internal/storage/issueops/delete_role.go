@@ -97,8 +97,10 @@ func DeleteInTx(ctx context.Context, tx *sql.Tx, req publicops.DeleteRequest) (p
 	}
 
 	// The guard runs only when the request did not already say what to do
-	// about dependents. Under Cascade there is nothing outside the set by
-	// construction, which is why the expansion below is not asked about it.
+	// about dependents. Under Cascade there can still be rows outside the
+	// set — the containment closure follows parent-child edges only (issue
+	// #6301), so an association dependent survives — and the cascade path
+	// computes its own orphan report against the resolved set.
 	//
 	// IT ASKS ABOUT EVERY NAMED ID, IN BOTH PLANES: the leaf says "a NAMED ROW
 	// that some row OUTSIDE the request depends on is refused" with no wisp

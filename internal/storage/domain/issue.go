@@ -119,7 +119,7 @@ type IssueSQLRepository interface {
 	Delete(ctx context.Context, id string, opts IssueTableOpts, actor string) error
 	DeleteByIDs(ctx context.Context, ids []string, opts IssueTableOpts, actor string) (int, error)
 	PartitionWispIDs(ctx context.Context, ids []string) (wispIDs, regularIDs []string, err error)
-	FindAllDependents(ctx context.Context, ids []string) ([]string, error)
+	FindCascadeClosure(ctx context.Context, ids []string) ([]string, error)
 	FindWispDependentsRecursive(ctx context.Context, ids []string) (map[string]bool, error)
 	AffectedByDeletion(ctx context.Context, issueIDs, wispIDs []string) (affectedIssues, affectedWisps []string, err error)
 	// RecomputeIsBlockedAfterDelete recomputes the blocked state of the
@@ -196,7 +196,8 @@ type DeleteIssuesParams struct {
 	// wisp/mol/gc/purge proxied paths and the single-ID convenience wrappers —
 	// cascade expansion follows params.Cascade alone and Force is ignored. When
 	// true, Cascade/Force choose the behavior:
-	//   Cascade=true               → delete all transitive dependents
+	//   Cascade=true               → delete the parent-child descendants (the
+	//                                containment closure, issue #6301)
 	//   Cascade=false, Force=false → refuse if any external dependent exists
 	//                                (*DeleteBlockedError, naming the blockers)
 	//   Cascade=false, Force=true  → orphan external dependents (delete only IDs)

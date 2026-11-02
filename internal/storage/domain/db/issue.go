@@ -1200,8 +1200,8 @@ func (r *issueSQLRepositoryImpl) PartitionWispIDs(ctx context.Context, ids []str
 	return issueops.PartitionWispIDsInTx(ctx, r.runner, ids)
 }
 
-func (r *issueSQLRepositoryImpl) FindAllDependents(ctx context.Context, ids []string) ([]string, error) {
-	set, err := issueops.FindAllDependentsInTx(ctx, r.runner, ids)
+func (r *issueSQLRepositoryImpl) FindCascadeClosure(ctx context.Context, ids []string) ([]string, error) {
+	set, err := issueops.FindCascadeClosureInTx(ctx, r.runner, ids)
 	if err != nil {
 		return nil, err
 	}

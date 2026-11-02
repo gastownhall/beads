@@ -95,15 +95,19 @@ type DeleteRequest struct {
 	// NOW, which an edge added since its read may have grown. A caller that
 	// needs the closure itself pinned wants DryRun's preview and not this.
 	ExpectedVersion *int64
-	// Cascade also deletes the TRANSITIVE CLOSURE of everything that depends
-	// on the named rows, in both planes. It is what `bd delete --cascade`
-	// asks for.
+	// Cascade also deletes the CONTAINMENT CLOSURE of the named rows: their
+	// PARENT-CHILD descendants, transitively, in both planes. It is what `bd
+	// delete --cascade` asks for.
 	//
-	// WITH CASCADE THERE IS NOTHING LEFT TO ORPHAN, by construction: the
-	// closure contains every dependent of every row it deletes. So Cascade
-	// makes Force moot rather than conflicting with it — a request carrying
-	// both is legal and behaves as Cascade, and DeleteResult.Orphaned comes
-	// back empty.
+	// PARENT-CHILD IS THE ONLY EDGE TYPE IT FOLLOWS (issue #6301). A row
+	// joined to the set by a discovered-from, blocks or related edge is a
+	// reference, not containment: it SURVIVES the cascade, loses the edge
+	// that pointed into the deleted set, and is named in
+	// DeleteResult.Orphaned. A cascade that followed associations deleted
+	// an unrelated epic, its children and its bystanders from one request.
+	//
+	// FORCE IS MOOT BESIDE CASCADE rather than conflicting with it — a
+	// request carrying both is legal and behaves as Cascade.
 	//
 	// The traversal is BOUNDED. A closure that grows past the backend's
 	// runaway limit aborts the whole request and deletes nothing rather than
@@ -182,8 +186,10 @@ type DeleteResult struct {
 	// Orphaned names the surviving rows that depended on something this
 	// request deleted, in ascending id order.
 	//
-	// It is populated exactly when the request carried Force without Cascade —
-	// the only mode in which orphaning is possible — and is empty otherwise.
+	// It is populated under Force without Cascade — the direct external
+	// dependents of the named rows — and under Cascade, where it names what
+	// the containment rule left behind: every surviving row joined to the
+	// deleted set by an association edge (discovered-from, blocks, related).
 	// It is also carried on the DependentsOutsideRequestError the unforced
 	// mode returns, so the same fact reaches a caller whichever answer it got.
 	//

@@ -149,8 +149,11 @@ type DeletionSet struct {
 }
 
 // ResolveDeletionSetInTx decides WHICH rows a delete removes: the named ids,
-// plus — under cascade — the transitive closure of everything that depends on
-// them, in BOTH planes.
+// plus — under cascade — the CONTAINMENT closure of the named ids: their
+// parent-child descendants, transitively, in BOTH planes. That is the only
+// edge type a cascade follows (issue #6301); a row joined to the set by a
+// discovered-from, blocks or related edge is a reference, not containment,
+// and stays outside it.
 //
 // THE CASCADE IS ROOTED AT EVERY NAMED ID, WISPS INCLUDED. Rooting it at the
 // durable half is what made `bd wisp gc` (which hardcodes cascade) silently
@@ -160,7 +163,7 @@ type DeletionSet struct {
 func ResolveDeletionSetInTx(ctx context.Context, tx DBTX, ids []string, cascade bool) (DeletionSet, error) {
 	all := append([]string(nil), ids...)
 	if cascade {
-		closure, err := FindAllDependentsInTx(ctx, tx, ids)
+		closure, err := FindCascadeClosureInTx(ctx, tx, ids)
 		if err != nil {
 			return DeletionSet{}, fmt.Errorf("expand cascade: %w", err)
 		}
@@ -463,12 +466,23 @@ func ExistingIssueIDsInTableInTx(ctx context.Context, tx DBTX, table string, ids
 	return actual, nil
 }
 
-// findAllDependentsRecursiveInTx finds all issues that depend on the given
-// issues, recursively. Uses batched IN-clause queries. Traversal is capped
-// at maxRecursiveResults total discovered IDs.
+// FindCascadeClosureInTx resolves the containment closure a cascade deletes:
+// every named root plus the rows that reach one of them through PARENT-CHILD
+// edges, child pointing at parent, in BOTH planes. Uses batched IN-clause
+// queries. Traversal is capped at maxRecursiveResults total discovered IDs.
+//
+// IT FOLLOWS ONLY PARENT-CHILD EDGES, by design (issue #6301): an association
+// into another epic — discovered-from, blocks, related — is a reference, not
+// containment, and a cascade that followed it deleted that epic, its children
+// and its bystanders from one `bd delete --cascade`. Surviving dependents on
+// other edge types keep their rows, lose the edges that pointed into the
+// deleted set, and are reported as orphans by the callers. Non-cascade
+// dependent detection (ExternalDependentsBySourceInTx) deliberately still
+// inspects EVERY edge type: the unforced guard must refuse over an
+// association, not only over containment.
 //
 //nolint:gosec // G201: inClause contains only ? placeholders
-func FindAllDependentsInTx(ctx context.Context, tx DBTX, ids []string) (map[string]bool, error) {
+func FindCascadeClosureInTx(ctx context.Context, tx DBTX, ids []string) (map[string]bool, error) {
 	result := make(map[string]bool)
 	for _, id := range ids {
 		result[id] = true
@@ -490,9 +504,11 @@ func FindAllDependentsInTx(ctx context.Context, tx DBTX, ids []string) (map[stri
 
 		inClause, args := buildSQLInClause(batch)
 		for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
+			// args and the type predicate bind as one list: the IN-clause
+			// placeholders first, then the edge type.
 			rows, err := tx.QueryContext(ctx,
-				fmt.Sprintf(`SELECT issue_id FROM %s WHERE %s`, depTable, depTargetIn("", inClause)),
-				args...)
+				fmt.Sprintf(`SELECT issue_id FROM %s WHERE %s AND type = ?`, depTable, depTargetIn("", inClause)),
+				append(args, string(types.DepParentChild))...)
 			if err != nil {
 				if optionalBlockedTable(depTable) && isTableNotExistError(err) {
 					continue

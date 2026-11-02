@@ -282,17 +282,20 @@ func RunDeleterForceOrphansDependents(t *testing.T, ctx context.Context, fixture
 // RunDeleterCascadeDeletesTheClosure pins the other mode (issueops/deleter.go,
 // DeleteRequest.Cascade) over a chain rather than a single edge, because
 // "transitive" is the whole claim and a one-edge fixture cannot tell a
-// transitive expansion from a direct one. It also pins the interaction the leaf
-// spells out: a request carrying BOTH Cascade and Force is legal and behaves as
-// Cascade.
+// transitive expansion from a direct one. The chain is PARENT-CHILD edges —
+// after issue #6301 those are the only edges a cascade follows; the
+// association-survival half of the containment rule is pinned by
+// RunDeleterCascadeStopsAtAssociationEdges. This case also pins the
+// interaction the leaf spells out: a request carrying BOTH Cascade and Force
+// is legal and behaves as Cascade.
 func RunDeleterCascadeDeletesTheClosure(t *testing.T, ctx context.Context, fixture DeleterFixture) {
 	t.Helper()
 	root := deleterSeedIssue(t, ctx, fixture, "casc", "root")
 	middle := deleterSeedIssue(t, ctx, fixture, "casc", "middle")
 	leaf := deleterSeedIssue(t, ctx, fixture, "casc", "leaf")
 	bystander := deleterSeedIssue(t, ctx, fixture, "casc", "bystander")
-	deleterAddEdge(t, ctx, fixture, middle, root)
-	deleterAddEdge(t, ctx, fixture, leaf, middle)
+	deleterAddParentChildEdge(t, ctx, fixture, middle, root)
+	deleterAddParentChildEdge(t, ctx, fixture, leaf, middle)
 
 	result := deleterDelete(t, ctx, fixture, publicops.DeleteRequest{
 		IDs:     []string{root},
@@ -300,7 +303,7 @@ func RunDeleterCascadeDeletesTheClosure(t *testing.T, ctx context.Context, fixtu
 		Force:   true,
 	})
 	if result.Deleted != 3 {
-		t.Errorf("Deleted = %d, want 3 — the closure is root, its dependent and ITS dependent", result.Deleted)
+		t.Errorf("Deleted = %d, want 3 — the closure is root, its child and ITS child", result.Deleted)
 	}
 	if len(result.Orphaned) != 0 {
 		t.Errorf("Orphaned = %v, want empty: a cascade leaves nothing outside the set to orphan", result.Orphaned)
@@ -319,16 +322,18 @@ func RunDeleterCascadeDeletesTheClosure(t *testing.T, ctx context.Context, fixtu
 // it. `bd wisp gc` deletes wisps with cascade hardcoded, so routine
 // housekeeping runs through this quadrant.
 //
-// The chain is two edges deep on purpose, and its second link is durable, so
-// this cannot be satisfied by a body that merely follows one cross-plane edge.
+// The chain is two PARENT-CHILD edges deep on purpose (issue #6301: the only
+// type a cascade follows, across the plane boundary like any other), and its
+// second link is durable, so this cannot be satisfied by a body that merely
+// follows one cross-plane edge.
 func RunDeleterCascadeFromAWispRootDeletesTheClosure(t *testing.T, ctx context.Context, fixture DeleterFixture) {
 	t.Helper()
 	root := deleterSeedWisp(t, ctx, fixture, "wcasc", "root")
 	dependent := deleterSeedIssue(t, ctx, fixture, "wcasc", "dependent")
 	grandchild := deleterSeedIssue(t, ctx, fixture, "wcasc", "grandchild")
 	bystander := deleterSeedIssue(t, ctx, fixture, "wcasc", "bystander")
-	deleterAddEdge(t, ctx, fixture, dependent, root)
-	deleterAddEdge(t, ctx, fixture, grandchild, dependent)
+	deleterAddParentChildEdge(t, ctx, fixture, dependent, root)
+	deleterAddParentChildEdge(t, ctx, fixture, grandchild, dependent)
 
 	result := deleterDelete(t, ctx, fixture, publicops.DeleteRequest{
 		IDs:     []string{root},
@@ -336,7 +341,7 @@ func RunDeleterCascadeFromAWispRootDeletesTheClosure(t *testing.T, ctx context.C
 		Force:   true,
 	})
 	if result.Deleted != 3 {
-		t.Errorf("Deleted = %d, want 3 — the wisp, the durable row that depends on it, and ITS dependent", result.Deleted)
+		t.Errorf("Deleted = %d, want 3 — the wisp, the durable row that is its child, and THAT row's child", result.Deleted)
 	}
 	deleterAssertWispRows(t, ctx, fixture, 0, root)
 	deleterAssertIssueRows(t, ctx, fixture, 0, dependent, grandchild)
@@ -513,7 +518,8 @@ func RunDeleterCountsCrossPlaneEdgesItRemoves(t *testing.T, ctx context.Context,
 // a neighbor's description saying a LIVE issue is gone.
 //
 // The fixture is the cheapest arrangement in which the two sets can differ: a
-// wisp root, a durable row reachable only through it, and a third row that the
+// wisp root, a durable row reachable only through it by a PARENT-CHILD edge
+// (the only kind a cascade descends, issue #6301), and a third row that the
 // durable one DEPENDS ON — a graph neighbor of the deletion set (in scope for
 // the rewrite) that is never in the closure, so it always survives.
 func RunDeleterNeverCallsALiveRowDeleted(t *testing.T, ctx context.Context, fixture DeleterFixture) {
@@ -524,7 +530,7 @@ func RunDeleterNeverCallsALiveRowDeleted(t *testing.T, ctx context.Context, fixt
 	survivor := deleterIssue(fixture, "live", "survivor", false)
 	survivor.Description = "unblocks " + dependent + ", tracked under " + root
 	deleterSeed(t, ctx, fixture, survivor)
-	deleterAddEdge(t, ctx, fixture, dependent, root)
+	deleterAddParentChildEdge(t, ctx, fixture, dependent, root)
 	deleterAddEdge(t, ctx, fixture, dependent, survivor.ID)
 
 	deleterDelete(t, ctx, fixture, publicops.DeleteRequest{

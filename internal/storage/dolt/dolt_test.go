@@ -1278,10 +1278,12 @@ func TestDeleteIssuesBatchPerformance(t *testing.T) {
 			t.Fatalf("failed to create issue %d: %v", i, err)
 		}
 		if i > 1 {
+			// Parent-child: after issue #6301 a cascade follows only
+			// parent-child edges, so the chain must be built from them.
 			dep := &types.Dependency{
 				IssueID:     fmt.Sprintf("batch-del-%d", i),
 				DependsOnID: fmt.Sprintf("batch-del-%d", i-1),
-				Type:        types.DepBlocks,
+				Type:        types.DepParentChild,
 			}
 			if err := store.AddDependency(ctx, dep, "tester"); err != nil {
 				t.Fatalf("failed to add dependency %d: %v", i, err)
@@ -1289,7 +1291,7 @@ func TestDeleteIssuesBatchPerformance(t *testing.T) {
 		}
 	}
 
-	// Cascade delete from the root — should delete all 100 issues
+	// Cascade delete from the root — should delete all the chained issues
 	result, err := store.DeleteIssues(ctx, []string{"batch-del-1"}, true, false, false)
 	if err != nil {
 		t.Fatalf("batch cascade delete failed: %v", err)
@@ -1411,9 +1413,11 @@ func TestDeleteIssuesDryRun(t *testing.T) {
 			t.Fatalf("failed to create issue: %v", err)
 		}
 		if i > 1 {
+			// Parent-child: the cascade closure this dry run counts is the
+			// parent-child chain only (issue #6301).
 			dep := &types.Dependency{
 				IssueID: fmt.Sprintf("dry-%d", i), DependsOnID: fmt.Sprintf("dry-%d", i-1),
-				Type: types.DepBlocks,
+				Type: types.DepParentChild,
 			}
 			if err := store.AddDependency(ctx, dep, "tester"); err != nil {
 				t.Fatalf("failed to add dep: %v", err)
@@ -1538,8 +1542,10 @@ func TestDeleteIssuesBatchBoundary(t *testing.T) {
 					t.Fatalf("failed to create issue %s: %v", id, err)
 				}
 				if i > 0 {
+					// Parent-child: the cascade this boundary test counts
+					// crosses batches of parent-child edges only (issue #6301).
 					dep := &types.Dependency{
-						IssueID: id, DependsOnID: ids[i-1], Type: types.DepBlocks,
+						IssueID: id, DependsOnID: ids[i-1], Type: types.DepParentChild,
 					}
 					if err := store.AddDependency(ctx, dep, "tester"); err != nil {
 						t.Fatalf("failed to add dep: %v", err)
@@ -1589,13 +1595,13 @@ func TestDeleteIssuesCircularDeps(t *testing.T) {
 			t.Fatalf("failed to create %s: %v", id, err)
 		}
 	}
-	// B depends on A, C depends on B (these two are acyclic, use normal API)
+	// B is a child of A, C a child of B (these two are acyclic, use normal API)
 	for _, d := range []struct{ from, to string }{
 		{"circ-b", "circ-a"},
 		{"circ-c", "circ-b"},
 	} {
 		dep := &types.Dependency{
-			IssueID: d.from, DependsOnID: d.to, Type: types.DepBlocks,
+			IssueID: d.from, DependsOnID: d.to, Type: types.DepParentChild,
 		}
 		if err := store.AddDependency(ctx, dep, "tester"); err != nil {
 			t.Fatalf("failed to add dep %s->%s: %v", d.from, d.to, err)
@@ -1606,7 +1612,7 @@ func TestDeleteIssuesCircularDeps(t *testing.T) {
 	// ability to handle cycles that may exist in the database, not AddDependency.
 	if _, err := store.execContext(ctx, `
 		INSERT INTO dependencies (id, issue_id, depends_on_issue_id, type, created_at, created_by, metadata)
-		VALUES (UUID(), ?, ?, 'blocks', NOW(), 'tester', '{}')
+		VALUES (UUID(), ?, ?, 'parent-child', NOW(), 'tester', '{}')
 	`, "circ-a", "circ-c"); err != nil {
 		t.Fatalf("failed to insert cycle-completing dep circ-a->circ-c: %v", err)
 	}
@@ -1655,8 +1661,10 @@ func TestDeleteIssuesDiamondDeps(t *testing.T) {
 		{"dia-bottom", "dia-right"},
 	}
 	for _, d := range deps {
+		// Parent-child: the diamond this cascade walks is built from the only
+		// edge type a cascade follows (issue #6301).
 		dep := &types.Dependency{
-			IssueID: d.from, DependsOnID: d.to, Type: types.DepBlocks,
+			IssueID: d.from, DependsOnID: d.to, Type: types.DepParentChild,
 		}
 		if err := store.AddDependency(ctx, dep, "tester"); err != nil {
 			t.Fatalf("failed to add dep: %v", err)

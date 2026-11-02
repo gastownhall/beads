@@ -11,7 +11,7 @@ func (s *testSuite) TestIssueUseCase_Delete() {
 	s.Run("DeleteIssue", func() {
 		s.Run("EmptyIDReturnsError", s.iucDeleteEmptyID)
 		s.Run("RemovesRowAndDeps", s.iucDeleteRemovesRowAndDeps)
-		s.Run("CascadesAcrossDepTypes", s.iucDeleteCascades)
+		s.Run("CascadesThroughParentChildEdges", s.iucDeleteCascades)
 		s.Run("RewritesTextReferencesInNeighbors", s.iucDeleteRewritesRefs)
 		s.Run("RecomputesIsBlockedOnAffected", s.iucDeleteRecomputesBlocked)
 	})
@@ -30,7 +30,7 @@ func (s *testSuite) TestIssueUseCase_Delete() {
 	})
 	s.Run("DeleteWisp", func() {
 		s.Run("DispatchesToWispsTable", s.iucDeleteWispDispatches)
-		s.Run("CleansAuxiliaryTablesAndCascadesAcrossDependencyTypes", s.iucDeleteWispCleansAuxiliaryTablesAndCascadesAcrossDependencyTypes)
+		s.Run("CleansAuxiliaryTablesAndCascades", s.iucDeleteWispCleansAuxiliaryTablesAndCascades)
 		s.Run("RewritesTextReferencesInWisps", s.iucDeleteWispRewritesTextReferencesInWisps)
 	})
 	s.Run("PreviewDelete", func() {
@@ -69,18 +69,28 @@ func (s *testSuite) iucDeleteRemovesRowAndDeps() {
 	s.Equal(0, rows)
 }
 
+// iucDeleteCascades pins the containment rule's deleted half (issue #6301):
+// the cascade takes the parent-child descendants of the root, and a blocks
+// edge into the root is a reference, not containment — the row behind it
+// survives with its own subtree intact.
 func (s *testSuite) iucDeleteCascades() {
 	s.seedOpenIssue("bd-iuc-cas-root")
 	s.seedOpenIssue("bd-iuc-cas-mid")
 	s.seedOpenIssue("bd-iuc-cas-leaf")
+	s.seedOpenIssue("bd-iuc-cas-ref")
+	s.seedOpenIssue("bd-iuc-cas-ref-kid")
 	s.Require().NoError(s.depRepo().Insert(s.Ctx(),
-		newDep("bd-iuc-cas-mid", "bd-iuc-cas-root", types.DepBlocks), "tester", domain.DepInsertOpts{}))
+		newDep("bd-iuc-cas-mid", "bd-iuc-cas-root", types.DepParentChild), "tester", domain.DepInsertOpts{}))
 	s.Require().NoError(s.depRepo().Insert(s.Ctx(),
-		newDep("bd-iuc-cas-leaf", "bd-iuc-cas-mid", types.DepBlocks), "tester", domain.DepInsertOpts{}))
+		newDep("bd-iuc-cas-leaf", "bd-iuc-cas-mid", types.DepParentChild), "tester", domain.DepInsertOpts{}))
+	s.Require().NoError(s.depRepo().Insert(s.Ctx(),
+		newDep("bd-iuc-cas-ref", "bd-iuc-cas-root", types.DepBlocks), "tester", domain.DepInsertOpts{}))
+	s.Require().NoError(s.depRepo().Insert(s.Ctx(),
+		newDep("bd-iuc-cas-ref-kid", "bd-iuc-cas-ref", types.DepParentChild), "tester", domain.DepInsertOpts{}))
 
 	res, err := s.issueUseCase().DeleteIssue(s.Ctx(), "bd-iuc-cas-root", "tester")
 	s.Require().NoError(err)
-	s.Equal(3, res.DeletedCount, "root + mid + leaf")
+	s.Equal(3, res.DeletedCount, "root + the parent-child chain only")
 
 	for _, id := range []string{"bd-iuc-cas-root", "bd-iuc-cas-mid", "bd-iuc-cas-leaf"} {
 		var rows int
@@ -88,6 +98,10 @@ func (s *testSuite) iucDeleteCascades() {
 			"SELECT COUNT(*) FROM issues WHERE id = ?", id).Scan(&rows))
 		s.Equal(0, rows, "%s should be deleted", id)
 	}
+	s.Equal(1, s.issueRowCount("bd-iuc-cas-ref"),
+		"a blocks dependent is not a cascade descendant")
+	s.Equal(1, s.issueRowCount("bd-iuc-cas-ref-kid"),
+		"what hangs off the surviving dependent stays with it")
 }
 
 func (s *testSuite) iucDeleteRewritesRefs() {
@@ -109,6 +123,10 @@ func (s *testSuite) iucDeleteRewritesRefs() {
 		"neighbor description should be rewritten; got %q", updated.Description)
 }
 
+// iucDeleteRecomputesBlocked pins the survivor's half of a cascade over a
+// blocks edge (issue #6301): the depender is a reference, not a descendant, so
+// it survives the cascade — and the deleting transaction must settle it
+// unblocked rather than leave it blocked by a row that no longer exists.
 func (s *testSuite) iucDeleteRecomputesBlocked() {
 	s.seedOpenIssue("bd-iuc-rib-blocker")
 	s.seedOpenIssue("bd-iuc-rib-depender")
@@ -118,7 +136,14 @@ func (s *testSuite) iucDeleteRecomputesBlocked() {
 
 	res, err := s.issueUseCase().DeleteIssue(s.Ctx(), "bd-iuc-rib-blocker", "tester")
 	s.Require().NoError(err)
-	s.Equal(2, res.DeletedCount, "blocker + depender (cascade)")
+	s.Equal(1, res.DeletedCount, "a blocks dependent is not a cascade descendant")
+
+	s.Equal(1, s.issueRowCount("bd-iuc-rib-depender"),
+		"the depender survives a cascade that no longer follows blocks edges")
+	var blocked int
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT is_blocked FROM issues WHERE id = ?", "bd-iuc-rib-depender").Scan(&blocked))
+	s.Equal(0, blocked, "the surviving depender is settled unblocked in the same transaction")
 }
 
 func (s *testSuite) iucDeleteIssuesEmpty() {
@@ -132,8 +157,10 @@ func (s *testSuite) iucDeleteIssuesDryRun() {
 	s.seedOpenIssue("bd-iuc-dry-a")
 	s.seedOpenIssue("bd-iuc-dry-b")
 	s.seedOpenWisp("bd-iuc-dry-c")
+	// Parent-child both links: after issue #6301 a dry run's closure counts
+	// exactly the rows the parent-child chain reaches.
 	s.Require().NoError(s.depRepo().Insert(s.Ctx(),
-		newDep("bd-iuc-dry-b", "bd-iuc-dry-a", types.DepBlocks), "tester", domain.DepInsertOpts{}))
+		newDep("bd-iuc-dry-b", "bd-iuc-dry-a", types.DepParentChild), "tester", domain.DepInsertOpts{}))
 	s.Require().NoError(s.depRepo().Insert(s.Ctx(),
 		newDep("bd-iuc-dry-c", "bd-iuc-dry-b", types.DepParentChild), "tester",
 		domain.DepInsertOpts{UseWispsTable: true}))
@@ -258,15 +285,18 @@ func (s *testSuite) iucDeleteSkipsRefsWhenFlagOff() {
 }
 
 // seedDependentChain seeds root <- mid <- leaf (mid depends on root, leaf on
-// mid) for the cascade-policy combos.
-func (s *testSuite) seedDependentChain(root, mid, leaf string) {
+// mid) for the cascade-policy combos. kind is the edge type the chain is built
+// from: the policy arms keep DepBlocks (an external dependent of any type
+// blocks or is orphaned), while the cascade arm needs DepParentChild — after
+// issue #6301 those are the only edges a cascade descends through.
+func (s *testSuite) seedDependentChain(root, mid, leaf string, kind types.DependencyType) {
 	for _, id := range []string{root, mid, leaf} {
 		s.seedOpenIssue(id)
 	}
 	s.Require().NoError(s.depRepo().Insert(s.Ctx(),
-		newDep(mid, root, types.DepBlocks), "tester", domain.DepInsertOpts{}))
+		newDep(mid, root, kind), "tester", domain.DepInsertOpts{}))
 	s.Require().NoError(s.depRepo().Insert(s.Ctx(),
-		newDep(leaf, mid, types.DepBlocks), "tester", domain.DepInsertOpts{}))
+		newDep(leaf, mid, kind), "tester", domain.DepInsertOpts{}))
 }
 
 func (s *testSuite) issueRowCount(id string) int {
@@ -281,7 +311,7 @@ func (s *testSuite) issueRowCount(id string) int {
 // ignored — no refusal, no orphan reporting. Other proxied callers (wisp/mol/
 // gc/purge) rely on this.
 func (s *testSuite) iucCascadePolicyLegacy() {
-	s.seedDependentChain("bd-iuc-cpl-root", "bd-iuc-cpl-mid", "bd-iuc-cpl-leaf")
+	s.seedDependentChain("bd-iuc-cpl-root", "bd-iuc-cpl-mid", "bd-iuc-cpl-leaf", types.DepBlocks)
 
 	res, err := s.issueUseCase().DeleteIssues(s.Ctx(), domain.DeleteIssuesParams{
 		IDs: []string{"bd-iuc-cpl-root"},
@@ -296,7 +326,10 @@ func (s *testSuite) iucCascadePolicyLegacy() {
 }
 
 func (s *testSuite) iucCascadePolicyCascade() {
-	s.seedDependentChain("bd-iuc-cpc-root", "bd-iuc-cpc-mid", "bd-iuc-cpc-leaf")
+	// Parent-child chain: after issue #6301 a cascade sweeps the parent-child
+	// descendants, so the whole chain is in the closure and nothing survives
+	// to orphan.
+	s.seedDependentChain("bd-iuc-cpc-root", "bd-iuc-cpc-mid", "bd-iuc-cpc-leaf", types.DepParentChild)
 
 	res, err := s.issueUseCase().DeleteIssues(s.Ctx(), domain.DeleteIssuesParams{
 		IDs:                  []string{"bd-iuc-cpc-root"},
@@ -304,7 +337,7 @@ func (s *testSuite) iucCascadePolicyCascade() {
 		EnforceCascadePolicy: true,
 	}, "tester")
 	s.Require().NoError(err)
-	s.Equal(3, res.DeletedCount, "cascade sweeps all transitive dependents")
+	s.Equal(3, res.DeletedCount, "cascade sweeps the transitive parent-child descendants")
 	s.Empty(res.OrphanedIssues, "cascade path reports no orphans")
 	for _, id := range []string{"bd-iuc-cpc-root", "bd-iuc-cpc-mid", "bd-iuc-cpc-leaf"} {
 		s.Equal(0, s.issueRowCount(id), "%s should be deleted", id)
@@ -312,7 +345,7 @@ func (s *testSuite) iucCascadePolicyCascade() {
 }
 
 func (s *testSuite) iucCascadePolicyRefuses() {
-	s.seedDependentChain("bd-iuc-cpr-root", "bd-iuc-cpr-mid", "bd-iuc-cpr-leaf")
+	s.seedDependentChain("bd-iuc-cpr-root", "bd-iuc-cpr-mid", "bd-iuc-cpr-leaf", types.DepBlocks)
 
 	res, err := s.issueUseCase().DeleteIssues(s.Ctx(), domain.DeleteIssuesParams{
 		IDs:                  []string{"bd-iuc-cpr-root"},
@@ -341,7 +374,7 @@ func (s *testSuite) iucCascadePolicyRefuses() {
 }
 
 func (s *testSuite) iucCascadePolicyForceOrphans() {
-	s.seedDependentChain("bd-iuc-cpf-root", "bd-iuc-cpf-mid", "bd-iuc-cpf-leaf")
+	s.seedDependentChain("bd-iuc-cpf-root", "bd-iuc-cpf-mid", "bd-iuc-cpf-leaf", types.DepBlocks)
 
 	res, err := s.issueUseCase().DeleteIssues(s.Ctx(), domain.DeleteIssuesParams{
 		IDs:                  []string{"bd-iuc-cpf-root"},
@@ -385,7 +418,11 @@ func (s *testSuite) iucDeleteWispDispatches() {
 	s.Equal(1, issueRows, "issues row with shadowed ID must remain")
 }
 
-func (s *testSuite) iucDeleteWispCleansAuxiliaryTablesAndCascadesAcrossDependencyTypes() {
+// iucDeleteWispCleansAuxiliaryTablesAndCascades is the wisp-plane sibling of
+// iucDeleteCascades: the chain is parent-child both links (issue #6301 — the
+// only edges a cascade descends through), and the deletion must still reach
+// every auxiliary table of every row it takes.
+func (s *testSuite) iucDeleteWispCleansAuxiliaryTablesAndCascades() {
 	root := "bd-iuc-wisp-cascade-root"
 	mid := "bd-iuc-wisp-cascade-mid"
 	leaf := "bd-iuc-wisp-cascade-leaf"
@@ -393,7 +430,7 @@ func (s *testSuite) iucDeleteWispCleansAuxiliaryTablesAndCascadesAcrossDependenc
 		s.seedOpenWisp(id)
 	}
 	s.Require().NoError(s.depRepo().Insert(s.Ctx(),
-		newDep(mid, root, types.DepBlocks), "tester", domain.DepInsertOpts{UseWispsTable: true}))
+		newDep(mid, root, types.DepParentChild), "tester", domain.DepInsertOpts{UseWispsTable: true}))
 	s.Require().NoError(s.depRepo().Insert(s.Ctx(),
 		newDep(leaf, mid, types.DepParentChild), "tester", domain.DepInsertOpts{UseWispsTable: true}))
 	s.Require().NoError(s.labelRepo().Insert(s.Ctx(),
@@ -404,7 +441,7 @@ func (s *testSuite) iucDeleteWispCleansAuxiliaryTablesAndCascadesAcrossDependenc
 
 	res, err := s.issueUseCase().DeleteWisp(s.Ctx(), root, "tester")
 	s.Require().NoError(err)
-	s.Equal(3, res.DeletedCount, "root plus both transitive dependents")
+	s.Equal(3, res.DeletedCount, "root plus both parent-child descendants")
 
 	for _, id := range []string{root, mid, leaf} {
 		var wispRows, labelRows, eventRows, dependencyRows int

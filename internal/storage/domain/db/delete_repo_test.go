@@ -21,10 +21,11 @@ func (s *testSuite) TestIssueSQLRepositoryDelete() {
 		s.Run("EmptyInputReturnsNil", s.issuePartitionEmpty)
 		s.Run("SplitsByTable", s.issuePartitionSplits)
 	})
-	s.Run("FindAllDependents", func() {
-		s.Run("EmptyInputReturnsEmpty", s.issueFindAllDependentsEmpty)
-		s.Run("TransitiveAcrossDepTypes", s.issueFindAllDependentsTransitive)
-		s.Run("IncludesRootIDs", s.issueFindAllDependentsIncludesRoots)
+	s.Run("FindCascadeClosure", func() {
+		s.Run("EmptyInputReturnsEmpty", s.issueFindCascadeClosureEmpty)
+		s.Run("TransitiveAcrossParentChildEdges", s.issueFindCascadeClosureTransitive)
+		s.Run("IgnoresAssociationEdges", s.issueFindCascadeClosureIgnoresAssociations)
+		s.Run("IncludesRootIDs", s.issueFindCascadeClosureIncludesRoots)
 	})
 	s.Run("AffectedByDeletion", func() {
 		s.Run("EmptyInputReturnsEmpty", s.issueAffectedByDeletionEmpty)
@@ -177,37 +178,67 @@ func (s *testSuite) issuePartitionSplits() {
 		"unknown IDs partition as permanent (treated as non-wisp by helper)")
 }
 
-func (s *testSuite) issueFindAllDependentsEmpty() {
-	out, err := s.issueRepo().FindAllDependents(s.Ctx(), nil)
+func (s *testSuite) issueFindCascadeClosureEmpty() {
+	out, err := s.issueRepo().FindCascadeClosure(s.Ctx(), nil)
 	s.Require().NoError(err)
 	s.Empty(out)
 }
 
-func (s *testSuite) issueFindAllDependentsTransitive() {
+func (s *testSuite) issueFindCascadeClosureTransitive() {
 	s.seedIssueRow("bd-del-cas-root")
 	s.seedIssueRow("bd-del-cas-mid")
 	s.seedIssueRow("bd-del-cas-leaf")
 
 	r := s.depRepo()
 	s.Require().NoError(r.Insert(s.Ctx(),
-		newDep("bd-del-cas-mid", "bd-del-cas-root", types.DepBlocks), "tester", domain.DepInsertOpts{}))
+		newDep("bd-del-cas-mid", "bd-del-cas-root", types.DepParentChild), "tester", domain.DepInsertOpts{}))
 	s.Require().NoError(r.Insert(s.Ctx(),
 		newDep("bd-del-cas-leaf", "bd-del-cas-mid", types.DepParentChild), "tester", domain.DepInsertOpts{}))
 
-	out, err := s.issueRepo().FindAllDependents(s.Ctx(), []string{"bd-del-cas-root"})
+	out, err := s.issueRepo().FindCascadeClosure(s.Ctx(), []string{"bd-del-cas-root"})
 	s.Require().NoError(err)
 	got := make(map[string]bool, len(out))
 	for _, id := range out {
 		got[id] = true
 	}
 	s.True(got["bd-del-cas-root"], "root included")
-	s.True(got["bd-del-cas-mid"], "direct dependent via blocks included")
-	s.True(got["bd-del-cas-leaf"], "transitive dependent via parent-child included")
+	s.True(got["bd-del-cas-mid"], "direct child included")
+	s.True(got["bd-del-cas-leaf"], "transitive grandchild included")
+	s.Len(out, 3, "the parent-child closure and nothing else")
 }
 
-func (s *testSuite) issueFindAllDependentsIncludesRoots() {
+// issueFindCascadeClosureIgnoresAssociations pins the containment rule
+// (issue #6301): a discovered-from, blocks or related edge into the deleted
+// set is a reference, not containment, so the row behind it survives a
+// cascade — and so does its own parent-child child, reachable only through
+// an edge the closure never followed.
+func (s *testSuite) issueFindCascadeClosureIgnoresAssociations() {
+	s.seedIssueRow("bd-del-cas-ref-root")
+	for _, id := range []string{"bd-del-cas-disc", "bd-del-cas-disc-kid",
+		"bd-del-cas-blocked", "bd-del-cas-related"} {
+		s.seedIssueRow(id)
+	}
+
+	r := s.depRepo()
+	for _, dep := range []struct{ source, target string; kind types.DependencyType }{
+		{"bd-del-cas-disc", "bd-del-cas-ref-root", types.DepDiscoveredFrom},
+		{"bd-del-cas-disc-kid", "bd-del-cas-disc", types.DepParentChild},
+		{"bd-del-cas-blocked", "bd-del-cas-ref-root", types.DepBlocks},
+		{"bd-del-cas-related", "bd-del-cas-ref-root", types.DepRelated},
+	} {
+		s.Require().NoError(r.Insert(s.Ctx(),
+			newDep(dep.source, dep.target, dep.kind), "tester", domain.DepInsertOpts{}))
+	}
+
+	out, err := s.issueRepo().FindCascadeClosure(s.Ctx(), []string{"bd-del-cas-ref-root"})
+	s.Require().NoError(err)
+	s.Equal([]string{"bd-del-cas-ref-root"}, out,
+		"association edges and everything behind them stay outside the closure")
+}
+
+func (s *testSuite) issueFindCascadeClosureIncludesRoots() {
 	s.seedIssueRow("bd-del-cas-solo")
-	out, err := s.issueRepo().FindAllDependents(s.Ctx(), []string{"bd-del-cas-solo"})
+	out, err := s.issueRepo().FindCascadeClosure(s.Ctx(), []string{"bd-del-cas-solo"})
 	s.Require().NoError(err)
 	s.Equal([]string{"bd-del-cas-solo"}, out)
 }

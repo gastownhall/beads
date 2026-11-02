@@ -446,7 +446,9 @@ func TestEmbeddedIfRevisionCascadeDelete(t *testing.T) {
 
 	parent := bdCreate(t, bd, dir, "Cascade parent", "--type", "task")
 	child := bdCreate(t, bd, dir, "Cascade child", "--type", "task")
-	bdDepAdd(t, bd, dir, child.ID, parent.ID)
+	// Parent-child: after issue #6301 the cascade this test drives only takes
+	// parent-child descendants, and the final successful delete must take both.
+	bdDepAdd(t, bd, dir, child.ID, parent.ID, "--type", "parent-child")
 
 	rev0 := bdShowRevision(t, bd, dir, parent.ID)
 	bdUpdate(t, bd, dir, parent.ID, "--notes", "bump")

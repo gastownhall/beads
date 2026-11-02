@@ -169,8 +169,10 @@ func deleteInUOW(ctx context.Context, uw UnitOfWork, req publicops.DeleteRequest
 	}
 
 	// The guard runs only when the request did not already say what to do
-	// about dependents. Under Cascade there is nothing outside the set by
-	// construction.
+	// about dependents. Under Cascade there can still be rows outside the
+	// set — the containment closure follows parent-child edges only (issue
+	// #6301), so an association dependent survives — and the cascade path
+	// computes its own orphan report against the resolved set.
 	if !req.Cascade {
 		idSet := make(map[string]bool, len(req.IDs))
 		for _, id := range req.IDs {
