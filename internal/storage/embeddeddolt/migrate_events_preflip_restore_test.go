@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"sort"
 	"strings"
@@ -385,5 +386,56 @@ func TestEmbeddedIgnoredMigration0031SkipsDeletedIssues(t *testing.T) {
 		if !strings.Contains(notice.String(), line) {
 			t.Fatalf("restore notice = %q, want it to report %q", notice.String(), line)
 		}
+	}
+}
+
+// eventsFlipDropMessage is the message main migration 0062 commits its drop
+// under (pinned to the frozen 0062 bytes in the schema package).
+const eventsFlipDropMessage = "schema: drop versioned events table for ignored-plane flip (bd-red8u)"
+
+// TestEmbeddedIgnoredMigration0031WithoutSourceIsANoOp pins the clones with
+// nothing to restore: one whose history never carried versioned events (no
+// drop commit), and one whose drop commit's first parent holds no events
+// table. Both record 0031, keep the live table as it was, and print nothing.
+func TestEmbeddedIgnoredMigration0031WithoutSourceIsANoOp(t *testing.T) {
+	requireEmbedded(t)
+
+	for name, addDrop := range map[string]bool{"no drop commit": false, "parent without events": true} {
+		t.Run(name, func(t *testing.T) {
+			ctx := t.Context()
+			dataDir := seedMainSchemaAt(t, ctx, schema.LatestVersion())
+			conn, closeConn := openPinnedConn(t, ctx, dataDir)
+			defer closeConn()
+			if _, err := schema.MigrateUp(ctx, conn); err != nil {
+				t.Fatalf("MigrateUp (fresh): %v", err)
+			}
+			execFrozenGuard(t, ctx, conn, `
+INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) VALUES
+  ('post-1', 'after the flip', '', '', '', '', 'open', 2, 'task');
+INSERT INTO events (issue_id, event_type, actor, created_at, id) VALUES
+  ('post-1', 'created', 'erin', '2026-09-01 10:00:00', 'evt-post-1');
+`)
+			mustDrain(t, ctx, conn, "CALL DOLT_COMMIT('-Am', 'test: post-flip issue')")
+			if addDrop {
+				mustExecOn(t, ctx, conn, "CALL DOLT_COMMIT('--allow-empty', '-m', ?)", eventsFlipDropMessage)
+			}
+			mustExecOn(t, ctx, conn, "DELETE FROM ignored_schema_migrations WHERE version = 31")
+			before := liveEvents(t, ctx, conn)
+
+			var notice bytes.Buffer
+			defer schema.SetPreflipEventsNoticeOutForTest(&notice)()
+			if _, err := schema.MigrateUp(ctx, conn); err != nil {
+				t.Fatalf("MigrateUp: %v", err)
+			}
+			if after := liveEvents(t, ctx, conn); len(before) != 1 || !reflect.DeepEqual(after, before) {
+				t.Fatalf("live events changed with nothing to restore: before %v, after %v", before, after)
+			}
+			if !ignoredCursorHas(t, ctx, conn, 31) {
+				t.Fatal("ignored cursor does not record 0031 with nothing to restore")
+			}
+			if notice.Len() != 0 {
+				t.Fatalf("restore printed %q with nothing to restore", notice.String())
+			}
+		})
 	}
 }
