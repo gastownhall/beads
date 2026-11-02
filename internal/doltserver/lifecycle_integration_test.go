@@ -228,7 +228,9 @@ func TestLifecycle_CrashRecovery(t *testing.T) {
 	if _, err := db.Exec("INSERT INTO crash_test VALUES (1, 'survive')"); err != nil {
 		t.Fatalf("INSERT: %v", err)
 	}
-	// Commit the data so it persists.
+	// Record the data in history so this test exercises recovery of the
+	// committed-history state; SQL-committed working-set persistence across
+	// a kill is covered by TestLifecycle_SharedServerSQLCommitSurvivesKill.
 	if _, err := db.Exec("CALL DOLT_COMMIT('-Am', 'crash test data')"); err != nil {
 		t.Logf("DOLT_COMMIT: %v (may be expected if auto-commit is on)", err)
 	}

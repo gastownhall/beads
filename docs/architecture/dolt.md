@@ -887,6 +887,50 @@ bd dolt status
 bd dolt show
 ```
 
+#### Durability and Dolt history
+
+Saving a write and recording it in Dolt history are separate steps:
+
+- **SQL commit (saved).** When a `bd` write succeeds, its SQL transaction has
+  committed and Dolt has synced it to the shared server's local data
+  directory through its chunk journal. With supported journal-backed Dolt and
+  the journal left at its default (enabled), the write survives the server
+  being killed (SIGKILL, out-of-memory, an ungraceful logout) and is there
+  after the next start. Surviving power loss also depends on the filesystem
+  and device honoring sync. A write still in an open transaction when the
+  server dies is lost, as in any database.
+- **Dolt commit (history).** A Dolt commit records saved changes in version
+  history: what `bd history` shows and what `bd dolt push` sends. With
+  `dolt.auto-commit` set to `batch` or `off`, saved changes wait in the working
+  set (`bd vc status` lists them) until you record them yourself:
+
+  ```bash
+  bd dolt commit -m "record pending changes"
+  ```
+
+  A graceful `bd dolt stop` also records them, best-effort. A crash does not
+  discard them: they are still pending after the restart.
+
+A local commit of either kind is not a backup. To keep a copy off the
+machine, push history to a remote, or point `bd backup` at a separate or
+off-machine destination (`bd backup init <path-or-url>`).
+
+bd does not turn on Dolt's `behavior.dolt_transaction_commit`, and saving
+writes does not need it. It would turn every SQL transaction into its own Dolt
+commit: history grows faster, Dolt's generic transaction commits take the
+place of bd's per-command messages and authors, and `batch` and `off` modes
+stop batching.
+
+**Server config file.** For a server bd launches with its default
+configuration, bd writes the shared server's config to
+`~/.beads/shared-server/dolt-server-config.yaml` and passes it with
+`--config`. bd rewrites it on every start, so edits to it do not last. With a
+Dolt too old for that config, bd passes command-line flags instead, and Dolt
+then writes a template to `~/.beads/shared-server/dolt/config.yaml` with
+settings commented out. The bd-launched server does not read that template, so
+editing it changes nothing. Servers you configure and run yourself (external
+or proxied) use whatever config you give them.
+
 ### Data Location (Orchestrator)
 
 ```
