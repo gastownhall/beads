@@ -12,8 +12,9 @@ import (
 //  3. Soft-reset to initial commit (collapses old history into working set)
 //  4. Commit as single squashed base
 //  5. Cherry-pick each recent commit on top
-//  6. Checkout main, hard-reset to temp branch
-//  7. Delete temp branch
+//  6. Checkout main, verify the temp branch's committed data equals main's
+//  7. Hard-reset main to the temp branch
+//  8. Delete temp branch
 //
 // Callers should run PruneRemoteRefs and then DoltGC afterward to reclaim disk
 // space — remote-tracking refs still anchor the pre-compact chain, and GC
@@ -71,6 +72,17 @@ func Compact(ctx context.Context, conn DBConn, initialHash, boundaryHash string,
 
 	if err := execSQL("checkout main", "CALL DOLT_CHECKOUT('main')"); err != nil {
 		return err
+	}
+	// The replay must reproduce main's committed data exactly: a cherry-pick
+	// can apply cleanly yet resurrect an edit the squashed base had already
+	// undone (#6645). Compare the committed refs and abort before the swap on
+	// any difference. This is not atomic with the reset below.
+	var changedTables int
+	if err := conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_diff_summary('main', 'compact-tmp')").Scan(&changedTables); err != nil {
+		return fmt.Errorf("compact step %q: %w", "verify replay", err)
+	}
+	if changedTables != 0 {
+		return fmt.Errorf("compact aborted: replayed history differs from main in %d table(s); main was not reset", changedTables)
 	}
 	if err := execSQL("reset main to compacted", "CALL DOLT_RESET('--hard', 'compact-tmp')"); err != nil {
 		return err

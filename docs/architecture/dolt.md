@@ -298,6 +298,16 @@ standalone Beads users. The `bd` binary includes everything; just `bd init` and 
 - Push to GitHub with `bd dolt push` — code and issues in one repo
 - Zero ops: no server, no ports, no PID files
 
+Each `bd` command starts the embedded engine, so a script or agent loop that
+calls `bd` hundreds of times pays that startup every time. bd batch runs a
+limited set of write commands (`close`, `update`, `create`, `dep add`,
+`dep remove`; see `bd batch --help`) in one transaction and one process. For
+sustained concurrent agents, use server or proxied-server mode, where one Dolt
+server keeps the engine running (see
+[Migrating Between Backends](#migrating-between-backends)). Neither repairs a
+damaged journal; for that, see
+[Engine won't open](/recovery/database-corruption#engine-wont-open).
+
 ### Server Mode (Multi-Writer / Orchestrator)
 
 Connects to a running `dolt sql-server` for multi-client access.
@@ -632,27 +642,25 @@ bd list                    # Re-triggers bootstrap
 
 ### Database Corruption
 
-**Symptom:** Queries fail, inconsistent data.
+**Symptom:** Queries fail, inconsistent data, or every `bd` command fails while
+opening the database.
 
-**Diagnosis:**
+**Diagnosis and logical repair (server mode):**
 ```bash
 bd doctor                  # Basic checks
 bd doctor --deep           # Full validation
-bd doctor --server         # Server mode checks (if applicable)
+bd doctor --server         # Server mode checks
+bd doctor --fix            # Repair logical inconsistencies
 ```
 
-**Recovery options:**
+Embedded mode runs only `bd doctor --check=artifacts`, `--check=conventions`
+and `--check=pollution`.
 
-1. **Repair what's fixable:**
-   ```bash
-   bd doctor --fix
-   ```
-
-2. **Rebuild from remote:**
-   ```bash
-   rm -rf .beads/dolt
-   bd list                  # Re-triggers bootstrap
-   ```
+**Recovery:** `bd doctor --fix` does not rebuild a damaged store, and deleting
+the data directory destroys any work your remote or backups lack. Follow
+[Engine won't open](/recovery/database-corruption#engine-wont-open): preserve
+the damaged store and its configuration first, then recover into a fresh store
+from a Dolt remote, a Dolt-native backup, or a JSONL export.
 
 ### Already Committed `.beads/dolt/` to Git
 
