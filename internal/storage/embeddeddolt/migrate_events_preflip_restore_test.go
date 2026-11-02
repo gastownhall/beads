@@ -824,3 +824,106 @@ VALUES ('pre-2', 'renamed', 'erin', '2026-08-01 08:00:00', ?)`, taken)
 		t.Fatal("ignored cursor does not record 0031 after the restore")
 	}
 }
+
+// TestEmbeddedIgnoredMigration0031CountsEveryOrphan pins the orphan count:
+// every skipped row of a deleted issue is counted, whether the issue leads a
+// page, fills the whole source, or appears in more than one source (each
+// source's rows count), the count prints even when nothing was restored, and
+// fk_events_issue still refuses an orphan afterwards.
+func TestEmbeddedIgnoredMigration0031CountsEveryOrphan(t *testing.T) {
+	requireEmbedded(t)
+
+	// gone-1 sorts before live-1, so with one issue per page the first page
+	// holds nothing but orphans.
+	orphanLineage := func(t *testing.T, ctx context.Context, deleted string) *sql.Conn {
+		t.Helper()
+		dataDir := seedMainSchemaAt(t, ctx, 61)
+		conn, closeConn := openPinnedConn(t, ctx, dataDir)
+		t.Cleanup(closeConn)
+		execFrozenGuard(t, ctx, conn, `
+INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) VALUES
+  ('gone-1', 'deleted after the flip', '', '', '', '', 'open', 2, 'task'),
+  ('live-1', 'kept', '', '', '', '', 'open', 2, 'task');
+INSERT INTO events (issue_id, event_type, actor, created_at, id) VALUES
+  ('gone-1', 'created', 'tester', '2026-07-30 00:00:00', 'evt-gone-1'),
+  ('gone-1', 'updated', 'tester', '2026-07-30 00:01:00', 'evt-gone-2'),
+  ('live-1', 'created', 'tester', '2026-07-30 00:02:00', 'evt-live-1');
+`)
+		mustDrain(t, ctx, conn, "CALL DOLT_COMMIT('-Am', 'test: seed pre-flip events')")
+		if _, err := schema.MigrateUp(ctx, conn); err != nil {
+			t.Fatalf("MigrateUp (migrator): %v", err)
+		}
+		execFrozenGuard(t, ctx, conn, "DELETE FROM issues WHERE id IN ("+deleted+")")
+		mustDrain(t, ctx, conn, "CALL DOLT_COMMIT('-Am', 'test: delete issues')")
+		execFrozenGuard(t, ctx, conn, "DROP TABLE IF EXISTS events")
+		return conn
+	}
+	restore := func(t *testing.T, ctx context.Context, conn *sql.Conn) string {
+		t.Helper()
+		var notice bytes.Buffer
+		defer schema.SetPreflipEventsNoticeOutForTest(&notice)()
+		if _, err := schema.MigrateUp(ctx, conn); err != nil {
+			t.Fatalf("MigrateUp (restore): %v", err)
+		}
+		if !ignoredCursorHas(t, ctx, conn, 31) {
+			t.Fatal("ignored cursor does not record 0031 after the restore")
+		}
+		return notice.String()
+	}
+	requireFKEnforced := func(t *testing.T, ctx context.Context, conn *sql.Conn, issue string) {
+		t.Helper()
+		if _, err := conn.ExecContext(ctx, `INSERT INTO events (issue_id, event_type, actor, created_at, id)
+VALUES (?, 'created', 'tester', '2026-09-01 00:00:00', 'evt-orphan-probe')`, issue); err == nil {
+			t.Fatalf("inserting an event of deleted issue %s succeeded; the restore left foreign keys off", issue)
+		}
+	}
+
+	t.Run("leading orphan page", func(t *testing.T) {
+		ctx := t.Context()
+		defer schema.SetPreflipEventsBatchSizesForTest(1, 1)()
+		conn := orphanLineage(t, ctx, "'gone-1'")
+		notice := restore(t, ctx, conn)
+		got := liveEvents(t, ctx, conn)
+		requireContent(t, got, map[string]int{preflipNullDigest("live-1", "created", "tester", "2026-07-30 00:02:00"): 1})
+		requireDerivedIDs(t, got)
+		for _, line := range []string{
+			"Restored 1 pre-upgrade audit event(s)",
+			"Skipped 2 pre-upgrade audit event(s) whose issue no longer exists",
+		} {
+			if !strings.Contains(notice, line) {
+				t.Fatalf("restore notice = %q, want it to report %q", notice, line)
+			}
+		}
+		requireFKEnforced(t, ctx, conn, "gone-1")
+	})
+
+	t.Run("only orphans", func(t *testing.T) {
+		ctx := t.Context()
+		conn := orphanLineage(t, ctx, "'gone-1', 'live-1'")
+		notice := restore(t, ctx, conn)
+		if n := len(liveEvents(t, ctx, conn)); n != 0 {
+			t.Fatalf("live events hold %d contents, want none: every issue is gone", n)
+		}
+		if strings.Contains(notice, "Restored") || !strings.Contains(notice, "Skipped 3 pre-upgrade audit event(s) whose issue no longer exists") {
+			t.Fatalf("restore notice = %q, want only the count of the 3 skipped rows", notice)
+		}
+		requireFKEnforced(t, ctx, conn, "live-1")
+	})
+
+	t.Run("orphan in two sources", func(t *testing.T) {
+		ctx := t.Context()
+		l := newTwoSourceLineage(t, ctx, false)
+		execFrozenGuard(t, ctx, l.conn, "DELETE FROM issues WHERE id = 'pre-1'")
+		notice := restore(t, ctx, l.conn)
+		requireContent(t, liveEvents(t, ctx, l.conn), map[string]int{l.pre2: 1})
+		for _, line := range []string{
+			"Restored 1 pre-upgrade audit event(s)",
+			"Skipped 2 pre-upgrade audit event(s) whose issue no longer exists",
+		} {
+			if !strings.Contains(notice, line) {
+				t.Fatalf("restore notice = %q, want it to report %q", notice, line)
+			}
+		}
+		requireFKEnforced(t, ctx, l.conn, "pre-1")
+	})
+}
