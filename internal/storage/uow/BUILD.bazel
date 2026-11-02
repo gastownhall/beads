@@ -22,6 +22,7 @@ go_library(
         "doltserver_provider.go",
         "doltserver_tx.go",
         "edgereader.go",
+        "endpoint_rediscovery.go",
         "errors.go",
         "events_journal.go",
         "external_doltserver_provider.go",

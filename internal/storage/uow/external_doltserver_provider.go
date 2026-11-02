@@ -70,7 +70,10 @@ func NewExternalDoltServerUOWProvider(
 		return nil, fmt.Errorf("uow: get proxy endpoint: %w", err)
 	}
 
-	return openAndInitSchema(ctx, ep, externalBackendAddress(external), database, rootUser, rootPassword, tlsConfigName, teamServer, expectedProjectID, resolved)
+	// Rediscovery of the local proxy address is wired for the managed-server
+	// provider only for now; the external-server provider is wired by its own
+	// change (the identical local-proxy hazard, but one step at a time).
+	return openAndInitSchema(ctx, ep, externalBackendAddress(external), database, rootUser, rootPassword, tlsConfigName, teamServer, expectedProjectID, resolved, nil)
 }
 
 // externalBackendAddress names the external server behind the proxy: its

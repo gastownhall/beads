@@ -3,17 +3,22 @@ package uow
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
+	"time"
 
 	_ "github.com/go-sql-driver/mysql"
 
+	"github.com/steveyegge/beads/internal/storage/dbproxy/pidfile"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
 	"github.com/steveyegge/beads/internal/testutil"
 	"github.com/steveyegge/beads/internal/testutil/bazeltest"
@@ -290,4 +295,115 @@ func writeServerConfig(t *testing.T, port int) string {
 	body := fmt.Sprintf("log_level: debug\nlistener:\n  host: 127.0.0.1\n  port: %d\n", port)
 	require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
 	return path
+}
+
+// TestNewDoltServerUOWProvider_RecoversAfterProxyIdleExit reproduces #7295: a
+// long-lived managed provider must still open units of work after its proxy
+// retires on idle, instead of dialing the retired proxy's port forever.
+//
+// The row proves the rediscovered connection reaches the same database and
+// data; the accept-counting listener on the retired proxy's port proves the
+// provider never dialed the stale address (a stale dial would not just fail:
+// this listener accepts TCP, so without rediscovery the handshake hangs on it
+// until the dial deadline, and the listener would count the accept).
+func TestNewDoltServerUOWProvider_RecoversAfterProxyIdleExit(t *testing.T) {
+	testutil.RequireDoltBinary(t)
+	bin, err := exec.LookPath("dolt")
+	require.NoError(t, err)
+
+	bdBin := buildBDBinary(t)
+	prev := proxy.ResolveExecutable
+	proxy.ResolveExecutable = func() (string, error) { return bdBin, nil }
+	t.Cleanup(func() { proxy.ResolveExecutable = prev })
+
+	t.Setenv("HOME", t.TempDir())
+
+	port, err := proxy.PickFreePort()
+	require.NoError(t, err)
+	storeRootDir := t.TempDir()
+	shutdownOnInterrupt(t, storeRootDir)
+	verifiedShutdownCleanup(t, storeRootDir)
+	cfgPath := writeServerConfig(t, port)
+	logPath := filepath.Join(t.TempDir(), "server.log")
+
+	ctx := context.Background()
+	provider, err := NewDoltServerUOWProvider(
+		ctx, storeRootDir, "beads", logPath, cfgPath,
+		proxy.BackendLocalServer, "root", "", bin,
+		0,
+		2*time.Second, // short proxy idle timeout
+		false, "",
+		WithProxiedServerMode(),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = provider.Close(ctx) })
+
+	// Retain no idle connections, like bd serve after pool_idle_time: every
+	// unit of work dials a new physical connection.
+	sqlProvider, ok := provider.(*doltSQLProvider)
+	require.True(t, ok, "NewDoltServerUOWProvider returned %T, want *doltSQLProvider", provider)
+	sqlProvider.SetPoolLimits(PoolLimits{MaxIdleConns: -1})
+
+	tx, err := sqlProvider.BeginTx(ctx)
+	require.NoError(t, err, "first unit of work")
+	_, err = tx.Runner().ExecContext(ctx,
+		"CREATE TABLE t_proxy_recovery (id INT PRIMARY KEY, v VARCHAR(64))")
+	require.NoError(t, err, "create the recovery probe table")
+	_, err = tx.Runner().ExecContext(ctx,
+		"INSERT INTO t_proxy_recovery (id, v) VALUES (1, 'survivor')")
+	require.NoError(t, err, "seed the recovery probe row")
+	require.NoError(t, tx.Commit(ctx, "seed proxy recovery probe"))
+
+	pf, err := pidfile.Read(storeRootDir, proxy.PIDFileName)
+	require.NoError(t, err)
+	oldPort := pf.Port
+	oldAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(oldPort))
+
+	// Wait for the proxy to retire on idle: its data port refuses connections.
+	deadline := time.Now().Add(60 * time.Second)
+	for {
+		c, dialErr := net.DialTimeout("tcp", oldAddr, time.Second)
+		if dialErr != nil {
+			break
+		}
+		_ = c.Close()
+		require.True(t, time.Now().Before(deadline), "proxy at %s never retired on idle", oldAddr)
+		time.Sleep(250 * time.Millisecond)
+	}
+
+	// Own the retired port so a provider that dials the stale address is
+	// caught in the act instead of failing with a bare refusal.
+	stale, err := net.Listen("tcp", oldAddr)
+	require.NoError(t, err, "retired proxy port %s was not released", oldAddr)
+	var staleAccepts atomic.Int32
+	go func() {
+		for {
+			c, err := stale.Accept()
+			if err != nil {
+				return
+			}
+			staleAccepts.Add(1)
+			_ = c.Close()
+		}
+	}()
+	t.Cleanup(func() { _ = stale.Close() })
+
+	tx, err = sqlProvider.BeginTx(ctx)
+	require.NoError(t, err, "unit of work after the proxy retired on idle must rediscover the proxy")
+	var v string
+	require.NoError(t, tx.Runner().QueryRowContext(ctx,
+		"SELECT v FROM t_proxy_recovery WHERE id = 1").Scan(&v),
+		"the rediscovered connection must read the row committed before retirement")
+	require.Equal(t, "survivor", v)
+	require.NoError(t, tx.Rollback(ctx))
+
+	require.Zero(t, staleAccepts.Load(),
+		"the provider dialed the retired proxy's port %d", oldPort)
+
+	// The unit of work must have run through a rediscovered proxy, whose
+	// published port is not the retired one this test holds.
+	pf, err = pidfile.Read(storeRootDir, proxy.PIDFileName)
+	require.NoError(t, err)
+	require.NotEqual(t, oldPort, pf.Port,
+		"the provider must publish a replacement proxy endpoint, not the retired one")
 }

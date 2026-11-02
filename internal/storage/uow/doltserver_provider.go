@@ -59,7 +59,7 @@ func NewDoltServerUOWProvider(
 	}
 
 	resolved := applyProviderOptions(opts)
-	ep, err := proxy.GetCreateDatabaseProxyServerEndpoint(absServerRootDir, proxy.OpenOpts{
+	openOpts := proxy.OpenOpts{
 		Backend:        backend,
 		ConfigFilePath: serverConfigFilePath,
 		LogFilePath:    serverLogFilePath,
@@ -68,10 +68,18 @@ func NewDoltServerUOWProvider(
 		Database:       database,
 		IdleTimeout:    idleTimeout,
 		Port:           proxyPort,
-	})
+	}
+	ep, err := proxy.GetCreateDatabaseProxyServerEndpoint(absServerRootDir, openOpts)
 	if err != nil {
 		return nil, fmt.Errorf("uow: get proxy endpoint: %w", err)
 	}
 
-	return openAndInitSchema(ctx, ep, "", database, rootUser, rootPassword, "", teamServer, expectedProjectID, resolved)
+	// The provider outlives the proxy it resolved above: a finite idle
+	// timeout retires that proxy, and a replacement binds a fresh
+	// OS-assigned port. Rediscovery reuses this exact root and OpenOpts —
+	// including the idle/port policy and the authenticated upstream identity —
+	// for every new physical connection after bootstrap (#7295).
+	resolver := newProxyEndpointResolver(absServerRootDir, openOpts)
+
+	return openAndInitSchema(ctx, ep, "", database, rootUser, rootPassword, "", teamServer, expectedProjectID, resolved, resolver)
 }
