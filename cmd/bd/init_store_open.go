@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"strings"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
@@ -28,16 +30,19 @@ const initReconcileCommitMessage = "bd init: commit pre-existing working set bef
 // The sequence is fixed, with no loop: a lenient open (Config.LenientOpen,
 // the same open `bd dolt commit` uses), one CommitAll of the whole working
 // set, a close of that handle, and one more strict open whose result is
-// returned unchanged. CommitAll commits every committable row, user rows
+// returned unchanged. When the commit committed something and that final
+// open succeeds, one note goes to notes (nil, under --quiet, for none).
+// CommitAll commits every committable row, user rows
 // included, exactly as the manual remedy does; running init against the
 // database is the intent to adopt it. Like the manual remedy, it is not
 // atomic with the refusal it answers.
-func openInitStore(ctx context.Context, cfg *dolt.Config, open initStoreOpener) (storage.DoltStorage, error) {
+func openInitStore(ctx context.Context, cfg *dolt.Config, open initStoreOpener, notes io.Writer) (storage.DoltStorage, error) {
 	store, err := open(ctx, cfg)
 	if err == nil {
 		return store, nil
 	}
-	if !initStoreAdoptable(cfg, err) {
+	dirtyErr := initStoreAdoptable(cfg, err)
+	if dirtyErr == nil {
 		return store, err
 	}
 
@@ -48,13 +53,19 @@ func openInitStore(ctx context.Context, cfg *dolt.Config, open initStoreOpener) 
 	if lerr != nil {
 		return nil, initReconcileError(err, lerr)
 	}
-	if _, cerr := lenient.CommitAll(ctx, initReconcileCommitMessage); cerr != nil && !isDoltNothingToCommit(cerr) {
+	committed, cerr := lenient.CommitAll(ctx, initReconcileCommitMessage)
+	if cerr != nil && !isDoltNothingToCommit(cerr) {
 		_ = lenient.Close()
 		return nil, initReconcileError(err, cerr)
 	}
 	_ = lenient.Close()
 
-	return open(ctx, cfg)
+	store, err = open(ctx, cfg)
+	if err == nil && committed && notes != nil {
+		fmt.Fprintf(notes, "Note: database %q had uncommitted changes in tables the schema migrations alter (%s); bd init committed the working set in its own commit, then applied the migrations; no further action is needed (gastownhall/beads#6089)\n",
+			cfg.Database, strings.Join(dirtyErr.Tables, ", "))
+	}
+	return store, err
 }
 
 // initStoreAdoptable reports whether openInitStore may adopt the database
@@ -62,13 +73,17 @@ func openInitStore(ctx context.Context, cfg *dolt.Config, open initStoreOpener) 
 // embedded, proxied, gateway, read-only or preview intent) refused by the
 // pending-migration dirty guard at main cursor 0. A versioned database keeps
 // the #4566 guard's protection of its dirty rows; its remedy stays the
-// operator's explicit `bd dolt commit`.
-func initStoreAdoptable(cfg *dolt.Config, err error) bool {
+// operator's explicit `bd dolt commit`. It returns the refusal when it is
+// adoptable and nil otherwise.
+func initStoreAdoptable(cfg *dolt.Config, err error) *schema.DirtyTablesError {
 	if !cfg.ServerMode || cfg.ProxiedServer || cfg.Gateway || cfg.ReadOnly || cfg.Preview {
-		return false
+		return nil
 	}
 	var dirtyErr *schema.DirtyTablesError
-	return errors.As(err, &dirtyErr) && dirtyErr.Unversioned
+	if !errors.As(err, &dirtyErr) || !dirtyErr.Unversioned {
+		return nil
+	}
+	return dirtyErr
 }
 
 // initReconcileError reports a failed adoption, keeping both the original
