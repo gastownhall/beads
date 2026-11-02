@@ -3,6 +3,7 @@ package versioncontrolops
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"sync/atomic"
@@ -513,5 +514,77 @@ func TestCompactQuietRunAddsNoCommit(t *testing.T) {
 		if n := f.count("SELECT COUNT(*) FROM scratch_x"); n != 1 {
 			t.Fatalf("ignored scratch_x row on main: present=false, want present=true")
 		}
+	})
+}
+
+// AC-4: when the follow-up commit fails, Compact says which step failed and
+// that main already moved, keeps the landed row staged, and removes
+// compact-tmp.
+func TestCompactFollowupFailureKeepsChangesStaged(t *testing.T) {
+	port := startCompactTestServer(t)
+
+	t.Run("follow-up commit fails", func(t *testing.T) {
+		f := newCompactFixture(t, port)
+		writer := f.conn()
+		injected := errors.New("injected follow-up commit failure")
+
+		hook := &compactHookConn{
+			beforeExec:         onceBeforeFinalReset(func() { f.landRow(writer) }),
+			failFollowupCommit: injected,
+		}
+		err := f.compact(hook)
+		if err == nil {
+			t.Fatalf("Compact succeeded, want the follow-up commit's failure")
+		}
+		if !errors.Is(err, injected) {
+			t.Fatalf("Compact error = %v, want it to wrap %v", err, injected)
+		}
+		if hook.followUps != 1 {
+			t.Fatalf("Compact attempted %d follow-up commits, want 1", hook.followUps)
+		}
+		for _, want := range []string{"commit changes that reached main", "compacted history", "bd dolt commit"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("Compact error = %q, want it to mention %q", err, want)
+			}
+		}
+
+		f.wantLog(replayedLog)
+		f.wantStatus("t:true")
+		if n := f.count("SELECT COUNT(*) FROM t WHERE id = 600"); n != 1 {
+			t.Fatalf("landed t row 600 on main: present=false, want present=true")
+		}
+		if n := f.count("SELECT COUNT(*) FROM t AS OF 'HEAD' WHERE id = 600"); n != 0 {
+			t.Fatalf("landed t row 600 is in main's HEAD, want it left staged (the follow-up never ran)")
+		}
+		f.wantNoTempBranch()
+	})
+
+	t.Run("staged check fails", func(t *testing.T) {
+		f := newCompactFixture(t, port)
+		writer := f.conn()
+
+		hook := &compactHookConn{
+			beforeExec:      onceBeforeFinalReset(func() { f.landRow(writer) }),
+			failStagedCheck: true,
+		}
+		err := f.compact(hook)
+		if err == nil {
+			t.Fatalf("Compact succeeded, want the staged check's failure")
+		}
+		if hook.followUps != 0 {
+			t.Fatalf("Compact attempted %d follow-up commits after the check failed, want 0", hook.followUps)
+		}
+		for _, want := range []string{"check main for staged changes", "compacted history", "bd dolt commit"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("Compact error = %q, want it to mention %q", err, want)
+			}
+		}
+		if strings.Contains(err.Error(), "still staged") {
+			t.Fatalf("Compact error = %q claims staged changes it never read", err)
+		}
+
+		f.wantLog(replayedLog)
+		f.wantStatus("t:true")
+		f.wantNoTempBranch()
 	})
 }
