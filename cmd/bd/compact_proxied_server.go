@@ -102,6 +102,11 @@ func runCompactProxiedServer(ctx context.Context) error {
 		return HandleError("could not find boundary commit for compaction")
 	}
 
+	// --force confirms the squash; it does not override a refusal.
+	if plan.refusal != nil {
+		return HandleErrorWithHint(plan.refusal.message(), compactRefusalHint)
+	}
+
 	if !compactDoltForce {
 		return HandleErrorWithHint(
 			fmt.Sprintf("would squash %d old commits into 1, preserving %d recent commits",

@@ -3,6 +3,8 @@
 package main
 
 import (
+	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -13,6 +15,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 )
 
@@ -252,5 +255,184 @@ func TestEmbeddedCompactMisdatedChild(t *testing.T) {
 
 	if got := bdShow(t, bd, dir, issue.ID).Title; got != "edit B" {
 		t.Errorf("title after compact = %q, want %q", got, "edit B")
+	}
+}
+
+// withEmbeddedConn opens the workspace's embedded database on main, runs fn on
+// a pinned connection, and releases the engine before any bd subprocess runs.
+func withEmbeddedConn(t *testing.T, beadsDir string, fn func(conn *sql.Conn)) {
+	t.Helper()
+	cfg, _ := configfile.Load(beadsDir)
+	database := ""
+	if cfg != nil {
+		database = cfg.GetDoltDatabase()
+	}
+	db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), filepath.Join(beadsDir, "embeddeddolt"), database, "main")
+	if err != nil {
+		t.Fatalf("OpenSQL: %v", err)
+	}
+	conn, err := db.Conn(t.Context())
+	if err != nil {
+		t.Fatalf("db.Conn: %v", err)
+	}
+	fn(conn)
+	conn.Close()
+	if err := cleanup(); err != nil {
+		t.Fatalf("cleanup: %v", err)
+	}
+}
+
+// embeddedCommit applies an UPDATE and commits it with the given date, or
+// with the current time when date is zero.
+func embeddedCommit(t *testing.T, conn *sql.Conn, query string, args []any, msg string, date time.Time) {
+	t.Helper()
+	if _, err := conn.ExecContext(t.Context(), query, args...); err != nil {
+		t.Fatalf("%s: %v", msg, err)
+	}
+	commit, commitArgs := "CALL DOLT_COMMIT('-Am', ?)", []any{msg}
+	if !date.IsZero() {
+		commit, commitArgs = "CALL DOLT_COMMIT('-Am', ?, '--date', ?)", []any{msg, date.Format(time.RFC3339)}
+	}
+	if _, err := conn.ExecContext(t.Context(), commit, commitArgs...); err != nil {
+		t.Fatalf("dolt commit %q: %v", msg, err)
+	}
+}
+
+// compactRefState is the part of main's state compaction must not touch when
+// it refuses or aborts.
+type compactRefState struct {
+	head      string
+	logCount  int
+	tmpBranch int
+}
+
+func readCompactRefState(t *testing.T, beadsDir string) compactRefState {
+	t.Helper()
+	var s compactRefState
+	withEmbeddedConn(t, beadsDir, func(conn *sql.Conn) {
+		if err := conn.QueryRowContext(t.Context(), "SELECT HASHOF('main')").Scan(&s.head); err != nil {
+			t.Fatalf("HASHOF(main): %v", err)
+		}
+		if err := conn.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM dolt_log").Scan(&s.logCount); err != nil {
+			t.Fatalf("count dolt_log: %v", err)
+		}
+		if err := conn.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM dolt_branches WHERE name = 'compact-tmp'").Scan(&s.tmpBranch); err != nil {
+			t.Fatalf("count compact-tmp: %v", err)
+		}
+	})
+	return s
+}
+
+// straddledCutoff is the #6645 history: recent-dated A changes a title to
+// "edit A" and its old-dated child B restores "ORIGINAL".
+type straddledCutoff struct {
+	bd, dir, beadsDir, issueID string
+	a, b                       storage.CommitInfo
+}
+
+func setupStraddledCutoff(t *testing.T, prefix string) straddledCutoff {
+	t.Helper()
+	f := straddledCutoff{bd: buildEmbeddedBD(t)}
+	f.dir, f.beadsDir, _ = bdInit(t, f.bd, "--prefix", prefix)
+	f.issueID = bdCreate(t, f.bd, f.dir, "ORIGINAL", "--type", "task").ID
+	bdCreate(t, f.bd, f.dir, "Filler bead", "--type", "task")
+
+	now := time.Now()
+	withEmbeddedConn(t, f.beadsDir, func(conn *sql.Conn) {
+		embeddedCommit(t, conn, "UPDATE issues SET title = ? WHERE id = ?", []any{"edit A", f.issueID},
+			"repro: edit A", now.Add(40*time.Minute))
+		// B is undated, as in the report: it is the newest old commit by
+		// the time compact runs.
+		embeddedCommit(t, conn, "UPDATE issues SET title = ? WHERE id = ?", []any{"ORIGINAL", f.issueID},
+			"repro: revert to ORIGINAL", time.Time{})
+		rows, err := conn.QueryContext(t.Context(), "SELECT commit_hash, date FROM dolt_log ORDER BY commit_order DESC LIMIT 2")
+		if err != nil {
+			t.Fatalf("read A/B: %v", err)
+		}
+		defer rows.Close()
+		for _, c := range []*storage.CommitInfo{&f.b, &f.a} {
+			if !rows.Next() {
+				t.Fatalf("dolt_log has fewer than 2 commits: %v", rows.Err())
+			}
+			if err := rows.Scan(&c.Hash, &c.Date); err != nil {
+				t.Fatalf("scan A/B: %v", err)
+			}
+		}
+	})
+
+	if got := bdShow(t, f.bd, f.dir, f.issueID).Title; got != "ORIGINAL" {
+		t.Fatalf("title before compact = %q, want %q", got, "ORIGINAL")
+	}
+	return f
+}
+
+// assertRefusalNames checks that out names both straddling commits with their
+// dates and carries the remediation hint.
+func assertRefusalNames(t *testing.T, f straddledCutoff, out string) {
+	t.Helper()
+	for _, want := range []string{
+		"cannot compact: commit dates are out of history order",
+		"recent commit " + f.a.Hash[:8] + " (dated " + f.a.Date.UTC().Format(time.RFC3339) + ")",
+		"old commit " + f.b.Hash[:8] + " (dated " + f.b.Date.UTC().Format(time.RFC3339) + ")",
+		"No compaction changes were made.",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestEmbeddedCompactRecentAncestorOfBoundary reproduces #6645: a preserved
+// (recent-dated) commit A is an ancestor of the old-dated boundary B, and B
+// reverts A's edit. The squashed base already reflects B, so cherry-picking A
+// on top would resurrect A's edit. Compact must refuse up front, naming both
+// commits, and leave main untouched; --force does not override the refusal.
+func TestEmbeddedCompactRecentAncestorOfBoundary(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	f := setupStraddledCutoff(t, "rb")
+	before := readCompactRefState(t, f.beadsDir)
+
+	for _, args := range [][]string{
+		{"compact", "--force", "--days", "0"},
+		{"compact", "--days", "0"},
+	} {
+		cmd := exec.Command(f.bd, args...)
+		cmd.Dir = f.dir
+		cmd.Env = bdEnv(f.dir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		if err == nil {
+			t.Fatalf("bd %s succeeded, want refusal\nstdout:\n%s", strings.Join(args, " "), stdout.String())
+		}
+		assertRefusalNames(t, f, stderr.String())
+		if strings.Contains(stdout.String()+stderr.String(), "Use --force") {
+			t.Errorf("bd %s recommends --force on a refused plan:\n%s%s", strings.Join(args, " "), stdout.String(), stderr.String())
+		}
+	}
+
+	cmd := exec.Command(f.bd, "--json", "compact", "--force", "--days", "0")
+	cmd.Dir = f.dir
+	cmd.Env = bdEnv(f.dir)
+	stdout, stderr, err := runCommandBuffers(t, cmd)
+	if err == nil {
+		t.Fatalf("bd --json compact --force succeeded, want refusal\nstdout:\n%s", stdout.String())
+	}
+	var jsonErr struct {
+		Error string `json:"error"`
+		Hint  string `json:"hint"`
+	}
+	if err := json.Unmarshal(stderr.Bytes(), &jsonErr); err != nil {
+		t.Fatalf("parse JSON error: %v\nstderr:\n%s", err, stderr.String())
+	}
+	assertRefusalNames(t, f, jsonErr.Error+"\n"+jsonErr.Hint)
+
+	if got := bdShow(t, f.bd, f.dir, f.issueID).Title; got != "ORIGINAL" {
+		t.Errorf("title after compact = %q, want %q", got, "ORIGINAL")
+	}
+	if after := readCompactRefState(t, f.beadsDir); after != before {
+		t.Errorf("main state after refused compact = %+v, want unchanged %+v", after, before)
 	}
 }
