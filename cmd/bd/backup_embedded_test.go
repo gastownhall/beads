@@ -341,6 +341,31 @@ func TestEmbeddedBackupRestoreRefusesSourceWithoutBackup(t *testing.T) {
 		}
 	})
 
+	// A directory holding only a JSONL export is the mistake the advice
+	// exists for: the refusal must say the database was not restored and
+	// point a JSONL export at bd import (GH#7098).
+	t.Run("jsonl_export_dir", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "bkjsonl")
+		id := bdCreateSilent(t, bd, dir, "survives refused jsonl restore")
+
+		source := t.TempDir()
+		if err := os.WriteFile(filepath.Join(source, "issues.jsonl"), []byte("{}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		requireNoManifest(t, source)
+
+		out := bdBackupFail(t, bd, dir, "restore", "--force", source)
+		for _, want := range []string{"no Dolt backup found", "restore refused", "bd backup init", "bd backup sync", "bd import"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("refusal should direct the user with %q, got:\n%s", want, out)
+			}
+		}
+
+		if out := bdRunOK(t, bd, dir, "show", id, "--json"); !strings.Contains(out, "survives refused jsonl restore") {
+			t.Fatalf("issue %s missing after the refused restore: %s", id, out)
+		}
+	})
+
 	// The no-argument form reads the default backup directory, which the CLI
 	// creates when it does not exist, so a never-synced default directory is
 	// the same defect's most direct trigger.

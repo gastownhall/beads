@@ -245,6 +245,39 @@ func TestBackupRestoreValidSourceRoundTrip(t *testing.T) {
 	}
 }
 
+// TestBackupRestoreSourceAdvice pins the decorator both restore error paths
+// hang their remedy on: unrelated errors pass through as the same value, and
+// a refusal wrapping ErrNoBackup keeps its identity (%w, so errors.Is still
+// reaches ErrNoBackup) and its text, gains the init/sync advice, and directs
+// a JSONL export at bd import. The refusal names its directory quoted, so a
+// control character in its name cannot forge lines in what the CLI prints.
+func TestBackupRestoreSourceAdvice(t *testing.T) {
+	unrelated := fmt.Errorf("connection refused")
+	if got := restoreSourceAdvice(unrelated); got != unrelated {
+		t.Errorf("unrelated error became %v, want the same error back", got)
+	}
+
+	refusal := fmt.Errorf("%q: %w", "/tmp/backup-source", versioncontrolops.ErrNoBackup)
+	got := restoreSourceAdvice(refusal)
+	if !errors.Is(got, versioncontrolops.ErrNoBackup) {
+		t.Errorf("advice lost the error's identity: %v", got)
+	}
+	msg := got.Error()
+	if !strings.HasPrefix(msg, refusal.Error()) {
+		t.Errorf("advice should carry the refusal's own text first, got:\n%s", msg)
+	}
+	for _, want := range []string{"no Dolt backup found", "restore refused", "bd backup init", "bd backup sync", "bd import"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("advice should direct the user with %q, got:\n%s", want, msg)
+		}
+	}
+
+	evil := fmt.Errorf("%q: %w", "src\nwith\tcontrol", versioncontrolops.ErrNoBackup)
+	if decorated := restoreSourceAdvice(evil).Error(); strings.Contains(decorated, "src\nwith") {
+		t.Errorf("a control character in the source name forged a line:\n%q", decorated)
+	}
+}
+
 func TestSyncProjectIDFromDB_NoWorkspaceUsesActiveWorkspaceError(t *testing.T) {
 	if testDoltServerPort == 0 {
 		t.Skip("Dolt test server not available")

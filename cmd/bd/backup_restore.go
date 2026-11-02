@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 	"github.com/steveyegge/beads/internal/ui"
 )
 
@@ -89,6 +91,19 @@ func init() {
 	backupCmd.AddCommand(backupRestoreCmd)
 }
 
+// restoreSourceAdvice decorates a restore refusal that wraps
+// versioncontrolops.ErrNoBackup with the remedy that produces a real backup.
+// Wrapping keeps the error's identity, so errors.Is still reaches ErrNoBackup
+// and the refusal's own text — the source it names and the fact that the
+// database was not changed — stays in front of the advice.
+func restoreSourceAdvice(err error) error {
+	if !errors.Is(err, versioncontrolops.ErrNoBackup) {
+		return err
+	}
+	return fmt.Errorf("%w\nRun 'bd backup init <dir>' and 'bd backup sync' to create a Dolt backup to restore; "+
+		"a JSONL export from 'bd export' is loaded with 'bd import', not 'bd backup restore'", err)
+}
+
 // runBackupRestore restores the database from a Dolt-native backup.
 func runBackupRestore(ctx context.Context, s storage.DoltStorage, dir string, force bool) error {
 	if s == nil {
@@ -101,7 +116,7 @@ func runBackupRestore(ctx context.Context, s storage.DoltStorage, dir string, fo
 	}
 
 	if err := bs.RestoreDatabase(ctx, dir, force); err != nil {
-		return err
+		return restoreSourceAdvice(err)
 	}
 
 	// After a force restore, the database's _project_id may differ from

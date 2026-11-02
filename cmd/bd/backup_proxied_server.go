@@ -372,7 +372,7 @@ func runBackupRestoreProxied(ctx context.Context, dir string, force bool) error 
 	// (GH#7098).
 	backupURL, err := versioncontrolops.RestoreSourceURL(dir)
 	if err != nil {
-		return HandleErrorRespectJSON("%v", err)
+		return HandleErrorRespectJSON("%v", restoreSourceAdvice(err))
 	}
 
 	// Ask the live provider which database to replace before taking it away.
