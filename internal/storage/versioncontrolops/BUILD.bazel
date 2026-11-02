@@ -26,6 +26,7 @@ go_library(
     deps = [
         "//internal/githooksenv",
         "//internal/gittraceenv",
+        "//internal/remedy",
         "//internal/storage",
         "//internal/storage/issueops",
         "//internal/storage/kvkeys",
