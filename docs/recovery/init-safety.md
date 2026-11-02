@@ -3,7 +3,7 @@ title: Recovery Playbooks
 description: Step-by-step recovery for bd init and bd dolt push/pull refusals, including the primary-key fork playbook
 ---
 
-Last reviewed: 2026-10-01
+Last reviewed: 2026-11-02
 
 Freshness source: `cmd/bd/init.go`, `cmd/bd/init_safety.go`,
 `cmd/bd/init_safety_test.go`, `cmd/bd/init_safety_help.go`, and
@@ -27,6 +27,7 @@ See also: `bd help init-safety`, and
 - [init-local-exists — `bd init --reinit-local` refused because local data already exists](#init-local-exists)
 - [init-home-refused — `bd init` refused because the working directory is your home directory](#init-home-refused)
 - [init-missing-server-db — `bd init` refused because the configured server-side database is missing](#init-missing-server-db)
+- [init-dirty-working-set — `bd init` refused because the database's working set has uncommitted changes the schema migrations alter](#init-dirty-working-set)
 - [pk-fork-refused — `bd dolt pull`/`push` refused because a table has different primary keys in its common ancestor](#pk-fork-refused)
 - [re-clone-gotchas — two gotchas hit during manual re-clone recovery: damaged stores left inside `data_dir`, and a fresh clone missing clone-local tables](#re-clone-gotchas)
 
@@ -440,6 +441,79 @@ rows rarely apply there.
   mode before creating anything, and does not restore over a database the
   server already holds. Elsewhere, including shared-server mode named only
   by `dolt.shared-server` in a config.yaml, it uses the embedded store.
+
+---
+
+## init-dirty-working-set
+
+**Symptom**
+
+```
+$ bd init
+Error: failed to open Dolt store: failed to initialize schema: schema migration:
+pending schema migrations alter pre-existing dirty tables: config, interactions, routes;
+run 'bd dolt commit' to commit the working set at the current schema, then re-run the
+migration (gastownhall/beads#4566)
+```
+
+On a database with no recorded migration history (below), the same init
+now succeeds instead, with a note on stderr:
+
+```
+Note: database "hq" had uncommitted changes in tables the schema migrations
+alter (config, interactions, routes); bd init committed the working set in
+its own commit, then applied the migrations; no further action is needed
+(gastownhall/beads#6089)
+```
+
+**Why this happens**
+
+`bd init` opens the store, and the open applies pending schema migrations.
+The [#4566](https://github.com/gastownhall/beads/pull/4566) guard refuses to
+run a migration that alters a table with uncommitted changes: migrating
+underneath a dirty working set could destroy the uncommitted rows or leave
+them unreadable at the new shape. Two very different situations produce the
+same refusal:
+
+- **A versioned database with concurrent uncommitted work.** Someone (or
+  something) wrote rows and did not commit. bd cannot tell that work from
+  valuable half-applied changes, so it refuses and keeps the rows exactly
+  as they are. The refusal is the safe behavior; nothing about it changed.
+- **An unversioned database: legacy-SDK residue.** A database installed by a
+  v1.0.0-era seeder has no `schema_migrations` table at all, and a legacy
+  SDK (Gas Town v1.2.1's `EnsureRigIssuePrefix`) wrote an `issue_prefix`
+  config row and created the `routes` and `interactions` tables without
+  ever committing. The first modern binary to open the database finds all of
+  that pending and refuses — which used to strand the workspace: `bd dolt
+  commit` could not open the store either, so no bd command could run
+  ([#6089](https://github.com/gastownhall/beads/issues/6089)).
+
+**Recovery paths**
+
+- **You got the note (unversioned, adopted):** nothing to do. bd init
+  committed the pre-existing working set in its own commit (message
+  `bd init: commit pre-existing working set before schema migration
+  (gastownhall/beads#6089)`), applied the migrations on top, and the
+  workspace is fully working. The note is informational; `--quiet` suppresses
+  it like init's other informational output.
+- **You got the refusal (versioned):** commit or discard the uncommitted
+  work, then re-run:
+
+  ```bash
+  bd dolt commit -m "commit half-applied work at the current schema"
+  bd init
+  ```
+
+  If the uncommitted changes turn out to be garbage, committing them is
+  still safe — they become ordinary committed rows you can clean up after
+  the migrations with the normal bd commands. Do not delete the dirty
+  tables by hand — the migrations may need the rows they hold.
+
+The adoption authority is narrow: only a plain writable server-mode
+`bd init` (or `gt install` reaching the same open) adopts. Embedded,
+gateway, read-only, preview and proxied-server opens keep the refusal
+unchanged, and a database with any recorded migration history — even one
+row in `schema_migrations` — is versioned, never adopted.
 
 ---
 

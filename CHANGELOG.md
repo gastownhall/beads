@@ -1126,6 +1126,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd init` no longer deadlocks on a server database left dirty by a legacy
+  v1.0.0-era SDK (the Gas Town v1.2.1 shape behind
+  [#6089](https://github.com/gastownhall/beads/issues/6089)). Such a
+  database has no recorded migration history, and its `issue_prefix` config
+  write plus uncommitted `routes` and `interactions` tables made the
+  dirty-table guard ([#4566](https://github.com/gastownhall/beads/pull/4566))
+  refuse the very first modern open — while the refusal's own remedy (`bd
+  dolt commit`) could not open the store either, stranding the workspace.
+  `bd init` on a plain writable server-mode database now recognizes this
+  shape (recorded main cursor 0) and adopts it: the pre-existing working
+  set is committed in its own labeled commit
+  (`bd init: commit pre-existing working set before schema migration
+  (gastownhall/beads#6089)`), the pending migrations apply on top, a note
+  on stderr explains what happened (suppressed by `--quiet`), and the
+  workspace is fully working. Versioned databases — anything with recorded
+  migration history — keep the refusal unchanged, as do embedded, gateway,
+  read-only, preview and proxied-server opens; a failed recovery reports the
+  original refusal first.
+  See [init-dirty-working-set](docs/recovery/init-safety.md#init-dirty-working-set).
 - `bd dolt push <remote>` and `bd dolt pull <remote>` now push to and pull
   from the named remote. bd ignored the name, so `bd dolt push 1st` pushed to
   the default remote and reported "Push complete."; a name that differs from

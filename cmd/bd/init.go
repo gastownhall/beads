@@ -1774,9 +1774,15 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// #6089: a strict open refused by the dirty-table guard on an
 		// unversioned database (legacy-SDK residue) is adopted by committing
 		// the pre-existing working set first; every other open or refusal
-		// passes through unchanged. The note writer is nil here; the
-		// stderr note lands with its own AC.
-		store, err := openInitStore(ctx, doltCfg, newDoltStore, nil)
+		// passes through unchanged. The recovery note goes to stderr so
+		// stdout's JSON document stays intact, and --quiet suppresses it
+		// like init's other informational output.
+		store, err := openInitStore(ctx, doltCfg, newDoltStore, func(line string) {
+			if quiet {
+				return
+			}
+			fmt.Fprint(os.Stderr, line+"\n")
+		})
 		if err != nil {
 			// #4259: the remote-migrate gate refused to auto-apply pending
 			// migrations. When init just bootstrapped the clone, the REMOTE is

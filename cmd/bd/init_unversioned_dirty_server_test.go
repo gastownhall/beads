@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -324,6 +325,71 @@ func TestCLI_InitServerUnversionedDirtyWorkingSet_E2E(t *testing.T) {
 		}
 		if got := initServerTestRecoveryCommitCount(t, db); got != 1 {
 			t.Fatalf("recovery commits = %d, want exactly 1", got)
+		}
+	})
+}
+
+// initUnversionedAdoptionNoteText is the full stderr note line for the
+// fixture database and its dirty tables.
+func initUnversionedAdoptionNoteText(database string) string {
+	return fmt.Sprintf("Note: database %q had uncommitted changes in tables the schema migrations alter (%s); "+
+		"bd init committed the working set in its own commit, then applied the migrations; "+
+		"no further action is needed (gastownhall/beads#6089)", database, "config, interactions, routes")
+}
+
+// TestCLI_InitServerUnversionedAdoptionNote_E2E pins the #6089 recovery
+// note: after a successful adoption bd init explains on stderr what it
+// committed, --quiet suppresses the note (and only the note — the lenient
+// open's own warning is unchanged behavior, not quiet-gated), and --json
+// keeps stdout a single JSON document with the note on stderr.
+func TestCLI_InitServerUnversionedAdoptionNote_E2E(t *testing.T) {
+	skipIfNoDolt(t)
+
+	// runInitOnUnversionedLegacyResidue builds one fresh #6089 fixture and
+	// runs bd init on it with extra, returning stdout and stderr.
+	runInitOnUnversionedLegacyResidue := func(t *testing.T, extra ...string) (stdout, stderr, database string) {
+		t.Helper()
+		env := externalServerTestEnv(t)
+		repoDir := t.TempDir()
+		initGitRepo(t, repoDir)
+		database = uniqueTestDBName(t)
+		t.Cleanup(func() { dropTestDatabase(database, testDoltServerPort) })
+		db := createInitServerTestDatabase(t, database)
+		initServerTestUnversionedLegacyResidue(t, db)
+		stdout, stderr, err := runInitServerBD(t, repoDir, env, initServerTestArgs(database, extra...)...)
+		if err != nil {
+			t.Fatalf("bd init on an unversioned dirty database failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		}
+		return stdout, stderr, database
+	}
+
+	t.Run("default prints the note to stderr", func(t *testing.T) {
+		stdout, stderr, database := runInitOnUnversionedLegacyResidue(t)
+		if note := initUnversionedAdoptionNoteText(database); !strings.Contains(stderr, note) {
+			t.Fatalf("bd init stderr = %q, want the adoption note:\n%s", stderr, note)
+		}
+		if strings.Contains(stdout, "Note: database") {
+			t.Fatalf("bd init stdout = %q, want the note on stderr only", stdout)
+		}
+	})
+
+	t.Run("quiet suppresses the note", func(t *testing.T) {
+		_, stderr, _ := runInitOnUnversionedLegacyResidue(t, "--quiet")
+		if strings.Contains(stderr, "Note: database") {
+			t.Fatalf("bd init --quiet stderr = %q, want the adoption note suppressed", stderr)
+		}
+	})
+
+	t.Run("json keeps the note off stdout", func(t *testing.T) {
+		stdout, stderr, database := runInitOnUnversionedLegacyResidue(t, "--json")
+		if note := initUnversionedAdoptionNoteText(database); !strings.Contains(stderr, note) {
+			t.Fatalf("bd init --json stderr = %q, want the adoption note on stderr", stderr)
+		}
+		if strings.Contains(stdout, "Note: database") {
+			t.Fatalf("bd init --json stdout = %q, want the note on stderr only", stdout)
+		}
+		if !strings.Contains(stdout, "bd initialized successfully") {
+			t.Fatalf("bd init --json stdout = %q, want the normal success summary", stdout)
 		}
 	})
 }
