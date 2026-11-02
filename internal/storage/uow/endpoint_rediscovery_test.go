@@ -128,3 +128,154 @@ func TestProxyEndpointResolverCoalesces(t *testing.T) {
 	require.NoError(t, r.beforeConnect(context.Background(), later))
 	assert.Equal(t, int64(2), calls.Load(), "a connection after the overlap must discover again, not reuse a cached endpoint")
 }
+
+// blockedDiscovery is a discovery that blocks until released, recording how
+// often it ran and whether its last run finished.
+type blockedDiscovery struct {
+	calls    atomic.Int64
+	finished atomic.Int64
+	entered  chan struct{}
+	release  chan struct{}
+}
+
+func newBlockedDiscovery() *blockedDiscovery {
+	return &blockedDiscovery{entered: make(chan struct{}, 8), release: make(chan struct{})}
+}
+
+func (b *blockedDiscovery) discover() (proxy.Endpoint, error) {
+	b.calls.Add(1)
+	b.entered <- struct{}{}
+	<-b.release
+	b.finished.Add(1)
+	return proxy.Endpoint{Host: "127.0.0.1", Port: 4321}, nil
+}
+
+// gatedDoneContext reports on waiting when a hook first asks for its Done
+// channel, then holds the hook there until gate closes, so a test can make
+// cancellation and a finished discovery ready at the same moment.
+type gatedDoneContext struct {
+	context.Context
+	once    sync.Once
+	waiting chan<- struct{}
+	gate    <-chan struct{}
+}
+
+func (c *gatedDoneContext) Done() <-chan struct{} {
+	c.once.Do(func() {
+		c.waiting <- struct{}{}
+		<-c.gate
+	})
+	return c.Context.Done()
+}
+
+// TestProxyEndpointResolverCancellation pins that a caller's cancellation ends
+// only that caller's wait: it returns its own context error promptly, the
+// discovery it shared keeps running (a spawned proxy is not a caller's to
+// stop), and the other waiters still get its endpoint.
+func TestProxyEndpointResolverCancellation(t *testing.T) {
+	t.Run("already canceled caller starts no discovery", func(t *testing.T) {
+		b := newBlockedDiscovery()
+		r := newProxyEndpointResolver(b.discover)
+		r.arm()
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		cfg := mysql.NewConfig()
+		cfg.Addr = "127.0.0.1:4000"
+		require.ErrorIs(t, r.beforeConnect(ctx, cfg), context.Canceled)
+		assert.Zero(t, b.calls.Load())
+		assert.Equal(t, "127.0.0.1:4000", cfg.Addr)
+	})
+
+	t.Run("one of two waiters cancels", func(t *testing.T) {
+		b := newBlockedDiscovery()
+		r := newProxyEndpointResolver(b.discover)
+		r.arm()
+		waiting := make(chan struct{}, 2)
+		canceledCtx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		canceledCfg, otherCfg := mysql.NewConfig(), mysql.NewConfig()
+		canceledDone, otherDone := make(chan error, 1), make(chan error, 1)
+		// The canceling caller is the one whose connection started discovery.
+		go func() {
+			canceledDone <- r.beforeConnect(&waitProbeContext{Context: canceledCtx, waiting: waiting}, canceledCfg)
+		}()
+		receiveWithin(t, b.entered, 10*time.Second, "discovery to start")
+		receiveWithin(t, waiting, 10*time.Second, "the first caller to wait")
+		go func() {
+			otherDone <- r.beforeConnect(&waitProbeContext{Context: context.Background(), waiting: waiting}, otherCfg)
+		}()
+		receiveWithin(t, waiting, 10*time.Second, "the second caller to wait")
+
+		cancel()
+		require.ErrorIs(t, receiveWithin(t, canceledDone, time.Second, "the canceled caller"), context.Canceled)
+		assert.Zero(t, b.finished.Load(), "the canceled caller must return while discovery is still running")
+
+		close(b.release)
+		require.NoError(t, receiveWithin(t, otherDone, 10*time.Second, "the remaining caller"))
+		assert.Equal(t, "127.0.0.1:4321", otherCfg.Addr)
+		assert.Empty(t, canceledCfg.Addr, "a canceled caller's connection config is left untouched")
+		assert.Equal(t, int64(1), b.calls.Load())
+		assert.Equal(t, int64(1), b.finished.Load(), "cancellation must not stop the shared discovery")
+	})
+
+	t.Run("every waiter cancels", func(t *testing.T) {
+		b := newBlockedDiscovery()
+		r := newProxyEndpointResolver(b.discover)
+		r.arm()
+		results := make(chan error, 2)
+		for range 2 {
+			ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+			defer cancel()
+			go func() { results <- r.beforeConnect(ctx, mysql.NewConfig()) }()
+		}
+		for range 2 {
+			require.ErrorIs(t, receiveWithin(t, results, 10*time.Second, "a caller"), context.DeadlineExceeded)
+		}
+		assert.Equal(t, int64(1), b.calls.Load())
+
+		// The abandoned discovery still runs to completion, and the next
+		// connection starts a discovery of its own.
+		close(b.release)
+		require.Eventually(t, func() bool {
+			r.mu.Lock()
+			defer r.mu.Unlock()
+			return r.inflight == nil
+		}, 10*time.Second, time.Millisecond, "the abandoned discovery must finish")
+		assert.Equal(t, int64(1), b.finished.Load())
+		require.NoError(t, r.beforeConnect(context.Background(), mysql.NewConfig()))
+		assert.Equal(t, int64(2), b.calls.Load())
+		assert.Equal(t, int64(2), b.finished.Load())
+	})
+
+	t.Run("cancellation wins over a discovery that finished at the same time", func(t *testing.T) {
+		// Both are ready when the canceled caller looks; without an explicit
+		// check it would get the endpoint about half the time.
+		for i := range 32 {
+			b := newBlockedDiscovery()
+			r := newProxyEndpointResolver(b.discover)
+			r.arm()
+			waiting := make(chan struct{}, 2)
+			gate := make(chan struct{})
+			ctx, cancel := context.WithCancel(context.Background())
+			canceledCfg := mysql.NewConfig()
+			canceledDone, otherDone := make(chan error, 1), make(chan error, 1)
+			go func() {
+				canceledDone <- r.beforeConnect(&gatedDoneContext{Context: ctx, waiting: waiting, gate: gate}, canceledCfg)
+			}()
+			receiveWithin(t, waiting, 10*time.Second, "the canceled caller to wait")
+			go func() {
+				otherDone <- r.beforeConnect(&waitProbeContext{Context: context.Background(), waiting: waiting}, mysql.NewConfig())
+			}()
+			receiveWithin(t, waiting, 10*time.Second, "the other caller to wait")
+
+			cancel()
+			close(b.release)
+			// The other caller returning means the discovery has published.
+			require.NoError(t, receiveWithin(t, otherDone, 10*time.Second, "the other caller"))
+			close(gate)
+			err := receiveWithin(t, canceledDone, 10*time.Second, "the canceled caller")
+			require.ErrorIs(t, err, context.Canceled, "iteration %d", i)
+			require.Empty(t, canceledCfg.Addr, "iteration %d", i)
+		}
+	})
+}
