@@ -61,3 +61,23 @@ SET @sql = IF(@wisp_events_comment_needs_fix = 1,
     'ALTER TABLE wisp_events MODIFY COLUMN comment LONGTEXT DEFAULT ''''',
     'SELECT 1');
 PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+-- compaction_snapshots.snapshot_json: the tier-1 archive the compactor
+-- restores from. Created BLOB (0010), the same 65,535-byte cap, while every
+-- issue text field it marshals has been LONGTEXT since 0049 -- so archiving
+-- an issue whose marshaled snapshot exceeds the cap fails and aborts
+-- compaction before any content is overwritten (internal/compact/compactor).
+-- Kept binary, not retyped to text: the column stores serialized JSON bytes
+-- verbatim, and 0068's durable_state JSON -> LONGBLOB retype is the
+-- precedent. NOT NULL, as 0010 created it.
+SET @snapshot_json_needs_fix = (
+    SELECT IF(COLUMN_TYPE = 'blob', 1, 0)
+    FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'compaction_snapshots'
+      AND COLUMN_NAME = 'snapshot_json'
+);
+SET @sql = IF(@snapshot_json_needs_fix = 1,
+    'ALTER TABLE compaction_snapshots MODIFY COLUMN snapshot_json LONGBLOB NOT NULL',
+    'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;

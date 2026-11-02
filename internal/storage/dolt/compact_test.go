@@ -1,6 +1,7 @@
 package dolt
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -865,4 +866,70 @@ func TestSnapshotRestoreRoundTrip(t *testing.T) {
 	if got.CompactionLevel != 0 {
 		t.Fatalf("expected compaction_level reset to 0, got %d", got.CompactionLevel)
 	}
+}
+
+// TestSnapshotRestoreRoundTripOversizedContent pins the snapshot half of
+// GH#3925: compaction_snapshots.snapshot_json was BLOB (65,535-byte cap)
+// while every issue text field it archives is LONGTEXT, so archiving an issue
+// whose marshaled snapshot exceeds the cap fails and aborts tier-1 compaction
+// before any content is overwritten. Migration 0075 widens it to LONGBLOB;
+// after it, archive, destructive overwrite and restore must all succeed with
+// the description byte-identical to the original.
+func TestSnapshotRestoreRoundTripOversizedContent(t *testing.T) {
+	run := func(t *testing.T, description string) {
+		store, cleanup := setupTestStore(t)
+		defer cleanup()
+
+		ctx, cancel := testContext(t)
+		defer cancel()
+
+		issue := &types.Issue{
+			ID:          "snap-rt-oversized",
+			Title:       "Oversized Round Trip",
+			Description: description,
+			Status:      types.StatusOpen,
+			Priority:    2,
+			IssueType:   types.TypeTask,
+		}
+		if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+			t.Fatalf("create issue: %v", err)
+		}
+
+		if err := store.SnapshotIssue(ctx, issue.ID, 1); err != nil {
+			t.Fatalf("snapshot %d-byte description: %v", len(description), err)
+		}
+		if err := store.UpdateIssue(ctx, issue.ID, map[string]interface{}{
+			"description": "compacted summary", "design": "", "notes": "", "acceptance_criteria": "",
+		}, "compactor"); err != nil {
+			t.Fatalf("overwrite: %v", err)
+		}
+		if err := store.ApplyCompaction(ctx, issue.ID, 1, 100, 7, "deadbeef"); err != nil {
+			t.Fatalf("apply compaction: %v", err)
+		}
+
+		applied, err := store.RestoreFromSnapshot(ctx, issue.ID)
+		if err != nil {
+			t.Fatalf("restore: %v", err)
+		}
+		if applied == nil {
+			t.Fatalf("expected restore to apply a snapshot")
+		}
+		got, err := store.GetIssue(ctx, issue.ID)
+		if err != nil {
+			t.Fatalf("get restored issue: %v", err)
+		}
+		if got.Description != description {
+			t.Fatalf("restored description: %d bytes, want the original %d bytes byte-for-byte", len(got.Description), len(description))
+		}
+	}
+
+	t.Run("70000 bytes", func(t *testing.T) {
+		run(t, strings.Repeat("d", 70000))
+	})
+
+	// Multibyte content: 21,846 euro signs are 65,538 UTF-8 bytes, over the
+	// BLOB cap even though the rune count is under it.
+	t.Run("utf8 over cap", func(t *testing.T) {
+		run(t, strings.Repeat("€", 21846))
+	})
 }

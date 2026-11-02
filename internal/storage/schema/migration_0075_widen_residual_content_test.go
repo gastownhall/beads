@@ -44,6 +44,8 @@ func TestMigration0075WidensEventsCommentGuarded(t *testing.T) {
 		"'ALTER TABLE events MODIFY COLUMN comment LONGTEXT'",
 		"@wisp_events_comment_needs_fix",
 		"'ALTER TABLE wisp_events MODIFY COLUMN comment LONGTEXT DEFAULT '''''",
+		"@snapshot_json_needs_fix",
+		"'ALTER TABLE compaction_snapshots MODIFY COLUMN snapshot_json LONGBLOB NOT NULL'",
 	} {
 		if !strings.Contains(upSQL, want) {
 			t.Errorf("0075 up migration missing %q", want)
@@ -65,6 +67,9 @@ func TestMigration0075WidensEventsCommentGuarded(t *testing.T) {
 	}
 	if !strings.Contains(got, "ALTER TABLE wisp_events MODIFY COLUMN comment LONGTEXT DEFAULT '';") {
 		t.Errorf("0075 CLI substitute missing direct wisp_events.comment widening: %s", got)
+	}
+	if !strings.Contains(got, "ALTER TABLE compaction_snapshots MODIFY COLUMN snapshot_json LONGBLOB NOT NULL;") {
+		t.Errorf("0075 CLI substitute missing direct snapshot_json widening: %s", got)
 	}
 	if !cliSubstituteAssumesWispTables(migration0075Up) {
 		t.Error("0075 is not registered on cliSubstituteAssumesWispTables; its substitute's bare wisp_events MODIFY aborts replays over never-synced clones")

@@ -2072,6 +2072,7 @@ func TestAllMigrationsSQLUsesDirectDDLForKnownCLIIncompatibilities(t *testing.T)
 		// 0075: prepared MODIFY COLUMN widenings, same shape as 0065.
 		"ALTER TABLE events MODIFY COLUMN comment LONGTEXT;",
 		"ALTER TABLE wisp_events MODIFY COLUMN comment LONGTEXT DEFAULT '';",
+		"ALTER TABLE compaction_snapshots MODIFY COLUMN snapshot_json LONGBLOB NOT NULL;",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("AllMigrationsSQL missing direct CLI DDL %q", want)
@@ -2120,6 +2121,7 @@ func TestAllMigrationsSQLUsesDirectDDLForKnownCLIIncompatibilities(t *testing.T)
 		// the probes.
 		"@events_comment_needs_fix",
 		"@wisp_events_comment_needs_fix",
+		"@snapshot_json_needs_fix",
 	} {
 		if strings.Contains(got, forbidden) {
 			t.Fatalf("AllMigrationsSQL contains source prepared-DDL guard %q", forbidden)
