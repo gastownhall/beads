@@ -14,6 +14,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/internal/workapi"
 )
 
 // Wisp commands - manage ephemeral molecules
@@ -703,25 +704,86 @@ func protectedWispStatuses(ctx context.Context, r molReader) (map[types.Status]b
 	return protected, nil
 }
 
-// isProtectedWisp reports whether a wisp is live work that age-based GC must
-// never reclaim. A wisp is protected if it is explicitly pinned, if it is
-// blocked on an open dependency (blockedSet, derived from is_blocked), or if
-// its status falls in a protected category. Reclaiming any of these
-// mid-execution destroys active molecules (GH#4394).
+// wispGuard is the set of protections a wisp-GC selection applies: a wisp is
+// spared if it is explicitly pinned, blocked on an open dependency (derived
+// from is_blocked), in a protected status category (GH#4394), or carries a
+// label the workspace named in wisp.protected_labels (bd-961adp).
 //
-// Named isProtectedWisp rather than isActiveWisp to avoid confusion with
+// It is one struct rather than a loose parameter pair so a future protection
+// cannot silently miss one of the sites that filter candidates: the age
+// sweep's parent scan, its cascade expansion, and the closed purge all decide
+// with the same guard (the closed purge with its label half only — that route
+// makes no status or blocked reads).
+type wispGuard struct {
+	blocked  map[string]bool
+	statuses map[types.Status]bool
+	labels   map[string]bool
+}
+
+// protects reports whether any protection spares this wisp from the GC.
+//
+// Named protects, not isProtectedWisp, to avoid confusion with
 // (*DoltStore).isActiveWisp in internal/storage/dolt, which is in this same
 // delete path but means only "a row for this ID exists in the wisps table".
-func isProtectedWisp(issue *types.Issue, blockedSet map[string]bool, protectedStatuses map[types.Status]bool) bool {
+func (g wispGuard) protects(issue *types.Issue) bool {
 	// The pinned flag is independent of the pinned status; the closed-purge
 	// branch of this same command already honors it (see runWispPurgeClosed).
 	if issue.Pinned {
 		return true
 	}
-	if blockedSet[issue.ID] {
+	if g.blocked[issue.ID] {
 		return true
 	}
-	return protectedStatuses[issue.Status]
+	if g.statuses[issue.Status] {
+		return true
+	}
+	return g.labelSpares(issue)
+}
+
+// protectsWithoutLabels reports whether a protection other than the labels
+// spares this wisp. The skip report counts a wisp the labels saved only when
+// nothing else already did: a count that claims the labels' reach while
+// another guard held the wisp reads as misconfiguration (bd-961adp).
+func (g wispGuard) protectsWithoutLabels(issue *types.Issue) bool {
+	return issue.Pinned || g.blocked[issue.ID] || g.statuses[issue.Status]
+}
+
+// labelSpares reports whether this wisp carries a protected label. Labels
+// match exactly and case-sensitively.
+func (g wispGuard) labelSpares(issue *types.Issue) bool {
+	for _, label := range issue.Labels {
+		if g.labels[label] {
+			return true
+		}
+	}
+	return false
+}
+
+// protectedLabelSet reads the workspace's wisp.protected_labels setting as a
+// lookup set, with extraLabels (--exclude-label) added for this invocation.
+//
+// The read is required, not best-effort, like protectedWispStatuses: a
+// setting that cannot be read, or does not parse, aborts the sweep (fail
+// closed). An unreadable setting must not read as "no labels configured" —
+// the record the operator marked irreplaceable is exactly the one at risk,
+// and an unlabeled issue is indistinguishable from a failed label read.
+func protectedLabelSet(ctx context.Context, r molReader, extraLabels []string) (map[string]bool, error) {
+	value, err := r.GetConfig(ctx, workapi.SettingKeyWispProtectedLabels)
+	if err != nil {
+		return nil, fmt.Errorf("reading %s for the protected-label guard: %w", workapi.SettingKeyWispProtectedLabels, err)
+	}
+	names, err := workapi.ParseProtectedLabelsValue(value)
+	if err != nil {
+		return nil, fmt.Errorf("invalid %s value: %v", workapi.SettingKeyWispProtectedLabels, err)
+	}
+	set := make(map[string]bool, len(names)+len(extraLabels))
+	for _, name := range names {
+		set[name] = true
+	}
+	for _, name := range extraLabels {
+		set[name] = true
+	}
+	return set, nil
 }
 
 func runWispGC(cmd *cobra.Command, args []string) error {
@@ -769,13 +831,14 @@ func runWispGC(cmd *cobra.Command, args []string) error {
 		return runWispPurgeClosed(ctx, dryRun, force, excludeTypes)
 	}
 
-	abandoned, err := findAbandonedWisps(ctx, store, cleanAll, ageThreshold, excludeTypes)
-	if err != nil && abandoned == nil {
+	sel, err := findAbandonedWisps(ctx, store, cleanAll, ageThreshold, excludeTypes)
+	if err != nil && sel.abandoned == nil {
 		return HandleError("%v", err)
 	}
 	if err != nil {
 		fmt.Fprintf(cmd.ErrOrStderr(), "Warning: cascade expansion incomplete: %v\n", err)
 	}
+	abandoned := sel.abandoned
 
 	if len(abandoned) == 0 {
 		if jsonOutput {
@@ -853,7 +916,16 @@ func wispIsAbandoned(now, updatedAt time.Time, ageThreshold time.Duration) bool 
 // t.Parallel().
 var wispGCNow = time.Now
 
-func findAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageThreshold time.Duration, excludeTypes []types.IssueType) ([]*types.Issue, error) {
+// wispGCSelection is what findAbandonedWisps selected, and what its caller
+// reports: the reclaim candidates, and how many distinct wisps a protected
+// label alone spared. A guard that silently drops rows reads identically to
+// having had nothing to delete, so the skip is counted (bd-961adp).
+type wispGCSelection struct {
+	abandoned   []*types.Issue
+	labelSpared int
+}
+
+func findAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageThreshold time.Duration, excludeTypes []types.IssueType) (wispGCSelection, error) {
 	ephemeralFlag := true
 	filter := types.IssueFilter{
 		Ephemeral:    &ephemeralFlag,
@@ -862,12 +934,12 @@ func findAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageThre
 	}
 	issues, err := r.SearchIssues(ctx, "", filter)
 	if err != nil {
-		return nil, err
+		return wispGCSelection{}, err
 	}
 
 	blocked, err := r.GetBlockedIssues(ctx, types.WorkFilter{})
 	if err != nil {
-		return nil, fmt.Errorf("determining blocked wisps for age GC: %w", err)
+		return wispGCSelection{}, fmt.Errorf("determining blocked wisps for age GC: %w", err)
 	}
 	blockedSet := make(map[string]bool, len(blocked))
 	for _, b := range blocked {
@@ -876,11 +948,18 @@ func findAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageThre
 
 	protectedStatuses, err := protectedWispStatuses(ctx, r)
 	if err != nil {
-		return nil, err
+		return wispGCSelection{}, err
 	}
 
+	labels, err := protectedLabelSet(ctx, r, nil)
+	if err != nil {
+		return wispGCSelection{}, err
+	}
+	guard := wispGuard{blocked: blockedSet, statuses: protectedStatuses, labels: labels}
+
 	now := wispGCNow()
-	var abandoned []*types.Issue
+	var sel wispGCSelection
+	labelSparedIDs := make(map[string]bool)
 	for _, issue := range issues {
 		if r.IsInfraTypeCtx(ctx, issue.IssueType) {
 			continue
@@ -888,20 +967,23 @@ func findAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageThre
 		if issue.Status == types.StatusClosed && !cleanAll {
 			continue
 		}
-		if isProtectedWisp(issue, blockedSet, protectedStatuses) {
+		if guard.protects(issue) {
+			countLabelSpare(guard, labelSparedIDs, issue, now, ageThreshold)
 			continue
 		}
 		if wispIsAbandoned(now, issue.UpdatedAt, ageThreshold) {
-			abandoned = append(abandoned, issue)
+			sel.abandoned = append(sel.abandoned, issue)
 		}
 	}
 
-	if len(abandoned) == 0 {
-		return abandoned, nil
+	sel.labelSpared = len(labelSparedIDs)
+
+	if len(sel.abandoned) == 0 {
+		return sel, nil
 	}
 
-	parentIDs := make([]string, len(abandoned))
-	for i, issue := range abandoned {
+	parentIDs := make([]string, len(sel.abandoned))
+	for i, issue := range sel.abandoned {
 		parentIDs[i] = issue.ID
 	}
 	childIDs, cascadeErr := r.FindWispDependentsRecursive(ctx, parentIDs)
@@ -915,8 +997,8 @@ func findAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageThre
 		// not yet routed through the role.
 		childIssues, fetchErr := r.GetIssuesByIDs(ctx, childIDSlice)
 		if fetchErr == nil {
-			abandonedSet := make(map[string]bool, len(abandoned))
-			for _, issue := range abandoned {
+			abandonedSet := make(map[string]bool, len(sel.abandoned))
+			for _, issue := range sel.abandoned {
 				abandonedSet[issue.ID] = true
 			}
 			// Dependents skip the parent scan's not-closed clause: an
@@ -929,7 +1011,10 @@ func findAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageThre
 				if r.IsInfraTypeCtx(ctx, child.IssueType) {
 					continue
 				}
-				if isProtectedWisp(child, blockedSet, protectedStatuses) {
+				// The labels join the cascade's protections with bd-961adp
+				// AC-2; until then the child scan keeps the parent scan's
+				// prior guard, which is every protection but the labels.
+				if guard.protectsWithoutLabels(child) {
 					continue
 				}
 				// Children are held to the same --age contract as parents. One
@@ -938,11 +1023,26 @@ func findAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageThre
 				if !wispIsAbandoned(now, child.UpdatedAt, ageThreshold) {
 					continue
 				}
-				abandoned = append(abandoned, child)
+				sel.abandoned = append(sel.abandoned, child)
 			}
 		}
 	}
-	return abandoned, cascadeErr
+	return sel, cascadeErr
+}
+
+// countLabelSpare records an ID the protected labels alone spared. A wisp
+// another guard already spares is not a label save, and neither is one too
+// young to select: both would have survived without the setting. A wisp the
+// parent scan and the cascade both visit counts once — the set is shared
+// across the two sites.
+func countLabelSpare(guard wispGuard, spared map[string]bool, issue *types.Issue, now time.Time, ageThreshold time.Duration) {
+	if guard.protectsWithoutLabels(issue) {
+		return
+	}
+	if !wispIsAbandoned(now, issue.UpdatedAt, ageThreshold) {
+		return
+	}
+	spared[issue.ID] = true
 }
 
 func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, excludeTypes []types.IssueType) error {

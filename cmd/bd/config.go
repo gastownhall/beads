@@ -1444,6 +1444,11 @@ var recognizedConfigKeys = map[string]bool{
 	// deleting records.
 	"events-journal": true, "events-journal-auto-prune": true,
 	"events-journal-retain-days": true, "events-journal-retain-rows": true,
+	// The labels `bd mol wisp gc` must never reclaim. Registered as the exact
+	// key, not a wisp. prefix, so a typo still warns. Read from the database
+	// only, and validated at write time by workapi.ValidateSettingWrite so a
+	// stored value always parses when the sweep reads it.
+	"wisp.protected_labels": true,
 }
 
 func isRecognizedConfigKey(key string) bool {

@@ -15,6 +15,7 @@ type cascadeAgeReader struct {
 	molReader
 	issues   []*types.Issue
 	children map[string]bool
+	config   map[string]string
 }
 
 func (r *cascadeAgeReader) SearchIssues(context.Context, string, types.IssueFilter) ([]*types.Issue, error) {
@@ -27,6 +28,12 @@ func (r *cascadeAgeReader) GetBlockedIssues(context.Context, types.WorkFilter) (
 
 func (r *cascadeAgeReader) GetCustomStatusesDetailed(context.Context) ([]types.CustomStatus, error) {
 	return nil, nil
+}
+
+// GetConfig serves the protected-label guard its stored setting: nil unless a
+// test configures one, which is the same answer an unset key gives.
+func (r *cascadeAgeReader) GetConfig(_ context.Context, key string) (string, error) {
+	return r.config[key], nil
 }
 
 func (r *cascadeAgeReader) IsInfraTypeCtx(context.Context, types.IssueType) bool { return false }
@@ -105,8 +112,8 @@ func TestWispGCCascadeRespectsAge(t *testing.T) {
 		t.Fatalf("findAbandonedWisps: %v", err)
 	}
 
-	collected := make(map[string]bool, len(got))
-	for _, issue := range got {
+	collected := make(map[string]bool, len(got.abandoned))
+	for _, issue := range got.abandoned {
 		collected[issue.ID] = true
 	}
 
@@ -149,7 +156,7 @@ func TestWispGCRaisingAgeDoesNotSaveFreshChild(t *testing.T) {
 		if err != nil {
 			t.Fatalf("findAbandonedWisps(--age %v): %v", threshold, err)
 		}
-		for _, issue := range got {
+		for _, issue := range got.abandoned {
 			if issue.ID == "gc-newborn" {
 				t.Errorf("--age %v still collected a wisp created 1s ago; the threshold must apply to cascade children", threshold)
 			}
@@ -203,8 +210,8 @@ func TestWispGCCascadeChildAgesAtStoragePrecision(t *testing.T) {
 		if err != nil {
 			t.Fatalf("findAbandonedWisps(--age %s): %v", tc.threshold, err)
 		}
-		collected := make(map[string]bool, len(got))
-		for _, issue := range got {
+		collected := make(map[string]bool, len(got.abandoned))
+		for _, issue := range got.abandoned {
 			collected[issue.ID] = true
 		}
 		if !collected[parent.ID] {

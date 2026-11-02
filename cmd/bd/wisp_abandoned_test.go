@@ -88,6 +88,12 @@ func (fixedWispsMolReader) GetBlockedIssues(context.Context, types.WorkFilter) (
 func (fixedWispsMolReader) GetCustomStatusesDetailed(context.Context) ([]types.CustomStatus, error) {
 	return nil, nil
 }
+
+// GetConfig answers the protected-label guard the way an unset key does: no
+// configured protection.
+func (fixedWispsMolReader) GetConfig(context.Context, string) (string, error) {
+	return "", nil
+}
 func (fixedWispsMolReader) IsInfraTypeCtx(context.Context, types.IssueType) bool { return false }
 func (fixedWispsMolReader) FindWispDependentsRecursive(context.Context, []string) (map[string]bool, error) {
 	return nil, nil
@@ -130,9 +136,9 @@ func TestFindAbandonedWispsAgesAtStoragePrecision(t *testing.T) {
 		if err != nil {
 			t.Fatalf("findAbandonedWisps(--age %s): %v", tc.threshold, err)
 		}
-		if len(got) != tc.want {
+		if len(got.abandoned) != tc.want {
 			t.Errorf("findAbandonedWisps(--age %s) at %s, updated_at 12:00:01: got %d wisps, want %d",
-				tc.threshold, tc.now.Format("15:04:05.000"), len(got), tc.want)
+				tc.threshold, tc.now.Format("15:04:05.000"), len(got.abandoned), tc.want)
 		}
 	}
 }
