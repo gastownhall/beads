@@ -96,7 +96,16 @@ func (r *proxyEndpointResolver) arm() {
 // Overlapping connections share one discovery: the caller that admits the
 // flight becomes its worker and publishes the result under r.mu; the others
 // wait on the flight outside the mutex and read what it published.
+//
+// Cancellation is the caller's own: an already-canceled caller is refused
+// before it can admit or start work, and a waiter whose context ends is
+// released with its context error while the shared discovery keeps running —
+// its result stays available to every other waiter, and the spawned proxy
+// work it may include is never run down by one caller hanging up.
 func (r *proxyEndpointResolver) beforeConnect(ctx context.Context, cfg *mysql.Config) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	r.mu.Lock()
 	armed := r.armed
 	r.mu.Unlock()
@@ -119,7 +128,14 @@ func (r *proxyEndpointResolver) beforeConnect(ctx context.Context, cfg *mysql.Co
 		return nil
 	}
 
-	<-flight.done
+	select {
+	case <-flight.done:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if flight.err != nil {
 		// Bare: the flight's error is normalized into the wrapped contract by
 		// the error-path change of its own step.
