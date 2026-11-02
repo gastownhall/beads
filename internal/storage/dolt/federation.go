@@ -579,24 +579,10 @@ func (s *DoltStore) stageFilteredBranch(ctx context.Context, conn *sql.Conn, sou
 // were deleted. The special type "wisp" matches ephemeral rows. A DELETE error
 // is intentionally ignored (deleted stays false for that type), preserving the
 // pre-existing best-effort filtering behavior; the caller only recomputes and
-// commits when something was actually removed.
+// commits when something was actually removed. Shared with the embedded
+// filtered push (GH#7890): the SQL lives in versioncontrolops.
 func deleteExcludedIssues(ctx context.Context, conn *sql.Conn, excludeTypes []string) bool {
-	deleted := false
-	for _, excludeType := range excludeTypes {
-		var result interface{ RowsAffected() (int64, error) }
-		var execErr error
-		if excludeType == "wisp" {
-			result, execErr = conn.ExecContext(ctx, "DELETE FROM issues WHERE ephemeral = 1")
-		} else {
-			result, execErr = conn.ExecContext(ctx, "DELETE FROM issues WHERE issue_type = ?", excludeType)
-		}
-		if execErr == nil {
-			if n, _ := result.RowsAffected(); n > 0 {
-				deleted = true
-			}
-		}
-	}
-	return deleted
+	return versioncontrolops.DeleteExcludedIssues(ctx, conn, excludeTypes)
 }
 
 // cleanupFilteredStaging discards the operation connection (an in-flight cancel

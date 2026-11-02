@@ -97,6 +97,7 @@ go_library(
         "//memoryops",
         "@com_github_cenkalti_backoff_v4//:backoff",
         "@com_github_dolthub_driver_v2//:driver",
+        "@com_github_google_uuid//:uuid",
     ],
 )
 
@@ -162,6 +163,7 @@ go_test(
         "expected_revision_contract_test.go",
         "external_dependencies_test.go",
         "federation_credentials_test.go",
+        "federation_filter_test.go",
         "federation_legacy_test.go",
         "get_issue_test.go",
         "git_ref_pin_test.go",
@@ -269,6 +271,7 @@ go_test(
     deps = [
         "//:beads",
         "//backend/conformance",
+        "//internal/config",
         "//internal/debug",
         "//internal/eventsjournal",
         "//internal/hooks",

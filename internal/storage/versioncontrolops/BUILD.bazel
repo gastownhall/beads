@@ -14,6 +14,7 @@ go_library(
         "db.go",
         "envguards.go",
         "fastforward.go",
+        "federation_filter.go",
         "flatten.go",
         "gc.go",
         "mergesettle.go",

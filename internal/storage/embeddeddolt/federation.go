@@ -16,15 +16,24 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
+
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/peercred"
+	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 )
 
 // credentialKeyFile is the filename for the random encryption key.
 const credentialKeyFile = ".beads-credential-key" //nolint:gosec // G101: filename, not a credential
+
+// federationStagingCleanupTimeout bounds the staging-branch cleanup after the
+// filtered push attempt, detached from the caller's possibly-canceled context.
+// Mirrors the server store's twin in dolt/federation.go.
+const federationStagingCleanupTimeout = 30 * time.Second
 
 // ensureCredentialKey lazily initializes the credential encryption key.
 func (s *EmbeddedDoltStore) ensureCredentialKey() error {
@@ -446,8 +455,13 @@ func (s *EmbeddedDoltStore) Sync(ctx context.Context, peer string, strategy stri
 		result.PulledCommits = 1
 	}
 
-	// Step 5: Push
-	if err := s.PushTo(ctx, peer); err != nil {
+	// Step 5: Push our changes to peer, filtering excluded issue types. The
+	// server-mode twin (dolt/federation.go's Sync) has always applied
+	// federation.exclude_types here; embedded Sync silently published every
+	// issue, so a machine that kept private types local via exclude_types
+	// leaked them to the peer (GH#7890).
+	excludeTypes := config.GetFederationConfig().ExcludeTypes
+	if err := s.filteredPushToPeer(ctx, peer, excludeTypes); err != nil {
 		result.PushError = err
 	} else {
 		result.Pushed = true
@@ -458,6 +472,139 @@ func (s *EmbeddedDoltStore) Sync(ctx context.Context, peer string, strategy stri
 
 	result.EndTime = time.Now()
 	return result, nil
+}
+
+// filteredPushToPeer pushes the store's branch to peer with the excluded issue
+// types removed, mirroring the server store's filtered push (dolt/federation.go)
+// over the shared versioncontrolops primitives: when excludeTypes is empty it
+// delegates directly to PushTo; otherwise it stages the filtered tip on a
+// temporary branch, pushes the staging ref mapped to the peer's expected
+// branch name, and deletes the staging branch whether the push succeeded or
+// not (GH#7890).
+func (s *EmbeddedDoltStore) filteredPushToPeer(ctx context.Context, peer string, excludeTypes []string) (retErr error) {
+	if len(excludeTypes) == 0 {
+		return s.PushTo(ctx, peer)
+	}
+	sourceBranch := s.branch
+	operationID, err := uuid.NewRandom()
+	if err != nil {
+		return fmt.Errorf("federation filter: generate staging branch: %w", err)
+	}
+	stagingBranch := versioncontrolops.FederationStagingBranchPrefix + operationID.String()
+
+	// Arm cleanup before staging: the staging branch must not outlive the
+	// push attempt, whatever its outcome. Dolt branch state is repo state, so
+	// the delete runs on its own connection — and detached from ctx, which
+	// may already be canceled when the deferred delete runs. A missing
+	// branch (staging never got created, or its create response was lost
+	// after Dolt created it) is success here.
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), federationStagingCleanupTimeout)
+		defer cancel()
+		if cleanupErr := s.withMutatingDBConn(cleanupCtx, func(db versioncontrolops.DBConn) error {
+			return versioncontrolops.DeleteBranch(cleanupCtx, db, stagingBranch)
+		}); cleanupErr != nil && !isMissingStagingBranchErr(cleanupErr) {
+			retErr = errors.Join(retErr, fmt.Errorf("federation filter: cleanup: %w", cleanupErr))
+		}
+	}()
+
+	// Branch state is session-scoped: every staging step runs on one pinned
+	// connection, whose session starts checked out on sourceBranch (OpenSQL
+	// pins it), and the source checkout is restored before the push so the
+	// store's other connections never observe the staging branch.
+	if err := s.withMutatingPinnedDBConn(ctx, func(conn versioncontrolops.DBConn) error {
+		recomputeConn, ok := conn.(versioncontrolops.BlockedRecomputeConn)
+		if !ok {
+			return fmt.Errorf("federation filter: staged connection %T cannot run the is_blocked recompute transaction", conn)
+		}
+		return stageFilteredBranch(ctx, recomputeConn, sourceBranch, stagingBranch, excludeTypes)
+	}); err != nil {
+		return err
+	}
+
+	// Push the staging branch to the peer, mapped to the peer's expected
+	// branch name. Credentials resolve through withPeerAuth exactly as
+	// PushTo's unfiltered push does.
+	refspec := stagingBranch + ":" + sourceBranch
+	return s.withPeerAuth(ctx, peer, func(user string) error {
+		return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
+			return versioncontrolops.Push(ctx, db, peer, refspec, user)
+		})
+	})
+}
+
+// stageFilteredBranch creates the staging branch from sourceBranch on the
+// pinned connection, deletes the excluded issue types on it, recomputes and
+// commits is_blocked when any rows were removed, and restores sourceBranch so
+// the caller can push the staging ref. Branch state is session-scoped, so
+// every step stays on conn.
+func stageFilteredBranch(ctx context.Context, conn versioncontrolops.BlockedRecomputeConn, sourceBranch, stagingBranch string, excludeTypes []string) error {
+	// Create staging from the named source branch, not the session checkout:
+	// naming the ref keeps the staging tip pinned even if the session's view
+	// ever diverges from sourceBranch.
+	if _, err := conn.ExecContext(ctx, "CALL DOLT_BRANCH(?, ?)", stagingBranch, sourceBranch); err != nil {
+		return fmt.Errorf("federation filter: create staging branch: %w", err)
+	}
+
+	if err := versioncontrolops.CheckoutBranch(ctx, conn, stagingBranch); err != nil {
+		return fmt.Errorf("federation filter: checkout staging: %w", err)
+	}
+
+	// A branch minted from HEAD does not inherit the working-set-LOCAL ignored
+	// tables (wisps, wisp_dependencies, events, leases, ...): its working set
+	// holds only the versioned tables — the same shape a fresh clone has
+	// before its first open heals it. The staged is_blocked recompute below
+	// reads the ignored plane, so heal the staging session the same way an
+	// open does. Main is at latest here (schema_migrations is versioned, so
+	// the branch carries it), so this replays only the ignored lane, whose
+	// tables cannot be staged: the pass leaves no commit on the staging tip.
+	if _, err := schema.MigrateUp(ctx, conn); err != nil {
+		return fmt.Errorf("federation filter: heal staging working set: %w", err)
+	}
+
+	if versioncontrolops.DeleteExcludedIssues(ctx, conn, excludeTypes) {
+		if err := commitFilteredStaging(ctx, conn); err != nil {
+			return err
+		}
+	}
+
+	// Restore original branch context before pushing.
+	if err := versioncontrolops.CheckoutBranch(ctx, conn, sourceBranch); err != nil {
+		return fmt.Errorf("federation filter: restore branch %s: %w", sourceBranch, err)
+	}
+	return nil
+}
+
+// commitFilteredStaging repairs and commits the filtered graph on the staging
+// branch selected by conn: the unguarded in-transaction recompute (the working
+// set is dirty by design — the deletes are the point) followed by the filtered
+// commit, matching the server store's twin in dolt/federation.go.
+func commitFilteredStaging(ctx context.Context, conn versioncontrolops.BlockedRecomputeConn) error {
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("federation filter: begin staged is_blocked recompute: %w", err)
+	}
+	if _, err := issueops.RecomputeAllIsBlockedInTx(ctx, tx); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("federation filter: recompute staged is_blocked: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("federation filter: commit staged is_blocked recompute: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', ?)",
+		"federation: exclude private issue types"); err != nil {
+		return fmt.Errorf("federation filter: commit filtered state: %w", err)
+	}
+	return nil
+}
+
+// isMissingStagingBranchErr reports whether err is Dolt's "branch not found"
+// from a DOLT_BRANCH('-D'). The embedded driver surfaces stored-procedure
+// failures without the server's typed MySQL error, so the message is matched
+// as a case-insensitive substring, exactly as the server store's twin
+// (deleteFederationStagingBranch) does.
+func isMissingStagingBranchErr(err error) bool {
+	return strings.Contains(strings.ToLower(err.Error()), "branch not found")
 }
 
 // SyncStatus returns the synchronization status with a peer.
