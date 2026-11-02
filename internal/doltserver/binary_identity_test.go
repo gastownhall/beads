@@ -4,8 +4,10 @@ package doltserver
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -287,6 +289,136 @@ func TestLaunchBinaryUnrecordedServerComparedByVersion(t *testing.T) {
 			}
 			if !ok || rec.PID != wantPID || rec.Version != "2.6.0" || rec.Provenance != tc.wantRecord {
 				t.Errorf("record = %+v (ok=%v), want PID %d, version 2.6.0, provenance %s", rec, ok, wantPID, tc.wantRecord)
+			}
+		})
+	}
+}
+
+// TestLaunchBinaryConcurrentDetectionsReplaceOnce: bd processes that each
+// found the same stale server replace it once between them; the rest find
+// the replacement current under the lifecycle lock and keep it.
+func TestLaunchBinaryConcurrentDetectionsReplaceOnce(t *testing.T) {
+	beadsDir, launches := fakeStartWorkspace(t)
+	stubProcessListLaunchedHere(t)
+	state, err := startForTest(t, beadsDir)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	upgradeFakeDolt(t, "2.7.0")
+	if got := CheckServerBinary(beadsDir, state.Port, nil); got.Verdict != BinaryStale {
+		t.Fatalf("check = %+v, want stale", got)
+	}
+
+	const callers = 3
+	results := make([]BinaryReplacement, callers)
+	errs := make([]error, callers)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := range callers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			results[i], errs[i] = ReplaceStaleServer(beadsDir, state.Port, nil)
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	replaced := 0
+	for i, res := range results {
+		if res.State != nil && res.State.PID > 0 {
+			killAtCleanup(t, res.State.PID)
+		}
+		if errs[i] != nil {
+			t.Errorf("caller %d: %v", i, errs[i])
+		}
+		if res.Replaced {
+			replaced++
+		}
+	}
+	if replaced != 1 {
+		t.Errorf("%d callers replaced the server, want 1", replaced)
+	}
+	if got := launchedPorts(t, launches); len(got) != 2 {
+		t.Errorf("launches = %v, want the original and one replacement", got)
+	}
+}
+
+// trackUnrelatedProcess points beadsDir's pid file at a live process that is
+// not a dolt sql-server, as when the tracked server died and its PID was
+// reused, and returns that process.
+func trackUnrelatedProcess(t *testing.T, beadsDir string) *exec.Cmd {
+	t.Helper()
+	cmd := exec.Command("sleep", "60")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+	if err := os.WriteFile(pidPath(beadsDir), []byte(strconv.Itoa(cmd.Process.Pid)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return cmd
+}
+
+// childExited reports whether this process's child pid has exited (signal 0
+// cannot tell: it reaches an unreaped child too).
+func childExited(pid int) bool {
+	var ws syscall.WaitStatus
+	got, err := syscall.Wait4(pid, &ws, syscall.WNOHANG, nil)
+	return err == nil && got == pid
+}
+
+// TestLaunchBinaryUnconfirmedProcessNotSignaled: ReplaceStaleServer stops only
+// a PID confirmed to be a dolt sql-server. A tracked PID the process list
+// shows is something else is left alone and nothing is launched; one the
+// process list cannot vouch for is refused with an error, unsignaled.
+func TestLaunchBinaryUnconfirmedProcessNotSignaled(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		readable bool
+	}{
+		{name: "unrelated process", readable: true},
+		{name: "process list unreadable", readable: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			beadsDir, launches := fakeStartWorkspace(t)
+			stubProcessListLaunchedHere(t)
+			state, err := startForTest(t, beadsDir)
+			if err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			other := trackUnrelatedProcess(t, beadsDir)
+			if !tc.readable {
+				stubProcessList(t, func() ([]int, error) { return nil, errProcessListUnreadable })
+			}
+			older := reportsVersion("2.5.9")
+			if got := CheckServerBinary(beadsDir, state.Port, older); got.Verdict != BinaryStale || got.PID != other.Process.Pid {
+				t.Fatalf("check = %+v, want stale for PID %d", got, other.Process.Pid)
+			}
+
+			res, err := ReplaceStaleServer(beadsDir, state.Port, older)
+			if res.State != nil && res.State.PID > 0 {
+				killAtCleanup(t, res.State.PID)
+			}
+			if res.Replaced {
+				t.Errorf("ReplaceStaleServer replaced PID %d, which is not a confirmed dolt sql-server", other.Process.Pid)
+			}
+			if tc.readable && err != nil {
+				t.Errorf("ReplaceStaleServer = %v, want the unrelated process left alone without an error", err)
+			}
+			if !tc.readable && err == nil {
+				t.Error("ReplaceStaleServer = nil error, want a refusal for an unconfirmed PID")
+			}
+			if childExited(other.Process.Pid) || !pidAlive(state.PID) {
+				t.Errorf("tracked PID exited=%v, fake server alive=%v; want both untouched",
+					childExited(other.Process.Pid), pidAlive(state.PID))
+			}
+			if got := launchedPorts(t, launches); len(got) != 1 {
+				t.Errorf("launches = %v, want none beyond the original", got)
 			}
 		})
 	}
