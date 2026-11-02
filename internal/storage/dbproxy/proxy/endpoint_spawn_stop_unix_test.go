@@ -193,3 +193,41 @@ func TestForkExecChild_RotatesOversizedLogs(t *testing.T) {
 		})
 	}
 }
+
+// forkExecChild hands the child the server log to bound while it runs
+// (--rotate-logpath) only for a log bd owns (RotateLogFile), the same
+// ownership rule as the startup rotation.
+func TestForkExecChild_PassesRotateLogPathOnlyForOwnedLog(t *testing.T) {
+	for _, owned := range []bool{true, false} {
+		t.Run(map[bool]string{true: "owned", false: "operator log"}[owned], func(t *testing.T) {
+			root := t.TempDir()
+			childPath := filepath.Join(root, "args-child.sh")
+			require.NoError(t, os.WriteFile(childPath, []byte("#!/bin/sh\necho \"$@\"\nexit 0\n"), 0o700))
+			previous := ResolveExecutable
+			ResolveExecutable = func() (string, error) { return childPath, nil }
+			t.Cleanup(func() { ResolveExecutable = previous })
+
+			lock, err := util.TryLock(filepath.Join(root, LockFileName))
+			require.NoError(t, err)
+			opts := externalOpenOpts(root)
+			opts.LogFilePath = filepath.Join(root, "server.log")
+			opts.RotateLogFile = owned
+			child, err := forkExecChild(root, opts, opts.Port, "", lock)
+			require.NoError(t, err)
+			select {
+			case err := <-child.done:
+				require.NoError(t, err)
+			case <-time.After(spawnStopFailAfter):
+				t.Fatal("stub proxy child did not exit")
+			}
+
+			argv, err := os.ReadFile(opts.LogFilePath)
+			require.NoError(t, err)
+			if owned {
+				assert.Contains(t, string(argv), "--rotate-logpath")
+			} else {
+				assert.NotContains(t, string(argv), "--rotate-logpath")
+			}
+		})
+	}
+}

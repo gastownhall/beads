@@ -53,6 +53,13 @@ type ProxyOpts struct {
 	// off by default; db-proxy-child sets this from BD_DEBUG. Lifecycle and
 	// error lines are always written.
 	TraceConnections bool
+	// ServerLogPath is the backend server log the proxy bounds while it
+	// runs, alongside proxy.log (see logSizeWatcher). Set it only for a log
+	// bd owns (OpenOpts.RotateLogFile); empty leaves the server log alone.
+	ServerLogPath string
+	// LogSizeCheckInterval is how often the running proxy checks its logs'
+	// size; zero means defaultLogSizeCheckInterval.
+	LogSizeCheckInterval time.Duration
 }
 
 type proxyServer struct {
@@ -64,6 +71,9 @@ type proxyServer struct {
 	stopEpoch   string
 
 	traceConnections bool
+
+	serverLogPath        string
+	logSizeCheckInterval time.Duration
 
 	// reportUpstreamOutage answers a connection whose upstream is not
 	// serving with a MySQL error instead of a bare close; see
@@ -117,6 +127,9 @@ func NewProxyServer(opts ProxyOpts) *proxyServer {
 		stopEpoch:   opts.StopEpoch,
 
 		traceConnections: opts.TraceConnections,
+
+		serverLogPath:        opts.ServerLogPath,
+		logSizeCheckInterval: opts.LogSizeCheckInterval,
 
 		reportUpstreamOutage: reportsUpstreamOutage(opts.Server),
 	}
@@ -368,6 +381,7 @@ func (p *proxyServer) ListenAndServe(parentCtx context.Context) error {
 		return nil
 	})
 	g.Go(func() error { return p.idleWatcher(gctx) })
+	g.Go(func() error { return p.logSizeWatcher(gctx) })
 	g.Go(func() error {
 		t := time.NewTicker(backendHealthInterval)
 		defer t.Stop()
