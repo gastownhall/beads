@@ -407,3 +407,111 @@ func TestNewDoltServerUOWProvider_RecoversAfterProxyIdleExit(t *testing.T) {
 	require.NotEqual(t, oldPort, pf.Port,
 		"the provider must publish a replacement proxy endpoint, not the retired one")
 }
+
+// TestProviderBootstrapKeepsFixedEndpoint pins the bootstrap half of #7295's
+// rediscovery design: however the open ends — the single-session fast path
+// over an existing database, or the fall-through that creates a fresh one —
+// every bootstrap connection (probe, version check, schema work,
+// session-database assertion) uses the fixed construction endpoint with ZERO
+// rediscovery, the pool that was proven is the pool handed to the provider
+// (its idle connection is reused, again with zero rediscovery), and only a
+// genuinely NEW physical connection consults the armed resolver.
+//
+// Both constructors funnel into openAndInitSchema, which this test drives
+// directly with a counting resolver that delegates to the exact production
+// discovery; the managed and external constructors pass it their own resolvers
+// built the same way.
+func TestProviderBootstrapKeepsFixedEndpoint(t *testing.T) {
+	testutil.RequireDoltBinary(t)
+	bin, err := exec.LookPath("dolt")
+	require.NoError(t, err)
+
+	bdBin := buildBDBinary(t)
+	prev := proxy.ResolveExecutable
+	proxy.ResolveExecutable = func() (string, error) { return bdBin, nil }
+	t.Cleanup(func() { proxy.ResolveExecutable = prev })
+
+	t.Setenv("HOME", t.TempDir())
+
+	// openCounting opens database in a workspace rooted at storeRootDir
+	// through the production open, with a resolver that counts how many times
+	// production discovery actually ran for the provider's connections.
+	openCounting := func(t *testing.T, storeRootDir, database string) (*doltSQLProvider, *atomic.Int32) {
+		t.Helper()
+		port, err := proxy.PickFreePort()
+		require.NoError(t, err)
+		cfgPath := writeServerConfig(t, port)
+		logPath := filepath.Join(t.TempDir(), "server.log")
+
+		openOpts := proxy.OpenOpts{
+			Backend:        proxy.BackendLocalServer,
+			ConfigFilePath: cfgPath,
+			LogFilePath:    logPath,
+			DoltBinPath:    bin,
+			Database:       database,
+		}
+		var rediscoveries atomic.Int32
+		resolver := &proxyEndpointResolver{resolve: func(ctx context.Context) (proxy.Endpoint, error) {
+			rediscoveries.Add(1)
+			return proxy.GetCreateDatabaseProxyServerEndpoint(storeRootDir, openOpts)
+		}}
+
+		ep, err := proxy.GetCreateDatabaseProxyServerEndpoint(storeRootDir, openOpts)
+		require.NoError(t, err, "bootstrap discovery for the fixed endpoint")
+		provider, err := openAndInitSchema(context.Background(), ep, "", database, "root", "", "", false, "", providerOptions{}, resolver)
+		require.NoError(t, err, "open")
+		require.NotNil(t, provider)
+		t.Cleanup(func() { _ = provider.Close(context.Background()) })
+
+		sqlProvider, ok := provider.(*doltSQLProvider)
+		require.True(t, ok, "openAndInitSchema returned %T, want *doltSQLProvider", provider)
+		return sqlProvider, &rediscoveries
+	}
+
+	// proveBootstrapInvariants asserts the three behaviors the fixed endpoint
+	// must keep, in the order a caller exercises them.
+	proveBootstrapInvariants := func(t *testing.T, p *doltSQLProvider, rediscoveries *atomic.Int32) {
+		t.Helper()
+		ctx := context.Background()
+		require.Zero(t, rediscoveries.Load(),
+			"bootstrap rediscovered the proxy endpoint; every bootstrap connection must use the fixed construction address")
+
+		// The proven pool is the handed-out pool: its idle connection is
+		// reused for the first query, again without discovery.
+		var one int
+		require.NoError(t, p.db.QueryRowContext(ctx, "SELECT 1").Scan(&one))
+		require.Zero(t, rediscoveries.Load(),
+			"the first query rediscovered instead of reusing the proven pool's connection")
+
+		// Only a genuinely NEW physical connection consults discovery.
+		p.SetPoolLimits(PoolLimits{MaxIdleConns: -1})
+		require.NoError(t, p.db.QueryRowContext(ctx, "SELECT 1").Scan(&one))
+		require.Equal(t, int32(1), rediscoveries.Load(),
+			"a new physical connection must have rediscovered exactly once")
+	}
+
+	t.Run("fresh database fall-through", func(t *testing.T) {
+		storeRootDir := t.TempDir()
+		shutdownOnInterrupt(t, storeRootDir)
+		verifiedShutdownCleanup(t, storeRootDir)
+		p, rediscoveries := openCounting(t, storeRootDir, "beads_bootstrap_fresh")
+		proveBootstrapInvariants(t, p, rediscoveries)
+	})
+
+	t.Run("existing database single-session open", func(t *testing.T) {
+		storeRootDir := t.TempDir()
+		shutdownOnInterrupt(t, storeRootDir)
+		verifiedShutdownCleanup(t, storeRootDir)
+
+		// The creating open is the fall-through; it must keep the same
+		// invariants, then close and leave the adopted proxy in place.
+		creating, creatingRediscoveries := openCounting(t, storeRootDir, "beads_bootstrap_existing")
+		proveBootstrapInvariants(t, creating, creatingRediscoveries)
+		require.NoError(t, creating.Close(context.Background()))
+
+		// The steady-state open over the now-existing database is the fast
+		// path: one proven session, handed out unchanged.
+		existing, existingRediscoveries := openCounting(t, storeRootDir, "beads_bootstrap_existing")
+		proveBootstrapInvariants(t, existing, existingRediscoveries)
+	})
+}
