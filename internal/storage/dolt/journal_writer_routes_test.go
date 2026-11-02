@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage"
@@ -158,4 +159,56 @@ func assertJournalWriterLockFree(t *testing.T, ctx context.Context, pool *sql.DB
 	if holder.Valid {
 		t.Fatalf("journal-writer lock %q is still held by session %d after the write returned", name, holder.Int64)
 	}
+}
+
+// TestJournalWriterLock_NoJournalTxRefusesEmits pins the guard on the store's
+// declared journal-free write route (gastownhall/beads#6117): it takes no
+// journal-writer lock, so a journal emit inside it is refused before it
+// allocates a seq, and the transaction cannot commit even though the body
+// drops the emit's error. It is refused once, not replayed.
+func TestJournalWriterLock_NoJournalTxRefusesEmits(t *testing.T) {
+	store, ctx, observer := newJournalWriterTestStore(t)
+	issue := createJournalWriterTestIssue(t, ctx, store, "no-journal issue")
+	before := journalSeqCounter(t, ctx, observer)
+
+	var emitErr error
+	attempts := 0
+	err := store.withRetryTxNoJournal(ctx, func(tx *sql.Tx) error {
+		attempts++
+		_, emitErr = issueops.AddIssueCommentInTx(ctx, tx, issue.ID, "route", "dropped emit")
+		return nil
+	})
+	if !errors.Is(emitErr, issueops.ErrJournalUnlockedTx) {
+		t.Fatalf("emit in a NoJournal transaction = %v, want ErrJournalUnlockedTx", emitErr)
+	}
+	if !errors.Is(err, issueops.ErrJournalUnlockedTx) {
+		t.Fatalf("NoJournal transaction whose emit was refused = %v, want ErrJournalUnlockedTx", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("NoJournal body ran %d times, want 1: a refused emit must not be replayed", attempts)
+	}
+	if after := journalSeqCounter(t, ctx, observer); after != before {
+		t.Fatalf("seq counter and journal rows moved from %v to %v: the refused emit allocated a seq", before, after)
+	}
+	comments, err := store.GetIssueComments(ctx, issue.ID)
+	if err != nil {
+		t.Fatalf("read comments: %v", err)
+	}
+	if len(comments) != 0 {
+		t.Fatalf("the NoJournal transaction committed %d comment(s) whose emit was refused", len(comments))
+	}
+}
+
+// journalSeqCounter reads the journal's seq counter and row count, which
+// together move whenever a seq is allocated and committed.
+func journalSeqCounter(t *testing.T, ctx context.Context, pool *sql.DB) [2]int64 {
+	t.Helper()
+	var got [2]int64
+	if err := pool.QueryRowContext(ctx, "SELECT next_seq FROM bd_events_seq WHERE id = 0").Scan(&got[0]); err != nil {
+		t.Fatalf("read seq counter: %v", err)
+	}
+	if err := pool.QueryRowContext(ctx, "SELECT COUNT(*) FROM bd_events_journal").Scan(&got[1]); err != nil {
+		t.Fatalf("count journal rows: %v", err)
+	}
+	return got
 }

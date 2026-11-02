@@ -25,6 +25,18 @@ import (
 // recheck, which is itself a journaled write and takes its own admission.
 // Embedded stores and a journal-off store take no lock.
 
+// journalTxMode is what a write transaction declares about the journal.
+type journalTxMode int
+
+const (
+	// journalTxWriter: the body may journal, so the transaction is admitted
+	// as a journal writer.
+	journalTxWriter journalTxMode = iota
+	// journalTxNoJournal: the body is declared journal-free. It takes no lock,
+	// and an emit inside it is refused (withRetryTxNoJournal).
+	journalTxNoJournal
+)
+
 // locksJournalWriters reports whether a write transaction whose journal
 // decision is journalOn must take the journal-writer lock.
 func (s *DoltStore) locksJournalWriters(journalOn bool) bool {

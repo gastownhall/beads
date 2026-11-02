@@ -157,3 +157,71 @@ func sessionInJournalWriterWait(ctx context.Context, db *sql.DB) (bool, error) {
 	}
 	return false, rows.Err()
 }
+
+// TestJournalWriterLock_UnlockedUOWRefusesEmits pins the guard on the
+// journal-free routes (gastownhall/beads#6117): RunTxEphemeral and RunTxRead
+// take no journal-writer lock, so a journal emit inside one is refused before
+// it allocates a seq, and the unit of work cannot commit even though the
+// callback drops the emit's error.
+func TestJournalWriterLock_UnlockedUOWRefusesEmits(t *testing.T) {
+	ctx := context.Background()
+	provider := newUOWRoleFixtureProvider(t, ctx, "jwu")
+	p, ok := provider.(*doltSQLProvider)
+	require.Truef(t, ok, "provider is %T, want *doltSQLProvider", provider)
+	p.SetEventsJournalEnabled(true)
+	t.Cleanup(func() { p.SetEventsJournalEnabled(false) })
+
+	// emit creates id, an emitting write, and keeps its error for the test
+	// while handing the route nothing to fail on.
+	emit := func(ctx context.Context, uw UnitOfWork, id string, emitErr *error) {
+		_, *emitErr = uw.IssueUseCase().CreateIssue(ctx, domain.CreateIssueParams{
+			Issue:      &types.Issue{ID: id, Title: id, IssueType: types.TypeTask, Status: types.StatusOpen},
+			ExplicitID: id,
+			CreateOnly: true,
+		}, "route")
+	}
+	for _, route := range []struct {
+		name string
+		id   string
+		run  func(ctx context.Context, id string, emitErr *error) error
+	}{
+		{"RunTxEphemeral", "jwu-ephemeral", func(ctx context.Context, id string, emitErr *error) error {
+			_, err := RunTxEphemeral(ctx, p, func(ctx context.Context, uw UnitOfWork) (struct{}, error) {
+				emit(ctx, uw, id, emitErr)
+				return struct{}{}, nil
+			})
+			return err
+		}},
+		{"RunTxRead", "jwu-read", func(ctx context.Context, id string, emitErr *error) error {
+			_, err := RunTxRead(ctx, p, func(ctx context.Context, uw UnitOfWork) (struct{}, error) {
+				emit(ctx, uw, id, emitErr)
+				return struct{}{}, nil
+			})
+			return err
+		}},
+	} {
+		t.Run(route.name, func(t *testing.T) {
+			before := uowJournalSeqCounter(t, ctx, p.db)
+			var emitErr error
+			err := route.run(ctx, route.id, &emitErr)
+			require.ErrorIs(t, emitErr, issueops.ErrJournalUnlockedTx, "the emit must be refused")
+			if route.name == "RunTxEphemeral" {
+				require.ErrorIs(t, err, issueops.ErrJournalUnlockedTx, "the unit of work must not commit")
+			}
+			require.Equal(t, before, uowJournalSeqCounter(t, ctx, p.db), "the refused emit allocated a seq")
+			var rows int
+			require.NoError(t, p.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM issues WHERE id = ?", route.id).Scan(&rows))
+			require.Zerof(t, rows, "%s committed the write whose emit was refused", route.name)
+		})
+	}
+}
+
+// uowJournalSeqCounter reads the journal's seq counter and row count, which
+// together move whenever a seq is allocated and committed.
+func uowJournalSeqCounter(t *testing.T, ctx context.Context, db *sql.DB) [2]int64 {
+	t.Helper()
+	var got [2]int64
+	require.NoError(t, db.QueryRowContext(ctx, "SELECT next_seq FROM bd_events_seq WHERE id = 0").Scan(&got[0]))
+	require.NoError(t, db.QueryRowContext(ctx, "SELECT COUNT(*) FROM bd_events_journal").Scan(&got[1]))
+	return got
+}

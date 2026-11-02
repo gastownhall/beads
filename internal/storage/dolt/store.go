@@ -1276,6 +1276,18 @@ func (s *DoltStore) withRetryTx(ctx context.Context, fn func(tx *sql.Tx) error) 
 // which is required: txBeginner's one other implementer, *sql.Conn, is itself
 // the pinned session, there is no pool to hand back a different one.
 func (s *DoltStore) withRetryTxOn(ctx context.Context, beginner txBeginner, fn func(tx *sql.Tx) error) error {
+	return s.withRetryTxMode(ctx, beginner, journalTxWriter, fn)
+}
+
+// withRetryTxNoJournal is withRetryTx for a body declared journal-free: it
+// takes no journal-writer lock, and a journal emit inside it is refused and
+// fails the transaction rather than racing the admitted writers. Use it only
+// for a body that provably records no journal event.
+func (s *DoltStore) withRetryTxNoJournal(ctx context.Context, fn func(tx *sql.Tx) error) error {
+	return s.withRetryTxMode(ctx, s.db, journalTxNoJournal, fn)
+}
+
+func (s *DoltStore) withRetryTxMode(ctx context.Context, beginner txBeginner, mode journalTxMode, fn func(tx *sql.Tx) error) error {
 	// Keep circuit admission at the transaction retry boundary. Calling
 	// withRetry from here would multiply retries and could replay a write after
 	// an indeterminate commit.
@@ -1297,7 +1309,7 @@ func (s *DoltStore) withRetryTxOn(ctx context.Context, beginner txBeginner, fn f
 	var pending issueops.BlockedRecheck
 	if err := backoff.Retry(func() error {
 		var err error
-		pending, err = s.commitWriteTxWith(ctx, beginner, admitBy, fn)
+		pending, err = s.commitWriteTxWith(ctx, beginner, mode, admitBy, fn)
 		if err == nil {
 			if !circuitWriteManaged(ctx) && s.breaker != nil {
 				s.breaker.RecordSuccess()
@@ -1367,20 +1379,23 @@ func (s *DoltStore) commitWriteTx(ctx context.Context, fn func(tx *sql.Tx) error
 // commitWriteTxOn is commitWriteTx against a caller-chosen txBeginner — see
 // withRetryTxOn.
 func (s *DoltStore) commitWriteTxOn(ctx context.Context, beginner txBeginner, fn func(tx *sql.Tx) error) (issueops.BlockedRecheck, error) {
-	return s.commitWriteTxWith(ctx, beginner, journalAdmitBy(ctx, issueops.JournalWriterAdmissionBudget), fn)
+	return s.commitWriteTxWith(ctx, beginner, journalTxWriter, journalAdmitBy(ctx, issueops.JournalWriterAdmissionBudget), fn)
 }
 
 // commitWriteTxWith is commitWriteTxOn with the journal-writer admission
 // deadline fixed by the caller, so a retry loop shares one deadline across its
 // attempts. When the store locks journal writers, the transaction runs on a
 // session that took the lock before BEGIN, and the lock is released once the
-// transaction has committed or rolled back, before this returns.
-func (s *DoltStore) commitWriteTxWith(ctx context.Context, beginner txBeginner, admitBy time.Time, fn func(tx *sql.Tx) error) (issueops.BlockedRecheck, error) {
+// transaction has committed or rolled back, before this returns. A
+// journalTxNoJournal transaction takes no lock and is scoped so an emit in it
+// is refused (issueops.ScopeUnlockedJournalTransaction).
+func (s *DoltStore) commitWriteTxWith(ctx context.Context, beginner txBeginner, mode journalTxMode, admitBy time.Time, fn func(tx *sql.Tx) error) (issueops.BlockedRecheck, error) {
 	if s.closed.Load() {
 		return issueops.BlockedRecheck{}, ErrStoreClosed
 	}
 	journalOn := s.eventsJournalEnabled.Load()
-	if s.locksJournalWriters(journalOn) {
+	unlocked := s.locksJournalWriters(journalOn) && mode == journalTxNoJournal
+	if s.locksJournalWriters(journalOn) && !unlocked {
 		adm, err := s.admitJournalWriter(ctx, beginner, admitBy)
 		if err != nil {
 			return issueops.BlockedRecheck{}, err
@@ -1397,7 +1412,12 @@ func (s *DoltStore) commitWriteTxWith(ctx context.Context, beginner txBeginner, 
 	// session: the session's release (and Conn.Close, which waits on an open
 	// Tx) must come after it. A no-op once the transaction has ended.
 	defer func() { _ = tx.Rollback() }()
-	clearJournalScope := issueops.ScopeEventsJournalTransaction(tx, journalOn)
+	var clearJournalScope func()
+	if unlocked {
+		clearJournalScope = issueops.ScopeUnlockedJournalTransaction(tx, journalOn)
+	} else {
+		clearJournalScope = issueops.ScopeEventsJournalTransaction(tx, journalOn)
+	}
 	defer clearJournalScope()
 	clearVersionScope, err := s.scopeVersionedHistoryTransaction(ctx, tx)
 	if err != nil {
@@ -1407,6 +1427,10 @@ func (s *DoltStore) commitWriteTxWith(ctx context.Context, beginner txBeginner, 
 	clearRecheckScope := issueops.ScopeBlockedRecheckTransaction(tx)
 	defer clearRecheckScope()
 	if err := fn(tx); err != nil {
+		return issueops.BlockedRecheck{}, errors.Join(err, tx.Rollback())
+	}
+	// A refused emit fails the transaction even when fn dropped its error.
+	if err := issueops.JournalEmitRefused(tx); err != nil {
 		return issueops.BlockedRecheck{}, errors.Join(err, tx.Rollback())
 	}
 	if err := tx.Commit(); err != nil {

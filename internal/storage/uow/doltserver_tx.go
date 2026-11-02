@@ -55,6 +55,11 @@ func (t *doltServerTx) Commit(ctx context.Context, message string) error {
 	if t.done {
 		return errors.New("uow: commit: already done")
 	}
+	// An emit refused in a journal-free unit of work fails the commit even
+	// when the callback dropped the emit's error.
+	if err := issueops.JournalEmitRefused(t.conn); err != nil {
+		return t.closeOpenTxAfterFailure(ctx, fmt.Errorf("uow: commit: %w", err))
+	}
 	stmt, args, err := t.commitStatement(ctx, message)
 	if err != nil {
 		if isSerializationError(err) {
@@ -135,6 +140,9 @@ const (
 func (t *doltServerTx) CommitScoped(ctx context.Context, tables []string, message string) error {
 	if t.done {
 		return errors.New("uow: commit: already done")
+	}
+	if err := issueops.JournalEmitRefused(t.conn); err != nil {
+		return t.closeOpenTxAfterFailure(ctx, fmt.Errorf("uow: commit: %w", err))
 	}
 	if message == "" || len(tables) == 0 || issueops.VersionCommitDeferred(ctx) {
 		return t.Commit(ctx, "")

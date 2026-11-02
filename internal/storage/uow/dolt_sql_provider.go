@@ -276,11 +276,19 @@ func (p *doltSQLProvider) BeginTx(ctx context.Context) (Tx, error) {
 	// (doltServerTx.releaseConn / poisonConn), so an entry cannot outlive its
 	// transaction. The blocked-recheck scope is bound and released the same
 	// way; Commit takes what it recorded once the transaction has committed.
+	// A journal-free unit of work took no lock, so it is scoped for an emit in
+	// it to be refused rather than race the admitted writers.
+	var clearJournalScope func()
+	if marker.mode == journalWriterUnlocked {
+		clearJournalScope = issueops.ScopeUnlockedJournalTransaction(conn, journalOn)
+	} else {
+		clearJournalScope = issueops.ScopeEventsJournalTransaction(conn, journalOn)
+	}
 	return &doltServerTx{
 		conn:              conn,
 		journalLock:       journalLock,
 		admitJournal:      admit,
-		clearJournalScope: issueops.ScopeEventsJournalTransaction(conn, journalOn),
+		clearJournalScope: clearJournalScope,
 		clearVersionScope: issueops.ScopeVersionedHistoryTransaction(conn, versioned),
 		clearRecheckScope: issueops.ScopeBlockedRecheckTransaction(conn),
 	}, nil

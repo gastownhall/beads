@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	gmssql "github.com/dolthub/go-mysql-server/sql"
@@ -182,6 +183,53 @@ func ScopeEventsJournalTransaction(tx DBTX, enabled bool) func() {
 	}
 	journalTransactions.Store(tx, enabled)
 	return func() { journalTransactions.Delete(tx) }
+}
+
+// unlockedJournalTransactions holds the transactions declared journal-free
+// while the journal is on; entries live for one transaction.
+var unlockedJournalTransactions sync.Map // map[DBTX]*unlockedJournalScope
+
+type unlockedJournalScope struct{ refused atomic.Bool }
+
+// ScopeUnlockedJournalTransaction is ScopeEventsJournalTransaction for a
+// transaction that took no journal-writer lock because it is declared
+// journal-free (a NoJournal write, a read, an ephemeral write). With the
+// journal on it keeps the activation, so an emit still reaches insertEventRow,
+// which refuses it with ErrJournalUnlockedTx before allocating a seq and marks
+// the transaction for JournalEmitRefused. An emit is never silently dropped.
+// With the journal off an emit stays the usual no-op.
+func ScopeUnlockedJournalTransaction(tx DBTX, enabled bool) func() {
+	clearScope := ScopeEventsJournalTransaction(tx, enabled)
+	if tx == nil || !enabled {
+		return clearScope
+	}
+	unlockedJournalTransactions.Store(tx, &unlockedJournalScope{})
+	return func() {
+		unlockedJournalTransactions.Delete(tx)
+		clearScope()
+	}
+}
+
+// JournalEmitRefused returns ErrJournalUnlockedTx when an emit was refused in
+// tx (see ScopeUnlockedJournalTransaction). Commit paths call it before
+// committing, so a transaction whose callback dropped the emit's error still
+// cannot commit.
+func JournalEmitRefused(tx DBTX) error {
+	if scope, ok := unlockedJournalTransactions.Load(tx); ok && scope.(*unlockedJournalScope).refused.Load() {
+		return ErrJournalUnlockedTx
+	}
+	return nil
+}
+
+// refuseUnlockedJournalEmit marks and refuses an emit in a journal-free
+// transaction.
+func refuseUnlockedJournalEmit(tx DBTX, op EventOp, issueID string) error {
+	scope, ok := unlockedJournalTransactions.Load(tx)
+	if !ok {
+		return nil
+	}
+	scope.(*unlockedJournalScope).refused.Store(true)
+	return fmt.Errorf("journal: record %s for %s: %w", op, issueID, ErrJournalUnlockedTx)
 }
 
 func journalEnabled(ctx context.Context, tx DBTX) bool {
@@ -475,6 +523,9 @@ func getJournalIssueInTx(ctx context.Context, tx DBTX, issueID string) (*types.I
 // row.arrival_seq == post-image.arrival_seq — and the counter is held for one
 // extra statement, not for a second counter.
 func insertEventRow(ctx context.Context, tx DBTX, op EventOp, issueID string, issue *types.Issue, dep *EventDep, comment *EventComment, actor string, stamp bool) error {
+	if err := refuseUnlockedJournalEmit(tx, op, issueID); err != nil {
+		return err
+	}
 	var depJSON any
 	if dep != nil {
 		b, err := json.Marshal(dep)

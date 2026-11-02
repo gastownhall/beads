@@ -206,7 +206,9 @@ func RunTxEphemeral[T any](ctx context.Context, p UnitOfWorkProvider, work TxRea
 	bo.MaxElapsedTime = DefaultTxRetryMaxElapsed
 
 	err := backoff.Retry(func() error {
-		uw, err := p.NewUOW(ctx)
+		// Ephemeral work never journals, so it takes no journal-writer lock
+		// and an emit inside it is refused.
+		uw, err := p.NewUOW(withoutJournalWriter(ctx))
 		if err != nil {
 			if isSerializationError(err) {
 				return err
@@ -336,7 +338,9 @@ func RunTxScoped[T any](ctx context.Context, p UnitOfWorkProvider, work TxScoped
 
 func RunTxRead[T any](ctx context.Context, p UnitOfWorkProvider, work TxReadFunc[T]) (T, error) {
 	var zero T
-	uw, err := p.NewUOW(ctx)
+	// A read never journals, so it takes no journal-writer lock and an emit
+	// inside it is refused.
+	uw, err := p.NewUOW(withoutJournalWriter(ctx))
 	if err != nil {
 		return zero, err
 	}
