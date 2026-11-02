@@ -87,3 +87,17 @@ func DataAuthTokenForPort(secret string, port int) string {
 	}
 	return hex.EncodeToString(mac.Sum(nil))
 }
+
+// DataServerProof derives the proxy's answer to a data-port hello carrying
+// nonce: it proves that the listener on port holds the proxy secret, so a
+// client hands the connection to its MySQL driver only after the proxy, not
+// merely whatever process now listens on a verified address, has answered.
+// The nonce is the client's own, so an answer seen once cannot be replayed,
+// and the label keeps the MAC apart from DataAuthTokenForPort and the IDENT
+// MACs computed under the same secret.
+func DataServerProof(secret string, port int, nonce []byte) string {
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write([]byte("bd-proxy-data-server-v1\x00" + strconv.Itoa(port) + "\x00"))
+	_, _ = mac.Write(nonce)
+	return hex.EncodeToString(mac.Sum(nil))
+}

@@ -17,7 +17,6 @@ import (
 	mysql "github.com/go-sql-driver/mysql"
 
 	"github.com/steveyegge/beads/internal/configfile"
-	"github.com/steveyegge/beads/internal/storage/dbproxy/identity"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/server"
 )
 
@@ -31,8 +30,7 @@ func init() {
 		if err != nil {
 			return nil, err
 		}
-		_, err = io.WriteString(conn, dataAuthPrefix+identity.DataAuthToken(upstreamTestSecret)+"\n")
-		if err != nil {
+		if err := clientDataHandshake(ctx, conn, upstreamTestSecret, 0); err != nil {
 			_ = conn.Close()
 			return nil, err
 		}
@@ -47,7 +45,7 @@ func serveThroughProxy(t *testing.T, backend tcpBlackholeBackend, reportOutage b
 	t.Helper()
 	p := NewProxyServer(ProxyOpts{Server: backend, Stats: &Stats{}})
 	p.logger = log.Default()
-	p.dataToken = identity.DataAuthToken(upstreamTestSecret)
+	p.data = newDataAuth(upstreamTestSecret, 0)
 	p.reportUpstreamOutage = reportOutage
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -94,8 +92,7 @@ func dialAuthenticatedTestProxy(t *testing.T, addr string) net.Conn {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = io.WriteString(conn, dataAuthPrefix+identity.DataAuthToken(upstreamTestSecret)+"\n")
-	if err != nil {
+	if err := clientDataHandshake(context.Background(), conn, upstreamTestSecret, 0); err != nil {
 		_ = conn.Close()
 		t.Fatal(err)
 	}

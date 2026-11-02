@@ -3,6 +3,8 @@ package proxy_test
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -127,8 +129,20 @@ func dialProxy(t *testing.T, port int) net.Conn {
 	require.True(t, ok)
 	secret, err := identity.ReadSecret(root)
 	require.NoError(t, err)
-	_, err = io.WriteString(c, "BDPROXY1 "+identity.DataAuthTokenForPort(secret, port)+"\n")
+	// The BDPROXY1 exchange, spelled out here rather than borrowed from the
+	// package so a change to its wire format shows up as a failure: the
+	// client's token and nonce, then the proxy's proof for that nonce,
+	// before any byte of the session.
+	nonce := make([]byte, 16)
+	_, err = rand.Read(nonce)
 	require.NoError(t, err)
+	_, err = io.WriteString(c, "BDPROXY1 "+identity.DataAuthTokenForPort(secret, port)+" "+hex.EncodeToString(nonce)+"\n")
+	require.NoError(t, err)
+	want := "BDPROXY1 " + identity.DataServerProof(secret, port, nonce) + "\n"
+	got := make([]byte, len(want))
+	_, err = io.ReadFull(c, got)
+	require.NoError(t, err)
+	require.Equal(t, want, string(got))
 	return c
 }
 

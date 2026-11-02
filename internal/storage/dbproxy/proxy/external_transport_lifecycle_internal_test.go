@@ -262,7 +262,7 @@ func dialInternalProxy(t *testing.T, running *runningExternalProxy) net.Conn {
 	if err != nil {
 		t.Fatalf("dial proxy: %v", err)
 	}
-	if _, err := io.WriteString(conn, "BDPROXY1 "+running.proxy.dataToken+"\n"); err != nil {
+	if err := clientDataHandshake(context.Background(), conn, running.proxy.data.secret, running.proxy.data.port); err != nil {
 		_ = conn.Close()
 		t.Fatalf("authenticate proxy: %v", err)
 	}

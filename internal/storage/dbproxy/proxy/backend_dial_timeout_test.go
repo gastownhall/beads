@@ -2,8 +2,8 @@ package proxy
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
-	"io"
 	"log"
 	"net"
 	"testing"
@@ -24,11 +24,19 @@ func (blockingBackend) Dial(ctx context.Context) (net.Conn, error) {
 
 func startAuthenticatedHandleConn(t *testing.T, p *proxyServer, ctx context.Context) (net.Conn, <-chan error) {
 	t.Helper()
-	p.dataToken = "test-token"
+	p.data = newDataAuth(testDataSecret, 0)
 	client, peer := net.Pipe()
 	done := make(chan error, 1)
 	go func() { done <- p.handleConn(ctx, client) }()
-	if _, err := io.WriteString(peer, dataAuthPrefix+p.dataToken+"\n"); err != nil {
+	// The exchange alone, without clientDataHandshake's deadline handling:
+	// the proxy may close its end as soon as its answer has been read (here,
+	// when the backend dial fails at once), and a pipe, unlike a socket,
+	// then refuses even the deadline reset.
+	nonce := make([]byte, dataNonceBytes)
+	if _, err := rand.Read(nonce); err != nil {
+		t.Fatal(err)
+	}
+	if err := exchangeDataHandshake(peer, testDataSecret, 0, nonce); err != nil {
 		t.Fatal(err)
 	}
 	return peer, done

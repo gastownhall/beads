@@ -93,6 +93,27 @@ func TestDataAuthToken(t *testing.T) {
 	assert.NotEqual(t, portA, portB)
 }
 
+// TestDataServerProof pins the proxy's data-port answer to its wire format
+// (both ends call this function, so only a fixed vector catches a changed
+// label) and to everything it binds: the secret, the port, and the client's
+// nonce.
+func TestDataServerProof(t *testing.T) {
+	secret := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	nonce := []byte("0123456789abcdef")
+	proof := DataServerProof(secret, 3306, nonce)
+
+	wantH := hmac.New(sha256.New, []byte(secret))
+	_, _ = wantH.Write([]byte("bd-proxy-data-server-v1\x003306\x00"))
+	_, _ = wantH.Write(nonce)
+	assert.Equal(t, hex.EncodeToString(wantH.Sum(nil)), proof)
+
+	assert.Len(t, proof, 64)
+	assert.NotEqual(t, proof, DataServerProof("different secret", 3306, nonce))
+	assert.NotEqual(t, proof, DataServerProof(secret, 3307, nonce))
+	assert.NotEqual(t, proof, DataServerProof(secret, 3306, []byte("fedcba9876543210")))
+	assert.NotEqual(t, proof, DataAuthTokenForPort(secret, 3306), "the proxy's answer must not equal the client's token")
+}
+
 func TestIdentifyRejectsUnauthenticatedReply(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)

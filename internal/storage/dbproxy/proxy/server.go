@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"context"
-	"crypto/subtle"
 	"errors"
 	"fmt"
 	"io"
@@ -72,7 +71,9 @@ type proxyServer struct {
 	stopEpoch   string
 
 	traceConnections bool
-	dataToken        string
+	// data authenticates every data-port connection (data_auth.go); its
+	// zero value admits none.
+	data dataAuth
 
 	serverLogPath        string
 	logSizeCheckInterval time.Duration
@@ -285,7 +286,7 @@ func (p *proxyServer) ListenAndServe(parentCtx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("write proxy secret: %w", err)
 	}
-	p.dataToken = identity.DataAuthTokenForPort(secret, dataPort.Port)
+	p.data = newDataAuth(secret, dataPort.Port)
 
 	var identMu sync.RWMutex
 	identReply := identity.IdentReply{
@@ -496,23 +497,11 @@ func (p *proxyServer) handleConn(ctx context.Context, client net.Conn) error {
 	addr := client.RemoteAddr()
 	p.connTracef("handleConn(%s) start", addr)
 
-	expected := []byte(dataAuthPrefix + p.dataToken + "\n")
-	if err := client.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
-		_ = client.Close()
-		return err
-	}
-	got := make([]byte, len(expected))
-	if _, err := io.ReadFull(client, got); err != nil {
+	// Authenticate before counting the connection or dialing the backend:
+	// an unauthenticated connection must neither hold the idle watcher off
+	// nor cost the backend a session.
+	if ok, err := p.data.accept(client); !ok || err != nil {
 		p.connTracef("handleConn(%s) data authentication failed", addr)
-		_ = client.Close()
-		return nil
-	}
-	if subtle.ConstantTimeCompare(got, expected) != 1 {
-		p.connTracef("handleConn(%s) data authentication failed", addr)
-		_ = client.Close()
-		return nil
-	}
-	if err := client.SetReadDeadline(time.Time{}); err != nil {
 		_ = client.Close()
 		return err
 	}
