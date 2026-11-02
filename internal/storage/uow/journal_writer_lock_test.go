@@ -276,10 +276,88 @@ func TestJournalWriterLock_AdvisoryDeferWakeSkipsWhenContended(t *testing.T) {
 	require.NoError(t, holder.QueryRowContext(ctx, "SELECT RELEASE_LOCK(?)", name).Scan(&released))
 	require.EqualValues(t, 1, released.Int64)
 	require.Empty(t, captureStderr(t, func() { WakeExpiredDefersAdvisory(ctx, p) }), "the uncontended sweep warned")
-	require.Equal(t, types.StatusOpen, readStoredIssue(t, ctx, p, id).Status, "the uncontended sweep did not wake the defer")
+	woken := readStoredIssue(t, ctx, p, id)
+	require.Equal(t, types.StatusOpen, woken.Status, "the uncontended sweep did not wake the defer")
+	require.Nil(t, woken.DeferUntil, "the uncontended sweep left defer_until set")
+	require.Equal(t, issueops.DeferWakeActor, uowLatestUpdateActor(t, ctx, p.db, id), "the wake was not journaled under the defer-wake actor")
 	var user sql.NullInt64
 	require.NoError(t, p.db.QueryRowContext(ctx, "SELECT IS_USED_LOCK(?)", name).Scan(&user))
 	require.False(t, user.Valid, "the journal-writer lock is still held after the sweeps")
+}
+
+// TestJournalWriterLock_ExplicitDeferWakeQueuesWhenContended pins the other
+// side of the advisory marker (gastownhall/beads#6117): only
+// WakeExpiredDefersAdvisory skips on contention. An explicit WakeExpiredDefers
+// keeps normal admission, so with the lock held it must be seen waiting in
+// GET_LOCK, not return until the holder lets go, and then wake the defer.
+func TestJournalWriterLock_ExplicitDeferWakeQueuesWhenContended(t *testing.T) {
+	ctx := context.Background()
+	provider := newUOWRoleFixtureProvider(t, ctx, "jwe")
+	p, ok := provider.(*doltSQLProvider)
+	require.Truef(t, ok, "provider is %T, want *doltSQLProvider", provider)
+	p.SetEventsJournalEnabled(true)
+	t.Cleanup(func() { p.SetEventsJournalEnabled(false) })
+	name := issueops.JournalWriterLockName(p.database)
+
+	const id = "jwe-deferred"
+	require.NoError(t, RunTx(ctx, p, func(ctx context.Context, uw UnitOfWork) (string, error) {
+		if _, err := uw.IssueUseCase().CreateIssue(ctx, domain.CreateIssueParams{
+			Issue:      &types.Issue{ID: id, Title: id, IssueType: types.TypeTask, Status: types.StatusOpen},
+			ExplicitID: id,
+			CreateOnly: true,
+		}, "seed"); err != nil {
+			return "", err
+		}
+		return "bd: create deferred", uw.IssueUseCase().UpdateIssue(ctx, id, map[string]interface{}{
+			"status":      "deferred",
+			"defer_until": time.Now().UTC().Add(-time.Hour),
+		}, "seed")
+	}))
+
+	holder, err := p.db.Conn(ctx)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, _ = holder.ExecContext(context.Background(), "DO RELEASE_LOCK(?)", name)
+		_ = holder.Close()
+	})
+	var granted sql.NullInt64
+	require.NoError(t, holder.QueryRowContext(ctx, "SELECT GET_LOCK(?, 0)", name).Scan(&granted))
+	require.EqualValues(t, 1, granted.Int64, "the holder must take the lock")
+
+	done := make(chan error, 1)
+	var woke atomic.Int32
+	go func() {
+		n, err := WakeExpiredDefers(ctx, p)
+		woke.Store(int32(n))
+		done <- err
+	}()
+	waitForUOWJournalWriterWaiter(t, ctx, p.db, done, "WakeExpiredDefers")
+	require.Equal(t, types.StatusDeferred, readStoredIssue(t, ctx, p, id).Status, "the explicit wake ran while the holder held the lock")
+
+	var released sql.NullInt64
+	require.NoError(t, holder.QueryRowContext(ctx, "SELECT RELEASE_LOCK(?)", name).Scan(&released))
+	require.EqualValues(t, 1, released.Int64)
+	select {
+	case err := <-done:
+		require.NoError(t, err, "the explicit wake must be admitted once the holder lets go, not refused busy")
+	case <-time.After(20 * time.Second):
+		t.Fatal("the explicit wake did not return once the holder released the lock")
+	}
+	require.EqualValues(t, 1, woke.Load(), "the explicit wake reported the wrong count")
+	woken := readStoredIssue(t, ctx, p, id)
+	require.Equal(t, types.StatusOpen, woken.Status, "the explicit wake did not wake the defer")
+	require.Nil(t, woken.DeferUntil, "the explicit wake left defer_until set")
+	require.Equal(t, issueops.DeferWakeActor, uowLatestUpdateActor(t, ctx, p.db, id), "the wake was not journaled under the defer-wake actor")
+}
+
+// uowLatestUpdateActor returns the actor of the newest update journal row for
+// id.
+func uowLatestUpdateActor(t *testing.T, ctx context.Context, db *sql.DB, id string) string {
+	t.Helper()
+	var actor string
+	require.NoError(t, db.QueryRowContext(ctx,
+		"SELECT actor FROM bd_events_journal WHERE op = 'update' AND issue_id = ? ORDER BY seq DESC LIMIT 1", id).Scan(&actor))
+	return actor
 }
 
 // TestJournalWriterLock_StoreAndUOWWritersQueueOnOneLock pins the

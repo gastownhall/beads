@@ -1142,9 +1142,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   many edges) could lose to short writers until its retry budget ran out.
   Journaled writers now queue on a per-database server lock, taken before
   their transaction begins and released after it ends. A write kept out past
-  its budget fails as busy with nothing written (`503 busy` over HTTP), and
-  the advisory defer-wake sweep before `bd ready` skips silently instead of
-  waiting. Embedded mode and a disabled journal take no lock, and older bd
+  its wait budget fails as busy (`503 busy` over HTTP). The refused attempt
+  never began its transaction, but an earlier attempt of a retrying write may
+  already have run its callback. The advisory defer-wake sweep before
+  `bd ready` makes one attempt at the lock and skips silently when it is
+  held. Embedded mode and a disabled journal take no lock, and older bd
   binaries still conflict and replay as before (gastownhall/beads#6117).
   See [Concurrent writers](docs/reference/events-journal.md#concurrent-writers).
 - `bd compact` no longer silently changes row data when commit dates are out

@@ -310,5 +310,21 @@ func TestJournalWriterLock_AdvisoryDeferWakeSkipsWhenContended(t *testing.T) {
 	if got := status(); got != types.StatusOpen {
 		t.Fatalf("status after the uncontended sweep = %q, want %q", got, types.StatusOpen)
 	}
+	var until sql.NullTime
+	if err := store.db.QueryRowContext(ctx, "SELECT defer_until FROM issues WHERE id = ?", issue.ID).Scan(&until); err != nil {
+		t.Fatalf("read defer_until: %v", err)
+	}
+	if until.Valid {
+		t.Fatalf("defer_until after the uncontended sweep = %v, want it cleared", until.Time)
+	}
+	var actor string
+	if err := store.db.QueryRowContext(ctx,
+		"SELECT actor FROM bd_events_journal WHERE op = 'update' AND issue_id = ? ORDER BY seq DESC LIMIT 1",
+		issue.ID).Scan(&actor); err != nil {
+		t.Fatalf("read the wake's journal row: %v", err)
+	}
+	if actor != issueops.DeferWakeActor {
+		t.Fatalf("wake journal actor = %q, want %q", actor, issueops.DeferWakeActor)
+	}
 	assertJournalWriterLockFree(t, ctx, observer, lockName)
 }

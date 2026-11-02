@@ -595,14 +595,20 @@ named lock per database, `bd_events_seq:<database>`, instead of overlapping.
   write let in runs to its commit however long that takes. Over HTTP the
   same refusal is a `503` with code `busy` and a `Retry-After`.
 - **Journal-free writes take no lock.** A write declared journal-free, such as
-  the journal prune or a lease refresh, does not queue. A journal record
-  attempted inside one is refused before it allocates a `seq`, and that
-  transaction does not commit.
+  the journal prune, a config or metadata write, or the repository mtime
+  cache, does not queue. A journal record attempted inside one is refused
+  before it allocates a `seq`, and that transaction does not commit. Lease
+  refreshes and the other heartbeat and scoped write routes are not
+  journal-free: re-arming a lease records a journal event, so they can wait
+  for the lock like any other journaled write.
 - **Advisory defer wakes skip instead of waiting.** `bd ready` and the claim
   paths wake expired [defers](/cli-reference/defer) before they read. That
   sweep makes one attempt at the lock: if another writer holds it, the sweep
-  skips without a warning and the read goes ahead. The next sweep that finds the lock free
-  wakes those beads.
+  skips without a warning and the read goes ahead. The next sweep that finds
+  the lock free wakes those beads. The sweep does not wait for the lock, but
+  it still waits for a free database connection, so a saturated connection
+  pool can delay it. An explicit defer wake is not advisory: it waits for the
+  lock like any other journaled write.
 - **Embedded mode and a disabled journal take no lock.** An embedded store
   has one writer at a time already, and with the journal off nothing draws a
   `seq`.
