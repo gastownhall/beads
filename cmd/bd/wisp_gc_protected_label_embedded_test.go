@@ -3,7 +3,9 @@
 package main
 
 import (
+	"errors"
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -151,5 +153,50 @@ func TestEmbeddedWispGCExcludeLabel(t *testing.T) {
 		if bdShowSucceeds(t, bd, dir, id) {
 			t.Errorf("wisp %s carries no protected label and must be reclaimed", id)
 		}
+	}
+}
+
+// TestEmbeddedWispGCProtectedLabelWriteRefused pins the write gate end to end:
+// a value wisp gc would refuse to read is refused by `bd config set` and by
+// `bd config set-many`, whose batch must write nothing when one pair is
+// refused, so a malformed list never reaches the sweep through the CLI.
+func TestEmbeddedWispGCProtectedLabelWriteRefused(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "gcw")
+	run := func(args ...string) (string, int) {
+		t.Helper()
+		cmd := exec.Command(bd, args...)
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			return string(out), 0
+		}
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) {
+			t.Fatalf("bd %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+		return string(out), exitErr.ExitCode()
+	}
+
+	bad := []string{`["keep:mail"`, `[null,"keep:mail"]`, `["keep:mail",1]`, "keep mail", ","}
+	for _, value := range bad {
+		if out, code := run("config", "set", "wisp.protected_labels", value); code == 0 {
+			t.Errorf("bd config set wisp.protected_labels %q succeeded:\n%s\nwant the malformed value refused", value, out)
+		}
+		if out, code := run("config", "set-many", "wisp.protected_labels="+value, "pl.untouched=1"); code == 0 {
+			t.Errorf("bd config set-many wisp.protected_labels=%q succeeded:\n%s\nwant the malformed value refused", value, out)
+		}
+	}
+	if out, code := run("config", "get", "pl.untouched"); code != 0 || !strings.Contains(out, "pl.untouched (not set)") {
+		t.Errorf("bd config get pl.untouched = %q (exit %d) after a refused set-many; want the batch to write nothing", out, code)
+	}
+	if out, code := run("config", "get", "wisp.protected_labels"); code != 0 || !strings.Contains(out, "wisp.protected_labels (not set)") {
+		t.Errorf("bd config get wisp.protected_labels = %q (exit %d) after refused writes; want it unset", out, code)
 	}
 }

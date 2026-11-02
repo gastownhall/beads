@@ -4,9 +4,12 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/beads/internal/workapi"
 )
 
 func TestProxiedServerWispCreate(t *testing.T) {
@@ -432,6 +435,52 @@ func TestProxiedServerWispGC(t *testing.T) {
 		}
 		if count != 1 {
 			t.Errorf("closed wisp %s carries protected label keep:mail and must survive wisp gc --closed --force", readMail.ID)
+		}
+	})
+
+	// A wisp.protected_labels value that cannot be parsed is not "no labels
+	// configured": GC aborts in age and closed mode with nothing deleted. The
+	// value is planted as direct database drift (the validated write path
+	// refuses it), so the abort is the read's own fail-closed contract, not a
+	// write gate. [null,"keep:mail"] pins that a null element is refused, not
+	// read as an empty name beside a valid one.
+	t.Run("invalid_setting_aborts_both_modes", func(t *testing.T) {
+		t.Parallel()
+		for i, value := range []string{`["keep:mail"`, `[null,"keep:mail"]`} {
+			p := newSharedProxiedProject(t, bd, fmt.Sprintf("wgi%d", i))
+			open := bdProxiedCreate(t, bd, p.dir, "open wisp", "--ephemeral")
+			closed := bdProxiedCreate(t, bd, p.dir, "closed wisp", "--ephemeral")
+			if out, err := bdProxiedRun(t, bd, p.dir, "close", closed.ID); err != nil {
+				t.Fatalf("bd close %s: %v\n%s", closed.ID, err, out)
+			}
+
+			db := openProxiedDB(t, p)
+			if _, err := db.Exec("INSERT INTO config (`key`, value) VALUES (?, ?) ON DUPLICATE KEY UPDATE value = VALUES(value)",
+				workapi.SettingKeyWispProtectedLabels, value); err != nil {
+				t.Fatalf("plant malformed setting %q: %v", value, err)
+			}
+
+			for _, mode := range []struct {
+				name string
+				args []string
+			}{
+				{name: "age", args: []string{"mol", "wisp", "gc", "--age", "0s", "--all"}},
+				{name: "closed", args: []string{"mol", "wisp", "gc", "--closed", "--force"}},
+			} {
+				out, err := bdProxiedRun(t, bd, p.dir, mode.args...)
+				if err == nil {
+					t.Errorf("%s-mode gc over malformed setting %q succeeded; want an abort:\n%s", mode.name, value, out)
+				}
+				for _, id := range []string{open.ID, closed.ID} {
+					var count int
+					if err := db.QueryRow("SELECT COUNT(*) FROM wisps WHERE id = ?", id).Scan(&count); err != nil {
+						t.Fatalf("query %s: %v", id, err)
+					}
+					if count != 1 {
+						t.Errorf("%s-mode gc over malformed setting %q deleted wisp %s; want no deletions", mode.name, value, id)
+					}
+				}
+			}
 		}
 	})
 

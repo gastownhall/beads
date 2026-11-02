@@ -23,9 +23,17 @@ func TestValidateSettingWriteProtectedLabels(t *testing.T) {
 		" keep:mail , keep:alert ",
 		`["keep:mail","keep:alert"]`,
 		`["say:\"hi\"","[x]"]`,
+		`["a,b","c[d","e\"f"]`,
 	} {
-		if _, err := ValidateSettingWrite(key, value); err != nil {
+		// An accepted value is stored verbatim: it REPLACES the list, and
+		// the read parses exactly what the operator wrote.
+		stored, err := ValidateSettingWrite(key, value)
+		if err != nil {
 			t.Errorf("ValidateSettingWrite(%s, %q) = %v, want it accepted", key, value, err)
+			continue
+		}
+		if stored != value {
+			t.Errorf("ValidateSettingWrite(%s, %q) stored %q, want the value verbatim", key, value, stored)
 		}
 	}
 	for _, test := range []struct{ value, wantInError string }{
@@ -33,6 +41,11 @@ func TestValidateSettingWriteProtectedLabels(t *testing.T) {
 		{`["keep:mail"`, "JSON array"},
 		{`[1]`, "JSON array"},
 		{`["a",2]`, "JSON array"},
+		{`[null]`, "JSON array"},
+		{`[null,"keep:mail"]`, "JSON array"},
+		{`["keep:mail",null]`, "JSON array"},
+		{`[["keep:mail"]]`, "JSON array"},
+		{`[{"name":"keep:mail"}]`, "JSON array"},
 		{"keep mail", "keep mail"},
 		{`["keep mail"]`, "keep mail"},
 		{",", "names no label"},
@@ -64,6 +77,8 @@ func TestParseProtectedLabels(t *testing.T) {
 		{"keep:mail", []string{"keep:mail"}},
 		{"b, a ,b,,A", []string{"b", "a", "A"}},
 		{`[" keep:mail ","keep:mail","x\"y"]`, []string{"keep:mail", `x"y`}},
+		{`["a,b","c[d","e\"f"]`, []string{"a,b", "c[d", `e"f`}},
+		{`["Keep:Mail","keep:mail"]`, []string{"Keep:Mail", "keep:mail"}},
 	} {
 		got, err := ParseProtectedLabels(test.value)
 		if err != nil {

@@ -31,10 +31,10 @@ const SettingKeyWispProtectedLabels = "wisp.protected_labels"
 // cannot parse, because guessing at a malformed protection list under-protects.
 //
 // An empty or blank value and `[]` are nil. It refuses a value that opens
-// with '[' but is not a JSON array of strings, a non-blank value that names no
-// label (`,`, `[""]`), and a name containing whitespace — labels never carry
-// it, so `a b` is a mis-spelled list. Other punctuation is part of a name: a
-// JSON-encoded `"say:\"hi\""` is one label.
+// with '[' but is not a JSON array of strings (a null element included), a
+// non-blank value that names no label (`,`, `[""]`), and a name containing
+// whitespace — labels never carry it, so `a b` is a mis-spelled list. Other
+// punctuation is part of a name: a JSON-encoded `"say:\"hi\""` is one label.
 func ParseProtectedLabels(value string) ([]string, error) {
 	trimmed := strings.TrimSpace(value)
 	if trimmed == "" {
@@ -42,11 +42,20 @@ func ParseProtectedLabels(value string) ([]string, error) {
 	}
 	var names []string
 	if strings.HasPrefix(trimmed, "[") {
-		if err := json.Unmarshal([]byte(trimmed), &names); err != nil {
+		// Decode through pointers: into a plain []string a JSON null leaves
+		// "" without an error, so [null,"keep:mail"] would pass as one name.
+		var elems []*string
+		if err := json.Unmarshal([]byte(trimmed), &elems); err != nil {
 			return nil, fmt.Errorf("%q is not a JSON array of label names (write [\"keep:mail\",\"keep:alert\"] or keep:mail,keep:alert): %v", value, err)
 		}
-		if len(names) == 0 {
+		if len(elems) == 0 {
 			return nil, nil
+		}
+		for _, elem := range elems {
+			if elem == nil {
+				return nil, fmt.Errorf("%q is not a JSON array of label names (write [\"keep:mail\",\"keep:alert\"] or keep:mail,keep:alert): null is not a label name", value)
+			}
+			names = append(names, *elem)
 		}
 	} else {
 		names = strings.Split(trimmed, ",")
