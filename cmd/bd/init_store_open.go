@@ -37,8 +37,7 @@ func openInitStore(ctx context.Context, cfg *dolt.Config, open initStoreOpener) 
 	if err == nil {
 		return store, nil
 	}
-	var dirtyErr *schema.DirtyTablesError
-	if !errors.As(err, &dirtyErr) {
+	if !initStoreAdoptable(cfg, err) {
 		return store, err
 	}
 
@@ -59,6 +58,20 @@ func openInitStore(ctx context.Context, cfg *dolt.Config, open initStoreOpener) 
 	}
 
 	return open(ctx, cfg)
+}
+
+// initStoreAdoptable reports whether openInitStore may adopt the database
+// behind a refused strict open: only a writable, direct server open (no
+// embedded, proxied, gateway, read-only or preview intent) refused by the
+// pending-migration dirty guard at main cursor 0. A versioned database keeps
+// the #4566 guard's protection of its dirty rows; its remedy stays the
+// operator's explicit `bd dolt commit`.
+func initStoreAdoptable(cfg *dolt.Config, err error) bool {
+	if !cfg.ServerMode || cfg.ProxiedServer || cfg.Gateway || cfg.ReadOnly || cfg.Preview {
+		return false
+	}
+	var dirtyErr *schema.DirtyTablesError
+	return errors.As(err, &dirtyErr) && dirtyErr.Unversioned
 }
 
 // initReconcileError reports a failed adoption, keeping both the original
