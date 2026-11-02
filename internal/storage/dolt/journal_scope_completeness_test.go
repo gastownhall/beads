@@ -89,7 +89,9 @@ func TestEveryRawTxJournalScopeIsScopedOrExempt(t *testing.T) {
 		// In scope: a function that mints its own transaction AND hands it to a
 		// journaling mutator IN ITS OWN BODY. A function given a tx by
 		// withWriteTx/runDoltTransactionRecording inherits their scoping, and those two
-		// are checked here in their own right.
+		// are checked here in their own right. Since #6117 the raw sites mint
+		// their transaction through beginJournalWriteTx (journal-writer
+		// admission), so that helper counts as minting exactly like BeginTx.
 		//
 		// Reachability is deliberately DIRECT rather than a call-graph fixpoint.
 		// A fixpoint over selector names is far too loose in a package this size
@@ -100,7 +102,7 @@ func TestEveryRawTxJournalScopeIsScopedOrExempt(t *testing.T) {
 		// mutator on it a few lines later. The cost is that a tx passed down to
 		// an unexported sibling that mutates would slip through; no such shape
 		// exists today, and the journal coverage tests cover the behavior.
-		if !f.CallsAnyOf(map[string]bool{"BeginTx": true}) || !f.CallsAnyOf(journalingMutators) {
+		if !f.CallsAnyOf(map[string]bool{"BeginTx": true, "beginJournalWriteTx": true}) || !f.CallsAnyOf(journalingMutators) {
 			continue
 		}
 		if reason, ok := rawTxScopeExemptions[key]; ok {

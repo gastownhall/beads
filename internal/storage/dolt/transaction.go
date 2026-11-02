@@ -201,6 +201,25 @@ func (s *DoltStore) runDoltTransactionRecording(ctx context.Context, commitMsg s
 	}
 	defer conn.Close()
 
+	// Journal-writer admission (#6117), on the pinned session BEFORE any
+	// snapshot-creating statement: a transaction that began before the
+	// previous journal holder committed still reads the old seq counter, so
+	// the lock must precede the active_branch() read and BeginTx, not just
+	// the body. The function-scoped release below covers the whole same-
+	// session finish sequence (SQL commit, DOLT_ADD, DOLT_COMMIT) and runs
+	// before the caller's post-commit blocked recheck, which admits on its
+	// own turn.
+	journalEnabled := s.eventsJournalEnabled.Load()
+	var releaseJournalLock func() = func() {}
+	if s.serverMode && journalEnabled {
+		release, err := s.acquireJournalWriterLockOn(ctx, conn)
+		if err != nil {
+			return issueops.BlockedRecheck{}, fmt.Errorf("journal writer admission: %w", err)
+		}
+		releaseJournalLock = release
+	}
+	defer releaseJournalLock()
+
 	var currentBranch string
 	if err := conn.QueryRowContext(ctx, "SELECT active_branch()").Scan(&currentBranch); err != nil {
 		return issueops.BlockedRecheck{}, fmt.Errorf("failed to read active branch: %w", err)
@@ -222,7 +241,6 @@ func (s *DoltStore) runDoltTransactionRecording(ctx context.Context, commitMsg s
 	// exists to make impossible. In journal mode both planes therefore share the
 	// pinned regular transaction. The default journal-off path keeps the
 	// established split transactions untouched.
-	journalEnabled := s.eventsJournalEnabled.Load()
 	ignoredTx := regularTx
 	if !journalEnabled {
 		// NOTE (GH#3140 metrics skew): the pool-wait bracket above measures only

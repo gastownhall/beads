@@ -15,11 +15,11 @@ import (
 func (s *DoltStore) AddComment(ctx context.Context, issueID, actor, comment string) error {
 	return s.withCircuitWrite(ctx, func(ctx context.Context) error {
 		isWisp := s.isActiveWisp(ctx, issueID)
-		tx, err := s.db.BeginTx(ctx, nil)
+		tx, finishJournalWrite, err := s.beginJournalWriteTx(ctx)
 		if err != nil {
 			return fmt.Errorf("begin tx: %w", err)
 		}
-		defer func() { _ = tx.Rollback() }()
+		defer finishJournalWrite()
 
 		clearJournalScope := s.scopeEventsJournalTransaction(tx)
 		defer clearJournalScope()
@@ -30,6 +30,10 @@ func (s *DoltStore) AddComment(ctx context.Context, issueID, actor, comment stri
 		if err := s.commitSQLTx(ctx, "commit add comment event", tx); err != nil {
 			return err
 		}
+		// The comment event is durable; release the journal-writer admission
+		// lock and its session before the Dolt commit, which pins a second
+		// pool connection of its own (#6117).
+		finishJournalWrite()
 		if isWisp {
 			return nil
 		}

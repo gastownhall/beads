@@ -1285,6 +1285,10 @@ func (s *DoltStore) withRetryTxOn(ctx context.Context, beginner txBeginner, fn f
 	bo.MaxElapsedTime = 5 * time.Second
 	if s.serverMode {
 		bo.MaxElapsedTime = 15 * time.Second
+		// One absolute journal-writer admission deadline for the whole retry
+		// loop: a replayed attempt re-acquires the lock, but the queueing
+		// budget is fixed at entry and never restarted by a retry.
+		ctx = issueops.WithJournalAdmissionDeadline(ctx, time.Now().Add(bo.MaxElapsedTime))
 	}
 	var pending issueops.BlockedRecheck
 	if err := backoff.Retry(func() error {
@@ -1358,14 +1362,49 @@ func (s *DoltStore) commitWriteTx(ctx context.Context, fn func(tx *sql.Tx) error
 
 // commitWriteTxOn is commitWriteTx against a caller-chosen txBeginner — see
 // withRetryTxOn.
+//
+// Journal-writer admission (#6117) happens HERE, once, at the bottom of the
+// store's write funnels: the session the transaction will run on is pinned
+// and takes the database's journal-writer lock BEFORE BeginTx, so overlapping
+// journaled writers queue instead of conflicting on the single bd_events_seq
+// counter. Outer wrappers never re-acquire — advisory locks are reentrant,
+// and admission is not free. The lock is released after COMMIT and before
+// this function returns, so withRetryTxOn's post-commit blocked recheck (a
+// journaled write of its own) admits on its own turn, never nested inside a
+// lock this attempt still holds.
 func (s *DoltStore) commitWriteTxOn(ctx context.Context, beginner txBeginner, fn func(tx *sql.Tx) error) (issueops.BlockedRecheck, error) {
 	if s.closed.Load() {
 		return issueops.BlockedRecheck{}, ErrStoreClosed
 	}
-	tx, err := beginner.BeginTx(ctx, nil)
+	conn, cleanupAdmission, err := s.pinJournalWriteSession(ctx, beginner)
 	if err != nil {
+		// Busy, canceled, or a failed acquisition: the body never ran, so
+		// the error is safe to surface (and retry at the caller's cadence —
+		// withRetryTxOn classifies it permanent, it is not a replay).
+		return issueops.BlockedRecheck{}, err
+	}
+	begin := beginner
+	if conn != nil {
+		begin = conn
+	}
+	tx, err := begin.BeginTx(ctx, nil)
+	if err != nil {
+		cleanupAdmission()
 		return issueops.BlockedRecheck{}, fmt.Errorf("begin write tx: %w", err)
 	}
+	defer func() {
+		// Every exit path ends the transaction before the lock and the
+		// session: Rollback is a no-op once committed, a panicking body is
+		// rolled back before the lock goes and the panic propagates, and a
+		// committed write is never converted into a failure by cleanup.
+		if r := recover(); r != nil {
+			_ = tx.Rollback()
+			cleanupAdmission()
+			panic(r)
+		}
+		_ = tx.Rollback()
+		cleanupAdmission()
+	}()
 	clearJournalScope := s.scopeEventsJournalTransaction(tx)
 	defer clearJournalScope()
 	clearVersionScope, err := s.scopeVersionedHistoryTransaction(ctx, tx)

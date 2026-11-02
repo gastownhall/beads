@@ -98,11 +98,11 @@ func (s *DoltStore) RemoveDependencyWithOptions(ctx context.Context, issueID, de
 	return s.withCircuitWrite(ctx, func(ctx context.Context) error {
 		// Wisps live in dolt_ignored tables — skip Dolt versioning entirely.
 		if s.isActiveWisp(ctx, issueID) {
-			tx, err := s.db.BeginTx(ctx, nil)
+			tx, finishJournalWrite, err := s.beginJournalWriteTx(ctx)
 			if err != nil {
 				return fmt.Errorf("failed to begin transaction: %w", err)
 			}
-			defer func() { _ = tx.Rollback() }()
+			defer finishJournalWrite()
 			clearJournalScope := s.scopeEventsJournalTransaction(tx)
 			defer clearJournalScope()
 			// Scoped even though RecordVersionInTx returns early on IsWisp and
@@ -119,17 +119,17 @@ func (s *DoltStore) RemoveDependencyWithOptions(ctx context.Context, issueID, de
 			if _, err := issueops.RemoveDependencyInTx(ctx, tx, issueID, dependsOnID, actor, rmOpts.EmitEvent); err != nil {
 				return err
 			}
-			if err := s.commitSQLTxAndRecheck(ctx, "commit remove wisp dependency", tx); err != nil {
+			if err := s.commitSQLTxAndRecheck(ctx, "commit remove wisp dependency", tx, finishJournalWrite); err != nil {
 				return err
 			}
 			return nil
 		}
 
-		tx, err := s.db.BeginTx(ctx, nil)
+		tx, finishJournalWrite, err := s.beginJournalWriteTx(ctx)
 		if err != nil {
 			return fmt.Errorf("failed to begin transaction: %w", err)
 		}
-		defer func() { _ = tx.Rollback() }()
+		defer finishJournalWrite()
 
 		clearJournalScope := s.scopeEventsJournalTransaction(tx)
 		defer clearJournalScope()
@@ -153,6 +153,10 @@ func (s *DoltStore) RemoveDependencyWithOptions(ctx context.Context, issueID, de
 		if err := s.commitSQLTx(ctx, "sql commit", tx); err != nil {
 			return err
 		}
+		// The removal is durable; release the journal-writer admission lock
+		// and its session before the Dolt commit and the recheck below, both
+		// of which open their own write transactions (#6117).
+		finishJournalWrite()
 		// The removal is durable; its dependents are settled after this
 		// removal's own Dolt commit so the recheck's commit follows it.
 		pending := issueops.TakeBlockedRecheck(tx)
