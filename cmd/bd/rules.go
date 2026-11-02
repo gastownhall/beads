@@ -851,22 +851,23 @@ func runRulesCompact(cmd *cobra.Command, args []string) error {
 				Output: plan.merged,
 				Rules:  len(plan.rules),
 			}
-			var backedUp map[string]bool
+			var done compactApplied
 			switch {
 			case plan.refused != nil:
 				fmt.Fprintf(os.Stderr, "Error: %v\n", plan.refused)
 				res.Error = plan.refused.Error()
 				failed++
 			case apply:
-				written, done, err := writeCompactedRule(filepath.Join(rulesPath, plan.outName), plan.merged, plan.rules)
-				res.Applied, backedUp = written, done
+				var err error
+				done, err = writeCompactedRule(filepath.Join(rulesPath, plan.outName), plan.merged, plan.rules)
+				res.Applied = done.Written
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 					res.Error = err.Error()
 					failed++
 				}
 			}
-			res.Sources = compactSources(plan.rules, backedUp)
+			res.Sources = compactSources(plan.rules, done)
 			results = append(results, res)
 
 			if !jsonOutput {
@@ -916,14 +917,14 @@ func runRulesCompact(cmd *cobra.Command, args []string) error {
 
 	outName := strings.ReplaceAll(label, " ", "-") + ".md"
 	outPath := filepath.Join(rulesPath, outName)
-	written := false
-	var backedUp map[string]bool
+	var done compactApplied
 	applyErr := checkCompactDestinations(outPath, groupRules)
 	refused := applyErr != nil
 	if apply && !refused {
-		written, backedUp, applyErr = writeCompactedRule(outPath, merged, groupRules)
+		done, applyErr = writeCompactedRule(outPath, merged, groupRules)
 	}
-	sources := compactSources(groupRules, backedUp)
+	written := done.Written
+	sources := compactSources(groupRules, done)
 
 	if jsonOutput {
 		result := map[string]interface{}{
@@ -970,6 +971,7 @@ type compactSource struct {
 	File     string `json:"file"`
 	Backup   string `json:"backup"`
 	BackedUp bool   `json:"backed_up"`
+	Deleted  bool   `json:"deleted"`
 }
 
 // ruleBackupPath is where compact copies a source rule before deleting it.
@@ -980,8 +982,8 @@ func ruleBackupPath(path string) string {
 }
 
 // compactSources lists each distinct source of a composite, marking the ones
-// whose backup completed.
-func compactSources(rules []RuleFile, backedUp map[string]bool) []compactSource {
+// whose backup completed and the ones deleted.
+func compactSources(rules []RuleFile, done compactApplied) []compactSource {
 	sources := make([]compactSource, 0, len(rules))
 	seen := make(map[string]bool, len(rules))
 	for _, rf := range rules {
@@ -992,7 +994,8 @@ func compactSources(rules []RuleFile, backedUp map[string]bool) []compactSource 
 		sources = append(sources, compactSource{
 			File:     rf.Path,
 			Backup:   ruleBackupPath(rf.Path),
-			BackedUp: backedUp[rf.Path],
+			BackedUp: done.BackedUp[rf.Path],
+			Deleted:  done.Deleted[rf.Path],
 		})
 	}
 	return sources
@@ -1009,7 +1012,7 @@ func printCompactPreview(outName, merged string, sources []compactSource, applie
 	fmt.Print(merged)
 	fmt.Println(strings.Repeat("─", 40))
 	names := make([]string, 0, len(sources))
-	var backups, backedUp []string
+	var backups, backedUp, deleted, kept []string
 	for _, s := range sources {
 		name := filepath.Base(s.File)
 		names = append(names, name)
@@ -1017,19 +1020,29 @@ func printCompactPreview(outName, merged string, sources []compactSource, applie
 		if s.BackedUp {
 			backedUp = append(backedUp, name+" → "+filepath.Base(s.Backup))
 		}
-	}
-	switch {
-	case applied && sourcesDeleted:
-		fmt.Printf("Backed up: %s\n", strings.Join(backedUp, ", "))
-		fmt.Printf("Created %s, deleted %d source files: %s\n\n", outName, len(names), strings.Join(names, ", "))
-	case applied:
-		if len(backedUp) > 0 {
-			fmt.Printf("Backed up: %s\n", strings.Join(backedUp, ", "))
+		if s.Deleted {
+			deleted = append(deleted, name)
+		} else {
+			kept = append(kept, name)
 		}
-		fmt.Printf("Created %s, but not every source file was deleted (see the error).\n\n", outName)
-	default:
+	}
+	if !applied {
 		fmt.Printf("Would back up: %s\n", strings.Join(backups, ", "))
 		fmt.Printf("Would delete: %s\n\n", strings.Join(names, ", "))
+		return
+	}
+	if len(backedUp) > 0 {
+		fmt.Printf("Backed up: %s\n", strings.Join(backedUp, ", "))
+	}
+	switch {
+	case sourcesDeleted:
+		fmt.Printf("Created %s, deleted %d source files: %s\n\n", outName, len(names), strings.Join(names, ", "))
+	case len(deleted) == 0:
+		fmt.Printf("Created %s, but no source file was deleted (see the error).\n\n", outName)
+	case len(kept) == 0:
+		fmt.Printf("Created %s and deleted %s, but a delete failed (see the error); every backup is kept.\n\n", outName, strings.Join(deleted, ", "))
+	default:
+		fmt.Printf("Created %s and deleted %s, but could not delete %s (see the error); every backup is kept.\n\n", outName, strings.Join(deleted, ", "), strings.Join(kept, ", "))
 	}
 }
 
@@ -1049,7 +1062,7 @@ func printCompactRefused(outName string, sources []compactSource) {
 // creates each file exclusively.
 func checkCompactDestinations(outPath string, sources []RuleFile) error {
 	paths := []string{outPath}
-	for _, s := range compactSources(sources, nil) {
+	for _, s := range compactSources(sources, compactApplied{}) {
 		paths = append(paths, s.Backup)
 	}
 	var conflicts []string
@@ -1068,53 +1081,70 @@ func checkCompactDestinations(outPath string, sources []RuleFile) error {
 	return nil
 }
 
+// compactApplied is what writeCompactedRule did, including when it failed
+// part way.
+type compactApplied struct {
+	Written  bool            // the composite was created
+	BackedUp map[string]bool // source path -> backup completed
+	Deleted  map[string]bool // source path -> source removed
+}
+
+// removeRuleSource deletes a source rule once its backup exists; tests replace
+// it to fail a delete.
+var removeRuleSource = os.Remove
+
 // writeCompactedRule creates outPath, copies every source to its backup path,
-// and only then removes the sources. It reports whether outPath was written and
-// which sources were backed up, even when a later step fails. It never replaces
-// an existing file: a composite named like one of its own sources would
-// otherwise be written and then deleted with them, one named like an unrelated
-// rule would silently replace it, and an existing backup may be the only copy
-// left of an earlier compaction's source.
-func writeCompactedRule(outPath, merged string, sources []RuleFile) (bool, map[string]bool, error) {
+// and only then removes the sources. It reports what it did even when a later
+// step fails. It never replaces an existing file: a composite named like one
+// of its own sources would otherwise be written and then deleted with them,
+// one named like an unrelated rule would silently replace it, and an existing
+// backup may be the only copy left of an earlier compaction's source.
+func writeCompactedRule(outPath, merged string, sources []RuleFile) (compactApplied, error) {
+	done := compactApplied{
+		BackedUp: make(map[string]bool, len(sources)),
+		Deleted:  make(map[string]bool, len(sources)),
+	}
 	// #nosec G304 -- path comes from controlled filepath.Join of user-specified rules directory
 	f, err := os.OpenFile(outPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if errors.Is(err, fs.ErrExist) {
-		return false, nil, fmt.Errorf("%s already exists; refusing to overwrite it. Rename or move that file (and update --group if it names it), then re-run", outPath)
+		return done, fmt.Errorf("%s already exists; refusing to overwrite it. Rename or move that file (and update --group if it names it), then re-run", outPath)
 	}
 	if err != nil {
-		return false, nil, fmt.Errorf("write %s: %w", outPath, err)
+		return done, fmt.Errorf("write %s: %w", outPath, err)
 	}
 	if _, err := f.WriteString(merged); err != nil {
 		_ = f.Close()
 		_ = os.Remove(outPath)
-		return false, nil, fmt.Errorf("write %s: %w", outPath, err)
+		return done, fmt.Errorf("write %s: %w", outPath, err)
 	}
 	if err := f.Close(); err != nil {
 		_ = os.Remove(outPath)
-		return false, nil, fmt.Errorf("write %s: %w", outPath, err)
+		return done, fmt.Errorf("write %s: %w", outPath, err)
 	}
+	done.Written = true
 
-	backedUp := make(map[string]bool, len(sources))
 	for _, rf := range sources {
-		if backedUp[rf.Path] {
+		if done.BackedUp[rf.Path] {
 			continue
 		}
 		if err := backupRuleSource(rf.Path, ruleBackupPath(rf.Path)); err != nil {
-			return true, backedUp, fmt.Errorf("wrote %s but %w; no source file was deleted", outPath, err)
+			return done, fmt.Errorf("wrote %s but %w; no source file was deleted", outPath, err)
 		}
-		backedUp[rf.Path] = true
+		done.BackedUp[rf.Path] = true
 	}
 
 	var failures []string
 	for _, rf := range sources {
-		if err := os.Remove(rf.Path); err != nil {
+		if err := removeRuleSource(rf.Path); err != nil {
 			failures = append(failures, err.Error())
+			continue
 		}
+		done.Deleted[rf.Path] = true
 	}
 	if len(failures) > 0 {
-		return true, backedUp, fmt.Errorf("wrote %s but could not delete %d source file(s): %s", outPath, len(failures), strings.Join(failures, "; "))
+		return done, fmt.Errorf("wrote %s but could not delete %d source file(s): %s", outPath, len(failures), strings.Join(failures, "; "))
 	}
-	return true, backedUp, nil
+	return done, nil
 }
 
 // backupRuleSource copies the bytes of src (following a symlink) into a new
