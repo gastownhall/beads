@@ -1130,7 +1130,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   already exists" on an id bd generated itself. The batch chose every id
   before it wrote any row, so two of its items could be handed the same short
   hash id, and a generated id (hash or counter) could be the one a later item
-  of the same file names explicitly. Generated hash ids also skip ids held in
+  of the same batch names explicitly. Generated hash ids also skip ids held in
   the other storage plane. A wisp or `--no-history` create could be refused
   because an imported or promoted wisp's row in the durable table already
   held its id. On a proxied-server workspace the same id was instead written
