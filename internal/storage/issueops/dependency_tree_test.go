@@ -67,6 +67,7 @@ func TestGetDependencyTreeInTxSkipsRelatesToEdges(t *testing.T) {
 	expectIssueBatch(mock, []string{"blocker", "related"})
 	expectIssue(mock, "blocker", "Blocker")
 	expectDependencies(mock, "blocker", nil)
+	expectTreeBlockedFlags(mock, nil, "root", "blocker")
 	mock.ExpectRollback()
 
 	tx, err := db.BeginTx(context.Background(), nil)
@@ -243,6 +244,7 @@ func TestGetDependencyTreeInTxEmitsDedupedDirectBlocker(t *testing.T) {
 				expectDependencies(mock, "mid", []dependencyRow{{id: "shared", depType: string(types.DepBlocks)}})
 				expectIssueBatchOne(mock, "shared")
 			}
+			expectTreeBlockedFlags(mock, nil, tt.wantIDs[:3]...)
 			// No expectation for the stub: it must read nothing.
 
 			tx, err := db.BeginTx(context.Background(), nil)
@@ -317,6 +319,7 @@ func TestGetDependencyTreeInTxDepthCutoffBeatsStub(t *testing.T) {
 	expectIssue(mock, "b", "B")
 	expectDependencies(mock, "b", []dependencyRow{{id: "x", depType: string(types.DepBlocks)}})
 	expectIssueBatchOne(mock, "x")
+	expectTreeBlockedFlags(mock, nil, "root", "x", "a", "b")
 
 	tx, err := db.BeginTx(context.Background(), nil)
 	if err != nil {
@@ -353,6 +356,29 @@ func expectIssueBatchOne(mock sqlmock.Sqlmock, id string) {
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT issue_id, label FROM labels WHERE issue_id IN (?) ORDER BY issue_id, label")).
 		WithArgs(id).
 		WillReturnRows(sqlmock.NewRows([]string{"issue_id", "label"}))
+}
+
+// expectTreeBlockedFlags expects the post-walk is_blocked batch read the tree
+// stamps on its nodes (stampTreeBlockedInTx): the issues rows for ids in walk
+// order — flags maps an id to its stored flag, and an id absent from the map
+// reads 0 — then the wisps read, which this unit database answers with a
+// missing table so the batch skips it.
+func expectTreeBlockedFlags(mock sqlmock.Sqlmock, flags map[string]int, ids ...string) {
+	rows := sqlmock.NewRows([]string{"id", "is_blocked"})
+	args := make([]driver.Value, len(ids))
+	placeholders := make([]string, len(ids))
+	for i, id := range ids {
+		rows.AddRow(id, flags[id])
+		args[i] = id
+		placeholders[i] = "?"
+	}
+	in := strings.Join(placeholders, ",")
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT id, is_blocked FROM issues WHERE id IN (" + in + ")")).
+		WithArgs(args...).
+		WillReturnRows(rows)
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT id, is_blocked FROM wisps WHERE id IN (" + in + ")")).
+		WithArgs(args...).
+		WillReturnError(missingTableError("wisps"))
 }
 
 // TestGetDependencyTreeInTxTellsABackEdgeFromACrossEdge walks a cycle
@@ -401,6 +427,7 @@ func TestGetDependencyTreeInTxTellsABackEdgeFromACrossEdge(t *testing.T) {
 				expectDependencies(mock, "b", []dependencyRow{{id: "c", depType: string(types.DepBlocks)}})
 				expectIssueBatchOne(mock, "c")
 			}
+			expectTreeBlockedFlags(mock, nil, tt.wantIDs[:3]...)
 
 			tx, err := db.BeginTx(context.Background(), nil)
 			if err != nil {

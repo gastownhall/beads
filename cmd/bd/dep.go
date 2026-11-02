@@ -1554,9 +1554,13 @@ func renderTree(tree []*types.TreeNode, maxDepth int, direction string) {
 		root = tree[0]
 	}
 
-	// Check if root has open blocking dependencies (GH#3565).
-	// Only genuine blockers (blocks, conditional-blocks, waits-for) count;
-	// parent-child, related, discovered-from, etc. do not block.
+	// Check if root is blocked: the stored transitive flag (root.IsBlocked, the
+	// same projection bd ready/bd blocked read) or an open direct blocking
+	// dependency (GH#3565). Only genuine blockers (blocks, conditional-blocks,
+	// waits-for) count; parent-child, related, discovered-from, etc. do not.
+	// The flag covers blocking inherited through a parent chain and blockers a
+	// depth or status prune hid (#6630); the visible-edge scan covers
+	// synthetic external leaves the storage walk cannot flag.
 	if root != nil {
 		hasOpenBlockers := false
 		for _, child := range children[root.ID] {
@@ -1566,7 +1570,7 @@ func renderTree(tree []*types.TreeNode, maxDepth int, direction string) {
 				break
 			}
 		}
-		r.rootBlocked = hasOpenBlockers
+		r.rootBlocked = root.IsBlocked || hasOpenBlockers
 	}
 
 	// Render recursively from root
