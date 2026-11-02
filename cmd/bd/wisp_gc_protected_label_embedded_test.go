@@ -4,6 +4,7 @@ package main
 
 import (
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -102,5 +103,42 @@ func TestEmbeddedWispGCCascadeSparesLabeledDependent(t *testing.T) {
 	}
 	if !bdShowSucceeds(t, bd, dir, keptChild) {
 		t.Errorf("labeled closed dependent %s was cascaded; want it spared (orphaned, not deleted)", keptChild)
+	}
+}
+
+// TestEmbeddedWispGCClosedPurgeSparesLabeled covers `--closed`: closing a
+// record does not make it disposable. The preview must count only the
+// unlabeled closed wisp as a candidate, and --force must delete only it; the
+// labeled one survives both, while `bd delete` remains the deliberate way
+// out.
+func TestEmbeddedWispGCClosedPurgeSparesLabeled(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "wpx")
+
+	bdCommand(t, bd, dir, "config", "set", "wisp.protected_labels", `["keep:mail"]`)
+
+	kept := bdCreate(t, bd, dir, "kept closed record", "--ephemeral").ID
+	bdCommand(t, bd, dir, "label", "add", kept, "keep:mail")
+	bdClose(t, bd, dir, kept)
+	plain := bdCreate(t, bd, dir, "plain closed record", "--ephemeral").ID
+	bdClose(t, bd, dir, plain)
+
+	preview := bdCommand(t, bd, dir, "mol", "wisp", "gc", "--closed", "--dry-run")
+	if !strings.Contains(preview, "Found 1 closed wisp(s)") {
+		t.Errorf("preview counted more than the unlabeled closed wisp as a candidate:\n%s", preview)
+	}
+
+	bdCommand(t, bd, dir, "mol", "wisp", "gc", "--closed", "--force")
+
+	if bdShowSucceeds(t, bd, dir, plain) {
+		t.Errorf("unlabeled closed wisp %s should have been purged", plain)
+	}
+	if !bdShowSucceeds(t, bd, dir, kept) {
+		t.Errorf("labeled closed wisp %s was purged by --closed --force; closing a record does not make it disposable", kept)
 	}
 }

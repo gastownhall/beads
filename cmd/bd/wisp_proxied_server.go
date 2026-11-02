@@ -249,21 +249,12 @@ func runWispPurgeClosedProxiedServer(ctx context.Context, dryRun, force bool, ex
 		return HandleError("listing closed wisps: %v", err)
 	}
 
-	pinnedCount := 0
-	infraCount := 0
-	filtered := make([]*types.Issue, 0, len(closedIssues))
-	for _, issue := range closedIssues {
-		if issue.Pinned {
-			pinnedCount++
-			continue
-		}
-		if r.IsInfraTypeCtx(ctx, issue.IssueType) {
-			infraCount++
-			continue
-		}
-		filtered = append(filtered, issue)
-	}
-	closedIssues = filtered
+	// The closed purge honors the workspace's protected labels like the age
+	// sweep, through the same shared filter the direct route applies;
+	// leniency on an unreadable setting matches the direct route until the
+	// setting's error-path hardening (bd-961adp AC-6).
+	labels, _ := protectedLabelSet(ctx, r, nil)
+	closedIssues, pinnedCount, infraCount := filterClosedPurgeCandidates(ctx, r, closedIssues, labels)
 	uw.Close(ctx)
 
 	if pinnedCount > 0 && !jsonOutput {

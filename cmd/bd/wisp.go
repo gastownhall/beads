@@ -1044,6 +1044,33 @@ func countLabelSpare(guard wispGuard, spared map[string]bool, issue *types.Issue
 	spared[issue.ID] = true
 }
 
+// filterClosedPurgeCandidates is the closed purge's protection filter, shared
+// by the direct and proxied-server routes so the two hand-copied pinned/infra
+// loops cannot drift on which protections they honor. It drops pinned wisps,
+// configured infra types and wisps carrying a protected label, and reports
+// the pinned and infra skip counts. The closed purge makes no status or
+// blocked reads — a wisp's labels are the only guard input beside its own
+// row.
+func filterClosedPurgeCandidates(ctx context.Context, r molReader, issues []*types.Issue, labels map[string]bool) (kept []*types.Issue, pinnedCount, infraCount int) {
+	guard := wispGuard{labels: labels}
+	filtered := make([]*types.Issue, 0, len(issues))
+	for _, issue := range issues {
+		if issue.Pinned {
+			pinnedCount++
+			continue
+		}
+		if r.IsInfraTypeCtx(ctx, issue.IssueType) {
+			infraCount++
+			continue
+		}
+		if guard.labelSpares(issue) {
+			continue
+		}
+		filtered = append(filtered, issue)
+	}
+	return filtered, pinnedCount, infraCount
+}
+
 func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, excludeTypes []types.IssueType) error {
 	statusClosed := types.StatusClosed
 	ephemeralTrue := true
@@ -1059,22 +1086,13 @@ func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, excludeTyp
 		return HandleError("listing closed wisps: %v", err)
 	}
 
-	// Filter out pinned and infra issues (protected from cleanup)
-	pinnedCount := 0
-	infraCount := 0
-	filtered := make([]*types.Issue, 0, len(closedIssues))
-	for _, issue := range closedIssues {
-		if issue.Pinned {
-			pinnedCount++
-			continue
-		}
-		if store.IsInfraTypeCtx(ctx, issue.IssueType) {
-			infraCount++
-			continue
-		}
-		filtered = append(filtered, issue)
-	}
-	closedIssues = filtered
+	// The closed purge honors the workspace's protected labels like the age
+	// sweep. This read is lenient until the setting's error-path hardening:
+	// the age mode already aborts on a value it cannot read, and the closed
+	// purge is aligned with it in bd-961adp AC-6 — the same fail-closed
+	// contract protectedWispStatuses holds.
+	labels, _ := protectedLabelSet(ctx, store, nil)
+	closedIssues, pinnedCount, infraCount := filterClosedPurgeCandidates(ctx, store, closedIssues, labels)
 
 	if pinnedCount > 0 && !jsonOutput {
 		fmt.Printf("Skipping %d pinned issue(s) (protected from cleanup)\n", pinnedCount)
