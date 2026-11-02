@@ -149,6 +149,11 @@ func TestPushWithContextReturnsPushError(t *testing.T) {
 }
 
 func TestPushWithContextBoundsIgnoredContext(t *testing.T) {
+	// Cannot be parallel: mutates the pushUnwindGrace seam.
+	prevGrace := pushUnwindGrace
+	pushUnwindGrace = 50 * time.Millisecond
+	t.Cleanup(func() { pushUnwindGrace = prevGrace })
+
 	started := make(chan struct{})
 	release := make(chan struct{})
 	target := &fakeAutoPushTarget{
@@ -177,6 +182,122 @@ func TestPushWithContextBoundsIgnoredContext(t *testing.T) {
 	}
 	if elapsed > 500*time.Millisecond {
 		t.Fatalf("pushWithContext took %s, want under 500ms", elapsed)
+	}
+}
+
+// TestPushUnwindGraceDefault pins the production unwind grace: fifteen
+// seconds is long enough for a hung push's engine teardown to finish, short
+// enough that a CLI exit is not held hostage by it (GH#7989).
+func TestPushUnwindGraceDefault(t *testing.T) {
+	// Cannot be parallel: reads the pushUnwindGrace seam other tests mutate.
+	if pushUnwindGrace != 15*time.Second {
+		t.Errorf("pushUnwindGrace = %s, want the 15s production default", pushUnwindGrace)
+	}
+}
+
+// TestPushWithContextWaitsUnwindGraceForLateTarget pins GH#7989's caller-side
+// unwind: when the push context expires, pushWithContext still waits a
+// bounded grace window for the target to finish its own unwind, and the
+// context error wins even when the late push result is nil.
+func TestPushWithContextWaitsUnwindGraceForLateTarget(t *testing.T) {
+	// Cannot be parallel: mutates the pushUnwindGrace seam.
+	prevGrace := pushUnwindGrace
+	pushUnwindGrace = 2 * time.Second
+	t.Cleanup(func() { pushUnwindGrace = prevGrace })
+
+	pushDone := make(chan struct{})
+	target := &fakeAutoPushTarget{
+		push: func(ctx context.Context) error {
+			<-ctx.Done()
+			// The unwind the grace window exists for: a short teardown,
+			// then a late (nil) result.
+			time.Sleep(100 * time.Millisecond)
+			close(pushDone)
+			return nil
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	err := pushWithContext(ctx, target)
+	elapsed := time.Since(start)
+
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("pushWithContext() = %v, want the context error even though the late push result was nil", err)
+	}
+	select {
+	case <-pushDone:
+	default:
+		t.Fatal("pushWithContext returned before the late target finished its unwind (grace window not observed)")
+	}
+	if elapsed >= 2*time.Second {
+		t.Fatalf("pushWithContext took %s, want the push released inside the grace window, not the full %s", elapsed, 2*time.Second)
+	}
+}
+
+// TestPushWithContextLateErrorStillYieldsContextError pins the other half of
+// the contract: a push that fails after the context expired still reports the
+// context error, never its own late error.
+func TestPushWithContextLateErrorStillYieldsContextError(t *testing.T) {
+	// Cannot be parallel: mutates the pushUnwindGrace seam.
+	prevGrace := pushUnwindGrace
+	pushUnwindGrace = 2 * time.Second
+	t.Cleanup(func() { pushUnwindGrace = prevGrace })
+
+	lateErr := errors.New("late push failure")
+	target := &fakeAutoPushTarget{
+		push: func(ctx context.Context) error {
+			<-ctx.Done()
+			time.Sleep(50 * time.Millisecond)
+			return lateErr
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	err := pushWithContext(ctx, target)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("pushWithContext() = %v, want the context error, not the late result %v", err, lateErr)
+	}
+}
+
+// TestPushWithContextGraceExpiresWithoutTarget pins the bound: a target that
+// never completes does not hold the caller past the grace window, and the
+// fallback's meaning stays honest — returning then proves bd stopped
+// waiting, not that the engine and its transport children stopped.
+func TestPushWithContextGraceExpiresWithoutTarget(t *testing.T) {
+	// Cannot be parallel: mutates the pushUnwindGrace seam.
+	prevGrace := pushUnwindGrace
+	pushUnwindGrace = 150 * time.Millisecond
+	t.Cleanup(func() { pushUnwindGrace = prevGrace })
+
+	release := make(chan struct{})
+	defer close(release)
+	target := &fakeAutoPushTarget{
+		push: func(context.Context) error {
+			<-release
+			return nil
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	err := pushWithContext(ctx, target)
+	elapsed := time.Since(start)
+
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("pushWithContext() = %v, want deadline exceeded", err)
+	}
+	if elapsed < 150*time.Millisecond {
+		t.Fatalf("pushWithContext returned in %s, before the grace window expired", elapsed)
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("pushWithContext took %s, want bounded by the grace window", elapsed)
 	}
 }
 

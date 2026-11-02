@@ -84,8 +84,21 @@ func isDoltAutoPushEnabled(_ context.Context) bool {
 	return config.GetBool("dolt.auto-push")
 }
 
+// pushUnwindGrace is how long pushWithContext keeps waiting for a push that
+// outlived its context to finish its own unwind (GH#7989). It is a variable,
+// not a constant, so tests can shrink the window; tests that touch it must
+// not be parallel.
+var pushUnwindGrace = 15 * time.Second
+
 // pushWithContext is a caller-side guard. Push implementations should honor
 // ctx directly, but this keeps auto-push from blocking forever if one does not.
+// When the context expires first, the push still gets a bounded unwind grace
+// (pushUnwindGrace) to finish its own teardown: the context error is decided
+// the moment the deadline hits, but abandoning the push mid-unwind can orphan
+// the transport children it spawned (GH#7989). Exceeding the grace means bd
+// stops waiting — it does not prove the engine or those children stopped, so
+// callers must not treat the return as a completed unwind. Whether the late
+// push result is nil or an error, the context error is what the caller sees.
 func pushWithContext(ctx context.Context, target autoPushTarget) error {
 	errCh := make(chan error, 1)
 	go func() {
@@ -96,6 +109,16 @@ func pushWithContext(ctx context.Context, target autoPushTarget) error {
 	case err := <-errCh:
 		return err
 	case <-ctx.Done():
+		timer := time.NewTimer(pushUnwindGrace)
+		defer timer.Stop()
+		select {
+		case <-errCh:
+			// The push finished its unwind inside the grace window. Its
+			// result is late — the context error still wins.
+		case <-timer.C:
+			// The grace expired; return the context error without the
+			// target. This is a fallback, not proof of a completed unwind.
+		}
 		return ctx.Err()
 	}
 }
