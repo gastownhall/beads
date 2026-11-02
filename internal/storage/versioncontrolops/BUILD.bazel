@@ -49,6 +49,7 @@ go_test(
         "conflicts_test.go",
         "excluded_history_warning_test.go",
         "fastforward_test.go",
+        "filtered_push_delete_test.go",
         "gc_test.go",
         "mergesettle_draincall_regression_test.go",
         "remotes_githooks_test.go",

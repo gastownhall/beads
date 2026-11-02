@@ -3,9 +3,12 @@
 package embeddeddolt
 
 import (
+	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/config"
@@ -243,4 +246,192 @@ func TestSyncFilteredPushRetainsExcludedRowsAcrossSyncs(t *testing.T) {
 		t.Errorf("after the final sync, local graph = %+v, want %+v", got, localGraph)
 	}
 	assertOnlyMainBranch(t, store)
+}
+
+var errInjectedFilteredPush = errors.New("injected filtered push failure")
+
+// injectFilteredPushStep makes the filtered push fail at step: with an error,
+// or, when cancel is set, by canceling the operation's context first.
+func injectFilteredPushStep(t *testing.T, step string, cancel context.CancelFunc) {
+	t.Helper()
+	filteredPushBeforeStep = func(got string) error {
+		if got != step {
+			return nil
+		}
+		if cancel != nil {
+			cancel()
+			return nil
+		}
+		return errInjectedFilteredPush
+	}
+	t.Cleanup(func() { filteredPushBeforeStep = nil })
+}
+
+// AC-7: a filtered push that fails or is canceled at any step reports the
+// failure, keeps every local row, sends nothing to the peer and removes both
+// temporary branches.
+func TestSyncFilteredPushFailureKeepsLocalDataAndCleansUp(t *testing.T) {
+	for _, step := range versioncontrolops.FilteredPushSteps {
+		if step == versioncontrolops.FilteredPushStepCleanup {
+			continue
+		}
+		for _, canceled := range []bool{false, true} {
+			name := step + "/failed"
+			if canceled {
+				name = step + "/canceled"
+			}
+			t.Run(name, func(t *testing.T) {
+				store := newFilteredPushStore(t)
+				seedFilteredPushGraph(t, store)
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				if canceled {
+					injectFilteredPushStep(t, step, cancel)
+				} else {
+					injectFilteredPushStep(t, step, nil)
+				}
+
+				result, err := store.Sync(ctx, filteredPushPeer, "")
+				if err != nil {
+					t.Fatalf("Sync: %v", err)
+				}
+				switch {
+				case result.Pushed || result.PushError == nil:
+					t.Fatalf("Sync pushed = %v, push error = %v; want the push to fail", result.Pushed, result.PushError)
+				case !canceled && !errors.Is(result.PushError, errInjectedFilteredPush):
+					t.Errorf("push error = %v, want the injected failure", result.PushError)
+				case strings.Contains(result.PushError.Error(), "cleanup"):
+					t.Errorf("push error = %v, want a clean cleanup", result.PushError)
+				}
+
+				if got := readFilteredGraph(t, store, ""); got != localGraph {
+					t.Errorf("local graph = %+v, want %+v", got, localGraph)
+				}
+				if got := readFilteredGraph(t, store, peerTip(t, store)); got != (filteredGraphCounts{}) {
+					t.Errorf("peer tip graph = %+v, want the seed tip (nothing pushed)", got)
+				}
+				assertOnlyMainBranch(t, store)
+				assertWritableAfterFilteredPushFailure(t, store)
+			})
+		}
+	}
+}
+
+// AC-7: a cleanup failure is reported, and cleanup still removes what it can.
+func TestSyncFilteredPushReportsCleanupFailure(t *testing.T) {
+	store := newFilteredPushStore(t)
+	seedFilteredPushGraph(t, store)
+	injectFilteredPushStep(t, versioncontrolops.FilteredPushStepCleanup, nil)
+
+	result, err := store.Sync(t.Context(), filteredPushPeer, "")
+	if err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if result.PushError == nil || !errors.Is(result.PushError, errInjectedFilteredPush) ||
+		!strings.Contains(result.PushError.Error(), "cleanup") {
+		t.Fatalf("push error = %v, want the injected cleanup failure reported", result.PushError)
+	}
+	if got := readFilteredGraph(t, store, ""); got != localGraph {
+		t.Errorf("local graph = %+v, want %+v", got, localGraph)
+	}
+	assertOnlyMainBranch(t, store)
+}
+
+// assertWritableAfterFilteredPushFailure checks that the store still accepts
+// ordinary writes after a failed filtered push: the staging steps run on the
+// store's shared session, so leaving it on a deleted temporary branch would
+// break every later write.
+func assertWritableAfterFilteredPushFailure(t *testing.T, store *EmbeddedDoltStore) {
+	t.Helper()
+	ctx := t.Context()
+	after := &types.Issue{ID: "fp-after", Title: "written after the failure", IssueType: types.TypeTask, Status: types.StatusOpen, Priority: 1}
+	if err := store.CreateIssue(ctx, after, "test"); err != nil {
+		t.Fatalf("create issue after failed filtered push: %v", err)
+	}
+	if err := store.Commit(ctx, "write after failed filtered push"); err != nil {
+		t.Fatalf("commit after failed filtered push: %v", err)
+	}
+	if n := countAt(t, store, "HEAD", "SELECT COUNT(*) FROM issues %s WHERE id = ?", after.ID); n != 1 {
+		t.Errorf("post-failure write: committed fp-after rows = %d, want 1", n)
+	}
+}
+
+// stubFilteredPushTransport replaces the embedded push transport for the test
+// with fn and returns a pointer to the number of times it ran.
+func stubFilteredPushTransport(t *testing.T, fn func(ctx context.Context, db versioncontrolops.DBConn) error) *int {
+	t.Helper()
+	calls := 0
+	prevPush := vcPush
+	vcPush = func(ctx context.Context, db versioncontrolops.DBConn, _, _, _ string) error {
+		calls++
+		return fn(ctx, db)
+	}
+	t.Cleanup(func() { vcPush = prevPush })
+	return &calls
+}
+
+// AC-7: a failure while filtering never falls back to publishing: the
+// transport is not reached, and the local data, branches and session survive.
+func TestEmbeddedFilteredPushDeleteFailureFailsClosed(t *testing.T) {
+	store := newFilteredPushStore(t)
+	seedFilteredPushGraph(t, store)
+	injectFilteredPushStep(t, versioncontrolops.FilteredPushStepDelete, nil)
+	transports := stubFilteredPushTransport(t, func(context.Context, versioncontrolops.DBConn) error {
+		return errors.New("transport must not run after a filtering failure")
+	})
+
+	err := store.filteredPushToPeer(t.Context(), filteredPushPeer, []string{"chore", "wisp"})
+	if !errors.Is(err, errInjectedFilteredPush) {
+		t.Fatalf("filteredPushToPeer error = %v, want the filtering failure", err)
+	}
+	if *transports != 0 {
+		t.Errorf("transport ran %d time(s) after the filtering failure, want 0", *transports)
+	}
+	if got := readFilteredGraph(t, store, ""); got != localGraph {
+		t.Errorf("local graph = %+v, want %+v", got, localGraph)
+	}
+	if got := readFilteredGraph(t, store, peerTip(t, store)); got != (filteredGraphCounts{}) {
+		t.Errorf("peer tip graph = %+v, want the seed tip (nothing pushed)", got)
+	}
+	assertOnlyMainBranch(t, store)
+	assertWritableAfterFilteredPushFailure(t, store)
+}
+
+// AC-7: the real transport failing after the local compensation reports the
+// transport's error and keeps the excluded rows. The compensation is already
+// on the local branch when the transport runs, so the next sync cannot
+// fast-forward over the excluded rows.
+func TestEmbeddedFilteredPushTransportFailurePreservesLocalData(t *testing.T) {
+	store := newFilteredPushStore(t)
+	seedFilteredPushGraph(t, store)
+	transportErr := errors.New("Error 1227: access denied to remote")
+	var revertsAtTransport, filterCommitsAtTransport int
+	transports := stubFilteredPushTransport(t, func(ctx context.Context, db versioncontrolops.DBConn) error {
+		if err := db.QueryRowContext(ctx,
+			"SELECT COUNT(*) FROM dolt_log WHERE message LIKE 'Revert %'").Scan(&revertsAtTransport); err != nil {
+			return fmt.Errorf("count reverts at transport: %w", err)
+		}
+		if err := db.QueryRowContext(ctx,
+			"SELECT COUNT(*) FROM dolt_log WHERE message = ?", versioncontrolops.FilteredPushCommitMsg).Scan(&filterCommitsAtTransport); err != nil {
+			return fmt.Errorf("count filter commits at transport: %w", err)
+		}
+		return transportErr
+	})
+
+	err := store.filteredPushToPeer(t.Context(), filteredPushPeer, []string{"chore", "wisp"})
+	if !errors.Is(err, transportErr) {
+		t.Fatalf("filteredPushToPeer error = %v, want the transport failure", err)
+	}
+	if *transports != 1 {
+		t.Fatalf("transport ran %d time(s), want 1", *transports)
+	}
+	if revertsAtTransport == 0 || filterCommitsAtTransport == 0 {
+		t.Errorf("at transport time the local branch had %d filter commit(s) and %d revert(s); want the compensation merged before the transport",
+			filterCommitsAtTransport, revertsAtTransport)
+	}
+	if got := readFilteredGraph(t, store, ""); got != localGraph {
+		t.Errorf("local graph = %+v, want %+v", got, localGraph)
+	}
+	assertOnlyMainBranch(t, store)
+	assertWritableAfterFilteredPushFailure(t, store)
 }

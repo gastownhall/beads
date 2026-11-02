@@ -148,7 +148,7 @@ Any key whose name contains `api_key`, `api-key`, `secret`, `token`, or `passwor
 | `federation.remote` | — | `BD_FEDERATION_REMOTE` | (none) | Dolt remote URL (`dolthub://`, `gs://`, `s3://`, `az://`, `file://`) |
 | `federation.sovereignty` | — | `BD_FEDERATION_SOVEREIGNTY` | (none) | Sovereignty tier: `T1`, `T2`, `T3`, `T4` (see [below](#sync-and-federation)) |
 | `federation.allowed-remote-patterns` | — | — | `[]` | Glob patterns restricting allowed remote URLs |
-| `federation.exclude_types` | — | — | `[wisp]` | Issue types excluded from federation push |
+| `federation.exclude_types` | — | — | `[wisp]` | Issue types kept local on federation push (`wisp` = ephemeral issues); the published tip omits them, history does not. See [Federation](../multi-agent/federation.md#excluded-issue-types) |
 | `sync.require_confirmation_on_mass_delete` | — | — | `false` | Prompt before pushing when a merge deletes most issues |
 | `output.title-length` | — | — | `255` | Title display in feedback (`0` hides); see routing note below |
 | `ai.model` | — | `BD_AI_MODEL` | `claude-haiku-4-5-20251001` | Default AI model |
