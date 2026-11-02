@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"slices"
 	"strings"
@@ -406,6 +407,80 @@ func TestCLI_InitServerUnversionedDirtyRecoveryCommit_E2E(t *testing.T) {
 			}
 			if got := unversionedQueryInt(t, ctx, db, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations"); got != schema.LatestVersion() {
 				t.Fatalf("main schema version after a second init = %d, want %d", got, schema.LatestVersion())
+			}
+		})
+	}
+}
+
+// TestCLI_InitServerUnversionedDirtyOutput_E2E pins where the
+// gastownhall/beads#6089 adoption reports itself: the default run prints one
+// full note on stderr, --quiet drops the note but keeps the store's lenient
+// warning, and --json keeps the note on stderr while stdout decodes as exactly
+// one JSON document.
+func TestCLI_InitServerUnversionedDirtyOutput_E2E(t *testing.T) {
+	skipIfNoDolt(t)
+
+	for _, tc := range []struct {
+		name     string
+		extra    []string
+		wantNote bool
+		wantJSON bool
+	}{
+		{name: "default", wantNote: true},
+		{name: "quiet", extra: []string{"--quiet"}},
+		{name: "json", extra: []string{"--json"}, wantNote: true, wantJSON: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+			defer cancel()
+
+			database := createUnversionedTestDatabase(t, ctx)
+			db := openUnversionedTestDB(t, ctx, database)
+			prepareLegacySeederResidue(t, ctx, db, false)
+
+			stdout, stderr, err := runBDExecSeparated(t, testBD, t.TempDir(), os.Environ(), unversionedInitArgs(database, tc.extra...)...)
+			if err != nil {
+				t.Fatalf("bd init %v failed: %v\nstdout:\n%s\nstderr:\n%s", tc.extra, err, stdout, stderr)
+			}
+
+			note := fmt.Sprintf("Note: database %q had uncommitted changes in tables the schema migrations alter (config, interactions, routes); bd init committed the working set in its own commit, then applied the migrations; no further action is needed (gastownhall/beads#6089)\n", database)
+			wantNotes := 0
+			if tc.wantNote {
+				wantNotes = 1
+			}
+			if n := strings.Count(stderr, initRecoveryNotePrefix); n != wantNotes {
+				t.Fatalf("stderr carries %d recovery notes, want %d:\n%s", n, wantNotes, stderr)
+			}
+			if tc.wantNote && !strings.Contains(stderr, note) {
+				t.Fatalf("stderr lacks the full recovery note %q:\n%s", note, stderr)
+			}
+			if strings.Contains(stdout, initRecoveryNotePrefix) {
+				t.Fatalf("stdout carries the recovery note:\n%s", stdout)
+			}
+			if !strings.Contains(stderr, lenientRefusalWarning) {
+				t.Fatalf("stderr lacks the lenient-open warning:\n%s", stderr)
+			}
+			if len(recoveryCommits(t, ctx, db)) != 1 {
+				t.Fatalf("recovery commits = %v, want exactly one", recoveryCommits(t, ctx, db))
+			}
+
+			if !tc.wantJSON {
+				return
+			}
+			if strings.TrimSpace(stdout) == "" {
+				t.Fatalf("bd init --json printed nothing on stdout; stderr:\n%s", stderr)
+			}
+			dec := json.NewDecoder(strings.NewReader(stdout))
+			var summary map[string]any
+			if err := dec.Decode(&summary); err != nil {
+				t.Fatalf("bd init --json stdout is not JSON: %v\n%s", err, stdout)
+			}
+			var extra any
+			if err := dec.Decode(&extra); err != io.EOF {
+				t.Fatalf("bd init --json stdout holds more than one JSON document (%v):\n%s", err, stdout)
+			}
+			if summary["initialized"] != true || summary["database"] != database || summary["mode"] != "server" {
+				t.Fatalf("bd init --json summary = %v, want initialized server-mode %s", summary, database)
 			}
 		})
 	}

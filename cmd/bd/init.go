@@ -1257,6 +1257,18 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		}
 		defer func() { _ = initGateHandle.Release() }()
 
+		// --json: stdout carries exactly one JSON document, the summary at
+		// the end (or the remote-migrate gate refusal). The progress lines
+		// init prints from here on go to stderr instead; restoreStdout puts
+		// stdout back before either document is written.
+		restoreStdout := func() {}
+		if jsonOutput {
+			jsonStdout := os.Stdout
+			os.Stdout = os.Stderr
+			restoreStdout = func() { os.Stdout = jsonStdout }
+		}
+		defer func() { restoreStdout() }()
+
 		// Resolve the operational storage path only after held-gate preflight
 		// succeeds. ResolveDoltDir retains its mkdir-on-use behavior for a
 		// real shared-server initialization.
@@ -1795,6 +1807,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 					}
 				}
 				if jsonOutput {
+					restoreStdout()
 					handleRemoteMigrateGateJSON(gateErr)
 				} else if bootstrappedFromRemote {
 					printBootstrapRemoteBehindGuidance(os.Stderr, gateErr, syncURL, "bd init")
@@ -2461,6 +2474,37 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			}
 		}
 
+		// Advertise the prefix that issue IDs will actually use. When the database
+		// already carries a provisioned issue_prefix — gateway adoption of a
+		// server-provisioned value, or a shared database another rig already
+		// configured — that value, not the caller-derived local prefix, is what
+		// appears in IDs, so the summary must show it instead of a prefix that
+		// will never be minted.
+		effectivePrefix := prefix
+		if dbIdentity.Prefix != "" {
+			effectivePrefix = dbIdentity.Prefix
+		}
+		serverUserShown := serverUser
+		if serverUserShown == "" {
+			serverUserShown = configfile.DefaultDoltServerUser
+		}
+		if jsonOutput {
+			restoreStdout()
+			summary := map[string]interface{}{
+				"initialized":              true,
+				"bootstrapped_from_remote": bootstrappedFromRemote,
+				"backend":                  backend,
+				"mode":                     "embedded",
+				"database":                 dbName,
+				"issue_prefix":             effectivePrefix,
+			}
+			if usesSQLServer() {
+				summary["mode"] = "server"
+				summary["server"] = fmt.Sprintf("%s@%s", serverUserShown, initSummaryServerAddr(beadsDir, serverHost, serverPort))
+			}
+			return outputJSON(summary)
+		}
+
 		// Skip output if quiet mode
 		if quiet {
 			return
@@ -2475,28 +2519,14 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		if !usesSQLServer() {
 			fmt.Printf("  Mode: %s\n", ui.RenderAccent("embedded"))
 		} else {
-			user := serverUser
-			if user == "" {
-				user = configfile.DefaultDoltServerUser
-			}
 			fmt.Printf("  Mode: %s\n", ui.RenderAccent("server"))
-			fmt.Printf("  Server: %s\n", ui.RenderAccent(fmt.Sprintf("%s@%s", remedy.PrintedValue(user), initSummaryServerAddr(beadsDir, serverHost, serverPort))))
+			fmt.Printf("  Server: %s\n", ui.RenderAccent(fmt.Sprintf("%s@%s", remedy.PrintedValue(serverUserShown), initSummaryServerAddr(beadsDir, serverHost, serverPort))))
 			// Warn when using the default localhost — this is the #1 misconfiguration
 			// for setups where Dolt runs on a remote machine (e.g., over Tailscale).
 			if serverHost == "" && os.Getenv("BEADS_DOLT_SERVER_HOST") == "" {
 				fmt.Fprintf(os.Stderr, "\n  %s Server host defaulted to %s.\n", ui.RenderWarn("⚠"), configfile.DefaultDoltServerHost)
 				fmt.Fprintf(os.Stderr, "    If your Dolt server is remote, set BEADS_DOLT_SERVER_HOST or pass --server-host.\n")
 			}
-		}
-		// Advertise the prefix that issue IDs will actually use. When the database
-		// already carries a provisioned issue_prefix — gateway adoption of a
-		// server-provisioned value, or a shared database another rig already
-		// configured — that value, not the caller-derived local prefix, is what
-		// appears in IDs, so the summary must show it instead of a prefix that
-		// will never be minted.
-		effectivePrefix := prefix
-		if dbIdentity.Prefix != "" {
-			effectivePrefix = dbIdentity.Prefix
 		}
 		fmt.Printf("  Database: %s\n", ui.RenderAccent(remedy.PrintedValue(dbName)))
 		// The prefix can be the database's own issue_prefix, which a clone
