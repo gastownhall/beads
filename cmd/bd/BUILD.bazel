@@ -892,6 +892,7 @@ go_test(
         "hooks_symlinked_hooks_dir_repro_test.go",
         "hooks_symlinked_hooks_dir_test.go",
         "hooks_symlinked_parent_guard_test.go",
+        "hooks_uninstall_symlink_test.go",
         "hooks_timeout_process_test.go",
         "hooks_worktree_test.go",
         "human_embedded_test.go",

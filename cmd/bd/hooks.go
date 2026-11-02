@@ -1654,10 +1654,31 @@ func uninstallHooks() error {
 }
 
 func uninstallHooksAt(hooksDir string, reset func() error) error {
+	// A hooks directory that is itself a symlink must be refused before any
+	// entry under it is read, removed or rewritten: the uninstall would act
+	// on the link's target, and the reset callback would clear beads-managed
+	// configuration for a directory bd does not own.
+	if err := refuseSymlinkedHooksDir(hooksDir); err != nil {
+		return fmt.Errorf("refusing to uninstall hooks: %w", err)
+	}
 	hookNames := []string{"pre-commit", "post-merge", "pre-push", "post-checkout", "prepare-commit-msg"}
 
 	for _, hookName := range hookNames {
 		hookPath := filepath.Join(hooksDir, hookName)
+
+		// Lstat before reading: a symlinked hook is left, with its target
+		// untouched, instead of being read through and rewritten or removed.
+		fi, lerr := os.Lstat(hookPath)
+		if lerr != nil {
+			if os.IsNotExist(lerr) {
+				continue
+			}
+			return fmt.Errorf("failed to stat %s: %w", hookName, lerr)
+		}
+		if fi.Mode()&os.ModeSymlink != 0 {
+			fmt.Fprintf(os.Stderr, "Warning: %s is a symlink; leaving it and its target untouched\n", remedy.PrintedValue(hookPath))
+			continue
+		}
 
 		// #nosec G304 -- hook path constrained to .git/hooks directory
 		content, err := os.ReadFile(hookPath)
@@ -1692,10 +1713,17 @@ func uninstallHooksAt(hooksDir string, reset func() error) error {
 			if err := os.Remove(hookPath); err != nil {
 				return fmt.Errorf("failed to remove %s: %w", hookName, err)
 			}
-			// Restore backup if exists
+			// Restore backup if it exists and is a regular file. A Stat here
+			// would follow a symlinked backup, and renaming the entry would
+			// replace the hook path with a link whose target bd never
+			// validated (the rename itself moves the link, but the restored
+			// "hook" would then execute the target); leave non-regular
+			// entries in place with a warning instead.
 			backupPath := hookPath + ".backup"
-			if _, err := os.Stat(backupPath); err == nil {
-				if err := os.Rename(backupPath, hookPath); err != nil {
+			if bfi, blerr := os.Lstat(backupPath); blerr == nil {
+				if !bfi.Mode().IsRegular() {
+					fmt.Fprintf(os.Stderr, "Warning: backup for %s is not a regular file; leaving it in place\n", hookName)
+				} else if err := os.Rename(backupPath, hookPath); err != nil {
 					fmt.Fprintf(os.Stderr, "Warning: failed to restore backup for %s: %v\n", hookName, err)
 				}
 			}
