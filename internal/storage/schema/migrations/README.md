@@ -8,6 +8,31 @@ pass before any higher version runs. The escape hatch is a **pre-migration
 repair** in Go, keyed to the pending version — see the header of
 `../migration_repairs.go` and the `preMigrationRepairs` registry.
 
+## Rewriting rows: assign `updated_at` or register a guard
+
+`issues`, `wisps`, `routes`, and `federation_peers` define `updated_at ...
+ON UPDATE CURRENT_TIMESTAMP`, so an UPDATE that changes a row without naming
+the column silently re-stamps it with the migration's wall clock — destroying
+the row's real last-modified date across every row the statement touches
+(gastownhall/beads#5981; migrations 0046/0047 did exactly this on the
+1.0.4 → 1.2.2 upgrade). Two legal shapes:
+
+- **Self-assign**, when the rewrite is cheap and single-purpose:
+  `UPDATE issues SET is_blocked = 1, updated_at = updated_at WHERE ...`
+  (the form 0059 and ignored/0015 use — derived state must not masquerade as
+  user activity).
+- **Register the step in the runner's guard** (`updatedAtGuards` in
+  `../migration_updated_at_guard.go`), which snapshots `(id, updated_at)`
+  before the step and compare-and-swap restores the historical timestamps
+  after its body, inside the same per-step commit. Use this when the
+  statement lives inside a prepared-statement string, moves rows between the
+  two tables (0035/0053), or the frozen SQL cannot be edited at all.
+
+`TestMigrationUpdatesOfAutoStampedTablesKeepUpdatedAt`
+(`../migration_updated_at_guard_test.go`) censuses both series against the
+registry: a new UPDATE that forgets the rule fails it, as does a registry
+entry whose restore target is not the table the statement rewrites.
+
 ## Measured Dolt behaviours
 
 These were measured against real Dolt (2.1.2 and 2.2.3) and confirmed against

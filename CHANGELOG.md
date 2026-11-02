@@ -1126,6 +1126,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Upgrading no longer rewrites `updated_at` on every migrated row.**
+  `issues` and `wisps` carry `ON UPDATE CURRENT_TIMESTAMP`, and the value
+  migrations 0046/0047 (the `is_blocked` backfill), 0035/0053 (the
+  agent/rig/role/message row moves and their `ephemeral` flips), and
+  ignored/0007 (the wisp-plane `is_blocked` recompute) change without naming
+  the column, so a 1.0.4 → 1.2.x upgrade silently stamped the migration's
+  wall clock over every row those statements touched, destroying real
+  last-modified dates. The migration runner now snapshots `(id, updated_at)`
+  before each registered step and restores the historical timestamps inside
+  the same per-step commit, before the version records; the migrations'
+  own frozen SQL is untouched and the recomputes still run. Rows already
+  re-stamped by a past upgrade keep the overwritten values — no repair is
+  attempted (#5981).
 - `bd dolt push <remote>` and `bd dolt pull <remote>` now push to and pull
   from the named remote. bd ignored the name, so `bd dolt push 1st` pushed to
   the default remote and reported "Push complete."; a name that differs from
