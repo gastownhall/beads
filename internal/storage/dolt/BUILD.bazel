@@ -282,6 +282,7 @@ go_test(
         "journal_scope_completeness_test.go",
         "journal_test.go",
         "journal_writer_lock_test.go",
+        "journal_writer_modes_test.go",
         "journal_writer_overlap_repro_test.go",
         "journal_writer_routes_test.go",
         "keyset_search_test.go",
