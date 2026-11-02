@@ -302,6 +302,7 @@ go_test(
         "metadata_number_fidelity_test.go",
         "metadata_schema_test.go",
         "metadata_validation_test.go",
+        "migrate_updated_at_preservation_test.go",
         "migration_0052_test.go",
         "migration_0073_rollback_test.go",
         "mixed_table_lifecycle_test.go",
