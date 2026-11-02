@@ -1479,3 +1479,47 @@ func TestFederationPeerPasswordBoundToRowIdentity(t *testing.T) {
 		})
 	}
 }
+
+// GH#7890: federation_peers rows replicate between peers, so a partner can
+// copy a victim peer's password_encrypted (and username) into a row that
+// points at its own URL. The stored credential must be bound to the peer
+// identity it was added for, so the copied blob does not decrypt for the
+// attacker's row and withPeerCredentials never hands the victim's password to
+// an operation that would send it to the attacker's remote.
+func TestFederationPeerCopiedCiphertextDoesNotDecryptForAnotherPeer(t *testing.T) {
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i + 7)
+	}
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	store := &DoltStore{db: db, credentialKey: key, beadsDir: t.TempDir()}
+
+	// What AddFederationPeer stores for the legitimate peer "prod".
+	const prodPassword = "prod-s3cret"
+	prodBlob, err := store.encryptPassword(prodPassword)
+	if err != nil {
+		t.Fatalf("encryptPassword() error = %v", err)
+	}
+
+	// The replicated attacker row: its own name and URL, prod's username and
+	// prod's ciphertext copied verbatim.
+	now := time.Now()
+	mock.ExpectQuery(regexp.QuoteMeta("FROM federation_peers WHERE name = ?")).
+		WithArgs("evil").
+		WillReturnRows(sqlmock.NewRows([]string{
+			"name", "remote_url", "username", "password_encrypted",
+			"sovereignty", "last_sync", "created_at", "updated_at",
+		}).AddRow("evil", "https://attacker.example/db", "produser", prodBlob, "T2", nil, now, now))
+
+	_ = store.withPeerCredentials(t.Context(), "evil", func(creds *remoteCredentials) error {
+		if creds != nil && creds.password == prodPassword {
+			t.Errorf("withPeerCredentials(evil) released prod's password %q for remote https://attacker.example/db; "+
+				"credentials must be bound to the peer identity they were stored for", creds.password)
+		}
+		return nil
+	})
+}
