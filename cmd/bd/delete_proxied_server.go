@@ -264,7 +264,7 @@ func renderDeletePreview(in *deleteInput, preview domain.DeletePreview, res issu
 		fmt.Printf("  %s: %s\n", id, title)
 	}
 	if in.cascade {
-		fmt.Printf("\n%s Cascade mode enabled - will also delete all dependent issues\n", ui.RenderWarn("⚠"))
+		fmt.Printf("\n%s Cascade mode enabled - will also delete all child issues\n", ui.RenderWarn("⚠"))
 	}
 	if blocked != nil {
 		// The refusal itself says how to proceed, so the "To proceed, run"

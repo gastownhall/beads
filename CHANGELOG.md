@@ -612,6 +612,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`bd delete --cascade` follows parent-child edges only.** A cascade used
+  to follow EVERY dependency edge, so deleting one epic deleted an unrelated
+  epic joined to it by a single association edge (blocks, related,
+  discovered-from) — and that bystander's own children with it
+  ([#6301](https://github.com/gastownhall/beads/issues/6301)). A cascade now
+  deletes exactly the containment closure (the named beads and their
+  parent-child descendants) and leaves the beads joined to it only by
+  association edges standing, reported in `orphaned` with their edges
+  removed — the same survival a `--force` delete gives its direct
+  dependents. Previews name what the confirming run would take instead of a
+  count beside the requested ids: text output lists every would-delete and
+  would-orphan id with its title, and `--json` adds `would_delete_ids` and
+  `would_orphan_ids` to previews and `deleted_ids` to results (on both the
+  local and the proxied-server route; `deleted` keeps naming the REQUESTED
+  ids and `deleted_count` the rows). Over HTTP, `DeleteIssuesResult` grows
+  `deleted_ids`, the containment rule and its members are announced by the
+  new build-level capability `issues.delete.containmentCascade`, and a wire
+  client refuses `cascade` — a dry-run included — against a server that does
+  not advertise it, before the dial, rather than send a request the old
+  server would answer by sweeping bystanders. A delete without `--cascade`
+  is unchanged: `bd delete <id> --force` still orphans direct dependents of
+  any edge type, and the unforced dependents refusal still covers every
+  edge type. `bd admin cleanup --cascade` inherits the same rule.
 - **`bd rules compact` previews by default and applies only with `--force`.**
   It used to apply merges by default, writing the composite and deleting the
   source rules. Scripts using `--auto` or `--group` to apply merges must add

@@ -153,7 +153,7 @@ func TestOutputDeleteProxiedPreviewExactContracts(t *testing.T) {
 		in := &deleteInput{ids: []string{"bd-target"}, cascade: true}
 		out := captureStdout(t, func() error { return outputDeleteProxiedPreview(in, result) })
 		for _, required := range []string{
-			"Cascade mode enabled - will also delete all dependent issues",
+			"Cascade mode enabled - will also delete all child issues",
 			"bd delete bd-target --cascade --force",
 		} {
 			if !strings.Contains(out, required) {
