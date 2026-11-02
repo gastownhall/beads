@@ -281,6 +281,17 @@ func applyRemote(drifted bool, dryRun bool) ApplyResult {
 			Message: "federation.remote is not set in config",
 		}
 	}
+	// A committed config.yaml can set federation.remote, and the Dolt remote
+	// added from it is what every later push and pull dials.
+	if err := checkRemoteNotOption("federation.remote", federationRemote); err != nil {
+		return ApplyResult{
+			Check:   "remote",
+			Action:  "configure",
+			Status:  applyStatusError,
+			Message: "federation.remote is not a usable remote URL",
+			Error:   err.Error(),
+		}
+	}
 
 	ctx := context.Background()
 	st, err := dolt.NewFromConfigWithOptions(ctx, beadsDir, remoteApplyStoreConfig(dryRun))
