@@ -1,6 +1,7 @@
 package dolt
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
+	"github.com/steveyegge/beads/internal/storage/peercred"
 	"github.com/steveyegge/beads/internal/testutil"
 )
 
@@ -687,8 +689,18 @@ func TestAddFederationPeerReturnsCredentialKeyInitError(t *testing.T) {
 
 func TestDecryptWithKeyShortCiphertext(t *testing.T) {
 	key := make([]byte, 32)
-	if _, err := decryptWithKey([]byte("short"), key); err == nil || err.Error() != "ciphertext too short" {
-		t.Fatalf("decryptWithKey(short) error = %v, want ciphertext too short", err)
+	// A v2 blob truncated past its nonce is local corruption.
+	blob, err := encryptWithKey("password", key)
+	if err != nil {
+		t.Fatalf("encryptWithKey failed: %v", err)
+	}
+	if _, err := decryptWithKey(blob[:len("v2:")+2], key); err == nil || err.Error() != "ciphertext too short" {
+		t.Fatalf("decryptWithKey(truncated v2) error = %v, want ciphertext too short", err)
+	}
+	// A blob without the v2 prefix is a legacy credential, not a truncated
+	// one: it is refused as legacy even when it is too short to be anything.
+	if _, err := decryptWithKey([]byte("short"), key); !errors.Is(err, peercred.ErrLegacyCredential) {
+		t.Fatalf("decryptWithKey(short) error = %v, want peercred.ErrLegacyCredential", err)
 	}
 }
 
@@ -898,9 +910,14 @@ func TestFederationPeerDecryptKeyMismatchNamesTheLocalKey(t *testing.T) {
 		localKey[i] = byte(i + 1)
 	}
 
-	encrypted, err := encryptWithKey("peerpass", writerKey)
+	// Seal with the peer's own binding so the failure below is a pure
+	// wrong-key mismatch: the blob is bound to this row, so only the local
+	// machine's key differs.
+	encrypted, err := peercred.Seal("peerpass", writerKey, peercred.Binding{
+		Name: "team", RemoteURL: "https://peer.example/peerdb", Username: "peeruser",
+	})
 	if err != nil {
-		t.Fatalf("encryptWithKey() error = %v", err)
+		t.Fatalf("peercred.Seal() error = %v", err)
 	}
 
 	// beadsDir is set only so the enrichment can resolve the key path it names;
@@ -1382,5 +1399,83 @@ func TestDecryptWithKeyStaysUnwrappedForRotation(t *testing.T) {
 	}
 	if errors.Is(err, storage.ErrCredentialKeyMismatch) {
 		t.Errorf("error = %v, want the bare cipher error; classification belongs to decryptPassword", err)
+	}
+}
+
+// GH#7890: a peer password sealed by add-peer is bound to the peer's stored
+// identity (name, raw remote URL, username) as AES-GCM associated data, so
+// reading it back for the row it was sealed for decrypts, and reading it for
+// any diverged field fails the authentication instead of handing the password
+// to a row it was never enrolled for.
+func TestFederationPeerPasswordBoundToRowIdentity(t *testing.T) {
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i + 7)
+	}
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	store := &DoltStore{db: db, credentialKey: key, beadsDir: t.TempDir()}
+
+	prod := &storage.FederationPeer{
+		Name:      "prod",
+		RemoteURL: "https://prod.example/db",
+		Username:  "produser",
+		Password:  "prod-s3cret",
+	}
+	blob, err := store.encryptPeerPassword(prod)
+	if err != nil {
+		t.Fatalf("encryptPeerPassword() error = %v", err)
+	}
+	if len(blob) == 0 || !bytes.HasPrefix(blob, []byte("v2:")) {
+		t.Fatalf("encryptPeerPassword() = %q, want a v2 blob", blob)
+	}
+
+	peerRows := func(name, url, user string) *sqlmock.Rows {
+		now := time.Now()
+		return sqlmock.NewRows([]string{
+			"name", "remote_url", "username", "password_encrypted",
+			"sovereignty", "last_sync", "created_at", "updated_at",
+		}).AddRow(name, url, user, blob, "T2", nil, now, now)
+	}
+
+	t.Run("original row decrypts", func(t *testing.T) {
+		mock.ExpectQuery(regexp.QuoteMeta("FROM federation_peers WHERE name = ?")).
+			WithArgs("prod").
+			WillReturnRows(peerRows("prod", prod.RemoteURL, prod.Username))
+		peer, err := store.GetFederationPeer(t.Context(), "prod")
+		if err != nil {
+			t.Fatalf("GetFederationPeer(prod) error = %v, want the bound password to decrypt", err)
+		}
+		if peer.Password != prod.Password {
+			t.Errorf("GetFederationPeer(prod).Password = %q, want %q", peer.Password, prod.Password)
+		}
+	})
+
+	diverged := []struct {
+		name string
+		row  string
+		url  string
+		user string
+	}{
+		{"rewritten url", "prod", "https://attacker.example/db", "produser"},
+		{"copied to another peer name", "evil", "https://attacker.example/db", "produser"},
+		{"rewritten username", "prod", "https://prod.example/db", "otheruser"},
+	}
+	for _, tc := range diverged {
+		t.Run(tc.name, func(t *testing.T) {
+			mock.ExpectQuery(regexp.QuoteMeta("FROM federation_peers WHERE name = ?")).
+				WithArgs(tc.row).
+				WillReturnRows(peerRows(tc.row, tc.url, tc.user))
+			_, err := store.GetFederationPeer(t.Context(), tc.row)
+			if err == nil {
+				t.Fatal("GetFederationPeer succeeded for a diverged row, want the binding to fail it")
+			}
+			if !errors.Is(err, storage.ErrCredentialKeyMismatch) {
+				t.Errorf("error = %v, want errors.Is storage.ErrCredentialKeyMismatch", err)
+			}
+		})
 	}
 }

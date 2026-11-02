@@ -267,6 +267,7 @@ release_cross_build(
         "//internal/storage/journalscan:journalscan",
         "//internal/storage/kvkeys:kvkeys",
         "//internal/storage/memoryops:memoryops",
+        "//internal/storage/peercred:peercred",
         "//internal/storage/rowid:rowid",
         "//internal/storage/schema:schema",
         "//internal/storage/sqlbuild:sqlbuild",

@@ -17,6 +17,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/peercred"
 )
 
 func newPeerAuthTestStore(t *testing.T) *EmbeddedDoltStore {
@@ -461,26 +462,50 @@ func TestDecryptPassword_KeyMismatchNamesTheLocalKey(t *testing.T) {
 	})
 }
 
-// Pins the short-ciphertext branch (GH#5214 review): a stored blob shorter
-// than the GCM nonce is local corruption of the credential row, so it must
-// classify through the same sentinel as a failed authentication rather than
-// surface as a bare cipher error that federation status reads as an
-// unreachable peer.
-func TestDecryptPassword_ShortCiphertextClassifiesAsKeyMismatch(t *testing.T) {
+// Pins the undecryptable-blob branches (GH#5214 review, GH#7890): a stored
+// blob that cannot be opened is a local credential problem, so it must
+// classify through the mismatch sentinel rather than surface as a bare
+// cipher error that federation status reads as an unreachable peer. A blob
+// too short for its nonce is corruption; a blob without the v2 prefix is a
+// legacy password, which carries its own sentinel for the re-enter wording
+// and still refuses the credential.
+func TestDecryptPassword_UndecryptableBlobClassifiesAsKeyMismatch(t *testing.T) {
 	store := newPeerAuthTestStore(t)
 
-	_, err := store.decryptPassword([]byte("short"))
-	if err == nil {
-		t.Fatal("decryptPassword succeeded, want short-ciphertext failure")
-	}
-	if !errors.Is(err, storage.ErrCredentialKeyMismatch) {
-		t.Errorf("error = %v, want errors.Is storage.ErrCredentialKeyMismatch", err)
-	}
-	for _, want := range []string{wantKeyMismatchClause(store), "ciphertext too short"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("error %q does not mention %q", err, want)
+	t.Run("short legacy blob", func(t *testing.T) {
+		_, err := store.decryptPassword([]byte("short"))
+		if err == nil {
+			t.Fatal("decryptPassword succeeded, want short-ciphertext failure")
 		}
-	}
+		if !errors.Is(err, storage.ErrCredentialKeyMismatch) {
+			t.Errorf("error = %v, want errors.Is storage.ErrCredentialKeyMismatch", err)
+		}
+		if !errors.Is(err, peercred.ErrLegacyCredential) {
+			t.Errorf("error = %v, want errors.Is peercred.ErrLegacyCredential", err)
+		}
+		if !strings.Contains(err.Error(), wantKeyMismatchClause(store)) {
+			t.Errorf("error %q does not mention %q", err, wantKeyMismatchClause(store))
+		}
+	})
+
+	t.Run("truncated v2 blob", func(t *testing.T) {
+		blob, err := store.encryptPassword("apassword")
+		if err != nil {
+			t.Fatalf("encryptPassword: %v", err)
+		}
+		_, err = store.decryptPassword(blob[:len("v2:")+2])
+		if err == nil {
+			t.Fatal("decryptPassword succeeded, want short-ciphertext failure")
+		}
+		if !errors.Is(err, storage.ErrCredentialKeyMismatch) {
+			t.Errorf("error = %v, want errors.Is storage.ErrCredentialKeyMismatch", err)
+		}
+		for _, want := range []string{wantKeyMismatchClause(store), "ciphertext too short"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not mention %q", err, want)
+			}
+		}
+	})
 }
 
 // A remote verb keeps failing closed on an undecryptable password: the
@@ -719,5 +744,124 @@ func TestWithPeerAuth_EnvFallbackDoesNotObservePeerCredentials(t *testing.T) {
 	}
 	if gotPwd != "envpass" {
 		t.Errorf("fallback observed DOLT_REMOTE_PASSWORD %q, want ambient %q", gotPwd, "envpass")
+	}
+}
+
+// GH#7890: federation_peers rows replicate between peers, and a password
+// sealed by the pre-binding codec opened for any row that carried it. A
+// partner that copies a victim peer's password_encrypted and username into a
+// row pointing at its own URL therefore borrowed the password on the
+// victim's next sync. The credential is now sealed for the peer's stored
+// identity, so the copied row cannot decrypt: withPeerAuth refuses before
+// installing anything, while the original peer stays usable.
+func TestWithPeerAuth_CopiedCiphertextRefusesAndOriginalPeerSurvives(t *testing.T) {
+	ctx := t.Context()
+	store := newPeerAuthTestStore(t)
+
+	if err := store.AddFederationPeer(ctx, &storage.FederationPeer{
+		Name: "prod", RemoteURL: "https://prod.example/db",
+		Username: "produser", Password: "prod-s3cret",
+	}); err != nil {
+		t.Fatalf("AddFederationPeer(prod): %v", err)
+	}
+	// The attacker's own peer row and remote, set up so the destination
+	// check alone would pass: the row's URL matches the live remote's.
+	if err := store.AddFederationPeer(ctx, &storage.FederationPeer{
+		Name: "evil", RemoteURL: "https://attacker.example/db",
+		Username: "eviluser", Password: "evil-s3cret",
+	}); err != nil {
+		t.Fatalf("AddFederationPeer(evil): %v", err)
+	}
+
+	// The replicated forged row: prod's username and ciphertext copied
+	// verbatim into the evil row, the way a partner's database would carry
+	// them after a pull.
+	if err := store.withConn(ctx, true, func(tx *sql.Tx) error {
+		var prodBlob []byte
+		if err := tx.QueryRowContext(ctx,
+			"SELECT password_encrypted FROM federation_peers WHERE name = 'prod'").Scan(&prodBlob); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx,
+			"UPDATE federation_peers SET username = ?, password_encrypted = ? WHERE name = 'evil'",
+			"produser", prodBlob)
+		return err
+	}); err != nil {
+		t.Fatalf("forge evil row: %v", err)
+	}
+
+	t.Run("copied row refuses before install", func(t *testing.T) {
+		t.Setenv("DOLT_REMOTE_USER", "envuser")
+		t.Setenv("DOLT_REMOTE_PASSWORD", "envpass")
+
+		called := false
+		err := store.withPeerAuth(ctx, "evil", func(string) error {
+			called = true
+			return nil
+		})
+		if err == nil {
+			t.Fatal("withPeerAuth(evil) succeeded, want the copied credential to be refused")
+		}
+		if called {
+			t.Error("withPeerAuth(evil) ran the operation, want refusal before any credential is installed")
+		}
+		if !errors.Is(err, storage.ErrCredentialKeyMismatch) {
+			t.Errorf("error = %v, want errors.Is storage.ErrCredentialKeyMismatch", err)
+		}
+		if got, set := os.LookupEnv("DOLT_REMOTE_PASSWORD"); set && got == "prod-s3cret" {
+			t.Error("the victim's password was installed into the environment for the attacker's remote")
+		}
+	})
+
+	t.Run("original peer remains usable", func(t *testing.T) {
+		gotUser := ""
+		err := store.withPeerAuth(ctx, "prod", func(user string) error {
+			gotUser = user
+			if pwd := os.Getenv("DOLT_REMOTE_PASSWORD"); pwd != "prod-s3cret" {
+				t.Errorf("DOLT_REMOTE_PASSWORD during fn = %q, want prod's stored password", pwd)
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("withPeerAuth(prod) error = %v, want the original peer to stay usable", err)
+		}
+		if gotUser != "produser" {
+			t.Errorf("withPeerAuth(prod) user = %q, want %q", gotUser, "produser")
+		}
+	})
+}
+
+// GH#7890: the binding covers every stored field, so a row diverged in one
+// field only — the URL the credentials were enrolled for rewritten to
+// another host, with name and username intact — cannot decrypt either.
+func TestGetFederationPeer_PasswordBoundToRowIdentity(t *testing.T) {
+	ctx := t.Context()
+	store := newPeerAuthTestStore(t)
+
+	if err := store.AddFederationPeer(ctx, &storage.FederationPeer{
+		Name: "prod", RemoteURL: "https://prod.example/db",
+		Username: "produser", Password: "prod-s3cret",
+	}); err != nil {
+		t.Fatalf("AddFederationPeer: %v", err)
+	}
+
+	// Re-enroll the same password for a second URL, as a legitimate operator
+	// would, then move the row's URL without re-entering the password: the
+	// stored blob was sealed for the first URL and must not open for the
+	// second.
+	if err := store.withConn(ctx, true, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx,
+			"UPDATE federation_peers SET remote_url = 'https://moved.example/db' WHERE name = 'prod'")
+		return err
+	}); err != nil {
+		t.Fatalf("move row URL: %v", err)
+	}
+
+	_, err := store.GetFederationPeer(ctx, "prod")
+	if err == nil {
+		t.Fatal("GetFederationPeer succeeded for a moved URL, want the binding to fail it")
+	}
+	if !errors.Is(err, storage.ErrCredentialKeyMismatch) {
+		t.Errorf("error = %v, want errors.Is storage.ErrCredentialKeyMismatch", err)
 	}
 }
