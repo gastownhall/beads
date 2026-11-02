@@ -378,3 +378,69 @@ func TestPull_PrelinkedOtherRepoBeadNotHydrated(t *testing.T) {
 		t.Errorf("created=%d updated=%d, want 0 and 0", result.PullStats.Created, result.PullStats.Updated)
 	}
 }
+
+// TestPush_OtherRepoBeadLeavesConfiguredRepoIssueAlone: pushing to B must
+// neither fetch nor update B's issue 1313 on behalf of A's locally edited
+// bead, in a real run or a preview, nor relink the bead. Own-repository
+// updates and unlinked creates still go through.
+func TestPush_OtherRepoBeadLeavesConfiguredRepoIssueAlone(t *testing.T) {
+	ownRef := "https://github.com/owner-b/repo-b/issues/7"
+	for _, dryRun := range []bool{false, true} {
+		t.Run(fmt.Sprintf("dry-run=%v", dryRun), func(t *testing.T) {
+			stub, tr := newGitHubAPIStub(t)
+			stub.issues[1313] = gitHubIssueJSON(1313, "Repo B issue 1313", crossRepoRemote)
+			stub.issues[7] = gitHubIssueJSON(7, "Own issue 7", crossRepoRemote)
+			store := newCrossRepoStore(
+				repoABead(crossRepoLocal),
+				&types.Issue{ID: "bd-own7", Title: "Own issue 7 edited", Status: types.StatusOpen,
+					IssueType: types.TypeTask, ExternalRef: &ownRef, UpdatedAt: crossRepoLocal},
+				&types.Issue{ID: "bd-unlinked", Title: "Unlinked", Status: types.StatusOpen,
+					IssueType: types.TypeTask, UpdatedAt: crossRepoLocal},
+			)
+
+			result, err := tracker.NewEngine(tr, store, "test").Sync(context.Background(),
+				tracker.SyncOptions{Push: true, DryRun: dryRun})
+			if err != nil {
+				t.Fatalf("Sync: %v", err)
+			}
+
+			store.assertUntouched(t, crossRepoAID, crossRepoAT, crossRepoARef)
+			if got := stub.requests(1313); len(got) != 0 {
+				t.Errorf("push sent requests for B's issue 1313 on behalf of %s: %v", crossRepoAID, got)
+			}
+			if got := result.PushStats; got.Created != 1 || got.Updated != 1 || got.Skipped != 1 {
+				t.Errorf("push stats created=%d updated=%d skipped=%d, want created=1 (unlinked) updated=1 (own) skipped=1 (repo A)",
+					got.Created, got.Updated, got.Skipped)
+			}
+			if !dryRun && len(stub.requests(7)) == 0 {
+				t.Errorf("own-repository bead was not pushed to issue 7")
+			}
+		})
+	}
+
+	// A conflict resolved as "keep local" forces a push. A's bead must not
+	// become a conflict against B's issue, so nothing is forced onto it.
+	for _, dryRun := range []bool{false, true} {
+		t.Run(fmt.Sprintf("forced/dry-run=%v", dryRun), func(t *testing.T) {
+			stub, tr := newGitHubAPIStub(t)
+			stub.issues[1313] = gitHubIssueJSON(1313, "Repo B issue 1313", crossRepoRemote)
+			store := newCrossRepoStore(repoABead(crossRepoLocal))
+			store.meta["github.last_sync"] = crossRepoSync.Format(time.RFC3339)
+
+			result, err := tracker.NewEngine(tr, store, "test").Sync(context.Background(),
+				tracker.SyncOptions{Pull: true, Push: true, DryRun: dryRun, ConflictResolution: tracker.ConflictLocal})
+			if err != nil {
+				t.Fatalf("Sync: %v", err)
+			}
+
+			store.assertUntouched(t, crossRepoAID, crossRepoAT, crossRepoARef)
+			if got := stub.requests(1313); len(got) != 0 {
+				t.Errorf("sync sent requests for B's issue 1313 on behalf of %s: %v", crossRepoAID, got)
+			}
+			if got := result.PushStats; got.Created != 0 || got.Updated != 0 || got.Skipped != 1 {
+				t.Errorf("push stats created=%d updated=%d skipped=%d, want 0, 0, 1",
+					got.Created, got.Updated, got.Skipped)
+			}
+		})
+	}
+}
