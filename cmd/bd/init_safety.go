@@ -256,12 +256,15 @@ func refusalMessageDivergence() string {
 // refusalMessageUnverifiedRemote returns the What/Why/Next refusal text for
 // local source selection without `--discard-remote` when the remote's
 // refs/dolt/data could not be read (GH#7665). Unlike
-// refusalMessageDivergence it does not claim the remote has history, and it
-// does not suggest bootstrap: adopting the remote needs the same read access
-// the probe lacked. The probe warning printed just before this names the URL
-// and the git error. The text is reproduced in docs/recovery/init-safety.md
-// under `init-remote-unverified`; keep them in sync. Like every refusal it
-// does not echo a token value or a complete destructive invocation.
+// refusalMessageDivergence it does not claim the remote has history. It
+// offers bootstrap only for a Dolt remote that is not a git repository: the
+// probe runs `git ls-remote`, which always fails for one, while bootstrap
+// reads it through Dolt. Bootstrapping from a git remote needs the same read
+// access the probe lacked, so for those restoring access comes first. The
+// probe warning printed just before this names the URL and the git error.
+// The text is reproduced in docs/recovery/init-safety.md under
+// `init-remote-unverified`; keep them in sync. Like every refusal it does
+// not echo a token value or a complete destructive invocation.
 func refusalMessageUnverifiedRemote() string {
 	return `bd init refuses: could not verify whether remote 'origin' has Dolt history (refs/dolt/data).
 
@@ -275,6 +278,11 @@ func refusalMessageUnverifiedRemote() string {
   Next:
     Restore access to the remote (credentials, URL, network), then
     re-run the same command.
+
+    A Dolt remote that is not a git repository (file://, gs://, s3://,
+    az://, DoltHub, remotesapi) always fails this check, which uses
+    git. To adopt such a remote:
+      bd bootstrap
 
     Or initialize without configuring a remote for this run:
       add --remote="" to the same command.

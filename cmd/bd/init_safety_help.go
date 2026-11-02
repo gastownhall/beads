@@ -88,13 +88,22 @@ UNREADABLE REMOTE
   bd init checks the remote for refs/dolt/data with git ls-remote. When
   that check fails (no credentials for a private repository, a wrong
   URL, no network), bd cannot rule out existing history and treats the
-  remote as if it had some. A plain bd init then warns and initializes
-  a fresh local database. --reinit-local, --force and --from-jsonl
-  refuse with exit 10 and "could not verify whether remote 'origin' has
-  Dolt history"; releases before this message said "already has Dolt
-  history" for the same case. Either restore access and re-run, or add
-  --remote="" to initialize without a remote and check the remote's
-  history before you add one later.
+  remote as if it had some. The check always fails for a Dolt remote
+  that is not a git repository (file://, gs://, s3://, az://, DoltHub,
+  remotesapi), because git cannot read one.
+
+  When the remote is the git origin (no sync.remote, no --remote), a
+  plain bd init then warns and initializes a fresh local database. A
+  configured sync.remote or an explicit --remote is cloned instead, and
+  bd init fails with exit 1 if the clone cannot read it.
+
+  --reinit-local, --force and --from-jsonl refuse with exit 10 and
+  "could not verify whether remote 'origin' has Dolt history"; releases
+  before this message said "already has Dolt history" for the same
+  case. Restore access and re-run; adopt a Dolt remote that is not a
+  git repository with bd bootstrap; or add --remote="" to initialize
+  without a remote, and check the remote's history before you add one
+  later.
 
 DESTROY-TOKEN (non-interactive only)
 

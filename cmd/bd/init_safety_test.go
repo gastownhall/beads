@@ -191,7 +191,8 @@ const unverifiedRemoteRefusalHeadline = "bd init refuses: could not verify wheth
 // runInitExpectingUnverifiedRefusal runs bd init and asserts the GH#7665
 // contract: exit 10 (the fail-closed refusal is kept), the unverified-remote
 // refusal, and never the verified text claiming history nobody could read.
-func runInitExpectingUnverifiedRefusal(t *testing.T, bdBin, workDir string, env []string, args ...string) {
+// It returns stderr.
+func runInitExpectingUnverifiedRefusal(t *testing.T, bdBin, workDir string, env []string, args ...string) string {
 	t.Helper()
 	cmd := exec.Command(bdBin, args...)
 	cmd.Dir = workDir
@@ -219,6 +220,7 @@ func runInitExpectingUnverifiedRefusal(t *testing.T, bdBin, workDir string, env 
 	if !strings.Contains(out, "could not verify refs/dolt/data on") {
 		t.Errorf("the probe warning naming the URL and git error is missing:\n%s", out)
 	}
+	return out
 }
 
 // TestInitOverrideWithUnreadableRemoteRefusesAsUnverified is the GH#7665
@@ -429,6 +431,79 @@ func TestInitReinitLocalUnreadableRemoteEmptyRemoteSucceeds(t *testing.T) {
 	}
 	if len(remotes) != 0 {
 		t.Errorf("the store has Dolt remotes %v; an explicitly empty --remote must configure none", remotes)
+	}
+}
+
+// TestInitOverrideNonGitDoltRemoteOffersWorkingBootstrap pins the GH#7665
+// refusal's remedy for a Dolt remote that is not a git repository. git
+// ls-remote can never read one, so --reinit-local / --force always get the
+// unverified refusal, and restoring access can never make the check pass.
+// The refusal must name bd bootstrap, and bd bootstrap must then adopt the
+// remote. The remote is a populated file:// remote bd pushed to; the
+// workspace was cloned from it with bd init --remote and then lost its local
+// database.
+func TestInitOverrideNonGitDoltRemoteOffersWorkingBootstrap(t *testing.T) {
+	if runtime.GOOS == windowsOS {
+		t.Skip("the file:// remote URL is built from a POSIX path")
+	}
+	bdBin := buildBDForInitTests(t)
+	env := hermeticInitEnv(t.TempDir())
+	run := func(t *testing.T, dir string, args ...string) string {
+		t.Helper()
+		cmd := exec.Command(bdBin, args...)
+		cmd.Dir = dir
+		cmd.Env = env
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("bd %v: %v\nstdout:\n%s\nstderr:\n%s", args, err, stdout.String(), stderr.String())
+		}
+		return stdout.String()
+	}
+	newGitDir := func(t *testing.T) string {
+		t.Helper()
+		dir := t.TempDir()
+		runGitForBootstrapTest(t, dir, "init", "-b", "main")
+		runGitForBootstrapTest(t, dir, "config", "core.hooksPath", ".git/hooks")
+		return dir
+	}
+	common := []string{"--non-interactive", "--skip-hooks", "--skip-agents"}
+
+	remoteURL := "file://" + t.TempDir()
+	srcDir := newGitDir(t)
+	run(t, srcDir, append([]string{"init", "--prefix", "nd", "--quiet"}, common...)...)
+	issueID := strings.TrimSpace(run(t, srcDir, "create", "Remote issue", "--type", "task", "--silent"))
+	if !strings.HasPrefix(issueID, "nd-") {
+		t.Fatalf("bd create --silent printed %q, want an nd- issue ID", issueID)
+	}
+	run(t, srcDir, "dolt", "remote", "add", "origin", remoteURL)
+	run(t, srcDir, "dolt", "push")
+
+	workDir := newGitDir(t)
+	run(t, workDir, append([]string{"init", "--remote", remoteURL, "--quiet"}, common...)...)
+	beadsDir := filepath.Join(workDir, ".beads")
+	if got := config.GetStringFromDir(beadsDir, "sync.remote"); got != remoteURL {
+		t.Fatalf("sync.remote = %q after bd init --remote, want %q", got, remoteURL)
+	}
+	dbDir := filepath.Join(beadsDir, "embeddeddolt")
+	if err := os.RemoveAll(dbDir); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, flag := range []string{"--reinit-local", "--force"} {
+		out := runInitExpectingUnverifiedRefusal(t, bdBin, workDir, env, append([]string{"init", flag}, common...)...)
+		if !strings.Contains(out, "bd bootstrap") {
+			t.Errorf("bd init %s refusal for a non-git Dolt remote does not name bd bootstrap:\n%s", flag, out)
+		}
+		if _, err := os.Stat(dbDir); err == nil {
+			t.Fatalf("bd init %s refusal created %s", flag, dbDir)
+		}
+	}
+
+	run(t, workDir, "bootstrap", "--non-interactive")
+	if out := run(t, workDir, "list", "--json"); !strings.Contains(out, `"`+issueID+`"`) {
+		t.Errorf("bd bootstrap did not adopt the remote: %s missing from bd list --json:\n%s", issueID, out)
 	}
 }
 
@@ -915,10 +990,12 @@ func TestCheckRemoteSafety_RefusalTextNoEcho(t *testing.T) {
 
 // TestCheckRemoteSafety_UnverifiedRefusalText pins the recovery text of the
 // GH#7665 refusal. It must explain that the check failed, not that history
-// exists; it must offer the remedies that work without reading the remote
-// (restore access, or init with no remote via --remote=""); and it must not
-// suggest bd bootstrap, which needs the very access the probe lacked. The
-// ADR no-echo contract applies as to every refusal.
+// exists, and offer a remedy that works for each kind of remote: restoring
+// access for a git remote; bd bootstrap for a Dolt remote that is not a git
+// repository, which the git check can never read but bootstrap reads through
+// Dolt; or init with no remote via --remote="". The bootstrap offer must
+// stay scoped to those remotes: for a git remote it needs the very access
+// the probe lacked. The ADR no-echo contract applies as to every refusal.
 func TestCheckRemoteSafety_UnverifiedRefusalText(t *testing.T) {
 	msg := CheckRemoteSafety(RemoteSafetyInput{RemoteDoltDataUnverified: true, ReinitLocal: true}).UserMessage
 
@@ -927,6 +1004,8 @@ func TestCheckRemoteSafety_UnverifiedRefusalText(t *testing.T) {
 		"the check of the remote failed",
 		"cannot rule out existing Dolt history",
 		"Restore access to the remote",
+		"A Dolt remote that is not a git repository",
+		"bd bootstrap",
 		`--remote=""`,
 		"bd help init-safety",
 		"--from-jsonl",
@@ -937,7 +1016,6 @@ func TestCheckRemoteSafety_UnverifiedRefusalText(t *testing.T) {
 	}
 	for _, banned := range []string{
 		"already has Dolt history",
-		"bd bootstrap",
 		"bd init --force --discard-remote --destroy-token",
 		"bd init --reinit-local --discard-remote --destroy-token",
 		"--destroy-token=",
@@ -945,6 +1023,13 @@ func TestCheckRemoteSafety_UnverifiedRefusalText(t *testing.T) {
 	} {
 		if strings.Contains(msg, banned) {
 			t.Errorf("unverified refusal contains %q:\n%s", banned, msg)
+		}
+	}
+	// Scoped, not just present: the paragraph that offers bootstrap names
+	// the remotes it is for.
+	for _, para := range strings.Split(msg, "\n\n") {
+		if strings.Contains(para, "bd bootstrap") && !strings.Contains(para, "not a git repository") {
+			t.Errorf("unverified refusal offers bd bootstrap without scoping it to Dolt remotes that are not git repositories:\n%s", para)
 		}
 	}
 }
