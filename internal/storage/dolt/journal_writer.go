@@ -54,6 +54,24 @@ func journalAdmitBy(ctx context.Context, budget time.Duration) time.Time {
 	return admitBy
 }
 
+type journalAdmitByKey struct{}
+
+// withJournalAdmitBy fixes one admission deadline, from budget, for every
+// attempt of a setup-retrying transaction route (RunInTransaction,
+// RunInIssueLifecycleTransaction): a retried attempt does not restart it.
+func withJournalAdmitBy(ctx context.Context, budget time.Duration) context.Context {
+	return context.WithValue(ctx, journalAdmitByKey{}, journalAdmitBy(ctx, budget))
+}
+
+// journalAdmitByFor is the deadline withJournalAdmitBy fixed on ctx, or one
+// fixed now from budget when ctx carries none.
+func journalAdmitByFor(ctx context.Context, budget time.Duration) time.Time {
+	if admitBy, ok := ctx.Value(journalAdmitByKey{}).(time.Time); ok {
+		return admitBy
+	}
+	return journalAdmitBy(ctx, budget)
+}
+
 // poolReadTimeout is the per-read deadline of the store's pool, zero when its
 // DSN sets none. A GET_LOCK wait must stay below it.
 func (s *DoltStore) poolReadTimeout() time.Duration {
@@ -116,18 +134,14 @@ func sqlTxEnded(err error) bool {
 // admission's conn is the session to begin the transaction on.
 func (s *DoltStore) admitJournalWriter(ctx context.Context, beginner txBeginner, admitBy time.Time) (*journalWriterAdmission, error) {
 	adm := &journalWriterAdmission{}
-	start := time.Now()
 	switch b := beginner.(type) {
 	case *sql.Conn:
 		adm.conn = b
 	case *sql.DB:
-		pinCtx, cancel := context.WithDeadline(ctx, admitBy)
-		conn, err := b.Conn(pinCtx)
-		cancel()
+		conn, err := issueops.PinJournalWriterSession(ctx, b, s.database, admitBy)
 		if err != nil {
-			if ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) {
-				name := issueops.JournalWriterLockName(s.database)
-				return nil, &issueops.JournalWriterBusyError{Lock: name, Database: s.database, Waited: time.Since(start)}
+			if errors.Is(err, issueops.ErrJournalWriterBusy) {
+				return nil, err
 			}
 			return nil, fmt.Errorf("journal writer: acquire connection: %w", err)
 		}

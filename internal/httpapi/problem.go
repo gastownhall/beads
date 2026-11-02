@@ -1708,8 +1708,9 @@ func ClassifyError(err error) Result {
 		return res
 
 	// A journaled write that other writers kept out of the journal-writer
-	// lock for its whole admission budget never ran its body: the same
-	// retryable contention.
+	// lock (or the pool) for its whole admission budget: the refused attempt
+	// never began, the same retryable contention. An earlier attempt's
+	// callback may have run, so a retry is the client's call.
 	case errors.Is(err, storageissueops.ErrJournalWriterBusy):
 		res := newResult(CodeBusy, "")
 		res.RetryAfterSeconds = retryAfterContention

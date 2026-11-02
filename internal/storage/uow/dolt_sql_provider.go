@@ -232,7 +232,17 @@ func (p *doltSQLProvider) BeginTx(ctx context.Context) (Tx, error) {
 	// The journal decision is taken once, for admission and scoping alike.
 	journalOn := p.eventsJournalEnabled.Load()
 	marker := journalWriterFor(ctx)
-	conn, err := p.db.Conn(ctx)
+	queue := journalOn && marker.mode == journalWriterQueue
+	// A queued writer waits for a pooled session only until its admission
+	// deadline, the one fixed when the outer operation started: a saturated
+	// pool is refused like a held lock.
+	var conn *sql.Conn
+	var err error
+	if queue {
+		conn, err = issueops.PinJournalWriterSession(ctx, p.db, p.database, marker.admitBy)
+	} else {
+		conn, err = p.db.Conn(ctx)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("uow: pin connection: %w", err)
 	}
@@ -241,7 +251,7 @@ func (p *doltSQLProvider) BeginTx(ctx context.Context) (Tx, error) {
 	// pinned session before START TRANSACTION opens its snapshot.
 	var journalLock *issueops.JournalWriterLock
 	var admit func(context.Context, time.Time) (*issueops.JournalWriterLock, error)
-	if journalOn && marker.mode == journalWriterQueue {
+	if queue {
 		admit = func(ctx context.Context, admitBy time.Time) (*issueops.JournalWriterLock, error) {
 			return admitJournalWriter(ctx, conn, p.database, admitBy)
 		}

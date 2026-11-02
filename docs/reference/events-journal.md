@@ -583,11 +583,16 @@ named lock per database, `bd_events_seq:<database>`, instead of overlapping.
   server frees the lock with it. A guarded delete (`bd delete` with an expected
   version) takes its per-bead delete fence first and the journal lock on the
   same session second.
-- **Busy is a refusal, not a partial write.** A write that is not let in
-  within its wait budget fails with `journal writer lock … not granted after
-  …: journal writer lock busy`. Its body never ran and nothing was written, so
-  it is safe to retry. The budget is 15 seconds for a single write, and a
-  write that already retries conflicts gets its retry budget. Over HTTP the
+- **Busy refuses one attempt.** A write that is not let in within its wait
+  budget fails with `journal writer lock … not granted after …: journal
+  writer lock busy`. Waiting for a free database connection counts against
+  the same budget. The refused attempt never began its transaction. An
+  earlier attempt of a write that retries may already have run its callback,
+  and anything that callback did outside the database stays done, so retry
+  only a request that is safe to repeat. The budget is 15 seconds for a
+  single write, and a write that already retries conflicts gets its retry
+  budget, fixed once for all its attempts. The budget bounds only the wait: a
+  write let in runs to its commit however long that takes. Over HTTP the
   same refusal is a `503` with code `busy` and a `Retry-After`.
 - **Journal-free writes take no lock.** A write declared journal-free, such as
   the journal prune or a lease refresh, does not queue. A journal record

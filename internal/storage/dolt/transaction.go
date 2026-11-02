@@ -85,6 +85,8 @@ func (s *DoltStore) runInTransaction(
 	fn func(storage.Transaction) error,
 	run func(context.Context, string, func(storage.Transaction) error) error,
 ) error {
+	// Setup retries share one journal-writer admission deadline.
+	ctx = withJournalAdmitBy(ctx, issueops.JournalWriterAdmissionBudget)
 	return s.withTransactionSetupRetry(ctx, func() error {
 		invoked := false
 		var callbackErr error
@@ -123,6 +125,8 @@ func (s *DoltStore) runInIssueLifecycleTransaction(
 	fn func(tx storage.IssueLifecycleTransaction) error,
 	run func(context.Context, func(*sql.Tx) error) error,
 ) error {
+	// Setup retries share one journal-writer admission deadline.
+	ctx = withJournalAdmitBy(ctx, issueops.JournalWriterAdmissionBudget)
 	return s.withTransactionSetupRetry(ctx, func() error {
 		invoked := false
 		var callbackErr error
@@ -183,13 +187,21 @@ func (s *DoltStore) runDoltTransactionRecording(ctx context.Context, commitMsg s
 
 	// The journal decision is taken once, for both admission and scoping.
 	journalEnabled := s.eventsJournalEnabled.Load()
-	admitBy := journalAdmitBy(ctx, issueops.JournalWriterAdmissionBudget)
+	admitBy := journalAdmitByFor(ctx, issueops.JournalWriterAdmissionBudget)
 
 	// Snapshot pool stats before acquisition to detect pool-wait events (GH#3140).
 	statsBefore := s.db.Stats()
 	acquireStart := time.Now()
 
-	conn, err := s.db.Conn(ctx)
+	// A journal writer waits for a pooled session only until its admission
+	// deadline: a saturated pool is refused like a held lock.
+	var conn *sql.Conn
+	var err error
+	if s.locksJournalWriters(journalEnabled) {
+		conn, err = issueops.PinJournalWriterSession(ctx, s.db, s.database, admitBy)
+	} else {
+		conn, err = s.db.Conn(ctx)
+	}
 	acquireMs := float64(time.Since(acquireStart).Microseconds()) / 1000.0
 	doltMetrics.connAcquireMs.Record(ctx, acquireMs)
 
@@ -205,6 +217,9 @@ func (s *DoltStore) runDoltTransactionRecording(ctx context.Context, commitMsg s
 	}
 
 	if err != nil {
+		if errors.Is(err, issueops.ErrJournalWriterBusy) {
+			return issueops.BlockedRecheck{}, err
+		}
 		return issueops.BlockedRecheck{}, fmt.Errorf("failed to acquire connection: %w", err)
 	}
 	defer conn.Close()

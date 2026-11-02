@@ -1393,7 +1393,7 @@ func (s *DoltStore) commitWriteTx(ctx context.Context, fn func(tx *sql.Tx) error
 // commitWriteTxOn is commitWriteTx against a caller-chosen txBeginner — see
 // withRetryTxOn.
 func (s *DoltStore) commitWriteTxOn(ctx context.Context, beginner txBeginner, fn func(tx *sql.Tx) error) (issueops.BlockedRecheck, error) {
-	return s.commitWriteTxWith(ctx, beginner, journalTxWriter, journalAdmitBy(ctx, issueops.JournalWriterAdmissionBudget), fn)
+	return s.commitWriteTxWith(ctx, beginner, journalTxWriter, journalAdmitByFor(ctx, issueops.JournalWriterAdmissionBudget), fn)
 }
 
 // commitWriteTxWith is commitWriteTxOn with the journal-writer admission

@@ -281,6 +281,7 @@ go_test(
         "journal_coverage_test.go",
         "journal_scope_completeness_test.go",
         "journal_test.go",
+        "journal_writer_admission_test.go",
         "journal_writer_lock_test.go",
         "journal_writer_modes_test.go",
         "journal_writer_overlap_repro_test.go",

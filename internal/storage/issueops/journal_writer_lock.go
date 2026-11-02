@@ -59,8 +59,11 @@ const (
 )
 
 // ErrJournalWriterBusy reports that a journaled write was not admitted within
-// its admission budget because other writers held the journal-writer lock. The
-// write's body never ran on this attempt; the request is retryable.
+// its admission budget, because other writers held the journal-writer lock or
+// kept every pooled session busy. The body never ran on THIS refused attempt;
+// an earlier attempt of a retrying operation may have run its callback, and
+// whatever that callback did outside the transaction stays done. Retry only a
+// request whose callback is safe to repeat.
 var ErrJournalWriterBusy = errors.New("journal writer lock busy")
 
 // ErrJournalUnlockedTx reports a journal emit inside a transaction that was
@@ -126,9 +129,11 @@ type JournalWriterLock struct {
 // AcquireJournalWriter takes the journal-writer lock on conn, waiting in short
 // GET_LOCK slices until adm.AdmitBy. It returns a *JournalWriterBusyError when
 // the deadline passes first, the caller's context error when ctx ends first,
-// and any query failure as itself. A failed or NULL GET_LOCK leaves the
-// session's lock state unknown, so the session is discarded: the caller must
-// close conn and not reuse it.
+// and any query failure as itself. A grant that lands after ctx ended or after
+// adm.AdmitBy is released and refused the same way, so no transaction begins
+// past the admission deadline. A failed or NULL GET_LOCK leaves the session's
+// lock state unknown, so the session is discarded: the caller must close conn
+// and not reuse it.
 //
 // Under WithJournalWriterTryOnce it makes one non-waiting attempt instead, and
 // contention is a *JournalWriterBusyError at once.
@@ -151,11 +156,7 @@ func AcquireJournalWriter(ctx context.Context, conn *sql.Conn, adm JournalWriter
 		}
 		remaining := time.Until(adm.AdmitBy)
 		if remaining <= 0 {
-			if deadline, ok := ctx.Deadline(); ok && !deadline.After(adm.AdmitBy) {
-				// The caller's own deadline is the bound that ran out.
-				return nil, fmt.Errorf("journal writer lock %q: %w", name, context.DeadlineExceeded)
-			}
-			return nil, &JournalWriterBusyError{Lock: name, Database: adm.Database, Waited: time.Since(start)}
+			return nil, admissionExpired(ctx, name, adm.Database, adm.AdmitBy, start)
 		}
 		wait := journalWriterWaitSeconds(remaining, adm.ReadTimeout)
 		granted, err := getLock(ctx, conn, name, wait)
@@ -165,10 +166,15 @@ func AcquireJournalWriter(ctx context.Context, conn *sql.Conn, adm JournalWriter
 		if granted {
 			lock := &JournalWriterLock{conn: conn, name: name, held: true}
 			// A grant that raced the caller's cancellation must not run a body
-			// the caller has given up on.
+			// the caller has given up on, and one that came back after the
+			// admission deadline (a slow round trip) must not begin past it.
 			if err := ctx.Err(); err != nil {
 				lock.Release()
 				return nil, fmt.Errorf("journal writer lock %q: %w", name, err)
+			}
+			if !time.Now().Before(adm.AdmitBy) {
+				lock.Release()
+				return nil, admissionExpired(ctx, name, adm.Database, adm.AdmitBy, start)
 			}
 			return lock, nil
 		}
@@ -187,16 +193,57 @@ func AcquireJournalWriter(ctx context.Context, conn *sql.Conn, adm JournalWriter
 	}
 }
 
+// PinJournalWriterSession pins a session from db for a journal writer, waiting
+// for a free pooled connection no longer than admitBy: a saturated pool counts
+// against the same admission deadline as the lock. Only the pin is bounded;
+// the session is not tied to ctx afterwards, so the body runs on the caller's
+// own context. A pin that outlasts admitBy is a *JournalWriterBusyError, or the
+// caller's DeadlineExceeded when ctx's own deadline was the bound.
+func PinJournalWriterSession(ctx context.Context, db *sql.DB, database string, admitBy time.Time) (*sql.Conn, error) {
+	start := time.Now()
+	pinCtx, cancel := context.WithDeadline(ctx, admitBy)
+	defer cancel()
+	conn, err := db.Conn(pinCtx)
+	if err == nil {
+		return conn, nil
+	}
+	if ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) {
+		return nil, admissionExpired(ctx, JournalWriterLockName(database), database, admitBy, start)
+	}
+	return nil, err
+}
+
+// admissionExpired is the refusal for an admission whose deadline passed: the
+// caller's DeadlineExceeded when ctx's own deadline was the bound, busy
+// otherwise. A cancellation stays the caller's, never busy.
+func admissionExpired(ctx context.Context, name, database string, admitBy, start time.Time) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("journal writer lock %q: %w", name, err)
+	}
+	if deadline, ok := ctx.Deadline(); ok && !deadline.After(admitBy) {
+		// The caller's own deadline is the bound that ran out.
+		return fmt.Errorf("journal writer lock %q: %w", name, context.DeadlineExceeded)
+	}
+	return &JournalWriterBusyError{Lock: name, Database: database, Waited: time.Since(start)}
+}
+
 // TryJournalWriter makes one non-waiting attempt at the journal-writer lock on
 // conn, for advisory work that should be skipped rather than queued when
-// another writer holds it. ok is false, with a nil error, on contention.
+// another writer holds it. ok is false, with a nil error, on contention. A
+// grant that raced the caller's cancellation is released and returns the
+// context error.
 func TryJournalWriter(ctx context.Context, conn *sql.Conn, database string) (lock *JournalWriterLock, ok bool, err error) {
 	name := JournalWriterLockName(database)
 	granted, err := getLock(ctx, conn, name, 0)
 	if err != nil || !granted {
 		return nil, false, err
 	}
-	return &JournalWriterLock{conn: conn, name: name, held: true}, true, nil
+	lock = &JournalWriterLock{conn: conn, name: name, held: true}
+	if err := ctx.Err(); err != nil {
+		lock.Release()
+		return nil, false, fmt.Errorf("journal writer lock %q: %w", name, err)
+	}
+	return lock, true, nil
 }
 
 type journalWriterTryOnceKey struct{}

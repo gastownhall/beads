@@ -109,6 +109,15 @@ func TestProblemMapping(t *testing.T) {
 			retryAfter: retryAfterContention,
 		},
 		{
+			// The bare sentinel, wrapped the way a funnel's caller wraps it,
+			// maps the same as the typed error above.
+			name:       "journal writer admission busy",
+			err:        fmt.Errorf("update issue: %w", storageissueops.ErrJournalWriterBusy),
+			wantStatus: http.StatusServiceUnavailable,
+			wantCode:   CodeBusy,
+			retryAfter: retryAfterContention,
+		},
+		{
 			name:       "dial failure",
 			err:        fmt.Errorf("new uow: %w", &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}),
 			wantStatus: http.StatusServiceUnavailable,
