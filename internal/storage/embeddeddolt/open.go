@@ -96,9 +96,23 @@ func OpenSQL(ctx context.Context, dir, database, branch string) (*sql.DB, func()
 }
 
 func buildDSN(dir, database string) string {
+	// The DSN's commit identity names the engine's own unauthored commits
+	// (schema migrations and their like). GIT_AUTHOR_* first, normalized like
+	// every other identity field, then the anonymous beads <beads@local> pair
+	// — the same rule the commit paths resolve (GH#7628). The DSN alone still
+	// cannot attribute DOLT_COMMIT (the SQL client identity outranks it), but
+	// the engine's identity should not be wrong either.
+	commitIdentityName := cleanCommitIdentityField(os.Getenv("GIT_AUTHOR_NAME"))
+	if commitIdentityName == "" {
+		commitIdentityName = commitName
+	}
+	commitIdentityEmail := cleanCommitIdentityField(os.Getenv("GIT_AUTHOR_EMAIL"))
+	if commitIdentityEmail == "" {
+		commitIdentityEmail = commitEmail
+	}
 	v := url.Values{}
-	v.Set(doltembed.CommitNameParam, commitName)
-	v.Set(doltembed.CommitEmailParam, commitEmail)
+	v.Set(doltembed.CommitNameParam, commitIdentityName)
+	v.Set(doltembed.CommitEmailParam, commitIdentityEmail)
 	v.Set(doltembed.MultiStatementsParam, "true")
 	if strings.TrimSpace(database) != "" {
 		v.Set(doltembed.DatabaseParam, database)
