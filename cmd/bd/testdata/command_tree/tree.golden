@@ -5369,6 +5369,9 @@ bd mol wisp gc
     | Use --closed to purge ALL closed wisps (regardless of age). This is the
     | fastest way to reclaim space from accumulated wisp bloat. Safe by default:
     | requires --force to actually delete.
+    | Without --force, closed wisps that still gate live work outside the purge
+    | candidate set are skipped in previews; JSON output includes their IDs and
+    | blocking dependents.
     |
     | Note: This uses time-based cleanup, appropriate for ephemeral wisps.
     | For graph-pressure staleness detection (blocking other work), see 'bd mol stale'.

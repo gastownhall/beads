@@ -78,6 +78,19 @@ func TestWispGCPurgeClosedPreviewJSONReportsSkippedLiveDependents(t *testing.T) 
 	bdClose(t, bd, dir, step1)
 	bdClose(t, bd, dir, step2)
 
+	// All candidates protected: keep the normal JSON preview shape.
+	allSkippedOut, err := bdRunWithFlockRetry(t, bd, dir, "mol", "wisp", "gc", "--closed", "--dry-run", "--json")
+	if err != nil {
+		t.Fatalf("all-skipped JSON preview failed: %v\n%s", err, allSkippedOut)
+	}
+	var allSkipped map[string]json.RawMessage
+	if err := json.Unmarshal(allSkippedOut, &allSkipped); err != nil {
+		t.Fatalf("all-skipped JSON preview invalid: %v\n%s", err, allSkippedOut)
+	}
+	if string(allSkipped["issue_ids"]) != "[]" || string(allSkipped["preview"]) != "true" || string(allSkipped["skipped_count"]) != "2" {
+		t.Fatalf("all-skipped JSON preview lost normal shape: %s", allSkippedOut)
+	}
+
 	safeWisp := bdCreate(t, bd, dir, "standalone closed wisp", "--ephemeral").ID
 	bdClose(t, bd, dir, safeWisp)
 

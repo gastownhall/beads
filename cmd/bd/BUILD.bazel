@@ -383,6 +383,7 @@ go_library(
         "versions.go",
         "where.go",
         "wisp.go",
+        "wisp_gc.go",
         "wisp_proxied_server.go",
         "workspace_format_guard.go",
         "workspace_gate.go",
