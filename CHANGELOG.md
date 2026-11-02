@@ -1135,6 +1135,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd delete --cascade` and `bd admin cleanup --cascade` now delete only
+  parent-child descendants** (GH#6301). The cascade used to follow every
+  dependency type, so deleting an issue also deleted whatever was
+  `discovered-from` it, blocked by one of its children, or `related` to it.
+  Now it deletes the named issues and their children at every depth; every
+  other dependent survives, loses its edges to the deleted set (a bead blocked
+  only by a deleted issue becomes ready), and is reported as orphaned, as with
+  `--force`. The `--dry-run` preview lists every id the cascade would delete and
+  every id it would orphan, and `--json` adds `would_delete_ids` and
+  `would_orphan_ids` to the preview and `deleted_ids` to a multi-id or cascade
+  deletion; `deleted` still names only the requested ids and `deleted_count`
+  counts every deleted row. Over HTTP, `issues:delete` answers with an optional
+  `deleted_ids` member, and the server announces the new cascade with the
+  build-level capability `issues.delete.containmentCascade`.
+  **Compatibility:** a server without that capability still deletes every
+  transitive dependent, so this bd refuses `--cascade` (a `--dry-run` preview
+  included) against it with an unsupported-capability error and sends nothing;
+  deletions without `--cascade` are unaffected. Upgrade the server first.
+
 - `bd compact` no longer silently changes row data when commit dates are out
   of history order across the cutoff. When a recent-dated commit came before
   an old-dated one in history (a host clock that jumped back), the squashed

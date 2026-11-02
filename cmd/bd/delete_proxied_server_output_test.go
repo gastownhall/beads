@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
+
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
@@ -316,4 +318,27 @@ func TestRenderDeleteProxiedResultExactContracts(t *testing.T) {
 			t.Errorf("deleted: got %#v, want the requested ids %#v", got["deleted"], want)
 		}
 	})
+}
+
+// TestDeleteAndCleanupHelpNameTheContainmentCascade pins the words a user reads
+// before running --cascade (GH#6301): it deletes parent-child descendants only,
+// and every other dependent survives orphaned. The old "recursively delete all
+// dependents" text described the wider cascade this one replaced.
+func TestDeleteAndCleanupHelpNameTheContainmentCascade(t *testing.T) {
+	const want = "parent-child descendants; other dependents survive"
+	for _, cmd := range []*cobra.Command{deleteCmd, cleanupCmd} {
+		if !strings.Contains(cmd.Long, want) {
+			t.Errorf("%s help does not say %q:\n%s", cmd.Name(), want, cmd.Long)
+		}
+		flag := cmd.Flags().Lookup("cascade")
+		if flag == nil {
+			t.Fatalf("%s has no --cascade flag", cmd.Name())
+		}
+		if !strings.Contains(flag.Usage, want) {
+			t.Errorf("%s --cascade usage = %q, want it to contain %q", cmd.Name(), flag.Usage, want)
+		}
+		if strings.Contains(strings.ToLower(cmd.Long+flag.Usage), "all dependent") {
+			t.Errorf("%s still describes the cascade as deleting all dependents", cmd.Name())
+		}
+	}
 }
