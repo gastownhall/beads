@@ -267,3 +267,123 @@ func TestSyncServerBinary_RetainsCurrentServer(t *testing.T) {
 		}
 	})
 }
+
+// TestSyncServerBinary_LegacyServerBootstrapsByProbe is AC-3: a legacy
+// tracked server (launched before the sidecar existed, so only the PID and
+// port files name it) is classified by asking it for its version — bounded,
+// with the open's credentials — and comparing with the launch candidate.
+// Different versions trigger the same replacement a replaced executable
+// does; equal versions retain the PID and record the observed identity; a
+// probe that cannot answer is unknown and never actionable.
+func TestSyncServerBinary_LegacyServerBootstrapsByProbe(t *testing.T) {
+	// startLegacy starts a tracked server and erases the binary witness
+	// record, leaving exactly the pre-sidecar state.
+	startLegacy := func(t *testing.T) (beadsDir, launches string, state *State) {
+		t.Helper()
+		beadsDir, launches = fakeStartWorkspace(t)
+		stopTrackedServerAfterTest(t, beadsDir)
+		state, err := startForTest(t, beadsDir)
+		if err != nil {
+			t.Fatalf("starting the tracked server: %v", err)
+		}
+		if err := os.Remove(ServerBinaryPath(beadsDir)); err != nil {
+			t.Fatalf("erasing the binary witness record (the legacy state): %v", err)
+		}
+		return beadsDir, launches, state
+	}
+	stubProbe := func(t *testing.T, version string, ok bool) {
+		t.Helper()
+		orig := probeServerDoltVersion
+		t.Cleanup(func() { probeServerDoltVersion = orig })
+		probeServerDoltVersion = func(BinarySyncRequest) (string, bool) {
+			return version, ok
+		}
+	}
+	sync := func(t *testing.T, beadsDir string, port int) (error, string) {
+		t.Helper()
+		var err error
+		stderr := captureStderr(t, func() {
+			err = SyncServerBinary(BinarySyncRequest{
+				BeadsDir:     beadsDir,
+				Host:         "127.0.0.1",
+				Port:         port,
+				AllowRestart: true,
+			})
+		})
+		return err, stderr
+	}
+
+	t.Run("different versions replace the server", func(t *testing.T) {
+		beadsDir, launches, state := startLegacy(t)
+		// The server answers 2.5.0; the dolt on PATH is 2.6.0.
+		stubProbe(t, "2.5.0", true)
+
+		err, stderr := sync(t, beadsDir, state.Port)
+		if err != nil {
+			t.Fatalf("SyncServerBinary on a legacy server running an older dolt: %v", err)
+		}
+		if got := launchedPorts(t, launches); len(got) != 2 || got[0] != got[1] {
+			t.Fatalf("launched %v, want one replacement on the same port", got)
+		}
+		rec := readBinaryRecordForTest(t, beadsDir)
+		if rec.PID == state.PID {
+			t.Fatalf("the legacy server (PID %d) was not replaced", state.PID)
+		}
+		if rec.DoltVersion != "2.6.0" || rec.Provenance != BinaryProvenanceLaunched {
+			t.Errorf("record after replacement = %+v, want dolt 2.6.0, provenance %q", rec, BinaryProvenanceLaunched)
+		}
+		for _, want := range []string{"replaced the tracked dolt sql-server", "2.5.0", "2.6.0"} {
+			if !strings.Contains(stderr, want) {
+				t.Errorf("the replacement notice is missing %q; stderr:\n%s", want, stderr)
+			}
+		}
+	})
+
+	t.Run("equal versions retain the PID and record the observation", func(t *testing.T) {
+		beadsDir, launches, state := startLegacy(t)
+		stubProbe(t, "2.6.0", true)
+
+		err, stderr := sync(t, beadsDir, state.Port)
+		if err != nil {
+			t.Fatalf("SyncServerBinary on a legacy server running the same dolt: %v", err)
+		}
+		if got := launchedPorts(t, launches); len(got) != 1 {
+			t.Errorf("launched %v, want only the original start (no restart)", got)
+		}
+		if stderr != "" {
+			t.Errorf("a current legacy server produced output:\n%s", stderr)
+		}
+		rec := readBinaryRecordForTest(t, beadsDir)
+		if rec.PID != state.PID {
+			t.Errorf("observed record names PID %d, want the retained %d", rec.PID, state.PID)
+		}
+		if rec.DoltVersion != "2.6.0" || !rec.KnownVersion {
+			t.Errorf("observed record = %+v, want dolt 2.6.0 (known)", rec)
+		}
+		if rec.Provenance != BinaryProvenanceObserved {
+			t.Errorf("observed record provenance = %q, want %q (the probe proves correlation, not launch)", rec.Provenance, BinaryProvenanceObserved)
+		}
+	})
+
+	t.Run("a probe that cannot answer is unknown", func(t *testing.T) {
+		beadsDir, launches, state := startLegacy(t)
+		stubProbe(t, "", false)
+
+		err, stderr := sync(t, beadsDir, state.Port)
+		if err != nil {
+			t.Fatalf("an unanswerable probe must not fail the open: %v", err)
+		}
+		if got := launchedPorts(t, launches); len(got) != 1 {
+			t.Errorf("launched %v, want only the original start (no restart)", got)
+		}
+		if pid := readTrackedPID(beadsDir); pid != state.PID {
+			t.Errorf("tracked PID = %d, want the retained %d", pid, state.PID)
+		}
+		if stderr != "" {
+			t.Errorf("an unknown verdict produced output:\n%s", stderr)
+		}
+		if _, statErr := os.Stat(ServerBinaryPath(beadsDir)); !os.IsNotExist(statErr) {
+			t.Errorf("an unknown verdict must not write a record: %v", statErr)
+		}
+	})
+}

@@ -1,23 +1,35 @@
 package doltserver
 
 import (
+	"context"
+	"database/sql"
 	"fmt"
 	"os"
 	"strconv"
+	"time"
+
+	"github.com/steveyegge/beads/internal/storage/doltutil"
+	"github.com/steveyegge/beads/internal/doltversion"
 )
 
 // GH#6064: a dolt sql-server outlives the binary it was exec'd with, so a
 // dolt upgrade leaves old-generation servers serving stores that
 // new-generation clients then write to. SyncServerBinary is the store-open
 // hook that closes that window for servers bd tracks: it decides, from the
-// binary witness sidecar, whether the tracked server still runs the dolt the
-// next start would launch — and, when this open may mutate the workspace's
+// binary witness sidecar (or, for a legacy server without one, a bounded
+// version probe), whether the tracked server still runs the dolt the next
+// start would launch — and, when this open may mutate the workspace's
 // lifecycle, replaces a stale server before the application's queries run.
 //
 // The hook never acts on a server bd does not track: a successful dial alone
 // says nothing about who owns the listener, so every decision below requires
 // the tracked port/live-PID proof of ManagesLiveServerOnPort, and an
 // untracked endpoint gets no comparison, no mutation and no output.
+//
+// For a legacy tracked server — one launched before the sidecar existed —
+// there is no launch evidence on disk, so classification falls back to a
+// bounded server version probe and compares its answer with the launch
+// candidate.
 
 // BinarySyncRequest is what SyncServerBinary needs to know about the open
 // that is about to use the server.
@@ -174,13 +186,41 @@ func trimSpaceBytes(b []byte) string {
 //     unknown.
 //
 // Without a usable record (a legacy server, or one whose record names
-// another PID) there is no launch evidence to compare, so the verdict is
-// unknown: never actionable.
-func classifyServerBinary(serverDir string, trackedPID int, _ BinarySyncRequest) binaryVerdict {
+// another PID) there is no launch evidence, so a bounded version probe
+// against the server — with the open's configured credentials — is compared
+// with the launch candidate: different versions are stale, equal versions are
+// current with the observed identity recorded, and a failed or unparseable
+// probe is unknown.
+func classifyServerBinary(serverDir string, trackedPID int, req BinarySyncRequest) binaryVerdict {
 	base := binaryVerdict{trackedPID: trackedPID}
 	rec := readBinaryRecord(serverDir)
 	if rec == nil || rec.PID != trackedPID {
-		base.kind = binaryUnknown
+		// Legacy tracked server: no launch evidence on disk (or a record
+		// left behind by a previous generation). Ask the server itself,
+		// bounded, and compare its answer with the launch candidate.
+		// Different versions are the same skew a replaced executable is;
+		// equal versions retain the PID and record the observed identity
+		// (provenance observed: the probe proves correlation, not which
+		// binary started the process); anything else — an unreachable
+		// server, an unparseable version, no usable candidate — is
+		// unknown, never actionable.
+		serverVersion, ok := probeServerDoltVersion(req)
+		if !ok {
+			base.kind = binaryUnknown
+			return base
+		}
+		base.serverVersion = serverVersion
+		cand, err := resolveLaunchCandidate()
+		if err != nil || !cand.known {
+			base.kind = binaryUnknown
+			return base
+		}
+		base.candidate = cand
+		if cand.version != serverVersion {
+			base.kind = binaryStale
+			return base
+		}
+		base.kind, base.refresh = binaryCurrent, true
 		return base
 	}
 	base.serverVersion = rec.DoltVersion
@@ -206,6 +246,42 @@ func classifyServerBinary(serverDir string, trackedPID int, _ BinarySyncRequest)
 	// record so the next open does not re-probe the replacement.
 	base.kind, base.refresh = binaryCurrent, true
 	return base
+}
+
+// binaryProbeTimeout bounds the legacy version probe's SQL query (and its
+// connection), so a wedged server leaves classification "unknown" quickly
+// instead of stalling the open.
+const binaryProbeTimeout = 5 * time.Second
+
+// probeServerDoltVersion asks the running server for its dolt version with
+// the open's configured credentials, bounded by binaryProbeTimeout. A var so
+// tests can stub the wire probe without a SQL server.
+var probeServerDoltVersion = func(req BinarySyncRequest) (string, bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), binaryProbeTimeout)
+	defer cancel()
+	user := req.User
+	if user == "" {
+		user = "root"
+	}
+	dsn := doltutil.ServerDSN{
+		Host:     req.Host,
+		Port:     req.Port,
+		User:     user,
+		Password: req.Password,
+		Timeout:  binaryProbeTimeout,
+	}.String()
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		return "", false
+	}
+	defer db.Close() //nolint:errcheck // best-effort close of a probe connection
+	db.SetMaxOpenConns(1)
+	db.SetConnMaxLifetime(binaryProbeTimeout)
+	v, err := doltversion.ServerVersion(ctx, db)
+	if err != nil {
+		return "", false
+	}
+	return v.String(), true
 }
 
 // binaryMutationPermitted reports whether this open may mutate the
