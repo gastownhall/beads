@@ -45,6 +45,7 @@ import (
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/doltversion"
+	"github.com/steveyegge/beads/internal/execgrace"
 	"github.com/steveyegge/beads/internal/gittraceenv"
 	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
@@ -4785,10 +4786,12 @@ func prepareDoltCLITransferCommand(ctx context.Context, cliDir string, creds *re
 		args = append([]string{args[0], "--user", creds.username}, args[1:]...)
 	}
 	cmd := exec.CommandContext(ctx, "dolt", args...) // #nosec G204 -- fixed command with validated remote/ref args
-	// CommandContext kills only the direct dolt child on expiry; a grandchild
-	// (e.g. a cloud credential helper) holding the inherited output pipes
-	// would otherwise keep Wait/CombinedOutput blocked forever after the kill.
-	cmd.WaitDelay = cliExecWaitDelay
+	// On expiry or cancellation dolt gets SIGTERM, so it can stop the git
+	// transport it runs in its own process group; it is killed if still
+	// running after cliExecWaitDelay. A grandchild (e.g. a cloud credential
+	// helper) holding the inherited output pipes would otherwise keep
+	// Wait/CombinedOutput blocked forever after the kill.
+	execgrace.Configure(cmd, cliExecWaitDelay)
 	cmd.Dir = cliDir
 	creds.applyToCmd(cmd)
 	if s3Remote {

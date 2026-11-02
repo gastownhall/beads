@@ -202,6 +202,8 @@ release_cross_build(
         "//internal/doltversion:doltversion",
         "//internal/eventsjournal:eventsjournal",
         "//internal/execenv:execenv",
+        "//internal/execgrace/execgracetest:execgracetest",
+        "//internal/execgrace:execgrace",
         "//internal/fdhygiene:fdhygiene",
         "//internal/formula/cmd/schemagen:schemagen",
         "//internal/formula/schemagen:schemagen",
