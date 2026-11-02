@@ -17,6 +17,7 @@ type cascadeAgeReader struct {
 	children  map[string]bool
 	config    map[string]string
 	searchErr error
+	fetchErr  error
 }
 
 func (r *cascadeAgeReader) SearchIssues(context.Context, string, types.IssueFilter) ([]*types.Issue, error) {
@@ -47,6 +48,9 @@ func (r *cascadeAgeReader) FindWispDependentsRecursive(context.Context, []string
 }
 
 func (r *cascadeAgeReader) GetIssuesByIDs(_ context.Context, ids []string) ([]*types.Issue, error) {
+	if r.fetchErr != nil {
+		return nil, r.fetchErr
+	}
 	want := make(map[string]bool, len(ids))
 	for _, id := range ids {
 		want[id] = true

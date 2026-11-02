@@ -1024,7 +1024,14 @@ func findAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageThre
 		// and the importIssueLookup TODO in import_shared.go for why this is
 		// not yet routed through the role.
 		childIssues, fetchErr := r.GetIssuesByIDs(ctx, childIDSlice)
-		if fetchErr == nil {
+		if fetchErr != nil {
+			// Hydrating the collected dependents is a required read, not
+			// best-effort: a child whose labels could not be read would pass
+			// the guard as if it carried nothing. The parents stay selected
+			// (their read succeeded) and the error is surfaced so both routes
+			// report the expansion as incomplete before deleting anything.
+			cascadeErr = errors.Join(cascadeErr, fmt.Errorf("hydrating cascade dependents: %w", fetchErr))
+		} else {
 			abandonedSet := make(map[string]bool, len(sel.abandoned))
 			for _, issue := range sel.abandoned {
 				abandonedSet[issue.ID] = true

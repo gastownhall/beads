@@ -140,10 +140,16 @@ func (r uowMolReader) GetIssuesByIDs(ctx context.Context, ids []string) ([]*type
 	if err != nil {
 		return nil, err
 	}
-	if labelMap, err := r.uw.LabelUseCase().GetLabelsForIssues(ctx, ids); err == nil { //nolint:forbidigo // in-transaction port read; see GetIssue above
-		for _, issue := range issues {
-			issue.Labels = labelMap[issue.ID]
-		}
+	// The label reads are required, not best-effort: a row whose labels
+	// could not be read must never come back, because a caller guarding on
+	// labels (the wisp GC's cascade expansion) would treat the blank as
+	// "carries nothing" — the deletion the guard exists to prevent.
+	labelMap, err := r.uw.LabelUseCase().GetLabelsForIssues(ctx, ids) //nolint:forbidigo // in-transaction port read; see GetIssue above
+	if err != nil {
+		return nil, fmt.Errorf("hydrating issue labels: %w", err)
+	}
+	for _, issue := range issues {
+		issue.Labels = labelMap[issue.ID]
 	}
 
 	wisps, err := r.uw.IssueUseCase().GetWispsByIDs(ctx, ids)
@@ -151,10 +157,12 @@ func (r uowMolReader) GetIssuesByIDs(ctx context.Context, ids []string) ([]*type
 		wisps = nil //nolint:staticcheck // wisps table may not exist; issues result still valid
 	}
 	if len(wisps) > 0 {
-		if labelMap, err := r.uw.LabelUseCase().GetLabelsForWisps(ctx, ids); err == nil { //nolint:forbidigo // in-transaction port read; see GetIssue above
-			for _, wisp := range wisps {
-				wisp.Labels = labelMap[wisp.ID]
-			}
+		wispLabelMap, err := r.uw.LabelUseCase().GetLabelsForWisps(ctx, ids) //nolint:forbidigo // in-transaction port read; see GetIssue above
+		if err != nil {
+			return nil, fmt.Errorf("hydrating wisp labels: %w", err)
+		}
+		for _, wisp := range wisps {
+			wisp.Labels = wispLabelMap[wisp.ID]
 		}
 	}
 

@@ -306,6 +306,42 @@ func TestWispGCInitialSearchFailureAborts(t *testing.T) {
 	}
 }
 
+// TestWispGCCascadeHydrationFailureKeepsParentsOnly pins the cascade
+// expansion's behavior when hydrating the collected dependents fails: the
+// selection keeps its eligible parents (they were selected by a read that
+// succeeded), admits no dependent — an unhydrated child's labels are
+// unknown, so treating it as unlabeled is exactly the deletion the guard
+// exists to prevent — and surfaces the error, which both routes report as
+// "Warning: cascade expansion incomplete" before deleting the parents.
+func TestWispGCCascadeHydrationFailureKeepsParentsOnly(t *testing.T) {
+	now := time.Now()
+	stale := now.Add(-24 * time.Hour)
+	parent := &types.Issue{ID: "gc-parent", Status: types.StatusOpen, UpdatedAt: stale}
+	plainChild := &types.Issue{ID: "gc-child-plain", Status: types.StatusClosed, UpdatedAt: stale}
+	labeledChild := &types.Issue{ID: "gc-child-kept", Status: types.StatusClosed, UpdatedAt: stale, Labels: []string{"keep:mail"}}
+	r := protectedLabelsReader{
+		cascadeAgeReader: &cascadeAgeReader{
+			issues:   []*types.Issue{parent, plainChild, labeledChild},
+			children: map[string]bool{"gc-child-plain": true, "gc-child-kept": true},
+			fetchErr: errors.New("hydrating issue labels: connection refused"),
+			config:   map[string]string{workapi.SettingKeyWispProtectedLabels: `["keep:mail"]`},
+		},
+	}
+	sel, err := findAbandonedWisps(context.Background(), r, false, time.Hour, nil)
+	if err == nil {
+		t.Errorf("findAbandonedWisps swallowed a cascade-hydration failure; want the error surfaced so the caller warns and can abort")
+	}
+	ids := collectedIDs(t, sel)
+	if !ids["gc-parent"] {
+		t.Errorf("eligible parent not selected beside a cascade-hydration failure (got %v)", ids)
+	}
+	for _, id := range []string{"gc-child-plain", "gc-child-kept"} {
+		if ids[id] {
+			t.Errorf("cascade admitted dependent %s whose labels could not be read; the expansion must abort on failure (got %v)", id, ids)
+		}
+	}
+}
+
 // TestWispGCAgeCountsLabelSpares pins what the skip report counts: a wisp the
 // labels alone spared. A labeled wisp too young to select was saved by age,
 // one also pinned was saved by another guard, and a closed one without --all
