@@ -89,6 +89,18 @@ func updatedGuardSeedIssue(t *testing.T, ctx context.Context, conn *sql.Conn, id
 		id, "seed "+id, status, issueType, ephemeral, updated)
 }
 
+// updatedGuardSeedWisp inserts one wisp with an explicit historical
+// updated_at on the clone-local wisp plane, listing every NOT NULL column for
+// the same engine-defaults reason as updatedGuardSeedIssue.
+func updatedGuardSeedWisp(t *testing.T, ctx context.Context, conn *sql.Conn, id, status, issueType, updated string, ephemeral int) {
+	t.Helper()
+	updatedGuardExec(t, ctx, conn,
+		`INSERT INTO wisps (id, title, description, design, acceptance_criteria, notes,
+		                   status, priority, issue_type, metadata, ephemeral, created_at, updated_at)
+		 VALUES (?, ?, '', '', '', '', ?, 2, ?, '{}', ?, '2025-12-01 08:00:00', ?)`,
+		id, "seed "+id, status, issueType, ephemeral, updated)
+}
+
 // updatedGuardCommitFixture commits everything currently stageable in the
 // working set, the state MigrateUp's pre-migration dirty-table guard requires.
 // wisps and every wisp_* table match dolt_ignore patterns, so a fixture that
@@ -228,4 +240,128 @@ func TestEmbeddedMigrate0047StepCommitKeepsUpdatedAt(t *testing.T) {
 		t.Fatalf("issues.%s AS OF HEAD updated_at = %q, want %q: the v47 step commit recorded the stamped value",
 			blocked, got.String, oldTS)
 	}
+}
+
+// TestEmbeddedMigrateRowMovesKeepUpdatedAt covers the two row-move migrations
+// whose follow-up `UPDATE ... SET ephemeral` re-stamps the rows that just
+// moved: 0035 (issues → wisps for agent/rig/role/message rows) and 0053
+// (wisps → issues for rig rows). The move itself carries updated_at in its
+// INSERT column list; the ephemeral flip is what destroys it. A destination
+// row that already existed (INSERT IGNORE collision) must keep its own
+// pre-step timestamp, not the moved row's.
+func TestEmbeddedMigrateRowMovesKeepUpdatedAt(t *testing.T) {
+	t.Run("0035 carries the source timestamp into wisps", func(t *testing.T) {
+		requireEmbedded(t)
+		ctx := t.Context()
+
+		dataDir := seedMainSchemaAt(t, ctx, 34)
+		conn, closeConn := openPinnedConn(t, ctx, dataDir)
+		defer closeConn()
+
+		const (
+			agentTS = "2026-01-06 10:00:00"
+			taskTS  = "2026-01-05 09:00:00"
+		)
+		updatedGuardSeedIssue(t, ctx, conn, "gh5981-agent", "open", "agent", agentTS, 0)
+		updatedGuardSeedIssue(t, ctx, conn, "gh5981-task", "open", "task", taskTS, 0)
+		updatedGuardCommitFixture(t, ctx, conn, "test: seed v34 fixture for gh 5981")
+
+		if _, err := schema.MigrateUp(ctx, conn); err != nil {
+			t.Fatalf("MigrateUp from v34: %v", err)
+		}
+
+		// The moved row keeps the agent issue's last-modified date (0035 then
+		// flips ephemeral to 1, which without the guard re-stamps it).
+		updatedGuardRowKeepsTimestamp(t, ctx, conn, "wisps", "gh5981-agent", agentTS)
+		var ephemeral int
+		if err := conn.QueryRowContext(ctx,
+			"SELECT ephemeral FROM wisps WHERE id = 'gh5981-agent'").Scan(&ephemeral); err != nil {
+			t.Fatalf("read moved wisp: %v", err)
+		}
+		if ephemeral != 1 {
+			t.Errorf("moved wisp ephemeral = %d, want 1 (the migration's own work must still land)", ephemeral)
+		}
+		// A plain issue neither moves nor gets stamped.
+		updatedGuardRowKeepsTimestamp(t, ctx, conn, "issues", "gh5981-task", taskTS)
+		var moved int
+		if err := conn.QueryRowContext(ctx,
+			"SELECT COUNT(*) FROM issues WHERE id = 'gh5981-agent'").Scan(&moved); err != nil {
+			t.Fatalf("count issues rows for moved id: %v", err)
+		}
+		if moved != 0 {
+			t.Errorf("agent issue still present in issues after 0035: %d row(s)", moved)
+		}
+	})
+
+	t.Run("0035 collision keeps the destination wisp's own timestamp", func(t *testing.T) {
+		requireEmbedded(t)
+		ctx := t.Context()
+
+		dataDir := seedMainSchemaAt(t, ctx, 34)
+		conn, closeConn := openPinnedConn(t, ctx, dataDir)
+		defer closeConn()
+
+		// A pre-existing wisp under the same id the move targets. INSERT
+		// IGNORE keeps it; 0035's ephemeral flip then re-stamps it without the
+		// guard. Its own pre-step timestamp is the value that must survive.
+		updatedGuardSeedWisp(t, ctx, conn, "gh5981-agent", "open", "agent", "2026-02-10 08:00:00", 0)
+		updatedGuardSeedIssue(t, ctx, conn, "gh5981-agent", "open", "agent", "2026-01-06 10:00:00", 0)
+		updatedGuardCommitFixture(t, ctx, conn, "test: seed v34 collision fixture for gh 5981")
+
+		if _, err := schema.MigrateUp(ctx, conn); err != nil {
+			t.Fatalf("MigrateUp from v34: %v", err)
+		}
+		updatedGuardRowKeepsTimestamp(t, ctx, conn, "wisps", "gh5981-agent", "2026-02-10 08:00:00")
+	})
+
+	t.Run("0053 carries the wisp timestamp into issues", func(t *testing.T) {
+		requireEmbedded(t)
+		ctx := t.Context()
+
+		dataDir := seedMainSchemaAt(t, ctx, 52)
+		conn, closeConn := openPinnedConn(t, ctx, dataDir)
+		defer closeConn()
+
+		const rigTS = "2026-03-01 09:00:00"
+		updatedGuardSeedWisp(t, ctx, conn, "gh5981-rig", "open", "rig", rigTS, 1)
+		updatedGuardCommitFixture(t, ctx, conn, "test: seed v52 fixture for gh 5981")
+
+		if _, err := schema.MigrateUp(ctx, conn); err != nil {
+			t.Fatalf("MigrateUp from v52: %v", err)
+		}
+
+		// The moved row keeps the rig wisp's last-modified date (0053 then
+		// flips ephemeral to 0, which without the guard re-stamps it).
+		updatedGuardRowKeepsTimestamp(t, ctx, conn, "issues", "gh5981-rig", rigTS)
+		var ephemeral int
+		if err := conn.QueryRowContext(ctx,
+			"SELECT ephemeral FROM issues WHERE id = 'gh5981-rig'").Scan(&ephemeral); err != nil {
+			t.Fatalf("read moved issue: %v", err)
+		}
+		if ephemeral != 0 {
+			t.Errorf("moved issue ephemeral = %d, want 0 (the migration's own work must still land)", ephemeral)
+		}
+	})
+
+	t.Run("0053 collision keeps the destination issue's own timestamp", func(t *testing.T) {
+		requireEmbedded(t)
+		ctx := t.Context()
+
+		dataDir := seedMainSchemaAt(t, ctx, 52)
+		conn, closeConn := openPinnedConn(t, ctx, dataDir)
+		defer closeConn()
+
+		// A pre-existing issue under the moved wisp's id, seeded ephemeral
+		// directly in the INSERT (a post-seed UPDATE would itself re-stamp
+		// updated_at) so 0053's flip to 0 changes it and would re-stamp it
+		// without the guard. Its own pre-step timestamp must survive.
+		updatedGuardSeedWisp(t, ctx, conn, "gh5981-rig", "open", "rig", "2026-03-01 09:00:00", 1)
+		updatedGuardSeedIssue(t, ctx, conn, "gh5981-rig", "open", "rig", "2026-02-20 07:00:00", 1)
+		updatedGuardCommitFixture(t, ctx, conn, "test: seed v52 collision fixture for gh 5981")
+
+		if _, err := schema.MigrateUp(ctx, conn); err != nil {
+			t.Fatalf("MigrateUp from v52: %v", err)
+		}
+		updatedGuardRowKeepsTimestamp(t, ctx, conn, "issues", "gh5981-rig", "2026-02-20 07:00:00")
+	})
 }

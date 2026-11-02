@@ -46,8 +46,15 @@ type updatedAtGuardPlan struct {
 // updatedAtGuards is keyed like preMigrationRepairs: by migration source and
 // pending version. A version absent here runs with zero guard queries.
 var updatedAtGuards = map[repairKey]updatedAtGuardPlan{
+	// 0035 moves agent/rig/role/message issues into wisps (INSERT IGNORE
+	// carries updated_at) and then flips `ephemeral` on the moved rows, which
+	// re-stamps them; a pre-existing same-id wisp keeps its own timestamp.
+	{"schema_migrations", 35}: {SnapshotTables: []string{"issues", "wisps"}, RestoreTable: "wisps"},
 	{"schema_migrations", 46}: {SnapshotTables: []string{"issues"}, RestoreTable: "issues"},
 	{"schema_migrations", 47}: {SnapshotTables: []string{"issues"}, RestoreTable: "issues"},
+	// 0053 is 0035's inverse: rig wisps move into issues, then `ephemeral`
+	// flips on the moved rows.
+	{"schema_migrations", 53}: {SnapshotTables: []string{"issues", "wisps"}, RestoreTable: "issues"},
 }
 
 // updatedAtGuardTableExists is the guard's table-existence probe, indirected

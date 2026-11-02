@@ -77,6 +77,71 @@ func updatedGuardPrimeTail(mock sqlmock.Sqlmock, commitEachStep bool) {
 	}
 }
 
+// updatedGuardWispsSelectRegex is updatedGuardSelectRegex's wisps-table
+// counterpart, and updatedGuardWispsRestoreRegex the two-row restore shape
+// the 0035 subtests pin.
+const (
+	updatedGuardWispsSelectRegex = "SELECT id, updated_at FROM `wisps` ORDER BY id"
+)
+const updatedGuardWispsRestoreRegex = `UPDATE ` + "`wisps`" + ` SET updated_at = CASE id WHEN \? THEN \? WHEN \? THEN \? ELSE updated_at END WHERE \(id = \? AND updated_at = \?\) OR \(id = \? AND updated_at = \?\)`
+
+// TestUpdatedAtGuardRowMovesPreferDestinationHistory pins the 0035/0053
+// lookup rules at statement level: a moved row is restored from its
+// source-table snapshot, a row that already existed in the restore table
+// keeps that table's own value even when the source table holds a same-id
+// snapshot, and rows the step created (no snapshot anywhere) or deleted
+// (absent from the reread) are left entirely alone.
+func TestUpdatedAtGuardRowMovesPreferDestinationHistory(t *testing.T) {
+	failOnSwallowedAdvisory(t)
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	// Snapshot: issues holds the moving row plus a same-id value that must
+	// NOT win; wisps holds the destination's own value for that id plus a
+	// row the step will delete.
+	mock.ExpectQuery(updatedGuardTableQuery).WithArgs("issues").
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
+	mock.ExpectQuery(updatedGuardSelectRegex).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "updated_at"}).
+			AddRow("mover", "2026-01-06 10:00:00").
+			AddRow("native", "2026-01-01 00:00:00"))
+	mock.ExpectQuery(updatedGuardTableQuery).WithArgs("wisps").
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
+	mock.ExpectQuery(updatedGuardWispsSelectRegex).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "updated_at"}).
+			AddRow("doomed", "2026-01-02 00:00:00").
+			AddRow("native", "2026-02-10 08:00:00"))
+	// 0035's body (bounded pass: no per-step commit).
+	mock.ExpectExec(`(?s)SET @shared_cols`).WillReturnResult(sqlmock.NewResult(0, 0))
+	// Reread: mover arrived stamped, native (collision) got stamped, fresh
+	// was created by the step, doomed is gone. Only mover and native are
+	// restored — mover from issues, native from wisps' own value, not the
+	// issues value under the same id.
+	mock.ExpectQuery(updatedGuardTableQuery).WithArgs("wisps").
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
+	mock.ExpectQuery(updatedGuardWispsSelectRegex).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "updated_at"}).
+			AddRow("fresh", updatedGuardNewTS).
+			AddRow("mover", updatedGuardNewTS).
+			AddRow("native", updatedGuardNewTS))
+	mock.ExpectExec(updatedGuardWispsRestoreRegex).
+		WithArgs("mover", "2026-01-06 10:00:00", "native", "2026-02-10 08:00:00",
+			"mover", updatedGuardNewTS, "native", updatedGuardNewTS).
+		WillReturnResult(sqlmock.NewResult(0, 2))
+	mock.ExpectExec(`INSERT IGNORE INTO schema_migrations`).WithArgs(35, sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	if _, err := runMigrations(context.Background(), db, mainSource, 34, 35, false); err != nil {
+		t.Fatalf("runMigrations: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations (lookup precedence or skip rules wrong): %v", err)
+	}
+}
+
 // TestUpdatedAtGuardRestoresTimestampsAroundRegisteredStep pins the guard's
 // position in the step: snapshot before the body, restore between a
 // successful body and the cursor row, so the restored values land in the same
@@ -227,7 +292,7 @@ func TestUpdatedAtGuardRestoresTimestampsAroundRegisteredStep(t *testing.T) {
 				AddRow("i3", updatedGuardNewTS))
 		// i1 and i2 fill one statement (two WHEN arms, two OR-ed predicates);
 		// i3 spills into a second statement in the single-row shape.
-		mock.ExpectExec(`UPDATE ` + "`issues`" + ` SET updated_at = CASE id WHEN \? THEN \? WHEN \? THEN \? ELSE updated_at END WHERE \(id = \? AND updated_at = \?\) OR \(id = \? AND updated_at = \?\)`).
+		mock.ExpectExec(`UPDATE `+"`issues`"+` SET updated_at = CASE id WHEN \? THEN \? WHEN \? THEN \? ELSE updated_at END WHERE \(id = \? AND updated_at = \?\) OR \(id = \? AND updated_at = \?\)`).
 			WithArgs("i1", "2026-01-10 09:00:00", "i2", "2026-01-11 09:00:00",
 				"i1", updatedGuardNewTS, "i2", updatedGuardNewTS).
 			WillReturnResult(sqlmock.NewResult(0, 2))

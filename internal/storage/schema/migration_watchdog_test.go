@@ -295,6 +295,13 @@ func TestRunMigrationsWatchdogSurvivesNonTTY(t *testing.T) {
 	issueRowCounter = func(context.Context, DBConn) (int64, error) { return 0, nil }
 	defer func() { issueRowCounter = origCounter }()
 
+	// Migration 0035 is in the updated_at guard registry (#5981) and the
+	// panic-stub mock cannot answer the guard's table probes, so stub the
+	// seam: both tables absent, the guard issues no reads.
+	origGuardProbe := updatedAtGuardTableExists
+	updatedAtGuardTableExists = func(context.Context, DBConn, string) (bool, error) { return false, nil }
+	defer func() { updatedAtGuardTableExists = origGuardProbe }()
+
 	t.Setenv(migrationWatchdogIntervalEnv, "10ms")
 
 	db := &slowMigrationDB{d: 80 * time.Millisecond}

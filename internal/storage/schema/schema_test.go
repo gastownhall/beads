@@ -487,6 +487,14 @@ func TestRunMigrationsSnapshotsDirtyTablesBeforeRepairSoRepairMutationsCommitAto
 	mock.ExpectQuery(dirtyStatusQuery).
 		WillReturnRows(sqlmock.NewRows([]string{"table_name", "staged"}))
 
+	// 1b. The updated_at guard registered for 0053 (#5981) snapshots before
+	// the repair too; this mocked world has no issues or wisps tables, so
+	// both probes report absent and the guard issues no reads.
+	mock.ExpectQuery(tableQuery).WithArgs("issues").
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
+	mock.ExpectQuery(tableQuery).WithArgs("wisps").
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
+
 	// 2. preMigrationRepair(53): ensureIssuesRigColumns (all present, no
 	// exec), ensureWispDependenciesSplitTargets (table absent, no-op), then
 	// ensureDependenciesIDColumn actually mutating `dependencies`.
@@ -515,8 +523,12 @@ func TestRunMigrationsSnapshotsDirtyTablesBeforeRepairSoRepairMutationsCommitAto
 	mock.ExpectExec(`ALTER TABLE dependencies ADD PRIMARY KEY \(id\)`).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 
-	// 3. Migration 0053's own frozen SQL, then its cursor row.
+	// 3. Migration 0053's own frozen SQL, then its cursor row. Between them
+	// the guard's restore path probes the restore table (still absent here,
+	// so no reread and no restore statement).
 	mock.ExpectExec(`SET FOREIGN_KEY_CHECKS = 0`).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(tableQuery).WithArgs("issues").
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
 	mock.ExpectExec(`INSERT IGNORE INTO schema_migrations`).WithArgs(53, sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
@@ -2519,6 +2531,13 @@ func TestRunMigrationsStderrOutput(t *testing.T) {
 	issueRowCounter = func(context.Context, DBConn) (int64, error) { return 0, nil }
 	defer func() { issueRowCounter = origCounter }()
 
+	// Migration 0035 is in the updated_at guard registry (#5981) and the
+	// panic-stub mock cannot answer the guard's table probes, so stub the
+	// seam: both tables absent, the guard issues no reads.
+	origGuardProbe := updatedAtGuardTableExists
+	updatedAtGuardTableExists = func(context.Context, DBConn, string) (bool, error) { return false, nil }
+	defer func() { updatedAtGuardTableExists = origGuardProbe }()
+
 	// Bounded below migration 40: migrations 40/41 carry preMigrationRepairs and
 	// CALL DOLT_* bodies that issue real queries via mockDB.QueryRowContext /
 	// QueryContext, and the repairs at 47 and 53 issue real INFORMATION_SCHEMA
@@ -2563,6 +2582,13 @@ func TestRunMigrationsUsesProvidedSource(t *testing.T) {
 	issueRowCounter = func(context.Context, DBConn) (int64, error) { return 0, nil }
 	defer func() { issueRowCounter = origCounter }()
 
+	// Migration 0035 is in the updated_at guard registry (#5981) and the
+	// panic-stub mock cannot answer the guard's table probes, so stub the
+	// seam: both tables absent, the guard issues no reads.
+	origGuardProbe := updatedAtGuardTableExists
+	updatedAtGuardTableExists = func(context.Context, DBConn, string) (bool, error) { return false, nil }
+	defer func() { updatedAtGuardTableExists = origGuardProbe }()
+
 	// Bounded below migration 40 for the same reason as
 	// TestRunMigrationsStderrOutput: mockDB can't answer the queries the
 	// preMigrationRepairs at versions 40/41/47/53 (and 40/41's CALL DOLT_*
@@ -2605,6 +2631,13 @@ func TestRunMigrationsLargeRigNoticeOnlyOnMainSource(t *testing.T) {
 	origCounter := issueRowCounter
 	issueRowCounter = func(context.Context, DBConn) (int64, error) { return 49_187, nil }
 	defer func() { issueRowCounter = origCounter }()
+
+	// Migration 0035 is in the updated_at guard registry (#5981) and the
+	// panic-stub mock cannot answer the guard's table probes, so stub the
+	// seam: both tables absent, the guard issues no reads.
+	origGuardProbe := updatedAtGuardTableExists
+	updatedAtGuardTableExists = func(context.Context, DBConn, string) (bool, error) { return false, nil }
+	defer func() { updatedAtGuardTableExists = origGuardProbe }()
 
 	var mainBuf bytes.Buffer
 	orig := stderr
