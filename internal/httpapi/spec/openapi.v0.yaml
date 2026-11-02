@@ -9705,12 +9705,27 @@ components:
           type: array
           description: >-
             The surviving beads that depended on something this request
-            deleted, in ascending id order. Present exactly when the request
-            carried `force` without `cascade`, which is the only mode in which
-            orphaning is possible; absent otherwise.
+            deleted, in ascending id order. Present when the request carried
+            `cascade` (a cascade follows parent-child edges only, so a bead
+            joined to the deleted tree by any other edge survives it) or
+            `force` without `cascade`, and some bead was orphaned; absent
+            otherwise.
 
 
             DIRECT dependents only. A bead two edges away lost no edge.
+          items:
+            type: string
+        deleted_ids:
+          type: array
+          description: >-
+            The beads `deleted` counts, in ascending id order without
+            duplicates: under `cascade`, the whole parent-child closure. Under
+            `dry_run` it names the beads that would go, so a preview and the
+            deletion that follows it can be compared id for id.
+
+
+            Optional, because a server older than this member does not send
+            it; a client reading such a server gets no names, never wrong ones.
           items:
             type: string
 

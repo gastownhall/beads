@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -414,13 +415,24 @@ func RunDeleterCascadeFollowsOnlyContainment(t *testing.T, ctx context.Context, 
 		{tag: "containnf", force: false},
 	} {
 		f := deleterSeedContainment(t, ctx, fixture, mode.tag)
-		result := deleterDelete(t, ctx, fixture, publicops.DeleteRequest{
-			IDs:     []string{f.A},
-			Cascade: true,
-			Force:   mode.force,
-		})
+		request := publicops.DeleteRequest{IDs: []string{f.A}, Cascade: true, Force: mode.force}
+		want := append([]string(nil), f.deleted()...)
+		sort.Strings(want)
+
+		// DeletedIDs names the rows Deleted counts, sorted, and the preview
+		// names the same rows the deletion then removes.
+		previewRequest := request
+		previewRequest.DryRun = true
+		preview := deleterDelete(t, ctx, fixture, previewRequest)
+		if !reflect.DeepEqual(preview.DeletedIDs, want) {
+			t.Errorf("Force=%v: preview DeletedIDs = %v, want %v", mode.force, preview.DeletedIDs, want)
+		}
+		result := deleterDelete(t, ctx, fixture, request)
 		if result.Deleted != 4 {
 			t.Errorf("Force=%v: Deleted = %d, want 4 — A and its three parent-child descendants", mode.force, result.Deleted)
+		}
+		if !reflect.DeepEqual(result.DeletedIDs, want) || len(result.DeletedIDs) != result.Deleted {
+			t.Errorf("Force=%v: DeletedIDs = %v (Deleted %d), want %v", mode.force, result.DeletedIDs, result.Deleted, want)
 		}
 		deleterAssertIssueRows(t, ctx, fixture, 0, f.deleted()...)
 		for _, id := range f.survivors() {
@@ -455,7 +467,9 @@ func RunDeleterCascadeReportsSurvivingDependents(t *testing.T, ctx context.Conte
 		probe := newBlockedStateProbe(ctx, fixture.QueryScalar)
 		probe.requireBlockedByOpenBlocker(t, blockedIssue(f.C1), blockedIssue(f.A1), "C1 is blocked by a row the cascade deletes")
 
-		preview := deleterDelete(t, ctx, fixture, deleterWithDryRun(request, true))
+		previewRequest := request
+		previewRequest.DryRun = true
+		preview := deleterDelete(t, ctx, fixture, previewRequest)
 		if !reflect.DeepEqual(preview.Orphaned, want) {
 			t.Errorf("Force=%v: preview Orphaned = %v, want %v", mode.force, preview.Orphaned, want)
 		}
