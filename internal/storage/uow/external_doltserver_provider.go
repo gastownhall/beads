@@ -58,22 +58,28 @@ func NewExternalDoltServerUOWProvider(
 	}
 
 	resolved := applyProviderOptions(opts)
-	ep, err := proxy.GetCreateDatabaseProxyServerEndpoint(absServerRootDir, proxy.OpenOpts{
+	openOpts := proxy.OpenOpts{
 		Backend:       proxy.BackendExternal,
 		LogFilePath:   serverLogFilePath,
-		RotateLogFile: resolved.rotateServerLog,
+		RotateLogFile:  resolved.rotateServerLog,
 		External:      external,
-		IdleTimeout:   idleTimeout,
-		Port:          proxyPort,
-	})
+		IdleTimeout:    idleTimeout,
+		Port:           proxyPort,
+	}
+	ep, err := proxy.GetCreateDatabaseProxyServerEndpoint(absServerRootDir, openOpts)
 	if err != nil {
 		return nil, fmt.Errorf("uow: get proxy endpoint: %w", err)
 	}
 
-	// Rediscovery of the local proxy address is wired for the managed-server
-	// provider only for now; the external-server provider is wired by its own
-	// change (the identical local-proxy hazard, but one step at a time).
-	return openAndInitSchema(ctx, ep, externalBackendAddress(external), database, rootUser, rootPassword, tlsConfigName, teamServer, expectedProjectID, resolved, nil)
+	// External mode fronts the same locally managed, idle-retiring proxy as
+	// the managed-server provider — only its upstream is external — so it
+	// carries the same stale-address hazard after an idle retirement
+	// (#7295). Rediscovery reuses this exact root and OpenOpts, refreshing
+	// the LOCAL proxy address only: upstream identity, credentials and the
+	// registered TLS config stay as the DSN set them.
+	resolver := newProxyEndpointResolver(absServerRootDir, openOpts)
+
+	return openAndInitSchema(ctx, ep, externalBackendAddress(external), database, rootUser, rootPassword, tlsConfigName, teamServer, expectedProjectID, resolved, resolver)
 }
 
 // externalBackendAddress names the external server behind the proxy: its

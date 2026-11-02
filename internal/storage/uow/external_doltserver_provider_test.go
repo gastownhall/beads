@@ -4,15 +4,18 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"net"
 	"path/filepath"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	mysql "github.com/go-sql-driver/mysql"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/storage/dbproxy/pidfile"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
 	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/testutil"
@@ -348,4 +351,114 @@ func TestNewExternalDoltServerUOWProvider_PreexistingDirtyDatabaseIsNotHealed(t 
 	require.NoError(t, admin.QueryRowContext(ctx,
 		"SELECT COUNT(*) FROM beads_loser.dolt_status WHERE table_name = 'issues'").Scan(&count))
 	require.Equal(t, 1, count, "issues working-set dirt was discarded by a non-creator init")
+}
+
+// TestNewExternalDoltServerUOWProvider_RecoversAfterProxyIdleExit pins
+// #7295 for external-server workspaces: their provider fronts a LOCAL proxy
+// whose idle retirement is the same hazard as the managed one — a
+// replacement binds a fresh OS-assigned port — so a later physical connection
+// must rediscover it, with the original database and connection
+// configuration intact. The counting listener on the retired port proves the
+// pool never dialed the stale address.
+func TestNewExternalDoltServerUOWProvider_RecoversAfterProxyIdleExit(t *testing.T) {
+	port := testutil.StartIsolatedDoltContainer(t)
+	portInt, err := strconv.Atoi(port)
+	require.NoError(t, err)
+
+	bdBin := buildBDBinary(t)
+	prev := proxy.ResolveExecutable
+	proxy.ResolveExecutable = func() (string, error) { return bdBin, nil }
+	t.Cleanup(func() { proxy.ResolveExecutable = prev })
+
+	t.Setenv("HOME", t.TempDir())
+
+	storeRootDir := t.TempDir()
+	shutdownOnInterrupt(t, storeRootDir)
+	verifiedShutdownCleanup(t, storeRootDir)
+	logPath := filepath.Join(t.TempDir(), "server.log")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	provider, err := NewExternalDoltServerUOWProvider(
+		ctx,
+		storeRootDir,
+		"beads_test",
+		logPath,
+		configfile.ExternalDoltConfig{Host: "127.0.0.1", Port: portInt},
+		"root",
+		"",
+		0,
+		2*time.Second, // short proxy idle timeout
+		false,
+		"",
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = provider.Close(context.Background()) })
+
+	sqlProv, ok := provider.(*doltSQLProvider)
+	require.True(t, ok, "expected *doltSQLProvider, got %T", provider)
+	sqlProv.SetPoolLimits(PoolLimits{MaxIdleConns: -1})
+
+	// Commit a row through the original configuration.
+	tx, err := sqlProv.BeginTx(ctx)
+	require.NoError(t, err, "first unit of work")
+	_, err = tx.Runner().ExecContext(ctx,
+		"CREATE TABLE t_external_recovery (id INT PRIMARY KEY, v VARCHAR(64))")
+	require.NoError(t, err, "create the recovery probe table")
+	_, err = tx.Runner().ExecContext(ctx,
+		"INSERT INTO t_external_recovery (id, v) VALUES (1, 'external-survivor')")
+	require.NoError(t, err, "seed the recovery probe row")
+	require.NoError(t, tx.Commit(ctx, "seed external recovery probe"))
+
+	pf, err := pidfile.Read(storeRootDir, proxy.PIDFileName)
+	require.NoError(t, err)
+	oldPort := pf.Port
+	oldAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(oldPort))
+
+	// Wait for the local proxy to retire on idle: its data port refuses.
+	deadline := time.Now().Add(60 * time.Second)
+	for {
+		c, dialErr := net.DialTimeout("tcp", oldAddr, time.Second)
+		if dialErr != nil {
+			break
+		}
+		_ = c.Close()
+		require.True(t, time.Now().Before(deadline), "proxy at %s never retired on idle", oldAddr)
+		time.Sleep(250 * time.Millisecond)
+	}
+
+	// Own the retired port so a pool that dials the stale address is caught
+	// in the act instead of failing with a bare refusal.
+	stale, err := net.Listen("tcp", oldAddr)
+	require.NoError(t, err, "retired proxy port %s was not released", oldAddr)
+	var staleAccepts atomic.Int32
+	go func() {
+		for {
+			c, err := stale.Accept()
+			if err != nil {
+				return
+			}
+			staleAccepts.Add(1)
+			_ = c.Close()
+		}
+	}()
+	t.Cleanup(func() { _ = stale.Close() })
+
+	// The later operation needs a physical connection: it must succeed
+	// through a rediscovered local proxy, on the original database.
+	tx, err = sqlProv.BeginTx(ctx)
+	require.NoError(t, err, "unit of work after the local proxy retired must rediscover the proxy")
+	var v string
+	require.NoError(t, tx.Runner().QueryRowContext(ctx,
+		"SELECT v FROM t_external_recovery WHERE id = 1").Scan(&v),
+		"the rediscovered connection must read the row committed before retirement")
+	require.Equal(t, "external-survivor", v)
+	var dbName string
+	require.NoError(t, tx.Runner().QueryRowContext(ctx, "SELECT DATABASE()").Scan(&dbName))
+	require.Equal(t, "beads_test", dbName, "the rediscovered connection must keep the original database")
+	require.NoError(t, tx.Rollback(ctx))
+
+	require.Zero(t, staleAccepts.Load(),
+		"the provider dialed the retired proxy's port %d", oldPort)
 }
