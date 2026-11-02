@@ -285,8 +285,8 @@ func TestServerModeReadRefusesASchemaItsReadsCannotQuery(t *testing.T) {
 			t.Fatalf("%s: %v", stmt, err)
 		}
 	}
-	if schema.LatestVersion() != 74 {
-		t.Fatalf("this fixture rebuilds the v72 shape for migrations 0073 (arrival_seq, which this binary's reads select) and 0074 (the id tombstone tables); LatestVersion() = %d, retarget it", schema.LatestVersion())
+	if schema.LatestVersion() != 75 {
+		t.Fatalf("this fixture rebuilds the v72 shape for migrations 0073 (arrival_seq, which this binary's reads select) and 0074 (the id tombstone tables), and leaves 0075's guarded widenings to replay as no-ops; LatestVersion() = %d, retarget it", schema.LatestVersion())
 	}
 
 	bd := buildBDForInitTests(t)
@@ -323,7 +323,7 @@ func TestServerModeReadRefusesASchemaItsReadsCannotQuery(t *testing.T) {
 		if code == 0 {
 			t.Fatalf("bd %v succeeded on a schema its reads cannot query\nstdout:\n%s\nstderr:\n%s", args, stdout, stderr)
 		}
-		if !strings.Contains(stderr, "schema version mismatch: database is at v72, binary expects v74") ||
+		if !strings.Contains(stderr, "schema version mismatch: database is at v72, binary expects v75") ||
 			!strings.Contains(stderr, "bd migrate schema") {
 			t.Errorf("bd %v refusal does not name the behind schema and its remedy:\n%s", args, stderr)
 		}
