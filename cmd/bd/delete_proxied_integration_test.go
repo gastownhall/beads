@@ -26,7 +26,10 @@ func TestProxiedServerDelete(t *testing.T) {
 
 	survivor := bdProxiedCreate(t, bd, p.dir, "Survivor", "--type", "task")
 	target := bdProxiedCreate(t, bd, p.dir, "Target", "--type", "task", "--label", "alpha", "--deps", "depends-on:"+survivor.ID)
-	dependent := bdProxiedCreate(t, bd, p.dir, "Dependent", "--type", "task", "--deps", "depends-on:"+target.ID)
+	// The cascade chain is PARENT-CHILD edges (issue #6301): they are the
+	// only edges a cascade follows, so a chain meant to be deleted with the
+	// root must be seeded as containment, not as depends-on blocks.
+	dependent := bdProxiedCreate(t, bd, p.dir, "Dependent", "--type", "task", "--parent", target.ID)
 	descendant := bdProxiedCreate(t, bd, p.dir, "Descendant", "--type", "task", "--parent", dependent.ID)
 	bdProxiedUpdateOne(t, bd, p.dir, survivor.ID, "--description", "see "+target.ID+" for context")
 
@@ -51,8 +54,8 @@ func TestProxiedServerDelete(t *testing.T) {
 		"schema_version":       float64(1),
 		"would_delete":         float64(3),
 		"dependencies_removed": float64(3),
-		"labels_removed":       float64(1),
-		"events_removed":       float64(4),
+		"labels_removed":       float64(3),
+		"events_removed":       float64(6),
 		"ids":                  []any{target.ID},
 		"not_found":            nil,
 		"connected":            []any{survivor.ID},
@@ -80,8 +83,8 @@ func TestProxiedServerDelete(t *testing.T) {
 		"deleted":              []any{target.ID},
 		"deleted_count":        float64(3),
 		"dependencies_removed": float64(3),
-		"labels_removed":       float64(1),
-		"events_removed":       float64(4),
+		"labels_removed":       float64(3),
+		"events_removed":       float64(6),
 		"references_updated":   float64(1),
 		"orphaned_issues":      nil,
 	}
