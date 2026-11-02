@@ -66,6 +66,12 @@ func TestGetDependencyTreeInTxSkipsRelatesToEdges(t *testing.T) {
 	expectIssueBatch(mock, []string{"blocker", "related"})
 	expectIssue(mock, "blocker", "Blocker")
 	expectDependencies(mock, "blocker", nil)
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT id, is_blocked FROM issues WHERE id IN (?,?)")).
+		WithArgs("root", "blocker").
+		WillReturnRows(sqlmock.NewRows([]string{"id", "is_blocked"}).AddRow("root", 1).AddRow("blocker", 0))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT id, is_blocked FROM wisps WHERE id IN (?,?)")).
+		WithArgs("root", "blocker").
+		WillReturnRows(sqlmock.NewRows([]string{"id", "is_blocked"}))
 	mock.ExpectRollback()
 
 	tx, err := db.BeginTx(context.Background(), nil)
@@ -92,6 +98,9 @@ func TestGetDependencyTreeInTxSkipsRelatesToEdges(t *testing.T) {
 	}
 	if tree[1].EdgeFromParent != types.DepBlocks {
 		t.Fatalf("blocker edge = %q, want %q", tree[1].EdgeFromParent, types.DepBlocks)
+	}
+	if !tree[0].IsBlocked || tree[1].IsBlocked {
+		t.Fatalf("is_blocked = [%v %v], want [true false] from the stored column", tree[0].IsBlocked, tree[1].IsBlocked)
 	}
 }
 

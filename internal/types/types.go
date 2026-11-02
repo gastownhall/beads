@@ -37,7 +37,8 @@ type Issue struct {
 	// IsBlocked is the persisted readiness projection. It is included in journal
 	// snapshots so graph deltas can be replayed without recomputing readiness.
 	// omitempty keeps it out of every other serialization (export JSONL, --json
-	// output): only journal snapshots, which set it explicitly, carry it.
+	// output): only journal snapshots and dependency-tree nodes, which set it
+	// explicitly, carry it.
 	IsBlocked bool `json:"is_blocked,omitempty"`
 
 	// ===== Assignment =====

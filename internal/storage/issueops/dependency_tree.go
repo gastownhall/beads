@@ -11,7 +11,25 @@ import (
 // GetDependenciesInTx/GetDependentsInTx which handle wisp routing.
 func GetDependencyTreeInTx(ctx context.Context, tx DBTX, issueID string, maxDepth int, showAllPaths bool, reverse bool) ([]*types.TreeNode, error) {
 	visited := make(map[string]bool)
-	return buildDependencyTreeInTx(ctx, tx, issueID, 0, maxDepth, reverse, visited, "", "")
+	nodes, err := buildDependencyTreeInTx(ctx, tx, issueID, 0, maxDepth, reverse, visited, "", "")
+	if err != nil || len(nodes) == 0 {
+		return nodes, err
+	}
+	// Each node carries the stored, transitive is_blocked flag — the column
+	// `bd ready` and `bd blocked` read — so a renderer never rebuilds readiness
+	// from the direct edges it happens to see (GH#6630).
+	ids := make([]string, 0, len(nodes))
+	for _, node := range nodes {
+		ids = append(ids, node.ID)
+	}
+	blocked, err := IsBlockedBatchInTx(ctx, tx, ids)
+	if err != nil {
+		return nil, err
+	}
+	for _, node := range nodes {
+		node.IsBlocked = blocked[node.ID]
+	}
+	return nodes, nil
 }
 
 func buildDependencyTreeInTx(ctx context.Context, tx DBTX, issueID string, depth, maxDepth int, reverse bool, visited map[string]bool, parentID string, edgeFromParent types.DependencyType) ([]*types.TreeNode, error) {
