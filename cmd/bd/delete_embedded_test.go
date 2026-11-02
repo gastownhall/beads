@@ -463,6 +463,61 @@ func TestEmbeddedDeleteCascadeFollowsOnlyParentChild(t *testing.T) {
 			t.Errorf("%s is still blocked after its only blocker %s was deleted", f.C1, f.A1)
 		}
 	})
+
+	t.Run("cascade_preview_lists_every_id_and_changes_nothing", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "cpp")
+		f := setupCascadeFixture(t, bd, dir)
+
+		historyBefore := make(map[string]int)
+		for _, id := range append(f.deleted(), f.survivors()...) {
+			historyBefore[id] = len(bdHistoryJSON(t, bd, dir, id))
+		}
+
+		for _, args := range [][]string{{"--cascade"}, {"--cascade", "--dry-run"}} {
+			out := bdDelete(t, bd, dir, append([]string{f.A}, args...)...)
+			if !strings.Contains(out, "Would delete: 4 issues") {
+				t.Errorf("bd delete %s %v: preview does not count the 4-row tree:\n%s", f.A, args, out)
+			}
+			// The heading counts the whole resolved set, not the one named id.
+			if !strings.Contains(out, "Issues to delete (4):") {
+				t.Errorf("bd delete %s %v: deletion heading does not count the 4-row tree:\n%s", f.A, args, out)
+			}
+			listed := previewListedIDs(out)
+			for _, id := range append(f.deleted(), f.B, f.C1, f.S) {
+				if listed[id] != 1 {
+					t.Errorf("bd delete %s %v: preview lists %s %d times, want once:\n%s", f.A, args, id, listed[id], out)
+				}
+			}
+			for _, id := range []string{f.B1, f.C} {
+				if listed[id] > 0 {
+					t.Errorf("bd delete %s %v: preview lists %s, which neither goes nor loses an edge:\n%s", f.A, args, id, out)
+				}
+			}
+		}
+		for _, id := range append(f.deleted(), f.survivors()...) {
+			if got := bdShowDetails(t, bd, dir, id); got["id"] != id {
+				t.Errorf("a preview deleted %s", id)
+			}
+			if got := len(bdHistoryJSON(t, bd, dir, id)); got != historyBefore[id] {
+				t.Errorf("a preview changed %s's history: %d entries, was %d", id, got, historyBefore[id])
+			}
+		}
+	})
+}
+
+// previewListedIDs counts the ids a delete preview lists one per line: the
+// first field of every indented line, without a trailing colon.
+func previewListedIDs(out string) map[string]int {
+	listed := make(map[string]int)
+	for _, line := range strings.Split(out, "\n") {
+		if !strings.HasPrefix(line, "  ") {
+			continue
+		}
+		if fields := strings.Fields(line); len(fields) > 0 {
+			listed[strings.TrimSuffix(fields[0], ":")]++
+		}
+	}
+	return listed
 }
 
 // bdDeleteJSON runs "bd delete <args> --json" and parses its object.

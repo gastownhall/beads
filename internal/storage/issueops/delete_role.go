@@ -173,6 +173,7 @@ func DeleteInTx(ctx context.Context, tx *sql.Tx, req publicops.DeleteRequest) (p
 	result.Dependencies = deleted.DependenciesCount
 	result.Labels = deleted.LabelsCount
 	result.Events = deleted.EventsCount
+	result.DeletedIDs = sortedUniqueIDs(set.All)
 
 	if req.DryRun {
 		return result, nil
@@ -389,4 +390,17 @@ func RewriteDeletedReferencesInTx(ctx context.Context, tx DBTX, deletedIDs []str
 // `be-12`.
 func DeletedReferencePattern(id string) *regexp.Regexp {
 	return regexp.MustCompile(`(^|[^A-Za-z0-9_-])(` + regexp.QuoteMeta(id) + `)($|[^A-Za-z0-9_-])`)
+}
+
+// sortedUniqueIDs returns ids in ascending order without duplicates, the
+// shape DeleteResult.DeletedIDs promises.
+func sortedUniqueIDs(ids []string) []string {
+	if len(ids) == 0 {
+		return nil
+	}
+	set := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		set[id] = true
+	}
+	return workapi.SortedDeleteIDs(set)
 }

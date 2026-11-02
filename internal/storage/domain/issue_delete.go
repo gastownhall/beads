@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"time"
 
@@ -143,6 +144,7 @@ func (u *issueUseCaseImpl) deleteMany(ctx context.Context, params DeleteIssuesPa
 		return DeleteIssuesResult{}, fmt.Errorf("delete: count wisp events: %w", err)
 	}
 	result.EventsCount = evIssue + evWisp
+	result.DeletedIDs = sortedUniqueIDs(append(append([]string(nil), regularIDs...), wispIDs...))
 
 	if params.DryRun {
 		result.DeletedCount = len(regularIDs) + len(wispIDs)
@@ -555,4 +557,15 @@ func (u *issueUseCaseImpl) countDeletedDependencies(ctx context.Context, allIDs 
 		}
 	}
 	return len(seen), nil
+}
+
+// sortedUniqueIDs returns ids in ascending order without duplicates, the
+// shape DeleteIssuesResult.DeletedIDs promises.
+func sortedUniqueIDs(ids []string) []string {
+	if len(ids) == 0 {
+		return nil
+	}
+	out := append([]string(nil), ids...)
+	slices.Sort(out)
+	return slices.Compact(out)
 }
