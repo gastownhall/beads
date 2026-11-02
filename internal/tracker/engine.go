@@ -23,6 +23,16 @@ import (
 // syncTracer is the OTel tracer for tracker sync spans.
 var syncTracer = otel.Tracer("github.com/steveyegge/beads/tracker")
 
+// pullFetchOverlap widens an incremental pull's fetch window to start before
+// the stored last_sync. That cursor is the end-of-sync wall time, but tracker
+// list endpoints lag behind writes, clocks drift, and a remote write can land
+// during a sync's post-fetch phases, so an issue updated just before the
+// cursor would otherwise never be fetched again (#6806). Only the fetch moves:
+// the conflict guard, DetectConflicts and pre-linked hydration keep the exact
+// stored cursor, and a row a fetch from that cursor returns keeps the
+// treatment it had before (pullOverlapOnly).
+const pullFetchOverlap = 5 * time.Minute
+
 // rateLimitExhaustedError is implemented by tracker errors (e.g.
 // linear.ErrRateLimitExhausted) that signal the API quota floor has been
 // hit and the sync loop should abort immediately rather than cascade the
@@ -74,6 +84,16 @@ type PushHooks struct {
 	// ContentEqual compares local and remote issues to skip unnecessary API calls.
 	// Returns true if content is identical (skip update). If nil, uses timestamp comparison.
 	ContentEqual func(local *types.Issue, remote *TrackerIssue) bool
+
+	// PushFieldsEqual reports whether remote already holds every field a push
+	// of local sends, comparing content only and never timestamps (unlike
+	// ContentEqual, which may keep a timestamp skip). A pull uses it to tell a
+	// re-fetched echo of an earlier push from a remote edit among the rows
+	// only its overlap window returned (#6806). A remote edit of a field the
+	// push does not send (the assignee, which GitHub, GitLab and Linear do
+	// not push) counts as an echo there. If nil, no overlap row counts as an
+	// echo.
+	PushFieldsEqual func(local *types.Issue, remote *TrackerIssue) bool
 
 	// ContentHash, if set, returns a stable fingerprint of the issue's pushable
 	// fields. When present, the engine binds the hash to the issue's external_ref
@@ -341,7 +361,8 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 	key := e.Tracker.ConfigPrefix() + ".last_sync"
 	if lastSyncStr, err := e.Store.GetLocalMetadata(ctx, key); err == nil && lastSyncStr != "" {
 		if t, err := parseSyncTime(lastSyncStr); err == nil {
-			fetchOpts.Since = &t
+			fetchSince := t.Add(-pullFetchOverlap)
+			fetchOpts.Since = &fetchSince
 			lastSync = &t
 			stats.Incremental = true
 			stats.SyncedSince = lastSyncStr
@@ -364,8 +385,10 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 
 	prelinkedHydrateIDs := make(map[string]bool)
 
-	// Fetch issues from external tracker
+	// Fetch issues from external tracker. The first bulkRows rows come from
+	// the bulk FetchIssues call; only those can be overlap-only.
 	var extIssues []TrackerIssue
+	bulkRows := 0
 	if len(opts.IssueIDs) > 0 {
 		// Selective pull: fetch only requested issues via FetchIssue()
 		prefix, _ := e.Store.GetConfig(ctx, "issue_prefix")
@@ -405,6 +428,7 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 			return nil, fmt.Errorf("fetching issues: %w", err)
 		}
 		stats.Candidates = len(extIssues)
+		bulkRows = len(extIssues)
 		if provider, ok := e.Tracker.(PullStatsProvider); ok {
 			stats.Queried, stats.Candidates = provider.LastPullStats()
 		}
@@ -424,7 +448,7 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 	var pendingDeps []DependencyInfo
 	var dryRunIssues []*types.Issue
 
-	for _, extIssue := range extIssues {
+	for i, extIssue := range extIssues {
 		// ShouldImport hook: filter before conversion
 		if e.PullHooks != nil && e.PullHooks.ShouldImport != nil {
 			if !e.PullHooks.ShouldImport(&extIssue) {
@@ -472,6 +496,14 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 			// Without this guard, pull silently overwrites local changes
 			// before conflict detection can compare timestamps.
 			if lastSync != nil && existing.UpdatedAt.After(*lastSync) && !allowOverwriteIDs[existing.ID] && !prelinkedHydrateIDs[existing.ID] {
+				stats.Skipped++
+				continue
+			}
+			// A row only the overlap window returned must not rewrite a
+			// linked issue the old exact-cursor fetch would have left alone:
+			// skip it when it is an echo of our own push, or older than the
+			// local issue (an edit a later sync never pushed).
+			if i < bulkRows && !allowOverwriteIDs[existing.ID] && !prelinkedHydrateIDs[existing.ID] && e.skipOverlapRow(existing, &extIssue, lastSync) {
 				stats.Skipped++
 				continue
 			}
@@ -572,6 +604,51 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 		attribute.Int("sync.skipped", stats.Skipped),
 	)
 	return stats, nil
+}
+
+// pullOverlapOnly reports whether a bulk incremental fetch row is one only
+// the pullFetchOverlap window returned: it was updated before the earliest
+// time a fetch from the stored last_sync returns (fetchFloor). A tracker that
+// matches Since coarsely returned the rest of the cursor's minute or day
+// before the window was widened, and those rows keep that treatment.
+func (e *Engine) pullOverlapOnly(issue *TrackerIssue, lastSync *time.Time) bool {
+	return lastSync != nil && !issue.UpdatedAt.IsZero() && issue.UpdatedAt.Before(e.fetchFloor(*lastSync))
+}
+
+// fetchFloor returns the earliest update time FetchIssues returns for since:
+// since itself, or since truncated to the tracker's SinceGranularity.
+func (e *Engine) fetchFloor(since time.Time) time.Time {
+	if coarse, ok := e.Tracker.(SinceGranularityProvider); ok {
+		if granularity := coarse.SinceGranularity(); granularity > 0 {
+			return since.UTC().Truncate(granularity)
+		}
+	}
+	return since
+}
+
+// skipOverlapRow reports whether extIssue is a row only the overlap window
+// returned that must leave existing untouched: existing is linked to this
+// tracker and the row predates the window itself, holds what a push of
+// existing sends (PushHooks.PushFieldsEqual), or is older than existing. A
+// tracker that matches Since coarsely returns rows before the window when the
+// widened Since falls in the previous minute or day: Azure DevOps returns the
+// whole previous UTC day for a last_sync in a day's first five minutes.
+// ContentEqual never decides it: a push-side hook may skip by timestamp
+// (GitLab's does), which would drop every remote edit in the window.
+func (e *Engine) skipOverlapRow(existing *types.Issue, extIssue *TrackerIssue, lastSync *time.Time) bool {
+	if !e.pullOverlapOnly(extIssue, lastSync) {
+		return false
+	}
+	if _, linked := e.trackerRef(existing); !linked {
+		return false
+	}
+	if extIssue.UpdatedAt.Before(lastSync.Add(-pullFetchOverlap)) {
+		return true
+	}
+	if e.PushHooks != nil && e.PushHooks.PushFieldsEqual != nil && e.PushHooks.PushFieldsEqual(existing, extIssue) {
+		return true
+	}
+	return extIssue.UpdatedAt.Before(existing.UpdatedAt)
 }
 
 func applyPullIssueFields(ctx context.Context, tx storage.IssueLifecycleTransaction, id string, updates map[string]interface{}, actor string) error {
@@ -809,15 +886,24 @@ func (e *Engine) fetchPrelinkedIssues(ctx context.Context, fetched []TrackerIssu
 		return nil, hydratedLocalIDs, nil
 	}
 
+	// seen holds the remotes a fetch from lastSync itself returns, which a
+	// pull treats as changed after it. A row only the overlap window returned
+	// (pullOverlapOnly) predates that fetch, so a pre-linked local matching it
+	// is still hydrated, from that row instead of a FetchIssue.
 	seen := make(map[string]struct{}, len(fetched))
+	overlapOnly := make(map[string]struct{})
 	for _, issue := range fetched {
+		into := seen
+		if e.pullOverlapOnly(&issue, lastSync) {
+			into = overlapOnly
+		}
 		for _, id := range []string{
 			strings.TrimSpace(issue.Identifier),
 			strings.TrimSpace(e.Tracker.ExtractIdentifier(e.Tracker.BuildExternalRef(&issue))),
 		} {
 			if id != "" {
-				seen[id] = struct{}{}
-				seen[strings.ToLower(id)] = struct{}{}
+				into[id] = struct{}{}
+				into[strings.ToLower(id)] = struct{}{}
 			}
 		}
 	}
@@ -846,6 +932,18 @@ func (e *Engine) fetchPrelinkedIssues(ctx context.Context, fetched []TrackerIssu
 			continue
 		}
 		if _, ok := seen[strings.ToLower(identifier)]; ok {
+			continue
+		}
+		_, inOverlap := overlapOnly[identifier]
+		if _, ok := overlapOnly[strings.ToLower(identifier)]; ok {
+			inOverlap = true
+		}
+		if inOverlap {
+			// The bulk row is already in the pull; marking the local lets the
+			// conflict guard apply it instead of skipping the stub.
+			hydratedLocalIDs[local.ID] = true
+			seen[identifier] = struct{}{}
+			seen[strings.ToLower(identifier)] = struct{}{}
 			continue
 		}
 

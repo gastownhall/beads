@@ -7,6 +7,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
@@ -177,6 +178,12 @@ func (t *Tracker) Validate() error {
 }
 
 func (t *Tracker) Close() error { return nil }
+
+var _ tracker.SinceGranularityProvider = (*Tracker)(nil)
+
+// SinceGranularity reports that FetchIssues matches Since to the minute: its
+// JQL compares updated with a "yyyy-MM-dd HH:mm" literal.
+func (t *Tracker) SinceGranularity() time.Duration { return time.Minute }
 
 func (t *Tracker) FetchIssues(ctx context.Context, opts tracker.FetchOptions) ([]tracker.TrackerIssue, error) {
 	// Build JQL query — use IN clause for multi-project.

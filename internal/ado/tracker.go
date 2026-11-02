@@ -15,8 +15,11 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// Compile-time interface check.
-var _ tracker.IssueTracker = (*Tracker)(nil)
+// Compile-time interface checks.
+var (
+	_ tracker.IssueTracker             = (*Tracker)(nil)
+	_ tracker.SinceGranularityProvider = (*Tracker)(nil)
+)
 
 func init() {
 	tracker.Register("ado", func() tracker.IssueTracker {
@@ -157,6 +160,11 @@ func (t *Tracker) ADOClient() *Client { return t.client }
 // SetFilters configures pull filters for WIQL queries.
 // When set, FetchIssues will only return work items matching these filters.
 func (t *Tracker) SetFilters(f *PullFilters) { t.filters = f }
+
+// SinceGranularity reports that FetchIssues matches Since to the UTC day:
+// its WIQL compares System.ChangedDate with a date-only literal
+// (formatWIQLDate).
+func (t *Tracker) SinceGranularity() time.Duration { return 24 * time.Hour }
 
 // FetchIssues retrieves work items from Azure DevOps. If opts.Since is set,
 // only work items changed after that time are fetched (incremental sync);

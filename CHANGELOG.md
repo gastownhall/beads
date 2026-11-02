@@ -1229,6 +1229,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   link only when both of its issues are in that project, and report the
   rest in one warning instead of linking that project's unrelated issues
   with the same IIDs (#7795, reported by @NahumLitvin).
+- Incremental tracker syncs (`bd github sync`, `bd gitlab sync`, `bd linear
+  sync`, `bd jira sync` and the other trackers) now fetch remote issues
+  updated up to five minutes before the stored `last_sync`, so an issue
+  written on the tracker just before a sync finished is imported on the next
+  sync instead of being missed until someone edits it again (#6806). A
+  remote copy only that wider window returns leaves the local issue alone
+  when it is older than the local issue, and on GitHub, GitLab and Linear
+  also when it only echoes what the previous sync pushed. A local issue
+  linked after the cursor is still hydrated from the overlapped fetch instead
+  of letting the next push overwrite the remote with a stub.
+- `bd linear sync` no longer updates a Linear issue again on every sync when
+  `linear.state_map` maps its status to a workflow state by name (for example
+  `linear.state_map.blocked` to a "Blocked" state of type started). The push
+  compared the issue's state the way a pull reads it back, by state type, so
+  such an issue never matched the state the push had just set.
 - `bd ado sync` no longer warns "Failed to resolve dependency" and counts
   a skipped issue for each link to a work item the pull did not import,
   such as one in another project. The dependency pass skips such a link
