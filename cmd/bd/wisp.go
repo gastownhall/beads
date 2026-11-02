@@ -1017,7 +1017,35 @@ func findAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageThre
 	return abandoned, cascadeErr
 }
 
-func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, excludeTypes []types.IssueType) error {
+// closedPurgeSkips counts the closed wisps a purge declined to delete, by
+// reason, so the operator can tell "nothing to delete" from "kept".
+type closedPurgeSkips struct {
+	pinned  int
+	infra   int
+	labeled int
+}
+
+// report prints the skip counts in text mode.
+func (c closedPurgeSkips) report() {
+	if c.pinned > 0 {
+		fmt.Printf("Skipping %d pinned issue(s) (protected from cleanup)\n", c.pinned)
+	}
+	if c.infra > 0 {
+		fmt.Printf("Skipping %d configured infra issue(s) protected from GC\n", c.infra)
+	}
+	if c.labeled > 0 {
+		fmt.Printf("Skipping %d wisp(s) carrying a protected label\n", c.labeled)
+	}
+}
+
+// selectClosedPurgeCandidates returns the closed wisps `wisp gc --closed` may
+// delete, with what it held back. It is shared by the direct and proxied
+// routes so they cannot drift on which protections they honor: pinned and
+// infra wisps, and wisps carrying a wisp.protected_labels label. Closing a
+// record does not make it disposable; `bd delete` still deletes one on
+// purpose. An unreadable setting is an error, never an empty guard.
+func selectClosedPurgeCandidates(ctx context.Context, r molReader, excludeTypes []types.IssueType) ([]*types.Issue, closedPurgeSkips, error) {
+	var skips closedPurgeSkips
 	statusClosed := types.StatusClosed
 	ephemeralTrue := true
 	filter := types.IssueFilter{
@@ -1026,34 +1054,43 @@ func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, excludeTyp
 		ExcludeTypes: excludeTypes,
 		Limit:        5000,
 	}
-
-	closedIssues, err := store.SearchIssues(ctx, "", filter)
+	closedIssues, err := r.SearchIssues(ctx, "", filter)
 	if err != nil {
-		return HandleError("listing closed wisps: %v", err)
+		return nil, skips, fmt.Errorf("listing closed wisps: %w", err)
 	}
 
-	// Filter out pinned and infra issues (protected from cleanup)
-	pinnedCount := 0
-	infraCount := 0
+	protectedLabels, err := protectedWispLabels(ctx, r)
+	if err != nil {
+		return nil, skips, err
+	}
+	guard := wispGuard{labels: protectedLabels}
+
 	filtered := make([]*types.Issue, 0, len(closedIssues))
 	for _, issue := range closedIssues {
 		if issue.Pinned {
-			pinnedCount++
+			skips.pinned++
 			continue
 		}
-		if store.IsInfraTypeCtx(ctx, issue.IssueType) {
-			infraCount++
+		if r.IsInfraTypeCtx(ctx, issue.IssueType) {
+			skips.infra++
+			continue
+		}
+		if guard.hasProtectedLabel(issue) {
+			skips.labeled++
 			continue
 		}
 		filtered = append(filtered, issue)
 	}
-	closedIssues = filtered
+	return filtered, skips, nil
+}
 
-	if pinnedCount > 0 && !jsonOutput {
-		fmt.Printf("Skipping %d pinned issue(s) (protected from cleanup)\n", pinnedCount)
+func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, excludeTypes []types.IssueType) error {
+	closedIssues, skips, err := selectClosedPurgeCandidates(ctx, store, excludeTypes)
+	if err != nil {
+		return HandleError("%v", err)
 	}
-	if infraCount > 0 && !jsonOutput {
-		fmt.Printf("Skipping %d configured infra issue(s) protected from GC\n", infraCount)
+	if !jsonOutput {
+		skips.report()
 	}
 
 	if len(closedIssues) == 0 {

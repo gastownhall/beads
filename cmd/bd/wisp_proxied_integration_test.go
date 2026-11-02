@@ -389,4 +389,49 @@ func TestProxiedServerWispGC(t *testing.T) {
 			t.Errorf("expected closed wisp %s purged", closedWisp.ID)
 		}
 	})
+
+	t.Run("closed_purge_spares_protected_labels", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "wgpl")
+		if out, err := bdProxiedRun(t, bd, p.dir, "config", "set", "wisp.protected_labels", "keep:mail"); err != nil {
+			t.Fatalf("bd config set wisp.protected_labels: %v\n%s", err, out)
+		}
+		readMail := bdProxiedCreate(t, bd, p.dir, "Read mail", "--ephemeral", "--label", "keep:mail")
+		spent := bdProxiedCreate(t, bd, p.dir, "Spent wisp", "--ephemeral")
+		if out, err := bdProxiedRun(t, bd, p.dir, "close", readMail.ID, spent.ID); err != nil {
+			t.Fatalf("bd close: %v\n%s", err, out)
+		}
+
+		preview, err := bdProxiedRun(t, bd, p.dir, "mol", "wisp", "gc", "--closed")
+		if err != nil {
+			t.Fatalf("bd mol wisp gc --closed: %v\n%s", err, preview)
+		}
+		if !strings.Contains(string(preview), "Found 1 closed wisp(s) to delete") ||
+			!strings.Contains(string(preview), "Skipping 1 wisp(s) carrying a protected label") {
+			t.Errorf("closed purge preview should find only the unlabeled wisp and report the label skip; got:\n%s", preview)
+		}
+
+		out, err := bdProxiedRun(t, bd, p.dir, "mol", "wisp", "gc", "--closed", "--force", "--json")
+		if err != nil {
+			t.Fatalf("bd mol wisp gc --closed --force --json: %v\n%s", err, out)
+		}
+		var got struct {
+			Deleted []string `json:"deleted"`
+		}
+		if err := json.Unmarshal(out, &got); err != nil {
+			t.Fatalf("unmarshal: %v\n%s", err, out)
+		}
+		if len(got.Deleted) != 1 || got.Deleted[0] != spent.ID {
+			t.Errorf("deleted = %v, want only the unlabeled closed wisp %s", got.Deleted, spent.ID)
+		}
+
+		db := openProxiedDB(t, p)
+		var count int
+		if err := db.QueryRow("SELECT COUNT(*) FROM wisps WHERE id = ?", readMail.ID).Scan(&count); err != nil {
+			t.Fatalf("query wisps: %v", err)
+		}
+		if count != 1 {
+			t.Errorf("closed wisp %s carries protected label keep:mail and must survive wisp gc --closed --force", readMail.ID)
+		}
+	})
 }

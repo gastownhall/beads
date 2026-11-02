@@ -108,3 +108,33 @@ func TestWispGCProtectedLabelSparesCascadeDependents(t *testing.T) {
 		}
 	}
 }
+
+// TestWispGCClosedPurgeSparesProtectedLabels pins the closed purge, shared by
+// the direct and proxied routes: --closed selects purely by status, so without
+// the label check a protected record would only need closing to be deleted.
+// Pinned and infra wisps keep their own counts; a wisp a label alone saves is
+// counted as a label skip.
+func TestWispGCClosedPurgeSparesProtectedLabels(t *testing.T) {
+	closedMail := &types.Issue{ID: "gc-closed-mail", Status: types.StatusClosed, Labels: []string{"keep:mail"}}
+	closedAlert := &types.Issue{ID: "gc-closed-alert", Status: types.StatusClosed, Labels: []string{"thread", "keep:alert"}}
+	closedPlain := &types.Issue{ID: "gc-closed-plain", Status: types.StatusClosed}
+	closedOther := &types.Issue{ID: "gc-closed-other", Status: types.StatusClosed, Labels: []string{"thread"}}
+	pinnedMail := &types.Issue{ID: "gc-pinned-mail", Status: types.StatusClosed, Pinned: true, Labels: []string{"keep:mail"}}
+
+	r := &cascadeAgeReader{
+		issues: []*types.Issue{closedMail, closedAlert, closedPlain, closedOther, pinnedMail},
+		config: map[string]string{protectedLabelsKey: "keep:mail,keep:alert"},
+	}
+	got, skips, err := selectClosedPurgeCandidates(context.Background(), r, nil)
+	if err != nil {
+		t.Fatalf("selectClosedPurgeCandidates: %v", err)
+	}
+	ids := collectedIDs(got)
+	want := map[string]bool{closedPlain.ID: true, closedOther.ID: true}
+	if len(ids) != len(want) || !ids[closedPlain.ID] || !ids[closedOther.ID] {
+		t.Errorf("closed purge candidates = %v, want only the unprotected %v", ids, want)
+	}
+	if skips.labeled != 2 || skips.pinned != 1 {
+		t.Errorf("closed purge skips = %+v, want 2 label skips and 1 pinned (a pinned wisp counts as pinned)", skips)
+	}
+}

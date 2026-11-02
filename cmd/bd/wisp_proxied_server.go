@@ -232,44 +232,13 @@ func runWispPurgeClosedProxiedServer(ctx context.Context, dryRun, force bool, ex
 	if err != nil {
 		return err
 	}
-	r := uowMolReader{uw: uw}
-
-	statusClosed := types.StatusClosed
-	ephemeralTrue := true
-	filter := types.IssueFilter{
-		Status:       &statusClosed,
-		Ephemeral:    &ephemeralTrue,
-		ExcludeTypes: excludeTypes,
-		Limit:        5000,
-	}
-	closedIssues, err := r.SearchIssues(ctx, "", filter)
-	if err != nil {
-		uw.Close(ctx)
-		return HandleError("listing closed wisps: %v", err)
-	}
-
-	pinnedCount := 0
-	infraCount := 0
-	filtered := make([]*types.Issue, 0, len(closedIssues))
-	for _, issue := range closedIssues {
-		if issue.Pinned {
-			pinnedCount++
-			continue
-		}
-		if r.IsInfraTypeCtx(ctx, issue.IssueType) {
-			infraCount++
-			continue
-		}
-		filtered = append(filtered, issue)
-	}
-	closedIssues = filtered
+	closedIssues, skips, err := selectClosedPurgeCandidates(ctx, uowMolReader{uw: uw}, excludeTypes)
 	uw.Close(ctx)
-
-	if pinnedCount > 0 && !jsonOutput {
-		fmt.Printf("Skipping %d pinned issue(s) (protected from cleanup)\n", pinnedCount)
+	if err != nil {
+		return HandleError("%v", err)
 	}
-	if infraCount > 0 && !jsonOutput {
-		fmt.Printf("Skipping %d configured infra issue(s) protected from GC\n", infraCount)
+	if !jsonOutput {
+		skips.report()
 	}
 
 	if len(closedIssues) == 0 {
