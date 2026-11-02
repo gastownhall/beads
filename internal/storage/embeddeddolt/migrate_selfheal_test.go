@@ -280,10 +280,10 @@ func runSupervisorLoop(ctx context.Context, dataDir string, maxAttempts int) err
 
 // --- helpers ---
 
-// seedMainSchemaAt creates a fresh embedded database whose main schema is
-// genuinely migrated to version `at` and committed clean, so a later MigrateUp
-// runs migrations at+1..latest as a real multi-step jump. Returns the dataDir.
-func seedMainSchemaAt(t *testing.T, ctx context.Context, at int) string {
+// newEmptyEmbeddedDataDir creates a fresh embedded database with no schema
+// applied — the shape a brand-new server database presents to the first open.
+// Returns the dataDir.
+func newEmptyEmbeddedDataDir(t *testing.T, ctx context.Context) string {
 	t.Helper()
 	dataDir := filepath.Join(t.TempDir(), ".beads", "embeddeddolt")
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
@@ -297,6 +297,15 @@ func seedMainSchemaAt(t *testing.T, ctx context.Context, at int) string {
 		t.Fatalf("CREATE DATABASE: %v", err)
 	}
 	_ = bootCleanup()
+	return dataDir
+}
+
+// seedMainSchemaAt creates a fresh embedded database whose main schema is
+// genuinely migrated to version `at` and committed clean, so a later MigrateUp
+// runs migrations at+1..latest as a real multi-step jump. Returns the dataDir.
+func seedMainSchemaAt(t *testing.T, ctx context.Context, at int) string {
+	t.Helper()
+	dataDir := newEmptyEmbeddedDataDir(t, ctx)
 
 	conn, closeConn := openPinnedConn(t, ctx, dataDir)
 	defer closeConn()
