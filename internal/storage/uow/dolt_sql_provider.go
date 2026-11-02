@@ -65,6 +65,11 @@ type doltSQLProvider struct {
 	// eventsJournalEnabled activates the durable events journal for THIS
 	// provider instance only. See SetEventsJournalEnabled.
 	eventsJournalEnabled atomic.Bool
+	// resolver, when non-nil, refreshes the local proxy address this
+	// provider's pool dials for every NEW physical connection (#7295). It is
+	// armed by the open before this provider is handed out; Close shuts it
+	// down, draining any in-flight discovery before the pool is closed.
+	resolver *proxyEndpointResolver
 	// versionedHistory activates dual-write issue-version history for THIS
 	// provider instance only. See SetVersionedHistoryEnabled and
 	// DeferVersionedHistory.
@@ -222,6 +227,13 @@ func (p *doltSQLProvider) Close(ctx context.Context) error {
 	}
 	db := p.db
 	p.db = nil
+	// Shut rediscovery down first, and let it drain: no new discovery is
+	// admitted once the pool it serves is going away, and a discovery that is
+	// already running (adoption, spawn, cleanup) finishes before the pool's
+	// own close, so no worker outlives this provider.
+	if p.resolver != nil {
+		p.resolver.shutdown()
+	}
 	return db.Close()
 }
 
@@ -1047,8 +1059,10 @@ func openAndInitSchema(ctx context.Context, ep proxy.Endpoint, backend, database
 			return nil, fmt.Errorf("uow: init schema: %w", err)
 		}
 		// Bootstrap is proven on the fixed construction endpoint; only now
-		// may later physical connections rediscover a replaced proxy.
+		// may later physical connections rediscover a replaced proxy, and the
+		// provider owns the resolver its pool carries the hook for.
 		if resolver != nil {
+			provider.resolver = resolver
 			resolver.arm()
 		}
 		return provider, nil
@@ -1102,9 +1116,13 @@ func openAndInitSchema(ctx context.Context, ep proxy.Endpoint, backend, database
 	}
 
 	// Bootstrap is proven on the fixed construction endpoint; only now may
-	// later physical connections rediscover a replaced proxy.
+	// later physical connections rediscover a replaced proxy, and the provider
+	// owns the resolver its pool carries the hook for.
 	if resolver != nil {
+		provider := newProvider(dbConn)
+		provider.resolver = resolver
 		resolver.arm()
+		return provider, nil
 	}
 	return newProvider(dbConn), nil
 }

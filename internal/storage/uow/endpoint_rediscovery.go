@@ -2,6 +2,7 @@ package uow
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 
@@ -48,6 +49,10 @@ type proxyEndpointResolver struct {
 	// armed for the provider's lifetime. Guarded by mu so the arm() write
 	// synchronizes with any hook already racing a first connection.
 	armed bool
+	// closed marks the resolver shut down (provider Close). Once set, no new
+	// discovery is admitted, and every hook is refused without dialing. The
+	// worker of an already-admitted flight still finishes — see shutdown.
+	closed bool
 	// flight is the single in-flight discovery, nil when none is running.
 	// New connections needing the endpoint while one is running join that
 	// flight instead of starting their own — overlap coalesces into ONE
@@ -56,6 +61,11 @@ type proxyEndpointResolver struct {
 	// again.
 	flight *resolveFlight
 }
+
+// errProxyEndpointResolverClosed is what a hook returns once the resolver's
+// provider has closed: rediscovery is over, and the caller must not dial
+// anything on the resolver's behalf.
+var errProxyEndpointResolverClosed = errors.New("uow: proxy endpoint rediscovery is closed")
 
 // resolveFlight is one shared discovery: the endpoint or error it produced,
 // published once, and done, closed at publication, which joiners wait on.
@@ -85,6 +95,23 @@ func (r *proxyEndpointResolver) arm() {
 	r.armed = true
 }
 
+// shutdown closes the resolver and drains it: once it returns, no discovery is
+// in flight and none can be admitted again. The worker of a discovery that was
+// already running is allowed to finish — its proxy lifecycle work (adoption,
+// spawn, cleanup) is not cancellable by an individual caller, and a half-torn
+// down discovery would strand a spawned child — so shutdown waits on the
+// flight's completion channel outside the mutex. Called by provider Close
+// before the pool itself is closed.
+func (r *proxyEndpointResolver) shutdown() {
+	r.mu.Lock()
+	r.closed = true
+	flight := r.flight
+	r.mu.Unlock()
+	if flight != nil {
+		<-flight.done
+	}
+}
+
 // beforeConnect is the mysql.BeforeConnect hook. While disarmed it leaves the
 // driver's connection-local configuration untouched, so the pool dials the
 // construction address. Once armed it resolves the endpoint and replaces only
@@ -102,13 +129,21 @@ func (r *proxyEndpointResolver) arm() {
 // released with its context error while the shared discovery keeps running —
 // its result stays available to every other waiter, and the spawned proxy
 // work it may include is never run down by one caller hanging up.
+//
+// Closure (provider Close) is checked before admission and again after
+// waiting: once shutdown has marked the resolver closed, no hook starts or
+// joins discovery, and none dials.
 func (r *proxyEndpointResolver) beforeConnect(ctx context.Context, cfg *mysql.Config) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	r.mu.Lock()
 	armed := r.armed
+	closed := r.closed
 	r.mu.Unlock()
+	if closed {
+		return errProxyEndpointResolverClosed
+	}
 	if !armed {
 		return nil
 	}
@@ -132,6 +167,12 @@ func (r *proxyEndpointResolver) beforeConnect(ctx context.Context, cfg *mysql.Co
 	case <-flight.done:
 	case <-ctx.Done():
 		return ctx.Err()
+	}
+	r.mu.Lock()
+	closed = r.closed
+	r.mu.Unlock()
+	if closed {
+		return errProxyEndpointResolverClosed
 	}
 	if err := ctx.Err(); err != nil {
 		return err

@@ -2,6 +2,7 @@ package uow
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"strings"
 	"sync"
@@ -311,6 +312,116 @@ func TestProxyEndpointResolverErrors(t *testing.T) {
 		}
 		if cfg.Addr != recovered.Address() {
 			t.Errorf("second beforeConnect() dialed %q, want the recovered endpoint %q", cfg.Addr, recovered.Address())
+		}
+	})
+}
+
+// TestProxyEndpointResolverClose pins #7295's shutdown rule: closing the
+// provider marks rediscovery closed, waits for a discovery that is already
+// running — the worker always finishes before Close returns, and no worker
+// outlives the resolver — and every later hook is refused without starting
+// discovery or dialing anything.
+func TestProxyEndpointResolverClose(t *testing.T) {
+	t.Run("shutdown waits for the in-flight worker and rejects later hooks", func(t *testing.T) {
+		released := make(chan struct{})
+		var calls atomic.Int32
+		var completed atomic.Bool
+		r := newScriptedResolver(func(context.Context) (proxy.Endpoint, error) {
+			calls.Add(1)
+			<-released
+			completed.Store(true)
+			return proxy.Endpoint{Host: "127.0.0.1", Port: 42454}, nil
+		})
+
+		hookDone := make(chan error, 1)
+		go func() {
+			cfg := mysql.NewConfig()
+			hookDone <- r.beforeConnect(context.Background(), cfg)
+		}()
+		waitForDiscoveryEntered(t, &calls, 1)
+
+		shutdownDone := make(chan struct{})
+		go func() {
+			r.shutdown()
+			close(shutdownDone)
+		}()
+		time.Sleep(250 * time.Millisecond)
+		select {
+		case <-shutdownDone:
+			t.Fatal("shutdown returned while its discovery was still in flight")
+		default:
+		}
+
+		close(released)
+		<-shutdownDone
+		if !completed.Load() {
+			t.Fatal("shutdown returned before the in-flight worker finished")
+		}
+		<-hookDone
+
+		cfg := mysql.NewConfig()
+		cfg.Addr = "127.0.0.1:1"
+		if err := r.beforeConnect(context.Background(), cfg); !errors.Is(err, errProxyEndpointResolverClosed) {
+			t.Errorf("beforeConnect() after shutdown = %v, want the closed error", err)
+		}
+		if cfg.Addr != "127.0.0.1:1" {
+			t.Errorf("a closed resolver still resolved the endpoint %q; want no dial", cfg.Addr)
+		}
+		if n := calls.Load(); n != 1 {
+			t.Fatalf("a closed resolver started another discovery (%d entries, want 1)", n)
+		}
+	})
+
+	t.Run("provider Close drains the resolver before it closes the pool", func(t *testing.T) {
+		front := newFlappingFront(t, 0)
+		released := make(chan struct{})
+		var calls atomic.Int32
+		var completed atomic.Bool
+		r := &proxyEndpointResolver{resolve: func(context.Context) (proxy.Endpoint, error) {
+			calls.Add(1)
+			<-released
+			completed.Store(true)
+			return proxy.Endpoint{Host: "127.0.0.1", Port: 42455}, nil
+		}}
+
+		pool, err := openPool("root@tcp("+front.addr+")/?timeout=5s", r, func(*sql.DB) error { return nil })
+		if err != nil {
+			t.Fatalf("openPool() = %v", err)
+		}
+		provider := &doltSQLProvider{db: pool, resolver: r}
+		r.arm()
+
+		hookDone := make(chan error, 1)
+		go func() {
+			cfg := mysql.NewConfig()
+			hookDone <- r.beforeConnect(context.Background(), cfg)
+		}()
+		waitForDiscoveryEntered(t, &calls, 1)
+
+		closed := make(chan error, 1)
+		go func() { closed <- provider.Close(context.Background()) }()
+		time.Sleep(250 * time.Millisecond)
+		select {
+		case err := <-closed:
+			t.Fatalf("provider Close returned %v while its discovery was still in flight", err)
+		default:
+		}
+
+		close(released)
+		if err := <-closed; err != nil {
+			t.Fatalf("provider Close() = %v", err)
+		}
+		if !completed.Load() {
+			t.Fatal("provider Close returned before the in-flight worker finished")
+		}
+		<-hookDone
+
+		cfg := mysql.NewConfig()
+		if err := r.beforeConnect(context.Background(), cfg); !errors.Is(err, errProxyEndpointResolverClosed) {
+			t.Errorf("beforeConnect() after provider Close = %v, want the closed error", err)
+		}
+		if n := calls.Load(); n != 1 {
+			t.Fatalf("provider Close was followed by another discovery (%d entries, want 1)", n)
 		}
 	})
 }
