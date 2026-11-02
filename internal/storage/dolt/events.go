@@ -15,14 +15,11 @@ import (
 func (s *DoltStore) AddComment(ctx context.Context, issueID, actor, comment string) error {
 	return s.withCircuitWrite(ctx, func(ctx context.Context) error {
 		isWisp := s.isActiveWisp(ctx, issueID)
-		tx, err := s.db.BeginTx(ctx, nil)
+		tx, done, err := s.beginJournalScopedTx(ctx)
 		if err != nil {
-			return fmt.Errorf("begin tx: %w", err)
+			return err
 		}
-		defer func() { _ = tx.Rollback() }()
-
-		clearJournalScope := s.scopeEventsJournalTransaction(tx)
-		defer clearJournalScope()
+		defer done()
 
 		if err := issueops.AddCommentEventInTx(ctx, tx, issueID, actor, comment); err != nil {
 			return err

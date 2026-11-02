@@ -102,7 +102,7 @@ func TestEveryRawTxVersionScopeIsScopedOrExempt(t *testing.T) {
 		// are covered by TestTxMintingWrappersScopeVersionedHistory below.
 		// Reachability is deliberately DIRECT, for the reasons the journal
 		// guard documents at length.
-		if !f.CallsAnyOf(map[string]bool{"BeginTx": true}) || !f.CallsAnyOf(versioningMutators) {
+		if !f.CallsAnyOf(txBegins) || !f.CallsAnyOf(versioningMutators) {
 			continue
 		}
 		if reason, ok := rawTxVersionScopeExemptions[key]; ok {

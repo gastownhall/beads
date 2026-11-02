@@ -98,13 +98,11 @@ func (s *DoltStore) RemoveDependencyWithOptions(ctx context.Context, issueID, de
 	return s.withCircuitWrite(ctx, func(ctx context.Context) error {
 		// Wisps live in dolt_ignored tables — skip Dolt versioning entirely.
 		if s.isActiveWisp(ctx, issueID) {
-			tx, err := s.db.BeginTx(ctx, nil)
+			tx, done, err := s.beginJournalScopedTx(ctx)
 			if err != nil {
-				return fmt.Errorf("failed to begin transaction: %w", err)
+				return err
 			}
-			defer func() { _ = tx.Rollback() }()
-			clearJournalScope := s.scopeEventsJournalTransaction(tx)
-			defer clearJournalScope()
+			defer done()
 			// Scoped even though RecordVersionInTx returns early on IsWisp and
 			// can mint nothing here: the two arms below share one mutator, and
 			// a scope that is present on one arm only is the asymmetry this
@@ -125,14 +123,11 @@ func (s *DoltStore) RemoveDependencyWithOptions(ctx context.Context, issueID, de
 			return nil
 		}
 
-		tx, err := s.db.BeginTx(ctx, nil)
+		tx, done, err := s.beginJournalScopedTx(ctx)
 		if err != nil {
-			return fmt.Errorf("failed to begin transaction: %w", err)
+			return err
 		}
-		defer func() { _ = tx.Rollback() }()
-
-		clearJournalScope := s.scopeEventsJournalTransaction(tx)
-		defer clearJournalScope()
+		defer done()
 		// The non-wisp arm: this removal mutates the issues plane, so the
 		// referencing issue must be versioned with it. RemoveDependencyInTx
 		// calls RecordVersionInTx on the row delete, and that seam no-ops

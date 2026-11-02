@@ -7,11 +7,18 @@ import (
 )
 
 // scopeCalls are the ways a function binds journal activation to the concrete
-// transaction it just began: the store helper, or the issueops primitive it
-// wraps (runDoltTransactionRecording calls the latter directly).
+// transaction it just began: the raw-transaction helper that begins it scoped,
+// or the issueops primitive it wraps (commitWriteTxWith and
+// runDoltTransactionRecording call the latter directly).
 var scopeCalls = map[string]bool{
-	"scopeEventsJournalTransaction": true,
+	"beginJournalScopedTx":          true,
 	"ScopeEventsJournalTransaction": true,
+}
+
+// txBegins are the ways a function mints its own write transaction.
+var txBegins = map[string]bool{
+	"BeginTx":              true,
+	"beginJournalScopedTx": true,
 }
 
 // rawTxScopeExemptions are functions that mint a raw transaction reaching
@@ -100,7 +107,7 @@ func TestEveryRawTxJournalScopeIsScopedOrExempt(t *testing.T) {
 		// mutator on it a few lines later. The cost is that a tx passed down to
 		// an unexported sibling that mutates would slip through; no such shape
 		// exists today, and the journal coverage tests cover the behavior.
-		if !f.CallsAnyOf(map[string]bool{"BeginTx": true}) || !f.CallsAnyOf(journalingMutators) {
+		if !f.CallsAnyOf(txBegins) || !f.CallsAnyOf(journalingMutators) {
 			continue
 		}
 		if reason, ok := rawTxScopeExemptions[key]; ok {
@@ -114,7 +121,7 @@ func TestEveryRawTxJournalScopeIsScopedOrExempt(t *testing.T) {
 		// Scoping must be DIRECT: activation binds to one concrete tx, so the
 		// function that began it is the only one that can bind it.
 		if !f.CallsAnyOf(scopeCalls) {
-			t.Errorf("%s begins its own transaction and reaches journaling issueops code, but never calls scopeEventsJournalTransaction on it — "+
+			t.Errorf("%s begins its own transaction and reaches journaling issueops code, but never scopes the journal on it (beginJournalScopedTx) — "+
 				"every mutation in that transaction journals NOTHING. Scope it (see wisps.go for the idiom), or add it to rawTxScopeExemptions with a reason.", key)
 		}
 	}
@@ -125,6 +132,48 @@ func TestEveryRawTxJournalScopeIsScopedOrExempt(t *testing.T) {
 	for key := range rawTxScopeExemptions {
 		if !seenExempt[key] {
 			t.Errorf("exemption %q no longer matches a raw-transaction mutation path — remove it", key)
+		}
+	}
+}
+
+// journalWriterAdmittingScopes are the only functions allowed to call
+// issueops.ScopeEventsJournalTransaction directly: each takes the
+// journal-writer lock on the session before it begins the transaction it scopes
+// (gastownhall/beads#6117).
+var journalWriterAdmittingScopes = map[string]bool{
+	"DoltStore.commitWriteTxWith":           true,
+	"DoltStore.runDoltTransactionRecording": true,
+	"DoltStore.beginJournalScopedTx":        true,
+}
+
+// TestEveryJournalScopeIsAdmittedAsAJournalWriter is the converse of
+// TestEveryRawTxJournalScopeIsScopedOrExempt: a transaction scoped for the
+// journal must also queue on the journal-writer lock, or it overlaps another
+// journaled writer and one of them loses the bd_events_seq conflict (1213) at
+// commit. A raw transaction scopes through beginJournalScopedTx, which admits it;
+// a direct ScopeEventsJournalTransaction call anywhere else scopes without
+// admission.
+func TestEveryJournalScopeIsAdmittedAsAJournalWriter(t *testing.T) {
+	doltFns, err := journalscan.ParsePackage(".")
+	if err != nil {
+		t.Fatalf("parse dolt package: %v", err)
+	}
+	direct := map[string]bool{"ScopeEventsJournalTransaction": true}
+	seen := map[string]bool{}
+	for key, f := range doltFns {
+		if !f.CallsAnyOf(direct) {
+			continue
+		}
+		if !journalWriterAdmittingScopes[key] {
+			t.Errorf("%s scopes the events journal on a transaction directly, so that transaction never takes the journal-writer lock — "+
+				"begin it with beginJournalScopedTx instead", key)
+			continue
+		}
+		seen[key] = true
+	}
+	for key := range journalWriterAdmittingScopes {
+		if !seen[key] {
+			t.Errorf("%s no longer scopes the journal directly — remove it from journalWriterAdmittingScopes", key)
 		}
 	}
 }

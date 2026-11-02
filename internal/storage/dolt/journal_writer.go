@@ -18,8 +18,9 @@ import (
 //
 // Every write transaction that scopes the journal on a server-mode store with
 // the journal on takes the lock on the session that will run it, before BEGIN:
-// commitWriteTxWith for the withRetryTx/withWriteTx/commitWriteTx funnels and
-// runDoltTransactionRecording for RunInTransaction. Each releases
+// commitWriteTxWith for the withRetryTx/withWriteTx/commitWriteTx funnels,
+// runDoltTransactionRecording for RunInTransaction, and beginJournalScopedTx
+// for the raw wisp, slot, dependency and comment transactions. Each releases
 // it once its SQL transaction has ended and before any post-commit blocked
 // recheck, which is itself a journaled write and takes its own admission.
 // Embedded stores and a journal-off store take no lock.
@@ -114,4 +115,45 @@ func (s *DoltStore) admitJournalWriter(ctx context.Context, beginner txBeginner,
 	}
 	adm.lock = lock
 	return adm, nil
+}
+
+// beginJournalScopedTx begins a raw write transaction with the journal scoped
+// on it, admitted as a journal writer first when the store locks them. done
+// rolls the transaction back unless it committed, clears the scope, releases
+// the admission, and returns the session; defer it. commitSQLTx releases the
+// admission as soon as the transaction commits, so a recheck that follows the
+// commit never runs while this transaction still holds the lock.
+func (s *DoltStore) beginJournalScopedTx(ctx context.Context) (tx *sql.Tx, done func(), err error) {
+	journalOn := s.eventsJournalEnabled.Load()
+	var beginner txBeginner = s.db
+	var adm *journalWriterAdmission
+	if s.locksJournalWriters(journalOn) {
+		adm, err = s.admitJournalWriter(ctx, s.db, journalAdmitBy(ctx, issueops.JournalWriterAdmissionBudget))
+		if err != nil {
+			return nil, nil, err
+		}
+		beginner = adm.conn
+	}
+	tx, err = beginner.BeginTx(ctx, nil)
+	if err != nil {
+		adm.release()
+		return nil, nil, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	if adm != nil {
+		s.journalAdmissions.Store(tx, adm)
+	}
+	clearJournalScope := issueops.ScopeEventsJournalTransaction(tx, journalOn)
+	return tx, func() {
+		_ = tx.Rollback()
+		clearJournalScope()
+		s.releaseJournalAdmission(tx)
+	}, nil
+}
+
+// releaseJournalAdmission releases the admission beginJournalScopedTx bound to
+// tx, if any. Call it only once tx has committed or rolled back.
+func (s *DoltStore) releaseJournalAdmission(tx *sql.Tx) {
+	if adm, ok := s.journalAdmissions.LoadAndDelete(tx); ok {
+		adm.(*journalWriterAdmission).release()
+	}
 }

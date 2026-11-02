@@ -330,6 +330,10 @@ type DoltStore struct {
 	// eventsJournalEnabled activates the durable events journal for THIS store
 	// instance only (storage.EventsJournalConfigurer); never process-global.
 	eventsJournalEnabled atomic.Bool
+	// journalAdmissions maps a raw journal-scoped *sql.Tx to the journal-writer
+	// admission it began under (beginJournalScopedTx), so commitSQLTx can
+	// release the lock the moment the transaction commits.
+	journalAdmissions sync.Map
 	// versionedHistory activates dual-write issue-version history for THIS
 	// store instance only (storage.VersionedHistoryConfigurer); never
 	// process-global. Activation usually leaves it pending
@@ -1502,10 +1506,6 @@ func (s *DoltStore) SetEventsJournalEnabled(enabled bool) {
 	s.eventsJournalEnabled.Store(enabled)
 }
 
-func (s *DoltStore) scopeEventsJournalTransaction(tx *sql.Tx) func() {
-	return issueops.ScopeEventsJournalTransaction(tx, s.eventsJournalEnabled.Load())
-}
-
 // SetVersionedHistoryEnabled activates dual-write issue-version history for
 // this store instance only.
 func (s *DoltStore) SetVersionedHistoryEnabled(enabled bool) {
@@ -1565,7 +1565,11 @@ func (s *DoltStore) withVersionedHistoryTables(ctx context.Context, q issueops.D
 }
 
 func (s *DoltStore) commitSQLTx(ctx context.Context, op string, tx *sql.Tx) error {
-	if err := tx.Commit(); err != nil {
+	err := tx.Commit()
+	// The transaction has ended either way: a raw journal-scoped write gives
+	// the journal-writer lock up here, before any post-commit recheck.
+	s.releaseJournalAdmission(tx)
+	if err != nil {
 		return s.recordDoltPublicationFailure(ctx, wrapSQLCommitError(op, err))
 	}
 	return nil
