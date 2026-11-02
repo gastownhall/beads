@@ -3,9 +3,9 @@ title: Recovery Playbooks
 description: Step-by-step recovery for bd init and bd dolt push/pull refusals, including the primary-key fork playbook
 ---
 
-Last reviewed: 2026-10-01
+Last reviewed: 2026-11-02
 
-Freshness source: `cmd/bd/init.go`, `cmd/bd/init_safety.go`,
+Freshness source: `cmd/bd/init.go`, `cmd/bd/init_store_open.go`, `cmd/bd/init_safety.go`,
 `cmd/bd/init_safety_test.go`, `cmd/bd/init_safety_help.go`, and
 `cmd/bd/dolt.go`.
 
@@ -27,6 +27,7 @@ See also: `bd help init-safety`, and
 - [init-local-exists — `bd init --reinit-local` refused because local data already exists](#init-local-exists)
 - [init-home-refused — `bd init` refused because the working directory is your home directory](#init-home-refused)
 - [init-missing-server-db — `bd init` refused because the configured server-side database is missing](#init-missing-server-db)
+- [init-unversioned-dirty — `bd init` committed the working set of a server database that had no migration cursor](#init-unversioned-dirty)
 - [pk-fork-refused — `bd dolt pull`/`push` refused because a table has different primary keys in its common ancestor](#pk-fork-refused)
 - [re-clone-gotchas — two gotchas hit during manual re-clone recovery: damaged stores left inside `data_dir`, and a fresh clone missing clone-local tables](#re-clone-gotchas)
 
@@ -440,6 +441,51 @@ rows rarely apply there.
   mode before creating anything, and does not restore over a database the
   server already holds. Elsewhere, including shared-server mode named only
   by `dolt.shared-server` in a config.yaml, it uses the embedded store.
+
+---
+
+## init-unversioned-dirty
+
+**Symptom**
+
+```
+Warning: pending schema migrations alter pre-existing dirty tables: config, interactions, routes; ...
+Note: database "hq" had uncommitted changes in tables the schema migrations alter (config, interactions, routes); bd init committed the working set in its own commit, then applied the migrations; no further action is needed (gastownhall/beads#6089)
+```
+
+**What happened**
+
+The server database had uncommitted changes in tables the schema migrations
+alter, and no migration cursor: no `schema_migrations` table, or an empty one.
+An older beads SDK leaves a database in this state; Gas Town's rig setup on
+beads v1.0.0 wrote `issue_prefix` to `config` and created `routes` and
+`interactions` without committing them. Every bd command refuses such a
+database (gastownhall/beads#4566), and before this fix so did the refusal's
+own `bd dolt commit` remedy and `bd init` itself (gastownhall/beads#6089).
+
+In releases after v1.3.2, `bd init` in server mode adopts the database: it
+commits the whole working set in one Dolt commit with the message
+`bd init: commit pre-existing working set before schema migration
+(gastownhall/beads#6089)`, then applies the migrations. The pre-existing
+changes are kept in that commit, which stays in the database's history.
+`--quiet` drops the `Note:` line; the `Warning:` line comes from the store
+and still prints.
+
+No action is needed. To see what was committed:
+
+```bash
+bd sql "SELECT commit_hash, date FROM dolt_log WHERE message LIKE 'bd init: commit pre-existing%'"
+```
+
+**What init does not adopt**
+
+- A database that has a migration cursor (it was migrated by some bd
+  release) keeps the refusal. Inspect its pending changes and commit them
+  yourself with `bd dolt commit`, as the refusal says.
+- Embedded, proxied-server, gateway, read-only and preview opens never
+  commit on init's behalf.
+- If the commit fails, init stops with the original refusal followed by
+  `bd init could not commit the pre-existing working set:` and the cause.
 
 ---
 
