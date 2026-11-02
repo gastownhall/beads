@@ -331,6 +331,12 @@ func classifyCandidate(check *BinaryCheck) bool {
 	return true
 }
 
+// ownsServerLifecycle reports whether bd manages the lifecycle of beadsDir's
+// server: its mode resolves to owned and it is not the shared server.
+func ownsServerLifecycle(beadsDir string) bool {
+	return ResolveServerMode(beadsDir) == ServerModeOwned && !IsSharedServerModeForDir(beadsDir)
+}
+
 // BinaryReplacement is what ReplaceStaleServer did.
 type BinaryReplacement struct {
 	// Replaced is true when the server was stopped and a new one started.
@@ -350,11 +356,13 @@ type BinaryReplacement struct {
 // commit every served database's working set (FlushWorkingSet).
 //
 // A server that is no longer stale under the lock (another bd replaced it
-// first) is left alone, so one stale generation is replaced at most once.
+// first) is left alone, so one stale generation is replaced at most once. A
+// stale server bd no longer owns under the lock (ownsServerLifecycle) is left
+// running too: the result has Replaced false, a stale Check and no error.
 // Only a PID confirmed to be a dolt sql-server is stopped: one the process
 // list cannot vouch for is refused, and one it shows is something else is
-// left alone as untracked. A
-// server that cannot be replaced is left running and the reason returned. A
+// left alone as untracked. A server that cannot be replaced is left running
+// and the reason returned. A
 // current server whose record needs a refresh (BinaryCheck.Refresh) keeps
 // running, and the executable it was compared with is recorded as observed.
 //
@@ -382,6 +390,13 @@ func ReplaceStaleServer(beadsDir string, port int, serverVersion ServerVersionFu
 	case BinaryCannotReplace:
 		return res, check.Reason
 	default:
+		return res, nil
+	}
+	// The caller found the workspace's server bd's to restart before it took
+	// the lock; a configuration or environment change since then can have
+	// handed it to an operator or made it the shared server. Such a server is
+	// left running, still stale, and nothing is signaled.
+	if !ownsServerLifecycle(beadsDir) {
 		return res, nil
 	}
 	// Stop only a process confirmed to be the tracked dolt sql-server. A PID

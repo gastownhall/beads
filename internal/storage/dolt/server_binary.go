@@ -75,6 +75,11 @@ func reconcileServerBinary(cfg *Config, beadsDir, serverDir string) (int, error)
 			addr, check.RunningVersion, remedy.PrintedValue(check.CandidatePath), check.CandidateVersion,
 			remedy.PrintedTextError(err), next)
 	}
+	if !res.Replaced && res.Check.Verdict == doltserver.BinaryStale {
+		// Still stale under the lock, but no longer bd's to restart.
+		adviseStaleServer(cfg, beadsDir, serverDir, res.Check)
+		return cfg.ServerPort, nil
+	}
 	if !res.Replaced || res.State == nil {
 		return cfg.ServerPort, nil
 	}

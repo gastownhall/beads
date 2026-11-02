@@ -4,6 +4,7 @@ package doltserver
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -301,6 +302,8 @@ func TestLaunchBinaryUnrecordedServerComparedByVersion(t *testing.T) {
 // TestLaunchBinaryConcurrentDetectionsReplaceOnce: bd processes that each
 // found the same stale server replace it once between them; the rest find
 // the replacement current under the lifecycle lock and keep it.
+// Every caller classifies the server as stale before any of them contends
+// for the lock, as processes that opened the store together do.
 func TestLaunchBinaryConcurrentDetectionsReplaceOnce(t *testing.T) {
 	beadsDir, launches := fakeStartWorkspace(t)
 	stubProcessListLaunchedHere(t)
@@ -316,17 +319,22 @@ func TestLaunchBinaryConcurrentDetectionsReplaceOnce(t *testing.T) {
 	const callers = 3
 	results := make([]BinaryReplacement, callers)
 	errs := make([]error, callers)
-	start := make(chan struct{})
-	var wg sync.WaitGroup
+	var classified, wg sync.WaitGroup
+	classified.Add(callers)
 	for i := range callers {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			<-start
+			check := CheckServerBinary(beadsDir, state.Port, nil)
+			classified.Done()
+			classified.Wait()
+			if check.Verdict != BinaryStale || check.PID != state.PID {
+				errs[i] = fmt.Errorf("before the lock: check = %+v, want the original server stale", check)
+				return
+			}
 			results[i], errs[i] = ReplaceStaleServer(beadsDir, state.Port, nil)
 		}()
 	}
-	close(start)
 	wg.Wait()
 
 	replaced := 0
@@ -346,6 +354,96 @@ func TestLaunchBinaryConcurrentDetectionsReplaceOnce(t *testing.T) {
 	}
 	if got := launchedPorts(t, launches); len(got) != 2 {
 		t.Errorf("launches = %v, want the original and one replacement", got)
+	}
+}
+
+// TestLaunchBinaryStaleServerNoLongerOwnedKept: a caller that found the
+// server stale and bd's to restart takes the lifecycle lock after the
+// workspace's server was handed to an operator; the server is left running,
+// stale, and nothing is signaled or launched.
+func TestLaunchBinaryStaleServerNoLongerOwnedKept(t *testing.T) {
+	for _, tc := range []struct{ name, env string }{
+		{name: "external mode", env: "BEADS_DOLT_SERVER_MODE"},
+		{name: "shared server", env: "BEADS_DOLT_SHARED_SERVER"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			beadsDir, launches := fakeStartWorkspace(t)
+			stubProcessListLaunchedHere(t)
+			state, err := startForTest(t, beadsDir)
+			if err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			upgradeFakeDolt(t, "2.7.0")
+			if got := CheckServerBinary(beadsDir, state.Port, nil); got.Verdict != BinaryStale {
+				t.Fatalf("check = %+v, want stale", got)
+			}
+			before, _ := os.ReadFile(binaryRecordPath(beadsDir))
+
+			t.Setenv(tc.env, "1")
+			res, err := ReplaceStaleServer(beadsDir, state.Port, nil)
+			if res.State != nil && res.State.PID > 0 {
+				killAtCleanup(t, res.State.PID)
+			}
+			if err != nil || res.Replaced || res.Stopped || res.Check.Verdict != BinaryStale {
+				t.Fatalf("ReplaceStaleServer = %+v, %v; want a stale check left unreplaced and no error", res, err)
+			}
+			if !pidAlive(state.PID) {
+				t.Errorf("server PID %d stopped; want it left running", state.PID)
+			}
+			if got := launchedPorts(t, launches); len(got) != 1 {
+				t.Errorf("launches = %v, want only the original start", got)
+			}
+			if after, _ := os.ReadFile(binaryRecordPath(beadsDir)); string(after) != string(before) {
+				t.Errorf("launch record rewritten:\n%s\nwant:\n%s", after, before)
+			}
+		})
+	}
+}
+
+// TestLaunchBinaryAnotherPIDsRecordIgnored: a launch record naming a PID
+// other than the tracked server's is not evidence about that server. Compared
+// by the version it reports, a server that cannot answer is unknown: nothing
+// is stopped, launched or rewritten.
+func TestLaunchBinaryAnotherPIDsRecordIgnored(t *testing.T) {
+	beadsDir, launches := fakeStartWorkspace(t)
+	stubProcessListLaunchedHere(t)
+	state, err := startForTest(t, beadsDir)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	// A record from an earlier generation: another PID, a dolt since removed.
+	if err := writeBinaryRecord(beadsDir, binaryRecord{
+		PID:            state.PID + 10000,
+		binaryIdentity: binaryIdentity{Path: "/nonexistent/dolt", Resolved: "/nonexistent/dolt", Size: 1},
+		Version:        "2.5.0",
+		Provenance:     binaryProvenanceLaunched,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(binaryRecordPath(beadsDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	noAnswer := func() (string, error) { return "", os.ErrDeadlineExceeded }
+
+	if got := CheckServerBinary(beadsDir, state.Port, noAnswer); got.Verdict != BinaryUnknown {
+		t.Fatalf("check = %+v, want unknown", got)
+	}
+	res, err := ReplaceStaleServer(beadsDir, state.Port, noAnswer)
+	if res.State != nil && res.State.PID > 0 {
+		killAtCleanup(t, res.State.PID)
+	}
+	if err != nil || res.Replaced || res.Check.Verdict != BinaryUnknown {
+		t.Fatalf("ReplaceStaleServer = %+v, %v; want unknown, nothing replaced", res, err)
+	}
+	if !pidAlive(state.PID) {
+		t.Errorf("server PID %d stopped, but nothing proved it stale", state.PID)
+	}
+	if got := launchedPorts(t, launches); len(got) != 1 {
+		t.Errorf("launches = %v, want only the original start", got)
+	}
+	if after, _ := os.ReadFile(binaryRecordPath(beadsDir)); string(after) != string(before) {
+		t.Errorf("another PID's record rewritten:\n%s\nwant:\n%s", after, before)
 	}
 }
 

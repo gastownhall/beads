@@ -398,6 +398,46 @@ func TestServerBinaryNoPermissionAdvises(t *testing.T) {
 	}
 }
 
+// TestServerBinaryNoLongerOwnedUnderLockAdvises: when the lifecycle finds the
+// server still stale under its lock but no longer bd's to restart (it leaves
+// it running and reports no replacement and no error), the open goes on to
+// use the server and warns as an open without permission does.
+func TestServerBinaryNoLongerOwnedUnderLockAdvises(t *testing.T) {
+	events := &serverBinaryEvents{}
+	cfg := serverBinaryOpen(t, events)
+	port := cfg.ServerPort
+	stubServerBinary(t,
+		func(string, int, doltserver.ServerVersionFunc) doltserver.BinaryCheck { return staleServerCheck(port) },
+		func(_ string, p int, _ doltserver.ServerVersionFunc) (doltserver.BinaryReplacement, error) {
+			events.add("replace")
+			return doltserver.BinaryReplacement{Check: staleServerCheck(p)}, nil
+		})
+
+	var err error
+	stderr := captureServerBinaryStderr(t, func() {
+		_, err = newServerMode(context.Background(), cfg)
+	})
+	if err != nil && strings.Contains(err.Error(), "no query was sent") {
+		t.Fatalf("open failed as a failed replacement: %v", err)
+	}
+	got := events.snapshot()
+	if len(got) < 3 || got[0] != "conn" || got[1] != "replace" || got[2] != "conn" ||
+		strings.Count(strings.Join(got, " "), "replace") != 1 {
+		t.Errorf("events = %v, want the probe, one replacement attempt, then the session as before", got)
+	}
+	if n := strings.Count(stderr, "this command does not restart it"); n != 1 {
+		t.Fatalf("stderr has %d warnings, want one:\n%s", n, stderr)
+	}
+	for _, want := range []string{"port " + strconv.Itoa(port), "dolt 2.6.0", "is now 2.7.0"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("warning does not mention %q:\n%s", want, stderr)
+		}
+	}
+	if strings.Contains(stderr, "Restarted the dolt sql-server") {
+		t.Errorf("unreplaced server reported a restart:\n%s", stderr)
+	}
+}
+
 // TestServerBinaryNotComparedForOtherEndpoints: an endpoint that is not a
 // server bd launches (a remote host, a unix socket, TLS, a gateway, a proxied
 // server) is never compared: no lifecycle call, no output, the port as
