@@ -868,6 +868,10 @@ func runWispGC(cmd *cobra.Command, args []string) error {
 	}
 	abandoned := sel.abandoned
 
+	if sel.labelSpared > 0 && !jsonOutput {
+		fmt.Printf("Skipping %d wisp(s) carrying a protected label\n", sel.labelSpared)
+	}
+
 	if len(abandoned) == 0 {
 		if jsonOutput {
 			return outputJSON(WispGCResult{
@@ -1083,10 +1087,9 @@ func countLabelSpare(guard wispGuard, spared map[string]bool, issue *types.Issue
 // by the direct and proxied-server routes so the two hand-copied pinned/infra
 // loops cannot drift on which protections they honor. It drops pinned wisps,
 // configured infra types and wisps carrying a protected label, and reports
-// the pinned and infra skip counts. The closed purge makes no status or
-// blocked reads — a wisp's labels are the only guard input beside its own
-// row.
-func filterClosedPurgeCandidates(ctx context.Context, r molReader, issues []*types.Issue, labels map[string]bool) (kept []*types.Issue, pinnedCount, infraCount int) {
+// each skip count. The closed purge makes no status or blocked reads — a
+// wisp's labels are the only guard input beside its own row.
+func filterClosedPurgeCandidates(ctx context.Context, r molReader, issues []*types.Issue, labels map[string]bool) (kept []*types.Issue, pinnedCount, infraCount, labelSpared int) {
 	guard := wispGuard{labels: labels}
 	filtered := make([]*types.Issue, 0, len(issues))
 	for _, issue := range issues {
@@ -1099,11 +1102,12 @@ func filterClosedPurgeCandidates(ctx context.Context, r molReader, issues []*typ
 			continue
 		}
 		if guard.labelSpares(issue) {
+			labelSpared++
 			continue
 		}
 		filtered = append(filtered, issue)
 	}
-	return filtered, pinnedCount, infraCount
+	return filtered, pinnedCount, infraCount, labelSpared
 }
 
 func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, excludeTypes []types.IssueType, extraLabels ...string) error {
@@ -1131,10 +1135,13 @@ func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, excludeTyp
 	if err != nil {
 		return HandleError("%v", err)
 	}
-	closedIssues, pinnedCount, infraCount := filterClosedPurgeCandidates(ctx, store, closedIssues, labels)
+	closedIssues, pinnedCount, infraCount, labelSpared := filterClosedPurgeCandidates(ctx, store, closedIssues, labels)
 
 	if pinnedCount > 0 && !jsonOutput {
 		fmt.Printf("Skipping %d pinned issue(s) (protected from cleanup)\n", pinnedCount)
+	}
+	if labelSpared > 0 && !jsonOutput {
+		fmt.Printf("Skipping %d wisp(s) carrying a protected label\n", labelSpared)
 	}
 	if infraCount > 0 && !jsonOutput {
 		fmt.Printf("Skipping %d configured infra issue(s) protected from GC\n", infraCount)

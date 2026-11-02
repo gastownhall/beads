@@ -3,6 +3,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"strings"
 	"testing"
@@ -103,6 +104,58 @@ func TestEmbeddedWispGCCascadeSparesLabeledDependent(t *testing.T) {
 	}
 	if !bdShowSucceeds(t, bd, dir, keptChild) {
 		t.Errorf("labeled closed dependent %s was cascaded; want it spared (orphaned, not deleted)", keptChild)
+	}
+}
+
+// TestEmbeddedWispGCProtectedLabelReporting covers what the operator sees:
+// setting the guard up through its exact key warns nothing, a preview says
+// how many wisps the labels held back, and the JSON wire stays a report of
+// the eligible candidates only — skips are reported in text, never mixed
+// into the delete list.
+func TestEmbeddedWispGCProtectedLabelReporting(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "wpr")
+
+	// The exact key is registered, so the feature's own setup command must
+	// not warn about an unrecognized key on every adopter's first use.
+	cfgOut := bdCommand(t, bd, dir, "config", "set", "wisp.protected_labels", `["keep:mail"]`)
+	if strings.Contains(cfgOut, "not a recognized config key") {
+		t.Fatalf("bd config set wisp.protected_labels warned about an unrecognized key:\n%s", cfgOut)
+	}
+
+	keptOne := bdCreate(t, bd, dir, "kept record one", "--ephemeral").ID
+	bdCommand(t, bd, dir, "label", "add", keptOne, "keep:mail")
+	keptTwo := bdCreate(t, bd, dir, "kept record two", "--ephemeral").ID
+	bdCommand(t, bd, dir, "label", "add", keptTwo, "keep:mail")
+	plain := bdCreate(t, bd, dir, "stale noise", "--ephemeral").ID
+
+	preview := bdCommand(t, bd, dir, "mol", "wisp", "gc", "--age", "0s", "--dry-run")
+	if !strings.Contains(preview, "Skipping 2 wisp(s) carrying a protected label") {
+		t.Errorf("preview does not report the two label skips:\n%s", preview)
+	}
+
+	raw := bdCommand(t, bd, dir, "mol", "wisp", "gc", "--age", "0s", "--dry-run", "--json")
+	var got struct {
+		CleanedIDs   []string `json:"cleaned_ids"`
+		Candidates   int      `json:"candidates"`
+		CleanedCount int      `json:"cleaned_count"`
+	}
+	if err := json.Unmarshal([]byte(raw), &got); err != nil {
+		t.Fatalf("unmarshal gc preview json: %v\n%s", err, raw)
+	}
+	if len(got.CleanedIDs) != 1 || got.CleanedIDs[0] != plain {
+		t.Errorf("json preview lists %v; want only the eligible unprotected wisp %s", got.CleanedIDs, plain)
+	}
+	if got.Candidates != 1 {
+		t.Errorf("json candidates = %d; want 1 (the labeled wisps are skips, not candidates)", got.Candidates)
+	}
+	if got.CleanedCount != 0 {
+		t.Errorf("json cleaned_count = %d in a preview; want 0", got.CleanedCount)
 	}
 }
 

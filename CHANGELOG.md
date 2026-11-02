@@ -1126,6 +1126,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd mol wisp gc` never reclaims a wisp carrying a protected label (#6266).
+  The age and --all sweeps, the cascade expansion and the --closed purge all
+  spare a wisp carrying a label the workspace named in the new
+  `wisp.protected_labels` setting (an exact, case-sensitive name; a JSON
+  array or comma-separated list, e.g.
+  `bd config set wisp.protected_labels '["keep:mail"]'`), and
+  `bd mol wisp gc --exclude-label` protects further labels for this run
+  alone. No label is protected by default — `bd delete` remains the
+  deliberate way out. A setting that cannot be read aborts the sweep in
+  every mode with nothing deleted, and a label read that fails while the
+  cascade hydrates warns `cascade expansion incomplete` and admits no
+  dependent — on the direct and proxied-server routes alike. Both routes
+  report `Skipping N wisp(s) carrying a protected label` in text previews
+  and list only eligible candidates in `--json`. A
+  `wisp.protected_labels` key in config.yaml or `BD_WISP_PROTECTED_LABELS`
+  is ignored with a warning: the setting is read from the workspace
+  database only, so every client of a shared workspace runs the same fence.
 - `bd dolt push <remote>` and `bd dolt pull <remote>` now push to and pull
   from the named remote. bd ignored the name, so `bd dolt push 1st` pushed to
   the default remote and reported "Push complete."; a name that differs from

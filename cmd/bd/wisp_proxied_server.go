@@ -151,6 +151,10 @@ func runWispGCProxiedServer(ctx context.Context, dryRun bool, ageThreshold time.
 	}
 	abandoned := sel.abandoned
 
+	if sel.labelSpared > 0 && !jsonOutput {
+		fmt.Printf("Skipping %d wisp(s) carrying a protected label\n", sel.labelSpared)
+	}
+
 	if len(abandoned) == 0 {
 		if jsonOutput {
 			return outputJSON(WispGCResult{CleanedIDs: []string{}, CleanedCount: 0, DryRun: dryRun})
@@ -258,11 +262,14 @@ func runWispPurgeClosedProxiedServer(ctx context.Context, dryRun, force bool, ex
 		uw.Close(ctx)
 		return HandleError("%v", err)
 	}
-	closedIssues, pinnedCount, infraCount := filterClosedPurgeCandidates(ctx, r, closedIssues, labels)
+	closedIssues, pinnedCount, infraCount, labelSpared := filterClosedPurgeCandidates(ctx, r, closedIssues, labels)
 	uw.Close(ctx)
 
 	if pinnedCount > 0 && !jsonOutput {
 		fmt.Printf("Skipping %d pinned issue(s) (protected from cleanup)\n", pinnedCount)
+	}
+	if labelSpared > 0 && !jsonOutput {
+		fmt.Printf("Skipping %d wisp(s) carrying a protected label\n", labelSpared)
 	}
 	if infraCount > 0 && !jsonOutput {
 		fmt.Printf("Skipping %d configured infra issue(s) protected from GC\n", infraCount)
