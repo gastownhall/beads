@@ -5,6 +5,7 @@ package embeddeddolt
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"net/url"
@@ -27,9 +28,22 @@ const (
 	commitEmail = "beads@local"
 )
 
+// embeddedConnector is the part of *doltembed.Connector that OpenSQL uses.
+type embeddedConnector interface {
+	driver.Connector
+	Close() error
+}
+
+// newEmbeddedConnector builds the engine connector; tests replace it to fail
+// the open without an engine.
+var newEmbeddedConnector = func(cfg doltembed.Config) (embeddedConnector, error) {
+	return doltembed.NewConnector(cfg)
+}
+
 // OpenSQL opens an embedded Dolt database at dir. The returned cleanup
 // function closes both the *sql.DB and the underlying connector.
 func OpenSQL(ctx context.Context, dir, database, branch string) (*sql.DB, func() error, error) {
+	start := time.Now()
 	dsn := buildDSN(dir, database)
 
 	cfg, err := doltembed.ParseDSN(dsn)
@@ -42,7 +56,7 @@ func OpenSQL(ctx context.Context, dir, database, branch string) (*sql.DB, func()
 	bo.MaxInterval = 5 * time.Second
 	cfg.BackOff = bo
 
-	connector, err := doltembed.NewConnector(cfg)
+	connector, err := newEmbeddedConnector(cfg)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -71,7 +85,7 @@ func OpenSQL(ctx context.Context, dir, database, branch string) (*sql.DB, func()
 	}
 
 	if err := db.PingContext(ctx); err != nil {
-		return nil, nil, errors.Join(err, cleanup())
+		return nil, nil, errors.Join(openFailure(ctx, dir, database, time.Since(start), err), cleanup())
 	}
 
 	if strings.TrimSpace(database) != "" {
@@ -93,6 +107,24 @@ func OpenSQL(ctx context.Context, dir, database, branch string) (*sql.DB, func()
 	}
 
 	return db, cleanup, nil
+}
+
+// openFailure describes a failed open: which database, where, and how long
+// the open (including the driver's retries) ran before it failed. It keeps
+// err, and joins the caller's context error when the driver's error does not
+// already carry it, so a canceled or timed-out open stays recognizable. It
+// says nothing about why the open failed or who holds the database: only the
+// engine's own error can report that.
+func openFailure(ctx context.Context, dir, database string, elapsed time.Duration, err error) error {
+	what := "embedded database"
+	if strings.TrimSpace(database) != "" {
+		what = fmt.Sprintf("embedded database %q", database)
+	}
+	err = fmt.Errorf("opening %s in %q failed after %s: %w", what, dir, elapsed.Round(time.Millisecond), err)
+	if ctxErr := ctx.Err(); ctxErr != nil && !errors.Is(err, ctxErr) {
+		err = errors.Join(err, ctxErr)
+	}
+	return err
 }
 
 func buildDSN(dir, database string) string {
