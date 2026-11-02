@@ -3,6 +3,12 @@ package uow
 import (
 	"context"
 	"crypto/tls"
+	"database/sql"
+	"database/sql/driver"
+	"errors"
+	"fmt"
+	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -277,5 +283,142 @@ func TestProxyEndpointResolverCancellation(t *testing.T) {
 			require.ErrorIs(t, err, context.Canceled, "iteration %d", i)
 			require.Empty(t, canceledCfg.Addr, "iteration %d", i)
 		}
+	})
+}
+
+// errDialRecorded is what recordingDialer refuses every dial with.
+var errDialRecorded = errors.New("test dial recorded")
+
+// dialAttempt is one dial the driver made: the address and how much of its
+// dial budget was left when it started.
+type dialAttempt struct {
+	addr   string
+	budget time.Duration
+}
+
+// recordingDialer stands in for the network: it records every dial the driver
+// makes and refuses it with errDialRecorded, so a test sees which endpoint a
+// new connection would have used without a server behind it.
+type recordingDialer struct {
+	mu       sync.Mutex
+	attempts []dialAttempt
+}
+
+func (d *recordingDialer) dial(ctx context.Context, _, addr string) (net.Conn, error) {
+	a := dialAttempt{addr: addr}
+	if deadline, ok := ctx.Deadline(); ok {
+		a.budget = time.Until(deadline)
+	}
+	d.mu.Lock()
+	d.attempts = append(d.attempts, a)
+	d.mu.Unlock()
+	return nil, errDialRecorded
+}
+
+func (d *recordingDialer) dialed() []dialAttempt {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]dialAttempt(nil), d.attempts...)
+}
+
+// openResolverPool opens a pool the way openPool does for a provider, on a
+// construction address of 127.0.0.1:4000 with r's hook installed, but dialing
+// through d.
+func openResolverPool(t *testing.T, r *proxyEndpointResolver, d *recordingDialer, timeout time.Duration) *sql.DB {
+	t.Helper()
+	cfg, err := mysql.ParseDSN(buildDSN(proxy.Endpoint{Host: "127.0.0.1", Port: 4000}, "beads", "root", "", ""))
+	require.NoError(t, err)
+	cfg.Timeout = timeout
+	cfg.DialFunc = d.dial
+	require.NoError(t, cfg.Apply(mysql.BeforeConnect(r.beforeConnect)))
+	connector, err := mysql.NewConnector(cfg)
+	require.NoError(t, err)
+	db := sql.OpenDB(connector)
+	t.Cleanup(func() { _ = db.Close() })
+	return db
+}
+
+// TestProxyEndpointResolverErrors pins that a failed discovery fails the new
+// connection with the discovery error, wrapped so callers can still match it,
+// and never as driver.ErrBadConn or by dialing the construction address; a
+// later discovery that succeeds lets a connection through again.
+func TestProxyEndpointResolverErrors(t *testing.T) {
+	mismatch := &proxy.ErrUpstreamMismatch{RootDir: "/workspace", Want: "upstream-a", Have: "upstream-b"}
+	results := []error{mismatch, fmt.Errorf("authenticate proxy: %w", proxy.ErrUnverifiableProcess), nil}
+	var calls atomic.Int64
+	r := newProxyEndpointResolver(func() (proxy.Endpoint, error) {
+		if err := results[calls.Add(1)-1]; err != nil {
+			return proxy.Endpoint{}, err
+		}
+		return proxy.Endpoint{Host: "127.0.0.1", Port: 4321}, nil
+	})
+	r.arm()
+	d := &recordingDialer{}
+	db := openResolverPool(t, r, d, 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	_, err := db.Conn(ctx)
+	require.Error(t, err)
+	assert.True(t, strings.HasPrefix(err.Error(), "uow: rediscover proxy endpoint: "), "got %q", err)
+	var got *proxy.ErrUpstreamMismatch
+	require.ErrorAs(t, err, &got)
+	assert.Same(t, mismatch, got)
+	assert.True(t, proxy.IsUpstreamMismatch(err))
+	assert.NotErrorIs(t, err, driver.ErrBadConn)
+
+	_, err = db.Conn(ctx)
+	require.ErrorIs(t, err, proxy.ErrUnverifiableProcess)
+	assert.True(t, strings.HasPrefix(err.Error(), "uow: rediscover proxy endpoint: "), "got %q", err)
+	assert.NotErrorIs(t, err, driver.ErrBadConn)
+	assert.Empty(t, d.dialed(), "a failed discovery must not fall back to the construction address")
+
+	_, err = db.Conn(ctx)
+	require.ErrorIs(t, err, errDialRecorded)
+	dialed := d.dialed()
+	require.Len(t, dialed, 1)
+	assert.Equal(t, "127.0.0.1:4321", dialed[0].addr)
+	assert.Equal(t, int64(3), calls.Load())
+}
+
+// TestProxyEndpointResolverDiscoveryBudget pins where the time goes: discovery
+// runs before the driver starts its dial timeout, so a slow discovery leaves
+// the dial its full budget, while the caller's own deadline still ends its
+// wait promptly.
+func TestProxyEndpointResolverDiscoveryBudget(t *testing.T) {
+	const dialTimeout = 200 * time.Millisecond
+
+	t.Run("dial gets a fresh budget after a slow discovery", func(t *testing.T) {
+		r := newProxyEndpointResolver(func() (proxy.Endpoint, error) {
+			time.Sleep(2 * dialTimeout)
+			return proxy.Endpoint{Host: "127.0.0.1", Port: 4321}, nil
+		})
+		r.arm()
+		d := &recordingDialer{}
+		db := openResolverPool(t, r, d, dialTimeout)
+
+		_, err := db.Conn(context.Background())
+		require.ErrorIs(t, err, errDialRecorded)
+		dialed := d.dialed()
+		require.Len(t, dialed, 1)
+		assert.Equal(t, "127.0.0.1:4321", dialed[0].addr)
+		assert.Greater(t, dialed[0].budget, dialTimeout/2, "discovery must not spend the dial timeout")
+	})
+
+	t.Run("caller deadline ends the wait", func(t *testing.T) {
+		b := newBlockedDiscovery()
+		t.Cleanup(func() { close(b.release) })
+		r := newProxyEndpointResolver(b.discover)
+		r.arm()
+		d := &recordingDialer{}
+		db := openResolverPool(t, r, d, 5*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+
+		start := time.Now()
+		_, err := db.Conn(ctx)
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+		assert.Less(t, time.Since(start), 5*time.Second)
+		assert.Empty(t, d.dialed())
 	})
 }

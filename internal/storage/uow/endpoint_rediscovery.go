@@ -2,6 +2,7 @@ package uow
 
 import (
 	"context"
+	"fmt"
 	"sync"
 
 	"github.com/go-sql-driver/mysql"
@@ -99,7 +100,10 @@ func (r *proxyEndpointResolver) beforeConnect(ctx context.Context, cfg *mysql.Co
 		return err
 	}
 	if d.err != nil {
-		return d.err
+		// Never fall back to the construction address, which may now belong to
+		// an unrelated listener, and never ErrBadConn: the pool would retry on
+		// the same failing discovery instead of reporting it.
+		return fmt.Errorf("uow: rediscover proxy endpoint: %w", d.err)
 	}
 	cfg.Addr = d.ep.Address()
 	return nil
