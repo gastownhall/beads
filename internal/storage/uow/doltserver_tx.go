@@ -33,6 +33,17 @@ type doltServerTx struct {
 	// transaction's unblocking writes record for the post-commit
 	// blocked-state recheck (gastownhall/beads#6716).
 	clearRecheckScope func()
+	// releaseJournalLock releases the journal-writer admission lock
+	// (gastownhall/beads#6117) BeginTx took on the pinned session. It is
+	// nil when admission was not required (journal off, or an unlocked
+	// read/ephemeral route). Idempotent, and called only after the SQL
+	// transaction has ended — after the commit statement on the success
+	// paths (before the blocked recheck, which is a journaled write of its
+	// own and must admit on its own turn), and in releaseConn/poisonConn
+	// after a rollback, so the lock never outlives the transaction it
+	// serialized. A nil session may still hold the lock: the deferred
+	// closeAttempt of a failed attempt runs before its retry re-acquires.
+	releaseJournalLock func()
 }
 
 var _ Tx = (*doltServerTx)(nil)
@@ -61,6 +72,12 @@ func (t *doltServerTx) Commit(ctx context.Context, message string) error {
 	_, err = t.conn.ExecContext(ctx, stmt, args...)
 	if err == nil {
 		t.done = true
+		// The statement ended the SQL transaction (COMMIT or DOLT_COMMIT), so
+		// the journal-writer admission lock goes before anything that opens
+		// another write: the blocked recheck below is a journaled write of
+		// its own and admits on its own turn, never nested inside this one's
+		// lock (#6117).
+		t.releaseJournalWriterLock()
 		// The write is durable. Settle the dependents its unblocking writes
 		// recorded on a fresh snapshot before the pinned session goes back
 		// to the pool (gastownhall/beads#6716). A recheck failure is logged,
@@ -145,6 +162,11 @@ func (t *doltServerTx) CommitScoped(ctx context.Context, tables []string, messag
 		return t.closeOpenTxAfterFailure(ctx, err)
 	}
 	t.done = true
+	// The SQL transaction is committed, so the journal-writer admission lock
+	// goes before the Dolt version publication and the blocked recheck below:
+	// both open their own write work on this session, and the recheck is a
+	// journaled write that must admit on its own turn (#6117).
+	t.releaseJournalWriterLock()
 	clean := t.commitStagedTables(ctx, staged, message)
 	if t.recheckBlockedAfterCommit(ctx, issueops.TakeBlockedRecheck(t.conn)) && clean {
 		t.releaseConn()
@@ -359,9 +381,21 @@ func (t *doltServerTx) releaseConn() {
 	t.releaseJournalScope()
 	t.releaseVersionScope()
 	t.releaseRecheckScope()
+	t.releaseJournalWriterLock()
 	if t.conn != nil {
 		_ = t.conn.Close()
 		t.conn = nil
+	}
+}
+
+// releaseJournalWriterLock drops this transaction's journal-writer admission
+// lock (#6117). Idempotent, like the scope releases: the commit paths call it
+// once explicitly (before the recheck) and again through releaseConn, and
+// Rollback may follow a failed Commit that already released.
+func (t *doltServerTx) releaseJournalWriterLock() {
+	if t.releaseJournalLock != nil {
+		t.releaseJournalLock()
+		t.releaseJournalLock = nil
 	}
 }
 
@@ -403,6 +437,7 @@ func (t *doltServerTx) poisonConn() {
 	t.releaseJournalScope()
 	t.releaseVersionScope()
 	t.releaseRecheckScope()
+	t.releaseJournalWriterLock()
 	if t.conn == nil {
 		return
 	}

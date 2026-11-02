@@ -143,6 +143,7 @@ go_test(
         "journal_contract_test.go",
         "journal_delete_actor_test.go",
         "journal_scope_test.go",
+        "journal_writer_lock_test.go",
         "lease_reclaimer_contract_test.go",
         "lifecycle_close_reopen_contract_test.go",
         "lifecycle_create_contract_test.go",

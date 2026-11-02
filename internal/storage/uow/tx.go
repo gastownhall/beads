@@ -86,6 +86,12 @@ func RunTxResultWithin[T any](ctx context.Context, p UnitOfWorkProvider, maxElap
 	bo := backoff.NewExponentialBackOff()
 	bo.InitialInterval = txRetryInitialInterval
 	bo.MaxElapsedTime = maxElapsed
+	// This is a journal-writer route (#6117): each attempt admits on the
+	// database's journal-writer lock before its START TRANSACTION. One
+	// absolute admission deadline for the whole retry loop — the earlier of
+	// the caller's own deadline and this budget — fixed here so a replayed
+	// attempt re-acquires the lock without restarting the queueing window.
+	ctx = issueops.WithRouteJournalAdmission(ctx, maxElapsed)
 
 	// lastAttemptDuration and lastErr let the loop decide, BEFORE starting a
 	// new attempt, whether there is realistically enough time left to finish
@@ -200,6 +206,10 @@ func RunTxEphemeral[T any](ctx context.Context, p UnitOfWorkProvider, work TxRea
 	bo := backoff.NewExponentialBackOff()
 	bo.InitialInterval = txRetryInitialInterval
 	bo.MaxElapsedTime = DefaultTxRetryMaxElapsed
+	// dolt_ignored-only writes journal nothing, so this route takes no
+	// journal-writer admission lock (#6117); an unexpected journal emit
+	// inside one fails hard rather than racing the admitted writers.
+	ctx = issueops.WithUnlockedJournalRoute(ctx)
 
 	err := backoff.Retry(func() error {
 		uw, err := p.NewUOW(ctx)
@@ -288,6 +298,12 @@ func RunTxScoped[T any](ctx context.Context, p UnitOfWorkProvider, work TxScoped
 	bo := backoff.NewExponentialBackOff()
 	bo.InitialInterval = txRetryInitialInterval
 	bo.MaxElapsedTime = DefaultTxRetryMaxElapsed
+	// The heartbeat route: a re-arm writes versioned rows and records a
+	// lease_rearmed journal event, so this is a journal-writer route (#6117)
+	// and every attempt admits on the database's journal-writer lock before
+	// its START TRANSACTION. One admission deadline for the whole retry loop,
+	// fixed here so a replayed attempt does not restart the queueing window.
+	ctx = issueops.WithRouteJournalAdmission(ctx, DefaultTxRetryMaxElapsed)
 
 	err := backoff.Retry(func() error {
 		uw, err := p.NewUOW(ctx)
@@ -328,6 +344,10 @@ func RunTxScoped[T any](ctx context.Context, p UnitOfWorkProvider, work TxScoped
 
 func RunTxRead[T any](ctx context.Context, p UnitOfWorkProvider, work TxReadFunc[T]) (T, error) {
 	var zero T
+	// A read takes no journal-writer admission lock (#6117); its transaction
+	// is scoped journal-forbidden instead, so a read that unexpectedly emits
+	// fails hard rather than racing the admitted writers.
+	ctx = issueops.WithUnlockedJournalRoute(ctx)
 	uw, err := p.NewUOW(ctx)
 	if err != nil {
 		return zero, err

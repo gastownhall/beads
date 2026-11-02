@@ -186,6 +186,7 @@ go_test(
         "journal_prune_test.go",
         "journal_truncation_test.go",
         "journal_vocabulary_test.go",
+        "journal_writer_lock_test.go",
         "label_rename_merged_count_test.go",
         "lease_reclaimer_test.go",
         "lease_replica_test.go",

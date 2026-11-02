@@ -1287,8 +1287,10 @@ func (s *DoltStore) withRetryTxOn(ctx context.Context, beginner txBeginner, fn f
 		bo.MaxElapsedTime = 15 * time.Second
 		// One absolute journal-writer admission deadline for the whole retry
 		// loop: a replayed attempt re-acquires the lock, but the queueing
-		// budget is fixed at entry and never restarted by a retry.
-		ctx = issueops.WithJournalAdmissionDeadline(ctx, time.Now().Add(bo.MaxElapsedTime))
+		// budget is fixed at entry and never restarted by a retry. The
+		// earlier of the caller's own deadline and the 15s budget bounds
+		// WAITING only; the body runs on its original context.
+		ctx = issueops.WithRouteJournalAdmission(ctx, bo.MaxElapsedTime)
 	}
 	var pending issueops.BlockedRecheck
 	if err := backoff.Retry(func() error {

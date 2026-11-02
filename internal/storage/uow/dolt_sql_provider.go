@@ -38,6 +38,12 @@ const (
 type doltSQLProvider struct {
 	defaultBranch string
 	db            *sql.DB
+	// database is the database every unit of work this provider begins runs
+	// against, and therefore the database whose journal-writer admission lock
+	// (#6117) its write routes queue on (bd_events_seq:<database>) — the same
+	// name the direct store takes, so proxied and direct writers on one
+	// database serialize with each other, not just among themselves.
+	database string
 	// serverEndpoint is the exact transport endpoint used by the migration
 	// connection. Fresh-bootstrap reset authority is bound to it together with
 	// the Dolt server UUID, database name, and initial HEAD.
@@ -231,10 +237,33 @@ func (p *doltSQLProvider) BeginTx(ctx context.Context) (Tx, error) {
 		return nil, fmt.Errorf("uow: pin connection: %w", err)
 	}
 
+	// Journal-writer admission (#6117) comes BEFORE START TRANSACTION: a
+	// transaction that began before the previous holder committed still reads
+	// the old bd_events_seq counter, which is the exact conflict the lock
+	// exists to prevent. Write routes (RunTxResultWithin, RunTxScoped) and an
+	// unmarked NewUOW — conservatively write-capable — take the same
+	// database-scoped lock the direct store takes, so proxied and direct
+	// writers on one database queue on one name. Read and ephemeral routes
+	// (RunTxRead, RunTxEphemeral) carry an explicit unlocked marker and take
+	// no lock. The proxied pool sets no read deadline, so admission applies
+	// no wait clamp (readTimeout 0).
+	releaseJournalLock, err := p.admitJournalWriter(ctx, conn)
+	if err != nil {
+		// Busy, canceled, or a failed acquisition: no transaction has begun,
+		// so the body never runs and the error is safe to surface.
+		_ = conn.Close()
+		return nil, err
+	}
+
 	_, err = conn.ExecContext(ctx, "START TRANSACTION;")
 	if err != nil {
+		releaseJournalLock()
 		_ = conn.Close()
 		return nil, fmt.Errorf("uow: failed to start transaction: %w", err)
+	}
+	tx := &doltServerTx{
+		conn:               conn,
+		releaseJournalLock: releaseJournalLock,
 	}
 
 	// A pending versioned-history switch is answered inside this transaction.
@@ -242,7 +271,7 @@ func (p *doltSQLProvider) BeginTx(ctx context.Context) (Tx, error) {
 	// run scoped off (issueops.VersionedHistorySwitch.ResolveIn).
 	versioned, err := p.versionedHistory.ResolveIn(ctx, conn)
 	if err != nil {
-		return nil, (&doltServerTx{conn: conn}).closeOpenTxAfterFailure(ctx, fmt.Errorf("uow: %w", err))
+		return nil, tx.closeOpenTxAfterFailure(ctx, fmt.Errorf("uow: %w", err))
 	}
 
 	// Bind journal and versioned-history activation to the connection this unit
@@ -252,12 +281,24 @@ func (p *doltSQLProvider) BeginTx(ctx context.Context) (Tx, error) {
 	// (doltServerTx.releaseConn / poisonConn), so an entry cannot outlive its
 	// transaction. The blocked-recheck scope is bound and released the same
 	// way; Commit takes what it recorded once the transaction has committed.
-	return &doltServerTx{
-		conn:              conn,
-		clearJournalScope: issueops.ScopeEventsJournalTransaction(conn, p.eventsJournalEnabled.Load()),
-		clearVersionScope: issueops.ScopeVersionedHistoryTransaction(conn, versioned),
-		clearRecheckScope: issueops.ScopeBlockedRecheckTransaction(conn),
-	}, nil
+	tx.clearJournalScope = issueops.ScopeEventsJournalTransaction(conn, p.eventsJournalEnabled.Load())
+	tx.clearVersionScope = issueops.ScopeVersionedHistoryTransaction(conn, versioned)
+	tx.clearRecheckScope = issueops.ScopeBlockedRecheckTransaction(conn)
+	return tx, nil
+}
+
+// admitJournalWriter takes the journal-writer admission lock on the pinned
+// session when this unit of work's route needs it: the journal is on and ctx
+// did not declare itself an unlocked (read/ephemeral) route. The returned
+// release is idempotent and detached from ctx; doltServerTx disposes of it on
+// every exit path (commit, rollback, poison), always after the SQL
+// transaction has ended.
+func (p *doltSQLProvider) admitJournalWriter(ctx context.Context, conn *sql.Conn) (func(), error) {
+	if !p.eventsJournalEnabled.Load() || issueops.UnlockedJournalRoute(ctx) {
+		return func() {}, nil
+	}
+	return issueops.AcquireJournalWriterLock(ctx, conn, p.database,
+		issueops.JournalAdmissionDeadline(ctx), 0)
 }
 
 // selectProbeDatabase lets schema's pre-lock convergence probe reach the
@@ -947,6 +988,7 @@ func openAndInitSchema(ctx context.Context, ep proxy.Endpoint, backend, database
 		return &doltSQLProvider{
 			defaultBranch:     defaultBranch,
 			db:                pool,
+			database:          database,
 			serverEndpoint:    "tcp:" + ep.Address(),
 			teamServer:        teamServer,
 			expectedProjectID: expectedProjectID,

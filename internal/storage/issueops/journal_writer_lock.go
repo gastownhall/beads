@@ -121,6 +121,38 @@ func WithJournalAdmissionDeadline(ctx context.Context, deadline time.Time) conte
 	return context.WithValue(ctx, journalAdmissionDeadlineKey{}, deadline)
 }
 
+// WithRouteJournalAdmission fixes the admission deadline for a route whose
+// retry budget is budget: the earlier of the caller's own deadline and
+// now+budget, so an operation scheduled close to its deadline never queues for
+// a lock it cannot finish under. The store's write funnels and the uow's
+// RunTxResultWithin/RunTxScoped call this at entry, once per operation.
+func WithRouteJournalAdmission(ctx context.Context, budget time.Duration) context.Context {
+	deadline := time.Now().Add(budget)
+	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
+		deadline = d
+	}
+	return WithJournalAdmissionDeadline(ctx, deadline)
+}
+
+type unlockedJournalRouteKey struct{}
+
+// WithUnlockedJournalRoute declares ctx a route whose transactions must not
+// take the journal-writer admission lock: uow.RunTxRead and uow.RunTxEphemeral
+// (reads and dolt_ignored-only writes). With the journal on, such a
+// transaction is scoped journal-FORBIDDEN instead (see
+// ScopeUnlockedJournalTransaction): an unexpected emit fails before any SQL
+// rather than silently racing the admitted writers.
+func WithUnlockedJournalRoute(ctx context.Context) context.Context {
+	return context.WithValue(ctx, unlockedJournalRouteKey{}, struct{}{})
+}
+
+// UnlockedJournalRoute reports whether ctx declared itself a route that must
+// not take the journal-writer admission lock.
+func UnlockedJournalRoute(ctx context.Context) bool {
+	_, ok := ctx.Value(unlockedJournalRouteKey{}).(struct{})
+	return ok
+}
+
 type advisoryJournalAdmissionKey struct{}
 
 // WithAdvisoryJournalAdmission marks ctx as an admission that must not queue:
