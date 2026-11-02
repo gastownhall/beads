@@ -125,6 +125,68 @@ func TestInitFreshWithUnreachableGitOriginSucceeds(t *testing.T) {
 	}
 }
 
+// TestInitOverrideWithUnreadableRemoteRefusesAsUnverified is the GH#7665
+// regression, with the full refusal contract spelled out. A git origin whose
+// refs/dolt/data probe FAILS is UNKNOWN, which resolveRemoteHasDoltDataProbe
+// fails closed to has-data, so `bd init --reinit-local` / `--force` must
+// still refuse (ADR-0002 keeps the fail-closed policy) — but the refusal must
+// say bd could not VERIFY the remote's history, exit 10 before any .beads
+// side effects, and never assert "already has Dolt history" about a remote
+// nothing was read from.
+func TestInitOverrideWithUnreadableRemoteRefusesAsUnverified(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		flag string
+	}{
+		{"reinit-local", "--reinit-local"},
+		{"force", "--force"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bdBin := buildBDForInitTests(t)
+
+			workDir := t.TempDir()
+			runGitForBootstrapTest(t, workDir, "init", "-b", "main")
+			runGitForBootstrapTest(t, workDir, "config", "core.hooksPath", ".git/hooks")
+			// A missing path answers ls-remote with the same exit 128 a
+			// credential-less private remote does, with no network access.
+			runGitForBootstrapTest(t, workDir, "remote", "add", "origin",
+				filepath.Join(t.TempDir(), "does-not-exist.git"))
+
+			homeDir := t.TempDir() // must differ from workDir: metrics.go caches to $HOME/.beads
+
+			cmd := exec.Command(bdBin, "init", tc.flag, "--prefix", "uv",
+				"--quiet", "--non-interactive", "--skip-hooks", "--skip-agents")
+			cmd.Dir = workDir
+			cmd.Env = hermeticInitEnv(homeDir)
+			var stderr bytes.Buffer
+			cmd.Stderr = &stderr
+			err := cmd.Run()
+
+			exitErr, ok := err.(*exec.ExitError)
+			if !ok {
+				t.Fatalf("bd init %s against an unreadable origin: err = %v, want exit %d\nstderr:\n%s",
+					tc.flag, err, ExitRemoteDivergenceRefused, stderr.String())
+			}
+			if code := exitErr.ExitCode(); code != ExitRemoteDivergenceRefused {
+				t.Errorf("exit code = %d, want %d (ExitRemoteDivergenceRefused)", code, ExitRemoteDivergenceRefused)
+			}
+
+			stderrStr := stderr.String()
+			if !strings.Contains(stderrStr, "could not verify whether remote 'origin' has Dolt history") {
+				t.Errorf("refusal must say bd could not verify the remote's Dolt history:\n%s", stderrStr)
+			}
+			if strings.Contains(stderrStr, "already has Dolt history") {
+				t.Errorf("refusal must not assert the unreadable remote already has Dolt history:\n%s", stderrStr)
+			}
+
+			beadsDir := filepath.Join(workDir, ".beads")
+			if _, err := os.Stat(beadsDir); err == nil {
+				t.Errorf("refusal should not have created %s", beadsDir)
+			}
+		})
+	}
+}
+
 // TestInitReinitLocalConfiguredRemoteWithDoltDataRefuses is the sibling case:
 // sync.remote (again via BD_SYNC_REMOTE, not --remote) points at a bare repo
 // that DOES have refs/dolt/data pushed to it. `bd init --reinit-local` must
