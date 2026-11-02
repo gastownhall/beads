@@ -497,3 +497,75 @@ func TestEmbeddedIgnoredMigration0031RetryAfterPartialRestore(t *testing.T) {
 		t.Fatal("ignored cursor does not record 0031 after the retry")
 	}
 }
+
+// TestEmbeddedIgnoredMigration0031LeavesHistoryAndWorkingSetAlone pins what an
+// open with only 0031 pending may touch: nothing but the ignored events
+// table. It needs no migration consent, makes no commit, keeps an unrelated
+// uncommitted edit as it was, writes no journal entry, and leaves events
+// dolt-ignored.
+func TestEmbeddedIgnoredMigration0031LeavesHistoryAndWorkingSetAlone(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+
+	dataDir := seedMainSchemaAt(t, ctx, 61)
+	beadsDir := filepath.Dir(dataDir)
+	var head string
+	var journal int
+	var dirty []string
+	withRawConn(t, dataDir, preflipDatabase, func(conn *sql.Conn) {
+		seedPreflipEvents(t, ctx, conn)
+		if _, err := schema.MigrateUp(ctx, conn); err != nil {
+			t.Fatalf("MigrateUp (migrator): %v", err)
+		}
+		// The adopter's state, plus an operator's uncommitted edit.
+		execFrozenGuard(t, ctx, conn, `
+DELETE FROM events;
+DELETE FROM ignored_schema_migrations WHERE version = 31;
+UPDATE issues SET title = 'edited, not committed' WHERE id = 'pre-1';
+`)
+		head = scalarString(t, ctx, conn, "SELECT HASHOF('HEAD')")
+		journal = scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM bd_events_journal")
+		var err error
+		if dirty, err = statusTables(ctx, conn); err != nil {
+			t.Fatalf("read dolt_status: %v", err)
+		}
+	})
+
+	schema.SetLocalMigrateConsent(false)
+	schema.SetForceAllowRemoteMigrate(false)
+	t.Cleanup(func() { schema.SetLocalMigrateConsent(true) })
+	t.Setenv(schema.AllowMigrateEnv, "")
+	t.Setenv(schema.AllowRemoteMigrateEnv, "")
+	store, err := embeddeddolt.Open(ctx, beadsDir, preflipDatabase, "main")
+	if err != nil {
+		t.Fatalf("open with only ignored 0031 pending and no consent: %v", err)
+	}
+	closeEmbeddedDoltStore(t, store)
+
+	withRawConn(t, dataDir, preflipDatabase, func(conn *sql.Conn) {
+		requireContent(t, liveEvents(t, ctx, conn), preflipSeededContent())
+		if !ignoredCursorHas(t, ctx, conn, 31) {
+			t.Fatal("ignored cursor does not record 0031 after the open")
+		}
+		if got := scalarString(t, ctx, conn, "SELECT HASHOF('HEAD')"); got != head {
+			t.Fatalf("HEAD moved from %s to %s; the restore must not commit", head, got)
+		}
+		if got := scalarString(t, ctx, conn, "SELECT title FROM issues WHERE id = 'pre-1'"); got != "edited, not committed" {
+			t.Fatalf("working-set title = %q, want the operator's uncommitted edit kept", got)
+		}
+		if got := scalarString(t, ctx, conn, "SELECT title FROM issues AS OF 'HEAD' WHERE id = 'pre-1'"); got != "first" {
+			t.Fatalf("HEAD title = %q, want the committed one", got)
+		}
+		if got := scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM bd_events_journal"); got != journal {
+			t.Fatalf("bd_events_journal holds %d rows after the open, want the %d it had", got, journal)
+		}
+		tables, err := statusTables(ctx, conn)
+		if err != nil {
+			t.Fatalf("read dolt_status: %v", err)
+		}
+		if !sameStrings(tables, dirty) {
+			t.Fatalf("dolt_status = %v after the open, want it as the open found it: %v", tables, dirty)
+		}
+		assertEventsAbsentFromStatus(t, ctx, conn)
+	})
+}
