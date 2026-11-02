@@ -6,10 +6,13 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 	"github.com/steveyegge/beads/internal/storage/schema"
 )
 
@@ -265,4 +268,87 @@ func TestEmbeddedMigrateRowMovesKeepUpdatedAt(t *testing.T) {
 		requireStamp(t, ctx, conn, "issues", collidingDest.id, collidingDest.stamp)
 		requireStamp(t, ctx, conn, "issues AS OF 'HEAD'", moved.id, moved.stamp)
 	})
+}
+
+// TestEmbeddedMigrateIgnored0007KeepsUpdatedAt is AC-4: ignored migration
+// 0007 clears and recomputes wisps.is_blocked. A fresh store's first pass is
+// stopped right after ignored 0006 (the second step numbered 6: main 0006
+// runs first), so the follow-up pass genuinely executes ignored 0007 against
+// the seeded wisps rather than reconciling its cursor. That pass is stopped
+// right after ignored 0007, so the assertions see 0007's own result.
+func TestEmbeddedMigrateIgnored0007KeepsUpdatedAt(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+	dataDir := filepath.Join(t.TempDir(), ".beads", "embeddeddolt")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	boot, bootCleanup, err := embeddeddolt.OpenSQL(ctx, dataDir, "", "")
+	if err != nil {
+		t.Fatalf("OpenSQL boot: %v", err)
+	}
+	if _, err := boot.ExecContext(ctx, "CREATE DATABASE IF NOT EXISTS testdb"); err != nil {
+		t.Fatalf("CREATE DATABASE: %v", err)
+	}
+	_ = bootCleanup()
+	conn, closeConn := openPinnedConn(t, ctx, dataDir)
+	defer closeConn()
+
+	seen6 := 0
+	restore := schema.SetMigrateStepFaultHookForTest(func(_ context.Context, _ schema.DBConn, v int) error {
+		if v == 6 {
+			if seen6++; seen6 == 2 {
+				return fmt.Errorf("injected fault: stop after ignored migration %d", v)
+			}
+		}
+		return nil
+	})
+	_, err = schema.MigrateUp(ctx, conn)
+	restore()
+	if err == nil || !strings.Contains(err.Error(), "injected fault") {
+		t.Fatalf("first MigrateUp err = %v, want the injected fault after ignored 0006", err)
+	}
+	ignoredVersion := func() int {
+		var v int
+		if err := conn.QueryRowContext(ctx, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations").Scan(&v); err != nil {
+			t.Fatalf("read ignored cursor: %v", err)
+		}
+		return v
+	}
+	if v := ignoredVersion(); v != 6 {
+		t.Fatalf("ignored cursor = %d, want 6", v)
+	}
+
+	blocker := stampedIssue{id: "ua-w-blocker", status: "open", stamp: historicalStamp(31)}
+	blocked := stampedIssue{id: "ua-wisp-blocked", status: "open", ephemeral: true, stamp: historicalStamp(32), wantBlocked: true}
+	free := stampedIssue{id: "ua-wisp-free", status: "open", ephemeral: true, stamp: historicalStamp(33)}
+	insertStampedIssues(t, ctx, conn, "issues", []stampedIssue{blocker}, false)
+	insertStampedIssues(t, ctx, conn, "wisps", []stampedIssue{blocked, free}, false)
+	if _, err := conn.ExecContext(ctx,
+		"INSERT INTO wisp_dependencies (issue_id, depends_on_issue_id, type, created_by) VALUES (?, ?, 'blocks', 'fixture')",
+		blocked.id, blocker.id); err != nil {
+		t.Fatalf("seed wisp dependency: %v", err)
+	}
+	commitFixture(t, ctx, conn, "test: blocker issue for wisps at ignored v6")
+
+	restore = schema.SetMigrateStepFaultHookForTest(func(_ context.Context, _ schema.DBConn, v int) error {
+		if v == 7 {
+			return fmt.Errorf("injected fault: stop after ignored migration %d", v)
+		}
+		return nil
+	})
+	_, err = schema.MigrateUp(ctx, conn)
+	restore()
+	if err == nil || !strings.Contains(err.Error(), "injected fault") {
+		t.Fatalf("second MigrateUp err = %v, want the injected fault after ignored 0007", err)
+	}
+	if v := ignoredVersion(); v != 7 {
+		t.Fatalf("ignored cursor = %d, want 7 (ignored 0007 must have executed)", v)
+	}
+	for _, w := range []stampedIssue{blocked, free} {
+		requireStamp(t, ctx, conn, "wisps", w.id, w.stamp)
+		if got := readIsBlocked(t, ctx, conn, "wisps", w.id); got != w.wantBlocked {
+			t.Errorf("wisps %s: is_blocked = %v, want %v", w.id, got, w.wantBlocked)
+		}
+	}
 }
