@@ -1641,6 +1641,11 @@ func uninstallHooks() error {
 }
 
 func uninstallHooksAt(hooksDir string, reset func() error) error {
+	// Refuse before editing any hook or resetting configuration: every edit
+	// below would land in the link's target.
+	if err := refuseSymlinkedHooksDir(hooksDir); err != nil {
+		return fmt.Errorf("refusing to uninstall hooks: %w", err)
+	}
 	hookNames := []string{"pre-commit", "post-merge", "pre-push", "post-checkout", "prepare-commit-msg"}
 
 	for _, hookName := range hookNames {
