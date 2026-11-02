@@ -128,7 +128,7 @@ func (s *DoltStore) updateWisp(ctx context.Context, id string, updates map[strin
 	}
 	defer finishJournalWrite()
 
-	clearJournalScope := s.scopeEventsJournalTransaction(tx)
+	clearJournalScope := s.scopeEventsJournalTransaction(ctx, tx)
 	defer clearJournalScope()
 	clearRecheckScope := issueops.ScopeBlockedRecheckTransaction(tx)
 	defer clearRecheckScope()
@@ -157,7 +157,7 @@ func (s *DoltStore) updateWispChecked(ctx context.Context, id string, updates ma
 	}
 	defer finishJournalWrite()
 
-	clearJournalScope := s.scopeEventsJournalTransaction(tx)
+	clearJournalScope := s.scopeEventsJournalTransaction(ctx, tx)
 	defer clearJournalScope()
 	clearRecheckScope := issueops.ScopeBlockedRecheckTransaction(tx)
 	defer clearRecheckScope()
@@ -187,7 +187,7 @@ func (s *DoltStore) closeWisp(ctx context.Context, id string, reason string, act
 	}
 	defer finishJournalWrite()
 
-	clearJournalScope := s.scopeEventsJournalTransaction(tx)
+	clearJournalScope := s.scopeEventsJournalTransaction(ctx, tx)
 	defer clearJournalScope()
 	clearRecheckScope := issueops.ScopeBlockedRecheckTransaction(tx)
 	defer clearRecheckScope()
@@ -222,7 +222,7 @@ func (s *DoltStore) closeWispChecked(ctx context.Context, id string, actor strin
 	}
 	defer finishJournalWrite()
 
-	clearJournalScope := s.scopeEventsJournalTransaction(tx)
+	clearJournalScope := s.scopeEventsJournalTransaction(ctx, tx)
 	defer clearJournalScope()
 	clearRecheckScope := issueops.ScopeBlockedRecheckTransaction(tx)
 	defer clearRecheckScope()
@@ -246,7 +246,7 @@ func (s *DoltStore) deleteWisp(ctx context.Context, id string) error {
 	}
 	defer finishJournalWrite()
 
-	clearJournalScope := s.scopeEventsJournalTransaction(tx)
+	clearJournalScope := s.scopeEventsJournalTransaction(ctx, tx)
 	defer clearJournalScope()
 	clearRecheckScope := issueops.ScopeBlockedRecheckTransaction(tx)
 	defer clearRecheckScope()
@@ -342,7 +342,7 @@ func (s *DoltStore) deleteWispBatchTx(ctx context.Context, ids []string) (int, e
 	}
 	defer finishJournalWrite()
 
-	clearJournalScope := s.scopeEventsJournalTransaction(tx)
+	clearJournalScope := s.scopeEventsJournalTransaction(ctx, tx)
 	defer clearJournalScope()
 	clearRecheckScope := issueops.ScopeBlockedRecheckTransaction(tx)
 	defer clearRecheckScope()
@@ -416,7 +416,7 @@ func (s *DoltStore) claimWisp(ctx context.Context, id string, actor string) erro
 	}
 	defer finishJournalWrite()
 
-	clearJournalScope := s.scopeEventsJournalTransaction(tx)
+	clearJournalScope := s.scopeEventsJournalTransaction(ctx, tx)
 	defer clearJournalScope()
 
 	if _, err := issueops.ClaimIssueInTx(ctx, tx, id, actor); err != nil {
@@ -605,7 +605,7 @@ func (s *DoltStore) addWispDependency(ctx context.Context, dep *types.Dependency
 	}
 	defer finishJournalWrite()
 
-	clearJournalScope := s.scopeEventsJournalTransaction(tx)
+	clearJournalScope := s.scopeEventsJournalTransaction(ctx, tx)
 	defer clearJournalScope()
 
 	kind := issueops.ClassifyDepTarget(ctx, tx, dep, isCrossPrefix)

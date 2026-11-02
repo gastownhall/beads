@@ -1265,6 +1265,18 @@ func (s *DoltStore) withRetryTx(ctx context.Context, fn func(tx *sql.Tx) error) 
 	return s.withRetryTxOn(ctx, s.db, fn)
 }
 
+// withRetryTxNoJournal is withRetryTx for a write audited to emit no journal
+// event (#6117): the route is marked journal-unlocked, so the attempt takes
+// no journal-writer admission lock and its transaction is scoped forbidden to
+// emit — an unexpected emit is refused before it allocates a sequence and
+// the commit rejects the attempt even when the callback ignores the emit
+// error, rather than minting journal rows outside the serialized writers.
+// The violation is permanent (not a serialization loser), so the body is
+// never replayed.
+func (s *DoltStore) withRetryTxNoJournal(ctx context.Context, fn func(tx *sql.Tx) error) error {
+	return s.withRetryTx(issueops.WithUnlockedJournalRoute(ctx), fn)
+}
+
 // withRetryTxOn is withRetryTx against a caller-chosen txBeginner instead of
 // the shared pool, so a caller that must hold a session-scoped resource (e.g.
 // a GET_LOCK) across the whole retried write can pin one *sql.Conn for it —
@@ -1407,7 +1419,7 @@ func (s *DoltStore) commitWriteTxOn(ctx context.Context, beginner txBeginner, fn
 		_ = tx.Rollback()
 		cleanupAdmission()
 	}()
-	clearJournalScope := s.scopeEventsJournalTransaction(tx)
+	clearJournalScope := s.scopeEventsJournalTransaction(ctx, tx)
 	defer clearJournalScope()
 	clearVersionScope, err := s.scopeVersionedHistoryTransaction(ctx, tx)
 	if err != nil {
@@ -1417,6 +1429,11 @@ func (s *DoltStore) commitWriteTxOn(ctx context.Context, beginner txBeginner, fn
 	clearRecheckScope := issueops.ScopeBlockedRecheckTransaction(tx)
 	defer clearRecheckScope()
 	if err := fn(tx); err != nil {
+		return issueops.BlockedRecheck{}, errors.Join(err, tx.Rollback())
+	}
+	// A journal-unlocked scope that refused an emit latched the violation;
+	// a callback that ignored the emit error still may not commit (#6117).
+	if err := issueops.JournalUnlockedEmitViolation(tx); err != nil {
 		return issueops.BlockedRecheck{}, errors.Join(err, tx.Rollback())
 	}
 	if err := tx.Commit(); err != nil {
@@ -1516,7 +1533,16 @@ func (s *DoltStore) SetEventsJournalEnabled(enabled bool) {
 	s.eventsJournalEnabled.Store(enabled)
 }
 
-func (s *DoltStore) scopeEventsJournalTransaction(tx *sql.Tx) func() {
+// scopeEventsJournalTransaction binds journal activation to one write
+// transaction. An unlocked route (the NoJournal funnels) is scoped FORBIDDEN
+// to emit instead of merely off: with the journal on, an unexpected emit is
+// refused before it allocates a sequence and the commit rejects the
+// transaction, so an audited non-emitting write can neither silently journal
+// outside the serialized writers nor fail quietly (#6117).
+func (s *DoltStore) scopeEventsJournalTransaction(ctx context.Context, tx *sql.Tx) func() {
+	if issueops.UnlockedJournalRoute(ctx) {
+		return issueops.ScopeUnlockedJournalTransaction(tx, s.eventsJournalEnabled.Load())
+	}
 	return issueops.ScopeEventsJournalTransaction(tx, s.eventsJournalEnabled.Load())
 }
 

@@ -11,9 +11,13 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// SetConfig sets a configuration value
+// SetConfig sets a configuration value. Config writes are audited to emit no
+// journal event, so they run on the NoJournal funnel: no journal-writer
+// admission lock, and the transaction is scoped forbidden to emit so an
+// unexpected journal record fails the write rather than racing the admitted
+// writers (#6117).
 func (s *DoltStore) SetConfig(ctx context.Context, key, value string) error {
-	if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
+	if err := s.withRetryTxNoJournal(ctx, func(tx *sql.Tx) error {
 		if err := issueops.SetConfigInTx(ctx, tx, key, value); err != nil {
 			return err
 		}
@@ -93,16 +97,18 @@ func (s *DoltStore) GetConfigByPrefix(ctx context.Context, prefix string) (map[s
 	return result, err
 }
 
-// DeleteConfig removes a configuration value
+// DeleteConfig removes a configuration value. Audited non-emitting (see
+// SetConfig): the NoJournal funnel.
 func (s *DoltStore) DeleteConfig(ctx context.Context, key string) error {
-	return s.withRetryTx(ctx, func(tx *sql.Tx) error {
+	return s.withRetryTxNoJournal(ctx, func(tx *sql.Tx) error {
 		return issueops.DeleteConfigInTx(ctx, tx, key)
 	})
 }
 
-// SetMetadata sets a metadata value
+// SetMetadata sets a metadata value. Audited non-emitting (see SetConfig):
+// the NoJournal funnel.
 func (s *DoltStore) SetMetadata(ctx context.Context, key, value string) error {
-	return s.withRetryTx(ctx, func(tx *sql.Tx) error {
+	return s.withRetryTxNoJournal(ctx, func(tx *sql.Tx) error {
 		return issueops.SetMetadataInTx(ctx, tx, key, value)
 	})
 }

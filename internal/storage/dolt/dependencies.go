@@ -103,7 +103,7 @@ func (s *DoltStore) RemoveDependencyWithOptions(ctx context.Context, issueID, de
 				return fmt.Errorf("failed to begin transaction: %w", err)
 			}
 			defer finishJournalWrite()
-			clearJournalScope := s.scopeEventsJournalTransaction(tx)
+			clearJournalScope := s.scopeEventsJournalTransaction(ctx, tx)
 			defer clearJournalScope()
 			// Scoped even though RecordVersionInTx returns early on IsWisp and
 			// can mint nothing here: the two arms below share one mutator, and
@@ -131,7 +131,7 @@ func (s *DoltStore) RemoveDependencyWithOptions(ctx context.Context, issueID, de
 		}
 		defer finishJournalWrite()
 
-		clearJournalScope := s.scopeEventsJournalTransaction(tx)
+		clearJournalScope := s.scopeEventsJournalTransaction(ctx, tx)
 		defer clearJournalScope()
 		// The non-wisp arm: this removal mutates the issues plane, so the
 		// referencing issue must be versioned with it. RemoveDependencyInTx

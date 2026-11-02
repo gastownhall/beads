@@ -2,6 +2,7 @@ package issueops
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"math/rand"
 	"strings"
@@ -97,4 +98,47 @@ func TestJournalWriterBusyErrorIsNamed(t *testing.T) {
 
 func randomBackendError() string {
 	return "sql: connection refused at " + strings.Repeat("x", rand.Intn(10))
+}
+// TestUnlockedJournalScopeTriState pins AC-4 of gastownhall/beads#6117 at the
+// issueops seam: a journal-unlocked scope is activated-but-forbidden with the
+// journal on — an emit is refused with ErrJournalUnlockedTx before any SQL and
+// the violation latches for the commit sites — and with the journal off it is
+// the same plain no-op as an ordinary journal-off scope. The tx is a typed-nil
+// *sql.Tx: the forbidden and no-op paths never touch it, which is the point.
+func TestUnlockedJournalScopeTriState(t *testing.T) {
+	// Forbidden scope, journal on: the emit is refused before any SQL and the
+	// violation latches until the scope's cleanup runs.
+	var forbidden *sql.Tx
+	clear := ScopeUnlockedJournalTransaction(forbidden, true)
+	if err := RecordDeleteInTx(context.Background(), forbidden, "bd-1", "actor"); !errors.Is(err, ErrJournalUnlockedTx) {
+		t.Fatalf("forbidden emit error = %v, want ErrJournalUnlockedTx", err)
+	}
+	if err := JournalUnlockedEmitViolation(forbidden); !errors.Is(err, ErrJournalUnlockedTx) {
+		t.Fatalf("violated scope does not report ErrJournalUnlockedTx: %v", err)
+	}
+	clear()
+	if err := JournalUnlockedEmitViolation(forbidden); err != nil {
+		t.Fatalf("cleared scope still reports a violation: %v", err)
+	}
+
+	// Unlocked scope, journal off: the no-op is exactly an ordinary
+	// journal-off scope's — the emit entry returns nil and nothing latches.
+	var off *sql.Tx
+	clearOff := ScopeUnlockedJournalTransaction(off, false)
+	if err := RecordDeleteInTx(context.Background(), off, "bd-1", "actor"); err != nil {
+		t.Fatalf("journal-off unlocked emit is not a no-op: %v", err)
+	}
+	if err := JournalUnlockedEmitViolation(off); err != nil {
+		t.Fatalf("journal-off unlocked scope latched a violation: %v", err)
+	}
+	clearOff()
+
+	// An ordinary activated scope emits without latching a violation (the
+	// emit itself is not exercised here; it would need a real transaction).
+	var plain *sql.Tx
+	clearPlain := ScopeEventsJournalTransaction(plain, true)
+	if err := JournalUnlockedEmitViolation(plain); err != nil {
+		t.Fatalf("ordinary activated scope reports a violation: %v", err)
+	}
+	clearPlain()
 }

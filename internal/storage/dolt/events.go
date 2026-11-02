@@ -21,7 +21,7 @@ func (s *DoltStore) AddComment(ctx context.Context, issueID, actor, comment stri
 		}
 		defer finishJournalWrite()
 
-		clearJournalScope := s.scopeEventsJournalTransaction(tx)
+		clearJournalScope := s.scopeEventsJournalTransaction(ctx, tx)
 		defer clearJournalScope()
 
 		if err := issueops.AddCommentEventInTx(ctx, tx, issueID, actor, comment); err != nil {

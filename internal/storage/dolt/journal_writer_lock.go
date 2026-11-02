@@ -33,11 +33,15 @@ import (
 
 // journalWriterLockRequired reports whether a write on this store must take
 // the journal-writer admission lock: only a server-mode store with the
-// journal enabled. The embedded engine serializes writers on the counter row
+// journal enabled, running for a route that did not declare itself
+// journal-unlocked (a read/ephemeral unit of work, or an audited
+// non-emitting write through the NoJournal funnels — such a transaction is
+// scoped forbidden to emit instead, so it cannot silently race the admitted
+// writers). The embedded engine serializes writers on the counter row
 // in-process and does not serve GET_LOCK, and a journal-off store journals
 // nothing, so neither queues on anything.
-func (s *DoltStore) journalWriterLockRequired() bool {
-	return s.serverMode && s.eventsJournalEnabled.Load()
+func (s *DoltStore) journalWriterLockRequired(ctx context.Context) bool {
+	return s.serverMode && s.eventsJournalEnabled.Load() && !issueops.UnlockedJournalRoute(ctx)
 }
 
 // poolReadDeadline is the configured per-I/O read deadline of the store's
@@ -74,7 +78,7 @@ func (s *DoltStore) acquireJournalWriterLockOn(ctx context.Context, conn *sql.Co
 // advisory route found contention — see the caller) and the transaction runs
 // on beginner exactly as before.
 func (s *DoltStore) pinJournalWriteSession(ctx context.Context, beginner txBeginner) (*sql.Conn, func(), error) {
-	if !s.journalWriterLockRequired() {
+	if !s.journalWriterLockRequired(ctx) {
 		return nil, func() {}, nil
 	}
 	if conn, ok := beginner.(*sql.Conn); ok {
@@ -129,7 +133,7 @@ func (s *DoltStore) pinJournalWriteSession(ctx context.Context, beginner txBegin
 // When admission is not required the transaction begins on the shared pool
 // exactly as before, and the cleanup only rolls back.
 func (s *DoltStore) beginJournalWriteTx(ctx context.Context) (*sql.Tx, func(), error) {
-	if !s.journalWriterLockRequired() {
+	if !s.journalWriterLockRequired(ctx) {
 		tx, err := s.db.BeginTx(ctx, nil)
 		if err != nil {
 			return nil, nil, err

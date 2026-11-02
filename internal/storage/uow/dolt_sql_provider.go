@@ -281,7 +281,18 @@ func (p *doltSQLProvider) BeginTx(ctx context.Context) (Tx, error) {
 	// (doltServerTx.releaseConn / poisonConn), so an entry cannot outlive its
 	// transaction. The blocked-recheck scope is bound and released the same
 	// way; Commit takes what it recorded once the transaction has committed.
-	tx.clearJournalScope = issueops.ScopeEventsJournalTransaction(conn, p.eventsJournalEnabled.Load())
+	//
+	// An unlocked route (read/ephemeral) is scoped FORBIDDEN to emit instead of
+	// activated: with the journal on, an unexpected emit is refused before it
+	// allocates a sequence and the commit rejects the unit of work, so a
+	// non-admitted transaction can neither mint journal state outside the
+	// serialized writers nor fail quietly (#6117). With the journal off the
+	// forbidden scope is plain off and emission stays the no-op it was.
+	if issueops.UnlockedJournalRoute(ctx) {
+		tx.clearJournalScope = issueops.ScopeUnlockedJournalTransaction(conn, p.eventsJournalEnabled.Load())
+	} else {
+		tx.clearJournalScope = issueops.ScopeEventsJournalTransaction(conn, p.eventsJournalEnabled.Load())
+	}
 	tx.clearVersionScope = issueops.ScopeVersionedHistoryTransaction(conn, versioned)
 	tx.clearRecheckScope = issueops.ScopeBlockedRecheckTransaction(conn)
 	return tx, nil

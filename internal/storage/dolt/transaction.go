@@ -211,7 +211,7 @@ func (s *DoltStore) runDoltTransactionRecording(ctx context.Context, commitMsg s
 	// own turn.
 	journalEnabled := s.eventsJournalEnabled.Load()
 	var releaseJournalLock func() = func() {}
-	if s.serverMode && journalEnabled {
+	if s.journalWriterLockRequired(ctx) {
 		release, err := s.acquireJournalWriterLockOn(ctx, conn)
 		if err != nil {
 			return issueops.BlockedRecheck{}, fmt.Errorf("journal writer admission: %w", err)
@@ -257,7 +257,15 @@ func (s *DoltStore) runDoltTransactionRecording(ctx context.Context, commitMsg s
 		}
 		defer ignoredCleanup()
 	}
-	clearJournalScope := issueops.ScopeEventsJournalTransaction(regularTx, journalEnabled)
+	// An unlocked route through this funnel (none today; the NoJournal
+	// funnels take withRetryTx instead) is scoped forbidden to emit, the
+	// same as the store's other write paths (#6117).
+	var clearJournalScope func()
+	if issueops.UnlockedJournalRoute(ctx) {
+		clearJournalScope = issueops.ScopeUnlockedJournalTransaction(regularTx, journalEnabled)
+	} else {
+		clearJournalScope = issueops.ScopeEventsJournalTransaction(regularTx, journalEnabled)
+	}
 	defer clearJournalScope()
 	// Versioned history binds to the SAME regular transaction the mutation runs
 	// in, for the same reason the journal does: RecordVersionInTx no-ops unless
@@ -349,6 +357,15 @@ func (s *DoltStore) finishDoltTransaction(ctx context.Context, conn *sql.Conn, t
 		}
 	}
 
+	// A journal-unlocked scope that refused an emit latched the violation; a
+	// callback that ignored the emit error still may not commit (#6117). The
+	// refusal is not indeterminate — nothing committed — so the dependents
+	// carry no pending recheck and the write is never replayed.
+	if err := issueops.JournalUnlockedEmitViolation(tx.regularTx); err != nil {
+		_ = tx.regularTx.Rollback()
+		rollbackIgnored()
+		return err
+	}
 	if err := tx.regularTx.Commit(); err != nil {
 		rollbackIgnored()
 		return wrapSQLCommitError("sql commit (regular)", err)

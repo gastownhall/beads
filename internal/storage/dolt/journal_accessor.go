@@ -42,10 +42,14 @@ func (s *DoltStore) ReadEventsJournalPage(ctx context.Context, since int64, limi
 }
 
 // PruneEventsJournal deletes journal rows below before, honoring the retain
-// floors, and returns the number of rows deleted.
+// floors, and returns the number of rows deleted. Pruning writes no journal
+// event — audited non-emitting (#6117) — so it runs on the NoJournal funnel:
+// no journal-writer admission lock (a prune must not queue behind the writers
+// whose rows it prunes), and the transaction is scoped forbidden to emit so
+// an unexpected journal record fails the prune rather than racing them.
 func (s *DoltStore) PruneEventsJournal(ctx context.Context, before int64, retainDays, retainRows int) (int64, error) {
 	var n int64
-	err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
+	err := s.withRetryTxNoJournal(ctx, func(tx *sql.Tx) error {
 		var pruneErr error
 		n, pruneErr = issueops.PruneEventsInTx(ctx, tx, before, retainDays, retainRows, time.Now().UTC())
 		return pruneErr

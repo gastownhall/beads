@@ -56,6 +56,14 @@ func (t *doltServerTx) Commit(ctx context.Context, message string) error {
 	if t.done {
 		return errors.New("uow: commit: already done")
 	}
+	// A journal-unlocked scope that refused an emit latched the violation; a
+	// callback that ignored the emit error still may not commit (#6117). The
+	// transaction is rolled back, never left open on the pinned session. The
+	// refusal is not a serialization loser, so the caller does not replay it
+	// under a different route.
+	if err := issueops.JournalUnlockedEmitViolation(t.conn); err != nil {
+		return t.closeOpenTxAfterFailure(ctx, err)
+	}
 	stmt, args, err := t.commitStatement(ctx, message)
 	if err != nil {
 		if isSerializationError(err) {
@@ -154,6 +162,12 @@ func (t *doltServerTx) CommitScoped(ctx context.Context, tables []string, messag
 				staged = append(staged, table)
 			}
 		}
+	}
+	// The same latched-violation refusal as Commit's: an unlocked scope that
+	// refused an emit may not commit, however its callback handled the emit
+	// error (#6117). Resolved before any version publication runs.
+	if err := issueops.JournalUnlockedEmitViolation(t.conn); err != nil {
+		return t.closeOpenTxAfterFailure(ctx, err)
 	}
 	if _, err := t.conn.ExecContext(ctx, "COMMIT;"); err != nil {
 		if isSerializationError(err) {

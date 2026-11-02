@@ -228,3 +228,70 @@ func TestJournalWriterLock_DisabledJournalUOWTakesNoLock(t *testing.T) {
 	}
 }
 
+// TestJournalUnlockedScope_EphemeralRouteCannotEmit pins AC-4 of
+// gastownhall/beads#6117 for the uow side: an ephemeral unit of work (no
+// journal-writer admission lock) with the journal ON is scoped
+// journal-FORBIDDEN — an emit attempt inside its body is refused before any
+// sequence is allocated, and even a callback that ignores the emit error
+// cannot commit it. On the unfixed provider the ephemeral route silently
+// JOURNALS from outside the serialized writers: the emit succeeds and its
+// row commits.
+func TestJournalUnlockedScope_EphemeralRouteCannotEmit(t *testing.T) {
+	provider := newTestUOWProvider(t)
+	p := provider.(*doltSQLProvider)
+	p.SetEventsJournalEnabled(true)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	journalRows := func() int {
+		var seqs []int64
+		rows, err := p.db.QueryContext(ctx, "SELECT seq FROM bd_events_journal ORDER BY seq")
+		require.NoError(t, err)
+		for rows.Next() {
+			var seq int64
+			require.NoError(t, rows.Scan(&seq))
+			seqs = append(seqs, seq)
+		}
+		require.NoError(t, rows.Err())
+		require.NoError(t, rows.Close())
+		return len(seqs)
+	}
+
+	_, err := RunTxEphemeral(ctx, provider, func(ctx context.Context, uw UnitOfWork) (struct{}, error) {
+		// The body's runner is the pinned session itself (doltServerTx.Runner
+		// is the *sql.Conn), so this emit runs on the transaction's own
+		// session — the way an IssueUseCase mutation would.
+		dbtx, ok := uw.(*baseUOW).tx.Runner().(issueops.DBTX)
+		require.True(t, ok, "the pinned session runner must carry the DBTX interface")
+		_ = issueops.RecordDeleteInTx(ctx, dbtx, "bd-ephemeral", "actor") // ignored: the commit must refuse it
+		return struct{}{}, nil
+	})
+	require.Error(t, err, "an ephemeral unit of work that attempted a journal emit must fail, not commit it")
+	if n := journalRows(); n != 0 {
+		t.Fatalf("journal rows = %d after a refused ephemeral emit, want 0", n)
+	}
+}
+
+// TestJournalUnlockedScope_ReadRouteCannotEmit pins AC-4 of
+// gastownhall/beads#6117 for the uow read route: a read unit of work with the
+// journal ON is scoped journal-FORBIDDEN, so an emit attempt inside its body
+// fails the read rather than journaling from outside the serialized writers.
+func TestJournalUnlockedScope_ReadRouteCannotEmit(t *testing.T) {
+	provider := newTestUOWProvider(t)
+	p := provider.(*doltSQLProvider)
+	p.SetEventsJournalEnabled(true)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	_, err := RunTxRead(ctx, provider, func(ctx context.Context, uw UnitOfWork) (struct{}, error) {
+		// The body's runner is the pinned session itself (doltServerTx.Runner
+		// is the *sql.Conn), so this emit runs on the transaction's own
+		// session — the way an IssueUseCase mutation would.
+		dbtx, ok := uw.(*baseUOW).tx.Runner().(issueops.DBTX)
+		require.True(t, ok, "the pinned session runner must carry the DBTX interface")
+		return struct{}{}, issueops.RecordDeleteInTx(ctx, dbtx, "bd-read", "actor")
+	})
+	require.Error(t, err, "a read unit of work that attempted a journal emit must fail, not journal silently")
+}

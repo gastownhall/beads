@@ -57,7 +57,7 @@ func (s *DoltStore) mergeMetadataWisp(ctx context.Context, issueID, key string, 
 	}
 	defer finishJournalWrite()
 
-	clearJournalScope := s.scopeEventsJournalTransaction(tx)
+	clearJournalScope := s.scopeEventsJournalTransaction(ctx, tx)
 	defer clearJournalScope()
 
 	if err := issueops.MergeMetadataInTx(ctx, tx, issueID, key, value, actor); err != nil {
@@ -158,7 +158,7 @@ func (s *DoltStore) clearMetadataWisp(ctx context.Context, issueID, key, actor s
 	}
 	defer finishJournalWrite()
 
-	clearJournalScope := s.scopeEventsJournalTransaction(tx)
+	clearJournalScope := s.scopeEventsJournalTransaction(ctx, tx)
 	defer clearJournalScope()
 
 	if err := issueops.DeleteMetadataInTx(ctx, tx, issueID, key, actor); err != nil {

@@ -3,6 +3,7 @@ package dolt
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"slices"
 	"testing"
 	"time"
@@ -208,3 +209,98 @@ func TestJournalWriterLock_DisabledJournalTakesNoLock(t *testing.T) {
 	}
 }
 
+// TestJournalUnlockedScope_NoJournalFunnelCannotEmit pins AC-4 of
+// gastownhall/beads#6117 for the store side: an audited NoJournal write
+// (withRetryTxNoJournal) with the journal ON takes no journal-writer
+// admission lock, and its transaction is scoped journal-FORBIDDEN — an emit
+// attempt is refused with ErrJournalUnlockedTx before any sequence is
+// allocated, and the latched violation refuses the COMMIT even when the
+// callback ignores the emit error. With the journal OFF the same funnel keeps
+// the no-op: an emit stays silent and the write succeeds.
+func TestJournalUnlockedScope_NoJournalFunnelCannotEmit(t *testing.T) {
+	store, cleanup := setupConcurrentTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+	store.SetEventsJournalEnabled(true)
+	defer store.SetEventsJournalEnabled(false)
+
+	journalRows := func() int {
+		rows, err := store.ReadEventsJournal(ctx, 0, 1000)
+		if err != nil {
+			t.Fatalf("read events journal: %v", err)
+		}
+		return len(rows)
+	}
+
+	// A propagated emit refusal: no row lands, no sequence is drawn.
+	err := store.withRetryTxNoJournal(ctx, func(tx *sql.Tx) error {
+		return issueops.RecordDeleteInTx(ctx, tx, "bd-nojournal", "actor")
+	})
+	if !errors.Is(err, issueops.ErrJournalUnlockedTx) {
+		t.Fatalf("NoJournal emit error = %v, want ErrJournalUnlockedTx", err)
+	}
+	if n := journalRows(); n != 0 {
+		t.Fatalf("journal rows = %d after a refused emit, want 0", n)
+	}
+
+	// A callback that ignores the emit error still cannot commit: the write it
+	// made is rolled back with the refusal. UpdateIssueInTx is itself a
+	// journaling mutator, so its emit is the refused one.
+	target := &types.Issue{Title: "nojournal target", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	if err := store.CreateIssue(ctx, target, "actor"); err != nil {
+		t.Fatalf("create target issue: %v", err)
+	}
+	err = store.withRetryTxNoJournal(ctx, func(tx *sql.Tx) error {
+		if _, err := issueops.UpdateIssueInTx(ctx, tx, target.ID, map[string]interface{}{"status": types.StatusInProgress}, "actor-b"); err != nil {
+			_ = err // ignored: the commit check must refuse this transaction
+		}
+		return nil
+	})
+	if !errors.Is(err, issueops.ErrJournalUnlockedTx) {
+		t.Fatalf("commit after an ignored emit error = %v, want ErrJournalUnlockedTx", err)
+	}
+	reread, err := store.GetIssue(ctx, target.ID)
+	if err != nil {
+		t.Fatalf("reread target issue: %v", err)
+	}
+	if reread.Status != types.StatusOpen {
+		t.Fatalf("target status = %q, want it rolled back to open", reread.Status)
+	}
+	if n := journalRows(); n != 1 {
+		t.Fatalf("journal rows = %d, want exactly the funnel create's 1 (no NoJournal row)", n)
+	}
+
+	// No admission: with the journal ON and a probe holding the journal-writer
+	// lock, a NoJournal write completes promptly — it never queues.
+	probe, err := store.db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("pin probe connection: %v", err)
+	}
+	defer func() { _ = probe.Close() }()
+	lockName := issueops.JournalWriterLockName(store.database)
+	var granted sql.NullInt64
+	if err := probe.QueryRowContext(ctx, "SELECT GET_LOCK(?, 0)", lockName).Scan(&granted); err != nil {
+		t.Fatalf("take probe lock: %v", err)
+	}
+	if !granted.Valid || granted.Int64 != 1 {
+		t.Fatalf("probe could not take the journal-writer lock (granted=%v)", granted)
+	}
+	defer func() { _, _ = probe.ExecContext(context.Background(), "SELECT RELEASE_LOCK(?)", lockName) }()
+	wctx, wcancel := context.WithTimeout(ctx, 5*time.Second)
+	defer wcancel()
+	if err := store.SetMetadata(wctx, "nojournal-key", "v"); err != nil {
+		t.Fatalf("NoJournal write queued or failed behind the admission lock: %v", err)
+	}
+	if n := journalRows(); n != 1 {
+		t.Fatalf("journal rows = %d after a NoJournal write, want still 1", n)
+	}
+
+	// Journal-off retention: with the journal off the funnel keeps the no-op.
+	store.SetEventsJournalEnabled(false)
+	if err := store.withRetryTxNoJournal(ctx, func(tx *sql.Tx) error {
+		return issueops.RecordDeleteInTx(ctx, tx, "bd-off", "actor")
+	}); err != nil {
+		t.Fatalf("journal-off NoJournal emit is not a no-op: %v", err)
+	}
+}

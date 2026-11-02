@@ -146,7 +146,19 @@ func CommentSources() []string {
 // A missing value is deliberately safe-off.
 type journalContextKey struct{}
 
-var journalTransactions sync.Map // map[DBTX]bool; entries live for one transaction
+// journalTxState is one transaction's journal scope: whether emission is
+// activated, and — on an explicitly journal-unlocked route (#6117) — whether
+// it is FORBIDDEN. A forbidden scope is still activated: the emit entries
+// take their activation reads and reach the emit seam, where the emit is
+// refused before any sequence is allocated. violated latches the refusal so
+// the commit sites can reject a callback that ignored the emit error.
+type journalTxState struct {
+	enabled   bool
+	forbidden bool
+	violated  bool
+}
+
+var journalTransactions sync.Map // map[DBTX]*journalTxState; entries live for one transaction
 
 // WithEventsJournal returns ctx scoped to one storage operation with the
 // durable events journal enabled or disabled.
@@ -180,17 +192,65 @@ func ScopeEventsJournalTransaction(tx DBTX, enabled bool) func() {
 	if tx == nil {
 		return func() {}
 	}
-	journalTransactions.Store(tx, enabled)
+	journalTransactions.Store(tx, &journalTxState{enabled: enabled})
 	return func() { journalTransactions.Delete(tx) }
+}
+
+// ScopeUnlockedJournalTransaction scopes tx for a route that takes no
+// journal-writer admission lock (a read or ephemeral unit of work, or an
+// audited non-emitting store write — #6117). With the journal off it is
+// exactly ScopeEventsJournalTransaction(tx, false): every emit entry stays a
+// no-op. With the journal ON the scope is activated but FORBIDDEN: an emit is
+// refused with ErrJournalUnlockedTx before any sequence is allocated, and the
+// latched violation makes the commit sites reject the transaction even when
+// the callback ignored the emit's error — the write can neither mint journal
+// state outside the serialized writers nor fail silently.
+func ScopeUnlockedJournalTransaction(tx DBTX, journalOn bool) func() {
+	if tx == nil {
+		return func() {}
+	}
+	journalTransactions.Store(tx, &journalTxState{enabled: journalOn, forbidden: journalOn})
+	return func() { journalTransactions.Delete(tx) }
+}
+
+// ErrJournalUnlockedTx reports an emit attempt from a journal-unlocked
+// transaction: the emit was refused before any journal sequence was
+// allocated, and the transaction must not commit.
+var ErrJournalUnlockedTx = errors.New("journal emit in journal-unlocked transaction")
+
+// JournalUnlockedEmitViolation reports whether tx's scope refused an emit,
+// so a commit site can refuse to commit a callback that ignored the emit
+// error. nil when tx carries no scope or its scope was never violated.
+func JournalUnlockedEmitViolation(tx DBTX) error {
+	state, _ := journalTransactions.Load(tx)
+	st, _ := state.(*journalTxState)
+	if st != nil && st.violated {
+		return ErrJournalUnlockedTx
+	}
+	return nil
+}
+
+// refuseForbiddenJournalEmit is the emit seam's gate (#6117): a forbidden
+// scope latches its violation and refuses the emit before the caller reaches
+// any journal SQL. It runs inside insertEventRow, the ONE seam both write
+// plumbings funnel through, so no emit path can skip it.
+func refuseForbiddenJournalEmit(tx DBTX, op EventOp, issueID string) error {
+	state, _ := journalTransactions.Load(tx)
+	st, _ := state.(*journalTxState)
+	if st == nil || !st.forbidden {
+		return nil
+	}
+	st.violated = true
+	return fmt.Errorf("journal: %s for %s: %w", op, issueID, ErrJournalUnlockedTx)
 }
 
 func journalEnabled(ctx context.Context, tx DBTX) bool {
 	if enabled, ok := ctx.Value(journalContextKey{}).(bool); ok {
 		return enabled
 	}
-	enabled, _ := journalTransactions.Load(tx)
-	on, _ := enabled.(bool)
-	return on
+	state, _ := journalTransactions.Load(tx)
+	st, _ := state.(*journalTxState)
+	return st != nil && st.enabled
 }
 
 type blockedJournalKey struct {
@@ -475,6 +535,12 @@ func getJournalIssueInTx(ctx context.Context, tx DBTX, issueID string) (*types.I
 // row.arrival_seq == post-image.arrival_seq — and the counter is held for one
 // extra statement, not for a second counter.
 func insertEventRow(ctx context.Context, tx DBTX, op EventOp, issueID string, issue *types.Issue, dep *EventDep, comment *EventComment, actor string, stamp bool) error {
+	// The journal-unlocked gate runs BEFORE any snapshot read on this path:
+	// a forbidden scope never allocates a sequence, mints no row, and leaves
+	// only the violation for the commit sites to act on.
+	if err := refuseForbiddenJournalEmit(tx, op, issueID); err != nil {
+		return err
+	}
 	var depJSON any
 	if dep != nil {
 		b, err := json.Marshal(dep)
