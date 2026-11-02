@@ -92,6 +92,14 @@ func ValidateSettingWrite(key, value string) (string, error) {
 			return "", fmt.Errorf("%w: invalid %s value: %v", issueops.ErrValidation, key, err)
 		}
 	}
+	// wisp.protected_labels guards a destructive command, and wisp gc refuses
+	// to run on a value it cannot parse; refusing the write keeps that value
+	// from being stored in the first place.
+	if key == SettingKeyWispProtectedLabels {
+		if _, err := ParseProtectedLabels(value); err != nil {
+			return "", fmt.Errorf("%w: invalid %s value: %v", issueops.ErrValidation, key, err)
+		}
+	}
 	return value, nil
 }
 
