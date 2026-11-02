@@ -350,6 +350,50 @@ func TestLifecycle_SharedServerSQLCommitSurvivesKill(t *testing.T) {
 
 	dbKill := connectMySQLDatabase(t, sqlPort, "kill_survival")
 	defer func() { _ = dbKill.Close() }()
+	// The default managed configuration records history only when a command
+	// asks for it (batch/off policy), so the SQL writes below must not move
+	// HEAD or the log, and dolt_transaction_commit must stay off: journal
+	// persistence covers durability without turning every SQL commit into a
+	// Dolt commit.
+	var txCommit0 int
+	if err := dbKill.QueryRow("SELECT @@dolt_transaction_commit").Scan(&txCommit0); err != nil {
+		t.Fatalf("SELECT @@dolt_transaction_commit: %v", err)
+	}
+	if txCommit0 != 0 {
+		t.Fatalf("@@dolt_transaction_commit = %d on the default managed config, want 0", txCommit0)
+	}
+	var head0 string
+	if err := dbKill.QueryRow("SELECT commit_hash FROM dolt_log ORDER BY commit_order DESC LIMIT 1").Scan(&head0); err != nil {
+		t.Fatalf("SELECT initial HEAD from dolt_log: %v", err)
+	}
+	var logCount0 int
+	if err := dbKill.QueryRow("SELECT COUNT(*) FROM dolt_log").Scan(&logCount0); err != nil {
+		t.Fatalf("SELECT initial dolt_log count: %v", err)
+	}
+	assertHistoryUnchanged := func(db *sql.DB, phase string) {
+		t.Helper()
+		var txCommit int
+		if err := db.QueryRow("SELECT @@dolt_transaction_commit").Scan(&txCommit); err != nil {
+			t.Fatalf("%s: SELECT @@dolt_transaction_commit: %v", phase, err)
+		}
+		if txCommit != 0 {
+			t.Errorf("%s: @@dolt_transaction_commit = %d, want 0 (default managed config)", phase, txCommit)
+		}
+		var head string
+		if err := db.QueryRow("SELECT commit_hash FROM dolt_log ORDER BY commit_order DESC LIMIT 1").Scan(&head); err != nil {
+			t.Fatalf("%s: SELECT HEAD from dolt_log: %v", phase, err)
+		}
+		if head != head0 {
+			t.Errorf("%s: HEAD = %s, want the recorded %s (no Dolt commit may have happened)", phase, head, head0)
+		}
+		var logCount int
+		if err := db.QueryRow("SELECT COUNT(*) FROM dolt_log").Scan(&logCount); err != nil {
+			t.Fatalf("%s: SELECT dolt_log count: %v", phase, err)
+		}
+		if logCount != logCount0 {
+			t.Errorf("%s: dolt_log count = %d, want the recorded %d", phase, logCount, logCount0)
+		}
+	}
 	// SQL-committed writes with no CALL DOLT_COMMIT anywhere: an
 	// autocommitted tracked row, a two-row explicit transaction, and a row
 	// in a dolt_ignore-ignored table.
@@ -429,6 +473,7 @@ func TestLifecycle_SharedServerSQLCommitSurvivesKill(t *testing.T) {
 	dbCheck := connectMySQLDatabase(t, sqlPort, "kill_survival")
 	defer func() { _ = dbCheck.Close() }()
 	assertCommittedWrites(dbCheck, "before kill")
+	assertHistoryUnchanged(dbCheck, "before kill")
 
 	// SIGKILL only the registered test server PID — no Stop, Restart or
 	// FlushWorkingSet between the writes and this kill.
@@ -468,6 +513,16 @@ func TestLifecycle_SharedServerSQLCommitSurvivesKill(t *testing.T) {
 	dbAfter := connectMySQLDatabase(t, sqlPort, "kill_survival")
 	defer func() { _ = dbAfter.Close() }()
 	assertCommittedWrites(dbAfter, "after crash")
+	assertHistoryUnchanged(dbAfter, "after crash")
+	// The tracked changes are still pending: crash persistence of the
+	// working set is not a history commit.
+	var pending int
+	if err := dbAfter.QueryRow("SELECT COUNT(*) FROM dolt_status WHERE table_name = 'survival_tracked'").Scan(&pending); err != nil {
+		t.Fatalf("after crash: SELECT dolt_status for survival_tracked: %v", err)
+	}
+	if pending == 0 {
+		t.Error("after crash: survival_tracked is not pending in dolt_status, want the tracked changes still uncommitted")
+	}
 
 	// Graceful cleanup only after the post-crash assertions.
 	if err := doltserver.Stop(serverDir); err != nil {
