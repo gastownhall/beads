@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -12,7 +14,12 @@ import (
 
 	"github.com/go-sql-driver/mysql"
 
+	"github.com/steveyegge/beads/internal/lockfile"
+	"github.com/steveyegge/beads/internal/storage/dbproxy/pidfile"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
+	"github.com/steveyegge/beads/internal/storage/dbproxy/util"
+	"github.com/steveyegge/beads/internal/testutil"
+	"github.com/stretchr/testify/require"
 )
 
 // newScriptedResolver arms a resolver whose discovery is the injected closure,
@@ -424,4 +431,83 @@ func TestProxyEndpointResolverClose(t *testing.T) {
 			t.Fatalf("provider Close was followed by another discovery (%d entries, want 1)", n)
 		}
 	})
+}
+
+// TestProxyEndpointResolverAdoptsWithoutSpawnLock pins the adoption half of
+// #7295's design over real discovery: a healthy, authenticated, running
+// proxy is ADOPTED before its spawn lock is ever taken (endpoint.go adopts on
+// the lock-free read-and-dial path), so an armed provider whose workspace's
+// spawn lock is held by another actor still gets its new physical connection
+// — discovery must not wait for the lock — and no respawn happens that would
+// need it.
+func TestProxyEndpointResolverAdoptsWithoutSpawnLock(t *testing.T) {
+	testutil.RequireDoltBinary(t)
+	doltBin, err := exec.LookPath("dolt")
+	require.NoError(t, err)
+
+	bdBin := buildBDBinary(t)
+	prev := proxy.ResolveExecutable
+	proxy.ResolveExecutable = func() (string, error) { return bdBin, nil }
+	t.Cleanup(func() { proxy.ResolveExecutable = prev })
+
+	t.Setenv("HOME", t.TempDir())
+
+	storeRootDir := t.TempDir()
+	shutdownOnInterrupt(t, storeRootDir)
+	verifiedShutdownCleanup(t, storeRootDir)
+	cfgPort, err := proxy.PickFreePort()
+	require.NoError(t, err)
+	cfgPath := writeServerConfig(t, cfgPort)
+	logPath := filepath.Join(t.TempDir(), "server.log")
+
+	openOpts := proxy.OpenOpts{
+		Backend:        proxy.BackendLocalServer,
+		ConfigFilePath: cfgPath,
+		LogFilePath:    logPath,
+		DoltBinPath:    doltBin,
+		Database:       "beads",
+	}
+	var rediscoveries atomic.Int32
+	resolver := &proxyEndpointResolver{resolve: func(ctx context.Context) (proxy.Endpoint, error) {
+		rediscoveries.Add(1)
+		return proxy.GetCreateDatabaseProxyServerEndpoint(storeRootDir, openOpts)
+	}}
+
+	ctx := context.Background()
+	ep, err := proxy.GetCreateDatabaseProxyServerEndpoint(storeRootDir, openOpts)
+	require.NoError(t, err, "bootstrap discovery for the fixed endpoint")
+	provider, err := openAndInitSchema(ctx, ep, "", "beads", "root", "", "", false, "", providerOptions{}, resolver)
+	require.NoError(t, err, "open")
+	t.Cleanup(func() { _ = provider.Close(context.Background()) })
+	sqlProvider, ok := provider.(*doltSQLProvider)
+	require.True(t, ok, "openAndInitSchema returned %T, want *doltSQLProvider", provider)
+	sqlProvider.SetPoolLimits(PoolLimits{MaxIdleConns: -1})
+
+	pf, err := pidfile.Read(storeRootDir, proxy.PIDFileName)
+	require.NoError(t, err)
+	portBefore := pf.Port
+
+	// Prove the scenario: the healthy proxy holds proxy.lock for its whole
+	// lifetime (server.go), so the workspace's spawn lock is genuinely
+	// unavailable to anyone else — a rediscovery that waits for it, or that
+	// needs it to adopt, cannot succeed while the proxy runs.
+	if _, err := util.TryLock(filepath.Join(storeRootDir, proxy.LockFileName)); !lockfile.IsLocked(err) {
+		t.Fatalf("the live proxy's spawn lock was available (%v); the scenario does not hold", err)
+	}
+
+	// Bounded by a deadline: the connection must adopt the live proxy while
+	// its spawn lock stays held, not eventually.
+	queryCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	var one int
+	require.NoError(t, sqlProvider.db.QueryRowContext(queryCtx, "SELECT 1").Scan(&one),
+		"a new physical connection must adopt the live proxy without waiting for the spawn lock")
+	require.Equal(t, int32(1), rediscoveries.Load(),
+		"the new physical connection must have rediscovered exactly once")
+
+	// Adoption, not respawn: the same live proxy still owns the same port.
+	pf, err = pidfile.Read(storeRootDir, proxy.PIDFileName)
+	require.NoError(t, err)
+	require.Equal(t, portBefore, pf.Port,
+		"the armed provider respawned a proxy under a held spawn lock instead of adopting the live one")
 }
