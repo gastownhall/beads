@@ -488,6 +488,11 @@ func writeFileAtomic(path string, body []byte) error {
 // startAttempt launches dolt sql-server once and waits until it is ready.
 // Only the first attempt runs the dolt config/init preparation; a retry after
 // a port conflict reuses it.
+//
+// lock is Start's root lock. startAttempt returns with it still held only
+// when it succeeds (the supervising goroutine then releases it when the
+// child exits) or when keepLockOnPortConflict is set and it fails with
+// ErrPortInUse (Start retries under it); every other return releases it.
 func (s *DoltServer) startAttempt(ctx context.Context, prepare bool, lock *util.Lock, keepLockOnPortConflict bool) error {
 	if prepare {
 		if err := s.doltConfigure(ctx); err != nil {
@@ -590,26 +595,27 @@ func (s *DoltServer) startAttempt(ctx context.Context, prepare bool, lock *util.
 		return failSpawn("write pidfile", err)
 	}
 
-	// The supervising goroutine releases the root lock when the child exits,
-	// except when this attempt ends in a port conflict that Start will retry
-	// under the same lock. A conflict is either the child saying its port is
-	// taken (watch.SawPortInUse) or waitReady proving the listener belongs to
-	// another process (ErrPortInUse from ownsListener), which the child never
-	// reports; lockMu makes that decision and the release happen exactly once.
+	// The root lock has one owner at a time, so it is released exactly once.
+	// Until waitReady settles, this attempt owns it, whenever the child
+	// exits: on failure it either releases it or, for a port conflict Start
+	// retries (the child saying its port is taken, or waitReady proving the
+	// listener another process's, which the child never reports), keeps it
+	// for the next attempt. Once the server is ready, the supervising
+	// goroutine owns it and releases it when the child exits.
 	var (
 		lockMu       sync.Mutex
-		lockReleased bool
-		holdForRetry bool
+		handedOff    bool // the server is ready: the goroutine releases the lock
+		exitedBefore bool // the child exited before the hand-off
 	)
 	eg.Go(func() error {
 		defer func() {
 			lockMu.Lock()
 			defer lockMu.Unlock()
-			if keepLockOnPortConflict && (holdForRetry || watch.SawPortInUse()) {
+			if handedOff {
+				lock.Unlock()
 				return
 			}
-			lock.Unlock()
-			lockReleased = true
+			exitedBefore = true
 		}()
 		if err := cmd.Wait(); err != nil {
 			return err
@@ -618,26 +624,23 @@ func (s *DoltServer) startAttempt(ctx context.Context, prepare bool, lock *util.
 	})
 
 	if err := s.waitReady(ctx, watch); err != nil {
-		retry := keepLockOnPortConflict && errors.Is(err, ErrPortInUse)
-		lockMu.Lock()
-		if retry && !lockReleased {
-			holdForRetry = true
-		}
-		lockMu.Unlock()
 		cancel()
 		_ = s.eg.Wait()
 		s.eg, s.egCtx, s.cancel, s.pid = nil, nil, nil, 0
 		_ = pidfile.Remove(s.rootDir, PIDFileName)
-		lockMu.Lock()
-		releasedBeforeRetry := retry && lockReleased
-		lockMu.Unlock()
-		if releasedBeforeRetry {
-			// The child exited and released the lock before the conflict was
-			// proven, so this Start no longer holds it: do not retry without it.
-			return fmt.Errorf("server: DoltServer.Start: %v", err)
+		if !keepLockOnPortConflict || !errors.Is(err, ErrPortInUse) {
+			lock.Unlock()
 		}
 		return fmt.Errorf("server: DoltServer.Start: %w", err)
 	}
+	lockMu.Lock()
+	handedOff = true
+	if exitedBefore {
+		// The child exited between waitReady's last look and here; Running
+		// reports it, and nothing is left to release the lock but this.
+		lock.Unlock()
+	}
+	lockMu.Unlock()
 	return nil
 }
 

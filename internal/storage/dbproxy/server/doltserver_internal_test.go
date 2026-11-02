@@ -14,6 +14,7 @@ import (
 	"github.com/dolthub/dolt/go/libraries/doltcore/servercfg"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/procid"
+	"github.com/steveyegge/beads/internal/storage/dbproxy/util"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -411,6 +412,31 @@ func TestDoltServer_Start_IdentityCaptureFailsWhileChildAlive(t *testing.T) {
 		t.Fatal("Start did not return: the live child was not killed")
 	}
 	assert.False(t, s.Running(context.Background()))
+}
+
+// TestDoltServer_Start_CanceledDuringPortConflictReleasesLock pins the root
+// lock's single owner while a start is settling. The child has said its port
+// is taken, which with a port policy is a conflict Start would retry under
+// the same lock, but the start ends some other way first (its context is
+// canceled, as a stop that begins mid-boot does): Start does not retry, so
+// it must release the lock, and its cleanup, which takes the lock, must run.
+// A lock kept on the strength of the child's port-in-use line alone was
+// never released here.
+func TestDoltServer_Start_CanceledDuringPortConflictReleasesLock(t *testing.T) {
+	s := newScriptDoltServer(t, `  echo "Port $port already in use." >&2; exec sleep 30`)
+	s.SetPortConflictPolicy(func(string, int) error { return nil })
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	err := s.Start(ctx)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.False(t, errors.Is(err, ErrPortInUse), "got %v", err)
+
+	lock, err := util.TryLock(filepath.Join(s.rootDir, LockFileName))
+	require.NoError(t, err, "Start returned without releasing %s", LockFileName)
+	lock.Unlock()
+	assert.NoFileExists(t, s.launchSnapshotPath(), "Start's failure cleanup did not run")
+	assert.NoFileExists(t, s.runtimeConfigPath())
 }
 
 // TestDoltServer_Start_ImmediateExitRealCapture is the same fast port-in-use
