@@ -246,6 +246,10 @@ func (s *githubAPIStub) serve(w http.ResponseWriter, r *http.Request) {
 	case path == repoPath && r.Method == http.MethodGet:
 		_, _ = w.Write([]byte(`{"id":4242,"name":"repo-b","full_name":"owner-b/repo-b",` +
 			`"html_url":"https://github.com/owner-b/repo-b"}`))
+	case path == "/repos/owner-a/repo-a" && r.Method == http.MethodGet:
+		// Repository A exists, as another repository.
+		_, _ = w.Write([]byte(`{"id":1111,"name":"repo-a","full_name":"owner-a/repo-a",` +
+			`"html_url":"https://github.com/owner-a/repo-a"}`))
 	case path == prefix && r.Method == http.MethodGet:
 		objs := make([]string, 0, len(s.list))
 		for _, n := range s.list {
@@ -632,7 +636,7 @@ func TestRenamedRepository_PulledBeadStillPushesAndConflicts(t *testing.T) {
 		stub, tr := newRenamedRepoStub(t)
 		stub.issues[1313] = gitHubIssueJSON(1313, "Repo B issue 1313", crossRepoRemote)
 		stub.list = []int{1313}
-		tr.resolveCurrentName(ctx) // as Init does
+		tr.resolveRepositoryNames(ctx) // as Init does
 		if tr.currentName != "owner-b/repo-b" {
 			t.Fatalf("resolved current name %q, want owner-b/repo-b (requests %q)", tr.currentName, stub.requestLog())
 		}
@@ -701,6 +705,121 @@ func TestRenamedRepository_PulledBeadStillPushesAndConflicts(t *testing.T) {
 	})
 }
 
+// TestRenamedRepository_ConfigMovedToCurrentName: the reverse of the case
+// above. The config names the repository's current name, as it does once the
+// user updates github.owner/github.repo after a rename or transfer, or when
+// GITHUB_REPOSITORY follows the repository, but beads pulled before the
+// rename are still linked under the old name. GitHub still resolves that name
+// to the repository, so those beads keep syncing: a pull updates and relinks
+// the bead instead of importing its issue again as a second bead, a local
+// edit is pushed (and previewed as an update) instead of being skipped
+// without a warning, and conflict detection still compares the bead with its
+// issue. Repository A, which GitHub serves as another repository, stays
+// foreign: its same-numbered bead is never read, fetched, updated or relinked.
+func TestRenamedRepository_ConfigMovedToCurrentName(t *testing.T) {
+	ctx := context.Background()
+	const oldRef = "https://github.com/old-owner/repo-b/issues/1313"
+	const oldID = "bd-old1313"
+	setup := func(t *testing.T, edited bool) (*githubAPIStub, *Tracker, *crossRepoStore) {
+		t.Helper()
+		stub, tr := newGitHubAPIStub(t)
+		stub.renamedFrom = "/repos/old-owner/repo-b" // GitHub redirects the old name
+		stub.issues[1313] = gitHubIssueJSON(1313, "Repo B issue 1313", crossRepoRemote)
+		stub.list = []int{1313}
+		ref := oldRef
+		bead := &types.Issue{ID: oldID, Title: "stale B title", Status: types.StatusOpen,
+			IssueType: types.TypeTask, ExternalRef: &ref}
+		var aUpdated time.Time
+		if edited {
+			bead.Title = "Local edit"
+			bead.UpdatedAt = crossRepoLocal
+			aUpdated = crossRepoLocal
+		}
+		store := newCrossRepoStore(repoABead(aUpdated), bead)
+		tr.store = store
+		tr.resolveRepositoryNames(ctx) // as Init does
+		want := []string{
+			"GET /repos/owner-b/repo-b",
+			"GET /repos/old-owner/repo-b",
+			"GET /repositories/4242",
+			"GET /repos/owner-a/repo-a",
+		}
+		if got := stub.requestLog(); !slices.Equal(got, want) {
+			t.Fatalf("name resolution requests = %q, want %q", got, want)
+		}
+		if !slices.Equal(tr.formerNames, []string{"old-owner/repo-b"}) {
+			t.Fatalf("former names = %q, want [old-owner/repo-b]", tr.formerNames)
+		}
+		stub.mu.Lock()
+		stub.calls = nil
+		stub.mu.Unlock()
+		return stub, tr, store
+	}
+
+	t.Run("pull", func(t *testing.T) {
+		_, tr, store := setup(t, false)
+
+		result, err := tracker.NewEngine(tr, store, "test").Sync(ctx, tracker.SyncOptions{Pull: true})
+		if err != nil {
+			t.Fatalf("pull: %v", err)
+		}
+		if got := result.PullStats; got.Created != 0 || got.Updated != 1 {
+			t.Errorf("pull stats created=%d updated=%d, want created=0 updated=1", got.Created, got.Updated)
+		}
+		if len(store.issues) != 2 {
+			t.Errorf("store holds %d beads, want 2 (no duplicate)", len(store.issues))
+		}
+		b := store.issues[oldID]
+		if b.Title != "Repo B issue 1313" || b.ExternalRef == nil || *b.ExternalRef != crossRepoBRef {
+			t.Errorf("old-name bead not updated and relinked: title=%q external_ref=%v", b.Title, derefRef(b.ExternalRef))
+		}
+		store.assertUntouched(t, crossRepoAID, crossRepoAT, crossRepoARef)
+	})
+
+	for _, dryRun := range []bool{false, true} {
+		t.Run(fmt.Sprintf("push/dry-run=%v", dryRun), func(t *testing.T) {
+			stub, tr, store := setup(t, true)
+
+			result, err := tracker.NewEngine(tr, store, "test").Sync(ctx, tracker.SyncOptions{Push: true, DryRun: dryRun})
+			if err != nil {
+				t.Fatalf("push: %v", err)
+			}
+			if got := result.PushStats; got.Created != 0 || got.Updated != 1 || got.Skipped != 1 {
+				t.Errorf("push stats created=%d updated=%d skipped=%d, want created=0 updated=1 (old-name bead) skipped=1 (repo A)",
+					got.Created, got.Updated, got.Skipped)
+			}
+			var want []string
+			if !dryRun {
+				want = []string{
+					"GET /repos/owner-b/repo-b/issues/1313",
+					"PATCH /repos/owner-b/repo-b/issues/1313",
+				}
+			}
+			if got := stub.requestLog(); !slices.Equal(got, want) {
+				t.Errorf("push requests = %q, want %q", got, want)
+			}
+			store.assertUntouched(t, crossRepoAID, crossRepoAT, crossRepoARef)
+		})
+	}
+
+	t.Run("conflict", func(t *testing.T) {
+		stub, tr, store := setup(t, true)
+		store.meta["github.last_sync"] = crossRepoSync.Format(time.RFC3339)
+
+		conflicts, err := tracker.NewEngine(tr, store, "test").DetectConflicts(ctx)
+		if err != nil {
+			t.Fatalf("DetectConflicts: %v", err)
+		}
+		if len(conflicts) != 1 || conflicts[0].IssueID != oldID {
+			t.Errorf("conflicts = %+v, want one, for %s", conflicts, oldID)
+		}
+		if got, want := stub.requestLog(), []string{"GET /repos/owner-b/repo-b/issues/1313"}; !slices.Equal(got, want) {
+			t.Errorf("conflict detection requests = %q, want %q", got, want)
+		}
+		store.assertUntouched(t, crossRepoAID, crossRepoAT, crossRepoARef)
+	})
+}
+
 // TestInit_ResolvesRenamedRepositoryName: Init asks GitHub for the configured
 // repository. When the configured name redirects, as a renamed or transferred
 // repository's does, refs under the current name address the repository too.
@@ -717,8 +836,10 @@ func TestInit_ResolvesRenamedRepositoryName(t *testing.T) {
 		switch r.URL.Path {
 		case "/api/v3/repos/old-owner/repo-b":
 			http.Redirect(w, r, "/api/v3/repositories/4242", http.StatusMovedPermanently)
-		case "/api/v3/repositories/4242":
+		case "/api/v3/repositories/4242", "/api/v3/repos/owner-b/repo-b":
 			_, _ = w.Write([]byte(`{"id":4242,"name":"repo-b","full_name":"owner-b/repo-b"}`))
+		case "/api/v3/repos/owner-a/repo-a":
+			_, _ = w.Write([]byte(`{"id":1111,"name":"repo-a","full_name":"owner-a/repo-a"}`))
 		default:
 			http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)
 		}
@@ -730,9 +851,48 @@ func TestInit_ResolvesRenamedRepositoryName(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		owner     string
+		refs      []string // external_refs of the local beads
 		wantCalls []string
 		want      map[string]string // ref -> ExtractIdentifier
 	}{
+		{
+			// The config names the current name; local refs name the old one
+			// (in two spellings and the REST form), repository A, a
+			// repository GitHub does not know, a malformed name, the
+			// configured repository, another host and the shorthand. Each
+			// other repository on the configured host is read once, in name
+			// order, and only the one GitHub resolves to the configured
+			// repository's ID is accepted.
+			name:  "former name in local refs",
+			owner: "owner-b",
+			refs: []string{
+				web + "/owner-a/repo-a/issues/5",
+				web + "/old-owner/repo-b/issues/5",
+				web + "/OLD-OWNER/Repo-B/issues/6",
+				web + "/api/v3/repos/old-owner/repo-b/issues/7",
+				web + "/gone/repo-x/issues/5",
+				web + "/bad~owner/repo-b/issues/5",
+				web + "/owner-b/repo-b/issues/9",
+				"https://github.com/elsewhere/repo-b/issues/5",
+				"github:5",
+			},
+			wantCalls: []string{
+				"GET /api/v3/repos/owner-b/repo-b",
+				"GET /api/v3/repos/gone/repo-x",
+				"GET /api/v3/repos/old-owner/repo-b",
+				"GET /api/v3/repositories/4242",
+				"GET /api/v3/repos/owner-a/repo-a",
+			},
+			want: map[string]string{
+				web + "/owner-b/repo-b/issues/5":                "5",
+				web + "/old-owner/repo-b/issues/5":              "5",
+				web + "/Old-Owner/repo-b/issues/6":              "6",
+				web + "/api/v3/repos/old-owner/repo-b/issues/7": "7",
+				web + "/owner-a/repo-a/issues/5":                "",
+				web + "/gone/repo-x/issues/5":                   "",
+				web + "/bad~owner/repo-b/issues/5":              "",
+			},
+		},
 		{
 			name:      "renamed",
 			owner:     "old-owner",
@@ -758,6 +918,9 @@ func TestInit_ResolvesRenamedRepositoryName(t *testing.T) {
 			calls = nil
 			mu.Unlock()
 			store := newCrossRepoStore()
+			for i, ref := range tc.refs {
+				store.issues[fmt.Sprintf("bd-%d", i)] = &types.Issue{ID: fmt.Sprintf("bd-%d", i), ExternalRef: &ref}
+			}
 			store.config["github.owner"] = tc.owner
 			store.config["github.repo"] = "repo-b"
 			store.config["github.url"] = srv.URL + "/api/v3"
