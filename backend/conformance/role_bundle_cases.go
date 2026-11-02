@@ -245,6 +245,7 @@ var roleContractCases = []roleContract{
 		RunDeleterForceOrphansDependents,
 		RunDeleterCascadeDeletesTheClosure,
 		RunDeleterCascadeFromAWispRootDeletesTheClosure,
+		RunDeleterCascadeFollowsOnlyContainment,
 		RunDeleterGuardsAWispNamedWithADurableDependent,
 		RunDeleterGuardsADurableNamedWithAWispDependent,
 		RunDeleterCountsCrossPlaneEdgesItRemoves,

@@ -95,9 +95,10 @@ type DeleteRequest struct {
 	// NOW, which an edge added since its read may have grown. A caller that
 	// needs the closure itself pinned wants DryRun's preview and not this.
 	ExpectedVersion *int64
-	// Cascade also deletes the TRANSITIVE CLOSURE of everything that depends
-	// on the named rows, in both planes. It is what `bd delete --cascade`
-	// asks for.
+	// Cascade also deletes the named rows' PARENT-CHILD DESCENDANTS,
+	// transitively, in both planes. It is what `bd delete --cascade` asks for.
+	// It follows containment only (GH#6301): a row that merely blocks, relates
+	// to or was discovered from a deleted row is not part of its tree.
 	//
 	// WITH CASCADE THERE IS NOTHING LEFT TO ORPHAN, by construction: the
 	// closure contains every dependent of every row it deletes. So Cascade
@@ -288,8 +289,8 @@ func (e *NotFoundError) Unwrap() error { return ErrNotFound }
 // Deterministic request-validation failures match ErrValidation. Result values
 // are unspecified when error is non-nil.
 type Deleter interface {
-	// Delete erases req.IDs and, under Cascade, everything that depends on
-	// them, and reports what it did.
+	// Delete erases req.IDs and, under Cascade, their parent-child
+	// descendants, and reports what it did.
 	//
 	// IT IS ONE TRANSACTION, and on this role that covers one thing it did not
 	// cover before: THE TEXT-REFERENCE REWRITE. The direct CLI route deleted

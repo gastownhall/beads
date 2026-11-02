@@ -149,8 +149,8 @@ type DeletionSet struct {
 }
 
 // ResolveDeletionSetInTx decides WHICH rows a delete removes: the named ids,
-// plus — under cascade — the transitive closure of everything that depends on
-// them, in BOTH planes.
+// plus — under cascade — their parent-child descendants, transitively, in
+// BOTH planes (see FindCascadeClosureInTx).
 //
 // THE CASCADE IS ROOTED AT EVERY NAMED ID, WISPS INCLUDED. Rooting it at the
 // durable half is what made `bd wisp gc` (which hardcodes cascade) silently
@@ -160,7 +160,7 @@ type DeletionSet struct {
 func ResolveDeletionSetInTx(ctx context.Context, tx DBTX, ids []string, cascade bool) (DeletionSet, error) {
 	all := append([]string(nil), ids...)
 	if cascade {
-		closure, err := FindAllDependentsInTx(ctx, tx, ids)
+		closure, err := FindCascadeClosureInTx(ctx, tx, ids)
 		if err != nil {
 			return DeletionSet{}, fmt.Errorf("expand cascade: %w", err)
 		}
@@ -463,12 +463,21 @@ func ExistingIssueIDsInTableInTx(ctx context.Context, tx DBTX, table string, ids
 	return actual, nil
 }
 
-// findAllDependentsRecursiveInTx finds all issues that depend on the given
-// issues, recursively. Uses batched IN-clause queries. Traversal is capped
-// at maxRecursiveResults total discovered IDs.
+// FindCascadeClosureInTx finds what a cascade adds to the given roots: their
+// parent-child descendants, recursively, in both planes. Uses batched
+// IN-clause queries. Traversal is capped at maxRecursiveResults total
+// discovered IDs.
+//
+// IT FOLLOWS CONTAINMENT ONLY. A child row's parent-child edge points at its
+// parent, so the walk reads incoming parent-child edges and nothing else. A
+// blocks, related or discovered-from edge says two rows are associated, not
+// that one is part of the other: following it let `bd delete <epic> --cascade`
+// reach an unrelated epic through one discovered-from edge and take that epic
+// and its children too (GH#6301). Rows joined by such an edge survive the
+// delete and lose the edge; the caller reports them as orphaned.
 //
 //nolint:gosec // G201: inClause contains only ? placeholders
-func FindAllDependentsInTx(ctx context.Context, tx DBTX, ids []string) (map[string]bool, error) {
+func FindCascadeClosureInTx(ctx context.Context, tx DBTX, ids []string) (map[string]bool, error) {
 	result := make(map[string]bool)
 	for _, id := range ids {
 		result[id] = true
@@ -489,9 +498,10 @@ func FindAllDependentsInTx(ctx context.Context, tx DBTX, ids []string) (map[stri
 		toProcess = toProcess[batchEnd:]
 
 		inClause, args := buildSQLInClause(batch)
+		args = append([]interface{}{string(types.DepParentChild)}, args...)
 		for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
 			rows, err := tx.QueryContext(ctx,
-				fmt.Sprintf(`SELECT issue_id FROM %s WHERE %s`, depTable, depTargetIn("", inClause)),
+				fmt.Sprintf(`SELECT issue_id FROM %s WHERE type = ? AND %s`, depTable, depTargetIn("", inClause)),
 				args...)
 			if err != nil {
 				if optionalBlockedTable(depTable) && isTableNotExistError(err) {

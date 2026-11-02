@@ -79,10 +79,10 @@ func testAuditDeleteIssuesBatchModes(t *testing.T, f Factory) {
 		t.Errorf("Case1: A should still exist (nothing deleted), got %v", err)
 	}
 
-	// Case 2: cascade removes A and its dependent B.
+	// Case 2: cascade removes A and its parent-child child B.
 	must(t, s.CreateIssue(ctx(), withDefaults(&types.Issue{ID: "d2-a", Title: "A"}), "a"))
 	must(t, s.CreateIssue(ctx(), withDefaults(&types.Issue{ID: "d2-b", Title: "B"}), "a"))
-	must(t, s.AddDependency(ctx(), &types.Dependency{IssueID: "d2-b", DependsOnID: "d2-a", Type: types.DepBlocks}, "a"))
+	must(t, s.AddDependency(ctx(), &types.Dependency{IssueID: "d2-b", DependsOnID: "d2-a", Type: types.DepParentChild}, "a"))
 	if _, err := s.DeleteIssues(ctx(), []string{"d2-a"}, true, false, false); err != nil {
 		t.Fatalf("Case2: cascade delete: %v", err)
 	}

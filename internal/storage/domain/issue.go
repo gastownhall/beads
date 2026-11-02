@@ -120,7 +120,7 @@ type IssueSQLRepository interface {
 	Delete(ctx context.Context, id string, opts IssueTableOpts, actor string) error
 	DeleteByIDs(ctx context.Context, ids []string, opts IssueTableOpts, actor string) (int, error)
 	PartitionWispIDs(ctx context.Context, ids []string) (wispIDs, regularIDs []string, err error)
-	FindAllDependents(ctx context.Context, ids []string) ([]string, error)
+	FindCascadeClosure(ctx context.Context, ids []string) ([]string, error)
 	FindWispDependentsRecursive(ctx context.Context, ids []string) (map[string]bool, error)
 	AffectedByDeletion(ctx context.Context, issueIDs, wispIDs []string) (affectedIssues, affectedWisps []string, err error)
 	// RecomputeIsBlockedAfterDelete recomputes the blocked state of the

@@ -374,3 +374,65 @@ func TestEmbeddedGetDependencies(t *testing.T) {
 		}
 	})
 }
+
+// cascadeFixture is the GH#6301 cascade-boundary workspace: epic A with a
+// two-level containment tree in mixed statuses, and rows joined to that tree
+// by association edges only.
+type cascadeFixture struct {
+	A, A1, A2, A11 string // the tree a cascade from A deletes
+	B, B1          string // an unrelated epic discovered-from A, and its child
+	C, C1          string // another epic whose child C1 is blocked by A1
+	S              string // a standalone issue related to A
+}
+
+func (f cascadeFixture) deleted() []string { return []string{f.A, f.A1, f.A11, f.A2} }
+
+func (f cascadeFixture) survivors() []string { return []string{f.B, f.B1, f.C, f.C1, f.S} }
+
+func setupCascadeFixture(t *testing.T, bd, dir string) cascadeFixture {
+	t.Helper()
+	var f cascadeFixture
+	f.A = bdCreate(t, bd, dir, "Epic A", "--type", "epic").ID
+	f.A1 = bdCreate(t, bd, dir, "A child one", "--type", "task", "--parent", f.A).ID
+	f.A2 = bdCreate(t, bd, dir, "A child two", "--type", "task", "--parent", f.A).ID
+	f.A11 = bdCreate(t, bd, dir, "A grandchild", "--type", "task", "--parent", f.A1).ID
+	f.B = bdCreate(t, bd, dir, "Unrelated epic B", "--type", "epic").ID
+	f.B1 = bdCreate(t, bd, dir, "B child", "--type", "task", "--parent", f.B).ID
+	f.C = bdCreate(t, bd, dir, "Epic C", "--type", "epic").ID
+	f.C1 = bdCreate(t, bd, dir, "C child blocked by A child", "--type", "task", "--parent", f.C).ID
+	f.S = bdCreate(t, bd, dir, "Standalone", "--type", "task").ID
+	bdClose(t, bd, dir, f.A2)
+	bdUpdate(t, bd, dir, f.A11, "--status", "in_progress")
+	bdDepAdd(t, bd, dir, f.B, f.A, "--type", "discovered-from")
+	bdDepAdd(t, bd, dir, f.C1, f.A1)
+	bdDepAdd(t, bd, dir, f.S, f.A, "--type", "related")
+	return f
+}
+
+// TestEmbeddedDeleteCascadeFollowsOnlyParentChild is GH#6301's reproduction:
+// `bd delete <epic> --cascade` followed every dependency type, so one
+// discovered-from edge took an unrelated epic and its child, a blocks edge took
+// another epic's child, and a related edge took a standalone issue.
+func TestEmbeddedDeleteCascadeFollowsOnlyParentChild(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+
+	t.Run("forced_cascade_deletes_only_the_containment_tree", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "cpc")
+		f := setupCascadeFixture(t, bd, dir)
+
+		bdDelete(t, bd, dir, f.A, "--cascade", "--force")
+		for _, id := range f.deleted() {
+			bdShowFail(t, bd, dir, id)
+		}
+		for _, id := range f.survivors() {
+			if got := bdShowDetails(t, bd, dir, id); got["id"] != id {
+				t.Errorf("cascade from %s deleted %s, which is outside its containment tree", f.A, id)
+			}
+		}
+	})
+}

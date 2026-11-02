@@ -213,6 +213,10 @@ func TestServedDeleterCascadeFromAWispRootDeletesTheClosure(t *testing.T) {
 	conformance.RunDeleterCascadeFromAWispRootDeletesTheClosure(t, t.Context(), newServedDeleterFixture(t, "hx05"))
 }
 
+func TestServedDeleterCascadeFollowsOnlyContainment(t *testing.T) {
+	conformance.RunDeleterCascadeFollowsOnlyContainment(t, t.Context(), newServedDeleterFixture(t, "hx23"))
+}
+
 func TestServedDeleterGuardsAWispNamedWithADurableDependent(t *testing.T) {
 	skipKnownDivergence(t, "L-delete-dependents", bulkParkBead, parkDeleteDependents)
 	conformance.RunDeleterGuardsAWispNamedWithADurableDependent(t, t.Context(), newServedDeleterFixture(t, "hx06"))
