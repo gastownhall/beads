@@ -86,3 +86,64 @@ func TestReopenIssueWithOversizedReasonKeepsTheCommentVerbatim(t *testing.T) {
 		})
 	}
 }
+
+// TestPromoteFromEphemeralPreservesOversizedEventComment pins GH#3925 on the
+// wisp plane: AddComment on an active wisp writes wisp_events.comment, TEXT
+// until migration 0075, and PromoteFromEphemeral copies that row into
+// events.comment with INSERT IGNORE, which truncates instead of failing when
+// the destination is narrower than the source. Both planes must hold the
+// comment byte for byte, in both copy directions.
+func TestPromoteFromEphemeralPreservesOversizedEventComment(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	commentIn := func(t *testing.T, table, id string) string {
+		t.Helper()
+		var got string
+		if err := store.db.QueryRowContext(ctx,
+			"SELECT comment FROM "+table+" WHERE issue_id = ? AND event_type = ?",
+			id, string(types.EventCommented)).Scan(&got); err != nil {
+			t.Fatalf("read commented event from %s: %v", table, err)
+		}
+		return got
+	}
+
+	t.Run("promote", func(t *testing.T) {
+		const id = "promote-big-comment"
+		big := oversizedText(70000)
+		createWisp(t, ctx, store, id)
+		if err := store.AddComment(ctx, id, "tester", big); err != nil {
+			t.Fatalf("AddComment on a wisp with a %d-byte comment: %.300v", len(big), err)
+		}
+		if got := commentIn(t, "wisp_events", id); got != big {
+			t.Fatalf("wisp_events.comment holds %d bytes, want the %d-byte comment verbatim", len(got), len(big))
+		}
+
+		if err := store.PromoteFromEphemeral(ctx, id, "tester"); err != nil {
+			t.Fatalf("PromoteFromEphemeral: %.300v", err)
+		}
+		assertNoRowsForIssue(t, store, "wisp_events", id)
+		if got := commentIn(t, "events", id); got != big {
+			t.Fatalf("promoted events.comment holds %d bytes, want the %d-byte comment verbatim", len(got), len(big))
+		}
+	})
+
+	t.Run("demote", func(t *testing.T) {
+		const id = "demote-big-comment"
+		big := strings.Repeat("€", 21846)
+		createPerm(t, ctx, store, id)
+		if err := store.AddComment(ctx, id, "tester", big); err != nil {
+			t.Fatalf("AddComment on a durable issue with a %d-byte comment: %.300v", len(big), err)
+		}
+
+		if err := store.UpdateIssue(ctx, id, map[string]interface{}{"no_history": true}, "tester"); err != nil {
+			t.Fatalf("demote to no-history wisp: %.300v", err)
+		}
+		assertNoRowsForIssue(t, store, "events", id)
+		if got := commentIn(t, "wisp_events", id); got != big {
+			t.Fatalf("demoted wisp_events.comment holds %d bytes, want the %d-byte comment verbatim", len(got), len(big))
+		}
+	})
+}
