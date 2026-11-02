@@ -361,6 +361,45 @@ Switch to server mode when you need:
 - Orchestrator multi-rig setups
 - Federation with remote peers
 
+#### After you upgrade `dolt`
+
+A running `dolt sql-server` keeps running the `dolt` executable it was
+started from, so upgrading `dolt` does not change the server until it
+restarts. bd checks this when a command opens the store, for the server bd
+started for the workspace (by auto-start or `bd dolt start`) and reached over
+TCP on the local host:
+
+- If the server's executable is unchanged, or was reinstalled at the same
+  Dolt release, bd keeps the server.
+- If the `dolt` bd would launch now is a different release, bd stops the
+  server and starts it on the installed `dolt`, on the same port and with the
+  same data, before the command sends any query. It prints one notice naming
+  the port, the old and new PIDs, and both releases. Stopping the server
+  first attempts to commit uncommitted working-set changes, as `bd dolt stop`
+  does. When several commands notice the upgrade at once, only one restarts
+  the server.
+- A server started before bd recorded which executable it launched is
+  compared by the release it reports.
+
+If the restart fails, the command fails and sends no query. The error says
+which state it left: the old server still running (restart it yourself with
+`bd dolt stop`, then `bd dolt start`), or the old server stopped with its
+port kept for the next `bd dolt start`. If the installed `dolt` cannot be
+run at all, bd leaves the old server running and asks you to fix the
+installation or stop the server.
+
+bd only warns, once per command, and goes on using the old server when this
+command may not restart it: auto-start is off (`BEADS_DOLT_AUTO_START=0` or
+`dolt.auto-start: false`), the command is a preview, runs with `--readonly`,
+or runs during a migration freeze, or the server is the shared server.
+Restarting the shared server disconnects every client and database it
+serves, so the warning says so; when that is safe, run `bd dolt stop`, then
+`bd dolt start`.
+
+bd does not compare a server it did not start, or one it reaches over a Unix
+socket, TLS, a gateway or a proxied server: restart those yourself after an
+upgrade.
+
 ## Maintenance — `bd prune` and `bd purge`
 
 `bd prune` permanently deletes closed non-ephemeral beads to reclaim storage
