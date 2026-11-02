@@ -154,9 +154,13 @@ func cannotReplaceServerError(addr string, check doltserver.BinaryCheck, reason 
 }
 
 // serverBinaryCandidate reports whether this open's endpoint can be the
-// tracked local server reconcileServerBinary compares: TCP to a host bd runs
-// its server at, on a resolved port.
+// tracked local server reconcileServerBinary compares: plain TCP to a host bd
+// runs its server at, on a resolved port. A socket, TLS, gateway or proxied
+// endpoint is a server bd does not launch, so it is never compared.
 func serverBinaryCandidate(cfg *Config) bool {
+	if cfg.ServerSocket != "" || cfg.ServerTLS || cfg.Gateway || cfg.ProxiedServer {
+		return false
+	}
 	return cfg.ServerPort > 0 && doltserver.AutoStartReaches(cfg.ServerHost, cfg.ServerSocket)
 }
 

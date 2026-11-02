@@ -397,3 +397,54 @@ func TestServerBinaryNoPermissionAdvises(t *testing.T) {
 		})
 	}
 }
+
+// TestServerBinaryNotComparedForOtherEndpoints: an endpoint that is not a
+// server bd launches (a remote host, a unix socket, TLS, a gateway, a proxied
+// server) is never compared: no lifecycle call, no output, the port as
+// configured.
+func TestServerBinaryNotComparedForOtherEndpoints(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cfg  Config
+	}{
+		{name: "remote host", cfg: Config{ServerHost: "db.example.com"}},
+		{name: "unix socket", cfg: Config{ServerSocket: "/tmp/dolt.sock"}},
+		{name: "tls", cfg: Config{ServerTLS: true}},
+		{name: "gateway", cfg: Config{Gateway: true}},
+		{name: "proxied", cfg: Config{ProxiedServer: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			events := &serverBinaryEvents{}
+			base := serverBinaryOpen(t, events)
+			cfg := tc.cfg
+			cfg.Path, cfg.BeadsDir, cfg.ServerPort, cfg.AutoStart = base.Path, base.BeadsDir, base.ServerPort, true
+			if cfg.ServerHost == "" {
+				cfg.ServerHost = "127.0.0.1"
+			}
+			stubServerBinary(t,
+				func(string, int, doltserver.ServerVersionFunc) doltserver.BinaryCheck {
+					events.add("check")
+					return staleServerCheck(cfg.ServerPort)
+				},
+				func(string, int, doltserver.ServerVersionFunc) (doltserver.BinaryReplacement, error) {
+					events.add("replace")
+					return doltserver.BinaryReplacement{}, errors.New("must not be called")
+				})
+
+			var port int
+			var err error
+			stderr := captureServerBinaryStderr(t, func() {
+				port, err = reconcileServerBinary(&cfg, cfg.BeadsDir, doltserver.ResolveServerDir(cfg.BeadsDir))
+			})
+			if err != nil || port != base.ServerPort {
+				t.Errorf("reconcileServerBinary = %d, %v; want %d, nil", port, err, base.ServerPort)
+			}
+			if got := events.snapshot(); len(got) != 0 {
+				t.Errorf("events = %v, want no lifecycle call", got)
+			}
+			if stderr != "" {
+				t.Errorf("stderr = %q, want nothing", stderr)
+			}
+		})
+	}
+}
