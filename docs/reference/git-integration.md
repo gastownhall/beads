@@ -307,6 +307,18 @@ bd init --skip-agents    # Skip AGENTS.md and Claude/Codex setup generation
 bd init --stealth        # Full invisible mode (also skips hooks + agents)
 ```
 
+### Init Without a Git Commit
+
+In a Git repository `bd init` stages the files it creates and commits them.
+In releases after v1.3.2, `--skip-git-commit` skips that step: init still
+writes `.beads/` and its other files, but leaves them unstaged, does not move
+HEAD, and keeps whatever you had already staged. It works for a re-init with
+`--reinit-local` too. Stage and commit the files yourself when you are ready.
+
+```bash
+bd init --skip-git-commit
+```
+
 ### Jujutsu Setup
 
 **Colocated repos** (`jj git init --colocate`): Git hooks work normally.

@@ -41,6 +41,7 @@ type initProxiedServerInput struct {
 	stealth                bool
 	skipHooks              bool
 	skipAgents             bool
+	skipGitCommit          bool // --skip-git-commit
 	keepHomeClean          bool // see guardInitInHomeDir
 	reinitLocal            bool
 	contributor            bool
@@ -666,7 +667,7 @@ func runInitProxiedServerTail(cmd *cobra.Command, ctx context.Context, in initPr
 		}
 	}
 
-	if !in.stealth && isRepo && t.useLocalBeads {
+	if !in.stealth && isRepo && t.useLocalBeads && !in.skipGitCommit {
 		commitResult, err := gitUC.CommitInitArtifacts(ctx, domain.CommitInitArtifactsParams{
 			BeadsDir: ".beads/",
 			OptionalPaths: []string{

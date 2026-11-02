@@ -877,3 +877,65 @@ func TestInitHooksEmptyPathRetainsUseCase(t *testing.T) {
 	require.Same(t, supplied, fs)
 	require.Nil(t, hooks)
 }
+
+// TestProxiedInitTailSkipGitCommit: with --skip-git-commit the tail still
+// produces init's files but neither stages them nor moves HEAD, and an
+// unrelated change the user had staged stays staged as it was. Omitting the
+// flag keeps the bootstrap commit.
+func TestProxiedInitTailSkipGitCommit(t *testing.T) {
+	for _, entry := range os.Environ() {
+		key := gitenv.EntryKey(entry)
+		if gitenv.IsRoutingKeyForOS(key, runtime.GOOS) {
+			t.Setenv(key, "")
+			require.NoError(t, os.Unsetenv(key))
+		}
+	}
+	home := t.TempDir()
+	for _, key := range []string{"HOME", "USERPROFILE", "XDG_CONFIG_HOME"} {
+		t.Setenv(key, home)
+	}
+	runGit := func(dir string, args ...string) string {
+		t.Helper()
+		cmd := gitCommand(args...)
+		cmd.Dir, cmd.Env = dir, gitenv.ScrubRouting(os.Environ())
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "fixture git %v: %s", args, out)
+		return strings.TrimSpace(string(out))
+	}
+	for _, skip := range []bool{true, false} {
+		t.Run(map[bool]string{true: "skip", false: "control"}[skip], func(t *testing.T) {
+			target := t.TempDir()
+			runGit(target, "init", "--quiet")
+			for key, value := range map[string]string{"user.name": "Fixture", "user.email": "fixture@example.test", "commit.gpgSign": "false", "core.hooksPath": ".git/hooks"} {
+				runGit(target, "config", "--local", key, value)
+			}
+			require.NoError(t, os.WriteFile(filepath.Join(target, "seed"), []byte("seed\n"), 0600))
+			runGit(target, "add", "seed")
+			runGit(target, "-c", "core.hooksPath=", "commit", "-m", "seed")
+			require.NoError(t, os.WriteFile(filepath.Join(target, "unrelated"), []byte("staged by the user\n"), 0600))
+			runGit(target, "add", "unrelated")
+			require.NoError(t, os.Mkdir(filepath.Join(target, ".beads"), 0755))
+			require.NoError(t, os.WriteFile(filepath.Join(target, ".beads", "artifact"), []byte(target), 0600))
+			require.NoError(t, os.WriteFile(filepath.Join(target, "CLAUDE.md"), []byte("optional\n"), 0600))
+			headBefore := runGit(target, "rev-parse", "HEAD")
+			stagedBefore := runGit(target, "diff", "--cached")
+			t.Chdir(target)
+
+			cmd := &cobra.Command{}
+			cmd.Flags().Bool("setup-exclude", false, "")
+			in := initProxiedServerInput{skipHooks: true, skipAgents: true, skipGitCommit: skip, nonInteractive: true}
+			captureStderr(t, func() {
+				require.NoError(t, runInitProxiedServerTail(cmd, t.Context(), in, runInitTailContext{workDir: target, beadsDir: filepath.Join(target, ".beads"), useLocalBeads: true, fsUseCase: &initTailForkObservation{}, gitUC: storagegit.NewGitProvider(target).GitUseCase()}))
+			})
+
+			require.FileExists(t, filepath.Join(target, ".beads", "artifact"))
+			if skip {
+				require.Equal(t, headBefore, runGit(target, "rev-parse", "HEAD"), "--skip-git-commit moved HEAD")
+				require.Equal(t, stagedBefore, runGit(target, "diff", "--cached"), "--skip-git-commit changed the index")
+			} else {
+				require.NotEqual(t, headBefore, runGit(target, "rev-parse", "HEAD"), "init without --skip-git-commit did not commit")
+				require.Equal(t, target, runGit(target, "show", "HEAD:.beads/artifact"))
+			}
+		})
+	}
+}

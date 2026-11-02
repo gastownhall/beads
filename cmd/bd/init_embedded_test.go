@@ -1988,3 +1988,72 @@ func testEmbeddedInitGitBootstrapRouting(t *testing.T, names ...string) {
 		})
 	}
 }
+
+// TestEmbeddedInitSkipGitCommit: --skip-git-commit on a fresh init and on a
+// --reinit-local still writes init's files but neither stages them nor moves
+// HEAD, and an unrelated change the user had staged stays staged as it was.
+// Omitting the flag keeps the bootstrap commit.
+func TestEmbeddedInitSkipGitCommit(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt init tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	gitOut := func(dir string, args ...string) string {
+		t.Helper()
+		cmd := gitCommand(args...)
+		cmd.Dir = dir
+		cmd.Env = gitenv.ScrubRouting(os.Environ())
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v failed: %v\n%s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	// repoWithStagedChange is a repository with a HEAD and an unrelated
+	// staged file, the state a user may run init in.
+	repoWithStagedChange := func(t *testing.T) string {
+		dir := t.TempDir()
+		initGitRepoAt(t, dir)
+		runGitForBootstrapTest(t, dir, "commit", "--allow-empty", "-m", "seed")
+		if err := os.WriteFile(filepath.Join(dir, "unrelated"), []byte("staged by the user\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		runGitForBootstrapTest(t, dir, "add", "unrelated")
+		return dir
+	}
+	requireRepoUntouched := func(t *testing.T, dir, step, headBefore, stagedBefore string) {
+		t.Helper()
+		if got := gitOut(dir, "rev-parse", "HEAD"); got != headBefore {
+			t.Errorf("%s with --skip-git-commit moved HEAD: %s -> %s", step, headBefore, got)
+		}
+		if got := gitOut(dir, "diff", "--cached"); got != stagedBefore {
+			t.Errorf("%s with --skip-git-commit changed the index:\nbefore:\n%s\nafter:\n%s", step, stagedBefore, got)
+		}
+	}
+
+	t.Run("init_and_reinit", func(t *testing.T) {
+		dir := repoWithStagedChange(t)
+		headBefore, stagedBefore := gitOut(dir, "rev-parse", "HEAD"), gitOut(dir, "diff", "--cached")
+
+		runBDInit(t, bd, dir, "--prefix", "sg", "--skip-hooks", "--skip-agents", "--skip-git-commit")
+		requireFile(t, filepath.Join(dir, ".beads", "metadata.json"))
+		requireFile(t, filepath.Join(dir, ".beads", "config.yaml"))
+		requireRepoUntouched(t, dir, "init", headBefore, stagedBefore)
+
+		runBDInit(t, bd, dir, "--reinit-local", "--prefix", "sg", "--non-interactive", "--skip-hooks", "--skip-agents", "--skip-git-commit")
+		requireFile(t, filepath.Join(dir, ".beads", "metadata.json"))
+		requireRepoUntouched(t, dir, "reinit", headBefore, stagedBefore)
+	})
+
+	t.Run("control_commits", func(t *testing.T) {
+		dir := repoWithStagedChange(t)
+		headBefore := gitOut(dir, "rev-parse", "HEAD")
+		runBDInit(t, bd, dir, "--prefix", "sg", "--skip-hooks", "--skip-agents")
+		if got := gitOut(dir, "rev-parse", "HEAD"); got == headBefore {
+			t.Errorf("init without --skip-git-commit did not commit its files")
+		}
+		gitOut(dir, "cat-file", "-e", "HEAD:.beads/metadata.json")
+	})
+}
