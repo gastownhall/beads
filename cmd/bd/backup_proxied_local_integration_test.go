@@ -179,6 +179,87 @@ func TestManagedLocalProxiedBackupRestoreReopenFailure(t *testing.T) {
 	}
 }
 
+// TestManagedLocalProxiedBackupRestoreRefusesSourceWithoutBackup pins the
+// proxied half of GH#7098: a --force restore whose source is an existing
+// local directory that holds no Dolt backup must be refused before the
+// command quiesces the topology, because the quiesce takes a serving
+// workspace's proxy and backend down and the restore that follows drops the
+// live database on the server. The PIDs are checked immediately after the
+// refusal, before any later bd command could relaunch the topology and hide
+// a quiesce.
+func TestManagedLocalProxiedBackupRestoreRefusesSourceWithoutBackup(t *testing.T) {
+	requireManagedLocalProxiedEnv(t)
+
+	bd := buildEmbeddedBD(t)
+	p := bdManagedLocalInit(t, bd, "bknobk", 5*time.Minute)
+
+	before := bdProxiedCreate(t, bd, p.dir, "survives the refused restore", "-p", "1")
+
+	// The running topology the refusal must leave alone.
+	proxyBefore := readManagedProxyPidFile(t, p)
+	backendBefore := readManagedBackendPidFile(t, p)
+	if proxyBefore == nil || backendBefore == nil {
+		t.Fatalf("topology is not up before the restore: proxy=%v backend=%v", proxyBefore, backendBefore)
+	}
+
+	emptySource := t.TempDir()
+	if _, err := os.Stat(filepath.Join(emptySource, "manifest")); !os.IsNotExist(err) {
+		t.Fatalf("precondition: %s must hold no backup manifest, stat err = %v", emptySource, err)
+	}
+
+	out, err := bdProxiedRun(t, bd, p.dir, "backup", "restore", "--force", "--json", emptySource)
+	if err == nil {
+		t.Fatalf("restore from a directory without a backup succeeded:\n%s", out)
+	}
+
+	start := strings.Index(string(out), "{")
+	if start < 0 {
+		t.Fatalf("restore --json produced no JSON error:\n%s", out)
+	}
+	var failure struct {
+		Error string `json:"error"`
+	}
+	if jerr := json.Unmarshal(out[start:], &failure); jerr != nil {
+		t.Fatalf("parse restore JSON error: %v\n%s", jerr, out)
+	}
+	if !strings.Contains(failure.Error, "no Dolt backup found") || !strings.Contains(failure.Error, emptySource) {
+		t.Errorf("JSON error should name the source and the missing backup, got: %s", failure.Error)
+	}
+
+	// Both processes the refusal found are still registered and still alive.
+	proxyAfter := readManagedProxyPidFile(t, p)
+	backendAfter := readManagedBackendPidFile(t, p)
+	if proxyAfter == nil || proxyAfter.Pid != proxyBefore.Pid {
+		t.Errorf("proxy pidfile changed across the refusal: %v -> %v (a quiesce removes it)", proxyBefore, proxyAfter)
+	}
+	if backendAfter == nil || backendAfter.Pid != backendBefore.Pid {
+		t.Errorf("backend pidfile changed across the refusal: %v -> %v (a quiesce removes it)", backendBefore, backendAfter)
+	}
+	if !processAlive(proxyBefore.Pid) {
+		t.Errorf("proxy process %d died across the refusal", proxyBefore.Pid)
+	}
+	if !processAlive(backendBefore.Pid) {
+		t.Errorf("backend process %d died across the refusal", backendBefore.Pid)
+	}
+
+	// The workspace data and the source directory are unchanged.
+	issues := bdProxiedListJSON(t, bd, p)
+	var ids []string
+	for _, issue := range issues {
+		ids = append(ids, issue.ID)
+	}
+	if !slices.Contains(ids, before.ID) {
+		t.Errorf("issue %s missing after the refused restore; got %v", before.ID, ids)
+	}
+	entries, err := os.ReadDir(emptySource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("refused restore changed the source directory: %d entries", len(entries))
+	}
+}
+
 type proxiedBackupStatus struct {
 	Dolt struct {
 		Configured bool   `json:"configured"`

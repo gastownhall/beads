@@ -365,7 +365,12 @@ func runBackupRestoreProxied(ctx context.Context, dir string, force bool) error 
 	if err != nil {
 		return HandleErrorRespectJSON("%v", err)
 	}
-	backupURL, err := versioncontrolops.DirToFileURL(dir)
+	// RestoreSourceURL's no-backup refusal must land here, before the
+	// topology is asked for its database and long before it is quiesced: the
+	// quiesce takes a serving workspace's proxy and backend down, and the
+	// restore that follows would drop the live database before failing
+	// (GH#7098).
+	backupURL, err := versioncontrolops.RestoreSourceURL(dir)
 	if err != nil {
 		return HandleErrorRespectJSON("%v", err)
 	}
