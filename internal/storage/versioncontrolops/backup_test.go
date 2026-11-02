@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io/fs"
 	neturl "net/url"
 	"os"
 	"path/filepath"
@@ -37,6 +38,144 @@ func TestDirToFileURLRejectsSchemes(t *testing.T) {
 	}
 	if !strings.HasPrefix(got, "file://") || strings.Contains(got, "://backups") {
 		t.Fatalf("DirToFileURL(%q) = %q", "backups/nightly", got)
+	}
+}
+
+// TestRestoreSourceURL pins the local-source prerequisite every restore entry
+// point (embedded, sql-server and proxied) shares: a directory that is not a
+// Dolt backup store is refused before any restore work, with or without
+// --force, because DOLT_BACKUP('restore', '--force') drops the target
+// database before it discovers the source is empty (GH#7098). A regular
+// manifest file is the layout prerequisite, not a promise about the backup's
+// contents: an empty one passes, and Dolt owns interpreting it.
+func TestRestoreSourceURL(t *testing.T) {
+	base := t.TempDir()
+	regularFile := filepath.Join(base, "not-a-dir")
+	if err := os.WriteFile(regularFile, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	jsonlDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(jsonlDir, "issues.jsonl"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stateDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(stateDir, "backup_state.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dirManifest := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dirManifest, "manifest"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	dangling := t.TempDir()
+	if err := os.Symlink(filepath.Join(t.TempDir(), "absent"), filepath.Join(dangling, "manifest")); err != nil {
+		t.Fatal(err)
+	}
+
+	valid := t.TempDir()
+	if err := os.WriteFile(filepath.Join(valid, "manifest"), []byte("manifest contents are Dolt's to interpret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A regular zero-length manifest passes this layout check.
+	empty := t.TempDir()
+	if err := os.WriteFile(filepath.Join(empty, "manifest"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A symlink to a regular manifest is a regular manifest, as os.Stat
+	// resolves it.
+	linkTarget := filepath.Join(t.TempDir(), "real-manifest")
+	if err := os.WriteFile(linkTarget, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	linked := t.TempDir()
+	if err := os.Symlink(linkTarget, filepath.Join(linked, "manifest")); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name         string
+		dir          string
+		wantURL      bool   // want the source's file:// URL back
+		wantText     string // error text it must carry
+		wantNoBackup bool   // error must wrap ErrNoBackup
+	}{
+		{name: "absent path", dir: filepath.Join(base, "absent"), wantText: "backup source does not exist"},
+		{name: "regular file", dir: regularFile, wantText: "backup source is not a directory"},
+		{name: "empty dir", dir: t.TempDir(), wantText: "no Dolt backup found", wantNoBackup: true},
+		{name: "url input", dir: "https://doltremoteapi.dolthub.com/user/repo", wantText: ""},
+		{name: "jsonl export only", dir: jsonlDir, wantText: "no Dolt backup found", wantNoBackup: true},
+		{name: "backup state only", dir: stateDir, wantText: "no Dolt backup found", wantNoBackup: true},
+		{name: "directory manifest", dir: dirManifest, wantText: "no Dolt backup found", wantNoBackup: true},
+		{name: "dangling manifest symlink", dir: dangling, wantText: "no Dolt backup found", wantNoBackup: true},
+		{name: "regular manifest", dir: valid, wantURL: true},
+		{name: "empty regular manifest", dir: empty, wantURL: true},
+		{name: "manifest symlink to a regular file", dir: linked, wantURL: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := RestoreSourceURL(tc.dir)
+			if tc.wantURL {
+				if err != nil {
+					t.Fatalf("RestoreSourceURL(%q) = %v, want the source's URL", tc.dir, err)
+				}
+				if want, werr := DirToFileURL(tc.dir); werr != nil || got != want {
+					t.Errorf("RestoreSourceURL(%q) = %q, want %q (DirToFileURL of it)", tc.dir, got, want)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("RestoreSourceURL(%q) = %q, want a refusal", tc.dir, got)
+			}
+			if tc.wantText != "" && !strings.Contains(err.Error(), tc.wantText) {
+				t.Errorf("error = %v, want it to contain %q", err, tc.wantText)
+			}
+			if tc.wantText != "" && !strings.Contains(err.Error(), tc.dir) {
+				t.Errorf("error = %v, want it to name the source %q", err, tc.dir)
+			}
+			if gotNoBackup := errors.Is(err, ErrNoBackup); gotNoBackup != tc.wantNoBackup {
+				t.Errorf("errors.Is(err, ErrNoBackup) = %v, want %v (err = %v)", gotNoBackup, tc.wantNoBackup, err)
+			}
+		})
+	}
+
+	// A directory whose manifest cannot be stat'd is refused with the
+	// underlying error preserved, not reported as a missing backup. Root and
+	// non-POSIX builds cannot make this happen; elsewhere the mode change is
+	// the whole fixture.
+	if os.Geteuid() != 0 {
+		denied := t.TempDir()
+		if err := os.WriteFile(filepath.Join(denied, "manifest"), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(denied, 0o000); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(denied, 0o700) })
+		_, err := RestoreSourceURL(denied)
+		if !errors.Is(err, fs.ErrPermission) {
+			t.Errorf("RestoreSourceURL(denied) = %v, want the underlying permission error preserved", err)
+		}
+		if errors.Is(err, ErrNoBackup) {
+			t.Errorf("a permission failure is not a missing backup: %v", err)
+		}
+	}
+
+	// Paths with characters URLs treat specially must round-trip through the
+	// same conversion DirToFileURL performs, not a reverse conversion.
+	for _, name := range []string{"a dir", "100%done", "my#dir"} {
+		special := filepath.Join(t.TempDir(), name)
+		if err := os.MkdirAll(special, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(special, "manifest"), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		got, err := RestoreSourceURL(special)
+		if err != nil {
+			t.Fatalf("RestoreSourceURL(%q): %v", special, err)
+		}
+		if want, werr := DirToFileURL(special); werr != nil || got != want {
+			t.Errorf("RestoreSourceURL(%q) = %q, want %q", special, got, want)
+		}
 	}
 }
 

@@ -318,6 +318,29 @@ func TestEmbeddedBackupRestoreRefusesSourceWithoutBackup(t *testing.T) {
 		}
 	})
 
+	// The prerequisite holds without --force too: a directory without a
+	// backup is never a usable local restore source, so the refusal replaces
+	// whatever error the engine would have produced for it.
+	t.Run("without_force", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "bknofo")
+		id := bdCreateSilent(t, bd, dir, "survives refused non-force restore")
+
+		source := t.TempDir()
+		requireNoManifest(t, source)
+
+		out := bdBackupFail(t, bd, dir, "restore", source)
+		if !strings.Contains(out, "no Dolt backup found") {
+			t.Errorf("refusal should say no Dolt backup was found, got:\n%s", out)
+		}
+		if !strings.Contains(out, source) {
+			t.Errorf("refusal should name the source directory %s, got:\n%s", source, out)
+		}
+
+		if out := bdRunOK(t, bd, dir, "show", id, "--json"); !strings.Contains(out, "survives refused non-force restore") {
+			t.Fatalf("issue %s missing after the refused restore: %s", id, out)
+		}
+	})
+
 	// The no-argument form reads the default backup directory, which the CLI
 	// creates when it does not exist, so a never-synced default directory is
 	// the same defect's most direct trigger.
