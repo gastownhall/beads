@@ -1205,6 +1205,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   [Upgrading](docs/getting-started/upgrading.md) gives a manual recipe for
   v1.3.2 and earlier, and how to retry a restore that skipped history
   (#7039).
+- Upgrading an older database no longer rewrites issue and wisp `updated_at`
+  values with the time of the upgrade. Schema migrations 0035, 0046, 0047 and
+  0053 and ignored migration 0007 update rows without assigning `updated_at`,
+  so its `ON UPDATE CURRENT_TIMESTAMP` stamped every row they touched (every
+  blocked issue on a 1.0.x upgrade, for example). Migration 0041 and ignored
+  migrations 0003 and 0011 stamped rows they only join: the engine applies
+  `ON UPDATE` to every table a multi-table UPDATE joins, so 0041's dependency
+  split stamped every issue and wisp a dependency points at. Their SQL is
+  frozen, so bd now records the affected rows' `updated_at` before each of
+  these steps and writes it back on the rows the step rewrote before the step
+  is recorded and committed; the pre-0047/0053 repair that splits legacy wisp
+  dependencies no longer joins the tables it would stamp (#5981). An edit
+  another process makes during the step to an issue the step does not rewrite
+  keeps its own time. Values already stamped by an earlier upgrade are not
+  repaired.
 - `bd dolt push <remote>` and `bd dolt pull <remote>` now push to and pull
   from the named remote. bd ignored the name, so `bd dolt push 1st` pushed to
   the default remote and reported "Push complete."; a name that differs from
