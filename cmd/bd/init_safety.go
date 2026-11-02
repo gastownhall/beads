@@ -268,7 +268,13 @@ func refusalMessageUnverifiedRemote() string {
        local source. Neither authorizes silent divergence of remote history.
 
   Next:
-    See 'bd help init-safety'.`
+    Restore access to the remote (check credentials, the URL, and the
+    network) and re-run bd init.
+
+    Or initialize without configuring a remote for this invocation:
+      add --remote=""
+
+    For an intentional discard of remote history, see 'bd help init-safety'.`
 }
 
 // refusalMessageTokenMissing returns the What/Why/Next refusal text for

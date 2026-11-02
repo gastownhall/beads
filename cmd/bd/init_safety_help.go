@@ -31,9 +31,14 @@ FLAG SURFACE
                                 local data. Does NOT authorize discarding
                                 remote history. If origin has Dolt data
                                 this will refuse — pair with
-                                --discard-remote to override. Nor does it
-                                authorize recreating a missing server-mode
-                                database; that takes --recreate-missing.
+                                --discard-remote to override. If origin
+                                cannot be READ (credentials, URL,
+                                network), the same refusal fires saying bd
+                                could not VERIFY it: an unreadable remote
+                                counts as having history until it can be
+                                read. Nor does it authorize recreating a
+                                missing server-mode database; that takes
+                                --recreate-missing.
 
   bd init --reinit-local \      Discard the remote's Dolt history and
       --discard-remote          replace it with the local reinit. First
@@ -63,7 +68,17 @@ FLAG SURFACE
   bd init --from-jsonl          Import from configured import.path. If
                                 origin has Dolt data, this refuses unless
                                 --discard-remote authorizes replacing that
-                                remote history.
+                                remote history. An origin bd cannot read
+                                refuses the same way: it may have history.
+
+  bd init --remote=""           Initialize without configuring a remote
+                                for this invocation: an explicitly empty
+                                --remote suppresses ambient sync.remote
+                                config and git-origin discovery, so bd
+                                neither probes nor wires the remote. Does
+                                NOT remove an existing sync.remote or
+                                Dolt remote. Check the remote's history
+                                before adding a remote later.
 
 ADOPTING A REMOTE
 
@@ -93,8 +108,10 @@ DESTROY-TOKEN (non-interactive only)
 
 EXIT CODES
 
-  10    refused: remote has Dolt history and you selected local history
-        without --discard-remote
+  10    refused: remote has Dolt history — verified, or unverified
+        because the probe could not read the remote — and you selected
+        local history without --discard-remote. The two cases share the
+        code; the message says which one fired.
   11    refused: existing local data and you declined the destroy confirm
         (interactive mode only)
   12    refused: destructive re-init (--discard-remote, or --reinit-local

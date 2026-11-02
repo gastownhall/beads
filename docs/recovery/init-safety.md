@@ -3,7 +3,7 @@ title: Recovery Playbooks
 description: Step-by-step recovery for bd init and bd dolt push/pull refusals, including the primary-key fork playbook
 ---
 
-Last reviewed: 2026-10-01
+Last reviewed: 2026-11-02
 
 Freshness source: `cmd/bd/init.go`, `cmd/bd/init_safety.go`,
 `cmd/bd/init_safety_test.go`, `cmd/bd/init_safety_help.go`, and
@@ -23,6 +23,7 @@ See also: `bd help init-safety`, and
 ## Table of contents
 
 - [init-force-refused — `bd init --force`/`--reinit-local` refused because origin has Dolt history](#init-force-refused)
+- [init-remote-unverified — `bd init` refused because it could not verify whether the remote has Dolt history](#init-remote-unverified)
 - [init-token-missing — a destructive re-init refused because `--destroy-token` is missing or wrong](#init-token-missing)
 - [init-local-exists — `bd init --reinit-local` refused because local data already exists](#init-local-exists)
 - [init-home-refused — `bd init` refused because the working directory is your home directory](#init-home-refused)
@@ -54,6 +55,11 @@ remote already has project history. Proceeding would create an orphan local
 Dolt branch with no common ancestor on origin. The
 next `bd dolt push` would either fail (no common ancestor) or — worse, if
 force-pushed — destroy the team's data.
+
+If the refusal instead says bd *could not verify* whether the remote has
+Dolt history, the probe could not read the remote at all — a different
+situation with its own playbook in
+[init-remote-unverified](#init-remote-unverified).
 
 **Recovery paths**
 
@@ -93,6 +99,74 @@ See `bd help init-safety` for the token format.
 After `bd init --reinit-local --discard-remote`, your next
 `bd dolt push` must be a history-replacing push. Coordinate with your
 team before doing this.
+
+---
+
+## init-remote-unverified
+
+**Exit code:** `10` (`ExitRemoteDivergenceRefused`)
+
+**Symptom**
+
+```
+bd init refuses: could not verify whether remote 'origin' has Dolt history (refs/dolt/data).
+  Why: the check of the remote failed (see the warning above for the URL
+       and the error), so bd cannot rule out remote Dolt history ...
+```
+
+A warning line printed just before the refusal names the probed URL and the
+underlying error, for example a `git ls-remote` authentication failure.
+
+**Why this happens**
+
+`bd init` probes the remote for `refs/dolt/data` with `git ls-remote`.
+When the probe cannot read the remote — missing credentials for a private
+repository, a wrong URL, a network failure — the answer is UNKNOWN, not
+"no data". Following
+[ADR 0002](https://github.com/gastownhall/beads/blob/main/engdocs/adr/0002-init-safety-invariants.md),
+bd treats an unreadable remote as one that may have history, because a
+fresh local identity pushed over unseen history would orphan it.
+
+Plain `bd init` has no local-source flag to refuse in this case, so it
+warns ("Could not verify the git origin's Dolt history") and initializes a
+fresh local database. `--reinit-local`, `--force` and `--from-jsonl`
+explicitly select local history, so they meet the refusal instead: the
+same exit `10` as the verified [init-force-refused](#init-force-refused)
+case, but the message says bd could not *verify* the remote rather than
+asserting it has history. `--reinit-local` and `--force` bypass only the
+LOCAL data-safety guard; they never authorize divergence of remote
+history, whether or not bd could read it.
+
+**Recovery paths**
+
+### 1. Restore access to the remote (most common)
+
+Check credentials, the URL, and the network until `git ls-remote <url>
+refs/dolt/data` answers, then re-run `bd init`. With the remote readable,
+the probe decides: no Dolt data initializes a fresh database; existing
+Dolt data gives the verified [init-force-refused](#init-force-refused)
+refusal.
+
+### 2. Initialize without a remote for this invocation
+
+```
+bd init --reinit-local --remote=""
+```
+
+The explicitly empty `--remote` suppresses ambient `sync.remote` config and
+git-origin discovery, so bd neither probes nor wires the remote. It does
+NOT remove an existing `sync.remote` or Dolt remote, and it bypasses no
+local data guard. Check the remote's history before adding a remote later
+(`bd dolt remote add`): adopting unread history is exactly the divergence
+this refusal guards against.
+
+### 3. You have independently confirmed the remote is empty or disposable
+
+If you can read the remote by other means and it has no Dolt history (or
+you intend to replace it), follow recovery path 3 of
+[init-force-refused](#init-force-refused): pair the local-source flag with
+`--discard-remote`. See `bd help init-safety` for the destroy-token
+workflow.
 
 ---
 

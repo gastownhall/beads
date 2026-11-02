@@ -187,6 +187,56 @@ func TestInitOverrideWithUnreadableRemoteRefusesAsUnverified(t *testing.T) {
 	}
 }
 
+// TestCheckRemoteSafety_UnverifiedRefusalText pins the recovery contract of
+// the unverified-remote refusal (GH#7665): it must explain that the failed
+// check cannot rule out remote history and name the reachable remedies —
+// restore access, or initialize without a remote via --remote="" — while
+// never suggesting bootstrap (the remote was never read, so adopting it is
+// advice about an unknown), echoing a destroy-token value, or constructing a
+// complete destructive invocation (same no-echo contract as
+// TestCheckRemoteSafety_RefusalTextNoEcho).
+func TestCheckRemoteSafety_UnverifiedRefusalText(t *testing.T) {
+	got := CheckRemoteSafety(RemoteSafetyInput{
+		RemoteHasDoltData: true, RemoteDoltDataUnverified: true, ReinitLocal: true,
+	})
+	if got.Action != ActionRefuseDivergence {
+		t.Fatalf("Action = %v, want ActionRefuseDivergence", got.Action)
+	}
+	msg := got.UserMessage
+
+	for _, must := range []string{
+		"could not verify whether remote 'origin' has Dolt history",
+		"cannot rule out",     // explains the failed check
+		"credentials",         // restore-access remedy
+		`--remote=""`,         // opt-out remedy
+		"bd help init-safety", // intentional-discard pointer
+	} {
+		if !strings.Contains(msg, must) {
+			t.Errorf("unverified refusal missing %q:\n%s", must, msg)
+		}
+	}
+
+	for _, banned := range []string{
+		"already has Dolt history", // the false assertion GH#7665 reports
+		"bd bootstrap",             // adoption advice about an unreadable remote
+		"DESTROY-",                 // token values live in help, not errors
+		"bd init --force --discard-remote --destroy-token",
+		"bd init --reinit-local --discard-remote --destroy-token",
+	} {
+		if strings.Contains(msg, banned) {
+			t.Errorf("unverified refusal contains banned echo %q:\n%s", banned, msg)
+		}
+	}
+
+	// The verified refusal keeps its own message: the two texts must stay
+	// distinct so the unverified wording can never silently replace the
+	// verified diagnosis (and vice versa).
+	verified := CheckRemoteSafety(RemoteSafetyInput{RemoteHasDoltData: true, ReinitLocal: true})
+	if verified.UserMessage == msg {
+		t.Error("unverified and verified refusals are identical, so the probe's uncertainty is not carried")
+	}
+}
+
 // TestInitReinitLocalConfiguredRemoteWithDoltDataRefuses is the sibling case:
 // sync.remote (again via BD_SYNC_REMOTE, not --remote) points at a bare repo
 // that DOES have refs/dolt/data pushed to it. `bd init --reinit-local` must
