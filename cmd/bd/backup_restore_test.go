@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -18,6 +19,7 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 	"github.com/steveyegge/beads/internal/testutil"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -43,6 +45,157 @@ func TestBackupRestoreMissingDir(t *testing.T) {
 	err := runBackupRestore(ctx, s, "/nonexistent/path", false)
 	if err == nil {
 		t.Error("expected error for nonexistent backup dir")
+	}
+}
+
+// TestBackupRestoreRefusesSourceWithoutBackup pins the sql-server half of
+// GH#7098: RestoreDatabase must refuse a local source directory that holds no
+// Dolt backup before it issues any restore SQL, because
+// DOLT_BACKUP('restore', '--force') drops the target database on the server
+// before it discovers the source is empty. It covers the store method SDK
+// callers use and the command's runBackupRestore, from an empty directory and
+// from a JSONL-only export. Every case asserts the postcondition (the issues,
+// the configuration, the current commit and the source's bytes are as they
+// were) even when the diagnostic is wrong, so a regression demonstrates data
+// loss, not merely an error-text mismatch. Each case gets its own isolated
+// database: a restore that runs replaces it, and two cases must not read each
+// other's damage.
+func TestBackupRestoreRefusesSourceWithoutBackup(t *testing.T) {
+	t.Run("store_without_connection", func(t *testing.T) {
+		// A zero DoltStore has no server to reach: the refusal must come from
+		// the source check alone, before a restore connection is opened.
+		err := (&dolt.DoltStore{}).RestoreDatabase(context.Background(), t.TempDir(), true)
+		if !errors.Is(err, versioncontrolops.ErrNoBackup) {
+			t.Fatalf("RestoreDatabase on a store without a connection = %v, want ErrNoBackup before any connection", err)
+		}
+	})
+
+	if testDoltServerPort == 0 {
+		t.Skip("Dolt test server not available")
+	}
+	if testutil.DoltContainerCrashed() {
+		t.Skipf("Dolt test server crashed: %v", testutil.DoltContainerCrashError())
+	}
+
+	seeds := map[string]string{
+		"bk-1": "issue the refused restore must leave in place A",
+		"bk-2": "issue the refused restore must leave in place B",
+	}
+
+	// newWorkspace returns a store on its own database holding the committed
+	// seed issues, plus the database's current commit.
+	newWorkspace := func(t *testing.T) (ctx context.Context, s *dolt.DoltStore, commit string) {
+		t.Helper()
+		ctx = context.Background()
+		s = newTestStoreIsolatedDB(t, filepath.Join(t.TempDir(), "dolt"), "bk")
+
+		now := time.Now()
+		for _, id := range []string{"bk-1", "bk-2"} {
+			if err := s.CreateIssue(ctx, &types.Issue{
+				ID:        id,
+				Title:     seeds[id],
+				Status:    types.StatusOpen,
+				Priority:  2,
+				IssueType: types.TypeTask,
+				CreatedAt: now,
+				UpdatedAt: now,
+			}, "test-user"); err != nil {
+				t.Fatalf("create issue %s: %v", id, err)
+			}
+		}
+		if err := s.Commit(ctx, "seed issues"); err != nil && !strings.Contains(err.Error(), "nothing to commit") {
+			t.Fatalf("commit seed issues: %v", err)
+		}
+		commit, err := s.GetCurrentCommit(ctx)
+		if err != nil {
+			t.Fatalf("read current commit: %v", err)
+		}
+		return ctx, s, commit
+	}
+
+	// snapshotSource records each entry of dir with its bytes, so a case can
+	// show the refusal left the source as it was.
+	snapshotSource := func(t *testing.T, dir string) map[string]string {
+		t.Helper()
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatalf("read source %s: %v", dir, err)
+		}
+		files := map[string]string{}
+		for _, e := range entries {
+			data, err := os.ReadFile(filepath.Join(dir, e.Name()))
+			if err != nil {
+				t.Fatalf("read source entry %s: %v", e.Name(), err)
+			}
+			files[e.Name()] = string(data)
+		}
+		return files
+	}
+
+	sources := []struct {
+		name  string
+		files map[string]string // the source's contents; none is an empty directory
+	}{
+		{name: "empty_dir"},
+		{name: "jsonl_export_only", files: map[string]string{"issues.jsonl": "{\"id\":\"bk-9\"}\n"}},
+	}
+	entries := []struct {
+		name    string
+		restore func(ctx context.Context, s *dolt.DoltStore, source string) error
+	}{
+		{"store_method", func(ctx context.Context, s *dolt.DoltStore, source string) error {
+			return s.RestoreDatabase(ctx, source, true)
+		}},
+		// runBackupRestore is the path the command takes above the store; the
+		// refusal must survive its wrapping.
+		{"run_backup_restore", func(ctx context.Context, s *dolt.DoltStore, source string) error {
+			return runBackupRestore(ctx, s, source, true)
+		}},
+	}
+	for _, entry := range entries {
+		for _, src := range sources {
+			t.Run(entry.name+"/"+src.name, func(t *testing.T) {
+				ctx, s, commit := newWorkspace(t)
+
+				source := t.TempDir()
+				for name, data := range src.files {
+					if err := os.WriteFile(filepath.Join(source, name), []byte(data), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if _, err := os.Stat(filepath.Join(source, "manifest")); !os.IsNotExist(err) {
+					t.Fatalf("precondition: %s must hold no backup manifest, stat err = %v", source, err)
+				}
+				sourceBefore := snapshotSource(t, source)
+
+				err := entry.restore(ctx, s, source)
+				if !errors.Is(err, versioncontrolops.ErrNoBackup) {
+					t.Errorf("restore from %s = %v, want an error wrapping ErrNoBackup", source, err)
+				} else if !strings.Contains(err.Error(), "no Dolt backup found") || !strings.Contains(err.Error(), source) {
+					t.Errorf("restore error should name the source and the missing backup, got: %v", err)
+				}
+
+				for id, title := range seeds {
+					got, err := s.GetIssue(ctx, id)
+					if err != nil {
+						t.Errorf("issue %s is missing after the refused restore (the database was replaced): %v", id, err)
+						continue
+					}
+					if got.Title != title {
+						t.Errorf("issue %s came back as %q, want %q", id, got.Title, title)
+					}
+				}
+				if prefix, err := s.GetConfig(ctx, "issue_prefix"); err != nil || prefix != "bk" {
+					t.Errorf("issue_prefix after the refused restore = %q, %v; want %q", prefix, err, "bk")
+				}
+				if after, err := s.GetCurrentCommit(ctx); err != nil || after != commit {
+					t.Errorf("current commit after the refused restore = %q, %v; want %q", after, err, commit)
+				}
+				if sourceAfter := snapshotSource(t, source); fmt.Sprint(sourceAfter) != fmt.Sprint(sourceBefore) {
+					t.Errorf("source %s changed across the refused restore: before %v, after %v", source, sourceBefore, sourceAfter)
+				}
+			})
+		}
 	}
 }
 
