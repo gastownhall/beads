@@ -798,8 +798,9 @@ func runRulesCompact(cmd *cobra.Command, args []string) error {
 			Sources []compactSourceReport `json:"sources"`
 			Error   string                `json:"error,omitempty"`
 		}
-		var results []compactResult
+		results := make([]compactResult, 0, len(result.MergeCandidates))
 		failed := 0
+		reservedOutputs := make(map[string]string, len(result.MergeCandidates))
 
 		for _, mc := range result.MergeCandidates {
 			// Parse the actual rule files for this group
@@ -827,6 +828,16 @@ func runRulesCompact(cmd *cobra.Command, args []string) error {
 				Rules:   len(groupRules),
 				Sources: newCompactSourceReports(groupRules),
 			}
+			if err := checkCompactDestinations(filepath.Join(rulesPath, outName), res.Sources, reservedOutputs); err != nil {
+				res.Error = err.Error()
+				failed++
+				results = append(results, res)
+				if !jsonOutput {
+					fmt.Fprintf(os.Stderr, "Refused group %q: %v\n", mc.GroupLabel, err)
+				}
+				continue
+			}
+			reservedOutputs[outName] = mc.GroupLabel
 			if apply {
 				written, err := writeCompactedRule(filepath.Join(rulesPath, outName), merged, groupRules, res.Sources)
 				res.Applied = written
@@ -881,6 +892,9 @@ func runRulesCompact(cmd *cobra.Command, args []string) error {
 
 	outName := strings.ReplaceAll(label, " ", "-") + ".md"
 	sourceReports := newCompactSourceReports(groupRules)
+	if err := checkCompactDestinations(filepath.Join(rulesPath, outName), sourceReports, nil); err != nil {
+		return HandleErrorRespectJSON("%v", err)
+	}
 	written := false
 	var applyErr error
 	if apply {
@@ -965,6 +979,33 @@ type compactSourceReport struct {
 // before the source is deleted.
 func backupPathFor(sourcePath string) string {
 	return sourcePath + ".backup"
+}
+
+// checkCompactDestinations refuses a group whose composite or any backup
+// path already exists on disk — a dangling symlink counts, because Lstat
+// sees the link itself — or whose output name another group in this
+// invocation already claimed, so duplicate labels cannot silently fight
+// over one file. Checking before any write keeps a refused group
+// untouched; the exclusive creation in writeCompactedRule stays the final
+// guard for destinations that appear between this check and the apply.
+func checkCompactDestinations(outPath string, sources []compactSourceReport, reserved map[string]string) error {
+	if claimer, ok := reserved[filepath.Base(outPath)]; ok {
+		return fmt.Errorf("%s is already planned as the output of group %q in this run; rename one group's rules first", outPath, claimer)
+	}
+	if _, err := os.Lstat(outPath); err == nil {
+		return fmt.Errorf("%s already exists; refusing to overwrite it. Rename or move that file (and update --group if it names it), then re-run", outPath)
+	}
+	seen := make(map[string]bool, len(sources))
+	for _, r := range sources {
+		if seen[r.Backup] {
+			continue
+		}
+		seen[r.Backup] = true
+		if _, err := os.Lstat(r.Backup); err == nil {
+			return fmt.Errorf("%s already exists; refusing to overwrite it. Rename or move that file, then re-run", r.Backup)
+		}
+	}
+	return nil
 }
 
 // newCompactSourceReports builds one report per source entry, in order.

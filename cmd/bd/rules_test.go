@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -1110,5 +1111,288 @@ func TestRulesCompact_Issue5719KeepsBackups(t *testing.T) {
 				t.Errorf("audit counts %d rules after the merge, want 1 (the .backup copies must not count)", audit.TotalRules)
 			}
 		})
+	}
+}
+
+// refusesCompactResult runs compact expecting a refusal, returning the
+// captured stderr and the command error, so subtests can share the setup.
+func refusesCompactResult(t *testing.T, args ...string) (string, error) {
+	t.Helper()
+	cmd := newRulesCompactTestCmd(t, args...)
+	var err error
+	stderr := captureStderr(t, func() {
+		captureStdoutIgnoringError(t, func() { err = runRulesCompact(cmd, nil) })
+	})
+	return stderr, err
+}
+
+// An existing .backup destination refuses the group, in preview and apply,
+// because applying would have to overwrite a recovery copy that is not this
+// run's to replace.
+func TestRulesCompact_RefusesExistingBackupDestination(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"preview auto", []string{"--auto"}},
+		{"apply auto", []string{"--auto", "--force"}},
+		{"preview group", []string{"--group", "alpha,beta"}},
+		{"apply group", []string{"--group", "alpha,beta", "--force"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := tempRulesDir(t)
+			writeRule(t, dir, "alpha", fmt.Sprintf(sharedDiskDirective, "Alpha", "alpha"))
+			writeRule(t, dir, "beta", fmt.Sprintf(sharedDiskDirective, "Beta", "beta"))
+			const backupContent = "precious earlier recovery copy"
+			if err := os.WriteFile(filepath.Join(dir, "alpha.md.backup"), []byte(backupContent), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			before := snapshotRulesDir(t, dir)
+
+			stderr, err := refusesCompactResult(t, append([]string{"--path", dir}, tc.args...)...)
+
+			if err == nil {
+				t.Fatal("expected compact to fail rather than touch alpha.md.backup")
+			}
+			if !strings.Contains(stderr, "alpha.md.backup already exists") && !strings.Contains(stderr, filepath.Join(dir, "alpha.md.backup")+" already exists") {
+				t.Errorf("expected the refusal to name alpha.md.backup, got: %s", stderr)
+			}
+			assertRulesDirUnchanged(t, dir, before)
+		})
+	}
+}
+
+// A JSON refusal must surface the conflict and exit nonzero without
+// applying anything.
+func TestRulesCompact_RefusesExistingBackupDestinationJSON(t *testing.T) {
+	dir := tempRulesDir(t)
+	writeRule(t, dir, "alpha", fmt.Sprintf(sharedDiskDirective, "Alpha", "alpha"))
+	writeRule(t, dir, "beta", fmt.Sprintf(sharedDiskDirective, "Beta", "beta"))
+	if err := os.WriteFile(filepath.Join(dir, "alpha.md.backup"), []byte("precious"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before := snapshotRulesDir(t, dir)
+
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"auto", []string{"--auto", "--force"}},
+		{"group", []string{"--group", "alpha,beta", "--force"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var payload interface{}
+			var err error
+			if tc.name == "auto" {
+				payload, err = runRulesCompactJSONValue(t, append([]string{"--path", dir}, tc.args...)...)
+			} else {
+				payload, err = runRulesCompactJSONValue(t, append([]string{"--path", dir}, tc.args...)...)
+			}
+			if err == nil {
+				t.Fatal("expected a nonzero exit for the refused group")
+			}
+			encoded, mErr := json.Marshal(payload)
+			if mErr != nil {
+				t.Fatal(mErr)
+			}
+			if !strings.Contains(string(encoded), "alpha.md.backup already exists") {
+				t.Errorf("expected the JSON error to name alpha.md.backup, got: %s", encoded)
+			}
+		})
+	}
+	assertRulesDirUnchanged(t, dir, before)
+}
+
+// snapshotRulesDirNoFollow snapshots a directory that may hold symlinks,
+// recording them by kind instead of following them (a dangling link cannot
+// be read through).
+func snapshotRulesDirNoFollow(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read dir: %v", err)
+	}
+	files := make(map[string]string, len(entries))
+	for _, e := range entries {
+		if info, err := e.Info(); err == nil && info.Mode()&os.ModeSymlink != 0 {
+			files[e.Name()] = "<symlink>"
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			t.Fatalf("read %s: %v", e.Name(), err)
+		}
+		files[e.Name()] = string(data)
+	}
+	return files
+}
+
+func assertRulesDirUnchangedNoFollow(t *testing.T, dir string, before map[string]string) {
+	t.Helper()
+	after := snapshotRulesDirNoFollow(t, dir)
+	if len(after) != len(before) {
+		t.Fatalf("rules dir changed: before %v, after %v", ruleFileNames(before), ruleFileNames(after))
+	}
+	for name, content := range before {
+		if after[name] != content {
+			t.Errorf("%s changed:\nbefore: %q\nafter:  %q", name, content, after[name])
+		}
+	}
+}
+
+// A destination that exists only as a dangling symlink still counts as
+// taken: Lstat sees the link, and following it would replace the link.
+func TestRulesCompact_RefusesDanglingSymlinkDestination(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating symlinks on windows needs developer mode")
+	}
+	for _, tc := range []struct {
+		name   string
+		link   string
+		apply  bool
+		labels [2]string
+	}{
+		{"output symlink preview", "disk.md", false, [2]string{"Alpha", "Beta"}},
+		{"output symlink apply", "disk.md", true, [2]string{"Alpha", "Beta"}},
+		{"backup symlink preview", "alpha.md.backup", false, [2]string{"Alpha", "Beta"}},
+		{"backup symlink apply", "alpha.md.backup", true, [2]string{"Alpha", "Beta"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := tempRulesDir(t)
+			writeRule(t, dir, "alpha", fmt.Sprintf(sharedDiskDirective, tc.labels[0], "alpha"))
+			writeRule(t, dir, "beta", fmt.Sprintf(sharedDiskDirective, tc.labels[1], "beta"))
+			if err := os.Symlink(filepath.Join(dir, "does-not-exist"), filepath.Join(dir, tc.link)); err != nil {
+				t.Fatal(err)
+			}
+			before := snapshotRulesDirNoFollow(t, dir)
+
+			args := []string{"--path", dir, "--group", "alpha,beta"}
+			if tc.apply {
+				args = append(args, "--force")
+			}
+			stderr, err := refusesCompactResult(t, args...)
+
+			if err == nil {
+				t.Fatal("expected compact to refuse the dangling symlink destination")
+			}
+			if !strings.Contains(stderr, tc.link+" already exists") {
+				t.Errorf("expected the refusal to name %s, got: %s", tc.link, stderr)
+			}
+			assertRulesDirUnchangedNoFollow(t, dir, before)
+		})
+	}
+}
+
+// Two auto groups whose labels collapse onto the same output name: the
+// first claims the name, the second is refused, and an independent group
+// is still processed.
+func TestRulesCompact_AutoRefusesDuplicateOutputLabels(t *testing.T) {
+	dir := tempRulesDir(t)
+	// Two 3-member chains whose dominant keyword is "disk" for both, so
+	// both groups are labelled disk; the quota pair forms an independent
+	// second group.
+	writeRule(t, dir, "a1", "# A1\n\n**Do:** disk alpha\n")
+	writeRule(t, dir, "a2", "# A2\n\n**Do:** disk alpha beta\n")
+	writeRule(t, dir, "a3", "# A3\n\n**Do:** disk beta\n")
+	writeRule(t, dir, "b1", "# B1\n\n**Do:** disk gamma\n")
+	writeRule(t, dir, "b2", "# B2\n\n**Do:** disk gamma delta\n")
+	writeRule(t, dir, "b3", "# B3\n\n**Do:** disk delta\n")
+	writeRule(t, dir, "q1", "# Q1\n\n**Do:** quota\n")
+	writeRule(t, dir, "q2", "# Q2\n\n**Do:** quota\n")
+
+	// Preview: nothing is written, so only the in-run reservation can
+	// catch the second disk group; the refusal exits nonzero.
+	var previewErr error
+	previewStderr := captureStderr(t, func() {
+		captureStdoutIgnoringError(t, func() { previewErr = runRulesCompact(newRulesCompactTestCmd(t, "--path", dir, "--auto"), nil) })
+	})
+	if previewErr == nil {
+		t.Fatal("expected the preview to exit nonzero for the refused duplicate group")
+	}
+	if !strings.Contains(previewStderr, "disk.md") {
+		t.Errorf("expected the preview refusal to name disk.md, got: %s", previewStderr)
+	}
+	for _, name := range []string{"a1.md", "a2.md", "a3.md", "b1.md", "b2.md", "b3.md", "q1.md", "q2.md"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Errorf("preview must not write or delete anything; %s: %v", name, err)
+		}
+	}
+
+	// Apply: the first disk group lands, the second is refused by the
+	// composite now on disk, and the quota group still applies.
+	var applyErr error
+	stderr := captureStderr(t, func() {
+		captureStdoutIgnoringError(t, func() { applyErr = runRulesCompact(newRulesCompactTestCmd(t, "--path", dir, "--auto", "--force"), nil) })
+	})
+	if applyErr == nil {
+		t.Fatal("expected a nonzero exit for the refused duplicate group")
+	}
+	if !strings.Contains(stderr, "disk.md") {
+		t.Errorf("expected the duplicate-label refusal to name disk.md, got: %s", stderr)
+	}
+	after := snapshotRulesDir(t, dir)
+	if _, ok := after["disk.md"]; !ok {
+		t.Errorf("expected the first disk group's composite, got %v", ruleFileNames(after))
+	}
+	if _, ok := after["quota.md"]; !ok {
+		t.Errorf("expected the quota group to apply independently, got %v", ruleFileNames(after))
+	}
+	// Whichever disk group ran second keeps every source byte-for-byte.
+	aGone, bGone := true, true
+	for _, name := range []string{"a1.md", "a2.md", "a3.md"} {
+		if _, ok := after[name]; ok {
+			aGone = false
+		}
+	}
+	for _, name := range []string{"b1.md", "b2.md", "b3.md"} {
+		if _, ok := after[name]; ok {
+			bGone = false
+		}
+	}
+	if aGone == bGone {
+		t.Errorf("exactly one disk group should have applied (a-gone=%v, b-gone=%v): %v", aGone, bGone, ruleFileNames(after))
+	}
+	survivors := map[string]string{"a1.md": "# A1\n\n**Do:** disk alpha\n", "b1.md": "# B1\n\n**Do:** disk gamma\n"}
+	for name, want := range survivors {
+		if got, ok := after[name]; ok && got != want {
+			t.Errorf("%s changed: %q", name, got)
+		}
+	}
+}
+
+// A backup that appears between the preflight check and the apply must be
+// refused by exclusive creation, without being altered: the composite and
+// the completed backups stay, the sources survive, the existing file keeps
+// its bytes.
+func TestWriteCompactedRule_NeverAltersExistingBackup(t *testing.T) {
+	dir := tempRulesDir(t)
+	alpha := writeRule(t, dir, "alpha", "# Alpha\n")
+	beta := writeRule(t, dir, "beta", "# Beta\n")
+	const existing = "earlier recovery copy, not this run's"
+	if err := os.WriteFile(filepath.Join(dir, "beta.md.backup"), []byte(existing), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sources := []RuleFile{{Path: alpha}, {Path: beta}}
+	reports := newCompactSourceReports(sources)
+
+	composite := filepath.Join(dir, "composite.md")
+	written, err := writeCompactedRule(composite, "# Composite\n", sources, reports)
+
+	if err == nil || !strings.Contains(err.Error(), "beta.md.backup already exists") {
+		t.Fatalf("expected the refusal to name beta.md.backup, got: %v", err)
+	}
+	if !written {
+		t.Error("expected written=true: the composite is created before the backups")
+	}
+	if got, rErr := os.ReadFile(filepath.Join(dir, "beta.md.backup")); rErr != nil || string(got) != existing {
+		t.Errorf("existing backup must keep its bytes, got %q (%v)", got, rErr)
+	}
+	for _, path := range []string{alpha, beta, alpha + ".backup", composite} {
+		if _, statErr := os.Stat(path); statErr != nil {
+			t.Errorf("%s must survive the refusal: %v", path, statErr)
+		}
+	}
+	if !reports[0].BackedUp || reports[1].BackedUp {
+		t.Errorf("reports must reflect the partial state: %+v", reports)
 	}
 }
