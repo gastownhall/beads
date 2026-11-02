@@ -39,14 +39,18 @@ func CollectPlatformInfo(path string) map[string]string {
 	return info
 }
 
-func startCPUProfile(path string) (*os.File, error) {
-	// #nosec G304 -- profile path supplied by CLI flag in trusted environment
-	f, err := os.Create(path)
+func startCPUProfile(dir, base string) (*os.File, error) {
+	// CreateTemp: exclusive creation under a name neither predictable nor
+	// pre-placeable, in the requested directory. A second-resolution name
+	// with os.Create followed a committed symlink and collided with any
+	// preexisting entry (bd-1tmym4 / #7888).
+	f, err := os.CreateTemp(dir, base+"-*.prof")
 	if err != nil {
 		return nil, err
 	}
 	if err := pprof.StartCPUProfile(f); err != nil {
 		_ = f.Close()
+		_ = os.Remove(f.Name()) // clean up the failed start's temp file
 		return nil, err
 	}
 	return f, nil

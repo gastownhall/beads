@@ -145,6 +145,7 @@ go_test(
         "multirepo_test.go",
         "nocow_test.go",
         "perf_dolt_test.go",
+        "perf_symlink_test.go",
         "quick_test.go",
         "role_test.go",
         "server_backend_test.go",
