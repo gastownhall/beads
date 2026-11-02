@@ -173,3 +173,31 @@ func TestInitHooksRefusesSymlinkedStorageHooksDir(t *testing.T) {
 	require.Equal(t, before, dirSnapshot(t, outside), "link target contents changed")
 	require.Equal(t, configBefore, localHooksPath(t, selected), "core.hooksPath changed")
 }
+
+// TestHookWriteGuardRefusesSymlinkedParentDir: the shared write guard checks
+// the hook's immediate parent before its early return for a missing leaf, so
+// hook migration cannot create a hook inside a symlinked directory's target.
+func TestHookWriteGuardRefusesSymlinkedParentDir(t *testing.T) {
+	root, repo := setupSymlinkedHooksDirRepo(t)
+	outside := filepath.Join(root, "outside-hooks")
+	require.NoError(t, os.MkdirAll(outside, 0o755))
+	link := filepath.Join(repo, "linked-hooks")
+	symlinkOrSkip(t, outside, link)
+	hookPath := filepath.Join(link, "pre-commit")
+
+	t.Run("guard", func(t *testing.T) {
+		err := guardHookWritePathWithProbe(hookPath, false, func(string) string { return "" })
+		require.ErrorContains(t, err, "symlink")
+	})
+	t.Run("migration", func(t *testing.T) {
+		plan := hookMigrationExecutionPlan{WriteOps: []hookMigrationWriteOp{{
+			HookName:   "pre-commit",
+			HookPath:   hookPath,
+			State:      "missing_no_artifacts",
+			SourceKind: hookMigrationWriteFromTemplate,
+		}}}
+		_, err := applyHookMigrationExecution(plan)
+		require.ErrorContains(t, err, "symlink")
+		require.Empty(t, dirSnapshot(t, outside), "migration created a hook in the link target")
+	})
+}

@@ -919,6 +919,8 @@ func refuseSymlinkedHooksDir(hooksDir string) error {
 
 // guardHookWritePath refuses hook writes that would silently modify files
 // bd does not own (bd-5vdt8):
+//   - a hook whose immediate parent directory is a symlink: the write lands
+//     in the link's target, even when the hook file does not exist yet
 //   - a symlinked hook path: os.WriteFile follows the link (O_TRUNC) and
 //     rewrites the target inode — e.g. a repo-tracked script the hook
 //     points at, dirtying every clone that shares it
@@ -930,6 +932,11 @@ func guardHookWritePath(hookPath string, allowTracked bool) error {
 }
 
 func guardHookWritePathWithProbe(hookPath string, allowTracked bool, tracked func(string) string) error {
+	// The parent is checked first: a hook that does not exist yet would still
+	// be created inside a symlinked directory's target.
+	if err := refuseSymlinkedHooksDir(filepath.Dir(hookPath)); err != nil {
+		return err
+	}
 	fi, err := os.Lstat(hookPath)
 	if err != nil {
 		if os.IsNotExist(err) {
