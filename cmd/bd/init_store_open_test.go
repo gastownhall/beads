@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"slices"
 	"strings"
 	"testing"
@@ -86,7 +87,7 @@ func unversionedDirtyRefusal() error {
 func runOpenInitStore(t *testing.T, cfg *dolt.Config, results ...initStoreOpenResult) (*initStoreFake, storage.DoltStorage, error) {
 	t.Helper()
 	fake := &initStoreFake{t: t, results: results}
-	store, err := openInitStore(context.Background(), cfg, fake.open)
+	store, err := openInitStore(context.Background(), cfg, fake.open, nil)
 	return fake, store, err
 }
 
@@ -308,6 +309,51 @@ func TestOpenInitStoreIneligibleOpensPassThrough(t *testing.T) {
 			}
 			if *cfg != want {
 				t.Fatalf("caller config mutated: %+v, want %+v", *cfg, want)
+			}
+		})
+	}
+}
+
+// TestOpenInitStoreRecoveryNote pins the one-line stderr note a successful
+// adoption prints: only when the reconcile commit actually committed and the
+// final strict open succeeded. A nil writer (bd init --quiet) suppresses it.
+func TestOpenInitStoreRecoveryNote(t *testing.T) {
+	const wantNote = `Note: database "hq" had uncommitted changes in tables the schema migrations alter (config, interactions, routes); ` +
+		"bd init committed the working set in its own commit, then applied the migrations; no further action is needed (gastownhall/beads#6089)\n"
+	finalErr := errors.New("final strict open refused")
+	for _, tc := range []struct {
+		name       string
+		committed  bool
+		commitErr  error
+		lenientErr error
+		finalErr   error
+		quiet      bool
+		want       string
+	}{
+		{name: "committed and migrated", committed: true, want: wantNote},
+		{name: "quiet", committed: true, quiet: true},
+		{name: "nothing to commit", committed: false},
+		{name: "final open fails", committed: true, finalErr: finalErr},
+		{name: "commit fails", commitErr: errors.New("commit failed")},
+		{name: "lenient open fails", lenientErr: errors.New("lenient open failed")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			results := []initStoreOpenResult{
+				{err: unversionedDirtyRefusal()},
+				{committed: tc.committed, commitErr: tc.commitErr, err: tc.lenientErr},
+			}
+			if tc.commitErr == nil && tc.lenientErr == nil {
+				results = append(results, initStoreOpenResult{err: tc.finalErr})
+			}
+			var notes strings.Builder
+			var w io.Writer = &notes
+			if tc.quiet {
+				w = nil
+			}
+			fake := &initStoreFake{t: t, results: results}
+			_, _ = openInitStore(context.Background(), initStoreTestConfig(), fake.open, w)
+			if got := notes.String(); got != tc.want {
+				t.Fatalf("notes = %q, want %q", got, tc.want)
 			}
 		})
 	}
