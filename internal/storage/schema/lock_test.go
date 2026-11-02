@@ -369,14 +369,16 @@ func expectIgnorePatternSeedNoop(mock sqlmock.Sqlmock, mainVersion int) {
 }
 
 func expectOnePendingMigration(t *testing.T, mock sqlmock.Sqlmock) {
-	expectOnePendingMigrationAtSetting(t, mock, 0)
+	expectOnePendingMigrationAtSetting(t, mock, 0, nil)
 }
 
 // expectOnePendingMigrationAtSetting is expectOnePendingMigration with an
 // explicit session dolt_transaction_commit value for the pass (see
 // expectSessionTransactionCommitSuspend): a non-zero value additionally
 // expects the pass's SET on entry and the deferred restoration on exit.
-func expectOnePendingMigrationAtSetting(t *testing.T, mock sqlmock.Sqlmock, transactionCommit int64) {
+// restoreErr, when non-nil, is the error the restoration itself fails with
+// (MigrateUp must report it).
+func expectOnePendingMigrationAtSetting(t *testing.T, mock sqlmock.Sqlmock, transactionCommit int64, restoreErr error) {
 	t.Helper()
 
 	latest := LatestVersion()
@@ -498,7 +500,7 @@ func expectOnePendingMigrationAtSetting(t *testing.T, mock sqlmock.Sqlmock, tran
 		WillReturnRows(sqlmock.NewRows([]string{"hash"}))
 	if transactionCommit != 0 {
 		// The deferred restoration is the pass's last statement (#4470).
-		expectSessionTransactionCommitRestore(mock, transactionCommit)
+		expectSessionTransactionCommitRestoration(mock, transactionCommit, restoreErr)
 	}
 }
 
@@ -557,13 +559,19 @@ func expectSessionTransactionCommitSuspend(mock sqlmock.Sqlmock, value int64) {
 	}
 }
 
-// expectSessionTransactionCommitRestore mocks the deferred restoration a
+// expectSessionTransactionCommitRestoration mocks the deferred restoration a
 // pass with a suspended setting performs as it exits (see
 // migrateUpAfterReconcile): it must be the last statement of the mocked
 // flow, before anything the caller issues after MigrateUp returns.
-func expectSessionTransactionCommitRestore(mock sqlmock.Sqlmock, value int64) {
-	mock.ExpectExec(fmt.Sprintf("SET @@SESSION.%s = %d", sessionTransactionCommitVar, value)).
-		WillReturnResult(sqlmock.NewResult(0, 0))
+// restoreErr, when non-nil, is what the restoration fails with (the pass
+// must join it onto whatever it is already returning).
+func expectSessionTransactionCommitRestoration(mock sqlmock.Sqlmock, value int64, restoreErr error) {
+	exec := mock.ExpectExec(fmt.Sprintf("SET @@SESSION.%s = %d", sessionTransactionCommitVar, value))
+	if restoreErr != nil {
+		exec.WillReturnError(restoreErr)
+		return
+	}
+	exec.WillReturnResult(sqlmock.NewResult(0, 0))
 }
 
 // expectDirtyGuardRefusal mocks a MigrateUp invocation that walks up to the
@@ -583,14 +591,15 @@ func expectSessionTransactionCommitRestore(mock sqlmock.Sqlmock, value int64) {
 const eventsFlipVersion = 62
 
 func expectDirtyGuardRefusal(t *testing.T, mock sqlmock.Sqlmock) {
-	expectDirtyGuardRefusalAtSetting(t, mock, 0)
+	expectDirtyGuardRefusalAtSetting(t, mock, 0, nil)
 }
 
 // expectDirtyGuardRefusalAtSetting is expectDirtyGuardRefusal with an
 // explicit session dolt_transaction_commit value (see
 // expectSessionTransactionCommitSuspend): a non-zero value additionally
 // expects the pass's entry SET and exit restoration straddling the refusal.
-func expectDirtyGuardRefusalAtSetting(t *testing.T, mock sqlmock.Sqlmock, transactionCommit int64) {
+// restoreErr, when non-nil, is the error the restoration itself fails with.
+func expectDirtyGuardRefusalAtSetting(t *testing.T, mock sqlmock.Sqlmock, transactionCommit int64, restoreErr error) {
 	t.Helper()
 
 	cursor := eventsFlipVersion - 1
@@ -632,7 +641,7 @@ func expectDirtyGuardRefusalAtSetting(t *testing.T, mock sqlmock.Sqlmock, transa
 	if transactionCommit != 0 {
 		// The deferred restoration runs as the pass unwinds from the
 		// refusal (#4470): it is the mocked flow's last statement.
-		expectSessionTransactionCommitRestore(mock, transactionCommit)
+		expectSessionTransactionCommitRestoration(mock, transactionCommit, restoreErr)
 	}
 }
 
