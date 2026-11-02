@@ -767,3 +767,60 @@ INSERT INTO events (issue_id, event_type, actor, created_at, id) VALUES
 		t.Fatal("ignored cursor does not record 0031 after the restore")
 	}
 }
+
+// preflipNullDigest is the content digest of an events row whose old_value,
+// new_value and comment are NULL.
+func preflipNullDigest(issue, eventType, actor, createdAt string) string {
+	v := func(s string) sql.NullString { return sql.NullString{String: s, Valid: true} }
+	null := sql.NullString{}
+	return rowid.Digest([]sql.NullString{v(issue), v(eventType), v(actor), null, null, null, v(createdAt)})
+}
+
+// adoptPreflipLineage runs the migrator's pass on conn and leaves the
+// adopter's state: events present and empty, 0031 pending.
+func adoptPreflipLineage(t *testing.T, ctx context.Context, conn *sql.Conn) {
+	t.Helper()
+	if _, err := schema.MigrateUp(ctx, conn); err != nil {
+		t.Fatalf("MigrateUp (migrator): %v", err)
+	}
+	execFrozenGuard(t, ctx, conn, "DELETE FROM events")
+	mustExecOn(t, ctx, conn, "DELETE FROM ignored_schema_migrations WHERE version = 31")
+}
+
+// TestEmbeddedIgnoredMigration0031SkipsADerivedIDAnotherIssueHolds pins the
+// table-wide id probe: a live row of another issue that holds the first
+// derived id of a restored content (an issue rename re-points issue_id, never
+// the id) keeps it untouched, and the restored copy takes the next ordinal.
+func TestEmbeddedIgnoredMigration0031SkipsADerivedIDAnotherIssueHolds(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+
+	dataDir := seedMainSchemaAt(t, ctx, 61)
+	conn, closeConn := openPinnedConn(t, ctx, dataDir)
+	defer closeConn()
+	seedPreflipEvents(t, ctx, conn)
+	adoptPreflipLineage(t, ctx, conn)
+
+	created := preflipNullDigest("pre-1", "created", "alice", "2026-07-01 10:00:00")
+	taken := rowid.New("events", 0, created)
+	mustExecOn(t, ctx, conn, `INSERT INTO events (issue_id, event_type, actor, created_at, id)
+VALUES ('pre-2', 'renamed', 'erin', '2026-08-01 08:00:00', ?)`, taken)
+
+	if _, err := schema.MigrateUp(ctx, conn); err != nil {
+		t.Fatalf("MigrateUp (restore): %v", err)
+	}
+	got := liveEvents(t, ctx, conn)
+	want := preflipSeededContent()
+	renamed := preflipNullDigest("pre-2", "renamed", "erin", "2026-08-01 08:00:00")
+	want[renamed] = 1
+	requireContent(t, got, want)
+	if ids, wantID := got[created], rowid.New("events", 1, created); len(ids) != 1 || ids[0] != wantID {
+		t.Fatalf("restored 'created' row ids = %v, want [%s] (ordinal 0 is another issue's)", ids, wantID)
+	}
+	if ids := got[renamed]; len(ids) != 1 || ids[0] != taken {
+		t.Fatalf("other issue's row ids = %v, want it to keep %s", ids, taken)
+	}
+	if !ignoredCursorHas(t, ctx, conn, 31) {
+		t.Fatal("ignored cursor does not record 0031 after the restore")
+	}
+}
