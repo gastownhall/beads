@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/remedy"
@@ -21,27 +22,56 @@ import (
 // comparison reads metadata only, so the decision cannot depend on whether the
 // recorded store is reachable or what it holds.
 //
-// It compares the database name and nothing else about the endpoint: host,
-// port, socket, --db and shared-server location changes are out of its scope.
+// It compares two axes: the engine family (embedded versus the SQL-server
+// family, which takes in server and proxied-server alike) and the database
+// name. Nothing else about the endpoint is compared: host, port, socket, --db
+// and shared-server location changes are out of its scope.
 type initStoreSwitch struct {
+	recordedMode      string // metadata.json dolt_mode, lowercased; "" when absent
+	targetSQLServer   bool   // the family this init resolved
+	familyChanged     bool
 	recordedDatabase  string // metadata.json dolt_database, raw
 	requestedDatabase string // --database, raw; "" reuses the recorded one
 	databaseChanged   bool
 }
 
+// doltModeFamily reports whether a recorded dolt_mode belongs to the
+// SQL-server family. known is false for an absent or unrecognized mode, which
+// is not defaulted to embedded: "no recorded mode" and "deliberately
+// embedded" stay distinguishable.
+func doltModeFamily(mode string) (sqlServer, known bool) {
+	switch mode {
+	case configfile.DoltModeEmbedded:
+		return false, true
+	case configfile.DoltModeServer, configfile.DoltModeProxiedServer:
+		return true, true
+	default:
+		return false, false
+	}
+}
+
 // detectInitStoreSwitch reports how the request differs from the recorded
 // store. cfg is the workspace's metadata as discovery reads it (nil when the
-// workspace has none); database is the raw --database value.
+// workspace has none); database is the raw --database value; targetSQLServer
+// is the engine family init resolved for this run (usesSQLServer).
+//
+// A family change needs a recognized recorded mode; an absent one skips that
+// axis but not the database axis.
 //
 // A database change needs both names: an absent --database reuses the
 // recorded database (init's own name resolution prefers it over the prefix
 // default), and a workspace that records none has nothing to switch away
 // from. Names compare byte for byte, since two names differing only in case
 // can address two different embedded database directories.
-func detectInitStoreSwitch(cfg *configfile.Config, database string) initStoreSwitch {
-	sw := initStoreSwitch{requestedDatabase: database}
+func detectInitStoreSwitch(cfg *configfile.Config, database string, targetSQLServer bool) initStoreSwitch {
+	sw := initStoreSwitch{requestedDatabase: database, targetSQLServer: targetSQLServer}
 	if cfg == nil || cfg.GetBackend() != configfile.BackendDolt {
 		return sw
+	}
+	// Lowercased like existingWorkspaceDoltMode, which decides inheritance.
+	sw.recordedMode = strings.ToLower(strings.TrimSpace(cfg.DoltMode))
+	if recordedSQLServer, known := doltModeFamily(sw.recordedMode); known {
+		sw.familyChanged = recordedSQLServer != targetSQLServer
 	}
 	sw.recordedDatabase = cfg.DoltDatabase
 	sw.databaseChanged = sw.recordedDatabase != "" && database != "" && database != sw.recordedDatabase
@@ -49,7 +79,7 @@ func detectInitStoreSwitch(cfg *configfile.Config, database string) initStoreSwi
 }
 
 func (s initStoreSwitch) switches() bool {
-	return s.databaseChanged
+	return s.familyChanged || s.databaseChanged
 }
 
 // initReinitPreflight is the confirmation --reinit-local runs while init
@@ -62,8 +92,12 @@ type initReinitPreflight struct {
 	prefix       string // the raw --prefix the destroy token is formed from
 	destroyToken string
 	database     string // the raw --database value
+	// targetSQLServer is the engine family this init resolved: true for
+	// server, proxied-server and shared-server mode, false for embedded.
+	targetSQLServer bool
 
-	stderr io.Writer
+	countIssues func() (int, error)
+	stderr      io.Writer
 }
 
 func (p initReinitPreflight) run() error {
@@ -79,10 +113,10 @@ func (p initReinitPreflight) run() error {
 			return fmt.Errorf("cannot read this workspace's .beads/metadata.json before re-initializing: %v", remedy.PrintedError(err))
 		}
 	}
-	if sw := detectInitStoreSwitch(cfg, p.database); sw.switches() {
+	if sw := detectInitStoreSwitch(cfg, p.database, p.targetSQLServer); sw.switches() {
 		return p.confirmStoreSwitch(sw)
 	}
-	return runInitReinitPreflight(p.reinitLocal, p.prefix, p.destroyToken)
+	return runInitReinitPreflight(p.countIssues, p.prefix, p.destroyToken)
 }
 
 // confirmStoreSwitch asks for the destroy token before init moves the
@@ -105,11 +139,13 @@ func (p initReinitPreflight) confirmStoreSwitch(sw initStoreSwitch) error {
 // newInitReinitPreflight wires the preflight to the process.
 func newInitReinitPreflight(reinitLocal bool, beadsDir, prefix, destroyToken, database string) initReinitPreflight {
 	return initReinitPreflight{
-		reinitLocal:  reinitLocal,
-		beadsDir:     beadsDir,
-		prefix:       prefix,
-		destroyToken: destroyToken,
-		database:     database,
-		stderr:       os.Stderr,
+		reinitLocal:     reinitLocal,
+		beadsDir:        beadsDir,
+		prefix:          prefix,
+		destroyToken:    destroyToken,
+		database:        database,
+		targetSQLServer: usesSQLServer(),
+		countIssues:     func() (int, error) { return countExistingIssues(prefix) },
+		stderr:          os.Stderr,
 	}
 }
