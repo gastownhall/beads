@@ -303,6 +303,7 @@ go_test(
         "metadata_validation_test.go",
         "migration_0052_test.go",
         "migration_0073_rollback_test.go",
+        "migration_is_blocked_updated_at_test.go",
         "mixed_table_lifecycle_test.go",
         "molecule_contract_test.go",
         "multistore_multiprocess_test.go",

@@ -2291,6 +2291,18 @@ func runMigrations(ctx context.Context, db DBConn, src migrationSource, minVersi
 			}
 		}
 
+		// #5981: a registered step may rewrite rows without assigning
+		// updated_at, letting the column's ON UPDATE CURRENT_TIMESTAMP clause
+		// stamp them with the migration's wall clock. Snapshot the historical
+		// timestamps before anything runs — the pre-migration repair and the
+		// body both count — and restore them after the body, before the
+		// cursor row and per-step commit record the version. Unregistered
+		// versions return a nil guard and issue zero queries.
+		guard, err := snapshotUpdatedAtGuard(ctx, db, src, mf.version)
+		if err != nil {
+			return count, fmt.Errorf("updated_at guard for %s: %w", mf.name, err)
+		}
+
 		if err := src.preMigrationRepair(ctx, db, mf.version); err != nil {
 			return count, fmt.Errorf("pre-repair for migration %s: %w", mf.name, err)
 		}
@@ -2320,6 +2332,15 @@ func runMigrations(ctx context.Context, db DBConn, src migrationSource, minVersi
 			func(ctx context.Context) error { return execMigrationBody(ctx, db, string(data)) },
 		); err != nil {
 			return count, fmt.Errorf("migration %s: %w", mf.name, err)
+		}
+		// Restore before the cursor row records the version: a pass killed
+		// right after this step's commit must find the historical timestamps
+		// in HEAD, and the version must never be recorded while stamped
+		// values are still in place — a retry would not run the step again.
+		if guard != nil {
+			if err := guard.restore(ctx, db); err != nil {
+				return count, fmt.Errorf("updated_at guard for %s: %w", mf.name, err)
+			}
 		}
 		sum := sha256.Sum256(data)
 		contentHash := hex.EncodeToString(sum[:])
