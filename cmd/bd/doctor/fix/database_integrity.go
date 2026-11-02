@@ -1,6 +1,7 @@
 package fix
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -76,10 +77,10 @@ func doltIntegrityRecovery(path, beadsDir string) error {
 
 	if err := initCmd.Run(); err != nil {
 		// Restore backup on failure
-		fmt.Printf("  Warning: recovery failed, restoring corrupted Dolt database from %s\n", filepath.Base(backupPath))
 		if cerr := revalidateIntegrityRestore(beadsDir, doltPath, backupPath); cerr != nil {
 			return fmt.Errorf("failed to reinitialize Dolt database: %w\n%w", err, cerr)
 		}
+		fmt.Printf("  Warning: recovery failed, restoring corrupted Dolt database from %s\n", filepath.Base(backupPath))
 		_ = os.RemoveAll(doltPath)
 		_ = os.Rename(backupPath, doltPath)
 		return fmt.Errorf("failed to reinitialize Dolt database: %w", err)
@@ -92,14 +93,23 @@ func doltIntegrityRecovery(path, beadsDir string) error {
 
 // revalidateIntegrityRestore re-admits doltPath before a failed recovery
 // removes what bd init left there and moves the backup back: the location
-// may have changed while bd init ran. On refusal the backup stays where it is
-// and the error names it.
+// may have changed during recovery. On refusal the backup is left alone and
+// the error names the path it was written to.
 func revalidateIntegrityRestore(beadsDir, doltPath, backupPath string) error {
-	if _, err := confinedDatabasePath(beadsDir, doltPath); err != nil {
-		return fmt.Errorf("not restoring the corrupted Dolt database: %w\nThe corrupted database is preserved at %s",
-			err, remedy.PrintedValue(backupPath))
+	_, err := confinedDatabasePath(beadsDir, doltPath)
+	if err == nil {
+		return nil
 	}
-	return nil
+	// Report only the reason: the admission remedy, selecting the location
+	// through BEADS_DOLT_DATA_DIR, would exempt the changed location.
+	var refusal *databaseRefusal
+	if errors.As(err, &refusal) {
+		err = errors.New(refusal.why)
+	}
+	return fmt.Errorf("not restoring the corrupted Dolt database: its location %s changed during recovery: %w\n"+
+		"Check what is there now, then move the backup back by hand. It was written to %s; "+
+		"if a directory above the database was replaced, the backup moved with that directory",
+		remedy.PrintedValue(doltPath), err, remedy.PrintedValue(backupPath))
 }
 
 func serverModeIntegrityRecoveryGuard(beadsDir string) error {

@@ -64,6 +64,10 @@ func TestRepoFingerprint_UnrecognizedInputSkips(t *testing.T) {
 }
 
 func TestRepoFingerprint_Choice2RefusesEscapingAndSymlinkedDoltDataDir(t *testing.T) {
+	// An inherited BEADS_DOLT_DATA_DIR would select, and exempt, a real store.
+	t.Setenv("BEADS_DOLT_DATA_DIR", "")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
 	dir := setupTestWorkspace(t)
 	beadsDir := filepath.Join(dir, ".beads")
 	victim := filepath.Join(t.TempDir(), "victim")
@@ -84,16 +88,21 @@ func TestRepoFingerprint_Choice2RefusesEscapingAndSymlinkedDoltDataDir(t *testin
 
 	oldReadLine := repoFingerprintReadLine
 	defer func() { repoFingerprintReadLine = oldReadLine }()
-	inputs := []string{"2", "y"}
+	// The refusal comes before the DELETE confirmation; answering "n" there
+	// keeps a regression from deleting anything.
+	inputs := []string{"2", "n"}
+	reads := 0
 	repoFingerprintReadLine = func() (string, error) {
-		out := inputs[0]
-		inputs = inputs[1:]
-		return out, nil
+		reads++
+		return inputs[min(reads, len(inputs))-1], nil
 	}
 
 	err = RepoFingerprint(dir, false)
 	if err == nil || !strings.Contains(err.Error(), "outside") {
 		t.Fatalf("expected outside error, got %v", err)
+	}
+	if reads != 1 {
+		t.Fatalf("expected the refusal before the DELETE confirmation (1 read), got %d reads", reads)
 	}
 	if data, rerr := os.ReadFile(sentinel); rerr != nil || string(data) != "keep" {
 		t.Fatalf("sentinel removed: %q, %v", data, rerr)

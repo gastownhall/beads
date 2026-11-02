@@ -904,6 +904,9 @@ var hooksListCmd = &cobra.Command{
 // directory is allowed (install creates it), and aliases above the directory,
 // such as a symlinked .beads workspace, remain supported.
 func refuseSymlinkedHooksDir(hooksDir string) error {
+	// An absolute core.hooksPath arrives as configured, and Lstat follows a
+	// link spelled with a trailing separator.
+	hooksDir = filepath.Clean(hooksDir)
 	fi, err := os.Lstat(hooksDir)
 	if err != nil {
 		if os.IsNotExist(err) {
