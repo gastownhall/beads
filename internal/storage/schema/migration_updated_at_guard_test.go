@@ -144,6 +144,39 @@ func TestUpdatedAtGuardRowMovesPreferDestinationHistory(t *testing.T) {
 	}
 }
 
+// TestUpdatedAtGuardIssuesNoQueriesForUnregisteredStep pins the guard's
+// default-off contract (#5981): a version outside the registry runs with
+// zero snapshot, reread, or restore queries — the guard must never become a
+// tax on the ordinary migration path. The mock primes ONLY the step's own
+// statements (0052's body and its cursor row; 0052 carries no
+// pre-migration repair), so a single guard probe or read against a
+// mistakenly-registered version surfaces as an unexpected call and fails
+// the step. Vacuous against the pre-guard base by construction (there is
+// nothing to issue the queries); it exists to pin the registry's shape.
+func TestUpdatedAtGuardIssuesNoQueriesForUnregisteredStep(t *testing.T) {
+	failOnSwallowedAdvisory(t)
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectExec(`(?s)SET @has_old`).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(`INSERT IGNORE INTO schema_migrations`).WithArgs(52, sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	applied, err := runMigrations(context.Background(), db, mainSource, 51, 52, false)
+	if err != nil {
+		t.Fatalf("runMigrations: %v", err)
+	}
+	if applied != 1 {
+		t.Fatalf("runMigrations applied = %d, want 1", applied)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
 // TestUpdatedAtGuardRestoresTimestampsAroundRegisteredStep pins the guard's
 // position in the step: snapshot before the body, restore between a
 // successful body and the cursor row, so the restored values land in the same
