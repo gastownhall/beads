@@ -51,7 +51,10 @@ Examples:
   bd notify drain --all
   bd notify drain --seat wiseman --print
   bd notify drain --seat wiseman --exec 'echo "$BD_NOTIFY_ID"'
-  bd notify seats`,
+  bd notify seats
+  bd notify holds
+  bd notify holds reap --dry-run
+  bd notify holds reap --yes`,
 }
 
 var notifyPendingCmd = &cobra.Command{
@@ -494,6 +497,140 @@ var notifyAckCmd = &cobra.Command{
 	},
 }
 
+var notifyHoldsCmd = &cobra.Command{
+	Use:   "holds",
+	Short: "List or reap parent-escalation holds",
+	Long: `Holds mark seats whose drain could not deliver (no-pin, pinned-target-dead,
+target-blocked). Detection already works; retention reaps dead-pin and no-pin
+holds older than the retention window (default 14d) and acks their pending
+outbox rows. Transient holds (hold-until-idle, target-blocked) are never
+reaped.
+
+Examples:
+  bd notify holds
+  bd notify holds --json
+  bd notify holds reap --dry-run
+  bd notify holds reap --older-than 14d
+  bd notify holds reap --older-than 7d --yes`,
+}
+
+var notifyHoldsListCmd = &cobra.Command{
+	Use:   "list",
+	Short: "List current holds (default when no subcommand)",
+	Args:  cobra.NoArgs,
+	RunE:  runNotifyHoldsList,
+}
+
+var notifyHoldsReapCmd = &cobra.Command{
+	Use:   "reap",
+	Short: "Reap stale dead-pin / no-pin holds past retention",
+	Args:  cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		older, _ := cmd.Flags().GetString("older-than")
+		dryRun, _ := cmd.Flags().GetBool("dry-run")
+		yes, _ := cmd.Flags().GetBool("yes")
+		maxAge, err := parseHoldRetention(older)
+		if err != nil {
+			return HandleError("%v", err)
+		}
+		if !dryRun && !yes {
+			return HandleError("notify holds reap requires --dry-run or --yes")
+		}
+		o, err := openNotifyOutbox()
+		if err != nil {
+			return err
+		}
+		result, err := o.ReapHolds(maxAge, time.Now().UTC(), dryRun)
+		if err != nil {
+			return HandleError("%v", err)
+		}
+		if jsonOutput {
+			return printJSON(result)
+		}
+		action := "would clear"
+		if !dryRun {
+			action = "cleared"
+		}
+		pendingSum := 0
+		for _, c := range result.Cleared {
+			pendingSum += c.PendingAcked
+			fmt.Printf("  %-20s  %-18s  age=%-12s  pending_acked=%d\n",
+				c.Seat, c.Reason, c.Age, c.PendingAcked)
+		}
+		fmt.Printf("%s %s %d hold(s) (skipped %d; retention %s; pending_acked %d)%s\n",
+			ui.RenderAccent("*"), action, len(result.Cleared), result.Skipped, result.Retention, pendingSum,
+			map[bool]string{true: " [dry-run]", false: ""}[dryRun])
+		if len(result.Cleared) >= 20 || pendingSum >= 100 {
+			fmt.Fprintf(os.Stderr, "notify holds reap: large backlog cleared (%d holds, %d pending) - check seat registry\n",
+				len(result.Cleared), pendingSum)
+		}
+		return nil
+	},
+}
+
+func runNotifyHoldsList(cmd *cobra.Command, args []string) error {
+	o, err := openNotifyOutbox()
+	if err != nil {
+		return err
+	}
+	holds, err := o.Holds()
+	if err != nil {
+		return HandleError("%v", err)
+	}
+	type row struct {
+		Seat      string       `json:"seat"`
+		Hold      notify.Hold  `json:"hold"`
+	}
+	rows := make([]row, 0, len(holds))
+	for seat, h := range holds {
+		rows = append(rows, row{Seat: seat, Hold: h})
+	}
+	// Stable order for humans and JSON diffs.
+	for i := 0; i < len(rows); i++ {
+		for j := i + 1; j < len(rows); j++ {
+			if rows[j].Seat < rows[i].Seat {
+				rows[i], rows[j] = rows[j], rows[i]
+			}
+		}
+	}
+	if jsonOutput {
+		return printJSON(rows)
+	}
+	if len(rows) == 0 {
+		fmt.Printf("%s no holds\n", ui.RenderAccent("*"))
+		return nil
+	}
+	for _, r := range rows {
+		fmt.Printf("  %-20s  %-18s  pending=%-4d  updated=%s\n",
+			r.Seat, r.Hold.Reason, r.Hold.Pending, r.Hold.UpdatedAt)
+	}
+	fmt.Printf("%s %d hold(s)\n", ui.RenderAccent("*"), len(rows))
+	return nil
+}
+
+func parseHoldRetention(s string) (time.Duration, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return notify.DefaultHoldRetention, nil
+	}
+	// Go's ParseDuration has no "d"; accept Nd as N*24h before falling through.
+	if strings.HasSuffix(s, "d") {
+		var days int
+		if _, err := fmt.Sscanf(strings.TrimSuffix(s, "d"), "%d", &days); err != nil || days <= 0 {
+			return 0, fmt.Errorf("invalid --older-than %q (want Nd like 14d, or Go duration like 336h)", s)
+		}
+		return time.Duration(days) * 24 * time.Hour, nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 0, fmt.Errorf("invalid --older-than %q (want Nd or Go duration like 336h): %w", s, err)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("--older-than must be > 0")
+	}
+	return d, nil
+}
+
 // pingCommentAssignee enqueues a pin-addressed notify for the bead's assignee
 // after a successful comment. Best-effort: never fails the comment.
 func pingCommentAssignee(assignee, issueID, issueTitle, author, text string) {
@@ -881,11 +1018,20 @@ func init() {
 	notifyDrainCmd.Flags().Bool("no-ack", false, "do not mark rows delivered")
 	notifyAckCmd.Flags().String("seat", "", "assignee seat (required)")
 	notifyAckCmd.Flags().Int64("upto", 0, "ack through this seq (required)")
+	notifyHoldsReapCmd.Flags().String("older-than", "14d", "reap dead-pin/no-pin holds older than this (Nd or Go duration)")
+	notifyHoldsReapCmd.Flags().Bool("dry-run", false, "report eligible holds without writing")
+	notifyHoldsReapCmd.Flags().Bool("yes", false, "apply the reap (required unless --dry-run)")
+
+	// Bare `bd notify holds` lists; `bd notify holds list|reap` for explicit.
+	notifyHoldsCmd.RunE = runNotifyHoldsList
+	notifyHoldsCmd.AddCommand(notifyHoldsListCmd)
+	notifyHoldsCmd.AddCommand(notifyHoldsReapCmd)
 
 	notifyCmd.AddCommand(notifyPendingCmd)
 	notifyCmd.AddCommand(notifyResolveCmd)
 	notifyCmd.AddCommand(notifyDrainCmd)
 	notifyCmd.AddCommand(notifyAckCmd)
 	notifyCmd.AddCommand(notifySeatsCmd)
+	notifyCmd.AddCommand(notifyHoldsCmd)
 	rootCmd.AddCommand(notifyCmd)
 }

@@ -265,6 +265,9 @@ var proxyCapabilityRegistry = []capabilityRow{
 	// rather than waiting for a proxied dual.
 	refusedPath("notify ack", "proxy.notify.local-only", ProxyReasonDesign, ""),
 	refusedPath("notify drain", "proxy.notify.local-only", ProxyReasonDesign, ""),
+	refusedPath("notify holds", "proxy.notify.local-only", ProxyReasonDesign, ""),
+	refusedPath("notify holds list", "proxy.notify.local-only", ProxyReasonDesign, ""),
+	refusedPath("notify holds reap", "proxy.notify.local-only", ProxyReasonDesign, ""),
 	refusedPath("notify pending", "proxy.notify.local-only", ProxyReasonDesign, ""),
 	refusedPath("notify resolve", "proxy.notify.local-only", ProxyReasonDesign, ""),
 	refusedPath("notify seats", "proxy.notify.local-only", ProxyReasonDesign, ""),

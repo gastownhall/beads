@@ -3,11 +3,13 @@ package notify
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/steveyegge/beads/internal/seats"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
+
+	"github.com/steveyegge/beads/internal/seats"
 )
 
 const (
@@ -369,4 +371,149 @@ func (o *Outbox) saveHoldsLocked(holds map[string]Hold) error {
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+// DefaultHoldRetention is how long a dead-pin / no-pin hold may live before
+// reap. Transient holds (hold-until-idle, target-blocked) are never reaped.
+const DefaultHoldRetention = 14 * 24 * time.Hour
+
+// ReapableHoldReason reports whether a hold reason is eligible for retention
+// reap. Only escalation marks for seats that will not self-heal without a
+// human pin/re-register are reapable.
+func ReapableHoldReason(reason string) bool {
+	switch reason {
+	case HoldNoPin, HoldDeadPin:
+		return true
+	default:
+		return false
+	}
+}
+
+// ReapedHold is one seat cleared by ReapHolds.
+type ReapedHold struct {
+	Seat         string `json:"seat"`
+	Reason       string `json:"reason"`
+	UpdatedAt    string `json:"updated_at"`
+	PendingAcked int    `json:"pending_acked"`
+	Age          string `json:"age"`
+}
+
+// ReapHoldsResult summarizes a retention pass.
+type ReapHoldsResult struct {
+	Cleared   []ReapedHold `json:"cleared"`
+	Skipped   int          `json:"skipped"`
+	Retention string       `json:"retention"`
+	DryRun    bool         `json:"dry_run"`
+}
+
+// ReapHolds removes dead-pin / no-pin holds older than maxAge and acks any
+// pending outbox rows for those seats (they are undeliverable until the seat
+// re-registers; a later fire enqueues a fresh row). Transient holds
+// (hold-until-idle, target-blocked) are never reaped. dryRun reports what
+// would change without writing.
+func (o *Outbox) ReapHolds(maxAge time.Duration, now time.Time, dryRun bool) (ReapHoldsResult, error) {
+	if maxAge <= 0 {
+		maxAge = DefaultHoldRetention
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	release, lockErr := seats.LockFile(filepath.Join(o.dir, "outbox.lock"))
+	if lockErr != nil {
+		return ReapHoldsResult{}, lockErr
+	}
+	defer release()
+
+	holds, err := o.loadHoldsLocked()
+	if err != nil {
+		return ReapHoldsResult{}, err
+	}
+	acks, err := o.loadAcksLocked()
+	if err != nil {
+		return ReapHoldsResult{}, err
+	}
+	all, err := o.readAllLocked()
+	if err != nil {
+		return ReapHoldsResult{}, err
+	}
+
+	result := ReapHoldsResult{
+		Retention: maxAge.String(),
+		DryRun:    dryRun,
+		Cleared:   []ReapedHold{},
+	}
+	changedHolds := false
+	changedAcks := false
+	for seat, h := range holds {
+		if !ReapableHoldReason(h.Reason) {
+			result.Skipped++
+			continue
+		}
+		updated, parseErr := time.Parse(time.RFC3339, h.UpdatedAt)
+		if parseErr != nil || h.UpdatedAt == "" {
+			// Unparseable / missing timestamp: treat as immediately eligible
+			// so a corrupt hold cannot stall retention forever.
+			updated = time.Time{}
+		}
+		age := now.Sub(updated)
+		if !updated.IsZero() && age < maxAge {
+			result.Skipped++
+			continue
+		}
+		pendingAcked := 0
+		var maxSeq int64
+		for _, rec := range all {
+			if !strings.EqualFold(rec.Seat, seat) {
+				continue
+			}
+			if rec.Seq > acks[strings.ToLower(seat)] && rec.Seq > maxSeq {
+				maxSeq = rec.Seq
+			}
+		}
+		if maxSeq > acks[strings.ToLower(seat)] {
+			for _, rec := range all {
+				if strings.EqualFold(rec.Seat, seat) && rec.Seq > acks[strings.ToLower(seat)] && rec.Seq <= maxSeq {
+					pendingAcked++
+				}
+			}
+			if !dryRun {
+				acks[strings.ToLower(seat)] = maxSeq
+				changedAcks = true
+			}
+		}
+		ageLabel := "unknown"
+		if !updated.IsZero() {
+			ageLabel = age.Round(time.Second).String()
+		}
+		result.Cleared = append(result.Cleared, ReapedHold{
+			Seat:         seat,
+			Reason:       h.Reason,
+			UpdatedAt:    h.UpdatedAt,
+			PendingAcked: pendingAcked,
+			Age:          ageLabel,
+		})
+		if !dryRun {
+			delete(holds, seat)
+			changedHolds = true
+		}
+	}
+	sort.Slice(result.Cleared, func(i, j int) bool {
+		return result.Cleared[i].Seat < result.Cleared[j].Seat
+	})
+	if dryRun {
+		return result, nil
+	}
+	if changedHolds {
+		if err := o.saveHoldsLocked(holds); err != nil {
+			return result, err
+		}
+	}
+	if changedAcks {
+		if err := o.saveAcksLocked(acks); err != nil {
+			return result, err
+		}
+	}
+	return result, nil
 }

@@ -272,13 +272,16 @@ func inlineRefusalPath(message string) (string, bool) {
 func TestProxyCapabilityRegistryReasonsAreAssignedIndividually(t *testing.T) {
 	wantDesign := map[string]bool{
 		// Reviewed 2026-10-12 during the upstream sync (repro-5at): the notify
-		// mailbox is clone-local state under .beads/notify/, so these five are
+		// mailbox is clone-local state under .beads/notify/, so these eight are
 		// design refusals, not backlog.
-		"notify ack":     true,
-		"notify drain":   true,
-		"notify pending": true,
-		"notify resolve": true,
-		"notify seats":   true,
+		"notify ack":        true,
+		"notify drain":      true,
+		"notify holds":      true,
+		"notify holds list": true,
+		"notify holds reap": true,
+		"notify pending":    true,
+		"notify resolve":    true,
+		"notify seats":      true,
 		// Reviewed 2026-10-13 during the upstream sync merge (repro-5at): the
 		// seat registry is clone-local (.beads/seats.json), so all seven seat
 		// commands are design refusals over the proxy.

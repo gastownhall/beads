@@ -59,6 +59,7 @@ that is not per-bead seat delivery.
 - `bd notify drain --seat S [--limit N] [--exec CMD] [--no-ack]`
 - `bd notify ack --seat S --upto N`
 - `bd notify seats`
+- `bd notify holds` / `bd notify holds reap [--older-than 14d] [--dry-run|--yes]`
 - `bd notify resolve --seat S` - human diagnostic only (fuzzy lookalike is not delivery)
 - `bd seat register --state <path> [--alias name] --session S --pane P` - mint once, re-register on every start (default state path: `$BEADS_AGENT_STATE`)
 - `bd seat register <seat-id> ...` - operator path for hand-named seats (refused for minted, token-protected uuids)
@@ -153,6 +154,36 @@ records its due events under.
 Pending outbox rows retry on the next sweep when the pinned target is live.
 Unpinned or dead-pinned seats stay queued until a human (or lock owner) pins
 the exact herdr id.
+
+## Holds retention and reap (wiseman-mm3l)
+
+`.beads/notify/holds.json` records seats whose drain escalated to a parent
+(no-pin, pinned-target-dead, target-blocked). Detection already works; what
+was missing is how long those marks live and who clears them.
+
+| Reason | Meaning | Auto-reap? |
+|---|---|---|
+| `no-pin` | seat has no endpoint | yes, after retention |
+| `pinned-target-dead` | pin exists but exact target not live | yes, after retention |
+| `target-blocked` | approval dialog open | no (transient) |
+| `hold-until-idle` | mid-turn, unverified queue | no (not even written to holds.json for parent escalation) |
+
+**Retention default: 14 days** from `updated_at`. A reaped hold is removed
+from `holds.json` and any pending outbox rows for that seat are acked
+(they are undeliverable until the seat re-registers; a later fire enqueues
+a fresh row).
+
+```text
+bd notify holds                     # list
+bd notify holds reap --dry-run      # show eligible
+bd notify holds reap --yes          # apply (14d default)
+bd notify holds reap --older-than 7d --yes
+```
+
+A large reap (≥20 holds or ≥100 pending acked) prints a stderr warning so
+the parent can notice a registry that has gone stale. Wire the reap into
+the due-wake unit or a weekly cron when the backlog is chronic; it is safe
+to run dry-run on every drain.
 
 ## Prompt playbook (finish-line education)
 

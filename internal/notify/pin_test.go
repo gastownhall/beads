@@ -1,10 +1,12 @@
 package notify
 
 import (
-	"github.com/steveyegge/beads/internal/seats"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
+
+	"github.com/steveyegge/beads/internal/seats"
 )
 
 func lookalikeInstances() []Instance {
@@ -131,6 +133,76 @@ func TestLoadPinsAndHolds(t *testing.T) {
 	}
 	if err := o.ClearHold("firstmate"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestReapHoldsRetention(t *testing.T) {
+	beads := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(beads, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	o, err := Open(beads)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	old := now.Add(-20 * 24 * time.Hour).Format(time.RFC3339)
+	fresh := now.Add(-2 * 24 * time.Hour).Format(time.RFC3339)
+
+	if err := o.SetHold("antigravity", Hold{Reason: HoldNoPin, Pending: 617, UpdatedAt: old}); err != nil {
+		t.Fatal(err)
+	}
+	if err := o.SetHold("fresh-dead", Hold{Reason: HoldDeadPin, Session: "s", PaneID: "w1:p1", UpdatedAt: fresh}); err != nil {
+		t.Fatal(err)
+	}
+	if err := o.SetHold("blocked", Hold{Reason: HoldBlocked, Session: "s", PaneID: "w1:p2", UpdatedAt: old}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := o.Enqueue("antigravity", "wiseman-x", KindDue, "stale ping"); err != nil {
+		t.Fatal(err)
+	}
+
+	dry, err := o.ReapHolds(DefaultHoldRetention, now, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dry.DryRun != true || len(dry.Cleared) != 1 || dry.Cleared[0].Seat != "antigravity" {
+		t.Fatalf("dry = %+v", dry)
+	}
+	if dry.Cleared[0].PendingAcked != 1 {
+		t.Fatalf("dry pending_acked = %d", dry.Cleared[0].PendingAcked)
+	}
+	holds, _ := o.Holds()
+	if len(holds) != 3 {
+		t.Fatalf("dry-run must not write; holds=%d", len(holds))
+	}
+
+	got, err := o.ReapHolds(DefaultHoldRetention, now, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Cleared) != 1 || got.Cleared[0].Seat != "antigravity" || got.Skipped != 2 {
+		t.Fatalf("reap = %+v", got)
+	}
+	holds, err = o.Holds()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := holds["antigravity"]; ok {
+		t.Fatal("antigravity hold should be cleared")
+	}
+	if _, ok := holds["fresh-dead"]; !ok {
+		t.Fatal("fresh dead-pin hold must survive retention")
+	}
+	if _, ok := holds["blocked"]; !ok {
+		t.Fatal("target-blocked hold must never be reaped")
+	}
+	pending, err := o.Pending("antigravity")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("reaped seat pending should be acked, got %d", len(pending))
 	}
 }
 
