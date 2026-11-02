@@ -403,10 +403,12 @@ installation or stop the server.
 bd only warns, once per command, and goes on using the old server when this
 command may not restart it: auto-start is off (`BEADS_DOLT_AUTO_START=0` or
 `dolt.auto-start: false`), the command is a preview, runs with `--readonly`,
-or runs during a migration freeze, or the server is the shared server.
+or runs during a migration freeze (including a `MIGRATION-FREEZE` above the
+workspace), or the server is declared external or is the shared server.
 Restarting the shared server disconnects every client and database it
 serves, so the warning says so; when that is safe, run `bd dolt stop`, then
-`bd dolt start`.
+`bd dolt start`. If the installed `dolt` cannot be run, the warning gives the
+reason: fix the installation before restarting the server.
 
 bd does not compare a server it did not start, or one it reaches over a Unix
 socket, TLS, a gateway or a proxied server: restart those yourself after an

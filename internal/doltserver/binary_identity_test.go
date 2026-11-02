@@ -357,6 +357,49 @@ func TestLaunchBinaryConcurrentDetectionsReplaceOnce(t *testing.T) {
 	}
 }
 
+// TestLaunchBinaryCheckChangesNothing: classifying a stale server, as every
+// open that may not restart it does, leaves the tracked PID and port, the
+// launch record and the process as they were, and launches nothing.
+func TestLaunchBinaryCheckChangesNothing(t *testing.T) {
+	beadsDir, launches := fakeStartWorkspace(t)
+	stubProcessListLaunchedHere(t)
+	state, err := startForTest(t, beadsDir)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	upgradeFakeDolt(t, "2.7.0")
+	files := []string{pidPath(beadsDir), portPath(beadsDir), binaryRecordPath(beadsDir)}
+	read := func() []string {
+		var out []string
+		for _, p := range files {
+			data, err := os.ReadFile(p) //nolint:gosec // G304: test-owned workspace
+			if err != nil {
+				t.Fatal(err)
+			}
+			out = append(out, string(data))
+		}
+		return out
+	}
+	before := read()
+
+	for range 2 {
+		if got := CheckServerBinary(beadsDir, state.Port, nil); got.Verdict != BinaryStale {
+			t.Fatalf("check = %+v, want stale", got)
+		}
+	}
+	for i, after := range read() {
+		if after != before[i] {
+			t.Errorf("%s changed by a check: %q, was %q", files[i], after, before[i])
+		}
+	}
+	if !pidAlive(state.PID) {
+		t.Errorf("server PID %d stopped by a check", state.PID)
+	}
+	if got := launchedPorts(t, launches); len(got) != 1 {
+		t.Errorf("launches = %v, want only the original start", got)
+	}
+}
+
 // TestLaunchBinaryStaleServerNoLongerOwnedKept: a caller that found the
 // server stale and bd's to restart takes the lifecycle lock after the
 // workspace's server was handed to an operator; the server is left running,

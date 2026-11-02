@@ -10,6 +10,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/doltversion"
+	"github.com/steveyegge/beads/internal/migration"
 	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
@@ -139,12 +140,24 @@ func adviseStaleServer(cfg *Config, beadsDir, serverDir string, check doltserver
 		installed += " has changed"
 	}
 	restart := "To restart it on the installed dolt: bd dolt stop, then bd dolt start"
+	if check.Verdict == doltserver.BinaryCannotReplace {
+		// Restarting now would stop the server and fail to start another.
+		restart = "Fix the dolt installation first, then restart it: bd dolt stop, then bd dolt start"
+	}
 	if doltserver.IsSharedServerModeForDir(beadsDir) {
 		restart = "It is the shared server: restarting it disconnects every client and database it serves.\n" +
 			"  When that is safe: bd dolt stop, then bd dolt start"
+		if check.Verdict == doltserver.BinaryCannotReplace {
+			restart = "It is the shared server: restarting it disconnects every client and database it serves.\n" +
+				"  Fix the dolt installation first; when that is safe: bd dolt stop, then bd dolt start"
+		}
 	}
-	fmt.Fprintf(os.Stderr, "Warning: the dolt sql-server on port %d runs dolt %s, but %s; this command does not restart it.\n  %s\n",
-		cfg.ServerPort, running, installed, restart)
+	reason := ""
+	if check.Reason != nil {
+		reason = "\n  " + remedy.PrintedText(check.Reason.Error())
+	}
+	fmt.Fprintf(os.Stderr, "Warning: the dolt sql-server on port %d runs dolt %s, but %s; this command does not restart it.%s\n  %s\n",
+		cfg.ServerPort, running, installed, reason, restart)
 }
 
 func cannotReplaceServerError(addr string, check doltserver.BinaryCheck, reason error) error {
@@ -172,9 +185,15 @@ func serverBinaryCandidate(cfg *Config) bool {
 // serverBinaryMayRestart reports whether this open may stop and start the
 // workspace's server: the same permission auto-start has, in a workspace
 // whose server bd owns, for a command that may change things (not a preview,
-// strict --readonly or a frozen command).
+// strict --readonly or a frozen command), outside a MIGRATION-FREEZE (looked
+// up from beadsDir, which covers opens that build their own Config, such as
+// the doctor's target-scoped ones) and outside test mode, where the dolt on
+// PATH is the test's.
 func serverBinaryMayRestart(cfg *Config, beadsDir string) bool {
 	if cfg.DisableAutoRestart || cfg.Preview || (cfg.ReadOnly && !cfg.ClassifiedRead) {
+		return false
+	}
+	if os.Getenv("BEADS_TEST_MODE") == "1" || migration.FindFrom(beadsDir).Frozen() {
 		return false
 	}
 	return serverOpenCanAutoStart(cfg) && !doltserver.IsAutoStartDisabled() &&

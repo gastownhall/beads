@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/migration"
 )
 
 // serverBinaryEvents records, in order, each connection the fake server
@@ -62,11 +63,15 @@ func serverBinaryListener(t *testing.T, events *serverBinaryEvents) int {
 }
 
 // serverBinaryOpen prepares an owned workspace whose tracked server is the
-// listener, and the Config an auto-starting CLI open of it uses.
+// listener, and the Config an auto-starting CLI open of it uses. Test mode is
+// off, as it forbids the restart these opens exercise; the circuit breaker
+// it would bypass keeps its state in a directory of the test's own.
 func serverBinaryOpen(t *testing.T, events *serverBinaryEvents) *Config {
 	t.Helper()
 	externalPortAdviceEnv(t)
-	t.Setenv("BEADS_TEST_MODE", "1")
+	t.Setenv("BEADS_TEST_MODE", "")
+	t.Setenv(testCircuitBreakerDirEnv, t.TempDir())
+	t.Setenv(migration.EnvFreezeFile, "")
 	beadsDir := externalPortAdviceWorkspace(t, 0)
 	if mode := doltserver.ResolveServerMode(beadsDir); mode != doltserver.ServerModeOwned {
 		t.Fatalf("workspace server mode = %v, want owned", mode)
@@ -339,11 +344,12 @@ func TestServerBinaryFailedReplacementReportsState(t *testing.T) {
 }
 
 // TestServerBinaryNoPermissionAdvises: an open that may not restart the
-// tracked server (auto-start off, a frozen command, a preview, strict
-// --readonly, a shared server) changes nothing: it does not ask the
-// lifecycle to replace the server, opens its session as before, and warns
-// once, naming both releases and the manual restart. The shared-server
-// warning names the clients a restart disconnects.
+// tracked server (auto-start off, a frozen command, a MIGRATION-FREEZE above
+// the workspace, a preview, strict --readonly, test mode, a server declared
+// external, a shared server) changes nothing: it does not ask the lifecycle
+// to replace the server, writes nothing in the workspace, opens its session
+// as before, and warns once, naming both releases and the manual restart.
+// The shared-server warning names the clients a restart disconnects.
 func TestServerBinaryNoPermissionAdvises(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -352,8 +358,25 @@ func TestServerBinaryNoPermissionAdvises(t *testing.T) {
 	}{
 		{name: "auto-start disabled", setup: func(t *testing.T, _ *Config) { t.Setenv("BEADS_DOLT_AUTO_START", "0") }},
 		{name: "frozen command", setup: func(_ *testing.T, cfg *Config) { cfg.DisableAutoRestart = true }},
+		{name: "ancestor freeze", setup: func(t *testing.T, cfg *Config) {
+			// A target-scoped open (the doctor's) builds its own Config: only the
+			// marker above the workspace says it is frozen.
+			marker := filepath.Join(filepath.Dir(cfg.BeadsDir), migration.FileName)
+			if err := os.WriteFile(marker, []byte("operator: test\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
 		{name: "preview", setup: func(_ *testing.T, cfg *Config) { cfg.Preview = true }},
 		{name: "strict readonly", setup: func(_ *testing.T, cfg *Config) { cfg.ReadOnly = true }},
+		{name: "test mode", setup: func(t *testing.T, _ *Config) { t.Setenv("BEADS_TEST_MODE", "1") }},
+		{name: "declared external", setup: func(t *testing.T, cfg *Config) {
+			// The open still auto-starts (its Config says so); the environment
+			// hands the server's lifecycle to an operator.
+			t.Setenv("BEADS_DOLT_SERVER_MODE", "1")
+			if !cfg.AutoStart {
+				t.Fatal("open does not auto-start")
+			}
+		}},
 		{name: "shared server", setup: func(t *testing.T, _ *Config) { t.Setenv("BEADS_DOLT_SHARED_SERVER", "1") }, shared: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -368,11 +391,15 @@ func TestServerBinaryNoPermissionAdvises(t *testing.T) {
 					return doltserver.BinaryReplacement{}, errors.New("must not be called")
 				})
 
+			before := serverBinaryWorkspaceFiles(t, cfg.BeadsDir)
 			stderr := captureServerBinaryStderr(t, func() {
 				for range 2 {
 					_, _ = newServerMode(context.Background(), cfg)
 				}
 			})
+			if after := serverBinaryWorkspaceFiles(t, cfg.BeadsDir); after != before {
+				t.Errorf("workspace changed by an open without permission:\nbefore:\n%s\nafter:\n%s", before, after)
+			}
 			got := strings.Join(events.snapshot(), " ")
 			if strings.Contains(got, "replace") {
 				t.Errorf("events = %s, want no replacement", got)
@@ -395,6 +422,131 @@ func TestServerBinaryNoPermissionAdvises(t *testing.T) {
 				t.Errorf("open without permission reported a restart:\n%s", stderr)
 			}
 		})
+	}
+}
+
+// serverBinaryWorkspaceFiles lists every file under beadsDir with its
+// contents, so a test can tell nothing (lock, state, record) was written.
+func serverBinaryWorkspaceFiles(t *testing.T, beadsDir string) string {
+	t.Helper()
+	var b strings.Builder
+	err := filepath.WalkDir(beadsDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		data, err := os.ReadFile(path) //nolint:gosec // G304: test-owned temp dir
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(beadsDir, path)
+		b.WriteString(rel + ": " + string(data) + "\n")
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b.String()
+}
+
+// TestServerBinaryProtectedOpenCannotReplaceAdvisesReason: a protected open
+// of a server whose executable changed into one bd cannot launch keeps using
+// the server and warns once with the reason and the repair to make before a
+// restart; the open does not fail.
+func TestServerBinaryProtectedOpenCannotReplaceAdvisesReason(t *testing.T) {
+	events := &serverBinaryEvents{}
+	cfg := serverBinaryOpen(t, events)
+	cfg.Preview = true
+	port := cfg.ServerPort
+	check := staleServerCheck(port)
+	check.Verdict, check.CandidateVersion = doltserver.BinaryCannotReplace, ""
+	check.Reason = errors.New("dolt executable /opt/dolt/bin/dolt does not run (`dolt version` failed)")
+	stubServerBinary(t,
+		func(string, int, doltserver.ServerVersionFunc) doltserver.BinaryCheck { return check },
+		func(string, int, doltserver.ServerVersionFunc) (doltserver.BinaryReplacement, error) {
+			events.add("replace")
+			return doltserver.BinaryReplacement{}, errors.New("must not be called")
+		})
+
+	var err error
+	stderr := captureServerBinaryStderr(t, func() {
+		_, err = newServerMode(context.Background(), cfg)
+	})
+	if err != nil && strings.Contains(err.Error(), "cannot be replaced") {
+		t.Fatalf("protected open failed on the cannot-replace verdict: %v", err)
+	}
+	if got := strings.Join(events.snapshot(), " "); strings.Contains(got, "replace") {
+		t.Errorf("events = %s, want no replacement", got)
+	}
+	if n := strings.Count(stderr, "this command does not restart it"); n != 1 {
+		t.Fatalf("stderr has %d warnings, want one:\n%s", n, stderr)
+	}
+	for _, want := range []string{"dolt 2.6.0", "has changed", "does not run (`dolt version` failed)", "Fix the dolt installation first", "bd dolt stop, then bd dolt start"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("warning does not mention %q:\n%s", want, stderr)
+		}
+	}
+}
+
+// TestServerBinaryClassifiedReadReplaces: a read the CLI classified as such
+// (a --readonly open that is not strict, e.g. `bd list`) may restart the
+// server as auto-start may, so the stale server is replaced.
+func TestServerBinaryClassifiedReadReplaces(t *testing.T) {
+	events := &serverBinaryEvents{}
+	cfg := serverBinaryOpen(t, events)
+	cfg.ReadOnly, cfg.ClassifiedRead = true, true
+	port := cfg.ServerPort
+	stubServerBinary(t,
+		func(string, int, doltserver.ServerVersionFunc) doltserver.BinaryCheck { return staleServerCheck(port) },
+		func(_ string, p int, _ doltserver.ServerVersionFunc) (doltserver.BinaryReplacement, error) {
+			events.add("replace")
+			return doltserver.BinaryReplacement{
+				Replaced: true, Check: staleServerCheck(p),
+				State: &doltserver.State{Running: true, PID: 222, Port: p},
+			}, nil
+		})
+
+	stderr := captureServerBinaryStderr(t, func() {
+		_, _ = newServerMode(context.Background(), cfg)
+	})
+	if n := strings.Count(strings.Join(events.snapshot(), " "), "replace"); n != 1 {
+		t.Errorf("replaced %d times, want once", n)
+	}
+	if !strings.Contains(stderr, "Restarted the dolt sql-server") || strings.Contains(stderr, "does not restart it") {
+		t.Errorf("stderr = %q, want the restart notice and no warning", stderr)
+	}
+}
+
+// TestServerBinaryProtectedRefreshSilent: a protected open of a current
+// server whose record needs a refresh (the same release reinstalled) neither
+// asks the lifecycle to record it nor warns: nothing is stale.
+func TestServerBinaryProtectedRefreshSilent(t *testing.T) {
+	events := &serverBinaryEvents{}
+	cfg := serverBinaryOpen(t, events)
+	cfg.Preview = true
+	port := cfg.ServerPort
+	current := doltserver.BinaryCheck{
+		Verdict: doltserver.BinaryCurrent, PID: 111, Port: port, Refresh: true,
+		RunningVersion: "2.6.0", CandidatePath: "/opt/dolt/bin/dolt", CandidateVersion: "2.6.0",
+	}
+	stubServerBinary(t,
+		func(string, int, doltserver.ServerVersionFunc) doltserver.BinaryCheck { return current },
+		func(string, int, doltserver.ServerVersionFunc) (doltserver.BinaryReplacement, error) {
+			events.add("replace")
+			return doltserver.BinaryReplacement{Check: current}, nil
+		})
+
+	before := serverBinaryWorkspaceFiles(t, cfg.BeadsDir)
+	stderr := captureServerBinaryStderr(t, func() {
+		_, _ = newServerMode(context.Background(), cfg)
+	})
+	if got := strings.Join(events.snapshot(), " "); strings.Contains(got, "replace") {
+		t.Errorf("events = %s, want no lifecycle call for a protected refresh", got)
+	}
+	if stderr != "" {
+		t.Errorf("stderr = %q, want nothing", stderr)
+	}
+	if after := serverBinaryWorkspaceFiles(t, cfg.BeadsDir); after != before {
+		t.Errorf("workspace changed:\nbefore:\n%s\nafter:\n%s", before, after)
 	}
 }
 
