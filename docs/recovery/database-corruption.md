@@ -15,10 +15,38 @@ diagnose first and change nothing on disk until you know which case you have.
   and the server log, `.beads/dolt-server.log`. A stopped server is not
   corruption: start it with `bd dolt start`. If the log reports a corrupted
   journal, continue with [Engine won't open](#engine-wont-open).
+- **The database is locked or busy**: `bd` reports `database is locked`, or
+  waits, after another command was interrupted or while agents are running.
+  See [Lock errors after an interrupted command](#lock-errors-after-an-interrupted-command).
 - **The engine reports a journal or open error**: every `bd` command fails
   while opening the database, for example with `corrupted journal` or
   `possible data loss detected in journal file`, even though no other `bd`
   process is running. Continue with [Engine won't open](#engine-wont-open).
+
+## Lock errors after an interrupted command
+
+Dolt takes its database locks through the operating system, which releases
+them when the holding process exits, including when it is killed. A lock file
+that still exists is not a held lock: the file stays on disk after every
+normal run, so its presence alone diagnoses nothing.
+
+If `bd` still reports the database as locked, a live process holds it. In
+embedded mode that is another `bd` process (often an agent or a script still
+running a batch) working in the same workspace; in server mode it is the Dolt
+server. Wait for the holder to finish, or stop it:
+
+```bash
+ps aux | grep '[b]d '     # find the bd process still working in this workspace
+kill <pid>                # only once you know it is yours and safe to stop
+bd dolt stop              # server mode: stop the managed server
+```
+
+`bd dolt stop` stops a managed server, not an embedded bd process. Never
+delete lock files inside `.dolt/` (including `noms/LOCK`): they belong to Dolt,
+and removing one while a process still has the database open can corrupt it.
+Live contention does not need a database rebuild; retry once the holder is
+gone. Only if every `bd` command still fails to open the database with no
+holder left, continue with [Engine won't open](#engine-wont-open).
 
 ## Engine won't open
 
