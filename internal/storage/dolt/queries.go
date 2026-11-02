@@ -119,6 +119,12 @@ func (s *DoltStore) wakeExpiredDefers(ctx context.Context) {
 	if !deferWakeSweepEligible(s.readOnly, s.classifiedRead) {
 		return
 	}
+	// The sweep admits NONBLOCKING (#6117): one GET_LOCK(name, 0) attempt, so
+	// a ready-work read never queues behind a long journaled writer for a
+	// write whose outcome it does not need. Contention answers the named busy
+	// outcome at once; it is skipped silently below and a later uncontended
+	// sweep performs the wake.
+	ctx = issueops.WithAdvisoryJournalAdmission(ctx)
 	err := s.withCircuitWrite(ctx, func(ctx context.Context) error {
 		return s.runIssueOperationTxWithMessage(ctx, func(tx *sql.Tx) (issueops.ChangedTables, string, error) {
 			woke, err := issueops.WakeExpiredDefersInTx(ctx, tx)
@@ -135,7 +141,11 @@ func (s *DoltStore) wakeExpiredDefers(ctx context.Context) {
 			return tables, issueops.WakeDefersCommitMessage(len(woke.Issues)), nil
 		})
 	})
-	if err != nil && !errors.Is(err, ErrCircuitOpen) && !errors.Is(err, ErrStoreClosed) {
+	// The journal-writer busy outcome is the expected shape of nonblocking
+	// admission (#6117), not a malfunction: contention on the admission lock
+	// skips this sweep silently, and the next uncontended one wakes.
+	if err != nil && !errors.Is(err, ErrCircuitOpen) && !errors.Is(err, ErrStoreClosed) &&
+		!errors.Is(err, issueops.ErrJournalWriterBusy) {
 		warnDeferWakeSweepSkipped(err)
 	}
 }

@@ -1,6 +1,7 @@
 package uow
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"sync"
@@ -32,8 +33,14 @@ import (
 // issued inside the work func; a serialization failure from it surfaces as
 // the closure's error and retries against a fresh unit of work, exactly like
 // a commit issued by RunTxResult itself.
+//
+// The sweep admits NONBLOCKING (#6117): with the journal on, its unit of
+// work makes one GET_LOCK(name, 0) attempt rather than queueing, so a
+// ready-work read never waits behind a long journaled writer. Contention
+// answers ErrJournalWriterBusy at once; WakeExpiredDefersAdvisory reduces
+// that to a silent skip and a later uncontended sweep performs the wake.
 func WakeExpiredDefers(ctx context.Context, p UnitOfWorkProvider) (int, error) {
-	return RunTxResult(ctx, p, func(ctx context.Context, uw UnitOfWork) (int, string, error) {
+	return RunTxResult(storageissueops.WithAdvisoryJournalAdmission(ctx), p, func(ctx context.Context, uw UnitOfWork) (int, string, error) {
 		issues, wisps, err := uw.IssueUseCase().WakeExpiredDefers(ctx)
 		if err != nil {
 			return 0, "", err
@@ -59,9 +66,15 @@ var advisoryAccessDeniedOnce sync.Once
 // WakeExpiredDefersAdvisory is WakeExpiredDefers under the read paths'
 // contract: a ready listing must never fail because the sweep could not run,
 // so errors are reduced to a stderr warning (warn-once for access-denied).
+// Journal-writer contention is not even a warning (#6117): the nonblocking
+// admission's busy outcome is the expected shape of a sweep skipped behind a
+// long journaled writer, and the next uncontended sweep wakes.
 func WakeExpiredDefersAdvisory(ctx context.Context, p UnitOfWorkProvider) {
 	_, err := WakeExpiredDefers(ctx, p)
 	if err == nil {
+		return
+	}
+	if errors.Is(err, storageissueops.ErrJournalWriterBusy) {
 		return
 	}
 	if dberrors.IsAccessDenied(err) {

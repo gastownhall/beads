@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"os"
 	"slices"
 	"testing"
 	"time"
@@ -717,6 +718,113 @@ func TestJournalWriterLock_FencedDeleteContention(t *testing.T) {
 		fenceFree(target.ID)
 		if inUse := store.db.Stats().InUse; inUse != 1 {
 			t.Fatalf("pool InUse = %d after the refused delete, want 1 (the probe only)", inUse)
+		}
+	})
+}
+
+// TestJournalWriterLock_AdvisoryDeferWake pins AC-8 of
+// gastownhall/beads#6117: the lazy defer-wake sweep ahead of ready-work reads
+// admits NONBLOCKING — one GET_LOCK(name, 0) attempt — so a ready listing
+// never waits behind a long journaled writer it does not need. Contention
+// skips the sweep at once and SILENTLY (the busy outcome is the expected
+// shape of advisory admission, not a warning), and the expired defer wakes
+// on the next uncontended sweep.
+func TestJournalWriterLock_AdvisoryDeferWake(t *testing.T) {
+	store, cleanup := setupConcurrentTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+	store.SetEventsJournalEnabled(true)
+	defer store.SetEventsJournalEnabled(false)
+
+	// One dated defer whose date has already passed: the row the sweep
+	// exists to flip. Seeded by raw SQL so no journaled write of the store's
+	// own is part of the fixture.
+	const target = "bd-wk-1"
+	if _, err := store.db.ExecContext(ctx,
+		`INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type, defer_until)
+		 VALUES (?, 'wake fixture', '', '', '', '', 'deferred', 2, 'task', UTC_TIMESTAMP() - INTERVAL 1 MINUTE)`,
+		target); err != nil {
+		t.Fatalf("seed expired defer: %v", err)
+	}
+	deferState := func() (string, bool) {
+		var status string
+		var until sql.NullTime
+		if err := store.db.QueryRowContext(ctx, "SELECT status, defer_until FROM issues WHERE id = ?", target).Scan(&status, &until); err != nil {
+			t.Fatalf("read seeded defer: %v", err)
+		}
+		return status, until.Valid
+	}
+	// quietStderr redirects the process stderr for one call and returns what
+	// landed there, so the skip can be pinned SILENT, not just fast.
+	quietStderr := func() func() string {
+		f, err := os.CreateTemp("", "advisory-wake-stderr-*")
+		if err != nil {
+			t.Fatalf("temp stderr: %v", err)
+		}
+		saved := os.Stderr
+		os.Stderr = f
+		return func() string {
+			os.Stderr = saved
+			_ = f.Close()
+			got, _ := os.ReadFile(f.Name())
+			_ = os.Remove(f.Name())
+			return string(got)
+		}
+	}
+
+	// The competitor: a probe session holding the journal-writer admission
+	// lock, standing in for any long journaled write.
+	lockName := issueops.JournalWriterLockName(store.database)
+	probe, err := store.db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("pin probe connection: %v", err)
+	}
+	defer func() { _ = probe.Close() }()
+	var granted sql.NullInt64
+	if err := probe.QueryRowContext(ctx, "SELECT GET_LOCK(?, 0)", lockName).Scan(&granted); err != nil {
+		t.Fatalf("take probe lock: %v", err)
+	}
+	if !granted.Valid || granted.Int64 != 1 {
+		t.Fatalf("probe could not take the journal-writer lock (granted=%v)", granted)
+	}
+	releaseProbe := func() {
+		_, _ = probe.ExecContext(context.Background(), "SELECT RELEASE_LOCK(?)", lockName)
+	}
+	defer releaseProbe()
+
+	t.Run("contended sweep skips at once, silently", func(t *testing.T) {
+		restore := quietStderr()
+		start := time.Now()
+		store.WakeExpiredDefersAdvisory(ctx)
+		elapsed := time.Since(start)
+		warned := restore()
+		if elapsed > 2*time.Second {
+			t.Fatalf("contended defer-wake sweep took %v, want an at-once nonblocking skip — a ready read must never queue behind a journaled writer", elapsed)
+		}
+		if warned != "" {
+			t.Fatalf("the skipped sweep warned: %s", warned)
+		}
+		if status, dated := deferState(); status != string(types.StatusDeferred) || !dated {
+			t.Fatalf("the skipped sweep changed the row: status = %q, defer_until set = %v; want deferred, dated", status, dated)
+		}
+	})
+
+	t.Run("a later uncontended sweep wakes the defer", func(t *testing.T) {
+		releaseProbe()
+		store.WakeExpiredDefersAdvisory(ctx)
+		if status, dated := deferState(); status != string(types.StatusOpen) || dated {
+			t.Fatalf("uncontended sweep left the row status = %q, defer_until set = %v; want open, dateless", status, dated)
+		}
+		// The wake minted through the admitted path, under its own actor.
+		var actor string
+		if err := store.db.QueryRowContext(ctx,
+			`SELECT actor FROM bd_events_journal WHERE op = 'update' AND issue_id = ? ORDER BY seq DESC LIMIT 1`,
+			target).Scan(&actor); err != nil {
+			t.Fatalf("read the wake's journal row: %v", err)
+		}
+		if actor != issueops.DeferWakeActor {
+			t.Fatalf("wake journal actor = %q, want %q", actor, issueops.DeferWakeActor)
 		}
 	})
 }

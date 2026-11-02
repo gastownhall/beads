@@ -319,6 +319,28 @@ a `dep_remove` it is the stored column read back just before the delete. The
 two can differ byte for byte while meaning the same thing, so compare parsed
 values rather than strings.
 
+## Concurrent writers serialize
+
+The `seq` contract above — gapless, strictly increasing in commit order — has
+to hold while several clients write at once. With the journal on in server
+mode, every journaling write takes the workspace's writer admission lock
+before its transaction begins, so concurrent writers queue instead of racing
+on the single sequence counter: a mutation either enters once the writer ahead
+of it has committed, or it is refused before anything ran. The difference is a
+bounded wait, never an interleaved sequence.
+
+A writer that cannot be admitted within its budget — about fifteen seconds —
+fails with a **busy** outcome rather than waiting indefinitely. Over
+`bd serve` that is a `503` carrying `Retry-After`; nothing ran, so retrying
+the same write as-is is always safe. Embedded mode serializes writers inside
+the process and never produces this.
+
+The one place beads refuses to queue on your behalf is the expired-defer
+sweep ahead of `bd ready` and ready-work claims: it makes one nonblocking
+attempt and skips itself when a journaled writer holds the lock, so a ready
+listing stays fast even during a long write. The sweep runs again on the next
+ready read, and the defer wakes then.
+
 ## Arrival order on the row
 
 A consumer that falls behind the retained window re-baselines from rows, and

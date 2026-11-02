@@ -1135,6 +1135,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Concurrent journaling writers on a server-mode workspace no longer abort
+  into serialization retries on the events journal's single sequence counter.
+  Every journaling write now takes a per-database writer admission lock
+  before its transaction begins, so overlapping writers queue and enter in
+  commit order; the seq contract (gapless, strictly increasing in commit
+  order) now holds under concurrency instead of being re-established by
+  rollback-and-retry (#6117). A writer that cannot be admitted within its
+  budget (about fifteen seconds) fails with a retryable busy outcome — a
+  `503` carrying `Retry-After` over `bd serve` — having run nothing, so
+  retrying the same write as-is is always safe. Writes audited to mint no
+  journal record (config, metadata, repo mtime cache, journal pruning) take
+  no admission lock at all, and the expired-defer sweep ahead of `bd ready`
+  and ready-work claims admits nonblocking, skipping itself behind a long
+  journaled writer rather than holding the listing up; the next ready read
+  performs the wake. Embedded mode is unchanged: it serializes writers
+  in-process and serves no such lock. See
+  [Concurrent writers serialize](docs/reference/events-journal.md#concurrent-writers-serialize).
 - `bd compact` no longer silently changes row data when commit dates are out
   of history order across the cutoff. When a recent-dated commit came before
   an old-dated one in history (a host clock that jumped back), the squashed

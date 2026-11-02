@@ -3,6 +3,7 @@ package uow
 import (
 	"context"
 	"database/sql"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -294,4 +295,83 @@ func TestJournalUnlockedScope_ReadRouteCannotEmit(t *testing.T) {
 		return struct{}{}, issueops.RecordDeleteInTx(ctx, dbtx, "bd-read", "actor")
 	})
 	require.Error(t, err, "a read unit of work that attempted a journal emit must fail, not journal silently")
+}
+
+// TestJournalWriterLock_AdvisoryDeferWake pins AC-8 of
+// gastownhall/beads#6117 for the uow side: the advisory defer-wake sweep
+// ahead of ready-work reads admits NONBLOCKING, so under journal-writer
+// contention it skips at once and silently — a ready read never queues
+// behind a long journaled writer — and the expired defer wakes on the next
+// uncontended sweep.
+func TestJournalWriterLock_AdvisoryDeferWake(t *testing.T) {
+	provider := newTestUOWProvider(t)
+	p := provider.(*doltSQLProvider)
+	p.SetEventsJournalEnabled(true)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	// One dated defer whose date has already passed, seeded by raw SQL.
+	const target = "bd-wk-1"
+	_, err := p.db.ExecContext(ctx,
+		`INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type, defer_until)
+		 VALUES (?, 'wake fixture', '', '', '', '', 'deferred', 2, 'task', UTC_TIMESTAMP() - INTERVAL 1 MINUTE)`, target)
+	require.NoError(t, err, "seed expired defer")
+	deferState := func() (status string, dated bool) {
+		var until sql.NullTime
+		require.NoError(t, p.db.QueryRowContext(ctx, "SELECT status, defer_until FROM issues WHERE id = ?", target).Scan(&status, &until))
+		return status, until.Valid
+	}
+
+	// The competitor: a probe session of the provider's own pool holding the
+	// journal-writer admission lock (the harness database is "beads").
+	lockName := issueops.JournalWriterLockName("beads")
+	probe, err := p.db.Conn(ctx)
+	require.NoError(t, err)
+	var granted sql.NullInt64
+	require.NoError(t, probe.QueryRowContext(ctx, "SELECT GET_LOCK(?, 0)", lockName).Scan(&granted))
+	require.True(t, granted.Valid, "GET_LOCK returned NULL")
+	require.EqualValues(t, 1, granted.Int64, "probe session must take the journal-writer lock")
+	releaseProbe := func() {
+		_, _ = probe.ExecContext(ctx, "SELECT RELEASE_LOCK(?)", lockName)
+	}
+	defer func() { _ = probe.Close() }()
+	defer releaseProbe()
+
+	// quietStderr redirects the process stderr for one call and returns what
+	// landed there, so the skip can be pinned SILENT, not just fast.
+	quietStderr := func() func() string {
+		f, err := os.CreateTemp("", "advisory-wake-stderr-*")
+		require.NoError(t, err)
+		saved := os.Stderr
+		os.Stderr = f
+		return func() string {
+			os.Stderr = saved
+			_ = f.Close()
+			got, _ := os.ReadFile(f.Name())
+			_ = os.Remove(f.Name())
+			return string(got)
+		}
+	}
+
+	t.Run("contended advisory wake skips fast and silent", func(t *testing.T) {
+		restore := quietStderr()
+		start := time.Now()
+		WakeExpiredDefersAdvisory(ctx, provider)
+		elapsed := time.Since(start)
+		warned := restore()
+		require.Less(t, elapsed, 2*time.Second, "contended defer-wake sweep took %v, want an at-once nonblocking skip", elapsed)
+		require.Empty(t, warned, "the skipped sweep warned")
+		status, dated := deferState()
+		require.Equal(t, "deferred", status, "the skipped sweep must not change the row")
+		require.True(t, dated, "the skipped sweep must leave the defer dated")
+	})
+
+	t.Run("a later uncontended sweep wakes the defer", func(t *testing.T) {
+		releaseProbe()
+		WakeExpiredDefersAdvisory(ctx, provider)
+		status, dated := deferState()
+		require.Equal(t, "open", status, "the uncontended sweep must wake the expired defer")
+		require.False(t, dated, "the woken defer must be dateless")
+	})
 }
