@@ -18,6 +18,7 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
+	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 )
 
 // bdCompact runs "bd compact" with the given args and returns stdout.
@@ -673,5 +674,33 @@ func TestEmbeddedCompactMisdatedOldWindow(t *testing.T) {
 		if replays != 1 {
 			t.Errorf("recent commit replayed %d times, want exactly 1", replays)
 		}
+	})
+}
+
+// TestEmbeddedCompactAbortsDivergentReplay covers #6645 (AC-4): the executor
+// itself must verify the replay before the swap. The planner is bypassed and
+// Compact is called directly with the straddled history (real root, the undo
+// commit as boundary, the preserved edit as the replay), a replay that
+// resurrects "edit A" without conflicting. Compact must return a divergence
+// error, leave main's hash and title untouched, and remove the temp branch.
+func TestEmbeddedCompactAbortsDivergentReplay(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	f := buildCompactStraddle(t, "da")
+
+	f.withReopened(t, func(conn *sql.Conn) {
+		err := versioncontrolops.Compact(t.Context(), conn, f.rootHash, f.old.Hash, f.logCountBefore-1, []string{f.recent.Hash})
+		if err == nil {
+			t.Fatal("Compact: expected divergence error, got nil (main was rewritten)")
+		}
+		for _, want := range []string{"compact aborted", "replayed history differs from main", "main was not reset"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error missing %q: %v", want, err)
+			}
+		}
+		f.assertMainUntouched(t, conn)
 	})
 }

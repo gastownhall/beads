@@ -738,7 +738,9 @@ bd compact
     | preserved commit that comes before a squashed commit in commit order would be
     | replayed onto history that already contains it, and that replay can silently
     | change row data instead of conflicting (#6645). The refusal names the two
-    | commits; use --dry-run to recheck after adjusting --days.
+    | commits; use --dry-run to recheck after adjusting --days. Independently, right
+    | before the swap, compact verifies that the replayed history matches main's
+    | current data and aborts without changes when it does not.
     |
     | The GC pass is a full collection: Dolt storage is generational, and a default
     | GC never revisits data an earlier GC moved to the old generation. On any store

@@ -12,8 +12,18 @@ import (
 //  3. Soft-reset to initial commit (collapses old history into working set)
 //  4. Commit as single squashed base
 //  5. Cherry-pick each recent commit on top
-//  6. Checkout main, hard-reset to temp branch
+//  6. Checkout main, verify the replayed content equals main's, hard-reset
+//     main to temp branch
 //  7. Delete temp branch
+//
+// The verify step (#6645) is the executor's own safety net: a cherry-pick
+// replay is a sequence of three-way merges, and one that silently diverges (a
+// preserved ancestor replayed onto the undo of its edit) would otherwise
+// hard-reset main to different data with a success message. dolt_diff_summary
+// compares the two committed refs — database hashes are not usable, they
+// differ even for a faithful replay — and any changed table aborts the swap
+// before main moves. The comparison is content-only: it proves nothing about
+// ignored working data, and it is not atomic with the reset that follows.
 //
 // Callers should run PruneRemoteRefs and then DoltGC afterward to reclaim disk
 // space — remote-tracking refs still anchor the pre-compact chain, and GC
@@ -71,6 +81,20 @@ func Compact(ctx context.Context, conn DBConn, initialHash, boundaryHash string,
 
 	if err := execSQL("checkout main", "CALL DOLT_CHECKOUT('main')"); err != nil {
 		return err
+	}
+	// Prove the replay preserved main's data before the rewrite (#6645). The
+	// count is of changed tables between the two committed refs; anything
+	// nonzero (or an unreadable answer) aborts before the reset, and the
+	// deferred cleanup returns to main and drops the temp branch.
+	var changedTables int
+	if err := conn.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM dolt_diff_summary('main', 'compact-tmp')").Scan(&changedTables); err != nil {
+		return fmt.Errorf("compact step %q: %w", "verify replay", err)
+	}
+	if changedTables > 0 {
+		return fmt.Errorf(
+			"compact aborted: replayed history differs from main in %d table(s); main was not reset",
+			changedTables)
 	}
 	if err := execSQL("reset main to compacted", "CALL DOLT_RESET('--hard', 'compact-tmp')"); err != nil {
 		return err

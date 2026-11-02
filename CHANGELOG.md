@@ -1126,6 +1126,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd compact --days N` no longer silently changes row data when a preserved
+  (recent-dated) commit is an ancestor of the date-picked boundary. Compaction
+  is now refused — before anything changes, regardless of `--force`, and
+  reported by `--dry-run` — when commit dates do not follow history order
+  across the cutoff, naming the two commits that straddle it; and right before
+  the swap, the executor verifies the replayed history matches main's data
+  (`dolt_diff_summary` between main and the compacted branch) and aborts
+  without touching main when it does not. Squash boundary and initial
+  selection moved from commit date to commit order, so an old window with
+  misdated commits squashes whole instead of anchoring on an obsolete
+  mid-chain state (#6645, reported by @bee-ghosttrack).
 - `bd dolt push <remote>` and `bd dolt pull <remote>` now push to and pull
   from the named remote. bd ignored the name, so `bd dolt push 1st` pushed to
   the default remote and reported "Push complete."; a name that differs from
