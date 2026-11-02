@@ -22,32 +22,6 @@ import (
 	"github.com/steveyegge/beads/internal/testutil"
 )
 
-func TestEncryptDecryptWithKey(t *testing.T) {
-	// Generate a random key
-	key := make([]byte, 32)
-	for i := range key {
-		key[i] = byte(i)
-	}
-
-	password := "super-secret-federation-password"
-
-	encrypted, err := encryptWithKey(password, key)
-	if err != nil {
-		t.Fatalf("encryptWithKey failed: %v", err)
-	}
-	if len(encrypted) == 0 {
-		t.Fatal("encrypted result is empty")
-	}
-
-	decrypted, err := decryptWithKey(encrypted, key)
-	if err != nil {
-		t.Fatalf("decryptWithKey failed: %v", err)
-	}
-	if decrypted != password {
-		t.Errorf("decrypted = %q, want %q", decrypted, password)
-	}
-}
-
 func TestApplyS3ChecksumEnvToCmd(t *testing.T) {
 	t.Setenv(awsResponseChecksumValidationEnv, "when_supported")
 
@@ -455,25 +429,6 @@ func TestIsS3RemoteURL(t *testing.T) {
 	}
 }
 
-func TestEncryptDecryptWithWrongKey(t *testing.T) {
-	key1 := make([]byte, 32)
-	key2 := make([]byte, 32)
-	for i := range key1 {
-		key1[i] = byte(i)
-		key2[i] = byte(i + 1)
-	}
-
-	encrypted, err := encryptWithKey("password", key1)
-	if err != nil {
-		t.Fatalf("encryptWithKey failed: %v", err)
-	}
-
-	_, err = decryptWithKey(encrypted, key2)
-	if err == nil {
-		t.Fatal("expected decryption with wrong key to fail")
-	}
-}
-
 func TestCredentialKeyFileGeneration(t *testing.T) {
 	tmpDir := t.TempDir()
 
@@ -684,13 +639,6 @@ func TestAddFederationPeerReturnsCredentialKeyInitError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "failed to initialize credential key") {
 		t.Fatalf("expected credential key initialization error, got: %v", err)
-	}
-}
-
-func TestDecryptWithKeyShortCiphertext(t *testing.T) {
-	key := make([]byte, 32)
-	if _, err := decryptWithKey([]byte("short"), key); err == nil || err.Error() != "ciphertext too short" {
-		t.Fatalf("decryptWithKey(short) error = %v, want ciphertext too short", err)
 	}
 }
 
@@ -1360,31 +1308,6 @@ func TestFederationPeerUninitializedKeyIsNotAMismatch(t *testing.T) {
 		_, err := store.ListFederationPeers(t.Context())
 		assertNotMismatch(t, err)
 	})
-}
-
-// The key-rotation reader passes an old key to decryptWithKey on purpose, so
-// that helper must stay unwrapped: a rotation miss is not a mismatch.
-func TestDecryptWithKeyStaysUnwrappedForRotation(t *testing.T) {
-	key := make([]byte, 32)
-	for i := range key {
-		key[i] = byte(i)
-	}
-	other := make([]byte, 32)
-	for i := range other {
-		other[i] = byte(255 - i)
-	}
-	encrypted, err := encryptWithKey("secret", key)
-	if err != nil {
-		t.Fatalf("encryptWithKey() error = %v", err)
-	}
-
-	_, err = decryptWithKey(encrypted, other)
-	if err == nil {
-		t.Fatal("decryptWithKey with the wrong key succeeded, want an error")
-	}
-	if errors.Is(err, storage.ErrCredentialKeyMismatch) {
-		t.Errorf("error = %v, want the bare cipher error; classification belongs to decryptPassword", err)
-	}
 }
 
 // GH#7890: federation_peers rows replicate between peers, so a partner can

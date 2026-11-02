@@ -3,12 +3,18 @@
 package embeddeddolt
 
 import (
+	"bytes"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
 	"database/sql"
 	"errors"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/peercred"
 )
 
 // GH#7890: stored peer passwords are bound to the federation_peers row they
@@ -119,5 +125,108 @@ func TestWithPeerAuth_CopiedCredentialRowFailsClosed(t *testing.T) {
 	}
 	if user != "produser" || pwd != "prod-s3cret" {
 		t.Fatalf("withPeerAuth(prod) user = %q, password = %q; want prod's", user, pwd)
+	}
+}
+
+// legacyUnboundBlob is the pre-v2 format: AES-GCM over the password with no
+// identity binding and no version prefix.
+func legacyUnboundBlob(t *testing.T, key []byte, password string) []byte {
+	t.Helper()
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		t.Fatal(err)
+	}
+	return gcm.Seal(nonce, nonce, []byte(password), nil)
+}
+
+func storedPeerBlob(t *testing.T, store *EmbeddedDoltStore, name string) []byte {
+	t.Helper()
+	ctx := t.Context()
+	var blob []byte
+	if err := store.withConn(ctx, false, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, "SELECT password_encrypted FROM federation_peers WHERE name = ?", name).Scan(&blob)
+	}); err != nil {
+		t.Fatalf("read password_encrypted for %s: %v", name, err)
+	}
+	return blob
+}
+
+// AC-3: a legacy blob, even one this machine's key opens, cannot prove it
+// was stored for the row carrying it. It is rejected with the legacy and
+// local-credential classifications, its bytes stay unchanged across reopen
+// with no migration marker, and re-entering the password with add-peer works.
+func TestFederationPeerLegacyCredentialRejectedUntilReentry(t *testing.T) {
+	ctx := t.Context()
+	store := newPeerAuthTestStore(t)
+	t.Setenv("DOLT_REMOTE_USER", "envuser")
+	t.Setenv("DOLT_REMOTE_PASSWORD", "envpass")
+	peer := &storage.FederationPeer{Name: "prod", RemoteURL: "https://prod.example/db", Username: "produser", Password: "prod-s3cret"}
+	if err := store.AddFederationPeer(ctx, peer); err != nil {
+		t.Fatalf("AddFederationPeer: %v", err)
+	}
+	legacy := legacyUnboundBlob(t, store.credentialKey, peer.Password)
+	execPeerSQL(t, store, "UPDATE federation_peers SET password_encrypted = ? WHERE name = 'prod'", legacy)
+
+	assertRefused := func(t *testing.T, store *EmbeddedDoltStore) {
+		t.Helper()
+		_, err := store.GetFederationPeer(ctx, "prod")
+		if !errors.Is(err, peercred.ErrLegacyCredential) || !errors.Is(err, storage.ErrCredentialKeyMismatch) {
+			t.Errorf("GetFederationPeer(legacy) error = %v, want ErrLegacyCredential and ErrCredentialKeyMismatch", err)
+		}
+		called := false
+		err = store.withPeerAuth(ctx, "prod", func(string) error {
+			called = true
+			return nil
+		})
+		if err == nil || called {
+			t.Errorf("withPeerAuth(legacy) err = %v, called = %v; want a refusal before the operation", err, called)
+		}
+		if !bytes.Equal(storedPeerBlob(t, store, "prod"), legacy) {
+			t.Error("legacy password_encrypted bytes changed, want them untouched until re-entry")
+		}
+	}
+	assertRefused(t, store)
+
+	beadsDir := store.beadsDir
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	reopened, err := Open(ctx, beadsDir, "fedauth", "main")
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	t.Cleanup(func() { reopened.Close() })
+	assertRefused(t, reopened)
+
+	entries, err := os.ReadDir(beadsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.Contains(e.Name(), "migrated") {
+			t.Errorf("found migration marker %s, want none", e.Name())
+		}
+	}
+
+	if err := reopened.AddFederationPeer(ctx, peer); err != nil {
+		t.Fatalf("re-entry AddFederationPeer: %v", err)
+	}
+	var pwd string
+	if err := reopened.withPeerAuth(ctx, "prod", func(string) error {
+		pwd = os.Getenv("DOLT_REMOTE_PASSWORD")
+		return nil
+	}); err != nil {
+		t.Fatalf("withPeerAuth after re-entry: %v", err)
+	}
+	if pwd != peer.Password {
+		t.Fatalf("password after re-entry = %q, want %q", pwd, peer.Password)
 	}
 }
