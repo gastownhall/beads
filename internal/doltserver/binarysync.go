@@ -327,10 +327,12 @@ func recordObservedBinary(serverDir string, trackedPID int, cand binaryIdentity,
 }
 
 // replaceStaleServer replaces the stale-generation server under the
-// lifecycle lock. Failures return an error for the open to fail on (AC-5):
-// a stop whose exit is unconfirmed preserves the tracked evidence, and a
-// failed start leaves the server stopped with the port restored, exactly as
-// Restart reports.
+// lifecycle lock, revalidating the tracked state and the classification
+// itself under the lock so concurrent detections of one stale generation
+// produce at most one replacement. Failures return an error for the open
+// to fail on (AC-5): a stop whose exit is unconfirmed preserves the tracked
+// evidence, and a failed start leaves the server stopped with the port
+// restored, exactly as Restart reports.
 func replaceStaleServer(serverDir string, req BinarySyncRequest, stale binaryVerdict) error {
 	lockF, err := acquireLifecycleLock(serverDir)
 	if err != nil {
@@ -338,16 +340,36 @@ func replaceStaleServer(serverDir string, req BinarySyncRequest, stale binaryVer
 	}
 	defer releaseLifecycleLock(lockF)
 
+	// Everything this caller decided is revalidated under the lock: another
+	// bd may have replaced this generation while this caller waited for it.
+	// The tracked port and PID must still be the ones the verdict was
+	// reached against — a concurrent replacement rewrites both.
+	if !ManagesLiveServerOnPort(serverDir, req.Port) {
+		return nil
+	}
+	if pid := readTrackedPID(serverDir); pid != stale.trackedPID {
+		return nil
+	}
+	// And the classification itself must still say stale. A caller whose
+	// verdict went obsolete finds the server current here and stands down:
+	// the concurrent caller's restart is the only one, so a stale
+	// generation is replaced at most once no matter how many opens
+	// detected it.
+	verdict := classifyServerBinary(serverDir, stale.trackedPID, req)
+	if verdict.kind != binaryStale {
+		return nil
+	}
+
 	state, err := restartLocked(serverDir)
 	if err != nil {
 		return fmt.Errorf("replacing the stale dolt sql-server on port %d (running dolt %s, replaced by dolt %s): %w\n"+
 			"bd will not query the old server after a failed replacement; resolve the failure, then retry",
-			req.Port, stale.serverVersion, stale.candidate.version, err)
+			req.Port, verdict.serverVersion, verdict.candidate.version, err)
 	}
 	fmt.Fprintf(os.Stderr,
 		"Info: replaced the tracked dolt sql-server on port %d (PID %d, running dolt %s) with dolt %s (PID %d): the binary it was started from was replaced by an upgrade.\n"+
 			"The stop commits each database's uncommitted working set when it can reach them, so no finished work is lost (see any flush warnings above).\n",
-		req.Port, stale.trackedPID, stale.serverVersion, stale.candidate.version, state.PID)
+		req.Port, stale.trackedPID, verdict.serverVersion, verdict.candidate.version, state.PID)
 	return nil
 }
 

@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -386,4 +387,112 @@ func TestSyncServerBinary_LegacyServerBootstrapsByProbe(t *testing.T) {
 			t.Errorf("an unknown verdict must not write a record: %v", statErr)
 		}
 	})
+}
+
+// TestSyncServerBinary_ConcurrentDetectionReplacesOnce is AC-4: when two
+// opens detect the same stale generation, the revalidation each caller
+// runs under the lifecycle lock means the replacement happens at most once
+// — the caller that lost the race finds the server current and stands down
+// instead of restarting the fresh one.
+func TestSyncServerBinary_ConcurrentDetectionReplacesOnce(t *testing.T) {
+	beadsDir, launches := fakeStartWorkspace(t)
+	stopTrackedServerAfterTest(t, beadsDir)
+	state, err := startForTest(t, beadsDir)
+	if err != nil {
+		t.Fatalf("starting the tracked server: %v", err)
+	}
+	replaceFakeDolt(t, "2.7.0")
+
+	const callers = 2
+	var barrier, done sync.WaitGroup
+	barrier.Add(callers)
+	done.Add(callers)
+	errs := make([]error, callers)
+	for i := range errs {
+		go func(i int) {
+			defer done.Done()
+			barrier.Done() // both callers classify the same stale generation
+			barrier.Wait()
+			errs[i] = SyncServerBinary(BinarySyncRequest{
+				BeadsDir:     beadsDir,
+				Host:         "127.0.0.1",
+				Port:         state.Port,
+				AllowRestart: true,
+			})
+		}(i)
+	}
+	done.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("caller %d: %v", i, err)
+		}
+	}
+
+	// Exactly one replacement: two launches total, one new PID, port kept.
+	ports := launchedPorts(t, launches)
+	if len(ports) != 2 {
+		t.Fatalf("the fake dolt launched %d time(s) (%v), want 2: the original start and one replacement", len(ports), ports)
+	}
+	if ports[0] != ports[1] {
+		t.Errorf("the replacement moved the port: %s -> %s", ports[0], ports[1])
+	}
+	rec := readBinaryRecordForTest(t, beadsDir)
+	if rec.PID == state.PID {
+		t.Fatalf("the stale server (PID %d) was never replaced", state.PID)
+	}
+}
+
+// TestSyncServerBinary_IgnoresAnotherPIDsRecord is AC-4's safety half: a
+// record naming a PID other than the tracked one is ignored (it is evidence
+// about another generation, not this server), and nothing is signaled on
+// the strength of it.
+func TestSyncServerBinary_IgnoresAnotherPIDsRecord(t *testing.T) {
+	beadsDir, launches := fakeStartWorkspace(t)
+	stopTrackedServerAfterTest(t, beadsDir)
+	state, err := startForTest(t, beadsDir)
+	if err != nil {
+		t.Fatalf("starting the tracked server: %v", err)
+	}
+
+	// A record left behind by a previous generation names a PID the
+	// workspace does not track.
+	b, err := json.Marshal(&BinaryRecord{
+		PID:        state.PID + 10000, // not the tracked PID
+		RealPath:   "/nonexistent/dolt",
+		Provenance: BinaryProvenanceLaunched,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(ServerBinaryPath(beadsDir), b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var syncErr error
+	stderr := captureStderr(t, func() {
+		syncErr = SyncServerBinary(BinarySyncRequest{
+			BeadsDir:     beadsDir,
+			Host:         "127.0.0.1",
+			Port:         state.Port,
+			AllowRestart: true,
+		})
+	})
+	// The record is not usable evidence, so the legacy probe decides — and
+	// the fake server speaks no MySQL, so the probe cannot answer and the
+	// verdict is unknown: nothing restarted, nothing signaled, no output.
+	if syncErr != nil {
+		t.Fatalf("SyncServerBinary with another PID's record: %v", syncErr)
+	}
+	if got := launchedPorts(t, launches); len(got) != 1 {
+		t.Errorf("launched %v, want only the original start (nothing restarted)", got)
+	}
+	if !isProcessAlive(state.PID) {
+		t.Error("the tracked server was stopped, but nothing proved it stale")
+	}
+	if pid := readTrackedPID(beadsDir); pid != state.PID {
+		t.Errorf("tracked PID = %d, want the retained %d", pid, state.PID)
+	}
+	if stderr != "" {
+		t.Errorf("an unknown verdict produced output:\n%s", stderr)
+	}
 }
