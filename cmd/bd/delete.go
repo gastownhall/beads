@@ -44,7 +44,8 @@ DEPENDENCY HANDLING (the same on a local database and against a team server):
 Default: Fails if any issue has dependents not in deletion set
   bd delete bd-1 bd-2
 
-Cascade: Recursively delete all dependents
+Cascade: Also delete parent-child descendants; other dependents survive
+(orphaned, as with --force). Preview first: --dry-run lists every id it deletes.
   bd delete bd-1 --cascade --force
 
 Force: Delete and orphan dependents
@@ -627,7 +628,7 @@ func init() {
 	deleteCmd.Flags().BoolP("force", "f", false, "Actually delete (without this flag, shows preview)")
 	deleteCmd.Flags().String("from-file", "", "Read issue IDs from file (one per line)")
 	deleteCmd.Flags().Bool("dry-run", false, "Preview what would be deleted without making changes")
-	deleteCmd.Flags().Bool("cascade", false, "Recursively delete all dependent issues")
+	deleteCmd.Flags().Bool("cascade", false, "Also delete parent-child descendants; other dependents survive")
 	// A8 (beads#4682)
 	deleteCmd.Flags().String("if-revision", "", ifRevisionFlagHelp)
 	deleteCmd.ValidArgsFunction = issueIDCompletion
