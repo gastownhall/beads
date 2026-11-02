@@ -7704,13 +7704,15 @@ components:
             dependency graph; never set by a client.
 
 
-            NOT POPULATED by the /v0 read endpoints today: they hydrate issues
-            without it, so the field is absent from their responses and its
-            absence says nothing about whether an issue is blocked. Use
-            `/v0/beads/ready` or the dependency endpoints to answer that. The
-            field is carried by events-journal snapshots, which is where it is
-            read back, and it is documented here because those snapshots
-            serialize the same type this schema is pinned to.
+            NOT POPULATED by the /v0 read endpoints that hydrate whole issues:
+            they leave the field absent, and its absence there says nothing
+            about whether an issue is blocked. Use `/v0/beads/ready` or the
+            dependency endpoints to answer that. The field IS populated on
+            dependency-tree nodes (`TreeNode`), by the tree walk, as that
+            property's description documents. It is also carried by
+            events-journal snapshots, which is where it is read back, and it is
+            documented here because those snapshots serialize the same type
+            this schema is pinned to.
         assignee:
           type: string
           description: The actor currently holding the issue, if any.
@@ -7936,13 +7938,15 @@ components:
             dependency graph; never set by a client.
 
 
-            NOT POPULATED by the /v0 read endpoints today: they hydrate issues
-            without it, so the field is absent from their responses and its
-            absence says nothing about whether an issue is blocked. Use
-            `/v0/beads/ready` or the dependency endpoints to answer that. The
-            field is carried by events-journal snapshots, which is where it is
-            read back, and it is documented here because those snapshots
-            serialize the same type this schema is pinned to.
+            NOT POPULATED by the /v0 read endpoints that hydrate whole issues:
+            they leave the field absent, and its absence there says nothing
+            about whether an issue is blocked. Use `/v0/beads/ready` or the
+            dependency endpoints to answer that. The field IS populated on
+            dependency-tree nodes (`TreeNode`), by the tree walk, as that
+            property's description documents. It is also carried by
+            events-journal snapshots, which is where it is read back, and it is
+            documented here because those snapshots serialize the same type
+            this schema is pinned to.
         assignee:
           type: string
           description: The actor currently holding the issue, if any.
@@ -8576,7 +8580,14 @@ components:
         status: { type: string }
         priority: { type: integer }
         issue_type: { type: string }
-        is_blocked: { type: boolean }
+        is_blocked:
+          type: boolean
+          description: >-
+            Present and true when the dependency-tree read flagged this node
+            blocked by the stored transitive projection — the same flag
+            /v0/beads/ready and /v0/beads/blocked read, with a stale flag read
+            around. Omitted when the node is not blocked; an older server that
+            does not say is not vouching for readiness by the omission.
         assignee: { type: string }
         owner: { type: string }
         estimated_minutes: { type: integer }

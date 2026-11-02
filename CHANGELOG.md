@@ -1135,6 +1135,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd dep tree` no longer marks a blocked root `[READY]`. The root's marker
+  was decided only by the root's own visible direct blocking edges, so a
+  child of a blocked epic — listed by `bd blocked` and omitted by `bd ready`
+  — rendered `[READY]`, as did any root whose blocker a `--max-depth` or
+  `--status` limit hid. The tree read now stamps every node with the stored
+  transitive `is_blocked` flag, the same projection `bd ready` and
+  `bd blocked` read (a stale flag set on a row with no own blocking edge is
+  read around, the way ready work does), and the marker agrees with it. In
+  `--json` and on the served dependency-tree endpoint a blocked node now
+  carries `"is_blocked": true`, an additive member the `TreeNode` schema
+  already documented. This makes `dep tree` consistent with `ready` and
+  `blocked`; it does not explain why a row in an existing workspace may hold
+  a stale flag (`bd recompute-blocked` repairs those, #6630).
 - `bd create --file` and other batch creates no longer fail with "issue
   already exists" on an id bd generated itself. The batch chose every id
   before it wrote any row, so two of its items could be handed the same short

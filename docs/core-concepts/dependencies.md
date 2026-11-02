@@ -129,6 +129,13 @@ bd dep tree issue-id --max-depth=3      # Limit depth
 bd dep tree issue-id --format=mermaid   # Mermaid.js output
 ```
 
+The `[READY]`/`[BLOCKED]` marker on the root agrees with `bd ready` and
+`bd blocked`: it reads the stored blocked flag, which covers blocking
+inherited through a parent chain (a child of a blocked epic is blocked even
+with no blocking edge of its own) and blockers hidden by `--max-depth` or
+`--status`. In `--json`, a blocked node carries `"is_blocked": true`; the
+member is omitted on nodes that are not blocked.
+
 ### Dependency Graph
 
 ```bash

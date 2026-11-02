@@ -140,6 +140,37 @@ func TestTreeCarriesADedupedStubToTheWire(t *testing.T) {
 	}
 }
 
+// TestTreeCarriesTheBlockedFlagToTheWire pins the additive JSON member #6630's
+// fix rides on: a node the walk flagged blocked serializes "is_blocked": true,
+// and an unblocked node omits the member rather than emitting a false — the
+// same omitempty shape Issue.IsBlocked gives every other serialization, so a
+// client never has to tell "not blocked" from "this server does not say".
+func TestTreeCarriesTheBlockedFlagToTheWire(t *testing.T) {
+	blocked := treeNode("bd-blocked", 0, "", "")
+	blocked.IsBlocked = true
+	ts := treeServer(t, &roleTreeWalker{result: issueops.TreeResult{Nodes: []*types.TreeNode{
+		blocked,
+		treeNode("bd-free", 1, "bd-blocked", types.DepBlocks),
+	}}})
+
+	resp := ts.get(t, treePath+"?root_id=bd-blocked")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	items, ok := decodeBody(t, resp)["items"].([]any)
+	if !ok || len(items) != 2 {
+		t.Fatalf("items = %#v, want the role's two nodes", items)
+	}
+	flagged, _ := items[0].(map[string]any)
+	if flagged["is_blocked"] != true {
+		t.Errorf("blocked node is_blocked = %#v, want true", flagged["is_blocked"])
+	}
+	free, _ := items[1].(map[string]any)
+	if _, present := free["is_blocked"]; present {
+		t.Errorf("unblocked node carries is_blocked = %#v; the member must be omitted, not false", free["is_blocked"])
+	}
+}
+
 // TestTreeHandsTheWiresParametersToTheRoleUnchanged is the half that proves the
 // handler decides nothing: every parameter the document publishes arrives on the
 // request, spelled as the role spells it.

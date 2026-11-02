@@ -3,6 +3,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"strings"
 	"testing"
@@ -57,6 +58,27 @@ func TestEmbeddedDepTreeRootBlockedThroughParent(t *testing.T) {
 		blocked := idSet(bdBlockedJSON(t, bd, dir))
 		if !blocked[child.ID] || !blocked[epic.ID] {
 			t.Errorf("blocked must list the epic and its child, got %v", blocked)
+		}
+	})
+
+	t.Run("tree_json_carries_is_blocked", func(t *testing.T) {
+		out := bdDep(t, bd, dir, "tree", child.ID, "--json")
+		var nodes []map[string]interface{}
+		if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &nodes); err != nil {
+			t.Fatalf("parse dep tree --json: %v\n%s", err, out)
+		}
+		byID := make(map[string]map[string]interface{}, len(nodes))
+		for _, node := range nodes {
+			id, _ := node["id"].(string)
+			byID[id] = node
+		}
+		for _, id := range []string{child.ID, epic.ID} {
+			if byID[id]["is_blocked"] != true {
+				t.Errorf("node %s is_blocked = %v, want true", id, byID[id]["is_blocked"])
+			}
+		}
+		if _, present := byID[blocker.ID]["is_blocked"]; present {
+			t.Errorf("unblocked node %s must omit is_blocked, got %v", blocker.ID, byID[blocker.ID]["is_blocked"])
 		}
 	})
 
