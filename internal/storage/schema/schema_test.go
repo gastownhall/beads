@@ -1332,6 +1332,54 @@ DELETE FROM schema_migrations WHERE version = %d;
 	}
 }
 
+// TestMigration0075BundleWidensAllFiveThroughDoltCLI proves the fresh-bundle
+// door lands all five widened columns by reading INFORMATION_SCHEMA after the
+// bundle applies — never an exit code, which the CLI reports as 0 even when a
+// statement failed. The bundle's CREATEs all emit the narrow columns and the
+// pre-2.3 CLI no-ops the prepared ALTERs, so this is exactly the shape
+// cliMigration0075WidenResidualContentColumns exists to deliver.
+func TestMigration0075BundleWidensAllFiveThroughDoltCLI(t *testing.T) {
+	testutil.RequireDoltBinary(t)
+
+	dir := filepath.Join(t.TempDir(), "widen-bundle")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("create widen bundle dir: %v", err)
+	}
+	runDoltCommand(t, dir, "init", "--name", "test", "--email", "test@example.com")
+	runDoltSQL(t, dir, AllMigrationsSQL())
+
+	for _, col := range []struct {
+		table       string
+		column      string
+		wantType    string
+		nullable    string
+		wantDefault string
+	}{
+		{"events", "comment", "longtext", "YES", "<none>"},
+		{"wisp_events", "comment", "longtext", "YES", ""},
+		{"issue_snapshots", "original_content", "longtext", "NO", "<none>"},
+		{"issue_snapshots", "archived_events", "longtext", "YES", "<none>"},
+		{"compaction_snapshots", "snapshot_json", "longblob", "NO", "<none>"},
+	} {
+		rows := queryDoltCSV(t, dir, fmt.Sprintf(
+			"SELECT COLUMN_TYPE, IS_NULLABLE, COALESCE(COLUMN_DEFAULT, '<none>') AS COLUMN_DEFAULT FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '%s' AND COLUMN_NAME = '%s'",
+			col.table, col.column))
+		if len(rows) != 1 {
+			t.Fatalf("%s.%s: INFORMATION_SCHEMA returned %d rows, want 1", col.table, col.column, len(rows))
+		}
+		got := rows[0]
+		if got["COLUMN_TYPE"] != col.wantType {
+			t.Errorf("%s.%s COLUMN_TYPE = %s, want %s", col.table, col.column, got["COLUMN_TYPE"], col.wantType)
+		}
+		if got["IS_NULLABLE"] != col.nullable {
+			t.Errorf("%s.%s IS_NULLABLE = %s, want %s", col.table, col.column, got["IS_NULLABLE"], col.nullable)
+		}
+		if got["COLUMN_DEFAULT"] != col.wantDefault {
+			t.Errorf("%s.%s COLUMN_DEFAULT = %q, want %q", col.table, col.column, got["COLUMN_DEFAULT"], col.wantDefault)
+		}
+	}
+}
+
 func TestMigration0053RepairsRigWispsThroughDoltCLI(t *testing.T) {
 	testutil.RequireDoltBinary(t)
 

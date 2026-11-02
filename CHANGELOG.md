@@ -1126,6 +1126,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Large reopen reasons, audit comments and compaction snapshots no longer
+  hit the 65,535-byte TEXT/BLOB cap (#3925). Five residual content columns
+  are widened to LONGTEXT/LONGBLOB by schema migration 0075:
+  `events.comment` and `wisp_events.comment` (the audit trail on both
+  planes; ignored migration 0031 carries these two to fresh clones, where
+  the tables are clone-local), `compaction_snapshots.snapshot_json`, and
+  the legacy `issue_snapshots.original_content`/`archived_events` pair.
+  Before the widening an oversized value was either refused — reopening a
+  closed issue with a reason over the cap failed the whole reopen, and a
+  comment or compaction snapshot over the cap failed its write — or
+  silently truncated, when a wisp promotion or demotion copied an
+  oversized event comment between the two event planes. No stored value
+  changes; the migration is one-time DDL, applied by `bd migrate schema`
+  as with every schema migration. (PR #3846 proposed MEDIUMTEXT for the
+  same columns and was deferred for this storage-layer redesign; LONGTEXT
+  matches the 0048/0049/0065 precedent so no second widening is ever
+  needed.)
 - `bd dolt push <remote>` and `bd dolt pull <remote>` now push to and pull
   from the named remote. bd ignored the name, so `bd dolt push 1st` pushed to
   the default remote and reported "Push complete."; a name that differs from

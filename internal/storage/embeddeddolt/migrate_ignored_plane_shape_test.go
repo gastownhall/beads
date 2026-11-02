@@ -96,6 +96,61 @@ func TestEmbeddedIgnoredSeriesConvergesWithFreshInitShape(t *testing.T) {
 		cloneShape := clonePlaneTableShape(t, ctx, cloneConn, table)
 		diffClonePlaneShapes(t, table, initShape, cloneShape)
 	}
+
+	// The widened event comment columns (GH#3925, main 0075 + ignored/0031)
+	// pinned explicitly on BOTH doors. The shape diff above only proves the
+	// doors match, so two equally narrow schemas would pass it silently;
+	// these pins cannot. Main 0075 widens the fresh-init door, ignored/0031
+	// the fresh-clone door — which is exactly why omitting the ignored twin
+	// fails here while the two-door diff alone would also catch it, but a
+	// twin dropped together with the main widening would leave both doors
+	// TEXT and identical, passing the diff and failing only these pins.
+	assertEventCommentColumnsWide(t, ctx, "fresh-init", initConn)
+	assertEventCommentColumnsWide(t, ctx, "fresh-clone", cloneConn)
+
+	// Both replay orders over already-widened doors are guarded no-ops. The
+	// fresh-init door already ran main-first (seedMainSchemaAt's main series,
+	// then MigrateUp's ignored series), so replaying the ignored text there
+	// completes the ignored-first order; the fresh-clone door built its event
+	// tables through the ignored series alone, so replaying the main text
+	// there completes main-first. Neither order may flip or narrow a column
+	// (#4353's encoding flip is what the COLUMN_TYPE guards exist to avoid).
+	ignoredSQL, err := schema.IgnoredMigrationSQL("0031_widen_event_comment_columns.up.sql")
+	if err != nil {
+		t.Fatalf("read ignored/0031: %v", err)
+	}
+	execFrozenGuard(t, ctx, initConn, ignoredSQL)
+	mainSQL, err := schema.MigrationSQL("0075_widen_residual_content_columns.up.sql")
+	if err != nil {
+		t.Fatalf("read 0075: %v", err)
+	}
+	execFrozenGuard(t, ctx, cloneConn, mainSQL)
+
+	for _, table := range []string{"events", "wisp_events"} {
+		diffClonePlaneShapes(t, table,
+			clonePlaneTableShape(t, ctx, initConn, table),
+			clonePlaneTableShape(t, ctx, cloneConn, table))
+	}
+	assertEventCommentColumnsWide(t, ctx, "fresh-init after replay", initConn)
+	assertEventCommentColumnsWide(t, ctx, "fresh-clone after replay", cloneConn)
+}
+
+// assertEventCommentColumnsWide pins the widened type of both event comment
+// columns on one door of TestEmbeddedIgnoredSeriesConvergesWithFreshInitShape.
+func assertEventCommentColumnsWide(t *testing.T, ctx context.Context, door string, conn *sql.Conn) {
+	t.Helper()
+	for _, pin := range []struct{ table, column string }{
+		{"events", "comment"},
+		{"wisp_events", "comment"},
+	} {
+		got := scalarString(t, ctx, conn, fmt.Sprintf(
+			"SELECT COLUMN_TYPE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '%s' AND COLUMN_NAME = '%s'",
+			pin.table, pin.column))
+		if got != "longtext" {
+			t.Errorf("%s.%s on the %s door is %s, want longtext (main 0075 and ignored/0031 must both deliver the widening)",
+				pin.table, pin.column, door, got)
+		}
+	}
 }
 
 // clonePlaneColumn is the column identity compared across the two doors.
