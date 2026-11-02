@@ -101,10 +101,16 @@ func startImageDoltServer(t *testing.T, dataDir string) int {
 }
 
 // doltTestEnv is the environment for this test's own dolt processes: a
-// private DOLT_ROOT_PATH carrying the identity dolt refuses to start without.
+// private DOLT_ROOT_PATH carrying the identity dolt refuses to start without,
+// and DOLT_DISABLE_EVENT_FLUSH. Without it every dolt command, the sql-server
+// included, forks a detached `dolt send-metrics` child as it exits. That child
+// outlives the reaped server, re-creates DOLT_ROOT_PATH/.dolt/config_global.json
+// and races t.TempDir's RemoveAll ("directory not empty"), as
+// internal/testutil's doltNoEventFlushEnv explains for its own servers.
 func doltTestEnv(t *testing.T) []string {
 	t.Helper()
-	env := append(envWithout(os.Environ(), "DOLT_ROOT_PATH"), "DOLT_ROOT_PATH="+t.TempDir())
+	env := append(envWithout(envWithout(os.Environ(), "DOLT_ROOT_PATH"), "DOLT_DISABLE_EVENT_FLUSH"),
+		"DOLT_ROOT_PATH="+t.TempDir(), "DOLT_DISABLE_EVENT_FLUSH=1")
 	for _, kv := range [][2]string{{"user.name", "bd-test"}, {"user.email", "bd-test@example.com"}} {
 		cmd := exec.Command("dolt", "config", "--global", "--add", kv[0], kv[1])
 		cmd.Env = env
@@ -261,7 +267,7 @@ func (w *writeBetweenReads) QueryContext(ctx context.Context, query string, args
 	return w.DBTX.QueryContext(ctx, query, args...)
 }
 
-func TestImageRoutesAgreeOnOneDataset(t *testing.T) {
+func TestProxiedServerImageRoutesAgreeOnOneDataset(t *testing.T) {
 	requireProxiedServerEnv(t)
 	t.Parallel()
 	bd := buildEmbeddedBD(t)
@@ -502,15 +508,15 @@ func sqlReader(db *sql.DB) imageStateReader {
 	}
 }
 
-// TestImageStartupWritesNothing pins that after a CLI upgrade, `bd image`
-// (and its missing-id refusal) must leave the version metadata, the schema
-// cursors, the Dolt history and the workspace version marker as they were, on
-// every route. As a classified read it would rewrite
+// TestProxiedServerImageStartupWritesNothing pins that after a CLI upgrade,
+// `bd image` (and its missing-id refusal) must leave the version metadata, the
+// schema cursors, the Dolt history and the workspace version marker as they
+// were, on every route. As a classified read it would rewrite
 // bd_version through the post-upgrade reconciliation, and .local_version
 // through version tracking. (A 0.56.0 seed passes the proxied route but is a
 // cross-era server workspace the direct route rightly refuses before any
 // write, so the fixture starts from 1.0.0.)
-func TestImageStartupWritesNothing(t *testing.T) {
+func TestProxiedServerImageStartupWritesNothing(t *testing.T) {
 	requireProxiedServerEnv(t)
 	t.Parallel()
 	bd := buildEmbeddedBD(t)
@@ -564,13 +570,13 @@ func assertImageBacksNothingUp(t *testing.T, r imageRoute, query imageStateReade
 	}
 }
 
-// TestImageAutoBackupWritesNothing pins that with auto-backup enabled and
-// due, `bd image` and its missing-id refusal must not back up or write backup
-// state on any route. Were the direct and embedded post-run maintenance to run
-// auto-backup unconditionally, a workspace with backup on would get
-// backup_state.json from every image — on the embedded route even when the
-// write-refusing preview store made the backup itself fail.
-func TestImageAutoBackupWritesNothing(t *testing.T) {
+// TestProxiedServerImageAutoBackupWritesNothing pins that with auto-backup
+// enabled and due, `bd image` and its missing-id refusal must not back up or
+// write backup state on any route. Were the direct and embedded post-run
+// maintenance to run auto-backup unconditionally, a workspace with backup on
+// would get backup_state.json from every image — on the embedded route even
+// when the write-refusing preview store made the backup itself fail.
+func TestProxiedServerImageAutoBackupWritesNothing(t *testing.T) {
 	requireProxiedServerEnv(t)
 	t.Parallel()
 	bd := buildEmbeddedBD(t)
