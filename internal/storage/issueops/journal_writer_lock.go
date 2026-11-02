@@ -129,9 +129,22 @@ type JournalWriterLock struct {
 // and any query failure as itself. A failed or NULL GET_LOCK leaves the
 // session's lock state unknown, so the session is discarded: the caller must
 // close conn and not reuse it.
+//
+// Under WithJournalWriterTryOnce it makes one non-waiting attempt instead, and
+// contention is a *JournalWriterBusyError at once.
 func AcquireJournalWriter(ctx context.Context, conn *sql.Conn, adm JournalWriterAdmission) (*JournalWriterLock, error) {
 	name := JournalWriterLockName(adm.Database)
 	start := time.Now()
+	if journalWriterTriesOnce(ctx) {
+		lock, ok, err := TryJournalWriter(ctx, conn, adm.Database)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return nil, &JournalWriterBusyError{Lock: name, Database: adm.Database, Waited: time.Since(start)}
+		}
+		return lock, nil
+	}
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil, fmt.Errorf("journal writer lock %q: %w", name, err)
@@ -184,6 +197,21 @@ func TryJournalWriter(ctx context.Context, conn *sql.Conn, database string) (loc
 		return nil, false, err
 	}
 	return &JournalWriterLock{conn: conn, name: name, held: true}, true, nil
+}
+
+type journalWriterTryOnceKey struct{}
+
+// WithJournalWriterTryOnce marks ctx for advisory writes, which skip rather
+// than queue when another writer holds the journal-writer lock: every
+// admission under it (AcquireJournalWriter) makes one non-waiting attempt.
+// The caller treats ErrJournalWriterBusy as "skipped".
+func WithJournalWriterTryOnce(ctx context.Context) context.Context {
+	return context.WithValue(ctx, journalWriterTryOnceKey{}, true)
+}
+
+func journalWriterTriesOnce(ctx context.Context) bool {
+	once, _ := ctx.Value(journalWriterTryOnceKey{}).(bool)
+	return once
 }
 
 // journalWriterWaitSeconds picks the GET_LOCK wait for one attempt: one second

@@ -259,3 +259,56 @@ func TestJournalWriterLock_HolderPastTheBudgetIsBusy(t *testing.T) {
 		t.Fatalf("journal-writer lock held by %v after a busy refusal, want the holder session %d", user, holderID)
 	}
 }
+
+// TestJournalWriterLock_AdvisoryDeferWakeSkipsWhenContended pins the ready
+// path's advisory defer-wake sweep under a contended journal
+// (gastownhall/beads#6117): it makes one non-waiting attempt at the
+// journal-writer lock and, finding it held, skips at once, with no warning and
+// no queued wait. The next sweep, uncontended, wakes the defer.
+func TestJournalWriterLock_AdvisoryDeferWakeSkipsWhenContended(t *testing.T) {
+	store, ctx, observer := newJournalWriterTestStore(t)
+	lockName := issueops.JournalWriterLockName(store.database)
+	holders, err := store.openLongTimeoutConn()
+	if err != nil {
+		t.Fatalf("open holder pool: %v", err)
+	}
+	t.Cleanup(func() { _ = holders.Close() })
+
+	issue := createJournalWriterTestIssue(t, ctx, store, "expired defer")
+	if err := store.UpdateIssue(ctx, issue.ID, map[string]interface{}{
+		"status":      "deferred",
+		"defer_until": time.Now().UTC().Add(-time.Hour),
+	}, "seed"); err != nil {
+		t.Fatalf("defer: %v", err)
+	}
+	status := func() types.Status {
+		t.Helper()
+		got, err := store.GetIssue(ctx, issue.ID)
+		if err != nil {
+			t.Fatalf("get %s: %v", issue.ID, err)
+		}
+		return got.Status
+	}
+
+	holder := holdJournalWriterLock(t, ctx, holders, lockName)
+	start := time.Now()
+	warned := captureOpenStderr(t, func() { store.WakeExpiredDefersAdvisory(ctx) })
+	if waited := time.Since(start); waited > 5*time.Second {
+		t.Fatalf("the contended sweep returned after %s; want one non-waiting attempt", waited)
+	}
+	if warned != "" {
+		t.Fatalf("the contended sweep warned %q; want a silent skip", warned)
+	}
+	if got := status(); got != types.StatusDeferred {
+		t.Fatalf("status after the contended sweep = %q, want it still %q", got, types.StatusDeferred)
+	}
+
+	holder.release(t)
+	if warned := captureOpenStderr(t, func() { store.WakeExpiredDefersAdvisory(ctx) }); warned != "" {
+		t.Fatalf("the uncontended sweep warned %q", warned)
+	}
+	if got := status(); got != types.StatusOpen {
+		t.Fatalf("status after the uncontended sweep = %q, want %q", got, types.StatusOpen)
+	}
+	assertJournalWriterLockFree(t, ctx, observer, lockName)
+}

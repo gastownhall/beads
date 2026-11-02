@@ -354,3 +354,58 @@ func uowJournalSeqCounter(t *testing.T, ctx context.Context, db *sql.DB) [2]int6
 	require.NoError(t, db.QueryRowContext(ctx, "SELECT COUNT(*) FROM bd_events_journal").Scan(&got[1]))
 	return got
 }
+
+// TestJournalWriterLock_AdvisoryDeferWakeSkipsWhenContended pins the ready
+// path's advisory defer-wake sweep on the proxied provider under a contended
+// journal (gastownhall/beads#6117): it makes one non-waiting attempt at the
+// journal-writer lock and, finding it held, skips at once, with no warning and
+// no queued wait. The next sweep, uncontended, wakes the defer.
+func TestJournalWriterLock_AdvisoryDeferWakeSkipsWhenContended(t *testing.T) {
+	ctx := context.Background()
+	provider := newUOWRoleFixtureProvider(t, ctx, "jwd")
+	p, ok := provider.(*doltSQLProvider)
+	require.Truef(t, ok, "provider is %T, want *doltSQLProvider", provider)
+	p.SetEventsJournalEnabled(true)
+	t.Cleanup(func() { p.SetEventsJournalEnabled(false) })
+	name := issueops.JournalWriterLockName(p.database)
+
+	const id = "jwd-deferred"
+	require.NoError(t, RunTx(ctx, p, func(ctx context.Context, uw UnitOfWork) (string, error) {
+		if _, err := uw.IssueUseCase().CreateIssue(ctx, domain.CreateIssueParams{
+			Issue:      &types.Issue{ID: id, Title: id, IssueType: types.TypeTask, Status: types.StatusOpen},
+			ExplicitID: id,
+			CreateOnly: true,
+		}, "seed"); err != nil {
+			return "", err
+		}
+		return "bd: create deferred", uw.IssueUseCase().UpdateIssue(ctx, id, map[string]interface{}{
+			"status":      "deferred",
+			"defer_until": time.Now().UTC().Add(-time.Hour),
+		}, "seed")
+	}))
+
+	holder, err := p.db.Conn(ctx)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, _ = holder.ExecContext(context.Background(), "DO RELEASE_LOCK(?)", name)
+		_ = holder.Close()
+	})
+	var granted sql.NullInt64
+	require.NoError(t, holder.QueryRowContext(ctx, "SELECT GET_LOCK(?, 0)", name).Scan(&granted))
+	require.EqualValues(t, 1, granted.Int64, "the holder must take the lock")
+
+	start := time.Now()
+	warned := captureStderr(t, func() { WakeExpiredDefersAdvisory(ctx, p) })
+	require.Less(t, time.Since(start), 5*time.Second, "the contended sweep queued; want one non-waiting attempt")
+	require.Empty(t, warned, "the contended sweep must skip silently")
+	require.Equal(t, types.StatusDeferred, readStoredIssue(t, ctx, p, id).Status, "the contended sweep woke the defer")
+
+	var released sql.NullInt64
+	require.NoError(t, holder.QueryRowContext(ctx, "SELECT RELEASE_LOCK(?)", name).Scan(&released))
+	require.EqualValues(t, 1, released.Int64)
+	require.Empty(t, captureStderr(t, func() { WakeExpiredDefersAdvisory(ctx, p) }), "the uncontended sweep warned")
+	require.Equal(t, types.StatusOpen, readStoredIssue(t, ctx, p, id).Status, "the uncontended sweep did not wake the defer")
+	var user sql.NullInt64
+	require.NoError(t, p.db.QueryRowContext(ctx, "SELECT IS_USED_LOCK(?)", name).Scan(&user))
+	require.False(t, user.Valid, "the journal-writer lock is still held after the sweeps")
+}
