@@ -124,6 +124,7 @@ go_test(
         "dualwrite_history_contract_test.go",
         "dualwrite_participation_generation_contract_test.go",
         "edge_reader_contract_test.go",
+        "endpoint_rediscovery_proxy_test.go",
         "endpoint_rediscovery_test.go",
         "errors_test.go",
         "expected_revision_contract_test.go",

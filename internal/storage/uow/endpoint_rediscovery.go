@@ -2,6 +2,7 @@ package uow
 
 import (
 	"context"
+	"sync"
 
 	"github.com/go-sql-driver/mysql"
 
@@ -19,8 +20,16 @@ import (
 // discover is the same proxy discovery the constructor ran: it authenticates
 // the published proxy, adopts a live one without taking the spawn lock, and
 // otherwise spawns a replacement under the existing proxy lifecycle rules.
+//
+// A resolver starts disarmed: bootstrap (the existence probe, version and
+// schema work, the session-database assertion) runs on the endpoint the
+// constructor resolved, which fresh-bootstrap heal authority is bound to.
+// openAndInitSchema arms it only once the provider it hands out is proven.
 type proxyEndpointResolver struct {
 	discover func() (proxy.Endpoint, error)
+
+	mu    sync.Mutex
+	armed bool
 }
 
 func newProxyEndpointResolver(discover func() (proxy.Endpoint, error)) *proxyEndpointResolver {
@@ -36,12 +45,25 @@ func workspaceProxyDiscovery(rootDir string, opts proxy.OpenOpts) func() (proxy.
 	}
 }
 
+// arm starts rediscovery for every later new physical connection.
+func (r *proxyEndpointResolver) arm() {
+	r.mu.Lock()
+	r.armed = true
+	r.mu.Unlock()
+}
+
 // beforeConnect is the mysql.BeforeConnect hook. cfg is the driver's clone for
 // this one connection: only its address changes, so database, credentials,
 // TLS, timeouts and ClientFoundRows stay as the provider was opened with.
 func (r *proxyEndpointResolver) beforeConnect(ctx context.Context, cfg *mysql.Config) error {
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	r.mu.Lock()
+	armed := r.armed
+	r.mu.Unlock()
+	if !armed {
+		return nil
 	}
 	ep, err := r.discover()
 	if err != nil {

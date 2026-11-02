@@ -42,6 +42,10 @@ type doltSQLProvider struct {
 	// connection. Fresh-bootstrap reset authority is bound to it together with
 	// the Dolt server UUID, database name, and initial HEAD.
 	serverEndpoint string
+	// endpointResolver re-resolves the proxy endpoint for new physical
+	// connections of db once the provider is handed out; nil when the
+	// provider's pool keeps a fixed address. See proxyEndpointResolver.
+	endpointResolver *proxyEndpointResolver
 	// teamServer: schema is owned by beads-team-server (bts) — bd never
 	// creates the database or migrates, only verifies the schema version.
 	teamServer bool
@@ -1053,6 +1057,16 @@ func openAndInitSchema(ctx context.Context, network string, ep proxy.Endpoint, b
 			proxiedServerMode: opts.proxiedServerMode,
 		}
 	}
+	// handOut gives the provider its resolver and arms it. It runs only once
+	// the open has proven the pool it returns, so every bootstrap connection
+	// used ep.
+	handOut := func(provider *doltSQLProvider) UnitOfWorkProvider {
+		if resolver != nil {
+			provider.endpointResolver = resolver
+			resolver.arm()
+		}
+		return provider
+	}
 
 	// Fast path (wy-s8ytnw): connect straight to the target database. A
 	// successful connect IS the existence proof (the same reasoning the
@@ -1105,7 +1119,7 @@ func openAndInitSchema(ctx context.Context, network string, ep proxy.Endpoint, b
 			_ = probeConn.Close()
 			return nil, fmt.Errorf("uow: init schema: %w", err)
 		}
-		return provider, nil
+		return handOut(provider), nil
 	}
 
 	// Advisory only: the fall-through below is the historical open, so this is
@@ -1154,5 +1168,5 @@ func openAndInitSchema(ctx context.Context, network string, ep proxy.Endpoint, b
 		return nil, errors.Join(err, dbConn.Close())
 	}
 
-	return newProvider(dbConn), nil
+	return handOut(newProvider(dbConn)), nil
 }
