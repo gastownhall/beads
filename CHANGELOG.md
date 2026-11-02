@@ -1360,6 +1360,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ... nothing to commit`. The migration pass now turns the setting off for
   its own session and restores it on return. The same error at migration
   0028, reported on bd 1.0.4, was fixed in v1.0.5 (#4470).
+- A long-lived proxied-server or external-server connection pool, such as
+  the one an embedder's unit-of-work provider keeps, now survives its local
+  proxy exiting on idle. Each new connection looks the proxy up again,
+  adopting a live one or starting a replacement, instead of dialing the
+  address chosen when the pool was opened, which a replacement proxy may no
+  longer use; until now every later query failed with `invalid connection`
+  until the process restarted. A connection whose lookup fails reports
+  `uow: rediscover proxy endpoint: <cause>` (#7295; builds on #7998 by
+  @vishnujayvel).
 - `bd dolt push <remote>` and `bd dolt pull <remote>` now push to and pull
   from the named remote. bd ignored the name, so `bd dolt push 1st` pushed to
   the default remote and reported "Push complete."; a name that differs from
