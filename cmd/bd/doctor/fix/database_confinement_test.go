@@ -183,3 +183,93 @@ func TestDatabaseIntegrityRefusesUnsafeDatabaseSelections(t *testing.T) {
 		})
 	}
 }
+
+// TestRepoFingerprintChoice2RefusesUnsafeDatabaseSelections covers AC-6: the
+// same unsafe selections are refused by RepoFingerprint's reinitialize
+// choice before the DELETE confirmation is even read, leaving the database
+// and any sidecar target unchanged.
+func TestRepoFingerprintChoice2RefusesUnsafeDatabaseSelections(t *testing.T) {
+	t.Setenv("BEADS_DOLT_DATA_DIR", "")
+
+	fixtures := []struct {
+		name     string
+		metadata func(t *testing.T, dir, beadsDir string)
+		sentinel string
+	}{
+		{
+			name: "relative dolt_data_dir escapes workspace",
+			metadata: func(t *testing.T, dir, beadsDir string) {
+				if err := (&configfile.Config{Backend: configfile.BackendDolt, DoltDataDir: "../outside-dolt"}).Save(beadsDir); err != nil {
+					t.Fatalf("save config: %v", err)
+				}
+			},
+			sentinel: "outside-dolt/noms.db",
+		},
+		{
+			name: "absolute dolt_data_dir outside workspace",
+			metadata: func(t *testing.T, dir, beadsDir string) {
+				writeRawMetadataForTest(t, beadsDir, fmt.Sprintf(`{"backend":"dolt","dolt_data_dir":%q}`, filepath.Join(dir, "outside-dolt")))
+			},
+			sentinel: "outside-dolt/noms.db",
+		},
+		{
+			name: "symlinked database leaf points outside",
+			metadata: func(t *testing.T, dir, beadsDir string) {
+				if err := (&configfile.Config{Backend: configfile.BackendDolt}).Save(beadsDir); err != nil {
+					t.Fatalf("save config: %v", err)
+				}
+				if err := os.Symlink(filepath.Join(dir, "real-dolt"), filepath.Join(beadsDir, "dolt")); err != nil {
+					t.Fatalf("symlink database: %v", err)
+				}
+			},
+			sentinel: "real-dolt/noms.db",
+		},
+		{
+			name: "symlinked ancestor escapes workspace",
+			metadata: func(t *testing.T, dir, beadsDir string) {
+				if err := (&configfile.Config{Backend: configfile.BackendDolt, DoltDataDir: "linked/dolt"}).Save(beadsDir); err != nil {
+					t.Fatalf("save config: %v", err)
+				}
+				if err := os.Symlink(filepath.Join(dir, "real-dolt"), filepath.Join(beadsDir, "linked")); err != nil {
+					t.Fatalf("symlink ancestor: %v", err)
+				}
+			},
+			sentinel: "real-dolt/noms.db",
+		},
+	}
+
+	for _, fx := range fixtures {
+		t.Run(fx.name, func(t *testing.T) {
+			dir := setupTestWorkspace(t)
+			beadsDir := filepath.Join(dir, ".beads")
+			fx.metadata(t, dir, beadsDir)
+			checkSentinel := sentinelForTest(t, filepath.Join(dir, filepath.FromSlash(fx.sentinel)), "sentinel-data\n")
+
+			reads := 0
+			oldReadLine := repoFingerprintReadLine
+			defer func() { repoFingerprintReadLine = oldReadLine }()
+			// The first read answers the choice prompt with "2"; the second,
+			// the DELETE confirmation, must never be consumed.
+			repoFingerprintReadLine = func() (string, error) {
+				reads++
+				if reads == 1 {
+					return "2", nil
+				}
+				return "y", nil
+			}
+
+			err := RepoFingerprint(dir, false)
+			if err == nil {
+				t.Fatal("expected repo fingerprint choice 2 to refuse the unsafe database selection")
+			}
+			if !strings.Contains(err.Error(), "refusing") {
+				t.Fatalf("expected a refusal error, got %v", err)
+			}
+			if reads != 1 {
+				t.Fatalf("expected the refusal before the DELETE confirmation read, got %d reads", reads)
+			}
+			checkSentinel()
+			assertNoCorruptBackups(t, dir)
+		})
+	}
+}

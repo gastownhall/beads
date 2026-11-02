@@ -141,6 +141,17 @@ func RepoFingerprint(path string, autoYes bool) error {
 		dbPath := cfg.DatabasePath(beadsDir)
 		isDolt := cfg.GetBackend() == configfile.BackendDolt
 
+		// Confinement before the destructive action is even proposed: the
+		// metadata-selected path accepts relative or absolute dolt_data_dir
+		// values and an absolute database, so without this check the removal
+		// below can delete data outside this workspace. The refusal happens
+		// before the DELETE confirmation is read, so an unsafe selection never
+		// gets as far as a y/N prompt.
+		dbPath, err := confinedDatabasePath(beadsDir, dbPath)
+		if err != nil {
+			return fmt.Errorf("refusing to reinitialize database: %w", err)
+		}
+
 		// Confirm before destructive action
 		fmt.Printf("  ⚠️  This will DELETE %s. Continue? [y/N]: ", dbPath)
 		confirm, err := repoFingerprintReadLine()
