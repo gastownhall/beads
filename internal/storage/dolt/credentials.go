@@ -128,7 +128,6 @@ func (s *DoltStore) ensureCredentialKey() error {
 	return s.initCredentialKey()
 }
 
-
 // encryptWithKey seals plaintext under the empty peer binding: the unbound
 // codec shared by both stores. It stays separate from the peer-bound seal so
 // the key-rotation path (and its tests) can exercise the codec without a
