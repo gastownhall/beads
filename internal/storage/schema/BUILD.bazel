@@ -17,6 +17,7 @@ go_library(
         "migrate_consent.go",
         "migration_content_hashes.go",
         "migration_repairs.go",
+        "migration_updated_at_guard.go",
         "remote_migrate_gate.go",
         "schema.go",
         "smart_remote_migrate_gate.go",
