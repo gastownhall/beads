@@ -1110,6 +1110,9 @@ func runMigrateFromProxiedServer(dryRun bool, shared bool) error {
 			return HandleError("%v", err)
 		}
 	}
+	// A committed journal can name anything as a log asset: confine removal
+	// (and the dry-run list) to the two eligible logs under the root.
+	logAssets = confineMigrateLogAssets(rootDir, logAssets)
 
 	if dryRun {
 		if jsonOutput {
@@ -1281,6 +1284,57 @@ func proxiedLogAssets(beadsDir string) ([]string, error) {
 	}
 	// The proxy start rotates an oversized server.log to its single .1 slot.
 	return []string{logPath, logPath + ".1"}, nil
+}
+
+// confineMigrateLogAssets filters migration log assets down to the two
+// eligible proxied-server logs under rootDir — server.log and its single
+// rotated .1 — each a regular non-symlink file if it exists at all. A
+// committed migration journal names its log assets, and it can name
+// anything: a path outside rootDir, or a leaf symlink standing where a log
+// should be. Anything else is skipped with a warning naming the path and is
+// never removed; absence is tolerated (bd-1tmym4 / #7888).
+func confineMigrateLogAssets(rootDir string, logAssets []string) []string {
+	if absRoot, err := filepath.Abs(rootDir); err == nil {
+		rootDir = absRoot
+	}
+	eligible := make([]string, 0, len(logAssets))
+	for _, p := range logAssets {
+		abs := p
+		if a, err := filepath.Abs(p); err == nil {
+			abs = a
+		}
+		if !migrateLogAssetEligible(rootDir, abs) {
+			continue
+		}
+		eligible = append(eligible, abs)
+	}
+	return eligible
+}
+
+// migrateLogAssetEligible reports whether abs is one of the two expected
+// proxied-server logs under rootDir and, when present on disk, a regular
+// non-symlink file. Unsafe assets warn naming the path and are skipped.
+func migrateLogAssetEligible(rootDir, abs string) bool {
+	for _, name := range []string{proxiedServerLogName, proxiedServerLogName + ".1"} {
+		if abs != filepath.Join(rootDir, name) {
+			continue
+		}
+		fi, err := os.Lstat(abs)
+		if os.IsNotExist(err) {
+			return true // absence is tolerated; removal ignores it too
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: skipping migration log asset %s: %v\n", abs, err)
+			return false
+		}
+		if fi.Mode()&os.ModeSymlink != 0 || !fi.Mode().IsRegular() {
+			fmt.Fprintf(os.Stderr, "Warning: skipping migration log asset %s — not a regular file\n", abs)
+			return false
+		}
+		return true
+	}
+	fmt.Fprintf(os.Stderr, "Warning: skipping migration log asset %s — not an eligible proxied-server log under %s\n", abs, rootDir)
+	return false
 }
 
 func removeMigrateAssets(paths []string) []error {

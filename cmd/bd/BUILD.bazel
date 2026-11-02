@@ -1042,6 +1042,7 @@ go_test(
         "migrate_hooks_apply_test.go",
         "migrate_hooks_test.go",
         "migrate_issues_max_rows_gate_test.go",
+        "migrate_log_assets_test.go",
         "migrate_personal_server_test.go",
         "migrate_personal_test.go",
         "migrate_repo_id_notice_test.go",
