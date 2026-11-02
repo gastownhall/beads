@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -404,5 +405,53 @@ func TestEmbeddedBackupRestoreRefusesSourceWithoutBackup(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestEmbeddedBackupRestoreValidSourceRoundTrip is the positive control for
+// TestEmbeddedBackupRestoreRefusesSourceWithoutBackup: the source check must
+// not refuse a real backup. A backup made by init and sync is force-restored
+// after one more issue is created: the backed-up issues come back and the
+// later one is gone, so the restore really replaced the database.
+func TestEmbeddedBackupRestoreValidSourceRoundTrip(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt backup tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "bkvalid")
+	bdRunOK(t, bd, dir, "config", "set", "backup.enabled", "false")
+	backedUp := []string{
+		bdCreateSilent(t, bd, dir, "in the backup A"),
+		bdCreateSilent(t, bd, dir, "in the backup B"),
+	}
+
+	backupDir := filepath.Join(t.TempDir(), "dolt-backup")
+	if err := os.MkdirAll(backupDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	bdBackup(t, bd, dir, "init", "file://"+backupDir)
+	bdBackup(t, bd, dir, "sync")
+	if _, err := os.Stat(filepath.Join(backupDir, "manifest")); err != nil {
+		t.Fatalf("backup sync wrote no manifest to %s: %v", backupDir, err)
+	}
+	later := bdCreateSilent(t, bd, dir, "created after the backup")
+
+	if out := bdBackup(t, bd, dir, "restore", "--force", backupDir); !strings.Contains(out, "Restore complete") {
+		t.Fatalf("restore from a real backup did not complete:\n%s", out)
+	}
+
+	var ids []string
+	for _, issue := range bdListJSON(t, bd, dir) {
+		ids = append(ids, issue.ID)
+	}
+	for _, id := range backedUp {
+		if !slices.Contains(ids, id) {
+			t.Errorf("restore lost %s, which the backup holds; got %v", id, ids)
+		}
+	}
+	if slices.Contains(ids, later) {
+		t.Errorf("restore did not replace the database: %s was created after the backup and is still here; got %v", later, ids)
 	}
 }

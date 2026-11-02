@@ -508,3 +508,42 @@ func TestRestoreSourceErrorAdvice(t *testing.T) {
 		t.Errorf("restoreSourceError(nil) = %v, want nil", got)
 	}
 }
+
+// TestBackupRestoreValidSourceRoundTrip is the sql-server positive control for
+// TestBackupRestoreRefusesSourceWithoutBackup: a backup registered and synced
+// through the store passes the source check and force-restores, bringing the
+// backed-up issues back and dropping the one created after the backup.
+func TestBackupRestoreValidSourceRoundTrip(t *testing.T) {
+	s := newOwnDatabaseStore(t, "vr")
+	ctx := context.Background()
+	seedRestoreIssue(t, s, "vr-1", "in the backup A")
+	seedRestoreIssue(t, s, "vr-2", "in the backup B")
+
+	backupDir := filepath.Join(t.TempDir(), "dolt-backup")
+	if err := os.MkdirAll(backupDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	backupURL, err := versioncontrolops.DirToFileURL(backupDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.BackupAdd(ctx, defaultDoltBackupName, backupURL); err != nil {
+		t.Fatalf("register the backup (the Dolt server must be able to write %s): %v", backupDir, err)
+	}
+	if err := s.BackupSync(ctx, defaultDoltBackupName); err != nil {
+		t.Fatalf("sync the backup: %v", err)
+	}
+	seedRestoreIssue(t, s, "vr-3", "created after the backup")
+
+	if err := s.RestoreDatabase(ctx, backupDir, true); err != nil {
+		t.Fatalf("force restore from a real backup: %v", err)
+	}
+	for _, id := range []string{"vr-1", "vr-2"} {
+		if _, err := s.GetIssue(ctx, id); err != nil {
+			t.Errorf("restore lost %s, which the backup holds: %v", id, err)
+		}
+	}
+	if issue, err := s.GetIssue(ctx, "vr-3"); err == nil && issue != nil {
+		t.Errorf("restore did not replace the database: vr-3 was created after the backup and is still here")
+	}
+}
