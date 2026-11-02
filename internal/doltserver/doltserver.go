@@ -2370,7 +2370,7 @@ func restartLocked(beadsDir string, launch *binaryIdentity) (*State, error) {
 	if state, stateErr := IsRunning(beadsDir); stateErr == nil && state != nil {
 		previousPort = state.Port
 	}
-	if err := IgnoreNotRunning(stopLocked(beadsDir)); err != nil {
+	if err := IgnoreNotRunning(stopLockedWith(beadsDir, launch != nil)); err != nil {
 		return nil, fmt.Errorf("stopping Dolt server for restart: %w", err)
 	}
 	if previousPort > 0 {
@@ -2409,7 +2409,33 @@ func StopWithForce(beadsDir string, force bool) error {
 	return stopLocked(beadsDir)
 }
 
-func stopLocked(beadsDir string) error {
+func stopLocked(beadsDir string) error { return stopLockedWith(beadsDir, false) }
+
+// stopServerProcess stops a verified server process. A var so tests can make
+// a stop fail.
+var stopServerProcess = gracefulStop
+
+// stopExitWait bounds how long a replacement waits for a stopped server's
+// process to be gone before it starts the new one.
+const stopExitWait = 2 * time.Second
+
+// awaitProcessExit reports whether pid is gone within timeout.
+func awaitProcessExit(pid int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for isProcessAlive(pid) {
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return true
+}
+
+// stopLockedWith is stopLocked. With keepUntilExit, as a replacement stops
+// the server it is about to replace, a process still alive after the stop
+// keeps its pid, port and launch record files, so the next open still finds
+// it, and the stop fails.
+func stopLockedWith(beadsDir string, keepUntilExit bool) error {
 	state, err := IsRunning(beadsDir)
 	if err != nil {
 		return err
@@ -2461,8 +2487,15 @@ func stopLocked(beadsDir string) error {
 		fmt.Fprintf(os.Stderr, "Warning: could not flush working set before stop: %v\n", flushErr)
 	}
 
-	if err := gracefulStop(state.PID, 5*time.Second); err != nil {
-		return errors.Join(err, cleanupStateFiles(beadsDir))
+	stopErr := stopServerProcess(state.PID, 5*time.Second)
+	if keepUntilExit && (stopErr != nil || !awaitProcessExit(state.PID, stopExitWait)) && isProcessAlive(state.PID) {
+		if stopErr == nil {
+			stopErr = errors.New("it is still running")
+		}
+		return fmt.Errorf("PID %d did not stop, so its state files are kept: %w", state.PID, stopErr)
+	}
+	if stopErr != nil {
+		return errors.Join(stopErr, cleanupStateFiles(beadsDir))
 	}
 
 	// In debug mode, rotate cpu.pprof → cpu-<timestamp>.pprof so the next

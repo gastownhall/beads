@@ -278,3 +278,62 @@ func TestServerBinaryAsksTheServerItsVersion(t *testing.T) {
 		t.Error(asked)
 	}
 }
+
+// TestServerBinaryFailedReplacementReportsState: an open whose replacement
+// fails sends no query and says what state it left: a refused preflight left
+// the server running; a failed stop names the manual restart; a failed start
+// says none runs and the port is kept for `bd dolt start`.
+func TestServerBinaryFailedReplacementReportsState(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		cannot      bool
+		stopped     bool
+		wantReplace int
+		want        []string
+		banned      []string
+	}{
+		{name: "preflight", cannot: true, want: []string{"cannot be replaced", "left running", "bd dolt stop"}, banned: []string{"bd dolt start"}},
+		{name: "stop", wantReplace: 1, want: []string{"replacing the server failed", "bd dolt stop, then bd dolt start"}},
+		{name: "start", stopped: true, wantReplace: 1, want: []string{"replacing the server failed", "none is running", "is kept for the next start: bd dolt start"}, banned: []string{"bd dolt stop"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			events := &serverBinaryEvents{}
+			cfg := serverBinaryOpen(t, events)
+			port := cfg.ServerPort
+			check := staleServerCheck(port)
+			if tc.cannot {
+				check.Verdict = doltserver.BinaryCannotReplace
+				check.Reason = errors.New("dolt 2.5.1 is below the minimum")
+			}
+			stubServerBinary(t,
+				func(string, int, doltserver.ServerVersionFunc) doltserver.BinaryCheck { return check },
+				func(string, int, doltserver.ServerVersionFunc) (doltserver.BinaryReplacement, error) {
+					events.add("replace")
+					return doltserver.BinaryReplacement{Check: check, Stopped: tc.stopped}, errors.New("replacement step failed")
+				})
+
+			_, err := newServerMode(context.Background(), cfg)
+			if err == nil {
+				t.Fatal("open succeeded after a failed replacement")
+			}
+			msg := err.Error()
+			for _, want := range append([]string{"no query was sent", "2.6.0"}, tc.want...) {
+				if !strings.Contains(msg, want) {
+					t.Errorf("error does not mention %q:\n%s", want, msg)
+				}
+			}
+			if tc.stopped && !strings.Contains(msg, "SQL port "+strconv.Itoa(port)) {
+				t.Errorf("error does not name the kept port %d:\n%s", port, msg)
+			}
+			for _, b := range tc.banned {
+				if strings.Contains(msg, b) {
+					t.Errorf("error mentions %q:\n%s", b, msg)
+				}
+			}
+			got := events.snapshot()
+			if n := strings.Count(strings.Join(got, " "), "replace"); n != tc.wantReplace || strings.Count(strings.Join(got, " "), "conn") != 1 {
+				t.Errorf("events = %v, want the probe and %d replacement attempts, no session", got, tc.wantReplace)
+			}
+		})
+	}
+}

@@ -3,14 +3,18 @@
 package doltserver
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/beads/internal/doltversion"
 )
 
 // stubProcessListLaunchedHere makes the process list report exactly the
@@ -422,4 +426,89 @@ func TestLaunchBinaryUnconfirmedProcessNotSignaled(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestLaunchBinaryFailedReplacement covers each way a replacement can fail.
+// A dolt bd cannot launch is refused before anything is stopped: the server
+// and its record stay. A stop that fails keeps the live server's pid, port and
+// record files, so the next attempt finds it stale and fails again. A start
+// that fails leaves no server running, says so, and keeps the SQL port for
+// the next start.
+func TestLaunchBinaryFailedReplacement(t *testing.T) {
+	t.Run("preflight", func(t *testing.T) {
+		beadsDir, launches := fakeStartWorkspace(t)
+		stubProcessListLaunchedHere(t)
+		state, err := startForTest(t, beadsDir)
+		if err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		upgradeFakeDolt(t, "2.5.1")
+
+		res, err := ReplaceStaleServer(beadsDir, state.Port, nil)
+		if !errors.Is(err, doltversion.ErrBelowRequiredMin) || res.Check.Verdict != BinaryCannotReplace || res.Replaced || res.Stopped {
+			t.Fatalf("ReplaceStaleServer = %+v, %v; want a below-minimum refusal", res, err)
+		}
+		if !pidAlive(state.PID) || len(launchedPorts(t, launches)) != 1 {
+			t.Errorf("server alive=%v, launches=%v; want it kept, launched once", pidAlive(state.PID), launchedPorts(t, launches))
+		}
+		if rec, ok := readBinaryRecord(beadsDir); !ok || rec.PID != state.PID || rec.Version != "2.6.0" {
+			t.Errorf("record = %+v (ok=%v), want the original launch record", rec, ok)
+		}
+	})
+
+	t.Run("stop", func(t *testing.T) {
+		beadsDir, launches := fakeStartWorkspace(t)
+		stubProcessListLaunchedHere(t)
+		state, err := startForTest(t, beadsDir)
+		if err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		upgradeFakeDolt(t, "2.7.0")
+		orig := stopServerProcess
+		stopServerProcess = func(int, time.Duration) error { return errors.New("operation not permitted") }
+		t.Cleanup(func() { stopServerProcess = orig })
+
+		for attempt := 1; attempt <= 2; attempt++ {
+			res, err := ReplaceStaleServer(beadsDir, state.Port, nil)
+			if err == nil || !strings.Contains(err.Error(), "operation not permitted") || res.Replaced || res.Stopped {
+				t.Fatalf("attempt %d: ReplaceStaleServer = %+v, %v; want the stop failure", attempt, res, err)
+			}
+			for _, p := range []string{pidPath(beadsDir), portPath(beadsDir), binaryRecordPath(beadsDir)} {
+				if _, err := os.Stat(p); err != nil {
+					t.Errorf("attempt %d: %s gone after a failed stop: %v", attempt, filepath.Base(p), err)
+				}
+			}
+			if got := CheckServerBinary(beadsDir, state.Port, nil); got.Verdict != BinaryStale || got.PID != state.PID {
+				t.Errorf("attempt %d: check = %+v, want the server still found stale", attempt, got)
+			}
+		}
+		if !pidAlive(state.PID) || len(launchedPorts(t, launches)) != 1 {
+			t.Errorf("server alive=%v, launches=%v; want it kept, launched once", pidAlive(state.PID), launchedPorts(t, launches))
+		}
+	})
+
+	t.Run("start", func(t *testing.T) {
+		beadsDir, _ := fakeStartWorkspace(t)
+		stubProcessListLaunchedHere(t)
+		state, err := startForTest(t, beadsDir)
+		if err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		upgradeFakeDolt(t, "2.7.0")
+		t.Setenv(testFakeDoltExitEnv, "1")
+
+		res, err := ReplaceStaleServer(beadsDir, state.Port, nil)
+		if res.State != nil && res.State.PID > 0 {
+			killAtCleanup(t, res.State.PID)
+		}
+		if err == nil || !strings.Contains(err.Error(), "server remains stopped") || res.Replaced || !res.Stopped {
+			t.Fatalf("ReplaceStaleServer = %+v, %v; want a failed start reported as stopped", res, err)
+		}
+		if pidAlive(state.PID) {
+			t.Errorf("old server PID %d still running", state.PID)
+		}
+		if b, err := os.ReadFile(portPath(beadsDir)); err != nil || strings.TrimSpace(string(b)) != strconv.Itoa(state.Port) {
+			t.Errorf("port file = %q, %v; want port %d kept", b, err, state.Port)
+		}
+	})
 }

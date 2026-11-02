@@ -62,11 +62,14 @@ func reconcileServerBinary(cfg *Config, beadsDir, serverDir string) (int, error)
 		if res.Check.Verdict == doltserver.BinaryStale {
 			check = res.Check
 		}
+		next := "To restart it yourself: bd dolt stop, then bd dolt start"
+		if res.Stopped {
+			next = fmt.Sprintf("The old server is stopped and none is running; SQL port %d is kept for the next start: bd dolt start", cfg.ServerPort)
+		}
 		return 0, fmt.Errorf("Dolt server at %s runs dolt %s, but the dolt bd launches (%s) is now %s; "+
-			"replacing the server failed, so no query was sent: %w\n\n"+
-			"To restart it yourself: bd dolt stop, then bd dolt start",
+			"replacing the server failed, so no query was sent: %w\n\n%s",
 			addr, check.RunningVersion, remedy.PrintedValue(check.CandidatePath), check.CandidateVersion,
-			remedy.PrintedTextError(err))
+			remedy.PrintedTextError(err), next)
 	}
 	if !res.Replaced || res.State == nil {
 		return cfg.ServerPort, nil

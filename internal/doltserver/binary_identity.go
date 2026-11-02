@@ -339,6 +339,9 @@ type BinaryReplacement struct {
 	Check BinaryCheck
 	// State is the replacement server's state when Replaced.
 	State *State
+	// Stopped is true when the replacement failed after the server was
+	// stopped: none runs, and its port is kept for the next start.
+	Stopped bool
 }
 
 // ReplaceStaleServer replaces the dolt sql-server beadsDir tracks on port
@@ -398,6 +401,7 @@ func ReplaceStaleServer(beadsDir string, port int, serverVersion ServerVersionFu
 	}
 	state, err := restartLocked(beadsDir, &check.candidate)
 	if err != nil {
+		res.Stopped = !isProcessAlive(check.PID)
 		return res, err
 	}
 	res.Replaced, res.State = true, state
