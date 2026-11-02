@@ -4,6 +4,7 @@ package main
 
 import (
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -79,6 +80,43 @@ func TestEmbeddedWispGCProtectedLabelCascade(t *testing.T) {
 	for _, id := range []string{parent, plainStep} {
 		if bdShowSucceeds(t, bd, dir, id) {
 			t.Errorf("unprotected wisp %s must be reclaimed (abandoned parent or its closed step)", id)
+		}
+	}
+}
+
+// TestEmbeddedWispGCClosedPurgeProtectedLabel pins that `wisp gc --closed`
+// honors the setting on the direct route: the preview names only the
+// unlabeled wisps and reports the skip, and --force deletes only those.
+func TestEmbeddedWispGCClosedPurgeProtectedLabel(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "gcp")
+	bdCommand(t, bd, dir, "config", "set", "wisp.protected_labels", "keep:mail")
+
+	readMail := bdCreate(t, bd, dir, "read mail", "--ephemeral", "--label", "keep:mail").ID
+	spent := bdCreate(t, bd, dir, "spent wisp", "--ephemeral").ID
+	other := bdCreate(t, bd, dir, "spent thread", "--ephemeral", "--label", "thread").ID
+	bdCommand(t, bd, dir, "close", readMail, spent, other)
+
+	preview := bdCommand(t, bd, dir, "mol", "wisp", "gc", "--closed")
+	if !strings.Contains(preview, "Found 2 closed wisp(s) to delete") {
+		t.Errorf("closed purge preview should find exactly the 2 unlabeled wisps; got:\n%s", preview)
+	}
+	if !strings.Contains(preview, "Skipping 1 wisp(s) carrying a protected label") {
+		t.Errorf("closed purge preview must report the protected-label skip; got:\n%s", preview)
+	}
+
+	bdCommand(t, bd, dir, "mol", "wisp", "gc", "--closed", "--force")
+	if !bdShowSucceeds(t, bd, dir, readMail) {
+		t.Errorf("closed wisp %s carries protected label keep:mail and must survive wisp gc --closed --force", readMail)
+	}
+	for _, id := range []string{spent, other} {
+		if bdShowSucceeds(t, bd, dir, id) {
+			t.Errorf("closed wisp %s carries no protected label and must be purged", id)
 		}
 	}
 }
