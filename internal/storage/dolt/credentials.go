@@ -12,11 +12,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 
 	"github.com/steveyegge/beads/internal/execenv"
 	"github.com/steveyegge/beads/internal/githooksenv"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/peercred"
 )
@@ -586,6 +588,10 @@ func isMissingFederationPeer(err error) bool {
 // still need status/fetch/pull/push via normal Dolt credential discovery
 // (GH#4837). Malformed, decryption, and database errors remain fatal.
 //
+// A peer that stores credentials has its live destination verified before
+// fn runs (verifyPeerDestination): a credential is only installed for the
+// remote it was enrolled for, never for a diverged or missing one.
+//
 // An unknown peer name (a mistyped --peer) is therefore passed through too:
 // without a row it looks the same as a credential-free remote, so Dolt rejects
 // it with its own remote error. A name check added in front of this must
@@ -603,6 +609,9 @@ func (s *DoltStore) withPeerCredentials(ctx context.Context, peerName string, fn
 
 	var creds *remoteCredentials
 	if peer != nil && (peer.Username != "" || peer.Password != "") {
+		if err := s.verifyPeerDestination(ctx, peer); err != nil {
+			return fmt.Errorf("refusing to use stored credentials for peer %s: %w", remedy.PrintedValue(peerName), err)
+		}
 		creds = &remoteCredentials{username: peer.Username, password: peer.Password}
 	}
 
@@ -614,6 +623,70 @@ func (s *DoltStore) withPeerCredentials(ctx context.Context, peerName string, fn
 	}
 
 	return err
+}
+
+// verifyPeerDestination fails closed when the live remote named peer does
+// not carry the URL the peer row stored its credentials for (GH#7890): a
+// federation_peers row travels with the database, so name alone does not
+// prove the destination, and installing a stored password for a diverged URL
+// would disclose it to an unrelated host. The live SQL remote wins; only
+// when the name is absent from dolt_remotes is the on-disk persisted record
+// consulted (GH#2118 cold start), and a live URL is never overridden by it.
+// A peer row with an empty stored URL has no verified destination either, so
+// it is refused the same way. Mirrors embeddeddolt's verifyPeerRemoteURL.
+func (s *DoltStore) verifyPeerDestination(ctx context.Context, peer *storage.FederationPeer) error {
+	liveURL, found, err := s.peerRemoteURL(ctx, peer.Name)
+	if err != nil {
+		return err
+	}
+	if !found {
+		// GH#2118: a freshly (auto-)started sql-server can report an empty
+		// dolt_remotes table while the remote is persisted on disk. Recover
+		// the persisted URL instead of refusing a configured rig.
+		for _, r := range s.PersistedRemoteInfos() {
+			if r.Name == peer.Name {
+				liveURL, found = r.URL, true
+				break
+			}
+		}
+	}
+	if !found {
+		arg, note := remedy.CommandArg(runtime.GOOS, peer.Name, "<peer>")
+		return fmt.Errorf("federation peer %s has stored credentials but no remote named %s exists; re-run bd federation add-peer %s <url> --user <user>%s to restore it", remedy.PrintedValue(peer.Name), remedy.PrintedValue(peer.Name), arg, note)
+	}
+	if !remoteURLMatches(peer.RemoteURL, liveURL) {
+		return fmt.Errorf("remote %s points at %q but federation peer %s stored its credentials for %q; refusing to send stored credentials to a diverged URL. Remove and re-add the peer to rebind it", remedy.PrintedValue(peer.Name), liveURL, remedy.PrintedValue(peer.Name), peer.RemoteURL)
+	}
+	return nil
+}
+
+// peerRemoteURL returns the live URL the Dolt server records for the remote
+// named name, and whether such a remote exists.
+func (s *DoltStore) peerRemoteURL(ctx context.Context, name string) (string, bool, error) {
+	remotes, err := s.ListRemotes(ctx)
+	if err != nil {
+		return "", false, fmt.Errorf("resolve remote URL for peer %s: %w", remedy.PrintedValue(name), err)
+	}
+	for _, r := range remotes {
+		if r.Name == name {
+			return r.URL, true, nil
+		}
+	}
+	return "", false, nil
+}
+
+// remoteURLMatches reports whether a credential enrolled for stored may be
+// installed for the remote the server reads back as live. Only identical
+// nonempty URLs match: equivalences (case, trailing slash, .git, scp forms)
+// are NOT assumed, because an accepted-but-unequal pair is a credential
+// disclosure if the two spellings are actually different hosts. Dolt
+// provably read-back-identical forms can be added here; anything unproven
+// fails closed (GH#7890).
+func remoteURLMatches(stored, live string) bool {
+	if stored == "" || live == "" {
+		return false
+	}
+	return stored == live
 }
 
 // FederationPeer is an alias for storage.FederationPeer for convenience.

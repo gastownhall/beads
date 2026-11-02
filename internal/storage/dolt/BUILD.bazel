@@ -189,6 +189,7 @@ go_test(
         "create_guard_test.go",
         "create_issue_commit_test.go",
         "create_rollback_test.go",
+        "credentials_destination_test.go",
         "credentials_legacy_test.go",
         "credentials_peer_test.go",
         "credentials_test.go",
