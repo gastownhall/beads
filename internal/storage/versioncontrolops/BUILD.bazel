@@ -45,6 +45,7 @@ go_test(
         "fastforward_test.go",
         "gc_test.go",
         "mergesettle_draincall_regression_test.go",
+        "pull_transfer_scope_test.go",
         "remotes_githooks_test.go",
         "remotes_gittrace_test.go",
         "remotes_test.go",
