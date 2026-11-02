@@ -202,8 +202,8 @@ func TestPull_SameNumberInOtherRepoCreatesNewBead(t *testing.T) {
 	issueJSON := ghIssueJSON(5001, 1313, "Repo B issue 1313", repoBIssue, "2026-10-02T00:00:00Z")
 
 	for _, tt := range []struct {
-		name  string
-		routes map[string]string
+		name     string
+		routes   map[string]string
 		issueIDs []string
 	}{
 		{name: "bulk pull", routes: map[string]string{
@@ -286,7 +286,7 @@ func TestPull_SelectiveBeadIDLinkedToOtherRepoIsSkipped(t *testing.T) {
 func TestPull_PrelinkedOtherRepoBeadNotHydrated(t *testing.T) {
 	const repoAIssue = "https://github.com/owner-a/repo-a/issues/1313"
 	tr, tp := newCrossRepoTracker(ghRoutes(map[string]string{
-		"/repos/owner-b/repo-b/issues":      "[]",
+		"/repos/owner-b/repo-b/issues": "[]",
 		"/repos/owner-b/repo-b/issues/1313": ghIssueJSON(5001, 1313, "Repo B issue 1313",
 			"https://github.com/owner-b/repo-b/issues/1313", "2026-10-02T00:00:00Z"),
 	}))
@@ -324,4 +324,68 @@ func derefExtRef(ref *string) string {
 		return "<nil>"
 	}
 	return *ref
+}
+
+// TestPull_SameRepoRespellingUpdatesExistingBead pins that repository-scoped
+// matching still finds a bead linked to the pulled issue under another
+// accepted spelling of its ref — a case-variant URL, the REST form, or the
+// shorthand — and relinks it to the canonical URL instead of creating a
+// duplicate. Repository A's same-numbered bead sits last in store order, so
+// the base's last-wins fallback index is the one that would wrongly capture
+// the update. The canonical-ref subtest is the exact-match control: a fix
+// that disables all matching fails it.
+func TestPull_SameRepoRespellingUpdatesExistingBead(t *testing.T) {
+	const (
+		repoAIssue  = "https://github.com/owner-a/repo-a/issues/1313"
+		repoBCanon  = "https://github.com/owner-b/repo-b/issues/1313"
+		remoteTitle = "Repo B issue 1313 (remote)"
+	)
+	issueJSON := ghIssueJSON(5001, 1313, remoteTitle, repoBCanon, "2026-10-02T00:00:00Z")
+	for _, tt := range []struct {
+		name   string
+		stored string // repository B's issue 1313, as an older link spelled it
+	}{
+		{name: "path case", stored: "https://github.com/Owner-B/Repo-B/issues/1313"},
+		{name: "rest url", stored: "https://api.github.com/repos/owner-b/repo-b/issues/1313"},
+		{name: "shorthand", stored: "github:1313"},
+		{name: "canonical ref (exact match)", stored: repoBCanon},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			tr, _ := newCrossRepoTracker(ghRoutes(map[string]string{
+				"/repos/owner-b/repo-b/issues/1313": issueJSON,
+			}))
+			bRef, aRef := tt.stored, repoAIssue
+			store := newCrossRepoStore(map[string]*types.Issue{
+				"bd-b1313": {ID: "bd-b1313", Title: "Repo B issue 1313 (stale)", Status: types.StatusOpen,
+					IssueType: types.TypeTask, ExternalRef: &bRef},
+				// bd-x1313 sorts last, so the base's last-wins fallback index
+				// hands repository B's issue to this bead.
+				"bd-x1313": {ID: "bd-x1313", Title: "Repo A issue 1313", Status: types.StatusOpen,
+					IssueType: types.TypeTask, ExternalRef: &aRef},
+			})
+
+			result, err := tracker.NewEngine(tr, store, "test").Sync(context.Background(),
+				tracker.SyncOptions{Pull: true, IssueIDs: []string{"1313"}})
+			if err != nil {
+				t.Fatalf("Sync: %v", err)
+			}
+			if result.PullStats.Created != 0 || result.PullStats.Updated != 1 {
+				t.Errorf("re-pull with stored ref %q: created=%d updated=%d, want created=0 updated=1",
+					tt.stored, result.PullStats.Created, result.PullStats.Updated)
+			}
+			b := store.issues["bd-b1313"]
+			if b.Title != remoteTitle || b.ExternalRef == nil || *b.ExternalRef != repoBCanon {
+				t.Errorf("repository B's bead = {title:%q external_ref:%q}, want {title:%q external_ref:%q}",
+					b.Title, derefExtRef(b.ExternalRef), remoteTitle, repoBCanon)
+			}
+			a := store.issues["bd-x1313"]
+			if a.Title != "Repo A issue 1313" || a.ExternalRef == nil || *a.ExternalRef != repoAIssue {
+				t.Errorf("repository A's bead overwritten: title=%q external_ref=%q",
+					a.Title, derefExtRef(a.ExternalRef))
+			}
+			if len(store.issues) != 2 {
+				t.Errorf("store holds %d beads, want 2", len(store.issues))
+			}
+		})
+	}
 }
