@@ -304,3 +304,33 @@ func TestEmbeddedKVConcurrent(t *testing.T) {
 		t.Fatal("expected at least 1 worker to succeed")
 	}
 }
+
+// GH#7523: bd kv set and bd kv clear wrote the config row but never flagged
+// the write, so the auto-commit epilogue skipped them and the kv row sat
+// uncommitted in the working set. Each must now leave the working set clean
+// and HEAD one commit further on.
+func TestEmbeddedKVWritesCommit(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "kc")
+
+	before, dirty := embeddedLogCountAndDirtyTables(t, beadsDir)
+	if len(dirty) != 0 {
+		t.Fatalf("precondition: working set dirty after bd init: %v", dirty)
+	}
+	for _, step := range [][]string{{"set", "gh7523", "v"}, {"clear", "gh7523"}} {
+		bdKV(t, bd, dir, step...)
+		after, dirty := embeddedLogCountAndDirtyTables(t, beadsDir)
+		if len(dirty) != 0 {
+			t.Errorf("bd kv %s left the working set dirty: %v", strings.Join(step, " "), dirty)
+		}
+		if after != before+1 {
+			t.Errorf("bd kv %s: dolt_log %d -> %d, want exactly one auto-commit", strings.Join(step, " "), before, after)
+		}
+		before = after
+	}
+}

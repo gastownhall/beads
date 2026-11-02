@@ -179,6 +179,7 @@
 100 43 TestEmbeddedInitExplicitBeadsDirIsAuthoritative
 
 100 44 TestEmbeddedIfRevisionComposesWithIfAssigneeIfStatus
+100 44 TestEmbeddedKVWritesCommit
 100 44 TestEmbeddedStaleConcurrent
 
 100 45 TestEmbeddedGraph

@@ -266,6 +266,12 @@ Examples:
 		if err := store.SetConfig(ctx, storageKey, value); err != nil {
 			return HandleErrorRespectJSON("setting key: %v", err)
 		}
+		noteDirectConfigWrite()
+		// The write has landed, so a refused or failed commit warns, as for
+		// bd remember (GH#7523).
+		if err := commitKVWrite(ctx, store, "kv set"); err != nil {
+			WarnError("%v", err)
+		}
 
 		return printKVSetResult(key, value)
 	},
@@ -353,6 +359,10 @@ Examples:
 		ctx := rootCtx
 		if err := store.DeleteConfig(ctx, storageKey); err != nil {
 			return HandleErrorRespectJSON("deleting key: %v", err)
+		}
+		noteDirectConfigWrite()
+		if err := commitKVWrite(ctx, store, "kv clear"); err != nil {
+			WarnError("%v", err)
 		}
 
 		return printKVClearResult(key)

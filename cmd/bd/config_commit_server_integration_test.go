@@ -78,6 +78,8 @@ func TestCLI_ServerModeConfigWritesCommit_E2E(t *testing.T) {
 		{"config", "set-many", "types.custom=gh4078kind", "status.custom=gh4078review:active,gh4078parked:frozen"},
 		{"config", "unset", "types.custom"},
 		{"forget", "gh4078"},
+		{"kv", "set", "gh7523", "server-mode kv"},
+		{"kv", "clear", "gh7523"},
 	} {
 		mustBD(step...)
 		if got := dirtyConfigTables(); got != "" {
