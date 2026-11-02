@@ -385,6 +385,21 @@ var conditionalCapabilities = []string{CapExternalDependencies}
 // sending it.
 const CapIssuesCloseAutoCloseMolecule = "issues.close.autoCloseMolecule"
 
+// CapIssuesDeleteContainmentCascade is the behavior capability that advertises
+// that a deleteIssue(s) `cascade` follows parent-child edges only (issue
+// #6301), together with the result members that name the closure:
+// `deleted_ids` (the ids behind `deleted`) and — under cascade — `orphaned`
+// (the beads joined to the closure only by an association edge, which the
+// cascade leaves behind on purpose). An older server predating this token
+// cascades over EVERY dependency edge, so the same request deletes bystanders
+// joined by blocks/related/discovered-from, each with its own subtree, and
+// no result member names what went. That skew is not one a caller can eat:
+// the rows are already gone. A client that does not see the token therefore
+// refuses the `cascade` member locally before the dial — a dry-run included,
+// because the preview the old server returns names the over-broad closure as
+// if it were the right one.
+const CapIssuesDeleteContainmentCascade = "issues.delete.containmentCascade"
+
 // customMethodTarget splits the custom method off the segment the router
 // matched, and reports the row that claims it.
 //
@@ -1181,7 +1196,7 @@ var behaviorCapabilities = []string{
 	CapIssuesCloseAutoCloseMolecule, CapIssuesListSearch,
 	CapIssuesListNoAssignee, CapIssuesListTitle, CapListIDs, CapIssuesUpdatePersistence, CapDependenciesBlockingIsBlocked, CapIssuesUpdateClaim,
 	CapIssuesCreateGates, CapIssuesUpdateGates, CapIssuesListFilters,
-	CapIssuesArrivalSeq,
+	CapIssuesArrivalSeq, CapIssuesDeleteContainmentCascade,
 }
 
 // Capabilities lists what this build advertises in ContextResponse.capabilities:

@@ -116,6 +116,7 @@ go_test(
         "create_priority_test.go",
         "credential_source_test.go",
         "credential_test.go",
+        "delete_cascade_test.go",
         "dial_header_timeout_test.go",
         "dial_test.go",
         "dispatch_test.go",

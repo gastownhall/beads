@@ -4619,7 +4619,7 @@ paths:
       summary: Delete named beads
       description: >-
         Erases the beads this request NAMES, and — under `cascade` — everything
-        that depends on them. It is the operation behind `bd delete`, the other
+        they contain. It is the operation behind `bd delete`, the other
         DESTRUCTIVE operation on this surface alongside `issues:sweep`, and
         nothing it deletes comes back.
 
@@ -4647,9 +4647,19 @@ paths:
         the request depends on is REFUSED with `400` / `invalid_argument`, and
         nothing is deleted. `force` deletes the named beads and leaves those
         dependents ORPHANED — they keep their rows, lose their edges, and come
-        back in `orphaned`. `cascade` deletes the transitive closure instead,
-        so nothing is left outside it to orphan; a request carrying both
-        behaves as `cascade`.
+        back in `orphaned`. `cascade` deletes the CONTAINMENT closure instead —
+        parent-child descendants only (issue #6301), never a row joined by an
+        association edge (blocks, related, discovered-from) — so the beads
+        joined to the closure only by such an edge survive, come back in
+        `orphaned`, and nothing else is left outside it to orphan; a request
+        carrying both behaves as `cascade`.
+
+
+        The containment rule, and the result members that report it
+        (`deleted_ids` — always under cascade — and `orphaned`), are announced
+        by the `issues.delete.containmentCascade` capability: an older server
+        predating the token follows every dependency edge, so a client that
+        does not see it refuses `cascade` locally rather than dial it.
 
 
         The refusal is the LIBRARY's, not this handler's — the same surface
@@ -9225,7 +9235,14 @@ components:
             record (see `Issue.arrival_seq`; build-level like the others —
             records are stamped only while the workspace journals, which
             `GET /v0/beads/events` reports by answering `409
-            events_journal_disabled` when it does not). One behavior token is
+            events_journal_disabled` when it does not), and
+            `issues.delete.containmentCascade`, which announces that
+            `POST /v0/beads/issues:delete` under `cascade` follows
+            parent-child edges only (issue #6301) — leaving the beads joined
+            to the closure only by an association edge behind, named in
+            `orphaned` — and answers `deleted_ids`, the ids behind `deleted`,
+            rather than an older server's dependency-edge sweep that deleted
+            those bystanders' own subtrees too. One behavior token is
             CONDITIONAL rather than build-level: `policy.external_dependencies`
             announces that this server's ready, blocked-listing, claim,
             claim-next, close, blocking and dependency-tree operations already
@@ -9572,11 +9589,22 @@ components:
           type: boolean
           default: false
           description: >-
-            Also delete the transitive closure of everything that depends on
-            the named beads. With `cascade` there is nothing left outside the
-            set to orphan, so it makes `force` moot rather than conflicting
-            with it: a request carrying both behaves as `cascade` and
-            `orphaned` comes back empty.
+            Also delete the CONTAINMENT closure of the named beads — their
+            parent-child descendants, and nothing joined to them by an
+            association edge (blocks, related, discovered-from; issue #6301).
+            The beads joined to the closure only by such an edge survive and
+            come back in `orphaned`, and nothing else is left outside the set
+            to orphan, so `cascade` makes `force` moot rather than conflicting
+            with it: a request carrying both behaves as `cascade`.
+
+
+            Behind the `issues.delete.containmentCascade` behavior token: the
+            containment rule, and the `deleted_ids` and cascade `orphaned`
+            result members that report it. An older server predating the
+            token follows every dependency edge — deleting bystanders joined
+            by association edges, each with its own subtree — so a client
+            that does not see the token refuses this member before the dial
+            rather than send it.
         force:
           type: boolean
           default: false
@@ -9683,6 +9711,17 @@ components:
             How many beads were deleted, or under `dry_run` would be. Under
             `cascade` this counts the whole closure, so it is normally larger
             than `ids` and it — not the request length — is the number to show.
+        deleted_ids:
+          type: array
+          description: >-
+            The ids behind `deleted`, in ascending id order. Under `cascade`
+            this is the whole containment closure — parent-child descendants
+            only (issue #6301), never a row joined by an association edge —
+            so a caller can name every bead that went, or under `dry_run`
+            would go, where `deleted` counts them. Absent when the delete
+            removed nothing.
+          items:
+            type: string
         dependencies:
           type: integer
           description: >-
@@ -9705,9 +9744,12 @@ components:
           type: array
           description: >-
             The surviving beads that depended on something this request
-            deleted, in ascending id order. Present exactly when the request
-            carried `force` without `cascade`, which is the only mode in which
-            orphaning is possible; absent otherwise.
+            deleted, in ascending id order. Present under `force` without
+            `cascade` — the direct dependents the orphaning mode leaves
+            behind — and under `cascade`, where it names the beads joined to
+            the containment closure only by an association edge
+            (discovered-from, blocks, related; issue #6301), the ones the
+            cascade leaves behind on purpose; absent otherwise.
 
 
             DIRECT dependents only. A bead two edges away lost no edge.

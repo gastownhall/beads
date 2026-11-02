@@ -361,6 +361,17 @@ const CapIssuesCreateDefaultPriority = "issues.create.defaultPriority"
 // rule.
 const CapCloseAutoCloseMolecule = "issues.close.autoCloseMolecule"
 
+// CapDeleteContainmentCascade is the behavior capability announcing that a
+// deleteIssue(s) `cascade` follows parent-child edges only and answers
+// `deleted_ids` (and, under cascade, `orphaned` for the association-edge
+// bystanders), spelled exactly as httpapi's
+// CapIssuesDeleteContainmentCascade. deleter.go refuses the `cascade` member
+// before the dial — a dry-run included — against a server without it: an older
+// server cascades over every dependency edge, deleting bystanders joined by
+// association edges plus their own subtrees, and its dry-run preview reports
+// that over-broad closure as if it were the right one.
+const CapDeleteContainmentCascade = "issues.delete.containmentCascade"
+
 // CapExternalDependencies is the CONDITIONAL behavior capability announcing
 // that the ready, claim and close operations of this server apply bd's
 // external-dependency policy themselves, spelled exactly as httpapi's constant
@@ -503,7 +514,7 @@ var behaviorCapabilities = []string{
 	CapCloseAutoCloseMolecule, CapListSearch,
 	CapListNoAssignee, CapListTitle, CapListIDs, CapIssuesUpdatePersistence, CapBlockingIsBlocked, CapIssuesUpdateClaim,
 	CapIssuesCreateGates, CapIssuesUpdateGates, CapListFilters,
-	CapArrivalSeq,
+	CapArrivalSeq, CapDeleteContainmentCascade,
 }
 
 // CapabilityFor reports the capability token gating op, and whether op is on

@@ -1424,7 +1424,9 @@ type DeleteIssuesRequest struct {
 	// Actor Caller-asserted attribution, under the same rules as `SweepRequest`'s `actor`: trimmed, refused when empty after trimming, over 256 BYTES, or carrying any control character. Optional — a deleted bead leaves no row to attribute the deletion on — but it does reach the SURVIVING beads whose text this operation rewrites, so a workspace that cares who rewrote a description sends one.
 	Actor *string `json:"actor,omitempty"`
 
-	// Cascade Also delete the transitive closure of everything that depends on the named beads. With `cascade` there is nothing left outside the set to orphan, so it makes `force` moot rather than conflicting with it: a request carrying both behaves as `cascade` and `orphaned` comes back empty.
+	// Cascade Also delete the CONTAINMENT closure of the named beads — their parent-child descendants, and nothing joined to them by an association edge (blocks, related, discovered-from; issue #6301). The beads joined to the closure only by such an edge survive and come back in `orphaned`, and nothing else is left outside the set to orphan, so `cascade` makes `force` moot rather than conflicting with it: a request carrying both behaves as `cascade`.
+	//
+	// Behind the `issues.delete.containmentCascade` behavior token: the containment rule, and the `deleted_ids` and cascade `orphaned` result members that report it. An older server predating the token follows every dependency edge — deleting bystanders joined by association edges, each with its own subtree — so a client that does not see the token refuses this member before the dial rather than send it.
 	Cascade *bool `json:"cascade,omitempty"`
 
 	// DryRun Report what the deletion WOULD do and change nothing. The counts and BOTH refusals are the ones the real request would produce, computed against the same snapshot, and nothing is recorded in history either.
@@ -1463,6 +1465,9 @@ type DeleteIssuesResult struct {
 	// Deleted How many beads were deleted, or under `dry_run` would be. Under `cascade` this counts the whole closure, so it is normally larger than `ids` and it — not the request length — is the number to show.
 	Deleted int `json:"deleted"`
 
+	// DeletedIds The ids behind `deleted`, in ascending id order. Under `cascade` this is the whole containment closure — parent-child descendants only (issue #6301), never a row joined by an association edge — so a caller can name every bead that went, or under `dry_run` would go, where `deleted` counts them. Absent when the delete removed nothing.
+	DeletedIds *[]string `json:"deleted_ids,omitempty"`
+
 	// Dependencies Dependency edge rows removed with them, in either direction. Reported because a delete's visible effect is much larger than its bead count.
 	Dependencies int `json:"dependencies"`
 
@@ -1475,7 +1480,7 @@ type DeleteIssuesResult struct {
 	// Labels Label rows removed with the deleted beads.
 	Labels int `json:"labels"`
 
-	// Orphaned The surviving beads that depended on something this request deleted, in ascending id order. Present exactly when the request carried `force` without `cascade`, which is the only mode in which orphaning is possible; absent otherwise.
+	// Orphaned The surviving beads that depended on something this request deleted, in ascending id order. Present under `force` without `cascade` — the direct dependents the orphaning mode leaves behind — and under `cascade`, where it names the beads joined to the containment closure only by an association edge (discovered-from, blocks, related; issue #6301), the ones the cascade leaves behind on purpose; absent otherwise.
 	//
 	// DIRECT dependents only. A bead two edges away lost no edge.
 	Orphaned *[]string `json:"orphaned,omitempty"`

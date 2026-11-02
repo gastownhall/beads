@@ -8,6 +8,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/httpapi/apigen"
 	"github.com/steveyegge/beads/internal/httpclient/encode"
+	"github.com/steveyegge/beads/internal/httpclient/wire"
 	"github.com/steveyegge/beads/issueops"
 )
 
@@ -65,6 +66,17 @@ func (d *httpDeleter) Delete(ctx context.Context, req issueops.DeleteRequest) (r
 	if err := checkDeleteIDs(req.IDs); err != nil {
 		return issueops.DeleteResult{}, err
 	}
+	// A cascade is the one member whose old-server skew is not eatable: an
+	// older server sweeps every dependency edge, deleting bystanders joined by
+	// association edges (and their subtrees) that this build's rule —
+	// parent-child only, issue #6301 — would leave standing, and no reply
+	// names them afterwards. A dry-run is refused too, because its preview
+	// would present that over-broad closure as the right one.
+	if req.Cascade {
+		if err := d.store.requireCapabilityBeforeDial(ctx, wire.OpDeleteIssues, wire.CapDeleteContainmentCascade); err != nil {
+			return issueops.DeleteResult{}, err
+		}
+	}
 	// The guard is sent as the caller spelled it and the ARITY rule that comes
 	// with it is left to the server. The wire refuses a guard beside more than
 	// one DISTINCT id, and distinctness there is measured after trimming and
@@ -98,6 +110,12 @@ func (d *httpDeleter) Delete(ctx context.Context, req issueops.DeleteRequest) (r
 	}
 	if res.Orphaned != nil {
 		out.Orphaned = append([]string(nil), *res.Orphaned...)
+	}
+	// Absent on an older server, which has no member to fill it from; the
+	// caller's previews degrade to the requested ids exactly as they did
+	// before the member existed.
+	if res.DeletedIds != nil {
+		out.DeletedIDs = append([]string(nil), *res.DeletedIds...)
 	}
 	return out, nil
 }

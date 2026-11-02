@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -298,6 +299,32 @@ func TestDeleteResponseCarriesEveryRoleField(t *testing.T) {
 	if role != wire {
 		t.Fatalf("issueops.DeleteResult has %d fields and the wire type has %d: "+
 			"a field was added to one and not projected onto the other (see deleteResponse)", role, wire)
+	}
+}
+
+// TestDeleteResponseProjectsTheClosureIDs is deleted_ids' half of the
+// projection the count guard cannot see: the COUNT proves every role field has
+// a wire member, not that this one carries the role's list. A cascade delete's
+// visible damage is its id list (issue #6301's previews live on it), so a
+// projection that dropped or reordered it must fail here rather than in a
+// caller that trusted `deleted` alone.
+func TestDeleteResponseProjectsTheClosureIDs(t *testing.T) {
+	ids := []string{"bd-a", "bd-child", "bd-grandchild"}
+	body := deleteResponse(issueops.DeleteResult{
+		Deleted:    len(ids),
+		DeletedIDs: ids,
+		Orphaned:   []string{"bd-associated"},
+	})
+	if body.DeletedIds == nil {
+		t.Fatal("deleted_ids is nil: the closure list the role resolved never reached the wire")
+	}
+	if got := *body.DeletedIds; !slices.Equal(got, ids) {
+		t.Errorf("deleted_ids = %v, want %v", got, ids)
+	}
+	// The empty case is ABSENT, not an empty list: the member is the ids
+	// behind `deleted`, and a delete that removed nothing has none to name.
+	if body := deleteResponse(issueops.DeleteResult{Deleted: 0}); body.DeletedIds != nil {
+		t.Errorf("deleted_ids = %v over an empty delete, want nil so the member stays absent", *body.DeletedIds)
 	}
 }
 
