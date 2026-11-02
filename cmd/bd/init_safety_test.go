@@ -454,6 +454,116 @@ func TestCheckRemoteSafety_GuardMatrix(t *testing.T) {
 			}
 		})
 	}
+
+	// Unverified twins of the remote-has-data rows (GH#7665): the probe
+	// failed, so RemoteHasDoltData is the fail-closed assumption, not
+	// verified contents. Action and ExitCode must match the corresponding
+	// known-has-data row — including when ONLY the unverified field is set,
+	// which no live caller produces today but the pure function must still
+	// fail closed on — while override-without-discard rows get the distinct
+	// unverified Reason. The first two rows pin the verified Reasons so the
+	// unverified wording cannot silently replace them.
+	unverifiedCases := []struct {
+		name       string
+		in         RemoteSafetyInput
+		want       RemoteSafetyAction
+		wantExit   int // 0 when not a refusal
+		wantReason string
+	}{
+		{"verified/force (reason pin)", RemoteSafetyInput{RemoteHasDoltData: true, Force: true},
+			ActionRefuseDivergence, ExitRemoteDivergenceRefused, "force-without-discard-remote"},
+		{"verified/no-flags (reason pin)", RemoteSafetyInput{RemoteHasDoltData: true},
+			ActionBootstrap, 0, "bootstrap-from-remote"},
+
+		{"unverified/no-flags", RemoteSafetyInput{RemoteDoltDataUnverified: true},
+			ActionBootstrap, 0, "bootstrap-from-remote"},
+		{"unverified/force", RemoteSafetyInput{RemoteDoltDataUnverified: true, Force: true},
+			ActionRefuseDivergence, ExitRemoteDivergenceRefused, "unverified-remote-without-discard-remote"},
+		{"unverified/reinit-local", RemoteSafetyInput{RemoteDoltDataUnverified: true, ReinitLocal: true},
+			ActionRefuseDivergence, ExitRemoteDivergenceRefused, "unverified-remote-without-discard-remote"},
+		{"unverified/force+reinit-local", RemoteSafetyInput{RemoteDoltDataUnverified: true, Force: true, ReinitLocal: true},
+			ActionRefuseDivergence, ExitRemoteDivergenceRefused, "unverified-remote-without-discard-remote"},
+		{"unverified/from-jsonl", RemoteSafetyInput{RemoteDoltDataUnverified: true, FromJSONL: true},
+			ActionRefuseDivergence, ExitRemoteDivergenceRefused, "unverified-remote-without-discard-remote"},
+		{"unverified/force+discard/non-interactive/no-token",
+			RemoteSafetyInput{RemoteDoltDataUnverified: true, Force: true, DiscardRemote: true, ExpectedToken: "DESTROY-bd"},
+			ActionRequireDestroyToken, ExitDestroyTokenMissing, "destroy-token-missing"},
+		{"unverified/force+discard/non-interactive/wrong-token",
+			RemoteSafetyInput{RemoteDoltDataUnverified: true, Force: true, DiscardRemote: true,
+				DestroyToken: "DESTROY-wrong", ExpectedToken: "DESTROY-bd"},
+			ActionRequireDestroyToken, ExitDestroyTokenMissing, "destroy-token-mismatch"},
+		{"unverified/force+discard/non-interactive/matching-token",
+			RemoteSafetyInput{RemoteDoltDataUnverified: true, Force: true, DiscardRemote: true,
+				DestroyToken: "DESTROY-bd", ExpectedToken: "DESTROY-bd"},
+			ActionProceedWithDivergence, 0, "authorized-divergence"},
+		{"unverified/discard-remote-only/interactive",
+			RemoteSafetyInput{RemoteDoltDataUnverified: true, DiscardRemote: true, IsInteractive: true},
+			ActionProceedWithDivergence, 0, "authorized-divergence"},
+		{"unverified/discard-remote/interactive/wrong-token",
+			RemoteSafetyInput{RemoteDoltDataUnverified: true, DiscardRemote: true, IsInteractive: true,
+				DestroyToken: "WRONG", ExpectedToken: "DESTROY-bd"},
+			ActionRequireDestroyToken, ExitDestroyTokenMissing, "destroy-token-mismatch"},
+		// Both fields set — the shape every fail-closed probe produces:
+		// resolveRemoteHasDoltDataProbe returns has-data AND the caller
+		// sets unverified from the same error.
+		{"unverified+has-data/reinit-local",
+			RemoteSafetyInput{RemoteHasDoltData: true, RemoteDoltDataUnverified: true, ReinitLocal: true},
+			ActionRefuseDivergence, ExitRemoteDivergenceRefused, "unverified-remote-without-discard-remote"},
+	}
+	for _, tc := range unverifiedCases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := CheckRemoteSafety(tc.in)
+			if got.Action != tc.want {
+				t.Errorf("Action = %v (reason=%q), want %v", got.Action, got.Reason, tc.want)
+			}
+			if tc.wantExit != 0 && got.ExitCode != tc.wantExit {
+				t.Errorf("ExitCode = %d, want %d", got.ExitCode, tc.wantExit)
+			}
+			if got.Reason != tc.wantReason {
+				t.Errorf("Reason = %q, want %q", got.Reason, tc.wantReason)
+			}
+			if (tc.want == ActionRefuseDivergence || tc.want == ActionRequireDestroyToken) && got.UserMessage == "" {
+				t.Errorf("refusal action %v returned empty UserMessage", tc.want)
+			}
+		})
+	}
+
+	// AC-3 parity, mechanically rather than by hand-copied expectations: for
+	// every flag/token combination, the decision with ONLY the unverified
+	// field set must match the known-has-data decision in Action and
+	// ExitCode. Reason and message may differ (that is the GH#7665 fix);
+	// the outcome the caller branches on may not.
+	flagSets := []RemoteSafetyInput{
+		{},
+		{Force: true},
+		{ReinitLocal: true},
+		{Force: true, ReinitLocal: true},
+		{FromJSONL: true},
+		{DiscardRemote: true},
+		{Force: true, DiscardRemote: true},
+		{FromJSONL: true, DiscardRemote: true},
+		{Force: true, DiscardRemote: true, ExpectedToken: "DESTROY-bd"},
+		{Force: true, DiscardRemote: true, DestroyToken: "DESTROY-wrong", ExpectedToken: "DESTROY-bd"},
+		{Force: true, DiscardRemote: true, DestroyToken: "DESTROY-bd", ExpectedToken: "DESTROY-bd"},
+		{DiscardRemote: true, IsInteractive: true},
+		{DiscardRemote: true, IsInteractive: true, DestroyToken: "WRONG", ExpectedToken: "DESTROY-bd"},
+		{DiscardRemote: true, IsInteractive: true, ExpectedToken: "DESTROY-bd"},
+	}
+	for _, flags := range flagSets {
+		known := flags
+		known.RemoteHasDoltData = true
+		unverifiedOnly := flags
+		unverifiedOnly.RemoteHasDoltData = false
+		unverifiedOnly.RemoteDoltDataUnverified = true
+		k := CheckRemoteSafety(known)
+		u := CheckRemoteSafety(unverifiedOnly)
+		if u.Action != k.Action {
+			t.Errorf("flags %+v: unverified-only Action = %v, want %v (known-has-data)", flags, u.Action, k.Action)
+		}
+		if u.ExitCode != k.ExitCode {
+			t.Errorf("flags %+v: unverified-only ExitCode = %d, want %d (known-has-data)", flags, u.ExitCode, k.ExitCode)
+		}
+	}
 }
 
 // TestCheckRemoteSafety_TokenRefusalDistinguishesPresence pins which refusal

@@ -158,8 +158,11 @@ type RemoteSafetyDecision struct {
 // function — never add a new `&& !someFlag` at the call site. See the
 // guard matrix test in init_safety_test.go.
 func CheckRemoteSafety(in RemoteSafetyInput) RemoteSafetyDecision {
-	// No remote data → no cross-boundary concern. Proceed.
-	if !in.RemoteHasDoltData {
+	// No remote data → no cross-boundary concern. Proceed. An unverified
+	// remote (probe failed) must NOT take this exit: uncertainty alone can
+	// never accidentally permit initialization (GH#7665) — it flows into
+	// the same override/bootstrap/discard decisions as known history.
+	if !in.RemoteHasDoltData && !in.RemoteDoltDataUnverified {
 		return RemoteSafetyDecision{Action: ActionNoRemoteData, Reason: "no-remote-data"}
 	}
 
