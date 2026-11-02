@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/formula"
@@ -628,6 +629,14 @@ included even without --all, but only if they too haven't been updated in
 spared and loses its edge to the deleted wisp: an open one is collected once
 it ages out, a closed one only by --all, --closed or 'bd purge'.
 
+A wisp carrying a label named in the wisp.protected_labels setting is never
+reclaimed, in any mode (age, --all, --closed) and on either side of a
+cascade. The setting is read from the database only, unset by default (it
+protects nothing until a workspace names its labels), and matched exactly:
+  bd config set wisp.protected_labels keep:mail,keep:alert
+--exclude-label adds labels for one run. 'bd delete' still deletes a
+protected wisp on purpose.
+
 Abandoned wisps are deleted without creating a digest. Use 'bd mol squash'
 if you want to preserve a summary before garbage collection.
 
@@ -647,7 +656,8 @@ Examples:
   bd mol wisp gc --closed --force                   # Delete all closed wisps
   bd mol wisp gc --closed --dry-run                 # Explicit dry-run (same as no --force)
   bd mol wisp gc --exclude-type agent,rig           # Protect agent and rig wisps from GC
-  bd mol wisp gc --closed --force --exclude-type mol # Delete closed wisps except mol type`,
+  bd mol wisp gc --closed --force --exclude-type mol # Delete closed wisps except mol type
+  bd mol wisp gc --exclude-label my:message         # Also protect wisps labeled my:message`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE:          runWispGC,
@@ -706,14 +716,14 @@ func protectedWispStatuses(ctx context.Context, r molReader) (map[types.Status]b
 
 // protectedWispLabels reads the workspace's wisp.protected_labels setting
 // (workapi.SettingKeyWispProtectedLabels) into the set of labels that make a
-// wisp unreclaimable. It reads the workspace database only, like
-// types.retained, so every client sweeping a shared workspace applies the same
-// rule. Unset protects nothing.
+// wisp unreclaimable, adding this run's --exclude-label names (extra). It
+// reads the workspace database only, like types.retained, so every client
+// sweeping a shared workspace applies the same rule. Unset protects nothing.
 //
 // Reading and parsing it is required, not best-effort: this command deletes,
 // so a guard it cannot read must abort it rather than silently under-protect —
 // the contract protectedWispStatuses holds.
-func protectedWispLabels(ctx context.Context, r molReader) (map[string]bool, error) {
+func protectedWispLabels(ctx context.Context, r molReader, extra []string) (map[string]bool, error) {
 	value, err := r.GetConfig(ctx, workapi.SettingKeyWispProtectedLabels)
 	if err != nil {
 		return nil, fmt.Errorf("reading %s for wisp gc: %w", workapi.SettingKeyWispProtectedLabels, err)
@@ -722,11 +732,30 @@ func protectedWispLabels(ctx context.Context, r molReader) (map[string]bool, err
 	if err != nil {
 		return nil, fmt.Errorf("invalid %s for wisp gc (fix it with bd config set): %w", workapi.SettingKeyWispProtectedLabels, err)
 	}
-	set := make(map[string]bool, len(labels))
-	for _, label := range labels {
+	set := make(map[string]bool, len(labels)+len(extra))
+	for _, label := range append(labels, extra...) {
 		set[label] = true
 	}
 	return set, nil
+}
+
+// parseExcludeLabels normalizes --exclude-label values: trimmed, blanks
+// dropped. A name containing whitespace is refused, as it is in the setting:
+// labels never carry it, so it is a mis-typed list, and silently protecting
+// nothing would under-protect.
+func parseExcludeLabels(values []string) ([]string, error) {
+	var labels []string
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if strings.IndexFunc(value, unicode.IsSpace) >= 0 {
+			return nil, fmt.Errorf("invalid --exclude-label %q: a label name cannot contain whitespace (separate labels with commas)", value)
+		}
+		labels = append(labels, value)
+	}
+	return labels, nil
 }
 
 // wispGuard is everything `bd mol wisp gc` consults before it selects a wisp.
@@ -798,6 +827,7 @@ func runWispGC(cmd *cobra.Command, args []string) error {
 	closedMode, _ := cmd.Flags().GetBool("closed")
 	force, _ := cmd.Flags().GetBool("force")
 	excludeTypeStrs, _ := cmd.Flags().GetStringSlice("exclude-type")
+	excludeLabelStrs, _ := cmd.Flags().GetStringSlice("exclude-label")
 
 	ageThreshold := time.Hour
 	if ageStr != "" {
@@ -812,9 +842,13 @@ func runWispGC(cmd *cobra.Command, args []string) error {
 	for _, t := range excludeTypeStrs {
 		excludeTypes = append(excludeTypes, types.IssueType(t))
 	}
+	excludeLabels, err := parseExcludeLabels(excludeLabelStrs)
+	if err != nil {
+		return HandleError("%v", err)
+	}
 
 	if usesProxiedServer() {
-		return runWispGCProxiedServer(rootCtx, dryRun, ageThreshold, cleanAll, closedMode, force, excludeTypes)
+		return runWispGCProxiedServer(rootCtx, dryRun, ageThreshold, cleanAll, closedMode, force, excludeTypes, excludeLabels)
 	}
 
 	if store == nil {
@@ -822,10 +856,10 @@ func runWispGC(cmd *cobra.Command, args []string) error {
 	}
 
 	if closedMode {
-		return runWispPurgeClosed(ctx, dryRun, force, excludeTypes)
+		return runWispPurgeClosed(ctx, dryRun, force, excludeTypes, excludeLabels)
 	}
 
-	abandoned, err := findAbandonedWisps(ctx, store, cleanAll, ageThreshold, excludeTypes)
+	abandoned, err := selectAbandonedWisps(ctx, store, cleanAll, ageThreshold, excludeTypes, excludeLabels)
 	if err != nil && abandoned == nil {
 		return HandleError("%v", err)
 	}
@@ -909,7 +943,15 @@ func wispIsAbandoned(now, updatedAt time.Time, ageThreshold time.Duration) bool 
 // t.Parallel().
 var wispGCNow = time.Now
 
+// findAbandonedWisps is selectAbandonedWisps with no --exclude-label names.
 func findAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageThreshold time.Duration, excludeTypes []types.IssueType) ([]*types.Issue, error) {
+	return selectAbandonedWisps(ctx, r, cleanAll, ageThreshold, excludeTypes, nil)
+}
+
+// selectAbandonedWisps returns the wisps age GC deletes: the abandoned ones
+// and their unprotected dependents. excludeLabels adds to the
+// wisp.protected_labels setting for this run.
+func selectAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageThreshold time.Duration, excludeTypes []types.IssueType, excludeLabels []string) ([]*types.Issue, error) {
 	ephemeralFlag := true
 	filter := types.IssueFilter{
 		Ephemeral:    &ephemeralFlag,
@@ -935,7 +977,7 @@ func findAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageThre
 		return nil, err
 	}
 
-	protectedLabels, err := protectedWispLabels(ctx, r)
+	protectedLabels, err := protectedWispLabels(ctx, r, excludeLabels)
 	if err != nil {
 		return nil, err
 	}
@@ -1044,7 +1086,7 @@ func (c closedPurgeSkips) report() {
 // infra wisps, and wisps carrying a wisp.protected_labels label. Closing a
 // record does not make it disposable; `bd delete` still deletes one on
 // purpose. An unreadable setting is an error, never an empty guard.
-func selectClosedPurgeCandidates(ctx context.Context, r molReader, excludeTypes []types.IssueType) ([]*types.Issue, closedPurgeSkips, error) {
+func selectClosedPurgeCandidates(ctx context.Context, r molReader, excludeTypes []types.IssueType, excludeLabels []string) ([]*types.Issue, closedPurgeSkips, error) {
 	var skips closedPurgeSkips
 	statusClosed := types.StatusClosed
 	ephemeralTrue := true
@@ -1059,7 +1101,7 @@ func selectClosedPurgeCandidates(ctx context.Context, r molReader, excludeTypes 
 		return nil, skips, fmt.Errorf("listing closed wisps: %w", err)
 	}
 
-	protectedLabels, err := protectedWispLabels(ctx, r)
+	protectedLabels, err := protectedWispLabels(ctx, r, excludeLabels)
 	if err != nil {
 		return nil, skips, err
 	}
@@ -1084,8 +1126,8 @@ func selectClosedPurgeCandidates(ctx context.Context, r molReader, excludeTypes 
 	return filtered, skips, nil
 }
 
-func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, excludeTypes []types.IssueType) error {
-	closedIssues, skips, err := selectClosedPurgeCandidates(ctx, store, excludeTypes)
+func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, excludeTypes []types.IssueType, excludeLabels []string) error {
+	closedIssues, skips, err := selectClosedPurgeCandidates(ctx, store, excludeTypes, excludeLabels)
 	if err != nil {
 		return HandleError("%v", err)
 	}
@@ -1168,6 +1210,7 @@ func init() {
 	wispGCCmd.Flags().Bool("closed", false, "Delete all closed wisps (ignores --age threshold)")
 	wispGCCmd.Flags().BoolP("force", "f", false, "Actually delete (default: preview only)")
 	wispGCCmd.Flags().StringSlice("exclude-type", nil, "Exclude wisps of these types from GC (comma-separated, e.g., agent,rig)")
+	wispGCCmd.Flags().StringSlice("exclude-label", nil, "Additionally protect wisps carrying these labels (comma-separated); adds to wisp.protected_labels")
 
 	wispCmd.AddCommand(wispCreateCmd)
 	wispCmd.AddCommand(wispListCmd)

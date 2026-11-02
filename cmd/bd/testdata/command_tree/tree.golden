@@ -5363,6 +5363,14 @@ bd mol wisp gc
     | spared and loses its edge to the deleted wisp: an open one is collected once
     | it ages out, a closed one only by --all, --closed or 'bd purge'.
     |
+    | A wisp carrying a label named in the wisp.protected_labels setting is never
+    | reclaimed, in any mode (age, --all, --closed) and on either side of a
+    | cascade. The setting is read from the database only, unset by default (it
+    | protects nothing until a workspace names its labels), and matched exactly:
+    |   bd config set wisp.protected_labels keep:mail,keep:alert
+    | --exclude-label adds labels for one run. 'bd delete' still deletes a
+    | protected wisp on purpose.
+    |
     | Abandoned wisps are deleted without creating a digest. Use 'bd mol squash'
     | if you want to preserve a summary before garbage collection.
     |
@@ -5383,10 +5391,12 @@ bd mol wisp gc
     |   bd mol wisp gc --closed --dry-run                 # Explicit dry-run (same as no --force)
     |   bd mol wisp gc --exclude-type agent,rig           # Protect agent and rig wisps from GC
     |   bd mol wisp gc --closed --force --exclude-type mol # Delete closed wisps except mol type
+    |   bd mol wisp gc --exclude-label my:message         # Also protect wisps labeled my:message
   flag --age type=string default="1h" usage="Age threshold for abandoned wisp detection"
   flag --all type=bool default="false" usage="Also clean closed wisps older than threshold"
   flag --closed type=bool default="false" usage="Delete all closed wisps (ignores --age threshold)"
   flag --dry-run type=bool default="false" usage="Preview what would be cleaned"
+  flag --exclude-label type=stringSlice default="[]" usage="Additionally protect wisps carrying these labels (comma-separated); adds to wisp.protected_labels"
   flag --exclude-type type=stringSlice default="[]" usage="Exclude wisps of these types from GC (comma-separated, e.g., agent,rig)"
   flag --force -f type=bool default="false" usage="Actually delete (default: preview only)"
 
