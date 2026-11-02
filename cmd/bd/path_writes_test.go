@@ -200,3 +200,44 @@ func TestInstallHooksRefusesManagedSymlinkBeforePreservation(t *testing.T) {
 		}
 	})
 }
+
+// A shared install (.beads-hooks) with a live link at a managed destination
+// refuses before preservation copies foreign hooks into the target.
+func TestInstallHooksSharedRefusesManagedSymlinkBeforePreservation(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating symlinks needs privileges on windows")
+	}
+	repoDir := newGitRepo(t)
+	runInDir(t, repoDir, func() {
+		sourceHooks := filepath.Join(repoDir, ".git", "hooks")
+		if err := os.MkdirAll(sourceHooks, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(sourceHooks, "commit-msg"), []byte("#!/bin/sh\necho user hook\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		victim := filepath.Join(repoDir, "victim.sh")
+		if err := os.WriteFile(victim, []byte("original\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		target := filepath.Join(repoDir, ".beads-hooks")
+		if err := os.MkdirAll(target, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(victim, filepath.Join(target, "pre-commit")); err != nil {
+			t.Fatal(err)
+		}
+
+		err := installHooksAt([]string{"pre-commit"}, false, true, false, false, nil)
+		if err == nil || !strings.Contains(err.Error(), "refusing to install") {
+			t.Fatalf("install error = %v, want a managed-hook refusal", err)
+		}
+		if got, rerr := os.ReadFile(victim); rerr != nil || string(got) != "original\n" {
+			t.Errorf("link target modified: %q (%v)", got, rerr)
+		}
+		if _, serr := os.Lstat(filepath.Join(target, "commit-msg")); !os.IsNotExist(serr) {
+			t.Errorf("hooks preserved before the managed-hook refusal: %v", serr)
+		}
+	})
+}
