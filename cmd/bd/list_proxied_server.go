@@ -210,11 +210,21 @@ func runListProxiedWatch(_ *cobra.Command, ctx context.Context, in listInput) er
 // workapi.FinishPage's, inside issueops.Reader.List, where the direct route's
 // are too.
 func emitProxiedListJSONResult(iwc []*types.IssueWithCounts, in listInput, hasMore bool) error {
+	// The same in-band truncation verdict runListCore emits on the direct
+	// route: the stderr hint below is terminal-gated and unreachable in a
+	// pipe, so a --limit-cut page must carry "pagination" under the
+	// envelope for the documented contract to hold on this backend too
+	// (GH#5444). Total stays omitted, for the reason the direct route's
+	// comment gives — no listing-plane count exists.
+	var pag *PaginationMeta
+	if hasMore {
+		pag = &PaginationMeta{Returned: len(iwc), Truncated: true}
+	}
 	var err error
 	if in.SkipLabels {
-		err = outputJSON(newSkipLabelsListJSONResponse(iwc))
+		err = outputJSONWithPagination(newSkipLabelsListJSONResponse(iwc), pag)
 	} else {
-		err = outputJSON(iwc)
+		err = outputJSONWithPagination(iwc, pag)
 	}
 	if err != nil {
 		return err
