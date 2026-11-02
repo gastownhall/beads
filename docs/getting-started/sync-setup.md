@@ -107,9 +107,10 @@ Commit and push that config file with your normal git workflow. Other clones can
 then run `bd bootstrap` if their database is missing/stale, or `bd dolt pull`
 when they already have the right database.
 
-`sync.remote` and `sync.git-remote` must be remote URLs; bd refuses values
-that begin with `-` before passing them to git, so they can never be parsed
-as git options.
+`sync.remote` and `sync.git-remote` must be remote URLs. bd refuses a value
+that begins with `-`, and an `ssh://` URL whose user name or host begins with
+`-`, before passing it to git, Dolt or ssh, so no part of it can be parsed as
+a command-line option.
 
 ## Cloning to a New Computer
 
