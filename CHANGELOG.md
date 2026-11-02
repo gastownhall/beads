@@ -1126,6 +1126,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd init` against a Dolt sql-server whose sessions start with
+  automatic transaction commits on (`dolt_transaction_commit`) no longer
+  fails on a fresh database with `migration 0040_ignored_tables_also_nonlocal_tables.up.sql:
+  ... nothing to commit`. The migration pass now turns the setting off for
+  its own session and restores it on return. The same error at migration
+  0028, reported on bd 1.0.4, was fixed in v1.0.5 (#4470).
 - `bd dolt push <remote>` and `bd dolt pull <remote>` now push to and pull
   from the named remote. bd ignored the name, so `bd dolt push 1st` pushed to
   the default remote and reported "Push complete."; a name that differs from
