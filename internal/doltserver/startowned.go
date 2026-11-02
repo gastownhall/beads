@@ -95,6 +95,7 @@ func writeServerStateFiles(beadsDir string, pid, port int) error {
 func removeServerStateFiles(beadsDir string) {
 	_ = os.Remove(pidPath(beadsDir))
 	_ = os.Remove(portPath(beadsDir))
+	_ = os.Remove(binaryRecordPath(beadsDir))
 }
 
 // pinnedPortRemedy says why Start did not move off port, which another
