@@ -1135,7 +1135,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   nothing; `--force` does not override the refusal. The squashed base now
   also ends at the last old commit in history rather than the newest-dated
   one, so an old window whose dates are shuffled no longer loses its final
-  edits (#6645, reported by @bee-ghosttrack).
+  edits. As a general net, compact now compares the replayed history's
+  committed data with main before swapping it in and aborts, leaving main
+  untouched, on any difference (#6645, reported by @bee-ghosttrack).
 - `bd dolt push <remote>` and `bd dolt pull <remote>` now push to and pull
   from the named remote. bd ignored the name, so `bd dolt push 1st` pushed to
   the default remote and reported "Push complete."; a name that differs from
