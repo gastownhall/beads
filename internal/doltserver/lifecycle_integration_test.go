@@ -82,16 +82,24 @@ func doltTestEnv(home string) []string {
 	return append(os.Environ(), "HOME="+home, "DOLT_ROOT_PATH="+home)
 }
 
-// connectMySQL opens a MySQL connection to the dolt server.
-// Caller is responsible for closing the returned *sql.DB.
-func connectMySQL(t *testing.T, port int) *sql.DB {
+// connectMySQLDatabase opens a MySQL connection to the dolt server's named
+// database ("" for no default database). Caller is responsible for closing
+// the returned *sql.DB.
+func connectMySQLDatabase(t *testing.T, port int, database string) *sql.DB {
 	t.Helper()
-	dsn := doltutil.ServerDSN{Host: "127.0.0.1", Port: port, User: "root", Database: "dolt"}.String()
+	dsn := doltutil.ServerDSN{Host: "127.0.0.1", Port: port, User: "root", Database: database}.String()
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
 		t.Fatalf("sql.Open: %v", err)
 	}
 	return db
+}
+
+// connectMySQL opens a MySQL connection to the dolt server.
+// Caller is responsible for closing the returned *sql.DB.
+func connectMySQL(t *testing.T, port int) *sql.DB {
+	t.Helper()
+	return connectMySQLDatabase(t, port, "dolt")
 }
 
 func reserveDistinctTCPPorts(t *testing.T, count int) []int {
@@ -284,6 +292,185 @@ func TestLifecycle_CrashRecovery(t *testing.T) {
 
 	// Clean stop.
 	if err := doltserver.Stop(beadsDir); err != nil {
+		t.Fatalf("Stop (cleanup): %v", err)
+	}
+	reg.Deregister(state2.PID)
+}
+
+// TestLifecycle_SharedServerSQLCommitSurvivesKill verifies that SQL-committed
+// working-set writes on a bd-managed shared server survive an ungraceful kill
+// without any Dolt history commit (gastownhall/beads#4443): an ordinary SQL
+// COMMIT persists through Dolt's default chunk journal, so it needs neither
+// a behavior.dolt_transaction_commit setting nor a pre-stop history flush.
+// The write left inside an open transaction is the part a crash does lose.
+// Would have caught: the missing crash coverage for the SQL-committed,
+// not-history-committed state that GH#4443 reported as data loss.
+func TestLifecycle_SharedServerSQLCommitSurvivesKill(t *testing.T) {
+	beadsDir := setupLifecycleTestDir(t)
+	reg := integration.NewProcessRegistry(t)
+	diag := integration.NewDiagnostics(t, beadsDir)
+	diag.CaptureOnFailure()
+
+	// Shared-server mode against its own temporary directory and a reserved
+	// SQL port, with the remotesapi listener explicitly off, so nothing real
+	// on this machine is served or inherited.
+	sharedDir := t.TempDir()
+	sqlPort := reserveDistinctTCPPorts(t, 1)[0]
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+	t.Setenv("BEADS_SHARED_SERVER_DIR", sharedDir)
+	t.Setenv("BEADS_DOLT_SERVER_PORT", fmt.Sprintf("%d", sqlPort))
+	t.Setenv("BEADS_DOLT_REMOTESAPI_PORT", "0")
+	// The persistence under test is Dolt's default chunk journal, which
+	// DOLT_DISABLE_CHUNK_JOURNAL turns off (file.go: an empty value keeps
+	// the journal). Pin the default in the test process so an operator
+	// override on this host cannot change what the test proves; production
+	// never touches this variable.
+	t.Setenv("DOLT_DISABLE_CHUNK_JOURNAL", "")
+
+	serverDir := doltserver.ResolveServerDir(beadsDir)
+	if serverDir != sharedDir {
+		t.Fatalf("ResolveServerDir(%s) = %q, want the temporary shared directory %q", beadsDir, serverDir, sharedDir)
+	}
+
+	state1, err := doltserver.Start(serverDir)
+	if err != nil {
+		t.Fatalf("Start (first): %v", err)
+	}
+	if proc, findErr := os.FindProcess(state1.PID); findErr == nil {
+		reg.Register(proc)
+	}
+
+	// A dedicated database on the shared server, so the assertions cannot be
+	// satisfied by another database's state.
+	db := connectMySQLDatabase(t, sqlPort, "")
+	if _, err := db.Exec("CREATE DATABASE kill_survival"); err != nil {
+		t.Fatalf("CREATE DATABASE kill_survival: %v", err)
+	}
+	_ = db.Close()
+
+	dbKill := connectMySQLDatabase(t, sqlPort, "kill_survival")
+	defer func() { _ = dbKill.Close() }()
+	// SQL-committed writes with no CALL DOLT_COMMIT anywhere: an
+	// autocommitted tracked row, a two-row explicit transaction, and a row
+	// in a dolt_ignore-ignored table.
+	if _, err := dbKill.Exec("CREATE TABLE survival_tracked (id INT PRIMARY KEY, val VARCHAR(100))"); err != nil {
+		t.Fatalf("CREATE TABLE survival_tracked: %v", err)
+	}
+	if _, err := dbKill.Exec("INSERT INTO survival_tracked VALUES (1, 'autocommit-marker')"); err != nil {
+		t.Fatalf("INSERT autocommitted row: %v", err)
+	}
+	tx, err := dbKill.Begin()
+	if err != nil {
+		t.Fatalf("BEGIN explicit transaction: %v", err)
+	}
+	if _, err := tx.Exec("INSERT INTO survival_tracked VALUES (2, 'tx-marker')"); err != nil {
+		t.Fatalf("INSERT first transaction row: %v", err)
+	}
+	if _, err := tx.Exec("INSERT INTO survival_tracked VALUES (3, 'tx-marker')"); err != nil {
+		t.Fatalf("INSERT second transaction row: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("COMMIT explicit transaction: %v", err)
+	}
+	if _, err := dbKill.Exec("INSERT IGNORE INTO dolt_ignore VALUES ('wisp_%', true)"); err != nil {
+		t.Fatalf("INSERT dolt_ignore pattern: %v", err)
+	}
+	if _, err := dbKill.Exec("CREATE TABLE wisp_scratch (id INT PRIMARY KEY, val VARCHAR(100))"); err != nil {
+		t.Fatalf("CREATE TABLE wisp_scratch: %v", err)
+	}
+	if _, err := dbKill.Exec("INSERT INTO wisp_scratch VALUES (1, 'wisp-marker')"); err != nil {
+		t.Fatalf("INSERT ignored-table row: %v", err)
+	}
+
+	// A transaction left open at the kill: its write must not survive.
+	dbOpen := connectMySQLDatabase(t, sqlPort, "kill_survival")
+	defer func() { _ = dbOpen.Close() }()
+	openTx, err := dbOpen.Begin()
+	if err != nil {
+		t.Fatalf("BEGIN open transaction: %v", err)
+	}
+	if _, err := openTx.Exec("INSERT INTO survival_tracked VALUES (9, 'uncommitted-marker')"); err != nil {
+		t.Fatalf("INSERT uncommitted row: %v", err)
+	}
+	// Deliberately no Commit: the transaction is still open at the kill.
+
+	// The committed writes are visible from a separate connection before the
+	// kill; the open transaction's row is not.
+	assertCommittedWrites := func(db *sql.DB, phase string) {
+		t.Helper()
+		for id, want := range map[int]string{
+			1: "autocommit-marker",
+			2: "tx-marker",
+			3: "tx-marker",
+		} {
+			var val string
+			if err := db.QueryRow("SELECT val FROM survival_tracked WHERE id = ?", id).Scan(&val); err != nil {
+				t.Fatalf("%s: SELECT survival_tracked id %d: %v", phase, id, err)
+			}
+			if val != want {
+				t.Errorf("%s: survival_tracked id %d = %q, want %q", phase, id, val, want)
+			}
+		}
+		var wispCount int
+		if err := db.QueryRow("SELECT COUNT(*) FROM wisp_scratch").Scan(&wispCount); err != nil {
+			t.Fatalf("%s: SELECT wisp_scratch count: %v", phase, err)
+		}
+		if wispCount != 1 {
+			t.Errorf("%s: wisp_scratch count = %d, want 1 (the ignored-table row)", phase, wispCount)
+		}
+		var openCount int
+		if err := db.QueryRow("SELECT COUNT(*) FROM survival_tracked WHERE id = 9").Scan(&openCount); err != nil {
+			t.Fatalf("%s: SELECT uncommitted row count: %v", phase, err)
+		}
+		if openCount != 0 {
+			t.Errorf("%s: uncommitted row (id 9) count = %d, want 0", phase, openCount)
+		}
+	}
+	dbCheck := connectMySQLDatabase(t, sqlPort, "kill_survival")
+	defer func() { _ = dbCheck.Close() }()
+	assertCommittedWrites(dbCheck, "before kill")
+
+	// SIGKILL only the registered test server PID — no Stop, Restart or
+	// FlushWorkingSet between the writes and this kill.
+	proc, err := os.FindProcess(state1.PID)
+	if err != nil {
+		t.Fatalf("FindProcess: %v", err)
+	}
+	if err := proc.Signal(syscall.SIGKILL); err != nil {
+		t.Fatalf("SIGKILL: %v", err)
+	}
+	if _, err := proc.Wait(); err != nil {
+		t.Fatalf("wait for killed server: %v", err)
+	}
+	reg.Deregister(state1.PID)
+	waitForPortClosed(t, sqlPort, 5*time.Second)
+	t.Logf("server PID %d killed, port %d closed", state1.PID, sqlPort)
+
+	// Close the stale SQL handles from the killed server before restarting
+	// against the same resolved directory.
+	_ = dbKill.Close()
+	_ = dbOpen.Close()
+	_ = dbCheck.Close()
+
+	state2, err := doltserver.Start(serverDir)
+	if err != nil {
+		t.Fatalf("Start (second): %v", err)
+	}
+	if state2.PID == state1.PID {
+		t.Error("second Start reused the killed server's PID (unexpected)")
+	}
+	if proc, findErr := os.FindProcess(state2.PID); findErr == nil {
+		reg.Register(proc)
+	}
+
+	// Connect afresh and assert the committed writes survived the crash
+	// while the open transaction's write did not.
+	dbAfter := connectMySQLDatabase(t, sqlPort, "kill_survival")
+	defer func() { _ = dbAfter.Close() }()
+	assertCommittedWrites(dbAfter, "after crash")
+
+	// Graceful cleanup only after the post-crash assertions.
+	if err := doltserver.Stop(serverDir); err != nil {
 		t.Fatalf("Stop (cleanup): %v", err)
 	}
 	reg.Deregister(state2.PID)
