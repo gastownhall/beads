@@ -824,12 +824,24 @@ func runRulesCompact(cmd *cobra.Command, args []string) error {
 			var groupRules []RuleFile
 			for _, ruleName := range mc.Rules {
 				path := filepath.Join(rulesPath, ruleName)
-				rf, err := ParseRuleFile(path)
+				rf, err := parseCompactSource(path)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "Warning: skipping %s: %v\n", ruleName, err)
 					continue
 				}
+				if !hasDirectives(rf) {
+					fmt.Fprintf(os.Stderr, "Warning: skipping %s: it has no **Do:** or **Don't:** lines, so a composite would carry none of it\n", ruleName)
+					continue
+				}
 				groupRules = append(groupRules, rf)
+			}
+			if len(groupRules) < 2 {
+				names := make([]string, 0, len(groupRules))
+				for _, rf := range groupRules {
+					names = append(names, filepath.Base(rf.Path))
+				}
+				fmt.Fprintf(os.Stderr, "Warning: skipping group %q: fewer than two of its rules can be merged (%s); nothing written, backed up or deleted\n", mc.GroupLabel, strings.Join(names, ", "))
+				continue
 			}
 
 			merged, err := CompactRules(groupRules, mc.GroupLabel)
@@ -918,6 +930,11 @@ func runRulesCompact(cmd *cobra.Command, args []string) error {
 
 	if len(groupRules) < 2 {
 		return HandleErrorRespectJSON("need at least 2 rules to merge")
+	}
+	for _, rf := range groupRules {
+		if !hasDirectives(rf) {
+			return HandleErrorRespectJSON("refusing to merge this group: %s has no **Do:** or **Don't:** lines, so the composite would carry none of it. Drop it from --group, then re-run", filepath.Base(rf.Path))
+		}
 	}
 
 	label := findGroupLabel(groupRules, makeRange(len(groupRules)))
@@ -1087,6 +1104,16 @@ func printNotCarried(sources []compactSource) {
 		}
 	}
 }
+
+// hasDirectives reports whether rf has a Do or Don't entry a composite can
+// carry.
+func hasDirectives(rf RuleFile) bool {
+	return len(rf.DoLines)+len(rf.DontLines) > 0
+}
+
+// parseCompactSource parses an --auto group's rule again after the audit did;
+// tests replace it to fail a parse in between.
+var parseCompactSource = ParseRuleFile
 
 // printCompactRefused reports a group compact will not merge, without showing
 // it as a preview that is safe to apply.
