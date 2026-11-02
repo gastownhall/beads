@@ -436,3 +436,60 @@ func TestEmbeddedCompactRecentAncestorOfBoundary(t *testing.T) {
 		t.Errorf("main state after refused compact = %+v, want unchanged %+v", after, before)
 	}
 }
+
+// TestEmbeddedCompactRefusedDryRun covers the #6645 preview: --dry-run on a
+// refused history exits 0 without changing main, reports the refusal and its
+// hint instead of recommending --force, and the JSON preview keeps its fields
+// and adds refusal.error and refusal.hint.
+func TestEmbeddedCompactRefusedDryRun(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	f := setupStraddledCutoff(t, "rd")
+	before := readCompactRefState(t, f.beadsDir)
+
+	out := bdCompact(t, f.bd, f.dir, "--dry-run", "--days", "0")
+	if !strings.Contains(out, "DRY RUN") || !strings.Contains(out, "Refused: ") || !strings.Contains(out, "Hint: ") {
+		t.Errorf("dry-run output lacks the refusal preview:\n%s", out)
+	}
+	assertRefusalNames(t, f, out)
+	if strings.Contains(out, "--force to proceed") || strings.Contains(out, "Result: ") {
+		t.Errorf("dry-run forecasts a forced run on a refused plan:\n%s", out)
+	}
+
+	cmd := exec.Command(f.bd, "--json", "compact", "--dry-run", "--days", "0")
+	cmd.Dir = f.dir
+	cmd.Env = bdEnv(f.dir)
+	stdout, stderr, err := runCommandBuffers(t, cmd)
+	if err != nil {
+		t.Fatalf("bd --json compact --dry-run failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+	var preview map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &preview); err != nil {
+		t.Fatalf("parse JSON preview: %v\nstdout:\n%s", err, stdout.String())
+	}
+	if preview["dry_run"] != true {
+		t.Errorf("JSON preview dry_run = %v, want true", preview["dry_run"])
+	}
+	for _, key := range []string{"dry_run", "total_commits", "old_commits", "recent_commits", "cutoff_days", "cutoff_date", "initial_hash", "boundary_hash"} {
+		if _, ok := preview[key]; !ok {
+			t.Errorf("JSON preview lacks %q: %v", key, preview)
+		}
+	}
+	refusal, _ := preview["refusal"].(map[string]any)
+	errText, _ := refusal["error"].(string)
+	hint, _ := refusal["hint"].(string)
+	if errText == "" || hint == "" {
+		t.Fatalf("JSON preview refusal = %v, want error and hint", preview["refusal"])
+	}
+	assertRefusalNames(t, f, errText+"\n"+hint)
+
+	if got := bdShow(t, f.bd, f.dir, f.issueID).Title; got != "ORIGINAL" {
+		t.Errorf("title after dry-run = %q, want %q", got, "ORIGINAL")
+	}
+	if after := readCompactRefState(t, f.beadsDir); after != before {
+		t.Errorf("main state after dry-run = %+v, want unchanged %+v", after, before)
+	}
+}

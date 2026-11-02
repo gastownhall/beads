@@ -45,6 +45,11 @@ func (r *compactRefusal) message() string {
 		shortCommitHash(r.old.Hash), r.old.Date.UTC().Format(time.RFC3339))
 }
 
+// jsonFields is the dry-run preview's "refusal" object.
+func (r *compactRefusal) jsonFields() map[string]string {
+	return map[string]string{"error": r.message(), "hint": compactRefusalHint}
+}
+
 func shortCommitHash(hash string) string {
 	return hash[:min(8, len(hash))]
 }
