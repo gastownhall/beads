@@ -142,11 +142,66 @@ func assertNoFederationTempBranches(t *testing.T, ctx context.Context, te *testE
 	te.queryScalar(t, ctx,
 		"SELECT COALESCE(GROUP_CONCAT(name ORDER BY name SEPARATOR ','), '') FROM dolt_branches",
 		nil, &branches)
-	for _, prefix := range []string{versioncontrolops.FilteredPushStagingPrefix} {
+	for _, prefix := range []string{versioncontrolops.FilteredPushStagingPrefix, versioncontrolops.FilteredPushKeepPrefix} {
 		if strings.Contains(branches, prefix) {
 			t.Errorf("temporary branch with prefix %q left behind; dolt_branches = %q", prefix, branches)
 		}
 	}
+}
+
+// TestEmbeddedFilteredPushMergesPeerChangesAcrossSyncs is the embedded AC-6
+// peer-activity leg against a real clone (GH#7890): after a compensated
+// filtered push, commits the peer made on top of the published filtered tip
+// must merge in while the excluded local rows survive.
+func TestEmbeddedFilteredPushMergesPeerChangesAcrossSyncs(t *testing.T) {
+	te := newTestEnv(t, "fedmerge")
+	ctx := t.Context()
+	task, chore := createTaskAndChore(t, ctx, te, "fedmerge")
+	remoteURL := newFederationRemote(t, ctx, te)
+
+	withFederationExcludeTypes(t, []string{"chore"})
+
+	if _, err := te.store.Sync(ctx, "peer", ""); err != nil {
+		t.Fatalf("first sync: %v", err)
+	}
+
+	// The peer edits the shared task on top of the filtered tip it received
+	// and publishes the result, as a real federation partner would.
+	withRawConn(t, cloneFederationRemote(t, ctx, remoteURL, te.database), te.database, func(conn *sql.Conn) {
+		mustExecOn(t, ctx, conn, "UPDATE issues SET title = 'Peer edit' WHERE id = ?", task.ID)
+		mustExecOn(t, ctx, conn, "CALL DOLT_COMMIT('-Am', ?)", "peer edits task")
+		mustExecOn(t, ctx, conn, "CALL DOLT_PUSH('origin', 'main')")
+	})
+
+	// Second sync: the peer's edit must arrive while the excluded local row
+	// survives. Before the compensation this merge fast-forwarded the local
+	// branch to the peer's filtered history, deleting the excluded row.
+	result, err := te.store.Sync(ctx, "peer", "")
+	if err != nil {
+		t.Fatalf("second sync: %v", err)
+	}
+	if result.PushError != nil {
+		t.Fatalf("second sync push error: %v", result.PushError)
+	}
+	assertNoFederationTempBranches(t, ctx, te)
+
+	var title string
+	te.queryScalar(t, ctx, "SELECT title FROM issues WHERE id = ?", []any{task.ID}, &title)
+	if title != "Peer edit" {
+		t.Errorf("peer edit did not merge: task title = %q", title)
+	}
+	te.assertRowExists(t, ctx, "issues", chore.ID)
+
+	// What the peer ends up with: the merged edit, and still no excluded row.
+	withRawConn(t, cloneFederationRemote(t, ctx, remoteURL, te.database), te.database, func(conn *sql.Conn) {
+		if err := conn.QueryRowContext(ctx, "SELECT title FROM issues WHERE id = ?", task.ID).Scan(&title); err != nil {
+			t.Fatalf("read task title from final clone: %v", err)
+		}
+		if title != "Peer edit" {
+			t.Errorf("final clone task title = %q, want %q", title, "Peer edit")
+		}
+		assertCloneIssueCount(t, ctx, conn, chore.ID, 0)
+	})
 }
 
 // cloneFederationRemote clones remoteURL (a file:// Dolt remote) into a fresh
