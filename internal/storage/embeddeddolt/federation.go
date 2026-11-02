@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
@@ -415,8 +416,8 @@ func (s *EmbeddedDoltStore) Sync(ctx context.Context, peer string, strategy stri
 		result.PulledCommits = 1
 	}
 
-	// Step 5: Push
-	if err := s.PushTo(ctx, peer); err != nil {
+	// Step 5: Push, filtering excluded types (GH#7890).
+	if err := s.filteredPushToPeer(ctx, peer, config.GetFederationConfig().ExcludeTypes); err != nil {
 		result.PushError = err
 	} else {
 		result.Pushed = true
@@ -427,6 +428,57 @@ func (s *EmbeddedDoltStore) Sync(ctx context.Context, peer string, strategy stri
 
 	result.EndTime = time.Now()
 	return result, nil
+}
+
+// filteredPushCleanupTimeout bounds the cleanup of a filtered push's
+// temporary branches after the caller has canceled or its deadline expired.
+const filteredPushCleanupTimeout = 30 * time.Second
+
+// filteredPushToPeer pushes to peer without the issues of excludeTypes, as the
+// server store's filteredPushToPeer does. An empty excludeTypes is a plain
+// PushTo. Otherwise the filtered state is committed on a temporary branch,
+// which is pushed onto the peer's copy of the store's branch and then
+// deleted; the local branch keeps the excluded issues.
+func (s *EmbeddedDoltStore) filteredPushToPeer(ctx context.Context, peer string, excludeTypes []string) (retErr error) {
+	if len(excludeTypes) == 0 {
+		return s.PushTo(ctx, peer)
+	}
+	if _, err := s.CommitPending(ctx, "beads"); err != nil {
+		return fmt.Errorf("commit pending before push: %w", err)
+	}
+	push, err := versioncontrolops.NewFilteredPush(s.branch, excludeTypes, commitAuthor)
+	if err != nil {
+		return err
+	}
+
+	// Armed before the branch exists, and on a fresh, uncanceled, bounded
+	// session: the operation's own session may be the one a cancel broke.
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), filteredPushCleanupTimeout)
+		defer cancel()
+		if err := s.withMutatingDBConn(cleanupCtx, func(db versioncontrolops.DBConn) error {
+			return push.Cleanup(cleanupCtx, db)
+		}); err != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("federation filter: cleanup: %w", err))
+		}
+	}()
+
+	if err := s.withMutatingPinnedDBConn(ctx, func(db versioncontrolops.DBConn) error {
+		conn, ok := db.(versioncontrolops.BlockedRecomputeConn)
+		if !ok {
+			return fmt.Errorf("federation filter: pinned session %T cannot open a transaction", db)
+		}
+		_, err := push.Stage(ctx, conn)
+		return err
+	}); err != nil {
+		return err
+	}
+
+	return s.withPeerAuth(ctx, peer, func(user string) error {
+		return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
+			return versioncontrolops.Push(ctx, db, peer, push.Refspec(), user)
+		})
+	})
 }
 
 // SyncStatus returns the synchronization status with a peer.

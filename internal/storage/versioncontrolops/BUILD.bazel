@@ -14,6 +14,7 @@ go_library(
         "db.go",
         "envguards.go",
         "fastforward.go",
+        "filtered_push.go",
         "flatten.go",
         "gc.go",
         "mergesettle.go",
@@ -30,6 +31,7 @@ go_library(
         "//internal/storage/issueops",
         "//internal/storage/kvkeys",
         "//internal/storage/schema",
+        "@com_github_google_uuid//:uuid",
     ],
 )
 

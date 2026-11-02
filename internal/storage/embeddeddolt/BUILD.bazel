@@ -162,6 +162,7 @@ go_test(
         "expected_revision_contract_test.go",
         "external_dependencies_test.go",
         "federation_credentials_test.go",
+        "federation_filtered_push_test.go",
         "federation_peercred_test.go",
         "get_issue_test.go",
         "git_ref_pin_test.go",
@@ -269,6 +270,7 @@ go_test(
     deps = [
         "//:beads",
         "//backend/conformance",
+        "//internal/config",
         "//internal/debug",
         "//internal/eventsjournal",
         "//internal/hooks",
