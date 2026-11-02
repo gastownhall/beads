@@ -156,6 +156,20 @@ func TestInstallHooksRefusesSymlinkedHooksDirInEveryMode(t *testing.T) {
 	}
 }
 
+// TestInstallHooksAllowsMissingHooksDir pins the admitted half of the
+// directory check: a hooks directory that does not exist yet is created, not
+// refused.
+// Adapted from the GLM candidate's test of the same name.
+func TestInstallHooksAllowsMissingHooksDir(t *testing.T) {
+	_, repo := setupSymlinkedHooksDirRepo(t)
+	hooksDir := filepath.Join(repo, ".beads", "hooks")
+	_, err := os.Lstat(hooksDir)
+	require.True(t, os.IsNotExist(err), "fixture must start without .beads/hooks: %v", err)
+
+	require.NoError(t, installHooksWithOptions([]string{"pre-commit"}, false, false, false, true))
+	require.Contains(t, readFileForWorktreeTest(t, filepath.Join(hooksDir, "pre-commit")), hookSectionBeginPrefix)
+}
+
 // TestInitHooksRefusesSymlinkedStorageHooksDir covers the selected init
 // context: the storage hooks directory is resolved from the selected
 // workspace, and a symlink there is refused like the standalone modes.
