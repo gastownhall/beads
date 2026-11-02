@@ -48,6 +48,21 @@ type proxyEndpointResolver struct {
 	// armed for the provider's lifetime. Guarded by mu so the arm() write
 	// synchronizes with any hook already racing a first connection.
 	armed bool
+	// flight is the single in-flight discovery, nil when none is running.
+	// New connections needing the endpoint while one is running join that
+	// flight instead of starting their own — overlap coalesces into ONE
+	// authenticated discovery. Nothing is cached: the slot is cleared when the
+	// flight publishes, so the next connection after the overlap discovers
+	// again.
+	flight *resolveFlight
+}
+
+// resolveFlight is one shared discovery: the endpoint or error it produced,
+// published once, and done, closed at publication, which joiners wait on.
+type resolveFlight struct {
+	done chan struct{}
+	ep   proxy.Endpoint
+	err  error
 }
 
 // newProxyEndpointResolver builds the production resolver for the provider
@@ -77,6 +92,10 @@ func (r *proxyEndpointResolver) arm() {
 // timeouts, ClientFoundRows) is the driver's own clone of that
 // configuration. A discovery failure is returned, never swallowed and never
 // answered by dialing the stale construction address.
+//
+// Overlapping connections share one discovery: the caller that admits the
+// flight becomes its worker and publishes the result under r.mu; the others
+// wait on the flight outside the mutex and read what it published.
 func (r *proxyEndpointResolver) beforeConnect(ctx context.Context, cfg *mysql.Config) error {
 	r.mu.Lock()
 	armed := r.armed
@@ -85,10 +104,40 @@ func (r *proxyEndpointResolver) beforeConnect(ctx context.Context, cfg *mysql.Co
 		return nil
 	}
 
-	ep, err := r.resolve(context.Background())
-	if err != nil {
-		return fmt.Errorf("uow: rediscover proxy endpoint: %w", err)
+	flight, worker := r.admit()
+	if worker {
+		ep, err := r.resolve(context.Background())
+		r.mu.Lock()
+		flight.ep, flight.err = ep, err
+		r.flight = nil
+		close(flight.done)
+		r.mu.Unlock()
+		if err != nil {
+			return fmt.Errorf("uow: rediscover proxy endpoint: %w", err)
+		}
+		cfg.Addr = ep.Address()
+		return nil
 	}
-	cfg.Addr = ep.Address()
+
+	<-flight.done
+	if flight.err != nil {
+		// Bare: the flight's error is normalized into the wrapped contract by
+		// the error-path change of its own step.
+		return flight.err
+	}
+	cfg.Addr = flight.ep.Address()
 	return nil
+}
+
+// admit returns the flight this hook joins, and whether the caller must run
+// it. Joiners never hold r.mu while waiting.
+func (r *proxyEndpointResolver) admit() (flight *resolveFlight, worker bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.flight != nil {
+		return r.flight, false
+	}
+	flight = &resolveFlight{done: make(chan struct{})}
+	r.flight = flight
+	return flight, true
 }
