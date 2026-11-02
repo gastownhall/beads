@@ -166,6 +166,17 @@ func TestInitReinitLocalConfiguredRemoteWithDoltDataRefuses(t *testing.T) {
 	if code := exitErr.ExitCode(); code != ExitRemoteDivergenceRefused {
 		t.Errorf("exit code = %d, want %d (ExitRemoteDivergenceRefused)", code, ExitRemoteDivergenceRefused)
 	}
+	// A probe that READ the remote keeps the verified refusal: GH#7665's
+	// unverified wording is only for a probe that failed.
+	stderrStr := stderr.String()
+	if !strings.Contains(stderrStr, "bd init refuses: remote 'origin' already has Dolt history (refs/dolt/data).") {
+		t.Errorf("verified refusal text changed:\n%s", stderrStr)
+	}
+	for _, banned := range []string{unverifiedRemoteRefusalHeadline, "could not verify refs/dolt/data"} {
+		if strings.Contains(stderrStr, banned) {
+			t.Errorf("a remote that was read must not be reported as unverified (%q):\n%s", banned, stderrStr)
+		}
+	}
 
 	beadsDir := filepath.Join(workDir, ".beads")
 	if _, err := os.Stat(beadsDir); err == nil {
