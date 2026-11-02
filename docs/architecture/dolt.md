@@ -298,6 +298,16 @@ standalone Beads users. The `bd` binary includes everything; just `bd init` and 
 - Push to GitHub with `bd dolt push` — code and issues in one repo
 - Zero ops: no server, no ports, no PID files
 
+Each `bd` command starts the embedded engine, so a script or agent loop that
+calls `bd` hundreds of times pays that startup every time. bd batch runs a
+limited set of write commands (`close`, `update`, `create`, `dep add`,
+`dep remove`; see `bd batch --help`) in one transaction and one process. For
+sustained concurrent agents, use server or proxied-server mode, where one Dolt
+server keeps the engine running (see
+[Migrating Between Backends](#migrating-between-backends)). Neither repairs a
+damaged journal; for that, see
+[Engine won't open](/recovery/database-corruption#engine-wont-open).
+
 ### Server Mode (Multi-Writer / Orchestrator)
 
 Connects to a running `dolt sql-server` for multi-client access.
