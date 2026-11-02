@@ -25,6 +25,8 @@ import (
 	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/stretchr/testify/require"
+
+	"github.com/creack/pty"
 )
 
 func TestEmbeddedInitHooksRouting(t *testing.T) {
@@ -2077,4 +2079,226 @@ func TestEmbeddedInitReinitLocalRefusesDatabaseRepoint(t *testing.T) {
 	}
 	requireNoFile(t, filepath.Join(beadsDir, "embeddeddolt", "other"))
 	requireFile(t, filepath.Join(beadsDir, "embeddeddolt", "fi"))
+}
+
+// reinitSwitchFixture builds the GH#3495 embedded workspace shape: database
+// "fi" with zero issues holding only database-stored configuration, the
+// exact store a count-based preflight cannot see anything worth protecting
+// in. Reuse across the authorized-switch subtests below via t.Run.
+func reinitSwitchFixture(t *testing.T, bd string) (dir, beadsDir string) {
+	t.Helper()
+	dir, beadsDir, _ = bdInit(t, bd, "--prefix", "fi", "--skip-agents")
+	if out, code := runBDExit(t, bd, dir, "config", "set", "types.custom", "molecule,convoy"); code != 0 {
+		t.Fatalf("bd config set types.custom exited %d:\n%s", code, out)
+	}
+	if got := readBack(t, beadsDir, "fi", "types.custom", false); got != "molecule,convoy" {
+		t.Fatalf("fixture: types.custom = %q, want molecule,convoy", got)
+	}
+	return dir, beadsDir
+}
+
+// assertAuthorizedSwitch checks the post-conditions of an AUTHORIZED switch
+// to database "other": the new database is recorded, both databases exist,
+// and the original database's custom configuration survives untouched — the
+// switch repoints the workspace, it does not copy or destroy the old store.
+func assertAuthorizedSwitch(t *testing.T, beadsDir string) {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(beadsDir, "metadata.json"))
+	if err != nil {
+		t.Fatalf("read metadata.json after the switch: %v", err)
+	}
+	var meta struct {
+		DoltDatabase string `json:"dolt_database"`
+	}
+	if err := json.Unmarshal(raw, &meta); err != nil {
+		t.Fatalf("parse metadata.json after the switch: %v\n%s", err, raw)
+	}
+	if meta.DoltDatabase != "other" {
+		t.Errorf("metadata dolt_database = %q, want the switched-to database \"other\"", meta.DoltDatabase)
+	}
+	requireFile(t, filepath.Join(beadsDir, "embeddeddolt", "other"))
+	requireFile(t, filepath.Join(beadsDir, "embeddeddolt", "fi"))
+	if got := readBack(t, beadsDir, "fi", "types.custom", false); got != "molecule,convoy" {
+		t.Errorf("the original database's custom types must survive the switch, got %q", got)
+	}
+}
+
+// runBDOnTTY runs bd args in dir on a pseudo-terminal (the only way the
+// interactive typed confirmation is reachable: it keys on term.IsTerminal on
+// stdin), waits for want to appear in the terminal output, types answer, and
+// returns the full terminal output and exit code.
+func runBDOnTTY(t *testing.T, bd, dir string, env []string, want, answer string, args ...string) (string, int) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("no unix PTY on Windows; the interactive typed confirmation is unreachable here")
+	}
+	cmd := exec.Command(bd, args...)
+	cmd.Dir = dir
+	cmd.Env = env
+	ptmx, err := pty.Start(cmd)
+	if err != nil {
+		t.Fatalf("pty.Start bd %s: %v", strings.Join(args, " "), err)
+	}
+	defer func() { _ = ptmx.Close() }()
+
+	var (
+		mu         sync.Mutex
+		output     bytes.Buffer
+		promptSeen = make(chan struct{})
+		once       sync.Once
+		readerDone = make(chan struct{})
+	)
+	go func() {
+		defer close(readerDone)
+		buf := make([]byte, 4096)
+		for {
+			n, readErr := ptmx.Read(buf)
+			if n > 0 {
+				mu.Lock()
+				output.Write(buf[:n])
+				if strings.Contains(output.String(), want) {
+					once.Do(func() { close(promptSeen) })
+				}
+				mu.Unlock()
+			}
+			if readErr != nil {
+				return
+			}
+		}
+	}()
+	waitCh := make(chan error, 1)
+	go func() { waitCh <- cmd.Wait() }()
+	got := func() string {
+		mu.Lock()
+		defer mu.Unlock()
+		return output.String()
+	}
+
+	// The deadline covers a whole workspace inspection before the prompt,
+	// not just process startup.
+	const promptDeadline = 120 * time.Second
+	select {
+	case <-promptSeen:
+	case err := <-waitCh:
+		t.Fatalf("bd %s exited before %q appeared: %v\n%s", strings.Join(args, " "), want, err, got())
+	case <-time.After(promptDeadline):
+		_ = cmd.Process.Kill()
+		<-waitCh
+		t.Fatalf("timed out waiting for %q in bd %s output\n%s", want, strings.Join(args, " "), got())
+	}
+
+	if _, err := ptmx.Write([]byte(answer + "\n")); err != nil {
+		t.Fatalf("write %q to PTY: %v", answer, err)
+	}
+	var waitErr error
+	select {
+	case waitErr = <-waitCh:
+	case <-time.After(120 * time.Second):
+		_ = cmd.Process.Kill()
+		<-waitCh
+		t.Fatalf("bd %s did not exit after the answer %q\n%s", strings.Join(args, " "), answer, got())
+	}
+	// Close the master so the drain goroutine hits EOF and the output below
+	// is complete.
+	_ = ptmx.Close()
+	select {
+	case <-readerDone:
+	case <-time.After(2 * time.Second):
+	}
+
+	code := 0
+	if waitErr != nil {
+		var exit *exec.ExitError
+		if !errors.As(waitErr, &exit) {
+			t.Fatalf("bd %s: %v\n%s", strings.Join(args, " "), waitErr, got())
+		}
+		code = exit.ExitCode()
+	}
+	return got(), code
+}
+
+// TestEmbeddedInitReinitLocalAuthorizedSwitch pins the success half of the
+// store-switch guard: an authorized switch — matching destroy token, or the
+// matching interactive phrase at a real terminal — proceeds exactly once,
+// records the switched-to database, and leaves the original database and its
+// custom configuration intact. A mismatched interactive phrase refuses with
+// exit 11 (ExitLocalExistsRefused), the interactive counterpart of the
+// non-interactive token refusal's exit 12.
+func TestEmbeddedInitReinitLocalAuthorizedSwitch(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt init tests")
+	}
+	// Deliberately NOT t.Parallel(): the PTY subtests drive a terminal with
+	// prompt deadlines; serializing keeps the interactions free of
+	// contention noise.
+	bd := buildEmbeddedBD(t)
+
+	t.Run("matching destroy token permits the switch once", func(t *testing.T) {
+		dir, beadsDir := reinitSwitchFixture(t, bd)
+		out, code := runBDExit(t, bd, dir,
+			"init", "--quiet", "--reinit-local", "--prefix", "fi",
+			"--database", "other", "--non-interactive", "--destroy-token", "DESTROY-fi")
+		if code != 0 {
+			t.Fatalf("authorized reinit switch exited %d, want 0:\n%s", code, out)
+		}
+		// Authorized once: no second, count-based destruction prompt may
+		// follow the accepted switch confirmation.
+		if strings.Contains(out, "Existing issues") {
+			t.Errorf("an authorized switch was followed by the count-based prompt:\n%s", out)
+		}
+		assertAuthorizedSwitch(t, beadsDir)
+	})
+
+	t.Run("matching interactive phrase permits the switch once", func(t *testing.T) {
+		dir, beadsDir := reinitSwitchFixture(t, bd)
+		// BD_NON_INTERACTIVE=0 explicitly forces the interactive resolution;
+		// the typed phrase only fires on a real terminal.
+		env := append(bdEnv(dir), "BD_NON_INTERACTIVE=0")
+		out, code := runBDOnTTY(t, bd, dir, env,
+			"leave fi behind", "leave fi behind",
+			"init", "--quiet", "--reinit-local", "--prefix", "fi", "--database", "other",
+			"--skip-hooks", "--skip-agents", "--role", "maintainer")
+		if code != 0 {
+			t.Fatalf("authorized interactive reinit switch exited %d, want 0:\n%s", code, out)
+		}
+		if strings.Contains(out, "Existing issues") {
+			t.Errorf("an authorized switch was followed by the count-based prompt:\n%s", out)
+		}
+		assertAuthorizedSwitch(t, beadsDir)
+	})
+
+	t.Run("mismatched interactive phrase refuses with 11", func(t *testing.T) {
+		dir, beadsDir := reinitSwitchFixture(t, bd)
+		metadataBefore, err := os.ReadFile(filepath.Join(beadsDir, "metadata.json"))
+		if err != nil {
+			t.Fatalf("read metadata.json: %v", err)
+		}
+		env := append(bdEnv(dir), "BD_NON_INTERACTIVE=0")
+		out, code := runBDOnTTY(t, bd, dir, env,
+			"leave fi behind", "leave nope behind",
+			"init", "--quiet", "--reinit-local", "--prefix", "fi", "--database", "other",
+			"--skip-hooks", "--skip-agents")
+		if code != ExitLocalExistsRefused {
+			t.Fatalf("mismatched phrase exited %d, want %d (ExitLocalExistsRefused):\n%s", code, ExitLocalExistsRefused, out)
+		}
+		if code == ExitDestroyTokenMissing {
+			t.Errorf("the interactive refusal collapsed into the token code — an operator declining at the prompt is not a missing token")
+		}
+		// The abort is a no-op: nothing was switched, counted or written.
+		if strings.Contains(out, "Existing issues") {
+			t.Errorf("the switch refusal was followed by the count-based prompt:\n%s", out)
+		}
+		got, err := os.ReadFile(filepath.Join(beadsDir, "metadata.json"))
+		if err != nil {
+			t.Fatalf("re-read metadata.json: %v", err)
+		}
+		if string(got) != string(metadataBefore) {
+			t.Errorf("refused switch changed .beads/metadata.json:\n before: %s\n after:  %s", metadataBefore, got)
+		}
+		requireNoFile(t, filepath.Join(beadsDir, "embeddeddolt", "other"))
+		requireFile(t, filepath.Join(beadsDir, "embeddeddolt", "fi"))
+		if got := readBack(t, beadsDir, "fi", "types.custom", false); got != "molecule,convoy" {
+			t.Errorf("refused switch must preserve the recorded database's custom types, got %q", got)
+		}
+	})
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -225,6 +226,112 @@ func TestConfirmStoreSwitchRequiresToken(t *testing.T) {
 			t.Errorf("refusal echoed the destroy-token value (ADR 0002 Invariant 4):\n%s", out)
 		}
 	})
+}
+
+// TestConfirmStoreSwitchInteractivePhrase pins the interactive half of the
+// switch authorization: on a real terminal the operator may type the phrase
+// naming what is being left behind, a mismatch is a declined prompt (11,
+// distinct from the non-interactive token refusal's 12), and no path that
+// answers without the terminal may read an interactive answer.
+func TestConfirmStoreSwitchInteractivePhrase(t *testing.T) {
+	diff := storeSwitchDiff{DatabaseSwitch: true, RecordedDatabase: "fi", RequestedDatabase: "other"}
+	run := func(t *testing.T, stdinIsTTY bool, token string, stdin io.Reader) (string, int) {
+		t.Helper()
+		var sb strings.Builder
+		err := confirmStoreSwitch(confirmStoreSwitchInput{
+			Diff:          diff,
+			DestroyToken:  token,
+			ExpectedToken: "DESTROY-fi",
+			StdinIsTTY:    stdinIsTTY,
+			Stdin:         stdin,
+			Stderr:        &sb,
+		})
+		if err == nil {
+			return sb.String(), 0
+		}
+		var exit *exitError
+		if !errors.As(err, &exit) {
+			t.Fatalf("confirmStoreSwitch error = %T(%v), want *exitError", err, err)
+		}
+		return sb.String(), exit.Code
+	}
+
+	t.Run("matching phrase authorizes the switch", func(t *testing.T) {
+		out, code := run(t, true, "", strings.NewReader("leave fi behind\n"))
+		if code != 0 {
+			t.Errorf("matching phrase exit = %d, want 0:\n%s", code, out)
+		}
+		for _, want := range []string{"Type 'leave fi behind' to confirm", "Confirmed. Proceeding with the store switch."} {
+			if !strings.Contains(out, want) {
+				t.Errorf("interactive confirmation missing %q:\n%s", want, out)
+			}
+		}
+	})
+
+	t.Run("mismatched phrase is a declined prompt, exit 11", func(t *testing.T) {
+		out, code := run(t, true, "", strings.NewReader("leave nope behind\n"))
+		if code != ExitLocalExistsRefused {
+			t.Errorf("mismatched phrase exit = %d, want %d (ExitLocalExistsRefused):\n%s", code, ExitLocalExistsRefused, out)
+		}
+		if code == ExitDestroyTokenMissing {
+			t.Error("a declined prompt collapsed into the missing-token code; an operator declining at the terminal is not a missing token")
+		}
+		if !strings.Contains(out, "Aborted. The workspace's store was not switched.") {
+			t.Errorf("declined prompt missing its abort line:\n%s", out)
+		}
+	})
+
+	t.Run("surrounding whitespace in the typed answer is tolerated", func(t *testing.T) {
+		if _, code := run(t, true, "", strings.NewReader("  leave fi behind  \n")); code != 0 {
+			t.Errorf("phrase with surrounding whitespace exit = %d, want 0", code)
+		}
+	})
+
+	t.Run("a matching token wins without reading an interactive answer", func(t *testing.T) {
+		out, code := run(t, true, "DESTROY-fi", failReader{t})
+		if code != 0 {
+			t.Errorf("matching token exit = %d, want 0:\n%s", code, out)
+		}
+		if !strings.Contains(out, "Destroy token accepted") {
+			t.Errorf("token acceptance must be visible, got:\n%s", out)
+		}
+	})
+
+	t.Run("family-only switch names the store when no database is recorded", func(t *testing.T) {
+		var sb strings.Builder
+		err := confirmStoreSwitch(confirmStoreSwitchInput{
+			Diff:          storeSwitchDiff{FamilySwitch: true, RecordedFamily: "server", RequestedFamily: "embedded"},
+			ExpectedToken: "DESTROY-fi",
+			StdinIsTTY:    true,
+			Stdin:         strings.NewReader("leave the recorded store behind\n"),
+			Stderr:        &sb,
+		})
+		if err != nil {
+			t.Fatalf("family-only phrase confirmation: %v", err)
+		}
+		if out := sb.String(); !strings.Contains(out, "Type 'leave the recorded store behind' to confirm") {
+			t.Errorf("family-only switch must phrase its prompt around the store, got:\n%s", out)
+		}
+	})
+
+	t.Run("non-interactive refusal points at the terminal, and reads nothing", func(t *testing.T) {
+		out, code := run(t, false, "", failReader{t})
+		if code != ExitDestroyTokenMissing {
+			t.Errorf("non-interactive exit = %d, want %d", code, ExitDestroyTokenMissing)
+		}
+		if !strings.Contains(out, "re-run the command at a terminal") {
+			t.Errorf("refusal must name the interactive alternative:\n%s", out)
+		}
+	})
+}
+
+// failReader fails the test the moment anything reads from it: paths that
+// must decide without an interactive answer are pinned by handing them this.
+type failReader struct{ t *testing.T }
+
+func (r failReader) Read([]byte) (int, error) {
+	r.t.Fatal("an interactive answer was read on a path that must not read one")
+	return 0, io.EOF
 }
 
 // TestReinitPreflightSwitchNeverCounts proves the load-bearing property of

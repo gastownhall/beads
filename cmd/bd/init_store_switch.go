@@ -167,20 +167,36 @@ func storeSwitchNotice(w io.Writer, diff storeSwitchDiff) {
 }
 
 // confirmStoreSwitchInput carries the switch confirmation's injectable
-// state: the detected diff, the tokens, and the writer the notice and
-// refusal print through. The reader exists so interactive confirmation can
-// be unit-tested without a TTY.
+// state: the detected diff, the tokens, and the reader and writer the
+// interactive phrase path and the notice and refusal use. StdinIsTTY routes
+// between the typed phrase (a real terminal) and the token requirement
+// (everything else).
 type confirmStoreSwitchInput struct {
 	Diff          storeSwitchDiff
 	DestroyToken  string
 	ExpectedToken string
+	StdinIsTTY    bool
 	Stdin         io.Reader
 	Stderr        io.Writer
 }
 
-// confirmStoreSwitch demands authorization for a detected store switch.
-// A matching destroy token authorizes it once; anything else refuses with
-// ExitDestroyTokenMissing. The old store is never opened, counted or
+// storeSwitchPhrase is the typed text an interactive switch confirmation must
+// match. Naming what is being left behind — the recorded database — makes the
+// operator say the consequence instead of a bare "yes"; a family-only switch
+// with no recorded database name falls back to naming the store itself.
+func storeSwitchPhrase(diff storeSwitchDiff) string {
+	if diff.RecordedDatabase != "" {
+		return "leave " + diff.RecordedDatabase + " behind"
+	}
+	return "leave the recorded store behind"
+}
+
+// confirmStoreSwitch demands authorization for a detected store switch:
+// a matching destroy token, or the matching interactive phrase at a real
+// terminal. Either authorizes the switch once. A mismatched phrase is the
+// operator declining at the prompt (ExitLocalExistsRefused); everything
+// else without a terminal refuses for want of a token
+// (ExitDestroyTokenMissing). The old store is never opened, counted or
 // inspected to make this decision.
 func confirmStoreSwitch(in confirmStoreSwitchInput) error {
 	storeSwitchNotice(in.Stderr, in.Diff)
@@ -188,8 +204,21 @@ func confirmStoreSwitch(in confirmStoreSwitchInput) error {
 		fmt.Fprintln(in.Stderr, "Destroy token accepted. Proceeding with the store switch.")
 		return nil
 	}
+	if in.StdinIsTTY {
+		phrase := storeSwitchPhrase(in.Diff)
+		fmt.Fprintf(in.Stderr, "Type '%s' to confirm: ", remedy.PrintedValue(phrase))
+		scanner := bufio.NewScanner(in.Stdin)
+		scanner.Scan()
+		if strings.TrimSpace(scanner.Text()) == phrase {
+			fmt.Fprintln(in.Stderr, "\nConfirmed. Proceeding with the store switch.")
+			return nil
+		}
+		fmt.Fprintf(in.Stderr, "\nAborted. The workspace's store was not switched.\n")
+		return &exitError{Code: ExitLocalExistsRefused}
+	}
 	fmt.Fprintf(in.Stderr, "Refusing to switch this workspace's store without a matching --destroy-token.\n")
 	fmt.Fprintf(in.Stderr, "  See 'bd help init-safety' for the required --destroy-token format.\n")
+	fmt.Fprintf(in.Stderr, "  Or re-run the command at a terminal to type the confirmation instead.\n")
 	return &exitError{Code: ExitDestroyTokenMissing}
 }
 
@@ -240,6 +269,7 @@ func runInitReinitPreflight(in reinitPreflightInput) error {
 			Diff:          diff,
 			DestroyToken:  in.DestroyToken,
 			ExpectedToken: in.ExpectedToken,
+			StdinIsTTY:    in.StdinIsTTY,
 			Stdin:         in.Stdin,
 			Stderr:        in.Stderr,
 		})
