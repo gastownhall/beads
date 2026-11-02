@@ -1005,6 +1005,11 @@ func findAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageThre
 				if !wispIsAbandoned(now, child.UpdatedAt, ageThreshold) {
 					continue
 				}
+				// Per record: recursion has already expanded past a protected
+				// step, so its own unprotected dependents stay eligible.
+				if guard.hasProtectedLabel(child) {
+					continue
+				}
 				abandoned = append(abandoned, child)
 			}
 		}

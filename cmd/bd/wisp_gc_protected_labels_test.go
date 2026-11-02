@@ -74,3 +74,37 @@ func TestWispGCProtectedLabelUnsetProtectsNothing(t *testing.T) {
 		}
 	}
 }
+
+// TestWispGCProtectedLabelSparesCascadeDependents pins the second filter site.
+// The cascade expansion reaches dependents the parent search never selected —
+// without --all it collects an abandoned parent's closed steps — so a label
+// guard on the search alone would let a protected dependent go down with its
+// parent. Protection is per record: a protected intermediate does not shield
+// an unprotected wisp further down the chain, which recursion has already
+// reached.
+func TestWispGCProtectedLabelSparesCascadeDependents(t *testing.T) {
+	stale := time.Now().Add(-24 * time.Hour)
+	parent := &types.Issue{ID: "gc-parent", Status: types.StatusOpen, UpdatedAt: stale}
+	keptStep := &types.Issue{ID: "gc-kept-step", Status: types.StatusClosed, UpdatedAt: stale, Labels: []string{"keep:mail"}}
+	plainStep := &types.Issue{ID: "gc-plain-step", Status: types.StatusClosed, UpdatedAt: stale}
+	behindKept := &types.Issue{ID: "gc-behind-kept", Status: types.StatusClosed, UpdatedAt: stale}
+
+	r := &cascadeAgeReader{
+		issues:   []*types.Issue{parent, keptStep, plainStep, behindKept},
+		children: map[string]bool{keptStep.ID: true, plainStep.ID: true, behindKept.ID: true},
+		config:   map[string]string{protectedLabelsKey: `["keep:mail"]`},
+	}
+	got, err := findAbandonedWisps(context.Background(), r, false, time.Hour, nil)
+	if err != nil {
+		t.Fatalf("findAbandonedWisps: %v", err)
+	}
+	ids := collectedIDs(got)
+	if ids[keptStep.ID] {
+		t.Errorf("closed dependent %s carries protected label keep:mail but was cascaded into GC; selected=%v", keptStep.ID, ids)
+	}
+	for _, id := range []string{parent.ID, plainStep.ID, behindKept.ID} {
+		if !ids[id] {
+			t.Errorf("unprotected wisp %s must still be collected (parent or cascade dependent); selected=%v", id, ids)
+		}
+	}
+}
