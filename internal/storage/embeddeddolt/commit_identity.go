@@ -32,19 +32,26 @@ func (s *EmbeddedDoltStore) commitAuthor() string {
 	return s.identity.author
 }
 
-// resolveCommitAuthor resolves name and email independently, the way server
-// mode does: GIT_AUTHOR_NAME / GIT_AUTHOR_EMAIL, else beads / beads@local.
-// A value that is empty once cleaned falls through.
+// resolveCommitAuthor formats envCommitIdentity as a Dolt --author value.
 func resolveCommitAuthor() string {
-	name := cleanCommitIdentityField(os.Getenv("GIT_AUTHOR_NAME"))
-	email := cleanCommitIdentityField(os.Getenv("GIT_AUTHOR_EMAIL"))
+	name, email := envCommitIdentity()
+	return name + " <" + email + ">"
+}
+
+// envCommitIdentity resolves name and email independently, the way server
+// mode does: GIT_AUTHOR_NAME / GIT_AUTHOR_EMAIL, else beads / beads@local.
+// A value that is empty once cleaned falls through. buildDSN uses it too, so
+// the DSN and the commits name the same identity.
+func envCommitIdentity() (name, email string) {
+	name = cleanCommitIdentityField(os.Getenv("GIT_AUTHOR_NAME"))
+	email = cleanCommitIdentityField(os.Getenv("GIT_AUTHOR_EMAIL"))
 	if name == "" {
 		name = commitName
 	}
 	if email == "" {
 		email = commitEmail
 	}
-	return name + " <" + email + ">"
+	return name, email
 }
 
 // cleanCommitIdentityField makes one identity field safe for Dolt's

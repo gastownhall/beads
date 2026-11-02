@@ -97,8 +97,9 @@ func OpenSQL(ctx context.Context, dir, database, branch string) (*sql.DB, func()
 
 func buildDSN(dir, database string) string {
 	v := url.Values{}
-	v.Set(doltembed.CommitNameParam, commitName)
-	v.Set(doltembed.CommitEmailParam, commitEmail)
+	name, email := envCommitIdentity()
+	v.Set(doltembed.CommitNameParam, name)
+	v.Set(doltembed.CommitEmailParam, email)
 	v.Set(doltembed.MultiStatementsParam, "true")
 	if strings.TrimSpace(database) != "" {
 		v.Set(doltembed.DatabaseParam, database)
