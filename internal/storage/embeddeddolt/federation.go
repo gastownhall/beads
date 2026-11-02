@@ -477,10 +477,12 @@ func (s *EmbeddedDoltStore) Sync(ctx context.Context, peer string, strategy stri
 // filteredPushToPeer pushes the store's branch to peer with the excluded issue
 // types removed, mirroring the server store's filtered push (dolt/federation.go)
 // over the shared versioncontrolops primitives: when excludeTypes is empty it
-// delegates directly to PushTo; otherwise it stages the filtered tip on a
-// temporary branch, pushes the staging ref mapped to the peer's expected
-// branch name, and deletes the staging branch whether the push succeeded or
-// not (GH#7890).
+// delegates directly to PushTo; otherwise it stages the filtered tip F on a
+// temporary branch, compensates locally (KeepFilteredPushLocal: revert F on a
+// keep branch and merge the revert into the source branch, so the next sync's
+// merge cannot fast-forward the peer's filtered tip over the local excluded
+// rows), pushes the staging ref mapped to the peer's expected branch name, and
+// deletes both temporary branches whether the push succeeded or not (GH#7890).
 func (s *EmbeddedDoltStore) filteredPushToPeer(ctx context.Context, peer string, excludeTypes []string) (retErr error) {
 	if len(excludeTypes) == 0 {
 		return s.PushTo(ctx, peer)
@@ -491,19 +493,26 @@ func (s *EmbeddedDoltStore) filteredPushToPeer(ctx context.Context, peer string,
 		return fmt.Errorf("federation filter: generate staging branch: %w", err)
 	}
 	stagingBranch := versioncontrolops.FederationStagingBranchPrefix + operationID.String()
+	keepBranch := versioncontrolops.FederationKeepBranchPrefix + operationID.String()
 
-	// Arm cleanup before staging: the staging branch must not outlive the
+	// Arm cleanup before staging: neither temporary branch must outlive the
 	// push attempt, whatever its outcome. Dolt branch state is repo state, so
-	// the delete runs on its own connection — and detached from ctx, which
-	// may already be canceled when the deferred delete runs. A missing
-	// branch (staging never got created, or its create response was lost
-	// after Dolt created it) is success here.
+	// the deletes run on their own connection — and detached from ctx, which
+	// may already be canceled when the deferred delete runs. A missing branch
+	// (never created, or its create response was lost after Dolt created it)
+	// is success here.
 	defer func() {
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), federationStagingCleanupTimeout)
 		defer cancel()
 		if cleanupErr := s.withMutatingDBConn(cleanupCtx, func(db versioncontrolops.DBConn) error {
-			return versioncontrolops.DeleteBranch(cleanupCtx, db, stagingBranch)
-		}); cleanupErr != nil && !isMissingStagingBranchErr(cleanupErr) {
+			var errs []error
+			for _, branch := range []string{stagingBranch, keepBranch} {
+				if err := versioncontrolops.DeleteBranch(cleanupCtx, db, branch); err != nil && !isMissingStagingBranchErr(err) {
+					errs = append(errs, fmt.Errorf("delete %s: %w", branch, err))
+				}
+			}
+			return errors.Join(errs...)
+		}); cleanupErr != nil {
 			retErr = errors.Join(retErr, fmt.Errorf("federation filter: cleanup: %w", cleanupErr))
 		}
 	}()
@@ -512,14 +521,36 @@ func (s *EmbeddedDoltStore) filteredPushToPeer(ctx context.Context, peer string,
 	// connection, whose session starts checked out on sourceBranch (OpenSQL
 	// pins it), and the source checkout is restored before the push so the
 	// store's other connections never observe the staging branch.
+	var filtered bool
 	if err := s.withMutatingPinnedDBConn(ctx, func(conn versioncontrolops.DBConn) error {
 		recomputeConn, ok := conn.(versioncontrolops.BlockedRecomputeConn)
 		if !ok {
 			return fmt.Errorf("federation filter: staged connection %T cannot run the is_blocked recompute transaction", conn)
 		}
-		return stageFilteredBranch(ctx, recomputeConn, sourceBranch, stagingBranch, excludeTypes)
+		var err error
+		filtered, err = stageFilteredBranch(ctx, recomputeConn, sourceBranch, stagingBranch, keepBranch, excludeTypes)
+		return err
 	}); err != nil {
 		return err
+	}
+
+	// Compensate before publishing: merge the keep branch (revert R of the
+	// filtered commit F) into the source branch through the store's normal
+	// merge path, post-merge is_blocked maintenance included. The merge
+	// records F and its revert locally, so the peer's filtered tip is
+	// already an ancestor of the source branch and the next sync's merge
+	// cannot fast-forward the local excluded rows away. Conflicts are not
+	// expected (keep's tree equals the source tip's); any error or conflict
+	// skips publication — the filtered tip is never sent before the
+	// compensation succeeds.
+	if filtered {
+		conflicts, err := s.Merge(ctx, keepBranch)
+		if err != nil {
+			return fmt.Errorf("federation filter: keep-branch merge: %w", err)
+		}
+		if len(conflicts) > 0 {
+			return fmt.Errorf("federation filter: keep-branch merge conflicted (%d conflicts); publication skipped", len(conflicts))
+		}
 	}
 
 	// Push the staging branch to the peer, mapped to the peer's expected
@@ -535,19 +566,21 @@ func (s *EmbeddedDoltStore) filteredPushToPeer(ctx context.Context, peer string,
 
 // stageFilteredBranch creates the staging branch from sourceBranch on the
 // pinned connection, deletes the excluded issue types on it, recomputes and
-// commits is_blocked when any rows were removed, and restores sourceBranch so
-// the caller can push the staging ref. Branch state is session-scoped, so
-// every step stays on conn.
-func stageFilteredBranch(ctx context.Context, conn versioncontrolops.BlockedRecomputeConn, sourceBranch, stagingBranch string, excludeTypes []string) error {
+// commits is_blocked when any rows were removed, mints the keep branch at the
+// filtered commit and reverts the filter on it, and restores sourceBranch so
+// the caller can merge the keep branch and push the staging ref. It reports
+// whether the filtered commit exists (no removed rows means no F/R commits).
+// Branch state is session-scoped, so every step stays on conn.
+func stageFilteredBranch(ctx context.Context, conn versioncontrolops.BlockedRecomputeConn, sourceBranch, stagingBranch, keepBranch string, excludeTypes []string) (bool, error) {
 	// Create staging from the named source branch, not the session checkout:
 	// naming the ref keeps the staging tip pinned even if the session's view
 	// ever diverges from sourceBranch.
 	if _, err := conn.ExecContext(ctx, "CALL DOLT_BRANCH(?, ?)", stagingBranch, sourceBranch); err != nil {
-		return fmt.Errorf("federation filter: create staging branch: %w", err)
+		return false, fmt.Errorf("federation filter: create staging branch: %w", err)
 	}
 
 	if err := versioncontrolops.CheckoutBranch(ctx, conn, stagingBranch); err != nil {
-		return fmt.Errorf("federation filter: checkout staging: %w", err)
+		return false, fmt.Errorf("federation filter: checkout staging: %w", err)
 	}
 
 	// A branch minted from HEAD does not inherit the working-set-LOCAL ignored
@@ -559,20 +592,29 @@ func stageFilteredBranch(ctx context.Context, conn versioncontrolops.BlockedReco
 	// the branch carries it), so this replays only the ignored lane, whose
 	// tables cannot be staged: the pass leaves no commit on the staging tip.
 	if _, err := schema.MigrateUp(ctx, conn); err != nil {
-		return fmt.Errorf("federation filter: heal staging working set: %w", err)
+		return false, fmt.Errorf("federation filter: heal staging working set: %w", err)
 	}
 
+	filtered := false
 	if versioncontrolops.DeleteExcludedIssues(ctx, conn, excludeTypes) {
 		if err := commitFilteredStaging(ctx, conn); err != nil {
-			return err
+			return false, err
 		}
+		filtered = true
 	}
 
-	// Restore original branch context before pushing.
-	if err := versioncontrolops.CheckoutBranch(ctx, conn, sourceBranch); err != nil {
-		return fmt.Errorf("federation filter: restore branch %s: %w", sourceBranch, err)
+	if filtered {
+		// Mint the keep branch at the filtered commit and revert the filter
+		// on it, leaving the session back on sourceBranch for the caller's
+		// merge. Cleanup for both temporary branches is already armed.
+		if err := versioncontrolops.KeepFilteredPushLocal(ctx, conn, sourceBranch, stagingBranch, keepBranch); err != nil {
+			return false, err
+		}
+	} else if err := versioncontrolops.CheckoutBranch(ctx, conn, sourceBranch); err != nil {
+		// Restore original branch context before pushing.
+		return false, fmt.Errorf("federation filter: restore branch %s: %w", sourceBranch, err)
 	}
-	return nil
+	return filtered, nil
 }
 
 // commitFilteredStaging repairs and commits the filtered graph on the staging

@@ -1692,3 +1692,133 @@ func newFederationStore(ctx context.Context, path, dbName, prefix string) (*Dolt
 
 	return store, cleanup, nil
 }
+
+// TestFilteredPushSecondSyncKeepsExcludedRows is the server-side AC-6
+// regression (GH#7890): after a compensated filtered push, the merge of the
+// peer's unchanged filtered tip — the second sync's pull step — must retain
+// the excluded local rows. Before the keep-branch compensation the filtered
+// commit F lived only on the deleted staging branch, the peer's filtered tip
+// descended from the local tip, and this merge fast-forwarded the local branch
+// to F, deleting every excluded issue.
+func TestFilteredPushSecondSyncKeepsExcludedRows(t *testing.T) {
+	store, cleanup := setupConcurrentTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	task := &types.Issue{
+		ID:        "fed-keep-task",
+		Title:     "Shareable task",
+		IssueType: types.TypeTask,
+		Status:    types.StatusOpen,
+		Priority:  1,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	chore := &types.Issue{
+		ID:        "fed-keep-chore",
+		Title:     "Private chore",
+		IssueType: types.TypeChore,
+		Status:    types.StatusOpen,
+		Priority:  1,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	for _, issue := range []*types.Issue{task, chore} {
+		if err := store.CreateIssue(ctx, issue, "test"); err != nil {
+			t.Fatalf("create %s: %v", issue.ID, err)
+		}
+	}
+	if err := store.Commit(ctx, "create test issues"); err != nil {
+		if !isDoltNothingToCommit(err) {
+			t.Fatalf("commit: %v", err)
+		}
+	}
+
+	remoteDir := filepath.Join(t.TempDir(), "remote")
+	if err := os.MkdirAll(remoteDir, 0o700); err != nil {
+		t.Fatalf("create remote dir: %v", err)
+	}
+	if err := store.AddRemote(ctx, "peer", "file://"+remoteDir); err != nil {
+		t.Fatalf("add remote: %v", err)
+	}
+	if err := store.PushTo(ctx, "peer"); err != nil {
+		t.Fatalf("initial push: %v", err)
+	}
+
+	// First filtered push: publishes the filtered tip and compensates locally.
+	if err := store.filteredPushToPeer(ctx, "peer", []string{"chore"}); err != nil {
+		t.Fatalf("filtered push: %v", err)
+	}
+
+	// The compensation recorded the filtered commit and its revert in the
+	// local branch's history. Before it, F lived only on the staging branch,
+	// which the cleanup deleted.
+	assertBranchLogMessage(t, ctx, store, "federation: exclude private issue types")
+	var reverts int
+	if err := store.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM dolt_log WHERE message LIKE 'Revert %'").Scan(&reverts); err != nil {
+		t.Fatalf("count revert commits: %v", err)
+	}
+	if reverts == 0 {
+		t.Error("local history lacks the keep-branch revert of the filtered commit")
+	}
+
+	// The excluded row survives the push itself.
+	assertIssueRowExists(t, ctx, store, task.ID)
+	assertIssueRowExists(t, ctx, store, chore.ID)
+
+	// Second sync's merge: the peer's filtered tip fast-forwarded the local
+	// branch to it before the compensation, deleting the excluded row. With F
+	// already an ancestor of the local branch the merge is a no-op.
+	if err := store.Fetch(ctx, "peer"); err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	if _, err := store.Merge(ctx, "peer/main"); err != nil {
+		t.Fatalf("merge peer tip: %v", err)
+	}
+	assertIssueRowExists(t, ctx, store, task.ID)
+	assertIssueRowExists(t, ctx, store, chore.ID)
+
+	// Neither temporary branch outlives the operation. The keep prefix is a
+	// literal, not the shared versioncontrolops constant, so the same test
+	// compiles against commits before that constant existed.
+	branches, err := store.ListBranches(ctx)
+	if err != nil {
+		t.Fatalf("list branches: %v", err)
+	}
+	for _, b := range branches {
+		if strings.HasPrefix(b, federationStagingBranchPrefix) ||
+			strings.HasPrefix(b, "__federation_push_keep_") {
+			t.Errorf("temporary branch %q left behind", b)
+		}
+	}
+}
+
+// assertBranchLogMessage fails when the current branch's history holds no
+// commit with exactly message.
+func assertBranchLogMessage(t *testing.T, ctx context.Context, store *DoltStore, message string) {
+	t.Helper()
+	var n int
+	if err := store.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM dolt_log WHERE message = ?", message).Scan(&n); err != nil {
+		t.Fatalf("count log messages %q: %v", message, err)
+	}
+	if n == 0 {
+		t.Errorf("branch history lacks commit %q", message)
+	}
+}
+
+// assertIssueRowExists fails when the issues table has no row with id.
+func assertIssueRowExists(t *testing.T, ctx context.Context, store *DoltStore, id string) {
+	t.Helper()
+	var n int
+	if err := store.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM issues WHERE id = ?", id).Scan(&n); err != nil {
+		t.Fatalf("count issue %s: %v", id, err)
+	}
+	if n != 1 {
+		t.Errorf("issue %s row count = %d, want 1", id, n)
+	}
+}
