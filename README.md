@@ -65,6 +65,7 @@ This project uses bd (beads) for issue tracking.
 * **Compaction:** Semantic "memory decay" summarizes old closed tasks to save context window.
 * **Messaging:** Message issue type with threading (`--thread`), ephemeral lifecycle, and mail delegation.
 * **Graph Links:** `relates-to`, `duplicates`, `supersedes`, and `replies-to` for knowledge graphs.
+* **Issue Tracker Sync:** Two-way sync with GitHub and other trackers, several repositories into one database. Matching is scoped to the configured repository — a bead linked to another repository's same-numbered issue is never matched, overwritten, or pushed to.
 
 ## 📖 Essential Commands
 

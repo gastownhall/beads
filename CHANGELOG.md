@@ -1126,6 +1126,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd github sync` no longer matches an issue to another repository's bead
+  by issue number alone. When the exact `external_ref` lookup missed, a pull
+  fell back to the bare issue number, so pulling repository B's issue 1313
+  overwrote the bead linked to repository A's issue 1313 in the same
+  database; push, conflict detection and pre-linked hydration addressed B's
+  same-numbered issue on A's behalf the same way. An initialized tracker now
+  resolves refs through its configured repository: another repository's or
+  host's refs match nothing and are skipped. The `github:{number}` shorthand
+  still names the configured repository. A URL that still names a
+  repository's pre-rename owner/name no longer matches — relink such beads
+  before the next pull, or they import as duplicates. A push dry run now
+  previews the same skip instead of counting such a bead as an update
+  (#7781, reported by @NahumLitvin).
 - `bd dolt push <remote>` and `bd dolt pull <remote>` now push to and pull
   from the named remote. bd ignored the name, so `bd dolt push 1st` pushed to
   the default remote and reported "Push complete."; a name that differs from

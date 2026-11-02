@@ -503,6 +503,13 @@ bd config set github.label_map.bug "bug"
 bd config set github.label_map.feature "enhancement"
 ```
 
+Matching is scoped to the configured repository: an issue URL from another
+repository or host never matches a bead by number alone, so one database can
+sync several repositories without cross-talk. The `github:{number}` shorthand
+counts as the configured repository. A URL that still names a repository's
+pre-rename or pre-transfer owner/name no longer matches — relink such beads
+before the next pull, or they import as duplicates.
+
 See [bd github](/cli-reference/github).
 
 ### Azure DevOps
