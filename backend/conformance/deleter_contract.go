@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/types"
 	publicops "github.com/steveyegge/beads/issueops"
@@ -280,8 +281,8 @@ func RunDeleterForceOrphansDependents(t *testing.T, ctx context.Context, fixture
 }
 
 // RunDeleterCascadeDeletesTheClosure pins the other mode (issueops/deleter.go,
-// DeleteRequest.Cascade) over a chain rather than a single edge, because
-// "transitive" is the whole claim and a one-edge fixture cannot tell a
+// DeleteRequest.Cascade) over a parent-child chain rather than a single edge,
+// because "transitive" is the whole claim and a one-edge fixture cannot tell a
 // transitive expansion from a direct one. It also pins the interaction the leaf
 // spells out: a request carrying BOTH Cascade and Force is legal and behaves as
 // Cascade.
@@ -291,8 +292,8 @@ func RunDeleterCascadeDeletesTheClosure(t *testing.T, ctx context.Context, fixtu
 	middle := deleterSeedIssue(t, ctx, fixture, "casc", "middle")
 	leaf := deleterSeedIssue(t, ctx, fixture, "casc", "leaf")
 	bystander := deleterSeedIssue(t, ctx, fixture, "casc", "bystander")
-	deleterAddEdge(t, ctx, fixture, middle, root)
-	deleterAddEdge(t, ctx, fixture, leaf, middle)
+	deleterAddParentChildEdge(t, ctx, fixture, middle, root)
+	deleterAddParentChildEdge(t, ctx, fixture, leaf, middle)
 
 	result := deleterDelete(t, ctx, fixture, publicops.DeleteRequest{
 		IDs:     []string{root},
@@ -300,7 +301,7 @@ func RunDeleterCascadeDeletesTheClosure(t *testing.T, ctx context.Context, fixtu
 		Force:   true,
 	})
 	if result.Deleted != 3 {
-		t.Errorf("Deleted = %d, want 3 — the closure is root, its dependent and ITS dependent", result.Deleted)
+		t.Errorf("Deleted = %d, want 3 — the closure is root, its child and ITS child", result.Deleted)
 	}
 	if len(result.Orphaned) != 0 {
 		t.Errorf("Orphaned = %v, want empty: a cascade leaves nothing outside the set to orphan", result.Orphaned)
@@ -311,8 +312,7 @@ func RunDeleterCascadeDeletesTheClosure(t *testing.T, ctx context.Context, fixtu
 
 // RunDeleterCascadeFromAWispRootDeletesTheClosure pins the CROSS-PLANE quadrant
 // of the cascade (issueops/deleter.go, DeleteRequest.Cascade: "also deletes the
-// TRANSITIVE CLOSURE of everything that depends on the named rows, IN BOTH
-// PLANES").
+// named rows' parent-child descendants, transitively, IN BOTH PLANES").
 //
 // The other cascade cases are durable-only or edge-free, so nothing else
 // asserts what a cascade rooted at a WISP does to the durable rows hanging off
@@ -327,8 +327,8 @@ func RunDeleterCascadeFromAWispRootDeletesTheClosure(t *testing.T, ctx context.C
 	dependent := deleterSeedIssue(t, ctx, fixture, "wcasc", "dependent")
 	grandchild := deleterSeedIssue(t, ctx, fixture, "wcasc", "grandchild")
 	bystander := deleterSeedIssue(t, ctx, fixture, "wcasc", "bystander")
-	deleterAddEdge(t, ctx, fixture, dependent, root)
-	deleterAddEdge(t, ctx, fixture, grandchild, dependent)
+	deleterAddParentChildEdge(t, ctx, fixture, dependent, root)
+	deleterAddParentChildEdge(t, ctx, fixture, grandchild, dependent)
 
 	result := deleterDelete(t, ctx, fixture, publicops.DeleteRequest{
 		IDs:     []string{root},
@@ -336,11 +336,97 @@ func RunDeleterCascadeFromAWispRootDeletesTheClosure(t *testing.T, ctx context.C
 		Force:   true,
 	})
 	if result.Deleted != 3 {
-		t.Errorf("Deleted = %d, want 3 — the wisp, the durable row that depends on it, and ITS dependent", result.Deleted)
+		t.Errorf("Deleted = %d, want 3 — the wisp, the durable child it contains, and ITS child", result.Deleted)
 	}
 	deleterAssertWispRows(t, ctx, fixture, 0, root)
 	deleterAssertIssueRows(t, ctx, fixture, 0, dependent, grandchild)
 	deleterAssertIssueRows(t, ctx, fixture, 1, bystander)
+}
+
+// deleterContainment is the cascade-boundary fixture: epic A with a
+// two-level containment tree in mixed statuses, and three rows joined to that
+// tree by association edges only, one of which is an epic with a child of its
+// own.
+type deleterContainment struct {
+	A, A1, A2, A11 string // the containment tree a cascade from A deletes
+	B, B1          string // an unrelated epic discovered-from A, and its child
+	C, C1          string // another epic whose child C1 is blocked by A1
+	S              string // a standalone row related to A
+}
+
+// deleted is the tree a cascade from A deletes, in ascending id order.
+func (f deleterContainment) deleted() []string { return []string{f.A, f.A1, f.A11, f.A2} }
+
+// survivors is every row outside that tree.
+func (f deleterContainment) survivors() []string {
+	return []string{f.B, f.B1, f.C, f.C1, f.S}
+}
+
+func deleterSeedContainment(t *testing.T, ctx context.Context, fixture DeleterFixture, tag string) deleterContainment {
+	t.Helper()
+	seed := func(name string, status types.Status) string {
+		issue := deleterIssue(fixture, tag, name, false)
+		issue.Status = status
+		if status == types.StatusClosed {
+			closedAt := time.Now().UTC().Add(-time.Hour)
+			issue.ClosedAt = &closedAt
+		}
+		return deleterSeed(t, ctx, fixture, issue)
+	}
+	f := deleterContainment{
+		A:   seed("a", types.StatusOpen),
+		A1:  seed("a1", types.StatusOpen),
+		A2:  seed("a2", types.StatusClosed),
+		A11: seed("a11", types.StatusInProgress),
+		B:   seed("b", types.StatusOpen),
+		B1:  seed("b1", types.StatusOpen),
+		C:   seed("c", types.StatusOpen),
+		C1:  seed("c1", types.StatusOpen),
+		S:   seed("s", types.StatusOpen),
+	}
+	deleterAddParentChildEdge(t, ctx, fixture, f.A1, f.A)
+	deleterAddParentChildEdge(t, ctx, fixture, f.A2, f.A)
+	deleterAddParentChildEdge(t, ctx, fixture, f.A11, f.A1)
+	deleterAddParentChildEdge(t, ctx, fixture, f.B1, f.B)
+	deleterAddParentChildEdge(t, ctx, fixture, f.C1, f.C)
+	deleterAddTypedEdge(t, ctx, fixture, f.B, f.A, types.DepDiscoveredFrom)
+	deleterAddTypedEdge(t, ctx, fixture, f.C1, f.A1, types.DepBlocks)
+	deleterAddTypedEdge(t, ctx, fixture, f.S, f.A, types.DepRelated)
+	return f
+}
+
+// RunDeleterCascadeFollowsOnlyContainment pins the cascade's boundary
+// (issueops/deleter.go, DeleteRequest.Cascade: "the named rows' parent-child
+// descendants"): a cascade from an epic deletes its containment tree, in
+// whatever status its rows are in, and nothing an association edge reaches.
+//
+// GH#6301 is the failure this case is shaped after: a cascade that followed
+// every edge type took an unrelated epic and its child through one
+// discovered-from edge, another epic's child through a blocks edge, and a
+// standalone row through a related edge.
+func RunDeleterCascadeFollowsOnlyContainment(t *testing.T, ctx context.Context, fixture DeleterFixture) {
+	t.Helper()
+	for _, mode := range []struct {
+		tag   string
+		force bool
+	}{
+		{tag: "contain", force: true},
+		{tag: "containnf", force: false},
+	} {
+		f := deleterSeedContainment(t, ctx, fixture, mode.tag)
+		result := deleterDelete(t, ctx, fixture, publicops.DeleteRequest{
+			IDs:     []string{f.A},
+			Cascade: true,
+			Force:   mode.force,
+		})
+		if result.Deleted != 4 {
+			t.Errorf("Force=%v: Deleted = %d, want 4 — A and its three parent-child descendants", mode.force, result.Deleted)
+		}
+		deleterAssertIssueRows(t, ctx, fixture, 0, f.deleted()...)
+		for _, id := range f.survivors() {
+			deleterAssertIssueRows(t, ctx, fixture, 1, id)
+		}
+	}
 }
 
 // RunDeleterGuardsAWispNamedWithADurableDependent pins that the dependents
@@ -524,7 +610,7 @@ func RunDeleterNeverCallsALiveRowDeleted(t *testing.T, ctx context.Context, fixt
 	survivor := deleterIssue(fixture, "live", "survivor", false)
 	survivor.Description = "unblocks " + dependent + ", tracked under " + root
 	deleterSeed(t, ctx, fixture, survivor)
-	deleterAddEdge(t, ctx, fixture, dependent, root)
+	deleterAddParentChildEdge(t, ctx, fixture, dependent, root)
 	deleterAddEdge(t, ctx, fixture, dependent, survivor.ID)
 
 	deleterDelete(t, ctx, fixture, publicops.DeleteRequest{
@@ -1271,13 +1357,20 @@ func deleterSeedWisp(t *testing.T, ctx context.Context, fixture DeleterFixture, 
 // deleterAddEdge makes dependent depend on blocker.
 func deleterAddEdge(t *testing.T, ctx context.Context, fixture DeleterFixture, dependent, blocker string) {
 	t.Helper()
+	deleterAddTypedEdge(t, ctx, fixture, dependent, blocker, types.DepBlocks)
+}
+
+// deleterAddTypedEdge makes dependent depend on target through an edge of
+// depType.
+func deleterAddTypedEdge(t *testing.T, ctx context.Context, fixture DeleterFixture, dependent, target string, depType types.DependencyType) {
+	t.Helper()
 	err := fixture.AddDependency(ctx, &types.Dependency{
 		IssueID:     dependent,
-		DependsOnID: blocker,
-		Type:        types.DepBlocks,
+		DependsOnID: target,
+		Type:        depType,
 	}, "deleter-seed")
 	if err != nil {
-		t.Fatalf("seeding edge %s -> %s: %v", dependent, blocker, err)
+		t.Fatalf("seeding %s edge %s -> %s: %v", depType, dependent, target, err)
 	}
 }
 

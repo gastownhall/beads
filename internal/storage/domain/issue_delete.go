@@ -75,7 +75,7 @@ func (u *issueUseCaseImpl) deleteMany(ctx context.Context, params DeleteIssuesPa
 	allIDs := params.IDs
 	switch {
 	case params.Cascade:
-		expanded, err := u.issueRepo.FindAllDependents(ctx, params.IDs)
+		expanded, err := u.issueRepo.FindCascadeClosure(ctx, params.IDs)
 		if err != nil {
 			return DeleteIssuesResult{}, fmt.Errorf("delete: cascade expansion: %w", err)
 		}
@@ -360,7 +360,7 @@ func (u *issueUseCaseImpl) previewDelete(ctx context.Context, ids []string) (Del
 		preview.DepRecords[id] = append(preview.DepRecords[id], deps...)
 	}
 
-	allIDs, err := u.issueRepo.FindAllDependents(ctx, ids)
+	allIDs, err := u.issueRepo.FindCascadeClosure(ctx, ids)
 	if err != nil {
 		return preview, fmt.Errorf("previewDelete: cascade expansion: %w", err)
 	}
