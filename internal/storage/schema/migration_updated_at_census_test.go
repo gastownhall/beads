@@ -14,9 +14,13 @@ import (
 // both shipped migration series that rewrites a table whose updated_at
 // carries ON UPDATE CURRENT_TIMESTAMP either assigns updated_at itself or is
 // covered by its step's updatedAtGuards restore target, assigning nothing
-// there but the step's registered flag. The census parses SQL rather than
-// grepping it, and fails on any UPDATE shape it cannot classify, so a new
-// form has to be taught to it rather than slipping by.
+// there but the step's registered flag. Every such table a multi-table UPDATE
+// joins without assigning any of its columns counts too: go-mysql-server
+// stamps every row the join matches, so the UPDATE must assign that table's
+// updated_at to itself or the step must list the table as joinStamped. The
+// census parses SQL rather than grepping it, and fails on any UPDATE shape it
+// cannot classify, so a new form has to be taught to it rather than slipping
+// by.
 
 // censusFile is one migration's up script.
 type censusFile struct {
@@ -102,6 +106,46 @@ func TestMigrationUpdatesOfAutoStampedTablesKeepUpdatedAt(t *testing.T) {
 			"schema_migrations/9999_rename_routes.up.sql: UPDATE routes")
 	})
 
+	t.Run("dropping main 0041 join coverage fails", func(t *testing.T) {
+		guards := maps.Clone(updatedAtGuards)
+		delete(guards, repairKey{"schema_migrations", 41})
+		requireCensusProblem(t, censusUpdatedAtCoverage(series, stamped, guards),
+			"schema_migrations/0041_split_dependencies_target.up.sql: UPDATE joins issues")
+	})
+
+	t.Run("a joinStamped table the step does not join fails", func(t *testing.T) {
+		guards := maps.Clone(updatedAtGuards)
+		key := repairKey{"schema_migrations", 46}
+		spec := guards[key]
+		spec.joinStamped = []string{"wisps"}
+		guards[key] = spec
+		requireCensusProblem(t, censusUpdatedAtCoverage(series, stamped, guards),
+			"schema_migrations/0046_add_is_blocked.up.sql: updatedAtGuards lists wisps as joinStamped")
+	})
+
+	t.Run("a new UPDATE joining an auto-stamped table fails unless it self-assigns", func(t *testing.T) {
+		for _, tc := range []struct {
+			sql  string
+			want string
+		}{
+			{"UPDATE labels l JOIN issues i ON i.id = l.issue_id SET l.label = LOWER(l.label);\n", "UPDATE joins issues"},
+			{"UPDATE labels l JOIN issues i ON i.id = l.issue_id SET l.label = LOWER(l.label), i.updated_at = i.updated_at;\n", ""},
+		} {
+			mutated := slices.Clone(series)
+			main := mutated[0]
+			main.files = append(slices.Clone(main.files), censusFile{version: 9999, name: "9999_relabel.up.sql", sql: tc.sql})
+			mutated[0] = main
+			problems := censusUpdatedAtCoverage(mutated, stamped, updatedAtGuards)
+			if tc.want == "" {
+				for _, p := range problems {
+					t.Error(p)
+				}
+				continue
+			}
+			requireCensusProblem(t, problems, "schema_migrations/9999_relabel.up.sql: "+tc.want)
+		}
+	})
+
 	t.Run("a self-assigning new UPDATE passes", func(t *testing.T) {
 		mutated := slices.Clone(series)
 		main := mutated[0]
@@ -130,9 +174,12 @@ func requireCensusProblem(t *testing.T, problems []string, want string) {
 // censusUpdatedAtCoverage returns every coverage problem: an unsafe UPDATE
 // its step's restore targets miss, an unsafe UPDATE of a restore target that
 // assigns anything but the step's flag (the guard reads only that column to
-// tell the body's rewrites from another writer's), a registry entry naming no
-// shipped step, a restore target the step never rewrites unsafely, a move
-// source the step never copies from, and any SQL the census cannot classify.
+// tell the body's rewrites from another writer's), an auto-stamped table an
+// UPDATE joins without assigning that the step does not list as joinStamped,
+// a registry entry naming no shipped step, a restore target the step never
+// rewrites unsafely, a joinStamped table the step never joins that way, a
+// move source the step never copies from, and any SQL the census cannot
+// classify.
 func censusUpdatedAtCoverage(series []censusSeries, stamped map[string]bool, guards map[repairKey]updatedAtGuardSpec) []string {
 	var problems []string
 	seen := map[repairKey]bool{}
@@ -148,9 +195,21 @@ func censusUpdatedAtCoverage(series []censusSeries, stamped map[string]bool, gua
 			}
 			spec, guarded := guards[key]
 			unsafe := map[string]bool{}
+			joined := map[string]bool{}
 			for _, u := range updates {
 				for table, columns := range u {
 					if !stamped[table] || slices.Contains(columns, "updated_at") {
+						continue
+					}
+					if len(columns) == 0 {
+						// Joined, not assigned: the engine stamps every
+						// row the join matches anyway.
+						joined[table] = true
+						if !guarded || !slices.Contains(spec.joinStamped, table) {
+							problems = append(problems, fmt.Sprintf(
+								"%s: UPDATE joins %s without assigning its updated_at, and go-mysql-server stamps every %s row the join matches; add `<alias>.updated_at = <alias>.updated_at` to the SET list (updatedAtGuards is only for frozen migrations)",
+								where, table, table))
+						}
 						continue
 					}
 					unsafe[table] = true
@@ -172,6 +231,11 @@ func censusUpdatedAtCoverage(series []censusSeries, stamped map[string]bool, gua
 			for _, table := range spec.restore {
 				if !unsafe[table] {
 					problems = append(problems, fmt.Sprintf("%s: updatedAtGuards restores %s, but the step has no UPDATE of it that leaves updated_at unassigned", where, table))
+				}
+			}
+			for _, table := range spec.joinStamped {
+				if !joined[table] {
+					problems = append(problems, fmt.Sprintf("%s: updatedAtGuards lists %s as joinStamped, but no UPDATE of the step joins it without assigning it", where, table))
 				}
 			}
 			stripped, err := censusStripComments(f.sql)
@@ -332,8 +396,9 @@ func censusTokenize(sql string) ([]censusToken, error) {
 	return out, nil
 }
 
-// censusUpdate maps each table one UPDATE assigns to the columns it assigns
-// there, lowercased and deduplicated, in SET-list order.
+// censusUpdate maps each table one UPDATE references to the columns it
+// assigns there, lowercased and deduplicated, in SET-list order; a table the
+// UPDATE only joins maps to an empty list.
 type censusUpdate map[string][]string
 
 // censusUpdates finds every UPDATE statement in sql and in the string
@@ -505,6 +570,14 @@ func censusParseUpdate(ts []censusToken) (censusUpdate, error) {
 				return nil, err
 			}
 			start = j + 1
+		}
+	}
+	// A table the UPDATE references but assigns nothing in still gets an
+	// entry: the engine applies its ON UPDATE clause to the rows the join
+	// matches.
+	for _, table := range tables {
+		if _, ok := u[table]; !ok {
+			u[table] = []string{}
 		}
 	}
 	return u, nil

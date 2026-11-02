@@ -550,3 +550,85 @@ func TestUpdatedAtGuardRowMovesPreferDestinationHistory(t *testing.T) {
 		t.Fatalf("unmet sql expectations (lookup precedence or skip rules wrong): %v", err)
 	}
 }
+
+// guardFingerprintColumnsQuery matches fingerprintColumnsOf's column listing.
+const guardFingerprintColumnsQuery = `(?s)SELECT COLUMN_NAME FROM INFORMATION_SCHEMA\.COLUMNS.*TABLE_NAME = \? AND COLUMN_NAME <> 'updated_at'.*ORDER BY ORDINAL_POSITION`
+
+// guardExpectFingerprintColumns primes one fingerprintColumnsOf listing.
+func guardExpectFingerprintColumns(mock sqlmock.Sqlmock, table string, cols ...string) {
+	rows := sqlmock.NewRows([]string{"COLUMN_NAME"})
+	for _, col := range cols {
+		rows.AddRow(col)
+	}
+	mock.ExpectQuery(guardFingerprintColumnsQuery).WithArgs(table).WillReturnRows(rows)
+}
+
+// TestUpdatedAtGuardRestoresJoinStampedRowsOnly pins the join rule on main
+// 0041, whose dependency-split UPDATEs join issues and wisps without
+// assigning them: a row whose columns other than updated_at read the same
+// after the step was stamped by the join and gets its pre-step value back; a
+// row whose other columns changed was edited by another writer and keeps
+// its time; an untouched row is not rewritten; and when the step drops a
+// fingerprinted column the rule is off, so nothing is restored on a guess.
+func TestUpdatedAtGuardRestoresJoinStampedRowsOnly(t *testing.T) {
+	const fpSelect = "SELECT id, updated_at, MD5\\(JSON_ARRAY\\(`id`, `title`, `status`\\)\\) FROM issues ORDER BY id"
+	snapshot := func(mock sqlmock.Sqlmock) {
+		guardExpectColumn(mock, "issues", "updated_at", true)
+		guardExpectFingerprintColumns(mock, "issues", "id", "title", "status")
+		mock.ExpectQuery(fpSelect).WillReturnRows(sqlmock.NewRows([]string{"id", "updated_at", "fp"}).
+			AddRow("bd-edited", "2025-03-02 10:00:00", "fp-edited").
+			AddRow("bd-target", guardOldStamp, "fp-target").
+			AddRow("bd-untouched", "2025-03-03 11:00:00", "fp-untouched"))
+		guardExpectColumn(mock, "wisps", "updated_at", false)
+	}
+	afterBody := sqlmock.NewRows([]string{"id", "updated_at", "fp"}).
+		AddRow("bd-edited", "2026-11-02 03:59:58", "fp-edited-by-another-writer").
+		AddRow("bd-target", guardNewStamp, "fp-target").
+		AddRow("bd-untouched", "2025-03-03 11:00:00", "fp-untouched")
+
+	run := func(t *testing.T, expect func(mock sqlmock.Sqlmock)) {
+		t.Helper()
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("sqlmock.New: %v", err)
+		}
+		defer db.Close()
+		expect(mock)
+		snap, err := snapshotUpdatedAt(context.Background(), db, mainSource, 41)
+		if err != nil {
+			t.Fatalf("snapshotUpdatedAt: %v", err)
+		}
+		if err := snap.restore(context.Background(), db); err != nil {
+			t.Fatalf("restore: %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet sql expectations: %v", err)
+		}
+	}
+
+	t.Run("join-stamped row restored, edited and untouched rows left alone", func(t *testing.T) {
+		run(t, func(mock sqlmock.Sqlmock) {
+			snapshot(mock)
+			guardExpectColumn(mock, "issues", "updated_at", true)
+			guardExpectFingerprintColumns(mock, "issues", "id", "title", "status")
+			mock.ExpectQuery(fpSelect).WillReturnRows(afterBody)
+			mock.ExpectExec(guardRestoreSQL("issues", 1)).
+				WithArgs(guardRestoreArgs(guardRestoreRow{"bd-target", guardOldStamp, guardNewStamp})...).
+				WillReturnResult(sqlmock.NewResult(0, 1))
+			guardExpectColumn(mock, "wisps", "updated_at", false)
+		})
+	})
+
+	t.Run("a dropped fingerprint column turns the join rule off", func(t *testing.T) {
+		run(t, func(mock sqlmock.Sqlmock) {
+			snapshot(mock)
+			guardExpectColumn(mock, "issues", "updated_at", true)
+			guardExpectFingerprintColumns(mock, "issues", "id", "title")
+			// No fingerprint is read and no restore is primed: an issued
+			// UPDATE fails as unexpected.
+			mock.ExpectQuery(`SELECT id, updated_at FROM issues ORDER BY id`).
+				WillReturnRows(sqlmock.NewRows([]string{"id", "updated_at"}).AddRow("bd-target", guardNewStamp))
+			guardExpectColumn(mock, "wisps", "updated_at", false)
+		})
+	})
+}

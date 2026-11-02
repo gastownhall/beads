@@ -110,16 +110,30 @@ updated_at`, as 0059 and ignored 0015 do; an explicit assignment suppresses the
 clause. `TestMigrationUpdatesOfAutoStampedTablesKeepUpdatedAt` parses both
 series and fails on an UPDATE that does not.
 
-The frozen migrations that predate the rule (main 0035, 0046, 0047 and 0053,
-ignored 0007) are listed in `updatedAtGuards` (`../migration_updated_at_guard.go`)
-with the one column each rewrites (`is_blocked` or `ephemeral`): the runner
-snapshots `(id, updated_at, <column>)` of the step's tables before its
-pre-migration repair and body, and after the body, before the step's cursor row
-and commit, writes the old `updated_at` back on the rows the body rewrote.
-A row whose column shows the body left it alone keeps whatever time another
-writer gave it during the step. The census also fails if a guarded step's
-UPDATE assigns anything but its registered column. That registry is closed: a
-new migration self-assigns instead of joining it.
+**So does an UPDATE that only joins one of those tables.** go-mysql-server,
+unlike MySQL, applies the `ON UPDATE` clause of every table a multi-table
+UPDATE joins, and writes the joined row back: 0041's `UPDATE dependencies d
+JOIN issues i ON i.id = d.depends_on_id SET d.depends_on_issue_id = ...`
+stamped every issue a dependency points at. Assign the joined table's
+`updated_at` to itself as well (`SET d.x = ..., i.updated_at = i.updated_at`),
+or test the other table with `IN (SELECT id FROM issues)` instead of joining
+it. The census fails on a join that does neither.
+
+The frozen migrations that predate these rules are listed in `updatedAtGuards`
+(`../migration_updated_at_guard.go`). Main 0035, 0046, 0047 and 0053 and
+ignored 0007 rewrite rows of an auto-stamped table: each entry names the one
+column the step rewrites (`is_blocked` or `ephemeral`). Main 0041, 0047 and
+0053 and ignored 0003 and 0011 join one: each entry lists it as
+`joinStamped`. The runner snapshots `(id, updated_at, <column>)` of the step's
+tables, plus a fingerprint of every other column of a `joinStamped` table,
+before its pre-migration repair and body. After the body, before the step's
+cursor row and commit, it writes the old `updated_at` back on the rows the
+body rewrote: a row whose column changed, and on a `joinStamped` table a row
+whose other columns are all unchanged. A row whose column shows the body left
+it alone, and whose other columns changed, keeps whatever time another writer
+gave it during the step. The census also fails if a guarded step's UPDATE
+assigns anything but its registered column. That registry is closed: a new
+migration self-assigns instead of joining it.
 
 ## Testing
 

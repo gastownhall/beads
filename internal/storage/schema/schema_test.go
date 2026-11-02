@@ -386,10 +386,13 @@ func TestEnsureWispDependenciesSplitTargetsAddsMissingAndBackfills(t *testing.T)
 	}
 	mock.ExpectQuery(columnQuery).WithArgs("wisp_dependencies", "depends_on_id").
 		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
+	// The wisp and issue cases test the target with IN (SELECT ...) rather
+	// than joining wisps or issues, which would stamp the joined rows'
+	// updated_at (gastownhall/beads#5981).
 	for _, update := range []string{
 		`UPDATE wisp_dependencies SET depends_on_external = depends_on_id`,
-		`UPDATE wisp_dependencies wd JOIN wisps w ON w\.id = wd\.depends_on_id`,
-		`UPDATE wisp_dependencies wd JOIN issues i ON i\.id = wd\.depends_on_id`,
+		`UPDATE wisp_dependencies SET depends_on_wisp_id = depends_on_id WHERE .* AND depends_on_id IN \(SELECT id FROM wisps\)$`,
+		`UPDATE wisp_dependencies SET depends_on_issue_id = depends_on_id WHERE .* AND depends_on_id IN \(SELECT id FROM issues\)$`,
 		`UPDATE wisp_dependencies SET depends_on_external = depends_on_id WHERE depends_on_external IS NULL`,
 	} {
 		mock.ExpectExec(update).WillReturnResult(sqlmock.NewResult(0, 1))
@@ -525,8 +528,9 @@ func TestRunMigrationsSnapshotsDirtyTablesBeforeRepairSoRepairMutationsCommitAto
 		WillReturnResult(sqlmock.NewResult(0, 0))
 
 	// 4. Migration 0053's own frozen SQL; the guard then restores the row
-	// the body flipped and stamped (compare-and-swap on the stamped value)
-	// BEFORE the cursor row is recorded.
+	// the body flipped and stamped (compare-and-swap on the stamped value),
+	// and checks its joinStamped wisps (absent here), BEFORE the cursor row
+	// is recorded.
 	mock.ExpectExec(`SET FOREIGN_KEY_CHECKS = 0`).WillReturnResult(sqlmock.NewResult(0, 0))
 	guardExpectColumn(mock, "issues", "updated_at", true)
 	guardExpectColumn(mock, "issues", "ephemeral", true)
@@ -535,6 +539,7 @@ func TestRunMigrationsSnapshotsDirtyTablesBeforeRepairSoRepairMutationsCommitAto
 	mock.ExpectExec(guardRestoreSQL("issues", 1)).
 		WithArgs(guardRestoreArgs(guardRestoreRow{"bd-1", "2025-03-01 09:30:00", "2026-11-02 04:00:00"})...).
 		WillReturnResult(sqlmock.NewResult(0, 1))
+	guardExpectColumn(mock, "wisps", "updated_at", false)
 	mock.ExpectExec(`INSERT IGNORE INTO schema_migrations`).WithArgs(53, sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
@@ -1895,6 +1900,58 @@ INSERT INTO wisp_dependencies (issue_id, depends_on_id) VALUES (%s, %s);
 		`SELECT COUNT(*) AS c FROM wisp_dependencies WHERE issue_id = 'source-wisp' AND depends_on_wisp_id = 'ambiguous-target' AND depends_on_issue_id IS NULL AND depends_on_external IS NULL`, "1")
 	requireDoltCount(t, dir,
 		`SELECT COUNT(*) AS c FROM wisp_dependencies WHERE issue_id = 'source-wisp' AND depends_on_issue_id = 'ambiguous-target'`, "0")
+}
+
+// TestWispDependenciesSplitTargetBackfillLeavesTargetsUpdatedAtThroughDoltCLI
+// pins that the split-target pre-repair (run before 0047 and 0053) classifies
+// a wisp dependency's target without stamping it: go-mysql-server applies
+// the ON UPDATE CURRENT_TIMESTAMP of every table a multi-table UPDATE joins,
+// so the JOIN form this backfill used before stamped every issue and wisp a
+// wisp dependency points at (gastownhall/beads#5981).
+func TestWispDependenciesSplitTargetBackfillLeavesTargetsUpdatedAtThroughDoltCLI(t *testing.T) {
+	testutil.RequireDoltBinary(t)
+
+	dir := filepath.Join(t.TempDir(), "wisp-dependency-split-stamps")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("create wisp dependency split dir: %v", err)
+	}
+	runDoltCommand(t, dir, "init", "--name", "test", "--email", "test@example.com")
+
+	var repairSQL strings.Builder
+	for _, col := range wispDependenciesSplitTargetColumns() {
+		fmt.Fprintf(&repairSQL, "ALTER TABLE wisp_dependencies ADD COLUMN %s %s;\n", col.name, col.definition)
+	}
+	for _, stmt := range wispDependenciesSplitTargetBackfillSQL() {
+		repairSQL.WriteString(stmt)
+		repairSQL.WriteString(";\n")
+	}
+
+	const seedSQL = `
+CREATE TABLE issues (
+    id VARCHAR(255) PRIMARY KEY,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+);
+CREATE TABLE wisps (
+    id VARCHAR(255) PRIMARY KEY,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+);
+CREATE TABLE wisp_dependencies (
+    issue_id VARCHAR(255) NOT NULL,
+    depends_on_id VARCHAR(255) NOT NULL,
+    PRIMARY KEY (issue_id, depends_on_id)
+);
+INSERT INTO issues (id, updated_at) VALUES ('issue-target', '2025-01-02 03:04:05');
+INSERT INTO wisps (id, updated_at) VALUES ('source-wisp', '2025-01-02 03:04:05'), ('wisp-target', '2025-01-02 03:04:05');
+INSERT INTO wisp_dependencies (issue_id, depends_on_id) VALUES ('source-wisp', 'issue-target'), ('source-wisp', 'wisp-target'), ('source-wisp', 'external:gh-1');
+`
+	runDoltSQL(t, dir, seedSQL+repairSQL.String())
+
+	requireDoltCount(t, dir,
+		`SELECT COUNT(*) AS c FROM wisp_dependencies WHERE (depends_on_id = 'issue-target' AND depends_on_issue_id = 'issue-target') OR (depends_on_id = 'wisp-target' AND depends_on_wisp_id = 'wisp-target') OR (depends_on_id = 'external:gh-1' AND depends_on_external = 'external:gh-1')`, "3")
+	requireDoltCount(t, dir,
+		`SELECT COUNT(*) AS c FROM issues WHERE updated_at <> '2025-01-02 03:04:05'`, "0")
+	requireDoltCount(t, dir,
+		`SELECT COUNT(*) AS c FROM wisps WHERE updated_at <> '2025-01-02 03:04:05'`, "0")
 }
 
 func TestMigration0047HandlesLegacyWispDependenciesShape(t *testing.T) {
