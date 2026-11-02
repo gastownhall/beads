@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"golang.org/x/sys/windows"
+
+	"github.com/steveyegge/beads/internal/atomicfile"
 )
 
 const (
@@ -68,7 +70,13 @@ type syncLockWindowsOps struct {
 }
 
 var defaultSyncLockWindowsOps = syncLockWindowsOps{
-	openFile:   os.OpenFile,
+	// OpenNoFollow: a symlinked sidecar must not turn metadata publication
+	// into a write onto the link's target. Advisory only — a refusal
+	// degrades contention diagnostics and never touches primary ownership
+	// (publishSyncLockInfoWithOps already treats an open failure that way).
+	openFile: func(path string, flags int, perm os.FileMode) (*os.File, error) {
+		return atomicfile.OpenNoFollow(path, flags, perm)
+	},
 	readRandom: rand.Read,
 	writeAt: func(f *os.File, data []byte, offset int64) (int, error) {
 		return f.WriteAt(data, offset)

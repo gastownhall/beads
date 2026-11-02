@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/beads/internal/atomicfile"
 	"github.com/steveyegge/beads/internal/lockfile"
 )
 
@@ -39,7 +40,11 @@ func AcquireSyncLock(beadsDir string, wait bool) (*SyncLock, error) {
 		return nil, fmt.Errorf("creating beads directory: %w", err)
 	}
 
-	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600) // #nosec G304 -- lockPath is constrained to the beads directory.
+	// OpenNoFollow: a committed symlink at the lock path must not turn the
+	// lock into a write handle onto its target — refuse the leaf link before
+	// any truncate/write, keeping the existing kernel-lock and inode
+	// semantics for regular lock files (bd-1tmym4 / #7888).
+	f, err := atomicfile.OpenNoFollow(lockPath, os.O_CREATE|os.O_RDWR, 0600) // #nosec G304 -- lockPath is constrained to the beads directory.
 	if err != nil {
 		return nil, fmt.Errorf("opening lock file: %w", err)
 	}

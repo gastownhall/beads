@@ -22,6 +22,7 @@ go_library(
     importpath = "github.com/steveyegge/beads/internal/linear",
     visibility = ["//:__subpackages__"],
     deps = [
+        "//internal/atomicfile",
         "//internal/config",
         "//internal/debug",
         "//internal/idgen",
@@ -46,6 +47,7 @@ go_test(
         "parent_reconcile_test.go",
         "staleness_test.go",
         "synclock_info_windows_test.go",
+        "synclock_symlink_test.go",
         "synclock_test.go",
         "synclock_windows_test.go",
         "tracker_test.go",
