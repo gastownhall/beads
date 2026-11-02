@@ -3,12 +3,14 @@
 package embeddeddolt_test
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"os"
 	"path/filepath"
 	"slices"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
@@ -341,4 +343,47 @@ func sameStrings(a, b []string) bool {
 	slices.Sort(a)
 	slices.Sort(b)
 	return slices.Equal(a, b)
+}
+
+// TestEmbeddedIgnoredMigration0031SkipsDeletedIssues pins that a pre-upgrade
+// row whose issue has since been deleted is skipped -- fk_events_issue would
+// refuse it -- and reported, while the rest of the history comes back.
+func TestEmbeddedIgnoredMigration0031SkipsDeletedIssues(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+
+	dataDir := seedMainSchemaAt(t, ctx, 61)
+	conn, closeConn := openPinnedConn(t, ctx, dataDir)
+	defer closeConn()
+	seedPreflipEvents(t, ctx, conn)
+	if _, err := schema.MigrateUp(ctx, conn); err != nil {
+		t.Fatalf("MigrateUp (migrator): %v", err)
+	}
+	execFrozenGuard(t, ctx, conn, "DELETE FROM issues WHERE id = 'pre-2'")
+	mustDrain(t, ctx, conn, "CALL DOLT_COMMIT('-Am', 'test: delete pre-2')")
+	execFrozenGuard(t, ctx, conn, "DROP TABLE IF EXISTS events")
+
+	var notice bytes.Buffer
+	defer schema.SetPreflipEventsNoticeOutForTest(&notice)()
+	if _, err := schema.MigrateUp(ctx, conn); err != nil {
+		t.Fatalf("MigrateUp (lost table): %v", err)
+	}
+
+	v := func(s string) sql.NullString { return sql.NullString{String: s, Valid: true} }
+	want := preflipSeededContent()
+	delete(want, rowid.Digest([]sql.NullString{v("pre-2"), v("updated"), v("carol"), v(""), {}, v(""), v("2026-07-02 09:00:00")}))
+	got := liveEvents(t, ctx, conn)
+	requireContent(t, got, want)
+	requireDerivedIDs(t, got)
+	if !ignoredCursorHas(t, ctx, conn, 31) {
+		t.Fatal("ignored cursor does not record 0031 after the restore")
+	}
+	for _, line := range []string{
+		"Restored 4 pre-upgrade audit event(s)",
+		"Skipped 1 pre-upgrade audit event(s) whose issue no longer exists",
+	} {
+		if !strings.Contains(notice.String(), line) {
+			t.Fatalf("restore notice = %q, want it to report %q", notice.String(), line)
+		}
+	}
 }

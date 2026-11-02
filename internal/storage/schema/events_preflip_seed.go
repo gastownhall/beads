@@ -46,6 +46,15 @@ var (
 // the only sign on a piped or served open that history came back.
 var preflipEventsNoticeOut io.Writer = os.Stderr
 
+// SetPreflipEventsNoticeOutForTest redirects the pre-upgrade events restore's
+// notices to w and returns a function that restores the previous writer.
+// Test-only.
+func SetPreflipEventsNoticeOutForTest(w io.Writer) func() {
+	prev := preflipEventsNoticeOut
+	preflipEventsNoticeOut = w
+	return func() { preflipEventsNoticeOut = prev }
+}
+
 // seedEventsFromPreflipHistory restores, into the dolt_ignored events table,
 // the audit rows this clone still holds in history from before main migration
 // 0062 moved events off the versioned plane (gastownhall/beads#7039). It is
@@ -59,7 +68,8 @@ var preflipEventsNoticeOut io.Writer = os.Stderr
 // each content digest, under the lowest content-derived ids no row holds yet.
 // Existing rows and their ids are never touched, a retry adds nothing twice,
 // and across several sources the result is each digest's maximum
-// multiplicity, whatever the order.
+// multiplicity, whatever the order. Rows whose issue no longer exists are
+// skipped (fk_events_issue would refuse them) and counted.
 //
 // It writes only the ignored events table: no journal entry, no staging, no
 // Dolt commit. A clone with no such commit, or whose source has no events
@@ -73,8 +83,9 @@ func seedEventsFromPreflipHistory(ctx context.Context, db DBConn) error {
 		return nil
 	}
 	restored := 0
+	orphans := make(map[string]int)
 	for _, ref := range sources {
-		n, err := restorePreflipEventsFrom(ctx, db, ref)
+		n, err := restorePreflipEventsFrom(ctx, db, ref, orphans)
 		restored += n
 		if err != nil {
 			return fmt.Errorf("restoring pre-upgrade events from %s: %w", ref, err)
@@ -83,6 +94,10 @@ func seedEventsFromPreflipHistory(ctx context.Context, db DBConn) error {
 	if restored > 0 {
 		fmt.Fprintf(preflipEventsNoticeOut,
 			"Restored %d pre-upgrade audit event(s) from this clone's history (gastownhall/beads#7039).\n", restored)
+	}
+	if skipped := sumPreflipOrphans(orphans); skipped > 0 {
+		fmt.Fprintf(preflipEventsNoticeOut,
+			"Skipped %d pre-upgrade audit event(s) whose issue no longer exists.\n", skipped)
 	}
 	return nil
 }
@@ -126,8 +141,9 @@ func preflipEventsSources(ctx context.Context, db DBConn) ([]string, error) {
 }
 
 // restorePreflipEventsFrom reconciles one source commit into the live events
-// table and returns how many rows it inserted.
-func restorePreflipEventsFrom(ctx context.Context, db DBConn, ref string) (int, error) {
+// table and returns how many rows it inserted. Skipped rows are recorded in
+// orphans (see recordPreflipOrphans).
+func restorePreflipEventsFrom(ctx context.Context, db DBConn, ref string, orphans map[string]int) (int, error) {
 	present, err := preflipEventsSourceUsable(ctx, db, ref)
 	if err != nil || !present {
 		return 0, err
@@ -143,7 +159,7 @@ func restorePreflipEventsFrom(ctx context.Context, db DBConn, ref string) (int, 
 			return restored, nil
 		}
 		after = issues[len(issues)-1]
-		n, err := restorePreflipEventsPage(ctx, db, ref, issues)
+		n, err := restorePreflipEventsPage(ctx, db, ref, issues, orphans)
 		restored += n
 		if err != nil {
 			return restored, err
@@ -217,18 +233,40 @@ type preflipEventsRow struct {
 // table. Every source row for the page is read, and its result set closed,
 // before anything is written: the restore runs on the migration's pinned
 // connection, which cannot interleave an open result with a write.
-func restorePreflipEventsPage(ctx context.Context, db DBConn, ref string, issues []string) (int, error) {
+func restorePreflipEventsPage(ctx context.Context, db DBConn, ref string, issues []string, orphans map[string]int) (int, error) {
 	source, err := readPreflipEventsContent(ctx, db, "events AS OF '"+ref+"'", issues, nil)
 	if err != nil {
 		return 0, err
 	}
+	//nolint:gosec // G202: only ? placeholders are concatenated.
+	existing, err := preflipQueryStrings(ctx, db,
+		"SELECT id FROM issues WHERE id IN ("+preflipPlaceholders(len(issues))+")", preflipStringArgs(issues)...)
+	if err != nil {
+		return 0, fmt.Errorf("reading live issues: %w", err)
+	}
+	live := make(map[string]bool, len(existing))
+	for _, id := range existing {
+		live[id] = true
+	}
+	kept := issues[:0:0]
+	for _, issue := range issues {
+		if live[issue] {
+			kept = append(kept, issue)
+		} else {
+			recordPreflipOrphans(orphans, issue, source[issue])
+		}
+	}
+	if len(kept) == 0 {
+		return 0, nil
+	}
+	issues = kept
 	taken := make(map[string]bool)
-	live, err := readPreflipEventsContent(ctx, db, "events", issues, taken)
+	current, err := readPreflipEventsContent(ctx, db, "events", issues, taken)
 	if err != nil {
 		return 0, fmt.Errorf("reading live events: %w", err)
 	}
 	for {
-		plan := planPreflipEventsInserts(issues, source, live, taken)
+		plan := planPreflipEventsInserts(issues, source, current, taken)
 		if len(plan) == 0 {
 			return 0, nil
 		}
@@ -249,6 +287,26 @@ func restorePreflipEventsPage(ctx context.Context, db DBConn, ref string, issues
 		}
 		return insertPreflipEvents(ctx, db, plan)
 	}
+}
+
+// recordPreflipOrphans records a deleted issue's source content in orphans,
+// keyed by issue and digest, keeping each key's largest multiplicity so a row
+// that several sources carry is counted once.
+func recordPreflipOrphans(orphans map[string]int, issue string, content preflipEventsContent) {
+	for digest, g := range content {
+		key := issue + "\x00" + digest
+		if g.count > orphans[key] {
+			orphans[key] = g.count
+		}
+	}
+}
+
+func sumPreflipOrphans(orphans map[string]int) int {
+	total := 0
+	for _, n := range orphans {
+		total += n
+	}
+	return total
 }
 
 // readPreflipEventsContent reads the given issues' events content from table
