@@ -404,6 +404,96 @@ func TestEmbeddedMigrateIgnored0007KeepsUpdatedAt(t *testing.T) {
 	}
 }
 
+// TestEmbeddedMigrateGuardRestoresAcrossBatches runs the restore through the
+// real engine with more stamped rows than one restoring UPDATE carries
+// (restoreBatchSize, 500): 1001 issues blocked by one open blocker, two thirds
+// of them already flagged blocked (0047 clears and sets them again) and the
+// rest flagged for the first time. The sqlmock runner test pins how the rows
+// split into statements; this pins that the engine accepts and applies
+// full-size batches, in the working set and in 0047's step commit.
+func TestEmbeddedMigrateGuardRestoresAcrossBatches(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+	dataDir := seedMainSchemaAt(t, ctx, 46)
+
+	conn, closeConn := openPinnedConn(t, ctx, dataDir)
+	defer closeConn()
+
+	const blockedCount = 2*500 + 1
+	blocker := stampedIssue{id: "ua-batch-blocker", status: "open", stamp: historicalStamp(0)}
+	insertStampedIssues(t, ctx, conn, "issues", []stampedIssue{blocker}, true)
+	batchID := func(i int) string { return fmt.Sprintf("ua-batch-%04d", i) }
+	batchStamp := func(i int) time.Time {
+		return time.Date(2024, time.June, 1, 0, 0, 0, 0, time.UTC).Add(time.Duration(i) * time.Minute)
+	}
+	const chunk = 200
+	for start := 0; start < blockedCount; start += chunk {
+		end := min(start+chunk, blockedCount)
+		var issueRows, depRows []string
+		var issueArgs, depArgs []any
+		for i := start; i < end; i++ {
+			issueRows = append(issueRows, "(?, 'fixture', '', '', '', '', 'open', 'task', ?, ?, ?)")
+			issueArgs = append(issueArgs, batchID(i), batchStamp(i), batchStamp(i), i%3 != 0)
+			depRows = append(depRows, "(UUID(), ?, ?, 'blocks', 'fixture')")
+			depArgs = append(depArgs, batchID(i), blocker.id)
+		}
+		if _, err := conn.ExecContext(ctx,
+			"INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, issue_type, created_at, updated_at, is_blocked) VALUES "+
+				strings.Join(issueRows, ", "), issueArgs...); err != nil {
+			t.Fatalf("seed issues %d..%d: %v", start, end-1, err)
+		}
+		if _, err := conn.ExecContext(ctx,
+			"INSERT INTO dependencies (id, issue_id, depends_on_issue_id, type, created_by) VALUES "+
+				strings.Join(depRows, ", "), depArgs...); err != nil {
+			t.Fatalf("seed dependencies %d..%d: %v", start, end-1, err)
+		}
+	}
+	commitFixture(t, ctx, conn, "test: v46 issues past one restore batch")
+
+	migrateUpStoppingAfter(t, ctx, conn, 47)
+
+	for _, table := range []string{"issues", "issues AS OF 'HEAD'"} {
+		rows, err := conn.QueryContext(ctx, "SELECT id, updated_at, is_blocked FROM "+table+" WHERE id LIKE 'ua-batch-%' ORDER BY id")
+		if err != nil {
+			t.Fatalf("read %s: %v", table, err)
+		}
+		seen, stamped := 0, 0
+		for rows.Next() {
+			var id string
+			var got time.Time
+			var blocked bool
+			if err := rows.Scan(&id, &got, &blocked); err != nil {
+				t.Fatalf("scan %s: %v", table, err)
+			}
+			want, wantBlocked := blocker.stamp, false
+			if id != blocker.id {
+				var i int
+				if _, err := fmt.Sscanf(id, "ua-batch-%04d", &i); err != nil {
+					t.Fatalf("parse fixture id %q: %v", id, err)
+				}
+				want, wantBlocked = batchStamp(i), true
+			}
+			if !got.Equal(want) {
+				if stamped++; stamped <= 3 {
+					t.Errorf("%s %s: updated_at = %s, want its historical %s (the migration overwrote it)",
+						table, id, got.UTC().Format(time.RFC3339), want.Format(time.RFC3339))
+				}
+			}
+			if blocked != wantBlocked {
+				t.Errorf("%s %s: is_blocked = %v, want %v", table, id, blocked, wantBlocked)
+			}
+			seen++
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatalf("read %s: %v", table, err)
+		}
+		_ = rows.Close()
+		if seen != blockedCount+1 || stamped != 0 {
+			t.Errorf("%s: %d fixture rows read (want %d), %d with a migration-time updated_at (want 0)", table, seen, blockedCount+1, stamped)
+		}
+	}
+}
+
 // TestEmbeddedMigrateGuardKeepsAnotherSessionsUpdatedAt pins that the guard
 // undoes only the frozen body's own rewrites. While main 0047 runs, a second
 // session edits an issue the recompute leaves alone, the way an older bd
