@@ -3,8 +3,10 @@
 -- 0049 widened issues/wisps/comments large-content columns to LONGTEXT, 0048
 -- (+ 0057's idempotency guard) the events value columns, 0065 (with its
 -- ignored/0024 twin) wisp_comments.text, and ignored/0008 the wisp_events
--- value columns. What the #3925 report named that none of those reached:
--- events.comment and wisp_events.comment are still TEXT. A reopen records
+-- value columns. What the #3925 report named that none of those reached,
+-- widened here one guarded block per column: the two event comment columns,
+-- the compaction archive column (BLOB, same 65,535-byte cap), and the legacy
+-- issue_snapshots pair. A reopen records
 -- its reason twice — once into the LONGTEXT new_value and then again, as the
 -- audit comment, into
 -- events.comment via AddCommentEventInTx — so a reason over the TEXT cap
@@ -79,5 +81,37 @@ SET @snapshot_json_needs_fix = (
 );
 SET @sql = IF(@snapshot_json_needs_fix = 1,
     'ALTER TABLE compaction_snapshots MODIFY COLUMN snapshot_json LONGBLOB NOT NULL',
+    'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+-- issue_snapshots.original_content / archived_events: the legacy archive
+-- pair, TEXT since 0009. No runtime INSERT reaches this table today (the
+-- live compaction path writes compaction_snapshots), but its readers expect
+-- an archived row's full original body, and the columns are the same
+-- silent-truncation class on any future writer. Widened for consistency with
+-- the rest of the #3925 set; the table is versioned, so no ignored twin is
+-- needed. original_content NOT NULL and archived_events nullable, as 0009
+-- created them; each guarded separately, never as a pair.
+SET @snapshots_content_needs_fix = (
+    SELECT IF(COLUMN_TYPE = 'text', 1, 0)
+    FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'issue_snapshots'
+      AND COLUMN_NAME = 'original_content'
+);
+SET @sql = IF(@snapshots_content_needs_fix = 1,
+    'ALTER TABLE issue_snapshots MODIFY COLUMN original_content LONGTEXT NOT NULL',
+    'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @snapshots_events_needs_fix = (
+    SELECT IF(COLUMN_TYPE = 'text', 1, 0)
+    FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'issue_snapshots'
+      AND COLUMN_NAME = 'archived_events'
+);
+SET @sql = IF(@snapshots_events_needs_fix = 1,
+    'ALTER TABLE issue_snapshots MODIFY COLUMN archived_events LONGTEXT',
     'SELECT 1');
 PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;

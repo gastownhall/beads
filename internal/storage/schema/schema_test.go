@@ -2073,6 +2073,8 @@ func TestAllMigrationsSQLUsesDirectDDLForKnownCLIIncompatibilities(t *testing.T)
 		"ALTER TABLE events MODIFY COLUMN comment LONGTEXT;",
 		"ALTER TABLE wisp_events MODIFY COLUMN comment LONGTEXT DEFAULT '';",
 		"ALTER TABLE compaction_snapshots MODIFY COLUMN snapshot_json LONGBLOB NOT NULL;",
+		"ALTER TABLE issue_snapshots MODIFY COLUMN original_content LONGTEXT NOT NULL;",
+		"ALTER TABLE issue_snapshots MODIFY COLUMN archived_events LONGTEXT;",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("AllMigrationsSQL missing direct CLI DDL %q", want)
@@ -2122,6 +2124,8 @@ func TestAllMigrationsSQLUsesDirectDDLForKnownCLIIncompatibilities(t *testing.T)
 		"@events_comment_needs_fix",
 		"@wisp_events_comment_needs_fix",
 		"@snapshot_json_needs_fix",
+		"@snapshots_content_needs_fix",
+		"@snapshots_events_needs_fix",
 	} {
 		if strings.Contains(got, forbidden) {
 			t.Fatalf("AllMigrationsSQL contains source prepared-DDL guard %q", forbidden)

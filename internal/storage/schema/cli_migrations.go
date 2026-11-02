@@ -386,7 +386,9 @@ CREATE UNIQUE INDEX uk_wisps_arrival_seq ON wisps (arrival_seq);`
 // use the frozen source text instead -- see cliSubstituteAssumesWispTables.
 const cliMigration0075WidenResidualContentColumns = `ALTER TABLE events MODIFY COLUMN comment LONGTEXT;
 ALTER TABLE wisp_events MODIFY COLUMN comment LONGTEXT DEFAULT '';
-ALTER TABLE compaction_snapshots MODIFY COLUMN snapshot_json LONGBLOB NOT NULL;`
+ALTER TABLE compaction_snapshots MODIFY COLUMN snapshot_json LONGBLOB NOT NULL;
+ALTER TABLE issue_snapshots MODIFY COLUMN original_content LONGTEXT NOT NULL;
+ALTER TABLE issue_snapshots MODIFY COLUMN archived_events LONGTEXT;`
 
 const cliMigration0041SplitDependenciesTarget = `DELETE FROM dolt_nonlocal_tables;
 CALL DOLT_COMMIT('-Am', 'disable nonlocal tables for fk migrations');
