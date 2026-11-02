@@ -88,6 +88,7 @@ func (fixedWispsMolReader) GetBlockedIssues(context.Context, types.WorkFilter) (
 func (fixedWispsMolReader) GetCustomStatusesDetailed(context.Context) ([]types.CustomStatus, error) {
 	return nil, nil
 }
+func (fixedWispsMolReader) GetConfig(context.Context, string) (string, error)    { return "", nil }
 func (fixedWispsMolReader) IsInfraTypeCtx(context.Context, types.IssueType) bool { return false }
 func (fixedWispsMolReader) FindWispDependentsRecursive(context.Context, []string) (map[string]bool, error) {
 	return nil, nil
