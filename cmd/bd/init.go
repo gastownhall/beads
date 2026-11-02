@@ -1250,7 +1250,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			plannedDBPathAbs = filepath.Dir(plannedDBPathAbs)
 		}
 		initGateHandle, gateErr := acquireInitMutationGate(rootCtx, beadsDirAbs, plannedDBPathAbs, func() error {
-			return newInitReinitPreflight(reinitLocal, beadsDirForInit, destroyTokenPrefix, destroyToken, database).run()
+			return newInitReinitPreflight(reinitLocal, nonInteractive, beadsDirForInit, destroyTokenPrefix, destroyToken, database).run()
 		})
 		if gateErr != nil {
 			return gateErr

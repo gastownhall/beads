@@ -1489,6 +1489,7 @@ go_test(
         "//issueops",
         "//memoryops",
         "@com_github_charmbracelet_x_ansi//:ansi",
+        "@com_github_creack_pty//:pty",
         "@com_github_data_dog_go_sqlmock//:go-sqlmock",
         "@com_github_dolthub_dolt_go//libraries/doltcore/servercfg",
         "@com_github_dolthub_dolt_go//libraries/utils/filesys",
