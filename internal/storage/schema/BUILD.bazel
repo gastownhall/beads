@@ -152,6 +152,7 @@ go_test(
         "converged_test.go",
         "cursor_reality_test.go",
         "dep_id_backfill_test.go",
+        "dirty_tables_error_test.go",
         "dolt_ignore_seed_test.go",
         "ignored_cursor_untrack_test.go",
         "lock_test.go",

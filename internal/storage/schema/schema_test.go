@@ -121,6 +121,12 @@ func TestMigrateUpReturnsDirtyTablesErrorForPreExistingDirtyTable(t *testing.T) 
 	if len(dirtyErr.Tables) != 1 || dirtyErr.Tables[0] != "dependencies" {
 		t.Fatalf("DirtyTablesError.Tables = %v, want [dependencies]", dirtyErr.Tables)
 	}
+	// v42 is a recorded main migration history, so the refusal is not
+	// unversioned (TestDirtyTablesErrorUnversioned covers the 0-cursor
+	// shapes).
+	if dirtyErr.Unversioned {
+		t.Fatal("DirtyTablesError.Unversioned = true for main cursor 42, want false")
+	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet sql expectations: %v", err)
 	}

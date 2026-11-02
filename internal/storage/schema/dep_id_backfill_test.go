@@ -303,6 +303,13 @@ func TestRekeyDependencyIDsRefusesToWriteIntoDirtyTable(t *testing.T) {
 	if !slices.Equal(dirtyErr.Tables, []string{"dependencies"}) {
 		t.Errorf("dirtyErr.Tables = %v, want [dependencies]", dirtyErr.Tables)
 	}
+	// The re-key refusal constructs its own DirtyTablesError and must keep
+	// the false zero value: it can fire on a fully versioned database, and
+	// Unversioned is the main-source pending-migration guard's
+	// classification alone (TestDirtyTablesErrorUnversioned).
+	if dirtyErr.Unversioned {
+		t.Error("re-key refusal DirtyTablesError.Unversioned = true, want false")
+	}
 }
 
 // TestRekeyDependencyIDsIgnoresDirtyTableWithNothingToDo keeps the refusal

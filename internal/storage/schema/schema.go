@@ -1063,7 +1063,12 @@ func migrateUpAfterReconcile(ctx context.Context, db DBConn, seedChanged bool) (
 		return 0, fmt.Errorf("checking dirty tables against pending migrations: %w", err)
 	}
 	if len(touchedDirtyTables) > 0 {
-		return 0, &DirtyTablesError{Tables: touchedDirtyTables}
+		// Unversioned classifies the refusal by the RECORDED main cursor
+		// (mainVersionBefore, read above): true on a database with no
+		// main migration history — the legacy-seeder shape bd init adopts
+		// (#6089). See DirtyTablesError.Unversioned for the exact claim
+		// that makes and the one it deliberately does not.
+		return 0, &DirtyTablesError{Tables: touchedDirtyTables, Unversioned: mainVersionBefore == 0}
 	}
 	dirtyBeforeSignatures, err := dirtyTableSignatures(ctx, db, dirtyBefore)
 	if err != nil {
