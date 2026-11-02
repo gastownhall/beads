@@ -3,6 +3,9 @@ package versioncontrolops
 import (
 	"context"
 	"fmt"
+
+	"github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/steveyegge/beads/internal/storage/schema"
 )
 
 // Compact squashes old Dolt commits into a single base commit while preserving
@@ -14,7 +17,9 @@ import (
 //  5. Cherry-pick each recent commit on top
 //  6. Checkout main, verify the temp branch's committed data equals main's
 //  7. Soft-reset main to the temp branch (keeps main's working set)
-//  8. Delete temp branch
+//  8. Commit main's staged set, if any: a commit that reached main while
+//     the history was rebuilt
+//  9. Delete temp branch
 //
 // Callers should run PruneRemoteRefs and then DoltGC afterward to reclaim disk
 // space — remote-tracking refs still anchor the pre-compact chain, and GC
@@ -94,6 +99,29 @@ func Compact(ctx context.Context, conn DBConn, initialHash, boundaryHash string,
 	if err := execSQL("reset main to compacted", "CALL DOLT_RESET('--soft', 'compact-tmp')"); err != nil {
 		return err
 	}
+
+	// A commit that reached main after the plan was read is now staged on
+	// main, outside HEAD and so outside a push of main. Commit the staged set
+	// only: rows that are just in the working set stay pending, as they were,
+	// so a writer's batch keeps its own commit boundary. Rows that were
+	// already staged when Compact ran join this commit too. The landed commit
+	// does not keep its own hash or message on main: compaction rewrites that
+	// history anyway.
+	const followupStep = "commit changes that reached main"
+	staged, err := issueops.HasStagedChanges(ctx, conn)
+	if err != nil {
+		return fmt.Errorf("compact step %q: %w", followupStep, err)
+	}
+	if staged {
+		err = schema.DrainCall(ctx, conn, "CALL DOLT_COMMIT('-m', ?)",
+			"compact: commit changes that reached main during compaction")
+		// Another writer committing main's staged set first leaves nothing
+		// to commit, which is the outcome this step wants.
+		if err != nil && !issueops.IsNothingToCommitError(err) {
+			return fmt.Errorf("compact step %q: %w", followupStep, err)
+		}
+	}
+
 	if err := execSQL("delete temp branch", "CALL DOLT_BRANCH('-D', 'compact-tmp')"); err != nil {
 		return err
 	}

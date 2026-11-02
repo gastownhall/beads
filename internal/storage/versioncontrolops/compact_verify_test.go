@@ -82,6 +82,7 @@ func TestCompactVerifyEqualReplayResets(t *testing.T) {
 		ok := sqlmock.NewResult(0, 0)
 		mock.ExpectQuery(regexp.QuoteMeta(compactVerifySQL)).WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
 		mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_RESET('--soft', 'compact-tmp')")).WillReturnResult(ok)
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM dolt_status WHERE staged = 1")).WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
 		mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_BRANCH('-D', 'compact-tmp')")).WillReturnResult(ok)
 	})
 	if err != nil {

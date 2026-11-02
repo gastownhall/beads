@@ -28,8 +28,9 @@ type compactHookConn struct {
 
 	// beforeExec runs before each ExecContext statement is forwarded.
 	beforeExec func(query string)
-	// afterStagedCheck runs once the post-reset dolt_status read has executed.
-	afterStagedCheck func()
+	// beforeFollowUp runs after the staged check, just before the follow-up
+	// commit is forwarded.
+	beforeFollowUp func()
 	// failFollowupCommit, when set, is returned for a DOLT_COMMIT issued
 	// through QueryContext after the final reset, without forwarding it.
 	failFollowupCommit error
@@ -37,7 +38,12 @@ type compactHookConn struct {
 	failStagedCheck bool
 
 	resetDone atomic.Bool
+	followUps int // follow-up commit CALLs seen (forwarded or failed)
 }
+
+// compactFollowupMsg is the message of the commit Compact adds when the soft
+// reset leaves anything staged on main.
+const compactFollowupMsg = "compact: commit changes that reached main during compaction"
 
 func isFinalReset(query string) bool {
 	return strings.Contains(query, "DOLT_RESET(") && strings.Contains(query, "compact-tmp")
@@ -54,22 +60,21 @@ func (c *compactHookConn) ExecContext(ctx context.Context, query string, args ..
 }
 
 func (c *compactHookConn) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
-	if c.resetDone.Load() && c.failFollowupCommit != nil && strings.Contains(query, "DOLT_COMMIT") {
-		return nil, c.failFollowupCommit
+	if c.resetDone.Load() && strings.Contains(query, "DOLT_COMMIT") {
+		c.followUps++
+		if c.failFollowupCommit != nil {
+			return nil, c.failFollowupCommit
+		}
+		if c.beforeFollowUp != nil {
+			c.beforeFollowUp()
+		}
 	}
 	return c.Conn.QueryContext(ctx, query, args...)
 }
 
 func (c *compactHookConn) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
-	if c.resetDone.Load() && strings.Contains(query, "dolt_status") {
-		if c.failStagedCheck {
-			return c.Conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM compact_injected_missing_table")
-		}
-		row := c.Conn.QueryRowContext(ctx, query, args...)
-		if c.afterStagedCheck != nil {
-			c.afterStagedCheck()
-		}
-		return row
+	if c.resetDone.Load() && c.failStagedCheck && strings.Contains(query, "dolt_status") {
+		return c.Conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM compact_injected_missing_table")
 	}
 	return c.Conn.QueryRowContext(ctx, query, args...)
 }
@@ -259,6 +264,13 @@ func (f *compactFixture) status() []string {
 	return out
 }
 
+// wantFollowupLog checks main's history is the replayed history with exactly
+// one follow-up commit on top.
+func (f *compactFixture) wantFollowupLog() {
+	f.t.Helper()
+	f.wantLog(append([]string{compactFollowupMsg}, replayedLog...))
+}
+
 func (f *compactFixture) wantStatus(want ...string) {
 	f.t.Helper()
 	if got := f.status(); strings.Join(got, ",") != strings.Join(want, ",") {
@@ -360,5 +372,111 @@ func TestCompactKeepsUncommittedChanges(t *testing.T) {
 		f.wantLog(replayedLog)
 		f.wantHeadTree(f.head)
 		f.wantStatus("config:false", "u:false")
+	})
+}
+
+// AC-2: a commit that reaches main after the rebuild, just before the final
+// reset, is in main's HEAD through one follow-up commit, while unrelated
+// working-only changes stay pending.
+func TestCompactKeepsCommitLandingBeforeMainMoves(t *testing.T) {
+	port := startCompactTestServer(t)
+
+	t.Run("landing commit", func(t *testing.T) {
+		f := newCompactFixture(t, port)
+		f.writePending(f.db)
+		writer := f.conn()
+
+		var landed string
+		hook := &compactHookConn{beforeExec: onceBeforeFinalReset(func() { landed = f.landRow(writer) })}
+		if err := f.compact(hook); err != nil {
+			t.Fatalf("Compact: %v", err)
+		}
+
+		if n := f.count("SELECT COUNT(*) FROM t AS OF 'HEAD' WHERE id = 600"); n != 1 {
+			t.Fatalf("landed t row 600 in main's HEAD: present=false, want present=true")
+		}
+		f.wantFollowupLog()
+		f.wantHeadTree(landed)
+		f.wantPendingKept()
+		f.wantStatus("config:false", "u:false")
+		f.wantNoTempBranch()
+	})
+
+	t.Run("landing during replay", func(t *testing.T) {
+		f := newCompactFixture(t, port)
+		f.writePending(f.db)
+		writer := f.conn()
+
+		var done bool
+		var landed string
+		hook := &compactHookConn{beforeExec: func(query string) {
+			if !done && strings.Contains(query, "DOLT_CHERRY_PICK") {
+				done = true
+				landed = f.landRow(writer)
+			}
+		}}
+		if err := f.compact(hook); err != nil {
+			t.Fatalf("Compact: %v", err)
+		}
+		if n := f.count("SELECT COUNT(*) FROM t AS OF 'HEAD' WHERE id = 600"); n != 1 {
+			t.Fatalf("landed t row 600 in main's HEAD: present=false, want present=true")
+		}
+		f.wantFollowupLog()
+		f.wantHeadTree(landed)
+		f.wantPendingKept()
+		f.wantStatus("config:false", "u:false")
+	})
+
+	t.Run("another writer commits the staged rows first", func(t *testing.T) {
+		f := newCompactFixture(t, port)
+		f.writePending(f.db)
+		writer := f.conn()
+
+		hook := &compactHookConn{
+			beforeExec: onceBeforeFinalReset(func() { f.landRow(writer) }),
+			beforeFollowUp: func() {
+				f.exec(writer, "CALL DOLT_COMMIT('-m', 'writer took staging')")
+			},
+		}
+		if err := f.compact(hook); err != nil {
+			t.Fatalf("Compact: %v (a nothing-to-commit follow-up must be benign)", err)
+		}
+		if hook.followUps != 1 {
+			t.Fatalf("Compact issued %d follow-up commits, want 1", hook.followUps)
+		}
+		f.wantLog(append([]string{"writer took staging"}, replayedLog...))
+		if n := f.count("SELECT COUNT(*) FROM t AS OF 'HEAD' WHERE id = 600"); n != 1 {
+			t.Fatalf("landed t row 600 in main's HEAD: present=false, want present=true")
+		}
+		var one int
+		if err := hook.Conn.QueryRowContext(f.ctx, "SELECT 1").Scan(&one); err != nil {
+			t.Fatalf("Compact's connection is unusable after a benign nothing-to-commit: %v", err)
+		}
+		f.wantPendingKept()
+		f.wantStatus("config:false", "u:false")
+		f.wantNoTempBranch()
+	})
+
+	t.Run("pre-staged row joins the follow-up", func(t *testing.T) {
+		f := newCompactFixture(t, port)
+		f.exec(f.db,
+			"INSERT INTO u VALUES (800, 'staged')",
+			"CALL DOLT_ADD('u')",
+			"UPDATE u SET v = 'edited' WHERE id = 1",
+		)
+
+		if err := f.compact(&compactHookConn{}); err != nil {
+			t.Fatalf("Compact: %v", err)
+		}
+		if n := f.count("SELECT COUNT(*) FROM u AS OF 'HEAD' WHERE id = 800"); n != 1 {
+			t.Fatalf("pre-staged u row 800 in main's HEAD: present=false, want present=true")
+		}
+		if v := f.value("SELECT v FROM u AS OF 'HEAD' WHERE id = 1"); v != "recent" {
+			t.Fatalf("u row 1 in main's HEAD = %q, want the unstaged edit left out", v)
+		}
+		if v := f.value("SELECT v FROM u WHERE id = 1"); v != "edited" {
+			t.Fatalf("u row 1 on main = %q, want the unstaged edit kept", v)
+		}
+		f.wantStatus("u:false")
 	})
 }
