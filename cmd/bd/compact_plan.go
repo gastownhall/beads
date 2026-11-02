@@ -35,11 +35,15 @@ type compactRefusal struct {
 }
 
 // planCompaction partitions logEntries (as returned by Log: newest commit date
-// first, non-empty) around cutoff. Old/recent membership, initialHash and
-// boundaryHash are selected by commit date as before. The replay order of the
-// recent commits is by Dolt's commit_order, not by date: commit dates are not
-// required to be monotonic along the parent chain, so a child dated before its
-// parent would otherwise be cherry-picked first and conflict (#6516).
+// first, non-empty) around cutoff. Old/recent membership stays date-based
+// (Date.Before). Everything positional is by Dolt's commit_order, not by
+// date: the replay order of the recent commits (a child dated before its
+// parent would otherwise be cherry-picked first and conflict, #6516), and the
+// boundary and initial selection — the last old commit and the first commit
+// overall in commit order. With old commits dated out of history order, the
+// newest-dated old commit can be an obsolete mid-chain state whose squash
+// drops later old edits and keeps the superseded chain reachable (#6645).
+// Ties keep the first entry in Log order.
 //
 // The partition itself must also be contiguous in commit order (#6645): when
 // a preserved commit is an ANCESTOR of an old commit, the squashed base
@@ -51,13 +55,14 @@ type compactRefusal struct {
 func planCompaction(logEntries []storage.CommitInfo, cutoff time.Time) compactPlan {
 	var plan compactPlan
 	recent := make([]storage.CommitInfo, 0, len(logEntries))
-	var maxOld *storage.CommitInfo
+	var initial, maxOld *storage.CommitInfo
 	for _, entry := range logEntries {
+		if initial == nil || entry.CommitOrder < initial.CommitOrder {
+			e := entry
+			initial = &e
+		}
 		if entry.Date.Before(cutoff) {
 			plan.oldCommits++
-			if plan.boundaryHash == "" {
-				plan.boundaryHash = entry.Hash
-			}
 			if maxOld == nil || entry.CommitOrder > maxOld.CommitOrder {
 				e := entry
 				maxOld = &e
@@ -66,7 +71,10 @@ func planCompaction(logEntries []storage.CommitInfo, cutoff time.Time) compactPl
 			recent = append(recent, entry)
 		}
 	}
-	plan.initialHash = logEntries[len(logEntries)-1].Hash
+	plan.initialHash = initial.Hash
+	if maxOld != nil {
+		plan.boundaryHash = maxOld.Hash
+	}
 
 	sort.SliceStable(recent, func(i, j int) bool {
 		return recent[i].CommitOrder < recent[j].CommitOrder

@@ -584,3 +584,94 @@ func TestEmbeddedCompactDryRunRefusedPreview(t *testing.T) {
 		f.assertMainUntouched(t, conn)
 	})
 }
+
+// TestEmbeddedCompactMisdatedOldWindow covers #6645's sibling defect: OLD
+// commits dated out of history order (a clock that jumped back mid-window).
+// Date-picked selection squashed from an obsolete boundary and kept the old
+// chain reachable; commit-order selection must squash the whole old window,
+// preserve the old window's final value (Y2) and the recent edit (R), and
+// leave the superseded old commits unreachable.
+func TestEmbeddedCompactMisdatedOldWindow(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "ow")
+	window := bdCreate(t, bd, dir, "ORIGINAL", "--type", "task")
+	other := bdCreate(t, bd, dir, "Other bead", "--type", "task")
+
+	cfg, _ := configfile.Load(beadsDir)
+	database := ""
+	if cfg != nil {
+		database = cfg.GetDoltDatabase()
+	}
+	db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), filepath.Join(beadsDir, "embeddeddolt"), database, "main")
+	if err != nil {
+		t.Fatalf("OpenSQL: %v", err)
+	}
+	conn, err := db.Conn(t.Context())
+	if err != nil {
+		t.Fatalf("db.Conn: %v", err)
+	}
+	// Ancestry: ... creates -> C (undated, old) -> E1 (Y1, -5h) -> E2 (Y2,
+	// -4h) -> R (future, edits the OTHER issue). The old window's dates run
+	// backwards relative to its own history.
+	now := time.Now()
+	steps := []struct {
+		issueID, title, msg string
+		date                string
+	}{
+		{window.ID, "C1", "oldwindow: C", ""},
+		{window.ID, "Y1", "oldwindow: E1", now.Add(-5 * time.Hour).Format(time.RFC3339)},
+		{window.ID, "Y2", "oldwindow: E2", now.Add(-4 * time.Hour).Format(time.RFC3339)},
+		{other.ID, "R edit", "oldwindow: R", now.Add(time.Hour).Format(time.RFC3339)},
+	}
+	for _, s := range steps {
+		if _, err := conn.ExecContext(t.Context(), "UPDATE issues SET title = ? WHERE id = ?", s.title, s.issueID); err != nil {
+			t.Fatalf("update title %q: %v", s.title, err)
+		}
+		if s.date != "" {
+			if _, err := conn.ExecContext(t.Context(), "CALL DOLT_COMMIT('-Am', ?, '--date', ?)", s.msg, s.date); err != nil {
+				t.Fatalf("dolt commit %q: %v", s.msg, err)
+			}
+		} else if _, err := conn.ExecContext(t.Context(), "CALL DOLT_COMMIT('-Am', ?)", s.msg); err != nil {
+			t.Fatalf("dolt commit %q: %v", s.msg, err)
+		}
+	}
+	conn.Close()
+	if err := cleanup(); err != nil {
+		t.Fatalf("cleanup: %v", err)
+	}
+
+	bdCompact(t, bd, dir, "--force", "--days", "0")
+
+	if got := bdShow(t, bd, dir, window.ID).Title; got != "Y2" {
+		t.Errorf("old-window issue title after compact = %q, want %q", got, "Y2")
+	}
+	if got := bdShow(t, bd, dir, other.ID).Title; got != "R edit" {
+		t.Errorf("recent-edit issue title after compact = %q, want %q", got, "R edit")
+	}
+
+	compactStraddleFixture{bd: bd, beadsDir: beadsDir}.withReopened(t, func(conn *sql.Conn) {
+		for _, msg := range []string{"oldwindow: C", "oldwindow: E1", "oldwindow: E2"} {
+			var count int
+			if err := conn.QueryRowContext(t.Context(),
+				"SELECT COUNT(*) FROM dolt_log WHERE message = ?", msg).Scan(&count); err != nil {
+				t.Fatalf("count %q: %v", msg, err)
+			}
+			if count != 0 {
+				t.Errorf("superseded commit %q still reachable on main (%d rows)", msg, count)
+			}
+		}
+		var replays int
+		if err := conn.QueryRowContext(t.Context(),
+			"SELECT COUNT(*) FROM dolt_log WHERE message = ?", "oldwindow: R").Scan(&replays); err != nil {
+			t.Fatalf("count oldwindow: R: %v", err)
+		}
+		if replays != 1 {
+			t.Errorf("recent commit replayed %d times, want exactly 1", replays)
+		}
+	})
+}

@@ -31,7 +31,8 @@ func TestPlanCompactionReplaysInCommitOrder(t *testing.T) {
 	if plan.oldCommits != 2 {
 		t.Errorf("oldCommits = %d, want 2", plan.oldCommits)
 	}
-	// Partition selection stays date-based.
+	// Boundary/initial selection is commit-order based (max old order /
+	// min overall); here it agrees with the date-based pick.
 	if plan.boundaryHash != "old2" {
 		t.Errorf("boundaryHash = %q, want old2", plan.boundaryHash)
 	}
@@ -171,6 +172,44 @@ func TestPlanCompactionRefusesStraddledCutoff(t *testing.T) {
 				t.Errorf("refusal = %s/%s, want %s", plan.refusal.recent.Hash, plan.refusal.old.Hash, tt.wantRefusal)
 			}
 		})
+	}
+}
+
+// TestPlanCompactionSelectsByCommitOrder covers #6645's old-window defect:
+// with old commits dated out of history order, the boundary must be the LAST
+// old commit in commit order (not the newest-dated one) and initial the first
+// commit overall (not the oldest-dated one), or the squash anchors on an
+// obsolete state and keeps the superseded chain reachable. Entries are in Log
+// order (date DESC).
+func TestPlanCompactionSelectsByCommitOrder(t *testing.T) {
+	now := time.Now()
+	cutoff := now.Add(-time.Hour)
+	// Ancestry by commit_order: root(1), create2(2), C(3), E1(4), E2(5),
+	// R(6). Dates: R is future (recent); C is the newest-dated old; E1/E2
+	// are dated older than the creates even though they FOLLOW them.
+	entries := []storage.CommitInfo{
+		{Hash: "R", Date: now.Add(time.Hour), CommitOrder: 6},
+		{Hash: "C", Date: now.Add(-70 * time.Minute), CommitOrder: 3},
+		{Hash: "create2", Date: now.Add(-80 * time.Minute), CommitOrder: 2},
+		{Hash: "root", Date: now.Add(-90 * time.Minute), CommitOrder: 1},
+		{Hash: "E2", Date: now.Add(-4 * time.Hour), CommitOrder: 5},
+		{Hash: "E1", Date: now.Add(-5 * time.Hour), CommitOrder: 4},
+	}
+	plan := planCompaction(entries, cutoff)
+
+	if plan.oldCommits != 5 || len(plan.recentHashes) != 1 || plan.recentHashes[0] != "R" {
+		t.Errorf("unexpected partition: %+v", plan)
+	}
+	// Date-picked selection would choose boundary C (newest-dated old) and
+	// initial E1 (oldest-dated); both are mid-chain.
+	if plan.boundaryHash != "E2" {
+		t.Errorf("boundaryHash = %q, want E2 (last old commit in commit order)", plan.boundaryHash)
+	}
+	if plan.initialHash != "root" {
+		t.Errorf("initialHash = %q, want root (first commit in commit order)", plan.initialHash)
+	}
+	if plan.refusal != nil {
+		t.Errorf("refusal = %+v, want nil: the partition is contiguous in commit order", plan.refusal)
 	}
 }
 
