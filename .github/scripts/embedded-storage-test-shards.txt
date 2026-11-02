@@ -346,6 +346,7 @@
 40 19 TestEmbeddedReaderListMaxRowsIsHonored
 40 19 TestEmbeddedRelationsAnswersInThePinnedOrder
 40 19 TestIgnoredCursorHealConvergesFromEveryCrashState
+40 19 TestMintedIDsPassOverEveryHeldID
 40 19 TestOpenAfterCloseCreatesNewStore
 40 19 TestOpenReturnsCachedStore
 40 19 TestParticipationGenerationFixtureKitIsWired

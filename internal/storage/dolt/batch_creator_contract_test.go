@@ -24,6 +24,9 @@ func TestBatchCreatorContract(t *testing.T) {
 	t.Run("CreatesEveryItemAsOneAct", func(t *testing.T) {
 		conformance.RunBatchCreatorCreatesEveryItemAsOneAct(t, ctx, fixture)
 	})
+	t.Run("MintsADistinctIDForEachIdenticalItem", func(t *testing.T) {
+		conformance.RunBatchCreatorMintsADistinctIDForEachIdenticalItem(t, ctx, fixture)
+	})
 	t.Run("RefusesEverythingWhenOneItemRefuses", func(t *testing.T) {
 		conformance.RunBatchCreatorRefusesEverythingWhenOneItemRefuses(t, ctx, fixture)
 	})

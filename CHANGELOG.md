@@ -1126,6 +1126,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd create --file` and other batch creates no longer fail with "issue
+  already exists" on an id bd generated itself. The batch chose every id
+  before it wrote any row, so two of its items could be handed the same short
+  hash id. Generated ids also skip ids held in the other storage plane. A
+  wisp or `--no-history` create could be refused because an imported or
+  promoted wisp's row in the durable table already held its id. On a
+  proxied-server workspace the same id was instead written into both tables
+  (#5106).
 - `bd dolt push <remote>` and `bd dolt pull <remote>` now push to and pull
   from the named remote. bd ignored the name, so `bd dolt push 1st` pushed to
   the default remote and reported "Push complete."; a name that differs from

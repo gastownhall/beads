@@ -111,6 +111,42 @@ func RunBatchCreatorCreatesEveryItemAsOneAct(t *testing.T, ctx context.Context, 
 	}
 }
 
+// RunBatchCreatorMintsADistinctIDForEachIdenticalItem pins that a GENERATED id
+// is never refused: ErrAlreadyExists is the refusal of an occupied EXPLICIT id
+// (issueops/batchcreator.go:21-25, 156-162), and an item that named no id
+// occupied nothing. Two items alike in every input an id is derived from —
+// title, description, created_at, and the batch's one actor — both land,
+// under two ids.
+//
+// IT IS THE STORE BODY'S CASE. ExecuteCreateBatch assigns every id before it
+// writes any row, so no table holds the first item's id yet when the second
+// item's is chosen; the unit-of-work body writes each item before it mints the
+// next. A body that refuses this pair also refuses, at random, two items that
+// differ and happen to draw the same short id, which is how it was found.
+func RunBatchCreatorMintsADistinctIDForEachIdenticalItem(t *testing.T, ctx context.Context, fixture BatchCreatorFixture) {
+	t.Helper()
+	at := time.Date(2021, 5, 6, 7, 8, 9, 123456789, time.UTC)
+	twin := func() publicops.BatchCreateItem {
+		return batchCreatorItem(&types.Issue{Title: fixture.IssuePrefix + " twin", Priority: 2, IssueType: types.TypeTask, CreatedAt: at})
+	}
+	result, err := fixture.BatchCreator.CreateBatch(ctx, publicops.CreateBatchRequest{
+		Actor: "batch-writer",
+		Items: []publicops.BatchCreateItem{twin(), twin()},
+	})
+	if err != nil {
+		t.Fatalf("CreateBatch(two identical items): %v; neither item named an id, so neither can be refused as occupied", err)
+	}
+	if len(result.Issues) != 2 || result.Issues[0] == nil || result.Issues[1] == nil {
+		t.Fatalf("CreateBatch returned %v for two items", result.Issues)
+	}
+	first, second := result.Issues[0].ID, result.Issues[1].ID
+	if first == "" || first == second {
+		t.Fatalf("CreateBatch handed the two items ids %q and %q, want two distinct generated ids", first, second)
+	}
+	assertBatchCreatorRowCount(t, ctx, fixture, "issues", first, 1)
+	assertBatchCreatorRowCount(t, ctx, fixture, "issues", second, 1)
+}
+
 // RunBatchCreatorRefusesEverythingWhenOneItemRefuses is the case this role
 // exists for (issueops/batchcreator.go:106-116, 117-124): a batch is ALL OR
 // NOTHING, so an item the batch cannot create leaves the items around it

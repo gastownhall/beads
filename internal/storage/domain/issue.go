@@ -79,10 +79,11 @@ type IssueSQLRepository interface {
 	// does.
 	GetMany(ctx context.Context, request publicops.GetManyRequest) (publicops.GetManyResult, error)
 	Exists(ctx context.Context, id string, opts IssueTableOpts) (bool, error)
-	// Taken reports whether id is unavailable to a fresh create in the
-	// plane opts names: a live row of that table holds it, or a retaining
-	// retention sweep retired it (either tombstone table). One statement.
-	Taken(ctx context.Context, id string, opts IssueTableOpts) (bool, error)
+	// Taken reports whether id is unavailable to a fresh create in either
+	// plane, whichever one it is minted for (issues and wisps share one id
+	// space): a live row of either table holds it, or a retaining retention
+	// sweep retired it (either tombstone table). One statement.
+	Taken(ctx context.Context, id string) (bool, error)
 	// Retired reports whether a retaining retention sweep retired id (either
 	// tombstone table), whatever the row tables hold.
 	Retired(ctx context.Context, id string) (bool, error)
@@ -1755,7 +1756,7 @@ func (u *issueUseCaseImpl) mintTopLevelID(ctx context.Context, issue *types.Issu
 	for length := baseLength; length <= cfg.MaxLength; length++ {
 		for nonce := 0; nonce < 10; nonce++ {
 			candidate := idgen.GenerateHashID(prefix, issue.Title, issue.Description, actor, issue.CreatedAt, length, nonce)
-			taken, err := u.issueRepo.Taken(ctx, candidate, tableOpts)
+			taken, err := u.issueRepo.Taken(ctx, candidate)
 			if err != nil {
 				return "", err
 			}

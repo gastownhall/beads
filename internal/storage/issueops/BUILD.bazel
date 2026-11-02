@@ -175,6 +175,7 @@ go_test(
         "execution_test.go",
         "filters_test.go",
         "gate_fields_test.go",
+        "generate_issue_id_test.go",
         "get_issue_test.go",
         "helpers_test.go",
         "id_coordination_test.go",
@@ -244,6 +245,7 @@ go_test(
     embed = [":issueops"],
     deps = [
         "//internal/config",
+        "//internal/idgen",
         "//internal/storage",
         "//internal/storage/depid",
         "//internal/storage/domain",
