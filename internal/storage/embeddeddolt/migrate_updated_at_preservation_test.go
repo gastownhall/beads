@@ -5,6 +5,8 @@ package embeddeddolt_test
 import (
 	"context"
 	"database/sql"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -155,5 +157,45 @@ func TestEmbeddedMigrate0046And0047KeepIssueUpdatedAt(t *testing.T) {
 		if got := readIsBlocked(t, ctx, conn, "issues", r.id); got != r.wantBlocked {
 			t.Errorf("issues %s: is_blocked = %v, want %v", r.id, got, r.wantBlocked)
 		}
+	}
+}
+
+// TestEmbeddedMigrate0047StepCommitKeepsIssueUpdatedAt is AC-2: the timestamp
+// is restored before 0047's per-step commit, not by some later pass. The pass
+// is stopped right after step 0047 commits; both the working row and the row
+// in that step's commit must hold the historical value. The blocked issue is
+// seeded already blocked, so only 0047's intermediate is_blocked = 0 (and its
+// recompute back to 1) touch it.
+func TestEmbeddedMigrate0047StepCommitKeepsIssueUpdatedAt(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+	dataDir := seedMainSchemaAt(t, ctx, 46)
+
+	conn, closeConn := openPinnedConn(t, ctx, dataDir)
+	defer closeConn()
+	insertStampedIssues(t, ctx, conn, "issues", blockingGraph, true)
+	insertIssueEdges(t, ctx, conn, blockingEdges)
+	commitFixture(t, ctx, conn, "test: v46 issues with historical updated_at")
+
+	restore := schema.SetMigrateStepFaultHookForTest(func(_ context.Context, _ schema.DBConn, version int) error {
+		if version == 47 {
+			return fmt.Errorf("injected fault: stop after migration %d", version)
+		}
+		return nil
+	})
+	_, err := schema.MigrateUp(ctx, conn)
+	restore()
+	if err == nil || !strings.Contains(err.Error(), "injected fault") {
+		t.Fatalf("MigrateUp err = %v, want the injected fault after 0047", err)
+	}
+	if v := currentMainVersion(t, ctx, conn); v != 47 {
+		t.Fatalf("main schema version = %d, want 47 (the pass must stop right after 0047)", v)
+	}
+	for _, r := range blockingGraph {
+		requireStamp(t, ctx, conn, "issues", r.id, r.stamp)
+		requireStamp(t, ctx, conn, "issues AS OF 'HEAD'", r.id, r.stamp)
+	}
+	if !readIsBlocked(t, ctx, conn, "issues AS OF 'HEAD'", "ua-blocked") {
+		t.Errorf("issues AS OF HEAD ua-blocked: is_blocked = false, want true after 0047's recompute")
 	}
 }
