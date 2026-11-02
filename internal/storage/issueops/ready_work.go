@@ -42,8 +42,9 @@ func buildReadyWorkOrder(policy types.SortPolicy) sqlbuild.ReadyWorkOrder {
 }
 
 // buildReadyWorkPredicates computes the ID sets the ready-work WHERE clause
-// needs (children of deferred parents, parent descendants), then delegates
-// the clause text to sqlbuild so both stacks share ready semantics.
+// needs (children of deferred parents, parent descendants, the family's
+// stale-flagged rows), then delegates the clause text to sqlbuild so both
+// stacks share ready semantics.
 func buildReadyWorkPredicates(ctx context.Context, tx DBTX, filter types.WorkFilter, tables FilterTables) (*readyWorkPredicates, error) {
 	var inputs sqlbuild.ReadyWorkWhereInputs
 	if !filter.IncludeDeferred {
@@ -64,6 +65,11 @@ func buildReadyWorkPredicates(ctx context.Context, tx DBTX, filter types.WorkFil
 		}
 		inputs.ParentDescendantIDs = descendantIDs
 	}
+	staleIDs, err := queryIDs(ctx, tx, sqlbuild.StaleBlockedIDsSQL(tables))
+	if err != nil {
+		return nil, fmt.Errorf("get ready work: stale blocked flags in %s: %w", tables.Main, err)
+	}
+	inputs.StaleBlockedIDs = map[string][]string{tables.Main: staleIDs}
 	return buildReadyWorkPredicatesFrom(filter, tables, inputs)
 }
 
@@ -182,6 +188,10 @@ func getReadyWispsInTx(ctx context.Context, tx DBTX, filter types.WorkFilter, de
 	if empty {
 		return nil, nil
 	}
+	stale, err := staleBlockedWispSetInTx(ctx, tx)
+	if err != nil {
+		return nil, err
+	}
 
 	wispFilter := readyWorkWispIssueFilter(filter)
 	if filter.Limit <= 0 {
@@ -193,7 +203,7 @@ func getReadyWispsInTx(ctx context.Context, tx DBTX, filter types.WorkFilter, de
 			}
 			return nil, fmt.Errorf("search wisps (ready work): %w", err)
 		}
-		return filterReadyWispsInTx(ctx, tx, filter, wisps, deferredChildIDs)
+		return filterReadyWispsInTx(ctx, tx, filter, wisps, deferredChildIDs, stale)
 	}
 
 	pageSize := readyWorkPageSize(filter.Limit)
@@ -215,7 +225,7 @@ func getReadyWispsInTx(ctx context.Context, tx DBTX, filter types.WorkFilter, de
 		if err != nil {
 			return nil, fmt.Errorf("search wisps (ready work): %w", err)
 		}
-		pageReady, err := filterReadyWispsInTx(ctx, tx, filter, pageWisps, deferredChildIDs)
+		pageReady, err := filterReadyWispsInTx(ctx, tx, filter, pageWisps, deferredChildIDs, stale)
 		if err != nil {
 			return nil, err
 		}
@@ -230,6 +240,21 @@ func getReadyWispsInTx(ctx context.Context, tx DBTX, filter types.WorkFilter, de
 		}
 	}
 	return ready, nil
+}
+
+// staleBlockedWispSetInTx reads the wisp family's stale-flagged rows
+// (sqlbuild.StaleBlockedIDsSQL). A database without wisp_dependencies has none
+// to read around, so the flag decides there as it always did.
+func staleBlockedWispSetInTx(ctx context.Context, tx DBTX) (map[string]bool, error) {
+	ids, err := queryIDs(ctx, tx, sqlbuild.StaleBlockedIDsSQL(WispsFilterTables))
+	if err != nil && !missingOptionalWispTable(err) {
+		return nil, fmt.Errorf("search wisps (ready work): stale blocked flags: %w", err)
+	}
+	stale := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		stale[id] = true
+	}
+	return stale, nil
 }
 
 func queryReadyWispIssueIDPage(ctx context.Context, tx DBTX, filter types.IssueFilter, excludeDeferred bool, orderBy sqlbuild.ReadyWorkOrder, limit, offset int) ([]string, error) {
@@ -360,7 +385,9 @@ func readyWorkWispIssueFilter(filter types.WorkFilter) types.IssueFilter {
 	return wispFilter
 }
 
-func filterReadyWispsInTx(ctx context.Context, tx DBTX, filter types.WorkFilter, wisps []*types.Issue, deferredChildIDs []string) ([]*types.Issue, error) {
+// filterReadyWispsInTx applies the ready predicates the wisp page query does
+// not. stale is the wisp family's stale-flagged rows (excludeBlockedWispsInTx).
+func filterReadyWispsInTx(ctx context.Context, tx DBTX, filter types.WorkFilter, wisps []*types.Issue, deferredChildIDs []string, stale map[string]bool) ([]*types.Issue, error) {
 	if len(wisps) == 0 {
 		return wisps, nil
 	}
@@ -410,31 +437,8 @@ func filterReadyWispsInTx(ctx context.Context, tx DBTX, filter types.WorkFilter,
 		}
 	}
 
-	for start := 0; start < len(wispIDs); start += queryBatchSize {
-		end := start + queryBatchSize
-		if end > len(wispIDs) {
-			end = len(wispIDs)
-		}
-		placeholders, args := buildSQLInClause(wispIDs[start:end])
-		//nolint:gosec // G201: only IN-clause placeholders are formatted in.
-		rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
-			SELECT id FROM wisps WHERE id IN (%s) AND is_blocked = 1
-		`, placeholders), args...)
-		if err != nil {
-			return nil, fmt.Errorf("get ready work: filter blocked wisps: %w", err)
-		}
-		for rows.Next() {
-			var id string
-			if err := rows.Scan(&id); err != nil {
-				_ = rows.Close()
-				return nil, fmt.Errorf("scan blocked wisp: %w", err)
-			}
-			excluded[id] = struct{}{}
-		}
-		_ = rows.Close()
-		if err := rows.Err(); err != nil {
-			return nil, fmt.Errorf("blocked wisp rows: %w", err)
-		}
+	if err := excludeBlockedWispsInTx(ctx, tx, wispIDs, stale, excluded); err != nil {
+		return nil, err
 	}
 
 	ready := wisps[:0]
@@ -448,6 +452,42 @@ func filterReadyWispsInTx(ctx context.Context, tx DBTX, filter types.WorkFilter,
 		ready = append(ready, wisp)
 	}
 	return ready, nil
+}
+
+// excludeBlockedWispsInTx adds to excluded the ids among wispIDs whose
+// is_blocked flag hides them from ready work: set, and not in stale, the wisp
+// family's sqlbuild.StaleBlockedIDsSQL set, which the ready WHERE reads around
+// on every other ready path (GH#3268).
+func excludeBlockedWispsInTx(ctx context.Context, tx DBTX, wispIDs []string, stale map[string]bool, excluded map[string]struct{}) error {
+	for start := 0; start < len(wispIDs); start += queryBatchSize {
+		end := start + queryBatchSize
+		if end > len(wispIDs) {
+			end = len(wispIDs)
+		}
+		placeholders, args := buildSQLInClause(wispIDs[start:end])
+		//nolint:gosec // G201: only IN-clause placeholders are formatted in.
+		rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
+			SELECT id FROM wisps WHERE id IN (%s) AND is_blocked = 1
+		`, placeholders), args...)
+		if err != nil {
+			return fmt.Errorf("get ready work: filter blocked wisps: %w", err)
+		}
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				_ = rows.Close()
+				return fmt.Errorf("scan blocked wisp: %w", err)
+			}
+			if !stale[id] {
+				excluded[id] = struct{}{}
+			}
+		}
+		_ = rows.Close()
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("blocked wisp rows: %w", err)
+		}
+	}
+	return nil
 }
 
 func sortReadyIssues(issues []*types.Issue, policy types.SortPolicy) {

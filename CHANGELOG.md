@@ -1168,6 +1168,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   each refresh, and `bd list --watch --parent` reads its tree in one
   transaction, so other bd commands on an embedded workspace no longer stall
   behind a large watched tree (#3415).
+- `bd ready` no longer hides an open issue whose `is_blocked` flag is stale
+  while it has no open blocking dependency (#3268): the ready query now
+  trusts the flag only for an issue that is the source of a `blocks`,
+  `parent-child`, `conditional-blocks` or `waits-for` edge, so the direct and
+  domain stacks, wisps included, list it again. When nothing is ready,
+  `bd ready` says "all issues have blocking dependencies" only if `bd blocked`
+  lists an issue the listing would otherwise show, and says nothing is
+  blocked only when that holds for its filters; otherwise it points at
+  `bd blocked`, `bd list`, `bd doctor` and `bd recompute-blocked`. An empty
+  `--offset` page (`--proxied-server`) says only that the offset is past the
+  last ready issue.
 - The `### Dependencies` (or `### Deps`) section of a `bd create --file`
   batch now reads its entries the way `bd create --deps` does (#7508).
   `depends-on:<id>` and `blocked-by:<id>` now block: they used to be stored

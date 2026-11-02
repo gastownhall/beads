@@ -459,6 +459,7 @@ go_library(
         "//internal/storage/issueops",
         "//internal/storage/kvkeys",
         "//internal/storage/schema",
+        "//internal/storage/sqlbuild",
         "//internal/storage/sqlclass",
         "//internal/storage/uow",
         "//internal/storage/versioncontrolops",
