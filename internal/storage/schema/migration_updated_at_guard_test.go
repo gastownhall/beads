@@ -3,6 +3,9 @@ package schema
 import (
 	"context"
 	"errors"
+	"fmt"
+	"regexp"
+	"sort"
 	"strings"
 	"testing"
 
@@ -341,6 +344,245 @@ func TestUpdatedAtGuardRestoresTimestampsAroundRegisteredStep(t *testing.T) {
 		}
 		if err := mock.ExpectationsWereMet(); err != nil {
 			t.Fatalf("unmet sql expectations (batch shape or order wrong): %v", err)
+		}
+	})
+}
+
+// The census half of the guard tests (#5981): the registry is only as good
+// as its coverage of the shipped SQL, so TestMigrationUpdatesOfAutoStamped-
+// TablesKeepUpdatedAt re-derives, from the migration files themselves, which
+// tables re-stamp on UPDATE and which migration statements rewrite them
+// without assigning updated_at, and fails when any such statement lacks a
+// guard entry with the right restore target.
+
+// censusFile is one shipped migration's identity plus its SQL.
+type censusFile struct {
+	cursorTable string
+	name        string
+	version     int
+	content     string
+}
+
+// censusMigrationContents reads every shipped .up.sql file in both series.
+func censusMigrationContents(t *testing.T) []censusFile {
+	t.Helper()
+	var files []censusFile
+	for _, src := range []migrationSource{mainSource, ignoredSource} {
+		for _, mf := range src.list() {
+			data, err := src.files.ReadFile(src.dir + "/" + mf.name)
+			if err != nil {
+				t.Fatalf("read migration %s: %v", mf.name, err)
+			}
+			files = append(files, censusFile{cursorTable: src.cursorTable, name: mf.name, version: mf.version, content: string(data)})
+		}
+	}
+	return files
+}
+
+var (
+	// A CREATE TABLE line opens the column list the tracked table owns until
+	// the next one; __temp__ prefixes are dropped (ignored/0001 builds wisps
+	// as __temp__wisps and renames it).
+	censusCreateTableRE = regexp.MustCompile(`(?i)^\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?` + "`?" + `([A-Za-z0-9_]+)`)
+	// A column line defining the auto-stamp clause the guard exists to undo.
+	censusAutoStampRE = regexp.MustCompile(`(?i)^\s*updated_at\b.*ON\s+UPDATE\s+CURRENT_TIMESTAMP`)
+	// Any UPDATE token, including the ones living inside prepared-statement
+	// strings (0035/0053's ephemeral flips) — those are real statements the
+	// engine executes.
+	censusUpdateRE = regexp.MustCompile(`(?i)\bUPDATE\s+([A-Za-z_][A-Za-z0-9_]*)`)
+	// The self-protecting form 0059/ignored-0015 use.
+	censusSelfAssignRE = regexp.MustCompile(`(?i)updated_at\s*=\s*updated_at`)
+)
+
+// censusAutoStampedTables scans both series' DDL for tables whose updated_at
+// column carries ON UPDATE CURRENT_TIMESTAMP — the tables an UPDATE that
+// forgets the column silently re-stamps.
+func censusAutoStampedTables(files []censusFile) map[string]bool {
+	stamped := make(map[string]bool)
+	for _, f := range files {
+		table := ""
+		for _, line := range strings.Split(f.content, "\n") {
+			if m := censusCreateTableRE.FindStringSubmatch(line); m != nil {
+				table = strings.TrimPrefix(m[1], "__temp__")
+				continue
+			}
+			if table != "" && censusAutoStampRE.MatchString(line) {
+				stamped[table] = true
+			}
+		}
+	}
+	return stamped
+}
+
+// censusUnsafeUpdatesIn scans one migration's SQL for UPDATE statements that
+// rewrite an auto-stamped table without assigning updated_at: ON UPDATE
+// clauses in DDL/FK definitions (the token preceded by "ON ") and statements
+// that self-assign `updated_at = updated_at` within the statement are not
+// unsafe. The statement window runs to the next `;` — the shipped UPDATE
+// statements carry no semicolons inside their string literals.
+func censusUnsafeUpdatesIn(content string, stamped map[string]bool) []string {
+	var out []string
+	for _, m := range censusUpdateRE.FindAllStringSubmatchIndex(content, -1) {
+		table := content[m[2]:m[3]]
+		if !stamped[table] {
+			continue
+		}
+		if m[0] >= 3 && strings.EqualFold(content[m[0]-3:m[0]], "ON ") {
+			continue
+		}
+		windowEnd := strings.IndexByte(content[m[1]:], ';')
+		if windowEnd < 0 {
+			windowEnd = len(content)
+		} else {
+			windowEnd += m[1]
+		}
+		if censusSelfAssignRE.MatchString(content[m[1]:windowEnd]) {
+			continue
+		}
+		out = append(out, table)
+	}
+	return out
+}
+
+// censusCoverageProblems reports, one line each, every migration version that
+// rewrites an auto-stamped table without a guard plan restoring that exact
+// table (and snapshotting it). guards is a parameter, not the global, so the
+// mutation subtests can run a doctored copy.
+func censusCoverageProblems(files []censusFile, stamped map[string]bool, guards map[repairKey]updatedAtGuardPlan) []string {
+	rewrites := make(map[repairKey]map[string]bool)
+	for _, f := range files {
+		for _, table := range censusUnsafeUpdatesIn(f.content, stamped) {
+			key := repairKey{f.cursorTable, f.version}
+			if rewrites[key] == nil {
+				rewrites[key] = make(map[string]bool)
+			}
+			rewrites[key][table] = true
+		}
+	}
+	var problems []string
+	for key, tables := range rewrites {
+		plan, ok := guards[key]
+		if !ok {
+			problems = append(problems, fmt.Sprintf("%s version %d rewrites an auto-stamped table without an updated_at guard entry", key.cursorTable, key.version))
+			continue
+		}
+		for table := range tables {
+			if plan.RestoreTable != table {
+				problems = append(problems, fmt.Sprintf("%s version %d rewrites %s but the guard restores %s", key.cursorTable, key.version, table, plan.RestoreTable))
+			}
+			snapshotted := false
+			for _, st := range plan.SnapshotTables {
+				if st == table {
+					snapshotted = true
+				}
+			}
+			if !snapshotted {
+				problems = append(problems, fmt.Sprintf("%s version %d rewrites %s but the guard never snapshots it", key.cursorTable, key.version, table))
+			}
+		}
+	}
+	sort.Strings(problems)
+	return problems
+}
+
+// TestMigrationUpdatesOfAutoStampedTablesKeepUpdatedAt is the census for
+// #5981: every UPDATE a shipped migration issues against an auto-stamped
+// table is either self-protecting (updated_at = updated_at, the 0059 shape)
+// or covered by a guard registry entry whose restore target is the rewritten
+// table. A new migration that forgets the rule fails the pinned-findings
+// subtest; a registry edit that drops or misaims coverage fails the coverage
+// subtests — including the two mutation proofs the AC names (remove main/47,
+// add an unguarded UPDATE).
+func TestMigrationUpdatesOfAutoStampedTablesKeepUpdatedAt(t *testing.T) {
+	failOnSwallowedAdvisory(t)
+	files := censusMigrationContents(t)
+	stamped := censusAutoStampedTables(files)
+
+	t.Run("auto-stamped table set is pinned", func(t *testing.T) {
+		want := []string{"federation_peers", "issues", "routes", "wisps"}
+		var got []string
+		for table := range stamped {
+			got = append(got, table)
+		}
+		sort.Strings(got)
+		if len(got) != len(want) {
+			t.Fatalf("auto-stamped tables = %v, want %v (a DDL change here must be reflected in the guard census)", got, want)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("auto-stamped tables = %v, want %v (a DDL change here must be reflected in the guard census)", got, want)
+			}
+		}
+	})
+
+	t.Run("unsafe UPDATE findings are pinned", func(t *testing.T) {
+		var got []string
+		for _, f := range files {
+			for _, table := range censusUnsafeUpdatesIn(f.content, stamped) {
+				got = append(got, f.name+" -> "+table)
+			}
+		}
+		sort.Strings(got)
+		want := []string{
+			"0007_recompute_wisp_is_blocked.up.sql -> wisps",
+			"0007_recompute_wisp_is_blocked.up.sql -> wisps",
+			"0035_migrate_infra_to_wisps.up.sql -> wisps",
+			"0046_add_is_blocked.up.sql -> issues",
+			"0046_add_is_blocked.up.sql -> issues",
+			"0047_recompute_mixed_is_blocked.up.sql -> issues",
+			"0047_recompute_mixed_is_blocked.up.sql -> issues",
+			"0053_repair_rig_wisps.up.sql -> issues",
+		}
+		if len(got) != len(want) {
+			t.Fatalf("census found %d unsafe UPDATEs (%v), want the pinned %d (%v): a new migration that rewrites an auto-stamped table without assigning updated_at needs a guard registry entry", len(got), got, len(want), want)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("census findings = %v, want %v", got, want)
+			}
+		}
+	})
+
+	t.Run("every unsafe UPDATE has the correct restore target", func(t *testing.T) {
+		if problems := censusCoverageProblems(files, stamped, updatedAtGuards); len(problems) > 0 {
+			t.Fatalf("unsafe UPDATEs without correct guard coverage:\n%s", strings.Join(problems, "\n"))
+		}
+	})
+
+	t.Run("removing main/47 coverage fails the census", func(t *testing.T) {
+		doctored := make(map[repairKey]updatedAtGuardPlan, len(updatedAtGuards))
+		for k, v := range updatedAtGuards {
+			doctored[k] = v
+		}
+		delete(doctored, repairKey{"schema_migrations", 47})
+		problems := censusCoverageProblems(files, stamped, doctored)
+		if len(problems) == 0 {
+			t.Fatal("census accepted a registry without main/47 coverage; it must fail")
+		}
+		if !strings.Contains(problems[0], "version 47") {
+			t.Fatalf("census blamed %q, want the missing main/47 entry", problems[0])
+		}
+	})
+
+	t.Run("an unguarded UPDATE fails the census", func(t *testing.T) {
+		synthetic := []censusFile{{
+			cursorTable: mainSource.cursorTable,
+			name:        "9999_synthetic.up.sql",
+			version:     9999,
+			content:     "UPDATE issues SET priority = 1;\nUPDATE issues SET is_blocked = 1, updated_at = updated_at;",
+		}}
+		// The scanner itself must find the unguarded statement and skip the
+		// self-protecting one.
+		got := censusUnsafeUpdatesIn(synthetic[0].content, stamped)
+		if len(got) != 1 || got[0] != "issues" {
+			t.Fatalf("scanner findings on synthetic SQL = %v, want exactly [issues] (the unguarded statement; the self-assigning one is safe)", got)
+		}
+		problems := censusCoverageProblems(synthetic, stamped, updatedAtGuards)
+		if len(problems) == 0 {
+			t.Fatal("census accepted an unguarded UPDATE; it must fail")
+		}
+		if !strings.Contains(problems[0], "version 9999") {
+			t.Fatalf("census blamed %q, want the synthetic version", problems[0])
 		}
 	})
 }
