@@ -1150,8 +1150,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   symlink, install copied preexisting hooks into, and wrote bd sections over
   hooks in, the link's target, then pointed `core.hooksPath` at it. Install
   now refuses such a directory, dangling links included, before any of those
-  steps; a symlinked `.beads` workspace above it is still supported (#7889,
-  #8070, from @Wenjix).
+  steps; a symlinked `.beads` workspace above it is still supported. Hook
+  migration likewise refuses to create a hook whose parent directory is a
+  symlink. `bd hooks uninstall` refuses a symlinked hooks directory before
+  editing hooks or resetting `core.hooksPath`, leaves symlinked hooks alone,
+  and restores a legacy `.backup` only when it is a regular file, so a
+  symlink or directory never becomes the hook (#7889, #8070, from @Wenjix).
 
 - `bd compact` no longer silently changes row data when commit dates are out
   of history order across the cutoff. When a recent-dated commit came before
