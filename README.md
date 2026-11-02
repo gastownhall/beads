@@ -78,6 +78,23 @@ This project uses bd (beads) for issue tracking.
 | `bd prime` | Print agent workflow context and persistent memories. |
 | `bd remember "insight"` | Store project memory that `bd prime` injects later. |
 
+### Auditing Agent Rules
+
+`bd rules audit` scans `.claude/rules/` for contradictions and merge
+candidates. `bd rules compact` turns a group into one composite, and only
+ever merges on explicit consent:
+
+```bash
+bd rules compact --auto              # Preview the audit's suggested merges
+bd rules compact --auto --force      # Apply them: write composites, back up every source, then delete it
+bd rules compact --group alpha,beta --force
+```
+
+A composite keeps only the `**Do:**`/`**Don't:**` directives; the preview
+lists any prose it would drop, per source. Applying writes
+`<rule>.md.backup` beside each source before deleting it. To undo a merge,
+delete the composite and restore the backups (`mv alpha.md.backup alpha.md`).
+
 ## 🔗 Hierarchy & Workflow
 
 Beads supports hierarchical IDs for epics:

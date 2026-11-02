@@ -96,7 +96,7 @@ Flags:
   --group        List of rule filenames (without .md) to merge
   --auto         Run an audit and use its merge candidates as the groups
   --dry-run      Preview merged output without writing files (the default)
-  --force        Write the composite and delete the source files
+  --force        Write the composite, back up every source, then delete it
   --json         Structured JSON output
 ```
 
@@ -113,15 +113,28 @@ Preview merge → agent-discipline.md:
 Source rules: agent-spawn-discipline.md, agent-efficiency.md, agent-token-efficiency.md
 ────────────────────────────────────
 Would delete: agent-spawn-discipline.md, agent-efficiency.md, agent-token-efficiency.md
+Would back up: agent-spawn-discipline.md → agent-spawn-discipline.md.backup, ...
+Composites keep only Do/Don't directives; any other prose is not carried over.
+  Not carried from agent-spawn-discipline.md (kept in agent-spawn-discipline.md.backup once applied):
+    # Agent Spawn Discipline
+    ## Rationale
+    ...
 
 Preview only, nothing written. Re-run with --force to write the composite and delete its source files.
 ```
 
-Re-running with `--force` writes the composite and deletes the sources. The
+Re-running with `--force` writes the composite, copies every source to
+`<source>.md.backup`, and only then deletes the sources: a backup or delete
+failure stops the merge and reports what completed, and nothing is deleted
+before every backup succeeded. To undo an applied merge, delete the
+composite and restore the backups (`mv alpha.md.backup alpha.md`). The
 confirmation is a flag rather than a `[y/N]` prompt so the command behaves the
 same in noninteractive workflows, the same shape as `bd delete --force`.
-Compact refuses to write a composite over an existing file, including one of
-its own sources.
+Compact refuses to write a composite or a backup over an existing path,
+including one of its own sources, and refuses an output name another group
+in the same `--auto` run already claimed. Rules with no Do/Don't directives
+never join a merge — `--auto` excludes them with a warning, and a group
+left with fewer than two contributors is skipped whole, `--force` included.
 
 ---
 
@@ -203,8 +216,8 @@ Given a group of rules to merge:
 **Don't:** {deduplicated don't entries, newline-separated}
 ```
 
-6. Without --force, show the composite and the files it would delete, and stop
-7. With --force: create the merged file (refusing if the path exists), then delete source files, reporting any delete that fails
+6. Without --force, show the composite, the files it would delete, the .backup copy each gets, and the prose the composite would not carry, and stop
+7. With --force: create the merged file (refusing if any output or backup path exists), copy every source to <source>.md.backup, and delete the source files only after every backup succeeded, reporting any failure
 
 ---
 

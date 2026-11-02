@@ -1130,6 +1130,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd rules compact` keeps a recovery copy of everything it deletes.**
+  A forced merge now copies each source's complete bytes to
+  `<source>.md.backup` (exclusive create, mode 0600) before deleting it and
+  deletes nothing until every backup succeeded, so GH#5719's silent,
+  unrecoverable prose loss can no longer happen. Previews and applies
+  disclose the prose a composite omits, per source, in text and JSON.
+  Output and backup destinations that already exist are refused by name —
+  a dangling symlink counts, and duplicate output names within one
+  `--auto` run are caught even in preview — and rules with no Do/Don't
+  directives never join a merge: they are excluded with a warning, and a
+  group left with fewer than two contributors is skipped whole, `--force`
+  included. To undo an applied merge, delete the composite and restore the
+  backups (`mv alpha.md.backup alpha.md`).
+  ([#5719](https://github.com/gastownhall/beads/issues/5719))
 - **`bd rules compact` no longer overwrites an existing file.** A source named
   like the composite was overwritten and then deleted with the other sources,
   leaving nothing, and an unrelated rule with that name was silently replaced.

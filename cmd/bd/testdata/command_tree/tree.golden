@@ -6386,12 +6386,19 @@ bd rules compact
     |
     | A composite keeps only the **Do:** and **Don't:** lines of its sources, plus a
     | "Source rules:" line naming them. Any other prose in the source files is not
-    | carried over, and the source files are deleted when the merge is applied.
+    | carried over; a preview lists the omitted lines for each source. Rules with
+    | no Do/Don't directives never join a merge: a composite would drop their
+    | prose entirely.
     |
-    | Without --force, compact only prints the composite and the files it would
-    | delete. With --force it writes the composite and deletes the sources. It
-    | refuses to write a composite over an existing file, including one of its own
-    | sources.
+    | Without --force, compact only prints the composite, the files it would
+    | delete, and the .backup copy it would write beside each one. With --force it
+    | writes the composite, copies every source to <source>.md.backup, and only
+    | then deletes the sources; if a backup or delete fails it stops and reports
+    | what completed. It refuses to write over an existing path, including one of
+    | its own sources.
+    |
+    | To undo an applied merge, delete the composite and restore the backups:
+    | mv alpha.md.backup alpha.md
     |
     | Examples:
     |   bd rules compact --auto                    # Preview the audit's suggested merges
