@@ -5368,8 +5368,13 @@ bd mol wisp gc
     | cascade. The setting is read from the database only, unset by default (it
     | protects nothing until a workspace names its labels), and matched exactly:
     |   bd config set wisp.protected_labels keep:mail,keep:alert
-    | --exclude-label adds labels for one run. 'bd delete' still deletes a
-    | protected wisp on purpose.
+    | --exclude-label adds labels for one run. Text output reports how many wisps
+    | a protected label held back. If the setting cannot be read or parsed, GC
+    | aborts with nothing deleted; if dependents cannot be fetched, it warns
+    | "cascade expansion incomplete" and deletes no wisp reachable only through
+    | them. Only this command honors the setting: other sweeps (bd purge, bd gc,
+    | bd admin cleanup) and a bd from before it ignore it, and 'bd delete' still
+    | deletes a protected wisp on purpose.
     |
     | Abandoned wisps are deleted without creating a digest. Use 'bd mol squash'
     | if you want to preserve a summary before garbage collection.

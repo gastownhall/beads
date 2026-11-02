@@ -158,7 +158,7 @@ func TestWispGCExcludeLabelAddsToSetting(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseExcludeLabels: %v", err)
 	}
-	aged, err := selectAbandonedWisps(context.Background(), r, true, time.Hour, nil, extra)
+	aged, _, err := selectAbandonedWisps(context.Background(), r, true, time.Hour, nil, extra)
 	if err != nil {
 		t.Fatalf("selectAbandonedWisps: %v", err)
 	}
@@ -176,5 +176,39 @@ func TestWispGCExcludeLabelAddsToSetting(t *testing.T) {
 
 	if _, err := parseExcludeLabels([]string{"keep mail"}); err == nil {
 		t.Errorf("parseExcludeLabels accepted a name containing whitespace")
+	}
+}
+
+// TestWispGCLabelSkipCountIsDistinct pins the count behind "Skipping N
+// wisp(s) carrying a protected label": distinct wisps a label alone held back.
+// A labeled wisp the sweep reached and the cascade reached again counts once,
+// and a closed one only the cascade reached counts. One too young, one live
+// work or a pin protects anyway, and a closed one the sweep passes over
+// without --all (no parent reaches it), is not a label skip: counting them
+// would overstate the setting's reach and read as misconfiguration.
+func TestWispGCLabelSkipCountIsDistinct(t *testing.T) {
+	stale := time.Now().Add(-24 * time.Hour)
+	parent := &types.Issue{ID: "gc-parent", Status: types.StatusOpen, UpdatedAt: stale}
+	twice := &types.Issue{ID: "gc-twice", Status: types.StatusOpen, UpdatedAt: stale, Labels: []string{"keep:mail"}}
+	step := &types.Issue{ID: "gc-step", Status: types.StatusClosed, UpdatedAt: stale, Labels: []string{"keep:mail"}}
+	young := &types.Issue{ID: "gc-young", Status: types.StatusOpen, UpdatedAt: time.Now(), Labels: []string{"keep:mail"}}
+	live := &types.Issue{ID: "gc-live", Status: types.StatusInProgress, UpdatedAt: stale, Labels: []string{"keep:mail"}}
+	pinned := &types.Issue{ID: "gc-pinned", Status: types.StatusOpen, UpdatedAt: stale, Pinned: true, Labels: []string{"keep:mail"}}
+	closed := &types.Issue{ID: "gc-closed", Status: types.StatusClosed, UpdatedAt: stale, Labels: []string{"keep:mail"}}
+
+	r := &cascadeAgeReader{
+		issues:   []*types.Issue{parent, twice, step, young, live, pinned, closed},
+		children: map[string]bool{twice.ID: true, step.ID: true},
+		config:   map[string]string{protectedLabelsKey: "keep:mail"},
+	}
+	got, skips, err := selectAbandonedWisps(context.Background(), r, false, time.Hour, nil, nil)
+	if err != nil {
+		t.Fatalf("selectAbandonedWisps: %v", err)
+	}
+	if ids := collectedIDs(got); len(ids) != 1 || !ids[parent.ID] {
+		t.Errorf("selected %v, want only %s", ids, parent.ID)
+	}
+	if skips != 2 {
+		t.Errorf("label skips = %d, want 2 (%s once though reached twice, and %s)", skips, twice.ID, step.ID)
 	}
 }

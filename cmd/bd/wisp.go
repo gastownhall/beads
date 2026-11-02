@@ -10,6 +10,7 @@ import (
 	"unicode"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/formula"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
@@ -634,8 +635,13 @@ reclaimed, in any mode (age, --all, --closed) and on either side of a
 cascade. The setting is read from the database only, unset by default (it
 protects nothing until a workspace names its labels), and matched exactly:
   bd config set wisp.protected_labels keep:mail,keep:alert
---exclude-label adds labels for one run. 'bd delete' still deletes a
-protected wisp on purpose.
+--exclude-label adds labels for one run. Text output reports how many wisps
+a protected label held back. If the setting cannot be read or parsed, GC
+aborts with nothing deleted; if dependents cannot be fetched, it warns
+"cascade expansion incomplete" and deletes no wisp reachable only through
+them. Only this command honors the setting: other sweeps (bd purge, bd gc,
+bd admin cleanup) and a bd from before it ignore it, and 'bd delete' still
+deletes a protected wisp on purpose.
 
 Abandoned wisps are deleted without creating a digest. Use 'bd mol squash'
 if you want to preserve a summary before garbage collection.
@@ -846,6 +852,9 @@ func runWispGC(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return HandleError("%v", err)
 	}
+	if msg := config.ProtectedWispLabelsYAMLWarning(); msg != "" {
+		WarnError("%s", msg)
+	}
 
 	if usesProxiedServer() {
 		return runWispGCProxiedServer(rootCtx, dryRun, ageThreshold, cleanAll, closedMode, force, excludeTypes, excludeLabels)
@@ -859,12 +868,15 @@ func runWispGC(cmd *cobra.Command, args []string) error {
 		return runWispPurgeClosed(ctx, dryRun, force, excludeTypes, excludeLabels)
 	}
 
-	abandoned, err := selectAbandonedWisps(ctx, store, cleanAll, ageThreshold, excludeTypes, excludeLabels)
+	abandoned, labelSkips, err := selectAbandonedWisps(ctx, store, cleanAll, ageThreshold, excludeTypes, excludeLabels)
 	if err != nil && abandoned == nil {
 		return HandleError("%v", err)
 	}
 	if err != nil {
 		fmt.Fprintf(cmd.ErrOrStderr(), "Warning: cascade expansion incomplete: %v\n", err)
+	}
+	if !jsonOutput {
+		reportProtectedLabelSkips(labelSkips)
 	}
 
 	if len(abandoned) == 0 {
@@ -945,13 +957,18 @@ var wispGCNow = time.Now
 
 // findAbandonedWisps is selectAbandonedWisps with no --exclude-label names.
 func findAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageThreshold time.Duration, excludeTypes []types.IssueType) ([]*types.Issue, error) {
-	return selectAbandonedWisps(ctx, r, cleanAll, ageThreshold, excludeTypes, nil)
+	abandoned, _, err := selectAbandonedWisps(ctx, r, cleanAll, ageThreshold, excludeTypes, nil)
+	return abandoned, err
 }
 
 // selectAbandonedWisps returns the wisps age GC deletes: the abandoned ones
 // and their unprotected dependents. excludeLabels adds to the
 // wisp.protected_labels setting for this run.
-func selectAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageThreshold time.Duration, excludeTypes []types.IssueType, excludeLabels []string) ([]*types.Issue, error) {
+//
+// It also returns how many distinct wisps a protected label alone held back:
+// ones that were otherwise eligible (old enough, not live work), whether the
+// sweep or the cascade reached them.
+func selectAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageThreshold time.Duration, excludeTypes []types.IssueType, excludeLabels []string) ([]*types.Issue, int, error) {
 	ephemeralFlag := true
 	filter := types.IssueFilter{
 		Ephemeral:    &ephemeralFlag,
@@ -960,12 +977,12 @@ func selectAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageTh
 	}
 	issues, err := r.SearchIssues(ctx, "", filter)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	blocked, err := r.GetBlockedIssues(ctx, types.WorkFilter{})
 	if err != nil {
-		return nil, fmt.Errorf("determining blocked wisps for age GC: %w", err)
+		return nil, 0, fmt.Errorf("determining blocked wisps for age GC: %w", err)
 	}
 	blockedSet := make(map[string]bool, len(blocked))
 	for _, b := range blocked {
@@ -974,13 +991,14 @@ func selectAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageTh
 
 	protectedStatuses, err := protectedWispStatuses(ctx, r)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	protectedLabels, err := protectedWispLabels(ctx, r, excludeLabels)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
+	labelSkipped := make(map[string]bool)
 
 	guard := wispGuard{blocked: blockedSet, statuses: protectedStatuses, labels: protectedLabels}
 
@@ -1000,13 +1018,14 @@ func selectAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageTh
 			continue
 		}
 		if guard.hasProtectedLabel(issue) {
+			labelSkipped[issue.ID] = true
 			continue
 		}
 		abandoned = append(abandoned, issue)
 	}
 
 	if len(abandoned) == 0 {
-		return abandoned, nil
+		return abandoned, len(labelSkipped), nil
 	}
 
 	parentIDs := make([]string, len(abandoned))
@@ -1056,13 +1075,14 @@ func selectAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageTh
 				// Per record: recursion has already expanded past a protected
 				// step, so its own unprotected dependents stay eligible.
 				if guard.hasProtectedLabel(child) {
+					labelSkipped[child.ID] = true
 					continue
 				}
 				abandoned = append(abandoned, child)
 			}
 		}
 	}
-	return abandoned, cascadeErr
+	return abandoned, len(labelSkipped), cascadeErr
 }
 
 // closedPurgeSkips counts the closed wisps a purge declined to delete, by
@@ -1081,8 +1101,15 @@ func (c closedPurgeSkips) report() {
 	if c.infra > 0 {
 		fmt.Printf("Skipping %d configured infra issue(s) protected from GC\n", c.infra)
 	}
-	if c.labeled > 0 {
-		fmt.Printf("Skipping %d wisp(s) carrying a protected label\n", c.labeled)
+	reportProtectedLabelSkips(c.labeled)
+}
+
+// reportProtectedLabelSkips prints, in text mode, how many otherwise eligible
+// wisps a wisp.protected_labels or --exclude-label label held back, so a
+// short candidate list is not mistaken for "nothing else was old enough".
+func reportProtectedLabelSkips(n int) {
+	if n > 0 {
+		fmt.Printf("Skipping %d wisp(s) carrying a protected label\n", n)
 	}
 }
 

@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`wisp.protected_labels`: labels `bd mol wisp gc` never reclaims.** A wisp
+  carrying any label named in this setting is spared by age GC, `--all`,
+  `--closed` and the cascade from an abandoned parent, on direct and
+  proxied-server workspaces; `wisp gc --exclude-label` adds labels for one run,
+  and text output reports `Skipping N wisp(s) carrying a protected label`.
+  Unset by default (no label is protected until a workspace names its own, e.g.
+  `bd config set wisp.protected_labels keep:mail,keep:alert`), matched exactly,
+  and read from the workspace database only: a `config.yaml` or environment
+  value is ignored with a warning. GC aborts with nothing deleted when the
+  setting cannot be read or parsed, and the proxied cascade no longer treats a
+  failed label read as "no labels": when cascade dependents cannot be fetched,
+  GC warns `cascade expansion incomplete` and deletes no wisp reachable only
+  through them. Other sweeps (`bd purge`, `bd gc`, `bd admin cleanup`) and a
+  `bd` from before this setting ignore it, and `bd delete` still deletes a
+  protected wisp on purpose. Builds on #6266.
+
 - **`arrival_seq`, a commit-ordered create sequence on wisp-plane rows.**
   While a workspace journals, every `ephemeral` or `no_history` bead it creates
   is stamped with the `seq` of its own `create` journal record, in the same

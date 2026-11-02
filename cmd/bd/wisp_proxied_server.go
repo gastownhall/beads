@@ -141,13 +141,16 @@ func runWispGCProxiedServer(ctx context.Context, dryRun bool, ageThreshold time.
 		return err
 	}
 	r := uowMolReader{uw: uw}
-	abandoned, err := selectAbandonedWisps(ctx, r, cleanAll, ageThreshold, excludeTypes, excludeLabels)
+	abandoned, labelSkips, err := selectAbandonedWisps(ctx, r, cleanAll, ageThreshold, excludeTypes, excludeLabels)
 	uw.Close(ctx)
 	if err != nil && abandoned == nil {
 		return HandleError("%v", err)
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: cascade expansion incomplete: %v\n", err)
+	}
+	if !jsonOutput {
+		reportProtectedLabelSkips(labelSkips)
 	}
 
 	if len(abandoned) == 0 {

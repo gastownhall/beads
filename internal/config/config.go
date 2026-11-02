@@ -1209,6 +1209,20 @@ func RetainedTypesYAMLWarning() string {
 	return fmt.Sprintf("types.retained in config.yaml (%s) is ignored: it is read from the workspace database only; set it with `bd config set types.retained %s`", list, list)
 }
 
+// ProtectedWispLabelsYAMLWarning is the warning for a wisp.protected_labels
+// key in config.yaml (or BD_WISP_PROTECTED_LABELS), or "" when there is none.
+// `bd mol wisp gc` reads the setting from the workspace database only, for the
+// reason types.retained is, and prints this before it selects: the key here
+// would otherwise look like protection while protecting nothing.
+func ProtectedWispLabelsYAMLWarning() string {
+	names := getConfigList("wisp.protected_labels")
+	if len(names) == 0 {
+		return ""
+	}
+	list := strings.Join(names, ",")
+	return fmt.Sprintf("wisp.protected_labels in config.yaml (%s) is ignored: it is read from the workspace database only; set it with `bd config set wisp.protected_labels %s`", list, list)
+}
+
 // GetCustomStatusesFromYAML retrieves custom statuses from config.yaml.
 // This is used as a fallback when the database doesn't have status.custom set yet
 // or when the database connection is temporarily unavailable.
