@@ -175,6 +175,7 @@ func setGitAuthorEnv(t *testing.T, name, email string) {
 // an embedded store creates to GIT_AUTHOR_NAME / GIT_AUTHOR_EMAIL, the way
 // server mode authors them.
 func TestEmbeddedCommitAuthorFollowsGitAuthorEnv(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
 	const name, email = "Alice Author", "alice@example.com"
 
 	t.Run("transactions", func(t *testing.T) {
@@ -339,4 +340,32 @@ func TestEmbeddedCommitAuthorFollowsGitAuthorEnv(t *testing.T) {
 			t.Errorf("recompute commit message = %q, want %q", head.message, versioncontrolops.BlockedRecomputeCommitMsg)
 		}
 	})
+}
+
+// TestEmbeddedCommitAuthorDefaults pins the unchanged anonymous identity for a
+// writer that sets nothing: beads <beads@local> on transactional AND
+// whole-working-set commits (the latter recorded root <root@%> before
+// GH#7628).
+func TestEmbeddedCommitAuthorDefaults(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	setGitAuthorEnv(t, "", "")
+	ctx := t.Context()
+	te := newTestEnv(t, "authd")
+
+	before := te.readHead(t, ctx)
+	issue := &types.Issue{Title: "anonymous", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	if err := te.store.RunInTransaction(ctx, "bd: create issue", func(tx storage.Transaction) error {
+		return tx.CreateIssue(ctx, issue, "someone")
+	}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	head := te.readHead(t, ctx)
+	requireNewCommitBy(t, "transaction", before, head, "beads", "beads@local")
+
+	te.exec(t, ctx, "INSERT INTO config (`key`, value) VALUES ('test.author.defaults', 'v')")
+	before = head
+	if err := te.store.Commit(ctx, "test: Commit"); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	requireNewCommitBy(t, "Commit", before, te.readHead(t, ctx), "beads", "beads@local")
 }
