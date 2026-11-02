@@ -17,6 +17,7 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
+	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 )
 
 // bdCompact runs "bd compact" with the given args and returns stdout.
@@ -556,4 +557,37 @@ func TestEmbeddedCompactMisdatedOldWindow(t *testing.T) {
 			t.Errorf("recent commit R is reachable %d times from main, want exactly 1", replays)
 		}
 	})
+}
+
+// TestEmbeddedCompactAbortsDivergentReplay drives the executor directly with
+// the #6645 plan the planner now refuses (squash to B, replay A). The replay
+// resurrects "edit A", so Compact must notice the committed data differs from
+// main before the swap, leave main untouched, and remove its temp branch.
+func TestEmbeddedCompactAbortsDivergentReplay(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	f := setupStraddledCutoff(t, "dv")
+	before := readCompactRefState(t, f.beadsDir)
+
+	var compactErr error
+	withEmbeddedConn(t, f.beadsDir, func(conn *sql.Conn) {
+		var root string
+		if err := conn.QueryRowContext(t.Context(), "SELECT commit_hash FROM dolt_log ORDER BY commit_order ASC LIMIT 1").Scan(&root); err != nil {
+			t.Fatalf("read root commit: %v", err)
+		}
+		compactErr = versioncontrolops.Compact(t.Context(), conn, root, f.b.Hash, before.logCount-1, []string{f.a.Hash})
+	})
+	if compactErr == nil || !strings.Contains(compactErr.Error(), "replayed history differs from main") {
+		t.Errorf("Compact error = %v, want the replay divergence abort", compactErr)
+	}
+
+	if got := bdShow(t, f.bd, f.dir, f.issueID).Title; got != "ORIGINAL" {
+		t.Errorf("title after aborted compact = %q, want %q", got, "ORIGINAL")
+	}
+	if after := readCompactRefState(t, f.beadsDir); after != before {
+		t.Errorf("main state after aborted compact = %+v, want unchanged %+v", after, before)
+	}
 }
