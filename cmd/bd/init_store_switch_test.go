@@ -8,8 +8,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/configfile"
 )
 
 // writeInitStoreSwitchMetadata writes metadata.json into a fresh .beads
@@ -277,4 +280,56 @@ func TestRunInitReinitPreflightStoreSwitchAcceptedDiagnostic(t *testing.T) {
 		"Requested database:      fi (unchanged)",
 		"--server",
 	)
+}
+
+// TestInitReinitLocalKeepsManagedServerStore locks in the Gas City shape of
+// #3495 at the store level: a workspace provisioned against an external
+// server, recorded as server mode with database-stored custom types, and
+// re-initialized by the reporter's command with no mode of its own. The
+// reinit must reuse the recorded server database, keep the custom types, and
+// create no embedded database beside it.
+func TestInitReinitLocalKeepsManagedServerStore(t *testing.T) {
+	skipIfNoDolt(t)
+	env := externalServerTestEnv(t)
+
+	repoDir := t.TempDir()
+	initGitRepo(t, repoDir)
+	beadsDir := filepath.Join(repoDir, ".beads")
+
+	database := uniqueTestDBName(t)
+	t.Cleanup(func() { dropTestDatabase(database, testDoltServerPort) })
+
+	out, err := runExternalServerBD(t, repoDir, env,
+		"init", "--quiet", "--server", "--external",
+		"--server-host", "127.0.0.1", "--server-port", strconv.Itoa(testDoltServerPort),
+		"--database", database, "--prefix", "la", "--skip-hooks", "--skip-agents")
+	if err != nil {
+		t.Fatalf("provisioning bd init --server --external failed: %v\n%s", err, out)
+	}
+	if out, err := runExternalServerBD(t, repoDir, env, "config", "set", "types.custom", "molecule,convoy"); err != nil {
+		t.Fatalf("bd config set types.custom: %v\n%s", err, out)
+	}
+
+	out, err = runExternalServerBD(t, repoDir, env,
+		"init", "--reinit-local", "--prefix", "la", "--database", database, "--non-interactive", "--role", "maintainer")
+	if err != nil {
+		t.Fatalf("same-store reinit of a server workspace must succeed: %v\n%s", err, out)
+	}
+	if strings.Contains(out, "switch this workspace to another store") {
+		t.Errorf("same-store reinit was treated as a store switch:\n%s", out)
+	}
+
+	cfg, err := configfile.Load(beadsDir)
+	if err != nil || cfg == nil {
+		t.Fatalf("load metadata.json after reinit: cfg=%v err=%v", cfg, err)
+	}
+	if cfg.DoltMode != configfile.DoltModeServer || cfg.DoltDatabase != database {
+		t.Errorf("recorded store after reinit: dolt_mode=%q dolt_database=%q, want %q and %q",
+			cfg.DoltMode, cfg.DoltDatabase, configfile.DoltModeServer, database)
+	}
+	requireNoFile(t, filepath.Join(beadsDir, "embeddeddolt"))
+	out, err = runExternalServerBD(t, repoDir, env, "config", "get", "types.custom")
+	if err != nil || !strings.Contains(out, "molecule,convoy") {
+		t.Errorf("types.custom after a same-store reinit: err=%v, want molecule,convoy in:\n%s", err, out)
+	}
 }
