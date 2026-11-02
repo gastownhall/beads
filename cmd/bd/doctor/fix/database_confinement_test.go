@@ -160,3 +160,63 @@ func TestDatabaseIntegrity_RefusesUnconfinedDatabasePath(t *testing.T) {
 		})
 	}
 }
+
+func TestRepoFingerprint_Choice2RefusesUnconfinedDatabaseBeforeConfirmation(t *testing.T) {
+	for _, tc := range unsafeDatabaseCases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, outside := setupUnsafeDatabase(t, tc.setup)
+			dirBefore, outsideBefore := confineTree(t, dir), confineTree(t, outside)
+
+			oldReadLine := repoFingerprintReadLine
+			t.Cleanup(func() { repoFingerprintReadLine = oldReadLine })
+			answers := []string{"2", "n"}
+			reads := 0
+			repoFingerprintReadLine = func() (string, error) {
+				reads++
+				return answers[min(reads, len(answers))-1], nil
+			}
+
+			err := RepoFingerprint(dir, false)
+			if err == nil || !strings.Contains(err.Error(), "refusing") {
+				t.Fatalf("expected a confinement refusal, got %v", err)
+			}
+			if reads != 1 {
+				t.Fatalf("expected the refusal before the DELETE confirmation (1 read), got %d reads", reads)
+			}
+			confineTreesEqual(t, dirBefore, confineTree(t, dir), "workspace")
+			confineTreesEqual(t, outsideBefore, confineTree(t, outside), "outside data")
+		})
+	}
+}
+
+// Choice 2 on an admitted database unlinks its sidecars without following
+// them: the parent is confined, and an outside sidecar target survives.
+func TestRepoFingerprint_Choice2KeepsOutsideSidecarTargets(t *testing.T) {
+	t.Setenv("BEADS_DOLT_DATA_DIR", "")
+	dir := setupTestWorkspace(t)
+	beadsDir := filepath.Join(dir, ".beads")
+	outside := t.TempDir()
+	db := filepath.Join(beadsDir, "beads.db")
+	confineWriteFile(t, db, "db")
+	for _, suffix := range []string{"-wal", "-shm"} {
+		confineWriteFile(t, filepath.Join(outside, "target"+suffix), "keep")
+		confineSymlink(t, filepath.Join(outside, "target"+suffix), db+suffix)
+	}
+	confineMetadata(t, beadsDir, map[string]string{"backend": "sqlite", "database": db})
+	outsideBefore := confineTree(t, outside)
+
+	oldReadLine := repoFingerprintReadLine
+	t.Cleanup(func() { repoFingerprintReadLine = oldReadLine })
+	answers := []string{"2", "y"}
+	repoFingerprintReadLine = func() (string, error) {
+		answer := answers[0]
+		answers = answers[1:]
+		return answer, nil
+	}
+
+	_ = RepoFingerprint(dir, false) // reinitializing a sqlite workspace fails; only the removal matters
+	if _, err := os.Lstat(db); !os.IsNotExist(err) {
+		t.Fatalf("expected the admitted database removed, got %v", err)
+	}
+	confineTreesEqual(t, outsideBefore, confineTree(t, outside), "outside sidecar targets")
+}
