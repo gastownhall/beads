@@ -14,6 +14,10 @@ This runbook helps you recover from Dolt sync failures.
 - `bd dolt push`, `bd sync` or dolt auto-push fails with "Found dangling
   references to HashSet" — see
   [Push fails with "Found dangling references"](#push-fails-with-found-dangling-references)
+- A pull or merge after migration 0062 refuses with `local changes would be
+  stomped by merge: events` or `the table(s) events have schema conflicts` —
+  see
+  [Merge blocked on the events table (migration 0062)](#merge-blocked-on-the-events-table-migration-0062)
 
 ## Diagnosis
 
@@ -174,6 +178,73 @@ bd sql "SELECT dolt_hashof('HEAD') AS head_commit, dolt_hashof_db('HEAD') AS hea
    the remote type, the output of `bd version` (and of `dolt version` in server
    mode: embedded mode runs the Dolt engine built into bd), and the UTC times
    of the failures (DoltHub can match them to its manifest logs).
+
+## Merge blocked on the events table (migration 0062)
+
+**Symptom:** after this clone migrated past schema 61, a `bd dolt pull` or
+merge of a peer's work fails with one of:
+
+```text
+local changes would be stomped by merge: events
+```
+
+```text
+the table(s) events have schema conflicts
+```
+
+`dolt_schema_conflicts` then names `events` with `cannot merge a table
+deletion with data modification`. The bead tables themselves may merge with no
+conflicts at all.
+
+**What it means:** migration 0062 moved the `events` audit table onto Dolt's
+ignore plane: it deleted the versioned table in a commit and recreated it as a
+working table that is never committed. A peer that has not migrated (or whose
+history predates the migration, such as unpushed work on a laptop) still
+changes the versioned table. Merging the two meets a deletion on one side and
+row changes on the other. Dolt cannot resolve that in either direction:
+`DOLT_CONFLICTS_RESOLVE('--ours','events')` and `--theirs` both fail with
+`table not found`, and `ALTER TABLE` does not apply. An `events` schema
+conflict is not proof of this cause on its own, but after migration 0062 it is
+the likely one. bd releases after v1.3.2 print this diagnosis under the merge
+blockers.
+
+Because `events` is ignored, `dolt status` shows a clean working set even
+while the merge refuses. That does not mean the table is empty: it holds this
+clone's local audit rows.
+
+**Steps:**
+
+1. Keep your local work. Back up the issues and, for the event rows, the whole
+   store, while no `bd` command is running:
+   ```bash
+   bd export --all -o .beads/backup/pre-events-recovery.jsonl
+   ```
+   and copy the `.beads` directory (or take a `dolt backup` in server mode).
+2. If a merge is open, abort it explicitly. On embedded storage, run
+   `dolt merge --abort` in the database directory. In server mode, run
+   `CALL DOLT_MERGE('--abort')` on a connection to the server that serves this
+   store (on the server host for a proxied-server workspace). Do not leave
+   the merge open and retry on top of it.
+3. **Do not** run `DOLT_CHECKOUT('--','events')` to clear the `stomped`
+   refusal. The committed HEAD no longer has `events`,
+   so reverting it to HEAD deletes the working table and its rows, and every
+   later bd write fails with `failed to record event ...: table not found:
+   events`. If that has already happened, the next bd command that writes
+   recreates an empty `events` table; the lost rows come back only from a
+   backup.
+4. Do not force past the problem. `bd migrate --force` and retrying the pull
+   on the same bd release do not change the history that conflicts, and the
+   advice in [Clone behind the remote](/getting-started/upgrading#clone-behind-the-remote)
+   still holds: pull before migrating, never force past a data-behind stop.
+5. Keep the peer's work where it is: leave its clone unchanged and do not
+   delete its branch or remote ref, so its commits stay available to a later
+   merge.
+
+There is no supported in-place merge for this shape yet: absorbing the peer's
+history needs a compatibility operation in the Dolt driver, tracked in
+[#6727](https://github.com/gastownhall/beads/issues/6727). Until it ships,
+follow that issue rather than hand-written bridge SQL, which has not been
+validated against this procedure.
 
 ## Prevention
 

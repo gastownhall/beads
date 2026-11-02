@@ -415,6 +415,12 @@ on embedded storage / `bd conflicts resolve` on a server store). Once there is
 nothing left to pull, the clone is the first-mover it looked like and the
 migration proceeds on its own.
 
+If the clone already migrated past schema 61 and the merge then refuses on
+the `events` table (`local changes would be stomped by merge: events`, or an
+`events` schema conflict), see
+[Merge blocked on the events table (migration 0062)](/recovery/sync-failures#merge-blocked-on-the-events-table-migration-0062)
+before trying anything else.
+
 Do **not** force past this stop. `bd migrate --force` applies the migration
 while the clone is still behind — precisely the state the stop exists to
 prevent — and the `bd dolt push` that would follow is rejected as a
