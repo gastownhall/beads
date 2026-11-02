@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
@@ -537,7 +538,16 @@ var (
 	vcForcePush        = versioncontrolops.ForcePush
 	vcPull             = versioncontrolops.Pull
 	vcPullWithStrategy = versioncontrolops.PullWithStrategy
+	vcFetch            = versioncontrolops.Fetch
 )
+
+// transferCtx opts one remote verb's network statement into the
+// dolt.remote-timeout budget (GH#7989). Only the DOLT_PUSH/DOLT_FETCH
+// statement reads it: the pending-change commit before it, a pull's merge
+// and settle, and the blocked-state recompute after it keep ctx unbounded.
+func transferCtx(ctx context.Context) context.Context {
+	return versioncontrolops.WithTransferTimeout(ctx, config.DoltRemoteTimeout())
+}
 
 func (s *EmbeddedDoltStore) RemoveRemote(ctx context.Context, name string) error {
 	return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
@@ -576,7 +586,7 @@ func (s *EmbeddedDoltStore) Push(ctx context.Context) error {
 	}
 	return s.withPeerAuth(ctx, defaultRemote, func(user string) error {
 		return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
-			return vcPush(ctx, db, defaultRemote, s.branch, user)
+			return vcPush(transferCtx(ctx), db, defaultRemote, s.branch, user)
 		})
 	})
 }
@@ -591,7 +601,7 @@ func (s *EmbeddedDoltStore) Pull(ctx context.Context) error {
 	preHead := s.preMergeHead(ctx)
 	err := s.withPeerAuth(ctx, defaultRemote, func(user string) error {
 		return s.withMutatingPinnedDBConn(ctx, func(db versioncontrolops.DBConn) error {
-			return vcPull(ctx, db, defaultRemote, s.branch, user)
+			return vcPull(transferCtx(ctx), db, defaultRemote, s.branch, user)
 		})
 	})
 	if err != nil {
@@ -611,7 +621,7 @@ func (s *EmbeddedDoltStore) PullWithStrategy(ctx context.Context, strategy strin
 	preHead := s.preMergeHead(ctx)
 	err := s.withPeerAuth(ctx, defaultRemote, func(user string) error {
 		return s.withMutatingPinnedDBConn(ctx, func(db versioncontrolops.DBConn) error {
-			return vcPullWithStrategy(ctx, db, defaultRemote, s.branch, user, strategy)
+			return vcPullWithStrategy(transferCtx(ctx), db, defaultRemote, s.branch, user, strategy)
 		})
 	})
 	if err != nil {
@@ -629,7 +639,7 @@ func (s *EmbeddedDoltStore) PullRemoteWithStrategy(ctx context.Context, remote, 
 	preHead := s.preMergeHead(ctx)
 	err := s.withPeerAuth(ctx, remote, func(user string) error {
 		return s.withMutatingPinnedDBConn(ctx, func(db versioncontrolops.DBConn) error {
-			return vcPullWithStrategy(ctx, db, remote, s.branch, user, strategy)
+			return vcPullWithStrategy(transferCtx(ctx), db, remote, s.branch, user, strategy)
 		})
 	})
 	if err != nil {
@@ -645,7 +655,7 @@ func (s *EmbeddedDoltStore) ForcePush(ctx context.Context) error {
 	}
 	return s.withPeerAuth(ctx, defaultRemote, func(user string) error {
 		return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
-			return vcForcePush(ctx, db, defaultRemote, s.branch, user)
+			return vcForcePush(transferCtx(ctx), db, defaultRemote, s.branch, user)
 		})
 	})
 }
@@ -658,9 +668,9 @@ func (s *EmbeddedDoltStore) PushRemote(ctx context.Context, remote string, force
 	return s.withPeerAuth(ctx, remote, func(user string) error {
 		return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
 			if force {
-				return vcForcePush(ctx, db, remote, s.branch, user)
+				return vcForcePush(transferCtx(ctx), db, remote, s.branch, user)
 			}
-			return vcPush(ctx, db, remote, s.branch, user)
+			return vcPush(transferCtx(ctx), db, remote, s.branch, user)
 		})
 	})
 }
@@ -673,7 +683,7 @@ func (s *EmbeddedDoltStore) PullRemote(ctx context.Context, remote string) error
 	preHead := s.preMergeHead(ctx)
 	err := s.withPeerAuth(ctx, remote, func(user string) error {
 		return s.withMutatingPinnedDBConn(ctx, func(db versioncontrolops.DBConn) error {
-			return vcPull(ctx, db, remote, s.branch, user)
+			return vcPull(transferCtx(ctx), db, remote, s.branch, user)
 		})
 	})
 	if err != nil {
@@ -685,7 +695,7 @@ func (s *EmbeddedDoltStore) PullRemote(ctx context.Context, remote string) error
 func (s *EmbeddedDoltStore) Fetch(ctx context.Context, peer string) error {
 	return s.withPeerAuth(ctx, peer, func(user string) error {
 		return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
-			return versioncontrolops.Fetch(ctx, db, peer, user)
+			return vcFetch(transferCtx(ctx), db, peer, user)
 		})
 	})
 }
@@ -697,7 +707,7 @@ func (s *EmbeddedDoltStore) PushTo(ctx context.Context, peer string) error {
 	}
 	return s.withPeerAuth(ctx, peer, func(user string) error {
 		return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
-			return versioncontrolops.Push(ctx, db, peer, s.branch, user)
+			return vcPush(transferCtx(ctx), db, peer, s.branch, user)
 		})
 	})
 }
@@ -713,7 +723,7 @@ func (s *EmbeddedDoltStore) PullFrom(ctx context.Context, peer string) ([]storag
 	var conflicts []storage.Conflict
 	err := s.withPeerAuth(ctx, peer, func(user string) error {
 		return s.withMutatingPinnedDBConn(ctx, func(db versioncontrolops.DBConn) error {
-			if pullErr := versioncontrolops.Pull(ctx, db, peer, s.branch, user); pullErr != nil {
+			if pullErr := vcPull(transferCtx(ctx), db, peer, s.branch, user); pullErr != nil {
 				// bd-578h9.15: the settle machinery aborts a merge it cannot
 				// auto-resolve before returning, so dolt_conflicts is already
 				// empty here; the conflicts arrive captured pre-abort inside
