@@ -40,15 +40,32 @@ func (t *doltServerTx) recheckBlockedAfterCommit(ctx context.Context, pending is
 	bo.InitialInterval = txRetryInitialInterval
 	bo.MaxElapsedTime = DefaultTxRetryMaxElapsed
 	clean := true
+	// The recheck journals what it changes, so each of its transactions is
+	// admitted as a journal writer like the unit of work was (whose own lock
+	// was released when it committed), on one deadline for all its attempts.
+	admitBy := journalAdmitBy(ctx, DefaultTxRetryMaxElapsed)
 	err := backoff.Retry(func() error {
+		var lock *issueops.JournalWriterLock
+		if t.admitJournal != nil {
+			var err error
+			if lock, err = t.admitJournal(ctx, admitBy); err != nil {
+				// No transaction was begun; a failed GET_LOCK has already
+				// marked the session for discard.
+				return backoff.Permanent(err)
+			}
+		}
 		err := t.recheckBlockedOnce(ctx, pending)
 		if err == nil || isSerializationError(err) {
 			// A serialization failure means the server already rolled the
 			// transaction back, so the session is idle for the next attempt.
+			lock.Release()
 			return err
 		}
 		if _, rbErr := t.conn.ExecContext(ctx, "ROLLBACK;"); rbErr != nil {
 			clean = false
+			lock.Abandon()
+		} else {
+			lock.Release()
 		}
 		return backoff.Permanent(err)
 	}, backoff.WithContext(bo, ctx))

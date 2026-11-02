@@ -82,6 +82,10 @@ func RunTxResult[T any](ctx context.Context, p UnitOfWorkProvider, work TxFuncRe
 // the last serialization failure is returned unwrapped, so callers can tell an
 // exhausted write conflict from a permanent error.
 func RunTxResultWithin[T any](ctx context.Context, p UnitOfWorkProvider, maxElapsed time.Duration, work TxFuncResult[T]) (T, error) {
+	// Every attempt queues on the journal-writer lock against one deadline,
+	// this call's retry budget, so admission never outwaits the replays it
+	// replaces.
+	ctx = withJournalWriter(ctx, maxElapsed)
 	var result T
 	bo := backoff.NewExponentialBackOff()
 	bo.InitialInterval = txRetryInitialInterval
@@ -284,6 +288,10 @@ type TxScopedFunc[T any] func(ctx context.Context, uw UnitOfWork) (result T, tab
 // into this commit (a staged table is committed whole). Serialization losers
 // are replayed like RunTxEphemeral's.
 func RunTxScoped[T any](ctx context.Context, p UnitOfWorkProvider, work TxScopedFunc[T]) (T, error) {
+	// A heartbeat that re-arms journals, so every attempt is a journal writer:
+	// a plain refresh may wait behind a long journaled write, within this
+	// call's retry budget.
+	ctx = withJournalWriter(ctx, DefaultTxRetryMaxElapsed)
 	var result T
 	bo := backoff.NewExponentialBackOff()
 	bo.InitialInterval = txRetryInitialInterval

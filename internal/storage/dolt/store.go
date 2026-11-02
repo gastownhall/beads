@@ -1286,10 +1286,14 @@ func (s *DoltStore) withRetryTxOn(ctx context.Context, beginner txBeginner, fn f
 	if s.serverMode {
 		bo.MaxElapsedTime = 15 * time.Second
 	}
+	// One journal-writer admission deadline for the whole operation: a retry
+	// does not restart it, so the lock never waits longer than the conflicts
+	// it replaces were retried.
+	admitBy := journalAdmitBy(ctx, bo.MaxElapsedTime)
 	var pending issueops.BlockedRecheck
 	if err := backoff.Retry(func() error {
 		var err error
-		pending, err = s.commitWriteTxOn(ctx, beginner, fn)
+		pending, err = s.commitWriteTxWith(ctx, beginner, admitBy, fn)
 		if err == nil {
 			if !circuitWriteManaged(ctx) && s.breaker != nil {
 				s.breaker.RecordSuccess()
@@ -1359,14 +1363,37 @@ func (s *DoltStore) commitWriteTx(ctx context.Context, fn func(tx *sql.Tx) error
 // commitWriteTxOn is commitWriteTx against a caller-chosen txBeginner — see
 // withRetryTxOn.
 func (s *DoltStore) commitWriteTxOn(ctx context.Context, beginner txBeginner, fn func(tx *sql.Tx) error) (issueops.BlockedRecheck, error) {
+	return s.commitWriteTxWith(ctx, beginner, journalAdmitBy(ctx, issueops.JournalWriterAdmissionBudget), fn)
+}
+
+// commitWriteTxWith is commitWriteTxOn with the journal-writer admission
+// deadline fixed by the caller, so a retry loop shares one deadline across its
+// attempts. When the store locks journal writers, the transaction runs on a
+// session that took the lock before BEGIN, and the lock is released once the
+// transaction has committed or rolled back, before this returns.
+func (s *DoltStore) commitWriteTxWith(ctx context.Context, beginner txBeginner, admitBy time.Time, fn func(tx *sql.Tx) error) (issueops.BlockedRecheck, error) {
 	if s.closed.Load() {
 		return issueops.BlockedRecheck{}, ErrStoreClosed
+	}
+	journalOn := s.eventsJournalEnabled.Load()
+	if s.locksJournalWriters(journalOn) {
+		adm, err := s.admitJournalWriter(ctx, beginner, admitBy)
+		if err != nil {
+			return issueops.BlockedRecheck{}, err
+		}
+		// Deferred first, so it runs last: after the rollback below.
+		defer adm.release()
+		beginner = adm.conn
 	}
 	tx, err := beginner.BeginTx(ctx, nil)
 	if err != nil {
 		return issueops.BlockedRecheck{}, fmt.Errorf("begin write tx: %w", err)
 	}
-	clearJournalScope := s.scopeEventsJournalTransaction(tx)
+	// A body that panics, or returns early, leaves no transaction open on the
+	// session: the session's release (and Conn.Close, which waits on an open
+	// Tx) must come after it. A no-op once the transaction has ended.
+	defer func() { _ = tx.Rollback() }()
+	clearJournalScope := issueops.ScopeEventsJournalTransaction(tx, journalOn)
 	defer clearJournalScope()
 	clearVersionScope, err := s.scopeVersionedHistoryTransaction(ctx, tx)
 	if err != nil {

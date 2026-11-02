@@ -39,6 +39,7 @@ func TestBeginTxScopesJournalActivationToThePinnedConn(t *testing.T) {
 	p, mock := newMockTxProvider(t)
 	p.SetEventsJournalEnabled(true)
 
+	expectJournalWriterLock(mock)
 	mock.ExpectExec("START TRANSACTION").WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec("UPDATE bd_events_seq SET next_seq").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectQuery("SELECT next_seq FROM bd_events_seq").
@@ -84,6 +85,7 @@ func TestTxEndReleasesJournalScope(t *testing.T) {
 			name: "rollback",
 			end: func(t *testing.T, mock sqlmock.Sqlmock, tx Tx) {
 				mock.ExpectExec("ROLLBACK").WillReturnResult(sqlmock.NewResult(0, 0))
+				expectJournalWriterUnlock(mock)
 				require.NoError(t, tx.Rollback(context.Background()))
 			},
 		},
@@ -92,6 +94,7 @@ func TestTxEndReleasesJournalScope(t *testing.T) {
 			end: func(t *testing.T, mock sqlmock.Sqlmock, tx Tx) {
 				expectPendingChanges(mock, 1)
 				mock.ExpectExec("DOLT_COMMIT").WillReturnResult(sqlmock.NewResult(0, 1))
+				expectJournalWriterUnlock(mock)
 				require.NoError(t, tx.Commit(context.Background(), "msg"))
 			},
 		},
@@ -99,6 +102,7 @@ func TestTxEndReleasesJournalScope(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			p, mock := newMockTxProvider(t)
 			p.SetEventsJournalEnabled(true)
+			expectJournalWriterLock(mock)
 			mock.ExpectExec("START TRANSACTION").WillReturnResult(sqlmock.NewResult(0, 0))
 
 			tx, err := p.BeginTx(context.Background())
@@ -119,4 +123,15 @@ func TestTxEndReleasesJournalScope(t *testing.T) {
 				"a leaked activation entry makes a released connection journal")
 		})
 	}
+}
+
+// expectJournalWriterLock arms the journal-writer admission an enabled
+// provider's BeginTx takes before START TRANSACTION (gastownhall/beads#6117).
+func expectJournalWriterLock(mock sqlmock.Sqlmock) {
+	mock.ExpectQuery(`SELECT GET_LOCK\(`).WillReturnRows(sqlmock.NewRows([]string{"granted"}).AddRow(1))
+}
+
+// expectJournalWriterUnlock arms the release once the transaction has ended.
+func expectJournalWriterUnlock(mock sqlmock.Sqlmock) {
+	mock.ExpectQuery(`SELECT RELEASE_LOCK\(`).WillReturnRows(sqlmock.NewRows([]string{"released"}).AddRow(1))
 }
