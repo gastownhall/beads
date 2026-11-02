@@ -396,6 +396,13 @@ func TestEmbeddedBackupRestoreRefusesSourceWithoutBackup(t *testing.T) {
 			if !strings.Contains(out, "no Dolt backup found") || !strings.Contains(out, shown) {
 				t.Errorf("restore output does not name %s as holding no Dolt backup:\n%s", shown, out)
 			}
+			// A JSONL export is the likeliest wrong source: the refusal says
+			// nothing was restored and where each kind of file goes instead.
+			for _, want := range []string{"database was not restored", "bd backup sync", "bd import"} {
+				if !strings.Contains(out, want) {
+					t.Errorf("restore refusal is missing %q:\n%s", want, out)
+				}
+			}
 		})
 	}
 }

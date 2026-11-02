@@ -472,3 +472,39 @@ func TestBackupRestoreRefusesSourceWithoutBackup(t *testing.T) {
 		})
 	}
 }
+
+// TestRestoreSourceErrorAdvice pins the advice bd backup restore adds to a
+// refusal for a source without a Dolt backup (GH#7098), and that it leaves
+// every other error alone and keeps the refusal unwrappable.
+func TestRestoreSourceErrorAdvice(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "export\nError: forged")
+	if err := os.Mkdir(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	_, refusal := versioncontrolops.RestoreSourceURL(dir)
+	if !errors.Is(refusal, versioncontrolops.ErrNoBackup) {
+		t.Fatalf("fixture: RestoreSourceURL(%q) = %v, want ErrNoBackup", dir, refusal)
+	}
+
+	err := restoreSourceError(refusal)
+	if !errors.Is(err, versioncontrolops.ErrNoBackup) {
+		t.Errorf("errors.Is(%v, ErrNoBackup) = false, want the refusal wrapped", err)
+	}
+	msg := err.Error()
+	for _, want := range []string{"database was not restored", "bd backup init", "bd backup sync", "bd import"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("advice %q is missing %q", msg, want)
+		}
+	}
+	if strings.Contains(msg, "\n") {
+		t.Errorf("advice %q carries a line feed, so a path could forge an output line", msg)
+	}
+
+	other := errors.New("backup source does not exist")
+	if got := restoreSourceError(other); got != other {
+		t.Errorf("restoreSourceError(%v) = %v, want the error unchanged", other, got)
+	}
+	if got := restoreSourceError(nil); got != nil {
+		t.Errorf("restoreSourceError(nil) = %v, want nil", got)
+	}
+}

@@ -369,7 +369,7 @@ func runBackupRestoreProxied(ctx context.Context, dir string, force bool) error 
 	// past the quiesce below, Dolt drops the database before it finds out.
 	backupURL, err := versioncontrolops.RestoreSourceURL(dir)
 	if err != nil {
-		return HandleErrorRespectJSON("%v", err)
+		return HandleErrorRespectJSON("%v", restoreSourceError(err))
 	}
 
 	// Ask the live provider which database to replace before taking it away.

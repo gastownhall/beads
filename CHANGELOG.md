@@ -1126,6 +1126,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd backup restore [--force] <dir>` refuses a directory that holds no Dolt
+  backup (no `manifest` file), such as an empty directory, a never-synced
+  `.beads/backup/` or a directory of JSONL exports, before it starts the
+  restore. Dolt drops the database a `--force` restore replaces before it
+  finds out the source is empty, so these restores used to leave the
+  workspace without its tables (`table not found: config`). The check covers
+  embedded, server and proxied-server workspaces; it is a layout check only,
+  so a damaged backup can still fail partway through a force restore (#7098).
 - `bd dolt push <remote>` and `bd dolt pull <remote>` now push to and pull
   from the named remote. bd ignored the name, so `bd dolt push 1st` pushed to
   the default remote and reported "Push complete."; a name that differs from

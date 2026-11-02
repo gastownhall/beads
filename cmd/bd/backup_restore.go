@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 	"github.com/steveyegge/beads/internal/ui"
 )
 
@@ -67,7 +69,7 @@ To initialize and restore in one step, use: bd init && bd backup restore`,
 				return err
 			}
 		} else if err := runBackupRestore(ctx, store, dir, force); err != nil {
-			return err
+			return restoreSourceError(err)
 		}
 
 		// One success report for both topologies. Under --json this used to
@@ -167,6 +169,18 @@ func syncProjectIDFromDB(ctx context.Context, s storage.DoltStorage) error {
 
 	cfg.ProjectID = dbID
 	return cfg.Save(beadsDir)
+}
+
+// restoreSourceError adds what to do instead to err when it says the restore
+// source holds no Dolt backup (versioncontrolops.ErrNoBackup): the likeliest
+// wrong source is a JSONL export, which bd import loads. Any other error is
+// returned as it is. The advice is one line, and the refusal it wraps quotes
+// the source path, so a path cannot forge an output line.
+func restoreSourceError(err error) error {
+	if !errors.Is(err, versioncontrolops.ErrNoBackup) {
+		return err
+	}
+	return fmt.Errorf("%w. The database was not restored: restore takes a Dolt backup directory written by 'bd backup init <dir>' and 'bd backup sync'; to load a JSONL export, use 'bd import <file>' instead", err)
 }
 
 func validateBackupRestoreDir(dir string) error {
