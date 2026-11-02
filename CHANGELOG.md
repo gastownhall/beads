@@ -1126,6 +1126,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Long-lived proxied-server providers recover after the proxy retires on
+  idle** (#7295). `bd serve`, and any other long-lived open of a proxied
+  workspace, pinned its local dbproxy's address at construction; after the
+  proxy's idle retirement a replacement binds a fresh OS-assigned port, and
+  every later connection dialed the dead address forever. The provider's pool
+  now re-resolves the authenticated workspace endpoint before each NEW
+  physical connection (the MySQL driver's BeforeConnect hook), reusing the
+  same discovery as construction — adoption of a live proxy before the spawn
+  lock included — while bootstrap keeps the fixed endpoint and the proven pool
+  is handed out unchanged; database, credentials, TLS and timeouts stay as the
+  DSN set them, and only the dialed address is refreshed. Overlapping
+  connections share one discovery; a caller that cancels is released with its
+  own context error while the shared discovery (which may be spawning a
+  proxy a peer can adopt) keeps running; provider Close drains an in-flight
+  discovery before the pool is closed. External-server workspaces front the
+  same locally managed proxy and get the same recovery; discovery failures
+  are returned wrapped and never answered by dialing the stale address.
 - `bd dolt push <remote>` and `bd dolt pull <remote>` now push to and pull
   from the named remote. bd ignored the name, so `bd dolt push 1st` pushed to
   the default remote and reported "Push complete."; a name that differs from

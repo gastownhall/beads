@@ -459,11 +459,14 @@ func resolveServerModeUOWTopologyWithTransportResolver(ctx context.Context, bead
 		// ever have is bd serve, whose pool releases its last connection after
 		// ConnMaxIdleTime (20s, servePoolLimits) of no requests; a finite-idle
 		// proxy then sees zero clients and exits, taking with it the
-		// OS-assigned port the provider's DSN pinned at construction. Nothing
-		// re-resolves that endpoint — GetCreateDatabaseProxyServerEndpoint runs
-		// once, above — so serve would go on answering /healthz with no
-		// database left to answer anything else from, unrecoverable without a
-		// restart.
+		// OS-assigned port the provider's DSN pinned at construction. Since
+		// #7295 a later physical connection re-resolves that endpoint, so an
+		// idle exit is no longer unrecoverable — but rediscovery spawns a
+		// replacement proxy and its backend on the first request after every
+		// quiet period, so serve would still go dark between a retirement and
+		// that first request, and /healthz (which does not touch the database)
+		// would keep answering while every database-touching request paid a
+		// cold restart. Keeping the proxy alive avoids the whole cycle.
 		//
 		// The tradeoff is a child that outlives serve, and it is deliberate: a
 		// never-idle proxy is already a supported configuration

@@ -15,6 +15,7 @@ Freshness source: `internal/storage/dbproxy/pidfile/pidfile.go`,
 `internal/doltserver/physical_root.go`,
 `internal/storage/uow/doltserver_provider.go`,
 `internal/storage/uow/dolt_sql_provider.go`,
+`internal/storage/uow/endpoint_rediscovery.go`,
 `internal/storage/schema/remote_migrate_gate.go`,
 `internal/storage/schema/smart_remote_migrate_gate.go`,
 `internal/storage/schema/lock.go`, `internal/storage/storage.go`,
@@ -287,6 +288,43 @@ draining.
 If `Shutdown` refuses because a record's identity cannot be verified,
 `bd dolt stop --force` escalates to `proxy.ForceStopUnverified`; the refusal is
 recognisable with `proxy.CanForceStopUnverified`.
+
+**A provider's pool redials after an idle exit — new in this change (#7295).**
+The SQL-server unit-of-work providers (`internal/storage/uow`) resolve the
+proxy endpoint once at construction and open their pool on that address.
+Since this change the pool carries a resolver
+(`internal/storage/uow/endpoint_rediscovery.go`) that re-resolves the
+authenticated workspace endpoint before every NEW physical connection, so an
+idle exit followed by a replacement on a fresh OS-assigned port no longer
+leaves the pool dialing the dead address forever. Embedders keeping a
+provider open across quiet periods no longer need to hold a connection open
+merely to keep the address valid — though holding one still defers the exit
+itself, as above.
+
+What rediscovery does NOT change:
+
+- Bootstrap — probe, version check, schema work, session-database assertion
+  — still uses the fixed construction address, and the pool proven during
+  bootstrap is the pool handed to the provider, so the single-session
+  steady-state open and its connection reuse are preserved. Pooled
+  connection reuse pays no discovery; only a genuinely new physical
+  connection does.
+- Only the dialed address is refreshed. Database, credentials, TLS and
+  timeouts stay as the pool's DSN set them; external-server workspaces keep
+  their external upstream identity (they front the same locally managed,
+  idle-retiring proxy, and get the same recovery).
+- Overlapping new connections coalesce into ONE discovery.
+- Cancellation is per-caller. A canceled connection is released promptly with
+  its own context error while the shared discovery keeps running under its
+  native ~15s open budget — it may be spawning a proxy child a peer has
+  already adopted, and a canceled opener is not a shutdown request. The 5s
+  TCP dial budget per connection is unchanged.
+- Provider `Close` drains an in-flight discovery before closing the pool;
+  connections requested after Close are refused rather than rediscovering.
+- A discovery failure is returned wrapped (`uow: rediscover proxy endpoint:
+  ...`) and is never answered by silently dialing the stale construction
+  address.
+
 
 ## 5. The sidecar's `idle_timeout` — changing in 1.3.1
 
