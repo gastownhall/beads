@@ -1145,9 +1145,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   read around, the way ready work does), and the marker agrees with it. In
   `--json` and on the served dependency-tree endpoint a blocked node now
   carries `"is_blocked": true`, an additive member the `TreeNode` schema
-  already documented. This makes `dep tree` consistent with `ready` and
-  `blocked`; it does not explain why a row in an existing workspace may hold
-  a stale flag (`bd recompute-blocked` repairs those, #6630).
+  already documented. An `--direction up` or `both` walk also no longer
+  counts the root's own dependents — open issues the root blocks — as
+  blockers: their edges point the other way, and a dependent's row used to
+  flip the root to `[BLOCKED]` on its own. This makes `dep tree` consistent
+  with `ready` and `blocked`; it does not explain why a row in an existing
+  workspace may hold a stale flag (`bd recompute-blocked` repairs those,
+  #6630).
 - `bd create --file` and other batch creates no longer fail with "issue
   already exists" on an id bd generated itself. The batch chose every id
   before it wrote any row, so two of its items could be handed the same short

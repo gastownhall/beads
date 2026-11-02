@@ -1521,7 +1521,8 @@ type treeRenderer struct {
 	maxDepth int
 	// Direction of traversal
 	direction string
-	// Whether the root node has open children (i.e., is blocked)
+	// Whether the root node is blocked: its stored flag, or an open direct
+	// blocker on the down side of the walk
 	rootBlocked bool
 }
 
@@ -1541,10 +1542,12 @@ func renderTree(tree []*types.TreeNode, maxDepth int, direction string) {
 	// Build a map of parent -> children for proper sibling tracking
 	children := make(map[string][]*types.TreeNode)
 	var root *types.TreeNode
+	rootIndex := -1
 
-	for _, node := range tree {
+	for i, node := range tree {
 		if node.Depth == 0 {
 			root = node
+			rootIndex = i
 		} else {
 			children[node.ParentID] = append(children[node.ParentID], node)
 		}
@@ -1561,9 +1564,28 @@ func renderTree(tree []*types.TreeNode, maxDepth int, direction string) {
 	// The flag covers blocking inherited through a parent chain and blockers a
 	// depth or status prune hid (#6630); the visible-edge scan covers
 	// synthetic external leaves the storage walk cannot flag.
+	//
+	// The scan reads the DOWN side only. An up walk's children are the root's
+	// DEPENDENTS — their edge says the root blocks them, not the reverse — and
+	// a both walk merges the up nodes ahead of the down root
+	// (MergeBidirectionalTree), so a dependent's row would otherwise count as
+	// a blocker and hide ready work behind its own consequences.
 	if root != nil {
+		var downChildren []*types.TreeNode
+		switch {
+		case r.direction == "up":
+			// Dependents never block the root; the flag alone decides.
+		case rootIndex < 0:
+			downChildren = children[root.ID]
+		default:
+			for _, node := range tree[rootIndex+1:] {
+				if node.ParentID == root.ID {
+					downChildren = append(downChildren, node)
+				}
+			}
+		}
 		hasOpenBlockers := false
-		for _, child := range children[root.ID] {
+		for _, child := range downChildren {
 			if (child.Status == types.StatusOpen || child.Status == types.StatusInProgress) &&
 				child.EdgeFromParent.IsBlockingEdge() {
 				hasOpenBlockers = true
