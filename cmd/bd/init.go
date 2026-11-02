@@ -1771,7 +1771,9 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			}
 		}
 
-		store, err := newDoltStore(ctx, doltCfg)
+		// #6089: an unversioned database a legacy SDK left dirty is adopted
+		// by committing its working set; --quiet drops the note it prints.
+		store, err := openInitStore(ctx, doltCfg, newDoltStore, initStoreNotes(quiet))
 		if err != nil {
 			// #4259: the remote-migrate gate refused to auto-apply pending
 			// migrations. When init just bootstrapped the clone, the REMOTE is

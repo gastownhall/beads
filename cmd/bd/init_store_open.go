@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/storage"
@@ -68,6 +69,15 @@ func openInitStore(ctx context.Context, cfg *dolt.Config, open initStoreOpener, 
 			cfg.Database, strings.Join(dirtyErr.Tables, ", "))
 	}
 	return store, err
+}
+
+// initStoreNotes is where openInitStore's note goes: stderr, or nowhere
+// under --quiet.
+func initStoreNotes(quiet bool) io.Writer {
+	if quiet {
+		return nil
+	}
+	return os.Stderr
 }
 
 // initStoreAdoptable reports whether openInitStore may adopt the database

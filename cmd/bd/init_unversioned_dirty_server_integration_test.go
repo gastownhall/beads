@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"slices"
@@ -242,5 +243,61 @@ func TestCLI_InitServerVersionedDirtyWorkingSetStillRefuses_E2E(t *testing.T) {
 	}
 	if got := unversionedQueryInt(t, ctx, db, "SELECT COUNT(*) FROM issues WHERE id = 'hq-dirty'"); got != 1 {
 		t.Fatalf("pending issues row count = %d, want it preserved", got)
+	}
+}
+
+// TestCLI_InitServerUnversionedDirtyWorkingSet_E2E is the user-level pin for
+// gastownhall/beads#6089: bd init against a server database a beads v1.0.0
+// seeder left with no migration cursor and uncommitted config, routes and
+// interactions. Before the fix the strict open's #4566 guard refused it, and
+// so did every later bd command, the refusal's own `bd dolt commit` remedy
+// included. Init now adopts the working set and migrates.
+func TestCLI_InitServerUnversionedDirtyWorkingSet_E2E(t *testing.T) {
+	skipIfNoDolt(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	database := createUnversionedTestDatabase(t, ctx)
+	db := openUnversionedTestDB(t, ctx, database)
+	prepareLegacySeederResidue(t, ctx, db, false)
+
+	tmpDir := t.TempDir()
+	env := os.Environ()
+	stdout, stderr, err := runBDExecSeparated(t, testBD, tmpDir, env, unversionedInitArgs(database)...)
+	if err != nil {
+		t.Fatalf("bd init on an unversioned dirty database failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+	}
+
+	if n := strings.Count(stderr, initRecoveryNotePrefix); n != 1 {
+		t.Fatalf("stderr carries %d recovery notes, want 1:\n%s", n, stderr)
+	}
+	if !strings.Contains(stderr, lenientRefusalWarning) {
+		t.Fatalf("stderr lacks the lenient-open warning:\n%s", stderr)
+	}
+
+	if got := unversionedQueryInt(t, ctx, db, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations"); got != schema.LatestVersion() {
+		t.Fatalf("main schema version after init = %d, want %d", got, schema.LatestVersion())
+	}
+	if dirty := unversionedQueryStrings(t, ctx, db, "SELECT table_name FROM dolt_status"); len(dirty) != 0 {
+		t.Fatalf("working set after init is dirty: %v", dirty)
+	}
+
+	bd := func(args ...string) string {
+		t.Helper()
+		out, err := runBDExecAllowErrorWithEnv(t, tmpDir, env, args...)
+		if err != nil {
+			t.Fatalf("bd %v failed after init: %v\n%s", args, err, out)
+		}
+		return out
+	}
+	created := bd("create", "adopted database works", "--json")
+	var issue struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal([]byte(created), &issue); err != nil || !strings.HasPrefix(issue.ID, "hq-") {
+		t.Fatalf("bd create --json = %q (%v), want an hq- issue", created, err)
+	}
+	if listed := bd("list"); !strings.Contains(listed, issue.ID) {
+		t.Fatalf("bd list does not show %s:\n%s", issue.ID, listed)
 	}
 }

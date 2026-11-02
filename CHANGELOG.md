@@ -1126,6 +1126,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd init` in server mode now adopts a database with no migration cursor
+  whose working set holds uncommitted changes in tables the migrations alter,
+  as a beads v1.0.0 seeder (Gas Town rig setup) leaves it. It commits the
+  working set in one commit, migrates, and prints a note. Before, init and
+  every later command refused the database, `bd dolt commit` included. A
+  database with a migration cursor still refuses (#6089).
 - `bd dolt push <remote>` and `bd dolt pull <remote>` now push to and pull
   from the named remote. bd ignored the name, so `bd dolt push 1st` pushed to
   the default remote and reported "Push complete."; a name that differs from
