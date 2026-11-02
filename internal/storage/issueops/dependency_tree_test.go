@@ -548,3 +548,206 @@ func TestGetDependencyTreeInTxStaleFlagReadsReady(t *testing.T) {
 		t.Fatalf("json node = %s, want is_blocked omitted", wire)
 	}
 }
+
+// expectDependenciesAcrossTables is expectDependencies with the wisp plane's
+// rows answered too: anchorEdgesInTx reads the durable table first, then
+// wisp_dependencies.
+func expectDependenciesAcrossTables(mock sqlmock.Sqlmock, issueID string, deps, wispDeps []dependencyRow) {
+	depRows := sqlmock.NewRows([]string{"depends_on_id", "type"})
+	for _, dep := range deps {
+		depRows.AddRow(dep.id, dep.depType)
+	}
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT " + DepTargetExpr + " AS depends_on_id, type FROM dependencies WHERE issue_id = ?")).
+		WithArgs(issueID).
+		WillReturnRows(depRows)
+	wispRows := sqlmock.NewRows([]string{"depends_on_id", "type"})
+	for _, dep := range wispDeps {
+		wispRows.AddRow(dep.id, dep.depType)
+	}
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT " + DepTargetExpr + " AS depends_on_id, type FROM wisp_dependencies WHERE issue_id = ?")).
+		WithArgs(issueID).
+		WillReturnRows(wispRows)
+}
+
+// expectWispAwareIssueBatch pins GetIssuesByIDsInTx against a LIVE wisp plane:
+// the routing probe answers a row, the id scan returns the wisp ids, and each
+// plane's rows and labels are read from its own tables.
+func expectWispAwareIssueBatch(mock sqlmock.Sqlmock, permIDs, wispIDs []string) {
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT 1 FROM wisps LIMIT 1")).
+		WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
+
+	all := append(append([]string{}, permIDs...), wispIDs...)
+	placeholders := make([]string, len(all))
+	args := make([]driver.Value, len(all))
+	for i, id := range all {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	wispScan := sqlmock.NewRows([]string{"id"})
+	for _, id := range wispIDs {
+		wispScan.AddRow(id)
+	}
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT id FROM wisps WHERE id IN (" + strings.Join(placeholders, ",") + ")")).
+		WithArgs(args...).
+		WillReturnRows(wispScan)
+
+	expectPlaneIssueBatch(mock, "issues", "labels", permIDs)
+	expectPlaneIssueBatch(mock, "wisps", "wisp_labels", wispIDs)
+}
+
+// expectPlaneIssueBatch pins one plane's slice of a GetIssuesByIDsInTx batch
+// read: the rows for ids from that plane's table, then its labels.
+func expectPlaneIssueBatch(mock sqlmock.Sqlmock, table, labelTable string, ids []string) {
+	if len(ids) == 0 {
+		return
+	}
+	placeholders := make([]string, len(ids))
+	args := make([]driver.Value, len(ids))
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	in := strings.Join(placeholders, ",")
+	rows := issueRows()
+	for _, id := range ids {
+		rows.AddRow(issueRowValues(id, id)...)
+	}
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT " + IssueSelectColumns + " FROM " + table + " " + sqlbuild.LeaseJoin(table) + " WHERE id IN (" + in + ")")).
+		WithArgs(args...).
+		WillReturnRows(rows)
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT issue_id, label FROM " + labelTable + " WHERE issue_id IN (" + in + ") ORDER BY issue_id, label")).
+		WithArgs(args...).
+		WillReturnRows(sqlmock.NewRows([]string{"issue_id", "label"}))
+}
+
+// expectWispIssue pins GetIssueInTx for an id that lives on the wisp plane:
+// the durable read comes back empty, then the wisp row and its labels.
+func expectWispIssue(mock sqlmock.Sqlmock, id, title string) {
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT " + IssueSelectColumns + " FROM issues " + sqlbuild.LeaseJoin("issues") + " WHERE id = ?")).
+		WithArgs(id).
+		WillReturnRows(sqlmock.NewRows(issueColumns()))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT " + IssueSelectColumns + " FROM wisps " + sqlbuild.LeaseJoin("wisps") + " WHERE id = ?")).
+		WithArgs(id).
+		WillReturnRows(issueRows().AddRow(issueRowValues(id, title)...))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT label FROM wisp_labels WHERE issue_id = ? ORDER BY label")).
+		WithArgs(id).
+		WillReturnRows(sqlmock.NewRows([]string{"label"}))
+}
+
+// expectTreeBlockedFlagsAcrossTables is expectTreeBlockedFlags for a live wisp
+// plane: the issues read answers rows for the ids issueFlags names, the wisps
+// read for wispFlags, an id absent from a map reading no row there.
+func expectTreeBlockedFlagsAcrossTables(mock sqlmock.Sqlmock, ids []string, issueFlags, wispFlags map[string]int) {
+	issues := sqlmock.NewRows([]string{"id", "is_blocked"})
+	wisps := sqlmock.NewRows([]string{"id", "is_blocked"})
+	placeholders := make([]string, len(ids))
+	args := make([]driver.Value, len(ids))
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args[i] = id
+		if flag, ok := issueFlags[id]; ok {
+			issues.AddRow(id, flag)
+		}
+		if flag, ok := wispFlags[id]; ok {
+			wisps.AddRow(id, flag)
+		}
+	}
+	in := strings.Join(placeholders, ",")
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT id, is_blocked FROM issues WHERE id IN (" + in + ")")).
+		WithArgs(args...).
+		WillReturnRows(issues)
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT id, is_blocked FROM wisps WHERE id IN (" + in + ")")).
+		WithArgs(args...).
+		WillReturnRows(wisps)
+}
+
+// TestGetDependencyTreeInTxStampsEveryOccurrenceAcrossPlanes is AC-6: a walk
+// whose diamond repeats shared as a Deduped stub and reaches a wisp node, each
+// carrying a true stored flag backed by an own ready-affecting edge in its
+// family's table. Every occurrence — the stub's copy included — must stamp
+// IsBlocked and serialize it, and the wisp's flag must be qualified by
+// wisp_dependencies, not by the durable table.
+func TestGetDependencyTreeInTxStampsEveryOccurrenceAcrossPlanes(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectBegin()
+	expectIssue(mock, "root", "Root")
+	// root's edges: mid, shared on the durable plane; the wisp hangs off a
+	// durable row targeting it.
+	expectDependenciesAcrossTables(mock, "root", []dependencyRow{
+		{id: "mid", depType: string(types.DepBlocks)},
+		{id: "shared", depType: string(types.DepBlocks)},
+		{id: "wisp-1", depType: string(types.DepBlocks)},
+	}, nil)
+	expectWispAwareIssueBatch(mock, []string{"mid", "shared"}, []string{"wisp-1"})
+	// mid expands shared first, so root's edge into shared is the Deduped stub.
+	expectIssue(mock, "mid", "Mid")
+	expectDependencies(mock, "mid", []dependencyRow{{id: "shared", depType: string(types.DepBlocks)}})
+	expectWispAwareIssueBatch(mock, []string{"shared"}, nil)
+	expectIssue(mock, "shared", "Shared")
+	expectDependencies(mock, "shared", nil)
+	// No expectation for the stub: it must read nothing.
+	expectWispIssue(mock, "wisp-1", "Wisp")
+	expectDependencies(mock, "wisp-1", nil)
+	// The stamping read: root's flag is false; mid and shared are flagged
+	// issues, wisp-1 a flagged wisp.
+	expectTreeBlockedFlagsAcrossTables(mock, []string{"root", "mid", "shared", "wisp-1"},
+		map[string]int{"mid": 1, "shared": 1}, map[string]int{"wisp-1": 1})
+	expectOwnEdgeProbe(mock, "dependencies", []string{"mid", "shared"}, []string{"mid", "shared"})
+	expectOwnEdgeProbe(mock, "wisp_dependencies", []string{"wisp-1"}, []string{"wisp-1"})
+
+	tx, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("BeginTx: %v", err)
+	}
+	tree, err := GetDependencyTreeInTx(context.Background(), tx, "root", 5, false, false)
+	if err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("GetDependencyTreeInTx: %v", err)
+	}
+	mock.ExpectRollback()
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("Rollback: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+
+	if got := treeIDs(tree); strings.Join(got, ",") != "root,mid,shared,shared,wisp-1" {
+		t.Fatalf("tree = %v, want [root mid shared shared(stub) wisp-1]", got)
+	}
+	for _, node := range tree {
+		if node.ID == "root" && node.Issue.IsBlocked {
+			t.Fatalf("root stamped IsBlocked, want false: %+v", node.Issue)
+		}
+		if node.ID != "root" && !node.Issue.IsBlocked {
+			t.Fatalf("node %s (Deduped=%v) stamped IsBlocked false, want true", node.ID, node.Deduped)
+		}
+	}
+	stubs := 0
+	for _, node := range tree {
+		if node.Deduped {
+			stubs++
+			if !node.Issue.IsBlocked {
+				t.Fatalf("the Deduped stub of %s lost the flag its expanded copy carries", node.ID)
+			}
+		}
+	}
+	if stubs != 1 {
+		t.Fatalf("Deduped rows = %d, want exactly the one stub of shared", stubs)
+	}
+	for _, node := range tree {
+		wire, err := json.Marshal(node)
+		if err != nil {
+			t.Fatalf("marshal node %s: %v", node.ID, err)
+		}
+		wantMember := node.Issue.IsBlocked
+		if got := strings.Contains(string(wire), "is_blocked"); got != wantMember {
+			t.Fatalf("node %s json = %s, want is_blocked present=%v", node.ID, wire, wantMember)
+		}
+	}
+}
