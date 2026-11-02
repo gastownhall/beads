@@ -2,6 +2,7 @@ package uow
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 
@@ -9,6 +10,9 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
 )
+
+// errProviderClosed refuses a new connection of a provider that has been closed.
+var errProviderClosed = errors.New("uow: provider closed")
 
 // proxyEndpointResolver re-resolves the workspace proxy's endpoint for every
 // new physical connection of a provider pool (#7295). A proxy with a finite
@@ -32,11 +36,15 @@ import (
 // unrelated listener that still accepts TCP. Each new connection
 // authenticates the proxy afresh, and a pooled connection is reused without
 // discovery.
+//
+// close stops admission and waits for the discovery in flight, so no worker
+// outlives the provider.
 type proxyEndpointResolver struct {
 	discover func() (proxy.Endpoint, error)
 
 	mu       sync.Mutex
 	armed    bool
+	closed   bool
 	inflight *endpointDiscovery
 }
 
@@ -76,6 +84,10 @@ func (r *proxyEndpointResolver) beforeConnect(ctx context.Context, cfg *mysql.Co
 		return err
 	}
 	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return errProviderClosed
+	}
 	if !r.armed {
 		r.mu.Unlock()
 		return nil
@@ -99,6 +111,12 @@ func (r *proxyEndpointResolver) beforeConnect(ctx context.Context, cfg *mysql.Co
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	r.mu.Lock()
+	closed := r.closed
+	r.mu.Unlock()
+	if closed {
+		return errProviderClosed
+	}
 	if d.err != nil {
 		// Never fall back to the construction address, which may now belong to
 		// an unrelated listener, and never ErrBadConn: the pool would retry on
@@ -107,6 +125,18 @@ func (r *proxyEndpointResolver) beforeConnect(ctx context.Context, cfg *mysql.Co
 	}
 	cfg.Addr = d.ep.Address()
 	return nil
+}
+
+// close refuses every later hook and waits for the discovery in flight, if
+// any, to finish. It is safe to call more than once.
+func (r *proxyEndpointResolver) close() {
+	r.mu.Lock()
+	r.closed = true
+	d := r.inflight
+	r.mu.Unlock()
+	if d != nil {
+		<-d.done
+	}
 }
 
 // run performs discovery d and publishes its result, clearing the in-flight
