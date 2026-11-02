@@ -5,6 +5,8 @@ package embeddeddolt_test
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage/schema"
@@ -70,5 +72,50 @@ func TestEmbeddedMigrateFromEmptyUnderTransactionCommitReachesLatestAndRestores(
 	}
 	if wisps != 1 {
 		t.Fatalf("dolt_log 'create nonlocal table wisps' commits = %d, want 1", wisps)
+	}
+}
+
+// TestEmbeddedMigratePassSuspendsTransactionCommitUntilRestoredOnFault proves
+// the suspension is scoped to the pass and survives a fault: a step fault hook
+// observing the session mid-pass (right after migration 40 applies) must see
+// the mode suspended (0), the sentinel error must travel out unwrapped enough
+// for errors.Is, and the session must be back at 1 when MigrateUp returns.
+// Not parallel: the fault hook is a package-global seam.
+func TestEmbeddedMigratePassSuspendsTransactionCommitUntilRestoredOnFault(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+	dataDir := seedMainSchemaAt(t, ctx, 27)
+
+	sentinel := errors.New("injected fault after migration 40")
+	var observed string
+	var observedOK bool
+	restore := schema.SetMigrateStepFaultHookForTest(func(ctx context.Context, q schema.DBConn, version int) error {
+		if version != 40 {
+			return nil
+		}
+		var v sql.NullString
+		if err := q.QueryRowContext(ctx, "SELECT @@SESSION.dolt_transaction_commit").Scan(&v); err != nil {
+			return fmt.Errorf("observing dolt_transaction_commit at migration 40: %w", err)
+		}
+		observed, observedOK = v.String, true
+		return sentinel
+	})
+	t.Cleanup(restore)
+
+	conn, closeConn := openPinnedConn(t, ctx, dataDir)
+	defer closeConn()
+	if _, err := conn.ExecContext(ctx, "SET @@dolt_transaction_commit = 1"); err != nil {
+		t.Fatalf("enable dolt_transaction_commit: %v", err)
+	}
+
+	_, err := schema.MigrateUp(ctx, conn)
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("MigrateUp err = %v, want the sentinel fault (errors.Is)", err)
+	}
+	if !observedOK || observed != "0" {
+		t.Fatalf("setting observed at migration 40 = (%q, seen=%t), want \"0\" (suspended for the pass)", observed, observedOK)
+	}
+	if got := sessionTransactionCommit(t, ctx, conn); got != "1" {
+		t.Fatalf("session dolt_transaction_commit after faulted pass = %q, want \"1\" (restored)", got)
 	}
 }
