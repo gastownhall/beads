@@ -5,6 +5,9 @@ package embeddeddolt_test
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage/rowid"
@@ -140,6 +143,7 @@ INSERT INTO events (issue_id, event_type, actor, old_value, new_value, comment, 
 	}
 	assertEventsAbsentFromStatus(t, ctx, conn)
 }
+
 // TestEmbeddedIgnoredMigration0031PreservesExistingRowsAndIDs pins the
 // restore's reconciliation contract on a table that already holds rows: ids
 // and rows that exist are never touched or re-ided, only the missing content
@@ -280,3 +284,147 @@ func TestEmbeddedPreflipSeedCompletesWithoutSourceSilently(t *testing.T) {
 	assertEventsAbsentFromStatus(t, ctx, conn)
 }
 
+// TestEmbeddedPreflipSeedResumesAfterInterruptedPass models the crash shape:
+// an earlier restore attempt wrote the first issue's rows (with derived ids)
+// and died before recording the cursor. The retry must converge — reusing the
+// already-written rows, restoring the rest, and ending with exact content
+// multiplicities, no duplicates.
+func TestEmbeddedPreflipSeedResumesAfterInterruptedPass(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+
+	dataDir := seedMainSchemaAt(t, ctx, 61)
+	conn, closeConn := openPinnedConn(t, ctx, dataDir)
+	defer closeConn()
+
+	seedPreflipEvents(t, ctx, conn, "r-1", `
+INSERT INTO events (issue_id, event_type, actor, old_value, new_value, comment, created_at, id) VALUES
+('r-1', 'created', 'tester', NULL, NULL, NULL, '2026-07-30 00:00:00', 'evt-r-1a');
+INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type)
+VALUES ('r-2', 'unreached', '', '', '', '', 'open', 2, 'task');
+INSERT INTO events (issue_id, event_type, actor, old_value, new_value, comment, created_at, id) VALUES
+('r-2', 'status_changed', 'tester', 'open', 'in_progress', NULL, '2026-07-30 00:01:00', 'evt-r-2a'),
+('r-2', 'status_changed', 'tester', 'open', 'in_progress', NULL, '2026-07-30 00:01:00', 'evt-r-2b');
+`)
+
+	if _, err := schema.MigrateUpTo(ctx, conn, 74); err != nil {
+		t.Fatalf("MigrateUpTo(74): %v", err)
+	}
+	commitWorkingSet(t, ctx, conn, "test: flipped schema")
+	execFrozenGuard(t, ctx, conn, "DROP TABLE events")
+
+	// The interrupted attempt: the table was re-created (ignored/0019's
+	// bytes) and the first issue's row was written with its derived id
+	// before the process died — cursor still pending.
+	r1Digest := eventDigest("r-1", "created", "tester", eventNull, eventNull, eventNull, "2026-07-30 00:00:00")
+	markerSQL, err := schema.IgnoredMigrationSQL("0019_create_events.up.sql")
+	if err != nil {
+		t.Fatalf("IgnoredMigrationSQL(0019): %v", err)
+	}
+	execFrozenGuard(t, ctx, conn, markerSQL)
+	execFrozenGuard(t, ctx, conn, `
+INSERT INTO events (issue_id, event_type, actor, old_value, new_value, comment, created_at, id)
+VALUES ('r-1', 'created', 'tester', NULL, NULL, NULL, '2026-07-30 00:00:00', '`+rowid.New("events", 0, r1Digest)+`');
+`)
+	// The ignored cursor table does not exist yet (the ignored series has not
+	// run on this fixture), so the interrupted state is implicit: the
+	// restore's version is unrecorded and its first issue's row is written.
+
+	if _, err := schema.MigrateUp(ctx, conn); err != nil {
+		t.Fatalf("MigrateUp (retry): %v", err)
+	}
+
+	// The interrupted attempt's row is reused, not duplicated or re-ided.
+	if got := scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM events WHERE issue_id = 'r-1'"); got != 1 {
+		t.Fatalf("r-1 events = %d, want exactly 1 (half-written rows are reused, not duplicated)", got)
+	}
+	// The unreached issue's duplicate pair is restored with exact multiplicity.
+	r2Digest := eventDigest("r-2", "status_changed", "tester", "open", "in_progress", eventNull, "2026-07-30 00:01:00")
+	for ord := 0; ord < 2; ord++ {
+		if got := scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM events WHERE id = ?", rowid.New("events", ord, r2Digest)); got != 1 {
+			t.Fatalf("r-2 restored duplicate ord %d = %d, want 1", ord, got)
+		}
+	}
+	if got := scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM events"); got != 3 {
+		t.Fatalf("events rows after retry = %d, want 3", got)
+	}
+	if got := scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM ignored_schema_migrations WHERE version = 31"); got != 1 {
+		t.Fatalf("restore version recorded after retry = %d, want 1", got)
+	}
+	assertEventsAbsentFromStatus(t, ctx, conn)
+}
+
+// TestEmbeddedPreflipSeedRetriesAfterInjectedInsertFault drives the same
+// interruption as the crash-shape test above through the fault seam, on a
+// fixture large enough to span insert batches: the second batch fails, the
+// pass aborts with the marker pending and the first batch's rows live, and a
+// plain retry converges to exact multiplicities.
+func TestEmbeddedPreflipSeedRetriesAfterInjectedInsertFault(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+
+	dataDir := seedMainSchemaAt(t, ctx, 61)
+	conn, closeConn := openPinnedConn(t, ctx, dataDir)
+	defer closeConn()
+
+	// 102 distinct-content rows (one per second) so the restore's plan spans
+	// two insert batches of at most 100 rows.
+	var bulk strings.Builder
+	bulk.WriteString(`
+INSERT INTO events (issue_id, event_type, actor, old_value, new_value, comment, created_at, id) VALUES
+`)
+	for i := range 102 {
+		if i > 0 {
+			bulk.WriteByte(',')
+		}
+		fmt.Fprintf(&bulk, "('f-1', 'noted', 'tester', NULL, NULL, 'note %03d', '2026-07-30 00:%02d:%02d', 'evt-f-%03d')\n",
+			i, i/60, i%60, i)
+	}
+	seedPreflipEvents(t, ctx, conn, "f-1", bulk.String())
+
+	if _, err := schema.MigrateUpTo(ctx, conn, 74); err != nil {
+		t.Fatalf("MigrateUpTo(74): %v", err)
+	}
+	commitWorkingSet(t, ctx, conn, "test: flipped schema")
+	execFrozenGuard(t, ctx, conn, "DROP TABLE events")
+
+	batches := 0
+	restore := schema.SetPreflipSeedFaultHookForTest(func(point schema.PreflipSeedFaultPoint, _ string) error {
+		if point == schema.PreflipFaultInsertBatch {
+			batches++
+			if batches == 2 {
+				return errors.New("injected: connection reset mid-restore")
+			}
+		}
+		return nil
+	})
+	_, err := schema.MigrateUp(ctx, conn)
+	restore()
+	if err == nil {
+		t.Fatal("first pass with the injected second-batch fault unexpectedly succeeded")
+	}
+	if !strings.Contains(err.Error(), "injected") {
+		t.Fatalf("first pass failed with an unexpected error: %v", err)
+	}
+	// The marker stayed pending; the first batch's 100 rows are live.
+	if got := scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM ignored_schema_migrations WHERE version = 31"); got != 0 {
+		t.Fatalf("restore version recorded despite the fault = %d, want 0", got)
+	}
+	if got := scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM events"); got != 100 {
+		t.Fatalf("rows persisted by the first batch = %d, want 100", got)
+	}
+
+	if _, err := schema.MigrateUp(ctx, conn); err != nil {
+		t.Fatalf("MigrateUp (retry): %v", err)
+	}
+	if got := scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM events"); got != 102 {
+		t.Fatalf("events rows after retry = %d, want 102 (no duplicates, nothing missing)", got)
+	}
+	if got := scalarInt(t, ctx, conn, "SELECT COUNT(DISTINCT id) FROM events"); got != 102 {
+		t.Fatalf("distinct event ids after retry = %d, want 102", got)
+	}
+	if got := scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM ignored_schema_migrations WHERE version = 31"); got != 1 {
+		t.Fatalf("restore version recorded after retry = %d, want 1", got)
+	}
+	assertEventsAbsentFromStatus(t, ctx, conn)
+}
