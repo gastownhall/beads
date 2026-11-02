@@ -371,3 +371,44 @@ func TestJournalWriterLock_StoreAndUOWWritersQueueOnOneLock(t *testing.T) {
 	require.NoError(t, rows.Err())
 	require.True(t, sawHolder && sawWaiter, "want journal rows for both writers (holder=%v unit of work=%v)", sawHolder, sawWaiter)
 }
+
+// TestJournalWriterLock_DisabledJournalUOWTakesNoLock pins the journal-off
+// lane on the proxied provider (gastownhall/beads#6117): with the journal off
+// no unit of work takes the journal-writer lock, so an emitting write
+// completes promptly while another session holds it, and its emit stays the
+// usual no-op.
+func TestJournalWriterLock_DisabledJournalUOWTakesNoLock(t *testing.T) {
+	ctx := context.Background()
+	provider := newUOWRoleFixtureProvider(t, ctx, "jwo")
+	p, ok := provider.(*doltSQLProvider)
+	require.Truef(t, ok, "provider is %T, want *doltSQLProvider", provider)
+	p.SetEventsJournalEnabled(false)
+	name := issueops.JournalWriterLockName(p.database)
+
+	probe, err := p.db.Conn(ctx)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, _ = probe.ExecContext(context.Background(), "DO RELEASE_LOCK(?)", name)
+		_ = probe.Close()
+	})
+	var granted sql.NullInt64
+	require.NoError(t, probe.QueryRowContext(ctx, "SELECT GET_LOCK(?, 0)", name).Scan(&granted))
+	require.EqualValues(t, 1, granted.Int64, "the probe must take the lock")
+
+	before := uowJournalSeqCounter(t, ctx, p.db)
+	// Well inside the admission budget: a unit of work that queued would run out.
+	wctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	const id = "jwo-write"
+	_, err = RunTxResultWithin(wctx, p, 15*time.Second, func(ctx context.Context, uw UnitOfWork) (struct{}, string, error) {
+		_, err := uw.IssueUseCase().CreateIssue(ctx, domain.CreateIssueParams{
+			Issue:      &types.Issue{ID: id, Title: id, IssueType: types.TypeTask, Status: types.StatusOpen},
+			ExplicitID: id,
+			CreateOnly: true,
+		}, "route")
+		return struct{}{}, "bd: journal-off write", err
+	})
+	require.NoError(t, err, "a journal-off unit of work must complete while another session holds the journal-writer lock")
+	require.Equal(t, types.StatusOpen, readStoredIssue(t, ctx, p, id).Status)
+	require.Equal(t, before, uowJournalSeqCounter(t, ctx, p.db), "a journal-off emit allocated a seq")
+}

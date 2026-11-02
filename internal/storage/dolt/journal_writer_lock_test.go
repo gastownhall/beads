@@ -355,3 +355,61 @@ func TestJournalWriterLock_OtherDatabasesWriterDoesNotQueue(t *testing.T) {
 		t.Fatalf("the other database's lock %q is no longer its holder's after this store's write", otherName)
 	}
 }
+
+// TestJournalWriterLock_DisabledJournalTakesNoLock pins the journal-off lane
+// on a real server (gastownhall/beads#6117): with the journal off, a write
+// takes no journal-writer lock, so it completes promptly while another
+// session holds the lock — on the funnel, a raw journal-scoped site and the
+// NoJournal funnel — and an emit stays the usual no-op: the NoJournal funnel's
+// emitting body commits, and the journal stays empty.
+func TestJournalWriterLock_DisabledJournalTakesNoLock(t *testing.T) {
+	store, cleanup := setupConcurrentTestStore(t)
+	t.Cleanup(cleanup)
+	ctx, cancel := testContext(t)
+	t.Cleanup(cancel)
+	// The journal stays off, the harness default.
+	observer, err := store.openLongTimeoutConn()
+	if err != nil {
+		t.Fatalf("open observer: %v", err)
+	}
+	t.Cleanup(func() { _ = observer.Close() })
+
+	name := issueops.JournalWriterLockName(store.database)
+	probe, err := observer.Conn(ctx)
+	if err != nil {
+		t.Fatalf("pin probe: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = probe.ExecContext(context.Background(), "DO RELEASE_LOCK(?)", name)
+		_ = probe.Close()
+	})
+	var granted sql.NullInt64
+	if err := probe.QueryRowContext(ctx, "SELECT GET_LOCK(?, 0)", name).Scan(&granted); err != nil || granted.Int64 != 1 {
+		t.Fatalf("hold %q: granted=%v err=%v", name, granted, err)
+	}
+
+	// Well inside the admission budget: a write that queued would run out.
+	wctx, wcancel := context.WithTimeout(ctx, 5*time.Second)
+	defer wcancel()
+	issue := &types.Issue{Title: "journal off", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	if err := store.CreateIssue(wctx, issue, "actor"); err != nil {
+		t.Fatalf("journal-off funnel write queued or failed behind the held lock: %v", err)
+	}
+	if err := store.AddComment(wctx, issue.ID, "actor", "comment"); err != nil {
+		t.Fatalf("journal-off raw-site write queued or failed behind the held lock: %v", err)
+	}
+	if err := store.withRetryTxNoJournal(wctx, func(tx *sql.Tx) error {
+		_, err := issueops.UpdateIssueInTx(wctx, tx, issue.ID, map[string]interface{}{"title": "journal off, NoJournal funnel"}, "actor")
+		return err
+	}); err != nil {
+		t.Fatalf("journal-off NoJournal emit was not a no-op: %v", err)
+	}
+
+	rows, err := store.ReadEventsJournal(ctx, 0, 100)
+	if err != nil {
+		t.Fatalf("read journal: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("journal rows = %d, want 0 (journal-off emission is a no-op)", len(rows))
+	}
+}
