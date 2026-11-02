@@ -240,7 +240,9 @@ dolt merge --abort                 # only if a failed merge is still open
 dolt branch tmp-events-bridge remotes/origin/main
 dolt checkout tmp-events-bridge
 dolt sql -q "DROP TABLE events"
-dolt add -A
+dolt add -f events                 # -f is required: the ignore pattern survives
+                                   # the checkout, and staging an ignored table's
+                                   # drop without -f is a silent no-op
 dolt commit -m "bridge: apply the events retirement to incoming history"
 dolt checkout main
 dolt merge tmp-events-bridge       # the peer's beads land; no events conflict
