@@ -403,3 +403,52 @@ func TestUnresolvedErrorNamesTheHostEscaped(t *testing.T) {
 		t.Errorf("socket-only endpoint: UnresolvedError = %v, want nil", err)
 	}
 }
+
+// TestCheckEndpointTrustGatesTheServerPasswordSend pins the credential-trust
+// gate the diagnostic and maintenance connection paths share (bd dolt status,
+// bd dolt clean-databases, the bd doctor checks): a remote Dolt host named only
+// by shared configuration (metadata.json dolt_server_host) is refused on first
+// use, and a private source (the caller's own BEADS_DOLT_SERVER_HOST) confirms
+// it. The local server and the vendor default are trusted without confirmation.
+func TestCheckEndpointTrustGatesTheServerPasswordSend(t *testing.T) {
+	beadsDir := endpointTestEnv(t, nil)
+	writeEndpointMetadata(t, beadsDir, &configfile.Config{
+		DoltMode:       configfile.DoltModeServer,
+		DoltServerHost: "evil.example",
+		DoltServerPort: 13306,
+		DoltDatabase:   "endpoint_trust",
+	})
+
+	// bd's own local server is trusted without any confirmation.
+	if err := CheckEndpointTrust(beadsDir, nil, "127.0.0.1", 3307, ""); err != nil {
+		t.Fatalf("local server must be trusted: %v", err)
+	}
+
+	// A remote host from shared config is refused on first use.
+	err := CheckEndpointTrust(beadsDir, nil, "evil.example", 13306, "")
+	if err == nil {
+		t.Fatal("an unpinned shared remote endpoint must be refused")
+	}
+	if !strings.Contains(err.Error(), "credential was not sent") {
+		t.Fatalf("error must say the credential was not sent, got %v", err)
+	}
+	// The Endpoint method is equivalent.
+	ep := Endpoint{BeadsDir: beadsDir, Host: "evil.example", Port: 13306}
+	if err := ep.EnsureTrustedForCredential(nil); err == nil {
+		t.Fatal("EnsureTrustedForCredential must refuse the same unpinned endpoint")
+	}
+
+	// A private source (the caller's environment) confirms it; it then pins.
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "evil.example")
+	if err := CheckEndpointTrust(beadsDir, nil, "evil.example", 13306, ""); err != nil {
+		t.Fatalf("private confirmation must pass: %v", err)
+	}
+	// Once pinned, it is trusted even without the env var; a different host is a mismatch.
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	if err := CheckEndpointTrust(beadsDir, nil, "evil.example", 13306, ""); err != nil {
+		t.Fatalf("pinned endpoint must stay trusted: %v", err)
+	}
+	if err := CheckEndpointTrust(beadsDir, nil, "other.example", 13306, ""); err == nil {
+		t.Fatal("a changed shared host must be refused after the pin")
+	}
+}

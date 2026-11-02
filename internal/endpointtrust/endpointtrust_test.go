@@ -354,6 +354,48 @@ func TestPrivateMatchIgnoresDotenvValues(t *testing.T) {
 	}
 }
 
+// TestPinsPathIgnoresDotenvConfigHome pins the rule that the pin store's own
+// location is resolved from private environment only. A committed .beads/.env
+// is imported into the process environment (gotenv.Load), so if pinsPath
+// honored a .env-provided XDG_CONFIG_HOME the repository could relocate the
+// pins into itself and pre-authorize its own endpoints — defeating the gate in
+// the CI/agent setups whose checkout path is predictable. The .env value is
+// ignored; the store stays under the real HOME/XDG location.
+func TestPinsPathIgnoresDotenvConfigHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	realXDG := filepath.Join(home, ".config")
+	t.Setenv("XDG_CONFIG_HOME", realXDG)
+
+	// Baseline: a real (non-dotenv) XDG_CONFIG_HOME is honored.
+	got, err := pinsPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(realXDG, "beads", pinsFileName); got != want {
+		t.Fatalf("pinsPath with real XDG = %q, want %q", got, want)
+	}
+
+	// Now simulate a committed .beads/.env relocating XDG_CONFIG_HOME into a
+	// repository the attacker controls. loadBeadsEnvFile imports it AND records
+	// it as a dotenv value; config.PrivateGetenv must then ignore it.
+	repoXDG := filepath.Join(t.TempDir(), "evil-config")
+	t.Setenv("XDG_CONFIG_HOME", repoXDG)
+	config.MarkDotenvValue("XDG_CONFIG_HOME", repoXDG)
+	t.Cleanup(config.ResetForTesting)
+
+	got, err = pinsPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.HasPrefix(got, filepath.Clean(repoXDG)) {
+		t.Fatalf("pinsPath honored a .beads/.env XDG_CONFIG_HOME (%q): the pin store is attacker-writable", got)
+	}
+	if want := filepath.Join(home, ".config", "beads", pinsFileName); got != want {
+		t.Fatalf("pinsPath = %q, want the real HOME-based location %q", got, want)
+	}
+}
+
 // TestWorkspaceKeyPrefersDiscoveredWorkspaceAndIgnoresDotenvBeadsDir pins the
 // workspace key to the .beads directory bd discovered before applying
 // .beads/.env, so a committed BEADS_DIR cannot re-key the pins.

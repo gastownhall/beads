@@ -3,10 +3,12 @@ package dolt
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/endpointtrust"
 	"github.com/steveyegge/beads/internal/testutil/credentialcmd"
@@ -233,4 +235,77 @@ func TestApplyResolvedConfigGatewayCredential(t *testing.T) {
 		}
 		credentialcmd.AssertMarkerAbsent(t, marker)
 	})
+}
+
+// TestNewRefusesUnpinnedRemoteEndpointWithPassword pins the central gate in New:
+// every store open funnels through it, so a bd command that opens the store with
+// BEADS_DOLT_PASSWORD set and a remote host named only in shared configuration
+// (metadata.json dolt_server_host) is refused before any dial — it is the
+// #7886 Dolt-password send on the diagnostic/maintenance paths (bd doctor's
+// federation, validation, maintenance and migration checks open via dolt.New,
+// bypassing the applyResolvedConfig gate).
+func TestNewRefusesUnpinnedRemoteEndpointWithPassword(t *testing.T) {
+	// Fresh, private pin store and a clean Dolt environment.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	for _, name := range []string{
+		"BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_PORT",
+		"BEADS_DOLT_PASSWORD", "BEADS_DOLT_SERVER_SOCKET", "BEADS_DOLT_CREDENTIAL_COMMAND",
+		"BEADS_TEST_MODE", "BEADS_DIR",
+	} {
+		t.Setenv(name, "")
+	}
+	config.ResetForTesting()
+	t.Cleanup(config.ResetForTesting)
+
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Shared configuration (metadata.json) names an attacker's host.
+	fileCfg := &configfile.Config{
+		Backend:        configfile.BackendDolt,
+		DoltMode:       configfile.DoltModeServer,
+		DoltServerHost: "evil.example",
+		DoltServerPort: 13306,
+		DoltDatabase:   "endpoint_trust",
+	}
+	if err := fileCfg.Save(beadsDir); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &Config{
+		Path:           t.TempDir(),
+		Database:       "endpoint_trust",
+		BeadsDir:       beadsDir,
+		ServerHost:     "evil.example",
+		ServerPort:     13306,
+		ServerPassword: "victim-secret",
+	}
+	_, err := New(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("New must refuse an unpinned shared remote endpoint when a password would be sent")
+	}
+	var firstUse *endpointtrust.FirstUseError
+	if !errors.As(err, &firstUse) {
+		t.Fatalf("want a FirstUseError refusing the unconfirmed endpoint, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "credential was not sent") {
+		t.Fatalf("error must say the credential was not sent, got %v", err)
+	}
+
+	// A private source (the caller's own environment) confirms the endpoint, so
+	// New gets past the trust gate (and then fails at the real dial instead).
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "evil.example")
+	_, err = New(context.Background(), cfg)
+	if err != nil {
+		if _, ok := err.(*endpointtrust.FirstUseError); ok {
+			t.Fatalf("private confirmation did not bypass the trust gate: %v", err)
+		}
+		var mismatch *endpointtrust.MismatchError
+		if errors.As(err, &mismatch) {
+			t.Fatalf("private confirmation did not bypass the trust gate: %v", err)
+		}
+	}
 }

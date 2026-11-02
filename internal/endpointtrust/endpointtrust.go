@@ -365,23 +365,58 @@ func isLocalDoltEndpoint(endpoint string) bool {
 	}
 }
 
+// pinsPath locates the user-private pin store. The whole gate rests on this
+// file living somewhere a workspace cannot write, so the location is resolved
+// from private environment only: a committed .beads/.env is imported into the
+// process environment (gotenv.Load in cmd/bd), so honoring a .env-provided
+// XDG_CONFIG_HOME, APPDATA, HOME or USERPROFILE would let a repository relocate
+// the pins into itself and pre-authorize its own endpoints (the pin store is
+// the one place the attacker must not reach). config.PrivateGetenv ignores
+// .beads/.env values, the same way the rest of this package treats a .env
+// endpoint as shared rather than privately confirmed.
 func pinsPath() (string, error) {
 	if runtime.GOOS == "windows" {
-		if appdata := strings.TrimSpace(os.Getenv("APPDATA")); appdata != "" && filepath.IsAbs(appdata) {
-			return filepath.Join(filepath.Clean(appdata), "beads", pinsFileName), nil
+		if appdata := privateAbsEnv("APPDATA"); appdata != "" {
+			return filepath.Join(appdata, "beads", pinsFileName), nil
 		}
 	}
-	if xdg := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME")); xdg != "" && filepath.IsAbs(xdg) {
-		return filepath.Join(filepath.Clean(xdg), "beads", pinsFileName), nil
+	if xdg := privateAbsEnv("XDG_CONFIG_HOME"); xdg != "" {
+		return filepath.Join(xdg, "beads", pinsFileName), nil
+	}
+	if home := privateHomeDir(); home != "" {
+		return filepath.Join(home, ".config", "beads", pinsFileName), nil
+	}
+	return "", errors.New("find user config directory: no private HOME, XDG_CONFIG_HOME or APPDATA (a .beads/.env value for one of these is ignored)")
+}
+
+// privateAbsEnv returns the cleaned absolute value of key from a private
+// source (not .beads/.env), or "" when unset, relative, or dotenv-sourced.
+func privateAbsEnv(key string) string {
+	v := strings.TrimSpace(config.PrivateGetenv(key))
+	if v == "" || !filepath.IsAbs(v) {
+		return ""
+	}
+	return filepath.Clean(v)
+}
+
+// privateHomeDir resolves the user's home directory without trusting a
+// .beads/.env-provided HOME/USERPROFILE. os.UserHomeDir reads the same
+// variable, so it is consulted only when a dotenv value did not set it.
+func privateHomeDir() string {
+	key := "HOME"
+	if runtime.GOOS == "windows" {
+		key = "USERPROFILE"
+	}
+	if home := privateAbsEnv(key); home != "" {
+		return home
+	}
+	if config.IsDotenvKey(key) {
+		return ""
 	}
 	if home, err := os.UserHomeDir(); err == nil && filepath.IsAbs(home) {
-		return filepath.Join(filepath.Clean(home), ".config", "beads", pinsFileName), nil
+		return filepath.Clean(home)
 	}
-	configDir, err := os.UserConfigDir()
-	if err != nil {
-		return "", fmt.Errorf("find user config directory: %w", err)
-	}
-	return filepath.Join(configDir, "beads", pinsFileName), nil
+	return ""
 }
 
 func readPins() (pins, error) {

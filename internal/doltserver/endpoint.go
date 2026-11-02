@@ -259,6 +259,20 @@ func CheckEndpointTrust(beadsDir string, fileCfg *configfile.Config, host string
 	return endpointtrust.Check(beadsDir, "dolt-server", endpoint, fromPrivate)
 }
 
+// EnsureTrustedForCredential checks e's endpoint against the workspace pins
+// before a caller sends e's password (or presents a credential-command
+// identity) to it. It is a no-op for bd's own local server and the vendor
+// default; it returns a MismatchError or FirstUseError for a shared endpoint
+// (metadata.json dolt_server_host, config.yaml dolt.host) that changed or was
+// never privately confirmed, so a diagnostic or repair connection a bd command
+// makes outside the store's gated open — bd dolt status, bd dolt
+// clean-databases and the bd doctor checks — cannot harvest BEADS_DOLT_PASSWORD
+// by naming an attacker's host. fileCfg is e's metadata.json (loaded from
+// e.BeadsDir when nil).
+func (e Endpoint) EnsureTrustedForCredential(fileCfg *configfile.Config) error {
+	return CheckEndpointTrust(e.BeadsDir, fileCfg, e.Host, e.Port, e.Socket)
+}
+
 // DialDSN is the connection to e the store would make, on database ("" for
 // none): its transport (SocketTransport), the identity it presents
 // (WithIdentity) and the password keyed to its port. It refuses an endpoint

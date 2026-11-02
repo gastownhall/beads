@@ -224,3 +224,51 @@ func TestScanConnectionNeverDialsAnUnresolvedPort(t *testing.T) {
 		t.Errorf("OpenScanDB error = %v, want the store's unresolved-port refusal and no dial of 127.0.0.1:0", err)
 	}
 }
+
+// TestOpenFixDBRefusesUnpinnedRemoteEndpointWithPassword pins the credential gate
+// on bd doctor --fix: its repair connection (openFixDB → openWorkspaceDB) and the
+// read-only scans (openScanDB) refuse to send BEADS_DOLT_PASSWORD to a remote host
+// named only by shared configuration (metadata.json dolt_server_host) the
+// workspace never pinned, before any dial (GH#7886).
+func TestOpenFixDBRefusesUnpinnedRemoteEndpointWithPassword(t *testing.T) {
+	beadsDir, _ := fixEndpointWorkspace(t)
+	cfg := &configfile.Config{
+		Backend:        configfile.BackendDolt,
+		DoltMode:       configfile.DoltModeServer,
+		DoltServerHost: "evil.example",
+		DoltServerPort: 13306,
+		DoltDatabase:   "fix_endpoint",
+	}
+	if err := cfg.Save(beadsDir); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_DOLT_PASSWORD", "victim-secret")
+
+	if db, err := openFixDB(beadsDir, cfg); err == nil {
+		if db != nil {
+			_ = db.Close()
+		}
+		t.Fatal("openFixDB must refuse an unpinned shared remote endpoint when a password would be sent")
+	} else if !strings.Contains(err.Error(), "credential was not sent") {
+		t.Fatalf("openFixDB error must say the credential was not sent, got %v", err)
+	}
+	if db, err := openScanDB(beadsDir, cfg); err == nil {
+		if db != nil {
+			_ = db.Close()
+		}
+		t.Fatal("openScanDB must refuse an unpinned shared remote endpoint when a password would be sent")
+	} else if !strings.Contains(err.Error(), "credential was not sent") {
+		t.Fatalf("openScanDB error must say the credential was not sent, got %v", err)
+	}
+
+	// A private source confirms the endpoint, so the gate passes (the dial then
+	// fails against the unreachable host, which is not a trust refusal).
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "evil.example")
+	if db, err := openFixDB(beadsDir, cfg); err != nil {
+		if strings.Contains(err.Error(), "credential was not sent") {
+			t.Fatalf("private confirmation did not bypass the trust gate: %v", err)
+		}
+	} else if db != nil {
+		_ = db.Close()
+	}
+}
