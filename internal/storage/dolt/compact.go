@@ -46,9 +46,11 @@ func (s *DoltStore) CheckEligibility(ctx context.Context, issueID string, tier i
 	return eligible, reason, err
 }
 
-// ApplyCompaction records a compaction result in the database.
+// ApplyCompaction records a compaction result in the database. Compaction
+// records no journal event (issueops.ApplyCompactionInTx is a documented
+// journal gap), so none of the compaction writes takes the journal writer lock.
 func (s *DoltStore) ApplyCompaction(ctx context.Context, issueID string, tier int, originalSize int, _ int, commitHash string) error {
-	return s.withRetryTx(ctx, func(tx *sql.Tx) error {
+	return s.withRetryTxNoJournal(ctx, func(tx *sql.Tx) error {
 		return issueops.ApplyCompactionInTx(ctx, tx, issueID, tier, originalSize, commitHash)
 	})
 }
@@ -56,7 +58,7 @@ func (s *DoltStore) ApplyCompaction(ctx context.Context, issueID string, tier in
 // SnapshotIssue archives an issue's current text content before a destructive
 // compaction overwrites it. See issueops.SnapshotIssueInTx.
 func (s *DoltStore) SnapshotIssue(ctx context.Context, issueID string, tier int) error {
-	return s.withRetryTx(ctx, func(tx *sql.Tx) error {
+	return s.withRetryTxNoJournal(ctx, func(tx *sql.Tx) error {
 		return issueops.SnapshotIssueInTx(ctx, tx, issueID, tier)
 	})
 }
@@ -77,7 +79,7 @@ func (s *DoltStore) GetCompactionSnapshot(ctx context.Context, issueID string) (
 // and steps its compaction level back down. See issueops.RestoreFromSnapshotInTx.
 func (s *DoltStore) RestoreFromSnapshot(ctx context.Context, issueID string) (*types.IssueSnapshot, error) {
 	var snap *types.IssueSnapshot
-	err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
+	err := s.withRetryTxNoJournal(ctx, func(tx *sql.Tx) error {
 		var err error
 		snap, err = issueops.RestoreFromSnapshotInTx(ctx, tx, issueID)
 		return err

@@ -1368,6 +1368,20 @@ func (s *DoltStore) withWriteTx(ctx context.Context, fn func(tx *sql.Tx) error) 
 	return nil
 }
 
+// withWriteTxNoJournal is withWriteTx for a body declared journal-free (see
+// withRetryTxNoJournal): one attempt, no journal-writer lock, and a journal
+// emit inside it is refused and fails the transaction.
+func (s *DoltStore) withWriteTxNoJournal(ctx context.Context, fn func(tx *sql.Tx) error) error {
+	// A journal-free transaction is never admitted, so it has no admission
+	// deadline.
+	pending, err := s.commitWriteTxWith(ctx, s.db, journalTxNoJournal, time.Time{}, fn)
+	if err != nil {
+		return err
+	}
+	logBlockedRecheckFailure(ctx, pending, s.recheckBlockedAfterCommit(ctx, pending))
+	return nil
+}
+
 // commitWriteTx runs fn in one write transaction and, once it has committed,
 // hands back the dependents its unblocking writes recorded for a post-commit
 // recheck. The caller runs that recheck outside any retry loop around fn: a

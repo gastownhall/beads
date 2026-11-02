@@ -11,9 +11,12 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// SetConfig sets a configuration value
+// SetConfig sets a configuration value. Config keys are not bead state and
+// record no journal event, so config writes run on the NoJournal funnel: no
+// journal writer lock, and an unexpected emit fails the write rather than
+// racing the admitted writers (gastownhall/beads#6117).
 func (s *DoltStore) SetConfig(ctx context.Context, key, value string) error {
-	if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
+	if err := s.withRetryTxNoJournal(ctx, func(tx *sql.Tx) error {
 		if err := issueops.SetConfigInTx(ctx, tx, key, value); err != nil {
 			return err
 		}
@@ -93,16 +96,18 @@ func (s *DoltStore) GetConfigByPrefix(ctx context.Context, prefix string) (map[s
 	return result, err
 }
 
-// DeleteConfig removes a configuration value
+// DeleteConfig removes a configuration value. Like SetConfig it records no
+// journal event and takes no journal writer lock.
 func (s *DoltStore) DeleteConfig(ctx context.Context, key string) error {
-	return s.withRetryTx(ctx, func(tx *sql.Tx) error {
+	return s.withRetryTxNoJournal(ctx, func(tx *sql.Tx) error {
 		return issueops.DeleteConfigInTx(ctx, tx, key)
 	})
 }
 
-// SetMetadata sets a metadata value
+// SetMetadata sets a metadata value. Metadata writes carry no journal op, so
+// like SetConfig it takes no journal writer lock.
 func (s *DoltStore) SetMetadata(ctx context.Context, key, value string) error {
-	return s.withRetryTx(ctx, func(tx *sql.Tx) error {
+	return s.withRetryTxNoJournal(ctx, func(tx *sql.Tx) error {
 		return issueops.SetMetadataInTx(ctx, tx, key, value)
 	})
 }
@@ -119,9 +124,10 @@ func (s *DoltStore) GetMetadata(ctx context.Context, key string) (string, error)
 }
 
 // SetLocalMetadata sets a value in the dolt-ignored local_metadata table.
-// Used for clone-local state that should not generate merge conflicts.
+// Used for clone-local state that should not generate merge conflicts. It
+// records no journal event and takes no journal writer lock.
 func (s *DoltStore) SetLocalMetadata(ctx context.Context, key, value string) error {
-	return s.withRetryTx(ctx, func(tx *sql.Tx) error {
+	return s.withRetryTxNoJournal(ctx, func(tx *sql.Tx) error {
 		return issueops.SetLocalMetadataInTx(ctx, tx, key, value)
 	})
 }

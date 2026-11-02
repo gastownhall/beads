@@ -410,11 +410,13 @@ go_test(
         "workspace_config_contract_test.go",
     ],
     # Source-scan guards (journal/version scope completeness, helper sentinel
-    # census) parse this package and ../issueops at test time; the PR4107 and
-    # migration replay tests (server-backed) read ../schema/migrations.
+    # census, NoJournal funnel audit) parse this package, ../issueops and
+    # ../memoryops at test time; the PR4107 and migration replay tests
+    # (server-backed) read ../schema/migrations.
     data = [
         ":go_srcs",
         "//internal/storage/issueops:go_srcs",
+        "//internal/storage/memoryops:go_srcs",
         "//internal/storage/schema:migrations",
     ],
     embed = [":dolt"],
@@ -453,6 +455,7 @@ go_test(
         "//internal/versionedhistory",
         "//internal/workapi",
         "//issueops",
+        "//memoryops",
         "@com_github_data_dog_go_sqlmock//:go-sqlmock",
         "@com_github_go_sql_driver_mysql//:mysql",
         "@com_github_google_uuid//:uuid",

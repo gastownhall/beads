@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/memoryops"
 )
 
 // journalWriterWatchdog bounds every wait in these tests, so a regression
@@ -411,5 +412,80 @@ func TestJournalWriterLock_DisabledJournalTakesNoLock(t *testing.T) {
 	}
 	if len(rows) != 0 {
 		t.Fatalf("journal rows = %d, want 0 (journal-off emission is a no-op)", len(rows))
+	}
+}
+
+// TestJournalWriterLock_NonJournaledWritesSkipAHeldLock pins the NoJournal
+// audit end to end (gastownhall/beads#6117): while another session holds the
+// journal-writer lock, writes that record no journal event complete inside a
+// deadline far shorter than one GET_LOCK wait, and a journaled write in the
+// same window still waits.
+func TestJournalWriterLock_NonJournaledWritesSkipAHeldLock(t *testing.T) {
+	store, ctx, observer := newJournalWriterTestStore(t)
+	issue := createJournalWriterTestIssue(t, ctx, store, "journaled write target")
+	mems, err := store.Memories()
+	if err != nil {
+		t.Fatalf("memories: %v", err)
+	}
+
+	name := issueops.JournalWriterLockName(store.database)
+	holder, err := observer.Conn(ctx)
+	if err != nil {
+		t.Fatalf("pin holder: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = holder.ExecContext(context.Background(), "DO RELEASE_LOCK(?)", name)
+		_ = holder.Close()
+	})
+	var granted sql.NullInt64
+	if err := holder.QueryRowContext(ctx, "SELECT GET_LOCK(?, 0)", name).Scan(&granted); err != nil || granted.Int64 != 1 {
+		t.Fatalf("hold %q: granted=%v err=%v", name, granted, err)
+	}
+
+	const deadline = time.Second
+	for _, tc := range []struct {
+		name string
+		call func(context.Context) error
+	}{
+		{"SetConfig", func(ctx context.Context) error { return store.SetConfig(ctx, "bd-nj.key", "held") }},
+		{"DeleteConfig", func(ctx context.Context) error { return store.DeleteConfig(ctx, "bd-nj.key") }},
+		{"SetMetadata", func(ctx context.Context) error { return store.SetMetadata(ctx, "bd-nj.meta", "held") }},
+		{"SetLocalMetadata", func(ctx context.Context) error { return store.SetLocalMetadata(ctx, "bd-nj.local", "held") }},
+		{"SetRepoMtime", func(ctx context.Context) error {
+			return store.SetRepoMtime(ctx, "/tmp/bd-nj/repo", "/tmp/bd-nj/repo/issues.jsonl", 1)
+		}},
+		{"ClearRepoMtime", func(ctx context.Context) error { return store.ClearRepoMtime(ctx, "/tmp/bd-nj/repo") }},
+		{"Remember", func(ctx context.Context) error {
+			_, err := mems.Remember(ctx, memoryops.RememberRequest{Key: "nj", Content: "held"})
+			return err
+		}},
+		{"Forget", func(ctx context.Context) error {
+			_, err := mems.Forget(ctx, memoryops.ForgetRequest{Key: "nj"})
+			return err
+		}},
+		{"RunEventsMaintenanceTx", func(ctx context.Context) error {
+			return store.RunEventsMaintenanceTx(ctx, func(ctx context.Context, tx issueops.DBTX) error {
+				var rows int
+				return tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM bd_events_journal").Scan(&rows)
+			})
+		}},
+	} {
+		callCtx, cancel := context.WithTimeout(ctx, deadline)
+		start := time.Now()
+		err := tc.call(callCtx)
+		cancel()
+		t.Logf("%s under a held journal-writer lock: %s", tc.name, time.Since(start))
+		if err != nil {
+			t.Errorf("non-journaled %s waited on the held journal-writer lock: %v", tc.name, err)
+		}
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, deadline)
+	defer cancel()
+	start := time.Now()
+	err = store.UpdateIssue(callCtx, issue.ID, map[string]interface{}{"title": "held"}, "actor")
+	t.Logf("journaled UpdateIssue under a held journal-writer lock: %s (err=%v)", time.Since(start), err)
+	if err == nil {
+		t.Fatal("a journaled UpdateIssue committed while another session held the journal-writer lock; it must wait")
 	}
 }
