@@ -472,7 +472,7 @@ func TestAPlainSweepAgainstAServerWithoutRetainedTypesReadsTheSetting(t *testing
 func TestDeleteResultCarriesEveryWireMember(t *testing.T) {
 	w := &stubWire{deleted: &apigen.DeleteIssuesResult{
 		DryRun: true, Deleted: 2, Dependencies: 3, Labels: 4, Events: 5,
-		ReferencesUpdated: 6, Orphaned: &[]string{"bd-9"},
+		ReferencesUpdated: 6, Orphaned: &[]string{"bd-9"}, DeletedIds: &[]string{"bd-1", "bd-9"},
 	}}
 	result, err := bulkDeleter(t, w).Delete(t.Context(), issueops.DeleteRequest{IDs: []string{"bd-1"}, Force: true})
 	if err != nil {
@@ -481,6 +481,9 @@ func TestDeleteResultCarriesEveryWireMember(t *testing.T) {
 	assertEveryFieldPopulated(t, "DeleteResult", reflect.ValueOf(result))
 	if !reflect.DeepEqual(result.Orphaned, []string{"bd-9"}) {
 		t.Errorf("Orphaned = %v, want [bd-9]", result.Orphaned)
+	}
+	if !reflect.DeepEqual(result.DeletedIDs, []string{"bd-1", "bd-9"}) {
+		t.Errorf("DeletedIDs = %v, want [bd-1 bd-9]", result.DeletedIDs)
 	}
 }
 
@@ -495,8 +498,15 @@ func TestDeleteSendsTheIDsVerbatim(t *testing.T) {
 	ids := []string{"  bd-1  ", "bd-1", "bd-2"}
 	snapshot := append([]string(nil), ids...)
 
+	// The request carries cascade, so the stub server must advertise the
+	// containment token or the pre-dial refusal this build adds answers
+	// before the wire body is ever built — exactly the skew AC-6 gates.
 	w := &stubWire{}
-	if _, err := bulkDeleter(t, w).Delete(t.Context(), issueops.DeleteRequest{
+	deleter, err := gateServer(t, w, wire.CapDeleteContainmentCascade).Deleter()
+	if err != nil {
+		t.Fatalf("Deleter(): %v", err)
+	}
+	if _, err := deleter.Delete(t.Context(), issueops.DeleteRequest{
 		IDs: ids, Actor: "deleter", Cascade: true, Force: true, DryRun: true,
 	}); err != nil {
 		t.Fatalf("Delete(): %v", err)
