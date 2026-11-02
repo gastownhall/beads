@@ -25,6 +25,12 @@ func TestBatchCreatorContract(t *testing.T) {
 	t.Run("CreatesEveryItemAsOneAct", func(t *testing.T) {
 		conformance.RunBatchCreatorCreatesEveryItemAsOneAct(t, ctx, fixture)
 	})
+	t.Run("MintsADistinctIDForEachIdenticalItem", func(t *testing.T) {
+		conformance.RunBatchCreatorMintsADistinctIDForEachIdenticalItem(t, ctx, fixture)
+	})
+	t.Run("MintsPastAnIDALaterItemNames", func(t *testing.T) {
+		conformance.RunBatchCreatorMintsPastAnIDALaterItemNames(t, ctx, fixture)
+	})
 	t.Run("RefusesEverythingWhenOneItemRefuses", func(t *testing.T) {
 		conformance.RunBatchCreatorRefusesEverythingWhenOneItemRefuses(t, ctx, fixture)
 	})
@@ -86,6 +92,7 @@ func newUOWBatchCreatorFixture(t *testing.T, ctx context.Context, prefix string)
 		BatchCreator: creator,
 		CreateIssue:  kit.CreateIssue,
 		QueryScalar:  kit.QueryScalar,
+		SetConfig:    kit.SetConfig,
 		CountHistory: kit.CountHistory,
 	}
 }

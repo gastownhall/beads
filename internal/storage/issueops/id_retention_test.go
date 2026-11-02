@@ -194,10 +194,10 @@ func TestGenerateIssueIDSkipsARetiredCandidate(t *testing.T) {
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT value FROM config WHERE `key` = ?")).
 		WithArgs("issue_id_mode").WillReturnError(sql.ErrNoRows)
 	mock.ExpectQuery("SELECT").WillReturnError(errors.New("adaptive length unavailable"))
-	taken := regexp.QuoteMeta("SELECT (SELECT COUNT(*) FROM issues WHERE id = ?) + (SELECT COUNT(*) FROM id_tombstones WHERE id = ?) + (SELECT COUNT(*) FROM wisp_id_tombstones WHERE id = ?)")
+	taken := regexp.QuoteMeta(idTakenSQL)
 	mock.ExpectQuery(taken).WillReturnRows(sqlmock.NewRows([]string{"n"}).AddRow(1))
 	mock.ExpectQuery(taken).WillReturnRows(sqlmock.NewRows([]string{"n"}).AddRow(0))
-	id, err := GenerateIssueIDInTable(context.Background(), db, "issues", "bd", issue, "actor")
+	id, err := GenerateIssueIDInTable(context.Background(), db, "issues", "bd", issue, "actor", nil)
 	if err != nil {
 		t.Fatalf("GenerateIssueIDInTable() = %v", err)
 	}
@@ -232,24 +232,12 @@ func TestGenerateIssueIDCounterModeWalksPastARetiredValue(t *testing.T) {
 	}
 	expectCounter(5, true)
 	expectCounter(6, false)
-	id, err := GenerateIssueIDInTable(context.Background(), db, "issues", "bd", &types.Issue{}, "actor")
+	id, err := GenerateIssueIDInTable(context.Background(), db, "issues", "bd", &types.Issue{}, "actor", nil)
 	if err != nil {
 		t.Fatalf("GenerateIssueIDInTable(counter) = %v", err)
 	}
 	if id != "bd-6" {
 		t.Fatalf("GenerateIssueIDInTable(counter) = %q, want bd-6 past the retired bd-5", id)
-	}
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Fatal(err)
-	}
-}
-
-// TestIDTakenRefusesAnUnknownTable pins that the one formatted table name is
-// checked rather than trusted.
-func TestIDTakenRefusesAnUnknownTable(t *testing.T) {
-	db, mock := newIDRetentionMock(t)
-	if _, err := IDTakenInTx(context.Background(), db, "issues; DROP TABLE x", "bd-1"); err == nil {
-		t.Fatal("IDTakenInTx(unknown table) = nil error")
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)

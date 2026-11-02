@@ -278,8 +278,10 @@ func RecordEventInTable(ctx context.Context, tx DBTX, table, issueID string, eve
 // looping on a counter that a sweep retired a long run of.
 const maxRetiredCounterSkips = 1000
 
-// GenerateIssueIDInTable generates a unique ID, checking for collisions
-// in the specified table. Supports counter mode for non-ephemeral issues.
+// GenerateIssueIDInTable generates an ID for an issue bound for table that
+// claimed does not name and no tombstone retired. Supports counter mode for
+// non-ephemeral issues. Only hash mode also probes for live rows, in both
+// planes (IDTakenInTx); counter mode takes the counter's next value on trust.
 //
 // A RETIRED ID IS TAKEN: a candidate a retaining sweep retired (either
 // tombstone table) is skipped exactly like one a live row holds, so a fresh
@@ -288,8 +290,13 @@ const maxRetiredCounterSkips = 1000
 // already made; counter mode walks past retired values, at most
 // maxRetiredCounterSkips of them.
 //
-//nolint:gosec // G201: table is a hardcoded constant
-func GenerateIssueIDInTable(ctx context.Context, tx DBTX, table, prefix string, issue *types.Issue, actor string) (string, error) {
+// CLAIMED IS THE CALLER'S OWN BATCH: the ids it will write but has not yet,
+// explicit and minted. The probe reads rows, so a caller that assigns every
+// id before it writes any (ExecuteCreateBatch) must pass them, or two of its
+// items can be handed one id and the second refused at insert. A claimed
+// candidate is passed over like a taken one, without a probe. A caller that
+// writes each row before it mints the next passes nil.
+func GenerateIssueIDInTable(ctx context.Context, tx DBTX, table, prefix string, issue *types.Issue, actor string, claimed map[string]bool) (string, error) {
 	// Counter mode only applies to the issues table (not wisps).
 	if table == "issues" {
 		counterMode, err := IsCounterModeTx(ctx, tx)
@@ -297,7 +304,7 @@ func GenerateIssueIDInTable(ctx context.Context, tx DBTX, table, prefix string, 
 			return "", err
 		}
 		if counterMode {
-			return nextUnretiredCounterIDTx(ctx, tx, prefix)
+			return nextUnretiredCounterIDTx(ctx, tx, prefix, claimed)
 		}
 	}
 
@@ -315,8 +322,10 @@ func GenerateIssueIDInTable(ctx context.Context, tx DBTX, table, prefix string, 
 	for length := baseLength; length <= maxLength; length++ {
 		for nonce := 0; nonce < 10; nonce++ {
 			candidate := idgen.GenerateHashID(prefix, issue.Title, issue.Description, actor, issue.CreatedAt, length, nonce)
-
-			taken, err := IDTakenInTx(ctx, tx, table, candidate)
+			if claimed[candidate] {
+				continue
+			}
+			taken, err := IDTakenInTx(ctx, tx, candidate)
 			if err != nil {
 				return "", fmt.Errorf("failed to check for ID collision: %w", err)
 			}
@@ -330,23 +339,25 @@ func GenerateIssueIDInTable(ctx context.Context, tx DBTX, table, prefix string, 
 }
 
 // nextUnretiredCounterIDTx is NextCounterIDTx skipping counter values a
-// retaining sweep retired. The counter only ever advances, so a skipped value
-// is never offered again.
-func nextUnretiredCounterIDTx(ctx context.Context, tx DBTX, prefix string) (string, error) {
+// retaining sweep retired or the caller's batch claimed. The counter only ever
+// advances, so a skipped value is never offered again.
+func nextUnretiredCounterIDTx(ctx context.Context, tx DBTX, prefix string, claimed map[string]bool) (string, error) {
 	for skips := 0; ; skips++ {
 		candidate, err := NextCounterIDTx(ctx, tx, prefix)
 		if err != nil {
 			return "", err
 		}
-		retired, err := IDRetiredInTx(ctx, tx, candidate)
-		if err != nil {
-			return "", err
-		}
-		if !retired {
-			return candidate, nil
+		if !claimed[candidate] {
+			retired, err := IDRetiredInTx(ctx, tx, candidate)
+			if err != nil {
+				return "", err
+			}
+			if !retired {
+				return candidate, nil
+			}
 		}
 		if skips >= maxRetiredCounterSkips {
-			return "", fmt.Errorf("issue counter for prefix %q walked past %d retired ids without finding a free one", prefix, maxRetiredCounterSkips)
+			return "", fmt.Errorf("issue counter for prefix %q walked past %d retired or claimed ids without finding a free one", prefix, maxRetiredCounterSkips)
 		}
 	}
 }
