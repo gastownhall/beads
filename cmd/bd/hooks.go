@@ -12,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/cmd/bd/doctor"
+	"github.com/steveyegge/beads/internal/atomicfile"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
@@ -1148,18 +1149,6 @@ func installHooksAt(hookNames []string, force, shared, chain, beadsHooks bool, s
 		return fmt.Errorf("failed to create hooks directory: %w", err)
 	}
 
-	// When setting a local core.hooksPath (beads or shared mode), preserve any
-	// hooks from the previously effective hooks directory (e.g. a global
-	// core.hooksPath or the default .git/hooks). Without this, setting a local
-	// core.hooksPath silently shadows the global one and those hooks stop running.
-	if beadsHooks || shared {
-		if selected == nil {
-			preservePreexistingHooks(hooksDir)
-		} else {
-			preservePreexistingHooksAt(hooksDir, selected.paths.HooksDir, func() string { return selected.paths.MainRepoRoot })
-		}
-	}
-
 	tracked := gitTrackedFileContext
 	if selected != nil {
 		tracked = func(path string) string {
@@ -1171,6 +1160,20 @@ func installHooksAt(hookNames []string, force, shared, chain, beadsHooks bool, s
 	for _, hookName := range hookNames {
 		if err := guardHookWritePathWithProbe(filepath.Join(hooksDir, hookName), shared, tracked); err != nil {
 			return fmt.Errorf("refusing to install %s hook: %w", hookName, err)
+		}
+	}
+
+	// When setting a local core.hooksPath (beads or shared mode), preserve any
+	// hooks from the previously effective hooks directory (e.g. a global
+	// core.hooksPath or the default .git/hooks). Without this, setting a local
+	// core.hooksPath silently shadows the global one and those hooks stop running.
+	// This runs after the guard above: preservation writes managed hook names
+	// too, so an unsafe managed destination must refuse the install first.
+	if beadsHooks || shared {
+		if selected == nil {
+			preservePreexistingHooks(hooksDir)
+		} else {
+			preservePreexistingHooksAt(hooksDir, selected.paths.HooksDir, func() string { return selected.paths.MainRepoRoot })
 		}
 	}
 
@@ -1341,14 +1344,23 @@ func preservePreexistingHooksAt(targetDir, currentDir string, mainRoot func() st
 		}
 		contentStr := newContent
 
-		// Don't overwrite existing files in target
+		// Don't overwrite existing entries in target. Lstat, not Stat: a
+		// dangling symlink is an existing entry, and writing it would create
+		// the link target.
 		dstPath := filepath.Join(targetDir, entry.Name())
-		if _, err := os.Stat(dstPath); err == nil {
+		if info, err := os.Lstat(dstPath); err == nil {
+			if info.Mode()&os.ModeSymlink != 0 {
+				fmt.Fprintf(os.Stderr, "Warning: not preserving %s hook from %s: %s is a symlink\n",
+					remedy.PrintedValue(entry.Name()), remedy.PrintedValue(currentDir), remedy.PrintedValue(dstPath))
+			}
+			continue
+		} else if !os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "Warning: failed to preserve %s hook from %s: %v\n", entry.Name(), currentDir, err)
 			continue
 		}
 
 		// #nosec G306 -- git hooks must be executable
-		if err := os.WriteFile(dstPath, []byte(contentStr), 0755); err != nil {
+		if err := atomicfile.WriteFileNoFollow(dstPath, []byte(contentStr), 0755); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to preserve %s hook from %s: %v\n", entry.Name(), currentDir, err)
 			continue
 		}
@@ -1423,8 +1435,18 @@ func fixHuskyHookLayout(sourceDir, targetDir string) {
 			continue
 		}
 		hookPath := filepath.Join(targetDir, entry.Name())
-		if _, statErr := os.Stat(hookPath); statErr != nil {
+		info, statErr := os.Lstat(hookPath)
+		if statErr != nil {
 			continue // target hook not copied — nothing to replace
+		}
+		if !info.Mode().IsRegular() {
+			// Only a regular file is rewritten: writing a symlink would
+			// rewrite (or create) its target instead of the hook.
+			if info.Mode()&os.ModeSymlink != 0 {
+				fmt.Fprintf(os.Stderr, "Warning: not replacing husky v9 shim %s: %s is a symlink\n",
+					remedy.PrintedValue(entry.Name()), remedy.PrintedValue(hookPath))
+			}
+			continue
 		}
 		userHookPath := filepath.Join(userHooksDir, entry.Name())
 		userContent, readErr := os.ReadFile(userHookPath) // #nosec G304 -- constrained to husky dir
@@ -1437,7 +1459,7 @@ func fixHuskyHookLayout(sourceDir, targetDir string) {
 			replacement = "#!/usr/bin/env sh\n" + replacement
 		}
 		// #nosec G306 -- git hooks must be executable
-		if writeErr := os.WriteFile(hookPath, []byte(replacement), 0755); writeErr != nil {
+		if writeErr := atomicfile.WriteFileNoFollow(hookPath, []byte(replacement), 0755); writeErr != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to replace husky v9 shim %s: %v\n", entry.Name(), writeErr)
 		}
 	}
