@@ -939,6 +939,7 @@ func TestIgnored15RecomputeHardFailsWithoutIsBlockedRepair(t *testing.T) {
 // version-15 entry at all: the unrecoverable case
 // ensureWispIsBlockedForRecompute's doc comment describes.
 func TestIgnored7RecomputeHardFailsWithoutIsBlockedRepair(t *testing.T) {
+	stubUpdatedAtGuard(t)
 	orig := stderr
 	stderr = &bytes.Buffer{}
 	defer func() { stderr = orig }()
