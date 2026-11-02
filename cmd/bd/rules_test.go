@@ -1458,3 +1458,177 @@ func TestRulesCompact_DeleteFailureAfterBackupsReportsPartialState(t *testing.T)
 		t.Errorf("beta.md should have been removed, got: %v", statErr)
 	}
 }
+
+// The exact prose a preview must disclose, by source, for the GH#5719
+// fixture: every trimmed nonblank line the directive walker does not
+// consume, and nothing it carries.
+var issue5719AlphaNotCarried = []string{
+	"# Alpha",
+	"## Rationale",
+	"This prevents corruption when the writer crashes mid-flush.",
+	"## Exceptions",
+	"None.",
+}
+
+var issue5719BetaNotCarried = []string{
+	"# Beta",
+	"## Rationale",
+	"Second file, distinct prose that must survive.",
+}
+
+func notCarriedForFile(t *testing.T, payload interface{}, file string) []string {
+	t.Helper()
+	var objects []map[string]interface{}
+	switch v := payload.(type) {
+	case map[string]interface{}:
+		objects = []map[string]interface{}{v}
+	case []interface{}:
+		for _, item := range v {
+			m, ok := item.(map[string]interface{})
+			if !ok {
+				t.Fatalf("results item is not an object: %v", item)
+			}
+			objects = append(objects, m)
+		}
+	}
+	for _, m := range objects {
+		srcs, _ := m["sources"].([]interface{})
+		for _, s := range srcs {
+			entry, _ := s.(map[string]interface{})
+			if entry == nil {
+				continue
+			}
+			if name, _ := entry["file"].(string); name == file {
+				raw, _ := entry["not_carried"].([]interface{})
+				lines := make([]string, 0, len(raw))
+				for _, l := range raw {
+					text, _ := l.(string)
+					lines = append(lines, text)
+				}
+				return lines
+			}
+		}
+	}
+	return nil
+}
+
+// A preview must list, per source, the lines the composite will not carry
+// and where they survive — in text and JSON, auto and group — without
+// listing carried directives as omitted.
+func TestRulesCompact_PreviewDisclosesOmittedProse(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		json bool
+	}{
+		{"auto text", []string{"--auto"}, false},
+		{"auto json", []string{"--auto"}, true},
+		{"group text", []string{"--group", "alpha,beta"}, false},
+		{"group json", []string{"--group", "alpha,beta"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := tempRulesDir(t)
+			writeRule(t, dir, "alpha", issue5719Alpha)
+			writeRule(t, dir, "beta", issue5719Beta)
+			args := append([]string{"--path", dir}, tc.args...)
+
+			if tc.json {
+				payload, err := runRulesCompactJSONValue(t, args...)
+				if err != nil {
+					t.Fatalf("preview: %v", err)
+				}
+				for file, want := range map[string][]string{
+					"alpha.md": issue5719AlphaNotCarried,
+					"beta.md":  issue5719BetaNotCarried,
+				} {
+					got := notCarriedForFile(t, payload, file)
+					if len(got) == 0 && len(want) > 0 {
+						t.Fatalf("no not_carried list for %s in: %v", file, payload)
+					}
+					if fmt.Sprint(got) != fmt.Sprint(want) {
+						t.Errorf("%s not_carried = %v, want %v", file, got, want)
+					}
+				}
+			} else {
+				cmd := newRulesCompactTestCmd(t, args...)
+				out := captureStdout(t, func() error { return runRulesCompact(cmd, nil) })
+				for _, want := range []string{
+					"Composites keep only Do/Don't directives",
+					"Not carried from alpha.md",
+					"This prevents corruption when the writer crashes mid-flush.",
+					"Second file, distinct prose that must survive.",
+					"alpha.md.backup",
+				} {
+					if !strings.Contains(out, want) {
+						t.Errorf("preview missing %q:\n%s", want, out)
+					}
+				}
+				// The carried directive must not be listed as omitted: it
+				// belongs to the composite, so count its appearances.
+				if got := strings.Count(out, "validate input before writing to disk"); got != 1 {
+					t.Errorf("carried directive should appear only in the composite, found %d times:\n%s", got, out)
+				}
+			}
+		})
+	}
+}
+
+// The disclosure follows the directive walker exactly: bullets and plain
+// continuations are carried, headings, frontmatter, bold non-directive
+// lines and stray prose are not, blank lines are never listed, and an
+// empty directive marker is consumed rather than disclosed.
+func TestRulesCompact_NotCarriedEdgeLines(t *testing.T) {
+	dir := tempRulesDir(t)
+	content := "---\ntitle: frontmatter\n---\n# Heading\n\nIntro prose.\n\n**Do:**\n- bullet one\n- bullet two\ncontinuation of the do block\n\n**Don't:** never do this\n\n## Rationale\nBecause.\n\n**Note:** not a directive.\nTrailing prose.\n"
+	writeRule(t, dir, "edges", content)
+
+	rf, err := ParseRuleFile(filepath.Join(dir, "edges.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantNotCarried := []string{
+		"---",
+		"title: frontmatter",
+		"---",
+		"# Heading",
+		"Intro prose.",
+		"## Rationale",
+		"Because.",
+		"**Note:** not a directive.",
+		"Trailing prose.",
+	}
+	if fmt.Sprint(rf.NotCarried) != fmt.Sprint(wantNotCarried) {
+		t.Errorf("NotCarried = %v, want %v", rf.NotCarried, wantNotCarried)
+	}
+	wantDo := []string{"bullet one", "bullet two", "continuation of the do block"}
+	if fmt.Sprint(rf.DoLines) != fmt.Sprint(wantDo) {
+		t.Errorf("DoLines = %v, want %v", rf.DoLines, wantDo)
+	}
+	if fmt.Sprint(rf.DontLines) != fmt.Sprint([]string{"never do this"}) {
+		t.Errorf("DontLines = %v, want [never do this]", rf.DontLines)
+	}
+
+	// The same list reaches the JSON preview untouched.
+	writeRule(t, dir, "twin", content)
+	payload, err := runRulesCompactJSONValue(t, "--path", dir, "--group", "edges,twin")
+	if err != nil {
+		t.Fatalf("preview: %v", err)
+	}
+	if got := notCarriedForFile(t, payload, "edges.md"); fmt.Sprint(got) != fmt.Sprint(wantNotCarried) {
+		t.Errorf("JSON not_carried = %v, want %v", got, wantNotCarried)
+	}
+
+	// Audit JSON never carries the field: it is compact's disclosure, not
+	// audit data.
+	audit, err := RunAudit(dir, 0.6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(audit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "not_carried") || strings.Contains(string(encoded), "NotCarried") {
+		t.Errorf("audit JSON must not carry the disclosure field: %s", encoded)
+	}
+}

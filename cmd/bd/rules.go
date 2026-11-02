@@ -29,6 +29,11 @@ type RuleFile struct {
 	Body      string   `json:"body,omitempty"`
 	Keywords  []string `json:"keywords"`
 	Tokens    int      `json:"tokens"`
+	// NotCarried lists the trimmed nonblank lines the directive walker did
+	// not consume. It backs compact's omission disclosure and is excluded
+	// from audit JSON (json:"-"), which applies nothing and must not grow
+	// a field for it.
+	NotCarried []string `json:"-"`
 }
 
 // ContradictionReport describes a tension between two rules.
@@ -124,8 +129,8 @@ func ParseRuleFile(path string) (RuleFile, error) {
 		rf.Title = name
 	}
 
-	// Extract Do and Don't blocks
-	rf.DoLines, rf.DontLines = extractAllDirectives(content)
+	// Extract Do and Don't blocks, and the prose they do not carry
+	rf.DoLines, rf.DontLines, rf.NotCarried = extractAllDirectives(content)
 
 	// Extract keywords from Do/Don't lines first, fallback to body
 	allDirectives := append(rf.DoLines, rf.DontLines...)
@@ -138,9 +143,11 @@ func ParseRuleFile(path string) (RuleFile, error) {
 	return rf, nil
 }
 
-// extractAllDirectives parses Do and Don't blocks from rule content.
-// Don't patterns are checked first to avoid false matches (since "Don't" contains "Do").
-func extractAllDirectives(content string) (doLines, dontLines []string) {
+// extractAllDirectives parses Do and Don't blocks from rule content. It
+// also returns notCarried: every trimmed nonblank line it did not consume,
+// which is the prose a composite would drop. Don't patterns are checked
+// first to avoid false matches (since "Don't" contains "Do").
+func extractAllDirectives(content string) (doLines, dontLines, notCarried []string) {
 	lines := strings.Split(content, "\n")
 
 	// blockType: 0=none, 1=do, 2=dont
@@ -181,8 +188,12 @@ func extractAllDirectives(content string) (doLines, dontLines []string) {
 					}
 				}
 			} else if trimmed == "" || strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, "**") {
-				// End of block
+				// End of block. A heading or bold line is itself prose the
+				// walker does not carry; a blank line is never listed.
 				blockType = 0
+				if trimmed != "" {
+					notCarried = append(notCarried, trimmed)
+				}
 			} else {
 				// Plain continuation text
 				if blockType == 1 {
@@ -191,9 +202,16 @@ func extractAllDirectives(content string) (doLines, dontLines []string) {
 					dontLines = append(dontLines, trimmed)
 				}
 			}
+			continue
+		}
+
+		// Outside any directive block, every nonblank line is prose a
+		// composite would drop.
+		if trimmed != "" {
+			notCarried = append(notCarried, trimmed)
 		}
 	}
-	return doLines, dontLines
+	return doLines, dontLines, notCarried
 }
 
 // ExtractKeywords tokenizes lines, removes stop words, lowercases, and deduplicates.
@@ -958,21 +976,41 @@ func printCompactPreview(outName, merged string, reports []compactSourceReport, 
 	}
 	switch {
 	case applied && complete:
-		fmt.Printf("Created %s, deleted %d source files (backups: %s)\n\n", outName, len(names), strings.Join(backups, ", "))
+		fmt.Printf("Created %s, deleted %d source files (backups: %s)\n", outName, len(names), strings.Join(backups, ", "))
 	case applied:
-		fmt.Printf("Created %s, but the merge did not complete (see the error). Backups so far: %s\n\n", outName, strings.Join(backups, ", "))
+		fmt.Printf("Created %s, but the merge did not complete (see the error). Backups so far: %s\n", outName, strings.Join(backups, ", "))
 	default:
 		fmt.Printf("Would delete: %s\n", strings.Join(names, ", "))
-		fmt.Printf("Would back up: %s\n\n", strings.Join(wouldBackup, ", "))
+		fmt.Printf("Would back up: %s\n", strings.Join(wouldBackup, ", "))
 	}
+	printOmittedProse(reports)
+}
+
+// printOmittedProse discloses, per source, the lines the composite does not
+// carry and where they survive, and states the directives-only rule even
+// when a group happens to have nothing to omit.
+func printOmittedProse(reports []compactSourceReport) {
+	fmt.Println("Composites keep only Do/Don't directives; any other prose is not carried over.")
+	for _, r := range reports {
+		if len(r.NotCarried) == 0 {
+			continue
+		}
+		fmt.Printf("  Not carried from %s (kept in %s once applied):\n", r.File, filepath.Base(r.Backup))
+		for _, line := range r.NotCarried {
+			fmt.Printf("    %s\n", line)
+		}
+	}
+	fmt.Println()
 }
 
 // compactSourceReport describes one source rule of a compact group: where
-// its recovery copy goes, and whether that copy completed.
+// its recovery copy goes, the lines the composite does not carry, and
+// whether that copy completed.
 type compactSourceReport struct {
-	File     string `json:"file"`
-	Backup   string `json:"backup"`
-	BackedUp bool   `json:"backed_up"`
+	File       string   `json:"file"`
+	Backup     string   `json:"backup"`
+	NotCarried []string `json:"not_carried"`
+	BackedUp   bool     `json:"backed_up"`
 }
 
 // backupPathFor returns the recovery-copy path written beside a source rule
@@ -1009,12 +1047,19 @@ func checkCompactDestinations(outPath string, sources []compactSourceReport, res
 }
 
 // newCompactSourceReports builds one report per source entry, in order.
+// not_carried is always an array, never null, so JSON consumers can read
+// it uniformly.
 func newCompactSourceReports(sources []RuleFile) []compactSourceReport {
 	reports := make([]compactSourceReport, 0, len(sources))
 	for _, rf := range sources {
+		notCarried := rf.NotCarried
+		if notCarried == nil {
+			notCarried = []string{}
+		}
 		reports = append(reports, compactSourceReport{
-			File:   filepath.Base(rf.Path),
-			Backup: backupPathFor(rf.Path),
+			File:       filepath.Base(rf.Path),
+			Backup:     backupPathFor(rf.Path),
+			NotCarried: notCarried,
 		})
 	}
 	return reports
