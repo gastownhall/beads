@@ -388,6 +388,29 @@ which also covers server mode. The clone's own commit history and `events`
 rows stay in the moved-aside directory; keep it until you have checked the
 result.
 
+## Embedded database stays busy after an interrupted push or pull
+
+In embedded mode a `bd` process holds the database while it runs, so a push,
+pull or fetch that is slow to stop can make the next command wait to open it.
+In releases after v1.3.2, a failed open names the database, its directory and
+how long the open ran, for example
+`opening embedded database "beads" in "/repo/.beads/embeddeddolt" failed after 30s: ...`,
+followed by the engine's own error.
+
+`bd` cannot tell which process holds the database: the message shows a holder
+only when the engine's error itself reports one. To look for one yourself on
+Linux or macOS, list the processes with files open under the directory the
+message names:
+
+```bash
+lsof +D '/repo/.beads/embeddeddolt'
+```
+
+This is a manual hint, not proof: a process listed there may only be reading
+the files, and how long it has run is not how long it has held the database.
+Let a running `bd` or `dolt` finish or stop it normally before removing
+anything.
+
 ## Prevention
 
 - Ensure stable network before sync

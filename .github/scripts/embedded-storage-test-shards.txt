@@ -189,6 +189,8 @@
 40 5 TestEmbeddedIssueOperationsCloseAndReopenAWisp
 40 5 TestEmbeddedMergeAfterEventsFlipOrdinary
 40 5 TestEmbeddedReaderListKeysetPositionResumesTheCreatedDescIDAscOrder
+40 5 TestOpenSQLFailureContext
+40 5 TestOpenSQLFailureNamesLocationElapsedAndCallerDeadline
 40 5 TestRecordVersionKeepsSubSecondChangeAt
 40 5 TestWithPeerAuth
 

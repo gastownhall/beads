@@ -217,6 +217,8 @@ go_test(
         "migrate_wisp_dep_forward_repair_test.go",
         "molecule_contract_test.go",
         "new_methods_test.go",
+        "open_diagnostics_test.go",
+        "open_failure_test.go",
         "open_test.go",
         "post_sql_commit_test.go",
         "preview_readonly_test.go",
