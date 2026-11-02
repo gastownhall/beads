@@ -534,3 +534,25 @@ func TestPush_OtherRepoBeadLeavesConfiguredRepoIssueAlone(t *testing.T) {
 		}
 	})
 }
+
+// TestDetectConflicts_OtherRepoBeadNotFetched: A's bead edited since the last
+// sync must not be compared against B's same-numbered issue, which was also
+// edited since then.
+func TestDetectConflicts_OtherRepoBeadNotFetched(t *testing.T) {
+	stub, tr := newGitHubAPIStub(t)
+	stub.issues[1313] = gitHubIssueJSON(1313, "Repo B issue 1313", crossRepoRemote)
+	store := newCrossRepoStore(repoABead(crossRepoLocal))
+	store.meta["github.last_sync"] = crossRepoSync.Format(time.RFC3339)
+
+	conflicts, err := tracker.NewEngine(tr, store, "test").DetectConflicts(context.Background())
+	if err != nil {
+		t.Fatalf("DetectConflicts: %v", err)
+	}
+	if got := stub.requestLog(); len(got) != 0 {
+		t.Errorf("conflict detection for %s issued requests %q, want none", crossRepoAID, got)
+	}
+	if len(conflicts) != 0 {
+		t.Errorf("conflicts = %+v, want none", conflicts)
+	}
+	store.assertUntouched(t, crossRepoAID, crossRepoAT, crossRepoARef)
+}
