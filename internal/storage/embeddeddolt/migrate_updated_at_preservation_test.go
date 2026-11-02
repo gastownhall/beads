@@ -334,6 +334,22 @@ func TestEmbeddedMigrate0041KeepsDependencyTargetsUpdatedAt(t *testing.T) {
 	wispTarget := stampedIssue{id: "ua-dep-wisp-target", status: "open", ephemeral: true, stamp: historicalStamp(46)}
 	insertStampedIssues(t, ctx, conn, "issues", issues, false)
 	insertStampedIssues(t, ctx, conn, "wisps", []stampedIssue{wispTarget}, false)
+	// A large TEXT value is stored out of band and reaches SQL functions as
+	// *val.TextStorage, which stores written by historical releases hold;
+	// the join rule's fingerprint must read it (JSON_ARRAY could not).
+	large := strings.Repeat("historical design notes ", 2500) // ~60 KiB, under TEXT's limit at v40
+	for _, row := range []struct{ table, id string }{{"issues", "ua-dep-target"}, {"wisps", wispTarget.id}} {
+		var stamp time.Time
+		if row.table == "wisps" {
+			stamp = wispTarget.stamp
+		} else {
+			stamp = issues[1].stamp
+		}
+		if _, err := conn.ExecContext(ctx,
+			"UPDATE "+row.table+" SET description = ?, design = ?, updated_at = ? WHERE id = ?", large, large, stamp, row.id); err != nil {
+			t.Fatalf("give %s %s out-of-band text: %v", row.table, row.id, err)
+		}
+	}
 	for _, e := range [][3]string{
 		{"ua-dep-src", "ua-dep-target", "blocks"},
 		{"ua-dep-child", "ua-dep-parent", "parent-child"},

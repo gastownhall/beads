@@ -6,6 +6,7 @@ import (
 	"database/sql/driver"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -571,7 +572,7 @@ func guardExpectFingerprintColumns(mock sqlmock.Sqlmock, table string, cols ...s
 // its time; an untouched row is not rewritten; and when the step drops a
 // fingerprinted column the rule is off, so nothing is restored on a guess.
 func TestUpdatedAtGuardRestoresJoinStampedRowsOnly(t *testing.T) {
-	const fpSelect = "SELECT id, updated_at, MD5\\(JSON_ARRAY\\(`id`, `title`, `status`\\)\\) FROM issues ORDER BY id"
+	fpSelect := "SELECT id, updated_at, " + regexp.QuoteMeta(fingerprintSQL([]string{"id", "title", "status"})) + " FROM issues ORDER BY id"
 	snapshot := func(mock sqlmock.Sqlmock) {
 		guardExpectColumn(mock, "issues", "updated_at", true)
 		guardExpectFingerprintColumns(mock, "issues", "id", "title", "status")

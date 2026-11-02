@@ -425,15 +425,18 @@ func readUpdatedAt(ctx context.Context, db DBConn, table, flag string, fpCols []
 	return out, nil
 }
 
-// fingerprintSQL hashes cols, in order, into one value per row. JSON_ARRAY
-// keeps NULL apart from the empty string and every column apart from its
-// neighbors.
+// fingerprintSQL hashes cols, in order, into one value per row: the MD5 of
+// each column's MD5 (or '-' for NULL, which keeps NULL apart from the empty
+// string), comma-separated. Every column is cast to CHAR and hashed on its
+// own because a large TEXT value reaches functions as Dolt's out-of-band
+// *val.TextStorage, which JSON_ARRAY rejects ("unsupported type") on stores
+// historical bd releases wrote.
 func fingerprintSQL(cols []string) string {
-	quoted := make([]string, len(cols))
+	parts := make([]string, len(cols))
 	for i, col := range cols {
-		quoted[i] = "`" + strings.ReplaceAll(col, "`", "``") + "`"
+		parts[i] = "IFNULL(MD5(CAST(`" + strings.ReplaceAll(col, "`", "``") + "` AS CHAR)), '-')"
 	}
-	return "MD5(JSON_ARRAY(" + strings.Join(quoted, ", ") + "))"
+	return "MD5(CONCAT_WS(',', " + strings.Join(parts, ", ") + "))"
 }
 
 // ownUpdatedAt detaches a scanned value from the driver: a byte buffer may be
