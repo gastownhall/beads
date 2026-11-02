@@ -902,7 +902,8 @@ Saving a write and recording it in Dolt history are separate steps:
 - **Dolt commit (history).** A Dolt commit records saved changes in version
   history: what `bd history` shows and what `bd dolt push` sends. With
   `dolt.auto-commit` set to `batch` or `off`, saved changes wait in the working
-  set (`bd vc status` lists them) until you record them yourself:
+  set (`bd doctor` reports them under "Dolt Status") until you record them
+  yourself:
 
   ```bash
   bd dolt commit -m "record pending changes"
@@ -913,7 +914,9 @@ Saving a write and recording it in Dolt history are separate steps:
 
 A local commit of either kind is not a backup. To keep a copy off the
 machine, push history to a remote, or point `bd backup` at a separate or
-off-machine destination (`bd backup init <path-or-url>`).
+off-machine destination: run `bd backup init <path-or-url>` once, then
+`bd backup sync`. Only `bd backup sync` writes to that destination, so run it
+again to bring the copy up to date.
 
 bd does not turn on Dolt's `behavior.dolt_transaction_commit`, and saving
 writes does not need it. It would turn every SQL transaction into its own Dolt
@@ -926,10 +929,13 @@ configuration, bd writes the shared server's config to
 `~/.beads/shared-server/dolt-server-config.yaml` and passes it with
 `--config`. bd rewrites it on every start, so edits to it do not last. With a
 Dolt too old for that config, bd passes command-line flags instead, and Dolt
-then writes a template to `~/.beads/shared-server/dolt/config.yaml` with
-settings commented out. The bd-launched server does not read that template, so
-editing it changes nothing. Servers you configure and run yourself (external
-or proxied) use whatever config you give them.
+then writes a template to `~/.beads/shared-server/dolt/config.yaml` that
+records those flag values and leaves its other settings commented out. The
+bd-launched server does not read that template, so its server settings have no
+effect. bd itself still reads the template's `listener.port` when it resolves
+the shared server's port: after `BEADS_DOLT_SERVER_PORT` and bd's port file,
+ahead of `dolt.port` in config.yaml. Servers you configure and run yourself
+(external or proxied) use whatever config you give them.
 
 ### Data Location (Orchestrator)
 
