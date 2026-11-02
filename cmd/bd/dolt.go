@@ -770,7 +770,12 @@ or 'bd dolt push --remote <remote>'. The remote must already exist (see
 			fmt.Println("To re-enable remote sync: bd config unset dolt.local-only")
 			return nil
 		}
-		ctx := context.Background()
+		// The signal-aware root context, not a detached one: SIGINT or
+		// SIGTERM during a hung transfer (a blocked git/ssh remote, GH#7989)
+		// must be observed, so bd unwinds, reaps its transport children, and
+		// exits instead of outliving the signal on a context nothing can
+		// cancel.
+		ctx := getRootContext()
 		st := getStore()
 		if st == nil {
 			return HandleError("no store available")
@@ -874,7 +879,8 @@ reports conflicts.`,
 			fmt.Println("To re-enable remote sync: bd config unset dolt.local-only")
 			return nil
 		}
-		ctx := context.Background()
+		// The signal-aware root context: see doltPushCmd (GH#7989).
+		ctx := getRootContext()
 		st := getStore()
 		if st == nil {
 			return HandleError("no store available")

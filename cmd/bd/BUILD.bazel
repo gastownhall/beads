@@ -786,6 +786,7 @@ go_test(
         "dolt_remote_reset_data_test.go",
         "dolt_stop_test.go",
         "dolt_test.go",
+        "dolt_transport_shutdown_test.go",
         "dolt_worktree_remote_test.go",
         "duplicate_embedded_test.go",
         "duplicates_embedded_test.go",
