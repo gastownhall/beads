@@ -1,6 +1,7 @@
 package dolt
 
 import (
+	"context"
 	"database/sql"
 	"slices"
 	"testing"
@@ -155,3 +156,55 @@ func TestJournalWriterLock_ConcurrentWritersSerialize(t *testing.T) {
 		t.Fatalf("holder journal seq %d is not before the waiter's %d (SQL commit order)", holderSeq, last.Seq)
 	}
 }
+// TestJournalWriterLock_DisabledJournalTakesNoLock pins AC-3 of
+// gastownhall/beads#6117: with the journal off, a server-mode store takes no
+// journal-writer admission lock — a write proceeds promptly while another
+// session HOLDS the lock — and emission stays a no-op (no journal rows).
+func TestJournalWriterLock_DisabledJournalTakesNoLock(t *testing.T) {
+	store, cleanup := setupConcurrentTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+	// The journal stays OFF — the test harness default.
+
+	// A probe session holds the journal-writer admission lock, standing in
+	// for another admitted writer on this database. A journal-off write that
+	// took admission would queue behind it and blow the short write deadline
+	// below; a no-lock write completes promptly.
+	probe, err := store.db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("pin probe connection: %v", err)
+	}
+	defer func() { _ = probe.Close() }()
+	lockName := issueops.JournalWriterLockName(store.database)
+	var granted sql.NullInt64
+	if err := probe.QueryRowContext(ctx, "SELECT GET_LOCK(?, 0)", lockName).Scan(&granted); err != nil {
+		t.Fatalf("take probe lock: %v", err)
+	}
+	if !granted.Valid || granted.Int64 != 1 {
+		t.Fatalf("probe could not take the journal-writer lock (granted=%v)", granted)
+	}
+	defer func() { _, _ = probe.ExecContext(context.Background(), "SELECT RELEASE_LOCK(?)", lockName) }()
+
+	// A funnel write and a raw-site write, both promptly, while the lock is
+	// held: neither route issues journal-lock SQL when the journal is off.
+	wctx, wcancel := context.WithTimeout(ctx, 5*time.Second)
+	defer wcancel()
+	issue := &types.Issue{Title: "journal off", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	if err := store.CreateIssue(wctx, issue, "actor"); err != nil {
+		t.Fatalf("journal-off funnel write queued or failed behind the lock: %v", err)
+	}
+	if err := store.AddComment(wctx, issue.ID, "actor", "comment"); err != nil {
+		t.Fatalf("journal-off raw-site write queued or failed behind the lock: %v", err)
+	}
+
+	// Emission stays a no-op with the journal off.
+	rows, err := store.ReadEventsJournal(ctx, 0, 100)
+	if err != nil {
+		t.Fatalf("read events journal: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("journal rows = %d, want 0 (journal-off emission stays a no-op)", len(rows))
+	}
+}
+

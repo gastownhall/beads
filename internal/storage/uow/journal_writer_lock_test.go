@@ -194,3 +194,37 @@ func TestJournalWriterLock_UOWRouteAdmission(t *testing.T) {
 		}
 	})
 }
+// TestJournalWriterLock_DisabledJournalUOWTakesNoLock pins AC-3 of
+// gastownhall/beads#6117 for the uow provider: with the journal off, no unit
+// of work takes the journal-writer admission lock — a write route begins and
+// completes promptly while another session HOLDS the lock.
+func TestJournalWriterLock_DisabledJournalUOWTakesNoLock(t *testing.T) {
+	provider := newTestUOWProvider(t)
+	// The provider's journal stays OFF — the harness default.
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	lockName := issueops.JournalWriterLockName("beads")
+	probe, err := provider.(*doltSQLProvider).db.Conn(ctx)
+	require.NoError(t, err)
+	defer func() { _ = probe.Close() }()
+	var granted sql.NullInt64
+	require.NoError(t, probe.QueryRowContext(ctx, "SELECT GET_LOCK(?, 0)", lockName).Scan(&granted))
+	require.True(t, granted.Valid, "GET_LOCK returned NULL")
+	require.EqualValues(t, 1, granted.Int64, "probe session must take the journal-writer lock")
+	defer func() { _, _ = probe.ExecContext(ctx, "SELECT RELEASE_LOCK(?)", lockName) }()
+
+	started := make(chan struct{}, 1)
+	_, err = RunTxResultWithin(ctx, provider, 15*time.Second, func(ctx context.Context, uw UnitOfWork) (struct{}, string, error) {
+		started <- struct{}{}
+		return struct{}{}, "", nil
+	})
+	require.NoError(t, err, "a journal-off write route must complete while another writer holds the journal lock")
+	select {
+	case <-started:
+	default:
+		t.Fatalf("RunTxResultWithin returned without running its body")
+	}
+}
+

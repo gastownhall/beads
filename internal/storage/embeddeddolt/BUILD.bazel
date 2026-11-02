@@ -185,6 +185,7 @@ go_test(
         "journal_contract_test.go",
         "journal_retention_test.go",
         "journal_truncation_test.go",
+        "journal_writer_lock_test.go",
         "label_list_all_benchmark_test.go",
         "label_rename_test.go",
         "large_batch_apply_measure_test.go",
