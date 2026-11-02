@@ -1771,7 +1771,12 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			}
 		}
 
-		store, err := newDoltStore(ctx, doltCfg)
+		// #6089: a strict open refused by the dirty-table guard on an
+		// unversioned database (legacy-SDK residue) is adopted by committing
+		// the pre-existing working set first; every other open or refusal
+		// passes through unchanged. The note writer is nil here; the
+		// stderr note lands with its own AC.
+		store, err := openInitStore(ctx, doltCfg, newDoltStore, nil)
 		if err != nil {
 			// #4259: the remote-migrate gate refused to auto-apply pending
 			// migrations. When init just bootstrapped the clone, the REMOTE is

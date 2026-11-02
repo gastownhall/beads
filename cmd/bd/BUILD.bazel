@@ -957,6 +957,7 @@ go_test(
         "init_store_open_test.go",
         "init_team_server_test.go",
         "init_test.go",
+        "init_unversioned_dirty_server_test.go",
         "init_versioned_dirty_server_test.go",
         "init_worktree_test.go",
         "jira_max_rows_gate_test.go",
