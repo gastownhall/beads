@@ -973,7 +973,7 @@ func migrateUpConsented(ctx context.Context, db DBConn) (int, error) {
 // migrateUpAfterReconcile is MigrateUp's migration pass proper, split out so
 // the open-time reconciles above it have exactly one place to contribute to
 // the reported total.
-func migrateUpAfterReconcile(ctx context.Context, db DBConn, seedChanged bool) (int, error) {
+func migrateUpAfterReconcile(ctx context.Context, db DBConn, seedChanged bool) (applied int, err error) {
 	needed, err := migrationWorkNeeded(ctx, db)
 	if err != nil {
 		return 0, fmt.Errorf("checking schema migration work: %w", err)
@@ -993,10 +993,18 @@ func migrateUpAfterReconcile(ctx context.Context, db DBConn, seedChanged bool) (
 	}
 
 	// Past the converged early return so a no-work open issues no extra
-	// statements; ahead of every write the pass makes.
-	if err := suspendTransactionCommit(ctx, db); err != nil {
+	// statements; ahead of every write the pass makes. Restored on every
+	// return below; a failed restore is joined to, never replaces, the
+	// pass's own result.
+	restoreTransactionCommit, err := suspendTransactionCommit(ctx, db)
+	if err != nil {
 		return 0, err
 	}
+	defer func() {
+		if restoreErr := restoreTransactionCommit(); restoreErr != nil {
+			err = errors.Join(err, restoreErr)
+		}
+	}()
 
 	dirtyBeforeAll, err := dirtyTables(ctx, db, false)
 	if err != nil {
