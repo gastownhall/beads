@@ -489,3 +489,136 @@ func TestJournalWriterLock_NonJournaledWritesSkipAHeldLock(t *testing.T) {
 		t.Fatal("a journaled UpdateIssue committed while another session held the journal-writer lock; it must wait")
 	}
 }
+
+// TestJournalWriterLock_CleanupOrderBeforeUnlock pins, on a real server, how an
+// admitted write leaves on each exit path (gastownhall/beads#6117): success,
+// body error, panic and cancellation. Each one ends its transaction before the
+// lock goes. A committed write stays committed and a rolled-back one reads as
+// never made. The body runs exactly once. Once the write returns, the lock is
+// free and no store session is still out of the pool, whether it was
+// released or discarded. A raw non-funnel site (AddComment) is held to the
+// same rule.
+func TestJournalWriterLock_CleanupOrderBeforeUnlock(t *testing.T) {
+	store, ctx, observer := newJournalWriterTestStore(t)
+	lockName := issueops.JournalWriterLockName(store.database)
+
+	returned := func() {
+		t.Helper()
+		assertJournalWriterLockFree(t, ctx, observer, lockName)
+		if inUse := store.db.Stats().InUse; inUse != 0 {
+			t.Fatalf("pool InUse = %d after the write returned, want 0", inUse)
+		}
+	}
+	status := func(id string) types.Status {
+		t.Helper()
+		issue, err := store.GetIssue(ctx, id)
+		if err != nil {
+			t.Fatalf("get issue %s: %v", id, err)
+		}
+		return issue.Status
+	}
+	update := func(ctx context.Context, tx *sql.Tx, id string) error {
+		_, err := issueops.UpdateIssueInTx(ctx, tx, id, map[string]interface{}{"status": types.StatusInProgress}, "actor-b")
+		return err
+	}
+
+	t.Run("success commits once and hands the lock back", func(t *testing.T) {
+		target := createJournalWriterTestIssue(t, ctx, store, "cleanup success")
+		runs := 0
+		if err := store.withRetryTx(ctx, func(tx *sql.Tx) error {
+			runs++
+			return update(ctx, tx, target.ID)
+		}); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		if runs != 1 {
+			t.Fatalf("committed body ran %d times, want once", runs)
+		}
+		if got := status(target.ID); got != types.StatusInProgress {
+			t.Fatalf("status = %q, want the committed in_progress", got)
+		}
+		returned()
+	})
+
+	t.Run("body error rolls back before unlock", func(t *testing.T) {
+		target := createJournalWriterTestIssue(t, ctx, store, "cleanup error")
+		boom := errors.New("cleanup error test")
+		runs := 0
+		if err := store.withRetryTx(ctx, func(tx *sql.Tx) error {
+			runs++
+			if err := update(ctx, tx, target.ID); err != nil {
+				return err
+			}
+			return boom
+		}); !errors.Is(err, boom) {
+			t.Fatalf("write error = %v, want the body's own", err)
+		}
+		if runs != 1 {
+			t.Fatalf("failed body ran %d times, want once", runs)
+		}
+		if got := status(target.ID); got != types.StatusOpen {
+			t.Fatalf("status = %q, want the rolled-back open", got)
+		}
+		returned()
+	})
+
+	t.Run("panic rolls back before unlock and propagates", func(t *testing.T) {
+		target := createJournalWriterTestIssue(t, ctx, store, "cleanup panic")
+		runs := 0
+		func() {
+			defer func() {
+				if r := recover(); r != "cleanup panic test" {
+					t.Fatalf("panic value = %v, want it propagated", r)
+				}
+			}()
+			_ = store.withRetryTx(ctx, func(tx *sql.Tx) error {
+				runs++
+				if err := update(ctx, tx, target.ID); err != nil {
+					return err
+				}
+				panic("cleanup panic test")
+			})
+		}()
+		if runs != 1 {
+			t.Fatalf("panicking body ran %d times, want once", runs)
+		}
+		if got := status(target.ID); got != types.StatusOpen {
+			t.Fatalf("status = %q, want the rolled-back open", got)
+		}
+		returned()
+	})
+
+	t.Run("cancellation rolls back before unlock, never replayed", func(t *testing.T) {
+		target := createJournalWriterTestIssue(t, ctx, store, "cleanup cancel")
+		bctx, bcancel := context.WithCancel(ctx)
+		defer bcancel()
+		runs := 0
+		err := store.withRetryTx(bctx, func(tx *sql.Tx) error {
+			runs++
+			if err := update(bctx, tx, target.ID); err != nil {
+				return err
+			}
+			bcancel()
+			<-bctx.Done()
+			return bctx.Err()
+		})
+		if err == nil {
+			t.Fatal("canceled write returned nil")
+		}
+		if runs != 1 {
+			t.Fatalf("canceled body ran %d times, want exactly once (never replayed)", runs)
+		}
+		if got := status(target.ID); got != types.StatusOpen {
+			t.Fatalf("status = %q, want the rolled-back open", got)
+		}
+		returned()
+	})
+
+	t.Run("raw site returns its session after the commit", func(t *testing.T) {
+		target := createJournalWriterTestIssue(t, ctx, store, "cleanup raw site")
+		if err := store.AddComment(ctx, target.ID, "actor", "cleanup-order probe"); err != nil {
+			t.Fatalf("add comment: %v", err)
+		}
+		returned()
+	})
+}
