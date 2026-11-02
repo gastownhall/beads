@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"sort"
 	"time"
 
@@ -19,6 +20,33 @@ type compactPlan struct {
 	// initialHash and boundaryHash are the soft-reset target and the temp
 	// branch point for the squashed base.
 	initialHash, boundaryHash string
+	// refusal is set when the plan would squash history (more than one old
+	// commit) but the date partition is not contiguous in commit order, so
+	// replaying the recent commits onto the squashed base could change data
+	// (#6645). Callers must not compact a refused plan.
+	refusal *compactRefusal
+}
+
+// compactRefusal names the two commits that straddle the cutoff out of
+// history order: the lowest-order recent commit is not after the
+// highest-order old commit.
+type compactRefusal struct {
+	cutoff      time.Time
+	recent, old storage.CommitInfo
+}
+
+// compactRefusalHint is the remediation shown with every compactRefusal.
+const compactRefusalHint = "No compaction changes were made. Try a larger --days so the cutoff precedes the conflicting old history, or wait until the conflicting recent commits are older than the cutoff; use --dry-run to recheck."
+
+func (r *compactRefusal) message() string {
+	return fmt.Sprintf("cannot compact: commit dates are out of history order across cutoff %s: recent commit %s (dated %s) is not after old commit %s (dated %s) in commit order; replay could change data",
+		r.cutoff.UTC().Format(time.RFC3339),
+		shortCommitHash(r.recent.Hash), r.recent.Date.UTC().Format(time.RFC3339),
+		shortCommitHash(r.old.Hash), r.old.Date.UTC().Format(time.RFC3339))
+}
+
+func shortCommitHash(hash string) string {
+	return hash[:min(8, len(hash))]
 }
 
 // planCompaction partitions logEntries (as returned by Log: newest commit date
@@ -27,14 +55,26 @@ type compactPlan struct {
 // recent commits is by Dolt's commit_order, not by date: commit dates are not
 // required to be monotonic along the parent chain, so a child dated before its
 // parent would otherwise be cherry-picked first and conflict (#6516).
+//
+// The squashed base holds everything up to the boundary, so on a linear
+// history the replay is only safe when every old commit precedes every recent
+// commit in commit order. A recent commit at or below the highest-order old
+// commit is already in the base; cherry-picking it again can silently
+// resurrect an edit a later old commit undid (#6645). Such plans carry a
+// refusal. Equal orders are treated as unsafe; this rule does not prove
+// arbitrary merge ancestry.
 func planCompaction(logEntries []storage.CommitInfo, cutoff time.Time) compactPlan {
 	var plan compactPlan
 	recent := make([]storage.CommitInfo, 0, len(logEntries))
-	for _, entry := range logEntries {
+	var maxOld *storage.CommitInfo
+	for i, entry := range logEntries {
 		if entry.Date.Before(cutoff) {
 			plan.oldCommits++
 			if plan.boundaryHash == "" {
 				plan.boundaryHash = entry.Hash
+			}
+			if maxOld == nil || entry.CommitOrder > maxOld.CommitOrder {
+				maxOld = &logEntries[i]
 			}
 		} else {
 			recent = append(recent, entry)
@@ -48,6 +88,10 @@ func planCompaction(logEntries []storage.CommitInfo, cutoff time.Time) compactPl
 	plan.recentHashes = make([]string, 0, len(recent))
 	for _, entry := range recent {
 		plan.recentHashes = append(plan.recentHashes, entry.Hash)
+	}
+
+	if plan.oldCommits > 1 && len(recent) > 0 && recent[0].CommitOrder <= maxOld.CommitOrder {
+		plan.refusal = &compactRefusal{cutoff: cutoff, recent: recent[0], old: *maxOld}
 	}
 	return plan
 }

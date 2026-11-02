@@ -49,3 +49,128 @@ func TestPlanCompactionNoRecent(t *testing.T) {
 		t.Errorf("unexpected plan: %+v", plan)
 	}
 }
+
+// TestPlanCompactionRefusesStraddledCutoff covers #6645: a recent commit at or
+// below the highest-order old commit is already in the squashed base, and
+// replaying it again can change data, so the plan carries a refusal naming
+// the lowest-order recent and highest-order old commits.
+func TestPlanCompactionRefusesStraddledCutoff(t *testing.T) {
+	now := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	cutoff := now
+	tests := []struct {
+		name                string
+		entries             []storage.CommitInfo
+		wantRecent, wantOld string
+	}{
+		{
+			// The reporter's shape: recent A, then its old-dated child B at the tip.
+			name: "tip",
+			entries: []storage.CommitInfo{
+				{Hash: "aaaaaaaaaa", Date: now.Add(40 * time.Minute), CommitOrder: 3},
+				{Hash: "bbbbbbbbbb", Date: now.Add(-time.Minute), CommitOrder: 4},
+				{Hash: "old1", Date: now.Add(-2 * time.Hour), CommitOrder: 2},
+				{Hash: "root", Date: now.Add(-3 * time.Hour), CommitOrder: 1},
+			},
+			wantRecent: "aaaaaaaaaa", wantOld: "bbbbbbbbbb",
+		},
+		{
+			name: "mid_chain",
+			entries: []storage.CommitInfo{
+				{Hash: "r2", Date: now.Add(2 * time.Hour), CommitOrder: 5},
+				{Hash: "r1", Date: now.Add(time.Hour), CommitOrder: 2},
+				{Hash: "o3", Date: now.Add(-time.Minute), CommitOrder: 4},
+				{Hash: "o2", Date: now.Add(-2 * time.Minute), CommitOrder: 3},
+				{Hash: "root", Date: now.Add(-time.Hour), CommitOrder: 1},
+			},
+			wantRecent: "r1", wantOld: "o3",
+		},
+		{
+			name: "equal_order",
+			entries: []storage.CommitInfo{
+				{Hash: "r", Date: now.Add(time.Hour), CommitOrder: 3},
+				{Hash: "o", Date: now.Add(-time.Minute), CommitOrder: 3},
+				{Hash: "root", Date: now.Add(-time.Hour), CommitOrder: 1},
+			},
+			wantRecent: "r", wantOld: "o",
+		},
+		{
+			name: "recent_root",
+			entries: []storage.CommitInfo{
+				{Hash: "root", Date: now.Add(time.Hour), CommitOrder: 1},
+				{Hash: "o2", Date: now.Add(-time.Minute), CommitOrder: 3},
+				{Hash: "o1", Date: now.Add(-2 * time.Minute), CommitOrder: 2},
+			},
+			wantRecent: "root", wantOld: "o2",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			plan := planCompaction(tt.entries, cutoff)
+			if plan.refusal == nil {
+				t.Fatalf("plan.refusal = nil, want refusal of %s vs %s", tt.wantRecent, tt.wantOld)
+			}
+			if plan.refusal.recent.Hash != tt.wantRecent || plan.refusal.old.Hash != tt.wantOld {
+				t.Errorf("refusal names recent %s / old %s, want %s / %s",
+					plan.refusal.recent.Hash, plan.refusal.old.Hash, tt.wantRecent, tt.wantOld)
+			}
+		})
+	}
+}
+
+func TestPlanCompactionRefusalMessage(t *testing.T) {
+	now := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	plan := planCompaction([]storage.CommitInfo{
+		{Hash: "aaaaaaaa11112222", Date: now.Add(40 * time.Minute), CommitOrder: 3},
+		{Hash: "bbbbbbbb33334444", Date: now.Add(-time.Minute), CommitOrder: 4},
+		{Hash: "root", Date: now.Add(-time.Hour), CommitOrder: 1},
+	}, now)
+	if plan.refusal == nil {
+		t.Fatal("plan.refusal = nil, want a refusal")
+	}
+	want := "cannot compact: commit dates are out of history order across cutoff 2026-11-02T12:00:00Z: " +
+		"recent commit aaaaaaaa (dated 2026-11-02T12:40:00Z) is not after old commit bbbbbbbb " +
+		"(dated 2026-11-02T11:59:00Z) in commit order; replay could change data"
+	if got := plan.refusal.message(); got != want {
+		t.Errorf("message() =\n%s\nwant\n%s", got, want)
+	}
+}
+
+// TestPlanCompactionNoRefusal pins the plans that stay unrefused: contiguous
+// partitions, no recent commits, and no-op plans with at most one old commit.
+func TestPlanCompactionNoRefusal(t *testing.T) {
+	now := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name    string
+		entries []storage.CommitInfo
+	}{
+		{"contiguous", []storage.CommitInfo{
+			{Hash: "r", Date: now.Add(time.Hour), CommitOrder: 3},
+			{Hash: "o", Date: now.Add(-time.Minute), CommitOrder: 2},
+			{Hash: "root", Date: now.Add(-time.Hour), CommitOrder: 1},
+		}},
+		{"exact_cutoff_is_recent", []storage.CommitInfo{
+			{Hash: "r", Date: now, CommitOrder: 3},
+			{Hash: "o", Date: now.Add(-time.Minute), CommitOrder: 2},
+			{Hash: "root", Date: now.Add(-time.Hour), CommitOrder: 1},
+		}},
+		{"no_recent", []storage.CommitInfo{
+			{Hash: "o", Date: now.Add(-time.Hour), CommitOrder: 1},
+			{Hash: "o2", Date: now.Add(-2 * time.Hour), CommitOrder: 2},
+		}},
+		{"one_old_noop", []storage.CommitInfo{
+			{Hash: "r", Date: now.Add(time.Hour), CommitOrder: 1},
+			{Hash: "o", Date: now.Add(-time.Minute), CommitOrder: 2},
+		}},
+		{"zero_old_noop", []storage.CommitInfo{
+			{Hash: "r2", Date: now.Add(2 * time.Hour), CommitOrder: 1},
+			{Hash: "r1", Date: now.Add(time.Hour), CommitOrder: 2},
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if plan := planCompaction(tt.entries, now); plan.refusal != nil {
+				t.Errorf("unexpected refusal: %s", plan.refusal.message())
+			}
+		})
+	}
+}

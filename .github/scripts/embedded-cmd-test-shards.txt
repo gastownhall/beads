@@ -180,6 +180,7 @@
 100 43 TestEmbeddedInitExplicitBeadsDirIsAuthoritative
 100 43 TestEmbeddedReadyEmptyStateRealBlocker
 
+100 44 TestEmbeddedCompactRecentAncestorOfBoundary
 100 44 TestEmbeddedIfRevisionComposesWithIfAssigneeIfStatus
 100 44 TestEmbeddedReadyStaleBlockedFlagOnEdgelessIssue
 100 44 TestEmbeddedStaleConcurrent
