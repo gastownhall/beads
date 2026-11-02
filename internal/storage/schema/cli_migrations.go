@@ -379,6 +379,8 @@ CREATE UNIQUE INDEX uk_wisps_arrival_seq ON wisps (arrival_seq);`
 // PREPARE block replaced by its bare MODIFY, definitions unchanged.
 const cliMigration0075WidenResidualContentColumns = `ALTER TABLE events MODIFY COLUMN comment LONGTEXT;
 ALTER TABLE wisp_events MODIFY COLUMN comment LONGTEXT DEFAULT '';
+ALTER TABLE issue_snapshots MODIFY COLUMN original_content LONGTEXT NOT NULL;
+ALTER TABLE issue_snapshots MODIFY COLUMN archived_events LONGTEXT;
 ALTER TABLE compaction_snapshots MODIFY COLUMN snapshot_json LONGBLOB NOT NULL;`
 
 const cliMigration0041SplitDependenciesTarget = `DELETE FROM dolt_nonlocal_tables;

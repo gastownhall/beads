@@ -28,6 +28,12 @@
 --                        binary -- LONGBLOB, as 0068 retyped durable_state --
 --                        so the snapshot's bytes come back unchanged.
 --
+--   issue_snapshots.original_content, issue_snapshots.archived_events
+--                        nothing writes this table at runtime any more (it is
+--                        read, counted and deleted); both TEXT columns (0009)
+--                        are widened so a snapshot row can hold what the
+--                        issue it copies holds. Each keeps its nullability.
+--
 -- A plain INSERT of an oversized value fails with Error 1105 ("too large for
 -- column"); the silent truncation GH#3925 describes is what an INSERT IGNORE
 -- copy does when its source is wider than its destination.
@@ -47,7 +53,9 @@
 -- so this ships with an ignored-series twin, ignored/0031: a fresh clone
 -- materializes them from ignored/0019 and ignored/0001 with the main cursor
 -- already at-latest and never runs this file (check D of
--- scripts/check-migration-hygiene.sh).
+-- scripts/check-migration-hygiene.sh). issue_snapshots and
+-- compaction_snapshots are versioned and reach every clone through this file,
+-- so the twin does not touch them.
 SET @events_comment_needs_widen = (
     SELECT IF(COLUMN_TYPE = 'text', 1, 0)
     FROM INFORMATION_SCHEMA.COLUMNS
@@ -69,6 +77,30 @@ SET @wisp_events_comment_needs_widen = (
 );
 SET @sql = IF(@wisp_events_comment_needs_widen = 1,
     'ALTER TABLE wisp_events MODIFY COLUMN comment LONGTEXT DEFAULT ''''',
+    'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @issue_snapshots_original_content_needs_widen = (
+    SELECT IF(COLUMN_TYPE = 'text', 1, 0)
+    FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'issue_snapshots'
+      AND COLUMN_NAME = 'original_content'
+);
+SET @sql = IF(@issue_snapshots_original_content_needs_widen = 1,
+    'ALTER TABLE issue_snapshots MODIFY COLUMN original_content LONGTEXT NOT NULL',
+    'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @issue_snapshots_archived_events_needs_widen = (
+    SELECT IF(COLUMN_TYPE = 'text', 1, 0)
+    FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'issue_snapshots'
+      AND COLUMN_NAME = 'archived_events'
+);
+SET @sql = IF(@issue_snapshots_archived_events_needs_widen = 1,
+    'ALTER TABLE issue_snapshots MODIFY COLUMN archived_events LONGTEXT',
     'SELECT 1');
 PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
