@@ -569,3 +569,133 @@ UPDATE issues SET title = 'edited, not committed' WHERE id = 'pre-1';
 		assertEventsAbsentFromStatus(t, ctx, conn)
 	})
 }
+
+// twoSourceLineage is a migrator's database whose history carries two
+// commits under 0062's drop message: an empty one made by hand over a first
+// source holding pre-1's row, then 0062's own over a second source holding
+// pre-1's and pre-2's rows (second is that commit's first parent: MigrateUp
+// may commit between the seed and 0062). It is left in the adopter's state (events empty,
+// 0031 pending). With dropComment, the first source's events table lacks the
+// comment column.
+type twoSourceLineage struct {
+	conn          *sql.Conn
+	first, second string
+	pre1, pre2    string // content digests
+}
+
+func newTwoSourceLineage(t *testing.T, ctx context.Context, dropComment bool) *twoSourceLineage {
+	t.Helper()
+	dataDir := seedMainSchemaAt(t, ctx, 61)
+	conn, closeConn := openPinnedConn(t, ctx, dataDir)
+	t.Cleanup(closeConn)
+
+	if dropComment {
+		execFrozenGuard(t, ctx, conn, "ALTER TABLE events DROP COLUMN comment")
+	}
+	execFrozenGuard(t, ctx, conn, `
+INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) VALUES
+  ('pre-1', 'first', '', '', '', '', 'open', 2, 'task'),
+  ('pre-2', 'second', '', '', '', '', 'open', 2, 'task');
+INSERT INTO events (issue_id, event_type, actor, created_at, id) VALUES
+  ('pre-1', 'created', 'alice', '2026-07-01 10:00:00', 'legacy-1');
+`)
+	mustDrain(t, ctx, conn, "CALL DOLT_COMMIT('-Am', 'test: first pre-flip source')")
+	l := &twoSourceLineage{conn: conn, first: scalarString(t, ctx, conn, "SELECT HASHOF('HEAD')")}
+	mustExecOn(t, ctx, conn, "CALL DOLT_COMMIT('--allow-empty', '-m', ?)", eventsFlipDropMessage)
+	handDrop := scalarString(t, ctx, conn, "SELECT HASHOF('HEAD')")
+	if dropComment {
+		execFrozenGuard(t, ctx, conn, "ALTER TABLE events ADD COLUMN comment TEXT")
+	}
+	execFrozenGuard(t, ctx, conn, `
+INSERT INTO events (issue_id, event_type, actor, created_at, id) VALUES
+  ('pre-2', 'updated', 'carol', '2026-07-02 09:00:00', 'legacy-5');
+`)
+	mustDrain(t, ctx, conn, "CALL DOLT_COMMIT('-Am', 'test: second pre-flip source')")
+
+	if _, err := schema.MigrateUp(ctx, conn); err != nil {
+		t.Fatalf("MigrateUp (migrator): %v", err)
+	}
+	if err := conn.QueryRowContext(ctx, `
+SELECT a.parent_hash FROM dolt_commit_ancestors a JOIN dolt_log l ON l.commit_hash = a.commit_hash
+WHERE l.message = ? AND l.commit_hash <> ? AND a.parent_index = 0`,
+		eventsFlipDropMessage, handDrop).Scan(&l.second); err != nil {
+		t.Fatalf("find 0062's drop commit parent: %v", err)
+	}
+	execFrozenGuard(t, ctx, conn, "DELETE FROM events")
+	mustExecOn(t, ctx, conn, "DELETE FROM ignored_schema_migrations WHERE version = 31")
+
+	v := func(s string) sql.NullString { return sql.NullString{String: s, Valid: true} }
+	null := sql.NullString{}
+	l.pre1 = rowid.Digest([]sql.NullString{v("pre-1"), v("created"), v("alice"), null, null, null, v("2026-07-01 10:00:00")})
+	l.pre2 = rowid.Digest([]sql.NullString{v("pre-2"), v("updated"), v("carol"), null, null, null, v("2026-07-02 09:00:00")})
+	return l
+}
+
+// TestEmbeddedIgnoredMigration0031SkipsAnUnreadableSource pins the per-source
+// degradation: a source whose history cannot be read (Dolt's schema-encoding
+// drift) or whose events table lacks a column the restore reads is skipped
+// with one warning naming it and the upgrading guide, the other source is
+// still restored, 0031 is recorded, and neither that open nor the next fails.
+// A drift-shaped failure of a LIVE write is not a source problem: it fails the
+// pass with 0031 pending.
+func TestEmbeddedIgnoredMigration0031SkipsAnUnreadableSource(t *testing.T) {
+	requireEmbedded(t)
+
+	requireSkipped := func(t *testing.T, ctx context.Context, l *twoSourceLineage, skipped string, want map[string]int) {
+		t.Helper()
+		var notice bytes.Buffer
+		defer schema.SetPreflipEventsNoticeOutForTest(&notice)()
+		if _, err := schema.MigrateUp(ctx, l.conn); err != nil {
+			t.Fatalf("MigrateUp with an unreadable source: %v", err)
+		}
+		got := liveEvents(t, ctx, l.conn)
+		requireContent(t, got, want)
+		requireDerivedIDs(t, got)
+		if !ignoredCursorHas(t, ctx, l.conn, 31) {
+			t.Fatal("ignored cursor does not record 0031 after skipping the unreadable source")
+		}
+		warning := notice.String()
+		for _, part := range []string{"Warning", skipped, "https://beads.gascity.com/getting-started/upgrading"} {
+			if !strings.Contains(warning, part) {
+				t.Fatalf("restore notice = %q, want a warning carrying %q", warning, part)
+			}
+		}
+		if _, err := schema.MigrateUp(ctx, l.conn); err != nil {
+			t.Fatalf("second MigrateUp after skipping the unreadable source: %v", err)
+		}
+	}
+
+	t.Run("drift reading the history", func(t *testing.T) {
+		ctx := t.Context()
+		l := newTwoSourceLineage(t, ctx, false)
+		defer schema.SetPreflipEventsSourceFaultHookForTest(func(ref string) error {
+			if ref == l.second {
+				return errors.New("panic: invalid hash length: 19")
+			}
+			return nil
+		})()
+		requireSkipped(t, ctx, l, l.second, map[string]int{l.pre1: 1})
+	})
+
+	t.Run("source lacks a column", func(t *testing.T) {
+		ctx := t.Context()
+		l := newTwoSourceLineage(t, ctx, true)
+		requireSkipped(t, ctx, l, l.first, map[string]int{l.pre1: 1, l.pre2: 1})
+	})
+
+	t.Run("drift on a live write fails the pass", func(t *testing.T) {
+		ctx := t.Context()
+		l := newTwoSourceLineage(t, ctx, false)
+		restoreHook := schema.SetPreflipEventsInsertFaultHookForTest(func() error {
+			return errors.New("panic: invalid hash length: 19")
+		})
+		_, err := schema.MigrateUp(ctx, l.conn)
+		restoreHook()
+		if err == nil || !strings.Contains(err.Error(), "invalid hash length") {
+			t.Fatalf("MigrateUp with a drifting live write = %v, want that failure", err)
+		}
+		if ignoredCursorHas(t, ctx, l.conn, 31) {
+			t.Fatal("ignored cursor recorded 0031 after a live write failed")
+		}
+	})
+}
