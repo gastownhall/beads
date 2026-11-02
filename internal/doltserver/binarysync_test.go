@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -143,4 +144,126 @@ func TestSyncServerBinary_ReplacesStaleTrackedServer(t *testing.T) {
 			t.Errorf("the replacement notice is missing %q; stderr:\n%s", want, stderr)
 		}
 	}
+}
+// TestSyncServerBinary_RetainsCurrentServer is AC-2: an unchanged
+// executable — even when a different opener's PATH would resolve another
+// dolt — and a same-version replacement never restart the tracked server.
+// The PID is retained without a restart notice; only the same-version
+// replacement refreshes the record, so the next open does not re-probe it.
+func TestSyncServerBinary_RetainsCurrentServer(t *testing.T) {
+	sync := func(t *testing.T, beadsDir string, port int) (error, string) {
+		t.Helper()
+		var err error
+		stderr := captureStderr(t, func() {
+			err = SyncServerBinary(BinarySyncRequest{
+				BeadsDir:     beadsDir,
+				Host:         "127.0.0.1",
+				Port:         port,
+				AllowRestart: true,
+			})
+		})
+		return err, stderr
+	}
+
+	t.Run("unchanged executable", func(t *testing.T) {
+		beadsDir, launches := fakeStartWorkspace(t)
+		stopTrackedServerAfterTest(t, beadsDir)
+		state, err := startForTest(t, beadsDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		err, stderr := sync(t, beadsDir, state.Port)
+		if err != nil {
+			t.Fatalf("SyncServerBinary on an unchanged executable: %v", err)
+		}
+		if got := launchedPorts(t, launches); len(got) != 1 {
+			t.Errorf("launched %v, want only the original start", got)
+		}
+		if pid := readTrackedPID(beadsDir); pid != state.PID {
+			t.Errorf("tracked PID = %d, want the retained %d", pid, state.PID)
+		}
+		if stderr != "" {
+			t.Errorf("an unchanged executable produced output:\n%s", stderr)
+		}
+		rec := readBinaryRecordForTest(t, beadsDir)
+		if rec.Provenance != BinaryProvenanceLaunched {
+			t.Errorf("record provenance = %q, want the original %q (nothing to refresh)", rec.Provenance, BinaryProvenanceLaunched)
+		}
+	})
+
+	t.Run("different opener PATH with unchanged recorded executable", func(t *testing.T) {
+		beadsDir, launches := fakeStartWorkspace(t)
+		stopTrackedServerAfterTest(t, beadsDir)
+		state, err := startForTest(t, beadsDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Another dolt earlier on PATH reports a different version. The
+		// server's executable never changed, so no opener's PATH matters:
+		// comparing the PATH dolt to the server would restart a perfectly
+		// current server.
+		otherDir := t.TempDir()
+		other := "#!/bin/sh\necho \"dolt version 9.9.9\"\n"
+		if err := os.WriteFile(filepath.Join(otherDir, "dolt"), []byte(other), 0o700); err != nil { //nolint:gosec // G306: the shim must be executable
+			t.Fatal(err)
+		}
+		t.Setenv("PATH", otherDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+		err, stderr := sync(t, beadsDir, state.Port)
+		if err != nil {
+			t.Fatalf("SyncServerBinary with another dolt on PATH: %v", err)
+		}
+		if got := launchedPorts(t, launches); len(got) != 1 {
+			t.Errorf("launched %v, want only the original start (no restart)", got)
+		}
+		if pid := readTrackedPID(beadsDir); pid != state.PID {
+			t.Errorf("tracked PID = %d, want the retained %d", pid, state.PID)
+		}
+		if stderr != "" {
+			t.Errorf("an unchanged executable produced output:\n%s", stderr)
+		}
+	})
+
+	t.Run("same-version replacement refreshes the record", func(t *testing.T) {
+		beadsDir, launches := fakeStartWorkspace(t)
+		stopTrackedServerAfterTest(t, beadsDir)
+		state, err := startForTest(t, beadsDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		oldRec := readBinaryRecordForTest(t, beadsDir)
+
+		// The executable is replaced (a new file identity) by one that
+		// reports the same version: not skew, so no restart.
+		replaceFakeDolt(t, "2.6.0")
+
+		err, stderr := sync(t, beadsDir, state.Port)
+		if err != nil {
+			t.Fatalf("SyncServerBinary after a same-version replacement: %v", err)
+		}
+		if got := launchedPorts(t, launches); len(got) != 1 {
+			t.Errorf("launched %v, want only the original start (no restart)", got)
+		}
+		if pid := readTrackedPID(beadsDir); pid != state.PID {
+			t.Errorf("tracked PID = %d, want the retained %d", pid, state.PID)
+		}
+		if stderr != "" {
+			t.Errorf("a same-version replacement produced output:\n%s", stderr)
+		}
+		// But the observation is recorded, so the next open takes the fast
+		// path instead of re-probing the replacement.
+		newRec := readBinaryRecordForTest(t, beadsDir)
+		if newRec.PID != state.PID {
+			t.Errorf("refreshed record names PID %d, want the retained %d", newRec.PID, state.PID)
+		}
+		if newRec.DoltVersion != "2.6.0" || !newRec.KnownVersion {
+			t.Errorf("refreshed record = %+v, want dolt 2.6.0 (known)", newRec)
+		}
+		if newRec.Provenance != BinaryProvenanceObserved {
+			t.Errorf("refreshed record provenance = %q, want %q", newRec.Provenance, BinaryProvenanceObserved)
+		}
+		if newRec.ModTimeNanos == oldRec.ModTimeNanos || newRec.Size == oldRec.Size {
+			t.Errorf("refreshed record kept the replaced executable's identity: old %+v, new %+v", oldRec, newRec)
+		}
+	})
 }

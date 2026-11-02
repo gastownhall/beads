@@ -76,6 +76,10 @@ type binaryVerdict struct {
 	candidate binaryIdentity
 	// problem explains binaryCannotReplace.
 	problem string
+	// refresh is set when the server is current but the record should be
+	// refreshed: an equal-version replacement, so the next open does not
+	// re-probe it.
+	refresh bool
 }
 
 // SyncServerBinary is the store-open lifecycle hook (GH#6064). It classifies
@@ -105,14 +109,19 @@ func SyncServerBinary(req BinarySyncRequest) error {
 	}
 	verdict := classifyServerBinary(serverDir, trackedPID, req)
 	switch verdict.kind {
+	case binaryCurrent:
+		if verdict.refresh {
+			recordObservedBinary(serverDir, trackedPID, verdict.candidate, req)
+		}
+		return nil
 	case binaryStale:
 		if !binaryMutationPermitted(req) {
 			return nil
 		}
 		return replaceStaleServer(serverDir, req, verdict)
 	default:
-		// Current, unknown and cannot-replace leave the connection
-		// behavior unchanged.
+		// Unknown and cannot-replace leave the connection behavior
+		// unchanged.
 		return nil
 	}
 }
@@ -193,8 +202,9 @@ func classifyServerBinary(serverDir string, trackedPID int, _ BinarySyncRequest)
 		base.kind = binaryStale
 		return base
 	}
-	// Equal version, new file identity: retain the PID.
-	base.kind = binaryCurrent
+	// Equal version, new file identity: retain the PID, and refresh the
+	// record so the next open does not re-probe the replacement.
+	base.kind, base.refresh = binaryCurrent, true
 	return base
 }
 
@@ -213,6 +223,31 @@ func binaryMutationPermitted(req BinarySyncRequest) bool {
 		return false
 	}
 	return ResolveServerModeIgnoringPortEnv(req.BeadsDir) == ServerModeOwned
+}
+
+// recordObservedBinary refreshes the witness sidecar for a server that was
+// classified current through a fresh observation: an equal-version
+// replacement of the executable. Under the lifecycle lock, the tracked
+// port/PID is revalidated before the write, so the record never describes a
+// server that was replaced while the observation was being made. A write
+// failure is a warning, not an error: the observation is an optimization,
+// and the next open re-derives it.
+func recordObservedBinary(serverDir string, trackedPID int, cand binaryIdentity, req BinarySyncRequest) {
+	if !binaryMutationPermitted(req) {
+		return
+	}
+	lockF, err := acquireLifecycleLock(serverDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not record the current dolt binary for the tracked server: %v\n", err)
+		return
+	}
+	defer releaseLifecycleLock(lockF)
+	if !ManagesLiveServerOnPort(serverDir, req.Port) || readTrackedPID(serverDir) != trackedPID {
+		return // replaced while classifying; the new generation writes its own record
+	}
+	if err := writeBinaryRecord(serverDir, recordForIdentity(trackedPID, cand, BinaryProvenanceObserved)); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not record the current dolt binary for the tracked server: %v\n", err)
+	}
 }
 
 // replaceStaleServer replaces the stale-generation server under the
