@@ -113,8 +113,9 @@ func SetPreflipEventsNoticeOutForTest(w io.Writer) func() {
 // each content digest, under the lowest content-derived ids no row holds yet.
 // Existing rows and their ids are never touched, a retry adds nothing twice,
 // and across several sources the result is each digest's maximum
-// multiplicity, whatever the order. Rows whose issue no longer exists are
-// skipped (fk_events_issue would refuse them) and counted.
+// multiplicity, whatever the order. Rows whose issue id no longer exists are
+// skipped (fk_events_issue would refuse them) and counted: the issue was
+// deleted, or renamed after the flip, and history holds only its old id.
 //
 // It writes only the ignored events table: no journal entry, no staging, no
 // Dolt commit. A clone with no such commit, or whose source has no events
@@ -156,7 +157,7 @@ func seedEventsFromPreflipHistory(ctx context.Context, db DBConn) error {
 	}
 	if orphans > 0 {
 		fmt.Fprintf(preflipEventsNoticeOut,
-			"Skipped %d pre-upgrade audit event(s) whose issue no longer exists.\n", orphans)
+			"Skipped %d pre-upgrade audit event(s) whose issue id no longer exists (deleted or renamed).\n", orphans)
 	}
 	return nil
 }

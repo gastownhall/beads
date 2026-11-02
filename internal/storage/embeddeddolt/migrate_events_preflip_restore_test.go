@@ -383,7 +383,7 @@ func TestEmbeddedIgnoredMigration0031SkipsDeletedIssues(t *testing.T) {
 	}
 	for _, line := range []string{
 		"Restored 4 pre-upgrade audit event(s)",
-		"Skipped 1 pre-upgrade audit event(s) whose issue no longer exists",
+		"Skipped 1 pre-upgrade audit event(s) whose issue id no longer exists (deleted or renamed)",
 	} {
 		if !strings.Contains(notice.String(), line) {
 			t.Fatalf("restore notice = %q, want it to report %q", notice.String(), line)
@@ -889,7 +889,7 @@ VALUES (?, 'created', 'tester', '2026-09-01 00:00:00', 'evt-orphan-probe')`, iss
 		requireDerivedIDs(t, got)
 		for _, line := range []string{
 			"Restored 1 pre-upgrade audit event(s)",
-			"Skipped 2 pre-upgrade audit event(s) whose issue no longer exists",
+			"Skipped 2 pre-upgrade audit event(s) whose issue id no longer exists (deleted or renamed)",
 		} {
 			if !strings.Contains(notice, line) {
 				t.Fatalf("restore notice = %q, want it to report %q", notice, line)
@@ -905,7 +905,7 @@ VALUES (?, 'created', 'tester', '2026-09-01 00:00:00', 'evt-orphan-probe')`, iss
 		if n := len(liveEvents(t, ctx, conn)); n != 0 {
 			t.Fatalf("live events hold %d contents, want none: every issue is gone", n)
 		}
-		if strings.Contains(notice, "Restored") || !strings.Contains(notice, "Skipped 3 pre-upgrade audit event(s) whose issue no longer exists") {
+		if strings.Contains(notice, "Restored") || !strings.Contains(notice, "Skipped 3 pre-upgrade audit event(s) whose issue id no longer exists (deleted or renamed)") {
 			t.Fatalf("restore notice = %q, want only the count of the 3 skipped rows", notice)
 		}
 		requireFKEnforced(t, ctx, conn, "live-1")
@@ -919,7 +919,7 @@ VALUES (?, 'created', 'tester', '2026-09-01 00:00:00', 'evt-orphan-probe')`, iss
 		requireContent(t, liveEvents(t, ctx, l.conn), map[string]int{l.pre2: 1})
 		for _, line := range []string{
 			"Restored 1 pre-upgrade audit event(s)",
-			"Skipped 2 pre-upgrade audit event(s) whose issue no longer exists",
+			"Skipped 2 pre-upgrade audit event(s) whose issue id no longer exists (deleted or renamed)",
 		} {
 			if !strings.Contains(notice, line) {
 				t.Fatalf("restore notice = %q, want it to report %q", notice, line)

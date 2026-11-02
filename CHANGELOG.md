@@ -1192,13 +1192,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   first open now restores the missing events once from the clone's own
   pre-upgrade history: it adds only the rows the live table lacks (a row
   history holds twice is restored up to twice), keeps rows already present
-  and their ids, skips and counts events of deleted issues, and resumes an
-  interrupted restore without duplicates. When that history cannot be read,
-  it warns that the audit history is incomplete and carries on; a
-  cancelled, transient or live-table failure leaves the restore to retry on
-  the next open. It makes no Dolt commit, and the restored rows stay
-  clone-local. [Upgrading](docs/getting-started/upgrading.md) gives a manual
-  recipe for v1.3.2 and earlier (#7039).
+  and their ids, skips and counts events of deleted or renamed issues, and
+  resumes an interrupted restore without duplicates. When that history
+  cannot be read, it warns that the audit history is incomplete and carries
+  on; a cancelled, transient or live-table failure leaves the restore to
+  retry on the next open. It makes no Dolt commit, and the restored rows
+  stay clone-local. [Upgrading](docs/getting-started/upgrading.md) gives a
+  manual recipe for v1.3.2 and earlier (#7039).
 - `bd dolt push <remote>` and `bd dolt pull <remote>` now push to and pull
   from the named remote. bd ignored the name, so `bd dolt push 1st` pushed to
   the default remote and reported "Push complete."; a name that differs from

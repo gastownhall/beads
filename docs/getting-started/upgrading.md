@@ -433,9 +433,11 @@ Restored 42 pre-upgrade audit event(s) from this clone's history (gastownhall/be
 - **Existing rows stay.** Rows already in the table are kept with their ids.
   A row is restored only as many times as history holds it more often than
   the live table does, so a second run adds nothing.
-- **Deleted issues are skipped.** Events of an issue deleted since the
-  upgrade are not restored, and bd prints `Skipped N pre-upgrade audit
-  event(s) whose issue no longer exists.`
+- **Deleted and renamed issues are skipped.** History holds each event
+  under the id its issue had at the upgrade, so events of an issue deleted
+  or renamed since (`bd rename`, `bd rename-prefix`) are not restored, and
+  bd prints `Skipped N pre-upgrade audit event(s) whose issue id no longer
+  exists (deleted or renamed).`
 - **Restored rows are local.** Like every event since 1.3.0, they are not
   committed and do not replicate; each clone restores its own. New events
   still do not replicate either.
