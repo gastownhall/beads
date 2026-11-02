@@ -301,3 +301,81 @@ func TestCLI_InitServerUnversionedDirtyWorkingSet_E2E(t *testing.T) {
 		t.Fatalf("bd list does not show %s:\n%s", issue.ID, listed)
 	}
 }
+
+// TestCLI_InitServerUnversionedDirtyRecoveryCommit_E2E pins the history the
+// #6089 adoption leaves: exactly one commit with the fixed recovery message,
+// holding the pre-existing changes at the pre-migration schema, and still an
+// ancestor of the final HEAD. The empty-cursor case also runs --quiet --json:
+// the note is suppressed and never reaches stdout, which stays empty or valid
+// JSON.
+func TestCLI_InitServerUnversionedDirtyRecoveryCommit_E2E(t *testing.T) {
+	skipIfNoDolt(t)
+	for _, tc := range []struct {
+		name       string
+		emptyTable bool
+		extra      []string
+	}{
+		{name: "absent cursor table"},
+		{name: "empty cursor table quiet json", emptyTable: true, extra: []string{"--quiet", "--json"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+			defer cancel()
+
+			database := createUnversionedTestDatabase(t, ctx)
+			db := openUnversionedTestDB(t, ctx, database)
+			prepareLegacySeederResidue(t, ctx, db, tc.emptyTable)
+
+			stdout, stderr, err := runBDExecSeparated(t, testBD, t.TempDir(), os.Environ(), unversionedInitArgs(database, tc.extra...)...)
+			if err != nil {
+				t.Fatalf("bd init failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+			}
+			quiet := tc.extra != nil
+			if n := strings.Count(stderr, initRecoveryNotePrefix); quiet && n != 0 || !quiet && n != 1 {
+				t.Fatalf("stderr carries %d recovery notes (quiet=%v):\n%s", n, quiet, stderr)
+			}
+			// The note is stderr-only: --json stdout stays empty or valid JSON.
+			if strings.Contains(stdout, initRecoveryNotePrefix) {
+				t.Fatalf("recovery note leaked to stdout:\n%s", stdout)
+			}
+			if out := strings.TrimSpace(stdout); quiet && out != "" && !json.Valid([]byte(out)) {
+				t.Fatalf("--json stdout is not valid JSON:\n%s", stdout)
+			}
+
+			commits := recoveryCommits(t, ctx, db)
+			if len(commits) != 1 {
+				t.Fatalf("recovery commits = %v, want exactly one", commits)
+			}
+			hash := commits[0]
+			asOf := func(query string) []string {
+				return unversionedQueryStrings(t, ctx, db, fmt.Sprintf(query, hash))
+			}
+			if got := asOf("SELECT value FROM config AS OF '%s' WHERE `key` = 'issue_prefix'"); !slices.Equal(got, []string{"hq"}) {
+				t.Fatalf("issue_prefix at the recovery commit = %v, want [hq]", got)
+			}
+			if got := asOf("SELECT path FROM routes AS OF '%s' WHERE prefix = 'gt-'"); !slices.Equal(got, []string{"gastown"}) {
+				t.Fatalf("routes row at the recovery commit = %v, want [gastown]", got)
+			}
+			if got := asOf("SELECT id FROM interactions AS OF '%s'"); !slices.Equal(got, []string{"int-legacy"}) {
+				t.Fatalf("interactions at the recovery commit = %v, want [int-legacy]", got)
+			}
+			// Before the numbered migrations: no issues table yet, and the
+			// cursor exactly as the fixture left it.
+			tables := asOf("SHOW TABLES AS OF '%s'")
+			if slices.Contains(tables, "issues") {
+				t.Fatalf("recovery commit already holds migrated tables: %v", tables)
+			}
+			if slices.Contains(tables, "schema_migrations") != tc.emptyTable {
+				t.Fatalf("recovery commit tables = %v, want schema_migrations present=%v", tables, tc.emptyTable)
+			}
+			if tc.emptyTable {
+				if n := len(asOf("SELECT version FROM schema_migrations AS OF '%s'")); n != 0 {
+					t.Fatalf("cursor at the recovery commit has %d rows, want 0", n)
+				}
+			}
+			if base := asOf("SELECT DOLT_MERGE_BASE('%s', 'HEAD')"); !slices.Equal(base, []string{hash}) {
+				t.Fatalf("merge base of recovery commit and HEAD = %v, want %s (an ancestor)", base, hash)
+			}
+		})
+	}
+}
