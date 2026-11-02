@@ -16,7 +16,13 @@
 # --jobs=64 (scripts/bazel_dolt_race_test.go), which 4 would overrun by one.
 # TestManagedLocalProxiedCapabilityMatrix was added afterwards on shard 1 at
 # its local measurement (~35s), still under the lane's ~130-160s tail.
-# Seconds per shard: 98 63 63
+# TestManagedLocalProxiedUnjoinedCloneRefusesFreshStore was added afterwards on
+# shard 2 at its local measurement (~39s).
+# TestManagedLocalProxiedDeletedRootRestoresFromBackup (5s) and
+# TestManagedLocalProxiedLeftoverRootInitRecovers (2s) were added afterwards on
+# shard 3, the lightest, at their rbe-west measurements (2026-11-01), and
+# TestManagedLocalProxiedTeamServerCloneInitKeepsTrackedConfig (1s) after them.
+# Seconds per shard: 98 102 71
 #
 # <shard> <TestName>
 1 TestManagedLocalProxiedAutoBackup
@@ -33,11 +39,15 @@
 2 TestManagedLocalProxiedListenerPolicy
 2 TestManagedLocalProxiedMoleculeFrontDoorPositive
 2 TestManagedLocalProxiedNProcessColdStartConvergence
+2 TestManagedLocalProxiedUnjoinedCloneRefusesFreshStore
 3 TestManagedLocalProxiedBackupRestoreRefusedWhileAttached
 3 TestManagedLocalProxiedBackupRestoreReopenFailure
+3 TestManagedLocalProxiedDeletedRootRestoresFromBackup
 3 TestManagedLocalProxiedDoltStatusReportsLiveTopology
+3 TestManagedLocalProxiedLeftoverRootInitRecovers
 3 TestManagedLocalProxiedLegacyRecordFailClosed
 3 TestManagedLocalProxiedOrphanBackendReaped
 3 TestManagedLocalProxiedOutageReconnectContract
 3 TestManagedLocalProxiedPurgeWispsPlaneRetention
 3 TestManagedLocalProxiedReusedPidNeverKilled
+3 TestManagedLocalProxiedTeamServerCloneInitKeepsTrackedConfig

@@ -276,12 +276,126 @@ func TestBuildReadyWorkWhereBatchesIDSets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got := strings.Count(where, "id NOT IN ("); got != 2 {
+	if got := strings.Count(where, "id NOT IN (?"); got != 2 {
 		t.Errorf("expected 2 batched NOT IN clauses for %d IDs, got %d", len(ids), got)
 	}
 	wantArgs := len(ids) + len(ReadyWorkExcludeTypes(nil))
 	if len(args) != wantArgs {
 		t.Errorf("args = %d, want %d", len(args), wantArgs)
+	}
+}
+
+// GH#3268: ready trusted a bare is_blocked = 0, so a stale flag on a row with
+// no ready-affecting dependency rows hid it. The stale rows are resolved per
+// family (StaleBlockedIDsSQL) and listed by id; with none, the WHERE keeps the
+// bare indexed is_blocked = 0, so the common case reads no dependency table.
+func TestBuildReadyWorkWhereIsBlockedGuard(t *testing.T) {
+	t.Parallel()
+
+	blockedTerm := func(t *testing.T, where string) string {
+		t.Helper()
+		for _, term := range strings.Split(strings.TrimPrefix(where, "WHERE "), " AND ") {
+			if strings.Contains(term, "is_blocked") {
+				return strings.TrimSpace(term)
+			}
+		}
+		t.Fatalf("no is_blocked clause at all; blocked rows would be ready: %s", where)
+		return ""
+	}
+
+	for _, tables := range []FilterTables{IssuesFilterTables, WispsFilterTables} {
+		t.Run(tables.Main+"/no_stale_flag", func(t *testing.T) {
+			where, _, err := BuildReadyWorkWhere(types.WorkFilter{}, tables, ReadyWorkWhereInputs{})
+			if err != nil {
+				t.Fatalf("BuildReadyWorkWhere: %v", err)
+			}
+			if got := blockedTerm(t, where); got != "is_blocked = 0" {
+				t.Errorf("blocked term = %q, want the bare indexed is_blocked = 0", got)
+			}
+			if strings.Contains(where, tables.Dependencies+" WHERE issue_id IS NOT NULL") || strings.Contains(where, "type IN (") {
+				t.Errorf("the WHERE must not read the dependency table when no flag is stale: %s", where)
+			}
+		})
+
+		t.Run(tables.Main+"/stale_flags", func(t *testing.T) {
+			stale := make([]string, QueryBatchSize+2)
+			for i := range stale {
+				stale[i] = fmt.Sprintf("st-%d", i)
+			}
+			where, args, err := BuildReadyWorkWhere(types.WorkFilter{Status: types.StatusOpen}, tables,
+				ReadyWorkWhereInputs{StaleBlockedIDs: map[string][]string{tables.Main: stale}})
+			if err != nil {
+				t.Fatalf("BuildReadyWorkWhere: %v", err)
+			}
+			got := blockedTerm(t, where)
+			if !strings.HasPrefix(got, "(is_blocked = 0 OR id IN (?") || !strings.HasSuffix(got, ")") {
+				t.Fatalf("blocked term = %q, want (is_blocked = 0 OR id IN (...) ...)", got)
+			}
+			if n := strings.Count(got, "id IN (?"); n != 2 {
+				t.Errorf("%d stale ids rendered %d IN batches, want 2: %s", len(stale), n, got)
+			}
+			// The status arg leads, then the stale ids in order.
+			if len(args) < 1+len(stale) || args[0] != string(types.StatusOpen) {
+				t.Fatalf("args = %v, want the status arg then %d stale ids", args, len(stale))
+			}
+			for i, id := range stale {
+				if args[1+i] != id {
+					t.Fatalf("args[%d] = %v, want stale id %q", 1+i, args[1+i], id)
+				}
+			}
+		})
+
+		// The set is keyed by family: an id can name a row in both tables,
+		// and the other family's stale row must not unhide this one.
+		t.Run(tables.Main+"/other_familys_stale_flags", func(t *testing.T) {
+			other := IssuesFilterTables.Main
+			if tables.Main == other {
+				other = WispsFilterTables.Main
+			}
+			where, args, err := BuildReadyWorkWhere(types.WorkFilter{}, tables,
+				ReadyWorkWhereInputs{StaleBlockedIDs: map[string][]string{other: {"st-1"}}})
+			if err != nil {
+				t.Fatalf("BuildReadyWorkWhere: %v", err)
+			}
+			if got := blockedTerm(t, where); got != "is_blocked = 0" {
+				t.Errorf("blocked term = %q, want the bare is_blocked = 0: the stale id is the %s family's", got, other)
+			}
+			if slices.Contains(args, any("st-1")) {
+				t.Errorf("args carry the other family's stale id: %v", args)
+			}
+		})
+
+		t.Run(tables.Main+"/stale_query", func(t *testing.T) {
+			q := StaleBlockedIDsSQL(tables)
+			if !strings.HasPrefix(q, "SELECT t.id FROM "+tables.Main+" t WHERE t.is_blocked = 1 AND NOT EXISTS (") {
+				t.Fatalf("stale query must select the family's flagged rows with no edge of their own: %s", q)
+			}
+			if !strings.Contains(q, "FROM "+tables.Dependencies+" d WHERE d.issue_id = t.id AND ") {
+				t.Fatalf("stale query must probe %s by the row's own id: %s", tables.Dependencies, q)
+			}
+			typesStart := strings.Index(q, "d.type IN (")
+			if typesStart < 0 {
+				t.Fatalf("stale query does not restrict dependency types: %s", q)
+			}
+			list := q[typesStart+len("d.type IN ("):]
+			list = list[:strings.Index(list, ")")]
+			got := map[string]bool{}
+			for _, lit := range strings.Split(list, ",") {
+				got[strings.Trim(strings.TrimSpace(lit), "'")] = true
+			}
+			want := map[string]bool{}
+			for _, d := range types.ReadyAffectingDependencyTypes() {
+				want[string(d)] = true
+			}
+			if len(got) != len(want) {
+				t.Errorf("stale query types = %v, want %v", got, want)
+			}
+			for d := range want {
+				if !got[d] {
+					t.Errorf("stale query omits ready-affecting type %q: %s", d, q)
+				}
+			}
+		})
 	}
 }
 
@@ -300,7 +414,7 @@ func TestBuildReadyWorkWhereAppliesPolicyIDExclusions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildReadyWorkWhere: %v", err)
 	}
-	if got := strings.Count(where, "id NOT IN ("); got != 2 {
+	if got := strings.Count(where, "id NOT IN (?"); got != 2 {
 		t.Fatalf("external policy exclusions produced %d NOT IN clauses, want 2", got)
 	}
 	wantArgs := len(ids) + len(ReadyWorkExcludeTypes(nil))

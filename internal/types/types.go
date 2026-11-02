@@ -1550,6 +1550,14 @@ func (d DependencyType) AffectsReadyWork() bool {
 	return d == DepBlocks || d == DepParentChild || d == DepConditionalBlocks || d == DepWaitsFor
 }
 
+// ReadyAffectingDependencyTypes returns the dependency types for which
+// AffectsReadyWork is true: the only edge types that can make an issue
+// blocked. SQL that must name those types renders this list rather than a
+// hand-written copy.
+func ReadyAffectingDependencyTypes() []DependencyType {
+	return []DependencyType{DepBlocks, DepParentChild, DepConditionalBlocks, DepWaitsFor}
+}
+
 // IsBlockingEdge returns true if this dependency type represents a hard blocker.
 // Unlike AffectsReadyWork, this excludes parent-child (structural, not blocking).
 // Used by dep tree rendering to decide whether the [BLOCKED] badge applies.
@@ -2119,6 +2127,10 @@ type TreeNode struct {
 	ParentID       string         `json:"parent_id"`
 	EdgeFromParent DependencyType `json:"edge_from_parent,omitempty"`
 	Truncated      bool           `json:"truncated"`
+	// Deduped is true on a stub row: it records only the edge from ParentID
+	// into an issue already expanded earlier in the same list, and it has no
+	// descendants. Drop these rows to get each issue once.
+	Deduped bool `json:"deduped,omitempty"`
 }
 
 // MoleculeProgressStats provides efficient progress info for large molecules.

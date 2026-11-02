@@ -146,6 +146,14 @@ func TestEmbeddedDoctorUnsupportedJSON(t *testing.T) {
 			if !strings.Contains(errStr, "not yet supported in embedded mode") {
 				t.Errorf("expected error to mention embedded-mode unsupported, got %q", errStr)
 			}
+
+			hints, _ := result["hints"].([]interface{})
+			var joined []string
+			for _, h := range hints {
+				s, _ := h.(string)
+				joined = append(joined, s)
+			}
+			assertEmbeddedRecoveryHints(t, strings.Join(joined, "\n"))
 		})
 	}
 }
@@ -176,5 +184,20 @@ func TestEmbeddedDoctorUnsupportedProse(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("expected stub to mention %q so users know what works:\n%s", want, out)
 		}
+	}
+	assertEmbeddedRecoveryHints(t, out)
+}
+
+// assertEmbeddedRecoveryHints checks that the embedded-unsupported hints send
+// a reader whose database will not open to the preservation-first runbook,
+// not to a bare reinitialization that would build an empty store over it
+// (GH#4521).
+func assertEmbeddedRecoveryHints(t *testing.T, hints string) {
+	t.Helper()
+	if want := "docs/recovery/database-corruption.md#engine-wont-open"; !strings.Contains(hints, want) {
+		t.Errorf("expected hints to link %q:\n%s", want, hints)
+	}
+	if strings.Contains(hints, "--reinit-local") {
+		t.Errorf("hints must not offer bare reinitialization:\n%s", hints)
 	}
 }

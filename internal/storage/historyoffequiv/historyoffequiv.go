@@ -199,6 +199,15 @@ var schemaAdditions = []schemaAddition{{
 		"schema_migrations":         {"74"},
 		"ignored_schema_migrations": {"30"},
 	},
+}, {
+	By: "the pre-upgrade events restore marker (#7039)",
+	// Ignored/0031 adds no schema. Its pre-migration repair restores the
+	// events a clone's history holds from before 0062, and the scenario
+	// writes every event after its store has migrated, so the repair
+	// restores nothing and the marker adds only its bookkeeping row.
+	Migrations: map[string][]string{
+		"ignored_schema_migrations": {"31"},
+	},
 }}
 
 // runWindow widens the span of the run on each side to bound the wall-clock

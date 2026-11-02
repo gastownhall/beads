@@ -10,13 +10,13 @@ import (
 	"syscall"
 )
 
-// The two process reads listenerOwnership makes on darwin; tests replace them.
+// The two process reads classifyListener makes on darwin; tests replace them.
 var (
 	listeningPIDs  = lsofListeningPIDs
 	processParents = psParentPIDs
 )
 
-// listenerOwnership reports whether a TCP listener on port belongs to pid or
+// classifyListener reports whether a TCP listener on port belongs to pid or
 // one of its descendants. Darwin has no /proc, so the listener's processes
 // come from lsof and the process tree from ps, the same two tools this
 // package already uses to find a port's holder and a server's working
@@ -24,35 +24,36 @@ var (
 // exec: the listener's ancestor chain then passes through the wrapper, which
 // is the child bd launched.
 //
-// known is false when the tools cannot answer, and the caller then falls back
-// to weaker readiness evidence:
-//   - lsof or ps is missing or fails;
-//   - no listener on port is listed at all, although one just answered: lsof
-//     cannot see another user's sockets without privilege, or the connection
-//     is forwarded elsewhere.
+// It is OwnershipUnknown when lsof or ps is missing or fails, and
+// OwnershipUnlisted when lsof lists no listener on port at all, although one
+// just answered: lsof cannot see another user's sockets without privilege,
+// or the connection is forwarded elsewhere.
 //
 // A child that no longer exists is known not to own anything.
 //
 // Both reads run only once a greeting has arrived on the port, never on the
 // bare readiness poll, and together cost on the order of 100ms.
-func listenerOwnership(pid, port int) (owned, known bool) {
+func classifyListener(pid, port int) Ownership {
 	if !processExists(pid) {
-		return false, true
+		return OwnershipForeign
 	}
 	holders, err := listeningPIDs(port)
-	if err != nil || len(holders) == 0 {
-		return false, false
+	if err != nil {
+		return OwnershipUnknown
+	}
+	if len(holders) == 0 {
+		return OwnershipUnlisted
 	}
 	parents, err := processParents()
 	if err != nil || len(parents) == 0 {
-		return false, false
+		return OwnershipUnknown
 	}
 	for _, holder := range holders {
 		if descendsFrom(holder, pid, parents) {
-			return true, true
+			return OwnershipOwned
 		}
 	}
-	return false, true
+	return OwnershipForeign
 }
 
 // processExists is true while pid names a process this user may signal, or

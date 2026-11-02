@@ -5,6 +5,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/git"
 )
 
 // TestIsUserHomeDir covers the guard decision used to refuse `bd init` directly
@@ -323,10 +326,18 @@ func setInitFlag(t *testing.T, name, value string) {
 //
 // Cobra's root PersistentPreRunE runs first, and for a no-DB command like init
 // it resolves a beads dir and exports it (main.go, selectedNoDBBeadsDir ->
-// prepareSelectedNoDBContext). That resolution accepts an ancestor .beads/
+// prepareSelectedNoDBContext). That resolution accepted an ancestor .beads/
 // holding nothing but a config.yaml, which is precisely the shape of this
 // project's legacy user-level ~/.beads/config.yaml. A guard reading the LIVE
 // BEADS_DIR therefore saw a value it had set for itself and stood down.
+//
+// Discovery now passes over the account home's own .beads (GH#4402;
+// TestInitThroughRootCmd_HomeDirDiscoveryExportsNoUserGlobalBeadsDir), so
+// only the guard's home is stubbed here: discovery's stays the real account
+// home, and to it the fixture's config.yaml-only .beads is an ordinary
+// ancestor workspace. That keeps the bypass reproducible, so the guard's own
+// defense, reading the caller's BEADS_DIR rather than the live one, stays
+// pinned even if some discovery route adopts ~/.beads again.
 //
 // The half that made this worth blocking on: the `git init` is separately
 // gated on the same env, so it stayed skipped — but the agent scaffolding is
@@ -396,6 +407,60 @@ func TestInitThroughRootCmd_RefusesInHomeDirWithDiscoveredBeadsDir(t *testing.T)
 			t.Errorf("init created %s in the home directory despite refusing", name)
 		}
 	}
+}
+
+// TestInitThroughRootCmd_HomeDirDiscoveryExportsNoUserGlobalBeadsDir is the
+// bypass above with discovery's home pointed at the fixture too, as it is in
+// production, where both resolve the account home: PreRun discovery passes
+// over the home directory's own .beads (GH#4402), so it exports no BEADS_DIR
+// for the guard to mistake for the caller's, and init refuses.
+func TestInitThroughRootCmd_HomeDirDiscoveryExportsNoUserGlobalBeadsDir(t *testing.T) {
+	home := t.TempDir()
+	stubHomeDir(t, home)
+	t.Cleanup(beads.SetUserHomeDirForTesting(home))
+	t.Chdir(home)
+	stubCallerBeadsDir(t, "")
+	beads.ResetCaches()
+	git.ResetCaches()
+	t.Cleanup(func() {
+		beads.ResetCaches()
+		git.ResetCaches()
+	})
+
+	t.Setenv("BEADS_DIR", "")
+	t.Setenv("HOME", home)
+	t.Setenv("BD_NON_INTERACTIVE", "1")
+
+	beadsDir := filepath.Join(home, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("actor: someone\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := selectedNoDBBeadsDir(initCmd); got != "" {
+		t.Fatalf("selectedNoDBBeadsDir = %q, want \"\": discovery from the home directory must pass over %s", got, beadsDir)
+	}
+
+	origStore, origDBPath := store, dbPath
+	t.Cleanup(func() {
+		rootCmd.SetArgs(nil)
+		store, dbPath = origStore, origDBPath
+		_ = initCmd.Flags().Set("backend", "")
+		_ = initCmd.Flags().Set("prefix", "")
+	})
+	store, dbPath = nil, ""
+
+	rootCmd.SetArgs([]string{"init", "--backend", homeGuardSentinelBackend, "--prefix", "hg"})
+	err := rootCmd.Execute()
+	if err == nil {
+		t.Fatal("bd init in an untracked home returned nil, want a refusal")
+	}
+	if strings.Contains(err.Error(), homeGuardSentinelBackend) {
+		t.Fatalf("init ran past the home guard and got as far as backend selection: %v", err)
+	}
+	assertHomeDirRefusal(t, err)
 }
 
 // evalSymlinks resolves path for comparison, tolerating a path that does not

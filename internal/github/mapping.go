@@ -229,6 +229,14 @@ func PushFieldsEqual(local *types.Issue, remote *Issue, config *MappingConfig) b
 	return labelSetsEqual(desiredLabels, remote.LabelNames())
 }
 
+// pushContentHashVersion prefixes every PushContentHash so hashes recorded by
+// older builds can be invalidated in one place. It was bumped to "2" for
+// gastownhall/beads#5486: builds before the fix cached the desired closed
+// state's hash at create time even though the issue landed OPEN on GitHub, so
+// users who already pushed closed beads are stuck until the stored hash misses
+// once and the next sync fetches, sees the state mismatch, and closes.
+const pushContentHashVersion = "2"
+
 // PushContentHash returns a stable hex fingerprint of the fields a push would
 // send to GitHub: title, body, desired state, and the order-independent label
 // set produced by BeadsIssueToGitHubFields. The engine persists this hash in
@@ -236,7 +244,9 @@ func PushFieldsEqual(local *types.Issue, remote *Issue, config *MappingConfig) b
 // issue, so an unchanged issue is skipped without any API call
 // (gastownhall/beads#4214). It is derived from the same fields PushFieldsEqual
 // compares, so the two agree on what "unchanged" means. Fields are
-// length-prefixed before hashing so distinct field boundaries cannot collide.
+// length-prefixed before hashing so distinct field boundaries cannot collide,
+// and a format version is hashed first so stale hashes from older builds miss
+// once (see pushContentHashVersion).
 func PushContentHash(local *types.Issue, config *MappingConfig) string {
 	if local == nil {
 		return ""
@@ -252,7 +262,7 @@ func PushContentHash(local *types.Issue, config *MappingConfig) string {
 	slices.Sort(sortedLabels)
 
 	h := sha256.New()
-	for _, s := range []string{local.Title, local.Description, desiredState, strings.Join(sortedLabels, "\x00")} {
+	for _, s := range []string{pushContentHashVersion, local.Title, local.Description, desiredState, strings.Join(sortedLabels, "\x00")} {
 		_, _ = h.Write([]byte(s))
 		_, _ = h.Write([]byte{0})
 	}

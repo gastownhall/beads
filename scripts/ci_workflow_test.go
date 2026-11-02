@@ -972,15 +972,20 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 	assertGoCacheInventory(t, workflows["pr.yml"].job(t, "pr-preflight-platforms"), []goCacheStep{
 		restoreModuleCache(), restoreBuildCache("non-race"),
 	})
+	// windows-make-shell and its saver hold toolchain caches, not Go caches;
+	// TestWindowsMakeShellProvisionsWithoutNetworkInstalls and
+	// TestWindowsMakeShellToolchainSaverMatchesPRJob pin every one of them.
 	assertNoUnmanagedGoCacheSteps(t, workflows, map[string]map[string]bool{
 		"main.yml": {
 			"test": true, "test-windows": true,
 			"blacksmith-macos-go-build-cache": true,
+			"windows-make-shell-toolchains":   true,
 		},
 		"pr.yml": {
 			"worktree-remove-windows":       true,
 			"check-doc-freshness-platforms": true, "pr-preflight-platforms": true, "advisory-reports": true,
 			"test-windows-liveness": true,
+			"windows-make-shell":    true,
 		},
 		"pr-risk.yml": {},
 	})
@@ -2280,8 +2285,9 @@ func TestSameRepoBlacksmithRunners(t *testing.T) {
 			// included (ga-96smfk.22). test-windows-liveness and
 			// worktree-remove-windows are sized at 4vcpu (a build plus a
 			// focused test run each); test-windows-small at 2vcpu;
-			// windows-make-shell at 4vcpu (installs three separate Make
-			// toolchains).
+			// windows-make-shell at 4vcpu (provisions three separate Make
+			// toolchains, the label main.yml's windows-make-shell-toolchains
+			// saver seeds them on).
 			"test-windows-liveness":   blacksmithWindows4vcpuRunsOn,
 			"worktree-remove-windows": blacksmithWindows4vcpuRunsOn,
 			"test-windows-small":      blacksmithWindows2vcpuRunsOn,
@@ -2313,6 +2319,9 @@ func TestSameRepoBlacksmithRunners(t *testing.T) {
 			// if: (TestBlacksmithSaverJobsGuardedAgainstPullRequest below),
 			// matching F7c's own saver convention.
 			"test-windows": mainBlacksmithWindows4vcpuRunsOn,
+			// Same guard, seeding windows-make-shell's toolchain caches
+			// (TestWindowsMakeShellToolchainSaverMatchesPRJob).
+			"windows-make-shell-toolchains": mainBlacksmithWindows4vcpuRunsOn,
 			// Same guard, seeding pr.yml's macOS legs.
 			"blacksmith-macos-go-build-cache": mainBlacksmithMacOSGoBuildCacheRunsOn,
 			// The macOS -race -short suite (Linux runs it under Bazel).
@@ -2617,18 +2626,24 @@ func stepContinueOnError(step ciWorkflowStep) bool {
 // nothing pinned the aggregator's own correctness. The fix removes the
 // aggregator entirely: every step after checkout keeps `if: !cancelled()`
 // (so a failing leg does not stop later legs from attempting to run), but
-// only the Cygwin *setup* step (a flaky installer download, not a code
-// failure) may carry continue-on-error. Every other step's failure now fails
-// the job directly, with no hand-written logic in between to go stale.
+// only the Cygwin *setup* steps (windowsMakeShellCygwinSetupIDs: the offline
+// install from the main-saved package cache, which falls back to the online
+// installer, and that installer, a flaky download rather than a code
+// failure) may carry continue-on-error. Every other step's failure, the
+// Cygwin exercise included, fails the job directly, with no hand-written
+// logic in between to go stale.
 func TestPRWindowsMakeShellLegsFailTheJob(t *testing.T) {
 	pr := readCIWorkflow(t, "pr.yml")
-	// Only the install/exercise "leg" steps need `if: !cancelled()` (so a
-	// failing leg does not stop a later, independent leg from attempting to
-	// run) and the no-continue-on-error rule; checkout/setup steps that every
-	// leg depends on are deliberately left to run unconditionally.
+	// Only the per-leg restore/install/exercise steps need `if: !cancelled()`
+	// (so a failing leg does not stop a later, independent leg from
+	// attempting to run) and the no-continue-on-error rule; the checkout,
+	// diagnostics and cache-key steps every leg depends on are deliberately
+	// left to run unconditionally.
 	legSteps := map[string][]string{
 		"windows-make-shell": {
-			"Install native GNU Make", "Set up MSYS2 GNU Make", "Set up Cygwin GNU Make",
+			"Restore cached native GNU Make", "Install native GNU Make",
+			"Set up preinstalled MSYS2", "Restore MSYS2 package cache", "Install MSYS2 GNU Make",
+			"Restore Cygwin package cache", "Install Cygwin GNU Make from the package cache", "Set up Cygwin GNU Make",
 			"Warn when Cygwin setup was skipped by a download failure",
 			"Exercise native Windows Make", "Exercise MSYS2-hosted Make", "Exercise Cygwin-hosted Make",
 		},
@@ -2643,21 +2658,30 @@ func TestPRWindowsMakeShellLegsFailTheJob(t *testing.T) {
 			if !strings.Contains(step.If, "!cancelled()") {
 				t.Errorf("%s step %q if = %q, want it to contain !cancelled() so later legs still run after an earlier one fails", jobName, step.Name, step.If)
 			}
-			allowCOE := jobName == "windows-make-shell" && step.ID == "cygwin"
+			allowCOE := jobName == "windows-make-shell" && windowsMakeShellCygwinSetupIDs[step.ID]
 			if stepContinueOnError(step) && !allowCOE {
-				t.Errorf("%s step %q (id %q) has continue-on-error; only windows-make-shell's Cygwin setup step may, so every other leg's failure reds the job directly", jobName, step.Name, step.ID)
+				t.Errorf("%s step %q (id %q) has continue-on-error; only windows-make-shell's Cygwin setup steps may, so every other leg's failure reds the job directly", jobName, step.Name, step.ID)
 			}
 			if allowCOE && !stepContinueOnError(step) {
-				t.Errorf("%s Cygwin setup step lost continue-on-error; a flaky installer download would now fail the job", jobName)
+				t.Errorf("%s Cygwin setup step %q lost continue-on-error; a broken package cache or a flaky installer download would now fail the job", jobName, step.ID)
 			}
 		}
 		for _, step := range job.Steps {
 			if strings.HasPrefix(step.Name, "Fail if") {
 				t.Errorf("%s still has a hand-written aggregator step %q; SF-1 replaced aggregators with per-step failure propagation", jobName, step.Name)
 			}
-			if step.ID != "cygwin" && stepContinueOnError(step) {
-				t.Errorf("%s step %q (id %q) has continue-on-error; only windows-make-shell's Cygwin setup step may", jobName, step.Name, step.ID)
+			if !(jobName == "windows-make-shell" && windowsMakeShellCygwinSetupIDs[step.ID]) && stepContinueOnError(step) {
+				t.Errorf("%s step %q (id %q) has continue-on-error; only windows-make-shell's Cygwin setup steps may", jobName, step.Name, step.ID)
 			}
+		}
+	}
+	for id := range windowsMakeShellCygwinSetupIDs {
+		found := false
+		for _, step := range pr.job(t, "windows-make-shell").Steps {
+			found = found || step.ID == id
+		}
+		if !found {
+			t.Errorf("windows-make-shell has no Cygwin setup step with id %q", id)
 		}
 	}
 	// The aggregator's job outputs (native/msys2/cygwin) are gone too
@@ -2670,15 +2694,20 @@ func TestPRWindowsMakeShellLegsFailTheJob(t *testing.T) {
 }
 
 // TestPRWindowsMakeShellSetupStepsHaveTimeouts is review SF-2 (2026-10-03):
-// the Cygwin and MSYS2 setup steps download third-party installers from the
-// network; a step timeout bounds how long a hang can block the later legs'
-// exercise steps behind it, instead of consuming the whole 30-minute job
-// timeout (which would also lose native/msys2 coverage, since their exercise
-// steps would never get a chance to run before the job-level cancel).
+// each leg's provisioning step can still reach the network on its fallback
+// path (Chocolatey, MSYS2's mirrors, cygwin.com); a step timeout bounds how
+// long a hang can block the later legs' exercise steps behind it, instead of
+// consuming the whole 40-minute job timeout (which would also lose the other
+// legs' coverage, since their exercise steps would never get a chance to run
+// before the job-level cancel). TestWindowsMakeShellNetworkFallbacksAreBoundedAndRetried
+// checks the retried ones' caps against their own retry budgets.
 func TestPRWindowsMakeShellSetupStepsHaveTimeouts(t *testing.T) {
 	pr := readCIWorkflow(t, "pr.yml")
 	job := pr.job(t, "windows-make-shell")
-	for _, name := range []string{"Set up MSYS2 GNU Make", "Set up Cygwin GNU Make"} {
+	for _, name := range []string{
+		"Install native GNU Make", "Set up preinstalled MSYS2", "Install MSYS2 GNU Make",
+		"Install Cygwin GNU Make from the package cache", "Set up Cygwin GNU Make",
+	} {
 		step := job.step(t, name)
 		if step.TimeoutMinutes <= 0 {
 			t.Errorf("windows-make-shell step %q has no timeout-minutes", name)

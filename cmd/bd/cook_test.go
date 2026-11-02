@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -1544,4 +1545,149 @@ func TestStepTypeToIssueType(t *testing.T) {
 			t.Errorf("stepTypeToIssueType(%q) = %q, want %q", tt.stepType, got, tt.want)
 		}
 	}
+}
+
+// loopDepsReproTOML is the GH#7636 repro: a loop step with its own needs,
+// and a step after it that needs the loop.
+const loopDepsReproTOML = `formula = "loopdeps"
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "brief"
+title = "Brief"
+
+[[steps]]
+id = "round"
+title = "Round"
+needs = ["brief"]
+[steps.loop]
+count = 2
+[[steps.loop.body]]
+id = "work"
+title = "Work"
+
+[[steps]]
+id = "land"
+title = "Land"
+needs = ["round"]
+`
+
+// TestCookFormulaToSubgraph_LoopStepDependencies pins GH#7636 on the pour
+// cook path: a loop step's own needs gate its first expanded step, and a
+// step that needs the loop waits for the loop's last expanded step.
+func TestCookFormulaToSubgraph_LoopStepDependencies(t *testing.T) {
+	t.Run("loop_own_needs", func(t *testing.T) {
+		sg := cookGateFormulaTOML(t, "loopdeps", loopDepsReproTOML)
+		if got := blocksEdgesFrom(sg, "loopdeps.round.iter1.work"); !slices.Equal(got, []string{"loopdeps.brief"}) {
+			t.Errorf("round.iter1.work blocks edges = %v, want [loopdeps.brief] (the loop step's own needs)", got)
+		}
+		if got := blocksEdgesFrom(sg, "loopdeps.round.iter2.work"); !slices.Equal(got, []string{"loopdeps.round.iter1.work"}) {
+			t.Errorf("round.iter2.work blocks edges = %v, want [loopdeps.round.iter1.work] (iteration chaining only)", got)
+		}
+	})
+
+	t.Run("needs_on_loop", func(t *testing.T) {
+		sg := cookGateFormulaTOML(t, "loopdeps", loopDepsReproTOML)
+		if got := blocksEdgesFrom(sg, "loopdeps.land"); !slices.Equal(got, []string{"loopdeps.round.iter2.work"}) {
+			t.Errorf("land blocks edges = %v, want [loopdeps.round.iter2.work] (the loop's last expanded step)", got)
+		}
+	})
+
+	// A body of two independent steps: every expanded step that nothing
+	// else in the loop waits for blocks the step that needs the loop.
+	t.Run("needs_on_parallel_loop", func(t *testing.T) {
+		src := strings.Replace(loopDepsReproTOML, `[[steps.loop.body]]
+id = "work"
+title = "Work"
+`, `[[steps.loop.body]]
+id = "a"
+title = "A"
+
+[[steps.loop.body]]
+id = "b"
+title = "B"
+`, 1)
+		sg := cookGateFormulaTOML(t, "loopdeps", src)
+		want := []string{"loopdeps.round.iter2.b", "loopdeps.round.iter1.a", "loopdeps.round.iter2.a"}
+		if got := blocksEdgesFrom(sg, "loopdeps.land"); !slices.Equal(got, want) {
+			t.Errorf("land blocks edges = %v, want %v (every step that ends the loop)", got, want)
+		}
+	})
+
+	// A body step that names its own loop is refused as an invalid formula:
+	// pour, wisp and bond report a formula.ErrValidation from this cook path
+	// as it is, where any other error makes them report the formula as not
+	// found.
+	t.Run("self_reference", func(t *testing.T) {
+		src := strings.Replace(loopDepsReproTOML, `id = "work"
+title = "Work"
+`, `id = "work"
+title = "Work"
+needs = ["round"]
+`, 1)
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "loopdeps.formula.toml"), []byte(src), 0o600); err != nil {
+			t.Fatalf("write formula: %v", err)
+		}
+		_, err := resolveAndCookFormulaWithVars("loopdeps", []string{dir}, nil)
+		if !errors.Is(err, formula.ErrValidation) {
+			t.Fatalf("cook error = %v, want a formula.ErrValidation", err)
+		}
+		if want := `loop "round": step "round.iter1.work" depends on its own loop`; !strings.Contains(err.Error(), want) {
+			t.Errorf("cook error = %q, want it to contain %q", err, want)
+		}
+	})
+
+	t.Run("dry_run", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "loopdeps.formula.toml"), []byte(loopDepsReproTOML), 0o600); err != nil {
+			t.Fatalf("write formula: %v", err)
+		}
+		cmd := &cobra.Command{}
+		cmd.Flags().Bool("dry-run", true, "")
+		cmd.Flags().Bool("persist", false, "")
+		cmd.Flags().Bool("force", false, "")
+		cmd.Flags().StringSlice("search-path", []string{dir}, "")
+		cmd.Flags().String("prefix", "", "")
+		cmd.Flags().StringArray("var", nil, "")
+		cmd.Flags().String("mode", "", "")
+		stdout, stderr, err := runCookCapturingOutput(t, cmd, "loopdeps")
+		if err != nil {
+			t.Fatalf("runCook: %v; stderr = %q", err, stderr)
+		}
+		for _, want := range []string{
+			"round.iter1.work: Work [needs: brief]",
+			"round.iter2.work: Work [needs: round.iter1.work]",
+			"land: Land [needs: round.iter2.work]",
+		} {
+			if !strings.Contains(stdout, want) {
+				t.Errorf("dry-run stdout missing %q:\n%s", want, stdout)
+			}
+		}
+	})
+
+	// A loop whose last body step is an exit gate: a step that needs the
+	// loop waits for that task and its companion gate (GH#3316).
+	t.Run("exit_gate_end", func(t *testing.T) {
+		src := strings.Replace(loopDepsReproTOML, `[[steps.loop.body]]
+id = "work"
+title = "Work"
+`, `[[steps.loop.body]]
+id = "work"
+title = "Work"
+
+[[steps.loop.body]]
+id = "approve"
+title = "Approve"
+type = "gate"
+needs = ["work"]
+gate = { type = "human" }
+`, 1)
+		sg := cookGateFormulaTOML(t, "loopdeps", src)
+		want := []string{"loopdeps.round.iter2.approve", "loopdeps.gate-round.iter2.approve"}
+		if got := blocksEdgesFrom(sg, "loopdeps.land"); !slices.Equal(got, want) {
+			t.Errorf("land blocks edges = %v, want %v (the loop's exit-gate task and its companion)", got, want)
+		}
+	})
 }

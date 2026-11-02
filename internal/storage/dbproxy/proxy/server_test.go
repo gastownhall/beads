@@ -1013,3 +1013,111 @@ func waitForLogLine(t *testing.T, path, want string) {
 	}
 	t.Fatalf("%s never contained %q", path, want)
 }
+
+// ga-t18xx8.11 / follow-up to #7527: a proxy can run for weeks, so the
+// startup rotation alone does not bound its logs. While it runs, the proxy
+// copy-truncates proxy.log and the server log it owns (ServerLogPath) once
+// either passes BEADS_DOLT_LOG_MAX_BYTES. The writers hold those files open
+// with O_APPEND (dolt's output, the proxy child's stdout, the proxy logger),
+// so the primary must be emptied in place: a writer opened before the
+// rotation keeps writing to the primary, from its start.
+func TestProxy_BoundsLogsWhileRunning(t *testing.T) {
+	t.Setenv(doltserver.EnvMaxLogBytes, "1024")
+	root := t.TempDir()
+	proxyLog := filepath.Join(root, proxy.LogFileName)
+	serverLog := filepath.Join(root, "server.log")
+
+	h := runProxy(t, proxy.ProxyOpts{
+		RootDir: root, Port: freeTCPPort(t),
+		IdleTimeout:          proxy.IdleTimeoutNever,
+		Server:               server.New(),
+		Stats:                &proxy.Stats{},
+		ServerLogPath:        serverLog,
+		LogSizeCheckInterval: 20 * time.Millisecond,
+	})
+	waitListening(t, root, listenWait)
+	waitForLogLine(t, proxyLog, "acceptLoop start")
+
+	// Stand-ins for the long-lived writers: dolt's output and the proxy
+	// logger both append to their file through a descriptor opened once.
+	serverW, err := os.OpenFile(serverLog, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = serverW.Close() })
+	proxyW, err := os.OpenFile(proxyLog, os.O_WRONLY|os.O_APPEND, 0o600)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = proxyW.Close() })
+
+	oldServer := strings.Repeat("s", 4096) + "old-server-marker\n"
+	oldProxy := strings.Repeat("p", 4096) + "old-proxy-marker\n"
+	_, err = serverW.WriteString(oldServer)
+	require.NoError(t, err)
+	_, err = proxyW.WriteString(oldProxy)
+	require.NoError(t, err)
+
+	waitForRotation(t, serverLog, "old-server-marker")
+	waitForRotation(t, proxyLog, "old-proxy-marker")
+
+	_, err = serverW.WriteString("new-server-line\n")
+	require.NoError(t, err)
+	body, err := os.ReadFile(serverLog)
+	require.NoError(t, err)
+	assert.Equal(t, "new-server-line\n", string(body), "an open O_APPEND writer must keep writing to the emptied primary")
+	rotated, err := os.ReadFile(serverLog + ".1")
+	require.NoError(t, err)
+	assert.Equal(t, oldServer, string(rotated))
+
+	h.Cancel()
+	require.NoError(t, h.waitErr(t, shutdownWait))
+}
+
+// A server log the proxy was not given (an operator's log path, which
+// db-proxy-child does not pass on) is never rotated while the proxy runs.
+func TestProxy_LeavesUnownedServerLogWhileRunning(t *testing.T) {
+	t.Setenv(doltserver.EnvMaxLogBytes, "1024")
+	root := t.TempDir()
+	proxyLog := filepath.Join(root, proxy.LogFileName)
+	operatorLog := filepath.Join(t.TempDir(), "operator.log")
+	old := strings.Repeat("o", 4096) + "\n"
+	require.NoError(t, os.WriteFile(operatorLog, []byte(old), 0o600))
+
+	h := runProxy(t, proxy.ProxyOpts{
+		RootDir: root, Port: freeTCPPort(t),
+		IdleTimeout:          proxy.IdleTimeoutNever,
+		Server:               server.New(),
+		Stats:                &proxy.Stats{},
+		LogSizeCheckInterval: 20 * time.Millisecond,
+	})
+	waitListening(t, root, listenWait)
+	waitForLogLine(t, proxyLog, "acceptLoop start")
+
+	// Drive one proxy.log rotation so the watcher has provably ticked.
+	proxyW, err := os.OpenFile(proxyLog, os.O_WRONLY|os.O_APPEND, 0o600)
+	require.NoError(t, err)
+	_, err = proxyW.WriteString(strings.Repeat("p", 4096) + "old-proxy-marker\n")
+	require.NoError(t, err)
+	require.NoError(t, proxyW.Close())
+	waitForRotation(t, proxyLog, "old-proxy-marker")
+
+	h.Cancel()
+	require.NoError(t, h.waitErr(t, shutdownWait))
+	body, err := os.ReadFile(operatorLog)
+	require.NoError(t, err)
+	assert.Equal(t, old, string(body))
+	assert.NoFileExists(t, operatorLog+".1")
+}
+
+// waitForRotation waits until path's .1 generation holds marker and path
+// itself no longer does.
+func waitForRotation(t *testing.T, path, marker string) {
+	t.Helper()
+	deadline := time.Now().Add(listenWait)
+	for time.Now().Before(deadline) {
+		rotated, rerr := os.ReadFile(path + ".1")
+		body, berr := os.ReadFile(path)
+		if rerr == nil && berr == nil && strings.Contains(string(rotated), marker) && !strings.Contains(string(body), marker) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("%s was not rotated to %s.1 while the proxy ran", path, path)
+}

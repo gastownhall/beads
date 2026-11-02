@@ -725,23 +725,27 @@ func pushGitHubDependencyLinks(ctx context.Context, gt *github.Tracker, st stora
 // buildGitHubPushHooks creates PushHooks for GitHub-specific push behavior.
 // The ContentEqual hook lets the engine skip issues whose pushable fields
 // already match GitHub, so repeated `github sync --push-only` / `github push`
-// runs don't re-PATCH unchanged issues (gastownhall/beads#4214).
+// runs don't re-PATCH unchanged issues (gastownhall/beads#4214). The same
+// content comparison is PushFieldsEqual, which a pull uses to recognize an
+// echo of its own push.
 func buildGitHubPushHooks(gt *github.Tracker) *tracker.PushHooks {
 	config := gt.MappingConfig()
 	if config == nil {
 		config = github.DefaultMappingConfig()
 	}
+	pushFieldsEqual := func(local *types.Issue, remote *tracker.TrackerIssue) bool {
+		if remote == nil {
+			return false
+		}
+		gh, ok := remote.Raw.(*github.Issue)
+		if !ok || gh == nil {
+			return false
+		}
+		return github.PushFieldsEqual(local, gh, config)
+	}
 	return &tracker.PushHooks{
-		ContentEqual: func(local *types.Issue, remote *tracker.TrackerIssue) bool {
-			if remote == nil {
-				return false
-			}
-			gh, ok := remote.Raw.(*github.Issue)
-			if !ok || gh == nil {
-				return false
-			}
-			return github.PushFieldsEqual(local, gh, config)
-		},
+		ContentEqual:    pushFieldsEqual,
+		PushFieldsEqual: pushFieldsEqual,
 		// ContentHash lets the engine skip the per-issue GitHub fetch entirely
 		// when an issue is unchanged since its last push, so a no-op
 		// `github sync --push-only` makes ~zero REST calls instead of one GET

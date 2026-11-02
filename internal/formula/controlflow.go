@@ -18,8 +18,22 @@ import (
 // ApplyLoops expands loop bodies in a formula's steps.
 // Fixed-count loops expand the body N times with indexed step IDs.
 // Conditional loops expand once and add a "loop:until" label for runtime evaluation.
+// A reference to a loop step, which no longer exists after expansion, is
+// retargeted to the loop's ends, so it waits for the whole loop (GH#7636).
 // Returns a new steps slice with loops expanded.
 func ApplyLoops(steps []*Step) ([]*Step, error) {
+	ends := make(map[string][]string)
+	result, err := applyLoops(steps, ends)
+	if err != nil {
+		return nil, err
+	}
+	retargetLoopRefs(result, ends)
+	return result, nil
+}
+
+// applyLoops expands loops like ApplyLoops and records each expanded loop's
+// ends (loopEnds) in ends, keyed by the loop step's ID, without retargeting.
+func applyLoops(steps []*Step, ends map[string][]string) ([]*Step, error) {
 	result := make([]*Step, 0, len(steps))
 
 	for _, step := range steps {
@@ -27,7 +41,7 @@ func ApplyLoops(steps []*Step) ([]*Step, error) {
 			// No loop - recursively process children
 			clone := cloneStep(step)
 			if len(step.Children) > 0 {
-				children, err := ApplyLoops(step.Children)
+				children, err := applyLoops(step.Children, ends)
 				if err != nil {
 					return nil, err
 				}
@@ -43,7 +57,7 @@ func ApplyLoops(steps []*Step) ([]*Step, error) {
 		}
 
 		// Expand the loop
-		expanded, err := expandLoop(step)
+		expanded, err := expandLoop(step, ends)
 		if err != nil {
 			return nil, err
 		}
@@ -108,13 +122,14 @@ func validateLoopSpec(loop *LoopSpec, stepID string) error {
 }
 
 // expandLoop expands a loop step into its constituent steps.
-func expandLoop(step *Step) ([]*Step, error) {
-	return expandLoopWithVars(step, nil)
+func expandLoop(step *Step, ends map[string][]string) ([]*Step, error) {
+	return expandLoopWithVars(step, nil, ends)
 }
 
 // expandLoopWithVars expands a loop step using the given variable context.
 // The vars map is used to resolve range expressions with variables.
-func expandLoopWithVars(step *Step, vars map[string]string) ([]*Step, error) {
+// The loop's ends, and those of nested loops, are recorded in ends.
+func expandLoopWithVars(step *Step, vars map[string]string, ends map[string][]string) ([]*Step, error) {
 	var result []*Step
 
 	if step.Loop.Count > 0 {
@@ -129,7 +144,7 @@ func expandLoopWithVars(step *Step, vars map[string]string) ([]*Step, error) {
 
 		// Recursively expand any nested loops FIRST
 		var err error
-		result, err = ApplyLoops(result)
+		result, err = applyLoops(result, ends)
 		if err != nil {
 			return nil, err
 		}
@@ -170,7 +185,7 @@ func expandLoopWithVars(step *Step, vars map[string]string) ([]*Step, error) {
 		}
 
 		// Recursively expand any nested loops FIRST
-		result, err = ApplyLoops(result)
+		result, err = applyLoops(result, ends)
 		if err != nil {
 			return nil, err
 		}
@@ -200,13 +215,94 @@ func expandLoopWithVars(step *Step, vars map[string]string) ([]*Step, error) {
 		}
 
 		// Recursively expand any nested loops
-		result, err = ApplyLoops(iterSteps)
+		result, err = applyLoops(iterSteps, ends)
 		if err != nil {
 			return nil, err
 		}
 	}
 
+	// Name nested loops' real ends before computing roots, so a body step
+	// that needs a nested loop counts as gated by it.
+	retargetLoopRefs(result, ends)
+	// Rewriting a body step's reference to its own loop would cycle with
+	// iteration chaining, and dropping it would be silent.
+	if selfRef := findStepNaming(result, step.ID); selfRef != "" {
+		return nil, fmt.Errorf("%w: loop %q: step %q depends on its own loop", ErrValidation, step.ID, selfRef)
+	}
+	carryLoopDeps(step, result)
+	// For an until loop these are the ends of the one cooked iteration.
+	if len(result) > 0 {
+		ends[step.ID] = loopEnds(result)
+	}
 	return result, nil
+}
+
+// loopEnds returns the steps a reference to a loop waits for: the top-level
+// expanded steps that no expanded step, children included, names in Needs
+// or DependsOn (GH#7636). Every other step of the loop comes before one of
+// them, so waiting for all of them waits for the whole loop. The
+// last-declared one comes first; a sequential body has no other. A body
+// whose steps all name each other is a cycle cook refuses; its last step
+// stands in, so the reference still names the loop.
+func loopEnds(expanded []*Step) []string {
+	named := make(map[string]bool)
+	var mark func([]*Step)
+	mark = func(steps []*Step) {
+		for _, s := range steps {
+			for _, dep := range s.Needs {
+				named[dep] = true
+			}
+			for _, dep := range s.DependsOn {
+				named[dep] = true
+			}
+			mark(s.Children)
+		}
+	}
+	mark(expanded)
+
+	var ends []string
+	for _, s := range expanded {
+		if !named[s.ID] {
+			ends = append(ends, s.ID)
+		}
+	}
+	if len(ends) == 0 {
+		return []string{expanded[len(expanded)-1].ID}
+	}
+	last := len(ends) - 1
+	return append([]string{ends[last]}, ends[:last]...)
+}
+
+// carryLoopDeps appends the loop step's own Needs and DependsOn to the
+// roots of its expansion: the top-level expanded steps that depend on no
+// other step of the loop (GH#7636). Every other expanded step is already
+// gated by a sibling or by iteration chaining. Children need no carry: a
+// blocked parent blocks its children. The deps are appended, not
+// prepended, because needs[0] is the inferred waits_for spawner.
+func carryLoopDeps(step *Step, expanded []*Step) {
+	if len(step.Needs) == 0 && len(step.DependsOn) == 0 {
+		return
+	}
+	ids := collectStepIDs(expanded)
+	namesLoopStep := func(deps []string) bool {
+		for _, dep := range deps {
+			if ids[dep] {
+				return true
+			}
+		}
+		return false
+	}
+	for _, s := range expanded {
+		if namesLoopStep(s.Needs) || namesLoopStep(s.DependsOn) {
+			continue
+		}
+		for _, dep := range step.Needs {
+			s.Needs = appendUnique(s.Needs, dep)
+		}
+		for _, dep := range step.DependsOn {
+			s.DependsOn = appendUnique(s.DependsOn, dep)
+		}
+	}
 }
 
 // expandLoopIteration expands a single iteration of a loop.
@@ -239,7 +335,7 @@ func expandLoopIteration(step *Step, iteration int, iterVars map[string]string) 
 			WaitsFor:       bodyStep.WaitsFor,
 			Expand:         bodyStep.Expand,
 			Gate:           bodyStep.Gate,
-			Loop:           cloneLoopSpec(bodyStep.Loop), // Support nested loops
+			Loop:           nestedLoopSpec(bodyStep.Loop, bodyStep.ID, iterID), // Support nested loops
 			OnComplete:     cloneOnComplete(bodyStep.OnComplete),
 			SourceFormula:  bodyStep.SourceFormula,                                       // Preserve source
 			SourceLocation: fmt.Sprintf("%s.iter%d", bodyStep.SourceLocation, iteration), // Track iteration
@@ -276,6 +372,107 @@ func expandLoopIteration(step *Step, iteration int, iterVars map[string]string) 
 	}
 
 	return result, nil
+}
+
+// retargetLoopRefs replaces every Needs and DependsOn entry that names an
+// expanded loop with that loop's ends (retargetDeps), the way
+// UpdateDependenciesForExpansion retargets an expansion's target to its
+// last step. The values in ends are real step IDs, never loop IDs, so one
+// pass is enough.
+func retargetLoopRefs(steps []*Step, ends map[string][]string) {
+	if len(ends) == 0 {
+		return
+	}
+	for _, s := range steps {
+		s.Needs = retargetDeps(s.Needs, ends)
+		s.DependsOn = retargetDeps(s.DependsOn, ends)
+		retargetLoopRefs(s.Children, ends)
+	}
+}
+
+// retargetDeps replaces each loop ID in deps with the loop's first end, in
+// place, since needs[0] is the inferred waits_for spawner, and appends the
+// loop's other ends that deps does not name yet.
+func retargetDeps(deps []string, ends map[string][]string) []string {
+	var others []string
+	for i, dep := range deps {
+		if targets, ok := ends[dep]; ok {
+			deps[i] = targets[0]
+			others = append(others, targets[1:]...)
+		}
+	}
+	for _, id := range others {
+		deps = appendUnique(deps, id)
+	}
+	return deps
+}
+
+// nestedLoopSpec copies the spec of a loop nested in another loop's body,
+// which expands under expandedID instead of its written ID. References to
+// the loop that its own expansion keeps as written (renameLoopRefs) are
+// renamed to expandedID, so its self-reference check sees them.
+func nestedLoopSpec(loop *LoopSpec, writtenID, expandedID string) *LoopSpec {
+	clone := cloneLoopSpec(loop)
+	renameLoopRefs(clone, writtenID, expandedID)
+	return clone
+}
+
+// renameLoopRefs renames from to to in the Needs and DependsOn of the loop's
+// body steps and their children, unless one of them is itself named from
+// and so is what they name, and likewise in the bodies of the loops nested
+// in it, other than a loop named from. loop must be a copy; the specs of its
+// nested loops, which it shares with its original, are copied before they
+// change.
+func renameLoopRefs(loop *LoopSpec, from, to string) {
+	if loop == nil {
+		return
+	}
+	shadowed := collectBodyStepIDs(loop.Body)[from]
+	var rename func([]*Step)
+	rename = func(steps []*Step) {
+		for _, s := range steps {
+			if !shadowed {
+				replaceDep(s.Needs, from, to)
+				replaceDep(s.DependsOn, from, to)
+			}
+			if s.Loop != nil && s.ID != from {
+				s.Loop = cloneLoopSpec(s.Loop)
+				renameLoopRefs(s.Loop, from, to)
+			}
+			rename(s.Children)
+		}
+	}
+	rename(loop.Body)
+}
+
+// replaceDep replaces every from in deps with to, in place.
+func replaceDep(deps []string, from, to string) {
+	for i, dep := range deps {
+		if dep == from {
+			deps[i] = to
+		}
+	}
+}
+
+// findStepNaming returns the ID of the first step in the tree whose Needs or
+// DependsOn names id, or "" when none does.
+func findStepNaming(steps []*Step, id string) string {
+	for _, s := range steps {
+		for _, dep := range s.Needs {
+			if dep == id {
+				return s.ID
+			}
+		}
+		for _, dep := range s.DependsOn {
+			if dep == id {
+				return s.ID
+			}
+		}
+		if found := findStepNaming(s.Children, id); found != "" {
+			return found
+		}
+	}
+	return ""
 }
 
 // substituteLoopVars replaces {varname} placeholders with values from vars map.
@@ -333,6 +530,7 @@ func expandLoopChildren(children []*Step, loopID string, iteration int, bodyStep
 	for i, child := range children {
 		clone := cloneStepDeep(child)
 		clone.ID = fmt.Sprintf("%s.iter%d.%s", loopID, iteration, child.ID)
+		clone.Loop = nestedLoopSpec(child.Loop, child.ID, clone.ID)
 		clone.DependsOn = rewriteLoopDependencies(child.DependsOn, loopID, iteration, bodyStepIDs)
 		clone.Needs = rewriteLoopDependencies(child.Needs, loopID, iteration, bodyStepIDs)
 
