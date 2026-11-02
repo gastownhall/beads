@@ -1396,3 +1396,65 @@ func TestWriteCompactedRule_NeverAltersExistingBackup(t *testing.T) {
 		t.Errorf("reports must reflect the partial state: %+v", reports)
 	}
 }
+
+// A source removal that fails after every backup completed must report a
+// nonzero exit, the failed path, and accurate partial state: the composite
+// and the completed backups survive, applied stays true, and every source
+// reads as backed up. rulesCompactRemove is the narrow seam that injects
+// the failure after the backups.
+func TestRulesCompact_DeleteFailureAfterBackupsReportsPartialState(t *testing.T) {
+	dir := tempRulesDir(t)
+	writeRule(t, dir, "alpha", fmt.Sprintf(sharedDiskDirective, "Alpha", "alpha"))
+	writeRule(t, dir, "beta", fmt.Sprintf(sharedDiskDirective, "Beta", "beta"))
+
+	prev := rulesCompactRemove
+	rulesCompactRemove = func(path string) error {
+		if filepath.Base(path) == "alpha.md" {
+			return fmt.Errorf("injected failure removing %s", path)
+		}
+		return prev(path)
+	}
+	t.Cleanup(func() { rulesCompactRemove = prev })
+
+	payload, err := runRulesCompactJSON(t, "--path", dir, "--group", "alpha,beta", "--force")
+	if err == nil {
+		t.Fatal("expected a nonzero exit for the failed delete")
+	}
+	if payload["applied"] != true {
+		t.Errorf("expected applied=true after the composite was written, got: %v", payload)
+	}
+	msg, _ := payload["error"].(string)
+	if !strings.Contains(msg, "could not delete 1 source file") || !strings.Contains(msg, "alpha.md") {
+		t.Errorf("expected the error to name the failed delete of alpha.md, got: %v", msg)
+	}
+	srcs, _ := payload["sources"].([]interface{})
+	if len(srcs) != 2 {
+		t.Fatalf("expected 2 source reports, got: %v", payload["sources"])
+	}
+	for _, s := range srcs {
+		m, _ := s.(map[string]interface{})
+		if m == nil || m["backed_up"] != true {
+			t.Errorf("every completed backup must be reported as backed_up, got: %v", s)
+		}
+	}
+	for name, want := range map[string]string{
+		"alpha.md.backup": fmt.Sprintf(sharedDiskDirective, "Alpha", "alpha"),
+		"beta.md.backup":  fmt.Sprintf(sharedDiskDirective, "Beta", "beta"),
+		"alpha.md":        fmt.Sprintf(sharedDiskDirective, "Alpha", "alpha"),
+	} {
+		got, readErr := os.ReadFile(filepath.Join(dir, name))
+		if readErr != nil {
+			t.Errorf("%s must survive the failed delete: %v", name, readErr)
+			continue
+		}
+		if string(got) != want {
+			t.Errorf("%s = %q, want %q", name, got, want)
+		}
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "disk.md")); statErr != nil {
+		t.Errorf("the composite must survive a failed delete: %v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "beta.md")); !os.IsNotExist(statErr) {
+		t.Errorf("beta.md should have been removed, got: %v", statErr)
+	}
+}

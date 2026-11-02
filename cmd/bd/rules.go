@@ -1020,6 +1020,11 @@ func newCompactSourceReports(sources []RuleFile) []compactSourceReport {
 	return reports
 }
 
+// rulesCompactRemove removes an applied group's source file. It is a
+// variable so tests can inject removal failures that land after every
+// backup completed.
+var rulesCompactRemove = os.Remove
+
 // writeCompactedRule creates outPath, copies every distinct source to
 // <source>.backup, and only then removes the sources, reporting whether
 // outPath was written even when a later step fails. It never replaces an
@@ -1068,7 +1073,7 @@ func writeCompactedRule(outPath, merged string, sources []RuleFile, reports []co
 
 	var failures []string
 	for _, rf := range sources {
-		if err := os.Remove(rf.Path); err != nil {
+		if err := rulesCompactRemove(rf.Path); err != nil {
 			failures = append(failures, err.Error())
 		}
 	}
