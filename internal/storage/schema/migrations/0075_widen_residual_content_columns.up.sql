@@ -14,6 +14,13 @@
 --                        large AddComment on a durable issue failed the same
 --                        way. 0062's recreate and ignored/0019 kept it TEXT.
 --
+--   wisp_events.comment  the same comment on a wisp failed the same way, and
+--                        promotion and demotion copy event rows between the
+--                        two planes with INSERT IGNORE, which truncates a
+--                        value the destination cannot hold instead of failing.
+--                        The planes must agree on the width. Its DEFAULT ''
+--                        (0021, ignored/0001) is kept.
+--
 -- A plain INSERT of an oversized value fails with Error 1105 ("too large for
 -- column"); the silent truncation GH#3925 describes is what an INSERT IGNORE
 -- copy does when its source is wider than its destination.
@@ -29,10 +36,11 @@
 -- definition, so each ALTER restates the column's nullability and default
 -- exactly as created.
 --
--- events is clone-local (dolt_ignored since 0062), so this ships with an
--- ignored-series twin, ignored/0031: a fresh clone materializes it from
--- ignored/0019 with the main cursor already at-latest and never runs this
--- file (check D of scripts/check-migration-hygiene.sh).
+-- events and wisp_events are clone-local (dolt_ignored; events since 0062),
+-- so this ships with an ignored-series twin, ignored/0031: a fresh clone
+-- materializes them from ignored/0019 and ignored/0001 with the main cursor
+-- already at-latest and never runs this file (check D of
+-- scripts/check-migration-hygiene.sh).
 SET @events_comment_needs_widen = (
     SELECT IF(COLUMN_TYPE = 'text', 1, 0)
     FROM INFORMATION_SCHEMA.COLUMNS
@@ -42,5 +50,17 @@ SET @events_comment_needs_widen = (
 );
 SET @sql = IF(@events_comment_needs_widen = 1,
     'ALTER TABLE events MODIFY COLUMN comment LONGTEXT',
+    'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @wisp_events_comment_needs_widen = (
+    SELECT IF(COLUMN_TYPE = 'text', 1, 0)
+    FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'wisp_events'
+      AND COLUMN_NAME = 'comment'
+);
+SET @sql = IF(@wisp_events_comment_needs_widen = 1,
+    'ALTER TABLE wisp_events MODIFY COLUMN comment LONGTEXT DEFAULT ''''',
     'SELECT 1');
 PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
