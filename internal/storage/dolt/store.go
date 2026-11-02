@@ -44,6 +44,7 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/execgrace"
 	"github.com/steveyegge/beads/internal/doltversion"
 	"github.com/steveyegge/beads/internal/gittraceenv"
 	"github.com/steveyegge/beads/internal/remedy"
@@ -4789,6 +4790,10 @@ func prepareDoltCLITransferCommand(ctx context.Context, cliDir string, creds *re
 	// (e.g. a cloud credential helper) holding the inherited output pipes
 	// would otherwise keep Wait/CombinedOutput blocked forever after the kill.
 	cmd.WaitDelay = cliExecWaitDelay
+	// Graceful teardown on context expiry (internal/execgrace, GH#7989): the
+	// direct dolt child gets SIGTERM instead of the hard kill, and the
+	// cliExecWaitDelay bound set above is preserved.
+	execgrace.Configure(cmd)
 	cmd.Dir = cliDir
 	creds.applyToCmd(cmd)
 	if s3Remote {

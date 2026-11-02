@@ -72,6 +72,55 @@ func TestPrepareDoltCLITransferCommandSetsDeadlineAndWaitDelay(t *testing.T) {
 	}
 }
 
+// TestPrepareDoltCLITransferCommandSIGTERMsChild pins the GH#7989 teardown on
+// the CLI transfer route: when the transfer context expires, the direct dolt
+// child receives SIGTERM (so it can reap the transport children it spawned)
+// instead of the hard kill CommandContext applies by default, and the
+// existing cliExecWaitDelay pipe bound is preserved.
+func TestPrepareDoltCLITransferCommandSIGTERMsChild(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the dolt stub is a POSIX shell script")
+	}
+	marker := filepath.Join(t.TempDir(), "sigterm")
+	binDir := t.TempDir()
+	// Fake dolt: report a version at the floor (the transfer checks it first),
+	// then ignore nothing — trap SIGTERM, leave the marker, and exit; a hard
+	// kill (SIGKILL) leaves no marker at all.
+	script := "#!/bin/sh\nif [ \"$1\" = version ]; then echo 'dolt version " + doltversion.RequiredMin.String() + "'; exit 0; fi\ntrap 'echo sigterm > \"" + marker + "\"; exit 0' TERM\nwhile :; do sleep 0.1; done\n"
+	if err := os.WriteFile(filepath.Join(binDir, "dolt"), []byte(script), 0o755); err != nil { // #nosec G204 -- test fixture must be executable
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv(cliExecTimeoutEnv, "1s")
+
+	cmd, ctx, cancel, err := prepareDoltCLITransferCommand(context.Background(), binDir, nil, false, "push", "gcs", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cancel()
+	if cmd.WaitDelay != cliExecWaitDelay {
+		t.Fatalf("cmd.WaitDelay = %s, want the existing %s bound preserved", cmd.WaitDelay, cliExecWaitDelay)
+	}
+
+	start := time.Now()
+	_, err = cmd.CombinedOutput()
+	elapsed := time.Since(start)
+
+	if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		t.Fatalf("ctx.Err() = %v, want DeadlineExceeded", ctx.Err())
+	}
+	if elapsed > 10*time.Second {
+		t.Fatalf("CombinedOutput blocked %v despite the 1s timeout; the child was never torn down", elapsed)
+	}
+	got, readErr := os.ReadFile(marker)
+	if readErr != nil {
+		t.Fatalf("the dolt child never received SIGTERM (it was killed hard instead); %v", readErr)
+	}
+	if strings.TrimSpace(string(got)) != "sigterm" {
+		t.Fatalf("SIGTERM marker = %q, want %q", got, "sigterm")
+	}
+}
+
 // TestCLITransferTimeoutUnblocksDespiteGrandchildPipes reproduces the wy-5f2u7
 // hang shape: the direct child is killed at the context deadline, but a
 // grandchild (stand-in for a cloud credential helper) still holds the
