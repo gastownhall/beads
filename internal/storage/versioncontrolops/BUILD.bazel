@@ -49,6 +49,7 @@ go_test(
         "remotes_githooks_test.go",
         "remotes_gittrace_test.go",
         "remotes_test.go",
+        "transfer_pull_test.go",
         "transfer_test.go",
     ],
     embed = [":versioncontrolops"],
