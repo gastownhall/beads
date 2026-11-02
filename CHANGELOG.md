@@ -612,6 +612,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A `dolt.host` in config.yaml now outranks `dolt_server_host` in
+  `.beads/metadata.json` (GH#5961).** The host order is
+  `BEADS_DOLT_SERVER_HOST`, then `dolt.host` (`BD_DOLT_HOST`,
+  config.local.yaml, config.yaml, the user-level config.yaml), then
+  metadata.json, then `127.0.0.1`, so the host is paired with the
+  `dolt.port` beside it. `bd` warns once per command when a `dolt.host`
+  outranks a different metadata host and names how to keep either.
+  `bd dolt set host` and `bd init --server-host` write the host to
+  config.yaml too, and `bd init`'s clone dials the host its store opens.
+
 - **`bd` requires Dolt 2.6.0 or newer outside embedded mode, and refuses
   anything older.** `doltversion.RecommendedMin` (2.5.0, a warning) is now
   `doltversion.RequiredMin` (2.6.0, an error). `bd dolt start` and

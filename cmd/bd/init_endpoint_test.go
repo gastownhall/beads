@@ -445,3 +445,51 @@ func TestInitIPv6LoopbackRemoteWithNoPortAsksForThePort(t *testing.T) {
 		})
 	}
 }
+
+// TestInitCloneDialsTheHostInitsStoreOpens: bd init --server with no
+// --server-host opens its store at BEADS_DOLT_SERVER_HOST or 127.0.0.1
+// (initStoreServerHost), whatever dolt.host the loaded config names, so its
+// clone dials that host too, with that host's password. The clone config
+// names no dolt_server_host: a 127.0.0.1 stamped there would land in the
+// git-tracked metadata.json, below the config.yaml dolt.host that now
+// outranks it (GH#5961).
+func TestInitCloneDialsTheHostInitsStoreOpens(t *testing.T) {
+	const port = 13400
+	endpointCredentialsEnv(t, []string{"127.0.0.1", "192.0.2.50"}, port)
+	t.Setenv("BEADS_DIR", "")
+	t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", strconv.Itoa(port))
+	userCfg := filepath.Join(os.Getenv("HOME"), ".config", "bd", "config.yaml")
+	root := t.TempDir()
+	beadsDir := filepath.Join(root, ".beads")
+	for _, dir := range []string{beadsDir, filepath.Dir(userCfg)} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(userCfg, []byte("dolt:\n  host: 192.0.2.50\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(root)
+	config.ResetForTesting()
+	t.Cleanup(config.ResetForTesting)
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize: %v", err)
+	}
+
+	cloneCfg := initTimeCloneConfig(true, "", 0, "", "", "init_clone_host")
+	if cloneCfg.DoltServerHost != "" {
+		t.Errorf("clone config dolt_server_host = %q, want none", cloneCfg.DoltServerHost)
+	}
+	wantPass := fmt.Sprintf("127.0.0.1-%d", port)
+	ep, err := initServerCloneEndpoint(beadsDir, cloneCfg)
+	if err != nil {
+		t.Fatalf("initServerCloneEndpoint: %v", err)
+	}
+	if ep.host != "127.0.0.1" || ep.port != port || ep.pass != wantPass {
+		t.Errorf("clone endpoint = %s:%d password %q, want 127.0.0.1:%d password %q", ep.host, ep.port, ep.pass, port, wantPass)
+	}
+	if got := initCloneEndpoint(beadsDir, cloneCfg, ""); got.Host != "127.0.0.1" || got.Port != port || got.Password() != wantPass {
+		t.Errorf("clone mode endpoint = %s password %q, want 127.0.0.1:%d password %q", got.Addr(), got.Password(), port, wantPass)
+	}
+}

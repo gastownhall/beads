@@ -394,15 +394,18 @@ const (
 //     treated as a deliberate suppression of host-based inference, not
 //     merely "no signal" — it also suppresses the struct/config.yaml host
 //     inference below.
-//  4. dolt_mode field in metadata.json (project-local, explicit) — always
-//     wins over any persisted or configured host, since it is the
-//     operator's explicit statement of intent.
-//  5. Non-localhost DoltServerHost persisted in metadata.json (GH#3545),
-//     when no explicit dolt_mode is set and env didn't suppress inference.
+//  4. dolt_mode field in metadata.json (explicit) — always wins over any
+//     persisted or configured host, since it is the operator's explicit
+//     statement of intent.
+//  5. The non-localhost host GetDoltServerHost dials (GH#3545), when no
+//     explicit dolt_mode is set and env didn't suppress inference: the
+//     config.yaml dolt.host, which outranks metadata.json dolt_server_host
+//     (GH#5961) unless both name the same server, and is gated by an
+//     explicit config.yaml dolt.mode; otherwise the metadata.json host,
+//     which a config.yaml dolt.mode does not gate. See
+//     HostImpliesServerMode.
 //  6. dolt.mode in config.yaml (user-global fallback, only when
 //     metadata.json has no mode)
-//  7. Non-localhost dolt.host in config.yaml (GH#3545), gated the same way
-//     as (5) — a configured host must mean server mode.
 //
 // Runtime env vars take precedence over persisted metadata.json to prevent
 // stale dolt_mode=embedded from overriding active server intent (GH#2949).
@@ -444,7 +447,7 @@ func (c *Config) IsDoltServerMode() bool {
 
 // HostImpliesServerMode evaluates host-based server-mode inference
 // (GH#3545) against the EFFECTIVE host precedence chain (env >
-// metadata.json > config.yaml, mirroring GetDoltServerHost), so that a
+// config.yaml > metadata.json, mirroring GetDoltServerHost), so that a
 // lower-priority host that GetDoltServerHost would ignore can never
 // drive the inference. Rules, in order:
 //
@@ -462,11 +465,14 @@ func (c *Config) IsDoltServerMode() bool {
 //     exactly the split-storage failure this inference fixes.
 //   - An explicit metadata.json dolt_mode disables inference from
 //     persisted/configured hosts.
-//   - A metadata.json dolt_server_host, when set, decides alone (a
-//     lower-priority config.yaml dolt.host is not consulted, matching
-//     GetDoltServerHost precedence).
-//   - An explicit config.yaml dolt.mode disables inference from the
-//     config.yaml dolt.host.
+//   - A metadata.json dolt_server_host decides alone when config.yaml
+//     names no dolt.host or names the same server (SameServerHost): it is
+//     the host GetDoltServerHost dials, and a config.yaml dolt.mode does
+//     not suppress it, so a user-level dolt.mode cannot flip a workspace
+//     whose metadata names the server it uses to embedded storage.
+//   - Otherwise a config.yaml dolt.host outranks the metadata host (it is
+//     the host GetDoltServerHost dials, GH#5961) and decides, unless an
+//     explicit config.yaml dolt.mode disables inference from it.
 //
 // "Localhost" here is IsLocalHostString, the machine-locality question, not
 // the ownership one (BdRunsServerAt): the IPv6 loopback in any spelling is
@@ -482,16 +488,14 @@ func (c *Config) HostImpliesServerMode() bool {
 	if c.DoltMode != "" {
 		return false
 	}
-	if c.DoltServerHost != "" {
+	h := config.GetYamlConfig("dolt.host")
+	if c.DoltServerHost != "" && (h == "" || SameServerHost(h, c.DoltServerHost)) {
 		return !IsLocalHostString(c.DoltServerHost)
 	}
-	if config.GetYamlConfig("dolt.mode") != "" {
+	if h == "" || config.GetYamlConfig("dolt.mode") != "" {
 		return false
 	}
-	if h := config.GetYamlConfig("dolt.host"); h != "" {
-		return !IsLocalHostString(h)
-	}
-	return false
+	return !IsLocalHostString(h)
 }
 
 // PortImpliesServerMode evaluates port-based server-mode inference: an
@@ -572,22 +576,58 @@ func (c *Config) GetDoltMode() string {
 }
 
 // GetDoltServerHost returns the Dolt server host.
-// Priority: BEADS_DOLT_SERVER_HOST env var > metadata.json dolt_server_host
-// > config.yaml / global config dolt.host > DefaultDoltServerHost.
+// Priority: BEADS_DOLT_SERVER_HOST env var > config.yaml / global config
+// dolt.host > metadata.json dolt_server_host (including a server.json
+// central host merged into it) > DefaultDoltServerHost.
 // The config.yaml layer mirrors the dolt.port fix (GH#2073) so a shared
 // team / user-level Dolt server can be configured once without per-clone
-// metadata.json edits.
+// metadata.json edits. It outranks metadata.json because metadata.json is
+// git-tracked: a host one operator persisted there travels to every clone,
+// and pairing it with a config.yaml port dials an endpoint neither file
+// declares. The port chain demoted its metadata.json tier for the same
+// reason (GH#2372); host followed in GH#5961.
 func (c *Config) GetDoltServerHost() string {
 	if h := os.Getenv("BEADS_DOLT_SERVER_HOST"); h != "" {
+		return h
+	}
+	if h := config.GetYamlConfig("dolt.host"); h != "" {
 		return h
 	}
 	if c.DoltServerHost != "" {
 		return c.DoltServerHost
 	}
-	if h := config.GetYamlConfig("dolt.host"); h != "" {
-		return h
-	}
 	return DefaultDoltServerHost
+}
+
+// OutrankedServerHost reports a metadata.json dolt_server_host that the
+// merged config.yaml dolt.host now outranks (GH#5961) where that changes what
+// bd does: beadsDir's own metadata.json (read raw, so a server.json central
+// host never counts) names a host, config.yaml names a different server
+// (SameServerHost), BEADS_DOLT_SERVER_HOST does not outrank both, and the
+// host matters, because cfg selects server mode or because the metadata host
+// alone used to select it (no dolt_mode, a non-local host) and the config.yaml
+// host no longer does. Explicit embedded and proxied-server workspaces never
+// dial the host, so they are not reported. cfg is beadsDir's loaded config.
+func OutrankedServerHost(beadsDir string, cfg *Config) (metaHost, yamlHost string, ok bool) {
+	if cfg == nil || beadsDir == "" || os.Getenv("BEADS_DOLT_SERVER_HOST") != "" {
+		return "", "", false
+	}
+	if strings.EqualFold(cfg.DoltMode, DoltModeEmbedded) || strings.EqualFold(cfg.DoltMode, DoltModeProxiedServer) {
+		return "", "", false
+	}
+	raw, err := LoadForDiscovery(beadsDir)
+	if err != nil || raw == nil || raw.DoltServerHost == "" {
+		return "", "", false
+	}
+	metaHost = raw.DoltServerHost
+	yamlHost = config.GetYamlConfig("dolt.host")
+	if yamlHost == "" || SameServerHost(yamlHost, metaHost) {
+		return "", "", false
+	}
+	if !cfg.IsDoltServerMode() && (cfg.DoltMode != "" || IsLocalHostString(metaHost)) {
+		return "", "", false
+	}
+	return metaHost, yamlHost, true
 }
 
 // Deprecated: Use doltserver.DefaultConfig(beadsDir).Port instead.

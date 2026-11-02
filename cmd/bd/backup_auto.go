@@ -88,12 +88,16 @@ func backupAutoStatusNote(enabled bool) string {
 //
 // Detection follows the same effective-host precedence as
 // configfile.GetDoltServerHost / HostImpliesServerMode (env >
-// metadata.json > config.yaml, GH#3545), so a workspace whose remote
-// host lives only in metadata.json is classified the same way here as
-// by mode inference — the operator's intent is unambiguous from the
-// effective host value alone.
+// config.yaml > metadata.json, GH#3545, GH#5961), so a workspace is
+// classified by the host its store dials — the operator's intent is
+// unambiguous from the effective host value alone.
 func clientServerShareFilesystem() bool {
 	host := os.Getenv("BEADS_DOLT_SERVER_HOST")
+	if host == "" {
+		// config.yaml dolt.host (merged config) outranks the git-tracked
+		// metadata.json dolt_server_host (GH#5961).
+		host = config.GetString("dolt.host")
+	}
 	if host == "" {
 		if bd := beads.FindBeadsDir(); bd != "" {
 			if cfg, err := configfile.Load(bd); err == nil && cfg != nil {
@@ -106,10 +110,6 @@ func clientServerShareFilesystem() bool {
 				}
 			}
 		}
-	}
-	if host == "" {
-		// Fall back to in-struct config (config.yaml dolt.host etc.).
-		host = config.GetString("dolt.host")
 	}
 	return configfile.IsLocalHostString(host)
 }

@@ -116,8 +116,9 @@ func guardForeignLegacyDoltWorkspace(beadsDir string, cfg *configfile.Config) er
 // configfile.Config.IsDoltServerMode's precedence with that resolver's
 // config.yaml layer read from beadsDir's own config.yaml and the
 // config.local.yaml beside it rather than from the launcher's: the
-// environment, then a non-local host (env, then metadata, then config.yaml
-// when it names no dolt.mode), then metadata's dolt_mode, then config.yaml's
+// environment, then a non-local host (env; then metadata's when config.yaml
+// names no host or the same server, otherwise config.yaml's when it names no
+// dolt.mode, GH#5961), then metadata's dolt_mode, then config.yaml's
 // dolt.mode. A config.yaml that cannot be read selects nothing, leaving the
 // stricter embedded classification.
 //
@@ -166,15 +167,16 @@ func targetSelectsServerMode(beadsDir string, cfg *configfile.Config) bool {
 				return true
 			}
 		} else if cfg.DoltMode == "" {
-			if cfg.DoltServerHost != "" {
+			host, _, hostErr := config.WorkspaceYamlSettingWithLocal(beadsDir, "dolt.host")
+			if hostErr != nil {
+				host = ""
+			}
+			if cfg.DoltServerHost != "" && (host == "" || configfile.SameServerHost(host, cfg.DoltServerHost)) {
 				if !configfile.IsLocalHostString(cfg.DoltServerHost) {
 					return true
 				}
-			} else if mode == "" {
-				host, _, hostErr := config.WorkspaceYamlSettingWithLocal(beadsDir, "dolt.host")
-				if hostErr == nil && host != "" && !configfile.IsLocalHostString(host) {
-					return true
-				}
+			} else if mode == "" && host != "" && !configfile.IsLocalHostString(host) {
+				return true
 			}
 		}
 	}
