@@ -52,6 +52,11 @@ type IssueTracker interface {
 	IsExternalRef(ref string) bool
 
 	// ExtractIdentifier extracts the human-readable identifier from an external_ref.
+	// An empty result means the tracker cannot resolve the ref to an issue it
+	// can act on — callers skip such a ref, and do not treat it as an error.
+	// Whether a ref resolves can depend on the tracker's configured
+	// repository: a ref naming another repository's issue may resolve empty
+	// even though IsExternalRef recognizes it.
 	ExtractIdentifier(ref string) string
 
 	// BuildExternalRef constructs an external_ref string for a tracker issue.

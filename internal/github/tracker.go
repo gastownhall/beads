@@ -245,21 +245,34 @@ func (t *Tracker) IsExternalRef(ref string) bool {
 	return strings.Contains(ref, "github.com") && issueNumberPattern.MatchString(ref)
 }
 
-// ExtractIdentifier extracts the issue number from a GitHub URL or shorthand ref.
+// ExtractIdentifier extracts the issue number from a GitHub URL or shorthand
+// ref. The shorthand names an issue of this tracker's configured repository,
+// so it keeps its number; every other ref of an initialized tracker is
+// resolved through RefScope, and a ref pointing at another repository or host
+// yields "" rather than a number that would address an unrelated issue of the
+// configured repository (gastownhall/beads#7781). An uninitialized tracker
+// keeps the legacy unscoped parse.
 func (t *Tracker) ExtractIdentifier(ref string) string {
 	if m := ghShorthandPattern.FindStringSubmatch(ref); len(m) >= 2 {
 		return m[1]
 	}
-	matches := issueNumberPattern.FindStringSubmatch(ref)
-	if len(matches) < 2 {
-		return ""
+	if t.client == nil {
+		matches := issueNumberPattern.FindStringSubmatch(ref)
+		if len(matches) < 2 {
+			return ""
+		}
+		return matches[1]
 	}
-	return matches[1]
+	if n, ok := t.RefScope().IssueNumberFromRef(ref); ok {
+		return strconv.Itoa(n)
+	}
+	return ""
 }
 
-// RefScope returns the repository scope used to resolve external refs to issue
-// numbers for relationship sync. Refs are deliberately not resolved by issue
-// number alone: see RefScope.
+// RefScope returns the repository scope used to resolve external refs to
+// issue numbers, both for relationship sync and for the initialized
+// ExtractIdentifier. Refs are deliberately not resolved by issue number
+// alone: see RefScope.
 func (t *Tracker) RefScope() RefScope {
 	if t.client == nil {
 		return RefScope{}
