@@ -64,6 +64,7 @@ func TestRunInitReinitPreflightStoreSwitch(t *testing.T) {
 				beadsDir:        writeInitStoreSwitchMetadata(t, tt.metadata),
 				prefix:          "la",
 				database:        tt.database,
+				nonInteractive:  true,
 				targetSQLServer: tt.targetSQLServer,
 				countIssues: func() (int, error) {
 					counted = true
@@ -134,4 +135,52 @@ func TestInitReinitLocalRefusesEngineFamilySwitch(t *testing.T) {
 		t.Errorf("metadata.json changed by a refused store switch:\nbefore:\n%s\nafter:\n%s", metadata, got)
 	}
 	requireNoFile(t, filepath.Join(beadsDir, "embeddeddolt"))
+}
+
+// TestRunInitReinitPreflightStoreSwitchPhrase: on an interactive terminal a
+// switch is confirmed by typing a phrase naming the store left behind, and a
+// mismatch or end of input refuses it with exit 11. Neither path counts.
+func TestRunInitReinitPreflightStoreSwitchPhrase(t *testing.T) {
+	tests := []struct {
+		name     string
+		metadata string
+		input    string
+		wantCode int // 0 accepts
+	}{
+		{name: "phrase names the recorded database", metadata: `{"backend":"dolt","dolt_mode":"embedded","dolt_database":"fi"}`, input: "leave fi behind\n"},
+		{name: "surrounding space is ignored", metadata: `{"backend":"dolt","dolt_mode":"embedded","dolt_database":"fi"}`, input: "  leave fi behind  \n"},
+		{name: "no recorded database: phrase names the recorded mode", metadata: `{"backend":"dolt","dolt_mode":"embedded"}`, input: "leave embedded behind\n"},
+		{name: "mismatched phrase", metadata: `{"backend":"dolt","dolt_mode":"embedded","dolt_database":"fi"}`, input: "leave other behind\n", wantCode: ExitLocalExistsRefused},
+		{name: "a bare yes is not the phrase", metadata: `{"backend":"dolt","dolt_mode":"embedded","dolt_database":"fi"}`, input: "yes\n", wantCode: ExitLocalExistsRefused},
+		{name: "end of input", metadata: `{"backend":"dolt","dolt_mode":"embedded","dolt_database":"fi"}`, input: "", wantCode: ExitLocalExistsRefused},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stderr bytes.Buffer
+			p := initReinitPreflight{
+				reinitLocal:     true,
+				beadsDir:        writeInitStoreSwitchMetadata(t, tt.metadata),
+				prefix:          "fi",
+				targetSQLServer: true,
+				countIssues: func() (int, error) {
+					t.Fatal("a store switch counted the old store")
+					return 0, nil
+				},
+				isTerminal: func() bool { return true },
+				stdin:      bytes.NewBufferString(tt.input),
+				stderr:     &stderr,
+			}
+			err := p.run()
+			if tt.wantCode == 0 {
+				if err != nil {
+					t.Fatalf("matching phrase: want nil, got %v\n%s", err, stderr.String())
+				}
+				return
+			}
+			var exitErr *exitError
+			if !errors.As(err, &exitErr) || exitErr.Code != tt.wantCode {
+				t.Fatalf("want exit %d, got %v\n%s", tt.wantCode, err, stderr.String())
+			}
+		})
+	}
 }

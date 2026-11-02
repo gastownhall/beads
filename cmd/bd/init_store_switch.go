@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"io"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/ui"
+	"golang.org/x/term"
 )
 
 // initStoreSwitch compares the store a workspace's metadata.json records with
@@ -96,7 +98,13 @@ type initReinitPreflight struct {
 	// server, proxied-server and shared-server mode, false for embedded.
 	targetSQLServer bool
 
+	// nonInteractive is init's resolved isNonInteractiveInit; isTerminal
+	// reports whether stdin is a terminal. Both must allow a prompt.
+	nonInteractive bool
+	isTerminal     func() bool
+
 	countIssues func() (int, error)
+	stdin       io.Reader
 	stderr      io.Writer
 }
 
@@ -119,8 +127,10 @@ func (p initReinitPreflight) run() error {
 	return runInitReinitPreflight(p.countIssues, p.prefix, p.destroyToken)
 }
 
-// confirmStoreSwitch asks for the destroy token before init moves the
-// workspace onto another store. It never opens or counts either store.
+// confirmStoreSwitch asks for the destroy token, or on an interactive
+// terminal a typed phrase, before init moves the workspace onto another
+// store. It never opens or counts either store, and a confirmation authorizes
+// the switch once: no count-based prompt follows it.
 func (p initReinitPreflight) confirmStoreSwitch(sw initStoreSwitch) error {
 	w := p.stderr
 	fmt.Fprintf(w, "\n%s Re-initializing would switch this workspace to another store.\n\n", ui.RenderWarn("WARNING:"))
@@ -131,13 +141,29 @@ func (p initReinitPreflight) confirmStoreSwitch(sw initStoreSwitch) error {
 		fmt.Fprintf(w, "Destroy token accepted. Proceeding with the store switch.\n")
 		return nil
 	}
+	if !p.nonInteractive && p.isTerminal() {
+		// A phrase naming the store left behind, never the destroy token:
+		// ADR 0002 forbids printing the token's value.
+		left := sw.recordedDatabase
+		if left == "" {
+			left = sw.recordedMode
+		}
+		fmt.Fprintf(w, "Type 'leave %s behind' to confirm: ", remedy.PrintedValue(left))
+		scanner := bufio.NewScanner(p.stdin)
+		scanner.Scan()
+		if strings.TrimSpace(scanner.Text()) != "leave "+left+" behind" {
+			fmt.Fprintf(w, "\nAborted. The workspace was NOT switched.\n")
+			return &exitError{Code: ExitLocalExistsRefused}
+		}
+		return nil
+	}
 	fmt.Fprintf(w, "Refusing to switch stores in non-interactive mode.\n")
 	fmt.Fprintf(w, "  See 'bd help init-safety' for the required --destroy-token format.\n")
 	return &exitError{Code: ExitDestroyTokenMissing}
 }
 
 // newInitReinitPreflight wires the preflight to the process.
-func newInitReinitPreflight(reinitLocal bool, beadsDir, prefix, destroyToken, database string) initReinitPreflight {
+func newInitReinitPreflight(reinitLocal, nonInteractive bool, beadsDir, prefix, destroyToken, database string) initReinitPreflight {
 	return initReinitPreflight{
 		reinitLocal:     reinitLocal,
 		beadsDir:        beadsDir,
@@ -145,7 +171,10 @@ func newInitReinitPreflight(reinitLocal bool, beadsDir, prefix, destroyToken, da
 		destroyToken:    destroyToken,
 		database:        database,
 		targetSQLServer: usesSQLServer(),
+		nonInteractive:  nonInteractive,
+		isTerminal:      func() bool { return term.IsTerminal(int(os.Stdin.Fd())) },
 		countIssues:     func() (int, error) { return countExistingIssues(prefix) },
+		stdin:           os.Stdin,
 		stderr:          os.Stderr,
 	}
 }
