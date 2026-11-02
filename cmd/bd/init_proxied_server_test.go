@@ -155,6 +155,7 @@ func TestRunInitProxiedServerRejectsOptionSyncRemoteBeforeWrites(t *testing.T) {
 		"--upload-pack=touch /tmp/pwned;false #.git",
 		"git+--upload-pack=touch /tmp/pwned;false",
 		"-utouch /tmp/pwned;false",
+		"ssh://-oProxyCommand=touch%20%2Ftmp%2Fpwned@host/path",
 	} {
 		t.Run(remote, func(t *testing.T) {
 			beadsDir := newForgeSyncRemoteWorkspace(t, remote)
@@ -180,6 +181,11 @@ func TestInitCommandRejectsOptionSyncRemoteBeforeWrites(t *testing.T) {
 		"--upload-pack=touch /tmp/pwned;false #.git",
 		"git+--upload-pack=touch /tmp/pwned;false",
 		"-utouch /tmp/pwned;false",
+		// git refuses to probe this URL, so bd init would treat it as holding
+		// Dolt history and clone it through Dolt's ssh:// transport, which
+		// hands -oProxyCommand=<command>@host to ssh as an option.
+		"ssh://-oProxyCommand=touch%20%2Ftmp%2Fpwned@host/path",
+		"ssh://-oProxyCommand=touch$IFS.pwned/path",
 	} {
 		t.Run(remote, func(t *testing.T) {
 			beadsDir := newForgeSyncRemoteWorkspace(t, remote)

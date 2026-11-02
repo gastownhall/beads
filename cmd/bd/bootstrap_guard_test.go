@@ -790,6 +790,12 @@ func TestResolveSyncRemoteCheckedRejectsOptionValue(t *testing.T) {
 		"git+--upload-pack=touch /tmp/pwned;false",
 		"git+-utouch /tmp/pwned;false",
 		"GIT+ -utouch /tmp/pwned;false",
+		// Dolt's ssh:// transport runs `ssh [user@]host <command>`, so an ssh
+		// user name or host starting with "-" reaches ssh as an option.
+		"ssh://-oProxyCommand=touch%20%2Ftmp%2Fpwned@host/path",
+		"ssh://%2DoProxyCommand=touch%20%2Ftmp%2Fpwned@host/path",
+		"ssh://-oProxyCommand=touch$IFS.pwned/path",
+		"git+ssh://-oProxyCommand=touch%20%2Ftmp%2Fpwned@host/path",
 	}
 
 	for _, remote := range optionRemotes {
@@ -827,6 +833,12 @@ func TestDetectBootstrapAction_OptionSyncRemoteBlocksWithoutProbe(t *testing.T) 
 		"-utouch /tmp/pwned;false #.git",
 		"git+--upload-pack=touch /tmp/pwned;false",
 		"git+-utouch /tmp/pwned;false",
+		// Not a forge URL, so without the refusal bootstrap would plan a
+		// DOLT_CLONE through Dolt's ssh:// transport, which hands
+		// -oProxyCommand=<command>@host to ssh as an option.
+		"ssh://-oProxyCommand=touch%20%2Ftmp%2Fpwned@host/path",
+		"ssh://%2DoProxyCommand=touch%20%2Ftmp%2Fpwned@host/path",
+		"ssh://-oProxyCommand=touch$IFS.pwned/path",
 	} {
 		t.Run(remote, func(t *testing.T) {
 			beadsDir := newForgeSyncRemoteWorkspace(t, remote)
