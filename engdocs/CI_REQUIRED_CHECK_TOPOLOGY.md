@@ -892,8 +892,11 @@ In mode `remote`, `bazel.yml`'s `bazel-dolt-int` job (check name
 (`server-storage lane`) and `bazel-cmd-dolt` (`cmd-dolt tier`) jobs.
 `--config=dolt-int` is exactly the union of `--config=doltserver-integration`
 and `--config=doltserver-cmd`, with one tag filter for both tiers. The final
-argv and environment Bazel assembles for all 63 `TestRunner` actions (17
-server-storage + 46 cmd-dolt) are unchanged under the union, so the remote
+argv and environment Bazel assembles for all 63 `TestRunner` actions at the
+cutover (17 server-storage + 46 cmd-dolt; 64 since
+`//internal/storage/versioncontrolops:versioncontrolops_dolt_test` joined
+server-storage, which leaves the union no room under `--jobs=64`) are
+unchanged under the union, so the remote
 action digest -- what RBE's cache keys on -- is unaffected and cached results
 should carry over (confirmed in practice by the first merge group's
 `tests_cached == tests_total` in ci-analytics, not claimed here as already
@@ -973,7 +976,7 @@ what a pull request's gate requires.
   `bazel-server-storage`/`bazel-cmd-dolt` result today -- and the per-mode
   skips are the members' as before.
 - `check_testcases.py` runs twice over the union's BEP, once per tier
-  (`check-ss`, scoped with `--label` to server-storage's two targets; `check-cd`,
+  (`check-ss`, scoped with `--label` to server-storage's three targets; `check-cd`,
   scoped to cmd-dolt's two), each with `continue-on-error: true` so a
   zero-testcase shard in one tier reaches only that tier's classify result
   (must-fix 2 of PR #7535's review), not the other's and not the job
@@ -1782,7 +1785,11 @@ macOS jobs; `release.yml` stays on `macos-latest`.
 
 Retired from `pr-risk.yml` (ga-96smfk.22): `bazel.yml`'s `bazel-server-storage`
 lane runs `//internal/storage/dolt:dolt_server_full_test` (16 shards) and
-`:dolt_server_conformance_test` against hermetic dolt sql-servers.
+`:dolt_server_conformance_test` against hermetic dolt sql-servers. It also
+runs `//internal/storage/versioncontrolops:versioncontrolops_dolt_test`, that
+package's tests against a hermetic dolt sql-server, which no PR Risk job ran.
+It is like the dolt-server lane's targets, but that lane's union with the
+proxied tier (`dolt-race`) already fills `--jobs=64`.
 
 - `.github/scripts/server-storage-test-shard.sh` discovers top-level
   `Test*` functions from `internal/storage/dolt/*_test.go` (excluding
