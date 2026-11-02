@@ -1,4 +1,5 @@
--- Ignored migration 0031: ensure events.comment is LONGTEXT on every clone.
+-- Ignored migration 0031: ensure the event comment columns are LONGTEXT on
+-- every clone.
 --
 -- The twin of synced migration 0075, and required by check D of
 -- scripts/check-migration-hygiene.sh rather than offered: events is
@@ -24,5 +25,22 @@ SET @events_comment_needs_fix = (
 );
 SET @sql = IF(@events_comment_needs_fix = 1,
     'ALTER TABLE events MODIFY COLUMN comment LONGTEXT',
+    'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+-- wisp_events.comment, same shape as 0075's block: the two event planes must
+-- hold the same width or the promote/demote INSERT IGNORE copies silently
+-- truncate oversized comments in the narrow direction. Created nullable
+-- DEFAULT '' by ignored/0001; the DEFAULT is restated (doubled inside the
+-- literal, 0049's spelling).
+SET @wisp_events_comment_needs_fix = (
+    SELECT IF(COLUMN_TYPE = 'text', 1, 0)
+    FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'wisp_events'
+      AND COLUMN_NAME = 'comment'
+);
+SET @sql = IF(@wisp_events_comment_needs_fix = 1,
+    'ALTER TABLE wisp_events MODIFY COLUMN comment LONGTEXT DEFAULT ''''',
     'SELECT 1');
 PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;

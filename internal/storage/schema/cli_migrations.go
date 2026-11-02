@@ -248,6 +248,11 @@ func cliSubstituteAssumesWispTables(name string) bool {
 		// cliMigration0073AddArrivalSeq drops the source's @has_wisps
 		// table-exists guard and ALTERs and indexes wisps directly.
 		return true
+	case "0075_widen_residual_content_columns.up.sql":
+		// cliMigration0075WidenResidualContentColumns is a bare MODIFY on
+		// wisp_events (and the main-plane events, which is dolt-ignored
+		// itself since 0062 and equally absent on a never-synced clone).
+		return true
 	default:
 		return false
 	}
@@ -379,7 +384,8 @@ CREATE UNIQUE INDEX uk_wisps_arrival_seq ON wisps (arrival_seq);`
 // NOT NULL (0010) kept binary as LONGBLOB (0068's durable_state retype is the
 // precedent). Replays over a database that never synced the wisp tables must
 // use the frozen source text instead -- see cliSubstituteAssumesWispTables.
-const cliMigration0075WidenResidualContentColumns = `ALTER TABLE events MODIFY COLUMN comment LONGTEXT;`
+const cliMigration0075WidenResidualContentColumns = `ALTER TABLE events MODIFY COLUMN comment LONGTEXT;
+ALTER TABLE wisp_events MODIFY COLUMN comment LONGTEXT DEFAULT '';`
 
 const cliMigration0041SplitDependenciesTarget = `DELETE FROM dolt_nonlocal_tables;
 CALL DOLT_COMMIT('-Am', 'disable nonlocal tables for fk migrations');

@@ -115,7 +115,11 @@ func TestSchemaParityIssuesVsWisps(t *testing.T) {
 
 // TestSchemaParityAuxiliaryTables verifies that wisp auxiliary tables have the
 // same column names as their issues counterparts. Type/nullability differences
-// are allowed (wisps are more permissive), but column names must match.
+// are allowed (wisps are more permissive), but column names must match —
+// except the event planes' payload columns, whose widths must match exactly:
+// promote/demote copy events rows between the two planes with INSERT IGNORE,
+// which silently truncates oversized values when one plane is narrower than
+// the other (GH#3925; both comment columns are LONGTEXT since 0075).
 func TestSchemaParityAuxiliaryTables(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
@@ -166,8 +170,33 @@ func TestSchemaParityAuxiliaryTables(t *testing.T) {
 					t.Errorf("column %q in %s but missing from %s", n, pair.wispTable, pair.issueTable)
 				}
 			}
+
+			// Width parity for the copied event payload columns. Defaults and
+			// nullability stay exempt (the planes intentionally differ there:
+			// wisp_events carries DEFAULT ''), but the byte capacity must not:
+			// a promote or demote of a row with a large payload silently
+			// truncates it when the destination column is narrower.
+			if pair.issueTable == "events" {
+				issueTypes := columnTypes(issueCols)
+				wispTypes := columnTypes(wispCols)
+				for _, col := range []string{"old_value", "new_value", "comment"} {
+					if issueTypes[col] != wispTypes[col] {
+						t.Errorf("events.%s = %s but wisp_events.%s = %s; the promote/demote INSERT IGNORE copies truncate oversized payloads when the planes' widths differ",
+							col, issueTypes[col], col, wispTypes[col])
+					}
+				}
+			}
 		})
 	}
+}
+
+// columnTypes indexes a columnInfo slice by column name.
+func columnTypes(cols []columnInfo) map[string]string {
+	types := make(map[string]string, len(cols))
+	for _, c := range cols {
+		types[c.Name] = c.ColumnType
+	}
+	return types
 }
 
 // TestMigrations004And005Together verifies that migrations 004 (wisps table)

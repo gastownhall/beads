@@ -42,6 +42,8 @@ func TestMigration0075WidensEventsCommentGuarded(t *testing.T) {
 	for _, want := range []string{
 		"@events_comment_needs_fix",
 		"'ALTER TABLE events MODIFY COLUMN comment LONGTEXT'",
+		"@wisp_events_comment_needs_fix",
+		"'ALTER TABLE wisp_events MODIFY COLUMN comment LONGTEXT DEFAULT '''''",
 	} {
 		if !strings.Contains(upSQL, want) {
 			t.Errorf("0075 up migration missing %q", want)
@@ -61,6 +63,12 @@ func TestMigration0075WidensEventsCommentGuarded(t *testing.T) {
 	if !strings.Contains(got, "ALTER TABLE events MODIFY COLUMN comment LONGTEXT;") {
 		t.Errorf("0075 CLI substitute missing direct events.comment widening: %s", got)
 	}
+	if !strings.Contains(got, "ALTER TABLE wisp_events MODIFY COLUMN comment LONGTEXT DEFAULT '';") {
+		t.Errorf("0075 CLI substitute missing direct wisp_events.comment widening: %s", got)
+	}
+	if !cliSubstituteAssumesWispTables(migration0075Up) {
+		t.Error("0075 is not registered on cliSubstituteAssumesWispTables; its substitute's bare wisp_events MODIFY aborts replays over never-synced clones")
+	}
 	for _, forbidden := range []string{"PREPARE", "@events_comment_needs_fix"} {
 		if strings.Contains(got, forbidden) {
 			t.Errorf("0075 CLI substitute contains prepared-DDL marker %q", forbidden)
@@ -77,6 +85,8 @@ func TestMigration0075WidensEventsCommentGuarded(t *testing.T) {
 	for _, want := range []string{
 		"@events_comment_needs_fix",
 		"'ALTER TABLE events MODIFY COLUMN comment LONGTEXT'",
+		"@wisp_events_comment_needs_fix",
+		"'ALTER TABLE wisp_events MODIFY COLUMN comment LONGTEXT DEFAULT '''''",
 	} {
 		if !strings.Contains(ignoredSQL, want) {
 			t.Errorf("ignored/0031 missing %q", want)

@@ -4,8 +4,9 @@
 -- (+ 0057's idempotency guard) the events value columns, 0065 (with its
 -- ignored/0024 twin) wisp_comments.text, and ignored/0008 the wisp_events
 -- value columns. What the #3925 report named that none of those reached:
--- events.comment is still TEXT. A reopen records its reason twice — once into
--- the LONGTEXT new_value and then again, as the audit comment, into
+-- events.comment and wisp_events.comment are still TEXT. A reopen records
+-- its reason twice — once into the LONGTEXT new_value and then again, as the
+-- audit comment, into
 -- events.comment via AddCommentEventInTx — so a reason over the TEXT cap
 -- fails the second write and rolls back the entire reopen: a closed issue
 -- cannot be reopened with a large reason at all. PR #3846 proposed widening
@@ -39,5 +40,24 @@ SET @events_comment_needs_fix = (
 );
 SET @sql = IF(@events_comment_needs_fix = 1,
     'ALTER TABLE events MODIFY COLUMN comment LONGTEXT',
+    'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+-- wisp_events.comment: the same audit path on the wisp plane, and the source
+-- of the cross-plane copies. PromoteFromEphemeral copies wisp_events.comment
+-- into events.comment and demotion copies it back (both INSERT IGNORE, which
+-- truncates oversized values silently when the two widths differ), so the two
+-- planes must hold the same width. wisp_events.comment was created nullable
+-- DEFAULT '' (0021); ignored/0001 recreates it the same way on clones, and
+-- ignored/0031 widens it there.
+SET @wisp_events_comment_needs_fix = (
+    SELECT IF(COLUMN_TYPE = 'text', 1, 0)
+    FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'wisp_events'
+      AND COLUMN_NAME = 'comment'
+);
+SET @sql = IF(@wisp_events_comment_needs_fix = 1,
+    'ALTER TABLE wisp_events MODIFY COLUMN comment LONGTEXT DEFAULT ''''',
     'SELECT 1');
 PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;

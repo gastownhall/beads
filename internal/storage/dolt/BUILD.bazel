@@ -395,6 +395,7 @@ go_test(
         "wisp_custom_type_tx_test.go",
         "wisp_delete_cascade_integration_test.go",
         "wisp_delete_cascade_tx_integration_test.go",
+        "wisp_event_comment_cap_test.go",
         "wisp_gc_test.go",
         "wisp_infra_dep_test.go",
         "wisp_partition_test.go",

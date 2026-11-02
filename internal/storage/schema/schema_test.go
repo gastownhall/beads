@@ -1284,6 +1284,54 @@ DELETE FROM schema_migrations WHERE version = %d;
 	}
 }
 
+// TestMigration0075NoopsWithoutWispEventsThroughDoltCLI licenses
+// cliSubstituteAssumesWispTables's 0075 entry: the fresh-bundle substitute is
+// bare MODIFYs that abort the batch with "table not found" on a database that
+// never synced the dolt-ignored event tables (both events and wisp_events are
+// clone-local since 0062), so replay callers use the frozen source text
+// instead — and this pins that the frozen text's INFORMATION_SCHEMA probes
+// really do tolerate both tables being absent rather than merely being
+// assumed to. A missing table makes each probe yield NULL, and IF(NULL = 1,
+// ...) takes the 'SELECT 1' branch. This is only the CLI missing-table
+// compatibility control; the embedded 0075 test proves the guards fire and
+// widen through a real engine.
+func TestMigration0075NoopsWithoutWispEventsThroughDoltCLI(t *testing.T) {
+	testutil.RequireDoltBinary(t)
+
+	dir := filepath.Join(t.TempDir(), "widen-event-comments-no-events")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("create no-events dir: %v", err)
+	}
+	runDoltCommand(t, dir, "init", "--name", "test", "--email", "test@example.com")
+	runDoltSQL(t, dir, AllMigrationsSQL())
+
+	seedSQL := fmt.Sprintf(`
+DROP TABLE IF EXISTS wisp_events;
+DROP TABLE IF EXISTS events;
+DELETE FROM schema_migrations WHERE version = %d;
+`, LatestVersion())
+	migrationSQL, err := mainSource.files.ReadFile("migrations/0075_widen_residual_content_columns.up.sql")
+	if err != nil {
+		t.Fatalf("read 0075 migration: %v", err)
+	}
+	runDoltSQL(t, dir, seedSQL+"\n"+string(migrationSQL))
+
+	for _, table := range []string{"events", "wisp_events"} {
+		requireDoltCount(t, dir,
+			fmt.Sprintf(`SELECT COUNT(*) AS c FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '%s'`, table), "0")
+	}
+
+	// Control: the same absent tables under the registered substitute are the
+	// failure this test exists to route around.
+	substitute := cliCompatibleMigrationSQL("0075_widen_residual_content_columns.up.sql", string(migrationSQL))
+	if substitute == string(migrationSQL) {
+		t.Fatal("0075 has no registered CLI substitute; this test's control is vacuous")
+	}
+	if err := runDoltSQLExpectingError(t, dir, substitute); err == nil {
+		t.Fatal("0075 CLI substitute unexpectedly succeeded against absent event tables")
+	}
+}
+
 func TestMigration0053RepairsRigWispsThroughDoltCLI(t *testing.T) {
 	testutil.RequireDoltBinary(t)
 
@@ -2023,6 +2071,7 @@ func TestAllMigrationsSQLUsesDirectDDLForKnownCLIIncompatibilities(t *testing.T)
 		"CREATE UNIQUE INDEX uk_wisps_arrival_seq ON wisps (arrival_seq);",
 		// 0075: prepared MODIFY COLUMN widenings, same shape as 0065.
 		"ALTER TABLE events MODIFY COLUMN comment LONGTEXT;",
+		"ALTER TABLE wisp_events MODIFY COLUMN comment LONGTEXT DEFAULT '';",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("AllMigrationsSQL missing direct CLI DDL %q", want)
@@ -2070,6 +2119,7 @@ func TestAllMigrationsSQLUsesDirectDDLForKnownCLIIncompatibilities(t *testing.T)
 		// 0075 guards its widening the same way; only its source text carries
 		// the probes.
 		"@events_comment_needs_fix",
+		"@wisp_events_comment_needs_fix",
 	} {
 		if strings.Contains(got, forbidden) {
 			t.Fatalf("AllMigrationsSQL contains source prepared-DDL guard %q", forbidden)
