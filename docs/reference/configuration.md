@@ -273,6 +273,7 @@ How it works:
 - Pushes are debounced: skipped if the last push was less than `dolt.auto-push-interval` ago.
 - Change detection: skipped if the Dolt HEAD commit hasn't changed since the last push.
 - Push failures are warnings only (non-fatal), and failed attempts are throttled too.
+- In releases after v1.3.2, when `dolt.auto-push-timeout` runs out `bd` cancels the push and waits up to 15 more seconds for it to stop (so Dolt can end its `git`/`ssh` transport) before warning and continuing. If the push still has not stopped, `bd` stops waiting anyway; that does not mean the transport has stopped.
 - Last push time and commit are tracked in `.beads/push-state.json`, a per-machine file (not in the database, to avoid merge conflicts across machines).
 
 Before pushing, `bd` verifies the local chunk store with `dolt fsck --quiet`, bounded by a 30-second timeout. For large stores, raise it with the runtime-only `BEADS_FSCK_TIMEOUT` environment variable (accepts durations like `2m` or bare seconds like `90`).
