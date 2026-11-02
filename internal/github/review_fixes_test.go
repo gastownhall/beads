@@ -57,3 +57,34 @@ func TestRefScopeRejectsForeignHostAndRepository(t *testing.T) {
 		t.Fatalf("configured ref = %d, %v; want 12, true", number, ok)
 	}
 }
+
+// TestRefScopeWithCurrentName: a scope that knows the repository's current
+// name accepts refs under it as well as under the configured name. The two
+// names do not mix (owner from one, repository from the other), and a
+// fullName that is not exactly owner/repo adds nothing.
+func TestRefScopeWithCurrentName(t *testing.T) {
+	scope := NewRefScope("https://api.github.com", "old-owner", "old-repo").withCurrentName("New-Owner/new-repo")
+	for ref, want := range map[string]int{
+		"https://github.com/old-owner/old-repo/issues/12":           12,
+		"https://github.com/new-owner/new-repo/issues/12":           12,
+		"https://github.com/NEW-OWNER/New-Repo/issues/12":           12,
+		"https://api.github.com/repos/new-owner/new-repo/issues/12": 12,
+		"github:12": 12,
+		"https://github.com/old-owner/new-repo/issues/12":      0,
+		"https://github.com/new-owner/old-repo/issues/12":      0,
+		"https://github.com/other/new-repo/issues/12":          0,
+		"https://ghe.example.com/new-owner/new-repo/issues/12": 0,
+	} {
+		number, ok := scope.IssueNumberFromRef(ref)
+		if number != want || ok != (want != 0) {
+			t.Errorf("IssueNumberFromRef(%q) = %d, %v; want %d", ref, number, ok, want)
+		}
+	}
+
+	base := NewRefScope("https://api.github.com", "old-owner", "old-repo")
+	for _, fullName := range []string{"", " ", "new-owner", "/new-repo", "new-owner/", "a/b/c"} {
+		if got := base.withCurrentName(fullName); got != base {
+			t.Errorf("withCurrentName(%q) = %+v, want the scope unchanged", fullName, got)
+		}
+	}
+}

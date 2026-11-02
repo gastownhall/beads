@@ -1153,10 +1153,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the first repository's issue 1313; push, conflict detection and selective
   pull likewise read another repository's link as the configured
   repository's issue. Issue URLs now count only when they name the configured
-  host and owner/repo, and `--dry-run` push reports such beads as skipped.
-  Beads still linked to a repository's old name after a rename or transfer
-  need relinking before the next pull (#7781, reported and first fixed by
-  @NahumLitvin in #7794).
+  host and repository, by its configured owner/repo or by the current name
+  GitHub reports for it, so a config that still names a renamed or
+  transferred repository keeps syncing the beads linked to it. `--dry-run`
+  push reports beads linked elsewhere as skipped, and `bd github pull
+  <bead-id>` says their link is not an issue the tracker can address. After
+  changing `github.owner`/`github.repo` to a repository's new name, relink
+  beads that still name the old one before the next pull (#7781, reported and
+  first fixed by @NahumLitvin in #7794).
 - `bd dolt push <remote>` and `bd dolt pull <remote>` now push to and pull
   from the named remote. bd ignored the name, so `bd dolt push 1st` pushed to
   the default remote and reported "Push complete."; a name that differs from

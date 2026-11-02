@@ -395,12 +395,8 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 		for _, id := range opts.IssueIDs {
 			var identifier string
 			if isBeadID(id, prefix) {
-				// Look up the local issue to find its external ref
-				if local, ok := localByID[id]; ok && local.ExternalRef != nil {
-					identifier = e.Tracker.ExtractIdentifier(*local.ExternalRef)
-				}
-				if identifier == "" {
-					e.warn("No external ref found for local issue %s, skipping pull", id)
+				var ok bool
+				if identifier, ok = e.selectivePullIdentifier(id, localByID[id]); !ok {
 					stats.Skipped++
 					continue
 				}
@@ -604,6 +600,28 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 		attribute.Int("sync.skipped", stats.Skipped),
 	)
 	return stats, nil
+}
+
+// selectivePullIdentifier returns the tracker identifier that local's external
+// ref addresses, for a pull that selects the bead by ID. When there is none it
+// warns why and reports false: the bead has no ref, or the tracker cannot
+// address the one it has (gastownhall/beads#7781: another repository's issue).
+func (e *Engine) selectivePullIdentifier(id string, local *types.Issue) (string, bool) {
+	extRef := ""
+	if local != nil {
+		extRef = derefStr(local.ExternalRef)
+	}
+	if strings.TrimSpace(extRef) == "" {
+		e.warn("No external ref found for local issue %s, skipping pull", id)
+		return "", false
+	}
+	identifier := e.Tracker.ExtractIdentifier(extRef)
+	if identifier == "" {
+		e.warn("External ref %q of local issue %s is not an issue %s can address with its current configuration (another repository?), skipping pull",
+			extRef, id, e.Tracker.DisplayName())
+		return "", false
+	}
+	return identifier, true
 }
 
 // pullOverlapOnly reports whether a bulk incremental fetch row is one only

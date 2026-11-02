@@ -348,8 +348,10 @@ updates only beads whose issue URL points at the configured repository, so
 pulling issue 1313 from a second repository creates a new bead instead of
 overwriting the bead linked to the first repository's issue 1313. A
 `github:<number>` ref has no repository and is always read as the configured
-one. After renaming or transferring a repository, update `github.owner` and
-`github.repo`, and relink beads that still name the old owner or repository
+one. A repository you renamed or transferred keeps syncing under its old
+name, because GitHub redirects that name and sync also accepts the current
+name GitHub reports. Once you update `github.owner` and `github.repo` to the
+new name, relink beads that still name the old owner or repository
 (`bd update <id> --external-ref <new-url>`) before the next pull; otherwise the
 pull imports their issues again as new beads.
 

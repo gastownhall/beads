@@ -27,6 +27,10 @@ type RefScope struct {
 	webHost string // canonical host[:port] used by issue HTML URLs
 	owner   string
 	repo    string
+	// currentOwner and currentRepo name the same repository as GitHub
+	// reports it (see withCurrentName); empty when unknown.
+	currentOwner string
+	currentRepo  string
 }
 
 // SubIssueLinkFromParentChild is retained for existing callers. Relationship
@@ -59,6 +63,22 @@ func NewRefScope(baseURL, owner, repo string) RefScope {
 	}
 }
 
+// withCurrentName returns a copy of s that also accepts refs naming the
+// scope's repository by fullName ("owner/repo"), the name GitHub reports for
+// it. After a rename or transfer GitHub still serves the configured old name
+// by redirect, but the issues it returns, and so the refs BuildExternalRef
+// stores from them, name the current repository. A fullName that is not
+// exactly owner/repo leaves s unchanged.
+func (s RefScope) withCurrentName(fullName string) RefScope {
+	owner, repo, ok := strings.Cut(strings.TrimSpace(fullName), "/")
+	if !ok || owner == "" || repo == "" || strings.Contains(repo, "/") {
+		return s
+	}
+	s.currentOwner = strings.ToLower(owner)
+	s.currentRepo = strings.ToLower(repo)
+	return s
+}
+
 func hostFromURL(raw string) string {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
@@ -73,10 +93,11 @@ func hostFromURL(raw string) string {
 
 // IssueNumberFromRef extracts a repository-scoped GitHub issue number from a
 // beads external ref, but only when the ref points at this scope's repository.
-// A full issue URL must match the configured host and owner/repo; the
-// repo-less "github:{digits}" shorthand that BuildExternalRef emits when no
-// URL is available is read as the configured repository. Everything else —
-// another repository, another host, a non-GitHub tracker URL — is rejected.
+// A full issue URL must match the configured host and owner/repo, or the
+// repository's current owner/repo when the scope knows it; the repo-less
+// "github:{digits}" shorthand that BuildExternalRef emits when no URL is
+// available is read as the configured repository. Everything else — another
+// repository, another host, a non-GitHub tracker URL — is rejected.
 func (s RefScope) IssueNumberFromRef(ref string) (int, bool) {
 	ref = strings.TrimSpace(ref)
 	if ref == "" || s.owner == "" || s.repo == "" {
@@ -97,13 +118,19 @@ func (s RefScope) IssueNumberFromRef(ref string) (int, bool) {
 	}
 
 	owner, repo, number, ok := splitIssueURLPath(u.Path)
-	if !ok {
-		return 0, false
-	}
-	if !strings.EqualFold(owner, s.owner) || !strings.EqualFold(repo, s.repo) {
+	if !ok || !s.namesRepository(owner, repo) {
 		return 0, false
 	}
 	return number, true
+}
+
+// namesRepository reports whether owner/repo is the scope's repository, by
+// its configured name or by its current one.
+func (s RefScope) namesRepository(owner, repo string) bool {
+	if strings.EqualFold(owner, s.owner) && strings.EqualFold(repo, s.repo) {
+		return true
+	}
+	return s.currentOwner != "" && strings.EqualFold(owner, s.currentOwner) && strings.EqualFold(repo, s.currentRepo)
 }
 
 // splitIssueURLPath pulls owner, repo, and issue number out of a GitHub issue

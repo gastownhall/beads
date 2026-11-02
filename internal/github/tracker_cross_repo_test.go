@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"slices"
 	"sort"
 	"strings"
@@ -178,6 +179,9 @@ type githubAPIStub struct {
 	calls  []string
 	issues map[int]string // issue number -> JSON object
 	list   []int          // numbers GET .../issues answers
+	// renamedFrom, when set, is the old /repos/{owner}/{repo} path of the
+	// repository; see newRenamedRepoStub.
+	renamedFrom string
 }
 
 func newGitHubAPIStub(t *testing.T) (*githubAPIStub, *Tracker) {
@@ -198,6 +202,18 @@ func newGitHubAPIStub(t *testing.T) (*githubAPIStub, *Tracker) {
 	return stub, &Tracker{client: client, config: DefaultMappingConfig()}
 }
 
+// newRenamedRepoStub is newGitHubAPIStub for a config that still names
+// owner-b/repo-b by its old name, old-owner/repo-b. Like GitHub, the stub
+// redirects every request under the old name to the repository's ID path
+// (301 for GET, 307 for other methods), which it serves as owner-b/repo-b.
+func newRenamedRepoStub(t *testing.T) (*githubAPIStub, *Tracker) {
+	t.Helper()
+	stub, tr := newGitHubAPIStub(t)
+	stub.renamedFrom = "/repos/old-owner/repo-b"
+	tr.client.Owner = "old-owner"
+	return stub, tr
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
@@ -208,19 +224,39 @@ func (s *githubAPIStub) serve(w http.ResponseWriter, r *http.Request) {
 	s.calls = append(s.calls, r.Method+" "+r.URL.Path)
 	w.Header().Set("Content-Type", "application/json")
 
-	const prefix = "/repos/owner-b/repo-b/issues"
+	const repoPath, idPath = "/repos/owner-b/repo-b", "/repositories/4242"
+	if s.renamedFrom != "" {
+		if rest, ok := cutPathPrefix(r.URL.Path, s.renamedFrom); ok {
+			status := http.StatusMovedPermanently
+			if r.Method != http.MethodGet {
+				status = http.StatusTemporaryRedirect
+			}
+			w.Header().Set("Location", (&url.URL{Path: idPath + rest, RawQuery: r.URL.RawQuery}).String())
+			w.WriteHeader(status)
+			return
+		}
+	}
+	path := r.URL.Path
+	if rest, ok := cutPathPrefix(path, idPath); ok {
+		path = repoPath + rest
+	}
+
+	const prefix = repoPath + "/issues"
 	switch {
-	case r.URL.Path == prefix && r.Method == http.MethodGet:
+	case path == repoPath && r.Method == http.MethodGet:
+		_, _ = w.Write([]byte(`{"id":4242,"name":"repo-b","full_name":"owner-b/repo-b",` +
+			`"html_url":"https://github.com/owner-b/repo-b"}`))
+	case path == prefix && r.Method == http.MethodGet:
 		objs := make([]string, 0, len(s.list))
 		for _, n := range s.list {
 			objs = append(objs, s.issues[n])
 		}
 		_, _ = w.Write([]byte("[" + strings.Join(objs, ",") + "]"))
-	case r.URL.Path == prefix && r.Method == http.MethodPost:
+	case path == prefix && r.Method == http.MethodPost:
 		_, _ = w.Write([]byte(gitHubIssueJSON(8, "Created", crossRepoRemote)))
-	case strings.HasPrefix(r.URL.Path, prefix+"/"):
+	case strings.HasPrefix(path, prefix+"/"):
 		var n int
-		if _, err := fmt.Sscanf(strings.TrimPrefix(r.URL.Path, prefix+"/"), "%d", &n); err != nil || s.issues[n] == "" {
+		if _, err := fmt.Sscanf(strings.TrimPrefix(path, prefix+"/"), "%d", &n); err != nil || s.issues[n] == "" {
 			http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)
 			return
 		}
@@ -228,6 +264,18 @@ func (s *githubAPIStub) serve(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)
 	}
+}
+
+// cutPathPrefix reports whether path is prefix or lies under it, and returns
+// the part of path after prefix.
+func cutPathPrefix(path, prefix string) (string, bool) {
+	if path == prefix {
+		return "", true
+	}
+	if strings.HasPrefix(path, prefix+"/") {
+		return path[len(prefix):], true
+	}
+	return "", false
 }
 
 // requests returns the recorded requests whose path names issue number n.
@@ -355,25 +403,37 @@ func TestPull_SameRepoRespellingUpdatesExistingBead(t *testing.T) {
 
 // TestPull_SelectiveBeadIDLinkedToOtherRepoIsSkipped: selecting A's bead by
 // ID gives B's tracker no identifier to fetch, so the pull skips it instead
-// of fetching B's 1313 into it.
+// of fetching B's 1313 into it, and says the bead's link is not one the
+// tracker can address rather than that it has none. An unlinked bead is the
+// control: it still gets the no-link warning.
 func TestPull_SelectiveBeadIDLinkedToOtherRepoIsSkipped(t *testing.T) {
 	stub, tr := newGitHubAPIStub(t)
 	stub.issues[1313] = gitHubIssueJSON(1313, "Repo B issue 1313", crossRepoRemote)
-	store := newCrossRepoStore(repoABead(time.Time{}))
+	store := newCrossRepoStore(repoABead(time.Time{}), &types.Issue{
+		ID: "bd-unlinked", Title: "Unlinked", Status: types.StatusOpen, IssueType: types.TypeTask,
+	})
 
 	result, err := tracker.NewEngine(tr, store, "test").Sync(context.Background(),
-		tracker.SyncOptions{Pull: true, IssueIDs: []string{crossRepoAID}})
+		tracker.SyncOptions{Pull: true, IssueIDs: []string{crossRepoAID, "bd-unlinked"}})
 	if err != nil {
 		t.Fatalf("Sync: %v", err)
 	}
 
 	store.assertUntouched(t, crossRepoAID, crossRepoAT, crossRepoARef)
-	if got := stub.requests(1313); len(got) != 0 {
-		t.Errorf("selective pull of %s requested B's issue: %v", crossRepoAID, got)
+	if got := stub.requestLog(); len(got) != 0 {
+		t.Errorf("selective pull of %s and bd-unlinked issued requests %q, want none", crossRepoAID, got)
 	}
-	if result.PullStats.Skipped != 1 || result.PullStats.Created != 0 || result.PullStats.Updated != 0 {
-		t.Errorf("skipped=%d created=%d updated=%d, want skipped=1 created=0 updated=0",
+	if result.PullStats.Skipped != 2 || result.PullStats.Created != 0 || result.PullStats.Updated != 0 {
+		t.Errorf("skipped=%d created=%d updated=%d, want skipped=2 created=0 updated=0",
 			result.PullStats.Skipped, result.PullStats.Created, result.PullStats.Updated)
+	}
+	want := []string{
+		`External ref "` + crossRepoARef + `" of local issue ` + crossRepoAID +
+			` is not an issue GitHub can address with its current configuration (another repository?), skipping pull`,
+		"No external ref found for local issue bd-unlinked, skipping pull",
+	}
+	if !slices.Equal(result.Warnings, want) {
+		t.Errorf("warnings = %q, want %q", result.Warnings, want)
 	}
 }
 
@@ -555,4 +615,171 @@ func TestDetectConflicts_OtherRepoBeadNotFetched(t *testing.T) {
 		t.Errorf("conflicts = %+v, want none", conflicts)
 	}
 	store.assertUntouched(t, crossRepoAID, crossRepoAT, crossRepoARef)
+}
+
+// TestRenamedRepository_PulledBeadStillPushesAndConflicts: a config that still
+// names a renamed or transferred repository by its old name keeps syncing,
+// because GitHub serves that name by redirect, but every issue it returns
+// names the current repository, and the pull links beads to those URLs. The
+// name Init resolves makes those refs addressable, so a pulled bead edited
+// locally is still pushed (and previewed as an update) and still reaches
+// conflict detection, rather than being skipped until a remote edit
+// overwrites the local one.
+func TestRenamedRepository_PulledBeadStillPushesAndConflicts(t *testing.T) {
+	ctx := context.Background()
+	pullAndEdit := func(t *testing.T) (*githubAPIStub, *Tracker, *crossRepoStore, *types.Issue) {
+		t.Helper()
+		stub, tr := newRenamedRepoStub(t)
+		stub.issues[1313] = gitHubIssueJSON(1313, "Repo B issue 1313", crossRepoRemote)
+		stub.list = []int{1313}
+		tr.resolveCurrentName(ctx) // as Init does
+		if tr.currentName != "owner-b/repo-b" {
+			t.Fatalf("resolved current name %q, want owner-b/repo-b (requests %q)", tr.currentName, stub.requestLog())
+		}
+		store := newCrossRepoStore()
+		if _, err := tracker.NewEngine(tr, store, "test").Sync(ctx, tracker.SyncOptions{Pull: true}); err != nil {
+			t.Fatalf("pull: %v", err)
+		}
+		bead, err := store.GetIssueByExternalRef(ctx, crossRepoBRef)
+		if err != nil {
+			t.Fatalf("pull linked no bead to %s: %v", crossRepoBRef, err)
+		}
+		bead.Title = "Local edit"
+		bead.UpdatedAt = crossRepoLocal
+		return stub, tr, store, bead
+	}
+
+	for _, dryRun := range []bool{false, true} {
+		t.Run(fmt.Sprintf("push/dry-run=%v", dryRun), func(t *testing.T) {
+			stub, tr, store, _ := pullAndEdit(t)
+
+			result, err := tracker.NewEngine(tr, store, "test").Sync(ctx, tracker.SyncOptions{Push: true, DryRun: dryRun})
+			if err != nil {
+				t.Fatalf("push: %v", err)
+			}
+			if got := result.PushStats; got.Updated != 1 || got.Skipped != 0 {
+				t.Errorf("push stats updated=%d skipped=%d, want updated=1 skipped=0", got.Updated, got.Skipped)
+			}
+			var want []string
+			if !dryRun {
+				want = []string{
+					"GET /repos/old-owner/repo-b/issues/1313",
+					"GET /repositories/4242/issues/1313",
+					"PATCH /repos/old-owner/repo-b/issues/1313",
+					"PATCH /repositories/4242/issues/1313",
+				}
+			}
+			if got := stub.requests(1313); !slices.Equal(got, want) {
+				t.Errorf("push requests for issue 1313 = %q, want %q", got, want)
+			}
+		})
+	}
+
+	// Both sides edited since the last sync: conflict detection compares the
+	// bead with its issue, keeps the newer local edit and pushes it.
+	t.Run("conflict", func(t *testing.T) {
+		stub, tr, store, bead := pullAndEdit(t)
+		store.meta["github.last_sync"] = crossRepoSync.Format(time.RFC3339)
+
+		result, err := tracker.NewEngine(tr, store, "test").Sync(ctx,
+			tracker.SyncOptions{Pull: true, Push: true, ConflictResolution: tracker.ConflictTimestamp})
+		if err != nil {
+			t.Fatalf("Sync: %v", err)
+		}
+		if result.Stats.Conflicts != 1 {
+			t.Errorf("conflicts=%d, want 1", result.Stats.Conflicts)
+		}
+		if got := result.PushStats; got.Updated != 1 {
+			t.Errorf("push stats updated=%d, want 1 (the local edit)", got.Updated)
+		}
+		if !slices.Contains(stub.requests(1313), "PATCH /repositories/4242/issues/1313") {
+			t.Errorf("sync did not push the local edit: requests %q", stub.requests(1313))
+		}
+		if bead.Title != "Local edit" {
+			t.Errorf("bead title = %q, want the local edit kept", bead.Title)
+		}
+	})
+}
+
+// TestInit_ResolvesRenamedRepositoryName: Init asks GitHub for the configured
+// repository. When the configured name redirects, as a renamed or transferred
+// repository's does, refs under the current name address the repository too.
+// When the lookup fails, Init still succeeds and only the configured name
+// does, as before.
+func TestInit_ResolvesRenamedRepositoryName(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "tok")
+	var mu sync.Mutex
+	var calls []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		calls = append(calls, r.Method+" "+r.URL.Path)
+		mu.Unlock()
+		switch r.URL.Path {
+		case "/api/v3/repos/old-owner/repo-b":
+			http.Redirect(w, r, "/api/v3/repositories/4242", http.StatusMovedPermanently)
+		case "/api/v3/repositories/4242":
+			_, _ = w.Write([]byte(`{"id":4242,"name":"repo-b","full_name":"owner-b/repo-b"}`))
+		default:
+			http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	// A GitHub Enterprise host serves issue pages and the API at /api/v3.
+	web := srv.URL
+
+	for _, tc := range []struct {
+		name      string
+		owner     string
+		wantCalls []string
+		want      map[string]string // ref -> ExtractIdentifier
+	}{
+		{
+			name:      "renamed",
+			owner:     "old-owner",
+			wantCalls: []string{"GET /api/v3/repos/old-owner/repo-b", "GET /api/v3/repositories/4242"},
+			want: map[string]string{
+				web + "/old-owner/repo-b/issues/5": "5",
+				web + "/owner-b/repo-b/issues/5":   "5",
+				web + "/owner-a/repo-a/issues/5":   "",
+			},
+		},
+		{
+			name:      "lookup fails",
+			owner:     "gone-owner",
+			wantCalls: []string{"GET /api/v3/repos/gone-owner/repo-b"},
+			want: map[string]string{
+				web + "/gone-owner/repo-b/issues/5": "5",
+				web + "/owner-b/repo-b/issues/5":    "",
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mu.Lock()
+			calls = nil
+			mu.Unlock()
+			store := newCrossRepoStore()
+			store.config["github.owner"] = tc.owner
+			store.config["github.repo"] = "repo-b"
+			store.config["github.url"] = srv.URL + "/api/v3"
+
+			tr := &Tracker{}
+			if err := tr.Init(context.Background(), store); err != nil {
+				t.Fatalf("Init: %v", err)
+			}
+			mu.Lock()
+			gotCalls := append([]string(nil), calls...)
+			mu.Unlock()
+			if !slices.Equal(gotCalls, tc.wantCalls) {
+				t.Errorf("Init requests = %q, want %q", gotCalls, tc.wantCalls)
+			}
+			for ref, want := range tc.want {
+				if got := tr.ExtractIdentifier(ref); got != want {
+					t.Errorf("ExtractIdentifier(%q) = %q, want %q", ref, got, want)
+				}
+				if n, ok := tr.LinkResolver().Scope().IssueNumberFromRef(ref); (want != "") != ok || (ok && fmt.Sprint(n) != want) {
+					t.Errorf("LinkResolver scope resolves %q to %d, %v; want %q", ref, n, ok, want)
+				}
+			}
+		})
+	}
 }

@@ -32,6 +32,9 @@ type Tracker struct {
 	client *Client
 	config *MappingConfig
 	store  tracker.Store
+	// currentName is the repository's owner/repo as GitHub reported it at
+	// Init (see resolveCurrentName); empty when unknown.
+	currentName string
 }
 
 // LinkResolver returns a relationship resolver bound to this tracker's
@@ -42,7 +45,9 @@ func (t *Tracker) LinkResolver() *LinkResolver {
 	if t.client == nil {
 		return nil
 	}
-	return NewLinkResolver(t.client)
+	r := NewLinkResolver(t.client)
+	r.scope = t.RefScope()
+	return r
 }
 
 func (t *Tracker) Name() string         { return "github" }
@@ -88,7 +93,23 @@ func (t *Tracker) Init(ctx context.Context, store tracker.Store) error {
 	}
 
 	t.config = DefaultMappingConfig()
+	t.resolveCurrentName(ctx)
 	return nil
+}
+
+// resolveCurrentName records the repository's owner/repo as GitHub reports
+// it. A config that still names a renamed or transferred repository keeps
+// syncing, because GitHub serves the old name by redirect, but every issue it
+// returns names the current repository, and so does every ref
+// BuildExternalRef stores. Without that name in RefScope the tracker would
+// refuse the refs it wrote itself, and push and conflict detection would skip
+// those beads. A failed lookup leaves the configured name as the only one.
+func (t *Tracker) resolveCurrentName(ctx context.Context) {
+	repo, err := t.client.FetchRepository(ctx)
+	if err != nil {
+		return
+	}
+	t.currentName = repo.FullName
 }
 
 func (t *Tracker) Validate() error {
@@ -247,9 +268,10 @@ func (t *Tracker) IsExternalRef(ref string) bool {
 
 // ExtractIdentifier extracts the issue number from a GitHub URL or shorthand ref.
 // Once the tracker is initialized, a URL yields a number only when it points
-// at the configured repository (see RefScope): issue numbers are
-// repository-scoped, so another repository's URL must not address, match or
-// overwrite the configured repository's issue with the same number
+// at the configured repository, by its configured name or the current name
+// GitHub reports for it (see RefScope): issue numbers are repository-scoped,
+// so another repository's URL must not address, match or overwrite the
+// configured repository's issue with the same number
 // (gastownhall/beads#7781). The repo-less shorthand is read as the configured
 // repository, as before.
 func (t *Tracker) ExtractIdentifier(ref string) string {
@@ -277,7 +299,7 @@ func (t *Tracker) RefScope() RefScope {
 	if t.client == nil {
 		return RefScope{}
 	}
-	return NewRefScope(t.client.BaseURL, t.client.Owner, t.client.Repo)
+	return NewRefScope(t.client.BaseURL, t.client.Owner, t.client.Repo).withCurrentName(t.currentName)
 }
 
 func (t *Tracker) BuildExternalRef(issue *tracker.TrackerIssue) string {
