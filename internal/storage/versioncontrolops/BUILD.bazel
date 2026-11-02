@@ -19,6 +19,7 @@ go_library(
         "mergesettle.go",
         "remoterefs.go",
         "remotes.go",
+        "transfer.go",
         "version_control.go",
     ],
     importpath = "github.com/steveyegge/beads/internal/storage/versioncontrolops",
@@ -48,6 +49,7 @@ go_test(
         "remotes_githooks_test.go",
         "remotes_gittrace_test.go",
         "remotes_test.go",
+        "transfer_test.go",
     ],
     embed = [":versioncontrolops"],
     deps = [
