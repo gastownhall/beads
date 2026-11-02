@@ -992,6 +992,12 @@ func migrateUpAfterReconcile(ctx context.Context, db DBConn, seedChanged bool) (
 		return 0, nil
 	}
 
+	// Past the converged early return so a no-work open issues no extra
+	// statements; ahead of every write the pass makes.
+	if err := suspendTransactionCommit(ctx, db); err != nil {
+		return 0, err
+	}
+
 	dirtyBeforeAll, err := dirtyTables(ctx, db, false)
 	if err != nil {
 		return 0, fmt.Errorf("reading pre-migration status: %w", err)
