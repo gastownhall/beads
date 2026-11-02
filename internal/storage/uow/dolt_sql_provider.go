@@ -232,9 +232,17 @@ func (p *doltSQLProvider) BeginTx(ctx context.Context) (Tx, error) {
 	// The journal decision is taken once, for admission and scoping alike.
 	journalOn := p.eventsJournalEnabled.Load()
 	marker := journalWriterFor(ctx)
-	conn, err := p.db.Conn(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("uow: pin connection: %w", err)
+	// A session lent by the caller (the delete fence's) is used as it is;
+	// otherwise one is pinned from the pool.
+	lent := borrowLentSession(ctx)
+	var conn *sql.Conn
+	if lent != nil {
+		conn = lent.conn
+	} else {
+		var err error
+		if conn, err = p.db.Conn(ctx); err != nil {
+			return nil, fmt.Errorf("uow: pin connection: %w", err)
+		}
 	}
 
 	// A unit of work that may journal is admitted as a journal writer on the
@@ -245,19 +253,19 @@ func (p *doltSQLProvider) BeginTx(ctx context.Context) (Tx, error) {
 		admit = func(ctx context.Context, admitBy time.Time) (*issueops.JournalWriterLock, error) {
 			return admitJournalWriter(ctx, conn, p.database, admitBy)
 		}
+		var err error
 		journalLock, err = admit(ctx, marker.admitBy)
 		if err != nil {
-			_ = conn.Close()
+			lent.giveBack(conn)
 			return nil, fmt.Errorf("uow: %w", err)
 		}
 	}
 
-	_, err = conn.ExecContext(ctx, "START TRANSACTION;")
-	if err != nil {
+	if _, err := conn.ExecContext(ctx, "START TRANSACTION;"); err != nil {
 		// No transaction is open, but the session's state is unknown: give
 		// the lock up with the session.
 		journalLock.Abandon()
-		_ = conn.Close()
+		lent.giveBack(conn)
 		return nil, fmt.Errorf("uow: failed to start transaction: %w", err)
 	}
 
@@ -266,7 +274,7 @@ func (p *doltSQLProvider) BeginTx(ctx context.Context) (Tx, error) {
 	// run scoped off (issueops.VersionedHistorySwitch.ResolveIn).
 	versioned, err := p.versionedHistory.ResolveIn(ctx, conn)
 	if err != nil {
-		return nil, (&doltServerTx{conn: conn, journalLock: journalLock}).closeOpenTxAfterFailure(ctx, fmt.Errorf("uow: %w", err))
+		return nil, (&doltServerTx{conn: conn, lent: lent, journalLock: journalLock}).closeOpenTxAfterFailure(ctx, fmt.Errorf("uow: %w", err))
 	}
 
 	// Bind journal and versioned-history activation to the connection this unit
@@ -286,6 +294,7 @@ func (p *doltSQLProvider) BeginTx(ctx context.Context) (Tx, error) {
 	}
 	return &doltServerTx{
 		conn:              conn,
+		lent:              lent,
 		journalLock:       journalLock,
 		admitJournal:      admit,
 		clearJournalScope: clearJournalScope,

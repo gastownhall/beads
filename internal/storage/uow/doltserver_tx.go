@@ -19,6 +19,10 @@ import (
 
 type doltServerTx struct {
 	conn *sql.Conn
+	// lent is the lender's session conn was borrowed from, nil when BeginTx
+	// pinned conn from the pool: a lent session goes back to its lender
+	// instead of being closed.
+	lent *lentSession
 	done bool
 	// journalLock is the journal-writer lock BeginTx took on conn before
 	// START TRANSACTION, nil when this unit of work took none. It is released
@@ -383,7 +387,7 @@ func (t *doltServerTx) releaseConn() {
 	t.releaseVersionScope()
 	t.releaseRecheckScope()
 	if t.conn != nil {
-		_ = t.conn.Close()
+		t.lent.giveBack(t.conn)
 		t.conn = nil
 	}
 }
@@ -442,6 +446,6 @@ func (t *doltServerTx) poisonConn() {
 		return
 	}
 	_ = t.conn.Raw(func(any) error { return driver.ErrBadConn })
-	_ = t.conn.Close()
+	t.lent.giveBack(t.conn)
 	t.conn = nil
 }

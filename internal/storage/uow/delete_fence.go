@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"sync/atomic"
 	"time"
 )
 
@@ -75,20 +76,18 @@ func deleteFenceLockName(databaseName, id string) string {
 // an established repo idiom (schema.MigrateUpWithLock,
 // internal/storage/dolt's own delete fence).
 //
-// UNLIKE internal/storage/dolt's fence, the lock connection here is NOT the
-// connection fn's write runs on: fn is left free to call RunTxResult, which
-// draws its own (possibly several, across retries) connection from p.db the
-// ordinary way. That is safe for exactly the reason the dolt-package fence's
-// doc calls out as the hazard to avoid there: THIS provider's pool is never
-// constrained to a single connection (no cmd/bd call site ever calls
-// SetPoolLimits on the proxied-server or bd-serve UOW chain — see pool.go),
-// so a dedicated lock connection can never starve the write of its own
-// connection. What matters for correctness is not which physical connection
-// runs the write but WHEN its transaction begins: fn (and therefore every
-// snapshot it establishes, across every retry) starts only after GET_LOCK has
-// already returned success, so a queued loser's first read can only ever
-// observe the winner's commit as already landed and durable.
-func withDeleteFence(ctx context.Context, p *doltSQLProvider, id string, fn func() error) error {
+// What matters for the fence's correctness is WHEN fn's transaction begins:
+// fn (and therefore every snapshot it establishes, across every retry) starts
+// only after GET_LOCK has already returned success, so a queued loser's first
+// read can only ever observe the winner's commit as already landed and
+// durable. fn is free to call RunTxResult, and its units of work run on the
+// fence's own session, lent to them through the ctx fn is handed
+// (withLentSession), as internal/storage/dolt's fence runs its write on its
+// pinned connection: the write's journal-writer admission is then taken on
+// the session that already holds the fence, fence before journal, so a
+// fenced delete waiting for the journal holds no second pool session
+// (gastownhall/beads#6117).
+func withDeleteFence(ctx context.Context, p *doltSQLProvider, id string, fn func(ctx context.Context) error) error {
 	conn, err := p.db.Conn(ctx)
 	if err != nil {
 		return fmt.Errorf("delete fence: acquire connection: %w", err)
@@ -110,7 +109,45 @@ func withDeleteFence(ctx context.Context, p *doltSQLProvider, id string, fn func
 	}
 	defer releaseDeleteFenceLock(conn, lockName)
 
-	return fn()
+	return fn(withLentSession(ctx, conn))
+}
+
+// lentSession is a session its holder lends, through a context, to the units
+// of work begun under it (doltSQLProvider.BeginTx), one at a time: a unit of
+// work begun while another has it borrowed draws its own session from the
+// pool, because a second START TRANSACTION on the session would commit the
+// first. A borrower never closes it; the lender does.
+type lentSession struct {
+	conn     *sql.Conn
+	borrowed atomic.Bool
+}
+
+type lentSessionKey struct{}
+
+// withLentSession lends conn to the units of work begun under the returned
+// context.
+func withLentSession(ctx context.Context, conn *sql.Conn) context.Context {
+	return context.WithValue(ctx, lentSessionKey{}, &lentSession{conn: conn})
+}
+
+// borrowLentSession borrows ctx's lent session, or returns nil when ctx lends
+// none or another unit of work has it.
+func borrowLentSession(ctx context.Context) *lentSession {
+	ls, ok := ctx.Value(lentSessionKey{}).(*lentSession)
+	if !ok || !ls.borrowed.CompareAndSwap(false, true) {
+		return nil
+	}
+	return ls
+}
+
+// giveBack returns a borrowed session to its lender, or closes conn, which
+// the borrower pinned from the pool itself, when ls is nil.
+func (ls *lentSession) giveBack(conn *sql.Conn) {
+	if ls == nil {
+		_ = conn.Close()
+		return
+	}
+	ls.borrowed.Store(false)
 }
 
 // currentDatabaseName reads the database conn's session is attached to.

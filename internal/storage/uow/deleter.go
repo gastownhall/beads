@@ -96,7 +96,7 @@ func (d *deleter) Delete(ctx context.Context, req publicops.DeleteRequest) (publ
 	if req.ExpectedVersion != nil {
 		if sp, ok := UnwrapProvider(d.provider).(*doltSQLProvider); ok {
 			var result publicops.DeleteResult
-			err := withDeleteFence(ctx, sp, req.IDs[0], func() error {
+			err := withDeleteFence(ctx, sp, req.IDs[0], func(ctx context.Context) error {
 				var ferr error
 				result, ferr = write(ctx)
 				return ferr
