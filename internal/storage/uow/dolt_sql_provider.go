@@ -221,6 +221,10 @@ func (p *doltSQLProvider) NewUOW(ctx context.Context) (UnitOfWork, error) {
 }
 
 func (p *doltSQLProvider) Close(ctx context.Context) error {
+	// Stop rediscovery first, so no discovery worker outlives the provider.
+	if p.endpointResolver != nil {
+		p.endpointResolver.close()
+	}
 	if p.db == nil {
 		return nil
 	}

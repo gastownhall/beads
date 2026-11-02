@@ -422,3 +422,54 @@ func TestProxyEndpointResolverDiscoveryBudget(t *testing.T) {
 		assert.Empty(t, d.dialed())
 	})
 }
+
+// TestProxyEndpointResolverClose pins that provider Close does not return while
+// a discovery is in flight, so no discovery worker outlives the provider, and
+// that afterwards every hook is refused without discovering or dialing.
+func TestProxyEndpointResolverClose(t *testing.T) {
+	b := newBlockedDiscovery()
+	r := newProxyEndpointResolver(b.discover)
+	r.arm()
+	d := &recordingDialer{}
+	p := &doltSQLProvider{db: openResolverPool(t, r, d, 5*time.Second), endpointResolver: r}
+	// A pool the provider does not own, sharing its resolver, shows what a
+	// connection attempt through the real driver does after Close.
+	other := openResolverPool(t, r, d, 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	connDone := make(chan error, 1)
+	go func() {
+		conn, err := p.db.Conn(ctx)
+		if conn != nil {
+			_ = conn.Close()
+		}
+		connDone <- err
+	}()
+	receiveWithin(t, b.entered, 10*time.Second, "discovery to start")
+
+	closed := make(chan error, 1)
+	go func() { closed <- p.Close(ctx) }()
+	select {
+	case err := <-closed:
+		t.Fatalf("Close returned (%v) while discovery was still in flight", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(b.release)
+	require.NoError(t, receiveWithin(t, closed, 10*time.Second, "Close"))
+	assert.Equal(t, int64(1), b.finished.Load(), "the in-flight discovery must have finished when Close returns")
+	r.mu.Lock()
+	assert.Nil(t, r.inflight, "no discovery may remain in flight after Close")
+	r.mu.Unlock()
+	require.Error(t, receiveWithin(t, connDone, 10*time.Second, "the in-flight connection"))
+
+	cfg := mysql.NewConfig()
+	cfg.Addr = "127.0.0.1:4000"
+	require.ErrorIs(t, r.beforeConnect(context.Background(), cfg), errProviderClosed)
+	assert.Equal(t, "127.0.0.1:4000", cfg.Addr)
+	_, err := other.Conn(ctx)
+	require.ErrorIs(t, err, errProviderClosed)
+	assert.Equal(t, int64(1), b.calls.Load(), "no discovery may start after Close")
+	assert.Empty(t, d.dialed(), "nothing may be dialed after Close")
+	require.NoError(t, p.Close(ctx), "Close is idempotent")
+}
