@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -437,5 +438,62 @@ INSERT INTO events (issue_id, event_type, actor, created_at, id) VALUES
 				t.Fatalf("restore printed %q with nothing to restore", notice.String())
 			}
 		})
+	}
+}
+
+// TestEmbeddedIgnoredMigration0031RetryAfterPartialRestore pins the failure
+// contract: a live write that fails after some restored rows have landed
+// fails the pass with 0031 still pending, and the next pass completes the
+// restore without adding any row twice.
+func TestEmbeddedIgnoredMigration0031RetryAfterPartialRestore(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+
+	dataDir := seedMainSchemaAt(t, ctx, 61)
+	conn, closeConn := openPinnedConn(t, ctx, dataDir)
+	defer closeConn()
+	seedPreflipEvents(t, ctx, conn)
+	if _, err := schema.MigrateUp(ctx, conn); err != nil {
+		t.Fatalf("MigrateUp (migrator): %v", err)
+	}
+	// The adopter's state: events present and empty, 0031 not yet recorded.
+	execFrozenGuard(t, ctx, conn, "DELETE FROM events")
+	mustExecOn(t, ctx, conn, "DELETE FROM ignored_schema_migrations WHERE version = 31")
+
+	// One issue per page and one row per INSERT, failing after the second.
+	restoreSizes := schema.SetPreflipEventsBatchSizesForTest(1, 1)
+	defer restoreSizes()
+	injected := errors.New("injected live write failure")
+	batches := 0
+	restoreHook := schema.SetPreflipEventsInsertFaultHookForTest(func() error {
+		if batches++; batches == 2 {
+			return injected
+		}
+		return nil
+	})
+	_, err := schema.MigrateUp(ctx, conn)
+	restoreHook()
+	if !errors.Is(err, injected) {
+		t.Fatalf("MigrateUp with a failing restore write = %v, want the injected failure", err)
+	}
+	if ignoredCursorHas(t, ctx, conn, 31) {
+		t.Fatal("ignored cursor recorded 0031 after the restore failed; the rest of the history would never come back")
+	}
+	partial := 0
+	for _, ids := range liveEvents(t, ctx, conn) {
+		partial += len(ids)
+	}
+	if partial != 2 {
+		t.Fatalf("live events hold %d rows after the failure, want the 2 written before it", partial)
+	}
+
+	if _, err := schema.MigrateUp(ctx, conn); err != nil {
+		t.Fatalf("MigrateUp (retry): %v", err)
+	}
+	got := liveEvents(t, ctx, conn)
+	requireContent(t, got, preflipSeededContent())
+	requireDerivedIDs(t, got)
+	if !ignoredCursorHas(t, ctx, conn, 31) {
+		t.Fatal("ignored cursor does not record 0031 after the retry")
 	}
 }
