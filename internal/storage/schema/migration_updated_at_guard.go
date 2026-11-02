@@ -44,6 +44,8 @@ var updatedAtGuards = map[repairKey]updatedAtGuardSpec{
 	{"schema_migrations", 47}: {restore: []string{"issues"}},
 	// 0053 copies rig wisps back into issues, then sets issues.ephemeral = 0.
 	{"schema_migrations", 53}: {restore: []string{"issues"}, moveSources: map[string]string{"issues": "wisps"}},
+	// Ignored 0007 clears and recomputes wisps.is_blocked.
+	{"ignored_schema_migrations", 7}: {restore: []string{"wisps"}},
 }
 
 // snapshotTables returns the restore targets plus their move sources, sorted.
