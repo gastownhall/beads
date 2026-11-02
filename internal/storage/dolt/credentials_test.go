@@ -18,6 +18,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
+	"github.com/steveyegge/beads/internal/storage/peercred"
 	"github.com/steveyegge/beads/internal/testutil"
 )
 
@@ -564,12 +565,13 @@ func TestEncryptDecryptRoundTrip(t *testing.T) {
 
 	password := "my-federation-password-123!"
 
-	encrypted, err := store.encryptPassword(password)
+	id := peercred.Identity{Name: "peerone", RemoteURL: "https://peer.example/db", Username: "alice"}
+	encrypted, err := store.encryptPassword(id, password)
 	if err != nil {
 		t.Fatalf("encryptPassword failed: %v", err)
 	}
 
-	decrypted, err := store.decryptPassword(encrypted)
+	decrypted, err := store.decryptPassword(id, encrypted)
 	if err != nil {
 		t.Fatalf("decryptPassword failed: %v", err)
 	}
@@ -582,7 +584,7 @@ func TestEncryptDecryptRoundTrip(t *testing.T) {
 func TestEncryptPasswordEmpty(t *testing.T) {
 	store := &DoltStore{}
 
-	encrypted, err := store.encryptPassword("")
+	encrypted, err := store.encryptPassword(peercred.Identity{Name: "peerone"}, "")
 	if err != nil {
 		t.Fatalf("encryptPassword with empty string failed: %v", err)
 	}
@@ -594,7 +596,7 @@ func TestEncryptPasswordEmpty(t *testing.T) {
 func TestDecryptPasswordEmpty(t *testing.T) {
 	store := &DoltStore{}
 
-	decrypted, err := store.decryptPassword(nil)
+	decrypted, err := store.decryptPassword(peercred.Identity{Name: "peerone"}, nil)
 	if err != nil {
 		t.Fatalf("decryptPassword with nil failed: %v", err)
 	}
@@ -606,7 +608,7 @@ func TestDecryptPasswordEmpty(t *testing.T) {
 func TestEncryptPasswordNoKey(t *testing.T) {
 	store := &DoltStore{}
 
-	_, err := store.encryptPassword("password")
+	_, err := store.encryptPassword(peercred.Identity{Name: "peerone"}, "password")
 	if err == nil {
 		t.Fatal("expected error when key is not initialized")
 	}
@@ -898,9 +900,9 @@ func TestFederationPeerDecryptKeyMismatchNamesTheLocalKey(t *testing.T) {
 		localKey[i] = byte(i + 1)
 	}
 
-	encrypted, err := encryptWithKey("peerpass", writerKey)
+	encrypted, err := peercred.Seal(writerKey, peercred.Identity{Name: "team", RemoteURL: "https://peer.example/peerdb", Username: "peeruser"}, "peerpass")
 	if err != nil {
-		t.Fatalf("encryptWithKey() error = %v", err)
+		t.Fatalf("peercred.Seal() error = %v", err)
 	}
 
 	// beadsDir is set only so the enrichment can resolve the key path it names;
@@ -1383,4 +1385,48 @@ func TestDecryptWithKeyStaysUnwrappedForRotation(t *testing.T) {
 	if errors.Is(err, storage.ErrCredentialKeyMismatch) {
 		t.Errorf("error = %v, want the bare cipher error; classification belongs to decryptPassword", err)
 	}
+}
+
+// GH#7890: federation_peers rows replicate between peers, so a partner can
+// copy a victim peer's password_encrypted (and username) into a row that
+// points at its own URL. The stored credential must be bound to the peer
+// identity it was added for, so the copied blob does not decrypt for the
+// attacker's row and withPeerCredentials never hands the victim's password to
+// an operation that would send it to the attacker's remote.
+func TestFederationPeerCopiedCiphertextDoesNotDecryptForAnotherPeer(t *testing.T) {
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i + 7)
+	}
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	store := &DoltStore{db: db, credentialKey: key, beadsDir: t.TempDir()}
+
+	// What AddFederationPeer stores for the legitimate peer "prod".
+	const prodPassword = "prod-s3cret"
+	prodBlob, err := store.encryptPassword(peercred.Identity{Name: "prod", RemoteURL: "https://prod.example/db", Username: "produser"}, prodPassword)
+	if err != nil {
+		t.Fatalf("encryptPassword() error = %v", err)
+	}
+
+	// The replicated attacker row: its own name and URL, prod's username and
+	// prod's ciphertext copied verbatim.
+	now := time.Now()
+	mock.ExpectQuery(regexp.QuoteMeta("FROM federation_peers WHERE name = ?")).
+		WithArgs("evil").
+		WillReturnRows(sqlmock.NewRows([]string{
+			"name", "remote_url", "username", "password_encrypted",
+			"sovereignty", "last_sync", "created_at", "updated_at",
+		}).AddRow("evil", "https://attacker.example/db", "produser", prodBlob, "T2", nil, now, now))
+
+	_ = store.withPeerCredentials(t.Context(), "evil", func(creds *remoteCredentials) error {
+		if creds != nil && creds.password == prodPassword {
+			t.Errorf("withPeerCredentials(evil) released prod's password %q for remote https://attacker.example/db; "+
+				"credentials must be bound to the peer identity they were stored for", creds.password)
+		}
+		return nil
+	})
 }
