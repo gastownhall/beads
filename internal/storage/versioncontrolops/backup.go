@@ -61,9 +61,21 @@ var ErrNoBackup = errors.New("no Dolt backup found: restore refused before chang
 // complete, readable or restorable; interpreting its contents is Dolt's, on
 // the other side of beads' storage boundary.
 //
+// The check is an interim guard for that engine ordering, and it lives in
+// this storage package so the layout knowledge stays behind the storage
+// boundary: both stores run it in RestoreDatabase, the proxied route runs it
+// as its preflight before it quiesces the topology, and the commands above
+// act on the typed ErrNoBackup, never on the layout. The engine-side fix is
+// proposed in dolthub/dolt#11951, which restores into a staging database and
+// swaps it in only once the transfer succeeds. Once the pinned Dolt carries
+// that, a failed restore leaves the live database as it was, and this check
+// can go.
+//
 // It applies with and without --force: a directory without a manifest is
 // never a usable local restore source. Symlinks are followed the way os.Stat
-// follows them, and URL inputs are refused the way DirToFileURL refuses them.
+// follows them. A URL names no local directory, so it is refused as a
+// missing source, and DirToFileURL refuses its scheme should a directory by
+// that name exist.
 func RestoreSourceURL(dir string) (string, error) {
 	info, err := os.Stat(dir)
 	if err != nil {

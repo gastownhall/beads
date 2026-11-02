@@ -307,7 +307,7 @@ func TestRestoreSourceErrorAdvice(t *testing.T) {
 	if !strings.HasPrefix(msg, refusal.Error()) {
 		t.Errorf("advice should carry the refusal's own text first, got:\n%s", msg)
 	}
-	for _, want := range []string{"no Dolt backup found", "database was not restored", "bd backup init", "bd backup sync", "bd import"} {
+	for _, want := range []string{"no Dolt backup found", "database was not restored", "bd backup init", "bd backup sync", "bd backup restore <dir>", "bd import"} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("advice %q is missing %q", msg, want)
 		}

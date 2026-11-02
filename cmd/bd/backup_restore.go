@@ -92,15 +92,16 @@ func init() {
 }
 
 // restoreSourceError adds what to do instead to err when it says the restore
-// source holds no Dolt backup (versioncontrolops.ErrNoBackup): the likeliest
-// wrong source is a JSONL export, which bd import loads. Any other error is
-// returned as it is. The advice is one line, and the refusal it wraps quotes
-// the source path, so a path cannot forge an output line.
+// source holds no Dolt backup (versioncontrolops.ErrNoBackup): pass the
+// directory 'bd backup init' set up, which the no-argument form never reads,
+// or load a JSONL export, the likeliest wrong source, with bd import. Any
+// other error is returned as it is. The advice is one line, and the refusal
+// it wraps quotes the source path, so a path cannot forge an output line.
 func restoreSourceError(err error) error {
 	if !errors.Is(err, versioncontrolops.ErrNoBackup) {
 		return err
 	}
-	return fmt.Errorf("%w. The database was not restored: restore takes a Dolt backup directory written by 'bd backup init <dir>' and 'bd backup sync'; to load a JSONL export, use 'bd import <file>' instead", err)
+	return fmt.Errorf("%w. The database was not restored. To restore the Dolt backup that 'bd backup init <dir>' and 'bd backup sync' wrote, run 'bd backup restore <dir>'; to load a JSONL export, run 'bd import <file>' instead", err)
 }
 
 // runBackupRestore restores the database from a Dolt-native backup.

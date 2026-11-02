@@ -9,6 +9,7 @@ import (
 	neturl "net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -161,9 +162,10 @@ func TestRestoreSourceURL(t *testing.T) {
 
 	// A directory whose manifest cannot be stat'd is refused with the
 	// underlying error preserved, not reported as a missing backup. Root and
-	// non-POSIX builds cannot make this happen; elsewhere the mode change is
-	// the whole fixture.
-	if os.Geteuid() != 0 {
+	// non-POSIX builds cannot make this happen (Windows reports euid -1, and
+	// its chmod only sets the read-only attribute); elsewhere the mode change
+	// is the whole fixture.
+	if runtime.GOOS != "windows" && os.Geteuid() != 0 {
 		denied := t.TempDir()
 		if err := os.WriteFile(filepath.Join(denied, "manifest"), nil, 0o600); err != nil {
 			t.Fatal(err)
