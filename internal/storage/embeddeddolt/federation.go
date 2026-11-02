@@ -241,7 +241,8 @@ func warnStoredPeerSuppressesAmbientPassword(peer string, p *storage.FederationP
 }
 
 // verifyPeerRemoteURL fails closed when the live remote named peer does not
-// carry the URL stored on the federation peer row. AddRemoteIfNotExists
+// carry the URL stored on the federation peer row, or the URL Dolt recorded
+// for it (peercred.RemoteURLMatches). AddRemoteIfNotExists
 // preserves an existing same-name remote regardless of its URL, so the name
 // alone does not prove the destination; installing the stored password for a
 // diverged URL would disclose it to an unrelated host. A missing remote fails
@@ -261,7 +262,7 @@ func (s *EmbeddedDoltStore) verifyPeerRemoteURL(ctx context.Context, peer, store
 	if err != nil {
 		return fmt.Errorf("resolve remote URL for peer %s: %w", remedy.PrintedValue(peer), err)
 	}
-	if liveURL != storedURL {
+	if !peercred.RemoteURLMatches(storedURL, liveURL) {
 		return fmt.Errorf("remote %s points at %q but federation peer %s stored its credentials for %q; refusing to send stored credentials to a diverged URL. Remove and re-add the peer to rebind it", remedy.PrintedValue(peer), liveURL, remedy.PrintedValue(peer), storedURL)
 	}
 	return nil
