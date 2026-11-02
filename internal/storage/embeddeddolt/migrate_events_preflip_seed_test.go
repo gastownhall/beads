@@ -251,3 +251,32 @@ INSERT INTO events (issue_id, event_type, actor, old_value, new_value, comment, 
 	assertEventsAbsentFromStatus(t, ctx, conn)
 }
 
+// TestEmbeddedPreflipSeedCompletesWithoutSourceSilently pins the no-source
+// shape: a database whose flip commit dropped an EMPTY table (the shape a
+// fresh install or a post-squash re-clone presents) records the restore's
+// completion silently — no rows are invented and the cursor advances.
+func TestEmbeddedPreflipSeedCompletesWithoutSourceSilently(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+
+	// Full chain from scratch: 0062 flips an empty events table, so the
+	// drop commit's parent carries the table with zero rows.
+	dataDir := seedMainSchemaAt(t, ctx, schema.LatestVersion())
+	conn, closeConn := openPinnedConn(t, ctx, dataDir)
+	defer closeConn()
+
+	if _, err := schema.MigrateUp(ctx, conn); err != nil {
+		t.Fatalf("MigrateUp: %v", err)
+	}
+
+	if got := scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM events"); got != 0 {
+		t.Fatalf("events rows after restore = %d, want 0 (nothing to restore, nothing invented)", got)
+	}
+	// The restore's version is recorded: this pass, and every later open,
+	// must see the work done rather than re-reading history each time.
+	if got := scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM ignored_schema_migrations WHERE version = 31"); got != 1 {
+		t.Fatalf("ignored_schema_migrations row for the restore version 31 = %d, want 1", got)
+	}
+	assertEventsAbsentFromStatus(t, ctx, conn)
+}
+
