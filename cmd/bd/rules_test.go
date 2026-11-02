@@ -1059,3 +1059,260 @@ func TestRulesCompact_Issue5719KeepsBackups(t *testing.T) {
 		})
 	}
 }
+
+// runRulesCompactText runs compact in text mode and returns stdout, stderr
+// and the error.
+func runRulesCompactText(t *testing.T, args ...string) (string, string, error) {
+	t.Helper()
+	cmd := newRulesCompactTestCmd(t, args...)
+	outFile, err := os.CreateTemp(t.TempDir(), "stdout-*")
+	if err != nil {
+		t.Fatalf("create temp: %v", err)
+	}
+	defer outFile.Close()
+	errFile, err := os.CreateTemp(t.TempDir(), "stderr-*")
+	if err != nil {
+		t.Fatalf("create temp: %v", err)
+	}
+	defer errFile.Close()
+
+	stdioMutex.Lock()
+	oldOut, oldErr := os.Stdout, os.Stderr
+	os.Stdout, os.Stderr = outFile, errFile
+	runErr := runRulesCompact(cmd, nil)
+	os.Stdout, os.Stderr = oldOut, oldErr
+	stdioMutex.Unlock()
+
+	stdout, err := os.ReadFile(outFile.Name())
+	if err != nil {
+		t.Fatalf("read captured stdout: %v", err)
+	}
+	stderr, err := os.ReadFile(errFile.Name())
+	if err != nil {
+		t.Fatalf("read captured stderr: %v", err)
+	}
+	return string(stdout), string(stderr), runErr
+}
+
+// An existing output or backup path, dangling symlinks included, refuses its
+// group in preview and apply alike: nothing of that group is written, backed
+// up or deleted, and compact exits nonzero naming the path.
+func TestRulesCompact_RefusesExistingDestinations(t *testing.T) {
+	for _, dest := range []struct {
+		name  string
+		plant func(t *testing.T, dir string) string
+	}{
+		{"existing backup", func(t *testing.T, dir string) string {
+			p := filepath.Join(dir, "beta.md.backup")
+			if err := os.WriteFile(p, []byte("an older backup\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return p
+		}},
+		{"dangling backup symlink", func(t *testing.T, dir string) string {
+			p := filepath.Join(dir, "alpha.md.backup")
+			if err := os.Symlink(filepath.Join(dir, "nowhere"), p); err != nil {
+				t.Fatal(err)
+			}
+			return p
+		}},
+		{"dangling output symlink", func(t *testing.T, dir string) string {
+			p := filepath.Join(dir, "disk.md")
+			if err := os.Symlink(filepath.Join(dir, "nowhere"), p); err != nil {
+				t.Fatal(err)
+			}
+			return p
+		}},
+	} {
+		for _, args := range [][]string{{"--auto"}, {"--auto", "--force"}, {"--group", "alpha,beta"}, {"--group", "alpha,beta", "--force"}} {
+			t.Run(dest.name+" "+strings.Join(args, " "), func(t *testing.T) {
+				dir := tempRulesDir(t)
+				writeRule(t, dir, "alpha", issue5719Alpha)
+				writeRule(t, dir, "beta", issue5719Beta)
+				conflict := dest.plant(t, dir)
+				before := snapshotDirLinks(t, dir)
+
+				out, stderr, err := runRulesCompactText(t, append([]string{"--path", dir}, args...)...)
+				if err == nil {
+					t.Fatalf("expected compact to refuse the group:\n%s", out)
+				}
+				if !strings.Contains(stderr, conflict+" already exists") {
+					t.Errorf("expected the refusal to name %s, got: %s", conflict, stderr)
+				}
+				if strings.Contains(out, "Preview merge") || strings.Contains(out, "Merged →") {
+					t.Errorf("a refused group must not read as a preview or merge:\n%s", out)
+				}
+				if after := snapshotDirLinks(t, dir); fmt.Sprint(after) != fmt.Sprint(before) {
+					t.Errorf("rules dir changed:\nbefore %v\nafter  %v", before, after)
+				}
+			})
+		}
+	}
+}
+
+// One refused auto group does not stop an independent one: the refused group
+// stays as it was, the other previews or applies, and compact exits nonzero.
+func TestRulesCompact_AutoRefusalSparesIndependentGroups(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		json bool
+	}{
+		{"preview", []string{"--auto"}, false},
+		{"force", []string{"--auto", "--force"}, false},
+		{"force json", []string{"--auto", "--force"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := tempRulesDir(t)
+			writeRule(t, dir, "alpha", issue5719Alpha)
+			writeRule(t, dir, "beta", issue5719Beta)
+			writeRule(t, dir, "gamma", "# Gamma\n\n**Do:** rotate vault secrets weekly\n")
+			writeRule(t, dir, "delta", "# Delta\n\n**Do:** rotate vault secrets weekly\n\nOn-call owns it.\n")
+			if err := os.WriteFile(filepath.Join(dir, "alpha.md.backup"), []byte("older\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			before := snapshotRulesDir(t, dir)
+			args := append([]string{"--path", dir}, tc.args...)
+
+			var out string
+			var err error
+			if tc.json {
+				out, err = runRulesCompactJSONRaw(t, args...)
+				var results []map[string]interface{}
+				if jerr := json.Unmarshal([]byte(out), &results); jerr != nil || len(results) != 2 {
+					t.Fatalf("want two group results (%v): %s", jerr, out)
+				}
+				for _, r := range results {
+					msg, _ := r["error"].(string)
+					switch r["group"] {
+					case "disk":
+						if r["applied"] != false || !strings.Contains(msg, "alpha.md.backup already exists") {
+							t.Errorf("disk group should be refused, got %v", r)
+						}
+					case "rotate":
+						if r["applied"] != true || msg != "" {
+							t.Errorf("rotate group should apply, got %v", r)
+						}
+					default:
+						t.Errorf("unexpected group %v", r)
+					}
+				}
+			} else {
+				var stderr string
+				out, stderr, err = runRulesCompactText(t, args...)
+				if !strings.Contains(stderr, "alpha.md.backup already exists") {
+					t.Errorf("expected the refusal to name alpha.md.backup, got: %s", stderr)
+				}
+				if !strings.Contains(out, "Refused merge → disk.md") {
+					t.Errorf("expected the disk group labelled as refused:\n%s", out)
+				}
+			}
+			if err == nil {
+				t.Fatalf("expected a nonzero exit for the refused group:\n%s", out)
+			}
+
+			after := snapshotRulesDir(t, dir)
+			for _, name := range []string{"alpha.md", "beta.md", "alpha.md.backup"} {
+				if after[name] != before[name] {
+					t.Errorf("refused group's %s changed: %q -> %q", name, before[name], after[name])
+				}
+			}
+			if _, ok := after["disk.md"]; ok {
+				t.Error("refused group wrote disk.md")
+			}
+			if _, ok := after["beta.md.backup"]; ok {
+				t.Error("refused group backed up beta.md")
+			}
+			if len(tc.args) == 1 {
+				if fmt.Sprint(ruleFileNames(after)) != fmt.Sprint(ruleFileNames(before)) {
+					t.Errorf("preview wrote files: %v", ruleFileNames(after))
+				}
+				if !strings.Contains(out, "Preview merge → rotate.md") {
+					t.Errorf("expected the rotate group previewed:\n%s", out)
+				}
+				return
+			}
+			if _, ok := after["rotate.md"]; !ok {
+				t.Errorf("independent group was not applied: %v", ruleFileNames(after))
+			}
+			for _, name := range []string{"gamma", "delta"} {
+				if after[name+".md.backup"] != before[name+".md"] {
+					t.Errorf("%s.md.backup = %q, want %q", name, after[name+".md.backup"], before[name+".md"])
+				}
+				if _, ok := after[name+".md"]; ok {
+					t.Errorf("%s.md should be deleted", name)
+				}
+			}
+		})
+	}
+}
+
+// Two auto groups that would write the same composite: the later one is
+// refused in preview as well as apply, rather than overwriting or reading as
+// a safe preview.
+func TestRulesCompact_AutoRefusesRepeatedOutputName(t *testing.T) {
+	for _, args := range [][]string{{"--auto"}, {"--auto", "--force"}} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			dir := tempRulesDir(t)
+			writeRule(t, dir, "alpha", fmt.Sprintf(sharedDiskDirective, "Alpha", "alpha"))
+			writeRule(t, dir, "beta", fmt.Sprintf(sharedDiskDirective, "Beta", "beta"))
+			writeRule(t, dir, "gamma", "# Gamma\n\n**Do:** disk quota zone\n")
+			writeRule(t, dir, "delta", "# Delta\n\n**Do:** disk quota zone\n")
+			before := snapshotRulesDir(t, dir)
+
+			out, stderr, err := runRulesCompactText(t, append([]string{"--path", dir}, args...)...)
+			if err == nil {
+				t.Fatalf("expected a nonzero exit for the repeated composite name:\n%s", out)
+			}
+			if strings.Count(out, "Refused merge → disk.md") != 1 {
+				t.Errorf("expected exactly one group refused:\n%s", out)
+			}
+			if !strings.Contains(stderr, "disk.md is also the composite of another group") {
+				t.Errorf("expected the refusal to name disk.md, got: %s", stderr)
+			}
+			after := snapshotRulesDir(t, dir)
+			// Exactly one pair is untouched; with --force the other is merged.
+			untouched := 0
+			for _, pair := range [][2]string{{"alpha.md", "beta.md"}, {"gamma.md", "delta.md"}} {
+				if after[pair[0]] == before[pair[0]] && after[pair[1]] == before[pair[1]] {
+					untouched++
+				}
+			}
+			want := 1
+			if len(args) == 1 {
+				want = 2
+			}
+			if untouched != want {
+				t.Errorf("%d groups untouched, want %d: %v", untouched, want, ruleFileNames(after))
+			}
+		})
+	}
+}
+
+// snapshotDirLinks returns name -> content, or the link target for a
+// symlink, for every entry in dir.
+func snapshotDirLinks(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read dir: %v", err)
+	}
+	files := make(map[string]string, len(entries))
+	for _, e := range entries {
+		p := filepath.Join(dir, e.Name())
+		if e.Type()&os.ModeSymlink != 0 {
+			target, err := os.Readlink(p)
+			if err != nil {
+				t.Fatalf("readlink %s: %v", p, err)
+			}
+			files[e.Name()] = "-> " + target
+			continue
+		}
+		data, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatalf("read %s: %v", p, err)
+		}
+		files[e.Name()] = string(data)
+	}
+	return files
+}

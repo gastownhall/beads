@@ -798,9 +798,16 @@ func runRulesCompact(cmd *cobra.Command, args []string) error {
 			Error   string          `json:"error,omitempty"`
 			Sources []compactSource `json:"sources"`
 		}
-		var results []compactResult
-		failed := 0
+		type compactPlan struct {
+			label, outName, merged string
+			rules                  []RuleFile
+			refused                error
+		}
 
+		// Plan and check every group before any is applied, so a preview
+		// refuses the same groups an apply would.
+		var plans []compactPlan
+		planned := make(map[string]bool)
 		for _, mc := range result.MergeCandidates {
 			// Parse the actual rule files for this group
 			var groupRules []RuleFile
@@ -820,15 +827,38 @@ func runRulesCompact(cmd *cobra.Command, args []string) error {
 				continue
 			}
 
-			outName := strings.ReplaceAll(mc.GroupLabel, " ", "-") + ".md"
+			plan := compactPlan{
+				label:   mc.GroupLabel,
+				outName: strings.ReplaceAll(mc.GroupLabel, " ", "-") + ".md",
+				merged:  merged,
+				rules:   groupRules,
+			}
+			outPath := filepath.Join(rulesPath, plan.outName)
+			if planned[outPath] {
+				plan.refused = fmt.Errorf("%s is also the composite of another group; refusing to write it twice. Merge one of the groups with --group, then re-run", outPath)
+			} else {
+				planned[outPath] = true
+				plan.refused = checkCompactDestinations(outPath, groupRules)
+			}
+			plans = append(plans, plan)
+		}
+
+		results := make([]compactResult, 0, len(plans))
+		failed := 0
+		for _, plan := range plans {
 			res := compactResult{
-				Group:  mc.GroupLabel,
-				Output: merged,
-				Rules:  len(groupRules),
+				Group:  plan.label,
+				Output: plan.merged,
+				Rules:  len(plan.rules),
 			}
 			var backedUp map[string]bool
-			if apply {
-				written, done, err := writeCompactedRule(filepath.Join(rulesPath, outName), merged, groupRules)
+			switch {
+			case plan.refused != nil:
+				fmt.Fprintf(os.Stderr, "Error: %v\n", plan.refused)
+				res.Error = plan.refused.Error()
+				failed++
+			case apply:
+				written, done, err := writeCompactedRule(filepath.Join(rulesPath, plan.outName), plan.merged, plan.rules)
 				res.Applied, backedUp = written, done
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -836,11 +866,15 @@ func runRulesCompact(cmd *cobra.Command, args []string) error {
 					failed++
 				}
 			}
-			res.Sources = compactSources(groupRules, backedUp)
+			res.Sources = compactSources(plan.rules, backedUp)
 			results = append(results, res)
 
 			if !jsonOutput {
-				printCompactPreview(outName, merged, res.Sources, res.Applied, res.Error == "")
+				if plan.refused != nil {
+					printCompactRefused(plan.outName, res.Sources)
+				} else {
+					printCompactPreview(plan.outName, plan.merged, res.Sources, res.Applied, res.Error == "")
+				}
 			}
 		}
 
@@ -881,11 +915,13 @@ func runRulesCompact(cmd *cobra.Command, args []string) error {
 	}
 
 	outName := strings.ReplaceAll(label, " ", "-") + ".md"
+	outPath := filepath.Join(rulesPath, outName)
 	written := false
 	var backedUp map[string]bool
-	var applyErr error
-	if apply {
-		written, backedUp, applyErr = writeCompactedRule(filepath.Join(rulesPath, outName), merged, groupRules)
+	applyErr := checkCompactDestinations(outPath, groupRules)
+	refused := applyErr != nil
+	if apply && !refused {
+		written, backedUp, applyErr = writeCompactedRule(outPath, merged, groupRules)
 	}
 	sources := compactSources(groupRules, backedUp)
 
@@ -910,6 +946,10 @@ func runRulesCompact(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
+	if refused {
+		printCompactRefused(outName, sources)
+		return HandleError("%v", applyErr)
+	}
 	if applyErr != nil && !written {
 		return HandleError("%v", applyErr)
 	}
@@ -991,6 +1031,41 @@ func printCompactPreview(outName, merged string, sources []compactSource, applie
 		fmt.Printf("Would back up: %s\n", strings.Join(backups, ", "))
 		fmt.Printf("Would delete: %s\n\n", strings.Join(names, ", "))
 	}
+}
+
+// printCompactRefused reports a group compact will not merge, without showing
+// it as a preview that is safe to apply.
+func printCompactRefused(outName string, sources []compactSource) {
+	names := make([]string, 0, len(sources))
+	for _, s := range sources {
+		names = append(names, filepath.Base(s.File))
+	}
+	fmt.Printf("Refused merge → %s: nothing written, backed up or deleted for %s (see the error).\n\n", outName, strings.Join(names, ", "))
+}
+
+// checkCompactDestinations refuses a group whose composite or backup path
+// already exists, dangling symlinks included, before anything is written. A
+// clean check does not guarantee the apply succeeds: writeCompactedRule still
+// creates each file exclusively.
+func checkCompactDestinations(outPath string, sources []RuleFile) error {
+	paths := []string{outPath}
+	for _, s := range compactSources(sources, nil) {
+		paths = append(paths, s.Backup)
+	}
+	var conflicts []string
+	for _, p := range paths {
+		_, err := os.Lstat(p)
+		switch {
+		case err == nil:
+			conflicts = append(conflicts, p+" already exists")
+		case !errors.Is(err, fs.ErrNotExist):
+			conflicts = append(conflicts, fmt.Sprintf("cannot check %s: %v", p, err))
+		}
+	}
+	if len(conflicts) > 0 {
+		return fmt.Errorf("refusing to compact into %s: %s. Rename or move those files (and update --group if it names them), then re-run", outPath, strings.Join(conflicts, "; "))
+	}
+	return nil
 }
 
 // writeCompactedRule creates outPath, copies every source to its backup path,
