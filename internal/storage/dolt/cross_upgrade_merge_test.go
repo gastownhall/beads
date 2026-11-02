@@ -82,25 +82,33 @@ func TestCrossUpgradeBoundaryMerge(t *testing.T) {
 			t.Errorf("merged edge id = %q, want deterministic %q", gotID, want)
 		}
 
+		// Every issue still holds the shared ancestor's updated_at, which is
+		// what kept the two upgrades from conflicting on the cell (#5981):
 		// anc-x is blocked by anc-y, so both upgrades' 0046/0047 recomputes
-		// rewrote it. It must still hold the shared ancestor's updated_at:
-		// each clone's guard put that value back, which is what kept the
-		// two upgrades from conflicting on the cell (#5981).
+		// rewrote it; anc-y is the edge's target, which 0041's dependency
+		// split joins and the engine stamps; anc-z is untouched. Each
+		// clone's guard put the rewritten rows' values back.
 		var blocked bool
-		var merged, ancestor time.Time
 		if err := env.conn.QueryRowContext(ctx,
-			"SELECT is_blocked, updated_at FROM issues WHERE id = 'anc-x'").Scan(&blocked, &merged); err != nil {
+			"SELECT is_blocked FROM issues WHERE id = 'anc-x'").Scan(&blocked); err != nil {
 			t.Fatalf("read merged anc-x: %v", err)
-		}
-		if err := env.conn.QueryRowContext(ctx,
-			"SELECT updated_at FROM issues AS OF 'main' WHERE id = 'anc-x'").Scan(&ancestor); err != nil {
-			t.Fatalf("read ancestor anc-x: %v", err)
 		}
 		if !blocked {
 			t.Fatal("anc-x is not blocked after the upgrades; the recompute this case relies on did not run")
 		}
-		if !merged.Equal(ancestor) {
-			t.Errorf("merged anc-x updated_at = %s, want the ancestor's %s (an upgrade stamped it)", merged, ancestor)
+		for _, id := range []string{"anc-x", "anc-y", "anc-z"} {
+			var merged, ancestor time.Time
+			if err := env.conn.QueryRowContext(ctx,
+				"SELECT updated_at FROM issues WHERE id = ?", id).Scan(&merged); err != nil {
+				t.Fatalf("read merged %s: %v", id, err)
+			}
+			if err := env.conn.QueryRowContext(ctx,
+				"SELECT updated_at FROM issues AS OF 'main' WHERE id = ?", id).Scan(&ancestor); err != nil {
+				t.Fatalf("read ancestor %s: %v", id, err)
+			}
+			if !merged.Equal(ancestor) {
+				t.Errorf("merged %s updated_at = %s, want the ancestor's %s (an upgrade stamped it)", id, merged, ancestor)
+			}
 		}
 	})
 
@@ -171,12 +179,14 @@ func (e *crossUpgradeEnv) upgradeBranch(t *testing.T, branch string) {
 	if _, err := schema.MigrateUp(e.ctx, e.conn); err != nil {
 		t.Fatalf("MigrateUp on %s: %v", branch, err)
 	}
-	// No updated_at pin here. Frozen migrations 0046/0047 flip is_blocked on
-	// issue rows, and issues.updated_at carries ON UPDATE CURRENT_TIMESTAMP,
-	// so before the runner's updated_at guard (#5981) each branch stamped
-	// its own migration wall clock on blocked rows, and branches upgraded
-	// across a second boundary conflicted on that cell in the DOLT_MERGE
-	// below (bd-578h9.19). The guard restores each row's pre-step value, so
+	// No updated_at pin here. issues.updated_at carries ON UPDATE
+	// CURRENT_TIMESTAMP, and frozen migrations stamp it: 0046/0047 flip
+	// is_blocked on blocked rows, and 0041's dependency split joins every
+	// dependency target (the engine stamps a joined table's rows too). Before
+	// the runner's updated_at guard (#5981) each branch stamped its own
+	// migration wall clock on those rows, and branches upgraded across a
+	// second boundary conflicted on that cell in the DOLT_MERGE below
+	// (bd-578h9.19). The guard restores each row's pre-step value, so
 	// independently upgraded clones hold identical rows; the "synced clones"
 	// case asserts that directly.
 	//

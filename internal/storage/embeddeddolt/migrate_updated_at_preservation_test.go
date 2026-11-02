@@ -308,6 +308,171 @@ func TestEmbeddedMigrateRowMovesKeepUpdatedAt(t *testing.T) {
 	})
 }
 
+// TestEmbeddedMigrate0041KeepsDependencyTargetsUpdatedAt pins the join rule
+// on a real upgrade. 0041 splits dependencies.depends_on_id with UPDATEs that
+// join issues and wisps without assigning any of their columns, and the
+// engine still stamps every row those joins match: every issue and wisp a
+// dependency points at, blocking or not. A v40 store keeps every issue's and
+// the wisp target's updated_at through 0041 (working set and step commit)
+// and through the rest of the upgrade, while the split lands and the blocked
+// issue is flagged.
+func TestEmbeddedMigrate0041KeepsDependencyTargetsUpdatedAt(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+	dataDir := seedMainSchemaAt(t, ctx, 40)
+
+	conn, closeConn := openPinnedConn(t, ctx, dataDir)
+	defer closeConn()
+
+	issues := []stampedIssue{
+		{id: "ua-dep-src", status: "open", stamp: historicalStamp(41), wantBlocked: true},
+		{id: "ua-dep-target", status: "open", stamp: historicalStamp(42)},
+		{id: "ua-dep-parent", status: "open", issueType: "epic", stamp: historicalStamp(43)},
+		{id: "ua-dep-child", status: "open", stamp: historicalStamp(44)},
+		{id: "ua-dep-free", status: "open", stamp: historicalStamp(45)},
+	}
+	wispTarget := stampedIssue{id: "ua-dep-wisp-target", status: "open", ephemeral: true, stamp: historicalStamp(46)}
+	insertStampedIssues(t, ctx, conn, "issues", issues, false)
+	insertStampedIssues(t, ctx, conn, "wisps", []stampedIssue{wispTarget}, false)
+	for _, e := range [][3]string{
+		{"ua-dep-src", "ua-dep-target", "blocks"},
+		{"ua-dep-child", "ua-dep-parent", "parent-child"},
+		{"ua-dep-src", wispTarget.id, "related"},
+		{"ua-dep-src", "external:gh-41", "related"},
+	} {
+		if _, err := conn.ExecContext(ctx,
+			"INSERT INTO dependencies (issue_id, depends_on_id, type, created_at, created_by) VALUES (?, ?, ?, '2025-01-01 00:00:00', 'fixture')",
+			e[0], e[1], e[2]); err != nil {
+			t.Fatalf("seed v40 dependency %v: %v", e, err)
+		}
+	}
+	commitFixture(t, ctx, conn, "test: v40 dependency targets with historical updated_at")
+
+	migrateUpStoppingAfter(t, ctx, conn, 41)
+	for _, r := range issues {
+		requireStamp(t, ctx, conn, "issues", r.id, r.stamp)
+		requireStamp(t, ctx, conn, "issues AS OF 'HEAD'", r.id, r.stamp)
+	}
+	requireStamp(t, ctx, conn, "wisps", wispTarget.id, wispTarget.stamp)
+	// The split itself still lands: each target in its own column.
+	for _, q := range []string{
+		"SELECT COUNT(*) FROM dependencies WHERE issue_id = 'ua-dep-src' AND depends_on_issue_id = 'ua-dep-target'",
+		"SELECT COUNT(*) FROM dependencies WHERE issue_id = 'ua-dep-child' AND depends_on_issue_id = 'ua-dep-parent'",
+		"SELECT COUNT(*) FROM dependencies WHERE issue_id = 'ua-dep-src' AND depends_on_wisp_id = 'ua-dep-wisp-target'",
+		"SELECT COUNT(*) FROM dependencies WHERE issue_id = 'ua-dep-src' AND depends_on_external = 'external:gh-41'",
+	} {
+		var n int
+		if err := conn.QueryRowContext(ctx, q).Scan(&n); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+		if n != 1 {
+			t.Errorf("%s = %d, want 1 after 0041's split", q, n)
+		}
+	}
+
+	if _, err := schema.MigrateUp(ctx, conn); err != nil {
+		t.Fatalf("MigrateUp to latest: %v", err)
+	}
+	for _, r := range issues {
+		requireStamp(t, ctx, conn, "issues", r.id, r.stamp)
+		if got := readIsBlocked(t, ctx, conn, "issues", r.id); got != r.wantBlocked {
+			t.Errorf("issues %s: is_blocked = %v, want %v", r.id, got, r.wantBlocked)
+		}
+	}
+	requireStamp(t, ctx, conn, "wisps", wispTarget.id, wispTarget.stamp)
+}
+
+// TestEmbeddedMigrateIgnored0011KeepsUpdatedAt pins the join rule on the
+// ignored series: ignored 0011 folds a wisp's leftover child_counters row
+// into wisp_child_counters with an UPDATE that joins wisps without assigning
+// them, which stamps the wisp. The first pass on a fresh store stops right
+// after ignored 0010 (the second step numbered 10), so the second pass
+// genuinely executes ignored 0011, and is stopped right after it.
+func TestEmbeddedMigrateIgnored0011KeepsUpdatedAt(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+	dataDir := filepath.Join(t.TempDir(), ".beads", "embeddeddolt")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	boot, bootCleanup, err := embeddeddolt.OpenSQL(ctx, dataDir, "", "")
+	if err != nil {
+		t.Fatalf("OpenSQL boot: %v", err)
+	}
+	if _, err := boot.ExecContext(ctx, "CREATE DATABASE IF NOT EXISTS testdb"); err != nil {
+		t.Fatalf("CREATE DATABASE: %v", err)
+	}
+	_ = bootCleanup()
+	conn, closeConn := openPinnedConn(t, ctx, dataDir)
+	defer closeConn()
+
+	seen10 := 0
+	restore := schema.SetMigrateStepFaultHookForTest(func(_ context.Context, _ schema.DBConn, v int) error {
+		if v == 10 {
+			if seen10++; seen10 == 2 {
+				return fmt.Errorf("injected fault: stop after ignored migration %d", v)
+			}
+		}
+		return nil
+	})
+	_, err = schema.MigrateUp(ctx, conn)
+	restore()
+	if err == nil || !strings.Contains(err.Error(), "injected fault") {
+		t.Fatalf("first MigrateUp err = %v, want the injected fault after ignored 0010", err)
+	}
+
+	parent := stampedIssue{id: "ua-wisp-counter-parent", status: "open", ephemeral: true, stamp: historicalStamp(51)}
+	bystander := stampedIssue{id: "ua-wisp-counter-bystander", status: "open", ephemeral: true, stamp: historicalStamp(52)}
+	insertStampedIssues(t, ctx, conn, "wisps", []stampedIssue{parent, bystander}, false)
+	for _, q := range []string{
+		"SET FOREIGN_KEY_CHECKS = 0",
+		"INSERT INTO child_counters (parent_id, last_child) VALUES ('ua-wisp-counter-parent', 5)",
+		"SET FOREIGN_KEY_CHECKS = 1",
+		"INSERT INTO wisp_child_counters (parent_id, last_child) VALUES ('ua-wisp-counter-parent', 3)",
+	} {
+		if _, err := conn.ExecContext(ctx, q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	commitFixture(t, ctx, conn, "test: leftover child counter for a wisp at ignored v10")
+
+	restore = schema.SetMigrateStepFaultHookForTest(func(_ context.Context, _ schema.DBConn, v int) error {
+		if v == 11 {
+			return fmt.Errorf("injected fault: stop after ignored migration %d", v)
+		}
+		return nil
+	})
+	_, err = schema.MigrateUp(ctx, conn)
+	restore()
+	if err == nil || !strings.Contains(err.Error(), "injected fault") {
+		t.Fatalf("second MigrateUp err = %v, want the injected fault after ignored 0011", err)
+	}
+	var cursor int
+	if err := conn.QueryRowContext(ctx, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations").Scan(&cursor); err != nil {
+		t.Fatalf("read ignored cursor: %v", err)
+	}
+	if cursor != 11 {
+		t.Fatalf("ignored cursor = %d, want 11 (ignored 0011 must have executed)", cursor)
+	}
+	requireStamp(t, ctx, conn, "wisps", parent.id, parent.stamp)
+	requireStamp(t, ctx, conn, "wisps", bystander.id, bystander.stamp)
+	// The fold itself still lands.
+	var last int
+	if err := conn.QueryRowContext(ctx, "SELECT last_child FROM wisp_child_counters WHERE parent_id = ?", parent.id).Scan(&last); err != nil {
+		t.Fatalf("read wisp_child_counters: %v", err)
+	}
+	if last != 5 {
+		t.Errorf("wisp_child_counters.last_child = %d, want 5 (GREATEST of both counters)", last)
+	}
+	var leftover int
+	if err := conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM child_counters WHERE parent_id = ?", parent.id).Scan(&leftover); err != nil {
+		t.Fatalf("count child_counters: %v", err)
+	}
+	if leftover != 0 {
+		t.Errorf("child_counters still holds %s's counter after ignored 0011 (%d row(s))", parent.id, leftover)
+	}
+}
+
 // TestEmbeddedMigrateIgnored0007KeepsUpdatedAt is AC-4: ignored migration
 // 0007 clears and recomputes wisps.is_blocked. A fresh store's first pass is
 // stopped right after ignored 0006 (the second step numbered 6: main 0006
