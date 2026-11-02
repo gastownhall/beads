@@ -340,7 +340,7 @@ in; 13 is the HTTP surface, which lands with the command rather than after it.
     | File | Edit |
     |---|---|
     | `spec/openapi.v0.yaml` | The operation, its schemas, and the capability token in `ContextResponse.capabilities`'s prose — that token is hand-edited; `Capabilities()` itself is derived from the route table |
-    | `internal/httpapi/apigen/types.gen.go` | Regenerated from the spec — `make api-check` writes it; about thirty lines per operation in both evidence commits |
+    | `internal/httpapi/apigen/types.gen.go` | Regenerated from the spec — `make api-check` writes it; sixty to ninety lines per operation in the two evidence commits |
     | `problem.go` | The `Op<Name>` constant and its `operationCodes` row |
     | `routes.go` | The `routeTable` row, carrying the `capability` token |
     | `server.go` | A required `Config` field, its entry in `sourceRoles`, its name in `roleSourceNames`, the `Server` field, the `Listen` assignment, and the per-request accessor |

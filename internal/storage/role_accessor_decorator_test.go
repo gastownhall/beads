@@ -304,10 +304,11 @@ func (s *roleAccessorStore) BlockedLister() (issueops.BlockedLister, error) {
 	return s.blockedLister, s.err
 }
 
-// roleAccessorSentinel implements thirty of the thirty-three roles at
+// roleAccessorSentinel implements twenty-nine of the thirty-three roles at
 // once — every one but memoryops.Memories, whose List collides with
-// issueops.Reader.List and needs the second sentinel below; issueops.Claimer
-// and issueops.MoleculeStepper are the other two absences.
+// issueops.Reader.List and needs the second sentinel below; issueops.Claimer,
+// issueops.MoleculeStepper and issueops.TreeWalker (no WalkTree here — the
+// store's tree field is left nil) are the other three absences.
 // Nothing calls its methods; identity is the whole point.
 type roleAccessorSentinel struct{}
 
