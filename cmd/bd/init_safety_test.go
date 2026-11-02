@@ -902,6 +902,42 @@ func TestCheckRemoteSafety_RefusalTextNoEcho(t *testing.T) {
 	}
 }
 
+// TestCheckRemoteSafety_UnverifiedRefusalText pins the recovery text of the
+// GH#7665 refusal. It must explain that the check failed, not that history
+// exists; it must offer the remedies that work without reading the remote
+// (restore access, or init with no remote via --remote=""); and it must not
+// suggest bd bootstrap, which needs the very access the probe lacked. The
+// ADR no-echo contract applies as to every refusal.
+func TestCheckRemoteSafety_UnverifiedRefusalText(t *testing.T) {
+	msg := CheckRemoteSafety(RemoteSafetyInput{RemoteDoltDataUnverified: true, ReinitLocal: true}).UserMessage
+
+	for _, must := range []string{
+		"could not verify whether remote 'origin' has Dolt history",
+		"the check of the remote failed",
+		"cannot rule out existing Dolt history",
+		"Restore access to the remote",
+		`--remote=""`,
+		"bd help init-safety",
+		"--from-jsonl",
+	} {
+		if !strings.Contains(msg, must) {
+			t.Errorf("unverified refusal missing %q:\n%s", must, msg)
+		}
+	}
+	for _, banned := range []string{
+		"already has Dolt history",
+		"bd bootstrap",
+		"bd init --force --discard-remote --destroy-token",
+		"bd init --reinit-local --discard-remote --destroy-token",
+		"--destroy-token=",
+		"DESTROY-",
+	} {
+		if strings.Contains(msg, banned) {
+			t.Errorf("unverified refusal contains %q:\n%s", banned, msg)
+		}
+	}
+}
+
 func TestShouldWireInitRemote(t *testing.T) {
 	tests := []struct {
 		name              string
