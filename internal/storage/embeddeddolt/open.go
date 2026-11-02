@@ -30,6 +30,7 @@ const (
 // OpenSQL opens an embedded Dolt database at dir. The returned cleanup
 // function closes both the *sql.DB and the underlying connector.
 func OpenSQL(ctx context.Context, dir, database, branch string) (*sql.DB, func() error, error) {
+	openStart := time.Now()
 	dsn := buildDSN(dir, database)
 
 	cfg, err := doltembed.ParseDSN(dsn)
@@ -71,7 +72,21 @@ func OpenSQL(ctx context.Context, dir, database, branch string) (*sql.DB, func()
 	}
 
 	if err := db.PingContext(ctx); err != nil {
-		return nil, nil, errors.Join(err, cleanup())
+		// Say what was being done, where, and for how long, and keep the
+		// engine's own error (its busy-lock text names no holder either —
+		// an unproven guess would be worse than silence; the manual
+		// diagnostic starts from the location, see
+		// docs/reference/configuration.md), the caller's expiry, and the
+		// cleanup result.
+		diag := fmt.Errorf("opening the embedded Dolt database at %s failed after %s: %w",
+			dir, time.Since(openStart).Round(time.Millisecond), err)
+		var errs []error
+		errs = append(errs, diag)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			errs = append(errs, ctxErr)
+		}
+		errs = append(errs, cleanup())
+		return nil, nil, errors.Join(errs...)
 	}
 
 	if strings.TrimSpace(database) != "" {
