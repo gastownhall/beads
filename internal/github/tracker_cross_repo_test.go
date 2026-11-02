@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -243,6 +244,13 @@ func (s *githubAPIStub) requests(n int) []string {
 	return out
 }
 
+// requestLog returns every recorded request, in order.
+func (s *githubAPIStub) requestLog() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.calls...)
+}
+
 // gitHubIssueJSON renders one owner-b/repo-b REST issue object.
 func gitHubIssueJSON(number int, title string, updated time.Time) string {
 	return fmt.Sprintf(`{"id":%d,"number":%d,"title":%q,"body":"","state":"open",`+
@@ -390,4 +398,139 @@ func TestPull_PrelinkedOtherRepoBeadNotHydrated(t *testing.T) {
 	if result.PullStats.Created != 0 || result.PullStats.Updated != 0 {
 		t.Errorf("created=%d updated=%d, want 0 and 0", result.PullStats.Created, result.PullStats.Updated)
 	}
+}
+
+// TestPush_OtherRepoBeadLeavesConfiguredRepoIssueAlone: pushing to B must
+// neither fetch nor update B's issue 1313 on behalf of A's locally edited
+// bead, in a real run or a preview, nor relink the bead. Own-repository
+// updates and unlinked creates still go through.
+func TestPush_OtherRepoBeadLeavesConfiguredRepoIssueAlone(t *testing.T) {
+	ownRef := "https://github.com/owner-b/repo-b/issues/7"
+	for _, dryRun := range []bool{false, true} {
+		t.Run(fmt.Sprintf("isolated/dry-run=%v", dryRun), func(t *testing.T) {
+			stub, tr := newGitHubAPIStub(t)
+			stub.issues[1313] = gitHubIssueJSON(1313, "Repo B issue 1313", crossRepoRemote)
+			store := newCrossRepoStore(repoABead(crossRepoLocal))
+
+			result, err := tracker.NewEngine(tr, store, "test").Sync(context.Background(),
+				tracker.SyncOptions{Push: true, DryRun: dryRun})
+			if err != nil {
+				t.Fatalf("Sync: %v", err)
+			}
+
+			store.assertUntouched(t, crossRepoAID, crossRepoAT, crossRepoARef)
+			if got := stub.requestLog(); len(got) != 0 {
+				t.Errorf("push issued requests %q, want none", got)
+			}
+			if got := result.PushStats; got.Created != 0 || got.Updated != 0 || got.Skipped != 1 {
+				t.Errorf("push stats created=%d updated=%d skipped=%d, want 0, 0, 1",
+					got.Created, got.Updated, got.Skipped)
+			}
+		})
+
+		t.Run(fmt.Sprintf("mixed/dry-run=%v", dryRun), func(t *testing.T) {
+			stub, tr := newGitHubAPIStub(t)
+			stub.issues[1313] = gitHubIssueJSON(1313, "Repo B issue 1313", crossRepoRemote)
+			stub.issues[7] = gitHubIssueJSON(7, "Own issue 7", crossRepoRemote)
+			store := newCrossRepoStore(
+				repoABead(crossRepoLocal),
+				&types.Issue{ID: "bd-own7", Title: "Own issue 7 edited", Status: types.StatusOpen,
+					IssueType: types.TypeTask, ExternalRef: &ownRef, UpdatedAt: crossRepoLocal},
+				&types.Issue{ID: "bd-unlinked", Title: "Unlinked", Status: types.StatusOpen,
+					IssueType: types.TypeTask, UpdatedAt: crossRepoLocal},
+			)
+
+			result, err := tracker.NewEngine(tr, store, "test").Sync(context.Background(),
+				tracker.SyncOptions{Push: true, DryRun: dryRun})
+			if err != nil {
+				t.Fatalf("Sync: %v", err)
+			}
+
+			store.assertUntouched(t, crossRepoAID, crossRepoAT, crossRepoARef)
+			if got := stub.requests(1313); len(got) != 0 {
+				t.Errorf("push sent requests for B's issue 1313 on behalf of %s: %v", crossRepoAID, got)
+			}
+			if got := result.PushStats; got.Created != 1 || got.Updated != 1 || got.Skipped != 1 {
+				t.Errorf("push stats created=%d updated=%d skipped=%d, want created=1 (unlinked) updated=1 (own) skipped=1 (repo A)",
+					got.Created, got.Updated, got.Skipped)
+			}
+			var want []string
+			if !dryRun {
+				want = []string{
+					"GET /repos/owner-b/repo-b/issues/7",
+					"PATCH /repos/owner-b/repo-b/issues/7",
+					"POST /repos/owner-b/repo-b/issues",
+				}
+				if linked := store.issues["bd-unlinked"].ExternalRef; linked == nil ||
+					*linked != "https://github.com/owner-b/repo-b/issues/8" {
+					t.Errorf("unlinked bead external_ref = %s, want B's created issue 8", derefRef(linked))
+				}
+			}
+			if got := stub.requestLog(); !slices.Equal(got, want) {
+				t.Errorf("push issued requests %q, want %q", got, want)
+			}
+		})
+
+		// A conflict resolved as "keep local" forces a push. A's bead must not
+		// become a conflict against B's issue, so nothing is forced onto it.
+		t.Run(fmt.Sprintf("forced/dry-run=%v", dryRun), func(t *testing.T) {
+			stub, tr := newGitHubAPIStub(t)
+			stub.issues[1313] = gitHubIssueJSON(1313, "Repo B issue 1313", crossRepoRemote)
+			store := newCrossRepoStore(repoABead(crossRepoLocal))
+			store.meta["github.last_sync"] = crossRepoSync.Format(time.RFC3339)
+
+			result, err := tracker.NewEngine(tr, store, "test").Sync(context.Background(),
+				tracker.SyncOptions{Pull: true, Push: true, DryRun: dryRun, ConflictResolution: tracker.ConflictLocal})
+			if err != nil {
+				t.Fatalf("Sync: %v", err)
+			}
+
+			store.assertUntouched(t, crossRepoAID, crossRepoAT, crossRepoARef)
+			if got := stub.requests(1313); len(got) != 0 {
+				t.Errorf("sync sent requests for B's issue 1313 on behalf of %s: %v", crossRepoAID, got)
+			}
+			if got := result.PushStats; got.Created != 0 || got.Updated != 0 || got.Skipped != 1 {
+				t.Errorf("push stats created=%d updated=%d skipped=%d, want 0, 0, 1",
+					got.Created, got.Updated, got.Skipped)
+			}
+		})
+	}
+
+	// B's own issue 99, edited on both sides since the last sync, is a real
+	// conflict that "keep local" resolves by forcing its update: the forced
+	// push still skips A's bead and never addresses issue 1313.
+	t.Run("forced own-repo conflict", func(t *testing.T) {
+		stub, tr := newGitHubAPIStub(t)
+		stub.issues[1313] = gitHubIssueJSON(1313, "Repo B issue 1313", crossRepoRemote)
+		stub.issues[99] = gitHubIssueJSON(99, "Repo B issue 99 (remote)", crossRepoRemote)
+		stub.list = []int{99}
+		ref99 := "https://github.com/owner-b/repo-b/issues/99"
+		store := newCrossRepoStore(
+			repoABead(crossRepoLocal),
+			&types.Issue{ID: "bd-b99", Title: "Local edit on B's bead", Status: types.StatusOpen,
+				IssueType: types.TypeTask, ExternalRef: &ref99, UpdatedAt: crossRepoLocal},
+		)
+		store.meta["github.last_sync"] = crossRepoSync.Format(time.RFC3339)
+
+		result, err := tracker.NewEngine(tr, store, "test").Sync(context.Background(),
+			tracker.SyncOptions{Pull: true, Push: true, ConflictResolution: tracker.ConflictLocal})
+		if err != nil {
+			t.Fatalf("Sync: %v", err)
+		}
+
+		store.assertUntouched(t, crossRepoAID, crossRepoAT, crossRepoARef)
+		if result.Stats.Conflicts != 1 {
+			t.Errorf("conflicts=%d, want 1 (B's issue 99 only)", result.Stats.Conflicts)
+		}
+		if got := result.PushStats; got.Created != 0 || got.Updated != 1 || got.Skipped != 1 {
+			t.Errorf("forced push stats created=%d updated=%d skipped=%d, want created=0 updated=1 (issue 99) skipped=1 (repo A)",
+				got.Created, got.Updated, got.Skipped)
+		}
+		if got := stub.requests(1313); len(got) != 0 {
+			t.Errorf("forced push sent requests for B's issue 1313 on behalf of %s: %v", crossRepoAID, got)
+		}
+		if !slices.Contains(stub.requestLog(), "PATCH /repos/owner-b/repo-b/issues/99") {
+			t.Errorf("forced push did not update B's issue 99: requests %q", stub.requestLog())
+		}
+	})
 }
