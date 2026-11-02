@@ -87,58 +87,243 @@ func initServerTestUnversionedLegacyResidue(t *testing.T, db *sql.DB) {
 	exec("INSERT INTO interactions (id, kind, created_at, actor, issue_id) VALUES ('ia-1', 'note', NOW(), 'gt', 'bd-legacy')")
 }
 
+// initServerTestRecoveryCommitHash returns the single recovery commit's
+// hash. dolt_log lists ancestors of the current HEAD, newest first, so a
+// hash found here is by definition on HEAD's history.
+func initServerTestRecoveryCommitHash(t *testing.T, db *sql.DB) string {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	rows, err := db.QueryContext(ctx, "SELECT commit_hash FROM dolt_log WHERE message = ?", initUnversionedRecoveryCommitMessage)
+	if err != nil {
+		t.Fatalf("read recovery commit hash: %v", err)
+	}
+	defer rows.Close()
+	var hash string
+	for rows.Next() {
+		if hash != "" {
+			t.Fatal("more than one recovery commit found")
+		}
+		if err := rows.Scan(&hash); err != nil {
+			t.Fatalf("scan recovery commit hash: %v", err)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read recovery commit hash: %v", err)
+	}
+	if hash == "" {
+		t.Fatal("no recovery commit found")
+	}
+	return hash
+}
+
+// initServerTestConfigValueAt reads one config row as of a commit.
+func initServerTestConfigValueAt(t *testing.T, db *sql.DB, hash, key string) string {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	var value string
+	err := db.QueryRowContext(ctx, "SELECT value FROM config AS OF ? WHERE `key` = ?", hash, key).Scan(&value)
+	if err != nil {
+		t.Fatalf("read config %q as of %s: %v", key, hash, err)
+	}
+	return value
+}
+
+// initServerTestInteractionsRowExistsAt reports whether the fixture's
+// residue row is present in interactions as of a commit.
+func initServerTestInteractionsRowExistsAt(t *testing.T, db *sql.DB, hash string) bool {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	var count int
+	if err := db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM interactions AS OF ? WHERE id = 'ia-1'", hash).Scan(&count); err != nil {
+		t.Fatalf("read interactions as of %s: %v", hash, err)
+	}
+	return count > 0
+}
+
+// initServerTestRecoveryCommitPrecedesMigrations walks dolt_log (ancestors
+// of HEAD, newest first) and reports whether the recovery commit appears
+// after — i.e. earlier in history than — every "schema: apply migration"
+// commit: the adoption commit must precede the migrations it unblocked.
+func initServerTestRecoveryCommitPrecedesMigrations(t *testing.T, db *sql.DB, recoveryHash string) bool {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	rows, err := db.QueryContext(ctx, "SELECT commit_hash, message FROM dolt_log")
+	if err != nil {
+		t.Fatalf("read dolt_log: %v", err)
+	}
+	defer rows.Close()
+	recoveryIdx := -1
+	for rows.Next() {
+		var hash, message string
+		if err := rows.Scan(&hash, &message); err != nil {
+			t.Fatalf("scan dolt_log: %v", err)
+		}
+		if hash == recoveryHash {
+			recoveryIdx++
+			continue
+		}
+		if recoveryIdx >= 0 && strings.HasPrefix(message, "schema: apply migration") {
+			// A migration commit newer than the recovery commit — the
+			// recovery commit must precede every one of them.
+			t.Fatalf("recovery commit %s does not precede migration commit %q", recoveryHash, message)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read dolt_log: %v", err)
+	}
+	return recoveryIdx >= 0
+}
+
 // TestCLI_InitServerUnversionedDirtyWorkingSet_E2E pins the #6089 adoption:
 // bd init against the unversioned dirty legacy shape commits the
 // pre-existing working set in its own labeled commit, applies the pending
 // migrations, and leaves a fully working workspace — without any
 // migration-consent or shared-store unlock in the environment, exactly
 // like the reporter's `gt install` (a cursor of 0 passes both gates).
+// The absent-cursor subtest covers the reporter's shape (no
+// schema_migrations table); the empty-cursor subtest covers the same
+// classification for a cursor table that exists but records nothing.
 func TestCLI_InitServerUnversionedDirtyWorkingSet_E2E(t *testing.T) {
 	skipIfNoDolt(t)
-	env := externalServerTestEnv(t)
 
-	repoDir := t.TempDir()
-	initGitRepo(t, repoDir)
+	t.Run("absent cursor table", func(t *testing.T) {
+		env := externalServerTestEnv(t)
 
-	database := uniqueTestDBName(t)
-	t.Cleanup(func() { dropTestDatabase(database, testDoltServerPort) })
-	db := createInitServerTestDatabase(t, database)
-	initServerTestUnversionedLegacyResidue(t, db)
+		repoDir := t.TempDir()
+		initGitRepo(t, repoDir)
 
-	// Preconditions: exactly the #6089 shape.
-	if got := initServerTestMainCursor(t, db); got != 0 {
-		t.Fatalf("main cursor = %d, want 0 (no schema_migrations table)", got)
-	}
-	dirty := initServerTestDirtyTables(t, db)
-	for _, table := range []string{"config", "routes", "interactions"} {
-		if !dirty[table] {
-			t.Fatalf("dolt_status = %v, want %s dirty before init", dirty, table)
+		database := uniqueTestDBName(t)
+		t.Cleanup(func() { dropTestDatabase(database, testDoltServerPort) })
+		db := createInitServerTestDatabase(t, database)
+		initServerTestUnversionedLegacyResidue(t, db)
+
+		// Preconditions: exactly the #6089 shape.
+		if got := initServerTestMainCursor(t, db); got != 0 {
+			t.Fatalf("main cursor = %d, want 0 (no schema_migrations table)", got)
 		}
-	}
+		dirty := initServerTestDirtyTables(t, db)
+		for _, table := range []string{"config", "routes", "interactions"} {
+			if !dirty[table] {
+				t.Fatalf("dolt_status = %v, want %s dirty before init", dirty, table)
+			}
+		}
 
-	stdout, stderr, err := runInitServerBD(t, repoDir, env, initServerTestArgs(database)...)
-	if err != nil {
-		t.Fatalf("bd init on an unversioned dirty database failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
-	}
+		stdout, stderr, err := runInitServerBD(t, repoDir, env, initServerTestArgs(database)...)
+		if err != nil {
+			t.Fatalf("bd init on an unversioned dirty database failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		}
 
-	// The migrations ran, and the adopted working set is clean.
-	if got, want := initServerTestMainCursor(t, db), schema.LatestVersion(); got != want {
-		t.Fatalf("main cursor = %d, want %d (the pending migrations must have run)", got, want)
-	}
-	if dirty := initServerTestDirtyTables(t, db); len(dirty) != 0 {
-		t.Fatalf("dolt_status = %v, want a clean working set after init", dirty)
-	}
+		// The migrations ran, and the adopted working set is clean.
+		if got, want := initServerTestMainCursor(t, db), schema.LatestVersion(); got != want {
+			t.Fatalf("main cursor = %d, want %d (the pending migrations must have run)", got, want)
+		}
+		if dirty := initServerTestDirtyTables(t, db); len(dirty) != 0 {
+			t.Fatalf("dolt_status = %v, want a clean working set after init", dirty)
+		}
 
-	// The adopted database is a working bd workspace end to end.
-	_, stderr, err = runInitServerBD(t, repoDir, env, "create", "--json", "Adopted workspace issue")
-	if err != nil {
-		t.Fatalf("bd create after adoption failed: %v\n%s", err, stderr)
-	}
-	stdout, stderr, err = runInitServerBD(t, repoDir, env, "list", "--json")
-	if err != nil {
-		t.Fatalf("bd list after adoption failed: %v\n%s", err, stderr)
-	}
-	if !strings.Contains(stdout, "Adopted workspace issue") {
-		t.Fatalf("bd list --json output does not contain the created issue:\n%s", stdout)
-	}
+		// The pre-existing working set landed in exactly one labeled
+		// recovery commit, carrying the legacy residue rows, and it
+		// precedes the migrations it unblocked (dolt_log lists HEAD's
+		// ancestors, so presence here already means it is on HEAD's
+		// history).
+		if got := initServerTestRecoveryCommitCount(t, db); got != 1 {
+			t.Fatalf("recovery commits = %d, want exactly 1", got)
+		}
+		recoveryHash := initServerTestRecoveryCommitHash(t, db)
+		if got := initServerTestConfigValueAt(t, db, recoveryHash, "issue_prefix"); got != "hq" {
+			t.Fatalf("issue_prefix in the recovery commit = %q, want the legacy residue %q", got, "hq")
+		}
+		if got := initServerTestConfigValueAt(t, db, recoveryHash, "schema_version"); got != "11" {
+			t.Fatalf("schema_version in the recovery commit = %q, want the legacy baseline %q", got, "11")
+		}
+		if !initServerTestInteractionsRowExistsAt(t, db, recoveryHash) {
+			t.Fatal("the legacy residue interactions row is missing from the recovery commit")
+		}
+		if !initServerTestRecoveryCommitPrecedesMigrations(t, db, recoveryHash) {
+			t.Fatalf("recovery commit %s is not an ancestor of HEAD", recoveryHash)
+		}
+
+		// A second init is the benign already-initialized refusal, and it
+		// must not adopt again: still exactly one recovery commit, cursor
+		// unmoved.
+		_, stderr, err = runInitServerBD(t, repoDir, env, initServerTestArgs(database)...)
+		if err == nil {
+			t.Fatal("second bd init succeeded, want the already-initialized refusal")
+		}
+		if !strings.Contains(stderr, "already initialized") {
+			t.Fatalf("second bd init stderr = %q, want the already-initialized refusal", stderr)
+		}
+		if got := initServerTestRecoveryCommitCount(t, db); got != 1 {
+			t.Fatalf("recovery commits after second init = %d, want 1 (no re-adoption)", got)
+		}
+		if got, want := initServerTestMainCursor(t, db), schema.LatestVersion(); got != want {
+			t.Fatalf("main cursor after second init = %d, want %d", got, want)
+		}
+
+		// The adopted database is a working bd workspace end to end.
+		_, stderr, err = runInitServerBD(t, repoDir, env, "create", "--json", "Adopted workspace issue")
+		if err != nil {
+			t.Fatalf("bd create after adoption failed: %v\n%s", err, stderr)
+		}
+		stdout, stderr, err = runInitServerBD(t, repoDir, env, "list", "--json")
+		if err != nil {
+			t.Fatalf("bd list after adoption failed: %v\n%s", err, stderr)
+		}
+		if !strings.Contains(stdout, "Adopted workspace issue") {
+			t.Fatalf("bd list --json output does not contain the created issue:\n%s", stdout)
+		}
+	})
+
+	t.Run("empty cursor table", func(t *testing.T) {
+		env := externalServerTestEnv(t)
+
+		repoDir := t.TempDir()
+		initGitRepo(t, repoDir)
+
+		database := uniqueTestDBName(t)
+		t.Cleanup(func() { dropTestDatabase(database, testDoltServerPort) })
+		db := createInitServerTestDatabase(t, database)
+		initServerTestUnversionedLegacyResidue(t, db)
+
+		// An empty schema_migrations table — the bootstrap shape with
+		// nothing recorded — classifies as unversioned exactly like the
+		// absent table does.
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if _, err := db.ExecContext(ctx,
+			"CREATE TABLE IF NOT EXISTS schema_migrations (\n"+
+				"    version INT PRIMARY KEY,\n"+
+				"    applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,\n"+
+				"    content_hash CHAR(64)\n"+
+				")"); err != nil {
+			t.Fatalf("create empty schema_migrations: %v", err)
+		}
+
+		// Preconditions: the cursor table exists but records nothing.
+		if got := initServerTestMainCursor(t, db); got != 0 {
+			t.Fatalf("main cursor = %d, want 0 (empty cursor table)", got)
+		}
+		var cursorTableExists bool
+		if err := db.QueryRowContext(ctx,
+			"SELECT COUNT(*) > 0 FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'schema_migrations'",
+		).Scan(&cursorTableExists); err != nil || !cursorTableExists {
+			t.Fatalf("schema_migrations probe = (%v, %v), want the table to exist", cursorTableExists, err)
+		}
+
+		stdout, stderr, err := runInitServerBD(t, repoDir, env, initServerTestArgs(database)...)
+		if err != nil {
+			t.Fatalf("bd init on an empty-cursor dirty database failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		}
+		if got, want := initServerTestMainCursor(t, db), schema.LatestVersion(); got != want {
+			t.Fatalf("main cursor = %d, want %d (the pending migrations must have run)", got, want)
+		}
+		if got := initServerTestRecoveryCommitCount(t, db); got != 1 {
+			t.Fatalf("recovery commits = %d, want exactly 1", got)
+		}
+	})
 }
