@@ -3,6 +3,8 @@ package schema
 import (
 	"bytes"
 	"context"
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
@@ -87,5 +89,85 @@ func TestRunMigrationsRestoresIgnored0007UpdatedAtBeforeItsCursorRow(t *testing.
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet sql expectations (ordering mismatch would surface here): %v", err)
+	}
+}
+
+// TestRunMigrationsFailsGuardedStepOnUpdatedAtGuardError pins AC-5: on the
+// committing main path, a failed snapshot or restoration of a registered
+// step (main 0046) returns that error before the step's cursor row, its
+// DOLT_COMMIT or its "done" line. sqlmock answers any statement after the
+// injected failure with an unexpected-call error of its own, so errors.Is on
+// the injected error proves the runner stopped right there.
+func TestRunMigrationsFailsGuardedStepOnUpdatedAtGuardError(t *testing.T) {
+	dirtyStatusQuery := `(?s)SELECT s\.table_name, s\.staged\s+FROM dolt_status s\s+WHERE NOT EXISTS`
+	injected := errors.New("injected updated_at guard failure")
+
+	for _, tc := range []struct {
+		name   string
+		expect func(mock sqlmock.Sqlmock)
+		want   string
+	}{
+		{
+			name: "snapshot read fails",
+			expect: func(mock sqlmock.Sqlmock) {
+				mock.ExpectQuery(guardColumnQuery).WithArgs("issues", "updated_at").
+					WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
+				mock.ExpectQuery(`SELECT id, updated_at FROM issues ORDER BY id`).WillReturnError(injected)
+			},
+			want: "snapshotting updated_at before migration 0046_",
+		},
+		{
+			name: "restore write fails",
+			expect: func(mock sqlmock.Sqlmock) {
+				mock.ExpectQuery(guardColumnQuery).WithArgs("issues", "updated_at").
+					WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
+				mock.ExpectQuery(`SELECT id, updated_at FROM issues ORDER BY id`).
+					WillReturnRows(sqlmock.NewRows([]string{"id", "updated_at"}).AddRow("bd-1", "2025-03-01 09:30:00"))
+				mock.ExpectExec(`SET @needs_add`).WillReturnResult(sqlmock.NewResult(0, 1))
+				mock.ExpectQuery(guardColumnQuery).WithArgs("issues", "updated_at").
+					WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
+				mock.ExpectQuery(`SELECT id, updated_at FROM issues ORDER BY id`).
+					WillReturnRows(sqlmock.NewRows([]string{"id", "updated_at"}).AddRow("bd-1", "2026-11-02 04:00:00"))
+				mock.ExpectExec(`UPDATE issues SET updated_at = CASE id`).WillReturnError(injected)
+			},
+			want: "restoring updated_at after migration 0046_",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			failOnSwallowedAdvisory(t)
+			var out bytes.Buffer
+			orig := stderr
+			stderr = &out
+			t.Cleanup(func() { stderr = orig })
+			origCounter := issueRowCounter
+			issueRowCounter = func(context.Context, DBConn) (int64, error) { return 0, nil }
+			t.Cleanup(func() { issueRowCounter = origCounter })
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("sqlmock.New: %v", err)
+			}
+			defer db.Close()
+
+			mock.ExpectQuery(dirtyStatusQuery).
+				WillReturnRows(sqlmock.NewRows([]string{"table_name", "staged"}))
+			tc.expect(mock)
+
+			applied, err := runMigrations(context.Background(), db, mainSource, 45, 46, true)
+			if !errors.Is(err, injected) {
+				t.Fatalf("runMigrations err = %v, want the injected guard failure", err)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("runMigrations err = %q, want it to name %q", err, tc.want)
+			}
+			if applied != 0 {
+				t.Errorf("applied = %d, want 0: the failed step must not count", applied)
+			}
+			if strings.Contains(out.String(), "done") {
+				t.Errorf("stderr reports the failed step done:\n%s", out.String())
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("unmet sql expectations: %v", err)
+			}
+		})
 	}
 }
