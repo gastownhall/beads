@@ -130,6 +130,15 @@ var unsafeDatabaseCases = []struct {
 		confineWriteFile(t, filepath.Join(beadsDir, "real-dolt", "sentinel"), "keep")
 		confineSymlink(t, filepath.Join(beadsDir, "real-dolt"), filepath.Join(beadsDir, "dolt"))
 	}},
+	{"absolute resolved spelling of a symlinked .beads", func(t *testing.T, beadsDir, outside string) {
+		real := filepath.Join(outside, "beads-real")
+		if err := os.Rename(beadsDir, real); err != nil {
+			t.Fatal(err)
+		}
+		confineSymlink(t, real, beadsDir)
+		confineWriteFile(t, filepath.Join(real, "dolt", "sentinel"), "keep")
+		confineMetadata(t, beadsDir, map[string]string{"backend": "dolt", "dolt_data_dir": filepath.Join(real, "dolt")})
+	}},
 }
 
 // setupUnsafeDatabase returns a workspace and an outside directory arranged
