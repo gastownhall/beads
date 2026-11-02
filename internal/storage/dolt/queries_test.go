@@ -1,10 +1,15 @@
 package dolt
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/DATA-DOG/go-sqlmock"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
@@ -3299,4 +3304,165 @@ func TestSearchIssues_StableOrdering(t *testing.T) {
 			t.Errorf("run %d: ordering changed from %q to %q", i, firstOrder, order)
 		}
 	}
+}
+
+// =============================================================================
+// GetMoleculeProgress truncated-read tests
+// =============================================================================
+
+var (
+	moleculeProgressDepQuery    = regexp.QuoteMeta("SELECT issue_id FROM dependencies")
+	moleculeProgressStatusQuery = regexp.QuoteMeta("SELECT id, status FROM issues WHERE id IN (")
+)
+
+// newMoleculeProgressMock returns a sqlmock-backed DoltStore primed with the
+// reads GetMoleculeProgress issues before the child-ID query for mol-1: the
+// wisp probe (no rows, so routing stays on issues/dependencies) and the title.
+func newMoleculeProgressMock(t *testing.T) (*DoltStore, sqlmock.Sqlmock) {
+	t.Helper()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT 1 FROM wisps WHERE id = ? LIMIT 1")).
+		WillReturnRows(sqlmock.NewRows([]string{"1"}))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT title FROM issues WHERE id = ?")).
+		WillReturnRows(sqlmock.NewRows([]string{"title"}).AddRow("Molecule"))
+	return &DoltStore{db: db}, mock
+}
+
+// fourChildMoleculeRows returns the child-ID and status result sets for a
+// molecule whose children are c1 closed, c2 closed, c3 in_progress, c4 open.
+// Cutting either read after two rows leaves only the closed children, which
+// reads as a finished molecule (Total=2 Completed=2).
+func fourChildMoleculeRows() (children, statuses *sqlmock.Rows) {
+	children = sqlmock.NewRows([]string{"issue_id"}).
+		AddRow("c1").AddRow("c2").AddRow("c3").AddRow("c4")
+	statuses = sqlmock.NewRows([]string{"id", "status"}).
+		AddRow("c1", "closed").AddRow("c2", "closed").
+		AddRow("c3", "in_progress").AddRow("c4", "open")
+	return children, statuses
+}
+
+// twoBatchMoleculeRows returns the child-ID result set for a molecule with
+// queryBatchSize+1 open children, so its status read takes two batches, and
+// the full first status batch. The caller builds the one-row second batch.
+func twoBatchMoleculeRows() (children, firstBatch *sqlmock.Rows) {
+	children = sqlmock.NewRows([]string{"issue_id"})
+	firstBatch = sqlmock.NewRows([]string{"id", "status"})
+	for i := 0; i < queryBatchSize; i++ {
+		id := fmt.Sprintf("c%03d", i)
+		children.AddRow(id)
+		firstBatch.AddRow(id, "open")
+	}
+	children.AddRow(fmt.Sprintf("c%03d", queryBatchSize))
+	return children, firstBatch
+}
+
+// requireTruncatedReadError fails unless GetMoleculeProgress reported the
+// mid-iteration driver error instead of a rollup built from partial rows.
+func requireTruncatedReadError(t *testing.T, stats *types.MoleculeProgressStats, err, cause error) {
+	t.Helper()
+	if stats != nil {
+		t.Errorf("GetMoleculeProgress on a truncated read returned stats Total=%d Completed=%d (err=%v), want nil stats",
+			stats.Total, stats.Completed, err)
+	}
+	if !errors.Is(err, cause) {
+		t.Errorf("GetMoleculeProgress on a truncated read: err=%v, want errors.Is(err, %q)", err, cause)
+	}
+	if !errors.Is(err, ErrQuery) {
+		t.Errorf("GetMoleculeProgress on a truncated read: err=%v, want errors.Is(err, ErrQuery)", err)
+	}
+}
+
+// TestGetMoleculeProgressReportsTruncatedReads pins that a result set which
+// ends early (the driver reports an error after some rows) surfaces as an
+// error instead of a progress total built from the rows that arrived. A read
+// that comes after the failed one is primed with healthy rows even though the
+// fixed code returns before it, so a missing check fails as the skewed rollup
+// the bug produced, not as an unexpected query.
+func TestGetMoleculeProgressReportsTruncatedReads(t *testing.T) {
+	lost := errors.New("connection lost mid-iteration")
+
+	t.Run("children truncated", func(t *testing.T) {
+		store, mock := newMoleculeProgressMock(t)
+		children, statuses := fourChildMoleculeRows()
+		children.RowError(2, lost)
+		mock.ExpectQuery(moleculeProgressDepQuery).WillReturnRows(children)
+		mock.ExpectQuery(moleculeProgressStatusQuery).WillReturnRows(statuses)
+
+		stats, err := store.GetMoleculeProgress(context.Background(), "mol-1")
+		requireTruncatedReadError(t, stats, err, lost)
+	})
+
+	t.Run("status truncated", func(t *testing.T) {
+		store, mock := newMoleculeProgressMock(t)
+		children, statuses := fourChildMoleculeRows()
+		statuses.RowError(2, lost)
+		mock.ExpectQuery(moleculeProgressDepQuery).WillReturnRows(children)
+		mock.ExpectQuery(moleculeProgressStatusQuery).WillReturnRows(statuses)
+
+		stats, err := store.GetMoleculeProgress(context.Background(), "mol-1")
+		requireTruncatedReadError(t, stats, err, lost)
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("unmet sqlmock expectations: %v", err)
+		}
+	})
+
+	// The status read is batched, so a failure in any batch must surface.
+	// Here the second batch is healthy: a check of only the last batch's
+	// Rows.Err misses the failure and returns Total=2 Completed=1 for the
+	// molecule's queryBatchSize+1 children.
+	t.Run("status truncated in an earlier batch", func(t *testing.T) {
+		store, mock := newMoleculeProgressMock(t)
+		children, firstBatch := twoBatchMoleculeRows()
+		firstBatch.RowError(1, lost)
+		secondBatch := sqlmock.NewRows([]string{"id", "status"}).
+			AddRow(fmt.Sprintf("c%03d", queryBatchSize), "closed")
+		mock.ExpectQuery(moleculeProgressDepQuery).WillReturnRows(children)
+		mock.ExpectQuery(moleculeProgressStatusQuery).WillReturnRows(firstBatch)
+		mock.ExpectQuery(moleculeProgressStatusQuery).WillReturnRows(secondBatch)
+
+		stats, err := store.GetMoleculeProgress(context.Background(), "mol-1")
+		requireTruncatedReadError(t, stats, err, lost)
+	})
+
+	t.Run("status truncated in the last batch", func(t *testing.T) {
+		store, mock := newMoleculeProgressMock(t)
+		children, firstBatch := twoBatchMoleculeRows()
+		secondBatch := sqlmock.NewRows([]string{"id", "status"}).
+			AddRow(fmt.Sprintf("c%03d", queryBatchSize), "open").
+			RowError(0, lost)
+		mock.ExpectQuery(moleculeProgressDepQuery).WillReturnRows(children)
+		mock.ExpectQuery(moleculeProgressStatusQuery).WillReturnRows(firstBatch)
+		mock.ExpectQuery(moleculeProgressStatusQuery).WillReturnRows(secondBatch)
+
+		stats, err := store.GetMoleculeProgress(context.Background(), "mol-1")
+		requireTruncatedReadError(t, stats, err, lost)
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("unmet sqlmock expectations: %v", err)
+		}
+	})
+
+	// A read that completes keeps today's rollup, which also proves the
+	// fixture is faithful: the truncation subtests fail for the right reason.
+	t.Run("complete read", func(t *testing.T) {
+		store, mock := newMoleculeProgressMock(t)
+		children, statuses := fourChildMoleculeRows()
+		mock.ExpectQuery(moleculeProgressDepQuery).WillReturnRows(children)
+		mock.ExpectQuery(moleculeProgressStatusQuery).WillReturnRows(statuses)
+
+		stats, err := store.GetMoleculeProgress(context.Background(), "mol-1")
+		if err != nil {
+			t.Fatalf("GetMoleculeProgress on a complete read: %v", err)
+		}
+		if stats.Total != 4 || stats.Completed != 2 || stats.InProgress != 1 || stats.CurrentStepID != "c3" {
+			t.Errorf("GetMoleculeProgress on a complete read: Total=%d Completed=%d InProgress=%d CurrentStepID=%q, want Total=4 Completed=2 InProgress=1 CurrentStepID=\"c3\"",
+				stats.Total, stats.Completed, stats.InProgress, stats.CurrentStepID)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("unmet sqlmock expectations: %v", err)
+		}
+	})
 }
