@@ -905,6 +905,10 @@ func refreshBoundCommandConfig(cmd *cobra.Command) {
 	if !root.PersistentFlags().Changed("readonly") {
 		readonlyMode = config.GetBool("readonly")
 	}
+	// Recorded for actorExplicitlyUnknown (commit identity): the parsed
+	// --actor value is later overwritten in the global by resolution, so
+	// whether the flag was passed must survive in its own variable.
+	actorFlagChangedAtStartup = root.PersistentFlags().Changed("actor")
 	if !root.PersistentFlags().Changed("actor") {
 		// Raw write, not setActor: every caller runs in PersistentPreRunE
 		// BEFORE deferActorGitFallback, which then decides from this value
@@ -1410,6 +1414,7 @@ var rootCmd = &cobra.Command{
 		// deferActorGitFallback, so no fallback is pending yet and the value
 		// is only the flag/env/config actor. currentActor() here would resolve
 		// git user.name eagerly, which is what the deferral exists to avoid.
+		actorFlagChangedAtStartup = cmd.Root().PersistentFlags().Changed("actor")
 		if !cmd.Root().PersistentFlags().Changed("actor") && actor == "" {
 			actor = resolveConfiguredActor()
 		} else if cmd.Root().PersistentFlags().Changed("actor") {

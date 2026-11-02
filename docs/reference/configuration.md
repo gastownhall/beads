@@ -293,6 +293,14 @@ For most developers no configuration is needed — issue authorship matches comm
 export BEADS_ACTOR="my-github-handle"
 ```
 
+The resolved actor also names **Dolt commits in embedded mode** (the default storage mode), and the owner email
+(`GIT_AUTHOR_EMAIL` environment variable, then `git config user.email`) is the commit's email: a commit's
+authorship follows the same chain a developer's issue authorship does. `GIT_AUTHOR_NAME` and
+`GIT_AUTHOR_EMAIL` still win over the chain when set — the rule server mode already uses — so tooling that
+exports a git identity (hooks, automation) attributes embedded commits through it. When no source resolves a
+name, the terminal `"unknown"` sentinel is dropped and commits fall back to the anonymous
+`beads <beads@local>` pair; an actor a source explicitly sets to `unknown` is kept as-is.
+
 ## Project-Level Settings (Database)
 
 These are written to the Dolt database by `bd config set` and have no env var override, with one exception: `versioned-history.enabled` also honors `BD_VERSIONED_HISTORY_ENABLED` (see [Versioned Issue History](#versioned-issue-history)). Common namespaces:

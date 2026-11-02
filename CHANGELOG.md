@@ -5177,6 +5177,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `bd context` still shows the workspace. Add the repository to
   `safe.directory` if you trust it.
 
+### Fixed
+
+- **Embedded-mode Dolt commits carry the resolved actor.** Embedded mode (the
+  default storage mode) authored its version-control commits anonymously:
+  lifecycle writes (create, update, close, dependency and label changes) as
+  the constant `beads <beads@local>`, and whole-working-set commits
+  (`bd`'s pull/push auto-commit net, `bd dolt commit`, `bd vc commit`) as the
+  SQL client's `root <root@%>` — the DSN's commit identity never reached them,
+  because the embedded driver's client identity outranks it (GH#7628). Every
+  embedded commit now resolves an author the way server mode does:
+  `GIT_AUTHOR_NAME`/`GIT_AUTHOR_EMAIL` first, then the identity `bd` itself
+  resolved for the command (the actor chain — `--actor`, `BEADS_ACTOR`,
+  `BD_ACTOR`, `config.yaml` `actor`, `git user.name`, `$USER` — for the name,
+  `GIT_AUTHOR_EMAIL` or `git user.email` for the email), then the previous
+  anonymous `beads <beads@local>` pair. Merges and the `is_blocked` recompute
+  repairs are attributed the same way, the resolution is lazy (reads and clean
+  stores never resolve one), and an actor chain that ends in its `"unknown"`
+  sentinel falls back to the anonymous pair while a deliberately configured
+  `unknown` is kept. See
+  [Actor identity resolution](docs/reference/configuration.md#actor-identity-resolution).
+
 ## [1.3.2] - 2026-10-23
 
 First stable release of the 1.3.2 patch line. It ships the same code as
