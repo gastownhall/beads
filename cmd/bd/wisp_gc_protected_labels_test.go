@@ -155,6 +155,76 @@ func TestWispGCAgeInvalidProtectedLabelsAborts(t *testing.T) {
 	}
 }
 
+// TestWispGCCascadeSparesLabeledDependent carries the guard onto the cascade
+// expansion, which reaches wisps the parent scan never saw: an eligible
+// unlabeled parent with two old closed dependents, one carrying the protected
+// label. Without --all the parent scan passes over closed wisps, so only the
+// cascade can collect either dependent — the parent and the unlabeled
+// dependent go, the labeled dependent survives (orphaned, its edge dropped).
+func TestWispGCCascadeSparesLabeledDependent(t *testing.T) {
+	now := time.Now()
+	stale := now.Add(-24 * time.Hour)
+	parent := &types.Issue{ID: "gc-parent", Status: types.StatusOpen, UpdatedAt: stale}
+	plainChild := &types.Issue{ID: "gc-child-plain", Status: types.StatusClosed, UpdatedAt: stale}
+	labeledChild := &types.Issue{ID: "gc-child-kept", Status: types.StatusClosed, UpdatedAt: stale, Labels: []string{"keep:mail"}}
+	r := protectedLabelsReader{
+		cascadeAgeReader: &cascadeAgeReader{
+			issues:   []*types.Issue{parent, plainChild, labeledChild},
+			children: map[string]bool{"gc-child-plain": true, "gc-child-kept": true},
+		},
+		config: map[string]string{workapi.SettingKeyWispProtectedLabels: `["keep:mail"]`},
+	}
+	sel, err := findAbandonedWisps(context.Background(), r, false, time.Hour, nil)
+	if err != nil {
+		t.Fatalf("findAbandonedWisps: %v", err)
+	}
+	ids := collectedIDs(t, sel)
+	for _, id := range []string{"gc-parent", "gc-child-plain"} {
+		if !ids[id] {
+			t.Errorf("%s not selected; the guard must not protect it (got %v)", id, ids)
+		}
+	}
+	if ids["gc-child-kept"] {
+		t.Errorf("cascade collected labeled dependent gc-child-kept; want it spared (got %v)", ids)
+	}
+	if sel.labelSpared != 1 {
+		t.Errorf("labelSpared = %d, want 1 (the labeled dependent); selection=%+v", sel.labelSpared, sel)
+	}
+}
+
+// TestWispGCCascadeProtectsEachWispIndependently pins that protection is per
+// record: the recursion expands the whole dependent subtree before any
+// filtering, so a protected intermediate does not shield its own unlabeled
+// descendants — and does not drag them to safety either.
+func TestWispGCCascadeProtectsEachWispIndependently(t *testing.T) {
+	now := time.Now()
+	stale := now.Add(-24 * time.Hour)
+	parent := &types.Issue{ID: "gc-parent", Status: types.StatusOpen, UpdatedAt: stale}
+	keptChild := &types.Issue{ID: "gc-child-kept", Status: types.StatusOpen, UpdatedAt: stale, Labels: []string{"keep:mail"}}
+	plainGrandchild := &types.Issue{ID: "gc-grandchild-plain", Status: types.StatusClosed, UpdatedAt: stale}
+	r := protectedLabelsReader{
+		cascadeAgeReader: &cascadeAgeReader{
+			issues:   []*types.Issue{parent, keptChild, plainGrandchild},
+			children: map[string]bool{"gc-child-kept": true, "gc-grandchild-plain": true},
+		},
+		config: map[string]string{workapi.SettingKeyWispProtectedLabels: `["keep:mail"]`},
+	}
+	sel, err := findAbandonedWisps(context.Background(), r, false, time.Hour, nil)
+	if err != nil {
+		t.Fatalf("findAbandonedWisps: %v", err)
+	}
+	ids := collectedIDs(t, sel)
+	if !ids["gc-parent"] {
+		t.Errorf("eligible parent not selected (got %v)", ids)
+	}
+	if ids["gc-child-kept"] {
+		t.Errorf("labeled child collected; want it spared (got %v)", ids)
+	}
+	if !ids["gc-grandchild-plain"] {
+		t.Errorf("unlabeled grandchild behind a protected intermediate was spared; protection is per record, not a traversal barrier (got %v)", ids)
+	}
+}
+
 // TestWispGCAgeCountsLabelSpares pins what the skip report counts: a wisp the
 // labels alone spared. A labeled wisp too young to select was saved by age,
 // one also pinned was saved by another guard, and a closed one without --all

@@ -64,3 +64,43 @@ func TestEmbeddedWispGCProtectedLabel(t *testing.T) {
 		t.Errorf("closed wisp %s carrying protected label keep:mail was reclaimed by --all", closedKept)
 	}
 }
+
+// TestEmbeddedWispGCCascadeSparesLabeledDependent carries the guard onto the
+// cascade expansion, which reaches wisps the parent scan never saw: two old
+// closed dependents of an abandoned parent, only one labeled. Closed wisps
+// are invisible to the parent scan without --all, so only the cascade can
+// collect either — the unlabeled one goes with its parent, the labeled one
+// survives, orphaned.
+func TestEmbeddedWispGCCascadeSparesLabeledDependent(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "wpc")
+
+	bdCommand(t, bd, dir, "config", "set", "wisp.protected_labels", `["keep:mail"]`)
+
+	parent := bdCreate(t, bd, dir, "abandoned parent", "--ephemeral").ID
+	keptChild := bdCreate(t, bd, dir, "kept dependent", "--ephemeral").ID
+	bdCommand(t, bd, dir, "label", "add", keptChild, "keep:mail")
+	bdClose(t, bd, dir, keptChild)
+	plainChild := bdCreate(t, bd, dir, "gone dependent", "--ephemeral").ID
+	bdClose(t, bd, dir, plainChild)
+	bdDepAdd(t, bd, dir, keptChild, parent)
+	bdDepAdd(t, bd, dir, plainChild, parent)
+
+	// No --all: the closed dependents are reachable only through the cascade.
+	bdCommand(t, bd, dir, "mol", "wisp", "gc", "--age", "0s")
+
+	if bdShowSucceeds(t, bd, dir, parent) {
+		t.Errorf("abandoned parent %s should have been reclaimed", parent)
+	}
+	if bdShowSucceeds(t, bd, dir, plainChild) {
+		t.Errorf("unlabeled closed dependent %s should have been cascaded with its parent", plainChild)
+	}
+	if !bdShowSucceeds(t, bd, dir, keptChild) {
+		t.Errorf("labeled closed dependent %s was cascaded; want it spared (orphaned, not deleted)", keptChild)
+	}
+}

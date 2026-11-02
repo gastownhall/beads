@@ -1011,10 +1011,8 @@ func findAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageThre
 				if r.IsInfraTypeCtx(ctx, child.IssueType) {
 					continue
 				}
-				// The labels join the cascade's protections with bd-961adp
-				// AC-2; until then the child scan keeps the parent scan's
-				// prior guard, which is every protection but the labels.
-				if guard.protectsWithoutLabels(child) {
+				if guard.protects(child) {
+					countLabelSpare(guard, labelSparedIDs, child, now, ageThreshold)
 					continue
 				}
 				// Children are held to the same --age contract as parents. One
@@ -1027,6 +1025,7 @@ func findAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageThre
 			}
 		}
 	}
+	sel.labelSpared = len(labelSparedIDs)
 	return sel, cascadeErr
 }
 
