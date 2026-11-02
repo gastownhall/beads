@@ -750,3 +750,44 @@ func TestColumnNames(t *testing.T) {
 		t.Errorf("QualifyColumns = %q, want %q", got, want)
 	}
 }
+
+// TestOwnReadyAffectingEdgeIDBatchSQL pins the bounded stale-flag probe the
+// dependency-tree read runs: one SELECT DISTINCT per id batch, against the
+// batch's placeholders, over the same ready-affecting type list
+// OwnReadyAffectingEdgeSQL (and StaleBlockedIDsSQL) test with — both table
+// families render, so a flagged wisp is qualified by its own family's edge
+// rows, not the durable ones.
+func TestOwnReadyAffectingEdgeIDBatchSQL(t *testing.T) {
+	t.Parallel()
+
+	for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
+		want := fmt.Sprintf(
+			"SELECT DISTINCT issue_id FROM %s WHERE issue_id IN (?,?,?) AND type IN (%s)",
+			depTable, readyAffectingTypesSQL())
+		if got := OwnReadyAffectingEdgeIDBatchSQL(depTable, "?,?,?"); got != want {
+			t.Errorf("OwnReadyAffectingEdgeIDBatchSQL(%q) =\n  %q\nwant\n  %q", depTable, got, want)
+		}
+	}
+	// The type list is the shared one, parent-child included, so an inherited
+	// flag on a row that owns only a parent-child edge survives the probe.
+	depTypes := types.ReadyAffectingDependencyTypes()
+	rendered := ownReadyAffectingEdgeIDBatchSQLTypes(t)
+	for _, d := range depTypes {
+		if !strings.Contains(rendered, "'"+string(d)+"'") {
+			t.Errorf("probe SQL %q omits ready-affecting type %q", rendered, d)
+		}
+	}
+	if !strings.Contains(rendered, "'"+string(types.DepParentChild)+"'") {
+		t.Errorf("probe SQL %q must include parent-child: a child's own edge to its parent is what makes its inherited flag non-stale", rendered)
+	}
+}
+
+func ownReadyAffectingEdgeIDBatchSQLTypes(t *testing.T) string {
+	t.Helper()
+	q := OwnReadyAffectingEdgeIDBatchSQL("dependencies", "?")
+	start := strings.Index(q, "type IN (")
+	if start < 0 {
+		t.Fatalf("probe SQL %q has no type IN list", q)
+	}
+	return q[start:]
+}

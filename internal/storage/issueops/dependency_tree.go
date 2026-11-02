@@ -32,12 +32,14 @@ func GetDependencyTreeInTx(ctx context.Context, tx DBTX, issueID string, maxDept
 	return nodes, nil
 }
 
-// stampTreeBlockedInTx sets each node's IsBlocked from the stored transitive
-// is_blocked flag, read in the same transaction as the walk (IsBlockedBatchInTx).
-// The walk hydrates issues without the flag, and the renderer's visible-edge
-// scan cannot see blocking a depth or status prune hid or that a node inherited
-// through its parent chain (#6630), so the flag is read here rather than at the
-// renderer, where the served and JSON answers would stay unpopulated.
+// stampTreeBlockedInTx sets each node's IsBlocked from the effective blocked
+// read of the stored transitive flag, in the same transaction as the walk
+// (effectiveBlockedBatchInTx, which reads a stale flag around the way ready
+// work does). The walk hydrates issues without the flag, and the renderer's
+// visible-edge scan cannot see blocking a depth or status prune hid or that a
+// node inherited through its parent chain (#6630), so the flag is read here
+// rather than at the renderer, where the served and JSON answers would stay
+// unpopulated.
 //
 // EVERY OCCURRENCE IS STAMPED, a Deduped stub included: the stub copies the
 // issue before this runs, so stamping the expanded node alone would leave the
@@ -56,7 +58,7 @@ func stampTreeBlockedInTx(ctx context.Context, tx DBTX, rootID string, nodes []*
 		seen[node.ID] = true
 		ids = append(ids, node.ID)
 	}
-	blocked, err := IsBlockedBatchInTx(ctx, tx, ids)
+	blocked, err := effectiveBlockedBatchInTx(ctx, tx, ids)
 	if err != nil {
 		return fmt.Errorf("dependency tree %s: read is_blocked: %w", rootID, err)
 	}

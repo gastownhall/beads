@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/types"
 	publicops "github.com/steveyegge/beads/issueops"
 )
@@ -1221,6 +1222,98 @@ func readIsBlockedIntoFromTable(ctx context.Context, tx DBTX, table string, ids 
 		_ = rows.Close()
 		if err := rows.Err(); err != nil {
 			return fmt.Errorf("is_blocked rows from %s: %w", table, err)
+		}
+	}
+	return nil
+}
+
+// effectiveBlockedBatchInTx is the dependency-tree read's blocked flag: the raw
+// stored flags (IsBlockedBatchInTx) minus the flags that are stale — set on a
+// row with no own ready-affecting edge. Ready work reads the same staleness
+// around (sqlbuild.StaleBlockedIDsSQL; GH#3268), so a stale flag cannot keep a
+// row out of bd ready while the tree still marks it [BLOCKED]; here the probe
+// is bounded to the flagged ids of one walked tree rather than every flagged
+// row in the database.
+//
+// The flags are read issues-first, exactly as IsBlockedBatchInTx reads them,
+// and each family's flagged ids are qualified against that family's own
+// dependency table, in the ids' encounter order. A database without a wisps
+// table contributes no flags; one without wisp_dependencies keeps the wisps
+// family's raw flags, the same way staleBlockedWispSetInTx treats it — no
+// wisp-plane edge is available to disprove a flag with. The flags are only
+// read around, never rewritten; ids absent from both families read false.
+func effectiveBlockedBatchInTx(ctx context.Context, tx DBTX, ids []string) (map[string]bool, error) {
+	blocked := make(map[string]bool, len(ids))
+	if len(ids) == 0 {
+		return blocked, nil
+	}
+	seen := make(map[string]bool, len(ids))
+	if err := readIsBlockedIntoFromTable(ctx, tx, "issues", ids, seen, blocked); err != nil {
+		return nil, err
+	}
+	issuesSeen := make(map[string]bool, len(seen))
+	for id := range seen {
+		issuesSeen[id] = true
+	}
+	if err := readIsBlockedIntoFromTable(ctx, tx, "wisps", ids, seen, blocked); err != nil {
+		if !(optionalBlockedTable("wisps") && isTableNotExistError(err)) {
+			return nil, err
+		}
+		// No wisps table at all: the issues read above saw every id there is.
+	}
+
+	flagged := func(own func(id string) bool) []string {
+		out := make([]string, 0)
+		for _, id := range ids {
+			if seen[id] && own(id) && blocked[id] {
+				out = append(out, id)
+			}
+		}
+		return out
+	}
+	if err := qualifyBlockedFlagsInTx(ctx, tx, "dependencies", flagged(func(id string) bool {
+		return issuesSeen[id]
+	}), false, blocked); err != nil {
+		return nil, err
+	}
+	if err := qualifyBlockedFlagsInTx(ctx, tx, "wisp_dependencies", flagged(func(id string) bool {
+		return !issuesSeen[id]
+	}), true, blocked); err != nil {
+		return nil, err
+	}
+	return blocked, nil
+}
+
+// qualifyBlockedFlagsInTx clears blocked's flag for each flagged id that owns
+// no ready-affecting row in depTable, probing one batch of queryBatchSize ids
+// at a time (sqlbuild.OwnReadyAffectingEdgeIDBatchSQL). depTable is constant;
+// wispFamily names the one tolerated miss: a database whose wisp_dependencies
+// table is gone keeps the raw flags — like staleBlockedWispSetInTx — rather
+// than clearing them on an absent table's say-so.
+//
+//nolint:gosec // G201: depTable is a hardcoded "dependencies" or "wisp_dependencies"; placeholders are ? only.
+func qualifyBlockedFlagsInTx(ctx context.Context, tx DBTX, depTable string, flagged []string, wispFamily bool, blocked map[string]bool) error {
+	for start := 0; start < len(flagged); start += queryBatchSize {
+		end := min(start+queryBatchSize, len(flagged))
+		placeholders, args := buildSQLInClause(flagged[start:end])
+		ownEdge, err := queryIDs(ctx, tx, sqlbuild.OwnReadyAffectingEdgeIDBatchSQL(depTable, placeholders), args...)
+		if err != nil {
+			if wispFamily && missingOptionalWispTable(err) {
+				// The wisp-plane dependency table is gone; its flags keep
+				// their raw values. The table cannot drop mid-transaction, so
+				// stopping here clears nothing else either.
+				return nil
+			}
+			return fmt.Errorf("check own ready-affecting edges in %s: %w", depTable, err)
+		}
+		hasEdge := make(map[string]bool, len(ownEdge))
+		for _, id := range ownEdge {
+			hasEdge[id] = true
+		}
+		for _, id := range flagged[start:end] {
+			if !hasEdge[id] {
+				blocked[id] = false
+			}
 		}
 	}
 	return nil

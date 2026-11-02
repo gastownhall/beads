@@ -96,6 +96,19 @@ func OwnReadyAffectingEdgeSQL(tables FilterTables, alias string) string {
 		tables.Dependencies, alias, readyAffectingTypesSQL())
 }
 
+// OwnReadyAffectingEdgeIDBatchSQL renders the bounded form of the
+// OwnReadyAffectingEdgeSQL test: the DISTINCT issue_ids of one batch that own
+// a ready-affecting row in depTable. StaleBlockedIDsSQL asks the same question
+// of every flagged row in the database; the dependency-tree read asks it of
+// the flagged ids one tree walked, so its query work stays proportional to
+// the tree rather than to the flagged rows. placeholders is the batch's IN
+// list, which the caller renders and batches.
+func OwnReadyAffectingEdgeIDBatchSQL(depTable, placeholders string) string {
+	return fmt.Sprintf(
+		"SELECT DISTINCT issue_id FROM %s WHERE issue_id IN (%s) AND type IN (%s)",
+		depTable, placeholders, readyAffectingTypesSQL())
+}
+
 // StaleBlockedIDsSQL selects the ids of one table family whose is_blocked flag
 // is stale: set on a row OwnReadyAffectingEdgeSQL rejects. Each stack resolves
 // it once per ready read and hands the ids to BuildReadyWorkWhere in

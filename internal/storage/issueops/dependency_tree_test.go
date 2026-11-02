@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"encoding/json"
+	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
@@ -362,7 +364,10 @@ func expectIssueBatchOne(mock sqlmock.Sqlmock, id string) {
 // stamps on its nodes (stampTreeBlockedInTx): the issues rows for ids in walk
 // order — flags maps an id to its stored flag, and an id absent from the map
 // reads 0 — then the wisps read, which this unit database answers with a
-// missing table so the batch skips it.
+// missing table so the batch skips it. A nonzero flag makes the read
+// non-final: the qualification's own-edge probe (expectOwnEdgeProbe) runs
+// next for that family's flagged ids, so callers with flagged ids must add
+// it.
 func expectTreeBlockedFlags(mock sqlmock.Sqlmock, flags map[string]int, ids ...string) {
 	rows := sqlmock.NewRows([]string{"id", "is_blocked"})
 	args := make([]driver.Value, len(ids))
@@ -379,6 +384,35 @@ func expectTreeBlockedFlags(mock sqlmock.Sqlmock, flags map[string]int, ids ...s
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT id, is_blocked FROM wisps WHERE id IN (" + in + ")")).
 		WithArgs(args...).
 		WillReturnError(missingTableError("wisps"))
+}
+
+// readyAffectingTypesSQLList is the type list the qualification probe renders
+// (sqlbuild.readyAffectingTypesSQL, pinned by the sqlbuild test to be the
+// shared ready-affecting list). Spelled here so the expected statement matches
+// the real one exactly, and changes to the list fail this suite until the
+// expectations are updated.
+const readyAffectingTypesSQLList = "'blocks', 'parent-child', 'conditional-blocks', 'waits-for'"
+
+// expectOwnEdgeProbe expects one batch of the qualification probe
+// (sqlbuild.OwnReadyAffectingEdgeIDBatchSQL) against depTable: it answers with
+// the ids withEdge (their own ready-affecting edge), and every other id of the
+// batch is stale.
+func expectOwnEdgeProbe(mock sqlmock.Sqlmock, depTable string, withEdge, ids []string) {
+	placeholders := make([]string, len(ids))
+	args := make([]driver.Value, len(ids))
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	rows := sqlmock.NewRows([]string{"issue_id"})
+	for _, id := range withEdge {
+		rows.AddRow(id)
+	}
+	mock.ExpectQuery(regexp.QuoteMeta(fmt.Sprintf(
+		"SELECT DISTINCT issue_id FROM %s WHERE issue_id IN (%s) AND type IN (%s)",
+		depTable, strings.Join(placeholders, ","), readyAffectingTypesSQLList))).
+		WithArgs(args...).
+		WillReturnRows(rows)
 }
 
 // TestGetDependencyTreeInTxTellsABackEdgeFromACrossEdge walks a cycle
@@ -459,5 +493,58 @@ func TestGetDependencyTreeInTxTellsABackEdgeFromACrossEdge(t *testing.T) {
 				t.Fatalf("stub of c = parent %q depth %d edge %q, want %s/%s/blocks", stub.ParentID, stub.Depth, stub.EdgeFromParent, tt.stub[0], tt.stub[1])
 			}
 		})
+	}
+}
+
+// TestGetDependencyTreeInTxStaleFlagReadsReady is the AC-3 walk: an open root
+// whose stored is_blocked flag is 1 with no own ready-affecting edge carries
+// a stale flag (GH#3268) that ready work reads around, so the tree's
+// effective flag is false, the JSON omits the member, and — because the
+// ordered mock only names reads — any attempt to rewrite the stored flag
+// would fail the test. Without the qualification the raw flag marks the root
+// [BLOCKED] while `bd ready` still lists it.
+func TestGetDependencyTreeInTxStaleFlagReadsReady(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectBegin()
+	expectIssue(mock, "stale", "Stale")
+	expectDependencies(mock, "stale", nil)
+	expectTreeBlockedFlags(mock, map[string]int{"stale": 1}, "stale")
+	// The probe answers with no id: the stale flag owns no edge.
+	expectOwnEdgeProbe(mock, "dependencies", nil, []string{"stale"})
+
+	tx, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("BeginTx: %v", err)
+	}
+	tree, err := GetDependencyTreeInTx(context.Background(), tx, "stale", 3, false, false)
+	if err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("GetDependencyTreeInTx: %v", err)
+	}
+	mock.ExpectRollback()
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("Rollback: %v", err)
+	}
+
+	if len(tree) != 1 {
+		t.Fatalf("len(tree) = %d, want only the root: %+v", len(tree), tree)
+	}
+	if tree[0].Issue.IsBlocked {
+		t.Fatalf("root %s stamped IsBlocked from the raw flag, want the stale flag read around (bd ready lists it)", tree[0].ID)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+	wire, err := json.Marshal(tree[0])
+	if err != nil {
+		t.Fatalf("marshal tree node: %v", err)
+	}
+	if strings.Contains(string(wire), "is_blocked") {
+		t.Fatalf("json node = %s, want is_blocked omitted", wire)
 	}
 }
