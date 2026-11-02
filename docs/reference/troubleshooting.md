@@ -170,9 +170,14 @@ contains:
 possible data loss detected in journal file at offset ...: corrupted journal
 ```
 
-**Cause:** Dolt detected damaged journal blocks after an unclean shutdown.
-This is not the same as a stale PID, stale port, or stale lock file. `bd`
-will not run Dolt's data-loss repair mode automatically.
+**Symptom (embedded mode):** `bd` fails to open the database at startup —
+the journal or open error is printed by the CLI itself, because the engine
+runs in-process and there is no separate server log.
+
+**Cause:** Dolt detected damaged journal blocks after an unclean shutdown
+(for example a batch write killed mid-flight). This is not the same as a
+stale PID, stale port, or stale lock file. `bd` will not run Dolt's
+data-loss repair mode automatically.
 
 **Safe recovery when your remote is current:**
 
@@ -188,6 +193,11 @@ If the remote may be stale, keep the corrupt directory for forensics and
 inspect it with `dolt fsck` before considering
 `dolt fsck --revive-journal-with-data-loss`. Only use the revive path after
 reviewing Dolt's data-loss warning.
+
+For the embedded-mode symptom and the preservation-first recovery procedure
+(preserve the damaged store, then recover into a fresh target from a remote,
+a Dolt-native snapshot, or an existing JSONL export), see
+[Engine won't open](/recovery/database-corruption#engine-wont-open).
 
 ### `failed to import: issue already exists`
 

@@ -75,6 +75,17 @@ const (
 	reCloneGotchasHeading = "## " + reCloneGotchasAnchor
 
 	gotcha1Heading = "### Gotcha 1"
+
+	// engineWontOpenHeading is the runbook section every #4521 recovery
+	// diagnostic points at; the doctor hint and Fix strings embed the GitHub
+	// blob URL, so the heading that generates the anchor cannot silently
+	// change. journalCorruptionHeading scopes the troubleshooting entry that
+	// must route embedded symptoms to it.
+	engineWontOpenHeading    = "## Engine won't open"
+	engineWontOpenAnchor     = "engine-wont-open"
+	engineWontOpenDocLink    = "/recovery/database-corruption#engine-wont-open"
+	journalCorruptionHeading = "### Dolt journal corruption after restart"
+	initSafetyReCloneLink    = "/recovery/init-safety#re-clone-gotchas"
 )
 
 // docSection returns the markdown between the heading line that starts with
@@ -121,6 +132,27 @@ func flattenProse(s string) string {
 	return strings.Join(strings.Fields(s), " ")
 }
 
+// requireDocSection returns the markdown under heading, failing the test when
+// the heading is missing, so a rename cannot silently hollow out a guard.
+func requireDocSection(t *testing.T, doc, heading, docPath string) string {
+	t.Helper()
+	section, ok := docSection(doc, heading)
+	if !ok {
+		t.Fatalf("%s missing the %q section", docPath, heading)
+	}
+	return section
+}
+
+// requireInSection fails when phrase is absent from the section's flattened
+// prose. Assert lowercase phrases with backticks and emphasis removed
+// (underscores survive).
+func requireInSection(t *testing.T, sectionName, section, phrase string) {
+	t.Helper()
+	if !strings.Contains(flattenProse(section), phrase) {
+		t.Errorf("%s must say %q (matched with emphasis and code decoration removed)", sectionName, phrase)
+	}
+}
+
 // TestInitSafetyCLIHelpCoversReCloneGotchas guards the same two re-clone
 // gotchas (at CLI-help brevity) in cmd/bd/init_safety_help.go's Long field,
 // the generator source for docs/cli-reference/init-safety.md.
@@ -163,4 +195,87 @@ func TestInitSafetyCLIHelpCoversReCloneGotchas(t *testing.T) {
 	if want := "docs/recovery/init-safety.md#" + reCloneGotchasAnchor; !strings.Contains(string(data), want) {
 		t.Errorf("cmd/bd/init_safety_help.go must send readers to %q for the full detail", want)
 	}
+}
+
+// TestDatabaseCorruptionRecoveryGuidance guards the issue #4521 recovery
+// guidance. An unopenable store must route through preservation-first
+// recovery — a remote via bd bootstrap --dry-run, a Dolt-native snapshot via
+// bd init + bd backup restore, or an existing JSONL export via bd import /
+// configured import.path — verified with bd list --all and bd stats, never a
+// universal stop/doctor/restart sequence that embedded mode cannot follow.
+func TestDatabaseCorruptionRecoveryGuidance(t *testing.T) {
+	root := repoRoot()
+
+	runbookPath := filepath.Join(root, "docs", "recovery", "database-corruption.md")
+	runbookData, err := os.ReadFile(runbookPath)
+	if err != nil {
+		t.Fatalf("reading %s: %v", runbookPath, err)
+	}
+	runbook := string(runbookData)
+
+	t.Run("ac1_stable_engine_wont_open_heading", func(t *testing.T) {
+		if !hasHeadingLine(runbook, engineWontOpenHeading) {
+			t.Errorf("docs/recovery/database-corruption.md must keep the %q heading: doctor diagnostics and the troubleshooting journal-corruption entry link to #%s",
+				engineWontOpenHeading, engineWontOpenAnchor)
+		}
+	})
+
+	engineSectionName := "docs/recovery/database-corruption.md \"Engine won't open\""
+	engine := requireDocSection(t, runbook, engineWontOpenHeading, "docs/recovery/database-corruption.md")
+
+	t.Run("ac1_preserve_configured_store_and_configuration", func(t *testing.T) {
+		requireInSection(t, engineSectionName, engine, "dolt_data_dir")
+		requireInSection(t, engineSectionName, engine, "metadata.json")
+		requireInSection(t, engineSectionName, engine, "outside any active server data_dir")
+		if !strings.Contains(engine, initSafetyReCloneLink) {
+			t.Errorf("%s must link %s for the data_dir preservation gotcha", engineSectionName, initSafetyReCloneLink)
+		}
+	})
+
+	t.Run("ac1_verify_without_embedded_doctor", func(t *testing.T) {
+		requireInSection(t, engineSectionName, engine, "bd list --all")
+		requireInSection(t, engineSectionName, engine, "bd stats")
+		requireInSection(t, engineSectionName, engine, "general bd doctor still requires server mode")
+		requireInSection(t, engineSectionName, engine, "--check=artifacts")
+	})
+
+	t.Run("ac1_remote_route_bootstrap_dry_run", func(t *testing.T) {
+		requireInSection(t, engineSectionName, engine, "bd bootstrap --dry-run")
+		requireInSection(t, engineSectionName, engine, "is not data recovery")
+	})
+
+	t.Run("ac1_native_snapshot_route", func(t *testing.T) {
+		requireInSection(t, engineSectionName, engine, "bd init")
+		requireInSection(t, engineSectionName, engine, "bd backup restore")
+		requireInSection(t, engineSectionName, engine, "will not read a bd export jsonl file")
+		requireInSection(t, engineSectionName, engine, "requires an initialized database")
+	})
+
+	t.Run("ac1_jsonl_export_route", func(t *testing.T) {
+		requireInSection(t, engineSectionName, engine, "bd import /path/to/export.jsonl")
+		requireInSection(t, engineSectionName, engine, "bd config set import.path recovered.jsonl")
+		requireInSection(t, engineSectionName, engine, "bd init --from-jsonl")
+		requireInSection(t, engineSectionName, engine, "reads the configured import.path")
+	})
+
+	t.Run("ac1_stale_or_missing_recovery_sources", func(t *testing.T) {
+		requireInSection(t, engineSectionName, engine, "cannot export from an engine that will not open")
+		requireInSection(t, engineSectionName, engine, "a stale remote silently loses")
+		requireInSection(t, engineSectionName, engine, "a stale export silently loses")
+	})
+
+	t.Run("ac1_troubleshooting_journal_corruption_covers_embedded", func(t *testing.T) {
+		tsPath := filepath.Join(root, "docs", "reference", "troubleshooting.md")
+		tsData, err := os.ReadFile(tsPath)
+		if err != nil {
+			t.Fatalf("reading %s: %v", tsPath, err)
+		}
+		const where = "docs/reference/troubleshooting.md \"Dolt journal corruption after restart\""
+		section := requireDocSection(t, string(tsData), journalCorruptionHeading, "docs/reference/troubleshooting.md")
+		requireInSection(t, where, section, "symptom (server mode)")
+		requireInSection(t, where, section, "symptom (embedded mode)")
+		if !strings.Contains(section, engineWontOpenDocLink) {
+			t.Errorf("%s must link %s inside the section itself; the same link elsewhere in the file does not route this symptom", where, engineWontOpenDocLink)
+		}
+	})
 }
