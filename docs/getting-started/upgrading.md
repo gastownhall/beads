@@ -420,6 +420,15 @@ while the clone is still behind — precisely the state the stop exists to
 prevent — and the `bd dolt push` that would follow is rejected as a
 non-fast-forward anyway.
 
+One shape this stop cannot see: commits that exist only on another clone and
+were never pushed to the remote at all. If that clone's work wrote to the
+`events` audit table, the migrated store cannot merge it back — `bd dolt pull`
+fails with `the table(s) events have schema conflicts`, a conflict neither
+`--ours` nor `--theirs` can settle. Pull *before* migrating whenever another
+clone may hold unpushed work, and if you are already in that state, see
+[Events schema conflict after
+migrating](/recovery/sync-failures#merge-fails-with-the-tables-events-have-schema-conflicts).
+
 **On a shared server**, the pull is still the first step, but the migration
 after it needs explicit consent, because it promotes the schema for every
 co-resident client at once (see [Shared servers](#shared-servers)). Confirm

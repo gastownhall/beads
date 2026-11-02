@@ -623,7 +623,23 @@ func writeMergeBlockers(w io.Writer, b storage.MergeBlockers) {
 		fmt.Fprintf(w, "  constraint violations: %s (%d)\n", v.Table, v.Count)
 	}
 	fmt.Fprintln(w, "\nNeither class has an ours/theirs resolution — bd conflicts resolve cannot settle them.")
-	if len(b.SchemaConflictTables) > 0 {
+	// #6727: an events schema conflict is usually not a schema edit at all.
+	// Migration 0062 dropped the versioned events table, so merging history
+	// that still writes to it is a deletion-vs-modification conflict — a
+	// shape ALTER TABLE cannot reconcile (no versioned table remains on this
+	// side) and neither --ours nor --theirs can resolve. Split the remedy so
+	// events gets the migration-0062 recovery and every other table keeps the
+	// ALTER TABLE guidance; an events entry alone is not proof of this cause,
+	// so the events remedy stays conditional on the store having run 0062.
+	var eventsConflict, otherSchemaConflict bool
+	for _, t := range b.SchemaConflictTables {
+		if strings.EqualFold(t, "events") {
+			eventsConflict = true
+		} else {
+			otherSchemaConflict = true
+		}
+	}
+	if otherSchemaConflict {
 		// Not `dolt conflicts resolve`: dolt refuses that outright while a
 		// schema conflict is live (dolthub/dolt#6616), so pointing an
 		// operator at it sends them to a command that always errors
@@ -631,6 +647,14 @@ func writeMergeBlockers(w io.Writer, b storage.MergeBlockers) {
 		// re-merged, not resolved in place.
 		fmt.Fprintln(w, "  Schema conflicts:       abort the merge (dolt merge --abort), apply the peer's")
 		fmt.Fprintln(w, "                          ALTER TABLE statements locally, then merge again")
+	}
+	if eventsConflict {
+		fmt.Fprintln(w, "  Schema conflict (events): if this store migrated past schema v62, migration 0062 dropped")
+		fmt.Fprintln(w, "                          the versioned events table, and this is its deletion meeting peer")
+		fmt.Fprintln(w, "                          history that still writes to it — ours/theirs cannot resolve it. Do NOT")
+		fmt.Fprintln(w, "                          run `dolt checkout -- events` (it destroys the working events table);")
+		fmt.Fprintln(w, "                          back up, abort the merge where it is open (dolt merge --abort), then")
+		fmt.Fprintln(w, "                          follow docs/recovery/sync-failures.md#merge-fails-with-the-tables-events-have-schema-conflicts")
 	}
 	if len(b.ConstraintViolations) > 0 {
 		fmt.Fprintln(w, "  Constraint violations:  inspect dolt_constraint_violations_<table>, delete the offending rows,")

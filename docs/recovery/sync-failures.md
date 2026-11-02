@@ -14,6 +14,9 @@ This runbook helps you recover from Dolt sync failures.
 - `bd dolt push`, `bd sync` or dolt auto-push fails with "Found dangling
   references to HashSet" — see
   [Push fails with "Found dangling references"](#push-fails-with-found-dangling-references)
+- After migrating past schema v62, `bd dolt pull` fails with "the table(s)
+  events have schema conflicts" — see
+  [Merge fails with "the table(s) events have schema conflicts"](#merge-fails-with-the-tables-events-have-schema-conflicts)
 
 ## Diagnosis
 
@@ -71,6 +74,7 @@ bd doctor
 | Corrupted state | Back up, then `bd doctor --fix` |
 | Merge conflicts | See [Merge Conflicts](/recovery/merge-conflicts) |
 | Remote refused a chunk ("Found dangling references") | See [Push fails with "Found dangling references"](#push-fails-with-found-dangling-references) |
+| Store migrated past v62 while a clone had unpushed events writes | See [Merge fails with "the table(s) events have schema conflicts"](#merge-fails-with-the-tables-events-have-schema-conflicts) |
 
 ## Push fails with "Found dangling references"
 
@@ -174,6 +178,98 @@ bd sql "SELECT dolt_hashof('HEAD') AS head_commit, dolt_hashof_db('HEAD') AS hea
    the remote type, the output of `bd version` (and of `dolt version` in server
    mode: embedded mode runs the Dolt engine built into bd), and the UTC times
    of the failures (DoltHub can match them to its manifest logs).
+
+## Merge fails with "the table(s) events have schema conflicts"
+
+**Symptom:** on a store that has migrated past schema v62, `bd dolt pull` (or
+`bd vc merge`) fails with one of:
+
+```text
+Error: failed to commit resolved conflicts: Error 1105 (HY000): the table(s) events have schema conflicts
+```
+
+```text
+Error: local changes would be stomped by merge: events
+```
+
+While the failed merge is open, `bd conflicts list` reports
+`schema conflict: events`. `dolt status` shows nothing either way: `events`
+has lived on Dolt's ignore plane since migration 0062, and ignored tables are
+invisible to status.
+
+**What it means:** migration 0062 removed the `events` audit table from
+versioned history. Another clone of this database had commits that still wrote
+to the versioned `events` table and had not pushed them when this store
+migrated. Merging that history is now a table deletion (ours) meeting a table
+modification (theirs) — a conflict shape neither `--ours` nor `--theirs` can
+settle, because the table no longer exists on this side
+([#6727](https://github.com/gastownhall/beads/issues/6727)).
+
+Your local events rows are not at risk: they live unversioned in the working
+set and the merge never touches them. What is stranded is the peer's unmerged
+bead work.
+
+<Warning>
+Do **not** run `dolt checkout -- events` to clear merge state. Migration 0062
+deleted the table at HEAD, so "revert to HEAD" deletes the working table with
+all its rows, and every later event write fails with `table not found:
+events`. If it already happened, the next `bd` command that opens the store
+for writing recreates the table — empty; rows lost this way are recoverable
+only from a backup.
+</Warning>
+
+**Steps:** back up first (`cp -r .beads .beads.backup`), then pick one.
+
+**Option 1 — migrate the peer.** The clean fix when the other clone can
+upgrade. Upgrade `bd` on the peer and let it migrate its own store: its
+migration 0062 commits the same `events` deletion on its own history, after
+which both sides deleted the table and ordinary push/pull merge cleanly.
+Resolve any ordinary bead conflicts that were already pending, if the histories
+had diverged before.
+
+**Option 2 — bridge the peer's history by hand.** When the peer cannot
+migrate (or its history only exists on the remote), commit the `events`
+deletion on top of the peer's history yourself, so both sides of the merge
+deleted the table. Every `dolt` command runs inside the Dolt data directory —
+`.beads/embeddeddolt/<database>/` in embedded mode, `.beads/dolt/<database>/`
+in server mode, on the host serving the database:
+
+```bash
+dolt fetch origin                  # make the peer's history visible locally
+dolt merge --abort                 # only if a failed merge is still open
+dolt branch tmp-events-bridge remotes/origin/main
+dolt checkout tmp-events-bridge
+dolt sql -q "DROP TABLE events"
+dolt add -A
+dolt commit -m "bridge: apply the events retirement to incoming history"
+dolt checkout main
+dolt merge tmp-events-bridge       # the peer's beads land; no events conflict
+dolt branch -d tmp-events-bridge
+```
+
+The temporary branch adds one commit on top of the peer's tip — the peer's
+branch and commits are unchanged, and its beads arrive through the merge like
+any other. This sequence is regression-tested against the Dolt engine bd
+embeds.
+
+Then verify:
+
+```bash
+bd list                            # the peer's beads are present
+bd show <peer-bead-id>
+bd update <peer-bead-id> --append-notes "post-recovery check"
+bd dolt push                       # fast-forwards the remote
+```
+
+The `bd update` matters as much as the push: it proves event writes work
+again. If it fails with `table not found: events`, see the warning above.
+
+There is no `bd`-native recovery for this shape yet: the fix that lets an
+ordinary pull absorb such history is tracked in
+[#6727](https://github.com/gastownhall/beads/issues/6727) and lands in `bd`
+and its Dolt driver together. Upgrading `bd` alone does not clear an already
+open conflict, and retrying the pull on the same pair of versions keeps
+failing — run one of the two options above instead.
 
 ## Prevention
 

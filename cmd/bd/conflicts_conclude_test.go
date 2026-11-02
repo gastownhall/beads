@@ -209,6 +209,45 @@ func TestWriteMergeBlockersRemedies(t *testing.T) {
 		}
 	})
 
+	t.Run("events schema conflict points at migration 0062 recovery", func(t *testing.T) {
+		var sb strings.Builder
+		writeMergeBlockers(&sb, schemaBlockers("events"))
+		out := sb.String()
+		// #6727: an events schema conflict on a store that ran migration 0062
+		// is a table-deletion-vs-modification history that no ALTER TABLE can
+		// reconcile, so the generic schema remedy would send the operator to
+		// SQL that cannot apply. The remedy must name the flip, the explicit
+		// abort, the checkout trap, and the recovery page.
+		for _, want := range []string{
+			"schema conflict: events",
+			"0062",
+			"dolt merge --abort",
+			"docs/recovery/sync-failures.md",
+		} {
+			if !strings.Contains(out, want) {
+				t.Errorf("events schema-conflict remedy missing %q:\n%s", want, out)
+			}
+		}
+		if !strings.Contains(strings.ToLower(out), "do not") || !strings.Contains(out, "checkout") {
+			t.Errorf("events schema-conflict remedy must warn against checking out events:\n%s", out)
+		}
+		if strings.Contains(out, "ALTER TABLE") {
+			t.Errorf("events schema-conflict remedy must not recommend ALTER TABLE (no versioned table to alter):\n%s", out)
+		}
+	})
+
+	t.Run("mixed events and other schema conflicts keep both remedies", func(t *testing.T) {
+		var sb strings.Builder
+		writeMergeBlockers(&sb, schemaBlockers("events", "issues"))
+		out := sb.String()
+		if !strings.Contains(out, "ALTER TABLE") {
+			t.Errorf("non-events schema conflicts keep the ALTER TABLE remedy:\n%s", out)
+		}
+		if !strings.Contains(out, "0062") {
+			t.Errorf("events schema conflict in a mixed set keeps the 0062 remedy:\n%s", out)
+		}
+	})
+
 	t.Run("constraint violations", func(t *testing.T) {
 		var sb strings.Builder
 		writeMergeBlockers(&sb, violationBlockers("comments", 3))
