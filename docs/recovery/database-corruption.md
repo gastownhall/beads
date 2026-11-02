@@ -17,6 +17,10 @@ storage engine, or a refused open, before any command logic runs.
 - **Server mode — connection refused / server not running.** The database is
   fine; the server is unreachable. Check `bd dolt status` and start the
   server. This is an availability problem, not corruption.
+- **A live process is using the embedded database.** Embedded mode is
+  single-writer: while another `bd` process holds the database, opens wait
+  or fail with lock errors. That is live contention, not corruption — see
+  [Locks and live holders](#locks-and-live-holders).
 - **An actual open or journal error from the engine itself** (embedded mode,
   or a server reporting journal damage in its log). Continue with the steps
   below.
@@ -118,6 +122,27 @@ General `bd doctor` still requires server mode — embedded mode supports only
 `--check=pollution` — so `bd list --all` and `bd stats` are the
 verification, independent of doctor support. Keep the preserved copy until
 this passes.
+
+## Locks and live holders
+
+After an interrupted or killed command you may find a lock file left behind
+(in embedded mode a `LOCK` pathname inside the database's `.dolt/`
+directory), or see "database is locked" errors on the next command.
+
+A leftover lock file is not evidence of a held lock. The kernel releases a
+process's file locks when the process dies, so a lock left behind by a killed
+command is normally already released — an existing `LOCK` file alone
+diagnoses nothing. Live contention means another process is *still* using
+the database right now, and is resolved by waiting for or stopping the actual
+holder, not by rebuilding the database. `bd dolt stop` stops a server that bd
+manages; it cannot stop an arbitrary embedded `bd` process — end that
+process yourself (close its terminal, or kill its PID) after confirming it
+is really yours to stop.
+
+Never delete files inside `.dolt/` to "clear" a lock. Lock files are part of
+the engine's on-disk format; deleting engine internals is what actually
+risks corruption, which is why `bd doctor` refuses to touch Dolt-internal
+lock files.
 
 ## Prevention
 

@@ -279,3 +279,30 @@ func TestDatabaseCorruptionRecoveryGuidance(t *testing.T) {
 		}
 	})
 }
+
+// ac2: an interrupted command leaves lock pathnames behind; the runbook must
+// keep a leftover pathname, a live holder, and actual damage distinct.
+func TestDatabaseCorruptionLockGuidance(t *testing.T) {
+	root := repoRoot()
+	runbookPath := filepath.Join(root, "docs", "recovery", "database-corruption.md")
+	runbookData, err := os.ReadFile(runbookPath)
+	if err != nil {
+		t.Fatalf("reading %s: %v", runbookPath, err)
+	}
+	runbook := string(runbookData)
+
+	const lockHeading = "## Locks and live holders"
+	const where = "docs/recovery/database-corruption.md \"Locks and live holders\""
+	locks := requireDocSection(t, runbook, lockHeading, "docs/recovery/database-corruption.md")
+
+	requireInSection(t, where, locks, "a leftover lock file is not evidence of a held lock")
+	requireInSection(t, where, locks, "waiting for or stopping the actual holder")
+	requireInSection(t, where, locks, "not by rebuilding the database")
+	requireInSection(t, where, locks, "never delete files inside .dolt/")
+	requireInSection(t, where, locks, "bd dolt stop")
+	requireInSection(t, where, locks, "cannot stop an arbitrary embedded bd process")
+
+	engine := requireDocSection(t, runbook, engineWontOpenHeading, "docs/recovery/database-corruption.md")
+	engineSectionName := "docs/recovery/database-corruption.md \"Engine won't open\""
+	requireInSection(t, engineSectionName, engine, "live contention, not corruption")
+}
