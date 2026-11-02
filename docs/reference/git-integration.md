@@ -90,7 +90,11 @@ bd hooks uninstall
 ```
 
 In releases after v1.3.2, uninstall refuses a hooks directory that is itself a
-symlink, before editing any hook or resetting `core.hooksPath`.
+symlink, before editing any hook or resetting `core.hooksPath`. In a real
+hooks directory it leaves a symlinked hook and its target untouched, and it
+restores a `<hook>.backup` only when that backup is a regular file; each
+skipped entry is named in a warning, and the other hooks are uninstalled as
+usual.
 
 ### External Hook Managers
 
