@@ -480,6 +480,7 @@
 100 84 TestEmbeddedInitGitBootstrapRoutingDecoyInvalid
 100 84 TestEmbeddedInitReinitLocalAuthorizedSwitch
 100 84 TestEmbeddedInitSelectedExcludeRoutingStealthInvalid
+100 84 TestEmbeddedInitSkipGitCommit
 100 84 TestEmbeddedMigratePersonal_preservesComments
 
 100 85 TestEmbeddedBootstrapExistingDryRunInit

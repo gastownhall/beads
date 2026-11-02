@@ -3736,6 +3736,7 @@ bd init
   flag --setup-exclude type=bool default="false" usage="Configure .git/info/exclude to keep beads files local (for forks)"
   flag --shared-server type=bool default="false" usage="Enable shared Dolt server mode (all projects share one server at ~/.beads/shared-server/)"
   flag --skip-agents type=bool default="false" usage="Skip AGENTS.md and Claude/Codex/Cursor setup generation"
+  flag --skip-git-commit type=bool default="false" usage="Skip staging and committing init artifacts in the project's Git repository"
   flag --skip-hooks type=bool default="false" usage="Skip git hooks installation"
   flag --sqlite-path type=string default="" hidden usage="Legacy SQLite database file (removed backend compatibility only)"
   flag --stealth type=bool default="false" usage="Enable stealth mode: keep beads files out of git via .git/info/exclude (sets no-git-ops)"
@@ -3842,6 +3843,17 @@ bd init-safety
     |   differs. Back it up first with bd backup. Only the engine family and the
     |   database name are compared: host, port, socket and shared-server
     |   location changes are not.
+    |
+    | GIT OPT-OUT (--skip-git-commit)
+    |
+    |   bd init's last step stages its artifacts (.beads/, the agent
+    |   instructions) and makes a "bd init: initialize beads issue tracking"
+    |   commit in the project's Git repository. --skip-git-commit skips that
+    |   staging and commit only: the files are still created, nothing is
+    |   staged, HEAD does not move, and whatever the index already held is
+    |   left untouched. It does not touch the store's own Dolt history, and it
+    |   does not authorize any store switch or remote-history discard; those
+    |   keep their own confirmations above.
     |
     | EXIT CODES
     |

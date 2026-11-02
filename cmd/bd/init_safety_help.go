@@ -111,6 +111,17 @@ STORE SWITCH
   database name are compared: host, port, socket and shared-server
   location changes are not.
 
+GIT OPT-OUT (--skip-git-commit)
+
+  bd init's last step stages its artifacts (.beads/, the agent
+  instructions) and makes a "bd init: initialize beads issue tracking"
+  commit in the project's Git repository. --skip-git-commit skips that
+  staging and commit only: the files are still created, nothing is
+  staged, HEAD does not move, and whatever the index already held is
+  left untouched. It does not touch the store's own Dolt history, and it
+  does not authorize any store switch or remote-history discard; those
+  keep their own confirmations above.
+
 EXIT CODES
 
   10    refused: remote has Dolt history and you selected local history
