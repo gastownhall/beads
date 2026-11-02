@@ -2025,6 +2025,8 @@ func TestAllMigrationsSQLUsesDirectDDLForKnownCLIIncompatibilities(t *testing.T)
 		// 0065.
 		"ALTER TABLE events MODIFY COLUMN comment LONGTEXT;",
 		"ALTER TABLE wisp_events MODIFY COLUMN comment LONGTEXT DEFAULT '';",
+		"ALTER TABLE issue_snapshots MODIFY COLUMN original_content LONGTEXT NOT NULL;",
+		"ALTER TABLE issue_snapshots MODIFY COLUMN archived_events LONGTEXT;",
 		"ALTER TABLE compaction_snapshots MODIFY COLUMN snapshot_json LONGBLOB NOT NULL;",
 	} {
 		if !strings.Contains(got, want) {
@@ -2074,6 +2076,8 @@ func TestAllMigrationsSQLUsesDirectDDLForKnownCLIIncompatibilities(t *testing.T)
 		// (and its unbundled ignored twin) carries these.
 		"@events_comment_needs_widen",
 		"@wisp_events_comment_needs_widen",
+		"@issue_snapshots_original_content_needs_widen",
+		"@issue_snapshots_archived_events_needs_widen",
 		"@compaction_snapshot_json_needs_widen",
 	} {
 		if strings.Contains(got, forbidden) {

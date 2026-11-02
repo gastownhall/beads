@@ -211,6 +211,7 @@ go_test(
         "migrate_ignored_plane_shape_test.go",
         "migrate_journal_shape_repair_test.go",
         "migrate_repair_atomicity_test.go",
+        "migrate_residual_content_columns_test.go",
         "migrate_selfheal_test.go",
         "migrate_temp_intermediates_test.go",
         "migrate_wisp_dep_forward_repair_test.go",
