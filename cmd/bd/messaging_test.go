@@ -6,6 +6,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -402,9 +403,9 @@ func TestFindMailDelegate(t *testing.T) {
 	})
 }
 
-// TestMailDelegateFromConfig tests mail delegate resolution from store config.
-// Kept separate because it modifies global store and rootCtx.
-func TestMailDelegateFromConfig(t *testing.T) {
+// TestMailDelegateIgnoresStoreConfig checks that a replicated DB value is not
+// used as the mail delegate. Kept separate because it modifies global store and rootCtx.
+func TestMailDelegateIgnoresStoreConfig(t *testing.T) {
 	tmpDir := t.TempDir()
 	testStore := newTestStore(t, filepath.Join(tmpDir, ".beads", "beads.db"))
 	ctx := context.Background()
@@ -413,14 +414,8 @@ func TestMailDelegateFromConfig(t *testing.T) {
 		t.Fatalf("SetConfig failed: %v", err)
 	}
 
-	origBeads := os.Getenv("BEADS_MAIL_DELEGATE")
-	origBD := os.Getenv("BD_MAIL_DELEGATE")
-	os.Unsetenv("BEADS_MAIL_DELEGATE")
-	os.Unsetenv("BD_MAIL_DELEGATE")
-	defer func() {
-		os.Setenv("BEADS_MAIL_DELEGATE", origBeads)
-		os.Setenv("BD_MAIL_DELEGATE", origBD)
-	}()
+	t.Setenv("BEADS_MAIL_DELEGATE", "")
+	t.Setenv("BD_MAIL_DELEGATE", "")
 
 	oldStore := store
 	oldCtx := rootCtx
@@ -431,8 +426,18 @@ func TestMailDelegateFromConfig(t *testing.T) {
 		rootCtx = oldCtx
 	}()
 
-	got := findMailDelegate()
-	if got != "gt mail" {
-		t.Errorf("findMailDelegate() = %q, want \"gt mail\"", got)
+	if err := withBeadsDirConfig(t, t.TempDir(), func() {
+		var got string
+		warning := captureStderr(t, func() {
+			got = findMailDelegate()
+		})
+		if got != "" {
+			t.Errorf("findMailDelegate() = %q, want DB value ignored", got)
+		}
+		if !strings.Contains(warning, "ignoring mail.delegate from workspace database") {
+			t.Errorf("warning = %q, want migration notice for DB mail.delegate", warning)
+		}
+	}); err != nil {
+		t.Fatal(err)
 	}
 }
