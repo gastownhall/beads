@@ -192,9 +192,13 @@ type confirmStoreSwitchInput struct {
 	Diff          storeSwitchDiff
 	DestroyToken  string
 	ExpectedToken string
-	StdinIsTTY    bool
-	Stdin         io.Reader
-	Stderr        io.Writer
+	// NonInteractive is init's resolved non-interactive mode (flag, env, or
+	// CI): it outranks the terminal, so a TTY with non-interactive mode
+	// enabled takes the token path and reads no interactive answer.
+	NonInteractive bool
+	StdinIsTTY     bool
+	Stdin          io.Reader
+	Stderr         io.Writer
 }
 
 // storeSwitchPhrase is the typed text an interactive switch confirmation must
@@ -210,9 +214,9 @@ func storeSwitchPhrase(diff storeSwitchDiff) string {
 
 // confirmStoreSwitch demands authorization for a detected store switch:
 // a matching destroy token, or the matching interactive phrase at a real
-// terminal. Either authorizes the switch once. A mismatched phrase is the
-// operator declining at the prompt (ExitLocalExistsRefused); everything
-// else without a terminal refuses for want of a token
+// terminal with interactive mode resolved. Either authorizes the switch
+// once. A mismatched phrase is the operator declining at the prompt
+// (ExitLocalExistsRefused); everything else refuses for want of a token
 // (ExitDestroyTokenMissing). The old store is never opened, counted or
 // inspected to make this decision.
 func confirmStoreSwitch(in confirmStoreSwitchInput) error {
@@ -221,7 +225,7 @@ func confirmStoreSwitch(in confirmStoreSwitchInput) error {
 		fmt.Fprintln(in.Stderr, "Destroy token accepted. Proceeding with the store switch.")
 		return nil
 	}
-	if in.StdinIsTTY {
+	if !in.NonInteractive && in.StdinIsTTY {
 		phrase := storeSwitchPhrase(in.Diff)
 		fmt.Fprintf(in.Stderr, "Type '%s' to confirm: ", remedy.PrintedValue(phrase))
 		scanner := bufio.NewScanner(in.Stdin)
@@ -235,7 +239,11 @@ func confirmStoreSwitch(in confirmStoreSwitchInput) error {
 	}
 	fmt.Fprintf(in.Stderr, "Refusing to switch this workspace's store without a matching --destroy-token.\n")
 	fmt.Fprintf(in.Stderr, "  See 'bd help init-safety' for the required --destroy-token format.\n")
-	fmt.Fprintf(in.Stderr, "  Or re-run the command at a terminal to type the confirmation instead.\n")
+	if in.StdinIsTTY {
+		fmt.Fprintf(in.Stderr, "  Or re-run with non-interactive mode disabled to type the confirmation instead.\n")
+	} else {
+		fmt.Fprintf(in.Stderr, "  Or re-run the command at a terminal to type the confirmation instead.\n")
+	}
 	return &exitError{Code: ExitDestroyTokenMissing}
 }
 
@@ -249,9 +257,12 @@ type reinitPreflightInput struct {
 	Request       storeSwitchRequest
 	DestroyToken  string
 	ExpectedToken string
-	// StdinIsTTY feeds the prompt-vs-token decision of the count-based
-	// confirmation below; the switch confirmation above never reads
-	// stdin for its decision.
+	// NonInteractive is init's resolved non-interactive mode; it outranks
+	// StdinIsTTY on both confirmations, so a TTY with non-interactive mode
+	// enabled takes the token path and reads no interactive answer.
+	NonInteractive bool
+	// StdinIsTTY feeds the prompt-vs-token decision of both confirmations;
+	// the switch confirmation reads stdin only on its interactive path.
 	StdinIsTTY bool
 	Stdin      io.Reader
 	Stderr     io.Writer
@@ -283,12 +294,13 @@ func runInitReinitPreflight(in reinitPreflightInput) error {
 	}
 	if diff, switched := compareStoreSwitch(recorded, in.Request); switched {
 		return confirmStoreSwitch(confirmStoreSwitchInput{
-			Diff:          diff,
-			DestroyToken:  in.DestroyToken,
-			ExpectedToken: in.ExpectedToken,
-			StdinIsTTY:    in.StdinIsTTY,
-			Stdin:         in.Stdin,
-			Stderr:        in.Stderr,
+			Diff:           diff,
+			DestroyToken:   in.DestroyToken,
+			ExpectedToken:  in.ExpectedToken,
+			NonInteractive: in.NonInteractive,
+			StdinIsTTY:     in.StdinIsTTY,
+			Stdin:          in.Stdin,
+			Stderr:         in.Stderr,
 		})
 	}
 
@@ -312,7 +324,7 @@ func runInitReinitPreflight(in reinitPreflightInput) error {
 	fmt.Fprintf(in.Stderr, "  Before proceeding, consider:\n")
 	fmt.Fprintf(in.Stderr, "    bd export > issue-export.jsonl    # Export issue records, not full DB state\n")
 	fmt.Fprintf(in.Stderr, "    bd dolt status              # Check if this is a server config issue\n\n")
-	if in.StdinIsTTY {
+	if !in.NonInteractive && in.StdinIsTTY {
 		fmt.Fprintf(in.Stderr, "Type 'destroy %d issues' to confirm: ", count)
 		scanner := bufio.NewScanner(in.Stdin)
 		scanner.Scan()

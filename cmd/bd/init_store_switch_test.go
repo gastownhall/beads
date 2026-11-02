@@ -334,6 +334,87 @@ func (r failReader) Read([]byte) (int, error) {
 	return 0, io.EOF
 }
 
+// TestReinitNonInteractiveRouting pins the resolved non-interactive mode's
+// precedence over the terminal: on a TTY with non-interactive mode enabled,
+// BOTH destructive confirmations take the token path and read no
+// interactive answer, while a TTY with interactive mode resolved still gets
+// its typed prompt.
+func TestReinitNonInteractiveRouting(t *testing.T) {
+	newSwitchInput := func(t *testing.T, nonInteractive bool, token string, stdin io.Reader) confirmStoreSwitchInput {
+		t.Helper()
+		return confirmStoreSwitchInput{
+			Diff:           storeSwitchDiff{DatabaseSwitch: true, RecordedDatabase: "fi", RequestedDatabase: "other"},
+			DestroyToken:   token,
+			ExpectedToken:  "DESTROY-fi",
+			NonInteractive: nonInteractive,
+			StdinIsTTY:     true, // the whole point: a terminal is present
+			Stdin:          stdin,
+			Stderr:         &strings.Builder{},
+		}
+	}
+
+	t.Run("switch confirmation on a TTY takes the token path", func(t *testing.T) {
+		in := newSwitchInput(t, true, "", failReader{t})
+		err := confirmStoreSwitch(in)
+		var exit *exitError
+		if !errors.As(err, &exit) || exit.Code != ExitDestroyTokenMissing {
+			t.Fatalf("TTY with non-interactive mode resolved = %v, want exit %d", err, ExitDestroyTokenMissing)
+		}
+		if out := in.Stderr.(*strings.Builder).String(); strings.Contains(out, "Type 'leave") {
+			t.Errorf("the refusal asked for a typed phrase although non-interactive mode was resolved:\n%s", out)
+		}
+	})
+
+	t.Run("a matching token still authorizes the switch on a TTY", func(t *testing.T) {
+		if err := confirmStoreSwitch(newSwitchInput(t, true, "DESTROY-fi", failReader{t})); err != nil {
+			t.Fatalf("matching token on a TTY with non-interactive mode: %v", err)
+		}
+	})
+
+	t.Run("populated-store confirmation on a TTY takes the token path", func(t *testing.T) {
+		in := reinitPreflightInput{
+			ReinitLocal:    true,
+			Request:        storeSwitchRequest{Database: "fi"},
+			NonInteractive: true,
+			StdinIsTTY:     true,
+			Stdin:          failReader{t},
+			Stderr:         &strings.Builder{},
+			LoadRecorded: func(string) (storeSwitchRecord, error) {
+				return storeSwitchRecord{Backend: "dolt", Mode: "embedded", Database: "fi"}, nil
+			},
+			CountExisting: func() (int, error) { return 3, nil },
+		}
+		err := runInitReinitPreflight(in)
+		var exit *exitError
+		if !errors.As(err, &exit) || exit.Code != ExitDestroyTokenMissing {
+			t.Fatalf("TTY with non-interactive mode resolved = %v, want exit %d", err, ExitDestroyTokenMissing)
+		}
+		if out := in.Stderr.(*strings.Builder).String(); !strings.Contains(out, "Refusing to destroy") {
+			t.Errorf("wanted the non-interactive populated-store refusal, got:\n%s", out)
+		}
+	})
+
+	t.Run("a TTY with interactive mode resolved still gets its typed prompt", func(t *testing.T) {
+		in := reinitPreflightInput{
+			ReinitLocal:    true,
+			Request:        storeSwitchRequest{Database: "fi"},
+			NonInteractive: false,
+			StdinIsTTY:     true,
+			Stdin:          strings.NewReader("not the confirmation\n"),
+			Stderr:         &strings.Builder{},
+			LoadRecorded: func(string) (storeSwitchRecord, error) {
+				return storeSwitchRecord{Backend: "dolt", Mode: "embedded", Database: "fi"}, nil
+			},
+			CountExisting: func() (int, error) { return 3, nil },
+		}
+		err := runInitReinitPreflight(in)
+		var exit *exitError
+		if !errors.As(err, &exit) || exit.Code != ExitLocalExistsRefused {
+			t.Fatalf("interactive TTY mismatch = %v, want exit %d (the typed prompt must keep working)", err, ExitLocalExistsRefused)
+		}
+	})
+}
+
 // TestReinitPreflightSwitchNeverCounts proves the load-bearing property of
 // the GH#3495 fix: a switch is decided from the recorded metadata, so the
 // recorded store is never opened or counted — before a refusal, and after

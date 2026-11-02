@@ -2363,3 +2363,136 @@ func TestEmbeddedInitReinitLocalSwitchNoticeContract(t *testing.T) {
 		t.Errorf("notice contains a complete destructive invocation:\n%s", out)
 	}
 }
+
+// runBDOnTTYAwaitExit runs bd args in dir on a pseudo-terminal and waits for
+// it to EXIT without anything being typed. If promptMarker appears in the
+// terminal output first, the test fails immediately: the command was required
+// to decide without reading an interactive answer.
+func runBDOnTTYAwaitExit(t *testing.T, bd, dir string, env []string, promptMarker string, args ...string) (string, int) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("no unix PTY on Windows; the interactive typed confirmation is unreachable here")
+	}
+	cmd := exec.Command(bd, args...)
+	cmd.Dir = dir
+	cmd.Env = env
+	ptmx, err := pty.Start(cmd)
+	if err != nil {
+		t.Fatalf("pty.Start bd %s: %v", strings.Join(args, " "), err)
+	}
+	defer func() { _ = ptmx.Close() }()
+
+	var (
+		mu         sync.Mutex
+		output     bytes.Buffer
+		promptSeen = make(chan struct{})
+		once       sync.Once
+		readerDone = make(chan struct{})
+	)
+	go func() {
+		defer close(readerDone)
+		buf := make([]byte, 4096)
+		for {
+			n, readErr := ptmx.Read(buf)
+			if n > 0 {
+				mu.Lock()
+				output.Write(buf[:n])
+				if strings.Contains(output.String(), promptMarker) {
+					once.Do(func() { close(promptSeen) })
+				}
+				mu.Unlock()
+			}
+			if readErr != nil {
+				return
+			}
+		}
+	}()
+	waitCh := make(chan error, 1)
+	go func() { waitCh <- cmd.Wait() }()
+	got := func() string {
+		mu.Lock()
+		defer mu.Unlock()
+		return output.String()
+	}
+
+	select {
+	case <-promptSeen:
+		_ = cmd.Process.Kill()
+		<-waitCh
+		t.Fatalf("bd %s prompted for an interactive answer although non-interactive mode was resolved:\n%s", strings.Join(args, " "), got())
+	case err := <-waitCh:
+		_ = ptmx.Close()
+		select {
+		case <-readerDone:
+		case <-time.After(2 * time.Second):
+		}
+		code := 0
+		if err != nil {
+			var exit *exec.ExitError
+			if !errors.As(err, &exit) {
+				t.Fatalf("bd %s: %v\n%s", strings.Join(args, " "), err, got())
+			}
+			code = exit.ExitCode()
+		}
+		return got(), code
+	case <-time.After(180 * time.Second):
+		_ = cmd.Process.Kill()
+		<-waitCh
+		t.Fatalf("bd %s did not exit within the deadline\n%s", strings.Join(args, " "), got())
+	}
+	return "", 0 // unreachable
+}
+
+// TestEmbeddedInitReinitLocalNonInteractiveTakesTokenPath pins the resolved
+// non-interactive mode's precedence over the terminal: on a TTY with
+// non-interactive mode enabled (--non-interactive or BD_NON_INTERACTIVE),
+// BOTH destructive confirmations must take the non-interactive token path
+// and exit 12 — refusing for want of a token — without reading an
+// interactive answer. Before this, the confirmations keyed on
+// term.IsTerminal(stdin) alone, so an agent driving bd on a pty with
+// BD_NON_INTERACTIVE=1 still got a prompt no automation can answer.
+func TestEmbeddedInitReinitLocalNonInteractiveTakesTokenPath(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt init tests")
+	}
+	// Deliberately NOT t.Parallel(): PTY interactions with prompt deadlines.
+	bd := buildEmbeddedBD(t)
+
+	t.Run("store-switch confirmation takes the token path", func(t *testing.T) {
+		dir, _ := reinitSwitchFixture(t, bd)
+		env := append(bdEnv(dir), "BD_NON_INTERACTIVE=1")
+		out, code := runBDOnTTYAwaitExit(t, bd, dir, env, "to confirm:",
+			"init", "--quiet", "--reinit-local", "--prefix", "fi", "--database", "other",
+			"--skip-hooks", "--skip-agents", "--role", "maintainer")
+		if code != ExitDestroyTokenMissing {
+			t.Fatalf("TTY with non-interactive mode resolved exited %d, want %d:\n%s", code, ExitDestroyTokenMissing, out)
+		}
+		if !strings.Contains(out, "Refusing to switch this workspace's store") {
+			t.Errorf("wanted the non-interactive switch refusal, got:\n%s", out)
+		}
+		if strings.Contains(out, "Type 'leave") {
+			t.Errorf("the refusal asked for a typed phrase although non-interactive mode was resolved:\n%s", out)
+		}
+	})
+
+	t.Run("populated-store confirmation takes the token path", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "fi", "--skip-agents")
+		if out, code := runBDExit(t, bd, dir, "create", "--title", "seed issue", "--type", "task"); code != 0 {
+			t.Fatalf("bd create exited %d:\n%s", code, out)
+		}
+		env := append(bdEnv(dir), "BD_NON_INTERACTIVE=1")
+		// Same database, no switch: the existing populated-store confirmation.
+		out, code := runBDOnTTYAwaitExit(t, bd, dir, env, "to confirm:",
+			"init", "--quiet", "--reinit-local", "--prefix", "fi",
+			"--skip-hooks", "--skip-agents", "--role", "maintainer")
+		if code != ExitDestroyTokenMissing {
+			t.Fatalf("TTY with non-interactive mode resolved exited %d, want %d:\n%s", code, ExitDestroyTokenMissing, out)
+		}
+		if !strings.Contains(out, "Refusing to destroy") {
+			t.Errorf("wanted the non-interactive populated-store refusal, got:\n%s", out)
+		}
+		if strings.Contains(out, "Type 'destroy") {
+			t.Errorf("the refusal asked for a typed confirmation although non-interactive mode was resolved:\n%s", out)
+		}
+	})
+}

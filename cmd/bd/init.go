@@ -1251,8 +1251,9 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		}
 		initGateHandle, gateErr := acquireInitMutationGate(rootCtx, beadsDirAbs, plannedDBPathAbs, func() error {
 			return runInitReinitPreflight(reinitPreflightInput{
-				ReinitLocal: reinitLocal,
-				BeadsDir:    beadsDirAbs,
+				ReinitLocal:    reinitLocal,
+				BeadsDir:       beadsDirAbs,
+				NonInteractive: nonInteractive,
 				Request: storeSwitchRequest{
 					UsesSQLServer: usesSQLServer(),
 					Database:      database,
