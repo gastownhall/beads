@@ -753,15 +753,15 @@ func TestWriteCompactedRule_ReportsFailedBackup(t *testing.T) {
 	missing := filepath.Join(dir, "gone.md")
 
 	composite := filepath.Join(dir, "composite.md")
-	written, backedUp, err := writeCompactedRule(composite, "# Composite\n", []RuleFile{{Path: present}, {Path: missing}})
+	done, err := writeCompactedRule(composite, "# Composite\n", []RuleFile{{Path: present}, {Path: missing}})
 	if err == nil || !strings.Contains(err.Error(), "could not back up "+missing) || !strings.Contains(err.Error(), "no source file was deleted") {
 		t.Fatalf("expected the failed backup to be reported, got: %v", err)
 	}
-	if !written {
+	if !done.Written {
 		t.Error("expected written=true: the composite was created before the backup failed")
 	}
-	if !backedUp[present] || backedUp[missing] {
-		t.Errorf("backed up = %v, want only %s", backedUp, present)
+	if !done.BackedUp[present] || done.BackedUp[missing] || len(done.Deleted) != 0 {
+		t.Errorf("backed up = %v, deleted = %v, want only %s backed up", done.BackedUp, done.Deleted, present)
 	}
 	if _, statErr := os.Stat(composite); statErr != nil {
 		t.Errorf("expected the composite to survive a failed backup: %v", statErr)
@@ -1315,4 +1315,153 @@ func snapshotDirLinks(t *testing.T, dir string) map[string]string {
 		files[e.Name()] = string(data)
 	}
 	return files
+}
+
+// A backup path that appears after the destination check still fails the
+// exclusive create: that file is left as it was, the backups already made
+// stay, and no source is deleted.
+func TestWriteCompactedRule_BackupAppearingAfterCheckIsKept(t *testing.T) {
+	dir := tempRulesDir(t)
+	alpha := writeRule(t, dir, "alpha", issue5719Alpha)
+	beta := writeRule(t, dir, "beta", issue5719Beta)
+	if err := os.WriteFile(beta+".backup", []byte("an older backup\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	composite := filepath.Join(dir, "disk.md")
+
+	done, err := writeCompactedRule(composite, "# Disk\n", []RuleFile{{Path: alpha}, {Path: beta}})
+	if err == nil || !strings.Contains(err.Error(), beta+".backup already exists") || !strings.Contains(err.Error(), "no source file was deleted") {
+		t.Fatalf("expected the refused backup to be reported, got: %v", err)
+	}
+	if !done.Written || !done.BackedUp[alpha] || done.BackedUp[beta] || len(done.Deleted) != 0 {
+		t.Errorf("reported %+v, want written, only alpha backed up, nothing deleted", done)
+	}
+	want := map[string]string{
+		"alpha.md":        issue5719Alpha,
+		"alpha.md.backup": issue5719Alpha,
+		"beta.md":         issue5719Beta,
+		"beta.md.backup":  "an older backup\n",
+		"disk.md":         "# Disk\n",
+	}
+	if got := snapshotRulesDir(t, dir); fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("rules dir = %v, want %v", got, want)
+	}
+}
+
+// failRemovingRule makes removeRuleSource fail for paths named name.
+func failRemovingRule(t *testing.T, name string) {
+	t.Helper()
+	prev := removeRuleSource
+	removeRuleSource = func(path string) error {
+		if filepath.Base(path) == name {
+			return &os.PathError{Op: "remove", Path: path, Err: os.ErrPermission}
+		}
+		return prev(path)
+	}
+	t.Cleanup(func() { removeRuleSource = prev })
+}
+
+// A delete that fails after every backup completed is reported with its path
+// and an accurate partial state: the composite and all backups stay, the
+// other sources are deleted, and compact exits nonzero.
+func TestRulesCompact_ReportsFailedDelete(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		json bool
+	}{
+		{"auto text", []string{"--auto", "--force"}, false},
+		{"auto json", []string{"--auto", "--force"}, true},
+		{"group text", []string{"--group", "alpha,beta", "--force"}, false},
+		{"group json", []string{"--group", "alpha,beta", "--force"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := tempRulesDir(t)
+			alpha := writeRule(t, dir, "alpha", issue5719Alpha)
+			beta := writeRule(t, dir, "beta", issue5719Beta)
+			failRemovingRule(t, "beta.md")
+			args := append([]string{"--path", dir}, tc.args...)
+
+			if tc.json {
+				out, err := runRulesCompactJSONRaw(t, args...)
+				if err == nil {
+					t.Fatalf("expected a nonzero exit for the failed delete:\n%s", out)
+				}
+				var result map[string]interface{}
+				if tc.args[0] == "--auto" {
+					var results []map[string]interface{}
+					if jerr := json.Unmarshal([]byte(out), &results); jerr != nil || len(results) != 1 {
+						t.Fatalf("want a one-group results array (%v): %s", jerr, out)
+					}
+					result = results[0]
+				} else if jerr := json.Unmarshal([]byte(out), &result); jerr != nil {
+					t.Fatalf("group JSON is not an object (%v): %s", jerr, out)
+				}
+				if msg, _ := result["error"].(string); result["applied"] != true || !strings.Contains(msg, "could not delete 1 source file(s): remove "+beta) {
+					t.Errorf("want applied=true and an error naming %s, got %v", beta, result)
+				}
+				sources, _ := result["sources"].([]interface{})
+				if len(sources) != 2 {
+					t.Fatalf("want two sources, got %v", result["sources"])
+				}
+				for i, want := range []struct {
+					file    string
+					deleted bool
+				}{{alpha, true}, {beta, false}} {
+					s, _ := sources[i].(map[string]interface{})
+					if s["file"] != want.file || s["backed_up"] != true || s["deleted"] != want.deleted {
+						t.Errorf("source %d = %v, want %s backed up, deleted=%v", i, s, want.file, want.deleted)
+					}
+				}
+			} else {
+				out, stderr, err := runRulesCompactText(t, args...)
+				if err == nil {
+					t.Fatalf("expected a nonzero exit for the failed delete:\n%s", out)
+				}
+				if !strings.Contains(stderr, "remove "+beta) {
+					t.Errorf("expected the error to name %s, got: %s", beta, stderr)
+				}
+				for _, want := range []string{
+					"Backed up: alpha.md → alpha.md.backup, beta.md → beta.md.backup",
+					"Created disk.md and deleted alpha.md, but could not delete beta.md (see the error); every backup is kept",
+				} {
+					if !strings.Contains(out, want) {
+						t.Errorf("output missing %q:\n%s", want, out)
+					}
+				}
+			}
+
+			want := map[string]string{
+				"alpha.md.backup": issue5719Alpha,
+				"beta.md":         issue5719Beta,
+				"beta.md.backup":  issue5719Beta,
+			}
+			got := snapshotRulesDir(t, dir)
+			composite := got["disk.md"]
+			delete(got, "disk.md")
+			if !strings.Contains(composite, "validate input before writing to disk") {
+				t.Errorf("composite missing or wrong: %q", composite)
+			}
+			if fmt.Sprint(got) != fmt.Sprint(want) {
+				t.Errorf("rules dir = %v, want %v plus disk.md", got, want)
+			}
+		})
+	}
+}
+
+// After a failed backup the text says no source was deleted, not that some
+// deletes failed.
+func TestPrintCompactPreview_FailedBackupDeletesNothing(t *testing.T) {
+	out := captureStdout(t, func() error {
+		printCompactPreview("disk.md", "# Disk\n", []compactSource{
+			{File: "/r/alpha.md", Backup: "/r/alpha.md.backup", BackedUp: true},
+			{File: "/r/beta.md", Backup: "/r/beta.md.backup"},
+		}, true, false)
+		return nil
+	})
+	for _, want := range []string{"Backed up: alpha.md → alpha.md.backup\n", "Created disk.md, but no source file was deleted (see the error)"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
 }
