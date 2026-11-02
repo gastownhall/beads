@@ -286,6 +286,65 @@ func TestPull_SameNumberInOtherRepoCreatesNewBead(t *testing.T) {
 	}
 }
 
+// TestPull_SameRepoRespellingUpdatesExistingBead: a bead linked to B's issue
+// through another spelling RefScope accepts still matches the canonical ref
+// on pull and is canonicalized, while A's same-numbered bead is ignored. A
+// sorts after B's bead, so an index keyed by bare number would pick A. The
+// canonical-ref case is the exact-match control: a fix that disables all
+// matching fails it.
+func TestPull_SameRepoRespellingUpdatesExistingBead(t *testing.T) {
+	for _, mode := range []struct {
+		name string
+		opts tracker.SyncOptions
+	}{
+		{"bulk", tracker.SyncOptions{Pull: true}},
+		{"selective number", tracker.SyncOptions{Pull: true, IssueIDs: []string{"1313"}}},
+	} {
+		for _, tc := range []struct {
+			name string
+			ref  string
+		}{
+			{"canonical exact ref", crossRepoBRef},
+			{"owner and repo case", "https://github.com/OWNER-B/Repo-B/issues/1313"},
+			{"REST URL", "https://api.github.com/repos/owner-b/repo-b/issues/1313"},
+			{"shorthand", "github:1313"},
+		} {
+			t.Run(mode.name+"/"+tc.name, func(t *testing.T) {
+				stub, tr := newGitHubAPIStub(t)
+				stub.issues[1313] = gitHubIssueJSON(1313, "Repo B issue 1313", crossRepoRemote)
+				stub.list = []int{1313}
+				ref := tc.ref
+				const bID = "bd-1313b"
+				store := newCrossRepoStore(repoABead(time.Time{}), &types.Issue{
+					ID:          bID,
+					Title:       "stale B title",
+					Status:      types.StatusOpen,
+					IssueType:   types.TypeTask,
+					ExternalRef: &ref,
+				})
+
+				result, err := tracker.NewEngine(tr, store, "test").Sync(context.Background(), mode.opts)
+				if err != nil {
+					t.Fatalf("Sync: %v", err)
+				}
+
+				store.assertUntouched(t, crossRepoAID, crossRepoAT, crossRepoARef)
+				if result.PullStats.Created != 0 || result.PullStats.Updated != 1 {
+					t.Errorf("created=%d updated=%d, want created=0 updated=1",
+						result.PullStats.Created, result.PullStats.Updated)
+				}
+				b := store.issues[bID]
+				if b.Title != "Repo B issue 1313" || b.ExternalRef == nil || *b.ExternalRef != crossRepoBRef {
+					t.Errorf("B bead not updated and canonicalized: title=%q external_ref=%v", b.Title, derefRef(b.ExternalRef))
+				}
+				if len(store.issues) != 2 {
+					t.Errorf("store holds %d beads, want 2", len(store.issues))
+				}
+			})
+		}
+	}
+}
+
 // TestPull_SelectiveBeadIDLinkedToOtherRepoIsSkipped: selecting A's bead by
 // ID gives B's tracker no identifier to fetch, so the pull skips it instead
 // of fetching B's 1313 into it.
