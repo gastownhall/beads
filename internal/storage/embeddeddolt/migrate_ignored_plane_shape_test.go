@@ -96,6 +96,44 @@ func TestEmbeddedIgnoredSeriesConvergesWithFreshInitShape(t *testing.T) {
 		cloneShape := clonePlaneTableShape(t, ctx, cloneConn, table)
 		diffClonePlaneShapes(t, table, initShape, cloneShape)
 	}
+
+	// Two equally narrow doors would pass the diff above, so the event
+	// comment columns migration 0075 and its twin ignored/0031 widen are
+	// pinned outright, on the main-first door (init: 0075, then the ignored
+	// series) and on the ignored-first door (clone: ignored/0031 only), and
+	// again after 0075 is replayed over the clone door's ignored-first shape.
+	requireWidenedEventComments(t, ctx, initConn, "fresh-init")
+	requireWidenedEventComments(t, ctx, cloneConn, "fresh-clone")
+	mainSQL, err := schema.MigrationSQL("0075_widen_residual_content_columns.up.sql")
+	if err != nil {
+		t.Fatalf("read 0075: %v", err)
+	}
+	cloneEvents := clonePlaneTableShape(t, ctx, cloneConn, "events")
+	cloneWispEvents := clonePlaneTableShape(t, ctx, cloneConn, "wisp_events")
+	execFrozenGuard(t, ctx, cloneConn, mainSQL)
+	diffClonePlaneShapes(t, "events", cloneEvents, clonePlaneTableShape(t, ctx, cloneConn, "events"))
+	diffClonePlaneShapes(t, "wisp_events", cloneWispEvents, clonePlaneTableShape(t, ctx, cloneConn, "wisp_events"))
+	requireWidenedEventComments(t, ctx, cloneConn, "fresh-clone after a 0075 replay")
+}
+
+// requireWidenedEventComments asserts both event planes' comment column is
+// LONGTEXT and nullable, events.comment with no default and wisp_events.comment
+// keeping its ” default (GH#3925).
+func requireWidenedEventComments(t *testing.T, ctx context.Context, conn *sql.Conn, door string) {
+	t.Helper()
+	for _, want := range []struct {
+		table      string
+		hasDefault bool
+	}{
+		{"events", false},
+		{"wisp_events", true},
+	} {
+		got := clonePlaneTableShape(t, ctx, conn, want.table)["comment"]
+		if got.ColumnType != "longtext" || got.Nullable != "YES" || got.Default.Valid != want.hasDefault {
+			t.Errorf("%s door: %s.comment = %s, want a nullable longtext (default set: %v)",
+				door, want.table, formatClonePlaneColumn(got), want.hasDefault)
+		}
+	}
 }
 
 // clonePlaneColumn is the column identity compared across the two doors.

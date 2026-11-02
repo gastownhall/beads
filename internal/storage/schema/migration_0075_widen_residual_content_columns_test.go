@@ -1,9 +1,13 @@
 package schema
 
 import (
+	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/testutil"
 )
 
 const (
@@ -72,5 +76,89 @@ func TestMigration0075GuardsEachColumnOnItsOwn(t *testing.T) {
 		if line = strings.TrimSpace(line); line != "" && !strings.HasPrefix(line, "--") {
 			t.Errorf("0075 down migration runs %q; it must stay a comment-only no-op", line)
 		}
+	}
+}
+
+// TestMigration0075BundleWidensAllFiveThroughDoltCLI runs the whole CLI bundle
+// on a fresh dolt repository and reads back the five column definitions. The
+// dolt CLI skips a PREPAREd ALTER without an error, so only the registered
+// direct-DDL substitute can widen them here, and a zero exit status proves
+// nothing on its own.
+func TestMigration0075BundleWidensAllFiveThroughDoltCLI(t *testing.T) {
+	testutil.RequireDoltBinary(t)
+
+	dir := filepath.Join(t.TempDir(), "widen-residual-content")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("create bundle dir: %v", err)
+	}
+	runDoltCommand(t, dir, "init", "--name", "test", "--email", "test@example.com")
+	runDoltSQL(t, dir, AllMigrationsSQL())
+
+	rows := queryDoltCSV(t, dir, `
+SELECT CONCAT(TABLE_NAME, '.', COLUMN_NAME) AS col, COLUMN_TYPE AS type, IS_NULLABLE AS nullable
+FROM INFORMATION_SCHEMA.COLUMNS
+WHERE TABLE_SCHEMA = DATABASE()
+  AND CONCAT(TABLE_NAME, '.', COLUMN_NAME) IN ('events.comment', 'wisp_events.comment',
+      'issue_snapshots.original_content', 'issue_snapshots.archived_events', 'compaction_snapshots.snapshot_json')`)
+	got := map[string]string{}
+	for _, row := range rows {
+		got[row["col"]] = row["type"] + " " + row["nullable"]
+	}
+	for col, want := range map[string]string{
+		"events.comment":                     "longtext YES",
+		"wisp_events.comment":                "longtext YES",
+		"issue_snapshots.original_content":   "longtext NO",
+		"issue_snapshots.archived_events":    "longtext YES",
+		"compaction_snapshots.snapshot_json": "longblob NO",
+	} {
+		if got[col] != want {
+			t.Errorf("CLI bundle %s = %q, want %q", col, got[col], want)
+		}
+	}
+}
+
+// TestMigration0075NoopsWithoutWispEventsThroughDoltCLI replays the frozen
+// 0075 and ignored/0031 texts through the dolt CLI on a database without the
+// two clone-local event tables: their NULL probes take the SELECT 1 branch,
+// so the replay succeeds and creates nothing. It is the CLI's missing-table
+// compatibility control only; the embedded engine tests prove the prepared
+// ALTERs widen.
+func TestMigration0075NoopsWithoutWispEventsThroughDoltCLI(t *testing.T) {
+	testutil.RequireDoltBinary(t)
+
+	dir := filepath.Join(t.TempDir(), "widen-residual-content-no-events")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("create no-events dir: %v", err)
+	}
+	runDoltCommand(t, dir, "init", "--name", "test", "--email", "test@example.com")
+	runDoltSQL(t, dir, AllMigrationsSQL())
+
+	seedSQL := fmt.Sprintf(`
+DROP TABLE IF EXISTS events;
+DROP TABLE IF EXISTS wisp_events;
+DELETE FROM schema_migrations WHERE version = %d;
+`, LatestVersion())
+	migrationSQL, err := mainSource.files.ReadFile("migrations/" + migration0075Up)
+	if err != nil {
+		t.Fatalf("read 0075 migration: %v", err)
+	}
+	ignoredSQL, err := IgnoredMigrationSQL(ignoredMigration0031Up)
+	if err != nil {
+		t.Fatalf("read ignored 0031 migration: %v", err)
+	}
+	runDoltSQL(t, dir, seedSQL+"\n"+string(migrationSQL)+"\n"+ignoredSQL)
+
+	requireDoltCount(t, dir,
+		`SELECT COUNT(*) AS c FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN ('events', 'wisp_events')`, "0")
+
+	// Control: the registered substitute ALTERs both tables unguarded, so the
+	// same absent tables make it fail; without this, "the frozen text
+	// tolerates it" would be indistinguishable from "nothing here can fail".
+	substitute := cliCompatibleMigrationSQL(migration0075Up, string(migrationSQL))
+	if substitute == string(migrationSQL) {
+		t.Fatal("0075 has no registered CLI substitute; this test's control is vacuous")
+	}
+	if err := runDoltSQLExpectingError(t, dir, substitute); err == nil {
+		t.Fatal("0075 CLI substitute unexpectedly succeeded against absent events and wisp_events")
 	}
 }
