@@ -2,6 +2,8 @@ package schema
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
@@ -306,6 +308,94 @@ func TestUpdatedAtGuardRestoresTimestampsAroundRegisteredStep(t *testing.T) {
 		}
 		if err := mock.ExpectationsWereMet(); err != nil {
 			t.Fatalf("unmet sql expectations (batch shape or order wrong): %v", err)
+		}
+	})
+}
+
+// TestUpdatedAtGuardSnapshotFailureAbortsStep proves a snapshot failure fails
+// the step before anything it could corrupt: no migration body, no cursor row,
+// no commit.
+func TestUpdatedAtGuardSnapshotFailureAbortsStep(t *testing.T) {
+	failOnSwallowedAdvisory(t)
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	// commitEachStep primes the dirty-table snapshot first; the failure point
+	// is the guard's snapshot read, after its table probe.
+	mock.ExpectQuery(updatedGuardDirtyStatusQuery).
+		WillReturnRows(sqlmock.NewRows([]string{"table_name", "staged"}))
+	mock.ExpectQuery(updatedGuardTableQuery).WithArgs("issues").
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
+	mock.ExpectQuery(updatedGuardSelectRegex).
+		WillReturnError(errors.New("snapshot read failed"))
+
+	applied, err := runMigrations(context.Background(), db, mainSource, 45, 46, true)
+	if err == nil || !strings.Contains(err.Error(), "updated_at") {
+		t.Fatalf("runMigrations err = %v, want an updated_at snapshot failure", err)
+	}
+	if applied != 0 {
+		t.Fatalf("runMigrations applied = %d, want 0", applied)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations (a body/cursor statement ran after the failure?): %v", err)
+	}
+}
+
+// TestUpdatedAtGuardRestoreFailureAbortsStep proves a restore failure fails
+// the step after a successful body but before the cursor row records: the
+// version stays pending, so the next pass re-runs body and restore together.
+func TestUpdatedAtGuardRestoreFailureAbortsStep(t *testing.T) {
+	failOnSwallowedAdvisory(t)
+
+	t.Run("post-body reread fails", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("sqlmock.New: %v", err)
+		}
+		defer db.Close()
+
+		updatedGuardPrimeThroughBody(t, mock, true)
+		mock.ExpectQuery(updatedGuardSelectRegex).
+			WillReturnError(errors.New("post-body read failed"))
+
+		applied, err := runMigrations(context.Background(), db, mainSource, 45, 46, true)
+		if err == nil || !strings.Contains(err.Error(), "updated_at") {
+			t.Fatalf("runMigrations err = %v, want an updated_at restore failure", err)
+		}
+		if applied != 0 {
+			t.Fatalf("runMigrations applied = %d, want 0 (cursor must not record the step)", applied)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet sql expectations (a cursor/commit statement ran after the failure?): %v", err)
+		}
+	})
+
+	t.Run("restore statement fails", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("sqlmock.New: %v", err)
+		}
+		defer db.Close()
+
+		updatedGuardPrimeThroughBody(t, mock, true)
+		mock.ExpectQuery(updatedGuardSelectRegex).
+			WillReturnRows(sqlmock.NewRows([]string{"id", "updated_at"}).AddRow("i1", updatedGuardNewTS))
+		mock.ExpectExec(updatedGuardRestoreRegex).
+			WithArgs("i1", updatedGuardOldTS, "i1", updatedGuardNewTS).
+			WillReturnError(errors.New("restore write failed"))
+
+		applied, err := runMigrations(context.Background(), db, mainSource, 45, 46, true)
+		if err == nil || !strings.Contains(err.Error(), "updated_at") {
+			t.Fatalf("runMigrations err = %v, want an updated_at restore failure", err)
+		}
+		if applied != 0 {
+			t.Fatalf("runMigrations applied = %d, want 0 (cursor must not record the step)", applied)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet sql expectations (a cursor/commit statement ran after the failure?): %v", err)
 		}
 	})
 }
