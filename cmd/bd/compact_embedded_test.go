@@ -493,3 +493,67 @@ func TestEmbeddedCompactRefusedDryRun(t *testing.T) {
 		t.Errorf("main state after dry-run = %+v, want unchanged %+v", after, before)
 	}
 }
+
+// TestEmbeddedCompactMisdatedOldWindow covers a contiguous partition whose old
+// commits are dated out of history order: C (now-1m), then E1 (now-5h) and E2
+// (now-4h) editing one title, then a recent edit R to another issue. The
+// squashed base must end at E2, not the newest-dated old commit, so both
+// final values survive and the superseded old commits leave main's history.
+func TestEmbeddedCompactMisdatedOldWindow(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "mo")
+	edited := bdCreate(t, bd, dir, "X0", "--type", "task")
+	other := bdCreate(t, bd, dir, "Z0", "--type", "task")
+
+	now := time.Now()
+	var c, e1, e2 string
+	withEmbeddedConn(t, beadsDir, func(conn *sql.Conn) {
+		head := func() string {
+			var h string
+			if err := conn.QueryRowContext(t.Context(), "SELECT HASHOF('main')").Scan(&h); err != nil {
+				t.Fatalf("HASHOF(main): %v", err)
+			}
+			return h
+		}
+		update := "UPDATE issues SET title = ? WHERE id = ?"
+		embeddedCommit(t, conn, update, []any{"C", edited.ID}, "old: C", now.Add(-time.Minute))
+		c = head()
+		embeddedCommit(t, conn, update, []any{"Y1", edited.ID}, "old: E1", now.Add(-5*time.Hour))
+		e1 = head()
+		embeddedCommit(t, conn, update, []any{"Y2", edited.ID}, "old: E2", now.Add(-4*time.Hour))
+		e2 = head()
+		embeddedCommit(t, conn, update, []any{"R", other.ID}, "recent: R", now.Add(time.Hour))
+	})
+
+	bdCompact(t, bd, dir, "--force", "--days", "0")
+
+	if got := bdShow(t, bd, dir, edited.ID).Title; got != "Y2" {
+		t.Errorf("old-window title after compact = %q, want %q", got, "Y2")
+	}
+	if got := bdShow(t, bd, dir, other.ID).Title; got != "R" {
+		t.Errorf("recent title after compact = %q, want %q", got, "R")
+	}
+	withEmbeddedConn(t, beadsDir, func(conn *sql.Conn) {
+		for name, hash := range map[string]string{"C": c, "E1": e1, "E2": e2} {
+			var n int
+			if err := conn.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM dolt_log WHERE commit_hash = ?", hash).Scan(&n); err != nil {
+				t.Fatalf("look up %s in dolt_log: %v", name, err)
+			}
+			if n != 0 {
+				t.Errorf("superseded old commit %s (%s) is still reachable from main", name, hash)
+			}
+		}
+		var replays int
+		if err := conn.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM dolt_log WHERE message = ?", "recent: R").Scan(&replays); err != nil {
+			t.Fatalf("count recent: R in dolt_log: %v", err)
+		}
+		if replays != 1 {
+			t.Errorf("recent commit R is reachable %d times from main, want exactly 1", replays)
+		}
+	})
+}

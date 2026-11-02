@@ -1132,8 +1132,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   base already held the recent commit, and replaying it again could undo the
   later old commit's edit while reporting "Compacted". Compact now refuses
   such a history up front, names both commits and their dates, and changes
-  nothing; `--force` does not override the refusal (#6645, reported by
-  @bee-ghosttrack).
+  nothing; `--force` does not override the refusal. The squashed base now
+  also ends at the last old commit in history rather than the newest-dated
+  one, so an old window whose dates are shuffled no longer loses its final
+  edits (#6645, reported by @bee-ghosttrack).
 - `bd dolt push <remote>` and `bd dolt pull <remote>` now push to and pull
   from the named remote. bd ignored the name, so `bd dolt push 1st` pushed to
   the default remote and reported "Push complete."; a name that differs from

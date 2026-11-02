@@ -172,6 +172,7 @@
 100 41 TestEmbeddedDuplicateConcurrent
 100 41 TestEmbeddedVersionedHistoryFollowsTheStoreItWritesInto
 
+100 42 TestEmbeddedCompactMisdatedOldWindow
 100 42 TestEmbeddedInitAForkAutoContributor
 100 42 TestEmbeddedReadyEmptyStateMessage
 100 42 TestEmbeddedUpdateIfGuardsFlagValidation

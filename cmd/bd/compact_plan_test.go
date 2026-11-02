@@ -30,7 +30,7 @@ func TestPlanCompactionReplaysInCommitOrder(t *testing.T) {
 	if plan.oldCommits != 2 {
 		t.Errorf("oldCommits = %d, want 2", plan.oldCommits)
 	}
-	// Partition selection stays date-based.
+	// Boundary and root are the highest-order old and lowest-order commits.
 	if plan.boundaryHash != "old2" {
 		t.Errorf("boundaryHash = %q, want old2", plan.boundaryHash)
 	}
@@ -172,5 +172,33 @@ func TestPlanCompactionNoRefusal(t *testing.T) {
 				t.Errorf("unexpected refusal: %s", plan.refusal.message())
 			}
 		})
+	}
+}
+
+// TestPlanCompactionSelectsBoundaryAndRootByCommitOrder: within the old window
+// dates can be out of history order, so the squashed base must end at the
+// highest-order old commit and start at the lowest-order commit, not at the
+// newest- and oldest-dated ones.
+func TestPlanCompactionSelectsBoundaryAndRootByCommitOrder(t *testing.T) {
+	now := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	// Log order is date DESC: r, c, root, e2, e1.
+	plan := planCompaction([]storage.CommitInfo{
+		{Hash: "r", Date: now.Add(time.Hour), CommitOrder: 5},
+		{Hash: "c", Date: now.Add(-time.Minute), CommitOrder: 2},
+		{Hash: "root", Date: now.Add(-2 * time.Hour), CommitOrder: 1},
+		{Hash: "e2", Date: now.Add(-4 * time.Hour), CommitOrder: 4},
+		{Hash: "e1", Date: now.Add(-5 * time.Hour), CommitOrder: 3},
+	}, now)
+	if plan.boundaryHash != "e2" {
+		t.Errorf("boundaryHash = %q, want e2 (highest-order old commit)", plan.boundaryHash)
+	}
+	if plan.initialHash != "root" {
+		t.Errorf("initialHash = %q, want root (lowest-order commit)", plan.initialHash)
+	}
+	if plan.oldCommits != 4 || !reflect.DeepEqual(plan.recentHashes, []string{"r"}) {
+		t.Errorf("oldCommits = %d, recentHashes = %v; want 4, [r]", plan.oldCommits, plan.recentHashes)
+	}
+	if plan.refusal != nil {
+		t.Errorf("unexpected refusal: %s", plan.refusal.message())
 	}
 }
