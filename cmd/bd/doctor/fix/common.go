@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/remedy"
 )
 
 // ErrTestBinary is returned when getBdBinary detects it's running as a test binary.
@@ -155,4 +156,118 @@ func isWithinWorkspace(root, candidate string) bool {
 // This is a wrapper around beads.FollowRedirect for use within the fix package.
 func resolveBeadsDir(beadsDir string) string {
 	return beads.FollowRedirect(beadsDir)
+}
+
+// resolveExistingParent resolves dir to a symlink-free location when dir
+// itself exists, and otherwise walks up to the nearest existing ancestor,
+// returning that ancestor with dir's remaining components joined back on. A
+// missing database parent is thereby compared by the directory that does
+// exist, so a confinement cannot be satisfied by a symlinked ancestor below
+// the last existing one. Adapted from PR #7889.
+func resolveExistingParent(dir string) (string, error) {
+	info, err := os.Lstat(dir)
+	if os.IsNotExist(err) {
+		parent, err := resolveExistingParent(filepath.Dir(dir))
+		if err != nil {
+			return "", err
+		}
+		return filepath.Join(parent, filepath.Base(dir)), nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if !info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
+		return "", fmt.Errorf("not a directory: %s", dir)
+	}
+	return filepath.EvalSymlinks(dir)
+}
+
+// isStrictDescendant reports whether rel — the path of a candidate relative
+// to its root — names an entry strictly below the root: not the root itself,
+// a parent, or an absolute path (Rel's error stand-in).
+func isStrictDescendant(rel string) bool {
+	return rel != "." && rel != ".." &&
+		!strings.HasPrefix(rel, ".."+string(os.PathSeparator)) &&
+		!filepath.IsAbs(rel)
+}
+
+// envSelectedDataDir returns the data directory BEADS_DOLT_DATA_DIR selects
+// for beadsDir, resolved exactly like Config.GetDoltDataDir plus
+// Config.DatabasePath: an absolute value is kept, a relative one is joined
+// onto beadsDir, and the result is normalized with the same Abs/Clean
+// handling the selected database path gets. ok is false when the variable is
+// empty — an empty override selects nothing.
+func envSelectedDataDir(beadsDir string) (dir string, ok bool) {
+	raw := os.Getenv("BEADS_DOLT_DATA_DIR")
+	if raw == "" {
+		return "", false
+	}
+	selected := raw
+	if !filepath.IsAbs(selected) {
+		selected = filepath.Join(beadsDir, selected)
+	}
+	abs, err := filepath.Abs(selected)
+	if err != nil {
+		return "", false
+	}
+	return abs, true
+}
+
+// confinedDatabasePath validates that the database path a destructive doctor
+// fix selected from workspace metadata stays inside the effective workspace
+// .beads directory, and returns the absolute selected path when it does.
+// getDatabasePath accepts relative or absolute dolt_data_dir values and an
+// absolute database (Config.Save strips only the first), so unvalidated
+// metadata can point a "repair" at arbitrary data: lexical traversal, a
+// symlinked database leaf (a backup must represent the database entry
+// itself, so a link is refused even when its target is inside the workspace
+// or dangling), and a symlinked ancestor are all refused before any rename,
+// removal or deletion happens. Two selections stay trusted: the workspace
+// root may itself be a symlink (a supported alias — resolved, not refused),
+// and an actual explicitly env-selected data directory is process input the
+// operator named, exempted only when the selected path is exactly that
+// path. Adapted from PR #7889; its blanket refusal of a symlinked workspace
+// root is inverted to match this repository's supported layouts.
+func confinedDatabasePath(beadsDir, dbPath string) (string, error) {
+	absBeads, err := filepath.Abs(beadsDir)
+	if err != nil {
+		return "", fmt.Errorf("invalid beads directory: %w", err)
+	}
+	// Resolve the workspace root through its own symlink so confinement
+	// compares real locations, not spellings.
+	resolvedBeads, err := resolveExistingParent(absBeads)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve beads directory: %w", err)
+	}
+	absDB, err := filepath.Abs(dbPath)
+	if err != nil {
+		return "", fmt.Errorf("invalid database path: %w", err)
+	}
+	if envDir, ok := envSelectedDataDir(absBeads); ok && envDir == absDB {
+		return absDB, nil
+	}
+	relLex, err := filepath.Rel(absBeads, absDB)
+	if err != nil || !isStrictDescendant(relLex) {
+		return "", fmt.Errorf("refusing database path outside the workspace .beads directory: %s", remedy.PrintedValue(dbPath))
+	}
+	if info, lerr := os.Lstat(absDB); lerr == nil && info.Mode()&os.ModeSymlink != 0 {
+		return "", fmt.Errorf("refusing symlinked database path: %s", remedy.PrintedValue(dbPath))
+	}
+	resolvedParent, err := resolveExistingParent(filepath.Dir(absDB))
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve database parent directory: %w", err)
+	}
+	relParent, err := filepath.Rel(resolvedBeads, resolvedParent)
+	if err != nil || (relParent != "." && !isStrictDescendant(relParent)) {
+		return "", fmt.Errorf("refusing database path whose parent resolves outside the workspace .beads directory: %s", remedy.PrintedValue(dbPath))
+	}
+	if resolvedDB, rerr := filepath.EvalSymlinks(absDB); rerr == nil {
+		relRes, relErr := filepath.Rel(resolvedBeads, resolvedDB)
+		if relErr != nil || !isStrictDescendant(relRes) {
+			return "", fmt.Errorf("refusing database path resolving outside the workspace .beads directory: %s", remedy.PrintedValue(dbPath))
+		}
+	} else if !os.IsNotExist(rerr) {
+		return "", fmt.Errorf("failed to resolve database path: %w", rerr)
+	}
+	return absDB, nil
 }

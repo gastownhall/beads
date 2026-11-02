@@ -34,6 +34,18 @@ func doltIntegrityRecovery(path, beadsDir string) error {
 
 	doltPath := getDatabasePath(beadsDir)
 
+	// Confinement before anything destructive: the metadata this repair reads
+	// accepts relative or absolute dolt_data_dir values and an absolute
+	// database (Config.Save strips only the first), so an unvalidated
+	// selection could point the rename below — and the rollback removal — at
+	// data outside this workspace. The check resolves the workspace root
+	// itself through a supported symlink and honors an explicitly env-selected
+	// data directory; every metadata-selected escape is refused here, before
+	// the backup rename and before the bd binary lookup.
+	if _, err := confinedDatabasePath(beadsDir, doltPath); err != nil {
+		return fmt.Errorf("refusing integrity recovery: %w", err)
+	}
+
 	// Check if dolt directory exists
 	if _, err := os.Stat(doltPath); os.IsNotExist(err) {
 		return fmt.Errorf("no Dolt database to recover at %s", doltPath)
