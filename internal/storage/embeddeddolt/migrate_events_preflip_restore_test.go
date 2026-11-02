@@ -1311,3 +1311,294 @@ WHERE l.message = ? AND l.commit_hash <> ? AND a.parent_index = 0`,
 		t.Fatalf("later opens read history %d time(s) and printed %q; 0031 is done", reads, notice.String())
 	}
 }
+
+// TestEmbeddedIgnoredMigration0031OpensAShallowClone pins that a shallow
+// clone whose depth ends at 0062's drop commit opens. Dolt refuses to name the
+// missing first parent ("Commit not found. You are using a shallow clone"),
+// which used to fail the ignored pass, and so every open of the clone, until
+// it was re-cloned in full. There is nothing local to restore from, so the
+// restore records 0031 silently; one commit deeper, it restores as usual.
+func TestEmbeddedIgnoredMigration0031OpensAShallowClone(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+
+	originData, remoteURL := publishPreflipLineage(t, ctx)
+	migrateAndPublishOrigin(t, ctx, originData)
+	depth := 0
+	withRawConn(t, originData, preflipDatabase, func(conn *sql.Conn) {
+		rows, err := conn.QueryContext(ctx, "SELECT message FROM dolt_log")
+		if err != nil {
+			t.Fatalf("read origin log: %v", err)
+		}
+		defer rows.Close()
+		for i := 1; rows.Next(); i++ {
+			var message string
+			if err := rows.Scan(&message); err != nil {
+				t.Fatalf("scan origin log: %v", err)
+			}
+			if message == eventsFlipDropMessage {
+				depth = i
+			}
+		}
+	})
+	if depth == 0 {
+		t.Fatal("origin history holds no drop commit")
+	}
+
+	for _, tc := range []struct {
+		name  string
+		depth int
+		want  map[string]int
+	}{
+		{"depth ends at the drop commit", depth, map[string]int{}},
+		{"depth reaches its parent", depth + 1, preflipSeededContent()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			beadsDir := filepath.Join(t.TempDir(), ".beads")
+			dataDir := filepath.Join(beadsDir, "embeddeddolt")
+			if err := os.MkdirAll(dataDir, 0o700); err != nil {
+				t.Fatalf("create clone data dir: %v", err)
+			}
+			withRawConn(t, dataDir, "", func(conn *sql.Conn) {
+				mustExecOn(t, ctx, conn, "CALL DOLT_CLONE('--depth', ?, ?, ?)", fmt.Sprint(tc.depth), remoteURL, preflipDatabase)
+			})
+			var notice bytes.Buffer
+			defer schema.SetPreflipEventsNoticeOutForTest(&notice)()
+			store, err := embeddeddolt.Open(ctx, beadsDir, preflipDatabase, "main")
+			if err != nil {
+				t.Fatalf("open shallow clone: %v", err)
+			}
+			closeEmbeddedDoltStore(t, store)
+			withRawConn(t, dataDir, preflipDatabase, func(conn *sql.Conn) {
+				requireContent(t, liveEvents(t, ctx, conn), tc.want)
+				if !ignoredCursorHas(t, ctx, conn, 31) {
+					t.Fatal("ignored cursor does not record 0031")
+				}
+			})
+			if len(tc.want) == 0 && notice.Len() != 0 {
+				t.Fatalf("restore notice = %q; a shallow clone has nothing to restore and nothing to warn about", notice.String())
+			}
+		})
+	}
+}
+
+// TestEmbeddedIgnoredMigration0031SkipsAPersistentHistoryFailure pins that a
+// failure reading history the classifier has never seen (here, a real failing
+// AS OF statement on the migration's own pinned session, standing in for a
+// missing chunk) skips that source with a warning instead of failing every
+// open: bd reads nothing else that old, so the restore is the only thing such
+// damage would break. The other source is still restored, 0031 records, what
+// the session wrote after the failed statement survives a full reopen, and
+// that reopen neither fails nor reads history again.
+func TestEmbeddedIgnoredMigration0031SkipsAPersistentHistoryFailure(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+
+	dataDir := seedMainSchemaAt(t, ctx, 61)
+	beadsDir := filepath.Dir(dataDir)
+	conn, closeConn := openPinnedConn(t, ctx, dataDir)
+	closed := false
+	defer func() {
+		if !closed {
+			closeConn()
+		}
+	}()
+
+	// First source: pre-1's row, under a hand-made drop commit. Second
+	// (0062's own): pre-1's and pre-2's rows.
+	execFrozenGuard(t, ctx, conn, `
+INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) VALUES
+  ('pre-1', 'first', '', '', '', '', 'open', 2, 'task'),
+  ('pre-2', 'second', '', '', '', '', 'open', 2, 'task');
+INSERT INTO events (issue_id, event_type, actor, created_at, id) VALUES
+  ('pre-1', 'created', 'alice', '2026-07-01 10:00:00', 'legacy-1');
+`)
+	mustDrain(t, ctx, conn, "CALL DOLT_COMMIT('-Am', 'test: first pre-flip source')")
+	mustExecOn(t, ctx, conn, "CALL DOLT_COMMIT('--allow-empty', '-m', ?)", eventsFlipDropMessage)
+	handDrop := scalarString(t, ctx, conn, "SELECT HASHOF('HEAD')")
+	execFrozenGuard(t, ctx, conn, `
+INSERT INTO events (issue_id, event_type, actor, created_at, id) VALUES
+  ('pre-2', 'updated', 'carol', '2026-07-02 09:00:00', 'legacy-5');
+`)
+	mustDrain(t, ctx, conn, "CALL DOLT_COMMIT('-Am', 'test: second pre-flip source')")
+	adoptPreflipLineage(t, ctx, conn)
+	var second string
+	if err := conn.QueryRowContext(ctx, `
+SELECT a.parent_hash FROM dolt_commit_ancestors a JOIN dolt_log l ON l.commit_hash = a.commit_hash
+WHERE l.message = ? AND l.commit_hash <> ? AND a.parent_index = 0`,
+		eventsFlipDropMessage, handDrop).Scan(&second); err != nil {
+		t.Fatalf("find 0062's drop commit parent: %v", err)
+	}
+	pre1 := preflipNullDigest("pre-1", "created", "alice", "2026-07-01 10:00:00")
+
+	failures := 0
+	restoreHook := schema.SetPreflipEventsSourceFaultHookForTest(func(ref, _ string) error {
+		if ref != second {
+			return nil
+		}
+		failures++
+		rows, err := conn.QueryContext(ctx, "SELECT COUNT(*) FROM events AS OF 'v0v0v0v0v0v0v0v0v0v0v0v0v0v0v0v0'")
+		if err == nil {
+			rows.Close()
+			return errors.New("the fixture's AS OF read of a missing commit succeeded")
+		}
+		return err
+	})
+	var notice bytes.Buffer
+	restoreNotice := schema.SetPreflipEventsNoticeOutForTest(&notice)
+	_, err := schema.MigrateUp(ctx, conn)
+	restoreHook()
+	restoreNotice()
+	if err != nil {
+		t.Fatalf("MigrateUp with a persistently unreadable source: %v", err)
+	}
+	if failures == 0 {
+		t.Fatal("the second source was never read; the fixture failed nothing")
+	}
+	if warning := notice.String(); !strings.Contains(warning, "Warning") || !strings.Contains(warning, second) {
+		t.Fatalf("restore notice = %q, want a warning naming %s", warning, second)
+	}
+	requireContent(t, liveEvents(t, ctx, conn), map[string]int{pre1: 1})
+	if !ignoredCursorHas(t, ctx, conn, 31) {
+		t.Fatal("ignored cursor does not record 0031 after skipping the unreadable source")
+	}
+
+	closeConn()
+	closed = true
+	notice.Reset()
+	reads := 0
+	defer schema.SetPreflipEventsSourceFaultHookForTest(func(string, string) error { reads++; return nil })()
+	defer schema.SetPreflipEventsNoticeOutForTest(&notice)()
+	store, err := embeddeddolt.Open(ctx, beadsDir, preflipDatabase, "main")
+	if err != nil {
+		t.Fatalf("reopen after the skip: %v", err)
+	}
+	closeEmbeddedDoltStore(t, store)
+	if reads != 0 || notice.Len() != 0 {
+		t.Fatalf("the reopen read history %d time(s) and printed %q; 0031 is done", reads, notice.String())
+	}
+	withRawConn(t, dataDir, preflipDatabase, func(conn *sql.Conn) {
+		got := liveEvents(t, ctx, conn)
+		requireContent(t, got, map[string]int{pre1: 1})
+		requireDerivedIDs(t, got)
+		if !ignoredCursorHas(t, ctx, conn, 31) {
+			t.Fatal("the reopened clone does not record 0031")
+		}
+	})
+}
+
+// preflipStatementCounter counts the statements the restore issues.
+type preflipStatementCounter struct {
+	schema.DBConn
+	statements, inserts int
+}
+
+func (c *preflipStatementCounter) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	c.statements++
+	if strings.HasPrefix(query, "INSERT") {
+		c.inserts++
+	}
+	return c.DBConn.ExecContext(ctx, query, args...)
+}
+
+func (c *preflipStatementCounter) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+	c.statements++
+	return c.DBConn.QueryContext(ctx, query, args...)
+}
+
+func (c *preflipStatementCounter) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
+	c.statements++
+	return c.DBConn.QueryRowContext(ctx, query, args...)
+}
+
+// seedManyPreflipEvents commits, on a database at main 61, issues events per
+// issue, each with its own content, under legacy ids.
+func seedManyPreflipEvents(t *testing.T, ctx context.Context, conn *sql.Conn, issues, events int) {
+	t.Helper()
+	var issueRows, eventRows strings.Builder
+	issueRows.WriteString("INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) VALUES ")
+	eventRows.WriteString("INSERT INTO events (issue_id, event_type, actor, old_value, new_value, comment, created_at, id) VALUES ")
+	for i := range issues {
+		if i > 0 {
+			issueRows.WriteString(", ")
+		}
+		fmt.Fprintf(&issueRows, "('many-%03d', 'busy', '', '', '', '', 'open', 2, 'task')", i)
+		for j := range events {
+			if i > 0 || j > 0 {
+				eventRows.WriteString(", ")
+			}
+			fmt.Fprintf(&eventRows, "('many-%03d', 'updated', 'tester', '{\"n\":%d}', NULL, NULL, '2026-07-30 00:00:%02d', 'legacy-%03d-%02d')", i, j, j, i, j)
+		}
+	}
+	execFrozenGuard(t, ctx, conn, issueRows.String()+";\n"+eventRows.String()+";\n")
+	mustDrain(t, ctx, conn, "CALL DOLT_COMMIT('-Am', 'test: many pre-flip events')")
+}
+
+// TestEmbeddedIgnoredMigration0031BatchesItsStatements pins the restore's
+// cost: its statement count grows with the number of issues, never with the
+// number of rows. It used to probe the live table once per missing row and
+// write each issue separately, about 1 ms per event in embedded mode and more
+// on a sql-server, where the restore holds the migration lock that every
+// other writable open waits on for at most 30 s.
+func TestEmbeddedIgnoredMigration0031BatchesItsStatements(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+
+	const issues, events = 60, 12
+	dataDir := seedMainSchemaAt(t, ctx, 61)
+	conn, closeConn := openPinnedConn(t, ctx, dataDir)
+	defer closeConn()
+	seedManyPreflipEvents(t, ctx, conn, issues, events)
+	adoptPreflipLineage(t, ctx, conn)
+
+	counter := &preflipStatementCounter{DBConn: conn}
+	if err := schema.RestorePreflipEventsForTest(ctx, counter); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	got := liveEvents(t, ctx, conn)
+	total := 0
+	for _, ids := range got {
+		total += len(ids)
+	}
+	if total != issues*events {
+		t.Fatalf("restored %d events, want %d", total, issues*events)
+	}
+	requireDerivedIDs(t, got)
+	// One read per issue, plus a handful per page and per batch (75 today;
+	// probing and writing per row took 908).
+	if limit := issues + 30; counter.statements > limit {
+		t.Fatalf("restoring %d events of %d issues took %d statements, want at most %d", issues*events, issues, counter.statements, limit)
+	}
+	if counter.inserts != 1 {
+		t.Fatalf("restore wrote %d INSERTs for %d rows, want 1", counter.inserts, issues*events)
+	}
+}
+
+// TestEmbeddedIgnoredMigration0031SplitsInsertsByContentSize pins the byte
+// budget on one restore INSERT: update events carry the whole issue as JSON,
+// so a batch of them must not grow into one oversized statement. Under a
+// budget smaller than any row, every row is its own INSERT, and the result is
+// unchanged.
+func TestEmbeddedIgnoredMigration0031SplitsInsertsByContentSize(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+
+	dataDir := seedMainSchemaAt(t, ctx, 61)
+	conn, closeConn := openPinnedConn(t, ctx, dataDir)
+	defer closeConn()
+	seedPreflipEvents(t, ctx, conn)
+	adoptPreflipLineage(t, ctx, conn)
+
+	defer schema.SetPreflipEventsInsertBytesForTest(1)()
+	inserts := 0
+	defer schema.SetPreflipEventsInsertFaultHookForTest(func() error { inserts++; return nil })()
+	if _, err := schema.MigrateUp(ctx, conn); err != nil {
+		t.Fatalf("MigrateUp (restore): %v", err)
+	}
+	got := liveEvents(t, ctx, conn)
+	requireContent(t, got, preflipSeededContent())
+	requireDerivedIDs(t, got)
+	if inserts != 5 {
+		t.Fatalf("restore wrote %d INSERTs, want one per row (5) under a 1-byte budget", inserts)
+	}
+}
