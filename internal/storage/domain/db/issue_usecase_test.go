@@ -20,6 +20,7 @@ func (s *testSuite) TestIssueUseCase_MintTopLevelID() {
 	s.Run("IDPrefixSubprefixHonored", s.useCaseMintRespectsIDPrefix)
 	s.Run("WispUsesWispPrefix", s.useCaseMintWispPrefix)
 	s.Run("HashModePassesOverTheOtherPlanesIDs", s.useCaseMintPassesOverTheOtherPlane)
+	s.Run("MintPassesOverClaimedIDs", s.useCaseMintPassesOverClaimedIDs)
 	s.Run("MissingConfigPrefixErrors", s.useCaseMintMissingPrefix)
 	s.Run("ExplicitIDRequiresConfiguredPrefixUnlessForced", s.useCaseExplicitIDPrefixGuard)
 	s.Run("CreateOnlyRefusesOccupiedID", s.useCaseCreateOnlyRefusesOccupiedID)
@@ -199,6 +200,34 @@ func (s *testSuite) useCaseMintPassesOverTheOtherPlane() {
 	}, "tester")
 	s.Require().NoError(err)
 	s.NotContains(heldByIssues, wisp.Issue.ID, "minted a wisp id an issue holds")
+}
+
+// useCaseMintPassesOverClaimedIDs pins CreateIssueParams.ClaimedIDs, the ids a
+// caller's batch will write in a LATER item and so are in no table yet: the
+// mint passes over them in both modes, as it passes over a held id.
+func (s *testSuite) useCaseMintPassesOverClaimedIDs() {
+	uc := s.issueUseCase()
+
+	s.resetMintConfig("cl", "")
+	at := time.Date(2022, time.January, 2, 3, 4, 5, 678901234, time.UTC)
+	claimed := map[string]bool{}
+	for length := 3; length <= 8; length++ {
+		claimed[idgen.GenerateHashID("cl", "claimed", "", "tester", at, length, 0)] = true
+	}
+	hashed, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue:      &types.Issue{Title: "claimed", IssueType: types.TypeTask, Priority: 2, CreatedAt: at},
+		ClaimedIDs: claimed,
+	}, "tester")
+	s.Require().NoError(err)
+	s.False(claimed[hashed.Issue.ID], "hash mode minted the claimed %s", hashed.Issue.ID)
+
+	s.resetMintConfig("clc", "counter")
+	counted, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue:      &types.Issue{Title: "counted", IssueType: types.TypeTask, Priority: 2},
+		ClaimedIDs: map[string]bool{"clc-1": true},
+	}, "tester")
+	s.Require().NoError(err)
+	s.Equal("clc-2", counted.Issue.ID, "counter mode must pass over the claimed clc-1")
 }
 
 func (s *testSuite) useCaseMintMissingPrefix() {

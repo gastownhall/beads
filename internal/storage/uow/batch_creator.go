@@ -66,12 +66,24 @@ func (o *batchCreator) CreateBatch(ctx context.Context, request publicops.Create
 			return publicops.CreateBatchResult{}, "", err
 		}
 
+		// claimed is every id the batch will write, as ExecuteCreateBatch
+		// keeps it: each item's explicit id up front, then each id as it
+		// lands. An earlier item is a row by the time the next one mints, so
+		// the set matters for the LATER explicit ids, which are in no table
+		// yet when an earlier item mints.
+		claimed := make(map[string]bool, len(attempt.Items))
+		for _, item := range attempt.Items {
+			if item.Issue.ID != "" {
+				claimed[item.Issue.ID] = true
+			}
+		}
 		result := publicops.CreateBatchResult{Issues: make([]*types.Issue, len(attempt.Items))}
 		for i, item := range attempt.Items {
-			issue, err := createBatchItem(ctx, uw, attempt, item, createContext)
+			issue, err := createBatchItem(ctx, uw, attempt, item, createContext, claimed)
 			if err != nil {
 				return publicops.CreateBatchResult{}, "", storageissueops.CreateBatchItemError(i, err)
 			}
+			claimed[issue.ID] = true
 			result.Issues[i] = issue
 		}
 		return result, storageissueops.CreateBatchCommitMessage(attempt, result), nil
@@ -80,8 +92,9 @@ func (o *batchCreator) CreateBatch(ctx context.Context, request publicops.Create
 
 // createBatchItem creates one item on the batch's unit of work, through the
 // same preparation, infra-type routing and error classification the single
-// create runs — so an item's content rules ARE Lifecycle.Create's.
-func createBatchItem(ctx context.Context, uw UnitOfWork, request publicops.CreateBatchRequest, item publicops.BatchCreateItem, createContext domain.CreateContext) (*types.Issue, error) {
+// create runs — so an item's content rules ARE Lifecycle.Create's. A minted id
+// passes over the ids claimed holds.
+func createBatchItem(ctx context.Context, uw UnitOfWork, request publicops.CreateBatchRequest, item publicops.BatchCreateItem, createContext domain.CreateContext, claimed map[string]bool) (*types.Issue, error) {
 	prepared, err := storageissueops.PreparePublicCreateRequest(
 		storageissueops.CreateBatchItemRequest(request, item),
 		storageissueops.PublicCreateContext{
@@ -106,6 +119,7 @@ func createBatchItem(ctx context.Context, uw UnitOfWork, request publicops.Creat
 	if err != nil {
 		return nil, validationError(err)
 	}
+	params.ClaimedIDs = claimed
 	var created domain.CreateIssueResult
 	if useWisp {
 		created, err = uw.IssueUseCase().CreateWisp(ctx, params, request.Actor)

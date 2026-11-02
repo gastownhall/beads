@@ -207,7 +207,9 @@ func prepareCreateIssueInTx(ctx context.Context, tx DBTX, bc *BatchContext, issu
 	issueTable, eventTable = TableRouting(issue)
 
 	explicitID := issue.ID != ""
-	// No claimed set: a minted issue is written before the next one is minted.
+	// No claimed set. Each issue is written before the next one mints, so a
+	// mint sees every EARLIER issue's row; an explicit id a LATER issue of the
+	// same slice names is not seen, and a mint can still draw it.
 	if err := assignCreateIssueIDInTx(ctx, tx, bc, issue, actor, nil); err != nil {
 		return "", "", prepareWrite, err
 	}

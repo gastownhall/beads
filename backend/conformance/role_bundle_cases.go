@@ -95,6 +95,7 @@ var roleContractCases = []roleContract{
 		func(b RoleContractBundle) func(t *testing.T) *BatchCreatorFixture { return b.BatchCreator },
 		RunBatchCreatorCreatesEveryItemAsOneAct,
 		RunBatchCreatorMintsADistinctIDForEachIdenticalItem,
+		RunBatchCreatorMintsPastAnIDALaterItemNames,
 		RunBatchCreatorRefusesEverythingWhenOneItemRefuses,
 		RunBatchCreatorRejectsAnUnusableRequest,
 		RunBatchCreatorRefusesACrossPlaneInBatchEdge,

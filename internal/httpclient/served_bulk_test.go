@@ -585,6 +585,12 @@ func TestServedBatchCreatorMintsADistinctIDForEachIdenticalItem(t *testing.T) {
 	conformance.RunBatchCreatorMintsADistinctIDForEachIdenticalItem(t, t.Context(), newServedBatchCreatorFixture(t, "hb13"))
 }
 
+func TestServedBatchCreatorMintsPastAnIDALaterItemNames(t *testing.T) {
+	skipKnownDivergence(t, "W-BatchCreateItem.Issue", bulkParkBead,
+		"the case's second item names the id the first item's counter mint would draw. "+parkBatchExplicitID)
+	conformance.RunBatchCreatorMintsPastAnIDALaterItemNames(t, t.Context(), newServedBatchCreatorFixture(t, "hb14"))
+}
+
 func TestServedBatchCreatorRefusesEverythingWhenOneItemRefuses(t *testing.T) {
 	skipKnownDivergence(t, "W-BatchCreateItem.Issue", bulkParkBead, parkBatchExplicitID)
 	conformance.RunBatchCreatorRefusesEverythingWhenOneItemRefuses(t, t.Context(), newServedBatchCreatorFixture(t, "hb01"))

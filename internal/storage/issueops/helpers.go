@@ -278,9 +278,10 @@ func RecordEventInTable(ctx context.Context, tx DBTX, table, issueID string, eve
 // looping on a counter that a sweep retired a long run of.
 const maxRetiredCounterSkips = 1000
 
-// GenerateIssueIDInTable generates an ID for an issue bound for table that no
-// row of either plane holds (IDTakenInTx) and claimed does not name. Supports
-// counter mode for non-ephemeral issues.
+// GenerateIssueIDInTable generates an ID for an issue bound for table that
+// claimed does not name and no tombstone retired. Supports counter mode for
+// non-ephemeral issues. Only hash mode also probes for live rows, in both
+// planes (IDTakenInTx); counter mode takes the counter's next value on trust.
 //
 // A RETIRED ID IS TAKEN: a candidate a retaining sweep retired (either
 // tombstone table) is skipped exactly like one a live row holds, so a fresh
