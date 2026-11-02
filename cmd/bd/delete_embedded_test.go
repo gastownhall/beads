@@ -503,6 +503,54 @@ func TestEmbeddedDeleteCascadeFollowsOnlyParentChild(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("cascade json preview names exactly what the deletion then reports", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "cpj")
+		f := setupCascadeFixture(t, bd, dir)
+		wantDeleted := f.deleted()
+		sort.Strings(wantDeleted)
+		wantOrphans := []string{f.B, f.C1, f.S}
+		sort.Strings(wantOrphans)
+
+		preview := bdDeleteJSON(t, bd, dir, f.A, "--cascade", "--dry-run")
+		if got := jsonStrings(preview["would_delete_ids"]); !reflect.DeepEqual(got, wantDeleted) {
+			t.Errorf("would_delete_ids = %v, want %v", got, wantDeleted)
+		}
+		if got := jsonStrings(preview["would_orphan_ids"]); !reflect.DeepEqual(got, wantOrphans) {
+			t.Errorf("would_orphan_ids = %v, want %v", got, wantOrphans)
+		}
+		if preview["would_delete"] != float64(4) || preview["would_orphan"] != float64(3) {
+			t.Errorf("preview counts: would_delete %v, would_orphan %v; want 4 and 3", preview["would_delete"], preview["would_orphan"])
+		}
+
+		done := bdDeleteJSON(t, bd, dir, f.A, "--cascade", "--force")
+		if got, want := jsonStrings(done["deleted_ids"]), jsonStrings(preview["would_delete_ids"]); !reflect.DeepEqual(got, want) {
+			t.Errorf("deleted_ids = %v, but the preview promised %v", got, want)
+		}
+		if got, want := jsonStrings(done["orphaned_issues"]), jsonStrings(preview["would_orphan_ids"]); !reflect.DeepEqual(got, want) {
+			t.Errorf("orphaned_issues = %v, but the preview promised %v", got, want)
+		}
+		if done["deleted_count"] != preview["would_delete"] {
+			t.Errorf("deleted_count = %v, but the preview promised %v", done["deleted_count"], preview["would_delete"])
+		}
+		if got := jsonStrings(done["deleted"]); !reflect.DeepEqual(got, []string{f.A}) {
+			t.Errorf("deleted = %v, want the requested ids [%s]", got, f.A)
+		}
+	})
+
+	// The confirmed run's text names the rows too: a count is what the 48-row
+	// deletion on v1.2.2 hid behind.
+	t.Run("cascade success text names every deleted row", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "cpt")
+		f := setupCascadeFixture(t, bd, dir)
+		wantDeleted := f.deleted()
+		sort.Strings(wantDeleted)
+
+		out := bdDelete(t, bd, dir, f.A, "--cascade", "--force")
+		if want := "  Deleted: " + strings.Join(wantDeleted, ", ") + "\n"; !strings.Contains(out, want) {
+			t.Errorf("success text does not list the deleted rows %q:\n%s", want, out)
+		}
+	})
 }
 
 // previewListedIDs counts the ids a delete preview lists one per line: the

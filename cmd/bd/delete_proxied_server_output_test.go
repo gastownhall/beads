@@ -106,6 +106,8 @@ func TestOutputDeleteProxiedPreviewExactContracts(t *testing.T) {
 			"dry_run":              true,
 			"cascade":              false,
 			"would_orphan":         float64(0),
+			"would_delete_ids":     nil,
+			"would_orphan_ids":     nil,
 		}
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("preview JSON: got %#v, want %#v", got, want)
@@ -181,6 +183,22 @@ func TestOutputDeleteProxiedPreviewExactContracts(t *testing.T) {
 		if !strings.Contains(out, "Would orphan 3 issue(s): bd-blocked, bd-found, bd-related") {
 			t.Errorf("cascade preview does not name every orphan:\n%s", out)
 		}
+
+		in.jsonOutput = true
+		jsonOut := captureStdout(t, func() error { return outputDeleteProxiedPreview(in, cascadeResult) })
+		var got map[string]any
+		if err := json.Unmarshal([]byte(jsonOut), &got); err != nil {
+			t.Fatalf("parse cascade preview JSON: %v\nraw: %s", err, jsonOut)
+		}
+		if want := []any{"bd-target", "bd-target.1", "bd-target.1.1", "bd-target.2"}; !reflect.DeepEqual(got["would_delete_ids"], want) {
+			t.Errorf("would_delete_ids: got %#v, want %#v", got["would_delete_ids"], want)
+		}
+		if want := []any{"bd-blocked", "bd-found", "bd-related"}; !reflect.DeepEqual(got["would_orphan_ids"], want) {
+			t.Errorf("would_orphan_ids: got %#v, want %#v", got["would_orphan_ids"], want)
+		}
+		if got["would_delete"] != float64(4) || got["would_orphan"] != float64(3) {
+			t.Errorf("cascade preview counts: would_delete %#v, would_orphan %#v; want 4 and 3", got["would_delete"], got["would_orphan"])
+		}
 	})
 
 	t.Run("refusal renders the blocking error instead of counts, JSON carries it as error", func(t *testing.T) {
@@ -241,6 +259,7 @@ func TestRenderDeleteProxiedResultExactContracts(t *testing.T) {
 			"events_removed":       float64(5),
 			"references_updated":   float64(1),
 			"orphaned_issues":      nil,
+			"deleted_ids":          nil,
 		}
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("final JSON: got %#v, want %#v", got, want)
@@ -262,6 +281,21 @@ func TestRenderDeleteProxiedResultExactContracts(t *testing.T) {
 		}
 		if strings.Contains(out, "Orphaned") {
 			t.Errorf("final prose without orphans must not warn about orphans:\n%s", out)
+		}
+		if strings.Contains(out, "Deleted:") {
+			t.Errorf("final prose without --cascade must not list the deleted rows:\n%s", out)
+		}
+	})
+
+	t.Run("cascade prose names every deleted row", func(t *testing.T) {
+		cascadeRes := res
+		cascadeRes.DeletedIDs = []string{"bd-target", "bd-target.1", "bd-target.2"}
+		out := captureStdout(t, func() error {
+			renderDeleteProxiedResult(&deleteInput{ids: []string{"bd-target"}, cascade: true}, cascadeRes)
+			return nil
+		})
+		if want := "  Deleted: bd-target, bd-target.1, bd-target.2\n"; !strings.Contains(out, want) {
+			t.Errorf("cascade final prose missing %q:\n%s", want, out)
 		}
 	})
 
@@ -288,6 +322,27 @@ func TestRenderDeleteProxiedResultExactContracts(t *testing.T) {
 		})
 		if !strings.Contains(prose, "Orphaned 2 issue(s): bd-orphan-a, bd-orphan-b") {
 			t.Errorf("orphan prose missing warning:\n%s", prose)
+		}
+	})
+
+	t.Run("JSON names every deleted row while deleted stays the requested ids", func(t *testing.T) {
+		cascadeRes := res
+		cascadeRes.DeletedIDs = []string{"bd-target", "bd-target.1", "bd-target.2"}
+
+		in := &deleteInput{ids: []string{"bd-target"}, cascade: true, force: true, jsonOutput: true}
+		out := captureStdout(t, func() error {
+			renderDeleteProxiedResult(in, cascadeRes)
+			return nil
+		})
+		var got map[string]any
+		if err := json.Unmarshal([]byte(out), &got); err != nil {
+			t.Fatalf("parse cascade JSON: %v\nraw: %s", err, out)
+		}
+		if want := []any{"bd-target", "bd-target.1", "bd-target.2"}; !reflect.DeepEqual(got["deleted_ids"], want) {
+			t.Errorf("deleted_ids: got %#v, want %#v", got["deleted_ids"], want)
+		}
+		if want := []any{"bd-target"}; !reflect.DeepEqual(got["deleted"], want) {
+			t.Errorf("deleted: got %#v, want the requested ids %#v", got["deleted"], want)
 		}
 	})
 }
