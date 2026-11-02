@@ -8,10 +8,12 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/procid"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/util"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -96,8 +98,82 @@ func runShutdownDuringHeldStart(t *testing.T, hold time.Duration) {
 	assert.NoFileExists(t, filepath.Join(root, spawnMarkerFileName))
 }
 
+// TestShutdownWaitsForStartDelayedBeforeExec parks a start before exec with
+// its spawn marker published, then resolves that start (exec, abort on the
+// advanced stop epoch, clear of its own marker) entirely inside Shutdown's
+// check of the marker. That is the interleaving behind #7158: a check made
+// under proxy.lock kept taking the lock the start needs to clear its marker,
+// the clear's bounded retry gave up, and Shutdown waited out the marker it
+// left behind. Shutdown must see the clear and succeed.
 func TestShutdownWaitsForStartDelayedBeforeExec(t *testing.T) {
-	runShutdownDuringHeldStart(t, 150*time.Millisecond)
+	root := t.TempDir()
+	entered, release := holdStartBeforeExec(t, root)
+
+	startDone := make(chan error, 1)
+	go func() {
+		_, err := GetCreateDatabaseProxyServerEndpoint(root, externalOpenOpts(root))
+		startDone <- err
+	}()
+	select {
+	case <-entered:
+	case <-time.After(spawnStopFailAfter):
+		t.Fatal("start did not reach injected pre-exec delay")
+	}
+
+	var (
+		resolveOnce sync.Once
+		startErr    error
+		checked     atomic.Bool
+	)
+	resolveStart := func() {
+		resolveOnce.Do(func() {
+			close(release)
+			select {
+			case startErr = <-startDone:
+			case <-time.After(spawnStopFailAfter):
+				startErr = errors.New("start did not terminate after concurrent shutdown")
+			}
+		})
+	}
+	// With the start parked there is no proxy record, so the only identity
+	// Shutdown verifies is the spawn marker owner's.
+	previousVerify := verifyProcessIdentity
+	verifyProcessIdentity = func(pid int, tok procid.Token) (bool, error) {
+		checked.Store(true)
+		resolveStart()
+		return previousVerify(pid, tok)
+	}
+	t.Cleanup(func() { verifyProcessIdentity = previousVerify })
+
+	stopDone := make(chan error, 1)
+	go func() { stopDone <- Shutdown(root) }()
+	var stopErr error
+	select {
+	case stopErr = <-stopDone:
+	case <-time.After(spawnStopFailAfter):
+		t.Fatal("Shutdown did not finish after delayed start resolved")
+	}
+	resolveStart() // no-op unless Shutdown never checked the marker
+
+	require.NoError(t, stopErr)
+	require.True(t, checked.Load(), "Shutdown returned without waiting on the parked start's spawn marker")
+	require.ErrorIs(t, startErr, errStartInterrupted)
+	assert.NoFileExists(t, filepath.Join(root, spawnMarkerFileName))
+}
+
+// A marker whose owner is gone (a crashed starter, or a PID since reused) is
+// not an in-progress start: Shutdown removes it under proxy.lock and succeeds.
+func TestShutdownRemovesDeadOwnerSpawnMarker(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, writeSpawnMarker(root, spawnMarker{
+		Schema:      1,
+		PID:         os.Getpid(),
+		Birth:       "birth-token-of-an-exited-process",
+		StartedUnix: time.Now().Unix(),
+	}))
+
+	require.NoError(t, Shutdown(root))
+	assert.NoFileExists(t, filepath.Join(root, spawnMarkerFileName))
 }
 
 // A live starter that is slow to exec (loaded host, -race) must be waited
