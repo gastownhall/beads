@@ -487,7 +487,16 @@ func TestRunMigrationsSnapshotsDirtyTablesBeforeRepairSoRepairMutationsCommitAto
 	mock.ExpectQuery(dirtyStatusQuery).
 		WillReturnRows(sqlmock.NewRows([]string{"table_name", "staged"}))
 
-	// 2. preMigrationRepair(53): ensureIssuesRigColumns (all present, no
+	// 2. The updated_at guard snapshots 0053's restore target (issues) and
+	// move source (wisps, absent here) BEFORE the repair can touch them.
+	mock.ExpectQuery(columnQuery).WithArgs("issues", "updated_at").
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
+	mock.ExpectQuery(`SELECT id, updated_at FROM issues ORDER BY id`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "updated_at"}).AddRow("bd-1", "2025-03-01 09:30:00"))
+	mock.ExpectQuery(columnQuery).WithArgs("wisps", "updated_at").
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
+
+	// 3. preMigrationRepair(53): ensureIssuesRigColumns (all present, no
 	// exec), ensureWispDependenciesSplitTargets (table absent, no-op), then
 	// ensureDependenciesIDColumn actually mutating `dependencies`.
 	for _, col := range []string{"hook_bead", "role_bead", "agent_state", "last_activity", "role_type", "rig"} {
@@ -515,12 +524,21 @@ func TestRunMigrationsSnapshotsDirtyTablesBeforeRepairSoRepairMutationsCommitAto
 	mock.ExpectExec(`ALTER TABLE dependencies ADD PRIMARY KEY \(id\)`).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 
-	// 3. Migration 0053's own frozen SQL, then its cursor row.
+	// 4. Migration 0053's own frozen SQL; the guard then restores the row
+	// the body stamped (compare-and-swap on the stamped value) BEFORE the
+	// cursor row is recorded.
 	mock.ExpectExec(`SET FOREIGN_KEY_CHECKS = 0`).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(columnQuery).WithArgs("issues", "updated_at").
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
+	mock.ExpectQuery(`SELECT id, updated_at FROM issues ORDER BY id`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "updated_at"}).AddRow("bd-1", "2026-11-02 04:00:00"))
+	mock.ExpectExec(`UPDATE issues SET updated_at = CASE id WHEN \? THEN \? ELSE updated_at END WHERE \(id = \? AND updated_at = \?\)`).
+		WithArgs("bd-1", "2025-03-01 09:30:00", "bd-1", "2026-11-02 04:00:00").
+		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(`INSERT IGNORE INTO schema_migrations`).WithArgs(53, sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
-	// 4. commitMigrationStep's "after" snapshot sees `dependencies` dirty --
+	// 5. commitMigrationStep's "after" snapshot sees `dependencies` dirty --
 	// from the repair's own ALTERs above, now correctly attributed to THIS
 	// step because the "before" snapshot in (1) predates them -- so it gets
 	// force-added alongside the cursor table and committed in the same call.
@@ -2528,6 +2546,7 @@ func TestRunMigrationsStderrOutput(t *testing.T) {
 	origCounter := issueRowCounter
 	issueRowCounter = func(context.Context, DBConn) (int64, error) { return 0, nil }
 	defer func() { issueRowCounter = origCounter }()
+	stubUpdatedAtGuard(t)
 
 	// Bounded below migration 40: migrations 40/41 carry preMigrationRepairs and
 	// CALL DOLT_* bodies that issue real queries via mockDB.QueryRowContext /
@@ -2572,6 +2591,7 @@ func TestRunMigrationsUsesProvidedSource(t *testing.T) {
 	origCounter := issueRowCounter
 	issueRowCounter = func(context.Context, DBConn) (int64, error) { return 0, nil }
 	defer func() { issueRowCounter = origCounter }()
+	stubUpdatedAtGuard(t)
 
 	// Bounded below migration 40 for the same reason as
 	// TestRunMigrationsStderrOutput: mockDB can't answer the queries the
@@ -2616,6 +2636,7 @@ func TestRunMigrationsLargeRigNoticeOnlyOnMainSource(t *testing.T) {
 	origCounter := issueRowCounter
 	issueRowCounter = func(context.Context, DBConn) (int64, error) { return 49_187, nil }
 	defer func() { issueRowCounter = origCounter }()
+	stubUpdatedAtGuard(t)
 
 	var mainBuf bytes.Buffer
 	orig := stderr

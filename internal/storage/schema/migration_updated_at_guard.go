@@ -36,9 +36,14 @@ type updatedAtGuardSpec struct {
 // updatedAtGuards is the frozen-exception registry, keyed like
 // preMigrationRepairs.
 var updatedAtGuards = map[repairKey]updatedAtGuardSpec{
+	// 0035 copies agent/rig/role/message issues into wisps, then sets
+	// wisps.ephemeral = 1 on them.
+	{"schema_migrations", 35}: {restore: []string{"wisps"}, moveSources: map[string]string{"wisps": "issues"}},
 	// 0046 and 0047 clear and recompute issues.is_blocked.
 	{"schema_migrations", 46}: {restore: []string{"issues"}},
 	{"schema_migrations", 47}: {restore: []string{"issues"}},
+	// 0053 copies rig wisps back into issues, then sets issues.ephemeral = 0.
+	{"schema_migrations", 53}: {restore: []string{"issues"}, moveSources: map[string]string{"issues": "wisps"}},
 }
 
 // snapshotTables returns the restore targets plus their move sources, sorted.

@@ -294,6 +294,7 @@ func TestRunMigrationsWatchdogSurvivesNonTTY(t *testing.T) {
 	origCounter := issueRowCounter
 	issueRowCounter = func(context.Context, DBConn) (int64, error) { return 0, nil }
 	defer func() { issueRowCounter = origCounter }()
+	stubUpdatedAtGuard(t)
 
 	t.Setenv(migrationWatchdogIntervalEnv, "10ms")
 
