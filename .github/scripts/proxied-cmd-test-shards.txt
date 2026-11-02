@@ -199,6 +199,7 @@
 34 22 TestProxiedServerUpdateB
 34 22 TestProxiedServerUpdateConcurrentMetadata
 
+34 23 TestProxiedServerCompactReportsPlannedHead
 34 23 TestProxiedServerDep2B
 34 23 TestProxiedServerIfRevisionGuardUpdate
 34 23 TestProxiedServerListWatchCountsTheOffsetIntoMaxRows
