@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"errors"
+	"fmt"
 	"regexp"
 	"strings"
 	"testing"
@@ -368,6 +369,14 @@ func expectIgnorePatternSeedNoop(mock sqlmock.Sqlmock, mainVersion int) {
 }
 
 func expectOnePendingMigration(t *testing.T, mock sqlmock.Sqlmock) {
+	expectOnePendingMigrationAtSetting(t, mock, 0)
+}
+
+// expectOnePendingMigrationAtSetting is expectOnePendingMigration with an
+// explicit session dolt_transaction_commit value for the pass (see
+// expectSessionTransactionCommitSuspend): a non-zero value additionally
+// expects the pass's SET on entry and the deferred restoration on exit.
+func expectOnePendingMigrationAtSetting(t *testing.T, mock sqlmock.Sqlmock, transactionCommit int64) {
 	t.Helper()
 
 	latest := LatestVersion()
@@ -380,6 +389,9 @@ func expectOnePendingMigration(t *testing.T, mock sqlmock.Sqlmock) {
 	expectIgnoredCursorHealNoop(mock)
 	expectCursorProbe(mock, "schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", latest-1)
+	// migrationWorkNeeded said yes: the pass suspends the session's commit
+	// semantics before its first statement (#4470).
+	expectSessionTransactionCommitSuspend(mock, transactionCommit)
 	expectDoltStatusRows(mock)
 	// The seed changed rows (expectIgnorePatternSeed reports RowsAffected=1),
 	// so MigrateUp commits it scoped+labeled before the pass runs (#4566: the
@@ -484,6 +496,10 @@ func expectOnePendingMigration(t *testing.T, mock sqlmock.Sqlmock) {
 		WillReturnRows(sqlmock.NewRows([]string{"status"}))
 	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', 'schema: apply migrations')")).
 		WillReturnRows(sqlmock.NewRows([]string{"hash"}))
+	if transactionCommit != 0 {
+		// The deferred restoration is the pass's last statement (#4470).
+		expectSessionTransactionCommitRestore(mock, transactionCommit)
+	}
 }
 
 // expectColumnExists mocks the INFORMATION_SCHEMA.COLUMNS probe still used by
@@ -527,6 +543,29 @@ func expectDoltStatusRows(mock sqlmock.Sqlmock) {
 		WillReturnRows(sqlmock.NewRows([]string{"table_name", "staged"}))
 }
 
+// expectSessionTransactionCommitSuspend mocks the commit-semantics probe at
+// the top of a needed migration pass (#4470): one read, plus — when the
+// setting is enabled — the SET that suspends it for the pass. Default flows
+// pass 0 (Dolt's default): a no-op restore, so the pass issues no other
+// statement for it.
+func expectSessionTransactionCommitSuspend(mock sqlmock.Sqlmock, value int64) {
+	mock.ExpectQuery(regexp.QuoteMeta(readSessionTransactionCommit)).
+		WillReturnRows(sqlmock.NewRows([]string{"@@SESSION.dolt_transaction_commit"}).AddRow(value))
+	if value != 0 {
+		mock.ExpectExec(regexp.QuoteMeta(clearSessionTransactionCommit)).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+	}
+}
+
+// expectSessionTransactionCommitRestore mocks the deferred restoration a
+// pass with a suspended setting performs as it exits (see
+// migrateUpAfterReconcile): it must be the last statement of the mocked
+// flow, before anything the caller issues after MigrateUp returns.
+func expectSessionTransactionCommitRestore(mock sqlmock.Sqlmock, value int64) {
+	mock.ExpectExec(fmt.Sprintf("SET @@SESSION.%s = %d", sessionTransactionCommitVar, value)).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+}
+
 // expectDirtyGuardRefusal mocks a MigrateUp invocation that walks up to the
 // #4566 pre-flight guard and gets refused: the cursor is one migration behind,
 // `issues` is dirty in the working set, and the pending (latest) migration
@@ -544,6 +583,14 @@ func expectDoltStatusRows(mock sqlmock.Sqlmock) {
 const eventsFlipVersion = 62
 
 func expectDirtyGuardRefusal(t *testing.T, mock sqlmock.Sqlmock) {
+	expectDirtyGuardRefusalAtSetting(t, mock, 0)
+}
+
+// expectDirtyGuardRefusalAtSetting is expectDirtyGuardRefusal with an
+// explicit session dolt_transaction_commit value (see
+// expectSessionTransactionCommitSuspend): a non-zero value additionally
+// expects the pass's entry SET and exit restoration straddling the refusal.
+func expectDirtyGuardRefusalAtSetting(t *testing.T, mock sqlmock.Sqlmock, transactionCommit int64) {
 	t.Helper()
 
 	cursor := eventsFlipVersion - 1
@@ -556,6 +603,9 @@ func expectDirtyGuardRefusal(t *testing.T, mock sqlmock.Sqlmock) {
 	// migrationWorkNeeded: main cursor behind -> work needed (short-circuits).
 	expectCursorProbe(mock, "schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", cursor)
+	// Work needed: the pass suspends the session's commit semantics before
+	// its first read (#4470).
+	expectSessionTransactionCommitSuspend(mock, transactionCommit)
 	// dirtyBeforeAll: `events` dirty (working set only, not staged).
 	expectDoltStatusDirtyEvents(mock)
 	// Nothing staged -> no unstage exec; seed was a no-op -> no seed commit.
@@ -579,6 +629,11 @@ func expectDirtyGuardRefusal(t *testing.T, mock sqlmock.Sqlmock) {
 	// touches `events` -> DirtyTablesError.
 	expectCursorProbe(mock, "schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", cursor)
+	if transactionCommit != 0 {
+		// The deferred restoration runs as the pass unwinds from the
+		// refusal (#4470): it is the mocked flow's last statement.
+		expectSessionTransactionCommitRestore(mock, transactionCommit)
+	}
 }
 
 func expectDoltStatusDirtyEvents(mock sqlmock.Sqlmock) {
@@ -984,6 +1039,9 @@ func TestMigrateUpWithLockFreshBootstrapHealCapabilityIsOneShot(t *testing.T) {
 	expectIgnoredCursorHealNoop(mock)
 	expectCursorProbe(mock, "schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", LatestVersion()-2)
+	// Work needed again on the rerun, so the pass suspends the commit
+	// semantics before the status read it dies on (#4470).
+	expectSessionTransactionCommitSuspend(mock, 0)
 	mock.ExpectQuery("(?s)SELECT s\\.table_name, s\\.staged\\s+FROM dolt_status s").
 		WillReturnError(errors.New("connection reset"))
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT RELEASE_LOCK(?)")).

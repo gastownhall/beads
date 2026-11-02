@@ -205,6 +205,7 @@ go_test(
         "migrate_consent_gate_test.go",
         "migrate_dep_rekey_dedup_test.go",
         "migrate_events_flip_test.go",
+        "migrate_fresh_transaction_commit_test.go",
         "migrate_frozen_guard_convergence_test.go",
         "migrate_id_tombstones_test.go",
         "migrate_ignored_cursor_untrack_test.go",

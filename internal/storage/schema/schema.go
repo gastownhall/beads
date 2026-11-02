@@ -911,6 +911,13 @@ func MigrateUpTo(ctx context.Context, db DBConn, maxVersion int) (int, error) {
 	return applied, err
 }
 
+// MigrateUp brings both migration sources (main and dolt-ignored) to the
+// binary's latest versions, with all open-time reconciles, guards, backfills
+// and rekeys. db must be a single session held for the whole call — pin a
+// connection (database/sql *sql.Conn) the way the production callers do: the
+// pass suspends and restores @@SESSION.dolt_transaction_commit on it
+// (suspendMigrationTransactionCommit), and a pooled *sql.DB would let the SET
+// land on one connection while the migrations run on another.
 func MigrateUp(ctx context.Context, db DBConn) (int, error) {
 	// Consent gate first, before ANY write — dolt_ignore seeding included: an
 	// existing database with pending main-sequence migrations must stay
@@ -972,8 +979,10 @@ func migrateUpConsented(ctx context.Context, db DBConn) (int, error) {
 
 // migrateUpAfterReconcile is MigrateUp's migration pass proper, split out so
 // the open-time reconciles above it have exactly one place to contribute to
-// the reported total.
-func migrateUpAfterReconcile(ctx context.Context, db DBConn, seedChanged bool) (int, error) {
+// the reported total. Its results are named: the deferred restoration of the
+// suspended session dolt_transaction_commit (acquired below) joins a restore
+// failure onto whatever the pass is already returning.
+func migrateUpAfterReconcile(ctx context.Context, db DBConn, seedChanged bool) (applied int, err error) {
 	needed, err := migrationWorkNeeded(ctx, db)
 	if err != nil {
 		return 0, fmt.Errorf("checking schema migration work: %w", err)
@@ -991,6 +1000,34 @@ func migrateUpAfterReconcile(ctx context.Context, db DBConn, seedChanged bool) (
 		}
 		return 0, nil
 	}
+
+	// A migration pass is about to run on this connection, so its commit
+	// semantics must be the pass's own for every statement it issues — most
+	// urgently the frozen in-body CALL DOLT_COMMIT calls of migrations like
+	// 0040, which die with "nothing to commit" when the session already
+	// commits each statement for itself (gastownhall/beads#4470; the
+	// suspension covers the numbered migrations, per-step and end-of-pass
+	// commits, pre-repairs, backfills and rekeys below). It runs after the
+	// short-circuit above so a converged open performs no new statements.
+	restoreCommitSetting, err := suspendMigrationTransactionCommit(ctx, db)
+	if err != nil {
+		return 0, fmt.Errorf("suspending session %s for the migration pass: %w", sessionTransactionCommitVar, err)
+	}
+	defer func() {
+		// Restoration must reach the server even when the pass was aborted by
+		// a canceled context, so it gets its own cancellation-independent
+		// deadline the way the migration lock's release does — returning a
+		// still-altered reusable session would hand later work a connection
+		// whose commits happen at boundaries it does not own. A restore
+		// failure is never swallowed: the pass's own error (if any) stays the
+		// primary cause and the restore failure joins it, so an altered
+		// session is reported rather than returned silently.
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), migrationLockCleanupTimeout)
+		defer cancel()
+		if restoreErr := restoreCommitSetting(cleanupCtx); restoreErr != nil {
+			err = errors.Join(err, fmt.Errorf("migration pass cleanup: %w", restoreErr))
+		}
+	}()
 
 	dirtyBeforeAll, err := dirtyTables(ctx, db, false)
 	if err != nil {
