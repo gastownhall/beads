@@ -125,7 +125,7 @@ func runWispListProxiedServer(ctx context.Context, showAll bool, typeFilter stri
 	return renderWispListResult(buildWispListResult(issues, showAll))
 }
 
-func runWispGCProxiedServer(ctx context.Context, dryRun bool, ageThreshold time.Duration, cleanAll, closedMode, force bool, excludeTypes []types.IssueType) error {
+func runWispGCProxiedServer(ctx context.Context, dryRun bool, ageThreshold time.Duration, cleanAll, closedMode, force bool, excludeTypes []types.IssueType, extraLabels ...string) error {
 	CheckReadonly("wisp gc")
 
 	if uowProvider == nil {
@@ -133,7 +133,7 @@ func runWispGCProxiedServer(ctx context.Context, dryRun bool, ageThreshold time.
 	}
 
 	if closedMode {
-		return runWispPurgeClosedProxiedServer(ctx, dryRun, force, excludeTypes)
+		return runWispPurgeClosedProxiedServer(ctx, dryRun, force, excludeTypes, extraLabels...)
 	}
 
 	uw, err := proxiedOpenReadUOW(ctx)
@@ -141,7 +141,7 @@ func runWispGCProxiedServer(ctx context.Context, dryRun bool, ageThreshold time.
 		return err
 	}
 	r := uowMolReader{uw: uw}
-	sel, err := findAbandonedWisps(ctx, r, cleanAll, ageThreshold, excludeTypes)
+	sel, err := findAbandonedWisps(ctx, r, cleanAll, ageThreshold, excludeTypes, extraLabels...)
 	uw.Close(ctx)
 	if err != nil && sel.abandoned == nil {
 		return HandleError("%v", err)
@@ -228,7 +228,7 @@ func renderWispGCDeleteResult(ids []string, res domain.DeleteIssuesResult) error
 	return nil
 }
 
-func runWispPurgeClosedProxiedServer(ctx context.Context, dryRun, force bool, excludeTypes []types.IssueType) error {
+func runWispPurgeClosedProxiedServer(ctx context.Context, dryRun, force bool, excludeTypes []types.IssueType, extraLabels ...string) error {
 	uw, err := proxiedOpenReadUOW(ctx)
 	if err != nil {
 		return err
@@ -253,7 +253,7 @@ func runWispPurgeClosedProxiedServer(ctx context.Context, dryRun, force bool, ex
 	// sweep, through the same shared filter the direct route applies;
 	// leniency on an unreadable setting matches the direct route until the
 	// setting's error-path hardening (bd-961adp AC-6).
-	labels, _ := protectedLabelSet(ctx, r, nil)
+	labels, _ := protectedLabelSet(ctx, r, extraLabels)
 	closedIssues, pinnedCount, infraCount := filterClosedPurgeCandidates(ctx, r, closedIssues, labels)
 	uw.Close(ctx)
 

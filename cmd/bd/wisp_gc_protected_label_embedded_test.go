@@ -106,6 +106,41 @@ func TestEmbeddedWispGCCascadeSparesLabeledDependent(t *testing.T) {
 	}
 }
 
+// TestEmbeddedWispGCExcludeLabelFlag is the end-to-end leg of the additive
+// --exclude-label flag: a label named on the command line protects for this
+// invocation alone, with nothing configured — and there is no built-in
+// default, so a wisp carrying only bd:protected stays reclaimable until the
+// workspace opts in (flag or setting).
+func TestEmbeddedWispGCExcludeLabelFlag(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "wpe")
+
+	// Deliberately no wisp.protected_labels setting: everything protected
+	// below is protected by the flag alone.
+	flagKept := bdCreate(t, bd, dir, "kept by the flag", "--ephemeral").ID
+	bdCommand(t, bd, dir, "label", "add", flagKept, "keep:mail")
+	builtinOnly := bdCreate(t, bd, dir, "carries only bd:protected", "--ephemeral").ID
+	bdCommand(t, bd, dir, "label", "add", builtinOnly, "bd:protected")
+	plain := bdCreate(t, bd, dir, "stale noise", "--ephemeral").ID
+
+	bdCommand(t, bd, dir, "mol", "wisp", "gc", "--age", "0s", "--exclude-label", "keep:mail")
+
+	if bdShowSucceeds(t, bd, dir, plain) {
+		t.Errorf("unlabeled wisp %s should have been reclaimed", plain)
+	}
+	if bdShowSucceeds(t, bd, dir, builtinOnly) {
+		t.Errorf("wisp %s carrying only bd:protected survived; bd:protected is not a built-in default (config or flag must name it)", builtinOnly)
+	}
+	if !bdShowSucceeds(t, bd, dir, flagKept) {
+		t.Errorf("wisp %s carrying the flag's label keep:mail was reclaimed; want it spared by --exclude-label", flagKept)
+	}
+}
+
 // TestEmbeddedWispGCClosedPurgeSparesLabeled covers `--closed`: closing a
 // record does not make it disposable. The preview must count only the
 // unlabeled closed wisp as a candidate, and --force must delete only it; the

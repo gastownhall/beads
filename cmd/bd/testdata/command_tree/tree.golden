@@ -5366,6 +5366,10 @@ bd mol wisp gc
     | Abandoned wisps are deleted without creating a digest. Use 'bd mol squash'
     | if you want to preserve a summary before garbage collection.
     |
+    | Wisps carrying a label named in the wisp.protected_labels setting (or this
+    | run's --exclude-label flag) are never reclaimed, on any route or mode;
+    | 'bd delete' remains the deliberate way out for one of them.
+    |
     | Use --closed to purge ALL closed wisps (regardless of age). This is the
     | fastest way to reclaim space from accumulated wisp bloat. Safe by default:
     | requires --force to actually delete.
@@ -5382,11 +5386,13 @@ bd mol wisp gc
     |   bd mol wisp gc --closed --force                   # Delete all closed wisps
     |   bd mol wisp gc --closed --dry-run                 # Explicit dry-run (same as no --force)
     |   bd mol wisp gc --exclude-type agent,rig           # Protect agent and rig wisps from GC
+    |   bd mol wisp gc --exclude-label keep:mail           # Spare labeled wisps for this run only
     |   bd mol wisp gc --closed --force --exclude-type mol # Delete closed wisps except mol type
   flag --age type=string default="1h" usage="Age threshold for abandoned wisp detection"
   flag --all type=bool default="false" usage="Also clean closed wisps older than threshold"
   flag --closed type=bool default="false" usage="Delete all closed wisps (ignores --age threshold)"
   flag --dry-run type=bool default="false" usage="Preview what would be cleaned"
+  flag --exclude-label type=stringSlice default="[]" usage="Also spare wisps carrying these labels from GC, on top of wisp.protected_labels (comma-separated, e.g., keep:mail)"
   flag --exclude-type type=stringSlice default="[]" usage="Exclude wisps of these types from GC (comma-separated, e.g., agent,rig)"
   flag --force -f type=bool default="false" usage="Actually delete (default: preview only)"
 

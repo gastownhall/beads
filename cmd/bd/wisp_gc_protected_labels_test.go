@@ -225,12 +225,73 @@ func TestWispGCCascadeProtectsEachWispIndependently(t *testing.T) {
 	}
 }
 
+// TestWispGCExcludeLabelIsAdditive pins the additive semantics of
+// --exclude-label: a label named by the flag protects for this invocation on
+// top of the setting's labels — either source is enough — and no label
+// protects until some source names it, so a wisp carrying only bd:protected
+// stays eligible (there is no built-in default).
+func TestWispGCExcludeLabelIsAdditive(t *testing.T) {
+	now := time.Now()
+	stale := now.Add(-24 * time.Hour)
+	issues := []*types.Issue{
+		{ID: "gc-config-kept", Status: types.StatusOpen, UpdatedAt: stale, Labels: []string{"a"}},
+		{ID: "gc-flag-kept", Status: types.StatusOpen, UpdatedAt: stale, Labels: []string{"b"}},
+		{ID: "gc-builtin-only", Status: types.StatusOpen, UpdatedAt: stale, Labels: []string{"bd:protected"}},
+		{ID: "gc-plain", Status: types.StatusOpen, UpdatedAt: stale},
+	}
+	r := newProtectedLabelsReader(`["a"]`, issues...)
+	sel, err := findAbandonedWisps(context.Background(), r, false, time.Hour, nil, "b")
+	if err != nil {
+		t.Fatalf("findAbandonedWisps: %v", err)
+	}
+	ids := collectedIDs(t, sel)
+	if ids["gc-config-kept"] {
+		t.Errorf("wisp carrying configured label a was reclaimed beside --exclude-label b; want it spared (got %v)", ids)
+	}
+	if ids["gc-flag-kept"] {
+		t.Errorf("wisp carrying flag label b was reclaimed; want it spared by the flag alone (got %v)", ids)
+	}
+	if !ids["gc-builtin-only"] {
+		t.Errorf("wisp carrying only bd:protected was spared; no label protects until setting or flag names it (got %v)", ids)
+	}
+	if !ids["gc-plain"] {
+		t.Errorf("unlabeled stale wisp not selected; want it reclaimable (got %v)", ids)
+	}
+}
+
+// TestParseExcludeLabels pins the flag's normalization: the same parser as
+// the stored setting, so a value it would refuse from the database is refused
+// from the command line too, and an absent flag protects nothing.
+func TestParseExcludeLabels(t *testing.T) {
+	got, err := parseExcludeLabels([]string{" keep:mail ", "keep:mail", "escalate/p1"})
+	if err != nil {
+		t.Fatalf("parseExcludeLabels: %v", err)
+	}
+	if len(got) != 2 || got[0] != "keep:mail" || got[1] != "escalate/p1" {
+		t.Errorf("parseExcludeLabels = %v, want trimmed and deduped [keep:mail escalate/p1]", got)
+	}
+	if got, err := parseExcludeLabels(nil); err != nil || len(got) != 0 {
+		t.Errorf("parseExcludeLabels(nil) = %v, %v; want empty, no error", got, err)
+	}
+	for _, bad := range []string{"keep mail"} {
+		if _, err := parseExcludeLabels([]string{bad}); err == nil {
+			t.Errorf("parseExcludeLabels([%q]) succeeded; want the setting's parser to refuse it", bad)
+		}
+	}
+	// A blank flag value is not malformed — the stored setting accepts a
+	// blank value as unset, so the flag accepts one as protecting nothing.
+	if got, err := parseExcludeLabels([]string{""}); err != nil || len(got) != 0 {
+		t.Errorf(`parseExcludeLabels([""]) = %v, %v; want empty, no error`, got, err)
+	}
+}
+
 // TestWispGCAgeCountsLabelSpares pins what the skip report counts: a wisp the
 // labels alone spared. A labeled wisp too young to select was saved by age,
 // one also pinned was saved by another guard, and a closed one without --all
 // was never a candidate — none of them is a label save, or the count would
 // overstate the setting's reach and read as misconfiguration.
 func TestWispGCAgeCountsLabelSpares(t *testing.T) {
+
 	now := time.Now()
 	stale := now.Add(-24 * time.Hour)
 	fresh := now.Add(-2 * time.Second)
