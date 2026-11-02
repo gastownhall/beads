@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "agent_profile.go",
         "config.go",
+        "dolt_remote_timeout.go",
         "permissions.go",
         "permissions_open_linux.go",
         "permissions_open_nonlinux.go",
@@ -39,6 +40,7 @@ go_test(
     srcs = [
         "agents_file_test.go",
         "config_test.go",
+        "dolt_remote_timeout_test.go",
         "git_routing_test.go",
         "permissions_linux_test.go",
         "permissions_test.go",

@@ -233,6 +233,7 @@ func TestRemoteEntryPointsUseVersionControlOps(t *testing.T) {
 		{"vcForcePush", vcForcePush, versioncontrolops.ForcePush},
 		{"vcPull", vcPull, versioncontrolops.Pull},
 		{"vcPullWithStrategy", vcPullWithStrategy, versioncontrolops.PullWithStrategy},
+		{"vcFetch", vcFetch, versioncontrolops.Fetch},
 	}
 	for _, tc := range cases {
 		if reflect.ValueOf(tc.got).Pointer() != reflect.ValueOf(tc.want).Pointer() {

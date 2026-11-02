@@ -114,6 +114,7 @@ Any key whose name contains `api_key`, `api-key`, `secret`, `token`, or `passwor
 | `dolt.auto-push` | — | `BD_DOLT_AUTO_PUSH` | `false` | Auto-push to Dolt remote after writes (opt-in; see [below](#auto-push)) |
 | `dolt.auto-push-interval` | — | `BD_DOLT_AUTO_PUSH_INTERVAL` | `5m` | Minimum time between auto-pushes |
 | `dolt.auto-push-timeout` | — | `BD_DOLT_AUTO_PUSH_TIMEOUT` | `30s` | Timeout for a single auto-push attempt |
+| `dolt.remote-timeout` | — | `BD_DOLT_REMOTE_TIMEOUT` | `5m` | Embedded mode, releases after v1.3.2: bound one push or fetch statement against a Dolt remote (see [below](#remote-transfer-timeout)) |
 | `dolt.local-only` | — | `BD_DOLT_LOCAL_ONLY` | `false` | Keep Dolt data off the network: skip remote wiring at `bd init`, suppress auto-push, have `bd dolt push`/`pull` and `bd sync` report remote sync as disabled without contacting a remote, and refuse `bd dolt remote add` |
 | `dolt.shared-server` | `--shared-server` | `BEADS_DOLT_SHARED_SERVER` | `false` | Share one Dolt server at `~/.beads/shared-server/` |
 | `dolt.max-conns` | — | `BEADS_DOLT_MAX_CONNS` | `10` | Connection pool size |
@@ -275,6 +276,19 @@ How it works:
 - Last push time and commit are tracked in `.beads/push-state.json`, a per-machine file (not in the database, to avoid merge conflicts across machines).
 
 Before pushing, `bd` verifies the local chunk store with `dolt fsck --quiet`, bounded by a 30-second timeout. For large stores, raise it with the runtime-only `BEADS_FSCK_TIMEOUT` environment variable (accepts durations like `2m` or bare seconds like `90`).
+
+### Remote transfer timeout
+
+Releases after v1.3.2 bound each network statement an embedded-mode `bd` sends to a Dolt remote (the push of `bd dolt push`, auto-push and `bd sync`, and the fetch of `bd dolt pull`, `bd dolt fetch` and federation sync) with `dolt.remote-timeout`, default five minutes. `BD_DOLT_REMOTE_TIMEOUT` overrides the config value. A missing, unparsable, zero or negative value uses the five-minute default.
+
+```yaml
+dolt:
+  remote-timeout: 10m  # Allow slow links more time per push or fetch
+```
+
+When the budget runs out, `bd` cancels the statement (Dolt then stops the `git`/`ssh` transport it started for it) and reports `dolt push timed out after 5m0s (set dolt.remote-timeout / BD_DOLT_REMOTE_TIMEOUT to change the limit)` with the underlying error. A push that timed out may still have written part of its data to the remote. The timeout does not cover opening the database, the local merge after a pull's fetch, or engine shutdown, so a whole command can take longer. A sooner deadline wins: auto-push keeps its own `dolt.auto-push-timeout` (default 30s) for the whole attempt.
+
+Server mode is unchanged: there, `bd` runs `dolt` CLI transfers under `BEADS_CLI_TRANSFER_TIMEOUT` (default five minutes).
 
 ## Actor Identity Resolution
 
@@ -521,6 +535,7 @@ Selected commonly-used variables:
 | `BD_JSON` | Force JSON output |
 | `BD_DOLT_AUTO_COMMIT` | Override `dolt.auto-commit` (`on`/`off`) |
 | `BD_DOLT_AUTO_PUSH`, `BD_DOLT_AUTO_PUSH_INTERVAL`, `BD_DOLT_AUTO_PUSH_TIMEOUT` | Override auto-push settings |
+| `BD_DOLT_REMOTE_TIMEOUT` | Override `dolt.remote-timeout` (embedded push/fetch statement budget) |
 | `BD_BACKUP_ENABLED`, `BD_BACKUP_INTERVAL`, `BD_BACKUP_GIT_REPO` | Override backup settings |
 | `BD_VERSIONED_HISTORY_ENABLED` | Turn on `versioned-history.enabled` for every store the process opens. `1` turns recording on; `0` does not turn it off for a store whose row says `true` (see [Versioned Issue History](#versioned-issue-history)) |
 | `BD_AGENT_PROFILE` | Override `agent.profile` |
