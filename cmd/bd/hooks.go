@@ -940,6 +940,14 @@ func refuseSymlinkedHooksDir(hooksDir string) error {
 }
 
 func guardHookWritePathWithProbe(hookPath string, allowTracked bool, tracked func(string) string) error {
+	// Refuse a symlinked immediate parent before the nonexistent-leaf early
+	// return below: os.WriteFile would follow the link and create the hook in
+	// the linked directory even when the hook leaf itself does not exist.
+	// This is the check installHooksAt's directory refusal cannot supply for
+	// the guard's other callers (hook migration), and it costs one Lstat.
+	if err := refuseSymlinkedHooksDir(filepath.Dir(hookPath)); err != nil {
+		return err
+	}
 	fi, err := os.Lstat(hookPath)
 	if err != nil {
 		if os.IsNotExist(err) {
