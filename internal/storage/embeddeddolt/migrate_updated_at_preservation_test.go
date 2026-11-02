@@ -352,3 +352,51 @@ func TestEmbeddedMigrateIgnored0007KeepsUpdatedAt(t *testing.T) {
 		}
 	}
 }
+
+// TestEmbeddedMigrateGuardKeepsUpdatedAtAutoStampDefinitions is AC-8's
+// runtime half: after a full upgrade through every guarded step, each
+// auto-stamped table's updated_at still declares ON UPDATE CURRENT_TIMESTAMP,
+// and the clause still fires on an ordinary write. The restore's explicit
+// assignments suppress it per statement only. (The migration-freeze tests
+// pin the SQL hashes; the CLI parity oracle compares the main tables'
+// definitions but excludes wisps.)
+func TestEmbeddedMigrateGuardKeepsUpdatedAtAutoStampDefinitions(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+	dataDir := seedMainSchemaAt(t, ctx, 45)
+
+	conn, closeConn := openPinnedConn(t, ctx, dataDir)
+	defer closeConn()
+	insertStampedIssues(t, ctx, conn, "issues", blockingGraph, false)
+	insertIssueEdges(t, ctx, conn, blockingEdges)
+	commitFixture(t, ctx, conn, "test: v45 issues with historical updated_at")
+
+	if _, err := schema.MigrateUp(ctx, conn); err != nil {
+		t.Fatalf("MigrateUp: %v", err)
+	}
+	for _, table := range []string{"issues", "wisps", "routes", "federation_peers"} {
+		var colType, nullable, extra string
+		var colDefault sql.NullString
+		err := conn.QueryRowContext(ctx, `SELECT COLUMN_TYPE, IS_NULLABLE, COLUMN_DEFAULT, EXTRA
+			FROM INFORMATION_SCHEMA.COLUMNS
+			WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = 'updated_at'`, table).
+			Scan(&colType, &nullable, &colDefault, &extra)
+		if err != nil {
+			t.Fatalf("reading %s.updated_at definition: %v", table, err)
+		}
+		if !strings.Contains(strings.ToLower(extra), "on update current_timestamp") {
+			t.Errorf("%s.updated_at EXTRA = %q, want ON UPDATE CURRENT_TIMESTAMP", table, extra)
+		}
+		if nullable != "NO" || !strings.Contains(strings.ToLower(colDefault.String), "current_timestamp") {
+			t.Errorf("%s.updated_at = %s nullable=%s default=%v, want NOT NULL DEFAULT CURRENT_TIMESTAMP", table, colType, nullable, colDefault)
+		}
+	}
+
+	free := blockingGraph[len(blockingGraph)-1]
+	if _, err := conn.ExecContext(ctx, "UPDATE issues SET title = 'retitled' WHERE id = ?", free.id); err != nil {
+		t.Fatalf("retitling %s: %v", free.id, err)
+	}
+	if got := readUpdatedAt(t, ctx, conn, "issues", free.id); got.Equal(free.stamp) {
+		t.Errorf("issues %s: updated_at stayed %v after an ordinary write; ON UPDATE CURRENT_TIMESTAMP no longer fires", free.id, got)
+	}
+}

@@ -1205,6 +1205,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   [Upgrading](docs/getting-started/upgrading.md) gives a manual recipe for
   v1.3.2 and earlier, and how to retry a restore that skipped history
   (#7039).
+- Upgrading an older database no longer rewrites issue and wisp `updated_at`
+  values with the time of the upgrade. Schema migrations 0035, 0046, 0047 and
+  0053 and ignored migration 0007 update rows without assigning `updated_at`,
+  so its `ON UPDATE CURRENT_TIMESTAMP` stamped every row they touched (every
+  blocked issue on a 1.0.x upgrade, for example). Their SQL is frozen, so bd
+  now records the affected rows' `updated_at` before each of these steps and
+  writes it back before the step is recorded and committed (#5981). Values
+  already stamped by an earlier upgrade are not repaired.
 - `bd dolt push <remote>` and `bd dolt pull <remote>` now push to and pull
   from the named remote. bd ignored the name, so `bd dolt push 1st` pushed to
   the default remote and reported "Push complete."; a name that differs from
