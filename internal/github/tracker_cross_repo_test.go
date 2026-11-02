@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"sort"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -388,4 +389,170 @@ func TestPull_SameRepoRespellingUpdatesExistingBead(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestPush_OtherRepoBeadLeavesConfiguredRepoIssueAlone pins push: a locally
+// edited bead linked to repository A's issue must be skipped — with no remote
+// request, its external_ref preserved — in a real push, in a dry run (whose
+// preview must report the same skip rather than an update), and in a forced
+// update pass that a conflict resolution forces for another bead. The
+// own-repo and unlinked subtests are the controls: linked own-repo beads are
+// still updated and unlinked beads still created.
+func TestPush_OtherRepoBeadLeavesConfiguredRepoIssueAlone(t *testing.T) {
+	const (
+		repoAIssue = "https://github.com/owner-a/repo-a/issues/1313"
+		repoBIssue = "https://github.com/owner-b/repo-b/issues/1313"
+		repoBIssue99 = "https://github.com/owner-b/repo-b/issues/99"
+	)
+	localEdit := ghSyncTime(t, "2026-10-05T00:00:00Z")
+
+	// newOtherRepoBead returns the store holding one bead linked to
+	// repository A's issue 1313, locally edited after every remote timestamp.
+	newOtherRepoBead := func() *crossRepoStore {
+		aRef := repoAIssue
+		return newCrossRepoStore(map[string]*types.Issue{
+			"bd-a1313": {ID: "bd-a1313", Title: "Local edit on A's bead", Status: types.StatusOpen,
+				IssueType: types.TypeTask, ExternalRef: &aRef,
+				CreatedAt: ghSyncTime(t, "2026-10-01T00:00:00Z"), UpdatedAt: localEdit},
+		})
+	}
+	assertOtherRepoBeadSkipped := func(t *testing.T, result *tracker.SyncResult, store *crossRepoStore, tp *ghTransport) {
+		t.Helper()
+		if result.PushStats.Skipped != 1 || result.PushStats.Updated != 0 || result.PushStats.Created != 0 {
+			t.Errorf("push of other-repo bead: skipped=%d updated=%d created=%d, want skipped=1 updated=0 created=0",
+				result.PushStats.Skipped, result.PushStats.Updated, result.PushStats.Created)
+		}
+		if got := tp.requestPaths(); len(got) != 0 {
+			t.Errorf("push issued requests %q, want none", got)
+		}
+		a := store.issues["bd-a1313"]
+		if a.Title != "Local edit on A's bead" || a.ExternalRef == nil || *a.ExternalRef != repoAIssue {
+			t.Errorf("repository A's bead = {title:%q external_ref:%q}, want its local edit and ref preserved",
+				a.Title, derefExtRef(a.ExternalRef))
+		}
+	}
+	// Repository B's issue 1313, which an unscoped push would have PATCHed
+	// with A's content.
+	bIssue1313 := ghIssueJSON(5001, 1313, "Repo B issue 1313", repoBIssue, "2026-10-02T00:00:00Z")
+
+	t.Run("real push", func(t *testing.T) {
+		tr, tp := newCrossRepoTracker(ghRoutes(map[string]string{
+			"/repos/owner-b/repo-b/issues/1313": bIssue1313,
+		}))
+		store := newOtherRepoBead()
+		result, err := tracker.NewEngine(tr, store, "test").Sync(context.Background(), tracker.SyncOptions{Push: true})
+		if err != nil {
+			t.Fatalf("Sync: %v", err)
+		}
+		assertOtherRepoBeadSkipped(t, result, store, tp)
+	})
+
+	t.Run("dry-run push previews the same skip", func(t *testing.T) {
+		tr, tp := newCrossRepoTracker(ghRoutes(map[string]string{
+			"/repos/owner-b/repo-b/issues/1313": bIssue1313,
+		}))
+		store := newOtherRepoBead()
+		result, err := tracker.NewEngine(tr, store, "test").Sync(context.Background(), tracker.SyncOptions{Push: true, DryRun: true})
+		if err != nil {
+			t.Fatalf("Sync: %v", err)
+		}
+		assertOtherRepoBeadSkipped(t, result, store, tp)
+	})
+
+	t.Run("forced update still skips it", func(t *testing.T) {
+		// A bidirectional sync whose own-repo bead (issue 99, edited on both
+		// sides after the last sync) resolves to pushing the local version,
+		// forcing its update: the other-repo bead must still be skipped with
+		// no request for its number. The bulk pull lists issue 99, so the
+		// pull's conflict guard — not an update — is what handles its bead,
+		// leaving the forced push free to act.
+		bIssue99 := ghIssueJSON(5099, 99, "Repo B issue 99 (remote)", repoBIssue99, "2026-10-04T00:00:00Z")
+		tr, tp := newCrossRepoTracker(ghRoutes(map[string]string{
+			"/repos/owner-b/repo-b/issues":      "[" + bIssue99 + "]",
+			"/repos/owner-b/repo-b/issues/99":   bIssue99,
+			"/repos/owner-b/repo-b/issues/1313": bIssue1313,
+		}))
+		aRef, bRef := repoAIssue, repoBIssue99
+		store := newCrossRepoStore(map[string]*types.Issue{
+			"bd-a1313": {ID: "bd-a1313", Title: "Repo A issue 1313", Status: types.StatusOpen,
+				IssueType: types.TypeTask, ExternalRef: &aRef,
+				CreatedAt: ghSyncTime(t, "2026-10-01T00:00:00Z"), UpdatedAt: localEdit},
+			"bd-b99": {ID: "bd-b99", Title: "Local edit on B's bead", Status: types.StatusOpen,
+				IssueType: types.TypeTask, ExternalRef: &bRef,
+				CreatedAt: ghSyncTime(t, "2026-10-01T00:00:00Z"), UpdatedAt: localEdit},
+		})
+		store.metadata["github.last_sync"] = "2026-10-02T00:00:00Z"
+
+		result, err := tracker.NewEngine(tr, store, "test").Sync(context.Background(), tracker.SyncOptions{
+			Push: true, Pull: true, ConflictResolution: tracker.ConflictLocal})
+		if err != nil {
+			t.Fatalf("Sync: %v", err)
+		}
+		if result.Stats.Conflicts != 1 {
+			t.Errorf("conflicts=%d, want 1 (repository B's issue 99 only)", result.Stats.Conflicts)
+		}
+		if result.PushStats.Skipped != 1 || result.PushStats.Updated != 1 || result.PushStats.Created != 0 {
+			t.Errorf("forced push: skipped=%d updated=%d created=%d, want skipped=1 updated=1 created=0",
+				result.PushStats.Skipped, result.PushStats.Updated, result.PushStats.Created)
+		}
+		for _, req := range tp.requestPaths() {
+			if strings.HasSuffix(req, "/issues/1313") {
+				t.Errorf("forced push requested %q, repository A's issue number must not be addressed", req)
+			}
+		}
+		a := store.issues["bd-a1313"]
+		if a.Title != "Repo A issue 1313" || a.ExternalRef == nil || *a.ExternalRef != repoAIssue {
+			t.Errorf("repository A's bead = {title:%q external_ref:%q}, want it left alone",
+				a.Title, derefExtRef(a.ExternalRef))
+		}
+	})
+
+	t.Run("own-repo bead is updated", func(t *testing.T) {
+		tr, tp := newCrossRepoTracker(ghRoutes(map[string]string{
+			"/repos/owner-b/repo-b/issues/1313": bIssue1313,
+		}))
+		bRef := repoBIssue
+		store := newCrossRepoStore(map[string]*types.Issue{
+			"bd-b1313": {ID: "bd-b1313", Title: "Local edit on B's bead", Status: types.StatusOpen,
+				IssueType: types.TypeTask, ExternalRef: &bRef,
+				CreatedAt: ghSyncTime(t, "2026-10-01T00:00:00Z"), UpdatedAt: localEdit},
+		})
+		result, err := tracker.NewEngine(tr, store, "test").Sync(context.Background(), tracker.SyncOptions{Push: true})
+		if err != nil {
+			t.Fatalf("Sync: %v", err)
+		}
+		if result.PushStats.Updated != 1 || result.PushStats.Skipped != 0 || result.PushStats.Created != 0 {
+			t.Errorf("push of own-repo bead: skipped=%d updated=%d created=%d, want skipped=0 updated=1 created=0",
+				result.PushStats.Skipped, result.PushStats.Updated, result.PushStats.Created)
+		}
+		if got := tp.requestPaths(); len(got) != 2 || got[0] != "GET /repos/owner-b/repo-b/issues/1313" ||
+			got[1] != "PATCH /repos/owner-b/repo-b/issues/1313" {
+			t.Errorf("push issued requests %q, want one fetch and one patch of repository B's issue 1313", got)
+		}
+	})
+
+	t.Run("unlinked bead is created", func(t *testing.T) {
+		tr, tp := newCrossRepoTracker(ghRoutes(map[string]string{
+			"/repos/owner-b/repo-b/issues": ghIssueJSON(5042, 42, "Unlinked bead", repoBIssue, "2026-10-02T00:00:00Z"),
+		}))
+		store := newCrossRepoStore(map[string]*types.Issue{
+			"bd-new1": {ID: "bd-new1", Title: "Unlinked bead", Status: types.StatusOpen,
+				IssueType: types.TypeTask,
+				CreatedAt: ghSyncTime(t, "2026-10-01T00:00:00Z"), UpdatedAt: localEdit},
+		})
+		result, err := tracker.NewEngine(tr, store, "test").Sync(context.Background(), tracker.SyncOptions{Push: true})
+		if err != nil {
+			t.Fatalf("Sync: %v", err)
+		}
+		if result.PushStats.Created != 1 || result.PushStats.Skipped != 0 {
+			t.Errorf("push of unlinked bead: skipped=%d created=%d, want skipped=0 created=1",
+				result.PushStats.Skipped, result.PushStats.Created)
+		}
+		if got := tp.requestPaths(); len(got) != 1 || got[0] != "POST /repos/owner-b/repo-b/issues" {
+			t.Errorf("push issued requests %q, want one create", got)
+		}
+		if linked := store.issues["bd-new1"].ExternalRef; linked == nil || *linked != repoBIssue {
+			t.Errorf("unlinked bead external_ref = %q, want repository B's issue URL", derefExtRef(linked))
+		}
+	})
 }
