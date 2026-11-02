@@ -304,3 +304,56 @@ func TestJournalUnlockedScope_NoJournalFunnelCannotEmit(t *testing.T) {
 		t.Fatalf("journal-off NoJournal emit is not a no-op: %v", err)
 	}
 }
+
+// TestJournalWriterLock_BusyAdmissionNamesTheError pins AC-5 of
+// gastownhall/beads#6117: a waiter whose admission budget expires while
+// another writer holds the journal-writer lock gets the named
+// ErrJournalWriterBusy — never an unbounded queue, never a generic timeout —
+// and the HTTP surface maps that sentinel to a retryable 503 busy with the
+// contention Retry-After (problem_test.go). The waiter here admits through
+// the same issueops.AcquireJournalWriterLock the write funnels call, with an
+// admission deadline of the same shape withRetryTxOn fixes (an absolute
+// budget, earlier than the session's own context deadline, so the BUDGET is
+// what expires — a waiter whose own ctx dies mid-wait keeps its cancellation
+// error, as the helper documents).
+func TestJournalWriterLock_BusyAdmissionNamesTheError(t *testing.T) {
+	store, cleanup := setupConcurrentTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+	store.SetEventsJournalEnabled(true)
+	defer store.SetEventsJournalEnabled(false)
+
+	// A competing holder on the database's journal-writer lock.
+	probe, err := store.db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("pin probe connection: %v", err)
+	}
+	defer func() { _ = probe.Close() }()
+	lockName := issueops.JournalWriterLockName(store.database)
+	var granted sql.NullInt64
+	if err := probe.QueryRowContext(ctx, "SELECT GET_LOCK(?, 0)", lockName).Scan(&granted); err != nil {
+		t.Fatalf("take probe lock: %v", err)
+	}
+	if !granted.Valid || granted.Int64 != 1 {
+		t.Fatalf("probe could not take the journal-writer lock (granted=%v)", granted)
+	}
+	defer func() { _, _ = probe.ExecContext(context.Background(), "SELECT RELEASE_LOCK(?)", lockName) }()
+
+	// The waiter: a pinned session with a live context, admitting on an
+	// absolute budget the holder outlasts. The answer is the named busy
+	// error, and the session is handed back clean (a busy acquisition is
+	// certain — no discard needed).
+	waiter, err := store.db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("pin waiter connection: %v", err)
+	}
+	defer func() { _ = waiter.Close() }()
+	wctx, wcancel := context.WithTimeout(ctx, 30*time.Second)
+	defer wcancel()
+	_, err = issueops.AcquireJournalWriterLock(wctx, waiter, store.database,
+		time.Now().Add(2*time.Second), store.poolReadDeadline())
+	if !errors.Is(err, issueops.ErrJournalWriterBusy) {
+		t.Fatalf("admission behind a held journal lock = %v, want ErrJournalWriterBusy", err)
+	}
+}

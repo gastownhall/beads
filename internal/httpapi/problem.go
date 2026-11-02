@@ -16,6 +16,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/httpapi/apigen"
 	"github.com/steveyegge/beads/internal/storage"
+	storageissueops "github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
@@ -1696,6 +1697,15 @@ func ClassifyError(err error) Result {
 	case errors.Is(err, ErrBusy):
 		res := newResult(CodeBusy, "")
 		res.RetryAfterSeconds = retryAfterSaturation
+		return res
+
+	// The journal-writer admission window expired while another writer held
+	// the database's journal-writer lock (#6117): the body never ran, so the
+	// client may retry the request as-is once the current writer commits —
+	// the same wire shape as the spent retry budget below.
+	case errors.Is(err, storageissueops.ErrJournalWriterBusy):
+		res := newResult(CodeBusy, "")
+		res.RetryAfterSeconds = retryAfterContention
 		return res
 
 	// The retry budget is spent inside uow.RunTxResult; reaching here means it
