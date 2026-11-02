@@ -1126,6 +1126,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd backup restore` now refuses a local source directory that holds no
+  Dolt backup (no `manifest` file) before changing anything, with or without
+  `--force`. Restoring `--force` from an existing directory that is not a
+  backup — including the never-synced default backup directory the
+  no-argument form uses — dropped the live database before Dolt discovered
+  the source was empty, leaving the workspace without its tables; the
+  refusal names the source, keeps the database untouched, and directs a
+  JSONL export at `bd import`. It covers every restore topology (embedded,
+  sql-server, proxied — which no longer quiesces its proxy and backend
+  first) and is a layout prerequisite only, not a guarantee that the backup
+  is complete or that every failed restore leaves the database unchanged
+  (#7098, reported by @jonesmabea).
 - `bd dolt push <remote>` and `bd dolt pull <remote>` now push to and pull
   from the named remote. bd ignored the name, so `bd dolt push 1st` pushed to
   the default remote and reported "Push complete."; a name that differs from

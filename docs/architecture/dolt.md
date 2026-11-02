@@ -498,6 +498,7 @@ database backup.
 
 - Data locations differ between modes: `.beads/embeddeddolt/` (embedded) vs `.beads/dolt/` (server)
 - The backup directory is a full Dolt backup, not an `issues.jsonl` export — it can be on a local drive, NAS, or DoltHub
+- `bd backup restore` refuses a local source directory that holds no Dolt backup (no `manifest` file) before it changes anything, with or without `--force`. A `--force` restore replaces the live database, and Dolt discovers an unusable source only after that drop. The check is a layout prerequisite, not a guarantee the backup is complete or that every failed restore leaves the database unchanged; a JSONL export is loaded with [`bd import`](/cli-reference/import)
 - You can also migrate via Dolt remotes (`bd dolt push` / `bd dolt pull`) if both projects share a remote
 
 The sections below are the canonical backend migration reference.
