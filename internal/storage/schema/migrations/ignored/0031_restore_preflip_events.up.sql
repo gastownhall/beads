@@ -24,9 +24,11 @@
 --
 -- The cursor table is dolt-ignored, so the marker is clone-local: every clone
 -- restores its own copy exactly once, and a clone that later loses events
--- re-runs it through the events sentinel replay (floor 18). A failure leaves
--- the marker pending for the next migration pass; the restore reconciles by
--- content, so a retry adds nothing twice.
+-- re-runs it through the events sentinel replay (floor 18). History the
+-- repair cannot read is skipped with a warning, so it never blocks an open; a
+-- canceled pass, a transient failure or a failed live write leaves the marker
+-- pending for the next migration pass, and the restore reconciles by content,
+-- so a retry adds nothing twice.
 --
 -- The marker itself changes nothing.
 SELECT 1;

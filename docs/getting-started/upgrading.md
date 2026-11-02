@@ -443,18 +443,34 @@ Restored 42 pre-upgrade audit event(s) from this clone's history (gastownhall/be
   still do not replicate either.
 - **Interrupted runs retry.** If the open fails or is killed partway, the
   next open finishes the job without duplicating what was already written.
-- **No history, nothing to restore.** A brand-new database, or a clone of a
+- **No history, nothing to restore.** A brand-new database, a clone of a
   history that was squashed or expired (see
-  [history squash](/recovery/history-squash)), has no pre-upgrade rows to
-  read; bd completes silently. A `bd backup` taken before the upgrade may
-  still hold them.
+  [history squash](/recovery/history-squash)), or a shallow clone
+  (`dolt clone --depth`) whose history stops at the upgrade has no
+  pre-upgrade rows to read; bd completes silently. A `bd backup` taken
+  before the upgrade may still hold them.
 
 If bd prints `Warning: could not restore pre-upgrade audit events from
-<commit>`, that commit's history could not be read, and the audit history of
-this clone is **incomplete**: the open carries on, but the rows from that
-commit stay missing and bd will not try again. Recover them from a clone or
-backup that can read that history, or repair the storage, then copy the rows
-in by hand as shown below.
+<commit>`, part of that commit's history could not be read (a missing chunk
+or Dolt's schema-encoding drift, for example), and the audit history of this
+clone is **incomplete**. Unreadable history never blocks an open: bd carries
+on, skips what it could not read, and does not try again by itself. Once the
+history reads again (after a storage repair, for example), have bd retry by
+removing the restore's marker (in embedded mode, while no `bd` command runs);
+the next command repeats the restore, which only adds what is still missing:
+
+```bash
+# Embedded mode (the default):
+cd .beads/embeddeddolt/<db>
+dolt sql -q "DELETE FROM ignored_schema_migrations WHERE version >= 31"
+
+# Server mode, from the project directory:
+bd sql "DELETE FROM ignored_schema_migrations WHERE version >= 31"
+```
+
+The statement also removes the markers of any later clone-local migrations,
+which the next command re-applies. Otherwise, recover the rows from a clone
+or backup that can read that history and copy them in by hand as shown below.
 
 To recover the rows **with v1.3.2 or earlier**, copy them in by hand with the
 [Dolt CLI](https://docs.dolthub.com/cli-reference/cli) while no `bd` command
