@@ -121,7 +121,13 @@ func gitOriginHasDoltDataRefStatus() (bool, error) {
 func gitRemoteHasDoltDataRefStatus(remote string) (bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), gitDoltDataProbeTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "ls-remote", gitRemoteURLForLsRemote(remote), "refs/dolt/data")
+	// The remote URL is its own argv element after "--", and a leading "-" is
+	// refused first, so it cannot be read as an option by git.
+	url := gitRemoteURLForLsRemote(remote)
+	if err := checkRemoteNotOption("git remote", url); err != nil {
+		return false, err
+	}
+	cmd := exec.CommandContext(ctx, "git", "ls-remote", "--", url, "refs/dolt/data")
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	output, err := cmd.Output()
 	if err != nil {
