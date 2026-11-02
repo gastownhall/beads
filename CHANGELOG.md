@@ -4249,6 +4249,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ACCEPTANCE CRITERIA, and comment bodies, direct and proxied alike — not
   just `bd show`'s DESCRIPTION field. An explicit `GLAMOUR_STYLE` override
   still takes priority over the detected background.
+- `bd init` on a fresh database no longer aborts schema initialization with
+  Error 1105 "nothing to commit" (#4470, reported by @MarkAtwood) when the
+  Dolt session has automatic transaction commits enabled — a session (or
+  dolt sql-server) configured with `@@dolt_transaction_commit` = 1 commits
+  every statement at its own boundary, so migrations 0040/0041, whose frozen
+  SQL commits explicitly, found their staged changes already committed and
+  died. The schema migration pass now suspends that session setting on its
+  pinned connection for the duration of the pass and restores it on exit,
+  including the error paths; an already-converged database issues no new
+  statements. The historical instance bd 1.0.4 reported (migration 0028's
+  own in-body commit) was fixed in v1.0.5, but upgrading bd alone did not
+  resolve every reported environment — this one needed the pass scoping.
+  **Upgrading:** retry the failed init once with the fixed bd; an aborted
+  first attempt leaves the database at the version below the failed
+  migration, and a debris state that trips one of the already-existing
+  workspace guards is refused by those guards as before, not recovered
+  automatically.
 
 ### Added
 
