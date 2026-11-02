@@ -3797,6 +3797,27 @@ bd init-safety
     |                                 --discard-remote authorizes replacing that
     |                                 remote history.
     |
+    | STORE SWITCHES (--reinit-local)
+    |
+    |   A re-init that names a different store than the workspace records —
+    |   a different --database, or a different engine family (embedded vs.
+    |   server) selected by --server/--shared-server, a BEADS_DOLT_* mode
+    |   variable, or dolt.mode in config.yaml — must be authorized like any
+    |   other destructive operation, even when the recorded store is empty or
+    |   unreachable: its issues, history and configuration (including the
+    |   custom issue types, types.custom, and custom statuses, status.custom)
+    |   stop being read by the re-initialized workspace.
+    |
+    |   The recorded database directory is left in place; it is not deleted.
+    |   Back it up first (bd backup) if you want it recoverable — after the
+    |   switch the new store starts empty, with default configuration.
+    |
+    |   A bare re-init inherits the recorded mode and reuses the recorded
+    |   database, so this confirmation fires only on an explicitly named
+    |   switch. Non-interactively it needs the same --destroy-token as below;
+    |   at a terminal it asks you to type a phrase naming what you are
+    |   leaving (for example: 'leave <database> behind').
+    |
     | ADOPTING A REMOTE
     |
     |   If you want to use the remote's existing history, use:
@@ -3828,11 +3849,13 @@ bd init-safety
     |   10    refused: remote has Dolt history and you selected local history
     |         without --discard-remote
     |   11    refused: existing local data and you declined the destroy confirm
-    |         (interactive mode only)
-    |   12    refused: destructive re-init (--discard-remote, or --reinit-local
-    |         over existing issues) without a valid --destroy-token
-    |         (non-interactive mode); also returned when the interactive
-    |         --discard-remote typed-token confirmation is declined
+    |         (interactive mode only); also returned when you decline the
+    |         interactive store-switch phrase confirmation
+    |   12    refused: destructive re-init (--discard-remote, --reinit-local
+    |         over existing issues, or a store switch) without a valid
+    |         --destroy-token (non-interactive mode); also returned when the
+    |         interactive --discard-remote typed-token confirmation is
+    |         declined
     |   15    refused: run directly in your home directory, which is not itself
     |         a git repository, with no BEADS_DIR named by the caller
     |

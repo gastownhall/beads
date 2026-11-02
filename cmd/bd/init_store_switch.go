@@ -148,22 +148,39 @@ func compareStoreSwitch(recorded storeSwitchRecord, request storeSwitchRequest) 
 // storeSwitchNotice prints what a store switch means before confirmation is
 // demanded. It is unconditional under --quiet: a silent store switch is
 // exactly the GH#3495 failure mode.
+//
+// The content contract: identify both sides of the switch, name the
+// database-stored configuration that stops being read (a count-based
+// preflight cannot see it, so the notice must), point at the safe commands
+// (backup first, reference for the token format), and echo neither a
+// destroy-token value nor a complete destructive invocation
+// (ADR 0002 Invariant 4) — the flag NAME is how the refusal explains
+// authorization without handing over a copy-pasteable command.
 func storeSwitchNotice(w io.Writer, diff storeSwitchDiff) {
 	fmt.Fprintf(w, "\n%s re-initializing switches this workspace's store", ui.RenderWarn("WARNING:"))
 	switch {
 	case diff.FamilySwitch && diff.DatabaseSwitch:
-		fmt.Fprintf(w, ": engine family %s -> %s and database %s -> %s.\n",
+		fmt.Fprintf(w, ": engine family %s -> %s and database %s -> %s",
 			remedy.PrintedValue(diff.RecordedFamily), remedy.PrintedValue(diff.RequestedFamily),
 			remedy.PrintedValue(diff.RecordedDatabase), remedy.PrintedValue(diff.RequestedDatabase))
 	case diff.FamilySwitch:
-		fmt.Fprintf(w, ": engine family %s -> %s.\n",
+		fmt.Fprintf(w, ": engine family %s -> %s",
 			remedy.PrintedValue(diff.RecordedFamily), remedy.PrintedValue(diff.RequestedFamily))
 	case diff.DatabaseSwitch:
-		fmt.Fprintf(w, ": database %s -> %s.\n",
+		fmt.Fprintf(w, ": database %s -> %s",
 			remedy.PrintedValue(diff.RecordedDatabase), remedy.PrintedValue(diff.RequestedDatabase))
 	}
+	if diff.FamilySwitch && diff.ModeSource != "" {
+		fmt.Fprintf(w, " (selected by %s)", remedy.PrintedValue(diff.ModeSource))
+	}
+	fmt.Fprintf(w, ".\n")
 	fmt.Fprintf(w, "  The recorded store is left in place; it is not deleted. But this workspace\n")
-	fmt.Fprintf(w, "  will stop reading its issues, its history and its configuration.\n\n")
+	fmt.Fprintf(w, "  will stop reading its issues, its history and its configuration,\n")
+	fmt.Fprintf(w, "  including the custom issue types (types.custom) and custom\n")
+	fmt.Fprintf(w, "  statuses (status.custom) stored with it.\n")
+	fmt.Fprintf(w, "  Before proceeding, consider:\n")
+	fmt.Fprintf(w, "    bd backup                    # Back up the recorded store\n")
+	fmt.Fprintf(w, "    bd help init-safety          # The --destroy-token format and init's safety guards\n\n")
 }
 
 // confirmStoreSwitchInput carries the switch confirmation's injectable

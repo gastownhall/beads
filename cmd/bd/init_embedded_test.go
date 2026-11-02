@@ -2302,3 +2302,64 @@ func TestEmbeddedInitReinitLocalAuthorizedSwitch(t *testing.T) {
 		}
 	})
 }
+
+// TestEmbeddedInitReinitLocalSwitchNoticeContract pins what the store-switch
+// notice must say under --quiet — the mode GH#3495 actually ran in, so the
+// notice is the only thing standing between the operator and a silently
+// abandoned store. It must identify both sides of the switch, name the
+// database-stored configuration that will stop being read, point at the
+// backup and reference commands, and stay silent on the destroy-token value
+// and on any complete destructive invocation (ADR 0002 Invariant 4).
+func TestEmbeddedInitReinitLocalSwitchNoticeContract(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt init tests")
+	}
+	bd := buildEmbeddedBD(t)
+
+	dir, _, _ := bdInit(t, bd, "--prefix", "fi", "--skip-agents")
+	if out, code := runBDExit(t, bd, dir, "config", "set", "types.custom", "molecule,convoy"); code != 0 {
+		t.Fatalf("bd config set types.custom exited %d:\n%s", code, out)
+	}
+	if out, code := runBDExit(t, bd, dir, "config", "set", "status.custom", "awaiting_review:active"); code != 0 {
+		t.Fatalf("bd config set status.custom exited %d:\n%s", code, out)
+	}
+
+	out, code := runBDExit(t, bd, dir,
+		"init", "--quiet", "--reinit-local", "--prefix", "fi", "--database", "other", "--non-interactive")
+	if code != ExitDestroyTokenMissing {
+		t.Fatalf("quiet reinit repoint exited %d, want %d:\n%s", code, ExitDestroyTokenMissing, out)
+	}
+
+	// The notice is unconditional under --quiet and identifies both sides of
+	// the switch.
+	for _, want := range []string{
+		"database fi -> other",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("notice missing %q:\n%s", want, out)
+		}
+	}
+	// It names the database-stored configuration that stops being read, so
+	// a configuration-only store is not mistaken for an empty one.
+	for _, want := range []string{"types.custom", "status.custom"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("notice must name %q — the configuration a count-based preflight cannot see:\n%s", want, out)
+		}
+	}
+	// It names the safe commands: backup before switching, reference for the
+	// token format.
+	for _, want := range []string{"bd backup", "bd help init-safety"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("notice must point at %q:\n%s", want, out)
+		}
+	}
+	// ADR 0002 Invariant 4: no destroy-token value, no complete destructive
+	// invocation. The flag NAME is required to explain how to authorize; the
+	// VALUE and a copy-pasteable command are not.
+	if strings.Contains(out, "DESTROY-") {
+		t.Errorf("notice echoed a destroy-token value:\n%s", out)
+	}
+	if strings.Contains(out, "--reinit-local") {
+		t.Errorf("notice contains a complete destructive invocation:\n%s", out)
+	}
+}

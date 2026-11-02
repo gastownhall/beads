@@ -25,6 +25,7 @@ See also: `bd help init-safety`, and
 - [init-force-refused — `bd init --force`/`--reinit-local` refused because origin has Dolt history](#init-force-refused)
 - [init-token-missing — a destructive re-init refused because `--destroy-token` is missing or wrong](#init-token-missing)
 - [init-local-exists — `bd init --reinit-local` refused because local data already exists](#init-local-exists)
+- [init-store-switch — `bd init --reinit-local` refused because it would switch the workspace to a different store](#init-store-switch)
 - [init-home-refused — `bd init` refused because the working directory is your home directory](#init-home-refused)
 - [init-missing-server-db — `bd init` refused because the configured server-side database is missing](#init-missing-server-db)
 - [pk-fork-refused — `bd dolt pull`/`push` refused because a table has different primary keys in its common ancestor](#pk-fork-refused)
@@ -160,7 +161,9 @@ for why the token is never echoed in `bd`'s error messages.
 **Symptom**
 
 Interactive (TTY): you declined the typed `destroy N issues` confirmation.
-This is the only path that exits `11`.
+Outside of a TTY-confirmed store switch (see
+[init-store-switch](#init-store-switch)), this is the only path that exits
+`11`.
 
 ```
 Type 'destroy N issues' to confirm:
@@ -209,6 +212,92 @@ enough to create a restorable backup before reinitializing.
 If you did NOT expect `bd init` to be the right command here, run
 `bd doctor` first — you may be looking at a server config issue that a
 re-init won't fix.
+
+---
+
+## init-store-switch
+
+**Exit code:** `12` (`ExitDestroyTokenMissing`) non-interactively;
+`11` (`ExitLocalExistsRefused`) when you decline the typed phrase at a TTY
+
+**Symptom**
+
+Non-interactive (CI, agent, piped input):
+
+```
+WARNING: re-initializing switches this workspace's store: database fi -> other.
+  The recorded store is left in place; it is not deleted. But this workspace
+  will stop reading its issues, its history and its configuration,
+  including the custom issue types (types.custom) and custom
+  statuses (status.custom) stored with it.
+  Before proceeding, consider:
+    bd backup                    # Back up the recorded store
+    bd help init-safety          # The --destroy-token format and init's safety guards
+
+Refusing to switch this workspace's store without a matching --destroy-token.
+  See 'bd help init-safety' for the required --destroy-token format.
+  Or re-run the command at a terminal to type the confirmation instead.
+```
+
+Interactive (TTY), if you type something other than the requested phrase:
+
+```
+Type 'leave fi behind' to confirm:
+Aborted. The workspace's store was not switched.
+```
+
+**Why this happens**
+
+Your invocation names a different store than the one this workspace
+records — a different `--database`, or a different engine family (embedded
+vs. server) selected by `--server`/`--shared-server`, a `BEADS_DOLT_*` mode
+variable, or `dolt.mode` in `config.yaml`. A bare re-init inherits the
+recorded mode instead, so this refusal means the switch was named
+explicitly.
+
+`--reinit-local` confirms destruction by counting the issues in the store
+it is about to replace. A store that holds zero issues — or is unreachable —
+answered "nothing to protect" even when it held your configuration, and the
+re-init silently abandoned it (the GH#3495 report: custom types vanished
+and a parallel embedded database appeared). The store-switch confirmation
+keys on the workspace's recorded metadata instead, so it fires before either
+store is opened, and it cannot be satisfied by an empty or unreachable
+store.
+
+Leaving is not deleting: the recorded database directory and its contents
+survive the switch untouched. But from the re-initialized workspace they
+are invisible — the new store starts empty, with default configuration.
+
+**Recovery paths**
+
+Pick the one that matches your intent.
+
+### 1. You did not mean to switch stores
+
+Remove the override: drop the `--database` flag, or unset the mode source
+the notice names (the `--server`/`--shared-server` flag, the
+`BEADS_DOLT_*` environment variable, or `dolt.mode` in `config.yaml`).
+A re-init without an override reuses the recorded store, and none of this
+confirmation applies.
+
+### 2. You do want the new store
+
+Back up first, then authorize the switch once — interactively by typing the
+phrase the prompt shows (`leave <database> behind`), or non-interactively
+with the destroy token:
+
+```
+bd backup
+
+# The token format is DESTROY-<issue-prefix>; see bd help init-safety.
+# Add --destroy-token to the same bd init invocation, keeping the flags
+# that named the store you are switching to:
+bd init --reinit-local --database <new-database> --destroy-token=DESTROY-<issue-prefix>
+```
+
+The authorization covers the switch itself; no second issue-count
+confirmation follows it. Afterwards the old database still exists on disk —
+`bd backup` of it is only possible before the switch, so make it first.
 
 ---
 
