@@ -230,3 +230,59 @@ func TestFederationPeerLegacyCredentialRejectedUntilReentry(t *testing.T) {
 		t.Fatalf("password after re-entry = %q, want %q", pwd, peer.Password)
 	}
 }
+
+// AC-4: credentials install only for the stored destination or the URL
+// Dolt's DOLT_REMOTE('add') recorded for it. Each form is added through
+// add-peer, so the live URL is Dolt's actual read-back, not an assumption.
+func TestWithPeerAuth_DestinationReadBackEquivalents(t *testing.T) {
+	ctx := t.Context()
+	store := newPeerAuthTestStore(t)
+	forms := map[string]string{
+		"plainhttps": "https://peer.example/db",
+		"httpsgit":   "https://peer.example/org/repo.git",
+		"sshgit":     "ssh://git@peer.example:2222/org/repo.git",
+		"scprel":     "git@peer.example:org/repo.git",
+		"scpabs":     "git@peer.example:/srv/repo.git",
+		"filegit":    "file://" + t.TempDir() + "/repo.git",
+		"native":     "org/repo",
+	}
+	for name, url := range forms {
+		t.Run(name, func(t *testing.T) {
+			if err := store.AddFederationPeer(ctx, &storage.FederationPeer{
+				Name: name, RemoteURL: url, Username: "peeruser", Password: "peerpass",
+			}); err != nil {
+				t.Fatalf("AddFederationPeer(%s): %v", url, err)
+			}
+			var live string
+			if err := store.withConn(ctx, false, func(tx *sql.Tx) error {
+				return tx.QueryRowContext(ctx, "SELECT url FROM dolt_remotes WHERE name = ?", name).Scan(&live)
+			}); err != nil {
+				t.Fatalf("read back remote %s: %v", name, err)
+			}
+			t.Logf("add-peer %q reads back as %q", url, live)
+			var pwd string
+			if err := store.withPeerAuth(ctx, name, func(string) error {
+				pwd = os.Getenv("DOLT_REMOTE_PASSWORD")
+				return nil
+			}); err != nil {
+				t.Fatalf("withPeerAuth(%s) for %q read back as %q: %v", name, url, live, err)
+			}
+			if pwd != "peerpass" {
+				t.Fatalf("withPeerAuth(%s) password = %q, want the stored one", name, pwd)
+			}
+		})
+	}
+
+	t.Run("live remote moved", func(t *testing.T) {
+		execPeerSQL(t, store, "CALL DOLT_REMOTE('remove', 'httpsgit')")
+		execPeerSQL(t, store, "CALL DOLT_REMOTE('add', 'httpsgit', 'https://peer.example:8443/org/repo.git')")
+		called := false
+		err := store.withPeerAuth(ctx, "httpsgit", func(string) error {
+			called = true
+			return nil
+		})
+		if err == nil || called {
+			t.Fatalf("withPeerAuth(httpsgit) err = %v, called = %v; want a refusal for the moved remote", err, called)
+		}
+	})
+}

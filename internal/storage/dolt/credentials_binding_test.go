@@ -136,6 +136,7 @@ func TestWithPeerCredentialsRefusesCopiedCredentialRow(t *testing.T) {
 	t.Run("original peer", func(t *testing.T) {
 		store, mock := newBindingTestStore(t, key)
 		expectPeerRow(mock, "prod", prod, prodBlob)
+		expectLiveRemotes(mock, map[string]string{"prod": prod.RemoteURL})
 		var got *remoteCredentials
 		if err := store.withPeerCredentials(t.Context(), "prod", func(creds *remoteCredentials) error {
 			got = creds
@@ -253,4 +254,127 @@ func TestInitCredentialKeyLeavesLegacyRowsUntouched(t *testing.T) {
 	if _, err := reader.GetFederationPeer(t.Context(), "prod"); !errors.Is(err, peercred.ErrLegacyCredential) {
 		t.Fatalf("GetFederationPeer(derived-key legacy row) error = %v, want peercred.ErrLegacyCredential", err)
 	}
+}
+
+func expectLiveRemotes(mock sqlmock.Sqlmock, remotes map[string]string) {
+	rows := sqlmock.NewRows([]string{"name", "url", "params"})
+	for name, url := range remotes {
+		rows.AddRow(name, url, nil)
+	}
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT name, url, params FROM dolt_remotes")).WillReturnRows(rows)
+}
+
+// AC-4: before credentials reach the operation, the peer's live remote must
+// be the stored destination or Dolt's read-back of it. SQL remotes decide;
+// the persisted repo state is consulted only for a name SQL does not list.
+func TestWithPeerCredentialsChecksLiveDestination(t *testing.T) {
+	key := bindingTestKey(9)
+	run := func(t *testing.T, store *DoltStore) (*remoteCredentials, bool, error) {
+		t.Helper()
+		var got *remoteCredentials
+		called := false
+		err := store.withPeerCredentials(t.Context(), "alpha", func(creds *remoteCredentials) error {
+			called = true
+			got = creds
+			return nil
+		})
+		return got, called, err
+	}
+	peerAt := func(url string) *storage.FederationPeer {
+		return &storage.FederationPeer{Name: "alpha", RemoteURL: url, Username: "alphauser", Password: "alpha-pass"}
+	}
+
+	accepted := map[string][2]string{
+		"identical":           {"https://alpha.example/db", "https://alpha.example/db"},
+		"scp read-back":       {"git@alpha.example:org/repo.git", "git+ssh://git@alpha.example/./org/repo.git"},
+		"https git read-back": {"https://alpha.example/org/repo.git", "git+https://alpha.example/org/repo.git"},
+	}
+	for name, urls := range accepted {
+		t.Run(name, func(t *testing.T) {
+			store, mock := newBindingTestStore(t, key)
+			peer := peerAt(urls[0])
+			expectPeerRow(mock, "alpha", peer, sealForTest(t, store, peer))
+			expectLiveRemotes(mock, map[string]string{"alpha": urls[1]})
+			got, called, err := run(t, store)
+			if err != nil || !called || got == nil || got.password != peer.Password {
+				t.Fatalf("withPeerCredentials(alpha) creds = %+v, called = %v, err = %v; want alpha's credentials", got, called, err)
+			}
+		})
+	}
+
+	refused := map[string]map[string]string{
+		"live remote diverged": {"alpha": "https://attacker.example/db"},
+		"remote missing":       {"other": "https://alpha.example/db"},
+	}
+	for name, live := range refused {
+		t.Run(name, func(t *testing.T) {
+			store, mock := newBindingTestStore(t, key)
+			peer := peerAt("https://alpha.example/db")
+			expectPeerRow(mock, "alpha", peer, sealForTest(t, store, peer))
+			expectLiveRemotes(mock, live)
+			if _, called, err := run(t, store); err == nil || called {
+				t.Fatalf("withPeerCredentials(alpha) err = %v, called = %v; want a refusal before the operation", err, called)
+			}
+		})
+	}
+
+	t.Run("listing remotes fails", func(t *testing.T) {
+		store, mock := newBindingTestStore(t, key)
+		peer := peerAt("https://alpha.example/db")
+		expectPeerRow(mock, "alpha", peer, sealForTest(t, store, peer))
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT name, url, params FROM dolt_remotes")).WillReturnError(errors.New("boom"))
+		if _, called, err := run(t, store); err == nil || called {
+			t.Fatalf("withPeerCredentials(alpha) err = %v, called = %v; want a refusal before the operation", err, called)
+		}
+	})
+
+	persistedStore := func(t *testing.T, persistedURL string) (*DoltStore, sqlmock.Sqlmock) {
+		t.Helper()
+		t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+		t.Setenv("BEADS_DOLT_PORT", "")
+		store, mock := newBindingTestStore(t, key)
+		store.serverMode = true
+		store.dbPath = filepath.Join(store.beadsDir, "dolt")
+		store.database = "active"
+		store.cfg = &Config{ServerHost: "127.0.0.1", ServerPort: testServedPort}
+		if err := os.MkdirAll(filepath.Join(store.CLIDir(), ".dolt"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		state := `{"remotes":{"alpha":{"name":"alpha","url":"` + persistedURL + `"}}}`
+		if err := os.WriteFile(filepath.Join(store.CLIDir(), ".dolt", "repo_state.json"), []byte(state), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		standInForServedDatabase(t, store.CLIDir(), testServedPort)
+		return store, mock
+	}
+
+	t.Run("persisted-only remote", func(t *testing.T) {
+		store, mock := persistedStore(t, "https://alpha.example/db")
+		peer := peerAt("https://alpha.example/db")
+		expectPeerRow(mock, "alpha", peer, sealForTest(t, store, peer))
+		expectLiveRemotes(mock, nil)
+		if got, called, err := run(t, store); err != nil || !called || got == nil {
+			t.Fatalf("withPeerCredentials(alpha) creds = %+v, called = %v, err = %v; want the persisted remote to verify", got, called, err)
+		}
+	})
+
+	t.Run("persisted-only remote diverged", func(t *testing.T) {
+		store, mock := persistedStore(t, "https://attacker.example/db")
+		peer := peerAt("https://alpha.example/db")
+		expectPeerRow(mock, "alpha", peer, sealForTest(t, store, peer))
+		expectLiveRemotes(mock, nil)
+		if _, called, err := run(t, store); err == nil || called {
+			t.Fatalf("withPeerCredentials(alpha) err = %v, called = %v; want a refusal before the operation", err, called)
+		}
+	})
+
+	t.Run("SQL remote conflicts with persisted", func(t *testing.T) {
+		store, mock := persistedStore(t, "https://alpha.example/db")
+		peer := peerAt("https://alpha.example/db")
+		expectPeerRow(mock, "alpha", peer, sealForTest(t, store, peer))
+		expectLiveRemotes(mock, map[string]string{"alpha": "https://attacker.example/db"})
+		if _, called, err := run(t, store); err == nil || called {
+			t.Fatalf("withPeerCredentials(alpha) err = %v, called = %v; want the live SQL remote to decide", err, called)
+		}
+	})
 }

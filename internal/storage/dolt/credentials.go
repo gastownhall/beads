@@ -12,11 +12,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 
 	"github.com/steveyegge/beads/internal/execenv"
 	"github.com/steveyegge/beads/internal/githooksenv"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/peercred"
 )
@@ -549,6 +551,9 @@ func (s *DoltStore) withPeerCredentials(ctx context.Context, peerName string, fn
 
 	var creds *remoteCredentials
 	if peer != nil && (peer.Username != "" || peer.Password != "") {
+		if err := s.verifyPeerDestination(ctx, peer); err != nil {
+			return err
+		}
 		creds = &remoteCredentials{username: peer.Username, password: peer.Password}
 	}
 
@@ -560,6 +565,43 @@ func (s *DoltStore) withPeerCredentials(ctx context.Context, peerName string, fn
 	}
 
 	return err
+}
+
+// verifyPeerDestination fails closed unless the live remote named after peer
+// points at the destination its credentials were stored for, or the URL Dolt
+// recorded for it (peercred.RemoteURLMatches). The server's SQL remotes
+// decide; the persisted repo state is read only for a name SQL does not list
+// (a cold sql-server, GH#2118), never to override a live URL. A missing
+// remote or a failed lookup refuses: there is no verified destination to
+// send the password to (GH#7890).
+func (s *DoltStore) verifyPeerDestination(ctx context.Context, peer *storage.FederationPeer) error {
+	remotes, err := s.ListRemotes(ctx)
+	if err != nil {
+		return fmt.Errorf("resolve remote for federation peer %s before sending its credentials: %w", remedy.PrintedValue(peer.Name), err)
+	}
+	liveURL, found := remoteURLNamed(remotes, peer.Name)
+	if !found {
+		liveURL, found = remoteURLNamed(s.PersistedRemoteInfos(), peer.Name)
+	}
+	if !found {
+		// The peer name is a row of the database, which travels with a
+		// pull, so it is named and pasted through the remedy printer.
+		arg, note := remedy.CommandArg(runtime.GOOS, peer.Name, "<peer>")
+		return fmt.Errorf("federation peer %s has stored credentials but no remote named %s exists; re-run bd federation add-peer %s <url> --user <user>%s to restore it", remedy.PrintedValue(peer.Name), remedy.PrintedValue(peer.Name), arg, note)
+	}
+	if !peercred.RemoteURLMatches(peer.RemoteURL, liveURL) {
+		return fmt.Errorf("remote %s points at %q but federation peer %s stored its credentials for %q; refusing to send stored credentials to a diverged URL. Remove and re-add the peer to rebind it", remedy.PrintedValue(peer.Name), liveURL, remedy.PrintedValue(peer.Name), peer.RemoteURL)
+	}
+	return nil
+}
+
+func remoteURLNamed(remotes []storage.RemoteInfo, name string) (string, bool) {
+	for _, r := range remotes {
+		if r.Name == name {
+			return r.URL, true
+		}
+	}
+	return "", false
 }
 
 // FederationPeer is an alias for storage.FederationPeer for convenience.
