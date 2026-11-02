@@ -119,6 +119,20 @@ func TestRunMigrationsFailsGuardedStepOnUpdatedAtGuardError(t *testing.T) {
 			want: "snapshotting updated_at before migration 0046_",
 		},
 		{
+			name: "post-body reread fails",
+			expect: func(mock sqlmock.Sqlmock) {
+				mock.ExpectQuery(guardColumnQuery).WithArgs("issues", "updated_at").
+					WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
+				mock.ExpectQuery(`SELECT id, updated_at FROM issues ORDER BY id`).
+					WillReturnRows(sqlmock.NewRows([]string{"id", "updated_at"}).AddRow("bd-1", "2025-03-01 09:30:00"))
+				mock.ExpectExec(`SET @needs_add`).WillReturnResult(sqlmock.NewResult(0, 1))
+				mock.ExpectQuery(guardColumnQuery).WithArgs("issues", "updated_at").
+					WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
+				mock.ExpectQuery(`SELECT id, updated_at FROM issues ORDER BY id`).WillReturnError(injected)
+			},
+			want: "restoring updated_at after migration 0046_",
+		},
+		{
 			name: "restore write fails",
 			expect: func(mock sqlmock.Sqlmock) {
 				mock.ExpectQuery(guardColumnQuery).WithArgs("issues", "updated_at").
