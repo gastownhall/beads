@@ -138,7 +138,10 @@ func RepoFingerprint(path string, autoYes bool) error {
 		if cfgErr != nil || cfg == nil {
 			cfg = configfile.DefaultConfig()
 		}
-		dbPath := cfg.DatabasePath(beadsDir)
+		dbPath, err := confinedDatabasePath(beadsDir, cfg.DatabasePath(beadsDir))
+		if err != nil {
+			return err
+		}
 		isDolt := cfg.GetBackend() == configfile.BackendDolt
 
 		// Confirm before destructive action
@@ -163,8 +166,11 @@ func RepoFingerprint(path string, autoYes bool) error {
 			if err := os.Remove(dbPath); err != nil && !os.IsNotExist(err) {
 				return fmt.Errorf("failed to remove database: %w", err)
 			}
-			_ = os.Remove(dbPath + "-wal")
-			_ = os.Remove(dbPath + "-shm")
+			for _, sidecar := range []string{dbPath + "-wal", dbPath + "-shm"} {
+				if info, lerr := os.Lstat(sidecar); lerr == nil && info.Mode()&os.ModeSymlink == 0 {
+					_ = os.Remove(sidecar)
+				}
+			}
 		}
 
 		// Reinitialize by creating a new store (auto-bootstraps from JSONL)

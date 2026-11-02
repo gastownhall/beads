@@ -61,8 +61,8 @@ var doctorDeleteExemptions = map[string]doctorDeleteExemption{
 		reason: "bd's own lock files in the admitted workspace, by fixed name and age, never data; the Lock Files check reports the same names and thresholds",
 	},
 	"doctor/fix/repo_fingerprint.go:RepoFingerprint": {
-		calls:  []string{"os.RemoveAll", "os.Remove", "os.Remove", "os.Remove"},
-		reason: "the interactive Reinitialize database choice, confirmed a second time with the path named; --yes never takes it",
+		calls:  []string{"os.RemoveAll", "os.Remove", "os.Remove"},
+		reason: "the interactive Reinitialize database choice, confirmed a second time with the path named; --yes never takes it; the last call is the sidecar loop, which removes only non-symlink -wal/-shm files beside the database it just deleted — RemoveDisposable itself would refuse them as database state",
 	},
 	"doctor/fix/database_integrity.go:doltIntegrityRecovery": {
 		calls:  []string{"os.RemoveAll"},

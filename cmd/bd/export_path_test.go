@@ -331,6 +331,112 @@ func TestResolveExportPath(t *testing.T) {
 			t.Error("accepted the hook's GIT_DIR")
 		}
 	})
+
+	t.Run("separate git dir case variant", func(t *testing.T) {
+		if !fsCaseInsensitive(t, separate) {
+			t.Skip("case-variant names are distinct directories on a case-sensitive filesystem")
+		}
+		// The git directory lives at separate/meta; on a case-insensitive
+		// filesystem ../META reaches the same directory, so the export must
+		// be refused exactly like ../meta/config.
+		if _, err := resolveExportPath(filepath.Join(separate, ".beads"), "../META/config"); err == nil {
+			t.Error("accepted a case-variant path into the separate git dir")
+		}
+		if _, err := resolveExportPath(filepath.Join(separate, ".beads"), "../Meta/hooks/pre-commit"); err == nil {
+			t.Error("accepted a mixed-case path into the separate git dir")
+		}
+	})
+}
+
+// fsCaseInsensitive reports whether dir's filesystem resolves case-variant
+// names to the same entry, detected by writing one file and statting its
+// differently-cased name.
+func fsCaseInsensitive(t *testing.T, dir string) bool {
+	t.Helper()
+	probe := filepath.Join(dir, "export-test-CASE-probe")
+	if err := os.WriteFile(probe, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(probe) })
+	_, err := os.Lstat(filepath.Join(dir, "export-test-case-probe"))
+	return err == nil
+}
+
+// TestHookGitDirs covers the GIT_DIR / GIT_COMMON_DIR / commondir selection
+// behind the hook-side git metadata check: a linked worktree's admin dir
+// carries a commondir file naming the shared git dir, and the env override
+// takes precedence over that file.
+func TestHookGitDirs(t *testing.T) {
+	t.Run("commondir file", func(t *testing.T) {
+		gitDir := t.TempDir()
+		common := filepath.Join(gitDir, "shared-git")
+		if err := os.WriteFile(filepath.Join(gitDir, "commondir"), []byte("shared-git\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("GIT_DIR", gitDir)
+		t.Setenv("GIT_COMMON_DIR", "")
+		got := hookGitDirs()
+		if len(got) != 2 || got[0] != gitDir || got[1] != common {
+			t.Errorf("hookGitDirs() = %v, want [%s %s]", got, gitDir, common)
+		}
+	})
+
+	t.Run("commondir file absolute", func(t *testing.T) {
+		gitDir := t.TempDir()
+		common := t.TempDir()
+		if err := os.WriteFile(filepath.Join(gitDir, "commondir"), []byte(common+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("GIT_DIR", gitDir)
+		t.Setenv("GIT_COMMON_DIR", "")
+		got := hookGitDirs()
+		if len(got) != 2 || got[0] != gitDir || got[1] != common {
+			t.Errorf("hookGitDirs() = %v, want [%s %s]", got, gitDir, common)
+		}
+	})
+
+	t.Run("GIT_COMMON_DIR wins over commondir file", func(t *testing.T) {
+		gitDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(gitDir, "commondir"), []byte("shared-git\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		common := t.TempDir()
+		t.Setenv("GIT_DIR", gitDir)
+		t.Setenv("GIT_COMMON_DIR", common)
+		got := hookGitDirs()
+		if len(got) != 2 || got[0] != gitDir || got[1] != common {
+			t.Errorf("hookGitDirs() = %v, want [%s %s]", got, gitDir, common)
+		}
+	})
+
+	t.Run("no commondir file", func(t *testing.T) {
+		gitDir := t.TempDir()
+		t.Setenv("GIT_DIR", gitDir)
+		t.Setenv("GIT_COMMON_DIR", "")
+		if got := hookGitDirs(); len(got) != 1 || got[0] != gitDir {
+			t.Errorf("hookGitDirs() = %v, want [%s]", got, gitDir)
+		}
+	})
+
+	t.Run("empty commondir file", func(t *testing.T) {
+		gitDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(gitDir, "commondir"), []byte("\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("GIT_DIR", gitDir)
+		t.Setenv("GIT_COMMON_DIR", "")
+		if got := hookGitDirs(); len(got) != 1 || got[0] != gitDir {
+			t.Errorf("hookGitDirs() = %v, want [%s]", got, gitDir)
+		}
+	})
+
+	t.Run("no GIT_DIR", func(t *testing.T) {
+		t.Setenv("GIT_DIR", "")
+		t.Setenv("GIT_COMMON_DIR", t.TempDir())
+		if got := hookGitDirs(); got != nil {
+			t.Errorf("hookGitDirs() = %v, want nil", got)
+		}
+	})
 }
 
 // TestAutoExportRejectsUnsafePaths: ordinary auto-export warns naming

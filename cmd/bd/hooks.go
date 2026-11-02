@@ -912,6 +912,10 @@ func guardHookWritePath(hookPath string, allowTracked bool) error {
 }
 
 func guardHookWritePathWithProbe(hookPath string, allowTracked bool, tracked func(string) string) error {
+	parentDir := filepath.Dir(hookPath)
+	if pfi, perr := os.Lstat(parentDir); perr == nil && pfi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s is a symlink; refusing to write hook %s through a symlinked directory", parentDir, hookPath)
+	}
 	fi, err := os.Lstat(hookPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -1104,15 +1108,21 @@ func installHooksWithContext(hookNames []string, force, shared, chain, beadsHook
 
 //nolint:unparam // force and chain remain accepted compatibility no-ops
 func installHooksAt(hookNames []string, force, shared, chain, beadsHooks bool, selected *initHooksContext) error {
-	var hooksDir string
+	var hooksDir, baseDir, repoRoot string
 	if selected != nil {
 		hooksDir = selected.paths.HooksDir
+		repoRoot = selected.paths.MainRepoRoot
+		if repoRoot == "" {
+			repoRoot = selected.paths.RepoRoot
+		}
 		if beadsHooks {
 			if selected.beadsDir == "" {
 				return fmt.Errorf("%s", activeWorkspaceNotFoundError())
 			}
+			baseDir = selected.beadsDir
 			hooksDir = filepath.Join(selected.beadsDir, "hooks")
 		} else if shared {
+			baseDir = selected.paths.MainRepoRoot
 			hooksDir = filepath.Join(selected.paths.MainRepoRoot, ".beads-hooks")
 		}
 	} else if beadsHooks {
@@ -1121,10 +1131,17 @@ func installHooksAt(hookNames []string, force, shared, chain, beadsHooks bool, s
 		if beadsDir == "" {
 			return fmt.Errorf("%s", activeWorkspaceNotFoundError())
 		}
+		baseDir = beadsDir
+		repoRoot, _ = git.GetMainRepoRoot()
+		if repoRoot == "" {
+			repoRoot = git.GetRepoRoot()
+		}
 		hooksDir = filepath.Join(beadsDir, "hooks")
 	} else if shared {
 		// Use versioned directory for shared hooks
 		if mainRoot, err := git.GetMainRepoRoot(); err == nil && mainRoot != "" {
+			baseDir = mainRoot
+			repoRoot = mainRoot
 			hooksDir = filepath.Join(mainRoot, ".beads-hooks")
 		} else {
 			hooksDir = ".beads-hooks"
@@ -1136,6 +1153,14 @@ func installHooksAt(hookNames []string, force, shared, chain, beadsHooks bool, s
 		if err != nil {
 			return err
 		}
+		repoRoot, _ = git.GetMainRepoRoot()
+		if repoRoot == "" {
+			repoRoot = git.GetRepoRoot()
+		}
+	}
+
+	if err := validateHooksDir(hooksDir, baseDir, repoRoot); err != nil {
+		return fmt.Errorf("refusing to install hooks: %w", err)
 	}
 
 	// Create hooks directory if it doesn't exist.
@@ -1215,7 +1240,7 @@ func installHooksAt(hookNames []string, force, shared, chain, beadsHooks bool, s
 					backupPath := hookPath + ".backup"
 					if _, statErr := os.Lstat(backupPath); os.IsNotExist(statErr) {
 						// #nosec G306 -- keep executable so a rename restores a working hook
-						if backupErr := os.WriteFile(backupPath, existing, 0755); backupErr != nil {
+						if backupErr := atomicfile.WriteFileNoFollow(backupPath, existing, 0755); backupErr != nil {
 							return fmt.Errorf("failed to back up %s before injecting bd section: %w", hookName, backupErr)
 						}
 					}
@@ -1230,7 +1255,7 @@ func installHooksAt(hookNames []string, force, shared, chain, beadsHooks bool, s
 
 		// Write hook file
 		// #nosec G306 -- git hooks must be executable for Git to run them
-		if err := os.WriteFile(hookPath, []byte(newContent), 0755); err != nil {
+		if err := atomicfile.WriteFileNoFollow(hookPath, []byte(newContent), 0755); err != nil {
 			return fmt.Errorf("failed to write %s: %w", hookName, err)
 		}
 	}
@@ -1631,10 +1656,24 @@ func uninstallHooks() error {
 }
 
 func uninstallHooksAt(hooksDir string, reset func() error) error {
+	if info, err := os.Lstat(hooksDir); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("refusing to uninstall hooks in symlinked directory %s", hooksDir)
+	}
 	hookNames := []string{"pre-commit", "post-merge", "pre-push", "post-checkout", "prepare-commit-msg"}
 
 	for _, hookName := range hookNames {
 		hookPath := filepath.Join(hooksDir, hookName)
+
+		fi, lerr := os.Lstat(hookPath)
+		if lerr != nil {
+			if os.IsNotExist(lerr) {
+				continue
+			}
+			return fmt.Errorf("failed to stat %s: %w", hookName, lerr)
+		}
+		if fi.Mode()&os.ModeSymlink != 0 {
+			continue
+		}
 
 		// #nosec G304 -- hook path constrained to .git/hooks directory
 		content, err := os.ReadFile(hookPath)
@@ -1656,7 +1695,7 @@ func uninstallHooksAt(hooksDir string, reset func() error) error {
 				}
 			} else {
 				// #nosec G306 -- git hooks must be executable
-				if err := os.WriteFile(hookPath, []byte(newContent), 0755); err != nil {
+				if err := atomicfile.WriteFileNoFollow(hookPath, []byte(newContent), 0755); err != nil {
 					return fmt.Errorf("failed to write %s: %w", hookName, err)
 				}
 			}
@@ -1671,7 +1710,7 @@ func uninstallHooksAt(hooksDir string, reset func() error) error {
 			}
 			// Restore backup if exists
 			backupPath := hookPath + ".backup"
-			if _, err := os.Stat(backupPath); err == nil {
+			if bfi, err := os.Lstat(backupPath); err == nil && bfi.Mode()&os.ModeSymlink == 0 {
 				if err := os.Rename(backupPath, hookPath); err != nil {
 					fmt.Fprintf(os.Stderr, "Warning: failed to restore backup for %s: %v\n", hookName, err)
 				}
@@ -1970,6 +2009,53 @@ func exportJSONLForCommit() {
 	}
 }
 
+// validateHooksDir refuses a hooks directory whose own path, or whose
+// resolution through its owning base directory or the repository, leaves the
+// place the caller expects to write: a symlinked hooks dir writes managed
+// hooks into the link's target, and a .beads or worktree link that resolves
+// outside the repository drops them outside the checkout entirely.
+// Carried from PR #7889.
+func validateHooksDir(hooksDir, baseDir, repoRoot string) error {
+	if info, err := os.Lstat(hooksDir); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s is a symlink; refusing to write hooks through a symlinked directory", hooksDir)
+	}
+	absHooks, err := filepath.Abs(hooksDir)
+	if err != nil {
+		return err
+	}
+	resolvedHooks, err := resolveExistingPath(absHooks)
+	if err != nil {
+		return err
+	}
+	if baseDir != "" {
+		if info, err := os.Lstat(baseDir); err == nil && info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("%s is a symlink; refusing to write hooks through a symlinked directory", baseDir)
+		}
+		absBase, err := filepath.Abs(baseDir)
+		if err != nil {
+			return err
+		}
+		resolvedBase, err := resolveExistingPath(absBase)
+		if err != nil {
+			return err
+		}
+		if !exportWithinAnchor(resolvedBase, resolvedHooks) {
+			return fmt.Errorf("%s resolves outside %s; refusing to write hooks through a symlinked directory", hooksDir, baseDir)
+		}
+	}
+	if repoRoot != "" {
+		absRepo, err := filepath.Abs(repoRoot)
+		if err == nil {
+			if resolvedRepo, rerr := filepath.EvalSymlinks(absRepo); rerr == nil {
+				if (exportWithinAnchor(absRepo, absHooks) || exportWithinAnchor(resolvedRepo, absHooks)) && !exportWithinAnchor(resolvedRepo, resolvedHooks) {
+					return fmt.Errorf("%s resolves outside repository %s; refusing to write hooks through a symlinked directory", hooksDir, repoRoot)
+				}
+			}
+		}
+	}
+	return nil
+}
+
 // hookJSONLDir returns the directory the running git hook should read and
 // write the git-tracked JSONL snapshot in. It is the single destination
 // resolver shared by the pre-commit export writer and the
@@ -1989,6 +2075,7 @@ func exportJSONLForCommit() {
 // worktree ownership of their own JSONL means resolving the worktree from cwd
 // on every command, which changes JSONL ownership globally; that is a product
 // decision rather than a hook fix, and is tracked separately.
+
 func hookJSONLDir(beadsDir string) string {
 	hookRoot := hookWorkTreeRoot()
 	primaryRoot := hookLinkedWorktreePrimaryRoot(hookRoot)
