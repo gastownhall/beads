@@ -184,11 +184,25 @@ func resolveExistingParent(dir string) (string, error) {
 	return filepath.EvalSymlinks(dir)
 }
 
+// envSelectedDatabasePath is the database location BEADS_DOLT_DATA_DIR names
+// for beadsDir, or "" when the variable is unset or empty.
+func envSelectedDatabasePath(beadsDir string) (string, error) {
+	dataDir := os.Getenv("BEADS_DOLT_DATA_DIR")
+	if dataDir == "" {
+		return "", nil
+	}
+	if !filepath.IsAbs(dataDir) {
+		dataDir = filepath.Join(beadsDir, dataDir)
+	}
+	return filepath.Abs(dataDir)
+}
+
 // confinedDatabasePath admits dbPath for a doctor fix that backs up or
 // deletes it, returning it as an absolute path. The path must lie strictly
 // inside the workspace .beads directory (which may itself be a symlink) and
 // may not be a symlink, and its existing ancestors must not resolve outside
-// .beads.
+// .beads. The one exception is the location BEADS_DOLT_DATA_DIR selects,
+// which the user named explicitly.
 // Adapted from #7889 by @Wenjix.
 func confinedDatabasePath(beadsDir, dbPath string) (string, error) {
 	absBeads, err := filepath.Abs(beadsDir)
@@ -199,9 +213,17 @@ func confinedDatabasePath(beadsDir, dbPath string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("invalid database path: %w", err)
 	}
+	envPath, err := envSelectedDatabasePath(absBeads)
+	if err != nil {
+		return "", fmt.Errorf("invalid BEADS_DOLT_DATA_DIR: %w", err)
+	}
+	if envPath != "" && envPath == absDB {
+		return absDB, nil
+	}
+
 	refuse := func(why string) error {
 		return fmt.Errorf("refusing to back up or delete the database at %s: %s\n"+
-			"Recover it by hand",
+			"Recover it by hand, or set BEADS_DOLT_DATA_DIR to that location to select it explicitly",
 			remedy.PrintedValue(absDB), why)
 	}
 	resolvedBeads, err := resolveExistingParent(absBeads)

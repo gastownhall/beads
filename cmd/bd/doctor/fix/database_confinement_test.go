@@ -320,3 +320,131 @@ func TestDatabaseIntegrity_RollbackRefusesReplacedDestination(t *testing.T) {
 		})
 	}
 }
+
+// confinedDatabaseLayouts are layouts doctor still backs up and deletes:
+// each returns the database path the fix selects.
+var confinedDatabaseLayouts = []struct {
+	name  string
+	setup func(t *testing.T, dir string) string
+}{
+	{"default .beads/dolt", func(t *testing.T, dir string) string {
+		return filepath.Join(dir, ".beads", "dolt")
+	}},
+	{"dolt_data_dir inside .beads", func(t *testing.T, dir string) string {
+		beadsDir := filepath.Join(dir, ".beads")
+		confineMetadata(t, beadsDir, map[string]string{"backend": "dolt", "dolt_data_dir": "data/dolt"})
+		return filepath.Join(beadsDir, "data", "dolt")
+	}},
+	{"symlinked .beads", func(t *testing.T, dir string) string {
+		real := filepath.Join(t.TempDir(), "beads-data")
+		if err := os.MkdirAll(real, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(filepath.Join(dir, ".beads")); err != nil {
+			t.Fatal(err)
+		}
+		confineSymlink(t, real, filepath.Join(dir, ".beads"))
+		return filepath.Join(real, "dolt")
+	}},
+	{"absolute BEADS_DOLT_DATA_DIR outside", func(t *testing.T, dir string) string {
+		confineMetadata(t, filepath.Join(dir, ".beads"), map[string]string{"backend": "dolt"})
+		selected := filepath.Join(t.TempDir(), "external-dolt")
+		t.Setenv("BEADS_DOLT_DATA_DIR", selected)
+		return selected
+	}},
+	{"relative BEADS_DOLT_DATA_DIR outside", func(t *testing.T, dir string) string {
+		confineMetadata(t, filepath.Join(dir, ".beads"), map[string]string{"backend": "dolt"})
+		t.Setenv("BEADS_DOLT_DATA_DIR", "../external-dolt")
+		return filepath.Join(dir, "external-dolt")
+	}},
+}
+
+func setupConfinedDatabase(t *testing.T, setup func(t *testing.T, dir string) string) (dir, dbPath string) {
+	t.Helper()
+	t.Setenv("BEADS_DOLT_DATA_DIR", "")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	dir = setupTestWorkspace(t)
+	dbPath = setup(t, dir)
+	confineWriteFile(t, filepath.Join(dbPath, "state"), "corrupt")
+	return dir, dbPath
+}
+
+func TestDatabaseIntegrity_AdmitsConfinedAndSelectedDatabases(t *testing.T) {
+	for _, tc := range confinedDatabaseLayouts {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, dbPath := setupConfinedDatabase(t, tc.setup)
+
+			// Admission reaches the backup and the bd binary lookup, which a
+			// test binary refuses; the backup is then moved back.
+			if err := DatabaseIntegrity(dir); !errors.Is(err, ErrTestBinary) {
+				t.Fatalf("expected recovery to reach the bd binary lookup, got %v", err)
+			}
+			if data, err := os.ReadFile(filepath.Join(dbPath, "state")); err != nil || string(data) != "corrupt" {
+				t.Fatalf("database not restored after the lookup failure: %q, %v", data, err)
+			}
+		})
+	}
+}
+
+func TestRepoFingerprint_Choice2AdmitsConfinedAndSelectedDatabases(t *testing.T) {
+	for _, tc := range confinedDatabaseLayouts {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, dbPath := setupConfinedDatabase(t, tc.setup)
+
+			oldReadLine := repoFingerprintReadLine
+			t.Cleanup(func() { repoFingerprintReadLine = oldReadLine })
+			answers := []string{"2", "n"}
+			reads := 0
+			repoFingerprintReadLine = func() (string, error) {
+				reads++
+				return answers[min(reads, len(answers))-1], nil
+			}
+
+			if err := RepoFingerprint(dir, false); err != nil {
+				t.Fatalf("expected the DELETE confirmation to be offered and declined, got %v", err)
+			}
+			if reads != 2 {
+				t.Fatalf("expected the DELETE confirmation to be read, got %d reads", reads)
+			}
+			if _, err := os.Stat(filepath.Join(dbPath, "state")); err != nil {
+				t.Fatalf("declined confirmation changed the database: %v", err)
+			}
+		})
+	}
+}
+
+func TestDatabaseIntegrity_ServerModeRefusalPrecedesConfinement(t *testing.T) {
+	t.Setenv("BEADS_DOLT_DATA_DIR", "")
+	dir := setupTestWorkspace(t)
+	beadsDir := filepath.Join(dir, ".beads")
+	confineWriteFile(t, filepath.Join(dir, "escaped", "sentinel"), "keep")
+	confineMetadata(t, beadsDir, map[string]string{"backend": "dolt", "dolt_mode": "server", "dolt_data_dir": "../escaped"})
+
+	err := DatabaseIntegrity(dir)
+	if err == nil || !strings.Contains(err.Error(), "automatic integrity recovery is disabled for server-mode repos") {
+		t.Fatalf("expected the server-mode refusal first, got %v", err)
+	}
+}
+
+func TestConfinedDatabasePath_EnvExemptsOnlyTheSelectedPath(t *testing.T) {
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	selected := filepath.Join(t.TempDir(), "selected")
+	other := filepath.Join(t.TempDir(), "other")
+
+	t.Setenv("BEADS_DOLT_DATA_DIR", selected)
+	if got, err := confinedDatabasePath(beadsDir, selected+string(filepath.Separator)); err != nil || got != selected {
+		t.Fatalf("expected the env-selected path admitted, got %q, %v", got, err)
+	}
+	if _, err := confinedDatabasePath(beadsDir, other); err == nil || !strings.Contains(err.Error(), "refusing") {
+		t.Fatalf("expected a path the env does not select refused, got %v", err)
+	}
+
+	t.Setenv("BEADS_DOLT_DATA_DIR", "")
+	if _, err := confinedDatabasePath(beadsDir, selected); err == nil || !strings.Contains(err.Error(), "refusing") {
+		t.Fatalf("expected an empty BEADS_DOLT_DATA_DIR to exempt nothing, got %v", err)
+	}
+}

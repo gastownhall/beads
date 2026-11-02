@@ -267,3 +267,87 @@ func TestUninstallHooksLeavesUnsafeEntries(t *testing.T) {
 	require.Contains(t, stderr, filepath.Join(hooksDir, "post-checkout.backup"))
 	require.Contains(t, stderr, filepath.Join(hooksDir, "prepare-commit-msg.backup"))
 }
+
+// Ported from #7889 by @Wenjix. Its last step is inverted: main supports a
+// symlinked .beads, so installing into the real hooks directory inside the
+// link target succeeds.
+func TestHooksRefuseSymlinkedHooksDirAndUninstallSymlinkedHook(t *testing.T) {
+	isolateBeadsDirForTest(t)
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	beadsDir := filepath.Join(repo, ".beads")
+	writeFileForWorktreeTest(t, filepath.Join(beadsDir, "metadata.json"), []byte("{}\n"))
+	runGitForWorktreeTest(t, repo, "init", "-q")
+	t.Chdir(repo)
+	git.ResetCaches()
+	t.Cleanup(git.ResetCaches)
+	t.Setenv("BEADS_DIR", beadsDir)
+
+	outsideHooks := filepath.Join(root, "outside-hooks")
+	if err := os.MkdirAll(outsideHooks, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sentinel := filepath.Join(outsideHooks, "pre-commit")
+	writeFileForWorktreeTest(t, sentinel, []byte("#!/bin/sh\necho keep\n"))
+
+	hooksLink := filepath.Join(beadsDir, "hooks")
+	if err := os.Symlink(outsideHooks, hooksLink); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := installHooksWithOptions([]string{"pre-commit"}, false, false, false, true); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("expected installHooksWithOptions to refuse symlinked .beads/hooks, got %v", err)
+	}
+	if got := readFileForWorktreeTest(t, sentinel); got != "#!/bin/sh\necho keep\n" {
+		t.Fatalf("outside hook modified by install: %q", got)
+	}
+
+	if err := uninstallHooksAt(hooksLink, func() error { return nil }); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("expected uninstallHooksAt to refuse symlinked hooksDir, got %v", err)
+	}
+
+	// Real hooksDir with a symlinked hook file pointing to a file with bd section markers must not modify or remove the target on uninstall.
+	realHooks := filepath.Join(repo, "real-hooks")
+	if err := os.MkdirAll(realHooks, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	markedTarget := filepath.Join(outsideHooks, "marked-pre-commit")
+	markedContent := "#!/usr/bin/env sh\necho keep\n" + generateHookSection("pre-commit")
+	writeFileForWorktreeTest(t, markedTarget, []byte(markedContent))
+	if err := os.Symlink(markedTarget, filepath.Join(realHooks, "pre-commit")); err != nil {
+		t.Fatal(err)
+	}
+	if err := uninstallHooksAt(realHooks, func() error { return nil }); err != nil {
+		t.Fatalf("uninstallHooksAt failed: %v", err)
+	}
+	if got := readFileForWorktreeTest(t, markedTarget); got != markedContent {
+		t.Fatalf("symlinked hook target modified on uninstall: %q", got)
+	}
+
+	// .beads itself symlinked, reached through discovery rather than
+	// BEADS_DIR: the hooks directory inside the link target is real, so bd
+	// installs into it.
+	outsideBeads := filepath.Join(root, "outside-beads")
+	if err := os.MkdirAll(filepath.Join(outsideBeads, "hooks"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFileForWorktreeTest(t, filepath.Join(outsideBeads, "metadata.json"), []byte("{}\n"))
+	linkedRepo := filepath.Join(root, "linked")
+	if err := os.MkdirAll(linkedRepo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGitForWorktreeTest(t, linkedRepo, "init", "-q")
+	if err := os.Symlink(outsideBeads, filepath.Join(linkedRepo, ".beads")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_DIR", "")
+	t.Chdir(linkedRepo)
+	git.ResetCaches()
+
+	if err := installHooksWithOptions([]string{"pre-commit"}, false, false, false, true); err != nil {
+		t.Fatalf("expected install through a symlinked .beads to succeed, got %v", err)
+	}
+	if got := readFileForWorktreeTest(t, filepath.Join(outsideBeads, "hooks", "pre-commit")); !strings.Contains(got, generateHookSection("pre-commit")) {
+		t.Fatalf("expected the bd hook section in the symlinked .beads hooks dir, got %q", got)
+	}
+}
