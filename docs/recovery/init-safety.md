@@ -526,13 +526,14 @@ skipping straight to `bd list`) can hit either of two live gotchas — see
 
 ### Prevention (upgrades across PK-reshaping migrations)
 
-- **Sync before upgrading**: `bd dolt push` + `bd dolt pull` on every clone
-  while all clones still run the *old* version, then stop editing. Once the new
-  binary is installed, `bd dolt push`/`bd dolt pull` are gated too, so this must
-  happen first. The one exception is the *data-behind* stop — a clone level on
-  schema but missing commits the remote has — where `bd dolt pull` **is** the
-  remedy and is allowed through (a proxied-server workspace refuses it, so
-  there the pull runs on the server host); the gate says so when it fires, and
+- **Sync before upgrading**: `bd dolt pull`, `bd dolt commit` and
+  `bd dolt push` on every clone while all clones still run the *old* version,
+  then stop editing. Once the new binary is installed,
+  `bd dolt push`/`bd dolt pull` are gated too, so this must happen first. The
+  one exception is the *data-behind* stop — a clone level on schema but
+  missing commits the remote has — where `bd dolt pull` **is** the remedy and
+  is allowed through (a proxied-server workspace refuses it, so there the pull
+  runs on the server host); the gate says so when it fires, and
   [Clone behind the remote](/getting-started/upgrading#clone-behind-the-remote)
   has the recipe. Plan for the rule, not the exception.
 - **One designated migrator**: upgrade one machine, let it migrate, then

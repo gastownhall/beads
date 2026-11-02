@@ -23,8 +23,9 @@ bd info --whats-new
 
 1. With your current `bd`, sync remote-backed databases before installing the
    new binary:
-   `bd dolt push`
    `bd dolt pull`
+   `bd dolt commit`
+   `bd dolt push`
 2. Back up **with that same current binary**, before installing:
    `bd export --all -o .beads/backup/pre-migrate-$(date +%Y%m%d).jsonl`
 3. Upgrade using the command that matches your install method.
@@ -329,13 +330,19 @@ scripted override that fits the situation.
 **Multiple clones sharing one remote:**
 
 ```bash
-# 1. With your CURRENT (old) binary, on EVERY clone: publish all work, get in
-#    sync and back up, then stop editing until the upgrade is done.
-bd dolt push
+# 1. With your CURRENT (old) binary, on EVERY clone: get in sync, commit and
+#    publish all work, and back up, then stop editing until the upgrade is
+#    done. If the push is rejected because another clone pushed first, run
+#    the first three commands again.
 bd dolt pull
+bd dolt commit
+bd dolt push
+mkdir -p .beads/backup
 bd export --all -o .beads/backup/pre-migrate.jsonl
 
-# 2. Designated migrator ONLY: install the new binary, then migrate and publish.
+# 2. Designated migrator ONLY, once every other clone has finished step 1:
+#    run step 1's pull, commit and push once more with the CURRENT binary,
+#    then install the new binary, migrate and publish.
 bd migrate schema
 bd dolt push
 
@@ -348,7 +355,22 @@ bd version                    # after installing: confirm the new version
 The pull in step 3 brings the migrated schema down with the data, so the new
 binary finds nothing to migrate and the clone keeps its local state. Between
 that pull and the install, the old binary refuses the database (it is now
-newer than the schema the old binary knows), so install straight away.
+newer than the schema the old binary knows), so install straight away. On the
+upgrade to 1.3.0 the clone's earlier `events` audit rows are the exception:
+they stop syncing with migration 0062, so after that pull they remain only in
+history.
+
+Run `bd dolt commit` in step 1 even on a clone where you wrote nothing, so
+that the step 3 pull is a fast-forward: on 1.2.2 a pull that merges can leave
+part of the merge uncommitted, and on the upgrade to 1.3.0 that leftover turns
+the step 3 pull into a merge that cannot succeed (see
+[Pull fails on a clone still on the old release](/recovery/sync-failures#pull-fails-on-a-clone-still-on-the-old-release)).
+It prints `Nothing to commit.` when nothing is pending. The migrator syncs
+again in step 2 because the gate judges whether a clone is behind from its
+last fetch: a migrator that has not fetched since the other clones pushed
+migrates as if it were level, and its push is then rejected as a
+non-fast-forward. On the upgrade to 1.3.0 that leaves the migrator in
+[Merge blocked on the events table (migration 0062)](/recovery/sync-failures#merge-blocked-on-the-events-table-migration-0062).
 
 **A clone that already runs the new binary** cannot take step 3 as written: the
 gate refuses `bd dolt pull` while the clone has pending migrations. Adopt the
@@ -414,6 +436,17 @@ conflicts, or decide them in bulk with `bd dolt pull --strategy ours|theirs`
 on embedded storage / `bd conflicts resolve` on a server store). Once there is
 nothing left to pull, the clone is the first-mover it looked like and the
 migration proceeds on its own.
+
+If the clone already migrated past schema 61 and the pull then refuses with
+`local changes would be stomped by merge: events`, see
+[Merge blocked on the events table (migration 0062)](/recovery/sync-failures#merge-blocked-on-the-events-table-migration-0062)
+before trying anything else. A push from this clone publishes the migrated
+history, so every clone still on 1.2.2 or older first publishes its work and
+stops writing, as that section describes. Then a plain `bd dolt push` (no
+`--force`) shows whether the remote was only behind this clone: if it
+succeeds, the next pull has nothing to merge. If the push is rejected as a
+non-fast-forward, or the merge stops on an `events` schema conflict instead,
+follow that section's steps.
 
 Do **not** force past this stop. `bd migrate --force` applies the migration
 while the clone is still behind — precisely the state the stop exists to

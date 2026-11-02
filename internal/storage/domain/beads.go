@@ -62,6 +62,10 @@ type ResolveProxiedInitResult struct {
 	// DBNameDerived: DBName was guessed (prefix or default) rather than
 	// pinned by the --database flag or an existing metadata.json.
 	DBNameDerived bool
+	// Existing is the workspace's metadata.json as init found it, nil when
+	// there is none. Init writes that file back from it, so a re-init
+	// changes only the fields init owns.
+	Existing *configfile.Config
 }
 
 type BeadsDirTemplates struct {
@@ -144,6 +148,7 @@ func (u *beadsDirFSUseCaseImpl) ResolveProxiedInit(ctx context.Context, params R
 
 	result.DBName, result.DBNameDerived = resolveDoltDatabaseName(cfg, params.Prefix, params.DBFlag)
 	result.ProjectID = resolveProjectID(cfg)
+	result.Existing = cfg
 	return result, nil
 }
 

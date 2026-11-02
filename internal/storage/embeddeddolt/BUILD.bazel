@@ -199,6 +199,7 @@ go_test(
         "lifecycle_update_contract_test.go",
         "memories_contract_test.go",
         "merge_blockers_test.go",
+        "merge_events_flip_test.go",
         "merge_strategy_test.go",
         "metadata_cas_contract_test.go",
         "metadata_number_fidelity_test.go",
