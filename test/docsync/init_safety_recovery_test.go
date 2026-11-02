@@ -306,3 +306,33 @@ func TestDatabaseCorruptionLockGuidance(t *testing.T) {
 	engineSectionName := "docs/recovery/database-corruption.md \"Engine won't open\""
 	requireInSection(t, engineSectionName, engine, "live contention, not corruption")
 }
+
+// ac3: the prevention story steers bulk writes and sustained concurrency to
+// the existing capacity features (bd batch, server/proxied-server mode)
+// without presenting either as journal repair (issue #4521).
+func TestDatabaseCorruptionPreventionGuidance(t *testing.T) {
+	root := repoRoot()
+
+	runbookPath := filepath.Join(root, "docs", "recovery", "database-corruption.md")
+	runbookData, err := os.ReadFile(runbookPath)
+	if err != nil {
+		t.Fatalf("reading %s: %v", runbookPath, err)
+	}
+	const prevName = "docs/recovery/database-corruption.md \"Prevention\""
+	prevention := requireDocSection(t, string(runbookData), "## Prevention", "docs/recovery/database-corruption.md")
+	requireInSection(t, prevName, prevention, "bd batch")
+	requireInSection(t, prevName, prevention, "one transaction")
+	requireInSection(t, prevName, prevention, "server mode or proxied-server mode")
+	requireInSection(t, prevName, prevention, "nor a mode switch repairs a damaged journal")
+
+	archPath := filepath.Join(root, "docs", "architecture", "dolt.md")
+	archData, err := os.ReadFile(archPath)
+	if err != nil {
+		t.Fatalf("reading %s: %v", archPath, err)
+	}
+	const archName = "docs/architecture/dolt.md \"Embedded Mode (Solo / Standalone)\""
+	embedded := requireDocSection(t, string(archData), "### Embedded Mode (Solo / Standalone)", "docs/architecture/dolt.md")
+	requireInSection(t, archName, embedded, "bd batch")
+	requireInSection(t, archName, embedded, "server mode or proxied-server mode")
+	requireInSection(t, archName, embedded, "not a repair step")
+}

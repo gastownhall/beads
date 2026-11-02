@@ -298,6 +298,14 @@ standalone Beads users. The `bd` binary includes everything; just `bd init` and 
 - Push to GitHub with `bd dolt push` — code and issues in one repo
 - Zero ops: no server, no ports, no PID files
 
+Scripts and agents that make many writes in a loop should use
+[`bd batch`](/cli-reference/batch), which runs a limited write grammar in
+one transaction and one commit instead of one engine start-up per
+invocation. A workload that needs sustained concurrent access belongs in
+server mode or proxied-server mode. Switching is a configured migration
+(see [Migrating Between Backends](#migrating-between-backends)), not a
+repair step, and neither choice fixes an already-damaged journal.
+
 ### Server Mode (Multi-Writer / Orchestrator)
 
 Connects to a running `dolt sql-server` for multi-client access.

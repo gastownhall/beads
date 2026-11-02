@@ -146,6 +146,16 @@ lock files.
 
 ## Prevention
 
-- Let the Dolt server handle synchronization
-- Use `bd dolt stop` before system shutdown
+- **Scripts and agents making many writes should use `bd batch`.** It runs a
+  limited write grammar (`close`, `update`, `create`, `dep add`,
+  `dep remove`) in one transaction with one commit, instead of one engine
+  start-up and one commit per `bd` invocation — the aggregate cost that
+  times agent-driven batches out. Other commands still pay per-invocation
+  engine start-up; batching collapses a script's writes, not the CLI.
+- **Sustained concurrent access belongs in server mode or proxied-server
+  mode**, where one persistent engine serves every invocation. Switching is
+  a configured migration (see
+  [Migrating between backends](/architecture/dolt#migrating-between-backends)),
+  not a repair: neither `bd batch` nor a mode switch repairs a damaged
+  journal.
 - Run `bd doctor` periodically to catch issues early
