@@ -15,8 +15,28 @@ func GetDependencyTreeInTx(ctx context.Context, tx DBTX, issueID string, maxDept
 }
 
 func buildDependencyTreeInTx(ctx context.Context, tx DBTX, issueID string, depth, maxDepth int, reverse bool, visited map[string]bool, parentID string, edgeFromParent types.DependencyType) ([]*types.TreeNode, error) {
-	if depth >= maxDepth || visited[issueID] {
+	if depth >= maxDepth {
 		return nil, nil
+	}
+	if visited[issueID] {
+		// Diamond dependency: this node was already expanded on another path.
+		// Emit it again as a Deduped stub (no recursion) so every edge —
+		// in particular every DIRECT blocker of the root — stays visible.
+		// Dropping it made `bd dep tree` disagree with `bd dep list` on the
+		// direct-blocker set and let a blocked node render with no visible
+		// blocker (gastownhall/beads sys-7yjr8). The tree renderer shows
+		// stubs as "<id> (shown above)"; JSON carries deduped=true.
+		issue, err := GetIssueInTx(ctx, tx, issueID)
+		if err != nil {
+			return nil, err
+		}
+		return []*types.TreeNode{{
+			Issue:          *issue,
+			Depth:          depth,
+			ParentID:       parentID,
+			EdgeFromParent: edgeFromParent,
+			Deduped:        true,
+		}}, nil
 	}
 	visited[issueID] = true
 
