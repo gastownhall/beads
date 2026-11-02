@@ -85,10 +85,13 @@ func TestMigration0075GuardsEachColumnOnItsOwn(t *testing.T) {
 
 // TestMigration0075BundleWidensAllFiveThroughDoltCLI runs the whole CLI bundle
 // on a fresh dolt repository and reads back the five column definitions (type,
-// nullability and default, since MODIFY replaces all three). The
-// dolt CLI skips a PREPAREd ALTER without an error, so only the registered
-// direct-DDL substitute can widen them here, and a zero exit status proves
-// nothing on its own.
+// nullability and default, since MODIFY replaces all three), so a zero exit
+// status is not its only evidence. It checks the bundle's final schema, not
+// the override: the pinned 2.6.0 CLI runs a PREPAREd ALTER (only pre-2.3 CLIs
+// skip one), so the source text widens these columns here too, and the guard
+// of the 0075 substitute is
+// TestAllMigrationsSQLUsesDirectDDLForKnownCLIIncompatibilities (see the
+// cli_migrations.go header).
 func TestMigration0075BundleWidensAllFiveThroughDoltCLI(t *testing.T) {
 	testutil.RequireDoltBinary(t)
 

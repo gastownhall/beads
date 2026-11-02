@@ -16,10 +16,10 @@
 --
 --   wisp_events.comment  the same comment on a wisp failed the same way, and
 --                        promotion and demotion copy event rows between the
---                        two planes with INSERT IGNORE, which truncates a
---                        value the destination cannot hold instead of failing.
---                        The planes must agree on the width. Its DEFAULT ''
---                        (0021, ignored/0001) is kept.
+--                        two planes with INSERT IGNORE ... SELECT, which
+--                        fails on a value the destination cannot hold (see
+--                        below), so the planes must agree on the width. Its
+--                        DEFAULT '' (0021, ignored/0001) is kept.
 --
 --   compaction_snapshots.snapshot_json
 --                        SnapshotIssue marshals the issue's text fields, all
@@ -34,9 +34,11 @@
 --                        are widened so a snapshot row can hold what the
 --                        issue it copies holds. Each keeps its nullability.
 --
--- A plain INSERT of an oversized value fails with Error 1105 ("too large for
--- column"); the silent truncation GH#3925 describes is what an INSERT IGNORE
--- copy does when its source is wider than its destination.
+-- GH#3925 reports silent truncation, but no write to these columns
+-- truncates on the pinned engine: a plain INSERT of an oversized value
+-- fails with Error 1105 ("too large for column"), and the INSERT IGNORE ...
+-- SELECT copy between the event planes fails too, where MySQL's IGNORE
+-- semantics would truncate the value.
 --
 -- EVERY COLUMN HAS ITS OWN GUARD AND ITS OWN ALTER, never one shared probe:
 -- 0057 records the #4353 hazard (an embedded engine before dolthub/dolt#11126

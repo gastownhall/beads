@@ -1363,12 +1363,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Large reopen reasons, comments and compaction snapshots are no longer
   refused at 64 KiB. A reopen reason or comment over 65,535 bytes failed
   (rolling the reopen back), and tier-1 compaction aborted on an issue whose
-  snapshot was that large. Schema migration 0075 widens `events.comment`,
-  `wisp_events.comment` and `issue_snapshots`' two content columns to
-  LONGTEXT and `compaction_snapshots.snapshot_json` to LONGBLOB, keeping each
-  column's nullability and default; ignored migration 0031 widens both event
-  comment columns on fresh clones, so promoting or demoting a wisp no longer
-  truncates a long comment (GH#3925).
+  snapshot was that large. A reopen reason sent through `bd serve` is still
+  limited to 255 characters, as before. Schema migration 0075 widens
+  `events.comment`, `wisp_events.comment` and `issue_snapshots`' two content
+  columns to LONGTEXT and `compaction_snapshots.snapshot_json` to LONGBLOB,
+  keeping each column's nullability and default; ignored migration 0031
+  widens both event comment columns on fresh clones, so a fresh clone accepts
+  the same large comments an in-place-upgraded workspace does (GH#3925).
+  **Upgrading:** on a clone whose `wisp_events` or `events` table is
+  committed at HEAD and has uncommitted changes (the shape GH#5168 reports),
+  the upgrade fails with "pending ignored schema migrations alter
+  pre-existing dirty tables: …" after 0075 has applied, and so does every
+  later open, `bd dolt commit` included. Commit the tables it names by hand
+  in a SQL session on the database (GH#5816 shows the embedded-mode steps):
+  `CALL DOLT_ADD('-f', '<table>', …)`, then
+  `CALL DOLT_COMMIT('-m', '<message>')`. The next open finishes the upgrade
+  and keeps every row. `CALL DOLT_COMMIT('-Am', …)` skips those tables, and
+  `CALL DOLT_CHECKOUT('--', '<table>')` discards their uncommitted rows.
 - `bd dolt push <remote>` and `bd dolt pull <remote>` now push to and pull
   from the named remote. bd ignored the name, so `bd dolt push 1st` pushed to
   the default remote and reported "Push complete."; a name that differs from

@@ -208,6 +208,17 @@ var schemaAdditions = []schemaAddition{{
 	Migrations: map[string][]string{
 		"ignored_schema_migrations": {"31"},
 	},
+}, {
+	By: "the residual 64 KiB content-column widening (GH#3925)",
+	// Migration 0075 and ignored/0031 only widen existing columns (TEXT to
+	// LONGTEXT, BLOB to LONGBLOB), and the dump renders a value of either
+	// width alike, so they add no column or table here, only their
+	// bookkeeping rows: 0075 on the main series, and ignored/0031 (its
+	// clone-local event-table twin) on the dolt_ignored series.
+	Migrations: map[string][]string{
+		"schema_migrations":         {"75"},
+		"ignored_schema_migrations": {"31"},
+	},
 }}
 
 // runWindow widens the span of the run on each side to bound the wall-clock

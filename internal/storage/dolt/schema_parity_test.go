@@ -170,9 +170,10 @@ func TestSchemaParityAuxiliaryTables(t *testing.T) {
 	}
 
 	// Promotion and demotion copy event rows between the planes with INSERT
-	// IGNORE, which truncates a value the destination is too narrow for, so
-	// the content columns must have the same width on both, and that width
-	// is LONGTEXT (GH#3925).
+	// IGNORE ... SELECT, which fails on the pinned engine (and would truncate
+	// under MySQL's IGNORE semantics) when the destination is too narrow for
+	// a value, so the content columns must have the same width on both, and
+	// that width is LONGTEXT (GH#3925).
 	t.Run("events_vs_wisp_events_content_types", func(t *testing.T) {
 		columnTypes := func(table string) map[string]string {
 			m := map[string]string{}

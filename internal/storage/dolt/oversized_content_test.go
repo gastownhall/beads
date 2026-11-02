@@ -90,8 +90,9 @@ func TestReopenIssueWithOversizedReasonKeepsTheCommentVerbatim(t *testing.T) {
 // TestPromoteFromEphemeralPreservesOversizedEventComment pins GH#3925 on the
 // wisp plane: AddComment on an active wisp writes wisp_events.comment, TEXT
 // until migration 0075, and PromoteFromEphemeral copies that row into
-// events.comment with INSERT IGNORE, which truncates instead of failing when
-// the destination is narrower than the source. Both planes must hold the
+// events.comment with INSERT IGNORE ... SELECT, which fails on the pinned
+// engine (and would truncate under MySQL's IGNORE semantics) when the
+// destination is narrower than the source. Both planes must hold the
 // comment byte for byte, in both copy directions.
 func TestPromoteFromEphemeralPreservesOversizedEventComment(t *testing.T) {
 	store, cleanup := setupTestStore(t)
