@@ -2,8 +2,11 @@
 // directory a pre-Dolt bd left behind, whose SQLite database is still the only
 // copy of its data. Command admission (cmd/bd's guardLegacyUpgradeWorkspace)
 // refuses one before anything can open or rewrite it, and bd doctor's Classic
-// Artifacts check and cleanup (cmd/bd/doctor/fix.SelectsDolt) leave its SQLite
-// files alone. Both ask this package, so they recognize the same layouts.
+// Artifacts check and cleanup (cmd/bd/doctor/fix.PlanArtifacts) leave its
+// SQLite files alone. Both ask this package, so they recognize the same
+// layouts; the cleanup additionally deletes no SQLite sidecar outside a
+// redirect stub without positive Dolt evidence, so a layout this classifier
+// does not recognize is left alone too.
 package historicalsqlite
 
 import (
