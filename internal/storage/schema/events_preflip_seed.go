@@ -41,6 +41,28 @@ var (
 	preflipEventsInsertBatch = 200
 )
 
+// SetPreflipEventsBatchSizesForTest sets the restore's page and insert batch
+// sizes and returns a function that restores the previous ones. Test-only.
+func SetPreflipEventsBatchSizesForTest(page, insert int) func() {
+	prevPage, prevInsert := preflipEventsPageSize, preflipEventsInsertBatch
+	preflipEventsPageSize, preflipEventsInsertBatch = page, insert
+	return func() { preflipEventsPageSize, preflipEventsInsertBatch = prevPage, prevInsert }
+}
+
+// preflipEventsInsertFaultHook, when set by a test, runs after each restored
+// batch is inserted; an error aborts the restore there, emulating a live
+// failure after partial insertion. Production leaves it nil.
+var preflipEventsInsertFaultHook func() error
+
+// SetPreflipEventsInsertFaultHookForTest installs fn as the restore's
+// per-batch fault hook and returns a function that restores the previous
+// value. Test-only.
+func SetPreflipEventsInsertFaultHookForTest(fn func() error) func() {
+	prev := preflipEventsInsertFaultHook
+	preflipEventsInsertFaultHook = fn
+	return func() { preflipEventsInsertFaultHook = prev }
+}
+
 // preflipEventsNoticeOut is where the restore reports what it did. Like
 // lostTableNoticeOut it is deliberately NOT terminal-gated: the counts are
 // the only sign on a piped or served open that history came back.
@@ -151,6 +173,9 @@ func restorePreflipEventsFrom(ctx context.Context, db DBConn, ref string, orphan
 	restored := 0
 	after := ""
 	for {
+		if err := ctx.Err(); err != nil {
+			return restored, err
+		}
 		issues, err := preflipEventsIssuePage(ctx, db, ref, after)
 		if err != nil {
 			return restored, err
@@ -429,6 +454,11 @@ func insertPreflipEvents(ctx context.Context, db DBConn, plan []preflipEventsRow
 			return inserted, fmt.Errorf("inserting restored events: %w", err)
 		}
 		inserted += len(batch)
+		if preflipEventsInsertFaultHook != nil {
+			if err := preflipEventsInsertFaultHook(); err != nil {
+				return inserted, err
+			}
+		}
 	}
 	return inserted, nil
 }
