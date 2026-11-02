@@ -235,3 +235,48 @@ func TestOpenInitStoreRecoveryFailureStops(t *testing.T) {
 		})
 	}
 }
+
+// TestOpenInitStoreIneligibleOpensPassThrough pins what openInitStore must
+// leave alone: a successful first open, every refusal other than an
+// unversioned dirty-table one, and every configuration without the authority
+// to adopt a database (anything but a writable, direct server open). Each
+// makes exactly one open, no commit, and returns the original result.
+func TestOpenInitStoreIneligibleOpensPassThrough(t *testing.T) {
+	versioned := fmt.Errorf("failed to initialize schema: %w", &schema.DirtyTablesError{
+		Tables: []string{"issues"},
+	})
+	for _, tc := range []struct {
+		name   string
+		mutate func(*dolt.Config)
+		err    error
+	}{
+		{name: "first open succeeds"},
+		{name: "versioned dirty refusal", err: versioned},
+		{name: "consent refusal", err: &schema.MigrateConsentError{CurrentVersion: 51, LatestVersion: schema.LatestVersion(), Pending: 3}},
+		{name: "unrelated error", err: errors.New("dial tcp 127.0.0.1:3307: connection refused")},
+		{name: "embedded", mutate: func(c *dolt.Config) { c.ServerMode = false }, err: unversionedDirtyRefusal()},
+		{name: "proxied server", mutate: func(c *dolt.Config) { c.ServerMode = false; c.ProxiedServer = true }, err: unversionedDirtyRefusal()},
+		{name: "gateway", mutate: func(c *dolt.Config) { c.Gateway = true }, err: unversionedDirtyRefusal()},
+		{name: "read-only", mutate: func(c *dolt.Config) { c.ReadOnly = true }, err: unversionedDirtyRefusal()},
+		{name: "preview", mutate: func(c *dolt.Config) { c.Preview = true }, err: unversionedDirtyRefusal()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := initStoreTestConfig()
+			if tc.mutate != nil {
+				tc.mutate(cfg)
+			}
+			want := *cfg
+			fake, store, err := runOpenInitStore(t, cfg, initStoreOpenResult{err: tc.err})
+			assertInitStoreEvents(t, fake, "open strict#1")
+			if err != tc.err {
+				t.Fatalf("openInitStore error = %v, want the first open's result %v unchanged", err, tc.err)
+			}
+			if (tc.err == nil) != (store != nil) {
+				t.Fatalf("openInitStore store = %v with error %v, want the first open's store", store, err)
+			}
+			if *cfg != want {
+				t.Fatalf("caller config mutated: %+v, want %+v", *cfg, want)
+			}
+		})
+	}
+}
