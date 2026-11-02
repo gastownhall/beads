@@ -1126,6 +1126,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A fresh database on a Dolt server with transaction commit enabled
+  (`SET PERSIST dolt_transaction_commit = 1`) now migrates to the latest
+  schema instead of dying at migration 0040 with `nothing to commit`
+  (gastownhall/beads#4137, reported by @blairsilverberg): the migration pass
+  suspends that session's auto-commit for its duration and restores it after,
+  so migration bodies that carry their own `CALL DOLT_COMMIT` run as written.
+  A database already wedged mid-init by an older binary still needs the
+  documented `schema_migrations` insert; this fix does not recover it.
 - `bd dolt push <remote>` and `bd dolt pull <remote>` now push to and pull
   from the named remote. bd ignored the name, so `bd dolt push 1st` pushed to
   the default remote and reported "Push complete."; a name that differs from

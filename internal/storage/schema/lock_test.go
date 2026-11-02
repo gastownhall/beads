@@ -380,6 +380,9 @@ func expectOnePendingMigration(t *testing.T, mock sqlmock.Sqlmock) {
 	expectIgnoredCursorHealNoop(mock)
 	expectCursorProbe(mock, "schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", latest-1)
+	// Work needed: the pass suspends session transaction-commit before it
+	// snapshots the working set (#4137).
+	expectTransactionCommitSetting(mock)
 	expectDoltStatusRows(mock)
 	// The seed changed rows (expectIgnorePatternSeed reports RowsAffected=1),
 	// so MigrateUp commits it scoped+labeled before the pass runs (#4566: the
@@ -511,6 +514,16 @@ func expectScalar(mock sqlmock.Sqlmock, query, column string, value any) {
 		WillReturnRows(sqlmock.NewRows([]string{column}).AddRow(value))
 }
 
+// expectTransactionCommitSetting mocks the migration pass's suspend probe of
+// the pinned session's Dolt transaction-commit mode. The mocked worlds report
+// the default (0): no SET is issued and the restoration is a no-op, so a
+// stream using this helper expects the read and nothing else from the
+// suspension.
+func expectTransactionCommitSetting(mock sqlmock.Sqlmock) {
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT @@SESSION.dolt_transaction_commit")).
+		WillReturnRows(sqlmock.NewRows([]string{"dolt_transaction_commit"}).AddRow(0))
+}
+
 // expectCursorProbe mocks the existence probe that migrationSource.currentVersion
 // issues before it ever reads the cursor table: the schemata read proving the
 // session has a usable current database, then the SHOW TABLES listing. The
@@ -556,6 +569,8 @@ func expectDirtyGuardRefusal(t *testing.T, mock sqlmock.Sqlmock) {
 	// migrationWorkNeeded: main cursor behind -> work needed (short-circuits).
 	expectCursorProbe(mock, "schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", cursor)
+	// Work needed: suspend the session's transaction-commit before the pass.
+	expectTransactionCommitSetting(mock)
 	// dirtyBeforeAll: `events` dirty (working set only, not staged).
 	expectDoltStatusDirtyEvents(mock)
 	// Nothing staged -> no unstage exec; seed was a no-op -> no seed commit.
@@ -984,6 +999,9 @@ func TestMigrateUpWithLockFreshBootstrapHealCapabilityIsOneShot(t *testing.T) {
 	expectIgnoredCursorHealNoop(mock)
 	expectCursorProbe(mock, "schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", LatestVersion()-2)
+	// Work needed: the pass's suspend probe runs before the working-set
+	// snapshot that fails.
+	expectTransactionCommitSetting(mock)
 	mock.ExpectQuery("(?s)SELECT s\\.table_name, s\\.staged\\s+FROM dolt_status s").
 		WillReturnError(errors.New("connection reset"))
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT RELEASE_LOCK(?)")).

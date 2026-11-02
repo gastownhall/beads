@@ -911,6 +911,16 @@ func MigrateUpTo(ctx context.Context, db DBConn, maxVersion int) (int, error) {
 	return applied, err
 }
 
+// MigrateUp applies pending schema migrations from both numbered series and
+// the open-time reconciles around them, returning how many changes it made.
+//
+// It must run on one pinned session — the *sql.Conn (or equivalent
+// single-session DBConn) that every production caller already holds for the
+// duration of the pass (the dolt and embedded store opens, uow's
+// dolt_sql_provider): the pass suspends and restores that session's
+// @@SESSION.dolt_transaction_commit (suspendTransactionCommit), and its
+// per-step commit contract assumes every statement of the pass shares one
+// session.
 func MigrateUp(ctx context.Context, db DBConn) (int, error) {
 	// Consent gate first, before ANY write — dolt_ignore seeding included: an
 	// existing database with pending main-sequence migrations must stay
@@ -973,7 +983,7 @@ func migrateUpConsented(ctx context.Context, db DBConn) (int, error) {
 // migrateUpAfterReconcile is MigrateUp's migration pass proper, split out so
 // the open-time reconciles above it have exactly one place to contribute to
 // the reported total.
-func migrateUpAfterReconcile(ctx context.Context, db DBConn, seedChanged bool) (int, error) {
+func migrateUpAfterReconcile(ctx context.Context, db DBConn, seedChanged bool) (applied int, err error) {
 	needed, err := migrationWorkNeeded(ctx, db)
 	if err != nil {
 		return 0, fmt.Errorf("checking schema migration work: %w", err)
@@ -991,6 +1001,27 @@ func migrateUpAfterReconcile(ctx context.Context, db DBConn, seedChanged bool) (
 		}
 		return 0, nil
 	}
+
+	// The pass needs the session's default commit boundaries back. With
+	// @@SESSION.dolt_transaction_commit enabled, a frozen body's inline DML
+	// commits itself and its inline CALL DOLT_COMMIT then dies with "nothing
+	// to commit" (#4137). Suspend the mode for the whole pass — both numbered
+	// series, the pre-migration repairs, the per-step commits, and the pass
+	// tail all run inside it — and restore the prior setting on every return,
+	// faulted ones included. Converged opens exited above and pay no query; a
+	// session already at the default pays one read.
+	restoreTransactionCommit, err := suspendTransactionCommit(ctx, db)
+	if err != nil {
+		return 0, fmt.Errorf("preparing migration pass: %w", err)
+	}
+	defer func() {
+		if restoreErr := restoreTransactionCommit(); restoreErr != nil {
+			// Joined, never replaced: a *DirtyTablesError or test sentinel
+			// returned by the pass must stay identifiable through errors.Is
+			// and errors.As alongside the restoration failure.
+			err = errors.Join(err, restoreErr)
+		}
+	}()
 
 	dirtyBeforeAll, err := dirtyTables(ctx, db, false)
 	if err != nil {
