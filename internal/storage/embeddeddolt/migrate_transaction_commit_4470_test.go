@@ -5,6 +5,7 @@ package embeddeddolt_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -75,5 +76,131 @@ func TestEmbeddedFreshMigrateUnderTransactionCommit_4470(t *testing.T) {
 	}
 	if n := scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM dolt_log WHERE message = 'create nonlocal table wisps'"); n != 1 {
 		t.Fatalf("0040's 'create nonlocal table wisps' commit count = %d, want 1", n)
+	}
+}
+
+// TestEmbeddedFreshMigrateRestoresTransactionCommit_4470 is AC-2's success
+// leg: the migration pass hands the pinned connection back with the session's
+// original @@dolt_transaction_commit.
+func TestEmbeddedFreshMigrateRestoresTransactionCommit_4470(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+	conn := openFreshTransactionCommitConn(t, ctx)
+
+	if _, err := schema.MigrateUp(ctx, conn); err != nil {
+		t.Fatalf("fresh MigrateUp under dolt_transaction_commit=1: %v", err)
+	}
+	if got := sessionTransactionCommit(t, ctx, conn); got != 1 {
+		t.Fatalf("@@dolt_transaction_commit after MigrateUp = %d, want the original 1", got)
+	}
+}
+
+// TestEmbeddedMigrateFaultRestoresTransactionCommit_4470 is AC-2's failure
+// leg: a pass that fails mid-flight (injected after migration 0040) still
+// restores the session setting, and the caller sees the original error.
+func TestEmbeddedMigrateFaultRestoresTransactionCommit_4470(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+	conn := openFreshTransactionCommitConn(t, ctx)
+
+	errInjected := errors.New("injected fault after migration 40")
+	inPass := -1
+	restoreHook := schema.SetMigrateStepFaultHookForTest(func(ctx context.Context, db schema.DBConn, version int) error {
+		if version != 40 {
+			return nil
+		}
+		var v int
+		if err := db.QueryRowContext(ctx, "SELECT @@SESSION.dolt_transaction_commit").Scan(&v); err != nil {
+			return err
+		}
+		inPass = v
+		return errInjected
+	})
+	t.Cleanup(restoreHook)
+
+	_, err := schema.MigrateUp(ctx, conn)
+	if !errors.Is(err, errInjected) {
+		t.Fatalf("MigrateUp error = %v, want the injected fault", err)
+	}
+	if inPass != 0 {
+		t.Fatalf("@@dolt_transaction_commit inside the pass = %d, want 0 (suspended)", inPass)
+	}
+	if got := sessionTransactionCommit(t, ctx, conn); got != 1 {
+		t.Fatalf("@@dolt_transaction_commit after the failed pass = %d, want the original 1", got)
+	}
+}
+
+// TestEmbeddedMigrateCanceledFaultRestoresTransactionCommit_4470 is AC-2's
+// failure leg under a canceled caller: the fault hook cancels the pass's
+// context before injecting its error, so the restoration must run on its own
+// cleanup context. The same connection stays usable and reads 1 again.
+func TestEmbeddedMigrateCanceledFaultRestoresTransactionCommit_4470(t *testing.T) {
+	requireEmbedded(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	conn := openFreshTransactionCommitConn(t, ctx)
+
+	errInjected := errors.New("injected fault after migration 40")
+	inPass := -1
+	restoreHook := schema.SetMigrateStepFaultHookForTest(func(ctx context.Context, db schema.DBConn, version int) error {
+		if version != 40 {
+			return nil
+		}
+		var v int
+		if err := db.QueryRowContext(ctx, "SELECT @@SESSION.dolt_transaction_commit").Scan(&v); err != nil {
+			return err
+		}
+		inPass = v
+		cancel()
+		return errInjected
+	})
+	t.Cleanup(restoreHook)
+
+	if _, err := schema.MigrateUp(ctx, conn); !errors.Is(err, errInjected) {
+		t.Fatalf("MigrateUp error = %v, want the injected fault", err)
+	}
+	if inPass != 0 {
+		t.Fatalf("@@dolt_transaction_commit inside the pass = %d, want 0 (suspended)", inPass)
+	}
+	if got := sessionTransactionCommit(t, t.Context(), conn); got != 1 {
+		t.Fatalf("@@dolt_transaction_commit after the canceled pass = %d, want the original 1", got)
+	}
+	if err := conn.PingContext(t.Context()); err != nil {
+		t.Fatalf("connection unusable after the canceled pass: %v", err)
+	}
+}
+
+// TestEmbeddedMigrateRetryAfterFaultConverges_4470: after a pass aborted at
+// migration 0040, a plain re-run of MigrateUp on the same connection, setting
+// still enabled, converges to latest with a clean working set.
+func TestEmbeddedMigrateRetryAfterFaultConverges_4470(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+	conn := openFreshTransactionCommitConn(t, ctx)
+
+	errInjected := errors.New("injected fault after migration 40")
+	restoreHook := schema.SetMigrateStepFaultHookForTest(func(_ context.Context, _ schema.DBConn, version int) error {
+		if version == 40 {
+			return errInjected
+		}
+		return nil
+	})
+	_, err := schema.MigrateUp(ctx, conn)
+	restoreHook()
+	if !errors.Is(err, errInjected) {
+		t.Fatalf("first MigrateUp error = %v, want the injected fault", err)
+	}
+
+	if _, err := schema.MigrateUp(ctx, conn); err != nil {
+		t.Fatalf("retry MigrateUp: %v", err)
+	}
+	if got, want := currentMainVersion(t, ctx, conn), schema.LatestVersion(); got != want {
+		t.Fatalf("main schema version after retry = %d, want %d", got, want)
+	}
+	if dirty := dirtyTableNames(t, ctx, conn); len(dirty) != 0 {
+		t.Fatalf("working set after retry is dirty: %v, want clean", dirty)
+	}
+	if got := sessionTransactionCommit(t, ctx, conn); got != 1 {
+		t.Fatalf("@@dolt_transaction_commit after retry = %d, want the original 1", got)
 	}
 }
