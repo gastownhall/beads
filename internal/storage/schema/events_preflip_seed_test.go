@@ -48,3 +48,21 @@ func TestMigration0031MarkerIsSeenTouchingEvents(t *testing.T) {
 		t.Fatal("ignored 0031 declares a write to a table its repair never touches")
 	}
 }
+
+// TestPreflipEventsColumnsMatchAuxRekeyDigestList pins the restore's digest
+// columns to the aux rekey's events list: the restore derives ids with the
+// same rowid.Digest the rekey converged existing rows to, so a drift between
+// the two lists would mint ids no clone agrees on and miss rows already held
+// under their rekeyed ids.
+func TestPreflipEventsColumnsMatchAuxRekeyDigestList(t *testing.T) {
+	for _, table := range auxRekeyTables {
+		if table.name != "events" {
+			continue
+		}
+		if table.columns != preflipEventsDigestColumns {
+			t.Fatalf("preflipEventsDigestColumns diverged from the aux rekey's events digest list:\n  rekey:   %s\n  restore: %s", table.columns, preflipEventsDigestColumns)
+		}
+		return
+	}
+	t.Fatal("auxRekeyTables no longer covers events")
+}

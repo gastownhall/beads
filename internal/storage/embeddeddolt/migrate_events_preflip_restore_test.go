@@ -668,7 +668,7 @@ func TestEmbeddedIgnoredMigration0031SkipsAnUnreadableSource(t *testing.T) {
 	t.Run("drift reading the history", func(t *testing.T) {
 		ctx := t.Context()
 		l := newTwoSourceLineage(t, ctx, false)
-		defer schema.SetPreflipEventsSourceFaultHookForTest(func(ref string) error {
+		defer schema.SetPreflipEventsSourceFaultHookForTest(func(ref, _ string) error {
 			if ref == l.second {
 				return errors.New("panic: invalid hash length: 19")
 			}
@@ -698,4 +698,72 @@ func TestEmbeddedIgnoredMigration0031SkipsAnUnreadableSource(t *testing.T) {
 			t.Fatal("ignored cursor recorded 0031 after a live write failed")
 		}
 	})
+}
+
+// TestEmbeddedIgnoredMigration0031MergesComplementarySources pins the
+// reconcile across two sources that each hold rows the other lacks: every
+// content comes back at the largest multiplicity any one source holds, never
+// the sum, so a content both sources carry is not restored twice.
+func TestEmbeddedIgnoredMigration0031MergesComplementarySources(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+
+	dataDir := seedMainSchemaAt(t, ctx, 61)
+	conn, closeConn := openPinnedConn(t, ctx, dataDir)
+	defer closeConn()
+
+	// First source: a only there, and two copies of shared.
+	execFrozenGuard(t, ctx, conn, `
+INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) VALUES
+  ('pre-1', 'first', '', '', '', '', 'open', 2, 'task'),
+  ('pre-2', 'second', '', '', '', '', 'open', 2, 'task');
+INSERT INTO events (issue_id, event_type, actor, created_at, id) VALUES
+  ('pre-1', 'created', 'alice', '2026-07-01 10:00:00', 'legacy-a'),
+  ('pre-1', 'commented', 'bob', '2026-07-01 11:00:00', 'legacy-s1'),
+  ('pre-1', 'commented', 'bob', '2026-07-01 11:00:00', 'legacy-s2');
+`)
+	mustDrain(t, ctx, conn, "CALL DOLT_COMMIT('-Am', 'test: first pre-flip source')")
+	mustExecOn(t, ctx, conn, "CALL DOLT_COMMIT('--allow-empty', '-m', ?)", eventsFlipDropMessage)
+
+	// Second source: one copy of shared, b only there, and three copies of c.
+	execFrozenGuard(t, ctx, conn, `
+DELETE FROM events WHERE id IN ('legacy-a', 'legacy-s2');
+INSERT INTO events (issue_id, event_type, actor, created_at, id) VALUES
+  ('pre-2', 'updated', 'carol', '2026-07-02 09:00:00', 'legacy-b'),
+  ('pre-2', 'labeled', 'dave', '2026-07-02 10:00:00', 'legacy-c1'),
+  ('pre-2', 'labeled', 'dave', '2026-07-02 10:00:00', 'legacy-c2'),
+  ('pre-2', 'labeled', 'dave', '2026-07-02 10:00:00', 'legacy-c3');
+`)
+	mustDrain(t, ctx, conn, "CALL DOLT_COMMIT('-Am', 'test: second pre-flip source')")
+	if _, err := schema.MigrateUp(ctx, conn); err != nil {
+		t.Fatalf("MigrateUp (migrator): %v", err)
+	}
+	execFrozenGuard(t, ctx, conn, "DELETE FROM events")
+	mustExecOn(t, ctx, conn, "DELETE FROM ignored_schema_migrations WHERE version = 31")
+
+	var notice bytes.Buffer
+	defer schema.SetPreflipEventsNoticeOutForTest(&notice)()
+	if _, err := schema.MigrateUp(ctx, conn); err != nil {
+		t.Fatalf("MigrateUp (restore): %v", err)
+	}
+
+	v := func(s string) sql.NullString { return sql.NullString{String: s, Valid: true} }
+	null := sql.NullString{}
+	d := func(issue, typ, actor, at string) string {
+		return rowid.Digest([]sql.NullString{v(issue), v(typ), v(actor), null, null, null, v(at)})
+	}
+	got := liveEvents(t, ctx, conn)
+	requireContent(t, got, map[string]int{
+		d("pre-1", "created", "alice", "2026-07-01 10:00:00"): 1,
+		d("pre-1", "commented", "bob", "2026-07-01 11:00:00"): 2,
+		d("pre-2", "updated", "carol", "2026-07-02 09:00:00"): 1,
+		d("pre-2", "labeled", "dave", "2026-07-02 10:00:00"):  3,
+	})
+	requireDerivedIDs(t, got)
+	if !strings.Contains(notice.String(), "Restored 7 pre-upgrade audit event(s)") {
+		t.Fatalf("restore notice = %q, want it to count the 7 restored rows", notice.String())
+	}
+	if !ignoredCursorHas(t, ctx, conn, 31) {
+		t.Fatal("ignored cursor does not record 0031 after the restore")
+	}
 }

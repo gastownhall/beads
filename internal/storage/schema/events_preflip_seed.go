@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -31,12 +32,19 @@ const (
 	preflipEventsInsertColumns = "issue_id, event_type, actor, old_value, new_value, comment, created_at, id"
 )
 
-// preflipEventsSourceColumns are the historical columns the restore reads; a
-// source missing any of them cannot be reconciled with the live table.
-var preflipEventsSourceColumns = []string{"issue_id", "event_type", "actor", "old_value", "new_value", "comment", "created_at"}
+// preflipEventsSourceColumns are the historical columns the restore reads
+// and reconciles by; preflipEventsRequiredColumns adds the id it pages a
+// source's rows by. A source missing any of them cannot be reconciled with the
+// live table.
+var (
+	preflipEventsSourceColumns   = []string{"issue_id", "event_type", "actor", "old_value", "new_value", "comment", "created_at"}
+	preflipEventsRequiredColumns = append(slices.Clone(preflipEventsSourceColumns), "id")
+)
 
-// preflipEventsPageSize bounds how many historical issues the restore plans
-// at once, and preflipEventsInsertBatch how many rows one INSERT carries.
+// preflipEventsPageSize bounds how many issues, and how many of one issue's
+// rows, the restore reads at once; preflipEventsInsertBatch bounds how many
+// rows one INSERT carries and how many planned ids one probe checks. Memory
+// is bounded by one issue's distinct content, not by its row count.
 var (
 	preflipEventsPageSize    = 200
 	preflipEventsInsertBatch = 200
@@ -55,15 +63,15 @@ func SetPreflipEventsBatchSizesForTest(page, insert int) func() {
 // failure after partial insertion. Production leaves it nil.
 var preflipEventsInsertFaultHook func() error
 
-// preflipEventsSourceFaultHook, when set by a test, runs before each read of
-// a source's events rows; an error stands in for that historical read
-// failing. Production leaves it nil.
-var preflipEventsSourceFaultHook func(ref string) error
+// preflipEventsSourceFaultHook, when set by a test, runs as each page of one
+// issue's source rows finishes iterating; an error stands in for that
+// historical read failing there. Production leaves it nil.
+var preflipEventsSourceFaultHook func(ref, issue string) error
 
 // SetPreflipEventsSourceFaultHookForTest installs fn as the restore's
 // source-read fault hook and returns a function that restores the previous
 // value. Test-only.
-func SetPreflipEventsSourceFaultHookForTest(fn func(ref string) error) func() {
+func SetPreflipEventsSourceFaultHookForTest(fn func(ref, issue string) error) func() {
 	prev := preflipEventsSourceFaultHook
 	preflipEventsSourceFaultHook = fn
 	return func() { preflipEventsSourceFaultHook = prev }
@@ -123,11 +131,10 @@ func seedEventsFromPreflipHistory(ctx context.Context, db DBConn) error {
 	if len(sources) == 0 {
 		return nil
 	}
-	restored := 0
-	orphans := make(map[string]int)
+	restored, orphans := 0, 0
 	var unreadable []string
 	for _, ref := range sources {
-		n, err := restorePreflipEventsFrom(ctx, db, ref, orphans)
+		n, err := restorePreflipEventsFrom(ctx, db, ref, &orphans)
 		restored += n
 		if err != nil {
 			if !unreadablePreflipSource(err) {
@@ -145,9 +152,9 @@ func seedEventsFromPreflipHistory(ctx context.Context, db DBConn) error {
 		fmt.Fprintf(preflipEventsNoticeOut,
 			"Restored %d pre-upgrade audit event(s) from this clone's history (gastownhall/beads#7039).\n", restored)
 	}
-	if skipped := sumPreflipOrphans(orphans); skipped > 0 {
+	if orphans > 0 {
 		fmt.Fprintf(preflipEventsNoticeOut,
-			"Skipped %d pre-upgrade audit event(s) whose issue no longer exists.\n", skipped)
+			"Skipped %d pre-upgrade audit event(s) whose issue no longer exists.\n", orphans)
 	}
 	return nil
 }
@@ -213,31 +220,29 @@ func unreadablePreflipSource(err error) bool {
 }
 
 // restorePreflipEventsFrom reconciles one source commit into the live events
-// table and returns how many rows it inserted. Skipped rows are recorded in
-// orphans (see recordPreflipOrphans).
-func restorePreflipEventsFrom(ctx context.Context, db DBConn, ref string, orphans map[string]int) (int, error) {
+// table, one source issue at a time, and returns how many rows it inserted.
+// Skipped rows are counted in orphans.
+func restorePreflipEventsFrom(ctx context.Context, db DBConn, ref string, orphans *int) (int, error) {
 	present, err := preflipEventsSourceUsable(ctx, db, ref)
 	if err != nil || !present {
 		return 0, err
 	}
-	restored := 0
+	w := &preflipEventsWriter{ctx: ctx, db: db}
 	after := ""
 	for {
 		if err := ctx.Err(); err != nil {
-			return restored, err
+			return w.inserted, err
 		}
 		issues, err := preflipEventsIssuePage(ctx, db, ref, after)
 		if err != nil {
-			return restored, &preflipSourceError{err}
+			return w.inserted, &preflipSourceError{err}
 		}
 		if len(issues) == 0 {
-			return restored, nil
+			return w.inserted, nil
 		}
 		after = issues[len(issues)-1]
-		n, err := restorePreflipEventsPage(ctx, db, ref, issues, orphans)
-		restored += n
-		if err != nil {
-			return restored, err
+		if err := restorePreflipEventsPage(ctx, db, w, ref, issues, orphans); err != nil {
+			return w.inserted, err
 		}
 	}
 }
@@ -265,7 +270,7 @@ func preflipEventsSourceUsable(ctx context.Context, db DBConn, ref string) (bool
 	for _, c := range columns {
 		have[strings.ToLower(c)] = true
 	}
-	for _, c := range preflipEventsSourceColumns {
+	for _, c := range preflipEventsRequiredColumns {
 		if !have[c] {
 			return false, &preflipSourceError{fmt.Errorf("%w: no %s", errPreflipSourceIncompatible, c)}
 		}
@@ -309,217 +314,243 @@ type preflipEventsRow struct {
 }
 
 // restorePreflipEventsPage reconciles one page of source issues with the live
-// table. Every source row for the page is read, and its result set closed,
-// before anything is written: the restore runs on the migration's pinned
-// connection, which cannot interleave an open result with a write.
-func restorePreflipEventsPage(ctx context.Context, db DBConn, ref string, issues []string, orphans map[string]int) (int, error) {
-	if preflipEventsSourceFaultHook != nil {
-		if err := preflipEventsSourceFaultHook(ref); err != nil {
-			return 0, &preflipSourceError{err}
-		}
-	}
-	source, err := readPreflipEventsContent(ctx, db, "events AS OF '"+ref+"'", issues, nil)
-	if err != nil {
-		return 0, &preflipSourceError{err}
-	}
+// table, issue by issue. Each issue's source content is read whole, and every
+// result set closed, before anything is written for it: the restore runs on
+// the migration's pinned connection, which cannot interleave an open result
+// with a write. A source read that fails part-way through an issue therefore
+// writes nothing for that issue.
+func restorePreflipEventsPage(ctx context.Context, db DBConn, w *preflipEventsWriter, ref string, issues []string, orphans *int) error {
 	//nolint:gosec // G202: only ? placeholders are concatenated.
 	existing, err := preflipQueryStrings(ctx, db,
 		"SELECT id FROM issues WHERE id IN ("+preflipPlaceholders(len(issues))+")", preflipStringArgs(issues)...)
 	if err != nil {
-		return 0, fmt.Errorf("reading live issues: %w", err)
+		return fmt.Errorf("reading live issues: %w", err)
 	}
 	live := make(map[string]bool, len(existing))
 	for _, id := range existing {
 		live[id] = true
 	}
-	kept := issues[:0:0]
 	for _, issue := range issues {
-		if live[issue] {
-			kept = append(kept, issue)
-		} else {
-			recordPreflipOrphans(orphans, issue, source[issue])
+		if err := ctx.Err(); err != nil {
+			return err
 		}
-	}
-	if len(kept) == 0 {
-		return 0, nil
-	}
-	issues = kept
-	taken := make(map[string]bool)
-	current, err := readPreflipEventsContent(ctx, db, "events", issues, taken)
-	if err != nil {
-		return 0, fmt.Errorf("reading live events: %w", err)
-	}
-	for {
-		plan := planPreflipEventsInserts(issues, source, current, taken)
-		if len(plan) == 0 {
-			return 0, nil
-		}
-		// A derived id is a function of content, so only a same-content row of
-		// the same issue can hold it -- unless the row was re-pointed since
-		// (fk_events_issue cascades an issue rename onto events.issue_id but not
-		// onto the id). Probe the whole plan against the table and re-plan
-		// around any id already held, so a plain INSERT cannot collide.
-		held, err := heldPreflipEventIDs(ctx, db, plan)
-		if err != nil {
-			return 0, fmt.Errorf("reading live event ids: %w", err)
-		}
-		if len(held) > 0 {
-			for _, id := range held {
-				taken[id] = true
+		if !live[issue] {
+			if err := countPreflipOrphans(ctx, db, ref, issue, orphans); err != nil {
+				return err
 			}
 			continue
 		}
-		return insertPreflipEvents(ctx, db, plan)
-	}
-}
-
-// recordPreflipOrphans records a deleted issue's source content in orphans,
-// keyed by issue and digest, keeping each key's largest multiplicity so a row
-// that several sources carry is counted once.
-func recordPreflipOrphans(orphans map[string]int, issue string, content preflipEventsContent) {
-	for digest, g := range content {
-		key := issue + "\x00" + digest
-		if g.count > orphans[key] {
-			orphans[key] = g.count
+		source, err := readPreflipEventsContent(ctx, db, ref, issue)
+		if err != nil {
+			return &preflipSourceError{err}
+		}
+		current, err := readPreflipEventsContent(ctx, db, "", issue)
+		if err != nil {
+			return fmt.Errorf("reading live events: %w", err)
+		}
+		for _, need := range planPreflipEventsNeeds(source, current) {
+			probe := func(ids []string) (map[string]bool, error) { return heldPreflipEventIDs(ctx, db, ids) }
+			if err := allocatePreflipEvents(need, probe, w.add); err != nil {
+				return err
+			}
+		}
+		if err := w.flush(); err != nil {
+			return err
 		}
 	}
+	return nil
 }
 
-func sumPreflipOrphans(orphans map[string]int) int {
-	total := 0
-	for _, n := range orphans {
-		total += n
-	}
-	return total
-}
-
-// readPreflipEventsContent reads the given issues' events content from table
-// (the live table or an AS OF source), grouped by issue and digest. When taken
-// is non-nil every row's id is recorded in it.
-func readPreflipEventsContent(ctx context.Context, db DBConn, table string, issues []string, taken map[string]bool) (map[string]preflipEventsContent, error) {
-	idColumn := "''"
-	if taken != nil {
-		idColumn = "id"
-	}
-	//nolint:gosec // G201: table is "events" or an AS OF over a validated ref; only ? placeholders carry values.
-	rows, err := db.QueryContext(ctx,
-		"SELECT "+idColumn+", "+preflipEventsDigestColumns+" FROM "+table+" WHERE issue_id IN ("+preflipPlaceholders(len(issues))+")",
-		preflipStringArgs(issues)...)
+// countPreflipOrphans adds to orphans the source rows of an issue that no
+// longer exists: fk_events_issue would refuse them.
+func countPreflipOrphans(ctx context.Context, db DBConn, ref, issue string, orphans *int) error {
+	//nolint:gosec // G201: ref is validated by preflipEventsSources.
+	counts, err := preflipQueryStrings(ctx, db, "SELECT COUNT(*) FROM events AS OF '"+ref+"' WHERE issue_id = ?", issue)
 	if err != nil {
-		return nil, err
+		return &preflipSourceError{err}
+	}
+	for _, c := range counts {
+		n, err := strconv.Atoi(c)
+		if err != nil {
+			return &preflipSourceError{fmt.Errorf("counting events of deleted issue %s: %w", issue, err)}
+		}
+		*orphans += n
+	}
+	return nil
+}
+
+// readPreflipEventsContent reads one issue's events content, grouped by
+// digest, from the source commit ref, or from the live table when ref is
+// empty. Rows are read in id-ordered pages so no result set stays open long
+// and memory holds only the issue's distinct content.
+func readPreflipEventsContent(ctx context.Context, db DBConn, ref, issue string) (preflipEventsContent, error) {
+	table := "events"
+	if ref != "" {
+		table = "events AS OF '" + ref + "'"
+	}
+	content := make(preflipEventsContent)
+	after := ""
+	for {
+		n, last, err := readPreflipEventsRowPage(ctx, db, table, issue, after, content)
+		if err == nil && ref != "" && preflipEventsSourceFaultHook != nil {
+			err = preflipEventsSourceFaultHook(ref, issue)
+		}
+		if err != nil {
+			return nil, err
+		}
+		if n < preflipEventsPageSize {
+			return content, nil
+		}
+		after = last
+	}
+}
+
+// readPreflipEventsRowPage adds to content the next page of the issue's rows
+// after the given id, and returns how many it read and the last id.
+func readPreflipEventsRowPage(ctx context.Context, db DBConn, table, issue, after string, content preflipEventsContent) (int, string, error) {
+	//nolint:gosec // G201: table is "events" or an AS OF over a validated ref; the limit is an int.
+	rows, err := db.QueryContext(ctx,
+		"SELECT id, "+preflipEventsDigestColumns+" FROM "+table+" WHERE issue_id = ? AND id > ? ORDER BY id LIMIT "+strconv.Itoa(preflipEventsPageSize),
+		issue, after)
+	if err != nil {
+		return 0, "", err
 	}
 	defer rows.Close()
-	content := make(map[string]preflipEventsContent)
+	n, last := 0, after
 	for rows.Next() {
-		var id string
 		fields := make([]sql.NullString, len(preflipEventsSourceColumns))
-		dests := []any{&id}
+		dests := []any{&last}
 		for i := range fields {
 			dests = append(dests, &fields[i])
 		}
 		if err := rows.Scan(dests...); err != nil {
-			return nil, err
+			return 0, "", err
 		}
-		issue := fields[0].String
-		if content[issue] == nil {
-			content[issue] = make(preflipEventsContent)
+		content.add(fields)
+		n++
+	}
+	return n, last, rows.Err()
+}
+
+// preflipEventsNeed is one content the live table holds fewer copies of than
+// the source.
+type preflipEventsNeed struct {
+	digest  string
+	fields  []sql.NullString
+	missing int
+}
+
+// planPreflipEventsNeeds returns, in digest order, how many copies of each of
+// an issue's source contents the live table is missing: max(0, source - live),
+// whatever ids the live copies hold.
+func planPreflipEventsNeeds(source, live preflipEventsContent) []preflipEventsNeed {
+	digests := make([]string, 0, len(source))
+	for digest := range source {
+		digests = append(digests, digest)
+	}
+	sort.Strings(digests)
+	var needs []preflipEventsNeed
+	for _, digest := range digests {
+		g := source[digest]
+		missing := g.count
+		if have, ok := live[digest]; ok {
+			missing -= have.count
 		}
-		content[issue].add(fields)
-		if taken != nil {
-			taken[id] = true
+		if missing > 0 {
+			needs = append(needs, preflipEventsNeed{digest: digest, fields: g.fields, missing: missing})
 		}
 	}
-	if err := rows.Err(); err != nil {
+	return needs
+}
+
+// allocatePreflipEvents emits need.missing rows of the need's content under
+// the lowest content-derived ids no row holds. Candidate ids are checked with
+// probe at most preflipEventsInsertBatch at a time. A derived id is a function
+// of content, so usually only a same-content row of the same issue holds it --
+// unless the row was re-pointed since (fk_events_issue cascades an issue
+// rename onto events.issue_id but not onto the id) -- so probing the table,
+// not the issue's rows, is what keeps a plain INSERT from colliding.
+func allocatePreflipEvents(need preflipEventsNeed, probe func([]string) (map[string]bool, error), emit func(preflipEventsRow) error) error {
+	ordinal := 0
+	for need.missing > 0 {
+		ids := make([]string, min(need.missing, preflipEventsInsertBatch))
+		for i := range ids {
+			ids[i] = rowid.New("events", ordinal, need.digest)
+			ordinal++
+		}
+		held, err := probe(ids)
+		if err != nil {
+			return fmt.Errorf("reading live event ids: %w", err)
+		}
+		for _, id := range ids {
+			if held[id] {
+				continue
+			}
+			if err := emit(preflipEventsRow{fields: need.fields, id: id}); err != nil {
+				return err
+			}
+			need.missing--
+		}
+	}
+	return nil
+}
+
+// heldPreflipEventIDs returns which of ids some live events row holds.
+func heldPreflipEventIDs(ctx context.Context, db DBConn, ids []string) (map[string]bool, error) {
+	//nolint:gosec // G201: only ? placeholders are interpolated.
+	found, err := preflipQueryStrings(ctx, db, "SELECT id FROM events WHERE id IN ("+preflipPlaceholders(len(ids))+")", preflipStringArgs(ids)...)
+	if err != nil {
 		return nil, err
 	}
-	return content, nil
-}
-
-// planPreflipEventsInserts returns, in a deterministic order, the rows that
-// bring each issue's live content up to the source's multiplicity, each under
-// the lowest content-derived id not in taken.
-func planPreflipEventsInserts(issues []string, source, live map[string]preflipEventsContent, taken map[string]bool) []preflipEventsRow {
-	var plan []preflipEventsRow
-	assigned := make(map[string]bool)
-	for _, issue := range issues {
-		groups := source[issue]
-		digests := make([]string, 0, len(groups))
-		for digest := range groups {
-			digests = append(digests, digest)
-		}
-		sort.Strings(digests)
-		for _, digest := range digests {
-			g := groups[digest]
-			missing := g.count
-			if have, ok := live[issue][digest]; ok {
-				missing -= have.count
-			}
-			ordinal := 0
-			for ; missing > 0; missing-- {
-				for {
-					id := rowid.New("events", ordinal, digest)
-					ordinal++
-					if !taken[id] && !assigned[id] {
-						assigned[id] = true
-						plan = append(plan, preflipEventsRow{fields: g.fields, id: id})
-						break
-					}
-				}
-			}
-		}
-	}
-	return plan
-}
-
-// heldPreflipEventIDs returns the planned ids some live events row already
-// holds.
-func heldPreflipEventIDs(ctx context.Context, db DBConn, plan []preflipEventsRow) ([]string, error) {
-	var held []string
-	for start := 0; start < len(plan); start += preflipEventsInsertBatch {
-		batch := plan[start:min(start+preflipEventsInsertBatch, len(plan))]
-		ids := make([]string, len(batch))
-		for i, row := range batch {
-			ids[i] = row.id
-		}
-		//nolint:gosec // G201: only ? placeholders are interpolated.
-		found, err := preflipQueryStrings(ctx, db, "SELECT id FROM events WHERE id IN ("+preflipPlaceholders(len(ids))+")", preflipStringArgs(ids)...)
-		if err != nil {
-			return nil, err
-		}
-		held = append(held, found...)
+	held := make(map[string]bool, len(found))
+	for _, id := range found {
+		held[id] = true
 	}
 	return held, nil
 }
 
-// insertPreflipEvents writes the plan in bounded, parameterized batches with
-// an explicit column list (the recreated table's column order differs from
-// the pre-0062 one).
-func insertPreflipEvents(ctx context.Context, db DBConn, plan []preflipEventsRow) (int, error) {
-	inserted := 0
-	for start := 0; start < len(plan); start += preflipEventsInsertBatch {
-		batch := plan[start:min(start+preflipEventsInsertBatch, len(plan))]
-		values := make([]string, len(batch))
-		args := make([]any, 0, len(batch)*8)
-		for i, row := range batch {
-			values[i] = "(?, ?, ?, ?, ?, ?, ?, ?)"
-			for _, f := range row.fields {
-				args = append(args, f)
-			}
-			args = append(args, row.id)
-		}
-		//nolint:gosec // G201: only ? placeholders are interpolated.
-		if _, err := db.ExecContext(ctx,
-			"INSERT INTO events ("+preflipEventsInsertColumns+") VALUES "+strings.Join(values, ", "), args...); err != nil {
-			return inserted, fmt.Errorf("inserting restored events: %w", err)
-		}
-		inserted += len(batch)
-		if preflipEventsInsertFaultHook != nil {
-			if err := preflipEventsInsertFaultHook(); err != nil {
-				return inserted, err
-			}
-		}
+// preflipEventsWriter streams restored rows into the live table in bounded,
+// parameterized batches with an explicit column list (the recreated table's
+// column order differs from the pre-0062 one).
+type preflipEventsWriter struct {
+	ctx      context.Context
+	db       DBConn
+	batch    []preflipEventsRow
+	inserted int
+}
+
+func (w *preflipEventsWriter) add(row preflipEventsRow) error {
+	w.batch = append(w.batch, row)
+	if len(w.batch) >= preflipEventsInsertBatch {
+		return w.flush()
 	}
-	return inserted, nil
+	return nil
+}
+
+func (w *preflipEventsWriter) flush() error {
+	if len(w.batch) == 0 {
+		return nil
+	}
+	values := make([]string, len(w.batch))
+	args := make([]any, 0, len(w.batch)*8)
+	for i, row := range w.batch {
+		values[i] = "(?, ?, ?, ?, ?, ?, ?, ?)"
+		for _, f := range row.fields {
+			args = append(args, f)
+		}
+		args = append(args, row.id)
+	}
+	//nolint:gosec // G201: only ? placeholders are interpolated.
+	if _, err := w.db.ExecContext(w.ctx,
+		"INSERT INTO events ("+preflipEventsInsertColumns+") VALUES "+strings.Join(values, ", "), args...); err != nil {
+		return fmt.Errorf("inserting restored events: %w", err)
+	}
+	w.inserted += len(w.batch)
+	w.batch = w.batch[:0]
+	if preflipEventsInsertFaultHook != nil {
+		return preflipEventsInsertFaultHook()
+	}
+	return nil
 }
 
 func preflipQueryStrings(ctx context.Context, db DBConn, query string, args ...any) ([]string, error) {

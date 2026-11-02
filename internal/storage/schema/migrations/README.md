@@ -89,9 +89,16 @@ clone but the one that migrates.** 0062 drops versioned `events`, commits the
 drop, and recreates the table ignored, refilled from a temp copy. The commit
 replicates; the refill does not. A clone that pulls the migration, or clones
 after it, gets the drop and an empty table, while its rows still sit in its own
-history at the drop commit's first parent (gastownhall/beads#7039; ignored 0031
-and `../events_preflip_seed.go` restore them). A future flip must plan the
-refill for every clone, not only the migrator's.
+history at the drop commit's first parent (gastownhall/beads#7039). A future
+flip must plan the refill for every clone, not only the migrator's, and that
+refill cannot live in frozen SQL: the drop commit is only findable by its
+frozen message, and the old rows are only readable `AS OF` its first parent
+(`dolt_commit_ancestors.parent_hash` with `parent_index = 0`; the table's
+`commit_hash` column names the child). Ignored 0031 is the shape to copy: an
+inert marker whose Go repair (`../events_preflip_seed.go`) does the reads and
+writes, with a header comment that names the table it writes so the raw-text
+dirty-table guard still sees it (`migrationSQLTouchesTable` scans comments on
+purpose). Never edit the frozen drop message; the repair matches it exactly.
 
 ## Testing
 
