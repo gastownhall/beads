@@ -415,7 +415,9 @@ for the check and the fix.
 no Dolt commit holds yet (a batch under batched or disabled auto-commit), and
 a commit that lands on `main` while the history is being rebuilt. Builds with
 the fix listed in the CHANGELOG move `main` with a soft reset and keep both.
-Working-set changes stay pending, as they were. A commit that landed during
+The check that the rebuilt history reproduces `main`'s data compares it with
+`main` as `bd compact` read it, so such a write is not mistaken for a divergent
+replay. Working-set changes stay pending, as they were. A commit that landed during
 the rebuild is kept in one follow-up commit,
 `compact: commit changes that reached main during compaction`, so it does not
 keep its own hash, message or author on `main`; changes that were already

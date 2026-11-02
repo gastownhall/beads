@@ -1170,9 +1170,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rebuild is kept in one follow-up commit
   (`compact: commit changes that reached main during compaction`), without its
   own hash, message or author; changes already staged when `bd compact` started
-  join that commit. If the follow-up commit fails, `bd compact` stops before
-  garbage collection with the changes staged on `main`, for `bd dolt commit`.
-  `bd flatten` and the merge-settle path are unchanged. See
+  join that commit. The check that the replay reproduces `main`'s data (#6645)
+  compares it with `main` as `bd compact` read it, so a write that lands
+  meanwhile is kept, not refused as a divergent replay. If the follow-up
+  commit fails, `bd compact` stops before garbage collection with the changes
+  staged on `main`, for `bd dolt commit`. `bd flatten` and the merge-settle
+  path are unchanged. See
   [Writes that reach `main` while `bd compact` runs](docs/architecture/dolt.md#maintenance--bd-prune-and-bd-purge).
 - `bd dolt push <remote>` and `bd dolt pull <remote>` now push to and pull
   from the named remote. bd ignored the name, so `bd dolt push 1st` pushed to

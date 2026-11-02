@@ -578,7 +578,9 @@ func TestEmbeddedCompactAbortsDivergentReplay(t *testing.T) {
 		if err := conn.QueryRowContext(t.Context(), "SELECT commit_hash FROM dolt_log ORDER BY commit_order ASC LIMIT 1").Scan(&root); err != nil {
 			t.Fatalf("read root commit: %v", err)
 		}
-		compactErr = versioncontrolops.Compact(t.Context(), conn, root, f.b.Hash, before.logCount-1, []string{f.a.Hash})
+		// The plan was read at main's current HEAD, B: that is the tree
+		// the replay must reproduce.
+		compactErr = versioncontrolops.Compact(t.Context(), conn, root, f.b.Hash, before.head, before.logCount-1, []string{f.a.Hash})
 	})
 	if compactErr == nil || !strings.Contains(compactErr.Error(), "replayed history differs from main") {
 		t.Errorf("Compact error = %v, want the replay divergence abort", compactErr)

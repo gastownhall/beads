@@ -183,13 +183,14 @@ func (f *compactFixture) conn() *sql.Conn {
 	return c
 }
 
-// compact runs Compact on hook (whose Conn it pins if unset).
+// compact runs Compact on hook (whose Conn it pins if unset) with the plan
+// read when the fixture was built: main's HEAD then is the planned head.
 func (f *compactFixture) compact(hook *compactHookConn) error {
 	f.t.Helper()
 	if hook.Conn == nil {
 		hook.Conn = f.conn()
 	}
-	return Compact(f.ctx, hook, f.initial, f.boundary, 2, f.recent)
+	return Compact(f.ctx, hook, f.initial, f.boundary, f.head, 2, f.recent)
 }
 
 // log returns main's commits, newest first.
@@ -376,12 +377,16 @@ func TestCompactKeepsUncommittedChanges(t *testing.T) {
 	})
 }
 
-// AC-2: a commit that reaches main after the rebuild, just before the final
-// reset, is in main's HEAD through one follow-up commit, while unrelated
-// working-only changes stay pending.
+// AC-2: a commit that reaches main after the plan was read, whether before
+// Compact starts, during the replay or just before the final reset, is in
+// main's HEAD through one follow-up commit, while unrelated working-only
+// changes stay pending. The replay check compares the replay with the planned
+// head, so such a commit is kept, not refused as a divergent replay.
 func TestCompactKeepsCommitLandingBeforeMainMoves(t *testing.T) {
 	port := startCompactTestServer(t)
 
+	// Lands between the replay check and the final reset: the check has
+	// already passed, so only the soft reset keeps this commit.
 	t.Run("landing commit", func(t *testing.T) {
 		f := newCompactFixture(t, port)
 		f.writePending(f.db)
@@ -403,6 +408,8 @@ func TestCompactKeepsCommitLandingBeforeMainMoves(t *testing.T) {
 		f.wantNoTempBranch()
 	})
 
+	// Lands before the replay check, so main's HEAD differs from the replay
+	// when the check runs.
 	t.Run("landing during replay", func(t *testing.T) {
 		f := newCompactFixture(t, port)
 		f.writePending(f.db)
@@ -426,6 +433,26 @@ func TestCompactKeepsCommitLandingBeforeMainMoves(t *testing.T) {
 		f.wantHeadTree(landed)
 		f.wantPendingKept()
 		f.wantStatus("config:false", "u:false")
+	})
+
+	// Lands between the plan read and Compact's first statement, as a write
+	// can between bd compact's log read and its compaction.
+	t.Run("landing after the plan was read", func(t *testing.T) {
+		f := newCompactFixture(t, port)
+		f.writePending(f.db)
+		landed := f.landRow(f.conn())
+
+		if err := f.compact(&compactHookConn{}); err != nil {
+			t.Fatalf("Compact: %v", err)
+		}
+		if n := f.count("SELECT COUNT(*) FROM t AS OF 'HEAD' WHERE id = 600"); n != 1 {
+			t.Fatalf("landed t row 600 in main's HEAD: present=false, want present=true")
+		}
+		f.wantFollowupLog()
+		f.wantHeadTree(landed)
+		f.wantPendingKept()
+		f.wantStatus("config:false", "u:false")
+		f.wantNoTempBranch()
 	})
 
 	t.Run("another writer commits the staged rows first", func(t *testing.T) {
@@ -587,4 +614,58 @@ func TestCompactFollowupFailureKeepsChangesStaged(t *testing.T) {
 		f.wantStatus("t:true")
 		f.wantNoTempBranch()
 	})
+}
+
+// #6645 composed with a concurrent write: the replay check compares the
+// replay with the planned head, not main's current HEAD, but that must not
+// weaken it. A replay that differs from the planned head still aborts before
+// main moves, while a commit that lands on main during the replay stays
+// exactly where its writer put it.
+func TestCompactRefusesDivergentReplayWhileMainMoves(t *testing.T) {
+	port := startCompactTestServer(t)
+	f := newCompactFixture(t, port)
+
+	// edit changes config, revert restores it. A plan that squashes up to
+	// revert and replays edit again (the shape bd compact's planner refuses)
+	// rebuilds a tree with the edit, which revert's tree does not have.
+	f.exec(f.db,
+		"UPDATE config SET v = 'edited' WHERE k = 'mode'",
+		"CALL DOLT_COMMIT('-Am', 'edit')",
+		"UPDATE config SET v = 'base' WHERE k = 'mode'",
+		"CALL DOLT_COMMIT('-Am', 'revert')",
+	)
+	hashes, _ := f.log()
+	revert, edit := hashes[0], hashes[1]
+	f.writePending(f.db)
+	writer := f.conn()
+
+	var done bool
+	var landed string
+	hook := &compactHookConn{Conn: f.conn(), beforeExec: func(query string) {
+		if !done && strings.Contains(query, "DOLT_CHERRY_PICK") {
+			done = true
+			landed = f.landRow(writer)
+		}
+	}}
+	err := Compact(f.ctx, hook, f.initial, revert, revert, 6, []string{edit})
+	if err == nil || !strings.Contains(err.Error(), "replayed history differs from main's planned head "+revert[:8]) {
+		t.Fatalf("Compact error = %v, want the divergent replay refused against the planned head %s", err, revert[:8])
+	}
+	if hook.resetDone.Load() {
+		t.Fatalf("Compact reset main after the replay check failed")
+	}
+
+	var head string
+	if err := f.db.QueryRowContext(f.ctx, "SELECT HASHOF('main')").Scan(&head); err != nil {
+		t.Fatalf("read main's HEAD: %v", err)
+	}
+	if head != landed {
+		t.Fatalf("main's HEAD = %s after the refused compaction, want the landed commit %s", head, landed)
+	}
+	if v := f.value("SELECT v FROM config AS OF 'HEAD' WHERE k = 'mode'"); v != "base" {
+		t.Fatalf("config mode in main's HEAD = %q, want %q (the divergent replay must not reach main)", v, "base")
+	}
+	f.wantPendingKept()
+	f.wantStatus("config:false", "u:false")
+	f.wantNoTempBranch()
 }
