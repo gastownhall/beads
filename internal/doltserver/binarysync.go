@@ -131,9 +131,18 @@ func SyncServerBinary(req BinarySyncRequest) error {
 			return nil
 		}
 		return replaceStaleServer(serverDir, req, verdict)
+	case binaryCannotReplace:
+		if !binaryMutationPermitted(req) {
+			return nil
+		}
+		// The replacement exists but bd would refuse to launch it (missing,
+		// broken, or below the required floor). The running server is
+		// preserved — stopping it first would leave the workspace with no
+		// server and nothing bd is willing to start — and the open refuses
+		// to query a server it decided not to trust.
+		return cannotReplaceError(req, verdict)
 	default:
-		// Unknown and cannot-replace leave the connection behavior
-		// unchanged.
+		// Unknown leaves the connection behavior unchanged.
 		return nil
 	}
 }
@@ -217,6 +226,12 @@ func classifyServerBinary(serverDir string, trackedPID int, req BinarySyncReques
 		}
 		base.candidate = cand
 		if cand.version != serverVersion {
+			// The launch candidate must clear the same floor a start would
+			// enforce before the server is stopped for it.
+			if err := RequireDoltBinaryVersion(cand.givenPath); err != nil {
+				base.kind, base.problem = binaryCannotReplace, err.Error()
+				return base
+			}
 			base.kind = binaryStale
 			return base
 		}
@@ -236,6 +251,12 @@ func classifyServerBinary(serverDir string, trackedPID int, req BinarySyncReques
 	base.candidate = cand
 	if !cand.known || !rec.KnownVersion {
 		base.kind = binaryUnknown
+		return base
+	}
+	// A replacement bd would refuse to launch is not a replacement: say so
+	// before anything is stopped.
+	if err := RequireDoltBinaryVersion(cand.givenPath); err != nil {
+		base.kind, base.problem = binaryCannotReplace, err.Error()
 		return base
 	}
 	if cand.version != rec.DoltVersion {
@@ -359,6 +380,14 @@ func replaceStaleServer(serverDir string, req BinarySyncRequest, stale binaryVer
 	if verdict.kind != binaryStale {
 		return nil
 	}
+	// Preflight the exact candidate the launch will use, after the
+	// re-classification captured it. Its failure is an open error that
+	// preserves the running server: stopping a server for a binary bd would
+	// then refuse to launch leaves the workspace worse off than either
+	// alternative.
+	if err := RequireDoltBinaryVersion(verdict.candidate.givenPath); err != nil {
+		return fmt.Errorf("replacing the stale dolt sql-server on port %d: %w", req.Port, err)
+	}
 
 	state, err := restartLocked(serverDir)
 	if err != nil {
@@ -371,6 +400,26 @@ func replaceStaleServer(serverDir string, req BinarySyncRequest, stale binaryVer
 			"The stop commits each database's uncommitted working set when it can reach them, so no finished work is lost (see any flush warnings above).\n",
 		req.Port, stale.trackedPID, verdict.serverVersion, verdict.candidate.version, state.PID)
 	return nil
+}
+
+// cannotReplaceError is the open error for a tracked server whose recorded
+// executable was replaced by something bd cannot launch. The running server
+// is preserved (the error is the open's, not a lifecycle change), and the
+// remedy names both the fix and the restart.
+func cannotReplaceError(req BinarySyncRequest, v binaryVerdict) error {
+	return fmt.Errorf(
+		"bd will not query the tracked dolt sql-server on port %d (PID %d): it was started from a dolt binary that has since been replaced, and the replacement cannot be launched: %s\n"+
+			"The running server is unchanged. Fix dolt (install or repair the binary on PATH), then restart the server: bd dolt stop && bd dolt start",
+		req.Port, v.trackedPID, firstLine(v.problem))
+}
+
+func firstLine(s string) string {
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\n' {
+			return s[:i]
+		}
+	}
+	return s
 }
 
 // ServerBinaryPath returns the path of the binary witness sidecar for

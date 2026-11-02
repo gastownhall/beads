@@ -2461,7 +2461,15 @@ func stopLocked(beadsDir string) error {
 	}
 
 	if err := gracefulStop(state.PID, 5*time.Second); err != nil {
-		return errors.Join(err, cleanupStateFiles(beadsDir))
+		// GH#6064: an exit that could not be confirmed leaves the server's
+		// state files in place. Removing them would orphan a possibly-live
+		// server bd can no longer find, and would erase the evidence the
+		// next bd needs to classify the server it tried to replace. The
+		// operator resolves it with 'bd dolt stop' once the exit can be
+		// confirmed.
+		return fmt.Errorf("stopping dolt sql-server (PID %d): %w\n"+
+			"The server's state files were left in place because the exit could not be confirmed; "+
+			"run 'bd dolt stop' again once the process is gone", state.PID, err)
 	}
 
 	// In debug mode, rotate cpu.pprof → cpu-<timestamp>.pprof so the next

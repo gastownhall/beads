@@ -4,6 +4,7 @@ package doltserver
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -495,4 +496,128 @@ func TestSyncServerBinary_IgnoresAnotherPIDsRecord(t *testing.T) {
 	if stderr != "" {
 		t.Errorf("an unknown verdict produced output:\n%s", stderr)
 	}
+}
+
+// TestSyncServerBinary_FailedReplacement is AC-5: a replacement this open
+// initiated that cannot complete fails the open before any application
+// query runs — and each failure mode leaves the workspace in the state its
+// error names: a below-floor replacement never stops the running server, a
+// stop whose exit is unconfirmed keeps the tracked evidence, and a failed
+// start leaves the server stopped with the port retained.
+func TestSyncServerBinary_FailedReplacement(t *testing.T) {
+	startServer := func(t *testing.T) (beadsDir, launches string, state *State) {
+		t.Helper()
+		beadsDir, launches = fakeStartWorkspace(t)
+		stopTrackedServerAfterTest(t, beadsDir)
+		state, err := startForTest(t, beadsDir)
+		if err != nil {
+			t.Fatalf("starting the tracked server: %v", err)
+		}
+		return beadsDir, launches, state
+	}
+
+	t.Run("below-floor replacement preserves the server", func(t *testing.T) {
+		beadsDir, launches, state := startServer(t)
+		// The upgrade installs a dolt older than the one bd requires.
+		replaceFakeDolt(t, "2.5.1")
+
+		var syncErr error
+		stderr := captureStderr(t, func() {
+			syncErr = SyncServerBinary(BinarySyncRequest{
+				BeadsDir:     beadsDir,
+				Host:         "127.0.0.1",
+				Port:         state.Port,
+				AllowRestart: true,
+			})
+		})
+		if syncErr == nil {
+			t.Fatal("a replacement bd would refuse to launch must fail the open")
+		}
+		for _, want := range []string{"cannot be launched", "running server is unchanged"} {
+			if !strings.Contains(syncErr.Error(), want) {
+				t.Errorf("error is missing %q: %v", want, syncErr)
+			}
+		}
+		if !isProcessAlive(state.PID) {
+			t.Error("the running server was stopped for a replacement bd would refuse to launch")
+		}
+		if got := launchedPorts(t, launches); len(got) != 1 {
+			t.Errorf("launched %v, want only the original start (nothing relaunched)", got)
+		}
+		if pid := readTrackedPID(beadsDir); pid != state.PID {
+			t.Errorf("tracked PID = %d, want the preserved %d", pid, state.PID)
+		}
+		if stderr != "" {
+			t.Errorf("the refusal produced unexpected output:\n%s", stderr)
+		}
+	})
+
+	t.Run("failed stop retains the evidence", func(t *testing.T) {
+		beadsDir, launches, state := startServer(t)
+		replaceFakeDolt(t, "2.7.0")
+		// The stop cannot confirm the server's exit.
+		origStop := gracefulStop
+		t.Cleanup(func() { gracefulStop = origStop })
+		gracefulStop = func(int, time.Duration) error {
+			return errors.New("exit could not be confirmed")
+		}
+
+		var syncErr error
+		captureStderr(t, func() {
+			syncErr = SyncServerBinary(BinarySyncRequest{
+				BeadsDir:     beadsDir,
+				Host:         "127.0.0.1",
+				Port:         state.Port,
+				AllowRestart: true,
+			})
+		})
+		if syncErr == nil {
+			t.Fatal("a replacement whose stop failed must fail the open")
+		}
+		// The server is possibly still alive, so its evidence must stay:
+		// removing the state files would orphan a live server bd can no
+		// longer find, and would erase what the next bd needs to classify.
+		for _, path := range []string{pidPath(beadsDir), portPath(beadsDir), ServerBinaryPath(beadsDir)} {
+			if _, err := os.Stat(path); err != nil {
+				t.Errorf("stop failure removed %s, want the evidence retained: %v", filepath.Base(path), err)
+			}
+		}
+		if !isProcessAlive(state.PID) {
+			t.Errorf("the tracked server (PID %d) is gone, but its exit was never confirmed", state.PID)
+		}
+		if got := launchedPorts(t, launches); len(got) != 1 {
+			t.Errorf("launched %v, want only the original start (nothing relaunched)", got)
+		}
+	})
+
+	t.Run("failed start reports the stopped state and the retained port", func(t *testing.T) {
+		beadsDir, launches, state := startServer(t)
+		replaceFakeDolt(t, "2.7.0")
+		// The replacement's launch fails: the new dolt exits during startup.
+		t.Setenv(testFakeDoltExitEnv, "1")
+
+		var syncErr error
+		captureStderr(t, func() {
+			syncErr = SyncServerBinary(BinarySyncRequest{
+				BeadsDir:     beadsDir,
+				Host:         "127.0.0.1",
+				Port:         state.Port,
+				AllowRestart: true,
+			})
+		})
+		if syncErr == nil {
+			t.Fatal("a replacement whose start failed must fail the open")
+		}
+		if !strings.Contains(syncErr.Error(), "server remains stopped") {
+			t.Errorf("the error must report the stopped state: %v", syncErr)
+		}
+		// The port the old server had is retained as desired state, so the
+		// operator's next start does not move the workspace.
+		if got := readPortFile(beadsDir); got != state.Port {
+			t.Errorf("port file = %d, want the retained %d", got, state.Port)
+		}
+		if got := launchedPorts(t, launches); len(got) != 2 {
+			t.Errorf("launched %v, want the original start and the failed relaunch", got)
+		}
+	})
 }
