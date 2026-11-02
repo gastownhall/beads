@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -159,6 +160,87 @@ func TestSyncFilteredPushPublishesWithoutExcludedTypes(t *testing.T) {
 	}
 	if got := readFilteredGraph(t, store, ""); got != localGraph {
 		t.Errorf("local graph = %+v, want %+v", got, localGraph)
+	}
+	assertOnlyMainBranch(t, store)
+}
+
+// commitOnPeer commits an edit to fp-task on top of the peer's current tip
+// and pushes it there, as another workspace syncing with the peer would.
+func commitOnPeer(t *testing.T, store *EmbeddedDoltStore, title string) {
+	t.Helper()
+	ctx := t.Context()
+	tip := peerTip(t, store)
+	if err := store.withPinnedDBConn(ctx, func(db versioncontrolops.DBConn) error {
+		for _, stmt := range []struct {
+			q    string
+			args []any
+		}{
+			{"CALL DOLT_BRANCH('peer-work', ?)", []any{tip}},
+			{"CALL DOLT_CHECKOUT('peer-work')", nil},
+			{"UPDATE issues SET title = ? WHERE id = 'fp-task'", []any{title}},
+			{"CALL DOLT_COMMIT('-Am', 'peer: edit published task')", nil},
+			{"CALL DOLT_PUSH(?, 'peer-work:main')", []any{filteredPushPeer}},
+			{"CALL DOLT_CHECKOUT('main')", nil},
+			{"CALL DOLT_BRANCH('-D', 'peer-work')", nil},
+		} {
+			if _, err := db.ExecContext(ctx, stmt.q, stmt.args...); err != nil {
+				return fmt.Errorf("%s: %w", stmt.q, err)
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("commit on peer: %v", err)
+	}
+}
+
+func syncFilteredPeer(t *testing.T, store *EmbeddedDoltStore, label string) {
+	t.Helper()
+	result, err := store.Sync(t.Context(), filteredPushPeer, "")
+	if err != nil {
+		t.Fatalf("%s: Sync: %v", label, err)
+	}
+	if result.PushError != nil || !result.Pushed {
+		t.Fatalf("%s: Sync pushed = %v, push error = %v; want a successful push", label, result.Pushed, result.PushError)
+	}
+}
+
+func taskTitleAt(t *testing.T, store *EmbeddedDoltStore, ref string) int {
+	t.Helper()
+	return countAt(t, store, ref, "SELECT COUNT(*) FROM issues %s WHERE id = 'fp-task' AND title = 'edited on peer'")
+}
+
+// AC-6: syncing again after a filtered push, with the peer unchanged or with
+// peer commits on the filtered tip, keeps the excluded issues and their
+// labels, comments and dependencies local and merges the peer's changes.
+func TestSyncFilteredPushRetainsExcludedRowsAcrossSyncs(t *testing.T) {
+	store := newFilteredPushStore(t)
+	seedFilteredPushGraph(t, store)
+
+	syncFilteredPeer(t, store, "first sync")
+	syncFilteredPeer(t, store, "sync with unchanged peer")
+	if got := readFilteredGraph(t, store, ""); got != localGraph {
+		t.Fatalf("after re-sync with unchanged peer, local graph = %+v, want %+v", got, localGraph)
+	}
+
+	commitOnPeer(t, store, "edited on peer")
+	syncFilteredPeer(t, store, "sync with peer commit on the filtered tip")
+	if got := readFilteredGraph(t, store, ""); got != localGraph {
+		t.Errorf("after merging a peer commit, local graph = %+v, want %+v", got, localGraph)
+	}
+	if taskTitleAt(t, store, "") != 1 {
+		t.Errorf("local fp-task lacks the peer's edit")
+	}
+	tip := peerTip(t, store)
+	if got := readFilteredGraph(t, store, tip); got != publishedGraph {
+		t.Errorf("peer tip graph = %+v, want %+v", got, publishedGraph)
+	}
+	if taskTitleAt(t, store, tip) != 1 {
+		t.Errorf("peer tip lost its own edit")
+	}
+
+	syncFilteredPeer(t, store, "final sync")
+	if got := readFilteredGraph(t, store, ""); got != localGraph {
+		t.Errorf("after the final sync, local graph = %+v, want %+v", got, localGraph)
 	}
 	assertOnlyMainBranch(t, store)
 }

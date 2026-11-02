@@ -14,17 +14,26 @@ import (
 // publishes. Each operation appends a UUID so concurrent pushes cannot collide.
 const FilteredPushStagingPrefix = "__federation_push_staging_"
 
+// FilteredPushKeepPrefix identifies the temporary branch holding the commit
+// that reverts the filter commit, which the backend merges into Source so the
+// local history descends from what the peer receives.
+const FilteredPushKeepPrefix = "__federation_push_keep_"
+
 // FilteredPushCommitMsg is the message of the staging commit that removes the
 // excluded issue types.
 const FilteredPushCommitMsg = "federation: exclude private issue types"
 
 // FilteredPush is one federation push that publishes Source without the
 // issues of ExcludeTypes ("wisp" matches ephemeral rows). Stage builds the
-// filtered commit on Staging; the backend pushes Staging to the peer's Source
-// and calls Cleanup on every exit.
+// filtered commit F on Staging and, on Keep, the commit R reverting it. The
+// backend merges Keep into Source before pushing Staging to the peer's
+// Source, so the filtered tip coming back on the next sync is an ancestor of
+// Source instead of a deletion of the excluded issues, and calls Cleanup on
+// every exit.
 type FilteredPush struct {
 	Source       string
 	Staging      string
+	Keep         string
 	ExcludeTypes []string
 	// Author is passed to the commits Stage makes; empty lets the session
 	// attribute them.
@@ -41,6 +50,7 @@ func NewFilteredPush(source string, excludeTypes []string, author string) (*Filt
 	return &FilteredPush{
 		Source:       source,
 		Staging:      FilteredPushStagingPrefix + id.String(),
+		Keep:         FilteredPushKeepPrefix + id.String(),
 		ExcludeTypes: excludeTypes,
 		Author:       author,
 	}, nil
@@ -53,9 +63,10 @@ func (p *FilteredPush) Refspec() string {
 
 // Stage creates Staging from Source on conn, deletes the excluded issues
 // there (foreign keys cascade to their labels, comments and dependencies),
-// recomputes is_blocked for the filtered graph and commits it, then checks
-// Source out again. It reports whether any row was removed; when none was,
-// Staging is Source and nothing is committed. Branch state is session
+// recomputes is_blocked for the filtered graph and commits it, creates Keep
+// from that commit and reverts it there, then checks Source out again. It
+// reports whether any row was removed; when none was, Staging is Source,
+// nothing is committed and Keep is not created. Branch state is session
 // scoped, so conn must be one pinned session; the caller arms Cleanup first,
 // since a create whose response is lost can leave the branch behind.
 //
@@ -79,11 +90,34 @@ func (p *FilteredPush) Stage(ctx context.Context, conn BlockedRecomputeConn) (bo
 		if err := CommitFilteredStaging(ctx, conn, p.Author); err != nil {
 			return false, err
 		}
+		if err := p.revertOnKeep(ctx, conn); err != nil {
+			return false, err
+		}
 	}
 	if err := CheckoutBranch(ctx, conn, p.Source); err != nil {
 		return false, fmt.Errorf("federation filter: restore branch %s: %w", p.Source, err)
 	}
 	return removed, nil
+}
+
+// revertOnKeep branches Keep from Staging's filter commit and reverts that
+// commit on Keep: Keep's tip has Source's tree with the filter commit as its
+// parent.
+func (p *FilteredPush) revertOnKeep(ctx context.Context, conn DBConn) error {
+	if _, err := conn.ExecContext(ctx, "CALL DOLT_BRANCH(?, ?)", p.Keep, p.Staging); err != nil {
+		return fmt.Errorf("federation filter: create keep branch: %w", err)
+	}
+	if err := CheckoutBranch(ctx, conn, p.Keep); err != nil {
+		return fmt.Errorf("federation filter: checkout keep branch: %w", err)
+	}
+	query, args := "CALL DOLT_REVERT('HEAD')", []any(nil)
+	if p.Author != "" {
+		query, args = "CALL DOLT_REVERT('--author', ?, 'HEAD')", []any{p.Author}
+	}
+	if _, err := conn.ExecContext(ctx, query, args...); err != nil {
+		return fmt.Errorf("federation filter: revert filter commit on keep branch: %w", err)
+	}
+	return nil
 }
 
 // filteredStagingIgnoredTables are the dolt_ignore'd tables the is_blocked
@@ -165,16 +199,18 @@ func CommitFilteredStaging(ctx context.Context, conn BlockedRecomputeConn, autho
 	return nil
 }
 
-// Cleanup checks Source out on db and deletes the temporary branch; a branch
-// that was never created is not an error. Errors are joined so one failure
+// Cleanup checks Source out on db and deletes both temporary branches; a
+// branch that was never created is not an error. Errors are joined so one failure
 // does not hide another.
 func (p *FilteredPush) Cleanup(ctx context.Context, db DBConn) error {
 	var errs error
 	if err := CheckoutBranch(ctx, db, p.Source); err != nil {
 		errs = errors.Join(errs, fmt.Errorf("restore branch %s: %w", p.Source, err))
 	}
-	if err := deleteBranchIfPresent(ctx, db, p.Staging); err != nil {
-		errs = errors.Join(errs, err)
+	for _, branch := range []string{p.Staging, p.Keep} {
+		if err := deleteBranchIfPresent(ctx, db, branch); err != nil {
+			errs = errors.Join(errs, err)
+		}
 	}
 	return errs
 }

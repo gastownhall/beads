@@ -463,15 +463,29 @@ func (s *EmbeddedDoltStore) filteredPushToPeer(ctx context.Context, peer string,
 		}
 	}()
 
+	removed := false
 	if err := s.withMutatingPinnedDBConn(ctx, func(db versioncontrolops.DBConn) error {
 		conn, ok := db.(versioncontrolops.BlockedRecomputeConn)
 		if !ok {
 			return fmt.Errorf("federation filter: pinned session %T cannot open a transaction", db)
 		}
-		_, err := push.Stage(ctx, conn)
+		var err error
+		removed, err = push.Stage(ctx, conn)
 		return err
 	}); err != nil {
 		return err
+	}
+	// Bring the revert of the filter commit into the local branch before the
+	// filtered tip leaves: once the peer has it, the next sync merges it as an
+	// ancestor rather than as a deletion of the excluded issues.
+	if removed {
+		conflicts, err := s.Merge(ctx, push.Keep)
+		if err != nil {
+			return fmt.Errorf("federation filter: merge keep branch: %w", err)
+		}
+		if len(conflicts) > 0 {
+			return fmt.Errorf("federation filter: merge keep branch: %d conflict(s); nothing pushed", len(conflicts))
+		}
 	}
 
 	return s.withPeerAuth(ctx, peer, func(user string) error {
