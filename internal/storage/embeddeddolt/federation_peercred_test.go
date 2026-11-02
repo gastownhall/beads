@@ -5,6 +5,7 @@ package embeddeddolt
 import (
 	"database/sql"
 	"errors"
+	"os"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage"
@@ -72,4 +73,51 @@ func TestFederationPeerPasswordBindsToStoredIdentity(t *testing.T) {
 			t.Fatalf("GetFederationPeer(prod) with another key decrypted %q, want a failure", got.Password)
 		}
 	})
+}
+
+// AC-2: alpha's row, still naming alpha's live remote, is given prod's
+// username and ciphertext. Authenticating as alpha must refuse before the
+// operation runs, and prod must keep working.
+func TestWithPeerAuth_CopiedCredentialRowFailsClosed(t *testing.T) {
+	ctx := t.Context()
+	store := newPeerAuthTestStore(t)
+	t.Setenv("DOLT_REMOTE_USER", "envuser")
+	t.Setenv("DOLT_REMOTE_PASSWORD", "envpass")
+
+	for _, p := range []*storage.FederationPeer{
+		{Name: "prod", RemoteURL: "https://prod.example/db", Username: "produser", Password: "prod-s3cret"},
+		{Name: "alpha", RemoteURL: "https://alpha.example/db", Username: "alphauser", Password: "alpha-pass"},
+	} {
+		if err := store.AddFederationPeer(ctx, p); err != nil {
+			t.Fatalf("AddFederationPeer(%s): %v", p.Name, err)
+		}
+	}
+	execPeerSQL(t, store, `UPDATE federation_peers AS a JOIN federation_peers AS p ON p.name = 'prod'
+		SET a.username = p.username, a.password_encrypted = p.password_encrypted WHERE a.name = 'alpha'`)
+
+	called := false
+	err := store.withPeerAuth(ctx, "alpha", func(string) error {
+		called = true
+		if os.Getenv("DOLT_REMOTE_PASSWORD") == "prod-s3cret" {
+			t.Error("withPeerAuth(alpha) installed prod's password for alpha's remote")
+		}
+		return nil
+	})
+	if err == nil || called {
+		t.Fatalf("withPeerAuth(alpha) err = %v, called = %v; want a refusal before the operation", err, called)
+	}
+	if got := os.Getenv("DOLT_REMOTE_PASSWORD"); got != "envpass" {
+		t.Errorf("DOLT_REMOTE_PASSWORD after refusal = %q, want untouched %q", got, "envpass")
+	}
+
+	var user, pwd string
+	if err := store.withPeerAuth(ctx, "prod", func(u string) error {
+		user, pwd = u, os.Getenv("DOLT_REMOTE_PASSWORD")
+		return nil
+	}); err != nil {
+		t.Fatalf("withPeerAuth(prod): %v", err)
+	}
+	if user != "produser" || pwd != "prod-s3cret" {
+		t.Fatalf("withPeerAuth(prod) user = %q, password = %q; want prod's", user, pwd)
+	}
 }

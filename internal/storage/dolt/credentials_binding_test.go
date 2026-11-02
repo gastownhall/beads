@@ -99,3 +99,45 @@ func TestFederationPeerPasswordBindsToStoredIdentity(t *testing.T) {
 		}
 	})
 }
+
+// AC-2: a replicated row naming another configured remote, carrying prod's
+// username and ciphertext, must not release prod's password, and must refuse
+// before the operation runs; prod itself keeps working.
+func TestWithPeerCredentialsRefusesCopiedCredentialRow(t *testing.T) {
+	key := bindingTestKey(5)
+	prod := &storage.FederationPeer{Name: "prod", RemoteURL: "https://prod.example/db", Username: "produser", Password: "prod-s3cret"}
+	sealer, _ := newBindingTestStore(t, key)
+	prodBlob := sealForTest(t, sealer, prod)
+
+	t.Run("copied row", func(t *testing.T) {
+		store, mock := newBindingTestStore(t, key)
+		alpha := &storage.FederationPeer{Name: "alpha", RemoteURL: "https://alpha.example/db", Username: prod.Username}
+		expectPeerRow(mock, "alpha", alpha, prodBlob)
+		called := false
+		err := store.withPeerCredentials(t.Context(), "alpha", func(creds *remoteCredentials) error {
+			called = true
+			if creds != nil && creds.password == prod.Password {
+				t.Errorf("withPeerCredentials(alpha) released prod's password")
+			}
+			return nil
+		})
+		if err == nil || called {
+			t.Fatalf("withPeerCredentials(alpha) err = %v, called = %v; want a refusal before the operation", err, called)
+		}
+	})
+
+	t.Run("original peer", func(t *testing.T) {
+		store, mock := newBindingTestStore(t, key)
+		expectPeerRow(mock, "prod", prod, prodBlob)
+		var got *remoteCredentials
+		if err := store.withPeerCredentials(t.Context(), "prod", func(creds *remoteCredentials) error {
+			got = creds
+			return nil
+		}); err != nil {
+			t.Fatalf("withPeerCredentials(prod) error = %v", err)
+		}
+		if got == nil || got.username != prod.Username || got.password != prod.Password {
+			t.Fatalf("withPeerCredentials(prod) creds = %+v, want prod's", got)
+		}
+	})
+}
