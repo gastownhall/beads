@@ -50,7 +50,8 @@ func TestMigrationPassRestoresTransactionCommitAfterFailure_4470(t *testing.T) {
 }
 
 // TestMigrationPassJoinsRestoreFailureToPassError_4470: when the restore also
-// fails, both causes stay observable.
+// fails, both causes stay observable, on one line with the pass's error first
+// so a last-line-only capture cannot drop the migration diagnostic.
 func TestMigrationPassJoinsRestoreFailureToPassError_4470(t *testing.T) {
 	failOnSwallowedAdvisory(t)
 	db, mock, err := sqlmock.New()
@@ -70,6 +71,18 @@ func TestMigrationPassJoinsRestoreFailureToPassError_4470(t *testing.T) {
 	_, err = migrateUpAfterReconcile(context.Background(), db, false)
 	if !errors.Is(err, errPass) || !errors.Is(err, errRestore) {
 		t.Fatalf("migrateUpAfterReconcile() error = %v, want both the pass and restore errors", err)
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "\n") {
+		t.Fatalf("migrateUpAfterReconcile() error is multi-line, want one line: %q", msg)
+	}
+	passIdx := strings.Index(msg, errPass.Error())
+	restoreIdx := strings.Index(msg, "restoring @@dolt_transaction_commit")
+	if passIdx < 0 || restoreIdx < passIdx {
+		t.Fatalf("migrateUpAfterReconcile() error = %q, want the pass error first, then the restore failure", msg)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
 	}
 }
 
@@ -260,6 +273,9 @@ func TestMigrateUpJoinsRestoreFailureOntoDirtyGuardError(t *testing.T) {
 	}
 	if !errors.Is(err, restoreErr) {
 		t.Fatalf("MigrateUp() error = %v, want the restore failure joined onto it", err)
+	}
+	if strings.Contains(err.Error(), "\n") {
+		t.Fatalf("MigrateUp() error is multi-line, want one line: %q", err.Error())
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet SQL expectations: %v", err)

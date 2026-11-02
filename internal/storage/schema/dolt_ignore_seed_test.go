@@ -215,11 +215,15 @@ func TestSeedDoltIgnorePatternsDegradesToBlindWriteOnPartialRead(t *testing.T) {
 // non-ignored CREATE auto-commits, so without this pattern the intermediates
 // materialize as real tables at HEAD and the rename halves wedge dolt_status
 // (field incident: three-city shared hub, twice in one day, fleet write
-// refusal behind the dirty-table guard). The canonical set must cover the
-// intermediates so they are born ignored; dolt's own matcher treats the
-// underscores literally (patterns support only ? * %), so the entry matches
-// exactly the __temp__ prefix. The engine-level contract is pinned by
-// TestEmbeddedTempRebuildIntermediatesNeverReachHistory in embeddeddolt.
+// refusal behind the dirty-table guard). This binary's own pass now turns the
+// setting off for its session (GH#4470); the pattern still guards binaries
+// without that suspension and other auto-commit sessions on a shared server.
+// The canonical set must cover the intermediates so they are born ignored;
+// dolt's own matcher treats the underscores literally (patterns support only
+// ? * %), so the entry matches exactly the __temp__ prefix. The engine-level
+// contract is pinned by TestEmbeddedTempRebuildIntermediatesNeverReachHistory
+// in embeddeddolt, which keeps the setting on through its pass
+// (SetKeepTransactionCommitForTest).
 func TestDoltIgnorePatternsCoverRebuildIntermediates(t *testing.T) {
 	if !slices.Contains(doltIgnorePatterns, "__temp__%") {
 		t.Fatal("doltIgnorePatterns is missing \"__temp__%\": ignored-series rebuild intermediates would auto-commit as tracked tables on dolt_transaction_commit=1 servers")

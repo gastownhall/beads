@@ -17,6 +17,9 @@ import (
 // The setting is per session, so the caller must run the whole pass on one
 // pinned connection (MigrateUpWithLock already requires a *sql.Conn).
 func suspendTransactionCommit(ctx context.Context, db DBConn) (restore func() error, err error) {
+	if keepTransactionCommitForTest {
+		return func() error { return nil }, nil
+	}
 	var enabled int64
 	if err := db.QueryRowContext(ctx, "SELECT @@SESSION.dolt_transaction_commit").Scan(&enabled); err != nil {
 		return nil, fmt.Errorf("reading @@dolt_transaction_commit: %w", err)
@@ -42,4 +45,34 @@ func suspendTransactionCommit(ctx context.Context, db DBConn) (restore func() er
 		}
 		return nil
 	}, nil
+}
+
+// joinRestoreError adds a failed restore to the pass's own result without
+// replacing it. Like MigrateUpWithLock's lock release, both go on one line,
+// the pass's error first: errors.Join's separator newline would let a
+// last-line-only capture drop the migration diagnostic.
+func joinRestoreError(err, restoreErr error) error {
+	switch {
+	case restoreErr == nil:
+		return err
+	case err == nil:
+		return restoreErr
+	default:
+		// Two %w verbs keep errors.Is/As working for both errors.
+		return fmt.Errorf("%w (transaction-commit restore also failed: %w)", err, restoreErr)
+	}
+}
+
+// keepTransactionCommitForTest is a test-only seam. When true,
+// suspendTransactionCommit leaves the session's setting alone, so a test can
+// run a pass with automatic transaction commits on, the way a binary without
+// the suspension still runs it. Production leaves it false.
+var keepTransactionCommitForTest bool
+
+// SetKeepTransactionCommitForTest sets keepTransactionCommitForTest and
+// returns a function that restores the previous value. Test-only.
+func SetKeepTransactionCommitForTest(keep bool) func() {
+	prev := keepTransactionCommitForTest
+	keepTransactionCommitForTest = keep
+	return func() { keepTransactionCommitForTest = prev }
 }

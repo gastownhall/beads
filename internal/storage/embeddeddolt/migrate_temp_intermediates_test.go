@@ -63,6 +63,11 @@ func TestEmbeddedTempRebuildIntermediatesNeverReachHistory(t *testing.T) {
 	if _, err := conn.ExecContext(ctx, "SET @@dolt_transaction_commit = 1"); err != nil {
 		t.Fatalf("enable dolt_transaction_commit: %v", err)
 	}
+	// This binary's own pass turns the setting off for its session (GH#4470),
+	// which would let the pass succeed without the pattern. Keep it on, as a
+	// binary without the suspension runs the pass: the pattern still guards
+	// those passes and the sweeps of other auto-commit sessions on a hub.
+	t.Cleanup(schema.SetKeepTransactionCommitForTest(true))
 
 	// The fresh-box open.
 	if _, err := schema.MigrateUp(ctx, conn); err != nil {
