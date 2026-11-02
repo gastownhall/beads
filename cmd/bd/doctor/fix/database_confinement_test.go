@@ -184,6 +184,82 @@ func TestDatabaseIntegrityRefusesUnsafeDatabaseSelections(t *testing.T) {
 	}
 }
 
+// TestRestoreIntegrityBackupRefusesReplacedDestination covers AC-8: when a
+// reinitialization's database destination has been replaced with a symlink
+// to outside data, the rollback refuses to remove or restore through it,
+// preserves the backup and the outside sentinel, and reports the backup
+// location.
+func TestRestoreIntegrityBackupRefusesReplacedDestination(t *testing.T) {
+	t.Setenv("BEADS_DOLT_DATA_DIR", "")
+	dir := setupTestWorkspace(t)
+	beadsDir := filepath.Join(dir, ".beads")
+	doltPath := filepath.Join(beadsDir, "dolt")
+
+	// The corrupt database, already renamed away to its backup by the
+	// admitted recovery.
+	backupPath := doltPath + ".20260102T030405Z.corrupt.backup"
+	if err := os.WriteFile(backupPath, []byte("corrupt database\n"), 0o644); err != nil {
+		t.Fatalf("plant backup: %v", err)
+	}
+	// The destination, replaced with a symlink to outside data while the
+	// reinitialization ran.
+	outside := filepath.Join(dir, "outside-dolt")
+	checkSentinel := sentinelForTest(t, filepath.Join(outside, "noms.db"), "sentinel-data\n")
+	if err := os.Symlink(outside, doltPath); err != nil {
+		t.Fatalf("symlink destination: %v", err)
+	}
+
+	err := restoreIntegrityBackup(beadsDir, doltPath, backupPath)
+	if err == nil {
+		t.Fatal("expected rollback to refuse the replaced destination")
+	}
+	if !strings.Contains(err.Error(), "refusing") {
+		t.Fatalf("expected a refusal error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), backupPath) {
+		t.Fatalf("error %q does not report the preserved backup location", err)
+	}
+	// The outside data survives, the symlink entry is untouched, and the
+	// backup is preserved.
+	checkSentinel()
+	fi, statErr := os.Lstat(doltPath)
+	if statErr != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("replaced destination removed or rewritten: lstat=%v", statErr)
+	}
+	if _, statErr := os.Lstat(backupPath); statErr != nil {
+		t.Errorf("backup not preserved: %v", statErr)
+	}
+}
+
+// TestRestoreIntegrityBackupRestoresNormally pins the allowed half of AC-8:
+// an unchanged destination still gets its reinitialized database removed and
+// the backup restored.
+func TestRestoreIntegrityBackupRestoresNormally(t *testing.T) {
+	t.Setenv("BEADS_DOLT_DATA_DIR", "")
+	dir := setupTestWorkspace(t)
+	beadsDir := filepath.Join(dir, ".beads")
+	doltPath := filepath.Join(beadsDir, "dolt")
+
+	// A fresh database the failed reinitialization created, plus the backup.
+	if err := os.MkdirAll(doltPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	backupPath := doltPath + ".20260102T030405Z.corrupt.backup"
+	if err := os.WriteFile(backupPath, []byte("corrupt database\n"), 0o644); err != nil {
+		t.Fatalf("plant backup: %v", err)
+	}
+
+	if err := restoreIntegrityBackup(beadsDir, doltPath, backupPath); err != nil {
+		t.Fatalf("rollback failed: %v", err)
+	}
+	if got, readErr := os.ReadFile(doltPath); readErr != nil || string(got) != "corrupt database\n" {
+		t.Errorf("backup not restored over the reinitialized database: %q (%v)", string(got), readErr)
+	}
+	if _, statErr := os.Lstat(backupPath); statErr == nil {
+		t.Errorf("backup sidecar left behind after a successful restore")
+	}
+}
+
 // TestRepoFingerprintChoice2RefusesUnsafeDatabaseSelections covers AC-6: the
 // same unsafe selections are refused by RepoFingerprint's reinitialize
 // choice before the DELETE confirmation is even read, leaving the database

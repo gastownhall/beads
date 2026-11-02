@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/remedy"
 )
 
 // DatabaseIntegrity attempts to recover from database corruption by:
@@ -64,8 +65,12 @@ func doltIntegrityRecovery(path, beadsDir string) error {
 	// Get bd binary path
 	bdBinary, err := getBdBinary()
 	if err != nil {
-		// Restore corrupted database on failure
-		_ = os.Rename(backupPath, doltPath)
+		// Restore corrupted database on failure. A rollback refusal keeps the
+		// original failure (the error below still wraps it) instead of
+		// reporting success while the backup stays behind.
+		if rbErr := restoreIntegrityBackup(beadsDir, doltPath, backupPath); rbErr != nil {
+			return fmt.Errorf("%w; rollback refused: %v", err, rbErr)
+		}
 		return err
 	}
 
@@ -80,13 +85,33 @@ func doltIntegrityRecovery(path, beadsDir string) error {
 	if err := initCmd.Run(); err != nil {
 		// Restore backup on failure
 		fmt.Printf("  Warning: recovery failed, restoring corrupted Dolt database from %s\n", filepath.Base(backupPath))
-		_ = os.RemoveAll(doltPath)
-		_ = os.Rename(backupPath, doltPath)
+		if rbErr := restoreIntegrityBackup(beadsDir, doltPath, backupPath); rbErr != nil {
+			return fmt.Errorf("failed to reinitialize Dolt database: %w; rollback refused: %v", err, rbErr)
+		}
 		return fmt.Errorf("failed to reinitialize Dolt database: %w", err)
 	}
 
 	fmt.Printf("  Recovered Dolt database\n")
 	fmt.Printf("  Corrupted database preserved at: %s\n", filepath.Base(backupPath))
+	return nil
+}
+
+// restoreIntegrityBackup rolls back a failed integrity recovery: it removes
+// the database the failed reinitialization left at the destination and
+// restores the corrupt backup over it. The destination is revalidated first
+// — the reinitialization ran a subprocess in the workspace, so the entry
+// that was confined before the backup rename may since have been replaced
+// (e.g. with a symlink to unrelated data); a refusal removes and restores
+// nothing, preserves the backup, and reports its location.
+func restoreIntegrityBackup(beadsDir, doltPath, backupPath string) error {
+	confinedPath, err := confinedDatabasePath(beadsDir, doltPath)
+	if err != nil {
+		return fmt.Errorf(
+			"refusing to restore through %s: %w; the corrupted database is preserved at %s",
+			remedy.PrintedValue(doltPath), err, remedy.PrintedValue(backupPath))
+	}
+	_ = os.RemoveAll(confinedPath)
+	_ = os.Rename(backupPath, confinedPath)
 	return nil
 }
 
