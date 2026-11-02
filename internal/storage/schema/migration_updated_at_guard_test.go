@@ -171,3 +171,69 @@ func TestRunMigrationsFailsGuardedStepOnUpdatedAtGuardError(t *testing.T) {
 		})
 	}
 }
+
+// TestUpdatedAtGuardIssuesNoQueriesOutsideTheRegistry pins AC-6: a step
+// outside updatedAtGuards gets no snapshot, reread or restoration query. A
+// sqlmock with no expectations fails any statement, so a nil snapshot and nil
+// error for every unregistered version of both series proves none was sent.
+func TestUpdatedAtGuardIssuesNoQueriesOutsideTheRegistry(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	unregistered := 0
+	for _, src := range []migrationSource{mainSource, ignoredSource} {
+		for _, mf := range src.list() {
+			if _, ok := updatedAtGuards[repairKey{src.cursorTable, mf.version}]; ok {
+				continue
+			}
+			unregistered++
+			snap, err := snapshotUpdatedAt(context.Background(), db, src, mf.version)
+			if err != nil || snap != nil {
+				t.Errorf("snapshotUpdatedAt(%s, %d) = %v, %v; want nil, nil", src.cursorTable, mf.version, snap, err)
+			}
+			if err := snap.restore(context.Background(), db); err != nil {
+				t.Errorf("restore after %s/%d = %v, want a no-op", src.cursorTable, mf.version, err)
+			}
+		}
+	}
+	if unregistered == 0 {
+		t.Fatal("no unregistered migration found; the sweep tested nothing")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+// TestRunMigrationsRunsUnregisteredStepWithoutGuardQueries is AC-6 through
+// the runner: main 0048 (unregistered) runs its body and records its cursor
+// row with nothing in between or before.
+func TestRunMigrationsRunsUnregisteredStepWithoutGuardQueries(t *testing.T) {
+	failOnSwallowedAdvisory(t)
+	quietStderr(t)
+	origCounter := issueRowCounter
+	issueRowCounter = func(context.Context, DBConn) (int64, error) { return 0, nil }
+	t.Cleanup(func() { issueRowCounter = origCounter })
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectExec(`ALTER TABLE events MODIFY old_value LONGTEXT`).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(`INSERT IGNORE INTO schema_migrations`).WithArgs(48, sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	applied, err := runMigrations(context.Background(), db, mainSource, 47, 48, false)
+	if err != nil {
+		t.Fatalf("runMigrations: %v", err)
+	}
+	if applied != 1 {
+		t.Fatalf("applied = %d, want 1", applied)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
