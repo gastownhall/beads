@@ -80,7 +80,23 @@ func MergeAndSettleWithStrategy(ctx context.Context, db DBConn, ref, strategy st
 		// DOLT_PULL swallows "Already up to date." internally; we do the same.
 		mergeErr = nil
 	}
-	return SettleMerge(ctx, db, mergeErr, preMergeClean, strategy)
+	// Capture the #6727 events-retirement conflict before SettleMerge runs:
+	// its abort wipes dolt_schema_conflicts (and a refusal never opens
+	// them), so afterwards nothing about the shape is queryable — the
+	// failure itself has to carry the recovery guidance.
+	retiredEvents := eventsRetiredConflict(ctx, db, mergeErr)
+	if err := SettleMerge(ctx, db, mergeErr, preMergeClean, strategy); err != nil {
+		if retiredEvents {
+			return fmt.Errorf("%w — %s", err, eventsRetiredConflictAdvice)
+		}
+		return err
+	}
+	if retiredEvents {
+		// The settle pass reported success over a merge the engine cannot
+		// commit. Do not let a silently wedged store through as a clean pull.
+		return errors.New("merge left an unresolved " + eventsRetiredConflictAdvice)
+	}
+	return nil
 }
 
 // MergeConflictsError reports the conflicts a settle pass refused to
@@ -303,6 +319,14 @@ func MergeWithStrategy(ctx context.Context, db DBConn, ref, author, strategy str
 			abortMerge(ctx, db, preMergeClean)
 			return nil, fmt.Errorf("merge branch %s: %w", ref, mergeErr)
 		}
+		if eventsRetiredConflict(ctx, db, nil) {
+			// #6727: the merge opened, left a schema conflict on the retired
+			// events table, and produced no row conflicts for the strategy
+			// to resolve — the shape below would report a clean success over
+			// a commit the engine refuses.
+			abortMerge(ctx, db, preMergeClean)
+			return nil, errors.New("merge branch " + ref + ": " + eventsRetiredConflictAdvice)
+		}
 		return nil, nil
 	}
 
@@ -341,6 +365,54 @@ func MergeWithStrategy(ctx context.Context, db DBConn, ref, author, strategy str
 	}
 
 	return conflicts, nil
+}
+
+// eventsRetiredConflictAdvice rides a merge failure blocked by the #6727
+// events-retirement shape. Migration 0062 removed the events audit table
+// from versioned history, so peer history that still writes to it conflicts
+// as a table deletion versus a data modification: neither --ours nor
+// --theirs can act on a table with no versioned existence on this side, and
+// `dolt checkout -- events` — the natural-looking way to clear the refusal —
+// destroys the working (ignored-plane) events table with all its rows. The
+// settle pass has aborted the merge (or it never opened) by the time this
+// text reaches the operator, and the aborted state is unqueryable
+// (dolt_schema_conflicts is empty, dolt_status looks clean), so the error
+// itself has to name the shape and where the recovery lives.
+const eventsRetiredConflictAdvice = "schema conflict on the retired events table: migration 0062 removed events from versioned history, and the incoming history still writes to it — a table-deletion-vs-modification shape --ours/--theirs cannot resolve; do not run `dolt checkout -- events` (it destroys the working events table); nothing was applied. Recovery: docs/recovery/sync-failures.md#merge-fails-with-the-tables-events-have-schema-conflicts"
+
+// eventsRetiredConflict reports whether a merge just blocked on the #6727
+// events-retirement shape: a schema conflict naming events, or a refusal to
+// stomp the ignored-plane working table naming events, while events is
+// registered in dolt_ignore — the signature migration 0062 leaves in this
+// database. mergeErr is the merge statement's own error, for the shapes
+// that refuse before any conflict state exists. Every read failure reads as
+// "no": a diagnosis must never add a failure on top of a failed merge.
+func eventsRetiredConflict(ctx context.Context, db DBConn, mergeErr error) bool {
+	if tables, err := schemaConflictTables(ctx, db); err == nil {
+		for _, t := range tables {
+			if strings.EqualFold(t, "events") {
+				return eventsOnIgnorePlane(ctx, db)
+			}
+		}
+	}
+	if mergeErr != nil {
+		msg := mergeErr.Error()
+		if strings.Contains(msg, "stomped by merge") && strings.Contains(msg, "events") {
+			return eventsOnIgnorePlane(ctx, db)
+		}
+	}
+	return false
+}
+
+// eventsOnIgnorePlane reports whether events is a dolt_ignored table here.
+// Engines without dolt_ignore read as no.
+func eventsOnIgnorePlane(ctx context.Context, db DBConn) bool {
+	var ignored int
+	if err := db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM dolt_ignore WHERE pattern = 'events' AND ignored = 1").Scan(&ignored); err != nil {
+		return false
+	}
+	return ignored > 0
 }
 
 // abortMerge restores the pre-merge state after a settle pass refused the
