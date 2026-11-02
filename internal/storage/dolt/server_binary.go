@@ -1,10 +1,14 @@
 package dolt
 
 import (
+	"context"
+	"database/sql"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/doltversion"
 	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
@@ -31,7 +35,8 @@ func reconcileServerBinary(cfg *Config, beadsDir, serverDir string) (int, error)
 	if !serverBinaryCandidate(cfg) {
 		return cfg.ServerPort, nil
 	}
-	check := checkServerBinary(serverDir, cfg.ServerPort)
+	serverVersion := serverDoltVersion(cfg)
+	check := checkServerBinary(serverDir, cfg.ServerPort, serverVersion)
 	refresh := check.Verdict == doltserver.BinaryCurrent && check.Refresh
 	if check.Verdict != doltserver.BinaryStale && check.Verdict != doltserver.BinaryCannotReplace && !refresh {
 		return cfg.ServerPort, nil
@@ -46,7 +51,7 @@ func reconcileServerBinary(cfg *Config, beadsDir, serverDir string) (int, error)
 	// For a reinstall of the same release (refresh) the server stays, and
 	// replaceStaleServer only records the executable it was compared with,
 	// unless it finds the server stale by the time it holds the lock.
-	res, err := replaceStaleServer(serverDir, cfg.ServerPort)
+	res, err := replaceStaleServer(serverDir, cfg.ServerPort, serverVersion)
 	if err != nil {
 		switch {
 		case res.Check.Verdict == doltserver.BinaryCannotReplace:
@@ -71,6 +76,30 @@ func reconcileServerBinary(cfg *Config, beadsDir, serverDir string) (int, error)
 		res.State.Port, res.Check.PID, res.State.PID, res.Check.RunningVersion,
 		remedy.PrintedValue(res.Check.CandidatePath), res.Check.CandidateVersion)
 	return res.State.Port, nil
+}
+
+// serverVersionTimeout bounds serverDoltVersion's query, so a server that
+// accepts connections but does not answer cannot stall the open.
+const serverVersionTimeout = 3 * time.Second
+
+// serverDoltVersion asks the server cfg dials for its dolt version, over a
+// connection of its own with no database selected. It is how a server bd has
+// no launch record for is compared.
+func serverDoltVersion(cfg *Config) doltserver.ServerVersionFunc {
+	return func() (string, error) {
+		db, err := sql.Open("mysql", buildServerDSN(cfg, ""))
+		if err != nil {
+			return "", err
+		}
+		defer db.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), serverVersionTimeout)
+		defer cancel()
+		v, err := doltversion.ServerVersion(ctx, db)
+		if err != nil {
+			return "", err
+		}
+		return v.String(), nil
+	}
 }
 
 func cannotReplaceServerError(addr string, check doltserver.BinaryCheck, reason error) error {

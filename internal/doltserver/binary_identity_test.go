@@ -75,17 +75,17 @@ func TestLaunchBinaryReplacedRestartsServer(t *testing.T) {
 	if !ok || rec.PID != state.PID || rec.Version != "2.6.0" || rec.Provenance != binaryProvenanceLaunched {
 		t.Fatalf("launch record = %+v (ok=%v), want PID %d, version 2.6.0, provenance launched", rec, ok, state.PID)
 	}
-	if got := CheckServerBinary(beadsDir, state.Port); got.Verdict != BinaryCurrent {
+	if got := CheckServerBinary(beadsDir, state.Port, nil); got.Verdict != BinaryCurrent {
 		t.Fatalf("before upgrade: verdict = %v (%v), want current", got.Verdict, got.Reason)
 	}
 
 	doltBin := upgradeFakeDolt(t, "2.7.0")
-	check := CheckServerBinary(beadsDir, state.Port)
+	check := CheckServerBinary(beadsDir, state.Port, nil)
 	if check.Verdict != BinaryStale || check.RunningVersion != "2.6.0" || check.CandidateVersion != "2.7.0" || check.PID != state.PID {
 		t.Fatalf("after upgrade: check = %+v, want stale 2.6.0 → 2.7.0 for PID %d", check, state.PID)
 	}
 
-	res, err := ReplaceStaleServer(beadsDir, state.Port)
+	res, err := ReplaceStaleServer(beadsDir, state.Port, nil)
 	if res.State != nil && res.State.PID > 0 {
 		killAtCleanup(t, res.State.PID)
 	}
@@ -111,7 +111,7 @@ func TestLaunchBinaryReplacedRestartsServer(t *testing.T) {
 	if !ok || rec.PID != res.State.PID || rec.Version != "2.7.0" || rec.Path != mustAbs(t, doltBin) {
 		t.Errorf("record after replacement = %+v (ok=%v), want PID %d, version 2.7.0, path %s", rec, ok, res.State.PID, doltBin)
 	}
-	if got := CheckServerBinary(beadsDir, state.Port); got.Verdict != BinaryCurrent {
+	if got := CheckServerBinary(beadsDir, state.Port, nil); got.Verdict != BinaryCurrent {
 		t.Errorf("after replacement: verdict = %v (%v), want current", got.Verdict, got.Reason)
 	}
 }
@@ -162,11 +162,11 @@ func TestLaunchBinaryUnchangedKeepsServer(t *testing.T) {
 			before, _ := os.ReadFile(binaryRecordPath(beadsDir))
 			tc.setup(t)
 
-			check := CheckServerBinary(beadsDir, state.Port)
+			check := CheckServerBinary(beadsDir, state.Port, nil)
 			if check.Verdict != BinaryCurrent || check.Refresh {
 				t.Fatalf("check = %+v, want current with nothing to refresh", check)
 			}
-			res, err := ReplaceStaleServer(beadsDir, state.Port)
+			res, err := ReplaceStaleServer(beadsDir, state.Port, nil)
 			if err != nil || res.Replaced {
 				t.Fatalf("ReplaceStaleServer = %+v, %v; want the server kept", res, err)
 			}
@@ -194,11 +194,11 @@ func TestLaunchBinarySameVersionReinstallKeepsServer(t *testing.T) {
 	}
 	doltBin := upgradeFakeDolt(t, "2.6.0")
 
-	check := CheckServerBinary(beadsDir, state.Port)
+	check := CheckServerBinary(beadsDir, state.Port, nil)
 	if check.Verdict != BinaryCurrent || !check.Refresh {
 		t.Fatalf("check = %+v, want current with a record to refresh", check)
 	}
-	res, err := ReplaceStaleServer(beadsDir, state.Port)
+	res, err := ReplaceStaleServer(beadsDir, state.Port, nil)
 	if err != nil || res.Replaced {
 		t.Fatalf("ReplaceStaleServer = %+v, %v; want the server kept", res, err)
 	}
@@ -215,7 +215,79 @@ func TestLaunchBinarySameVersionReinstallKeepsServer(t *testing.T) {
 		t.Fatalf("record = %+v (ok=%v), want PID %d, the reinstalled executable %+v, version 2.6.0, provenance observed",
 			rec, ok, state.PID, want)
 	}
-	if got := CheckServerBinary(beadsDir, state.Port); got.Verdict != BinaryCurrent || got.Refresh {
+	if got := CheckServerBinary(beadsDir, state.Port, nil); got.Verdict != BinaryCurrent || got.Refresh {
 		t.Errorf("after refresh: check = %+v, want current with nothing to refresh", got)
+	}
+}
+
+func reportsVersion(v string) ServerVersionFunc {
+	return func() (string, error) { return v, nil }
+}
+
+// TestLaunchBinaryUnrecordedServerComparedByVersion: a tracked server with no
+// launch record (started by a bd that wrote none) is compared by the version
+// it reports. A different release than the dolt bd would launch is replaced
+// as a recorded stale one is; the same release keeps running, and the dolt it
+// was compared with is recorded as observed; an unanswered question changes
+// nothing.
+func TestLaunchBinaryUnrecordedServerComparedByVersion(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		serverVersion ServerVersionFunc
+		want          BinaryVerdict
+		wantReplaced  bool
+		wantRecord    string // provenance of the record afterwards, "" for none
+	}{
+		{name: "different version", serverVersion: reportsVersion("2.5.9"), want: BinaryStale, wantReplaced: true, wantRecord: binaryProvenanceLaunched},
+		{name: "same version", serverVersion: reportsVersion("2.6.0"), want: BinaryCurrent, wantRecord: binaryProvenanceObserved},
+		{name: "no answer", serverVersion: func() (string, error) { return "", os.ErrDeadlineExceeded }, want: BinaryUnknown},
+		{name: "not asked", want: BinaryUnknown},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			beadsDir, launches := fakeStartWorkspace(t)
+			stubProcessListLaunchedHere(t)
+			state, err := startForTest(t, beadsDir)
+			if err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			if err := os.Remove(binaryRecordPath(beadsDir)); err != nil {
+				t.Fatal(err)
+			}
+
+			check := CheckServerBinary(beadsDir, state.Port, tc.serverVersion)
+			if check.Verdict != tc.want {
+				t.Fatalf("check = %+v, want verdict %v", check, tc.want)
+			}
+			res, err := ReplaceStaleServer(beadsDir, state.Port, tc.serverVersion)
+			if res.State != nil && res.State.PID > 0 {
+				killAtCleanup(t, res.State.PID)
+			}
+			if err != nil || res.Replaced != tc.wantReplaced {
+				t.Fatalf("ReplaceStaleServer = %+v, %v; want replaced=%v", res, err, tc.wantReplaced)
+			}
+			wantPID, wantLaunches := state.PID, 1
+			if tc.wantReplaced {
+				wantPID, wantLaunches = res.State.PID, 2
+				if res.State.Port != state.Port || pidAlive(state.PID) {
+					t.Errorf("replacement on port %d, old PID alive=%v; want port %d and the old server gone",
+						res.State.Port, pidAlive(state.PID), state.Port)
+				}
+			} else if !pidAlive(state.PID) {
+				t.Errorf("server PID %d stopped; want it kept", state.PID)
+			}
+			if got := launchedPorts(t, launches); len(got) != wantLaunches {
+				t.Errorf("launches = %v, want %d", got, wantLaunches)
+			}
+			rec, ok := readBinaryRecord(beadsDir)
+			if tc.wantRecord == "" {
+				if ok {
+					t.Errorf("record written: %+v", rec)
+				}
+				return
+			}
+			if !ok || rec.PID != wantPID || rec.Version != "2.6.0" || rec.Provenance != tc.wantRecord {
+				t.Errorf("record = %+v (ok=%v), want PID %d, version 2.6.0, provenance %s", rec, ok, wantPID, tc.wantRecord)
+			}
+		})
 	}
 }
