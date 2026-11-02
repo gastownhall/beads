@@ -145,6 +145,7 @@ go_test(
         "nocow_test.go",
         "path_writes_test.go",
         "perf_dolt_test.go",
+        "perf_profile_test.go",
         "quick_test.go",
         "role_test.go",
         "server_backend_test.go",

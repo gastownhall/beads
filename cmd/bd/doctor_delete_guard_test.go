@@ -52,6 +52,10 @@ var doctorDeleteExemptions = map[string]doctorDeleteExemption{
 		calls:  []string{"os.Remove"},
 		reason: "removes only the unique probe file this call created with os.CreateTemp",
 	},
+	"doctor/perf.go:startCPUProfile": {
+		calls:  []string{"os.Remove"},
+		reason: "removes only the unique profile file this call created with os.CreateTemp when profiling cannot start",
+	},
 	"doctor/fix/locks.go:StaleLockFiles": {
 		calls:  []string{"os.Remove", "os.Remove", "os.Remove"},
 		reason: "bd's own lock files in the admitted workspace, by fixed name and age, never data; the Lock Files check reports the same names and thresholds",

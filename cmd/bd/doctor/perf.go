@@ -3,8 +3,10 @@ package doctor
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"runtime/pprof"
+	"strings"
 )
 
 // RunPerformanceDiagnostics runs performance diagnostics.
@@ -39,14 +41,19 @@ func CollectPlatformInfo(path string) map[string]string {
 	return info
 }
 
+// startCPUProfile starts CPU profiling into a new file beside path. The file
+// is created exclusively with a random suffix (path "x.prof" becomes
+// "x-<random>.prof"), so an entry already at a predictable name, such as a
+// planted symlink, is never followed or replaced. Callers report f.Name().
 func startCPUProfile(path string) (*os.File, error) {
-	// #nosec G304 -- profile path supplied by CLI flag in trusted environment
-	f, err := os.Create(path)
+	pattern := strings.TrimSuffix(filepath.Base(path), ".prof") + "-*.prof"
+	f, err := os.CreateTemp(filepath.Dir(path), pattern)
 	if err != nil {
 		return nil, err
 	}
 	if err := pprof.StartCPUProfile(f); err != nil {
 		_ = f.Close()
+		_ = os.Remove(f.Name())
 		return nil, err
 	}
 	return f, nil
