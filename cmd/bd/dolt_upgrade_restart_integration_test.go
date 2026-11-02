@@ -197,8 +197,26 @@ func TestE2E_AutoStartedServerRestartsAfterDoltBinaryUpgrade(t *testing.T) {
 	if got := readServerPIDFile(t, beadsDir); got != newPID || !processAlive(newPID) {
 		t.Errorf("server PID after the next command = %d (alive %v), want %d kept", got, processAlive(newPID), newPID)
 	}
+	// bd init committed .beads/ without the server's state files, the launch
+	// record among them, so restarting and stopping the server leave it
+	// clean.
+	assertBeadsDirClean(t, tmpDir, "after the restart")
 
 	if out, errOut, err := runBDStdoutStderr(t, bdBinary, tmpDir, env, "dolt", "stop"); err != nil {
 		t.Fatalf("bd dolt stop cleanup failed: %v\n%s%s", err, out, errOut)
+	}
+	assertBeadsDirClean(t, tmpDir, "after bd dolt stop")
+}
+
+// assertBeadsDirClean fails the test when git status shows any change under
+// repo's .beads/, untracked files included.
+func assertBeadsDirClean(t *testing.T, repo, when string) {
+	t.Helper()
+	status, err := runCommandInDirCombinedOutput(repo, "git", "status", "--porcelain", "--untracked-files=all", "--", ".beads")
+	if err != nil {
+		t.Fatalf("git status %s failed: %v\n%s", when, err, status)
+	}
+	if status != "" {
+		t.Errorf("git status shows .beads/ changes %s:\n%s", when, status)
 	}
 }

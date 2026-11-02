@@ -126,10 +126,9 @@ bd info  # Shows warnings if hooks are outdated
 bd dolt stop && bd dolt start
 ```
 
-**After upgrading `dolt` itself:** a server bd started keeps running the old
-`dolt` until it restarts. The next bd command that may restart it does so on
-the installed `dolt` before it sends a query, and prints a notice; otherwise
-bd warns. See [After you upgrade `dolt`](../architecture/dolt.md#after-you-upgrade-dolt).
+**After upgrading `dolt` itself:** a running server keeps running the `dolt`
+it was started from, so restart it to run the new release:
+`bd dolt stop && bd dolt start`.
 
 **Why update hooks?** Git hooks are versioned with bd. Outdated hooks may miss export refresh, legacy fallback, or safety fixes.
 

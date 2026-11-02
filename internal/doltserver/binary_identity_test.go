@@ -837,6 +837,69 @@ func TestLaunchBinaryRecordPublicationFailureLeavesNothing(t *testing.T) {
 	}
 }
 
+// TestLaunchBinaryReplacedDuringLaunchNotRecorded: an installer replaces dolt
+// after Start launched the server but before it published the launch record.
+// Nothing then says which release the server runs, so no record is left, not
+// even an earlier generation's: the next open asks the server, finds the old
+// release it runs stale, and replaces it. A record naming the new executable
+// would make the server current for good.
+func TestLaunchBinaryReplacedDuringLaunchNotRecorded(t *testing.T) {
+	beadsDir, launches := fakeStartWorkspace(t)
+	stubProcessListLaunchedHere(t)
+	if err := writeBinaryRecord(beadsDir, binaryRecord{
+		PID:            1,
+		binaryIdentity: binaryIdentity{Path: "/nonexistent/dolt", Resolved: "/nonexistent/dolt", Size: 1},
+		Version:        "2.5.0",
+		Provenance:     binaryProvenanceLaunched,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	orig := startServerProcess
+	replaced := false
+	startServerProcess = func(cmd *exec.Cmd) (*startedServer, error) {
+		srv, err := orig(cmd)
+		if err == nil && !replaced {
+			replaced = true
+			upgradeFakeDolt(t, "2.7.0")
+		}
+		return srv, err
+	}
+	t.Cleanup(func() { startServerProcess = orig })
+
+	state, err := startForTest(t, beadsDir)
+	if err != nil || !replaced {
+		t.Fatalf("Start = %+v, %v (dolt replaced: %v); want a start during which dolt was replaced", state, err, replaced)
+	}
+	if _, err := os.Stat(binaryRecordPath(beadsDir)); !os.IsNotExist(err) {
+		rec, _ := os.ReadFile(binaryRecordPath(beadsDir))
+		t.Fatalf("launch record left after dolt was replaced during the launch (%v): %s", err, rec)
+	}
+
+	// The server runs the release it was exec'd from.
+	running := reportsVersion("2.6.0")
+	check := CheckServerBinary(beadsDir, state.Port, running)
+	if check.Verdict != BinaryStale || check.RunningVersion != "2.6.0" || check.CandidateVersion != "2.7.0" || check.PID != state.PID {
+		t.Fatalf("check = %+v, want stale 2.6.0 → 2.7.0 for PID %d, as the server reports", check, state.PID)
+	}
+	res, err := ReplaceStaleServer(beadsDir, state.Port, running)
+	if res.State != nil && res.State.PID > 0 {
+		killAtCleanup(t, res.State.PID)
+	}
+	if err != nil || !res.Replaced || res.State == nil || res.State.Port != state.Port {
+		t.Fatalf("ReplaceStaleServer = %+v, %v; want a replacement on port %d", res, err, state.Port)
+	}
+	if pidAlive(state.PID) {
+		t.Errorf("old server PID %d still running after replacement", state.PID)
+	}
+	if got := launchedPorts(t, launches); len(got) != 2 {
+		t.Errorf("launches = %v, want the original and one replacement", got)
+	}
+	rec, ok := readBinaryRecord(beadsDir)
+	if !ok || rec.PID != res.State.PID || rec.Version != "2.7.0" || rec.Provenance != binaryProvenanceLaunched {
+		t.Errorf("record after replacement = %+v (ok=%v), want PID %d launched at 2.7.0", rec, ok, res.State.PID)
+	}
+}
+
 // TestLaunchBinaryRecordModeAndSchema: the launch record is private (0600)
 // and versioned; a record of another schema is not read as evidence, so the
 // server it names is compared as an unrecorded one.

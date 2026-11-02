@@ -131,15 +131,38 @@ func binaryVersion(doltBin string) (v string, ok bool) {
 	return parsed.String(), true
 }
 
-// writeLaunchRecord records doltBin as the executable of the server Start just
-// launched as pid.
-func writeLaunchRecord(beadsDir string, pid int, doltBin string) error {
+// draftLaunchRecord reads what the launch record of doltBin will say, before
+// Start launches it: the executable's identity, then the version it reports.
+// It is nil when the identity cannot be read.
+func draftLaunchRecord(doltBin string) *binaryRecord {
 	id, err := identifyBinary(doltBin)
 	if err != nil {
-		return fmt.Errorf("writing %s: %w", BinaryRecordFileName, err)
+		return nil
 	}
 	v, _ := binaryVersion(doltBin)
-	return writeBinaryRecord(beadsDir, binaryRecord{PID: pid, binaryIdentity: id, Version: v, Provenance: binaryProvenanceLaunched})
+	return &binaryRecord{binaryIdentity: id, Version: v, Provenance: binaryProvenanceLaunched}
+}
+
+// writeLaunchRecord records draft, read from doltBin before Start launched it,
+// as the executable of the server Start launched as pid. An installer can
+// replace doltBin between that read and the exec, or between the exec and
+// now, and then nothing says which of the two executables the server runs: a
+// record naming the new one would make a server that still runs the old one
+// current for good. So draft is published only while doltBin keeps its
+// identity. Otherwise no record is left, and the next open asks the server
+// its version, as for a server started by a bd that wrote no record.
+func writeLaunchRecord(beadsDir string, pid int, doltBin string, draft *binaryRecord) error {
+	if draft != nil {
+		if cur, err := identifyBinary(doltBin); err == nil && cur.same(draft.binaryIdentity) {
+			rec := *draft
+			rec.PID = pid
+			return writeBinaryRecord(beadsDir, rec)
+		}
+	}
+	if err := os.Remove(binaryRecordPath(beadsDir)); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("removing %s: %w", BinaryRecordFileName, err)
+	}
+	return nil
 }
 
 // lookPathDolt finds the dolt Start would launch next. A var so tests can
@@ -218,8 +241,8 @@ type ServerVersionFunc func() (string, error)
 // whatever dolt the caller's PATH finds; a changed or deleted one means the
 // next launch candidate is probed and its version compared with the
 // recorded one. A server with no record for its PID (started by a bd that
-// wrote none) is asked its version with serverVersion instead; with a nil
-// serverVersion its verdict is unknown.
+// wrote none, or while dolt was being replaced) is asked its version with
+// serverVersion instead; with a nil serverVersion its verdict is unknown.
 func CheckServerBinary(beadsDir string, port int, serverVersion ServerVersionFunc) BinaryCheck {
 	pid := trackedLivePID(beadsDir, port)
 	if pid <= 0 {

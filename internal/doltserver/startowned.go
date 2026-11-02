@@ -41,6 +41,10 @@ func launchServer(cmd *exec.Cmd) (*startedServer, error) {
 	return s, nil
 }
 
+// startServerProcess is the launchServer Start runs its dolt sql-server with.
+// A var so tests can act between the launch and its launch record.
+var startServerProcess = launchServer
+
 // launchedHere reports whether pid is a dolt sql-server this process launched
 // and has not seen exit. That identifies the server Start recorded without
 // the process list, which a sandbox can refuse (GH#7214).

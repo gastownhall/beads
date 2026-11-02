@@ -10,6 +10,8 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/doltserver"
 )
 
 func TestFixGitignore_FilePermissions(t *testing.T) {
@@ -1697,6 +1699,61 @@ func TestGitignore_ContainsHTTPTarget(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("requiredPatterns should include %q", pattern)
+	}
+}
+
+// TestGitignoreTemplate_IgnoresDoltServerStateFiles: bd init writes
+// GitignoreTemplate and commits .beads/, so every file bd keeps beside the
+// dolt sql-server it runs (doltserver.StateFilePaths, plus the temporary file
+// the launch record is written through) must be ignored by it. One that is
+// not is committed by bd init and dirties the tree on every server start,
+// restart or stop. Each name is created first, so a directory is matched as
+// one. The launch record's patterns are required too, so bd doctor --fix
+// adds them to a .beads/.gitignore written before the record existed.
+func TestGitignoreTemplate_IgnoresDoltServerStateFiles(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Skipping git-based test on Windows")
+	}
+	repo := t.TempDir()
+	if out, err := gitCommand("-C", repo, "init", "-q").CombinedOutput(); err != nil {
+		t.Fatalf("git init failed: %v\n%s", err, out)
+	}
+	disableGlobalGitIgnore(t, repo)
+	beadsDir := filepath.Join(repo, ".beads")
+	if err := os.Mkdir(beadsDir, 0750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, ".gitignore"), []byte(GitignoreTemplate), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	profileDir := filepath.Base(doltserver.DebugProfileDir(beadsDir))
+	names := []string{"." + doltserver.BinaryRecordFileName + "-1234567890"}
+	for _, p := range doltserver.StateFilePaths(beadsDir) {
+		names = append(names, filepath.Base(p))
+	}
+	for _, name := range names {
+		path := filepath.Join(beadsDir, name)
+		var err error
+		if name == profileDir {
+			err = os.Mkdir(path, 0750)
+		} else {
+			err = os.WriteFile(path, nil, 0600)
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		cmd := gitCommand("check-ignore", "--no-index", "-q", filepath.Join(".beads", name))
+		cmd.Dir = repo
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Errorf(".beads/%s is not ignored by GitignoreTemplate (git check-ignore: %v)\n%s", name, err, out)
+		}
+	}
+	required := strings.Join(requiredPatterns, "\n")
+	for _, pattern := range []string{doltserver.BinaryRecordFileName, "." + doltserver.BinaryRecordFileName + "-*"} {
+		if !containsGitignorePattern(required, pattern) {
+			t.Errorf("requiredPatterns should include %q", pattern)
+		}
 	}
 }
 

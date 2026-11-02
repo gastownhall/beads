@@ -1903,10 +1903,11 @@ func startLockedWith(beadsDir string, launch *binaryIdentity) (*State, error) {
 	if err != nil {
 		return nil, fmt.Errorf("dolt is not installed (not found in PATH)\n\nInstall from: https://docs.dolthub.com/introduction/installation")
 	}
-	if launch != nil {
-		if id, idErr := identifyBinary(doltBin); idErr != nil || !id.same(*launch) {
-			return nil, fmt.Errorf("the dolt executable on PATH (%s) changed after it was checked; not launching it", doltBin)
-		}
+	// Read what the launch record will name before launching: an installer
+	// can replace the executable at any moment (see writeLaunchRecord).
+	draft := draftLaunchRecord(doltBin)
+	if launch != nil && (draft == nil || !draft.same(*launch)) {
+		return nil, fmt.Errorf("the dolt executable on PATH (%s) changed after it was checked; not launching it", doltBin)
 	}
 
 	// Refuse a dolt older than the minimum bd requires before launching it:
@@ -2106,7 +2107,7 @@ func startLockedWith(beadsDir string, launch *binaryIdentity) (*State, error) {
 			sanitizeInheritedFDs()
 
 			logOffset := logSize(logFile)
-			srv, startErr := launchServer(cmd)
+			srv, startErr := startServerProcess(cmd)
 			if startErr != nil {
 				lastErr = startErr
 				if movable {
@@ -2122,7 +2123,7 @@ func startLockedWith(beadsDir string, launch *binaryIdentity) (*State, error) {
 			// a tracked server whose port it cannot determine.
 			werr := writeServerStateFiles(beadsDir, srv.pid, actualPort)
 			if werr == nil {
-				werr = writeLaunchRecord(beadsDir, srv.pid, doltBin)
+				werr = writeLaunchRecord(beadsDir, srv.pid, doltBin, draft)
 			}
 			if werr != nil {
 				srv.killAndWait()
