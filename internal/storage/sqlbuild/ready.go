@@ -144,6 +144,10 @@ func idBatchClauses(format string, ids []string) ([]string, []any) {
 	return clauses, args
 }
 
+// ActiveCustomStatusesSQL is the query used to resolve active custom statuses
+// for parameterization into the ready query.
+const ActiveCustomStatusesSQL = "SELECT name FROM custom_statuses WHERE category = 'active' ORDER BY name"
+
 // ReadyWorkWhereInputs carries the precomputed ID sets the ready-work WHERE
 // clause folds in. Computing them takes queries, which is execution-context
 // work each stack does its own way.

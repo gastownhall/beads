@@ -52,9 +52,10 @@ func (r *issueSQLRepositoryImpl) buildReadyWorkPredicates(ctx context.Context, f
 
 	if filter.Status == types.StatusOpen {
 		activeStatuses, asErr := r.getActiveCustomStatuses(ctx)
-		if asErr == nil {
-			inputs.ActiveCustomStatuses = activeStatuses
+		if asErr != nil {
+			return nil, fmt.Errorf("get ready work: active custom statuses in %s: %w", tables.Main, asErr)
 		}
+		inputs.ActiveCustomStatuses = activeStatuses
 	}
 
 	whereSQL, args, err := sqlbuild.BuildReadyWorkWhere(filter, tables, inputs)
@@ -85,7 +86,7 @@ func (r *issueSQLRepositoryImpl) staleBlockedIDs(ctx context.Context, tables fil
 }
 
 func (r *issueSQLRepositoryImpl) getActiveCustomStatuses(ctx context.Context) ([]string, error) {
-	rows, err := r.runner.QueryContext(ctx, "SELECT name FROM custom_statuses WHERE category = 'active' ORDER BY name")
+	rows, err := r.runner.QueryContext(ctx, sqlbuild.ActiveCustomStatusesSQL)
 	if err != nil {
 		return nil, err
 	}

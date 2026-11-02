@@ -1126,6 +1126,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd ready` parameterizes active custom statuses into `status = ?` or
+  `status IN (?, ...)` instead of evaluating an unindexed subquery inside an
+  `OR` clause, restoring index range scans on Dolt and relational backends (#8045).
 - `bd dolt push <remote>` and `bd dolt pull <remote>` now push to and pull
   from the named remote. bd ignored the name, so `bd dolt push 1st` pushed to
   the default remote and reported "Push complete."; a name that differs from

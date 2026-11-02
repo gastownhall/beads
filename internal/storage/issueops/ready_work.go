@@ -42,7 +42,7 @@ func buildReadyWorkOrder(policy types.SortPolicy) sqlbuild.ReadyWorkOrder {
 }
 
 func getActiveCustomStatusesInTx(ctx context.Context, tx DBTX) ([]string, error) {
-	rows, err := tx.QueryContext(ctx, "SELECT name FROM custom_statuses WHERE category = 'active' ORDER BY name")
+	rows, err := tx.QueryContext(ctx, sqlbuild.ActiveCustomStatusesSQL)
 	if err != nil {
 		return nil, err
 	}
@@ -97,9 +97,10 @@ func buildReadyWorkPredicates(ctx context.Context, tx DBTX, filter types.WorkFil
 	inputs.StaleBlockedIDs = map[string][]string{tables.Main: staleIDs}
 	if filter.Status == types.StatusOpen {
 		activeStatuses, asErr := getActiveCustomStatusesInTx(ctx, tx)
-		if asErr == nil {
-			inputs.ActiveCustomStatuses = activeStatuses
+		if asErr != nil {
+			return nil, fmt.Errorf("get ready work: active custom statuses in %s: %w", tables.Main, asErr)
 		}
+		inputs.ActiveCustomStatuses = activeStatuses
 	}
 	return buildReadyWorkPredicatesFrom(filter, tables, inputs)
 }
