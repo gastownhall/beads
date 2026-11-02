@@ -5,6 +5,7 @@ package doltserver
 import (
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -680,5 +681,207 @@ func TestLaunchBinaryUntrackedServerNotCompared(t *testing.T) {
 	}
 	if _, err := os.Stat(binaryRecordPath(beadsDir)); !os.IsNotExist(err) {
 		t.Errorf("record written for an untracked server: %v", err)
+	}
+}
+
+// writeDoltShim writes an executable fake dolt at path whose content names
+// version, so two shims for different releases differ in size and content.
+func writeDoltShim(t *testing.T, path, version string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	shim := "#!/bin/sh\n# dolt " + version + " (" + filepath.Base(filepath.Dir(path)) + ")\nexec " + shellQuote(os.Args[0]) + " \"$@\"\n"
+	if err := os.WriteFile(path, []byte(shim), 0o700); err != nil { //nolint:gosec // G306: the shim must be executable
+		t.Fatal(err)
+	}
+}
+
+// TestLaunchBinarySymlinkRetargetedRestartsServer: dolt on PATH is a symlink
+// (as version managers and Homebrew install it). Retargeting it at a new
+// release leaves the executable the server started from on disk, unchanged,
+// yet the server is stale: the recorded path now resolves elsewhere. It is
+// replaced, and the record names the new target.
+func TestLaunchBinarySymlinkRetargetedRestartsServer(t *testing.T) {
+	beadsDir, launches := fakeStartWorkspace(t)
+	stubProcessListLaunchedHere(t)
+	root := t.TempDir()
+	oldTarget := filepath.Join(root, "dolt-2.6.0", "dolt")
+	newTarget := filepath.Join(root, "dolt-2.7.0-release", "dolt")
+	writeDoltShim(t, oldTarget, "2.6.0")
+	writeDoltShim(t, newTarget, "2.7.0")
+	binDir := filepath.Join(root, "bin")
+	if err := os.MkdirAll(binDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(binDir, "dolt")
+	if err := os.Symlink(oldTarget, link); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	state, err := startForTest(t, beadsDir)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	rec, ok := readBinaryRecord(beadsDir)
+	if !ok || rec.Path != link || rec.Resolved != mustEvalSymlinks(t, oldTarget) || rec.Version != "2.6.0" {
+		t.Fatalf("launch record = %+v (ok=%v), want path %s resolving to %s at 2.6.0", rec, ok, link, oldTarget)
+	}
+	oldBefore, err := os.ReadFile(oldTarget)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.Remove(link); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(newTarget, link); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(testFakeDoltVersionEnv, "2.7.0")
+
+	check := CheckServerBinary(beadsDir, state.Port, nil)
+	if check.Verdict != BinaryStale || check.RunningVersion != "2.6.0" || check.CandidateVersion != "2.7.0" {
+		t.Fatalf("after retarget: check = %+v, want stale 2.6.0 → 2.7.0", check)
+	}
+	res, err := ReplaceStaleServer(beadsDir, state.Port, nil)
+	if res.State != nil && res.State.PID > 0 {
+		killAtCleanup(t, res.State.PID)
+	}
+	if err != nil || !res.Replaced || res.State == nil || res.State.Port != state.Port {
+		t.Fatalf("ReplaceStaleServer = %+v, %v; want a replacement on port %d", res, err, state.Port)
+	}
+	if pidAlive(state.PID) {
+		t.Errorf("old server PID %d still running", state.PID)
+	}
+	if got := launchedPorts(t, launches); len(got) != 2 {
+		t.Errorf("launches = %v, want the original and one replacement", got)
+	}
+	rec, ok = readBinaryRecord(beadsDir)
+	if !ok || rec.PID != res.State.PID || rec.Resolved != mustEvalSymlinks(t, newTarget) || rec.Version != "2.7.0" {
+		t.Errorf("record after replacement = %+v (ok=%v), want PID %d resolving to %s at 2.7.0", rec, ok, res.State.PID, newTarget)
+	}
+	if oldAfter, err := os.ReadFile(oldTarget); err != nil || string(oldAfter) != string(oldBefore) {
+		t.Errorf("old target changed or removed (%v); the test needs it left in place", err)
+	}
+}
+
+func mustEvalSymlinks(t *testing.T, p string) string {
+	t.Helper()
+	r, err := filepath.EvalSymlinks(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+// TestLaunchBinaryRecordPublicationFailureLeavesNothing: a Start that cannot
+// publish the launch record kills the server it launched and fails, leaving
+// no state files, no temporary record, and nothing listening on the port.
+func TestLaunchBinaryRecordPublicationFailureLeavesNothing(t *testing.T) {
+	beadsDir, launches := fakeStartWorkspace(t)
+	stubProcessListLaunchedHere(t)
+	// A non-empty directory where the record goes: the rename onto it fails.
+	blocker := binaryRecordPath(beadsDir)
+	if err := os.MkdirAll(blocker, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(blocker, "keep"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	state, err := startForTest(t, beadsDir)
+	if err == nil {
+		t.Fatalf("Start = %+v, want an error publishing %s", state, BinaryRecordFileName)
+	}
+	if !strings.Contains(err.Error(), BinaryRecordFileName) {
+		t.Errorf("Start error does not name %s: %v", BinaryRecordFileName, err)
+	}
+	for _, p := range []string{pidPath(beadsDir), portPath(beadsDir)} {
+		if _, statErr := os.Stat(p); !os.IsNotExist(statErr) {
+			t.Errorf("%s left behind (%v)", p, statErr)
+		}
+	}
+	entries, err := os.ReadDir(beadsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "."+BinaryRecordFileName+"-") {
+			t.Errorf("temporary record %s left behind", e.Name())
+		}
+	}
+	// The server is usually killed before the fake records its launch; one
+	// that got that far must not be listening.
+	ports := launchedPorts(t, launches)
+	if len(ports) > 1 {
+		t.Errorf("launches = %v, want at most the one failed start", ports)
+	}
+	for _, port := range ports {
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			c, dialErr := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", port), 200*time.Millisecond)
+			if dialErr != nil {
+				break
+			}
+			_ = c.Close()
+			if time.Now().After(deadline) {
+				t.Fatalf("port %s still accepts connections after the failed start", port)
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+	if _, ok := readBinaryRecord(beadsDir); ok {
+		t.Error("a launch record was read after the failed publication")
+	}
+}
+
+// TestLaunchBinaryRecordModeAndSchema: the launch record is private (0600)
+// and versioned; a record of another schema is not read as evidence, so the
+// server it names is compared as an unrecorded one.
+func TestLaunchBinaryRecordModeAndSchema(t *testing.T) {
+	beadsDir, launches := fakeStartWorkspace(t)
+	stubProcessListLaunchedHere(t)
+	state, err := startForTest(t, beadsDir)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	info, err := os.Stat(binaryRecordPath(beadsDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mode := info.Mode().Perm(); mode != 0o600 {
+		t.Errorf("record mode = %o, want 600", mode)
+	}
+	data, err := os.ReadFile(binaryRecordPath(beadsDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"schema":1`) {
+		t.Errorf("record = %s, want schema 1", data)
+	}
+
+	future := strings.Replace(string(data), `"schema":1`, `"schema":2`, 1)
+	if err := os.WriteFile(binaryRecordPath(beadsDir), []byte(future), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := readBinaryRecord(beadsDir); ok {
+		t.Fatal("a schema 2 record was read")
+	}
+	upgradeFakeDolt(t, "2.7.0")
+	check := CheckServerBinary(beadsDir, state.Port, nil)
+	if check.Verdict != BinaryUnknown {
+		t.Fatalf("check with a schema 2 record = %+v, want unknown (unrecorded, not asked)", check)
+	}
+	res, err := ReplaceStaleServer(beadsDir, state.Port, nil)
+	if res.State != nil && res.State.PID > 0 {
+		killAtCleanup(t, res.State.PID)
+	}
+	if err != nil || res.Replaced {
+		t.Fatalf("ReplaceStaleServer = %+v, %v; want nothing replaced", res, err)
+	}
+	if got := launchedPorts(t, launches); len(got) != 1 || !pidAlive(state.PID) {
+		t.Errorf("launches = %v, server alive = %v; want the server kept", got, pidAlive(state.PID))
 	}
 }

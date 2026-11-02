@@ -414,6 +414,13 @@ bd does not compare a server it did not start, or one it reaches over a Unix
 socket, TLS, a gateway or a proxied server: restart those yourself after an
 upgrade.
 
+The check sees a change of the `dolt` executable bd would launch and the
+release it reports, so some upgrades go unnoticed: a version-manager shim
+that stays the same file while it switches the release behind it, a custom
+build reinstalled at the same release number, and a server started before bd
+recorded its executable whose release cannot be determined. After such an
+upgrade, restart the server yourself: `bd dolt stop`, then `bd dolt start`.
+
 ## Maintenance — `bd prune` and `bd purge`
 
 `bd prune` permanently deletes closed non-ephemeral beads to reclaim storage
