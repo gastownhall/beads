@@ -98,6 +98,7 @@ var (
 	verifyProcessIdentity = procid.Verify
 	resolveRootIdentity   = identity.RootID
 	readControlSecret     = identity.ReadSecret
+	removeSpawnMarkerFile = os.Remove
 )
 
 // ErrUnverifiableProcess marks lifecycle operations that refuse to signal a
@@ -1083,14 +1084,23 @@ func spawnMarkerLive(rootDir string) bool {
 }
 
 func clearSpawnMarkerAfterLock(rootDir string) error {
-	err := os.Remove(filepath.Join(rootDir, spawnMarkerFileName))
+	err := removeSpawnMarkerFile(filepath.Join(rootDir, spawnMarkerFileName))
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
 	return nil
 }
 
-func clearOwnSpawnMarker(rootDir string, own spawnMarker) error {
+// clearOwnSpawnMarker removes this start's spawn marker under proxy.lock,
+// unless it is already gone or no longer this start's. Its callers cannot
+// act on a failure, so it logs one: a marker it leaves behind holds up proxy
+// starts and stops for rootDir while this process lives.
+func clearOwnSpawnMarker(rootDir string, own spawnMarker) (err error) {
+	defer func() {
+		if err != nil {
+			log.Printf("dbproxy: could not clear this process's spawn marker in %s: %v", rootDir, err)
+		}
+	}()
 	deadline := time.Now().Add(shutdownConfirmDeadline)
 	for {
 		marker, err := readSpawnMarker(rootDir)

@@ -31,6 +31,11 @@ const (
 	shutdownSpawnWaitDeadline = openDeadline + 2*shutdownConfirmDeadline
 )
 
+// afterSpawnMarkerLockFreeCheck is a deterministic test hook for the window
+// between stopAndAcquire's lock-free spawn-marker check and its TryLock, in
+// which a start can still publish a marker. Production leaves it as a no-op.
+var afterSpawnMarkerLockFreeCheck = func() {}
+
 type killRecordChecks struct {
 	VerifyRoot       bool
 	CheckSpawnMarker bool
@@ -202,13 +207,16 @@ func stopAndAcquire(
 	}
 
 	for {
-		// Wait on a live start without proxy.lock: the start needs the lock
-		// to clear its own marker (see spawnMarkerLive).
-		if checks.CheckSpawnMarker && spawnMarkerLive(rootDir) {
-			if waitErr := waitForStart(); waitErr != nil {
-				return nil, waitErr
+		if checks.CheckSpawnMarker {
+			// Wait on a live start without proxy.lock: the start needs the
+			// lock to clear its own marker (see spawnMarkerLive).
+			if spawnMarkerLive(rootDir) {
+				if waitErr := waitForStart(); waitErr != nil {
+					return nil, waitErr
+				}
+				continue
 			}
-			continue
+			afterSpawnMarkerLockFreeCheck()
 		}
 
 		lock, err := util.TryLock(lockPath)
