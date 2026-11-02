@@ -205,16 +205,22 @@ func trackedLivePID(beadsDir string, port int) int {
 	return pid
 }
 
+// ServerVersionFunc asks the running server for the dolt version it runs
+// (SELECT dolt_version()).
+type ServerVersionFunc func() (string, error)
+
 // CheckServerBinary classifies the dolt sql-server beadsDir tracks on port
-// against the dolt bd would launch now. It is read-only: it writes no file,
-// takes no lock and signals no process, so any open may call it.
+// against the dolt bd would launch now. It writes no file, takes no lock and
+// signals no process, so any open may call it.
 //
 // Only a tracked live server is compared (ManagesLiveServerOnPort). With a
 // launch record for that PID, an unchanged recorded executable means current,
 // whatever dolt the caller's PATH finds; a changed or deleted one means the
 // next launch candidate is probed and its version compared with the
-// recorded one.
-func CheckServerBinary(beadsDir string, port int) BinaryCheck {
+// recorded one. A server with no record for its PID (started by a bd that
+// wrote none) is asked its version with serverVersion instead; with a nil
+// serverVersion its verdict is unknown.
+func CheckServerBinary(beadsDir string, port int, serverVersion ServerVersionFunc) BinaryCheck {
 	pid := trackedLivePID(beadsDir, port)
 	if pid <= 0 {
 		return BinaryCheck{Verdict: BinaryNotTracked}
@@ -222,9 +228,7 @@ func CheckServerBinary(beadsDir string, port int) BinaryCheck {
 	check := BinaryCheck{PID: pid, Port: port}
 	rec, ok := readBinaryRecord(beadsDir)
 	if !ok || rec.PID != pid {
-		check.Verdict = BinaryUnknown
-		check.Reason = errors.New("no record of the dolt executable this server runs")
-		return check
+		return checkUnrecordedServer(check, serverVersion)
 	}
 	check.RunningVersion = rec.Version
 	if cur, err := identifyBinary(rec.Path); err == nil && cur.same(rec.binaryIdentity) {
@@ -241,6 +245,45 @@ func CheckServerBinary(beadsDir string, port int) BinaryCheck {
 		return check
 	}
 	if rec.Version != check.CandidateVersion {
+		check.Verdict = BinaryStale
+		return check
+	}
+	check.Verdict = BinaryCurrent
+	check.Refresh = true
+	return check
+}
+
+// checkUnrecordedServer classifies a tracked server bd holds no launch record
+// for by the version it reports. Without a record nothing says its executable
+// changed, so a dolt bd cannot launch makes the verdict unknown, unless that
+// dolt reports a release other than the server's.
+func checkUnrecordedServer(check BinaryCheck, serverVersion ServerVersionFunc) BinaryCheck {
+	if serverVersion == nil {
+		check.Verdict = BinaryUnknown
+		check.Reason = errors.New("no record of the dolt executable this server runs")
+		return check
+	}
+	raw, err := serverVersion()
+	if err != nil {
+		check.Verdict = BinaryUnknown
+		check.Reason = fmt.Errorf("asking the server for its dolt version: %w", err)
+		return check
+	}
+	running, err := doltversion.ParseVersion(raw)
+	if err != nil {
+		check.Verdict = BinaryUnknown
+		check.Reason = fmt.Errorf("asking the server for its dolt version: %w", err)
+		return check
+	}
+	check.RunningVersion = running.String()
+	if !classifyCandidate(&check) {
+		if check.Verdict == BinaryCannotReplace && check.CandidateVersion != "" && check.CandidateVersion != check.RunningVersion {
+			return check
+		}
+		check.Verdict = BinaryUnknown
+		return check
+	}
+	if check.CandidateVersion != check.RunningVersion {
 		check.Verdict = BinaryStale
 		return check
 	}
@@ -308,14 +351,16 @@ type BinaryReplacement struct {
 // server that cannot be replaced is left running and the reason returned. A
 // current server whose record needs a refresh (BinaryCheck.Refresh) keeps
 // running, and the executable it was compared with is recorded as observed.
-func ReplaceStaleServer(beadsDir string, port int) (BinaryReplacement, error) {
+//
+// serverVersion is CheckServerBinary's.
+func ReplaceStaleServer(beadsDir string, port int, serverVersion ServerVersionFunc) (BinaryReplacement, error) {
 	lockF, err := acquireLifecycleLock(beadsDir)
 	if err != nil {
 		return BinaryReplacement{}, err
 	}
 	defer releaseLifecycleLock(lockF)
 
-	check := CheckServerBinary(beadsDir, port)
+	check := CheckServerBinary(beadsDir, port, serverVersion)
 	res := BinaryReplacement{Check: check}
 	switch check.Verdict {
 	case BinaryStale:

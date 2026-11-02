@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/doltserver"
 )
@@ -82,8 +83,8 @@ func serverBinaryOpen(t *testing.T, events *serverBinaryEvents) *Config {
 }
 
 // stubServerBinary replaces the lifecycle calls reconcileServerBinary makes.
-func stubServerBinary(t *testing.T, check func(string, int) doltserver.BinaryCheck,
-	replace func(string, int) (doltserver.BinaryReplacement, error)) {
+func stubServerBinary(t *testing.T, check func(string, int, doltserver.ServerVersionFunc) doltserver.BinaryCheck,
+	replace func(string, int, doltserver.ServerVersionFunc) (doltserver.BinaryReplacement, error)) {
 	t.Helper()
 	origCheck, origReplace := checkServerBinary, replaceStaleServer
 	checkServerBinary, replaceStaleServer = check, replace
@@ -135,8 +136,8 @@ func TestServerBinaryStaleServerReplacedBeforeFirstQuery(t *testing.T) {
 	cfg := serverBinaryOpen(t, events)
 	port := cfg.ServerPort
 	stubServerBinary(t,
-		func(string, int) doltserver.BinaryCheck { return staleServerCheck(port) },
-		func(_ string, p int) (doltserver.BinaryReplacement, error) {
+		func(string, int, doltserver.ServerVersionFunc) doltserver.BinaryCheck { return staleServerCheck(port) },
+		func(_ string, p int, _ doltserver.ServerVersionFunc) (doltserver.BinaryReplacement, error) {
 			events.add("replace")
 			return doltserver.BinaryReplacement{
 				Replaced: true, Check: staleServerCheck(p),
@@ -178,8 +179,8 @@ func TestServerBinaryFailedReplacementSendsNoQuery(t *testing.T) {
 	cfg := serverBinaryOpen(t, events)
 	port := cfg.ServerPort
 	stubServerBinary(t,
-		func(string, int) doltserver.BinaryCheck { return staleServerCheck(port) },
-		func(_ string, p int) (doltserver.BinaryReplacement, error) {
+		func(string, int, doltserver.ServerVersionFunc) doltserver.BinaryCheck { return staleServerCheck(port) },
+		func(_ string, p int, _ doltserver.ServerVersionFunc) (doltserver.BinaryReplacement, error) {
 			events.add("replace")
 			return doltserver.BinaryReplacement{Check: staleServerCheck(p)}, errors.New("stop failed")
 		})
@@ -220,8 +221,8 @@ func TestServerBinaryCurrentServerKept(t *testing.T) {
 				RunningVersion: "2.6.0", CandidatePath: "/opt/dolt/bin/dolt", CandidateVersion: "2.6.0",
 			}
 			stubServerBinary(t,
-				func(string, int) doltserver.BinaryCheck { return current },
-				func(string, int) (doltserver.BinaryReplacement, error) {
+				func(string, int, doltserver.ServerVersionFunc) doltserver.BinaryCheck { return current },
+				func(string, int, doltserver.ServerVersionFunc) (doltserver.BinaryReplacement, error) {
 					events.add("replace")
 					return doltserver.BinaryReplacement{Check: current}, nil
 				})
@@ -236,5 +237,44 @@ func TestServerBinaryCurrentServerKept(t *testing.T) {
 				t.Errorf("current server reported a restart:\n%s", stderr)
 			}
 		})
+	}
+}
+
+// TestServerBinaryAsksTheServerItsVersion: the open hands the lifecycle a way
+// to ask the server it dials for its version (how a server with no launch
+// record is compared), and that question fails, bounded, rather than hanging
+// on a server that does not answer it.
+func TestServerBinaryAsksTheServerItsVersion(t *testing.T) {
+	events := &serverBinaryEvents{}
+	cfg := serverBinaryOpen(t, events)
+	var asked error
+	called := false
+	stubServerBinary(t,
+		func(_ string, _ int, serverVersion doltserver.ServerVersionFunc) doltserver.BinaryCheck {
+			called = true
+			if serverVersion == nil {
+				asked = errors.New("no ServerVersionFunc")
+				return doltserver.BinaryCheck{Verdict: doltserver.BinaryUnknown}
+			}
+			start := time.Now()
+			v, err := serverVersion()
+			if err == nil {
+				asked = errors.New("the fake server answered " + v)
+			} else if d := time.Since(start); d > serverVersionTimeout+time.Second {
+				asked = errors.New("question took " + d.String())
+			}
+			return doltserver.BinaryCheck{Verdict: doltserver.BinaryUnknown}
+		},
+		func(string, int, doltserver.ServerVersionFunc) (doltserver.BinaryReplacement, error) {
+			t.Error("unknown verdict led to a replacement")
+			return doltserver.BinaryReplacement{}, nil
+		})
+
+	_, _ = newServerMode(context.Background(), cfg)
+	if !called {
+		t.Fatal("checkServerBinary not called")
+	}
+	if asked != nil {
+		t.Error(asked)
 	}
 }
