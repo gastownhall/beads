@@ -291,7 +291,10 @@ func TestMigrationMarkerSurvivesLaterWrites(t *testing.T) {
 	}
 }
 
-func TestUnsetMachineLocalKeyLeavesTrackedConfigAlone(t *testing.T) {
+// TestUnsetSidecarOnlyMachineLocalKeyLeavesTrackedConfigAlone: the unset
+// clears config.yaml too, but only when config.yaml carries the key. A tracked
+// file that does not is not rewritten, so the checkout stays clean.
+func TestUnsetSidecarOnlyMachineLocalKeyLeavesTrackedConfigAlone(t *testing.T) {
 	beadsDir, configPath, localPath := newWorkspace(t, trackedConfigFixture)
 
 	if err := SetMachineLocalYamlConfigInDir(beadsDir, "dolt.mode", "server"); err != nil {
@@ -300,8 +303,12 @@ func TestUnsetMachineLocalKeyLeavesTrackedConfigAlone(t *testing.T) {
 	before := readFile(t, configPath)
 
 	t.Chdir(filepath.Dir(beadsDir))
-	if _, err := UnsetMachineLocalYamlConfig("dolt.mode"); err != nil {
+	sidecarCleared, trackedCleared, err := UnsetMachineLocalYamlConfig("dolt.mode")
+	if err != nil {
 		t.Fatalf("UnsetMachineLocalYamlConfig: %v", err)
+	}
+	if !sidecarCleared || trackedCleared {
+		t.Errorf("UnsetMachineLocalYamlConfig = (sidecar %v, tracked %v), want (true, false)", sidecarCleared, trackedCleared)
 	}
 
 	if after := readFile(t, configPath); after != before {
@@ -433,8 +440,14 @@ func TestUnsetMachineLocalKeyClearsAValueStillInTrackedConfig(t *testing.T) {
 		"issue_prefix: vp\nbackup.enabled: false\nother-setting: value\n")
 
 	t.Chdir(filepath.Dir(beadsDir))
-	if _, err := UnsetMachineLocalYamlConfig("backup.enabled"); err != nil {
+	sidecarCleared, trackedCleared, err := UnsetMachineLocalYamlConfig("backup.enabled")
+	if err != nil {
 		t.Fatalf("UnsetMachineLocalYamlConfig: %v", err)
+	}
+	// The value was read from config.yaml, so that is the file reported, even
+	// though the one-time migration had not run yet.
+	if sidecarCleared || !trackedCleared {
+		t.Errorf("UnsetMachineLocalYamlConfig = (sidecar %v, tracked %v), want (false, true)", sidecarCleared, trackedCleared)
 	}
 
 	if _, ok := yamlValueInContent(readFile(t, configPath), "backup.enabled"); ok {
@@ -445,6 +458,71 @@ func TestUnsetMachineLocalKeyClearsAValueStillInTrackedConfig(t *testing.T) {
 	}
 	if !strings.Contains(readFile(t, configPath), "other-setting: value") {
 		t.Errorf("unset disturbed an unrelated key:\n%s", readFile(t, configPath))
+	}
+}
+
+// TestUnsetMachineLocalKeyClearsATrackedValueAfterTheMigration is the #6125
+// review case. Once the one-time migration has run (its marker is in the
+// sidecar), a value written to config.yaml afterwards -- by an older bd, or by
+// hand -- is never lifted again. An unset that cleared only the sidecar left
+// that value in effect and reported the key as not set.
+func TestUnsetMachineLocalKeyClearsATrackedValueAfterTheMigration(t *testing.T) {
+	beadsDir, configPath, localPath := newWorkspace(t, trackedConfigFixture)
+
+	// Any sidecar write runs the migration and records its marker.
+	if err := SetMachineLocalYamlConfigInDir(beadsDir, "dolt.port", "3307"); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	if !strings.Contains(readFile(t, localPath), machineLocalMigrationMarker) {
+		t.Fatalf("precondition: the migration marker is not in the sidecar:\n%s", readFile(t, localPath))
+	}
+	if err := os.WriteFile(configPath, []byte(readFile(t, configPath)+"backup.enabled: true\n"), 0o600); err != nil {
+		t.Fatalf("write config.yaml: %v", err)
+	}
+
+	sidecarCleared, trackedCleared, err := UnsetMachineLocalYamlConfigInDir(beadsDir, "backup.enabled")
+	if err != nil {
+		t.Fatalf("UnsetMachineLocalYamlConfigInDir: %v", err)
+	}
+	if sidecarCleared || !trackedCleared {
+		t.Errorf("UnsetMachineLocalYamlConfigInDir = (sidecar %v, tracked %v), want (false, true)", sidecarCleared, trackedCleared)
+	}
+	if _, ok := yamlValueInContent(readFile(t, configPath), "backup.enabled"); ok {
+		t.Errorf("backup.enabled still live in config.yaml after unset:\n%s", readFile(t, configPath))
+	}
+	if got, ok := readYamlValueAtPath(localPath, "dolt.port"); !ok || got != "3307" {
+		t.Errorf("unset disturbed another sidecar key: dolt.port = %q (present %v)", got, ok)
+	}
+}
+
+// TestUnsetMachineLocalKeyClearsBothFiles: when the sidecar overrides a value
+// config.yaml also carries, clearing the sidecar alone would let the tracked
+// value take effect again. The key is unset only when both are cleared.
+func TestUnsetMachineLocalKeyClearsBothFiles(t *testing.T) {
+	beadsDir, configPath, localPath := newWorkspace(t, trackedConfigFixture)
+
+	if err := SetMachineLocalYamlConfigInDir(beadsDir, "backup.enabled", "false"); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	if err := os.WriteFile(configPath, []byte(readFile(t, configPath)+"backup:\n  enabled: true\n"), 0o600); err != nil {
+		t.Fatalf("write config.yaml: %v", err)
+	}
+
+	sidecarCleared, trackedCleared, err := UnsetMachineLocalYamlConfigInDir(beadsDir, "backup.enabled")
+	if err != nil {
+		t.Fatalf("UnsetMachineLocalYamlConfigInDir: %v", err)
+	}
+	if !sidecarCleared || !trackedCleared {
+		t.Errorf("UnsetMachineLocalYamlConfigInDir = (sidecar %v, tracked %v), want (true, true)", sidecarCleared, trackedCleared)
+	}
+	if _, ok := yamlValueInContent(readFile(t, configPath), "backup.enabled"); ok {
+		t.Errorf("backup.enabled still live in config.yaml after unset:\n%s", readFile(t, configPath))
+	}
+	if _, ok := readYamlValueAtPath(localPath, "backup.enabled"); ok {
+		t.Errorf("backup.enabled still live in %s after unset", LocalConfigFileName)
+	}
+	if _, present, err := WorkspaceYamlValueStrictWithLocal(beadsDir, "backup.enabled"); err != nil || present {
+		t.Errorf("backup.enabled still effective after unset (present %v, err %v)", present, err)
 	}
 }
 
@@ -856,7 +934,7 @@ func TestSidecarWritersRefuseSharedKeys(t *testing.T) {
 			if err := SetMachineLocalYamlConfigInDir(beadsDir, key, sampleValueFor(key)); err == nil {
 				t.Errorf("SetMachineLocalYamlConfigInDir(%s) succeeded; it must refuse a shared key", key)
 			}
-			if _, err := UnsetMachineLocalYamlConfigInDir(beadsDir, key); err == nil {
+			if _, _, err := UnsetMachineLocalYamlConfigInDir(beadsDir, key); err == nil {
 				t.Errorf("UnsetMachineLocalYamlConfigInDir(%s) succeeded; it must refuse a shared key", key)
 			}
 			if after := readFile(t, configPath); after != before {
@@ -928,7 +1006,7 @@ func TestSidecarWritersStillAcceptEveryRegistryKey(t *testing.T) {
 			if !strings.Contains(readFile(t, localPath), sampleValueFor(key)) {
 				t.Errorf("%s was not written to the sidecar:\n%s", key, readFile(t, localPath))
 			}
-			changed, err := UnsetMachineLocalYamlConfigInDir(beadsDir, key)
+			changed, _, err := UnsetMachineLocalYamlConfigInDir(beadsDir, key)
 			if err != nil {
 				t.Fatalf("UnsetMachineLocalYamlConfigInDir(%s): %v", key, err)
 			}
@@ -1025,7 +1103,7 @@ func TestSidecarWritesSurviveATrackedConfigEndingInABlankLine(t *testing.T) {
 	t.Run("unset", func(t *testing.T) {
 		beadsDir, configPath, localPath := newWorkspace(t, tracked)
 
-		if _, err := UnsetMachineLocalYamlConfigInDir(beadsDir, "dolt.host"); err != nil {
+		if _, _, err := UnsetMachineLocalYamlConfigInDir(beadsDir, "dolt.host"); err != nil {
 			t.Fatalf("UnsetMachineLocalYamlConfigInDir: %v", err)
 		}
 

@@ -154,30 +154,51 @@ func setMachineLocalYamlConfig(configPath, key, value string) error {
 	return setYamlConfigAtPath(localPath, key, value)
 }
 
-// unsetMachineLocalYamlConfig comments a machine-local key out of the sidecar.
-// The tracked config.yaml is left alone: a value there is a shared default that
-// only an explicit edit should remove. changed reports whether the key was
-// live and is now commented out, matching UnsetYamlConfig.
-func unsetMachineLocalYamlConfig(configPath, key string) (bool, error) {
+// unsetMachineLocalYamlConfig comments a machine-local key out of the sidecar
+// AND out of the tracked config.yaml, so the key is actually unset afterwards.
+//
+// Clearing only the sidecar was a regression for every workspace that set the
+// key under the old routing: once the one-time migration has run, a value an
+// older bd (or an operator) left in config.yaml is not lifted again, so the
+// unset reported "was not set" while `bd config get` kept returning it. An
+// unset is the explicit edit that removes a shared default. Each bool reports
+// whether the key was live in that file and is now commented out, matching
+// UnsetYamlConfig; a file that did not carry the key is not rewritten.
+func unsetMachineLocalYamlConfig(configPath, key string) (sidecarCleared, trackedCleared bool, err error) {
 	if !IsMachineLocalKey(key) {
-		return false, fmt.Errorf("%q is not a machine-local key; use UnsetYamlConfig to clear it from the tracked config.yaml", key)
+		return false, false, fmt.Errorf("%q is not a machine-local key; use UnsetYamlConfig to clear it from the tracked config.yaml", key)
 	}
 	localPath := LocalConfigPathFor(configPath)
-	// Unset has to migrate first. Before the migration has run, the live value
-	// is still the one in config.yaml; clearing only the sidecar would report
-	// success while `bd config get` kept returning the old value.
 	if err := ensureLocalConfigFile(localPath); err != nil {
-		return false, err
+		return false, false, err
 	}
+	// The tracked file goes first, before the migration. Run the other way
+	// round, a migration that had not run yet would lift the tracked value into
+	// the sidecar and the unset would report the sidecar for a value that was
+	// read from config.yaml.
+	if trackedCleared, err = commentOutYamlKeyInFile(configPath, key); err != nil {
+		return false, false, err
+	}
+	// The migration still runs, for the OTHER machine-local keys config.yaml
+	// may carry: every sidecar write takes that one-time step.
 	if err := migrateMachineLocalKeys(configPath, localPath); err != nil {
-		return false, err
+		return false, trackedCleared, err
 	}
-	content, err := os.ReadFile(localPath) //nolint:gosec // localPath is derived from a resolved config.yaml path
+	sidecarCleared, err = commentOutYamlKeyInFile(localPath, key)
+	return sidecarCleared, trackedCleared, err
+}
+
+// commentOutYamlKeyInFile comments key out of the YAML file at path, in either
+// key form. It reports whether the key was live and is now commented out; an
+// absent file, or one that does not carry the key, is left untouched.
+func commentOutYamlKeyInFile(path, key string) (bool, error) {
+	name := filepath.Base(path)
+	content, err := os.ReadFile(path) //nolint:gosec // path is a resolved config.yaml or its sidecar
 	if err != nil {
 		if os.IsNotExist(err) {
-			return false, nil // nothing set on this machine
+			return false, nil
 		}
-		return false, fmt.Errorf("failed to read %s: %w", LocalConfigFileName, err)
+		return false, fmt.Errorf("failed to read %s: %w", name, err)
 	}
 	// Normalize first so "changed" means the key was commented out, not that
 	// CRLF line endings were rewritten (see UnsetYamlConfig).
@@ -189,8 +210,8 @@ func unsetMachineLocalYamlConfig(configPath, key string) (bool, error) {
 	if updated == normalized {
 		return false, nil
 	}
-	if err := os.WriteFile(localPath, []byte(updated), 0o600); err != nil {
-		return false, fmt.Errorf("failed to write %s: %w", LocalConfigFileName, err)
+	if err := os.WriteFile(path, []byte(updated), 0o600); err != nil {
+		return false, fmt.Errorf("failed to write %s: %w", name, err)
 	}
 	return true, nil
 }
@@ -547,9 +568,9 @@ func SetMachineLocalYamlConfigInDir(beadsDir, key, value string) error {
 }
 
 // UnsetMachineLocalYamlConfigInDir comments key out of the sidecar beside
-// beadsDir's config.yaml. The tracked config.yaml is left alone: a value there
-// is a shared default that only an explicit edit should remove.
-func UnsetMachineLocalYamlConfigInDir(beadsDir, key string) (bool, error) {
+// beadsDir's config.yaml and out of config.yaml itself, reporting which of the
+// two carried it. See unsetMachineLocalYamlConfig.
+func UnsetMachineLocalYamlConfigInDir(beadsDir, key string) (sidecarCleared, trackedCleared bool, err error) {
 	return unsetMachineLocalYamlConfig(filepath.Join(beadsDir, "config.yaml"), key)
 }
 
@@ -565,10 +586,10 @@ func SetMachineLocalYamlConfig(key, value string) error {
 
 // UnsetMachineLocalYamlConfig is UnsetMachineLocalYamlConfigInDir for the
 // project config.yaml the caller is standing in.
-func UnsetMachineLocalYamlConfig(key string) (bool, error) {
+func UnsetMachineLocalYamlConfig(key string) (sidecarCleared, trackedCleared bool, err error) {
 	configPath, err := findProjectConfigYaml()
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	return unsetMachineLocalYamlConfig(configPath, key)
 }

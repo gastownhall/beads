@@ -126,7 +126,7 @@ Because the sidecar is merged last, a value there overrides `config.yaml`. A com
 Two consequences worth knowing:
 
 - **The first machine-local write tidies `config.yaml` once.** If the tracked file already holds one of these keys, bd moves it into the sidecar and comments it out of `config.yaml` — one small diff, once per workspace, for you to review and commit.
-- **`bd config unset` on these keys clears the sidecar only.** A value still sitting in `config.yaml` is a shared default, and only an explicit edit should remove it, so `bd config get` can keep returning a value after an unset. `bd config show` reports which file each value came from.
+- **`bd config unset` on these keys clears them from both files.** It comments the key out of `config.local.yaml` and, when the tracked `config.yaml` carries it too, out of that file as well, so the key is unset afterwards instead of falling back to the committed value. The output names each file it changed (`--json` reports them in `location`, for example `config.local.yaml, config.yaml`); a value removed from `config.yaml` is a change for you to commit.
 
 <Note>
 bd never commits the sidecar. `bd init` lists `config.local.yaml` in `.beads/.gitignore`; in a checkout made before bd wrote that entry, bd adds a per-clone line to `.git/info/exclude` the first time it writes the file. Run `bd doctor --fix` to add the tracked entry.

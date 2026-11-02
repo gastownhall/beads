@@ -1332,8 +1332,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bd also keeps git from seeing the sidecar: `bd init` lists it in
   `.beads/.gitignore`, and in a checkout made before that entry existed bd adds
   a per-clone line to `.git/info/exclude` the first time it writes there.
-  `bd config unset` on one of these keys clears the sidecar only; a shared
-  default in `config.yaml` is removed by an explicit edit.
+  `bd config unset` on one of these keys clears it from the sidecar and, when
+  the tracked `config.yaml` carries it too, from that file as well, and names
+  each file it changed. Clearing the sidecar alone left a value an older bd had
+  written to `config.yaml` in effect, and reported the key as not set.
 
   Scope worth naming: the sidecar-first read added to `GetStringFromDir`
   applies to EVERY key resolved through the directory path, not only the

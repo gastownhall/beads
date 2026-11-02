@@ -817,9 +817,22 @@ func runConfigUnsetYamlOnly(key string) error {
 	} else if config.IsMachineLocalKey(key) {
 		// The CLI owns the routing decision; the library writers keep writing
 		// exactly where they are told, which is what keeps #6574's round-trip
-		// suite honest (bd-zj95).
-		changed, unsetErr = config.UnsetMachineLocalYamlConfig(key)
-		file = config.LocalConfigFileName
+		// suite honest (bd-zj95). The unset clears the key from both files, so
+		// the location names each one that carried it, in the same
+		// comma-joined form the database-backed arm uses.
+		var inSidecar, inTracked bool
+		inSidecar, inTracked, unsetErr = config.UnsetMachineLocalYamlConfig(key)
+		changed = inSidecar || inTracked
+		switch {
+		case inSidecar && inTracked:
+			file = config.LocalConfigFileName + ", config.yaml"
+		case inSidecar:
+			file = config.LocalConfigFileName
+		case inTracked:
+			file = "config.yaml"
+		default:
+			file = config.LocalConfigFileName + " or config.yaml"
+		}
 	} else {
 		changed, unsetErr = config.UnsetYamlConfig(key)
 	}

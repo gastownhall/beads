@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 // bdConfig runs "bd config" with the given args and returns stdout.
@@ -340,6 +342,138 @@ func TestEmbeddedConfig(t *testing.T) {
 		payload = decode(stdout)
 		if loc, _ := payload["location"].(string); !strings.Contains(loc, "database") {
 			t.Errorf("database-backed --json payload location = %v, want it to name the database: %s", payload["location"], stdout)
+		}
+	})
+
+	// A machine-local key is written to config.local.yaml, but a workspace
+	// configured by an older bd (or by hand) can still carry it in the tracked
+	// config.yaml, where the one-time migration no longer looks once it has
+	// run. The unset must clear whichever files carry the key and name each of
+	// them; clearing only the sidecar left the tracked value in effect and
+	// reported "was not set" (the #6125 review).
+	t.Run("config_unset_machine_local_key_clears_each_file_that_carries_it", func(t *testing.T) {
+		configPath := filepath.Join(dir, ".beads", "config.yaml")
+		localPath := filepath.Join(dir, ".beads", "config.local.yaml")
+		original, err := os.ReadFile(configPath)
+		if err != nil {
+			t.Fatalf("read config.yaml: %v", err)
+		}
+		originalLocal, localErr := os.ReadFile(localPath)
+		t.Cleanup(func() {
+			if err := os.WriteFile(configPath, original, 0600); err != nil {
+				t.Fatalf("restore config.yaml: %v", err)
+			}
+			if localErr != nil {
+				_ = os.Remove(localPath)
+			} else if err := os.WriteFile(localPath, originalLocal, 0600); err != nil {
+				t.Fatalf("restore config.local.yaml: %v", err)
+			}
+		})
+		if strings.Contains(string(original), "backup.enabled") {
+			t.Skipf("this workspace's config.yaml already carries backup.enabled; each arm needs to control it")
+		}
+
+		run := func(args ...string) (string, string) {
+			t.Helper()
+			cmd := exec.Command(bd, append([]string{"config"}, args...)...)
+			cmd.Dir = dir
+			cmd.Env = bdEnv(dir)
+			stdout, stderr, err := runCommandBuffers(t, cmd)
+			if err != nil {
+				t.Fatalf("bd config %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
+			}
+			return stdout.String(), stderr.String()
+		}
+		read := func(path string) string {
+			t.Helper()
+			b, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read %s: %v", path, err)
+			}
+			return string(b)
+		}
+		// live reports whether the file carries a backup.enabled entry in
+		// either form: this test writes the flat one to config.yaml, and
+		// `bd config set` writes the nested one to the sidecar.
+		live := func(path string) bool {
+			t.Helper()
+			var doc map[string]interface{}
+			if err := yaml.Unmarshal([]byte(read(path)), &doc); err != nil {
+				t.Fatalf("parse %s: %v", path, err)
+			}
+			if _, ok := doc["backup.enabled"]; ok {
+				return true
+			}
+			backup, _ := doc["backup"].(map[string]interface{})
+			_, ok := backup["enabled"]
+			return ok
+		}
+
+		for _, tc := range []struct {
+			name         string
+			inTracked    bool
+			inSidecar    bool
+			wantLocation string
+		}{
+			{name: "tracked_only", inTracked: true, wantLocation: "config.yaml"},
+			{name: "sidecar_only", inSidecar: true, wantLocation: "config.local.yaml"},
+			{name: "both", inTracked: true, inSidecar: true, wantLocation: "config.local.yaml, config.yaml"},
+		} {
+			for _, jsonMode := range []bool{true, false} {
+				t.Run(fmt.Sprintf("%s/json=%v", tc.name, jsonMode), func(t *testing.T) {
+					if err := os.WriteFile(configPath, original, 0600); err != nil {
+						t.Fatalf("reset config.yaml: %v", err)
+					}
+					if tc.inSidecar {
+						// The routed write, so the sidecar is bd's own and the
+						// migration marker is in it before the tracked edit.
+						run("set", "backup.enabled", "false")
+						if !live(localPath) {
+							t.Fatalf("precondition: bd config set did not write backup.enabled to config.local.yaml:\n%s", read(localPath))
+						}
+					}
+					if tc.inTracked {
+						if err := os.WriteFile(configPath, append(append([]byte{}, original...), []byte("\nbackup.enabled: true\n")...), 0600); err != nil {
+							t.Fatalf("write config.yaml: %v", err)
+						}
+					}
+
+					var stdout, stderr string
+					if jsonMode {
+						stdout, stderr = run("unset", "--json", "backup.enabled")
+						var payload map[string]interface{}
+						if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+							t.Fatalf("unset --json did not emit an object: %v\n%s", err, stdout)
+						}
+						if changed, ok := payload["changed"].(bool); !ok || !changed {
+							t.Errorf("--json payload changed = %v, want true: %s", payload["changed"], stdout)
+						}
+						if payload["location"] != tc.wantLocation {
+							t.Errorf("--json payload location = %v, want %q: %s", payload["location"], tc.wantLocation, stdout)
+						}
+					} else {
+						stdout, stderr = run("unset", "backup.enabled")
+						if want := fmt.Sprintf("Unset backup.enabled (in %s)", tc.wantLocation); !strings.Contains(stdout, want) {
+							t.Errorf("human output = %q, want it to contain %q", stdout, want)
+						}
+					}
+					if !strings.Contains(stderr, "Backup config removed") {
+						t.Errorf("a real removal dropped its side-effect hint:\n%s", stderr)
+					}
+
+					if live(configPath) {
+						t.Errorf("backup.enabled still live in config.yaml after unset:\n%s", read(configPath))
+					}
+					if _, err := os.Stat(localPath); err == nil && live(localPath) {
+						t.Errorf("backup.enabled still live in config.local.yaml after unset:\n%s", read(localPath))
+					}
+					if !tc.inTracked {
+						if got := read(configPath); got != string(original) {
+							t.Errorf("unset rewrote a config.yaml that did not carry the key:\n%s", got)
+						}
+					}
+				})
+			}
 		}
 	})
 
