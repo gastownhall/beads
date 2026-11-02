@@ -36,6 +36,7 @@ var _ storage.SchemaMigrator = (*EmbeddedDoltStore)(nil)
 var _ storage.EventsJournalConfigurer = (*EmbeddedDoltStore)(nil)
 var _ storage.EventsJournalShapeChecker = (*EmbeddedDoltStore)(nil)
 var _ storage.VersionedHistoryConfigurer = (*EmbeddedDoltStore)(nil)
+var _ storage.CommitIdentityConfigurer = (*EmbeddedDoltStore)(nil)
 var _ storage.VersionedHistoryDeferrer = (*EmbeddedDoltStore)(nil)
 var _ storage.ExternalRefHistoryQuerier = (*EmbeddedDoltStore)(nil)
 
