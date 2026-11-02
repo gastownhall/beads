@@ -125,6 +125,33 @@ func TestDatabaseCorruptionRecoveryGuidance(t *testing.T) {
 			engineWontOpenRoute,
 		)
 	})
+
+	// Corruption advice outside the runbook must route to it, not rebuild in
+	// place: deleting the data directory destroys whatever the remote lacks.
+	t.Run("AC-1 corruption entries elsewhere route to the runbook", func(t *testing.T) {
+		entries := []struct {
+			doc     []string
+			heading string
+		}{
+			{[]string{"docs", "reference", "faq.md"}, "### What's the difference between database corruption and ID collisions?"},
+			{[]string{"docs", "reference", "troubleshooting.md"}, "### Corrupted database"},
+			{[]string{"docs", "architecture", "dolt.md"}, "### Database Corruption"},
+		}
+		for _, e := range entries {
+			where := strings.Join(e.doc, "/") + " " + e.heading
+			section, ok := docSection(readRepoDoc(t, e.doc...), e.heading)
+			if !ok {
+				t.Errorf("%s: section missing", where)
+				continue
+			}
+			requirePhrases(t, where, section,
+				engineWontOpenRoute,
+				"preserve the damaged store",
+				"embedded mode runs only bd doctor --check=artifacts",
+			)
+			forbidPhrases(t, where, section, "rm -rf .beads/")
+		}
+	})
 }
 
 // readRepoDoc reads a repository file by its path elements.
@@ -145,6 +172,17 @@ func requirePhrases(t *testing.T, where, section string, phrases ...string) {
 	for _, p := range phrases {
 		if !strings.Contains(flat, flattenProse(p)) {
 			t.Errorf("%s must say %q", where, p)
+		}
+	}
+}
+
+// forbidPhrases reports each phrase present in the flattened section.
+func forbidPhrases(t *testing.T, where, section string, phrases ...string) {
+	t.Helper()
+	flat := flattenProse(section)
+	for _, p := range phrases {
+		if strings.Contains(flat, flattenProse(p)) {
+			t.Errorf("%s must not say %q", where, p)
 		}
 	}
 }

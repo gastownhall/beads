@@ -12,7 +12,8 @@ diagnose first and change nothing on disk until you know which case you have.
 
 - **The server is unavailable** (server mode only): `bd` reports that the Dolt
   server is not running or not accepting connections. Check `bd dolt status`
-  and the server log, `.beads/dolt-server.log`. A stopped server is not
+  and the server log, `.beads/dolt-server.log` (in shared server mode,
+  `~/.beads/shared-server/dolt-server.log`). A stopped server is not
   corruption: start it with `bd dolt start`. If the log reports a corrupted
   journal, continue with [Engine won't open](#engine-wont-open).
 - **The database is locked or busy**: `bd` reports `database is locked`, or
@@ -73,20 +74,25 @@ depends on it first.
 ### 2. Preserve the damaged store
 
 Copy the whole store and its configuration before you change anything. Find
-the store first instead of assuming the default path:
+the store first instead of assuming the default path. `bd context --json`
+reads only configuration files, so it answers even when the database will not
+open. Its `beads_dir` is the `.beads` directory bd actually uses: in a git
+worktree or jj workspace, or behind a `.beads/redirect` file, it can be
+another checkout's.
 
-- **Embedded mode:** `.beads/embeddeddolt/` inside the workspace's `.beads/`
-  directory (or the directory `BEADS_DIR` names).
-- **Server mode:** `.beads/dolt/` by default, or the directory named by
-  `dolt_data_dir` in `.beads/metadata.json` or by `BEADS_DOLT_DATA_DIR`. In
-  shared server mode it is `~/.beads/shared-server/dolt/` (or
-  `$BEADS_SHARED_SERVER_DIR/dolt/`) and holds every project's database.
+- **Embedded mode:** `embeddeddolt/` inside `beads_dir`.
+- **Server mode:** `dolt/` inside `beads_dir` by default, or the `data_dir`
+  that `bd context` reports (set by `dolt_data_dir` in `metadata.json` or by
+  `BEADS_DOLT_DATA_DIR`). In shared server mode it is
+  `~/.beads/shared-server/dolt/` (or `$BEADS_SHARED_SERVER_DIR/dolt/`) and
+  holds every project's database.
 
 ```bash
+beads_dir=$(bd context --json | jq -r .beads_dir)   # or set it from bd context by hand
 ts=$(date +%Y%m%dT%H%M%S)
 mkdir -p ../beads-damaged-$ts
-cp -a .beads ../beads-damaged-$ts/   # store, metadata.json, config.yaml, backups
-# If the store lives outside .beads/, copy that directory as well.
+cp -a "$beads_dir" ../beads-damaged-$ts/   # store, metadata.json, config.yaml, backups
+# If the store lives outside beads_dir, copy that directory as well.
 ```
 
 Keep the preserved copy outside any server data_dir: the sql-server loads every
@@ -103,7 +109,7 @@ repository), or in this workspace after moving the damaged store out of the
 way, outside `.beads/` and outside any server data_dir:
 
 ```bash
-mv .beads/embeddeddolt ../embeddeddolt.damaged.$ts   # embedded mode
+mv "$beads_dir/embeddeddolt" ../embeddeddolt.damaged.$ts   # embedded mode
 # Server mode: move the database directory under your data_dir the same way.
 ```
 
@@ -136,16 +142,17 @@ that will not open.
 
 ### From a Dolt-native backup
 
-Use this only for a Dolt-native snapshot made by `bd backup sync` (under
-`.beads/backup/` by default, or the configured backup directory; take it from
-your preserved copy if it lived inside the moved store). `bd backup restore`
-needs an initialized database and does not read a `bd export` JSONL file, so
-run it only in an initialized recovery workspace, never over the damaged
-store:
+Use this only for a Dolt-native backup: the directory you registered with
+`bd backup init` and filled with `bd backup sync`, or an
+[auto-backup](/reference/configuration#auto-backup) snapshot in
+`.beads/backup/` (take it from your preserved copy) or in the `backup/`
+directory inside `backup.git-repo`. `bd backup restore` needs an initialized
+database and does not read a `bd export` JSONL file, so run it only in an
+initialized recovery workspace, never over the damaged store:
 
 ```bash
 bd init
-bd backup restore /path/to/backup --force   # replaces the empty database bd init just created
+bd backup restore /path/to/backup --force   # replaces whatever bd init created
 ```
 
 ### From a JSONL export
@@ -195,5 +202,6 @@ run only the supported `bd doctor --check=...` variants.
 - Neither repairs a damaged journal: recover first with
   [Engine won't open](#engine-wont-open).
 - Keep a current recovery source: push to a Dolt remote (`bd dolt push`) or
-  take Dolt-native backups (`bd backup sync`).
+  take Dolt-native backups (`bd backup init <path>` once, then
+  `bd backup sync`).
 - In server mode, use `bd dolt stop` before system shutdown.

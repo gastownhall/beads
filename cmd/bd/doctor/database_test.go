@@ -229,11 +229,11 @@ func TestLargeDatabaseWarningRecommendsRealCommand(t *testing.T) {
 }
 
 // TestDatabaseOpenFailureRecoveryGuidance pins the Fix text of the local
-// "Unable to open database" diagnostic: it keeps the server-configuration
-// diagnosis but sends an unopenable store to the preservation-first runbook,
-// not to a `bd doctor --fix` that does not rebuild a damaged journal
-// (GH#4521). The missing-database and remote-server branches keep their own
-// guidance.
+// "Unable to open database" diagnostic and its bd doctor --agent rendering:
+// both keep the server-configuration diagnosis but send an unopenable store
+// to the preservation-first runbook, not to a `bd doctor --fix` that does not
+// rebuild a damaged journal (GH#4521). The missing-database and remote-server
+// branches keep their own guidance.
 func TestDatabaseOpenFailureRecoveryGuidance(t *testing.T) {
 	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
 	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
@@ -264,6 +264,20 @@ func TestDatabaseOpenFailureRecoveryGuidance(t *testing.T) {
 		}
 		if strings.Contains(check.Fix, "bd doctor --fix") {
 			t.Errorf("Fix must not present doctor as a rebuild of an unopenable store:\n%s", check.Fix)
+		}
+
+		// bd doctor --agent renders this verdict through its own enricher,
+		// which must carry the same link instead of steering at --fix. A safe
+		// gate passes commands through unchanged, so a --fix here is the
+		// enricher's own.
+		ad := EnrichForAgent(check, safeGate())
+		if !strings.Contains(ad.Explanation, EngineWontOpenRecoveryURL) {
+			t.Errorf("--agent explanation must link %s:\n%s", EngineWontOpenRecoveryURL, ad.Explanation)
+		}
+		for _, c := range ad.Commands {
+			if strings.Contains(c, "bd doctor --fix") {
+				t.Errorf("--agent must not list 'bd doctor --fix' for a store that did not open: %q", ad.Commands)
+			}
 		}
 	})
 

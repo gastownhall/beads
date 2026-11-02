@@ -138,27 +138,21 @@ Distinguish **logical consistency issues** (ID collisions, wrong prefixes)
 from **physical database corruption** (disk failures, power loss, filesystem
 errors).
 
-For logical consistency issues — this is not corruption:
+Logical consistency issues are not corruption. In server mode, repair them
+with:
 
 ```bash
 bd doctor --fix
 ```
 
-For physical corruption, rebuild from a Dolt remote or a backup:
+Embedded mode runs only `bd doctor --check=artifacts`, `--check=conventions`
+and `--check=pollution`.
 
-```bash
-# Move the damaged data directory aside:
-mv .beads/embeddeddolt .beads/embeddeddolt.backup   # embedded mode (default)
-mv .beads/dolt .beads/dolt.backup                   # server mode
-
-bd init
-bd dolt pull    # Pull from Dolt remote if configured
-
-# Or restore from a backup:
-# bd backup restore [path] --force
-```
-
-See [Database Corruption](/recovery/database-corruption) for the full runbook.
+Physical corruption needs recovery, not repair: `bd doctor --fix` does not
+rebuild a damaged store. Follow
+[Engine won't open](/recovery/database-corruption#engine-wont-open): preserve
+the damaged store and its configuration first, then recover into a fresh store
+from a Dolt remote, a Dolt-native backup, or a JSONL export.
 
 ### Dolt journal corruption after restart
 
