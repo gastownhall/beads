@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -219,4 +220,103 @@ func TestRepoFingerprint_Choice2KeepsOutsideSidecarTargets(t *testing.T) {
 		t.Fatalf("expected the admitted database removed, got %v", err)
 	}
 	confineTreesEqual(t, outsideBefore, confineTree(t, outside), "outside sidecar targets")
+}
+
+// replaceWithOutsideLink moves path (when present) to moved and leaves a
+// symlink to target in its place, as a concurrent actor could while bd init
+// runs.
+func replaceWithOutsideLink(t *testing.T, path, moved, target string) {
+	t.Helper()
+	if err := os.Rename(path, moved); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, path); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDatabaseIntegrity_RollbackRefusesReplacedDestination(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the fake bd binary is a POSIX shell script")
+	}
+	for _, tc := range []struct {
+		name        string
+		dataDir     string // dolt_data_dir ("" for the default .beads/dolt)
+		replace     string // .beads-relative entry the swap replaces
+		lookupError bool   // swap during the binary lookup, which then fails
+	}{
+		{name: "database leaf", replace: "dolt"},
+		{name: "database ancestor", dataDir: "data/dolt", replace: "data"},
+		{name: "binary lookup failure", replace: "dolt", lookupError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("BEADS_DOLT_DATA_DIR", "")
+			t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+			t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+			// Recovery names the canonical workspace path in its error.
+			dir, err := filepath.EvalSymlinks(setupTestWorkspace(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			beadsDir := filepath.Join(dir, ".beads")
+			doltPath := filepath.Join(beadsDir, "dolt")
+			if tc.dataDir != "" {
+				doltPath = filepath.Join(beadsDir, filepath.FromSlash(tc.dataDir))
+				confineMetadata(t, beadsDir, map[string]string{"backend": "dolt", "dolt_data_dir": tc.dataDir})
+			}
+			confineWriteFile(t, filepath.Join(doltPath, "state"), "corrupt")
+			outside := t.TempDir()
+			confineWriteFile(t, filepath.Join(outside, "sentinel"), "keep")
+			confineWriteFile(t, filepath.Join(outside, "dolt", "sentinel"), "keep")
+			outsideBefore := confineTree(t, outside)
+			replaced := filepath.Join(beadsDir, tc.replace)
+			moved := filepath.Join(t.TempDir(), "moved")
+
+			lookupErr := errors.New("bd binary lookup failed")
+			oldBinary := integrityBdBinary
+			t.Cleanup(func() { integrityBdBinary = oldBinary })
+			integrityBdBinary = func() (string, error) {
+				if tc.lookupError {
+					replaceWithOutsideLink(t, replaced, moved, outside)
+					return "", lookupErr
+				}
+				script := filepath.Join(t.TempDir(), "bd")
+				body := "#!/bin/sh\nif [ -e '" + replaced + "' ]; then mv '" + replaced + "' '" + moved + "'; fi\n" +
+					"ln -s '" + outside + "' '" + replaced + "'\nexit 1\n"
+				if err := os.WriteFile(script, []byte(body), 0o700); err != nil { // #nosec G306 -- test script must be executable
+					t.Fatal(err)
+				}
+				return script, nil
+			}
+
+			err = DatabaseIntegrity(dir)
+			if err == nil || !strings.Contains(err.Error(), "refusing") {
+				t.Fatalf("expected the rollback to refuse the replaced destination, got %v", err)
+			}
+			if tc.lookupError && !errors.Is(err, lookupErr) {
+				t.Fatalf("expected the original lookup failure to be kept, got %v", err)
+			}
+			// The backup sits beside the database, so an ancestor swap carries
+			// it to moved; the error names where recovery left it.
+			backupDir := filepath.Dir(doltPath)
+			if replaced != doltPath {
+				rel, relErr := filepath.Rel(replaced, backupDir)
+				if relErr != nil {
+					t.Fatal(relErr)
+				}
+				backupDir = filepath.Join(moved, rel)
+			}
+			backups, globErr := filepath.Glob(filepath.Join(backupDir, "dolt.*.corrupt.backup"))
+			if globErr != nil || len(backups) != 1 {
+				t.Fatalf("expected the backup to stay in place, got %v (%v)", backups, globErr)
+			}
+			if reported := filepath.Join(filepath.Dir(doltPath), filepath.Base(backups[0])); !strings.Contains(err.Error(), reported) {
+				t.Fatalf("error %q does not report the backup location %s", err, reported)
+			}
+			if data, rerr := os.ReadFile(filepath.Join(backups[0], "state")); rerr != nil || string(data) != "corrupt" {
+				t.Fatalf("backup contents changed: %q, %v", data, rerr)
+			}
+			confineTreesEqual(t, outsideBefore, confineTree(t, outside), "outside data")
+		})
+	}
 }

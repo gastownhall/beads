@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/remedy"
 )
 
 // DatabaseIntegrity attempts to recover from database corruption by:
@@ -25,6 +26,10 @@ func DatabaseIntegrity(path string) error {
 
 	return doltIntegrityRecovery(absPath, beadsDir)
 }
+
+// integrityBdBinary finds the bd binary integrity recovery re-runs; tests
+// replace it to drive the recovery's failure paths.
+var integrityBdBinary = getBdBinary
 
 // doltIntegrityRecovery backs up the corrupted Dolt database and reinitializes.
 func doltIntegrityRecovery(path, beadsDir string) error {
@@ -51,9 +56,12 @@ func doltIntegrityRecovery(path, beadsDir string) error {
 	}
 
 	// Get bd binary path
-	bdBinary, err := getBdBinary()
+	bdBinary, err := integrityBdBinary()
 	if err != nil {
 		// Restore corrupted database on failure
+		if cerr := revalidateIntegrityRestore(beadsDir, doltPath, backupPath); cerr != nil {
+			return fmt.Errorf("%w\n%w", err, cerr)
+		}
 		_ = os.Rename(backupPath, doltPath)
 		return err
 	}
@@ -69,6 +77,9 @@ func doltIntegrityRecovery(path, beadsDir string) error {
 	if err := initCmd.Run(); err != nil {
 		// Restore backup on failure
 		fmt.Printf("  Warning: recovery failed, restoring corrupted Dolt database from %s\n", filepath.Base(backupPath))
+		if cerr := revalidateIntegrityRestore(beadsDir, doltPath, backupPath); cerr != nil {
+			return fmt.Errorf("failed to reinitialize Dolt database: %w\n%w", err, cerr)
+		}
 		_ = os.RemoveAll(doltPath)
 		_ = os.Rename(backupPath, doltPath)
 		return fmt.Errorf("failed to reinitialize Dolt database: %w", err)
@@ -76,6 +87,18 @@ func doltIntegrityRecovery(path, beadsDir string) error {
 
 	fmt.Printf("  Recovered Dolt database\n")
 	fmt.Printf("  Corrupted database preserved at: %s\n", filepath.Base(backupPath))
+	return nil
+}
+
+// revalidateIntegrityRestore re-admits doltPath before a failed recovery
+// removes what bd init left there and moves the backup back: the location
+// may have changed while bd init ran. On refusal the backup stays where it is
+// and the error names it.
+func revalidateIntegrityRestore(beadsDir, doltPath, backupPath string) error {
+	if _, err := confinedDatabasePath(beadsDir, doltPath); err != nil {
+		return fmt.Errorf("not restoring the corrupted Dolt database: %w\nThe corrupted database is preserved at %s",
+			err, remedy.PrintedValue(backupPath))
+	}
 	return nil
 }
 
