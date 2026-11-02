@@ -3,6 +3,7 @@ package schema
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -54,6 +55,20 @@ func SetPreflipEventsBatchSizesForTest(page, insert int) func() {
 // failure after partial insertion. Production leaves it nil.
 var preflipEventsInsertFaultHook func() error
 
+// preflipEventsSourceFaultHook, when set by a test, runs before each read of
+// a source's events rows; an error stands in for that historical read
+// failing. Production leaves it nil.
+var preflipEventsSourceFaultHook func(ref string) error
+
+// SetPreflipEventsSourceFaultHookForTest installs fn as the restore's
+// source-read fault hook and returns a function that restores the previous
+// value. Test-only.
+func SetPreflipEventsSourceFaultHookForTest(fn func(ref string) error) func() {
+	prev := preflipEventsSourceFaultHook
+	preflipEventsSourceFaultHook = fn
+	return func() { preflipEventsSourceFaultHook = prev }
+}
+
 // SetPreflipEventsInsertFaultHookForTest installs fn as the restore's
 // per-batch fault hook and returns a function that restores the previous
 // value. Test-only.
@@ -95,7 +110,11 @@ func SetPreflipEventsNoticeOutForTest(w io.Writer) func() {
 //
 // It writes only the ignored events table: no journal entry, no staging, no
 // Dolt commit. A clone with no such commit, or whose source has no events
-// table, completes silently.
+// table, completes silently. A source whose history cannot be read (Dolt's
+// schema-encoding drift) or whose events table lacks a column the restore
+// reads is skipped with a warning and the others are still restored; any
+// other failure, and every failure of a live statement, fails the pass with
+// 0031 pending.
 func seedEventsFromPreflipHistory(ctx context.Context, db DBConn) error {
 	sources, err := preflipEventsSources(ctx, db)
 	if err != nil {
@@ -106,12 +125,21 @@ func seedEventsFromPreflipHistory(ctx context.Context, db DBConn) error {
 	}
 	restored := 0
 	orphans := make(map[string]int)
+	var unreadable []string
 	for _, ref := range sources {
 		n, err := restorePreflipEventsFrom(ctx, db, ref, orphans)
 		restored += n
 		if err != nil {
-			return fmt.Errorf("restoring pre-upgrade events from %s: %w", ref, err)
+			if !unreadablePreflipSource(err) {
+				return fmt.Errorf("restoring pre-upgrade events from %s: %w", ref, err)
+			}
+			unreadable = append(unreadable, fmt.Sprintf("%s (%v)", ref, err))
 		}
+	}
+	if len(unreadable) > 0 {
+		fmt.Fprintf(preflipEventsNoticeOut,
+			"Warning: could not restore pre-upgrade audit events from %s; see https://beads.gascity.com/getting-started/upgrading\n",
+			strings.Join(unreadable, ", "))
 	}
 	if restored > 0 {
 		fmt.Fprintf(preflipEventsNoticeOut,
@@ -162,6 +190,28 @@ func preflipEventsSources(ctx context.Context, db DBConn) ([]string, error) {
 	return sources, nil
 }
 
+// preflipSourceError marks a failure reading a source commit's history, as
+// opposed to a statement against the live database.
+type preflipSourceError struct{ err error }
+
+func (e *preflipSourceError) Error() string { return e.err.Error() }
+func (e *preflipSourceError) Unwrap() error { return e.err }
+
+// errPreflipSourceIncompatible is a source whose events table lacks a column
+// the restore reads.
+var errPreflipSourceIncompatible = errors.New("its events table lacks columns the restore reads")
+
+// unreadablePreflipSource reports whether err means only that one source
+// cannot be restored from: drift or an incompatible shape in its history.
+// Cancellation, transient and live-statement failures are not.
+func unreadablePreflipSource(err error) bool {
+	var src *preflipSourceError
+	if !errors.As(err, &src) {
+		return false
+	}
+	return errors.Is(src.err, errPreflipSourceIncompatible) || isSchemaEncodingDriftErr(src.err)
+}
+
 // restorePreflipEventsFrom reconciles one source commit into the live events
 // table and returns how many rows it inserted. Skipped rows are recorded in
 // orphans (see recordPreflipOrphans).
@@ -178,7 +228,7 @@ func restorePreflipEventsFrom(ctx context.Context, db DBConn, ref string, orphan
 		}
 		issues, err := preflipEventsIssuePage(ctx, db, ref, after)
 		if err != nil {
-			return restored, err
+			return restored, &preflipSourceError{err}
 		}
 		if len(issues) == 0 {
 			return restored, nil
@@ -192,20 +242,24 @@ func restorePreflipEventsFrom(ctx context.Context, db DBConn, ref string, orphan
 	}
 }
 
-// preflipEventsSourceUsable reports whether ref carries an events table with
-// every column the restore reads. The shape is probed before anything selects
+// preflipEventsSourceUsable reports whether ref carries an events table, and
+// fails with errPreflipSourceIncompatible when it lacks a column the restore
+// reads. The shape is probed before anything selects
 // from it, as ReadMigrationContentHashes does: a failing statement would pin
 // a pooled Dolt session to its pre-statement catalog (be-bv7x).
 func preflipEventsSourceUsable(ctx context.Context, db DBConn, ref string) (bool, error) {
 	//nolint:gosec // G201: ref is validated by preflipEventsSources; AS OF requires a literal.
 	hasTable, err := queryHasRows(ctx, db, "SHOW TABLES AS OF '"+ref+"' LIKE 'events'")
-	if err != nil || !hasTable {
-		return false, err
+	if err != nil {
+		return false, &preflipSourceError{err}
+	}
+	if !hasTable {
+		return false, nil
 	}
 	//nolint:gosec // G201: as above.
 	columns, err := preflipQueryStrings(ctx, db, "SHOW COLUMNS FROM events AS OF '"+ref+"'")
 	if err != nil {
-		return false, err
+		return false, &preflipSourceError{err}
 	}
 	have := make(map[string]bool, len(columns))
 	for _, c := range columns {
@@ -213,7 +267,7 @@ func preflipEventsSourceUsable(ctx context.Context, db DBConn, ref string) (bool
 	}
 	for _, c := range preflipEventsSourceColumns {
 		if !have[c] {
-			return false, nil
+			return false, &preflipSourceError{fmt.Errorf("%w: no %s", errPreflipSourceIncompatible, c)}
 		}
 	}
 	return true, nil
@@ -259,9 +313,14 @@ type preflipEventsRow struct {
 // before anything is written: the restore runs on the migration's pinned
 // connection, which cannot interleave an open result with a write.
 func restorePreflipEventsPage(ctx context.Context, db DBConn, ref string, issues []string, orphans map[string]int) (int, error) {
+	if preflipEventsSourceFaultHook != nil {
+		if err := preflipEventsSourceFaultHook(ref); err != nil {
+			return 0, &preflipSourceError{err}
+		}
+	}
 	source, err := readPreflipEventsContent(ctx, db, "events AS OF '"+ref+"'", issues, nil)
 	if err != nil {
-		return 0, err
+		return 0, &preflipSourceError{err}
 	}
 	//nolint:gosec // G202: only ? placeholders are concatenated.
 	existing, err := preflipQueryStrings(ctx, db,
