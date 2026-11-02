@@ -38,7 +38,9 @@ import (
 // unchanged. Databases already at this binary's latest version never consult
 // the gate. The ignored (clone-local, dolt_ignored) migration sequence is
 // deliberately NOT gated on its own: it only materializes per-clone
-// bookkeeping tables and runs on every fresh clone — but when the MAIN
+// bookkeeping tables, refills the clone-local events table from the clone's
+// own pre-upgrade history (ignored 0031, gastownhall/beads#7039; no commit, no
+// tracked-table write), and runs on every fresh clone — but when the MAIN
 // sequence is pending and unconsented, MigrateUp refuses before ANY write,
 // ignored sequence and dolt_ignore seeding included.
 //
