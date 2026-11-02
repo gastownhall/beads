@@ -273,7 +273,14 @@ func refusalMessageUnverifiedRemote() string {
        history that may exist on the remote.
 
   Next:
-    See 'bd help init-safety'.`
+    Restore access to the remote (credentials, URL, network), then
+    re-run the same command.
+
+    Or initialize without configuring a remote for this run:
+      add --remote="" to the same command.
+
+    Overwrite the remote intentionally (destructive):
+      See 'bd help init-safety' for the --discard-remote workflow.`
 }
 
 // refusalMessageTokenMissing returns the What/Why/Next refusal text for
