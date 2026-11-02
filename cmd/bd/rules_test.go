@@ -860,3 +860,114 @@ func TestRulesCompact_GroupJSONReportsPartialApply(t *testing.T) {
 		t.Errorf("want only the composite left, got %v", ruleFileNames(after))
 	}
 }
+
+// TestRulesCompactAuto_PreservesSourceProse reproduces GH#5719: `bd rules
+// compact --auto` must not destroy rule prose. After the command, every
+// source file's non-directive text must still exist somewhere under the
+// rules directory (kept source, backup, or merged composite).
+func TestRulesCompactAuto_PreservesSourceProse(t *testing.T) {
+	dir := tempRulesDir(t)
+	writeRule(t, dir, "alpha", "# Alpha\n\n**Do:** validate input before writing to disk\n\n## Rationale\nThis prevents corruption when the writer crashes mid-flush.\n\n## Exceptions\nNone.\n")
+	writeRule(t, dir, "beta", "# Beta\n\n**Do:** validate input before writing to disk\n\n## Rationale\nSecond file, distinct prose that must survive.\n")
+
+	if err := rulesCompactCmd.Flags().Set("path", dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := rulesCompactCmd.Flags().Set("auto", "true"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = rulesCompactCmd.Flags().Set("path", ".claude/rules/")
+		_ = rulesCompactCmd.Flags().Set("auto", "false")
+	})
+	if err := runRulesCompact(rulesCompactCmd, nil); err != nil {
+		t.Fatalf("compact --auto: %v", err)
+	}
+
+	var all strings.Builder
+	_ = filepath.Walk(dir, func(p string, info os.FileInfo, err error) error {
+		if err == nil && !info.IsDir() {
+			b, _ := os.ReadFile(p)
+			all.Write(b)
+		}
+		return nil
+	})
+	for _, prose := range []string{
+		"This prevents corruption when the writer crashes mid-flush.",
+		"Second file, distinct prose that must survive.",
+	} {
+		if !strings.Contains(all.String(), prose) {
+			t.Errorf("prose %q lost after compact --auto; rules dir now holds:\n%s", prose, all.String())
+		}
+	}
+}
+
+// runRulesCompactJSONValue runs compact with --json and decodes the payload,
+// array or object, so tests can assert on either output shape.
+func runRulesCompactJSONValue(t *testing.T, args ...string) (interface{}, error) {
+	t.Helper()
+	prevJSON := jsonOutput
+	jsonOutput = true
+	t.Cleanup(func() { jsonOutput = prevJSON })
+
+	cmd := newRulesCompactTestCmd(t, args...)
+	out, err := captureStdoutWithError(t, func() error { return runRulesCompact(cmd, nil) })
+	var payload interface{}
+	if jsonErr := json.Unmarshal([]byte(out), &payload); jsonErr != nil {
+		t.Fatalf("stdout was not valid JSON (%v): %s", jsonErr, out)
+	}
+	return payload, err
+}
+
+// Without --force (or with --force --dry-run) compact previews in every
+// mode — text, JSON, piped stdout — and writes nothing. The tests capture
+// stdout through a pipe (never a TTY), so a prompt would hang them, not
+// bypass them: passing proves no prompt and no stdin read.
+func TestRulesCompact_PreviewJSONAppliedFalse(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"auto json", []string{"--auto"}},
+		{"group json", []string{"--group", "alpha,beta"}},
+		{"auto dry-run force json", []string{"--auto", "--dry-run", "--force"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := tempRulesDir(t)
+			writeRule(t, dir, "alpha", fmt.Sprintf(sharedDiskDirective, "Alpha", "alpha"))
+			writeRule(t, dir, "beta", fmt.Sprintf(sharedDiskDirective, "Beta", "beta"))
+			before := snapshotRulesDir(t, dir)
+
+			payload, err := runRulesCompactJSONValue(t, append([]string{"--path", dir}, tc.args...)...)
+			if err != nil {
+				t.Fatalf("preview must not fail: %v", err)
+			}
+
+			var objects []map[string]interface{}
+			switch v := payload.(type) {
+			case map[string]interface{}:
+				objects = []map[string]interface{}{v}
+			case []interface{}:
+				for _, item := range v {
+					m, ok := item.(map[string]interface{})
+					if !ok {
+						t.Fatalf("results item is not an object: %v", item)
+					}
+					objects = append(objects, m)
+				}
+			default:
+				t.Fatalf("unexpected JSON payload: %v", payload)
+			}
+			if len(objects) == 0 {
+				t.Fatal("expected at least one result object")
+			}
+			for _, m := range objects {
+				if m["applied"] != false {
+					t.Errorf("preview reported applied=%v, want false: %v", m["applied"], m)
+				}
+			}
+
+			assertRulesDirUnchanged(t, dir, before)
+		})
+	}
+}
