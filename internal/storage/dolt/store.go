@@ -2332,6 +2332,21 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		breaker.RecordSuccess()
 	}
 
+	// A tracked server still running a dolt that has since been replaced is
+	// replaced before the first application query (GH#6064). The replacement
+	// is not autoStartedDir's: Close leaves it running.
+	port, reconcileErr := reconcileServerBinary(cfg, resolvedBeadsDir, serverDir)
+	if reconcileErr != nil {
+		if autoStartedDir != "" {
+			_ = autoStartRelease(autoStartedDir)
+		}
+		return nil, reconcileErr
+	}
+	if port != cfg.ServerPort {
+		fmt.Fprintf(os.Stderr, "Warning: Dolt server endpoint changed: port %d → %d (dolt upgrade restart)\n", cfg.ServerPort, port)
+		cfg.ServerPort = port
+	}
+
 	// Server mode: connect via MySQL protocol to dolt sql-server
 	db, connStr, dbFacts, err := openServerConnection(ctx, cfg)
 	if err != nil {
