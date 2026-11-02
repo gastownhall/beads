@@ -478,7 +478,9 @@ func printEmbeddedUnsupported(commandLabel string) {
 	hints := []string{
 		"Verify database exists:  ls -la .beads/embeddeddolt/",
 		"Check bd version:        bd version",
-		"Reinitialize if needed:  bd init --reinit-local",
+		// GH#4521: bare reinitialization over a store that may not open loses
+		// data; route an unopenable engine to preservation-first recovery.
+		"If it won't open:        preserve data first, then follow https://github.com/gastownhall/beads/blob/main/docs/recovery/database-corruption.md#engine-wont-open",
 		"Switch to server mode:   bd init --server",
 	}
 	supported := []string{"artifacts", "conventions", "pollution"}

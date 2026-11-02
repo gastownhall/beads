@@ -146,6 +146,26 @@ func TestEmbeddedDoctorUnsupportedJSON(t *testing.T) {
 			if !strings.Contains(errStr, "not yet supported in embedded mode") {
 				t.Errorf("expected error to mention embedded-mode unsupported, got %q", errStr)
 			}
+
+			// GH#4521: the hints must link preservation-first recovery for an
+			// unopenable engine instead of offering bare reinitialization.
+			hints, _ := result["hints"].([]interface{})
+			if len(hints) == 0 {
+				t.Fatalf("bd %s emitted no hints", strings.Join(tc.args, " "))
+			}
+			linked := false
+			for _, h := range hints {
+				s, _ := h.(string)
+				if strings.Contains(s, "docs/recovery/database-corruption.md#engine-wont-open") {
+					linked = true
+				}
+				if strings.Contains(s, "reinit-local") {
+					t.Errorf("hint %q offers reinitialization over a store that may not open; link recovery guidance instead", s)
+				}
+			}
+			if !linked {
+				t.Errorf("expected a hint linking docs/recovery/database-corruption.md#engine-wont-open, got %v", hints)
+			}
 		})
 	}
 }
@@ -176,5 +196,14 @@ func TestEmbeddedDoctorUnsupportedProse(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("expected stub to mention %q so users know what works:\n%s", want, out)
 		}
+	}
+
+	// GH#4521: recovery guidance, not bare reinitialization over a store that
+	// may not open.
+	if !strings.Contains(out, "docs/recovery/database-corruption.md#engine-wont-open") {
+		t.Errorf("expected stub to link the engine-wont-open recovery runbook:\n%s", out)
+	}
+	if strings.Contains(out, "bd init --reinit-local") {
+		t.Errorf("stub must not offer bare reinitialization over an unopenable store:\n%s", out)
 	}
 }
