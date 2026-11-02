@@ -428,3 +428,79 @@ INSERT INTO events (issue_id, event_type, actor, old_value, new_value, comment, 
 	}
 	assertEventsAbsentFromStatus(t, ctx, conn)
 }
+// TestEmbeddedIgnoredMigration0031AlonePreservesHeadAndDirtyState runs the
+// restore as the only pending migration: HEAD must not move, an unrelated
+// dirty tracked row must stay uncommitted, the events journal must be
+// untouched, and events must remain dolt_ignored — while the missing events
+// multiplicity is restored.
+func TestEmbeddedIgnoredMigration0031AlonePreservesHeadAndDirtyState(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+
+	dataDir := seedMainSchemaAt(t, ctx, 61)
+	conn, closeConn := openPinnedConn(t, ctx, dataDir)
+	defer closeConn()
+
+	seedPreflipEvents(t, ctx, conn, "h-1", `
+INSERT INTO events (issue_id, event_type, actor, old_value, new_value, comment, created_at, id) VALUES
+('h-1', 'created', 'tester', NULL, NULL, NULL, '2026-07-30 00:00:00', 'evt-h-1'),
+('h-1', 'commented', 'tester', NULL, NULL, 'note', '2026-07-30 00:02:00', 'evt-h-2');
+`)
+
+	// Full chain first: this clone is at latest everywhere.
+	if _, err := schema.MigrateUp(ctx, conn); err != nil {
+		t.Fatalf("MigrateUp: %v", err)
+	}
+
+	// An adopting clone of the pre-fix binary tops out one version lower:
+	// drop the restore's cursor row so 0031 alone is pending again.
+	execFrozenGuard(t, ctx, conn, "DELETE FROM ignored_schema_migrations WHERE version = 31")
+
+	// Unrelated uncommitted tracked work, a missing events multiplicity to
+	// restore, and a stable HEAD/journal to protect.
+	execFrozenGuard(t, ctx, conn, `
+INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type)
+VALUES ('h-dirty', 'uncommitted', '', '', '', '', 'open', 2, 'task');
+`)
+	execFrozenGuard(t, ctx, conn, "DELETE FROM events WHERE id = 'evt-h-2'")
+	headBefore := scalarString(t, ctx, conn, "SELECT commit_hash FROM dolt_log LIMIT 1")
+	journalBefore := scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM bd_events_journal")
+
+	if _, err := schema.MigrateUp(ctx, conn); err != nil {
+		t.Fatalf("MigrateUp (restore alone): %v", err)
+	}
+
+	// The lost multiplicity is back under a derived id.
+	commentDigest := eventDigest("h-1", "commented", "tester", eventNull, eventNull, "note", "2026-07-30 00:02:00")
+	if got := scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM events WHERE id = ?", rowid.New("events", 0, commentDigest)); got != 1 {
+		t.Fatalf("restored commented event = %d, want 1", got)
+	}
+	if got := scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM events WHERE id = 'evt-h-1'"); got != 1 {
+		t.Fatalf("surviving original event = %d, want 1", got)
+	}
+	if got := scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM events"); got != 2 {
+		t.Fatalf("events rows = %d, want 2", got)
+	}
+
+	// HEAD, the dirty row, the journal, and the ignore plane are untouched.
+	if got := scalarString(t, ctx, conn, "SELECT commit_hash FROM dolt_log LIMIT 1"); got != headBefore {
+		t.Fatalf("HEAD moved: %s -> %s (restore must not commit)", headBefore, got)
+	}
+	if got := scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM issues WHERE id = 'h-dirty'"); got != 1 {
+		t.Fatalf("dirty issue row lost = %d, want 1", got)
+	}
+	if got := scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM issues AS OF 'HEAD' WHERE id = 'h-dirty'"); got != 0 {
+		t.Fatalf("dirty issue row committed = %d at HEAD, want 0 (must stay uncommitted)", got)
+	}
+	if got := scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM bd_events_journal"); got != journalBefore {
+		t.Fatalf("bd_events_journal rows changed: %d -> %d", journalBefore, got)
+	}
+	if got := scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM dolt_ignore WHERE pattern = 'events' AND ignored = 1"); got != 1 {
+		t.Fatalf("dolt_ignore events pattern = %d, want 1", got)
+	}
+	if got := scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM ignored_schema_migrations WHERE version = 31"); got != 1 {
+		t.Fatalf("restore version re-recorded = %d, want 1", got)
+	}
+	assertEventsAbsentFromStatus(t, ctx, conn)
+}
+
