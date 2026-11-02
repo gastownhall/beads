@@ -201,3 +201,23 @@ func TestHookWriteGuardRefusesSymlinkedParentDir(t *testing.T) {
 		require.Empty(t, dirSnapshot(t, outside), "migration created a hook in the link target")
 	})
 }
+
+// TestUninstallHooksRefusesSymlinkedHooksDir: uninstall refuses a hooks
+// directory that is a symlink before editing any hook in its target or
+// resetting Git configuration.
+func TestUninstallHooksRefusesSymlinkedHooksDir(t *testing.T) {
+	root, repo := setupSymlinkedHooksDirRepo(t)
+	outside := filepath.Join(root, "outside-hooks")
+	marked := "#!/usr/bin/env sh\necho keep\n" + generateHookSection("pre-commit")
+	writeFileForWorktreeTest(t, filepath.Join(outside, "pre-commit"), []byte(marked))
+	writeFileForWorktreeTest(t, filepath.Join(outside, "post-merge"), []byte("#!/usr/bin/env sh\n"+generateHookSection("post-merge")))
+	link := filepath.Join(repo, "linked-hooks")
+	symlinkOrSkip(t, outside, link)
+	before := dirSnapshot(t, outside)
+
+	resetCalled := false
+	err := uninstallHooksAt(link, func() error { resetCalled = true; return nil })
+	require.ErrorContains(t, err, "symlink")
+	require.False(t, resetCalled, "reset ran despite the refusal")
+	require.Equal(t, before, dirSnapshot(t, outside), "link target contents changed")
+}

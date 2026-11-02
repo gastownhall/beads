@@ -89,6 +89,9 @@ bd hooks list
 bd hooks uninstall
 ```
 
+In releases after v1.3.2, uninstall refuses a hooks directory that is itself a
+symlink, before editing any hook or resetting `core.hooksPath`.
+
 ### External Hook Managers
 
 bd detects these external git hook managers and checks whether their config
