@@ -494,3 +494,93 @@ func TestEmbeddedCompactRefusesStraddledCutoff(t *testing.T) {
 		f.assertMainUntouched(t, conn)
 	})
 }
+
+// TestEmbeddedCompactDryRunRefusedPreview covers #6645 (AC-2): previewing the
+// straddled history must exit 0 and change nothing, report the refusal and
+// the hint instead of recommending --force, and keep the existing preview
+// fields with refusal.error/refusal.hint added in JSON.
+func TestEmbeddedCompactDryRunRefusedPreview(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	f := buildCompactStraddle(t, "dp")
+
+	short := func(hash string) string {
+		if len(hash) > 8 {
+			return hash[:8]
+		}
+		return hash
+	}
+
+	t.Run("text", func(t *testing.T) {
+		cmd := exec.Command(f.bd, "compact", "--dry-run", "--days", "0")
+		cmd.Dir = f.dir
+		cmd.Env = bdEnv(f.dir)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("dry-run must exit 0 even when refused: %v\n%s", err, out)
+		}
+		for _, want := range []string{
+			"DRY RUN",
+			"Refused: cannot compact",
+			short(f.recent.Hash),
+			short(f.old.Hash),
+			"Hint: No compaction changes were made",
+		} {
+			if !strings.Contains(string(out), want) {
+				t.Errorf("dry-run output missing %q:\n%s", want, out)
+			}
+		}
+		if strings.Contains(string(out), "Run with --force") {
+			t.Errorf("refused preview must not recommend --force:\n%s", out)
+		}
+		if strings.Contains(string(out), "Result:") {
+			t.Errorf("refused preview must not print a success forecast:\n%s", out)
+		}
+	})
+
+	t.Run("json", func(t *testing.T) {
+		cmd := exec.Command(f.bd, "--json", "compact", "--dry-run", "--days", "0")
+		cmd.Dir = f.dir
+		cmd.Env = bdEnv(f.dir)
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("json dry-run must exit 0 even when refused: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+		}
+		start := strings.Index(stdout.String(), "{")
+		if start < 0 {
+			t.Fatalf("no JSON object in dry-run output:\n%s", stdout.String())
+		}
+		var m map[string]interface{}
+		if err := json.Unmarshal([]byte(stdout.String()[start:]), &m); err != nil {
+			t.Fatalf("parse dry-run JSON: %v\nraw: %s", err, stdout.String())
+		}
+		// The existing preview fields all survive.
+		if m["dry_run"] != true {
+			t.Errorf("dry_run = %v, want true", m["dry_run"])
+		}
+		for _, field := range []string{"total_commits", "old_commits", "recent_commits", "cutoff_days", "cutoff_date", "initial_hash", "boundary_hash"} {
+			if _, ok := m[field]; !ok {
+				t.Errorf("dry-run JSON lost field %q: %v", field, m)
+			}
+		}
+		refusal, ok := m["refusal"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("dry-run JSON has no refusal object: %v", m)
+		}
+		if msg, _ := refusal["error"].(string); !strings.Contains(msg, "cannot compact") || !strings.Contains(msg, short(f.recent.Hash)) {
+			t.Errorf("refusal.error = %q, want the refusal naming the recent commit", msg)
+		}
+		if hint, _ := refusal["hint"].(string); !strings.Contains(hint, "No compaction changes were made") {
+			t.Errorf("refusal.hint = %q, want the remediation hint", hint)
+		}
+	})
+
+	f.withReopened(t, func(conn *sql.Conn) {
+		f.assertMainUntouched(t, conn)
+	})
+}

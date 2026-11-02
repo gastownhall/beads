@@ -3,10 +3,12 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 func parseProxiedJSONObject(t *testing.T, stdout string) map[string]interface{} {
@@ -260,6 +262,94 @@ func TestProxiedServerCompactHistory(t *testing.T) {
 		}
 		if !strings.Contains(stdout, "Nothing to compact") {
 			t.Errorf("expected 'Nothing to compact', got: %s", stdout)
+		}
+	})
+
+	// The #6645 shape through the proxied front door: a future-dated commit
+	// whose old-dated child undoes its edit. The forced run must refuse and
+	// change nothing; the preview must report the refusal instead of
+	// recommending --force.
+	t.Run("refuses_straddled_cutoff", func(t *testing.T) {
+		issue := bdProxiedCreate(t, bd, p.dir, "straddle me", "--type", "task")
+		db := openProxiedDB(t, p)
+		defer db.Close()
+		straddle := []struct {
+			title, msg, date string
+		}{
+			{"edit A", "straddle: edit A", time.Now().Add(40 * time.Minute).Format(time.RFC3339)},
+			{"straddle me", "straddle: revert", ""},
+		}
+		for _, s := range straddle {
+			if _, err := db.ExecContext(context.Background(),
+				"UPDATE issues SET title = ? WHERE id = ?", s.title, issue.ID); err != nil {
+				t.Fatalf("update title %q: %v", s.title, err)
+			}
+			if s.date != "" {
+				if _, err := db.ExecContext(context.Background(),
+					"CALL DOLT_COMMIT('-Am', ?, '--date', ?)", s.msg, s.date); err != nil {
+					t.Fatalf("dolt commit %q: %v", s.msg, err)
+				}
+			} else if _, err := db.ExecContext(context.Background(),
+				"CALL DOLT_COMMIT('-Am', ?)", s.msg); err != nil {
+				t.Fatalf("dolt commit %q: %v", s.msg, err)
+			}
+		}
+		var headBefore string
+		if err := db.QueryRowContext(context.Background(), "SELECT HASHOF('HEAD')").Scan(&headBefore); err != nil {
+			t.Fatalf("read HEAD before: %v", err)
+		}
+
+		stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "compact", "--days", "0", "--force")
+		if err == nil {
+			t.Fatalf("compact --force should have refused\nstdout:\n%s", stdout)
+		}
+		if out := stdout + stderr; !strings.Contains(out, "cannot compact") || !strings.Contains(out, "No compaction changes were made") {
+			t.Errorf("expected refusal with hint, got:\n%s\n%s", stdout, stderr)
+		}
+
+		var headAfter string
+		if err := db.QueryRowContext(context.Background(), "SELECT HASHOF('HEAD')").Scan(&headAfter); err != nil {
+			t.Fatalf("read HEAD after: %v", err)
+		}
+		if headAfter != headBefore {
+			t.Errorf("main head = %s, want unchanged %s", headAfter, headBefore)
+		}
+		if got := bdProxiedSQLJSON(t, bd, p.dir, "SELECT title FROM issues WHERE id = '"+issue.ID+"'"); len(got) != 1 || got[0]["title"] != "straddle me" {
+			t.Errorf("title after refused compact = %v, want %q", got, "straddle me")
+		}
+	})
+
+	t.Run("dry_run_reports_refusal", func(t *testing.T) {
+		stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "compact", "--days", "0", "--dry-run")
+		if err != nil {
+			t.Fatalf("dry-run must exit 0 even when refused: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		}
+		for _, want := range []string{"DRY RUN", "Refused: cannot compact", "Hint: No compaction changes were made"} {
+			if !strings.Contains(stdout, want) {
+				t.Errorf("dry-run output missing %q: %s", want, stdout)
+			}
+		}
+		if strings.Contains(stdout, "Run with --force") {
+			t.Errorf("refused preview must not recommend --force: %s", stdout)
+		}
+
+		stdout, stderr, err = bdProxiedRunBuffers(t, bd, p.dir, "compact", "--days", "0", "--dry-run", "--json")
+		if err != nil {
+			t.Fatalf("json dry-run must exit 0 even when refused: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		}
+		m := parseProxiedJSONObject(t, stdout)
+		if m["dry_run"] != true {
+			t.Errorf("expected dry_run=true, got: %v", m["dry_run"])
+		}
+		refusal, ok := m["refusal"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("dry-run JSON has no refusal object: %v", m)
+		}
+		if msg, _ := refusal["error"].(string); !strings.Contains(msg, "cannot compact") {
+			t.Errorf("refusal.error = %q, want the refusal message", msg)
+		}
+		if hint, _ := refusal["hint"].(string); !strings.Contains(hint, "No compaction changes were made") {
+			t.Errorf("refusal.hint = %q, want the remediation hint", hint)
 		}
 	})
 }
