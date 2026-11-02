@@ -116,9 +116,55 @@ func TestMigrationLogAssetsRejectSymlinkDirectory(t *testing.T) {
 
 	var errs []error
 	stderr := captureStderr(t, func() {
-		errs = removeMigrateAssets(confinedMigrateLogAssets(root, []string{logPath}))
+		errs = removeMigrateAssets(root, confinedMigrateLogAssets(root, []string{logPath}))
 	})
 	assert.Empty(t, errs)
 	assert.True(t, strings.Contains(stderr, "Warning") && strings.Contains(stderr, logPath), "missing warning: %q", stderr)
 	assert.Equal(t, "unchanged", string(mustReadFile(t, sentinel)))
+
+	// The remover enforces the same boundary without the filter.
+	stderr = captureStderr(t, func() { errs = removeMigrateAssets(root, []string{logPath}) })
+	assert.Empty(t, errs)
+	assert.True(t, strings.Contains(stderr, "Warning") && strings.Contains(stderr, logPath), "missing warning: %q", stderr)
+	assert.Equal(t, "unchanged", string(mustReadFile(t, sentinel)))
+}
+
+// TestRemoveMigrateAssetsGuardsItsBoundary drives the remover directly: only
+// logDir's regular server.log and server.log.1 are removed; an outside path,
+// an unrelated sibling and a symlinked rotated log stay.
+func TestRemoveMigrateAssetsGuardsItsBoundary(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating symlinks needs privileges on windows")
+	}
+	dir := t.TempDir()
+	logDir := filepath.Join(dir, ".beads", "dolt")
+	require.NoError(t, os.MkdirAll(logDir, 0o755))
+	outside := filepath.Join(dir, "sentinel")
+	legit := filepath.Join(logDir, proxiedServerLogName)
+	link := filepath.Join(logDir, proxiedServerLogName+".1")
+	other := filepath.Join(logDir, "unrelated")
+	for _, p := range []string{outside, other} {
+		require.NoError(t, os.WriteFile(p, []byte("unchanged"), 0o600))
+	}
+	require.NoError(t, os.WriteFile(legit, []byte("log"), 0o600))
+	require.NoError(t, os.Symlink(outside, link))
+
+	var errs []error
+	stderr := captureStderr(t, func() { errs = removeMigrateAssets(logDir, []string{outside, link, legit, other}) })
+	assert.Empty(t, errs)
+	for _, p := range []string{outside, link, other} {
+		assert.Contains(t, stderr, p, "skipped entry not named in warnings")
+	}
+	for _, p := range []string{outside, other} {
+		assert.Equal(t, "unchanged", string(mustReadFile(t, p)), p)
+	}
+	_, lerr := os.Lstat(link)
+	assert.NoError(t, lerr, "rotated-log symlink removed")
+	assert.NoFileExists(t, legit, "eligible log not removed")
+
+	assert.Empty(t, removeMigrateAssets(logDir, nil))
+	require.NoError(t, os.Remove(link))
+	require.NoError(t, os.WriteFile(link, []byte("rotation"), 0o600))
+	assert.Empty(t, removeMigrateAssets(logDir, []string{legit, link}), "absent server.log must be tolerated")
+	assert.NoFileExists(t, link, "regular rotated log not removed")
 }

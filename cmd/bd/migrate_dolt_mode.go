@@ -1208,7 +1208,7 @@ func runMigrateFromProxiedServer(dryRun bool, shared bool) error {
 		if errs := proxy.PurgeControlFiles(rootDir); len(errs) > 0 {
 			return HandleError("failed to retire proxy controls: %v", errs[0])
 		}
-		if errs := removeMigrateAssets(confinedMigrateLogAssets(rootDir, logAssets)); len(errs) > 0 {
+		if errs := removeMigrateAssets(rootDir, confinedMigrateLogAssets(rootDir, logAssets)); len(errs) > 0 {
 			return HandleError("failed to retire proxy logs: %v", errs[0])
 		}
 		if err := checkpointMigration(beadsDir, j, migrateOldControlsRetired); err != nil {
@@ -1326,10 +1326,39 @@ func confinedMigrateLogAssets(rootDir string, paths []string) []string {
 	return kept
 }
 
-func removeMigrateAssets(paths []string) []error {
+// removeMigrateAssets removes logDir's own server.log and server.log.1 among
+// paths. It enforces the confinement itself rather than trusting its caller:
+// under a logDir that is not a real directory, any other entry and a log that
+// is not a regular file are warned about and skipped. Absent logs are
+// tolerated; other inspection and removal errors are returned.
+func removeMigrateAssets(logDir string, paths []string) []error {
 	var errs []error
+	root, rootErr := filepath.Abs(logDir)
+	rootIsDir := rootErr == nil
+	if rootIsDir {
+		info, statErr := os.Lstat(root)
+		rootIsDir = statErr == nil && info.IsDir()
+	}
 	for _, p := range paths {
-		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+		path, pathErr := filepath.Abs(p)
+		if !rootIsDir || pathErr != nil ||
+			(path != filepath.Join(root, proxiedServerLogName) && path != filepath.Join(root, proxiedServerLogName+".1")) {
+			fmt.Fprintf(os.Stderr, "Warning: skipping untrusted migration log asset %s\n", remedy.PrintedValue(p))
+			continue
+		}
+		info, err := os.Lstat(path)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if !info.Mode().IsRegular() {
+			fmt.Fprintf(os.Stderr, "Warning: skipping non-regular migration log asset %s\n", remedy.PrintedValue(p))
+			continue
+		}
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			errs = append(errs, err)
 		}
 	}
