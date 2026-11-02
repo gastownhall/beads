@@ -78,6 +78,8 @@ func TestMigrateUpReturnsDirtyTablesErrorForPreExistingDirtyTable(t *testing.T) 
 	expectCursorProbe(mock, "schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", 42)
 
+	// The pass reads @@dolt_transaction_commit before its first write (#4470).
+	expectTransactionCommitRead(mock, 0)
 	// dirtyTables(ctx, db, false): `dependencies` has an uncommitted, unstaged
 	// change in the working set.
 	expectDirtyDoltStatusRow(mock, "dependencies", false)
@@ -124,6 +126,13 @@ func TestMigrateUpReturnsDirtyTablesErrorForPreExistingDirtyTable(t *testing.T) 
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet sql expectations: %v", err)
 	}
+}
+
+// expectTransactionCommitRead mocks the migration pass's read of the session's
+// @@dolt_transaction_commit (#4470). A value of 0 issues no SET.
+func expectTransactionCommitRead(mock sqlmock.Sqlmock, value int) {
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT @@SESSION.dolt_transaction_commit")).
+		WillReturnRows(sqlmock.NewRows([]string{"@@SESSION.dolt_transaction_commit"}).AddRow(value))
 }
 
 // expectDirtyDoltStatusRow mocks a dolt_status query returning a single dirty

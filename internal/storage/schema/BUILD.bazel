@@ -19,6 +19,7 @@ go_library(
         "remote_migrate_gate.go",
         "schema.go",
         "smart_remote_migrate_gate.go",
+        "transaction_commit.go",
         "wisp_dep_forward_repair.go",
     ],
     embedsrcs = [
