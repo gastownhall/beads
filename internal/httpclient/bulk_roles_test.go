@@ -472,7 +472,7 @@ func TestAPlainSweepAgainstAServerWithoutRetainedTypesReadsTheSetting(t *testing
 func TestDeleteResultCarriesEveryWireMember(t *testing.T) {
 	w := &stubWire{deleted: &apigen.DeleteIssuesResult{
 		DryRun: true, Deleted: 2, Dependencies: 3, Labels: 4, Events: 5,
-		ReferencesUpdated: 6, Orphaned: &[]string{"bd-9"},
+		ReferencesUpdated: 6, Orphaned: &[]string{"bd-9"}, DeletedIds: &[]string{"bd-1", "bd-1.1"},
 	}}
 	result, err := bulkDeleter(t, w).Delete(t.Context(), issueops.DeleteRequest{IDs: []string{"bd-1"}, Force: true})
 	if err != nil {
@@ -481,6 +481,9 @@ func TestDeleteResultCarriesEveryWireMember(t *testing.T) {
 	assertEveryFieldPopulated(t, "DeleteResult", reflect.ValueOf(result))
 	if !reflect.DeepEqual(result.Orphaned, []string{"bd-9"}) {
 		t.Errorf("Orphaned = %v, want [bd-9]", result.Orphaned)
+	}
+	if !reflect.DeepEqual(result.DeletedIDs, []string{"bd-1", "bd-1.1"}) {
+		t.Errorf("DeletedIDs = %v, want [bd-1 bd-1.1]", result.DeletedIDs)
 	}
 }
 

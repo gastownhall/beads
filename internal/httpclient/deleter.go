@@ -106,6 +106,9 @@ func (d *httpDeleter) Delete(ctx context.Context, req issueops.DeleteRequest) (r
 	if res.Orphaned != nil {
 		out.Orphaned = append([]string(nil), *res.Orphaned...)
 	}
+	if res.DeletedIds != nil {
+		out.DeletedIDs = append([]string(nil), *res.DeletedIds...)
+	}
 	return out, nil
 }
 

@@ -1463,6 +1463,11 @@ type DeleteIssuesResult struct {
 	// Deleted How many beads were deleted, or under `dry_run` would be. Under `cascade` this counts the whole closure, so it is normally larger than `ids` and it — not the request length — is the number to show.
 	Deleted int `json:"deleted"`
 
+	// DeletedIds The beads `deleted` counts, in ascending id order without duplicates: under `cascade`, the whole parent-child closure. Under `dry_run` it names the beads that would go, so a preview and the deletion that follows it can be compared id for id.
+	//
+	// Optional, because a server older than this member does not send it; a client reading such a server gets no names, never wrong ones.
+	DeletedIds *[]string `json:"deleted_ids,omitempty"`
+
 	// Dependencies Dependency edge rows removed with them, in either direction. Reported because a delete's visible effect is much larger than its bead count.
 	Dependencies int `json:"dependencies"`
 
@@ -1475,7 +1480,7 @@ type DeleteIssuesResult struct {
 	// Labels Label rows removed with the deleted beads.
 	Labels int `json:"labels"`
 
-	// Orphaned The surviving beads that depended on something this request deleted, in ascending id order. Present exactly when the request carried `force` without `cascade`, which is the only mode in which orphaning is possible; absent otherwise.
+	// Orphaned The surviving beads that depended on something this request deleted, in ascending id order. Present when the request carried `cascade` (a cascade follows parent-child edges only, so a bead joined to the deleted tree by any other edge survives it) or `force` without `cascade`, and some bead was orphaned; absent otherwise.
 	//
 	// DIRECT dependents only. A bead two edges away lost no edge.
 	Orphaned *[]string `json:"orphaned,omitempty"`
