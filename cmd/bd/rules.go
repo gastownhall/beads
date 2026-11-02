@@ -29,6 +29,9 @@ type RuleFile struct {
 	Body      string   `json:"body,omitempty"`
 	Keywords  []string `json:"keywords"`
 	Tokens    int      `json:"tokens"`
+	// NotCarried holds the trimmed nonblank lines that are not part of a
+	// directive, so a composite drops them.
+	NotCarried []string `json:"-"`
 }
 
 // ContradictionReport describes a tension between two rules.
@@ -125,7 +128,7 @@ func ParseRuleFile(path string) (RuleFile, error) {
 	}
 
 	// Extract Do and Don't blocks
-	rf.DoLines, rf.DontLines = extractAllDirectives(content)
+	rf.DoLines, rf.DontLines, rf.NotCarried = extractAllDirectives(content)
 
 	// Extract keywords from Do/Don't lines first, fallback to body
 	allDirectives := append(rf.DoLines, rf.DontLines...)
@@ -138,9 +141,10 @@ func ParseRuleFile(path string) (RuleFile, error) {
 	return rf, nil
 }
 
-// extractAllDirectives parses Do and Don't blocks from rule content.
+// extractAllDirectives parses Do and Don't blocks from rule content, and
+// returns the trimmed nonblank lines it did not take into a directive.
 // Don't patterns are checked first to avoid false matches (since "Don't" contains "Do").
-func extractAllDirectives(content string) (doLines, dontLines []string) {
+func extractAllDirectives(content string) (doLines, dontLines, notCarried []string) {
 	lines := strings.Split(content, "\n")
 
 	// blockType: 0=none, 1=do, 2=dont
@@ -179,10 +183,15 @@ func extractAllDirectives(content string) (doLines, dontLines []string) {
 					} else {
 						dontLines = append(dontLines, text)
 					}
+				} else {
+					notCarried = append(notCarried, trimmed)
 				}
 			} else if trimmed == "" || strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, "**") {
 				// End of block
 				blockType = 0
+				if trimmed != "" {
+					notCarried = append(notCarried, trimmed)
+				}
 			} else {
 				// Plain continuation text
 				if blockType == 1 {
@@ -191,9 +200,11 @@ func extractAllDirectives(content string) (doLines, dontLines []string) {
 					dontLines = append(dontLines, trimmed)
 				}
 			}
+		} else if trimmed != "" {
+			notCarried = append(notCarried, trimmed)
 		}
 	}
-	return doLines, dontLines
+	return doLines, dontLines, notCarried
 }
 
 // ExtractKeywords tokenizes lines, removes stop words, lowercases, and deduplicates.
@@ -968,10 +979,11 @@ const compactPreviewFooter = "Preview only, nothing written. Re-run with --force
 
 // compactSource is one source rule of a composite as compact reports it.
 type compactSource struct {
-	File     string `json:"file"`
-	Backup   string `json:"backup"`
-	BackedUp bool   `json:"backed_up"`
-	Deleted  bool   `json:"deleted"`
+	File       string   `json:"file"`
+	Backup     string   `json:"backup"`
+	NotCarried []string `json:"not_carried"`
+	BackedUp   bool     `json:"backed_up"`
+	Deleted    bool     `json:"deleted"`
 }
 
 // ruleBackupPath is where compact copies a source rule before deleting it.
@@ -991,11 +1003,16 @@ func compactSources(rules []RuleFile, done compactApplied) []compactSource {
 			continue
 		}
 		seen[rf.Path] = true
+		notCarried := rf.NotCarried
+		if notCarried == nil {
+			notCarried = []string{}
+		}
 		sources = append(sources, compactSource{
-			File:     rf.Path,
-			Backup:   ruleBackupPath(rf.Path),
-			BackedUp: done.BackedUp[rf.Path],
-			Deleted:  done.Deleted[rf.Path],
+			File:       rf.Path,
+			Backup:     ruleBackupPath(rf.Path),
+			NotCarried: notCarried,
+			BackedUp:   done.BackedUp[rf.Path],
+			Deleted:    done.Deleted[rf.Path],
 		})
 	}
 	return sources
@@ -1011,6 +1028,7 @@ func printCompactPreview(outName, merged string, sources []compactSource, applie
 	fmt.Println(strings.Repeat("─", 40))
 	fmt.Print(merged)
 	fmt.Println(strings.Repeat("─", 40))
+	printNotCarried(sources)
 	names := make([]string, 0, len(sources))
 	var backups, backedUp, deleted, kept []string
 	for _, s := range sources {
@@ -1043,6 +1061,30 @@ func printCompactPreview(outName, merged string, sources []compactSource, applie
 		fmt.Printf("Created %s and deleted %s, but a delete failed (see the error); every backup is kept.\n\n", outName, strings.Join(deleted, ", "))
 	default:
 		fmt.Printf("Created %s and deleted %s, but could not delete %s (see the error); every backup is kept.\n\n", outName, strings.Join(deleted, ", "), strings.Join(kept, ", "))
+	}
+}
+
+// printNotCarried lists, by source, the lines a composite drops.
+func printNotCarried(sources []compactSource) {
+	dropped := false
+	for _, s := range sources {
+		if len(s.NotCarried) > 0 {
+			dropped = true
+		}
+	}
+	if !dropped {
+		fmt.Println("Every nonblank line of the sources is carried (a composite keeps only **Do:** and **Don't:** lines).")
+		return
+	}
+	fmt.Println("Not carried into the composite (a composite keeps only **Do:** and **Don't:** lines; each backup keeps its source's full text):")
+	for _, s := range sources {
+		fmt.Printf("  %s:\n", filepath.Base(s.File))
+		if len(s.NotCarried) == 0 {
+			fmt.Println("    (nothing)")
+		}
+		for _, line := range s.NotCarried {
+			fmt.Printf("    %s\n", line)
+		}
 	}
 }
 

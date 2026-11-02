@@ -1465,3 +1465,188 @@ func TestPrintCompactPreview_FailedBackupDeletesNothing(t *testing.T) {
 		}
 	}
 }
+
+// A rule exercising every way the directive walker treats a line:
+// frontmatter, a title, bullets and plain continuations, a heading and a
+// blank line ending a block, an empty directive marker, trailing prose.
+const notCarriedGamma = "---\npaths: src/**\n---\n# Gamma\n\n**Do:** rotate vault secrets weekly\n- audit the rotation log\ncontinue plain text\n## Why\nLeaked keys stay valid otherwise.\n\n**Don't:**\n* share secrets in chat\n\nClosing note.\n"
+
+// Preview names, per source, every nonblank line the composite drops, never
+// a line it carries, along with the backup path.
+func TestRulesCompact_PreviewListsNotCarried(t *testing.T) {
+	wantGamma := []string{"---", "paths: src/**", "---", "# Gamma", "## Why", "Leaked keys stay valid otherwise.", "Closing note."}
+	wantAlpha := []string{"# Alpha", "## Rationale", "This prevents corruption when the writer crashes mid-flush.", "## Exceptions", "None."}
+	wantBeta := []string{"# Beta", "## Rationale", "Second file, distinct prose that must survive."}
+
+	t.Run("group json", func(t *testing.T) {
+		dir := tempRulesDir(t)
+		gamma := writeRule(t, dir, "gamma", notCarriedGamma)
+		delta := writeRule(t, dir, "delta", "# Delta\n\n**Do:** rotate vault secrets weekly\n")
+		out, err := runRulesCompactJSONRaw(t, "--path", dir, "--group", "gamma,delta")
+		if err != nil {
+			t.Fatalf("preview failed: %v\n%s", err, out)
+		}
+		var payload struct {
+			Sources []struct {
+				File       string   `json:"file"`
+				Backup     string   `json:"backup"`
+				NotCarried []string `json:"not_carried"`
+			} `json:"sources"`
+		}
+		if err := json.Unmarshal([]byte(out), &payload); err != nil {
+			t.Fatalf("bad JSON (%v): %s", err, out)
+		}
+		want := []struct {
+			file       string
+			notCarried []string
+		}{{gamma, wantGamma}, {delta, []string{"# Delta"}}}
+		if len(payload.Sources) != len(want) {
+			t.Fatalf("sources = %+v", payload.Sources)
+		}
+		for i, w := range want {
+			s := payload.Sources[i]
+			if s.File != w.file || s.Backup != w.file+".backup" || fmt.Sprintf("%q", s.NotCarried) != fmt.Sprintf("%q", w.notCarried) {
+				t.Errorf("source %d = %+v, want %s with not_carried %q", i, s, w.file, w.notCarried)
+			}
+		}
+	})
+
+	t.Run("auto json", func(t *testing.T) {
+		dir := tempRulesDir(t)
+		writeRule(t, dir, "alpha", issue5719Alpha)
+		writeRule(t, dir, "beta", issue5719Beta)
+		out, err := runRulesCompactJSONRaw(t, "--path", dir, "--auto")
+		if err != nil {
+			t.Fatalf("preview failed: %v\n%s", err, out)
+		}
+		var results []struct {
+			Sources []struct {
+				NotCarried []string `json:"not_carried"`
+			} `json:"sources"`
+		}
+		if err := json.Unmarshal([]byte(out), &results); err != nil || len(results) != 1 || len(results[0].Sources) != 2 {
+			t.Fatalf("want one group of two sources (%v): %s", err, out)
+		}
+		for i, want := range [][]string{wantAlpha, wantBeta} {
+			if got := results[0].Sources[i].NotCarried; fmt.Sprintf("%q", got) != fmt.Sprintf("%q", want) {
+				t.Errorf("source %d not_carried = %q, want %q", i, got, want)
+			}
+		}
+	})
+
+	// Text, in preview and after applying.
+	for _, args := range [][]string{{"--auto"}, {"--auto", "--force"}} {
+		t.Run("text "+strings.Join(args, " "), func(t *testing.T) {
+			dir := tempRulesDir(t)
+			writeRule(t, dir, "alpha", issue5719Alpha)
+			writeRule(t, dir, "beta", issue5719Beta)
+			out, _, err := runRulesCompactText(t, append([]string{"--path", dir}, args...)...)
+			if err != nil {
+				t.Fatalf("compact failed: %v\n%s", err, out)
+			}
+			i := strings.Index(out, "Not carried into the composite")
+			if i < 0 {
+				t.Fatalf("output does not disclose the dropped lines:\n%s", out)
+			}
+			section := out[i:]
+			if j := strings.Index(section, "Backed up:"); j >= 0 {
+				section = section[:j]
+			}
+			if j := strings.Index(section, "Would back up:"); j >= 0 {
+				section = section[:j]
+			}
+			if !strings.Contains(section, "keeps only") {
+				t.Errorf("disclosure does not say a composite keeps only directives:\n%s", section)
+			}
+			want := "  alpha.md:\n    " + strings.Join(wantAlpha, "\n    ") + "\n  beta.md:\n    " + strings.Join(wantBeta, "\n    ") + "\n"
+			if !strings.Contains(section, want) {
+				t.Errorf("disclosure missing %q:\n%s", want, section)
+			}
+			if strings.Contains(section, "validate input") {
+				t.Errorf("a carried directive is listed as dropped:\n%s", section)
+			}
+			if !strings.Contains(out, "alpha.md → alpha.md.backup, beta.md → beta.md.backup") {
+				t.Errorf("output does not name the backups:\n%s", out)
+			}
+		})
+	}
+}
+
+// Edge lines around directives: frontmatter, headings, a bold non-directive
+// note and a plain continuation. The parser's directive lines stay as they
+// were; the dropped lines reach the JSON preview untouched.
+func TestRulesCompact_NotCarriedEdgeLines(t *testing.T) {
+	dir := tempRulesDir(t)
+	content := "---\ntitle: frontmatter\n---\n# Heading\n\nIntro prose.\n\n**Do:**\n- bullet one\n- bullet two\ncontinuation of the do block\n\n**Don't:** never do this\n\n## Rationale\nBecause.\n\n**Note:** not a directive.\nTrailing prose.\n"
+	writeRule(t, dir, "edges", content)
+
+	rf, err := ParseRuleFile(filepath.Join(dir, "edges.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantNotCarried := []string{
+		"---",
+		"title: frontmatter",
+		"---",
+		"# Heading",
+		"Intro prose.",
+		"## Rationale",
+		"Because.",
+		"**Note:** not a directive.",
+		"Trailing prose.",
+	}
+	if fmt.Sprint(rf.NotCarried) != fmt.Sprint(wantNotCarried) {
+		t.Errorf("NotCarried = %v, want %v", rf.NotCarried, wantNotCarried)
+	}
+	wantDo := []string{"bullet one", "bullet two", "continuation of the do block"}
+	if fmt.Sprint(rf.DoLines) != fmt.Sprint(wantDo) {
+		t.Errorf("DoLines = %v, want %v", rf.DoLines, wantDo)
+	}
+	if fmt.Sprint(rf.DontLines) != fmt.Sprint([]string{"never do this"}) {
+		t.Errorf("DontLines = %v, want [never do this]", rf.DontLines)
+	}
+
+	// The same list reaches the JSON preview untouched.
+	writeRule(t, dir, "twin", content)
+	out, err := runRulesCompactJSONRaw(t, "--path", dir, "--group", "edges,twin")
+	if err != nil {
+		t.Fatalf("preview: %v\n%s", err, out)
+	}
+	var payload struct {
+		Sources []struct {
+			File       string   `json:"file"`
+			NotCarried []string `json:"not_carried"`
+		} `json:"sources"`
+	}
+	if err := json.Unmarshal([]byte(out), &payload); err != nil {
+		t.Fatalf("bad JSON (%v): %s", err, out)
+	}
+	edges := filepath.Join(dir, "edges.md")
+	found := false
+	for _, s := range payload.Sources {
+		if s.File != edges {
+			continue
+		}
+		found = true
+		if fmt.Sprint(s.NotCarried) != fmt.Sprint(wantNotCarried) {
+			t.Errorf("JSON not_carried = %v, want %v", s.NotCarried, wantNotCarried)
+		}
+	}
+	if !found {
+		t.Errorf("JSON preview has no source %s: %s", edges, out)
+	}
+
+	// Audit JSON never carries the field: it is compact's disclosure, not
+	// audit data.
+	audit, err := RunAudit(dir, 0.6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(audit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "not_carried") || strings.Contains(string(encoded), "NotCarried") {
+		t.Errorf("audit JSON must not carry the disclosure field: %s", encoded)
+	}
+}
