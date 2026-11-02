@@ -167,6 +167,17 @@ func TestInitReinitLocalConfiguredRemoteWithDoltDataRefuses(t *testing.T) {
 	if code := exitErr.ExitCode(); code != ExitRemoteDivergenceRefused {
 		t.Errorf("exit code = %d, want %d (ExitRemoteDivergenceRefused)", code, ExitRemoteDivergenceRefused)
 	}
+	// A probe that READ the remote keeps the verified refusal: GH#7665's
+	// unverified wording is only for a probe that failed.
+	stderrStr := stderr.String()
+	if !strings.Contains(stderrStr, "bd init refuses: remote 'origin' already has Dolt history (refs/dolt/data).") {
+		t.Errorf("verified refusal text changed:\n%s", stderrStr)
+	}
+	for _, banned := range []string{unverifiedRemoteRefusalHeadline, "could not verify refs/dolt/data"} {
+		if strings.Contains(stderrStr, banned) {
+			t.Errorf("a remote that was read must not be reported as unverified (%q):\n%s", banned, stderrStr)
+		}
+	}
 
 	beadsDir := filepath.Join(workDir, ".beads")
 	if _, err := os.Stat(beadsDir); err == nil {
@@ -1175,9 +1186,11 @@ func TestInitForceRefusesWhenRemoteHasDoltData(t *testing.T) {
 		t.Errorf("exit code = %d, want %d (ExitRemoteDivergenceRefused)", code, ExitRemoteDivergenceRefused)
 	}
 
-	// Refusal text must name the safe path.
+	// Refusal text must name the safe path and keep the verified already-has
+	// diagnosis: the unverified could-not-verify wording (GH#7665) must never
+	// replace it for a remote that was actually read.
 	stderrStr := stderr.String()
-	for _, must := range []string{"bd bootstrap", "bd help init-safety", "remote 'origin'"} {
+	for _, must := range []string{"bd bootstrap", "bd help init-safety", "remote 'origin'", "already has Dolt history"} {
 		if !strings.Contains(stderrStr, must) {
 			t.Errorf("refusal missing %q:\n%s", must, stderrStr)
 		}
