@@ -1554,9 +1554,13 @@ func renderTree(tree []*types.TreeNode, maxDepth int, direction string) {
 		root = tree[0]
 	}
 
-	// Check if root has open blocking dependencies (GH#3565).
-	// Only genuine blockers (blocks, conditional-blocks, waits-for) count;
-	// parent-child, related, discovered-from, etc. do not block.
+	// The root is blocked when the store says so (IsBlocked: the transitive
+	// flag bd ready and bd blocked read, which covers blocking inherited
+	// through a parent and blockers the depth bound hides, #6630) or when it
+	// has a visible open blocking dependency (GH#3565). Only genuine blockers
+	// (blocks, conditional-blocks, waits-for) count; parent-child, related,
+	// discovered-from, etc. do not block. The visible check still matters for
+	// synthetic external leaves and for servers that predate the flag.
 	if root != nil {
 		hasOpenBlockers := false
 		for _, child := range children[root.ID] {
@@ -1566,7 +1570,7 @@ func renderTree(tree []*types.TreeNode, maxDepth int, direction string) {
 				break
 			}
 		}
-		r.rootBlocked = hasOpenBlockers
+		r.rootBlocked = root.IsBlocked || hasOpenBlockers
 	}
 
 	// Render recursively from root

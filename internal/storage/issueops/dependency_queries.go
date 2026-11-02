@@ -1190,6 +1190,13 @@ func IsBlockedBatchInTx(ctx context.Context, tx DBTX, ids []string) (map[string]
 	return blocked, nil
 }
 
+// treeBlockedBatchInTx is the blocked flag a dependency tree shows for each of
+// ids: the stored, transitive is_blocked flag IsBlockedBatchInTx reads, the
+// one bd ready and bd blocked read. ids missing from both tables read false.
+func treeBlockedBatchInTx(ctx context.Context, tx DBTX, ids []string) (map[string]bool, error) {
+	return IsBlockedBatchInTx(ctx, tx, ids)
+}
+
 //nolint:gosec // G201: table is a hardcoded "issues" or "wisps"; placeholders are ? only.
 func readIsBlockedIntoFromTable(ctx context.Context, tx DBTX, table string, ids []string, seen, blocked map[string]bool) error {
 	for start := 0; start < len(ids); start += queryBatchSize {

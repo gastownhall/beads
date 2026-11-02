@@ -67,6 +67,7 @@ func TestGetDependencyTreeInTxSkipsRelatesToEdges(t *testing.T) {
 	expectIssueBatch(mock, []string{"blocker", "related"})
 	expectIssue(mock, "blocker", "Blocker")
 	expectDependencies(mock, "blocker", nil)
+	expectTreeBlocked(mock, []string{"root", "blocker"}, map[string]bool{"root": true, "blocker": false}, nil)
 	mock.ExpectRollback()
 
 	tx, err := db.BeginTx(context.Background(), nil)
@@ -93,6 +94,9 @@ func TestGetDependencyTreeInTxSkipsRelatesToEdges(t *testing.T) {
 	}
 	if tree[1].EdgeFromParent != types.DepBlocks {
 		t.Fatalf("blocker edge = %q, want %q", tree[1].EdgeFromParent, types.DepBlocks)
+	}
+	if !tree[0].IsBlocked || tree[1].IsBlocked {
+		t.Fatalf("IsBlocked = root %v, blocker %v; want the stored true, false", tree[0].IsBlocked, tree[1].IsBlocked)
 	}
 }
 
@@ -243,7 +247,9 @@ func TestGetDependencyTreeInTxEmitsDedupedDirectBlocker(t *testing.T) {
 				expectDependencies(mock, "mid", []dependencyRow{{id: "shared", depType: string(types.DepBlocks)}})
 				expectIssueBatchOne(mock, "shared")
 			}
-			// No expectation for the stub: it must read nothing.
+			// No expectation for the stub: it must read nothing. The one flag
+			// read covers the walk's distinct ids.
+			expectTreeBlocked(mock, tt.wantIDs[:3], map[string]bool{"root": true, "mid": true, "shared": false}, nil)
 
 			tx, err := db.BeginTx(context.Background(), nil)
 			if err != nil {
@@ -282,6 +288,11 @@ func TestGetDependencyTreeInTxEmitsDedupedDirectBlocker(t *testing.T) {
 			if stub.Title != "Shared" {
 				t.Fatalf("stub title = %q, want the expanded issue's %q", stub.Title, "Shared")
 			}
+			for _, node := range tree {
+				if node.IsBlocked != (node.ID != "shared") {
+					t.Fatalf("%s IsBlocked = %v, want the stored flag", node.ID, node.IsBlocked)
+				}
+			}
 			for _, node := range tree[:3] {
 				if node.ID == "shared" && (node.Depth != tt.fullDepth || node.ParentID != tt.fullFrom) {
 					t.Fatalf("expanded shared = depth %d parent %q, want %d/%s", node.Depth, node.ParentID, tt.fullDepth, tt.fullFrom)
@@ -317,6 +328,7 @@ func TestGetDependencyTreeInTxDepthCutoffBeatsStub(t *testing.T) {
 	expectIssue(mock, "b", "B")
 	expectDependencies(mock, "b", []dependencyRow{{id: "x", depType: string(types.DepBlocks)}})
 	expectIssueBatchOne(mock, "x")
+	expectTreeBlocked(mock, []string{"root", "x", "a", "b"}, map[string]bool{"root": false, "x": false, "a": false, "b": false}, nil)
 
 	tx, err := db.BeginTx(context.Background(), nil)
 	if err != nil {
@@ -342,6 +354,38 @@ func TestGetDependencyTreeInTxDepthCutoffBeatsStub(t *testing.T) {
 			t.Fatalf("node %s is Deduped, want no stub at or beyond the cutoff", node.ID)
 		}
 	}
+}
+
+// expectTreeBlocked expects the walk's one post-walk read of the stored
+// is_blocked flag for ids (its distinct ids in encounter order): issues, then
+// wisps. Flags absent from a map return no row from that table.
+func expectTreeBlocked(mock sqlmock.Sqlmock, ids []string, issues, wisps map[string]bool) {
+	for _, table := range []struct {
+		name  string
+		flags map[string]bool
+	}{{"issues", issues}, {"wisps", wisps}} {
+		rows := sqlmock.NewRows([]string{"id", "is_blocked"})
+		for _, id := range ids {
+			if b, ok := table.flags[id]; ok {
+				rows.AddRow(id, map[bool]int{false: 0, true: 1}[b])
+			}
+		}
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT id, is_blocked FROM "+table.name+" WHERE id IN (" + placeholderList(len(ids)) + ")")).
+			WithArgs(stringArgs(ids)...).
+			WillReturnRows(rows)
+	}
+}
+
+func placeholderList(n int) string {
+	return strings.TrimSuffix(strings.Repeat("?,", n), ",")
+}
+
+func stringArgs(ids []string) []driver.Value {
+	args := make([]driver.Value, len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
+	return args
 }
 
 func expectIssueBatchOne(mock sqlmock.Sqlmock, id string) {
@@ -401,6 +445,7 @@ func TestGetDependencyTreeInTxTellsABackEdgeFromACrossEdge(t *testing.T) {
 				expectDependencies(mock, "b", []dependencyRow{{id: "c", depType: string(types.DepBlocks)}})
 				expectIssueBatchOne(mock, "c")
 			}
+			expectTreeBlocked(mock, tt.wantIDs[:3], map[string]bool{"a": true, "b": true, "c": true}, nil)
 
 			tx, err := db.BeginTx(context.Background(), nil)
 			if err != nil {

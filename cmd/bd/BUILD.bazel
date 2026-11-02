@@ -722,6 +722,7 @@ go_test(
         "dep_proxied_integration_test.go",
         "dep_relation_test.go",
         "dep_test.go",
+        "dep_tree_inherited_block_embedded_test.go",
         "dep_warning_test.go",
         "dependency_hierarchy_embedded_test.go",
         "diff_embedded_test.go",
