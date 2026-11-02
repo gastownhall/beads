@@ -1650,3 +1650,179 @@ func TestRulesCompact_NotCarriedEdgeLines(t *testing.T) {
 		t.Errorf("audit JSON must not carry the disclosure field: %s", encoded)
 	}
 }
+
+// failParsingRule makes compact's re-parse of an --auto group's rule fail
+// for paths named name, as when the file changes after the audit read it.
+func failParsingRule(t *testing.T, name string) {
+	t.Helper()
+	prev := parseCompactSource
+	parseCompactSource = func(path string) (RuleFile, error) {
+		if filepath.Base(path) == name {
+			return RuleFile{}, fmt.Errorf("read rule file %s: %w", path, os.ErrPermission)
+		}
+		return prev(path)
+	}
+	t.Cleanup(func() { parseCompactSource = prev })
+}
+
+// A prose-only rule grouped by its body keywords contributes nothing to a
+// composite, so compact never merges, backs up or deletes it.
+const proseOnlyGamma = "# Validate\n\nValidate input writing disk.\n"
+
+// --auto merges only the rules that contribute directives and parsed: the
+// others stay untouched with a named warning, and a group left with fewer
+// than two contributors is skipped whole, even under --force.
+func TestRulesCompact_AutoSkipsNoncontributingRules(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		rules        map[string]string
+		parseFails   string
+		wantWarnings []string
+		wantMerged   []string // sources merged into disk.md; nil = group skipped
+	}{
+		{
+			name:         "prose-only member excluded",
+			rules:        map[string]string{"alpha": issue5719Alpha, "beta": issue5719Beta, "gamma": proseOnlyGamma},
+			wantWarnings: []string{"skipping gamma.md: it has no **Do:** or **Don't:** lines"},
+			wantMerged:   []string{"alpha", "beta"},
+		},
+		{
+			name:         "prose-only exclusion leaves one",
+			rules:        map[string]string{"alpha": issue5719Alpha, "gamma": proseOnlyGamma},
+			wantWarnings: []string{"skipping gamma.md: it has no **Do:** or **Don't:** lines", `skipping group "disk": fewer than two of its rules can be merged (alpha.md)`},
+		},
+		{
+			name:         "parse failure leaves one",
+			rules:        map[string]string{"alpha": issue5719Alpha, "beta": issue5719Beta},
+			parseFails:   "beta.md",
+			wantWarnings: []string{"skipping beta.md: read rule file", `skipping group "disk": fewer than two of its rules can be merged (alpha.md)`},
+		},
+		{
+			name:         "both exclusions leave one",
+			rules:        map[string]string{"alpha": issue5719Alpha, "beta": issue5719Beta, "gamma": proseOnlyGamma},
+			parseFails:   "beta.md",
+			wantWarnings: []string{"skipping beta.md: read rule file", "skipping gamma.md: it has no **Do:** or **Don't:** lines", `skipping group "disk": fewer than two of its rules can be merged (alpha.md)`},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := tempRulesDir(t)
+			for name, content := range tc.rules {
+				writeRule(t, dir, name, content)
+			}
+			if tc.parseFails != "" {
+				failParsingRule(t, tc.parseFails)
+			}
+			before := snapshotRulesDir(t, dir)
+
+			out, stderr, err := runRulesCompactText(t, "--path", dir, "--auto", "--force")
+			if err != nil {
+				t.Fatalf("compact failed: %v\n%s\n%s", err, out, stderr)
+			}
+			for _, w := range tc.wantWarnings {
+				if !strings.Contains(stderr, "Warning: "+w) {
+					t.Errorf("stderr missing warning %q:\n%s", w, stderr)
+				}
+			}
+
+			after := snapshotRulesDir(t, dir)
+			if tc.wantMerged == nil {
+				assertRulesDirUnchanged(t, dir, before)
+				if strings.Contains(out, "Merged →") {
+					t.Errorf("skipped group reads as merged:\n%s", out)
+				}
+				return
+			}
+			merged := make(map[string]bool)
+			var names []string
+			for _, name := range tc.wantMerged {
+				merged[name+".md"] = true
+				names = append(names, name+".md")
+				if after[name+".md.backup"] != before[name+".md"] {
+					t.Errorf("%s.md.backup = %q, want the original", name, after[name+".md.backup"])
+				}
+			}
+			for name, content := range before {
+				if merged[name] {
+					if _, ok := after[name]; ok {
+						t.Errorf("merged source %s was not deleted", name)
+					}
+					continue
+				}
+				if after[name] != content {
+					t.Errorf("excluded %s changed: %q", name, after[name])
+				}
+				if _, ok := after[name+".backup"]; ok {
+					t.Errorf("excluded %s was backed up", name)
+				}
+			}
+			if want := "Source rules: " + strings.Join(names, ", "); !strings.Contains(after["disk.md"], want) {
+				t.Errorf("composite attribution: want %q in %q", want, after["disk.md"])
+			}
+		})
+	}
+}
+
+// Naming a rule without directives in --group refuses the whole group
+// unchanged, in preview and apply, text and JSON.
+func TestRulesCompact_GroupRefusesRuleWithoutDirectives(t *testing.T) {
+	for _, args := range [][]string{{"--group", "alpha,gamma,beta"}, {"--group", "alpha,gamma,beta", "--force"}} {
+		for _, asJSON := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s json=%v", strings.Join(args, " "), asJSON), func(t *testing.T) {
+				dir := tempRulesDir(t)
+				writeRule(t, dir, "alpha", issue5719Alpha)
+				writeRule(t, dir, "beta", issue5719Beta)
+				writeRule(t, dir, "gamma", proseOnlyGamma)
+				before := snapshotRulesDir(t, dir)
+				args := append([]string{"--path", dir}, args...)
+
+				var msg string
+				var err error
+				if asJSON {
+					msg, err = runRulesCompactJSONRaw(t, args...)
+				} else {
+					_, msg, err = runRulesCompactText(t, args...)
+				}
+				if err == nil {
+					t.Fatal("expected compact to refuse the group")
+				}
+				if !strings.Contains(msg, "gamma.md has no **Do:** or **Don't:** lines") {
+					t.Errorf("expected the refusal to name gamma.md, got: %s", msg)
+				}
+				assertRulesDirUnchanged(t, dir, before)
+			})
+		}
+	}
+}
+
+// A symlinked source is backed up as an independent regular file holding the
+// target's bytes; deleting the source removes only the link.
+func TestRulesCompact_SymlinkSourceBackupIsRegularFile(t *testing.T) {
+	dir := tempRulesDir(t)
+	elsewhere := t.TempDir()
+	target := filepath.Join(elsewhere, "alpha-real.md")
+	if err := os.WriteFile(target, []byte(issue5719Alpha), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	alpha := filepath.Join(dir, "alpha.md")
+	if err := os.Symlink(target, alpha); err != nil {
+		t.Fatal(err)
+	}
+	writeRule(t, dir, "beta", issue5719Beta)
+
+	cmd := newRulesCompactTestCmd(t, "--path", dir, "--group", "alpha,beta", "--force")
+	captureStdout(t, func() error { return runRulesCompact(cmd, nil) })
+
+	info, err := os.Lstat(alpha + ".backup")
+	if err != nil || !info.Mode().IsRegular() {
+		t.Fatalf("backup of the symlinked source is not a regular file: %v, %v", info, err)
+	}
+	if got, _ := os.ReadFile(alpha + ".backup"); string(got) != issue5719Alpha {
+		t.Errorf("backup = %q, want the target's bytes", got)
+	}
+	if _, err := os.Lstat(alpha); !os.IsNotExist(err) {
+		t.Errorf("expected the source link removed, got %v", err)
+	}
+	if got, _ := os.ReadFile(target); string(got) != issue5719Alpha {
+		t.Errorf("link target changed: %q", got)
+	}
+}
