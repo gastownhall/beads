@@ -1424,3 +1424,29 @@ func TestPortImpliesServerMode(t *testing.T) {
 		})
 	}
 }
+
+// TestMetadataDatabaseNames: a dolt_database value from committed
+// metadata.json must be a plain database name — separators, absolute paths,
+// volume names, NUL, and the exact "." / ".." components are refused with
+// an error naming dolt_database, while legacy dotted and hyphenated names
+// stay valid (bd-1tmym4 / #7888).
+func TestMetadataDatabaseNames(t *testing.T) {
+	for _, name := range []string{"beads", "my-project", "myproj.dolt", "db_1", "a..b"} {
+		if err := ValidateDoltDatabaseName(name); err != nil {
+			t.Errorf("%q: unexpected refusal %v", name, err)
+		}
+	}
+	// `c:\dolt` is refused by its separator on every platform; a bare
+	// "c:db" spelling is a volume name only on Windows, where
+	// filepath.VolumeName catches it.
+	for _, name := range []string{"", "../escaped", "a/b", `a\b`, "/etc/dolt", ".", "..", "nul\x00byte", `c:\dolt`} {
+		err := ValidateDoltDatabaseName(name)
+		if err == nil {
+			t.Errorf("%q: expected a refusal", name)
+			continue
+		}
+		if !strings.Contains(err.Error(), "dolt_database") {
+			t.Errorf("%q: refusal does not name dolt_database: %v", name, err)
+		}
+	}
+}

@@ -660,6 +660,30 @@ func (c *Config) GetDoltDatabase() string {
 	return DefaultDoltDatabase
 }
 
+// ValidateDoltDatabaseName refuses a dolt_database value that could escape
+// the directory that holds it: path separators, an absolute path, a Windows
+// volume name, a NUL byte, or an exact "." / ".." component. The name is
+// committed metadata, so callers validate before any name-derived effect —
+// opening a database directory, migrating a legacy directory name, or
+// cloning into one. Legacy dotted and hyphenated names stay valid
+// (bd-1tmym4 / #7888).
+func ValidateDoltDatabaseName(name string) error {
+	const key = "dolt_database"
+	switch {
+	case name == "":
+		return fmt.Errorf("%s is empty", key)
+	case strings.ContainsRune(name, 0):
+		return fmt.Errorf("%s contains a NUL byte", key)
+	case strings.ContainsAny(name, `/\`):
+		return fmt.Errorf("%s %q must be a database name, not a path", key, name)
+	case filepath.IsAbs(name) || filepath.VolumeName(name) != "":
+		return fmt.Errorf("%s %q must be a database name, not an absolute path", key, name)
+	case name == "." || name == "..":
+		return fmt.Errorf("%s %q must be a database name, not a path component", key, name)
+	}
+	return nil
+}
+
 // GetGlobalDoltDatabase returns the global database name for shared-server mode.
 // Returns empty string if no global database is configured.
 func (c *Config) GetGlobalDoltDatabase() string {

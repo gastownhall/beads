@@ -855,6 +855,12 @@ func unresolvedBootstrapDBPlan(plan BootstrapPlan, beadsDir string, cfg *configf
 		probe.Err = err
 		return BootstrapPlan{}, probe, false
 	}
+	// dolt_database is committed metadata: refuse a path-shaped value before
+	// the probe stats any directory derived from it (bd-1tmym4 / #7888).
+	if err := configfile.ValidateDoltDatabaseName(cfg.GetDoltDatabase()); err != nil {
+		probe.Err = err
+		return BootstrapPlan{}, probe, false
+	}
 	dbDir := filepath.Join(bootstrapOwnedDataDir(beadsDir, cfg), cfg.GetDoltDatabase())
 	if info, err := os.Stat(filepath.Join(dbDir, ".dolt")); err == nil && info.IsDir() {
 		probe.Exists = true
@@ -1462,6 +1468,13 @@ func bootstrapServerRestoreRefusal(plan BootstrapPlan, cfg *configfile.Config, s
 }
 
 func executeSyncAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.Config) error {
+	// dolt_database is committed metadata: refuse a path-shaped value before
+	// anything clones, creates or finalizes a directory derived from it
+	// (bd-1tmym4 / #7888).
+	if err := configfile.ValidateDoltDatabaseName(cfg.GetDoltDatabase()); err != nil {
+		return err
+	}
+
 	// Ensure .beads directory exists — it may not in the "fresh clone"
 	// bootstrap path where we detected remote data before .beads was
 	// created. Deferred here to preserve --dry-run semantics. (GH#2792)

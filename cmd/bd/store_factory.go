@@ -235,6 +235,12 @@ func openDoltStoreFromConfig(ctx context.Context, beadsDir string, requireExisti
 	if cfg != nil {
 		database = cfg.GetDoltDatabase()
 	}
+	// dolt_database is committed metadata: refuse a path-shaped value before
+	// the sanitize migration renames a directory outside the data directory
+	// or rewrites metadata.json (bd-1tmym4 / #7888).
+	if err := configfile.ValidateDoltDatabaseName(database); err != nil {
+		return nil, err
+	}
 	if sanitized := sanitizeDBName(database); sanitized != database {
 		if err := migrateHyphenatedDB(beadsDir, cfg, database, sanitized); err != nil {
 			return nil, fmt.Errorf("auto-sanitize database name %q → %q: %w", database, sanitized, err)
@@ -256,6 +262,15 @@ func errNoRoutedEmbeddedDatabase(beadsDir string) error {
 // This handles projects initialized before GH#2142 that upgrade to
 // embedded-mode-default builds (GH#3231).
 func migrateHyphenatedDB(beadsDir string, cfg *configfile.Config, oldName, newName string) error {
+	// Both names come from (or derive from) committed metadata: refuse a
+	// path-shaped value before the rename or metadata.json rewrite
+	// (bd-1tmym4 / #7888).
+	if err := configfile.ValidateDoltDatabaseName(oldName); err != nil {
+		return err
+	}
+	if err := configfile.ValidateDoltDatabaseName(newName); err != nil {
+		return err
+	}
 	dataDir := filepath.Join(beadsDir, "embeddeddolt")
 	oldDir := filepath.Join(dataDir, oldName)
 	newDir := filepath.Join(dataDir, newName)
@@ -367,6 +382,11 @@ func openNonMutatingStoreFromConfig(ctx context.Context, beadsDir string, previe
 	database := configfile.DefaultDoltDatabase
 	if cfg != nil {
 		database = cfg.GetDoltDatabase()
+	}
+	// dolt_database is committed metadata: refuse a path-shaped value before
+	// opening any directory derived from it (bd-1tmym4 / #7888).
+	if err := configfile.ValidateDoltDatabaseName(database); err != nil {
+		return nil, err
 	}
 	if sanitized := sanitizeDBName(database); sanitized != database {
 		database = sanitized
