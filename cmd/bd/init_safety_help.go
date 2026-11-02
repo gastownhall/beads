@@ -76,9 +76,9 @@ ADOPTING A REMOTE
 DESTROY-TOKEN (non-interactive only)
 
   When running with no TTY (CI, agents, piped input), a destructive
-  re-init requires an explicit --destroy-token value. That covers both
-  --discard-remote and --reinit-local over existing issues. The token
-  format is:
+  re-init requires an explicit --destroy-token value. That covers
+  --discard-remote, --reinit-local over existing issues, and a
+  --reinit-local store switch (see STORE SWITCH). The token format is:
 
       DESTROY-<issue-prefix>
 
@@ -91,14 +91,36 @@ DESTROY-TOKEN (non-interactive only)
   deliberate guard against pattern-matched one-liners (see
   engdocs/adr/0002-init-safety-invariants.md).
 
+STORE SWITCH
+
+  bd init --reinit-local re-initializes the store this workspace records
+  in .beads/metadata.json. When the invocation would select another one,
+  either another engine family (embedded versus server, proxied-server or
+  shared-server) or a --database other than the recorded one, bd init
+  names both stores and asks for confirmation first, under --quiet too and
+  whether or not the recorded store holds issues:
+
+    - interactively, type the phrase it shows: leave <database> behind
+    - non-interactively, pass the destroy token described above
+
+  The recorded store is left in place, not deleted, but the workspace
+  stops reading its issues, Dolt history and database-stored configuration
+  (types.custom, status.custom); none of it is copied to the new store.
+  To keep the recorded store, drop the mode setting or --database that
+  differs. Back it up first with bd backup. Only the engine family and the
+  database name are compared: host, port, socket and shared-server
+  location changes are not.
+
 EXIT CODES
 
   10    refused: remote has Dolt history and you selected local history
         without --discard-remote
-  11    refused: existing local data and you declined the destroy confirm
-        (interactive mode only)
-  12    refused: destructive re-init (--discard-remote, or --reinit-local
-        over existing issues) without a valid --destroy-token
+  11    refused: existing local data and you declined the destroy confirm,
+        or a store switch's typed phrase did not match (interactive mode
+        only)
+  12    refused: destructive re-init (--discard-remote, --reinit-local
+        over existing issues, or a store switch) without a valid
+        --destroy-token
         (non-interactive mode); also returned when the interactive
         --discard-remote typed-token confirmation is declined
   15    refused: run directly in your home directory, which is not itself

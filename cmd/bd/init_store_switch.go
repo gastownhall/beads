@@ -84,6 +84,65 @@ func (s initStoreSwitch) switches() bool {
 	return s.familyChanged || s.databaseChanged
 }
 
+// describe prints the switch on w. It is printed whichever way the
+// confirmation ends and under --quiet too, since the switch changes where the
+// workspace's data lives. It states what the workspace stops reading without
+// claiming to know what the recorded store holds: neither store is opened.
+func (s initStoreSwitch) describe(w io.Writer) {
+	recordedFamily := "not recorded"
+	if sqlServer, known := doltModeFamily(s.recordedMode); known {
+		recordedFamily = doltFamilyName(sqlServer)
+		if s.recordedMode != recordedFamily {
+			recordedFamily += " (dolt_mode " + s.recordedMode + ")"
+		}
+	} else if s.recordedMode != "" {
+		recordedFamily = "not recognized (dolt_mode " + remedy.PrintedValue(s.recordedMode) + ")"
+	}
+	recordedDatabase := "not recorded"
+	if s.recordedDatabase != "" {
+		recordedDatabase = remedy.PrintedValue(s.recordedDatabase)
+	}
+	requestedDatabase := remedy.PrintedValue(s.requestedDatabase)
+	if s.requestedDatabase == "" {
+		requestedDatabase = recordedDatabase + " (unchanged)"
+	}
+
+	fmt.Fprintf(w, "\n%s Re-initializing would switch this workspace to another store.\n\n", ui.RenderWarn("WARNING:"))
+	fmt.Fprintf(w, "  Recorded engine family:  %s\n", recordedFamily)
+	fmt.Fprintf(w, "  Requested engine family: %s\n", doltFamilyName(s.targetSQLServer))
+	fmt.Fprintf(w, "  Recorded database:       %s\n", recordedDatabase)
+	fmt.Fprintf(w, "  Requested database:      %s\n\n", requestedDatabase)
+	fmt.Fprintf(w, "  The recorded store is left in place; nothing in it is deleted. This\n")
+	fmt.Fprintf(w, "  workspace would stop reading its issues, Dolt history and database-stored\n")
+	fmt.Fprintf(w, "  configuration (types.custom, status.custom), none of which is copied to\n")
+	fmt.Fprintf(w, "  the requested store.\n\n")
+	fmt.Fprintf(w, "  To keep the recorded store, re-run without:\n")
+	if s.familyChanged {
+		if s.targetSQLServer {
+			fmt.Fprintf(w, "    - the setting that selects server mode: --server, --shared-server or\n")
+			fmt.Fprintf(w, "      --proxied-server, BEADS_DOLT_SERVER_MODE, BEADS_DOLT_SHARED_SERVER or\n")
+			fmt.Fprintf(w, "      BEADS_DOLT_PROXIED_SERVER, or dolt.mode in config.yaml\n")
+		} else {
+			fmt.Fprintf(w, "    - the setting that selects embedded mode: BEADS_DOLT_SERVER_MODE,\n")
+			fmt.Fprintf(w, "      BEADS_DOLT_SHARED_SERVER or BEADS_DOLT_PROXIED_SERVER, or dolt.mode in\n")
+			fmt.Fprintf(w, "      config.yaml (unset, init keeps the recorded mode)\n")
+		}
+	}
+	if s.databaseChanged {
+		fmt.Fprintf(w, "    - --database %s\n", remedy.PrintedValue(s.requestedDatabase))
+	}
+	fmt.Fprintf(w, "\n  Back up the recorded store first with bd backup (see 'bd backup --help').\n")
+	fmt.Fprintf(w, "  See 'bd help init-safety' for how a store switch is confirmed.\n\n")
+}
+
+// doltFamilyName names an engine family for the switch diagnostic.
+func doltFamilyName(sqlServer bool) string {
+	if sqlServer {
+		return configfile.DoltModeServer
+	}
+	return configfile.DoltModeEmbedded
+}
+
 // initReinitPreflight is the confirmation --reinit-local runs while init
 // holds its complete exclusive gate set, before anything is written. Its
 // dependencies are fields so the decision can be tested without a terminal
@@ -133,9 +192,7 @@ func (p initReinitPreflight) run() error {
 // the switch once: no count-based prompt follows it.
 func (p initReinitPreflight) confirmStoreSwitch(sw initStoreSwitch) error {
 	w := p.stderr
-	fmt.Fprintf(w, "\n%s Re-initializing would switch this workspace to another store.\n\n", ui.RenderWarn("WARNING:"))
-	fmt.Fprintf(w, "  Recorded database:  %s\n", remedy.PrintedValue(sw.recordedDatabase))
-	fmt.Fprintf(w, "  Requested database: %s\n\n", remedy.PrintedValue(sw.requestedDatabase))
+	sw.describe(w)
 
 	if p.destroyToken == FormatDestroyToken(p.prefix) {
 		fmt.Fprintf(w, "Destroy token accepted. Proceeding with the store switch.\n")

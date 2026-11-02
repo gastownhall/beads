@@ -25,6 +25,7 @@ See also: `bd help init-safety`, and
 - [init-force-refused — `bd init --force`/`--reinit-local` refused because origin has Dolt history](#init-force-refused)
 - [init-token-missing — a destructive re-init refused because `--destroy-token` is missing or wrong](#init-token-missing)
 - [init-local-exists — `bd init --reinit-local` refused because local data already exists](#init-local-exists)
+- [init-store-switch — `bd init --reinit-local` refused because it would switch the workspace to another store](#init-store-switch)
 - [init-home-refused — `bd init` refused because the working directory is your home directory](#init-home-refused)
 - [init-missing-server-db — `bd init` refused because the configured server-side database is missing](#init-missing-server-db)
 - [pk-fork-refused — `bd dolt pull`/`push` refused because a table has different primary keys in its common ancestor](#pk-fork-refused)
@@ -209,6 +210,75 @@ enough to create a restorable backup before reinitializing.
 If you did NOT expect `bd init` to be the right command here, run
 `bd doctor` first — you may be looking at a server config issue that a
 re-init won't fix.
+
+---
+
+## init-store-switch
+
+In releases after v1.3.2.
+
+**Exit code:** `11` (`ExitLocalExistsRefused`) interactively;
+`12` (`ExitDestroyTokenMissing`) non-interactively
+
+**Symptom**
+
+```
+WARNING: Re-initializing would switch this workspace to another store.
+
+  Recorded engine family:  server
+  Requested engine family: embedded
+  Recorded database:       la
+  Requested database:      la (unchanged)
+```
+
+followed by `Type 'leave la behind' to confirm:` in a TTY, or by
+`Refusing to switch stores in non-interactive mode.` without one. This
+prints under `--quiet` too.
+
+**Why this happens**
+
+`bd init --reinit-local` (or `--force`) normally re-initializes the store
+that `.beads/metadata.json` records, and keeps its issues and its
+database-stored configuration. This invocation would select another store
+instead:
+
+- another engine family: embedded versus server (server, proxied-server and
+  shared-server count as one family), chosen by `--server`,
+  `--shared-server`, `--proxied-server`, `BEADS_DOLT_SERVER_MODE`,
+  `BEADS_DOLT_SHARED_SERVER`, `BEADS_DOLT_PROXIED_SERVER`, or `dolt.mode` in
+  `config.yaml`; or
+- a `--database` other than the recorded `dolt_database`, compared byte for
+  byte.
+
+The decision is made from `metadata.json` alone, before either store is
+opened, so it applies whether or not the recorded store holds issues or can
+be reached. Host, port, socket, and shared-server location changes within
+the server family are not compared.
+
+Switching leaves the recorded store in place; nothing in it is deleted. But
+the workspace stops reading that store's issues, Dolt history, and
+database-stored configuration (`types.custom`, `status.custom`), and none of
+it is copied to the new store.
+
+**Recovery paths**
+
+### 1. Keep the recorded store (most common)
+
+Re-run without the mode setting or `--database` that differs. Without an
+explicit mode, `bd init --reinit-local` keeps a recorded server mode, and
+without `--database` it keeps the recorded database.
+
+### 2. Switch on purpose
+
+Back up the recorded store first with `bd backup` if you may need it again.
+Then confirm the switch:
+
+- In a TTY, type the phrase the prompt shows, `leave <database> behind`.
+- Without a TTY, pass the destroy token, `DESTROY-<issue-prefix>`, with
+  `--destroy-token` (see [init-token-missing](#init-token-missing)).
+
+To return later, re-run with the original mode and `--database`; that is a
+switch too and needs the same confirmation.
 
 ---
 

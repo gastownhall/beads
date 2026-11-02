@@ -278,6 +278,99 @@ func TestRunInitReinitPreflightStoreSwitchPhrase(t *testing.T) {
 	}
 }
 
+// requireStoreSwitchDiagnostic checks what a store-switch confirmation tells
+// the user, whichever way it ends: both stores, what stops being read, how to
+// keep the recorded store, and the safe commands, and never the destroy
+// token's value or a destructive command to paste.
+func requireStoreSwitchDiagnostic(t *testing.T, out string, want ...string) {
+	t.Helper()
+	want = append(want,
+		"left in place",
+		"issues",
+		"history",
+		"types.custom",
+		"status.custom",
+		"bd backup",
+		"bd help init-safety",
+	)
+	for _, w := range want {
+		if !strings.Contains(out, w) {
+			t.Errorf("store-switch diagnostic does not mention %q:\n%s", w, out)
+		}
+	}
+	for _, banned := range []string{"DESTROY-", "bd init --", "--reinit-local", "--force"} {
+		if strings.Contains(out, banned) {
+			t.Errorf("store-switch diagnostic contains %q:\n%s", banned, out)
+		}
+	}
+}
+
+// TestInitReinitLocalStoreSwitchDiagnosticUnderQuiet: --quiet does not
+// silence the switch diagnostic, which names the recorded and requested
+// family and database and what to remove to keep the recorded store.
+func TestInitReinitLocalStoreSwitchDiagnosticUnderQuiet(t *testing.T) {
+	bd := buildBDUnderTest(t)
+	projectDir := t.TempDir()
+	beadsDir := filepath.Join(projectDir, ".beads")
+	if err := os.MkdirAll(filepath.Join(beadsDir, "dolt", "la", ".dolt"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, localVersionFile), []byte("1.2.0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	metadata := `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"la","project_id":"existing-project-id"}`
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(metadata), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(bd, "init", "--quiet", "--reinit-local", "--prefix", "la", "--database", "other",
+		"--non-interactive", "--skip-hooks", "--skip-agents")
+	cmd.Dir = projectDir
+	cmd.Env = append(initGuardE2EEnv(t, freeLoopbackPort(t)), "BEADS_DOLT_SERVER_MODE=0")
+	_, stderr, err := runCommandBuffers(t, cmd)
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != ExitDestroyTokenMissing {
+		t.Fatalf("want exit %d, got %v\n%s", ExitDestroyTokenMissing, err, stderr.String())
+	}
+	requireStoreSwitchDiagnostic(t, stderr.String(),
+		"Recorded engine family:  server",
+		"Requested engine family: embedded",
+		"Recorded database:       la",
+		"Requested database:      other",
+		"BEADS_DOLT_SERVER_MODE",
+		"--database",
+	)
+}
+
+// TestRunInitReinitPreflightStoreSwitchAcceptedDiagnostic: an accepted
+// switch still names the store it leaves behind, without echoing the token.
+func TestRunInitReinitPreflightStoreSwitchAcceptedDiagnostic(t *testing.T) {
+	var stderr bytes.Buffer
+	p := initReinitPreflight{
+		reinitLocal:     true,
+		beadsDir:        writeInitStoreSwitchMetadata(t, `{"backend":"dolt","dolt_mode":"embedded","dolt_database":"fi"}`),
+		prefix:          "fi",
+		destroyToken:    FormatDestroyToken("fi"),
+		nonInteractive:  true,
+		targetSQLServer: true,
+		countIssues: func() (int, error) {
+			t.Fatal("a store switch counted the old store")
+			return 0, nil
+		},
+		stderr: &stderr,
+	}
+	if err := p.run(); err != nil {
+		t.Fatalf("matching token: want nil, got %v\n%s", err, stderr.String())
+	}
+	requireStoreSwitchDiagnostic(t, stderr.String(),
+		"Recorded engine family:  embedded",
+		"Requested engine family: server",
+		"Recorded database:       fi",
+		"Requested database:      fi (unchanged)",
+		"--server",
+	)
+}
+
 // TestRunInitReinitPreflightStoreSwitchTokenNeverCounts: an accepted destroy
 // token authorizes the switch once, without counting the old store or
 // following it with the count-based confirmation.
