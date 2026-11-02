@@ -1135,6 +1135,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Concurrent journaled writes on a Dolt sql-server no longer keep replaying
+  each other. With the events journal on, two overlapping writes both bumped
+  the one journal sequence row, so the later commit lost a serialization
+  conflict and replayed its whole body. A long write (`bd create --deps` with
+  many edges) could lose to short writers until its retry budget ran out.
+  Journaled writers now queue on a per-database server lock, taken before
+  their transaction begins and released after it ends. A write kept out past
+  its budget fails as busy with nothing written (`503 busy` over HTTP), and
+  the advisory defer-wake sweep before `bd ready` skips silently instead of
+  waiting. Embedded mode and a disabled journal take no lock, and older bd
+  binaries still conflict and replay as before (gastownhall/beads#6117).
+  See [Concurrent writers](docs/reference/events-journal.md#concurrent-writers).
 - `bd compact` no longer silently changes row data when commit dates are out
   of history order across the cutoff. When a recent-dated commit came before
   an old-dated one in history (a host clock that jumped back), the squashed
