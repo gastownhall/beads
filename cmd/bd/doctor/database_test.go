@@ -227,3 +227,88 @@ func TestLargeDatabaseWarningRecommendsRealCommand(t *testing.T) {
 		t.Fatalf("Large Database fix should recommend 'bd prune': %q", dc.Fix)
 	}
 }
+
+// TestDatabaseOpenFailureRecoveryGuidance pins the GH#4521 contract for the
+// local-store "Unable to open database" diagnostics: keep the server
+// configuration diagnosis, link the engine-wont-open recovery runbook, and do
+// not present doctor repair as an unopenable-journal rebuild. The
+// missing-database and remote-server branches stay distinct cases.
+func TestDatabaseOpenFailureRecoveryGuidance(t *testing.T) {
+	const recoveryURL = "https://github.com/gastownhall/beads/blob/main/docs/recovery/database-corruption.md#engine-wont-open"
+
+	t.Run("local store present but unopenable", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		beadsDir := filepath.Join(tmpDir, ".beads")
+		// No metadata.json: doctor expects a local dolt directory, whose
+		// default location is .beads/dolt. It exists, so the check reaches
+		// the open-failure branch without opening a real engine.
+		if err := os.MkdirAll(filepath.Join(beadsDir, "dolt"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		ss := &SharedStore{beadsDir: beadsDir} // nil store: engine never opened
+
+		check := CheckDatabaseVersionWithStore(ss, "v0.0.0-doctest")
+
+		if check.Message != "Unable to open database" {
+			t.Fatalf("expected message %q, got %q", "Unable to open database", check.Message)
+		}
+		if !strings.Contains(check.Fix, "bd dolt status") {
+			t.Errorf("Fix must keep the server-configuration diagnosis, got %q", check.Fix)
+		}
+		if !strings.Contains(check.Fix, recoveryURL) {
+			t.Errorf("Fix must link the engine-wont-open recovery runbook, got %q", check.Fix)
+		}
+		if strings.Contains(check.Fix, "bd doctor --fix") {
+			t.Errorf("Fix must not present doctor repair as an unopenable-journal rebuild, got %q", check.Fix)
+		}
+	})
+
+	t.Run("missing database stays a bootstrap case", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		beadsDir := filepath.Join(tmpDir, ".beads")
+		if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		ss := &SharedStore{beadsDir: beadsDir}
+
+		check := CheckDatabaseVersionWithStore(ss, "v0.0.0-doctest")
+
+		if check.Message != "No dolt database found" {
+			t.Fatalf("expected the missing-database case, got %q", check.Message)
+		}
+		if !strings.Contains(check.Fix, "bd bootstrap") {
+			t.Errorf("missing database is a bootstrap case, got %q", check.Fix)
+		}
+		if strings.Contains(check.Fix, recoveryURL) {
+			t.Errorf("a missing database is not corruption recovery, got %q", check.Fix)
+		}
+	})
+
+	t.Run("remote server stays an availability case", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		beadsDir := filepath.Join(tmpDir, ".beads")
+		if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		cfg := &configfile.Config{
+			Backend:  configfile.BackendDolt,
+			DoltMode: configfile.DoltModeServer,
+		}
+		if err := cfg.Save(beadsDir); err != nil {
+			t.Fatalf("failed to save config: %v", err)
+		}
+		ss := &SharedStore{beadsDir: beadsDir}
+
+		check := CheckDatabaseVersionWithStore(ss, "v0.0.0-doctest")
+
+		if check.Message != "Unable to open database" {
+			t.Fatalf("expected message %q, got %q", "Unable to open database", check.Message)
+		}
+		if !strings.Contains(check.Fix, "server availability") {
+			t.Errorf("Fix must stay focused on server availability, got %q", check.Fix)
+		}
+		if strings.Contains(check.Fix, recoveryURL) {
+			t.Errorf("an unreachable remote server is not local-store corruption recovery, got %q", check.Fix)
+		}
+	})
+}

@@ -21,6 +21,12 @@ type localConfig struct {
 	PreferDolt bool   `yaml:"prefer-dolt"`
 }
 
+// unopenableStoreFix is the advice for the local-store "Unable to open
+// database" branches (GH#4521): keep the server-configuration diagnosis and
+// route to preservation-first recovery. Doctor repair fixes configuration
+// and consistency; it is not an unopenable-journal rebuild.
+const unopenableStoreFix = "Check 'bd dolt status' for server configuration issues. If the local store will not open, preserve it and follow https://github.com/gastownhall/beads/blob/main/docs/recovery/database-corruption.md#engine-wont-open"
+
 // CheckDoltFormat detects old dolt databases created by pre-0.56 bd versions
 // (GH#2137). Those databases used embedded Dolt mode and may be incompatible
 // with the current server-only architecture. The ensureDoltInit function
@@ -81,7 +87,7 @@ func CheckDatabaseVersion(path string, cliVersion string) DoctorCheck {
 			Status:  StatusError,
 			Message: "Unable to open database",
 			Detail:  fmt.Sprintf("Storage: Dolt\n\nError: %v", err),
-			Fix:     "Run 'bd doctor --fix' to attempt repair. Check 'bd dolt status' for server configuration issues",
+			Fix:     unopenableStoreFix,
 		}
 	}
 	defer func() { _ = store.Close() }()
@@ -119,7 +125,7 @@ func CheckDatabaseVersionWithStore(ss *SharedStore, cliVersion string) DoctorChe
 			Status:  StatusError,
 			Message: "Unable to open database",
 			Detail:  "Storage: Dolt",
-			Fix:     "Run 'bd doctor --fix' to attempt repair. Check 'bd dolt status' for server configuration issues",
+			Fix:     unopenableStoreFix,
 		}
 	}
 	return checkDatabaseVersionWithStore(store, cliVersion)
