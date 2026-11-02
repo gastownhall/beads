@@ -796,12 +796,25 @@ func newWispIsBlockedDriftDB(t *testing.T, migrationFile string, wantCursorVersi
 	tableQuery := `(?s)SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.TABLES.*TABLE_NAME = \?`
 	columnQuery := `(?s)SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.COLUMNS.*TABLE_NAME = \? AND COLUMN_NAME = \?`
 	indexQuery := `(?s)SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.STATISTICS.*TABLE_NAME = \? AND INDEX_NAME = \?`
+	// Version 7 is also in the updated_at guard registry (#5981), whose
+	// snapshot and restore each probe wisps around the repair. Answer "table
+	// absent" so the guard stops at the probe (the drift DB's QueryContext
+	// panics; this test pins the repair, the guard's real reads are pinned in
+	// migration_updated_at_guard_test.go). Version 15 is not registered.
+	if wantCursorVersion == 7 {
+		mock.ExpectQuery(tableQuery).WithArgs("wisps").
+			WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
+	}
 	mock.ExpectQuery(tableQuery).WithArgs("wisps").
 		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
 	mock.ExpectQuery(columnQuery).WithArgs("wisps", "is_blocked").
 		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
 	mock.ExpectQuery(indexQuery).WithArgs("wisps", "idx_wisps_is_blocked").
 		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
+	if wantCursorVersion == 7 {
+		mock.ExpectQuery(tableQuery).WithArgs("wisps").
+			WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
+	}
 
 	body, err := IgnoredMigrationSQL(migrationFile)
 	if err != nil {
@@ -2499,7 +2512,9 @@ func newWispsAbsentDB(t *testing.T) *wispsAbsentDB {
 	// Registered twice, once per firing of the {ignored_schema_migrations, 7}
 	// and {ignored_schema_migrations, 15} repairs; go-sqlmock v1.5.2 predates
 	// ExpectedQuery.Times, so the same expectation is set up twice instead of
-	// asking for a repeat count.
+	// asking for a repeat count. (The updated_at guard also registered at
+	// ignored/0007 probes no tables here: this test's caller stubs
+	// updatedAtGuardTableExists.)
 	for i := 0; i < 2; i++ {
 		mock.ExpectQuery(`(?s)SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.TABLES.*TABLE_NAME = \?`).
 			WithArgs("wisps").

@@ -365,3 +365,68 @@ func TestEmbeddedMigrateRowMovesKeepUpdatedAt(t *testing.T) {
 		updatedGuardRowKeepsTimestamp(t, ctx, conn, "issues", "gh5981-rig", "2026-02-20 07:00:00")
 	})
 }
+
+// TestEmbeddedMigrateIgnored0007KeepsUpdatedAt covers the clone-local wisp
+// plane: a store whose ignored-series cursor sits at 6 replays
+// ignored/0007's unguarded `UPDATE wisps SET is_blocked = ...` recompute. The
+// wisp whose blocking flag flips must keep its historical updated_at, and the
+// restore must be in place before 0007's cursor row records (otherwise a pass
+// killed right after it would never get another chance).
+func TestEmbeddedMigrateIgnored0007KeepsUpdatedAt(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+
+	dataDir := seedMainSchemaAt(t, ctx, schema.LatestVersion())
+	conn, closeConn := openPinnedConn(t, ctx, dataDir)
+	defer closeConn()
+
+	// Materialize the wisp plane at its canonical shape first (the ignored
+	// series only runs through MigrateUp), then rewind its cursor to 6 so
+	// ignored/0007 is genuinely pending again — the replay a cursor-6 clone
+	// performs, not a reconcile.
+	if _, err := schema.MigrateUp(ctx, conn); err != nil {
+		t.Fatalf("initial MigrateUp: %v", err)
+	}
+	updatedGuardExec(t, ctx, conn, "DELETE FROM ignored_schema_migrations WHERE version > 6")
+	// The first pass also materialized ignored/0012's leases table into the
+	// working set, where dolt_status reports it as a dirty table — and the
+	// replay's own pending set includes 0012's guarded CREATE, so the
+	// dirty-table gate would refuse the whole replay. Force it onto the
+	// versioned plane (the DOLT_ADD('-f') + COMMIT recipe the ignored-cursor
+	// untrack fixture uses) so it stops being dirty; 0012's guard never
+	// touches an existing table, so the replay is unaffected.
+	updatedGuardExec(t, ctx, conn, "CALL DOLT_ADD('-f', 'leases')")
+	updatedGuardExec(t, ctx, conn, "CALL DOLT_COMMIT('-m', 'test: pin leases for gh 5981 replay')")
+
+	const (
+		blockedWispTS  = "2026-04-01 09:00:00"
+		blockerWispTS  = "2026-04-02 09:30:00"
+		unrelatedWispT = "2026-04-03 10:00:00"
+	)
+	updatedGuardSeedWisp(t, ctx, conn, "gh5981-w-blocked", "open", "message", blockedWispTS, 1)
+	updatedGuardSeedWisp(t, ctx, conn, "gh5981-w-blocker", "open", "message", blockerWispTS, 1)
+	updatedGuardSeedWisp(t, ctx, conn, "gh5981-w-free", "open", "message", unrelatedWispT, 1)
+	updatedGuardExec(t, ctx, conn,
+		`INSERT INTO wisp_dependencies (id, issue_id, depends_on_wisp_id, type, metadata)
+		 VALUES ('gh5981-w-dep', 'gh5981-w-blocked', 'gh5981-w-blocker', 'blocks', '{}')`)
+	updatedGuardExec(t, ctx, conn, "UPDATE wisps SET is_blocked = 0 WHERE id = 'gh5981-w-blocked'")
+
+	if _, err := schema.MigrateUp(ctx, conn); err != nil {
+		t.Fatalf("MigrateUp replaying ignored 0007: %v", err)
+	}
+	var ignoredVersion int
+	if err := conn.QueryRowContext(ctx,
+		"SELECT COALESCE(MAX(version),0) FROM ignored_schema_migrations").Scan(&ignoredVersion); err != nil {
+		t.Fatalf("read ignored schema version: %v", err)
+	}
+	if ignoredVersion != schema.LatestIgnoredVersion() {
+		t.Fatalf("ignored schema version after replay = %d, want latest %d", ignoredVersion, schema.LatestIgnoredVersion())
+	}
+
+	updatedGuardRowIsBlocked(t, ctx, conn, "wisps", "gh5981-w-blocked", true)
+	updatedGuardRowIsBlocked(t, ctx, conn, "wisps", "gh5981-w-blocker", false)
+	updatedGuardRowIsBlocked(t, ctx, conn, "wisps", "gh5981-w-free", false)
+	updatedGuardRowKeepsTimestamp(t, ctx, conn, "wisps", "gh5981-w-blocked", blockedWispTS)
+	updatedGuardRowKeepsTimestamp(t, ctx, conn, "wisps", "gh5981-w-blocker", blockerWispTS)
+	updatedGuardRowKeepsTimestamp(t, ctx, conn, "wisps", "gh5981-w-free", unrelatedWispT)
+}

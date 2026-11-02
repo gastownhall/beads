@@ -55,6 +55,9 @@ var updatedAtGuards = map[repairKey]updatedAtGuardPlan{
 	// 0053 is 0035's inverse: rig wisps move into issues, then `ephemeral`
 	// flips on the moved rows.
 	{"schema_migrations", 53}: {SnapshotTables: []string{"issues", "wisps"}, RestoreTable: "issues"},
+	// ignored/0007 recomputes wisps.is_blocked on the clone-local wisp plane,
+	// the 0046/0047 mechanism on the other table (fired on a cursor-6 replay).
+	{"ignored_schema_migrations", 7}: {SnapshotTables: []string{"wisps"}, RestoreTable: "wisps"},
 }
 
 // updatedAtGuardTableExists is the guard's table-existence probe, indirected
