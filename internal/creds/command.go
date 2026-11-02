@@ -12,6 +12,85 @@ import (
 	"time"
 )
 
+// CommandEnvKeys names environment settings whose values bd executes.
+var CommandEnvKeys = []string{
+	"BEADS_DOLT_CREDENTIAL_COMMAND",
+	"BEADS_HTTP_TOKEN_COMMAND",
+	"BEADS_MAIL_DELEGATE",
+	"BD_MAIL_DELEGATE",
+	"EDITOR",
+	"VISUAL",
+	"BD_PAGER",
+	"PAGER",
+	"BEADS_DOLT_BIN",
+}
+
+// CredentialRedirectEnvKeys names environment settings that redirect where a
+// user's credential command or file is sent or read from, or that redirect the
+// trust/config bd loads a server and its credentials from.
+var CredentialRedirectEnvKeys = []string{
+	"BEADS_DOLT_SERVER_HOST",
+	"BEADS_CREDENTIALS_FILE",
+	// BEADS_CENTRAL_CONFIG names a JSON file whose server fields (host, mode,
+	// user, TLS) bd merges as connection defaults; a .beads/.env that pointed
+	// it at a committed file could silently send the user's Dolt credentials
+	// to an attacker-chosen host.
+	"BEADS_CENTRAL_CONFIG",
+	// BEADS_HTTP_CA_FILE names the CA bundle the http backend trusts; a
+	// .beads/.env that pointed it at a committed cert would let a
+	// network-positioned attacker present a MITM certificate bd accepts.
+	"BEADS_HTTP_CA_FILE",
+}
+
+// AllowedDoltEnvKeys names the only bare DOLT_* variables a project
+// .beads/.env may import: the Dolt remote credential pair, the documented
+// per-project credential use case (GH#2520). The DOLT_* namespace as a whole
+// is owned by the dolt binary bd shells out to, and carries command-valued and
+// path-redirect members bd does not control (DOLT_SSH_COMMAND runs a command in
+// dolt's ssh transport; DOLT_ROOT_PATH redirects where dolt reads its global
+// config, which can name an executable credential helper; DOLT_PAGER /
+// DOLT_EDITOR / DOLT_BIN_PATH are the same class). A prefix allow of DOLT_*
+// therefore re-opens the very command-execution hole this filter exists to
+// close, so the prefix is NOT admitted and only these two keys are.
+var AllowedDoltEnvKeys = []string{
+	"DOLT_REMOTE_USER",
+	"DOLT_REMOTE_PASSWORD",
+}
+
+// AllowedProjectEnvKey reports whether key may be imported from a project
+// .beads/.env file. Comparison is case-insensitive so mixed-case keys on
+// Windows cannot bypass the filter. Only BEADS_* and BD_* keys outside the
+// command and credential-redirection sets, plus the explicit Dolt remote
+// credential keys in AllowedDoltEnvKeys, are admitted: the broader DOLT_*
+// namespace is deliberately excluded (see AllowedDoltEnvKeys) and non-prefixed
+// keys are refused so child git/dolt/ssh processes cannot inherit GIT_*, SSH_*,
+// LD_*, or DYLD_* hooks.
+func AllowedProjectEnvKey(key string) (bool, string) {
+	upper := strings.ToUpper(strings.TrimSpace(key))
+	if upper == "" {
+		return false, "empty environment variable name"
+	}
+	for _, k := range CommandEnvKeys {
+		if upper == k {
+			return false, "command settings must come from your shell environment or user config"
+		}
+	}
+	for _, k := range CredentialRedirectEnvKeys {
+		if upper == k {
+			return false, "credential target settings must come from your shell environment or user config"
+		}
+	}
+	for _, k := range AllowedDoltEnvKeys {
+		if upper == k {
+			return true, ""
+		}
+	}
+	if !strings.HasPrefix(upper, "BEADS_") && !strings.HasPrefix(upper, "BD_") {
+		return false, "only BEADS_*, BD_*, and the Dolt remote credential variables (DOLT_REMOTE_USER, DOLT_REMOTE_PASSWORD) are allowed in .beads/.env"
+	}
+	return true, ""
+}
+
 // CommandSource runs a configured command and reads a credential from its stdout —
 // the external credential-process idiom (kubectl ExecCredential / AWS
 // credential_process / git credential helper). bd knows nothing of the issuer: the

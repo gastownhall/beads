@@ -3,8 +3,149 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/config"
 )
+
+func TestFindMailDelegateUsesYaml(t *testing.T) {
+	t.Setenv("BEADS_MAIL_DELEGATE", "")
+	t.Setenv("BD_MAIL_DELEGATE", "")
+	for _, tt := range []struct {
+		name    string
+		user    string
+		project string
+		want    string
+	}{
+		{name: "user config", user: "mail:\n  delegate: trusted mail\n", project: "mail:\n  delegate: untrusted mail\n", want: "trusted mail"},
+		{name: "project config ignored", project: "mail:\n  delegate: untrusted mail\n"},
+		{name: "no config"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("USERPROFILE", home)
+			t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+			userDir := filepath.Join(home, ".config", "bd")
+			if err := os.MkdirAll(userDir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(userDir, "config.yaml"), []byte(tt.user), 0600); err != nil {
+				t.Fatal(err)
+			}
+			projectDir := filepath.Join(t.TempDir(), ".beads")
+			if err := os.MkdirAll(projectDir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(projectDir, "config.yaml"), []byte(tt.project), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := config.WithBeadsDir(projectDir, func() {
+				if got := findMailDelegate(); got != tt.want {
+					t.Errorf("delegate = %q, want %q", got, tt.want)
+				}
+			}); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestLoadBeadsEnvFileRejectsCommands(t *testing.T) {
+	for _, tc := range []struct {
+		key    string
+		reason string
+	}{
+		{"BEADS_DOLT_CREDENTIAL_COMMAND", "command settings must come from your shell environment or user config"},
+		{"beads_dolt_credential_command", "command settings must come from your shell environment or user config"},
+		{"BEADS_HTTP_TOKEN_COMMAND", "command settings must come from your shell environment or user config"},
+		{"BEADS_MAIL_DELEGATE", "command settings must come from your shell environment or user config"},
+		{"Beads_Mail_Delegate", "command settings must come from your shell environment or user config"},
+		{"BD_MAIL_DELEGATE", "command settings must come from your shell environment or user config"},
+		{"EDITOR", "command settings must come from your shell environment or user config"},
+		{"VISUAL", "command settings must come from your shell environment or user config"},
+		{"BD_PAGER", "command settings must come from your shell environment or user config"},
+		{"PAGER", "command settings must come from your shell environment or user config"},
+		{"BEADS_DOLT_BIN", "command settings must come from your shell environment or user config"},
+		{"BEADS_DOLT_SERVER_HOST", "credential target settings must come from your shell environment or user config"},
+		{"BEADS_CREDENTIALS_FILE", "credential target settings must come from your shell environment or user config"},
+		{"BEADS_CENTRAL_CONFIG", "credential target settings must come from your shell environment or user config"},
+		{"BEADS_HTTP_CA_FILE", "credential target settings must come from your shell environment or user config"},
+		// The DOLT_* namespace is owned by the dolt binary and carries
+		// command-/path-valued members bd cannot control, so the prefix is NOT
+		// admitted: DOLT_SSH_COMMAND runs a command in dolt's ssh transport,
+		// DOLT_ROOT_PATH redirects dolt's global config (which can name an
+		// executable credential helper), and a bare DOLT_* key is refused too.
+		{"DOLT_SSH_COMMAND", "only BEADS_*, BD_*, and the Dolt remote credential variables (DOLT_REMOTE_USER, DOLT_REMOTE_PASSWORD) are allowed in .beads/.env"},
+		{"DOLT_ROOT_PATH", "only BEADS_*, BD_*, and the Dolt remote credential variables (DOLT_REMOTE_USER, DOLT_REMOTE_PASSWORD) are allowed in .beads/.env"},
+		{"DOLT_PAGER", "only BEADS_*, BD_*, and the Dolt remote credential variables (DOLT_REMOTE_USER, DOLT_REMOTE_PASSWORD) are allowed in .beads/.env"},
+		{"dolt_ssh_command", "only BEADS_*, BD_*, and the Dolt remote credential variables (DOLT_REMOTE_USER, DOLT_REMOTE_PASSWORD) are allowed in .beads/.env"},
+		{"GIT_CONFIG_COUNT", "only BEADS_*, BD_*, and the Dolt remote credential variables (DOLT_REMOTE_USER, DOLT_REMOTE_PASSWORD) are allowed in .beads/.env"},
+		{"GIT_SSH_COMMAND", "only BEADS_*, BD_*, and the Dolt remote credential variables (DOLT_REMOTE_USER, DOLT_REMOTE_PASSWORD) are allowed in .beads/.env"},
+		{"GIT_ASKPASS", "only BEADS_*, BD_*, and the Dolt remote credential variables (DOLT_REMOTE_USER, DOLT_REMOTE_PASSWORD) are allowed in .beads/.env"},
+		{"SSH_ASKPASS", "only BEADS_*, BD_*, and the Dolt remote credential variables (DOLT_REMOTE_USER, DOLT_REMOTE_PASSWORD) are allowed in .beads/.env"},
+		{"LD_PRELOAD", "only BEADS_*, BD_*, and the Dolt remote credential variables (DOLT_REMOTE_USER, DOLT_REMOTE_PASSWORD) are allowed in .beads/.env"},
+		{"DYLD_INSERT_LIBRARIES", "only BEADS_*, BD_*, and the Dolt remote credential variables (DOLT_REMOTE_USER, DOLT_REMOTE_PASSWORD) are allowed in .beads/.env"},
+	} {
+		t.Run(tc.key, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, ".env"), []byte(tc.key+"=untrusted\nBEADS_TEST_NORMAL=normal\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			upper := strings.ToUpper(tc.key)
+			t.Setenv(tc.key, "")
+			os.Unsetenv(tc.key)
+			t.Setenv(upper, "")
+			os.Unsetenv(upper)
+			t.Setenv("BEADS_TEST_NORMAL", "")
+			os.Unsetenv("BEADS_TEST_NORMAL")
+			warning := captureStderr(t, func() { loadBeadsEnvFile(dir) })
+			if _, ok := os.LookupEnv(tc.key); ok {
+				t.Errorf("%s was imported", tc.key)
+			}
+			if _, ok := os.LookupEnv(upper); ok {
+				t.Errorf("%s was imported as %s", tc.key, upper)
+			}
+			if os.Getenv("BEADS_TEST_NORMAL") != "normal" {
+				t.Error("normal setting not imported")
+			}
+			want := "beads: ignoring " + tc.key + " from .beads/.env (" + tc.reason + ")\n"
+			if !strings.Contains(warning, want) {
+				t.Errorf("warning = %q, want %q", warning, want)
+			}
+			t.Setenv(upper, "trusted")
+			captureStderr(t, func() { loadBeadsEnvFile(dir) })
+			if os.Getenv(upper) != "trusted" {
+				t.Error("shell setting changed")
+			}
+		})
+	}
+}
+
+// TestLoadBeadsEnvFileAdmitsDoltRemoteCredentials pins that narrowing the
+// DOLT_* prefix to AllowedDoltEnvKeys did not break the documented
+// per-project Dolt remote credential use case (GH#2520): the two explicitly
+// allowed DOLT_* keys still import, while a sibling DOLT_* key does not.
+func TestLoadBeadsEnvFileAdmitsDoltRemoteCredentials(t *testing.T) {
+	for _, key := range []string{"DOLT_REMOTE_USER", "DOLT_REMOTE_PASSWORD"} {
+		t.Run(key, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, ".env"), []byte(key+"=from-env\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv(key, "")
+			os.Unsetenv(key)
+			warning := captureStderr(t, func() { loadBeadsEnvFile(dir) })
+			if got := os.Getenv(key); got != "from-env" {
+				t.Errorf("%s = %q, want %q (allowed Dolt remote credential key must import)", key, got, "from-env")
+			}
+			if strings.Contains(warning, "ignoring "+key) {
+				t.Errorf("%s was warned about but should be admitted: %q", key, warning)
+			}
+		})
+	}
+}
 
 func TestLoadBeadsEnvFile(t *testing.T) {
 	t.Run("loads env vars from .env file", func(t *testing.T) {
