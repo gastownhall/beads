@@ -10,13 +10,13 @@ import (
 	"testing"
 )
 
-// TestWispGCPurgeClosedPreviewSkipsLiveDependents is the regression test for
+// TestEmbeddedWispGCPurgeClosedPreviewSkipsLiveDependents is the regression test for
 // #5753: `bd mol wisp gc --closed --dry-run` hard-failed the whole batch with
 // DependentsOutsideRequestError the moment a single closed candidate still had
 // a live dependent outside the batch. One live molecule step therefore blocked
 // the preview of every other eligible closed wisp. The non-force preview must
 // skip-with-notice the protected candidates and preview the rest, exiting 0.
-func TestWispGCPurgeClosedPreviewSkipsLiveDependents(t *testing.T) {
+func TestEmbeddedWispGCPurgeClosedPreviewSkipsLiveDependents(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -61,7 +61,7 @@ func TestWispGCPurgeClosedPreviewSkipsLiveDependents(t *testing.T) {
 	}
 }
 
-func TestWispGCPurgeClosedPreviewJSONReportsSkippedLiveDependents(t *testing.T) {
+func TestEmbeddedWispGCPurgeClosedPreviewJSONReportsSkippedLiveDependents(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
