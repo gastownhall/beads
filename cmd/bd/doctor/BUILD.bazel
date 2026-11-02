@@ -124,6 +124,7 @@ go_test(
         "gitignore_test.go",
         "hooks_migration_test.go",
         "hooks_path_test.go",
+        "installation_symlink_test.go",
         "installation_test.go",
         "integrity_cycles_db_test.go",
         "integrity_cycles_mock_test.go",

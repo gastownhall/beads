@@ -43,14 +43,37 @@ func CheckInstallation(path string) DoctorCheck {
 	}
 }
 
+// probeBeadsDirWritable verifies that beadsDir is writable without writing
+// through any path a workspace could control. A fixed probe filename
+// (.doctor-test-write) followed a committed symlink and collided with a
+// preexisting entry; CreateTemp gives a unique, exclusively-created name so
+// neither can happen, and only the probe's own file is removed (bd-1tmym4 /
+// #7888).
+func probeBeadsDirWritable(beadsDir string) error {
+	f, err := os.CreateTemp(beadsDir, ".doctor-test-write-*")
+	if err != nil {
+		return err
+	}
+	probe := f.Name()
+	if _, err = f.WriteString("test"); err != nil {
+		_ = f.Close()
+		_ = os.Remove(probe)
+		return err
+	}
+	if err = f.Close(); err != nil {
+		_ = os.Remove(probe)
+		return err
+	}
+	return os.Remove(probe)
+}
+
 // CheckPermissions verifies that .beads directory and database are readable/writable.
 // Opens its own store; prefer CheckPermissionsWithStore when a shared store is available.
 func CheckPermissions(path string) DoctorCheck {
 	beadsDir := ResolveBeadsDirForRepo(path)
 
 	// Check if .beads/ is writable
-	testFile := filepath.Join(beadsDir, ".doctor-test-write")
-	if err := os.WriteFile(testFile, []byte("test"), 0600); err != nil {
+	if err := probeBeadsDirWritable(beadsDir); err != nil {
 		return DoctorCheck{
 			Name:    "Permissions",
 			Status:  StatusError,
@@ -58,7 +81,6 @@ func CheckPermissions(path string) DoctorCheck {
 			Fix:     "Run 'bd doctor --fix' to fix permissions",
 		}
 	}
-	_ = os.Remove(testFile) // Clean up test file (intentionally ignore error)
 
 	// Check Dolt database directory permissions
 	cfg, err := configfile.Load(beadsDir)
@@ -103,8 +125,7 @@ func CheckPermissionsWithStore(path string, ss *SharedStore) DoctorCheck {
 	store := ss.Store()
 
 	// Check if .beads/ is writable
-	testFile := filepath.Join(beadsDir, ".doctor-test-write")
-	if err := os.WriteFile(testFile, []byte("test"), 0600); err != nil {
+	if err := probeBeadsDirWritable(beadsDir); err != nil {
 		return DoctorCheck{
 			Name:    "Permissions",
 			Status:  StatusError,
@@ -112,7 +133,6 @@ func CheckPermissionsWithStore(path string, ss *SharedStore) DoctorCheck {
 			Fix:     "Run 'bd doctor --fix' to fix permissions",
 		}
 	}
-	_ = os.Remove(testFile)
 
 	// Check Dolt database directory permissions
 	cfg, err := configfile.Load(beadsDir)
