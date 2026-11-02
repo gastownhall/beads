@@ -661,13 +661,23 @@ var rulesCompactCmd = &cobra.Command{
 	Long: `Merge related rules into composites.
 
 A composite keeps only the **Do:** and **Don't:** lines of its sources, plus a
-"Source rules:" line naming them. Any other prose in the source files is not
-carried over, and the source files are deleted when the merge is applied.
+"Source rules:" line naming them. Any other prose is not carried over: the
+preview lists every dropped line by source. A rule with no **Do:** or **Don't:**
+lines is skipped by --auto and refused by --group.
 
-Without --force, compact only prints the composite and the files it would
-delete. With --force it writes the composite and deletes the sources. It
-refuses to write a composite over an existing file, including one of its own
-sources.
+Without --force, compact only previews: it prints the composite, the dropped
+lines, and the files it would back up and delete, and writes nothing. --force
+is the consent to apply. It writes the composite, copies each source to
+<name>.md.backup, and only then deletes the sources. Backups are not rules,
+so audit ignores them.
+
+Compact refuses a group whose composite or any backup path already exists,
+including one of its own sources; nothing is written for that group. If a
+backup or delete fails, the error names what was written, backed up and
+deleted, and every backup is kept.
+
+To undo a merge, delete the composite, then rename each <name>.md.backup back
+to <name>.md (a source that was not deleted still has its original name).
 
 Examples:
   bd rules compact --auto                    # Preview the audit's suggested merges
