@@ -42,6 +42,9 @@ type DoltPerfMetrics struct {
 	ProfilePath string
 }
 
+// perfProfileNow names the --perf CPU profile; tests pin it.
+var perfProfileNow = time.Now
+
 // RunDoltPerformanceDiagnostics runs performance diagnostics for Dolt backend
 func RunDoltPerformanceDiagnostics(path string, enableProfiling bool) (*DoltPerfMetrics, error) {
 	beadsDir := ResolveBeadsDirForRepo(path)
@@ -87,11 +90,11 @@ func RunDoltPerformanceDiagnostics(path string, enableProfiling bool) (*DoltPerf
 
 	// Start profiling if requested
 	if enableProfiling {
-		profilePath := fmt.Sprintf("beads-dolt-perf-%s.prof", time.Now().Format("2006-01-02-150405"))
+		profilePath := fmt.Sprintf("beads-dolt-perf-%s.prof", perfProfileNow().Format("2006-01-02-150405"))
 		if profileFile, err := startCPUProfile(profilePath); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to start CPU profiling: %v\n", err)
 		} else {
-			metrics.ProfilePath = profilePath
+			metrics.ProfilePath = profileFile.Name()
 			defer stopCPUProfile(profileFile)
 		}
 	}
