@@ -170,6 +170,7 @@
 100 40 TestEmbeddedUpdateLifecycleClaimParentCommit
 
 100 41 TestEmbeddedDuplicateConcurrent
+100 41 TestEmbeddedRemoteSignalCleanup
 100 41 TestEmbeddedVersionedHistoryFollowsTheStoreItWritesInto
 
 100 42 TestEmbeddedInitAForkAutoContributor

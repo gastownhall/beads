@@ -198,6 +198,13 @@ the files, and how long it has run is not how long it has held the database.
 Let a running `bd` or `dolt` finish or stop it normally before removing
 anything.
 
+To stop an embedded `bd dolt push` or `bd dolt pull`, press Ctrl-C once or
+send it one `SIGTERM`. In releases after v1.3.2 that first signal cancels the
+transfer: Dolt stops the git or SSH transport it started, and `bd` exits with
+an error and releases the database. This cleanup is cooperative. A second
+signal, or `kill -9`, ends `bd` at once without that cleanup and can leave the
+transport running.
+
 ## Prevention
 
 - Ensure stable network before sync
