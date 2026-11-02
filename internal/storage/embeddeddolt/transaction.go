@@ -59,8 +59,9 @@ func (s *EmbeddedDoltStore) runTransactionWithMessage(ctx context.Context, fn fu
 
 	// Create a Dolt version commit from the working set changes.
 	if commitMsg != "" && len(tracker.DirtyTables()) > 0 {
+		author := s.commitAuthor()
 		if err := s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
-			return versioncontrolops.StageAndCommit(ctx, db, tracker.DirtyTables(), commitMsg, commitAuthor)
+			return versioncontrolops.StageAndCommit(ctx, db, tracker.DirtyTables(), commitMsg, author)
 		}); err != nil {
 			return wrapCommitIndeterminate("embeddeddolt: stage and commit after SQL commit", err)
 		}

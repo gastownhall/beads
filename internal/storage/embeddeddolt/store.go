@@ -73,6 +73,8 @@ type EmbeddedDoltStore struct {
 	// (e.g. the post-command autocommit net, or the commit itself) - only the
 	// migration step is skipped.
 	intent openIntent
+	// identity authors this store's Dolt commits (GH#7628).
+	identity commitIdentity
 }
 
 // lenientSharedGateGuidance is the blunt migrate-or-adopt block shared by the
