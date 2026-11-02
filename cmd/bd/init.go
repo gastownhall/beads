@@ -1102,6 +1102,10 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			var earlySyncURL string
 			earlyRemoteSource := initSyncRemoteNone
 			earlyRemoteHasDoltData := false
+			// earlyRemoteUnverified records that the probe failed, so the
+			// refusal can say the remote could not be read instead of
+			// claiming history (GH#7665). The fail-closed bool is unchanged.
+			earlyRemoteUnverified := false
 			var earlyProbeNote string
 			earlySyncURL, earlyRemoteSource = resolveInitConfiguredSyncRemote(initRemote, initRemoteChanged, resolveSyncRemote)
 			if earlyRemoteSource == initSyncRemoteExplicit {
@@ -1113,6 +1117,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				if fromJSONL {
 					hasData, err := gitRemoteHasDoltDataRefStatus(earlySyncURL)
 					earlyRemoteHasDoltData, earlyProbeNote = resolveRemoteHasDoltDataProbe(earlySyncURL, hasData, err)
+					earlyRemoteUnverified = err != nil
 				}
 			} else if earlyRemoteSource == initSyncRemoteConfigured {
 				// Probe refs/dolt/data — do NOT treat mere presence of
@@ -1121,6 +1126,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				// --reinit-local / local init.
 				hasData, err := gitRemoteHasDoltDataRefStatus(earlySyncURL)
 				earlyRemoteHasDoltData, earlyProbeNote = resolveRemoteHasDoltDataProbe(earlySyncURL, hasData, err)
+				earlyRemoteUnverified = err != nil
 			} else if earlyRemoteSource == initSyncRemoteNone && !stealth && !keepHomeClean && isGitRepo() && !isBareGitRepo() {
 				// Not under keepHomeClean: a repository git finds from the
 				// home is not the project's, so its origin is not this
@@ -1129,6 +1135,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 					earlySyncURL = normalizeRemoteURL(originURL)
 					hasData, probeErr := gitOriginHasDoltDataRefStatus()
 					earlyRemoteHasDoltData, earlyProbeNote = resolveRemoteHasDoltDataProbe(earlySyncURL, hasData, probeErr)
+					earlyRemoteUnverified = probeErr != nil
 				}
 			}
 			if earlySyncURL != "" {
@@ -1136,14 +1143,15 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 					fmt.Fprintf(os.Stderr, "%s %s\n", ui.RenderWarn("!"), earlyProbeNote)
 				}
 				earlyDecision := CheckRemoteSafety(RemoteSafetyInput{
-					Force:             force,
-					ReinitLocal:       reinitLocal,
-					FromJSONL:         fromJSONL,
-					DiscardRemote:     discardRemote,
-					DestroyToken:      destroyToken,
-					ExpectedToken:     FormatDestroyToken(prefix),
-					RemoteHasDoltData: earlyRemoteHasDoltData,
-					IsInteractive:     term.IsTerminal(int(os.Stdin.Fd())),
+					Force:                    force,
+					ReinitLocal:              reinitLocal,
+					FromJSONL:                fromJSONL,
+					DiscardRemote:            discardRemote,
+					DestroyToken:             destroyToken,
+					ExpectedToken:            FormatDestroyToken(prefix),
+					RemoteHasDoltData:        earlyRemoteHasDoltData,
+					RemoteDoltDataUnverified: earlyRemoteUnverified,
+					IsInteractive:            term.IsTerminal(int(os.Stdin.Fd())),
 				})
 				if _, err := handleRemoteSafetyDecision(earlyDecision, prefix, earlySyncURL, destroyToken, func() (bool, error) {
 					switch earlyRemoteSource {
@@ -1478,6 +1486,8 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		syncURLFromGitOrigin := false
 		remoteHasDoltData := false
 		var lateProbeNote string
+		// lateRemoteUnverified: as earlyRemoteUnverified above (GH#7665).
+		lateRemoteUnverified := false
 
 		if syncURL != "" {
 			// sync.remote was explicitly configured. Treat it as bootstrap-
@@ -1494,20 +1504,22 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				// from a configured URL alone (GH#4861).
 				hasData, err := gitRemoteHasDoltDataRefStatus(syncURL)
 				remoteHasDoltData, lateProbeNote = resolveRemoteHasDoltDataProbe(syncURL, hasData, err)
+				lateRemoteUnverified = err != nil
 			}
 			if lateProbeNote != "" {
 				fmt.Fprintf(os.Stderr, "%s %s\n", ui.RenderWarn("!"), lateProbeNote)
 			}
 			if !syncFromRemote {
 				decision := CheckRemoteSafety(RemoteSafetyInput{
-					Force:             force,
-					ReinitLocal:       reinitLocal,
-					FromJSONL:         fromJSONL,
-					DiscardRemote:     discardRemote,
-					DestroyToken:      destroyToken,
-					ExpectedToken:     FormatDestroyToken(prefix),
-					RemoteHasDoltData: remoteHasDoltData,
-					IsInteractive:     term.IsTerminal(int(os.Stdin.Fd())),
+					Force:                    force,
+					ReinitLocal:              reinitLocal,
+					FromJSONL:                fromJSONL,
+					DiscardRemote:            discardRemote,
+					DestroyToken:             destroyToken,
+					ExpectedToken:            FormatDestroyToken(prefix),
+					RemoteHasDoltData:        remoteHasDoltData,
+					RemoteDoltDataUnverified: lateRemoteUnverified,
+					IsInteractive:            term.IsTerminal(int(os.Stdin.Fd())),
 				})
 				bootstrap, err := handleRemoteSafetyDecision(decision, prefix, syncURL, destroyToken, func() (bool, error) {
 					return gitRemoteHasDoltDataRefStatus(syncURL)
@@ -1530,19 +1542,21 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				syncURLFromGitOrigin = true
 				hasData, probeErr := gitOriginHasDoltDataRefStatus()
 				remoteHasDoltData, lateProbeNote = resolveRemoteHasDoltDataProbe(syncURL, hasData, probeErr)
+				lateRemoteUnverified = probeErr != nil
 				if lateProbeNote != "" {
 					fmt.Fprintf(os.Stderr, "%s %s\n", ui.RenderWarn("!"), lateProbeNote)
 				}
 
 				decision := CheckRemoteSafety(RemoteSafetyInput{
-					Force:             force,
-					ReinitLocal:       reinitLocal,
-					FromJSONL:         fromJSONL,
-					DiscardRemote:     discardRemote,
-					DestroyToken:      destroyToken,
-					ExpectedToken:     FormatDestroyToken(prefix),
-					RemoteHasDoltData: remoteHasDoltData,
-					IsInteractive:     term.IsTerminal(int(os.Stdin.Fd())),
+					Force:                    force,
+					ReinitLocal:              reinitLocal,
+					FromJSONL:                fromJSONL,
+					DiscardRemote:            discardRemote,
+					DestroyToken:             destroyToken,
+					ExpectedToken:            FormatDestroyToken(prefix),
+					RemoteHasDoltData:        remoteHasDoltData,
+					RemoteDoltDataUnverified: lateRemoteUnverified,
+					IsInteractive:            term.IsTerminal(int(os.Stdin.Fd())),
 				})
 
 				bootstrap, err := handleRemoteSafetyDecision(decision, prefix, syncURL, destroyToken, gitOriginHasDoltDataRefStatus, remoteHasDoltData, &remoteDivergenceConfirmed)
