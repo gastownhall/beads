@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -279,4 +280,94 @@ func TestJournalWriterLock_AdvisoryDeferWakeSkipsWhenContended(t *testing.T) {
 	var user sql.NullInt64
 	require.NoError(t, p.db.QueryRowContext(ctx, "SELECT IS_USED_LOCK(?)", name).Scan(&user))
 	require.False(t, user.Valid, "the journal-writer lock is still held after the sweeps")
+}
+
+// TestJournalWriterLock_StoreAndUOWWritersQueueOnOneLock pins the
+// cross-provider half of gastownhall/beads#6117: a server store's journaled
+// writer and a proxied unit of work on the same database queue on one lock.
+// The holder is admitted the way the store's funnel admits (AcquireJournalWriter
+// for the database on its pinned session, then BEGIN and a journal-scoped
+// emit) and pauses inside its transaction. A RunTx on the provider must be
+// seen waiting in GET_LOCK and not return until the holder commits; then both
+// writes are journaled at contiguous seqs, the holder's first.
+func TestJournalWriterLock_StoreAndUOWWritersQueueOnOneLock(t *testing.T) {
+	ctx := context.Background()
+	provider := newUOWRoleFixtureProvider(t, ctx, "jwx")
+	p, ok := provider.(*doltSQLProvider)
+	require.Truef(t, ok, "provider is %T, want *doltSQLProvider", provider)
+	p.SetEventsJournalEnabled(true)
+	t.Cleanup(func() { p.SetEventsJournalEnabled(false) })
+
+	const holderID, waiterID = "jwx-holder", "jwx-waiter"
+	require.NoError(t, RunTx(ctx, p, func(ctx context.Context, uw UnitOfWork) (string, error) {
+		for _, id := range []string{holderID, waiterID} {
+			if _, err := uw.IssueUseCase().CreateIssue(ctx, domain.CreateIssueParams{
+				Issue:      &types.Issue{ID: id, Title: id, IssueType: types.TypeTask, Status: types.StatusOpen},
+				ExplicitID: id,
+				CreateOnly: true,
+			}, "seed"); err != nil {
+				return "", err
+			}
+		}
+		return "bd: seed cross-provider writers", nil
+	}))
+	var head int64
+	require.NoError(t, p.db.QueryRowContext(ctx, "SELECT COALESCE(MAX(seq), 0) FROM bd_events_journal").Scan(&head))
+
+	conn, err := p.db.Conn(ctx)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+	lock, err := issueops.AcquireJournalWriter(ctx, conn, issueops.JournalWriterAdmission{
+		Database: p.database,
+		AdmitBy:  time.Now().Add(issueops.JournalWriterAdmissionBudget),
+	})
+	require.NoError(t, err, "the store-shaped holder must be admitted")
+	t.Cleanup(lock.Release)
+	tx, err := conn.BeginTx(ctx, nil)
+	require.NoError(t, err)
+	clearScope := issueops.ScopeEventsJournalTransaction(tx, true)
+	t.Cleanup(clearScope)
+	_, err = issueops.UpdateIssueInTx(ctx, tx, holderID, map[string]interface{}{"title": "written by the store-shaped holder"}, "holder")
+	require.NoError(t, err)
+
+	var waiterRuns atomic.Int32
+	done := make(chan error, 1)
+	go func() {
+		done <- RunTx(ctx, p, func(ctx context.Context, uw UnitOfWork) (string, error) {
+			waiterRuns.Add(1)
+			return "bd: cross-provider waiter", uw.IssueUseCase().UpdateIssue(ctx, waiterID, map[string]interface{}{"title": "written by the unit of work"}, "waiter")
+		})
+	}()
+	waitForUOWJournalWriterWaiter(t, ctx, p.db, done, "RunTx")
+	require.Zero(t, waiterRuns.Load(), "the unit of work ran its body while the store-shaped holder was inside its transaction")
+
+	require.NoError(t, tx.Commit())
+	lock.Release()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(20 * time.Second):
+		t.Fatal("the unit of work did not return once the holder committed")
+	}
+	require.EqualValues(t, 1, waiterRuns.Load(), "the unit of work replayed its body")
+
+	rows, err := p.db.QueryContext(ctx, "SELECT seq, issue_id FROM bd_events_journal WHERE seq > ? ORDER BY seq", head)
+	require.NoError(t, err)
+	defer rows.Close()
+	var sawHolder, sawWaiter bool
+	for want := head + 1; rows.Next(); want++ {
+		var seq int64
+		var id string
+		require.NoError(t, rows.Scan(&seq, &id))
+		require.Equalf(t, want, seq, "journal seq %d breaks the contiguous run after %d", seq, head)
+		switch id {
+		case holderID:
+			require.Falsef(t, sawWaiter, "seq %d journals the holder after the unit of work; want commit order", seq)
+			sawHolder = true
+		case waiterID:
+			sawWaiter = true
+		}
+	}
+	require.NoError(t, rows.Err())
+	require.True(t, sawHolder && sawWaiter, "want journal rows for both writers (holder=%v unit of work=%v)", sawHolder, sawWaiter)
 }

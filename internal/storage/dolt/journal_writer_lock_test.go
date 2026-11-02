@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -241,5 +242,116 @@ func assertJournalCommitOrder(t *testing.T, ctx context.Context, store *DoltStor
 	}
 	if !sawFirst || !sawSecond {
 		t.Fatalf("journal after seq %d has rows for %s=%v %s=%v, want both", head, first, sawFirst, second, sawSecond)
+	}
+}
+
+// TestJournalWriterLock_TransactionHolderQueuesAFunnelWriter is the
+// gastownhall/beads#6117 schedule across the store's two writer shapes: the
+// holder is a RunInTransaction (admitted before its snapshot reads and BEGIN)
+// paused after its emit, and the waiter is a plain withRetryTx funnel write.
+// The waiter must be seen waiting at admission, not inside a transaction, and
+// once the holder commits both bodies have run exactly once and the journal
+// is contiguous in commit order.
+func TestJournalWriterLock_TransactionHolderQueuesAFunnelWriter(t *testing.T) {
+	store, ctx, observer := newJournalWriterTestStore(t)
+	target := createJournalWriterTestIssue(t, ctx, store, "funnel waiter target")
+	head := journalHead(t, ctx, store)
+
+	holderIssue := &types.Issue{Title: "transaction holder issue", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	var holderRuns, waiterRuns atomic.Int32
+	inside := make(chan struct{})
+	releaseHolder := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseHolder) }) }
+	t.Cleanup(release)
+
+	holderDone := make(chan error, 1)
+	go func() {
+		holderDone <- store.RunInTransaction(ctx, "transaction holder", func(tx storage.Transaction) error {
+			run := holderRuns.Add(1)
+			if err := tx.CreateIssue(ctx, holderIssue, "holder"); err != nil {
+				return err
+			}
+			if run == 1 {
+				close(inside)
+				<-releaseHolder
+			}
+			return nil
+		})
+	}()
+	receiveWithin(t, inside, "the transaction holder to emit inside its transaction")
+
+	waiterBegan := make(chan struct{}, 1)
+	waiterDone := make(chan error, 1)
+	go func() {
+		waiterDone <- store.withRetryTx(ctx, func(tx *sql.Tx) error {
+			waiterRuns.Add(1)
+			select {
+			case waiterBegan <- struct{}{}:
+			default:
+			}
+			_, err := issueops.UpdateIssueInTx(ctx, tx, target.ID, map[string]interface{}{"title": "written by the funnel waiter"}, "waiter")
+			return err
+		})
+	}()
+	waitForJournalWriterWaiter(t, ctx, observer, store.database, waiterBegan, waiterDone, "the funnel waiter")
+
+	release()
+	if err := receiveWithin(t, holderDone, "the transaction holder"); err != nil {
+		t.Fatalf("transaction holder: %v", err)
+	}
+	if err := receiveWithin(t, waiterDone, "the funnel waiter"); err != nil {
+		t.Fatalf("funnel waiter: %v", err)
+	}
+	if got := holderRuns.Load(); got != 1 {
+		t.Errorf("transaction holder ran its body %d times, want 1 (a replay means the counter conflict was not prevented)", got)
+	}
+	if got := waiterRuns.Load(); got != 1 {
+		t.Errorf("funnel waiter ran its body %d times, want 1", got)
+	}
+	assertJournalCommitOrder(t, ctx, store, head, holderIssue.ID, target.ID)
+}
+
+// TestJournalWriterLock_OtherDatabasesWriterDoesNotQueue pins that the lock is
+// per database (gastownhall/beads#6117): a session holding another database's
+// journal-writer lock, as that database's writer does inside its transaction,
+// does not hold this store's writers. The write completes, journaled, and the
+// other database's lock is still its holder's.
+func TestJournalWriterLock_OtherDatabasesWriterDoesNotQueue(t *testing.T) {
+	store, ctx, observer := newJournalWriterTestStore(t)
+	other := store.database + "_other"
+	otherName := issueops.JournalWriterLockName(other)
+	if otherName == issueops.JournalWriterLockName(store.database) {
+		t.Fatalf("databases %q and %q share the journal-writer lock %q", store.database, other, otherName)
+	}
+
+	holder, err := observer.Conn(ctx)
+	if err != nil {
+		t.Fatalf("pin holder: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = holder.ExecContext(context.Background(), "DO RELEASE_LOCK(?)", otherName)
+		_ = holder.Close()
+	})
+	var granted sql.NullInt64
+	if err := holder.QueryRowContext(ctx, "SELECT GET_LOCK(?, 0)", otherName).Scan(&granted); err != nil || granted.Int64 != 1 {
+		t.Fatalf("hold %q: granted=%v err=%v", otherName, granted, err)
+	}
+
+	head := journalHead(t, ctx, store)
+	start := time.Now()
+	issue := createJournalWriterTestIssue(t, ctx, store, "written beside another database's writer")
+	if waited := time.Since(start); waited >= issueops.JournalWriterAdmissionBudget/2 {
+		t.Fatalf("the write took %v beside another database's held lock; want no queueing", waited)
+	}
+	if got := journalHead(t, ctx, store); got <= head {
+		t.Fatalf("journal head %d after the write, want past %d (the write %s was not journaled)", got, head, issue.ID)
+	}
+	var stillHeld sql.NullBool
+	if err := holder.QueryRowContext(ctx, "SELECT IS_USED_LOCK(?) = CONNECTION_ID()", otherName).Scan(&stillHeld); err != nil {
+		t.Fatalf("IS_USED_LOCK: %v", err)
+	}
+	if !stillHeld.Bool {
+		t.Fatalf("the other database's lock %q is no longer its holder's after this store's write", otherName)
 	}
 }
