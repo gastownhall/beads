@@ -4,6 +4,7 @@ package embeddeddolt
 
 import (
 	"os"
+	"strings"
 )
 
 // Embedded commit authorship (GH#7628): the store resolves a commit identity
@@ -62,6 +63,10 @@ func (s *EmbeddedDoltStore) resolveCommitAuthorLocked() string {
 			email = fallbackEmail
 		}
 	}
+	// Normalize before the empty checks: a field that was only structure
+	// characters cleans to nothing and falls through honestly.
+	name = cleanCommitIdentityField(name)
+	email = cleanCommitIdentityField(email)
 	if name == "" {
 		name = commitName
 	}
@@ -69,4 +74,25 @@ func (s *EmbeddedDoltStore) resolveCommitAuthorLocked() string {
 		email = commitEmail
 	}
 	return name + " <" + email + ">"
+}
+
+// cleanCommitIdentityField flattens an identity field to the shape Dolt's
+// author parser can hold. Dolt parses '--author' with an unanchored
+// "([^)]+) \<([^)]+)" match, so a name carrying its own " <" — an odd
+// display name, a newline, angle brackets — re-splits the pair and
+// attributes the commit to a fragment of the field (observed: the name
+// "Alice (bot)\n<x>" parsed as the author "\n<x>"). Strip the structural
+// characters, collapse whitespace to single spaces, and trim: the result
+// still identifies the author, whatever the source format.
+func cleanCommitIdentityField(field string) string {
+	var b strings.Builder
+	for _, r := range field {
+		switch r {
+		case '<', '>', '(', ')', '\n', '\r', '\t':
+			b.WriteByte(' ')
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return strings.Join(strings.Fields(b.String()), " ")
 }

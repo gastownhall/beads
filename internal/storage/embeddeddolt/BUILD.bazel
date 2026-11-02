@@ -136,6 +136,7 @@ go_test(
         "commit_author_defaults_test.go",
         "commit_author_merge_test.go",
         "commit_author_test.go",
+        "commit_identity_internal_test.go",
         "commit_nothing_to_commit_test.go",
         "concurrency_test.go",
         "conformance_test.go",

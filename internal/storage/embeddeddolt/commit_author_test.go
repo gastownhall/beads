@@ -129,3 +129,25 @@ func TestEmbeddedCommitAllAuthorFollowsGitAuthorEnv(t *testing.T) {
 	}
 	assertNewCommitAuthored(t, te, "Alice Author", "alice@example.com", "bd: commit pending changes by tester")
 }
+
+// TestEmbeddedCommitAuthorNormalizesHostileIdentity pins GH#7628 AC-6: an
+// identity field carrying the characters Dolt's author parser treats as
+// structure — angle brackets, parentheses, newlines — is normalized to a
+// flattened form that still identifies the author, instead of reaching
+// DOLT_COMMIT('--author') raw and parsing into something else entirely.
+func TestEmbeddedCommitAuthorNormalizesHostileIdentity(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	t.Setenv("GIT_AUTHOR_NAME", "Alice (bot)\n<x>")
+	t.Setenv("GIT_AUTHOR_EMAIL", "alice@example.com")
+
+	te := newTestEnv(t, "can")
+	ctx := t.Context()
+
+	issue := &types.Issue{Title: "hostile identity", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	if err := te.store.RunInTransaction(ctx, "bd: create issue", func(tx storage.Transaction) error {
+		return tx.CreateIssue(ctx, issue, "tester")
+	}); err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+	assertNewCommitAuthored(t, te, "Alice bot x", "alice@example.com", "bd: create issue")
+}
