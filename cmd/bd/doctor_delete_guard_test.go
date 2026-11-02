@@ -64,9 +64,9 @@ var doctorDeleteExemptions = map[string]doctorDeleteExemption{
 		calls:  []string{"os.RemoveAll", "os.Remove", "os.Remove", "os.Remove"},
 		reason: "the interactive Reinitialize database choice, confirmed a second time with the path named; --yes never takes it",
 	},
-	"doctor/fix/database_integrity.go:doltIntegrityRecovery": {
+	"doctor/fix/database_integrity.go:restoreIntegrityBackup": {
 		calls:  []string{"os.RemoveAll"},
-		reason: "removes only what its own bd init --force created after renaming the original database aside, then restores the original",
+		reason: "removes only what the failed reinitialization left at the confined database destination, after revalidating it, then restores the renamed original",
 	},
 	"doctor/fix/fs.go:var removeFile": {
 		calls:  []string{"os.Remove"},
