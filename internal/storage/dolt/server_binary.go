@@ -32,7 +32,8 @@ func reconcileServerBinary(cfg *Config, beadsDir, serverDir string) (int, error)
 		return cfg.ServerPort, nil
 	}
 	check := checkServerBinary(serverDir, cfg.ServerPort)
-	if check.Verdict != doltserver.BinaryStale && check.Verdict != doltserver.BinaryCannotReplace {
+	refresh := check.Verdict == doltserver.BinaryCurrent && check.Refresh
+	if check.Verdict != doltserver.BinaryStale && check.Verdict != doltserver.BinaryCannotReplace && !refresh {
 		return cfg.ServerPort, nil
 	}
 	if !serverBinaryMayRestart(cfg, beadsDir) {
@@ -42,10 +43,19 @@ func reconcileServerBinary(cfg *Config, beadsDir, serverDir string) (int, error)
 	if check.Verdict == doltserver.BinaryCannotReplace {
 		return 0, cannotReplaceServerError(addr, check, check.Reason)
 	}
+	// For a reinstall of the same release (refresh) the server stays, and
+	// replaceStaleServer only records the executable it was compared with,
+	// unless it finds the server stale by the time it holds the lock.
 	res, err := replaceStaleServer(serverDir, cfg.ServerPort)
 	if err != nil {
-		if res.Check.Verdict == doltserver.BinaryCannotReplace {
+		switch {
+		case res.Check.Verdict == doltserver.BinaryCannotReplace:
 			return 0, cannotReplaceServerError(addr, res.Check, err)
+		case res.Check.Verdict != doltserver.BinaryStale && refresh:
+			return cfg.ServerPort, nil
+		}
+		if res.Check.Verdict == doltserver.BinaryStale {
+			check = res.Check
 		}
 		return 0, fmt.Errorf("Dolt server at %s runs dolt %s, but the dolt bd launches (%s) is now %s; "+
 			"replacing the server failed, so no query was sent: %w\n\n"+
