@@ -512,3 +512,32 @@ func TestLaunchBinaryFailedReplacement(t *testing.T) {
 		}
 	})
 }
+
+// TestLaunchBinaryUntrackedServerNotCompared: a server this workspace does
+// not track (no pid file of bd's for the port) is not compared: neither the
+// dolt on PATH nor the server is asked anything.
+func TestLaunchBinaryUntrackedServerNotCompared(t *testing.T) {
+	beadsDir := t.TempDir()
+	port := foreignGreeter(t)
+	orig := lookPathDolt
+	lookPathDolt = func() (string, error) {
+		t.Error("the dolt on PATH was looked up for an untracked server")
+		return "", errors.New("not looked up")
+	}
+	t.Cleanup(func() { lookPathDolt = orig })
+	asked := func() (string, error) {
+		t.Error("an untracked server was asked its version")
+		return "", errors.New("not asked")
+	}
+
+	if got := CheckServerBinary(beadsDir, port, asked); got.Verdict != BinaryNotTracked {
+		t.Errorf("check = %+v, want not tracked", got)
+	}
+	res, err := ReplaceStaleServer(beadsDir, port, asked)
+	if err != nil || res.Replaced {
+		t.Errorf("ReplaceStaleServer = %+v, %v; want nothing done", res, err)
+	}
+	if _, err := os.Stat(binaryRecordPath(beadsDir)); !os.IsNotExist(err) {
+		t.Errorf("record written for an untracked server: %v", err)
+	}
+}
