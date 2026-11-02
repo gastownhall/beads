@@ -105,7 +105,7 @@ Examples:
 
 		if compactDoltDryRun {
 			if jsonOutput {
-				return outputJSON(map[string]interface{}{
+				result := map[string]interface{}{
 					"dry_run":        true,
 					"total_commits":  totalCommits,
 					"old_commits":    oldCommits,
@@ -114,7 +114,11 @@ Examples:
 					"cutoff_date":    cutoff.Format("2006-01-02"),
 					"initial_hash":   initialHash,
 					"boundary_hash":  boundaryHash,
-				})
+				}
+				if plan.refusal != nil {
+					result["refusal"] = plan.refusal.jsonFields()
+				}
+				return outputJSON(result)
 			}
 			fmt.Printf("DRY RUN — Compact preview\n\n")
 			fmt.Printf("  Total commits:  %d\n", totalCommits)
@@ -123,6 +127,9 @@ Examples:
 			fmt.Printf("  Cutoff date:    %s\n", cutoff.Format("2006-01-02"))
 			if oldCommits <= 1 {
 				fmt.Printf("\n  Nothing to compact (0-1 old commits).\n")
+			} else if plan.refusal != nil {
+				fmt.Printf("\n  Refused: %s\n", plan.refusal.message())
+				fmt.Printf("  Hint: %s\n", compactRefusalHint)
 			} else {
 				fmt.Printf("\n  Result: %d commits → %d commits\n", totalCommits, recentCommits+1)
 				fmt.Printf("  Run with --force to proceed.\n")
