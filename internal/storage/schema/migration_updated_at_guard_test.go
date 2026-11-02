@@ -394,3 +394,57 @@ func TestUpdatedAtGuardRestoresTimestampsAroundRegisteredStep(t *testing.T) {
 		})
 	})
 }
+
+// TestUpdatedAtGuardRowMovesPreferDestinationHistory is AC-3's statement-level
+// half for main 0035: a moved row takes its issues (source) value, a row the
+// wisps destination already held keeps its own value over a same-ID source
+// value, and rows the step created (no snapshot) or deleted (absent from the
+// reread) are left alone.
+func TestUpdatedAtGuardRowMovesPreferDestinationHistory(t *testing.T) {
+	failOnSwallowedAdvisory(t)
+	quietStderr(t)
+	zeroIssueRowCounter(t)
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	// Snapshot, sorted by table: issues (source) then wisps (destination).
+	mock.ExpectQuery(guardColumnQuery).WithArgs("issues", "updated_at").
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
+	mock.ExpectQuery(guardIssuesSelect).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "updated_at"}).
+			AddRow("mover", "2025-01-06 10:00:00").
+			AddRow("native", "2025-01-01 00:00:00"))
+	mock.ExpectQuery(guardColumnQuery).WithArgs("wisps", "updated_at").
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
+	mock.ExpectQuery(`SELECT id, updated_at FROM wisps ORDER BY id`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "updated_at"}).
+			AddRow("doomed", "2025-01-02 00:00:00").
+			AddRow("native", "2025-02-10 08:00:00"))
+	// 0035's body (no pre-repair at 35).
+	mock.ExpectExec(`SET @shared_cols`).WillReturnResult(sqlmock.NewResult(0, 0))
+	// Reread: fresh is new, mover arrived stamped, native (collision) got
+	// stamped, doomed is gone. Only mover and native are restored.
+	mock.ExpectQuery(guardColumnQuery).WithArgs("wisps", "updated_at").
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
+	mock.ExpectQuery(`SELECT id, updated_at FROM wisps ORDER BY id`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "updated_at"}).
+			AddRow("fresh", guardNewStamp).
+			AddRow("mover", guardNewStamp).
+			AddRow("native", guardNewStamp))
+	mock.ExpectExec(`UPDATE wisps SET updated_at = CASE id WHEN \? THEN \? WHEN \? THEN \? ELSE updated_at END WHERE \(id = \? AND updated_at = \?\) OR \(id = \? AND updated_at = \?\)$`).
+		WithArgs("mover", "2025-01-06 10:00:00", "native", "2025-02-10 08:00:00",
+			"mover", guardNewStamp, "native", guardNewStamp).
+		WillReturnResult(sqlmock.NewResult(0, 2))
+	mock.ExpectExec(`INSERT IGNORE INTO schema_migrations`).WithArgs(35, sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	if _, err := runMigrations(context.Background(), db, mainSource, 34, 35, false); err != nil {
+		t.Fatalf("runMigrations: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations (lookup precedence or skip rules wrong): %v", err)
+	}
+}

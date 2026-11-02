@@ -130,6 +130,28 @@ func readIsBlocked(t *testing.T, ctx context.Context, conn *sql.Conn, table, id 
 	return got
 }
 
+// readEphemeral reads one row's ephemeral flag from table.
+func readEphemeral(t *testing.T, ctx context.Context, conn *sql.Conn, table, id string) bool {
+	t.Helper()
+	var got bool
+	if err := conn.QueryRowContext(ctx, "SELECT ephemeral FROM "+table+" WHERE id = ?", id).Scan(&got); err != nil {
+		t.Fatalf("read %s ephemeral of %s: %v", table, id, err)
+	}
+	return got
+}
+
+// requireGone fails if table still holds a row with id.
+func requireGone(t *testing.T, ctx context.Context, conn *sql.Conn, table, id string) {
+	t.Helper()
+	var n int
+	if err := conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+table+" WHERE id = ?", id).Scan(&n); err != nil {
+		t.Fatalf("count %s rows for %s: %v", table, id, err)
+	}
+	if n != 0 {
+		t.Errorf("%s still holds %s after the move (%d row(s))", table, id, n)
+	}
+}
+
 func requireStamp(t *testing.T, ctx context.Context, conn *sql.Conn, table, id string, want time.Time) {
 	t.Helper()
 	if got := readUpdatedAt(t, ctx, conn, table, id); !got.Equal(want) {
@@ -248,6 +270,13 @@ func TestEmbeddedMigrateRowMovesKeepUpdatedAt(t *testing.T) {
 		migrateUpStoppingAfter(t, ctx, conn, 35)
 		requireStamp(t, ctx, conn, "wisps", moved.id, moved.stamp)
 		requireStamp(t, ctx, conn, "wisps", collidingDest.id, collidingDest.stamp)
+		// The migration's own work still lands: the moved wisp is ephemeral
+		// and both sources left issues.
+		if !readEphemeral(t, ctx, conn, "wisps", moved.id) {
+			t.Errorf("wisps %s: ephemeral = false, want true after 0035", moved.id)
+		}
+		requireGone(t, ctx, conn, "issues", moved.id)
+		requireGone(t, ctx, conn, "issues", collidingSource.id)
 	})
 
 	t.Run("0053 wisps to issues", func(t *testing.T) {
@@ -267,6 +296,15 @@ func TestEmbeddedMigrateRowMovesKeepUpdatedAt(t *testing.T) {
 		requireStamp(t, ctx, conn, "issues", moved.id, moved.stamp)
 		requireStamp(t, ctx, conn, "issues", collidingDest.id, collidingDest.stamp)
 		requireStamp(t, ctx, conn, "issues AS OF 'HEAD'", moved.id, moved.stamp)
+		// The migration's own work still lands: both rows in issues are no
+		// longer ephemeral and the rig wisps are gone.
+		for _, id := range []string{moved.id, collidingDest.id} {
+			if readEphemeral(t, ctx, conn, "issues", id) {
+				t.Errorf("issues %s: ephemeral = true, want false after 0053", id)
+			}
+		}
+		requireGone(t, ctx, conn, "wisps", moved.id)
+		requireGone(t, ctx, conn, "wisps", collidingSource.id)
 	})
 }
 
