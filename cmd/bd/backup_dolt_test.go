@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/storage"
 )
 
@@ -227,6 +228,34 @@ func TestValidateBackupPruneDestination(t *testing.T) {
 				t.Fatalf("validation error leaked URL credentials: %v", err)
 			}
 		})
+	}
+}
+
+func TestBackupSyncPruneRejectsNonFileDestinationBeforeSync(t *testing.T) {
+	prepareBackupStatusTest(t)
+	if err := saveDoltBackupConfig("https://example.com/beads"); err != nil {
+		t.Fatalf("save backup config: %v", err)
+	}
+
+	root := &cobra.Command{Use: "bd"}
+	backup := &cobra.Command{Use: "backup"}
+	sync := &cobra.Command{
+		Use:           "sync",
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		RunE:          backupSyncCmd.RunE,
+	}
+	sync.Flags().Duration(backupSyncPruneGracePeriodFlag, 0, "")
+	backup.AddCommand(sync)
+	root.AddCommand(backup)
+	root.SetArgs([]string{"backup", "sync", "--prune-with-grace-period", "10m"})
+
+	_, stderr, err := executeBackupStatusCommand(t, root)
+	if err == nil {
+		t.Fatal("bd backup sync --prune-with-grace-period 10m succeeded for a non-file destination")
+	}
+	if !strings.Contains(stderr, "--prune-with-grace-period supports only file:// backup destinations (configured scheme: https)") {
+		t.Fatalf("backup sync error = %q, want non-file destination rejection before sync", stderr)
 	}
 }
 
