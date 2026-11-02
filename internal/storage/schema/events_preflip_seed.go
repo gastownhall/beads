@@ -137,7 +137,7 @@ func seedEventsFromPreflipHistory(ctx context.Context, db DBConn) error {
 		n, err := restorePreflipEventsFrom(ctx, db, ref, &orphans)
 		restored += n
 		if err != nil {
-			if !unreadablePreflipSource(err) {
+			if !unreadablePreflipSource(ctx, err) {
 				return fmt.Errorf("restoring pre-upgrade events from %s: %w", ref, err)
 			}
 			unreadable = append(unreadable, fmt.Sprintf("%s (%v)", ref, err))
@@ -145,7 +145,9 @@ func seedEventsFromPreflipHistory(ctx context.Context, db DBConn) error {
 	}
 	if len(unreadable) > 0 {
 		fmt.Fprintf(preflipEventsNoticeOut,
-			"Warning: could not restore pre-upgrade audit events from %s; see https://beads.gascity.com/getting-started/upgrading\n",
+			"Warning: could not restore pre-upgrade audit events from %s; this clone's audit history is incomplete. "+
+				"Recover the rows from a clone or backup that can read that history, or repair the storage; "+
+				"see https://beads.gascity.com/getting-started/upgrading#pre-upgrade-audit-events-on-adopting-clones\n",
 			strings.Join(unreadable, ", "))
 	}
 	if restored > 0 {
@@ -210,8 +212,13 @@ var errPreflipSourceIncompatible = errors.New("its events table lacks columns th
 
 // unreadablePreflipSource reports whether err means only that one source
 // cannot be restored from: drift or an incompatible shape in its history.
-// Cancellation, transient and live-statement failures are not.
-func unreadablePreflipSource(err error) bool {
+// Cancellation, transient and live-statement failures are not. A canceled
+// ctx wins over the error's shape: a read cut short can surface as anything,
+// drift included, and must leave 0031 pending rather than skip the source.
+func unreadablePreflipSource(ctx context.Context, err error) bool {
+	if ctx.Err() != nil {
+		return false
+	}
 	var src *preflipSourceError
 	if !errors.As(err, &src) {
 		return false

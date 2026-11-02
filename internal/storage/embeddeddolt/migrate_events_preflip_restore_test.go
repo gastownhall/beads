@@ -1105,3 +1105,209 @@ INSERT INTO events (issue_id, event_type, actor, comment, created_at, id) VALUES
 		}
 	})
 }
+
+// TestEmbeddedIgnoredMigration0031SkipsARetrackedSource pins the flap shape:
+// events was tracked again after the flip, without its comment column, and
+// dropped again under 0062's frozen message, so history holds two drop
+// commits. The retracked source is skipped with the warning, the real one is
+// restored, and the next pass opens cleanly.
+func TestEmbeddedIgnoredMigration0031SkipsARetrackedSource(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+
+	dataDir := seedMainSchemaAt(t, ctx, 61)
+	conn, closeConn := openPinnedConn(t, ctx, dataDir)
+	defer closeConn()
+	execFrozenGuard(t, ctx, conn, `
+INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) VALUES
+  ('s-1', 'survivor', '', '', '', '', 'open', 2, 'task');
+INSERT INTO events (issue_id, event_type, actor, created_at, id) VALUES
+  ('s-1', 'created', 'tester', '2026-07-30 00:00:00', 'evt-s-1');
+`)
+	mustDrain(t, ctx, conn, "CALL DOLT_COMMIT('-Am', 'test: seed pre-flip events')")
+	if _, err := schema.MigrateUp(ctx, conn); err != nil {
+		t.Fatalf("MigrateUp (migrator): %v", err)
+	}
+
+	execFrozenGuard(t, ctx, conn, `
+DROP TABLE IF EXISTS events;
+CREATE TABLE events (
+    issue_id VARCHAR(255) NOT NULL,
+    event_type VARCHAR(32) NOT NULL,
+    actor VARCHAR(255) NOT NULL,
+    old_value LONGTEXT,
+    new_value LONGTEXT,
+    created_at DATETIME NOT NULL,
+    id CHAR(36) NOT NULL,
+    PRIMARY KEY (id)
+);
+INSERT INTO events (issue_id, event_type, actor, created_at, id) VALUES
+  ('s-1', 'flapped', 'tester', '2026-07-31 00:00:00', 'evt-flap-1');
+`)
+	mustDrain(t, ctx, conn, "CALL DOLT_ADD('-f', 'events')")
+	mustDrain(t, ctx, conn, "CALL DOLT_COMMIT('-m', 'test: retrack events without comment')")
+	retracked := scalarString(t, ctx, conn, "SELECT HASHOF('HEAD')")
+	execFrozenGuard(t, ctx, conn, "DROP TABLE events")
+	mustDrain(t, ctx, conn, "CALL DOLT_ADD('-f', 'events')")
+	mustExecOn(t, ctx, conn, "CALL DOLT_COMMIT('-m', ?)", eventsFlipDropMessage)
+	if got := scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM dolt_log WHERE message = ?", eventsFlipDropMessage); got != 2 {
+		t.Fatalf("fixture holds %d drop commits, want 2", got)
+	}
+	mustExecOn(t, ctx, conn, "DELETE FROM ignored_schema_migrations WHERE version = 31")
+
+	var notice bytes.Buffer
+	defer schema.SetPreflipEventsNoticeOutForTest(&notice)()
+	if _, err := schema.MigrateUp(ctx, conn); err != nil {
+		t.Fatalf("MigrateUp with a retracked source: %v", err)
+	}
+	got := liveEvents(t, ctx, conn)
+	requireContent(t, got, map[string]int{preflipNullDigest("s-1", "created", "tester", "2026-07-30 00:00:00"): 1})
+	requireDerivedIDs(t, got)
+	if !ignoredCursorHas(t, ctx, conn, 31) {
+		t.Fatal("ignored cursor does not record 0031 after skipping the retracked source")
+	}
+	for _, part := range []string{"Warning", retracked, "incomplete", "https://beads.gascity.com/getting-started/upgrading"} {
+		if !strings.Contains(notice.String(), part) {
+			t.Fatalf("restore notice = %q, want a warning carrying %q", notice.String(), part)
+		}
+	}
+	if _, err := schema.MigrateUp(ctx, conn); err != nil {
+		t.Fatalf("MigrateUp (reopen): %v", err)
+	}
+	assertEventsAbsentFromStatus(t, ctx, conn)
+}
+
+// TestEmbeddedIgnoredMigration0031NeverSkipsACanceledRead pins that a
+// cancellation wins over the error's shape: a history read cut short by a
+// canceled open that surfaces as drift fails the pass with 0031 pending
+// instead of skipping the source for good.
+func TestEmbeddedIgnoredMigration0031NeverSkipsACanceledRead(t *testing.T) {
+	requireEmbedded(t)
+	l := newTwoSourceLineage(t, t.Context(), false)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	var notice bytes.Buffer
+	defer schema.SetPreflipEventsNoticeOutForTest(&notice)()
+	restoreHook := schema.SetPreflipEventsSourceFaultHookForTest(func(string, string) error {
+		cancel()
+		return errors.New("panic: invalid hash length: 19")
+	})
+	_, err := schema.MigrateUp(ctx, l.conn)
+	restoreHook()
+	if err == nil {
+		t.Fatal("MigrateUp canceled mid-read succeeded; the canceled source was skipped")
+	}
+	if strings.Contains(notice.String(), "Warning") {
+		t.Fatalf("restore notice = %q; a canceled read must not be reported as an unreadable source", notice.String())
+	}
+	if ignoredCursorHas(t, t.Context(), l.conn, 31) {
+		t.Fatal("ignored cursor recorded 0031 after a canceled pass")
+	}
+}
+
+// TestEmbeddedIgnoredMigration0031SkipsASourceFailingMidway pins a source
+// whose history fails partway: the issues it restored before the failure
+// stay, the issue it was reading gets nothing from it, the other source still
+// restores, the warning names the failing source, and later writable and
+// read-only opens neither read history again nor print anything.
+func TestEmbeddedIgnoredMigration0031SkipsASourceFailingMidway(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+
+	dataDir := seedMainSchemaAt(t, ctx, 61)
+	beadsDir := filepath.Dir(dataDir)
+	conn, closeConn := openPinnedConn(t, ctx, dataDir)
+	closed := false
+	defer func() {
+		if !closed {
+			closeConn()
+		}
+	}()
+
+	// First source: pre-3's row. Second (0062's own): pre-1's, two of pre-2's,
+	// and pre-3's.
+	execFrozenGuard(t, ctx, conn, `
+INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) VALUES
+  ('pre-1', 'first', '', '', '', '', 'open', 2, 'task'),
+  ('pre-2', 'second', '', '', '', '', 'open', 2, 'task'),
+  ('pre-3', 'third', '', '', '', '', 'open', 2, 'task');
+INSERT INTO events (issue_id, event_type, actor, created_at, id) VALUES
+  ('pre-3', 'created', 'carol', '2026-07-03 09:00:00', 'legacy-3');
+`)
+	mustDrain(t, ctx, conn, "CALL DOLT_COMMIT('-Am', 'test: first pre-flip source')")
+	mustExecOn(t, ctx, conn, "CALL DOLT_COMMIT('--allow-empty', '-m', ?)", eventsFlipDropMessage)
+	handDrop := scalarString(t, ctx, conn, "SELECT HASHOF('HEAD')")
+	execFrozenGuard(t, ctx, conn, `
+INSERT INTO events (issue_id, event_type, actor, created_at, id) VALUES
+  ('pre-1', 'created', 'alice', '2026-07-01 10:00:00', 'legacy-1'),
+  ('pre-2', 'created', 'bob', '2026-07-02 10:00:00', 'legacy-2a'),
+  ('pre-2', 'updated', 'bob', '2026-07-02 11:00:00', 'legacy-2b');
+`)
+	mustDrain(t, ctx, conn, "CALL DOLT_COMMIT('-Am', 'test: second pre-flip source')")
+	adoptPreflipLineage(t, ctx, conn)
+	var second string
+	if err := conn.QueryRowContext(ctx, `
+SELECT a.parent_hash FROM dolt_commit_ancestors a JOIN dolt_log l ON l.commit_hash = a.commit_hash
+WHERE l.message = ? AND l.commit_hash <> ? AND a.parent_index = 0`,
+		eventsFlipDropMessage, handDrop).Scan(&second); err != nil {
+		t.Fatalf("find 0062's drop commit parent: %v", err)
+	}
+
+	// One row per page: pre-2's second page from the second source drifts.
+	defer schema.SetPreflipEventsBatchSizesForTest(1, 1)()
+	pages, reads := 0, 0
+	defer schema.SetPreflipEventsSourceFaultHookForTest(func(ref, issue string) error {
+		reads++
+		if ref == second && issue == "pre-2" {
+			if pages++; pages == 2 {
+				return errors.New("panic: invalid hash length: 19")
+			}
+		}
+		return nil
+	})()
+	var notice bytes.Buffer
+	defer schema.SetPreflipEventsNoticeOutForTest(&notice)()
+	if _, err := schema.MigrateUp(ctx, conn); err != nil {
+		t.Fatalf("MigrateUp with a source failing midway: %v", err)
+	}
+	if pages != 2 {
+		t.Fatalf("the second source's pre-2 was read in %d pages, want the failing 2nd", pages)
+	}
+	got := liveEvents(t, ctx, conn)
+	requireContent(t, got, map[string]int{
+		preflipNullDigest("pre-1", "created", "alice", "2026-07-01 10:00:00"): 1,
+		preflipNullDigest("pre-3", "created", "carol", "2026-07-03 09:00:00"): 1,
+	})
+	requireDerivedIDs(t, got)
+	if !ignoredCursorHas(t, ctx, conn, 31) {
+		t.Fatal("ignored cursor does not record 0031 after skipping the failing source")
+	}
+	warning := notice.String()
+	for _, part := range []string{"Warning", second, "incomplete", "Restored 2 pre-upgrade audit event(s)"} {
+		if !strings.Contains(warning, part) {
+			t.Fatalf("restore notice = %q, want it to carry %q", warning, part)
+		}
+	}
+	if strings.Contains(warning, handDrop) {
+		t.Fatalf("restore notice = %q names the readable source's drop commit", warning)
+	}
+
+	closeConn()
+	closed = true
+	notice.Reset()
+	reads = 0
+	store, err := embeddeddolt.Open(ctx, beadsDir, preflipDatabase, "main")
+	if err != nil {
+		t.Fatalf("writable open after the skip: %v", err)
+	}
+	closeEmbeddedDoltStore(t, store)
+	ro, err := embeddeddolt.OpenReadOnly(ctx, beadsDir, preflipDatabase, "main")
+	if err != nil {
+		t.Fatalf("read-only open after the skip: %v", err)
+	}
+	closeEmbeddedDoltStore(t, ro)
+	if reads != 0 || notice.Len() != 0 {
+		t.Fatalf("later opens read history %d time(s) and printed %q; 0031 is done", reads, notice.String())
+	}
+}

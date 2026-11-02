@@ -1,7 +1,10 @@
 package schema
 
 import (
+	"context"
 	"database/sql"
+	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -149,4 +152,33 @@ func TestPlanPreflipEventsRestoresMissingMultiplicityOnly(t *testing.T) {
 			t.Fatalf("allocations differ across calls: %v vs %v", first, second)
 		}
 	})
+}
+
+// TestUnreadablePreflipSourceClassifiesHistoricalErrors pins which failures
+// skip a source: only drift or an incompatible shape read from its history,
+// and never once the pass is canceled, whatever the error looks like.
+func TestUnreadablePreflipSourceClassifiesHistoricalErrors(t *testing.T) {
+	drift := errors.New("Error 1105 (HY000): panic recovered: invalid hash length: 19")
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	for _, tc := range []struct {
+		name string
+		ctx  context.Context
+		err  error
+		want bool
+	}{
+		{"historical drift", context.Background(), &preflipSourceError{drift}, true},
+		{"incompatible shape", context.Background(), &preflipSourceError{errPreflipSourceIncompatible}, true},
+		{"wrapped historical drift", context.Background(), fmt.Errorf("reading: %w", &preflipSourceError{drift}), true},
+		{"unrecognized historical error", context.Background(), &preflipSourceError{errors.New("Error 1146: table not found")}, false},
+		{"transient historical error", context.Background(), &preflipSourceError{errors.New("driver: bad connection")}, false},
+		{"live drift", context.Background(), drift, false},
+		{"canceled historical drift", canceled, &preflipSourceError{drift}, false},
+		{"canceled historical cancellation", canceled, &preflipSourceError{context.Canceled}, false},
+		{"nil", context.Background(), nil, false},
+	} {
+		if got := unreadablePreflipSource(tc.ctx, tc.err); got != tc.want {
+			t.Errorf("%s: unreadablePreflipSource = %v, want %v", tc.name, got, tc.want)
+		}
+	}
 }
