@@ -1063,7 +1063,7 @@ func migrateUpAfterReconcile(ctx context.Context, db DBConn, seedChanged bool) (
 		return 0, fmt.Errorf("checking dirty tables against pending migrations: %w", err)
 	}
 	if len(touchedDirtyTables) > 0 {
-		return 0, &DirtyTablesError{Tables: touchedDirtyTables}
+		return 0, &DirtyTablesError{Tables: touchedDirtyTables, Unversioned: mainVersionBefore == 0}
 	}
 	dirtyBeforeSignatures, err := dirtyTableSignatures(ctx, db, dirtyBefore)
 	if err != nil {
