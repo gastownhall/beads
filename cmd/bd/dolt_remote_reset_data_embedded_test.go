@@ -113,6 +113,105 @@ func TestDoltRemoteResetData_GitBacked(t *testing.T) {
 	}
 }
 
+// TestEmbeddedDoltRemoteResetData_FileRemoteInGitRepoRefused: Dolt makes a
+// file URL a git remote only when it ends in .git (stored as git+file://);
+// any other file:// URL is a native Dolt file store, which Dolt writes among
+// the files of a git repository at that path. reset-data took a checkout
+// holding such a store for a file store and cleared it, .git and every
+// working file included, and over a bare repository it reported a reset that
+// left every old table file in place. It must refuse both, with the
+// replace-the-remote hint, and leave each directory as it was. These are the
+// refusal legs of #7902's TestE2E_ResetDataThroughOwnServerKeepsTheRemotesData,
+// run in embedded mode: the classification runs before any push, in either
+// mode. The TestEmbedded prefix puts it in CI's embedded cmd shards
+// (.github/scripts/embedded-test-shard.sh).
+func TestEmbeddedDoltRemoteResetData_FileRemoteInGitRepoRefused(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded integration tests")
+	}
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "rd")
+	bdCreate(t, bd, dir, "seed issue", "--type", "task")
+
+	mustDolt := func(args ...string) {
+		t.Helper()
+		if stdout, stderr, err := bdDoltSeparate(t, bd, dir, args...); err != nil {
+			t.Fatalf("bd dolt %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout, stderr)
+		}
+	}
+	listing := func(path string) string {
+		t.Helper()
+		entries, err := os.ReadDir(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		return strings.Join(names, " ")
+	}
+	refused := func(name string) {
+		t.Helper()
+		stdout, stderr, err := bdDoltSeparate(t, bd, dir, "remote", "reset-data", name, "--yes")
+		if err == nil {
+			t.Fatalf("reset-data of file:// remote %q in a git repository exited 0\nstdout:\n%s\nstderr:\n%s", name, stdout, stderr)
+		}
+		for _, want := range []string{`cannot clear stored data on remote "` + name + `"`, "git repository", "fresh URL"} {
+			if !strings.Contains(stderr, want) {
+				t.Errorf("reset-data refusal for %q lacks %q:\n%s", name, want, stderr)
+			}
+		}
+	}
+
+	// A bare repository: Dolt writes its file store among the repository's
+	// files and no Dolt data ref.
+	plainDir := filepath.Join(t.TempDir(), "plain")
+	resetDataRunGit(t, filepath.Dir(plainDir), "init", "--bare", "-b", "main", plainDir)
+	mustDolt("remote", "add", "plain", "file://"+plainDir)
+	mustDolt("push", "--remote", "plain")
+	if _, err := os.Stat(filepath.Join(plainDir, "manifest")); err != nil {
+		t.Fatalf("a push to file://%s wrote no Dolt file store there: %v", plainDir, err)
+	}
+	if lsRemoteRef(t, plainDir, "refs/dolt/data") != "" {
+		t.Fatalf("a push to file://%s wrote refs/dolt/data: Dolt took it for a git remote", plainDir)
+	}
+	plainBefore := listing(plainDir)
+	refused("plain")
+	if got := listing(plainDir); got != plainBefore || !isBareGitRepoDir(plainDir) {
+		t.Errorf("reset-data changed the bare repository it refused:\nbefore: %s\nafter:  %s", plainBefore, got)
+	}
+
+	// A checkout: the file store lands beside .git and the working files.
+	checkoutDir := filepath.Join(t.TempDir(), "checkout")
+	resetDataRunGit(t, filepath.Dir(checkoutDir), "init", "-b", "main", checkoutDir)
+	if err := os.WriteFile(filepath.Join(checkoutDir, "README.md"), []byte("code\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	resetDataRunGit(t, checkoutDir, "add", "README.md")
+	resetDataRunGit(t, checkoutDir, "-c", "user.name=bd-test", "-c", "user.email=bd-test@example.com",
+		"commit", "-m", "code")
+	mustDolt("remote", "add", "checkout", "file://"+checkoutDir)
+	mustDolt("push", "--remote", "checkout")
+	if _, err := os.Stat(filepath.Join(checkoutDir, "manifest")); err != nil {
+		t.Fatalf("a push to file://%s wrote no Dolt file store there: %v", checkoutDir, err)
+	}
+	checkoutBefore := listing(checkoutDir)
+	refused("checkout")
+	if got := listing(checkoutDir); got != checkoutBefore {
+		t.Errorf("reset-data changed the checkout it refused:\nbefore: %s\nafter:  %s", checkoutBefore, got)
+	}
+	for _, f := range []string{".git", "README.md", "manifest"} {
+		if _, err := os.Stat(filepath.Join(checkoutDir, f)); err != nil {
+			t.Errorf("reset-data changed the checkout it refused: %v", err)
+		}
+	}
+	if log := resetDataRunGit(t, checkoutDir, "log", "--format=%s"); !strings.Contains(log, "code") {
+		t.Errorf("the checkout's history is gone after the refused reset-data:\n%s", log)
+	}
+}
+
 func TestDoltRemoteResetData_UnknownRemote(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded integration tests")
