@@ -384,6 +384,56 @@ schema against the cached remote ref — a useful post-upgrade verification.
 It runs in both server and embedded modes.
 </Note>
 
+### Pre-flip events history on pulling clones
+
+The 1.3.x events-table flip moved `bd history --events` data (the events
+audit table) off Dolt's versioned plane. The flip's committed table drop
+replicates to every pulling clone, but the re-created table does not — it is
+clone-local by design. On clones that pulled the flip, the table therefore
+came back **empty** ([#7039](https://github.com/gastownhall/beads/issues/7039)):
+the pre-flip audit rows stayed reachable inside the clone's own Dolt history
+but invisible to every `bd` command.
+
+The upgrade restores them automatically. On the first open with the upgraded
+binary, ignored migration 0031 re-inserts, from the clone's own history, every
+pre-flip events row the working-set table is missing — under deterministic
+content-derived ids, without touching rows that already exist, without
+committing anything, and without needing extra consent beyond the ordinary
+upgrade. It prints one line when it restores something:
+
+```
+bd: restored 42 pre-flip events row(s) from this clone's dolt history
+```
+
+Two shapes restore less than everything, deliberately:
+
+- **Events of issues deleted after the flip** are skipped (re-inserting them
+  would fail the foreign key); the summary line counts them.
+- **Unreadable history** — a re-tracked table shape the restore cannot
+  reconcile, or schema encoding drift in an old commit — is skipped with a
+  warning; those rows stay reachable in Dolt history either way.
+
+An interrupted restore (process killed mid-pass) simply retries on the next
+open: rows already written are recognized, never duplicated, and the pass
+converges. A database whose history holds nothing to restore — a fresh
+install, or a re-clone after a history squash — completes silently.
+
+If a clone must recover the rows **without** upgrading first, the manual
+equivalent (run while no `bd` command is, with `dolt sql` in the database
+directory) is to read the table as of the commit just below the flip's drop
+commit and copy the missing rows back:
+
+```bash
+dolt log                     # find the commit message "schema: drop versioned events table for ignored-plane flip (bd-red8u)"
+dolt sql -q "SELECT parent_hash FROM dolt_commit_ancestors WHERE commit_hash = '<drop-commit>' AND parent_index = 0"
+dolt sql -q "SELECT COUNT(*) FROM events AS OF '<parent>'"   # the pre-flip rows, still readable
+```
+
+Rows can then be re-inserted from that parent (`INSERT INTO events SELECT …
+AS OF '<parent>'`), but the automatic restore is the safer path: it
+de-duplicates against rows the clone still holds and skips the rows of
+deleted issues, which a manual copy of the whole table does not.
+
 ### Clone behind the remote
 
 This is the one pending-migration stop whose remedy is a `bd dolt pull`, and

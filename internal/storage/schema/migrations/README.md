@@ -84,6 +84,20 @@ outcomes by reading `INFORMATION_SCHEMA`, never an exit code, and test guarded
 migrations through the embedded (cgo) engine, where `PREPARE`/`EXECUTE` behaves
 normally. See `internal/storage/embeddeddolt/migrate_frozen_guard_convergence_test.go`.
 
+**A committed table drop replicates; the ignored-plane re-create does not.**
+Flipping a synced table onto the ignore plane (0062's events flip) commits the
+drop out of HEAD, and that commit travels to every pulling clone — but the
+re-created table is clone-local, so pulling clones arrive with the table
+missing and the ignored series re-creates it EMPTY (gh 7039). Any flip of a
+table with rows therefore owes those clones a restore from their own reachable
+history, which cannot live in the frozen SQL: the drop commit is only findable
+by its frozen message, and the pre-flip rows are only readable `AS OF` its
+first parent (`dolt_commit_ancestors`, `parent_hash` — the table also has a
+`commit_hash` column, which names the child). ignored/0031 is the shape: an
+inert marker whose Go repair does the reads and writes, with the marker's
+header comment spelling out the write in SQL terms so the raw-text dirty-table
+guard still sees it (`migrationSQLTouchesTable` scans comments deliberately).
+
 ## Testing
 
 `sqlmock` statement-echo tests cannot exercise any of the above; they assert the

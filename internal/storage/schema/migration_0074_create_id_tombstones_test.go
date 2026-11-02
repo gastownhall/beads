@@ -32,9 +32,9 @@ func TestLatestVersionIncludesMigration0074(t *testing.T) {
 	if got := LatestVersion(); got != want {
 		t.Fatalf("LatestVersion() = %d, want %d (id tombstone tables)", got, want)
 	}
-	const wantIgnored = 30
+	const wantIgnored = 31
 	if got := LatestIgnoredVersion(); got != wantIgnored {
-		t.Fatalf("LatestIgnoredVersion() = %d, want %d (wisp_id_tombstones on fresh clones)", got, wantIgnored)
+		t.Fatalf("LatestIgnoredVersion() = %d, want %d (wisp_id_tombstones here; ignored/0031's pre-flip events restore superseded 30 — see events_preflip_seed_test.go)", got, wantIgnored)
 	}
 }
 

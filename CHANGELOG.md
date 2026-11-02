@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Automatic restore of pre-flip events history on pulling clones.**
+  Clones that pulled the 1.3.x events-table flip re-created the table empty:
+  the flip's committed drop replicates, the ignored-plane re-create does not,
+  so the pre-flip audit rows behind `bd history --events` stayed reachable in
+  each clone's own Dolt history but invisible to every command
+  ([#7039](https://github.com/gastownhall/beads/issues/7039)). Ignored
+  migration 0031 now restores, on the first open with the upgraded binary,
+  every pre-flip row the working-set table is missing — under content-derived
+  ids, without touching existing rows, committing anything, or needing extra
+  consent. Rows of issues deleted after the flip are skipped (the restore
+  counts them), unreadable history is skipped with a warning, and an
+  interrupted restore converges on the next open. See
+  [upgrading](/upgrading#pre-flip-events-history-on-pulling-clones).
+
 - **`arrival_seq`, a commit-ordered create sequence on wisp-plane rows.**
   While a workspace journals, every `ephemeral` or `no_history` bead it creates
   is stamped with the `seq` of its own `create` journal record, in the same

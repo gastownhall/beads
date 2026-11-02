@@ -1,0 +1,31 @@
+-- Ignored migration 0031: restore this clone's pre-flip events history from
+-- its own Dolt commit history (gh 7039).
+--
+-- Main migration 0062 flipped the events audit table to this ignored plane by
+-- dropping the versioned table and committing that drop (frozen message:
+-- "schema: drop versioned events table for ignored-plane flip (bd-red8u)").
+-- The drop commit replicates to every pulling clone; the ignored-plane
+-- recreate does not, so a clone that pulled the flip lost its working-set
+-- events table, and ignored/0019's replay re-creates it EMPTY. The pre-flip
+-- audit rows stayed reachable in the clone's own commit history — one first
+-- parent below the drop commit — while being invisible to every reader
+-- (`bd history --events` reads the live table with plain SELECTs).
+--
+-- This file's body is an inert marker; the restore itself is the Go repair
+-- registered for {"ignored_schema_migrations", 31}
+-- (internal/storage/schema/events_preflip_seed.go): it resolves the drop
+-- commit's first parent via dolt_commit_ancestors and INSERT INTO events
+-- every pre-flip row whose content multiplicity is missing from the live
+-- table, under content-derived ids (internal/storage/rowid) — never touching
+-- rows that already exist. The sentence above deliberately spells the
+-- repair's write out in SQL terms so the raw-text dirty-table guard
+-- (migrationSQLTouchesTable, which scans comments and PREPARE strings on
+-- purpose) refuses to entangle a restore with a pre-existing dirty tracked
+-- events table, exactly as if the write lived in this file.
+--
+-- The repair writes only ignored-plane rows: no journal append, no staging,
+-- no Dolt commit of its own. events stays dolt_ignored; HEAD, the events
+-- journal, and every tracked table are unchanged, so a clone that cannot
+-- finish the restore (unreadable history, interruption) simply retries on
+-- the next open until the cursor row below records completion.
+SELECT 1;

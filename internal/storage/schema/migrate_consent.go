@@ -38,7 +38,10 @@ import (
 // unchanged. Databases already at this binary's latest version never consult
 // the gate. The ignored (clone-local, dolt_ignored) migration sequence is
 // deliberately NOT gated on its own: it only materializes per-clone
-// bookkeeping tables and runs on every fresh clone — but when the MAIN
+// bookkeeping tables and runs on every fresh clone — including ignored/0031's
+// restore of each clone's own pre-flip events rows from its dolt history
+// (gh 7039), which writes only ignored-plane rows and so needs no consent
+// beyond the main sequence's — but when the MAIN
 // sequence is pending and unconsented, MigrateUp refuses before ANY write,
 // ignored sequence and dolt_ignore seeding included.
 //
