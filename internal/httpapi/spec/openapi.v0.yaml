@@ -8576,7 +8576,15 @@ components:
         status: { type: string }
         priority: { type: integer }
         issue_type: { type: string }
-        is_blocked: { type: boolean }
+        is_blocked:
+          type: boolean
+          description: >-
+            True when the issue is blocked: the stored, transitive flag
+            `/v0/beads/ready` reads, so blocking inherited through a parent or
+            from a blocker past `max_depth` counts. Absent when the issue is
+            not blocked, which includes a stale flag on an issue with no
+            ready-affecting dependency of its own. A server that predates this
+            member never sends it, so its absence there says nothing.
         assignee: { type: string }
         owner: { type: string }
         estimated_minutes: { type: integer }

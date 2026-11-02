@@ -3,7 +3,9 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -20,6 +22,29 @@ func depTreeRootLine(t *testing.T, bd, dir, id string, args ...string) string {
 	}
 	t.Fatalf("no root line for %s in dep tree output:\n%s", id, out)
 	return ""
+}
+
+// depTreeBlockedJSON runs bd dep tree --json on id and returns, per node id,
+// the node's is_blocked member, or nil when the member is absent.
+func depTreeBlockedJSON(t *testing.T, bd, dir, id string) map[string]any {
+	t.Helper()
+	cmd := exec.Command(bd, "dep", "tree", id, "--json")
+	cmd.Dir = dir
+	cmd.Env = bdEnv(dir)
+	stdout, stderr, err := runCommandBuffers(t, cmd)
+	if err != nil {
+		t.Fatalf("dep tree %s --json failed: %v\nstdout:\n%s\nstderr:\n%s", id, err, stdout.String(), stderr.String())
+	}
+	var nodes []map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &nodes); err != nil {
+		t.Fatalf("parse dep tree JSON: %v\n%s", err, stdout.String())
+	}
+	got := make(map[string]any, len(nodes))
+	for _, node := range nodes {
+		nodeID, _ := node["id"].(string)
+		got[nodeID] = node["is_blocked"]
+	}
+	return got
 }
 
 func wantRootMarker(t *testing.T, line, want string) {
@@ -74,4 +99,34 @@ func TestEmbeddedDepTreeRootBlockedThroughParent(t *testing.T) {
 	bdClose(t, bd, dir, blocker.ID)
 	wantRootMarker(t, depTreeRootLine(t, bd, dir, child.ID), "[READY]")
 	wantRootMarker(t, depTreeRootLine(t, bd, dir, epic.ID), "[READY]")
+}
+
+// TestEmbeddedDepTreeJSONCarriesInheritedBlock: on the same graph, bd dep tree
+// --json carries is_blocked: true on the child and the epic and omits the
+// member on the unblocked blocker (bd-42wxtt, #6630).
+func TestEmbeddedDepTreeJSONCarriesInheritedBlock(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "dp")
+
+	blocker := bdCreate(t, bd, dir, "Blocker", "--type", "task")
+	epic := bdCreate(t, bd, dir, "Blocked epic", "--type", "epic")
+	bdDep(t, bd, dir, "add", epic.ID, blocker.ID)
+	child := bdCreate(t, bd, dir, "Child", "--type", "task", "--parent", epic.ID)
+
+	got := depTreeBlockedJSON(t, bd, dir, child.ID)
+	for _, id := range []string{child.ID, epic.ID} {
+		if got[id] != true {
+			t.Fatalf("dep tree %s --json: %s is_blocked = %#v, want true (all: %v)", child.ID, id, got[id], got)
+		}
+	}
+	if b, present := got[blocker.ID]; !present {
+		t.Fatalf("dep tree %s --json lacks %s: %v", child.ID, blocker.ID, got)
+	} else if b != nil {
+		t.Fatalf("dep tree %s --json: unblocked %s is_blocked = %#v, want the member omitted", child.ID, blocker.ID, b)
+	}
 }
