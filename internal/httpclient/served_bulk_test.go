@@ -209,6 +209,10 @@ func TestServedDeleterCascadeDeletesTheClosure(t *testing.T) {
 	conformance.RunDeleterCascadeDeletesTheClosure(t, t.Context(), newServedDeleterFixture(t, "hx04"))
 }
 
+func TestServedDeleterCascadeStopsAtAssociationEdges(t *testing.T) {
+	conformance.RunDeleterCascadeStopsAtAssociationEdges(t, t.Context(), newServedDeleterFixture(t, "hx23"))
+}
+
 func TestServedDeleterCascadeFromAWispRootDeletesTheClosure(t *testing.T) {
 	conformance.RunDeleterCascadeFromAWispRootDeletesTheClosure(t, t.Context(), newServedDeleterFixture(t, "hx05"))
 }

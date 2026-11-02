@@ -39,6 +39,9 @@ func TestDeleterContract(t *testing.T) {
 	t.Run("CascadeDeletesTheClosure", func(t *testing.T) {
 		conformance.RunDeleterCascadeDeletesTheClosure(t, ctx, fixture)
 	})
+	t.Run("CascadeStopsAtAssociationEdges", func(t *testing.T) {
+		conformance.RunDeleterCascadeStopsAtAssociationEdges(t, ctx, fixture)
+	})
 	t.Run("ErasesAcrossBothPlanes", func(t *testing.T) {
 		conformance.RunDeleterErasesAcrossBothPlanes(t, ctx, fixture)
 	})

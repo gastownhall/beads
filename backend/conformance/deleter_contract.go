@@ -312,6 +312,66 @@ func RunDeleterCascadeDeletesTheClosure(t *testing.T, ctx context.Context, fixtu
 	deleterAssertIssueRows(t, ctx, fixture, 1, bystander)
 }
 
+// RunDeleterCascadeStopsAtAssociationEdges pins the ASSOCIATION-SURVIVAL half
+// of the containment rule (issue #6301), the half
+// RunDeleterCascadeDeletesTheClosure cannot: a cascade follows parent-child
+// edges ONLY, so a row joined
+// to the deletion set by an association edge — blocks, here; discovered-from
+// and related ride the same predicate — survives the cascade. The survivor
+// keeps its OWN parent-child tree, which must not save it from being named:
+// stopping at the association edge and reporting the survivor as orphaned are
+// the same promise, and a delete that took the association dependent would be
+// the one-row version of the bystander sweep this issue is about.
+//
+// The DRY RUN runs first and answers the same question the real delete does,
+// because a preview that disagreed with the run it previews is the gap a
+// caller confirms against.
+func RunDeleterCascadeStopsAtAssociationEdges(t *testing.T, ctx context.Context, fixture DeleterFixture) {
+	t.Helper()
+	root := deleterSeedIssue(t, ctx, fixture, "cassoc", "root")
+	child := deleterSeedIssue(t, ctx, fixture, "cassoc", "child")
+	associated := deleterSeedIssue(t, ctx, fixture, "cassoc", "associated")
+	associatedChild := deleterSeedIssue(t, ctx, fixture, "cassoc", "associated-child")
+	deleterAddParentChildEdge(t, ctx, fixture, child, root)
+	// The association edge that must not carry its row away, and the
+	// survivor's own containment tree, which must not save it from being
+	// reported.
+	deleterAddEdge(t, ctx, fixture, associated, root)
+	deleterAddParentChildEdge(t, ctx, fixture, associatedChild, associated)
+
+	preview := deleterDelete(t, ctx, fixture, deleterWithDryRun(publicops.DeleteRequest{
+		IDs:     []string{root},
+		Cascade: true,
+		Force:   true,
+	}, true))
+	if preview.Deleted != 2 {
+		t.Errorf("preview Deleted = %d, want 2 — root and its child only; the association dependent stays", preview.Deleted)
+	}
+	if !reflect.DeepEqual(preview.Orphaned, []string{associated}) {
+		t.Errorf("preview Orphaned = %v, want [%s] — the preview names the survivor the run would leave",
+			preview.Orphaned, associated)
+	}
+
+	result := deleterDelete(t, ctx, fixture, publicops.DeleteRequest{
+		IDs:     []string{root},
+		Cascade: true,
+		Force:   true,
+	})
+	if result.Deleted != 2 {
+		t.Errorf("Deleted = %d, want 2 — the containment closure is root and child; the blocks edge stops it", result.Deleted)
+	}
+	if !reflect.DeepEqual(result.Orphaned, []string{associated}) {
+		t.Errorf("Orphaned = %v, want [%s] — the association dependent survives NAMED, not as silent collateral",
+			result.Orphaned, associated)
+	}
+	deleterAssertIssueRows(t, ctx, fixture, 0, root, child)
+	deleterAssertIssueRows(t, ctx, fixture, 2, associated, associatedChild)
+	// The orphan loses the edge that joined it to the deleted set and keeps
+	// the edge that belongs to its own tree.
+	deleterAssertEdgeRows(t, ctx, fixture, 0, associated, root)
+	deleterAssertEdgeRows(t, ctx, fixture, 1, associatedChild, associated)
+}
+
 // RunDeleterCascadeFromAWispRootDeletesTheClosure pins the CROSS-PLANE quadrant
 // of the cascade (issueops/deleter.go, DeleteRequest.Cascade: "also deletes the
 // TRANSITIVE CLOSURE of everything that depends on the named rows, IN BOTH
