@@ -166,6 +166,38 @@ func TestInstallHooksRefusesDanglingSymlinkedHooksDir(t *testing.T) {
 	}
 }
 
+// TestInstallHooksAllowsSymlinkedBeadsWorkspaceAlias pins AC-7's admission
+// half: a symlinked .beads workspace (a supported alias — #7889 refused it
+// wholesale, which this delta deliberately inverts) still installs into
+// .beads/hooks, because only the hooks directory entry itself is checked,
+// not its ancestors.
+func TestInstallHooksAllowsSymlinkedBeadsWorkspaceAlias(t *testing.T) {
+	isolateBeadsDirForTest(t)
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	store := filepath.Join(root, "real-store")
+	writeFileForWorktreeTest(t, filepath.Join(store, "metadata.json"), []byte("{}\n"))
+	runGitForWorktreeTest(t, repo, "init", "-q")
+	if err := os.Symlink(store, filepath.Join(repo, ".beads")); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(repo)
+	git.ResetCaches()
+	t.Cleanup(git.ResetCaches)
+	t.Setenv("BEADS_DIR", filepath.Join(repo, ".beads"))
+
+	if err := installHooksWithOptions([]string{"pre-commit"}, false, false, false, true); err != nil {
+		t.Fatalf("install into a symlinked .beads workspace alias failed: %v", err)
+	}
+	body := readFileForWorktreeTest(t, filepath.Join(store, "hooks", "pre-commit"))
+	if !strings.Contains(body, hookSectionBeginPrefix) {
+		t.Errorf("pre-commit hook missing bd section inside the aliased store: %q", body)
+	}
+}
+
 // TestInstallHooksAllowsMissingHooksDir pins the allowed half of the
 // directory check: a hooks directory that does not exist yet is created, not
 // refused.
