@@ -5,9 +5,11 @@ package doltserver
 import (
 	"encoding/json"
 	"errors"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -619,5 +621,139 @@ func TestSyncServerBinary_FailedReplacement(t *testing.T) {
 		if got := launchedPorts(t, launches); len(got) != 2 {
 			t.Errorf("launched %v, want the original start and the failed relaunch", got)
 		}
+	})
+}
+
+// assertAdvisoryOnly checks the AC-6 invariant after an advisory open: the
+// server is exactly as it was — alive, once-launched, on its port, with the
+// launch record no advisory rewrote — and stderr names every wanted phrase.
+func assertAdvisoryOnly(t *testing.T, serverDir string, state *State, launches, stderr string, wants []string) {
+	t.Helper()
+	if !isProcessAlive(state.PID) {
+		t.Errorf("the tracked server (PID %d) was stopped, want it left running", state.PID)
+	}
+	if ports := launchedPorts(t, launches); len(ports) != 1 {
+		t.Errorf("the fake dolt launched %d time(s) (%v), want 1: the original start only", len(ports), ports)
+	}
+	if got := readPortFile(serverDir); got != state.Port {
+		t.Errorf("tracked port = %d, want %d unchanged", got, state.Port)
+	}
+	if rec := readBinaryRecordForTest(t, serverDir); rec.PID != state.PID || rec.DoltVersion != "2.6.0" || rec.Provenance != BinaryProvenanceLaunched {
+		t.Errorf("binary record = %+v, want the original launch record (PID %d, dolt 2.6.0, provenance %q)", rec, state.PID, BinaryProvenanceLaunched)
+	}
+	for _, want := range wants {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("the advisory is missing %q; stderr:\n%s", want, stderr)
+		}
+	}
+}
+
+// TestSyncServerBinary_AdvisesWhenItMayNotRestart is AC-6: an open without
+// lifecycle-mutation permission — a read-only open, or any open of a shared
+// server — never mutates the server or its sidecar and never fails, but the
+// stale generation is not silently ignored either: one actionable advisory
+// names both versions and the remedy. The shared-server advice says what a
+// restart interrupts: every connected client and every database it serves.
+func TestSyncServerBinary_AdvisesWhenItMayNotRestart(t *testing.T) {
+	sync := func(t *testing.T, req BinarySyncRequest) (string, error) {
+		t.Helper()
+		var err error
+		stderr := captureStderr(t, func() {
+			err = SyncServerBinary(req)
+		})
+		return stderr, err
+	}
+
+	t.Run("owned server, open without restart permission", func(t *testing.T) {
+		beadsDir, launches := fakeStartWorkspace(t)
+		stopTrackedServerAfterTest(t, beadsDir)
+
+		state, err := startForTest(t, beadsDir)
+		if err != nil {
+			t.Fatalf("starting the tracked server: %v", err)
+		}
+		replaceFakeDolt(t, "2.7.0")
+
+		stderr, err := sync(t, BinarySyncRequest{
+			BeadsDir:     beadsDir,
+			Host:         "127.0.0.1",
+			Port:         state.Port,
+			AllowRestart: false,
+		})
+		if err != nil {
+			t.Fatalf("an advisory open must not fail: %v", err)
+		}
+		assertAdvisoryOnly(t, beadsDir, state, launches, stderr, []string{
+			"Warning:", "did not restart it", "bd dolt stop && bd dolt start", "2.6.0", "2.7.0",
+		})
+	})
+
+	t.Run("shared server names the client impact", func(t *testing.T) {
+		beadsDir, launches := fakeStartWorkspace(t)
+		// Shared-server mode: the tracked server's state lives in the shared
+		// dir, and the fixed shared default port is dialed by every workspace
+		// on the host, so the test runs on a private port of its own.
+		t.Setenv("BEADS_SHARED_SERVER_DIR", t.TempDir())
+		t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		port := ln.Addr().(*net.TCPAddr).Port
+		if err := ln.Close(); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("BEADS_DOLT_SERVER_PORT", strconv.Itoa(port))
+		sharedDir := resolveServerDir(beadsDir)
+		stopTrackedServerAfterTest(t, sharedDir)
+
+		state, err := startForTest(t, sharedDir)
+		if err != nil {
+			t.Fatalf("starting the shared server: %v", err)
+		}
+		replaceFakeDolt(t, "2.7.0")
+
+		stderr, err := sync(t, BinarySyncRequest{
+			BeadsDir: beadsDir,
+			Host:     "127.0.0.1",
+			Port:     state.Port,
+			// Restart permission alone does not authorize touching a shared
+			// server; the advisory must still be the only effect.
+			AllowRestart: true,
+		})
+		if err != nil {
+			t.Fatalf("an advisory open must not fail: %v", err)
+		}
+		assertAdvisoryOnly(t, sharedDir, state, launches, stderr, []string{
+			"Warning:", "shared dolt sql-server", "every connected client and every database it serves",
+			"bd dolt stop && bd dolt start", "2.6.0", "2.7.0",
+		})
+	})
+
+	t.Run("unlaunchable replacement stays advisory", func(t *testing.T) {
+		beadsDir, launches := fakeStartWorkspace(t)
+		stopTrackedServerAfterTest(t, beadsDir)
+
+		state, err := startForTest(t, beadsDir)
+		if err != nil {
+			t.Fatalf("starting the tracked server: %v", err)
+		}
+		// The upgrade lands below the required floor, so the replacement
+		// cannot be launched: with permission that fails the open (AC-5),
+		// without it the running server keeps serving under an advisory.
+		replaceFakeDolt(t, "2.5.1")
+
+		stderr, err := sync(t, BinarySyncRequest{
+			BeadsDir:     beadsDir,
+			Host:         "127.0.0.1",
+			Port:         state.Port,
+			AllowRestart: false,
+		})
+		if err != nil {
+			t.Fatalf("an advisory open must not fail, even for an unlaunchable replacement: %v", err)
+		}
+		assertAdvisoryOnly(t, beadsDir, state, launches, stderr, []string{
+			"Warning:", "cannot launch the replacement", "used the running server unchanged", "Fix dolt",
+		})
 	})
 }

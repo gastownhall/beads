@@ -96,8 +96,8 @@ type binaryVerdict struct {
 
 // SyncServerBinary is the store-open lifecycle hook (GH#6064). It classifies
 // the tracked server on req.Port against the dolt executable the next start
-// would launch, and replaces it under the lifecycle lock when it is stale
-// and this open may mutate the lifecycle.
+// would launch, replaces it under the lifecycle lock when it is stale and
+// this open may mutate the lifecycle, and stays advisory otherwise.
 //
 // It returns nil for every verdict that is not actionable; an error is the
 // open's to fail on, and means bd will not query the tracked stale server
@@ -128,11 +128,16 @@ func SyncServerBinary(req BinarySyncRequest) error {
 		return nil
 	case binaryStale:
 		if !binaryMutationPermitted(req) {
+			// AC-6: this open may not touch the lifecycle, but the skew is
+			// too dangerous to leave unmentioned — one advisory names it and
+			// the remedy, and the connection behavior is unchanged.
+			printStaleServerAdvisory(req, verdict)
 			return nil
 		}
 		return replaceStaleServer(serverDir, req, verdict)
 	case binaryCannotReplace:
 		if !binaryMutationPermitted(req) {
+			printCannotReplaceAdvisory(req, verdict)
 			return nil
 		}
 		// The replacement exists but bd would refuse to launch it (missing,
@@ -345,6 +350,37 @@ func recordObservedBinary(serverDir string, trackedPID int, cand binaryIdentity,
 	if err := writeBinaryRecord(serverDir, recordForIdentity(trackedPID, cand, BinaryProvenanceObserved)); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: could not record the current dolt binary for the tracked server: %v\n", err)
 	}
+}
+
+// printStaleServerAdvisory is the one advisory a stale server gets from an
+// open that may not restart it (AC-6): the skew is named with both versions,
+// the remedy is actionable, and the connection behavior is unchanged. In
+// shared-server mode the advice names what a restart actually interrupts —
+// every database and client the one server serves — instead of implying a
+// private restart.
+func printStaleServerAdvisory(req BinarySyncRequest, v binaryVerdict) {
+	if IsSharedServerModeForDir(req.BeadsDir) {
+		fmt.Fprintf(os.Stderr,
+			"Warning: the shared dolt sql-server on port %d (PID %d) is running dolt %s, but the dolt bd would launch on this machine is %s.\n"+
+				"bd will not restart it: one shared server serves every workspace on this host, and a restart interrupts every connected client and every database it serves.\n"+
+				"Restart it deliberately, once every workspace can tolerate the interruption: bd dolt stop && bd dolt start\n",
+			req.Port, v.trackedPID, v.serverVersion, v.candidate.version)
+		return
+	}
+	fmt.Fprintf(os.Stderr,
+		"Warning: the tracked dolt sql-server on port %d (PID %d) is running dolt %s, but the dolt bd would launch on this machine is %s; this command did not restart it.\n"+
+			"Restart it before relying on it: bd dolt stop && bd dolt start\n",
+		req.Port, v.trackedPID, v.serverVersion, v.candidate.version)
+}
+
+// printCannotReplaceAdvisory is the advisory for a replaced executable whose
+// replacement cannot be launched: the old server keeps serving, and the
+// remedy is to fix dolt itself.
+func printCannotReplaceAdvisory(req BinarySyncRequest, v binaryVerdict) {
+	fmt.Fprintf(os.Stderr,
+		"Warning: the tracked dolt sql-server on port %d (PID %d) was started from a dolt binary that has since been replaced, and bd cannot launch the replacement: %s.\n"+
+			"This command used the running server unchanged. Fix dolt (install or repair the binary on PATH), then restart the server: bd dolt stop && bd dolt start\n",
+		req.Port, v.trackedPID, firstLine(v.problem))
 }
 
 // replaceStaleServer replaces the stale-generation server under the
