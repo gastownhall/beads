@@ -217,6 +217,7 @@ func deleteInUOW(ctx context.Context, uw UnitOfWork, req publicops.DeleteRequest
 	result.Labels = deleted.LabelsCount
 	result.Events = deleted.EventsCount
 	result.ReferencesUpdated = deleted.ReferencesUpdated
+	result.DeletedIDs = deleted.DeletedIDs
 	if req.Cascade {
 		result.Orphaned = deleted.OrphanedIssues
 	}

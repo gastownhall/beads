@@ -567,17 +567,27 @@ func outputDeletionPreviewReporting(issueIDs []string, issues map[string]*types.
 		}
 	}
 	if cascade {
-		fmt.Printf("\n%s Cascade mode enabled - will also delete all dependent issues\n", ui.RenderWarn("⚠"))
+		fmt.Printf("\n%s Cascade mode enabled - will also delete parent-child descendants; other dependents survive\n", ui.RenderWarn("⚠"))
 	}
 	if depError != nil {
 		fmt.Printf("\n%s\n", ui.RenderFail(depError.Error()))
 	}
 	if result != nil {
 		fmt.Printf("\nWould delete: %d issues\n", result.Deleted)
+		// A cascade deletes rows the caller never named, so the preview names
+		// every one of them before the caller agrees to it (GH#6301).
+		if cascade {
+			for _, id := range result.DeletedIDs {
+				fmt.Printf("  %s\n", id)
+			}
+		}
 		fmt.Printf("Would remove: %d dependencies, %d labels, %d events\n",
 			result.Dependencies, result.Labels, result.Events)
 		if len(result.Orphaned) > 0 {
 			fmt.Printf("Would orphan: %d issues\n", len(result.Orphaned))
+			for _, id := range result.Orphaned {
+				fmt.Printf("  %s\n", id)
+			}
 		}
 		if dryRun {
 			fmt.Printf("\n(Dry-run mode - no changes made)\n")

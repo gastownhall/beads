@@ -463,6 +463,49 @@ func TestEmbeddedDeleteCascadeFollowsOnlyParentChild(t *testing.T) {
 			t.Errorf("%s is still blocked after its only blocker %s was deleted", f.C1, f.A1)
 		}
 	})
+
+	t.Run("cascade_preview_lists_every_id_and_changes_nothing", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "cpp")
+		f := setupCascadeFixture(t, bd, dir)
+
+		for _, args := range [][]string{{"--cascade"}, {"--cascade", "--dry-run"}} {
+			out := bdDelete(t, bd, dir, append([]string{f.A}, args...)...)
+			if !strings.Contains(out, "Would delete: 4 issues") {
+				t.Errorf("bd delete %s %v: preview does not count the 4-row tree:\n%s", f.A, args, out)
+			}
+			listed := previewListedIDs(out)
+			for _, id := range append(f.deleted(), f.B, f.C1, f.S) {
+				if !listed[id] {
+					t.Errorf("bd delete %s %v: preview does not list %s:\n%s", f.A, args, id, out)
+				}
+			}
+			for _, id := range []string{f.B1, f.C} {
+				if listed[id] {
+					t.Errorf("bd delete %s %v: preview lists %s, which neither goes nor loses an edge:\n%s", f.A, args, id, out)
+				}
+			}
+		}
+		for _, id := range append(f.deleted(), f.survivors()...) {
+			if got := bdShowDetails(t, bd, dir, id); got["id"] != id {
+				t.Errorf("a preview deleted %s", id)
+			}
+		}
+	})
+}
+
+// previewListedIDs is the set of ids a delete preview lists one per line:
+// the first field of every indented line, without a trailing colon.
+func previewListedIDs(out string) map[string]bool {
+	listed := make(map[string]bool)
+	for _, line := range strings.Split(out, "\n") {
+		if !strings.HasPrefix(line, "  ") {
+			continue
+		}
+		if fields := strings.Fields(line); len(fields) > 0 {
+			listed[strings.TrimSuffix(fields[0], ":")] = true
+		}
+	}
+	return listed
 }
 
 // bdDeleteJSON runs "bd delete <args> --json" and parses its object.

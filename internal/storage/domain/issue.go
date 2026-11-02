@@ -227,6 +227,10 @@ type DeleteIssuesResult struct {
 	// so does EnforceCascadePolicy with Force; the uncascaded legacy path
 	// leaves it empty. `bd wisp gc --json` publishes it.
 	OrphanedIssues []string
+	// DeletedIDs names, in ascending id order without duplicates, the rows
+	// DeletedCount counts (under Cascade, the whole parent-child closure). A
+	// DryRun names the rows the deletion would remove.
+	DeletedIDs []string
 }
 
 type DeletePreview struct {

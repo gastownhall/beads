@@ -134,12 +134,38 @@ func TestOutputDeleteProxiedPreviewExactContracts(t *testing.T) {
 		in := &deleteInput{ids: []string{"bd-target"}, cascade: true}
 		out := captureStdout(t, func() error { return outputDeleteProxiedPreview(in, result) })
 		for _, required := range []string{
-			"Cascade mode enabled - will also delete all dependent issues",
+			"Cascade mode enabled - will also delete parent-child descendants; other dependents survive",
 			"bd delete bd-target --cascade --force",
 		} {
 			if !strings.Contains(out, required) {
 				t.Errorf("cascade preview missing %q:\n%s", required, out)
 			}
+		}
+	})
+
+	t.Run("cascade prose lists every row the closure deletes and every row it orphans", func(t *testing.T) {
+		cascadeResult := result
+		cascadeResult.res = issueops.DeleteResult{
+			Deleted:    4,
+			DeletedIDs: []string{"bd-target", "bd-target.1", "bd-target.1.1", "bd-target.2"},
+			Orphaned:   []string{"bd-blocked", "bd-found", "bd-related"},
+		}
+		in := &deleteInput{ids: []string{"bd-target"}, cascade: true, dryRun: true}
+		out := captureStdout(t, func() error { return outputDeleteProxiedPreview(in, cascadeResult) })
+		lines := make(map[string]bool)
+		for _, line := range strings.Split(out, "\n") {
+			lines[strings.TrimSpace(line)] = true
+		}
+		for _, id := range cascadeResult.res.DeletedIDs {
+			if !lines[id] {
+				t.Errorf("cascade preview does not list %s on its own line:\n%s", id, out)
+			}
+		}
+		if !strings.Contains(out, "4 issue(s) total") {
+			t.Errorf("cascade preview does not count the 4-row closure:\n%s", out)
+		}
+		if !strings.Contains(out, "Would orphan 3 issue(s): bd-blocked, bd-found, bd-related") {
+			t.Errorf("cascade preview does not name every orphan:\n%s", out)
 		}
 	})
 

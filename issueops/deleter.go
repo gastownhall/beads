@@ -192,6 +192,11 @@ type DeleteResult struct {
 	// not orphaned by this deletion; it is merely blocked by something that is
 	// now blocked by nothing.
 	Orphaned []string
+	// DeletedIDs names the rows Deleted counts, in ascending id order without
+	// duplicates, so len(DeletedIDs) == Deleted. Under Cascade it is the whole
+	// parent-child closure, which is what a preview has to show before the
+	// caller agrees to it; a DryRun names the same rows the deletion would.
+	DeletedIDs []string
 }
 
 // ErrDependentsOutsideRequest classifies the unforced refusal: a named row has

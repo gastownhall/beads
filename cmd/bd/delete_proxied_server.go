@@ -218,7 +218,7 @@ func renderDeletePreview(in *deleteInput, preview domain.DeletePreview, res issu
 		fmt.Printf("  %s: %s\n", id, title)
 	}
 	if in.cascade {
-		fmt.Printf("\n%s Cascade mode enabled - will also delete all dependent issues\n", ui.RenderWarn("⚠"))
+		fmt.Printf("\n%s Cascade mode enabled - will also delete parent-child descendants; other dependents survive\n", ui.RenderWarn("⚠"))
 	}
 	if blocked != nil {
 		// The refusal itself says how to proceed, so the "To proceed, run"
@@ -228,6 +228,13 @@ func renderDeletePreview(in *deleteInput, preview domain.DeletePreview, res issu
 	}
 	fmt.Printf("\nWould remove:\n")
 	fmt.Printf("  %d issue(s) total\n", res.Deleted)
+	// A cascade deletes rows the caller never named, so the preview names
+	// every one of them before the caller agrees to it (GH#6301).
+	if in.cascade {
+		for _, id := range res.DeletedIDs {
+			fmt.Printf("    %s\n", id)
+		}
+	}
 	fmt.Printf("  %d dependency link(s)\n", res.Dependencies)
 	fmt.Printf("  %d label(s)\n", res.Labels)
 	fmt.Printf("  %d event(s)\n", res.Events)
