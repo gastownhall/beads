@@ -911,6 +911,12 @@ func MigrateUpTo(ctx context.Context, db DBConn, maxVersion int) (int, error) {
 	return applied, err
 }
 
+// MigrateUp brings db's main and ignored schema to the latest version.
+//
+// db must be a single session (a pinned *sql.Conn, or a *sql.DB whose pool
+// holds one connection): the pass reads and writes session state, including
+// @@dolt_transaction_commit, which it turns off for the pass and restores
+// before returning.
 func MigrateUp(ctx context.Context, db DBConn) (int, error) {
 	// Consent gate first, before ANY write — dolt_ignore seeding included: an
 	// existing database with pending main-sequence migrations must stay
@@ -973,7 +979,7 @@ func migrateUpConsented(ctx context.Context, db DBConn) (int, error) {
 // migrateUpAfterReconcile is MigrateUp's migration pass proper, split out so
 // the open-time reconciles above it have exactly one place to contribute to
 // the reported total.
-func migrateUpAfterReconcile(ctx context.Context, db DBConn, seedChanged bool) (int, error) {
+func migrateUpAfterReconcile(ctx context.Context, db DBConn, seedChanged bool) (_ int, err error) {
 	needed, err := migrationWorkNeeded(ctx, db)
 	if err != nil {
 		return 0, fmt.Errorf("checking schema migration work: %w", err)
@@ -993,10 +999,12 @@ func migrateUpAfterReconcile(ctx context.Context, db DBConn, seedChanged bool) (
 	}
 
 	// Suspended only once a pass is known to run, so converged opens pay
-	// nothing for it.
-	if err := suspendTransactionCommit(ctx, db); err != nil {
+	// nothing for it; restored on every return below.
+	restoreTransactionCommit, err := suspendTransactionCommit(ctx, db)
+	if err != nil {
 		return 0, err
 	}
+	defer func() { err = restoreTransactionCommit(err) }()
 
 	dirtyBeforeAll, err := dirtyTables(ctx, db, false)
 	if err != nil {
