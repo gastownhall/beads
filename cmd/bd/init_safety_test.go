@@ -10,9 +10,11 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -234,6 +236,227 @@ func TestCheckRemoteSafety_UnverifiedRefusalText(t *testing.T) {
 	verified := CheckRemoteSafety(RemoteSafetyInput{RemoteHasDoltData: true, ReinitLocal: true})
 	if verified.UserMessage == msg {
 		t.Error("unverified and verified refusals are identical, so the probe's uncertainty is not carried")
+	}
+}
+
+// assertUnverifiedRefusal checks the GH#7665 unverified-refusal contract on a
+// failed bd init subprocess: exit 10 (the fail-closed policy is unchanged),
+// could-not-verify wording, no already-has assertion, and no clone attempt.
+func assertUnverifiedRefusal(t *testing.T, err error, stderrStr string) {
+	t.Helper()
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("bd init: err = %v, want exit %d\nstderr:\n%s", err, ExitRemoteDivergenceRefused, stderrStr)
+	}
+	if code := exitErr.ExitCode(); code != ExitRemoteDivergenceRefused {
+		t.Errorf("exit code = %d, want %d (ExitRemoteDivergenceRefused)", code, ExitRemoteDivergenceRefused)
+	}
+	if !strings.Contains(stderrStr, "could not verify whether remote 'origin' has Dolt history") {
+		t.Errorf("refusal must say bd could not verify the remote's Dolt history:\n%s", stderrStr)
+	}
+	if strings.Contains(stderrStr, "already has Dolt history") {
+		t.Errorf("refusal must not assert the unreadable remote already has Dolt history:\n%s", stderrStr)
+	}
+	if strings.Contains(stderrStr, "failed to clone remote") {
+		t.Errorf("refusal must fire before any clone attempt:\n%s", stderrStr)
+	}
+}
+
+// TestInitReinitLocalUnverifiedConfiguredRemoteRefuses wires the unverified
+// signal through the BD_SYNC_REMOTE (initSyncRemoteConfigured) probe site:
+// a configured sync.remote that cannot be read must refuse --reinit-local
+// with the could-not-verify wording, not an already-has assertion.
+func TestInitReinitLocalUnverifiedConfiguredRemoteRefuses(t *testing.T) {
+	bdBin := buildBDForInitTests(t)
+
+	workDir := t.TempDir()
+	runGitForBootstrapTest(t, workDir, "init", "-b", "main")
+	runGitForBootstrapTest(t, workDir, "config", "core.hooksPath", ".git/hooks")
+	homeDir := t.TempDir() // must differ from workDir: metrics.go caches to $HOME/.beads
+
+	cmd := exec.Command(bdBin, "init", "--reinit-local", "--prefix", "cfg",
+		"--quiet", "--non-interactive", "--skip-hooks", "--skip-agents")
+	cmd.Dir = workDir
+	cmd.Env = hermeticInitEnv(homeDir,
+		"BD_SYNC_REMOTE="+filepath.Join(t.TempDir(), "does-not-exist.git"))
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	assertUnverifiedRefusal(t, err, stderr.String())
+
+	beadsDir := filepath.Join(workDir, ".beads")
+	if _, err := os.Stat(beadsDir); err == nil {
+		t.Errorf("refusal should not have created %s", beadsDir)
+	}
+}
+
+// TestInitFromJSONLUnverifiedConfiguredRemoteRefuses is the --from-jsonl arm
+// of the configured-remote wiring: a local-source import against a
+// configured sync.remote that cannot be read refuses as unverified before
+// any import.
+func TestInitFromJSONLUnverifiedConfiguredRemoteRefuses(t *testing.T) {
+	bdBin := buildBDForInitTests(t)
+
+	workDir := t.TempDir()
+	runGitForBootstrapTest(t, workDir, "init", "-b", "main")
+	runGitForBootstrapTest(t, workDir, "config", "core.hooksPath", ".git/hooks")
+	beadsDir := filepath.Join(workDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "issues.jsonl"), []byte(`{"id":"jl-abc123","title":"Local JSONL wins","type":"task","status":"open","priority":2}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	homeDir := t.TempDir()
+
+	cmd := exec.Command(bdBin, "init", "--from-jsonl", "--prefix", "jl",
+		"--quiet", "--non-interactive", "--skip-hooks", "--skip-agents")
+	cmd.Dir = workDir
+	cmd.Env = hermeticInitEnv(homeDir,
+		"BD_SYNC_REMOTE="+filepath.Join(t.TempDir(), "does-not-exist.git"))
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	assertUnverifiedRefusal(t, cmd.Run(), stderr.String())
+}
+
+// TestInitFromJSONLUnverifiedExplicitRemoteRefuses is the explicit --remote
+// arm of the wiring: --from-jsonl probes an explicitly named remote, and one
+// that cannot be read must refuse as unverified.
+func TestInitFromJSONLUnverifiedExplicitRemoteRefuses(t *testing.T) {
+	bdBin := buildBDForInitTests(t)
+
+	workDir := t.TempDir()
+	runGitForBootstrapTest(t, workDir, "init", "-b", "main")
+	runGitForBootstrapTest(t, workDir, "config", "core.hooksPath", ".git/hooks")
+	beadsDir := filepath.Join(workDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "issues.jsonl"), []byte(`{"id":"jl-abc123","title":"Local JSONL wins","type":"task","status":"open","priority":2}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	homeDir := t.TempDir()
+
+	cmd := exec.Command(bdBin, "init", "--from-jsonl", "--remote",
+		filepath.Join(t.TempDir(), "does-not-exist.git"), "--prefix", "jl",
+		"--quiet", "--non-interactive", "--skip-hooks", "--skip-agents")
+	cmd.Dir = workDir
+	cmd.Env = hermeticInitEnv(homeDir)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	assertUnverifiedRefusal(t, cmd.Run(), stderr.String())
+}
+
+// gitLsRemoteShimPATH returns a PATH entry that puts a `git` shim first on
+// the subprocess PATH: it delegates every operation to the real git but
+// fails the Nth (and later) `git ls-remote` with exit 128 — the
+// credential-less private-remote shape. It lets a test split the probe
+// outcomes: the early init guard reads a reachable remote, the late one
+// reads a failure, which is the only way the late CheckRemoteSafety
+// decision calls are reachable with an override flag (an early probe
+// failure is refused by the early guard first).
+func gitLsRemoteShimPATH(t *testing.T, failOnNth int) []string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("git ls-remote PATH shim needs a POSIX shell")
+	}
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Skipf("git not on PATH: %v", err)
+	}
+	shimDir := t.TempDir()
+	countFile := filepath.Join(shimDir, "ls-remote-count")
+	shim := fmt.Sprintf(`#!/bin/sh
+if [ "$1" = "ls-remote" ]; then
+  n=$(cat %q 2>/dev/null || echo 0)
+  n=$((n + 1))
+  echo "$n" > %q
+  if [ "$n" -ge %d ]; then
+    echo "fatal: simulated unreadable remote" >&2
+    exit 128
+  fi
+fi
+exec %q "$@"
+`, countFile, countFile, failOnNth, realGit)
+	if err := os.WriteFile(filepath.Join(shimDir, "git"), []byte(shim), 0o755); err != nil {
+		t.Fatalf("write git shim: %v", err)
+	}
+	return []string{"PATH=" + shimDir + string(os.PathListSeparator) + os.Getenv("PATH")}
+}
+
+// prependShimPATH rewrites the PATH entry of a hermetic env so the shim
+// directory wins. glibc getenv resolves the FIRST occurrence, so appending
+// another PATH would be ignored by the child.
+func prependShimPATH(env, extra []string) []string {
+	out := make([]string, 0, len(env)+len(extra))
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "PATH=") {
+			for _, e := range extra {
+				if strings.HasPrefix(e, "PATH=") {
+					out = append(out, e)
+				}
+			}
+			continue
+		}
+		out = append(out, kv)
+	}
+	// Keep any non-PATH extras (none today, but the caller's contract says env).
+	for _, e := range extra {
+		if !strings.HasPrefix(e, "PATH=") {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// TestInitLateProbeFailureRefusesAsUnverified covers both LATE
+// CheckRemoteSafety decision calls (the configured-sync.remote probe and the
+// git-origin probe): when the early guard read a Dolt-data-free remote but
+// the late probe fails, the late decision must refuse an override flag with
+// the could-not-verify wording — never an already-has assertion about a
+// remote state that changed between the two probes.
+func TestInitLateProbeFailureRefusesAsUnverified(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		flag   string
+		origin bool // true: probe git origin; false: probe BD_SYNC_REMOTE
+	}{
+		{"configured-remote/reinit-local", "--reinit-local", false},
+		{"git-origin/reinit-local", "--reinit-local", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bdBin := buildBDForInitTests(t)
+
+			// A reachable remote with ordinary git plumbing but no
+			// refs/dolt/data: the early probe verifies it clean.
+			bareDir := filepath.Join(t.TempDir(), "bare.git")
+			runGitForBootstrapTest(t, "", "init", "--bare", bareDir)
+
+			workDir := t.TempDir()
+			runGitForBootstrapTest(t, workDir, "init", "-b", "main")
+			runGitForBootstrapTest(t, workDir, "config", "core.hooksPath", ".git/hooks")
+			if tc.origin {
+				runGitForBootstrapTest(t, workDir, "remote", "add", "origin", bareDir)
+			}
+			homeDir := t.TempDir() // must differ from workDir: metrics.go caches to $HOME/.beads
+
+			shimEnv := gitLsRemoteShimPATH(t, 2)
+			var env []string
+			if tc.origin {
+				env = prependShimPATH(hermeticInitEnv(homeDir), shimEnv)
+			} else {
+				env = prependShimPATH(hermeticInitEnv(homeDir,
+					"BD_SYNC_REMOTE="+bareDir), shimEnv)
+			}
+
+			cmd := exec.Command(bdBin, "init", tc.flag, "--prefix", "late",
+				"--quiet", "--non-interactive", "--skip-hooks", "--skip-agents")
+			cmd.Dir = workDir
+			cmd.Env = env
+			var stderr bytes.Buffer
+			cmd.Stderr = &stderr
+			assertUnverifiedRefusal(t, cmd.Run(), stderr.String())
+		})
 	}
 }
 
@@ -1031,9 +1254,11 @@ func TestInitForceRefusesWhenRemoteHasDoltData(t *testing.T) {
 		t.Errorf("exit code = %d, want %d (ExitRemoteDivergenceRefused)", code, ExitRemoteDivergenceRefused)
 	}
 
-	// Refusal text must name the safe path.
+	// Refusal text must name the safe path and keep the verified already-has
+	// diagnosis: the unverified could-not-verify wording (GH#7665) must never
+	// replace it for a remote that was actually read.
 	stderrStr := stderr.String()
-	for _, must := range []string{"bd bootstrap", "bd help init-safety", "remote 'origin'"} {
+	for _, must := range []string{"bd bootstrap", "bd help init-safety", "remote 'origin'", "already has Dolt history"} {
 		if !strings.Contains(stderrStr, must) {
 			t.Errorf("refusal missing %q:\n%s", must, stderrStr)
 		}
