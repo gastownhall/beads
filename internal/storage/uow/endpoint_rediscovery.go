@@ -87,10 +87,16 @@ func (r *proxyEndpointResolver) beforeConnect(ctx context.Context, cfg *mysql.Co
 	}
 	r.mu.Unlock()
 
+	// Cancellation ends only this caller's wait: the discovery keeps running
+	// for the other waiters, since a proxy it may be spawning is not this
+	// caller's to stop. When both are ready, select picks either, so the
+	// caller's cancellation is checked again and always wins.
 	select {
 	case <-d.done:
 	case <-ctx.Done():
-		return ctx.Err()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	if d.err != nil {
 		return d.err
