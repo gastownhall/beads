@@ -898,6 +898,25 @@ var hooksListCmd = &cobra.Command{
 	},
 }
 
+// refuseSymlinkedHooksDir refuses a hooks directory that is itself a symlink,
+// dangling or not: every hook write, preserved copy and uninstall edit would
+// land in the link's target, a directory bd never selected. A missing
+// directory is allowed (install creates it), and aliases above the directory,
+// such as a symlinked .beads workspace, remain supported.
+func refuseSymlinkedHooksDir(hooksDir string) error {
+	fi, err := os.Lstat(hooksDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to stat hooks directory %s: %w", remedy.PrintedValue(hooksDir), err)
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("hooks directory %s is a symlink; bd will not write hooks through it into the link target\nReplace the symlink with a real directory and re-run", remedy.PrintedValue(hooksDir))
+	}
+	return nil
+}
+
 // guardHookWritePath refuses hook writes that would silently modify files
 // bd does not own (bd-5vdt8):
 //   - a symlinked hook path: os.WriteFile follows the link (O_TRUNC) and
@@ -1135,6 +1154,12 @@ func installHooksAt(hookNames []string, force, shared, chain, beadsHooks bool, s
 		if err != nil {
 			return err
 		}
+	}
+
+	// Check the destination itself before creating, preserving into, or
+	// writing any hook in it, and before configuring Git to use it.
+	if err := refuseSymlinkedHooksDir(hooksDir); err != nil {
+		return fmt.Errorf("refusing to install hooks: %w", err)
 	}
 
 	// Create hooks directory if it doesn't exist.
