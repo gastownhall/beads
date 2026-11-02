@@ -951,7 +951,7 @@ func TestStoreReadHintsNameTitlesEscaped(t *testing.T) {
 			_ = reportFindDuplicates(context.Background(), []*types.Issue{
 				{ID: "bd-1", Title: hostileName, Description: "one identical body of text", Status: types.StatusOpen},
 				{ID: "bd-2", Title: hostileName, Description: "one identical body of text", Status: types.StatusOpen},
-			}, "mechanical", 0.1, 0, "")
+			}, "mechanical", 0.1, 0, "", nil)
 		}},
 		{"bd mol ready --gated", func() {
 			_ = renderGatedReadyMolecules([]*GatedMolecule{{MoleculeID: "bd-1", MoleculeTitle: hostileName,
