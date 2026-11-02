@@ -140,3 +140,63 @@ INSERT INTO events (issue_id, event_type, actor, old_value, new_value, comment, 
 	}
 	assertEventsAbsentFromStatus(t, ctx, conn)
 }
+// TestEmbeddedIgnoredMigration0031PreservesExistingRowsAndIDs pins the
+// restore's reconciliation contract on a table that already holds rows: ids
+// and rows that exist are never touched or re-ided, only the missing content
+// multiplicity is added, and live-only rows (post-flip audit writes whose
+// content never existed in history) survive untouched.
+func TestEmbeddedIgnoredMigration0031PreservesExistingRowsAndIDs(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+
+	dataDir := seedMainSchemaAt(t, ctx, 61)
+	conn, closeConn := openPinnedConn(t, ctx, dataDir)
+	defer closeConn()
+
+	seedPreflipEvents(t, ctx, conn, "keep-1", `
+INSERT INTO events (issue_id, event_type, actor, old_value, new_value, comment, created_at, id) VALUES
+('keep-1', 'created', 'tester', NULL, NULL, NULL, '2026-07-30 00:00:00', 'evt-keep-1'),
+('keep-1', 'status_changed', 'tester', 'open', 'in_progress', NULL, '2026-07-30 00:01:00', 'evt-keep-2'),
+('keep-1', 'status_changed', 'tester', 'open', 'in_progress', NULL, '2026-07-30 00:01:00', 'evt-keep-3');
+`)
+
+	// Run the flip (main 62..74) and commit, leaving the ignored series
+	// pending: the clone's events table holds the flip-preserved rows.
+	if _, err := schema.MigrateUpTo(ctx, conn, 74); err != nil {
+		t.Fatalf("MigrateUpTo(74): %v", err)
+	}
+	commitWorkingSet(t, ctx, conn, "test: flipped schema")
+
+	// A partial hand-restore lost one of the duplicate pair, and a post-flip
+	// audit write (content that never existed in history) landed locally.
+	execFrozenGuard(t, ctx, conn, "DELETE FROM events WHERE id = 'evt-keep-3'")
+	execFrozenGuard(t, ctx, conn, `
+INSERT INTO events (issue_id, event_type, actor, old_value, new_value, comment, created_at, id)
+VALUES ('keep-1', 'local_write', 'tester', NULL, NULL, NULL, '2026-08-01 00:00:00', 'evt-live-only');
+`)
+
+	if _, err := schema.MigrateUp(ctx, conn); err != nil {
+		t.Fatalf("MigrateUp: %v", err)
+	}
+
+	// Existing rows and ids survive verbatim.
+	for _, id := range []string{"evt-keep-1", "evt-keep-2", "evt-live-only"} {
+		if got := scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM events WHERE id = ?", id); got != 1 {
+			t.Fatalf("pre-existing row %s = %d, want 1 (restore must not touch or re-id existing rows)", id, got)
+		}
+	}
+	// Only the missing multiplicity is added, under a derived id (ordinals 0
+	// and 1 are free: the surviving duplicate holds a legacy id).
+	dupDigest := eventDigest("keep-1", "status_changed", "tester", "open", "in_progress", eventNull, "2026-07-30 00:01:00")
+	if got := scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM events WHERE id = ?", rowid.New("events", 0, dupDigest)); got != 1 {
+		t.Fatalf("restored missing duplicate under derived id = %d, want 1", got)
+	}
+	if got := scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM events"); got != 4 {
+		t.Fatalf("events rows after restore = %d, want 4 (3 preserved + 1 restored)", got)
+	}
+	if got := scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM events WHERE event_type = 'created' AND id = 'evt-keep-1'"); got != 1 {
+		t.Fatalf("created row preserved under its original id = %d, want 1", got)
+	}
+	assertEventsAbsentFromStatus(t, ctx, conn)
+}
+
