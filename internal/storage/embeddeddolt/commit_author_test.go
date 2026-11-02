@@ -4,10 +4,13 @@ package embeddeddolt_test
 
 import (
 	"context"
+	"database/sql"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
+	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -41,6 +44,125 @@ func requireNewCommitBy(t *testing.T, label string, before, head headCommit, nam
 	if head.committer != name || head.committerEmail != email {
 		t.Errorf("%s: commit %q committer = %q <%s>, want %q <%s>", label, head.message, head.committer, head.committerEmail, name, email)
 	}
+}
+
+// logHashes returns every commit hash in HEAD's log.
+func (te *testEnv) logHashes(t *testing.T, ctx context.Context) map[string]bool {
+	t.Helper()
+	hashes := map[string]bool{}
+	for _, c := range te.logCommits(t, ctx) {
+		hashes[c.hash] = true
+	}
+	return hashes
+}
+
+// commitsSince returns HEAD's log entries missing from known, skipping the
+// "peer:" commits a test makes itself.
+func (te *testEnv) commitsSince(t *testing.T, ctx context.Context, known map[string]bool) []headCommit {
+	t.Helper()
+	var fresh []headCommit
+	for _, c := range te.logCommits(t, ctx) {
+		if !known[c.hash] && !strings.HasPrefix(c.message, "peer:") {
+			fresh = append(fresh, c)
+		}
+	}
+	return fresh
+}
+
+func (te *testEnv) logCommits(t *testing.T, ctx context.Context) []headCommit {
+	t.Helper()
+	db, cleanup, err := embeddeddolt.OpenSQL(ctx, te.dataDir, te.database, "main")
+	if err != nil {
+		t.Fatalf("OpenSQL: %v", err)
+	}
+	defer cleanup()
+	rows, err := db.QueryContext(ctx, "SELECT commit_hash, author, author_email, committer, email, message FROM dolt_log")
+	if err != nil {
+		t.Fatalf("read dolt_log: %v", err)
+	}
+	defer rows.Close()
+	var commits []headCommit
+	for rows.Next() {
+		var c headCommit
+		if err := rows.Scan(&c.hash, &c.author, &c.authorEmail, &c.committer, &c.committerEmail, &c.message); err != nil {
+			t.Fatalf("scan dolt_log: %v", err)
+		}
+		commits = append(commits, c)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read dolt_log: %v", err)
+	}
+	return commits
+}
+
+// openPinnedConn opens one session on the database. Close it before the store
+// next opens its engine: the store waits for an open engine to close.
+func (te *testEnv) openPinnedConn(t *testing.T, ctx context.Context) (*sql.Conn, func()) {
+	t.Helper()
+	db, cleanup, err := embeddeddolt.OpenSQL(ctx, te.dataDir, te.database, "main")
+	if err != nil {
+		t.Fatalf("OpenSQL: %v", err)
+	}
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		_ = cleanup()
+		t.Fatalf("pin connection: %v", err)
+	}
+	return conn, func() {
+		_ = conn.Close()
+		_ = cleanup()
+	}
+}
+
+// peerCommit commits conn's working set as someone other than the store.
+func peerCommit(t *testing.T, ctx context.Context, conn *sql.Conn, message string) {
+	t.Helper()
+	if _, err := conn.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', ?, '--author', 'Peer <peer@example.com>')", "peer: "+message); err != nil {
+		t.Fatalf("peer commit %q: %v", message, err)
+	}
+}
+
+func execOn(t *testing.T, ctx context.Context, conn *sql.Conn, stmt string, args ...any) {
+	t.Helper()
+	if _, err := conn.ExecContext(ctx, stmt, args...); err != nil {
+		t.Fatalf("exec %q: %v", stmt, err)
+	}
+}
+
+// seedBlockerPair creates <prefix>-a and <prefix>-b through the store and
+// commits them.
+func seedBlockerPair(t *testing.T, ctx context.Context, te *testEnv, prefix string) (a, b string) {
+	t.Helper()
+	a, b = prefix+"-a", prefix+"-b"
+	for _, id := range []string{a, b} {
+		iss := &types.Issue{ID: id, Title: id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+		if err := te.store.CreateIssue(ctx, iss, "tester"); err != nil {
+			t.Fatalf("create %s: %v", id, err)
+		}
+	}
+	if err := te.store.Commit(ctx, "seed issues"); err != nil {
+		t.Fatalf("commit seed: %v", err)
+	}
+	return a, b
+}
+
+// divergeFromPeer branches peer at HEAD, commits an unrelated config row on
+// main, and runs onPeer on the peer branch before committing it, so a merge
+// of peer cannot fast-forward.
+func divergeFromPeer(t *testing.T, ctx context.Context, te *testEnv, peer string, onPeer func(conn *sql.Conn)) {
+	t.Helper()
+	conn, closeConn := te.openPinnedConn(t, ctx)
+	defer closeConn()
+	execOn(t, ctx, conn, "CALL DOLT_BRANCH(?, 'HEAD')", peer)
+	execOn(t, ctx, conn, "INSERT INTO config (`key`, value) VALUES (?, 'main')", "test.main."+peer)
+	peerCommit(t, ctx, conn, "main side")
+	execOn(t, ctx, conn, "CALL DOLT_CHECKOUT(?)", peer)
+	execOn(t, ctx, conn, "INSERT INTO config (`key`, value) VALUES (?, 'peer')", "test.peer."+peer)
+	if onPeer != nil {
+		onPeer(conn)
+	}
+	peerCommit(t, ctx, conn, "peer side")
+	execOn(t, ctx, conn, "CALL DOLT_CHECKOUT('main')")
 }
 
 func setGitAuthorEnv(t *testing.T, name, email string) {
@@ -134,6 +256,87 @@ func TestEmbeddedCommitAuthorFollowsGitAuthorEnv(t *testing.T) {
 				t.Fatalf("%s: %v", c.label, err)
 			}
 			requireNewCommitBy(t, c.label, before, te.readHead(t, ctx), name, email)
+		}
+	})
+
+	// Plain Merge: a non-fast-forward merge whose peer side adds a blocking
+	// dependency without maintaining is_blocked, so the post-pull recompute
+	// commits a repair too.
+	t.Run("merge and post-pull recompute", func(t *testing.T) {
+		setGitAuthorEnv(t, name, email)
+		ctx := t.Context()
+		te := newTestEnv(t, "authm")
+		a, b := seedBlockerPair(t, ctx, te, "authm")
+		divergeFromPeer(t, ctx, te, "authmpeer", func(conn *sql.Conn) {
+			execOn(t, ctx, conn,
+				"INSERT INTO dependencies (id, issue_id, depends_on_issue_id, type, created_at, created_by) VALUES (UUID(), ?, ?, 'blocks', NOW(), 'peer')",
+				a, b)
+		})
+
+		known := te.logHashes(t, ctx)
+		conflicts, err := te.store.Merge(ctx, "authmpeer")
+		if err != nil || len(conflicts) != 0 {
+			t.Fatalf("Merge = %v, %v; want a clean merge", conflicts, err)
+		}
+		fresh := te.commitsSince(t, ctx, known)
+		sawRecompute := false
+		for _, c := range fresh {
+			sawRecompute = sawRecompute || c.message == "bd: recompute is_blocked after pull"
+			requireNewCommitBy(t, "Merge", headCommit{}, c, name, email)
+		}
+		if len(fresh) < 2 || !sawRecompute {
+			t.Fatalf("Merge created commits %+v; want the merge commit and the post-pull recompute", fresh)
+		}
+	})
+
+	t.Run("merge with strategy", func(t *testing.T) {
+		setGitAuthorEnv(t, name, email)
+		ctx := t.Context()
+		te := newTestEnv(t, "authms")
+		divergeFromPeer(t, ctx, te, "authmspeer", nil)
+
+		known := te.logHashes(t, ctx)
+		if _, err := te.store.MergeWithStrategy(ctx, "authmspeer", "theirs"); err != nil {
+			t.Fatalf("MergeWithStrategy: %v", err)
+		}
+		fresh := te.commitsSince(t, ctx, known)
+		if len(fresh) == 0 {
+			t.Fatal("MergeWithStrategy created no commit")
+		}
+		for _, c := range fresh {
+			requireNewCommitBy(t, "MergeWithStrategy", headCommit{}, c, name, email)
+		}
+	})
+
+	t.Run("full recompute repair", func(t *testing.T) {
+		setGitAuthorEnv(t, name, email)
+		ctx := t.Context()
+		te := newTestEnv(t, "authr")
+		a, b := seedBlockerPair(t, ctx, te, "authr")
+		if err := te.store.AddDependency(ctx, &types.Dependency{IssueID: a, DependsOnID: b, Type: types.DepBlocks}, "tester"); err != nil {
+			t.Fatalf("add dependency: %v", err)
+		}
+		if err := te.store.Commit(ctx, "seed blocker"); err != nil {
+			t.Fatalf("commit blocker: %v", err)
+		}
+		conn, closeConn := te.openPinnedConn(t, ctx)
+		execOn(t, ctx, conn, "UPDATE issues SET is_blocked = 0 WHERE id = ?", a)
+		peerCommit(t, ctx, conn, "stale is_blocked")
+		closeConn()
+
+		rc, ok := storage.UnwrapStore(te.store).(storage.BlockedRecomputer)
+		if !ok {
+			t.Fatal("embedded store must implement storage.BlockedRecomputer")
+		}
+		before := te.readHead(t, ctx)
+		changed, err := rc.RecomputeAllBlocked(ctx)
+		if err != nil || changed == 0 {
+			t.Fatalf("RecomputeAllBlocked = %d, %v; want a repair", changed, err)
+		}
+		head := te.readHead(t, ctx)
+		requireNewCommitBy(t, "RecomputeAllBlocked", before, head, name, email)
+		if head.message != versioncontrolops.BlockedRecomputeCommitMsg {
+			t.Errorf("recompute commit message = %q, want %q", head.message, versioncontrolops.BlockedRecomputeCommitMsg)
 		}
 	})
 }
