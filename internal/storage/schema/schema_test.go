@@ -487,14 +487,14 @@ func TestRunMigrationsSnapshotsDirtyTablesBeforeRepairSoRepairMutationsCommitAto
 	mock.ExpectQuery(dirtyStatusQuery).
 		WillReturnRows(sqlmock.NewRows([]string{"table_name", "staged"}))
 
-	// 2. The updated_at guard snapshots 0053's restore target (issues) and
-	// move source (wisps, absent here) BEFORE the repair can touch them.
-	mock.ExpectQuery(columnQuery).WithArgs("issues", "updated_at").
-		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
-	mock.ExpectQuery(`SELECT id, updated_at FROM issues ORDER BY id`).
-		WillReturnRows(sqlmock.NewRows([]string{"id", "updated_at"}).AddRow("bd-1", "2025-03-01 09:30:00"))
-	mock.ExpectQuery(columnQuery).WithArgs("wisps", "updated_at").
-		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
+	// 2. The updated_at guard snapshots 0053's restore target (issues, with
+	// the ephemeral flag the body sets) and move source (wisps, absent here)
+	// BEFORE the repair can touch them.
+	guardExpectColumn(mock, "issues", "updated_at", true)
+	guardExpectColumn(mock, "issues", "ephemeral", true)
+	mock.ExpectQuery(`SELECT id, updated_at, ephemeral FROM issues ORDER BY id`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "updated_at", "ephemeral"}).AddRow("bd-1", "2025-03-01 09:30:00", 1))
+	guardExpectColumn(mock, "wisps", "updated_at", false)
 
 	// 3. preMigrationRepair(53): ensureIssuesRigColumns (all present, no
 	// exec), ensureWispDependenciesSplitTargets (table absent, no-op), then
@@ -525,15 +525,15 @@ func TestRunMigrationsSnapshotsDirtyTablesBeforeRepairSoRepairMutationsCommitAto
 		WillReturnResult(sqlmock.NewResult(0, 0))
 
 	// 4. Migration 0053's own frozen SQL; the guard then restores the row
-	// the body stamped (compare-and-swap on the stamped value) BEFORE the
-	// cursor row is recorded.
+	// the body flipped and stamped (compare-and-swap on the stamped value)
+	// BEFORE the cursor row is recorded.
 	mock.ExpectExec(`SET FOREIGN_KEY_CHECKS = 0`).WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectQuery(columnQuery).WithArgs("issues", "updated_at").
-		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
-	mock.ExpectQuery(`SELECT id, updated_at FROM issues ORDER BY id`).
-		WillReturnRows(sqlmock.NewRows([]string{"id", "updated_at"}).AddRow("bd-1", "2026-11-02 04:00:00"))
-	mock.ExpectExec(`UPDATE issues SET updated_at = CASE id WHEN \? THEN \? ELSE updated_at END WHERE \(id = \? AND updated_at = \?\)`).
-		WithArgs("bd-1", "2025-03-01 09:30:00", "bd-1", "2026-11-02 04:00:00").
+	guardExpectColumn(mock, "issues", "updated_at", true)
+	guardExpectColumn(mock, "issues", "ephemeral", true)
+	mock.ExpectQuery(`SELECT id, updated_at, ephemeral FROM issues ORDER BY id`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "updated_at", "ephemeral"}).AddRow("bd-1", "2026-11-02 04:00:00", 0))
+	mock.ExpectExec(guardRestoreSQL("issues", 1)).
+		WithArgs(guardRestoreArgs(guardRestoreRow{"bd-1", "2025-03-01 09:30:00", "2026-11-02 04:00:00"})...).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(`INSERT IGNORE INTO schema_migrations`).WithArgs(53, sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(0, 1))

@@ -111,11 +111,15 @@ clause. `TestMigrationUpdatesOfAutoStampedTablesKeepUpdatedAt` parses both
 series and fails on an UPDATE that does not.
 
 The frozen migrations that predate the rule (main 0035, 0046, 0047 and 0053,
-ignored 0007) are listed in `updatedAtGuards` (`../migration_updated_at_guard.go`):
-the runner snapshots `(id, updated_at)` of the step's tables before its
-pre-migration repair and body, and writes the old values back after the body,
-before the step's cursor row and commit. That registry is closed: a new
-migration self-assigns instead of joining it.
+ignored 0007) are listed in `updatedAtGuards` (`../migration_updated_at_guard.go`)
+with the one column each rewrites (`is_blocked` or `ephemeral`): the runner
+snapshots `(id, updated_at, <column>)` of the step's tables before its
+pre-migration repair and body, and after the body, before the step's cursor row
+and commit, writes the old `updated_at` back on the rows the body rewrote.
+A row whose column shows the body left it alone keeps whatever time another
+writer gave it during the step. The census also fails if a guarded step's
+UPDATE assigns anything but its registered column. That registry is closed: a
+new migration self-assigns instead of joining it.
 
 ## Testing
 

@@ -358,14 +358,18 @@ func TestEmbeddedMigrateIgnored0007KeepsUpdatedAt(t *testing.T) {
 	}
 
 	// A wisp blocked by an issue, a wisp blocked by another wisp, that wisp
-	// blocker itself, and a free bystander wisp.
+	// blocker itself, and a free bystander wisp. The issue-blocked wisp is
+	// already flagged blocked, so 0007 clears its flag and sets it again
+	// (stamping it twice while its flag ends where it started); the
+	// wisp-blocked one is flagged for the first time.
 	blocker := stampedIssue{id: "ua-w-blocker", status: "open", stamp: historicalStamp(31)}
 	blocked := stampedIssue{id: "ua-wisp-blocked", status: "open", ephemeral: true, stamp: historicalStamp(32), wantBlocked: true}
 	free := stampedIssue{id: "ua-wisp-free", status: "open", ephemeral: true, stamp: historicalStamp(33)}
 	wispBlocker := stampedIssue{id: "ua-wisp-blocker", status: "open", ephemeral: true, stamp: historicalStamp(34)}
 	wispBlocked := stampedIssue{id: "ua-wisp-blocked-by-wisp", status: "open", ephemeral: true, stamp: historicalStamp(35), wantBlocked: true}
 	insertStampedIssues(t, ctx, conn, "issues", []stampedIssue{blocker}, false)
-	insertStampedIssues(t, ctx, conn, "wisps", []stampedIssue{blocked, free, wispBlocker, wispBlocked}, false)
+	insertStampedIssues(t, ctx, conn, "wisps", []stampedIssue{blocked}, true)
+	insertStampedIssues(t, ctx, conn, "wisps", []stampedIssue{free, wispBlocker, wispBlocked}, false)
 	if _, err := conn.ExecContext(ctx,
 		"INSERT INTO wisp_dependencies (issue_id, depends_on_issue_id, type, created_by) VALUES (?, ?, 'blocks', 'fixture')",
 		blocked.id, blocker.id); err != nil {
@@ -396,6 +400,64 @@ func TestEmbeddedMigrateIgnored0007KeepsUpdatedAt(t *testing.T) {
 		requireStamp(t, ctx, conn, "wisps", w.id, w.stamp)
 		if got := readIsBlocked(t, ctx, conn, "wisps", w.id); got != w.wantBlocked {
 			t.Errorf("wisps %s: is_blocked = %v, want %v", w.id, got, w.wantBlocked)
+		}
+	}
+}
+
+// TestEmbeddedMigrateGuardKeepsAnotherSessionsUpdatedAt pins that the guard
+// undoes only the frozen body's own rewrites. While main 0047 runs, a second
+// session edits an issue the recompute leaves alone, the way an older bd
+// sharing the server could: that edit keeps its own updated_at, and the
+// issues the body rewrote still get their historical values back.
+func TestEmbeddedMigrateGuardKeepsAnotherSessionsUpdatedAt(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+	dataDir := seedMainSchemaAt(t, ctx, 46)
+
+	db, cleanup, err := embeddeddolt.OpenSQL(ctx, dataDir, "testdb", "main")
+	if err != nil {
+		t.Fatalf("OpenSQL: %v", err)
+	}
+	defer func() { _ = cleanup() }()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("migrating session: %v", err)
+	}
+	defer conn.Close()
+	writer, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("writing session: %v", err)
+	}
+	defer writer.Close()
+
+	insertStampedIssues(t, ctx, conn, "issues", blockingGraph, true)
+	insertIssueEdges(t, ctx, conn, blockingEdges)
+	commitFixture(t, ctx, conn, "test: v46 issues with historical updated_at")
+
+	edited := blockingGraph[len(blockingGraph)-1] // ua-free: never blocked
+	editedAt := time.Date(2025, time.September, 9, 9, 9, 9, 0, time.UTC)
+	edits := 0
+	restore := schema.SetUpdatedAtSnapshotHookForTest(func(ctx context.Context, _ schema.DBConn, version int) error {
+		if version != 47 {
+			return nil
+		}
+		edits++
+		_, err := writer.ExecContext(ctx, "UPDATE issues SET title = 'edited during 0047', updated_at = ? WHERE id = ?", editedAt, edited.id)
+		return err
+	})
+	defer restore()
+	migrateUpStoppingAfter(t, ctx, conn, 47)
+	if edits != 1 {
+		t.Fatalf("the second session edited %d time(s) during 0047, want 1", edits)
+	}
+
+	if got := readUpdatedAt(t, ctx, conn, "issues", edited.id); !got.Equal(editedAt) {
+		t.Errorf("issues %s: updated_at = %s, want the second session's %s (the guard reverted another writer's edit)",
+			edited.id, got.UTC().Format(time.RFC3339Nano), editedAt.Format(time.RFC3339Nano))
+	}
+	for _, r := range blockingGraph {
+		if r.id != edited.id {
+			requireStamp(t, ctx, conn, "issues", r.id, r.stamp)
 		}
 	}
 }

@@ -52,31 +52,31 @@ func TestRunMigrationsRestoresIgnored0007UpdatedAtBeforeItsCursorRow(t *testing.
 	}
 	defer db.Close()
 
-	// 1. Snapshot.
-	mock.ExpectQuery(guardColumnQuery).WithArgs("wisps", "updated_at").
-		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
-	mock.ExpectQuery(`SELECT id, updated_at FROM wisps ORDER BY id`).
-		WillReturnRows(sqlmock.NewRows([]string{"id", "updated_at"}).
-			AddRow("w-1", "2025-04-02 09:30:32").
-			AddRow("w-2", "2025-04-03 09:30:33"))
+	// 1. Snapshot, with the is_blocked flag the body rewrites.
+	guardExpectColumn(mock, "wisps", "updated_at", true)
+	guardExpectColumn(mock, "wisps", "is_blocked", true)
+	mock.ExpectQuery(`SELECT id, updated_at, is_blocked FROM wisps ORDER BY id`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "updated_at", "is_blocked"}).
+			AddRow("w-1", "2025-04-02 09:30:32", 0).
+			AddRow("w-2", "2025-04-03 09:30:33", 0))
 	// 2. ensureWispIsBlockedForRecompute: everything already in place.
 	mock.ExpectQuery(guardTableQuery).WithArgs("wisps").
 		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
-	mock.ExpectQuery(guardColumnQuery).WithArgs("wisps", "is_blocked").
-		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
+	guardExpectColumn(mock, "wisps", "is_blocked", true)
 	mock.ExpectQuery(guardIndexQuery).WithArgs("wisps", "idx_wisps_is_blocked").
 		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
 	// 3. The frozen body.
 	mock.ExpectExec(`UPDATE wisps SET is_blocked = 0`).WillReturnResult(sqlmock.NewResult(0, 1))
-	// 4. Restore: only w-1 was stamped; w-2 is unchanged and not rewritten.
-	mock.ExpectQuery(guardColumnQuery).WithArgs("wisps", "updated_at").
-		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
-	mock.ExpectQuery(`SELECT id, updated_at FROM wisps ORDER BY id`).
-		WillReturnRows(sqlmock.NewRows([]string{"id", "updated_at"}).
-			AddRow("w-1", "2026-11-02 04:00:00").
-			AddRow("w-2", "2025-04-03 09:30:33"))
-	mock.ExpectExec(`UPDATE wisps SET updated_at = CASE id WHEN \? THEN \? ELSE updated_at END WHERE \(id = \? AND updated_at = \?\)$`).
-		WithArgs("w-1", "2025-04-02 09:30:32", "w-1", "2026-11-02 04:00:00").
+	// 4. Restore: only w-1 was rewritten (now blocked) and stamped; w-2 is
+	// unchanged and not rewritten.
+	guardExpectColumn(mock, "wisps", "updated_at", true)
+	guardExpectColumn(mock, "wisps", "is_blocked", true)
+	mock.ExpectQuery(`SELECT id, updated_at, is_blocked FROM wisps ORDER BY id`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "updated_at", "is_blocked"}).
+			AddRow("w-1", "2026-11-02 04:00:00", 1).
+			AddRow("w-2", "2025-04-03 09:30:33", 0))
+	mock.ExpectExec(guardRestoreSQL("wisps", 1)).
+		WithArgs(guardRestoreArgs(guardRestoreRow{"w-1", "2025-04-02 09:30:32", "2026-11-02 04:00:00"})...).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	// 5. Only now the cursor row; no per-step commit on this source.
 	mock.ExpectExec(`INSERT IGNORE INTO ignored_schema_migrations`).WithArgs(7, sqlmock.AnyArg()).
@@ -110,40 +110,35 @@ func TestRunMigrationsFailsGuardedStepOnUpdatedAtGuardError(t *testing.T) {
 		want   string
 	}{
 		{
+			name: "snapshot flag probe fails",
+			expect: func(mock sqlmock.Sqlmock) {
+				guardExpectColumn(mock, "issues", "updated_at", true)
+				mock.ExpectQuery(guardColumnQuery).WithArgs("issues", "is_blocked").WillReturnError(injected)
+			},
+			want: "snapshotting updated_at before migration 0046_",
+		},
+		{
 			name: "snapshot read fails",
 			expect: func(mock sqlmock.Sqlmock) {
-				mock.ExpectQuery(guardColumnQuery).WithArgs("issues", "updated_at").
-					WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
-				mock.ExpectQuery(`SELECT id, updated_at FROM issues ORDER BY id`).WillReturnError(injected)
+				guardExpectColumn(mock, "issues", "updated_at", true)
+				guardExpectColumn(mock, "issues", "is_blocked", false)
+				mock.ExpectQuery(guardIssuesSelect).WillReturnError(injected)
 			},
 			want: "snapshotting updated_at before migration 0046_",
 		},
 		{
 			name: "post-body reread fails",
 			expect: func(mock sqlmock.Sqlmock) {
-				mock.ExpectQuery(guardColumnQuery).WithArgs("issues", "updated_at").
-					WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
-				mock.ExpectQuery(`SELECT id, updated_at FROM issues ORDER BY id`).
-					WillReturnRows(sqlmock.NewRows([]string{"id", "updated_at"}).AddRow("bd-1", "2025-03-01 09:30:00"))
-				mock.ExpectExec(`SET @needs_add`).WillReturnResult(sqlmock.NewResult(0, 1))
-				mock.ExpectQuery(guardColumnQuery).WithArgs("issues", "updated_at").
-					WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
-				mock.ExpectQuery(`SELECT id, updated_at FROM issues ORDER BY id`).WillReturnError(injected)
+				guardPrimeThroughBody(mock, false, false, oneGuardRow(guardOldStamp))
+				mock.ExpectQuery(guardIssuesFlagSelect).WillReturnError(injected)
 			},
 			want: "restoring updated_at after migration 0046_",
 		},
 		{
 			name: "restore write fails",
 			expect: func(mock sqlmock.Sqlmock) {
-				mock.ExpectQuery(guardColumnQuery).WithArgs("issues", "updated_at").
-					WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
-				mock.ExpectQuery(`SELECT id, updated_at FROM issues ORDER BY id`).
-					WillReturnRows(sqlmock.NewRows([]string{"id", "updated_at"}).AddRow("bd-1", "2025-03-01 09:30:00"))
-				mock.ExpectExec(`SET @needs_add`).WillReturnResult(sqlmock.NewResult(0, 1))
-				mock.ExpectQuery(guardColumnQuery).WithArgs("issues", "updated_at").
-					WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
-				mock.ExpectQuery(`SELECT id, updated_at FROM issues ORDER BY id`).
-					WillReturnRows(sqlmock.NewRows([]string{"id", "updated_at"}).AddRow("bd-1", "2026-11-02 04:00:00"))
+				guardPrimeThroughBody(mock, false, false, oneGuardRow(guardOldStamp))
+				mock.ExpectQuery(guardIssuesFlagSelect).WillReturnRows(oneGuardFlagRow(guardNewStamp, 1))
 				mock.ExpectExec(`UPDATE issues SET updated_at = CASE id`).WillReturnError(injected)
 			},
 			want: "restoring updated_at after migration 0046_",
@@ -266,26 +261,82 @@ func zeroIssueRowCounter(t *testing.T) {
 const (
 	guardDirtyStatusQuery = `(?s)SELECT s\.table_name, s\.staged\s+FROM dolt_status s\s+WHERE NOT EXISTS`
 	guardIssuesSelect     = `SELECT id, updated_at FROM issues ORDER BY id`
-	guardOneRowRestore    = `UPDATE issues SET updated_at = CASE id WHEN \? THEN \? ELSE updated_at END WHERE \(id = \? AND updated_at = \?\)$`
+	guardIssuesFlagSelect = `SELECT id, updated_at, is_blocked FROM issues ORDER BY id`
 	guardOldStamp         = "2025-03-01 09:30:00"
 	guardNewStamp         = "2026-11-02 04:00:00"
 )
 
+// guardExpectColumn primes one schemaColumnExists probe of table.column.
+func guardExpectColumn(mock sqlmock.Sqlmock, table, column string, present bool) {
+	count := 0
+	if present {
+		count = 1
+	}
+	mock.ExpectQuery(guardColumnQuery).WithArgs(table, column).
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(count))
+}
+
+// guardRestoreSQL matches the statement restoreUpdatedAtBatch builds for n
+// rows of table: the rows picked by an id IN list (a primary-key lookup), not
+// an OR of per-row conditions (a full table scan).
+func guardRestoreSQL(table string, n int) string {
+	cases := strings.Repeat(` WHEN \? THEN \?`, n)
+	return `^UPDATE ` + table + ` SET updated_at = CASE id` + cases + ` ELSE updated_at END` +
+		` WHERE id IN \(\?` + strings.Repeat(`, \?`, n-1) + `\)` +
+		` AND updated_at = CASE id` + cases + ` END$`
+}
+
+// guardRestoreRow is one restored row: its id, the value written back, and
+// the value the post-body reread saw.
+type guardRestoreRow struct{ id, want, got string }
+
+// guardRestoreArgs returns restoreUpdatedAtBatch's arguments for rows.
+func guardRestoreArgs(rows ...guardRestoreRow) []driver.Value {
+	args := make([]driver.Value, 0, 5*len(rows))
+	for _, r := range rows {
+		args = append(args, r.id, r.want)
+	}
+	for _, r := range rows {
+		args = append(args, r.id)
+	}
+	for _, r := range rows {
+		args = append(args, r.id, r.got)
+	}
+	return args
+}
+
+// oneGuardRow is a one-issue snapshot taken before the issues table had its
+// is_blocked flag (v45).
+func oneGuardRow(stamp string) *sqlmock.Rows {
+	return sqlmock.NewRows([]string{"id", "updated_at"}).AddRow("bd-1", stamp)
+}
+
+// oneGuardFlagRow is a one-issue read with its is_blocked flag.
+func oneGuardFlagRow(stamp string, blocked int) *sqlmock.Rows {
+	return sqlmock.NewRows([]string{"id", "updated_at", "is_blocked"}).AddRow("bd-1", stamp, blocked)
+}
+
 // guardPrimeThroughBody primes main 0046 from v45 up to and including the
-// restore's column probe: the per-step dirty-table snapshot (commitEachStep
-// only), the guard's snapshot of snapshotRows, and the frozen body (0046 has
-// no pre-repair). The caller primes the post-body reread and what follows.
-func guardPrimeThroughBody(mock sqlmock.Sqlmock, commitEachStep bool, snapshotRows *sqlmock.Rows) {
+// restore's column probes: the per-step dirty-table snapshot (commitEachStep
+// only), the guard's snapshot of snapshotRows (with is_blocked when
+// flagBefore, as on a store that already has the column), and the frozen
+// body (0046 has no pre-repair). The caller primes the post-body reread
+// (guardIssuesFlagSelect) and what follows.
+func guardPrimeThroughBody(mock sqlmock.Sqlmock, commitEachStep, flagBefore bool, snapshotRows *sqlmock.Rows) {
 	if commitEachStep {
 		mock.ExpectQuery(guardDirtyStatusQuery).
 			WillReturnRows(sqlmock.NewRows([]string{"table_name", "staged"}))
 	}
-	mock.ExpectQuery(guardColumnQuery).WithArgs("issues", "updated_at").
-		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
-	mock.ExpectQuery(guardIssuesSelect).WillReturnRows(snapshotRows)
+	guardExpectColumn(mock, "issues", "updated_at", true)
+	guardExpectColumn(mock, "issues", "is_blocked", flagBefore)
+	if flagBefore {
+		mock.ExpectQuery(guardIssuesFlagSelect).WillReturnRows(snapshotRows)
+	} else {
+		mock.ExpectQuery(guardIssuesSelect).WillReturnRows(snapshotRows)
+	}
 	mock.ExpectExec(`SET @needs_add`).WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectQuery(guardColumnQuery).WithArgs("issues", "updated_at").
-		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
+	guardExpectColumn(mock, "issues", "updated_at", true)
+	guardExpectColumn(mock, "issues", "is_blocked", true)
 }
 
 // guardPrimeTail primes main 0046's cursor row and, on the commitEachStep
@@ -308,14 +359,13 @@ func guardPrimeTail(mock sqlmock.Sqlmock, commitEachStep bool) {
 // TestUpdatedAtGuardRestoresTimestampsAroundRegisteredStep is AC-1's runner
 // half: on a registered step (main 0046) the restore runs between a
 // successful body and the cursor row, on both the per-step-commit and the
-// bounded path; rows the body left alone are not rewritten; a
-// compare-and-swap miss does not fail the step; and more than
+// bounded path; rows the body left alone are not rewritten; a row whose flag
+// the body never touched keeps a timestamp another writer gave it during the
+// step; a row the recompute cleared and set again, or cleared for good, is
+// restored; a compare-and-swap miss does not fail the step; and more than
 // restoreBatchSize stamped rows split into bounded statements. sqlmock
 // matches calls in order, so the expectation sequence is the assertion.
 func TestUpdatedAtGuardRestoresTimestampsAroundRegisteredStep(t *testing.T) {
-	oneRow := func(stamp string) *sqlmock.Rows {
-		return sqlmock.NewRows([]string{"id", "updated_at"}).AddRow("bd-1", stamp)
-	}
 	run := func(t *testing.T, commitEachStep bool, prime func(mock sqlmock.Sqlmock)) {
 		t.Helper()
 		failOnSwallowedAdvisory(t)
@@ -346,10 +396,10 @@ func TestUpdatedAtGuardRestoresTimestampsAroundRegisteredStep(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			run(t, commitEachStep, func(mock sqlmock.Sqlmock) {
-				guardPrimeThroughBody(mock, commitEachStep, oneRow(guardOldStamp))
-				mock.ExpectQuery(guardIssuesSelect).WillReturnRows(oneRow(guardNewStamp))
-				mock.ExpectExec(guardOneRowRestore).
-					WithArgs("bd-1", guardOldStamp, "bd-1", guardNewStamp).
+				guardPrimeThroughBody(mock, commitEachStep, false, oneGuardRow(guardOldStamp))
+				mock.ExpectQuery(guardIssuesFlagSelect).WillReturnRows(oneGuardFlagRow(guardNewStamp, 1))
+				mock.ExpectExec(guardRestoreSQL("issues", 1)).
+					WithArgs(guardRestoreArgs(guardRestoreRow{"bd-1", guardOldStamp, guardNewStamp})...).
 					WillReturnResult(sqlmock.NewResult(0, 1))
 				guardPrimeTail(mock, commitEachStep)
 			})
@@ -358,21 +408,53 @@ func TestUpdatedAtGuardRestoresTimestampsAroundRegisteredStep(t *testing.T) {
 
 	t.Run("rows the body left alone are not rewritten", func(t *testing.T) {
 		run(t, false, func(mock sqlmock.Sqlmock) {
-			guardPrimeThroughBody(mock, false, oneRow(guardOldStamp))
+			guardPrimeThroughBody(mock, false, false, oneGuardRow(guardOldStamp))
 			// No restore is primed: an issued UPDATE fails as unexpected.
-			mock.ExpectQuery(guardIssuesSelect).WillReturnRows(oneRow(guardOldStamp))
+			mock.ExpectQuery(guardIssuesFlagSelect).WillReturnRows(oneGuardFlagRow(guardOldStamp, 0))
+			guardPrimeTail(mock, false)
+		})
+	})
+
+	t.Run("a row whose flag the body never set keeps another writer's updated_at", func(t *testing.T) {
+		run(t, false, func(mock sqlmock.Sqlmock) {
+			guardPrimeThroughBody(mock, false, true, oneGuardFlagRow(guardOldStamp, 0))
+			// Another session edited bd-1 during the step; the recompute
+			// left it unblocked, so the body never wrote it. No restore is
+			// primed: an issued UPDATE fails as unexpected.
+			mock.ExpectQuery(guardIssuesFlagSelect).WillReturnRows(oneGuardFlagRow("2026-11-02 03:59:58", 0))
+			guardPrimeTail(mock, false)
+		})
+	})
+
+	t.Run("rows the recompute cleared are restored", func(t *testing.T) {
+		run(t, false, func(mock sqlmock.Sqlmock) {
+			// bd-1 stays blocked: the body cleared it and set it again, so
+			// its flag reads the same before and after. bd-2 is unblocked
+			// for good. The clear stamped both.
+			guardPrimeThroughBody(mock, false, true, sqlmock.NewRows([]string{"id", "updated_at", "is_blocked"}).
+				AddRow("bd-1", guardOldStamp, 1).
+				AddRow("bd-2", "2025-03-02 10:00:00", 1))
+			mock.ExpectQuery(guardIssuesFlagSelect).WillReturnRows(sqlmock.NewRows([]string{"id", "updated_at", "is_blocked"}).
+				AddRow("bd-1", guardNewStamp, 1).
+				AddRow("bd-2", guardNewStamp, 0))
+			mock.ExpectExec(guardRestoreSQL("issues", 2)).
+				WithArgs(guardRestoreArgs(
+					guardRestoreRow{"bd-1", guardOldStamp, guardNewStamp},
+					guardRestoreRow{"bd-2", "2025-03-02 10:00:00", guardNewStamp},
+				)...).
+				WillReturnResult(sqlmock.NewResult(0, 2))
 			guardPrimeTail(mock, false)
 		})
 	})
 
 	t.Run("a compare-and-swap miss is not an error", func(t *testing.T) {
 		run(t, false, func(mock sqlmock.Sqlmock) {
-			guardPrimeThroughBody(mock, false, oneRow(guardOldStamp))
-			mock.ExpectQuery(guardIssuesSelect).WillReturnRows(oneRow(guardNewStamp))
+			guardPrimeThroughBody(mock, false, false, oneGuardRow(guardOldStamp))
+			mock.ExpectQuery(guardIssuesFlagSelect).WillReturnRows(oneGuardFlagRow(guardNewStamp, 1))
 			// Another writer moved the row after the reread: the predicate
 			// matches nothing and the step still records.
-			mock.ExpectExec(guardOneRowRestore).
-				WithArgs("bd-1", guardOldStamp, "bd-1", guardNewStamp).
+			mock.ExpectExec(guardRestoreSQL("issues", 1)).
+				WithArgs(guardRestoreArgs(guardRestoreRow{"bd-1", guardOldStamp, guardNewStamp})...).
 				WillReturnResult(sqlmock.NewResult(0, 0))
 			guardPrimeTail(mock, false)
 		})
@@ -382,27 +464,22 @@ func TestUpdatedAtGuardRestoresTimestampsAroundRegisteredStep(t *testing.T) {
 		n := restoreBatchSize + 1
 		id := func(i int) string { return fmt.Sprintf("bd-%04d", i) }
 		before := sqlmock.NewRows([]string{"id", "updated_at"})
-		after := sqlmock.NewRows([]string{"id", "updated_at"})
+		after := sqlmock.NewRows([]string{"id", "updated_at", "is_blocked"})
+		var full []guardRestoreRow
 		for i := range n {
 			before.AddRow(id(i), guardOldStamp)
-			after.AddRow(id(i), guardNewStamp)
-		}
-		fullBatch := `UPDATE issues SET updated_at = CASE id` + strings.Repeat(` WHEN \? THEN \?`, restoreBatchSize) +
-			` ELSE updated_at END WHERE \(id = \? AND updated_at = \?\)` +
-			strings.Repeat(` OR \(id = \? AND updated_at = \?\)`, restoreBatchSize-1) + `$`
-		setArgs := make([]driver.Value, 0, 2*restoreBatchSize)
-		whereArgs := make([]driver.Value, 0, 2*restoreBatchSize)
-		for i := range restoreBatchSize {
-			setArgs = append(setArgs, id(i), guardOldStamp)
-			whereArgs = append(whereArgs, id(i), guardNewStamp)
+			after.AddRow(id(i), guardNewStamp, 1)
+			if i < restoreBatchSize {
+				full = append(full, guardRestoreRow{id(i), guardOldStamp, guardNewStamp})
+			}
 		}
 		run(t, false, func(mock sqlmock.Sqlmock) {
-			guardPrimeThroughBody(mock, false, before)
-			mock.ExpectQuery(guardIssuesSelect).WillReturnRows(after)
-			mock.ExpectExec(fullBatch).WithArgs(append(setArgs, whereArgs...)...).
+			guardPrimeThroughBody(mock, false, false, before)
+			mock.ExpectQuery(guardIssuesFlagSelect).WillReturnRows(after)
+			mock.ExpectExec(guardRestoreSQL("issues", restoreBatchSize)).WithArgs(guardRestoreArgs(full...)...).
 				WillReturnResult(sqlmock.NewResult(0, int64(restoreBatchSize)))
-			mock.ExpectExec(guardOneRowRestore).
-				WithArgs(id(n-1), guardOldStamp, id(n-1), guardNewStamp).
+			mock.ExpectExec(guardRestoreSQL("issues", 1)).
+				WithArgs(guardRestoreArgs(guardRestoreRow{id(n - 1), guardOldStamp, guardNewStamp})...).
 				WillReturnResult(sqlmock.NewResult(0, 1))
 			guardPrimeTail(mock, false)
 		})
@@ -412,8 +489,10 @@ func TestUpdatedAtGuardRestoresTimestampsAroundRegisteredStep(t *testing.T) {
 // TestUpdatedAtGuardRowMovesPreferDestinationHistory is AC-3's statement-level
 // half for main 0035: a moved row takes its issues (source) value, a row the
 // wisps destination already held keeps its own value over a same-ID source
-// value, and rows the step created (no snapshot) or deleted (absent from the
-// reread) are left alone.
+// value, a destination row whose ephemeral flag the body flipped (from 0 or
+// NULL) is restored, a destination row whose flag the body left alone keeps
+// a timestamp another writer gave it during the step, and rows the step
+// created (no snapshot) or deleted (absent from the reread) are left alone.
 func TestUpdatedAtGuardRowMovesPreferDestinationHistory(t *testing.T) {
 	failOnSwallowedAdvisory(t)
 	quietStderr(t)
@@ -424,34 +503,43 @@ func TestUpdatedAtGuardRowMovesPreferDestinationHistory(t *testing.T) {
 	}
 	defer db.Close()
 
-	// Snapshot, sorted by table: issues (source) then wisps (destination).
-	mock.ExpectQuery(guardColumnQuery).WithArgs("issues", "updated_at").
-		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
+	// Snapshot, sorted by table: issues (source, no flag) then wisps
+	// (destination, with the ephemeral flag the body sets).
+	guardExpectColumn(mock, "issues", "updated_at", true)
 	mock.ExpectQuery(guardIssuesSelect).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "updated_at"}).
 			AddRow("mover", "2025-01-06 10:00:00").
 			AddRow("native", "2025-01-01 00:00:00"))
-	mock.ExpectQuery(guardColumnQuery).WithArgs("wisps", "updated_at").
-		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
-	mock.ExpectQuery(`SELECT id, updated_at FROM wisps ORDER BY id`).
-		WillReturnRows(sqlmock.NewRows([]string{"id", "updated_at"}).
-			AddRow("doomed", "2025-01-02 00:00:00").
-			AddRow("native", "2025-02-10 08:00:00"))
+	guardExpectColumn(mock, "wisps", "updated_at", true)
+	guardExpectColumn(mock, "wisps", "ephemeral", true)
+	mock.ExpectQuery(`SELECT id, updated_at, ephemeral FROM wisps ORDER BY id`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "updated_at", "ephemeral"}).
+			AddRow("bystander", "2025-01-03 00:00:00", 1).
+			AddRow("doomed", "2025-01-02 00:00:00", 0).
+			AddRow("legacy", "2025-01-04 00:00:00", nil).
+			AddRow("native", "2025-02-10 08:00:00", 0))
 	// 0035's body (no pre-repair at 35).
 	mock.ExpectExec(`SET @shared_cols`).WillReturnResult(sqlmock.NewResult(0, 0))
-	// Reread: fresh is new, mover arrived stamped, native (collision) got
-	// stamped, doomed is gone. Only mover and native are restored.
-	mock.ExpectQuery(guardColumnQuery).WithArgs("wisps", "updated_at").
-		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
-	mock.ExpectQuery(`SELECT id, updated_at FROM wisps ORDER BY id`).
-		WillReturnRows(sqlmock.NewRows([]string{"id", "updated_at"}).
-			AddRow("fresh", guardNewStamp).
-			AddRow("mover", guardNewStamp).
-			AddRow("native", guardNewStamp))
-	mock.ExpectExec(`UPDATE wisps SET updated_at = CASE id WHEN \? THEN \? WHEN \? THEN \? ELSE updated_at END WHERE \(id = \? AND updated_at = \?\) OR \(id = \? AND updated_at = \?\)$`).
-		WithArgs("mover", "2025-01-06 10:00:00", "native", "2025-02-10 08:00:00",
-			"mover", guardNewStamp, "native", guardNewStamp).
-		WillReturnResult(sqlmock.NewResult(0, 2))
+	// Reread: fresh is new, mover arrived stamped, legacy and native
+	// (collision) got flipped and stamped, bystander was edited by another
+	// writer with its flag already set, doomed is gone. Only mover, legacy
+	// and native are restored.
+	guardExpectColumn(mock, "wisps", "updated_at", true)
+	guardExpectColumn(mock, "wisps", "ephemeral", true)
+	mock.ExpectQuery(`SELECT id, updated_at, ephemeral FROM wisps ORDER BY id`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "updated_at", "ephemeral"}).
+			AddRow("bystander", "2026-11-02 03:59:58", 1).
+			AddRow("fresh", guardNewStamp, 1).
+			AddRow("legacy", guardNewStamp, 1).
+			AddRow("mover", guardNewStamp, 1).
+			AddRow("native", guardNewStamp, 1))
+	mock.ExpectExec(guardRestoreSQL("wisps", 3)).
+		WithArgs(guardRestoreArgs(
+			guardRestoreRow{"legacy", "2025-01-04 00:00:00", guardNewStamp},
+			guardRestoreRow{"mover", "2025-01-06 10:00:00", guardNewStamp},
+			guardRestoreRow{"native", "2025-02-10 08:00:00", guardNewStamp},
+		)...).
+		WillReturnResult(sqlmock.NewResult(0, 3))
 	mock.ExpectExec(`INSERT IGNORE INTO schema_migrations`).WithArgs(35, sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 

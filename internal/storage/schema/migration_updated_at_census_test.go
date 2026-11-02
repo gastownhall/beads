@@ -13,9 +13,10 @@ import (
 // The updated_at census (AC-7 of gastownhall/beads#5981): every UPDATE in
 // both shipped migration series that rewrites a table whose updated_at
 // carries ON UPDATE CURRENT_TIMESTAMP either assigns updated_at itself or is
-// covered by its step's updatedAtGuards restore target. The census parses
-// SQL rather than grepping it, and fails on any UPDATE shape it cannot
-// classify, so a new form has to be taught to it rather than slipping by.
+// covered by its step's updatedAtGuards restore target, assigning nothing
+// there but the step's registered flag. The census parses SQL rather than
+// grepping it, and fails on any UPDATE shape it cannot classify, so a new
+// form has to be taught to it rather than slipping by.
 
 // censusFile is one migration's up script.
 type censusFile struct {
@@ -78,6 +79,16 @@ func TestMigrationUpdatesOfAutoStampedTablesKeepUpdatedAt(t *testing.T) {
 			"schema_migrations/0047_recompute_mixed_is_blocked.up.sql: UPDATE issues")
 	})
 
+	t.Run("a registry flag the body does not assign fails", func(t *testing.T) {
+		guards := maps.Clone(updatedAtGuards)
+		key := repairKey{"schema_migrations", 47}
+		spec := guards[key]
+		spec.flag = "ephemeral"
+		guards[key] = spec
+		requireCensusProblem(t, censusUpdatedAtCoverage(series, stamped, guards),
+			"schema_migrations/0047_recompute_mixed_is_blocked.up.sql: UPDATE issues assigns [is_blocked]")
+	})
+
 	t.Run("an unguarded new UPDATE fails", func(t *testing.T) {
 		mutated := slices.Clone(series)
 		main := mutated[0]
@@ -117,9 +128,11 @@ func requireCensusProblem(t *testing.T, problems []string, want string) {
 }
 
 // censusUpdatedAtCoverage returns every coverage problem: an unsafe UPDATE
-// its step's restore targets miss, a registry entry naming no shipped step,
-// a restore target the step never rewrites unsafely, a move source the step
-// never copies from, and any SQL the census cannot classify.
+// its step's restore targets miss, an unsafe UPDATE of a restore target that
+// assigns anything but the step's flag (the guard reads only that column to
+// tell the body's rewrites from another writer's), a registry entry naming no
+// shipped step, a restore target the step never rewrites unsafely, a move
+// source the step never copies from, and any SQL the census cannot classify.
 func censusUpdatedAtCoverage(series []censusSeries, stamped map[string]bool, guards map[repairKey]updatedAtGuardSpec) []string {
 	var problems []string
 	seen := map[repairKey]bool{}
@@ -136,15 +149,20 @@ func censusUpdatedAtCoverage(series []censusSeries, stamped map[string]bool, gua
 			spec, guarded := guards[key]
 			unsafe := map[string]bool{}
 			for _, u := range updates {
-				for table, assignsUpdatedAt := range u {
-					if !stamped[table] || assignsUpdatedAt {
+				for table, columns := range u {
+					if !stamped[table] || slices.Contains(columns, "updated_at") {
 						continue
 					}
 					unsafe[table] = true
-					if !guarded || !slices.Contains(spec.restore, table) {
+					switch {
+					case !guarded || !slices.Contains(spec.restore, table):
 						problems = append(problems, fmt.Sprintf(
 							"%s: UPDATE %s does not assign updated_at, which its ON UPDATE CURRENT_TIMESTAMP then stamps; add `updated_at = updated_at` to the SET list (updatedAtGuards is only for frozen migrations)",
 							where, table))
+					case !slices.Equal(columns, []string{spec.flag}):
+						problems = append(problems, fmt.Sprintf(
+							"%s: UPDATE %s assigns %v, but updatedAtGuards says the step rewrites only its %s flag",
+							where, table, columns, spec.flag))
 					}
 				}
 			}
@@ -314,9 +332,9 @@ func censusTokenize(sql string) ([]censusToken, error) {
 	return out, nil
 }
 
-// censusUpdate maps each table one UPDATE assigns to whether it assigns that
-// table's updated_at.
-type censusUpdate map[string]bool
+// censusUpdate maps each table one UPDATE assigns to the columns it assigns
+// there, lowercased and deduplicated, in SET-list order.
+type censusUpdate map[string][]string
 
 // censusUpdates finds every UPDATE statement in sql and in the string
 // literals it builds statements from (PREPARE'd SQL), recursively.
@@ -457,7 +475,9 @@ func censusParseUpdate(ts []censusToken) (censusUpdate, error) {
 		} else {
 			return fmt.Errorf("%w: unqualified %q in a multi-table UPDATE", errCensusShape, column)
 		}
-		u[table] = u[table] || strings.EqualFold(column, "updated_at")
+		if column = strings.ToLower(column); !slices.Contains(u[table], column) {
+			u[table] = append(u[table], column)
+		}
 		return nil
 	}
 	split := func(end int) error {

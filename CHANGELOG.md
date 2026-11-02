@@ -1211,8 +1211,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so its `ON UPDATE CURRENT_TIMESTAMP` stamped every row they touched (every
   blocked issue on a 1.0.x upgrade, for example). Their SQL is frozen, so bd
   now records the affected rows' `updated_at` before each of these steps and
-  writes it back before the step is recorded and committed (#5981). Values
-  already stamped by an earlier upgrade are not repaired.
+  writes it back on the rows the step rewrote before the step is recorded and
+  committed (#5981). An edit another process makes during the step to an
+  issue the step does not rewrite keeps its own time. Values already stamped
+  by an earlier upgrade are not repaired.
 - `bd dolt push <remote>` and `bd dolt pull <remote>` now push to and pull
   from the named remote. bd ignored the name, so `bd dolt push 1st` pushed to
   the default remote and reported "Push complete."; a name that differs from
