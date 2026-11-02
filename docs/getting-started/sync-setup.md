@@ -24,7 +24,8 @@ dolt version   # must match the pinned version
 Install a specific Dolt version rather than `releases/latest`. On Dolt 2.3.x a
 few percent of freshly created databases come up with `CALL
 DOLT_RESET('--hard')` broken for the life of the server process, which breaks
-`bd flatten`, `bd admin compact` and the rollback behind `bd dolt pull`;
+`bd flatten`, `bd compact` in v1.3.2 and earlier, and the rollback behind
+`bd dolt pull`;
 separately, the upstream `latest` URL can resolve to a *lower* version than
 one released days earlier.
 [Which Dolt version to install](/architecture/dolt#which-dolt-version-to-install)
