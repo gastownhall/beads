@@ -1157,6 +1157,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   each linked issue once (one GET per issue, the same one-time cost as a fresh
   clone or Dolt server restart) and closes any issue an earlier build left
   open.
+- `bd dep tree` no longer drops a diamond's second edge (#5282). An issue
+  reached by two paths is still expanded once, under the first path, but each
+  later path now lists it as `(shown above)` with its edge type, so a direct
+  blocker that is also reachable through another issue stays visible. In
+  `--json` and on `GET /v0/beads/dependencies/tree` those rows carry
+  `"deduped": true`; drop them to get each issue once. They count toward
+  `--max-rows` / `BEADS_MAX_ROWS`.
 - `bd list --watch` and `bd show --watch` now wait a full poll interval after
   each refresh, and `bd list --watch --parent` reads its tree in one
   transaction, so other bd commands on an embedded workspace no longer stall
