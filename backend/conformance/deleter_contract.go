@@ -304,7 +304,7 @@ func RunDeleterCascadeDeletesTheClosure(t *testing.T, ctx context.Context, fixtu
 		t.Errorf("Deleted = %d, want 3 — the closure is root, its child and ITS child", result.Deleted)
 	}
 	if len(result.Orphaned) != 0 {
-		t.Errorf("Orphaned = %v, want empty: a cascade leaves nothing outside the set to orphan", result.Orphaned)
+		t.Errorf("Orphaned = %v, want empty: nothing outside the tree depends on it", result.Orphaned)
 	}
 	deleterAssertIssueRows(t, ctx, fixture, 0, root, middle, leaf)
 	deleterAssertIssueRows(t, ctx, fixture, 1, bystander)
@@ -426,6 +426,50 @@ func RunDeleterCascadeFollowsOnlyContainment(t *testing.T, ctx context.Context, 
 		for _, id := range f.survivors() {
 			deleterAssertIssueRows(t, ctx, fixture, 1, id)
 		}
+	}
+}
+
+// RunDeleterCascadeReportsSurvivingDependents pins what a containment-only
+// cascade owes the rows it leaves behind (issueops/deleter.go,
+// DeleteResult.Orphaned): every surviving DIRECT dependent of a deleted row is
+// named, in ascending id order, whether or not the request carried Force, and
+// the preview names the same rows the deletion does.
+//
+// B1 and C are not named — B1 depends on B and C is C1's parent, neither of
+// which is deleted — and the deleted tree's own internal edges orphan nothing.
+// The survivors' edges into the tree go with it, so C1, blocked by A1 until
+// now, is left unblocked.
+func RunDeleterCascadeReportsSurvivingDependents(t *testing.T, ctx context.Context, fixture DeleterFixture) {
+	t.Helper()
+	for _, mode := range []struct {
+		tag   string
+		force bool
+	}{
+		{tag: "corph", force: true},
+		{tag: "corphnf", force: false},
+	} {
+		f := deleterSeedContainment(t, ctx, fixture, mode.tag)
+		want := []string{f.B, f.C1, f.S}
+		request := publicops.DeleteRequest{IDs: []string{f.A}, Cascade: true, Force: mode.force}
+
+		probe := newBlockedStateProbe(ctx, fixture.QueryScalar)
+		probe.requireBlockedByOpenBlocker(t, blockedIssue(f.C1), blockedIssue(f.A1), "C1 is blocked by a row the cascade deletes")
+
+		preview := deleterDelete(t, ctx, fixture, deleterWithDryRun(request, true))
+		if !reflect.DeepEqual(preview.Orphaned, want) {
+			t.Errorf("Force=%v: preview Orphaned = %v, want %v", mode.force, preview.Orphaned, want)
+		}
+
+		result := deleterDelete(t, ctx, fixture, request)
+		if !reflect.DeepEqual(result.Orphaned, want) {
+			t.Errorf("Force=%v: Orphaned = %v, want %v — the surviving direct dependents of the deleted tree", mode.force, result.Orphaned, want)
+		}
+		deleterAssertEdgeRows(t, ctx, fixture, 0, f.B, f.A)
+		deleterAssertEdgeRows(t, ctx, fixture, 0, f.C1, f.A1)
+		deleterAssertEdgeRows(t, ctx, fixture, 0, f.S, f.A)
+		deleterAssertEdgeRows(t, ctx, fixture, 1, f.C1, f.C)
+		deleterAssertEdgeRows(t, ctx, fixture, 1, f.B1, f.B)
+		probe.requireUnblocked(t, blockedIssue(f.C1), "C1's only blocker was deleted by the cascade")
 	}
 }
 

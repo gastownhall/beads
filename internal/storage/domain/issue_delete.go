@@ -80,6 +80,15 @@ func (u *issueUseCaseImpl) deleteMany(ctx context.Context, params DeleteIssuesPa
 			return DeleteIssuesResult{}, fmt.Errorf("delete: cascade expansion: %w", err)
 		}
 		allIDs = expanded
+		// The closure is containment only (GH#6301), so rows joined to it by
+		// any other edge survive the cascade and lose that edge. They are asked
+		// about against the whole closure: a dependent of a cascade-deleted
+		// descendant is orphaned as surely as one of a named id.
+		externalBySource, err := u.externalDependents(ctx, allIDs)
+		if err != nil {
+			return DeleteIssuesResult{}, err
+		}
+		result.OrphanedIssues = orphansOf(externalBySource)
 	case params.EnforceCascadePolicy:
 		// Embedded-parity dependent handling (see DeleteIssuesParams): without
 		// Cascade, an external dependent either blocks the delete (no Force) or
@@ -89,13 +98,7 @@ func (u *issueUseCaseImpl) deleteMany(ctx context.Context, params DeleteIssuesPa
 			return DeleteIssuesResult{}, err
 		}
 		if params.Force {
-			orphanSet := map[string]bool{}
-			for _, deps := range externalBySource {
-				for _, dep := range deps {
-					orphanSet[dep] = true
-				}
-			}
-			result.OrphanedIssues = sortedStringSet(orphanSet)
+			result.OrphanedIssues = orphansOf(externalBySource)
 		} else {
 			for _, id := range params.IDs {
 				if deps := externalBySource[id]; len(deps) > 0 {
@@ -296,6 +299,18 @@ func (u *issueUseCaseImpl) externalDependents(ctx context.Context, ids []string)
 		}
 	}
 	return out, nil
+}
+
+// orphansOf flattens externalDependents' answer into one ascending,
+// duplicate-free list.
+func orphansOf(externalBySource map[string][]string) []string {
+	orphanSet := map[string]bool{}
+	for _, deps := range externalBySource {
+		for _, dep := range deps {
+			orphanSet[dep] = true
+		}
+	}
+	return sortedStringSet(orphanSet)
 }
 
 func sortedStringSet(set map[string]bool) []string {

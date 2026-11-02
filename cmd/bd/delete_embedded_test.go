@@ -6,6 +6,9 @@ import (
 	"encoding/json"
 	"os"
 	"os/exec"
+	"reflect"
+	"slices"
+	"sort"
 	"strings"
 	"testing"
 
@@ -435,4 +438,78 @@ func TestEmbeddedDeleteCascadeFollowsOnlyParentChild(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("cascade_reports_and_releases_surviving_dependents", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "cpo")
+		f := setupCascadeFixture(t, bd, dir)
+		if !blockedIDs(t, bd, dir)[f.C1] {
+			t.Fatalf("precondition: %s must be blocked by %s before the delete", f.C1, f.A1)
+		}
+
+		got := bdDeleteJSON(t, bd, dir, f.A, "--cascade", "--force")
+		want := []string{f.B, f.C1, f.S}
+		sort.Strings(want)
+		if orphans := jsonStrings(got["orphaned_issues"]); !reflect.DeepEqual(orphans, want) {
+			t.Errorf("orphaned_issues = %v, want %v — the surviving direct dependents of the deleted tree", orphans, want)
+		}
+		for _, id := range want {
+			for _, dep := range dependsOnIDs(bdShowDetails(t, bd, dir, id)) {
+				if slices.Contains(f.deleted(), dep) {
+					t.Errorf("survivor %s still depends on deleted %s", id, dep)
+				}
+			}
+		}
+		if blockedIDs(t, bd, dir)[f.C1] {
+			t.Errorf("%s is still blocked after its only blocker %s was deleted", f.C1, f.A1)
+		}
+	})
+}
+
+// bdDeleteJSON runs "bd delete <args> --json" and parses its object.
+func bdDeleteJSON(t *testing.T, bd, dir string, args ...string) map[string]interface{} {
+	t.Helper()
+	stdout, _ := bdRunSplit(t, bd, dir, append(append([]string{"delete"}, args...), "--json")...)
+	var out map[string]interface{}
+	if err := json.Unmarshal([]byte(stdout), &out); err != nil {
+		t.Fatalf("parse bd delete --json: %v\n%s", err, stdout)
+	}
+	return out
+}
+
+// jsonStrings converts a decoded JSON array of strings to []string.
+func jsonStrings(v interface{}) []string {
+	items, _ := v.([]interface{})
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		if s, ok := item.(string); ok {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// dependsOnIDs is the ids a "bd show --json" issue depends on.
+func dependsOnIDs(details map[string]interface{}) []string {
+	deps, _ := details["dependencies"].([]interface{})
+	var out []string
+	for _, dep := range deps {
+		if m, ok := dep.(map[string]interface{}); ok {
+			if id, ok := m["id"].(string); ok {
+				out = append(out, id)
+			}
+		}
+	}
+	return out
+}
+
+// blockedIDs is the set of ids "bd blocked" lists.
+func blockedIDs(t *testing.T, bd, dir string) map[string]bool {
+	t.Helper()
+	out := make(map[string]bool)
+	for _, entry := range bdBlockedJSON(t, bd, dir) {
+		if id, ok := entry["id"].(string); ok {
+			out[id] = true
+		}
+	}
+	return out
 }

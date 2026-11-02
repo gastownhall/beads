@@ -221,15 +221,11 @@ type DeleteIssuesResult struct {
 	LabelsCount       int
 	EventsCount       int
 	ReferencesUpdated int
-	// OrphanedIssues is NOT POPULATED BY ANY PATH TODAY, and is kept only
-	// because `bd wisp gc --json` publishes it (always null) and this commit is
-	// not changing that command's wire shape.
-	//
-	// It once described a force-delete policy this layer never implemented: the
-	// two params that were supposed to select that policy were declared,
-	// documented in detail and never read. The policy now lives in
-	// issueops.Deleter, above the use case, and DeleteResult.Orphaned is where
-	// the answer comes out.
+	// OrphanedIssues names, in ascending id order, the surviving rows that
+	// depended directly on a deleted row. A Cascade fills it (the closure is
+	// containment only, so rows joined to it by any other edge survive), and
+	// so does EnforceCascadePolicy with Force; the uncascaded legacy path
+	// leaves it empty. `bd wisp gc --json` publishes it.
 	OrphanedIssues []string
 }
 

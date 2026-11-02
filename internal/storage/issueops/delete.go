@@ -229,14 +229,25 @@ func DeleteIssuesBesideWispsInTx(ctx context.Context, tx *sql.Tx, ids, peeledWis
 				}
 			}
 		} else {
-			orphans := make(map[string]bool)
-			for _, deps := range external {
-				for _, id := range deps {
-					orphans[id] = true
-				}
-			}
-			orphaned = workapi.SortedDeleteIDs(orphans)
+			orphaned = orphanedIDs(external)
 		}
+	} else {
+		// A containment-only cascade (GH#6301) leaves the rows joined to the
+		// tree by any other edge behind, and reports them as DeleteInTx does:
+		// against the whole deletion set, so a dependent of a cascade-deleted
+		// descendant is named too.
+		idSet := make(map[string]bool, len(set.All)+len(peeledWisps))
+		for _, id := range set.All {
+			idSet[id] = true
+		}
+		for _, id := range peeledWisps {
+			idSet[id] = true
+		}
+		external, err := ExternalDependentsBySourceInTx(ctx, tx, set.All, idSet)
+		if err != nil {
+			return nil, fmt.Errorf("get dependents: %w", err)
+		}
+		orphaned = orphanedIDs(external)
 	}
 
 	result, err := DeleteResolvedSetInTx(ctx, tx, set, dryRun, actor)
