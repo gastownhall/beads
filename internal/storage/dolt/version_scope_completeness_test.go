@@ -154,9 +154,12 @@ var txMintingWrappers = []string{
 	// (and the scope calls beside it) down into commitWriteTxOn so a caller
 	// holding a session-scoped resource (withDeleteFence's GET_LOCK'd
 	// *sql.Conn) could mint the retried transaction on THAT connection
-	// instead of the pool. commitWriteTxOn is therefore the real tx-minting
-	// wrapper now; list it, not its thin commitWriteTx delegate.
-	"DoltStore.commitWriteTxOn",
+	// instead of the pool. The journal-writer admission (gastownhall/beads#6117)
+	// moved it once more, into commitWriteTxWith, which takes the retry loop's
+	// shared admission deadline; commitWriteTxWith is therefore the real
+	// tx-minting wrapper now; list it, not its thin commitWriteTx and
+	// commitWriteTxOn delegates.
+	"DoltStore.commitWriteTxWith",
 }
 
 // TestTxMintingWrappersScopeVersionedHistory covers the half

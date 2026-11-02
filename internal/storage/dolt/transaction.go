@@ -177,6 +177,10 @@ func (s *DoltStore) runDoltTransactionRecording(ctx context.Context, commitMsg s
 	// SQL server mode, so mixing connections causes DOLT_COMMIT to see
 	// stale or unrelated changes. (GH#2455)
 
+	// The journal decision is taken once, for both admission and scoping.
+	journalEnabled := s.eventsJournalEnabled.Load()
+	admitBy := journalAdmitBy(ctx, issueops.JournalWriterAdmissionBudget)
+
 	// Snapshot pool stats before acquisition to detect pool-wait events (GH#3140).
 	statsBefore := s.db.Stats()
 	acquireStart := time.Now()
@@ -201,6 +205,19 @@ func (s *DoltStore) runDoltTransactionRecording(ctx context.Context, commitMsg s
 	}
 	defer conn.Close()
 
+	// A journal writer is admitted on the pinned session before anything on it
+	// opens a snapshot. The release is deferred after conn.Close, so it runs
+	// before it: once finishDoltTransactionRecording has committed (DOLT_ADD
+	// and DOLT_COMMIT on this session included) or the body has rolled back,
+	// and before runDoltTransaction's blocked recheck.
+	if s.locksJournalWriters(journalEnabled) {
+		adm, err := s.admitJournalWriter(ctx, conn, admitBy)
+		if err != nil {
+			return issueops.BlockedRecheck{}, err
+		}
+		defer adm.release()
+	}
+
 	var currentBranch string
 	if err := conn.QueryRowContext(ctx, "SELECT active_branch()").Scan(&currentBranch); err != nil {
 		return issueops.BlockedRecheck{}, fmt.Errorf("failed to read active branch: %w", err)
@@ -222,7 +239,6 @@ func (s *DoltStore) runDoltTransactionRecording(ctx context.Context, commitMsg s
 	// exists to make impossible. In journal mode both planes therefore share the
 	// pinned regular transaction. The default journal-off path keeps the
 	// established split transactions untouched.
-	journalEnabled := s.eventsJournalEnabled.Load()
 	ignoredTx := regularTx
 	if !journalEnabled {
 		// NOTE (GH#3140 metrics skew): the pool-wait bracket above measures only

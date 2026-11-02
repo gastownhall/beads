@@ -65,6 +65,9 @@ type doltSQLProvider struct {
 	// eventsJournalEnabled activates the durable events journal for THIS
 	// provider instance only. See SetEventsJournalEnabled.
 	eventsJournalEnabled atomic.Bool
+	// database is the database this provider's units of work run on, the
+	// scope of the journal-writer lock (issueops.JournalWriterLockName).
+	database string
 	// versionedHistory activates dual-write issue-version history for THIS
 	// provider instance only. See SetVersionedHistoryEnabled and
 	// DeferVersionedHistory.
@@ -226,13 +229,34 @@ func (p *doltSQLProvider) Close(ctx context.Context) error {
 }
 
 func (p *doltSQLProvider) BeginTx(ctx context.Context) (Tx, error) {
+	// The journal decision is taken once, for admission and scoping alike.
+	journalOn := p.eventsJournalEnabled.Load()
+	marker := journalWriterFor(ctx)
 	conn, err := p.db.Conn(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("uow: pin connection: %w", err)
 	}
 
+	// A unit of work that may journal is admitted as a journal writer on the
+	// pinned session before START TRANSACTION opens its snapshot.
+	var journalLock *issueops.JournalWriterLock
+	var admit func(context.Context, time.Time) (*issueops.JournalWriterLock, error)
+	if journalOn && marker.mode == journalWriterQueue {
+		admit = func(ctx context.Context, admitBy time.Time) (*issueops.JournalWriterLock, error) {
+			return admitJournalWriter(ctx, conn, p.database, admitBy)
+		}
+		journalLock, err = admit(ctx, marker.admitBy)
+		if err != nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf("uow: %w", err)
+		}
+	}
+
 	_, err = conn.ExecContext(ctx, "START TRANSACTION;")
 	if err != nil {
+		// No transaction is open, but the session's state is unknown: give
+		// the lock up with the session.
+		journalLock.Abandon()
 		_ = conn.Close()
 		return nil, fmt.Errorf("uow: failed to start transaction: %w", err)
 	}
@@ -242,7 +266,7 @@ func (p *doltSQLProvider) BeginTx(ctx context.Context) (Tx, error) {
 	// run scoped off (issueops.VersionedHistorySwitch.ResolveIn).
 	versioned, err := p.versionedHistory.ResolveIn(ctx, conn)
 	if err != nil {
-		return nil, (&doltServerTx{conn: conn}).closeOpenTxAfterFailure(ctx, fmt.Errorf("uow: %w", err))
+		return nil, (&doltServerTx{conn: conn, journalLock: journalLock}).closeOpenTxAfterFailure(ctx, fmt.Errorf("uow: %w", err))
 	}
 
 	// Bind journal and versioned-history activation to the connection this unit
@@ -254,7 +278,9 @@ func (p *doltSQLProvider) BeginTx(ctx context.Context) (Tx, error) {
 	// way; Commit takes what it recorded once the transaction has committed.
 	return &doltServerTx{
 		conn:              conn,
-		clearJournalScope: issueops.ScopeEventsJournalTransaction(conn, p.eventsJournalEnabled.Load()),
+		journalLock:       journalLock,
+		admitJournal:      admit,
+		clearJournalScope: issueops.ScopeEventsJournalTransaction(conn, journalOn),
 		clearVersionScope: issueops.ScopeVersionedHistoryTransaction(conn, versioned),
 		clearRecheckScope: issueops.ScopeBlockedRecheckTransaction(conn),
 	}, nil
@@ -947,6 +973,7 @@ func openAndInitSchema(ctx context.Context, ep proxy.Endpoint, backend, database
 		return &doltSQLProvider{
 			defaultBranch:     defaultBranch,
 			db:                pool,
+			database:          database,
 			serverEndpoint:    "tcp:" + ep.Address(),
 			teamServer:        teamServer,
 			expectedProjectID: expectedProjectID,

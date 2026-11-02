@@ -20,6 +20,16 @@ import (
 type doltServerTx struct {
 	conn *sql.Conn
 	done bool
+	// journalLock is the journal-writer lock BeginTx took on conn before
+	// START TRANSACTION, nil when this unit of work took none. It is released
+	// as soon as the statement that ends the SQL transaction succeeds, before
+	// the post-commit recheck, and otherwise with the connection: released by
+	// releaseConn (the transaction has ended), abandoned with the session by
+	// poisonConn (it may not have).
+	journalLock *issueops.JournalWriterLock
+	// admitJournal re-admits this session as a journal writer, for the
+	// post-commit recheck's own transactions; nil when BeginTx took no lock.
+	admitJournal func(ctx context.Context, admitBy time.Time) (*issueops.JournalWriterLock, error)
 	// clearJournalScope releases the events-journal activation BeginTx bound to
 	// conn. It is called from the two places the connection leaves this tx —
 	// releaseConn and poisonConn — so the activation entry cannot outlive the
@@ -61,6 +71,7 @@ func (t *doltServerTx) Commit(ctx context.Context, message string) error {
 	_, err = t.conn.ExecContext(ctx, stmt, args...)
 	if err == nil {
 		t.done = true
+		t.releaseJournalLock()
 		// The write is durable. Settle the dependents its unblocking writes
 		// recorded on a fresh snapshot before the pinned session goes back
 		// to the pool (gastownhall/beads#6716). A recheck failure is logged,
@@ -145,6 +156,9 @@ func (t *doltServerTx) CommitScoped(ctx context.Context, tables []string, messag
 		return t.closeOpenTxAfterFailure(ctx, err)
 	}
 	t.done = true
+	// The SQL transaction has ended; the Dolt commit after it and the recheck
+	// run unlocked (the recheck takes its own admission).
+	t.releaseJournalLock()
 	clean := t.commitStagedTables(ctx, staged, message)
 	if t.recheckBlockedAfterCommit(ctx, issueops.TakeBlockedRecheck(t.conn)) && clean {
 		t.releaseConn()
@@ -356,6 +370,7 @@ func (t *doltServerTx) rollbackConn(ctx context.Context) error {
 }
 
 func (t *doltServerTx) releaseConn() {
+	t.releaseJournalLock()
 	t.releaseJournalScope()
 	t.releaseVersionScope()
 	t.releaseRecheckScope()
@@ -363,6 +378,14 @@ func (t *doltServerTx) releaseConn() {
 		_ = t.conn.Close()
 		t.conn = nil
 	}
+}
+
+// releaseJournalLock releases the journal-writer lock, if this unit of work
+// still holds one. Call it only once the SQL transaction has ended.
+// Idempotent.
+func (t *doltServerTx) releaseJournalLock() {
+	t.journalLock.Release()
+	t.journalLock = nil
 }
 
 // releaseJournalScope drops this transaction's events-journal activation entry.
@@ -400,6 +423,10 @@ func (t *doltServerTx) releaseRecheckScope() {
 // commit the orphaned writes. Returning driver.ErrBadConn from Raw makes
 // database/sql close the connection and drop it from the pool.
 func (t *doltServerTx) poisonConn() {
+	// A transaction may still be open on the session, so no RELEASE_LOCK:
+	// the lock goes with the discarded session.
+	t.journalLock.Abandon()
+	t.journalLock = nil
 	t.releaseJournalScope()
 	t.releaseVersionScope()
 	t.releaseRecheckScope()

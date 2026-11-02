@@ -33,6 +33,7 @@ go_library(
         "issue_operations.go",
         "issue_reader.go",
         "journal_maintenance.go",
+        "journal_writer.go",
         "lease_reclaimer.go",
         "maintenance.go",
         "memories.go",
