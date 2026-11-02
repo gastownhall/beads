@@ -36,6 +36,10 @@ type doltTransaction struct {
 	// role: it deliberately drops wisp_* tables because they are dolt-ignored.
 	wroteRegularDep bool
 	wroteWispDep    bool
+
+	// regularEnded records that finishDoltTransaction's commit of regularTx
+	// ended it (sqlTxEnded), so a journal-writer admission may unlock.
+	regularEnded bool
 	// journalPinned records that ignoredTx IS regularTx because the events
 	// journal collapsed the two planes into one transaction, so the finish path
 	// must not commit or roll it back a second time.
@@ -209,13 +213,16 @@ func (s *DoltStore) runDoltTransactionRecording(ctx context.Context, commitMsg s
 	// opens a snapshot. The release is deferred after conn.Close, so it runs
 	// before it: once finishDoltTransactionRecording has committed (DOLT_ADD
 	// and DOLT_COMMIT on this session included) or the body has rolled back,
-	// and before runDoltTransaction's blocked recheck.
+	// and before runDoltTransaction's blocked recheck. regularEnded records
+	// that the regular transaction committed or rolled back; until then the
+	// admission discards the session rather than unlock it.
+	regularEnded := true
 	if s.locksJournalWriters(journalEnabled) {
 		adm, err := s.admitJournalWriter(ctx, conn, admitBy)
 		if err != nil {
 			return issueops.BlockedRecheck{}, err
 		}
-		defer adm.release()
+		defer func() { adm.end(regularEnded) }()
 	}
 
 	var currentBranch string
@@ -226,6 +233,12 @@ func (s *DoltStore) runDoltTransactionRecording(ctx context.Context, commitMsg s
 	regularTx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
 		return issueops.BlockedRecheck{}, fmt.Errorf("failed to begin regular tx: %w", err)
+	}
+	regularEnded = false
+	rollbackRegular := func() {
+		if regularTx.Rollback() == nil {
+			regularEnded = true
+		}
 	}
 
 	// The journal counter and rows must commit in the SAME SQL transaction as
@@ -250,7 +263,7 @@ func (s *DoltStore) runDoltTransactionRecording(ctx context.Context, commitMsg s
 		var ignoredCleanup func()
 		ignoredCleanup, ignoredTx, err = s.beginIgnoredTxOnBranch(ctx, currentBranch)
 		if err != nil {
-			_ = regularTx.Rollback()
+			rollbackRegular()
 			return issueops.BlockedRecheck{}, err
 		}
 		defer ignoredCleanup()
@@ -269,7 +282,7 @@ func (s *DoltStore) runDoltTransactionRecording(ctx context.Context, commitMsg s
 	// before fn runs, for the same reason (VersionedHistorySwitch.ResolveIn).
 	versioned, err := s.versionedHistory.ResolveIn(ctx, regularTx)
 	if err != nil {
-		_ = regularTx.Rollback()
+		rollbackRegular()
 		if !journalEnabled {
 			_ = ignoredTx.Rollback()
 		}
@@ -291,7 +304,7 @@ func (s *DoltStore) runDoltTransactionRecording(ctx context.Context, commitMsg s
 
 	defer func() {
 		if r := recover(); r != nil {
-			_ = regularTx.Rollback()
+			rollbackRegular()
 			if !journalEnabled {
 				_ = ignoredTx.Rollback()
 			}
@@ -300,14 +313,16 @@ func (s *DoltStore) runDoltTransactionRecording(ctx context.Context, commitMsg s
 	}()
 
 	if err := fn(tx); err != nil {
-		_ = regularTx.Rollback()
+		rollbackRegular()
 		if !journalEnabled {
 			_ = ignoredTx.Rollback()
 		}
 		return issueops.BlockedRecheck{}, err
 	}
 
-	return s.finishDoltTransactionRecording(ctx, conn, tx, commitMsg)
+	pending, err := s.finishDoltTransactionRecording(ctx, conn, tx, commitMsg)
+	regularEnded = tx.regularEnded
+	return pending, err
 }
 
 // finishDoltTransactionRecording is finishDoltTransaction that also hands back
@@ -347,7 +362,9 @@ func (s *DoltStore) finishDoltTransaction(ctx context.Context, conn *sql.Conn, t
 		}
 	}
 
-	if err := tx.regularTx.Commit(); err != nil {
+	err := tx.regularTx.Commit()
+	tx.regularEnded = sqlTxEnded(err)
+	if err != nil {
 		rollbackIgnored()
 		return wrapSQLCommitError("sql commit (regular)", err)
 	}
