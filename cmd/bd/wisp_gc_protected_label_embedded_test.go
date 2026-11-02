@@ -47,3 +47,38 @@ func TestEmbeddedWispGCProtectedLabel(t *testing.T) {
 		}
 	}
 }
+
+// TestEmbeddedWispGCProtectedLabelCascade drives the cascade site end to end:
+// without --all the parent scan passes over closed wisps, so only the cascade
+// from an abandoned parent can reach its closed steps, and a step carrying a
+// protected label must not go down with the parent.
+func TestEmbeddedWispGCProtectedLabelCascade(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "gcc")
+	bdCommand(t, bd, dir, "config", "set", "wisp.protected_labels", "keep:mail")
+
+	parent := bdCreate(t, bd, dir, "abandoned parent", "--ephemeral").ID
+	plainStep := bdCreate(t, bd, dir, "plain step", "--ephemeral").ID
+	keptStep := bdCreate(t, bd, dir, "kept step", "--ephemeral", "--label", "keep:mail").ID
+	// Closed before the edges are added: a step blocked on its open parent
+	// cannot be closed without --force.
+	bdCommand(t, bd, dir, "close", plainStep, keptStep)
+	bdDepAdd(t, bd, dir, plainStep, parent)
+	bdDepAdd(t, bd, dir, keptStep, parent)
+
+	bdCommand(t, bd, dir, "mol", "wisp", "gc", "--age", "0s", "--force")
+
+	if !bdShowSucceeds(t, bd, dir, keptStep) {
+		t.Errorf("closed step %s carries protected label keep:mail and must survive its parent's GC", keptStep)
+	}
+	for _, id := range []string{parent, plainStep} {
+		if bdShowSucceeds(t, bd, dir, id) {
+			t.Errorf("unprotected wisp %s must be reclaimed (abandoned parent or its closed step)", id)
+		}
+	}
+}
