@@ -200,3 +200,54 @@ VALUES ('keep-1', 'local_write', 'tester', NULL, NULL, NULL, '2026-08-01 00:00:0
 	assertEventsAbsentFromStatus(t, ctx, conn)
 }
 
+// TestEmbeddedPreflipSeedSkipsEventsOfGoneIssues pins the orphan rule: an
+// issue deleted after the flip is gone from the live issues table, so its
+// historical events must be skipped (never re-inserted, or the foreign key
+// would refuse the restore), while live issues get their history back.
+func TestEmbeddedPreflipSeedSkipsEventsOfGoneIssues(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+
+	dataDir := seedMainSchemaAt(t, ctx, 61)
+	conn, closeConn := openPinnedConn(t, ctx, dataDir)
+	defer closeConn()
+
+	seedPreflipEvents(t, ctx, conn, "live-1", `
+INSERT INTO events (issue_id, event_type, actor, old_value, new_value, comment, created_at, id) VALUES
+('live-1', 'created', 'tester', NULL, NULL, NULL, '2026-07-30 00:00:00', 'evt-live-1');
+INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type)
+VALUES ('gone-1', 'deleted after flip', '', '', '', '', 'open', 2, 'task');
+INSERT INTO events (issue_id, event_type, actor, old_value, new_value, comment, created_at, id) VALUES
+('gone-1', 'created', 'tester', NULL, NULL, NULL, '2026-07-30 00:03:00', 'evt-gone-1');
+`)
+
+	if _, err := schema.MigrateUpTo(ctx, conn, 74); err != nil {
+		t.Fatalf("MigrateUpTo(74): %v", err)
+	}
+	commitWorkingSet(t, ctx, conn, "test: flipped schema")
+
+	// The issue is deleted after the flip (cascading its live events away)
+	// and the working-set table is lost — the adopter shape.
+	execFrozenGuard(t, ctx, conn, "DELETE FROM issues WHERE id = 'gone-1'")
+	if got := scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM events WHERE issue_id = 'gone-1'"); got != 0 {
+		t.Fatalf("cascade pre-check: gone-1 live events = %d, want 0", got)
+	}
+	execFrozenGuard(t, ctx, conn, "DROP TABLE events")
+
+	if _, err := schema.MigrateUp(ctx, conn); err != nil {
+		t.Fatalf("MigrateUp: %v (restoring a deleted issue's events would have failed the foreign key)", err)
+	}
+
+	liveDigest := eventDigest("live-1", "created", "tester", eventNull, eventNull, eventNull, "2026-07-30 00:00:00")
+	if got := scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM events WHERE id = ?", rowid.New("events", 0, liveDigest)); got != 1 {
+		t.Fatalf("restored live issue's events = %d, want 1", got)
+	}
+	if got := scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM events WHERE issue_id = 'gone-1'"); got != 0 {
+		t.Fatalf("restored events of deleted issue = %d, want 0 (orphans are skipped)", got)
+	}
+	if got := scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM events"); got != 1 {
+		t.Fatalf("events rows after restore = %d, want 1", got)
+	}
+	assertEventsAbsentFromStatus(t, ctx, conn)
+}
+
