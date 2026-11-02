@@ -3,6 +3,7 @@ package uow
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -216,4 +217,100 @@ func waitForDiscoveryEntered(t *testing.T, calls *atomic.Int32, want int32) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+}
+
+// TestProxyEndpointResolverErrors pins #7295's failure contract: a discovery
+// failure fails the connection with the wrapped discovery error — for the
+// worker AND for the waiters sharing its flight — preserving errors.Is/As on
+// the cause, never silently dialing the stale construction address, and never
+// poisoning the resolver: the next connection discovers again and can
+// succeed.
+func TestProxyEndpointResolverErrors(t *testing.T) {
+	t.Run("worker failure wraps the cause and keeps the stale address", func(t *testing.T) {
+		var calls atomic.Int32
+		sentinel := errors.New("discovery refused")
+		r := newScriptedResolver(func(context.Context) (proxy.Endpoint, error) {
+			calls.Add(1)
+			return proxy.Endpoint{}, sentinel
+		})
+		cfg := mysql.NewConfig()
+		cfg.Addr = "127.0.0.1:1" // the stale construction address
+
+		err := r.beforeConnect(context.Background(), cfg)
+		if err == nil {
+			t.Fatal("beforeConnect() = nil, want the wrapped discovery error")
+		}
+		if !strings.Contains(err.Error(), "uow: rediscover proxy endpoint") {
+			t.Errorf("beforeConnect() = %v, want the uow rediscovery wrapper", err)
+		}
+		if !errors.Is(err, sentinel) {
+			t.Errorf("beforeConnect() = %v, want errors.Is on the discovery cause", err)
+		}
+		if cfg.Addr != "127.0.0.1:1" {
+			t.Errorf("a failed discovery still dialed %q; want no fallback to any address change", cfg.Addr)
+		}
+	})
+
+	t.Run("waiters sharing a failed flight get the same wrapped error", func(t *testing.T) {
+		released := make(chan struct{})
+		var calls atomic.Int32
+		sentinel := errors.New("discovery refused")
+		r := newScriptedResolver(func(context.Context) (proxy.Endpoint, error) {
+			calls.Add(1)
+			<-released
+			return proxy.Endpoint{}, sentinel
+		})
+
+		results := make(chan error, 2)
+		for i := 0; i < 2; i++ {
+			go func() {
+				cfg := mysql.NewConfig()
+				results <- r.beforeConnect(context.Background(), cfg)
+			}()
+		}
+		waitForDiscoveryEntered(t, &calls, 1)
+		time.Sleep(500 * time.Millisecond) // let the second caller join the flight
+		close(released)
+
+		for i := 0; i < 2; i++ {
+			err := <-results
+			if err == nil {
+				t.Fatal("beforeConnect() = nil, want the wrapped discovery error")
+			}
+			if !strings.Contains(err.Error(), "uow: rediscover proxy endpoint") {
+				t.Errorf("caller %d: beforeConnect() = %v, want the uow rediscovery wrapper", i, err)
+			}
+			if !errors.Is(err, sentinel) {
+				t.Errorf("caller %d: beforeConnect() = %v, want errors.Is on the discovery cause", i, err)
+			}
+		}
+		if n := calls.Load(); n != 1 {
+			t.Fatalf("the failed overlap ran %d discoveries, want 1", n)
+		}
+	})
+
+	t.Run("a later discovery can succeed after a failure", func(t *testing.T) {
+		var calls atomic.Int32
+		sentinel := errors.New("discovery refused")
+		recovered := proxy.Endpoint{Host: "127.0.0.1", Port: 42444}
+		r := newScriptedResolver(func(context.Context) (proxy.Endpoint, error) {
+			if calls.Add(1) == 1 {
+				return proxy.Endpoint{}, sentinel
+			}
+			return recovered, nil
+		})
+
+		cfg := mysql.NewConfig()
+		if err := r.beforeConnect(context.Background(), cfg); err == nil {
+			t.Fatal("first beforeConnect() = nil, want the discovery failure")
+		}
+
+		cfg = mysql.NewConfig()
+		if err := r.beforeConnect(context.Background(), cfg); err != nil {
+			t.Fatalf("second beforeConnect() = %v, want recovery on a fresh discovery", err)
+		}
+		if cfg.Addr != recovered.Address() {
+			t.Errorf("second beforeConnect() dialed %q, want the recovered endpoint %q", cfg.Addr, recovered.Address())
+		}
+	})
 }

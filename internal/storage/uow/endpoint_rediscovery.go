@@ -137,9 +137,7 @@ func (r *proxyEndpointResolver) beforeConnect(ctx context.Context, cfg *mysql.Co
 		return err
 	}
 	if flight.err != nil {
-		// Bare: the flight's error is normalized into the wrapped contract by
-		// the error-path change of its own step.
-		return flight.err
+		return fmt.Errorf("uow: rediscover proxy endpoint: %w", flight.err)
 	}
 	cfg.Addr = flight.ep.Address()
 	return nil
