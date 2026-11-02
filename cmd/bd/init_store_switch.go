@@ -183,7 +183,7 @@ func (p initReinitPreflight) run() error {
 	if sw := detectInitStoreSwitch(cfg, p.database, p.targetSQLServer); sw.switches() {
 		return p.confirmStoreSwitch(sw)
 	}
-	return runInitReinitPreflight(p.countIssues, p.prefix, p.destroyToken)
+	return p.confirmPopulatedStore()
 }
 
 // confirmStoreSwitch asks for the destroy token, or on an interactive

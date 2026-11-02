@@ -396,3 +396,78 @@ func TestRunInitReinitPreflightStoreSwitchTokenNeverCounts(t *testing.T) {
 		t.Errorf("an authorized switch was followed by the count-based prompt:\n%s", stderr.String())
 	}
 }
+
+// unreadableStdin fails the test if a confirmation reads an answer.
+type unreadableStdin struct{ t *testing.T }
+
+func (r unreadableStdin) Read([]byte) (int, error) {
+	r.t.Error("a non-interactive confirmation read an interactive answer")
+	return 0, errors.New("stdin must not be read")
+}
+
+// TestRunInitReinitPreflightNonInteractiveOnTTY: resolved non-interactive
+// mode (--non-interactive, BD_NON_INTERACTIVE, CI) wins over a terminal on
+// stdin, for the store-switch confirmation and the existing populated-store
+// one alike: no answer is read, and a missing token exits 12.
+func TestRunInitReinitPreflightNonInteractiveOnTTY(t *testing.T) {
+	tests := []struct {
+		name     string
+		metadata string
+		database string
+		count    int
+	}{
+		{name: "store switch", metadata: `{"backend":"dolt","dolt_mode":"embedded","dolt_database":"fi"}`, database: "other"},
+		{name: "populated store", metadata: `{"backend":"dolt","dolt_mode":"embedded","dolt_database":"fi"}`, count: 3},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stderr bytes.Buffer
+			p := initReinitPreflight{
+				reinitLocal:    true,
+				beadsDir:       writeInitStoreSwitchMetadata(t, tt.metadata),
+				prefix:         "fi",
+				database:       tt.database,
+				nonInteractive: true,
+				isTerminal:     func() bool { return true },
+				countIssues:    func() (int, error) { return tt.count, nil },
+				stdin:          unreadableStdin{t},
+				stderr:         &stderr,
+			}
+			err := p.run()
+			var exitErr *exitError
+			if !errors.As(err, &exitErr) || exitErr.Code != ExitDestroyTokenMissing {
+				t.Fatalf("non-interactive on a TTY without a token: want exit %d, got %v\n%s", ExitDestroyTokenMissing, err, stderr.String())
+			}
+		})
+	}
+}
+
+// TestRunInitReinitPreflightCountErrorWarns: when the recorded store cannot
+// be counted, the existing policy still proceeds, but says so instead of
+// passing silently, escapes the cause, and does not call the store empty.
+// The preflight takes no --quiet input, so the warning prints under --quiet
+// too.
+func TestRunInitReinitPreflightCountErrorWarns(t *testing.T) {
+	var stderr bytes.Buffer
+	p := initReinitPreflight{
+		reinitLocal:    true,
+		beadsDir:       writeInitStoreSwitchMetadata(t, `{"backend":"dolt","dolt_mode":"embedded","dolt_database":"fi"}`),
+		prefix:         "fi",
+		nonInteractive: true,
+		countIssues:    func() (int, error) { return 0, errors.New("dial tcp 127.0.0.1:1: connection refused\x1b[2J") },
+		stderr:         &stderr,
+	}
+	if err := p.run(); err != nil {
+		t.Fatalf("a count error keeps the existing policy: want nil, got %v", err)
+	}
+	out := stderr.String()
+	if !strings.Contains(out, "could not count") || !strings.Contains(out, "connection refused") {
+		t.Errorf("count-error warning missing or without its cause:\n%s", out)
+	}
+	if strings.Contains(out, "\x1b") {
+		t.Errorf("count-error warning printed a raw escape byte:\n%q", out)
+	}
+	if strings.Contains(out, "empty") {
+		t.Errorf("count-error warning calls a store it could not read empty:\n%s", out)
+	}
+}
