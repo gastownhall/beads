@@ -142,6 +142,33 @@ func DeleteInTx(ctx context.Context, tx *sql.Tx, req publicops.DeleteRequest) (p
 		return publicops.DeleteResult{}, fmt.Errorf("delete: %w", err)
 	}
 
+	// THE CASCADE PATH COMPUTES ITS OWN ORPHAN REPORT, against the resolved
+	// set: the containment closure follows parent-child edges only (issue
+	// #6301), so a row joined to the deleted set by an association edge —
+	// discovered-from, blocks, related — survives, and the delete names every
+	// such survivor rather than leaving it silent collateral. It runs before
+	// the dry-run return, so a preview reports the same orphans the real run
+	// would leave. The scan asks about every edge type, exactly as the
+	// non-cascade guard does: what separates an orphan from a deleted row is
+	// WHICH SET it is in, not which edge joined it.
+	if req.Cascade {
+		deletedSet := make(map[string]bool, len(set.All))
+		for _, id := range set.All {
+			deletedSet[id] = true
+		}
+		external, err := ExternalDependentsBySourceInTx(ctx, tx, set.All, deletedSet)
+		if err != nil {
+			return publicops.DeleteResult{}, fmt.Errorf("delete: report cascade orphans: %w", err)
+		}
+		orphaned := make(map[string]bool)
+		for _, deps := range external {
+			for _, id := range deps {
+				orphaned[id] = true
+			}
+		}
+		result.Orphaned = workapi.SortedDeleteIDs(orphaned)
+	}
+
 	// The neighborhood is read BEFORE the deletion, because after it the
 	// edges that identify a neighbor are gone. It is read against the whole
 	// deletion set — the cascade closure, not just the named ids — so a row

@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"os"
 	"os/exec"
+	"slices"
+	"sort"
 	"strings"
 	"testing"
 
@@ -405,7 +407,7 @@ func TestEmbeddedDeleteCascadeFollowsOnlyParentChild(t *testing.T) {
 	t.Parallel()
 
 	bd := buildEmbeddedBD(t)
-	dir, _, _ := bdInit(t, bd, "--prefix", "tdc")
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "tdc")
 
 	t.Run("cascade_deletes_only_the_parent_child_descendants", func(t *testing.T) {
 		fx := seedCascadeContainmentFixture(t, bd, dir)
@@ -421,6 +423,51 @@ func TestEmbeddedDeleteCascadeFollowsOnlyParentChild(t *testing.T) {
 			if got := bdShow(t, bd, dir, id); got.ID != id {
 				t.Errorf("expected %s to survive a cascade rooted at %s", id, fx.a)
 			}
+		}
+	})
+
+	// The three association dependents a cascade leaves behind are not silent
+	// collateral: the delete names them as orphans, drops the edges that joined
+	// them to the deleted set, and settles their blocked state — C.1 loses the
+	// A.1 edge it was blocked over.
+	t.Run("cascade_reports_and_settles_the_association_dependents", func(t *testing.T) {
+		fx := seedCascadeContainmentFixture(t, bd, dir)
+
+		if !issueIsBlockedRaw(t, beadsDir, "tdc", fx.c1) {
+			t.Fatalf("expected %s to be blocked by %s before the delete", fx.c1, fx.a1)
+		}
+
+		out := bdDeleteJSON(t, bd, dir, fx.a, "--cascade", "--force")
+
+		rawOrphans, ok := out["orphaned_issues"].([]interface{})
+		if !ok {
+			t.Fatalf("orphaned_issues = %#v, want a list naming %s, %s and %s",
+				out["orphaned_issues"], fx.b, fx.c1, fx.s)
+		}
+		gotOrphans := make([]string, 0, len(rawOrphans))
+		for _, v := range rawOrphans {
+			id, ok := v.(string)
+			if !ok {
+				t.Fatalf("orphaned_issues entry %#v is not a string", v)
+			}
+			gotOrphans = append(gotOrphans, id)
+		}
+		wantOrphans := []string{fx.b, fx.c1, fx.s}
+		sort.Strings(wantOrphans)
+		if !slices.Equal(gotOrphans, wantOrphans) {
+			t.Errorf("orphaned_issues = %v, want exactly %v", gotOrphans, wantOrphans)
+		}
+
+		// The edges into the deleted set are gone; the survivors' own
+		// parent-child edges stay.
+		assertDepNotExists(t, beadsDir, "tdc", fx.b, fx.a)
+		assertDepNotExists(t, beadsDir, "tdc", fx.c1, fx.a1)
+		assertDepNotExists(t, beadsDir, "tdc", fx.s, fx.a)
+		assertDepExists(t, beadsDir, "tdc", fx.b1, fx.b)
+		assertDepExists(t, beadsDir, "tdc", fx.c1, fx.c)
+
+		if issueIsBlockedRaw(t, beadsDir, "tdc", fx.c1) {
+			t.Errorf("expected %s to be unblocked after %s was deleted", fx.c1, fx.a1)
 		}
 	})
 }

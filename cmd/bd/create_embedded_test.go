@@ -164,6 +164,47 @@ func assertDepExists(t *testing.T, beadsDir, database, issueID, dependsOnID stri
 	}
 }
 
+// assertDepNotExists verifies no dependency row exists via raw SQL — the
+// inverse of assertDepExists, pinning that a delete dropped the edge.
+func assertDepNotExists(t *testing.T, beadsDir, database, issueID, dependsOnID string) {
+	t.Helper()
+	dataDir := filepath.Join(beadsDir, "embeddeddolt")
+	db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), dataDir, database, "main")
+	if err != nil {
+		t.Fatalf("OpenSQL: %v", err)
+	}
+	defer cleanup()
+	var count int
+	err = db.QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM dependencies WHERE issue_id = ? AND COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) = ?",
+		issueID, dependsOnID).Scan(&count)
+	if err != nil {
+		t.Fatalf("query dependencies: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("expected no dependency %s -> %s, found %d row(s)", issueID, dependsOnID, count)
+	}
+}
+
+// issueIsBlockedRaw reads the stored is_blocked column for one issue — the
+// authoritative bit, which the hydration column lists (IssueSelectColumns)
+// do not select and the JSON issue shapes therefore cannot report.
+func issueIsBlockedRaw(t *testing.T, beadsDir, database, issueID string) bool {
+	t.Helper()
+	dataDir := filepath.Join(beadsDir, "embeddeddolt")
+	db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), dataDir, database, "main")
+	if err != nil {
+		t.Fatalf("OpenSQL: %v", err)
+	}
+	defer cleanup()
+	var isBlocked bool
+	if err := db.QueryRowContext(t.Context(),
+		"SELECT is_blocked FROM issues WHERE id = ?", issueID).Scan(&isBlocked); err != nil {
+		t.Fatalf("query is_blocked for %s: %v", issueID, err)
+	}
+	return isBlocked
+}
+
 func assertDepExistsWithType(t *testing.T, beadsDir, database, issueID, dependsOnID, expectedType string) {
 	t.Helper()
 	dataDir := filepath.Join(beadsDir, "embeddeddolt")

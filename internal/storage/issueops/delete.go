@@ -204,6 +204,36 @@ func DeleteIssuesBesideWispsInTx(ctx context.Context, tx *sql.Tx, ids, peeledWis
 	}
 
 	var orphaned []string
+	if cascade {
+		// The cascade leaves the association dependents of the resolved set
+		// behind (issue #6301) and reports them here: the same scan the guard
+		// uses, with the deleted set — the resolved closure plus the peeled
+		// wisps, which are part of the request — playing the role the named
+		// ids play there. On a real delete the wisps are already gone and the
+		// edges into them with them, so they name no orphans; a dry run has
+		// removed nothing, and there they do.
+		deletedSet := make(map[string]bool, len(set.All)+len(peeledWisps))
+		targets := make([]string, 0, len(set.All)+len(peeledWisps))
+		for _, id := range set.All {
+			deletedSet[id] = true
+			targets = append(targets, id)
+		}
+		for _, id := range peeledWisps {
+			deletedSet[id] = true
+			targets = append(targets, id)
+		}
+		external, err := ExternalDependentsBySourceInTx(ctx, tx, targets, deletedSet)
+		if err != nil {
+			return nil, fmt.Errorf("get dependents: %w", err)
+		}
+		orphans := make(map[string]bool)
+		for _, deps := range external {
+			for _, id := range deps {
+				orphans[id] = true
+			}
+		}
+		orphaned = workapi.SortedDeleteIDs(orphans)
+	}
 	if !cascade {
 		// The guard here is the STORAGE SEAM's, and it stays durable-only: the
 		// server-backed store peels wisps off before it ever reaches this

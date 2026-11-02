@@ -219,6 +219,12 @@ func deleteInUOW(ctx context.Context, uw UnitOfWork, req publicops.DeleteRequest
 	result.Labels = deleted.LabelsCount
 	result.Events = deleted.EventsCount
 	result.ReferencesUpdated = deleted.ReferencesUpdated
+	// The containment closure leaves the association dependents behind (issue
+	// #6301); the use case reports them as orphans and this leg carries the
+	// report out. The non-cascade modes were answered by the guard above.
+	if req.Cascade {
+		result.Orphaned = deleted.OrphanedIssues
+	}
 	return result, nil
 }
 

@@ -110,6 +110,25 @@ func (u *issueUseCaseImpl) deleteMany(ctx context.Context, params DeleteIssuesPa
 		return DeleteIssuesResult{}, nil
 	}
 
+	// The cascade leaves the association dependents of the resolved set
+	// behind (issue #6301) and reports them: the same externalDependents scan
+	// the EnforceCascadePolicy branch uses for its guard, pointed at the
+	// containment closure instead of the named ids. It runs before the dry-run
+	// return so a preview reports the same orphans the real run leaves.
+	if params.Cascade {
+		externalBySource, err := u.externalDependents(ctx, allIDs)
+		if err != nil {
+			return DeleteIssuesResult{}, err
+		}
+		orphanSet := map[string]bool{}
+		for _, deps := range externalBySource {
+			for _, dep := range deps {
+				orphanSet[dep] = true
+			}
+		}
+		result.OrphanedIssues = sortedStringSet(orphanSet)
+	}
+
 	wispIDs, regularIDs, err := u.issueRepo.PartitionWispIDs(ctx, allIDs)
 	if err != nil {
 		return DeleteIssuesResult{}, fmt.Errorf("delete: partition: %w", err)
