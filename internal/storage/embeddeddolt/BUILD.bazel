@@ -163,6 +163,7 @@ go_test(
         "expected_revision_contract_test.go",
         "external_dependencies_test.go",
         "federation_credentials_test.go",
+        "federation_failure_internal_test.go",
         "federation_filter_test.go",
         "federation_legacy_test.go",
         "get_issue_test.go",

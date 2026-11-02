@@ -54,10 +54,11 @@ func KeepFilteredPushLocal(ctx context.Context, conn DBConn, sourceBranch, stagi
 // normally live in dolt_ignore'd tables and are not pushed, so this acts as a
 // defense-in-depth safety net (GH#7890).
 //
-// A DELETE error is deliberately ignored (deleted stays false for that type),
-// matching the server store's pre-existing best-effort filtering behavior;
-// the caller only recomputes and commits when something was actually removed.
-func DeleteExcludedIssues(ctx context.Context, conn DBConn, excludeTypes []string) bool {
+// Fail-closed: a DELETE error aborts the filtered push with that error —
+// continuing would publish the unfiltered tip, which is the exact leak the
+// filtering exists to prevent. The caller only recomputes and commits when
+// something was actually removed.
+func DeleteExcludedIssues(ctx context.Context, conn DBConn, excludeTypes []string) (bool, error) {
 	deleted := false
 	for _, excludeType := range excludeTypes {
 		var result interface{ RowsAffected() (int64, error) }
@@ -67,11 +68,12 @@ func DeleteExcludedIssues(ctx context.Context, conn DBConn, excludeTypes []strin
 		} else {
 			result, execErr = conn.ExecContext(ctx, "DELETE FROM issues WHERE issue_type = ?", excludeType)
 		}
-		if execErr == nil {
-			if n, _ := result.RowsAffected(); n > 0 {
-				deleted = true
-			}
+		if execErr != nil {
+			return deleted, fmt.Errorf("federation filter: delete excluded issues (%s): %w", excludeType, execErr)
+		}
+		if n, _ := result.RowsAffected(); n > 0 {
+			deleted = true
 		}
 	}
-	return deleted
+	return deleted, nil
 }

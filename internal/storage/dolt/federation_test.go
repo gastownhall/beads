@@ -1822,3 +1822,149 @@ func assertIssueRowExists(t *testing.T, ctx context.Context, store *DoltStore, i
 		t.Errorf("issue %s row count = %d, want 1", id, n)
 	}
 }
+
+// federationDeleteResponseLossDialer drops the connection the moment the
+// filtered push's excluded-type DELETE runs, so the staging DELETE fails
+// mid-flight exactly like a dropped connection in production — but
+// deterministically and without the response orchestration the
+// branch-response-loss dialer needs. It also records any DOLT_PUSH write so
+// the test can prove publication was never attempted after the failure.
+type federationDeleteResponseLossDialer struct {
+	armed    atomic.Bool
+	pushSeen atomic.Bool
+}
+
+type federationDeleteResponseLossConn struct {
+	net.Conn
+	dialer       *federationDeleteResponseLossDialer
+	failNextRead atomic.Bool
+}
+
+func installFederationDeleteResponseLossDialer(t *testing.T, store *DoltStore) *federationDeleteResponseLossDialer {
+	t.Helper()
+	cfg, err := mysql.ParseDSN(store.connStr)
+	if err != nil {
+		t.Fatalf("parse store DSN: %v", err)
+	}
+	if cfg.Net != "tcp" {
+		t.Fatalf("delete response-loss dialer requires TCP, got %q", cfg.Net)
+	}
+	dialer := &federationDeleteResponseLossDialer{}
+	network := fmt.Sprintf("federation_delete_loss_%d", time.Now().UnixNano())
+	mysql.RegisterDialContext(network, func(ctx context.Context, addr string) (net.Conn, error) {
+		conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", addr)
+		if err != nil {
+			return nil, err
+		}
+		return &federationDeleteResponseLossConn{Conn: conn, dialer: dialer}, nil
+	})
+	t.Cleanup(func() { mysql.DeregisterDialContext(network) })
+	cfg.Net = network
+	store.connStr = cfg.FormatDSN()
+	return dialer
+}
+
+func (c *federationDeleteResponseLossConn) Write(p []byte) (int, error) {
+	n, err := c.Conn.Write(p)
+	if err != nil {
+		return n, err
+	}
+	lower := bytes.ToLower(p)
+	if bytes.Contains(lower, []byte("delete from issues where issue_type")) &&
+		c.dialer.armed.CompareAndSwap(false, true) {
+		c.failNextRead.Store(true)
+	}
+	if bytes.Contains(lower, []byte("dolt_push(")) {
+		c.dialer.pushSeen.Store(true)
+	}
+	return n, err
+}
+
+func (c *federationDeleteResponseLossConn) Read(p []byte) (int, error) {
+	if c.failNextRead.CompareAndSwap(true, false) {
+		_ = c.Conn.Close()
+		return 0, net.ErrClosed
+	}
+	return c.Conn.Read(p)
+}
+
+// TestFilteredPushDeleteFailureFailsClosed pins AC-7's core guarantee on the
+// server backend (GH#7890): when the excluded-type DELETE fails mid-flight —
+// here a dropped connection after Dolt may already have applied the delete —
+// the filtered push aborts with that error. It must not swallow the failure
+// and publish the unfiltered tip instead; that fallback is the exact leak
+// the filter exists to prevent. Local rows (shared and excluded alike)
+// survive, and no temporary branch is left behind.
+func TestFilteredPushDeleteFailureFailsClosed(t *testing.T) {
+	store, cleanup := setupConcurrentTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	for _, issue := range []struct{ id, issueType string }{
+		{"fed-delfail-task", "task"},
+		{"fed-delfail-chore", "chore"},
+	} {
+		_, err := store.db.ExecContext(ctx, `INSERT INTO issues
+			(id, title, description, design, acceptance_criteria, notes,
+			 issue_type, status, priority, ephemeral, created_at, updated_at)
+			VALUES (?, ?, '', '', '', '', ?, 'open', 1, 0, NOW(), NOW())`,
+			issue.id, "Filtered push delete-failure test", issue.issueType)
+		if err != nil {
+			t.Fatalf("insert %s: %v", issue.id, err)
+		}
+	}
+	if err := store.Commit(ctx, "create delete-failure test issues"); err != nil {
+		if !isDoltNothingToCommit(err) {
+			t.Fatalf("commit: %v", err)
+		}
+	}
+
+	observer, err := store.openLongTimeoutConn()
+	if err != nil {
+		t.Fatalf("open observer: %v", err)
+	}
+	defer observer.Close()
+
+	dialer := installFederationDeleteResponseLossDialer(t, store)
+
+	err = store.filteredPushToPeer(ctx, "nonexistent-peer", []string{"chore"})
+	if err == nil {
+		t.Fatal("filtered push succeeded despite the staging DELETE failing, want fail-closed")
+	}
+	if !strings.Contains(err.Error(), "delete excluded issues (chore)") {
+		t.Fatalf("filtered push error = %v, want the DELETE failure reported (the old code swallowed it and published the unfiltered tip)", err)
+	}
+	if dialer.pushSeen.Load() {
+		t.Error("a push was attempted after the staging DELETE failure, want publication skipped")
+	}
+
+	// The failure must not cost any local data, on either side of the filter.
+	assertIssueRowExists(t, ctx, store, "fed-delfail-task")
+	assertIssueRowExists(t, ctx, store, "fed-delfail-chore")
+
+	// Neither temporary branch may outlive the failed push.
+	branches, err := observer.QueryContext(ctx, `
+		SELECT name FROM dolt_branches
+		WHERE LEFT(name, ?) = ? OR LEFT(name, ?) = ?`,
+		len(federationStagingBranchPrefix), federationStagingBranchPrefix,
+		len("__federation_push_keep_"), "__federation_push_keep_")
+	if err != nil {
+		t.Fatalf("query leftover temporary branches: %v", err)
+	}
+	defer branches.Close()
+	var leftover []string
+	for branches.Next() {
+		var branch string
+		if err := branches.Scan(&branch); err != nil {
+			t.Fatalf("scan leftover branch: %v", err)
+		}
+		leftover = append(leftover, branch)
+	}
+	if err := branches.Err(); err != nil {
+		t.Fatalf("iterate leftover branches: %v", err)
+	}
+	if len(leftover) != 0 {
+		t.Errorf("temporary branches %v outlived the failed filtered push", leftover)
+	}
+}

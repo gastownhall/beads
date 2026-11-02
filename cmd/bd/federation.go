@@ -50,6 +50,13 @@ Handles merge conflicts using the configured strategy:
 If no strategy is specified and conflicts occur, the sync will pause
 and report which tables have conflicts for manual resolution.
 
+The push is filtered by the federation.exclude_types config (default [wisp]):
+issues of an excluded type are omitted from the push in both embedded and
+server modes, and stay in the local database — excluding a type is a sharing
+boundary, not a deletion. The filtering is fail-closed: if a filtered push
+fails, nothing is published rather than falling back to an unfiltered push,
+and local data is preserved for the next sync.
+
 Examples:
   bd federation sync                      # Sync with all peers
   bd federation sync --peer town-beta     # Sync with specific peer
@@ -87,9 +94,17 @@ The URL can be:
   - host:port/database      Direct dolt sql-server connection
   - file:///path/to/repo    Local file path (for testing)
 
-Credentials are encrypted and stored locally. They are used automatically
-when syncing with the peer. If --user is provided without --password,
-you will be prompted for the password interactively.
+Credentials are encrypted and stored locally, sealed for the peer's own
+identity (name, URL, and username together), so a peer row copied from
+another database cannot use the password. Credentials stored by older
+versions predate that binding and are refused until you re-enter the
+password (run add-peer again with --user, which re-seals it). If a partner
+database could have copied your credential row while syncing with an older
+version, treat the password as exposed and rotate it.
+
+Credentials are used automatically when syncing with the peer. If --user is
+provided without --password, you will be prompted for the password
+interactively.
 
 Examples:
   bd federation add-peer town-beta dolthub://acme/town-beta-beads

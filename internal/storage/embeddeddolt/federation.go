@@ -35,6 +35,11 @@ const credentialKeyFile = ".beads-credential-key" //nolint:gosec // G101: filena
 // Mirrors the server store's twin in dolt/federation.go.
 const federationStagingCleanupTimeout = 30 * time.Second
 
+// vcDeleteExcluded is the seam over the shared filtered-push delete step, so
+// tests in this package can inject DELETE failures (GH#7890 AC-7). Same
+// pattern as the vcPush/vcFetch seams in version_control.go.
+var vcDeleteExcluded = versioncontrolops.DeleteExcludedIssues
+
 // ensureCredentialKey lazily initializes the credential encryption key.
 func (s *EmbeddedDoltStore) ensureCredentialKey() error {
 	if s.credentialKey != nil {
@@ -555,11 +560,12 @@ func (s *EmbeddedDoltStore) filteredPushToPeer(ctx context.Context, peer string,
 
 	// Push the staging branch to the peer, mapped to the peer's expected
 	// branch name. Credentials resolve through withPeerAuth exactly as
-	// PushTo's unfiltered push does.
+	// PushTo's unfiltered push does, and the push itself goes through the
+	// vcPush seam like every other push.
 	refspec := stagingBranch + ":" + sourceBranch
 	return s.withPeerAuth(ctx, peer, func(user string) error {
 		return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
-			return versioncontrolops.Push(ctx, db, peer, refspec, user)
+			return vcPush(ctx, db, peer, refspec, user)
 		})
 	})
 }
@@ -570,8 +576,11 @@ func (s *EmbeddedDoltStore) filteredPushToPeer(ctx context.Context, peer string,
 // filtered commit and reverts the filter on it, and restores sourceBranch so
 // the caller can merge the keep branch and push the staging ref. It reports
 // whether the filtered commit exists (no removed rows means no F/R commits).
-// Branch state is session-scoped, so every step stays on conn.
-func stageFilteredBranch(ctx context.Context, conn versioncontrolops.BlockedRecomputeConn, sourceBranch, stagingBranch, keepBranch string, excludeTypes []string) (bool, error) {
+// Branch state is session-scoped, so every step stays on conn. Any failure
+// after the staging checkout restores the session to sourceBranch before
+// returning (GH#7890): the armed cleanup cannot delete a session's
+// checked-out branch, and the pinned session outlives this push.
+func stageFilteredBranch(ctx context.Context, conn versioncontrolops.BlockedRecomputeConn, sourceBranch, stagingBranch, keepBranch string, excludeTypes []string) (filtered bool, err error) {
 	// Create staging from the named source branch, not the session checkout:
 	// naming the ref keeps the staging tip pinned even if the session's view
 	// ever diverges from sourceBranch.
@@ -582,6 +591,24 @@ func stageFilteredBranch(ctx context.Context, conn versioncontrolops.BlockedReco
 	if err := versioncontrolops.CheckoutBranch(ctx, conn, stagingBranch); err != nil {
 		return false, fmt.Errorf("federation filter: checkout staging: %w", err)
 	}
+
+	// From here on the session is checked out on the staging branch. Every
+	// failure below must put it back on sourceBranch: the cleanup armed by
+	// the caller cannot delete a session's checked-out branch, and leaving
+	// the pinned session on a temporary branch would corrupt the store's
+	// later operations. The restore runs detached from ctx — on the
+	// cancellation paths ctx is already dead — under the same bound as the
+	// cleanup itself.
+	defer func() {
+		if err == nil {
+			return
+		}
+		restoreCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), federationStagingCleanupTimeout)
+		defer cancel()
+		if restoreErr := versioncontrolops.CheckoutBranch(restoreCtx, conn, sourceBranch); restoreErr != nil {
+			err = errors.Join(err, fmt.Errorf("federation filter: restore branch %s: %w", sourceBranch, restoreErr))
+		}
+	}()
 
 	// A branch minted from HEAD does not inherit the working-set-LOCAL ignored
 	// tables (wisps, wisp_dependencies, events, leases, ...): its working set
@@ -595,15 +622,14 @@ func stageFilteredBranch(ctx context.Context, conn versioncontrolops.BlockedReco
 		return false, fmt.Errorf("federation filter: heal staging working set: %w", err)
 	}
 
-	filtered := false
-	if versioncontrolops.DeleteExcludedIssues(ctx, conn, excludeTypes) {
+	filtered, err = vcDeleteExcluded(ctx, conn, excludeTypes)
+	if err != nil {
+		return filtered, err
+	}
+	if filtered {
 		if err := commitFilteredStaging(ctx, conn); err != nil {
 			return false, err
 		}
-		filtered = true
-	}
-
-	if filtered {
 		// Mint the keep branch at the filtered commit and revert the filter
 		// on it, leaving the session back on sourceBranch for the caller's
 		// merge. Cleanup for both temporary branches is already armed.

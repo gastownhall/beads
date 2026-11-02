@@ -601,12 +601,14 @@ func (s *DoltStore) stageFilteredBranch(ctx context.Context, conn *sql.Conn, sou
 		return false, fmt.Errorf("federation filter: heal staging working set: %w", err)
 	}
 
-	filtered := false
-	if deleteExcludedIssues(ctx, conn, excludeTypes) {
+	filtered, err := deleteExcludedIssues(ctx, conn, excludeTypes)
+	if err != nil {
+		return false, err
+	}
+	if filtered {
 		if err := s.commitFilteredStaging(ctx, conn); err != nil {
 			return false, err
 		}
-		filtered = true
 	}
 
 	if filtered {
@@ -625,12 +627,11 @@ func (s *DoltStore) stageFilteredBranch(ctx context.Context, conn *sql.Conn, sou
 
 // deleteExcludedIssues removes issues matching excludeTypes from the committed
 // issues table on conn's current (staging) branch and reports whether any rows
-// were deleted. The special type "wisp" matches ephemeral rows. A DELETE error
-// is intentionally ignored (deleted stays false for that type), preserving the
-// pre-existing best-effort filtering behavior; the caller only recomputes and
-// commits when something was actually removed. Shared with the embedded
-// filtered push (GH#7890): the SQL lives in versioncontrolops.
-func deleteExcludedIssues(ctx context.Context, conn *sql.Conn, excludeTypes []string) bool {
+// were deleted. The special type "wisp" matches ephemeral rows. Fail-closed
+// (GH#7890): a DELETE error aborts the push — swallowing it would publish the
+// unfiltered tip, which is the exact leak the filtering exists to prevent.
+// Shared with the embedded filtered push: the SQL lives in versioncontrolops.
+func deleteExcludedIssues(ctx context.Context, conn *sql.Conn, excludeTypes []string) (bool, error) {
 	return versioncontrolops.DeleteExcludedIssues(ctx, conn, excludeTypes)
 }
 
