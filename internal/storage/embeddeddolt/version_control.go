@@ -284,9 +284,6 @@ func (s *EmbeddedDoltStore) ListBranches(ctx context.Context) ([]string, error) 
 // Version control operations
 // ---------------------------------------------------------------------------
 
-// commitAuthor returns the author string for merge commits.
-const commitAuthor = commitName + " <" + commitEmail + ">"
-
 func (s *EmbeddedDoltStore) CommitExists(ctx context.Context, commitHash string) (bool, error) {
 	var exists bool
 	err := s.withDBConn(ctx, func(db versioncontrolops.DBConn) error {
@@ -361,9 +358,10 @@ func (s *EmbeddedDoltStore) Merge(ctx context.Context, branch string) ([]storage
 		preHead = s.preMergeHead(ctx)
 	}
 	var conflicts []storage.Conflict
+	author := s.commitAuthor()
 	err := s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
 		var err error
-		conflicts, err = versioncontrolops.Merge(ctx, db, branch, commitAuthor)
+		conflicts, err = versioncontrolops.Merge(ctx, db, branch, author)
 		return err
 	})
 	if err == nil && len(conflicts) == 0 && !s.readOnly {
@@ -391,9 +389,10 @@ func (s *EmbeddedDoltStore) MergeWithStrategy(ctx context.Context, branch, strat
 		preHead = s.preMergeHead(ctx)
 	}
 	var conflicts []storage.Conflict
+	author := s.commitAuthor()
 	err := s.withMutatingPinnedDBConn(ctx, func(db versioncontrolops.DBConn) error {
 		var err error
-		conflicts, err = versioncontrolops.MergeWithStrategy(ctx, db, branch, commitAuthor, strategy)
+		conflicts, err = versioncontrolops.MergeWithStrategy(ctx, db, branch, author, strategy)
 		return err
 	})
 	if err != nil {
@@ -437,10 +436,11 @@ func (s *EmbeddedDoltStore) RecomputeAllBlocked(ctx context.Context) (int, error
 	if changed > 0 {
 		// Stage only issues (wisps are dolt_ignore'd), matching the post-pull
 		// recompute, so an unrelated dirty working set is not swept in.
+		author := s.commitAuthor()
 		if err := s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
 			return stageAndCommitAfterSQLCommit(ctx, db,
 				versioncontrolops.BlockedRecomputeStagedTables(),
-				versioncontrolops.BlockedRecomputeCommitMsg, commitAuthor)
+				versioncontrolops.BlockedRecomputeCommitMsg, author)
 		}); err != nil {
 			return int(changed), err
 		}
@@ -773,9 +773,10 @@ func (s *EmbeddedDoltStore) recomputeBlockedAfterPull(ctx context.Context, preHe
 		})
 		return err
 	}
+	author := s.commitAuthor()
 	return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
 		return stageAndCommitAfterSQLCommit(ctx, db,
-			map[string]bool{"issues": true}, "bd: recompute is_blocked after pull", commitAuthor)
+			map[string]bool{"issues": true}, "bd: recompute is_blocked after pull", author)
 	})
 }
 
