@@ -498,6 +498,65 @@ func TestEmbeddedDeleteCascadeFollowsOnlyParentChild(t *testing.T) {
 			}
 		}
 	})
+
+	// The --json preview and result carry the same enumeration the text
+	// preview prints (issue #6301): would_delete_ids/would_orphan_ids on a
+	// preview, deleted_ids on the confirmed run. `deleted` stays the
+	// REQUESTED ids, the shape every existing parser reads.
+	t.Run("json_carries_the_full_id_lists", func(t *testing.T) {
+		fx := seedCascadeContainmentFixture(t, bd, dir)
+		wantDelete := []string{fx.a, fx.a1, fx.a11, fx.a2}
+		sort.Strings(wantDelete)
+		wantOrphan := []string{fx.b, fx.c1, fx.s}
+		sort.Strings(wantOrphan)
+
+		preview := bdDeleteJSON(t, bd, dir, fx.a, "--cascade")
+		if got := jsonIDList(t, preview, "would_delete_ids"); !slices.Equal(got, wantDelete) {
+			t.Errorf("would_delete_ids = %v, want %v", got, wantDelete)
+		}
+		if got := jsonIDList(t, preview, "would_orphan_ids"); !slices.Equal(got, wantOrphan) {
+			t.Errorf("would_orphan_ids = %v, want %v", got, wantOrphan)
+		}
+
+		deleted := bdDeleteJSON(t, bd, dir, fx.a, "--cascade", "--force")
+		if got := jsonIDList(t, deleted, "deleted_ids"); !slices.Equal(got, wantDelete) {
+			t.Errorf("deleted_ids = %v, want %v", got, wantDelete)
+		}
+		rawRequested, ok := deleted["deleted"].([]interface{})
+		if !ok || len(rawRequested) != 1 || rawRequested[0] != fx.a {
+			t.Errorf("deleted = %#v, want the requested ids [%s] unchanged", deleted["deleted"], fx.a)
+		}
+
+		// The confirmed run's text names the rows too: a count is what the
+		// 48-row deletion on v1.2.2 hid behind.
+		fx2 := seedCascadeContainmentFixture(t, bd, dir)
+		out := bdDelete(t, bd, dir, fx2.a, "--cascade", "--force")
+		for _, id := range []string{fx2.a, fx2.a1, fx2.a11, fx2.a2} {
+			if !strings.Contains(out, id) {
+				t.Errorf("success text does not list deleted %s:\n%s", id, out)
+			}
+		}
+	})
+}
+
+// jsonIDList decodes m[key] as a JSON list of strings, failing the test on
+// any other shape — including null, which is a missing report rather than an
+// empty one.
+func jsonIDList(t *testing.T, m map[string]interface{}, key string) []string {
+	t.Helper()
+	raw, ok := m[key].([]interface{})
+	if !ok {
+		t.Fatalf("%s = %#v, want a list of issue ids", key, m[key])
+	}
+	out := make([]string, 0, len(raw))
+	for _, v := range raw {
+		id, ok := v.(string)
+		if !ok {
+			t.Fatalf("%s entry %#v is not a string", key, v)
+		}
+		out = append(out, id)
+	}
+	return out
 }
 
 func TestEmbeddedGetDependencies(t *testing.T) {

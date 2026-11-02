@@ -95,6 +95,8 @@ func TestOutputDeleteProxiedPreviewExactContracts(t *testing.T) {
 		want := map[string]any{
 			"schema_version":       float64(1),
 			"would_delete":         float64(3),
+			"would_delete_ids":     nil,
+			"would_orphan_ids":     nil,
 			"dependencies_removed": float64(4),
 			"labels_removed":       float64(2),
 			"events_removed":       float64(5),
@@ -212,6 +214,7 @@ func TestRenderDeleteProxiedResultExactContracts(t *testing.T) {
 		want := map[string]any{
 			"schema_version":       float64(1),
 			"deleted":              []any{"bd-target", "bd-dependent"},
+			"deleted_ids":          nil,
 			"deleted_count":        float64(3),
 			"dependencies_removed": float64(4),
 			"labels_removed":       float64(2),

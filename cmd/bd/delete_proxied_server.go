@@ -218,7 +218,12 @@ func runDeleteProxiedPreviewTx(ctx context.Context, in *deleteInput, enumerate [
 func outputDeleteProxiedPreview(in *deleteInput, result deletePreviewResult) error {
 	if in.jsonOutput {
 		payload := map[string]any{
-			"would_delete":         result.res.Deleted,
+			"would_delete": result.res.Deleted,
+			// The ids behind the counts (issue #6301): under --cascade the
+			// whole containment closure, and the association dependents left
+			// behind — the same enumeration the text preview prints.
+			"would_delete_ids":     result.res.DeletedIDs,
+			"would_orphan_ids":     result.res.Orphaned,
 			"dependencies_removed": result.res.Dependencies,
 			"labels_removed":       result.res.Labels,
 			"events_removed":       result.res.Events,
@@ -306,7 +311,11 @@ func renderDeletePreview(in *deleteInput, preview domain.DeletePreview, res issu
 func renderDeleteProxiedResult(in *deleteInput, res issueops.DeleteResult) {
 	if in.jsonOutput {
 		_ = outputJSON(map[string]any{
-			"deleted":              in.ids,
+			"deleted": in.ids,
+			// The ids behind deleted_count (issue #6301): under --cascade the
+			// whole containment closure. `deleted` above stays the requested
+			// ids, the shape existing parsers read.
+			"deleted_ids":          res.DeletedIDs,
 			"deleted_count":        res.Deleted,
 			"dependencies_removed": res.Dependencies,
 			"labels_removed":       res.Labels,
@@ -319,6 +328,11 @@ func renderDeleteProxiedResult(in *deleteInput, res issueops.DeleteResult) {
 		return
 	}
 	fmt.Printf("%s Deleted %d issue(s)\n", ui.RenderPass("✓"), res.Deleted)
+	if in.cascade && len(res.DeletedIDs) > 0 {
+		// The cascade's reach named, not just counted (issue #6301), matching
+		// the direct route's confirmation.
+		fmt.Printf("  Deleted: %s\n", strings.Join(res.DeletedIDs, ", "))
+	}
 	fmt.Printf("  Removed %d dependency link(s)\n", res.Dependencies)
 	fmt.Printf("  Removed %d label(s)\n", res.Labels)
 	fmt.Printf("  Removed %d event(s)\n", res.Events)

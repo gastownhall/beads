@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"io"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -50,9 +51,14 @@ func TestProxiedServerDelete(t *testing.T) {
 	}
 
 	preview := bdProxiedDeleteJSON(t, bd, p.dir, "--json", "--cascade", target.ID)
+	// The cascade closure the preview must name, in the role's sorted order.
+	closure := []any{target.ID, dependent.ID, descendant.ID}
+	sort.Slice(closure, func(i, j int) bool { return closure[i].(string) < closure[j].(string) })
 	previewWant := map[string]any{
 		"schema_version":       float64(1),
 		"would_delete":         float64(3),
+		"would_delete_ids":     closure,
+		"would_orphan_ids":     nil,
 		"dependencies_removed": float64(3),
 		"labels_removed":       float64(3),
 		"events_removed":       float64(6),
@@ -81,6 +87,7 @@ func TestProxiedServerDelete(t *testing.T) {
 	deletedWant := map[string]any{
 		"schema_version":       float64(1),
 		"deleted":              []any{target.ID},
+		"deleted_ids":          closure,
 		"deleted_count":        float64(3),
 		"dependencies_removed": float64(3),
 		"labels_removed":       float64(3),

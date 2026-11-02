@@ -502,7 +502,11 @@ func deleteBatchReporting(issueIDs []string, force, dryRun, cascade, jsonOutput 
 
 	if jsonOutput {
 		answer := map[string]interface{}{
-			"deleted":              resolvedIDs,
+			"deleted": resolvedIDs,
+			// The ids behind deleted_count (issue #6301): under --cascade the
+			// whole containment closure, not just the requested rows. `deleted`
+			// above stays the requested ids, the shape existing parsers read.
+			"deleted_ids":          result.DeletedIDs,
 			"deleted_count":        result.Deleted,
 			"dependencies_removed": result.Dependencies,
 			"labels_removed":       result.Labels,
@@ -518,6 +522,12 @@ func deleteBatchReporting(issueIDs []string, force, dryRun, cascade, jsonOutput 
 		}
 	} else {
 		fmt.Printf("%s Deleted %d issue(s)\n", ui.RenderPass("✓"), result.Deleted)
+		if cascade && len(result.DeletedIDs) > 0 {
+			// The cascade's reach named, not just counted (issue #6301): the
+			// confirmation is the last place a caller can still see which rows
+			// went with the request.
+			fmt.Printf("  Deleted: %s\n", strings.Join(result.DeletedIDs, ", "))
+		}
 		fmt.Printf("  Removed %d dependency link(s)\n", result.Dependencies)
 		fmt.Printf("  Removed %d label(s)\n", result.Labels)
 		fmt.Printf("  Removed %d event(s)\n", result.Events)
@@ -559,6 +569,12 @@ func outputDeletionPreviewReporting(issueIDs []string, issues map[string]*types.
 			preview["would_remove_labels"] = result.Labels
 			preview["would_remove_events"] = result.Events
 			preview["would_orphan"] = len(result.Orphaned)
+			// The ids behind the counts (issue #6301): under --cascade
+			// would_delete_ids is the whole containment closure and
+			// would_orphan_ids the association dependents left behind, so a
+			// script can name every row before committing to the delete.
+			preview["would_delete_ids"] = result.DeletedIDs
+			preview["would_orphan_ids"] = result.Orphaned
 		}
 		if depError != nil {
 			preview["error"] = depError.Error()
