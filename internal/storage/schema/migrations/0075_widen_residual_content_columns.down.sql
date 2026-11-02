@@ -1,0 +1,5 @@
+-- Reverse of 0075: not reversible without potential data loss, for 0049's
+-- reason exactly. Shrinking LONGTEXT/LONGBLOB back to TEXT/BLOB would silently
+-- truncate any value longer than 65535 bytes that was successfully stored
+-- after the migration (a column-narrow under MySQL semantics truncates with a
+-- warning rather than failing). Intentional no-op.

@@ -194,6 +194,15 @@ func cliCompatibleMigrationSQL(name, sqlText string) string {
 		// the wisp tables must use the frozen source text instead -- see
 		// cliSubstituteAssumesWispTables.
 		return cliMigration0073AddArrivalSeq
+	case "0075_widen_residual_content_columns.up.sql":
+		// Direct DDL for the same reason as 0065: the source migration's
+		// PREPARE guards (COLUMN_TYPE probes) are what make the raw .up.sql
+		// idempotent when replayed onto an already-migrated store, and the
+		// 2.2.x CLI no-ops a prepared MODIFY COLUMN. A fresh bundle's CREATEs
+		// (0005 events, 0021 wisp_events, 0009 issue_snapshots, 0010
+		// compaction_snapshots) all still emit the narrow columns, so every
+		// widening always fires here.
+		return cliMigration0075WidenResidualContentColumns
 	default:
 		return sqlText
 	}
@@ -359,6 +368,18 @@ const cliMigration0071AddRemovedRestriction = `ALTER TABLE issue_versions ADD CO
 const cliMigration0073AddArrivalSeq = `ALTER TABLE issues ADD COLUMN arrival_seq BIGINT;
 ALTER TABLE wisps ADD COLUMN arrival_seq BIGINT;
 CREATE UNIQUE INDEX uk_wisps_arrival_seq ON wisps (arrival_seq);`
+
+// cliMigration0075WidenResidualContentColumns is 0075 with each guarded
+// PREPARE block replaced by the direct ALTER it would run on a fresh database.
+// Each MODIFY restates the column's full definition (nullability and default
+// included), exactly as the source's prepared literals do: events.comment is
+// nullable with no default (0005/0062), wisp_events.comment nullable
+// DEFAULT '' (0021/ignored/0001), issue_snapshots.original_content NOT NULL
+// (0009) with nullable archived_events, and compaction_snapshots.snapshot_json
+// NOT NULL (0010) kept binary as LONGBLOB (0068's durable_state retype is the
+// precedent). Replays over a database that never synced the wisp tables must
+// use the frozen source text instead -- see cliSubstituteAssumesWispTables.
+const cliMigration0075WidenResidualContentColumns = `ALTER TABLE events MODIFY COLUMN comment LONGTEXT;`
 
 const cliMigration0041SplitDependenciesTarget = `DELETE FROM dolt_nonlocal_tables;
 CALL DOLT_COMMIT('-Am', 'disable nonlocal tables for fk migrations');
