@@ -1,0 +1,34 @@
+-- Ignored migration 0031: clone-local marker for restoring the pre-upgrade
+-- events audit history from this clone's own commit history
+-- (gastownhall/beads#7039).
+--
+-- Main migration 0062 drops the versioned events table, COMMITS the drop, and
+-- recreates the table in the dolt_ignored working set, refilled from a temp
+-- copy. That preserves every row only on the clone that runs it. Every other
+-- clone adopts 0062 by pull (or clones after it): the pull brings the
+-- committed DROP, the recreate never replicates, and ignored/0019 then
+-- materializes events EMPTY -- while the rows are still sitting in the clone's
+-- own history, at the first parent of the commit 0062 made.
+--
+-- The work happens in code, not here: seedEventsFromPreflipHistory
+-- (internal/storage/schema/events_preflip_seed.go) is registered in
+-- preMigrationRepairs for this version, so it runs immediately before this
+-- marker is recorded, after ignored/0019 has created the table. It finds every
+-- reachable commit carrying 0062's exact drop message, reads events AS OF each
+-- one's first parent, and runs INSERT INTO events for the content
+-- multiplicities the live table is missing, under content-derived ids. Rows
+-- already present (under any id) are kept, and rows whose issue no longer
+-- exists are skipped. The INSERT INTO events above is stated in this header on
+-- purpose: MigrateUp's pending-migration dirty-table guard scans the raw text
+-- of pending files, and this marker must be seen as touching events.
+--
+-- The cursor table is dolt-ignored, so the marker is clone-local: every clone
+-- restores its own copy exactly once, and a clone that later loses events
+-- re-runs it through the events sentinel replay (floor 18). History the
+-- repair cannot read is skipped with a warning, so it never blocks an open; a
+-- canceled pass, a transient failure or a failed live write leaves the marker
+-- pending for the next migration pass, and the restore reconciles by content,
+-- so a retry adds nothing twice.
+--
+-- The marker itself changes nothing.
+SELECT 1;

@@ -395,6 +395,10 @@ it. In server mode the database lives under `.beads/dolt/` instead; stop the
 server and move the database outside `.beads/dolt/` (see
 [re-clone-gotchas](/recovery/init-safety#re-clone-gotchas)).
 
+A clone that adopts the migrated database this way, by the pull in step 3 or
+by `bd bootstrap`, can start with an empty `events` audit table; see
+[Pre-upgrade audit events on adopting clones](#pre-upgrade-audit-events-on-adopting-clones).
+
 If a clone was instead migrated independently and `bd dolt pull` later fails
 with `cannot merge because table dependencies has different primary keys in its
 common ancestor`, the schema has already forked — follow the recovery playbook:
@@ -405,6 +409,101 @@ common ancestor`, the schema has already forked — follow the recovery playbook
 schema against the cached remote ref — a useful post-upgrade verification.
 It runs in both server and embedded modes.
 </Note>
+
+### Pre-upgrade audit events on adopting clones
+
+Since 1.3.0 the `events` audit table (what `bd history <id> --events` shows)
+is clone-local: migration 0062 commits the drop of the old versioned table,
+and that drop replicates, but the clone-local table that replaces it does not.
+Only the clone that ran the migration keeps its rows. Every clone that adopts
+the migrated database instead starts with an **empty** `events` table
+([#7039](https://github.com/gastownhall/beads/issues/7039)). That covers a
+clone that takes the pull in step 3 above, one re-cloned by `bd bootstrap`,
+and a fresh clone made after the migration. The old rows are not gone: they
+stay in the clone's own Dolt history, just below the drop commit.
+
+**Releases after v1.3.2** put them back once, on the first open, with no
+extra step or consent. bd reads the table as of each commit just before a
+drop, adds only the rows the live table is missing, and prints:
+
+```
+Restored 42 pre-upgrade audit event(s) from this clone's history (gastownhall/beads#7039).
+```
+
+- **Existing rows stay.** Rows already in the table are kept with their ids.
+  A row is restored only as many times as history holds it more often than
+  the live table does, so a second run adds nothing.
+- **Deleted and renamed issues are skipped.** History holds each event
+  under the id its issue had at the upgrade, so events of an issue deleted
+  or renamed since (`bd rename`, `bd rename-prefix`) are not restored, and
+  bd prints `Skipped N pre-upgrade audit event(s) whose issue id no longer
+  exists (deleted or renamed).`
+- **Restored rows are local.** Like every event since 1.3.0, they are not
+  committed and do not replicate; each clone restores its own. New events
+  still do not replicate either.
+- **Interrupted runs retry.** If the open fails or is killed partway, the
+  next open finishes the job without duplicating what was already written.
+- **No history, nothing to restore.** A brand-new database, a clone of a
+  history that was squashed or expired (see
+  [history squash](/recovery/history-squash)), or a shallow clone
+  (`dolt clone --depth`) whose history stops at the upgrade has no
+  pre-upgrade rows to read; bd completes silently. A `bd backup` taken
+  before the upgrade may still hold them.
+
+If bd prints `Warning: could not restore pre-upgrade audit events from
+<commit>`, part of that commit's history could not be read (a missing chunk
+or Dolt's schema-encoding drift, for example), and the audit history of this
+clone is **incomplete**. Unreadable history never blocks an open: bd carries
+on, skips what it could not read, and does not try again by itself. Once the
+history reads again (after a storage repair, for example), have bd retry by
+removing the restore's marker (in embedded mode, while no `bd` command runs);
+the next command repeats the restore, which only adds what is still missing:
+
+```bash
+# Embedded mode (the default):
+cd .beads/embeddeddolt/<db>
+dolt sql -q "DELETE FROM ignored_schema_migrations WHERE version >= 31"
+
+# Server mode, from the project directory:
+bd sql "DELETE FROM ignored_schema_migrations WHERE version >= 31"
+```
+
+The statement also removes the markers of any later clone-local migrations,
+which the next command re-applies. Otherwise, recover the rows from a clone
+or backup that can read that history and copy them in by hand as shown below.
+
+To recover the rows **with v1.3.2 or earlier**, copy them in by hand with the
+[Dolt CLI](https://docs.dolthub.com/cli-reference/cli) while no `bd` command
+runs. This is only safe when the live table is still empty and history holds
+exactly one drop commit; otherwise install a newer release, which merges the
+two without duplicates.
+
+```bash
+cd .beads/embeddeddolt/<db>   # server mode: bd dolt stop, then cd .beads/dolt/<db>
+
+# 1. The drop commit (its message is exact) and the commit just before it.
+dolt sql -q "SELECT commit_hash FROM dolt_log WHERE message = 'schema: drop versioned events table for ignored-plane flip (bd-red8u)'"
+dolt sql -q "SELECT parent_hash FROM dolt_commit_ancestors WHERE commit_hash = '<drop>' AND parent_index = 0"
+
+# 2. How many rows history holds, and confirm the live table is empty (0).
+dolt sql -q "SELECT COUNT(*) FROM events AS OF '<parent>'"
+dolt sql -q "SELECT COUNT(*) FROM events"
+
+# 3. Copy the rows of issues that still exist.
+dolt sql -q "INSERT INTO events (issue_id, event_type, actor, old_value, new_value, comment, created_at, id)
+  SELECT issue_id, event_type, actor, old_value, new_value, comment, created_at, id
+  FROM events AS OF '<parent>' WHERE issue_id IN (SELECT id FROM issues)"
+
+# 4. Check the count, then a sample issue.
+dolt sql -q "SELECT COUNT(*) FROM events"
+bd history <id> --events      # server mode: bd dolt start first
+```
+
+If the first query finds nothing, the drop commit was rewritten (by a squash
+or a rebase, for example) and its message no longer matches; look for the
+last commit whose `events` table still has rows with `dolt log` and
+`SELECT COUNT(*) FROM events AS OF '<commit>'`, and use that commit as
+`<parent>`.
 
 ### Clone behind the remote
 
