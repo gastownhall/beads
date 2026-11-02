@@ -5,6 +5,8 @@ package embeddeddolt_test
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -53,6 +55,82 @@ func TestEmbeddedMigrateFreshDatabaseUnderDoltTransactionCommit(t *testing.T) {
 	}
 	if got := sessionTransactionCommit(t, ctx, conn); got != 1 {
 		t.Fatalf("session dolt_transaction_commit after MigrateUp = %d, want 1 (restored)", got)
+	}
+}
+
+// TestEmbeddedMigrateFaultRestoresDoltTransactionCommit: a pass that fails
+// part-way must still hand the session back with its setting, and the caller
+// must still be able to match the failure. The hook fires after 0040, the
+// first body whose inline commits the enabled setting broke, so it also proves
+// the pass ran with the setting off.
+func TestEmbeddedMigrateFaultRestoresDoltTransactionCommit(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+	conn := openFreshTransactionCommitConn(t, ctx)
+
+	sentinel := errors.New("injected fault after migration 40")
+	observed := -1
+	t.Cleanup(schema.SetMigrateStepFaultHookForTest(func(ctx context.Context, db schema.DBConn, version int) error {
+		if version != 40 {
+			return nil
+		}
+		if err := db.QueryRowContext(ctx, "SELECT @@SESSION.dolt_transaction_commit").Scan(&observed); err != nil {
+			return err
+		}
+		return sentinel
+	}))
+
+	_, err := schema.MigrateUp(ctx, conn)
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("MigrateUp error = %v, want the injected fault", err)
+	}
+	if observed != 0 {
+		t.Fatalf("dolt_transaction_commit inside the pass at migration 40 = %d, want 0", observed)
+	}
+	if got := sessionTransactionCommit(t, ctx, conn); got != 1 {
+		t.Fatalf("session dolt_transaction_commit after a failed pass = %d, want 1 (restored)", got)
+	}
+}
+
+// TestEmbeddedMigratePassSuspendsTransactionCommitUntilRestoredOnFault is the
+// upgrade counterpart of the fresh-database fault test: a store already at
+// schema 27 (the #4137 reporter's starting point) migrated on an enabled
+// session must run the pass with the setting suspended (observed 0 right after
+// migration 40 applies), carry the sentinel out matchable by errors.Is, and be
+// back at 1 when MigrateUp returns. Not parallel: the fault hook is a
+// package-global seam.
+func TestEmbeddedMigratePassSuspendsTransactionCommitUntilRestoredOnFault(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+	dataDir := seedMainSchemaAt(t, ctx, 27)
+
+	sentinel := errors.New("injected fault after migration 40")
+	observed := -1
+	t.Cleanup(schema.SetMigrateStepFaultHookForTest(func(ctx context.Context, db schema.DBConn, version int) error {
+		if version != 40 {
+			return nil
+		}
+		if err := db.QueryRowContext(ctx, "SELECT @@SESSION.dolt_transaction_commit").Scan(&observed); err != nil {
+			return fmt.Errorf("observing dolt_transaction_commit at migration 40: %w", err)
+		}
+		return sentinel
+	}))
+
+	conn, closeConn := openPinnedConn(t, ctx, dataDir)
+	t.Cleanup(closeConn)
+	if _, err := conn.ExecContext(ctx, "SET @@dolt_transaction_commit = 1"); err != nil {
+		t.Fatalf("enable dolt_transaction_commit: %v", err)
+	}
+
+	_, err := schema.MigrateUp(ctx, conn)
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("MigrateUp error = %v, want the injected fault", err)
+	}
+	if observed != 0 {
+		t.Fatalf("dolt_transaction_commit inside the pass at migration 40 = %d, want 0", observed)
+	}
+	if got := sessionTransactionCommit(t, ctx, conn); got != 1 {
+		t.Fatalf("session dolt_transaction_commit after a failed upgrade pass = %d, want 1 (restored)", got)
 	}
 }
 
