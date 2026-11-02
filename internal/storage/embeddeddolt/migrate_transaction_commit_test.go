@@ -5,6 +5,7 @@ package embeddeddolt_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -53,6 +54,40 @@ func TestEmbeddedMigrateFreshDatabaseUnderDoltTransactionCommit(t *testing.T) {
 	}
 	if got := sessionTransactionCommit(t, ctx, conn); got != 1 {
 		t.Fatalf("session dolt_transaction_commit after MigrateUp = %d, want 1 (restored)", got)
+	}
+}
+
+// TestEmbeddedMigrateFaultRestoresDoltTransactionCommit: a pass that fails
+// part-way must still hand the session back with its setting, and the caller
+// must still be able to match the failure. The hook fires after 0040, the
+// first body whose inline commits the enabled setting broke, so it also proves
+// the pass ran with the setting off.
+func TestEmbeddedMigrateFaultRestoresDoltTransactionCommit(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+	conn := openFreshTransactionCommitConn(t, ctx)
+
+	sentinel := errors.New("injected fault after migration 40")
+	observed := -1
+	t.Cleanup(schema.SetMigrateStepFaultHookForTest(func(ctx context.Context, db schema.DBConn, version int) error {
+		if version != 40 {
+			return nil
+		}
+		if err := db.QueryRowContext(ctx, "SELECT @@SESSION.dolt_transaction_commit").Scan(&observed); err != nil {
+			return err
+		}
+		return sentinel
+	}))
+
+	_, err := schema.MigrateUp(ctx, conn)
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("MigrateUp error = %v, want the injected fault", err)
+	}
+	if observed != 0 {
+		t.Fatalf("dolt_transaction_commit inside the pass at migration 40 = %d, want 0", observed)
+	}
+	if got := sessionTransactionCommit(t, ctx, conn); got != 1 {
+		t.Fatalf("session dolt_transaction_commit after a failed pass = %d, want 1 (restored)", got)
 	}
 }
 

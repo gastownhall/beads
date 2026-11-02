@@ -94,3 +94,68 @@ func TestSuspendTransactionCommitDiscardsAnUnrestorableConn(t *testing.T) {
 		t.Fatalf("unmet SQL expectations: %v", err)
 	}
 }
+
+// A restore failure on a failed pass must not hide the pass's own error: a
+// typed refusal callers match with errors.As stays the same value.
+func TestSuspendTransactionCommitJoinsARestoreFailureToThePassError(t *testing.T) {
+	conn, mock, cleanup := newMockConn(t)
+	defer cleanup()
+	restoreErr := errors.New("connection lost")
+	expectTransactionCommitRead(mock, 1)
+	expectTransactionCommitSet(mock, 0).WillReturnResult(sqlmock.NewResult(0, 0))
+	expectTransactionCommitSet(mock, 1).WillReturnError(restoreErr)
+	mock.ExpectClose()
+
+	restore, err := suspendTransactionCommit(context.Background(), conn)
+	if err != nil {
+		t.Fatalf("suspendTransactionCommit() error = %v", err)
+	}
+	passErr := &DirtyTablesError{Tables: []string{"issues"}}
+	err = restore(passErr)
+	var dirtyErr *DirtyTablesError
+	if !errors.As(err, &dirtyErr) || dirtyErr != passErr {
+		t.Fatalf("restore(passErr) = %v, want the original *DirtyTablesError still matchable", err)
+	}
+	if !errors.Is(err, restoreErr) {
+		t.Fatalf("restore(passErr) = %v, want the restore failure joined", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}
+
+// A session whose mode cannot be read or changed must not run the pass with
+// the mode it would break under: MigrateUp fails before its first pass read.
+func TestMigrateUpStopsBeforeThePassWhenTransactionCommitCannotBeSuspended(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		expect func(sqlmock.Sqlmock, error)
+	}{
+		{"read fails", func(mock sqlmock.Sqlmock, err error) {
+			mock.ExpectQuery(regexp.QuoteMeta("SELECT @@SESSION.dolt_transaction_commit")).WillReturnError(err)
+		}},
+		{"set fails", func(mock sqlmock.Sqlmock, err error) {
+			expectTransactionCommitRead(mock, 1)
+			expectTransactionCommitSet(mock, 0).WillReturnError(err)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock := newMockDB(t)
+			expectIgnorePatternSeedNoop(mock, 42)
+			expectIgnoredCursorHealNoop(mock)
+			// migrationWorkNeeded: v42 is behind latest, so a pass is needed.
+			expectCursorProbe(mock, "schema_migrations", true)
+			expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", 42)
+			sessionErr := errors.New("session unavailable")
+			tc.expect(mock, sessionErr)
+
+			applied, err := MigrateUp(context.Background(), db)
+			if !errors.Is(err, sessionErr) || applied != 0 {
+				t.Fatalf("MigrateUp() = %d, %v; want 0 and the session error", applied, err)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("unmet SQL expectations: %v", err)
+			}
+		})
+	}
+}
