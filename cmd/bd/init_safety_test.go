@@ -10,6 +10,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -359,6 +360,64 @@ func TestInitOverrideLateUnreadableRemoteRefusesAsUnverified(t *testing.T) {
 			}
 			runInitExpectingUnverifiedRefusal(t, bdBin, workDir, hermeticInitEnv(t.TempDir(), extra...), append([]string{"init"}, common...)...)
 		})
+	}
+}
+
+// TestInitReinitLocalUnreadableRemoteEmptyRemoteSucceeds pins the opt-out the
+// GH#7665 refusal offers: adding --remote="" to the refused command
+// initializes without a remote, so the unreadable origin (and an ambient
+// sync.remote naming an equally unreadable one) is neither probed nor
+// configured. This covers a fresh workspace only: --remote="" does not erase
+// a sync.remote or Dolt remote that already exists.
+func TestInitReinitLocalUnreadableRemoteEmptyRemoteSucceeds(t *testing.T) {
+	bdBin := buildBDForInitTests(t)
+
+	workDir := t.TempDir()
+	runGitForBootstrapTest(t, workDir, "init", "-b", "main")
+	runGitForBootstrapTest(t, workDir, "config", "core.hooksPath", ".git/hooks")
+	runGitForBootstrapTest(t, workDir, "remote", "add", "origin", filepath.Join(t.TempDir(), "does-not-exist.git"))
+	homeDir := t.TempDir()
+	ambientRemote := filepath.Join(t.TempDir(), "also-missing.git")
+
+	cmd := exec.Command(bdBin, "init", "--non-interactive", "--reinit-local", "--remote=", "--prefix", "er", "--skip-hooks", "--skip-agents")
+	cmd.Dir = workDir
+	cmd.Env = hermeticInitEnv(homeDir, "BD_SYNC_REMOTE="+ambientRemote)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("bd init --reinit-local --remote=\"\" against an unreadable origin failed: %v\noutput:\n%s", err, out.String())
+	}
+	for _, banned := range []string{"could not verify refs/dolt/data", "bd init refuses", "Configured Dolt remote"} {
+		if strings.Contains(out.String(), banned) {
+			t.Errorf("an explicitly empty --remote must not probe or wire a remote, got %q:\n%s", banned, out.String())
+		}
+	}
+
+	beadsDir := filepath.Join(workDir, ".beads")
+	if _, err := os.Stat(beadsDir); err != nil {
+		t.Fatalf(".beads should have been created by a successful init: %v", err)
+	}
+	if got := config.GetStringFromDir(beadsDir, "sync.remote"); got != "" {
+		t.Errorf("sync.remote persisted as %q; an explicitly empty --remote must not persist one", got)
+	}
+
+	// Config alone is not proof: ask the store which Dolt remotes it has.
+	list := exec.Command(bdBin, "dolt", "remote", "list", "--json")
+	list.Dir = workDir
+	list.Env = hermeticInitEnv(homeDir)
+	var listOut, listErr bytes.Buffer
+	list.Stdout = &listOut
+	list.Stderr = &listErr
+	if err := list.Run(); err != nil {
+		t.Fatalf("bd dolt remote list --json: %v\nstdout:\n%s\nstderr:\n%s", err, listOut.String(), listErr.String())
+	}
+	var remotes []map[string]any
+	if err := json.Unmarshal(listOut.Bytes(), &remotes); err != nil {
+		t.Fatalf("parse bd dolt remote list --json: %v\n%s", err, listOut.String())
+	}
+	if len(remotes) != 0 {
+		t.Errorf("the store has Dolt remotes %v; an explicitly empty --remote must configure none", remotes)
 	}
 }
 
