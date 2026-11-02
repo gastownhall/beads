@@ -988,6 +988,35 @@ func TestRenderTreeExternalBlockerMarksRootBlocked(t *testing.T) {
 	}
 }
 
+// TestRenderTreeDirectBlockerWithoutAFlagStillMarksRootBlocked pins the
+// visible-edge half of the root marker (#6630): a down tree whose open
+// blocker sits in plain view marks the root [BLOCKED] even though the stored
+// flag is false. The scan is the same fallback that covers a synthetic
+// external leaf (TestRenderTreeExternalBlockerMarksRootBlocked) for a real
+// blocker the flag has not reached; reading stale flags around (AC-3) must
+// not clip it. A preservation pin: it passes on the pre-fix renderer too, by
+// design.
+func TestRenderTreeDirectBlockerWithoutAFlagStillMarksRootBlocked(t *testing.T) {
+	tree := []*types.TreeNode{
+		{
+			Issue: types.Issue{ID: "BD-root", Title: "Root", Status: types.StatusOpen, Priority: 1},
+			// IsBlocked stays false: the flag says ready, the visible edge says not.
+		},
+		{
+			Issue:          types.Issue{ID: "BD-blocker", Title: "Blocker", Status: types.StatusOpen, Priority: 2},
+			Depth:          1,
+			ParentID:       "BD-root",
+			EdgeFromParent: types.DepBlocks,
+		},
+	}
+
+	text := stripANSIForTest(captureDepTreeStdout(t, func() { renderTree(tree, 50, "down") }))
+	rootLine := strings.Split(strings.TrimRight(text, "\n"), "\n")[0]
+	if !strings.Contains(rootLine, "[BLOCKED]") || strings.Contains(rootLine, "[READY]") {
+		t.Fatalf("root line = %q, want [BLOCKED] from the visible direct blocker:\n%s", rootLine, text)
+	}
+}
+
 // TestRenderTreeNeverCountsADependentAsABlocker is the direction half of the
 // root marker (#6630): an unblocked root whose up (or both) walk reaches an
 // open dependent X — root blocks X, an edge the direct-blocker scan used to
