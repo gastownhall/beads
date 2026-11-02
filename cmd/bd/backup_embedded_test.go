@@ -292,3 +292,115 @@ func TestEmbeddedBackupRestoreStrictReadonly(t *testing.T) {
 		})
 	}
 }
+
+// TestEmbeddedBackupRestoreRefusesSourceWithoutBackup pins GH#7098: a restore
+// from an existing directory that holds no Dolt backup must be refused before
+// Dolt drops the live database. Dolt opens such a directory as an empty store
+// and, under --force, drops the target first, so the workspace used to lose
+// its tables (`table not found: config`). Each case checks the workspace is
+// still readable with the same issues and configuration, independently of the
+// diagnostic, so a baseline run fails on the data loss itself.
+func TestEmbeddedBackupRestoreRefusesSourceWithoutBackup(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt backup tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+
+	// newWorkspace returns a workspace holding two issues whose auto-backup is
+	// off, so no command in the setup can write a backup into the default
+	// directory and turn the "no backup" source into a valid one.
+	newWorkspace := func(t *testing.T, prefix string) (dir string, ids []string) {
+		t.Helper()
+		dir, _, _ = bdInit(t, bd, "--prefix", prefix)
+		bdRunOK(t, bd, dir, "config", "set", "backup.enabled", "false")
+		ids = append(ids,
+			bdCreateSilent(t, bd, dir, "survives the refused restore A"),
+			bdCreateSilent(t, bd, dir, "survives the refused restore B"))
+		return dir, ids
+	}
+
+	// listSource records dir's entries, so the test can show the refusal left
+	// the source as it was. An absent directory lists as empty: the
+	// no-argument form creates the default directory, empty, on its way to
+	// the refusal.
+	listSource := func(t *testing.T, dir string) []string {
+		t.Helper()
+		entries, err := os.ReadDir(dir)
+		if os.IsNotExist(err) {
+			return []string{}
+		}
+		if err != nil {
+			t.Fatalf("read source %s: %v", dir, err)
+		}
+		names := []string{}
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		return names
+	}
+
+	for _, tc := range []struct {
+		name   string
+		prefix string
+		source func(t *testing.T, dir string) string // "" restores from the default directory
+		force  bool
+		empty  bool // the source holds no entries at all
+	}{
+		{name: "empty_dir", prefix: "bknbempty", force: true, empty: true, source: func(t *testing.T, _ string) string { return t.TempDir() }},
+		{name: "default_dir_never_synced", prefix: "bknbdflt", force: true, source: func(*testing.T, string) string { return "" }},
+		{name: "jsonl_export_only", prefix: "bknbjsonl", force: true, source: func(t *testing.T, dir string) string {
+			src := t.TempDir()
+			bdRunOK(t, bd, dir, "export", "-o", filepath.Join(src, "issues.jsonl"))
+			return src
+		}},
+		{name: "empty_dir_without_force", prefix: "bknbnoforce", empty: true, source: func(t *testing.T, _ string) string { return t.TempDir() }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, ids := newWorkspace(t, tc.prefix)
+			configBefore := bdRunOK(t, bd, dir, "config", "list", "--json")
+
+			source := tc.source(t, dir)
+			shown := source
+			if source == "" {
+				shown = filepath.Join(dir, ".beads", "backup")
+			}
+			if _, err := os.Stat(filepath.Join(shown, "manifest")); !os.IsNotExist(err) {
+				t.Fatalf("fixture %s already holds a Dolt manifest (stat error %v); the case would not test a source without a backup", shown, err)
+			}
+			sourceBefore := listSource(t, shown)
+
+			args := []string{"restore"}
+			if tc.force {
+				args = append(args, "--force")
+			}
+			if source != "" {
+				args = append(args, source)
+			}
+			out := bdBackupFail(t, bd, dir, args...)
+
+			for _, id := range ids {
+				if got := bdRunOK(t, bd, dir, "show", id, "--json"); !strings.Contains(got, id) {
+					t.Errorf("issue %s missing after the refused restore: %s", id, got)
+				}
+			}
+			if got := len(bdListJSON(t, bd, dir)); got != len(ids) {
+				t.Errorf("issue count after the refused restore = %d, want %d", got, len(ids))
+			}
+			if configAfter := bdRunOK(t, bd, dir, "config", "list", "--json"); configAfter != configBefore {
+				t.Errorf("configuration changed across the refused restore:\nbefore:\n%s\nafter:\n%s", configBefore, configAfter)
+			}
+			sourceAfter := listSource(t, shown)
+			if strings.Join(sourceAfter, "\n") != strings.Join(sourceBefore, "\n") {
+				t.Errorf("source %s changed across the refused restore: before %v, after %v", shown, sourceBefore, sourceAfter)
+			}
+			if tc.empty && len(sourceAfter) != 0 {
+				t.Errorf("refused restore wrote into the empty source %s: %v", shown, sourceAfter)
+			}
+			if !strings.Contains(out, "no Dolt backup found") || !strings.Contains(out, shown) {
+				t.Errorf("restore output does not name %s as holding no Dolt backup:\n%s", shown, out)
+			}
+		})
+	}
+}
