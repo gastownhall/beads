@@ -74,18 +74,39 @@ type journalWriterAdmission struct {
 }
 
 // release unlocks and, when this admission pinned the session, returns it.
-// Call it only once the transaction on the session has committed or rolled
-// back. Idempotent and nil-safe.
+// Call it only when no transaction is open on the session. Idempotent and
+// nil-safe.
 func (a *journalWriterAdmission) release() {
+	a.end(true)
+}
+
+// end gives the admission up once the session's transaction is over. ended
+// reports that it committed or rolled back: the lock is released and the
+// session kept. Otherwise the transaction may still be open, and a
+// RELEASE_LOCK would let the next writer in before it ends, so the session is
+// discarded and the server drops the lock with it. Either way a pinned session
+// is then returned. Idempotent and nil-safe.
+func (a *journalWriterAdmission) end(ended bool) {
 	if a == nil {
 		return
 	}
 	a.once.Do(func() {
-		a.lock.Release()
+		if ended {
+			a.lock.Release()
+		} else {
+			a.lock.Abandon()
+		}
 		if a.owned {
 			_ = a.conn.Close()
 		}
 	})
+}
+
+// sqlTxEnded reports whether a transaction whose Commit returned err has
+// ended: it committed, or the server refused it with a rollback guaranteed.
+// Any other failure leaves the session's transaction state unknown.
+func sqlTxEnded(err error) bool {
+	return err == nil || isSerializationError(err) || isDoltAutocommitRollbackError(err)
 }
 
 // admitJournalWriter takes the journal-writer lock for a transaction that will
@@ -131,8 +152,8 @@ func (s *DoltStore) admitJournalWriter(ctx context.Context, beginner txBeginner,
 
 // beginJournalScopedTx begins a raw write transaction with the journal scoped
 // on it, admitted as a journal writer first when the store locks them. done
-// rolls the transaction back unless it committed, clears the scope, releases
-// the admission, and returns the session; defer it. commitSQLTx releases the
+// rolls the transaction back unless it committed, clears the scope, ends the
+// admission, and returns the session; defer it. commitSQLTx ends the
 // admission as soon as the transaction commits, so a recheck that follows the
 // commit never runs while this transaction still holds the lock.
 func (s *DoltStore) beginJournalScopedTx(ctx context.Context) (tx *sql.Tx, done func(), err error) {
@@ -156,16 +177,19 @@ func (s *DoltStore) beginJournalScopedTx(ctx context.Context) (tx *sql.Tx, done 
 	}
 	clearJournalScope := issueops.ScopeEventsJournalTransaction(tx, journalOn)
 	return tx, func() {
-		_ = tx.Rollback()
+		// After commitSQLTx the admission is already gone, so this
+		// rollback's ErrTxDone ends nothing.
+		rollbackErr := tx.Rollback()
 		clearJournalScope()
-		s.releaseJournalAdmission(tx)
+		s.endJournalAdmission(tx, rollbackErr == nil)
 	}, nil
 }
 
-// releaseJournalAdmission releases the admission beginJournalScopedTx bound to
-// tx, if any. Call it only once tx has committed or rolled back.
-func (s *DoltStore) releaseJournalAdmission(tx *sql.Tx) {
+// endJournalAdmission ends the admission beginJournalScopedTx bound to tx, if
+// any; ended reports that tx committed or rolled back
+// (journalWriterAdmission.end).
+func (s *DoltStore) endJournalAdmission(tx *sql.Tx, ended bool) {
 	if adm, ok := s.journalAdmissions.LoadAndDelete(tx); ok {
-		adm.(*journalWriterAdmission).release()
+		adm.(*journalWriterAdmission).end(ended)
 	}
 }
