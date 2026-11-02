@@ -87,3 +87,12 @@ func RecomputeAllBlockedOnConn(ctx context.Context, conn BlockedRecomputeConn, a
 	}
 	return changed, nil
 }
+
+// BlockedRecomputeNotRetried reports a post-merge is_blocked recompute that
+// failed (err) when the marker that makes the next pull retry it
+// (bd-578h9.11) could not be written either (markErr). Nothing repairs
+// is_blocked on its own then, so the message names the repair; err stays in
+// the chain.
+func BlockedRecomputeNotRetried(err, markErr error) error {
+	return fmt.Errorf("%w; no retry was recorded for the next pull (%v), so run `bd recompute-blocked` to repair is_blocked", err, markErr)
+}

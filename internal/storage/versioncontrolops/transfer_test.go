@@ -196,8 +196,12 @@ func TestRemoteTransferDeadline(t *testing.T) {
 				cancel()
 				err := site.call(WithTransferTimeout(ctx, time.Hour), db)
 				assertNotBlamedOnTransferSetting(t, err)
-				if !errors.Is(db.statementCtx(t).Err(), context.Canceled) {
-					t.Errorf("statement context err = %v, want the caller's Canceled", db.statementCtx(t).Err())
+				// endedByCtx was read as the statement returned. The statement
+				// context's Err proves nothing afterwards: runTransfer's deferred
+				// cancel ends that context whatever stopped the statement.
+				db.statementCtx(t) // exactly one statement
+				if !db.endedByCtx[0] {
+					t.Errorf("statement was released by the watchdog, not the caller's cancellation (err %v)", err)
 				}
 			})
 		}

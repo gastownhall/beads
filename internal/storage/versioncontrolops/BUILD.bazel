@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "versioncontrolops",
     srcs = [
+        "aftermerge.go",
         "automerge.go",
         "backup.go",
         "blocked_recompute.go",
@@ -37,6 +38,7 @@ go_library(
 go_test(
     name = "versioncontrolops_test",
     srcs = [
+        "aftermerge_test.go",
         "automerge_test.go",
         "backup_test.go",
         "clone_test.go",

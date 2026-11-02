@@ -5878,6 +5878,10 @@ func (s *DoltStore) settleMergeInTx(ctx context.Context, tx *sql.Tx, pullErr err
 	return s.commitSQLTx(ctx, "commit pull merge settlement", tx)
 }
 
+// afterMergeGrace is versioncontrolops.AfterMergeGrace, held in a variable so
+// tests can shorten it.
+var afterMergeGrace = versioncontrolops.AfterMergeGrace
+
 // recomputeBlockedAfterPull recomputes the denormalized is_blocked column for
 // the rows a pull's merge changed (bd-6dnrw.3) and commits the result.
 // is_blocked is otherwise maintained only by local write paths, so a merge
@@ -5885,7 +5889,14 @@ func (s *DoltStore) settleMergeInTx(ctx context.Context, tx *sql.Tx, pullErr err
 // and `bd ready` trusts it. fromCommit is the pre-pull HEAD; empty means it
 // could not be read, which degrades to a full recompute. A pull that merged
 // nothing (HEAD unchanged) is a no-op.
+//
+// It runs on ctx without its cancellation, for up to afterMergeGrace after
+// ctx ends: the merge it covers is already in, so a pull canceled now (the
+// first SIGINT or SIGTERM, GH#7989) must still recompute, or at least leave
+// the marker below for the next pull.
 func (s *DoltStore) recomputeBlockedAfterPull(ctx context.Context, fromCommit string) error {
+	ctx, cancel := versioncontrolops.WithCancelGrace(ctx, afterMergeGrace)
+	defer cancel()
 	return s.withCircuitWrite(ctx, func(ctx context.Context) error {
 		return s.recomputeBlockedAfterPullUnchecked(ctx, fromCommit)
 	})
@@ -5896,8 +5907,11 @@ func (s *DoltStore) recomputeBlockedAfterPullUnchecked(ctx context.Context, from
 		// The merge this recompute covers is already committed, so a plain
 		// retry on the next pull would skip as "nothing merged" — leave a
 		// marker so it widens its window instead (bd-578h9.11). Best-effort:
-		// the recompute error is what matters.
-		s.markBlockedRecomputePending(ctx, fromCommit)
+		// the recompute error is what matters, unless no marker could be
+		// left either, which the error then says.
+		if markErr := s.markBlockedRecomputePending(ctx, fromCommit); markErr != nil {
+			return versioncontrolops.BlockedRecomputeNotRetried(err, markErr)
+		}
 		return err
 	}
 	// Derived state converges: every clone computes the same values from the
@@ -6051,19 +6065,19 @@ func (s *DoltStore) recomputeBlockedTxWithDB(ctx context.Context, db txBeginner,
 	return nil
 }
 
-// markBlockedRecomputePending best-effort records a failed post-merge
-// is_blocked recompute (bd-578h9.11); see
+// markBlockedRecomputePending records a failed post-merge is_blocked
+// recompute (bd-578h9.11) for the next pull to retry; see
 // issueops.MarkIsBlockedRecomputePendingInTx.
-func (s *DoltStore) markBlockedRecomputePending(ctx context.Context, fromCommit string) {
+func (s *DoltStore) markBlockedRecomputePending(ctx context.Context, fromCommit string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return
+		return err
 	}
 	if err := issueops.MarkIsBlockedRecomputePendingInTx(ctx, tx, fromCommit); err != nil {
 		_ = tx.Rollback()
-		return
+		return err
 	}
-	_ = tx.Commit()
+	return tx.Commit()
 }
 
 // finishCLIPull runs the merge-conflict auto-resolver after a CLI-based pull
@@ -6076,11 +6090,20 @@ func (s *DoltStore) markBlockedRecomputePending(ctx context.Context, fromCommit 
 // same resolver as the SQL path. pullErr is what doltCLIPull returned: a pull that
 // fails *because* of conflicts is recoverable once they resolve, so we inspect the
 // working set regardless and only surface pullErr when nothing was resolved.
+//
+// It runs on ctx without its cancellation, for up to afterMergeGrace after ctx
+// ends. The dolt CLI commits its merge together with any conflicts (its pull sets
+// @@dolt_force_transaction_commit), so they are in the server's working set once it
+// exits; a caller canceled after the transfer (the first SIGINT or SIGTERM,
+// GH#7989) must not leave them there, where they refuse every later write on the
+// branch.
 func (s *DoltStore) finishCLIPull(ctx context.Context, pullErr error) error {
 	if s.readOnly {
 		// A read-only store cannot resolve or commit; surface the pull result as-is.
 		return pullErr
 	}
+	ctx, cancel := versioncontrolops.WithCancelGrace(ctx, afterMergeGrace)
+	defer cancel()
 	resolved, resolveErr := s.autoResolveConflictsAfterCLIPull(ctx)
 	if resolveErr != nil {
 		if pullErr != nil {

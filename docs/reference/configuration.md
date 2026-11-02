@@ -280,7 +280,7 @@ Before pushing, `bd` verifies the local chunk store with `dolt fsck --quiet`, bo
 
 ### Remote transfer timeout
 
-Releases after v1.3.2 bound each network statement an embedded-mode `bd` sends to a Dolt remote (the push of `bd dolt push`, auto-push and `bd sync`, and the fetch of `bd dolt pull`, `bd dolt fetch` and federation sync) with `dolt.remote-timeout`, default five minutes. `BD_DOLT_REMOTE_TIMEOUT` overrides the config value. A missing, unparsable, zero or negative value uses the five-minute default.
+Releases after v1.3.2 bound each network statement an embedded-mode `bd` sends to a Dolt remote (the push of `bd dolt push`, auto-push and `bd sync`, and the fetch of `bd dolt pull`, `bd federation status` and federation sync) with `dolt.remote-timeout`, default five minutes. `BD_DOLT_REMOTE_TIMEOUT` overrides the config value. A missing, unparsable, zero or negative value uses the five-minute default.
 
 ```yaml
 dolt:
@@ -289,7 +289,7 @@ dolt:
 
 When the budget runs out, `bd` cancels the statement (Dolt then stops the `git`/`ssh` transport it started for it) and reports `dolt push timed out after 5m0s (set dolt.remote-timeout / BD_DOLT_REMOTE_TIMEOUT to change the limit)` with the underlying error. A push that timed out may still have written part of its data to the remote. The timeout does not cover opening the database, the local merge after a pull's fetch, or engine shutdown, so a whole command can take longer. A sooner deadline wins: auto-push keeps its own `dolt.auto-push-timeout` (default 30s) for the whole attempt.
 
-Server mode does not use `dolt.remote-timeout`: there, `bd` runs `dolt` CLI transfers under `BEADS_CLI_TRANSFER_TIMEOUT` (default five minutes). In releases after v1.3.2, when that timeout or an interrupt cancels a `dolt` command `bd` started for a transfer, `bd` first sends it SIGTERM on Linux and macOS so it can stop its own transport, and kills it only if it is still running 10 seconds later (15 seconds for the remote cache's clone, pull and push). On Windows `bd` kills it at once, as before.
+Server mode does not use `dolt.remote-timeout`: there, `bd` runs `dolt` CLI transfers under `BEADS_CLI_TRANSFER_TIMEOUT` (default five minutes). In releases after v1.3.2, when that timeout or an interrupt cancels a `dolt` command `bd` started for a transfer, `bd` first sends it SIGTERM on Linux and macOS so it can stop its own transport, and kills it only if it is still running 10 seconds later (15 seconds for the remote cache's clone, pull and push). On Windows `bd` kills it at once, as before. An interrupt that arrives after a pull's `dolt` command has finished does not stop the pull: `bd` still settles the merge as an uninterrupted pull would, auto-resolving the conflicts it can and recomputing blocked flags, and gives each step up to 15 seconds.
 
 ## Actor Identity Resolution
 

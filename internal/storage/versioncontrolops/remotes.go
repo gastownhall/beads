@@ -147,9 +147,15 @@ func Pull(ctx context.Context, db DBConn, remote, branch, user string) error {
 // the pull for the operator to resolve out-of-band. strategy == "" is exactly
 // Pull's behavior. See MergeAndSettleWithStrategy/SettleMerge for the
 // resolution logic.
+//
+// Canceling ctx stops the fetch, never the merge after it (GH#7989). The
+// conflict flags MergeAndSettle sets let DOLT_MERGE commit a conflicted or
+// FK-violating merge into the working set, and only the settle pass, or its
+// abort, takes it out again; a cancellation between the two would leave the
+// database mid-merge, refusing every later write and pull.
 func PullWithStrategy(ctx context.Context, db DBConn, remote, branch, user, strategy string) error {
-	// Only the fetch runs under the transfer deadline; the local merge and
-	// settle below keep the caller's ctx (GH#7989).
+	// Only the fetch runs under the transfer deadline and the caller's
+	// cancellation; the local merge and settle below run without either.
 	if err := withRemoteEnvGuards(func() error {
 		return runTransfer(ctx, "dolt fetch", func(ctx context.Context) error {
 			if user != "" {
@@ -163,7 +169,7 @@ func PullWithStrategy(ctx context.Context, db DBConn, remote, branch, user, stra
 		return fmt.Errorf("fetch from %s/%s: %w", remote, branch, err)
 	}
 	trackingRef := remote + "/" + branch
-	if err := MergeAndSettleWithStrategy(ctx, db, trackingRef, strategy); err != nil {
+	if err := MergeAndSettleWithStrategy(context.WithoutCancel(ctx), db, trackingRef, strategy); err != nil {
 		return fmt.Errorf("merge %s: %w", trackingRef, err)
 	}
 	return nil

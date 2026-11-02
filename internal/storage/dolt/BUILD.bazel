@@ -318,6 +318,7 @@ go_test(
         "public_write_circuit_test.go",
         "pull_branch_tracking_integration_test.go",
         "pull_branch_tracking_test.go",
+        "pull_cancel_test.go",
         "pull_config_wedge_test.go",
         "pull_conflict_test.go",
         "pull_report_sql_route_test.go",

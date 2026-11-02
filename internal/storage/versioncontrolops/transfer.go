@@ -18,8 +18,9 @@ type transferTimeoutKey struct{}
 // network statements this package issues (DOLT_PUSH and DOLT_FETCH, including
 // the fetch half of a pull). The deadline starts when the statement starts,
 // after the remote environment guards are entered, and covers only that
-// statement: a pull's local merge and settle keep ctx itself. A caller
-// deadline that ends sooner still wins. d <= 0 leaves ctx unbounded.
+// statement: a pull's local merge and settle run without it (see
+// PullWithStrategy). A caller deadline that ends sooner still wins. d <= 0
+// leaves ctx unbounded.
 //
 // Callers that do not opt in keep their existing behavior; clone and backup
 // never read the value.
