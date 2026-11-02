@@ -330,6 +330,47 @@ func TestDatabaseIntegrity_RollbackRefusesReplacedDestination(t *testing.T) {
 	}
 }
 
+// A failed reinitialization at an unchanged destination still rolls back:
+// what bd init left is removed, the original database is restored and the
+// backup is consumed.
+// Adapted from the GLM candidate's TestRestoreIntegrityBackupRestoresNormally.
+func TestDatabaseIntegrity_RollbackRestoresUnchangedDestination(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the fake bd binary is a POSIX shell script")
+	}
+	t.Setenv("BEADS_DOLT_DATA_DIR", "")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	dir := setupTestWorkspace(t)
+	doltPath := filepath.Join(dir, ".beads", "dolt")
+	confineWriteFile(t, filepath.Join(doltPath, "state"), "corrupt")
+
+	oldBinary := integrityBdBinary
+	t.Cleanup(func() { integrityBdBinary = oldBinary })
+	integrityBdBinary = func() (string, error) {
+		script := filepath.Join(t.TempDir(), "bd")
+		body := "#!/bin/sh\nmkdir -p '" + doltPath + "' && echo partial > '" + filepath.Join(doltPath, "partial") + "'\nexit 1\n"
+		if err := os.WriteFile(script, []byte(body), 0o700); err != nil { // #nosec G306 -- test script must be executable
+			t.Fatal(err)
+		}
+		return script, nil
+	}
+
+	err := DatabaseIntegrity(dir)
+	if err == nil || !strings.Contains(err.Error(), "failed to reinitialize") || strings.Contains(err.Error(), "refusing") {
+		t.Fatalf("expected the reinitialize failure without a refusal, got %v", err)
+	}
+	if data, rerr := os.ReadFile(filepath.Join(doltPath, "state")); rerr != nil || string(data) != "corrupt" {
+		t.Fatalf("original database not restored: %q, %v", data, rerr)
+	}
+	if _, serr := os.Lstat(filepath.Join(doltPath, "partial")); !os.IsNotExist(serr) {
+		t.Fatalf("expected the partial reinitialization removed, got %v", serr)
+	}
+	if backups, _ := filepath.Glob(filepath.Join(filepath.Dir(doltPath), "dolt.*.corrupt.backup")); len(backups) != 0 {
+		t.Fatalf("expected the backup consumed by the restore, got %v", backups)
+	}
+}
+
 // confinedDatabaseLayouts are layouts doctor still backs up and deletes:
 // each returns the database path the fix selects.
 var confinedDatabaseLayouts = []struct {
