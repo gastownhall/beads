@@ -24,6 +24,7 @@ go_test(
     name = "github_test",
     srcs = [
         "client_ratelimit_test.go",
+        "links_pagination_test.go",
         "links_test.go",
         "mapping_test.go",
         "push_dedup_test.go",
