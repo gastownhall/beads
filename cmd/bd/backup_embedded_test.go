@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -150,6 +151,48 @@ func TestEmbeddedBackup(t *testing.T) {
 		out := bdBackupFail(t, bd, dir2, "restore", backupDest)
 		if !strings.Contains(out, "already exists") {
 			t.Errorf("expected 'already exists' error, got: %s", out)
+		}
+	})
+
+	// force_restore_from_real_backup is the positive control for the
+	// no-backup refusal (GH#7098): a real backup — a directory `bd backup
+	// init` plus `bd backup sync` produced, manifest and all — must still
+	// restore, and the force restore must replace the live workspace's data
+	// with the backup's: the issues the backup holds come back, the issue
+	// created after it does not.
+	t.Run("force_restore_from_real_backup", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "bkreal")
+		bdCreateSilent(t, bd, dir, "issue the backup holds A")
+		bdCreateSilent(t, bd, dir, "issue the backup holds B")
+
+		backupDest := filepath.Join(t.TempDir(), "dolt-backup-real")
+		if err := os.MkdirAll(backupDest, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		bdBackup(t, bd, dir, "init", "file://"+backupDest)
+		bdBackup(t, bd, dir, "sync")
+		if _, err := os.Stat(filepath.Join(backupDest, "manifest")); err != nil {
+			t.Fatalf("backup sync produced no manifest at %s: %v", backupDest, err)
+		}
+
+		bdCreateSilent(t, bd, dir, "issue created after the backup")
+
+		out := bdBackup(t, bd, dir, "restore", "--force", backupDest)
+		if !strings.Contains(out, "Restore complete") {
+			t.Errorf("expected 'Restore complete', got: %s", out)
+		}
+
+		titles := make([]string, 0, 2)
+		for _, issue := range bdListJSON(t, bd, dir) {
+			titles = append(titles, issue.Title)
+		}
+		for _, want := range []string{"issue the backup holds A", "issue the backup holds B"} {
+			if !slices.Contains(titles, want) {
+				t.Errorf("restored workspace lost %q; got %v", want, titles)
+			}
+		}
+		if slices.Contains(titles, "issue created after the backup") {
+			t.Errorf("restore did not replace the database: the post-backup issue is still here; got %v", titles)
 		}
 	})
 }

@@ -158,6 +158,93 @@ func TestBackupRestoreRefusesSourceWithoutBackup(t *testing.T) {
 	})
 }
 
+// TestBackupRestoreValidSourceRoundTrip is the positive control for the
+// no-backup refusal (GH#7098): a real backup — a directory BackupDatabase
+// produced, manifest and all — must still restore through the same
+// prerequisite, and the force restore must replace the live database with the
+// backup's contents: the issues the backup holds come back, the issue created
+// after it does not. It runs on its own isolated database; a restore that
+// runs replaces it.
+func TestBackupRestoreValidSourceRoundTrip(t *testing.T) {
+	if testDoltServerPort == 0 {
+		t.Skip("Dolt test server not available")
+	}
+	if testutil.DoltContainerCrashed() {
+		t.Skipf("Dolt test server crashed: %v", testutil.DoltContainerCrashError())
+	}
+
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "dolt")
+	s := newTestStoreIsolatedDB(t, dbPath, "bkv")
+
+	seed := func(id, title string) {
+		t.Helper()
+		now := time.Now()
+		issue := &types.Issue{
+			ID:        id,
+			Title:     title,
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+			CreatedAt: now,
+			UpdatedAt: now,
+		}
+		if err := s.CreateIssue(ctx, issue, "test-user"); err != nil {
+			t.Fatalf("create issue %s: %v", id, err)
+		}
+	}
+	commit := func(message string) {
+		t.Helper()
+		if err := s.Commit(ctx, message); err != nil && !strings.Contains(err.Error(), "nothing to commit") {
+			t.Fatalf("commit %q: %v", message, err)
+		}
+	}
+
+	seed("bkv-1", "issue the backup holds A")
+	seed("bkv-2", "issue the backup holds B")
+	commit("issues the backup holds")
+
+	backupDir := filepath.Join(t.TempDir(), "dolt-backup")
+	if err := os.MkdirAll(backupDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.BackupDatabase(ctx, backupDir); err != nil {
+		t.Fatalf("back up the database: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(backupDir, "manifest")); err != nil {
+		t.Fatalf("backup produced no manifest at %s: %v", backupDir, err)
+	}
+
+	seed("bkv-3", "issue created after the backup")
+	commit("issue the backup lacks")
+
+	if err := s.RestoreDatabase(ctx, backupDir, true); err != nil {
+		t.Fatalf("force restore from a real backup: %v", err)
+	}
+
+	// Verify through a store opened after the replace: the first store's
+	// pooled connections watched the database be dropped and recreated.
+	after, err := dolt.NewFromConfig(ctx, filepath.Dir(dbPath))
+	if err != nil {
+		t.Fatalf("reopen the restored database: %v", err)
+	}
+	t.Cleanup(func() { _ = after.Close() })
+
+	for _, id := range []string{"bkv-1", "bkv-2"} {
+		got, err := after.GetIssue(ctx, id)
+		if err != nil {
+			t.Errorf("issue %s missing after the restore: %v", id, err)
+			continue
+		}
+		if !strings.HasPrefix(got.Title, "issue the backup holds") {
+			t.Errorf("issue %s came back as %q", id, got.Title)
+		}
+	}
+	if got, err := after.GetIssue(ctx, "bkv-3"); err == nil {
+		t.Errorf("restore did not replace the database: %s was created after the backup and is still here (%q)", "bkv-3", got.Title)
+	}
+}
+
 func TestSyncProjectIDFromDB_NoWorkspaceUsesActiveWorkspaceError(t *testing.T) {
 	if testDoltServerPort == 0 {
 		t.Skip("Dolt test server not available")
