@@ -698,6 +698,7 @@ go_test(
         "cross_mode_parity_harness_test.go",
         "cursor_hook_test.go",
         "database_name_test.go",
+        "database_name_traversal_test.go",
         "db_proxy_child_test.go",
         "defer_embedded_test.go",
         "defer_proxied_integration_test.go",
