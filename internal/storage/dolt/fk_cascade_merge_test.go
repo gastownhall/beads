@@ -9,7 +9,8 @@ import (
 
 // These tests cover the bd-6dnrw.4 hazard: migrations 0041/0042 put FOREIGN
 // KEYs with ON DELETE/UPDATE CASCADE from the synced child tables
-// (dependencies, labels, comments, events, snapshots) onto issues(id). Dolt
+// (dependencies, labels, comments, events, snapshots) onto issues(id), and
+// 0063 created provenance_events with one. Dolt
 // merges row-wise and never re-executes cascades, so "clone A deletes an
 // issue" merged with "clone B inserts a child row referencing it" produces a
 // dangling child row — a foreign-key constraint violation that rolls the whole
@@ -47,6 +48,12 @@ var fkCascadeCases = []fkCascadeCase{
 		insert: "INSERT INTO comments (id, issue_id, author, text, created_at) " +
 			"VALUES (UUID(), 'fkc-x-%[1]s', 'peer', 'late comment', NOW())",
 		orphanQuery: "SELECT COUNT(*) FROM comments WHERE issue_id = 'fkc-x-%[1]s'",
+	},
+	{
+		name: "provenance_events",
+		insert: "INSERT INTO provenance_events (id, issue_id, kind, source) " +
+			"VALUES (UUID(), 'fkc-x-%[1]s', 'claim', 'peer')",
+		orphanQuery: "SELECT COUNT(*) FROM provenance_events WHERE issue_id = 'fkc-x-%[1]s'",
 	},
 }
 

@@ -160,8 +160,12 @@ bd federation status
 bd federation status --peer town-beta
 ```
 
-Without `--strategy`, a sync that hits merge conflicts pauses and reports the
-conflicting tables for manual resolution instead of auto-resolving.
+Without `--strategy`, a sync that hits merge conflicts stops and reports the
+conflicting tables instead of resolving them. In releases after v1.3.2, sync
+first settles conflicts the way `bd dolt pull` does, such as edits to
+different fields of one issue, and stops only on the ones it cannot settle,
+leaving your database as it was. `--strategy ours` or `--strategy theirs`
+then resolves every conflicting table that way.
 
 ### Excluded Issue Types
 
@@ -170,6 +174,18 @@ keeps local. `wisp` matches ephemeral issues. Each push publishes a commit
 with these issues removed, along with their labels, comments and
 dependencies. The issues stay in your own database, and later syncs keep
 them while merging the peer's changes.
+
+In releases after v1.3.2, an excluded issue that any peer held at your last
+fetch from it is not removed, whichever peer you sync with: for example one
+the peer created, or one it received before you excluded its type. Removing
+it from the tip would delete it from that peer once the tip reaches it,
+directly or through another peer. It syncs like any other issue, so your
+edits to it reach your peers. Every remote except `origin` counts as a peer
+here, as it does for `bd federation sync` without `--peer`: `bd dolt push`
+sends `origin` every issue, so what `origin` holds counts only when you sync
+with `origin` itself. Each sync that removes issues also adds two commits to
+your local history: the filtered commit it publishes and the commit that
+restores the issues locally.
 
 ```yaml
 # .beads/config.yaml

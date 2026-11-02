@@ -416,50 +416,37 @@ func (s *DoltStore) Sync(ctx context.Context, peer string, strategy string) (*Sy
 	// Step 2: Get status before merge
 	beforeCommit, _ := s.GetCurrentCommit(ctx) // Best effort: empty commit hash means diff won't be logged
 
-	// Step 3: Merge peer's branch
+	// Step 3: Merge peer's branch through the pull settle path, as PullFrom
+	// does: the conflict classes a pull resolves on its own are resolved and
+	// foreign-key cascade violations repaired. A filtered push's compensation
+	// produces both when the peer deletes an issue it touched (GH#7890), and a
+	// bare merge failed every later sync on them.
 	remoteBranch := fmt.Sprintf("%s/%s", peer, s.branch)
-	conflicts, err := s.Merge(ctx, remoteBranch)
+	conflicts, err := s.mergeAndSettle(ctx, remoteBranch)
 	if err != nil {
 		result.Error = fmt.Errorf("merge failed: %w", err)
 		return result, result.Error
 	}
 
-	// Step 4: Handle conflicts if any
+	// Step 4: Handle the conflicts the settle path left for the operator. It
+	// rolled the merge back, so merge again resolving every conflicted table
+	// with the strategy, as bd vc merge --strategy does; MergeWithStrategy
+	// commits the resolution, config included, and recomputes is_blocked.
 	if len(conflicts) > 0 {
 		result.Conflicts = conflicts
 
 		if strategy == "" {
 			// No strategy specified, leave conflicts for manual resolution
-			result.Error = fmt.Errorf("merge conflicts require resolution (use --strategy ours|theirs)")
+			result.Error = fmt.Errorf("merge conflicts in %s require resolution (use --strategy ours|theirs)",
+				versioncontrolops.ConflictTables(conflicts))
 			return result, result.Error
 		}
 
-		// Auto-resolve using strategy
-		for _, c := range conflicts {
-			if err := s.ResolveConflicts(ctx, c.Field, strategy); err != nil {
-				result.Error = fmt.Errorf("conflict resolution failed for %s: %w", c.Field, err)
-				return result, result.Error
-			}
+		if _, err := s.MergeWithStrategy(ctx, remoteBranch, strategy); err != nil {
+			result.Error = fmt.Errorf("conflict resolution with %s strategy failed: %w", strategy, err)
+			return result, result.Error
 		}
 		result.ConflictsResolved = true
-
-		// Commit the resolution INCLUDING config: the operator chose this
-		// strategy, and plain Commit excludes config (GH#2455). A config-only
-		// conflict — routine now that kv.memory.* memories sync through config —
-		// would otherwise resolve but never commit, leaving the merge
-		// unconcluded and re-wedging the next sync.
-		if err := s.CommitMergeResolution(ctx, fmt.Sprintf("Resolve conflicts from %s using %s strategy", peer, strategy)); err != nil {
-			result.Error = fmt.Errorf("failed to commit conflict resolution: %w", err)
-			return result, result.Error
-		}
-
-		// bd-578h9.11: the conflicted merge skipped the automatic is_blocked
-		// recompute (unresolved rows would have fed it garbage); now that the
-		// resolution is committed, cover the whole merge+resolution window.
-		if err := s.RecomputeBlockedAfterMerge(ctx, beforeCommit); err != nil {
-			result.Error = fmt.Errorf("conflicts resolved but is_blocked recompute failed: %w", err)
-			return result, result.Error
-		}
 	}
 	result.Merged = true
 
@@ -485,6 +472,65 @@ func (s *DoltStore) Sync(ctx context.Context, peer string, strategy string) (*Sy
 	return result, nil
 }
 
+// mergeAndSettle merges ref into the store's branch in one transaction with
+// the pull settle flags, on a long-timeout connection checked out to the
+// store's branch, and settles it as a pull does (settleMergeInTx). When the
+// merge lands it recomputes is_blocked for the rows it changed. It returns
+// the conflicts the settle path left for the operator; the merge is rolled
+// back then.
+func (s *DoltStore) mergeAndSettle(ctx context.Context, ref string) ([]storage.Conflict, error) {
+	preHead := ""
+	if h, err := s.GetCurrentCommit(ctx); err == nil {
+		preHead = h
+	}
+	err := s.withCircuitWrite(ctx, func(ctx context.Context) error {
+		db, err := s.openLongTimeoutConn()
+		if err != nil {
+			return err
+		}
+		defer db.Close()
+		// One physical connection for the checkout and the transaction, on the
+		// store's branch rather than the fresh connection's default (be-b0am).
+		db.SetMaxIdleConns(0)
+		conn, err := db.Conn(ctx)
+		if err != nil {
+			return fmt.Errorf("acquire long-timeout connection: %w", err)
+		}
+		defer conn.Close()
+		if err := s.pinStoreBranch(ctx, conn); err != nil {
+			return err
+		}
+		tx, err := conn.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("failed to begin transaction: %w", err)
+		}
+		for _, flag := range []string{"SET @@dolt_allow_commit_conflicts = 1", "SET @@dolt_force_transaction_commit = 1"} {
+			if _, err := tx.ExecContext(ctx, flag); err != nil {
+				_ = tx.Rollback()
+				return fmt.Errorf("failed to %s: %w", strings.ToLower(flag), err)
+			}
+		}
+		mergeErr := schema.DrainCall(ctx, tx, "CALL DOLT_MERGE('--author', ?, ?)", s.commitAuthorString(), ref)
+		if mergeErr != nil && strings.Contains(mergeErr.Error(), "up to date") {
+			mergeErr = nil
+		}
+		return s.settleMergeInTx(ctx, tx, mergeErr)
+	})
+	var mce *versioncontrolops.MergeConflictsError
+	if errors.As(err, &mce) {
+		return mce.Conflicts, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !s.readOnly {
+		if err := s.recomputeBlockedAfterPull(ctx, preHead); err != nil {
+			return nil, fmt.Errorf("merge succeeded but is_blocked recompute failed: %w", err)
+		}
+	}
+	return nil, nil
+}
+
 // filteredPushToPeer pushes to a peer after filtering out excluded issue types.
 // When excludeTypes is empty, delegates directly to PushTo (no filtering).
 //
@@ -493,7 +539,9 @@ func (s *DoltStore) Sync(ctx context.Context, peer string, strategy string) (*Sy
 // branch. The keep branch is merged into the local branch before the staging
 // branch is pushed to the peer, so the filtered tip is an ancestor of the
 // local branch and the next sync does not delete the excluded issues locally.
-// Both temporary branches are always cleaned up.
+// Both temporary branches are always cleaned up. Excluded issues that a
+// peer's fetched copy already holds, this peer's or another's, are pushed
+// like any other row (versioncontrolops.FilteredPush.Peer).
 //
 // The special type "wisp" matches issues with ephemeral=true in the committed
 // issues table. Wisps normally live in dolt_ignore'd tables and are not pushed,
@@ -506,6 +554,7 @@ func (s *DoltStore) filteredPushToPeer(ctx context.Context, peer string, exclude
 	if err != nil {
 		return err
 	}
+	push.Peer = peer
 	push.BeforeStep = filteredPushBeforeStep
 
 	// Pin a single long-timeout connection for the session-scoped staging

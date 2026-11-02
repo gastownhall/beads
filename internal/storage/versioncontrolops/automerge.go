@@ -2,12 +2,14 @@ package versioncontrolops
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/steveyegge/beads/internal/storage/schema"
 )
 
 // Domain-aware auto-merge (federation ask #1, the flagship).
@@ -43,7 +45,9 @@ import (
 // A row is left for the operator when it is not modify/modify (add/add,
 // delete/modify), when a genuinely conflicting cell cannot be settled because
 // the two sides' `updated_at` values are equal or unparseable — the ambiguity
-// LWW has no answer for — or when one of those carve-outs applies.
+// LWW has no answer for — or when one of those carve-outs applies. The one
+// delete/modify settled here is their delete against our change to derived
+// state only (mergeDeleteOverDerivedEdit): the delete wins.
 //
 // The companion tables merge by the semantics the ask names:
 //
@@ -82,6 +86,10 @@ type issuesRowMerge struct {
 	ourKey  any
 	columns []string
 	values  []any
+	// deleteRow settles the row by deleting it from our working set: their
+	// side deleted it and ours changed only derived columns (see
+	// mergeDeleteOverDerivedEdit). columns and values are empty then.
+	deleteRow bool
 	// lww names the cells both sides changed differently, which were settled
 	// by timestamp rather than merged. They are the only cells where one
 	// side's edit is superseded, so the resolver names them on stderr — the
@@ -288,6 +296,38 @@ var issuesNonScalarColumns = map[string]bool{
 	"metadata": true,
 }
 
+// issuesDerivedColumns are columns bd computes from other rows rather than
+// writes for an edit: is_blocked follows the dependency graph, and every
+// recompute of it (RecomputeAllIsBlockedInTx, the post-merge pass) keeps
+// updated_at as it was.
+var issuesDerivedColumns = map[string]bool{
+	"is_blocked": true,
+}
+
+// mergeDeleteOverDerivedEdit settles a delete/modify conflict in which their
+// side deleted the row and ours changed nothing since the merge base but
+// issuesDerivedColumns: the delete wins, because a recomputed value carries no
+// edit to keep, and the delete's cascade drops the row's dependencies here as
+// it did there. A federation filtered push creates this shape. Its filter
+// commit unblocks issues blocked only by excluded ones, the revert merged
+// locally blocks them again, and a peer that deletes such an issue on the
+// filtered tip conflicts with that revert on every later sync. Any other
+// difference on our side, or a delete on ours, is left for the operator.
+func mergeDeleteOverDerivedEdit(row rawConflictRow) (issuesRowMerge, bool) {
+	for _, col := range row.dataColumns(issuesKeyColumn) {
+		if issuesDerivedColumns[col] {
+			continue
+		}
+		ourVal, ourHas := row.value("our", col)
+		baseVal, baseHas := row.value("base", col)
+		if !ourHas || !baseHas || !conflictCellsEqual(ourVal, baseVal) {
+			return issuesRowMerge{}, false
+		}
+	}
+	ourKey, _ := row.value("our", issuesKeyColumn)
+	return issuesRowMerge{ourKey: ourKey, deleteRow: true}, true
+}
+
 // cellVerdict classifies one cell against the merge base.
 type cellVerdict int
 
@@ -332,6 +372,9 @@ func classifyCell(row rawConflictRow, col string) (cellVerdict, any, bool) {
 // It is pure, so every merge rule is unit-testable without a database.
 func mergeIssuesConflictRow(row rawConflictRow) (issuesRowMerge, bool) {
 	baseOK, ourOK, theirOK := row.sidesPresent([]string{issuesKeyColumn})
+	if baseOK && ourOK && !theirOK {
+		return mergeDeleteOverDerivedEdit(row)
+	}
 	if !baseOK || !ourOK || !theirOK {
 		// add/add (no base row) or delete/modify (one side removed it):
 		// neither has a field-level answer.
@@ -625,6 +668,64 @@ func resolveIssuesFieldMerge(ctx context.Context, db DBConn, plan []issuesRowMer
 		}
 		if n, err := res.RowsAffected(); err == nil && n == 0 {
 			return fmt.Errorf("conflict for issue %v was not cleared (no conflict row deleted)", m.ourKey)
+		}
+		if m.deleteRow {
+			if err := deleteSettledIssue(ctx, db, m.ourKey); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// deleteSettledIssue applies a deleteRow merge once its conflict is cleared.
+// Clearing comes first because dolt_conflicts_issues reads our side from the
+// working set, so a row deleted first would leave no our_id to clear its
+// conflict by; a failure here still aborts the whole merge. The delete
+// cascades to the issue's child rows; stageCascadedChildTables stages them.
+func deleteSettledIssue(ctx context.Context, db DBConn, id any) error {
+	res, err := db.ExecContext(ctx, "DELETE FROM `issues` WHERE `"+issuesKeyColumn+"` = ?", id)
+	if err != nil {
+		return fmt.Errorf("delete issue %v deleted on the other side: %w", id, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("count the rows deleted for issue %v: %w", id, err)
+	}
+	if n != 1 {
+		return fmt.Errorf("delete of issue %v, deleted on the other side, matched %d row(s), want 1", id, n)
+	}
+	return nil
+}
+
+// stageCascadedChildTables stages the issue child tables whose rows a
+// deleteRow merge removed through their ON DELETE CASCADE foreign keys. The
+// resolver stages only the conflicted table, and the commit that concludes
+// the merge takes only staged tables: without this it would commit the
+// delete beside the child rows that still reference the issue. Ignored child
+// tables never show in dolt_status, so they are left to the working set.
+func stageCascadedChildTables(ctx context.Context, db DBConn) error {
+	rows, err := db.QueryContext(ctx, "SELECT table_name FROM dolt_status WHERE staged = 0")
+	if err != nil {
+		return fmt.Errorf("list tables changed by cascaded deletes: %w", err)
+	}
+	var tables []string
+	for rows.Next() {
+		var table string
+		if err := rows.Scan(&table); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("scan table changed by cascaded deletes: %w", err)
+		}
+		if _, ok := fkCascadeRepairDeletes[table]; ok {
+			tables = append(tables, table)
+		}
+	}
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+		return fmt.Errorf("list tables changed by cascaded deletes: %w", err)
+	}
+	for _, table := range tables {
+		if err := schema.DrainCall(ctx, db, "CALL DOLT_ADD(?)", table); err != nil {
+			return fmt.Errorf("stage %s after cascaded deletes: %w", table, err)
 		}
 	}
 	return nil

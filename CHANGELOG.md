@@ -3845,6 +3845,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or decrypting a stored row still fail. A mistyped `--peer` now fails with
   Dolt's own unknown-remote error instead.
 
+- **`bd federation sync` keeps `federation.exclude_types` issues local in
+  both backends, and merges the way `bd dolt pull` does (GH#7890).** Server
+  mode published a commit without the excluded issues and then merged it back
+  on the next sync, deleting them locally; the embedded backend ignored the
+  setting (default `[wisp]`) and pushed them. A filtering push now merges a
+  revert of its filtered commit into the local branch before sending it, so
+  later syncs keep the issues, and it withholds only excluded issues that
+  neither the destination nor any other remote but `origin` held at the last
+  fetch from it, so a peer's own issue of an excluded type is no longer
+  deleted from its tip, whether the sync is with that peer or with another
+  one that passes the tip on.
+  Each such sync adds two commits to local history: the filtered commit and
+  its revert. Sync's merge now settles what a pull settles, including a peer
+  deleting an issue the filtered commit had unblocked, which failed every
+  later sync. A conflict it cannot settle stops the sync with the conflicting
+  tables listed and the local database unchanged, and
+  `--strategy ours|theirs` then resolves it; under the old autocommit merge a
+  real conflict rolled back before the strategy ran. `bd dolt pull` settles
+  two more cases with it: another clone's delete of an issue wins over a
+  local change to `is_blocked` alone, and a merge that deletes an issue with
+  provenance events recorded on the other side drops those events, as their
+  foreign key's cascade does, where both used to stop the pull.
+  `bd vc merge --strategy ours`, which sync now uses, concludes a merge whose
+  resolution changed nothing; it used to leave the merge open, so the next
+  merge refused to start. Filtering removes rows from the published tip, not
+  from history, and sync warns once per process when it filters a push.
+
 - **`bd comment`/`bd comments add` refuse an abbreviated id and a reserved
   word instead of silently resolving one to the wrong issue**
   ([#5393](https://github.com/gastownhall/beads/pull/5393)). `bd comment list
@@ -5184,6 +5211,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   binary `make build` and `make install` produce, so a downstream image-build
   override cannot reach them; only the module floor can. Re-derive rather
   than trusting this table: `govulncheck -scan module`.
+
+- **Stored federation peer passwords are bound to the peer they were entered
+  for, and sync checks the peer's live remote before sending one (GH#7890).**
+  Peer rows replicate between towns, so a partner could copy your encrypted
+  password into a row naming their own remote and receive it on the next
+  sync. A password now opens only with its row's own name, remote URL and
+  username, and server mode, like embedded, refuses to send it unless the
+  remote of that name still points at the stored URL or at the URL Dolt
+  recorded for it (`https://192.168.1.100:3306/beads` for
+  `192.168.1.100:3306/beads`). A refusal names both URLs; remove and re-add
+  the peer to bind its password to a moved remote. **Upgrading:** passwords
+  stored by earlier releases stay on disk but are refused until re-entered
+  with `bd federation add-peer <name> <url> --user <user>` (you are prompted
+  for the password). If a peer row may have been copied before the upgrade,
+  treat that password as exposed and rotate it on the peer's server.
+  Downgrading after re-entry needs another re-entry.
 
 - A `.beads/redirect` that leads into another user's git repository no
   longer makes bd run git there as you. bd pins `GIT_DIR` for its own git

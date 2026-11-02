@@ -292,6 +292,7 @@
 40 13 TestEmbeddedPre0058RepairMarchesDriftedWispDependenciesToFinalShape
 40 13 TestEmbeddedRelationsDirectionSelectsTheInverseGraph
 40 13 TestGraphWalkPlansHonorJoinHints
+40 13 TestSyncFilteredPushMergesPeerDeletes
 
 40 14 TestArrivalSeq_EmbeddedReplayedCounterSeedClearsTheStamps
 40 14 TestBatchCreatorContract
@@ -332,6 +333,7 @@
 40 16 TestExternalCapabilityBlocksEmbeddedReadyAndAppearsInTree
 40 16 TestGetReadyWorkIncludeEphemeralAppliesWispFilters
 40 16 TestMergeWithStrategy_OursKeepsLocal
+40 16 TestSyncFilteredPushKeepsExcludedIssuesThePeerHolds
 40 16 TestWithPeerAuth_DivergedRemoteURLFailsClosed
 
 40 17 TestAddDependency
@@ -345,6 +347,7 @@
 40 17 TestEmbeddedReadyClaimerLeasesADurableWinButNotAnEphemeralOne
 40 17 TestHeartbeatMatchesActorAcrossSpellingEmbedded
 40 17 TestStatsReporterContract
+40 17 TestSyncStrategyResolvesConflictsTheSettlePathDeclines
 40 17 TestVersionReconcilerContract
 
 40 18 TestCreateBatchParticipationGeneration
@@ -417,6 +420,7 @@
 40 22 TestLargeBatchApplyStatementCounts356_Embedded
 40 22 TestLeaseLifecycleEmbedded
 40 22 TestPolicyBlockingAnnotatorForeignOpensAreSublinear
+40 22 TestSyncFilteredPushKeepsExcludedIssuesAnyPeerHolds
 
 40 23 TestAsOfReadContract
 40 23 TestEmbeddedBatchCloserBackendFailureReturnsNoOutcomes

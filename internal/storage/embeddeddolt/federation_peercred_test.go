@@ -245,6 +245,11 @@ func TestWithPeerAuth_DestinationReadBackEquivalents(t *testing.T) {
 		"scpabs":     "git@peer.example:/srv/repo.git",
 		"filegit":    "file://" + t.TempDir() + "/repo.git",
 		"native":     "org/repo",
+		// The sql-server form add-peer --help documents.
+		"sqlserver":     "192.168.1.100:3306/beads",
+		"dottedhost":    "peer.example/db",
+		"localhostport": "localhost:50051/beads",
+		"localhostrepo": "localhost/repo",
 	}
 	for name, url := range forms {
 		t.Run(name, func(t *testing.T) {

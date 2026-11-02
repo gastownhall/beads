@@ -3,6 +3,7 @@ package peercred
 import (
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -15,16 +16,25 @@ const doltNativeRemotesAPIHost = "doltremoteapi.dolthub.com"
 // a first segment Dolt cannot take for a host (no dot) and a plain repo name.
 var nativeRemotePattern = regexp.MustCompile(`^[A-Za-z0-9_-]+/[A-Za-z0-9_][A-Za-z0-9_.-]*$`)
 
+// schemelessHostPattern is the host[:port]/path shape, without a scheme, that
+// Dolt's earl.Parse takes for a host (isValidHost: localhost, or a name with a
+// dot, and an optional numeric port) and env.GetAbsRemoteUrl records as
+// https:// plus the URL as typed, such as a sql-server's 192.168.1.100:3306/beads.
+// The host and path characters are a subset of what Dolt accepts, so any
+// other spelling still has to match exactly.
+var schemelessHostPattern = regexp.MustCompile(`^(localhost|[A-Za-z0-9-]*\.[A-Za-z0-9.-]*)(:([0-9]+))?/[A-Za-z0-9_.~/-]+$`)
+
 // RemoteURLMatches reports whether live, the URL the database lists for a
 // peer's remote, is the destination its credentials were stored for.
 //
 // stored is the raw remote_url add-peer bound the password to. live passes
 // when it is identical, or when it is exactly what DOLT_REMOTE('add') records
 // for stored in one of the forms Dolt rewrites: a git remote ending in .git
-// (http, https, ssh or file URL, or scp-like [user@]host:path) and a native
-// owner/repo remote. Any other difference fails, including host, account or
-// path case, port, scheme, query, fragment and a trailing slash or .git: an
-// equivalence nobody verified must not let a password reach another server.
+// (http, https, ssh or file URL, or scp-like [user@]host:path), a schemeless
+// host[:port]/path, and a native owner/repo remote. Any other difference
+// fails, including host, account or path case, port, scheme, query, fragment
+// and a trailing slash or .git: an equivalence nobody verified must not let a
+// password reach another server.
 func RemoteURLMatches(stored, live string) bool {
 	if stored == "" || live == "" {
 		return false
@@ -52,6 +62,16 @@ func doltReadBack(stored string) (string, bool) {
 		base = base[:i]
 	}
 	if !strings.HasSuffix(base, ".git") {
+		// Dolt tries the host reading first, so localhost/repo is a host
+		// and not a DoltHub owner.
+		if m := schemelessHostPattern.FindStringSubmatch(stored); m != nil {
+			if port := m[3]; port != "" {
+				if _, err := strconv.ParseUint(port, 10, 16); err != nil {
+					return "", false
+				}
+			}
+			return "https://" + stored, true
+		}
 		if nativeRemotePattern.MatchString(stored) {
 			return "https://" + doltNativeRemotesAPIHost + "/" + stored, true
 		}

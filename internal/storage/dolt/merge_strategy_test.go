@@ -88,6 +88,16 @@ func TestMergeWithStrategy_OursKeepsLocal(t *testing.T) {
 	if dirty != 0 {
 		t.Errorf("%d dirty table(s) remain: the resolution was not committed", dirty)
 	}
+
+	// Keeping ours throughout changed nothing to commit, yet the merge must
+	// still be concluded, or the next merge refuses to start.
+	var merging bool
+	if err := store.db.QueryRowContext(ctx, "SELECT is_merging FROM dolt_merge_status").Scan(&merging); err != nil {
+		t.Fatalf("read dolt_merge_status: %v", err)
+	}
+	if merging {
+		t.Error("--strategy ours resolved the conflict but left the merge open")
+	}
 }
 
 // TestMerge_NoStrategyStillErrorsWithEscapeHatchHint pins the "no --strategy"

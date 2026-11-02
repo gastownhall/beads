@@ -88,15 +88,31 @@ func createTaskAndChore(t *testing.T, ctx context.Context, te *testEnv, prefix s
 // Sync must publish a peer tip that lacks the excluded rows while the local
 // store keeps them, and must not leave its temporary staging branch behind.
 // At the base commit embedded Sync pushed unconditionally, so the peer tip
-// carried the excluded rows (GH#7890).
+// carried the excluded rows (GH#7890). An excluded issue the peer already
+// holds stays on the tip: withholding it would delete it from the peer.
 func TestEmbeddedSyncAppliesExcludeTypes(t *testing.T) {
 	te := newTestEnv(t, "fedex")
 	ctx := t.Context()
-	task, chore := createTaskAndChore(t, ctx, te, "fedex")
+	published := &types.Issue{
+		ID:        "fedex-published",
+		Title:     "Chore published before the type was excluded",
+		IssueType: types.TypeChore,
+		Status:    types.StatusOpen,
+		Priority:  1,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	if err := te.store.CreateIssue(ctx, published, "test"); err != nil {
+		t.Fatalf("create %s: %v", published.ID, err)
+	}
+	if err := te.store.Commit(ctx, "create published chore"); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
 	remoteURL := newFederationRemote(t, ctx, te)
+	task, chore := createTaskAndChore(t, ctx, te, "fedex")
 
 	// Now exclude the chore type and sync: the filtered push must replace
-	// the peer's main with a tip that has no chore row.
+	// the peer's main with a tip that has no row for the chore it never had.
 	withFederationExcludeTypes(t, []string{"chore"})
 
 	result, err := te.store.Sync(ctx, "peer", "")
@@ -114,11 +130,13 @@ func TestEmbeddedSyncAppliesExcludeTypes(t *testing.T) {
 	withRawConn(t, cloneFederationRemote(t, ctx, remoteURL, te.database), te.database, func(conn *sql.Conn) {
 		assertCloneIssueCount(t, ctx, conn, task.ID, 1)
 		assertCloneIssueCount(t, ctx, conn, chore.ID, 0)
+		assertCloneIssueCount(t, ctx, conn, published.ID, 1)
 	})
 
 	// Local data survives the filtered push.
 	te.assertRowExists(t, ctx, "issues", task.ID)
 	te.assertRowExists(t, ctx, "issues", chore.ID)
+	te.assertRowExists(t, ctx, "issues", published.ID)
 
 	assertNoFederationTempBranches(t, ctx, te)
 }
@@ -156,8 +174,8 @@ func assertNoFederationTempBranches(t *testing.T, ctx context.Context, te *testE
 func TestEmbeddedFilteredPushMergesPeerChangesAcrossSyncs(t *testing.T) {
 	te := newTestEnv(t, "fedmerge")
 	ctx := t.Context()
-	task, chore := createTaskAndChore(t, ctx, te, "fedmerge")
 	remoteURL := newFederationRemote(t, ctx, te)
+	task, chore := createTaskAndChore(t, ctx, te, "fedmerge")
 
 	withFederationExcludeTypes(t, []string{"chore"})
 

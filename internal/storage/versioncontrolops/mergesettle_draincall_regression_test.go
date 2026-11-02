@@ -75,6 +75,22 @@ func TestMergeSettleDrainsCallResultSets(t *testing.T) {
 		rec.assertDrained(t, mock)
 	})
 
+	// A resolution that changed nothing (--ours where theirs touched only the
+	// conflicted rows) gives the stage nothing to commit; the merge is still
+	// open, so MergeWithStrategy concludes it with a commit of its own.
+	t.Run("merge_with_strategy_conflicted_resolution_changes_nothing", func(t *testing.T) {
+		rec, mock := newDrainMock(t)
+		expectStrategyResolved(mock)
+		expectNoPendingChanges(mock)
+		expectDrainedCall(mock, "CALL DOLT_COMMIT('-m', ?, '--author', ?)", strategyCommitMsg, testAuthor)
+
+		conflicts, err := MergeWithStrategy(context.Background(), rec, "feature", testAuthor, "theirs")
+		if err != nil || len(conflicts) != 1 {
+			t.Fatalf("MergeWithStrategy = (%v, %v), want (one conflict, nil)", conflicts, err)
+		}
+		rec.assertDrained(t, mock)
+	})
+
 	// The unauthored commit form (the proxied-server plane's) drains too.
 	t.Run("stage_and_commit_unauthored", func(t *testing.T) {
 		rec, mock := newDrainMock(t)
@@ -286,6 +302,21 @@ func TestMergeSettleDrainsCallResultSets(t *testing.T) {
 					return err
 				},
 				want: "conflicts resolved but commit failed: dolt commit: injected",
+			},
+			{
+				name: "MergeWithStrategy concluding DOLT_COMMIT",
+				setup: func(mock sqlmock.Sqlmock, cause error) {
+					expectStrategyResolved(mock)
+					expectNoPendingChanges(mock)
+					mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', ?, '--author', ?)")).
+						WithArgs(strategyCommitMsg, testAuthor).WillReturnError(cause)
+					expectDrainedCall(mock, "CALL DOLT_MERGE('--abort')")
+				},
+				run: func(db DBConn) error {
+					_, err := MergeWithStrategy(ctx, db, "feature", testAuthor, "theirs")
+					return err
+				},
+				want: "conflicts resolved but concluding the merge failed: injected",
 			},
 			{
 				name: "StageAndCommit DOLT_COMMIT nothing to commit",
@@ -546,6 +577,13 @@ func expectStrategyResolved(mock sqlmock.Sqlmock) {
 func expectPendingChanges(mock sqlmock.Sqlmock) {
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM dolt_status s")).
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+}
+
+// expectNoPendingChanges answers StageAndCommit's working-set read with
+// nothing pending.
+func expectNoPendingChanges(mock sqlmock.Sqlmock) {
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM dolt_status s")).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
 }
 
 // expectStagedChanges answers StageAndCommit's post-DOLT_ADD read

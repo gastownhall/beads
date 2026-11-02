@@ -2,8 +2,11 @@ package versioncontrolops
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
+	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/google/uuid"
@@ -24,17 +27,25 @@ const FilteredPushKeepPrefix = "__federation_push_keep_"
 const FilteredPushCommitMsg = "federation: exclude private issue types"
 
 // FilteredPush is one federation push that publishes Source without the
-// issues of ExcludeTypes ("wisp" matches ephemeral rows). Stage builds the
-// filtered commit F on Staging and, on Keep, the commit R reverting it. The
-// backend merges Keep into Source before pushing Staging to the peer's
-// Source, so the filtered tip coming back on the next sync is an ancestor of
-// Source instead of a deletion of the excluded issues, and calls Cleanup on
-// every exit.
+// issues of ExcludeTypes ("wisp" matches ephemeral rows) that no peer already
+// holds. Stage builds the filtered commit F on Staging and, on Keep, the
+// commit R reverting it. The backend merges Keep into Source before pushing
+// Staging to the peer's Source, so the filtered tip coming back on the next
+// sync is an ancestor of Source instead of a deletion of the excluded issues,
+// and calls Cleanup on every exit.
 type FilteredPush struct {
 	Source       string
 	Staging      string
 	Keep         string
 	ExcludeTypes []string
+	// Peer is the remote the push goes to. Excluded issues that a peer's
+	// copy of Source holds stay in F: Peer's copy, fresh from the caller's
+	// fetch, and the copy last fetched from every other remote but
+	// federationSyncRemote. Deleting one would delete the peer's own issue,
+	// or one it already has, when it merges F, directly or through another
+	// peer that merged F first. Every excluded issue is withheld when no
+	// peer copy has been fetched.
+	Peer string
 	// Author is passed to the commits Stage makes; empty lets the session
 	// attribute them.
 	Author string
@@ -125,7 +136,11 @@ func (p *FilteredPush) Stage(ctx context.Context, conn BlockedRecomputeConn) (bo
 	if err := p.Step(FilteredPushStepDelete); err != nil {
 		return false, err
 	}
-	n, err := deleteExcludedIssues(ctx, conn, p.ExcludeTypes)
+	notHeld, err := p.notHeldByPeers(ctx, conn)
+	if err != nil {
+		return false, err
+	}
+	n, err := deleteExcludedIssues(ctx, conn, p.ExcludeTypes, notHeld)
 	if err != nil {
 		return false, err
 	}
@@ -201,14 +216,86 @@ func (p *FilteredPush) materializeIgnoredTables(ctx context.Context, conn DBConn
 	return nil
 }
 
+// doltCommitHashPattern is the shape of a Dolt commit hash (32 base32
+// characters), the only text notHeldByPeers interpolates into its AS OF.
+var doltCommitHashPattern = regexp.MustCompile(`^[0-9a-v]{32}$`)
+
+// federationSyncRemote is the remote bd dolt push and pull use. bd
+// federation sync without --peer skips it, and unless it is Peer its copy
+// does not count as a peer's: bd dolt push sends it every issue, excluded
+// types included, so its holding one says nothing about any peer.
+const federationSyncRemote = "origin"
+
+// notHeldByPeers returns the condition limiting the delete to issues that no
+// peer copy of Source holds (see Peer), or "" (no limit) when no copy has
+// been fetched. Each copy is resolved to its commit hash, so a remote name
+// never reaches the SQL text.
+func (p *FilteredPush) notHeldByPeers(ctx context.Context, conn DBConn) (string, error) {
+	refs, err := p.peerRefs(ctx, conn)
+	if err != nil {
+		return "", err
+	}
+	var notHeld strings.Builder
+	for _, ref := range refs {
+		var hash string
+		err := conn.QueryRowContext(ctx,
+			"SELECT hash FROM dolt_remote_branches WHERE name = ?", ref).Scan(&hash)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return "", fmt.Errorf("federation filter: resolve peer branch %s: %w", ref, err)
+		}
+		if !doltCommitHashPattern.MatchString(hash) {
+			return "", fmt.Errorf("federation filter: peer branch %s resolved to unexpected hash %q", ref, hash)
+		}
+		fmt.Fprintf(&notHeld, " AND id NOT IN (SELECT id FROM issues AS OF '%s')", hash)
+	}
+	return notHeld.String(), nil
+}
+
+// peerRefs names the remote-tracking refs of Source that notHeldByPeers
+// reads: Peer's first, then every other remote's but federationSyncRemote's,
+// in name order.
+func (p *FilteredPush) peerRefs(ctx context.Context, conn DBConn) ([]string, error) {
+	rows, err := conn.QueryContext(ctx, "SELECT name FROM dolt_remotes")
+	if err != nil {
+		return nil, fmt.Errorf("federation filter: list peers: %w", err)
+	}
+	var others []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("federation filter: list peers: %w", err)
+		}
+		if name != p.Peer && name != federationSyncRemote {
+			others = append(others, name)
+		}
+	}
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+		return nil, fmt.Errorf("federation filter: list peers: %w", err)
+	}
+	slices.Sort(others)
+	var refs []string
+	if p.Peer != "" {
+		refs = append(refs, "remotes/"+p.Peer+"/"+p.Source)
+	}
+	for _, name := range others {
+		refs = append(refs, "remotes/"+name+"/"+p.Source)
+	}
+	return refs, nil
+}
+
 // deleteExcludedIssues removes the issues of excludeTypes from the committed
-// issues table on conn's current branch and reports how many rows went.
-func deleteExcludedIssues(ctx context.Context, conn DBConn, excludeTypes []string) (int64, error) {
+// issues table on conn's current branch, limited by notHeld (see
+// notHeldByPeers), and reports how many rows went.
+func deleteExcludedIssues(ctx context.Context, conn DBConn, excludeTypes []string, notHeld string) (int64, error) {
 	var removed int64
 	for _, excludeType := range excludeTypes {
-		query, args := "DELETE FROM issues WHERE issue_type = ?", []any{excludeType}
+		query, args := "DELETE FROM issues WHERE issue_type = ?"+notHeld, []any{excludeType}
 		if excludeType == "wisp" {
-			query, args = "DELETE FROM issues WHERE ephemeral = 1", nil
+			query, args = "DELETE FROM issues WHERE ephemeral = 1"+notHeld, nil
 		}
 		result, err := conn.ExecContext(ctx, query, args...)
 		if err != nil {
@@ -225,7 +312,11 @@ func deleteExcludedIssues(ctx context.Context, conn DBConn, excludeTypes []strin
 
 // CommitFilteredStaging recomputes is_blocked for the filtered graph on
 // conn's current branch in one SQL transaction, then commits everything
-// (Dolt procedures cannot run inside that transaction).
+// (Dolt procedures cannot run inside that transaction). The transaction does
+// not activate the events journal: is_blocked is derived from the dependency
+// graph, so a consumer replaying the journal needs no record of the
+// recompute, the reason the dolt package's journal-scope audit exempts its
+// own post-merge recompute.
 func CommitFilteredStaging(ctx context.Context, conn BlockedRecomputeConn, author string) error {
 	return (&FilteredPush{Author: author}).commitFiltered(ctx, conn)
 }

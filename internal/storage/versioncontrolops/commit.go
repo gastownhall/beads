@@ -96,8 +96,14 @@ func (t *DirtyTableTracker) MarkVersionedHistoryDirty(enabled bool) {
 // unauthored, and passing an empty --author would be a malformed commit rather
 // than an unattributed one.
 func StageAndCommit(ctx context.Context, conn DBConn, dirtyTables map[string]bool, commitMsg, author string) error {
+	_, err := stageAndCommit(ctx, conn, dirtyTables, commitMsg, author)
+	return err
+}
+
+// stageAndCommit is StageAndCommit, reporting whether it made a commit.
+func stageAndCommit(ctx context.Context, conn DBConn, dirtyTables map[string]bool, commitMsg, author string) (bool, error) {
 	if commitMsg == "" || len(dirtyTables) == 0 {
-		return nil
+		return false, nil
 	}
 
 	// dirtyTables tracks tables touched by a write statement, but a statement
@@ -116,15 +122,15 @@ func StageAndCommit(ctx context.Context, conn DBConn, dirtyTables map[string]boo
 	// captures that correctly where a rows-affected check would not.
 	pending, err := issueops.HasPendingChanges(ctx, conn)
 	if err != nil {
-		return fmt.Errorf("check pending changes before commit: %w", err)
+		return false, fmt.Errorf("check pending changes before commit: %w", err)
 	}
 	if !pending {
-		return nil
+		return false, nil
 	}
 
 	for table := range dirtyTables {
 		if err := schema.DrainCall(ctx, conn, "CALL DOLT_ADD(?)", table); err != nil {
-			return fmt.Errorf("dolt add %s: %w", table, err)
+			return false, fmt.Errorf("dolt add %s: %w", table, err)
 		}
 	}
 
@@ -136,19 +142,22 @@ func StageAndCommit(ctx context.Context, conn DBConn, dirtyTables map[string]boo
 	// will commit) and skip the empty commit.
 	staged, err := issueops.HasStagedChanges(ctx, conn)
 	if err != nil {
-		return fmt.Errorf("check staged changes before commit: %w", err)
+		return false, fmt.Errorf("check staged changes before commit: %w", err)
 	}
 	if !staged {
-		return nil
+		return false, nil
 	}
 	if author == "" {
 		err = schema.DrainCall(ctx, conn, "CALL DOLT_COMMIT('-m', ?)", commitMsg)
 	} else {
 		err = schema.DrainCall(ctx, conn, "CALL DOLT_COMMIT('-m', ?, '--author', ?)", commitMsg, author)
 	}
-	if err != nil && !issueops.IsNothingToCommitError(err) {
-		return fmt.Errorf("dolt commit: %w", err)
+	if err != nil {
+		if issueops.IsNothingToCommitError(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("dolt commit: %w", err)
 	}
 
-	return nil
+	return true, nil
 }
