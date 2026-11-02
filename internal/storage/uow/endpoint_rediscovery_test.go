@@ -30,6 +30,7 @@ func TestProxyEndpointResolverReplacesOnlyAddress(t *testing.T) {
 	r := newProxyEndpointResolver(func() (proxy.Endpoint, error) {
 		return proxy.Endpoint{Host: "127.0.0.1", Port: 4321}, nil
 	})
+	r.arm()
 	got := cfg.Clone()
 	require.NoError(t, r.beforeConnect(context.Background(), got))
 
