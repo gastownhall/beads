@@ -301,3 +301,112 @@ func TestCLI_InitServerUnversionedDirtyWorkingSet_E2E(t *testing.T) {
 		t.Fatalf("bd list does not show %s:\n%s", issue.ID, listed)
 	}
 }
+
+// migrationCommitsAfter checks HEAD's history (dolt_log, newest first) around
+// the recovery commit: it returns how many numbered migration commits are
+// newer than it, and fails if any is older.
+func migrationCommitsAfter(t *testing.T, ctx context.Context, db *sql.DB, recovery string) int {
+	t.Helper()
+	newer, seen := 0, false
+	for _, row := range unversionedQueryStrings(t, ctx, db, "SELECT CONCAT(commit_hash, ' ', message) FROM dolt_log") {
+		hash, message, _ := strings.Cut(row, " ")
+		switch {
+		case hash == recovery:
+			seen = true
+		case !strings.HasPrefix(message, "schema: apply migration"):
+		case seen:
+			t.Fatalf("migration commit %q precedes the recovery commit %s", message, recovery)
+		default:
+			newer++
+		}
+	}
+	if !seen {
+		t.Fatalf("recovery commit %s is not in HEAD's history", recovery)
+	}
+	return newer
+}
+
+// TestCLI_InitServerUnversionedDirtyRecoveryCommit_E2E pins the history the
+// #6089 adoption leaves: exactly one commit with the fixed recovery message,
+// holding the pre-existing changes at the pre-migration schema, followed by
+// the numbered migrations and still an ancestor of the final HEAD. A second
+// init adopts nothing more.
+func TestCLI_InitServerUnversionedDirtyRecoveryCommit_E2E(t *testing.T) {
+	skipIfNoDolt(t)
+	for _, tc := range []struct {
+		name       string
+		emptyTable bool
+	}{
+		{name: "absent cursor table"},
+		{name: "empty cursor table", emptyTable: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+			defer cancel()
+
+			database := createUnversionedTestDatabase(t, ctx)
+			db := openUnversionedTestDB(t, ctx, database)
+			prepareLegacySeederResidue(t, ctx, db, tc.emptyTable)
+
+			workDir := t.TempDir()
+			stdout, stderr, err := runBDExecSeparated(t, testBD, workDir, os.Environ(), unversionedInitArgs(database)...)
+			if err != nil {
+				t.Fatalf("bd init failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+			}
+
+			commits := recoveryCommits(t, ctx, db)
+			if len(commits) != 1 {
+				t.Fatalf("recovery commits = %v, want exactly one", commits)
+			}
+			hash := commits[0]
+			asOf := func(query string) []string {
+				return unversionedQueryStrings(t, ctx, db, fmt.Sprintf(query, hash))
+			}
+			if got := asOf("SELECT value FROM config AS OF '%s' WHERE `key` = 'issue_prefix'"); !slices.Equal(got, []string{"hq"}) {
+				t.Fatalf("issue_prefix at the recovery commit = %v, want [hq]", got)
+			}
+			if got := asOf("SELECT value FROM config AS OF '%s' WHERE `key` = 'schema_version'"); !slices.Equal(got, []string{"11"}) {
+				t.Fatalf("schema_version at the recovery commit = %v, want the v1.0.0 baseline [11]", got)
+			}
+			if got := asOf("SELECT path FROM routes AS OF '%s' WHERE prefix = 'gt-'"); !slices.Equal(got, []string{"gastown"}) {
+				t.Fatalf("routes row at the recovery commit = %v, want [gastown]", got)
+			}
+			if got := asOf("SELECT id FROM interactions AS OF '%s'"); !slices.Equal(got, []string{"int-legacy"}) {
+				t.Fatalf("interactions at the recovery commit = %v, want [int-legacy]", got)
+			}
+			// Before the numbered migrations: no issues table yet, and the
+			// cursor exactly as the fixture left it.
+			tables := asOf("SHOW TABLES AS OF '%s'")
+			if slices.Contains(tables, "issues") {
+				t.Fatalf("recovery commit already holds migrated tables: %v", tables)
+			}
+			if slices.Contains(tables, "schema_migrations") != tc.emptyTable {
+				t.Fatalf("recovery commit tables = %v, want schema_migrations present=%v", tables, tc.emptyTable)
+			}
+			if tc.emptyTable {
+				if n := len(asOf("SELECT version FROM schema_migrations AS OF '%s'")); n != 0 {
+					t.Fatalf("cursor at the recovery commit has %d rows, want 0", n)
+				}
+			}
+			if base := asOf("SELECT DOLT_MERGE_BASE('%s', 'HEAD')"); !slices.Equal(base, []string{hash}) {
+				t.Fatalf("merge base of recovery commit and HEAD = %v, want %s (an ancestor)", base, hash)
+			}
+			if n := migrationCommitsAfter(t, ctx, db, hash); n == 0 {
+				t.Fatal("no numbered migration commit follows the recovery commit")
+			}
+
+			// A second init finds a versioned, clean database: no second
+			// recovery commit, no note, and the cursor stays at the latest.
+			_, stderr, _ = runBDExecSeparated(t, testBD, workDir, os.Environ(), unversionedInitArgs(database)...)
+			if strings.Contains(stderr, initRecoveryNotePrefix) {
+				t.Fatalf("second bd init printed a recovery note:\n%s", stderr)
+			}
+			if got := recoveryCommits(t, ctx, db); len(got) != 1 {
+				t.Fatalf("recovery commits after a second init = %v, want only %s", got, hash)
+			}
+			if got := unversionedQueryInt(t, ctx, db, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations"); got != schema.LatestVersion() {
+				t.Fatalf("main schema version after a second init = %d, want %d", got, schema.LatestVersion())
+			}
+		})
+	}
+}
