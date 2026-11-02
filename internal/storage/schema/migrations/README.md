@@ -84,6 +84,23 @@ outcomes by reading `INFORMATION_SCHEMA`, never an exit code, and test guarded
 migrations through the embedded (cgo) engine, where `PREPARE`/`EXECUTE` behaves
 normally. See `internal/storage/embeddeddolt/migrate_frozen_guard_convergence_test.go`.
 
+**An UPDATE that does not assign `updated_at` stamps it.** `issues`, `wisps`,
+`routes` and `federation_peers` declare `updated_at ... ON UPDATE
+CURRENT_TIMESTAMP`, so any UPDATE that changes one of their rows overwrites its
+last-modified time with the migration's wall clock (#5981: 0046/0047's
+`is_blocked` recompute stamped every blocked issue on upgrade). Assign it
+yourself in every UPDATE of those tables, `SET is_blocked = 0, updated_at =
+updated_at`, as 0059 and ignored 0015 do; an explicit assignment suppresses the
+clause. `TestMigrationUpdatesOfAutoStampedTablesKeepUpdatedAt` parses both
+series and fails on an UPDATE that does not.
+
+The frozen migrations that predate the rule (main 0035, 0046, 0047 and 0053,
+ignored 0007) are listed in `updatedAtGuards` (`../migration_updated_at_guard.go`):
+the runner snapshots `(id, updated_at)` of the step's tables before its
+pre-migration repair and body, and writes the old values back after the body,
+before the step's cursor row and commit. That registry is closed: a new
+migration self-assigns instead of joining it.
+
 ## Testing
 
 `sqlmock` statement-echo tests cannot exercise any of the above; they assert the
