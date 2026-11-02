@@ -322,6 +322,23 @@ workspace with a credential scoped to one caller via
 `beads.OpenBestAvailableWith` — see that package's doc comment for the
 multi-tenant case. This surface is EXPERIMENTAL: pin an exact beads version.
 
+## 🧹 Compacting Claude Rules
+
+`bd rules audit` scans `.claude/rules/*.md` for contradictions and
+near-duplicates; `bd rules compact` merges related rules into one composite.
+
+```bash
+bd rules compact --auto           # Preview: composite, dropped lines, backups, deletes
+bd rules compact --auto --force   # Apply
+```
+
+Compact only previews unless you pass `--force`. A composite keeps only the
+`**Do:**` and `**Don't:**` lines of its sources, and the preview lists every
+other line it drops. Applying writes the composite, copies each source to
+`<name>.md.backup`, then deletes the sources; it refuses a group whose
+composite or backup path already exists. To undo a merge, delete the composite
+and rename each `<name>.md.backup` back to `<name>.md`.
+
 ## 🌐 Community Tools
 
 See [docs/community-tools.md](docs/community-tools.md) for a curated list of community-built UIs, extensions, and integrations—including terminal interfaces, web UIs, editor extensions, and native apps.

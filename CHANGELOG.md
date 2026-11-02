@@ -615,7 +615,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`bd rules compact` previews by default and applies only with `--force`.**
   It used to apply merges by default, writing the composite and deleting the
   source rules. Scripts using `--auto` or `--group` to apply merges must add
-  `--force`. ([#5719](https://github.com/gastownhall/beads/issues/5719))
+  `--force`. Applying now copies each source to `<name>.md.backup` before
+  deleting it; undo a merge by deleting the composite and renaming each
+  backup back. The preview lists, by source, every line the composite drops
+  (it keeps only `**Do:**` and `**Don't:**` lines), and a rule with no such
+  lines is skipped by `--auto` and refused by `--group`.
+  ([#5719](https://github.com/gastownhall/beads/issues/5719))
 - **`bd` requires Dolt 2.6.0 or newer outside embedded mode, and refuses
   anything older.** `doltversion.RecommendedMin` (2.5.0, a warning) is now
   `doltversion.RequiredMin` (2.6.0, an error). `bd dolt start` and
@@ -3418,8 +3423,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`bd rules compact` no longer overwrites an existing file.** A source named
   like the composite was overwritten and then deleted with the other sources,
   leaving nothing, and an unrelated rule with that name was silently replaced.
-  Compact now refuses any existing output path, naming it, and reports source
-  deletions that fail instead of ignoring them.
+  Compact now refuses a group whose output or backup path already exists
+  (a dangling symlink included), naming it, and leaves that group untouched
+  while other `--auto` groups apply. A failed backup deletes no source; a
+  failed delete is reported with exactly what was written, backed up and
+  deleted, and every backup is kept.
   ([#5719](https://github.com/gastownhall/beads/issues/5719))
 
 - **Concurrent `bd init --shared-server` runs in different projects no

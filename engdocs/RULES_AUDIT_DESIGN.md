@@ -96,7 +96,7 @@ Flags:
   --group        List of rule filenames (without .md) to merge
   --auto         Run an audit and use its merge candidates as the groups
   --dry-run      Preview merged output without writing files (the default)
-  --force        Write the composite and delete the source files
+  --force        Write the composite, back up and delete the source files
   --json         Structured JSON output
 ```
 
@@ -112,16 +112,36 @@ Preview merge → agent-discipline.md:
 
 Source rules: agent-spawn-discipline.md, agent-efficiency.md, agent-token-efficiency.md
 ────────────────────────────────────
+Every nonblank line of the sources is carried (a composite keeps only **Do:** and **Don't:** lines).
+Would back up: agent-spawn-discipline.md → agent-spawn-discipline.md.backup, agent-efficiency.md → agent-efficiency.md.backup, agent-token-efficiency.md → agent-token-efficiency.md.backup
 Would delete: agent-spawn-discipline.md, agent-efficiency.md, agent-token-efficiency.md
 
-Preview only, nothing written. Re-run with --force to write the composite and delete its source files.
+Preview only, nothing written. Re-run with --force to write the composite, back up each source file to <name>.md.backup, and delete the sources.
 ```
 
-Re-running with `--force` writes the composite and deletes the sources. The
-confirmation is a flag rather than a `[y/N]` prompt so the command behaves the
-same in noninteractive workflows, the same shape as `bd delete --force`.
-Compact refuses to write a composite over an existing file, including one of
-its own sources.
+A composite keeps only **Do:** and **Don't:** lines. When a source has other
+prose (headings, notes, frontmatter), the preview lists each dropped line under
+"Not carried into the composite", by source. A rule with no **Do:** or
+**Don't:** lines would contribute nothing: `--auto` skips it with a warning
+(and skips the group if fewer than two rules remain), and `--group` refuses the
+group.
+
+Re-running with `--force` writes the composite, copies each source to
+`<name>.md.backup` (created exclusively, mode 0600, holding the full original
+text), and only then deletes the sources. The confirmation is a flag rather
+than a `[y/N]` prompt so the command behaves the same in noninteractive
+workflows, the same shape as `bd delete --force`. Backups are not `*.md`, so
+audit never counts them as rules.
+
+Every group is checked before any is applied. Compact refuses a group whose
+composite or any backup path already exists (including one of its own sources
+or a dangling symlink); that group is left untouched, other `--auto` groups
+still apply, and the command exits 1. A failed backup deletes no source. A
+failed delete is reported with what was written, backed up and deleted, and
+every backup is kept.
+
+To undo a merge, delete the composite, then rename each `<name>.md.backup`
+back to `<name>.md`; a source whose delete failed still has its original name.
 
 ---
 
@@ -203,8 +223,8 @@ Given a group of rules to merge:
 **Don't:** {deduplicated don't entries, newline-separated}
 ```
 
-6. Without --force, show the composite and the files it would delete, and stop
-7. With --force: create the merged file (refusing if the path exists), then delete source files, reporting any delete that fails
+6. Without --force, show the composite, the lines it drops by source, and the files it would back up and delete, and stop
+7. With --force: create the merged file (refusing if it or any backup path exists), copy each source to `<name>.md.backup`, then delete source files, reporting any backup or delete that fails
 
 ---
 
@@ -309,7 +329,7 @@ func init() {
     rulesCompactCmd.Flags().StringSlice("group", nil, "Rule names to merge")
     rulesCompactCmd.Flags().Bool("auto", false, "Use audit suggestions to select merge groups")
     rulesCompactCmd.Flags().Bool("dry-run", false, "Preview without applying")
-    rulesCompactCmd.Flags().Bool("force", false, "Write the composite and delete the source files")
+    rulesCompactCmd.Flags().Bool("force", false, "Write the composite and delete the source files (without this flag, shows preview)")
     rulesCompactCmd.Flags().Bool("json", false, "JSON output")
 
     rulesCmd.AddCommand(rulesAuditCmd)
