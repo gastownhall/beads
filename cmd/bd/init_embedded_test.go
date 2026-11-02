@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -1987,4 +1988,93 @@ func testEmbeddedInitGitBootstrapRouting(t *testing.T, names ...string) {
 			}
 		})
 	}
+}
+
+// runBDExit runs a bd command in dir, returning (combined stdout+stderr,
+// exit code). Unlike runBDInit it tolerates a non-zero exit and reports the
+// code, which is what the reinit-refusal tests assert on: the refusals exit
+// through stable codes (11/12), not exit 1.
+func runBDExit(t *testing.T, bd, dir string, args ...string) (string, int) {
+	t.Helper()
+	cmd := exec.Command(bd, args...)
+	cmd.Dir = dir
+	cmd.Env = bdEnv(dir)
+	out, err := cmd.CombinedOutput()
+	var exit *exec.ExitError
+	switch {
+	case err == nil:
+		return string(out), 0
+	case errors.As(err, &exit):
+		return string(out), exit.ExitCode()
+	default:
+		t.Fatalf("bd %s: %v", strings.Join(args, " "), err)
+		return "", 0
+	}
+}
+
+// TestEmbeddedInitReinitLocalRefusesDatabaseRepoint pins the residual defect
+// behind GH#3495 once mode inheritance already covers a correctly recorded
+// workspace: an embedded database with ZERO issues held only database-stored
+// configuration (custom types), and `bd init --reinit-local --database other`
+// silently abandoned it — no prompt, no token, no notice — because the reinit
+// preflight keyed on countExistingIssues, which answered 0. The repoint must
+// refuse for want of a destroy token BEFORE either database is opened, so the
+// recorded database, its configuration and the workspace metadata all survive.
+func TestEmbeddedInitReinitLocalRefusesDatabaseRepoint(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt init tests")
+	}
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
+
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "fi", "--skip-agents")
+	if out, code := runBDExit(t, bd, dir, "config", "set", "types.custom", "molecule,convoy"); code != 0 {
+		t.Fatalf("bd config set types.custom exited %d:\n%s", code, out)
+	}
+	if got := readBack(t, beadsDir, "fi", "types.custom", false); got != "molecule,convoy" {
+		t.Fatalf("fixture: types.custom = %q, want molecule,convoy", got)
+	}
+	if got := readBack(t, beadsDir, "fi", "issue_prefix", false); got != "fi" {
+		t.Fatalf("fixture: issue_prefix = %q, want fi", got)
+	}
+	metadataPath := filepath.Join(beadsDir, "metadata.json")
+	metadataBefore, err := os.ReadFile(metadataPath)
+	if err != nil {
+		t.Fatalf("read metadata.json: %v", err)
+	}
+	configBefore, err := os.ReadFile(filepath.Join(beadsDir, "config.yaml"))
+	if err != nil {
+		t.Fatalf("read config.yaml: %v", err)
+	}
+
+	// The reporter's shape: non-interactive quiet reinit repointing the
+	// database, with zero issues so the old count-based preflight passed.
+	out, code := runBDExit(t, bd, dir,
+		"init", "--quiet", "--reinit-local", "--prefix", "fi",
+		"--database", "other", "--non-interactive")
+	if code != ExitDestroyTokenMissing {
+		t.Fatalf("reinit repoint without a destroy token exited %d, want %d:\n%s", code, ExitDestroyTokenMissing, out)
+	}
+	if !strings.Contains(out, "bd help init-safety") {
+		t.Errorf("refusal must point at the destroy-token format reference, got:\n%s", out)
+	}
+
+	// Nothing was written: the recorded database, its configuration and the
+	// workspace metadata are all byte-for-byte intact, and no `other`
+	// database was created beside it.
+	got, err := os.ReadFile(metadataPath)
+	if err != nil {
+		t.Fatalf("re-read metadata.json: %v", err)
+	}
+	if string(got) != string(metadataBefore) {
+		t.Errorf("refused reinit changed .beads/metadata.json:\n before: %s\n after:  %s", metadataBefore, got)
+	}
+	if got, err := os.ReadFile(filepath.Join(beadsDir, "config.yaml")); err != nil || string(got) != string(configBefore) {
+		t.Errorf("refused reinit changed .beads/config.yaml (err=%v)", err)
+	}
+	if got := readBack(t, beadsDir, "fi", "types.custom", false); got != "molecule,convoy" {
+		t.Errorf("refused reinit must preserve the recorded database's custom types, got %q", got)
+	}
+	requireNoFile(t, filepath.Join(beadsDir, "embeddeddolt", "other"))
+	requireFile(t, filepath.Join(beadsDir, "embeddeddolt", "fi"))
 }

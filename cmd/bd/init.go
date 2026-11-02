@@ -1250,7 +1250,18 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			plannedDBPathAbs = filepath.Dir(plannedDBPathAbs)
 		}
 		initGateHandle, gateErr := acquireInitMutationGate(rootCtx, beadsDirAbs, plannedDBPathAbs, func() error {
-			return runInitReinitPreflight(reinitLocal, destroyTokenPrefix, destroyToken)
+			return runInitReinitPreflight(reinitPreflightInput{
+				ReinitLocal:   reinitLocal,
+				BeadsDir:      beadsDirAbs,
+				Request:       storeSwitchRequest{UsesSQLServer: usesSQLServer(), Database: database},
+				DestroyToken:  destroyToken,
+				ExpectedToken: FormatDestroyToken(destroyTokenPrefix),
+				StdinIsTTY:    term.IsTerminal(int(os.Stdin.Fd())),
+				Stdin:         os.Stdin,
+				Stderr:        os.Stderr,
+				LoadRecorded:  loadStoreSwitchRecord,
+				CountExisting: func() (int, error) { return countExistingIssues(prefix) },
+			})
 		})
 		if gateErr != nil {
 			return gateErr
@@ -3029,53 +3040,6 @@ func countExistingIssues(_ string) (int, error) {
 		return 0, nil
 	}
 	return stats.TotalIssues, nil
-}
-
-// runInitReinitPreflight confirms the destructive local replacement while the
-// caller holds init's complete exclusive gate set.
-func runInitReinitPreflight(reinitLocal bool, prefix, destroyToken string) error {
-	if !reinitLocal {
-		return nil
-	}
-	count, err := countExistingIssues(prefix)
-	if err != nil || count == 0 {
-		return nil
-	}
-
-	fmt.Fprintf(os.Stderr, "\n%s Re-initializing will destroy the existing database.\n\n", ui.RenderWarn("WARNING:"))
-	fmt.Fprintf(os.Stderr, "  Existing issues: %d\n\n", count)
-	fmt.Fprintf(os.Stderr, "  This action CANNOT be undone. All issues, dependencies, and\n")
-	fmt.Fprintf(os.Stderr, "  Dolt commit history will be permanently lost.\n\n")
-	fmt.Fprintf(os.Stderr, "  Before proceeding, consider:\n")
-	fmt.Fprintf(os.Stderr, "    bd export > issue-export.jsonl    # Export issue records, not full DB state\n")
-	fmt.Fprintf(os.Stderr, "    bd dolt status              # Check if this is a server config issue\n\n")
-	if term.IsTerminal(int(os.Stdin.Fd())) {
-		fmt.Fprintf(os.Stderr, "Type 'destroy %d issues' to confirm: ", count)
-		scanner := bufio.NewScanner(os.Stdin)
-		scanner.Scan()
-		expected := fmt.Sprintf("destroy %d issues", count)
-		if strings.TrimSpace(scanner.Text()) != expected {
-			fmt.Fprintf(os.Stderr, "\nAborted. Database was NOT modified.\n")
-			return &exitError{Code: ExitLocalExistsRefused}
-		}
-		return nil
-	}
-
-	// Non-interactive (piped input, AI agent, etc.)
-	//
-	// ADR invariant (engdocs/adr/0002-init-safety-invariants.md): runtime
-	// error text must not echo a complete destructive invocation. See
-	// 'bd help init-safety' for the token format. This closes the
-	// 58f5989bf failure class where an agent copy-pasted the suggestion.
-	expectedToken := FormatDestroyToken(prefix)
-	if destroyToken == expectedToken {
-		fmt.Fprintf(os.Stderr, "Destroy token accepted. Proceeding with re-initialization.\n")
-		return nil
-	}
-	fmt.Fprintf(os.Stderr, "Refusing to destroy %d issues in non-interactive mode.\n", count)
-	fmt.Fprintf(os.Stderr, "  See 'bd help init-safety' for the required --destroy-token format.\n")
-	fmt.Fprintf(os.Stderr, "  Or export issue records first: bd export > issue-export.jsonl\n")
-	return &exitError{Code: ExitDestroyTokenMissing}
 }
 
 // checkExistingBeadsData checks for existing database files
