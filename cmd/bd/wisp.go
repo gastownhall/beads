@@ -1022,8 +1022,14 @@ func selectAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageTh
 		// TODO(batchgetter): unbounded id list; see issueops.BatchGetter's doc
 		// and the importIssueLookup TODO in import_shared.go for why this is
 		// not yet routed through the role.
+		// A failed fetch keeps the parents, collects no dependent, and is
+		// returned so the command reports the expansion as incomplete: on the
+		// proxied route a failed label read fails this fetch rather than
+		// returning rows the label guard would read as unprotected.
 		childIssues, fetchErr := r.GetIssuesByIDs(ctx, childIDSlice)
-		if fetchErr == nil {
+		if fetchErr != nil {
+			cascadeErr = errors.Join(cascadeErr, fmt.Errorf("loading %d cascade dependent(s): %w", len(childIDSlice), fetchErr))
+		} else {
 			abandonedSet := make(map[string]bool, len(abandoned))
 			for _, issue := range abandoned {
 				abandonedSet[issue.ID] = true

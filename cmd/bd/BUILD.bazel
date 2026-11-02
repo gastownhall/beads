@@ -1061,6 +1061,7 @@ go_test(
         "mol_frontdoor_managed_local_integration_test.go",
         "mol_frontdoor_parity_integration_test.go",
         "mol_last_activity_proxied_integration_test.go",
+        "mol_port_labels_test.go",
         "mol_progress_proxied_integration_test.go",
         "mol_ready_gated_flag_test.go",
         "mol_ready_gated_hint_test.go",
