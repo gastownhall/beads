@@ -681,12 +681,23 @@ func TestRulesCompact_ForceApplies(t *testing.T) {
 	captureStdout(t, func() error { return runRulesCompact(cmd, nil) })
 
 	after := snapshotRulesDir(t, dir)
-	if len(after) != 1 {
-		t.Fatalf("want only the composite left, got %v", ruleFileNames(after))
+	if len(after) != 3 {
+		t.Fatalf("want the composite and both backups left, got %v", ruleFileNames(after))
 	}
 	for name, content := range after {
-		if !strings.Contains(content, "validate input before writing to disk") || !strings.Contains(content, "Source rules: alpha.md, beta.md") {
-			t.Errorf("%s is not the expected composite: %q", name, content)
+		switch name {
+		case "alpha.md.backup":
+			if content != fmt.Sprintf(sharedDiskDirective, "Alpha", "alpha") {
+				t.Errorf("%s must hold the exact original bytes: %q", name, content)
+			}
+		case "beta.md.backup":
+			if content != fmt.Sprintf(sharedDiskDirective, "Beta", "beta") {
+				t.Errorf("%s must hold the exact original bytes: %q", name, content)
+			}
+		default:
+			if !strings.Contains(content, "validate input before writing to disk") || !strings.Contains(content, "Source rules: alpha.md, beta.md") {
+				t.Errorf("%s is not the expected composite: %q", name, content)
+			}
 		}
 	}
 }
@@ -746,24 +757,35 @@ func TestRulesCompact_RefusesUnrelatedExistingFile(t *testing.T) {
 	}
 }
 
-func TestWriteCompactedRule_ReportsFailedDelete(t *testing.T) {
+// A source that cannot be read cannot be backed up, so it must stop the
+// merge before any deletion: a missing file used to surface as a failed
+// delete after the other sources were already gone.
+func TestWriteCompactedRule_MissingSourceFailsAtBackup(t *testing.T) {
 	dir := tempRulesDir(t)
 	present := writeRule(t, dir, "alpha", "# Alpha\n")
 	missing := filepath.Join(dir, "gone.md")
+	sources := []RuleFile{{Path: present}, {Path: missing}}
+	reports := newCompactSourceReports(sources)
 
 	composite := filepath.Join(dir, "composite.md")
-	written, err := writeCompactedRule(composite, "# Composite\n", []RuleFile{{Path: present}, {Path: missing}})
-	if err == nil || !strings.Contains(err.Error(), "could not delete 1 source file") {
-		t.Fatalf("expected the failed delete to be reported, got: %v", err)
+	written, err := writeCompactedRule(composite, "# Composite\n", sources, reports)
+	if err == nil || !strings.Contains(err.Error(), "could not back up") || !strings.Contains(err.Error(), "gone.md") {
+		t.Fatalf("expected the failed backup to name gone.md, got: %v", err)
 	}
 	if !written {
-		t.Error("expected written=true: the composite was created before the delete failed")
+		t.Error("expected written=true: the composite was created before the backup failed")
 	}
 	if _, statErr := os.Stat(composite); statErr != nil {
-		t.Errorf("expected the composite to survive a failed source delete: %v", statErr)
+		t.Errorf("expected the composite to survive a failed backup: %v", statErr)
 	}
-	if _, statErr := os.Stat(present); !os.IsNotExist(statErr) {
-		t.Errorf("expected %s to be deleted", present)
+	if _, statErr := os.Stat(present); statErr != nil {
+		t.Errorf("no source may be deleted before every backup succeeded; %s must survive: %v", present, statErr)
+	}
+	if _, statErr := os.Stat(present + ".backup"); statErr != nil {
+		t.Errorf("completed backups must survive a later failure: %v", statErr)
+	}
+	if !reports[0].BackedUp || reports[1].BackedUp {
+		t.Errorf("reports must reflect the partial state: %+v", reports)
 	}
 }
 
@@ -831,8 +853,8 @@ func TestRulesCompact_GroupJSONForceApplies(t *testing.T) {
 	if payload["applied"] != true {
 		t.Errorf("expected applied=true, got: %v", payload)
 	}
-	if after := snapshotRulesDir(t, dir); len(after) != 1 {
-		t.Errorf("want only the composite left, got %v", ruleFileNames(after))
+	if after := snapshotRulesDir(t, dir); len(after) != 3 {
+		t.Errorf("want the composite and both backups left, got %v", ruleFileNames(after))
 	}
 }
 
@@ -856,8 +878,8 @@ func TestRulesCompact_GroupJSONReportsPartialApply(t *testing.T) {
 		t.Errorf("expected the failed delete in the JSON error, got: %v", payload)
 	}
 	after := snapshotRulesDir(t, dir)
-	if len(after) != 1 {
-		t.Errorf("want only the composite left, got %v", ruleFileNames(after))
+	if len(after) != 3 {
+		t.Errorf("want the composite and both distinct-path backups left, got %v", ruleFileNames(after))
 	}
 }
 
@@ -968,6 +990,125 @@ func TestRulesCompact_PreviewJSONAppliedFalse(t *testing.T) {
 			}
 
 			assertRulesDirUnchanged(t, dir, before)
+		})
+	}
+}
+
+// The GH#5719 fixture: two rules sharing a directive, each with distinct
+// prose that a composite does not carry.
+const (
+	issue5719Alpha = "# Alpha\n\n**Do:** validate input before writing to disk\n\n## Rationale\nThis prevents corruption when the writer crashes mid-flush.\n\n## Exceptions\nNone.\n"
+	issue5719Beta  = "# Beta\n\n**Do:** validate input before writing to disk\n\n## Rationale\nSecond file, distinct prose that must survive.\n"
+)
+
+// TestRulesCompact_Issue5719KeepsBackups covers GH#5719: a forced merge
+// keeps the directives in the composite, preserves an exact byte-for-byte
+// copy of every source as <source>.backup, removes the sources, and leaves
+// the audit counting one rule — in all four modes.
+func TestRulesCompact_Issue5719KeepsBackups(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		json bool
+	}{
+		{"auto text", []string{"--auto", "--force"}, false},
+		{"auto json", []string{"--auto", "--force"}, true},
+		{"group text", []string{"--group", "alpha,beta", "--force"}, false},
+		{"group json", []string{"--group", "alpha,beta", "--force"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := tempRulesDir(t)
+			writeRule(t, dir, "alpha", issue5719Alpha)
+			writeRule(t, dir, "beta", issue5719Beta)
+			args := append([]string{"--path", dir}, tc.args...)
+
+			if tc.json {
+				payload, err := runRulesCompactJSONValue(t, args...)
+				if err != nil {
+					t.Fatalf("forced apply: %v", err)
+				}
+				var objects []map[string]interface{}
+				switch v := payload.(type) {
+				case map[string]interface{}:
+					objects = []map[string]interface{}{v}
+				case []interface{}:
+					for _, item := range v {
+						m, ok := item.(map[string]interface{})
+						if !ok {
+							t.Fatalf("results item is not an object: %v", item)
+						}
+						objects = append(objects, m)
+					}
+				default:
+					t.Fatalf("unexpected JSON payload: %v", payload)
+				}
+				if len(objects) != 1 {
+					t.Fatalf("expected exactly one group result, got %d: %v", len(objects), payload)
+				}
+				if objects[0]["applied"] != true {
+					t.Errorf("expected applied=true, got: %v", objects[0])
+				}
+				srcs, ok := objects[0]["sources"].([]interface{})
+				if !ok || len(srcs) != 2 {
+					t.Fatalf("expected sources with 2 entries, got: %v", objects[0]["sources"])
+				}
+				for _, s := range srcs {
+					m, ok := s.(map[string]interface{})
+					if !ok {
+						t.Fatalf("sources entry is not an object: %v", s)
+					}
+					if m["backed_up"] != true {
+						t.Errorf("expected backed_up=true, got: %v", m)
+					}
+					backup, _ := m["backup"].(string)
+					if backup == "" {
+						t.Errorf("expected a named backup path, got: %v", m)
+					}
+					if _, ok := m["file"].(string); !ok {
+						t.Errorf("expected a file name, got: %v", m)
+					}
+				}
+			} else {
+				cmd := newRulesCompactTestCmd(t, args...)
+				out := captureStdout(t, func() error { return runRulesCompact(cmd, nil) })
+				for _, want := range []string{"backups: alpha.md.backup, beta.md.backup", "validate input before writing to disk"} {
+					if !strings.Contains(out, want) {
+						t.Errorf("apply output missing %q:\n%s", want, out)
+					}
+				}
+			}
+
+			for name, want := range map[string]string{"alpha.md.backup": issue5719Alpha, "beta.md.backup": issue5719Beta} {
+				got, err := os.ReadFile(filepath.Join(dir, name))
+				if err != nil {
+					t.Fatalf("read %s: %v", name, err)
+				}
+				if string(got) != want {
+					t.Errorf("%s = %q, want the exact original bytes %q", name, got, want)
+				}
+			}
+			composite, err := os.ReadFile(filepath.Join(dir, "disk.md"))
+			if err != nil {
+				t.Fatalf("read composite: %v", err)
+			}
+			if !strings.Contains(string(composite), "**Do:** validate input before writing to disk") {
+				t.Errorf("composite lost the directive:\n%s", composite)
+			}
+			if !strings.Contains(string(composite), "Source rules: alpha.md, beta.md") {
+				t.Errorf("composite lost the source attribution:\n%s", composite)
+			}
+			for _, name := range []string{"alpha.md", "beta.md"} {
+				if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
+					t.Errorf("%s should be removed after the merge", name)
+				}
+			}
+			audit, err := RunAudit(dir, 0.6)
+			if err != nil {
+				t.Fatalf("audit after merge: %v", err)
+			}
+			if audit.TotalRules != 1 {
+				t.Errorf("audit counts %d rules after the merge, want 1 (the .backup copies must not count)", audit.TotalRules)
+			}
 		})
 	}
 }

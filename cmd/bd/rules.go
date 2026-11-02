@@ -791,11 +791,12 @@ func runRulesCompact(cmd *cobra.Command, args []string) error {
 		}
 
 		type compactResult struct {
-			Group   string `json:"group"`
-			Output  string `json:"output"`
-			Rules   int    `json:"rules_merged"`
-			Applied bool   `json:"applied"`
-			Error   string `json:"error,omitempty"`
+			Group   string                `json:"group"`
+			Output  string                `json:"output"`
+			Rules   int                   `json:"rules_merged"`
+			Applied bool                  `json:"applied"`
+			Sources []compactSourceReport `json:"sources"`
+			Error   string                `json:"error,omitempty"`
 		}
 		var results []compactResult
 		failed := 0
@@ -821,12 +822,13 @@ func runRulesCompact(cmd *cobra.Command, args []string) error {
 
 			outName := strings.ReplaceAll(mc.GroupLabel, " ", "-") + ".md"
 			res := compactResult{
-				Group:  mc.GroupLabel,
-				Output: merged,
-				Rules:  len(groupRules),
+				Group:   mc.GroupLabel,
+				Output:  merged,
+				Rules:   len(groupRules),
+				Sources: newCompactSourceReports(groupRules),
 			}
 			if apply {
-				written, err := writeCompactedRule(filepath.Join(rulesPath, outName), merged, groupRules)
+				written, err := writeCompactedRule(filepath.Join(rulesPath, outName), merged, groupRules, res.Sources)
 				res.Applied = written
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -837,7 +839,7 @@ func runRulesCompact(cmd *cobra.Command, args []string) error {
 			results = append(results, res)
 
 			if !jsonOutput {
-				printCompactPreview(outName, merged, groupRules, res.Applied, res.Error == "")
+				printCompactPreview(outName, merged, res.Sources, res.Applied, res.Error == "")
 			}
 		}
 
@@ -878,10 +880,11 @@ func runRulesCompact(cmd *cobra.Command, args []string) error {
 	}
 
 	outName := strings.ReplaceAll(label, " ", "-") + ".md"
+	sourceReports := newCompactSourceReports(groupRules)
 	written := false
 	var applyErr error
 	if apply {
-		written, applyErr = writeCompactedRule(filepath.Join(rulesPath, outName), merged, groupRules)
+		written, applyErr = writeCompactedRule(filepath.Join(rulesPath, outName), merged, groupRules, sourceReports)
 	}
 
 	if jsonOutput {
@@ -891,6 +894,7 @@ func runRulesCompact(cmd *cobra.Command, args []string) error {
 			"rules":   len(groupRules),
 			"dry_run": !apply,
 			"applied": written,
+			"sources": sourceReports,
 		}
 		if applyErr != nil {
 			result["error"] = applyErr.Error()
@@ -907,7 +911,7 @@ func runRulesCompact(cmd *cobra.Command, args []string) error {
 	if applyErr != nil && !written {
 		return HandleError("%v", applyErr)
 	}
-	printCompactPreview(outName, merged, groupRules, written, applyErr == nil)
+	printCompactPreview(outName, merged, sourceReports, written, applyErr == nil)
 	if applyErr != nil {
 		return HandleError("%v", applyErr)
 	}
@@ -919,8 +923,9 @@ func runRulesCompact(cmd *cobra.Command, args []string) error {
 
 const compactPreviewFooter = "Preview only, nothing written. Re-run with --force to write the composite and delete its source files."
 
-// printCompactPreview shows a composite and the source files it replaces.
-func printCompactPreview(outName, merged string, sources []RuleFile, applied, sourcesDeleted bool) {
+// printCompactPreview shows a composite, the source files it replaces, and
+// where each source's recovery copy goes.
+func printCompactPreview(outName, merged string, reports []compactSourceReport, applied, complete bool) {
 	if applied {
 		fmt.Printf("Merged → %s:\n", outName)
 	} else {
@@ -929,26 +934,62 @@ func printCompactPreview(outName, merged string, sources []RuleFile, applied, so
 	fmt.Println(strings.Repeat("─", 40))
 	fmt.Print(merged)
 	fmt.Println(strings.Repeat("─", 40))
-	names := make([]string, 0, len(sources))
-	for _, rf := range sources {
-		names = append(names, filepath.Base(rf.Path))
+	names := make([]string, 0, len(reports))
+	backups := make([]string, 0, len(reports))
+	wouldBackup := make([]string, 0, len(reports))
+	for _, r := range reports {
+		names = append(names, r.File)
+		backups = append(backups, filepath.Base(r.Backup))
+		wouldBackup = append(wouldBackup, r.File+" → "+filepath.Base(r.Backup))
 	}
 	switch {
-	case applied && sourcesDeleted:
-		fmt.Printf("Created %s, deleted %d source files: %s\n\n", outName, len(names), strings.Join(names, ", "))
+	case applied && complete:
+		fmt.Printf("Created %s, deleted %d source files (backups: %s)\n\n", outName, len(names), strings.Join(backups, ", "))
 	case applied:
-		fmt.Printf("Created %s, but not every source file was deleted (see the error).\n\n", outName)
+		fmt.Printf("Created %s, but the merge did not complete (see the error). Backups so far: %s\n\n", outName, strings.Join(backups, ", "))
 	default:
-		fmt.Printf("Would delete: %s\n\n", strings.Join(names, ", "))
+		fmt.Printf("Would delete: %s\n", strings.Join(names, ", "))
+		fmt.Printf("Would back up: %s\n\n", strings.Join(wouldBackup, ", "))
 	}
 }
 
-// writeCompactedRule creates outPath and then removes the sources, reporting
-// whether outPath was written even when a delete fails afterwards. It never
-// replaces an existing file: a composite named like one of its own sources
-// would otherwise be written and then deleted with them, and one named like an
-// unrelated rule would silently replace it.
-func writeCompactedRule(outPath, merged string, sources []RuleFile) (bool, error) {
+// compactSourceReport describes one source rule of a compact group: where
+// its recovery copy goes, and whether that copy completed.
+type compactSourceReport struct {
+	File     string `json:"file"`
+	Backup   string `json:"backup"`
+	BackedUp bool   `json:"backed_up"`
+}
+
+// backupPathFor returns the recovery-copy path written beside a source rule
+// before the source is deleted.
+func backupPathFor(sourcePath string) string {
+	return sourcePath + ".backup"
+}
+
+// newCompactSourceReports builds one report per source entry, in order.
+func newCompactSourceReports(sources []RuleFile) []compactSourceReport {
+	reports := make([]compactSourceReport, 0, len(sources))
+	for _, rf := range sources {
+		reports = append(reports, compactSourceReport{
+			File:   filepath.Base(rf.Path),
+			Backup: backupPathFor(rf.Path),
+		})
+	}
+	return reports
+}
+
+// writeCompactedRule creates outPath, copies every distinct source to
+// <source>.backup, and only then removes the sources, reporting whether
+// outPath was written even when a later step fails. It never replaces an
+// existing file: a composite named like one of its own sources would
+// otherwise be written and then deleted with them, and one named like an
+// unrelated rule would silently replace it. No source is deleted before
+// every backup succeeded, so a failed copy loses nothing: the composite and
+// the completed backups stay, and only this call's uncompleted copy is
+// removed. reports is filled in as each copy completes, so callers can
+// report partial application.
+func writeCompactedRule(outPath, merged string, sources []RuleFile, reports []compactSourceReport) (bool, error) {
 	// #nosec G304 -- path comes from controlled filepath.Join of user-specified rules directory
 	f, err := os.OpenFile(outPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if errors.Is(err, fs.ErrExist) {
@@ -967,6 +1008,23 @@ func writeCompactedRule(outPath, merged string, sources []RuleFile) (bool, error
 		return false, fmt.Errorf("write %s: %w", outPath, err)
 	}
 
+	// Back up every distinct source before deleting anything. Backups are
+	// regular files (a symlink source is copied, not linked), so recovery
+	// never depends on the target's survival.
+	backedUp := make(map[string]bool, len(sources))
+	for i, rf := range sources {
+		if backedUp[rf.Path] {
+			reports[i].BackedUp = true
+			continue
+		}
+		dst := backupPathFor(rf.Path)
+		if err := backupRuleFile(rf.Path, dst); err != nil {
+			return true, fmt.Errorf("wrote %s but could not back up %s: %v; no source files were deleted", outPath, rf.Path, err)
+		}
+		backedUp[rf.Path] = true
+		reports[i].BackedUp = true
+	}
+
 	var failures []string
 	for _, rf := range sources {
 		if err := os.Remove(rf.Path); err != nil {
@@ -974,9 +1032,44 @@ func writeCompactedRule(outPath, merged string, sources []RuleFile) (bool, error
 		}
 	}
 	if len(failures) > 0 {
-		return true, fmt.Errorf("wrote %s but could not delete %d source file(s): %s", outPath, len(failures), strings.Join(failures, "; "))
+		return true, fmt.Errorf("wrote %s but could not delete %d source file(s): %s (backups keep every source's original bytes)", outPath, len(failures), strings.Join(failures, "; "))
 	}
 	return true, nil
+}
+
+// backupRuleFile copies src's complete bytes to a new regular file at dst
+// with mode 0600, refusing to touch an existing dst. A copy that fails
+// midway removes only the file it created, never an existing one.
+func backupRuleFile(src, dst string) error {
+	data, err := os.ReadFile(src) //nolint:gosec // G304: rule paths join the user-specified rules directory
+	if err != nil {
+		return fmt.Errorf("read source: %w", err)
+	}
+	// #nosec G304 -- paths come from controlled filepath.Join of user-specified rules directory
+	f, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if errors.Is(err, fs.ErrExist) {
+		return fmt.Errorf("%s already exists; refusing to overwrite it. Rename or move that file, then re-run", dst)
+	}
+	if err != nil {
+		return fmt.Errorf("write backup: %w", err)
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		return removeIncompleteBackup(dst, err)
+	}
+	if err := f.Close(); err != nil {
+		return removeIncompleteBackup(dst, err)
+	}
+	return nil
+}
+
+// removeIncompleteBackup drops a backup this call created but could not
+// finish, reporting a cleanup failure alongside the original error.
+func removeIncompleteBackup(dst string, cause error) error {
+	if rmErr := os.Remove(dst); rmErr != nil && !os.IsNotExist(rmErr) {
+		return fmt.Errorf("write backup: %v (removing the incomplete copy failed: %v)", cause, rmErr)
+	}
+	return fmt.Errorf("write backup: %w", cause)
 }
 
 // titleCase capitalizes the first letter of each word.
