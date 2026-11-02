@@ -2622,7 +2622,16 @@ var syncServerBinary = doltserver.SyncServerBinary
 // lifecycle, and fails the open when a replacement this open initiated could
 // not complete (so bd never queries a server it decided not to trust).
 func maybeSyncServerBinary(cfg *Config, beadsDir string) error {
-	if cfg.ServerPort <= 0 {
+	// The hook only ever speaks about a server bd tracks and may launch on
+	// this machine (AC-7). A socket, TLS, gateway or proxied endpoint is not
+	// the workspace's tracked owned server — it is the operator's, the
+	// gateway's, the proxy's — and a host bd never runs its server at (or
+	// port 0) is not a server bd could have started here. In test mode the
+	// dolt on PATH is the test's, not the operator's. None of those opens
+	// reach the hook: no comparison, no lifecycle change, no output.
+	if cfg.ServerSocket != "" || cfg.ServerTLS || cfg.Gateway || cfg.ProxiedServer ||
+		cfg.ServerPort <= 0 || !configfile.BdRunsServerAt(cfg.ServerHost) ||
+		os.Getenv("BEADS_TEST_MODE") == "1" {
 		return nil
 	}
 	return syncServerBinary(doltserver.BinarySyncRequest{

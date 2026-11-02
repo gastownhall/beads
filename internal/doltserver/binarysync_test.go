@@ -757,3 +757,49 @@ func TestSyncServerBinary_AdvisesWhenItMayNotRestart(t *testing.T) {
 		})
 	})
 }
+
+// TestSyncServerBinary_IgnoresUntrackedEndpoint is AC-7's untracked clause:
+// a live server answering on the dialed port is not, by itself, one bd may
+// compare or touch — only the workspace's own port/PID files prove tracking.
+// An open from a workspace that tracks nothing gets no comparison, no
+// lifecycle change and no output, and the unrelated server keeps running.
+func TestSyncServerBinary_IgnoresUntrackedEndpoint(t *testing.T) {
+	// One launch ledger: the harness process writes every launch to the
+	// file the env var names, so both workspaces share it here.
+	beadsDir, launches := fakeStartWorkspace(t)
+	stopTrackedServerAfterTest(t, beadsDir)
+
+	// A second workspace that tracks nothing, while the first one owns a
+	// live server on a private port.
+	tracked := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(tracked, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	stopTrackedServerAfterTest(t, tracked)
+	state, err := startForTest(t, tracked)
+	if err != nil {
+		t.Fatalf("starting the tracked server: %v", err)
+	}
+
+	var syncErr error
+	stderr := captureStderr(t, func() {
+		syncErr = SyncServerBinary(BinarySyncRequest{
+			BeadsDir:     beadsDir,
+			Host:         "127.0.0.1",
+			Port:         state.Port,
+			AllowRestart: true,
+		})
+	})
+	if syncErr != nil {
+		t.Fatalf("an untracked endpoint must be a silent no-op: %v", syncErr)
+	}
+	if stderr != "" {
+		t.Errorf("an untracked endpoint produced output %q, want none", stderr)
+	}
+	if !isProcessAlive(state.PID) {
+		t.Errorf("the untracked server (PID %d) was signaled, want it untouched", state.PID)
+	}
+	if ports := launchedPorts(t, launches); len(ports) != 1 {
+		t.Errorf("the fake dolt launched %d time(s) (%v), want 1: the original start only", len(ports), ports)
+	}
+}
