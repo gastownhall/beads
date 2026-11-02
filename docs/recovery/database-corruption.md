@@ -1,59 +1,150 @@
 ---
 title: Database Corruption
-description: Recover from Dolt database corruption
+description: Tell an unavailable or busy database from a damaged one, and recover a Beads database that will not open
 ---
 
-This runbook helps you recover from database corruption in Beads.
+This runbook covers a Beads database that will not open, in embedded mode (the
+default, data in `.beads/embeddeddolt/`) and in server mode (data in
+`.beads/dolt/` by default). Many errors that look like corruption are not, so
+diagnose first and change nothing on disk until you know which case you have.
 
 ## Symptoms
 
-- Error messages during `bd` commands
-- "database is locked" errors that persist
-- Missing issues that should exist
-- Inconsistent database state
+- **The server is unavailable** (server mode only): `bd` reports that the Dolt
+  server is not running or not accepting connections. Check `bd dolt status`
+  and the server log, `.beads/dolt-server.log`. A stopped server is not
+  corruption: start it with `bd dolt start`. If the log reports a corrupted
+  journal, continue with [Engine won't open](#engine-wont-open).
+- **The engine reports a journal or open error**: every `bd` command fails
+  while opening the database, for example with `corrupted journal` or
+  `possible data loss detected in journal file`, even though no other `bd`
+  process is running. Continue with [Engine won't open](#engine-wont-open).
 
-## Diagnosis
+## Engine won't open
+
+`bd doctor --fix` does not rebuild a journal the engine cannot open, and
+general bd doctor checks are not supported in embedded mode (only
+`bd doctor --check=artifacts`, `--check=conventions` and `--check=pollution`
+run there). Recovery means building a new database from a copy of your data
+that still opens, while keeping the damaged store intact.
+
+### 1. Stop everything that uses the store
+
+Stop every bd process, agent and script that works in this workspace. In
+server mode also stop the managed server with `bd dolt stop`; in shared server
+mode that server serves every project on the machine, so check what else
+depends on it first.
+
+### 2. Preserve the damaged store
+
+Copy the whole store and its configuration before you change anything. Find
+the store first instead of assuming the default path:
+
+- **Embedded mode:** `.beads/embeddeddolt/` inside the workspace's `.beads/`
+  directory (or the directory `BEADS_DIR` names).
+- **Server mode:** `.beads/dolt/` by default, or the directory named by
+  `dolt_data_dir` in `.beads/metadata.json` or by `BEADS_DOLT_DATA_DIR`. In
+  shared server mode it is `~/.beads/shared-server/dolt/` (or
+  `$BEADS_SHARED_SERVER_DIR/dolt/`) and holds every project's database.
 
 ```bash
-# Check database integrity
-bd doctor
-
-# Check Dolt server health
-bd dolt show
+ts=$(date +%Y%m%dT%H%M%S)
+mkdir -p ../beads-damaged-$ts
+cp -a .beads ../beads-damaged-$ts/   # store, metadata.json, config.yaml, backups
+# If the store lives outside .beads/, copy that directory as well.
 ```
 
-## Solution
+Keep the preserved copy outside any server data_dir: the sql-server loads every
+subdirectory of its data_dir as a database, and a damaged copy there
+crash-loops it (see [re-clone gotchas](/recovery/init-safety#re-clone-gotchas)).
+Do not delete or edit files inside `.dolt/`, and do not run Dolt's data-loss
+repair (`dolt fsck --revive-journal-with-data-loss`) on your only copy.
 
-**Step 1:** Stop the Dolt server
+### 3. Recover into a fresh store
+
+Each route below builds a new database; none repairs the damaged one in place.
+Run it in a fresh recovery workspace (for example a new clone of the
+repository), or in this workspace after moving the damaged store out of the
+way, outside `.beads/` and outside any server data_dir:
+
 ```bash
-bd dolt stop
+mv .beads/embeddeddolt ../embeddeddolt.damaged.$ts   # embedded mode
+# Server mode: move the database directory under your data_dir the same way.
 ```
 
-**Step 2:** Back up current state
+Pick the newest source you trust. A remote, backup or export holds only what
+it held when it was made, so a stale source silently drops later work; compare
+it with what you expect before you rely on it. If you have no recovery source,
+stop here and keep the preserved copy: it is the only copy of your data. Do
+not run `bd init` over it or expect an empty database to bring the issues back.
+
+If `bd bootstrap` or `bd init` refuses on any route (for example because the
+remote already has history or the configured server database is missing),
+follow the [recovery playbook](/recovery/init-safety) for the code it prints
+rather than forcing it.
+
+### From a Dolt remote
+
+Use this when a Dolt remote (`sync.remote`, or Dolt data on the git origin) is
+current:
+
 ```bash
-cp -r .beads .beads.backup
+bd bootstrap --dry-run    # inspect the plan first
+bd bootstrap --yes
 ```
 
-**Step 3:** Preview what doctor would fix
+Read the dry-run plan before you run it. It should clone the remote or, with no
+usable remote, restore `.beads/backup/issues.jsonl` or import a git-tracked
+`.beads/issues.jsonl`. A plan that creates an empty database is not a recovery:
+stop and use another route. `bd dolt pull` does not repair a local engine
+that will not open.
+
+### From a Dolt-native backup
+
+Use this only for a Dolt-native snapshot made by `bd backup sync` (under
+`.beads/backup/` by default, or the configured backup directory; take it from
+your preserved copy if it lived inside the moved store). `bd backup restore`
+needs an initialized database and does not read a `bd export` JSONL file, so
+run it only in an initialized recovery workspace, never over the damaged
+store:
+
 ```bash
-bd doctor --dry-run
+bd init
+bd backup restore /path/to/backup --force   # replaces the empty database bd init just created
 ```
 
-**Step 4:** Rebuild database
+### From a JSONL export
+
+A JSONL file from `bd export` is an issue export, not a Dolt backup: it has no
+Dolt history and `bd backup restore` cannot read it. Keep the original file
+and import a copy into an initialized recovery workspace:
+
 ```bash
-bd doctor --fix
+bd init
+bd import /path/to/export.jsonl
 ```
 
-**Step 5:** Verify recovery
+Or let `bd init` import it: place a copy under the recovery workspace's
+`.beads/` and point `import.path` at it (`bd init --from-jsonl` reads the
+configured `import.path`, `issues.jsonl` by default, not a filename you pass):
+
 ```bash
-bd doctor
-bd list
+cp /path/to/export.jsonl .beads/recovered.jsonl
+bd config set import.path recovered.jsonl
+bd init --from-jsonl
 ```
 
-**Step 6:** Restart the Dolt server
+### 4. Verify the recovered data
+
+Compare the recovered issues with your source, not with a doctor run:
+
 ```bash
-dolt sql-server
+bd list --all
+bd stats
 ```
+
+In server mode `bd doctor` can also check the new database. In embedded mode
+run only the supported `bd doctor --check=...` variants.
 
 ## Prevention
 
