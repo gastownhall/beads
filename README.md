@@ -192,6 +192,25 @@ other line it drops. Applying writes the composite, copies each source to
 composite or backup path already exists. To undo a merge, delete the composite
 and rename each `<name>.md.backup` back to `<name>.md`.
 
+## 🔁 GitHub Issues Sync
+
+`bd github sync` (and `bd github pull`/`push`) syncs the one repository named
+by `github.owner` and `github.repo`, but a database can hold beads from
+several repositories. In releases after v1.3.2, sync matches, fetches and
+updates only beads whose issue URL points at the configured repository, so
+pulling issue 1313 from a second repository creates a new bead instead of
+overwriting the bead linked to the first repository's issue 1313. A
+`github:<number>` ref has no repository and is always read as the configured
+one. A repository you renamed or transferred keeps syncing whichever of its
+names the config holds: GitHub redirects a former name to the repository, and
+sync asks GitHub which repository each other name your beads link under
+belongs to now (one request per name), so beads linked under the old name and
+under the new one stay matched to their issues, and a pull relinks them to the
+current URL. If that request fails, or the old name now belongs to another
+repository, beads still linked under it count as another repository's: relink
+them (`bd update <id> --external-ref <new-url>`), or the next pull imports
+their issues again as new beads.
+
 ## 🌐 Community Tools
 
 See [docs/community-tools.md](docs/community-tools.md) for a curated list of community-built UIs, extensions, and integrations—including terminal interfaces, web UIs, editor extensions, and native apps.
