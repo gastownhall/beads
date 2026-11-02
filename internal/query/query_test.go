@@ -776,6 +776,26 @@ func TestQueryMinutesUnitResolvesAgo(t *testing.T) {
 			bound: func(f *types.IssueFilter) *time.Time { return f.UpdatedBefore },
 		},
 		{
+			// A signed duration still means N ago: the lexer keeps the sign in
+			// the token, and "-7d" used to become "--7d", which no layer parses.
+			name:  "created>-7d is 7 days ago",
+			query: "created>-7d",
+			want:  now.AddDate(0, 0, -7),
+			bound: func(f *types.IssueFilter) *time.Time { return f.CreatedAfter },
+		},
+		{
+			name:  "updated<+2h is 2 hours ago",
+			query: "updated<+2h",
+			want:  now.Add(-2 * time.Hour),
+			bound: func(f *types.IssueFilter) *time.Time { return f.UpdatedBefore },
+		},
+		{
+			name:  "updated<-30min is 30 minutes ago",
+			query: "updated<-30min",
+			want:  now.Add(-30 * time.Minute),
+			bound: func(f *types.IssueFilter) *time.Time { return f.UpdatedBefore },
+		},
+		{
 			name:  "bare m still means months, not minutes",
 			query: "created>30m",
 			want:  now.AddDate(0, -30, 0),
