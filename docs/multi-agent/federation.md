@@ -109,6 +109,16 @@ Stored credentials are used automatically during sync:
 bd federation add-peer town-gamma 192.168.1.100:3306/beads --user sync-bot
 ```
 
+A stored password is sealed for the peer's own identity — name, URL, and
+username together — so a peer row copied from another database cannot use
+it: sync refuses the copied credential instead of presenting it, and the
+original peer keeps working. Sync also refuses stored credentials when the
+peer's URL no longer matches the live Dolt remote it names. A password that
+sync reports as predating this sealing is refused until you re-enter it
+(`bd federation add-peer <name> <url> --user …`, which re-seals it). If a
+partner database could have copied your credential row before the sealing
+existed, treat that password as exposed and rotate it on the SQL server.
+
 ### JSON Output
 
 For scripting, use the `--json` flag:
@@ -148,6 +158,26 @@ bd federation status --peer town-beta
 
 Without `--strategy`, a sync that hits merge conflicts pauses and reports the
 conflicting tables for manual resolution instead of auto-resolving.
+
+### Excluding issue types from pushes
+
+The `federation.exclude_types` config (default `[wisp]`) names issue types
+that never leave this workspace: `bd federation sync` filters them out of
+every push, in both embedded and server modes. Excluded issues are not
+deleted — they stay in the local database and keep working with every `bd`
+command, and later syncs keep them while still merging in the peers'
+changes. The filter is a *sharing boundary*, not a cleanup.
+
+Filtering is **fail-closed**: if a filtered push fails, nothing is
+published. The sync reports the failure, keeps the local data, and leaves no
+temporary state behind — the next run publishes the filtered result.
+
+<Warning>
+The filter is forward-only. Issue types that reached a peer before you
+excluded them remain in that peer's history even though later pushes omit
+them. Removing them for good means rewriting the remote's history or
+starting a fresh remote.
+</Warning>
 
 ### Topologies
 

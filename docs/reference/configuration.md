@@ -5,7 +5,7 @@ description: Complete reference for bd configuration across config.yaml and data
 
 Complete configuration reference for beads.
 
-Last reviewed: 2026-09-10
+Last reviewed: 2026-11-02
 
 Freshness source: `cmd/bd/main.go`, `cmd/bd/config.go`, and `internal/configfile/`.
 
@@ -148,7 +148,7 @@ Any key whose name contains `api_key`, `api-key`, `secret`, `token`, or `passwor
 | `federation.remote` | — | `BD_FEDERATION_REMOTE` | (none) | Dolt remote URL (`dolthub://`, `gs://`, `s3://`, `az://`, `file://`) |
 | `federation.sovereignty` | — | `BD_FEDERATION_SOVEREIGNTY` | (none) | Sovereignty tier: `T1`, `T2`, `T3`, `T4` (see [below](#sync-and-federation)) |
 | `federation.allowed-remote-patterns` | — | — | `[]` | Glob patterns restricting allowed remote URLs |
-| `federation.exclude_types` | — | — | `[wisp]` | Issue types excluded from federation push |
+| `federation.exclude_types` | — | — | `[wisp]` | Issue types `bd federation sync` omits from every push (embedded and server modes); excluded issues stay in the local database |
 | `sync.require_confirmation_on_mass_delete` | — | — | `false` | Prompt before pushing when a merge deletes most issues |
 | `output.title-length` | — | — | `255` | Title display in feedback (`0` hides); see routing note below |
 | `ai.model` | — | `BD_AI_MODEL` | `claude-haiku-4-5-20251001` | Default AI model |
@@ -444,6 +444,10 @@ federation:
   - `T2`: Regional sovereignty — data stays within region/jurisdiction
   - `T3`: Provider sovereignty — data with trusted cloud provider
   - `T4`: No restrictions — data can be anywhere
+- `federation.exclude_types`: issue types `bd federation sync` omits from
+  every push (embedded and server modes). Excluded issues stay in the local
+  database — the filter is a sharing boundary, not a deletion; see
+  [Federation](/multi-agent/federation) for the fail-closed push behavior.
 
 `bd config validate` checks the remote URL format, the sovereignty tier, `federation.allowed-remote-patterns`, and `routing.mode`.
 
