@@ -22,6 +22,16 @@ import "strings"
 // wherever the guard fires.
 type DirtyTablesError struct {
 	Tables []string
+	// Unversioned reports that the refusing guard was the pending-migration
+	// guard and that it read main migration cursor 0 (no schema_migrations
+	// table, or an empty one) in this database. It says only what the cursor
+	// read: not that the database is empty, holds no user data, was created
+	// by this process, or was never migrated by any binary. bd init uses it
+	// to decide whether a database predates the migration cursor and so may
+	// be adopted by committing its working set (gastownhall/beads#6089).
+	// Every other refusal, the dependency re-key's included, leaves it false.
+	// A future clamp of the main cursor must keep this the recorded cursor.
+	Unversioned bool
 }
 
 func (e *DirtyTablesError) Error() string {

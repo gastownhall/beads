@@ -121,8 +121,29 @@ func TestMigrateUpReturnsDirtyTablesErrorForPreExistingDirtyTable(t *testing.T) 
 	if len(dirtyErr.Tables) != 1 || dirtyErr.Tables[0] != "dependencies" {
 		t.Fatalf("DirtyTablesError.Tables = %v, want [dependencies]", dirtyErr.Tables)
 	}
+	if dirtyErr.Unversioned {
+		t.Fatal("DirtyTablesError.Unversioned = true at main cursor 42, want false")
+	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+// TestDirtyTablesErrorUnversioned pins that the Unversioned classification
+// (gastownhall/beads#6089) is data only: it defaults to false, so every
+// constructor that does not set it keeps reporting a versioned refusal, and
+// it does not change the refusal's text or its #4566 recovery advice.
+func TestDirtyTablesErrorUnversioned(t *testing.T) {
+	const want = "pending schema migrations alter pre-existing dirty tables: config, interactions, routes" +
+		"; run 'bd dolt commit' to commit the working set at the current schema, then re-run the migration (gastownhall/beads#4566)"
+	tables := []string{"config", "interactions", "routes"}
+	if (&DirtyTablesError{Tables: tables}).Unversioned {
+		t.Fatal("zero-value DirtyTablesError.Unversioned = true, want false")
+	}
+	for _, unversioned := range []bool{false, true} {
+		if got := (&DirtyTablesError{Tables: tables, Unversioned: unversioned}).Error(); got != want {
+			t.Errorf("Error() with Unversioned=%v = %q, want %q", unversioned, got, want)
+		}
 	}
 }
 
