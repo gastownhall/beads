@@ -120,3 +120,36 @@ func TestEmbeddedWispGCClosedPurgeProtectedLabel(t *testing.T) {
 		}
 	}
 }
+
+// TestEmbeddedWispGCExcludeLabel pins --exclude-label end to end: it adds to
+// the stored setting for one run, so a wisp carrying either label survives,
+// while a wisp carrying only bd:protected — a label nothing configured — is
+// reclaimed like any other.
+func TestEmbeddedWispGCExcludeLabel(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "gcx")
+	bdCommand(t, bd, dir, "config", "set", "wisp.protected_labels", "keep:mail")
+
+	mail := bdCreate(t, bd, dir, "unread mail", "--ephemeral", "--label", "keep:mail").ID
+	alert := bdCreate(t, bd, dir, "open escalation", "--ephemeral", "--label", "keep:alert").ID
+	defaultLabel := bdCreate(t, bd, dir, "no default label", "--ephemeral", "--label", "bd:protected").ID
+	plain := bdCreate(t, bd, dir, "idle wisp", "--ephemeral").ID
+
+	bdCommand(t, bd, dir, "mol", "wisp", "gc", "--age", "0s", "--exclude-label", "keep:alert", "--force")
+
+	for _, id := range []string{mail, alert} {
+		if !bdShowSucceeds(t, bd, dir, id) {
+			t.Errorf("wisp %s carries a label protected by the setting or --exclude-label and must survive", id)
+		}
+	}
+	for _, id := range []string{defaultLabel, plain} {
+		if bdShowSucceeds(t, bd, dir, id) {
+			t.Errorf("wisp %s carries no protected label and must be reclaimed", id)
+		}
+	}
+}

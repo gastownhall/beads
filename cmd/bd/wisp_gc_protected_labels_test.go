@@ -125,7 +125,7 @@ func TestWispGCClosedPurgeSparesProtectedLabels(t *testing.T) {
 		issues: []*types.Issue{closedMail, closedAlert, closedPlain, closedOther, pinnedMail},
 		config: map[string]string{protectedLabelsKey: "keep:mail,keep:alert"},
 	}
-	got, skips, err := selectClosedPurgeCandidates(context.Background(), r, nil)
+	got, skips, err := selectClosedPurgeCandidates(context.Background(), r, nil, nil)
 	if err != nil {
 		t.Fatalf("selectClosedPurgeCandidates: %v", err)
 	}
@@ -136,5 +136,45 @@ func TestWispGCClosedPurgeSparesProtectedLabels(t *testing.T) {
 	}
 	if skips.labeled != 2 || skips.pinned != 1 {
 		t.Errorf("closed purge skips = %+v, want 2 label skips and 1 pinned (a pinned wisp counts as pinned)", skips)
+	}
+}
+
+// TestWispGCExcludeLabelAddsToSetting pins that --exclude-label adds to the
+// stored setting rather than replacing it, in age GC and in the closed purge:
+// a wisp carrying either label is spared. bd:protected is not a default, so a
+// wisp carrying only it stays eligible.
+func TestWispGCExcludeLabelAddsToSetting(t *testing.T) {
+	stale := time.Now().Add(-24 * time.Hour)
+	fromSetting := &types.Issue{ID: "gc-setting", Status: types.StatusClosed, UpdatedAt: stale, Labels: []string{"a"}}
+	fromFlag := &types.Issue{ID: "gc-flag", Status: types.StatusClosed, UpdatedAt: stale, Labels: []string{"b"}}
+	defaultLabel := &types.Issue{ID: "gc-default", Status: types.StatusClosed, UpdatedAt: stale, Labels: []string{"bd:protected"}}
+	plain := &types.Issue{ID: "gc-plain", Status: types.StatusClosed, UpdatedAt: stale}
+
+	r := &cascadeAgeReader{
+		issues: []*types.Issue{fromSetting, fromFlag, defaultLabel, plain},
+		config: map[string]string{protectedLabelsKey: "a"},
+	}
+	extra, err := parseExcludeLabels([]string{" b ", ""})
+	if err != nil {
+		t.Fatalf("parseExcludeLabels: %v", err)
+	}
+	aged, err := selectAbandonedWisps(context.Background(), r, true, time.Hour, nil, extra)
+	if err != nil {
+		t.Fatalf("selectAbandonedWisps: %v", err)
+	}
+	closed, _, err := selectClosedPurgeCandidates(context.Background(), r, nil, extra)
+	if err != nil {
+		t.Fatalf("selectClosedPurgeCandidates: %v", err)
+	}
+	for mode, got := range map[string][]*types.Issue{"age --all": aged, "--closed": closed} {
+		ids := collectedIDs(got)
+		if len(ids) != 2 || !ids[defaultLabel.ID] || !ids[plain.ID] {
+			t.Errorf("%s selected %v, want exactly %s and %s (setting a plus --exclude-label b protect the others)",
+				mode, ids, defaultLabel.ID, plain.ID)
+		}
+	}
+
+	if _, err := parseExcludeLabels([]string{"keep mail"}); err == nil {
+		t.Errorf("parseExcludeLabels accepted a name containing whitespace")
 	}
 }
