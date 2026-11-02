@@ -1632,3 +1632,181 @@ func TestRulesCompact_NotCarriedEdgeLines(t *testing.T) {
 		t.Errorf("audit JSON must not carry the disclosure field: %s", encoded)
 	}
 }
+
+// mustFindCandidate asserts the audit produced a merge group with exactly
+// the named members, so a filtering test fails loudly when its fixture
+// stops grouping instead of silently passing.
+func mustFindCandidate(t *testing.T, dir string, members ...string) {
+	t.Helper()
+	sort.Strings(members)
+	audit, err := RunAudit(dir, 0.6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mc := range audit.MergeCandidates {
+		got := append([]string(nil), mc.Rules...)
+		sort.Strings(got)
+		if fmt.Sprint(got) == fmt.Sprint(members) {
+			return
+		}
+	}
+	t.Fatalf("no merge candidate with members %v; audit returned %+v", members, audit.MergeCandidates)
+}
+
+// proseOnlyRuleBody groups with the disk pair through whole-body keywords
+// (jaccard 0.8 against alpha's directive keywords) while carrying no
+// directives at all.
+const proseOnlyRuleBody = "# Disk\n\nvalidate input before writing to disk\n\nRationale.\n"
+
+// Auto excludes a directive-less candidate (its body keywords can still
+// make it one) with a warning naming it, leaves the file untouched, and
+// attributes/backs up/deletes only the contributing sources.
+func TestRulesCompact_AutoExcludesDirectivelessRules(t *testing.T) {
+	dir := tempRulesDir(t)
+	writeRule(t, dir, "alpha", fmt.Sprintf(sharedDiskDirective, "Alpha", "alpha"))
+	writeRule(t, dir, "beta", fmt.Sprintf(sharedDiskDirective, "Beta", "beta"))
+	writeRule(t, dir, "prose", proseOnlyRuleBody)
+	mustFindCandidate(t, dir, "alpha.md", "beta.md", "prose.md")
+
+	var applyErr error
+	stderrText := captureStderr(t, func() {
+		captureStdoutIgnoringError(t, func() { applyErr = runRulesCompact(newRulesCompactTestCmd(t, "--path", dir, "--auto", "--force"), nil) })
+	})
+	if applyErr != nil {
+		t.Fatalf("forced auto compact: %v", applyErr)
+	}
+
+	if !strings.Contains(stderrText, "excluding prose.md") {
+		t.Errorf("expected a named warning for prose.md, got: %s", stderrText)
+	}
+	after := snapshotRulesDir(t, dir)
+	if got, ok := after["prose.md"]; !ok || got != proseOnlyRuleBody {
+		t.Errorf("prose.md must stay untouched, got %q (%v)", got, ok)
+	}
+	if _, ok := after["prose.md.backup"]; ok {
+		t.Error("an excluded file must not be backed up")
+	}
+	composite, ok := after["disk.md"]
+	if !ok {
+		t.Fatalf("expected the composite, got %v", ruleFileNames(after))
+	}
+	if !strings.Contains(composite, "Source rules: alpha.md, beta.md") {
+		t.Errorf("attribution must name only contributors: %q", composite)
+	}
+}
+
+// A two-member group reduced to one contributor by the directive-less
+// exclusion is skipped whole — no composite, no backups, no deletes, no
+// reservation — with a warning, even under --force.
+func TestRulesCompact_AutoSkipsUndersizedGroup(t *testing.T) {
+	dir := tempRulesDir(t)
+	writeRule(t, dir, "alpha", fmt.Sprintf(sharedDiskDirective, "Alpha", "alpha"))
+	writeRule(t, dir, "prose", proseOnlyRuleBody)
+	mustFindCandidate(t, dir, "alpha.md", "prose.md")
+	before := snapshotRulesDir(t, dir)
+
+	var stderrText string
+	stderrText = captureStderr(t, func() {
+		captureStdoutIgnoringError(t, func() {
+			_ = runRulesCompact(newRulesCompactTestCmd(t, "--path", dir, "--auto", "--force"), nil)
+		})
+	})
+
+	if !strings.Contains(stderrText, "excluding prose.md") {
+		t.Errorf("expected a named exclusion warning, got: %s", stderrText)
+	}
+	if !strings.Contains(stderrText, "skipping group") {
+		t.Errorf("expected a group-skip warning, got: %s", stderrText)
+	}
+	assertRulesDirUnchanged(t, dir, before)
+}
+
+// Explicitly grouping a rule without directives refuses the group before
+// any mutation, in preview and under --force.
+func TestRulesCompact_GroupRefusesDirectivelessRule(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"preview", []string{"--group", "alpha,prose"}},
+		{"force", []string{"--group", "alpha,prose", "--force"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := tempRulesDir(t)
+			writeRule(t, dir, "alpha", fmt.Sprintf(sharedDiskDirective, "Alpha", "alpha"))
+			writeRule(t, dir, "prose", proseOnlyRuleBody)
+			before := snapshotRulesDir(t, dir)
+
+			stderr, err := refusesCompactResult(t, append([]string{"--path", dir}, tc.args...)...)
+
+			if err == nil {
+				t.Fatal("expected a refusal for the directive-less input")
+			}
+			if !strings.Contains(stderr, "prose.md has no Do/Don't directives") {
+				t.Errorf("expected the refusal to name prose.md, got: %s", stderr)
+			}
+			assertRulesDirUnchanged(t, dir, before)
+		})
+	}
+}
+
+// The parse-failure skip and the count that follows it live in
+// filterContributingRules: a member that cannot be re-read (it vanished or
+// broke between the audit and the apply) is dropped with a warning naming
+// it, and the caller must see the group fall below two contributors.
+func TestRulesCompact_FilterDropsUnreadableMember(t *testing.T) {
+	dir := tempRulesDir(t)
+	writeRule(t, dir, "alpha", fmt.Sprintf(sharedDiskDirective, "Alpha", "alpha"))
+
+	var warnings []string
+	got := filterContributingRules(dir, []string{"alpha.md", "gone.md"}, func(format string, args ...interface{}) {
+		warnings = append(warnings, fmt.Sprintf(format, args...))
+	})
+
+	if len(got) != 1 || got[0].Name != "alpha" {
+		t.Fatalf("expected only alpha to survive, got: %+v", got)
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "gone.md") {
+		t.Errorf("expected one warning naming gone.md, got: %v", warnings)
+	}
+	if remaining := filterContributingRules(dir, []string{"alpha.md", "gone.md"}, func(string, ...interface{}) {}); len(remaining) >= 2 {
+		t.Errorf("a two-member group losing one member must fall below two contributors, got %d", len(remaining))
+	}
+}
+
+// A symlinked source gets its own regular-file backup: recovery never
+// depends on the link's target surviving.
+func TestRulesCompact_SymlinkSourceGetsRegularBackup(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating symlinks on windows needs developer mode")
+	}
+	dir := tempRulesDir(t)
+	const targetBody = "# Alpha\n\n**Do:** validate input before writing to disk\n\n## Rationale\nLinked prose that must survive.\n"
+	target := filepath.Join(t.TempDir(), "target.md")
+	if err := os.WriteFile(target, []byte(targetBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(dir, "alpha.md")); err != nil {
+		t.Fatal(err)
+	}
+	writeRule(t, dir, "beta", "# Beta\n\n**Do:** validate input before writing to disk\n\n## Rationale\nSecond file.\n")
+
+	captureStdout(t, func() error {
+		return runRulesCompact(newRulesCompactTestCmd(t, "--path", dir, "--group", "alpha,beta", "--force"), nil)
+	})
+
+	info, err := os.Lstat(filepath.Join(dir, "alpha.md.backup"))
+	if err != nil {
+		t.Fatalf("expected alpha.md.backup: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		t.Error("alpha.md.backup must be a regular file, not a symlink")
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "alpha.md.backup"))
+	if err != nil || string(got) != targetBody {
+		t.Errorf("alpha.md.backup = %q (%v), want the target's exact bytes", got, err)
+	}
+	if _, err := os.Stat(target); err != nil {
+		t.Errorf("the link's target must survive: %v", err)
+	}
+}

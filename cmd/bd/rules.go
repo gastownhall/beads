@@ -821,16 +821,13 @@ func runRulesCompact(cmd *cobra.Command, args []string) error {
 		reservedOutputs := make(map[string]string, len(result.MergeCandidates))
 
 		for _, mc := range result.MergeCandidates {
-			// Parse the actual rule files for this group
-			var groupRules []RuleFile
-			for _, ruleName := range mc.Rules {
-				path := filepath.Join(rulesPath, ruleName)
-				rf, err := ParseRuleFile(path)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "Warning: skipping %s: %v\n", ruleName, err)
-					continue
-				}
-				groupRules = append(groupRules, rf)
+			// Parse the group's files, keeping only contributors: a
+			// directive-less file's prose would be dropped entirely, and an
+			// unreadable one cannot be backed up.
+			groupRules := filterContributingRules(rulesPath, mc.Rules, WarnError)
+			if len(groupRules) < 2 {
+				WarnError("skipping group %q: fewer than two contributing rules remain after skipping unreadable and directive-less files", mc.GroupLabel)
+				continue
 			}
 
 			merged, err := CompactRules(groupRules, mc.GroupLabel)
@@ -894,6 +891,9 @@ func runRulesCompact(cmd *cobra.Command, args []string) error {
 		rf, err := ParseRuleFile(path)
 		if err != nil {
 			return HandleErrorRespectJSON("cannot read rule %s: %v", name, err)
+		}
+		if len(rf.DoLines) == 0 && len(rf.DontLines) == 0 {
+			return HandleErrorRespectJSON("rule %s has no Do/Don't directives; a composite would drop all of its prose. Add directives to it or leave it out of --group", name)
 		}
 		groupRules = append(groupRules, rf)
 	}
@@ -1017,6 +1017,31 @@ type compactSourceReport struct {
 // before the source is deleted.
 func backupPathFor(sourcePath string) string {
 	return sourcePath + ".backup"
+}
+
+// filterContributingRules parses a candidate group's files, dropping the
+// ones that cannot be read or carry no Do/Don't directives, and warns about
+// each by filename. Whole-body keywords can make a directive-less file a
+// candidate, yet a composite would carry none of its prose; an unreadable
+// file cannot be backed up. Only what survives here may be attributed,
+// backed up or deleted, so the caller skips the group when fewer than two
+// contributors remain.
+func filterContributingRules(rulesPath string, ruleNames []string, warn func(string, ...interface{})) []RuleFile {
+	var rules []RuleFile
+	for _, ruleName := range ruleNames {
+		path := filepath.Join(rulesPath, ruleName)
+		rf, err := ParseRuleFile(path)
+		if err != nil {
+			warn("skipping %s: %v", ruleName, err)
+			continue
+		}
+		if len(rf.DoLines) == 0 && len(rf.DontLines) == 0 {
+			warn("excluding %s: no Do/Don't directives; a composite would carry none of its prose", ruleName)
+			continue
+		}
+		rules = append(rules, rf)
+	}
+	return rules
 }
 
 // checkCompactDestinations refuses a group whose composite or any backup
