@@ -566,6 +566,49 @@ assumes otherwise.
   stays stale until that bead's next journaled mutation delivers a fresh
   snapshot.
 
+## Concurrent writers
+
+Every journaled write draws its `seq` from the one `bd_events_seq` row. On a
+Dolt sql-server (server mode, `bd serve`, and the proxied clients behind it)
+two journaled transactions that overlap both bump that row, so the one that
+commits second fails with a serialization conflict and its whole body is
+replayed. With the journal on, writers on a sql-server therefore queue on one
+named lock per database, `bd_events_seq:<database>`, instead of overlapping.
+
+- **Taken before the transaction begins, released after it ends.** A write
+  takes the lock on the session that runs it before its transaction opens. It
+  releases the lock only once the transaction has committed or rolled back.
+  When bd cannot tell whether the transaction ended (a lost commit, a failed
+  rollback), it drops the session rather than release the lock early, and the
+  server frees the lock with it. A guarded delete (`bd delete` with an expected
+  version) takes its per-bead delete fence first and the journal lock on the
+  same session second.
+- **Busy is a refusal, not a partial write.** A write that is not let in
+  within its wait budget fails with `journal writer lock … not granted after
+  …: journal writer lock busy`. Its body never ran and nothing was written, so
+  it is safe to retry. The budget is 15 seconds for a single write, and a
+  write that already retries conflicts gets its retry budget. Over HTTP the
+  same refusal is a `503` with code `busy` and a `Retry-After`.
+- **Journal-free writes take no lock.** A write declared journal-free, such as
+  the journal prune or a lease refresh, does not queue. A journal record
+  attempted inside one is refused before it allocates a `seq`, and that
+  transaction does not commit.
+- **Advisory defer wakes skip instead of waiting.** `bd ready` and the claim
+  paths wake expired [defers](/cli-reference/defer) before they read. That
+  sweep makes one attempt at the lock: if another writer holds it, the sweep
+  skips without a warning and the read goes ahead. The next sweep that finds the lock free
+  wakes those beads.
+- **Embedded mode and a disabled journal take no lock.** An embedded store
+  has one writer at a time already, and with the journal off nothing draws a
+  `seq`.
+
+<Note>
+Older bd binaries do not take the lock. Their journaled writes still overlap
+the queued ones, lose the `bd_events_seq` conflict, and are replayed as
+before, so a mixed-version fleet keeps working but still sees those
+conflicts. They stop once every writer runs a bd that takes the lock.
+</Note>
+
 ## How it sits in Dolt
 
 The journal lives in two tables, `bd_events_journal` and `bd_events_seq`, both
