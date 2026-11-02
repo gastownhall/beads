@@ -28,6 +28,7 @@ func historicalStamp(n int) time.Time {
 type stampedIssue struct {
 	id, status  string
 	issueType   string
+	ephemeral   bool
 	stamp       time.Time
 	wantBlocked bool
 }
@@ -71,9 +72,9 @@ func insertStampedIssues(t *testing.T, ctx context.Context, conn *sql.Conn, tabl
 		if r.status == "closed" {
 			closedAt = r.stamp
 		}
-		cols := "id, title, description, design, acceptance_criteria, notes, status, issue_type, created_at, updated_at, closed_at"
-		vals := "?, ?, '', '', '', '', ?, ?, ?, ?, ?"
-		args := []any{r.id, "fixture " + r.id, r.status, issueType, r.stamp, r.stamp, closedAt}
+		cols := "id, title, description, design, acceptance_criteria, notes, status, issue_type, ephemeral, created_at, updated_at, closed_at"
+		vals := "?, ?, '', '', '', '', ?, ?, ?, ?, ?, ?"
+		args := []any{r.id, "fixture " + r.id, r.status, issueType, r.ephemeral, r.stamp, r.stamp, closedAt}
 		if withIsBlocked {
 			cols += ", is_blocked"
 			vals += ", ?"
@@ -198,4 +199,70 @@ func TestEmbeddedMigrate0047StepCommitKeepsIssueUpdatedAt(t *testing.T) {
 	if !readIsBlocked(t, ctx, conn, "issues AS OF 'HEAD'", "ua-blocked") {
 		t.Errorf("issues AS OF HEAD ua-blocked: is_blocked = false, want true after 0047's recompute")
 	}
+}
+
+// migrateUpStoppingAfter runs MigrateUp and stops the pass right after main
+// step version commits, so assertions see that step's own result rather than
+// anything a later migration did to the same rows.
+func migrateUpStoppingAfter(t *testing.T, ctx context.Context, conn *sql.Conn, version int) {
+	t.Helper()
+	restore := schema.SetMigrateStepFaultHookForTest(func(_ context.Context, _ schema.DBConn, v int) error {
+		if v == version {
+			return fmt.Errorf("injected fault: stop after migration %d", v)
+		}
+		return nil
+	})
+	defer restore()
+	if _, err := schema.MigrateUp(ctx, conn); err == nil || !strings.Contains(err.Error(), "injected fault") {
+		t.Fatalf("MigrateUp err = %v, want the injected fault after %04d", err, version)
+	}
+	if v := currentMainVersion(t, ctx, conn); v != version {
+		t.Fatalf("main schema version = %d, want %d", v, version)
+	}
+}
+
+// TestEmbeddedMigrateRowMovesKeepUpdatedAt is AC-3: 0035 moves agent-class
+// issues into wisps and 0053 moves rig wisps back into issues, each then
+// flipping the moved rows' ephemeral flag. A moved row keeps its source's
+// timestamp; a destination row that already held the ID (INSERT IGNORE kept
+// it) keeps its own.
+func TestEmbeddedMigrateRowMovesKeepUpdatedAt(t *testing.T) {
+	requireEmbedded(t)
+
+	t.Run("0035 issues to wisps", func(t *testing.T) {
+		ctx := t.Context()
+		dataDir := seedMainSchemaAt(t, ctx, 34)
+		conn, closeConn := openPinnedConn(t, ctx, dataDir)
+		defer closeConn()
+
+		moved := stampedIssue{id: "ua-agent", status: "open", issueType: "agent", stamp: historicalStamp(11)}
+		collidingSource := stampedIssue{id: "ua-agent-dup", status: "open", issueType: "agent", stamp: historicalStamp(12)}
+		collidingDest := stampedIssue{id: "ua-agent-dup", status: "open", issueType: "agent", stamp: historicalStamp(13)}
+		insertStampedIssues(t, ctx, conn, "issues", []stampedIssue{moved, collidingSource}, false)
+		insertStampedIssues(t, ctx, conn, "wisps", []stampedIssue{collidingDest}, false)
+		commitFixture(t, ctx, conn, "test: v34 agent issues with historical updated_at")
+
+		migrateUpStoppingAfter(t, ctx, conn, 35)
+		requireStamp(t, ctx, conn, "wisps", moved.id, moved.stamp)
+		requireStamp(t, ctx, conn, "wisps", collidingDest.id, collidingDest.stamp)
+	})
+
+	t.Run("0053 wisps to issues", func(t *testing.T) {
+		ctx := t.Context()
+		dataDir := seedMainSchemaAt(t, ctx, 52)
+		conn, closeConn := openPinnedConn(t, ctx, dataDir)
+		defer closeConn()
+
+		moved := stampedIssue{id: "ua-rig", status: "open", issueType: "rig", ephemeral: true, stamp: historicalStamp(21)}
+		collidingSource := stampedIssue{id: "ua-rig-dup", status: "open", issueType: "rig", ephemeral: true, stamp: historicalStamp(22)}
+		collidingDest := stampedIssue{id: "ua-rig-dup", status: "open", issueType: "rig", ephemeral: true, stamp: historicalStamp(23)}
+		insertStampedIssues(t, ctx, conn, "wisps", []stampedIssue{moved, collidingSource}, false)
+		insertStampedIssues(t, ctx, conn, "issues", []stampedIssue{collidingDest}, false)
+		commitFixture(t, ctx, conn, "test: v52 rig wisps with historical updated_at")
+
+		migrateUpStoppingAfter(t, ctx, conn, 53)
+		requireStamp(t, ctx, conn, "issues", moved.id, moved.stamp)
+		requireStamp(t, ctx, conn, "issues", collidingDest.id, collidingDest.stamp)
+		requireStamp(t, ctx, conn, "issues AS OF 'HEAD'", moved.id, moved.stamp)
+	})
 }
