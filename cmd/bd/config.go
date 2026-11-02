@@ -63,6 +63,10 @@ Auto-Export (config.yaml):
     export.interval   Minimum time between exports (default: 60s)
     export.git-add    Auto-stage the export file (default: false)
 
+  export.path must stay inside the repository holding .beads (or the parent
+  of a .beads outside any repository), outside .git, and must not be a
+  symlink; otherwise the export is skipped with a warning naming export.path.
+
 Auto-Import (config.yaml):
   Reads .beads/issues.jsonl by default when a JSONL import path is implied.
   Use a relative filename/path so the import stays within the project .beads/

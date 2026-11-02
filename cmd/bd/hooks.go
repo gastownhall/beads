@@ -1888,7 +1888,11 @@ func exportJSONLForCommit() {
 	if exportPath == "" {
 		exportPath = "issues.jsonl"
 	}
-	fullPath := filepath.Join(hookJSONLDir(beadsDir), exportPath)
+	fullPath, err := resolveExportPath(hookJSONLDir(beadsDir), exportPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "beads: pre-commit export warning: skipping export: export.path %s: %v\n", remedy.PrintedValue(exportPath), err)
+		return
+	}
 
 	// If the export file is staged for deletion (user ran `git rm`), do not
 	// re-export or re-stage it. GIT_INDEX_FILE is set during an actual commit,
