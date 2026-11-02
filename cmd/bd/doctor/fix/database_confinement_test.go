@@ -298,15 +298,28 @@ func TestDatabaseIntegrity_RollbackRefusesReplacedDestination(t *testing.T) {
 				return script, nil
 			}
 
-			err = DatabaseIntegrity(dir)
-			if err == nil || !strings.Contains(err.Error(), "refusing") {
+			stdout := captureFixStdout(t, func() { err = DatabaseIntegrity(dir) })
+			if err == nil || !strings.Contains(err.Error(), "not restoring the corrupted Dolt database") ||
+				!strings.Contains(err.Error(), "changed during recovery") {
 				t.Fatalf("expected the rollback to refuse the replaced destination, got %v", err)
 			}
 			if tc.lookupError && !errors.Is(err, lookupErr) {
 				t.Fatalf("expected the original lookup failure to be kept, got %v", err)
 			}
+			// Setting BEADS_DOLT_DATA_DIR, the admission remedy, would exempt
+			// the replaced location.
+			if strings.Contains(err.Error(), "BEADS_DOLT_DATA_DIR") {
+				t.Fatalf("rollback refusal offers the BEADS_DOLT_DATA_DIR remedy: %v", err)
+			}
+			if strings.Contains(stdout, "restoring corrupted Dolt database") {
+				t.Fatalf("recovery announced the restore it refused: %q", stdout)
+			}
 			// The backup sits beside the database, so an ancestor swap carries
-			// it to moved; the error names where recovery left it.
+			// it to moved; the error names where recovery wrote it and says a
+			// replaced directory takes it along.
+			if !strings.Contains(err.Error(), "if a directory above the database was replaced, the backup moved with that directory") {
+				t.Fatalf("error %q does not warn that a replaced directory moves the backup", err)
+			}
 			backupDir := filepath.Dir(doltPath)
 			if replaced != doltPath {
 				rel, relErr := filepath.Rel(replaced, backupDir)
@@ -356,9 +369,13 @@ func TestDatabaseIntegrity_RollbackRestoresUnchangedDestination(t *testing.T) {
 		return script, nil
 	}
 
-	err := DatabaseIntegrity(dir)
-	if err == nil || !strings.Contains(err.Error(), "failed to reinitialize") || strings.Contains(err.Error(), "refusing") {
+	var err error
+	stdout := captureFixStdout(t, func() { err = DatabaseIntegrity(dir) })
+	if err == nil || !strings.Contains(err.Error(), "failed to reinitialize") || strings.Contains(err.Error(), "not restoring") {
 		t.Fatalf("expected the reinitialize failure without a refusal, got %v", err)
+	}
+	if !strings.Contains(stdout, "restoring corrupted Dolt database") {
+		t.Fatalf("expected recovery to announce the restore, got %q", stdout)
 	}
 	if data, rerr := os.ReadFile(filepath.Join(doltPath, "state")); rerr != nil || string(data) != "corrupt" {
 		t.Fatalf("original database not restored: %q, %v", data, rerr)

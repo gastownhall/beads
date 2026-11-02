@@ -144,6 +144,10 @@ func TestDatabaseIntegrity_SharedWorktreeRestoresSharedRootOnTestBinaryError(t *
 }
 
 func TestDatabaseIntegrity_RefusesEscapingAndSymlinkedDoltDataDir(t *testing.T) {
+	// An inherited BEADS_DOLT_DATA_DIR would select, and exempt, a real store.
+	t.Setenv("BEADS_DOLT_DATA_DIR", "")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
 	t.Run("escaping dolt_data_dir", func(t *testing.T) {
 		dir := setupTestWorkspace(t)
 		beadsDir := filepath.Join(dir, ".beads")

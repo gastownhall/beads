@@ -222,9 +222,7 @@ func confinedDatabasePath(beadsDir, dbPath string) (string, error) {
 	}
 
 	refuse := func(why string) error {
-		return fmt.Errorf("refusing to back up or delete the database at %s: %s\n"+
-			"Recover it by hand, or set BEADS_DOLT_DATA_DIR to that location to select it explicitly",
-			remedy.PrintedValue(absDB), why)
+		return &databaseRefusal{path: absDB, why: why}
 	}
 	resolvedBeads, err := resolveExistingParent(absBeads)
 	if err != nil {
@@ -259,6 +257,18 @@ func confinedDatabasePath(beadsDir, dbPath string) (string, error) {
 		}
 	}
 	return absDB, nil
+}
+
+// databaseRefusal is confinedDatabasePath's refusal of a database location;
+// why says what makes the location unsafe.
+type databaseRefusal struct {
+	path, why string
+}
+
+func (e *databaseRefusal) Error() string {
+	return fmt.Sprintf("refusing to back up or delete the database at %s: %s\n"+
+		"Recover it by hand, or set BEADS_DOLT_DATA_DIR to that location to select it explicitly",
+		remedy.PrintedValue(e.path), e.why)
 }
 
 // resolveBeadsDir follows .beads/redirect files to find the actual beads directory.

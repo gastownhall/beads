@@ -72,7 +72,8 @@ and the repo fingerprint fix's "Reinitialize database" choice refuse a
 itself, or through a symlink, and leave it untouched; recover such a store by
 hand with the steps below. If `bd init` fails during automatic recovery and
 the database location changed meanwhile, bd leaves the backup where it is and
-prints its path.
+prints the path it wrote the backup to; if a directory above the database was
+replaced, the backup moved with that directory.
 
 ### 1. Stop everything that uses the store
 

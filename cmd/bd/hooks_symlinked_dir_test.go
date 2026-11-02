@@ -113,6 +113,7 @@ func TestInstallHooksRefusesSymlinkedHooksDirInEveryMode(t *testing.T) {
 	}{
 		{name: "default git hooks", link: filepath.Join(".git", "hooks")},
 		{name: "absolute core.hooksPath", link: "team-hooks", hooksPath: "<abs>"},
+		{name: "absolute core.hooksPath with trailing separator", link: "team-hooks", hooksPath: "<abs>/"},
 		{name: "relative core.hooksPath", link: "team-hooks", hooksPath: "team-hooks"},
 		{name: "shared", link: ".beads-hooks", shared: true, preserveSource: true},
 		{name: "beads", link: filepath.Join(".beads", "hooks"), beads: true, preserveSource: true},
@@ -130,8 +131,11 @@ func TestInstallHooksRefusesSymlinkedHooksDirInEveryMode(t *testing.T) {
 			}
 			if tt.hooksPath != "" {
 				value := tt.hooksPath
-				if value == "<abs>" {
+				switch value {
+				case "<abs>":
 					value = link
+				case "<abs>/":
+					value = link + string(os.PathSeparator)
 				}
 				runGitForWorktreeTest(t, repo, "config", "--local", "core.hooksPath", value)
 				git.ResetCaches()
@@ -147,6 +151,9 @@ func TestInstallHooksRefusesSymlinkedHooksDirInEveryMode(t *testing.T) {
 			err := installHooksWithOptions(managedHookNames, false, tt.shared, false, tt.beads)
 			require.Error(t, err)
 			require.Contains(t, err.Error(), "symlink")
+			// The directory check refuses, not the per-hook guard that runs
+			// after the directory is created.
+			require.Contains(t, err.Error(), "refusing to install hooks: hooks directory")
 			require.Equal(t, before, dirSnapshot(t, outside), "link target contents changed")
 			require.Equal(t, configBefore, localHooksPath(t, repo), "core.hooksPath changed")
 			info, lerr := os.Lstat(link)
@@ -241,22 +248,30 @@ func TestHookWriteGuardRefusesSymlinkedParentDir(t *testing.T) {
 
 // TestUninstallHooksRefusesSymlinkedHooksDir: uninstall refuses a hooks
 // directory that is a symlink before editing any hook in its target or
-// resetting Git configuration.
+// resetting Git configuration, also when the directory is spelled with a
+// trailing separator, as an absolute core.hooksPath can be.
 func TestUninstallHooksRefusesSymlinkedHooksDir(t *testing.T) {
-	root, repo := setupSymlinkedHooksDirRepo(t)
-	outside := filepath.Join(root, "outside-hooks")
-	marked := "#!/usr/bin/env sh\necho keep\n" + generateHookSection("pre-commit")
-	writeFileForWorktreeTest(t, filepath.Join(outside, "pre-commit"), []byte(marked))
-	writeFileForWorktreeTest(t, filepath.Join(outside, "post-merge"), []byte("#!/usr/bin/env sh\n"+generateHookSection("post-merge")))
-	link := filepath.Join(repo, "linked-hooks")
-	symlinkOrSkip(t, outside, link)
-	before := dirSnapshot(t, outside)
+	for _, tt := range []struct{ name, suffix string }{
+		{name: "plain"},
+		{name: "trailing separator", suffix: string(os.PathSeparator)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			root, repo := setupSymlinkedHooksDirRepo(t)
+			outside := filepath.Join(root, "outside-hooks")
+			marked := "#!/usr/bin/env sh\necho keep\n" + generateHookSection("pre-commit")
+			writeFileForWorktreeTest(t, filepath.Join(outside, "pre-commit"), []byte(marked))
+			writeFileForWorktreeTest(t, filepath.Join(outside, "post-merge"), []byte("#!/usr/bin/env sh\n"+generateHookSection("post-merge")))
+			link := filepath.Join(repo, "linked-hooks")
+			symlinkOrSkip(t, outside, link)
+			before := dirSnapshot(t, outside)
 
-	resetCalled := false
-	err := uninstallHooksAt(link, func() error { resetCalled = true; return nil })
-	require.ErrorContains(t, err, "symlink")
-	require.False(t, resetCalled, "reset ran despite the refusal")
-	require.Equal(t, before, dirSnapshot(t, outside), "link target contents changed")
+			resetCalled := false
+			err := uninstallHooksAt(link+tt.suffix, func() error { resetCalled = true; return nil })
+			require.ErrorContains(t, err, "symlink")
+			require.False(t, resetCalled, "reset ran despite the refusal")
+			require.Equal(t, before, dirSnapshot(t, outside), "link target contents changed")
+		})
+	}
 }
 
 // TestUninstallHooksLeavesUnsafeEntries: in a real hooks directory, uninstall
