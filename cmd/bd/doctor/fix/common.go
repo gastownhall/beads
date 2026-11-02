@@ -198,10 +198,10 @@ func envSelectedDatabasePath(beadsDir string) (string, error) {
 }
 
 // confinedDatabasePath admits dbPath for a doctor fix that backs up or
-// deletes it, returning it as an absolute path. The path must lie strictly
-// inside the workspace .beads directory (which may itself be a symlink) and
-// may not be a symlink, and its existing ancestors must not resolve outside
-// .beads. The one exception is the location BEADS_DOLT_DATA_DIR selects,
+// deletes it, returning it as an absolute path. The path must lie lexically
+// strictly inside the workspace .beads directory (which may itself be a
+// symlink) and may not be a symlink, and its existing ancestors must not
+// resolve outside .beads. The one exception is the location BEADS_DOLT_DATA_DIR selects,
 // which the user named explicitly.
 // Adapted from #7889 by @Wenjix.
 func confinedDatabasePath(beadsDir, dbPath string) (string, error) {
@@ -230,7 +230,9 @@ func confinedDatabasePath(beadsDir, dbPath string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to resolve beads directory %s: %w", remedy.PrintedValue(absBeads), err)
 	}
-	if !isStrictDescendant(absBeads, absDB) && !isStrictDescendant(resolvedBeads, absDB) {
+	// Metadata must name the database below .beads as spelled: a path that
+	// reaches the store only through .beads' resolved target is refused.
+	if !isStrictDescendant(absBeads, absDB) {
 		return "", refuse("it is outside the workspace .beads directory " + remedy.PrintedValue(absBeads))
 	}
 	info, err := os.Lstat(absDB)
