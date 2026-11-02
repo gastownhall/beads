@@ -25,11 +25,26 @@ import (
 // schema work, the session-database assertion) runs on the endpoint the
 // constructor resolved, which fresh-bootstrap heal authority is bound to.
 // openAndInitSchema arms it only once the provider it hands out is proven.
+//
+// Hooks that overlap share one discovery, run by a worker of its own; nothing
+// is cached for later connections, because a stale port can be recycled by an
+// unrelated listener that still accepts TCP. Each new connection
+// authenticates the proxy afresh, and a pooled connection is reused without
+// discovery.
 type proxyEndpointResolver struct {
 	discover func() (proxy.Endpoint, error)
 
-	mu    sync.Mutex
-	armed bool
+	mu       sync.Mutex
+	armed    bool
+	inflight *endpointDiscovery
+}
+
+// endpointDiscovery is one discovery run, shared by the hooks that overlap it.
+// ep and err are set before done is closed.
+type endpointDiscovery struct {
+	done chan struct{}
+	ep   proxy.Endpoint
+	err  error
 }
 
 func newProxyEndpointResolver(discover func() (proxy.Endpoint, error)) *proxyEndpointResolver {
@@ -60,15 +75,37 @@ func (r *proxyEndpointResolver) beforeConnect(ctx context.Context, cfg *mysql.Co
 		return err
 	}
 	r.mu.Lock()
-	armed := r.armed
-	r.mu.Unlock()
-	if !armed {
+	if !r.armed {
+		r.mu.Unlock()
 		return nil
 	}
-	ep, err := r.discover()
-	if err != nil {
-		return err
+	d := r.inflight
+	if d == nil {
+		d = &endpointDiscovery{done: make(chan struct{})}
+		r.inflight = d
+		go r.run(d)
 	}
-	cfg.Addr = ep.Address()
+	r.mu.Unlock()
+
+	select {
+	case <-d.done:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	if d.err != nil {
+		return d.err
+	}
+	cfg.Addr = d.ep.Address()
 	return nil
+}
+
+// run performs discovery d and publishes its result, clearing the in-flight
+// slot so the next connection starts a discovery of its own.
+func (r *proxyEndpointResolver) run(d *endpointDiscovery) {
+	ep, err := r.discover()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	d.ep, d.err = ep, err
+	r.inflight = nil
+	close(d.done)
 }
