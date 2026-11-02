@@ -90,6 +90,27 @@ func TestDatabaseCorruptionRecoveryGuidance(t *testing.T) {
 			"(#lock-errors-after-an-interrupted-command)")
 	})
 
+	t.Run("AC-3 batch and concurrent workloads", func(t *testing.T) {
+		steering := []string{
+			"bd batch runs a limited set of write commands",
+			"in one transaction",
+			"server or proxied-server mode",
+			"neither repairs a damaged journal",
+		}
+		prevention, ok := docSection(runbook, "## Prevention")
+		if !ok {
+			t.Fatalf("docs/recovery/database-corruption.md missing the %q section", "## Prevention")
+		}
+		requirePhrases(t, "database-corruption.md ## Prevention", prevention, steering...)
+
+		const embedded = "### Embedded Mode"
+		arch, ok := docSection(readRepoDoc(t, "docs", "architecture", "dolt.md"), embedded)
+		if !ok {
+			t.Fatalf("docs/architecture/dolt.md missing the %q section", embedded)
+		}
+		requirePhrases(t, "architecture/dolt.md "+embedded, arch, steering...)
+	})
+
 	t.Run("AC-1 troubleshooting journal-corruption entry", func(t *testing.T) {
 		doc := readRepoDoc(t, "docs", "reference", "troubleshooting.md")
 		const heading = "### Dolt journal corruption"

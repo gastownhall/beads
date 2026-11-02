@@ -183,6 +183,17 @@ run only the supported `bd doctor --check=...` variants.
 
 ## Prevention
 
-- Let the Dolt server handle synchronization
-- Use `bd dolt stop` before system shutdown
-- Run `bd doctor` periodically to catch issues early
+- **Batch repeated writes.** bd batch runs a limited set of write commands
+  (`close`, `update`, `create`, `dep add`, `dep remove`; see `bd batch --help`)
+  in one transaction and one `bd` process, instead of starting the embedded
+  engine once per call. Anything outside that grammar still needs its own `bd`
+  call.
+- **Use a server for sustained concurrent agents.** In server or proxied-server
+  mode (`bd init --server`, `bd init --proxied-server`) one Dolt server keeps
+  the engine running for every client. Switching an existing workspace is a
+  [migration](/architecture/dolt#migrating-between-backends), not a repair.
+- Neither repairs a damaged journal: recover first with
+  [Engine won't open](#engine-wont-open).
+- Keep a current recovery source: push to a Dolt remote (`bd dolt push`) or
+  take Dolt-native backups (`bd backup sync`).
+- In server mode, use `bd dolt stop` before system shutdown.
