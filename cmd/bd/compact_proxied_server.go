@@ -102,6 +102,13 @@ func runCompactProxiedServer(ctx context.Context) error {
 		return HandleError("could not find boundary commit for compaction")
 	}
 
+	// An unsafe partition is refused before anything runs: --force confirms a
+	// compaction, it must not override a data-safety refusal (#6645).
+	if plan.refusal != nil {
+		message, hint := compactRefusalDiagnostic(cutoff, plan.refusal)
+		return HandleErrorWithHint(message, hint)
+	}
+
 	if !compactDoltForce {
 		return HandleErrorWithHint(
 			fmt.Sprintf("would squash %d old commits into 1, preserving %d recent commits",

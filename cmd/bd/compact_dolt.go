@@ -37,6 +37,13 @@ How it works:
      the next push or fetch re-creates them at the new tip)
   6. Runs a full Dolt GC (all storage generations) to reclaim the old history
 
+Safety: compaction is refused — before anything changes, and regardless of
+--force — when commit dates do not follow history order across the cutoff: a
+preserved commit that comes before a squashed commit in commit order would be
+replayed onto history that already contains it, and that replay can silently
+change row data instead of conflicting (#6645). The refusal names the two
+commits; use --dry-run to recheck after adjusting --days.
+
 The GC pass is a full collection: Dolt storage is generational, and a default
 GC never revisits data an earlier GC moved to the old generation. On any store
 that has been GC'd before (bd gc, or a previous flatten or compact), only a
@@ -139,6 +146,14 @@ Examples:
 
 		if boundaryHash == "" {
 			return HandleError("could not find boundary commit for compaction")
+		}
+
+		// An unsafe partition is refused before anything runs: --force
+		// confirms a compaction, it must not override a data-safety refusal
+		// (#6645).
+		if plan.refusal != nil {
+			message, hint := compactRefusalDiagnostic(cutoff, plan.refusal)
+			return HandleErrorWithHint(message, hint)
 		}
 
 		if !compactDoltForce {

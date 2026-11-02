@@ -3,6 +3,9 @@
 package main
 
 import (
+	"bytes"
+	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -13,6 +16,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 )
 
@@ -253,4 +257,240 @@ func TestEmbeddedCompactMisdatedChild(t *testing.T) {
 	if got := bdShow(t, bd, dir, issue.ID).Title; got != "edit B" {
 		t.Errorf("title after compact = %q, want %q", got, "edit B")
 	}
+}
+
+// compactStraddleFixture is the #6645 shape on an embedded workspace: a
+// preserved (recent-dated) commit "edit A" whose old-dated child undoes the
+// edit, on top of enough ordinary history that compaction is actionable. The
+// embedded handle is released before the fixture returns so bd subprocesses
+// can open the database.
+type compactStraddleFixture struct {
+	bd, dir, beadsDir string
+	issueID           string
+	// rootHash is the lowest-commit_order commit; headBefore and
+	// logCountBefore are main's tip and log size after the undo commit.
+	rootHash, headBefore string
+	logCountBefore       int
+	// recent is the future-dated edit commit, old its undoing child, with
+	// the dates dolt stored for them.
+	recent, old storage.CommitInfo
+}
+
+func buildCompactStraddle(t *testing.T, prefix string) compactStraddleFixture {
+	t.Helper()
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", prefix)
+	issue := bdCreate(t, bd, dir, "ORIGINAL", "--type", "task")
+	bdCreate(t, bd, dir, "Filler bead", "--type", "task")
+
+	cfg, _ := configfile.Load(beadsDir)
+	database := ""
+	if cfg != nil {
+		database = cfg.GetDoltDatabase()
+	}
+	db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), filepath.Join(beadsDir, "embeddeddolt"), database, "main")
+	if err != nil {
+		t.Fatalf("OpenSQL: %v", err)
+	}
+	conn, err := db.Conn(t.Context())
+	if err != nil {
+		t.Fatalf("db.Conn: %v", err)
+	}
+	// "edit A" is dated in the future (preserved by --days 0); its child
+	// undoes the title and is dated now, so it becomes the old boundary.
+	edits := []struct {
+		title string
+		date  string // "--date" argument; "" commits undated
+	}{
+		{"edit A", time.Now().Add(40 * time.Minute).Format(time.RFC3339)},
+		{"ORIGINAL", ""},
+	}
+	messages := []string{"straddle: edit A", "straddle: revert to ORIGINAL"}
+	for i, e := range edits {
+		if _, err := conn.ExecContext(t.Context(), "UPDATE issues SET title = ? WHERE id = ?", e.title, issue.ID); err != nil {
+			t.Fatalf("update title %q: %v", e.title, err)
+		}
+		if e.date != "" {
+			if _, err := conn.ExecContext(t.Context(), "CALL DOLT_COMMIT('-Am', ?, '--date', ?)", messages[i], e.date); err != nil {
+				t.Fatalf("dolt commit %q: %v", messages[i], err)
+			}
+		} else if _, err := conn.ExecContext(t.Context(), "CALL DOLT_COMMIT('-Am', ?)", messages[i]); err != nil {
+			t.Fatalf("dolt commit %q: %v", messages[i], err)
+		}
+	}
+
+	f := compactStraddleFixture{bd: bd, dir: dir, beadsDir: beadsDir, issueID: issue.ID}
+	if err := conn.QueryRowContext(t.Context(),
+		"SELECT commit_hash, date FROM dolt_log WHERE message = ? LIMIT 1", messages[0]).Scan(&f.recent.Hash, &f.recent.Date); err != nil {
+		t.Fatalf("read edit A commit: %v", err)
+	}
+	if err := conn.QueryRowContext(t.Context(),
+		"SELECT commit_hash, date FROM dolt_log WHERE message = ? LIMIT 1", messages[1]).Scan(&f.old.Hash, &f.old.Date); err != nil {
+		t.Fatalf("read revert commit: %v", err)
+	}
+	if err := conn.QueryRowContext(t.Context(),
+		"SELECT commit_hash FROM dolt_log ORDER BY commit_order ASC LIMIT 1").Scan(&f.rootHash); err != nil {
+		t.Fatalf("read root commit: %v", err)
+	}
+	if err := conn.QueryRowContext(t.Context(),
+		"SELECT commit_hash FROM dolt_log ORDER BY commit_order DESC LIMIT 1").Scan(&f.headBefore); err != nil {
+		t.Fatalf("read head commit: %v", err)
+	}
+	if err := conn.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM dolt_log").Scan(&f.logCountBefore); err != nil {
+		t.Fatalf("count log: %v", err)
+	}
+	conn.Close()
+	if err := cleanup(); err != nil {
+		t.Fatalf("cleanup: %v", err)
+	}
+	return f
+}
+
+// withReopened runs fn on a fresh SQL connection to the fixture's embedded
+// database — any bd subprocess has exited by then, so the store lock is free.
+func (f compactStraddleFixture) withReopened(t *testing.T, fn func(conn *sql.Conn)) {
+	t.Helper()
+	cfg, _ := configfile.Load(f.beadsDir)
+	database := ""
+	if cfg != nil {
+		database = cfg.GetDoltDatabase()
+	}
+	db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), filepath.Join(f.beadsDir, "embeddeddolt"), database, "main")
+	if err != nil {
+		t.Fatalf("OpenSQL: %v", err)
+	}
+	conn, err := db.Conn(t.Context())
+	if err != nil {
+		cleanup()
+		t.Fatalf("db.Conn: %v", err)
+	}
+	defer func() {
+		conn.Close()
+		cleanup()
+	}()
+	fn(conn)
+}
+
+// assertMainUntouched fails when main moved at all since the fixture was
+// built: hash, log size, the issue's title, and the branch list (no leftover
+// compact-tmp).
+func (f compactStraddleFixture) assertMainUntouched(t *testing.T, conn *sql.Conn) {
+	t.Helper()
+	var head string
+	if err := conn.QueryRowContext(t.Context(),
+		"SELECT commit_hash FROM dolt_log ORDER BY commit_order DESC LIMIT 1").Scan(&head); err != nil {
+		t.Fatalf("read head after: %v", err)
+	}
+	if head != f.headBefore {
+		t.Errorf("main head = %s, want unchanged %s", head, f.headBefore)
+	}
+	var logCount int
+	if err := conn.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM dolt_log").Scan(&logCount); err != nil {
+		t.Fatalf("count log after: %v", err)
+	}
+	if logCount != f.logCountBefore {
+		t.Errorf("log count = %d, want unchanged %d", logCount, f.logCountBefore)
+	}
+	var title string
+	if err := conn.QueryRowContext(t.Context(),
+		"SELECT title FROM issues WHERE id = ?", f.issueID).Scan(&title); err != nil {
+		t.Fatalf("read title after: %v", err)
+	}
+	if title != "ORIGINAL" {
+		t.Errorf("title = %q, want %q", title, "ORIGINAL")
+	}
+	var tmpBranches int
+	if err := conn.QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM dolt_branches WHERE name = 'compact-tmp'").Scan(&tmpBranches); err != nil {
+		t.Fatalf("count compact-tmp branches: %v", err)
+	}
+	if tmpBranches != 0 {
+		t.Errorf("compact-tmp branch left behind (%d)", tmpBranches)
+	}
+}
+
+// TestEmbeddedCompactRefusesStraddledCutoff covers #6645 (AC-1): a preserved
+// (recent-dated) commit that is an ANCESTOR of the date-picked boundary, whose
+// edit the boundary undid. Compaction must refuse — naming both commits and
+// the remediation — and leave main byte-identical, not silently resurrect the
+// edit. Today compact --force succeeds and rewrites the title to "edit A".
+func TestEmbeddedCompactRefusesStraddledCutoff(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	f := buildCompactStraddle(t, "sr")
+
+	short := func(hash string) string {
+		if len(hash) > 8 {
+			return hash[:8]
+		}
+		return hash
+	}
+
+	t.Run("force_refuses", func(t *testing.T) {
+		cmd := exec.Command(f.bd, "compact", "--force", "--days", "0")
+		cmd.Dir = f.dir
+		cmd.Env = bdEnv(f.dir)
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("expected compact --force to refuse, got success:\n%s", out)
+		}
+		for _, want := range []string{
+			"cannot compact",
+			short(f.recent.Hash),
+			f.recent.Date.UTC().Format(time.RFC3339),
+			short(f.old.Hash),
+			f.old.Date.UTC().Format(time.RFC3339),
+			"No compaction changes were made",
+		} {
+			if !strings.Contains(string(out), want) {
+				t.Errorf("refusal output missing %q:\n%s", want, out)
+			}
+		}
+	})
+
+	t.Run("without_force_refuses_too", func(t *testing.T) {
+		cmd := exec.Command(f.bd, "compact", "--days", "0")
+		cmd.Dir = f.dir
+		cmd.Env = bdEnv(f.dir)
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("expected compact without --force to refuse, got success:\n%s", out)
+		}
+		if !strings.Contains(string(out), "cannot compact") {
+			t.Errorf("expected refusal message, got:\n%s", out)
+		}
+	})
+
+	t.Run("json_error", func(t *testing.T) {
+		cmd := exec.Command(f.bd, "--json", "compact", "--force", "--days", "0")
+		cmd.Dir = f.dir
+		cmd.Env = bdEnv(f.dir)
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err == nil {
+			t.Fatalf("expected json compact to refuse, got success:\nstdout:\n%s", stdout.String())
+		}
+		start := strings.Index(stderr.String(), "{")
+		if start < 0 {
+			t.Fatalf("no JSON error object on stderr:\n%s", stderr.String())
+		}
+		var payload map[string]interface{}
+		if err := json.Unmarshal([]byte(stderr.String()[start:]), &payload); err != nil {
+			t.Fatalf("parse JSON error: %v\nraw: %s", err, stderr.String())
+		}
+		if msg, _ := payload["error"].(string); !strings.Contains(msg, "cannot compact") {
+			t.Errorf("JSON error = %q, want the refusal message", msg)
+		}
+		if hint, _ := payload["hint"].(string); !strings.Contains(hint, "No compaction changes were made") {
+			t.Errorf("JSON hint = %q, want the remediation hint", hint)
+		}
+	})
+
+	f.withReopened(t, func(conn *sql.Conn) {
+		f.assertMainUntouched(t, conn)
+	})
 }
