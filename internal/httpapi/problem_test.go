@@ -18,6 +18,7 @@ import (
 	"github.com/go-sql-driver/mysql"
 
 	"github.com/steveyegge/beads/internal/storage"
+	storageissueops "github.com/steveyegge/beads/internal/storage/issueops"
 )
 
 // dsn is the shape a driver or dial error takes in the wild: it names the
@@ -92,6 +93,17 @@ func TestProblemMapping(t *testing.T) {
 		{
 			name:       "serialization retry budget exhausted (lock wait timeout)",
 			err:        &mysql.MySQLError{Number: 1205, Message: "Lock wait timeout exceeded"},
+			wantStatus: http.StatusServiceUnavailable,
+			wantCode:   CodeBusy,
+			retryAfter: retryAfterContention,
+		},
+		{
+			// A journaled write not admitted within its budget never ran its
+			// body: retryable contention, like an exhausted retry budget.
+			name: "journal writer lock busy",
+			err: fmt.Errorf("uow: %w", &storageissueops.JournalWriterBusyError{
+				Lock: storageissueops.JournalWriterLockName("beads"), Database: "beads", Waited: 15e9,
+			}),
 			wantStatus: http.StatusServiceUnavailable,
 			wantCode:   CodeBusy,
 			retryAfter: retryAfterContention,
