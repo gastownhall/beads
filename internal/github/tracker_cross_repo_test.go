@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
@@ -914,6 +916,11 @@ func TestInit_ResolvesRenamedRepositoryName(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			// The store-config github.url is shared configuration: the
+			// endpoint trust gate needs a workspace to key its pin on and a
+			// private confirmation of the endpoint before the token goes out.
+			setupEndpointTrustWorkspace(t)
+			t.Setenv("GITHUB_API_URL", srv.URL+"/api/v3")
 			mu.Lock()
 			calls = nil
 			mu.Unlock()
@@ -945,4 +952,21 @@ func TestInit_ResolvesRenamedRepositoryName(t *testing.T) {
 			}
 		})
 	}
+}
+
+// setupEndpointTrustWorkspace gives the endpoint trust gate a workspace to
+// key its pin on and an isolated HOME/XDG config directory to write it into.
+func setupEndpointTrustWorkspace(t *testing.T) {
+	t.Helper()
+	root := t.TempDir()
+	beadsDir := filepath.Join(root, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", root)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, ".config"))
+	t.Setenv("BEADS_DIR", beadsDir)
 }
