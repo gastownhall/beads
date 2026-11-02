@@ -13,12 +13,16 @@ import (
 // panic loudly rather than return a silent zero value.
 type cascadeAgeReader struct {
 	molReader
-	issues   []*types.Issue
-	children map[string]bool
-	config   map[string]string
+	issues    []*types.Issue
+	children  map[string]bool
+	config    map[string]string
+	searchErr error
 }
 
 func (r *cascadeAgeReader) SearchIssues(context.Context, string, types.IssueFilter) ([]*types.Issue, error) {
+	if r.searchErr != nil {
+		return nil, r.searchErr
+	}
 	return r.issues, nil
 }
 

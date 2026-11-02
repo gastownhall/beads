@@ -1217,6 +1217,28 @@ func GetCustomStatusesFromYAML() []string {
 	return getConfigList("status.custom")
 }
 
+// GetProtectedLabelsFromYAML reports a wisp.protected_labels key in
+// config.yaml (or BD_WISP_PROTECTED_LABELS). The setting is read from the
+// workspace database ONLY — the rule must be the same for every client of a
+// shared workspace — so the one use of this value is to warn that it is
+// ignored. Returns nil if the key is absent.
+func GetProtectedLabelsFromYAML() []string {
+	return getConfigList("wisp.protected_labels")
+}
+
+// ProtectedLabelsYAMLWarning is the warning for a wisp.protected_labels key
+// in config.yaml (or BD_WISP_PROTECTED_LABELS), or "" when there is none.
+// The wisp GC prints it before it selects: the key here would otherwise look
+// like protection while protecting nothing.
+func ProtectedLabelsYAMLWarning() string {
+	names := GetProtectedLabelsFromYAML()
+	if len(names) == 0 {
+		return ""
+	}
+	list := strings.Join(names, ",")
+	return fmt.Sprintf("wisp.protected_labels in config.yaml (%s) is ignored: it is read from the workspace database only; set it with `bd config set wisp.protected_labels %s`", list, list)
+}
+
 // MetadataValidationMode returns the metadata schema validation mode.
 // Returns "none" if config is not initialized or mode is empty/unknown.
 func MetadataValidationMode() string {

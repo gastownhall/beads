@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/beads/internal/workapi"
 )
 
 // The proxied-server leg of the wisp GC protected-label guard (bd-961adp).
@@ -141,6 +143,50 @@ func TestProxiedServerWispGCProtectedLabels(t *testing.T) {
 		}
 		if count != 1 {
 			t.Errorf("labeled dependent %s row count = %d, want 1 (survives, orphaned)", keptChild.ID, count)
+		}
+	})
+
+	// invalid_setting_aborts_both_modes: a wisp.protected_labels value that
+	// cannot be read is not "no labels configured" — an unreadable setting
+	// must not read as protection OFF in exactly the mode the operator tried
+	// to fence. The value here is planted as direct database drift (the
+	// validated write path refuses it), so the abort is the read's own
+	// fail-closed contract, not a write gate.
+	t.Run("invalid_setting_aborts_both_modes", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "wgi")
+		open := bdProxiedCreate(t, bd, p.dir, "open wisp", "--ephemeral")
+		closed := bdProxiedCreate(t, bd, p.dir, "closed wisp", "--ephemeral")
+		if out, err := bdProxiedRun(t, bd, p.dir, "close", closed.ID); err != nil {
+			t.Fatalf("bd close %s: %v\n%s", closed.ID, err, out)
+		}
+
+		db := openProxiedDB(t, p)
+		if _, err := db.Exec("INSERT INTO config (`key`, value) VALUES (?, ?)",
+			workapi.SettingKeyWispProtectedLabels, `["keep:mail"`); err != nil {
+			t.Fatalf("plant malformed setting: %v", err)
+		}
+
+		for _, mode := range []struct {
+			name string
+			args []string
+		}{
+			{name: "age", args: []string{"mol", "wisp", "gc", "--age", "0s"}},
+			{name: "closed", args: []string{"mol", "wisp", "gc", "--closed", "--force"}},
+		} {
+			out, err := bdProxiedRun(t, bd, p.dir, mode.args...)
+			if err == nil {
+				t.Errorf("%s-mode gc over a malformed setting succeeded; want an abort:\n%s", mode.name, out)
+			}
+			for _, id := range []string{open.ID, closed.ID} {
+				var count int
+				if err := db.QueryRow("SELECT COUNT(*) FROM wisps WHERE id = ?", id).Scan(&count); err != nil {
+					t.Fatalf("query %s: %v", id, err)
+				}
+				if count != 1 {
+					t.Errorf("%s-mode gc over a malformed setting deleted wisp %s; want no deletions", mode.name, id)
+				}
+			}
 		}
 	})
 

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/formula"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
@@ -838,6 +839,14 @@ func runWispGC(cmd *cobra.Command, args []string) error {
 		excludeTypes = append(excludeTypes, types.IssueType(t))
 	}
 
+	// The label setting is database-only: a wisp.protected_labels key in
+	// config.yaml (or BD_WISP_PROTECTED_LABELS) protects nothing, so say so
+	// before the sweep runs — the key would otherwise read as a fence while
+	// the sweep runs unfenced.
+	if msg := config.ProtectedLabelsYAMLWarning(); msg != "" {
+		WarnError("%s", msg)
+	}
+
 	if usesProxiedServer() {
 		return runWispGCProxiedServer(rootCtx, dryRun, ageThreshold, cleanAll, closedMode, force, excludeTypes, excludeLabels...)
 	}
@@ -1106,11 +1115,15 @@ func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, excludeTyp
 	}
 
 	// The closed purge honors the workspace's protected labels like the age
-	// sweep. This read is lenient until the setting's error-path hardening:
-	// the age mode already aborts on a value it cannot read, and the closed
-	// purge is aligned with it in bd-961adp AC-6 — the same fail-closed
-	// contract protectedWispStatuses holds.
-	labels, _ := protectedLabelSet(ctx, store, extraLabels)
+	// sweep, through the same shared filter the direct route applies, and
+	// the read is fail-closed like protectedWispStatuses: a setting that
+	// cannot be read or parsed aborts the purge rather than reading as "no
+	// labels configured" — the record the operator marked irreplaceable is
+	// exactly the one at risk.
+	labels, err := protectedLabelSet(ctx, store, extraLabels)
+	if err != nil {
+		return HandleError("%v", err)
+	}
 	closedIssues, pinnedCount, infraCount := filterClosedPurgeCandidates(ctx, store, closedIssues, labels)
 
 	if pinnedCount > 0 && !jsonOutput {

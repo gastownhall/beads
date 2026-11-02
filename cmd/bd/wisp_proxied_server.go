@@ -250,10 +250,14 @@ func runWispPurgeClosedProxiedServer(ctx context.Context, dryRun, force bool, ex
 	}
 
 	// The closed purge honors the workspace's protected labels like the age
-	// sweep, through the same shared filter the direct route applies;
-	// leniency on an unreadable setting matches the direct route until the
-	// setting's error-path hardening (bd-961adp AC-6).
-	labels, _ := protectedLabelSet(ctx, r, extraLabels)
+	// sweep, through the same shared filter the direct route applies, and
+	// the read is fail-closed the same way: a setting that cannot be read or
+	// parsed aborts the purge rather than reading as "no labels configured".
+	labels, err := protectedLabelSet(ctx, r, extraLabels)
+	if err != nil {
+		uw.Close(ctx)
+		return HandleError("%v", err)
+	}
 	closedIssues, pinnedCount, infraCount := filterClosedPurgeCandidates(ctx, r, closedIssues, labels)
 	uw.Close(ctx)
 

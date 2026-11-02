@@ -1590,6 +1590,34 @@ func TestRetainedTypesYAMLWarning(t *testing.T) {
 	}
 }
 
+// TestProtectedLabelsYAMLWarning pins the warning for a wisp.protected_labels
+// key in config.yaml (or BD_WISP_PROTECTED_LABELS). The setting is read from
+// the workspace database only — the fence must be the same for every client
+// of a shared workspace — so such a key protects nothing, and the wisp GC
+// that honors the setting says so rather than letting an operator believe
+// labeled wisps are fenced.
+func TestProtectedLabelsYAMLWarning(t *testing.T) {
+	restore := envSnapshot(t)
+	defer restore()
+	t.Chdir(t.TempDir())
+	ResetForTesting()
+	t.Cleanup(ResetForTesting)
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize() returned error: %v", err)
+	}
+
+	if msg := ProtectedLabelsYAMLWarning(); msg != "" {
+		t.Errorf("warning with no yaml key = %q, want none", msg)
+	}
+	Set("wisp.protected_labels", "keep:mail,escalate")
+	msg := ProtectedLabelsYAMLWarning()
+	for _, want := range []string{"config.yaml", "ignored", "bd config set wisp.protected_labels keep:mail,escalate"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("warning = %q, want it to contain %q", msg, want)
+		}
+	}
+}
+
 // TestGetCustomTypesFromYAML_ListForm verifies that the YAML sequence form
 // (e.g. `types: { custom: [step, wisp] }`) is honored equivalently to the
 // legacy comma-separated string form. Before the fix, viper.GetString on a

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -282,6 +283,26 @@ func TestParseExcludeLabels(t *testing.T) {
 	// blank value as unset, so the flag accepts one as protecting nothing.
 	if got, err := parseExcludeLabels([]string{""}); err != nil || len(got) != 0 {
 		t.Errorf(`parseExcludeLabels([""]) = %v, %v; want empty, no error`, got, err)
+	}
+}
+
+// TestWispGCInitialSearchFailureAborts pins the other half of the fail-closed
+// contract: the initial search is where each wisp's labels are hydrated, so a
+// label read that fails there must abort the sweep with an empty selection —
+// the sweep may not run on labels it could not read.
+func TestWispGCInitialSearchFailureAborts(t *testing.T) {
+	r := protectedLabelsReader{
+		cascadeAgeReader: &cascadeAgeReader{searchErr: errors.New("hydrate labels: connection refused")},
+	}
+	sel, err := findAbandonedWisps(context.Background(), r, false, time.Hour, nil)
+	if err == nil {
+		t.Errorf("findAbandonedWisps succeeded over a failed initial search; want an abort error")
+	}
+	if len(sel.abandoned) != 0 {
+		t.Errorf("selection is not empty after a failed initial search (got %d candidates)", len(sel.abandoned))
+	}
+	if sel.labelSpared != 0 {
+		t.Errorf("labelSpared = %d after a failed initial search, want 0", sel.labelSpared)
 	}
 }
 
