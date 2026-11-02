@@ -7,6 +7,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -925,5 +926,182 @@ VALUES (?, 'created', 'tester', '2026-09-01 00:00:00', 'evt-orphan-probe')`, iss
 			}
 		}
 		requireFKEnforced(t, ctx, l.conn, "pre-1")
+	})
+}
+
+// TestEmbeddedIgnoredMigration0031ResumesAnInterruptedRestore pins the retry
+// contract on the states an interrupted pass leaves: rows an earlier attempt
+// wrote under derived ids are reused, never duplicated; a failure after
+// a full batch landed, a failing cursor write after the restore, and a
+// transient failure reading history all fail the pass with 0031 pending, and
+// the next pass converges on exact multiplicities.
+func TestEmbeddedIgnoredMigration0031ResumesAnInterruptedRestore(t *testing.T) {
+	requireEmbedded(t)
+
+	t.Run("rows an earlier attempt wrote are reused", func(t *testing.T) {
+		ctx := t.Context()
+		dataDir := seedMainSchemaAt(t, ctx, 61)
+		conn, closeConn := openPinnedConn(t, ctx, dataDir)
+		defer closeConn()
+		execFrozenGuard(t, ctx, conn, `
+INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) VALUES
+  ('r-1', 'reached', '', '', '', '', 'open', 2, 'task'),
+  ('r-2', 'unreached', '', '', '', '', 'open', 2, 'task');
+INSERT INTO events (issue_id, event_type, actor, created_at, id) VALUES
+  ('r-1', 'created', 'tester', '2026-07-30 00:00:00', 'evt-r-1a'),
+  ('r-2', 'status_changed', 'tester', '2026-07-30 00:01:00', 'evt-r-2a'),
+  ('r-2', 'status_changed', 'tester', '2026-07-30 00:01:00', 'evt-r-2b');
+`)
+		mustDrain(t, ctx, conn, "CALL DOLT_COMMIT('-Am', 'test: seed pre-flip events')")
+		adoptPreflipLineage(t, ctx, conn)
+		r1 := preflipNullDigest("r-1", "created", "tester", "2026-07-30 00:00:00")
+		mustExecOn(t, ctx, conn, `INSERT INTO events (issue_id, event_type, actor, created_at, id)
+VALUES ('r-1', 'created', 'tester', '2026-07-30 00:00:00', ?)`, rowid.New("events", 0, r1))
+
+		if _, err := schema.MigrateUp(ctx, conn); err != nil {
+			t.Fatalf("MigrateUp (retry): %v", err)
+		}
+		got := liveEvents(t, ctx, conn)
+		requireContent(t, got, map[string]int{r1: 1, preflipNullDigest("r-2", "status_changed", "tester", "2026-07-30 00:01:00"): 2})
+		requireDerivedIDs(t, got)
+		if !ignoredCursorHas(t, ctx, conn, 31) {
+			t.Fatal("ignored cursor does not record 0031 after the retry")
+		}
+	})
+
+	t.Run("pass fails after a full batch landed", func(t *testing.T) {
+		ctx := t.Context()
+		dataDir := seedMainSchemaAt(t, ctx, 61)
+		conn, closeConn := openPinnedConn(t, ctx, dataDir)
+		defer closeConn()
+		var bulk strings.Builder
+		bulk.WriteString(`
+INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) VALUES
+  ('f-1', 'busy', '', '', '', '', 'open', 2, 'task');
+INSERT INTO events (issue_id, event_type, actor, comment, created_at, id) VALUES
+`)
+		for i := range 102 {
+			if i > 0 {
+				bulk.WriteByte(',')
+			}
+			fmt.Fprintf(&bulk, "('f-1', 'commented', 'tester', 'note %03d', '2026-07-30 00:%02d:%02d', 'evt-f-%03d')\n", i, i/60, i%60, i)
+		}
+		bulk.WriteString(";\n")
+		execFrozenGuard(t, ctx, conn, bulk.String())
+		mustDrain(t, ctx, conn, "CALL DOLT_COMMIT('-Am', 'test: seed pre-flip events')")
+		adoptPreflipLineage(t, ctx, conn)
+
+		defer schema.SetPreflipEventsBatchSizesForTest(100, 100)()
+		injected := errors.New("injected: connection reset mid-restore")
+		// The hook runs once a batch is written: fail after the first 100.
+		batches := 0
+		restoreHook := schema.SetPreflipEventsInsertFaultHookForTest(func() error {
+			if batches++; batches == 1 {
+				return injected
+			}
+			return nil
+		})
+		_, err := schema.MigrateUp(ctx, conn)
+		restoreHook()
+		if !errors.Is(err, injected) {
+			t.Fatalf("MigrateUp failing after the first batch = %v, want the injected failure", err)
+		}
+		if ignoredCursorHas(t, ctx, conn, 31) {
+			t.Fatal("ignored cursor recorded 0031 after the restore failed")
+		}
+		if got := scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM events"); got != 100 {
+			t.Fatalf("live events hold %d rows after the failure, want the first batch's 100", got)
+		}
+		if _, err := schema.MigrateUp(ctx, conn); err != nil {
+			t.Fatalf("MigrateUp (retry): %v", err)
+		}
+		if got := scalarInt(t, ctx, conn, "SELECT COUNT(DISTINCT id) FROM events"); got != 102 {
+			t.Fatalf("live events hold %d distinct ids after the retry, want 102", got)
+		}
+		requireDerivedIDs(t, liveEvents(t, ctx, conn))
+		if !ignoredCursorHas(t, ctx, conn, 31) {
+			t.Fatal("ignored cursor does not record 0031 after the retry")
+		}
+	})
+
+	t.Run("cursor write fails after the restore", func(t *testing.T) {
+		ctx := t.Context()
+		dataDir := seedMainSchemaAt(t, ctx, 61)
+		conn, closeConn := openPinnedConn(t, ctx, dataDir)
+		defer closeConn()
+		seedPreflipEvents(t, ctx, conn)
+		adoptPreflipLineage(t, ctx, conn)
+
+		// Hide the cursor table once the first restored batch lands, so the
+		// restore completes and recording 0031 is what fails.
+		hidden := false
+		restoreHook := schema.SetPreflipEventsInsertFaultHookForTest(func() error {
+			if !hidden {
+				hidden = true
+				_, err := conn.ExecContext(ctx, "RENAME TABLE ignored_schema_migrations TO ignored_schema_migrations_hidden")
+				return err
+			}
+			return nil
+		})
+		_, err := schema.MigrateUp(ctx, conn)
+		restoreHook()
+		if !hidden {
+			t.Fatal("the restore wrote no batch; the fixture never hid the cursor table")
+		}
+		if err == nil {
+			t.Fatal("MigrateUp with the cursor table gone succeeded; 0031 cannot have been recorded")
+		}
+		mustExecOn(t, ctx, conn, "RENAME TABLE ignored_schema_migrations_hidden TO ignored_schema_migrations")
+		if ignoredCursorHas(t, ctx, conn, 31) {
+			t.Fatal("ignored cursor records 0031 though writing it failed")
+		}
+		if _, err := schema.MigrateUp(ctx, conn); err != nil {
+			t.Fatalf("MigrateUp (retry): %v", err)
+		}
+		got := liveEvents(t, ctx, conn)
+		requireContent(t, got, preflipSeededContent())
+		requireDerivedIDs(t, got)
+		if !ignoredCursorHas(t, ctx, conn, 31) {
+			t.Fatal("ignored cursor does not record 0031 after the retry")
+		}
+	})
+
+	t.Run("transient history read fails", func(t *testing.T) {
+		ctx := t.Context()
+		dataDir := seedMainSchemaAt(t, ctx, 61)
+		conn, closeConn := openPinnedConn(t, ctx, dataDir)
+		defer closeConn()
+		seedPreflipEvents(t, ctx, conn)
+		adoptPreflipLineage(t, ctx, conn)
+
+		transient := errors.New("driver: bad connection")
+		var notice bytes.Buffer
+		defer schema.SetPreflipEventsNoticeOutForTest(&notice)()
+		restoreHook := schema.SetPreflipEventsSourceFaultHookForTest(func(_, issue string) error {
+			if issue == "pre-2" {
+				return transient
+			}
+			return nil
+		})
+		_, err := schema.MigrateUp(ctx, conn)
+		restoreHook()
+		if !errors.Is(err, transient) {
+			t.Fatalf("MigrateUp with a transient history failure = %v, want that failure", err)
+		}
+		if ignoredCursorHas(t, ctx, conn, 31) {
+			t.Fatal("ignored cursor recorded 0031 after a transient failure; the source would never be read again")
+		}
+		if strings.Contains(notice.String(), "Warning") {
+			t.Fatalf("restore notice = %q; a transient failure must not be reported as an unreadable source", notice.String())
+		}
+		if _, err := schema.MigrateUp(ctx, conn); err != nil {
+			t.Fatalf("MigrateUp (retry): %v", err)
+		}
+		got := liveEvents(t, ctx, conn)
+		requireContent(t, got, preflipSeededContent())
+		requireDerivedIDs(t, got)
+		if !ignoredCursorHas(t, ctx, conn, 31) {
+			t.Fatal("ignored cursor does not record 0031 after the retry")
+		}
 	})
 }
