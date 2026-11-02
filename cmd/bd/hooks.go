@@ -910,6 +910,35 @@ func guardHookWritePath(hookPath string, allowTracked bool) error {
 	return guardHookWritePathWithProbe(hookPath, allowTracked, gitTrackedFileContext)
 }
 
+// refuseSymlinkedHooksDir refuses a hooks directory that is itself a symlink
+// (carried from #7889 by #8070). Installing through the link would write the
+// managed hooks, their backups and any preserved hooks into whatever the
+// link points at, outside the workspace the operator named. A directory that
+// does not exist yet is fine — MkdirAll creates it — and a symlinked
+// ancestor (.beads itself is a supported alias) stays allowed; only the
+// hooks directory entry itself is refused.
+func refuseSymlinkedHooksDir(hooksDir string) error {
+	info, err := os.Lstat(hooksDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // created fresh below — nothing to write through
+		}
+		return fmt.Errorf("failed to stat hooks directory %s: %w", remedy.PrintedValue(hooksDir), err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		target := "an unresolvable target"
+		if resolved, rerr := filepath.EvalSymlinks(hooksDir); rerr == nil {
+			target = remedy.PrintedValue(resolved)
+		} else if link, lerr := os.Readlink(hooksDir); lerr == nil {
+			target = remedy.PrintedValue(link)
+		}
+		return fmt.Errorf(
+			"%s is a symlink to %s; installing would write hooks through the link into its target\nRemove the symlink (or point core.hooksPath at a real directory) and re-run",
+			remedy.PrintedValue(hooksDir), target)
+	}
+	return nil
+}
+
 func guardHookWritePathWithProbe(hookPath string, allowTracked bool, tracked func(string) string) error {
 	fi, err := os.Lstat(hookPath)
 	if err != nil {
@@ -1135,6 +1164,14 @@ func installHooksAt(hookNames []string, force, shared, chain, beadsHooks bool, s
 		if err != nil {
 			return err
 		}
+	}
+
+	// Refuse the destination before anything touches it: MkdirAll would
+	// follow the link, preservation would copy foreign hooks through it,
+	// and the git configuration change below would point core.hooksPath
+	// at a directory bd does not own.
+	if err := refuseSymlinkedHooksDir(hooksDir); err != nil {
+		return fmt.Errorf("refusing to install hooks: %w", err)
 	}
 
 	// Create hooks directory if it doesn't exist.
