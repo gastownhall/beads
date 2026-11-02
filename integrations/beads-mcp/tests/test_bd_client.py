@@ -415,7 +415,7 @@ async def test_update_with_optional_fields(bd_client, mock_process):
 
 @pytest.mark.asyncio
 async def test_update_defer_until(bd_client, mock_process):
-    """defer_until="" sends --defer "" (bd clears the defer); left unset, no --defer is sent."""
+    """defer_until="" sends --defer= (bd clears the defer); left unset, no --defer is sent."""
     issue_data = {
         "id": "bd-1",
         "title": "Test issue",
@@ -433,8 +433,8 @@ async def test_update_defer_until(bd_client, mock_process):
         await bd_client.update(UpdateIssueParams(issue_id="bd-1", status="open"))
         unset = mock_exec.call_args[0]
 
-    assert cleared[cleared.index("--defer") + 1] == ""
-    assert "--defer" not in unset
+    assert "--defer=" in cleared
+    assert not any(arg.startswith("--defer") for arg in unset)
 
 
 @pytest.mark.asyncio
