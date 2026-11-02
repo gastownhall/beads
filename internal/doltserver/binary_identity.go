@@ -180,6 +180,10 @@ type BinaryCheck struct {
 	CandidateVersion string
 	// Reason says why the verdict is BinaryCannotReplace or BinaryUnknown.
 	Reason error
+	// Refresh is set on a current server whose record no longer names the
+	// executable bd would launch (the same release was reinstalled):
+	// recording that executable lets later opens skip the version probe.
+	Refresh bool
 
 	candidate binaryIdentity
 }
@@ -241,6 +245,7 @@ func CheckServerBinary(beadsDir string, port int) BinaryCheck {
 		return check
 	}
 	check.Verdict = BinaryCurrent
+	check.Refresh = true
 	return check
 }
 
@@ -300,7 +305,9 @@ type BinaryReplacement struct {
 //
 // A server that is no longer stale under the lock (another bd replaced it
 // first) is left alone, so one stale generation is replaced at most once. A
-// server that cannot be replaced is left running and the reason returned.
+// server that cannot be replaced is left running and the reason returned. A
+// current server whose record needs a refresh (BinaryCheck.Refresh) keeps
+// running, and the executable it was compared with is recorded as observed.
 func ReplaceStaleServer(beadsDir string, port int) (BinaryReplacement, error) {
 	lockF, err := acquireLifecycleLock(beadsDir)
 	if err != nil {
@@ -312,6 +319,15 @@ func ReplaceStaleServer(beadsDir string, port int) (BinaryReplacement, error) {
 	res := BinaryReplacement{Check: check}
 	switch check.Verdict {
 	case BinaryStale:
+	case BinaryCurrent:
+		if check.Refresh {
+			// Best effort: without the refresh the next open probes again.
+			_ = writeBinaryRecord(beadsDir, binaryRecord{
+				PID: check.PID, binaryIdentity: check.candidate,
+				Version: check.CandidateVersion, Provenance: binaryProvenanceObserved,
+			})
+		}
+		return res, nil
 	case BinaryCannotReplace:
 		return res, check.Reason
 	default:

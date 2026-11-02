@@ -197,3 +197,44 @@ func TestServerBinaryFailedReplacementSendsNoQuery(t *testing.T) {
 		t.Errorf("events = %v, want only the probe and the replacement attempt", got)
 	}
 }
+
+// TestServerBinaryCurrentServerKept: an open of a current server neither
+// replaces it nor prints a notice; one whose record needs a refresh (the
+// same release was reinstalled) asks the lifecycle to record it, which
+// keeps the server, and prints nothing either.
+func TestServerBinaryCurrentServerKept(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		refresh     bool
+		wantReplace int
+	}{
+		{name: "unchanged executable"},
+		{name: "same release reinstalled", refresh: true, wantReplace: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			events := &serverBinaryEvents{}
+			cfg := serverBinaryOpen(t, events)
+			port := cfg.ServerPort
+			current := doltserver.BinaryCheck{
+				Verdict: doltserver.BinaryCurrent, PID: 111, Port: port, Refresh: tc.refresh,
+				RunningVersion: "2.6.0", CandidatePath: "/opt/dolt/bin/dolt", CandidateVersion: "2.6.0",
+			}
+			stubServerBinary(t,
+				func(string, int) doltserver.BinaryCheck { return current },
+				func(string, int) (doltserver.BinaryReplacement, error) {
+					events.add("replace")
+					return doltserver.BinaryReplacement{Check: current}, nil
+				})
+
+			stderr := captureServerBinaryStderr(t, func() {
+				_, _ = newServerMode(context.Background(), cfg)
+			})
+			if n := strings.Count(strings.Join(events.snapshot(), " "), "replace"); n != tc.wantReplace {
+				t.Errorf("replaceStaleServer called %d times, want %d", n, tc.wantReplace)
+			}
+			if strings.Contains(stderr, "Restarted the dolt sql-server") || strings.Contains(stderr, "endpoint changed") {
+				t.Errorf("current server reported a restart:\n%s", stderr)
+			}
+		})
+	}
+}
