@@ -170,11 +170,21 @@ contains:
 possible data loss detected in journal file at offset ...: corrupted journal
 ```
 
-**Cause:** Dolt detected damaged journal blocks after an unclean shutdown.
-This is not the same as a stale PID, stale port, or stale lock file. `bd`
-will not run Dolt's data-loss repair mode automatically.
+**Symptom (embedded mode):** There is no server or server log. Every `bd`
+command fails while opening the database with the same `corrupted journal`
+error, even with no other `bd` process running. Bare `bd doctor` is not
+supported in embedded mode, so do not wait for it to diagnose this.
 
-**Safe recovery when your remote is current:**
+**Cause:** Dolt detected damaged journal blocks after an unclean shutdown or an
+interrupted write. This is not the same as a stale PID, stale port, or stale
+lock file. `bd` will not run Dolt's data-loss repair mode automatically, and
+`bd doctor --fix` does not rebuild the journal.
+
+**Safe recovery:** follow
+[Engine won't open](/recovery/database-corruption#engine-wont-open). Preserve
+the damaged store and its configuration first, then recover into a fresh store
+from a current remote (`bd bootstrap --dry-run`), a Dolt-native backup, or a
+JSONL export. For example, when your server-mode remote is current:
 
 ```bash
 # Server mode data lives at .beads/dolt; embedded mode at .beads/embeddeddolt
