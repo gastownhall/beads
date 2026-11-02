@@ -119,6 +119,10 @@ func (s *DoltStore) wakeExpiredDefers(ctx context.Context) {
 	if !deferWakeSweepEligible(s.readOnly, s.classifiedRead) {
 		return
 	}
+	// Advisory: a sweep that finds the journal-writer lock held skips
+	// silently instead of queuing a ready read behind it; a later sweep wakes
+	// the same defers.
+	ctx = issueops.WithJournalWriterTryOnce(ctx)
 	err := s.withCircuitWrite(ctx, func(ctx context.Context) error {
 		return s.runIssueOperationTxWithMessage(ctx, func(tx *sql.Tx) (issueops.ChangedTables, string, error) {
 			woke, err := issueops.WakeExpiredDefersInTx(ctx, tx)
@@ -135,7 +139,7 @@ func (s *DoltStore) wakeExpiredDefers(ctx context.Context) {
 			return tables, issueops.WakeDefersCommitMessage(len(woke.Issues)), nil
 		})
 	})
-	if err != nil && !errors.Is(err, ErrCircuitOpen) && !errors.Is(err, ErrStoreClosed) {
+	if err != nil && !errors.Is(err, ErrCircuitOpen) && !errors.Is(err, ErrStoreClosed) && !errors.Is(err, issueops.ErrJournalWriterBusy) {
 		warnDeferWakeSweepSkipped(err)
 	}
 }

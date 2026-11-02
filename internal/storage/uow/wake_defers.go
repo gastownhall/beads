@@ -1,6 +1,7 @@
 package uow
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"sync"
@@ -59,9 +60,11 @@ var advisoryAccessDeniedOnce sync.Once
 // WakeExpiredDefersAdvisory is WakeExpiredDefers under the read paths'
 // contract: a ready listing must never fail because the sweep could not run,
 // so errors are reduced to a stderr warning (warn-once for access-denied).
+// A sweep that finds the journal-writer lock held skips silently instead of
+// queuing behind it; a later sweep wakes the same defers.
 func WakeExpiredDefersAdvisory(ctx context.Context, p UnitOfWorkProvider) {
-	_, err := WakeExpiredDefers(ctx, p)
-	if err == nil {
+	_, err := WakeExpiredDefers(storageissueops.WithJournalWriterTryOnce(ctx), p)
+	if err == nil || errors.Is(err, storageissueops.ErrJournalWriterBusy) {
 		return
 	}
 	if dberrors.IsAccessDenied(err) {
