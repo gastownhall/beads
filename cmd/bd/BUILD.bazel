@@ -954,6 +954,7 @@ go_test(
         "init_server_flags_test.go",
         "init_stealth_test.go",
         "init_store_switch_embedded_test.go",
+        "init_store_switch_test.go",
         "init_team_server_test.go",
         "init_test.go",
         "init_worktree_test.go",

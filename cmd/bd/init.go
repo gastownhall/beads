@@ -3033,11 +3033,8 @@ func countExistingIssues(_ string) (int, error) {
 
 // runInitReinitPreflight confirms the destructive local replacement while the
 // caller holds init's complete exclusive gate set.
-func runInitReinitPreflight(reinitLocal bool, prefix, destroyToken string) error {
-	if !reinitLocal {
-		return nil
-	}
-	count, err := countExistingIssues(prefix)
+func runInitReinitPreflight(countIssues func() (int, error), prefix, destroyToken string) error {
+	count, err := countIssues()
 	if err != nil || count == 0 {
 		return nil
 	}
