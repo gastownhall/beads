@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/beads/internal/remedy"
+	"github.com/steveyegge/beads/internal/utils"
 )
 
 // resolveExportPath returns the file the automatic export lanes write for
@@ -22,9 +23,13 @@ import (
 // contains jsonlDir, found from jsonlDir's own Git context (never the
 // committing checkout's), or jsonlDir's parent when no repository contains
 // it. A symlinked store's resolved directory is an additional anchor. Both
-// the lexical path and the path its existing parents resolve to are checked.
+// the lexical path and the path its existing parents resolve to, in their
+// stored case, are checked.
 // Absolute paths, NUL, leaf symlinks, dangling linked parents, .git
-// components and the actual Git directories are refused.
+// components and the actual Git directories are refused. A Git directory
+// that contains jsonlDir itself (a bare repository's <repo.git>/.beads) or
+// the worktree (one checked out inside a bare clone) allows only paths
+// inside that directory or worktree.
 func resolveExportPath(jsonlDir, exportPath string) (string, error) {
 	if exportPath == "" || strings.ContainsRune(exportPath, 0) || filepath.IsAbs(exportPath) || filepath.VolumeName(exportPath) != "" {
 		return "", errors.New("it must be a relative file path")
@@ -49,7 +54,7 @@ func resolveExportPath(jsonlDir, exportPath string) (string, error) {
 	resolved := filepath.Join(parent, filepath.Base(fullPath))
 
 	top, gitDirs := exportGitContext(dir)
-	anchor := exportAnchor(dir, top)
+	anchor, worktree := exportAnchor(dir, top)
 	if !exportWithinAnchor(anchor, fullPath) {
 		return "", fmt.Errorf("it leaves %s", remedy.PrintedValue(anchor))
 	}
@@ -69,7 +74,7 @@ func resolveExportPath(jsonlDir, exportPath string) (string, error) {
 			}
 		}
 	}
-	resolvedCase := canonicalPathCase(resolved)
+	workAreas := exportWorkAreas(dir, anchor, worktree)
 	for _, gitDir := range append(gitDirs, hookGitDirs()...) {
 		if abs, err := filepath.Abs(gitDir); err == nil {
 			gitDir = abs
@@ -77,63 +82,59 @@ func resolveExportPath(jsonlDir, exportPath string) (string, error) {
 		if r, err := resolveExistingPath(gitDir); err == nil {
 			gitDir = r
 		}
-		gitDir = canonicalPathCase(gitDir)
-		if resolvedCase == gitDir || exportWithinAnchor(gitDir, resolvedCase) {
+		if (resolved == gitDir || exportWithinAnchor(gitDir, resolved)) && !exportInWorkArea(gitDir, resolved, workAreas) {
 			return "", fmt.Errorf("it enters Git metadata at %s", remedy.PrintedValue(gitDir))
 		}
 	}
 	return fullPath, nil
 }
 
-// canonicalPathCase returns path with every existing component replaced by
-// its on-disk spelling, so a containment check cannot be evaded by a
-// differently-cased name on a case-insensitive filesystem: APFS (and NTFS)
-// treat META and meta as the same directory while string comparison does
-// not. Components with no on-disk entry keep the caller's spelling, as does
-// the whole tail below the first nonexistent component.
-func canonicalPathCase(path string) string {
-	vol := filepath.VolumeName(path)
-	rest := path[len(vol):]
-	sep := string(filepath.Separator)
-	acc, out := vol, vol
-	if strings.HasPrefix(rest, sep) {
-		acc += sep
-		out += sep
-		rest = rest[len(sep):]
-	} else {
-		acc += "."
+// exportWorkAreas returns the directories a Git directory may contain without
+// them being its metadata: the store where it sits (a symlinked store's link,
+// never its target, so a link into a Git directory gains nothing) and the
+// worktree Git reported for it, never the parent fallback.
+func exportWorkAreas(dir, anchor string, worktree bool) []string {
+	var areas []string
+	if parent, err := resolveExistingPath(filepath.Dir(dir)); err == nil {
+		areas = append(areas, filepath.Join(parent, filepath.Base(dir)))
 	}
-	for rest != "" {
-		part, tail, _ := strings.Cut(rest, sep)
-		rest = tail
-		if part == "" || part == "." {
-			continue
+	if worktree {
+		if r, err := resolveExistingPath(anchor); err == nil {
+			areas = append(areas, r)
 		}
-		name := part
-		if entries, err := os.ReadDir(acc); err == nil {
-			for _, e := range entries {
-				if strings.EqualFold(e.Name(), part) {
-					name = e.Name()
-					break
-				}
-			}
-		}
-		if out == "" || strings.HasSuffix(out, sep) {
-			out += name
-		} else {
-			out += sep + name
-		}
-		acc = out
 	}
-	return out
+	return areas
 }
 
-// resolveExistingPath resolves the deepest existing ancestor of path and
-// appends the missing components. A dangling symlink, or any failure other
-// than absence, is an error.
+// exportInWorkArea reports whether path lies inside one of workAreas that
+// gitDir contains, the only part of gitDir that is not Git metadata.
+func exportInWorkArea(gitDir, path string, workAreas []string) bool {
+	for _, area := range workAreas {
+		if exportWithinAnchor(gitDir, area) && exportWithinAnchor(area, path) {
+			return true
+		}
+	}
+	return false
+}
+
+// exportCanonicalPath is utils.CanonicalizePath, indirected so tests can stand
+// in for a case-insensitive filesystem. On darwin it returns an existing path
+// in its stored case, which filepath.EvalSymlinks keeps as the caller spelled
+// it: without it ../META/hooks/pre-commit, which darwin opens inside a Git
+// directory at meta, compares as meta's sibling. On Windows EvalSymlinks
+// already returns the stored case.
+var exportCanonicalPath = utils.CanonicalizePath
+
+// resolveExistingPath resolves the deepest existing ancestor of path, in its
+// stored case, and appends the missing components. A dangling symlink, or any
+// failure other than absence, is an error.
 func resolveExistingPath(path string) (string, error) {
 	if _, err := os.Lstat(path); err == nil {
-		return filepath.EvalSymlinks(path)
+		resolved, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			return "", err
+		}
+		return exportCanonicalPath(resolved), nil
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return "", err
 	}
@@ -210,19 +211,21 @@ func hookGitDirs() []string {
 }
 
 // exportAnchor returns the lexical ancestor of dir that is the repository
-// root top, or dir's parent when no repository contains dir.
-func exportAnchor(dir, top string) string {
+// root top, and true, or dir's parent and false when no repository contains
+// dir. Git for Windows prints top with forward slashes, so the paths are
+// compared normalized.
+func exportAnchor(dir, top string) (string, bool) {
 	if top != "" {
 		for a := dir; ; a = filepath.Dir(a) {
-			if r, err := filepath.EvalSymlinks(a); err == nil && r == top {
-				return a
+			if utils.PathsEqual(a, top) {
+				return a, true
 			}
 			if filepath.Dir(a) == a {
 				break
 			}
 		}
 	}
-	return filepath.Dir(dir)
+	return filepath.Dir(dir), false
 }
 
 // exportWithinAnchor reports whether path is strictly inside root.

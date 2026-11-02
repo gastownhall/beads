@@ -172,7 +172,12 @@ func TestNoFollowRegularFiles(t *testing.T) {
 // alone cannot cover it. Mirrors the caFileReadHookForTest swap pattern in
 // internal/httpclient.
 func TestOpenNoFollowRefusesSymlinkSwappedInAfterLstat(t *testing.T) {
-	if noFollowFlag == 0 {
+	// Gate on the platforms nofollow_flag.go's build constraint names, never
+	// on noFollowFlag itself: a noFollowFlag of 0 there is the bug this test
+	// exists to catch.
+	switch runtime.GOOS {
+	case "aix", "android", "darwin", "dragonfly", "freebsd", "illumos", "ios", "linux", "netbsd", "openbsd", "solaris":
+	default:
 		t.Skip("no O_NOFOLLOW on this platform; the Lstat check is the only layer")
 	}
 	dir := t.TempDir()

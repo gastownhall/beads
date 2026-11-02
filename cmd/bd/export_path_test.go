@@ -259,6 +259,23 @@ func TestResolveExportPath(t *testing.T) {
 	if err := os.Symlink(storeTarget, filepath.Join(linkedRepo, ".beads")); err != nil {
 		t.Fatal(err)
 	}
+	// A bare clone holds both supported bare layouts: the shared store at
+	// <repo.git>/.beads and a worktree checked out inside the clone.
+	bare := filepath.Join(root, "bare.git")
+	runGitForWorktreeTest(t, root, "clone", "-q", "--bare", repo, bare)
+	runGitForWorktreeTest(t, bare, "worktree", "add", "-q", filepath.Join(bare, "wt"))
+	bareStore := filepath.Join(bare, ".beads")
+	bareWorktreeStore := filepath.Join(bare, "wt", ".beads")
+	bareHooksStore := filepath.Join(bare, "hooks", ".beads")
+	for _, dir := range []string{bareStore, bareWorktreeStore, bareHooksStore} {
+		if err := os.MkdirAll(dir, 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	bareLinkedStore := filepath.Join(bare, "linked-store")
+	if err := os.Symlink(filepath.Join(bare, "hooks"), bareLinkedStore); err != nil {
+		t.Fatal(err)
+	}
 
 	beads := filepath.Join(repo, ".beads")
 	cases := []struct {
@@ -276,6 +293,10 @@ func TestResolveExportPath(t *testing.T) {
 		{"external store parent", external, "../issues.jsonl", true},
 		{"symlinked store", filepath.Join(linkedRepo, ".beads"), "issues.jsonl", true},
 		{"symlinked store nested", filepath.Join(linkedRepo, ".beads"), "x/issues.jsonl", true},
+		{"bare repository store", bareStore, "issues.jsonl", true},
+		{"bare repository store nested", bareStore, "exports/issues.jsonl", true},
+		{"bare clone worktree store", bareWorktreeStore, "issues.jsonl", true},
+		{"bare clone worktree root file", bareWorktreeStore, "../issues.jsonl", true},
 
 		{"absolute", beads, filepath.Join(root, "x.jsonl"), false},
 		{"nul", beads, "a\x00b", false},
@@ -293,6 +314,13 @@ func TestResolveExportPath(t *testing.T) {
 		{"git component case", beads, "x/.GIT/y", false},
 		{"worktree git file", filepath.Join(root, "wt", ".beads"), "../.git", false},
 		{"separate git dir", filepath.Join(separate, ".beads"), "../meta/config", false},
+		{"bare repository config", bareStore, "../config", false},
+		{"bare repository hook", bareStore, "../hooks/pre-commit", false},
+		{"bare repository as the store", bare, "config", false},
+		{"bare clone worktree leaves to config", bareWorktreeStore, "../../config", false},
+		{"bare clone worktree leaves to hook", bareWorktreeStore, "../../hooks/pre-commit", false},
+		{"store nested in bare repository metadata", bareHooksStore, "../pre-commit", false},
+		{"store linked into bare repository metadata", bareLinkedStore, "pre-commit", false},
 		{"non-directory parent", beads, "../file/x.jsonl", false},
 		{"dangling parent", beads, "dangling/x.jsonl", false},
 		{"dangling leaf", beads, "dangling.jsonl", false},
@@ -344,6 +372,20 @@ func TestResolveExportPath(t *testing.T) {
 		}
 		if _, err := resolveExportPath(filepath.Join(separate, ".beads"), "../Meta/hooks/pre-commit"); err == nil {
 			t.Error("accepted a mixed-case path into the separate git dir")
+		}
+	})
+
+	// A commit in the clone's worktree runs the hook with GIT_DIR naming the
+	// worktree's admin directory, whose commondir is the bare repository.
+	t.Run("hook-selected bare worktree", func(t *testing.T) {
+		t.Setenv("GIT_DIR", filepath.Join(bare, "worktrees", "wt"))
+		if _, err := resolveExportPath(bareStore, "issues.jsonl"); err != nil {
+			t.Errorf("bare repository store under a worktree hook: %v", err)
+		}
+		for _, path := range []string{"../config", "../worktrees/wt/HEAD"} {
+			if _, err := resolveExportPath(bareStore, path); err == nil {
+				t.Errorf("accepted %s under a worktree hook", path)
+			}
 		}
 	})
 }
@@ -437,6 +479,80 @@ func TestHookGitDirs(t *testing.T) {
 			t.Errorf("hookGitDirs() = %v, want nil", got)
 		}
 	})
+}
+
+// TestResolveExportPathCaseVariantGitDir: darwin opens ../META/config inside
+// a separate Git directory at meta, so the resolver must compare the paths in
+// their stored case. On a case-sensitive filesystem the variants are real
+// directories, and a stand-in gives them their stored spelling, as darwin's
+// CanonicalizePath does.
+func TestResolveExportPathCaseVariantGitDir(t *testing.T) {
+	t.Setenv("GIT_DIR", "")
+	t.Setenv("GIT_COMMON_DIR", "")
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := filepath.Join(root, "repo")
+	for _, dir := range []string{".beads", "exports"} {
+		if err := os.MkdirAll(filepath.Join(repo, dir), 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runGitForWorktreeTest(t, repo, "init", "-q", "--separate-git-dir", filepath.Join(repo, "meta"))
+	if _, err := os.Stat(filepath.Join(repo, "META")); os.IsNotExist(err) {
+		for _, dir := range []string{filepath.Join("META", "hooks"), "Exports"} {
+			if err := os.MkdirAll(filepath.Join(repo, dir), 0o750); err != nil {
+				t.Fatal(err)
+			}
+		}
+		writeFileForWorktreeTest(t, filepath.Join(repo, "META", "config"), []byte("x"))
+		stored := map[string]string{"META": "meta", "Exports": "exports"}
+		canonical := exportCanonicalPath
+		t.Cleanup(func() { exportCanonicalPath = canonical })
+		exportCanonicalPath = func(path string) string {
+			for variant, name := range stored {
+				if rest, ok := strings.CutPrefix(path, filepath.Join(repo, variant)); ok && (rest == "" || rest[0] == filepath.Separator) {
+					return filepath.Join(repo, name) + rest
+				}
+			}
+			return canonical(path)
+		}
+	} else if err != nil {
+		t.Fatal(err)
+	}
+
+	beads := filepath.Join(repo, ".beads")
+	for _, path := range []string{"../META/config", "../META/hooks/pre-commit"} {
+		if got, err := resolveExportPath(beads, path); err == nil {
+			t.Errorf("resolveExportPath(%q, %q) = %q, want an error", beads, path, got)
+		}
+	}
+	for _, path := range []string{"issues.jsonl", "../Exports/issues.jsonl"} {
+		got, err := resolveExportPath(beads, path)
+		if err != nil {
+			t.Errorf("resolveExportPath(%q, %q): %v", beads, path, err)
+		} else if want := filepath.Join(beads, path); got != want {
+			t.Errorf("got %q, want %q", got, want)
+		}
+	}
+}
+
+// TestExportAnchorComparesNormalizedPaths: Git for Windows prints
+// --show-toplevel with forward slashes, so the anchor must match a spelling
+// of the repository root that differs from the lexical ancestor's bytes.
+func TestExportAnchorComparesNormalizedPaths(t *testing.T) {
+	root := t.TempDir()
+	top, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(root, "sub", ".beads")
+	for _, spelling := range []string{filepath.ToSlash(top), top + "/"} {
+		if got, ok := exportAnchor(dir, spelling); !ok || got != root {
+			t.Errorf("exportAnchor(%q, %q) = %q, %t; want %q, true", dir, spelling, got, ok, root)
+		}
+	}
 }
 
 // TestAutoExportRejectsUnsafePaths: ordinary auto-export warns naming

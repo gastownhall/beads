@@ -2077,7 +2077,6 @@ func validateHooksDir(hooksDir, baseDir, repoRoot string) error {
 // worktree ownership of their own JSONL means resolving the worktree from cwd
 // on every command, which changes JSONL ownership globally; that is a product
 // decision rather than a hook fix, and is tracked separately.
-
 func hookJSONLDir(beadsDir string) string {
 	hookRoot := hookWorkTreeRoot()
 	primaryRoot := hookLinkedWorktreePrimaryRoot(hookRoot)
