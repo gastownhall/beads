@@ -855,6 +855,10 @@ func unresolvedBootstrapDBPlan(plan BootstrapPlan, beadsDir string, cfg *configf
 		probe.Err = err
 		return BootstrapPlan{}, probe, false
 	}
+	if err := configfile.ValidateDatabaseName(cfg.GetDoltDatabase()); err != nil {
+		probe.Err = err
+		return BootstrapPlan{}, probe, false
+	}
 	dbDir := filepath.Join(bootstrapOwnedDataDir(beadsDir, cfg), cfg.GetDoltDatabase())
 	if info, err := os.Stat(filepath.Join(dbDir, ".dolt")); err == nil && info.IsDir() {
 		probe.Exists = true
@@ -1462,6 +1466,10 @@ func bootstrapServerRestoreRefusal(plan BootstrapPlan, cfg *configfile.Config, s
 }
 
 func executeSyncAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.Config) error {
+	dbName := cfg.GetDoltDatabase()
+	if err := configfile.ValidateDatabaseName(dbName); err != nil {
+		return err
+	}
 	// Ensure .beads directory exists — it may not in the "fresh clone"
 	// bootstrap path where we detected remote data before .beads was
 	// created. Deferred here to preserve --dry-run semantics. (GH#2792)
@@ -1469,7 +1477,6 @@ func executeSyncAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.
 		return fmt.Errorf("create beads directory: %w", err)
 	}
 
-	dbName := cfg.GetDoltDatabase()
 	// Clone and finalize under the configuration the next command in
 	// plan.BeadsDir loads (config.WithBeadsDir), as serverClonePort and the
 	// warmup below do: the clone's mode (a server or the embedded engine),
