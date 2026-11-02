@@ -117,8 +117,18 @@ func TestPreCommitExportRejectsUnsafePaths(t *testing.T) {
 			}
 			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 			config.Set("export.auto", true)
-			config.Set("export.git-add", false)
+			config.Set("export.git-add", true)
 			config.Set("export.path", path)
+			staged := func() string {
+				cmd := gitCommand("diff", "--cached", "--name-only")
+				cmd.Dir = repo
+				out, err := cmd.CombinedOutput()
+				if err != nil {
+					t.Fatalf("git diff --cached: %v\n%s", err, out)
+				}
+				return string(out)
+			}
+			stagedBefore := staged()
 			warning := captureHookStderr(t, exportJSONLForCommit)
 			_, calledErr := os.Stat(marker)
 			if valid {
@@ -137,6 +147,9 @@ func TestPreCommitExportRejectsUnsafePaths(t *testing.T) {
 				}
 				if !strings.Contains(warning, "export.path") {
 					t.Errorf("warning does not name export.path: %q", warning)
+				}
+				if got := staged(); got != stagedBefore {
+					t.Errorf("unsafe export changed the index: %q, want %q", got, stagedBefore)
 				}
 				for _, p := range created {
 					if _, err := os.Lstat(p); !os.IsNotExist(err) {
@@ -333,7 +346,8 @@ func TestAutoExportRejectsUnsafePaths(t *testing.T) {
 			config.Set("export.auto", true)
 			config.Set("export.git-add", false)
 			saveAndRestoreGlobals(t)
-			store = &fakeStateHashStore{stateHash: "hash-after-write"}
+			fake := &fakeStateHashStore{stateHash: "hash-after-write"}
+			store = fake
 
 			dir := autoExportTestDir(t)
 			beadsDir := filepath.Join(dir, ".beads")
@@ -370,6 +384,9 @@ func TestAutoExportRejectsUnsafePaths(t *testing.T) {
 			}
 			if state := loadExportAutoState(beadsDir); state.LastDoltCommit != "hash-before-write" {
 				t.Errorf("export state advanced to %q", state.LastDoltCommit)
+			}
+			if fake.stateHashCalls != 0 {
+				t.Errorf("state hash calls = %d, want 0 (refusal precedes change detection)", fake.stateHashCalls)
 			}
 		})
 	}
