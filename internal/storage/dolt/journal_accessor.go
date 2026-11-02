@@ -42,10 +42,11 @@ func (s *DoltStore) ReadEventsJournalPage(ctx context.Context, since int64, limi
 }
 
 // PruneEventsJournal deletes journal rows below before, honoring the retain
-// floors, and returns the number of rows deleted.
+// floors, and returns the number of rows deleted. A prune allocates no seq, so
+// it does not queue behind the journal writers.
 func (s *DoltStore) PruneEventsJournal(ctx context.Context, before int64, retainDays, retainRows int) (int64, error) {
 	var n int64
-	err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
+	err := s.withRetryTxNoJournal(ctx, func(tx *sql.Tx) error {
 		var pruneErr error
 		n, pruneErr = issueops.PruneEventsInTx(ctx, tx, before, retainDays, retainRows, time.Now().UTC())
 		return pruneErr
