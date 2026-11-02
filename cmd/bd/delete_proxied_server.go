@@ -194,6 +194,10 @@ func outputDeleteProxiedPreview(in *deleteInput, result deletePreviewResult) err
 			"dry_run":              in.dryRun,
 			"cascade":              in.cascade,
 			"would_orphan":         len(result.res.Orphaned),
+			// The ids beside the counts, named as the deletion will report
+			// them (deleted_ids, orphaned_issues) (GH#6301).
+			"would_delete_ids": result.res.DeletedIDs,
+			"would_orphan_ids": result.res.Orphaned,
 		}
 		if result.blocked != nil {
 			payload["error"] = result.blocked.Error()
@@ -281,6 +285,9 @@ func renderDeleteProxiedResult(in *deleteInput, res issueops.DeleteResult) {
 			// New on this route, and new because the behavior is: `--force`
 			// used to cascade here, so there was never anything to orphan.
 			"orphaned_issues": res.Orphaned,
+			// deleted stays the requested ids; deleted_ids names every row
+			// deleted_count counts, the cascade closure included (GH#6301).
+			"deleted_ids": res.DeletedIDs,
 		})
 		return
 	}

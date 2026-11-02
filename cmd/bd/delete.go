@@ -499,6 +499,9 @@ func deleteBatchReporting(issueIDs []string, force, dryRun, cascade, jsonOutput 
 			"events_removed":       result.Events,
 			"references_updated":   result.ReferencesUpdated,
 			"orphaned_issues":      result.Orphaned,
+			// deleted stays the requested ids; deleted_ids names every row
+			// deleted_count counts, the cascade closure included (GH#6301).
+			"deleted_ids": result.DeletedIDs,
 		}
 		for key, value := range report {
 			answer[key] = value
@@ -549,6 +552,11 @@ func outputDeletionPreviewReporting(issueIDs []string, issues map[string]*types.
 			preview["would_remove_labels"] = result.Labels
 			preview["would_remove_events"] = result.Events
 			preview["would_orphan"] = len(result.Orphaned)
+			// The ids beside the counts, named as the deletion will report
+			// them (deleted_ids, orphaned_issues), so a caller can check it
+			// got what it previewed (GH#6301).
+			preview["would_delete_ids"] = result.DeletedIDs
+			preview["would_orphan_ids"] = result.Orphaned
 		}
 		if depError != nil {
 			preview["error"] = depError.Error()
