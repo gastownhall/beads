@@ -42,6 +42,7 @@ func usesProxiedServer() bool {
 func newRegisteredBackendStore(ctx context.Context, name, beadsDir string, readOnly bool) (s storage.DoltStorage, err error) {
 	defer func() { s, err = activateVersionedHistoryStore(ctx, s, err) }()
 	defer func() { s, err = activateEventsJournalStore(beadsDir, s, err) }()
+	defer func() { s, err = activateCommitIdentityStore(s, err) }()
 	backend, ok := backends.Lookup(name)
 	if !ok {
 		return nil, fmt.Errorf("storage backend %q is not registered", name)
@@ -57,6 +58,7 @@ func newRegisteredBackendStore(ctx context.Context, name, beadsDir string, readO
 func newDoltStore(ctx context.Context, cfg *dolt.Config) (s storage.DoltStorage, err error) {
 	defer func() { s, err = activateVersionedHistoryStore(ctx, s, err) }()
 	defer func() { s, err = activateEventsJournalStore(cfg.BeadsDir, s, err) }()
+	defer func() { s, err = activateCommitIdentityStore(s, err) }()
 	if cfg.ProxiedServer {
 		return nil, errProxiedStoreUnrouted()
 	}
@@ -75,6 +77,7 @@ func acquireEmbeddedLock(_ string, _ bool) (util.Unlocker, error) {
 func newDoltStoreFromConfig(ctx context.Context, beadsDir string) (s storage.DoltStorage, err error) {
 	defer func() { s, err = activateVersionedHistoryStore(ctx, s, err) }()
 	defer func() { s, err = activateEventsJournalStore(beadsDir, s, err) }()
+	defer func() { s, err = activateCommitIdentityStore(s, err) }()
 	// Before Load can migrate a legacy config.json; validateConfiguredBackend
 	// below re-checks the loaded config.
 	discovered, err := checkDiscoveredBackend(beadsDir)

@@ -1135,6 +1135,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Embedded-mode Dolt commits now record who made them (#7628). They were
+  authored `beads <beads@local>`, or `root <root@%>` for `bd dolt commit` and
+  other whole-working-set commits, whatever the environment said. The author
+  is now `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL`, else bd's resolved actor
+  (`--actor`, `BEADS_ACTOR`, config `actor`, `git config user.name`) and
+  `git config user.email`, else `beads <beads@local>`, each field resolved on
+  its own. Transactional writes, `bd dolt commit`, merges and the
+  blocked-state repair commits all carry it. Characters Dolt's author parser
+  rejects or truncates on (`<>()`, line breaks) are dropped. See
+  [Dolt Commit Author](docs/reference/configuration.md#dolt-commit-author-embedded-mode).
+
 - `bd create --file` and other batch creates no longer fail with "issue
   already exists" on an id bd generated itself. The batch chose every id
   before it wrote any row, so two of its items could be handed the same short

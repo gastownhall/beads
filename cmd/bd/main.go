@@ -1010,6 +1010,10 @@ func resolveConfiguredActor() string {
 var (
 	actorMu                 sync.Mutex
 	actorGitFallbackPending bool
+	// actorIsLastResort records that the deferred fallback found no source
+	// and settled on resolveActorWithGit's "unknown", as opposed to a source
+	// that named "unknown" on purpose. Guarded by actorMu.
+	actorIsLastResort bool
 )
 
 // deferActorGitFallback replaces the former eager `actor = getActorWithGit()`
@@ -1020,6 +1024,7 @@ func deferActorGitFallback() {
 	actorMu.Lock()
 	defer actorMu.Unlock()
 	actorGitFallbackPending = actor == ""
+	actorIsLastResort = false
 }
 
 // currentActor returns the actor for this invocation, resolving a fallback
@@ -1040,7 +1045,11 @@ func resolvePendingActorLocked() {
 	}
 	actorGitFallbackPending = false
 	deferred := actor
-	actor = resolveActorWithGit()
+	actor = resolveActorSources()
+	actorIsLastResort = actor == ""
+	if actorIsLastResort {
+		actor = "unknown"
+	}
 	// Keep the CommandContext copy in step, as the eager assignment did
 	// before syncCommandContext copied it.
 	if cmdCtx != nil && cmdCtx.Actor == deferred {
@@ -1065,6 +1074,15 @@ func getActorWithGit() string {
 // resolveActorWithGit is getActorWithGit's resolution order, without the
 // deferred-fallback bookkeeping. Caller holds actorMu or owns the global.
 func resolveActorWithGit() string {
+	if a := resolveActorSources(); a != "" {
+		return a
+	}
+	return "unknown"
+}
+
+// resolveActorSources is resolveActorWithGit without its last resort: "" when
+// no source names an actor. Caller holds actorMu or owns the global.
+func resolveActorSources() string {
 	// If actor is already set (from --actor flag), use it
 	if actor != "" {
 		return actor
@@ -1088,11 +1106,20 @@ func resolveActorWithGit() string {
 	}
 
 	// Fall back to system username
-	if user := os.Getenv("USER"); user != "" {
-		return user
-	}
+	return os.Getenv("USER")
+}
 
-	return "unknown"
+// actorFromSources returns the actor a source names, or "" where
+// getActorWithGit would fall back to "unknown": a deferred fallback that ended
+// there, or no source at all. Unlike getActorWithGit, it never resolves the
+// deferred fallback into the global.
+func actorFromSources() string {
+	actorMu.Lock()
+	defer actorMu.Unlock()
+	if actorIsLastResort {
+		return ""
+	}
+	return resolveActorSources()
 }
 
 // getOwner returns the human owner for CV attribution.

@@ -14,12 +14,22 @@ import (
 // the DSN's commit name/email, so an unauthored DOLT_COMMIT records root, and
 // the DSN identity alone never reaches the commit.
 //
-// The author is resolved on the first commit that needs it and memoized for
-// the store's life, so reads and transactions that commit nothing never
-// resolve it.
+// The author is resolved on the first commit that needs it and memoized until
+// SetCommitIdentityFallback replaces the fallback, so reads and transactions
+// that commit nothing never resolve it.
 type commitIdentity struct {
-	mu     sync.Mutex
-	author string // "name <email>"; "" until resolved
+	mu       sync.Mutex
+	fallback func() (name, email string) // storage.CommitIdentityConfigurer
+	author   string                      // "name <email>"; "" until resolved
+}
+
+// SetCommitIdentityFallback implements storage.CommitIdentityConfigurer. It
+// clears the memoized author, so the next commit resolves it again.
+func (s *EmbeddedDoltStore) SetCommitIdentityFallback(fallback func() (name, email string)) {
+	s.identity.mu.Lock()
+	defer s.identity.mu.Unlock()
+	s.identity.fallback = fallback
+	s.identity.author = ""
 }
 
 // commitAuthor returns this store's commit author, resolving it on first use.
@@ -27,24 +37,31 @@ func (s *EmbeddedDoltStore) commitAuthor() string {
 	s.identity.mu.Lock()
 	defer s.identity.mu.Unlock()
 	if s.identity.author == "" {
-		s.identity.author = resolveCommitAuthor()
+		name, email := resolveCommitIdentity(s.identity.fallback)
+		s.identity.author = name + " <" + email + ">"
 	}
 	return s.identity.author
 }
 
-// resolveCommitAuthor formats envCommitIdentity as a Dolt --author value.
-func resolveCommitAuthor() string {
-	name, email := envCommitIdentity()
-	return name + " <" + email + ">"
-}
-
-// envCommitIdentity resolves name and email independently, the way server
-// mode does: GIT_AUTHOR_NAME / GIT_AUTHOR_EMAIL, else beads / beads@local.
-// A value that is empty once cleaned falls through. buildDSN uses it too, so
-// the DSN and the commits name the same identity.
-func envCommitIdentity() (name, email string) {
+// resolveCommitIdentity resolves name and email independently, the way server
+// mode does: GIT_AUTHOR_NAME / GIT_AUTHOR_EMAIL, else what fallback (when
+// non-nil) returns for that field, else beads / beads@local. Every candidate
+// is cleaned first, and one that is empty once cleaned falls through.
+// fallback is called only when the environment leaves a field empty. buildDSN
+// uses it too (without a fallback), so the DSN and the commits name the same
+// identity whenever the environment does.
+func resolveCommitIdentity(fallback func() (name, email string)) (name, email string) {
 	name = cleanCommitIdentityField(os.Getenv("GIT_AUTHOR_NAME"))
 	email = cleanCommitIdentityField(os.Getenv("GIT_AUTHOR_EMAIL"))
+	if (name == "" || email == "") && fallback != nil {
+		fallbackName, fallbackEmail := fallback()
+		if name == "" {
+			name = cleanCommitIdentityField(fallbackName)
+		}
+		if email == "" {
+			email = cleanCommitIdentityField(fallbackEmail)
+		}
+	}
 	if name == "" {
 		name = commitName
 	}

@@ -1038,6 +1038,21 @@ type VersionedHistoryDeferrer interface {
 // row that is not there.
 type VersionedHistoryResolver func(ctx context.Context, readConfig func(ctx context.Context, key string) (string, error)) (enabled bool, err error)
 
+// CommitIdentityConfigurer supplies ONE storage instance with the identity to
+// author its Dolt commits under when the environment names none (GH#7628).
+// GIT_AUTHOR_NAME and GIT_AUTHOR_EMAIL still win field by field; fallback
+// fills only a field they leave empty, and a field neither fills keeps the
+// store's default. The store calls fallback lazily, at most once per call to
+// SetCommitIdentityFallback, on the first commit that needs it — so a command
+// that commits nothing never pays for it. A nil fallback removes it.
+//
+// Per instance, never process-global, for the reason EventsJournalConfigurer
+// gives. Callers type-assert; a store that does not implement it authors
+// commits from its own configuration.
+type CommitIdentityConfigurer interface {
+	SetCommitIdentityFallback(fallback func() (name, email string))
+}
+
 // LifecycleManager provides lifecycle inspection beyond Close().
 type LifecycleManager interface {
 	IsClosed() bool

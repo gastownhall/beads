@@ -293,6 +293,25 @@ For most developers no configuration is needed — issue authorship matches comm
 export BEADS_ACTOR="my-github-handle"
 ```
 
+### Dolt Commit Author (Embedded Mode)
+
+In releases after v1.3.2, the Dolt commits an embedded-mode workspace records
+(every write, `bd dolt commit`, merges from `bd dolt pull`, and blocked-state
+repairs) carry this author. bd resolves the name and the email separately:
+
+- **Name:** `GIT_AUTHOR_NAME`, else the actor resolved
+  [above](#actor-identity-resolution) (including `actor` in `config.yaml`),
+  else `beads`. The final `"unknown"` fallback does not count as an actor;
+  an `"unknown"` you set on purpose does.
+- **Email:** `GIT_AUTHOR_EMAIL`, else `git config user.email`, else
+  `beads@local`.
+
+bd drops `<`, `>`, `(` and `)` from each value and collapses runs of
+whitespace (line breaks included) to one space, so a name such as
+`Alice (bot)` is recorded as `Alice bot`. A value left empty falls through to
+the next source. v1.3.2 and earlier record `beads <beads@local>` for most of
+these commits, and `root <root@%>` for some.
+
 ## Project-Level Settings (Database)
 
 These are written to the Dolt database by `bd config set` and have no env var override, with one exception: `versioned-history.enabled` also honors `BD_VERSIONED_HISTORY_ENABLED` (see [Versioned Issue History](#versioned-issue-history)). Common namespaces:
