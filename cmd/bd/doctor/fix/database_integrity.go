@@ -32,7 +32,10 @@ func doltIntegrityRecovery(path, beadsDir string) error {
 		return err
 	}
 
-	doltPath := getDatabasePath(beadsDir)
+	doltPath, err := confinedDatabasePath(beadsDir, getDatabasePath(beadsDir))
+	if err != nil {
+		return err
+	}
 
 	// Check if dolt directory exists
 	if _, err := os.Stat(doltPath); os.IsNotExist(err) {

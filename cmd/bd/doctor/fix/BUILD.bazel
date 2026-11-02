@@ -64,6 +64,7 @@ go_test(
         "clone_local_fks_cgo_test.go",
         "common_test.go",
         "database_config_test.go",
+        "database_confinement_test.go",
         "database_integrity_test.go",
         "dep_keys_test.go",
         "dependency_sql_test.go",
