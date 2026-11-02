@@ -228,7 +228,9 @@ func TestLifecycle_CrashRecovery(t *testing.T) {
 	if _, err := db.Exec("INSERT INTO crash_test VALUES (1, 'survive')"); err != nil {
 		t.Fatalf("INSERT: %v", err)
 	}
-	// Commit the data so it persists.
+	// Record the data in Dolt history too. Persistence does not need this
+	// (TestLifecycle_SharedServerSQLCommitSurvivesKill covers that state);
+	// this test is about stale-state cleanup after a crash.
 	if _, err := db.Exec("CALL DOLT_COMMIT('-Am', 'crash test data')"); err != nil {
 		t.Logf("DOLT_COMMIT: %v (may be expected if auto-commit is on)", err)
 	}
