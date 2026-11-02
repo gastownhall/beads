@@ -113,7 +113,8 @@ Any key whose name contains `api_key`, `api-key`, `secret`, `token`, or `passwor
 | `dolt.auto-commit` | `--dolt-auto-commit` | `BD_DOLT_AUTO_COMMIT` | `on` | `off\|on\|batch`: `on` creates a Dolt history commit after each successful write; `batch`/`off` defer it to `bd dolt commit` (see [below](#auto-commit-sql-commits-vs-dolt-commits)) |
 | `dolt.auto-push` | — | `BD_DOLT_AUTO_PUSH` | `false` | Auto-push to Dolt remote after writes (opt-in; see [below](#auto-push)) |
 | `dolt.auto-push-interval` | — | `BD_DOLT_AUTO_PUSH_INTERVAL` | `5m` | Minimum time between auto-pushes |
-| `dolt.auto-push-timeout` | — | `BD_DOLT_AUTO_PUSH_TIMEOUT` | `30s` | Timeout for a single auto-push attempt |
+| `dolt.auto-push-timeout` | — | `BD_DOLT_AUTO_PUSH_TIMEOUT` | `30s` | Timeout for a single auto-push attempt (its own budget, separate from `dolt.remote-timeout`) |
+| `dolt.remote-timeout` | — | `BD_DOLT_REMOTE_TIMEOUT` | `5m` | Embedded mode only: deadline for a single remote transfer statement (`bd dolt push`/`pull`/`fetch` and every embedded push/fetch). Unset, invalid, zero or negative values fall back to 5 minutes. See [below](#remote-transfer-timeout) |
 | `dolt.local-only` | — | `BD_DOLT_LOCAL_ONLY` | `false` | Keep Dolt data off the network: skip remote wiring at `bd init`, suppress auto-push, have `bd dolt push`/`pull` and `bd sync` report remote sync as disabled without contacting a remote, and refuse `bd dolt remote add` |
 | `dolt.shared-server` | `--shared-server` | `BEADS_DOLT_SHARED_SERVER` | `false` | Share one Dolt server at `~/.beads/shared-server/` |
 | `dolt.max-conns` | — | `BEADS_DOLT_MAX_CONNS` | `10` | Connection pool size |
@@ -275,6 +276,23 @@ How it works:
 - Last push time and commit are tracked in `.beads/push-state.json`, a per-machine file (not in the database, to avoid merge conflicts across machines).
 
 Before pushing, `bd` verifies the local chunk store with `dolt fsck --quiet`, bounded by a 30-second timeout. For large stores, raise it with the runtime-only `BEADS_FSCK_TIMEOUT` environment variable (accepts durations like `2m` or bare seconds like `90`).
+
+### Remote transfer timeout
+
+In embedded mode (no `dolt sql-server`), every remote transfer — the `DOLT_PUSH` / `DOLT_FETCH` network statements behind `bd dolt push`, `bd dolt pull`, `bd dolt fetch`, `bd sync` and auto-push — runs under a per-statement deadline. A hung `git`/`ssh` transport child otherwise holds the embedded database lock indefinitely, blocking every other `bd` command on the machine (GH#7989).
+
+```yaml
+dolt:
+  remote-timeout: 5m  # Per transfer statement; unset, invalid, zero and negative fall back to 5m
+```
+
+- The deadline covers one push or fetch network statement. It does not cover waiting for the database to open, a pull's local merge and settle work, blocked-work recomputation, or the engine's own teardown after cancellation.
+- Auto-push keeps its own separate, earlier budget (`dolt.auto-push-timeout`, default 30s); an earlier caller deadline always wins over `dolt.remote-timeout`.
+- An earlier caller or harness deadline always keeps its identity in the error; only a transfer that outlives the configured `dolt.remote-timeout` is reported as a remote timeout naming the configuration key.
+- Server-mode and sql-server workspaces are unaffected: their dolt CLI transfers keep the separate `BEADS_CLI_TRANSFER_TIMEOUT` (also 5 minutes by default).
+- On a cancellation, cleanup is cooperative: the first `SIGINT`/`SIGTERM` stops the transfer and flushes pending batch work; a second signal exits immediately.
+
+An embedded open that fails while another `bd` or dolt process holds the database lock reports the database location and how long the open waited, but cannot name the holding process: the storage driver does not expose the lock holder yet. On Unix, `lsof +D '<database directory>'` lists the processes using the database directory (a manual diagnostic, not holder identification — a process's runtime is not its lock hold time).
 
 ## Actor Identity Resolution
 

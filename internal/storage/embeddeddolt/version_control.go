@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
@@ -532,12 +533,34 @@ func remoteAuthUser() string {
 // credential-routing tests swap these to observe the remote name and user each
 // verb presents. TestRemoteEntryPointsUseVersionControlOps pins the production
 // bindings.
+// The remote entry points the verbs below reach are held in variables purely
+// as a test seam: credentials only change the outcome against a remotesapi
+// server enforcing authentication, which a unit test cannot stand up, so the
+// credential-routing tests swap these to observe the remote name and user each
+// verb presents. TestRemoteEntryPointsUseVersionControlOps pins the production
+// bindings. PushTo and PullFrom reach vcPush/vcPull for the same reason
+// (identical operations to Push/Pull's), and the timeout-attach test rides
+// the same seam.
 var (
 	vcPush             = versioncontrolops.Push
 	vcForcePush        = versioncontrolops.ForcePush
 	vcPull             = versioncontrolops.Pull
 	vcPullWithStrategy = versioncontrolops.PullWithStrategy
+	vcFetch            = versioncontrolops.Fetch
 )
+
+// withRemoteTransferTimeout attaches the configured embedded remote transfer
+// deadline (config.DoltRemoteTimeout → dolt.remote-timeout /
+// BD_DOLT_REMOTE_TIMEOUT, GH#7989) to ctx. The value is inert everywhere
+// except the DOLT_PUSH / DOLT_FETCH statement sites (see
+// versioncontrolops.WithRemoteTransferTimeout); the commit-pending,
+// connection-opening, merge, settle and blocked-work steps around those
+// statements keep the caller's context. Every remote entry point below
+// attaches it, so no embedded transfer can hold the database lock forever
+// without a bound.
+func (s *EmbeddedDoltStore) withRemoteTransferTimeout(ctx context.Context) context.Context {
+	return versioncontrolops.WithRemoteTransferTimeout(ctx, config.DoltRemoteTimeout())
+}
 
 func (s *EmbeddedDoltStore) RemoveRemote(ctx context.Context, name string) error {
 	return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
@@ -566,6 +589,7 @@ func (s *EmbeddedDoltStore) ListRemotes(ctx context.Context) ([]storage.RemoteIn
 // where before it read it holding no lock at all.
 
 func (s *EmbeddedDoltStore) Push(ctx context.Context) error {
+	ctx = s.withRemoteTransferTimeout(ctx)
 	// GH#5433: every Pull variant below auto-commits pending changes first;
 	// push never did, so a working set with pending-but-uncommitted changes
 	// (auto-commit off, or a session that ended right after a write with no
@@ -582,6 +606,7 @@ func (s *EmbeddedDoltStore) Push(ctx context.Context) error {
 }
 
 func (s *EmbeddedDoltStore) Pull(ctx context.Context) error {
+	ctx = s.withRemoteTransferTimeout(ctx)
 	// GH#2474 / bd-578h9.2: auto-commit pending changes before pull, matching
 	// server-mode pullFromRemote and PullFrom. Leftovers from a crashed
 	// command would otherwise make the merge refuse to start.
@@ -605,6 +630,7 @@ func (s *EmbeddedDoltStore) Pull(ctx context.Context) error {
 // auto-resolver declines are resolved with strategy instead of aborting the
 // merge for the operator; see versioncontrolops.PullWithStrategy.
 func (s *EmbeddedDoltStore) PullWithStrategy(ctx context.Context, strategy string) error {
+	ctx = s.withRemoteTransferTimeout(ctx)
 	if _, err := s.CommitPending(ctx, "beads"); err != nil {
 		return fmt.Errorf("commit pending before pull: %w", err)
 	}
@@ -623,6 +649,7 @@ func (s *EmbeddedDoltStore) PullWithStrategy(ctx context.Context, strategy strin
 // PullRemoteWithStrategy implements storage.StrategicPuller for a named
 // remote; see PullWithStrategy.
 func (s *EmbeddedDoltStore) PullRemoteWithStrategy(ctx context.Context, remote, strategy string) error {
+	ctx = s.withRemoteTransferTimeout(ctx)
 	if _, err := s.CommitPending(ctx, "beads"); err != nil {
 		return fmt.Errorf("commit pending before pull: %w", err)
 	}
@@ -639,6 +666,7 @@ func (s *EmbeddedDoltStore) PullRemoteWithStrategy(ctx context.Context, remote, 
 }
 
 func (s *EmbeddedDoltStore) ForcePush(ctx context.Context) error {
+	ctx = s.withRemoteTransferTimeout(ctx)
 	// GH#5433: see Push.
 	if _, err := s.CommitPending(ctx, "beads"); err != nil {
 		return fmt.Errorf("commit pending before push: %w", err)
@@ -651,6 +679,7 @@ func (s *EmbeddedDoltStore) ForcePush(ctx context.Context) error {
 }
 
 func (s *EmbeddedDoltStore) PushRemote(ctx context.Context, remote string, force bool) error {
+	ctx = s.withRemoteTransferTimeout(ctx)
 	// GH#5433: see Push.
 	if _, err := s.CommitPending(ctx, "beads"); err != nil {
 		return fmt.Errorf("commit pending before push: %w", err)
@@ -666,6 +695,7 @@ func (s *EmbeddedDoltStore) PushRemote(ctx context.Context, remote string, force
 }
 
 func (s *EmbeddedDoltStore) PullRemote(ctx context.Context, remote string) error {
+	ctx = s.withRemoteTransferTimeout(ctx)
 	// GH#2474 / bd-578h9.2: see Pull.
 	if _, err := s.CommitPending(ctx, "beads"); err != nil {
 		return fmt.Errorf("commit pending before pull: %w", err)
@@ -683,26 +713,29 @@ func (s *EmbeddedDoltStore) PullRemote(ctx context.Context, remote string) error
 }
 
 func (s *EmbeddedDoltStore) Fetch(ctx context.Context, peer string) error {
+	ctx = s.withRemoteTransferTimeout(ctx)
 	return s.withPeerAuth(ctx, peer, func(user string) error {
 		return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
-			return versioncontrolops.Fetch(ctx, db, peer, user)
+			return vcFetch(ctx, db, peer, user)
 		})
 	})
 }
 
 func (s *EmbeddedDoltStore) PushTo(ctx context.Context, peer string) error {
+	ctx = s.withRemoteTransferTimeout(ctx)
 	// GH#5433: see Push.
 	if _, err := s.CommitPending(ctx, "beads"); err != nil {
 		return fmt.Errorf("commit pending before push: %w", err)
 	}
 	return s.withPeerAuth(ctx, peer, func(user string) error {
 		return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
-			return versioncontrolops.Push(ctx, db, peer, s.branch, user)
+			return vcPush(ctx, db, peer, s.branch, user)
 		})
 	})
 }
 
 func (s *EmbeddedDoltStore) PullFrom(ctx context.Context, peer string) ([]storage.Conflict, error) {
+	ctx = s.withRemoteTransferTimeout(ctx)
 	// Auto-commit pending changes before pull to prevent
 	// "cannot merge with uncommitted changes" errors.
 	if _, err := s.CommitPending(ctx, "beads"); err != nil {
@@ -713,7 +746,7 @@ func (s *EmbeddedDoltStore) PullFrom(ctx context.Context, peer string) ([]storag
 	var conflicts []storage.Conflict
 	err := s.withPeerAuth(ctx, peer, func(user string) error {
 		return s.withMutatingPinnedDBConn(ctx, func(db versioncontrolops.DBConn) error {
-			if pullErr := versioncontrolops.Pull(ctx, db, peer, s.branch, user); pullErr != nil {
+			if pullErr := vcPull(ctx, db, peer, s.branch, user); pullErr != nil {
 				// bd-578h9.15: the settle machinery aborts a merge it cannot
 				// auto-resolve before returning, so dolt_conflicts is already
 				// empty here; the conflicts arrive captured pre-abort inside

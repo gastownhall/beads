@@ -848,6 +848,30 @@ func Set(key string, value interface{}) {
 	}
 }
 
+// DefaultDoltRemoteTimeout is the default per-statement deadline for
+// embedded Dolt remote transfers (the DOLT_PUSH / DOLT_FETCH network
+// statements), matching the server-mode dolt CLI transfer default
+// (BEADS_CLI_TRANSFER_TIMEOUT). A hung git/ssh transport must not hold the
+// embedded database lock indefinitely (GH#7989), but local work around a
+// transfer — opening the database, a pull's merge and settle, blocked-work
+// recomputation — is NOT covered by this deadline.
+const DefaultDoltRemoteTimeout = 5 * time.Minute
+
+// DoltRemoteTimeout returns the configured embedded remote transfer deadline
+// (dolt.remote-timeout / BD_DOLT_REMOTE_TIMEOUT). Positive durations override
+// the DefaultDoltRemoteTimeout fallback; missing, unparsable, zero and
+// negative values — including an uninitialized SDK configuration — fall back
+// to it, so the deadline is always bounded.
+func DoltRemoteTimeout() time.Duration {
+	if v == nil {
+		return DefaultDoltRemoteTimeout
+	}
+	if d := v.GetDuration("dolt.remote-timeout"); d > 0 {
+		return d
+	}
+	return DefaultDoltRemoteTimeout
+}
+
 // BindPFlag is reserved for future use if we want to bind Cobra flags directly to Viper
 // For now, we handle flag precedence manually in PersistentPreRun
 // Uncomment and implement if needed:

@@ -42,6 +42,7 @@ go_test(
         "git_routing_test.go",
         "permissions_linux_test.go",
         "permissions_test.go",
+        "remote_timeout_test.go",
         "repos_test.go",
         "sync_test.go",
         "testmain_test.go",

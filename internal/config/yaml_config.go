@@ -118,6 +118,10 @@ var YamlOnlyKeys = map[string]bool{
 	"dolt.pool-read-timeout":  true, // Pool per-I/O read deadline override (default 10s, bd-vz0y9)
 	"dolt.pool-write-timeout": true, // Pool per-I/O write deadline override (default 10s, bd-vz0y9)
 	"dolt.debug":              true, // Debug-mode dolt sql-server: --loglevel=debug + --prof cpu
+	// Embedded remote transfer deadline (GH#7989). Read through viper
+	// (config.DoltRemoteTimeout) before and during remote statements, so a
+	// DB-backed write would be set successfully and never read.
+	"dolt.remote-timeout": true,
 
 	// Secrets: tokens and API keys must NOT be stored in the Dolt database
 	// because that data is pushed to remotes, triggering secret-scanning

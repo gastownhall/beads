@@ -239,6 +239,7 @@ go_test(
         "remote_migrate_gate_test.go",
         "remote_peer_auth_test.go",
         "remote_sync_gate_test.go",
+        "remote_transfer_timeout_test.go",
         "reopen_category_test.go",
         "retention_epoch_contract_test.go",
         "role_fixture_kit_test.go",
@@ -267,6 +268,7 @@ go_test(
     deps = [
         "//:beads",
         "//backend/conformance",
+        "//internal/config",
         "//internal/debug",
         "//internal/eventsjournal",
         "//internal/hooks",
