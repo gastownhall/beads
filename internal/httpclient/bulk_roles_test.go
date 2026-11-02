@@ -524,6 +524,48 @@ func TestDeleteSendsTheIDsVerbatim(t *testing.T) {
 	}
 }
 
+// TestDeleteCascadeRefusesAServerWithoutContainmentCascade is the skew half of
+// GH#6301. A server older than issues.delete.containmentCascade answers a
+// cascade by following EVERY dependency type, so a cascade sent to it — a
+// preview included, whose ids the caller is about to act on — would delete or
+// name rows this client promises survive. It refuses before dialing; a
+// request without cascade means the same thing on both and still goes.
+// The tokens are spelled literally, as an oracle independent of the code.
+func TestDeleteCascadeRefusesAServerWithoutContainmentCascade(t *testing.T) {
+	masked := &apigen.ContextResponse{Capabilities: []string{"issues.delete"}}
+
+	for _, dryRun := range []bool{false, true} {
+		w := &stubWire{}
+		deleter, err := New(testTarget(t), w, masked).Deleter()
+		if err != nil {
+			t.Fatalf("Deleter(): %v", err)
+		}
+		_, err = deleter.Delete(t.Context(), issueops.DeleteRequest{IDs: []string{"bd-1"}, Cascade: true, Force: true, DryRun: dryRun})
+		var unsup *storage.ErrUnsupported
+		if !errors.As(err, &unsup) {
+			t.Fatalf("DryRun=%v: Delete error = %v, want *storage.ErrUnsupported", dryRun, err)
+		}
+		if unsup.Capability != "issues.delete.containmentCascade" || unsup.Op != "Deleter.Delete" {
+			t.Errorf("DryRun=%v: refusal = %q/%q, want Deleter.Delete/issues.delete.containmentCascade", dryRun, unsup.Op, unsup.Capability)
+		}
+		if slices.Contains(w.calls, "deleteIssues") {
+			t.Errorf("DryRun=%v: calls = %v, want no deletion request", dryRun, w.calls)
+		}
+	}
+
+	w := &stubWire{}
+	deleter, err := New(testTarget(t), w, masked).Deleter()
+	if err != nil {
+		t.Fatalf("Deleter(): %v", err)
+	}
+	if _, err := deleter.Delete(t.Context(), issueops.DeleteRequest{IDs: []string{"bd-1"}, Force: true}); err != nil {
+		t.Fatalf("Delete without cascade: %v, want it sent", err)
+	}
+	if !slices.Contains(w.calls, "deleteIssues") {
+		t.Errorf("calls = %v, want the deletion request", w.calls)
+	}
+}
+
 // TestDeleteRefusesAnUnusableIDList pins the refusals the role's own contract
 // states, all of them decidable from the request alone. The empty case is the
 // dangerous one: answering it as a cheerful "deleted 0" is how a caller whose
