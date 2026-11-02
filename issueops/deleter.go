@@ -100,11 +100,10 @@ type DeleteRequest struct {
 	// It follows containment only (GH#6301): a row that merely blocks, relates
 	// to or was discovered from a deleted row is not part of its tree.
 	//
-	// WITH CASCADE THERE IS NOTHING LEFT TO ORPHAN, by construction: the
-	// closure contains every dependent of every row it deletes. So Cascade
-	// makes Force moot rather than conflicting with it — a request carrying
-	// both is legal and behaves as Cascade, and DeleteResult.Orphaned comes
-	// back empty.
+	// A CASCADE ORPHANS what its tree leaves behind: every surviving row with
+	// an edge of any other type into the tree loses that edge and is named in
+	// DeleteResult.Orphaned. Cascade makes Force moot rather than conflicting
+	// with it — a request carrying both is legal and behaves as Cascade.
 	//
 	// The traversal is BOUNDED. A closure that grows past the backend's
 	// runaway limit aborts the whole request and deletes nothing rather than
@@ -183,9 +182,10 @@ type DeleteResult struct {
 	// Orphaned names the surviving rows that depended on something this
 	// request deleted, in ascending id order.
 	//
-	// It is populated exactly when the request carried Force without Cascade —
-	// the only mode in which orphaning is possible — and is empty otherwise.
-	// It is also carried on the DependentsOutsideRequestError the unforced
+	// It is populated under Cascade (the rows joined to the deleted tree by
+	// any edge other than parent-child, checked against every deleted row) and
+	// under Force without Cascade, and is empty otherwise. A DryRun names the
+	// same rows the deletion would. It is also carried on the DependentsOutsideRequestError the unforced
 	// mode returns, so the same fact reaches a caller whichever answer it got.
 	//
 	// It is DIRECT dependents only. A row two edges away loses no edge and is

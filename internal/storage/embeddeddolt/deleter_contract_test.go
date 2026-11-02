@@ -49,6 +49,9 @@ func TestDeleterContract(t *testing.T) {
 	t.Run("CascadeFollowsOnlyContainment", func(t *testing.T) {
 		conformance.RunDeleterCascadeFollowsOnlyContainment(t, ctx, fixture)
 	})
+	t.Run("CascadeReportsSurvivingDependents", func(t *testing.T) {
+		conformance.RunDeleterCascadeReportsSurvivingDependents(t, ctx, fixture)
+	})
 	t.Run("GuardsAWispNamedWithADurableDependent", func(t *testing.T) {
 		conformance.RunDeleterGuardsAWispNamedWithADurableDependent(t, ctx, fixture)
 	})
