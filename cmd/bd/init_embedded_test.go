@@ -2496,3 +2496,122 @@ func TestEmbeddedInitReinitLocalNonInteractiveTakesTokenPath(t *testing.T) {
 		}
 	})
 }
+
+// TestEmbeddedInitSkipGitCommit pins the Git opt-out of GH#3495's
+// remediation: the bootstrap commit used to be unavoidable — even a fresh
+// workspace's .beads got staged and committed into the project's repository,
+// with no flag to decline it. --skip-git-commit makes init create its normal
+// files without staging them and without moving HEAD, and it preserves
+// whatever the index already held; without the flag, the bootstrap commit
+// keeps its existing behavior. The reinit route takes the same opt-out.
+func TestEmbeddedInitSkipGitCommit(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt init tests")
+	}
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
+
+	// repoWithStagedFile builds a git repository holding one commit on HEAD
+	// and one unrelated staged file, so both assertions below can tell the
+	// bootstrap commit and its staging apart from fixture noise.
+	repoWithStagedFile := func(t *testing.T) (dir string, head string) {
+		t.Helper()
+		dir = t.TempDir()
+		initGitRepoAt(t, dir)
+		if err := os.WriteFile(filepath.Join(dir, "existing.txt"), []byte("existing\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		gitRun := func(args ...string) string {
+			t.Helper()
+			cmd := gitCommand(args...)
+			cmd.Dir, cmd.Env = dir, gitenv.ScrubRouting(os.Environ())
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("git %v: %v\n%s", args, err, out)
+			}
+			return strings.TrimSpace(string(out))
+		}
+		gitRun("add", "existing.txt")
+		gitRun("-c", "core.hooksPath=", "commit", "--quiet", "-m", "existing")
+		if err := os.WriteFile(filepath.Join(dir, "unrelated.txt"), []byte("unrelated\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		gitRun("add", "unrelated.txt")
+		return dir, gitRun("rev-parse", "HEAD")
+	}
+	gitIn := func(t *testing.T, dir string, args ...string) string {
+		t.Helper()
+		cmd := gitCommand(args...)
+		cmd.Dir, cmd.Env = dir, gitenv.ScrubRouting(os.Environ())
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+
+	t.Run("with the flag: files created, HEAD and index preserved", func(t *testing.T) {
+		dir, head := repoWithStagedFile(t)
+		out, code := runBDExit(t, bd, dir,
+			"init", "--quiet", "--prefix", "fi", "--non-interactive",
+			"--skip-hooks", "--skip-agents", "--role", "maintainer", "--skip-git-commit")
+		if code != 0 {
+			t.Fatalf("init --skip-git-commit exited %d, want 0:\n%s", code, out)
+		}
+		// The init files exist: the opt-out skips the commit, not the work.
+		beadsDir := filepath.Join(dir, ".beads")
+		requireFile(t, filepath.Join(beadsDir, "embeddeddolt", "fi"))
+		if _, err := os.Stat(filepath.Join(beadsDir, "metadata.json")); err != nil {
+			t.Errorf("init --skip-git-commit did not create .beads/metadata.json: %v", err)
+		}
+		if got := gitIn(t, dir, "rev-parse", "HEAD"); got != head {
+			t.Errorf("init --skip-git-commit moved HEAD:\n before: %s\n after:  %s\n%s", head, got, out)
+		}
+		if got := gitIn(t, dir, "diff", "--cached", "--name-only"); got != "unrelated.txt" {
+			t.Errorf("init --skip-git-commit disturbed the preexisting index, staged = %q:\n%s", got, out)
+		}
+		if tracked := gitIn(t, dir, "ls-files", "--", ".beads"); tracked != "" {
+			t.Errorf("init --skip-git-commit staged .beads into the index: %q", tracked)
+		}
+	})
+
+	t.Run("without the flag: the bootstrap commit keeps its behavior", func(t *testing.T) {
+		dir, head := repoWithStagedFile(t)
+		out, code := runBDExit(t, bd, dir,
+			"init", "--quiet", "--prefix", "fi", "--non-interactive",
+			"--skip-hooks", "--skip-agents", "--role", "maintainer")
+		if code != 0 {
+			t.Fatalf("init without --skip-git-commit exited %d, want 0:\n%s", code, out)
+		}
+		if got := gitIn(t, dir, "rev-parse", "HEAD"); got == head {
+			t.Errorf("init without --skip-git-commit left HEAD unmoved; the bootstrap commit is missing:\n%s", out)
+		}
+		if got := gitIn(t, dir, "log", "-1", "--pretty=%s"); got != "bd init: initialize beads issue tracking" {
+			t.Errorf("HEAD's message = %q, want the bootstrap commit", got)
+		}
+	})
+
+	t.Run("reinit takes the same opt-out", func(t *testing.T) {
+		// bdInit's workspace already took its bootstrap commit; the reinit
+		// below must not take another one under the opt-out. The store holds
+		// zero issues, so no confirmation is needed either way.
+		dir, _, _ := bdInit(t, bd, "--prefix", "fi", "--skip-agents")
+		if err := os.WriteFile(filepath.Join(dir, "unrelated.txt"), []byte("unrelated\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		gitIn(t, dir, "add", "unrelated.txt")
+		head := gitIn(t, dir, "rev-parse", "HEAD")
+		out, code := runBDExit(t, bd, dir,
+			"init", "--quiet", "--reinit-local", "--prefix", "fi", "--non-interactive",
+			"--skip-hooks", "--skip-agents", "--role", "maintainer", "--skip-git-commit")
+		if code != 0 {
+			t.Fatalf("reinit --skip-git-commit exited %d, want 0:\n%s", code, out)
+		}
+		if got := gitIn(t, dir, "rev-parse", "HEAD"); got != head {
+			t.Errorf("reinit --skip-git-commit moved HEAD:\n before: %s\n after:  %s\n%s", head, got, out)
+		}
+		if got := gitIn(t, dir, "diff", "--cached", "--name-only"); got != "unrelated.txt" {
+			t.Errorf("reinit --skip-git-commit disturbed the preexisting index, staged = %q:\n%s", got, out)
+		}
+	})
+}

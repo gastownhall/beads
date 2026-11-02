@@ -86,6 +86,17 @@ STORE SWITCHES (--reinit-local)
   at a terminal it asks you to type a phrase naming what you are
   leaving (for example: 'leave <database> behind').
 
+GIT OPT-OUT (--skip-git-commit)
+
+  bd init's last step stages its artifacts (.beads/, the agent
+  instructions) and makes a "bd init: initialize beads issue tracking"
+  commit in the project's Git repository. --skip-git-commit declines
+  that commit only: the files are still created, nothing is staged,
+  and whatever the index already held is left untouched. It does not
+  touch the store's own Dolt history, and it does not authorize any
+  store switch or remote-history discard — those keep their own
+  confirmations above.
+
 ADOPTING A REMOTE
 
   If you want to use the remote's existing history, use:

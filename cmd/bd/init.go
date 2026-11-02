@@ -572,6 +572,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		stealth, _ := cmd.Flags().GetBool("stealth")
 		skipHooks, _ := cmd.Flags().GetBool("skip-hooks")
 		skipAgents, _ := cmd.Flags().GetBool("skip-agents")
+		skipGitCommit, _ := cmd.Flags().GetBool("skip-git-commit")
 		force, _ := cmd.Flags().GetBool("force")
 		reinitLocal, _ := cmd.Flags().GetBool("reinit-local")
 		initIfMissing, _ := cmd.Flags().GetBool("init-if-missing")
@@ -888,6 +889,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				stealth:                stealth,
 				skipHooks:              skipHooks,
 				skipAgents:             skipAgents,
+				skipGitCommit:          skipGitCommit,
 				keepHomeClean:          keepHomeClean,
 				reinitLocal:            reinitLocal,
 				contributor:            contributor,
@@ -2455,7 +2457,10 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// Not under keepHomeClean: the repository git finds from the home is
 		// not the project's, and the commit would stage the legacy ~/.beads
 		// and the home's own agent files into it (see guardInitInHomeDir).
-		if !stealth && useLocalBeads && !keepHomeClean {
+		// --skip-git-commit declines the bootstrap commit only: the files are
+		// already on disk above, and the workspace's Dolt commits are init's
+		// own storage, not the project repository's.
+		if !stealth && useLocalBeads && !keepHomeClean && !skipGitCommit {
 			commitEmbeddedInitArtifacts(cwd, quiet)
 		}
 
@@ -2567,6 +2572,7 @@ func init() {
 	initCmd.Flags().Bool("setup-exclude", false, "Configure .git/info/exclude to keep beads files local (for forks)")
 	initCmd.Flags().Bool("skip-hooks", false, "Skip git hooks installation")
 	initCmd.Flags().Bool("skip-agents", false, "Skip AGENTS.md and Claude/Codex/Cursor setup generation")
+	initCmd.Flags().Bool("skip-git-commit", false, "Skip the bootstrap commit: init still creates its files but stages and commits nothing in the project's Git repository")
 	initCmd.Flags().Bool("force", false, "Deprecated alias for --reinit-local. Bypasses only the LOCAL data-safety guard; does NOT authorize remote divergence or recreating a missing server-mode database (see 'bd help init-safety').")
 	initCmd.Flags().Bool("reinit-local", false, "Re-initialize local .beads/ over existing local data. Does NOT authorize remote divergence (see --discard-remote) or recreating a missing server-mode database (see --recreate-missing).")
 	initCmd.Flags().Bool("discard-remote", false, "Authorize discarding the configured remote's Dolt history when re-initializing. Requires --destroy-token in non-interactive mode; see 'bd help init-safety'.")

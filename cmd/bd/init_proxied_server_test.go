@@ -877,3 +877,76 @@ func TestInitHooksEmptyPathRetainsUseCase(t *testing.T) {
 	require.Same(t, supplied, fs)
 	require.Nil(t, hooks)
 }
+
+// TestProxiedInitTailSkipGitCommit pins the proxied-server route's half of
+// the --skip-git-commit opt-out: the tail must leave the project repository's
+// HEAD and index exactly as the operator left them, while the artifacts stay
+// on disk. Without the opt-out, the bootstrap commit keeps its behavior.
+func TestProxiedInitTailSkipGitCommit(t *testing.T) {
+	for _, entry := range os.Environ() {
+		key := gitenv.EntryKey(entry)
+		if gitenv.IsRoutingKeyForOS(key, runtime.GOOS) {
+			t.Setenv(key, "")
+			require.NoError(t, os.Unsetenv(key))
+		}
+	}
+	home := t.TempDir()
+	for _, key := range []string{"HOME", "USERPROFILE", "XDG_CONFIG_HOME"} {
+		t.Setenv(key, home)
+	}
+	target := t.TempDir()
+	runGit := func(args ...string) string {
+		t.Helper()
+		cmd := gitCommand(args...)
+		cmd.Dir, cmd.Env = target, gitenv.ScrubRouting(os.Environ())
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "fixture git %v: %s", args, out)
+		return strings.TrimSpace(string(out))
+	}
+	runGit("init", "--quiet")
+	for key, value := range map[string]string{"user.name": "Fixture", "user.email": "fixture@example.test", "commit.gpgSign": "false", "core.hooksPath": ".git/hooks"} {
+		runGit("config", "--local", key, value)
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(target, "existing.txt"), []byte("existing\n"), 0600))
+	runGit("add", "existing.txt")
+	runGit("-c", "core.hooksPath=", "commit", "--quiet", "-m", "existing")
+	require.NoError(t, os.WriteFile(filepath.Join(target, "unrelated.txt"), []byte("unrelated\n"), 0600))
+	runGit("add", "unrelated.txt")
+	// The artifacts the tail would commit: on disk either way.
+	require.NoError(t, os.Mkdir(filepath.Join(target, ".beads"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(target, ".beads", "artifact"), []byte("artifact\n"), 0600))
+	require.NoError(t, os.WriteFile(filepath.Join(target, "CLAUDE.md"), []byte("optional\n"), 0600))
+	head := runGit("rev-parse", "HEAD")
+
+	runTail := func(skipGitCommit bool) {
+		t.Helper()
+		cmd := &cobra.Command{}
+		cmd.Flags().Bool("setup-exclude", false, "")
+		in := initProxiedServerInput{skipHooks: true, skipAgents: true, skipGitCommit: skipGitCommit, nonInteractive: true}
+		captureStderr(t, func() {
+			require.NoError(t, runInitProxiedServerTail(cmd, t.Context(), in, runInitTailContext{
+				workDir:       target,
+				beadsDir:      filepath.Join(target, ".beads"),
+				useLocalBeads: true,
+				fsUseCase:     &initTailForkObservation{},
+				gitUC:         storagegit.NewGitProvider(target).GitUseCase(),
+			}))
+		})
+	}
+
+	t.Run("with the opt-out: HEAD and index preserved, artifacts on disk", func(t *testing.T) {
+		runTail(true)
+		require.Equal(t, head, runGit("rev-parse", "HEAD"), "tail moved HEAD under --skip-git-commit")
+		require.Equal(t, "unrelated.txt", runGit("diff", "--cached", "--name-only"), "tail disturbed the preexisting index")
+		require.Empty(t, runGit("ls-files", "--", ".beads"), "tail staged .beads under --skip-git-commit")
+		if _, err := os.Stat(filepath.Join(target, ".beads", "artifact")); err != nil {
+			t.Errorf("the opt-out skipped the file generation too: %v", err)
+		}
+	})
+
+	t.Run("without the opt-out: the bootstrap commit keeps its behavior", func(t *testing.T) {
+		runTail(false)
+		require.NotEqual(t, head, runGit("rev-parse", "HEAD"), "bootstrap commit is missing")
+		require.Equal(t, "artifact", runGit("show", "HEAD:.beads/artifact"))
+	})
+}

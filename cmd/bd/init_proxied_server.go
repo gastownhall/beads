@@ -41,6 +41,7 @@ type initProxiedServerInput struct {
 	stealth                bool
 	skipHooks              bool
 	skipAgents             bool
+	skipGitCommit          bool
 	keepHomeClean          bool // see guardInitInHomeDir
 	reinitLocal            bool
 	contributor            bool
@@ -666,7 +667,10 @@ func runInitProxiedServerTail(cmd *cobra.Command, ctx context.Context, in initPr
 		}
 	}
 
-	if !in.stealth && isRepo && t.useLocalBeads {
+	// --skip-git-commit declines the bootstrap commit only: the files are
+	// already on disk, and the workspace's Dolt commits live in the proxied
+	// store, not in the project repository.
+	if !in.stealth && isRepo && t.useLocalBeads && !in.skipGitCommit {
 		commitResult, err := gitUC.CommitInitArtifacts(ctx, domain.CommitInitArtifactsParams{
 			BeadsDir: ".beads/",
 			OptionalPaths: []string{
