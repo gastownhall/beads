@@ -122,14 +122,11 @@ func (s *DoltStore) getWispLabels(ctx context.Context, issueID string) ([]string
 // Delegates SQL work to issueops.UpdateIssueInTx; no Dolt versioning needed
 // since wisps live in dolt_ignored tables.
 func (s *DoltStore) updateWisp(ctx context.Context, id string, updates map[string]interface{}, actor string) error {
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, done, err := s.beginJournalScopedTx(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
+		return err
 	}
-	defer func() { _ = tx.Rollback() }()
-
-	clearJournalScope := s.scopeEventsJournalTransaction(tx)
-	defer clearJournalScope()
+	defer done()
 	clearRecheckScope := issueops.ScopeBlockedRecheckTransaction(tx)
 	defer clearRecheckScope()
 
@@ -151,14 +148,11 @@ func (s *DoltStore) updateWisp(ctx context.Context, id string, updates map[strin
 // the rest of the wisp write path — do not add one here); wisps live in
 // dolt_ignored tables, so there is no DOLT_COMMIT.
 func (s *DoltStore) updateWispChecked(ctx context.Context, id string, updates map[string]interface{}, actor string, opts storage.UpdateIssueOptions) error {
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, done, err := s.beginJournalScopedTx(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
+		return err
 	}
-	defer func() { _ = tx.Rollback() }()
-
-	clearJournalScope := s.scopeEventsJournalTransaction(tx)
-	defer clearJournalScope()
+	defer done()
 	clearRecheckScope := issueops.ScopeBlockedRecheckTransaction(tx)
 	defer clearRecheckScope()
 
@@ -181,14 +175,11 @@ func (s *DoltStore) updateWispChecked(ctx context.Context, id string, updates ma
 // Delegates SQL work to issueops.CloseIssueInTx; no Dolt versioning needed
 // since wisps live in dolt_ignored tables.
 func (s *DoltStore) closeWisp(ctx context.Context, id string, reason string, actor string, session string) error {
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, done, err := s.beginJournalScopedTx(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
+		return err
 	}
-	defer func() { _ = tx.Rollback() }()
-
-	clearJournalScope := s.scopeEventsJournalTransaction(tx)
-	defer clearJournalScope()
+	defer done()
 	clearRecheckScope := issueops.ScopeBlockedRecheckTransaction(tx)
 	defer clearRecheckScope()
 
@@ -216,14 +207,11 @@ func (s *DoltStore) closeWisp(ctx context.Context, id string, reason string, act
 // rather than ErrVersionMismatch. Either way atomicity holds: no lost update and
 // no stale close.
 func (s *DoltStore) closeWispChecked(ctx context.Context, id string, actor string, opts storage.CloseIssueOptions) (storage.CloseIssueResult, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, done, err := s.beginJournalScopedTx(ctx)
 	if err != nil {
-		return storage.CloseIssueResult{}, fmt.Errorf("failed to begin transaction: %w", err)
+		return storage.CloseIssueResult{}, err
 	}
-	defer func() { _ = tx.Rollback() }()
-
-	clearJournalScope := s.scopeEventsJournalTransaction(tx)
-	defer clearJournalScope()
+	defer done()
 	clearRecheckScope := issueops.ScopeBlockedRecheckTransaction(tx)
 	defer clearRecheckScope()
 
@@ -240,14 +228,11 @@ func (s *DoltStore) closeWispChecked(ctx context.Context, id string, actor strin
 
 // deleteWisp permanently removes a wisp and its related data.
 func (s *DoltStore) deleteWisp(ctx context.Context, id string) error {
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, done, err := s.beginJournalScopedTx(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
+		return err
 	}
-	defer func() { _ = tx.Rollback() }()
-
-	clearJournalScope := s.scopeEventsJournalTransaction(tx)
-	defer clearJournalScope()
+	defer done()
 	clearRecheckScope := issueops.ScopeBlockedRecheckTransaction(tx)
 	defer clearRecheckScope()
 
@@ -336,14 +321,11 @@ func (s *DoltStore) deleteWispBatch(ctx context.Context, ids []string) (int, err
 // Keeping each transaction to ≤200 wisps (8 DELETE statements) ensures it
 // completes well within Dolt's 10 s write timeout.
 func (s *DoltStore) deleteWispBatchTx(ctx context.Context, ids []string) (int, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, done, err := s.beginJournalScopedTx(ctx)
 	if err != nil {
-		return 0, fmt.Errorf("failed to begin transaction: %w", err)
+		return 0, err
 	}
-	defer func() { _ = tx.Rollback() }()
-
-	clearJournalScope := s.scopeEventsJournalTransaction(tx)
-	defer clearJournalScope()
+	defer done()
 	clearRecheckScope := issueops.ScopeBlockedRecheckTransaction(tx)
 	defer clearRecheckScope()
 
@@ -410,14 +392,11 @@ func (s *DoltStore) deleteWispBatchTx(ctx context.Context, ids []string) (int, e
 // Delegates SQL work to issueops.ClaimIssueInTx; no Dolt versioning needed
 // since wisps live in dolt_ignored tables.
 func (s *DoltStore) claimWisp(ctx context.Context, id string, actor string) error {
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, done, err := s.beginJournalScopedTx(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
+		return err
 	}
-	defer func() { _ = tx.Rollback() }()
-
-	clearJournalScope := s.scopeEventsJournalTransaction(tx)
-	defer clearJournalScope()
+	defer done()
 
 	if _, err := issueops.ClaimIssueInTx(ctx, tx, id, actor); err != nil {
 		return err
@@ -599,14 +578,11 @@ func (s *DoltStore) getWispsByIDs(ctx context.Context, ids []string) ([]*types.I
 
 // addWispDependency adds a dependency to the wisp_dependencies table.
 func (s *DoltStore) addWispDependency(ctx context.Context, dep *types.Dependency, actor string, isCrossPrefix, emitEvent bool) error {
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, done, err := s.beginJournalScopedTx(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
+		return err
 	}
-	defer func() { _ = tx.Rollback() }()
-
-	clearJournalScope := s.scopeEventsJournalTransaction(tx)
-	defer clearJournalScope()
+	defer done()
 
 	kind := issueops.ClassifyDepTarget(ctx, tx, dep, isCrossPrefix)
 	// Wisp source/event tables are dolt_ignored (committed with the SQL tx, not
