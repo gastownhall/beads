@@ -1126,6 +1126,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Schema migration now completes on a Dolt session running with
+  `@@dolt_transaction_commit=1` (for example a sql-server with
+  `SET PERSIST dolt_transaction_commit=1`). Each statement committed itself,
+  so the inline commits in migrations 0040 and 0041 found nothing to commit
+  and a fresh `bd init --server` stopped at schema 39 with
+  `Error 1105: nothing to commit`. bd now turns the setting off on its own
+  session for the migration pass; the server's setting is unchanged. This
+  does not repair a workspace an earlier failed init already left behind
+  (#4137, reported by @blairsilverberg).
 - `bd dolt push <remote>` and `bd dolt pull <remote>` now push to and pull
   from the named remote. bd ignored the name, so `bd dolt push 1st` pushed to
   the default remote and reported "Push complete."; a name that differs from

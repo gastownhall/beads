@@ -202,6 +202,7 @@ go_test(
         "merge_strategy_test.go",
         "metadata_cas_contract_test.go",
         "metadata_number_fidelity_test.go",
+        "migrate_0028_transaction_commit_test.go",
         "migrate_consent_gate_test.go",
         "migrate_dep_rekey_dedup_test.go",
         "migrate_events_flip_test.go",
