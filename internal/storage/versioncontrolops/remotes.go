@@ -72,12 +72,16 @@ func RemoveRemote(ctx context.Context, db DBConn, name string) error {
 // concurrent in-flight connections (bd-6dnrw.10).
 func Fetch(ctx context.Context, db DBConn, peer, user string) error {
 	err := withRemoteEnvGuards(func() error {
-		if user != "" {
-			_, err := db.ExecContext(ctx, "CALL DOLT_FETCH('--user', ?, ?)", user, peer)
+		// The transfer deadline (GH#7989) starts here, inside the guards:
+		// env scrubbing must not burn the budget. See withTransferTimeout.
+		return withTransferTimeout(ctx, "fetch", func(stmtCtx context.Context) error {
+			if user != "" {
+				_, err := db.ExecContext(stmtCtx, "CALL DOLT_FETCH('--user', ?, ?)", user, peer)
+				return err
+			}
+			_, err := db.ExecContext(stmtCtx, "CALL DOLT_FETCH(?)", peer)
 			return err
-		}
-		_, err := db.ExecContext(ctx, "CALL DOLT_FETCH(?)", peer)
-		return err
+		})
 	})
 	if err != nil {
 		return fmt.Errorf("fetch from %s: %w", peer, err)
@@ -91,12 +95,15 @@ func Fetch(ctx context.Context, db DBConn, peer, user string) error {
 // pushing to a remotesapi server that enforces CLONE_ADMIN authentication.
 func Push(ctx context.Context, db DBConn, remote, branch, user string) error {
 	err := withRemoteEnvGuards(func() error {
-		if user != "" {
-			_, err := db.ExecContext(ctx, "CALL DOLT_PUSH('--user', ?, ?, ?)", user, remote, branch)
+		// See Fetch for why the transfer deadline starts inside the guards.
+		return withTransferTimeout(ctx, "push", func(stmtCtx context.Context) error {
+			if user != "" {
+				_, err := db.ExecContext(stmtCtx, "CALL DOLT_PUSH('--user', ?, ?, ?)", user, remote, branch)
+				return err
+			}
+			_, err := db.ExecContext(stmtCtx, "CALL DOLT_PUSH(?, ?)", remote, branch)
 			return err
-		}
-		_, err := db.ExecContext(ctx, "CALL DOLT_PUSH(?, ?)", remote, branch)
-		return err
+		})
 	})
 	if err != nil {
 		return fmt.Errorf("push to %s/%s: %w", remote, branch, err)
@@ -108,12 +115,15 @@ func Push(ctx context.Context, db DBConn, remote, branch, user string) error {
 // See Push for the user/auth contract.
 func ForcePush(ctx context.Context, db DBConn, remote, branch, user string) error {
 	err := withRemoteEnvGuards(func() error {
-		if user != "" {
-			_, err := db.ExecContext(ctx, "CALL DOLT_PUSH('--force', '--user', ?, ?, ?)", user, remote, branch)
+		// See Fetch for why the transfer deadline starts inside the guards.
+		return withTransferTimeout(ctx, "force push", func(stmtCtx context.Context) error {
+			if user != "" {
+				_, err := db.ExecContext(stmtCtx, "CALL DOLT_PUSH('--force', '--user', ?, ?, ?)", user, remote, branch)
+				return err
+			}
+			_, err := db.ExecContext(stmtCtx, "CALL DOLT_PUSH('--force', ?, ?)", remote, branch)
 			return err
-		}
-		_, err := db.ExecContext(ctx, "CALL DOLT_PUSH('--force', ?, ?)", remote, branch)
-		return err
+		})
 	})
 	if err != nil {
 		return fmt.Errorf("force push to %s/%s: %w", remote, branch, err)
@@ -143,12 +153,17 @@ func Pull(ctx context.Context, db DBConn, remote, branch, user string) error {
 // resolution logic.
 func PullWithStrategy(ctx context.Context, db DBConn, remote, branch, user, strategy string) error {
 	if err := withRemoteEnvGuards(func() error {
-		if user != "" {
-			_, err := db.ExecContext(ctx, "CALL DOLT_FETCH('--user', ?, ?, ?)", user, remote, branch)
+		// Only the fetch statement runs under the transfer deadline
+		// (GH#7989): the merge and settle steps after it are local work and
+		// keep the caller's context.
+		return withTransferTimeout(ctx, "pull fetch", func(stmtCtx context.Context) error {
+			if user != "" {
+				_, err := db.ExecContext(stmtCtx, "CALL DOLT_FETCH('--user', ?, ?, ?)", user, remote, branch)
+				return err
+			}
+			_, err := db.ExecContext(stmtCtx, "CALL DOLT_FETCH(?, ?)", remote, branch)
 			return err
-		}
-		_, err := db.ExecContext(ctx, "CALL DOLT_FETCH(?, ?)", remote, branch)
-		return err
+		})
 	}); err != nil {
 		return fmt.Errorf("fetch from %s/%s: %w", remote, branch, err)
 	}
