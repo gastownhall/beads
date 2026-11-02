@@ -428,6 +428,7 @@ INSERT INTO events (issue_id, event_type, actor, old_value, new_value, comment, 
 	}
 	assertEventsAbsentFromStatus(t, ctx, conn)
 }
+
 // TestEmbeddedIgnoredMigration0031AlonePreservesHeadAndDirtyState runs the
 // restore as the only pending migration: HEAD must not move, an unrelated
 // dirty tracked row must stay uncommitted, the events journal must be
@@ -504,3 +505,83 @@ VALUES ('h-dirty', 'uncommitted', '', '', '', '', 'open', 2, 'task');
 	assertEventsAbsentFromStatus(t, ctx, conn)
 }
 
+// TestEmbeddedPreflipSeedSkipsUnreadableParentCommits pins the flap shape:
+// events was re-tracked after the flip and dropped again with 0062's frozen
+// message, so dolt_log holds TWO matching commits. The newer parent's shape
+// is incompatible (the re-tracked table lacked `comment`); the restore must
+// skip it, warn, and restore from the older readable parent — and the
+// database must keep opening cleanly afterwards.
+func TestEmbeddedPreflipSeedSkipsUnreadableParentCommits(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+
+	dataDir := seedMainSchemaAt(t, ctx, 61)
+	conn, closeConn := openPinnedConn(t, ctx, dataDir)
+	defer closeConn()
+
+	seedPreflipEvents(t, ctx, conn, "s-1", `
+INSERT INTO events (issue_id, event_type, actor, old_value, new_value, comment, created_at, id) VALUES
+('s-1', 'created', 'tester', NULL, NULL, NULL, '2026-07-30 00:00:00', 'evt-s-1');
+`)
+
+	if _, err := schema.MigrateUpTo(ctx, conn, 74); err != nil {
+		t.Fatalf("MigrateUpTo(74): %v", err)
+	}
+	commitWorkingSet(t, ctx, conn, "test: flipped schema")
+
+	// The flap: lose the working-set table (the adopter shape), re-track
+	// events (without the comment column) with one row of its own, commit,
+	// then drop it again with 0062's exact frozen message.
+	execFrozenGuard(t, ctx, conn, "DROP TABLE IF EXISTS events")
+	execFrozenGuard(t, ctx, conn, `
+CREATE TABLE events (
+    issue_id VARCHAR(255) NOT NULL,
+    event_type VARCHAR(32) NOT NULL,
+    actor VARCHAR(255) NOT NULL,
+    old_value LONGTEXT,
+    new_value LONGTEXT,
+    created_at DATETIME NOT NULL,
+    id CHAR(36) NOT NULL,
+    PRIMARY KEY (id)
+);
+INSERT INTO events (issue_id, event_type, actor, old_value, new_value, created_at, id)
+VALUES ('s-1', 'flapped', 'tester', NULL, NULL, '2026-07-31 00:00:00', 'evt-flap-1');
+`)
+	mustDrain(t, ctx, conn, "CALL DOLT_ADD('-f', 'events')")
+	mustDrain(t, ctx, conn, "CALL DOLT_COMMIT('-m', 'test: retrack events without comment column')")
+
+	execFrozenGuard(t, ctx, conn, "DROP TABLE events")
+	mustDrain(t, ctx, conn, "CALL DOLT_ADD('-f', 'events')")
+	mustDrain(t, ctx, conn, "CALL DOLT_COMMIT('-m', 'schema: drop versioned events table for ignored-plane flip (bd-red8u)')")
+
+	if got := scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM dolt_log WHERE message = 'schema: drop versioned events table for ignored-plane flip (bd-red8u)'"); got != 2 {
+		t.Fatalf("fixture sanity: drop-message commits = %d, want 2", got)
+	}
+
+	if _, err := schema.MigrateUp(ctx, conn); err != nil {
+		t.Fatalf("MigrateUp: %v", err)
+	}
+
+	// The readable parent's row is restored; the unreadable parent's
+	// (flapped) row contributed nothing.
+	s1Digest := eventDigest("s-1", "created", "tester", eventNull, eventNull, eventNull, "2026-07-30 00:00:00")
+	if got := scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM events WHERE id = ?", rowid.New("events", 0, s1Digest)); got != 1 {
+		t.Fatalf("restored readable parent's event = %d, want 1", got)
+	}
+	if got := scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM events WHERE event_type = 'flapped'"); got != 0 {
+		t.Fatalf("rows from unreadable parent = %d, want 0", got)
+	}
+	if got := scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM events"); got != 1 {
+		t.Fatalf("events rows = %d, want 1", got)
+	}
+
+	// The skipped source does not block completion, and the database keeps
+	// opening cleanly.
+	if got := scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM ignored_schema_migrations WHERE version = 31"); got != 1 {
+		t.Fatalf("restore version recorded = %d, want 1 (unreadable sources are skipped, not fatal)", got)
+	}
+	if _, err := schema.MigrateUp(ctx, conn); err != nil {
+		t.Fatalf("MigrateUp (reopen): %v", err)
+	}
+	assertEventsAbsentFromStatus(t, ctx, conn)
+}
