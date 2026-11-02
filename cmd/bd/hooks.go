@@ -1882,7 +1882,14 @@ func exportJSONLForCommit() {
 	if exportPath == "" {
 		exportPath = "issues.jsonl"
 	}
-	fullPath := filepath.Join(hookJSONLDir(beadsDir), exportPath)
+	// A committed config can point export.path anywhere: validate it against
+	// the workspace before any mkdir, subprocess or staging, and skip the
+	// export (warning) when it refuses (bd-1tmym4 / #7888).
+	fullPath, exportErr := validatedExportDestination(hookJSONLDir(beadsDir), exportPath)
+	if exportErr != nil {
+		fmt.Fprintf(os.Stderr, "Warning: pre-commit export skipped: %v\n", exportErr)
+		return
+	}
 
 	// If the export file is staged for deletion (user ran `git rm`), do not
 	// re-export or re-stage it. GIT_INDEX_FILE is set during an actual commit,

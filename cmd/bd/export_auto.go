@@ -124,7 +124,14 @@ func maybeAutoExport(ctx context.Context, allowEmptyOverwrite bool) error {
 			exportPath = "issues.jsonl"
 		}
 	}
-	fullPath := filepath.Join(beadsDir, exportPath)
+	// A committed config can point export.path anywhere: validate it against
+	// the workspace before any reconciliation, mkdir or write, and skip the
+	// export (warning) when it refuses (bd-1tmym4 / #7888).
+	fullPath, exportErr := validatedExportDestination(beadsDir, exportPath)
+	if exportErr != nil {
+		fmt.Fprintf(os.Stderr, "Warning: auto-export skipped: %v\n", exportErr)
+		return nil
+	}
 
 	// Load state + interval.
 	state := loadExportAutoState(beadsDir)
