@@ -69,7 +69,7 @@ func TestMigrateUpReturnsDirtyTablesErrorForPreExistingDirtyTable(t *testing.T) 
 	// pass runs (#4566: the seed must not ride the per-step pass commits).
 	expectIgnorePatternSeed(mock, 42)
 	// #4356: the open-time untrack reconcile runs right after the seed and
-	// before the no-work short-circuit. On a healthy database it is two reads
+	// before the no-work short-circuit. On a healthy database it is three reads
 	// and no writes.
 	expectIgnoredCursorHealNoop(mock)
 	// migrationWorkNeeded: mainSource.atLatest reads the current cursor; v42

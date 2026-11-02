@@ -290,6 +290,7 @@
 40 14 TestEmbeddedReadyClaimerDoesNotMutateTheCallerRequest
 40 14 TestHeartbeatIssueCommitsARefusalOnlyWhenItReadTheIssueEmbedded
 40 14 TestHistory_NullTextColumns
+40 14 TestScratchHeadProbeSucceedsOnABrandNewDatabase
 
 40 15 TestArrivalSeq_EmbeddedSequentialCreatesStampInCommitOrder
 40 15 TestCreateIssuesRejectStaleUpserts
@@ -300,6 +301,7 @@
 40 15 TestEmbeddedReaderReadyBriefDropsTheFreeFormTextAndNothingElse
 40 15 TestEmbeddedRelationsFiltersByAnOpenTypeVocabulary
 40 15 TestGetIssue
+40 15 TestIgnoredCursorScratchPendingDeletionIsSweptOnOpen
 40 15 TestLegacyTrackedIgnoredCursorHealsOnOpen
 40 15 TestMoleculeContract
 40 15 TestReadyWorkPageTotalFilterMatrix
@@ -411,6 +413,7 @@
 40 24 TestEmbeddedReaderListQueryMatchesTheTitleOrTheID
 40 24 TestEmbeddedReaderListWispTypeNarrowsTheAdmittedPlaneRatherThanAdmittingIt
 40 24 TestIgnoredCursorHealResumeRespectsOperatorOverride
+40 24 TestIgnoredCursorScratchPendingDeletionWithCursorMissingSweepsOnly
 40 24 TestLargeBatchApplyStatementCountsClassic40_Embedded
 40 24 TestReopenIssue
 40 24 TestUniqueIndexAllowsManyUnstampedWisps
@@ -425,6 +428,7 @@
 40 25 TestGetDependentRecordsForIssuesEmbedded
 40 25 TestHeartbeaterContract
 40 25 TestIgnoredCursorHealIsIdempotent
+40 25 TestIgnoredCursorScratchTrackedAtHeadIsSweptOnOpen
 40 25 TestIsBlockedBatchEmbedded
 40 25 TestReadyWorkPageTotal
 40 25 TestWithPeerAuth_RestoresAbsentEnv
