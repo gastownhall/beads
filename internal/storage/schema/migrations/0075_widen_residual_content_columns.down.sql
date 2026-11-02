@@ -1,0 +1,4 @@
+-- Reverse of 0075: not reversible without potential data loss, for 0049's
+-- and 0065's reason exactly. Narrowing a widened column back to TEXT or BLOB
+-- would truncate, or refuse, any value longer than 65535 bytes stored after
+-- the migration. Intentional no-op.

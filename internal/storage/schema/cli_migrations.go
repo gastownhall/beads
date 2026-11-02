@@ -194,6 +194,17 @@ func cliCompatibleMigrationSQL(name, sqlText string) string {
 		// the wisp tables must use the frozen source text instead -- see
 		// cliSubstituteAssumesWispTables.
 		return cliMigration0073AddArrivalSeq
+	case "0075_widen_residual_content_columns.up.sql":
+		// Direct DDL for the same reason as 0065: the source migration's
+		// per-column PREPARE guards (COLUMN_TYPE probes) are what make the raw
+		// .up.sql idempotent when replayed onto an already-widened store, and
+		// the 2.2.x CLI no-ops a prepared MODIFY COLUMN. Nothing earlier in
+		// the fresh-bundle series widens any of these columns -- 0062
+		// recreates events.comment as TEXT -- so every MODIFY always fires
+		// here. events is clone-local, so replays over a database that never
+		// synced it must use the frozen source text instead -- see
+		// cliSubstituteAssumesWispTables.
+		return cliMigration0075WidenResidualContentColumns
 	default:
 		return sqlText
 	}
@@ -238,6 +249,10 @@ func cliSubstituteAssumesWispTables(name string) bool {
 	case "0073_add_arrival_seq.up.sql":
 		// cliMigration0073AddArrivalSeq drops the source's @has_wisps
 		// table-exists guard and ALTERs and indexes wisps directly.
+		return true
+	case "0075_widen_residual_content_columns.up.sql":
+		// cliMigration0075WidenResidualContentColumns is bare MODIFYs on the
+		// clone-local event tables.
 		return true
 	default:
 		return false
@@ -359,6 +374,10 @@ const cliMigration0071AddRemovedRestriction = `ALTER TABLE issue_versions ADD CO
 const cliMigration0073AddArrivalSeq = `ALTER TABLE issues ADD COLUMN arrival_seq BIGINT;
 ALTER TABLE wisps ADD COLUMN arrival_seq BIGINT;
 CREATE UNIQUE INDEX uk_wisps_arrival_seq ON wisps (arrival_seq);`
+
+// cliMigration0075WidenResidualContentColumns is 0075 with each guarded
+// PREPARE block replaced by its bare MODIFY, definitions unchanged.
+const cliMigration0075WidenResidualContentColumns = `ALTER TABLE events MODIFY COLUMN comment LONGTEXT;`
 
 const cliMigration0041SplitDependenciesTarget = `DELETE FROM dolt_nonlocal_tables;
 CALL DOLT_COMMIT('-Am', 'disable nonlocal tables for fk migrations');
