@@ -2104,6 +2104,17 @@ func startLocked(beadsDir string) (*State, error) {
 				lastErr = werr
 				break
 			}
+			// GH#6064: record which dolt executable this server was launched
+			// from, so a later bd can tell whether an upgrade replaced it
+			// under the running server. Same failure contract as the state
+			// files: a server bd cannot classify later must not survive the
+			// start.
+			if werr := writeLaunchedBinaryRecord(beadsDir, doltBin, srv.pid); werr != nil {
+				srv.killAndWait()
+				removeServerStateFiles(beadsDir)
+				lastErr = werr
+				break
+			}
 
 			// Wait until this child, not whatever else holds the port, is
 			// accepting connections. A port another process holds shows up
@@ -2331,6 +2342,11 @@ func Stop(beadsDir string) error {
 	return StopWithForce(beadsDir, false)
 }
 
+// gracefulStop is the process-stop primitive the stop path uses (SIGTERM,
+// bounded wait, SIGKILL fallback); a var so tests can simulate a stop whose
+// exit cannot be confirmed (GH#6064 AC-5) without a wedged process.
+var gracefulStop = gracefulStopProcess
+
 // Restart gracefully replaces a managed server while holding the lifecycle
 // lock for the entire stop/start transition. The live SQL port is restored as
 // desired state so a per-project ephemeral server does not move merely because
@@ -2341,7 +2357,14 @@ func Restart(beadsDir string) (*State, error) {
 		return nil, err
 	}
 	defer releaseLifecycleLock(lockF)
+	return restartLocked(beadsDir)
+}
 
+// restartLocked is Restart's stop/start transition; callers hold the
+// lifecycle lock. The binary-sync replacement path (GH#6064) reuses this so
+// its preflight, stop and start run under the same serialized transition as
+// an explicit bd dolt restart.
+func restartLocked(beadsDir string) (*State, error) {
 	previousPort := 0
 	if state, stateErr := IsRunning(beadsDir); stateErr == nil && state != nil {
 		previousPort = state.Port
@@ -2462,13 +2485,14 @@ func sanitizeInheritedFDs() {
 	}
 }
 
-// cleanupStateFiles removes all server state files (PID and port).
+// cleanupStateFiles removes all server state files (PID, port, and the
+// binary witness record).
 // Returns a joined error for non-NotExist removal failures so callers
 // can surface filesystem problems while still treating "already clean"
 // as success. Logs non-NotExist errors at debug level (GH#2670).
 func cleanupStateFiles(beadsDir string) error {
 	var errs []error
-	for _, path := range []string{pidPath(beadsDir), portPath(beadsDir)} {
+	for _, path := range []string{pidPath(beadsDir), portPath(beadsDir), binaryPath(beadsDir)} {
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			debug.Logf("failed to remove server state file %s: %v", path, err)
 			errs = append(errs, err)
@@ -2486,6 +2510,7 @@ func StateFilePaths(beadsDir string) []string {
 		logPath(beadsDir) + ".1",
 		DebugProfileDir(beadsDir),
 		doltServerConfigPath(beadsDir),
+		binaryPath(beadsDir),
 	}
 }
 

@@ -46,6 +46,7 @@ import (
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/doltversion"
 	"github.com/steveyegge/beads/internal/gittraceenv"
+	"github.com/steveyegge/beads/internal/migration"
 	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
@@ -542,6 +543,14 @@ type Config struct {
 	// DisableAutoStart suppresses implicit server startup even when standalone
 	// defaults would enable it. Diagnostic paths use this to stay read-only.
 	DisableAutoStart bool
+
+	// DisableAutoRestart suppresses the store-open replacement of a tracked
+	// dolt sql-server whose executable was replaced by an upgrade (GH#6064).
+	// cmd/bd sets it when a MIGRATION-FREEZE marker quiesced the workspace,
+	// whose server lifecycle bd must not mutate. With it the open's binary
+	// sync is advisory only — a stale server gets a warning naming the
+	// remedy, never a restart and never a failed open.
+	DisableAutoRestart bool
 
 	// MaxOpenConns overrides the connection pool size (0 = default 10).
 	// Set to 1 for branch isolation in tests (DOLT_CHECKOUT is session-level).
@@ -2332,6 +2341,16 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		breaker.RecordSuccess()
 	}
 
+	// GH#6064: before the application's queries run, reconcile the tracked
+	// server on the dialed port with the dolt executable the next start
+	// would launch. A stale-generation server — the binary it was started
+	// from has since been replaced by an upgrade — is replaced under the
+	// lifecycle lock when this open may mutate the workspace's server
+	// lifecycle; every other verdict leaves this connection unchanged.
+	if err := maybeSyncServerBinary(cfg, resolvedBeadsDir); err != nil {
+		return nil, err
+	}
+
 	// Server mode: connect via MySQL protocol to dolt sql-server
 	db, connStr, dbFacts, err := openServerConnection(ctx, cfg)
 	if err != nil {
@@ -2588,6 +2607,40 @@ func initializeServerCircuitBreaker(cfg *Config) *circuitBreaker {
 func serverOpenCanAutoStart(cfg *Config) bool {
 	return !cfg.DisableAutoStart && cfg.AutoStart && cfg.Path != "" &&
 		doltserver.AutoStartReaches(cfg.ServerHost, cfg.ServerSocket)
+}
+
+// syncServerBinary is the server-binary reconciliation the store-open path
+// runs (GH#6064). Declared as a var (matching ensureRunningDetailed above) so
+// unit tests can stub it and assert which opens reach it, without a tracked
+// dolt sql-server.
+var syncServerBinary = doltserver.SyncServerBinary
+
+// maybeSyncServerBinary is newServerMode's hook (GH#6064): before the
+// application's queries run, it checks the tracked server on the dialed port
+// against the dolt executable the next start would launch, replaces a
+// stale-generation server when this open may mutate the workspace's server
+// lifecycle, and fails the open when a replacement this open initiated could
+// not complete (so bd never queries a server it decided not to trust).
+func maybeSyncServerBinary(cfg *Config, beadsDir string) error {
+	if cfg.ServerPort <= 0 {
+		return nil
+	}
+	return syncServerBinary(doltserver.BinarySyncRequest{
+		BeadsDir: beadsDir,
+		Host:     cfg.ServerHost,
+		Port:     cfg.ServerPort,
+		User:     cfg.ServerUser,
+		Password: cfg.ServerPassword,
+		// Restart permission is the auto-start eligibility (which already
+		// excludes a strict --readonly open through DisableAutoStart, while a
+		// classified read stays eligible), minus the opens that must not
+		// mutate the workspace: previews and a MIGRATION-FREEZE quiesced
+		// tree (the CLI freeze arrives as DisableAutoRestart; the ancestor
+		// walk here also covers the doctor's target-scoped opens, which
+		// build their own Config).
+		AllowRestart: serverOpenCanAutoStart(cfg) && !cfg.Preview && !cfg.DisableAutoRestart &&
+			!migration.FindFrom(beadsDir).Frozen(),
+	})
 }
 
 // ErrUnresolvedServerPort is wrapped by the error an open returns when it has

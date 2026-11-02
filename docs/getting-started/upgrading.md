@@ -121,11 +121,18 @@ bd hooks install
 # 3. Check for any outdated hooks
 bd info  # Shows warnings if hooks are outdated
 
-# 4. If using Dolt backend, restart the server
-bd dolt stop && bd dolt start
+# 4. If using Dolt backend, check the server
+bd dolt status
 ```
 
 **Why update hooks?** Git hooks are versioned with bd. Outdated hooks may miss export refresh, legacy fallback, or safety fixes.
+
+If you also upgraded `dolt` itself, bd replaces a server it manages that is
+still running the old dolt the next time it opens the project — with a notice
+naming both versions — so old and new binaries never serve the same database.
+A server bd does not manage (shared, or started outside bd) is left running,
+with a warning telling you to restart it yourself:
+`bd dolt stop && bd dolt start`.
 
 ## Database Migrations
 

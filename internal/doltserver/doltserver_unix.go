@@ -180,7 +180,7 @@ func serverInfoProcessExists(pid int) bool {
 
 // gracefulStop sends SIGTERM, waits for the process to exit, then SIGKILL if needed.
 // Used by reclaimPort and StopWithForce where data has already been flushed.
-func gracefulStop(pid int, timeout time.Duration) error {
+func gracefulStopProcess(pid int, timeout time.Duration) error {
 	process, err := os.FindProcess(pid)
 	if err != nil {
 		return fmt.Errorf("finding process %d: %w", pid, err)

@@ -138,7 +138,7 @@ func serverInfoProcessExists(pid int) bool {
 // directly. Data safety comes from FlushWorkingSet which runs in StopWithForce
 // before calling gracefulStop. The Unix SIGTERM is a courtesy; the real protection
 // is the flush.
-func gracefulStop(pid int, timeout time.Duration) error {
+func gracefulStopProcess(pid int, timeout time.Duration) error {
 	process, err := os.FindProcess(pid)
 	if err != nil {
 		return fmt.Errorf("finding process %d: %w", pid, err)

@@ -99,6 +99,12 @@ func TestMain(m *testing.M) {
 	if code, ok := credentialcmd.Dispatch(); ok {
 		os.Exit(code)
 	}
+	// A copy of this binary installed as `dolt` on PATH (the version-upgrade
+	// flagship test does that) answers dolt here, before any test machinery
+	// runs.
+	if code, ok := fakeDoltDispatch(); ok {
+		os.Exit(code)
+	}
 	// Delegate to testMainInner so defers run before os.Exit.
 	code := testMainInner(m)
 	if testBDBuildDir != "" {

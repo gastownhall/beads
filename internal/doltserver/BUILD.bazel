@@ -3,6 +3,8 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "doltserver",
     srcs = [
+        "binarysync.go",
+        "binarywitness.go",
         "doltserver.go",
         "doltserver_unix.go",
         "doltserver_windows.go",
@@ -59,6 +61,7 @@ go_library(
 go_test(
     name = "doltserver_test",
     srcs = [
+        "binarysync_test.go",
         "configport_test.go",
         "dirty_state_test.go",
         "doltserver_test.go",

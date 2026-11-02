@@ -1355,6 +1355,8 @@ go_test(
         "version_embedded_test.go",
         "version_test.go",
         "version_tracking_test.go",
+        "version_upgrade_fake_dolt_test.go",
+        "version_upgrade_server_restart_test.go",
         "versioned_history_construction_test.go",
         "versioned_history_e2e_test.go",
         "versioned_history_serve_e2e_test.go",

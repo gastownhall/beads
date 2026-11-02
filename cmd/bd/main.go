@@ -2011,7 +2011,11 @@ var rootCmd = &cobra.Command{
 			ReadOnly:         useReadOnly,
 			Preview:          previewMode,
 			DisableAutoStart: policy.disableAutoStart,
-			BeadsDir:         beadsDir,
+			// GH#6064: a MIGRATION-FREEZE quiesced workspace must not have its
+			// server lifecycle mutated either, so a stale tracked dolt
+			// sql-server gets an advisory, never a store-open replacement.
+			DisableAutoRestart: commandFreeze.Frozen(),
+			BeadsDir:          beadsDir,
 			LenientOpen:      isWorkingSetReconcileCommand(cmd),
 			RemoteSyncOpen:   isRemoteSyncCommand(cmd),
 			// Bulk loads outlive the pool's 10s fast-fail on every server
