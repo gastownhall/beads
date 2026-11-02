@@ -357,15 +357,24 @@ func TestEmbeddedMigrateIgnored0007KeepsUpdatedAt(t *testing.T) {
 		t.Fatalf("ignored cursor = %d, want 6", v)
 	}
 
+	// A wisp blocked by an issue, a wisp blocked by another wisp, that wisp
+	// blocker itself, and a free bystander wisp.
 	blocker := stampedIssue{id: "ua-w-blocker", status: "open", stamp: historicalStamp(31)}
 	blocked := stampedIssue{id: "ua-wisp-blocked", status: "open", ephemeral: true, stamp: historicalStamp(32), wantBlocked: true}
 	free := stampedIssue{id: "ua-wisp-free", status: "open", ephemeral: true, stamp: historicalStamp(33)}
+	wispBlocker := stampedIssue{id: "ua-wisp-blocker", status: "open", ephemeral: true, stamp: historicalStamp(34)}
+	wispBlocked := stampedIssue{id: "ua-wisp-blocked-by-wisp", status: "open", ephemeral: true, stamp: historicalStamp(35), wantBlocked: true}
 	insertStampedIssues(t, ctx, conn, "issues", []stampedIssue{blocker}, false)
-	insertStampedIssues(t, ctx, conn, "wisps", []stampedIssue{blocked, free}, false)
+	insertStampedIssues(t, ctx, conn, "wisps", []stampedIssue{blocked, free, wispBlocker, wispBlocked}, false)
 	if _, err := conn.ExecContext(ctx,
 		"INSERT INTO wisp_dependencies (issue_id, depends_on_issue_id, type, created_by) VALUES (?, ?, 'blocks', 'fixture')",
 		blocked.id, blocker.id); err != nil {
 		t.Fatalf("seed wisp dependency: %v", err)
+	}
+	if _, err := conn.ExecContext(ctx,
+		"INSERT INTO wisp_dependencies (issue_id, depends_on_wisp_id, type, created_by) VALUES (?, ?, 'blocks', 'fixture')",
+		wispBlocked.id, wispBlocker.id); err != nil {
+		t.Fatalf("seed wisp-to-wisp dependency: %v", err)
 	}
 	commitFixture(t, ctx, conn, "test: blocker issue for wisps at ignored v6")
 
@@ -383,7 +392,7 @@ func TestEmbeddedMigrateIgnored0007KeepsUpdatedAt(t *testing.T) {
 	if v := ignoredVersion(); v != 7 {
 		t.Fatalf("ignored cursor = %d, want 7 (ignored 0007 must have executed)", v)
 	}
-	for _, w := range []stampedIssue{blocked, free} {
+	for _, w := range []stampedIssue{blocked, free, wispBlocker, wispBlocked} {
 		requireStamp(t, ctx, conn, "wisps", w.id, w.stamp)
 		if got := readIsBlocked(t, ctx, conn, "wisps", w.id); got != w.wantBlocked {
 			t.Errorf("wisps %s: is_blocked = %v, want %v", w.id, got, w.wantBlocked)
