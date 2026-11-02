@@ -98,8 +98,9 @@ func (s *EmbeddedDoltStore) withMutatingPinnedDBConn(ctx context.Context, fn fun
 	return s.withPinnedDBConn(ctx, fn)
 }
 
-// commitAll runs the single embedded commit statement, DOLT_COMMIT('-Am'),
-// on one connection (via withConn) and reports whether a commit actually
+// commitAll runs the single embedded commit statement, DOLT_COMMIT('-Am',
+// ..., '--author'), on one connection (via withConn) and reports whether a
+// commit actually
 // landed. When tolerateEmpty is true, Dolt's "nothing to commit" response is
 // treated as a no-op (committed=false, err=nil) instead of an error — the
 // GH#3886 parity behavior Commit relies on. When tolerateEmpty is false, that
@@ -110,10 +111,16 @@ func (s *EmbeddedDoltStore) withMutatingPinnedDBConn(ctx context.Context, fn fun
 // from the returned bool instead of reading HEAD before and after: HEAD reads
 // are extra engine opens and are subject to a HEAD-moved-between-reads race
 // if anything else writes concurrently.
+//
+// The author is resolved here, before the connection is opened: an explicit
+// commit attempt may resolve an identity before discovering there is nothing
+// to commit (GH#7628), which is the honest ordering — the caller asked for an
+// authored commit, and only reads and clean stores stay free of resolution.
 func (s *EmbeddedDoltStore) commitAll(ctx context.Context, message string, tolerateEmpty bool) (committed bool, err error) {
+	author := s.commitAuthorString()
 	err = s.withConn(ctx, true, func(tx *sql.Tx) error {
 		var commitErr error
-		committed, commitErr = commitAllInTx(ctx, tx, message, tolerateEmpty)
+		committed, commitErr = commitAllInTx(ctx, tx, message, author, tolerateEmpty)
 		return commitErr
 	})
 	return committed, err
@@ -131,8 +138,8 @@ func (s *EmbeddedDoltStore) CommitAll(ctx context.Context, message string) (bool
 	return s.commitAll(ctx, message, true)
 }
 
-func commitAllInTx(ctx context.Context, tx *sql.Tx, message string, tolerateEmpty bool) (bool, error) {
-	if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', ?)", message); err != nil {
+func commitAllInTx(ctx context.Context, tx *sql.Tx, message, author string, tolerateEmpty bool) (bool, error) {
+	if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', ?, '--author', ?)", message, author); err != nil {
 		if issueops.IsNothingToCommitError(err) {
 			if tolerateEmpty {
 				return false, nil

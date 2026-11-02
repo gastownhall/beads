@@ -25,11 +25,12 @@ func TestDoltCommitResponseLossIsIndeterminate(t *testing.T) {
 	}
 
 	responseLoss := errors.New("connection lost before DOLT_COMMIT response")
-	mock.ExpectExec("CALL DOLT_COMMIT('-Am', ?)").
-		WithArgs("test: publish working set").
+	const author = "test author <tester@example.invalid>"
+	mock.ExpectExec("CALL DOLT_COMMIT('-Am', ?, '--author', ?)").
+		WithArgs("test: publish working set", author).
 		WillReturnError(responseLoss)
 
-	committed, err := commitAllInTx(t.Context(), tx, "test: publish working set", true)
+	committed, err := commitAllInTx(t.Context(), tx, "test: publish working set", author, true)
 	if committed {
 		t.Fatal("commitAllInTx() committed = true after response loss, want false")
 	}

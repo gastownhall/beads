@@ -3,6 +3,7 @@
 package embeddeddolt_test
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage"
@@ -73,4 +74,58 @@ func TestEmbeddedCommitAuthorFollowsGitAuthorEnv(t *testing.T) {
 		t.Fatalf("close issue: %v", err)
 	}
 	assertNewCommitAuthored(t, te, "Alice Author", "alice@example.com", "bd: close "+issue.ID)
+}
+
+// TestEmbeddedCommitAllAuthorFollowsGitAuthorEnv pins GH#7628 AC-2: the
+// whole-working-set commit points — the explicit Commit/CommitAll and the
+// CommitPending auto-commit net that every embedded pull/sync runs — author
+// their DOLT_COMMIT('-Am') commits from GIT_AUTHOR_NAME / GIT_AUTHOR_EMAIL
+// instead of the SQL client's root <root@%>. Each round dirties the working
+// set with a plain CreateIssue (no lifecycle transaction) so commitAll, not
+// the transactional path, is what publishes it.
+func TestEmbeddedCommitAllAuthorFollowsGitAuthorEnv(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	t.Setenv("GIT_AUTHOR_NAME", "Alice Author")
+	t.Setenv("GIT_AUTHOR_EMAIL", "alice@example.com")
+
+	te := newTestEnv(t, "cbc")
+	ctx := t.Context()
+
+	dirty := func(n int) {
+		issue := &types.Issue{
+			Title:     fmt.Sprintf("authored working set %d", n),
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+		}
+		if err := te.store.CreateIssue(ctx, issue, "tester"); err != nil {
+			t.Fatalf("CreateIssue round %d: %v", n, err)
+		}
+	}
+
+	dirty(1)
+	if err := te.store.Commit(ctx, "bd: explicit commit"); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	assertNewCommitAuthored(t, te, "Alice Author", "alice@example.com", "bd: explicit commit")
+
+	dirty(2)
+	committed, err := te.store.CommitAll(ctx, "bd: commit all")
+	if err != nil {
+		t.Fatalf("CommitAll: %v", err)
+	}
+	if !committed {
+		t.Fatalf("CommitAll reported nothing committed despite a dirty working set")
+	}
+	assertNewCommitAuthored(t, te, "Alice Author", "alice@example.com", "bd: commit all")
+
+	dirty(3)
+	committed, err = te.store.CommitPending(ctx, "tester")
+	if err != nil {
+		t.Fatalf("CommitPending: %v", err)
+	}
+	if !committed {
+		t.Fatalf("CommitPending reported nothing committed despite a dirty working set")
+	}
+	assertNewCommitAuthored(t, te, "Alice Author", "alice@example.com", "bd: commit pending changes by tester")
 }
