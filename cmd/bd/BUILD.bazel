@@ -717,6 +717,8 @@ go_test(
         "dep_cycles_test.go",
         "dep_edge_reader_test.go",
         "dep_embedded_test.go",
+        "dep_hidden_children_embedded_test.go",
+        "dep_hidden_children_test.go",
         "dep_list_cross_db_embedded_test.go",
         "dep_proxied_integration_test.go",
         "dep_relation_test.go",
