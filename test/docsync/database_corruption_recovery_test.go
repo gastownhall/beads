@@ -71,6 +71,25 @@ func TestDatabaseCorruptionRecoveryGuidance(t *testing.T) {
 		}
 	})
 
+	t.Run("AC-2 lock symptoms", func(t *testing.T) {
+		const heading = "## Lock errors after an interrupted command"
+		section, ok := docSection(runbook, heading)
+		if !ok {
+			t.Fatalf("docs/recovery/database-corruption.md missing the %q section", heading)
+		}
+		requirePhrases(t, "database-corruption.md "+heading, section,
+			"a leftover lock file is not evidence of a held lock",
+			"waiting for or stopping the actual holder",
+			"not by rebuilding the database",
+			"bd dolt stop stops a server that bd manages",
+			"cannot stop an arbitrary embedded bd process",
+			"never delete files inside .dolt/",
+		)
+		symptoms, _ := docSection(runbook, "## Symptoms")
+		requirePhrases(t, "database-corruption.md ## Symptoms", symptoms,
+			"(#lock-errors-after-an-interrupted-command)")
+	})
+
 	t.Run("AC-1 troubleshooting journal-corruption entry", func(t *testing.T) {
 		doc := readRepoDoc(t, "docs", "reference", "troubleshooting.md")
 		const heading = "### Dolt journal corruption"

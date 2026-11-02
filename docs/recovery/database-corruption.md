@@ -15,10 +15,45 @@ diagnose first and change nothing on disk until you know which case you have.
   and the server log, `.beads/dolt-server.log`. A stopped server is not
   corruption: start it with `bd dolt start`. If the log reports a corrupted
   journal, continue with [Engine won't open](#engine-wont-open).
+- **The database is locked or busy**: `bd` reports `database is locked`, or
+  waits, after another command was interrupted or while agents are running.
+  See [Lock errors after an interrupted command](#lock-errors-after-an-interrupted-command).
 - **The engine reports a journal or open error**: every `bd` command fails
   while opening the database, for example with `corrupted journal` or
   `possible data loss detected in journal file`, even though no other `bd`
   process is running. Continue with [Engine won't open](#engine-wont-open).
+
+## Lock errors after an interrupted command
+
+After an interrupted or killed command you may find a lock file left behind
+(in embedded mode a `LOCK` pathname inside the database's `.dolt/`
+directory), or see `database is locked` errors on the next command.
+
+A leftover lock file is not evidence of a held lock. Dolt takes its locks
+through the operating system, and the kernel releases a process's file locks
+when the process dies, so a lock left behind by a killed command is normally
+already released: an existing `LOCK` file alone diagnoses nothing.
+
+Live contention means another process is still using the database right now:
+in embedded mode another `bd` process (often an agent or a script still
+running a batch) working in the same workspace, in server mode the Dolt
+server. It is resolved by waiting for or stopping the actual holder, not by
+rebuilding the database. `bd dolt stop` stops a server that bd manages; it
+cannot stop an arbitrary embedded `bd` process. End that process yourself
+after confirming it is really yours to stop:
+
+```bash
+ps aux | grep '[b]d '     # find the bd process still working in this workspace
+kill <pid>                # only once you know it is yours and safe to stop
+bd dolt stop              # server mode: stop the managed server
+```
+
+Never delete files inside `.dolt/` (including `noms/LOCK`) to clear a lock.
+Lock files are part of the engine's on-disk format; deleting engine internals
+is what actually risks corruption, which is why `bd doctor` refuses to touch
+Dolt-internal lock files. Retry once the holder is gone. Only if every `bd`
+command still fails to open the database with no holder left, continue with
+[Engine won't open](#engine-wont-open).
 
 ## Engine won't open
 
