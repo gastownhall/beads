@@ -50,6 +50,10 @@ Handles merge conflicts using the configured strategy:
 If no strategy is specified and conflicts occur, the sync will pause
 and report which tables have conflicts for manual resolution.
 
+Issue types listed in federation.exclude_types (default: wisp) stay local:
+the pushed tip omits them and their labels, comments and dependencies, and
+later syncs keep them. Commits pushed earlier still contain them.
+
 Examples:
   bd federation sync                      # Sync with all peers
   bd federation sync --peer town-beta     # Sync with specific peer

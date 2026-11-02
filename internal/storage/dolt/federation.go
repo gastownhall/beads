@@ -26,6 +26,10 @@ const federationStagingBranchPrefix = versioncontrolops.FilteredPushStagingPrefi
 // has canceled or its deadline has expired.
 const federationStagingCleanupTimeout = 30 * time.Second
 
+// filteredPushBeforeStep is installed as every filtered push's BeforeStep;
+// tests set it to inject failures and cancellations.
+var filteredPushBeforeStep func(step string) error
+
 // FederatedStorage implementation for DoltStore
 // These methods enable peer-to-peer synchronization between workspaces.
 
@@ -502,6 +506,7 @@ func (s *DoltStore) filteredPushToPeer(ctx context.Context, peer string, exclude
 	if err != nil {
 		return err
 	}
+	push.BeforeStep = filteredPushBeforeStep
 
 	// Pin a single long-timeout connection for the session-scoped staging
 	// operation. RecomputeAllIsBlockedInTx can exceed the shared pool's
@@ -542,6 +547,9 @@ func (s *DoltStore) filteredPushToPeer(ctx context.Context, peer string, exclude
 	// filtered tip leaves: once the peer has it, the next sync merges it as an
 	// ancestor rather than as a deletion of the excluded issues.
 	if removed {
+		if err := push.Step(versioncontrolops.FilteredPushStepMerge); err != nil {
+			return err
+		}
 		conflicts, err := s.Merge(ctx, push.Keep)
 		if err != nil {
 			return fmt.Errorf("federation filter: merge keep branch: %w", err)
@@ -552,6 +560,9 @@ func (s *DoltStore) filteredPushToPeer(ctx context.Context, peer string, exclude
 	}
 
 	// Push staging branch to peer, mapped to the peer's expected branch name.
+	if err := push.Step(versioncontrolops.FilteredPushStepPush); err != nil {
+		return err
+	}
 	return s.pushRefToPeer(ctx, peer, push.Refspec())
 }
 
@@ -563,7 +574,7 @@ func (s *DoltStore) filteredPushToPeer(ctx context.Context, peer string, exclude
 func cleanupFilteredStaging(ctx context.Context, db *sql.DB, conn *sql.Conn, push *versioncontrolops.FilteredPush) error {
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), federationStagingCleanupTimeout)
 	defer cancel()
-	var cleanupErr error
+	cleanupErr := push.Step(versioncontrolops.FilteredPushStepCleanup)
 	if err := conn.Close(); err != nil {
 		cleanupErr = errors.Join(cleanupErr, fmt.Errorf("discard operation connection: %w", err))
 	}

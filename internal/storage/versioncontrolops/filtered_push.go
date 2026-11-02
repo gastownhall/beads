@@ -38,6 +38,30 @@ type FilteredPush struct {
 	// Author is passed to the commits Stage makes; empty lets the session
 	// attribute them.
 	Author string
+	// BeforeStep, when set, runs before each step named by the
+	// FilteredPushStep* constants; an error fails that step. It is a test
+	// seam for failure and cancellation injection.
+	BeforeStep func(step string) error
+}
+
+// The steps of a filtered push, in order, as passed to BeforeStep.
+const (
+	FilteredPushStepBranch    = "branch"
+	FilteredPushStepDelete    = "delete"
+	FilteredPushStepRecompute = "recompute"
+	FilteredPushStepCommit    = "commit"
+	FilteredPushStepKeep      = "keep"
+	FilteredPushStepRevert    = "revert"
+	FilteredPushStepMerge     = "merge"
+	FilteredPushStepPush      = "push"
+	FilteredPushStepCleanup   = "cleanup"
+)
+
+// FilteredPushSteps lists every step BeforeStep sees, in order.
+var FilteredPushSteps = []string{
+	FilteredPushStepBranch, FilteredPushStepDelete, FilteredPushStepRecompute,
+	FilteredPushStepCommit, FilteredPushStepKeep, FilteredPushStepRevert,
+	FilteredPushStepMerge, FilteredPushStepPush, FilteredPushStepCleanup,
 }
 
 // NewFilteredPush allocates unique temporary branch names for a filtered push
@@ -54,6 +78,17 @@ func NewFilteredPush(source string, excludeTypes []string, author string) (*Filt
 		ExcludeTypes: excludeTypes,
 		Author:       author,
 	}, nil
+}
+
+// Step runs BeforeStep for step, if set, and wraps its error with the step.
+func (p *FilteredPush) Step(step string) error {
+	if p.BeforeStep == nil {
+		return nil
+	}
+	if err := p.BeforeStep(step); err != nil {
+		return fmt.Errorf("federation filter: %s: %w", step, err)
+	}
+	return nil
 }
 
 // Refspec maps the filtered branch onto the peer's copy of Source.
@@ -73,6 +108,9 @@ func (p *FilteredPush) Refspec() string {
 // Any error fails the push: publishing an unfiltered or half-filtered tip
 // would leak exactly what the exclusion exists to keep local.
 func (p *FilteredPush) Stage(ctx context.Context, conn BlockedRecomputeConn) (bool, error) {
+	if err := p.Step(FilteredPushStepBranch); err != nil {
+		return false, err
+	}
 	if _, err := conn.ExecContext(ctx, "CALL DOLT_BRANCH(?, ?)", p.Staging, p.Source); err != nil {
 		return false, fmt.Errorf("federation filter: create staging branch: %w", err)
 	}
@@ -82,12 +120,15 @@ func (p *FilteredPush) Stage(ctx context.Context, conn BlockedRecomputeConn) (bo
 	if err := p.materializeIgnoredTables(ctx, conn); err != nil {
 		return false, err
 	}
+	if err := p.Step(FilteredPushStepDelete); err != nil {
+		return false, err
+	}
 	removed, err := deleteExcludedIssues(ctx, conn, p.ExcludeTypes)
 	if err != nil {
 		return false, err
 	}
 	if removed {
-		if err := CommitFilteredStaging(ctx, conn, p.Author); err != nil {
+		if err := p.commitFiltered(ctx, conn); err != nil {
 			return false, err
 		}
 		if err := p.revertOnKeep(ctx, conn); err != nil {
@@ -104,11 +145,17 @@ func (p *FilteredPush) Stage(ctx context.Context, conn BlockedRecomputeConn) (bo
 // commit on Keep: Keep's tip has Source's tree with the filter commit as its
 // parent.
 func (p *FilteredPush) revertOnKeep(ctx context.Context, conn DBConn) error {
+	if err := p.Step(FilteredPushStepKeep); err != nil {
+		return err
+	}
 	if _, err := conn.ExecContext(ctx, "CALL DOLT_BRANCH(?, ?)", p.Keep, p.Staging); err != nil {
 		return fmt.Errorf("federation filter: create keep branch: %w", err)
 	}
 	if err := CheckoutBranch(ctx, conn, p.Keep); err != nil {
 		return fmt.Errorf("federation filter: checkout keep branch: %w", err)
+	}
+	if err := p.Step(FilteredPushStepRevert); err != nil {
+		return err
 	}
 	query, args := "CALL DOLT_REVERT('HEAD')", []any(nil)
 	if p.Author != "" {
@@ -178,6 +225,13 @@ func deleteExcludedIssues(ctx context.Context, conn DBConn, excludeTypes []strin
 // conn's current branch in one SQL transaction, then commits everything
 // (Dolt procedures cannot run inside that transaction).
 func CommitFilteredStaging(ctx context.Context, conn BlockedRecomputeConn, author string) error {
+	return (&FilteredPush{Author: author}).commitFiltered(ctx, conn)
+}
+
+func (p *FilteredPush) commitFiltered(ctx context.Context, conn BlockedRecomputeConn) error {
+	if err := p.Step(FilteredPushStepRecompute); err != nil {
+		return err
+	}
 	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("federation filter: begin staged is_blocked recompute: %w", err)
@@ -189,9 +243,12 @@ func CommitFilteredStaging(ctx context.Context, conn BlockedRecomputeConn, autho
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("federation filter: commit staged is_blocked recompute: %w", err)
 	}
+	if err := p.Step(FilteredPushStepCommit); err != nil {
+		return err
+	}
 	query, args := "CALL DOLT_COMMIT('-Am', ?)", []any{FilteredPushCommitMsg}
-	if author != "" {
-		query, args = "CALL DOLT_COMMIT('-Am', ?, '--author', ?)", []any{FilteredPushCommitMsg, author}
+	if p.Author != "" {
+		query, args = "CALL DOLT_COMMIT('-Am', ?, '--author', ?)", []any{FilteredPushCommitMsg, p.Author}
 	}
 	if _, err := conn.ExecContext(ctx, query, args...); err != nil {
 		return fmt.Errorf("federation filter: commit filtered state: %w", err)
@@ -203,7 +260,7 @@ func CommitFilteredStaging(ctx context.Context, conn BlockedRecomputeConn, autho
 // branch that was never created is not an error. Errors are joined so one failure
 // does not hide another.
 func (p *FilteredPush) Cleanup(ctx context.Context, db DBConn) error {
-	var errs error
+	errs := p.Step(FilteredPushStepCleanup)
 	if err := CheckoutBranch(ctx, db, p.Source); err != nil {
 		errs = errors.Join(errs, fmt.Errorf("restore branch %s: %w", p.Source, err))
 	}

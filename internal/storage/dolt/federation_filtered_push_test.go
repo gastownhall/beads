@@ -2,11 +2,14 @@ package dolt
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -206,6 +209,94 @@ func TestServerSyncFilteredPushRetainsExcludedRowsAcrossSyncs(t *testing.T) {
 	syncServerFilteredPeer(t, ctx, store, "final sync")
 	if got := readServerGraph(t, ctx, store, ""); got != want {
 		t.Errorf("after the final sync, local graph = %+v, want %+v", got, want)
+	}
+	assertServerOnlySourceBranch(t, ctx, store)
+}
+
+var errInjectedServerFilteredPush = errors.New("injected filtered push failure")
+
+// injectServerFilteredPushStep makes the filtered push fail at step: with an
+// error, or, when cancel is set, by canceling the operation's context first.
+func injectServerFilteredPushStep(t *testing.T, step string, cancel context.CancelFunc) {
+	t.Helper()
+	filteredPushBeforeStep = func(got string) error {
+		if got != step {
+			return nil
+		}
+		if cancel != nil {
+			cancel()
+			return nil
+		}
+		return errInjectedServerFilteredPush
+	}
+	t.Cleanup(func() { filteredPushBeforeStep = nil })
+}
+
+// AC-7: a filtered push that fails or is canceled at any step reports the
+// failure, keeps every local row, sends nothing to the peer and removes both
+// temporary branches.
+func TestServerSyncFilteredPushFailureKeepsLocalDataAndCleansUp(t *testing.T) {
+	for _, step := range versioncontrolops.FilteredPushSteps {
+		if step == versioncontrolops.FilteredPushStepCleanup {
+			continue
+		}
+		for _, canceled := range []bool{false, true} {
+			name := step + "/failed"
+			if canceled {
+				name = step + "/canceled"
+			}
+			t.Run(name, func(t *testing.T) {
+				store, ctx := newServerFilteredPushStore(t)
+				seedServerFilteredPushGraph(t, ctx, store)
+				opCtx, cancel := context.WithCancel(ctx)
+				defer cancel()
+				if canceled {
+					injectServerFilteredPushStep(t, step, cancel)
+				} else {
+					injectServerFilteredPushStep(t, step, nil)
+				}
+
+				result, err := store.Sync(opCtx, serverFilteredPushPeer, "")
+				if err != nil {
+					t.Fatalf("Sync: %v", err)
+				}
+				switch {
+				case result.Pushed || result.PushError == nil:
+					t.Fatalf("Sync pushed = %v, push error = %v; want the push to fail", result.Pushed, result.PushError)
+				case !canceled && !errors.Is(result.PushError, errInjectedServerFilteredPush):
+					t.Errorf("push error = %v, want the injected failure", result.PushError)
+				case strings.Contains(result.PushError.Error(), "cleanup"):
+					t.Errorf("push error = %v, want a clean cleanup", result.PushError)
+				}
+
+				if got := readServerGraph(t, ctx, store, ""); got != serverLocalGraph {
+					t.Errorf("local graph = %+v, want %+v", got, serverLocalGraph)
+				}
+				if got := readServerGraph(t, ctx, store, serverPeerTip(t, ctx, store)); got != (serverGraphCounts{}) {
+					t.Errorf("peer tip graph = %+v, want the seed tip (nothing pushed)", got)
+				}
+				assertServerOnlySourceBranch(t, ctx, store)
+			})
+		}
+	}
+}
+
+// AC-7: a cleanup failure is reported, and cleanup still removes what it can.
+func TestServerSyncFilteredPushReportsCleanupFailure(t *testing.T) {
+	store, ctx := newServerFilteredPushStore(t)
+	seedServerFilteredPushGraph(t, ctx, store)
+	injectServerFilteredPushStep(t, versioncontrolops.FilteredPushStepCleanup, nil)
+
+	result, err := store.Sync(ctx, serverFilteredPushPeer, "")
+	if err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if result.PushError == nil || !errors.Is(result.PushError, errInjectedServerFilteredPush) ||
+		!strings.Contains(result.PushError.Error(), "cleanup") {
+		t.Fatalf("push error = %v, want the injected cleanup failure reported", result.PushError)
+	}
+	if got := readServerGraph(t, ctx, store, ""); got != serverLocalGraph {
+		t.Errorf("local graph = %+v, want %+v", got, serverLocalGraph)
 	}
 	assertServerOnlySourceBranch(t, ctx, store)
 }

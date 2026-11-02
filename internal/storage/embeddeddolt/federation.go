@@ -434,6 +434,10 @@ func (s *EmbeddedDoltStore) Sync(ctx context.Context, peer string, strategy stri
 // temporary branches after the caller has canceled or its deadline expired.
 const filteredPushCleanupTimeout = 30 * time.Second
 
+// filteredPushBeforeStep is installed as every filtered push's BeforeStep;
+// tests set it to inject failures and cancellations.
+var filteredPushBeforeStep func(step string) error
+
 // filteredPushToPeer pushes to peer without the issues of excludeTypes, as the
 // server store's filteredPushToPeer does. An empty excludeTypes is a plain
 // PushTo. Otherwise the filtered state is committed on a temporary branch,
@@ -450,6 +454,7 @@ func (s *EmbeddedDoltStore) filteredPushToPeer(ctx context.Context, peer string,
 	if err != nil {
 		return err
 	}
+	push.BeforeStep = filteredPushBeforeStep
 
 	// Armed before the branch exists, and on a fresh, uncanceled, bounded
 	// session: the operation's own session may be the one a cancel broke.
@@ -479,6 +484,9 @@ func (s *EmbeddedDoltStore) filteredPushToPeer(ctx context.Context, peer string,
 	// filtered tip leaves: once the peer has it, the next sync merges it as an
 	// ancestor rather than as a deletion of the excluded issues.
 	if removed {
+		if err := push.Step(versioncontrolops.FilteredPushStepMerge); err != nil {
+			return err
+		}
 		conflicts, err := s.Merge(ctx, push.Keep)
 		if err != nil {
 			return fmt.Errorf("federation filter: merge keep branch: %w", err)
@@ -488,6 +496,9 @@ func (s *EmbeddedDoltStore) filteredPushToPeer(ctx context.Context, peer string,
 		}
 	}
 
+	if err := push.Step(versioncontrolops.FilteredPushStepPush); err != nil {
+		return err
+	}
 	return s.withPeerAuth(ctx, peer, func(user string) error {
 		return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
 			return versioncontrolops.Push(ctx, db, peer, push.Refspec(), user)
