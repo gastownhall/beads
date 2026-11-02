@@ -31,6 +31,11 @@ func symlinkError(path string) error {
 	return fmt.Errorf("%w at %q", ErrSymlink, path)
 }
 
+// openNoFollowSwapHookForTest runs between the Lstat refusal and the kernel
+// open so a test can swap a symlink into the gap O_NOFOLLOW closes. It is nil
+// outside tests.
+var openNoFollowSwapHookForTest func(string)
+
 // OpenNoFollow is os.OpenFile that refuses a symbolic link at the final
 // component of path, live or dangling, with an error wrapping ErrSymlink.
 //
@@ -42,6 +47,9 @@ func symlinkError(path string) error {
 func OpenNoFollow(path string, flag int, perm os.FileMode) (*os.File, error) {
 	if err := rejectSymlink(path); err != nil {
 		return nil, err
+	}
+	if openNoFollowSwapHookForTest != nil {
+		openNoFollowSwapHookForTest(path)
 	}
 	f, err := os.OpenFile(path, flag|noFollowFlag, perm) // #nosec G304 -- caller selects path; final-component symlinks are refused.
 	if err != nil {

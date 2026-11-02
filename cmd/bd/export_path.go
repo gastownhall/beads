@@ -69,6 +69,7 @@ func resolveExportPath(jsonlDir, exportPath string) (string, error) {
 			}
 		}
 	}
+	resolvedCase := canonicalPathCase(resolved)
 	for _, gitDir := range append(gitDirs, hookGitDirs()...) {
 		if abs, err := filepath.Abs(gitDir); err == nil {
 			gitDir = abs
@@ -76,11 +77,55 @@ func resolveExportPath(jsonlDir, exportPath string) (string, error) {
 		if r, err := resolveExistingPath(gitDir); err == nil {
 			gitDir = r
 		}
-		if resolved == gitDir || exportWithinAnchor(gitDir, resolved) {
+		gitDir = canonicalPathCase(gitDir)
+		if resolvedCase == gitDir || exportWithinAnchor(gitDir, resolvedCase) {
 			return "", fmt.Errorf("it enters Git metadata at %s", remedy.PrintedValue(gitDir))
 		}
 	}
 	return fullPath, nil
+}
+
+// canonicalPathCase returns path with every existing component replaced by
+// its on-disk spelling, so a containment check cannot be evaded by a
+// differently-cased name on a case-insensitive filesystem: APFS (and NTFS)
+// treat META and meta as the same directory while string comparison does
+// not. Components with no on-disk entry keep the caller's spelling, as does
+// the whole tail below the first nonexistent component.
+func canonicalPathCase(path string) string {
+	vol := filepath.VolumeName(path)
+	rest := path[len(vol):]
+	sep := string(filepath.Separator)
+	acc, out := vol, vol
+	if strings.HasPrefix(rest, sep) {
+		acc += sep
+		out += sep
+		rest = rest[len(sep):]
+	} else {
+		acc += "."
+	}
+	for rest != "" {
+		part, tail, _ := strings.Cut(rest, sep)
+		rest = tail
+		if part == "" || part == "." {
+			continue
+		}
+		name := part
+		if entries, err := os.ReadDir(acc); err == nil {
+			for _, e := range entries {
+				if strings.EqualFold(e.Name(), part) {
+					name = e.Name()
+					break
+				}
+			}
+		}
+		if out == "" || strings.HasSuffix(out, sep) {
+			out += name
+		} else {
+			out += sep + name
+		}
+		acc = out
+	}
+	return out
 }
 
 // resolveExistingPath resolves the deepest existing ancestor of path and

@@ -166,6 +166,47 @@ func TestNoFollowRegularFiles(t *testing.T) {
 	assertNoTempFiles(t, dir)
 }
 
+// TestOpenNoFollowRefusesSymlinkSwappedInAfterLstat pins the kernel side of
+// OpenNoFollow: a symlink swapped into the gap between the Lstat refusal and
+// os.OpenFile must still be refused by O_NOFOLLOW — the Lstat pre-check
+// alone cannot cover it. Mirrors the caFileReadHookForTest swap pattern in
+// internal/httpclient.
+func TestOpenNoFollowRefusesSymlinkSwappedInAfterLstat(t *testing.T) {
+	if noFollowFlag == 0 {
+		t.Skip("no O_NOFOLLOW on this platform; the Lstat check is the only layer")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "lock")
+	if err := os.WriteFile(path, []byte("real"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	elsewhere := filepath.Join(t.TempDir(), "elsewhere")
+	if err := os.WriteFile(elsewhere, []byte("target"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	restore := openNoFollowSwapHookForTest
+	t.Cleanup(func() { openNoFollowSwapHookForTest = restore })
+	openNoFollowSwapHookForTest = func(real string) {
+		if err := os.Remove(real); err != nil {
+			t.Fatalf("remove checked path before symlink swap: %v", err)
+		}
+		if err := os.Symlink(elsewhere, real); err != nil {
+			t.Fatalf("symlink swap-in over checked path: %v", err)
+		}
+	}
+
+	f, err := OpenNoFollow(path, os.O_RDWR|os.O_TRUNC, 0)
+	if err == nil {
+		_ = f.Close()
+		t.Fatal("OpenNoFollow opened a symlink swapped in after the Lstat check")
+	}
+	if !errors.Is(err, ErrSymlink) {
+		t.Fatalf("OpenNoFollow = %v, want ErrSymlink", err)
+	}
+	assertContents(t, elsewhere, "target")
+}
+
 func assertContents(t *testing.T, path, want string) {
 	t.Helper()
 	got, err := os.ReadFile(path)
