@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
+	publicops "github.com/steveyegge/beads/issueops"
 	"github.com/steveyegge/beads/memoryops"
 )
 
@@ -620,5 +621,202 @@ func TestJournalWriterLock_CleanupOrderBeforeUnlock(t *testing.T) {
 			t.Fatalf("add comment: %v", err)
 		}
 		returned()
+	})
+}
+
+// TestJournalWriterLock_FencedDeleteContention pins AC-7 of
+// gastownhall/beads#6117: a guarded delete runs under the per-id delete fence
+// on ONE pinned session, and when the journal is on, that same session — not
+// a second store-pool connection — must take the journal-writer admission
+// lock (fence first, journal second, same session). The test store's pool is
+// capped at two connections, and the probe holds one, so the fenced delete
+// has exactly one available: if admission wrongly pinned another pool
+// connection it could never be granted, and both arms below would hang to
+// their context deadline instead of resolving.
+func TestJournalWriterLock_FencedDeleteContention(t *testing.T) {
+	store, cleanup := setupConcurrentTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+	store.SetEventsJournalEnabled(true)
+	defer store.SetEventsJournalEnabled(false)
+
+	lockName := issueops.JournalWriterLockName(store.database)
+	newIssue := func(title string) *types.Issue {
+		issue := &types.Issue{Title: title, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+		if err := store.CreateIssue(ctx, issue, "actor"); err != nil {
+			t.Fatalf("create %s: %v", title, err)
+		}
+		stored, err := store.GetIssue(ctx, issue.ID)
+		if err != nil {
+			t.Fatalf("read back %s: %v", issue.ID, err)
+		}
+		return stored
+	}
+	deleteJournalRow := func(op, id string) (string, bool) {
+		var got string
+		err := store.db.QueryRowContext(ctx,
+			`SELECT actor FROM bd_events_journal WHERE op = ? AND issue_id = ? ORDER BY seq DESC LIMIT 1`,
+			op, id).Scan(&got)
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", false
+		}
+		if err != nil {
+			t.Fatalf("query journal %s/%s: %v", op, id, err)
+		}
+		return got, true
+	}
+	// fenceFree asserts the delete fence for id was handed back: a fresh
+	// session takes it at once and gives it back.
+	fenceFree := func(id string) {
+		t.Helper()
+		c, err := store.db.Conn(ctx)
+		if err != nil {
+			t.Fatalf("pin fence probe connection: %v", err)
+		}
+		defer func() { _ = c.Close() }()
+		var granted sql.NullInt64
+		if err := c.QueryRowContext(ctx, "SELECT GET_LOCK(?, 0)", deleteFenceLockName(store.database, id)).Scan(&granted); err != nil {
+			t.Fatalf("probe fence lock: %v", err)
+		}
+		if !granted.Valid || granted.Int64 != 1 {
+			t.Fatalf("delete fence for %s still held after the delete returned (granted=%v)", id, granted)
+		}
+		_, _ = c.ExecContext(ctx, "SELECT RELEASE_LOCK(?)", deleteFenceLockName(store.database, id))
+	}
+	guardedDelete := func(ctx context.Context, id string, rowVersion int64) error {
+		deleter, err := store.Deleter()
+		if err != nil {
+			t.Fatalf("Deleter(): %v", err)
+		}
+		_, err = deleter.Delete(ctx, publicops.DeleteRequest{
+			IDs: []string{id}, ExpectedVersion: &rowVersion, Actor: "fence-test",
+		})
+		return err
+	}
+
+	t.Run("queues on the fence session, then proceeds", func(t *testing.T) {
+		target := newIssue("fenced delete queues")
+
+		// The competitor: one pool session holds the journal-writer lock,
+		// leaving exactly one connection of the capped pool for the fenced
+		// delete — its fence session.
+		probe, err := store.db.Conn(ctx)
+		if err != nil {
+			t.Fatalf("pin probe connection: %v", err)
+		}
+		defer func() { _ = probe.Close() }()
+		var granted sql.NullInt64
+		if err := probe.QueryRowContext(ctx, "SELECT GET_LOCK(?, 0)", lockName).Scan(&granted); err != nil {
+			t.Fatalf("take probe lock: %v", err)
+		}
+		if !granted.Valid || granted.Int64 != 1 {
+			t.Fatalf("probe could not take the journal-writer lock (granted=%v)", granted)
+		}
+		releaseProbe := func() {
+			_, _ = probe.ExecContext(context.Background(), "SELECT RELEASE_LOCK(?)", lockName)
+		}
+		defer releaseProbe()
+
+		type outcome struct {
+			err     error
+			elapsed time.Duration
+		}
+		done := make(chan outcome, 1)
+		start := time.Now()
+		go func() {
+			err := guardedDelete(ctx, target.ID, target.RowVersion)
+			done <- outcome{err: err, elapsed: time.Since(start)}
+		}()
+
+		// The fenced delete has pinned its fence session (InUse = probe +
+		// fence session) and is queued on the admission lock. If admission
+		// needed a second store-pool connection, the pool (capped at 2, one
+		// held by the probe) could never grant it and the delete below would
+		// never finish.
+		deadline := time.Now().Add(10 * time.Second)
+		for store.db.Stats().InUse < 2 && time.Now().Before(deadline) {
+			time.Sleep(20 * time.Millisecond)
+		}
+		if inUse := store.db.Stats().InUse; inUse != 2 {
+			t.Fatalf("pool InUse = %d while the fenced delete queued, want 2 (probe + fence session)", inUse)
+		}
+		// Give the queued admission its first GET_LOCK slice, then hand the
+		// lock over: the fenced delete enters, deletes, and commits on its
+		// own session.
+		time.Sleep(300 * time.Millisecond)
+		releaseProbe()
+
+		select {
+		case res := <-done:
+			if res.err != nil {
+				t.Fatalf("fenced delete under short journal contention: %v", res.err)
+			}
+			if res.elapsed > 20*time.Second {
+				t.Fatalf("fenced delete took %v, want a queue-then-proceed, not a hang", res.elapsed)
+			}
+		case <-time.After(20 * time.Second):
+			t.Fatalf("fenced delete never finished after the probe released the journal lock")
+		}
+
+		if _, err := store.GetIssue(ctx, target.ID); !errors.Is(err, storage.ErrNotFound) {
+			t.Fatalf("get deleted issue = %v, want ErrNotFound", err)
+		}
+		if actor, ok := deleteJournalRow("delete", target.ID); !ok || actor != "fence-test" {
+			t.Fatalf("delete journal row actor = %q, %v; want fence-test — the delete did not mint through the admitted path", actor, ok)
+		}
+		fenceFree(target.ID)
+	})
+
+	t.Run("contention past the admission budget is busy, fence handed back", func(t *testing.T) {
+		target := newIssue("fenced delete busy")
+
+		probe, err := store.db.Conn(ctx)
+		if err != nil {
+			t.Fatalf("pin probe connection: %v", err)
+		}
+		defer func() { _ = probe.Close() }()
+		var granted sql.NullInt64
+		if err := probe.QueryRowContext(ctx, "SELECT GET_LOCK(?, 0)", lockName).Scan(&granted); err != nil {
+			t.Fatalf("take probe lock: %v", err)
+		}
+		if !granted.Valid || granted.Int64 != 1 {
+			t.Fatalf("probe could not take the journal-writer lock (granted=%v)", granted)
+		}
+		// Held past the delete's return: contention beyond the whole
+		// server-mode admission budget, the shape the busy outcome exists
+		// for. The ctx below is the 90s test budget, strictly beyond the 15s
+		// admission deadline, so the failure is the named busy error rather
+		// than a cancellation racing the same deadline.
+		defer func() {
+			_, _ = probe.ExecContext(context.Background(), "SELECT RELEASE_LOCK(?)", lockName)
+		}()
+
+		start := time.Now()
+		err = guardedDelete(ctx, target.ID, target.RowVersion)
+		elapsed := time.Since(start)
+		if !errors.Is(err, issueops.ErrJournalWriterBusy) {
+			t.Fatalf("fenced delete under sustained contention = %v, want ErrJournalWriterBusy", err)
+		}
+		if elapsed < 14*time.Second || elapsed > 30*time.Second {
+			t.Fatalf("fenced delete failed after %v, want the ~15s admission budget (not an instant error, not the 20s fence timeout, not a hang)", elapsed)
+		}
+		// The body never ran: the row is intact and no journal row was minted.
+		stored, err := store.GetIssue(ctx, target.ID)
+		if err != nil {
+			t.Fatalf("get issue after the refused delete: %v", err)
+		}
+		if stored.Status != types.StatusOpen {
+			t.Fatalf("status = %q after the refused delete, want open", stored.Status)
+		}
+		if _, ok := deleteJournalRow("delete", target.ID); ok {
+			t.Fatalf("the refused delete minted a journal row")
+		}
+		// The fence went back with the failed write, and the pinned session
+		// was released or discarded: only the probe is still out.
+		fenceFree(target.ID)
+		if inUse := store.db.Stats().InUse; inUse != 1 {
+			t.Fatalf("pool InUse = %d after the refused delete, want 1 (the probe only)", inUse)
+		}
 	})
 }
