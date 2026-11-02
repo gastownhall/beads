@@ -369,3 +369,23 @@ func TestEmbeddedCommitAuthorDefaults(t *testing.T) {
 	}
 	requireNewCommitBy(t, "Commit", before, te.readHead(t, ctx), "beads", "beads@local")
 }
+
+// TestEmbeddedCommitAuthorNormalizesName: Dolt parses "name <email>" with an
+// unanchored pattern that rejects or truncates a name holding brackets,
+// parentheses or line breaks — after the SQL commit already landed. The store
+// strips them before publication.
+func TestEmbeddedCommitAuthorNormalizesName(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	setGitAuthorEnv(t, "Alice (bot)\n<x>", "alice@example.com")
+	ctx := t.Context()
+	te := newTestEnv(t, "authn")
+
+	before := te.readHead(t, ctx)
+	issue := &types.Issue{Title: "normalized", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	if err := te.store.RunInTransaction(ctx, "bd: create issue", func(tx storage.Transaction) error {
+		return tx.CreateIssue(ctx, issue, "alice")
+	}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	requireNewCommitBy(t, "transaction", before, te.readHead(t, ctx), "Alice bot x", "alice@example.com")
+}

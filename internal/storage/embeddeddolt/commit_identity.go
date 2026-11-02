@@ -34,9 +34,10 @@ func (s *EmbeddedDoltStore) commitAuthor() string {
 
 // resolveCommitAuthor resolves name and email independently, the way server
 // mode does: GIT_AUTHOR_NAME / GIT_AUTHOR_EMAIL, else beads / beads@local.
+// A value that is empty once cleaned falls through.
 func resolveCommitAuthor() string {
-	name := strings.TrimSpace(os.Getenv("GIT_AUTHOR_NAME"))
-	email := strings.TrimSpace(os.Getenv("GIT_AUTHOR_EMAIL"))
+	name := cleanCommitIdentityField(os.Getenv("GIT_AUTHOR_NAME"))
+	email := cleanCommitIdentityField(os.Getenv("GIT_AUTHOR_EMAIL"))
 	if name == "" {
 		name = commitName
 	}
@@ -44,4 +45,20 @@ func resolveCommitAuthor() string {
 		email = commitEmail
 	}
 	return name + " <" + email + ">"
+}
+
+// cleanCommitIdentityField makes one identity field safe for Dolt's
+// "name <email>" parser, whose unanchored pattern rejects or silently
+// truncates a value holding angle brackets, parentheses or line breaks — and
+// it parses only after the SQL commit has landed. It drops those characters
+// and collapses whitespace runs to one space.
+func cleanCommitIdentityField(s string) string {
+	s = strings.Map(func(r rune) rune {
+		switch r {
+		case '<', '>', '(', ')':
+			return -1
+		}
+		return r
+	}, s)
+	return strings.Join(strings.Fields(s), " ")
 }
