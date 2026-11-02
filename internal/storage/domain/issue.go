@@ -235,6 +235,13 @@ type DeleteIssuesResult struct {
 	// off) populate nothing here, so `bd wisp gc --json`, which publishes the
 	// field, keeps reading null.
 	OrphanedIssues []string
+	// DeletedIDs names every row the delete removed — or, under DryRun, would
+	// remove — in ascending id order: under Cascade the whole containment
+	// closure, not merely params.IDs (issue #6301). It is set from the
+	// resolved set before the dry-run return, so a preview enumerates exactly
+	// the rows the confirming run takes, and under DryRun
+	// len(DeletedIDs) == DeletedCount.
+	DeletedIDs []string
 }
 
 type DeletePreview struct {

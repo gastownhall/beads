@@ -303,7 +303,10 @@ func renderSingleDeletePreview(
 		fmt.Printf("\nWould delete: %d issues\n", result.Deleted)
 		fmt.Printf("Would remove: %d dependencies, %d labels, %d events\n", result.Dependencies, result.Labels, result.Events)
 		if len(result.Orphaned) > 0 {
-			fmt.Printf("Would orphan: %d issues\n", len(result.Orphaned))
+			// Named, not just counted (issue #6301): the orphans are rows the
+			// caller is about to leave behind, and this preview is the one
+			// place they can be seen before the delete happens.
+			fmt.Printf("Would orphan: %d issues: %s\n", len(result.Orphaned), strings.Join(result.Orphaned, ", "))
 		}
 		fmt.Printf("\n(Dry-run mode - no changes made)\n")
 	} else {
@@ -457,6 +460,13 @@ func deleteBatchReporting(issueIDs []string, force, dryRun, cascade, jsonOutput 
 			}
 			return err
 		}
+		// The front door hydrated only the REQUESTED rows; the preview below
+		// enumerates every row the role resolved — under --cascade the whole
+		// containment closure, plus the orphans it leaves (issue #6301). JSON
+		// and quiet never print the enumeration, so they skip the read.
+		if !jsonOutput && !isQuiet() {
+			hydrateDeletePreviewTitles(ctx, batchStore, issues, result)
+		}
 		if previewErr := outputDeletionPreviewReporting(resolvedIDs, issues, cascade, dryRun, &result, nil, jsonOutput, report); previewErr != nil {
 			return previewErr
 		}
@@ -560,11 +570,23 @@ func outputDeletionPreviewReporting(issueIDs []string, issues map[string]*types.
 	}
 
 	fmt.Printf("\n%s\n", ui.RenderFail("⚠️  DELETE PREVIEW"))
-	fmt.Printf("\nIssues to delete (%d):\n", len(issueIDs))
-	for _, id := range issueIDs {
+	// The role's answer names every row the request would take (issue #6301):
+	// under --cascade that is the whole containment closure, and a preview
+	// listing only the requested ids with a count beside them is what let a
+	// 48-row deletion look like a bounded one. When the role refused
+	// (result == nil) there is no closure to name, so the requested ids stand
+	// in as before.
+	previewIDs := issueIDs
+	if result != nil && len(result.DeletedIDs) > 0 {
+		previewIDs = result.DeletedIDs
+	}
+	fmt.Printf("\nIssues to delete (%d):\n", len(previewIDs))
+	for _, id := range previewIDs {
+		title := ""
 		if issue := issues[id]; issue != nil {
-			fmt.Printf("  %s: %s\n", id, issue.Title)
+			title = issue.Title
 		}
+		fmt.Printf("  %s: %s\n", id, title)
 	}
 	if cascade {
 		fmt.Printf("\n%s Cascade mode enabled - will also delete all dependent issues\n", ui.RenderWarn("⚠"))
@@ -579,11 +601,58 @@ func outputDeletionPreviewReporting(issueIDs []string, issues map[string]*types.
 		if len(result.Orphaned) > 0 {
 			fmt.Printf("Would orphan: %d issues\n", len(result.Orphaned))
 		}
+		if len(result.Orphaned) > 0 {
+			// Named, not just counted (issue #6301): the orphans are rows the
+			// caller is about to leave behind, and the preview is the one
+			// place they can be seen before the delete happens.
+			fmt.Printf("Would orphan: %d issues\n", len(result.Orphaned))
+			for _, id := range result.Orphaned {
+				title := ""
+				if issue := issues[id]; issue != nil {
+					title = issue.Title
+				}
+				fmt.Printf("  %s: %s\n", id, title)
+			}
+		}
 		if dryRun {
 			fmt.Printf("\n(Dry-run mode - no changes made)\n")
 		}
 	}
 	return nil
+}
+
+// hydrateDeletePreviewTitles batch-loads the rows the preview enumerates but
+// the front door did not hydrate: the role's answer names the whole resolved
+// set — under --cascade the containment closure — and the orphans it leaves,
+// none of which the per-id resolution read (issue #6301).
+//
+// Titles are presentation, so a load that fails lists those rows by id alone
+// — the error is dropped on purpose. It never hydrates a wisp id twice or a
+// row the caller already handed in: issues keeps the front door's rows.
+func hydrateDeletePreviewTitles(ctx context.Context, store storage.DoltStorage, issues map[string]*types.Issue, result issueops.DeleteResult) {
+	extra := make([]string, 0, len(result.DeletedIDs)+len(result.Orphaned))
+	for _, id := range result.DeletedIDs {
+		if issues[id] == nil {
+			extra = append(extra, id)
+		}
+	}
+	for _, id := range result.Orphaned {
+		if issues[id] == nil {
+			extra = append(extra, id)
+		}
+	}
+	if len(extra) == 0 {
+		return
+	}
+	rows, err := store.GetIssuesByIDs(ctx, extra)
+	if err != nil {
+		return
+	}
+	for _, row := range rows {
+		if row != nil {
+			issues[row.ID] = row
+		}
+	}
 }
 
 // readIssueIDsFromFile reads issue IDs from a file (one per line)

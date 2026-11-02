@@ -130,6 +130,23 @@ func TestOutputDeleteProxiedPreviewExactContracts(t *testing.T) {
 		}
 	})
 
+	t.Run("prose names every row the role resolved, not just the requested ones", func(t *testing.T) {
+		enumResult := result
+		enumResult.res = issueops.DeleteResult{
+			Deleted: 3, Dependencies: 4, Labels: 2, Events: 5,
+			DeletedIDs: []string{"bd-target", "bd-child", "bd-grandchild"},
+		}
+		in := &deleteInput{ids: []string{"bd-target"}, dryRun: true}
+		out := captureStdout(t, func() error { return outputDeleteProxiedPreview(in, enumResult) })
+		for _, required := range []string{
+			"Issues to delete (3):", "bd-child", "bd-grandchild",
+		} {
+			if !strings.Contains(out, required) {
+				t.Errorf("enumerated preview missing %q:\n%s", required, out)
+			}
+		}
+	})
+
 	t.Run("prose warns about cascade only when cascade was requested and proceed hint carries the flag", func(t *testing.T) {
 		in := &deleteInput{ids: []string{"bd-target"}, cascade: true}
 		out := captureStdout(t, func() error { return outputDeleteProxiedPreview(in, result) })

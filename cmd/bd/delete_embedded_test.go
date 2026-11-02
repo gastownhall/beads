@@ -470,6 +470,34 @@ func TestEmbeddedDeleteCascadeFollowsOnlyParentChild(t *testing.T) {
 			t.Errorf("expected %s to be unblocked after %s was deleted", fx.c1, fx.a1)
 		}
 	})
+
+	// A preview that lists only the requested ids with counts beside them is
+	// what let the 48-row deletion on v1.2.2 look like a bounded one: the text
+	// preview must name every row the cascade would take and every row it
+	// would orphan, before the caller confirms anything.
+	t.Run("preview_names_every_row_the_cascade_would_take", func(t *testing.T) {
+		fx := seedCascadeContainmentFixture(t, bd, dir)
+
+		out := bdDelete(t, bd, dir, fx.a, "--cascade")
+
+		for _, id := range []string{fx.a, fx.a1, fx.a11, fx.a2} {
+			if !strings.Contains(out, id) {
+				t.Errorf("preview does not name would-delete %s:\n%s", id, out)
+			}
+		}
+		for _, id := range []string{fx.b, fx.c1, fx.s} {
+			if !strings.Contains(out, id) {
+				t.Errorf("preview does not name would-orphan %s:\n%s", id, out)
+			}
+		}
+
+		// The preview is a read: nothing went anywhere.
+		for _, id := range []string{fx.a, fx.a1, fx.a11, fx.a2, fx.b, fx.b1, fx.c, fx.c1, fx.s} {
+			if got := bdShow(t, bd, dir, id); got.ID != id {
+				t.Errorf("preview deleted %s", id)
+			}
+		}
+	})
 }
 
 func TestEmbeddedGetDependencies(t *testing.T) {

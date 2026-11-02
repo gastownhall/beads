@@ -219,6 +219,10 @@ func deleteInUOW(ctx context.Context, uw UnitOfWork, req publicops.DeleteRequest
 	result.Labels = deleted.LabelsCount
 	result.Events = deleted.EventsCount
 	result.ReferencesUpdated = deleted.ReferencesUpdated
+	// The use case names every row of the resolved set (issue #6301); this leg
+	// carries the list out so a preview can enumerate what the confirming run
+	// takes instead of showing a count.
+	result.DeletedIDs = deleted.DeletedIDs
 	// The containment closure leaves the association dependents behind (issue
 	// #6301); the use case reports them as orphans and this leg carries the
 	// report out. The non-cascade modes were answered by the guard above.

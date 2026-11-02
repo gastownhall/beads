@@ -129,6 +129,17 @@ func (u *issueUseCaseImpl) deleteMany(ctx context.Context, params DeleteIssuesPa
 		result.OrphanedIssues = sortedStringSet(orphanSet)
 	}
 
+	// The resolved set is reported as ids, not just a count (issue #6301):
+	// under Cascade that is the whole containment closure, and the caller —
+	// previewing or committing — needs the rows named. Sorted dedup, set
+	// before the dry-run return so the preview and the real run enumerate the
+	// same ids.
+	deletedIDSet := make(map[string]bool, len(allIDs))
+	for _, id := range allIDs {
+		deletedIDSet[id] = true
+	}
+	result.DeletedIDs = sortedStringSet(deletedIDSet)
+
 	wispIDs, regularIDs, err := u.issueRepo.PartitionWispIDs(ctx, allIDs)
 	if err != nil {
 		return DeleteIssuesResult{}, fmt.Errorf("delete: partition: %w", err)

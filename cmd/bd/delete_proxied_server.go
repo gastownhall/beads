@@ -11,6 +11,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/uow"
+	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/issueops"
 )
@@ -132,8 +133,12 @@ func runDeleteProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 	if request.DryRun {
 		// The role answered WHAT WOULD HAPPEN; this read answers WHICH ROWS,
 		// which is presentation this route has always printed and which no
-		// result carries.
-		preview, previewErr := runDeleteProxiedPreviewTx(ctx, in)
+		// result carries. The extra ids come from the role's answer — the
+		// containment closure it resolved and the orphans it leaves (issue
+		// #6301) — because the preview below names every row that would go,
+		// and PreviewDelete hydrates only the requested ones.
+		enumerate := append(append([]string{}, result.DeletedIDs...), result.Orphaned...)
+		preview, previewErr := runDeleteProxiedPreviewTx(ctx, in, enumerate)
 		if previewErr != nil {
 			return HandleErrorRespectJSON("%v", previewErr)
 		}
@@ -169,11 +174,40 @@ type deletePreviewResult struct {
 
 // runDeleteProxiedPreviewTx reads the titles and the neighborhood one preview
 // prints. It is a READ unit of work and decides nothing.
-func runDeleteProxiedPreviewTx(ctx context.Context, in *deleteInput) (domain.DeletePreview, error) {
+//
+// enumerate names rows the preview must be able to TITLE but PreviewDelete
+// does not load — the cascade closure and the orphans (issue #6301), which
+// are outside in.ids.
+func runDeleteProxiedPreviewTx(ctx context.Context, in *deleteInput, enumerate []string) (domain.DeletePreview, error) {
 	return uow.RunTxRead(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (domain.DeletePreview, error) {
 		preview, err := uw.IssueUseCase().PreviewDelete(ctx, in.ids)
 		if err != nil {
 			return domain.DeletePreview{}, fmt.Errorf("preview: %w", err)
+		}
+		missing := make([]string, 0, len(enumerate))
+		for _, id := range enumerate {
+			if _, ok := preview.Issues[id]; !ok {
+				missing = append(missing, id)
+			}
+		}
+		if len(missing) > 0 {
+			issueUC := uw.IssueUseCase()
+			for _, load := range []func(context.Context, []string) ([]*types.Issue, error){
+				issueUC.GetIssuesByIDs,
+				issueUC.GetWispsByIDs,
+			} {
+				rows, err := load(ctx, missing)
+				if err != nil {
+					// Titles are presentation: a row that fails to hydrate
+					// is still enumerated below, by id and no title.
+					continue
+				}
+				for _, row := range rows {
+					if row != nil {
+						preview.Issues[row.ID] = row
+					}
+				}
+			}
 		}
 		return preview, nil
 	})
@@ -209,8 +243,15 @@ func outputDeleteProxiedPreview(in *deleteInput, result deletePreviewResult) err
 
 func renderDeletePreview(in *deleteInput, preview domain.DeletePreview, res issueops.DeleteResult, blocked *issueops.DependentsOutsideRequestError) {
 	fmt.Printf("\n%s\n", ui.RenderFail("⚠️  DELETE PREVIEW"))
-	fmt.Printf("\nIssues to delete (%d):\n", len(in.ids))
-	for _, id := range in.ids {
+	// The role's answer names every row the request would take (issue #6301)
+	// — under --cascade the whole containment closure — so the preview lists
+	// that rather than only the requested ids with a count beside them.
+	previewIDs := in.ids
+	if len(res.DeletedIDs) > 0 {
+		previewIDs = res.DeletedIDs
+	}
+	fmt.Printf("\nIssues to delete (%d):\n", len(previewIDs))
+	for _, id := range previewIDs {
 		title := ""
 		if iss, ok := preview.Issues[id]; ok && iss != nil {
 			title = iss.Title

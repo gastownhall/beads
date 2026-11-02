@@ -142,6 +142,18 @@ func DeleteInTx(ctx context.Context, tx *sql.Tx, req publicops.DeleteRequest) (p
 		return publicops.DeleteResult{}, fmt.Errorf("delete: %w", err)
 	}
 
+	// THE RESOLVED SET IS REPORTED AS IDS, not just a count (issue #6301):
+	// under Cascade it is the whole containment closure, and a caller about to
+	// confirm the delete needs the rows named, in the preview as much as in
+	// the result. Sorted so the list is stable across runs and across
+	// backends, and set BEFORE the dry-run return so the preview enumerates
+	// exactly the rows the confirming run takes.
+	deletedSet := make(map[string]bool, len(set.All))
+	for _, id := range set.All {
+		deletedSet[id] = true
+	}
+	result.DeletedIDs = workapi.SortedDeleteIDs(deletedSet)
+
 	// THE CASCADE PATH COMPUTES ITS OWN ORPHAN REPORT, against the resolved
 	// set: the containment closure follows parent-child edges only (issue
 	// #6301), so a row joined to the deleted set by an association edge —
@@ -152,10 +164,6 @@ func DeleteInTx(ctx context.Context, tx *sql.Tx, req publicops.DeleteRequest) (p
 	// non-cascade guard does: what separates an orphan from a deleted row is
 	// WHICH SET it is in, not which edge joined it.
 	if req.Cascade {
-		deletedSet := make(map[string]bool, len(set.All))
-		for _, id := range set.All {
-			deletedSet[id] = true
-		}
 		external, err := ExternalDependentsBySourceInTx(ctx, tx, set.All, deletedSet)
 		if err != nil {
 			return publicops.DeleteResult{}, fmt.Errorf("delete: report cascade orphans: %w", err)
