@@ -22,8 +22,10 @@ import "fmt"
 // branch on them without grep'ing stderr.
 const (
 	// ExitRemoteDivergenceRefused signals a local-source init was called
-	// against a remote that already has `refs/dolt/data`, without
-	// `--discard-remote`. Ambiguous identity source.
+	// against a remote that already has `refs/dolt/data`, or whose
+	// `refs/dolt/data` could not be read (GH#7665: unverified fails closed),
+	// without `--discard-remote`. Ambiguous identity source. The decision's
+	// Reason and message say which of the two it was.
 	ExitRemoteDivergenceRefused = 10
 
 	// ExitLocalExistsRefused signals the interactive typed-confirmation
@@ -80,10 +82,10 @@ const (
 	// instead of minting a fresh identity. This is the "adopt" path.
 	ActionBootstrap
 
-	// ActionRefuseDivergence — remote has Dolt data AND caller passed
-	// `--force` or `--reinit-local` without `--discard-remote`. The new
-	// identity would orphan-push over the remote on first write. Refuse
-	// with `ExitRemoteDivergenceRefused`.
+	// ActionRefuseDivergence — remote has (or, unverified, may have) Dolt
+	// data AND caller passed `--force` or `--reinit-local` without
+	// `--discard-remote`. The new identity would orphan-push over the remote
+	// on first write. Refuse with `ExitRemoteDivergenceRefused`.
 	ActionRefuseDivergence
 
 	// ActionRequireDestroyToken — caller passed `--discard-remote` but
@@ -125,6 +127,13 @@ type RemoteSafetyInput struct {
 
 	// Observed state.
 	RemoteHasDoltData bool
+	// RemoteDoltDataUnverified is true when the refs/dolt/data probe failed
+	// (auth, network, missing repository), so the remote's contents are
+	// UNKNOWN. ADR-0002 treats unknown as potentially having Dolt history:
+	// either field alone keeps the guard shut. It changes only the refusal's
+	// Reason and message, which must not claim history nobody could read
+	// (GH#7665).
+	RemoteDoltDataUnverified bool
 
 	// IsInteractive is true when the caller is attached to a TTY.
 	// Interactive callers can prompt for destroy-token confirmation, so the
@@ -151,8 +160,9 @@ type RemoteSafetyDecision struct {
 // function — never add a new `&& !someFlag` at the call site. See the
 // guard matrix test in init_safety_test.go.
 func CheckRemoteSafety(in RemoteSafetyInput) RemoteSafetyDecision {
-	// No remote data → no cross-boundary concern. Proceed.
-	if !in.RemoteHasDoltData {
+	// No remote data → no cross-boundary concern. Proceed. An unverified
+	// remote is not "no data": it fails closed like a populated one.
+	if !in.RemoteHasDoltData && !in.RemoteDoltDataUnverified {
 		return RemoteSafetyDecision{Action: ActionNoRemoteData, Reason: "no-remote-data"}
 	}
 
@@ -174,6 +184,14 @@ func CheckRemoteSafety(in RemoteSafetyInput) RemoteSafetyDecision {
 	// (`--force`, `--reinit-local`, or `--from-jsonl`) without
 	// `--discard-remote`. Refuse with structured message.
 	if !in.DiscardRemote {
+		if in.RemoteDoltDataUnverified {
+			return RemoteSafetyDecision{
+				Action:      ActionRefuseDivergence,
+				Reason:      "unverified-remote-without-discard-remote",
+				ExitCode:    ExitRemoteDivergenceRefused,
+				UserMessage: refusalMessageUnverifiedRemote(),
+			}
+		}
 		return RemoteSafetyDecision{
 			Action:      ActionRefuseDivergence,
 			Reason:      "force-without-discard-remote",
@@ -233,6 +251,29 @@ func refusalMessageDivergence() string {
 
     Overwrite the remote intentionally (destructive):
       See 'bd help init-safety' for the --discard-remote workflow.`
+}
+
+// refusalMessageUnverifiedRemote returns the What/Why/Next refusal text for
+// local source selection without `--discard-remote` when the remote's
+// refs/dolt/data could not be read (GH#7665). Unlike
+// refusalMessageDivergence it does not claim the remote has history, and it
+// does not suggest bootstrap: adopting the remote needs the same read access
+// the probe lacked. The probe warning printed just before this names the URL
+// and the git error. The text is reproduced in docs/recovery/init-safety.md
+// under `init-remote-unverified`; keep them in sync. Like every refusal it
+// does not echo a token value or a complete destructive invocation.
+func refusalMessageUnverifiedRemote() string {
+	return `bd init refuses: could not verify whether remote 'origin' has Dolt history (refs/dolt/data).
+
+  Why: the check of the remote failed (see the warning above for the
+       URL and the error), so bd cannot rule out existing Dolt history
+       and treats the remote as if it had some. --force / --reinit-local
+       bypasses only the LOCAL data-safety guard; --from-jsonl selects
+       JSONL as the local source. Neither authorizes diverging from
+       history that may exist on the remote.
+
+  Next:
+    See 'bd help init-safety'.`
 }
 
 // refusalMessageTokenMissing returns the What/Why/Next refusal text for
