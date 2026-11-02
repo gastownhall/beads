@@ -68,6 +68,15 @@ bd hooks install --chain    # Run existing hooks before bd hooks
 Hook installation is worktree-aware: `bd` resolves the shared git directory,
 so installing from a linked worktree works.
 
+*Unreleased:* `bd hooks install` and `bd hooks uninstall` refuse a hooks
+directory that is itself a symlink — installing would write the managed
+hooks, their backups and any preserved hooks into the link's target, outside
+the directory the operator named, so the refusal fires before any write or
+`core.hooksPath` change. A workspace whose `.beads` is a symlink stays
+supported (that alias layout is documented under
+[Worktrees](/reference/worktrees)); only the hooks directory entry itself is
+checked.
+
 ### Status
 
 ```bash

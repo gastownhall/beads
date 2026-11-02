@@ -154,6 +154,18 @@ rebuild a damaged store. Follow
 the damaged store and its configuration first, then recover into a fresh store
 from a Dolt remote, a Dolt-native backup, or a JSONL export.
 
+*Unreleased:* the automatic repairs that replace a database — integrity
+recovery and the repo-fingerprint reinitialization — accept only a database
+selected inside the workspace's `.beads` directory. A `dolt_data_dir` (or
+`database`) that resolves outside it, a symlinked database leaf, or a path
+that escapes through a symlinked ancestor is refused before anything is
+backed up or deleted. To repair such a workspace, point the metadata back at
+a location under `.beads` (or select the real store explicitly with
+`BEADS_DOLT_DATA_DIR`, which names it as process input), and recover
+manually: preserve the damaged store, then recover into a fresh store from a
+Dolt remote, a Dolt-native backup, or a JSONL export. A workspace whose
+`.beads` is a symlink stays supported and needs no workaround.
+
 ### Dolt journal corruption after restart
 
 **Symptom (server mode):** After a system restart, `bd` reports that the Dolt

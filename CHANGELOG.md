@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Hook installation, uninstall and the destructive doctor repairs refuse
+  paths that write through symlinks or leave the workspace.** Carries the
+  refusals from #7889 (thanks @Wenjix), which #8070 lifts into this
+  superseding change:
+  - `bd hooks install` refuses a hooks directory that is itself a symlink
+    (`.beads/hooks`, `.git/hooks` or `.beads-hooks`) before creating it,
+    preserving foreign hooks into it, writing the managed hooks, or changing
+    `core.hooksPath`; the shared write guard (used by `bd migrate hooks
+    --apply` too) refuses a hook path whose immediate parent is a symlink
+    even when the hook leaf does not exist yet; and `bd hooks uninstall`
+    refuses a symlinked hooks directory before touching its target or
+    resetting beads-managed config, leaves a symlinked hook and its target
+    untouched (with a warning) while still processing ordinary hooks, and
+    restores a legacy `.backup` only when it is a regular file.
+  - `bd doctor`'s database integrity recovery and repo-fingerprint
+    reinitialization refuse a metadata-selected database outside the
+    workspace before backing up, deleting or restoring anything: relative
+    or absolute `dolt_data_dir` values, an absolute `database`, a symlinked
+    database leaf (dangling or in-workspace links included — a backup must
+    represent the database entry itself), and escapes through a symlinked
+    ancestor. The integrity rollback revalidates its destination before the
+    failure-path removal/restoration, preserving the backup and reporting
+    its location when the destination was replaced while reinitializing.
+    A symlinked `.beads` workspace (the documented alias layout) is
+    resolved and stays supported, and an actual `BEADS_DOLT_DATA_DIR`
+    selection still overrides the workspace default; the server-mode
+    integrity refusal keeps precedence.
+
 ### Added
 
 - **`arrival_seq`, a commit-ordered create sequence on wisp-plane rows.**

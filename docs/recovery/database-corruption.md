@@ -64,6 +64,14 @@ general bd doctor checks are not supported in embedded mode (only
 run there). Recovery means building a new database from a copy of your data
 that still opens, while keeping the damaged store intact.
 
+*Unreleased:* the automatic repairs that replace a database (integrity
+recovery and the repo-fingerprint reinitialization) accept only a database
+selected inside the workspace's `.beads` directory, so a workspace whose
+metadata points its `dolt_data_dir` or `database` outside the workspace,
+or through a symlinked database leaf or ancestor, must use this manual
+procedure rather than the automatic repair. Selecting the real store
+explicitly with `BEADS_DOLT_DATA_DIR` keeps the automatic repairs working.
+
 ### 1. Stop everything that uses the store
 
 Stop every bd process, agent and script that works in this workspace. In
