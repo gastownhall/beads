@@ -357,3 +357,168 @@ func TestJournalWriterLock_BusyAdmissionNamesTheError(t *testing.T) {
 		t.Fatalf("admission behind a held journal lock = %v, want ErrJournalWriterBusy", err)
 	}
 }
+
+// TestJournalWriterLock_CleanupOrderBeforeUnlock pins AC-6 of
+// gastownhall/beads#6117: on every exit path of an admitted write — success,
+// body error, panic, cancellation — the transaction is ended (committed or
+// rolled back) BEFORE the admission lock and the pinned session go, so the
+// lock never outlives an open transaction and a session never returns to the
+// pool holding one. The cleanup order itself is AC-1's code; these are its
+// retention guards, holding at base and after. A follow-up probe session
+// taking the lock at once is the observable: released; a quiet pool is the
+// session back (or discarded, which the sql package accounts for the same
+// way).
+func TestJournalWriterLock_CleanupOrderBeforeUnlock(t *testing.T) {
+	store, cleanup := setupConcurrentTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+	store.SetEventsJournalEnabled(true)
+	defer store.SetEventsJournalEnabled(false)
+
+	lockName := issueops.JournalWriterLockName(store.database)
+
+	// lockFree asserts the admission lock is free: a fresh session takes it
+	// at once and gives it back. It must hold whenever an admitted write has
+	// RETURNED — whatever the exit path.
+	lockFree := func() {
+		t.Helper()
+		c, err := store.db.Conn(ctx)
+		if err != nil {
+			t.Fatalf("pin probe connection: %v", err)
+		}
+		defer func() { _ = c.Close() }()
+		var granted sql.NullInt64
+		if err := c.QueryRowContext(ctx, "SELECT GET_LOCK(?, 0)", lockName).Scan(&granted); err != nil {
+			t.Fatalf("probe GET_LOCK: %v", err)
+		}
+		if !granted.Valid || granted.Int64 != 1 {
+			t.Fatalf("admission lock not free after the write returned (granted=%v)", granted)
+		}
+		_, _ = c.ExecContext(ctx, "SELECT RELEASE_LOCK(?)", lockName)
+	}
+	// sessionsQuiet asserts no store-pinned session is still out of the
+	// pool: released, or discarded (which closes it).
+	sessionsQuiet := func() {
+		t.Helper()
+		if inUse := store.db.Stats().InUse; inUse != 0 {
+			t.Fatalf("pool InUse = %d after the write returned, want 0", inUse)
+		}
+	}
+
+	newIssue := func(title string) *types.Issue {
+		return &types.Issue{Title: title, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	}
+	issueStatus := func(id string) types.Status {
+		issue, err := store.GetIssue(ctx, id)
+		if err != nil {
+			t.Fatalf("get issue %s: %v", id, err)
+		}
+		return issue.Status
+	}
+
+	t.Run("success commits and hands the lock back", func(t *testing.T) {
+		target := newIssue("cleanup success")
+		if err := store.CreateIssue(ctx, target, "actor"); err != nil {
+			t.Fatalf("create target issue: %v", err)
+		}
+		if err := store.withRetryTx(ctx, func(tx *sql.Tx) error {
+			_, err := issueops.UpdateIssueInTx(ctx, tx, target.ID, map[string]interface{}{"status": types.StatusInProgress}, "actor-b")
+			return err
+		}); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		if got := issueStatus(target.ID); got != types.StatusInProgress {
+			t.Fatalf("status = %q, want the committed in_progress", got)
+		}
+		lockFree()
+		sessionsQuiet()
+	})
+
+	t.Run("body error rolls back before unlock", func(t *testing.T) {
+		target := newIssue("cleanup error")
+		if err := store.CreateIssue(ctx, target, "actor"); err != nil {
+			t.Fatalf("create target issue: %v", err)
+		}
+		boom := errors.New("cleanup error test")
+		if err := store.withRetryTx(ctx, func(tx *sql.Tx) error {
+			if _, err := issueops.UpdateIssueInTx(ctx, tx, target.ID, map[string]interface{}{"status": types.StatusInProgress}, "actor-b"); err != nil {
+				return err
+			}
+			return boom
+		}); err == nil || !errors.Is(err, boom) {
+			t.Fatalf("write error = %v, want the body's own", err)
+		}
+		if got := issueStatus(target.ID); got != types.StatusOpen {
+			t.Fatalf("status = %q, want the rolled-back open", got)
+		}
+		lockFree()
+		sessionsQuiet()
+	})
+
+	t.Run("panic rolls back before unlock and propagates", func(t *testing.T) {
+		target := newIssue("cleanup panic")
+		if err := store.CreateIssue(ctx, target, "actor"); err != nil {
+			t.Fatalf("create target issue: %v", err)
+		}
+		func() {
+			defer func() {
+				if r := recover(); r != "cleanup panic test" {
+					t.Fatalf("panic value = %v, want it propagated", r)
+				}
+			}()
+			_ = store.withRetryTx(ctx, func(tx *sql.Tx) error {
+				if _, err := issueops.UpdateIssueInTx(ctx, tx, target.ID, map[string]interface{}{"status": types.StatusInProgress}, "actor-b"); err != nil {
+					return err
+				}
+				panic("cleanup panic test")
+			})
+		}()
+		if got := issueStatus(target.ID); got != types.StatusOpen {
+			t.Fatalf("status = %q, want the rolled-back open", got)
+		}
+		lockFree()
+		sessionsQuiet()
+	})
+
+	t.Run("cancellation rolls back before unlock, never replayed", func(t *testing.T) {
+		target := newIssue("cleanup cancel")
+		if err := store.CreateIssue(ctx, target, "actor"); err != nil {
+			t.Fatalf("create target issue: %v", err)
+		}
+		bctx, bcancel := context.WithCancel(ctx)
+		runs := 0
+		err := store.withRetryTx(bctx, func(tx *sql.Tx) error {
+			runs++
+			if _, err := issueops.UpdateIssueInTx(bctx, tx, target.ID, map[string]interface{}{"status": types.StatusInProgress}, "actor-b"); err != nil {
+				return err
+			}
+			bcancel()
+			<-bctx.Done()
+			return bctx.Err()
+		})
+		if err == nil {
+			t.Fatalf("canceled write returned nil")
+		}
+		if runs != 1 {
+			t.Fatalf("canceled body ran %d times, want exactly 1 (never replayed)", runs)
+		}
+		if got := issueStatus(target.ID); got != types.StatusOpen {
+			t.Fatalf("status = %q, want the rolled-back open", got)
+		}
+		lockFree()
+		sessionsQuiet()
+	})
+
+	t.Run("raw site returns its session after the commit", func(t *testing.T) {
+		target := newIssue("cleanup raw site")
+		if err := store.CreateIssue(ctx, target, "actor"); err != nil {
+			t.Fatalf("create target issue: %v", err)
+		}
+		if err := store.AddComment(ctx, target.ID, "actor", "cleanup-order probe"); err != nil {
+			t.Fatalf("add comment: %v", err)
+		}
+		lockFree()
+		sessionsQuiet()
+	})
+}
