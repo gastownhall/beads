@@ -69,6 +69,11 @@ const initRecoveryNotePrefix = "Note: database "
 // when it continues past a dirty-table refusal.
 const lenientRefusalWarning = "Warning: pending schema migrations alter pre-existing dirty tables"
 
+// halfIdentifiedWarning is the identity warning bd init prints for a database
+// with an issue prefix but no project identity, which is how a beads v1.0.0
+// seeder leaves it: that release wrote _project_id only from cmd/bd.
+const halfIdentifiedWarning = "the database has an issue prefix (hq) but no project identity"
+
 func openUnversionedTestDB(t *testing.T, ctx context.Context, database string) *sql.DB {
 	t.Helper()
 	dsn := doltutil.ServerDSN{Host: "127.0.0.1", Port: testDoltServerPort, User: "root", Database: database}.String()
@@ -250,9 +255,12 @@ func TestCLI_InitServerVersionedDirtyWorkingSetStillRefuses_E2E(t *testing.T) {
 // TestCLI_InitServerUnversionedDirtyWorkingSet_E2E is the user-level pin for
 // gastownhall/beads#6089: bd init against a server database a beads v1.0.0
 // seeder left with no migration cursor and uncommitted config, routes and
-// interactions. Before the fix the strict open's #4566 guard refused it, and
-// so did every later bd command, the refusal's own `bd dolt commit` remedy
-// included. Init now adopts the working set and migrates.
+// interactions. Before the fix the strict open's #4566 guard refused it and
+// init wrote no workspace configuration, so gt install could not finish
+// without a manual `bd dolt commit`. Init now adopts the working set and
+// migrates. The seeder wrote an issue prefix but no project identity, and
+// init does not complete a half-identified database: it adopts it as found
+// and prints its identity warning.
 func TestCLI_InitServerUnversionedDirtyWorkingSet_E2E(t *testing.T) {
 	skipIfNoDolt(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
@@ -281,6 +289,12 @@ func TestCLI_InitServerUnversionedDirtyWorkingSet_E2E(t *testing.T) {
 	}
 	if dirty := unversionedQueryStrings(t, ctx, db, "SELECT table_name FROM dolt_status"); len(dirty) != 0 {
 		t.Fatalf("working set after init is dirty: %v", dirty)
+	}
+	if !strings.Contains(stderr, halfIdentifiedWarning) {
+		t.Fatalf("stderr lacks the identity warning %q:\n%s", halfIdentifiedWarning, stderr)
+	}
+	if n := unversionedQueryInt(t, ctx, db, "SELECT COUNT(*) FROM metadata WHERE `key` = '_project_id'"); n != 0 {
+		t.Fatalf("database _project_id rows after init = %d, want 0 (init adopts a half-identified database as found)", n)
 	}
 
 	bd := func(args ...string) string {
@@ -443,7 +457,7 @@ func TestCLI_InitServerUnversionedDirtyOutput_E2E(t *testing.T) {
 				t.Fatalf("bd init %v failed: %v\nstdout:\n%s\nstderr:\n%s", tc.extra, err, stdout, stderr)
 			}
 
-			note := fmt.Sprintf("Note: database %q had uncommitted changes in tables the schema migrations alter (config, interactions, routes); bd init committed the working set in its own commit, then applied the migrations; no further action is needed (gastownhall/beads#6089)\n", database)
+			note := fmt.Sprintf("Note: database %q had uncommitted changes in tables the schema migrations alter (config, interactions, routes); bd init committed the working set in its own commit, then applied the migrations (gastownhall/beads#6089)\n", database)
 			wantNotes := 0
 			if tc.wantNote {
 				wantNotes = 1

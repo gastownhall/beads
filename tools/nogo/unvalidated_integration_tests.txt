@@ -30,6 +30,7 @@ cmd/bd/gitlab_integration_test.go
 cmd/bd/import_missing_config_prefix_test.go
 cmd/bd/import_prefix_test.go
 cmd/bd/init_cancel_e2e_test.go
+cmd/bd/init_unversioned_dirty_server_integration_test.go
 cmd/bd/linear_roundtrip_test.go
 cmd/bd/migrate_dolt_mode_frontdoor_integration_test.go
 cmd/bd/reopen_defer_test.go

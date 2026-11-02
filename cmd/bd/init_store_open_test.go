@@ -319,7 +319,7 @@ func TestOpenInitStoreIneligibleOpensPassThrough(t *testing.T) {
 // final strict open succeeded. A nil writer (bd init --quiet) suppresses it.
 func TestOpenInitStoreRecoveryNote(t *testing.T) {
 	const wantNote = `Note: database "hq" had uncommitted changes in tables the schema migrations alter (config, interactions, routes); ` +
-		"bd init committed the working set in its own commit, then applied the migrations; no further action is needed (gastownhall/beads#6089)\n"
+		"bd init committed the working set in its own commit, then applied the migrations (gastownhall/beads#6089)\n"
 	finalErr := errors.New("final strict open refused")
 	for _, tc := range []struct {
 		name       string

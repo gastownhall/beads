@@ -25,14 +25,18 @@ const initReconcileCommitMessage = "bd init: commit pre-existing working set bef
 // that guard read as unversioned, it adopts the database the way the
 // refusal's own remedy does (gastownhall/beads#6089): an older beads SDK —
 // Gas Town's EnsureRigIssuePrefix, for one — can leave config, routes and
-// interactions uncommitted on a database that has no migration cursor yet,
-// and no later bd command could open the store to run `bd dolt commit`.
+// interactions uncommitted on a database that has no migration cursor yet.
+// bd init refused that database and wrote no workspace configuration, so
+// `gt install` could not finish until someone ran `bd dolt commit` from a
+// workspace that reaches the database and then ran `bd init` again.
 //
 // The sequence is fixed, with no loop: a lenient open (Config.LenientOpen,
 // the same open `bd dolt commit` uses), one CommitAll of the whole working
 // set, a close of that handle, and one more strict open whose result is
 // returned unchanged. When the commit committed something and that final
-// open succeeds, one note goes to notes (nil, under --quiet, for none).
+// open succeeds, one note goes to notes (nil, under --quiet, for none). The
+// note says only what init committed: the adopted database can still lack a
+// project identity, which init's identity check reports on its own.
 // CommitAll commits every committable row, user rows included, exactly as
 // the manual remedy does; running init against the database is the intent
 // to adopt it. Like the manual remedy, it is not atomic with the refusal it
@@ -65,7 +69,7 @@ func openInitStore(ctx context.Context, cfg *dolt.Config, open initStoreOpener, 
 
 	store, err = open(ctx, cfg)
 	if err == nil && committed && notes != nil {
-		fmt.Fprintf(notes, "Note: database %q had uncommitted changes in tables the schema migrations alter (%s); bd init committed the working set in its own commit, then applied the migrations; no further action is needed (gastownhall/beads#6089)\n",
+		fmt.Fprintf(notes, "Note: database %q had uncommitted changes in tables the schema migrations alter (%s); bd init committed the working set in its own commit, then applied the migrations (gastownhall/beads#6089)\n",
 			cfg.Database, strings.Join(dirtyErr.Tables, ", "))
 	}
 	return store, err

@@ -461,7 +461,7 @@ init succeeds instead and prints, on stderr:
 
 ```
 Warning: pending schema migrations alter pre-existing dirty tables: config, interactions, routes; ...
-Note: database "hq" had uncommitted changes in tables the schema migrations alter (config, interactions, routes); bd init committed the working set in its own commit, then applied the migrations; no further action is needed (gastownhall/beads#6089)
+Note: database "hq" had uncommitted changes in tables the schema migrations alter (config, interactions, routes); bd init committed the working set in its own commit, then applied the migrations (gastownhall/beads#6089)
 ```
 
 **Why this happens**
@@ -480,8 +480,11 @@ shape. Two situations produce the same refusal:
   cursor is 0: there is no `schema_migrations` table, or it has no rows.
   Gas Town's rig setup on beads v1.0.0 leaves this shape: it writes
   `issue_prefix` to `config` and creates `routes` and `interactions` without
-  committing them. Every bd command refused it, and so did `bd init`
-  ([#6089](https://github.com/gastownhall/beads/issues/6089)).
+  committing them. `bd init` refused it and wrote no workspace
+  configuration, so `gt install` could not finish
+  ([#6089](https://github.com/gastownhall/beads/issues/6089)): the way out
+  was `bd dolt commit` from a workspace that reaches the database, then
+  `bd init` again.
 
 A cursor of 0 says only what the database records. It does not prove that
 the database is empty, that it holds no user data, or that no bd release
@@ -509,11 +512,18 @@ gateway, read-only and preview opens never commit on init's behalf.
 
 **Recovery paths**
 
-- **You got the note:** nothing to do. To see what was committed:
+- **You got the note:** init committed the working set and migrated the
+  database. To see what it committed:
 
   ```bash
   bd sql "SELECT commit_hash, date FROM dolt_log WHERE message LIKE 'bd init: commit pre-existing%'"
   ```
+
+  If init also printed `WARNING: the database has an issue prefix (...) but
+  no project identity`, as it does for a database a beads v1.0.0 seeder
+  wrote, the database is still half-identified. Settle it as the warning
+  says: run `bd doctor --fix` from the clone whose identity should win, then
+  re-init the others.
 
 - **You got the refusal (a versioned database, or any bd command other than
   `bd init`):** inspect the pending changes before you commit them. From a
