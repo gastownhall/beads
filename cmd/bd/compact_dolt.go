@@ -42,8 +42,11 @@ order across the cutoff: a recent commit that comes at or before an old commit
 in history is already part of the squashed base, and replaying it again could
 change data. The error names both commits; --force does not override it, and
 --dry-run reports the refusal. Before swapping main, compact also checks that
-the replayed history holds the same committed data as main, and aborts
-without resetting main if it does not.
+the replayed history holds the same committed data main held when compact read
+its history, and aborts without resetting main if it does not. A write that
+reaches main while compact runs is kept, not counted as a difference:
+uncommitted changes stay pending, and a commit that lands meanwhile is kept in
+one follow-up commit.
 
 The GC pass is a full collection: Dolt storage is generational, and a default
 GC never revisits data an earlier GC moved to the old generation. On any store
@@ -178,7 +181,7 @@ Examples:
 			return HandleError("storage backend does not support compact")
 		}
 
-		if err := compactor.Compact(ctx, initialHash, boundaryHash, oldCommits, recentHashes); err != nil {
+		if err := compactor.Compact(ctx, initialHash, boundaryHash, plan.headHash, oldCommits, recentHashes); err != nil {
 			return HandleError("compact failed: %v", err)
 		}
 

@@ -490,6 +490,7 @@
 100 85 TestEmbeddedIfRevisionReopenGuardDirect
 100 85 TestEmbeddedInitArtifactRouting
 
+100 86 TestEmbeddedCompactKeepsPendingWrite
 100 86 TestEmbeddedDoltRemoteAdd_DifferentURL_ProceedsNormally
 100 86 TestEmbeddedExplicitHierarchicalParentEdges
 100 86 TestEmbeddedInitHooksRouting

@@ -1169,6 +1169,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reports beads linked elsewhere as skipped, and `bd github pull <bead-id>`
   says their link is not an issue the tracker can address (#7781, reported
   and first fixed by @NahumLitvin in #7794).
+- `bd compact` no longer discards writes that reach `main` while it runs. It
+  finished by hard-resetting `main` onto the rebuilt history, which dropped
+  changes in `main`'s working set that no Dolt commit held yet (a batch under
+  batched or disabled auto-commit, or a write between its SQL commit and its
+  Dolt commit) and any commit that landed on `main` during the rebuild, after
+  their writers had been told they succeeded. It now moves `main` with a soft
+  reset: working-set changes stay pending, and a commit that landed during the
+  rebuild is kept in one follow-up commit
+  (`compact: commit changes that reached main during compaction`), without its
+  own hash, message or author; changes already staged when `bd compact` started
+  join that commit. The check that the replay reproduces `main`'s data (#6645)
+  compares it with `main` as `bd compact` read it, so a write that lands
+  meanwhile is kept, not refused as a divergent replay. If the follow-up
+  commit fails, `bd compact` stops before garbage collection with the changes
+  staged on `main`, for `bd dolt commit`. `bd flatten` and the merge-settle
+  path are unchanged. See
+  [Writes that reach `main` while `bd compact` runs](docs/architecture/dolt.md#maintenance--bd-prune-and-bd-purge).
 - `bd dolt push <remote>` and `bd dolt pull <remote>` now push to and pull
   from the named remote. bd ignored the name, so `bd dolt push 1st` pushed to
   the default remote and reported "Push complete."; a name that differs from
