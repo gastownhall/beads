@@ -556,3 +556,37 @@ func TestPush_OtherRepoBeadLeavesConfiguredRepoIssueAlone(t *testing.T) {
 		}
 	})
 }
+
+// TestDetectConflicts_OtherRepoBeadNotFetched pins conflict detection: a
+// bead linked to another repository's issue, locally edited after the last
+// sync, yields no identifier for this tracker, so detection neither fetches
+// this repository's same-numbered issue on its behalf nor reports a conflict
+// for it.
+func TestDetectConflicts_OtherRepoBeadNotFetched(t *testing.T) {
+	const repoAIssue = "https://github.com/owner-a/repo-a/issues/1313"
+	tr, tp := newCrossRepoTracker(ghRoutes(map[string]string{
+		// Repository B's issue 1313, edited after the last sync: the false
+		// conflict the base reported on A's bead.
+		"/repos/owner-b/repo-b/issues/1313": ghIssueJSON(5001, 1313, "Repo B issue 1313",
+			"https://github.com/owner-b/repo-b/issues/1313", "2026-10-04T00:00:00Z"),
+	}))
+	aRef := repoAIssue
+	store := newCrossRepoStore(map[string]*types.Issue{
+		"bd-a1313": {ID: "bd-a1313", Title: "Local edit on A's bead", Status: types.StatusOpen,
+			IssueType: types.TypeTask, ExternalRef: &aRef,
+			CreatedAt: ghSyncTime(t, "2026-10-01T00:00:00Z"),
+			UpdatedAt: ghSyncTime(t, "2026-10-05T00:00:00Z")},
+	})
+	store.metadata["github.last_sync"] = "2026-10-02T00:00:00Z"
+
+	conflicts, err := tracker.NewEngine(tr, store, "test").DetectConflicts(context.Background())
+	if err != nil {
+		t.Fatalf("DetectConflicts: %v", err)
+	}
+	if len(conflicts) != 0 {
+		t.Errorf("conflicts=%d, want 0 (repository A's bead must not conflict through B's issue)", len(conflicts))
+	}
+	if got := tp.requestPaths(); len(got) != 0 {
+		t.Errorf("conflict detection issued requests %q, want none", got)
+	}
+}
