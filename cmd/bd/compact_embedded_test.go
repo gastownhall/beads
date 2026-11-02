@@ -259,6 +259,43 @@ func TestEmbeddedCompactMisdatedChild(t *testing.T) {
 	}
 }
 
+// TestEmbeddedCompactKeepsPendingWrite: a write that dolt.auto-commit=off
+// left in main's working set survives bd compact through the embedded front
+// door and stays pending. The hard reset compaction used to end with deleted
+// it after its writer had been told it succeeded.
+func TestEmbeddedCompactKeepsPendingWrite(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "kp")
+	bdCreate(t, bd, dir, "Committed one", "--type", "task")
+	bdCreate(t, bd, dir, "Committed two", "--type", "task")
+	pending := bdCreate(t, bd, dir, "Pending write", "--type", "task", "--dolt-auto-commit", "off")
+
+	if out := bdCompact(t, bd, dir, "--force", "--days", "0"); !strings.Contains(out, "Compacted") {
+		t.Fatalf("expected a compaction, got:\n%s", out)
+	}
+
+	if got := bdShow(t, bd, dir, pending.ID).Title; got != "Pending write" {
+		t.Errorf("pending issue title after compact = %q, want %q", got, "Pending write")
+	}
+	withEmbeddedConn(t, beadsDir, func(conn *sql.Conn) {
+		var inWorking, inHead int
+		if err := conn.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM issues WHERE id = ?", pending.ID).Scan(&inWorking); err != nil {
+			t.Fatalf("count pending issue: %v", err)
+		}
+		if err := conn.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM issues AS OF 'HEAD' WHERE id = ?", pending.ID).Scan(&inHead); err != nil {
+			t.Fatalf("count pending issue in HEAD: %v", err)
+		}
+		if inWorking != 1 || inHead != 0 {
+			t.Errorf("pending issue after compact: in working set %d, in HEAD %d; want 1 and 0 (kept, still uncommitted)", inWorking, inHead)
+		}
+	})
+}
+
 // withEmbeddedConn opens the workspace's embedded database on main, runs fn on
 // a pinned connection, and releases the engine before any bd subprocess runs.
 func withEmbeddedConn(t *testing.T, beadsDir string, fn func(conn *sql.Conn)) {
