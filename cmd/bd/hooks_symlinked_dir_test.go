@@ -170,6 +170,29 @@ func TestInstallHooksAllowsMissingHooksDir(t *testing.T) {
 	require.Contains(t, readFileForWorktreeTest(t, filepath.Join(hooksDir, "pre-commit")), hookSectionBeginPrefix)
 }
 
+// TestInstallHooksAllowsSymlinkedBeadsWorkspaceAlias: a .beads workspace
+// that is a symlink to external storage, selected explicitly through
+// BEADS_DIR, still installs into the real hooks directory behind the alias;
+// only the hooks directory entry itself is checked, not its ancestors.
+// Adapted from the GLM candidate's test of the same name.
+func TestInstallHooksAllowsSymlinkedBeadsWorkspaceAlias(t *testing.T) {
+	isolateBeadsDirForTest(t)
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	require.NoError(t, os.MkdirAll(repo, 0o755))
+	store := filepath.Join(root, "real-store")
+	writeFileForWorktreeTest(t, filepath.Join(store, "metadata.json"), []byte("{}\n"))
+	runGitForWorktreeTest(t, repo, "init", "-q")
+	symlinkOrSkip(t, store, filepath.Join(repo, ".beads"))
+	t.Chdir(repo)
+	git.ResetCaches()
+	t.Cleanup(git.ResetCaches)
+	t.Setenv("BEADS_DIR", filepath.Join(repo, ".beads"))
+
+	require.NoError(t, installHooksWithOptions([]string{"pre-commit"}, false, false, false, true))
+	require.Contains(t, readFileForWorktreeTest(t, filepath.Join(store, "hooks", "pre-commit")), hookSectionBeginPrefix)
+}
+
 // TestInitHooksRefusesSymlinkedStorageHooksDir covers the selected init
 // context: the storage hooks directory is resolved from the selected
 // workspace, and a symlink there is refused like the standalone modes.
