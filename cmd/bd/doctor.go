@@ -478,7 +478,7 @@ func printEmbeddedUnsupported(commandLabel string) {
 	hints := []string{
 		"Verify database exists:  ls -la .beads/embeddeddolt/",
 		"Check bd version:        bd version",
-		"Reinitialize if needed:  bd init --reinit-local",
+		"If it will not open:     preserve it first, then recover: " + doctor.EngineWontOpenRecoveryURL,
 		"Switch to server mode:   bd init --server",
 	}
 	supported := []string{"artifacts", "conventions", "pollution"}

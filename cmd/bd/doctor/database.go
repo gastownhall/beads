@@ -14,6 +14,10 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// EngineWontOpenRecoveryURL is the preservation-first runbook for a database
+// the engine cannot open. test/docsync pins the heading it deep-links.
+const EngineWontOpenRecoveryURL = "https://github.com/gastownhall/beads/blob/main/docs/recovery/database-corruption.md#engine-wont-open"
+
 // localConfig represents the config.yaml structure for no-db and prefer-dolt detection
 type localConfig struct {
 	SyncBranch string `yaml:"sync-branch"`
