@@ -5,6 +5,7 @@ package embeddeddolt_test
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -76,7 +77,7 @@ func updatedGuardRowIsBlocked(t *testing.T, ctx context.Context, conn *sql.Conn,
 // updatedGuardSeedIssue inserts one issue with an explicit historical
 // updated_at, the pre-upgrade shape every test here starts from. Every NOT
 // NULL column is listed explicitly: the embedded engine does not honor the
-// TEXT DEFAULT '' / JSON DEFAULT (JSON_OBJECT()) clauses the bootstrap DDL
+// TEXT DEFAULT ” / JSON DEFAULT (JSON_OBJECT()) clauses the bootstrap DDL
 // carries, so relying on them fails with "Field ... doesn't have a default
 // value".
 func updatedGuardSeedIssue(t *testing.T, ctx context.Context, conn *sql.Conn, id, status, issueType, updated string, ephemeral int) {
@@ -163,4 +164,68 @@ func TestEmbeddedMigrate0046And0047KeepIssueUpdatedAt(t *testing.T) {
 	updatedGuardRowKeepsTimestamp(t, ctx, conn, "issues", closedBlock, closedBlockT)
 	updatedGuardRowKeepsTimestamp(t, ctx, conn, "issues", closedBlkd, closedBlkdTS)
 	updatedGuardRowKeepsTimestamp(t, ctx, conn, "issues", free, freeTS)
+}
+
+// TestEmbeddedMigrate0047StepCommitKeepsUpdatedAt proves the restore lands
+// inside the per-step commit, not after the pass: a v46 store upgrades, and a
+// fault hook kills the pass immediately after migration 0047's atomic step
+// commit. Both the working row and the committed row (read AS OF HEAD, i.e.
+// through 0047's own Dolt commit) must carry the historical timestamp — if the
+// restore ran any later, HEAD would contain the stamped value forever.
+func TestEmbeddedMigrate0047StepCommitKeepsUpdatedAt(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+
+	const (
+		blocker = "gh5981-sb-blocker"
+		blocked = "gh5981-sb-blocked"
+		oldTS   = "2026-01-15 10:00:00"
+	)
+
+	dataDir := seedMainSchemaAt(t, ctx, 46)
+	conn, closeConn := openPinnedConn(t, ctx, dataDir)
+	defer closeConn()
+
+	updatedGuardSeedIssue(t, ctx, conn, blocker, "open", "task", "2026-01-10 09:00:00", 0)
+	updatedGuardSeedIssue(t, ctx, conn, blocked, "open", "task", oldTS, 0)
+	updatedGuardExec(t, ctx, conn,
+		`INSERT INTO dependencies (id, issue_id, depends_on_issue_id, type, created_by, metadata, created_at)
+		 VALUES ('gh5981-sb-dep', ?, ?, 'blocks', '', '{}', '2026-01-05 08:00:00')`, blocked, blocker)
+	// v46 already has is_blocked; park it at the value 0046's backfill left so
+	// only 0047's recompute flips it.
+	updatedGuardExec(t, ctx, conn, "UPDATE issues SET is_blocked = 0 WHERE id = ?", blocked)
+	updatedGuardCommitFixture(t, ctx, conn, "test: seed v46 fixture for gh 5981")
+
+	const killAfter = 47
+	restore := schema.SetMigrateStepFaultHookForTest(func(_ context.Context, _ schema.DBConn, version int) error {
+		if version == killAfter {
+			return fmt.Errorf("injected fault: process killed after migration %d step commit", killAfter)
+		}
+		return nil
+	})
+	defer restore()
+
+	if _, err := schema.MigrateUp(ctx, conn); err == nil || !strings.Contains(err.Error(), "injected fault") {
+		t.Fatalf("MigrateUp err = %v, want the injected fault after migration %d", err, killAfter)
+	}
+
+	// Working row: recompute ran (blocked) but the timestamp survived.
+	updatedGuardRowIsBlocked(t, ctx, conn, "issues", blocked, true)
+	updatedGuardRowKeepsTimestamp(t, ctx, conn, "issues", blocked, oldTS)
+
+	// Committed row: HEAD is 0047's own step commit, the one the fault fired
+	// right after. The restore must already be in it.
+	var n int
+	if err := conn.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM issues AS OF 'HEAD' WHERE id = ? AND updated_at = ? AND is_blocked = 1",
+		blocked, oldTS).Scan(&n); err != nil {
+		t.Fatalf("read committed issues AS OF HEAD: %v", err)
+	}
+	if n != 1 {
+		var got sql.NullString
+		_ = conn.QueryRowContext(ctx,
+			"SELECT CAST(updated_at AS CHAR) FROM issues AS OF 'HEAD' WHERE id = ?", blocked).Scan(&got)
+		t.Fatalf("issues.%s AS OF HEAD updated_at = %q, want %q: the v47 step commit recorded the stamped value",
+			blocked, got.String, oldTS)
+	}
 }
