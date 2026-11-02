@@ -1444,6 +1444,9 @@ var recognizedConfigKeys = map[string]bool{
 	// deleting records.
 	"events-journal": true, "events-journal-auto-prune": true,
 	"events-journal-retain-days": true, "events-journal-retain-rows": true,
+	// Read from the workspace database by `bd mol wisp gc`. The exact key, not
+	// a wisp.* namespace, so a misspelled key still warns.
+	"wisp.protected_labels": true,
 }
 
 func isRecognizedConfigKey(key string) bool {
