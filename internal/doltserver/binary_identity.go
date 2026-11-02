@@ -347,7 +347,10 @@ type BinaryReplacement struct {
 // commit every served database's working set (FlushWorkingSet).
 //
 // A server that is no longer stale under the lock (another bd replaced it
-// first) is left alone, so one stale generation is replaced at most once. A
+// first) is left alone, so one stale generation is replaced at most once.
+// Only a PID confirmed to be a dolt sql-server is stopped: one the process
+// list cannot vouch for is refused, and one it shows is something else is
+// left alone as untracked. A
 // server that cannot be replaced is left running and the reason returned. A
 // current server whose record needs a refresh (BinaryCheck.Refresh) keeps
 // running, and the executable it was compared with is recorded as observed.
@@ -376,6 +379,21 @@ func ReplaceStaleServer(beadsDir string, port int, serverVersion ServerVersionFu
 	case BinaryCannotReplace:
 		return res, check.Reason
 	default:
+		return res, nil
+	}
+	// Stop only a process confirmed to be the tracked dolt sql-server. A PID
+	// the process list shows is not one was reused: the files track no
+	// server, so there is nothing to replace.
+	isDolt, known := doltProcessStatus(check.PID)
+	if launchedHere(check.PID) {
+		isDolt, known = true, true
+	}
+	if !known {
+		return res, fmt.Errorf("not stopping PID %d: the process list could not be read, "+
+			"so it is not confirmed to be a dolt sql-server (%s)", check.PID, processListHint)
+	}
+	if !isDolt {
+		res.Check.Verdict = BinaryNotTracked
 		return res, nil
 	}
 	state, err := restartLocked(beadsDir, &check.candidate)
