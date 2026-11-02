@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cenkalti/backoff/v4"
@@ -589,11 +590,26 @@ func (s *DoltServer) startAttempt(ctx context.Context, prepare bool, lock *util.
 		return failSpawn("write pidfile", err)
 	}
 
+	// The supervising goroutine releases the root lock when the child exits,
+	// except when this attempt ends in a port conflict that Start will retry
+	// under the same lock. A conflict is either the child saying its port is
+	// taken (watch.SawPortInUse) or waitReady proving the listener belongs to
+	// another process (ErrPortInUse from ownsListener), which the child never
+	// reports; lockMu makes that decision and the release happen exactly once.
+	var (
+		lockMu       sync.Mutex
+		lockReleased bool
+		holdForRetry bool
+	)
 	eg.Go(func() error {
 		defer func() {
-			if !keepLockOnPortConflict || !watch.SawPortInUse() {
-				lock.Unlock()
+			lockMu.Lock()
+			defer lockMu.Unlock()
+			if keepLockOnPortConflict && (holdForRetry || watch.SawPortInUse()) {
+				return
 			}
+			lock.Unlock()
+			lockReleased = true
 		}()
 		if err := cmd.Wait(); err != nil {
 			return err
@@ -602,10 +618,24 @@ func (s *DoltServer) startAttempt(ctx context.Context, prepare bool, lock *util.
 	})
 
 	if err := s.waitReady(ctx, watch); err != nil {
+		retry := keepLockOnPortConflict && errors.Is(err, ErrPortInUse)
+		lockMu.Lock()
+		if retry && !lockReleased {
+			holdForRetry = true
+		}
+		lockMu.Unlock()
 		cancel()
 		_ = s.eg.Wait()
 		s.eg, s.egCtx, s.cancel, s.pid = nil, nil, nil, 0
 		_ = pidfile.Remove(s.rootDir, PIDFileName)
+		lockMu.Lock()
+		releasedBeforeRetry := retry && lockReleased
+		lockMu.Unlock()
+		if releasedBeforeRetry {
+			// The child exited and released the lock before the conflict was
+			// proven, so this Start no longer holds it: do not retry without it.
+			return fmt.Errorf("server: DoltServer.Start: %v", err)
+		}
 		return fmt.Errorf("server: DoltServer.Start: %w", err)
 	}
 	return nil
