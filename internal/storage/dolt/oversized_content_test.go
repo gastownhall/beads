@@ -147,3 +147,53 @@ func TestPromoteFromEphemeralPreservesOversizedEventComment(t *testing.T) {
 		}
 	})
 }
+
+// TestSnapshotRestoreRoundTripOversizedContent pins GH#3925 on compaction:
+// SnapshotIssue marshals the issue's text fields (LONGTEXT since 0049) into
+// compaction_snapshots.snapshot_json, BLOB until migration 0075, so archiving
+// a large issue failed and tier-1 compaction aborted before it could
+// overwrite anything. The restored description must equal the original.
+func TestSnapshotRestoreRoundTripOversizedContent(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	original := oversizedText(70000)
+	issue := &types.Issue{
+		ID:          "snap-big",
+		Title:       "Large description",
+		Description: original,
+		Status:      types.StatusOpen,
+		Priority:    2,
+		IssueType:   types.TypeTask,
+	}
+	if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	if err := store.SnapshotIssue(ctx, issue.ID, 1); err != nil {
+		t.Fatalf("SnapshotIssue of a %d-byte description: %.300v", len(original), err)
+	}
+	if err := store.UpdateIssue(ctx, issue.ID, map[string]interface{}{"description": "summary"}, "compactor"); err != nil {
+		t.Fatalf("overwrite: %v", err)
+	}
+	if err := store.ApplyCompaction(ctx, issue.ID, 1, len(original), 7, "deadbeef"); err != nil {
+		t.Fatalf("apply compaction: %v", err)
+	}
+
+	applied, err := store.RestoreFromSnapshot(ctx, issue.ID)
+	if err != nil {
+		t.Fatalf("RestoreFromSnapshot: %.300v", err)
+	}
+	if applied == nil {
+		t.Fatal("RestoreFromSnapshot applied no snapshot")
+	}
+	got, err := store.GetIssue(ctx, issue.ID)
+	if err != nil {
+		t.Fatalf("get restored issue: %v", err)
+	}
+	if got.Description != original {
+		t.Fatalf("restored description holds %d bytes, want the %d-byte original verbatim", len(got.Description), len(original))
+	}
+}

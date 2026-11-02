@@ -5,8 +5,8 @@
 -- events value columns, 0065 for wisp_comments.text) widened every
 -- large-content column it named to LONGTEXT, and PR #3846 proposed the rest
 -- as MEDIUMTEXT; this migration finishes the job with LONGTEXT, the type the
--- earlier widenings settled on. The columns it covers each still refuse a
--- value the column feeding them already accepts:
+-- earlier widenings settled on (LONGBLOB for the one binary column). Each
+-- column it covers still refuses a value the column feeding it accepts:
 --
 --   events.comment       a reopen reason is written to events.new_value
 --                        (LONGTEXT) and then again as a commented event here,
@@ -20,6 +20,13 @@
 --                        value the destination cannot hold instead of failing.
 --                        The planes must agree on the width. Its DEFAULT ''
 --                        (0021, ignored/0001) is kept.
+--
+--   compaction_snapshots.snapshot_json
+--                        SnapshotIssue marshals the issue's text fields, all
+--                        LONGTEXT, into this BLOB (0010), so archiving a large
+--                        issue failed and tier-1 compaction aborted. It stays
+--                        binary -- LONGBLOB, as 0068 retyped durable_state --
+--                        so the snapshot's bytes come back unchanged.
 --
 -- A plain INSERT of an oversized value fails with Error 1105 ("too large for
 -- column"); the silent truncation GH#3925 describes is what an INSERT IGNORE
@@ -62,5 +69,17 @@ SET @wisp_events_comment_needs_widen = (
 );
 SET @sql = IF(@wisp_events_comment_needs_widen = 1,
     'ALTER TABLE wisp_events MODIFY COLUMN comment LONGTEXT DEFAULT ''''',
+    'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @compaction_snapshot_json_needs_widen = (
+    SELECT IF(COLUMN_TYPE = 'blob', 1, 0)
+    FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'compaction_snapshots'
+      AND COLUMN_NAME = 'snapshot_json'
+);
+SET @sql = IF(@compaction_snapshot_json_needs_widen = 1,
+    'ALTER TABLE compaction_snapshots MODIFY COLUMN snapshot_json LONGBLOB NOT NULL',
     'SELECT 1');
 PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
