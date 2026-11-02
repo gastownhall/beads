@@ -221,3 +221,49 @@ func TestUninstallHooksRefusesSymlinkedHooksDir(t *testing.T) {
 	require.False(t, resetCalled, "reset ran despite the refusal")
 	require.Equal(t, before, dirSnapshot(t, outside), "link target contents changed")
 }
+
+// TestUninstallHooksLeavesUnsafeEntries: in a real hooks directory, uninstall
+// skips a symlinked hook and leaves a non-regular legacy backup in place, each
+// with a warning, while ordinary hooks and a regular backup are processed as
+// before and the reset still runs.
+func TestUninstallHooksLeavesUnsafeEntries(t *testing.T) {
+	root, repo := setupSymlinkedHooksDirRepo(t)
+	hooksDir := filepath.Join(repo, "real-hooks")
+	outside := filepath.Join(root, "outside")
+	legacy := "#!/bin/sh\n" + hookVersionPrefix + "0.1.0\nbd hooks run pre-push\n"
+	marked := "#!/usr/bin/env sh\necho keep\n" + generateHookSection("pre-commit")
+	writeFileForWorktreeTest(t, filepath.Join(outside, "marked-pre-commit"), []byte(marked))
+	writeFileForWorktreeTest(t, filepath.Join(outside, "backup-target"), []byte(symlinkedDirSentinel))
+	// pre-commit: a symlink to a bd-marked file outside; neither is touched.
+	symlinkOrSkip(t, filepath.Join(outside, "marked-pre-commit"), filepath.Join(hooksDir, "pre-commit"))
+	// post-merge: an ordinary bd-only hook, removed as before.
+	writeFileForWorktreeTest(t, filepath.Join(hooksDir, "post-merge"), []byte("#!/usr/bin/env sh\n"+generateHookSection("post-merge")))
+	// pre-push: a legacy hook whose regular backup is restored.
+	writeFileForWorktreeTest(t, filepath.Join(hooksDir, "pre-push"), []byte(legacy))
+	writeFileForWorktreeTest(t, filepath.Join(hooksDir, "pre-push.backup"), []byte("#!/bin/sh\necho original pre-push\n"))
+	// post-checkout: a legacy hook whose backup is a symlink.
+	writeFileForWorktreeTest(t, filepath.Join(hooksDir, "post-checkout"), []byte(legacy))
+	symlinkOrSkip(t, filepath.Join(outside, "backup-target"), filepath.Join(hooksDir, "post-checkout.backup"))
+	// prepare-commit-msg: a legacy hook whose backup is a directory.
+	writeFileForWorktreeTest(t, filepath.Join(hooksDir, "prepare-commit-msg"), []byte(legacy))
+	require.NoError(t, os.Mkdir(filepath.Join(hooksDir, "prepare-commit-msg.backup"), 0o755))
+	outsideBefore := dirSnapshot(t, outside)
+
+	resetCalled := false
+	var err error
+	stderr := captureStderr(t, func() {
+		err = uninstallHooksAt(hooksDir, func() error { resetCalled = true; return nil })
+	})
+	require.NoError(t, err)
+	require.True(t, resetCalled, "reset must still run")
+	require.Equal(t, outsideBefore, dirSnapshot(t, outside), "symlink targets changed")
+	require.Equal(t, map[string]string{
+		"pre-commit":                "<link> " + filepath.Join(outside, "marked-pre-commit"),
+		"pre-push":                  "#!/bin/sh\necho original pre-push\n",
+		"post-checkout.backup":      "<link> " + filepath.Join(outside, "backup-target"),
+		"prepare-commit-msg.backup": "<dir>",
+	}, dirSnapshot(t, hooksDir))
+	require.Contains(t, stderr, filepath.Join(hooksDir, "pre-commit"))
+	require.Contains(t, stderr, filepath.Join(hooksDir, "post-checkout.backup"))
+	require.Contains(t, stderr, filepath.Join(hooksDir, "prepare-commit-msg.backup"))
+}

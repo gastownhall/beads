@@ -1651,6 +1651,20 @@ func uninstallHooksAt(hooksDir string, reset func() error) error {
 	for _, hookName := range hookNames {
 		hookPath := filepath.Join(hooksDir, hookName)
 
+		// A symlinked hook is not bd's to edit: reading and rewriting it would
+		// change the link's target.
+		fi, err := os.Lstat(hookPath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return fmt.Errorf("failed to stat %s: %w", hookName, err)
+		}
+		if fi.Mode()&os.ModeSymlink != 0 {
+			fmt.Fprintf(os.Stderr, "Warning: %s is a symlink; leaving it and its target untouched\n", remedy.PrintedValue(hookPath))
+			continue
+		}
+
 		// #nosec G304 -- hook path constrained to .git/hooks directory
 		content, err := os.ReadFile(hookPath)
 		if err != nil {
@@ -1684,12 +1698,17 @@ func uninstallHooksAt(hooksDir string, reset func() error) error {
 			if err := os.Remove(hookPath); err != nil {
 				return fmt.Errorf("failed to remove %s: %w", hookName, err)
 			}
-			// Restore backup if exists
+			// Restore the backup only when it is a regular file: renaming a
+			// symlink or directory would make it the executable hook path.
 			backupPath := hookPath + ".backup"
-			if _, err := os.Stat(backupPath); err == nil {
-				if err := os.Rename(backupPath, hookPath); err != nil {
+			if bfi, err := os.Lstat(backupPath); err == nil {
+				if !bfi.Mode().IsRegular() {
+					fmt.Fprintf(os.Stderr, "Warning: %s is not a regular file; leaving it in place instead of restoring it\n", remedy.PrintedValue(backupPath))
+				} else if err := os.Rename(backupPath, hookPath); err != nil {
 					fmt.Fprintf(os.Stderr, "Warning: failed to restore backup for %s: %v\n", hookName, err)
 				}
+			} else if !os.IsNotExist(err) {
+				fmt.Fprintf(os.Stderr, "Warning: failed to check backup for %s: %v\n", hookName, err)
 			}
 		}
 		// Not a bd hook at all — leave it alone
