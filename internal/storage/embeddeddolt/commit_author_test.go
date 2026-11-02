@@ -99,4 +99,41 @@ func TestEmbeddedCommitAuthorFollowsGitAuthorEnv(t *testing.T) {
 			t.Errorf("close commit message = %q, want %q", head.message, closeMsg)
 		}
 	})
+
+	// The whole-working-set commits ran an unauthored DOLT_COMMIT('-Am'),
+	// which records the embedded driver's SQL client, root <root@%>.
+	t.Run("working set", func(t *testing.T) {
+		setGitAuthorEnv(t, name, email)
+		ctx := t.Context()
+		te := newTestEnv(t, "authws")
+
+		commits := []struct {
+			label  string
+			commit func() error
+		}{
+			{"Commit", func() error { return te.store.Commit(ctx, "test: Commit") }},
+			{"CommitAll", func() error {
+				committed, err := te.store.CommitAll(ctx, "test: CommitAll")
+				if err == nil && !committed {
+					t.Errorf("CommitAll reported nothing to commit")
+				}
+				return err
+			}},
+			{"CommitPending", func() error {
+				committed, err := te.store.CommitPending(ctx, "alice")
+				if err == nil && !committed {
+					t.Errorf("CommitPending reported nothing to commit")
+				}
+				return err
+			}},
+		}
+		for _, c := range commits {
+			te.exec(t, ctx, "INSERT INTO config (`key`, value) VALUES (?, 'v')", "test.author."+c.label)
+			before := te.readHead(t, ctx)
+			if err := c.commit(); err != nil {
+				t.Fatalf("%s: %v", c.label, err)
+			}
+			requireNewCommitBy(t, c.label, before, te.readHead(t, ctx), name, email)
+		}
+	})
 }

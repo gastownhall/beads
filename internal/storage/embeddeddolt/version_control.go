@@ -111,9 +111,10 @@ func (s *EmbeddedDoltStore) withMutatingPinnedDBConn(ctx context.Context, fn fun
 // are extra engine opens and are subject to a HEAD-moved-between-reads race
 // if anything else writes concurrently.
 func (s *EmbeddedDoltStore) commitAll(ctx context.Context, message string, tolerateEmpty bool) (committed bool, err error) {
+	author := s.commitAuthor()
 	err = s.withConn(ctx, true, func(tx *sql.Tx) error {
 		var commitErr error
-		committed, commitErr = commitAllInTx(ctx, tx, message, tolerateEmpty)
+		committed, commitErr = commitAllInTx(ctx, tx, message, author, tolerateEmpty)
 		return commitErr
 	})
 	return committed, err
@@ -131,8 +132,10 @@ func (s *EmbeddedDoltStore) CommitAll(ctx context.Context, message string) (bool
 	return s.commitAll(ctx, message, true)
 }
 
-func commitAllInTx(ctx context.Context, tx *sql.Tx, message string, tolerateEmpty bool) (bool, error) {
-	if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', ?)", message); err != nil {
+// commitAllInTx passes author explicitly: an unauthored DOLT_COMMIT records
+// the embedded driver's SQL client, root <root@%> (GH#7628).
+func commitAllInTx(ctx context.Context, tx *sql.Tx, message, author string, tolerateEmpty bool) (bool, error) {
+	if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', ?, '--author', ?)", message, author); err != nil {
 		if issueops.IsNothingToCommitError(err) {
 			if tolerateEmpty {
 				return false, nil
