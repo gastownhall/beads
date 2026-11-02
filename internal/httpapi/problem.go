@@ -16,6 +16,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/httpapi/apigen"
 	"github.com/steveyegge/beads/internal/storage"
+	storageissueops "github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
@@ -1702,6 +1703,14 @@ func ClassifyError(err error) Result {
 	// gave up, so the request is retryable at the client's cadence, not the
 	// server's.
 	case uow.IsSerializationError(err):
+		res := newResult(CodeBusy, "")
+		res.RetryAfterSeconds = retryAfterContention
+		return res
+
+	// A journaled write that other writers kept out of the journal-writer
+	// lock for its whole admission budget never ran its body: the same
+	// retryable contention.
+	case errors.Is(err, storageissueops.ErrJournalWriterBusy):
 		res := newResult(CodeBusy, "")
 		res.RetryAfterSeconds = retryAfterContention
 		return res

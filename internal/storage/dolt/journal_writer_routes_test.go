@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
@@ -211,4 +212,50 @@ func journalSeqCounter(t *testing.T, ctx context.Context, pool *sql.DB) [2]int64
 		t.Fatalf("count journal rows: %v", err)
 	}
 	return got
+}
+
+// TestJournalWriterLock_HolderPastTheBudgetIsBusy pins the end of admission
+// (gastownhall/beads#6117): when another session holds the journal-writer lock
+// past a writer's admission deadline, the writer's body never runs and the
+// write fails with the named busy error, and the lock stays the holder's.
+func TestJournalWriterLock_HolderPastTheBudgetIsBusy(t *testing.T) {
+	store, ctx, observer := newJournalWriterTestStore(t)
+	lockName := issueops.JournalWriterLockName(store.database)
+	holders, err := store.openLongTimeoutConn()
+	if err != nil {
+		t.Fatalf("open holder pool: %v", err)
+	}
+	t.Cleanup(func() { _ = holders.Close() })
+	holder := holdJournalWriterLock(t, ctx, holders, lockName)
+
+	ran := false
+	start := time.Now()
+	_, err = store.commitWriteTxWith(ctx, store.db, journalTxWriter, time.Now().Add(300*time.Millisecond), func(*sql.Tx) error {
+		ran = true
+		return nil
+	})
+	if ran {
+		t.Fatal("the body ran although the writer was never admitted")
+	}
+	var busy *issueops.JournalWriterBusyError
+	if !errors.Is(err, issueops.ErrJournalWriterBusy) || !errors.As(err, &busy) {
+		t.Fatalf("write past the admission deadline = %v, want a *JournalWriterBusyError", err)
+	}
+	if busy.Lock != lockName || busy.Database != store.database {
+		t.Fatalf("busy error names lock %q for database %q, want %q for %q", busy.Lock, busy.Database, lockName, store.database)
+	}
+	if waited := time.Since(start); waited > 10*time.Second {
+		t.Fatalf("admission gave up after %s, want it bounded by its 300ms deadline", waited)
+	}
+	var user sql.NullInt64
+	if err := observer.QueryRowContext(ctx, "SELECT IS_USED_LOCK(?)", lockName).Scan(&user); err != nil {
+		t.Fatalf("IS_USED_LOCK: %v", err)
+	}
+	var holderID int64
+	if err := holder.conn.QueryRowContext(ctx, "SELECT CONNECTION_ID()").Scan(&holderID); err != nil {
+		t.Fatalf("holder CONNECTION_ID: %v", err)
+	}
+	if !user.Valid || user.Int64 != holderID {
+		t.Fatalf("journal-writer lock held by %v after a busy refusal, want the holder session %d", user, holderID)
+	}
 }
