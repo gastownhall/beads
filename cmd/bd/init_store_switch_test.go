@@ -101,6 +101,67 @@ func TestCompareStoreSwitchDatabaseAxis(t *testing.T) {
 	}
 }
 
+// TestCompareStoreSwitchFamilyAxis pins the engine-family half of the guard:
+// recorded server and proxied-server are ONE family, embedded is the other,
+// and a request that resolves to the other family is a switch. An unrecorded
+// or unknown recorded mode skips this axis — it cannot prove a family change —
+// without disabling the database axis.
+func TestCompareStoreSwitchFamilyAxis(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		recorded storeSwitchRecord
+		request  storeSwitchRequest
+		family   bool // want FamilySwitch
+	}{
+		{"recorded server, embedded request switches", storeSwitchRecord{Backend: "dolt", Mode: "server", Database: "la"}, storeSwitchRequest{UsesSQLServer: false}, true},
+		{"proxied-server is the server family", storeSwitchRecord{Backend: "dolt", Mode: "proxied-server", Database: "la"}, storeSwitchRequest{UsesSQLServer: false}, true},
+		{"recorded embedded, server request switches", storeSwitchRecord{Backend: "dolt", Mode: "embedded", Database: "fi"}, storeSwitchRequest{UsesSQLServer: true}, true},
+		{"recorded embedded, embedded request reuses", storeSwitchRecord{Backend: "dolt", Mode: "embedded", Database: "fi"}, storeSwitchRequest{UsesSQLServer: false}, false},
+		{"recorded server, server request reuses", storeSwitchRecord{Backend: "dolt", Mode: "server", Database: "la"}, storeSwitchRequest{UsesSQLServer: true}, false},
+		{"proxied-server and server are one family", storeSwitchRecord{Backend: "dolt", Mode: "proxied-server", Database: "la"}, storeSwitchRequest{UsesSQLServer: true}, false},
+		{"unrecorded mode skips the family axis", storeSwitchRecord{Backend: "dolt", Database: "la"}, storeSwitchRequest{UsesSQLServer: true}, false},
+		{"unknown recorded mode skips the family axis", storeSwitchRecord{Backend: "dolt", Mode: "experimental", Database: "la"}, storeSwitchRequest{UsesSQLServer: false}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			diff, switched := compareStoreSwitch(tc.recorded, tc.request)
+			if diff.FamilySwitch != tc.family {
+				t.Fatalf("compareStoreSwitch(%+v, %+v) FamilySwitch = %v, want %v; diff %+v", tc.recorded, tc.request, diff.FamilySwitch, tc.family, diff)
+			}
+			if tc.family {
+				if !switched {
+					t.Error("family switch must make the request a switch")
+				}
+				if diff.RecordedFamily != tc.recorded.Mode {
+					t.Errorf("RecordedFamily = %q, want the recorded mode %q", diff.RecordedFamily, tc.recorded.Mode)
+				}
+				wantRequested := "embedded"
+				if tc.request.UsesSQLServer {
+					wantRequested = "server"
+				}
+				if diff.RequestedFamily != wantRequested {
+					t.Errorf("RequestedFamily = %q, want %q", diff.RequestedFamily, wantRequested)
+				}
+			}
+		})
+	}
+
+	t.Run("unrecorded mode still allows the database axis", func(t *testing.T) {
+		diff, switched := compareStoreSwitch(storeSwitchRecord{Backend: "dolt", Database: "la"}, storeSwitchRequest{Database: "other"})
+		if !switched || !diff.DatabaseSwitch || diff.FamilySwitch {
+			t.Fatalf("database switch with unrecorded mode = (%+v, %v); only the database axis may fire", diff, switched)
+		}
+	})
+
+	t.Run("mode source propagates so the notice can name the override", func(t *testing.T) {
+		diff, _ := compareStoreSwitch(
+			storeSwitchRecord{Backend: "dolt", Mode: "server", Database: "la"},
+			storeSwitchRequest{UsesSQLServer: false, ModeSource: "BEADS_DOLT_SERVER_MODE=0"})
+		if diff.ModeSource != "BEADS_DOLT_SERVER_MODE=0" {
+			t.Errorf("ModeSource = %q, want the request's explicit source", diff.ModeSource)
+		}
+	})
+}
+
 // TestConfirmStoreSwitchRequiresToken is the non-interactive authorization
 // half: a matching token authorizes the switch once, anything else refuses
 // with ExitDestroyTokenMissing, and the refusal names both sides without

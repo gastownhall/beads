@@ -41,19 +41,29 @@ type storeSwitchRecord struct {
 // UsesSQLServer is the final process mode resolved above the mutation gate
 // (usesSQLServer() at the call site); Database is the raw --database value,
 // where empty means REUSE of the recorded name, not a prefix-derived
-// default.
+// default. ModeSource names where the request's connection mode came from
+// (a flag, an env var, or config.yaml), so the notice can name the override
+// to remove; a family switch always implies a nonempty source, because a
+// bare reinit inherits the recorded mode instead of naming one.
 type storeSwitchRequest struct {
 	UsesSQLServer bool
 	Database      string
+	ModeSource    string
 }
 
 // storeSwitchDiff names the two sides of a detected switch for the
-// confirmation notice. RequestedDatabase is the explicit override when the
-// database axis triggered; otherwise the request reuses the recorded name.
+// confirmation notice. RecordedFamily is the recorded dolt_mode (server and
+// proxied-server are ONE family); RequestedFamily is "server" or "embedded".
+// RequestedDatabase is the explicit override when the database axis
+// triggered; otherwise the request reuses the recorded name.
 type storeSwitchDiff struct {
+	FamilySwitch      bool
+	RecordedFamily    string
+	RequestedFamily   string
 	DatabaseSwitch    bool
 	RecordedDatabase  string
 	RequestedDatabase string
+	ModeSource        string
 }
 
 // loadStoreSwitchRecord reads the selected workspace's recorded store
@@ -86,31 +96,72 @@ func loadStoreSwitchRecord(beadsDir string) (storeSwitchRecord, error) {
 // compareStoreSwitch reports whether the request repoints the workspace
 // away from the store its metadata records.
 //
+// The engine-family axis: the recorded dolt_mode compared with the resolved
+// process mode. Server and proxied-server are ONE family — a workspace whose
+// recorded family changes from server to embedded (or back) is switching its
+// store even when the database name is unchanged, which is why this axis
+// exists at all: the count-based preflight cannot see it. An unrecorded or
+// unknown recorded mode skips this axis (it cannot prove a family change)
+// without disabling the database axis.
+//
 // The database axis: a nonempty explicit database differing byte-for-byte
 // from a nonempty recorded dolt_database. An absent override means reuse,
-// not a prefix-derived default, and an unrecorded name cannot be switches
-// switched away from. Non-Dolt backends keep their existing validation and routing;
+// not a prefix-derived default, and an unrecorded name cannot be switched
+// away from. Non-Dolt backends keep their existing validation and routing;
 // this guard decides only Dolt store switches.
 func compareStoreSwitch(recorded storeSwitchRecord, request storeSwitchRequest) (storeSwitchDiff, bool) {
 	if recorded.Backend != configfile.BackendDolt {
 		return storeSwitchDiff{}, false
 	}
-	if request.Database == "" || recorded.Database == "" || request.Database == recorded.Database {
+	var diff storeSwitchDiff
+	switch recorded.Mode {
+	case configfile.DoltModeEmbedded:
+		if request.UsesSQLServer {
+			diff.FamilySwitch = true
+			diff.RecordedFamily = recorded.Mode
+			diff.RequestedFamily = "server"
+		}
+	case configfile.DoltModeServer, configfile.DoltModeProxiedServer:
+		// Same family: a proxied-server workspace re-initialized as
+		// --server keeps its server-side store, so only a move to the
+		// embedded engine is a family switch. (A --proxied-server request
+		// never reaches the mutation gate: its dedicated init route
+		// dispatches before mode inheritance.)
+		if !request.UsesSQLServer {
+			diff.FamilySwitch = true
+			diff.RecordedFamily = recorded.Mode
+			diff.RequestedFamily = configfile.DoltModeEmbedded
+		}
+	}
+	if request.Database != "" && recorded.Database != "" && request.Database != recorded.Database {
+		diff.DatabaseSwitch = true
+		diff.RecordedDatabase = recorded.Database
+		diff.RequestedDatabase = request.Database
+	}
+	if !diff.FamilySwitch && !diff.DatabaseSwitch {
 		return storeSwitchDiff{}, false
 	}
-	return storeSwitchDiff{
-		DatabaseSwitch:    true,
-		RecordedDatabase:  recorded.Database,
-		RequestedDatabase: request.Database,
-	}, true
+	diff.ModeSource = request.ModeSource
+	return diff, true
 }
 
 // storeSwitchNotice prints what a store switch means before confirmation is
 // demanded. It is unconditional under --quiet: a silent store switch is
 // exactly the GH#3495 failure mode.
 func storeSwitchNotice(w io.Writer, diff storeSwitchDiff) {
-	fmt.Fprintf(w, "\n%s re-initializing switches this workspace's store: database %s -> %s.\n",
-		ui.RenderWarn("WARNING:"), remedy.PrintedValue(diff.RecordedDatabase), remedy.PrintedValue(diff.RequestedDatabase))
+	fmt.Fprintf(w, "\n%s re-initializing switches this workspace's store", ui.RenderWarn("WARNING:"))
+	switch {
+	case diff.FamilySwitch && diff.DatabaseSwitch:
+		fmt.Fprintf(w, ": engine family %s -> %s and database %s -> %s.\n",
+			remedy.PrintedValue(diff.RecordedFamily), remedy.PrintedValue(diff.RequestedFamily),
+			remedy.PrintedValue(diff.RecordedDatabase), remedy.PrintedValue(diff.RequestedDatabase))
+	case diff.FamilySwitch:
+		fmt.Fprintf(w, ": engine family %s -> %s.\n",
+			remedy.PrintedValue(diff.RecordedFamily), remedy.PrintedValue(diff.RequestedFamily))
+	case diff.DatabaseSwitch:
+		fmt.Fprintf(w, ": database %s -> %s.\n",
+			remedy.PrintedValue(diff.RecordedDatabase), remedy.PrintedValue(diff.RequestedDatabase))
+	}
 	fmt.Fprintf(w, "  The recorded store is left in place; it is not deleted. But this workspace\n")
 	fmt.Fprintf(w, "  will stop reading its issues, its history and its configuration.\n\n")
 }

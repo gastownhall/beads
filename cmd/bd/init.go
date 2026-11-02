@@ -1251,9 +1251,13 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		}
 		initGateHandle, gateErr := acquireInitMutationGate(rootCtx, beadsDirAbs, plannedDBPathAbs, func() error {
 			return runInitReinitPreflight(reinitPreflightInput{
-				ReinitLocal:   reinitLocal,
-				BeadsDir:      beadsDirAbs,
-				Request:       storeSwitchRequest{UsesSQLServer: usesSQLServer(), Database: database},
+				ReinitLocal: reinitLocal,
+				BeadsDir:    beadsDirAbs,
+				Request: storeSwitchRequest{
+					UsesSQLServer: usesSQLServer(),
+					Database:      database,
+					ModeSource:    initModeSourceDescription(cmd),
+				},
 				DestroyToken:  destroyToken,
 				ExpectedToken: FormatDestroyToken(destroyTokenPrefix),
 				StdinIsTTY:    term.IsTerminal(int(os.Stdin.Fd())),
@@ -3224,6 +3228,27 @@ func inheritWorkspaceDoltMode() (bool, error) {
 // server-mode project runs embedded and rewrites dolt_mode to embedded, which
 // is #3885: the project comes back half-configured and the user is told
 // nothing.
+// initModeSourceDescription names where this invocation's connection mode
+// came from, for the store-switch notice: a family switch always implies an
+// explicit mode source (a bare reinit inherits the recorded mode and never
+// switches), and the notice names the override to remove.
+func initModeSourceDescription(cmd *cobra.Command) string {
+	for _, name := range []string{"server", "shared-server", "proxied-server"} {
+		if f := cmd.Flags().Lookup(name); f != nil && f.Changed {
+			return "--" + name
+		}
+	}
+	for _, env := range []string{"BEADS_DOLT_SERVER_MODE", "BEADS_DOLT_SHARED_SERVER", "BEADS_DOLT_PROXIED_SERVER"} {
+		if v := os.Getenv(env); v != "" {
+			return env + "=" + v
+		}
+	}
+	if modeVal := config.GetYamlConfig("dolt.mode"); modeVal != "" {
+		return "dolt.mode: " + modeVal + " in config.yaml"
+	}
+	return ""
+}
+
 func initModeExplicitlyRequested(cmd *cobra.Command) bool {
 	for _, name := range []string{"server", "shared-server", "proxied-server"} {
 		if f := cmd.Flags().Lookup(name); f != nil && f.Changed {
