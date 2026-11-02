@@ -57,10 +57,14 @@ func (s *EmbeddedDoltStore) runTransactionWithMessage(ctx context.Context, fn fu
 	// the mutation they describe rather than left dirty in the working set.
 	tracker.MarkVersionedHistoryDirty(s.versionedHistory.Enabled())
 
-	// Create a Dolt version commit from the working set changes.
+	// Create a Dolt version commit from the working set changes. The author
+	// is resolved here — inside the dirty branch, before the publication
+	// connection — so a read or a clean transaction never resolves (or pays
+	// for) an identity (GH#7628).
 	if commitMsg != "" && len(tracker.DirtyTables()) > 0 {
+		author := s.commitAuthorString()
 		if err := s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
-			return versioncontrolops.StageAndCommit(ctx, db, tracker.DirtyTables(), commitMsg, commitAuthor)
+			return versioncontrolops.StageAndCommit(ctx, db, tracker.DirtyTables(), commitMsg, author)
 		}); err != nil {
 			return wrapCommitIndeterminate("embeddeddolt: stage and commit after SQL commit", err)
 		}

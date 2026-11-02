@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -34,6 +35,7 @@ var _ storage.Flattener = (*EmbeddedDoltStore)(nil)
 var _ storage.Compactor = (*EmbeddedDoltStore)(nil)
 var _ storage.SchemaMigrator = (*EmbeddedDoltStore)(nil)
 var _ storage.EventsJournalConfigurer = (*EmbeddedDoltStore)(nil)
+var _ storage.CommitIdentityConfigurer = (*EmbeddedDoltStore)(nil)
 var _ storage.VersionedHistoryConfigurer = (*EmbeddedDoltStore)(nil)
 var _ storage.VersionedHistoryDeferrer = (*EmbeddedDoltStore)(nil)
 var _ storage.ExternalRefHistoryQuerier = (*EmbeddedDoltStore)(nil)
@@ -73,6 +75,12 @@ type EmbeddedDoltStore struct {
 	// (e.g. the post-command autocommit net, or the commit itself) - only the
 	// migration step is skipped.
 	intent openIntent
+	// commitIdentityMu guards the fallback and its memoized author string
+	// (GH#7628): the memo is resolved on the first authored commit and
+	// cleared when SetCommitIdentityFallback reconfigures the store.
+	commitIdentityMu       sync.Mutex
+	commitIdentityFallback func() (name, email string)
+	commitAuthorMemo       string
 }
 
 // lenientSharedGateGuidance is the blunt migrate-or-adopt block shared by the

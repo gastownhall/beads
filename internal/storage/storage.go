@@ -982,6 +982,22 @@ type EventsJournalConfigurer interface {
 	SetEventsJournalEnabled(enabled bool)
 }
 
+// CommitIdentityConfigurer supplies a fallback commit identity for Dolt
+// commits on ONE storage instance, resolved lazily by the store at its first
+// authored commit. The callback returns a candidate (name, email) pair; the
+// store still prefers GIT_AUTHOR_NAME / GIT_AUTHOR_EMAIL over either field,
+// normalizes what it accepts, and falls back to its own anonymous defaults
+// when a field comes back empty. Calling the setter again replaces the
+// fallback and clears whatever identity the previous configuration resolved.
+//
+// Like EventsJournalConfigurer, this is per-instance state: the CLI installs
+// its actor resolution on each store it opens, and a store opened without a
+// callback commits under environment or default identity only. Callers
+// type-assert; a store that does not implement it cannot take a fallback.
+type CommitIdentityConfigurer interface {
+	SetCommitIdentityFallback(fallback func() (name, email string))
+}
+
 // VersionedHistoryConfigurer controls dual-write issue-version history
 // activation on ONE storage instance. Implementations must never use
 // process-global state, for the same reason as EventsJournalConfigurer:
