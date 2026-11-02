@@ -2328,6 +2328,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `bd dolt test` and `bd dolt clean-databases` say how to check the server
   there (`nc -zv <host> <port>`) instead of advising `bd dolt start`, which
   refuses a remote host.
+- `bd doctor`'s "Federation remotesapi" check no longer warns `Server not
+  running (N peers configured)`, counting `origin`, for a live Dolt server
+  bd did not start (launchd, systemd, a container) or bd's shared server,
+  which write no PID file in the workspace. When the PID file names no
+  running server, the check probes the endpoint the store opens, as the
+  "Dolt Mode" check does, and reports the remotesapi listener's real state.
+  A server only that probe found is named by the endpoint the probe
+  reached, its unix socket or host:port, instead of `PID 0`. Its listener
+  is dialed at the configured host when the probe reached it over TCP, and
+  at `127.0.0.1` over the socket. When the store cannot open there (wrong
+  credentials, a missing database, a listener that is not Dolt), the check
+  reports `Skipped (database unavailable)` with the error. (#7724)
 - **When bd's port file chose the port, the unreachable-server advice names
   that file.** A command that reaches the server records its port in
   `.beads/dolt-server.port`, which outranks `dolt_server_port`, and
