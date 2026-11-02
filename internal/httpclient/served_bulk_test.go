@@ -573,6 +573,24 @@ func TestServedBatchCreatorCreatesEveryItemAsOneAct(t *testing.T) {
 	conformance.RunBatchCreatorCreatesEveryItemAsOneAct(t, t.Context(), newServedBatchCreatorFixture(t, "hb00"))
 }
 
+// TestServedBatchCreatorMintsADistinctIDForEachIdenticalItem is parked with
+// the timestamp echo below: the case makes its two items identical by giving
+// both one Issue.CreatedAt, and the wire's item publishes no timestamp member,
+// so the client refuses it before the dial. Over http the server stamps each
+// item's created_at itself, so the request cannot ask for the twin.
+func TestServedBatchCreatorMintsADistinctIDForEachIdenticalItem(t *testing.T) {
+	skipKnownDivergence(t, "W-BatchCreateItem.Issue", bulkParkBead,
+		"the case seeds the same Issue.CreatedAt on both items, and the wire's item publishes no timestamp "+
+			"member — the client refuses items[0].Issue.CreatedAt before any request is sent.")
+	conformance.RunBatchCreatorMintsADistinctIDForEachIdenticalItem(t, t.Context(), newServedBatchCreatorFixture(t, "hb13"))
+}
+
+func TestServedBatchCreatorMintsPastAnIDALaterItemNames(t *testing.T) {
+	skipKnownDivergence(t, "W-BatchCreateItem.Issue", bulkParkBead,
+		"the case's second item names the id the first item's counter mint would draw. "+parkBatchExplicitID)
+	conformance.RunBatchCreatorMintsPastAnIDALaterItemNames(t, t.Context(), newServedBatchCreatorFixture(t, "hb14"))
+}
+
 func TestServedBatchCreatorRefusesEverythingWhenOneItemRefuses(t *testing.T) {
 	skipKnownDivergence(t, "W-BatchCreateItem.Issue", bulkParkBead, parkBatchExplicitID)
 	conformance.RunBatchCreatorRefusesEverythingWhenOneItemRefuses(t, t.Context(), newServedBatchCreatorFixture(t, "hb01"))

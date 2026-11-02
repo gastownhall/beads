@@ -2101,9 +2101,13 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			}
 
 			// In stealth mode, persist no-git-ops: true so bd prime
-			// automatically uses stealth session-close protocol (GH#2159)
+			// automatically uses stealth session-close protocol (GH#2159).
+			// Name this workspace's config.yaml (created just above) via
+			// beadsDir: SaveConfigValue would write viper's ConfigFileUsed(),
+			// which still points at the user config when no project config
+			// existed at Initialize time, leaking stealth machine-wide (#7938).
 			if stealth {
-				if err := config.SaveConfigValue("no-git-ops", true, beadsDir); err != nil {
+				if err := config.SetYamlConfigInDir(beadsDir, "no-git-ops", "true"); err != nil {
 					fmt.Fprintf(os.Stderr, "Warning: failed to set no-git-ops in config: %v\n", err)
 				}
 			}
@@ -2738,22 +2742,7 @@ func checkExistingBeadsDataAt(beadsDir string, prefix string) error {
 
 	if cfg != nil && cfg.GetBackend() == configfile.BackendDolt {
 		if cfg.IsDoltProxiedServerMode() {
-			proxiedRoot, rootErr := resolveProxiedServerRootPath(beadsDir)
-			if rootErr != nil {
-				return fmt.Errorf("resolve proxied server root: %w", rootErr)
-			}
-			if info, statErr := os.Stat(proxiedRoot); statErr == nil && info.IsDir() {
-				return alreadyInitialized(`
-⚠ Found existing Dolt database: %s
-
-This workspace is already initialized.
-
-To use the existing database:
-  Just run bd commands normally (e.g., bd list)
-
-Aborting.`, proxiedRoot)
-			}
-			return nil
+			return checkExistingProxiedServerDataAt(beadsDir)
 		}
 
 		// Embedded mode stores databases under `.beads/embeddeddolt/<db>/`.
@@ -2992,6 +2981,42 @@ Aborting.`, dbPath, prefix)
 	}
 
 	return nil // No database found, safe to init
+}
+
+// checkExistingProxiedServerDataAt is checkExistingBeadsDataAt for a
+// proxied-server workspace: re-init is refused once the resolved root holds
+// what the workspace's opens serve. For a managed-local root that is a Dolt
+// database, read with the same HasDoltDatabase that proxiedFreshStoreRefusal
+// refuses on, so the two cannot disagree. Every other open refuses a root
+// that holds none and names `bd init --proxied-server`, so init must not
+// answer "already initialized" in turn, as it did while it keyed on the
+// directory alone: a failed init leaves its config.yaml and proxy files in
+// the root, and a clone can carry an empty one. A root whose sidecar names an
+// external server holds only the proxy's own files, so there the directory is
+// still the mark of an initialized workspace, as it is when the sidecar
+// cannot be read (the open refuses that workspace anyway).
+func checkExistingProxiedServerDataAt(beadsDir string) error {
+	proxiedRoot, err := resolveProxiedServerRootPath(beadsDir)
+	if err != nil {
+		return fmt.Errorf("resolve proxied server root: %w", err)
+	}
+	if info, statErr := os.Stat(proxiedRoot); statErr != nil || !info.IsDir() {
+		return nil
+	}
+	sidecar, sidecarErr := configfile.LoadProxiedServerClientInfo(beadsDir)
+	managedLocal := sidecarErr == nil && (sidecar == nil || sidecar.External == nil)
+	if managedLocal && !doltserver.HasDoltDatabase(proxiedRoot) {
+		return nil
+	}
+	return alreadyInitialized(`
+⚠ Found existing Dolt database: %s
+
+This workspace is already initialized.
+
+To use the existing database:
+  Just run bd commands normally (e.g., bd list)
+
+Aborting.`, remedy.PrintedValue(proxiedRoot))
 }
 
 // countExistingIssues attempts to connect to the existing database and count

@@ -21,20 +21,18 @@ const wispIDTombstonesDDL = `CREATE TABLE IF NOT EXISTS wisp_id_tombstones (
     PRIMARY KEY (id)
 );`
 
-// TestLatestVersionIncludesMigration0074 pins the slots this migration claims,
-// main 0074 and ignored 0030, superseding 0073's own version of this test.
-// The slots sit directly above arrival_seq's (0073, ignored 0029). A hardcoded
-// literal for the reason the earlier ones were: a drift to 74 for the wrong
-// reason is caught by the shape test below failing to explain why 74 is
-// tombstone-shaped.
+// TestLatestVersionIncludesMigration0074 pins the main slot this migration
+// claims, 0074, superseding 0073's own version of this test. The slot sits
+// directly above arrival_seq's (0073). A hardcoded literal for the reason the
+// earlier ones were: a drift to 74 for the wrong reason is caught by the shape
+// test below failing to explain why 74 is tombstone-shaped. Its ignored twin,
+// 0030, is no longer the top of the ignored series: that pin moved to
+// TestLatestIgnoredVersionIncludesMigration0031 when ignored 0031 claimed the
+// next slot.
 func TestLatestVersionIncludesMigration0074(t *testing.T) {
 	const want = 74
 	if got := LatestVersion(); got != want {
 		t.Fatalf("LatestVersion() = %d, want %d (id tombstone tables)", got, want)
-	}
-	const wantIgnored = 30
-	if got := LatestIgnoredVersion(); got != wantIgnored {
-		t.Fatalf("LatestIgnoredVersion() = %d, want %d (wisp_id_tombstones on fresh clones)", got, wantIgnored)
 	}
 }
 

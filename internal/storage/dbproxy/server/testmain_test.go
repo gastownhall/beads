@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/testutil"
@@ -54,12 +55,20 @@ const fakeDoltEnv = "BEADS_TEST_FAKE_DOLT"
 
 var fakeDoltPortRe = regexp.MustCompile(`(?m)^\s+port:\s*(\d+)`)
 
+// fakeDoltSlowBindDelay is how long the "slowbind" fake takes to reach its
+// port check: many readiness polls, so a foreign listener on the port
+// answers long before the fake can say the port is taken.
+const fakeDoltSlowBindDelay = 500 * time.Millisecond
+
 // fakeDolt answers the dolt invocations DoltServer.Start makes. For
 // `sql-server --config <file>` it reads listener.port from the file and, by
 // mode:
 //   - "inuse": reports dolt's own port-in-use error and exits 1;
 //   - "silent": listens but never logs the ready line;
-//   - "ready": listens and logs the ready line.
+//   - "ready": listens and logs the ready line;
+//   - "slowbind": waits fakeDoltSlowBindDelay, as dolt's own startup does
+//     before its port check, then reports the port in use and exits 1 if
+//     another process holds it, or listens and logs the ready line.
 func fakeDolt(mode string, args []string) int {
 	if len(args) == 0 {
 		return 2
@@ -95,12 +104,19 @@ func fakeDolt(mode string, args []string) int {
 		fmt.Fprintf(os.Stderr, "Port %s already in use.\n", port)
 		return 1
 	}
+	if mode == "slowbind" {
+		time.Sleep(fakeDoltSlowBindDelay)
+	}
 	ln, err := net.Listen("tcp", "127.0.0.1:"+port)
 	if err != nil {
+		if mode == "slowbind" {
+			fmt.Fprintf(os.Stderr, "Port %s already in use.\n", port)
+			return 1
+		}
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
-	if mode == "ready" {
+	if mode == "ready" || mode == "slowbind" {
 		fmt.Fprintln(os.Stderr, `level=info msg="Server ready. Accepting connections."`)
 	}
 	for {

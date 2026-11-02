@@ -1007,6 +1007,13 @@ func TestBazelRetiredLanesCannotBeNarrowed(t *testing.T) {
 				"BEADS_TEST_REQUIRE_DOLT_CONTAINER": "1", "BEADS_TEST_SUBPROCESS_BINARY": "$(rlocationpath :dolt_race_off)", "GOMAXPROCS": "4",
 			},
 		},
+		// No legacy job's: the server storage tier's one target that PR Risk
+		// never ran, the whole versioncontrolops_test binary on a required
+		// local dolt sql-server (its Compact tests skip everywhere else).
+		"//internal/storage/versioncontrolops:versioncontrolops_dolt_test": {
+			[]string{"$(rootpath :versioncontrolops_test)"},
+			map[string]string{"BEADS_TEST_DOLT_SERVER": "local", "BEADS_TEST_REQUIRE_DOLT_CONTAINER": "1"},
+		},
 	}
 	laneTags := regexp.MustCompile(`"(embedded|dolt-server-proxied|dolt-server-integration)"`)
 	quoted := regexp.MustCompile(`"([^"]*)"`)

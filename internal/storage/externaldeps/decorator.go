@@ -947,10 +947,10 @@ func (s *Store) GetDependencyTree(ctx context.Context, issueID string, maxDepth 
 	if err != nil {
 		return nil, fmt.Errorf("external dependencies: load tree edges: %w", err)
 	}
-	return s.appendTreeExternalReferences(ctx, tree, deps, maxDepth, showAllPaths)
+	return s.appendTreeExternalReferences(ctx, tree, deps, maxDepth)
 }
 
-func (s *Store) appendTreeExternalReferences(ctx context.Context, tree []*types.TreeNode, deps map[string][]*types.Dependency, maxDepth int, showAllPaths bool) ([]*types.TreeNode, error) {
+func (s *Store) appendTreeExternalReferences(ctx context.Context, tree []*types.TreeNode, deps map[string][]*types.Dependency, maxDepth int) ([]*types.TreeNode, error) {
 	refs := make([]reference, 0)
 	for _, issueDeps := range deps {
 		for _, dep := range issueDeps {
@@ -968,21 +968,27 @@ func (s *Store) appendTreeExternalReferences(ctx context.Context, tree []*types.
 	if effectiveMaxDepth <= 0 {
 		effectiveMaxDepth = 50
 	}
+	// An external id already in the tree gets a Deduped stub for each further
+	// parent, as the walk does for a shared issue; an edge the tree already
+	// holds (a server that hung the leaves itself) is not added again.
 	seen := make(map[string]bool, len(tree)+len(refs))
+	edges := make(map[[2]string]bool, len(tree))
 	for _, node := range tree {
 		if node != nil {
 			seen[node.ID] = true
+			edges[[2]string{node.ParentID, node.ID}] = true
 		}
 	}
 	for _, parent := range tree {
-		if parent == nil || parent.Depth >= effectiveMaxDepth {
+		// A stub has no descendants: its leaves hang under its expanded twin.
+		if parent == nil || parent.Deduped || parent.Depth >= effectiveMaxDepth {
 			continue
 		}
 		for _, dep := range deps[parent.ID] {
 			if dep == nil || !isExternalReference(dep.DependsOnID) {
 				continue
 			}
-			if !showAllPaths && seen[dep.DependsOnID] {
+			if edges[[2]string{parent.ID, dep.DependsOnID}] {
 				continue
 			}
 			ref := parseReference(dep.DependsOnID)
@@ -1002,8 +1008,10 @@ func (s *Store) appendTreeExternalReferences(ctx context.Context, tree []*types.
 				Depth:          parent.Depth + 1,
 				ParentID:       parent.ID,
 				EdgeFromParent: dep.Type,
+				Deduped:        seen[dep.DependsOnID],
 			})
 			seen[dep.DependsOnID] = true
+			edges[[2]string{parent.ID, dep.DependsOnID}] = true
 		}
 	}
 	return tree, nil

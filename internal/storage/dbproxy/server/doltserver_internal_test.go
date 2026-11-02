@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/procid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -21,10 +22,16 @@ import (
 // log_level info.
 func newFakeDoltServer(t *testing.T, mode string, port int) (*DoltServer, string) {
 	t.Helper()
+	return newFakeDoltServerAtLevel(t, mode, port, "info")
+}
+
+// newFakeDoltServerAtLevel is newFakeDoltServer with the config's log_level.
+func newFakeDoltServerAtLevel(t *testing.T, mode string, port int, logLevel string) (*DoltServer, string) {
+	t.Helper()
 	t.Setenv("BEADS_TEST_FAKE_DOLT", mode)
 	rootDir := t.TempDir()
 	cfg := filepath.Join(t.TempDir(), "config.yaml")
-	require.NoError(t, os.WriteFile(cfg, []byte(fmt.Sprintf("log_level: info\nlistener:\n  host: 127.0.0.1\n  port: %d\n", port)), 0o600))
+	require.NoError(t, os.WriteFile(cfg, []byte(fmt.Sprintf("log_level: %s\nlistener:\n  host: 127.0.0.1\n  port: %d\n", logLevel, port)), 0o600))
 	s, err := NewDoltServer(os.Args[0], rootDir, cfg, filepath.Join(t.TempDir(), "server.log"), 0, "")
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -81,6 +88,152 @@ func TestDoltServer_Start_MissingReadyLineIsDiagnosed(t *testing.T) {
 	assert.Contains(t, err.Error(), "never logged \"Server ready. Accepting connections.\"")
 	assert.Contains(t, err.Error(), "although something answered")
 	assert.Contains(t, err.Error(), "log_level to warning")
+}
+
+// TestDoltServer_Start_QuietLogLevelProvesListenerOwnership pins readiness
+// for a config whose log level hides dolt's ready line (warning, which
+// Beads-generated configs use so dolt does not log every connection): a
+// greeting counts once the listener is shown to be the child's, a listener
+// shown to be another process's ends Start with ErrPortInUse (so a
+// PortConflictPolicy can move the port), and where ownership cannot be told
+// the greeting decides. A listener the host lists no holder for is another
+// process's where the host lists this process's own listeners, and unknown
+// where it lists none; only that case runs the host probe.
+func TestDoltServer_Start_QuietLogLevelProvesListenerOwnership(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		ownership doltserver.Ownership
+		provable  bool
+		wantProbe bool
+		wantInUse bool
+	}{
+		{name: "owned", ownership: doltserver.OwnershipOwned, provable: true},
+		{name: "unknown", ownership: doltserver.OwnershipUnknown, provable: true},
+		{name: "another process", ownership: doltserver.OwnershipForeign, provable: true, wantInUse: true},
+		// Another user's socket (darwin), or a listener reached through a
+		// forward (WSL2 mirrored networking).
+		{name: "unlisted where own listeners are listed", ownership: doltserver.OwnershipUnlisted, provable: true, wantProbe: true, wantInUse: true},
+		// WSL1 and some sandboxes list no sockets at all.
+		{name: "unlisted where no listener is listed", ownership: doltserver.OwnershipUnlisted, provable: false, wantProbe: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, _ := newFakeDoltServerAtLevel(t, "silent", freeTestPort(t), "warning")
+			asked, probed := 0, 0
+			s.listenerOwner = func(pid, port int) doltserver.Ownership {
+				asked++
+				assert.Equal(t, s.pid, pid, "ownership is asked about the launched child")
+				assert.Equal(t, s.config.Port(), port)
+				return tc.ownership
+			}
+			s.ownerProvable = func() bool {
+				probed++
+				return tc.provable
+			}
+			err := s.Start(context.Background())
+			assert.Positive(t, asked, "a greeting at a quiet log level must be checked for ownership")
+			assert.Equal(t, tc.wantProbe, probed > 0, "the host probe runs only for an unlisted listener")
+			if tc.wantInUse {
+				require.Error(t, err)
+				assert.ErrorIs(t, err, ErrPortInUse)
+				assert.Contains(t, err.Error(), "another process")
+				assert.False(t, s.Running(context.Background()))
+				return
+			}
+			require.NoError(t, err)
+			assert.True(t, s.Running(context.Background()))
+		})
+	}
+}
+
+// TestDoltServer_Start_QuietLogLevelRealOwnership runs the real ownership
+// check against the fake child: on platforms that can tell (linux, darwin)
+// the child's own listener is recognized, so Start succeeds on proven
+// ownership, not on the unknown-ownership fallback.
+func TestDoltServer_Start_QuietLogLevelRealOwnership(t *testing.T) {
+	s, _ := newFakeDoltServerAtLevel(t, "silent", freeTestPort(t), "warning")
+	var last doltserver.Ownership
+	s.listenerOwner = func(pid, port int) doltserver.Ownership {
+		last = doltserver.ClassifyListener(pid, port)
+		return last
+	}
+	require.NoError(t, s.Start(context.Background()))
+	assert.True(t, s.Running(context.Background()))
+	if doltserver.ListenerOwnershipProvable() {
+		assert.Equal(t, doltserver.OwnershipOwned, last, "the child's own listener must be proven its own")
+	}
+}
+
+// holdTestPort listens on a free loopback port and accepts every
+// connection, standing in for another process that took the port first.
+func holdTestPort(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_ = c.Close()
+		}
+	}()
+	return ln.Addr().(*net.TCPAddr).Port
+}
+
+// TestDoltServer_Start_UnknownOwnershipKeepsReadyLineProof pins readiness
+// for the config cmd/bd generates on a host that cannot prove listener
+// ownership (Windows, WSL1, some sandboxes): there it stays at log_level
+// info, because only dolt's ready line then tells the dolt Start launched
+// from another process holding its port. Such a listener answers at once,
+// while dolt reaches its port check only after its own startup; its
+// greeting must not count, dolt's port-in-use exit must reach the policy,
+// and Start must come up on a moved port.
+func TestDoltServer_Start_UnknownOwnershipKeepsReadyLineProof(t *testing.T) {
+	foreign := holdTestPort(t)
+	s, _ := newFakeDoltServerAtLevel(t, "slowbind", foreign, "info")
+	s.listenerOwner = func(int, int) doltserver.Ownership { return doltserver.OwnershipUnknown }
+	var asked []int
+	s.SetPortConflictPolicy(func(_ string, inUsePort int) error {
+		asked = append(asked, inUsePort)
+		return nil
+	})
+
+	require.NoError(t, s.Start(context.Background()))
+	assert.Equal(t, []int{foreign}, asked, "dolt's port-in-use exit must reach the policy")
+	assert.NotEqual(t, foreign, s.config.Port(), "Start must not serve from the foreign listener's port")
+	assert.True(t, s.Running(context.Background()))
+}
+
+// TestDoltServer_Start_QuietLogLevelMovesOffUnlistedListener pins readiness
+// for the config cmd/bd generates on a host that lists this process's own
+// listeners (log_level warning) when the listener on the port is listed as
+// no process's: another user's socket, which lsof cannot see without
+// privilege, or a Windows listener under WSL2's mirrored networking. Such a
+// listener answers at once, while dolt reaches its port check only after
+// its own startup; its greeting must not count, the port must reach the
+// policy, and Start must come up on a moved port.
+func TestDoltServer_Start_QuietLogLevelMovesOffUnlistedListener(t *testing.T) {
+	foreign := holdTestPort(t)
+	s, _ := newFakeDoltServerAtLevel(t, "slowbind", foreign, "warning")
+	s.listenerOwner = func(_, port int) doltserver.Ownership {
+		if port == foreign {
+			return doltserver.OwnershipUnlisted
+		}
+		return doltserver.OwnershipOwned
+	}
+	s.ownerProvable = func() bool { return true }
+	var asked []int
+	s.SetPortConflictPolicy(func(_ string, inUsePort int) error {
+		asked = append(asked, inUsePort)
+		return nil
+	})
+
+	require.NoError(t, s.Start(context.Background()))
+	assert.Equal(t, []int{foreign}, asked, "the unlisted listener's port must reach the policy")
+	assert.NotEqual(t, foreign, s.config.Port(), "Start must not serve from the foreign listener's port")
+	assert.True(t, s.Running(context.Background()))
 }
 
 // TestDoltServer_Start_FakeReadyLine is the positive control for the fake.

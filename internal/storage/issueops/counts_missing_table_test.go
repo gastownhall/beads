@@ -45,7 +45,8 @@ type countsEntryPoint struct {
 const readyProbeSQL = `^SELECT EXISTS \(SELECT 1 FROM wisps\), EXISTS \(SELECT 1 FROM wisp_dependencies\)`
 
 // readyProbeRows answers the ready probe: wisps present, wisp_dependencies
-// present, then any further flags the caller's probe asks for.
+// present, a stale is_blocked flag in issues and in wisps, then any further
+// flags the caller's probe asks for.
 func readyProbeRows(flags ...bool) *sqlmock.Rows {
 	cols := make([]string, len(flags))
 	vals := make([]driver.Value, len(flags))
@@ -176,7 +177,7 @@ var countsEntryPoints = []countsEntryPoint{
 		name:    "GetReadyWorkWithCountsInTx",
 		missing: countsMegaQueryTables,
 		prime: func(mock sqlmock.Sqlmock, wispErr error) {
-			mock.ExpectQuery(readyProbeSQL).WillReturnRows(readyProbeRows(true, true))
+			mock.ExpectQuery(readyProbeSQL).WillReturnRows(readyProbeRows(true, true, false, false))
 			mock.ExpectQuery(`(?s)FROM issues i`).WillReturnRows(emptyCountsRows())
 			mock.ExpectQuery(`(?s)FROM wisps i`).WillReturnError(wispErr)
 		},
@@ -193,7 +194,7 @@ var countsEntryPoints = []countsEntryPoint{
 			// Both families are counted in one statement; when its wisp half
 			// names a table the database may lack, the issues count is taken
 			// on its own.
-			mock.ExpectQuery(readyProbeSQL).WillReturnRows(readyProbeRows(true, true, false))
+			mock.ExpectQuery(readyProbeSQL).WillReturnRows(readyProbeRows(true, true, false, false, false))
 			mock.ExpectQuery(`SELECT \(SELECT COUNT\(\*\) FROM issues .*\), \(SELECT COUNT\(\*\) FROM wisps`).WillReturnError(wispErr)
 			mock.ExpectQuery(`SELECT COUNT\(\*\) FROM issues`).WillReturnRows(scalarCountRows(1))
 		},
@@ -207,9 +208,11 @@ var countsEntryPoints = []countsEntryPoint{
 		name:    "GetReadyWorkInTx/unbounded",
 		missing: wispPlaneAndLeases,
 		prime: func(mock sqlmock.Sqlmock, wispErr error) {
+			mock.ExpectQuery(staleBlockedQueryRegex("issues")).WillReturnRows(sqlmock.NewRows([]string{"id"}))
 			mock.ExpectQuery(`SELECT id FROM issues`).WillReturnRows(sqlmock.NewRows([]string{"id"}))
 			mock.ExpectQuery(`SELECT 1 FROM wisps LIMIT 1`).
 				WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
+			mock.ExpectQuery(staleBlockedQueryRegex("wisps")).WillReturnRows(sqlmock.NewRows([]string{"id"}))
 			mock.ExpectQuery(`(?s)FROM wisps`).WillReturnError(wispErr)
 		},
 		run: func(ctx context.Context, tx *sql.Tx) (string, error) {
@@ -222,9 +225,11 @@ var countsEntryPoints = []countsEntryPoint{
 		name:    "GetReadyWorkInTx/paged",
 		missing: []string{"wisp_labels"},
 		prime: func(mock sqlmock.Sqlmock, wispErr error) {
+			mock.ExpectQuery(staleBlockedQueryRegex("issues")).WillReturnRows(sqlmock.NewRows([]string{"id"}))
 			mock.ExpectQuery(`SELECT id FROM issues`).WillReturnRows(sqlmock.NewRows([]string{"id"}))
 			mock.ExpectQuery(`SELECT 1 FROM wisps LIMIT 1`).
 				WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
+			mock.ExpectQuery(staleBlockedQueryRegex("wisps")).WillReturnRows(sqlmock.NewRows([]string{"id"}))
 			mock.ExpectQuery(`(?s)FROM wisps`).WillReturnError(wispErr)
 		},
 		run: func(ctx context.Context, tx *sql.Tx) (string, error) {
@@ -348,6 +353,9 @@ func TestReadyProbeFallsBackOnPreWispDatabase(t *testing.T) {
 		mock.ExpectQuery(readyProbeSQL).WillReturnError(tableNotFound("wisps"))
 		mock.ExpectQuery(`SELECT 1 FROM wisp_dependencies LIMIT 1`).WillReturnError(tableNotFound("wisp_dependencies"))
 		mock.ExpectQuery(`SELECT 1 FROM wisps LIMIT 1`).WillReturnError(tableNotFound("wisps"))
+		// The probe never answered whether a flag is stale, so the issues
+		// family's stale-flagged rows are read on their own.
+		mock.ExpectQuery(staleBlockedQueryRegex("issues")).WillReturnRows(sqlmock.NewRows([]string{"id"}))
 	}
 
 	t.Run("page_and_total", func(t *testing.T) {

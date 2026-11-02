@@ -80,10 +80,15 @@ func (s *testSuite) readyExcludesPinned() {
 
 func (s *testSuite) readyExcludesBlocked() {
 	r := s.issueRepo()
+	blocker := newTestIssue("bd-rdy-blk-by-1", "open blocker")
+	s.Require().NoError(r.Insert(s.Ctx(), blocker, "tester", domain.InsertIssueOpts{}))
 	blocked := newTestIssue("bd-rdy-blk-1", "blocked")
 	s.Require().NoError(r.Insert(s.Ctx(), blocked, "tester", domain.InsertIssueOpts{}))
-	_, err := s.Runner().ExecContext(s.Ctx(), "UPDATE issues SET is_blocked = 1 WHERE id = ?", "bd-rdy-blk-1")
-	s.Require().NoError(err)
+	// A real blocks edge, so the recompute sets the flag: a flag planted on an
+	// edgeless row is stale and ready reads around it (GH#3268).
+	depUC := domain.NewDependencyUseCase(NewDependencySQLRepository(s.Runner()))
+	s.Require().NoError(depUC.AddDependency(s.Ctx(),
+		&types.Dependency{IssueID: "bd-rdy-blk-1", DependsOnID: "bd-rdy-blk-by-1", Type: types.DepBlocks}, "tester"))
 
 	out, err := r.GetReadyWork(s.Ctx(), types.WorkFilter{})
 	s.Require().NoError(err)

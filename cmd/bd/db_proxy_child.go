@@ -29,6 +29,7 @@ var (
 	dbProxyChildExternalSocketPath string
 	dbProxyChildExternalKeepAlive  time.Duration
 	dbProxyChildStopEpoch          string
+	dbProxyChildRotateLogPath      bool
 )
 
 var dbProxyChildCmd = &cobra.Command{
@@ -83,7 +84,18 @@ func dbProxyChildProxyOpts(srv server.DatabaseServer) proxy.ProxyOpts {
 		// The child inherits BD_DEBUG from the spawning bd; its
 		// PersistentPreRun is a no-op, so --verbose never reaches it.
 		TraceConnections: debug.Enabled(),
+		ServerLogPath:    dbProxyChildServerLogPath(),
 	}
+}
+
+// dbProxyChildServerLogPath is the server log the running proxy bounds: the
+// --logpath the spawning bd marked as its own with --rotate-logpath, never
+// an operator's log.
+func dbProxyChildServerLogPath() string {
+	if !dbProxyChildRotateLogPath {
+		return ""
+	}
+	return dbProxyChildLogPath
 }
 
 func newDatabaseServer(backend proxy.Backend, rootDir, configPath, logPath, doltBin, database string, external configfile.ExternalDoltConfig) (server.DatabaseServer, error) {
@@ -113,6 +125,7 @@ func init() {
 		"backend kind: "+strings.Join(proxy.KnownBackendNames(), " | "))
 	dbProxyChildCmd.Flags().StringVar(&dbProxyChildConfig, "config", "", "path to backend server config (e.g. dolt sql-server YAML)")
 	dbProxyChildCmd.Flags().StringVar(&dbProxyChildLogPath, "logpath", "", "path the backend server should write its stdout/stderr to")
+	dbProxyChildCmd.Flags().BoolVar(&dbProxyChildRotateLogPath, "rotate-logpath", false, "bound --logpath's size while running (set only for a log bd owns)")
 	dbProxyChildCmd.Flags().StringVar(&dbProxyChildDoltBin, "dolt-bin", "", "path to the dolt executable")
 	dbProxyChildCmd.Flags().StringVar(&dbProxyChildDatabase, "database", "", "database to select when running shutdown maintenance (local-server backend)")
 	dbProxyChildCmd.Flags().StringVar(&dbProxyChildExternalHost, "external-host", "", "external backend: hostname or IP of the dolt sql-server")

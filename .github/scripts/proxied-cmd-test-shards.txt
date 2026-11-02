@@ -111,6 +111,7 @@
 
 34 11 TestProxiedServerBatchParity
 34 11 TestProxiedServerCompactHistory
+34 11 TestProxiedServerCompactKeepsPendingWrite
 34 11 TestProxiedServerImageAutoBackupWritesNothing
 34 11 TestProxiedServerPour
 34 11 TestProxiedServerQuery

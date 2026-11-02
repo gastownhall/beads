@@ -79,10 +79,11 @@ type IssueSQLRepository interface {
 	// does.
 	GetMany(ctx context.Context, request publicops.GetManyRequest) (publicops.GetManyResult, error)
 	Exists(ctx context.Context, id string, opts IssueTableOpts) (bool, error)
-	// Taken reports whether id is unavailable to a fresh create in the
-	// plane opts names: a live row of that table holds it, or a retaining
-	// retention sweep retired it (either tombstone table). One statement.
-	Taken(ctx context.Context, id string, opts IssueTableOpts) (bool, error)
+	// Taken reports whether id is unavailable to a fresh create in either
+	// plane, whichever one it is minted for (issues and wisps share one id
+	// space): a live row of either table holds it, or a retaining retention
+	// sweep retired it (either tombstone table). One statement.
+	Taken(ctx context.Context, id string) (bool, error)
 	// Retired reports whether a retaining retention sweep retired id (either
 	// tombstone table), whatever the row tables hold.
 	Retired(ctx context.Context, id string) (bool, error)
@@ -262,6 +263,13 @@ type CreateIssueParams struct {
 	ForcePrefix             bool
 	CreateOnly              bool
 	Comments                []*types.Comment
+	// ClaimedIDs are the ids the caller's batch has spoken for: every explicit
+	// id its items name and every id it has created so far. A mint passes over
+	// them as it passes over a held id, in both modes. What it adds over the
+	// row probe is the explicit ids of LATER items, which no table holds yet;
+	// minting one would refuse that later item as occupied by its own batch.
+	// Only a mint reads it; nil claims nothing.
+	ClaimedIDs map[string]bool
 }
 
 type DependencySpec struct {
@@ -1047,7 +1055,7 @@ func (u *issueUseCaseImpl) create(ctx context.Context, params CreateIssueParams,
 		}
 		issue.ID = childID
 	case issue.ID == "":
-		minted, err := u.mintTopLevelID(ctx, issue, actor, useWisp)
+		minted, err := u.mintTopLevelID(ctx, issue, actor, useWisp, params.ClaimedIDs)
 		if err != nil {
 			return CreateIssueResult{}, fmt.Errorf("create: mint top-level ID: %w", err)
 		}
@@ -1717,8 +1725,9 @@ func (u *issueUseCaseImpl) resolveTopLevelPrefix(ctx context.Context, issue *typ
 // ExplicitID and no ParentID. Honors counter mode for non-wisps (config key
 // issue_id_mode=counter); otherwise uses adaptive hash-mode IDs that mirror
 // issueops.GenerateIssueIDInTable. Reads issue.CreatedAt (caller must have
-// stabilized it before this call so retries hash the same value).
-func (u *issueUseCaseImpl) mintTopLevelID(ctx context.Context, issue *types.Issue, actor string, useWisp bool) (string, error) {
+// stabilized it before this call so retries hash the same value). Both modes
+// pass over the ids claimed names (CreateIssueParams.ClaimedIDs).
+func (u *issueUseCaseImpl) mintTopLevelID(ctx context.Context, issue *types.Issue, actor string, useWisp bool, claimed map[string]bool) (string, error) {
 	prefix, err := u.resolveTopLevelPrefix(ctx, issue, useWisp)
 	if err != nil {
 		return "", err
@@ -1733,7 +1742,7 @@ func (u *issueUseCaseImpl) mintTopLevelID(ctx context.Context, issue *types.Issu
 			return "", fmt.Errorf("read issue_id_mode: %w", err)
 		}
 		if mode == "counter" {
-			return u.nextUnretiredCounterID(ctx, prefix)
+			return u.nextUnretiredCounterID(ctx, prefix, claimed)
 		}
 	}
 
@@ -1755,7 +1764,10 @@ func (u *issueUseCaseImpl) mintTopLevelID(ctx context.Context, issue *types.Issu
 	for length := baseLength; length <= cfg.MaxLength; length++ {
 		for nonce := 0; nonce < 10; nonce++ {
 			candidate := idgen.GenerateHashID(prefix, issue.Title, issue.Description, actor, issue.CreatedAt, length, nonce)
-			taken, err := u.issueRepo.Taken(ctx, candidate, tableOpts)
+			if claimed[candidate] {
+				continue
+			}
+			taken, err := u.issueRepo.Taken(ctx, candidate)
 			if err != nil {
 				return "", err
 			}
@@ -1772,24 +1784,27 @@ func (u *issueUseCaseImpl) mintTopLevelID(ctx context.Context, issue *types.Issu
 const maxRetiredCounterSkips = 1000
 
 // nextUnretiredCounterID is the counter-mode mint skipping values a retaining
-// sweep retired, so a fresh create is never handed an id it would be refused.
-// The counter only advances, so a skipped value is never offered again.
-func (u *issueUseCaseImpl) nextUnretiredCounterID(ctx context.Context, prefix string) (string, error) {
+// sweep retired or the caller's batch claimed, so a fresh create is never
+// handed an id it would be refused. The counter only advances, so a skipped
+// value is never offered again.
+func (u *issueUseCaseImpl) nextUnretiredCounterID(ctx context.Context, prefix string, claimed map[string]bool) (string, error) {
 	for skips := 0; ; skips++ {
 		n, err := u.issueRepo.NextCounterID(ctx, prefix)
 		if err != nil {
 			return "", err
 		}
 		candidate := fmt.Sprintf("%s-%d", prefix, n)
-		retired, err := u.issueRepo.Retired(ctx, candidate)
-		if err != nil {
-			return "", err
-		}
-		if !retired {
-			return candidate, nil
+		if !claimed[candidate] {
+			retired, err := u.issueRepo.Retired(ctx, candidate)
+			if err != nil {
+				return "", err
+			}
+			if !retired {
+				return candidate, nil
+			}
 		}
 		if skips >= maxRetiredCounterSkips {
-			return "", fmt.Errorf("issue counter for prefix %q walked past %d retired ids without finding a free one", prefix, maxRetiredCounterSkips)
+			return "", fmt.Errorf("issue counter for prefix %q walked past %d retired or claimed ids without finding a free one", prefix, maxRetiredCounterSkips)
 		}
 	}
 }

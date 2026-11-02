@@ -187,6 +187,9 @@ func DeleteIssuesBySourceRepoInTx(ctx context.Context, tx *sql.Tx, sourceRepo st
 		issueIDs = append(issueIDs, id)
 	}
 	_ = rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("delete issues by source repo: issue rows: %w", err)
+	}
 
 	if len(issueIDs) == 0 {
 		return 0, nil

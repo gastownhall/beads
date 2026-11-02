@@ -293,6 +293,149 @@ func (s *testSuite) TestParityReadyBlockedDescendants() {
 	s.ElementsMatch([]string{"bd-par-desc-x"}, dom, "new child of a blocked parent must not be ready")
 }
 
+// plantStaleBlocked sets is_blocked = 1 on issue rows directly, the state an
+// outside merge or a failed post-pull recompute can leave (GH#3268).
+func (s *testSuite) plantStaleBlocked(ids ...string) {
+	s.plantStaleBlockedIn("issues", ids...)
+}
+
+// plantStaleBlockedIn plants the flag on rows of table (issues or wisps).
+func (s *testSuite) plantStaleBlockedIn(table string, ids ...string) {
+	for _, id := range ids {
+		res, err := s.Runner().ExecContext(s.Ctx(), "UPDATE "+table+" SET is_blocked = 1 WHERE id = ?", id)
+		s.Require().NoError(err)
+		n, err := res.RowsAffected()
+		s.Require().NoError(err)
+		s.Require().EqualValues(1, n, "plant is_blocked on %s", id)
+	}
+}
+
+// readyOnBothStacks reads ready work through the direct stack, the domain
+// stack and both stacks' counts paths, requires them all to agree, and
+// returns the ids. The direct counts path resolves the stale-flagged rows
+// through its ready probe rather than per read, so it is read here too, with
+// the total it sizes in the same transaction and the separate count.
+func (s *testSuite) readyOnBothStacks(label string) []string {
+	classic := idsOf(s.classicReady(types.WorkFilter{}))
+	dom := idsOf(s.domainReady(types.WorkFilter{}).Items)
+	s.Equal(classic, dom, "%s: direct and domain ready must return the same sequence", label)
+	counts, err := s.issueRepo().GetReadyWorkWithCounts(s.Ctx(), types.WorkFilter{})
+	s.Require().NoError(err)
+	s.ElementsMatch(dom, iwcIDs(counts), "%s: domain ready counts must list the same rows", label)
+
+	tx := s.beginClassicTx()
+	defer func() { _ = tx.Rollback() }()
+	direct, err := issueops.GetReadyWorkWithCountsInTx(s.Ctx(), tx, types.WorkFilter{})
+	s.Require().NoError(err)
+	s.ElementsMatch(dom, idsOfCounts(direct), "%s: direct ready counts must list the same rows", label)
+	_, total, err := issueops.GetReadyWorkWithCountsAndTotalInTx(s.Ctx(), tx, types.WorkFilter{Limit: 1})
+	s.Require().NoError(err)
+	s.Equal(len(dom), total, "%s: the direct in-band total must size the same set", label)
+	n, err := issueops.CountReadyWorkInTx(s.Ctx(), tx, types.WorkFilter{})
+	s.Require().NoError(err)
+	s.Equal(len(dom), n, "%s: the direct ready count must size the same set", label)
+	return dom
+}
+
+// Case 4c (GH#3268): an open issue with no dependency rows but a stale
+// is_blocked = 1 must be ready on both stacks. No recompute leg can mark such
+// a row, so ready reads around the flag; at base both stacks hid it.
+func (s *testSuite) TestParityReadyStaleEdgelessFlag() {
+	base := s.parityBase()
+	for n, id := range []string{"bd-par-stale-a", "bd-par-stale-r"} {
+		minute := n
+		s.seedParityIssue(id, func(i *types.Issue) {
+			i.CreatedAt = base.Add(time.Duration(minute) * time.Minute)
+		}, false)
+	}
+	s.plantStaleBlocked("bd-par-stale-a")
+
+	ready := s.readyOnBothStacks("stale edgeless flag")
+	s.ElementsMatch([]string{"bd-par-stale-a", "bd-par-stale-r"}, ready,
+		"an edgeless issue with a stale is_blocked flag is ready work")
+}
+
+// Case 4d (GH#3268): edges that never block (related, discovered-from) do not
+// make a stale is_blocked flag believable: only ready-affecting rows can, so
+// the guard ignores the rest and the issue is ready on both stacks.
+func (s *testSuite) TestParityReadyStaleFlagNonReadyAffectingEdges() {
+	base := s.parityBase()
+	for n, id := range []string{"bd-par-nra-r", "bd-par-nra-b", "bd-par-nra-d"} {
+		minute := n
+		s.seedParityIssue(id, func(i *types.Issue) {
+			i.CreatedAt = base.Add(time.Duration(minute) * time.Minute)
+		}, false)
+	}
+	s.classicAddDep("bd-par-nra-b", "bd-par-nra-r", types.DepRelated)
+	s.classicAddDep("bd-par-nra-d", "bd-par-nra-r", types.DepDiscoveredFrom)
+	s.plantStaleBlocked("bd-par-nra-b", "bd-par-nra-d")
+
+	ready := s.readyOnBothStacks("stale flag over non-ready-affecting edges")
+	s.ElementsMatch([]string{"bd-par-nra-r", "bd-par-nra-b", "bd-par-nra-d"}, ready,
+		"related / discovered-from edges never block, so their stale flags must not hide the issues")
+}
+
+// Case 4e (GH#3268): the stale-flag guard must not surface really blocked
+// work. Every ready-affecting edge type, with the flag set by the recompute
+// itself, keeps its issue out of ready on both stacks: c blocks on open d,
+// e is a parent-child child of blocked c, f conditional-blocks on open d, and
+// g waits for spawner s whose child k is still open (default all-children
+// gate).
+func (s *testSuite) TestParityReadyRealBlockersStayHidden() {
+	base := s.parityBase()
+	ids := []string{"bd-par-real-c", "bd-par-real-d", "bd-par-real-e", "bd-par-real-f",
+		"bd-par-real-g", "bd-par-real-s", "bd-par-real-k"}
+	for n, id := range ids {
+		minute := n
+		s.seedParityIssue(id, func(i *types.Issue) {
+			i.CreatedAt = base.Add(time.Duration(minute) * time.Minute)
+		}, false)
+	}
+	s.classicAddDep("bd-par-real-c", "bd-par-real-d", types.DepBlocks)
+	s.classicAddDep("bd-par-real-e", "bd-par-real-c", types.DepParentChild)
+	s.classicAddDep("bd-par-real-f", "bd-par-real-d", types.DepConditionalBlocks)
+	s.classicAddDep("bd-par-real-k", "bd-par-real-s", types.DepParentChild)
+	s.classicAddDep("bd-par-real-g", "bd-par-real-s", types.DepWaitsFor)
+
+	hidden := []string{"bd-par-real-c", "bd-par-real-e", "bd-par-real-f", "bd-par-real-g"}
+	for _, id := range hidden {
+		var blocked bool
+		s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+			"SELECT is_blocked FROM issues WHERE id = ?", id).Scan(&blocked))
+		s.Require().True(blocked, "%s: the recompute must set is_blocked from its real edge", id)
+	}
+
+	ready := s.readyOnBothStacks("real ready-affecting blockers")
+	for _, id := range hidden {
+		s.NotContains(ready, id, "%s is really blocked and must stay out of ready work", id)
+	}
+	s.ElementsMatch([]string{"bd-par-real-d", "bd-par-real-s", "bd-par-real-k"}, ready)
+}
+
+// Case 4f (GH#3268): the wisps family reads around a stale flag too. A
+// wisps-table row with is_blocked = 1 and no wisp_dependencies row of its own
+// is ready on every path, the direct stack's wisp page filter included, while
+// a wisp the recompute flagged through a real edge stays hidden.
+func (s *testSuite) TestParityReadyStaleFlagOnWispRow() {
+	base := s.parityBase()
+	for n, id := range []string{"bd-par-wst-a", "bd-par-wst-b", "bd-par-wst-x"} {
+		minute := n
+		s.seedParityIssue(id, func(i *types.Issue) {
+			i.CreatedAt = base.Add(time.Duration(minute) * time.Minute)
+		}, true)
+	}
+	s.classicAddDep("bd-par-wst-b", "bd-par-wst-x", types.DepBlocks)
+	var blocked bool
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT is_blocked FROM wisps WHERE id = ?", "bd-par-wst-b").Scan(&blocked))
+	s.Require().True(blocked, "the recompute must set is_blocked on the wisp from its real edge")
+	s.plantStaleBlockedIn("wisps", "bd-par-wst-a")
+
+	ready := s.readyOnBothStacks("stale flag on a wisp row")
+	s.ElementsMatch([]string{"bd-par-wst-a", "bd-par-wst-x"}, ready,
+		"an edgeless wisp with a stale is_blocked flag is ready work; a really blocked one is not")
+}
+
 // Case 5: ready limit boundary — membership parity at the cut, and the domain
 // HasMore flag agrees with what the direct stack's unlimited read implies.
 func (s *testSuite) TestParityReadyLimitBoundary() {

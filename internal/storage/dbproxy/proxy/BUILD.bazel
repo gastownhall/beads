@@ -9,6 +9,7 @@ go_library(
         "endpoint_unix.go",
         "endpoint_windows.go",
         "force_stop.go",
+        "logsize.go",
         "process_executable_darwin.go",
         "process_executable_linux.go",
         "process_executable_windows.go",

@@ -38,6 +38,7 @@ var preMigrationRepairs = map[repairKey]func(context.Context, DBConn) error{
 	{"schema_migrations", 58}:         repairWispDependenciesForwardShape,
 	{"ignored_schema_migrations", 7}:  ensureWispIsBlockedForRecompute,
 	{"ignored_schema_migrations", 15}: ensureWispIsBlockedForRecompute,
+	{"ignored_schema_migrations", 31}: seedEventsFromPreflipHistory,
 }
 
 // preMigrationRepair dispatches any repair registered for (source, version).

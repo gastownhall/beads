@@ -229,6 +229,7 @@ go_test(
         "epoch_cas_publish_test.go",
         "errors_test.go",
         "event_commit_boundary_test.go",
+        "events_preflip_restore_test.go",
         "events_since_test.go",
         "events_test.go",
         "expected_revision_contract_test.go",

@@ -24,11 +24,17 @@ func buildReadyWorkOrder(policy types.SortPolicy) sqlbuild.ReadyWorkOrder {
 }
 
 // buildReadyWorkPredicates computes the ID sets the ready-work WHERE clause
-// needs (children of deferred parents, parent descendants), then delegates
-// the clause text to sqlbuild so both stacks share ready semantics. Unlike
-// the classic stack, ORDER BY and LIMIT are applied at the UNION outer query.
+// needs (children of deferred parents, parent descendants, the family's
+// stale-flagged rows), then delegates the clause text to sqlbuild so both
+// stacks share ready semantics. Unlike the classic stack, ORDER BY and LIMIT
+// are applied at the UNION outer query.
 func (r *issueSQLRepositoryImpl) buildReadyWorkPredicates(ctx context.Context, filter types.WorkFilter, tables filterTables) (*readyWorkPredicates, error) {
 	var inputs sqlbuild.ReadyWorkWhereInputs
+	staleIDs, err := r.staleBlockedIDs(ctx, tables)
+	if err != nil {
+		return nil, fmt.Errorf("get ready work: stale blocked flags in %s: %w", tables.Main, err)
+	}
+	inputs.StaleBlockedIDs = map[string][]string{tables.Main: staleIDs}
 	if !filter.IncludeDeferred {
 		deferredChildIDs, dcErr := r.getChildrenOfDeferredParents(ctx)
 		if dcErr != nil {
@@ -49,6 +55,26 @@ func (r *issueSQLRepositoryImpl) buildReadyWorkPredicates(ctx context.Context, f
 		return nil, err
 	}
 	return &readyWorkPredicates{whereSQL: whereSQL, args: args}, nil
+}
+
+// staleBlockedIDs reads sqlbuild.StaleBlockedIDsSQL for one table family:
+// the rows whose is_blocked flag no ready-affecting edge of their own
+// explains, which ready work reads around (GH#3268). A database without the
+// wisp dependency table has nothing to read around in wisps, so the flag
+// decides there as it always did.
+func (r *issueSQLRepositoryImpl) staleBlockedIDs(ctx context.Context, tables filterTables) ([]string, error) {
+	rows, err := r.runner.QueryContext(ctx, sqlbuild.StaleBlockedIDsSQL(tables))
+	if err != nil {
+		if tables.Main == wispsFilterTables.Main && missingOptionalWispTable(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var ids []string
+	if err := scanStringsInto(rows, &ids); err != nil {
+		return nil, err
+	}
+	return ids, nil
 }
 
 type deferredParentEdge struct {

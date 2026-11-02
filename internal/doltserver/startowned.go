@@ -125,6 +125,72 @@ func pinnedPortRemedy(cfg *Config, beadsDir string, port int) string {
 	}
 }
 
+// Ownership is what ClassifyListener can tell about the TCP listener on a
+// port: whether it belongs to a given process or one of its descendants.
+type Ownership int
+
+const (
+	// OwnershipUnknown: the platform or the sandbox cannot tell. There is no
+	// check on this platform, or /proc, lsof or ps cannot answer.
+	OwnershipUnknown Ownership = iota
+	// OwnershipUnlisted: the check ran but lists no listener on the port,
+	// although one answered there. The listener is out of this process's
+	// sight: another user's socket, which lsof cannot see without privilege;
+	// one reached through a forward, such as a Windows listener under WSL2's
+	// mirrored networking; or a /proc that lists no sockets at all (WSL1,
+	// some sandboxes). Only ListenerOwnershipProvable tells the first two
+	// from the last.
+	OwnershipUnlisted
+	// OwnershipForeign: the listener on the port is listed and belongs to
+	// another process, or the process asked about no longer exists.
+	OwnershipForeign
+	// OwnershipOwned: the listener belongs to the process or one of its
+	// descendants.
+	OwnershipOwned
+)
+
+// ClassifyListener reports who holds the TCP listener on port, relative to
+// pid (linux via /proc, darwin via lsof and ps). The proxied-server launcher
+// in dbproxy/server uses it, as awaitOwnedListener uses listenerOwnership,
+// for a config whose log level hides dolt's ready line.
+func ClassifyListener(pid, port int) Ownership {
+	return classifyListener(pid, port)
+}
+
+// listenerOwnership is classifyListener as awaitOwnedListener reads it:
+// owned when the listener is pid's, known when that is shown either way. An
+// unlisted listener counts as unknown, which leaves server mode on its
+// fallback evidence.
+func listenerOwnership(pid, port int) (owned, known bool) {
+	switch classifyListener(pid, port) {
+	case OwnershipOwned:
+		return true, true
+	case OwnershipForeign:
+		return false, true
+	}
+	return false, false
+}
+
+// ListenerOwnershipProvable reports whether ClassifyListener can prove on
+// this host that a listener belongs to the process holding it: it listens on
+// a loopback port and asks about this process. It is false where the
+// platform has no ownership check (Windows and others) and where /proc or
+// lsof cannot see the listener (WSL1, some sandboxes). There a config whose
+// log level hides dolt's ready line leaves no proof that the listener on its
+// port is the dolt Beads started, so cmd/bd generates its proxied-server
+// config at such a level only where this is true. Where it is true, the
+// host lists this user's listeners in this network namespace, so a listener
+// it lists no holder for (OwnershipUnlisted) is not held by a child this
+// process launched.
+func ListenerOwnershipProvable() bool {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return false
+	}
+	defer func() { _ = ln.Close() }()
+	return classifyListener(os.Getpid(), ln.Addr().(*net.TCPAddr).Port) == OwnershipOwned
+}
+
 // startupProbe describes how awaitOwnedListener decides that the child it
 // launched is the dolt sql-server answering on host:port.
 type startupProbe struct {
