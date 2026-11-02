@@ -344,6 +344,87 @@ func TestCheckRemoteSafety_GuardMatrix(t *testing.T) {
 	}
 }
 
+// TestCheckRemoteSafety_UnverifiedRemoteMatrix pins GH#7665: a failed
+// refs/dolt/data probe is UNKNOWN, which fails closed exactly like a remote
+// known to have Dolt history. Every remote-has-data row of the guard matrix
+// is replayed with the remote unverified — both with RemoteHasDoltData still
+// set (what the fail-closed probe resolver passes today) and with ONLY the
+// unverified field set, so the uncertainty alone can never open the guard.
+// Action and ExitCode must match the verified row. Only the override-without-
+// discard refusal changes: it gets its own Reason and message, because the
+// verified text asserts history nobody could read.
+func TestCheckRemoteSafety_UnverifiedRemoteMatrix(t *testing.T) {
+	rows := []struct {
+		name string
+		in   RemoteSafetyInput
+	}{
+		{"no-flags", RemoteSafetyInput{}},
+		{"force", RemoteSafetyInput{Force: true}},
+		{"reinit-local", RemoteSafetyInput{ReinitLocal: true}},
+		{"force+reinit-local", RemoteSafetyInput{Force: true, ReinitLocal: true}},
+		{"from-jsonl", RemoteSafetyInput{FromJSONL: true}},
+		{"force+discard/non-interactive/no-token", RemoteSafetyInput{Force: true, DiscardRemote: true, ExpectedToken: "DESTROY-bd"}},
+		{"discard-only/non-interactive/no-token", RemoteSafetyInput{DiscardRemote: true, ExpectedToken: "DESTROY-bd"}},
+		{"from-jsonl+discard/non-interactive/no-token", RemoteSafetyInput{FromJSONL: true, DiscardRemote: true, ExpectedToken: "DESTROY-bd"}},
+		{"force+discard/non-interactive/wrong-token", RemoteSafetyInput{Force: true, DiscardRemote: true, DestroyToken: "DESTROY-wrong", ExpectedToken: "DESTROY-bd"}},
+		{"force+discard/non-interactive/matching-token", RemoteSafetyInput{Force: true, DiscardRemote: true, DestroyToken: "DESTROY-bd", ExpectedToken: "DESTROY-bd"}},
+		{"force+discard/interactive", RemoteSafetyInput{Force: true, DiscardRemote: true, IsInteractive: true}},
+		{"discard-only/interactive", RemoteSafetyInput{DiscardRemote: true, IsInteractive: true}},
+		{"discard-only/interactive/wrong-token", RemoteSafetyInput{DiscardRemote: true, IsInteractive: true, DestroyToken: "WRONG", ExpectedToken: "DESTROY-bd"}},
+		{"discard-only/interactive/matching-token", RemoteSafetyInput{DiscardRemote: true, IsInteractive: true, DestroyToken: "DESTROY-bd", ExpectedToken: "DESTROY-bd"}},
+		{"discard-only/interactive/no-token-with-expected", RemoteSafetyInput{DiscardRemote: true, IsInteractive: true, ExpectedToken: "DESTROY-bd"}},
+	}
+
+	for _, row := range rows {
+		known := row.in
+		known.RemoteHasDoltData = true
+		want := CheckRemoteSafety(known)
+
+		for _, variant := range []struct {
+			name    string
+			hasData bool
+		}{
+			{"unverified+has-data", true},
+			{"unverified-only", false},
+		} {
+			t.Run(row.name+"/"+variant.name, func(t *testing.T) {
+				in := row.in
+				in.RemoteHasDoltData = variant.hasData
+				in.RemoteDoltDataUnverified = true
+				got := CheckRemoteSafety(in)
+
+				if got.Action != want.Action {
+					t.Errorf("Action = %v (reason=%q), want %v as for the verified row (reason=%q)", got.Action, got.Reason, want.Action, want.Reason)
+				}
+				if got.ExitCode != want.ExitCode {
+					t.Errorf("ExitCode = %d, want %d as for the verified row", got.ExitCode, want.ExitCode)
+				}
+				if got.Action == ActionRefuseDivergence {
+					if got.Reason != "unverified-remote-without-discard-remote" {
+						t.Errorf("Reason = %q, want %q", got.Reason, "unverified-remote-without-discard-remote")
+					}
+					if got.UserMessage != refusalMessageUnverifiedRemote() {
+						t.Errorf("UserMessage =\n%s\n\nwant the unverified-remote refusal:\n%s", got.UserMessage, refusalMessageUnverifiedRemote())
+					}
+					return
+				}
+				if got.Reason != want.Reason || got.UserMessage != want.UserMessage {
+					t.Errorf("Reason/UserMessage = %q/%q, want the verified row's %q/%q", got.Reason, got.UserMessage, want.Reason, want.UserMessage)
+				}
+			})
+		}
+	}
+
+	// The verified refusal keeps its own Reason and text.
+	verified := CheckRemoteSafety(RemoteSafetyInput{RemoteHasDoltData: true, ReinitLocal: true})
+	if verified.Reason != "force-without-discard-remote" || verified.UserMessage != refusalMessageDivergence() {
+		t.Errorf("verified refusal changed: reason=%q message=\n%s", verified.Reason, verified.UserMessage)
+	}
+	if refusalMessageUnverifiedRemote() == refusalMessageDivergence() {
+		t.Error("the unverified and verified refusals are identical, so the uncertainty is not carried")
+	}
+}
+
 // TestCheckRemoteSafety_TokenRefusalDistinguishesPresence pins which refusal
 // text each exit-12 path gets. The distinction is load-bearing, not cosmetic:
 // the missing-token message tells the user to "re-run interactively ... and
