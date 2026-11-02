@@ -293,7 +293,8 @@ func TestLifecycle_CrashRecovery(t *testing.T) {
 // default managed shared-server configuration, a successful SQL COMMIT
 // persists across a SIGKILL without any Dolt history commit: the committed
 // rows (tracked and dolt_ignore'd) survive, an open transaction's row does
-// not (GH#4443).
+// not, and HEAD, the log and @@dolt_transaction_commit are untouched, so the
+// tracked writes are still pending in dolt_status (GH#4443).
 func TestLifecycle_SharedServerSQLCommitSurvivesKill(t *testing.T) {
 	beadsDir := setupLifecycleTestDir(t)
 	sharedDir := filepath.Join(t.TempDir(), "shared-server")
@@ -324,6 +325,14 @@ func TestLifecycle_SharedServerSQLCommitSurvivesKill(t *testing.T) {
 			t.Fatalf("sql.Open: %v", err)
 		}
 		return db
+	}
+	queryInt := func(db *sql.DB, query string) int {
+		t.Helper()
+		var n int
+		if err := db.QueryRow(query).Scan(&n); err != nil {
+			t.Fatalf("%s: %v", query, err)
+		}
+		return n
 	}
 	queryString := func(db *sql.DB, query string) string {
 		t.Helper()
@@ -386,6 +395,11 @@ func TestLifecycle_SharedServerSQLCommitSurvivesKill(t *testing.T) {
 
 	db := open(sqlPort)
 	t.Logf("dolt version: %s", queryString(db, "SELECT dolt_version()"))
+	if v := queryInt(db, "SELECT @@dolt_transaction_commit"); v != 0 {
+		t.Fatalf("@@dolt_transaction_commit = %d, want 0 on the default managed config", v)
+	}
+	initialHead := queryString(db, "SELECT DOLT_HASHOF('HEAD')")
+	initialLog := queryInt(db, "SELECT COUNT(*) FROM dolt_log")
 
 	// Autocommitted DDL and DML on a tracked table; no DOLT_COMMIT anywhere.
 	mustExec(db, "INSERT INTO dolt_ignore VALUES ('wisp_%', true)")
@@ -417,6 +431,12 @@ func TestLifecycle_SharedServerSQLCommitSurvivesKill(t *testing.T) {
 
 	observer := open(sqlPort)
 	assertCommittedRows(observer, "before kill")
+	if head := queryString(observer, "SELECT DOLT_HASHOF('HEAD')"); head != initialHead {
+		t.Fatalf("before kill: HEAD = %s, want unchanged %s", head, initialHead)
+	}
+	if n := queryInt(observer, "SELECT COUNT(*) FROM dolt_log"); n != initialLog {
+		t.Fatalf("before kill: dolt_log count = %d, want unchanged %d", n, initialLog)
+	}
 	_ = observer.Close()
 
 	// SIGKILL only the registered server: no Stop, Restart or FlushWorkingSet.
@@ -453,6 +473,18 @@ func TestLifecycle_SharedServerSQLCommitSurvivesKill(t *testing.T) {
 
 	db = open(second.Port)
 	assertCommittedRows(db, "after kill")
+	if v := queryInt(db, "SELECT @@dolt_transaction_commit"); v != 0 {
+		t.Fatalf("after kill: @@dolt_transaction_commit = %d, want 0", v)
+	}
+	if head := queryString(db, "SELECT DOLT_HASHOF('HEAD')"); head != initialHead {
+		t.Fatalf("after kill: HEAD = %s, want unchanged %s", head, initialHead)
+	}
+	if n := queryInt(db, "SELECT COUNT(*) FROM dolt_log"); n != initialLog {
+		t.Fatalf("after kill: dolt_log count = %d, want unchanged %d", n, initialLog)
+	}
+	if n := queryInt(db, "SELECT COUNT(*) FROM dolt_status WHERE table_name = 'tracked_rows'"); n == 0 {
+		t.Fatal("after kill: tracked_rows not pending in dolt_status; want it uncommitted to history")
+	}
 	_ = db.Close()
 
 	if err := doltserver.Stop(serverDir); err != nil {
