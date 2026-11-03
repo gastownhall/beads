@@ -1297,6 +1297,47 @@ func TestVerifyProjectIdentity_ReadErrors(t *testing.T) {
 		{"another missing table", &mysql.MySQLError{Number: 1146, Message: "table not found: issues"}},
 		{"unidentifiable missing table", &mysql.MySQLError{Number: 1146, Message: "table not found"}},
 	}
+	// Usable reads and missing local identities keep their outcomes; the
+	// local skips never touch the database.
+	const localID = "11111111-1111-1111-1111-111111111111"
+	empty, same, other := "", localID, "22222222-2222-2222-2222-222222222222"
+	outcomes := []struct {
+		name         string
+		localID      string
+		hasLocal     bool
+		read         bool
+		value        *string
+		wantMismatch bool
+	}{
+		{name: "no local metadata", hasLocal: false},
+		{name: "empty local id", localID: "", hasLocal: true},
+		{name: "absent database key", localID: localID, hasLocal: true, read: true},
+		{name: "empty database id", localID: localID, hasLocal: true, read: true, value: &empty},
+		{name: "matching ids", localID: localID, hasLocal: true, read: true, value: &same},
+		{name: "mismatched ids", localID: localID, hasLocal: true, read: true, value: &other, wantMismatch: true},
+	}
+	for _, tc := range outcomes {
+		t.Run("outcome/"+tc.name, func(t *testing.T) {
+			store, mock, beadsDir := identityMockStore(t, tc.localID, tc.hasLocal)
+			if tc.read {
+				expectProjectIDRead(mock, tc.value, nil)
+			}
+
+			err := store.verifyProjectIdentity(context.Background(), beadsDir, false)
+			if tc.wantMismatch {
+				if err == nil || !strings.Contains(err.Error(), "PROJECT IDENTITY MISMATCH") ||
+					!strings.Contains(err.Error(), localID) || !strings.Contains(err.Error(), other) {
+					t.Fatalf("verifyProjectIdentity = %v, want the PROJECT IDENTITY MISMATCH refusal naming both ids", err)
+				}
+			} else if err != nil {
+				t.Fatalf("verifyProjectIdentity = %v, want nil", err)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+
 	// A missing metadata table is an existing database with no bd schema yet:
 	// the compatibility skip, recognized only when the error names metadata.
 	missingMetadata := []struct {
