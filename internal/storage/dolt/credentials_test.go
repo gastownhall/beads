@@ -18,6 +18,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
+	"github.com/steveyegge/beads/internal/storage/peercred"
 	"github.com/steveyegge/beads/internal/testutil"
 )
 
@@ -564,12 +565,13 @@ func TestEncryptDecryptRoundTrip(t *testing.T) {
 
 	password := "my-federation-password-123!"
 
-	encrypted, err := store.encryptPassword(password)
+	b := peercred.Binding{Name: "team", URL: "https://peer.example/db", Username: "peeruser"}
+	encrypted, err := store.encryptPassword(b, password)
 	if err != nil {
 		t.Fatalf("encryptPassword failed: %v", err)
 	}
 
-	decrypted, err := store.decryptPassword(encrypted)
+	decrypted, err := store.decryptPassword(b, encrypted)
 	if err != nil {
 		t.Fatalf("decryptPassword failed: %v", err)
 	}
@@ -582,7 +584,7 @@ func TestEncryptDecryptRoundTrip(t *testing.T) {
 func TestEncryptPasswordEmpty(t *testing.T) {
 	store := &DoltStore{}
 
-	encrypted, err := store.encryptPassword("")
+	encrypted, err := store.encryptPassword(peercred.Binding{}, "")
 	if err != nil {
 		t.Fatalf("encryptPassword with empty string failed: %v", err)
 	}
@@ -594,7 +596,7 @@ func TestEncryptPasswordEmpty(t *testing.T) {
 func TestDecryptPasswordEmpty(t *testing.T) {
 	store := &DoltStore{}
 
-	decrypted, err := store.decryptPassword(nil)
+	decrypted, err := store.decryptPassword(peercred.Binding{}, nil)
 	if err != nil {
 		t.Fatalf("decryptPassword with nil failed: %v", err)
 	}
@@ -606,7 +608,7 @@ func TestDecryptPasswordEmpty(t *testing.T) {
 func TestEncryptPasswordNoKey(t *testing.T) {
 	store := &DoltStore{}
 
-	_, err := store.encryptPassword("password")
+	_, err := store.encryptPassword(peercred.Binding{}, "password")
 	if err == nil {
 		t.Fatal("expected error when key is not initialized")
 	}
@@ -898,9 +900,11 @@ func TestFederationPeerDecryptKeyMismatchNamesTheLocalKey(t *testing.T) {
 		localKey[i] = byte(i + 1)
 	}
 
-	encrypted, err := encryptWithKey("peerpass", writerKey)
+	encrypted, err := peercred.Seal(writerKey, peercred.Binding{
+		Name: "team", URL: "https://peer.example/peerdb", Username: "peeruser",
+	}, "peerpass")
 	if err != nil {
-		t.Fatalf("encryptWithKey() error = %v", err)
+		t.Fatalf("peercred.Seal() error = %v", err)
 	}
 
 	// beadsDir is set only so the enrichment can resolve the key path it names;

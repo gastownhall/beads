@@ -4,8 +4,6 @@ package embeddeddolt
 
 import (
 	"context"
-	"crypto/aes"
-	"crypto/cipher"
 	"crypto/rand"
 	"database/sql"
 	"errors"
@@ -21,6 +19,7 @@ import (
 	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/steveyegge/beads/internal/storage/peercred"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 )
 
@@ -58,64 +57,42 @@ func (s *EmbeddedDoltStore) ensureCredentialKey() error {
 	return nil
 }
 
-func (s *EmbeddedDoltStore) encryptPassword(password string) ([]byte, error) {
+// peerBinding is the identity a peer's stored password is sealed to: the
+// row's stored name, exact URL and username.
+func peerBinding(p *storage.FederationPeer) peercred.Binding {
+	return peercred.Binding{Name: p.Name, URL: p.RemoteURL, Username: p.Username}
+}
+
+func (s *EmbeddedDoltStore) encryptPassword(b peercred.Binding, password string) ([]byte, error) {
 	if password == "" {
 		return nil, nil
 	}
 	if err := s.ensureCredentialKey(); err != nil {
 		return nil, err
 	}
-	block, err := aes.NewCipher(s.credentialKey)
-	if err != nil {
-		return nil, err
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, err
-	}
-	nonce := make([]byte, gcm.NonceSize())
-	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
-		return nil, err
-	}
-	return gcm.Seal(nonce, nonce, []byte(password), nil), nil
+	return peercred.Seal(s.credentialKey, b, password)
 }
 
-func (s *EmbeddedDoltStore) decryptPassword(encrypted []byte) (string, error) {
+func (s *EmbeddedDoltStore) decryptPassword(b peercred.Binding, encrypted []byte) (string, error) {
 	if len(encrypted) == 0 {
 		return "", nil
 	}
 	if err := s.ensureCredentialKey(); err != nil {
 		return "", err
 	}
-	block, err := aes.NewCipher(s.credentialKey)
-	if err != nil {
-		return "", err
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return "", err
-	}
-	nonceSize := gcm.NonceSize()
-	if len(encrypted) < nonceSize {
-		// A blob too short to carry its nonce is the same local-corruption
-		// class as the failed GCM open below: the stored credential cannot be
-		// decrypted on this machine, and re-adding the peer is the fix.
-		// Classify it through the same sentinel so federation status reports
-		// the credential problem rather than an unreachable peer.
-		return "", storage.CredentialKeyMismatchError(filepath.Join(s.beadsDir, credentialKeyFile), fmt.Errorf("ciphertext too short"))
-	}
-	nonce, ciphertext := encrypted[:nonceSize], encrypted[nonceSize:]
-	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
-	if err != nil {
+	plaintext, err := peercred.Open(s.credentialKey, b, encrypted)
+	if errors.Is(err, peercred.ErrNotAuthenticated) || errors.Is(err, peercred.ErrLegacyFormat) {
 		// The common shape: the peer row replicated with the database but the key
 		// file did not, so machine B pulls the row, ensureCredentialKey generates
-		// a fresh key, and every decrypt fails authentication. Enrich at the
+		// a fresh key, and every decrypt fails authentication. A blob copied from
+		// another peer row, a corrupt blob and an unmigrated legacy blob fail the
+		// same way, and re-adding the peer is the fix for each. Enrich at the
 		// single decrypt funnel so every reader reports it: peer resolution for
 		// the remote verbs, GetFederationPeer, ListFederationPeers. The wording
 		// is shared with package dolt, which enriches its own two read paths.
 		return "", storage.CredentialKeyMismatchError(filepath.Join(s.beadsDir, credentialKeyFile), err)
 	}
-	return string(plaintext), nil
+	return plaintext, err
 }
 
 // ---------------------------------------------------------------------------
@@ -123,7 +100,7 @@ func (s *EmbeddedDoltStore) decryptPassword(encrypted []byte) (string, error) {
 // ---------------------------------------------------------------------------
 
 func (s *EmbeddedDoltStore) AddFederationPeer(ctx context.Context, peer *storage.FederationPeer) error {
-	encryptedPwd, err := s.encryptPassword(peer.Password)
+	encryptedPwd, err := s.encryptPassword(peerBinding(peer), peer.Password)
 	if err != nil {
 		return fmt.Errorf("encrypt password: %w", err)
 	}
@@ -152,7 +129,7 @@ func (s *EmbeddedDoltStore) GetFederationPeer(ctx context.Context, name string) 
 	}
 
 	if len(row.EncryptedPwd) > 0 {
-		row.Peer.Password, err = s.decryptPassword(row.EncryptedPwd)
+		row.Peer.Password, err = s.decryptPassword(peerBinding(&row.Peer), row.EncryptedPwd)
 		if err != nil {
 			return nil, fmt.Errorf("decrypt password for peer %s: %w", name, err)
 		}
@@ -319,7 +296,7 @@ func (s *EmbeddedDoltStore) ListFederationPeers(ctx context.Context) ([]*storage
 	peers := make([]*storage.FederationPeer, 0, len(rows))
 	for _, row := range rows {
 		if len(row.EncryptedPwd) > 0 {
-			pwd, err := s.decryptPassword(row.EncryptedPwd)
+			pwd, err := s.decryptPassword(peerBinding(&row.Peer), row.EncryptedPwd)
 			if err != nil {
 				return nil, fmt.Errorf("decrypt password for peer %s: %w", row.Peer.Name, err)
 			}
