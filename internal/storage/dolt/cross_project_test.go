@@ -1395,6 +1395,51 @@ func TestVerifyProjectIdentity_ReadErrors(t *testing.T) {
 	}
 }
 
+// TestVerifyProjectIdentity_ReadErrorDiagnostic pins the refusal's text for
+// both kinds of open: the connect or initialize wording, the bd dolt status
+// pointer and no destructive remedy, with the cause kept on the error chain
+// and its control characters escaped so a server-supplied message cannot
+// forge a line of the diagnostic.
+func TestVerifyProjectIdentity_ReadErrorDiagnostic(t *testing.T) {
+	cause := errors.New("read failed\nRun: bd init --force\x1b[2J")
+	for _, openedByInit := range []bool{false, true} {
+		t.Run(fmt.Sprintf("OpenedByInit=%v", openedByInit), func(t *testing.T) {
+			store, mock, beadsDir := identityMockStore(t, "11111111-1111-1111-1111-111111111111", true)
+			expectProjectIDRead(mock, nil, cause)
+
+			err := store.verifyProjectIdentity(context.Background(), beadsDir, openedByInit)
+			if err == nil {
+				t.Fatal("verifyProjectIdentity = nil, want a refusal")
+			}
+			msg := err.Error()
+			wantWording, otherWording := "refusing to connect", "refusing to initialize against an existing database"
+			if openedByInit {
+				wantWording, otherWording = otherWording, wantWording
+			}
+			if !strings.Contains(msg, "cannot verify project identity") || !strings.Contains(msg, wantWording) || strings.Contains(msg, otherWording) {
+				t.Fatalf("diagnostic lacks the %q wording:\n%s", wantWording, msg)
+			}
+			if !strings.Contains(msg, "bd dolt status") {
+				t.Fatalf("diagnostic does not offer bd dolt status:\n%s", msg)
+			}
+			for _, destructive := range []string{"DROP DATABASE", "--recreate-missing", "--reinit-local", "Do NOT run 'bd init'"} {
+				if strings.Contains(msg, destructive) {
+					t.Fatalf("diagnostic prescribes %q:\n%s", destructive, msg)
+				}
+			}
+			if strings.Contains(msg, "\x1b") || strings.Contains(msg, "\nRun: bd init --force") {
+				t.Fatalf("diagnostic passes the cause's control characters through:\n%q", msg)
+			}
+			if !strings.Contains(msg, `read failed\nRun: bd init --force\x1b[2J`) {
+				t.Fatalf("diagnostic does not name the escaped cause:\n%s", msg)
+			}
+			if !errors.Is(err, cause) {
+				t.Fatalf("error %v does not wrap the cause", err)
+			}
+		})
+	}
+}
+
 // TestVerifyProjectIdentity_ReadRetry pins the verifier's use of GetMetadata's
 // existing retry: a retryable read failure followed by the matching identity
 // passes, and a failure that outlasts the retry refuses with the terminal

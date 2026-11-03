@@ -905,6 +905,15 @@ Two projects with the same prefix share the same database — if this happens ac
 the project identity check will detect the mismatch and refuse to connect, preventing
 silent data corruption. Always use distinct prefixes when running `bd init --shared-server`.
 
+In releases after v1.3.2, the identity check also refuses to connect, with
+`cannot verify project identity`, when it cannot read the database's recorded
+project ID: an unreadable ID is no proof that the database belongs to this
+project. bd still connects without the check when the database records no
+project ID, or has no bd tables yet (a database created for bd ahead of
+`bd init`). The refusal names the read error; run `bd dolt status`, check that
+bd points at the intended server and database and that its credentials can
+read it, then retry.
+
 ```bash
 # Check shared server status from any project
 bd dolt status
