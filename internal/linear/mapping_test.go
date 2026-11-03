@@ -784,6 +784,7 @@ func TestResolveStateIDForBeadsStatusPrefersExplicitStateName(t *testing.T) {
 // Regression GH#3288: with the type map from `bd linear --help`, a state
 // named after its own type must not win the push by name. Otherwise every
 // closed issue lands in "Canceled" while "Done" is also mapped to closed.
+// The cache is a stock Linear team, Duplicate (type canceled) included.
 func TestResolveTypeKeyNameCollision(t *testing.T) {
 	cache := &StateCache{
 		States: []State{
@@ -791,6 +792,7 @@ func TestResolveTypeKeyNameCollision(t *testing.T) {
 			{ID: "state-todo", Name: "Todo", Type: "unstarted"},
 			{ID: "state-done", Name: "Done", Type: "completed"},
 			{ID: "state-canceled", Name: "Canceled", Type: "canceled"},
+			{ID: "state-duplicate", Name: "Duplicate", Type: "canceled"},
 		},
 	}
 	config := DefaultMappingConfig()
@@ -799,29 +801,46 @@ func TestResolveTypeKeyNameCollision(t *testing.T) {
 	} {
 		config.ExplicitStateMap[k] = v
 	}
-
-	for _, tc := range []struct {
-		status types.Status
-		want   string
-	}{
-		{types.StatusOpen, "Backlog, Todo"},
-		{types.StatusClosed, "Done, Canceled"},
-	} {
-		got, err := ResolveStateIDForBeadsStatus(cache, tc.status, config)
-		if err == nil || !strings.Contains(err.Error(), "type fallback is ambiguous") || !strings.Contains(err.Error(), tc.want) {
-			t.Errorf("%s: got (%q, %v), want type fallback ambiguous across %s", tc.status, got, err, tc.want)
+	wantAmbiguous := func(label string, status types.Status, want string) {
+		t.Helper()
+		got, err := ResolveStateIDForBeadsStatus(cache, status, config)
+		if err == nil || !strings.Contains(err.Error(), "type fallback is ambiguous") || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: got (%q, %v), want type fallback ambiguous across %s", label, got, err, want)
 		}
 	}
 
+	wantAmbiguous("open", types.StatusOpen, "Backlog, Todo")
+	wantAmbiguous("closed", types.StatusClosed, "Done, Canceled, Duplicate")
+
 	// A single state of the mapped type still resolves by type.
-	delete(config.ExplicitStateMap, "completed")
-	if got, err := ResolveStateIDForBeadsStatus(cache, types.StatusClosed, config); err != nil || got != "state-canceled" {
-		t.Fatalf("canceled only: got (%q, %v), want state-canceled", got, err)
+	delete(config.ExplicitStateMap, "unstarted")
+	if got, err := ResolveStateIDForBeadsStatus(cache, types.StatusOpen, config); err != nil || got != "state-backlog" {
+		t.Errorf("backlog only: got (%q, %v), want state-backlog", got, err)
 	}
-	// A name key that is not a type still wins over the type pass.
+	// canceled = closed alone no longer means the state named "Canceled"
+	// while Duplicate shares its type: it needs linear.outbound_state_map.closed.
+	delete(config.ExplicitStateMap, "completed")
+	wantAmbiguous("canceled only", types.StatusClosed, "Canceled, Duplicate")
+	// A name key that is not a type still wins over the type pass:
+	// done = closed next to canceled = closed resolves to Done.
 	config.ExplicitStateMap["done"] = "closed"
 	if got, err := ResolveStateIDForBeadsStatus(cache, types.StatusClosed, config); err != nil || got != "state-done" {
-		t.Fatalf("done name key: got (%q, %v), want state-done", got, err)
+		t.Errorf("done name key: got (%q, %v), want state-done", got, err)
+	}
+
+	// The filter compares trimmed names: a padded " Canceled " is still
+	// named after its type and is left to the type pass.
+	padded := &StateCache{
+		States: []State{
+			{ID: "state-done", Name: "Done", Type: "completed"},
+			{ID: "state-canceled", Name: " Canceled ", Type: "canceled"},
+		},
+	}
+	padConfig := DefaultMappingConfig()
+	padConfig.ExplicitStateMap["completed"] = "closed"
+	padConfig.ExplicitStateMap["canceled"] = "closed"
+	if got, err := ResolveStateIDForBeadsStatus(padded, types.StatusClosed, padConfig); err == nil || !strings.Contains(err.Error(), "type fallback is ambiguous") {
+		t.Errorf("padded name: got (%q, %v), want type fallback ambiguous", got, err)
 	}
 }
 

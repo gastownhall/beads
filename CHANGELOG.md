@@ -1171,7 +1171,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   state named "Canceled" matched by name and won, so every closed issue went
   to "Canceled" while "Done" was also mapped. Such a state now resolves
   through the type map, so the push stops with the ambiguity error that
-  names `linear.outbound_state_map.<status>` (#3288).
+  names `linear.outbound_state_map.<status>` (#3288). `bd linear --help` now
+  shows the two `linear.outbound_state_map` lines (`open` and `closed`) that
+  its example needs on a stock team. A config that sets only
+  `canceled = closed`, on a team that also has another canceled-type state
+  such as "Duplicate", now gets that error as well and needs
+  `linear.outbound_state_map.closed`. With `done = closed` next to
+  `canceled = closed`, closed now resolves to Done, where it used to stop with
+  "maps beads status closed to multiple Linear states".
 - `bd create --file` and other batch creates no longer fail with "issue
   already exists" on an id bd generated itself. The batch chose every id
   before it wrote any row, so two of its items could be handed the same short
