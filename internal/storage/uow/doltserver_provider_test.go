@@ -455,3 +455,65 @@ func TestNewDoltServerUOWProvider_RediscoversProxyAfterIdleExit(t *testing.T) {
 	// exits again once the pool is idle.
 	waitProxyExit(t, storeRootDir, fresh, 30*time.Second)
 }
+
+// TestNewDoltServerUOWProvider_AdoptsReplacementProxy: when the provider's
+// proxy has gone away and another opener has already started the workspace's
+// proxy again on a different port, the provider adopts that proxy — it reads
+// through it — and does not replace it: the replacement's PID is unchanged.
+func TestNewDoltServerUOWProvider_AdoptsReplacementProxy(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	const database = "managed_adopt"
+	p, storeRootDir := openManagedProvider(ctx, t, database, time.Minute)
+	seedProbe(ctx, t, p)
+	original := p.resolver.Endpoint()
+
+	// The proxy goes away (bd dolt stop, a crash), and the pool's open
+	// connections with it.
+	require.NoError(t, proxy.Shutdown(storeRootDir))
+
+	// Another opener starts the replacement, on a port the provider has
+	// never seen.
+	bin, err := exec.LookPath("dolt")
+	require.NoError(t, err)
+	backendPort, err := proxy.PickFreePort()
+	require.NoError(t, err)
+	replacementPort, err := proxy.PickFreePort()
+	require.NoError(t, err)
+	if replacementPort == original.Port {
+		replacementPort, err = proxy.PickFreePort()
+		require.NoError(t, err)
+	}
+	other, err := NewDoltServerUOWProvider(ctx, storeRootDir, database,
+		filepath.Join(storeRootDir, "server.log"), writeServerConfig(t, backendPort),
+		proxy.BackendLocalServer, "root", "", bin, replacementPort, time.Minute, false, "")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = other.Close(context.Background()) })
+	replacement, err := pidfile.Read(storeRootDir, proxy.PIDFileName)
+	require.NoError(t, err)
+	require.NotNil(t, replacement)
+	require.Equal(t, replacementPort, replacement.Port)
+	require.NotEqual(t, original.Port, replacement.Port)
+
+	// The provider's next reads go through the replacement. A read can lose
+	// a connection the shutdown broke; it must succeed within a few tries.
+	var readErr error
+	for range 5 {
+		request, done := context.WithTimeout(ctx, 20*time.Second)
+		readErr = readProbe(request, p, database)
+		done()
+		if readErr == nil {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	require.NoError(t, readErr, "read through the adopted replacement")
+	assert.Equal(t, replacementPort, p.resolver.Endpoint().Port)
+
+	after, err := pidfile.Read(storeRootDir, proxy.PIDFileName)
+	require.NoError(t, err)
+	require.NotNil(t, after)
+	assert.Equal(t, replacement.Pid, after.Pid, "the provider must adopt the replacement, not restart it")
+	assert.Equal(t, replacement.Birth, after.Birth)
+	assert.Equal(t, replacementPort, after.Port)
+}
