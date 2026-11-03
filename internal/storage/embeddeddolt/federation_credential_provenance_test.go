@@ -184,3 +184,55 @@ func TestFederationLegacyCredentialMoveIsNotRebound(t *testing.T) {
 		})
 	}
 }
+
+// A legacy blob held by two current rows, the replicated-row copy, is never
+// rebound: whichever row holds it, its owner is unknown. Both rows stay
+// unchanged and unusable, no remote operation runs with either, and an
+// honest peer's own credential still migrates (ported from the GLM
+// candidate; the no-callback assertion follows the contributor's PR #7891).
+func TestFederationLegacyCredentialDuplicatedInCurrentTableIsNotRebound(t *testing.T) {
+	ctx := context.Background()
+	_, store := legacyPeerStore(t,
+		&storage.FederationPeer{Name: "victim", RemoteURL: "https://victim.example/db", Username: "victim-user", Password: "victim-secret"},
+		&storage.FederationPeer{Name: "attacker", RemoteURL: "https://attacker.example/db", Password: "attacker-secret"},
+		&storage.FederationPeer{Name: "team", RemoteURL: "https://team.example/db", Username: "team-user", Password: "team-secret"},
+	)
+	execPinned(t, store,
+		`UPDATE federation_peers AS a JOIN federation_peers AS v ON v.name = 'victim'
+		 SET a.password_encrypted = v.password_encrypted
+		 WHERE a.name = 'attacker'`,
+		`CALL DOLT_COMMIT('-Am', 'copy credential')`,
+	)
+	shared := storedBlob(t, store, "victim")
+
+	var warn bytes.Buffer
+	prev := federationWarnWriter
+	federationWarnWriter = &warn
+	t.Cleanup(func() { federationWarnWriter = prev })
+
+	got, err := store.GetFederationPeer(ctx, "team")
+	if err != nil || got.Password != "team-secret" {
+		t.Fatalf("GetFederationPeer(team) = %v, %v; want the honest peer's migrated password", got, err)
+	}
+	for _, peer := range []string{"victim", "attacker"} {
+		if blob := storedBlob(t, store, peer); !bytes.Equal(blob, shared) {
+			t.Errorf("peer %s: the duplicated legacy blob was rewritten", peer)
+		}
+		if _, err := store.GetFederationPeer(ctx, peer); !errors.Is(err, storage.ErrCredentialKeyMismatch) {
+			t.Errorf("GetFederationPeer(%s) = %v, want errors.Is storage.ErrCredentialKeyMismatch", peer, err)
+		}
+		called := false
+		if err := store.withPeerAuth(ctx, peer, func(string) error {
+			called = true
+			return nil
+		}); err == nil || called {
+			t.Errorf("withPeerAuth(%s) = %v, called = %v; want a credential error before the operation runs", peer, err, called)
+		}
+		if !strings.Contains(warn.String(), "federation peer "+peer+" was not upgraded") {
+			t.Errorf("no warning names peer %s:\n%s", peer, warn.String())
+		}
+	}
+	if strings.Contains(warn.String(), "victim-secret") || strings.Contains(warn.String(), "victim.example") {
+		t.Errorf("warnings leak credential-bearing material:\n%s", warn.String())
+	}
+}

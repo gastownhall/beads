@@ -132,6 +132,12 @@ password between peers yourself, rotate it. An older-format password that
 arrives after the conversion (for example from a pull) is refused, not
 converted.
 
+The conversion rewrites the checked-out branch only. Other local branches keep
+their older-format passwords, and those stay unusable after the conversion
+finishes; re-add the peer on such a branch. bd v1.3.2 and earlier cannot read
+the bound format, so upgrade bd on every machine that shares the database
+before it runs a federation command there.
+
 ### JSON Output
 
 For scripting, use the `--json` flag:
