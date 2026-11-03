@@ -39,6 +39,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`bd import --strict-deps` exits 1 when a dependency edge was skipped
+  (GH#6113).** A restore split into several imports skips every edge whose
+  target only a later part carries, and each part still exited 0, so a
+  script could certify a graph missing a third of its edges. Text output now
+  closes the per-edge `Skipped dependency` lines with a count and a recovery
+  hint: import the missing targets, correct edges refused by validation, then
+  re-run the import that reported the edges. A re-run adds only the valid
+  edges of rows it writes; a row skipped as stale, as a `--dedup` duplicate
+  or as retired keeps its edges out. With `--strict-deps` the import then
+  fails with exit 1 instead; the check runs after the import committed, so
+  its rows stay. It counts every edge in `skipped_dependencies`, validation
+  refusals included, but not edges of rows that were not written, so a pass
+  is not a full graph audit. Under `--json` stdout stays the single result
+  object, no count line is added, and the strict-deps error goes to stderr.
+  `--strict-deps` cannot be combined with `--dry-run`; the default exit
+  status and the JSON result are unchanged.
+
 - **`arrival_seq`, a commit-ordered create sequence on wisp-plane rows.**
   While a workspace journals, every `ephemeral` or `no_history` bead it creates
   is stamped with the `seq` of its own `create` journal record, in the same

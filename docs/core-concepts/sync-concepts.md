@@ -34,6 +34,40 @@ Do not use routine `bd import .beads/issues.jsonl` as a replacement for
 `bd dolt pull`. JSONL import is upsert-only; it cannot infer that records absent
 from an export were deleted, pruned, or simply never exported.
 
+### Importing an export in parts
+
+For each source row it writes, one `bd import` resolves a dependency edge
+against targets already in the database or anywhere in the same input,
+whatever order its lines come in. An edge whose target is in neither is
+skipped, and so is an edge refused by validation (a cycle or an invalid
+hierarchy). Text output prints
+`Skipped dependency: <from> -> <to>: <reason>` on stderr for each one; under
+`--json` the edges are listed in `skipped_dependencies` instead. Either way the import exits 0.
+
+So an export restored in several parts skips each edge whose target only a
+later part carries. Prefer one combined import when it fits. Otherwise import
+every part, correct any edge validation refused, then import again each part
+that reported skipped edges: its rows upsert and each valid edge is added
+once. A re-run adds an edge only when it writes the edge's source row. A row
+skipped as stale (listed in `stale_skipped_ids`, because the local issue
+changed after the export) keeps the local state, and its edges are neither
+added nor reported; the same holds for a row `--dedup` skips as a duplicate
+title. Do not pass `--allow-stale` to force stale rows in: it overwrites the
+newer local rows.
+
+Verify a restore by comparing the dependency edges the database holds against
+the export, not by row counts alone: a split restore can land every issue,
+comment and label and still miss edges. A script can gate each part on the
+JSON result:
+
+```bash
+set -o pipefail
+bd import --json part-2.jsonl | jq -e '(.skipped_dependencies // []) | length == 0'
+```
+
+This checks skipped dependency edges only, not rows skipped for other reasons
+(`stale_skipped_ids`, `dedup_skipped`), and is not an audit of the whole graph.
+
 ## Hooks
 
 The pre-commit hook refreshes `.beads/issues.jsonl` when `export.auto=true`.

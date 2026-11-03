@@ -93,6 +93,22 @@ the already-committed chunks are durable and the command exits nonzero;
 re-running the same import is safe and converges (rows upsert,
 labels/comments/dependencies deduplicate).
 
+A dependency edge is skipped when its target is neither in the database
+nor in the same input, or when validation refuses it (a cycle or an invalid
+hierarchy). Text output prints one "Skipped dependency" line per edge on
+stderr, then a count and a recovery hint; --json lists the same edges in
+skipped_dependencies instead. The import still exits 0.
+A restore split into several imports skips every edge whose target only a
+later part carries: once those targets are imported, correct any edge
+validation refused, then re-run the import that reported the edges. Its rows
+upsert and each valid edge is added once, but only for rows the re-run
+writes: a row skipped as stale (stale_skipped_ids), as a duplicate title
+under --dedup, or as retired by a retention sweep (retired_ids) keeps its
+edges out and does not report them. Pass --strict-deps to exit 1 when any
+edge was reported skipped, so a script can gate on it; a pass is not an
+audit of the whole graph. The check runs after the import committed, so the
+imported rows stay; --strict-deps cannot be combined with --dry-run.
+
 EXAMPLES:
   bd import                        # Import from configured import.path
   bd import backup.jsonl           # Import from a specific file
@@ -102,6 +118,7 @@ EXAMPLES:
   bd import --dry-run              # Show what would be imported
   bd import --dedup                # Skip issues with duplicate titles
   bd import --allow-stale old.jsonl # Restore an older snapshot (overwrites newer local rows)
+  bd import --strict-deps part1.jsonl # Exit 1 if a dependency edge was skipped
   bd import --json                 # Structured output with created and skipped IDs`,
 	GroupID:       "sync",
 	SilenceUsage:  true,
