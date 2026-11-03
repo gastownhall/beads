@@ -134,9 +134,9 @@ Any key whose name contains `api_key`, `api-key`, `secret`, `token`, or `passwor
 | `backup.size-cap-mb` | — | `BD_BACKUP_SIZE_CAP_MB` | `2048` | Pause auto-backup once the destination directory reaches this size; `0` disables the cap (see [below](#auto-backup)) |
 | `backup.size-warn-interval` | — | `BD_BACKUP_SIZE_WARN_INTERVAL` | `24h` | Minimum time between repeated "auto-backup paused" warnings |
 | `audit.enabled` | — | `BD_AUDIT_ENABLED` | `false` | Enable the optional JSONL interaction sidecar at `.beads/interactions.jsonl`, written by `bd audit record` / `bd audit label`. While disabled, `bd init` does not create the file and `bd audit record` / `bd audit label` refuse to write. Issue history is always recorded in the database either way — see `bd history <id> --events` |
-| `export.auto` | — | — | `false` | Refresh `.beads/issues.jsonl` export after every write; not cross-machine sync |
+| `export.auto` | — | — | `false` | Refresh the `.beads/issues.jsonl` export after write commands, at most once per `export.interval`; not cross-machine sync |
 | `export.path` | — | — | `issues.jsonl` | Output filename relative to `.beads/` |
-| `export.interval` | — | — | `60s` | Minimum time between auto-exports |
+| `export.interval` | — | — | `60s` | Minimum time between automatic exports, not a flush deadline: a write inside the interval is exported by a later write command, never by a timer |
 | `export.git-add` | — | — | `false` | Run `git add` on the export file |
 | `import.auto` | — | `BD_IMPORT_AUTO` | `true` | Master switch for automatic JSONL imports: the git-hook fallback used when no Dolt remote is configured, and the empty-database recovery import when `.beads/issues.jsonl` exists but the database is empty. `false` disables all auto-imports; explicit `bd import` always works |
 | `import.path` | — | — | `issues.jsonl` | Input filename relative to `.beads/` for implied JSONL imports (including `bd init --from-jsonl` and empty-DB auto-import); use relative paths for portability |
@@ -171,8 +171,16 @@ bd config set export.auto true
 bd config set export.git-add true
 ```
 
-Use `bd dolt push` / `bd dolt pull` for sync and `bd backup` for restorable
-database backups.
+The export trails the database. `export.interval` is a minimum between
+automatic exports, not a guaranteed flush deadline: a write that lands inside
+the interval reaches the file only when a later write command runs auto-export
+again. The pre-commit hook re-exports only when the commit has a staged path
+under `.beads/`. In bd releases after v1.3.3, `bd doctor --check=export`
+reports in-scope issues missing from the export; refresh it explicitly with
+`bd export -o .beads/issues.jsonl`.
+
+Use `bd dolt push` / `bd dolt pull` for sync. To recover a damaged database,
+restore from `bd backup`, not from the JSONL export.
 </Warning>
 
 Routing note: `output.title-length` and `agents.file` are functionally tool-level settings, but `bd config set` writes them to the Dolt database. They are typically read from `config.yaml` when set there directly.

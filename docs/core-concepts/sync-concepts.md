@@ -27,8 +27,18 @@ that origin as the Dolt remote for future `bd dolt push` and `bd dolt pull`.
 
 ## What JSONL Is For
 
-`.beads/issues.jsonl` is an export. It exists for viewers, interchange,
-migration, and backup. It is not the canonical cross-machine sync channel.
+`.beads/issues.jsonl` is an export. It exists for viewers, interchange, and
+issue-level migration. It is not the canonical cross-machine sync channel and
+not a database backup: to recover a damaged database, restore from
+`bd backup`, not from the JSONL.
+
+The export can trail the database. With `export.auto=true`, write commands
+refresh it at most once per `export.interval`, which is a minimum between
+automatic exports, not a guaranteed flush deadline: a write inside the interval
+reaches the file only when a later write command runs auto-export again. In bd
+releases after v1.3.3, `bd doctor --check=export` reports in-scope issues
+missing from the export; refresh it explicitly with
+`bd export -o .beads/issues.jsonl`.
 
 Do not use routine `bd import .beads/issues.jsonl` as a replacement for
 `bd dolt pull`. JSONL import is upsert-only; it cannot infer that records absent
@@ -36,8 +46,10 @@ from an export were deleted, pruned, or simply never exported.
 
 ## Hooks
 
-The pre-commit hook refreshes `.beads/issues.jsonl` when `export.auto=true`.
-That keeps the export current for tools, but it does not push Dolt history.
+The pre-commit hook refreshes `.beads/issues.jsonl` when `export.auto=true`
+and the commit has a staged path under `.beads/`; a commit that stages nothing
+there leaves the export as it was. The refresh keeps the export current for
+tools, but it does not push Dolt history.
 
 The post-merge and post-checkout hooks skip JSONL import when `sync.remote` is
 configured. For old projects with no Dolt remote, they may import JSONL as a
