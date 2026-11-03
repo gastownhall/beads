@@ -587,8 +587,21 @@ func renderImportOutcome(result importResultJSON, source string, dedupHits int) 
 	for _, skipped := range result.SkippedDependencies {
 		fmt.Fprintf(os.Stderr, "Skipped dependency: %s\n", skipped)
 	}
+	// GH#6113: one line per edge scrolls past unread on a large restore, so
+	// close with the count. The edges stay reported in skipped_dependencies;
+	// --json keeps its single result object and adds nothing here.
+	if n := len(result.SkippedDependencies); n > 0 {
+		WarnError("%d dependency edge(s) were reported skipped", n)
+		fmt.Fprintf(os.Stderr, "Hint: %s\n", importSkippedDepsHint)
+	}
 	return nil
 }
+
+// importSkippedDepsHint is the recovery a skipped dependency edge needs: a
+// missing target lands with a later import (a split restore's later part),
+// after which re-running the import that carried the edge wires it; an edge
+// refused by validation has to be corrected first.
+const importSkippedDepsHint = "import the missing targets, then re-run the import that carried the skipped edges; correct edges refused by validation before re-running"
 
 // importTitleSearcher is the read seam the --dedup filter needs. It lives in
 // THIS file because naming types.IssueFilter is denied by default under
