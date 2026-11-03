@@ -1135,6 +1135,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Opening a project no longer silently connects to a database whose recorded
+  identity cannot be read. The connect-time project identity check treated a
+  `_project_id` metadata **read error** the same as an empty (old-style)
+  `_project_id` and skipped the check, disarming it exactly when a Dolt
+  server restart makes reads fail while a foreign server may answer on the
+  same port. A read that fails for any reason other than a specifically
+  classified missing `metadata` table now refuses the open, before
+  migrations run, with a named "cannot verify project identity" error that
+  wraps the underlying cause and names the database; a database with no bd
+  schema yet (a pre-created database) or with no recorded `_project_id`
+  keeps the historical compatibility skip
+  ([#7565](https://github.com/gastownhall/beads/pull/7565)).
 - `bd create --file` and other batch creates no longer fail with "issue
   already exists" on an id bd generated itself. The batch chose every id
   before it wrote any row, so two of its items could be handed the same short

@@ -1054,6 +1054,74 @@ func TestVerifyProjectIdentity_ReadErrors(t *testing.T) {
 			expectRefusal(t, store.verifyProjectIdentity(context.Background(), beadsDir, openedByInit), cause)
 		}
 	})
+
+	// The one read failure that keeps skipping: a database with no bd schema
+	// yet has no metadata table at all (a pre-created database, or a
+	// CREATE-race loser), and only that specifically classified absence is
+	// compatibility — every other missing table, an unidentifiable 1146, and
+	// a missing column still refuse.
+	expectSkip := func(t *testing.T, err error) {
+		t.Helper()
+		store, mock, beadsDir := newIdentityUnitStore(t, localID, database)
+		expectIdentityRead(mock, nil, err)
+		if got := store.verifyProjectIdentity(context.Background(), beadsDir, false); got != nil {
+			t.Errorf("verifyProjectIdentity() = %v; an absent metadata table is the pre-created-database skip", got)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("unfulfilled sqlmock expectations: %v", err)
+		}
+	}
+
+	t.Run("absent metadata table skips, every classified spelling", func(t *testing.T) {
+		for name, err := range map[string]error{
+			"stock MySQL qualified": &mysql.MySQLError{
+				Number:  1146,
+				Message: "Table 'shared_db.metadata' doesn't exist",
+			},
+			"backticked": &mysql.MySQLError{
+				Number:  1146,
+				Message: "Table `metadata` doesn't exist",
+			},
+			"go-mysql-server": &mysql.MySQLError{
+				Number:  1146,
+				Message: "table not found: metadata",
+			},
+		} {
+			t.Run(name, func(t *testing.T) {
+				expectSkip(t, err)
+			})
+		}
+	})
+
+	t.Run("missing other table refuses", func(t *testing.T) {
+		cause := &mysql.MySQLError{
+			Number:  1146,
+			Message: "Table 'shared_db.issues' doesn't exist",
+		}
+		store, mock, beadsDir := newIdentityUnitStore(t, localID, database)
+		expectIdentityRead(mock, nil, cause)
+		expectRefusal(t, store.verifyProjectIdentity(context.Background(), beadsDir, false), cause)
+	})
+
+	t.Run("unidentifiable 1146 refuses", func(t *testing.T) {
+		cause := &mysql.MySQLError{
+			Number:  1146,
+			Message: "Table doesn't exist",
+		}
+		store, mock, beadsDir := newIdentityUnitStore(t, localID, database)
+		expectIdentityRead(mock, nil, cause)
+		expectRefusal(t, store.verifyProjectIdentity(context.Background(), beadsDir, false), cause)
+	})
+
+	t.Run("missing column refuses", func(t *testing.T) {
+		cause := &mysql.MySQLError{
+			Number:  1054,
+			Message: "Unknown column 'value' in 'field list'",
+		}
+		store, mock, beadsDir := newIdentityUnitStore(t, localID, database)
+		expectIdentityRead(mock, nil, cause)
+		expectRefusal(t, store.verifyProjectIdentity(context.Background(), beadsDir, false), cause)
+	})
 }
 
 // TestCrossProject_IdentityCheck_ReadErrorRefuses covers the verifier's
@@ -1123,5 +1191,63 @@ func TestCrossProject_IdentityCheck_ReadErrorRefuses(t *testing.T) {
 	if err := raw.QueryRowContext(ctx,
 		"SELECT value FROM `"+f.dbName+"`.metadata WHERE `key` = '_project_id'").Scan(&value); err == nil {
 		t.Fatalf("the damaged metadata table was repaired during the refused open; the refusal must fire before any schema write")
+	}
+}
+
+// TestCrossProject_IdentityCheck_SoftSkip_NoBdSchema pins the preserved
+// compatibility exception the read-error refusal (bd-8b6e39 / PR #7565) must
+// not break: a pre-created database (docs/cli-reference/init.md) has no bd
+// schema at all, so identity verification — which runs before
+// initialization, and which the CREATE-race path can also reach — reads no
+// metadata table. That absence must keep skipping even with a non-empty
+// local project id and the database already existing, for both values of
+// CreateIfMissing and OpenedByInit, and the open must then initialize the
+// schema so metadata queries work afterwards. Each variant gets its own bare
+// database and its own local metadata, since the first open initializes.
+func TestCrossProject_IdentityCheck_SoftSkip_NoBdSchema(t *testing.T) {
+	skipIfNoDolt(t)
+	acquireTestSlot()
+	t.Cleanup(releaseTestSlot)
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	const localID = "99999999-9999-9999-9999-999999999999"
+	variants := []struct {
+		name           string
+		createIfMissing bool
+		openedByInit   bool
+	}{
+		{"connect existing", false, false},
+		{"init existing", false, true},
+		{"create existing", true, false},
+		{"init create existing", true, true},
+	}
+	for _, v := range variants {
+		t.Run(v.name, func(t *testing.T) {
+			f := newIdentityTestFixture(t, "noschema")
+			f.saveLocalProjectID(t, localID)
+			// A bare database: created on the server, no bd schema inside.
+			createTestDatabase(t, testServerPort, f.dbName)
+
+			cfg := f.config()
+			cfg.CreateIfMissing = v.createIfMissing
+			cfg.OpenedByInit = v.openedByInit
+			store, err := openStoreWithOwnBudget(t, cfg)
+			if err != nil {
+				t.Fatalf("open against a pre-created schema-less database must keep succeeding, got: %v", err)
+			}
+			defer store.Close()
+
+			// The open initialized the schema: metadata queries work.
+			if got, err := store.GetMetadata(ctx, "_project_id"); err != nil || got != "" {
+				t.Errorf("GetMetadata(_project_id) = %q, %v; want the absent key after initialization", got, err)
+			}
+			if err := store.SetMetadata(ctx, "_project_id", localID); err != nil {
+				t.Errorf("SetMetadata(_project_id) after initialization: %v", err)
+			}
+			if got, err := store.GetMetadata(ctx, "_project_id"); err != nil || got != localID {
+				t.Errorf("GetMetadata(_project_id) = %q, %v; want %q", got, err, localID)
+			}
+		})
 	}
 }

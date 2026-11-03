@@ -903,7 +903,11 @@ bd init --prefix myproject --shared-server
 **Important:** Each project on a shared server **must have a unique prefix** (database name).
 Two projects with the same prefix share the same database — if this happens accidentally,
 the project identity check will detect the mismatch and refuse to connect, preventing
-silent data corruption. Always use distinct prefixes when running `bd init --shared-server`.
+silent data corruption. A database whose recorded `_project_id` cannot be **read** is
+refused the same way with a "cannot verify project identity" error instead of silently
+connected — only a database that has no bd schema yet (no `metadata` table, pre-created
+for bd) or no recorded `_project_id` keeps the historical compatibility skip.
+Always use distinct prefixes when running `bd init --shared-server`.
 
 ```bash
 # Check shared server status from any project

@@ -48,6 +48,7 @@ import (
 	"github.com/steveyegge/beads/internal/gittraceenv"
 	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/kvkeys"
@@ -2406,9 +2407,12 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	// This must run BEFORE store.initSchema below: initSchema runs migrations
 	// and Dolt commits against the database, so verifying first means a
 	// foreign existing database is rejected before bd writes anything into
-	// it, not after. On a database with no bd schema yet, GetMetadata errors
-	// and the verifier soft-skips, so this ordering does not change behavior
-	// for a genuinely fresh database.
+	// it, not after. On a database with no bd schema yet, GetMetadata fails
+	// with a missing metadata table and the verifier keeps soft-skipping
+	// that specifically classified absence (a pre-created database or a
+	// CREATE-race loser); any other read failure refuses instead (PR #7565).
+	// So this ordering does not change behavior for a genuinely fresh
+	// database.
 	//
 	// Gateway is effectively excluded from the alreadyExisted branch because
 	// openServerConnection never probes existence for it (see the Gateway
@@ -2697,9 +2701,10 @@ func shouldPersistResolvedPortFile() bool {
 // verifyProjectIdentity checks that the database belongs to the expected project.
 // If both the local metadata.json and the database have a project_id, they must match.
 // Returns nil if verification passes or is not applicable (missing IDs = old
-// setup), and a projectIdentityReadError refusal when the database's recorded
-// identity cannot be read: a failed read is a failed proof, not an old-style
-// database (PR #7565).
+// setup, or no metadata table yet = pre-created database), and a
+// projectIdentityReadError refusal when the database's recorded identity
+// cannot be read: a failed read is a failed proof, not an old-style database
+// (PR #7565).
 // openedByInit is Config.OpenedByInit: it only shapes the error's advice (see
 // projectIdentityMismatchError), never whether the check runs.
 func (s *DoltStore) verifyProjectIdentity(ctx context.Context, beadsDir string, openedByInit bool) error {
@@ -2721,11 +2726,19 @@ func (s *DoltStore) verifyProjectIdentity(ctx context.Context, beadsDir string, 
 	// Read project ID from database metadata table
 	dbID, err := s.GetMetadata(ctx, "_project_id")
 	if err != nil {
-		// A failed read is not evidence of an old-style database: it is a
-		// failed proof. Treating it like one silently disarms the
-		// connect-time identity guard exactly when a server warming window
-		// makes reads fail, so refuse instead (PR #7565).
-		return projectIdentityReadError(s.database, err)
+		// One read failure is established compatibility, not a failed
+		// proof: a database with no bd schema yet (pre-created for bd, or
+		// a CREATE-race loser) has no metadata table at all, and that
+		// specifically classified absence keeps skipping so schema
+		// initialization can proceed. Any other read failure is not
+		// evidence of an old-style database — it is a failed proof, and
+		// treating it like one silently disarms the connect-time identity
+		// guard exactly when a server warming window makes reads fail, so
+		// refuse instead (PR #7565).
+		if !dberrors.IsMissingTable(err, "metadata") {
+			return projectIdentityReadError(s.database, err)
+		}
+		return nil // no metadata table yet — pre-created database, skip
 	}
 	if dbID == "" {
 		return nil // old database without project_id — skip
