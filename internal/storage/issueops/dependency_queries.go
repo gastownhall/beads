@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/types"
 	publicops "github.com/steveyegge/beads/issueops"
 )
@@ -533,13 +534,21 @@ func GetDependencyCountsInTx(ctx context.Context, tx DBTX, issueIDs []string) (m
 				return nil, fmt.Errorf("get dependency counts: blocker rows: %w", err)
 			}
 
+			// One seek per target column (sqlbuild.DepTargetArms), grouped
+			// outside: no index serves the COALESCE of the three.
+			arms := sqlbuild.DepTargetArms("", "IN ("+inClause+")")
+			dependentSelects := make([]string, len(arms))
+			dependentArgs := make([]any, 0, len(arms)*len(args))
+			for i, arm := range arms {
+				dependentSelects[i] = fmt.Sprintf("SELECT %s AS target_id FROM %s WHERE %s AND type = 'blocks'", arm.Col, depTable, arm.Where)
+				dependentArgs = append(dependentArgs, args...)
+			}
 			//nolint:gosec // G201: depTable is hardcoded and inClause contains only ? placeholders.
-			blockingRows, err := tx.QueryContext(ctx, fmt.Sprintf(`
-				SELECT %s AS depends_on_id, COUNT(*) as cnt
-				FROM %s
-				WHERE %s AND type = 'blocks'
-				GROUP BY %s
-			`, DepTargetExpr, depTable, depTargetIn("", inClause), DepTargetExpr), args...)
+			blockingRows, err := tx.QueryContext(ctx, `
+				SELECT target_id, COUNT(*) as cnt
+				FROM (`+strings.Join(dependentSelects, " UNION ALL ")+`) dependents
+				GROUP BY target_id
+			`, dependentArgs...)
 			if err != nil {
 				if optionalBlockedTable(depTable) && isTableNotExistError(err) {
 					continue

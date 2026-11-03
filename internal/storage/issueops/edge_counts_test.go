@@ -143,8 +143,15 @@ func TestBuildEdgeCountQueryResolvesTheTargetWithoutTheGeneratedColumn(t *testin
 	if strings.Contains(inbound, "depends_on_id") {
 		t.Errorf("the inbound count names the generated column:\n%s", inbound)
 	}
-	if !strings.Contains(inbound, "COALESCE(d.depends_on_issue_id") {
-		t.Errorf("the inbound count does not resolve the target from the base columns:\n%s", inbound)
+	// No index serves the COALESCE, so the target is matched one physical
+	// column per arm, each arm a seek.
+	if strings.Contains(inbound, depTargetExpr("d")) {
+		t.Errorf("the inbound count filters on the unindexable COALESCE:\n%s", inbound)
+	}
+	for _, col := range []string{"d.depends_on_issue_id", "d.depends_on_wisp_id", "d.depends_on_external"} {
+		if !strings.Contains(inbound, "SELECT "+col+" AS anchor") || !strings.Contains(inbound, col+" IN (?,?)") {
+			t.Errorf("the inbound count has no seek arm on %s:\n%s", col, inbound)
+		}
 	}
 	if strings.Contains(inbound, "JOIN") {
 		t.Errorf("an unnarrowed inbound count joins the dependent's plane for nothing:\n%s", inbound)
@@ -153,7 +160,7 @@ func TestBuildEdgeCountQueryResolvesTheTargetWithoutTheGeneratedColumn(t *testin
 	statusNarrowed := buildEdgeCountQuery("wisp_dependencies", "wisps", 1, publicops.EdgeCountRequest{
 		Direction: publicops.EdgeDirectionIn, Status: string(types.StatusOpen),
 	})
-	if !strings.Contains(statusNarrowed, "JOIN wisps s ON s.id = d.issue_id") {
+	if !strings.Contains(statusNarrowed, "JOIN wisps s ON s.id = e.issue_id") {
 		t.Errorf("the status narrowing does not join the DEPENDENT's own plane:\n%s", statusNarrowed)
 	}
 
@@ -171,7 +178,10 @@ func TestEdgeCountArgsBindInPlaceholderOrder(t *testing.T) {
 		Types:     []types.DependencyType{types.DepBlocks},
 		Status:    string(types.StatusOpen),
 	})
-	want := []any{"a", "b", string(types.DepBlocks), string(types.StatusOpen)}
+	// The ids and types bind once per target-column arm of the inbound query,
+	// the status once on the join outside them.
+	arm := []any{"a", "b", string(types.DepBlocks)}
+	want := append(append(append(append([]any{}, arm...), arm...), arm...), string(types.StatusOpen))
 	if len(args) != len(want) {
 		t.Fatalf("args = %v, want %v", args, want)
 	}

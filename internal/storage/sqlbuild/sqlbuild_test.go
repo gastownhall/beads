@@ -595,15 +595,27 @@ func TestSearchCountsSQLShape(t *testing.T) {
 	if strings.Contains(byIDs, "ORDER BY") || strings.Contains(byIDs, "LIMIT") {
 		t.Error("by-IDs counts SQL must not carry ORDER BY / LIMIT (order restored in Go)")
 	}
-	if len(idArgs) != 8*2 {
-		t.Errorf("by-IDs args = %d, want %d", len(idArgs), 8*2)
+	// The rc ids filter is one seek arm per target column, never the
+	// unindexable COALESCE of the three.
+	for _, arm := range DepTargetArms("", "IN (?,?)") {
+		if !strings.Contains(byIDs, "SELECT "+arm.Col+" AS dep_id") || !strings.Contains(byIDs, "WHERE type = 'blocks' AND "+arm.Where) {
+			t.Errorf("by-IDs counts SQL missing the %s reverse-blocker arm:\n%s", arm.Col, byIDs)
+		}
+	}
+	if strings.Contains(byIDs, DepTargetExpr+" IN") {
+		t.Errorf("by-IDs counts SQL filters reverse blockers on the COALESCE:\n%s", byIDs)
+	}
+	// Each of the two rc planes binds the ids once per target-column arm.
+	if len(idArgs) != 12*2 {
+		t.Errorf("by-IDs args = %d, want %d", len(idArgs), 12*2)
 	}
 
 	// skipLabels drops the labels point and !includeWispReverseDeps drops the
-	// rc-wisp point, leaving 6 injection points (dc, rc-deps, cc, pc, d, driver).
+	// rc-wisp arms, leaving 8 injection points (dc, three rc-deps arms, cc, pc,
+	// d, driver).
 	_, idArgsNoLabels := SearchCountsSQL(IssuesFilterTables, []string{"a", "b"}, "", "", "", false, CountsHydration{SkipLabels: true})
-	if len(idArgsNoLabels) != 6*2 {
-		t.Errorf("by-IDs args (skipLabels, no wisp deps) = %d, want %d", len(idArgsNoLabels), 6*2)
+	if len(idArgsNoLabels) != 8*2 {
+		t.Errorf("by-IDs args (skipLabels, no wisp deps) = %d, want %d", len(idArgsNoLabels), 8*2)
 	}
 
 	// SkipCounts drops the three cardinality joins and projects constants in

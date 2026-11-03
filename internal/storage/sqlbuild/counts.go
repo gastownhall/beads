@@ -1,6 +1,9 @@
 package sqlbuild
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // ReadyWorkIssueColumns is IssueSelectColumns qualified with the "i." alias
 // used by the counts mega-query. The lease overlay columns keep their own
@@ -84,8 +87,10 @@ func (h CountsHydration) IssueColumns() string {
 //     each subquery from scanning its whole side table and, crucially, keeps
 //     the reverse-blocker rc self-join — whose COALESCE(...) key the pure-Go
 //     GMS analyzer cannot auto-index — from re-scanning its full materialization
-//     once per driver row. The returned args are the ids repeated once per
-//     injection point, in left-to-right placeholder order.
+//     once per driver row. The rc ids filter itself is split per target column
+//     (reverseBlockerSelects), so it seeks rather than reads every blocks edge.
+//     The returned args are the ids repeated once per injection point, in
+//     left-to-right placeholder order.
 //
 // The by-IDs form is result-identical to the predicate form over the same set
 // of surviving rows: each per-issue count is a function of the whole dependency
@@ -136,27 +141,19 @@ func SearchCountsSQL(tables FilterTables, ids []string, whereSQL, orderBySQL, li
 	// Per-subquery id constraints. Empty strings in the predicate form leave the
 	// projection unchanged; in the by-IDs form they push the page down so no
 	// subquery aggregates more than the page's worth of rows.
-	var labelWhere, depBlocksExtra, rcDepExtra, rcWispExtra, ccWhere, pcExtra, depWhere string
+	var labelWhere, depBlocksExtra, ccWhere, pcExtra, depWhere string
 	if byIDs {
 		labelWhere = fmt.Sprintf("WHERE issue_id IN (%s)", inSQL)
 		depBlocksExtra = fmt.Sprintf(" AND issue_id IN (%s)", inSQL)
-		rcDepExtra = fmt.Sprintf(" AND %s IN (%s)", DepTargetExpr, inSQL)
-		rcWispExtra = fmt.Sprintf(" AND %s IN (%s)", DepTargetExpr, inSQL)
 		ccWhere = fmt.Sprintf("WHERE issue_id IN (%s)", inSQL)
 		pcExtra = fmt.Sprintf(" AND issue_id IN (%s)", inSQL)
 		depWhere = fmt.Sprintf("WHERE issue_id IN (%s)", inSQL)
 	}
 
-	reverseBlockerSelect := fmt.Sprintf(`
-				SELECT %s AS dep_id
-				FROM dependencies WHERE type = 'blocks'%s
-	`, DepTargetExpr, rcDepExtra)
+	reverseBlockerSelect := reverseBlockerSelects("dependencies", inSQL, byIDs)
 	if includeWispReverseDeps {
-		reverseBlockerSelect += fmt.Sprintf(`
-				UNION ALL
-				SELECT %s AS dep_id
-				FROM wisp_dependencies WHERE type = 'blocks'%s
-		`, DepTargetExpr, rcWispExtra)
+		reverseBlockerSelect += `
+				UNION ALL` + reverseBlockerSelects("wisp_dependencies", inSQL, byIDs)
 	}
 
 	labelsSelect := "l.labels_json AS labels_json"
@@ -266,17 +263,21 @@ func SearchCountsSQL(tables FilterTables, ids []string, whereSQL, orderBySQL, li
 	}
 
 	// args follow the placeholder order in sqlText: labels join (unless
-	// skipped), dc, rc dependencies branch, rc wisp branch (if any), cc (all
-	// four unless the counts are skipped), pc, d, then the driver.
-	args := make([]any, 0, len(idArgs)*8)
+	// skipped), dc, the rc dependencies arms, the rc wisp arms (if any), cc
+	// (all unless the counts are skipped), pc, d, then the driver: up to
+	// twelve copies of the ids.
+	args := make([]any, 0, len(idArgs)*12)
 	if !hyd.SkipLabels {
 		args = append(args, idArgs...)
 	}
 	if !hyd.SkipCounts {
 		args = append(args, idArgs...) // dc
-		args = append(args, idArgs...) // rc dependencies
+		rcPlanes := 1
 		if includeWispReverseDeps {
-			args = append(args, idArgs...) // rc wisp_dependencies
+			rcPlanes = 2 // and wisp_dependencies
+		}
+		for range rcPlanes * len(DepTargetArms("", "")) {
+			args = append(args, idArgs...) // rc, one per arm
 		}
 		args = append(args, idArgs...) // cc
 	}
@@ -284,4 +285,27 @@ func SearchCountsSQL(tables FilterTables, ids []string, whereSQL, orderBySQL, li
 	args = append(args, idArgs...) // d
 	args = append(args, idArgs...) // driver
 	return sqlText, args
+}
+
+// reverseBlockerSelects is the rc subquery's input from one dependency table:
+// a row per blocks edge, carrying its target as dep_id. The by-IDs form splits
+// the target filter into DepTargetArms so each arm seeks its target column's
+// (type, target) index; a filter on DepTargetExpr itself reads every blocks
+// edge. The predicate form aggregates the whole table either way.
+func reverseBlockerSelects(table, inSQL string, byIDs bool) string {
+	if !byIDs {
+		return fmt.Sprintf(`
+				SELECT %s AS dep_id
+				FROM %s WHERE type = 'blocks'
+	`, DepTargetExpr, table)
+	}
+	arms := DepTargetArms("", "IN ("+inSQL+")")
+	selects := make([]string, len(arms))
+	for i, arm := range arms {
+		selects[i] = fmt.Sprintf(`
+				SELECT %s AS dep_id
+				FROM %s WHERE type = 'blocks' AND %s`, arm.Col, table, arm.Where)
+	}
+	return strings.Join(selects, `
+				UNION ALL`) + "\n"
 }

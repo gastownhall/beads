@@ -259,9 +259,9 @@ func TestCountDependencyEdgesMissingWispPlaneIsNotAnError(t *testing.T) {
 	for _, ep := range edgeCountEntryPoints {
 		t.Run(ep.name, func(t *testing.T) {
 			_, mock, tx := beginMockTx(t)
-			mock.ExpectQuery(`^SELECT count\(\*\) FROM dependencies WHERE `).
+			mock.ExpectQuery(`^SELECT count\(\*\) FROM (\(SELECT 1 FROM )?dependencies WHERE `).
 				WillReturnRows(scalarCountRows(3))
-			mock.ExpectQuery(`^SELECT count\(\*\) FROM wisp_dependencies WHERE `).
+			mock.ExpectQuery(`^SELECT count\(\*\) FROM (\(SELECT 1 FROM )?wisp_dependencies WHERE `).
 				WillReturnError(tableNotFound("wisp_dependencies"))
 
 			n, err := CountDependencyEdgesInTx(context.Background(), tx, "epic-1", ep.dir, nil)
@@ -367,11 +367,11 @@ func TestCountDependencyEdgesBrokenPlaneIsAnError(t *testing.T) {
 				_, mock, tx := beginMockTx(t)
 				gone := tc.durable
 				if gone != nil {
-					mock.ExpectQuery(`^SELECT count\(\*\) FROM dependencies WHERE `).WillReturnError(gone)
+					mock.ExpectQuery(`^SELECT count\(\*\) FROM (\(SELECT 1 FROM )?dependencies WHERE `).WillReturnError(gone)
 				} else {
 					gone = tc.wisp
-					mock.ExpectQuery(`^SELECT count\(\*\) FROM dependencies WHERE `).WillReturnRows(scalarCountRows(3))
-					mock.ExpectQuery(`^SELECT count\(\*\) FROM wisp_dependencies WHERE `).WillReturnError(gone)
+					mock.ExpectQuery(`^SELECT count\(\*\) FROM (\(SELECT 1 FROM )?dependencies WHERE `).WillReturnRows(scalarCountRows(3))
+					mock.ExpectQuery(`^SELECT count\(\*\) FROM (\(SELECT 1 FROM )?wisp_dependencies WHERE `).WillReturnError(gone)
 				}
 
 				n, err := CountDependencyEdgesInTx(context.Background(), tx, "epic-1", ep.dir, nil)

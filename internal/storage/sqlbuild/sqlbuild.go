@@ -39,6 +39,51 @@ func OptionalWispTable(name string) bool {
 // mutually-exclusive target columns.
 const DepTargetExpr = "COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external)"
 
+// DepTargetArm is one of DepTargetExpr's target columns paired with the
+// predicate that selects the rows whose COALESCE resolves to that column.
+type DepTargetArm struct {
+	// Col is the prefixed target column; on the rows Where admits it equals
+	// DepTargetExpr.
+	Col string
+	// Where is "<Col> <cond>" plus an IS NULL guard over the earlier columns.
+	Where string
+}
+
+// DepTargetArms splits a condition on DepTargetExpr into one arm per target
+// column, in COALESCE precedence order:
+//
+//	depends_on_issue_id <cond>
+//	depends_on_wisp_id <cond> AND COALESCE(depends_on_issue_id) IS NULL
+//	depends_on_external <cond> AND COALESCE(depends_on_issue_id, depends_on_wisp_id) IS NULL
+//
+// prefix qualifies the columns ("" or "d."), and cond's placeholders bind once
+// per arm. The arms are disjoint and together select exactly the rows whose
+// DepTargetExpr satisfies cond, a malformed row with two targets set included
+// (only its first non-NULL column's arm admits it), so a UNION ALL of one
+// SELECT per arm, aggregated outside, counts what the COALESCE filter counts.
+// Unlike that filter, each arm constrains a bare indexed column, which Dolt
+// seeks; it does not index-merge an OR across the columns either
+// (issueops.depTargetEqualsOr). The guard is a COALESCE rather than one
+// "col IS NULL" per earlier column so that it is no index range: Dolt would
+// otherwise pick a guard column's index (wisp_dependencies'
+// depends_on_issue_id over its [NULL, NULL] range, nearly every non-issue
+// edge) instead of the arm's own target column.
+func DepTargetArms(prefix, cond string) []DepTargetArm {
+	arms := make([]DepTargetArm, len(descendantWalkTargetCols))
+	for i, col := range descendantWalkTargetCols {
+		where := prefix + col + " " + cond
+		if i > 0 {
+			guarded := make([]string, i)
+			for k, earlier := range descendantWalkTargetCols[:i] {
+				guarded[k] = prefix + earlier
+			}
+			where += " AND COALESCE(" + strings.Join(guarded, ", ") + ") IS NULL"
+		}
+		arms[i] = DepTargetArm{Col: prefix + col, Where: where}
+	}
+	return arms
+}
+
 // IssueBaseColumns is the column list for the issues/wisps row itself,
 // without the lease overlay. Use IssueSelectColumns for full hydration;
 // this split exists so callers that alias the main table (QualifyColumns)

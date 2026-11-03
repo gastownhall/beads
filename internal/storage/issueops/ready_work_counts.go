@@ -188,7 +188,7 @@ func finishReadyWorkWithCounts(items []*types.IssueWithCounts, filter types.Work
 //
 // The page IDs are chunked into sqlbuild.QueryBatchSize batches so a large page
 // stays within every backend's per-statement placeholder limit (the by-IDs form
-// binds the page up to eight times) without falling back to the quadratic query.
+// binds the page up to twelve times) without falling back to the quadratic query.
 //
 // For limit <= 0 (unbounded) there is no page to push down, so it runs the
 // predicate-form mega-query unchanged.
