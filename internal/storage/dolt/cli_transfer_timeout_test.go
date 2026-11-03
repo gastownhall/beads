@@ -475,3 +475,64 @@ func TestCLITransferErrorTimeoutRedactsAllInputs(t *testing.T) {
 		})
 	}
 }
+
+// TestCLITransferErrorCredentialFreeUnchanged pins that redaction leaves
+// credential-free inputs byte-identical to the pre-redaction formatting on
+// both branches (plain remote names, scp-style remotes, URLs without
+// userinfo), with surrounding whitespace still trimmed from dolt's output and
+// the cause still wrapped.
+func TestCLITransferErrorCredentialFreeUnchanged(t *testing.T) {
+	t.Setenv(cliExecTimeoutEnv, "7m")
+	live, cancelLive := context.WithTimeout(context.Background(), time.Hour)
+	defer cancelLive()
+	expired, cancelExpired := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancelExpired()
+	cause := errors.New("exit status 1")
+	const guidance = " timed out after 7m0s (override with BEADS_CLI_TRANSFER_TIMEOUT=<duration>; large transfers to cloud remotes can run long, and a busy dolt sql-server serving the database directory can stall CLI transfers): "
+
+	tests := []struct {
+		name   string
+		ctx    context.Context
+		op     string
+		remote string
+		out    string
+		want   string
+	}{
+		{
+			name: "plain name failure", ctx: live, op: "dolt push", remote: "origin",
+			out:  "\n  To git+https://github.com/org/repo\n ! [rejected] main -> main (non-fast-forward)\n",
+			want: "dolt push failed: To git+https://github.com/org/repo\n ! [rejected] main -> main (non-fast-forward): exit status 1",
+		},
+		{
+			name: "scp peer failure", ctx: live, op: "fetch from peer git@github.com:org/repo.git", remote: "git@github.com:org/repo.git",
+			out:  "fatal: git@github.com:org/repo.git does not appear to be a git repository\n",
+			want: "fetch from peer git@github.com:org/repo.git failed: fatal: git@github.com:org/repo.git does not appear to be a git repository: exit status 1",
+		},
+		{
+			name: "plain name timeout", ctx: expired, op: "dolt pull", remote: "origin",
+			out:  "  stalled\n",
+			want: `dolt pull to "origin"` + guidance + "stalled: exit status 1",
+		},
+		{
+			name: "url without userinfo timeout", ctx: expired, op: "push to peer https://github.com/org/repo", remote: "https://github.com/org/repo",
+			out:  "",
+			want: `push to peer https://github.com/org/repo to "https://github.com/org/repo"` + guidance + ": exit status 1",
+		},
+		{
+			name: "scp timeout", ctx: expired, op: "dolt push", remote: "git@github.com:org/repo.git",
+			out:  "context deadline exceeded",
+			want: `dolt push to "git@github.com:org/repo.git"` + guidance + "context deadline exceeded: exit status 1",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := cliTransferError(tt.op, tt.remote, tt.ctx, []byte(tt.out), cause)
+			if got := err.Error(); got != tt.want {
+				t.Errorf("cliTransferError() =\n%q\nwant\n%q", got, tt.want)
+			}
+			if !errors.Is(err, cause) {
+				t.Errorf("errors.Is(err, cause) = false: %v", err)
+			}
+		})
+	}
+}
