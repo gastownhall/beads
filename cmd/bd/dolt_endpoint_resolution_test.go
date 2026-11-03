@@ -459,6 +459,55 @@ func TestDoltStatusNamesTheSocketItDialsBesideAPort(t *testing.T) {
 	}
 }
 
+// TestPreviewStoreDialsTheSocketTheMainOpenDials pins the root pre-run's
+// identity preview (newPreviewStoreFromConfig, a library open) to the server
+// the command's own store open dials when metadata.json's dolt_server_socket
+// and a resolved port name different servers: the main open
+// (resolveDoltServerConnection) dials the live socket, and so must the
+// preview, or it validates the identity of a server the command never
+// writes. The library open took its socket from BEADS_DOLT_SERVER_SOCKET
+// alone, so the preview logged in over TCP at the port.
+func TestPreviewStoreDialsTheSocketTheMainOpenDials(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix socket fixture")
+	}
+	tcp := newFakeMySQLLogin(t)
+	socketServer := newFakeMySQLLoginOn(t, "unix", diagnosticSocketPath(t))
+	socket := socketServer.ln.Addr().String()
+	endpointCredentialsEnv(t, []string{"127.0.0.1"}, tcp.port())
+	beadsDir := serverModeWorkspaceAt(t, t.TempDir())
+	t.Setenv("BEADS_DOLT_SERVER_PORT", strconv.Itoa(tcp.port()))
+	fileCfg, err := configfile.Load(beadsDir)
+	if err != nil || fileCfg == nil {
+		t.Fatalf("load metadata: %v", err)
+	}
+	fileCfg.DoltServerSocket = socket
+	if err := fileCfg.Save(beadsDir); err != nil {
+		t.Fatal(err)
+	}
+
+	mainCfg := &dolt.Config{}
+	if err := resolveDoltServerConnection(context.Background(), beadsDir, fileCfg, mainCfg); err != nil {
+		t.Fatalf("resolveDoltServerConnection: %v", err)
+	}
+	if mainCfg.ServerSocket != socket {
+		t.Fatalf("the main open resolves socket %q, want metadata.json's %s", mainCfg.ServerSocket, socket)
+	}
+
+	// The fakes refuse every login, so the preview fails once it has logged
+	// in; where it logged in is what this test observes.
+	if store, err := newPreviewStoreFromConfig(context.Background(), beadsDir); err == nil {
+		_ = store.Close()
+		t.Fatal("the preview opened a store although both servers refuse every login")
+	}
+	if len(socketServer.Logins()) == 0 {
+		t.Errorf("the preview never logged in on the socket %s, the server the main open dials", socket)
+	}
+	if n := len(tcp.Logins()); n != 0 {
+		t.Errorf("the preview logged in over TCP at %s %d time(s); the main open dials the live socket %s", tcp.ln.Addr(), n, socket)
+	}
+}
+
 // TestDoltStatusAndShowDialASocketOnlyServerBdDoesNotRun drives bd dolt
 // status and bd dolt show through the binary for a server-mode workspace
 // whose server only a unix socket names, at a host bd does not run: the IPv6
