@@ -183,6 +183,31 @@ func TestServerModeDeferAutoWake(t *testing.T) {
 		}
 	})
 
+	t.Run("expired_dated_defer_wakes_on_ready_after_migration_freeze_lifts", func(t *testing.T) {
+		issue := bdCreate(t, bd, p.dir, "Expired snooze suppressed by a freeze (server mode)", "--type", "task")
+		bdDefer(t, bd, p.dir, issue.ID, "--until", "2020-01-01")
+		_, deferUntil := showDeferState(t, bd, p.dir, issue.ID)
+
+		if ids := wakeReadyIDsWithEnv(t, bd, p.dir, frozenEnv); ids[issue.ID] {
+			t.Fatalf("precondition: expired defer %s appeared in frozen bd ready", issue.ID)
+		}
+		assertDeferUnchanged(t, bd, p.dir, issue.ID, deferUntil)
+		if t.Failed() {
+			t.FailNow()
+		}
+
+		ids := wakeReadyIDs(t, bd, p.dir)
+		if !ids[issue.ID] {
+			t.Errorf("expected %s in bd ready once the freeze lifted", issue.ID)
+		}
+		status, deferUntil := showDeferState(t, bd, p.dir, issue.ID)
+		if status != "open" {
+			t.Errorf("expected status=open after the freeze lifted, got %q", status)
+		}
+		if deferUntil != nil {
+			t.Errorf("expected defer_until cleared after the freeze lifted, got %v", deferUntil)
+		}
+	})
 }
 
 // openServerModeDB opens a test-only connection to a server-mode project's
