@@ -4,7 +4,9 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/formula"
@@ -171,5 +173,66 @@ func TestEmbeddedSpawnMolecule_SubstitutesTemplatedStepFields(t *testing.T) {
 	}
 	if err := validation.AssigneeMatches(actor, false)(newQAID, issue); err != nil {
 		t.Errorf("spawned issue is not closable by the pouring actor %q: %v", actor, err)
+	}
+}
+
+// cookPersistConditionFormula is the GH#7639 workflow for the persist path:
+// an unconditional build step and a deploy step conditioned on {{deploy}}
+// (default false). %[1]s is the formula/proto id.
+const cookPersistConditionFormula = `formula = "%[1]s"
+version = 1
+type = "workflow"
+
+[vars.deploy]
+description = "Whether to include the deploy step"
+default = "false"
+
+[[steps]]
+id = "build"
+title = "Always build"
+
+[[steps]]
+id = "deploy"
+title = "Deploy to production"
+condition = "{{deploy}}"
+`
+
+// TestEmbeddedCookPersistAppliesStepConditions runs the real `bd cook
+// --persist` in an isolated embedded workspace and reads the stored proto
+// back: a step whose condition evaluates false must not become a child of
+// the persisted proto, and an explicit --var override must bring it back
+// (GH#7639).
+func TestEmbeddedCookPersistAppliesStepConditions(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "cq")
+
+	const protoID = "cq-cond"
+	formulaPath := filepath.Join(dir, protoID+".formula.toml")
+	if err := os.WriteFile(formulaPath, []byte(fmt.Sprintf(cookPersistConditionFormula, protoID)), 0o600); err != nil {
+		t.Fatalf("write formula: %v", err)
+	}
+
+	bdCommand(t, bd, dir, "cook", formulaPath, "--persist", "--var", "deploy=false")
+
+	if got := bdShow(t, bd, dir, protoID); got.Status != types.StatusOpen {
+		t.Fatalf("persisted proto status = %s, want open", got.Status)
+	}
+	build := bdShow(t, bd, dir, protoID+".build")
+	if build.Status != types.StatusOpen {
+		t.Errorf("persisted build child status = %s, want open", build.Status)
+	}
+	bdShowFail(t, bd, dir, protoID+".deploy")
+
+	// The override brings the conditioned step back, so the filter — not
+	// something else — is what kept it out.
+	bdCommand(t, bd, dir, "cook", formulaPath, "--persist", "--force", "--var", "deploy=true")
+	deploy := bdShow(t, bd, dir, protoID+".deploy")
+	if deploy.Status != types.StatusOpen {
+		t.Errorf("persisted deploy child with deploy=true: status = %s, want open", deploy.Status)
 	}
 }
