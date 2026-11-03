@@ -593,3 +593,323 @@ func TestActiveMoleculeIDsFallsBackToHookedWork(t *testing.T) {
 		t.Fatalf("ActiveMoleculeIDs (nobody's work) = %v, %v, want none", ids, err)
 	}
 }
+
+// analysisOf loads the molecule rooted at rootID and answers its analysis.
+func analysisOf(t *testing.T, f *fakeMolecules, rootID string) *issueops.MoleculeAnalysis {
+	t.Helper()
+	view, err := issueops.ViewMolecule(context.Background(), f.reader(), rootID)
+	if err != nil {
+		t.Fatalf("ViewMolecule(%s): %v", rootID, err)
+	}
+	return view.Analysis
+}
+
+// readyStepIDs answers the sorted ids an analysis marks ready, rootID left out.
+func readyStepIDs(a *issueops.MoleculeAnalysis, rootID string) []string {
+	var ids []string
+	for id, info := range a.Steps {
+		if id != rootID && info.IsReady {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+func blockedByOf(t *testing.T, a *issueops.MoleculeAnalysis, id string) []string {
+	t.Helper()
+	info := a.Steps[id]
+	if info == nil {
+		t.Fatalf("analysis has no entry for %s", id)
+	}
+	return info.BlockedBy
+}
+
+// seedBlockedGroup is GH#7638's molecule: open steps m.brief and m.group,
+// m.group blocked by m.brief, children m.a and m.b under m.group, and m.b
+// blocked by m.a.
+func seedBlockedGroup(f *fakeMolecules) {
+	f.add("m", types.TypeMolecule, types.StatusOpen)
+	f.add("m.brief", types.TypeTask, types.StatusOpen)
+	f.add("m.group", types.TypeEpic, types.StatusOpen)
+	f.edge("m.brief", "m", types.DepParentChild)
+	f.edge("m.group", "m", types.DepParentChild)
+	for _, id := range []string{"m.a", "m.b"} {
+		f.add(id, types.TypeTask, types.StatusOpen)
+		f.edge(id, "m.group", types.DepParentChild)
+	}
+	f.edge("m.group", "m.brief", types.DepBlocks)
+	f.edge("m.b", "m.a", types.DepBlocks)
+}
+
+// TestMoleculeAnalysisInheritsAnExogenouslyBlockedParent pins GH#7638: a
+// child of a parent blocked from outside its own subtree is not ready, and
+// lists that parent in BlockedBy, as bd ready and bd blocked would have it.
+func TestMoleculeAnalysisInheritsAnExogenouslyBlockedParent(t *testing.T) {
+	t.Run("a blocked group darkens its children until its blocker closes", func(t *testing.T) {
+		f := newFakeMolecules()
+		seedBlockedGroup(f)
+		a := analysisOf(t, f, "m")
+		if got, want := readyStepIDs(a, "m"), []string{"m.brief"}; !slices.Equal(got, want) {
+			t.Fatalf("ready = %v, want %v", got, want)
+		}
+		if got, want := blockedByOf(t, a, "m.a"), []string{"m.group"}; !slices.Equal(got, want) {
+			t.Errorf("m.a BlockedBy = %v, want %v", got, want)
+		}
+		if got, want := blockedByOf(t, a, "m.b"), []string{"m.a", "m.group"}; !slices.Equal(got, want) {
+			t.Errorf("m.b BlockedBy = %v, want %v", got, want)
+		}
+		if got := a.Steps["m.group"].Blocks; !slices.Contains(got, "m.a") || !slices.Contains(got, "m.b") {
+			t.Errorf("m.group Blocks = %v, want both children", got)
+		}
+
+		f.issues["m.brief"].Status = types.StatusClosed
+		a = analysisOf(t, f, "m")
+		if got, want := readyStepIDs(a, "m"), []string{"m.a", "m.group"}; !slices.Equal(got, want) {
+			t.Fatalf("after closing m.brief: ready = %v, want %v", got, want)
+		}
+		if got, want := blockedByOf(t, a, "m.b"), []string{"m.a"}; !slices.Equal(got, want) {
+			t.Errorf("after closing m.brief: m.b BlockedBy = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("transitively, naming only the immediate parent", func(t *testing.T) {
+		f := newFakeMolecules()
+		f.add("m", types.TypeMolecule, types.StatusOpen)
+		f.add("m.x", types.TypeTask, types.StatusOpen)
+		f.add("m.g", types.TypeEpic, types.StatusOpen)
+		f.add("m.g.s", types.TypeEpic, types.StatusOpen)
+		f.add("m.g.s.leaf", types.TypeTask, types.StatusOpen)
+		f.edge("m.x", "m", types.DepParentChild)
+		f.edge("m.g", "m", types.DepParentChild)
+		f.edge("m.g.s", "m.g", types.DepParentChild)
+		f.edge("m.g.s.leaf", "m.g.s", types.DepParentChild)
+		f.edge("m.g", "m.x", types.DepBlocks)
+		a := analysisOf(t, f, "m")
+		if got, want := readyStepIDs(a, "m"), []string{"m.x"}; !slices.Equal(got, want) {
+			t.Fatalf("ready = %v, want %v", got, want)
+		}
+		if got, want := blockedByOf(t, a, "m.g.s"), []string{"m.g"}; !slices.Equal(got, want) {
+			t.Errorf("m.g.s BlockedBy = %v, want %v", got, want)
+		}
+		if got, want := blockedByOf(t, a, "m.g.s.leaf"), []string{"m.g.s"}; !slices.Equal(got, want) {
+			t.Errorf("m.g.s.leaf BlockedBy = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("an outside blocker beside a close gate still cascades", func(t *testing.T) {
+		f := newFakeMolecules()
+		f.add("m", types.TypeMolecule, types.StatusOpen)
+		f.add("m.x", types.TypeTask, types.StatusOpen)
+		f.add("m.p", types.TypeEpic, types.StatusOpen)
+		f.add("m.p.c1", types.TypeTask, types.StatusOpen)
+		f.add("m.p.c2", types.TypeTask, types.StatusOpen)
+		f.edge("m.x", "m", types.DepParentChild)
+		f.edge("m.p", "m", types.DepParentChild)
+		f.edge("m.p.c1", "m.p", types.DepParentChild)
+		f.edge("m.p.c2", "m.p", types.DepParentChild)
+		f.edge("m.p", "m.p.c1", types.DepBlocks)
+		f.edge("m.p", "m.x", types.DepBlocks)
+		a := analysisOf(t, f, "m")
+		if got, want := readyStepIDs(a, "m"), []string{"m.x"}; !slices.Equal(got, want) {
+			t.Fatalf("ready = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("a close-gate parent inherits an outside reason from above", func(t *testing.T) {
+		f := newFakeMolecules()
+		f.add("m", types.TypeMolecule, types.StatusOpen)
+		f.add("m.x", types.TypeTask, types.StatusOpen)
+		f.add("m.g", types.TypeEpic, types.StatusOpen)
+		f.add("m.g.p", types.TypeEpic, types.StatusOpen)
+		f.add("m.g.p.c", types.TypeTask, types.StatusOpen)
+		f.edge("m.x", "m", types.DepParentChild)
+		f.edge("m.g", "m", types.DepParentChild)
+		f.edge("m.g.p", "m.g", types.DepParentChild)
+		f.edge("m.g.p.c", "m.g.p", types.DepParentChild)
+		f.edge("m.g", "m.x", types.DepBlocks)
+		f.edge("m.g.p", "m.g.p.c", types.DepBlocks)
+		a := analysisOf(t, f, "m")
+		if got, want := readyStepIDs(a, "m"), []string{"m.x"}; !slices.Equal(got, want) {
+			t.Fatalf("ready = %v, want %v", got, want)
+		}
+		if got, want := blockedByOf(t, a, "m.g.p.c"), []string{"m.g.p"}; !slices.Equal(got, want) {
+			t.Errorf("m.g.p.c BlockedBy = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("parent status", func(t *testing.T) {
+		for _, tt := range []struct {
+			status   types.Status
+			darkened bool
+		}{
+			{types.StatusOpen, true},
+			{types.StatusInProgress, true},
+			{types.StatusBlocked, true},
+			{types.StatusClosed, false},
+			{types.StatusPinned, false},
+		} {
+			t.Run(string(tt.status), func(t *testing.T) {
+				f := newFakeMolecules()
+				seedBlockedGroup(f)
+				f.issues["m.group"].Status = tt.status
+				a := analysisOf(t, f, "m")
+				aReady := a.Steps["m.a"].IsReady
+				if aReady == tt.darkened {
+					t.Fatalf("m.a ready = %v under a %s parent blocked by an open sibling, want %v (BlockedBy %v)",
+						aReady, tt.status, !tt.darkened, a.Steps["m.a"].BlockedBy)
+				}
+			})
+		}
+	})
+
+	t.Run("a closed parent does not relay its parent's state", func(t *testing.T) {
+		f := newFakeMolecules()
+		seedBlockedGroup(f)
+		f.issues["m.a"].Status = types.StatusClosed
+		f.add("m.a.leaf", types.TypeTask, types.StatusOpen)
+		f.edge("m.a.leaf", "m.a", types.DepParentChild)
+		a := analysisOf(t, f, "m")
+		if !a.Steps["m.a.leaf"].IsReady {
+			t.Fatalf("m.a.leaf under a closed m.a: BlockedBy = %v, want ready", a.Steps["m.a.leaf"].BlockedBy)
+		}
+	})
+
+	t.Run("one blocked parent of several darkens the child", func(t *testing.T) {
+		f := newFakeMolecules()
+		seedBlockedGroup(f)
+		f.add("m.free", types.TypeEpic, types.StatusOpen)
+		f.edge("m.free", "m", types.DepParentChild)
+		f.add("m.shared", types.TypeTask, types.StatusOpen)
+		f.edge("m.shared", "m.free", types.DepParentChild)
+		f.edge("m.shared", "m.group", types.DepParentChild)
+		a := analysisOf(t, f, "m")
+		if got, want := blockedByOf(t, a, "m.shared"), []string{"m.group"}; !slices.Equal(got, want) {
+			t.Fatalf("m.shared BlockedBy = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("a blocker reached through a second parent is inside the subtree", func(t *testing.T) {
+		f := newFakeMolecules()
+		f.add("m", types.TypeMolecule, types.StatusOpen)
+		f.add("m.p", types.TypeEpic, types.StatusOpen)
+		f.add("m.q", types.TypeEpic, types.StatusOpen)
+		f.add("m.p.c", types.TypeTask, types.StatusOpen)
+		f.add("m.d", types.TypeTask, types.StatusOpen)
+		f.edge("m.p", "m", types.DepParentChild)
+		f.edge("m.q", "m", types.DepParentChild)
+		f.edge("m.p.c", "m.p", types.DepParentChild)
+		f.edge("m.d", "m.q", types.DepParentChild)
+		f.edge("m.d", "m.p.c", types.DepParentChild)
+		f.edge("m.p", "m.d", types.DepBlocks)
+		a := analysisOf(t, f, "m")
+		if !a.Steps["m.p.c"].IsReady {
+			t.Fatalf("m.p.c BlockedBy = %v, want ready: m.p waits only on its own descendant m.d", a.Steps["m.p.c"].BlockedBy)
+		}
+	})
+
+	t.Run("waits-for on a sibling cascades, on its own children does not", func(t *testing.T) {
+		f := newFakeMolecules()
+		f.add("m", types.TypeMolecule, types.StatusOpen)
+		f.add("m.s", types.TypeEpic, types.StatusOpen)
+		f.add("m.s.1", types.TypeTask, types.StatusOpen)
+		f.add("m.p", types.TypeEpic, types.StatusOpen)
+		f.add("m.p.1", types.TypeTask, types.StatusOpen)
+		f.edge("m.s", "m", types.DepParentChild)
+		f.edge("m.p", "m", types.DepParentChild)
+		f.edge("m.s.1", "m.s", types.DepParentChild)
+		f.edge("m.p.1", "m.p", types.DepParentChild)
+		f.edge("m.p", "m.s", types.DepWaitsFor)
+		a := analysisOf(t, f, "m")
+		if got, want := blockedByOf(t, a, "m.p.1"), []string{"m.p"}; !slices.Equal(got, want) {
+			t.Fatalf("waits-for sibling: m.p.1 BlockedBy = %v, want %v", got, want)
+		}
+
+		g := newFakeMolecules()
+		g.add("m", types.TypeMolecule, types.StatusOpen)
+		g.add("m.p", types.TypeEpic, types.StatusOpen)
+		g.add("m.p.1", types.TypeTask, types.StatusOpen)
+		g.edge("m.p", "m", types.DepParentChild)
+		g.edge("m.p.1", "m.p", types.DepParentChild)
+		g.edge("m.p", "m.p", types.DepWaitsFor)
+		a = analysisOf(t, g, "m")
+		if a.Steps["m.p"].IsReady || !a.Steps["m.p.1"].IsReady {
+			t.Fatalf("waits-for own children: m.p ready=%v m.p.1 ready=%v (BlockedBy %v), want m.p waiting and m.p.1 ready",
+				a.Steps["m.p"].IsReady, a.Steps["m.p.1"].IsReady, a.Steps["m.p.1"].BlockedBy)
+		}
+	})
+
+	t.Run("a parent-child cycle terminates, seeded or not, in any order", func(t *testing.T) {
+		edges := [][3]string{
+			{"m.p", "m", string(types.DepParentChild)},
+			{"m.p.c", "m.p", string(types.DepParentChild)},
+			{"m.p", "m.p.c", string(types.DepParentChild)},
+			{"m.p", "m.p.c", string(types.DepBlocks)},
+		}
+		for _, seeded := range []bool{false, true} {
+			for _, order := range [][]int{{0, 1, 2, 3}, {2, 1, 0, 3}, {1, 2, 3, 0}, {3, 2, 1, 0}} {
+				f := newFakeMolecules()
+				f.add("m", types.TypeMolecule, types.StatusOpen)
+				f.add("m.p", types.TypeEpic, types.StatusOpen)
+				f.add("m.p.c", types.TypeTask, types.StatusOpen)
+				for _, i := range order {
+					f.edge(edges[i][0], edges[i][1], types.DependencyType(edges[i][2]))
+				}
+				if seeded {
+					f.add("m.x", types.TypeTask, types.StatusOpen)
+					f.edge("m.x", "m", types.DepParentChild)
+					f.edge("m.p", "m.x", types.DepBlocks)
+				}
+				a := analysisOf(t, f, "m")
+				want := []string{"m.p.c"}
+				if seeded {
+					want = []string{"m.x"}
+				}
+				if got := readyStepIDs(a, "m"); !slices.Equal(got, want) {
+					t.Errorf("seeded=%v order=%v: ready = %v, want %v", seeded, order, got, want)
+				}
+			}
+		}
+	})
+
+	t.Run("a missing node never relays", func(t *testing.T) {
+		issues := map[string]*types.Issue{}
+		for _, id := range []string{"m", "m.x", "m.g", "m.g.gone.c"} {
+			issues[id] = &types.Issue{ID: id, Status: types.StatusOpen}
+		}
+		g := &issueops.MoleculeGraph{
+			Root:     issues["m"],
+			Issues:   []*types.Issue{issues["m"], issues["m.x"], issues["m.g"], issues["m.g.gone.c"]},
+			IssueMap: issues,
+			Dependencies: []*types.Dependency{
+				{IssueID: "m.x", DependsOnID: "m", Type: types.DepParentChild},
+				{IssueID: "m.g", DependsOnID: "m", Type: types.DepParentChild},
+				{IssueID: "m.g.gone", DependsOnID: "m.g", Type: types.DepParentChild},
+				{IssueID: "m.g.gone.c", DependsOnID: "m.g.gone", Type: types.DepParentChild},
+				{IssueID: "m.g", DependsOnID: "m.x", Type: types.DepBlocks},
+			},
+		}
+		a := issueops.AnalyzeMolecule(g)
+		if !a.Steps["m.g.gone.c"].IsReady {
+			t.Fatalf("m.g.gone.c BlockedBy = %v, want ready: its parent is not in the graph", a.Steps["m.g.gone.c"].BlockedBy)
+		}
+	})
+
+	t.Run("inherited blockers set depth and groups", func(t *testing.T) {
+		f := newFakeMolecules()
+		seedBlockedGroup(f)
+		f.add("m.z", types.TypeTask, types.StatusOpen)
+		f.edge("m.z", "m", types.DepParentChild)
+		a := analysisOf(t, f, "m")
+		if got := a.Steps["m.a"].CanParallel; slices.Contains(got, "m.brief") || slices.Contains(got, "m.z") {
+			t.Errorf("m.a CanParallel = %v, want it apart from the depth-0 steps m.brief and m.z", got)
+		}
+		if a.Steps["m.brief"].ParallelGroup == "" || a.Steps["m.brief"].ParallelGroup != a.Steps["m.z"].ParallelGroup {
+			t.Errorf("m.brief group %q, m.z group %q, want one shared group",
+				a.Steps["m.brief"].ParallelGroup, a.Steps["m.z"].ParallelGroup)
+		}
+		if a.Steps["m.a"].ParallelGroup != "" && a.Steps["m.a"].ParallelGroup == a.Steps["m.brief"].ParallelGroup {
+			t.Errorf("m.a shares m.brief's group %q", a.Steps["m.a"].ParallelGroup)
+		}
+	})
+}
