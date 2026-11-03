@@ -505,6 +505,7 @@ var roleContractCases = []roleContract{
 		RunLifecycleCreateRejectsMissingDependencyTargets,
 		RunLifecycleCreateRefusesAnOccupiedID,
 		RunLifecycleCreateRefusesAForeignIDPrefix,
+		RunLifecycleCreateMintsAChildUnderAForeignPrefixParent,
 		RunLifecycleCreateInheritsParentLabels,
 		RunLifecycleCreateWritesEveryScalarField,
 		RunLifecycleCreateEchoesSubSecondTimestamps,

@@ -30,6 +30,9 @@ func TestLifecycleCreateContract(t *testing.T) {
 	t.Run("RefusesAForeignIDPrefix", func(t *testing.T) {
 		conformance.RunLifecycleCreateRefusesAForeignIDPrefix(t, ctx, fixture)
 	})
+	t.Run("MintsAChildUnderAForeignPrefixParent", func(t *testing.T) {
+		conformance.RunLifecycleCreateMintsAChildUnderAForeignPrefixParent(t, ctx, fixture)
+	})
 	t.Run("InheritsParentLabels", func(t *testing.T) {
 		conformance.RunLifecycleCreateInheritsParentLabels(t, ctx, fixture)
 	})
