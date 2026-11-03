@@ -427,4 +427,71 @@ func TestCreateIssuesCommentIDMatch(t *testing.T) {
 			t.Fatalf("comment journal events = %d, want 0", d)
 		}
 	})
+
+	// AC-5: a comment absent by id and content is inserted and journaled once;
+	// re-importing it with its stored timestamp changes nothing.
+	for _, tc := range []struct {
+		name       string
+		incomingID string
+		wisp       bool
+	}{
+		{"supplied_id", commentID, false},
+		{"supplied_id_wisp", commentID, true},
+		{"derived_id", "", false},
+	} {
+		t.Run("new_comment_inserts_once/"+tc.name, func(t *testing.T) {
+			te := newEnv(t, "cin")
+			ctx := t.Context()
+			table := commentTable(tc.wisp)
+			if err := create(t, te, ctx, plain, issueWith("cin-1", tc.wisp, base)); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+			journalBefore := commentJournal(t, te, ctx, "cin-1")
+
+			incoming := func() *types.Comment {
+				c := original("cin-1")
+				c.ID = tc.incomingID
+				return c
+			}
+			if err := create(t, te, ctx, plain, issueWith("cin-1", tc.wisp, base, incoming())); err != nil {
+				t.Fatalf("first import: %v", err)
+			}
+			if n := commentCount(t, te, ctx, table, "cin-1"); n != 1 {
+				t.Fatalf("comment rows after first import = %d, want 1", n)
+			}
+			var storedID string
+			te.queryScalar(t, ctx, fmt.Sprintf("SELECT id FROM %s WHERE issue_id = ?", table), []any{"cin-1"}, &storedID)
+			if tc.incomingID != "" && storedID != tc.incomingID {
+				t.Fatalf("stored comment id = %q, want the supplied %q", storedID, tc.incomingID)
+			}
+			if tc.incomingID == "" && storedID == "" {
+				t.Fatalf("id-less comment stored without a derived id")
+			}
+			if d := commentJournal(t, te, ctx, "cin-1") - journalBefore; d != 1 {
+				t.Fatalf("comment journal events after first import = %d, want 1", d)
+			}
+
+			// Re-import as sent, then (id-less case) under the id it was stored with.
+			again := []*types.Comment{incoming()}
+			if tc.incomingID == "" {
+				withID := incoming()
+				withID.ID = storedID
+				again = append(again, withID)
+			}
+			for _, c := range again {
+				if err := create(t, te, ctx, plain, issueWith("cin-1", tc.wisp, base, c)); err != nil {
+					t.Fatalf("re-import with id %q: %v", c.ID, err)
+				}
+			}
+			if n := commentCount(t, te, ctx, table, "cin-1"); n != 1 {
+				t.Fatalf("comment rows after re-import = %d, want 1", n)
+			}
+			want := original("cin-1")
+			want.ID = storedID
+			assertStoredComment(t, te, ctx, table, storedID, want)
+			if d := commentJournal(t, te, ctx, "cin-1") - journalBefore; d != 1 {
+				t.Fatalf("comment journal events after re-import = %d, want still 1", d)
+			}
+		})
+	}
 }
