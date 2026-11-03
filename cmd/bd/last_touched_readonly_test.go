@@ -115,17 +115,17 @@ func assertLastTouchedUnchanged(t *testing.T, path string, wantContents []byte, 
 	t.Helper()
 	gotContents, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("read last-touched after readonly show: %v", err)
+		t.Fatalf("read last-touched after show: %v", err)
 	}
 	if !bytes.Equal(gotContents, wantContents) {
-		t.Fatalf("last-touched bytes changed after readonly show: got %q, want %q", gotContents, wantContents)
+		t.Fatalf("last-touched bytes changed after show: got %q, want %q", gotContents, wantContents)
 	}
 	info, err := os.Stat(path)
 	if err != nil {
-		t.Fatalf("stat last-touched after readonly show: %v", err)
+		t.Fatalf("stat last-touched after show: %v", err)
 	}
 	if !info.ModTime().Equal(wantMtime) {
-		t.Fatalf("last-touched mtime changed after readonly show: got %v, want %v", info.ModTime(), wantMtime)
+		t.Fatalf("last-touched mtime changed after show: got %v, want %v", info.ModTime(), wantMtime)
 	}
 }
 

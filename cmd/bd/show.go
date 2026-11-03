@@ -125,6 +125,10 @@ var showCmd = &cobra.Command{
 		// Direct mode - use routed resolution for cross-repo lookups
 		allDetails := []interface{}{}
 		foundCount := 0
+		// First argument that actually resolved, as its canonical issue ID.
+		// The last-touched marker records this rather than a raw argument, so
+		// a missing ID or a partial ID never lands in the marker as typed.
+		firstResolvedID := ""
 		for idx, id := range args {
 			// Resolve and get issue with routing (e.g., gt-xyz routes to another rig)
 			result, err := resolveAndGetIssueWithRouting(ctx, store, id)
@@ -152,6 +156,9 @@ var showCmd = &cobra.Command{
 			issueStore := result.Store // Use the store that contains this issue
 			// Note: result.Close() called at end of loop iteration
 			foundCount++
+			if firstResolvedID == "" {
+				firstResolvedID = issue.ID
+			}
 
 			if shortMode {
 				fmt.Println(formatShortIssue(issue))
@@ -301,9 +308,8 @@ var showCmd = &cobra.Command{
 			return SilentExit()
 		}
 
-		if len(args) > 0 {
-			SetLastTouchedID(args[0])
-		}
+		// SetLastTouchedID ignores an empty ID and honors strict readonly.
+		SetLastTouchedID(firstResolvedID)
 		return nil
 	},
 }
