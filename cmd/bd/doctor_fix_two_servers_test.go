@@ -22,16 +22,16 @@ import (
 // TestDoctorFixFreshCloneLeavesTheServerAtThePortUnchanged runs bd doctor
 // --fix --yes's Fresh Clone check and repair against two servers: the
 // workspace's database, holding a row newer than the tracked issues.jsonl, on
-// the Dolt server at the resolved port, and beside it a live unix socket that
-// metadata.json names (as bd dolt set socket writes it) on a server that
-// refuses the login, in a fresh clone (no .beads/dolt). The repair imports
-// issues.jsonl through the library store open, which dials TCP at the port
-// and never metadata.json's socket. The check dialed the socket, reported
-// the server unreachable ("not a fresh clone"), and --fix imported the
-// tracked copy over the live row at the port all the same (#7874 review).
-// The check reads the server the repair writes and finds the database there,
-// and --fix, which imports only a fresh clone the check found
-// (doctor.FreshCloneDetected), changes nothing.
+// the Dolt server at the resolved port, and beside it a live unix socket
+// that metadata.json names (as bd dolt set socket writes it) on a server that
+// refuses the login, in a fresh clone (no .beads/dolt). The check now dials
+// that socket, its repair's transport, so its login is refused: it reports
+// the server unreachable — not a fresh clone — and --fix, which imports only
+// a fresh clone the check found (doctor.FreshCloneDetected), never imports.
+// The check used to dial TCP at the port, find the database there, and the
+// repair-before-that imported the tracked copy over the live row at the port
+// while the check had read the socket's server (#7874 review). The live row
+// stays as it is.
 func TestDoctorFixFreshCloneLeavesTheServerAtThePortUnchanged(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("unix socket fixture")
@@ -91,8 +91,14 @@ func TestDoctorFixFreshCloneLeavesTheServerAtThePortUnchanged(t *testing.T) {
 	if got.Title != "live title" {
 		t.Errorf("bd doctor --fix overwrote the live row at the port: title %q, want %q\nFresh Clone: %s %s\n%s", got.Title, "live title", check.Status, check.Message, out)
 	}
-	if check.Status != statusOK || !strings.Contains(check.Message, "Database exists") {
-		t.Errorf("Fresh Clone = %s %q, want the database found on the server its repair writes", check.Status, check.Message)
+	if !strings.Contains(out, "Fix summary: 0 fixed, 1 skipped, 0 errors") {
+		t.Errorf("bd doctor --fix does not report the Fresh Clone repair it withheld as skipped:\n%s", out)
+	}
+	if check.Status != statusWarning || !strings.Contains(check.Message, "unix:"+socketServer.ln.Addr().String()) {
+		t.Errorf("Fresh Clone = %s %q, want the refusing socket's server named in a warning", check.Status, check.Message)
+	}
+	if doctor.FreshCloneDetected(check.Message) {
+		t.Errorf("Fresh Clone = %s %q; a refused login is not a fresh clone", check.Status, check.Message)
 	}
 }
 

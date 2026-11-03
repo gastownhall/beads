@@ -776,15 +776,15 @@ func TestDoctorScansReadTheServerTheirFixesWrite(t *testing.T) {
 // fix.ChildParentDependencies, Dependency Keys and fix.DependencyKeys, and
 // Blocked State and fix.RecomputeBlocked. The SQL fixes dial TCP at the port
 // (openFixDB). The Fresh Clone repair opens the store through the library
-// open, which dials BEADS_DOLT_SERVER_SOCKET socket first and never reads
-// metadata.json's dolt_server_socket. The checks dialed the live socket the
-// CLI's store dials, so --fix repaired the server at the port while the
-// check had read the socket's, and Fresh Clone's repair imported
-// issues.jsonl over live rows there (#7874 review). Orphaned Dependencies,
-// Child-Parent Dependencies, Dependency Keys and Blocked State still read the
-// store's socket once the first three read the server their repairs write,
-// so their repairs deleted, re-keyed or recomputed rows at the port that the
-// check had not read (#7874 review).
+// open, which — like the CLI's store — resolves metadata.json's
+// dolt_server_socket and dials the socket first, so the check that dials the
+// same transport (freshCloneRepairTransport) reads the server it writes
+// beside a port too. That repair used to drop metadata.json's socket and
+// write TCP at the port while the check had read the socket's server, so
+// Fresh Clone's repair imported issues.jsonl over live rows there, and the
+// Orphaned Dependencies, Child-Parent Dependencies, Dependency Keys and
+// Blocked State repairs then deleted, re-keyed or recomputed rows at the
+// port that their checks had not read (#7874 review).
 //
 // Each check also logs in as the user its repair presents. The library open
 // presents a BEADS_DOLT_CREDENTIAL_COMMAND token over the static user. The
@@ -864,7 +864,7 @@ func TestDoctorChecksReadTheServerTheirRepairsWrite(t *testing.T) {
 					repair: func() { _ = fix.RecomputeBlocked(repo) }},
 			} {
 				want, other := tcp, socketServer
-				if pair.libraryOpen && tc.inEnv {
+				if pair.libraryOpen {
 					want, other = socketServer, tcp
 				}
 				var users [2][]string // the users the check, then its repair, logged in as
