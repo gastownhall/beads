@@ -949,8 +949,8 @@ func checkBazelrcForkCache(bazelrc string) []error {
 	var errs []error
 	var opts []bazelrcOption
 	for _, o := range parseBazelrcOptions(bazelrc) {
-		if strings.Contains(o.flag, "remote_cache_compression") {
-			errs = append(errs, errors.New(o.source()+" sets "+o.flag+"; only setup-bazel's generated rc may, for fork-cache while rbe-cache advertises zstd"))
+		if strings.Contains(o.flag, "remote_cache_compression") && o.config != "fork-cache" {
+			errs = append(errs, errors.New(o.source()+" sets "+o.flag+"; only fork-cache may: rbe-cache alone advertises zstd, and Bazel refuses a remote that does not"))
 		}
 		switch {
 		case o.config == "fork-cache":
@@ -989,6 +989,9 @@ func checkBazelrcForkCache(bazelrc string) []error {
 	}
 	if !hasBazelrcOption(opts, "--remote_instance_name="+forkCacheInstance) {
 		errs = append(errs, errors.New("fork-cache lacks --remote_instance_name="+forkCacheInstance))
+	}
+	if on, _ := boolFlagFinal(opts, "remote_cache_compression"); !on {
+		errs = append(errs, errors.New("fork-cache lacks --remote_cache_compression (rbe-cache serves zstd; contributors read identity otherwise)"))
 	}
 	for name, want := range map[string]bool{
 		"remote_upload_local_results":                         false,
@@ -1067,6 +1070,7 @@ func TestBazelForkCacheConfig(t *testing.T) {
 		"build:fork-cache --experimental_build_event_upload_strategy=local\n" +
 		"build:fork-cache --experimental_circuit_breaker_strategy=failure\n" +
 		"build:fork-cache --jobs=64 --remote_timeout=15\n" +
+		"build:fork-cache --remote_cache_compression\n" +
 		"build:remote-exec --remote_upload_local_results\n" +
 		"test --noremote_upload_local_results\n" +
 		"try-import %workspace%/.bazelrc.local\n"
@@ -1109,8 +1113,10 @@ func TestBazelForkCacheConfig(t *testing.T) {
 		"slow timeout":               good + "build:fork-cache --remote_timeout=60\n",
 		"zero timeout":               good + "build:fork-cache --remote_timeout=0\n",
 		"duration timeout":           good + "build:fork-cache --remote_timeout=15s\n",
-		"zstd in .bazelrc":           good + "build:fork-cache --remote_cache_compression\n",
+		"no zstd":                    drop("build:fork-cache --remote_cache_compression"),
+		"zstd turned off":            good + "build:fork-cache --noremote_cache_compression\n",
 		"trusted zstd in .bazelrc":   good + "build:remote-exec --remote_cache_compression\n",
+		"plain zstd in .bazelrc":     good + "build --remote_cache_compression\n",
 		"plain build expands":        good + "build --config=fork-cache\n",
 		"plain common expands":       good + "common --config=fork-cache\n",
 		"plain upload":               good + "build --remote_upload_local_results\n",
@@ -1229,9 +1235,9 @@ func TestBazelrcIntegrationLaneFixtures(t *testing.T) {
 }
 
 // TestBazelRemoteCacheCompressionOnlyForkCache: --remote_cache_compression
-// appears in one place, write-bazelrc.sh's fork-cache line behind
-// the zstd probe. No .bazelrc config, workflow or other action file may set
-// it: every other remote (rbe-west's trusted schedulers on :443, rbe-fork on
+// appears in one place, .bazelrc's fork-cache line (contributors and fork CI
+// alike). No other .bazelrc config, workflow or action file may set it:
+// every other remote (rbe-west's trusted schedulers on :443, rbe-fork on
 // :8444) advertises no compressor, and Bazel then refuses the remote.
 func TestBazelRemoteCacheCompressionOnlyForkCache(t *testing.T) {
 	root := bazelPolicyRoot(t)
@@ -1257,8 +1263,7 @@ func TestBazelRemoteCacheCompressionOnlyForkCache(t *testing.T) {
 			}
 		}
 	}
-	want := setupBazelActionDir + "/write-bazelrc.sh:"
-	if len(found) != 1 || !strings.HasPrefix(found[0], want) || !strings.HasSuffix(found[0], `echo "`+forkCacheZstdLine+`"`) {
-		t.Errorf("--remote_cache_compression set at %q; want only %s echo %q", found, want, forkCacheZstdLine)
+	if len(found) != 1 || !strings.HasPrefix(found[0], ".bazelrc:") || !strings.HasSuffix(found[0], ": "+forkCacheZstdLine) {
+		t.Errorf("--remote_cache_compression set at %q; want only .bazelrc's %q", found, forkCacheZstdLine)
 	}
 }

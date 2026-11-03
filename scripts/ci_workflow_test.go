@@ -5405,7 +5405,7 @@ func TestSetupBazelRCWriter(t *testing.T) {
 			"GITHUB_OUTPUT=" + out,
 			"BAZEL_CI_CACHE_DIR=" + filepath.Join(dir, "cache"),
 			"BAZEL_CI_SECRET_DIR=" + secret,
-			// The fork cache's zstd probe: a refused port unless extra
+			// The fork cache's rrc probe: a refused port unless extra
 			// names a stand-in rbe-cache; never rbe-cache itself.
 			"RBE_CACHE_PROBE_URL=" + refusedProbeURL,
 		}, extra...)
@@ -5454,34 +5454,30 @@ func TestSetupBazelRCWriter(t *testing.T) {
 			t.Errorf("log lacks the read-only cache notice:\n%s", logs)
 		}
 	})
-	// The fork cache asks for zstd exactly while rbe-cache advertises it
-	// (cache-zstd-probe.sh against a stand-in; TestCacheZstdProbe runs every
-	// other answer): the line follows --config=fork-cache, and the lane
-	// never fails on the probe. Remote-exec and rbe-fork never probe.
-	t.Run("fork cache zstd follows rbe-cache", func(t *testing.T) {
+	// The fork cache's zstd is .bazelrc's own fork-cache line
+	// (TestBazelRemoteCacheCompressionOnlyForkCache), whatever rbe-cache
+	// advertises: this rc never adds it, and a job that does not read the
+	// remote repo contents cache never asks rbe-cache anything.
+	t.Run("fork cache rc adds no zstd", func(t *testing.T) {
 		requireCacheZstdProbeTools(t)
-		for answer, wantLine := range map[string]bool{"zstd": true, "identity": false, "refused": false} {
-			env := []string{"BAZEL_FORK_CACHE=true"}
-			if answer != "refused" {
-				body := capsZstd
-				if answer == "identity" {
-					body = capsLive
-				}
-				url, ca, _ := serveCapabilities(t, capsAnswer{grpc: "0", body: grpcMessage(body)})
-				env = append(env, "RBE_CACHE_PROBE_URL="+url, "CURL_CA_BUNDLE="+ca)
+		for _, answer := range []string{"zstd", "identity"} {
+			body := capsZstd
+			if answer == "identity" {
+				body = capsLive
 			}
-			outputs, rc, logs, err := run(t, env...)
+			url, ca, hits := serveCapabilities(t, capsAnswer{grpc: "0", body: grpcMessage(body)})
+			outputs, rc, logs, err := run(t, "BAZEL_FORK_CACHE=true", "RBE_CACHE_PROBE_URL="+url, "CURL_CA_BUNDLE="+ca)
 			if err != nil {
 				t.Fatalf("%s: err=%v\n%s", answer, err, logs)
 			}
-			if got := strings.Contains(rc, "\nbuild --config=fork-cache\n"+forkCacheZstdLine+"\n"); got != wantLine || strings.Count(rc, "remote_cache_compression") != map[bool]int{true: 1}[wantLine] {
-				t.Errorf("rbe-cache %s: rc = %q; want %q right after --config=fork-cache: %v", answer, rc, forkCacheZstdLine, wantLine)
+			if strings.Count(rc, "remote_cache_compression") != 0 {
+				t.Errorf("rbe-cache %s: rc = %q; want no remote_cache_compression (.bazelrc's fork-cache has it)", answer, rc)
 			}
 			if strings.Contains(rc, "remote-exec") || !strings.Contains(outputs, "cache=true") {
 				t.Errorf("rbe-cache %s: outputs = %q rc = %q; want cache=true and no remote-exec", answer, outputs, rc)
 			}
-			if !strings.Contains(logs, "rbe-cache zstd probe: ") {
-				t.Errorf("rbe-cache %s: log lacks the probe's verdict:\n%s", answer, logs)
+			if n := hits.Load(); n != 0 || strings.Contains(logs, "rbe-cache zstd probe: ") {
+				t.Errorf("rbe-cache %s: %d probe requests; want none (no zstd probe, not an rrc reader):\n%s", answer, n, logs)
 			}
 		}
 	})
@@ -5489,8 +5485,8 @@ func TestSetupBazelRCWriter(t *testing.T) {
 	// repo contents cache readers, bazel_rrc_test.go) reads the remote repo
 	// contents cache exactly while rbe-cache answers (cache-rrc-probe.sh
 	// against a stand-in; TestCacheRRCProbe runs every other answer and the
-	// kill switch): the reader's two lines, after --config=fork-cache and
-	// any zstd line, and nothing else; otherwise none, with a notice saying
+	// kill switch): the reader's two lines, right after --config=fork-cache,
+	// and nothing else; otherwise none, with a notice saying
 	// why. A job that does not opt in never probes. The step summary says
 	// which, and why. The lane never fails on the probe.
 	t.Run("fork cache repo contents cache follows rbe-cache", func(t *testing.T) {
@@ -5521,9 +5517,6 @@ func TestSetupBazelRCWriter(t *testing.T) {
 				t.Fatalf("%s: rc lacks build --config=fork-cache:\n%s", answer, rc)
 			}
 			var want, got []string
-			if answer == "zstd" {
-				want = append(want, forkCacheZstdLine)
-			}
 			if wantRead {
 				want = append(want, bazelRRCReadLines...)
 			}
