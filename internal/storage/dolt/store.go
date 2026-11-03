@@ -2736,7 +2736,7 @@ func (s *DoltStore) verifyProjectIdentity(ctx context.Context, beadsDir string, 
 		// guard exactly when a server warming window makes reads fail, so
 		// refuse instead (PR #7565).
 		if !dberrors.IsMissingTable(err, "metadata") {
-			return projectIdentityReadError(s.database, err)
+			return projectIdentityReadError(s.database, openedByInit, err)
 		}
 		return nil // no metadata table yet — pre-created database, skip
 	}
@@ -2755,12 +2755,39 @@ func (s *DoltStore) verifyProjectIdentity(ctx context.Context, beadsDir string, 
 // projectIdentityMismatchError, which reports two identities that were both
 // read and differ, this is a failed read — no proof either way — and the
 // open refuses rather than silently adopt the database (the adoption vector
-// GH#4637 Part A guards). The cause stays wrapped, so errors.Is/errors.As
-// reach it.
-func projectIdentityReadError(database string, cause error) error {
+// GH#4637 Part A guards; PR #7565).
+//
+// openedByInit is true only for bd init's own open (Config.OpenedByInit),
+// which gets the initialize wording; every other open keeps the connect
+// wording (GH#5558: an init caller must not be told not to run init). The
+// advice stays diagnostic — the database may be valid and merely
+// unreachable or underprivileged — so it prescribes no drop, re-create or
+// repair. The cause is wrapped through remedy.PrintedError, so a
+// server-supplied message cannot forge diagnostic lines with control
+// characters while errors.Is/errors.As still reach it.
+func projectIdentityReadError(database string, openedByInit bool, cause error) error {
+	if openedByInit {
+		return fmt.Errorf(
+			"cannot verify project identity — refusing to initialize against an existing database\n\n"+
+				"  Database: %q\n"+
+				"  Cause:    %w\n\n"+
+				"bd could not read this database's recorded project identity, so it cannot\n"+
+				"prove the database belongs to this project; bd init will not write to it.\n"+
+				"To diagnose: bd dolt status\n"+
+				"Check that the intended Dolt server, database and credentials are\n"+
+				"configured, then retry.",
+			database, remedy.PrintedError(cause))
+	}
 	return fmt.Errorf(
-		"cannot verify project identity — refusing to connect to database %q: %w",
-		database, cause)
+		"cannot verify project identity — refusing to connect\n\n"+
+			"  Database: %q\n"+
+			"  Cause:    %w\n\n"+
+			"bd could not read this database's recorded project identity, so it cannot\n"+
+			"prove the database belongs to this project; it will not connect to it.\n"+
+			"To diagnose: bd dolt status\n"+
+			"Check that the intended Dolt server, database and credentials are\n"+
+			"configured, then retry.",
+		database, remedy.PrintedError(cause))
 }
 
 // projectIdentityMismatchError builds verifyProjectIdentity's refusal when

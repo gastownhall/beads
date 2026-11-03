@@ -1200,6 +1200,66 @@ func TestVerifyProjectIdentity_ReadErrors(t *testing.T) {
 			t.Errorf("unfulfilled sqlmock expectations: %v", err)
 		}
 	})
+
+	// The rendered refusal (PR #7565): connect vs initialize wording per
+	// OpenedByInit, bd dolt status offered, the cause escaped for the
+	// terminal while the chain still reaches it, and no recovery prescribed
+	// that a merely unreachable or underprivileged valid database would not
+	// need — diagnose first.
+	t.Run("refusal diagnostic rendering", func(t *testing.T) {
+		cause := errors.New("read failed\n\x1b[31m forged line\b")
+		expectRendered := func(t *testing.T, openedByInit bool, wantWording string) string {
+			t.Helper()
+			store, mock, beadsDir := newIdentityUnitStore(t, localID, database)
+			expectIdentityRead(mock, nil, cause)
+			err := store.verifyProjectIdentity(context.Background(), beadsDir, openedByInit)
+			if err == nil {
+				t.Fatal("verifyProjectIdentity() = nil; want the read refusal")
+			}
+			msg := err.Error()
+			for _, want := range []string{
+				"cannot verify project identity",
+				wantWording,
+				`"` + database + `"`,
+				"bd dolt status",
+			} {
+				if !strings.Contains(msg, want) {
+					t.Errorf("refusal missing %q:\n%s", want, msg)
+				}
+			}
+			for _, forbidden := range []string{
+				"Do NOT run 'bd init'",
+				"DROP DATABASE",
+				"recreate",
+				"bd doctor --fix",
+				"bd bootstrap",
+				"DIFFERENT project",
+				"another project",
+			} {
+				if strings.Contains(msg, forbidden) {
+					t.Errorf("refusal prescribes or asserts %q, which an unreadable valid database does not prove:\n%s", forbidden, msg)
+				}
+			}
+			if strings.ContainsRune(msg, '\x1b') {
+				t.Errorf("refusal prints a raw escape character from the cause:\n%q", msg)
+			}
+			if !strings.Contains(msg, `\x1b`) {
+				t.Errorf("refusal does not spell the escaped cause:\n%s", msg)
+			}
+			if !errors.Is(err, cause) {
+				t.Errorf("refusal does not wrap the cause:\n%v", err)
+			}
+			return msg
+		}
+		normal := expectRendered(t, false, "refusing to connect")
+		if strings.Contains(normal, "refusing to initialize") {
+			t.Errorf("a normal open got the bd init wording:\n%s", normal)
+		}
+		initMsg := expectRendered(t, true, "refusing to initialize against an existing database")
+		if strings.Contains(initMsg, "refusing to connect") {
+			t.Errorf("the bd init open got the connect wording:\n%s", initMsg)
+		}
+	})
 }
 
 // trackedConnErr is a retryable "invalid connection" failure that records
@@ -1230,7 +1290,7 @@ func TestVerifyProjectIdentity_ReadRetry(t *testing.T) {
 
 	t.Run("transient failure retries then the read decides", func(t *testing.T) {
 		for name, dbID := range map[string]string{
-			"matching identity passes": localID,
+			"matching identity passes":         localID,
 			"recovered mismatch still refuses": "dddddddd-dddd-dddd-dddd-dddddddddddd",
 		} {
 			t.Run(name, func(t *testing.T) {
@@ -1385,9 +1445,9 @@ func TestCrossProject_IdentityCheck_SoftSkip_NoBdSchema(t *testing.T) {
 
 	const localID = "99999999-9999-9999-9999-999999999999"
 	variants := []struct {
-		name           string
+		name            string
 		createIfMissing bool
-		openedByInit   bool
+		openedByInit    bool
 	}{
 		{"connect existing", false, false},
 		{"init existing", false, true},
