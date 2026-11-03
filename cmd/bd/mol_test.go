@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 
@@ -3407,4 +3408,77 @@ func advanceForTest(ctx context.Context, s storage.DoltStorage, closedStepID str
 		return nil, err
 	}
 	return continueResultOf(result), nil
+}
+
+// TestAnalyzeMoleculeParallelInheritsBlockedGroup pins GH#7638 on the cmd
+// surface's own wrapper: a group step blocked from outside its subtree keeps
+// its children out of the ready list and the parallel groups, and the blocked
+// parent itself appears in each child's BlockedBy.
+func TestAnalyzeMoleculeParallelInheritsBlockedGroup(t *testing.T) {
+	root := &types.Issue{
+		ID:        "mol-inherit",
+		Title:     "Molecule with a blocked group",
+		Status:    types.StatusOpen,
+		IssueType: types.TypeEpic,
+	}
+	brief := &types.Issue{
+		ID:        "mol-inherit.brief",
+		Title:     "Brief",
+		Status:    types.StatusOpen,
+		IssueType: types.TypeTask,
+	}
+	group := &types.Issue{
+		ID:        "mol-inherit.group",
+		Title:     "Group (blocked by the brief)",
+		Status:    types.StatusOpen,
+		IssueType: types.TypeTask,
+	}
+	work := &types.Issue{
+		ID:        "mol-inherit.work",
+		Title:     "Work under the group",
+		Status:    types.StatusOpen,
+		IssueType: types.TypeTask,
+	}
+
+	subgraph := &MoleculeSubgraph{
+		Root:   root,
+		Issues: []*types.Issue{root, brief, group, work},
+		IssueMap: map[string]*types.Issue{
+			root.ID:  root,
+			brief.ID: brief,
+			group.ID: group,
+			work.ID:  work,
+		},
+		Dependencies: []*types.Dependency{
+			{IssueID: brief.ID, DependsOnID: root.ID, Type: types.DepParentChild},
+			{IssueID: group.ID, DependsOnID: root.ID, Type: types.DepParentChild},
+			{IssueID: work.ID, DependsOnID: group.ID, Type: types.DepParentChild},
+			{IssueID: group.ID, DependsOnID: brief.ID, Type: types.DepBlocks},
+		},
+	}
+
+	analysis := analyzeMoleculeParallel(subgraph)
+
+	if !analysis.Steps[brief.ID].IsReady {
+		t.Error("brief should be ready")
+	}
+	groupInfo := analysis.Steps[group.ID]
+	if groupInfo.IsReady {
+		t.Error("group should be blocked by the brief")
+	}
+	workInfo := analysis.Steps[work.ID]
+	if workInfo.IsReady {
+		t.Error("work should not be ready; its parent group is blocked (GH#7638)")
+	}
+	if !slices.Contains(workInfo.BlockedBy, group.ID) {
+		t.Errorf("work.BlockedBy = %v, want the blocked parent group listed", workInfo.BlockedBy)
+	}
+	if analysis.ReadySteps != 1 {
+		t.Errorf("ReadySteps = %d, want 1 (the brief only; the root is not a step)", analysis.ReadySteps)
+	}
+	for _, members := range analysis.ParallelGroups {
+		if slices.Contains(members, work.ID) {
+			t.Errorf("parallel group %v contains the darkened work step", members)
+		}
+	}
 }

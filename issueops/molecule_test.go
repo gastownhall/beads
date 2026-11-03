@@ -1302,6 +1302,14 @@ func TestMoleculeAnalysisExcludesTheRoot(t *testing.T) {
 		if got := a.Steps["m.a"].CanParallel; !slices.Equal(got, []string{"m.b"}) {
 			t.Errorf("m.a CanParallel = %v, want [m.b]", got)
 		}
+		for _, step := range view.Steps {
+			if step.Issue.ID == "m" {
+				t.Error("view.Steps contains the root")
+			}
+		}
+		if view.Total != 3 {
+			t.Errorf("view.Total = %d, want 3", view.Total)
+		}
 	})
 
 	t.Run("a root with no steps", func(t *testing.T) {
