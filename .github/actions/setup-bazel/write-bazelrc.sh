@@ -33,7 +33,9 @@
 # (--remote_cache_compression) are .bazelrc's own fork-cache line, so
 # contributors get them too; this rc adds none. No other mode ever asks,
 # because only the anonymous cache advertises zstd, and Bazel refuses a
-# remote that does not. With BAZEL_RRC_READ=true too
+# remote that does not. cache-zstd-probe.sh checks that rbe-cache still
+# advertises it: if not, a warning says the job builds locally, and it gets
+# no remote repo contents cache lines. With BAZEL_RRC_READ=true too
 # (bazel.yml's remote repo contents cache readers alone: the jobs whose
 # configs rrc-lane-commands.txt seeds), and while rbe-cache answers
 # (cache-rrc-probe.sh, which also holds the committed kill switch), it reads
@@ -251,10 +253,22 @@ elif [[ "$fork_cache" == true ]]; then
 	# why. That holds at probe time only: after loading, Bazel fetches the
 	# files lazily, and losing rbe-cache then fails the command (R4). Both
 	# lines are key neutral, as for the trusted readers; fork-cache uploads
-	# nothing, and rbe-cache refuses every write.
+	# nothing, and rbe-cache refuses every write. First, a diagnostic:
+	# .bazelrc's fork-cache asks for zstd, so if rbe-cache stops advertising
+	# it Bazel refuses the remote and builds locally (the fallback flags);
+	# then the remote repo contents cache would only cost lookups too.
 	rrc_read=false
+	zstd=true
+	if ! zstd_why=$(bash "$(dirname "${BASH_SOURCE[0]}")/cache-zstd-probe.sh" 2>&1); then
+		zstd=false
+		echo "::warning title=rbe-cache without zstd::$zstd_why (.bazelrc's fork-cache asks for zstd, so Bazel refuses rbe-cache)"
+	else
+		echo "$zstd_why"
+	fi
 	if [[ "$rrc_reader" != true ]]; then
 		why="not a remote repo contents cache reader (no BAZEL_RRC_READ)"
+	elif [[ "$zstd" != true ]]; then
+		why=$zstd_why
 	elif why=$(bash "$(dirname "${BASH_SOURCE[0]}")/cache-rrc-probe.sh" 2>&1); then
 		rrc_read=true
 		echo "$why"
@@ -262,7 +276,7 @@ elif [[ "$fork_cache" == true ]]; then
 		echo "::notice title=No remote repo contents cache::$why"
 	fi
 	echo "Fork cache remote repo contents cache read: **$([[ "$rrc_read" == true ]] && echo on || echo off)** (${why#rbe-cache rrc probe: })" >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
-	# The probe never fails this script; it only decides the lines.
+	# The probes never fail this script; they only decide the lines.
 	{
 		echo "build --config=fork-cache"
 		if [[ "$rrc_read" == true ]]; then

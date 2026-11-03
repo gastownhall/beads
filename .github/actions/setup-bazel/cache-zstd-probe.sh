@@ -7,11 +7,13 @@
 # listed, an HTTP or gRPC error, a refused connection, a timeout, an answer
 # that does not parse, no curl or python3.
 #
-# An operator check, no longer called by CI: .bazelrc's fork-cache asks for
-# zstd itself (--remote_cache_compression, committed 2026-11), so while this
-# exits nonzero against the live endpoint every fork-cache build, contributor
-# or CI, runs locally until rbe-cache advertises zstd again or .bazelrc's
-# line is reverted.
+# A diagnostic, not a gate: .bazelrc's fork-cache asks for zstd itself
+# (--remote_cache_compression, committed 2026-11), so while this exits
+# nonzero against the live endpoint every fork-cache build, contributor or
+# CI, runs locally until rbe-cache advertises zstd again or .bazelrc's line
+# is reverted. Fork-cache CI jobs run it first (beads' write-bazelrc.sh,
+# gascity's bazel.yml): on failure they warn and skip the remote repo
+# contents cache lines, and never fail. Operators can run it by hand.
 #
 # One unary gRPC call over curl's HTTP/2, decoded by python3's standard
 # library: no grpcurl, no new action. Nothing goes to stdout; one verdict

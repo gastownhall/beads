@@ -2,6 +2,7 @@ package scripts_test
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1236,12 +1237,26 @@ func TestBazelrcIntegrationLaneFixtures(t *testing.T) {
 
 // TestBazelRemoteCacheCompressionOnlyForkCache: --remote_cache_compression
 // appears in one place, .bazelrc's fork-cache line (contributors and fork CI
-// alike). No other .bazelrc config, workflow or action file may set it:
-// every other remote (rbe-west's trusted schedulers on :443, rbe-fork on
-// :8444) advertises no compressor, and Bazel then refuses the remote.
+// alike). No other .bazelrc config, workflow, action file, git hook, pre-push
+// suite, rbe tool or make target may set it: every other remote (rbe-west's
+// trusted schedulers on :443, rbe-fork on :8444) advertises no compressor,
+// and Bazel then refuses the remote.
 func TestBazelRemoteCacheCompressionOnlyForkCache(t *testing.T) {
 	root := bazelPolicyRoot(t)
-	files := []string{".bazelrc"}
+	files := []string{".bazelrc", "Makefile", "scripts/pre-push-suite.sh"}
+	for _, dir := range []string{".githooks", "tools/rbe"} {
+		err := filepath.WalkDir(filepath.Join(root, dir), func(path string, d fs.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
+				return err
+			}
+			rel, err := filepath.Rel(root, path)
+			files = append(files, rel)
+			return err
+		})
+		if err != nil {
+			t.Fatalf("walk %s: %v", dir, err)
+		}
+	}
 	for _, pattern := range []string{".github/workflows/*.yml", ".github/workflows/*.yaml", ".github/actions/*/*"} {
 		m, err := filepath.Glob(filepath.Join(root, pattern))
 		if err != nil {
