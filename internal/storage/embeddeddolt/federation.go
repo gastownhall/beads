@@ -509,6 +509,7 @@ func (s *EmbeddedDoltStore) Sync(ctx context.Context, peer string, strategy stri
 	}
 	// A cleanup failure after the push is reported but does not undo it.
 	result.Pushed = err == nil || pushRes.Pushed
+	result.PushFiltered = pushRes.Filtered
 
 	// Record last sync time in metadata.
 	_ = s.setLastSyncTime(ctx, peer)

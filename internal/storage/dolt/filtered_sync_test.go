@@ -142,8 +142,8 @@ func TestFilteredSyncExcludesTypes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Sync: %v", err)
 	}
-	if res.PushError != nil || !res.Pushed {
-		t.Fatalf("Sync pushed=%v push error=%v, want a publication", res.Pushed, res.PushError)
+	if res.PushError != nil || !res.Pushed || !res.PushFiltered {
+		t.Fatalf("Sync pushed=%v filtered=%v push error=%v, want a filtered publication", res.Pushed, res.PushFiltered, res.PushError)
 	}
 
 	tip := f.peerTip(t, ctx)
