@@ -190,6 +190,7 @@ go_test(
         "create_issue_commit_test.go",
         "create_rollback_test.go",
         "credential_binding_test.go",
+        "credential_migration_test.go",
         "credentials_peer_test.go",
         "credentials_test.go",
         "cross_project_test.go",

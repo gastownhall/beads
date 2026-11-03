@@ -2,8 +2,12 @@ package dolt
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -913,6 +917,11 @@ func TestFederationPeerDecryptKeyMismatchNamesTheLocalKey(t *testing.T) {
 	// below vacuous, because filepath.Join("", credentialKeyFile) is the bare
 	// basename the fix replaced (GH#5214 review).
 	beadsDir := t.TempDir()
+	// A completed-migration marker for localKey, so the reads below go
+	// straight to the row instead of running the legacy credential upgrade.
+	if err := peercred.WriteMarker(filepath.Join(beadsDir, credentialKeyFile), localKey); err != nil {
+		t.Fatalf("WriteMarker: %v", err)
+	}
 	newStore := func(t *testing.T) (*DoltStore, sqlmock.Sqlmock) {
 		t.Helper()
 		db, mock, err := sqlmock.New()
@@ -1387,4 +1396,45 @@ func TestDecryptWithKeyStaysUnwrappedForRotation(t *testing.T) {
 	if errors.Is(err, storage.ErrCredentialKeyMismatch) {
 		t.Errorf("error = %v, want the bare cipher error; classification belongs to decryptPassword", err)
 	}
+}
+
+// encryptWithKey seals plaintext in the legacy unbound format (nonce ||
+// AES-GCM, no associated data) that predates peercred v2, for tests that
+// build pre-upgrade rows.
+func encryptWithKey(plaintext string, key []byte) ([]byte, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return nil, err
+	}
+	return gcm.Seal(nonce, nonce, []byte(plaintext), nil), nil
+}
+
+// decryptWithKey opens the legacy unbound format.
+func decryptWithKey(encrypted []byte, key []byte) (string, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return "", err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+	nonceSize := gcm.NonceSize()
+	if len(encrypted) < nonceSize {
+		return "", fmt.Errorf("ciphertext too short")
+	}
+	nonce, ciphertext := encrypted[:nonceSize], encrypted[nonceSize:]
+	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
+	if err != nil {
+		return "", err
+	}
+	return string(plaintext), nil
 }

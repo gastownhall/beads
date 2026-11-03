@@ -2,10 +2,15 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "peercred",
-    srcs = ["peercred.go"],
+    srcs = [
+        "migrate.go",
+        "peercred.go",
+    ],
     importpath = "github.com/steveyegge/beads/internal/storage/peercred",
     visibility = ["//:__subpackages__"],
+    deps = ["//internal/remedy"],
 )
+
 go_test(
     name = "peercred_test",
     srcs = ["peercred_test.go"],

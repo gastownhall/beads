@@ -135,6 +135,7 @@ bd_test
 
 # Beads / Dolt files (added by bd init)
 .beads-credential-key
+.beads-credential-key.v2-migrated
 
 # Beads / Dolt files (added by bd init)
 .beads/proxieddb/
