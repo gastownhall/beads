@@ -146,8 +146,10 @@ func BuildIssueDetails(ctx context.Context, src DetailSource, issue *types.Issue
 	if dependencyCountErr == nil {
 		details.DependencyCount = &dependencyCount
 	}
-	commentCount, _ := src.CountComments(ctx, id, isWisp)
-	details.CommentCount = &commentCount
+	commentCount, commentCountErr := src.CountComments(ctx, id, isWisp)
+	if commentCountErr == nil {
+		details.CommentCount = &commentCount
+	}
 
 	// depsErr is kept rather than discarded: it is what separates "the edge
 	// list came back short" from "the edge list never came back", and the
@@ -199,10 +201,12 @@ func BuildIssueDetails(ctx context.Context, src DetailSource, issue *types.Issue
 			return nil, err
 		}
 		details.Comments = comments
-	} else if commentCount > 0 {
+	} else if commentCountErr == nil && commentCount > 0 {
 		// ga-clgh: comment_count alone announces content exists without
 		// saying the representation is partial. Flag it explicitly so a
 		// caller reading only `.comments` doesn't read absence as "none".
+		// A failed count establishes nothing either way, so it sets no
+		// marker: the absent comment_count is the unknown (GH#7563).
 		omitted := true
 		details.CommentsOmitted = &omitted
 	}

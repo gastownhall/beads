@@ -204,6 +204,25 @@ func TestBuildIssueDetails_FailedCountsAreUnset(t *testing.T) {
 			t.Errorf("DependencyCount = %d, want unset", *details.DependencyCount)
 		}
 	})
+
+	// The default, count-only view: a failed comment count must not
+	// announce comments_omitted either, for the same reason the list path's
+	// TestHydrateListCommentsMarksNothingWhenCountsAreSkipped already
+	// requires (list_comments_test.go) - deriving the flag from a count that
+	// means nothing is exactly the bug.
+	t.Run("comment count failed, count-only view", func(t *testing.T) {
+		src := skewSource{issue: issue, commentCountErr: boom}
+		details, err := BuildIssueDetails(ctx, src, issue, false, DetailOptions{})
+		if err != nil {
+			t.Fatalf("BuildIssueDetails: %v", err)
+		}
+		if details.CommentCount != nil {
+			t.Errorf("CommentCount = %d, want unset", *details.CommentCount)
+		}
+		if details.CommentsOmitted != nil {
+			t.Errorf("CommentsOmitted = %v, want unset", *details.CommentsOmitted)
+		}
+	})
 }
 
 // TestBuildIssueDetails_UnresolvableDependents pins the inbound half, and in
@@ -414,6 +433,23 @@ func TestBuildIssueDetails_FailedCountIsAbsentNotZero(t *testing.T) {
 			dependencyCount: ptr64(0),
 			commentCount:    ptr64(0),
 			dependents:      1,
+		},
+
+		// AC-2: a failed comment count in count-only mode leaves both
+		// comment_count and comments_omitted out. The positive value
+		// beside the error catches a fix that drops the pointer but
+		// still derives the marker from the raw value.
+		{
+			name:            "comment count failed with zero",
+			src:             skewSource{issue: issue, commentCountErr: boom},
+			dependentCount:  ptr64(0),
+			dependencyCount: ptr64(0),
+		},
+		{
+			name:            "comment count failed with positive",
+			src:             skewSource{issue: issue, commentCount: 2, commentCountErr: boom},
+			dependentCount:  ptr64(0),
+			dependencyCount: ptr64(0),
 		},
 	}
 
