@@ -1170,7 +1170,15 @@ func PersistComments(ctx context.Context, tx DBTX, issue *types.Issue) (CreateIs
 			continue
 		}
 		// Incoming id (import/interchange): preserve it, with the historical
-		// existence check preventing duplicates on re-import.
+		// content check preventing duplicates on re-import. The content check
+		// misses a stored comment whose id matches but whose text, author or
+		// time was edited since, and inserting it then collides on the
+		// primary key (Error 1062), rolling back the whole chunk. Resolve the
+		// id before writing: comment merge is additive, so a comment already
+		// stored on this issue keeps its stored fields in every mode — no
+		// rewrite, no comment journal event, whatever the issue row's own
+		// stale guard decided. An id owned by a different issue is a conflict
+		// the caller must see (not a silent remap, drop or duplicate).
 		var exists int
 		//nolint:gosec // G201: table is determined by ephemeral flag
 		if err := tx.QueryRowContext(ctx, fmt.Sprintf(`
@@ -1182,8 +1190,27 @@ func PersistComments(ctx context.Context, tx DBTX, issue *types.Issue) (CreateIs
 		if exists > 0 {
 			continue
 		}
+		var owner string
 		//nolint:gosec // G201: table is determined by ephemeral flag
-		_, err := tx.ExecContext(ctx, fmt.Sprintf(`
+		err := tx.QueryRowContext(ctx, fmt.Sprintf(`
+				SELECT issue_id FROM %s WHERE id = ?
+			`, commentTable), comment.ID).Scan(&owner)
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			// Not stored anywhere: insert below, preserving the incoming id.
+		case err != nil:
+			return result, fmt.Errorf("failed to check comment id %s for %s: %w", comment.ID, issue.ID, err)
+		case owner == issue.ID:
+			// Already stored on this issue: keep the stored comment (fields
+			// and journal state), whatever the incoming snapshot says.
+			continue
+		default:
+			return result, fmt.Errorf(
+				"cannot import comment %s on issue %s: it is already stored on issue %s",
+				comment.ID, issue.ID, owner)
+		}
+		//nolint:gosec // G201: table is determined by ephemeral flag
+		_, err = tx.ExecContext(ctx, fmt.Sprintf(`
 			INSERT INTO %s (id, issue_id, author, text, created_at)
 			VALUES (?, ?, ?, ?, ?)
 		`, commentTable), comment.ID, issue.ID, comment.Author, comment.Text, createdAtText)

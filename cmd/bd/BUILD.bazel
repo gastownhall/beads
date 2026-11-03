@@ -910,6 +910,7 @@ go_test(
         "if_revision_test.go",
         "import_chunking_embedded_test.go",
         "import_chunking_test.go",
+        "import_comment_id_embedded_test.go",
         "import_embedded_test.go",
         "import_from_jsonl_test.go",
         "import_global_prefix_isolation_test.go",

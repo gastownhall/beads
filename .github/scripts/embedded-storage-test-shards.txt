@@ -397,6 +397,7 @@
 40 21 TestEmbeddedTransactionStandaloneWispLifecyclePersistsWithoutDoltCommit
 40 21 TestLargeBatchApplyWallClock_Embedded
 
+40 22 TestCreateIssuesCommentIDMatch
 40 22 TestEdgeReaderContract
 40 22 TestEmbeddedChildCounterNeverReissuesASweptChild
 40 22 TestEmbeddedDepRekeyAbortLeavesMarkerUnrecorded
