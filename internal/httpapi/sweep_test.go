@@ -216,6 +216,7 @@ func TestSweepResponseCarriesEveryRoleField(t *testing.T) {
 		Skipped: issueops.SweepSkips{
 			Pinned: 5, Referenced: 6, LiveDependent: 7, NotClosed: 8,
 			UnknownClosedAt: 9, ClosedAtOrAfterCutoff: 10, Unreadable: 11,
+			RetentionRequired: 13,
 		},
 		Remaining:     12,
 		RetainIDs:     true,

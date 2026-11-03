@@ -73,7 +73,7 @@ func NewExternalDoltServerUOWProvider(
 		return nil, fmt.Errorf("uow: get proxy endpoint: %w", err)
 	}
 
-	provider, err := openAndInitSchema(ctx, ep, externalBackendAddress(external), database, rootUser, rootPassword, tlsConfigName, teamServer, expectedProjectID, resolved)
+	provider, err := openAndInitSchema(ctx, proxy.DataNetwork, ep, externalBackendAddress(external), database, rootUser, rootPassword, tlsConfigName, teamServer, expectedProjectID, resolved)
 	if err != nil {
 		releaseTLS()
 		return nil, err

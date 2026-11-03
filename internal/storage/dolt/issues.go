@@ -738,8 +738,8 @@ func (s *DoltStore) deleteIssues(ctx context.Context, ids []string, cascade bool
 	// to avoid write timeout on large sets — see bd-2ehd, ff-tqm).
 	ephIDs, regularIDs := s.partitionByWispStatus(ctx, ids)
 	wispDeleteCount := 0
+	var activeWispIDs []string
 	if len(ephIDs) > 0 {
-		var activeWispIDs []string
 		for _, eid := range ephIDs {
 			if s.isActiveWisp(ctx, eid) {
 				activeWispIDs = append(activeWispIDs, eid)
@@ -762,7 +762,9 @@ func (s *DoltStore) deleteIssues(ctx context.Context, ids []string, cascade bool
 	var result *types.DeleteIssuesResult
 	if err := s.withWriteTx(ctx, func(tx *sql.Tx) error {
 		// storage.DeleteIssues carries no actor, so the journal rows record none.
-		r, err := issueops.DeleteIssuesInTx(ctx, tx, ids, cascade, force, dryRun, "")
+		// The wisps peeled off above stay part of the request for the
+		// dependents guard, in a dry run too, where they are not deleted first.
+		r, err := issueops.DeleteIssuesBesideWispsInTx(ctx, tx, ids, activeWispIDs, cascade, force, dryRun, "")
 		if err != nil {
 			result = r
 			return err

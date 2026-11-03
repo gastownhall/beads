@@ -491,8 +491,9 @@ func openProxiedDB(t *testing.T, p proxiedProject) *sql.DB {
 		t.Fatalf("read proxy pidfile %s: %v (pf=%v)", p.proxyRoot, err, pf)
 	}
 
-	dsn := fmt.Sprintf("root:@tcp(127.0.0.1:%d)/%s?multiStatements=true&parseTime=true",
-		pf.Port, p.database)
+	proxy.RegisterDataAddress(p.proxyRoot, proxy.Endpoint{Host: "127.0.0.1", Port: pf.Port})
+	dsn := fmt.Sprintf("root:@%s(127.0.0.1:%d)/%s?multiStatements=true&parseTime=true",
+		proxy.DataNetwork, pf.Port, p.database)
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
 		t.Fatalf("sql.Open mysql %s: %v", dsn, err)

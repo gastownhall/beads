@@ -23,6 +23,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/tracker"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/workapi"
 	"github.com/steveyegge/beads/issueops"
 )
 
@@ -1219,11 +1220,6 @@ Examples:
 					return HandleError("invalid role %q (valid values: maintainer, contributor)", p.value)
 				}
 			}
-			if p.key == "status.custom" && p.value != "" {
-				if _, err := types.ParseCustomStatusConfig(p.value); err != nil {
-					return HandleError("invalid status.custom value: %v", err)
-				}
-			}
 			if strings.HasPrefix(p.key, "storage-class.") {
 				if err := validateStorageClassConfig(p.key, p.value); err != nil {
 					return HandleError("%v", err)
@@ -1248,6 +1244,16 @@ Examples:
 				gitPairs = append(gitPairs, p)
 			} else {
 				dbPairs = append(dbPairs, p)
+			}
+		}
+
+		// Every database-bound pair passes the settings plane's write
+		// validation before ANY pair is written, on both routes, so the batch
+		// refuses what `bd config set` refuses (a malformed types.retained, an
+		// unprojectable status.custom) and a refusal leaves nothing half-set.
+		for _, p := range dbPairs {
+			if _, err := workapi.ValidateSettingWrite(p.key, p.value); err != nil {
+				return HandleError("%v", err)
 			}
 		}
 

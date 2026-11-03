@@ -5040,6 +5040,12 @@
     },
     {
       "schema": "SweepSkips",
+      "member": "retention_required",
+      "type": "integer",
+      "required": false
+    },
+    {
+      "schema": "SweepSkips",
       "member": "unknown_closed_at",
       "type": "integer",
       "required": true
@@ -5150,6 +5156,12 @@
       "schema": "TreeNode",
       "member": "created_by",
       "type": "string",
+      "required": false
+    },
+    {
+      "schema": "TreeNode",
+      "member": "deduped",
+      "type": "boolean",
       "required": false
     },
     {

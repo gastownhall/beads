@@ -177,6 +177,20 @@ func ResolveDeletionSetInTx(ctx context.Context, tx DBTX, ids []string, cascade 
 }
 
 func DeleteIssuesInTx(ctx context.Context, tx *sql.Tx, ids []string, cascade bool, force bool, dryRun bool, actor string) (*types.DeleteIssuesResult, error) {
+	return DeleteIssuesBesideWispsInTx(ctx, tx, ids, nil, cascade, force, dryRun, actor)
+}
+
+// DeleteIssuesBesideWispsInTx is DeleteIssuesInTx for the server-backed store,
+// which peels a request's wisps off and deletes them itself, in batches of
+// their own, before it calls this with the rest (dolt/issues.go deleteIssues).
+// peeledWisps are those wisps. They are still part of the request, so the
+// dependents guard does not count one of them as a dependent left behind, as
+// on the embedded store, which passes every id in ids. A real delete has
+// already removed them and their dependency rows, so there they change
+// nothing. A dry run has removed nothing: without them, its guard would refuse
+// a request whose own wisps depend on one of its issues, which the real
+// delete takes.
+func DeleteIssuesBesideWispsInTx(ctx context.Context, tx *sql.Tx, ids, peeledWisps []string, cascade bool, force bool, dryRun bool, actor string) (*types.DeleteIssuesResult, error) {
 	if len(ids) == 0 {
 		return &types.DeleteIssuesResult{}, nil
 	}
@@ -193,8 +207,11 @@ func DeleteIssuesInTx(ctx context.Context, tx *sql.Tx, ids []string, cascade boo
 		// function (dolt/issues.go DeleteIssues), so widening it would make the
 		// embedded store refuse where the server-backed one cannot. The ROLE's
 		// guard, which does cover both planes, is in DeleteInTx.
-		idSet := make(map[string]bool, len(ids))
+		idSet := make(map[string]bool, len(ids)+len(peeledWisps))
 		for _, id := range ids {
+			idSet[id] = true
+		}
+		for _, id := range peeledWisps {
 			idSet[id] = true
 		}
 		// One scan of the dependency planes answers both modes: the guard needs

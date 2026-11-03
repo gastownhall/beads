@@ -2291,6 +2291,14 @@ func runMigrations(ctx context.Context, db DBConn, src migrationSource, minVersi
 			}
 		}
 
+		// Snapshot updated_at before the repair and the body can stamp it,
+		// for the frozen migrations registered in updatedAtGuards (#5981);
+		// nil and query-free for every other step.
+		stamps, err := snapshotUpdatedAtForStep(ctx, db, src, mf.version)
+		if err != nil {
+			return count, fmt.Errorf("snapshotting updated_at before migration %s: %w", mf.name, err)
+		}
+
 		if err := src.preMigrationRepair(ctx, db, mf.version); err != nil {
 			return count, fmt.Errorf("pre-repair for migration %s: %w", mf.name, err)
 		}
@@ -2320,6 +2328,11 @@ func runMigrations(ctx context.Context, db DBConn, src migrationSource, minVersi
 			func(ctx context.Context) error { return execMigrationBody(ctx, db, string(data)) },
 		); err != nil {
 			return count, fmt.Errorf("migration %s: %w", mf.name, err)
+		}
+		// Restore before the cursor row and the per-step commit, so neither
+		// the step's commit nor a later pass ever records the stamped values.
+		if err := stamps.restore(ctx, db); err != nil {
+			return count, fmt.Errorf("restoring updated_at after migration %s: %w", mf.name, err)
 		}
 		sum := sha256.Sum256(data)
 		contentHash := hex.EncodeToString(sum[:])

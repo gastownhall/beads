@@ -8,6 +8,7 @@ package httpclient
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -155,20 +156,27 @@ func TestServedConfigSetTwiceReachesTheRoleBothTimes(t *testing.T) {
 	}
 }
 
-// TestServedConfigWriteBoundsAreTheServersAndNotThisClients is L-config-bounds,
-// measured against the reference store through its OWN role so "the two legs
-// differ" is observed rather than asserted.
+// TestServedConfigWriteBoundsAreTheRolesOnBothLegs is measured against the
+// reference store through its OWN role so "the two legs agree" is observed
+// rather than asserted.
 //
-// Both bounds are the OPERATION's: internal/httpapi checks them before the role
-// is called, and workapi.ValidateSettingWrite — the rule every leg shares —
-// applies neither. So the same request is a typed, member-named refusal here and
-// a raw column overflow there, and this client restates nothing, for the reason
-// the ledger row gives.
+// Both bounds are the ROLE's: workapi.ValidateSettingWrite applies them on every
+// leg, so the same request is ErrValidation over http and ErrValidation from the
+// reference store's own WorkspaceConfig. Before the bound moved onto the role,
+// the reference store's role let the write reach the column, which refused it
+// with a driver error no caller could classify, and the HTTP operation's edge
+// check was the only typed refusal there was (L-config-bounds, now retired).
 //
-// THE CEILING ITSELF IS ASSERTED FIRST. Without it the case would pass against a
-// client that refused every value: what makes the refusal a BOUND rather than a
-// blanket is that exactly types.MaxTextBytes bytes is stored.
-func TestServedConfigWriteBoundsAreTheServersAndNotThisClients(t *testing.T) {
+// THE HTTP LEG'S REFUSAL IS THIS CLIENT'S, raised before the dial
+// (TestConfigWritesRefuseBeforeTheDial), because the client restates the role's
+// rules. So the operation's own edge check is not what answers here; it is
+// pinned in internal/httpapi (settings_write_test.go), where it still answers
+// an older client that sends the request.
+//
+// THE CEILING ITSELF IS ASSERTED FIRST, on both legs. Without it the case would
+// pass against a role that refused every value: what makes the refusal a BOUND
+// rather than a blanket is that exactly types.MaxTextBytes bytes is stored.
+func TestServedConfigWriteBoundsAreTheRolesOnBothLegs(t *testing.T) {
 	e := newServedEnv(t, "hcfgw3")
 	ctx := t.Context()
 	settings := servedSettings(t, e)
@@ -176,35 +184,37 @@ func TestServedConfigWriteBoundsAreTheServersAndNotThisClients(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the reference store's WorkspaceConfig(): %v", err)
 	}
+	legs := []struct {
+		name     string
+		settings issueops.WorkspaceConfig
+	}{
+		{"http", settings},
+		{"the reference store's own role", reference},
+	}
 
 	atCeiling := strings.Repeat("y", types.MaxTextBytes)
-	if _, err := settings.SetSetting(ctx, issueops.SetSettingRequest{Key: "custom.hcfgw3-at", Value: atCeiling}); err != nil {
-		t.Fatalf("a value of exactly %d bytes was refused: %v", types.MaxTextBytes, err)
-	}
-
 	past := strings.Repeat("y", types.MaxTextBytes+1)
-	httpErr := setSettingErr(ctx, settings, "custom.hcfgw3-past", past)
-	if !errors.Is(httpErr, issueops.ErrValidation) {
-		t.Errorf("a value one byte past the column = %v, want ErrValidation carried back from the operation's 400", httpErr)
-	}
-	if refErr := setSettingErr(ctx, reference, "custom.hcfgw3-past-local", past); errors.Is(refErr, issueops.ErrValidation) {
-		t.Errorf("the reference store answered ErrValidation for the same value (%v); if both legs now classify it, "+
-			"L-config-bounds has retired and this pin should go with it", refErr)
-	} else if refErr == nil {
-		t.Error("the reference store STORED a value past the column; the bound this row is about does not exist")
-	}
-
-	// The KEY bound splits the same way — and only on the WRITE. The remove
-	// checks that the key names something and nothing more, on both legs.
-	longKey := "custom.hcfgw3-" + strings.Repeat("k", types.MaxFieldLen)
-	if err := setSettingErr(ctx, settings, longKey, "v"); !errors.Is(err, issueops.ErrValidation) {
-		t.Errorf("a key past the column on the write = %v, want ErrValidation", err)
-	}
-	if err := setSettingErr(ctx, reference, longKey+"2", "v"); errors.Is(err, issueops.ErrValidation) {
-		t.Errorf("the reference store answered ErrValidation for the same key (%v); the key half of L-config-bounds has retired", err)
-	}
-	if _, err := settings.UnsetSetting(ctx, issueops.UnsetSettingRequest{Key: longKey}); err != nil {
-		t.Errorf("removing an over-long key = %v, want success: the remove carries no length bound on either leg", err)
+	keyAtCeiling := "custom.hcfgw3-" + strings.Repeat("k", types.MaxFieldLen-len("custom.hcfgw3-"))
+	longKey := keyAtCeiling + "k"
+	for i, leg := range legs {
+		at := fmt.Sprintf("custom.hcfgw3-at-%d", i)
+		if _, err := leg.settings.SetSetting(ctx, issueops.SetSettingRequest{Key: at, Value: atCeiling}); err != nil {
+			t.Errorf("%s: a value of exactly %d bytes was refused: %v", leg.name, types.MaxTextBytes, err)
+		}
+		if err := setSettingErr(ctx, leg.settings, fmt.Sprintf("custom.hcfgw3-past-%d", i), past); !errors.Is(err, issueops.ErrValidation) {
+			t.Errorf("%s: a value one byte past the column = %v, want ErrValidation", leg.name, err)
+		}
+		if _, err := leg.settings.SetSetting(ctx, issueops.SetSettingRequest{Key: keyAtCeiling, Value: "v"}); err != nil {
+			t.Errorf("%s: a key of exactly %d characters was refused: %v", leg.name, types.MaxFieldLen, err)
+		}
+		// The KEY bound is on the WRITE only: the remove checks that the key
+		// names something and nothing more, on both legs.
+		if err := setSettingErr(ctx, leg.settings, longKey, "v"); !errors.Is(err, issueops.ErrValidation) {
+			t.Errorf("%s: a key past the column on the write = %v, want ErrValidation", leg.name, err)
+		}
+		if _, err := leg.settings.UnsetSetting(ctx, issueops.UnsetSettingRequest{Key: longKey}); err != nil {
+			t.Errorf("%s: removing an over-long key = %v, want success: the remove carries no length bound", leg.name, err)
+		}
 	}
 }
 

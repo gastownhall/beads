@@ -948,34 +948,33 @@ func writeSideRows() []Row {
 			PinnedBy: pinnedByS3Conformance,
 		},
 		{
-			// The CONFIG-WRITE population, from client wave ga-jpywb, and it has
+			// The CONFIG-WRITE population, from client wave ga-jpywb, and it had
 			// exactly one row. Both verbs map member for member — a key in the
 			// path, a value in the body, nothing else — so nothing refuses on
-			// shape; what diverges is a pair of EDGE BOUNDS the wire applies
-			// and no local leg does.
-			ID: "L-config-bounds", Kind: KindDegrade,
-			What: "a setting VALUE past types.MaxTextBytes bytes, and a setting KEY past types.MaxFieldLen characters on the WRITE, are refused with issueops.ErrValidation naming the member; on a local leg the same request reaches the column and fails with the engine's own `too large for column` error, which is no sentinel at all",
-			Why: "the bound belongs to the OPERATION rather than to the role: internal/httpapi's settingWriteKey and settingValue check both before the role is called, because a request the caller could have fixed should be a 400 naming the member rather than the 500 a column overflow would otherwise produce. workapi.ValidateSettingWrite — the rule every leg shares — applies no length bound at all, so below the wire the column is the only check there is. " +
-				"MEASURED, not inferred: a 65536-byte value answers `400 invalid_argument: \\`value\\` is 65536 bytes; storage holds at most 65535` over http and `Error 1105: string ... is too large for column 'value'` on the embedded leg, and a 306-character key splits the same way. Exactly 65535 bytes is accepted on both. " +
-				"THIS CLIENT RESTATES NEITHER BOUND, and that is the decision this row records. They are the SERVER's policy on a value whose shape the role accepted, one release away from moving, so a second copy here would either drift or refuse a request a newer server would take — the same argument L-comment-author makes about the author rule, and the same posture. What travels back is the operation's own 400, which the problem mapper turns into ErrValidation. " +
-				"IT IS A DEGRADE RATHER THAN A REFUSE because the ordinary path PROCEEDS and because the divergence runs in the CALLER'S FAVOR: over http an oversized write is a typed, member-named refusal that wrote nothing, where a local leg hands back a driver error no caller can classify. What a caller loses is nothing; what a caller must not assume is that a value a local workspace stored will store here. " +
-				"THE TWO BOUNDS ARE NOT SYMMETRIC ACROSS THE VERBS, and the asymmetry is the operation's: DELETE checks only that the key names something, so removing a 306-character key succeeds over http exactly as it does locally. Upstream ask: the length rules moving onto the shared validator, which retires this row by making the two legs one",
-			SpecRow:  "D8 row 11, D9",
+			// shape. What diverged was a pair of EDGE BOUNDS the wire applied and
+			// no local leg did, until the bounds moved onto the role.
+			ID: "L-config-bounds", Kind: KindRetired,
+			What: "RETIRED — a setting VALUE past types.MaxTextBytes bytes, and a setting KEY past types.MaxFieldLen characters on the WRITE, used to be refused with issueops.ErrValidation over http and to reach the column on a local leg",
+			Why: "retired by the upstream ask the row itself filed: \"the length rules moving onto the shared validator, which retires this row by making the two legs one\". Both bounds moved onto workapi.ValidateSettingWrite, the rule every leg's WorkspaceConfig body calls, so a local leg now refuses the same write with the same issueops.ErrValidation (carrying types.ErrFieldTooLong beside it) instead of the engine's `too large for column` driver error. " +
+				"WHAT IT BUYS beyond the classification is that the bound no longer depends on the column: a backend whose config.key and config.value are unbounded text would otherwise have had the operation's edge check as its ONLY bound, and every non-HTTP write through the role would have stored an arbitrarily large value. " +
+				"THE CLIENT NOW RESTATES BOTH, for the reason it restates every other role rule: they are the role's and no longer one server release away from moving, and a request the role calls invalid must not spend a round trip to be told so. internal/httpapi's settingWriteKey and settingValue still check both at the edge first, so an older client still gets the member-named 400. " +
+				"THE ASYMMETRY ACROSS THE VERBS STANDS and is now the role's on every leg: the bound is on the WRITE, and a removal of an over-long key compares and stores nothing, so it succeeds everywhere",
+			SpecRow:  "D8 row 11, D9 (RETIRED)",
 			PinnedBy: pinnedByS3Conformance,
 		},
 		{
-			// The UPDATE-BOUNDS row, and L-config-bounds' sibling one operation
-			// over. It is not the same row because the two are not the same
-			// situation: there the role applies no length rule at all and the
-			// column is the only check below the wire, HERE THE ROLE APPLIES THE
-			// SAME RULE with the same constant — so what is lost is a sentinel
+			// The UPDATE-BOUNDS row, and the retired L-config-bounds' sibling one
+			// operation over. It is not the same row because the two were not the
+			// same situation: there the role applied no length rule at all and
+			// the column was the only check below the wire, HERE THE ROLE APPLIES
+			// THE SAME RULE with the same constant — so what is lost is a sentinel
 			// rather than a bound.
 			ID: "L-update-fieldlen", Kind: KindDegrade,
 			What: "an updateIssue patch member past types.MaxFieldLen characters — a label on any of the three label members, `title`, `external_ref` — is refused with issueops.ErrValidation naming the member; on a local leg the same request answers types.ErrFieldTooLong",
 			Why: "the bound is applied TWICE and identically: internal/httpapi/update.go checks types.CheckFieldLen at the edge before the role is called, and internal/storage/issueops applies the same function below it. So this is a classification divergence and not a policy one — a value one leg stores the other stores, and a value one leg refuses the other refuses. " +
 				"WHAT COARSENS IT is the spelling: the operation refuses with `invalid_argument` and reason `invalid_value` (internal/httpapi's refuse on the patch member), which is the SAME pair a malformed status, an unparseable timestamp or any other bad value on the same member earns. Nothing on the wire tells them apart, so reconstructing ErrFieldTooLong from the pair would misclassify every other refusal of that member — the argument L-create-prefix makes about the id, on the patch. " +
 				"MEASURED, not inferred: a 256-character label answers `400 invalid_argument: \\`add_labels[0]\\` is 256 characters; storage holds at most 255` over http and ErrFieldTooLong through the reference store's own Lifecycle role, and exactly 255 characters is accepted on both. " +
-				"THIS CLIENT RESTATES THE BOUND NOWHERE, and the reason differs from L-config-bounds': not that the rule is the server's to move, but that a second copy of a rule two layers already apply is a third place for it to drift. What travels back is the operation's own 400. " +
+				"THIS CLIENT RESTATES THE BOUND NOWHERE, and the reason differs from the retired L-config-bounds': not that the rule is the server's to move, but that a second copy of a rule two layers already apply is a third place for it to drift. What travels back is the operation's own 400. " +
 				"IT IS A DEGRADE RATHER THAN A REFUSE because the path PROCEEDS and the outcome is identical on both legs — the request fails, the row is untouched, and no truncated value is stored — while the detail names the offending member and its length, which is the recovery a caller needs. What is lost is the errors.Is arm a caller writes to tell 'too long' from 'malformed'. Upstream ask: a `too_long` reason, or a code of its own, which retires this row",
 			SpecRow:  "D8 row 16, D9",
 			PinnedBy: pinnedByS3Conformance,

@@ -256,6 +256,21 @@ const CapIssuesSweepLimit = "issues.sweep.limit"
 // sweep that leaves the ids reusable.
 const CapIssuesSweepRetainIDs = "issues.sweep.retainIds"
 
+// CapIssuesSweepRetainedTypes is the behavior capability that advertises the
+// workspace's retained-type protection on issues:sweep and the paired
+// SweepSkips.retention_required response member (sweep.go): a sweep without
+// retain_ids holds back every candidate whose issue type the workspace's
+// types.retained setting names (issueops.SettingKeyTypesRetained,
+// issueops.SweepSkips.RetentionRequired). It names no request member — the
+// protection is the server's, keyed on a stored setting — so an older server
+// answers a plain sweep without complaint and deletes the retained beads
+// without retiring their ids. The token is how a client learns which it is
+// talking to: before a plain sweep, bd's client reads it and, against a
+// server without it, reads types.retained itself and refuses the sweep before
+// the dial when the setting names a type (httpclient's
+// refuseAnUnguardedPlainSweep; wire.CapSweepRetainedTypes).
+const CapIssuesSweepRetainedTypes = "issues.sweep.retainedTypes"
+
 // CapBatchApplyDepAddLineage is the behavior capability that advertises
 // ApplyDepAddItem's `has_spawner` and `thread_id` members (batch_apply.go):
 // additive fields a `dep_add` item may carry alongside `source`, `target`,
@@ -1161,7 +1176,7 @@ func (r route) specPathOf() string {
 var behaviorCapabilities = []string{
 	CapProjectEnforce, CapBatchApplyLarge, CapIssuesListSort, CapIssuesCountScope,
 	CapIssuesSweepWispsPlane, CapIssuesSweepLiveDependents, CapIssuesSweepLimit,
-	CapIssuesSweepRetainIDs,
+	CapIssuesSweepRetainIDs, CapIssuesSweepRetainedTypes,
 	CapBatchApplyDepAddLineage, CapIssuesUpdateAllowTemplate, CapIssuesCreateDefaultPriority,
 	CapIssuesCloseAutoCloseMolecule, CapIssuesListSearch,
 	CapIssuesListNoAssignee, CapIssuesListTitle, CapListIDs, CapIssuesUpdatePersistence, CapDependenciesBlockingIsBlocked, CapIssuesUpdateClaim,

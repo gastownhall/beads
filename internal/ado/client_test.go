@@ -701,6 +701,23 @@ func TestValidateProject(t *testing.T) {
 	}
 }
 
+// TestBuildPullWIQLMatchesSinceToSinceGranularity pins the tracker's
+// SinceGranularity to the WIQL: a query from Since asks for exactly what a
+// query from Since truncated to SinceGranularity asks for, and a query from
+// just before that asks for more.
+func TestBuildPullWIQLMatchesSinceToSinceGranularity(t *testing.T) {
+	c := NewClient(NewSecretString("pat"), "myorg", "testproject")
+	since := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
+	floor := since.Truncate((&Tracker{}).SinceGranularity())
+	if got, want := c.buildPullWIQL(&since, nil), c.buildPullWIQL(&floor, nil); got != want {
+		t.Fatalf("WIQL from %s = %q, want the WIQL from %s: %q", since, got, floor, want)
+	}
+	before := floor.Add(-time.Nanosecond)
+	if c.buildPullWIQL(&before, nil) == c.buildPullWIQL(&floor, nil) {
+		t.Fatalf("WIQL from just before %s is the same as from it: SinceGranularity is finer than the WIQL", floor)
+	}
+}
+
 func TestBuildPullWIQL(t *testing.T) {
 	c := NewClient(NewSecretString("pat"), "myorg", "testproject")
 	since := time.Date(2024, 6, 1, 0, 0, 0, 0, time.UTC)

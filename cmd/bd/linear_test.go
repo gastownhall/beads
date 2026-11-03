@@ -12,10 +12,12 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/beads/internal/linear"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/tracker"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -1855,4 +1857,286 @@ func TestApplyLinearExcludeIDConfig_NilSafe(t *testing.T) {
 	var opts tracker.SyncOptions
 	applyLinearExcludeIDConfig(context.Background(), nil, &opts)                    // must not panic
 	applyLinearExcludeIDConfig(context.Background(), fakeLinearConfigReader{}, nil) // must not panic
+}
+
+// TestLinearSyncOverlapKeepsEchoOfNameMappedStatus pins the incremental
+// pull's overlap window (#6806) against the push hooks `bd linear sync`
+// installs. The first sync pushes a blocked issue to "Blocked", a state of
+// type started that a name-keyed linear.state_map entry selects; the second
+// sync re-fetches that push in its overlap window, newer than the local issue.
+// Linear's pull maps the state's type, so the echo reads back as in_progress:
+// the pull must still recognize it and leave the issue alone, and the push
+// must not send the unchanged issue again.
+func TestLinearSyncOverlapKeepsEchoOfNameMappedStatus(t *testing.T) {
+	ctx := context.Background()
+	t.Setenv("LINEAR_API_KEY", "test-api-key")
+	t.Setenv("LINEAR_OAUTH_CLIENT_ID", "")
+	t.Setenv("LINEAR_OAUTH_CLIENT_SECRET", "")
+
+	const ref = "https://linear.app/team/issue/TEAM-1"
+	now := time.Now().UTC()
+	api := &fakeLinearIssueAPI{
+		states: []linear.State{
+			{ID: "state-todo", Name: "Todo", Type: "unstarted"},
+			{ID: "state-progress", Name: "In Progress", Type: "started"},
+			{ID: "state-blocked", Name: "Blocked", Type: "started"},
+			{ID: "state-done", Name: "Done", Type: "completed"},
+		},
+		// What the previous sync pushed: the issue in progress.
+		issue: linear.Issue{
+			ID:          "uuid-1",
+			Identifier:  "TEAM-1",
+			URL:         ref,
+			Title:       "Ship it",
+			Description: "Body\n\n## Acceptance Criteria\nIt ships",
+			Priority:    3,
+			State:       &linear.State{ID: "state-progress", Name: "In Progress", Type: "started"},
+			CreatedAt:   now.Add(-time.Hour).Format(time.RFC3339),
+			UpdatedAt:   now.Add(-10 * time.Minute).Format(time.RFC3339),
+		},
+	}
+	server := httptest.NewServer(api)
+	defer server.Close()
+
+	linkedRef := ref
+	store := &linearSyncStore{
+		config: map[string]string{
+			"linear.team_id":               "team-1",
+			"linear.api_endpoint":          server.URL,
+			"linear.state_map.todo":        "open",
+			"linear.state_map.in progress": "in_progress",
+			"linear.state_map.blocked":     "blocked",
+			"linear.state_map.done":        "closed",
+		},
+		metadata: map[string]string{"linear.last_sync": now.Add(-2 * time.Minute).Format(time.RFC3339)},
+		// Blocked locally after the previous sync.
+		issue: types.Issue{
+			ID:                 "bd-1",
+			Title:              "Ship it",
+			Description:        "Body",
+			AcceptanceCriteria: "It ships",
+			Status:             types.StatusBlocked,
+			Priority:           2,
+			IssueType:          types.TypeTask,
+			ExternalRef:        &linkedRef,
+			CreatedAt:          now.Add(-time.Hour),
+			UpdatedAt:          now.Add(-time.Minute),
+		},
+	}
+
+	lt := &linear.Tracker{}
+	lt.SetTeamIDs([]string{"team-1"})
+	if err := lt.Init(ctx, store); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if err := lt.ValidatePushStateMappings(ctx); err != nil {
+		t.Fatalf("ValidatePushStateMappings: %v", err)
+	}
+	runSync := func() *tracker.SyncResult {
+		t.Helper()
+		engine := tracker.NewEngine(lt, store, "test")
+		engine.PushHooks = buildLinearPushHooksForStore(ctx, store, lt, false)
+		result, err := engine.Sync(ctx, tracker.SyncOptions{Pull: true, Push: true})
+		if err != nil {
+			t.Fatalf("Sync: %v", err)
+		}
+		return result
+	}
+
+	result := runSync()
+	if remote, updates := api.snapshot(); result.PushStats.Updated != 1 || updates != 1 || remote.State.ID != "state-blocked" {
+		t.Fatalf("first sync: PushStats = %+v, issueUpdate calls = %d, Linear state = %s, want the issue pushed to Blocked once", result.PushStats, updates, remote.State.Name)
+	}
+
+	result = runSync()
+	if result.PullStats.Candidates != 1 {
+		t.Fatalf("second sync: PullStats = %+v, want the first sync's push re-fetched by the overlap window", result.PullStats)
+	}
+	if result.PullStats.Updated != 0 || store.issue.Status != types.StatusBlocked || store.issue.Description != "Body" {
+		t.Fatalf("second sync: PullStats = %+v, local status %q, description %q, want the echo skipped and the issue still blocked with description %q",
+			result.PullStats, store.issue.Status, store.issue.Description, "Body")
+	}
+	if _, updates := api.snapshot(); updates != 1 {
+		t.Fatalf("second sync: issueUpdate calls = %d, want 1: the unchanged issue was pushed again", updates)
+	}
+}
+
+// fakeLinearIssueAPI serves the Linear GraphQL calls `bd linear sync` makes
+// for one team holding one issue: workflow states, labels (none), the
+// incremental issues query, which honours its updatedAt.gte filter, the
+// lookup by identifier, and issueUpdate, which stamps updatedAt as Linear
+// does.
+type fakeLinearIssueAPI struct {
+	mu      sync.Mutex
+	states  []linear.State
+	issue   linear.Issue
+	updates int
+}
+
+func (f *fakeLinearIssueAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	var req linear.GraphQLRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var data interface{}
+	switch {
+	case strings.Contains(req.Query, "TeamStates"):
+		data = map[string]interface{}{"team": map[string]interface{}{"states": map[string]interface{}{"nodes": f.states}}}
+	case strings.Contains(req.Query, "TeamLabels"):
+		data = map[string]interface{}{"team": map[string]interface{}{"labels": map[string]interface{}{"nodes": []linear.Label{}}}}
+	case strings.Contains(req.Query, "issueUpdate"):
+		f.update(req.Variables["input"])
+		data = map[string]interface{}{"issueUpdate": map[string]interface{}{"success": true, "issue": f.issue}}
+	case strings.Contains(req.Query, "IssueByIdentifier"):
+		data = map[string]interface{}{"issues": map[string]interface{}{"nodes": []linear.Issue{f.issue}}}
+	case strings.Contains(req.Query, "query Issues("):
+		nodes := []linear.Issue{}
+		if f.updatedSince(req.Variables["filter"]) {
+			nodes = append(nodes, f.issue)
+		}
+		data = map[string]interface{}{"issues": map[string]interface{}{"nodes": nodes}}
+	default:
+		http.Error(w, "unexpected query: "+req.Query, http.StatusBadRequest)
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": data})
+}
+
+// update applies an issueUpdate input; f.mu must be held.
+func (f *fakeLinearIssueAPI) update(raw interface{}) {
+	input, _ := raw.(map[string]interface{})
+	if title, ok := input["title"].(string); ok {
+		f.issue.Title = title
+	}
+	if description, ok := input["description"].(string); ok {
+		f.issue.Description = description
+	}
+	if priority, ok := input["priority"].(float64); ok {
+		f.issue.Priority = int(priority)
+	}
+	for _, state := range f.states {
+		if state.ID == input["stateId"] {
+			f.issue.State = &state
+		}
+	}
+	f.issue.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	f.updates++
+}
+
+// updatedSince reports whether the issue matches an issues query filter's
+// updatedAt.gte bound; f.mu must be held.
+func (f *fakeLinearIssueAPI) updatedSince(raw interface{}) bool {
+	filter, _ := raw.(map[string]interface{})
+	updatedAt, _ := filter["updatedAt"].(map[string]interface{})
+	gte, _ := updatedAt["gte"].(string)
+	since, err := time.Parse(time.RFC3339, gte)
+	if err != nil {
+		return true
+	}
+	updated, err := time.Parse(time.RFC3339, f.issue.UpdatedAt)
+	return err == nil && !updated.Before(since)
+}
+
+// snapshot returns the issue and the number of issueUpdate calls so far.
+func (f *fakeLinearIssueAPI) snapshot() (linear.Issue, int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.issue, f.updates
+}
+
+// linearSyncStore is an in-memory tracker.Store holding one issue, for
+// running `bd linear sync` engine passes without a database. Like DoltStore
+// it answers external_ref history and drops an update that changes nothing,
+// so a push writing back the issue's own external_ref keeps its updated_at.
+type linearSyncStore struct {
+	config   map[string]string
+	metadata map[string]string
+	issue    types.Issue
+}
+
+func (s *linearSyncStore) GetConfig(_ context.Context, key string) (string, error) {
+	return s.config[key], nil
+}
+
+func (s *linearSyncStore) GetAllConfig(context.Context) (map[string]string, error) {
+	return s.config, nil
+}
+
+func (s *linearSyncStore) GetLocalMetadata(_ context.Context, key string) (string, error) {
+	return s.metadata[key], nil
+}
+
+func (s *linearSyncStore) SetLocalMetadata(_ context.Context, key, value string) error {
+	s.metadata[key] = value
+	return nil
+}
+
+func (s *linearSyncStore) SearchIssues(context.Context, string, types.IssueFilter) ([]*types.Issue, error) {
+	issue := s.issue
+	return []*types.Issue{&issue}, nil
+}
+
+func (s *linearSyncStore) GetIssueByExternalRef(_ context.Context, ref string) (*types.Issue, error) {
+	if s.issue.ExternalRef == nil || *s.issue.ExternalRef != ref {
+		return nil, storage.ErrNotFound
+	}
+	issue := s.issue
+	return &issue, nil
+}
+
+func (s *linearSyncStore) GetDependentsWithMetadata(context.Context, string) ([]*types.IssueWithDependencyMetadata, error) {
+	return nil, nil
+}
+
+func (s *linearSyncStore) GetDependenciesWithMetadata(context.Context, string) ([]*types.IssueWithDependencyMetadata, error) {
+	return nil, nil
+}
+
+func (s *linearSyncStore) CreateIssue(_ context.Context, issue *types.Issue, _ string) error {
+	return fmt.Errorf("unexpected create of %q", issue.Title)
+}
+
+func (s *linearSyncStore) UpdateIssue(ctx context.Context, id string, updates map[string]interface{}, actor string) error {
+	return s.ApplyIssueUpdate(ctx, id, updates, nil, actor)
+}
+
+func (s *linearSyncStore) ApplyIssueUpdate(_ context.Context, id string, updates map[string]interface{}, _ []string, _ string) error {
+	if id != s.issue.ID {
+		return storage.ErrNotFound
+	}
+	next := s.issue
+	for key, value := range updates {
+		text, _ := value.(string)
+		switch key {
+		case "title":
+			next.Title = text
+		case "description":
+			next.Description = text
+		case "status":
+			next.Status = types.Status(text)
+		case "assignee":
+			next.Assignee = text
+		case "external_ref":
+			next.ExternalRef = &text
+		}
+	}
+	if !reflect.DeepEqual(next, s.issue) {
+		next.UpdatedAt = time.Now().UTC()
+		s.issue = next
+	}
+	return nil
+}
+
+func (s *linearSyncStore) AddDependency(context.Context, *types.Dependency, string) error {
+	return nil
+}
+
+func (s *linearSyncStore) PreviousExternalRef(context.Context, string, time.Time) (string, bool, error) {
+	if s.issue.ExternalRef == nil {
+		return "", false, nil
+	}
+	return *s.issue.ExternalRef, true, nil
 }
