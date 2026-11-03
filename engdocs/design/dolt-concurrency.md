@@ -318,9 +318,10 @@ the issue as present, and nothing orders the two. A comment never bumps
 `row_lock`, so it does not invalidate the delete's `ExpectedVersion`, and
 the delete fence orders only guarded deletes of that id against each other,
 not comments. This section records what that race does today and what a fix
-needs. **The defect is unresolved:** these tests only characterize it. The
-race was reported by Raymond W. Ko in PR #8026; that PR's writer-lock
-implementation and its lock-dependent tests are not part of this change.
+needs. **The defect is unresolved:** the tests below only characterize it.
+Raymond W. Ko reported the race, with a fix that took #7645's journal writer
+lock on every server-mode bead write (#8026 as first opened). That fix was
+not adopted; the routes below say why.
 
 **Reproduction.** Two tests hold one side (the loser) at its first commit
 point, after it has read and written everything, then run the other side
@@ -343,7 +344,7 @@ the defect, append `--test_env=BEADS_TEST_EXPECT_SERIAL_DELETE_COMMENT=1`
 to either command. The journal-off cases then assert the outcome a serial
 execution gives, and they fail with the error below. This mode is a
 reproduction, not a quality gate: it is expected to fail until the
-dependency below exists.
+preferred fix below exists.
 
 **Measured on dolt 2.6.0** (local `dolt sql-server`), the same in all four
 journal-off cases on both paths:
@@ -368,15 +369,19 @@ journal-off cases on both paths:
   combination runs.
 
 Two controls in each test pass in either mode. With the events journal on,
-the loser's first attempt fails with an error beads already retries; the
-retry gives the serial outcome. With no overlap (winner, then loser), the
-outcome is serial by construction. In both, a losing delete succeeds and
-removes the issue and its comment, and a losing comment is refused with
+both sides bump the single `bd_events_seq` row, so the loser's first attempt
+fails with an error beads already retries, and the retry gives the serial
+outcome. That control describes beads without a journal-writer admission
+lock: a lock taken before `BEGIN` and held to the commit would make the
+winner queue behind the held loser, so a change that adds one must rework
+the control. With no overlap (winner, then loser), the outcome is serial by
+construction. In both controls the winner commits, a losing delete succeeds
+and removes the issue and its comment, and a losing comment is refused with
 `ErrNotFound`.
 
-**Dependency.** A fix needs the server to report this commit-time
-sequencing loss as a rollback-guaranteed serialization error, preferably
-MySQL 1213, on the server transport, on both server commit paths:
+**Preferred fix.** The server reports this commit-time sequencing loss as a
+rollback-guaranteed serialization error, preferably MySQL 1213, on the
+server transport, on both server commit paths:
 
 1. an ordinary SQL `COMMIT`, and
 2. an in-body `DOLT_COMMIT` (`CALL DOLT_COMMIT(...)` inside the transaction).
@@ -384,25 +389,39 @@ MySQL 1213, on the server transport, on both server commit paths:
 It must also keep that error distinct from a persisted or transaction-local
 constraint violation, which stays permanent. Beads would then replay the
 whole transaction through its existing retry path, and the serial-outcome
-assertions would become the default ones. No Dolt release that meets this
-contract has been identified. The follow-up fix is gated on identifying one
-and proving it on both server commit paths; until then, the hard failure
-stays.
+assertions would become the default ones. This route adds no contention:
+only a transaction that loses the race replays. No Dolt release that meets
+this contract has been identified. The follow-up fix is gated on identifying
+one and proving it on both server commit paths; until then, the hard
+failure stays.
 
-Beads does not close the gap itself by retrying this 1105. The diagnostic
-covers both a sequencing loss and a real persisted violation, so its text
-does not prove the error is transient, and classifying it would extend the
-engine-specific autocommit-1105 exception into a new retry policy on the
-beads side of the storage boundary
-([PROJECT_CHARTER.md](../PROJECT_CHARTER.md)). That needs a maintainer
-decision, which has not been made.
+Beads could also close the gap on its own side. Each such route is declined
+for now:
 
-**Scope.** This change adds test-only support (`internal/testutil/sqlgate`),
-the two tests, and this section. It does not add a runtime retry
-classifier, advisory-lock admission, a `row_lock` mutation, a dependency
-bump, or a schema change, and it does not claim a production fix. Label and
-dependency races are excluded, as are the wisp plane, cancellation of a held
-loser, and persisted constraint violations.
+- **Retrying this 1105.** The diagnostic covers both a sequencing loss and a
+  real persisted violation, so its text does not prove the error is
+  transient, and classifying it would extend the engine-specific
+  autocommit-1105 exception into a new retry policy on the beads side of the
+  storage boundary ([PROJECT_CHARTER.md](../PROJECT_CHARTER.md)). That needs
+  a maintainer decision, which has not been made.
+- **An admission lock that orders the writers**, as the writer-lock fix
+  proposed. One lock per database queues every server-mode bead write
+  behind the write that holds it, whether or not the two race, and a writer
+  that waits out the lock's budget fails with a busy error.
+- **Making a comment write the issue row**, so that the two transactions
+  conflict on one row and beads replays the loser, as the journaled writes
+  in the journal-on control do on `bd_events_seq`. Two comments on one issue
+  would then conflict with each other as well. If the comment also rewrote `row_lock`
+  (`RowLockClause`), a replayed guarded delete would fail its
+  `ExpectedVersion` check instead of deleting, and `row_lock` would no
+  longer track only lifecycle and ownership writes.
+
+**Scope.** The characterization is test-only support
+(`internal/testutil/sqlgate`) and the two tests above. Beads has no runtime
+retry classifier, advisory-lock admission or `row_lock` mutation for this
+race, and no production fix for it. Label and dependency races are not
+characterized, nor are the wisp plane, cancellation of a held loser, and
+persisted constraint violations.
 
 ## Migration Strategy
 

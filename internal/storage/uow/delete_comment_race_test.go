@@ -267,6 +267,12 @@ func TestUOWDeleteCommentRaceCharacterization(t *testing.T) {
 			case rc.serial:
 				assertUOWSerialDeleteCommentRace(t, rc.loser, ev)
 			case rc.journal:
+				// The journal-on control assumes no journal-writer
+				// admission lock: both sides bump the single bd_events_seq
+				// row, so the loser's first commit conflicts and is
+				// retried. A change that adds a lock taken before BEGIN
+				// (#7645, #8075) must rework this control, as in
+				// internal/storage/dolt.
 				if ev.Loser.Attempts < 2 {
 					t.Errorf("journal-on loser attempts = %d, want a retry", ev.Loser.Attempts)
 				}
@@ -386,7 +392,10 @@ func readUOWRaceState(ctx context.Context, t *testing.T, db *sql.DB, issueID, lo
 }
 
 // requireUOWRaceIntegrity fails on an orphan, a leftover violation, a loser
-// that failed with its write visible, or a commit kind other than the case's.
+// that failed with its write visible, a winner that did not commit, or a
+// commit kind other than the case's. In every case the winner runs to
+// completion first: a serial delete-loses case whose comment never landed
+// would otherwise pass, since the delete leaves no comment to count.
 func requireUOWRaceIntegrity(t *testing.T, rc uowRaceCase, ev uowRaceEvidence) {
 	t.Helper()
 	if ev.State.OrphanComments != 0 {
@@ -398,14 +407,18 @@ func requireUOWRaceIntegrity(t *testing.T, rc uowRaceCase, ev uowRaceEvidence) {
 	if ev.Loser.err != nil && !ev.RolledBk {
 		t.Errorf("loser failed (%v) but its write is visible: an ambiguous outcome", ev.Loser.err)
 	}
-	if rc.serial {
-		return // a refused serial comment never reaches a commit point
+	if ev.Winner.err != nil {
+		t.Errorf("winner failed: %v", ev.Winner.err)
 	}
 	want := "CALL DOLT_COMMIT"
 	if rc.deferred {
 		want = "COMMIT"
 	}
-	for who, op := range map[string]uowRaceOp{"loser": ev.Loser, "winner": ev.Winner} {
+	sides := map[string]uowRaceOp{"winner": ev.Winner}
+	if !rc.serial {
+		sides["loser"] = ev.Loser // a refused serial comment never reaches a commit point
+	}
+	for who, op := range sides {
 		if op.CommitKind != want {
 			t.Errorf("%s commit kind = %q, want %q", who, op.CommitKind, want)
 		}

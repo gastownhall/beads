@@ -119,7 +119,9 @@ func requireRaceSessionSettings(t *testing.T, who string, op raceOp) {
 // gate. The store keeps its real driver, DSN, retry and fence code; only the
 // connection pool is the gate's. The pool is wider than
 // setupConcurrentTestStore's two because a guarded delete pins one session for
-// its fence while the racing comment needs another.
+// its fence while the racing comment needs another. The original pool is
+// closed here, since nothing reads it again; the store's Close closes the
+// gated one.
 func raceGatedStore(t *testing.T, store *DoltStore) *sqlgate.Connector {
 	t.Helper()
 	gate := sqlgate.NewConnector(store.db.Driver(), store.connStr)
@@ -128,10 +130,7 @@ func raceGatedStore(t *testing.T, store *DoltStore) *sqlgate.Connector {
 	gated.SetMaxOpenConns(6)
 	original := store.db
 	store.db = gated
-	t.Cleanup(func() {
-		store.db = original
-		_ = gated.Close()
-	})
+	_ = original.Close()
 	return gate
 }
 
@@ -244,6 +243,9 @@ func raceLoserRolledBack(loser string, st raceState) bool {
 
 // requireRaceIntegrity fails on a partial or orphaned outcome, whatever the
 // loser's error was: no comment without its issue, no violation left behind.
+// In every case the winner runs to completion first, so it must also have
+// committed: a serial delete-loses case whose comment never landed would
+// otherwise pass, since the delete leaves no comment to count.
 func requireRaceIntegrity(t *testing.T, ev raceEvidence) {
 	t.Helper()
 	if ev.State.OrphanComments != 0 {
@@ -252,14 +254,11 @@ func requireRaceIntegrity(t *testing.T, ev raceEvidence) {
 	if ev.State.ConstraintViolations != 0 {
 		t.Errorf("%d dolt_constraint_violations row(s) after the race", ev.State.ConstraintViolations)
 	}
-	if ev.Loser.err == nil && !ev.RolledBk {
-		return
-	}
 	if ev.Loser.err != nil && !ev.RolledBk {
 		t.Errorf("loser failed (%v) but its write is visible: an ambiguous outcome", ev.Loser.err)
 	}
-	if ev.Winner.err != nil {
-		t.Errorf("winner failed: %v", ev.Winner.err)
+	if ev.Winner.err != nil || ev.Winner.CommitKind == "" {
+		t.Errorf("winner did not commit: commit kind %q, err: %v", ev.Winner.CommitKind, ev.Winner.err)
 	}
 }
 
@@ -382,6 +381,14 @@ func TestGuardedDeleteCommentRaceCharacterization(t *testing.T) {
 				// gives the serial outcome. That is the outcome the
 				// journal-off cases would give if their rollback were a
 				// retryable serialization error.
+				//
+				// The control assumes no journal-writer admission lock:
+				// both sides bump the single bd_events_seq row, so the
+				// loser's commit conflicts with the winner's. A lock taken
+				// before BEGIN and held to the commit (as #7645 and #8075
+				// propose) would make the winner queue behind the held
+				// loser instead, so a change that adds one must rework
+				// this control, here and in the uow test.
 				if ev.Loser.Attempts < 2 {
 					t.Errorf("journal-on loser attempts = %d, want a retry", ev.Loser.Attempts)
 				}
