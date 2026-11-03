@@ -650,7 +650,25 @@ func TestMoleculeAnalysisInheritsAnExogenouslyBlockedParent(t *testing.T) {
 	t.Run("a blocked group darkens its children until its blocker closes", func(t *testing.T) {
 		f := newFakeMolecules()
 		seedBlockedGroup(f)
-		a := analysisOf(t, f, "m")
+		view, err := issueops.ViewMolecule(context.Background(), f.reader(), "m")
+		if err != nil {
+			t.Fatalf("ViewMolecule: %v", err)
+		}
+		states := map[string]string{}
+		for _, step := range view.Steps {
+			states[step.Issue.ID] = step.State
+		}
+		for id, want := range map[string]string{
+			"m.brief": issueops.MoleculeStepReady,
+			"m.group": issueops.MoleculeStepPending,
+			"m.a":     issueops.MoleculeStepPending,
+			"m.b":     issueops.MoleculeStepPending,
+		} {
+			if states[id] != want {
+				t.Errorf("state[%s] = %q, want %q", id, states[id], want)
+			}
+		}
+		a := view.Analysis
 		if got, want := readyStepIDs(a, "m"), []string{"m.brief"}; !slices.Equal(got, want) {
 			t.Fatalf("ready = %v, want %v", got, want)
 		}
