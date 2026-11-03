@@ -380,6 +380,13 @@ Dolt release that meets this contract has been identified. The follow-up
 fix is gated on identifying one and proving it on both server commit paths;
 until then, the hard failure stays.
 
+**Scope.** This change adds test-only support (`internal/testutil/sqlgate`),
+the two tests, and this section. It does not add a runtime retry
+classifier, advisory-lock admission, a `row_lock` mutation, a dependency
+bump, or a schema change, and it does not claim a production fix. Label and
+dependency races are excluded, as are the wisp plane, cancellation of a held
+loser, and persisted constraint violations.
+
 ## Migration Strategy
 
 ### Phase 1: Add Transaction Discipline (Non-Breaking)
