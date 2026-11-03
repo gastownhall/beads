@@ -299,6 +299,27 @@ func TestLexer(t *testing.T) {
 			expected: []TokenType{TokenIdent, TokenEquals, TokenIdent, TokenAnd, TokenIdent, TokenEquals, TokenIdent, TokenEOF},
 			values:   []string{"status", "=", "open", "AND", "label", "=", "x", ""},
 		},
+		// The duration lookahead scans by decoded rune, so a multi-byte rune
+		// right after a number ends the unit run instead of being read byte
+		// by byte (#7539).
+		{
+			name:     "multi-byte rune after a duration prefix keeps it one identifier",
+			input:    "label=7d\u05e9",
+			expected: []TokenType{TokenIdent, TokenEquals, TokenIdent, TokenEOF},
+			values:   []string{"label", "=", "7d\u05e9", ""},
+		},
+		{
+			name:     "no-break space after a duration keeps the duration",
+			input:    "updated>7d\u00a0AND status=open",
+			expected: []TokenType{TokenIdent, TokenGreater, TokenDuration, TokenAnd, TokenIdent, TokenEquals, TokenIdent, TokenEOF},
+			values:   []string{"updated", ">", "7d", "AND", "status", "=", "open", ""},
+		},
+		{
+			name:     "arabic-indic digit is a number",
+			input:    "label=\u0663",
+			expected: []TokenType{TokenIdent, TokenEquals, TokenNumber, TokenEOF},
+			values:   []string{"label", "=", "\u0663", ""},
+		},
 	}
 
 	for _, tt := range tests {
