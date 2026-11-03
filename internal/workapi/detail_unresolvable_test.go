@@ -507,6 +507,56 @@ func TestBuildIssueDetails_FailedCountIsAbsentNotZero(t *testing.T) {
 			commentIDs:      []string{"c-1"},
 			dependencies:    1,
 		},
+
+		// AC-4: successful counts are published as returned, a genuine 0
+		// included, and comments_omitted follows a successful positive
+		// count only when the rows were not requested. The healthy rows
+		// catch suppressing a real zero; the mixed row catches dropping
+		// every count after any one fails.
+		{
+			name:            "healthy zero counts",
+			src:             skewSource{issue: issue},
+			dependentCount:  ptr64(0),
+			dependencyCount: ptr64(0),
+			commentCount:    ptr64(0),
+		},
+		{
+			name:            "healthy zero counts with comments included",
+			src:             skewSource{issue: issue},
+			opts:            DetailOptions{IncludeComments: true},
+			dependentCount:  ptr64(0),
+			dependencyCount: ptr64(0),
+			commentCount:    ptr64(0),
+		},
+		{
+			name:            "healthy positive counts",
+			src:             skewSource{issue: issue, rdepCount: 2, depCount: 1, deps: oneDep, commentCount: 3},
+			dependentCount:  ptr64(2),
+			dependencyCount: ptr64(1),
+			commentCount:    ptr64(3),
+			commentsOmitted: true,
+			dependencies:    1,
+		},
+		{
+			name: "healthy positive counts with comments included",
+			src: skewSource{
+				issue: issue, rdepCount: 2, depCount: 1, deps: oneDep, commentCount: 1,
+				comments: []*types.Comment{{ID: "c-1", IssueID: "rp-1", Author: "alice", Text: "a real comment"}},
+			},
+			opts:            DetailOptions{IncludeComments: true},
+			dependentCount:  ptr64(2),
+			dependencyCount: ptr64(1),
+			commentCount:    ptr64(1),
+			comments:        1,
+			dependencies:    1,
+		},
+		{
+			name:            "failed dependent count beside successful zero and positive counts",
+			src:             skewSource{issue: issue, rdepCount: 4, rdepCountErr: boom, commentCount: 2},
+			dependencyCount: ptr64(0),
+			commentCount:    ptr64(2),
+			commentsOmitted: true,
+		},
 	}
 
 	for _, tc := range tests {
