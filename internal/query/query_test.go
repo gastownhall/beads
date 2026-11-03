@@ -14,10 +14,11 @@ import (
 
 func TestLexer(t *testing.T) {
 	tests := []struct {
-		name     string
-		input    string
-		expected []TokenType
-		values   []string
+		name      string
+		input     string
+		expected  []TokenType
+		values    []string
+		positions []int
 	}{
 		{
 			name:     "simple equality",
@@ -213,6 +214,55 @@ func TestLexer(t *testing.T) {
 			expected: []TokenType{TokenIdent, TokenGreater, TokenDuration, TokenEOF},
 			values:   []string{"updated", ">", "+30d", ""},
 		},
+		{
+			name:     "quoted multi-byte value round-trips",
+			input:    `title="größe test"`,
+			expected: []TokenType{TokenIdent, TokenEquals, TokenString, TokenEOF},
+			values:   []string{"title", "=", "größe test", ""},
+		},
+		{
+			name:     "quoted CJK value round-trips",
+			input:    `title="日本語"`,
+			expected: []TokenType{TokenIdent, TokenEquals, TokenString, TokenEOF},
+			values:   []string{"title", "=", "日本語", ""},
+		},
+		{
+			name:     "single-quoted multi-byte value round-trips",
+			input:    `title='naïve café'`,
+			expected: []TokenType{TokenIdent, TokenEquals, TokenString, TokenEOF},
+			values:   []string{"title", "=", "naïve café", ""},
+		},
+		{
+			name:     "invalid byte in a quoted value passes through",
+			input:    "title=\"a\xffb\"",
+			expected: []TokenType{TokenIdent, TokenEquals, TokenString, TokenEOF},
+			values:   []string{"title", "=", "a\xffb", ""},
+		},
+		{
+			name:     "unknown escape before a multi-byte rune",
+			input:    `title="\é"`,
+			expected: []TokenType{TokenIdent, TokenEquals, TokenString, TokenEOF},
+			values:   []string{"title", "=", "é", ""},
+		},
+		{
+			name:     "unknown escape keeps a raw byte",
+			input:    "label=\"a\\\xffb\"",
+			expected: []TokenType{TokenIdent, TokenEquals, TokenString, TokenEOF},
+			values:   []string{"label", "=", "a\xffb", ""},
+		},
+		{
+			name:     "literal replacement character in a quoted value",
+			input:    "title=\"a\ufffdb\"",
+			expected: []TokenType{TokenIdent, TokenEquals, TokenString, TokenEOF},
+			values:   []string{"title", "=", "a\ufffdb", ""},
+		},
+		{
+			name:      "truncated lead byte inside quotes",
+			input:     "label=\"a\xc3\" AND x=1",
+			expected:  []TokenType{TokenIdent, TokenEquals, TokenString, TokenAnd, TokenIdent, TokenEquals, TokenNumber, TokenEOF},
+			values:    []string{"label", "=", "a\xc3", "AND", "x", "=", "1", ""},
+			positions: []int{0, 5, 6, 11, 15, 16, 17, 18},
+		},
 	}
 
 	for _, tt := range tests {
@@ -233,6 +283,9 @@ func TestLexer(t *testing.T) {
 				}
 				if tt.values != nil && tok.Value != tt.values[i] {
 					t.Errorf("token %d: got value %q, want %q", i, tok.Value, tt.values[i])
+				}
+				if tt.positions != nil && tok.Pos != tt.positions[i] {
+					t.Errorf("token %d: got pos %d, want %d", i, tok.Pos, tt.positions[i])
 				}
 			}
 		})
@@ -304,6 +357,16 @@ func TestParser(t *testing.T) {
 			name:     "NOT with parentheses",
 			input:    "NOT (status=closed OR status=deferred)",
 			expected: "NOT (status=closed OR status=deferred)",
+		},
+		{
+			name:     "quoted multi-byte value",
+			input:    `label="größe"`,
+			expected: "label=größe",
+		},
+		{
+			name:     "single-quoted multi-byte value",
+			input:    `title='naïve café'`,
+			expected: "title=naïve café",
 		},
 	}
 
@@ -437,6 +500,20 @@ func TestEvaluatorSimpleQueries(t *testing.T) {
 			query: "label=none",
 			expectFilter: func(f *types.IssueFilter) bool {
 				return f.NoLabels
+			},
+		},
+		{
+			name:  "label equals a multi-byte value (quoted)",
+			query: `label="größe"`,
+			expectFilter: func(f *types.IssueFilter) bool {
+				return len(f.Labels) == 1 && f.Labels[0] == "größe"
+			},
+		},
+		{
+			name:  "title contains a multi-byte value",
+			query: `title="größe test"`,
+			expectFilter: func(f *types.IssueFilter) bool {
+				return f.TitleContains == "größe test"
 			},
 		},
 		{
