@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
@@ -161,22 +160,16 @@ func freshCloneServerUnreachableResult(dbName, host string, port int, socket str
 // freshCloneRepairTransport is the transport the Fresh Clone check dials ep
 // over, the unix socket or "" for TCP: the server its repair
 // (fix.FreshCloneImport) writes, so bd doctor --fix never imports
-// issues.jsonl into a server the check did not read. That repair opens the
-// store through the library open (dolt.NewFromConfigWithOptions), which takes
-// its socket from BEADS_DOLT_SERVER_SOCKET alone, not from metadata.json's
-// dolt_server_socket as the CLI's store does, and dials it socket first
-// (doltserver.SocketTransport). Beside a resolved port the check therefore
-// dials a live BEADS_DOLT_SERVER_SOCKET, else TCP at the port, even where
-// metadata.json names a live socket: it read that socket's server while the
-// repair wrote TCP at the port, so --fix overwrote live rows there with the
-// tracked copy (#7874 review). A server only a socket names (no port) is
-// read on its socket, the store's transport; bd doctor --fix withholds the
-// repair there, as the schema gate's connection (openDoltDB) does not dial a
-// socket.
+// issues.jsonl into a server the check did not read (#7874 review). That
+// repair opens the store through the library open
+// (dolt.NewFromConfigWithOptions), which takes the socket ep resolved
+// (BEADS_DOLT_SERVER_SOCKET, else metadata.json's dolt_server_socket) and
+// dials it socket first, falling back to TCP at the port
+// (doltserver.SocketTransport), as ep.Transport does. A server only a socket
+// names (no port) is read on its socket, the store's transport; bd doctor
+// --fix withholds the repair there, as the schema gate's connection
+// (openDoltDB) does not dial a socket.
 func freshCloneRepairTransport(ep doltserver.Endpoint) string {
-	if ep.Resolved() {
-		ep.Socket = os.Getenv("BEADS_DOLT_SERVER_SOCKET")
-	}
 	return ep.Transport()
 }
 
