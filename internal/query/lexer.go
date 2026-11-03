@@ -305,20 +305,19 @@ func (l *Lexer) readNumberOrDuration(startPos int) (Token, error) {
 	return Token{Type: TokenNumber, Value: sb.String(), Pos: startPos}, nil
 }
 
-// readIdent reads an identifier or keyword.
+// readIdent reads an identifier or keyword starting at startPos, which must
+// be the current position. The value is the input slice it spans, so it keeps
+// the bytes as typed.
 func (l *Lexer) readIdent(startPos int) (Token, error) {
-	var sb strings.Builder
-
 	for {
 		r := l.next()
 		if r == 0 || !isIdentChar(r) {
 			l.backup()
 			break
 		}
-		sb.WriteRune(r)
 	}
 
-	value := sb.String()
+	value := l.input[startPos:l.pos]
 	upper := strings.ToUpper(value)
 
 	// Check for keywords
