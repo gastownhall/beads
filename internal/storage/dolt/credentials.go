@@ -137,7 +137,9 @@ func (s *DoltStore) legacyEncryptionKey() []byte {
 
 // ensureCredentialsMigrated upgrades this machine's legacy (unbound) peer
 // credentials to bound v2 before the first credential read, once per store.
-// Legacy blobs sealed under this store's key or under the old
+// The first writable credential operation establishes completion even when
+// no row holds a credential, so a legacy blob that arrives later is never
+// rebound. Legacy blobs sealed under this store's key or under the old
 // dbPath-derived key are both candidates until the marker records
 // completion, so a restart after the random key was persisted still
 // converts the remaining derived-key rows. Only a writable store migrates.
@@ -156,24 +158,7 @@ func (s *DoltStore) ensureCredentialsMigrated(ctx context.Context) error {
 		return nil
 	}
 
-	// The no-key probe runs outside the guard so concurrent credential
-	// readers each wait on the pool rather than queue behind this query.
 	keyPath := filepath.Join(s.beadsDir, credentialKeyFile)
-	s.mu.RLock()
-	loaded := s.credentialKey != nil
-	s.mu.RUnlock()
-	if _, statErr := os.Stat(keyPath); !loaded && errors.Is(statErr, os.ErrNotExist) {
-		var n int
-		if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM federation_peers WHERE password_encrypted IS NOT NULL AND LENGTH(password_encrypted) > 0").Scan(&n); err != nil {
-			return fmt.Errorf("check stored peer credentials: %w", err)
-		}
-		if n == 0 {
-			// No key and nothing stored, so nothing to upgrade; do not
-			// mint a key just to look.
-			return nil
-		}
-	}
-
 	s.credMigrateMu.Lock()
 	defer s.credMigrateMu.Unlock()
 	if s.credMigrated {
@@ -205,10 +190,12 @@ func (s *DoltStore) ensureCredentialsMigrated(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("upgrade stored peer credentials: %w", err)
 	}
-	if len(res.Migrated) > 0 {
-		if err := s.doltAddAndCommit(ctx, []string{"federation_peers"}, "federation: bind stored peer credentials to their peers"); err != nil {
-			return fmt.Errorf("commit upgraded peer credentials: %w", err)
-		}
+	// Commit even when this pass resealed nothing: a previous pass may have
+	// resealed rows and then failed to commit them, and the marker must not
+	// record completion over uncommitted rows. The commit stages only
+	// federation_peers and skips when nothing is staged.
+	if err := s.doltAddAndCommit(ctx, []string{"federation_peers"}, "federation: bind stored peer credentials to their peers"); err != nil {
+		return fmt.Errorf("commit upgraded peer credentials: %w", err)
 	}
 	for _, r := range res.Skipped {
 		fmt.Fprint(credentialWarnWriter, peercred.SkipWarning(runtime.GOOS, r))

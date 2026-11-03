@@ -112,6 +112,7 @@ var ProjectGitignorePatterns = []string{
 	".dolt/",
 	"*.db",
 	".beads-credential-key",
+	".beads-credential-key.v2-migrated",
 	".beads/proxieddb/",
 	// Workspace-gate artifacts (internal/workspacegate): the workspace
 	// gate file sits BESIDE .beads in the project root, so .beads/

@@ -67,7 +67,8 @@ func (s *EmbeddedDoltStore) ensureCredentialKeyLocked() error {
 
 // ensureCredentialsMigrated upgrades this machine's legacy (unbound) peer
 // credentials to bound v2 before the first credential read, once per store.
-// Only a writable store migrates; a read-only one leaves legacy rows
+// The first writable credential operation establishes completion even when
+// no row holds a credential. Only a writable store migrates; a read-only one leaves legacy rows
 // unusable. The marker beside the key file is written only after the
 // migrated rows are committed, and once it is valid for the loaded key no
 // legacy credential is ever rebound again, so a legacy blob that arrives
@@ -83,21 +84,6 @@ func (s *EmbeddedDoltStore) ensureCredentialsMigrated(ctx context.Context) error
 	}
 
 	keyPath := filepath.Join(s.beadsDir, credentialKeyFile)
-	if s.credentialKey == nil {
-		if _, err := os.Stat(keyPath); errors.Is(err, os.ErrNotExist) {
-			// No key on this machine, so no stored blob can be one of ours;
-			// do not mint a key just to look.
-			var n int
-			if err := s.withConn(ctx, false, func(tx *sql.Tx) error {
-				return tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM federation_peers WHERE password_encrypted IS NOT NULL AND LENGTH(password_encrypted) > 0").Scan(&n)
-			}); err != nil {
-				return fmt.Errorf("check stored peer credentials: %w", err)
-			}
-			if n == 0 {
-				return nil
-			}
-		}
-	}
 	if err := s.ensureCredentialKeyLocked(); err != nil {
 		return err
 	}
@@ -118,9 +104,10 @@ func (s *EmbeddedDoltStore) ensureCredentialsMigrated(ctx context.Context) error
 		if err != nil {
 			return err
 		}
-		if len(res.Migrated) == 0 {
-			return nil
-		}
+		// Commit even when this pass resealed nothing: a previous pass may
+		// have resealed rows and then failed to commit them, and the marker
+		// must not record completion over uncommitted rows. StageAndCommit
+		// skips when nothing is pending.
 		return versioncontrolops.StageAndCommit(ctx, db, map[string]bool{"federation_peers": true},
 			"federation: bind stored peer credentials to their peers", commitAuthor)
 	}); err != nil {
