@@ -397,6 +397,117 @@ This is well within Dolt's single-branch capacity. Even at 10x scale (60+
 agents across a large rig), we'd hit ~1200 writes/minute = ~20 writes/second,
 far below the hundreds-per-second ceiling.
 
+## Guarded delete vs. concurrent comment (PR #8026) — characterized, UNRESOLVED
+
+A guarded delete (`ExpectedVersion` checked, `issueops.DeleteInTx` / the uow
+deleter's `deleteInUOW`) and a comment written to the same bead through the
+Commenter role have no ordering between them: a comment never bumps
+`row_lock`, and the per-id delete fence orders guarded deletes against each
+other only. This section records the deterministic characterization of that
+race through the two supported write paths, the executable red regression
+that pins the desired outcome, and the server behavior the later behavioral
+fix is gated on. **The defect remains unresolved**: the current behavior — a
+hard, permanent failure of whichever write commits second, with no partial
+application and no orphaned rows — is retained in production, and the green
+behavioral fix is a separately gated follow-up.
+
+### Reproduction
+
+Two deterministic, channel-synchronized harnesses drive the race through
+the REAL retry boundaries (`withRetryTxOn` for the direct store,
+`RunTxResult` for the unit-of-work path), both commit orders, both supported
+commit styles, the journal on and off, and the wisp plane. The ordinary
+Dolt-backed lane:
+
+```bash
+bazel-test //internal/storage/dolt:dolt_test --test_filter='^TestGuardedDeleteCommentRaceCharacterization$' --test_env=BEADS_TEST_SKIP= --test_env=BEADS_TEST_DOLT_SERVER=local --test_env=BEADS_TEST_REQUIRE_DOLT_CONTAINER=1
+bazel-test //internal/storage/uow:uow_test --test_filter='^TestUOWDeleteCommentRaceCharacterization$' --test_env=BEADS_TEST_SKIP= --test_env=BEADS_TEST_DOLT_SERVER=local --test_env=BEADS_TEST_REQUIRE_DOLT_CONTAINER=1
+```
+
+Both pass: they assert the VERIFIED current behavior of the pinned server
+(`dolthub/dolt-sql-server:2.6.0`, `VERSION()=8.0.31`, `@@foreign_key_checks=1`,
+REPEATABLE-READ). Appending
+`--test_env=BEADS_TEST_EXPECT_SERIAL_DELETE_COMMENT=1` to either command runs
+the SAME cases against the DESIRED serial outcome instead, which the
+characterized server does not deliver on the journal-off configurations, so
+exactly those cases fail with the observed storage error. That red run is the
+executable regression — a reproduction switch, never an ordinary gate — and it
+is the assertion set the behavioral fix promotes into the default gates once a
+server that meets the dependency contract below is released. The serial
+non-overlap controls pass in BOTH modes.
+
+### Measured results (one `race-evidence:` line per case, from the harness logs)
+
+All journal-off cases, on BOTH write paths and in both commit styles, measure
+the same outcome — attempts=1, refused with MySQL **1105 (HY000)** naming the
+FK constraint (`fk_comments_issue` on the issue plane, `fk_wisp_comments_issue`
+on the wisp plane):
+
+> Committing this transaction resulted in a working set with constraint
+> violations, transaction rolled back. … set @@dolt_force_transaction_commit=1.
+> Constraint violations: Type: Foreign Key Constraint Violation,
+> ForeignKey: fk_comments_issue, Table: comments, ReferencedTable: issues …
+> (`force-commit off`: the sessions never set `@@dolt_force_transaction_commit`.)
+
+- **Delete after a committed comment** (direct store, plain COMMIT and
+  in-body `DOLT_COMMIT`; uow, plain COMMIT and `CALL DOLT_COMMIT('-Am')`;
+  both planes): the delete's operation body SUCCEEDS inside its transaction
+  (the version guard passes; the delete reports `Deleted: 1`), the commit is
+  refused with the 1105 constraint error, and the final state is
+  `parent_exists=true, comment_rows=1, dangling=0` — the parent and the
+  racing comment are both intact. The delete is refused, not replayed: the
+  1105 constraint-violation error matches no retry classifier
+  (`isSerializationError` is 1213/1205; `isDoltAutocommitRollbackError` is
+  the merge-conflict 1105, not this one), so it is permanent at the retry
+  boundary.
+- **Comment after a committed delete** (direct store and uow, all styles): the
+  comment's insert succeeds inside its transaction, the commit is refused
+  with the same 1105 constraint error, and the final state is
+  `parent_exists=false, comment_rows=0, dangling=0` — the delete stands and
+  the comment is rolled back. The comment does NOT get the typed
+  `storage.ErrNotFound` the Commenter role promises serially.
+- **Journal ON** (delete after a committed comment, both paths): attempts=2
+  and the delete SUCCEEDS, its cascade taking the racing comment —
+  `parent_exists=false, comment_rows=0, dangling=0`. The durable events
+  journal's `bd_events_seq` write-write conflict forces Dolt's commit-time
+  merge to refuse the first attempt with a rollback-guaranteed serialization
+  failure, and the replay re-pins a fresh snapshot that already contains the
+  racing comment, so the delete then runs against it. The desired serial
+  outcome is delivered by the journal's write-write serialization, not by
+  the guard — and only on this one configuration.
+
+No case ever left a partial application or an orphaned comment row: the
+hypothesis that the merge could leave a dangling child is refuted on the
+characterized artifact.
+
+Incomplete coverage, recorded as such: label and dependency races are out of
+scope by design (only the Commenter API carries the typed-not-found contract),
+and no persisted-constraint-violation or cancellation-mid-race case runs.
+
+### Required server behavior (the dependency contract)
+
+The later behavioral fix is gated on a `dolt sql-server` release (the
+`dolthub/dolt-sql-server` line the harness pins; no specific release is
+claimed here) whose commit-time merge reports this cross-session
+FK-cascade conflict as a **rollback-guaranteed serialization failure —
+MySQL 1213-class, not the permanent 1105 constraint-violation error —
+on BOTH server commit paths**:
+
+1. an ordinary SQL `COMMIT`, and
+2. an in-transaction `DOLT_COMMIT` / `CALL DOLT_COMMIT('-Am', …)` statement.
+
+A 1213-class refusal is the one outcome beads' existing retry boundaries
+already handle correctly and safely on both write paths: it guarantees the
+server rolled the transaction back, and it is replayed onto a fresh snapshot
+that contains the racing write — the exact mechanism the journal-on case
+measures delivering the desired serial outcome. Until the server provides
+that, the characterization and its red regression stand as recorded; the
+fix is NOT to add a beads-side retry classifier for the 1105 constraint error
+(that would be a new engine-specific retry policy behind the storage
+boundary, which this repo's charter reserves for a maintainer ruling), nor to
+take an advisory lock around comments, mutate `row_lock`, bump a dependency,
+or change the schema — PR #8026's scope excludes all of these.
+
 ## Open Questions
 
 1. **Commit granularity.** Should every `bd create` produce its own Dolt
