@@ -754,6 +754,45 @@ func TestProxiedServerReady2(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("max_rows_at_or_above_the_result_matches_uncapped", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "rcmu")
+		for i := 0; i < 3; i++ {
+			bdProxiedCreate(t, bd, p.dir, fmt.Sprintf("Ready within cap %d", i), "--label", "rcmu-cap")
+		}
+
+		run := func(env []string, args ...string) string {
+			t.Helper()
+			full := append([]string{"ready", "--label", "rcmu-cap"}, args...)
+			stdout, stderr, err := bdProxiedRunBuffersWithEnv(t, bd, p.dir, append([]string{"BD_JSON_ENVELOPE=1"}, env...), full...)
+			if err != nil {
+				t.Fatalf("bd %s (env %v) failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(full, " "), env, err, stdout, stderr)
+			}
+			return "stdout:\n" + stdout + "stderr:\n" + stderr
+		}
+
+		for _, tc := range []struct {
+			name     string
+			uncapped []string
+			capped   []string
+			env      []string
+		}{
+			{name: "flag cap equals the result", uncapped: nil, capped: []string{"--max-rows", "3"}},
+			{name: "env cap equals the result", uncapped: nil, env: []string{"BEADS_MAX_ROWS=3"}},
+			{name: "cap equals a truncating limit", uncapped: []string{"--limit", "2"}, capped: []string{"--limit", "2", "--max-rows", "2"}},
+			{name: "env cap equals a truncating limit", uncapped: []string{"--limit", "2"}, capped: []string{"--limit", "2"}, env: []string{"BEADS_MAX_ROWS=2"}},
+		} {
+			for _, format := range [][]string{nil, {"--json"}} {
+				want := run(nil, append(append([]string{}, tc.uncapped...), format...)...)
+				got := run(tc.env, append(append([]string{}, tc.capped...), format...)...)
+				if got != want {
+					t.Errorf("%s %v: capped output differs from uncapped\ncapped:\n%s\nuncapped:\n%s", tc.name, format, got, want)
+				}
+			}
+		}
+	})
+
 }
 
 func TestProxiedServerReadyConcurrent(t *testing.T) {
