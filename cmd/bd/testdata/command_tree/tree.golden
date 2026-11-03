@@ -440,15 +440,23 @@ bd backup sync
     | backup location configured with 'bd backup init'.
     |
     | For file:// destinations, --prune-with-grace-period <duration> asks Dolt to
-    | remove unreferenced table files older than the duration before syncing. The
-    | duration must be at least 10m. Dolt skips pruning if any destination file was
-    | modified within that period. Pruning is not supported for other destination
-    | types; without the flag, sync behavior is unchanged.
+    | remove manifest-unreferenced table files older than the duration before
+    | syncing. This reclaims orphan files from interrupted syncs; it does not reclaim
+    | unreachable chunks inside files still referenced by the manifest, so the backup
+    | size cap remains the control for normal backup growth. The duration must be at
+    | least 10m and shorter than the sync interval, or pruning may never run. Dolt
+    | skips pruning if any destination file was modified within the grace period.
+    |
+    | Pruning is best-effort: a prune failure does not fail the sync. Embedded mode
+    | reports Dolt's prune summary when available. On SQL-server and proxied routes,
+    | Dolt writes that summary to server stdout and does not return it over SQL, so
+    | bd reports the prune outcome as unavailable; check the Dolt server logs.
+    | Without the flag, sync behavior is unchanged.
     |
     | The backup is atomic — if the sync fails, the previous backup state is preserved.
     |
     | Run 'bd backup init <path>' first to configure a destination.
-  flag --prune-with-grace-period type=duration default="0s" usage="Prune aged unreferenced files in a file:// backup destination"
+  flag --prune-with-grace-period type=duration default="0s" usage="Best-effort prune of aged orphan files in a file:// backup destination"
 
 bd batch
   use: "batch"

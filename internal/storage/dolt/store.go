@@ -1610,10 +1610,19 @@ func (s *DoltStore) BackupSync(ctx context.Context, name string) error {
 
 // BackupSyncWithPrune runs a long-timeout Dolt backup sync with native
 // grace-period pruning enabled for the configured file:// destination.
-func (s *DoltStore) BackupSyncWithPrune(ctx context.Context, name string, gracePeriod time.Duration) error {
+func (s *DoltStore) BackupRemoteURL(ctx context.Context, name string) (string, error) {
 	db, err := s.oneShotConn(0)
 	if err != nil {
-		return err
+		return "", err
+	}
+	defer db.Close()
+	return versioncontrolops.BackupRemoteURL(ctx, db, name)
+}
+
+func (s *DoltStore) BackupSyncWithPrune(ctx context.Context, name string, gracePeriod time.Duration) (versioncontrolops.BackupPruneOutcome, error) {
+	db, err := s.oneShotConn(0)
+	if err != nil {
+		return versioncontrolops.BackupPruneOutcome{}, err
 	}
 	defer db.Close()
 	return versioncontrolops.BackupSyncWithPrune(ctx, db, name, gracePeriod)

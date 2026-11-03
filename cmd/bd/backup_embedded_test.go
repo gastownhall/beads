@@ -148,9 +148,24 @@ func TestEmbeddedBackup(t *testing.T) {
 		}
 		ageBackupDestinationEntries(t, backupDest, 20*time.Minute)
 
-		out := bdBackup(t, bd, dir, "sync", "--prune-with-grace-period", "10m")
-		if !strings.Contains(out, "Backup synced") {
-			t.Fatalf("pruned sync did not report success: %s", out)
+		out := bdBackup(t, bd, dir, "sync", "--json", "--prune-with-grace-period", "10m")
+		var firstPrune struct {
+			Synced bool `json:"synced"`
+			Prune  struct {
+				Status         string   `json:"status"`
+				FilesDeleted   int      `json:"files_deleted"`
+				BytesReclaimed int64    `json:"bytes_reclaimed"`
+				Skipped        []string `json:"skipped"`
+			} `json:"prune"`
+		}
+		if err := json.Unmarshal([]byte(out), &firstPrune); err != nil {
+			t.Fatalf("parse pruned sync JSON: %v\nstdout: %s", err, out)
+		}
+		if !firstPrune.Synced || (firstPrune.Prune.Status != "pruned" && firstPrune.Prune.Status != "partial") || firstPrune.Prune.FilesDeleted != 1 || firstPrune.Prune.BytesReclaimed <= 0 {
+			t.Fatalf("pruned sync result = %+v, want successful sync and one deleted orphan", firstPrune)
+		}
+		if firstPrune.Prune.Status == "partial" && len(firstPrune.Prune.Skipped) == 0 {
+			t.Fatalf("partial prune result = %+v, want skip reasons", firstPrune.Prune)
 		}
 		if _, err := os.Stat(orphan); !os.IsNotExist(err) {
 			t.Fatalf("pruned sync left the orphan in place; stat error: %v", err)
@@ -160,8 +175,19 @@ func TestEmbeddedBackup(t *testing.T) {
 		if err := os.WriteFile(recentOrphan, []byte("recent orphaned table file"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if out := bdBackup(t, bd, dir, "sync", "--prune-with-grace-period", "10m"); !strings.Contains(out, "Backup synced") {
-			t.Fatalf("pruned sync with recent destination file did not report success: %s", out)
+		out = bdBackup(t, bd, dir, "sync", "--json", "--prune-with-grace-period", "10m")
+		var recentPrune struct {
+			Synced bool `json:"synced"`
+			Prune  struct {
+				Status  string   `json:"status"`
+				Skipped []string `json:"skipped"`
+			} `json:"prune"`
+		}
+		if err := json.Unmarshal([]byte(out), &recentPrune); err != nil {
+			t.Fatalf("parse recent-file prune JSON: %v\nstdout: %s", err, out)
+		}
+		if !recentPrune.Synced || recentPrune.Prune.Status != "skipped" || len(recentPrune.Prune.Skipped) == 0 {
+			t.Fatalf("recent-file prune result = %+v, want successful sync with a reported skip", recentPrune)
 		}
 		if _, err := os.Stat(recentOrphan); err != nil {
 			t.Fatalf("pruned sync removed a recent destination file; stat error: %v", err)

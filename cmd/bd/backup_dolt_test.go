@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 )
 
 func TestResolveDoltBackupURL(t *testing.T) {
@@ -231,31 +231,37 @@ func TestValidateBackupPruneDestination(t *testing.T) {
 	}
 }
 
-func TestBackupSyncPruneRejectsNonFileDestinationBeforeSync(t *testing.T) {
+func TestRequireFileBackupForPruneUsesDoltRegisteredDestination(t *testing.T) {
 	prepareBackupStatusTest(t)
-	if err := saveDoltBackupConfig("https://example.com/beads"); err != nil {
-		t.Fatalf("save backup config: %v", err)
+	if err := saveDoltBackupConfig("file:///stale/local/status-file"); err != nil {
+		t.Fatalf("save stale backup config: %v", err)
 	}
 
-	root := &cobra.Command{Use: "bd"}
-	backup := &cobra.Command{Use: "backup"}
-	sync := &cobra.Command{
-		Use:           "sync",
-		SilenceUsage:  true,
-		SilenceErrors: true,
-		RunE:          backupSyncCmd.RunE,
+	read := false
+	err := requireFileBackupForPrune(context.Background(), func(_ context.Context, name string) (string, error) {
+		read = true
+		if name != defaultDoltBackupName {
+			t.Fatalf("backup remote name = %q, want %q", name, defaultDoltBackupName)
+		}
+		return "https://example.com/registered", nil
+	})
+	if !read {
+		t.Fatal("registered backup destination was not read")
 	}
-	sync.Flags().Duration(backupSyncPruneGracePeriodFlag, 0, "")
-	backup.AddCommand(sync)
-	root.AddCommand(backup)
-	root.SetArgs([]string{"backup", "sync", "--prune-with-grace-period", "10m"})
-
-	_, stderr, err := executeBackupStatusCommand(t, root)
 	if err == nil {
-		t.Fatal("bd backup sync --prune-with-grace-period 10m succeeded for a non-file destination")
+		t.Fatal("prune validation accepted a non-file Dolt-registered destination")
 	}
-	if !strings.Contains(stderr, "--prune-with-grace-period supports only file:// backup destinations (configured scheme: https)") {
-		t.Fatalf("backup sync error = %q, want non-file destination rejection before sync", stderr)
+	if !strings.Contains(err.Error(), "configured scheme: https") {
+		t.Fatalf("backup prune validation error = %q, want non-file destination rejection", err)
+	}
+}
+
+func TestRequireFileBackupForPruneReportsMissingDoltRemote(t *testing.T) {
+	err := requireFileBackupForPrune(context.Background(), func(context.Context, string) (string, error) {
+		return "", versioncontrolops.ErrBackupRemoteNotFound
+	})
+	if err == nil || !strings.Contains(err.Error(), "no backup destination configured") {
+		t.Fatalf("backup prune validation error = %v, want missing destination guidance", err)
 	}
 }
 
