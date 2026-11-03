@@ -1194,6 +1194,60 @@ func TestCrossProject_IdentityCheck_ReadErrorRefuses(t *testing.T) {
 	}
 }
 
+// TestCrossProject_IdentityCheck_SoftSkip_NoBdSchema pins the no-schema
+// compatibility skip: an existing database with no bd schema yet (a database
+// pre-created for bd, or the one a CREATE-race loser finds) has no metadata
+// table, so verifyProjectIdentity cannot read _project_id. That specific
+// absence keeps skipping, for every open that reaches the verifier, so schema
+// initialization can proceed.
+func TestCrossProject_IdentityCheck_SoftSkip_NoBdSchema(t *testing.T) {
+	skipIfNoDolt(t)
+	acquireTestSlot()
+	t.Cleanup(releaseTestSlot)
+
+	const localID = "99999999-9999-9999-9999-999999999999"
+	variants := []struct {
+		name            string
+		createIfMissing bool
+		openedByInit    bool
+	}{
+		{"connect", false, false},
+		{"init", false, true},
+		{"create-if-missing", true, false},
+		{"init create-if-missing", true, true},
+	}
+	for _, v := range variants {
+		t.Run(v.name, func(t *testing.T) {
+			ctx, cancel := testContext(t)
+			defer cancel()
+
+			f := newIdentityTestFixture(t, "noschema")
+			f.saveLocalProjectID(t, localID)
+			createTestDatabase(t, testServerPort, f.dbName)
+
+			cfg := f.config()
+			cfg.CreateIfMissing = v.createIfMissing
+			cfg.OpenedByInit = v.openedByInit
+			store, err := openStoreWithOwnBudget(t, cfg)
+			if err != nil {
+				t.Fatalf("open of an existing database with no bd schema must soft-skip identity verification, got: %v", err)
+			}
+			defer store.Close()
+
+			// The open initialized the schema: metadata queries work.
+			if got, err := store.GetMetadata(ctx, "_project_id"); err != nil || got != "" {
+				t.Errorf("GetMetadata(_project_id) = %q, %v; want the absent key after initialization", got, err)
+			}
+			if err := store.SetMetadata(ctx, "_project_id", localID); err != nil {
+				t.Errorf("SetMetadata(_project_id) after initialization: %v", err)
+			}
+			if got, err := store.GetMetadata(ctx, "_project_id"); err != nil || got != localID {
+				t.Errorf("GetMetadata(_project_id) = %q, %v; want %q", got, err, localID)
+			}
+		})
+	}
+}
+
 // identityMockStore is a store over sqlmock whose beadsDir carries localID in
 // metadata.json, so verifyProjectIdentity runs against scripted metadata
 // reads. hasLocal false writes no metadata.json at all.
@@ -1243,6 +1297,31 @@ func TestVerifyProjectIdentity_ReadErrors(t *testing.T) {
 		{"another missing table", &mysql.MySQLError{Number: 1146, Message: "table not found: issues"}},
 		{"unidentifiable missing table", &mysql.MySQLError{Number: 1146, Message: "table not found"}},
 	}
+	// A missing metadata table is an existing database with no bd schema yet:
+	// the compatibility skip, recognized only when the error names metadata.
+	missingMetadata := []struct {
+		name    string
+		readErr error
+	}{
+		{"go-mysql-server", &mysql.MySQLError{Number: 1146, Message: "table not found: metadata"}},
+		{"mysql qualified", &mysql.MySQLError{Number: 1146, Message: "Table 'beads_proj.metadata' doesn't exist"}},
+		{"mysql unqualified", &mysql.MySQLError{Number: 1146, Message: "Table 'metadata' doesn't exist"}},
+		{"mysql backticked", &mysql.MySQLError{Number: 1146, Message: "Table `metadata` doesn't exist"}},
+	}
+	for _, tc := range missingMetadata {
+		t.Run("skips missing metadata/"+tc.name, func(t *testing.T) {
+			store, mock, beadsDir := identityMockStore(t, "11111111-1111-1111-1111-111111111111", true)
+			expectProjectIDRead(mock, nil, tc.readErr)
+
+			if err := store.verifyProjectIdentity(context.Background(), beadsDir, false); err != nil {
+				t.Fatalf("verifyProjectIdentity = %v, want the no-schema skip for %v", err, tc.readErr)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+
 	for _, tc := range refusals {
 		t.Run("refuses/"+tc.name, func(t *testing.T) {
 			store, mock, beadsDir := identityMockStore(t, "11111111-1111-1111-1111-111111111111", true)
