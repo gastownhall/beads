@@ -1,0 +1,149 @@
+package dolt
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"testing"
+	"time"
+
+	"github.com/steveyegge/beads/internal/storage/doltutil"
+	"github.com/steveyegge/beads/internal/storage/schema"
+)
+
+// TestTempResidueUntrackOnSQLServer runs the committed __temp__ intermediate
+// repair (gastownhall/beads#7073) through the server-mode migration path:
+// MigrateUpWithLock on a pinned session of a real dolt sql-server, against an
+// at-latest database whose HEAD tracks a table-rebuild intermediate. The
+// lock-free fast path must decline, the first call must untrack the
+// intermediate (keeping its working rows) and count it, and the second call
+// must find nothing to do and leave HEAD where it was. Both settings of
+// @@dolt_transaction_commit run, since under 1 every SQL transaction commit is
+// already a Dolt commit.
+func TestTempResidueUntrackOnSQLServer(t *testing.T) {
+	skipIfNoDolt(t)
+	for _, txCommit := range []int{0, 1} {
+		t.Run(fmt.Sprintf("dolt_transaction_commit=%d", txCommit), func(t *testing.T) {
+			acquireTestSlot()
+			t.Cleanup(releaseTestSlot)
+			runTempResidueUntrackOnSQLServer(t, txCommit)
+		})
+	}
+}
+
+func runTempResidueUntrackOnSQLServer(t *testing.T, txCommit int) {
+	const residue = "__temp__wisp_child_counters"
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	t.Cleanup(cancel)
+
+	dbName := uniqueTestDBName(t)
+	admin, err := sql.Open("mysql", doltutil.ServerDSN{
+		Host: "127.0.0.1", Port: testServerPort, User: "root", Timeout: 10 * time.Second,
+	}.String())
+	if err != nil {
+		t.Fatalf("open admin connection: %v", err)
+	}
+	t.Cleanup(func() { admin.Close() })
+	// No DROP DATABASE on cleanup: rapid CREATE/DROP cycles crash the Dolt
+	// server (see setupPreReshapeAncestor).
+	if _, err := admin.ExecContext(ctx, "CREATE DATABASE `"+dbName+"`"); err != nil {
+		t.Fatalf("create database: %v", err)
+	}
+	db, err := sql.Open("mysql", doltutil.ServerDSN{
+		Host: "127.0.0.1", Port: testServerPort, User: "root", Database: dbName, Timeout: 10 * time.Second,
+	}.String())
+	if err != nil {
+		t.Fatalf("open test database: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("pin connection: %v", err)
+	}
+	t.Cleanup(func() { conn.Close() })
+
+	exec := func(query string, args ...any) {
+		t.Helper()
+		if _, err := conn.ExecContext(ctx, query, args...); err != nil {
+			t.Fatalf("exec %.60q: %v", query, err)
+		}
+	}
+	scalar := func(q interface {
+		QueryRowContext(context.Context, string, ...any) *sql.Row
+	}, query string) string {
+		t.Helper()
+		var v string
+		if err := q.QueryRowContext(ctx, query).Scan(&v); err != nil {
+			t.Fatalf("%.60q: %v", query, err)
+		}
+		return v
+	}
+
+	// An at-latest database, then the older binary's residue: committed with
+	// the pattern absent, and the pattern restored afterwards the way an
+	// upgraded binary's seeding leaves it.
+	if _, err := schema.MigrateUpWithLock(ctx, conn, dbName); err != nil {
+		t.Fatalf("MigrateUpWithLock (bootstrap): %v", err)
+	}
+	exec("DELETE FROM dolt_ignore WHERE pattern = '__temp__%'")
+	exec("CREATE TABLE " + residue + " (parent_id VARCHAR(255) NOT NULL PRIMARY KEY, last_child INT NOT NULL DEFAULT 0)")
+	exec("INSERT INTO " + residue + " VALUES ('srv-parent', 4)")
+	exec("CALL DOLT_COMMIT('-Am', 'test: auto-commit caught the rebuild intermediate')")
+	exec("INSERT INTO dolt_ignore (pattern, ignored) VALUES ('__temp__%', 1)")
+	exec("CALL DOLT_ADD('dolt_ignore')")
+	exec("CALL DOLT_COMMIT('-m', 'test: reseed __temp__%')")
+	exec(fmt.Sprintf("SET @@dolt_transaction_commit = %d", txCommit))
+
+	// headTemps counts the __temp__ tables at HEAD as q's session sees them.
+	headTemps := func(q interface {
+		QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+	}) int {
+		t.Helper()
+		rows, err := q.QueryContext(ctx, "SHOW TABLES AS OF 'HEAD' LIKE '__temp__%'")
+		if err != nil {
+			t.Fatalf("list __temp__ tables at HEAD: %v", err)
+		}
+		defer rows.Close()
+		n := 0
+		for rows.Next() {
+			n++
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatalf("list __temp__ tables at HEAD: %v", err)
+		}
+		return n
+	}
+	if headTemps(conn) != 1 {
+		t.Fatalf("%s is not tracked at HEAD; the residue is not reproduced", residue)
+	}
+
+	first, err := schema.MigrateUpWithLock(ctx, conn, dbName)
+	if err != nil {
+		t.Fatalf("MigrateUpWithLock (repair): %v", err)
+	}
+	if first == 0 {
+		t.Error("the repairing call returned 0; a call that moved HEAD must count it")
+	}
+	atHead := headTemps(db)
+	if atHead != 0 {
+		t.Errorf("another session still sees %d __temp__ table(s) at HEAD after the repair", atHead)
+	}
+	if got := scalar(conn, "SELECT COUNT(*) FROM dolt_status WHERE LOCATE('__temp__', table_name) > 0"); got != "0" {
+		t.Errorf("dolt_status carries %s __temp__ row(s) after the repair", got)
+	}
+	if got := scalar(conn, "SELECT last_child FROM "+residue+" WHERE parent_id = 'srv-parent'"); got != "4" {
+		t.Errorf("%s working row = %s, want 4: the repair must keep the rows", residue, got)
+	}
+
+	head := scalar(conn, "SELECT HASHOF('HEAD')")
+	second, err := schema.MigrateUpWithLock(ctx, conn, dbName)
+	if err != nil {
+		t.Fatalf("MigrateUpWithLock (converged): %v", err)
+	}
+	if second != 0 {
+		t.Errorf("the second call returned %d, want 0 on a repaired database", second)
+	}
+	if got := scalar(conn, "SELECT HASHOF('HEAD')"); got != head {
+		t.Errorf("the second call moved HEAD from %s to %s", head, got)
+	}
+}
