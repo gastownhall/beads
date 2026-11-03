@@ -6,12 +6,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"maps"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/memoryapi"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/memoryops"
 )
@@ -221,6 +224,70 @@ func TestRememberBareKeyReadsExactKey(t *testing.T) {
 			}
 			if run.stdout != "the exact memory\n" {
 				t.Errorf("stdout = %q, want the exact memory", run.stdout)
+			}
+		})
+	}
+}
+
+// bareKeyRefusal is the shipped refusal for a bare key naming nothing,
+// spelled as rememberBareKeyPath spells it.
+func bareKeyRefusal(key string) string {
+	keyArg, keyNote := remedy.CommandArg(runtime.GOOS, key, "<key>")
+	return fmt.Sprintf("no memory named %q to recall -- and refusing to store a bare key-like token as its own content. "+
+		"bd remember WRITES (its positional arg is CONTENT, not a key). "+
+		"To browse keys: bd memories. To store it anyway, run: bd remember %q --key %s%s",
+		key, key, keyArg, keyNote)
+}
+
+// assertBareKeyRefused checks a run exited 1 having written nothing.
+func assertBareKeyRefused(t *testing.T, run bareKeyRun, mem *bareKeyMemories, before map[string]string) {
+	t.Helper()
+	var exit *exitError
+	if !errors.As(run.err, &exit) || exit.Code != 1 {
+		t.Fatalf("err = %v, want exit 1\nstdout:\n%s\nstderr:\n%s", run.err, run.stdout, run.stderr)
+	}
+	if len(mem.writes) != 0 || run.commits != 0 {
+		t.Errorf("wrote %v (%d commits), want nothing written", mem.writes, run.commits)
+	}
+	if !maps.Equal(mem.stored, before) {
+		t.Errorf("corpus changed: %v, want %v", mem.stored, before)
+	}
+}
+
+// TestRememberBareKeyMissRefusesWithoutWriting pins the other half of
+// GH#7275: a bare key naming nothing -- neither itself nor its derived key --
+// is refused with the shipped refusal and no hint, and nothing is stored. At
+// the base it was stored as content under the derived key.
+func TestRememberBareKeyMissRefusesWithoutWriting(t *testing.T) {
+	for _, shape := range bareKeyShapes {
+		t.Run(shape.name, func(t *testing.T) {
+			for _, asJSON := range []bool{false, true} {
+				t.Run(bareKeyCaseName(asJSON, "miss"), func(t *testing.T) {
+					key := shape.key
+					derivedKeyOf(t, key)
+					mem := &bareKeyMemories{stored: map[string]string{"unrelated": "an unrelated memory"}}
+					before := maps.Clone(mem.stored)
+
+					run := runRememberCmd(t, mem, key, "", asJSON)
+					assertBareKeyRefused(t, run, mem, before)
+					want := bareKeyRefusal(key)
+					if asJSON {
+						body := decodeJSONBody(t, run.stdout)
+						if body["error"] != want {
+							t.Errorf("error = %q\nwant    %q", body["error"], want)
+						}
+						if hint, ok := body["hint"]; ok {
+							t.Errorf("hint = %q, want none: no memory sits under the derived key", hint)
+						}
+						return
+					}
+					if run.stderr != "Error: "+want+"\n" {
+						t.Errorf("stderr = %q\nwant     %q", run.stderr, "Error: "+want+"\n")
+					}
+					if run.stdout != "" {
+						t.Errorf("stdout = %q, want nothing", run.stdout)
+					}
+				})
 			}
 		})
 	}
