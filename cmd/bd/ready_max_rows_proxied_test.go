@@ -14,6 +14,7 @@ import (
 	storageissueops "github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/issueops"
 )
 
 // pinProxiedServerMode routes usesProxiedServer() down the proxied branch for
@@ -157,7 +158,15 @@ func (u stubReadyUOW) CommentUseCase() domain.CommentUseCase       { return nil 
 // capability accessors are where decorators attach; a test that needs the
 // claim or counter surface embeds this and adds the accessor.
 type stubReadyProvider struct {
-	issues domain.IssueUseCase
+	issues  domain.IssueUseCase
+	claimer *stubReadyClaimer
+}
+
+// ReadyClaimer is the claim surface the proxied claim route reaches through
+// uow.ReadyClaimerSource. A claimer set to nil means no test on this provider
+// claims; the claim route is the only caller, so it never dereferences it.
+func (p stubReadyProvider) ReadyClaimer() (issueops.ReadyClaimer, error) {
+	return p.claimer, nil
 }
 
 func (p stubReadyProvider) NewUOW(context.Context) (uow.UnitOfWork, error) {
@@ -500,6 +509,107 @@ func TestReadyMaxRowsPaginatesUnderProxiedServer(t *testing.T) {
 			}
 			if !strings.Contains(stdout, "bd-stub3") || strings.Contains(stdout, "bd-stub1") || strings.Contains(stdout, "bd-stub2") {
 				t.Errorf("offset page stdout = %q, want only bd-stub3", stdout)
+			}
+		})
+	}
+}
+
+// stubReadyClaimer records the one request the proxied claim route makes and
+// hands back one claimed row, so a test can prove the route claimed — and
+// claimed exactly once — without a store.
+type stubReadyClaimer struct {
+	issueops.ReadyClaimer
+	calls int
+}
+
+func (c *stubReadyClaimer) ClaimNext(context.Context, issueops.ClaimNextRequest) (issueops.ClaimNextResult, error) {
+	c.calls++
+	return issueops.ClaimNextResult{Claimed: &types.IssueWithCounts{Issue: stubReadyIssue(1)}}, nil
+}
+
+// withStubbedProxiedReadyClaim points the proxied ready route at a stub ready
+// front of items whose claim surface is claimer, and pins the route to
+// proxied for the test.
+func withStubbedProxiedReadyClaim(t *testing.T, items []*types.Issue, claimer *stubReadyClaimer) *stubReadyIssues {
+	t.Helper()
+	stub := &stubReadyIssues{items: items}
+	oldProvider := uowProvider
+	uowProvider = stubReadyProvider{issues: stub, claimer: claimer}
+	pinProxiedServerMode(t)
+	t.Cleanup(func() { uowProvider = oldProvider })
+	return stub
+}
+
+// TestReadyClaimIgnoresMaxRowsUnderProxiedServer is the AC-3 exemption: `bd
+// ready --claim` takes one row out of a ready front no matter how a cap sized
+// for bulk reads would bound the listing beside it, on the proxied route
+// exactly as on the direct one. A claim under a cap smaller than the ready
+// set succeeds with either cap source and claims exactly one eligible issue.
+func TestReadyClaimIgnoresMaxRowsUnderProxiedServer(t *testing.T) {
+	isolateBeadsDirForTest(t)
+	for _, tc := range []struct {
+		name string
+		json bool
+		args []string
+		env  string
+	}{
+		{name: "flag_text", args: []string{"--claim", "--max-rows", "1"}},
+		{name: "flag_json", json: true, args: []string{"--claim", "--max-rows", "1"}},
+		{name: "env_text", args: []string{"--claim"}, env: "1"},
+		{name: "env_json", json: true, args: []string{"--claim"}, env: "1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pinJSONOutput(t, tc.json)
+			t.Setenv(maxRowsEnvVar, tc.env)
+			claimer := &stubReadyClaimer{}
+			withStubbedProxiedReadyClaim(t, []*types.Issue{stubReadyIssue(1), stubReadyIssue(2), stubReadyIssue(3)}, claimer)
+
+			err, stdout, stderr := runReadyCaptured(t, newReadyFlagsCommand(t, tc.args...))
+			if err != nil {
+				t.Fatalf("claim under a cap smaller than the ready set failed: %v (stderr=%q)", err, stderr)
+			}
+			if claimer.calls != 1 {
+				t.Errorf("claim made %d requests, want exactly 1", claimer.calls)
+			}
+			if !strings.Contains(stdout, "bd-stub1") {
+				t.Errorf("stdout = %q, want the one claimed issue", stdout)
+			}
+			for _, bad := range []string{
+				"too many rows",
+				"not supported in proxied-server mode",
+				"must be non-negative",
+			} {
+				if strings.Contains(stderr, bad) {
+					t.Errorf("a cap diagnostic reached the claim: %q", stderr)
+				}
+			}
+		})
+	}
+
+	// The guards a claim keeps against a cap: a negative one is a usage
+	// error raised before any claim, and the claim/gated conflict is
+	// reported despite a positive cap. Neither may claim first.
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "negative_cap_is_a_usage_error", args: []string{"--claim", "--max-rows", "-1"}, want: "--max-rows must be non-negative"},
+		{name: "claim_gated_conflict_first", args: []string{"--claim", "--gated", "--max-rows", "1"}, want: "--claim cannot be combined with --gated"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pinJSONOutput(t, false)
+			claimer := &stubReadyClaimer{}
+			withStubbedProxiedReadyClaim(t, []*types.Issue{stubReadyIssue(1), stubReadyIssue(2), stubReadyIssue(3)}, claimer)
+
+			var err error
+			stderr := captureStderr(t, func() { err = readyCmd.RunE(newReadyFlagsCommand(t, tc.args...), nil) })
+			assertExitCode(t, err, 1)
+			if !strings.Contains(stderr, tc.want) {
+				t.Errorf("stderr = %q, want %q", stderr, tc.want)
+			}
+			if claimer.calls != 0 {
+				t.Errorf("an invalid claim command line reached the claim surface (%d calls)", claimer.calls)
 			}
 		})
 	}
