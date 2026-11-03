@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1474,6 +1475,90 @@ func TestGetReadyWork_UndatedDeferredParentHidesChildren(t *testing.T) {
 				t.Errorf("%s is ready, but its parent is deferred; ready = %v", hidden, ids)
 			}
 		}
+	}
+}
+
+// seedReadyIssues creates issues (all P2) and parent-child edges
+// (child -> parent) for the deferred-parent ready tests.
+func seedReadyIssues(ctx context.Context, t *testing.T, store *DoltStore, issues []*types.Issue, childToParent map[string]string) {
+	t.Helper()
+	for _, issue := range issues {
+		issue.Priority = 2
+		if issue.IssueType == "" {
+			issue.IssueType = types.TypeTask
+		}
+		if issue.Title == "" {
+			issue.Title = issue.ID
+		}
+		if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+			t.Fatalf("create %s: %v", issue.ID, err)
+		}
+	}
+	for child, parent := range childToParent {
+		if err := store.AddDependency(ctx, &types.Dependency{
+			IssueID: child, DependsOnID: parent, Type: types.DepParentChild,
+		}, "tester"); err != nil {
+			t.Fatalf("add dependency %s -> %s: %v", child, parent, err)
+		}
+	}
+}
+
+// readyReads reads filter's ready set the three ways the classic reader
+// offers (list, counts page with its total, count) and fails unless all three
+// agree; it returns the listed IDs.
+func readyReads(ctx context.Context, t *testing.T, store *DoltStore, filter types.WorkFilter) []string {
+	t.Helper()
+	work, err := store.GetReadyWork(ctx, filter)
+	if err != nil {
+		t.Fatalf("GetReadyWork(%+v): %v", filter, err)
+	}
+	ids := issueIDs(work)
+	withCounts, total, err := store.GetReadyWorkWithCountsAndTotal(ctx, filter)
+	if err != nil {
+		t.Fatalf("GetReadyWorkWithCountsAndTotal(%+v): %v", filter, err)
+	}
+	countsIDs := make([]string, 0, len(withCounts))
+	for _, issue := range withCounts {
+		countsIDs = append(countsIDs, issue.ID)
+	}
+	n, err := store.CountReadyWork(ctx, filter)
+	if err != nil {
+		t.Fatalf("CountReadyWork(%+v): %v", filter, err)
+	}
+	if !slices.Equal(slices.Sorted(slices.Values(countsIDs)), slices.Sorted(slices.Values(ids))) || total != len(ids) || n != len(ids) {
+		t.Fatalf("ready reads disagree for %+v: list %v, counts page %v (total %d), count %d", filter, ids, countsIDs, total, n)
+	}
+	return ids
+}
+
+// TestGetReadyWork_IncludeDeferredListsChildOfUndatedDeferredParent pins the
+// bypass for GH#7300's hold: IncludeDeferred lists and counts the child of an
+// undated deferred parent, while the parent's own 'deferred' status still
+// keeps it out of the default ready status filter.
+func TestGetReadyWork_IncludeDeferredListsChildOfUndatedDeferredParent(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	seedReadyIssues(ctx, t, store, []*types.Issue{
+		{ID: "rw-idf-epic", Status: types.StatusDeferred, IssueType: types.TypeEpic},
+		{ID: "rw-idf-child", Status: types.StatusOpen},
+		{ID: "rw-idf-free", Status: types.StatusOpen},
+	}, map[string]string{"rw-idf-child": "rw-idf-epic"})
+
+	held := readyReads(ctx, t, store, types.WorkFilter{})
+	if !slices.Contains(held, "rw-idf-free") || slices.Contains(held, "rw-idf-child") || slices.Contains(held, "rw-idf-epic") {
+		t.Fatalf("default ready = %v, want rw-idf-free without rw-idf-child or rw-idf-epic", held)
+	}
+
+	bypass := readyReads(ctx, t, store, types.WorkFilter{IncludeDeferred: true})
+	if !slices.Contains(bypass, "rw-idf-child") || !slices.Contains(bypass, "rw-idf-free") {
+		t.Errorf("IncludeDeferred ready = %v, want it to list rw-idf-child and rw-idf-free", bypass)
+	}
+	if slices.Contains(bypass, "rw-idf-epic") {
+		t.Errorf("IncludeDeferred ready = %v, but the parent's deferred status must still exclude it", bypass)
 	}
 }
 
