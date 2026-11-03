@@ -221,6 +221,13 @@ type VersionChange struct {
 // versionChanges contains agent-actionable changes for recent versions
 var versionChanges = []VersionChange{
 	{
+		Version: "1.3.3",
+		Date:    "2026-11-03",
+		Changes: []string{
+			"STABLE: first stable 1.3.3 release. Same code as 1.3.3-rc.1; only the version stamp changed. No new migration file and the embedded Dolt engine is unchanged, so upgrading from 1.3.x or 1.3.3-rc.1 is a binary swap. The 1.3.3-rc.1 entry below applies in full: read its SECURITY, CHANGE and UPGRADE lines, including the known issues, before upgrading from 1.3.2 or earlier. The 1.3.2 upgrade note still applies: run 'bd recompute-blocked' once per workspace whose store crossed migration 0059 under bd 1.3.0 or later, which includes any workspace first created by bd 1.2.x or earlier (#7037).",
+		},
+	},
+	{
 		Version: "1.3.3-rc.1",
 		Date:    "2026-11-03",
 		Changes: []string{
