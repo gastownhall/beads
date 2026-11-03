@@ -793,6 +793,40 @@ func TestProxiedServerReady2(t *testing.T) {
 		}
 	})
 
+	t.Run("max_rows_below_the_ready_set_claims_one", func(t *testing.T) {
+		t.Parallel()
+		for _, tc := range []struct {
+			name   string
+			prefix string
+			env    []string
+			args   []string
+		}{
+			{name: "flag", prefix: "rcmcf", args: []string{"--max-rows", "1"}},
+			{name: "env", prefix: "rcmce", env: []string{"BEADS_MAX_ROWS=1"}},
+		} {
+			p := newSharedProxiedProject(t, bd, tc.prefix)
+			label := tc.prefix + "-claim"
+			for i := 0; i < 3; i++ {
+				bdProxiedCreate(t, bd, p.dir, fmt.Sprintf("Claim under cap %d", i), "--label", label)
+			}
+
+			args := append([]string{"ready", "--claim", "--json", "--label", label}, tc.args...)
+			stdout, stderr, err := bdProxiedRunBuffersWithEnv(t, bd, p.dir, tc.env, args...)
+			if err != nil {
+				t.Fatalf("%s: bd ready --claim under a cap of 1 failed: %v\nstdout:\n%s\nstderr:\n%s", tc.name, err, stdout, stderr)
+			}
+			var claimed []types.IssueWithCounts
+			if err := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &claimed); err != nil {
+				t.Fatalf("%s: parse claim JSON: %v\n%s", tc.name, err, stdout)
+			}
+			if len(claimed) != 1 || claimed[0].Status != types.StatusInProgress {
+				t.Fatalf("%s: claimed = %+v, want exactly one in_progress issue", tc.name, claimed)
+			}
+			if left := bdProxiedReadyJSON(t, bd, p, "--label", label); len(left) != 2 {
+				t.Fatalf("%s: %d issues still ready after one claim, want 2", tc.name, len(left))
+			}
+		}
+	})
 }
 
 func TestProxiedServerReadyConcurrent(t *testing.T) {
