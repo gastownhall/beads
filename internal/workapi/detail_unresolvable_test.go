@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage"
@@ -205,6 +206,27 @@ func TestBuildIssueDetails_FailedCountsAreUnset(t *testing.T) {
 		}
 	})
 
+	// The IncludeComments case from the report: a failed count beside a
+	// real comment must not publish a comment_count that contradicts the
+	// comments it actually returns.
+	t.Run("comment count, with comments included", func(t *testing.T) {
+		src := skewSource{
+			issue:           issue,
+			commentCountErr: boom,
+			comments:        []*types.Comment{{ID: "c-1", IssueID: "rp-1", Author: "alice", Text: "a real comment"}},
+		}
+		details, err := BuildIssueDetails(ctx, src, issue, false, DetailOptions{IncludeComments: true})
+		if err != nil {
+			t.Fatalf("BuildIssueDetails: %v", err)
+		}
+		if details.CommentCount != nil {
+			t.Errorf("CommentCount = %d, want unset", *details.CommentCount)
+		}
+		if len(details.Comments) != 1 {
+			t.Errorf("Comments = %v, want the one comment IterComments returned", details.Comments)
+		}
+	})
+
 	// The default, count-only view: a failed comment count must not
 	// announce comments_omitted either, for the same reason the list path's
 	// TestHydrateListCommentsMarksNothingWhenCountsAreSkipped already
@@ -378,6 +400,9 @@ func TestBuildIssueDetails_FailedCountIsAbsentNotZero(t *testing.T) {
 		commentCount    *int64
 		commentsOmitted bool
 		comments        int
+		// commentIDs, when set, must match the returned rows in order,
+		// both on the struct and in the marshaled comments array.
+		commentIDs []string
 
 		dependencies             int
 		dependents               int
@@ -451,6 +476,37 @@ func TestBuildIssueDetails_FailedCountIsAbsentNotZero(t *testing.T) {
 			dependentCount:  ptr64(0),
 			dependencyCount: ptr64(0),
 		},
+
+		// AC-3: with the rows requested, a failed comment count leaves the
+		// readable comment in place beside no count, rather than beside a
+		// contradicting comment_count 0.
+		{
+			name: "comment count failed with comments included",
+			src: skewSource{
+				issue: issue, commentCountErr: boom,
+				comments: []*types.Comment{{ID: "c-1", IssueID: "rp-1", Author: "alice", Text: "a real comment"}},
+			},
+			opts:            DetailOptions{IncludeComments: true},
+			dependentCount:  ptr64(0),
+			dependencyCount: ptr64(0),
+			comments:        1,
+		},
+		{
+			// A positive value beside the error must not be published
+			// either, and the one readable row is the one that survives.
+			name: "comment count failed with nonzero and comments included",
+			src: skewSource{
+				issue: issue, deps: oneDep, depCount: 1,
+				commentCount: 1, commentCountErr: boom,
+				comments: []*types.Comment{{ID: "c-1", IssueID: "rp-1", Author: "alice", Text: "first"}},
+			},
+			opts:            DetailOptions{IncludeComments: true},
+			dependentCount:  ptr64(0),
+			dependencyCount: ptr64(1),
+			comments:        1,
+			commentIDs:      []string{"c-1"},
+			dependencies:    1,
+		},
 	}
 
 	for _, tc := range tests {
@@ -485,6 +541,28 @@ func TestBuildIssueDetails_FailedCountIsAbsentNotZero(t *testing.T) {
 			}
 			if got := len(details.Comments); got != tc.comments {
 				t.Errorf("len(Comments) = %d, want %d", got, tc.comments)
+			}
+			if tc.commentIDs != nil {
+				var got []string
+				for _, c := range details.Comments {
+					got = append(got, c.ID)
+				}
+				if !reflect.DeepEqual(got, tc.commentIDs) {
+					t.Errorf("comment IDs = %v, want %v", got, tc.commentIDs)
+				}
+				var marshaled []struct {
+					ID string `json:"id"`
+				}
+				if err := json.Unmarshal(raw["comments"], &marshaled); err != nil {
+					t.Fatalf("comments = %s: %v", raw["comments"], err)
+				}
+				got = got[:0]
+				for _, c := range marshaled {
+					got = append(got, c.ID)
+				}
+				if !reflect.DeepEqual(got, tc.commentIDs) {
+					t.Errorf("marshaled comment IDs = %v, want %v", got, tc.commentIDs)
+				}
 			}
 			if got := len(details.Dependencies); got != tc.dependencies {
 				t.Errorf("len(Dependencies) = %d, want %d", got, tc.dependencies)
