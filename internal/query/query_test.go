@@ -341,6 +341,20 @@ func TestLexer(t *testing.T) {
 			expected: []TokenType{TokenIdent, TokenEquals, TokenIdent, TokenEOF},
 			values:   []string{"label", "=", "7dש", ""},
 		},
+		{
+			name:      "positions after a multi-byte value are byte offsets",
+			input:     "label=größe AND status=open",
+			expected:  []TokenType{TokenIdent, TokenEquals, TokenIdent, TokenAnd, TokenIdent, TokenEquals, TokenIdent, TokenEOF},
+			values:    []string{"label", "=", "größe", "AND", "status", "=", "open", ""},
+			positions: []int{0, 5, 6, 14, 18, 24, 25, 29},
+		},
+		{
+			name:      "positions after a quoted multi-byte value are byte offsets",
+			input:     "label=\"f\u00eate\" AND status=open",
+			expected:  []TokenType{TokenIdent, TokenEquals, TokenString, TokenAnd, TokenIdent, TokenEquals, TokenIdent, TokenEOF},
+			values:    []string{"label", "=", "f\u00eate", "AND", "status", "=", "open", ""},
+			positions: []int{0, 5, 6, 14, 18, 24, 25, 29},
+		},
 	}
 
 	for _, tt := range tests {
@@ -387,6 +401,31 @@ func TestLexerErrors(t *testing.T) {
 			_, err := lexer.Tokenize()
 			if err == nil {
 				t.Error("expected error, got nil")
+			}
+		})
+	}
+}
+
+// TestLexerErrorMessages pins that a lexical error names the decoded rune at
+// its byte offset, not the raw input byte (#7539).
+func TestLexerErrorMessages(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{"multi-byte symbol in a bare value", "label=a€b", "unexpected character '€' at position 7"},
+		{"invalid byte in a bare value", "label=gr\xf6\xdfe", "unexpected character '\ufffd' at position 8"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := NewLexer(tt.input).Tokenize()
+			if err == nil {
+				t.Fatalf("Tokenize(%q) expected an error, got nil", tt.input)
+			}
+			if err.Error() != tt.expected {
+				t.Errorf("Tokenize(%q) error = %q, want %q", tt.input, err.Error(), tt.expected)
 			}
 		})
 	}
