@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"maps"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -290,5 +291,96 @@ func TestRememberBareKeyMissRefusesWithoutWriting(t *testing.T) {
 				})
 			}
 		})
+	}
+}
+
+// derivedKeyHint is the hint a refused bare key gets when a memory sits under
+// its derived key.
+func derivedKeyHint(derived string) string {
+	return "did you mean " + derived + "? A memory exists under that derived key; to read it, run: bd recall " + derived
+}
+
+// TestRememberBareKeyMissHintsDerivedKey pins the suggestion: a bare key
+// naming nothing whose DERIVED key names a memory is still refused -- the
+// derived memory answers a different question -- but the refusal points at
+// it, in a separate hint, without ever printing its content. A memory stored
+// as the empty string is present (#5963), so it is suggested too.
+func TestRememberBareKeyMissHintsDerivedKey(t *testing.T) {
+	const derivedValue = "the derived memory, never printed"
+	for _, shape := range bareKeyShapes {
+		t.Run(shape.name, func(t *testing.T) {
+			for _, asJSON := range []bool{false, true} {
+				for _, value := range []string{derivedValue, ""} {
+					t.Run(bareKeyCaseName(asJSON, "derived value "+strconv.Quote(value)), func(t *testing.T) {
+						key := shape.key
+						derived := derivedKeyOf(t, key)
+						mem := &bareKeyMemories{stored: map[string]string{derived: value}}
+						before := maps.Clone(mem.stored)
+
+						run := runRememberCmd(t, mem, key, "", asJSON)
+						assertBareKeyRefused(t, run, mem, before)
+						if want := []string{key, derived}; !slices.Equal(mem.recalls, want) {
+							t.Errorf("recalled %q, want %q", mem.recalls, want)
+						}
+						if strings.Contains(run.stdout+run.stderr, derivedValue) {
+							t.Errorf("output carries the derived key's memory:\nstdout:\n%s\nstderr:\n%s", run.stdout, run.stderr)
+						}
+						refusal, hint := bareKeyRefusal(key), derivedKeyHint(derived)
+						if asJSON {
+							body := decodeJSONBody(t, run.stdout)
+							if body["error"] != refusal {
+								t.Errorf("error = %q\nwant    %q", body["error"], refusal)
+							}
+							if body["hint"] != hint {
+								t.Errorf("hint = %q\nwant   %q", body["hint"], hint)
+							}
+							return
+						}
+						if want := "Error: " + refusal + "\nHint: " + hint + "\n"; run.stderr != want {
+							t.Errorf("stderr = %q\nwant     %q", run.stderr, want)
+						}
+						if run.stdout != "" {
+							t.Errorf("stdout = %q, want nothing", run.stdout)
+						}
+					})
+				}
+			}
+		})
+	}
+}
+
+// TestRememberBareKeyReadErrorsNeverWrite pins that a failed read at either
+// probe -- the exact key or the derived key the hint asks about -- is
+// reported as the shipped read error and never falls through to a write.
+func TestRememberBareKeyReadErrorsNeverWrite(t *testing.T) {
+	const key = "config.v2"
+	derived := derivedKeyOf(t, key)
+	boom := errors.New("boom")
+	for _, tc := range []struct {
+		name        string
+		failing     string
+		wantRecalls []string
+	}{
+		{"exact probe", key, []string{key}},
+		{"derived probe", derived, []string{key, derived}},
+	} {
+		for _, asJSON := range []bool{false, true} {
+			t.Run(bareKeyCaseName(asJSON, tc.name), func(t *testing.T) {
+				mem := &bareKeyMemories{
+					stored:    map[string]string{derived: "the derived memory"},
+					recallErr: map[string]error{tc.failing: boom},
+				}
+				before := maps.Clone(mem.stored)
+
+				run := runRememberCmd(t, mem, key, "", asJSON)
+				assertBareKeyRefused(t, run, mem, before)
+				if !slices.Equal(mem.recalls, tc.wantRecalls) {
+					t.Errorf("recalled %q, want %q", mem.recalls, tc.wantRecalls)
+				}
+				if got := run.stdout + run.stderr; !strings.Contains(got, "recalling memory: boom") {
+					t.Errorf("output does not report the read error:\n%s", got)
+				}
+			})
+		}
 	}
 }

@@ -170,7 +170,7 @@ func TestRememberBareKeyPath(t *testing.T) {
 	t.Run("found with empty value recalls it", func(t *testing.T) {
 		var err error
 		out := captureStdout(t, func() error {
-			err = rememberBareKeyPath("empty-key", "empty-key", "", true)
+			err = rememberBareKeyPath("empty-key", "empty-key", "", true, "")
 			return nil
 		})
 		if err != nil {
@@ -188,12 +188,54 @@ func TestRememberBareKeyPath(t *testing.T) {
 	t.Run("not found is refused", func(t *testing.T) {
 		var err error
 		captureStdout(t, func() error {
-			err = rememberBareKeyPath("gone", "gone", "", false)
+			err = rememberBareKeyPath("gone", "gone", "", false, "")
 			return nil
 		})
 		ee, ok := err.(*exitError)
 		if !ok || ee.Code != 1 {
 			t.Errorf("err = %v, want *exitError{Code: 1}", err)
+		}
+	})
+
+	// A suggestion rides in its own hint field; the refusal in error is the
+	// same with or without one, and a refusal with none carries no hint.
+	t.Run("not found suggestion is a separate hint", func(t *testing.T) {
+		bodies := map[string]map[string]interface{}{}
+		for _, suggestion := range []string{"", "config-v2"} {
+			var err error
+			out := captureStdout(t, func() error {
+				err = rememberBareKeyPath("config.v2", "config.v2", "", false, suggestion)
+				return nil
+			})
+			if ee, ok := err.(*exitError); !ok || ee.Code != 1 {
+				t.Fatalf("suggestion %q: err = %v, want *exitError{Code: 1}", suggestion, err)
+			}
+			var body map[string]interface{}
+			if uerr := json.Unmarshal([]byte(strings.TrimSpace(out)), &body); uerr != nil {
+				t.Fatalf("unmarshal %q: %v", out, uerr)
+			}
+			bodies[suggestion] = body
+		}
+		if hint, ok := bodies[""]["hint"]; ok {
+			t.Errorf("refusal without a suggestion has hint %q", hint)
+		}
+		if bodies[""]["error"] != bodies["config-v2"]["error"] {
+			t.Errorf("suggestion changed the refusal:\n%q\n%q", bodies[""]["error"], bodies["config-v2"]["error"])
+		}
+		want := "did you mean config-v2? A memory exists under that derived key; to read it, run: bd recall config-v2"
+		if got := bodies["config-v2"]["hint"]; got != want {
+			t.Errorf("hint = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("not found suggestion prints a hint line", func(t *testing.T) {
+		jsonOutput = false
+		defer func() { jsonOutput = true }()
+		out := captureStderr(t, func() {
+			_ = rememberBareKeyPath("config.v2", "config.v2", "", false, "config-v2")
+		})
+		if want := "\nHint: did you mean config-v2? A memory exists under that derived key; to read it, run: bd recall config-v2\n"; !strings.HasSuffix(out, want) {
+			t.Errorf("refusal = %q\nwant it to end %q", out, want)
 		}
 	})
 
@@ -206,7 +248,7 @@ func TestRememberBareKeyPath(t *testing.T) {
 		defer func() { jsonOutput = true }()
 		var err error
 		out := captureStderr(t, func() {
-			err = rememberBareKeyPath("auth-flow", "auth-flow", "", false)
+			err = rememberBareKeyPath("auth-flow", "auth-flow", "", false, "")
 		})
 		if err == nil {
 			t.Fatal("rememberBareKeyPath stored a bare key naming nothing")
