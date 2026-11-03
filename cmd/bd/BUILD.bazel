@@ -911,6 +911,7 @@ go_test(
         "import_chunking_embedded_test.go",
         "import_chunking_test.go",
         "import_embedded_test.go",
+        "import_forward_dep_embedded_test.go",
         "import_from_jsonl_test.go",
         "import_global_prefix_isolation_test.go",
         "import_missing_config_prefix_test.go",
