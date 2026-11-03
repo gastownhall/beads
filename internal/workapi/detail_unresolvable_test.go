@@ -405,6 +405,10 @@ func TestBuildIssueDetails_FailedCountIsAbsentNotZero(t *testing.T) {
 	boom := errors.New("simulated count failure")
 	oneDep := []*types.IssueWithDependencyMetadata{depRow("rp-2", types.DepBlocks)}
 	oneDependent := []*types.IssueWithDependencyMetadata{depRow("rp-3", types.DepBlocks)}
+	twoComments := []*types.Comment{
+		{ID: "c-1", IssueID: "rp-1", Author: "alice", Text: "first"},
+		{ID: "c-2", IssueID: "rp-1", Author: "bob", Text: "second"},
+	}
 
 	tests := []struct {
 		name string
@@ -481,6 +485,19 @@ func TestBuildIssueDetails_FailedCountIsAbsentNotZero(t *testing.T) {
 			wantDependency:   ptr64(1),
 			wantComment:      ptr64(0),
 			wantDependentIDs: []string{"rp-3"},
+		},
+		// AC-3: with the rows requested, a failed comment count leaves
+		// the readable comment in place beside no count at all.
+		{
+			name: "ac3_comment_count_failed_with_readable_comment",
+			src: skewSource{
+				issue: issue, deps: oneDep, depCount: 1,
+				commentCount: 1, commentCountErr: boom, comments: twoComments[:1],
+			},
+			opts:           DetailOptions{IncludeComments: true},
+			wantDependent:  ptr64(0),
+			wantDependency: ptr64(1),
+			wantCommentIDs: []string{"c-1"},
 		},
 	}
 

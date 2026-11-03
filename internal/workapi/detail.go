@@ -151,8 +151,10 @@ func BuildIssueDetails(ctx context.Context, src DetailSource, issue *types.Issue
 	if dependencyCountErr == nil {
 		details.DependencyCount = &dependencyCount
 	}
-	commentCount, _ := src.CountComments(ctx, id, isWisp)
-	details.CommentCount = &commentCount
+	commentCount, commentCountErr := src.CountComments(ctx, id, isWisp)
+	if commentCountErr == nil {
+		details.CommentCount = &commentCount
+	}
 
 	// depsErr is kept rather than discarded: it is what separates "the edge
 	// list came back short" from "the edge list never came back", and the
