@@ -160,6 +160,27 @@ func TestRenderImportOutcomeSkippedDependencies(t *testing.T) {
 		}
 	})
 
+	t.Run("strict_json_keeps_stdout_one_result_object", func(t *testing.T) {
+		stdout, stderr, err := renderImportOutcomeStreams(t, true, true, importResultJSON{
+			Source: "chunk.jsonl", Created: 2, SkippedDependencies: skipped,
+		})
+		requireImportExitCode(t, err, 1)
+		obj := decodeSingleJSONObject(t, stdout)
+		if got, _ := obj["skipped_dependencies"].([]any); len(got) != len(skipped) {
+			t.Errorf("skipped_dependencies = %v, want %d entries", obj["skipped_dependencies"], len(skipped))
+		}
+		if _, isError := obj["error"]; isError {
+			t.Errorf("stdout object is an error envelope, want the import result: %v", obj)
+		}
+		msg := decodeStrictDepsJSONError(t, stderr)
+		if !strings.Contains(msg["error"], "2 dependency edge(s)") || !strings.Contains(msg["error"], "imported rows remain committed") {
+			t.Errorf("stderr error = %q, want the count and the committed-rows note", msg["error"])
+		}
+		if !strings.Contains(msg["hint"], "re-run") {
+			t.Errorf("stderr hint = %q, want the recovery hint", msg["hint"])
+		}
+	})
+
 	t.Run("text_without_skips_adds_nothing", func(t *testing.T) {
 		_, stderr, err := renderImportOutcomeStreams(t, false, false, importResultJSON{Source: "chunk.jsonl", Created: 1})
 		if err != nil {
@@ -182,4 +203,31 @@ func requireImportExitCode(t *testing.T, err error, code int) {
 	if exitErr.Code != code {
 		t.Fatalf("exit code = %d, want %d", exitErr.Code, code)
 	}
+}
+
+// decodeStrictDepsJSONError decodes the JSON error object --strict-deps
+// writes to stderr under --json; text before it (progress lines) is skipped,
+// and nothing but whitespace may follow it.
+func decodeStrictDepsJSONError(t *testing.T, stderr string) map[string]string {
+	t.Helper()
+	start := strings.Index(stderr, "{")
+	if start < 0 {
+		t.Fatalf("stderr carries no JSON error:\n%s", stderr)
+	}
+	dec := json.NewDecoder(strings.NewReader(stderr[start:]))
+	var msg map[string]any
+	if err := dec.Decode(&msg); err != nil {
+		t.Fatalf("stderr JSON error does not decode: %v\n%s", err, stderr)
+	}
+	var extra json.RawMessage
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		t.Fatalf("stderr carries more after the JSON error (next: %s, err %v):\n%s", extra, err, stderr)
+	}
+	out := map[string]string{}
+	for key, value := range msg {
+		if text, ok := value.(string); ok {
+			out[key] = text
+		}
+	}
+	return out
 }

@@ -555,6 +555,20 @@ func TestProxiedServerImport(t *testing.T) {
 		if !strings.Contains(stderr, "Warning: 1 dependency edge(s) were reported skipped") {
 			t.Errorf("default import stderr lacks the skipped-count summary:\n%s", stderr)
 		}
+
+		// --json: stdout stays the one result object (decoded through EOF),
+		// the strict-deps error goes to stderr.
+		stdout, stderr, err := bdProxiedImportWithInput(t, bd, p.dir, fixture, "--json", "--strict-deps", "-")
+		if code := exitCode(err); code != 1 {
+			t.Fatalf("--json --strict-deps import exit = %d, want 1\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+		}
+		obj := decodeSingleJSONObject(t, stdout)
+		if deps, _ := obj["skipped_dependencies"].([]any); len(deps) != 1 {
+			t.Errorf("skipped_dependencies = %v, want the one skipped edge", obj["skipped_dependencies"])
+		}
+		if msg := decodeStrictDepsJSONError(t, stderr); !strings.Contains(msg["error"], "1 dependency edge(s)") {
+			t.Errorf("stderr error = %q, want the skipped-edge count", msg["error"])
+		}
 	})
 
 	t.Run("dedup_skips_matching_open_title", func(t *testing.T) {
