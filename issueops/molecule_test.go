@@ -938,3 +938,36 @@ func TestMoleculeAnalysisExcludesTheRoot(t *testing.T) {
 		t.Errorf("root-only molecule view.Ready = %v, want empty", view.Ready)
 	}
 }
+
+// TestMoleculeStepperSkipsAStepUnderABlockedGroup pins GH#7638 on the
+// stepper (`bd close --continue`): a step under a parent blocked from
+// outside the parent's subtree is not ready, so advancing claims nothing and
+// names no next step — never the work the stored blocked state refuses.
+func TestMoleculeStepperSkipsAStepUnderABlockedGroup(t *testing.T) {
+	ctx := context.Background()
+	f := newFakeMolecules()
+	f.add("m", types.TypeMolecule, types.StatusOpen)
+	f.add("m.x", types.TypeTask, types.StatusInProgress)
+	f.add("m.group", types.TypeTask, types.StatusOpen)
+	f.add("m.a", types.TypeTask, types.StatusOpen)
+	f.add("m.y", types.TypeTask, types.StatusClosed)
+	for _, id := range []string{"m.x", "m.group", "m.y"} {
+		f.edge(id, "m", types.DepParentChild)
+	}
+	f.edge("m.a", "m.group", types.DepParentChild)
+	f.edge("m.group", "m.x", types.DepBlocks)
+
+	res, err := f.stepper().Advance(ctx, issueops.AdvanceRequest{Actor: "alice", ClosedStepID: "m.y", AutoClaim: true})
+	if err != nil {
+		t.Fatalf("Advance: %v", err)
+	}
+	if res.Claimed || res.NextStep != nil {
+		t.Fatalf("Advance = %+v; the only candidate (m.a) sits under a group blocked by in-progress m.x, so nothing may be claimed or named (GH#7638)", res)
+	}
+	if len(f.claimed) != 0 || len(f.updated) != 0 {
+		t.Fatalf("stepper wrote: claims %v, updates %v; want none", f.claimed, f.updated)
+	}
+	if f.issues["m.a"].Status != types.StatusOpen || f.issues["m.a"].Assignee != "" {
+		t.Fatalf("m.a = %s/%q; want untouched", f.issues["m.a"].Status, f.issues["m.a"].Assignee)
+	}
+}
