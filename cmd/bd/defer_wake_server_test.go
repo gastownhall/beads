@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"os"
 	"reflect"
 	"testing"
 
@@ -188,6 +189,26 @@ func TestServerModeDeferAutoWake(t *testing.T) {
 		assertDeferUnchanged(t, bd, p.dir, issue.ID, deferUntil)
 		if commitsAfter != commitsBefore {
 			t.Errorf("frozen bd ready added %d Dolt commit(s); a frozen read must not commit", commitsAfter-commitsBefore)
+		}
+		if t.Failed() {
+			t.FailNow()
+		}
+
+		// Thaw: the same project now wakes the issue, so the frozen
+		// assertions above are not vacuous. This removes the shared marker,
+		// so every frozen subtest must run before this one.
+		if err := os.Remove(marker); err != nil {
+			t.Fatalf("removing freeze marker: %v", err)
+		}
+		if !wakeReadyIDs(t, bd, p.dir)[issue.ID] {
+			t.Errorf("expected %s in bd ready once the freeze lifted", issue.ID)
+		}
+		status, deferUntil = showDeferState(t, bd, p.dir, issue.ID)
+		if status != "open" {
+			t.Errorf("expected status=open after wake once the freeze lifted, got %q", status)
+		}
+		if deferUntil != nil {
+			t.Errorf("expected defer_until cleared after wake once the freeze lifted, got %v", deferUntil)
 		}
 	})
 }
