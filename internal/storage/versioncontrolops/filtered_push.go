@@ -59,6 +59,16 @@ type FilteredPushResult struct {
 // push leaves the peer untouched. Branch state is session-scoped, so conn must
 // be one pinned connection; the caller removes the temporary branches.
 func RunFilteredPush(ctx context.Context, conn BlockedRecomputeConn, req FilteredPushRequest) (FilteredPushResult, error) {
+	res, err := runFilteredPush(ctx, conn, req)
+	// The embedded engine reports a canceled statement as a plain error; keep
+	// the cancellation classifiable.
+	if err != nil && ctx.Err() != nil && !errors.Is(err, ctx.Err()) {
+		err = fmt.Errorf("%w: %w", err, ctx.Err())
+	}
+	return res, err
+}
+
+func runFilteredPush(ctx context.Context, conn BlockedRecomputeConn, req FilteredPushRequest) (FilteredPushResult, error) {
 	var res FilteredPushResult
 	for _, ref := range []string{req.Source, req.Staging, req.Keep} {
 		if err := issueops.ValidateRef(ref); err != nil {
@@ -94,12 +104,18 @@ func RunFilteredPush(ctx context.Context, conn BlockedRecomputeConn, req Filtere
 		}
 	}
 
+	if err := FilteredPushStage(ctx, "delete", conn, req); err != nil {
+		return res, err
+	}
 	deleted, err := deleteWithheldIssues(ctx, conn, req.ExcludeTypes, req.PeerTip)
 	if err != nil {
 		return res, err
 	}
 	filterCommit := ""
 	if deleted {
+		if err := FilteredPushStage(ctx, "commit", conn, req); err != nil {
+			return res, err
+		}
 		if filterCommit, err = CommitFilteredStaging(ctx, conn, req.Staging); err != nil {
 			return res, err
 		}
@@ -117,6 +133,9 @@ func RunFilteredPush(ctx context.Context, conn BlockedRecomputeConn, req Filtere
 	}
 
 	if filterCommit != "" {
+		if err := FilteredPushStage(ctx, "keep", conn, req); err != nil {
+			return res, err
+		}
 		if err := keepFilterAncestry(ctx, conn, req, filterCommit); err != nil {
 			return res, err
 		}
@@ -124,7 +143,7 @@ func RunFilteredPush(ctx context.Context, conn BlockedRecomputeConn, req Filtere
 	if err := CheckoutBranch(ctx, conn, req.Source); err != nil {
 		return res, fmt.Errorf("federation filter: restore branch %s: %w", req.Source, err)
 	}
-	if err := filteredPushStage(ctx, "push", conn, req); err != nil {
+	if err := FilteredPushStage(ctx, "push", conn, req); err != nil {
 		return res, err
 	}
 	if err := req.Push(ctx, req.Staging+":"+req.Source); err != nil {
@@ -139,6 +158,9 @@ func RunFilteredPush(ctx context.Context, conn BlockedRecomputeConn, req Filtere
 // the temporary branches, ignoring ones that were never created.
 func CleanupFilteredPush(ctx context.Context, conn DBConn, source string, branches ...string) error {
 	var errs []error
+	if err := FilteredPushStage(ctx, "cleanup", conn, FilteredPushRequest{Source: source}); err != nil {
+		errs = append(errs, err)
+	}
 	if _, err := conn.ExecContext(ctx, "CALL DOLT_CHECKOUT(?)", source); err != nil {
 		errs = append(errs, fmt.Errorf("restore branch %s: %w", source, err))
 	}
@@ -150,8 +172,9 @@ func CleanupFilteredPush(ctx context.Context, conn DBConn, source string, branch
 	return errors.Join(errs...)
 }
 
-// filteredPushStageHook, when set, runs at each named stage of
-// RunFilteredPush; a non-nil error stops the operation there.
+// filteredPushStageHook, when set, runs at each named stage of a filtered push
+// (delete, commit, keep, revert, merge, push, cleanup); a non-nil error fails
+// the operation there.
 var filteredPushStageHook func(ctx context.Context, stage string, conn DBConn, req FilteredPushRequest) error
 
 // SetFilteredPushStageHookForTest installs fn as the stage hook and returns a
@@ -162,7 +185,9 @@ func SetFilteredPushStageHookForTest(fn func(ctx context.Context, stage string, 
 	return func() { filteredPushStageHook = prev }
 }
 
-func filteredPushStage(ctx context.Context, stage string, conn DBConn, req FilteredPushRequest) error {
+// FilteredPushStage runs the test stage hook, if any, for stage. A driver with
+// its own cleanup calls it for the "cleanup" stage.
+func FilteredPushStage(ctx context.Context, stage string, conn DBConn, req FilteredPushRequest) error {
 	if filteredPushStageHook == nil {
 		return nil
 	}
@@ -250,11 +275,17 @@ func keepFilterAncestry(ctx context.Context, conn DBConn, req FilteredPushReques
 	if err := CheckoutBranch(ctx, conn, req.Keep); err != nil {
 		return fmt.Errorf("federation filter: checkout keep: %w", err)
 	}
+	if err := FilteredPushStage(ctx, "revert", conn, req); err != nil {
+		return err
+	}
 	if _, err := conn.ExecContext(ctx, "CALL DOLT_REVERT('--author', ?, ?)", req.Author, filterCommit); err != nil {
 		return fmt.Errorf("federation filter: revert filter commit on keep: %w", err)
 	}
 	if err := CheckoutBranch(ctx, conn, req.Source); err != nil {
 		return fmt.Errorf("federation filter: restore branch %s: %w", req.Source, err)
+	}
+	if err := FilteredPushStage(ctx, "merge", conn, req); err != nil {
+		return err
 	}
 	conflicts, err := Merge(ctx, conn, req.Keep, req.Author)
 	if err == nil && len(conflicts) > 0 {

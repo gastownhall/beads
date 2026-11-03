@@ -503,11 +503,12 @@ func (s *EmbeddedDoltStore) Sync(ctx context.Context, peer string, strategy stri
 	}
 
 	// Step 5: Push, filtering excluded types.
-	if err := s.filteredPushToPeer(ctx, peer, config.GetFederationConfig().ExcludeTypes); err != nil {
+	pushRes, err := s.filteredPushToPeer(ctx, peer, config.GetFederationConfig().ExcludeTypes)
+	if err != nil {
 		result.PushError = err
-	} else {
-		result.Pushed = true
 	}
+	// A cleanup failure after the push is reported but does not undo it.
+	result.Pushed = err == nil || pushRes.Pushed
 
 	// Record last sync time in metadata.
 	_ = s.setLastSyncTime(ctx, peer)
@@ -531,17 +532,19 @@ const federationStagingCleanupTimeout = 30 * time.Second
 // with versioncontrolops.RunFilteredPush. When excludeTypes is empty it
 // delegates to PushTo. The filter runs on one pinned connection, which also
 // performs the push, so no second connection is opened while it is held.
-func (s *EmbeddedDoltStore) filteredPushToPeer(ctx context.Context, peer string, excludeTypes []string) error {
+// res.Pushed stays set when cleanup fails after the push.
+func (s *EmbeddedDoltStore) filteredPushToPeer(ctx context.Context, peer string, excludeTypes []string) (res versioncontrolops.FilteredPushResult, err error) {
 	if len(excludeTypes) == 0 {
-		return s.PushTo(ctx, peer)
+		err := s.PushTo(ctx, peer)
+		return versioncontrolops.FilteredPushResult{Pushed: err == nil}, err
 	}
 	var suffix [16]byte
 	if _, err := rand.Read(suffix[:]); err != nil {
-		return fmt.Errorf("federation filter: generate staging branch: %w", err)
+		return res, fmt.Errorf("federation filter: generate staging branch: %w", err)
 	}
 	stagingBranch := federationStagingBranchPrefix + fmt.Sprintf("%x", suffix)
 	keepBranch := federationKeepBranchPrefix + fmt.Sprintf("%x", suffix)
-	return s.withPeerAuth(ctx, peer, func(user string) error {
+	err = s.withPeerAuth(ctx, peer, func(user string) error {
 		return s.withMutatingPinnedDBConn(ctx, func(db versioncontrolops.DBConn) (retErr error) {
 			conn, ok := db.(versioncontrolops.BlockedRecomputeConn)
 			if !ok {
@@ -560,7 +563,7 @@ func (s *EmbeddedDoltStore) filteredPushToPeer(ctx context.Context, peer string,
 			if err != nil {
 				return fmt.Errorf("federation filter: %w", err)
 			}
-			_, err = versioncontrolops.RunFilteredPush(ctx, conn, versioncontrolops.FilteredPushRequest{
+			res, err = versioncontrolops.RunFilteredPush(ctx, conn, versioncontrolops.FilteredPushRequest{
 				Source:       s.branch,
 				Staging:      stagingBranch,
 				Keep:         keepBranch,
@@ -574,6 +577,7 @@ func (s *EmbeddedDoltStore) filteredPushToPeer(ctx context.Context, peer string,
 			return err
 		})
 	})
+	return res, err
 }
 
 // SyncStatus returns the synchronization status with a peer.
