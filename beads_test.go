@@ -6,11 +6,13 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/beads"
+	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/testutil"
 )
 
@@ -189,6 +191,77 @@ func TestOpenFromConfig_ServerModeFailsWithoutServer(t *testing.T) {
 	// Should contain "unreachable" from the fail-fast TCP check
 	if !strings.Contains(openErr.Error(), "unreachable") {
 		t.Errorf("expected 'unreachable' in error, got: %v", openErr)
+	}
+}
+
+// TestOpenFromConfig_MetadataSocketReportedWhenNoEndpointAnswers pins the
+// public config open to metadata.json's dolt_server_socket: with neither the
+// socket nor the resolved TCP port answering, OpenFromConfig fails naming the
+// socket (the store's socket-first transport keeps it when TCP is down too,
+// and socket mode never auto-starts). The open used to drop the socket, so it
+// dialed and named the TCP endpoint instead — and, with auto-start permitted,
+// started a second server with an empty database.
+func TestOpenFromConfig_MetadataSocketReportedWhenNoEndpointAnswers(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix socket fixture")
+	}
+	for _, name := range []string{
+		"BEADS_DOLT_SERVER_SOCKET", "BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT",
+		"BEADS_DOLT_PORT", "BEADS_DOLT_SHARED_SERVER", "BEADS_DOLT_SERVER_MODE",
+		"BEADS_DOLT_CREDENTIAL_COMMAND",
+	} {
+		t.Setenv(name, "")
+	}
+	t.Setenv("BEADS_DOLT_AUTO_START", "0") // auto-start off: nothing may be started
+	t.Setenv("HOME", t.TempDir())
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("failed to create .beads dir: %v", err)
+	}
+
+	// A socket nothing listens on, short enough for a unix socket path.
+	sockDir, err := os.MkdirTemp("", "bds")
+	if err != nil {
+		t.Fatalf("failed to create socket dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(sockDir) })
+	socket := filepath.Join(sockDir, "dolt.sock")
+
+	// A TCP port nothing listens on, as the port file's.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to find free port: %v", err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	ln.Close()
+	if err := doltserver.EnsurePortFile(beadsDir, port); err != nil {
+		t.Fatalf("failed to write port file: %v", err)
+	}
+
+	metadata := fmt.Sprintf(`{"backend":"dolt","database":"dolt","dolt_mode":"server","dolt_server_host":"127.0.0.1","dolt_server_socket":%q}`, socket)
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(metadata), 0o644); err != nil {
+		t.Fatalf("failed to write metadata.json: %v", err)
+	}
+
+	// Both endpoints are unavailable: the socket has no listener and the
+	// port is closed. A TCP answer would fall the transport back to TCP.
+	if _, err := net.DialTimeout("unix", socket, 500*time.Millisecond); err == nil {
+		t.Fatalf("something listens on the socket %s; the fixture needs it absent", socket)
+	}
+	tcpAddr := fmt.Sprintf("127.0.0.1:%d", port)
+	if _, err := net.DialTimeout("tcp", tcpAddr, 500*time.Millisecond); err == nil {
+		t.Fatalf("something listens on %s; the fixture needs the port closed", tcpAddr)
+	}
+
+	_, openErr := beads.OpenFromConfig(context.Background(), beadsDir)
+	if openErr == nil {
+		t.Fatal("OpenFromConfig should fail when neither the socket nor the port answers")
+	}
+	if msg := openErr.Error(); !strings.Contains(msg, socket) {
+		t.Errorf("expected the error to name the metadata socket %s, got: %v", socket, openErr)
+	} else if strings.Contains(msg, tcpAddr) {
+		t.Errorf("the error names the TCP endpoint %s instead of the configured socket:\n%v", tcpAddr, openErr)
 	}
 }
 
