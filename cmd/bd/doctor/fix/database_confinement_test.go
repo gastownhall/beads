@@ -203,7 +203,14 @@ func TestRepoFingerprint_Choice2RefusesUnconfinedDatabaseBeforeConfirmation(t *t
 // them: the parent is confined, and an outside sidecar target survives.
 func TestRepoFingerprint_Choice2KeepsOutsideSidecarTargets(t *testing.T) {
 	t.Setenv("BEADS_DOLT_DATA_DIR", "")
-	dir := setupTestWorkspace(t)
+	// The absolute database path must spell the workspace the way
+	// confinedDatabasePath canonicalizes it: on macOS t.TempDir() answers
+	// /var/... while the workspace resolves to /private/var/..., and the
+	// lexical check would refuse the admission this test pins.
+	dir, err := filepath.EvalSymlinks(setupTestWorkspace(t))
+	if err != nil {
+		t.Fatal(err)
+	}
 	beadsDir := filepath.Join(dir, ".beads")
 	outside := t.TempDir()
 	db := filepath.Join(beadsDir, "beads.db")
