@@ -313,3 +313,35 @@ func TestCLITransferErrorRedactsRemoteCredentials(t *testing.T) {
 		})
 	}
 }
+
+// TestCLITransferErrorTimeoutRedactsCredentials pins the timeout branch, which
+// additionally names the remote: credentials placed independently in the
+// operation, the remote and dolt's output must all be absent, while the
+// configured timeout, the override guidance and the cause survive.
+func TestCLITransferErrorTimeoutRedactsCredentials(t *testing.T) {
+	t.Setenv(cliExecTimeoutEnv, "7m")
+	expired, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	cause := &os.PathError{Op: "wait", Path: "dolt", Err: errors.New("signal: killed")}
+
+	for name, tc := range map[string]struct{ op, remote, out string }{
+		"in op":     {op: "push to peer " + tokenRemote, remote: "peer", out: "context deadline exceeded"},
+		"in remote": {op: "dolt push", remote: tokenRemote, out: "context deadline exceeded"},
+		"in out":    {op: "dolt pull", remote: "origin", out: "fetching " + tokenRemote + "\nssh://alice:hunter2@dolt.example.com/org/db stalled"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := cliTransferError(tc.op, tc.remote, expired, []byte(tc.out), cause)
+			msg := err.Error()
+			assertNoCredentials(t, msg)
+			for _, keep := range []string{"timed out after 7m0s", cliExecTimeoutEnv + "=<duration>", "signal: killed"} {
+				if !strings.Contains(msg, keep) {
+					t.Errorf("error lost %q: %s", keep, msg)
+				}
+			}
+			var pathErr *os.PathError
+			if !errors.As(err, &pathErr) || pathErr != cause {
+				t.Errorf("errors.As did not recover the cause: %v", err)
+			}
+		})
+	}
+}
