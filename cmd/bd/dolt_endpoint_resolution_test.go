@@ -1036,6 +1036,63 @@ func TestDoctorDoltModeListsRemotesOnTheServerItProbes(t *testing.T) {
 	}
 }
 
+// TestPreviewStoreDialsTheSocketTheMainOpenDials observes, on the wire, where
+// the root pre-run's identity preview (newPreviewStoreFromConfig) connects
+// when a live metadata.json dolt_server_socket and a resolved TCP port name
+// two servers, with the socket environment unset: the preview's library open
+// (openNonMutatingStoreFromConfig → dolt.NewFromConfigWithOptions) used to
+// drop metadata.json's socket and dial TCP at the port, while the main open
+// (resolveDoltServerConnection) dialed the socket — so the identity check
+// verified one server while the command's own store opened another. Both
+// fakes refuse every login; where the preview logged in is what this test
+// observes, and the main resolver's socket is asserted to agree.
+func TestPreviewStoreDialsTheSocketTheMainOpenDials(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix socket fixture")
+	}
+	tcp := newFakeMySQLLogin(t)
+	socketServer := newFakeMySQLLoginOn(t, "unix", diagnosticSocketPath(t))
+	socket := socketServer.ln.Addr().String()
+	endpointCredentialsEnv(t, []string{"127.0.0.1"}, tcp.port())
+	repo := t.TempDir()
+	beadsDir := serverModeWorkspaceAt(t, repo)
+	t.Setenv("BEADS_DIR", beadsDir)
+	t.Setenv("BEADS_DOLT_SERVER_PORT", strconv.Itoa(tcp.port()))
+	cfg, err := configfile.Load(beadsDir)
+	if err != nil || cfg == nil {
+		t.Fatalf("load metadata: %v", err)
+	}
+	cfg.DoltServerSocket = socket
+	if err := cfg.Save(beadsDir); err != nil {
+		t.Fatal(err)
+	}
+
+	// The main CLI resolver names the workspace's socket, from metadata.json.
+	fileCfg, err := configfile.Load(beadsDir)
+	if err != nil {
+		t.Fatalf("load metadata: %v", err)
+	}
+	doltCfg := &dolt.Config{}
+	if err := resolveDoltServerConnection(context.Background(), beadsDir, fileCfg, doltCfg); err != nil {
+		t.Fatalf("resolveDoltServerConnection: %v", err)
+	}
+	if doltCfg.ServerSocket != socket {
+		t.Errorf("resolveDoltServerConnection dials %q, want the metadata socket %q", doltCfg.ServerSocket, socket)
+	}
+
+	// The preview open dials that socket and never the TCP server.
+	_, previewErr := newPreviewStoreFromConfig(context.Background(), beadsDir)
+	if len(socketServer.Logins()) == 0 {
+		t.Errorf("the preview never logged in to %s, the server the main open dials (error %v)", socket, previewErr)
+	}
+	if len(tcp.Logins()) != 0 {
+		t.Errorf("the preview logged in to 127.0.0.1:%d; it must dial the socket the main open dials", tcp.port())
+	}
+	if previewErr == nil {
+		t.Fatal("the preview open succeeded; the socket's server refuses every login")
+	}
+}
+
 // serverModeWorkspaceAt makes repo a server-mode workspace with no port named
 // and returns its .beads directory.
 func serverModeWorkspaceAt(t *testing.T, repo string) string {
