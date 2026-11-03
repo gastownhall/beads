@@ -123,6 +123,9 @@ func init() {
 	importCmd.Flags().BoolVar(&importDedup, "dedup", false, "Skip lines whose title matches an existing open issue")
 	importCmd.Flags().BoolVar(&importAllowStale, "allow-stale", false, "Import rows even when older than the local issue (required to restore an older snapshot)")
 	importCmd.Flags().BoolVar(&importStrictDeps, "strict-deps", false, "Exit nonzero if any dependency edge is reported skipped; imported rows stay committed")
+	// A dry run writes no dependency edge, so it has no skipped edge to gate
+	// on: accepting both would report a strict pass it never checked.
+	importCmd.MarkFlagsMutuallyExclusive("dry-run", "strict-deps")
 	rootCmd.AddCommand(importCmd)
 }
 

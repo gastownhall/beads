@@ -265,4 +265,20 @@ func TestEmbeddedImportStrictDeps(t *testing.T) {
 			t.Errorf("edges = %v, want exactly [%s] (no duplicate)", edges, want)
 		}
 	})
+
+	t.Run("dry_run_refuses_strict_deps", func(t *testing.T) {
+		t.Parallel()
+		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "sddry")
+
+		stdout, stderr, code := strictDepsImport(t, bd, dir, "--dry-run", "--strict-deps", partA(t, "sddry"))
+		if code == 0 {
+			t.Fatalf("--dry-run --strict-deps exit = 0, want a refusal\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+		}
+		if out := stdout + stderr; !strings.Contains(out, "none of the others can be") || !strings.Contains(out, "strict-deps") {
+			t.Errorf("refusal lacks the mutually-exclusive-flags diagnostic\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+		}
+		if ids, edges := strictDepsRows(t, beadsDir, "sddry"); len(ids) != 0 || len(edges) != 0 {
+			t.Errorf("refused import left rows %v edges %v, want none", ids, edges)
+		}
+	})
 }

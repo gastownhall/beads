@@ -248,3 +248,34 @@ func decodeStrictDepsJSONError(t *testing.T, stderr string) map[string]string {
 	}
 	return out
 }
+
+// TestImportDryRunStrictDepsMutuallyExclusive pins that bd import refuses
+// --dry-run with --strict-deps: a dry run writes no edge, so a strict pass
+// would be a check it never made.
+func TestImportDryRunStrictDepsMutuallyExclusive(t *testing.T) {
+	stdioMutex.Lock()
+	defer stdioMutex.Unlock()
+
+	flags := importCmd.Flags()
+	restore := func() {
+		for _, name := range []string{"dry-run", "strict-deps"} {
+			_ = flags.Set(name, "false")
+			flags.Lookup(name).Changed = false
+		}
+	}
+	restore()
+	defer restore()
+
+	for _, name := range []string{"dry-run", "strict-deps"} {
+		if err := flags.Set(name, "true"); err != nil {
+			t.Fatalf("set --%s: %v", name, err)
+		}
+	}
+	err := importCmd.ValidateFlagGroups()
+	if err == nil {
+		t.Fatal("ValidateFlagGroups accepted --dry-run with --strict-deps, want a mutually-exclusive refusal")
+	}
+	if msg := err.Error(); !strings.Contains(msg, "dry-run") || !strings.Contains(msg, "strict-deps") || !strings.Contains(msg, "none of the others can be") {
+		t.Errorf("refusal = %q, want cobra's mutually-exclusive diagnostic naming both flags", msg)
+	}
+}

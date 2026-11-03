@@ -3632,9 +3632,9 @@ bd import
     |   bd import --json                 # Structured output with created and skipped IDs
   flag --allow-stale type=bool default="false" usage="Import rows even when older than the local issue (required to restore an older snapshot)"
   flag --dedup type=bool default="false" usage="Skip lines whose title matches an existing open issue"
-  flag --dry-run type=bool default="false" usage="Show what would be imported without importing"
+  flag --dry-run type=bool default="false" annotations={cobra_annotation_mutually_exclusive=["dry-run strict-deps"]} usage="Show what would be imported without importing"
   flag --input -i type=string default="" usage="Read JSONL from a specific file"
-  flag --strict-deps type=bool default="false" usage="Exit nonzero if any dependency edge is reported skipped; imported rows stay committed"
+  flag --strict-deps type=bool default="false" annotations={cobra_annotation_mutually_exclusive=["dry-run strict-deps"]} usage="Exit nonzero if any dependency edge is reported skipped; imported rows stay committed"
 
 bd info
   use: "info"
