@@ -137,6 +137,7 @@ go_test(
         "conformance_test.go",
         "counter_contract_test.go",
         "counts_missing_table_test.go",
+        "counts_target_arms_test.go",
         "counts_wisp_test.go",
         "create_batch_equivalence_test.go",
         "create_batch_participation_generation_test.go",
