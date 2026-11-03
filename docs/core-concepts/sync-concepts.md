@@ -58,11 +58,12 @@ newer local rows.
 Verify a restore by comparing the dependency edges the database holds against
 the export, not by row counts alone: a split restore can land every issue,
 comment and label and still miss edges. A script can gate each part on the
-JSON result:
+JSON result; `(.data // .)` reads it whether or not `BD_JSON_ENVELOPE=1` nests
+it under `data` (see the [JSON envelope](/reference/json-schema)):
 
 ```bash
 set -o pipefail
-bd import --json part-2.jsonl | jq -e '(.skipped_dependencies // []) | length == 0'
+bd import --json part-2.jsonl | jq -e '(.data // .) | (.skipped_dependencies // []) | length == 0'
 ```
 
 This checks skipped dependency edges only, not rows skipped for other reasons
