@@ -76,7 +76,8 @@ This project uses bd (beads) for issue tracking.
 | `bd dep add <child> <parent>` | Link tasks (blocks, related, parent-child). |
 | `bd show <id>` | View task details and audit trail. |
 | `bd prime` | Print agent workflow context and persistent memories. |
-| `bd remember "insight"` | Store project memory that `bd prime` injects later. |
+| `bd remember "a project insight"` | Store project memory that `bd prime` injects later. |
+| `bd remember some-key` | Recall an exact key, including long and dotted ones like `api.v2`; a missing key fails without storing anything. Use `--key some-key` to write single-word content, and `bd recall` for keys with other characters. |
 
 ## 🔗 Hierarchy & Workflow
 
