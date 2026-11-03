@@ -19,6 +19,13 @@ import (
 	publicops "github.com/steveyegge/beads/issueops"
 )
 
+// expectSerialDeleteCommentEnv switches the delete/comment race tests from
+// asserting the characterized current outcome to asserting the outcome a
+// serial execution would give. It is a reproduction mode, never a gate: on
+// the server these tests were characterized against it FAILS, by design.
+// See engdocs/design/dolt-concurrency.md, "Guarded delete racing a comment".
+const expectSerialDeleteCommentEnv = "BEADS_TEST_EXPECT_SERIAL_DELETE_COMMENT"
+
 // raceSettingsProbe is what the gate reads on each racing session at its
 // commit point: the settings the characterization depends on, read from the
 // session that actually commits rather than from a sibling connection.
@@ -263,8 +270,12 @@ func requireRaceIntegrity(t *testing.T, ev raceEvidence) {
 // DOLT_COMMIT" is not executable on this path: the case still runs, and its
 // evidence records the commit kind the commenter really used.
 //
-// Every case logs one evidence line, then checks the session settings, the
-// commit kinds and that no orphan or ambiguous state is left.
+// Every case logs one evidence line. By default the journal-off cases then
+// assert the characterized current outcome (see
+// assertCurrentDeleteCommentRace); with
+// BEADS_TEST_EXPECT_SERIAL_DELETE_COMMENT=1 they assert the serial outcome
+// instead and fail on the characterized server. The journal-on and serial
+// control cases assert the serial outcome either way.
 func TestGuardedDeleteCommentRaceCharacterization(t *testing.T) {
 	store, cleanup := setupConcurrentTestStore(t)
 	defer cleanup()
@@ -355,6 +366,24 @@ func TestGuardedDeleteCommentRaceCharacterization(t *testing.T) {
 			if !rc.serial {
 				requireRaceCommitKinds(t, rc, ev)
 			}
+			switch {
+			case rc.serial:
+				assertSerialDeleteCommentRace(t, rc.loser, ev)
+			case rc.journal:
+				// The control: with the journal on, the loser's first
+				// attempt fails retryably, beads retries it, and the retry
+				// gives the serial outcome. That is the outcome the
+				// journal-off cases would give if their rollback were a
+				// retryable serialization error.
+				if ev.Loser.Attempts < 2 {
+					t.Errorf("journal-on loser attempts = %d, want a retry", ev.Loser.Attempts)
+				}
+				assertSerialDeleteCommentRace(t, rc.loser, ev)
+			case os.Getenv(expectSerialDeleteCommentEnv) == "1":
+				assertSerialDeleteCommentRace(t, rc.loser, ev)
+			default:
+				assertCurrentDeleteCommentRace(t, rc.loser, ev)
+			}
 		})
 	}
 	t.Logf("delete-comment race coverage (dolt-store): executed %v; not executable on this path: "+
@@ -436,5 +465,74 @@ func requireRaceCommitKinds(t *testing.T, rc raceCase, ev raceEvidence) {
 	}
 	if com.CommitKind != "Tx.Commit" {
 		t.Errorf("comment commit kind = %q, want Tx.Commit", com.CommitKind)
+	}
+}
+
+// assertCurrentDeleteCommentRace asserts the characterized outcome on Dolt
+// 2.6.0: the released loser's commit-time merge finds the FK violation the
+// winner's commit makes of its write, and the server rolls the loser back
+// with error 1105 (HY000). Beads treats 1105 as permanent here, so the loser
+// gets exactly one attempt and the caller sees the engine error rather than
+// a not-found or a retryable serialization error. No orphan comment and no
+// recorded violation survive.
+func assertCurrentDeleteCommentRace(t *testing.T, loser string, ev raceEvidence) {
+	t.Helper()
+	if ev.Winner.err != nil {
+		t.Fatalf("winner: %v", ev.Winner.err)
+	}
+	if ev.Loser.err == nil {
+		t.Fatalf("loser succeeded; the characterized outcome is a 1105 rollback (evidence above)")
+	}
+	if ev.Loser.MySQLCode != 1105 || ev.Loser.SQLState != "HY000" {
+		t.Errorf("loser error = %d (%s), want 1105 (HY000): %v", ev.Loser.MySQLCode, ev.Loser.SQLState, ev.Loser.err)
+	}
+	for _, want := range []string{"constraint violations", "transaction rolled back"} {
+		if !strings.Contains(ev.Loser.Err, want) {
+			t.Errorf("loser error %q does not mention %q", ev.Loser.Err, want)
+		}
+	}
+	if ev.Loser.NotFound {
+		t.Errorf("loser error unexpectedly matches storage.ErrNotFound: %v", ev.Loser.err)
+	}
+	if ev.Loser.Attempts != 1 {
+		t.Errorf("loser attempts = %d, want 1 (1105 is not retried)", ev.Loser.Attempts)
+	}
+	if !ev.RolledBk {
+		t.Errorf("loser's write is visible after its error")
+	}
+	switch loser {
+	case raceDeleteLoses:
+		if !ev.State.ParentPresent || ev.State.Comments != 1 || !ev.State.WinnerCommentPresent {
+			t.Errorf("final state %+v, want the issue kept with only the winner's comment", ev.State)
+		}
+	case raceCommentLoses:
+		if ev.State.ParentPresent || ev.State.Comments != 0 {
+			t.Errorf("final state %+v, want the issue deleted with no comments", ev.State)
+		}
+	}
+}
+
+// assertSerialDeleteCommentRace asserts what running the winner, then the
+// loser, one after the other gives: a delete after a comment cascades it
+// away; a comment after a delete is refused as not found. Either way the
+// loser's answer is a semantic one, not an engine rollback.
+func assertSerialDeleteCommentRace(t *testing.T, loser string, ev raceEvidence) {
+	t.Helper()
+	switch loser {
+	case raceDeleteLoses:
+		if ev.Loser.err != nil || ev.Loser.Deleted != 1 {
+			t.Errorf("serial outcome: the delete after a comment succeeds and deletes 1 issue; got deleted=%d, err: %v",
+				ev.Loser.Deleted, ev.Loser.err)
+		}
+		if ev.State.ParentPresent || ev.State.Comments != 0 {
+			t.Errorf("serial outcome: issue and its comments deleted; got %+v", ev.State)
+		}
+	case raceCommentLoses:
+		if !errors.Is(ev.Loser.err, storage.ErrNotFound) {
+			t.Errorf("serial outcome: the comment after a delete is refused with storage.ErrNotFound; got: %v", ev.Loser.err)
+		}
+		if ev.State.ParentPresent {
+			t.Errorf("serial outcome: issue deleted; got %+v", ev.State)
+		}
 	}
 }

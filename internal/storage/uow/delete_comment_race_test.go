@@ -22,6 +22,12 @@ import (
 	publicops "github.com/steveyegge/beads/issueops"
 )
 
+// expectSerialDeleteCommentEnv is internal/storage/dolt's reproduction
+// switch, read here too: with it set to 1 the journal-off cases assert the
+// serial outcome and fail on the characterized server. See
+// engdocs/design/dolt-concurrency.md, "Guarded delete racing a comment".
+const expectSerialDeleteCommentEnv = "BEADS_TEST_EXPECT_SERIAL_DELETE_COMMENT"
+
 // uowRaceSettingsProbe is what the gate reads on each racing session at its
 // commit point.
 const uowRaceSettingsProbe = "SELECT @@foreign_key_checks AS foreign_key_checks, " +
@@ -250,6 +256,19 @@ func TestUOWDeleteCommentRaceCharacterization(t *testing.T) {
 				}
 			}
 			requireUOWRaceIntegrity(t, rc, ev)
+			switch {
+			case rc.serial:
+				assertUOWSerialDeleteCommentRace(t, rc.loser, ev)
+			case rc.journal:
+				if ev.Loser.Attempts < 2 {
+					t.Errorf("journal-on loser attempts = %d, want a retry", ev.Loser.Attempts)
+				}
+				assertUOWSerialDeleteCommentRace(t, rc.loser, ev)
+			case os.Getenv(expectSerialDeleteCommentEnv) == "1":
+				assertUOWSerialDeleteCommentRace(t, rc.loser, ev)
+			default:
+				assertUOWCurrentDeleteCommentRace(t, rc.loser, ev)
+			}
 		})
 	}
 	t.Logf("delete-comment race coverage (uow): executed %v; "+
@@ -378,6 +397,67 @@ func requireUOWRaceIntegrity(t *testing.T, rc uowRaceCase, ev uowRaceEvidence) {
 	for who, op := range map[string]uowRaceOp{"loser": ev.Loser, "winner": ev.Winner} {
 		if op.CommitKind != want {
 			t.Errorf("%s commit kind = %q, want %q", who, op.CommitKind, want)
+		}
+	}
+}
+
+// assertUOWCurrentDeleteCommentRace asserts the characterized outcome, the
+// same one the direct store gives: the released loser is rolled back with
+// error 1105 (HY000), not retried, and no orphan survives.
+func assertUOWCurrentDeleteCommentRace(t *testing.T, loser string, ev uowRaceEvidence) {
+	t.Helper()
+	if ev.Winner.err != nil {
+		t.Fatalf("winner: %v", ev.Winner.err)
+	}
+	if ev.Loser.err == nil {
+		t.Fatalf("loser succeeded; the characterized outcome is a 1105 rollback (evidence above)")
+	}
+	if ev.Loser.MySQLCode != 1105 || ev.Loser.SQLState != "HY000" {
+		t.Errorf("loser error = %d (%s), want 1105 (HY000): %v", ev.Loser.MySQLCode, ev.Loser.SQLState, ev.Loser.err)
+	}
+	for _, want := range []string{"constraint violations", "transaction rolled back"} {
+		if !strings.Contains(ev.Loser.Err, want) {
+			t.Errorf("loser error %q does not mention %q", ev.Loser.Err, want)
+		}
+	}
+	if ev.Loser.NotFound {
+		t.Errorf("loser error unexpectedly matches ErrNotFound: %v", ev.Loser.err)
+	}
+	if ev.Loser.Attempts != 1 {
+		t.Errorf("loser attempts = %d, want 1 (1105 is not retried)", ev.Loser.Attempts)
+	}
+	switch loser {
+	case uowRaceDeleteLoses:
+		if !ev.State.ParentPresent || ev.State.Comments != 1 || !ev.State.WinnerCommentPresent {
+			t.Errorf("final state %+v, want the issue kept with only the winner's comment", ev.State)
+		}
+	case uowRaceCommentLoses:
+		if ev.State.ParentPresent || ev.State.Comments != 0 {
+			t.Errorf("final state %+v, want the issue deleted with no comments", ev.State)
+		}
+	}
+}
+
+// assertUOWSerialDeleteCommentRace asserts the winner-then-loser serial
+// outcome: a delete after a comment cascades it away; a comment after a
+// delete is refused as not found.
+func assertUOWSerialDeleteCommentRace(t *testing.T, loser string, ev uowRaceEvidence) {
+	t.Helper()
+	switch loser {
+	case uowRaceDeleteLoses:
+		if ev.Loser.err != nil || ev.Loser.Deleted != 1 {
+			t.Errorf("serial outcome: the delete after a comment succeeds and deletes 1 issue; got deleted=%d, err: %v",
+				ev.Loser.Deleted, ev.Loser.err)
+		}
+		if ev.State.ParentPresent || ev.State.Comments != 0 {
+			t.Errorf("serial outcome: issue and its comments deleted; got %+v", ev.State)
+		}
+	case uowRaceCommentLoses:
+		if !errors.Is(ev.Loser.err, publicops.ErrNotFound) {
+			t.Errorf("serial outcome: the comment after a delete is refused with ErrNotFound; got: %v", ev.Loser.err)
+		}
+		if ev.State.ParentPresent {
+			t.Errorf("serial outcome: issue deleted; got %+v", ev.State)
 		}
 	}
 }
