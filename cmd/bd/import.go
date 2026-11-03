@@ -553,7 +553,14 @@ func renderImportDryRun(result importResultJSON, memoriesCount int, source strin
 // identically in both modes.
 func renderImportOutcome(result importResultJSON, source string, dedupHits int) error {
 	if jsonOutput {
-		return outputJSON(result)
+		// The JSON result is the whole contract in this mode: it is emitted
+		// unchanged (skipped edges are in skipped_dependencies) and the
+		// verdict below adds no new field or stderr diagnostic, so a
+		// consumer that decodes one object keeps decoding exactly one.
+		if err := outputJSON(result); err != nil {
+			return err
+		}
+		return nil
 	}
 
 	fmt.Fprintf(os.Stderr, "Imported %d issues", result.Created)
@@ -587,6 +594,26 @@ func renderImportOutcome(result importResultJSON, source string, dedupHits int) 
 	for _, skipped := range result.SkippedDependencies {
 		fmt.Fprintf(os.Stderr, "Skipped dependency: %s\n", skipped)
 	}
+	return skippedDependencySummary(len(result.SkippedDependencies))
+}
+
+// skippedDependencySummary turns a completed import's skipped-dependency list
+// into one aggregate report. GH#6113: an import whose input references a
+// target that is neither in the database nor in the import stream drops that
+// edge and still exits 0 — in a chunked restore every chunk can succeed while
+// a third of the dependency graph disappears, and per-edge lines scrolling
+// past on a 0 exit are not a signal a script can gate on. The summary names
+// the count of every reported skip (missing targets and validation refusals
+// alike — the reason strings are not re-classified) and the recovery: import
+// the missing targets and re-run, which converges subject to the import's
+// stale policy. The rows are already committed at this point; nothing about
+// the verdict can un-commit them.
+func skippedDependencySummary(n int) error {
+	if n == 0 {
+		return nil
+	}
+	WarnError("%d dependency edge(s) were reported skipped", n)
+	fmt.Fprintf(os.Stderr, "Hint: import the missing target issues, then re-run this import to wire the skipped edges; fix validation-refused edges in the source file before re-running.\n") //nolint:gosec // G705: stderr, not a browser context
 	return nil
 }
 
