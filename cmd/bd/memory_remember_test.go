@@ -278,3 +278,53 @@ func TestRememberBareKeyReadsExactKey(t *testing.T) {
 		}
 	})
 }
+
+// TestRememberBareKeyRefusesMissingWithoutWriting pins the refusal half for
+// the GH#7275 shapes: a bare key naming nothing (neither the exact key nor its
+// derivation) exits 1 with the shipped bare-key refusal, emits no hint, and
+// creates or changes no memory. At base these arguments wrote the key as its
+// own content under its derived key.
+func TestRememberBareKeyRefusesMissingWithoutWriting(t *testing.T) {
+	for _, asJSON := range []bool{false, true} {
+		for _, key := range bareKeyShapesGH7275 {
+			t.Run(fmt.Sprintf("json=%v/%s", asJSON, key), func(t *testing.T) {
+				m, fake := setupRememberCommand(t)
+				jsonOutput = asJSON
+				// The corpus starts and stays empty: neither the exact key
+				// nor its derivation exists.
+
+				var runErr error
+				stdout, stderr := captureStdio(t, func() { runErr = runRemember(key) })
+				exitOne(t, runErr)
+				if len(m.remembers) != 0 {
+					t.Errorf("bd remember %q issued %d Remember request(s), want none: %+v", key, len(m.remembers), m.remembers)
+				}
+				if len(m.rows) != 0 {
+					t.Errorf("bd remember %q stored %v, want nothing", key, m.rows)
+				}
+				if fake.commits != 0 {
+					t.Errorf("bd remember %q committed %d time(s), want none", key, fake.commits)
+				}
+				if asJSON {
+					body := parseRememberJSON(t, stdout)
+					if !strings.Contains(fmt.Sprint(body["error"]), fmt.Sprintf("no memory named %q", key)) {
+						t.Errorf("--json error = %v, want the bare-key refusal naming %q", body["error"], key)
+					}
+					if _, hasHint := body["hint"]; hasHint {
+						t.Errorf("--json refusal = %v, want no hint when no derived key exists", body)
+					}
+				} else {
+					if !strings.Contains(stderr, fmt.Sprintf("no memory named %q", key)) {
+						t.Errorf("stderr = %q, want the bare-key refusal naming %q", stderr, key)
+					}
+					if strings.Contains(stderr, "Hint:") {
+						t.Errorf("stderr = %q, want no hint when no derived key exists", stderr)
+					}
+					if stdout != "" {
+						t.Errorf("stdout = %q, want the refusal to write nothing there", stdout)
+					}
+				}
+			})
+		}
+	}
+}
