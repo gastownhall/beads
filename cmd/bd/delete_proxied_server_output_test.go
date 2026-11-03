@@ -213,7 +213,7 @@ func TestOutputDeleteProxiedPreviewExactContracts(t *testing.T) {
 
 		in := &deleteInput{ids: []string{"bd-target"}}
 		out := captureStdout(t, func() error { return outputDeleteProxiedPreview(in, blockedResult) })
-		if !strings.Contains(out, "has dependents not in deletion set; use --cascade to delete them or --force to orphan them") {
+		if !strings.Contains(out, "has dependents not in deletion set; use --force to orphan them, or --cascade to also delete its parent-child descendants (other dependents are orphaned)") {
 			t.Errorf("refusal prose missing classic message:\n%s", out)
 		}
 		if strings.Contains(out, "Would remove:") {

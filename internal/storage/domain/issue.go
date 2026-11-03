@@ -197,7 +197,8 @@ type DeleteIssuesParams struct {
 	// wisp/mol/gc/purge proxied paths and the single-ID convenience wrappers —
 	// cascade expansion follows params.Cascade alone and Force is ignored. When
 	// true, Cascade/Force choose the behavior:
-	//   Cascade=true               → delete all transitive dependents
+	//   Cascade=true               → delete the parent-child closure and orphan
+	//                                every other external dependent
 	//   Cascade=false, Force=false → refuse if any external dependent exists
 	//                                (*DeleteBlockedError, naming the blockers)
 	//   Cascade=false, Force=true  → orphan external dependents (delete only IDs)

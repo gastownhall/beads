@@ -214,8 +214,8 @@ type cleanupSelection struct {
 // tombstone, so a retained issue is never its to take.
 //
 // --cascade is refused while anything is retained: the role expands a cascade
-// to every dependent past this selection, so it could delete a retained issue
-// the selection just held back.
+// to every parent-child descendant past this selection, so it could delete a
+// retained issue the selection just held back.
 func selectCleanupCandidates(closed []*types.Issue, retainedSetting string, cascade bool) (cleanupSelection, error) {
 	var selection cleanupSelection
 	if cascade && len(workapi.RetainedTypesFromSetting(retainedSetting)) > 0 {

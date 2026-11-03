@@ -326,7 +326,7 @@ func (s *testSuite) iucCascadePolicyRefuses() {
 	s.Require().ErrorAs(err, &blocked, "refusal must be a typed DeleteBlockedError")
 	s.Equal("bd-iuc-cpr-root", blocked.IssueID)
 	s.Equal([]string{"bd-iuc-cpr-mid"}, blocked.Dependents, "only the DIRECT external dependent blocks")
-	s.Contains(err.Error(), "use --cascade to delete them or --force to orphan them",
+	s.Contains(err.Error(), "use --force to orphan them, or --cascade to also delete its parent-child descendants (other dependents are orphaned)",
 		"refusal must say how to proceed (classic parity)")
 	s.Equal([]string{"bd-iuc-cpr-mid"}, res.OrphanedIssues,
 		"blocking dependents are reported on the result alongside the error")

@@ -226,7 +226,7 @@ type DependentsOutsideRequestError struct {
 }
 
 func (e *DependentsOutsideRequestError) Error() string {
-	return fmt.Sprintf("issue %s has dependents not in deletion set; use --cascade to delete them or --force to orphan them", e.IssueID)
+	return fmt.Sprintf("issue %s has dependents not in deletion set; use --force to orphan them, or --cascade to also delete its parent-child descendants (other dependents are orphaned)", e.IssueID)
 }
 
 // Unwrap makes DependentsOutsideRequestError match ErrDependentsOutsideRequest.
