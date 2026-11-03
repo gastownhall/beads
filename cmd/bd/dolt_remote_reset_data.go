@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -44,16 +45,26 @@ const (
 	// resetDataUnsupported: a cloud or hosted store whose contents bd cannot
 	// safely clear — replace the remote with a fresh URL/prefix instead.
 	resetDataUnsupported
+	// resetDataFileInGitRepo: a file remote whose directory is a git
+	// repository, bare or a checkout. Dolt keeps it as a native file store
+	// all the same, among the repository's own files, which bd will not
+	// clear — replace the remote with a fresh URL instead, as for
+	// resetDataUnsupported.
+	resetDataFileInGitRepo
 )
 
-// classifyResetDataRemote decides which reset-data mechanism applies to url.
-// File URLs are classified by what is actually on disk, because a file://
-// remote can be either a bare git repository (Dolt normalizes those to
-// git+file:// at push time) or a native Dolt file store: a bare git repo
-// takes the git-backed path, a directory with an nbs manifest is a file
-// store, and a missing or empty target has nothing to reset. A non-empty
-// target that is neither is an error — reset-data must not clear a
-// directory it cannot identify.
+// classifyResetDataRemote decides which reset-data mechanism applies to url,
+// the remote's URL as Dolt stored it. Dolt tells a git remote by that URL
+// alone, never by what is on disk: adding a remote stores a file:// URL or
+// path that ends in .git as git+file://, a git-protocol URL, and Dolt pushes
+// any other file URL as a native file store, writing its manifest and table
+// files into the directory even when that is a git repository. So a file
+// URL is classified by what is on disk only to find what reset-data may
+// clear: a git repository, bare or a checkout, is refused
+// (resetDataFileInGitRepo) whatever else it holds, a directory with an nbs
+// manifest is a file store, and a missing or empty target has nothing to
+// reset. Any other non-empty target is an error — reset-data must not clear
+// a directory it cannot identify.
 func classifyResetDataRemote(url string) (resetDataKind, error) {
 	if doltutil.IsGitProtocolURL(url) {
 		return resetDataGitBacked, nil
@@ -72,13 +83,13 @@ func classifyResetDataRemote(url string) (resetDataKind, error) {
 	if len(entries) == 0 {
 		return resetDataFileAbsent, nil
 	}
-	if isBareGitRepoDir(path) {
-		return resetDataGitBacked, nil
+	if isGitRepoDir(path, entries) {
+		return resetDataFileInGitRepo, nil
 	}
 	if _, err := os.Stat(filepath.Join(path, "manifest")); err == nil {
 		return resetDataFileStore, nil
 	}
-	return 0, fmt.Errorf("remote target %s is non-empty but is neither a bare git repository nor a Dolt file store (no manifest); refusing to clear it", path)
+	return 0, fmt.Errorf("remote target %s is non-empty but is neither a git repository nor a Dolt file store (no manifest); refusing to clear it", path)
 }
 
 // resetDataFilePath extracts the local filesystem path from a file:// URL or
@@ -91,6 +102,16 @@ func resetDataFilePath(url string) (string, bool) {
 		return url, true
 	}
 	return "", false
+}
+
+// isGitRepoDir reports whether dir, which holds entries, is a git
+// repository: a checkout, whose .git entry is the git directory or a file
+// naming it (a linked worktree or a submodule), or a bare repository.
+func isGitRepoDir(dir string, entries []os.DirEntry) bool {
+	if slices.ContainsFunc(entries, func(e os.DirEntry) bool { return e.Name() == ".git" }) {
+		return true
+	}
+	return isBareGitRepoDir(dir)
 }
 
 // isBareGitRepoDir reports whether dir looks like a bare git repository
@@ -120,7 +141,10 @@ func resetDataGitURL(url string) string {
 func lsRemoteDoltDataRefs(ctx context.Context, gitURL string) ([]string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "ls-remote", gitURL, gitDoltDataRef, gitDoltInfoRef) // #nosec G204 -- URL from configured remote
+	if err := checkRemoteNotOption("git remote", gitURL); err != nil {
+		return nil, err
+	}
+	cmd := exec.CommandContext(ctx, "git", "ls-remote", "--", gitURL, gitDoltDataRef, gitDoltInfoRef) // #nosec G204 -- URL from configured remote, after "--"
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("git ls-remote %s failed: %s: %w", gitURL, strings.TrimSpace(string(out)), err)
@@ -140,7 +164,10 @@ func lsRemoteDoltDataRefs(ctx context.Context, gitURL string) ([]string, error) 
 // git invocations (GH#3724 class: a user's templated pre-push hook must not
 // break — or observe — bd's data-plane plumbing).
 func deleteGitDoltDataRefs(ctx context.Context, gitURL string, refs []string) error {
-	args := []string{"push", gitURL}
+	if err := checkRemoteNotOption("git remote", gitURL); err != nil {
+		return err
+	}
+	args := []string{"push", "--", gitURL}
 	for _, ref := range refs {
 		args = append(args, ":"+ref)
 	}
@@ -202,7 +229,9 @@ only live chunks:
     deletes the Dolt data refs on the git remote, then force-pushes to
     rebuild a fresh store. Code branches are untouched.
   - Native file remotes (file:// paths): clears the store directory, then
-    force-pushes to rebuild it.
+    force-pushes to rebuild it. Refused for a git repository, bare or a
+    checkout, where Dolt keeps the store among the repository's own files:
+    replace that remote as below.
   - Cloud/hosted remotes (aws://, gs://, dolthub://, ...): bd cannot clear
     the stored data safely — replace the remote with a fresh URL or prefix:
       bd dolt remote remove <name>
@@ -274,9 +303,12 @@ Examples:
 		if err != nil {
 			return HandleError("%v", err)
 		}
-		if kind == resetDataUnsupported {
-			return HandleErrorWithHint(
-				fmt.Sprintf("cannot clear stored data on remote %q (%s)", name, url),
+		if kind == resetDataUnsupported || kind == resetDataFileInGitRepo {
+			msg := fmt.Sprintf("cannot clear stored data on remote %q (%s)", name, url)
+			if kind == resetDataFileInGitRepo {
+				msg += ": the directory is a git repository, and Dolt keeps a file:// remote's data in it as a file store, mixed in with the repository's files"
+			}
+			return HandleErrorWithHint(msg,
 				fmt.Sprintf("Replace the remote with a fresh URL or prefix instead:\n"+
 					"  bd dolt remote remove %s\n"+
 					"  bd dolt remote add %s <fresh-url>\n"+

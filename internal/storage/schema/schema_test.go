@@ -386,10 +386,13 @@ func TestEnsureWispDependenciesSplitTargetsAddsMissingAndBackfills(t *testing.T)
 	}
 	mock.ExpectQuery(columnQuery).WithArgs("wisp_dependencies", "depends_on_id").
 		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
+	// The wisp and issue cases test the target with IN (SELECT ...) rather
+	// than joining wisps or issues, which would stamp the joined rows'
+	// updated_at (gastownhall/beads#5981).
 	for _, update := range []string{
 		`UPDATE wisp_dependencies SET depends_on_external = depends_on_id`,
-		`UPDATE wisp_dependencies wd JOIN wisps w ON w\.id = wd\.depends_on_id`,
-		`UPDATE wisp_dependencies wd JOIN issues i ON i\.id = wd\.depends_on_id`,
+		`UPDATE wisp_dependencies SET depends_on_wisp_id = depends_on_id WHERE .* AND depends_on_id IN \(SELECT id FROM wisps\)$`,
+		`UPDATE wisp_dependencies SET depends_on_issue_id = depends_on_id WHERE .* AND depends_on_id IN \(SELECT id FROM issues\)$`,
 		`UPDATE wisp_dependencies SET depends_on_external = depends_on_id WHERE depends_on_external IS NULL`,
 	} {
 		mock.ExpectExec(update).WillReturnResult(sqlmock.NewResult(0, 1))
@@ -487,7 +490,15 @@ func TestRunMigrationsSnapshotsDirtyTablesBeforeRepairSoRepairMutationsCommitAto
 	mock.ExpectQuery(dirtyStatusQuery).
 		WillReturnRows(sqlmock.NewRows([]string{"table_name", "staged"}))
 
-	// 2. preMigrationRepair(53): ensureIssuesRigColumns (all present, no
+	// 2. The updated_at guard snapshots 0053's restore target (issues, with
+	// the ephemeral flag the body sets) and move source (wisps, absent here)
+	// BEFORE the repair can touch them.
+	guardExpectColumns(mock, "issues", "id", "updated_at", "ephemeral")
+	mock.ExpectQuery(`SELECT id, updated_at, ephemeral FROM issues ORDER BY id`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "updated_at", "ephemeral"}).AddRow("bd-1", "2025-03-01 09:30:00", 1))
+	guardExpectAbsentTable(mock)
+
+	// 3. preMigrationRepair(53): ensureIssuesRigColumns (all present, no
 	// exec), ensureWispDependenciesSplitTargets (table absent, no-op), then
 	// ensureDependenciesIDColumn actually mutating `dependencies`.
 	for _, col := range []string{"hook_bead", "role_bead", "agent_state", "last_activity", "role_type", "rig"} {
@@ -515,12 +526,22 @@ func TestRunMigrationsSnapshotsDirtyTablesBeforeRepairSoRepairMutationsCommitAto
 	mock.ExpectExec(`ALTER TABLE dependencies ADD PRIMARY KEY \(id\)`).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 
-	// 3. Migration 0053's own frozen SQL, then its cursor row.
+	// 4. Migration 0053's own frozen SQL; the guard then restores the row
+	// the body flipped and stamped (compare-and-swap on the stamped value),
+	// and checks its joinStamped wisps (absent here), BEFORE the cursor row
+	// is recorded.
 	mock.ExpectExec(`SET FOREIGN_KEY_CHECKS = 0`).WillReturnResult(sqlmock.NewResult(0, 0))
+	guardExpectColumns(mock, "issues", "id", "updated_at", "ephemeral")
+	mock.ExpectQuery(`SELECT id, updated_at, ephemeral FROM issues ORDER BY id`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "updated_at", "ephemeral"}).AddRow("bd-1", "2026-11-02 04:00:00", 0))
+	mock.ExpectExec(guardRestoreSQL("issues", 1)).
+		WithArgs(guardRestoreArgs(guardRestoreRow{"bd-1", "2025-03-01 09:30:00", "2026-11-02 04:00:00"})...).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	guardExpectAbsentTable(mock)
 	mock.ExpectExec(`INSERT IGNORE INTO schema_migrations`).WithArgs(53, sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
-	// 4. commitMigrationStep's "after" snapshot sees `dependencies` dirty --
+	// 5. commitMigrationStep's "after" snapshot sees `dependencies` dirty --
 	// from the repair's own ALTERs above, now correctly attributed to THIS
 	// step because the "before" snapshot in (1) predates them -- so it gets
 	// force-added alongside the cursor table and committed in the same call.
@@ -921,6 +942,7 @@ func TestIgnored15RecomputeHardFailsWithoutIsBlockedRepair(t *testing.T) {
 // version-15 entry at all: the unrecoverable case
 // ensureWispIsBlockedForRecompute's doc comment describes.
 func TestIgnored7RecomputeHardFailsWithoutIsBlockedRepair(t *testing.T) {
+	stubUpdatedAtGuard(t)
 	orig := stderr
 	stderr = &bytes.Buffer{}
 	defer func() { stderr = orig }()
@@ -1839,6 +1861,58 @@ INSERT INTO wisp_dependencies (issue_id, depends_on_id) VALUES (%s, %s);
 		`SELECT COUNT(*) AS c FROM wisp_dependencies WHERE issue_id = 'source-wisp' AND depends_on_issue_id = 'ambiguous-target'`, "0")
 }
 
+// TestWispDependenciesSplitTargetBackfillLeavesTargetsUpdatedAtThroughDoltCLI
+// pins that the split-target pre-repair (run before 0047 and 0053) classifies
+// a wisp dependency's target without stamping it: go-mysql-server applies
+// the ON UPDATE CURRENT_TIMESTAMP of every table a multi-table UPDATE joins,
+// so the JOIN form this backfill used before stamped every issue and wisp a
+// wisp dependency points at (gastownhall/beads#5981).
+func TestWispDependenciesSplitTargetBackfillLeavesTargetsUpdatedAtThroughDoltCLI(t *testing.T) {
+	testutil.RequireDoltBinary(t)
+
+	dir := filepath.Join(t.TempDir(), "wisp-dependency-split-stamps")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("create wisp dependency split dir: %v", err)
+	}
+	runDoltCommand(t, dir, "init", "--name", "test", "--email", "test@example.com")
+
+	var repairSQL strings.Builder
+	for _, col := range wispDependenciesSplitTargetColumns() {
+		fmt.Fprintf(&repairSQL, "ALTER TABLE wisp_dependencies ADD COLUMN %s %s;\n", col.name, col.definition)
+	}
+	for _, stmt := range wispDependenciesSplitTargetBackfillSQL() {
+		repairSQL.WriteString(stmt)
+		repairSQL.WriteString(";\n")
+	}
+
+	const seedSQL = `
+CREATE TABLE issues (
+    id VARCHAR(255) PRIMARY KEY,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+);
+CREATE TABLE wisps (
+    id VARCHAR(255) PRIMARY KEY,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+);
+CREATE TABLE wisp_dependencies (
+    issue_id VARCHAR(255) NOT NULL,
+    depends_on_id VARCHAR(255) NOT NULL,
+    PRIMARY KEY (issue_id, depends_on_id)
+);
+INSERT INTO issues (id, updated_at) VALUES ('issue-target', '2025-01-02 03:04:05');
+INSERT INTO wisps (id, updated_at) VALUES ('source-wisp', '2025-01-02 03:04:05'), ('wisp-target', '2025-01-02 03:04:05');
+INSERT INTO wisp_dependencies (issue_id, depends_on_id) VALUES ('source-wisp', 'issue-target'), ('source-wisp', 'wisp-target'), ('source-wisp', 'external:gh-1');
+`
+	runDoltSQL(t, dir, seedSQL+repairSQL.String())
+
+	requireDoltCount(t, dir,
+		`SELECT COUNT(*) AS c FROM wisp_dependencies WHERE (depends_on_id = 'issue-target' AND depends_on_issue_id = 'issue-target') OR (depends_on_id = 'wisp-target' AND depends_on_wisp_id = 'wisp-target') OR (depends_on_id = 'external:gh-1' AND depends_on_external = 'external:gh-1')`, "3")
+	requireDoltCount(t, dir,
+		`SELECT COUNT(*) AS c FROM issues WHERE updated_at <> '2025-01-02 03:04:05'`, "0")
+	requireDoltCount(t, dir,
+		`SELECT COUNT(*) AS c FROM wisps WHERE updated_at <> '2025-01-02 03:04:05'`, "0")
+}
+
 func TestMigration0047HandlesLegacyWispDependenciesShape(t *testing.T) {
 	sql, err := os.ReadFile("migrations/0047_recompute_mixed_is_blocked.up.sql")
 	if err != nil {
@@ -2433,6 +2507,7 @@ func TestRunMigrationsStderrOutput(t *testing.T) {
 	origCounter := issueRowCounter
 	issueRowCounter = func(context.Context, DBConn) (int64, error) { return 0, nil }
 	defer func() { issueRowCounter = origCounter }()
+	stubUpdatedAtGuard(t)
 
 	// Bounded below migration 40: migrations 40/41 carry preMigrationRepairs and
 	// CALL DOLT_* bodies that issue real queries via mockDB.QueryRowContext /
@@ -2477,6 +2552,7 @@ func TestRunMigrationsUsesProvidedSource(t *testing.T) {
 	origCounter := issueRowCounter
 	issueRowCounter = func(context.Context, DBConn) (int64, error) { return 0, nil }
 	defer func() { issueRowCounter = origCounter }()
+	stubUpdatedAtGuard(t)
 
 	// Bounded below migration 40 for the same reason as
 	// TestRunMigrationsStderrOutput: mockDB can't answer the queries the
@@ -2520,6 +2596,7 @@ func TestRunMigrationsLargeRigNoticeOnlyOnMainSource(t *testing.T) {
 	origCounter := issueRowCounter
 	issueRowCounter = func(context.Context, DBConn) (int64, error) { return 49_187, nil }
 	defer func() { issueRowCounter = origCounter }()
+	stubUpdatedAtGuard(t)
 
 	var mainBuf bytes.Buffer
 	orig := stderr

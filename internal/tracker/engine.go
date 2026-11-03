@@ -320,6 +320,28 @@ func (e *Engine) DetectConflicts(ctx context.Context) ([]Conflict, error) {
 	return conflicts, nil
 }
 
+// selectivePullIdentifier returns the tracker identifier that local's external
+// ref addresses, for a pull that selects the bead by ID. When there is none it
+// warns why and reports false: the bead has no ref, or the tracker cannot
+// address the one it has (gastownhall/beads#7781: another repository's issue).
+func (e *Engine) selectivePullIdentifier(id string, local *types.Issue) (string, bool) {
+	extRef := ""
+	if local != nil {
+		extRef = derefStr(local.ExternalRef)
+	}
+	if strings.TrimSpace(extRef) == "" {
+		e.warn("No external ref found for local issue %s, skipping pull", id)
+		return "", false
+	}
+	identifier := e.Tracker.ExtractIdentifier(extRef)
+	if identifier == "" {
+		e.warn("External ref %q of local issue %s is not an issue %s can address with its current configuration (another repository?), skipping pull",
+			extRef, id, e.Tracker.DisplayName())
+		return "", false
+	}
+	return identifier, true
+}
+
 // doPull imports issues from the external tracker into beads.
 // doPull imports tracker issues. IDs of issues it creates or updates are
 // added to pulledIDs so a bidirectional sync's push phase does not echo the
@@ -385,12 +407,8 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 		for _, id := range opts.IssueIDs {
 			var identifier string
 			if isBeadID(id, prefix) {
-				// Look up the local issue to find its external ref
-				if local, ok := localByID[id]; ok && local.ExternalRef != nil {
-					identifier = e.Tracker.ExtractIdentifier(*local.ExternalRef)
-				}
-				if identifier == "" {
-					e.warn("No external ref found for local issue %s, skipping pull", id)
+				var ok bool
+				if identifier, ok = e.selectivePullIdentifier(id, localByID[id]); !ok {
 					stats.Skipped++
 					continue
 				}
@@ -1063,6 +1081,11 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 			if willCreate {
 				e.msg("[dry-run] Would create in %s: %s", e.Tracker.DisplayName(), ui.SanitizeForTerminal(issue.Title))
 				stats.Created++
+			} else if e.Tracker.ExtractIdentifier(extRef) == "" {
+				// A real run skips a linked issue whose ref the tracker
+				// cannot address (e.g. another repository's issue), so the
+				// preview must skip it too (gastownhall/beads#7781).
+				stats.Skipped++
 			} else if !forceIDs[issue.ID] && e.storedPushHashMatches(ctx, issue, extRef) {
 				// Content unchanged since last push: a real run would skip this
 				// issue, so the preview must say so too (gastownhall/beads#4214).

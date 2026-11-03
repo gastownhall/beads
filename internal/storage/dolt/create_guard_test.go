@@ -188,6 +188,9 @@ func TestCreateGuard_MissingDB_CreateIfMissing(t *testing.T) {
 	defer store.Close()
 
 	assertDatabaseExists(t, testServerPort, dbName)
+	if !store.CreatedDatabase() {
+		t.Error("CreatedDatabase() = false for the open that created the database")
+	}
 }
 
 // TestCreateGuard_ExistingDB_NoFlag verifies that opening an EXISTING database
@@ -280,6 +283,9 @@ func TestCreateGuard_ExistingDB_WithData(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("first connection failed: %v", err)
+	}
+	if store1.CreatedDatabase() {
+		t.Error("CreatedDatabase() = true for a CreateIfMissing open of an existing database")
 	}
 
 	if err := store1.SetConfig(ctx, "test_key", "test_value"); err != nil {

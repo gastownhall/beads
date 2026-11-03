@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"github.com/dolthub/dolt/go/libraries/doltcore/servercfg"
 	"github.com/dolthub/dolt/go/libraries/utils/filesys"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/storage/dbproxy/server"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -1224,4 +1226,237 @@ func TestResolveProxiedServerLogPath_FollowsCustomRoot(t *testing.T) {
 		assert.Equal(t, filepath.Join(bd, "dolt", "server.log"), path)
 		assert.False(t, isCustom)
 	})
+}
+
+func TestRenderProxiedServerConfig_RecordsChosenPort(t *testing.T) {
+	body, err := renderProxiedServerConfig(54321)
+	require.NoError(t, err)
+	require.True(t, isManagedProxiedServerConfig(body))
+	port, _, ok := cutManagedPortRecord(body[len(managedProxiedServerConfigMarker):])
+	require.True(t, ok, "generated config must carry the chosen-port record")
+	assert.Equal(t, 54321, port)
+}
+
+func TestRenderLegacyProxiedServerConfig_IsMarkerPlusYAML(t *testing.T) {
+	legacy, err := renderLegacyProxiedServerConfig(40001)
+	require.NoError(t, err)
+	require.True(t, isManagedProxiedServerConfig(legacy))
+	_, _, ok := cutManagedPortRecord(legacy[len(managedProxiedServerConfigMarker):])
+	assert.False(t, ok, "the legacy form has no port record")
+	cfg, err := servercfg.NewYamlConfig(legacy)
+	require.NoError(t, err)
+	assert.Equal(t, 40001, cfg.Port())
+}
+
+func TestCutManagedPortRecord(t *testing.T) {
+	for _, tc := range []struct {
+		line string
+		port int
+		ok   bool
+	}{
+		{line: managedPortRecordPrefix + "40001 (Beads chose this port.)\n", port: 40001, ok: true},
+		{line: managedPortRecordPrefix + "40001\n", port: 40001, ok: true},
+		{line: managedPortRecordPrefix + "4000abc\n"},
+		{line: managedPortRecordPrefix + "0\n"},
+		{line: managedPortRecordPrefix + "70000\n"},
+		{line: managedPortRecordPrefix + "\n"},
+		{line: managedPortRecordPrefix + "40001"},
+		{line: "log_level: info\n"},
+	} {
+		port, _, ok := cutManagedPortRecord([]byte(tc.line + "log_level: info\n"))
+		if tc.line == managedPortRecordPrefix+"40001" {
+			// No newline before the YAML in this case: the record runs into it.
+			port, _, ok = cutManagedPortRecord([]byte(tc.line))
+		}
+		assert.Equal(t, tc.ok, ok, "%q", tc.line)
+		if tc.ok {
+			assert.Equal(t, tc.port, port, "%q", tc.line)
+		}
+	}
+}
+
+func TestManagedPortConflictPolicy_AllowsBeadsChosenPort(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body func(t *testing.T) []byte
+	}{
+		{name: "generated config", body: func(t *testing.T) []byte {
+			b, err := renderProxiedServerConfig(40001)
+			require.NoError(t, err)
+			return b
+		}},
+		{name: "generated config edited elsewhere, port unchanged", body: func(t *testing.T) []byte {
+			b, err := renderProxiedServerConfig(40001)
+			require.NoError(t, err)
+			return []byte(strings.Replace(string(b), "log_level: info", "log_level: debug", 1))
+		}},
+		{name: "generated config with an environment placeholder, port unchanged", body: func(t *testing.T) []byte {
+			// The server copies the raw text, so the placeholder's value never
+			// lands in the runtime config.
+			b, err := renderProxiedServerConfig(40001)
+			require.NoError(t, err)
+			return []byte(strings.Replace(string(b), "log_level: info", "log_level: ${BD_TEST_LOG_LEVEL}", 1))
+		}},
+		{name: "unedited config generated before the record existed", body: func(t *testing.T) []byte {
+			b, err := renderLegacyProxiedServerConfig(40001)
+			require.NoError(t, err)
+			return b
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("BD_TEST_LOG_LEVEL", "info")
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			body := tc.body(t)
+			require.NoError(t, os.WriteFile(path, body, 0o600))
+			require.NoError(t, managedPortConflictPolicy(path, 40001))
+			after, err := os.ReadFile(path)
+			require.NoError(t, err)
+			assert.Equal(t, string(body), string(after), "the policy must never modify the config")
+		})
+	}
+}
+
+func TestManagedPortConflictPolicy_PinsOtherPorts(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		body   func(t *testing.T) []byte
+		inUse  int
+		errHas []string
+	}{
+		{
+			name: "hand-set port",
+			body: func(t *testing.T) []byte {
+				b, err := renderProxiedServerConfig(40001)
+				require.NoError(t, err)
+				// The YAML key, not the "...-listener-port: 40001" record above it.
+				return []byte(strings.Replace(string(b), "\n    port: 40001", "\n    port: 40002", 1))
+			},
+			inUse:  40002,
+			errHas: []string{"set by hand", "free port 40002", "delete"},
+		},
+		{
+			name: "hand-edited config generated before the record existed",
+			body: func(t *testing.T) []byte {
+				b, err := renderLegacyProxiedServerConfig(40001)
+				require.NoError(t, err)
+				return []byte(strings.Replace(string(b), "log_level: info", "log_level: debug", 1))
+			},
+			inUse:  40001,
+			errHas: []string{"edited by hand", "pinned", "delete"},
+		},
+		{
+			name: "operator config",
+			body: func(t *testing.T) []byte {
+				return []byte("listener:\n  host: 127.0.0.1\n  port: 40001\n")
+			},
+			inUse:  40001,
+			errHas: []string{"not a Beads-generated config", "set listener.port in"},
+		},
+		{
+			name: "in-use port is not the config's port",
+			body: func(t *testing.T) []byte {
+				b, err := renderProxiedServerConfig(40001)
+				require.NoError(t, err)
+				return b
+			},
+			inUse:  40009,
+			errHas: []string{"not the in-use port"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("BD_TEST_LOG_LEVEL", "info")
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			body := tc.body(t)
+			require.NoError(t, os.WriteFile(path, body, 0o600))
+			err := managedPortConflictPolicy(path, tc.inUse)
+			require.Error(t, err)
+			for _, want := range tc.errHas {
+				assert.Contains(t, err.Error(), want)
+			}
+		})
+	}
+}
+
+// legacyGeneratedConfigV13 is, byte for byte, the config.yaml that bd v1.3.0
+// and v1.3.1 generate for port 40001 (marker plus yaml.Marshal of the
+// rendered servercfg.YAMLConfig, before the port record existed). It is
+// frozen here so a dolt or yaml upgrade that changes Marshal output cannot
+// silently stop existing workspaces from matching the legacy form.
+const legacyGeneratedConfigV13 = "# Generated by Beads on first run - safe to delete (will be regenerated). " +
+	"Never rewritten afterward; hand edits are preserved. See gastownhall/beads#4986.\n" +
+	"log_level: info\nbehavior:\n    auto_gc_behavior:\n        archive_level: 0\nlistener:\n    host: 127.0.0.1\n    port: 40001\nuser_session_vars: []\njwks: []\n"
+
+func TestManagedPortConflictPolicy_LegacyV13GoldenIsEligible(t *testing.T) {
+	legacy, err := renderLegacyProxiedServerConfig(40001)
+	require.NoError(t, err)
+	assert.Equal(t, legacyGeneratedConfigV13, string(legacy), "legacy render drifted from what v1.3.x wrote")
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(legacyGeneratedConfigV13), 0o600))
+	require.NoError(t, managedPortConflictPolicy(path, 40001))
+}
+
+// TestManagedPortConflictPolicy_ConsecutiveCollisions drives a real
+// server.DoltServer with bd's real policy through repeated port conflicts:
+// the stand-in dolt reports its port taken on every launch, so every move
+// Start makes collides again. The policy must be consulted about the
+// operator's port only, so Start keeps moving until it gives up after its
+// port budget, rather than being refused on the second move because the
+// runtime port is not config.yaml's port. config.yaml must stay unchanged.
+func TestManagedPortConflictPolicy_ConsecutiveCollisions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("stand-in dolt is a shell script")
+	}
+	dir := t.TempDir()
+	fakeDolt := filepath.Join(dir, "dolt")
+	launches := filepath.Join(dir, "launches")
+	script := `#!/bin/sh
+case "$1" in
+config) echo fake; exit 0 ;;
+init) exit 0 ;;
+sql-server)
+  cfg="$3"
+  port=$(sed -n 's/^ *port: *\([0-9][0-9]*\).*/\1/p' "$cfg" | head -n 1)
+  echo "$port" >> "` + launches + `"
+  echo "Port $port already in use." >&2
+  exit 1 ;;
+esac
+exit 2
+`
+	require.NoError(t, os.WriteFile(fakeDolt, []byte(script), 0o755))
+
+	root := filepath.Join(dir, "root")
+	require.NoError(t, os.MkdirAll(root, 0o755))
+	cfgPath := filepath.Join(root, "config.yaml")
+	body, err := renderProxiedServerConfig(40001)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(cfgPath, body, 0o600))
+
+	s, err := server.NewDoltServer(fakeDolt, root, cfgPath, filepath.Join(dir, "server.log"), 0, "")
+	require.NoError(t, err)
+	s.SetPortConflictPolicy(managedPortConflictPolicy)
+	t.Cleanup(func() { _ = s.Stop(context.Background()) })
+
+	err = s.Start(context.Background())
+	require.Error(t, err)
+	assert.ErrorIs(t, err, server.ErrPortInUse)
+	assert.Contains(t, err.Error(), "gave up after 5 ports", "the policy must not refuse the second and later moves")
+	assert.NotContains(t, err.Error(), "not the in-use port")
+
+	got, err := os.ReadFile(launches)
+	require.NoError(t, err)
+	ports := strings.Fields(string(got))
+	require.Len(t, ports, 5, "one launch per port: %v", ports)
+	assert.Equal(t, "40001", ports[0], "the first launch uses config.yaml's port")
+	seen := map[string]bool{}
+	for _, p := range ports {
+		assert.False(t, seen[p], "port %s launched twice: %v", p, ports)
+		seen[p] = true
+	}
+
+	after, err := os.ReadFile(cfgPath)
+	require.NoError(t, err)
+	assert.Equal(t, string(body), string(after), "config.yaml must never be modified")
+	_, err = os.Stat(filepath.Join(root, server.RuntimeConfigFileName))
+	assert.True(t, os.IsNotExist(err), "a failed Start must not leave a runtime config")
 }

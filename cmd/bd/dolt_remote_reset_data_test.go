@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -40,8 +41,32 @@ func TestClassifyResetDataRemote(t *testing.T) {
 		return dir
 	}
 
+	// writeFiles writes each named file, its directories included, into dir.
+	writeFiles := func(t *testing.T, dir string, files ...string) string {
+		for _, f := range files {
+			if err := os.MkdirAll(filepath.Dir(filepath.Join(dir, f)), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, f), []byte("x"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return dir
+	}
+
 	bareRepo := makeBareGitRepo(t)
 	fileStore := makeDoltFileStore(t)
+	// What Dolt leaves after pushing to a file:// remote in a bare git
+	// repository: its file store among the repository's files.
+	repoWithStore := makeBareGitRepo(t)
+	if err := os.WriteFile(filepath.Join(repoWithStore, "manifest"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The same in a checkout, beside .git and the working files, and in a
+	// linked worktree, whose .git is a file naming its git directory.
+	checkoutWithStore := writeFiles(t, t.TempDir(), ".git/HEAD", ".git/objects/info/packs", "README.md", "manifest")
+	worktreeWithStore := writeFiles(t, t.TempDir(), ".git", "README.md", "manifest")
+	checkout := writeFiles(t, t.TempDir(), ".git/HEAD", "README.md")
 	emptyDir := t.TempDir()
 	strangeDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(strangeDir, "notes.txt"), []byte("x"), 0o644); err != nil {
@@ -58,8 +83,13 @@ func TestClassifyResetDataRemote(t *testing.T) {
 		{"git+ssh", "git+ssh://git@github.com/org/repo.git", resetDataGitBacked, false},
 		{"scp-style", "git@github.com:org/repo.git", resetDataGitBacked, false},
 		{"git+file", "git+file://" + bareRepo, resetDataGitBacked, false},
-		{"file url to bare git repo", "file://" + bareRepo, resetDataGitBacked, false},
-		{"bare path to bare git repo", bareRepo, resetDataGitBacked, false},
+		{"file url to bare git repo", "file://" + bareRepo, resetDataFileInGitRepo, false},
+		{"bare path to bare git repo", bareRepo, resetDataFileInGitRepo, false},
+		{"file url to bare git repo holding a dolt store", "file://" + repoWithStore, resetDataFileInGitRepo, false},
+		{"file url to git checkout holding a dolt store", "file://" + checkoutWithStore, resetDataFileInGitRepo, false},
+		{"bare path to git checkout holding a dolt store", checkoutWithStore, resetDataFileInGitRepo, false},
+		{"file url to linked worktree holding a dolt store", "file://" + worktreeWithStore, resetDataFileInGitRepo, false},
+		{"file url to git checkout", "file://" + checkout, resetDataFileInGitRepo, false},
 		{"file url to dolt store", "file://" + fileStore, resetDataFileStore, false},
 		{"bare path to dolt store", fileStore, resetDataFileStore, false},
 		{"file url to missing dir", "file://" + filepath.Join(emptyDir, "nope"), resetDataFileAbsent, false},
@@ -105,5 +135,20 @@ func TestResetDataGitURL(t *testing.T) {
 		if got := resetDataGitURL(tt.url); got != tt.want {
 			t.Errorf("resetDataGitURL(%q) = %q, want %q", tt.url, got, tt.want)
 		}
+	}
+}
+
+func TestResetDataGitCommandsRejectOptionRemote(t *testing.T) {
+	pwned := filepath.Join(t.TempDir(), "pwned")
+	gitURL := "--upload-pack=touch " + pwned + ";false"
+
+	if _, err := lsRemoteDoltDataRefs(context.Background(), gitURL); err == nil {
+		t.Error("lsRemoteDoltDataRefs accepted a remote starting with '-'")
+	}
+	if err := deleteGitDoltDataRefs(context.Background(), "--receive-pack=touch "+pwned+";false", []string{gitDoltDataRef}); err == nil {
+		t.Error("deleteGitDoltDataRefs accepted a remote starting with '-'")
+	}
+	if _, err := os.Stat(pwned); err == nil {
+		t.Fatal("an injected git option ran a command")
 	}
 }

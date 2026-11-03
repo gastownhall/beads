@@ -8,6 +8,16 @@ import (
 	"github.com/steveyegge/beads/issueops"
 )
 
+func TestValidateSettingWriteRefusesCommandSettings(t *testing.T) {
+	for _, key := range []string{"mail.delegate", "MAIL.DELEGATE", "mail_delegate"} {
+		for _, value := range []string{"gt mail", ""} {
+			if _, err := ValidateSettingWrite(key, value); !errors.Is(err, issueops.ErrValidation) {
+				t.Fatalf("%s (%q) error = %v, want ErrValidation", key, value, err)
+			}
+		}
+	}
+}
+
 // The settings-write rules, checked without a database.
 //
 // The conformance contract pins what only a real backend can show — that a row

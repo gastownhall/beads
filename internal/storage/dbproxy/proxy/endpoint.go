@@ -171,8 +171,11 @@ var errStartInterrupted = errors.New("proxy startup interrupted by concurrent sh
 func PickFreePort() (int, error) {
 	// The managed proxy no longer uses this bind-close allocator: its child
 	// binds port 0 and publishes the kernel-assigned port. The remaining
-	// production caller allocates the Dolt config port; that race requires
-	// the managed-config ownership/retry contract deferred to the PR-C RFC.
+	// production caller allocates the Dolt config port. Another process can
+	// take that port before dolt binds it; server.DoltServer detects that
+	// (dolt's own ready line, not a bare dial, proves readiness) and, for a
+	// Beads-chosen port, retries on a fresh port through a runtime copy of
+	// the config; the config file itself is never rewritten.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return 0, err

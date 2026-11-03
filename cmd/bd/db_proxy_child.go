@@ -80,7 +80,14 @@ not intended to be invoked directly by users.`,
 func newDatabaseServer(backend proxy.Backend, rootDir, configPath, logPath, doltBin, database string, external configfile.ExternalDoltConfig) (server.DatabaseServer, error) {
 	switch backend {
 	case proxy.BackendLocalServer:
-		return server.NewDoltServer(doltBin, rootDir, configPath, logPath, 0, database)
+		s, err := server.NewDoltServer(doltBin, rootDir, configPath, logPath, 0, database)
+		if err != nil {
+			return nil, err
+		}
+		// A Beads-generated config's port was picked before dolt binds it;
+		// if another process got there first, run on a free port instead.
+		s.SetPortConflictPolicy(managedPortConflictPolicy)
+		return s, nil
 	case proxy.BackendExternal:
 		return server.NewExternalDoltServer(external)
 	case proxy.BackendLocalSharedServer:

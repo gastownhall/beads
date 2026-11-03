@@ -1871,6 +1871,14 @@ func runMigrations(ctx context.Context, db DBConn, src migrationSource, minVersi
 			}
 		}
 
+		// Snapshot updated_at before the repair and the body can stamp it,
+		// for the frozen migrations registered in updatedAtGuards (#5981);
+		// nil and query-free for every other step.
+		stamps, err := snapshotUpdatedAtForStep(ctx, db, src, mf.version)
+		if err != nil {
+			return count, fmt.Errorf("snapshotting updated_at before migration %s: %w", mf.name, err)
+		}
+
 		if err := src.preMigrationRepair(ctx, db, mf.version); err != nil {
 			return count, fmt.Errorf("pre-repair for migration %s: %w", mf.name, err)
 		}
@@ -1879,6 +1887,11 @@ func runMigrations(ctx context.Context, db DBConn, src migrationSource, minVersi
 		start := time.Now()
 		if err := execMigrationBody(ctx, db, string(data)); err != nil {
 			return count, fmt.Errorf("migration %s: %w", mf.name, err)
+		}
+		// Restore before the cursor row and the per-step commit, so neither
+		// the step's commit nor a later pass ever records the stamped values.
+		if err := stamps.restore(ctx, db); err != nil {
+			return count, fmt.Errorf("restoring updated_at after migration %s: %w", mf.name, err)
 		}
 		sum := sha256.Sum256(data)
 		contentHash := hex.EncodeToString(sum[:])
@@ -1963,4 +1976,58 @@ func commitMigrationStep(ctx context.Context, db DBConn, cursorTable, migrationN
 		}
 	}
 	return nil
+}
+
+// probing with SHOW TABLES rather than INFORMATION_SCHEMA.TABLES. Dolt does not
+// push the TABLES predicate down any more than the COLUMNS one: the probe walks
+// the catalog of every database on the server. On a sql-server hosting 28
+// databases the INFORMATION_SCHEMA read costs 25-30 ms against 0.6 ms for the
+// listing (dolt 2.1.8), and the open path asks a dozen times per bd write.
+//
+// It reads the unfiltered listing and compares names case-insensitively, which
+// is what the INFORMATION_SCHEMA count it replaced answers: Dolt resolves and
+// counts table names case-insensitively, but its SHOW TABLES LIKE filter
+// matches case-sensitively, so a filtered probe would read a table stored as
+// BD_EVENTS_SEQ as absent. The comparison is otherwise exact; without a LIKE
+// pattern, '_' wildcards cannot match a lookalike either.
+//
+// Unlike the INFORMATION_SCHEMA count, SHOW TABLES errors when no database is
+// selected or the selected one was dropped, so it is only for callers already
+// on the target database (the updated_at migration guard runs on the pinned
+// migration connection). table is a migration-series constant, never user
+// input.
+//
+// Hotfix-line note: on main this helper came with #7596, which also moved the
+// open path's table probes onto it; only the helper is carried here, for the
+// updated_at guard (#8080).
+func showTableExists(ctx context.Context, db DBConn, table string) (bool, error) {
+	rows, err := db.QueryContext(ctx, "SHOW TABLES")
+	if err != nil {
+		return false, fmt.Errorf("checking table %s: %w", table, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	cols, err := rows.Columns()
+	if err != nil {
+		return false, fmt.Errorf("checking table %s: %w", table, err)
+	}
+	// SHOW TABLES returns Tables_in_<db> (plus Table_type on SHOW FULL TABLES
+	// and on some servers); the first column is the table name.
+	cells := make([]sql.RawBytes, len(cols))
+	dest := make([]any, len(cols))
+	for i := range cells {
+		dest[i] = &cells[i]
+	}
+	for rows.Next() {
+		if err := rows.Scan(dest...); err != nil {
+			return false, fmt.Errorf("checking table %s: %w", table, err)
+		}
+		if len(cells) > 0 && strings.EqualFold(string(cells[0]), table) {
+			return true, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, fmt.Errorf("checking table %s: %w", table, err)
+	}
+	return false, nil
 }

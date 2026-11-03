@@ -10,6 +10,7 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/doltremote"
+	"github.com/steveyegge/beads/internal/remotecache"
 )
 
 // resolveSyncRemote returns the effective sync remote URL.
@@ -22,6 +23,39 @@ func resolveSyncRemote() string {
 		return v
 	}
 	return config.GetString("sync.git-remote")
+}
+
+// resolveSyncRemoteChecked is resolveSyncRemote for paths that hand the value
+// to git or dolt: a committed config.yaml can set it, so a value git would
+// parse as an option is refused, naming the key that set it.
+func resolveSyncRemoteChecked() (string, error) {
+	key := "sync.remote"
+	v := config.GetString(key)
+	if v == "" {
+		key = "sync.git-remote"
+		v = config.GetString(key)
+	}
+	if err := checkRemoteNotOption(key, v); err != nil {
+		return "", err
+	}
+	return v, nil
+}
+
+// checkRemoteNotOption rejects a remote URL that a program it reaches would
+// read as an option (remotecache.OptionShapedPart): one that begins with
+// "-", including after a "git+" scheme prefix, which git and dolt would read
+// as an option (e.g. --upload-pack=<command> or -u<command>), and an ssh://
+// URL whose user name or host begins with "-", which Dolt's ssh transport
+// hands to ssh as an option (e.g. -oProxyCommand=<command>).
+func checkRemoteNotOption(source, remote string) error {
+	switch part := remotecache.OptionShapedPart(remote); part {
+	case "":
+		return nil
+	case remotecache.OptionShapedURL:
+		return fmt.Errorf("%s %q is not a valid remote URL: it must not start with '-'", source, redactRemoteURL(remote))
+	default:
+		return fmt.Errorf("%s %q is not a valid remote URL: its %s must not start with '-'", source, redactRemoteURL(remote), part)
+	}
 }
 
 // resolveSyncRemoteFromDir is like resolveSyncRemote but reads from a

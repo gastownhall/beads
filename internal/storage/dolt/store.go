@@ -359,6 +359,10 @@ type DoltStore struct {
 	// auto-start. Close() uses it to stop the server when the last store
 	// referencing it is closed (tracked via autoStartRefs).
 	autoStartedServerDir string
+
+	// createdDatabase reports whether this store's open created its database
+	// (serverConnFacts.created); see CreatedDatabase.
+	createdDatabase bool
 }
 
 // Config holds Dolt database configuration
@@ -2087,6 +2091,7 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		serverMode:             true,
 		readOnly:               cfg.ReadOnly,
 		autoStartedServerDir:   autoStartedDir,
+		createdDatabase:        dbFacts.created,
 	}
 
 	// Forward-drift guard runs on read-only AND writable opens. A binary older
@@ -3204,6 +3209,19 @@ func (s *DoltStore) IsReadOnly() bool {
 	return s.readOnly
 }
 
+// CreatedDatabase reports whether opening this store created its database
+// on the server: its bare CREATE DATABASE won the server's arbitration
+// (serverConnFacts.created), so the database holds nothing bd did not just
+// put there. It is false for every open that found the database on the
+// server, by connecting to it, by SHOW DATABASES, or by losing the CREATE
+// DATABASE race to another open, and for a gateway server, on which bd never
+// creates a database. bd doctor --fix's Database repair imports issues.jsonl
+// into a database its own open created, and into one a local directory's
+// absence merely suggested was missing only when that has no issues.
+func (s *DoltStore) CreatedDatabase() bool {
+	return s.createdDatabase
+}
+
 // CLIDir returns the directory for dolt CLI operations (push/pull/remote/fetch).
 // The actual database lives in a subdirectory of Path() named after the database.
 // Use this instead of Path() when running dolt CLI commands that target the
@@ -3294,13 +3312,13 @@ func (s *DoltStore) Flatten(ctx context.Context) error {
 
 // Compact squashes old Dolt commits while preserving recent ones.
 // Pins a single connection for session-scoped stored procedures.
-func (s *DoltStore) Compact(ctx context.Context, initialHash, boundaryHash string, oldCommits int, recentHashes []string) error {
+func (s *DoltStore) Compact(ctx context.Context, initialHash, boundaryHash, headHash string, oldCommits int, recentHashes []string) error {
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
 		return fmt.Errorf("acquire connection for compact: %w", err)
 	}
 	defer conn.Close()
-	return versioncontrolops.Compact(ctx, conn, initialHash, boundaryHash, oldCommits, recentHashes)
+	return versioncontrolops.Compact(ctx, conn, initialHash, boundaryHash, headHash, oldCommits, recentHashes)
 }
 
 // UnderlyingDB returns the underlying *sql.DB connection

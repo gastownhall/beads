@@ -109,10 +109,12 @@ database after a restart, with a healthy database on the same server as the
 control. A restart re-rolls the dice for every database, though, so the
 durable fix is to move to the pinned version.
 
-This matters because `bd flatten` and the Dolt-history compaction in
-`bd admin compact` both finish by hard-resetting `main` onto a temporary
-branch, and the merge-settle path behind `bd dolt pull` / `bd sync` falls
-back to a hard reset when it has to abandon a merge. See
+This matters because `bd flatten` finishes by hard-resetting `main` onto a
+temporary branch, and the merge-settle path behind `bd dolt pull` / `bd sync`
+falls back to a hard reset when it has to abandon a merge. The Dolt-history
+compaction, `bd compact`, also hard-resets `main` in v1.3.2 and earlier;
+builds with the fix listed in the CHANGELOG move `main` with a soft reset,
+which this breakage does not affect. See
 [Maintenance](#maintenance--bd-prune-and-bd-purge).
 
 ### New Project
@@ -244,14 +246,30 @@ transient. For full Dolt storage reclaim after deleting many rows, follow
 with `bd flatten`.
 
 **On Dolt 2.3.x, storage-reclaim operations can fail partway.** `bd flatten`
-and the Dolt-history compaction in `bd admin compact` both build a temporary
-branch and then hard-reset `main` onto it, and the merge-settle path behind
-`bd dolt pull` / `bd sync` falls back to a hard reset when it abandons a
-merge. On an affected database that hard reset returns
-`Error 1105 (HY000): context canceled`: `bd flatten` and `bd admin compact`
-stop at that step, and an abandoned merge is left without its rollback. See
-[Which Dolt version to install](#which-dolt-version-to-install) for the check
-and the fix.
+builds a temporary branch and then hard-resets `main` onto it, as does the
+Dolt-history compaction, `bd compact`, in v1.3.2 and earlier, and the
+merge-settle path behind `bd dolt pull` / `bd sync` falls back to a hard reset
+when it abandons a merge. On an affected database that hard reset returns
+`Error 1105 (HY000): context canceled`: `bd flatten` and those `bd compact`
+releases stop at that step, and an abandoned merge is left without its
+rollback. See [Which Dolt version to install](#which-dolt-version-to-install)
+for the check and the fix.
+
+**Writes that reach `main` while `bd compact` runs.** In v1.3.2 and earlier,
+`bd compact`'s hard reset discards them: changes in `main`'s working set that
+no Dolt commit holds yet (a batch under batched or disabled auto-commit), and
+a commit that lands on `main` while the history is being rebuilt. Builds with
+the fix listed in the CHANGELOG move `main` with a soft reset and keep both.
+The check that the rebuilt history reproduces `main`'s data compares it with
+`main` as `bd compact` read it, so such a write is not mistaken for a divergent
+replay. Working-set changes stay pending, as they were. A commit that landed during
+the rebuild is kept in one follow-up commit,
+`compact: commit changes that reached main during compaction`, so it does not
+keep its own hash, message or author on `main`; changes that were already
+staged when `bd compact` started go into that commit too. If that follow-up
+commit fails, `bd compact` stops after `main` has moved and before garbage
+collection, says so, and leaves the changes staged: commit them with
+`bd dolt commit` when you are ready.
 
 ### Why a garbage collection can reclaim nothing
 

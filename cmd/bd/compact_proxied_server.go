@@ -52,32 +52,15 @@ func runCompactProxiedServer(ctx context.Context) error {
 
 	cutoff := time.Now().AddDate(0, 0, -compactDoltDays)
 
-	var oldCommits int
-	var recentHashes []string
-	for _, entry := range logEntries {
-		if entry.Date.Before(cutoff) {
-			oldCommits++
-		} else {
-			recentHashes = append(recentHashes, entry.Hash)
-		}
-	}
-	initialHash := logEntries[totalCommits-1].Hash
-	boundaryHash := ""
-	for _, entry := range logEntries {
-		if entry.Date.Before(cutoff) {
-			boundaryHash = entry.Hash
-			break
-		}
-	}
+	plan := planCompaction(logEntries, cutoff)
+	oldCommits, recentHashes := plan.oldCommits, plan.recentHashes
+	initialHash, boundaryHash := plan.initialHash, plan.boundaryHash
 
-	for i, j := 0, len(recentHashes)-1; i < j; i, j = i+1, j-1 {
-		recentHashes[i], recentHashes[j] = recentHashes[j], recentHashes[i]
-	}
 	recentCommits := len(recentHashes)
 
 	if compactDoltDryRun {
 		if jsonOutput {
-			return outputJSON(map[string]interface{}{
+			result := map[string]interface{}{
 				"dry_run":        true,
 				"total_commits":  totalCommits,
 				"old_commits":    oldCommits,
@@ -86,7 +69,11 @@ func runCompactProxiedServer(ctx context.Context) error {
 				"cutoff_date":    cutoff.Format("2006-01-02"),
 				"initial_hash":   initialHash,
 				"boundary_hash":  boundaryHash,
-			})
+			}
+			if plan.refusal != nil {
+				result["refusal"] = plan.refusal.jsonFields()
+			}
+			return outputJSON(result)
 		}
 		fmt.Printf("DRY RUN — Compact preview\n\n")
 		fmt.Printf("  Total commits:  %d\n", totalCommits)
@@ -95,6 +82,9 @@ func runCompactProxiedServer(ctx context.Context) error {
 		fmt.Printf("  Cutoff date:    %s\n", cutoff.Format("2006-01-02"))
 		if oldCommits <= 1 {
 			fmt.Printf("\n  Nothing to compact (0-1 old commits).\n")
+		} else if plan.refusal != nil {
+			fmt.Printf("\n  Refused: %s\n", plan.refusal.message())
+			fmt.Printf("  Hint: %s\n", compactRefusalHint)
 		} else {
 			fmt.Printf("\n  Result: %d commits → %d commits\n", totalCommits, recentCommits+1)
 			fmt.Printf("  Run with --force to proceed.\n")
@@ -119,6 +109,11 @@ func runCompactProxiedServer(ctx context.Context) error {
 		return HandleError("could not find boundary commit for compaction")
 	}
 
+	// --force confirms the squash; it does not override a refusal.
+	if plan.refusal != nil {
+		return HandleErrorWithHint(plan.refusal.message(), compactRefusalHint)
+	}
+
 	if !compactDoltForce {
 		return HandleErrorWithHint(
 			fmt.Sprintf("would squash %d old commits into 1, preserving %d recent commits",
@@ -133,7 +128,7 @@ func runCompactProxiedServer(ctx context.Context) error {
 
 	var pruned, tags []string
 	if err := runProxiedNonTx(ctx, func(ctx context.Context, conn *sql.Conn) error {
-		if err := versioncontrolops.Compact(ctx, conn, initialHash, boundaryHash, oldCommits, recentHashes); err != nil {
+		if err := versioncontrolops.Compact(ctx, conn, initialHash, boundaryHash, plan.headHash, oldCommits, recentHashes); err != nil {
 			return err
 		}
 		var perr error

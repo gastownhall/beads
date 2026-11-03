@@ -13,6 +13,26 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// CommandSettingKeys names configuration keys whose values bd executes. They
+// must be supplied from user-global YAML or shell environment variables, never
+// from project .beads/config.yaml or replicated database settings.
+var CommandSettingKeys = []string{
+	"mail.delegate",
+}
+
+// IsCommandSettingKey reports whether key names an executable command setting
+// (matched case-insensitively and normalizing underscores/hyphens to dots).
+func IsCommandSettingKey(key string) bool {
+	replacer := strings.NewReplacer("_", ".", "-", ".")
+	norm := replacer.Replace(strings.ToLower(strings.TrimSpace(key)))
+	for _, k := range CommandSettingKeys {
+		if norm == replacer.Replace(strings.ToLower(k)) {
+			return true
+		}
+	}
+	return false
+}
+
 // YamlOnlyKeys are configuration keys that must be stored in config.yaml
 // rather than the database. These are "startup" settings that are
 // read before the database is opened.
@@ -21,6 +41,7 @@ import (
 // appeared to succeed but had no effect (because no-db is read from yaml
 // at startup, not from the database).
 var YamlOnlyKeys = map[string]bool{
+	"mail.delegate": true,
 	// Bootstrap flags (affect how bd starts)
 	"no-db": true,
 	"json":  true,
@@ -301,7 +322,10 @@ var userGlobalKeyPrefixes = []string{"metrics."}
 // happening while the operator believes they are protected. Routing the write
 // to ~/.config/bd/config.yaml keeps it per-machine; viper still merges that
 // file, so config.NodeID() reads it back.
-var userGlobalExactKeys = map[string]bool{"node_id": true}
+var userGlobalExactKeys = map[string]bool{
+	"mail.delegate": true,
+	"node_id":       true,
+}
 
 func IsUserGlobalKey(key string) bool {
 	if userGlobalExactKeys[key] {
