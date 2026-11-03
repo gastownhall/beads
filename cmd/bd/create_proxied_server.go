@@ -144,6 +144,12 @@ func runCreateProxiedSingle(_ *cobra.Command, ctx context.Context, in createInpu
 		if errors.Is(err, storage.ErrAlreadyExists) && in.explicitID != "" {
 			return HandleErrorRespectJSON("%s already exists; use bd update, or bd import for upsert semantics", in.explicitID)
 		}
+		// This route has no explicit-ID prefix precheck, so the role's
+		// refusal is the one the caller sees; name the override the way the
+		// direct route does (GH#7965).
+		if errors.Is(err, storage.ErrPrefixMismatch) {
+			return HandleErrorRespectJSON("%s", createRefusalText(err))
+		}
 		return HandleError("%v", err)
 	}
 	// Every post-write read comes from the contract's result snapshot: the

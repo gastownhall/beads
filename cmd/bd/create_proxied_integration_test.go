@@ -91,6 +91,60 @@ func TestProxiedServerCreate(t *testing.T) {
 			}
 		}
 	})
+
+	// GH#7965: this route has no explicit-ID prefix precheck of its own, so the
+	// role's refusal is what the caller sees, and it must name the override in
+	// both output modes and leave nothing behind.
+	t.Run("foreign_prefix_id_names_force", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "walkthrough")
+		db := openProxiedDB(t, p)
+		assertNoRow := func(t *testing.T, label string) {
+			t.Helper()
+			for _, table := range []string{"issues", "wisps"} {
+				var count int
+				if err := db.QueryRowContext(context.Background(),
+					"SELECT COUNT(*) FROM "+table+" WHERE id = ?", "export-work").Scan(&count); err != nil {
+					t.Fatalf("count %s rows: %v", table, err)
+				}
+				if count != 0 {
+					t.Errorf("%s holds %d export-work rows %s, want none", table, count, label)
+				}
+			}
+		}
+
+		stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "create", "Add CSV export", "--id", "export-work")
+		if err == nil {
+			t.Fatalf("text-mode create at a foreign --id should have refused\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+		}
+		if !strings.Contains(stderr, "prefix mismatch") || !strings.Contains(stderr, "--force") {
+			t.Errorf("text-mode stderr = %q, want the prefix refusal naming --force", stderr)
+		}
+		if stdout != "" {
+			t.Errorf("text-mode stdout = %q, want empty on a refused create", stdout)
+		}
+		assertNoRow(t, "after the text-mode refusal")
+
+		stdout, stderr, err = bdProxiedRunBuffers(t, bd, p.dir, "create", "Add CSV export", "--id", "export-work", "--json")
+		if err == nil {
+			t.Fatalf("JSON-mode create at a foreign --id should have refused\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+		}
+		var refusal struct {
+			Error string `json:"error"`
+		}
+		if jerr := json.Unmarshal([]byte(stdout), &refusal); jerr != nil {
+			t.Fatalf("JSON-mode stdout is not an error object: %v\nstdout:\n%s\nstderr:\n%s", jerr, stdout, stderr)
+		}
+		if !strings.Contains(refusal.Error, "prefix mismatch") || !strings.Contains(refusal.Error, "--force") {
+			t.Errorf("JSON-mode error = %q, want the prefix refusal naming --force", refusal.Error)
+		}
+		assertNoRow(t, "after the JSON-mode refusal")
+
+		forced := bdProxiedCreate(t, bd, p.dir, "Add CSV export", "--id", "export-work", "--force")
+		if forced.ID != "export-work" {
+			t.Errorf("forced create ID = %q, want export-work", forced.ID)
+		}
+	})
 }
 
 func TestProxiedServerCreate2(t *testing.T) {
