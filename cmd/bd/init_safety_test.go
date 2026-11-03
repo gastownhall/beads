@@ -356,6 +356,61 @@ func TestInitReinitLocalConfiguredUnverifiedRemoteRefuses(t *testing.T) {
 	}
 }
 
+// TestInitDiscardUnverifiedRemoteRequiresToken pins that an unknown probe
+// keeps the --discard-remote safeguard for both an inferred git origin and a
+// configured remote: a non-interactive discard without the matching
+// destroy token exits ExitDestroyTokenMissing before creating a database.
+func TestInitDiscardUnverifiedRemoteRequiresToken(t *testing.T) {
+	bdBin := buildBDForInitTests(t)
+
+	cases := []struct {
+		name       string
+		configured bool
+		token      string
+	}{
+		{"origin/no-token", false, ""},
+		{"origin/wrong-token", false, "DESTROY-wrong"},
+		{"configured/no-token", true, ""},
+		{"configured/wrong-token", true, "DESTROY-wrong"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			remote := filepath.Join(t.TempDir(), "does-not-exist.git")
+			workDir := t.TempDir()
+			runGitForBootstrapTest(t, workDir, "init", "-b", "main")
+			runGitForBootstrapTest(t, workDir, "config", "core.hooksPath", ".git/hooks")
+			var env []string
+			if tc.configured {
+				env = append(env, "BD_SYNC_REMOTE="+remote)
+			} else {
+				runGitForBootstrapTest(t, workDir, "remote", "add", "origin", remote)
+			}
+			homeDir := t.TempDir()
+
+			args := []string{"init", "--reinit-local", "--discard-remote", "--prefix", "dsc", "--quiet", "--non-interactive", "--skip-hooks", "--skip-agents"}
+			if tc.token != "" {
+				args = append(args, "--destroy-token="+tc.token)
+			}
+			cmd := exec.Command(bdBin, args...)
+			cmd.Dir = workDir
+			cmd.Env = hermeticInitEnv(homeDir, env...)
+			var stderr bytes.Buffer
+			cmd.Stderr = &stderr
+			err := cmd.Run()
+			exitErr, ok := err.(*exec.ExitError)
+			if !ok {
+				t.Fatalf("bd init --discard-remote without a matching token: err=%v, want exit %d\nstderr:\n%s", err, ExitDestroyTokenMissing, stderr.String())
+			}
+			if code := exitErr.ExitCode(); code != ExitDestroyTokenMissing {
+				t.Errorf("exit code = %d, want %d (ExitDestroyTokenMissing)\nstderr:\n%s", code, ExitDestroyTokenMissing, stderr.String())
+			}
+			if _, err := os.Stat(filepath.Join(workDir, ".beads", "embeddeddolt")); err == nil {
+				t.Errorf("token refusal should not have created an embedded Dolt database")
+			}
+		})
+	}
+}
+
 // TestInitExplicitUnverifiedRemoteStillClones pins that an explicit --remote
 // without --from-jsonl keeps selecting the clone: init does not probe it, so an
 // unreachable one fails the clone rather than refusing or initializing locally.
@@ -495,6 +550,98 @@ func TestCheckRemoteSafety_GuardMatrix(t *testing.T) {
 			"remote-origin/reinit-local",
 			RemoteSafetyInput{RemoteHasDoltData: true, RemoteIsGitOrigin: true, ReinitLocal: true},
 			ActionRefuseDivergence, ExitRemoteDivergenceRefused,
+		},
+		{
+			"remote-origin/force",
+			RemoteSafetyInput{RemoteHasDoltData: true, RemoteIsGitOrigin: true, Force: true},
+			ActionRefuseDivergence, ExitRemoteDivergenceRefused,
+		},
+		{
+			"remote-origin/from-jsonl",
+			RemoteSafetyInput{RemoteHasDoltData: true, RemoteIsGitOrigin: true, FromJSONL: true},
+			ActionRefuseDivergence, ExitRemoteDivergenceRefused,
+		},
+		// Unverified remote WITH discard intent, either provenance: the
+		// unknown probe neither bypasses nor weakens the discard safeguards.
+		{
+			"unknown-origin/reinit-local+discard/non-interactive/no-token",
+			RemoteSafetyInput{
+				RemoteHasDoltData: true, RemoteProbeUnknown: true, RemoteIsGitOrigin: true,
+				ReinitLocal: true, DiscardRemote: true, ExpectedToken: "DESTROY-bd",
+			},
+			ActionRequireDestroyToken, ExitDestroyTokenMissing,
+		},
+		{
+			"unknown-origin/reinit-local+discard/non-interactive/wrong-token",
+			RemoteSafetyInput{
+				RemoteHasDoltData: true, RemoteProbeUnknown: true, RemoteIsGitOrigin: true,
+				ReinitLocal: true, DiscardRemote: true, DestroyToken: "DESTROY-wrong", ExpectedToken: "DESTROY-bd",
+			},
+			ActionRequireDestroyToken, ExitDestroyTokenMissing,
+		},
+		{
+			"unknown-origin/reinit-local+discard/non-interactive/matching-token",
+			RemoteSafetyInput{
+				RemoteHasDoltData: true, RemoteProbeUnknown: true, RemoteIsGitOrigin: true,
+				ReinitLocal: true, DiscardRemote: true, DestroyToken: "DESTROY-bd", ExpectedToken: "DESTROY-bd",
+			},
+			ActionProceedWithDivergence, 0,
+		},
+		{
+			"unknown-origin/discard/interactive/no-token",
+			RemoteSafetyInput{
+				RemoteHasDoltData: true, RemoteProbeUnknown: true, RemoteIsGitOrigin: true,
+				DiscardRemote: true, IsInteractive: true, ExpectedToken: "DESTROY-bd",
+			},
+			ActionProceedWithDivergence, 0,
+		},
+		{
+			"unknown-origin/discard/interactive/wrong-token",
+			RemoteSafetyInput{
+				RemoteHasDoltData: true, RemoteProbeUnknown: true, RemoteIsGitOrigin: true,
+				DiscardRemote: true, IsInteractive: true, DestroyToken: "WRONG", ExpectedToken: "DESTROY-bd",
+			},
+			ActionRequireDestroyToken, ExitDestroyTokenMissing,
+		},
+		{
+			"unknown-configured/from-jsonl+discard/non-interactive/no-token",
+			RemoteSafetyInput{
+				RemoteHasDoltData: true, RemoteProbeUnknown: true,
+				FromJSONL: true, DiscardRemote: true, ExpectedToken: "DESTROY-bd",
+			},
+			ActionRequireDestroyToken, ExitDestroyTokenMissing,
+		},
+		{
+			"unknown-configured/force+discard/non-interactive/wrong-token",
+			RemoteSafetyInput{
+				RemoteHasDoltData: true, RemoteProbeUnknown: true,
+				Force: true, DiscardRemote: true, DestroyToken: "DESTROY-wrong", ExpectedToken: "DESTROY-bd",
+			},
+			ActionRequireDestroyToken, ExitDestroyTokenMissing,
+		},
+		{
+			"unknown-configured/force+discard/non-interactive/matching-token",
+			RemoteSafetyInput{
+				RemoteHasDoltData: true, RemoteProbeUnknown: true,
+				Force: true, DiscardRemote: true, DestroyToken: "DESTROY-bd", ExpectedToken: "DESTROY-bd",
+			},
+			ActionProceedWithDivergence, 0,
+		},
+		{
+			"unknown-configured/discard/interactive/no-token",
+			RemoteSafetyInput{
+				RemoteHasDoltData: true, RemoteProbeUnknown: true,
+				DiscardRemote: true, IsInteractive: true, ExpectedToken: "DESTROY-bd",
+			},
+			ActionProceedWithDivergence, 0,
+		},
+		{
+			"unknown-configured/discard/interactive/wrong-token",
+			RemoteSafetyInput{
+				RemoteHasDoltData: true, RemoteProbeUnknown: true,
+				DiscardRemote: true, IsInteractive: true, DestroyToken: "WRONG", ExpectedToken: "DESTROY-bd",
+			},
+			ActionRequireDestroyToken, ExitDestroyTokenMissing,
 		},
 
 		// Remote-has-data, user forced WITH discard-remote, non-interactive,
