@@ -852,6 +852,10 @@ func TestProxiedServerReady2(t *testing.T) {
 				bdProxiedCreate(t, bd, p.dir, fmt.Sprintf("Claim under cap %d", i), "--label", label)
 			}
 
+			before := bdProxiedReadyJSON(t, bd, p, "--label", label)
+			if len(before) != 3 {
+				t.Fatalf("%s: %d issues ready before the claim, want 3", tc.name, len(before))
+			}
 			args := append([]string{"ready", "--claim", "--json", "--label", label}, tc.args...)
 			stdout, stderr, err := bdProxiedRunBuffersWithEnv(t, bd, p.dir, tc.env, args...)
 			if err != nil {
@@ -864,8 +868,8 @@ func TestProxiedServerReady2(t *testing.T) {
 			if len(claimed) != 1 || claimed[0].Status != types.StatusInProgress {
 				t.Fatalf("%s: claimed = %+v, want exactly one in_progress issue", tc.name, claimed)
 			}
-			if left := bdProxiedReadyJSON(t, bd, p, "--label", label); len(left) != 2 {
-				t.Fatalf("%s: %d issues still ready after one claim, want 2", tc.name, len(left))
+			if left := bdProxiedReadyJSON(t, bd, p, "--label", label); len(left) != len(before)-1 {
+				t.Fatalf("%s: %d issues still ready after one claim, want %d", tc.name, len(left), len(before)-1)
 			}
 		}
 	})
