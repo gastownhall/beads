@@ -8,6 +8,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -856,6 +857,83 @@ func TestApplyResolvedConfigMetadataSocket(t *testing.T) {
 	}
 	if cfg.ServerSocket != "/metadata/dolt.sock" {
 		t.Fatalf("ServerSocket = %q, want metadata.json's /metadata/dolt.sock", cfg.ServerSocket)
+	}
+}
+
+// TestConfigOpenWithMetadataSocketDoesNotAutoStart pins that a resolved
+// config whose metadata.json names an unavailable socket fails the
+// newServerMode open on the socket, without invoking auto-start, even with
+// auto-start otherwise permitted. The socket must reach the config first:
+// dropped, the open fell through to TCP at an unresolved port, where the
+// auto-start branch (ensureRunningDetailed) could start a second server
+// with an empty database (bd-1yc9q0).
+func TestConfigOpenWithMetadataSocketDoesNotAutoStart(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix socket fixture")
+	}
+	// BEADS_TEST_MODE disables the real circuit breaker, as baseAutoStartCfg
+	// does for the auto-start tests; no port source may resolve a port here.
+	t.Setenv("BEADS_TEST_MODE", "1")
+	for _, name := range []string{
+		"BEADS_DOLT_SERVER_SOCKET", "BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_PORT",
+		"BEADS_DOLT_SHARED_SERVER", "BEADS_DOLT_SERVER_MODE", "BEADS_DOLT_CREDENTIAL_COMMAND",
+	} {
+		t.Setenv(name, "")
+	}
+	beadsDir := t.TempDir()
+	// A socket path nothing listens on, short enough for a unix socket path.
+	sockDir, err := os.MkdirTemp("", "bds")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(sockDir) })
+	socket := filepath.Join(sockDir, "dolt.sock")
+	fileCfg := &configfile.Config{
+		Backend:          configfile.BackendDolt,
+		DoltMode:         configfile.DoltModeServer,
+		DoltDatabase:     "no_autostart",
+		DoltServerSocket: socket,
+	}
+	if err := fileCfg.Save(beadsDir); err != nil {
+		t.Fatal(err)
+	}
+
+	// The config the library open builds from metadata.
+	cfg := &Config{}
+	if err := applyResolvedConfig(context.Background(), beadsDir, fileCfg, cfg); err != nil {
+		t.Fatalf("applyResolvedConfig: %v", err)
+	}
+	if cfg.ServerSocket != socket {
+		t.Fatalf("ServerSocket = %q, want metadata.json's %s", cfg.ServerSocket, socket)
+	}
+	if cfg.ServerPort != 0 {
+		t.Fatalf("ServerPort = %d, want 0: no port source may resolve here", cfg.ServerPort)
+	}
+	// Auto-start is otherwise permitted, as baseAutoStartCfg enables it: only
+	// the socket may keep this open from starting a server.
+	cfg.AutoStart = true
+
+	autoStarts := 0
+	orig := ensureRunningDetailed
+	t.Cleanup(func() { ensureRunningDetailed = orig })
+	ensureRunningDetailed = func(string) (int, bool, error) {
+		autoStarts++
+		return 0, false, errors.New("auto-start must not run on a socket-configured open")
+	}
+
+	_, err = newServerMode(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("newServerMode succeeded against an absent socket")
+	}
+	if autoStarts != 0 {
+		t.Errorf("ensureRunningDetailed ran %d time(s); a socket-configured open must not auto-start", autoStarts)
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, socket) {
+		t.Errorf("error does not name the socket %s:\n%s", socket, msg)
+	}
+	if !strings.Contains(msg, "Auto-start is not supported in socket mode") {
+		t.Errorf("error does not give the socket-mode failure hint:\n%s", msg)
 	}
 }
 
