@@ -310,6 +310,76 @@ concurrent status updates (e.g., one agent closes a bead while another
 also updates it). Mitigation: use optimistic concurrency checks where needed
 (check expected status before update).
 
+### Guarded delete racing a comment
+
+A guarded delete (`ExpectedVersion` set, run under the per-id delete fence)
+and an `AddComment` on the same issue can overlap: each transaction reads
+the issue as present, and the delete fence orders only guarded deletes of
+that id, not comments. This section records what that race does today and
+what a fix needs. **The defect is unresolved:** these tests only
+characterize it.
+
+**Reproduction.** Two tests hold one side (the loser) at its first commit
+point, after it has read and written everything, then run the other side
+(the winner) to completion and release the loser. They run both orders,
+both commit styles (an in-body `DOLT_COMMIT` by default; a plain SQL
+`COMMIT` with the version commit deferred), and both server paths: the
+direct store and the unit-of-work path that proxied mode and `bd serve` use.
+The journal is off, `foreign_key_checks=1` and
+`dolt_force_transaction_commit=0`, read from the session that commits. Each
+case logs one `delete-comment race evidence:` JSON line, and each test ends
+with a coverage line naming what it did not run.
+
+```bash
+bazel-test //internal/storage/dolt:dolt_test --test_filter='^TestGuardedDeleteCommentRaceCharacterization$' --test_env=BEADS_TEST_SKIP= --test_env=BEADS_TEST_DOLT_SERVER=local --test_env=BEADS_TEST_REQUIRE_DOLT_CONTAINER=1
+bazel-test //internal/storage/uow:uow_test --test_filter='^TestUOWDeleteCommentRaceCharacterization$' --test_env=BEADS_TEST_SKIP= --test_env=BEADS_TEST_DOLT_SERVER=local --test_env=BEADS_TEST_REQUIRE_DOLT_CONTAINER=1
+```
+
+By default the tests pass by asserting the current behavior below. To see
+the defect, append `--test_env=BEADS_TEST_EXPECT_SERIAL_DELETE_COMMENT=1`
+to either command. The journal-off cases then assert the outcome a serial
+execution gives, and they fail with the error below. This mode is a
+reproduction, not a quality gate: it is expected to fail until the
+dependency below exists.
+
+**Measured on dolt 2.6.0** (local `dolt sql-server`), the same in all four
+journal-off cases on both paths:
+
+- The released loser fails with `Error 1105 (HY000): Committing this
+  transaction resulted in a working set with constraint violations,
+  transaction rolled back. …`. On the direct store the error is wrapped as
+  `dolt commit: …` for an in-body delete and `commit write tx: …` otherwise.
+  It does not match `ErrNotFound`.
+- The loser gets exactly one attempt. Beads retries serialization failures
+  (1213, 1205) and the exact autocommit 1105, not this one.
+- The loser's write is rolled back and the winner's stands. A losing delete
+  leaves the issue with the winner's comment; a losing comment leaves the
+  issue deleted with no comments.
+- No comment is orphaned and `dolt_constraint_violations` is empty. The
+  orphan-row outcome reported against this race did not reproduce.
+- On the direct store the Commenter always commits with a plain SQL `COMMIT`
+  and mints its version commit afterwards, so "comment loses under an
+  in-body `DOLT_COMMIT`" cannot run there. On the unit-of-work path every
+  combination runs.
+
+Two controls in each test pass in either mode. With the events journal on,
+the loser's first attempt fails with an error beads already retries; the
+retry gives the serial outcome. With no overlap (winner, then loser), the
+outcome is serial by construction. In both, a losing delete succeeds and
+removes the issue and its comment, and a losing comment is refused with
+`ErrNotFound`.
+
+**Dependency.** A fix needs the server to report this commit-time
+sequencing loss as a rollback-guaranteed serialization error, preferably
+MySQL 1213, on the server transport, for both an ordinary `COMMIT` and an
+in-body `DOLT_COMMIT`. It must also keep that error distinct from a
+persisted or transaction-local constraint violation, which stays permanent.
+Beads would then replay the whole transaction through its existing retry
+path, and the serial-outcome assertions would become the default ones. No
+Dolt release that meets this contract has been identified. The follow-up
+fix is gated on identifying one and proving it on both server commit paths;
+until then, the hard failure stays.
+
 ## Migration Strategy
 
 ### Phase 1: Add Transaction Discipline (Non-Breaking)
