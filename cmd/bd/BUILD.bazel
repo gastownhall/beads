@@ -810,6 +810,8 @@ go_test(
         "events_truncation_cli_test.go",
         "events_watch_http_e2e_test.go",
         "explicit_db_nodb_test.go",
+        "export_auto_embedded_test.go",
+        "export_auto_empty_throttle_test.go",
         "export_auto_max_rows_gate_test.go",
         "export_auto_missing_store_test.go",
         "export_auto_test.go",
