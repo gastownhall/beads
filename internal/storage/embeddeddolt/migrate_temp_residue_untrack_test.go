@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
+	"github.com/steveyegge/beads/internal/storage/schema"
 )
 
 // These tests cover gastownhall/beads#7073 against the real engine: a lineage
@@ -295,4 +296,76 @@ func TestTempResidueRenamedStoreConvergesOnOpen(t *testing.T) {
 			t.Errorf("%s is tracked at HEAD again after the pull", tempResidueTable)
 		}
 	})
+}
+
+// TestTempResidueUntrackKeepsRowsForTheirOwner covers an intermediate whose
+// working rows are still owed to the operation that made it: an older
+// binary's 0062 committed __temp__events_flip at HEAD after Phase 1 and died,
+// so the copy holds an audit row the events table no longer has. Untracking
+// must leave that copy for 0062's replay to restore, not drop it, and the
+// pass must end with the intermediate gone from HEAD and the working set.
+func TestTempResidueUntrackKeepsRowsForTheirOwner(t *testing.T) {
+	ctx := t.Context()
+	const flip = "__temp__events_flip"
+
+	dataDir := seedMainSchemaAt(t, ctx, 61)
+	conn, closeConn := openPinnedConn(t, ctx, dataDir)
+	defer closeConn()
+
+	mustExecOn(t, ctx, conn, `INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type)
+VALUES ('flip-1', 'flip seed', '', '', '', '', 'open', 2, 'task')`)
+	mustExecOn(t, ctx, conn, `INSERT INTO events (issue_id, event_type, actor, created_at, id)
+VALUES ('flip-1', 'created', 'tester', '2026-07-30 00:00:00', 'evt-live')`)
+	mustExecOn(t, ctx, conn, `CREATE TABLE `+flip+` (
+    issue_id VARCHAR(255) NOT NULL,
+    event_type VARCHAR(32) NOT NULL,
+    actor VARCHAR(255) NOT NULL,
+    old_value LONGTEXT,
+    new_value LONGTEXT,
+    comment TEXT,
+    created_at DATETIME NOT NULL,
+    id CHAR(36) NOT NULL,
+    PRIMARY KEY (id)
+)`)
+	mustExecOn(t, ctx, conn, `INSERT INTO `+flip+` (issue_id, event_type, actor, created_at, id)
+VALUES ('flip-1', 'created', 'tester', '2026-07-30 00:00:00', 'evt-live'),
+       ('flip-1', 'updated', 'tester', '2026-07-30 00:00:01', 'evt-only-in-flip')`)
+	mustExecOn(t, ctx, conn, "CALL DOLT_ADD('-f', '-A')")
+	mustExecOn(t, ctx, conn, "CALL DOLT_COMMIT('-m', 'older binary: auto-commit mid 0062')")
+	if !trackedAtHead(t, ctx, conn, flip) {
+		t.Fatalf("%s is not tracked at HEAD; the residue is not reproduced", flip)
+	}
+
+	if _, err := schema.MigrateUp(ctx, conn); err != nil {
+		t.Fatalf("MigrateUp: %v", err)
+	}
+
+	if trackedAtHead(t, ctx, conn, flip) {
+		t.Errorf("%s is still tracked at HEAD after MigrateUp", flip)
+	}
+	if tablePresent(t, ctx, conn, flip) {
+		t.Errorf("%s is still in the working set; 0062 owns its cleanup", flip)
+	}
+	if got := statusOf(t, ctx, conn, "__temp__"); len(got) > 0 {
+		t.Errorf("dolt_status still carries %v after MigrateUp", got)
+	}
+	var ids []string
+	rows, err := conn.QueryContext(ctx, "SELECT id FROM events ORDER BY id")
+	if err != nil {
+		t.Fatalf("reading events: %v", err)
+	}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			t.Fatalf("reading events: %v", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("reading events: %v", err)
+	}
+	_ = rows.Close()
+	if got, want := strings.Join(ids, ","), "evt-live,evt-only-in-flip"; got != want {
+		t.Errorf("events after MigrateUp = %s, want %s (the copy's rows restored by 0062)", got, want)
+	}
 }
