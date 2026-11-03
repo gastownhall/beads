@@ -796,6 +796,24 @@ func TestProxiedServerReady2(t *testing.T) {
 			}
 		}
 
+		// A page exactly at the cap answers with the uncapped page's bytes:
+		// same rows, same pagination metadata. The probe row that detects
+		// "more matched" runs inside the cap SearchProbeLimit bumps with it
+		// at limit == cap, so it never trips the cap it was sized for.
+		wantPage, _, err := bdProxiedRunBuffersWithEnv(t, bd, p.dir, nil,
+			"ready", "--json", "--label", "rcmr-claim", "--limit", "2")
+		if err != nil {
+			t.Fatalf("uncapped --limit 2 page failed: %v", err)
+		}
+		gotPage, stderr, err := bdProxiedRunBuffersWithEnv(t, bd, p.dir, nil,
+			"ready", "--json", "--label", "rcmr-claim", "--limit", "2", "--max-rows", "2")
+		if err != nil {
+			t.Fatalf("expected success with --limit 2 --max-rows 2 over 3 issues: %v\nstderr:\n%s", err, stderr)
+		}
+		if gotPage != wantPage {
+			t.Errorf("page at the cap differs from the uncapped page:\nat cap:\n%s\nuncapped:\n%s", gotPage, wantPage)
+		}
+
 		// A claim under a cap smaller than the ready set succeeds and claims
 		// exactly one eligible issue, as it always has on a direct workspace:
 		// a claim takes one row and claimNextRequest carries no cap.
