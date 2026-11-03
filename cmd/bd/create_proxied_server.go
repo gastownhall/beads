@@ -144,6 +144,11 @@ func runCreateProxiedSingle(_ *cobra.Command, ctx context.Context, in createInpu
 		if errors.Is(err, storage.ErrAlreadyExists) && in.explicitID != "" {
 			return HandleErrorRespectJSON("%s already exists; use bd update, or bd import for upsert semantics", in.explicitID)
 		}
+		// A prefix mismatch is the one refusal with an override the caller can
+		// re-offer, so the rendered text names it in both output modes.
+		if errors.Is(err, storage.ErrPrefixMismatch) {
+			return HandleErrorRespectJSON("%s", createRefusalText(err))
+		}
 		return HandleError("%v", err)
 	}
 	// Every post-write read comes from the contract's result snapshot: the

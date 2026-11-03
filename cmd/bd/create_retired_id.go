@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/issueops"
 )
 
@@ -45,4 +46,16 @@ func reportCreateOfRetiredID(err error) (handled bool, rendered error) {
 		return true, &exitError{Code: 1}
 	}
 	return true, HandleError("%s", message)
+}
+
+// createRefusalText renders a create refusal, naming the override a prefix
+// mismatch earns. Both local front doors decide whether to re-offer the
+// create with --force from errors.Is rather than from the message, but a
+// caller reading only the rendered text cannot act on a bare "prefix
+// mismatch" — so the one refusal that has an override says so.
+func createRefusalText(err error) string {
+	if errors.Is(err, storage.ErrPrefixMismatch) {
+		return err.Error() + " (use --force to override)"
+	}
+	return err.Error()
 }

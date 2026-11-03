@@ -91,6 +91,47 @@ func TestProxiedServerCreate(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("foreign_prefix_refusal_names_force", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "walkthrough")
+
+		// Text mode: the refusal is nonzero and names the override the caller
+		// can re-offer the create with.
+		out := bdProxiedCreateFail(t, bd, p.dir, "X", "--id", "export-work")
+		if !strings.Contains(out, "export-work") {
+			t.Errorf("text-mode refusal = %q, want it to name the refused id export-work", out)
+		}
+		if !strings.Contains(out, "--force") {
+			t.Errorf("text-mode refusal = %q, want it to name --force", out)
+		}
+
+		// JSON mode: the error object carries the same hint, so an agent
+		// parsing stdout learns the override too.
+		stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "create", "--json", "--id", "export-work", "X")
+		if err == nil {
+			t.Fatalf("JSON create at the foreign prefix exited 0; stdout:\n%s", stdout)
+		}
+		if !strings.Contains(stdout, "--force") {
+			t.Errorf("JSON-mode refusal stdout = %q, want the error object to name --force; stderr = %q", stdout, stderr)
+		}
+
+		// Neither refusal left a row behind.
+		db := openProxiedDB(t, p)
+		var count int
+		if err := db.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM issues WHERE id = ?", "export-work").Scan(&count); err != nil {
+			t.Fatalf("count rows at the refused id: %v", err)
+		}
+		if count != 0 {
+			t.Errorf("issues holds %d rows at export-work after the refusals, want none", count)
+		}
+
+		// The hint is actionable: the same create with --force lands.
+		forced := bdProxiedCreate(t, bd, p.dir, "X", "--id", "export-work", "--force")
+		if forced.ID != "export-work" {
+			t.Fatalf("forced create = %+v, want the requested id export-work", forced)
+		}
+	})
 }
 
 func TestProxiedServerCreate2(t *testing.T) {
