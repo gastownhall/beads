@@ -625,3 +625,22 @@ func TestReadyClaimIgnoresMaxRowsUnderProxiedServer(t *testing.T) {
 		})
 	}
 }
+
+// TestReproBd7fnvhpProxiedMaxRowsHonored asserts the expected behaviour from
+// bd-7fnvhp (PR #7408): under --proxied-server, a positive BEADS_MAX_ROWS cap is
+// honored by `bd ready`, `bd graph` and `bd find-duplicates` (as `bd list` and
+// `bd dep tree` already do), so the pre-provider front door must not refuse it.
+func TestReproBd7fnvhpProxiedMaxRowsHonored(t *testing.T) {
+	pinJSONOutput(t, false)
+	for _, path := range []string{"ready", "graph", "find-duplicates"} {
+		t.Run(path, func(t *testing.T) {
+			t.Setenv(maxRowsEnvVar, "5")
+			cmd := realCommandAtPath(t, path)
+			var err error
+			stderr := captureStderr(t, func() { err = validateProxyCapabilitiesBeforeProvider(cmd) })
+			if err != nil {
+				t.Fatalf("proxied `bd %s` with %s=5 was refused before the provider: %v (stderr=%q)", path, maxRowsEnvVar, err, stderr)
+			}
+		})
+	}
+}
