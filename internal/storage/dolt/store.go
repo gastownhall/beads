@@ -48,6 +48,7 @@ import (
 	"github.com/steveyegge/beads/internal/gittraceenv"
 	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/kvkeys"
@@ -2406,9 +2407,10 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	// This must run BEFORE store.initSchema below: initSchema runs migrations
 	// and Dolt commits against the database, so verifying first means a
 	// foreign existing database is rejected before bd writes anything into
-	// it, not after. On a database with no bd schema yet, GetMetadata errors
-	// and the verifier soft-skips, so this ordering does not change behavior
-	// for a genuinely fresh database.
+	// it, not after. On a database with no bd schema yet, GetMetadata fails
+	// on the missing metadata table and the verifier soft-skips, so this
+	// ordering does not change behavior for a genuinely fresh database; any
+	// other failure to read _project_id refuses the open.
 	//
 	// Gateway is effectively excluded from the alreadyExisted branch because
 	// openServerConnection never probes existence for it (see the Gateway
@@ -2696,7 +2698,9 @@ func shouldPersistResolvedPortFile() bool {
 
 // verifyProjectIdentity checks that the database belongs to the expected project.
 // If both the local metadata.json and the database have a project_id, they must match.
-// Returns nil if verification passes or is not applicable (missing IDs = old setup).
+// Returns nil if verification passes or is not applicable (missing IDs = old setup,
+// no metadata table = no bd schema yet). A database project_id that cannot be
+// read for any other reason refuses (projectIdentityUnreadableError).
 // openedByInit is Config.OpenedByInit: it only shapes the error's advice (see
 // projectIdentityMismatchError), never whether the check runs.
 func (s *DoltStore) verifyProjectIdentity(ctx context.Context, beadsDir string, openedByInit bool) error {
@@ -2717,9 +2721,15 @@ func (s *DoltStore) verifyProjectIdentity(ctx context.Context, beadsDir string, 
 
 	// Read project ID from database metadata table. GetMetadata already
 	// retries transient failures; an error that survives it is no proof of
-	// ownership, so it refuses rather than reading as an empty ID.
+	// ownership, so it refuses rather than reading as an empty ID. The one
+	// exception is a missing metadata table: an existing database with no bd
+	// schema yet (pre-created for bd, or found by a CREATE-race loser), which
+	// schema initialization after this check sets up.
 	dbID, err := s.GetMetadata(ctx, "_project_id")
 	if err != nil {
+		if dberrors.IsMissingTable(err, "metadata") {
+			return nil // no bd schema yet — skip
+		}
 		return projectIdentityUnreadableError(s.database, err)
 	}
 	if dbID == "" {
