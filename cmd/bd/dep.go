@@ -1560,21 +1560,43 @@ func renderTree(tree []*types.TreeNode, maxDepth int, direction string) {
 	// has a visible open blocking dependency (GH#3565). Only genuine blockers
 	// (blocks, conditional-blocks, waits-for) count; parent-child, related,
 	// discovered-from, etc. do not block. The visible check still matters for
-	// synthetic external leaves and for servers that predate the flag.
+	// synthetic external leaves and for servers that predate the flag. It reads
+	// only the down tree: an up row under the root is a dependent waiting on
+	// it, not a blocker, and a both tree lists its up half before the root.
 	if root != nil {
-		hasOpenBlockers := false
-		for _, child := range children[root.ID] {
-			if (child.Status == types.StatusOpen || child.Status == types.StatusInProgress) &&
-				child.EdgeFromParent.IsBlockingEdge() {
-				hasOpenBlockers = true
-				break
-			}
-		}
-		r.rootBlocked = root.IsBlocked || hasOpenBlockers
+		r.rootBlocked = root.IsBlocked || hasOpenDirectDownBlocker(tree, root, direction)
 	}
 
 	// Render recursively from root
 	r.renderNode(root, children, 0, true)
+}
+
+// hasOpenDirectDownBlocker reports whether root has an open direct blocking
+// dependency in the down part of tree: none in an up tree, and in a both tree
+// only the rows after the root, where MergeBidirectionalTree puts the down
+// walk.
+func hasOpenDirectDownBlocker(tree []*types.TreeNode, root *types.TreeNode, direction string) bool {
+	if direction == string(issueops.TreeUp) {
+		return false
+	}
+	down := tree
+	if direction == string(issueops.TreeBoth) {
+		down = nil
+		for i, node := range tree {
+			if node == root {
+				down = tree[i+1:]
+				break
+			}
+		}
+	}
+	for _, node := range down {
+		if node.ParentID == root.ID &&
+			(node.Status == types.StatusOpen || node.Status == types.StatusInProgress) &&
+			node.EdgeFromParent.IsBlockingEdge() {
+			return true
+		}
+	}
+	return false
 }
 
 // renderNode renders a single node and its children

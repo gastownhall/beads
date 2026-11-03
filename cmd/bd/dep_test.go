@@ -988,6 +988,72 @@ func TestRenderTreeExternalBlockerMarksRootBlocked(t *testing.T) {
 	}
 }
 
+// TestRenderTreeNeverCountsADependentAsABlocker is the direction half of the
+// root marker (#6630): an unblocked root whose up (or both) walk reaches an
+// open dependent X — root blocks X, an edge the direct-blocker scan used to
+// read backwards — stays [READY], while a real down-side blocker still marks
+// it [BLOCKED].
+func TestRenderTreeNeverCountsADependentAsABlocker(t *testing.T) {
+	rootRow := func() *types.TreeNode {
+		return &types.TreeNode{Issue: types.Issue{ID: "BD-root", Title: "Root", Status: types.StatusOpen, Priority: 1}}
+	}
+	edgeRow := func(id string) *types.TreeNode {
+		return &types.TreeNode{
+			Issue:          types.Issue{ID: id, Title: id, Status: types.StatusOpen, Priority: 2},
+			Depth:          1,
+			ParentID:       "BD-root",
+			EdgeFromParent: types.DepBlocks,
+		}
+	}
+
+	// The up walk of an unblocked root: only the dependent below it.
+	upTree := []*types.TreeNode{rootRow(), edgeRow("BD-dependent")}
+	// A down walk with a genuine blocker, for the both-direction merge.
+	blockedDownTree := []*types.TreeNode{rootRow(), edgeRow("BD-blocker")}
+
+	for _, tt := range []struct {
+		name      string
+		tree      []*types.TreeNode
+		direction string
+		want      string
+		notWant   string
+	}{
+		{
+			name:      "up walk: a dependent is not a blocker",
+			tree:      upTree,
+			direction: "up",
+			want:      "[READY]",
+			notWant:   "[BLOCKED]",
+		},
+		{
+			name: "both walk: an up-side dependent alone keeps the root ready",
+			tree: storageissueops.MergeBidirectionalTree(
+				[]*types.TreeNode{rootRow()}, upTree, "BD-root"),
+			direction: "both",
+			want:      "[READY]",
+			notWant:   "[BLOCKED]",
+		},
+		{
+			name:      "both walk: a down-side blocker still blocks beside the dependent",
+			tree:      storageissueops.MergeBidirectionalTree(blockedDownTree, upTree, "BD-root"),
+			direction: "both",
+			want:      "[BLOCKED]",
+			notWant:   "[READY]",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			text := stripANSIForTest(captureDepTreeStdout(t, func() { renderTree(tt.tree, 50, tt.direction) }))
+			rootLine := strings.Split(strings.TrimRight(text, "\n"), "\n")[0]
+			if !strings.Contains(rootLine, tt.want) {
+				t.Fatalf("root line = %q, want it to carry %q:\n%s", rootLine, tt.want, text)
+			}
+			if strings.Contains(rootLine, tt.notWant) {
+				t.Fatalf("root line = %q, want it free of %q:\n%s", rootLine, tt.notWant, text)
+			}
+		})
+	}
+}
+
 // TestRenderTreeShowsADiamondsDirectBlocker is GH#5282 at the renderer: open D
 // blocks-depends on closed E and open F, and E blocks-depends on F. Whichever
 // child the walk took first, D renders [BLOCKED], F is listed directly under D
@@ -1533,4 +1599,68 @@ func TestDepListCrossRigRouting(t *testing.T) {
 	}
 
 	t.Log("Successfully resolved cross-rig dependencies via routing")
+}
+
+// renderedRootLine renders tree in direction and returns the root's line, the
+// only one that carries a [READY]/[BLOCKED] marker.
+func renderedRootLine(t *testing.T, tree []*types.TreeNode, direction, rootID string) string {
+	t.Helper()
+	text := stripANSIForTest(captureDepTreeStdout(t, func() { renderTree(tree, 50, direction) }))
+	for _, line := range strings.Split(text, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), rootID+":") {
+			return line
+		}
+	}
+	t.Fatalf("no root line for %s:\n%s", rootID, text)
+	return ""
+}
+
+func wantRenderedMarker(t *testing.T, line, want string) {
+	t.Helper()
+	other := map[string]string{"[READY]": "[BLOCKED]", "[BLOCKED]": "[READY]"}[want]
+	if !strings.Contains(line, want) || strings.Contains(line, other) {
+		t.Fatalf("root line = %q, want %s and no %s", line, want, other)
+	}
+}
+
+// TestRenderTreeDependentsDoNotBlockTheRoot (bd-42wxtt): open X blocks-depends
+// on open, unblocked R. In R's up tree, and in the up half of its both tree, X
+// is a child row of R, but X waits on R rather than R on X, so R stays
+// [READY]. A real open blocker in the both tree's down half still marks R
+// [BLOCKED].
+func TestRenderTreeDependentsDoNotBlockTheRoot(t *testing.T) {
+	node := func(id string, depth int, parent string) *types.TreeNode {
+		n := &types.TreeNode{Issue: types.Issue{ID: id, Title: id, Status: types.StatusOpen, Priority: 2}, Depth: depth, ParentID: parent}
+		if parent != "" {
+			n.EdgeFromParent = types.DepBlocks
+		}
+		return n
+	}
+	for _, tt := range []struct {
+		name, direction, want string
+		tree                  []*types.TreeNode
+	}{
+		{
+			name:      "up",
+			direction: "up",
+			tree:      []*types.TreeNode{node("R", 0, ""), node("X", 1, "R")},
+			want:      "[READY]",
+		},
+		{
+			name:      "both, dependent only",
+			direction: "both",
+			tree:      []*types.TreeNode{node("X", 1, "R"), node("R", 0, "")},
+			want:      "[READY]",
+		},
+		{
+			name:      "both, dependent and a real blocker",
+			direction: "both",
+			tree:      []*types.TreeNode{node("X", 1, "R"), node("R", 0, ""), node("B", 1, "R")},
+			want:      "[BLOCKED]",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			wantRenderedMarker(t, renderedRootLine(t, tt.tree, tt.direction, "R"), tt.want)
+		})
+	}
 }
