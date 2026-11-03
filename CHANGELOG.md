@@ -1135,6 +1135,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A clone whose wisps table lacks `is_blocked` while its ignored migration
+  cursor is past 15 now heals on its next write-intent open. Before, `bd ready`
+  and `bd create --ephemeral` failed with "table ... does not have column
+  is_blocked" (and `bd close` too, on older trees), because the repairs at
+  ignored 7 and 15 fire only while one of those is pending. Ignored migration
+  0032 runs the same probed repair once on every clone; a clone that has the
+  column pays three probes and no DDL (#4468, #5257).
 - `bd create --file` and other batch creates no longer fail with "issue
   already exists" on an id bd generated itself. The batch chose every id
   before it wrote any row, so two of its items could be handed the same short
