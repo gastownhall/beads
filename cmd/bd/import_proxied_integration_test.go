@@ -557,4 +557,79 @@ func TestProxiedServerImport(t *testing.T) {
 			t.Errorf("title after upsert = %q, want the imported rewrite", got)
 		}
 	})
+
+	// GH#6113: a proxied import that skips dependency edges (target absent
+	// from the database and the input) must be gateable. The default keeps
+	// exiting 0 with the aggregate summary; --strict-deps exits 1 through the
+	// proxied route's own skip list (assembled in importer.go, forwarded by
+	// import_proxied_server.go) while the batch stays committed.
+	t.Run("strict_deps", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "imsx")
+		db := openProxiedDB(t, p)
+
+		fixture := importFixtureJSONL(t, []*types.Issue{{
+			ID: "imsx-src", Title: "Source with an absent target", Status: types.StatusOpen,
+			IssueType: types.TypeTask, Priority: 2, CreatedAt: when, UpdatedAt: when,
+			Dependencies: []*types.Dependency{{
+				IssueID: "imsx-src", DependsOnID: "imsx-tgt", Type: types.DepBlocks,
+			}},
+		}})
+		path := filepath.Join(p.dir, "strict.jsonl")
+		if err := os.WriteFile(path, []byte(fixture), 0o644); err != nil {
+			t.Fatalf("write fixture: %v", err)
+		}
+
+		// Default: exit 0, aggregate summary on stderr, source row committed.
+		stdout, stderr, err := bdProxiedImportWithInput(t, bd, p.dir, "", path)
+		if err != nil {
+			t.Fatalf("default proxied import must exit 0, got %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		}
+		if !strings.Contains(stderr, "Skipped dependency: imsx-src -> imsx-tgt: target not found") {
+			t.Errorf("per-edge report missing from stderr:\n%s", stderr)
+		}
+		if !strings.Contains(stderr, "Warning: 1 dependency edge(s) were reported skipped") {
+			t.Errorf("aggregate summary missing from stderr:\n%s", stderr)
+		}
+		if got := proxiedImportQueryInt(t, db, "SELECT COUNT(*) FROM issues WHERE id = 'imsx-src'"); got != 1 {
+			t.Errorf("source row count = %d, want 1", got)
+		}
+		if got := proxiedImportQueryInt(t, db, "SELECT COUNT(*) FROM dependencies WHERE issue_id = 'imsx-src'"); got != 0 {
+			t.Errorf("skipped edge landed anyway: %d rows", got)
+		}
+
+		// Strict: a second source row whose edge is also skipped — the
+		// batch commits (proxied one-transaction semantics) and the command
+		// still exits 1 with the aggregate error.
+		strictFixture := importFixtureJSONL(t, []*types.Issue{{
+			ID: "imsx-src2", Title: "Second source with an absent target", Status: types.StatusOpen,
+			IssueType: types.TypeTask, Priority: 2, CreatedAt: when, UpdatedAt: when,
+			Dependencies: []*types.Dependency{{
+				IssueID: "imsx-src2", DependsOnID: "imsx-tgt", Type: types.DepBlocks,
+			}},
+		}})
+		strictPath := filepath.Join(p.dir, "strict2.jsonl")
+		if err := os.WriteFile(strictPath, []byte(strictFixture), 0o644); err != nil {
+			t.Fatalf("write fixture: %v", err)
+		}
+		stdout, stderr, err = bdProxiedImportWithInput(t, bd, p.dir, "", "--strict-deps", strictPath)
+		if err == nil {
+			t.Fatalf("strict proxied import must exit 1 when edges are reported skipped\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+		}
+		if !strings.Contains(stderr, "Error: 1 dependency edge(s) were reported skipped") {
+			t.Errorf("aggregate error missing from stderr:\n%s", stderr)
+		}
+		if !strings.Contains(stderr, "remain committed") {
+			t.Errorf("aggregate error must say the imported rows remain committed:\n%s", stderr)
+		}
+		if strings.Contains(stderr, "Warning:") {
+			t.Errorf("strict mode must not also print the default summary warning:\n%s", stderr)
+		}
+		if got := proxiedImportQueryInt(t, db, "SELECT COUNT(*) FROM issues WHERE id = 'imsx-src2'"); got != 1 {
+			t.Errorf("strict failure must leave the source row committed, got %d rows", got)
+		}
+		if got := proxiedImportQueryInt(t, db, "SELECT COUNT(*) FROM dependencies WHERE issue_id LIKE 'imsx-%'"); got != 0 {
+			t.Errorf("skipped edges landed anyway: %d rows", got)
+		}
+	})
 }

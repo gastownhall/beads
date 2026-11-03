@@ -114,6 +114,7 @@ var (
 	importDedup      bool
 	importAllowStale bool
 	importInput      string
+	importStrictDeps bool
 )
 
 func init() {
@@ -121,6 +122,7 @@ func init() {
 	importCmd.Flags().BoolVar(&importDryRun, "dry-run", false, "Show what would be imported without importing")
 	importCmd.Flags().BoolVar(&importDedup, "dedup", false, "Skip lines whose title matches an existing open issue")
 	importCmd.Flags().BoolVar(&importAllowStale, "allow-stale", false, "Import rows even when older than the local issue (required to restore an older snapshot)")
+	importCmd.Flags().BoolVar(&importStrictDeps, "strict-deps", false, "Exit nonzero if any dependency edge is reported skipped; imported rows stay committed")
 	rootCmd.AddCommand(importCmd)
 }
 
@@ -555,12 +557,14 @@ func renderImportOutcome(result importResultJSON, source string, dedupHits int) 
 	if jsonOutput {
 		// The JSON result is the whole contract in this mode: it is emitted
 		// unchanged (skipped edges are in skipped_dependencies) and the
-		// verdict below adds no new field or stderr diagnostic, so a
-		// consumer that decodes one object keeps decoding exactly one.
+		// verdict below adds no new field, so a consumer that decodes one
+		// object keeps decoding exactly one. Strict mode still needs the
+		// exit-1 gate, so the verdict runs here too: it returns the stderr
+		// error envelope, never a second stdout value.
 		if err := outputJSON(result); err != nil {
 			return err
 		}
-		return nil
+		return skippedDependencySummary(len(result.SkippedDependencies))
 	}
 
 	fmt.Fprintf(os.Stderr, "Imported %d issues", result.Created)
@@ -598,22 +602,34 @@ func renderImportOutcome(result importResultJSON, source string, dedupHits int) 
 }
 
 // skippedDependencySummary turns a completed import's skipped-dependency list
-// into one aggregate report. GH#6113: an import whose input references a
-// target that is neither in the database nor in the import stream drops that
-// edge and still exits 0 — in a chunked restore every chunk can succeed while
-// a third of the dependency graph disappears, and per-edge lines scrolling
-// past on a 0 exit are not a signal a script can gate on. The summary names
-// the count of every reported skip (missing targets and validation refusals
-// alike — the reason strings are not re-classified) and the recovery: import
-// the missing targets and re-run, which converges subject to the import's
-// stale policy. The rows are already committed at this point; nothing about
-// the verdict can un-commit them.
+// into one aggregate report, or — under --strict-deps — the gateable exit-1
+// error a restore script can fail on. GH#6113: an import whose input
+// references a target that is neither in the database nor in the import
+// stream drops that edge and still exits 0 — in a chunked restore every
+// chunk can succeed while a third of the dependency graph disappears, and
+// per-edge lines scrolling past on a 0 exit are not a signal a script can
+// gate on. The report names the count of every reported skip (missing
+// targets and validation refusals alike — the reason strings are not
+// re-classified) and the recovery: import the missing targets and re-run,
+// which converges subject to the import's stale policy. The rows are already
+// committed at this point; the verdict is returned through
+// HandleErrorWithHint so text mode gets Error/Hint lines and JSON mode the
+// existing stderr error envelope, while stdout keeps the one result object
+// outputJSON already emitted. Exit status is 1 via the ordinary *exitError.
 func skippedDependencySummary(n int) error {
 	if n == 0 {
 		return nil
 	}
+	if importStrictDeps {
+		return HandleErrorWithHint(
+			fmt.Sprintf("%d dependency edge(s) were reported skipped (--strict-deps); imported rows remain committed", n),
+			"Import the missing target issues, then re-run the affected import (or import one combined stream) so the skipped edges land; fix validation-refused edges in the source file first. A re-run converges subject to the import's stale policy.")
+	}
+	if jsonOutput {
+		return nil
+	}
 	WarnError("%d dependency edge(s) were reported skipped", n)
-	fmt.Fprintf(os.Stderr, "Hint: import the missing target issues, then re-run this import to wire the skipped edges; fix validation-refused edges in the source file before re-running.\n") //nolint:gosec // G705: stderr, not a browser context
+	fmt.Fprintf(os.Stderr, "Hint: import the missing target issues, then re-run this import to wire the skipped edges; fix validation-refused edges in the source file before re-running; pass --strict-deps to exit nonzero instead of only warning.\n") //nolint:gosec // G705: stderr, not a browser context
 	return nil
 }
 

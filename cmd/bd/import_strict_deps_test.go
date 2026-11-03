@@ -75,8 +75,8 @@ func TestRenderImportOutcomeSkippedDependencies(t *testing.T) {
 		"zz-ccc -> zz-aaa: dependency validation failed: cycle detected",
 	}
 
-	oldJSON := jsonOutput
-	defer func() { jsonOutput = oldJSON }()
+	oldJSON, oldStrict := jsonOutput, importStrictDeps
+	defer func() { jsonOutput, importStrictDeps = oldJSON, oldStrict }()
 
 	t.Run("text_default_summarizes_and_hints", func(t *testing.T) {
 		jsonOutput = false
@@ -123,17 +123,48 @@ func TestRenderImportOutcomeSkippedDependencies(t *testing.T) {
 	})
 
 	t.Run("text_zero_skips_no_summary", func(t *testing.T) {
-		jsonOutput = false
+		jsonOutput, importStrictDeps = false, true
 		var stderr string
 		var err error
 		_, stderr, err = captureImportOutcome(t, func() error {
 			return renderImportOutcome(importResultJSON{Source: "clean.jsonl", Created: 2}, "clean.jsonl", 0)
 		})
 		if err != nil {
-			t.Fatalf("clean import must exit clean, got %v", err)
+			t.Fatalf("clean import must exit clean even under --strict-deps, got %v", err)
 		}
 		if strings.Contains(stderr, "dependency edge") {
 			t.Errorf("no skipped edges, but the report mentions them:\n%s", stderr)
+		}
+	})
+
+	t.Run("text_strict_exit1_error_and_hint", func(t *testing.T) {
+		jsonOutput, importStrictDeps = false, true
+		var stderr string
+		var err error
+		_, stderr, err = captureImportOutcome(t, func() error {
+			return renderImportOutcome(importResultJSON{Source: "chunk.jsonl", Created: 1, SkippedDependencies: skips}, "chunk.jsonl", 0)
+		})
+		exitErr, ok := err.(*exitError)
+		if !ok {
+			t.Fatalf("strict text import must fail with an exit error, got %v", err)
+		}
+		if exitErr.Code != 1 {
+			t.Errorf("strict exit code = %d, want 1", exitErr.Code)
+		}
+		if !strings.Contains(stderr, "Error: 2 dependency edge(s) were reported skipped") {
+			t.Errorf("missing aggregate error naming the skip count:\n%s", stderr)
+		}
+		if !strings.Contains(stderr, "--strict-deps") {
+			t.Errorf("the aggregate error must name --strict-deps:\n%s", stderr)
+		}
+		if !strings.Contains(stderr, "remain committed") {
+			t.Errorf("the aggregate error must say the imported rows remain committed:\n%s", stderr)
+		}
+		if n := strings.Count(stderr, "Hint:"); n != 1 {
+			t.Errorf("want exactly one recovery hint line, got %d:\n%s", n, stderr)
+		}
+		if strings.Contains(stderr, "Warning:") {
+			t.Errorf("strict mode must not also print the default summary warning:\n%s", stderr)
 		}
 	})
 }
