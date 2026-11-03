@@ -28,6 +28,13 @@ const credentialKeyFile = ".beads-credential-key" //nolint:gosec // G101: filena
 
 // ensureCredentialKey lazily initializes the credential encryption key.
 func (s *EmbeddedDoltStore) ensureCredentialKey() error {
+	s.credMu.Lock()
+	defer s.credMu.Unlock()
+	return s.ensureCredentialKeyLocked()
+}
+
+// ensureCredentialKeyLocked is ensureCredentialKey with credMu held.
+func (s *EmbeddedDoltStore) ensureCredentialKeyLocked() error {
 	if s.credentialKey != nil {
 		return nil
 	}
@@ -54,6 +61,72 @@ func (s *EmbeddedDoltStore) ensureCredentialKey() error {
 	}
 
 	s.credentialKey = key
+	return nil
+}
+
+// ensureCredentialsMigrated upgrades this machine's legacy (unbound) peer
+// credentials to bound v2 before the first credential read, once per store.
+// Only a writable store migrates; a read-only one leaves legacy rows
+// unusable. The marker beside the key file is written only after the
+// migrated rows are committed, and once it is valid for the loaded key no
+// legacy credential is ever rebound again, so a legacy blob that arrives
+// later (a pull, a direct write) is refused rather than resealed.
+func (s *EmbeddedDoltStore) ensureCredentialsMigrated(ctx context.Context) error {
+	if s.readOnly || s.beadsDir == "" {
+		return nil
+	}
+	s.credMu.Lock()
+	defer s.credMu.Unlock()
+	if s.credMigrated {
+		return nil
+	}
+
+	keyPath := filepath.Join(s.beadsDir, credentialKeyFile)
+	if s.credentialKey == nil {
+		if _, err := os.Stat(keyPath); errors.Is(err, os.ErrNotExist) {
+			// No key on this machine, so no stored blob can be one of ours;
+			// do not mint a key just to look.
+			var n int
+			if err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+				return tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM federation_peers WHERE password_encrypted IS NOT NULL AND LENGTH(password_encrypted) > 0").Scan(&n)
+			}); err != nil {
+				return fmt.Errorf("check stored peer credentials: %w", err)
+			}
+			if n == 0 {
+				return nil
+			}
+		}
+	}
+	if err := s.ensureCredentialKeyLocked(); err != nil {
+		return err
+	}
+	key := s.credentialKey
+	done, err := peercred.MarkerValid(keyPath, key)
+	if err != nil {
+		return err
+	}
+	if done {
+		s.credMigrated = true
+		return nil
+	}
+
+	if err := s.withMutatingPinnedDBConn(ctx, func(db versioncontrolops.DBConn) error {
+		res, err := peercred.Migrate(ctx, db, key, [][]byte{key})
+		if err != nil {
+			return err
+		}
+		if len(res.Migrated) == 0 {
+			return nil
+		}
+		return versioncontrolops.StageAndCommit(ctx, db, map[string]bool{"federation_peers": true},
+			"federation: bind stored peer credentials to their peers", commitAuthor)
+	}); err != nil {
+		return fmt.Errorf("upgrade stored peer credentials: %w", err)
+	}
+	if err := peercred.WriteMarker(keyPath, key); err != nil {
+		return err
+	}
+	s.credMigrated = true
 	return nil
 }
 
@@ -90,6 +163,9 @@ func (s *EmbeddedDoltStore) decryptPassword(b peercred.Binding, encrypted []byte
 		// single decrypt funnel so every reader reports it: peer resolution for
 		// the remote verbs, GetFederationPeer, ListFederationPeers. The wording
 		// is shared with package dolt, which enriches its own two read paths.
+		if errors.Is(err, peercred.ErrLegacyFormat) && s.readOnly {
+			err = fmt.Errorf("%w; a read-only store does not upgrade it, so run bd federation list-peers without --readonly first", err)
+		}
 		return "", storage.CredentialKeyMismatchError(filepath.Join(s.beadsDir, credentialKeyFile), err)
 	}
 	return plaintext, err
@@ -100,6 +176,9 @@ func (s *EmbeddedDoltStore) decryptPassword(b peercred.Binding, encrypted []byte
 // ---------------------------------------------------------------------------
 
 func (s *EmbeddedDoltStore) AddFederationPeer(ctx context.Context, peer *storage.FederationPeer) error {
+	if err := s.ensureCredentialsMigrated(ctx); err != nil {
+		return err
+	}
 	encryptedPwd, err := s.encryptPassword(peerBinding(peer), peer.Password)
 	if err != nil {
 		return fmt.Errorf("encrypt password: %w", err)
@@ -118,6 +197,10 @@ func (s *EmbeddedDoltStore) AddFederationPeer(ctx context.Context, peer *storage
 }
 
 func (s *EmbeddedDoltStore) GetFederationPeer(ctx context.Context, name string) (*storage.FederationPeer, error) {
+	// Migrate before reading, so the row read below is the upgraded one.
+	if err := s.ensureCredentialsMigrated(ctx); err != nil {
+		return nil, err
+	}
 	var row *issueops.FederationPeerRow
 	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
 		var err error
@@ -283,6 +366,9 @@ func overrideEnv(key, value string) func() {
 }
 
 func (s *EmbeddedDoltStore) ListFederationPeers(ctx context.Context) ([]*storage.FederationPeer, error) {
+	if err := s.ensureCredentialsMigrated(ctx); err != nil {
+		return nil, err
+	}
 	var rows []*issueops.FederationPeerRow
 	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
 		var err error

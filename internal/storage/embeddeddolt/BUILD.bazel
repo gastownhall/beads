@@ -162,6 +162,7 @@ go_test(
         "expected_revision_contract_test.go",
         "external_dependencies_test.go",
         "federation_credential_binding_test.go",
+        "federation_credential_migration_test.go",
         "federation_credentials_test.go",
         "get_issue_test.go",
         "git_ref_pin_test.go",

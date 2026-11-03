@@ -44,6 +44,7 @@ var trackedRuntimePatterns = []string{
 	"last_pull", // bd-578h9.6: gitignored since 7ebf4df6a, but gitignore cannot untrack already-committed copies
 	".local_version",
 	"redirect",
+	".beads-credential-key.v2-migrated",
 
 	// Sync / export state
 	".sync.lock",
