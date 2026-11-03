@@ -668,6 +668,8 @@ go_test(
         "context_text_test.go",
         "contributor_embedded_test.go",
         "contributor_routing_e2e_test.go",
+        "cook_condition_repro_test.go",
+        "cook_condition_test.go",
         "cook_qnt_test.go",
         "cook_test.go",
         "count_embedded_test.go",

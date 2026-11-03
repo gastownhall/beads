@@ -54,6 +54,8 @@ Two cooking modes are available:
     Produces a fully-resolved proto with variables substituted.
     Use for: final validation before pour, seeing exact output.
     Requires all variables to have values (via --var or defaults).
+    Steps whose condition evaluates to false are filtered out, the
+    same filtering bd mol pour applies.
 
 Formulas are high-level workflow templates that support:
   - Variable definitions with defaults and validation
@@ -396,6 +398,26 @@ func runCook(cmd *cobra.Command, args []string) error {
 		if err := formula.ValidateVars(resolved, flags.inputVars); err != nil {
 			return HandleError("%v", err)
 		}
+		// Filter steps whose condition evaluates false, as pour does
+		// (GH#7639). Defaults merge under the explicit inputs so a
+		// default-only runtime mode filters too. This runs before
+		// ExtractVariables below, so a variable only a dropped step
+		// references no longer demands a value; whole-formula validation
+		// above is unchanged, and compile mode keeps every step.
+		mergedVars := make(map[string]string)
+		for name, def := range resolved.Vars {
+			if def != nil && def.Default != nil {
+				mergedVars[name] = *def.Default
+			}
+		}
+		for k, v := range flags.inputVars {
+			mergedVars[k] = v
+		}
+		filteredSteps, err := formula.FilterStepsByCondition(resolved.Steps, mergedVars)
+		if err != nil {
+			return HandleError("filtering steps by condition: %v", err)
+		}
+		resolved.Steps = filteredSteps
 	}
 
 	protoID := resolved.Formula

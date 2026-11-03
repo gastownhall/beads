@@ -1252,6 +1252,8 @@ bd cook
     |     Produces a fully-resolved proto with variables substituted.
     |     Use for: final validation before pour, seeing exact output.
     |     Requires all variables to have values (via --var or defaults).
+    |     Steps whose condition evaluates to false are filtered out, the
+    |     same filtering bd mol pour applies.
     |
     | Formulas are high-level workflow templates that support:
     |   - Variable definitions with defaults and validation

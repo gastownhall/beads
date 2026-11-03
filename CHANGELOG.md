@@ -1165,6 +1165,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd cook --mode=runtime` now filters out steps whose `condition` evaluates
+  to false, matching `bd mol pour`. Runtime cook previously listed — and
+  `--persist` created children for — steps that pour correctly omits, across
+  all three output paths (dry run, ephemeral JSON, `--persist`). Filtering
+  runs against the formula's variable defaults merged with the `--var`
+  inputs, before the runtime missing-variable check, so a placeholder only a
+  dropped step references no longer demands a value; whole-formula
+  required-variable validation and compile mode (every step and its
+  condition intact) are unchanged (#7639).
 - `bd create --file` and other batch creates no longer fail with "issue
   already exists" on an id bd generated itself. The batch chose every id
   before it wrote any row, so two of its items could be handed the same short
