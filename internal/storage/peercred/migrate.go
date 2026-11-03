@@ -113,6 +113,15 @@ const currentRowsQuery = `
 	FROM federation_peers
 	WHERE password_encrypted IS NOT NULL AND LENGTH(password_encrypted) > 0`
 
+// historyRowsQuery lists every binding each ciphertext was committed under on
+// the checked-out branch. dolt_history_<table> walks every commit reachable
+// from HEAD, merge parents included, so a blob that was copied and then
+// deleted or overwritten still shows its other binding here.
+const historyRowsQuery = `
+	SELECT DISTINCT name, remote_url, username, password_encrypted
+	FROM dolt_history_federation_peers
+	WHERE password_encrypted IS NOT NULL AND LENGTH(password_encrypted) > 0`
+
 // Migrate rewrites this machine's legacy federation_peers credentials as v2
 // sealed under key and bound to their current row, when Plan finds their
 // provenance unambiguous. legacyKeys are the keys a legacy blob may have
@@ -144,9 +153,15 @@ func Migrate(ctx context.Context, conn Conn, key []byte, legacyKeys [][]byte) (M
 		return res, nil
 	}
 
-	occurrences := make([]Occurrence, 0, len(current))
-	for _, r := range current {
-		occurrences = append(occurrences, Occurrence{Binding: r.Binding, Blob: r.Blob})
+	history, err := scanRows(ctx, conn, historyRowsQuery, false)
+	if err != nil {
+		return res, fmt.Errorf("read federation peer credential history: %w", err)
+	}
+	occurrences := make([]Occurrence, 0, len(current)+len(history))
+	for _, rs := range [][]Row{current, history} {
+		for _, r := range rs {
+			occurrences = append(occurrences, Occurrence{Binding: r.Binding, Blob: r.Blob})
+		}
 	}
 
 	eligible, skipped := Plan(candidates, occurrences)
@@ -202,6 +217,32 @@ func scanRows(ctx context.Context, conn Conn, query string, withSovereignty bool
 		return nil, err
 	}
 	return out, nil
+}
+
+// SkipWarning is the line an operator sees for a legacy credential Migrate
+// refused to rebind. Every value comes from a replicated row, so names are
+// escaped and the command takes each through remedy.CommandArg. It never
+// prints the password, the ciphertext or the URL.
+func SkipWarning(goos string, r Row) string {
+	peerArg, peerNote := remedy.CommandArg(goos, r.Binding.Name, "<peer>")
+	user, userNote := "", ""
+	if r.Binding.Username != "" {
+		var userArg string
+		userArg, userNote = remedy.CommandArg(goos, r.Binding.Username, "<user>")
+		user = " --user " + userArg
+	}
+	sovereignty, tierNote := "", ""
+	if r.Sovereignty != "" {
+		var tierArg string
+		tierArg, tierNote = remedy.CommandArg(goos, r.Sovereignty, "<tier>")
+		sovereignty = " --sovereignty " + tierArg
+	}
+	return fmt.Sprintf("Warning: the stored password for federation peer %s was not upgraded: "+
+		"the same encrypted value appears under another peer name, URL or username in this database or its history, "+
+		"so it cannot be bound to this peer safely and will not be used. "+
+		"Re-add the peer with bd federation add-peer %s <url>%s%s and enter the password at the prompt; "+
+		"rotate that password if you did not copy it between peers yourself.%s\n",
+		remedy.PrintedValue(r.Binding.Name), peerArg, user, sovereignty, peerNote+userNote+tierNote)
 }
 
 // markerDomain separates the marker MAC from every other use of the key.

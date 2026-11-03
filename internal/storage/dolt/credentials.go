@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -199,12 +200,19 @@ func (s *DoltStore) ensureCredentialsMigrated(ctx context.Context) error {
 			return fmt.Errorf("commit upgraded peer credentials: %w", err)
 		}
 	}
+	for _, r := range res.Skipped {
+		fmt.Fprint(credentialWarnWriter, peercred.SkipWarning(runtime.GOOS, r))
+	}
 	if err := peercred.WriteMarker(keyPath, key); err != nil {
 		return err
 	}
 	s.credMigrated = true
 	return nil
 }
+
+// credentialWarnWriter receives the per-peer warnings for legacy credentials
+// the upgrade refused to rebind. Defaults to os.Stderr; tests replace it.
+var credentialWarnWriter io.Writer = os.Stderr
 
 // peerBinding is the identity a peer's stored password is sealed to: the
 // row's stored name, exact URL and username.
