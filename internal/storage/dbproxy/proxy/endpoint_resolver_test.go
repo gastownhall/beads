@@ -387,3 +387,74 @@ func TestEndpointResolver_UnarmedDialNeverRediscovers(t *testing.T) {
 		t.Fatalf("discovery calls = %d after Arm, want 1", got)
 	}
 }
+
+// TestEndpointResolver_SharedFlightWaitersReturnByDeadline: concurrent dials
+// that fail at one generation share one discovery flight, and while it is
+// blocked each returns by its own deadline with its refusal as the cause. The
+// flight carries on, and once it publishes the next dial uses its endpoint
+// without discovering again.
+func TestEndpointResolver_SharedFlightWaitersReturnByDeadline(t *testing.T) {
+	d := newFakeDiscovery()
+	d.gate = make(chan struct{})
+	r, rootDir, _ := newTestResolver(t, refusedEndpoint(t), d)
+	released := false
+	release := func() {
+		if !released {
+			released = true
+			close(d.gate)
+		}
+	}
+	t.Cleanup(release)
+	replacement := newResolverTestListener(t, rootDir, modeProve)
+	d.set(replacement.endpoint(), nil)
+	r.Arm()
+
+	const waiters = 8
+	deadlines := []time.Duration{100 * time.Millisecond, 250 * time.Millisecond, 400 * time.Millisecond}
+	var wg sync.WaitGroup
+	errs := make([]error, waiters)
+	took := make([]time.Duration, waiters)
+	for i := range waiters {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			start := time.Now()
+			conn, err := dialWithin(r, deadlines[i%len(deadlines)])
+			took[i] = time.Since(start)
+			if conn != nil {
+				_ = conn.Close()
+			}
+			errs[i] = err
+		}()
+	}
+	wg.Wait()
+	for i, err := range errs {
+		deadline := deadlines[i%len(deadlines)]
+		if !IsEndpointUnavailable(err) || !errors.Is(err, errDiscoveryPending) || !errors.Is(err, syscall.ECONNREFUSED) {
+			t.Errorf("waiter %d: %v, want unavailable with discovery pending and the refusal as its cause", i, err)
+		}
+		if took[i] > deadline+200*time.Millisecond {
+			t.Errorf("waiter %d took %v, past its %v deadline", i, took[i], deadline)
+		}
+	}
+	if got := d.calls.Load(); got != 1 {
+		t.Fatalf("discovery calls = %d, want one shared flight", got)
+	}
+
+	release()
+	deadline := time.Now().Add(5 * time.Second)
+	for r.Endpoint() != replacement.endpoint() {
+		if time.Now().After(deadline) {
+			t.Fatal("the flight never published its endpoint")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	conn, err := dialWithin(r, time.Second)
+	if err != nil {
+		t.Fatalf("dial after the flight published: %v", err)
+	}
+	_ = conn.Close()
+	if got := d.calls.Load(); got != 1 {
+		t.Fatalf("discovery calls = %d after publication, want 1", got)
+	}
+}
