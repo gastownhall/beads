@@ -6,6 +6,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/storage/domain"
+	storeops "github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/workapi"
 	publicops "github.com/steveyegge/beads/issueops"
@@ -55,6 +56,9 @@ var _ publicops.Deleter = (*deleter)(nil)
 // take the committing path and leave a history entry describing a preview.
 func (d *deleter) Delete(ctx context.Context, req publicops.DeleteRequest) (publicops.DeleteResult, error) {
 	if err := workapi.ValidateDeleteRequest(req); err != nil {
+		return publicops.DeleteResult{}, err
+	}
+	if err := storeops.ValidateThreadGuard(req); err != nil {
 		return publicops.DeleteResult{}, err
 	}
 	req.IDs = workapi.NormalizeDeleteIDs(req.IDs)
@@ -165,6 +169,24 @@ func deleteInUOW(ctx context.Context, uw UnitOfWork, req publicops.DeleteRequest
 	if req.ExpectedVersion != nil {
 		if current := present[req.IDs[0]].RowVersion; current != *req.ExpectedVersion {
 			return publicops.DeleteResult{}, &publicops.VersionMismatchError{Expected: *req.ExpectedVersion, Current: current}
+		}
+	}
+
+	// The thread guard, in the same place the store body runs it: after the
+	// version precondition, before the dependents guard and the deletion.
+	//
+	// IT IS THE STORE BODY'S CHECK, NOT A SECOND ONE. Its revision check
+	// compares image revisions, which only issueops.ImageInTx defines, so it
+	// runs on the unit of work's statement runner the way the imager does
+	// (imager.go). It only reads, so passing beneath the recording layer
+	// skips no hook.
+	if req.ThreadGuard != nil {
+		runner, err := imageStatementRunner(uw)
+		if err != nil {
+			return publicops.DeleteResult{}, err
+		}
+		if err := storeops.CheckThreadGuardInTx(ctx, runner, req.ThreadGuard, req.IDs); err != nil {
+			return publicops.DeleteResult{}, err
 		}
 	}
 

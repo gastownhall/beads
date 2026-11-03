@@ -28,6 +28,11 @@ import (
 // between the two, a workspace whose rows were gone and whose descriptions
 // still cited them.
 func DeleteInTx(ctx context.Context, tx *sql.Tx, req publicops.DeleteRequest) (publicops.DeleteResult, error) {
+	// A thread guard paired with Cascade, or missing a field its checks need,
+	// is refused before anything is read.
+	if err := ValidateThreadGuard(req); err != nil {
+		return publicops.DeleteResult{}, err
+	}
 	ids := req.IDs
 	result := publicops.DeleteResult{DryRun: req.DryRun}
 
@@ -87,6 +92,16 @@ func DeleteInTx(ctx context.Context, tx *sql.Tx, req publicops.DeleteRequest) (p
 	// conformance contract is where the two are held equal.
 	if req.ExpectedVersion != nil {
 		if err := CheckVersionInTx(ctx, tx, ids[0], *req.ExpectedVersion); err != nil {
+			return publicops.DeleteResult{}, err
+		}
+	}
+
+	// The thread guard, after the version precondition and before the
+	// dependents guard, the deletion and the rewrite: it reads only, so a
+	// mismatch leaves this transaction nothing to undo. It runs on a dry run
+	// too, which is what lets a clean preview vouch for the real run.
+	if req.ThreadGuard != nil {
+		if err := CheckThreadGuardInTx(ctx, tx, req.ThreadGuard, ids); err != nil {
 			return publicops.DeleteResult{}, err
 		}
 	}
