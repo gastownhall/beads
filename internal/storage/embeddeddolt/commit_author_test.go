@@ -340,6 +340,62 @@ func TestEmbeddedCommitAuthorFollowsGitAuthorEnv(t *testing.T) {
 			t.Errorf("recompute commit message = %q, want %q", head.message, versioncontrolops.BlockedRecomputeCommitMsg)
 		}
 	})
+
+	// The repair direction the subtests above do not take: the peer side
+	// commits a stale is_blocked = 1 on an issue with no blockers, and the
+	// post-pull recompute clears it.
+	t.Run("merge and post-pull recompute clearing a stale flag", func(t *testing.T) {
+		setGitAuthorEnv(t, name, email)
+		ctx := t.Context()
+		te := newTestEnv(t, "authmc")
+		a, _ := seedBlockerPair(t, ctx, te, "authmc")
+		divergeFromPeer(t, ctx, te, "authmcpeer", func(conn *sql.Conn) {
+			execOn(t, ctx, conn, "UPDATE issues SET is_blocked = 1 WHERE id = ?", a)
+		})
+
+		known := te.logHashes(t, ctx)
+		conflicts, err := te.store.Merge(ctx, "authmcpeer")
+		if err != nil || len(conflicts) != 0 {
+			t.Fatalf("Merge = %v, %v; want a clean merge", conflicts, err)
+		}
+		head := te.readHead(t, ctx)
+		if head.message != "bd: recompute is_blocked after pull" {
+			t.Errorf("newest commit message = %q, want the post-pull recompute", head.message)
+		}
+		fresh := te.commitsSince(t, ctx, known)
+		if len(fresh) < 2 {
+			t.Fatalf("Merge created commits %+v; want the merge commit and the post-pull recompute", fresh)
+		}
+		for _, c := range fresh {
+			requireNewCommitBy(t, "Merge", headCommit{}, c, name, email)
+		}
+	})
+
+	t.Run("full recompute clearing a stale flag", func(t *testing.T) {
+		setGitAuthorEnv(t, name, email)
+		ctx := t.Context()
+		te := newTestEnv(t, "authrc")
+		a, _ := seedBlockerPair(t, ctx, te, "authrc")
+		conn, closeConn := te.openPinnedConn(t, ctx)
+		execOn(t, ctx, conn, "UPDATE issues SET is_blocked = 1 WHERE id = ?", a)
+		peerCommit(t, ctx, conn, "stale is_blocked")
+		closeConn()
+
+		rc, ok := storage.UnwrapStore(te.store).(storage.BlockedRecomputer)
+		if !ok {
+			t.Fatal("embedded store must implement storage.BlockedRecomputer")
+		}
+		before := te.readHead(t, ctx)
+		changed, err := rc.RecomputeAllBlocked(ctx)
+		if err != nil || changed != 1 {
+			t.Fatalf("RecomputeAllBlocked = %d, %v; want exactly one repaired row", changed, err)
+		}
+		head := te.readHead(t, ctx)
+		requireNewCommitBy(t, "RecomputeAllBlocked", before, head, name, email)
+		if head.message != versioncontrolops.BlockedRecomputeCommitMsg {
+			t.Errorf("recompute commit message = %q, want %q", head.message, versioncontrolops.BlockedRecomputeCommitMsg)
+		}
+	})
 }
 
 // TestEmbeddedCommitAuthorDefaults pins the unchanged anonymous identity for a
