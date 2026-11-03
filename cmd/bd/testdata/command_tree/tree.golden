@@ -3634,6 +3634,7 @@ bd import
   flag --dedup type=bool default="false" usage="Skip lines whose title matches an existing open issue"
   flag --dry-run type=bool default="false" usage="Show what would be imported without importing"
   flag --input -i type=string default="" usage="Read JSONL from a specific file"
+  flag --strict-deps type=bool default="false" usage="Exit nonzero if any dependency edge is reported skipped; imported rows stay committed"
 
 bd info
   use: "info"

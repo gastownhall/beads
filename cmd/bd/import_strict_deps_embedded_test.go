@@ -148,4 +148,26 @@ func TestEmbeddedImportStrictDeps(t *testing.T) {
 			t.Errorf("default --json import added a stderr diagnostic:\n%s", stderr)
 		}
 	})
+
+	t.Run("strict_text_exits_one_rows_committed", func(t *testing.T) {
+		t.Parallel()
+		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "sdtxt")
+
+		stdout, stderr, code := strictDepsImport(t, bd, dir, "--strict-deps", partA(t, "sdtxt"))
+		if code != 1 {
+			t.Fatalf("--strict-deps import exit = %d, want 1\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+		}
+		if !strings.Contains(stderr, "Skipped dependency: sdtxt-a -> sdtxt-b: target not found") {
+			t.Errorf("stderr lacks the per-edge report:\n%s", stderr)
+		}
+		if !strings.Contains(stderr, "Error: --strict-deps: 1 dependency edge(s) were reported skipped; imported rows remain committed") {
+			t.Errorf("stderr lacks the strict-deps error:\n%s", stderr)
+		}
+		// The failure is the verdict on a committed import, not a refused
+		// flag: the source row landed, only the edge is missing.
+		ids, edges := strictDepsRows(t, beadsDir, "sdtxt")
+		if strings.Join(ids, ",") != "sdtxt-a" || len(edges) != 0 {
+			t.Errorf("after --strict-deps import rows = %v edges = %v, want [sdtxt-a] and no edge", ids, edges)
+		}
+	})
 }
