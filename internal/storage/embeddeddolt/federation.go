@@ -16,12 +16,24 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/peercred"
+	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 )
+
+// federationStagingBranchPrefix identifies temporary filtered-push branches,
+// matching the server-mode prefix: each operation appends a UUID so concurrent
+// pushes cannot collide.
+const federationStagingBranchPrefix = "__federation_push_staging_"
+
+// federationStagingCleanupTimeout bounds best-effort cleanup after the caller
+// has canceled or its deadline has expired.
+const federationStagingCleanupTimeout = 30 * time.Second
 
 // credentialKeyFile is the filename for the random encryption key.
 const credentialKeyFile = ".beads-credential-key" //nolint:gosec // G101: filename, not a credential
@@ -428,8 +440,11 @@ func (s *EmbeddedDoltStore) Sync(ctx context.Context, peer string, strategy stri
 		result.PulledCommits = 1
 	}
 
-	// Step 5: Push
-	if err := s.PushTo(ctx, peer); err != nil {
+	// Step 5: Push, filtering excluded issue types — matching server-mode
+	// Sync (dolt/federation.go), which never publishes a plain PushTo when
+	// federation.exclude_types is configured.
+	excludeTypes := config.GetFederationConfig().ExcludeTypes
+	if err := s.filteredPushToPeer(ctx, peer, excludeTypes); err != nil {
 		result.PushError = err
 	} else {
 		result.Pushed = true
@@ -440,6 +455,78 @@ func (s *EmbeddedDoltStore) Sync(ctx context.Context, peer string, strategy stri
 
 	result.EndTime = time.Now()
 	return result, nil
+}
+
+// filteredPushToPeer pushes to a peer after filtering out excluded issue
+// types, the embedded twin of dolt/federation.go's filteredPushToPeer. When
+// excludeTypes is empty it delegates directly to PushTo (no filtering).
+//
+// The staging itself lives in versioncontrolops.PushFilteredBranch, shared
+// with the server driver; this wrapper supplies the embedded connection and
+// the push: credentials resolve through withPeerAuth BEFORE the pinned
+// connection opens, because embedded OpenSQL serializes engine handles — the
+// push callback must run on the same connection as the staging steps.
+func (s *EmbeddedDoltStore) filteredPushToPeer(ctx context.Context, peer string, excludeTypes []string) (retErr error) {
+	if len(excludeTypes) == 0 {
+		return s.PushTo(ctx, peer)
+	}
+	sourceBranch := s.branch
+	operationID, err := uuid.NewRandom()
+	if err != nil {
+		return fmt.Errorf("federation filter: generate staging branch: %w", err)
+	}
+	stagingBranch := federationStagingBranchPrefix + operationID.String()
+
+	// Arm cleanup before staging exists: the staging branch can outlive a
+	// failed call, and the operation context may be canceled by then, so
+	// cleanup runs on a fresh connection under its own deadline.
+	defer func() {
+		if cleanupErr := s.cleanupFilteredStaging(ctx, stagingBranch); cleanupErr != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("federation filter: cleanup: %w", cleanupErr))
+		}
+	}()
+
+	err = s.withPeerAuth(ctx, peer, func(user string) error {
+		return s.withMutatingPinnedDBConn(ctx, func(db versioncontrolops.DBConn) error {
+			conn, ok := db.(versioncontrolops.FilteredConn)
+			if !ok {
+				return fmt.Errorf("federation filter: pinned connection %T cannot open transactions", db)
+			}
+			_, err := versioncontrolops.PushFilteredBranch(ctx, conn, versioncontrolops.FilteredPushOptions{
+				SourceBranch:  sourceBranch,
+				StagingBranch: stagingBranch,
+				ExcludeTypes:  excludeTypes,
+				PeerRef:       "remotes/" + peer + "/" + sourceBranch,
+				Push: func(ctx context.Context, refspec string) error {
+					return versioncontrolops.PushRefspec(ctx, conn, peer, refspec, user)
+				},
+			})
+			return err
+		})
+	})
+	return err
+}
+
+// cleanupFilteredStaging deletes the filtered-push staging branch on a fresh,
+// uncanceled connection. Unlike server mode there is no operation connection
+// to discard — embedded branch state is session-scoped (a fresh session starts
+// on the store's branch), so the pinned staging session simply ends with its
+// connection — but the branch itself is durable and must be deleted even when
+// the push failed.
+func (s *EmbeddedDoltStore) cleanupFilteredStaging(ctx context.Context, stagingBranch string) error {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), federationStagingCleanupTimeout)
+	defer cancel()
+	return s.withMutatingDBConn(cleanupCtx, func(db versioncontrolops.DBConn) error {
+		if err := schema.DrainCall(cleanupCtx, db, "CALL DOLT_BRANCH('-Df', ?)", stagingBranch); err != nil {
+			msg := strings.ToLower(err.Error())
+			if strings.Contains(msg, "not found") || strings.Contains(msg, "does not exist") {
+				// The branch was never created, or cleanup already ran.
+				return nil
+			}
+			return fmt.Errorf("delete staging branch: %w", err)
+		}
+		return nil
+	})
 }
 
 // SyncStatus returns the synchronization status with a peer.

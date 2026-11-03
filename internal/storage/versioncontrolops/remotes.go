@@ -104,6 +104,25 @@ func Push(ctx context.Context, db DBConn, remote, branch, user string) error {
 	return nil
 }
 
+// PushRefspec pushes an arbitrary refspec ("src[:dst]") to the named remote,
+// publishing a branch under a possibly different name on the remote — the
+// federation privacy filter's staging branch reaches the peer's branch this
+// way. See Push for the user/auth contract.
+func PushRefspec(ctx context.Context, db DBConn, remote, refspec, user string) error {
+	err := withRemoteEnvGuards(func() error {
+		if user != "" {
+			_, err := db.ExecContext(ctx, "CALL DOLT_PUSH('--user', ?, ?, ?)", user, remote, refspec)
+			return err
+		}
+		_, err := db.ExecContext(ctx, "CALL DOLT_PUSH(?, ?)", remote, refspec)
+		return err
+	})
+	if err != nil {
+		return fmt.Errorf("push %s to %s: %w", refspec, remote, err)
+	}
+	return nil
+}
+
 // ForcePush force-pushes the given branch to the named remote.
 // See Push for the user/auth contract.
 func ForcePush(ctx context.Context, db DBConn, remote, branch, user string) error {
