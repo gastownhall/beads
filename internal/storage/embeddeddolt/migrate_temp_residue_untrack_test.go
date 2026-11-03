@@ -371,6 +371,37 @@ VALUES ('flip-1', 'created', 'tester', '2026-07-30 00:00:00', 'evt-live'),
 	}
 }
 
+// tempResidueRepairChanges reads the latest repair commit's table changes, as
+// "<table> <diff_type>", sorted.
+func tempResidueRepairChanges(t *testing.T, ctx context.Context, conn *sql.Conn) []string {
+	t.Helper()
+	var repair string
+	err := conn.QueryRowContext(ctx,
+		"SELECT commit_hash FROM dolt_log WHERE message LIKE 'schema: untrack committed __temp__%' LIMIT 1").Scan(&repair)
+	if err != nil {
+		t.Fatalf("finding the repair commit: %v", err)
+	}
+	rows, err := conn.QueryContext(ctx,
+		"SELECT to_table_name, from_table_name, diff_type FROM dolt_diff_summary(?, ?)", repair+"~1", repair)
+	if err != nil {
+		t.Fatalf("reading the repair commit's diff: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var changes []string
+	for rows.Next() {
+		var to, from, kind string
+		if err := rows.Scan(&to, &from, &kind); err != nil {
+			t.Fatalf("reading the repair commit's diff: %v", err)
+		}
+		changes = append(changes, fmt.Sprintf("%s%s %s", from, to, kind))
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("reading the repair commit's diff: %v", err)
+	}
+	slices.Sort(changes)
+	return changes
+}
+
 // TestTempResidueUntrackCommitsOnlyTheRemovals pins the repair's scope on a
 // store that also carries unrelated work: a staged config edit and an
 // unstaged one. The repair commit may hold nothing but the intermediate's
@@ -391,29 +422,7 @@ func TestTempResidueUntrackCommitsOnlyTheRemovals(t *testing.T) {
 			t.Fatalf("MigrateUp: %v", err)
 		}
 
-		var repair string
-		err := conn.QueryRowContext(ctx,
-			"SELECT commit_hash FROM dolt_log WHERE message LIKE 'schema: untrack committed __temp__%' LIMIT 1").Scan(&repair)
-		if err != nil {
-			t.Fatalf("finding the repair commit: %v", err)
-		}
-		rows, err := conn.QueryContext(ctx,
-			"SELECT to_table_name, from_table_name, diff_type FROM dolt_diff_summary(?, ?)", repair+"~1", repair)
-		if err != nil {
-			t.Fatalf("reading the repair commit's diff: %v", err)
-		}
-		var changes []string
-		for rows.Next() {
-			var to, from, kind string
-			if err := rows.Scan(&to, &from, &kind); err != nil {
-				t.Fatalf("reading the repair commit's diff: %v", err)
-			}
-			changes = append(changes, fmt.Sprintf("%s%s %s", from, to, kind))
-		}
-		if err := rows.Err(); err != nil {
-			t.Fatalf("reading the repair commit's diff: %v", err)
-		}
-		_ = rows.Close()
+		changes := tempResidueRepairChanges(t, ctx, conn)
 		if want := tempResidueTable + " dropped"; len(changes) != 1 || changes[0] != want {
 			t.Errorf("repair commit changes = %v, want only [%s]", changes, want)
 		}
@@ -531,6 +540,74 @@ func TestEmbeddedTempResidueCrashWindowConvergesOnReopen(t *testing.T) {
 			if slices.Contains([]string{"__temp__wisp_child_counters", "wisp_child_counters"}, dirty) {
 				t.Errorf("dolt_status reports %q after the reopened repair, want no rebuild residue", dirty)
 			}
+		}
+	})
+}
+
+// TestTempResidueGlobVetoKeepsTheIntermediateVersioned is the wildcard veto
+// against the real engine. Beside the seeded ('__temp__%', 1), an operator's
+// ('__temp__keep*', 0) makes Dolt's own staging TRACK __temp__keep_rows:
+// Dolt reads the pattern as a glob, which SQL LIKE cannot, and keeps the more
+// specific of the two. A writable open must leave that table versioned, row
+// and all, and still untrack the genuine residue committed beside it, both
+// tables in the one repair commit.
+func TestTempResidueGlobVetoKeepsTheIntermediateVersioned(t *testing.T) {
+	ctx := t.Context()
+	const kept = "__temp__keep_rows"
+	residue := []string{"__temp__local_metadata", tempResidueTable}
+	f := newPristineEmbeddedDoltFixture(t, "residueglobveto")
+	closeEmbeddedDoltStore(t, f.store)
+
+	withRawConn(t, f.dataDir, f.database, func(conn *sql.Conn) {
+		requireTempPatternSeeded(t, conn)
+		mustExecOn(t, ctx, conn, "INSERT INTO dolt_ignore (pattern, ignored) VALUES ('__temp__keep*', 0)")
+		mustExecOn(t, ctx, conn, "CREATE TABLE "+kept+" (id INT NOT NULL PRIMARY KEY, note VARCHAR(64) NOT NULL)")
+		mustExecOn(t, ctx, conn, "INSERT INTO "+kept+" VALUES (1, 'versioned on purpose')")
+		for _, name := range residue {
+			mustExecOn(t, ctx, conn, "CREATE TABLE "+name+" (id INT NOT NULL PRIMARY KEY)")
+			mustExecOn(t, ctx, conn, "INSERT INTO "+name+" VALUES (7)")
+		}
+		// A plain add takes what Dolt's own resolution does not ignore; the
+		// residue is then forced past the seeded wildcard, the way an older
+		// binary's blanket commit took it.
+		mustExecOn(t, ctx, conn, "CALL DOLT_ADD('-A')")
+		mustExecOn(t, ctx, conn, "CALL DOLT_ADD('-f', ?, ?)", residue[0], residue[1])
+		mustExecOn(t, ctx, conn, "CALL DOLT_COMMIT('-m', 'test: a versioned intermediate beside committed residue')")
+		if !trackedAtHead(t, ctx, conn, kept) {
+			t.Fatalf("Dolt did not track %s under ('__temp__keep*', 0); the veto is not reproduced", kept)
+		}
+		for _, name := range residue {
+			if !trackedAtHead(t, ctx, conn, name) {
+				t.Fatalf("%s is not tracked at HEAD; the residue is not reproduced", name)
+			}
+		}
+	})
+
+	openAndClose(t, f.beadsDir, f.database)
+
+	withRawConn(t, f.dataDir, f.database, func(conn *sql.Conn) {
+		if !trackedAtHead(t, ctx, conn, kept) {
+			t.Errorf("%s left HEAD: the open committed away a table ('__temp__keep*', 0) keeps versioned", kept)
+		}
+		var note string
+		if err := conn.QueryRowContext(ctx, "SELECT note FROM "+kept+" AS OF 'HEAD' WHERE id = 1").Scan(&note); err != nil || note != "versioned on purpose" {
+			t.Errorf("%s row at HEAD = %q (%v), want the versioned row", kept, note, err)
+		}
+		if got := statusOf(t, ctx, conn, kept); len(got) > 0 {
+			t.Errorf("dolt_status carries %v after the open; the versioned table must be untouched", got)
+		}
+		for _, name := range residue {
+			if trackedAtHead(t, ctx, conn, name) {
+				t.Errorf("%s is still tracked at HEAD: a veto for another name must not block its repair", name)
+			}
+			var rows int
+			if err := conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+name).Scan(&rows); err != nil || rows != 1 {
+				t.Errorf("%s working rows = %d (%v), want 1: the repair keeps the rows", name, rows, err)
+			}
+		}
+		want := []string{residue[0] + " dropped", residue[1] + " dropped"}
+		if got := tempResidueRepairChanges(t, ctx, conn); !slices.Equal(got, want) {
+			t.Errorf("repair commit changes = %v, want exactly %v", got, want)
 		}
 	})
 }

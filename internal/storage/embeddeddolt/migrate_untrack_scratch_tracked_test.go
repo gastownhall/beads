@@ -159,10 +159,11 @@ func TestIgnoredCursorScratchPendingDeletionWithCursorMissingSweepsOnly(t *testi
 	})
 }
 
-// The gate's scratch-at-HEAD probe runs on every open of a healthy database,
-// so it must be a statement that SUCCEEDS there (be-bv7x): on a brand-new
-// database whose HEAD is only the init commit, in both spellings the gate
-// issues — unqualified on the session database, and qualified with the
+// A scratch left only at HEAD is found by the committed-__temp__ gate's HEAD
+// listing, which runs on every open of a healthy database, so it must be a
+// statement that SUCCEEDS there (be-bv7x): on a brand-new database whose HEAD
+// is only the init commit, in both spellings listTempTables issues —
+// unqualified on the session database, and qualified with the
 // backtick-quoted name selectTargetDatabase hands the server fast path.
 func TestScratchHeadProbeSucceedsOnABrandNewDatabase(t *testing.T) {
 	ctx := t.Context()
@@ -172,9 +173,9 @@ func TestScratchHeadProbeSucceedsOnABrandNewDatabase(t *testing.T) {
 	withRawConn(t, pristine.dataDir, "headprobe", func(conn *sql.Conn) {
 		mustExecOn(t, ctx, conn, "CREATE DATABASE brandnew")
 		for _, query := range []string{
-			"SHOW TABLES FROM `brandnew` AS OF 'HEAD' LIKE '" + untrackScratchTable + "'",
+			"SHOW TABLES FROM `brandnew` AS OF 'HEAD' LIKE '__temp__%'",
 			"USE brandnew",
-			"SHOW TABLES AS OF 'HEAD' LIKE '" + untrackScratchTable + "'",
+			"SHOW TABLES AS OF 'HEAD' LIKE '__temp__%'",
 		} {
 			rows, err := conn.QueryContext(ctx, query)
 			if err != nil {

@@ -279,6 +279,7 @@
 40 12 TestHistoryPresenceContract
 40 12 TestLifecycleUpdateContract
 40 12 TestReaderListExcludeStatusAcceptsAWorkspaceCustomStatus
+40 12 TestTempResidueGlobVetoKeepsTheIntermediateVersioned
 
 40 13 TestEmbeddedActivationDoesNotOpenTheEngine
 40 13 TestEmbeddedDepRekeyConvergesRenameChain

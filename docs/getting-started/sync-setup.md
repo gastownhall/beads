@@ -261,33 +261,6 @@ bd dolt commit
 bd dolt pull
 ```
 
-### "malformed database: chunk … required but not found" on pull
-
-A `bd` older than the fix for [#7073](https://github.com/gastownhall/beads/issues/7073)
-could commit a `__temp__` table-rebuild intermediate (for example
-`__temp__wisp_child_counters`) into the database's history. Every fresh clone of
-that history then renames it during its first migration, in a way Dolt cannot
-stage, and `bd dolt pull` fails with this error (or with "cannot merge with
-uncommitted changes"). It is not corruption.
-
-Upgrade `bd`, then run a `bd` command that opens the database for writing,
-such as `bd migrate`. On open, `bd` removes the intermediate from the history
-in its own commit and keeps the table's rows, then the pull works. Push once
-afterwards so new clones no longer receive the intermediate:
-
-```bash
-bd migrate
-bd dolt pull
-bd dolt push
-```
-
-The repair runs only when `bd` may migrate the database and the database user
-may commit. If the database is waiting for migration consent, or a restricted
-user opens it, `bd` skips the repair and keeps working, and the pull keeps
-failing until a permitted open repairs it. An intermediate that your
-`dolt_ignore` explicitly keeps versioned (an exact-name row with `ignored = 0`)
-is left alone.
-
 ### "no store available" on push or commit
 
 This was a bug in bd < 0.59.0. Upgrade bd:
