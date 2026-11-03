@@ -73,10 +73,8 @@ func LocalIsStrictAncestorOf(ctx context.Context, db DBConn, ref string) (bool, 
 // changes, EXCLUDING dolt-ignored wisp tables ("wisps" and "wisp_*"), which
 // cannot be staged/committed and so should never block a clean-working-set
 // gate. This mirrors the exclusion in DirtyTableTracker.MarkDirty
-// (commit.go), but — unlike the unexported workingSetClean in
-// mergesettle.go, which does not exclude wisps and swallows its query
-// error — this reports the error to the caller instead of treating it as
-// dirty.
+// (commit.go). MergeBaseline.Clean (mergesettle.go), which gates a hard
+// reset, counts every table dolt_status lists, wisps included.
 func WorkingSetClean(ctx context.Context, db DBConn) (bool, error) {
 	rows, err := db.QueryContext(ctx, "SELECT table_name FROM dolt_status")
 	if err != nil {

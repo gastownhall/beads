@@ -26,8 +26,9 @@ import (
 	"github.com/steveyegge/beads/internal/testutil"
 )
 
-func TestEncryptDecryptWithKey(t *testing.T) {
-	// Generate a random key
+// The credential upgrade reads rows sealed in the legacy unbound format with
+// peercred.OpenLegacy; it must open what older releases wrote.
+func TestOpenLegacyReadsTheLegacyFormat(t *testing.T) {
 	key := make([]byte, 32)
 	for i := range key {
 		key[i] = byte(i)
@@ -39,13 +40,10 @@ func TestEncryptDecryptWithKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("encryptWithKey failed: %v", err)
 	}
-	if len(encrypted) == 0 {
-		t.Fatal("encrypted result is empty")
-	}
 
-	decrypted, err := decryptWithKey(encrypted, key)
+	decrypted, err := peercred.OpenLegacy(key, encrypted)
 	if err != nil {
-		t.Fatalf("decryptWithKey failed: %v", err)
+		t.Fatalf("peercred.OpenLegacy failed: %v", err)
 	}
 	if decrypted != password {
 		t.Errorf("decrypted = %q, want %q", decrypted, password)
@@ -459,7 +457,7 @@ func TestIsS3RemoteURL(t *testing.T) {
 	}
 }
 
-func TestEncryptDecryptWithWrongKey(t *testing.T) {
+func TestOpenLegacyRejectsAnotherKey(t *testing.T) {
 	key1 := make([]byte, 32)
 	key2 := make([]byte, 32)
 	for i := range key1 {
@@ -472,8 +470,7 @@ func TestEncryptDecryptWithWrongKey(t *testing.T) {
 		t.Fatalf("encryptWithKey failed: %v", err)
 	}
 
-	_, err = decryptWithKey(encrypted, key2)
-	if err == nil {
+	if _, err := peercred.OpenLegacy(key2, encrypted); err == nil {
 		t.Fatal("expected decryption with wrong key to fail")
 	}
 }
@@ -691,10 +688,10 @@ func TestAddFederationPeerReturnsCredentialKeyInitError(t *testing.T) {
 	}
 }
 
-func TestDecryptWithKeyShortCiphertext(t *testing.T) {
+func TestOpenLegacyShortCiphertext(t *testing.T) {
 	key := make([]byte, 32)
-	if _, err := decryptWithKey([]byte("short"), key); err == nil || err.Error() != "ciphertext too short" {
-		t.Fatalf("decryptWithKey(short) error = %v, want ciphertext too short", err)
+	if _, err := peercred.OpenLegacy(key, []byte("short")); err == nil || err.Error() != "ciphertext too short" {
+		t.Fatalf("peercred.OpenLegacy(short) error = %v, want ciphertext too short", err)
 	}
 }
 
@@ -789,6 +786,34 @@ func TestCredentialKeyNoGhostDir(t *testing.T) {
 	// dbPath directory should NOT have been created
 	if _, err := os.Stat(dbPath); err == nil {
 		t.Error("dbPath directory should not be created in shared-server mode — ghost directory bug")
+	}
+}
+
+// The credential key opens every stored password, so the .gitignore beside it
+// lists the key file and its upgrade marker by the time the key is written: a
+// .beads/.gitignore that predates either file would otherwise offer them to
+// git add.
+func TestCredentialKeyFileIsGitignored(t *testing.T) {
+	beadsDir := t.TempDir()
+	gitignorePath := filepath.Join(beadsDir, ".gitignore")
+	if err := os.WriteFile(gitignorePath, []byte("*.db\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	store := &DoltStore{dbPath: filepath.Join(beadsDir, "dolt"), beadsDir: beadsDir}
+	if err := store.initCredentialKey(t.Context()); err != nil {
+		t.Fatalf("initCredentialKey failed: %v", err)
+	}
+
+	data, err := os.ReadFile(gitignorePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(string(data), "\n")
+	for _, want := range []string{"*.db", credentialKeyFile, credentialKeyFile + ".v2-migrated"} {
+		if !slices.Contains(lines, want) {
+			t.Errorf(".gitignore does not list %q:\n%s", want, data)
+		}
 	}
 }
 
@@ -951,7 +976,7 @@ func TestFederationPeerDecryptKeyMismatchNamesTheLocalKey(t *testing.T) {
 		// legacy dbPath and the bare name would not say which file is meant.
 		"stored peer credentials cannot be decrypted with this machine's credential key " +
 			"(the key file " + filepath.Join(beadsDir, credentialKeyFile) + " is machine-local and does not replicate with the database); " +
-			"re-run `bd federation add-peer team <url> --user peeruser` on this machine",
+			"re-run bd federation add-peer team <url> --user peeruser on this machine",
 		// The cipher error stays wrapped, so the raw cause is still readable.
 		"cipher: message authentication failed",
 	}
@@ -1348,7 +1373,7 @@ func TestFederationPeerUninitializedKeyIsNotAMismatch(t *testing.T) {
 		if !strings.Contains(err.Error(), "credential encryption key not initialized") {
 			t.Errorf("error = %v, want it to name the uninitialized key", err)
 		}
-		if strings.Contains(err.Error(), "re-run 'bd federation add-peer") {
+		if strings.Contains(err.Error(), "bd federation add-peer") {
 			t.Errorf("error = %v, must not prescribe re-adding the peer for an uninitialized key", err)
 		}
 	}
@@ -1373,9 +1398,10 @@ func TestFederationPeerUninitializedKeyIsNotAMismatch(t *testing.T) {
 	})
 }
 
-// The key-rotation reader passes an old key to decryptWithKey on purpose, so
-// that helper must stay unwrapped: a rotation miss is not a mismatch.
-func TestDecryptWithKeyStaysUnwrappedForRotation(t *testing.T) {
+// The credential upgrade tries each local key with peercred.OpenLegacy on
+// purpose, so a miss must stay a bare cipher error, not a mismatch:
+// classification belongs to decryptPassword.
+func TestOpenLegacyStaysUnwrappedForMigration(t *testing.T) {
 	key := make([]byte, 32)
 	for i := range key {
 		key[i] = byte(i)
@@ -1389,9 +1415,9 @@ func TestDecryptWithKeyStaysUnwrappedForRotation(t *testing.T) {
 		t.Fatalf("encryptWithKey() error = %v", err)
 	}
 
-	_, err = decryptWithKey(encrypted, other)
+	_, err = peercred.OpenLegacy(other, encrypted)
 	if err == nil {
-		t.Fatal("decryptWithKey with the wrong key succeeded, want an error")
+		t.Fatal("peercred.OpenLegacy with the wrong key succeeded, want an error")
 	}
 	if errors.Is(err, storage.ErrCredentialKeyMismatch) {
 		t.Errorf("error = %v, want the bare cipher error; classification belongs to decryptPassword", err)
@@ -1415,28 +1441,6 @@ func encryptWithKey(plaintext string, key []byte) ([]byte, error) {
 		return nil, err
 	}
 	return gcm.Seal(nonce, nonce, []byte(plaintext), nil), nil
-}
-
-// decryptWithKey opens the legacy unbound format.
-func decryptWithKey(encrypted []byte, key []byte) (string, error) {
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return "", err
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return "", err
-	}
-	nonceSize := gcm.NonceSize()
-	if len(encrypted) < nonceSize {
-		return "", fmt.Errorf("ciphertext too short")
-	}
-	nonce, ciphertext := encrypted[:nonceSize], encrypted[nonceSize:]
-	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
-	if err != nil {
-		return "", err
-	}
-	return string(plaintext), nil
 }
 
 // peerRowColumns are the columns GetFederationPeer and ListFederationPeers
@@ -1498,7 +1502,7 @@ func TestServerCopiedCiphertextNeverReachesPeerOperation(t *testing.T) {
 	if !errors.Is(err, storage.ErrCredentialKeyMismatch) || !errors.Is(err, peercred.ErrNotAuthenticated) {
 		t.Errorf("error = %v, want errors.Is ErrCredentialKeyMismatch and peercred.ErrNotAuthenticated", err)
 	}
-	if !strings.Contains(err.Error(), "re-run `bd federation add-peer evil <url> --user good-user` on this machine") {
+	if !strings.Contains(err.Error(), "re-run bd federation add-peer evil <url> --user good-user on this machine") {
 		t.Errorf("error = %v, want the peer-specific add-peer remedy", err)
 	}
 	if strings.Contains(err.Error(), "good-password") || strings.Contains(err.Error(), "evil.example") {

@@ -113,7 +113,7 @@ The key is a machine-local file (`.beads/.beads-credential-key`) that never
 replicates. The encrypted password itself is a row in the database, so it
 travels with every push and pull.
 
-In releases after v1.3.2, a stored password is bound to its peer's name, its
+In bd v1.4.0 and later, a stored password is bound to its peer's name, its
 exact URL and its username. If a password is copied into another peer's row,
 or that row's URL or username changes, it no longer decrypts there. bd refuses
 the peer's credential and never falls back to environment credentials. Re-add
@@ -123,7 +123,7 @@ The first federation command after upgrading converts this machine's older,
 unbound passwords to the bound format. It commits that change and records
 completion in `.beads/.beads-credential-key.v2-migrated` (machine-local and
 gitignored). A read-only command does not convert them, so run
-`bd federation list-peers` first. An encrypted password can appear in the
+`bd federation status` first. An encrypted password can appear in the
 database's history under another peer's name, URL or username. bd cannot know
 whose password that is, so it does not convert it. It prints a warning naming
 the peer and the `bd federation add-peer` command that re-adds it. That peer's
@@ -132,9 +132,14 @@ password between peers yourself, rotate it. An older-format password that
 arrives after the conversion (for example from a pull) is refused, not
 converted.
 
+The conversion reads every commit on the checked-out branch, so it can take a
+while on a long history. Until it succeeds, `bd federation sync`, `status` and
+`add-peer`, and any other command that uses stored peer credentials, fail with
+it.
+
 The conversion rewrites the checked-out branch only. Other local branches keep
 their older-format passwords, and those stay unusable after the conversion
-finishes; re-add the peer on such a branch. bd v1.3.2 and earlier cannot read
+finishes; re-add the peer on such a branch. bd v1.3.3 and earlier cannot read
 the bound format, so upgrade bd on every machine that shares the database
 before it runs a federation command there.
 
@@ -176,13 +181,25 @@ bd federation status --peer town-beta
 ```
 
 Without `--strategy`, a sync that hits merge conflicts pauses and reports the
-conflicting tables for manual resolution instead of auto-resolving.
+conflicting tables for manual resolution instead of auto-resolving. In bd
+v1.4.0 and later, a sync first settles the conflicts `bd dolt pull` settles on
+its own and pauses only for the rest. `--strategy` then merges again and
+resolves every conflicted table with the named side, including rows the
+automatic merge would have settled field by field. So `--strategy ours` also
+drops the peer's edits to those rows, and the push then removes them from the
+peer.
+
+A peer's delete of an issue linked to one you withhold from it (see below) is
+settled too, unless you changed that issue's own fields since the last sync:
+the issue is deleted here as well, and the withheld issue keeps its other
+rows. Comments, labels, dependencies and provenance events added to the
+deleted issue since the last sync are removed with it.
 
 ### Excluded issue types
 
 `federation.exclude_types` (default `[wisp]`) names issue types that
-`bd federation sync` keeps off the tip it pushes to a peer. In releases after
-v1.3.2 the filter works like this:
+`bd federation sync` keeps off the tip it pushes to a peer. In bd v1.4.0 and
+later the filter works like this:
 
 - Only issues the peer's tip does not already hold are withheld. An issue the
   peer already received stays there; changing its type later does not
@@ -195,14 +212,22 @@ v1.3.2 the filter works like this:
 - Your local data is kept. Each filtered push leaves a filter commit and its
   revert in local history, and a sync that fails partway (a push error, a
   cancelled run) leaves local issues, wisps and the checked-out branch as
-  they were. If another command commits to the branch, or leaves uncommitted
-  changes on it, while the sync prepares a filtered push, nothing is pushed
-  and that change is kept; run the sync again.
+  they were.
+- A filtered push needs the branch to hold still while the sync prepares it.
+  If another command commits to the branch, or leaves uncommitted changes on
+  it, in that time, nothing is pushed and that change is kept. Preparing the
+  push recomputes blocked issues across the whole database, which can take
+  seconds on a large one, and on a shared server every other bd command that
+  writes to the branch counts. Where agents write to the branch all the time,
+  run filtered syncs while nothing else writes to it.
 - When a push withholds anything, the peer's line reads
   `✓ Pushed (excluded issue types withheld from the tip)`, one notice per run
   is printed on stderr, and the `--json` result for that peer carries
-  `"PushFiltered": true`. When the filtered tip already matches what the peer
-  holds, nothing is pushed and no notice is printed.
+  `"PushFiltered": true`. Each sync records its time in the database, so
+  while any issue is withheld every sync publishes again, even when nothing
+  else changed, and adds another filter commit and revert to your history and
+  the peer's. Nothing is pushed only when the filtered tip already matches
+  what the peer holds.
 
 ### Topologies
 

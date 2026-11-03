@@ -412,8 +412,8 @@ func TestEmbeddedFederationSyncFilteredNotice(t *testing.T) {
 		t.Fatalf("write workspace config: %v", err)
 	}
 	runBdOK(t, bd, dir, "create", "--id", "fdfil-chore", "--type", "chore", "chore to withhold")
-	// A shared change too: with only the withheld chore new, the filtered
-	// payload would equal each peer's tip and nothing would be published.
+	// A shared change too, so each peer's publication carries an issue change
+	// and not only bookkeeping rows (peer rows, sync times).
 	runBdOK(t, bd, dir, "create", "--type", "task", "first shared task")
 
 	stdout, stderr := runBdFederationBuffers(t, bd, dir, "sync")
@@ -424,8 +424,9 @@ func TestEmbeddedFederationSyncFilteredNotice(t *testing.T) {
 		t.Errorf("human sync printed %d notices on stderr, want 1:\n%s", got, stderr)
 	}
 
-	// A new shared change, so the second invocation publishes again rather
-	// than finding an unchanged payload.
+	// A new shared change for the second invocation to publish. It would
+	// publish without one: each sync records its time in the database, so
+	// the filtered payload never equals the tip the previous sync pushed.
 	runBdOK(t, bd, dir, "create", "--type", "task", "second shared task")
 	stdout, stderr = runBdFederationBuffers(t, bd, dir, "sync", "--json")
 	var payload struct {

@@ -13,6 +13,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage"
@@ -353,5 +355,85 @@ func TestFederationCredentialMigrationResealsLegacyBlobWithV2PrefixedNonce(t *te
 	}
 	if blob := storedBlob(t, store, "team"); bytes.Equal(blob, legacy) {
 		t.Error("the v2-prefixed legacy blob was left in place instead of resealed")
+	}
+}
+
+// A read-only store does not upgrade a legacy credential, and its error names
+// the remedy: bd federation status without --readonly. That command fetches
+// from each peer, and the fetch's credential read upgrades the row, after
+// which a read-only store reads the password.
+func TestFederationReadOnlyLegacyCredentialRemedyUpgradesIt(t *testing.T) {
+	ctx := context.Background()
+	// A peer directory with no database: the fetch fails after the upgrade.
+	beadsDir, store := legacyPeerStore(t,
+		&storage.FederationPeer{Name: "team", RemoteURL: "file://" + t.TempDir(), Username: "peeruser", Password: "peerpass"},
+	)
+	store.Close()
+
+	readOnly, err := OpenReadOnly(ctx, beadsDir, "fedauth", "main")
+	if err != nil {
+		t.Fatalf("OpenReadOnly: %v", err)
+	}
+	_, err = readOnly.GetFederationPeer(ctx, "team")
+	readOnly.Close()
+	if !errors.Is(err, storage.ErrCredentialKeyMismatch) {
+		t.Fatalf("read-only GetFederationPeer error = %v, want errors.Is storage.ErrCredentialKeyMismatch", err)
+	}
+	if !strings.Contains(err.Error(), "run bd federation status without --readonly") {
+		t.Fatalf("read-only error does not name the remedy: %v", err)
+	}
+
+	// What bd federation status runs for the peer on a writable store.
+	writable, err := Open(ctx, beadsDir, "fedauth", "main")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	_ = writable.Fetch(ctx, "team")
+	writable.Close()
+
+	readOnly, err = OpenReadOnly(ctx, beadsDir, "fedauth", "main")
+	if err != nil {
+		t.Fatalf("OpenReadOnly after the remedy: %v", err)
+	}
+	defer readOnly.Close()
+	got, err := readOnly.GetFederationPeer(ctx, "team")
+	if err != nil {
+		t.Fatalf("read-only GetFederationPeer after the remedy: %v", err)
+	}
+	if got.Password != "peerpass" {
+		t.Errorf("password = %q, want %q", got.Password, "peerpass")
+	}
+}
+
+// The credential key opens every stored password, so the first writable
+// credential operation lists the key file and its upgrade marker in
+// .beads/.gitignore before writing them: a .gitignore that predates either
+// file would otherwise offer them to git add.
+func TestFederationCredentialFilesAreGitignored(t *testing.T) {
+	ctx := context.Background()
+	store := newPeerAuthTestStore(t)
+	gitignorePath := filepath.Join(store.beadsDir, ".gitignore")
+	if err := os.WriteFile(gitignorePath, []byte("*.db\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := store.ListFederationPeers(ctx); err != nil {
+		t.Fatalf("ListFederationPeers: %v", err)
+	}
+	keyPath := filepath.Join(store.beadsDir, credentialKeyFile)
+	for _, path := range []string{keyPath, peercred.MarkerPath(keyPath)} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("%s was not written: %v", filepath.Base(path), err)
+		}
+	}
+	data, err := os.ReadFile(gitignorePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(string(data), "\n")
+	for _, want := range []string{"*.db", credentialKeyFile, credentialKeyFile + ".v2-migrated"} {
+		if !slices.Contains(lines, want) {
+			t.Errorf(".gitignore does not list %q:\n%s", want, data)
+		}
 	}
 }

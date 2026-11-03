@@ -22,8 +22,11 @@ var filteredPushRecomputeTables = []string{"wisps", "wisp_dependencies"}
 
 // ErrFilteredPushSourceChanged reports that another writer advanced or dirtied
 // the source branch while a filtered publication was being prepared. Nothing
-// is published and the other writer's changes are kept; a new sync retries.
-var ErrFilteredPushSourceChanged = errors.New("source branch changed during the filtered publication; nothing was pushed")
+// is published and the other writer's changes are kept. On a shared server
+// every other writer on the branch counts, so a retry lands only while the
+// branch holds still.
+var ErrFilteredPushSourceChanged = errors.New("source branch changed during the filtered publication; nothing was pushed " +
+	"(a filtered push needs the branch to hold still while it is prepared: sync while nothing else writes to it)")
 
 // filteredPushAbortTimeout bounds the abort of a failed keep merge, which runs
 // on a fresh context so a canceled sync still aborts its own merge.

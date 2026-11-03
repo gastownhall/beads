@@ -1,3 +1,5 @@
+//go:build cgo
+
 package main
 
 import (
@@ -57,7 +59,8 @@ func runFederationSyncForTest(t *testing.T, stub *federationSyncStoreStub, asJSO
 // One CLI invocation prints the history-visibility notice once when any peer
 // publication withheld rows, in human and JSON mode, including one whose
 // cleanup failed after it landed, and never for a failed, unfiltered or
-// unchanged (nothing pushed) result. JSON output stays valid and marks each
+// unchanged (nothing pushed) result. Human mode prints a cleanup failure
+// beside the push it followed. JSON output stays valid and marks each
 // filtered result.
 func TestFederationSyncFilteredPushNoticeOncePerInvocation(t *testing.T) {
 	clearTelemetryEnv(t)
@@ -75,16 +78,18 @@ func TestFederationSyncFilteredPushNoticeOncePerInvocation(t *testing.T) {
 		alpha, beta string
 		asJSON      bool
 		notices     int
+		// stdoutHas is a human-mode line fragment the result must print.
+		stdoutHas string
 	}{
-		{"human both filtered", filtered, filtered, false, 1},
-		{"json both filtered", filtered, filtered, true, 1},
-		{"json filtered and failed", filtered, failed, true, 1},
-		{"human unfiltered and failed", plain, failed, false, 0},
-		{"json unfiltered and failed", plain, failed, true, 0},
-		{"human unchanged", unchanged, unchanged, false, 0},
-		{"json unchanged and unfiltered", unchanged, plain, true, 0},
-		{"human filtered with failed cleanup", cleanupFailed, unchanged, false, 1},
-		{"json filtered with failed cleanup", unchanged, cleanupFailed, true, 1},
+		{"human both filtered", filtered, filtered, false, 1, "Pushed (excluded issue types withheld from the tip)"},
+		{"json both filtered", filtered, filtered, true, 1, ""},
+		{"json filtered and failed", filtered, failed, true, 1, ""},
+		{"human unfiltered and failed", plain, failed, false, 0, "Push skipped: peer rejected the push"},
+		{"json unfiltered and failed", plain, failed, true, 0, ""},
+		{"human unchanged", unchanged, unchanged, false, 0, ""},
+		{"json unchanged and unfiltered", unchanged, plain, true, 0, ""},
+		{"human filtered with failed cleanup", cleanupFailed, unchanged, false, 1, "After the push: federation filter: cleanup: connection lost"},
+		{"json filtered with failed cleanup", unchanged, cleanupFailed, true, 1, ""},
 	} {
 		stub := &federationSyncStoreStub{results: map[string]string{"alpha": tc.alpha, "beta": tc.beta}}
 		stdout, stderr := runFederationSyncForTest(t, stub, tc.asJSON)
@@ -93,6 +98,9 @@ func TestFederationSyncFilteredPushNoticeOncePerInvocation(t *testing.T) {
 		}
 		if strings.Contains(stdout, noticeMarker) {
 			t.Errorf("%s: notice written to stdout", tc.name)
+		}
+		if !strings.Contains(stdout, tc.stdoutHas) {
+			t.Errorf("%s: stdout does not contain %q:\n%s", tc.name, tc.stdoutHas, stdout)
 		}
 		if !tc.asJSON {
 			continue

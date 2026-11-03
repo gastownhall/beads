@@ -134,7 +134,7 @@ func CredentialKeyMismatchError(keyFile, peer, user string, cause error) error {
 		userArg, userNote = remedy.CommandArg(runtime.GOOS, user, "<user>")
 		userFlag = " --user " + userArg
 	}
-	return fmt.Errorf("%w (the key file %s is machine-local and does not replicate with the database); re-run `bd federation add-peer %s <url>%s` on this machine%s: %w",
+	return fmt.Errorf("%w (the key file %s is machine-local and does not replicate with the database); re-run bd federation add-peer %s <url>%s on this machine%s: %w",
 		ErrCredentialKeyMismatch, keyFile, peerArg, userFlag, peerNote+userNote, cause)
 }
 

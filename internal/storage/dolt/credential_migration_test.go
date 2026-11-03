@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage"
@@ -25,6 +26,26 @@ func reopenCredentialTestStore(t *testing.T, prev *DoltStore) *DoltStore {
 	})
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	return store
+}
+
+// reopenReadOnlyCredentialTestStore is reopenCredentialTestStore for a
+// read-only command.
+func reopenReadOnlyCredentialTestStore(t *testing.T, prev *DoltStore) *DoltStore {
+	t.Helper()
+	store, err := New(context.Background(), &Config{
+		Path:         prev.dbPath,
+		BeadsDir:     prev.beadsDir,
+		ServerHost:   "127.0.0.1",
+		ServerPort:   testServerPort,
+		Database:     prev.database,
+		MaxOpenConns: 1,
+		ReadOnly:     true,
+	})
+	if err != nil {
+		t.Fatalf("reopen read-only: %v", err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	return store
@@ -138,5 +159,97 @@ func TestServerLegacyCredentialsMigrateOnce(t *testing.T) {
 	}
 	if blob := serverBlob(t, later, "other"); !bytes.Equal(blob, injected) {
 		t.Errorf("injected legacy blob was rewritten after migration completed (%d bytes)", len(blob))
+	}
+}
+
+// A read-only store does not upgrade a legacy credential, and its error names
+// the remedy: bd federation status without --readonly. That command fetches
+// from each peer, and the fetch's credential read upgrades the row, after
+// which the read-only store reads the password.
+func TestServerReadOnlyLegacyCredentialRemedyUpgradesIt(t *testing.T) {
+	seed := newCredentialBindingTestStore(t, "rofix")
+	ctx := context.Background()
+
+	// A peer directory with no database: the fetch fails after the upgrade.
+	peer := &storage.FederationPeer{Name: "team", RemoteURL: "file://" + t.TempDir(), Username: "team-user", Password: "team-secret"}
+	if err := seed.AddFederationPeer(ctx, peer); err != nil {
+		t.Fatalf("AddFederationPeer: %v", err)
+	}
+	if err := seed.ensureCredentialKey(ctx); err != nil {
+		t.Fatal(err)
+	}
+	setServerBlob(t, seed, "team", legacyServerBlob(t, seed.credentialKey, "team-secret"))
+	if err := seed.doltAddAndCommit(ctx, []string{"federation_peers"}, "legacy credential"); err != nil {
+		t.Fatalf("commit legacy row: %v", err)
+	}
+	removeMarker(t, seed)
+
+	readOnly := reopenReadOnlyCredentialTestStore(t, seed)
+	_, err := readOnly.GetFederationPeer(ctx, "team")
+	if !errors.Is(err, storage.ErrCredentialKeyMismatch) {
+		t.Fatalf("read-only GetFederationPeer error = %v, want errors.Is storage.ErrCredentialKeyMismatch", err)
+	}
+	if !strings.Contains(err.Error(), "run bd federation status without --readonly") {
+		t.Fatalf("read-only error does not name the remedy: %v", err)
+	}
+
+	// What bd federation status runs for the peer on a writable store.
+	_ = reopenCredentialTestStore(t, seed).Fetch(ctx, "team")
+
+	got, err := readOnly.GetFederationPeer(ctx, "team")
+	if err != nil {
+		t.Fatalf("read-only GetFederationPeer after the remedy: %v", err)
+	}
+	if got.Password != "team-secret" {
+		t.Errorf("password = %q, want %q", got.Password, "team-secret")
+	}
+}
+
+// The upgrade runs on its own connection, which starts on the database's
+// default branch, yet it must rewrite the branch the store has checked out:
+// later credential reads open that branch's rows. The default branch keeps
+// its legacy row.
+func TestServerLegacyCredentialMigrationRewritesTheStoresBranch(t *testing.T) {
+	seed := newCredentialBindingTestStore(t, "branchmig")
+	ctx := context.Background()
+
+	peer := &storage.FederationPeer{Name: "team", RemoteURL: "file:///tmp/credmig-branch", Username: "team-user", Password: "team-secret"}
+	if err := seed.AddFederationPeer(ctx, peer); err != nil {
+		t.Fatalf("AddFederationPeer: %v", err)
+	}
+	if err := seed.ensureCredentialKey(ctx); err != nil {
+		t.Fatal(err)
+	}
+	legacy := legacyServerBlob(t, seed.credentialKey, "team-secret")
+	setServerBlob(t, seed, "team", legacy)
+	if err := seed.doltAddAndCommit(ctx, []string{"federation_peers"}, "legacy credential"); err != nil {
+		t.Fatalf("commit legacy row: %v", err)
+	}
+	if err := seed.Branch(ctx, "side"); err != nil {
+		t.Fatalf("Branch: %v", err)
+	}
+	removeMarker(t, seed)
+
+	store := reopenCredentialTestStore(t, seed)
+	if err := store.Checkout(ctx, "side"); err != nil {
+		t.Fatalf("Checkout: %v", err)
+	}
+	got, err := store.GetFederationPeer(ctx, "team")
+	if err != nil {
+		t.Fatalf("GetFederationPeer on the checked-out branch: %v", err)
+	}
+	if got.Password != "team-secret" {
+		t.Errorf("password = %q, want %q", got.Password, "team-secret")
+	}
+	if blob := serverBlob(t, store, "team"); !bytes.HasPrefix(blob, []byte("v2:")) {
+		t.Error("the checked-out branch's row was not resealed as v2")
+	}
+	var mainBlob []byte
+	if err := store.db.QueryRowContext(ctx,
+		"SELECT password_encrypted FROM `"+store.database+"/main`.federation_peers WHERE name = ?", "team").Scan(&mainBlob); err != nil {
+		t.Fatalf("read the default branch's row: %v", err)
+	}
+	if !bytes.Equal(mainBlob, legacy) {
+		t.Error("the upgrade rewrote the default branch's row")
 	}
 }

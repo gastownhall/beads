@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/gitignore"
 	"github.com/steveyegge/beads/internal/remedy"
 )
 
@@ -155,7 +156,9 @@ func Migrate(ctx context.Context, conn Conn, key []byte, legacyKeys [][]byte) (M
 
 	history, err := scanRows(ctx, conn, historyRowsQuery, false)
 	if err != nil {
-		return res, fmt.Errorf("read federation peer credential history: %w", err)
+		// Say what the scan reads: every commit reachable from HEAD, so a
+		// long history is what makes it slow enough to time out.
+		return res, fmt.Errorf("read federation peer credential history (every commit on this branch): %w", err)
 	}
 	occurrences := make([]Occurrence, 0, len(current)+len(history))
 	for _, rs := range [][]Row{current, history} {
@@ -243,6 +246,20 @@ func SkipWarning(goos string, r Row) string {
 		"Re-add the peer with bd federation add-peer %s <url>%s%s and enter the password at the prompt; "+
 		"rotate that password if you did not copy it between peers yourself.%s\n",
 		remedy.PrintedValue(r.Binding.Name), peerArg, user, sovereignty, peerNote+userNote+tierNote)
+}
+
+// GitignoreLocalFiles makes the .gitignore beside keyPath list the key file
+// and its completion marker, so git never offers either to `git add`. A
+// .beads/.gitignore written before either file existed lists neither, and the
+// key opens every stored password. Call it before writing either file.
+func GitignoreLocalFiles(keyPath string) error {
+	dir := filepath.Dir(keyPath)
+	for _, name := range []string{filepath.Base(keyPath), filepath.Base(MarkerPath(keyPath))} {
+		if err := gitignore.EnsurePatternIgnored(dir, name); err != nil {
+			return fmt.Errorf("add %s to %s: %w", name, filepath.Join(dir, ".gitignore"), err)
+		}
+	}
+	return nil
 }
 
 // markerDomain separates the marker MAC from every other use of the key.

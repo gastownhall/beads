@@ -407,7 +407,7 @@ func rotateCredentialKey(t *testing.T, store *EmbeddedDoltStore) {
 func wantKeyMismatchClause(store *EmbeddedDoltStore, addPeer string) string {
 	return "stored peer credentials cannot be decrypted with this machine's credential key " +
 		"(the key file " + filepath.Join(store.beadsDir, credentialKeyFile) + " is machine-local and does not replicate with the database); " +
-		"re-run `" + addPeer + "` on this machine"
+		"re-run " + addPeer + " on this machine"
 }
 
 // Pins the decrypt-failure branch (GH#5085 review): a peer row whose password

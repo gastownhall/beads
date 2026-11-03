@@ -152,6 +152,15 @@ func TestMergeWithStrategy_OursKeepsLocal(t *testing.T) {
 	if dirty != 0 {
 		t.Errorf("%d dirty table(s) remain: the resolution was not committed", dirty)
 	}
+	// Keeping ours leaves nothing to stage, so only the merge state shows
+	// whether the merge was concluded.
+	var merging bool
+	if err := conn.QueryRowContext(ctx, "SELECT is_merging FROM dolt_merge_status").Scan(&merging); err != nil {
+		t.Fatalf("read merge status: %v", err)
+	}
+	if merging {
+		t.Error("the merge is still in progress after --strategy ours")
+	}
 }
 
 // TestMerge_NoStrategyStillErrorsWithEscapeHatchHint pins the "no --strategy"

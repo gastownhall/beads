@@ -249,6 +249,271 @@ func TestFilteredFederationSyncKeepsLocalExcludedIssues(t *testing.T) {
 	}
 }
 
+// peerCommits runs query on the peer's branch, as another clone of the peer
+// would: on a branch cut from the fetched peer tip, committed and pushed to
+// the peer's main.
+func (f *filteredSyncFixture) peerCommits(t *testing.T, query string, args ...any) {
+	t.Helper()
+	ctx := t.Context()
+	tip := f.tipHash(t)
+	if err := f.store.withPinnedDBConn(ctx, func(db versioncontrolops.DBConn) error {
+		if _, err := db.ExecContext(ctx, "CALL DOLT_BRANCH('peerwork', ?)", tip); err != nil {
+			return err
+		}
+		if err := versioncontrolops.CheckoutBranch(ctx, db, "peerwork"); err != nil {
+			return err
+		}
+		if _, err := db.ExecContext(ctx, query, args...); err != nil {
+			return err
+		}
+		if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'peer change')"); err != nil {
+			return err
+		}
+		if err := versioncontrolops.Push(ctx, db, f.peer, "peerwork:main", ""); err != nil {
+			return err
+		}
+		if err := versioncontrolops.CheckoutBranch(ctx, db, "main"); err != nil {
+			return err
+		}
+		_, err := db.ExecContext(ctx, "CALL DOLT_BRANCH('-D', 'peerwork')")
+		return err
+	}); err != nil {
+		t.Fatalf("peer commits %q: %v", query, err)
+	}
+}
+
+// assertNotMerging fails when a merge is left in progress on main.
+func (f *filteredSyncFixture) assertNotMerging(t *testing.T) {
+	t.Helper()
+	var merging bool
+	if err := f.store.withConn(t.Context(), false, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(t.Context(), "SELECT is_merging FROM dolt_merge_status").Scan(&merging)
+	}); err != nil {
+		t.Fatalf("read merge status: %v", err)
+	}
+	if merging {
+		t.Error("a merge is left in progress")
+	}
+}
+
+// titleAt reads the title of issue id at ref.
+func (f *filteredSyncFixture) titleAt(t *testing.T, ref, id string) string {
+	t.Helper()
+	var title string
+	if err := f.store.withConn(t.Context(), false, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(t.Context(), "SELECT title FROM issues AS OF '"+ref+"' WHERE id = ?", id).Scan(&title)
+	}); err != nil {
+		t.Fatalf("read title of %s at %s: %v", id, ref, err)
+	}
+	return title
+}
+
+// assertSyncTakesPeerDelete runs the sync after the peer deleted id and
+// checks that it settles: id is gone locally and from the peer's tip, the
+// withheld chore keeps choreRows label/comment/dependency rows, no merge is
+// left in progress, and the sync after it works too.
+func (f *filteredSyncFixture) assertSyncTakesPeerDelete(t *testing.T, id string, choreRows int) {
+	t.Helper()
+	res, err := f.store.Sync(t.Context(), f.peer, "")
+	if err != nil {
+		t.Fatalf("Sync after the peer deleted %s: %v", id, err)
+	}
+	if res.PushError != nil || len(res.Conflicts) != 0 {
+		t.Fatalf("Sync push error %v, conflicts %v; want a settled sync", res.PushError, res.Conflicts)
+	}
+	if n := f.issueCount(t, "main", id); n != 0 {
+		t.Errorf("%s survived locally (%d rows); want the peer's delete taken", id, n)
+	}
+	if n, rows := f.issueCount(t, "main", f.newChore), f.childRows(t, "main", f.newChore); n != 1 || rows != choreRows {
+		t.Errorf("withheld chore: %d rows with %d label/comment/dependency rows, want 1 with %d", n, rows, choreRows)
+	}
+	f.assertNotMerging(t)
+	tip := f.peerTip(t)
+	if f.issueCount(t, tip, id) != 0 || f.issueCount(t, tip, f.newChore) != 0 {
+		t.Error("peer tip holds the deleted issue or the withheld chore")
+	}
+	f.sync(t)
+}
+
+// A peer that deletes a published issue linked to a withheld one does not
+// wedge later syncs. The kept filter revert makes the withheld chore's edges,
+// and the is_blocked they set, local changes against the peer's tip, so the
+// next merge meets a delete/modify conflict whose local side changed only
+// is_blocked (the open task the chore blocks) or a foreign key violation on a
+// restored edge (a closed task the chore relates to, which bd prune deletes).
+func TestFilteredFederationSyncTakesPeerDeletesOfLinkedIssues(t *testing.T) {
+	t.Run("open task the withheld chore blocks", func(t *testing.T) {
+		f := newFilteredSyncFixture(t)
+		configureFederationExcludeTypes(t, "chore", "wisp")
+		f.sync(t)
+		f.peerCommits(t, "DELETE FROM issues WHERE id = ?", f.task)
+		// The label and comment; the task's edge went with the task.
+		f.assertSyncTakesPeerDelete(t, f.task, 2)
+	})
+	t.Run("closed task the withheld chore relates to", func(t *testing.T) {
+		ctx := t.Context()
+		f := newFilteredSyncFixture(t)
+		configureFederationExcludeTypes(t, "chore", "wisp")
+		closed := "fedauth-closed"
+		mustCreate(t, f.store, &types.Issue{ID: closed, Title: "finished task", IssueType: types.TypeTask, Status: types.StatusOpen, Priority: 2})
+		if err := f.store.CloseIssue(ctx, closed, "done", "test", ""); err != nil {
+			t.Fatalf("CloseIssue: %v", err)
+		}
+		if err := f.store.AddDependency(ctx, &types.Dependency{IssueID: f.newChore, DependsOnID: closed, Type: types.DepRelated}, "test"); err != nil {
+			t.Fatalf("AddDependency: %v", err)
+		}
+		f.commit(t)
+		f.sync(t)
+		f.peerCommits(t, "DELETE FROM issues WHERE id = ?", closed)
+		// The label, the comment and the open task's blocking edge.
+		f.assertSyncTakesPeerDelete(t, closed, 3)
+	})
+	// The delete is taken on our side, so its cascade removes our provenance
+	// row there; the commit that concludes the merge must take that too.
+	t.Run("open task with a local provenance row", func(t *testing.T) {
+		f := newFilteredSyncFixture(t)
+		configureFederationExcludeTypes(t, "chore", "wisp")
+		f.sync(t)
+		f.exec(t, `INSERT INTO provenance_events (id, issue_id, kind, ref, ref_kind, source)
+			VALUES (UUID(), ?, 'commit', 'abc123', 'git_sha', 'test')`, f.task)
+		f.commit(t)
+		f.peerCommits(t, "DELETE FROM issues WHERE id = ?", f.task)
+		f.assertSyncTakesPeerDelete(t, f.task, 2)
+		if n := countAt(t, f.store, "main", "SELECT COUNT(*) FROM provenance_events %s WHERE issue_id = ?", f.task); n != 0 {
+			t.Errorf("main keeps %d provenance row(s) of the deleted task", n)
+		}
+		f.assertMergeCommitted(t)
+	})
+}
+
+// A merge that needs the settle path (here a field-level merge of one issue
+// both sides edited) must commit everything else it brought in too: the
+// peer's label on another issue and its memory row reach our branch and stay
+// on the peer's tip after the push, whether or not an issue is withheld.
+// Committing only the tables the settle pass touched left them in our working
+// set, and the push then took them off the peer.
+func TestFilteredFederationSyncSettledMergeKeepsPeerChanges(t *testing.T) {
+	for _, exclude := range [][]string{{"epic"}, {"chore", "wisp"}} {
+		t.Run(fmt.Sprint(exclude), func(t *testing.T) {
+			f := newFilteredSyncFixture(t)
+			configureFederationExcludeTypes(t, exclude...)
+			shared, other := "fedauth-shared", "fedauth-other"
+			mustCreate(t, f.store, &types.Issue{ID: shared, Title: "shared", IssueType: types.TypeTask, Status: types.StatusOpen, Priority: 2})
+			mustCreate(t, f.store, &types.Issue{ID: other, Title: "other", IssueType: types.TypeTask, Status: types.StatusOpen, Priority: 2})
+			f.commit(t)
+			f.sync(t)
+
+			// Both sides edit the shared issue and stamp updated_at, so the
+			// row conflicts and the field-level merge settles it.
+			f.exec(t, "UPDATE issues SET title = 'ours', updated_at = '2026-01-02 03:04:05' WHERE id = ?", shared)
+			f.commit(t)
+			f.peerCommits(t, "UPDATE issues SET description = 'theirs', updated_at = '2026-01-02 03:04:06' WHERE id = ?", shared)
+			f.peerCommits(t, "INSERT INTO labels (issue_id, label) VALUES (?, 'peer-label')", other)
+			f.peerCommits(t, "INSERT INTO config (`key`, value) VALUES ('kv.memory.peer-note', 'from the peer')")
+
+			res, err := f.store.Sync(t.Context(), f.peer, "")
+			if err != nil || res.PushError != nil || len(res.Conflicts) != 0 || !res.Pushed {
+				t.Fatalf("Sync = (pushed %v, conflicts %v, push error %v, err %v), want a settled sync that pushed",
+					res.Pushed, res.Conflicts, res.PushError, err)
+			}
+			var title, description string
+			if err := f.store.withConn(t.Context(), false, func(tx *sql.Tx) error {
+				return tx.QueryRowContext(t.Context(), "SELECT title, description FROM issues WHERE id = ?", shared).Scan(&title, &description)
+			}); err != nil {
+				t.Fatalf("read the shared issue: %v", err)
+			}
+			if title != "ours" || description != "theirs" {
+				t.Fatalf("shared issue = (%q, %q), want the field-level merge (ours, theirs)", title, description)
+			}
+			f.assertNotMerging(t)
+			f.assertMergeCommitted(t)
+			for _, ref := range []string{"main", f.peerTip(t)} {
+				if n := countAt(t, f.store, ref, "SELECT COUNT(*) FROM labels %s WHERE issue_id = ? AND label = 'peer-label'", other); n != 1 {
+					t.Errorf("%s holds %d of the peer's label, want 1", ref, n)
+				}
+				if n := countAt(t, f.store, ref, "SELECT COUNT(*) FROM config %s WHERE `key` = 'kv.memory.peer-note'"); n != 1 {
+					t.Errorf("%s holds %d of the peer's memory row, want 1", ref, n)
+				}
+			}
+		})
+	}
+}
+
+// assertMergeCommitted fails when the working set holds a change outside the
+// dolt_ignore'd tables and the metadata row Sync writes after it pushes: what
+// the merge brought in must be committed, not left behind uncommitted.
+func (f *filteredSyncFixture) assertMergeCommitted(t *testing.T) {
+	t.Helper()
+	var dirty []string
+	if err := f.store.withConn(t.Context(), false, func(tx *sql.Tx) error {
+		rows, err := tx.QueryContext(t.Context(), `
+			SELECT DISTINCT s.table_name FROM dolt_status s
+			WHERE s.table_name <> 'metadata' AND NOT EXISTS (
+				SELECT 1 FROM dolt_ignore di
+				WHERE di.ignored = 1 AND s.table_name LIKE di.pattern
+			)`)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var table string
+			if err := rows.Scan(&table); err != nil {
+				return err
+			}
+			dirty = append(dirty, table)
+		}
+		return rows.Err()
+	}); err != nil {
+		t.Fatalf("read dolt_status: %v", err)
+	}
+	if len(dirty) != 0 {
+		t.Errorf("uncommitted changes left in %v", dirty)
+	}
+}
+
+// A conflict the auto-resolver leaves for the operator (both sides retitled
+// one issue with the same updated_at, so last-write-wins has no answer) stops
+// a sync without a strategy before it pushes; --strategy resolves it with the
+// named side and concludes the merge, including ours, which leaves nothing to
+// commit.
+func TestFilteredFederationSyncStrategyResolvesDeclinedConflicts(t *testing.T) {
+	const stamp = "2026-01-02 03:04:05"
+	for _, tc := range []struct{ strategy, want, wantTip string }{
+		{"", "ours", "theirs"},
+		{"theirs", "theirs", "theirs"},
+		{"ours", "ours", "ours"},
+	} {
+		t.Run("strategy="+tc.strategy, func(t *testing.T) {
+			f := newFilteredSyncFixture(t)
+			configureFederationExcludeTypes(t, "chore", "wisp")
+			shared := "fedauth-shared"
+			mustCreate(t, f.store, &types.Issue{ID: shared, Title: "shared", IssueType: types.TypeTask, Status: types.StatusOpen, Priority: 2})
+			f.commit(t)
+			f.sync(t)
+			f.exec(t, "UPDATE issues SET title = 'ours', updated_at = ? WHERE id = ?", stamp, shared)
+			f.commit(t)
+			f.peerCommits(t, "UPDATE issues SET title = 'theirs', updated_at = ? WHERE id = ?", stamp, shared)
+
+			res, err := f.store.Sync(t.Context(), f.peer, tc.strategy)
+			if tc.strategy == "" {
+				if err == nil || res.Pushed || len(res.Conflicts) != 1 || res.Conflicts[0].Field != "issues" {
+					t.Fatalf("Sync = (pushed %v, conflicts %v, err %v), want the issues conflict reported and nothing pushed", res.Pushed, res.Conflicts, err)
+				}
+			} else if err != nil || !res.ConflictsResolved || res.PushError != nil {
+				t.Fatalf("Sync = (resolved %v, push error %v, err %v), want the conflict resolved and pushed", res.ConflictsResolved, res.PushError, err)
+			}
+			if got := f.titleAt(t, "main", shared); got != tc.want {
+				t.Errorf("local title = %q, want %q", got, tc.want)
+			}
+			if got := f.titleAt(t, f.peerTip(t), shared); got != tc.wantTip {
+				t.Errorf("peer tip title = %q, want %q", got, tc.wantTip)
+			}
+			f.assertNotMerging(t)
+		})
+	}
+}
+
 // faultStages installs a stage hook that records each stage reached and runs
 // the current fault, which the caller swaps per case.
 type faultStages struct {

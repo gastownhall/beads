@@ -57,6 +57,9 @@ func (s *EmbeddedDoltStore) ensureCredentialKeyLocked() error {
 	if _, err := io.ReadFull(rand.Reader, key); err != nil {
 		return fmt.Errorf("generate credential key: %w", err)
 	}
+	if err := peercred.GitignoreLocalFiles(keyPath); err != nil {
+		return fmt.Errorf("keep the credential key file out of git: %w", err)
+	}
 	if err := os.WriteFile(keyPath, key, 0600); err != nil {
 		return fmt.Errorf("write credential key: %w", err)
 	}
@@ -116,6 +119,9 @@ func (s *EmbeddedDoltStore) ensureCredentialsMigrated(ctx context.Context) error
 	for _, r := range res.Skipped {
 		fmt.Fprint(federationWarnWriter, peercred.SkipWarning(runtime.GOOS, r))
 	}
+	if err := peercred.GitignoreLocalFiles(keyPath); err != nil {
+		return err
+	}
 	if err := peercred.WriteMarker(keyPath, key); err != nil {
 		return err
 	}
@@ -157,7 +163,7 @@ func (s *EmbeddedDoltStore) decryptPassword(b peercred.Binding, encrypted []byte
 		// the remote verbs, GetFederationPeer, ListFederationPeers. The wording
 		// is shared with package dolt, which enriches its own two read paths.
 		if errors.Is(err, peercred.ErrLegacyFormat) && s.readOnly {
-			err = fmt.Errorf("%w; a read-only store does not upgrade it, so run bd federation list-peers without --readonly first", err)
+			err = fmt.Errorf("%w; a read-only store does not upgrade it, so run bd federation status without --readonly first", err)
 		}
 		return "", storage.CredentialKeyMismatchError(filepath.Join(s.beadsDir, credentialKeyFile), b.Name, b.Username, err)
 	}
@@ -438,15 +444,18 @@ func (s *EmbeddedDoltStore) Sync(ctx context.Context, peer string, strategy stri
 	// Step 2: Get commit before merge for change detection
 	beforeCommit, _ := s.GetCurrentCommit(ctx)
 
-	// Step 3: Merge peer's branch
+	// Step 3: Merge peer's branch on the settle path PullFrom uses. A plain
+	// DOLT_MERGE rolls back on any conflict or FK violation, so a peer's delete
+	// of a published issue linked to a withheld one (the kept filter revert
+	// makes those links local changes) would fail every later sync.
 	remoteBranch := fmt.Sprintf("%s/%s", peer, s.branch)
-	conflicts, err := s.Merge(ctx, remoteBranch)
+	conflicts, err := s.mergeFetchedPeer(ctx, remoteBranch, beforeCommit)
 	if err != nil {
 		result.Error = fmt.Errorf("merge failed: %w", err)
 		return result, result.Error
 	}
 
-	// Step 4: Handle conflicts
+	// Step 4: Handle the conflicts the auto-resolver left for the operator.
 	if len(conflicts) > 0 {
 		result.Conflicts = conflicts
 
@@ -455,32 +464,15 @@ func (s *EmbeddedDoltStore) Sync(ctx context.Context, peer string, strategy stri
 			return result, result.Error
 		}
 
-		for _, c := range conflicts {
-			if err := s.ResolveConflicts(ctx, c.Field, strategy); err != nil {
-				result.Error = fmt.Errorf("conflict resolution failed for %s: %w", c.Field, err)
-				return result, result.Error
-			}
+		// The settle path aborted the merge. MergeWithStrategy (bd vc merge
+		// --strategy) merges again, resolves every conflicted table with the
+		// strategy, repairs FK cascade violations, commits and recomputes
+		// is_blocked.
+		if _, err := s.MergeWithStrategy(ctx, remoteBranch, strategy); err != nil {
+			result.Error = fmt.Errorf("conflict resolution failed: %w", err)
+			return result, result.Error
 		}
 		result.ConflictsResolved = true
-
-		// CommitMergeResolution, not Commit: Commit's GH#3886 nothing-to-commit
-		// tolerance would swallow the --ours case (resolution dirties nothing)
-		// as a silent no-op here, leaving dolt_merge_status.is_merging true while
-		// this function reports result.Merged = true and pushes — the exact
-		// re-wedge CommitMergeResolution's doc comment describes. See the
-		// server-mode twin, dolt/federation.go's Sync.
-		if err := s.CommitMergeResolution(ctx, fmt.Sprintf("Resolve conflicts from %s using %s strategy", peer, strategy)); err != nil {
-			result.Error = fmt.Errorf("commit conflict resolution: %w", err)
-			return result, result.Error
-		}
-
-		// bd-578h9.11: the conflicted merge skipped the automatic is_blocked
-		// recompute (unresolved rows would have fed it garbage); now that the
-		// resolution is committed, cover the whole merge+resolution window.
-		if err := s.RecomputeBlockedAfterMerge(ctx, beforeCommit); err != nil {
-			result.Error = fmt.Errorf("conflicts resolved but is_blocked recompute failed: %w", err)
-			return result, result.Error
-		}
 	}
 	result.Merged = true
 
@@ -504,6 +496,31 @@ func (s *EmbeddedDoltStore) Sync(ctx context.Context, peer string, strategy stri
 
 	result.EndTime = time.Now()
 	return result, nil
+}
+
+// mergeFetchedPeer merges ref, the peer branch Fetch brought in, on the settle
+// path PullFrom uses (versioncontrolops.MergeAndSettle): safe conflict classes
+// are auto-resolved and FK cascade violations repaired, then is_blocked is
+// recomputed from preHead. Conflicts left for the operator come back with the
+// merge aborted and the working set restored.
+func (s *EmbeddedDoltStore) mergeFetchedPeer(ctx context.Context, ref, preHead string) ([]storage.Conflict, error) {
+	var conflicts []storage.Conflict
+	err := s.withMutatingPinnedDBConn(ctx, func(db versioncontrolops.DBConn) error {
+		err := versioncontrolops.MergeAndSettle(ctx, db, ref)
+		var mce *versioncontrolops.MergeConflictsError
+		if errors.As(err, &mce) {
+			conflicts = mce.Conflicts
+			return nil
+		}
+		return err
+	})
+	if err != nil || len(conflicts) > 0 {
+		return conflicts, err
+	}
+	if err := s.recomputeBlockedAfterPull(ctx, preHead); err != nil {
+		return nil, fmt.Errorf("merge succeeded but is_blocked recompute failed: %w", err)
+	}
+	return nil, nil
 }
 
 // federationStagingBranchPrefix names the temporary branches of a filtered

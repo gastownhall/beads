@@ -212,35 +212,7 @@ func runFederationSync(cmd *cobra.Command, args []string) error {
 		}
 
 		if !jsonOutput {
-			if result.Fetched {
-				fmt.Printf("  %s Fetched\n", ui.RenderPass("✓"))
-			}
-			if result.Merged {
-				fmt.Printf("  %s Merged", ui.RenderPass("✓"))
-				if result.PulledCommits > 0 {
-					fmt.Printf(" (%d commits)", result.PulledCommits)
-				}
-				fmt.Println()
-			}
-			if len(result.Conflicts) > 0 {
-				if result.ConflictsResolved {
-					fmt.Printf("  %s Resolved %d conflicts using %s strategy\n",
-						ui.RenderPass("✓"), len(result.Conflicts), federationStrategy)
-				} else {
-					fmt.Printf("  %s %d conflicts need resolution\n",
-						ui.RenderWarn("⚠"), len(result.Conflicts))
-					for _, c := range result.Conflicts {
-						fmt.Printf("    - %s\n", c.Field)
-					}
-				}
-			}
-			if result.PushFiltered {
-				fmt.Printf("  %s Pushed (excluded issue types withheld from the tip)\n", ui.RenderPass("✓"))
-			} else if result.Pushed {
-				fmt.Printf("  %s Pushed\n", ui.RenderPass("✓"))
-			} else if result.PushError != nil {
-				fmt.Printf("  %s Push skipped: %v\n", ui.RenderMuted("○"), result.PushError)
-			}
+			printFederationSyncResult(result)
 		}
 	}
 
@@ -259,6 +231,46 @@ func runFederationSync(cmd *cobra.Command, args []string) error {
 		})
 	}
 	return nil
+}
+
+// printFederationSyncResult prints the human-mode lines for one peer's
+// successful sync.
+func printFederationSyncResult(result *storage.SyncResult) {
+	if result.Fetched {
+		fmt.Printf("  %s Fetched\n", ui.RenderPass("✓"))
+	}
+	if result.Merged {
+		fmt.Printf("  %s Merged", ui.RenderPass("✓"))
+		if result.PulledCommits > 0 {
+			fmt.Printf(" (%d commits)", result.PulledCommits)
+		}
+		fmt.Println()
+	}
+	if len(result.Conflicts) > 0 {
+		if result.ConflictsResolved {
+			fmt.Printf("  %s Resolved %d conflicts using %s strategy\n",
+				ui.RenderPass("✓"), len(result.Conflicts), federationStrategy)
+		} else {
+			fmt.Printf("  %s %d conflicts need resolution\n",
+				ui.RenderWarn("⚠"), len(result.Conflicts))
+			for _, c := range result.Conflicts {
+				fmt.Printf("    - %s\n", c.Field)
+			}
+		}
+	}
+	switch {
+	case result.PushFiltered:
+		fmt.Printf("  %s Pushed (excluded issue types withheld from the tip)\n", ui.RenderPass("✓"))
+	case result.Pushed:
+		fmt.Printf("  %s Pushed\n", ui.RenderPass("✓"))
+	case result.PushError != nil:
+		fmt.Printf("  %s Push skipped: %v\n", ui.RenderMuted("○"), result.PushError)
+	}
+	// A push can land and its cleanup fail afterwards, leaving temporary
+	// __federation_push_* branches behind; report that beside the push.
+	if result.Pushed && result.PushError != nil {
+		fmt.Printf("  %s After the push: %v\n", ui.RenderWarn("⚠"), result.PushError)
+	}
 }
 
 // filteredPushNotice explains what a filtered publication does not hide. The

@@ -76,9 +76,12 @@ func (s *DoltStore) initCredentialKey(_ context.Context) error {
 		oldKeyPath := filepath.Join(s.dbPath, credentialKeyFile)
 		oldKey, oldErr := os.ReadFile(oldKeyPath) //nolint:gosec // G304: oldKeyPath is derived from trusted dbPath
 		if oldErr == nil && len(oldKey) == 32 {
-			// Write to new location, then remove old file
-			if writeErr := os.WriteFile(keyPath, oldKey, 0600); writeErr == nil {
-				_ = os.Remove(oldKeyPath)
+			// Write to new location, then remove old file. Move it only
+			// once the new location is gitignored.
+			if peercred.GitignoreLocalFiles(keyPath) == nil {
+				if writeErr := os.WriteFile(keyPath, oldKey, 0600); writeErr == nil {
+					_ = os.Remove(oldKeyPath)
+				}
 			}
 			s.credentialKey = oldKey
 			return nil
@@ -99,6 +102,9 @@ func (s *DoltStore) initCredentialKey(_ context.Context) error {
 	// server without having run `bd init`, .beads/ may not exist yet (GH#2641).
 	if err := os.MkdirAll(s.beadsDir, 0700); err != nil {
 		return fmt.Errorf("failed to create beads directory %s: %w", s.beadsDir, err)
+	}
+	if err := peercred.GitignoreLocalFiles(keyPath); err != nil {
+		return fmt.Errorf("failed to keep the credential key file out of git: %w", err)
 	}
 	if err := os.WriteFile(keyPath, key, 0600); err != nil {
 		return fmt.Errorf("failed to write credential key file: %w", err)
@@ -186,7 +192,7 @@ func (s *DoltStore) ensureCredentialsMigrated(ctx context.Context) error {
 	if s.dbPath != "" {
 		legacyKeys = append(legacyKeys, s.legacyEncryptionKey())
 	}
-	res, err := peercred.Migrate(ctx, s.db, key, legacyKeys)
+	res, err := s.migrateLegacyCredentials(ctx, key, legacyKeys)
 	if err != nil {
 		return fmt.Errorf("upgrade stored peer credentials: %w", err)
 	}
@@ -200,11 +206,39 @@ func (s *DoltStore) ensureCredentialsMigrated(ctx context.Context) error {
 	for _, r := range res.Skipped {
 		fmt.Fprint(credentialWarnWriter, peercred.SkipWarning(runtime.GOOS, r))
 	}
+	if err := peercred.GitignoreLocalFiles(keyPath); err != nil {
+		return err
+	}
 	if err := peercred.WriteMarker(keyPath, key); err != nil {
 		return err
 	}
 	s.credMigrated = true
 	return nil
+}
+
+// migrateLegacyCredentials runs peercred.Migrate on a dedicated long-timeout
+// connection pinned to the store's branch. Its history scan reads
+// dolt_history_federation_peers, which visits every commit reachable from
+// HEAD, so on a long history it can outlast the shared pool's 10s read
+// deadline (see withReadTxLongTimeout). Its rewrites land in the branch's
+// working set, which the caller then commits on the pool.
+func (s *DoltStore) migrateLegacyCredentials(ctx context.Context, key []byte, legacyKeys [][]byte) (peercred.MigrationResult, error) {
+	db, err := s.openLongTimeoutConn()
+	if err != nil {
+		return peercred.MigrationResult{}, err
+	}
+	defer db.Close()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return peercred.MigrationResult{}, fmt.Errorf("acquire long-timeout connection: %w", err)
+	}
+	defer conn.Close()
+	// A fresh connection starts on the database's default branch; migrate
+	// the branch this store reads.
+	if err := s.pinStoreBranch(ctx, conn); err != nil {
+		return peercred.MigrationResult{}, err
+	}
+	return peercred.Migrate(ctx, conn, key, legacyKeys)
 }
 
 // credentialWarnWriter receives the per-peer warnings for legacy credentials
@@ -263,7 +297,7 @@ func (s *DoltStore) decryptPassword(b peercred.Binding, encrypted []byte) (strin
 		// different keys can share the name and the bare one does not say
 		// which is meant.
 		if errors.Is(err, peercred.ErrLegacyFormat) && s.readOnly {
-			err = fmt.Errorf("%w; a read-only store does not upgrade it, so run bd federation list-peers without --readonly first", err)
+			err = fmt.Errorf("%w; a read-only store does not upgrade it, so run bd federation status without --readonly first", err)
 		}
 		return "", storage.CredentialKeyMismatchError(filepath.Join(s.beadsDir, credentialKeyFile), b.Name, b.Username, err)
 	}
