@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/memoryapi"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 	storagememoryops "github.com/steveyegge/beads/internal/storage/memoryops"
 )
@@ -238,18 +239,71 @@ func TestEmbeddedMemory(t *testing.T) {
 		bdRecallFail(t, bd, dir, "brand-new-slug-memory")
 	})
 
-	// The two refusals that sit either side of the desire path, and the reason
-	// the bare-slug test is `derived != "" && derived == insight` rather than
-	// the shipped `slugify(insight) == insight`: DeriveKey("") is "", so empty
-	// and underivable content satisfies derived == insight and would be routed
-	// into a "recall" of the empty key instead of being refused. The shipped
-	// code was saved from that by an empty-content check that ran BEFORE the
-	// branch; that check belongs to the role now, so the branch has to exclude
-	// the empty key itself.
+	// GH#7275: read-shaped arguments are reads even when the key does not
+	// round-trip through the key derivation (nine-plus segments, over 60
+	// bytes, or a dot). The whole corpus is compared before and after every
+	// call, so a junk row minted by a stray write — or a derived-key collision
+	// overwritten by one — fails the test.
+	t.Run("remember_noncanonical_keys_are_read_only", func(t *testing.T) {
+		for _, key := range []string{
+			"bd-list-silent-partial-rows-take-decision-counts-with-json",
+			strings.Repeat("x", 61),
+			"memory.v2",
+		} {
+			t.Run(key, func(t *testing.T) {
+				derived := memoryapi.DeriveKey(key)
+				bdRemember(t, bd, dir, "exact memory content", "--key", key)
+				bdRemember(t, bd, dir, "derived memory content", "--key", derived)
+				before := bdMemories(t, bd, dir, "--json")
+				if out := bdRemember(t, bd, dir, key); out != "exact memory content\n" {
+					t.Errorf("bare recall of the exact key = %q, want the exact memory content", out)
+				}
+				if after := bdMemories(t, bd, dir, "--json"); after != before {
+					t.Fatalf("read changed memories:\nbefore: %s\nafter:  %s", before, after)
+				}
+
+				// The exact key gone, its derived collision still there: the
+				// refusal names the derived key, whose content never
+				// substitutes for the missing memory's.
+				bdForget(t, bd, dir, key)
+				before = bdMemories(t, bd, dir, "--json")
+				out := bdRememberFail(t, bd, dir, key)
+				if !strings.Contains(out, "no memory named") || !strings.Contains(out, "did you mean "+derived) {
+					t.Errorf("missing exact key must refuse with a derived-key hint: %s", out)
+				}
+				if strings.Contains(out, "derived memory content") {
+					t.Errorf("the hint must not substitute the derived memory's content: %s", out)
+				}
+				if after := bdMemories(t, bd, dir, "--json"); after != before {
+					t.Fatalf("miss changed memories:\nbefore: %s\nafter:  %s", before, after)
+				}
+
+				// Both gone: the same refusal, with no hint, and no write
+				// under either key.
+				bdForget(t, bd, dir, derived)
+				before = bdMemories(t, bd, dir, "--json")
+				out = bdRememberFail(t, bd, dir, key, "--json")
+				if !strings.Contains(out, "no memory named") || strings.Contains(out, "did you mean") {
+					t.Errorf("both keys missing must refuse without a hint: %s", out)
+				}
+				if after := bdMemories(t, bd, dir, "--json"); after != before {
+					t.Fatalf("miss changed memories:\nbefore: %s\nafter:  %s", before, after)
+				}
+			})
+		}
+	})
+
+	// The two refusals that sit either side of the desire path: empty and
+	// underivable content never matches the bare-key grammar, so it stays on
+	// the content path and gets the role's validation refusal rather than a
+	// "recall" of the empty key. "." and "-" are separator-only: the grammar
+	// rejects them, and they derive no key either way.
 	t.Run("remember_refuses_content_no_key_derives_from", func(t *testing.T) {
 		for _, tc := range []struct{ insight, want string }{
 			{"", "memory content cannot be empty"},
 			{"   ", "memory content cannot be empty"},
+			{".", "could not generate key from content"},
+			{"-", "could not generate key from content"},
 			{"!!!", "could not generate key from content"},
 		} {
 			out := bdRememberFail(t, bd, dir, tc.insight)

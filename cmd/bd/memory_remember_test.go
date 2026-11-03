@@ -328,3 +328,99 @@ func TestRememberBareKeyRefusesMissingWithoutWriting(t *testing.T) {
 		}
 	}
 }
+
+// TestRememberBareKeySuggestsDerivedKey pins the collision hint: the exact key
+// is absent but its DERIVED key exists, and the refusal names that derived key
+// and its recall command — as a hint, never as the answer. At base the
+// command took the write path and overwrote the derived key's memory with the
+// requested key as content.
+func TestRememberBareKeySuggestsDerivedKey(t *testing.T) {
+	for _, asJSON := range []bool{false, true} {
+		for _, key := range bareKeyShapesGH7275 {
+			t.Run(fmt.Sprintf("json=%v/%s", asJSON, key), func(t *testing.T) {
+				m, fake := setupRememberCommand(t)
+				jsonOutput = asJSON
+				derived := memoryapi.DeriveKey(key)
+				m.rows[derived] = "derived collision content"
+				wantHint := fmt.Sprintf("did you mean %s? A memory exists under that derived key; to read it, run: bd recall %s", derived, derived)
+
+				var runErr error
+				stdout, stderr := captureStdio(t, func() { runErr = runRemember(key) })
+				exitOne(t, runErr)
+				if len(m.remembers) != 0 {
+					t.Errorf("bd remember %q issued %d Remember request(s), want none: %+v", key, len(m.remembers), m.remembers)
+				}
+				if fake.commits != 0 {
+					t.Errorf("bd remember %q committed %d time(s), want none", key, fake.commits)
+				}
+				if m.rows[derived] != "derived collision content" {
+					t.Errorf("derived memory = %q, want it untouched", m.rows[derived])
+				}
+				// The exact key first, then the derived probe.
+				if !reflect.DeepEqual(m.recallKeys, []string{key, derived}) {
+					t.Errorf("bd remember %q read %v, want the exact key then the derived one", key, m.recallKeys)
+				}
+				if asJSON {
+					body := parseRememberJSON(t, stdout)
+					if !strings.Contains(fmt.Sprint(body["error"]), fmt.Sprintf("no memory named %q", key)) {
+						t.Errorf("--json error = %v, want the bare-key refusal naming %q", body["error"], key)
+					}
+					if body["hint"] != wantHint {
+						t.Errorf("--json hint = %v, want %q", body["hint"], wantHint)
+					}
+				} else {
+					if !strings.Contains(stderr, fmt.Sprintf("no memory named %q", key)) {
+						t.Errorf("stderr = %q, want the bare-key refusal naming %q", stderr, key)
+					}
+					if !strings.Contains(stderr, "Hint: "+wantHint) {
+						t.Errorf("stderr = %q, want the hint %q", stderr, "Hint: "+wantHint)
+					}
+					if stdout != "" {
+						t.Errorf("stdout = %q, want the refusal to write nothing there", stdout)
+					}
+				}
+				if strings.Contains(stdout, "derived collision content") || strings.Contains(stderr, "derived collision content") {
+					t.Errorf("the hint must not substitute the derived memory's content:\nstdout: %s\nstderr: %s", stdout, stderr)
+				}
+			})
+		}
+	}
+
+	// A derived row holding the empty string is still a row: the hint names
+	// it, presence being row existence here too.
+	t.Run("empty derived value still hints", func(t *testing.T) {
+		m, _ := setupRememberCommand(t)
+		jsonOutput = true
+		key := "config.v2"
+		derived := memoryapi.DeriveKey(key)
+		m.rows[derived] = ""
+
+		var runErr error
+		stdout, _ := captureStdio(t, func() { runErr = runRemember(key) })
+		exitOne(t, runErr)
+		body := parseRememberJSON(t, stdout)
+		wantHint := fmt.Sprintf("did you mean %s? A memory exists under that derived key; to read it, run: bd recall %s", derived, derived)
+		if body["hint"] != wantHint {
+			t.Errorf("--json hint = %v, want %q for an empty-valued derived row", body["hint"], wantHint)
+		}
+	})
+
+	// A read error at the derived-key probe surfaces the same "recalling
+	// memory" error, and neither error falls through to a write.
+	t.Run("derived-probe read error exits without writing", func(t *testing.T) {
+		m, fake := setupRememberCommand(t)
+		key := "config.v2"
+		derived := memoryapi.DeriveKey(key)
+		m.recallErr = map[string]error{derived: errors.New("read blew up")}
+
+		var runErr error
+		stdout, stderr := captureStdio(t, func() { runErr = runRemember(key) })
+		exitOne(t, runErr)
+		if !strings.Contains(stdout+stderr, "recalling memory: read blew up") {
+			t.Errorf("output = %q / %q, want the recalling memory failure", stdout, stderr)
+		}
+		if len(m.remembers) != 0 || fake.commits != 0 {
+			t.Errorf("failed read wrote: remembers %+v, commits %d", m.remembers, fake.commits)
+		}
+	})
+}

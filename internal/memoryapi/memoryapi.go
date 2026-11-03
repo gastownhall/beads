@@ -6,11 +6,15 @@
 //
 // It is its own package rather than a file in internal/workapi because nothing
 // in it is issue-shaped, and it is deliberately importable by cmd/bd: the
-// `bd remember` front door needs DeriveKey to spot the bare-slug desire path
-// BEFORE it decides which role method to call, exactly as the twenty-odd cmd/bd
-// files that import workapi need the builders. What a front door must not
-// reach is a role CONSTRUCTOR, and there is none here — these are meaning
-// functions, not bodies.
+// `bd remember` front door reaches for these meaning functions BEFORE it
+// decides which role method to call — ResolveKey to project the write the
+// corpus budget measures, and DeriveKey to name the derived key a bare-key
+// miss hints at (the bare-key SHAPE itself is the front door's own grammar,
+// isBareMemoryKey in cmd/bd, which deliberately does not derive: derivation
+// rewrites exactly the dotted and long keys the shortcut must still read) —
+// exactly as the twenty-odd cmd/bd files that import workapi need the
+// builders. What a front door must not reach is a role CONSTRUCTOR, and there
+// is none here — these are meaning functions, not bodies.
 //
 // The kv.memory. storage encoding is NOT here: that is
 // internal/storage/memoryops, below the role, because a user key is what this

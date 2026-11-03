@@ -196,9 +196,11 @@ func TestPrintRecallResult(t *testing.T) {
 	})
 }
 
-// TestRememberBareKeyPath guards the same presence rule on the
-// `bd remember <bare-slug>` read path: a bare slug naming a memory stored as
-// the empty string recalls it, and only a slug naming nothing is refused.
+// TestRememberBareKeyPath guards the same presence rule and the hint
+// contract on the `bd remember <bare-key>` read path: a bare key naming a
+// memory stored as the empty string recalls it, only a key naming nothing is
+// refused, and a derived-key suggestion arrives as a HINT — a separate line
+// or field that never rewrites the refusal itself.
 func TestRememberBareKeyPath(t *testing.T) {
 	savedJSONOutput := jsonOutput
 	jsonOutput = true
@@ -207,7 +209,7 @@ func TestRememberBareKeyPath(t *testing.T) {
 	t.Run("found with empty value recalls it", func(t *testing.T) {
 		var err error
 		out := captureStdout(t, func() error {
-			err = rememberBareKeyPath("empty-key", "empty-key", "", true)
+			err = rememberBareKeyPath("empty-key", "empty-key", "", true, "")
 			return nil
 		})
 		if err != nil {
@@ -225,7 +227,7 @@ func TestRememberBareKeyPath(t *testing.T) {
 	t.Run("not found is refused", func(t *testing.T) {
 		var err error
 		captureStdout(t, func() error {
-			err = rememberBareKeyPath("gone", "gone", "", false)
+			err = rememberBareKeyPath("gone", "gone", "", false, "")
 			return nil
 		})
 		ee, ok := err.(*exitError)
@@ -243,7 +245,7 @@ func TestRememberBareKeyPath(t *testing.T) {
 		defer func() { jsonOutput = true }()
 		var err error
 		out := captureStderr(t, func() {
-			err = rememberBareKeyPath("auth-flow", "auth-flow", "", false)
+			err = rememberBareKeyPath("auth-flow", "auth-flow", "", false, "")
 		})
 		if err == nil {
 			t.Fatal("rememberBareKeyPath stored a bare key naming nothing")
@@ -253,6 +255,58 @@ func TestRememberBareKeyPath(t *testing.T) {
 		}
 		if want := `To store it anyway, run: bd remember "auth-flow" --key auth-flow` + "\n"; !strings.HasSuffix(out, want) {
 			t.Errorf("refusal = %q\nwant it to end %q", out, want)
+		}
+	})
+
+	// A derived-key suggestion is a Hint: line in text mode, naming the
+	// derived key and its recall command, never its content.
+	t.Run("not found with a suggestion hints at the derived key", func(t *testing.T) {
+		jsonOutput = false
+		defer func() { jsonOutput = true }()
+		var err error
+		out := captureStderr(t, func() {
+			err = rememberBareKeyPath("config.v2", "config.v2", "", false, "config-v2")
+		})
+		if err == nil {
+			t.Fatal("rememberBareKeyPath stored a bare key naming nothing")
+		}
+		if !strings.Contains(out, `no memory named "config.v2"`) {
+			t.Errorf("refusal = %q, want it to name the missing key", out)
+		}
+		if want := "Hint: did you mean config-v2? A memory exists under that derived key; to read it, run: bd recall config-v2\n"; !strings.Contains(out, want) {
+			t.Errorf("refusal = %q\nwant the hint %q", out, want)
+		}
+	})
+
+	// In JSON the hint is its own field and the refusal stays byte-identical
+	// to the no-hint one; a hint-less refusal omits the field entirely.
+	t.Run("a suggestion in JSON keeps the refusal and adds a hint field", func(t *testing.T) {
+		refusal := func(suggestion string) map[string]interface{} {
+			t.Helper()
+			var err error
+			out := captureStdout(t, func() error {
+				err = rememberBareKeyPath("config.v2", "config.v2", "", false, suggestion)
+				return nil
+			})
+			ee, ok := err.(*exitError)
+			if !ok || ee.Code != 1 {
+				t.Fatalf("err = %v, want *exitError{Code: 1}", err)
+			}
+			var body map[string]interface{}
+			if uerr := json.Unmarshal([]byte(strings.TrimSpace(out)), &body); uerr != nil {
+				t.Fatalf("unmarshal %q: %v", out, uerr)
+			}
+			return body
+		}
+		withHint, withoutHint := refusal("config-v2"), refusal("")
+		if withHint["error"] != withoutHint["error"] {
+			t.Errorf("hint refusal error = %v, want it unchanged from %v", withHint["error"], withoutHint["error"])
+		}
+		if withHint["hint"] != "did you mean config-v2? A memory exists under that derived key; to read it, run: bd recall config-v2" {
+			t.Errorf("hint = %v, want the derived key and its recall command", withHint["hint"])
+		}
+		if _, hasHint := withoutHint["hint"]; hasHint {
+			t.Errorf("no-hint refusal = %v, want the hint field omitted", withoutHint)
 		}
 	})
 }

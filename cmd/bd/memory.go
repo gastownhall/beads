@@ -251,10 +251,13 @@ func isBareMemoryKey(value string) bool {
 // `bd remember <bare-key>` (no --key): a bare key naming an EXISTING memory
 // is recalled instead of stored; a bare key naming nothing is refused. The
 // caller only invokes it when memoryKeyFlag == "" and the insight is
-// key-shaped (isBareMemoryKey), having already read the key. As in
+// key-shaped (isBareMemoryKey), having already read the exact key — and, on
+// an exact miss, the derived one, whose existence becomes suggestion. As in
 // printRecallResult, presence is found (row existence), never existing != "":
-// a bare key naming a memory stored as the empty string recalls it.
-func rememberBareKeyPath(key, insight, existing string, found bool) error {
+// a bare key naming a memory stored as the empty string recalls it. A
+// suggestion is a HINT ONLY: it names the derived key and its recall command;
+// it never substitutes that memory's content.
+func rememberBareKeyPath(key, insight, existing string, found bool, suggestion string) error {
 	if found {
 		if jsonOutput {
 			return outputJSON(map[string]interface{}{
@@ -272,11 +275,17 @@ func rememberBareKeyPath(key, insight, existing string, found bool) error {
 		return nil
 	}
 	keyArg, keyNote := remedy.CommandArg(runtime.GOOS, key, "<key>")
-	return HandleErrorRespectJSON(
+	message := fmt.Sprintf(
 		"no memory named %q to recall -- and refusing to store a bare key-like token as its own content. "+
 			"bd remember WRITES (its positional arg is CONTENT, not a key). "+
 			"To browse keys: bd memories. To store it anyway, run: bd remember %q --key %s%s",
 		key, insight, keyArg, keyNote)
+	if suggestion == "" {
+		return HandleErrorRespectJSON("%s", message)
+	}
+	return HandleErrorWithHintRespectJSON(message, fmt.Sprintf(
+		"did you mean %s? A memory exists under that derived key; to read it, run: bd recall %s",
+		suggestion, suggestion))
 }
 
 // printRememberResult renders the `bd remember` success output. commitErr is
@@ -509,7 +518,24 @@ Examples:
 			if err != nil {
 				return HandleErrorRespectJSON("recalling memory: %v", err)
 			}
-			return rememberBareKeyPath(insight, insight, recalled.Value, recalled.Found)
+			if !recalled.Found {
+				// The exact key is absent. Its DERIVED key may still be there
+				// — the collision this guard exists to prevent — and naming
+				// it is the one hint that helps. The probe happens only when
+				// derivation actually rewrites the argument (a short slug
+				// derives to itself), and its content is never shown or
+				// substituted, only its existence.
+				if derived := memoryapi.DeriveKey(insight); derived != "" && derived != insight {
+					candidate, err := memories.Recall(rootCtx, memoryops.RecallRequest{Key: derived})
+					if err != nil {
+						return HandleErrorRespectJSON("recalling memory: %v", err)
+					}
+					if candidate.Found {
+						return rememberBareKeyPath(insight, insight, "", false, derived)
+					}
+				}
+			}
+			return rememberBareKeyPath(insight, insight, recalled.Value, recalled.Found, "")
 		}
 
 		// Corpus budget (memories.budget-chars, OPT-IN, 0 = off). The

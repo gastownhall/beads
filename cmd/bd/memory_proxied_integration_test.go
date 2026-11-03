@@ -158,10 +158,11 @@ func TestProxiedServerMemory(t *testing.T) {
 		}
 
 		// The two refusals either side of the desire path fire the same way
-		// here as on the direct route — one branch, one derivation, both
-		// routes. DeriveKey("") is "", so an insight nothing derives from
-		// would satisfy the bare-slug test and be READ instead of refused if
-		// the branch did not exclude the empty key.
+		// here as on the direct route — one branch, one grammar, both
+		// routes. The bare-key grammar (isBareMemoryKey) accepts only
+		// lowercase alphanumeric segments, so empty and underivable content
+		// never reaches the read branch and keeps the role's validation
+		// refusal.
 		for _, tc := range []struct{ insight, want string }{
 			{"", "memory content cannot be empty"},
 			{"   ", "memory content cannot be empty"},
