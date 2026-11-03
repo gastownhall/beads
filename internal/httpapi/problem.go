@@ -1724,6 +1724,12 @@ func ClassifyError(err error) Result {
 // codes that carry identical static detail, so a miss costs a less useful
 // `code`, never a disclosure.
 func isUnavailable(err error) bool {
+	// A dial the provider gave up on because the workspace proxy is gone and
+	// not yet back is unreachability, even when what ran out was a deadline
+	// (the dial's budget, or a discovery still running when it ended).
+	if uow.IsEndpointUnavailable(err) {
+		return true
+	}
 	// context.DeadlineExceeded satisfies net.Error, so it must be excluded
 	// before the net.Error test below: a tripped per-request deadline is a
 	// generic 500, not a claim that the database is unreachable.

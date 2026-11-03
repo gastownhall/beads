@@ -18,6 +18,7 @@ import (
 	"github.com/go-sql-driver/mysql"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
 )
 
 // dsn is the shape a driver or dial error takes in the wild: it names the
@@ -113,6 +114,16 @@ func TestProblemMapping(t *testing.T) {
 		{
 			name:       "invalid connection",
 			err:        fmt.Errorf("query %s: %w", dsn, mysql.ErrInvalidConn),
+			wantStatus: http.StatusServiceUnavailable,
+			wantCode:   CodeDBUnavailable,
+			retryAfter: retryAfterContention,
+		},
+		{
+			// The provider's endpoint resolver gave up within the dial's
+			// budget: the proxy is gone and not yet back. That is
+			// unreachability even when what ran out was a deadline.
+			name:       "proxy endpoint unavailable",
+			err:        fmt.Errorf("uow: pin connection: %w", &proxy.EndpointUnavailableError{Dial: context.DeadlineExceeded, Discovery: errors.New("proxy rediscovery is still running")}),
 			wantStatus: http.StatusServiceUnavailable,
 			wantCode:   CodeDBUnavailable,
 			retryAfter: retryAfterContention,

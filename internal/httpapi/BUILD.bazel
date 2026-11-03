@@ -137,6 +137,7 @@ go_test(
         "//internal/httpapi/spec",
         "//internal/httpclient/wire",
         "//internal/storage",
+        "//internal/storage/dbproxy/proxy",
         "//internal/storage/domain",
         "//internal/storage/uow",
         "//internal/types",
