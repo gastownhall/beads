@@ -368,6 +368,17 @@ control is simpler than network allowlists. The Dolt server must be started
 with `dolt sql-server --socket <path>`. Auto-start is not supported in socket
 mode.
 
+`bd init --server-socket` records the path as `dolt_server_socket` in
+`.beads/metadata.json`. `BEADS_DOLT_SERVER_SOCKET` wins over it. The socket is
+a preference, not a requirement: if it does not answer but the TCP host and
+port do, bd connects over TCP. If neither answers, the error names the socket.
+In releases after v1.3.2, opens that read metadata.json (`beads.OpenFromConfig`
+and the other config-based library opens, `bd doctor` and its repairs, and
+routed stores) take the socket the same way, after a socket the library
+caller passes directly. Earlier releases read only `BEADS_DOLT_SERVER_SOCKET`
+on those opens and dialed TCP beside a metadata.json socket. `beads.Open`
+does not read metadata.json.
+
 Switch to server mode when you need:
 - Multiple agents writing simultaneously
 - Orchestrator multi-rig setups
