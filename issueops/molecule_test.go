@@ -1027,3 +1027,41 @@ func TestMoleculeAnalysisExcludesTheRoot(t *testing.T) {
 		}
 	})
 }
+
+// TestMoleculeStepperSkipsAStepUnderABlockedGroup pins that advancing never
+// offers or claims a step whose group waits on an unfinished sibling step.
+func TestMoleculeStepperSkipsAStepUnderABlockedGroup(t *testing.T) {
+	ctx := context.Background()
+	f := newFakeMolecules()
+	f.add("m", types.TypeMolecule, types.StatusOpen)
+	f.add("m.x", types.TypeTask, types.StatusInProgress)
+	f.edge("m.x", "m", types.DepParentChild)
+	f.add("m.group", types.TypeEpic, types.StatusOpen)
+	f.edge("m.group", "m", types.DepParentChild)
+	f.edge("m.group", "m.x", types.DepBlocks)
+	f.add("m.group.a", types.TypeTask, types.StatusOpen)
+	f.edge("m.group.a", "m.group", types.DepParentChild)
+	f.add("m.y", types.TypeTask, types.StatusClosed)
+	f.edge("m.y", "m", types.DepParentChild)
+
+	res, err := f.stepper().Advance(ctx, issueops.AdvanceRequest{Actor: "alice", ClosedStepID: "m.y", AutoClaim: true})
+	if err != nil {
+		t.Fatalf("Advance: %v", err)
+	}
+	if res.Claimed || res.NextStep != nil || len(f.claimed) != 0 || len(f.updated) != 0 {
+		t.Fatalf("Advance = %+v (claims %v, updates %v), want nothing offered or claimed while m.group waits on m.x",
+			res, f.claimed, f.updated)
+	}
+	view, err := issueops.ViewMolecule(ctx, f.reader(), "m")
+	if err != nil {
+		t.Fatalf("ViewMolecule: %v", err)
+	}
+	for _, step := range view.Steps {
+		if step.Issue.ID == "m.group.a" && step.State != issueops.MoleculeStepPending {
+			t.Errorf("m.group.a state = %q, want %q", step.State, issueops.MoleculeStepPending)
+		}
+	}
+	if f.issues["m.group.a"].Status != types.StatusOpen || f.issues["m.group.a"].Assignee != "" {
+		t.Errorf("m.group.a = %s assigned %q, want open and unassigned", f.issues["m.group.a"].Status, f.issues["m.group.a"].Assignee)
+	}
+}
