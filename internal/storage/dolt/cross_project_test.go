@@ -1122,6 +1122,84 @@ func TestVerifyProjectIdentity_ReadErrors(t *testing.T) {
 		expectIdentityRead(mock, nil, cause)
 		expectRefusal(t, store.verifyProjectIdentity(context.Background(), beadsDir, false), cause)
 	})
+
+	// Existing outcomes the read-error refusal must leave unchanged: a
+	// usable identity read decides as before, and the local soft-skips
+	// (no metadata.json at all, an empty local project id) must perform no
+	// SQL — an unexpected query would come back from sqlmock as an error
+	// and fail these.
+	value := func(s string) *string { return &s }
+
+	t.Run("absent key skips", func(t *testing.T) {
+		store, mock, beadsDir := newIdentityUnitStore(t, localID, database)
+		expectIdentityRead(mock, nil, nil)
+		if err := store.verifyProjectIdentity(context.Background(), beadsDir, false); err != nil {
+			t.Errorf("verifyProjectIdentity() = %v; want the absent-key skip", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("unfulfilled sqlmock expectations: %v", err)
+		}
+	})
+
+	t.Run("empty database identity skips", func(t *testing.T) {
+		store, mock, beadsDir := newIdentityUnitStore(t, localID, database)
+		expectIdentityRead(mock, value(""), nil)
+		if err := store.verifyProjectIdentity(context.Background(), beadsDir, false); err != nil {
+			t.Errorf("verifyProjectIdentity() = %v; want the old-style-database skip", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("unfulfilled sqlmock expectations: %v", err)
+		}
+	})
+
+	t.Run("matching identity passes", func(t *testing.T) {
+		store, mock, beadsDir := newIdentityUnitStore(t, localID, database)
+		expectIdentityRead(mock, value(localID), nil)
+		if err := store.verifyProjectIdentity(context.Background(), beadsDir, false); err != nil {
+			t.Errorf("verifyProjectIdentity() = %v; want the matching identity to pass", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("unfulfilled sqlmock expectations: %v", err)
+		}
+	})
+
+	t.Run("mismatched identity refuses with the mismatch error", func(t *testing.T) {
+		store, mock, beadsDir := newIdentityUnitStore(t, localID, database)
+		expectIdentityRead(mock, value("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"), nil)
+		err := store.verifyProjectIdentity(context.Background(), beadsDir, false)
+		if err == nil {
+			t.Fatal("verifyProjectIdentity() = nil; want the existing mismatch refusal")
+		}
+		if !strings.Contains(err.Error(), "PROJECT IDENTITY MISMATCH") {
+			t.Errorf("refusal missing the existing mismatch headline:\n%s", err)
+		}
+	})
+
+	t.Run("no local metadata skips without SQL", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("sqlmock.New: %v", err)
+		}
+		t.Cleanup(func() { _ = db.Close() })
+		store := &DoltStore{db: db, database: database}
+		beadsDir := t.TempDir() // no metadata.json at all
+		if err := store.verifyProjectIdentity(context.Background(), beadsDir, false); err != nil {
+			t.Errorf("verifyProjectIdentity() = %v; want the no-local-metadata skip", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("unfulfilled sqlmock expectations: %v", err)
+		}
+	})
+
+	t.Run("empty local id skips without SQL", func(t *testing.T) {
+		store, mock, beadsDir := newIdentityUnitStore(t, "", database)
+		if err := store.verifyProjectIdentity(context.Background(), beadsDir, false); err != nil {
+			t.Errorf("verifyProjectIdentity() = %v; want the empty-local-id skip", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("unfulfilled sqlmock expectations: %v", err)
+		}
+	})
 }
 
 // TestCrossProject_IdentityCheck_ReadErrorRefuses covers the verifier's
