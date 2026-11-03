@@ -23,6 +23,10 @@ import (
 // Each operation appends a UUID so concurrent pushes cannot collide.
 const federationStagingBranchPrefix = "__federation_push_staging_"
 
+// federationKeepBranchPrefix names the temporary branch on which a filtered
+// push reverts its filter commit before merging that revert into the source.
+const federationKeepBranchPrefix = "__federation_push_keep_"
+
 // federationStagingCleanupTimeout bounds best-effort cleanup after the caller
 // has canceled or its deadline has expired.
 const federationStagingCleanupTimeout = 30 * time.Second
@@ -487,8 +491,9 @@ func (s *DoltStore) Sync(ctx context.Context, peer string, strategy string) (*Sy
 //
 // For non-empty excludeTypes, versioncontrolops.RunFilteredPush stages the
 // source branch, withholds excluded issues the peer's fetched tip does not
-// already hold, and pushes the staging branch to the peer using a refspec. The
-// staging branch is always cleaned up.
+// already hold, keeps the filter commit's ancestry locally without losing the
+// withheld rows, and pushes the staging branch to the peer using a refspec. The
+// temporary branches are always cleaned up.
 //
 // The special type "wisp" matches issues with ephemeral=true in the committed
 // issues table. Wisps normally live in dolt_ignore'd tables and are not pushed,
@@ -503,6 +508,7 @@ func (s *DoltStore) filteredPushToPeer(ctx context.Context, peer string, exclude
 		return fmt.Errorf("federation filter: generate staging branch: %w", err)
 	}
 	stagingBranch := federationStagingBranchPrefix + operationID.String()
+	keepBranch := federationKeepBranchPrefix + operationID.String()
 
 	// Pin a single long-timeout connection for the session-scoped staging
 	// operation. RecomputeAllIsBlockedInTx can exceed the shared pool's
@@ -525,12 +531,12 @@ func (s *DoltStore) filteredPushToPeer(ctx context.Context, peer string, exclude
 	}
 	defer conn.Close()
 
-	// Arm cleanup before creating the branch: a lost create response can make
-	// the branch exist even when the call fails, and canceling an in-flight
+	// Arm cleanup before creating the branches: a lost create response can make
+	// a branch exist even when the call fails, and canceling an in-flight
 	// query makes go-sql-driver/mysql invalidate the operation connection, so
 	// cleanup reopens a fresh one.
 	defer func() {
-		if cleanupErr := cleanupFilteredStaging(ctx, db, conn, sourceBranch, stagingBranch); cleanupErr != nil {
+		if cleanupErr := cleanupFilteredStaging(ctx, db, conn, sourceBranch, stagingBranch, keepBranch); cleanupErr != nil {
 			retErr = errors.Join(retErr, fmt.Errorf("federation filter: cleanup: %w", cleanupErr))
 		}
 	}()
@@ -542,8 +548,10 @@ func (s *DoltStore) filteredPushToPeer(ctx context.Context, peer string, exclude
 	_, err = versioncontrolops.RunFilteredPush(ctx, conn, versioncontrolops.FilteredPushRequest{
 		Source:       sourceBranch,
 		Staging:      stagingBranch,
+		Keep:         keepBranch,
 		PeerTip:      peerTip,
 		ExcludeTypes: excludeTypes,
+		Author:       s.commitAuthorString(),
 		Push: func(ctx context.Context, refspec string) error {
 			return s.pushRefToPeer(ctx, peer, refspec)
 		},

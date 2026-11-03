@@ -23,15 +23,18 @@ var filteredPushRecomputeTables = []string{"wisps", "wisp_dependencies"}
 type FilteredPushRequest struct {
 	// Source is the local branch being published.
 	Source string
-	// Staging is a unique temporary branch name. The caller arms its cleanup
-	// (and the Source checkout's restore) before calling.
-	Staging string
+	// Staging and Keep are unique temporary branch names. The caller arms
+	// cleanup of both (and of the Source checkout) before calling.
+	Staging, Keep string
 	// PeerTip is the commit hash of the peer's branch as last fetched, or ""
 	// when the peer does not have the branch yet. Excluded issues present at
 	// PeerTip are left in the publication.
 	PeerTip string
 	// ExcludeTypes are issue types to withhold; "wisp" matches ephemeral rows.
 	ExcludeTypes []string
+	// Author attributes the merge that keeps the filter commit's ancestry in
+	// Source.
+	Author string
 	// Push publishes refspec through the driver's authenticated transport.
 	Push func(ctx context.Context, refspec string) error
 }
@@ -49,13 +52,15 @@ type FilteredPushResult struct {
 
 // RunFilteredPush publishes Source minus the excluded issues the peer does not
 // already hold. On conn it stages an immutable snapshot S of Source, deletes
-// the withheld rows on the staging branch, commits that as F and pushes it.
-// Any error before the push leaves the peer untouched. Branch state is
-// session-scoped, so conn must be one pinned connection; the caller removes
-// the temporary branch.
+// the withheld rows on the staging branch and commits that as F, reverts F on
+// the keep branch and merges the revert into Source, so F is an ancestor of
+// Source with Source's contents unchanged before F is pushed. A later merge of
+// the peer's tip therefore cannot delete the local rows. Any error before the
+// push leaves the peer untouched. Branch state is session-scoped, so conn must
+// be one pinned connection; the caller removes the temporary branches.
 func RunFilteredPush(ctx context.Context, conn BlockedRecomputeConn, req FilteredPushRequest) (FilteredPushResult, error) {
 	var res FilteredPushResult
-	for _, ref := range []string{req.Source, req.Staging} {
+	for _, ref := range []string{req.Source, req.Staging, req.Keep} {
 		if err := issueops.ValidateRef(ref); err != nil {
 			return res, fmt.Errorf("federation filter: %w", err)
 		}
@@ -93,8 +98,9 @@ func RunFilteredPush(ctx context.Context, conn BlockedRecomputeConn, req Filtere
 	if err != nil {
 		return res, err
 	}
+	filterCommit := ""
 	if deleted {
-		if _, err := CommitFilteredStaging(ctx, conn, req.Staging); err != nil {
+		if filterCommit, err = CommitFilteredStaging(ctx, conn, req.Staging); err != nil {
 			return res, err
 		}
 	}
@@ -110,8 +116,16 @@ func RunFilteredPush(ctx context.Context, conn BlockedRecomputeConn, req Filtere
 		}
 	}
 
+	if filterCommit != "" {
+		if err := keepFilterAncestry(ctx, conn, req, filterCommit); err != nil {
+			return res, err
+		}
+	}
 	if err := CheckoutBranch(ctx, conn, req.Source); err != nil {
 		return res, fmt.Errorf("federation filter: restore branch %s: %w", req.Source, err)
+	}
+	if err := filteredPushStage(ctx, "push", conn, req); err != nil {
+		return res, err
 	}
 	if err := req.Push(ctx, req.Staging+":"+req.Source); err != nil {
 		return res, err
@@ -134,6 +148,28 @@ func CleanupFilteredPush(ctx context.Context, conn DBConn, source string, branch
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// filteredPushStageHook, when set, runs at each named stage of
+// RunFilteredPush; a non-nil error stops the operation there.
+var filteredPushStageHook func(ctx context.Context, stage string, conn DBConn, req FilteredPushRequest) error
+
+// SetFilteredPushStageHookForTest installs fn as the stage hook and returns a
+// restore func. Tests use it to observe or fail a filtered push mid-way.
+func SetFilteredPushStageHookForTest(fn func(ctx context.Context, stage string, conn DBConn, req FilteredPushRequest) error) func() {
+	prev := filteredPushStageHook
+	filteredPushStageHook = fn
+	return func() { filteredPushStageHook = prev }
+}
+
+func filteredPushStage(ctx context.Context, stage string, conn DBConn, req FilteredPushRequest) error {
+	if filteredPushStageHook == nil {
+		return nil
+	}
+	if err := filteredPushStageHook(ctx, stage, conn, req); err != nil {
+		return fmt.Errorf("federation filter: %s: %w", stage, err)
+	}
+	return nil
 }
 
 // RemoteBranchTip returns the commit hash of remote's branch as last fetched,
@@ -202,6 +238,37 @@ func deleteWithheldIssues(ctx context.Context, conn DBConn, excludeTypes []strin
 		}
 	}
 	return deleted, nil
+}
+
+// keepFilterAncestry makes filterCommit an ancestor of req.Source without
+// changing its contents: revert it on the keep branch, then merge that revert
+// into Source. A failed merge is aborted so Source is left as it was.
+func keepFilterAncestry(ctx context.Context, conn DBConn, req FilteredPushRequest, filterCommit string) error {
+	if _, err := conn.ExecContext(ctx, "CALL DOLT_BRANCH(?, ?)", req.Keep, filterCommit); err != nil {
+		return fmt.Errorf("federation filter: create keep branch: %w", err)
+	}
+	if err := CheckoutBranch(ctx, conn, req.Keep); err != nil {
+		return fmt.Errorf("federation filter: checkout keep: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx, "CALL DOLT_REVERT('--author', ?, ?)", req.Author, filterCommit); err != nil {
+		return fmt.Errorf("federation filter: revert filter commit on keep: %w", err)
+	}
+	if err := CheckoutBranch(ctx, conn, req.Source); err != nil {
+		return fmt.Errorf("federation filter: restore branch %s: %w", req.Source, err)
+	}
+	conflicts, err := Merge(ctx, conn, req.Keep, req.Author)
+	if err == nil && len(conflicts) > 0 {
+		err = fmt.Errorf("merge branch %s: %d conflict(s)", req.Keep, len(conflicts))
+	}
+	if err != nil {
+		if merging, _ := mergeInProgress(ctx, conn); merging {
+			if _, abortErr := conn.ExecContext(ctx, "CALL DOLT_MERGE('--abort')"); abortErr != nil {
+				err = errors.Join(err, fmt.Errorf("abort keep merge: %w", abortErr))
+			}
+		}
+		return fmt.Errorf("federation filter: keep local excluded issues: %w", err)
+	}
+	return nil
 }
 
 // sameContent reports whether two commits hold the same versioned contents.

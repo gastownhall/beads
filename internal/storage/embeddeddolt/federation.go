@@ -520,6 +520,10 @@ func (s *EmbeddedDoltStore) Sync(ctx context.Context, peer string, strategy stri
 // push, matching the server driver.
 const federationStagingBranchPrefix = "__federation_push_staging_"
 
+// federationKeepBranchPrefix names the temporary branch on which a filtered
+// push reverts its filter commit, matching the server driver.
+const federationKeepBranchPrefix = "__federation_push_keep_"
+
 // federationStagingCleanupTimeout bounds the cleanup of a filtered push.
 const federationStagingCleanupTimeout = 30 * time.Second
 
@@ -536,18 +540,19 @@ func (s *EmbeddedDoltStore) filteredPushToPeer(ctx context.Context, peer string,
 		return fmt.Errorf("federation filter: generate staging branch: %w", err)
 	}
 	stagingBranch := federationStagingBranchPrefix + fmt.Sprintf("%x", suffix)
+	keepBranch := federationKeepBranchPrefix + fmt.Sprintf("%x", suffix)
 	return s.withPeerAuth(ctx, peer, func(user string) error {
 		return s.withMutatingPinnedDBConn(ctx, func(db versioncontrolops.DBConn) (retErr error) {
 			conn, ok := db.(versioncontrolops.BlockedRecomputeConn)
 			if !ok {
 				return fmt.Errorf("federation filter: pinned connection cannot open transactions")
 			}
-			// Armed before the branch is created; bounded and uncanceled so
-			// a canceled sync still removes the staging branch.
+			// Armed before any branch is created; bounded and uncanceled so
+			// a canceled sync still removes the temporary branches.
 			defer func() {
 				cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), federationStagingCleanupTimeout)
 				defer cancel()
-				if err := versioncontrolops.CleanupFilteredPush(cleanupCtx, db, s.branch, stagingBranch); err != nil {
+				if err := versioncontrolops.CleanupFilteredPush(cleanupCtx, db, s.branch, stagingBranch, keepBranch); err != nil {
 					retErr = errors.Join(retErr, fmt.Errorf("federation filter: cleanup: %w", err))
 				}
 			}()
@@ -558,8 +563,10 @@ func (s *EmbeddedDoltStore) filteredPushToPeer(ctx context.Context, peer string,
 			_, err = versioncontrolops.RunFilteredPush(ctx, conn, versioncontrolops.FilteredPushRequest{
 				Source:       s.branch,
 				Staging:      stagingBranch,
+				Keep:         keepBranch,
 				PeerTip:      peerTip,
 				ExcludeTypes: excludeTypes,
+				Author:       commitAuthor,
 				Push: func(ctx context.Context, refspec string) error {
 					return versioncontrolops.Push(ctx, db, peer, refspec, user)
 				},
