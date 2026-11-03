@@ -286,6 +286,7 @@ release_cross_build(
         "//internal/testutil/fixtures:fixtures",
         "//internal/testutil/integration:integration",
         "//internal/testutil/legacyworkspace:legacyworkspace",
+        "//internal/testutil/sqlgate:sqlgate",
         "//internal/testutil:testutil",
         "//internal/timeparsing:timeparsing",
         "//internal/tracker/conformance:conformance",

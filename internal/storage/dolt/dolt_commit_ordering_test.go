@@ -525,10 +525,6 @@ func TestVerifiedClaimResolvesPostTxCommitFailureAsApplied(t *testing.T) {
 		return nil
 	}
 	connector.rows = func(query string) (driver.Rows, bool) {
-		// The journal writer lock a server-mode bead write takes.
-		if strings.Contains(query, "SELECT GET_LOCK") {
-			return &valRows{cols: []string{"got"}, vals: [][]driver.Value{{int64(1)}}}, true
-		}
 		// The verify re-read: report the claim as applied.
 		if strings.Contains(query, "SELECT assignee, status FROM issues") {
 			return &valRows{

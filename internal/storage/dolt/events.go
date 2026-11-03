@@ -15,12 +15,7 @@ import (
 func (s *DoltStore) AddComment(ctx context.Context, issueID, actor, comment string) error {
 	return s.withCircuitWrite(ctx, func(ctx context.Context) error {
 		isWisp := s.isActiveWisp(ctx, issueID)
-		conn, release, err := s.writeTxConn(ctx)
-		if err != nil {
-			return err
-		}
-		defer release()
-		tx, err := conn.BeginTx(ctx, nil)
+		tx, err := s.db.BeginTx(ctx, nil)
 		if err != nil {
 			return fmt.Errorf("begin tx: %w", err)
 		}
@@ -35,7 +30,6 @@ func (s *DoltStore) AddComment(ctx context.Context, issueID, actor, comment stri
 		if err := s.commitSQLTx(ctx, "commit add comment event", tx); err != nil {
 			return err
 		}
-		release()
 		if isWisp {
 			return nil
 		}

@@ -843,10 +843,9 @@ func (s *DoltStore) DeleteIssuesBySourceRepo(ctx context.Context, sourceRepo str
 	return count, err
 }
 
-// ClearRepoMtime removes the mtime cache entry for a repository. It writes only
-// repo_mtimes, no bead image table, so it takes no journal writer lock.
+// ClearRepoMtime removes the mtime cache entry for a repository.
 func (s *DoltStore) ClearRepoMtime(ctx context.Context, repoPath string) error {
-	return s.withRetryTxNoJournal(ctx, func(tx *sql.Tx) error {
+	return s.withRetryTx(ctx, func(tx *sql.Tx) error {
 		return issueops.ClearRepoMtimeInTx(ctx, tx, repoPath)
 	})
 }
@@ -863,10 +862,9 @@ func (s *DoltStore) GetRepoMtime(ctx context.Context, repoPath string) (int64, e
 	return result, err
 }
 
-// SetRepoMtime updates the mtime cache for a repository's data file. Like
-// ClearRepoMtime it writes only repo_mtimes and takes no journal writer lock.
+// SetRepoMtime updates the mtime cache for a repository's data file.
 func (s *DoltStore) SetRepoMtime(ctx context.Context, repoPath, jsonlPath string, mtimeNs int64) error {
-	return s.withRetryTxNoJournal(ctx, func(tx *sql.Tx) error {
+	return s.withRetryTx(ctx, func(tx *sql.Tx) error {
 		return issueops.SetRepoMtimeInTx(ctx, tx, repoPath, jsonlPath, mtimeNs)
 	})
 }

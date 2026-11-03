@@ -467,12 +467,10 @@ func (s *DoltStore) GetMoleculeLastActivity(ctx context.Context, moleculeID stri
 }
 
 // GetNextChildID returns the next available child ID for a parent.
-// Delegates SQL work to issueops.GetNextChildIDTx. The allocation writes only
-// the child counter table and records no journal event, so it takes no journal
-// writer lock.
+// Delegates SQL work to issueops.GetNextChildIDTx.
 func (s *DoltStore) GetNextChildID(ctx context.Context, parentID string) (string, error) {
 	var childID string
-	err := s.withRetryTxNoJournal(ctx, func(tx *sql.Tx) error {
+	err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
 		var err error
 		childID, err = issueops.GetNextChildIDTx(ctx, tx, parentID)
 		return err

@@ -196,6 +196,7 @@ go_test(
         "crosstier_dep_test.go",
         "custom_status_test.go",
         "cycle_detector_contract_test.go",
+        "delete_comment_race_test.go",
         "deleter_contract_test.go",
         "demote_coordination_test.go",
         "demote_to_wisp_test.go",
@@ -281,7 +282,6 @@ go_test(
         "journal_coverage_test.go",
         "journal_scope_completeness_test.go",
         "journal_test.go",
-        "journal_writer_lock_test.go",
         "keyset_search_test.go",
         "label_rename_test.go",
         "labels_test.go",
@@ -408,13 +408,11 @@ go_test(
         "workspace_config_contract_test.go",
     ],
     # Source-scan guards (journal/version scope completeness, helper sentinel
-    # census, the NoJournal guards) parse this package, ../issueops and
-    # ../memoryops at test time; the PR4107 and migration replay tests
-    # (server-backed) read ../schema/migrations.
+    # census) parse this package and ../issueops at test time; the PR4107 and
+    # migration replay tests (server-backed) read ../schema/migrations.
     data = [
         ":go_srcs",
         "//internal/storage/issueops:go_srcs",
-        "//internal/storage/memoryops:go_srcs",
         "//internal/storage/schema:migrations",
     ],
     embed = [":dolt"],
@@ -449,12 +447,12 @@ go_test(
         "//internal/testutil",
         "//internal/testutil/credentialcmd",
         "//internal/testutil/legacyworkspace",
+        "//internal/testutil/sqlgate",
         "//internal/types",
         "//internal/utils",
         "//internal/versionedhistory",
         "//internal/workapi",
         "//issueops",
-        "//memoryops",
         "@com_github_data_dog_go_sqlmock//:go-sqlmock",
         "@com_github_go_sql_driver_mysql//:mysql",
         "@com_github_google_uuid//:uuid",
