@@ -110,6 +110,20 @@ func alreadyConverged(ctx context.Context, db DBConn, databaseName string, selec
 		return false, nil
 	}
 
+	// Committed __temp__ rebuild residue (gastownhall/beads#7073) is the
+	// same wedge one plane over: MigrateUp untracks it before its series run,
+	// so a database that still carries it is not converged no matter how
+	// at-latest its cursors read. The whole gate, veto included — a residue
+	// the operator deliberately keeps versioned must neither trigger the
+	// repair nor defeat this fast path.
+	residue, err := tempResidueTables(ctx, db, qualifier)
+	if err != nil {
+		return false, err
+	}
+	if len(residue) > 0 {
+		return false, nil
+	}
+
 	// LAST, and deliberately so: everything above is the cheap steady-state
 	// question and short-circuits first. This term closes the window where a
 	// peer is midway through a real migration pass. migrationWorkNeeded only

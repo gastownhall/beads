@@ -821,6 +821,7 @@ func TestAlreadyConvergedAcceptsATrackedCursorTheOperatorUnignored(t *testing.T)
 	expectHeadTableProbe(mock, "", ignoredSource.cursorTable, true)
 	expectIgnoreResolution(mock, "", ignoredSource.cursorTable, exactlyIgnored(false))
 	expectShowTable(mock, ignoredCursorUntrackTempTable, false)
+	expectTempResidueNoop(mock, "")
 	expectMigrationLockProbe(mock, "testdb", 1)
 
 	converged, err := alreadyConverged(context.Background(), db, "testdb", nil)
@@ -888,6 +889,7 @@ func TestMigrateUpCountsAHealAsWork(t *testing.T) {
 	expectIgnoredCursorUnstage(mock)
 	expectIgnoredCursorUntrackCommit(mock)
 	expectIgnoredCursorRestore(mock, false)
+	expectTempResidueNoop(mock, "")
 	expectNoMigrationWorkNeeded(mock)
 
 	applied, err := MigrateUp(context.Background(), db)

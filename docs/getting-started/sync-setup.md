@@ -261,6 +261,22 @@ bd dolt commit
 bd dolt pull
 ```
 
+### "failed to update table; malformed database: chunk … required but not found" on pull
+
+The lineage's history carries a committed `__temp__…` table-rebuild
+intermediate, left there by an older bd. Every fresh clone rebuilds the
+affected table by renaming that intermediate onto its ignored final name — an
+unstageable delta that breaks the merge (#7073). bd now repairs this
+automatically: every writable open untracks the residue from history (keeping
+any rows it still holds in the working set) and commits the removal. Upgrade
+bd, run any writable command on the affected machine (or just `bd dolt pull`),
+and the pull goes through. Then run `bd dolt push` once so the repaired
+history propagates and other clones stop hitting it. The repair is skipped
+without error when migrations need consent or the account lacks the
+permissions it needs; a machine in that position keeps working locally until a
+permitted open repairs it. An intermediate deliberately kept versioned by an
+exact `dolt_ignore` override is left alone.
+
 ### "no store available" on push or commit
 
 This was a bug in bd < 0.59.0. Upgrade bd:

@@ -145,6 +145,7 @@ func expectConvergedProbe(mock sqlmock.Sqlmock, database string) {
 	expectNoMigrationWorkNeeded(mock)
 	expectDoltIgnoreRead(mock, unqualifiedDoltIgnore, seededIgnorePatterns(LatestVersion()))
 	expectIgnoredCursorGate(mock, "", false, nil, false)
+	expectTempResidueNoop(mock, "")
 	expectMigrationLockProbe(mock, database, 1)
 }
 
@@ -230,6 +231,7 @@ func TestMigrateUpWithLockSkipsLockOnAnUnselectedSession(t *testing.T) {
 	expectNoMigrationWorkNeeded(mock)
 	expectDoltIgnoreRead(mock, qualifiedDoltIgnore("testdb"), seededIgnorePatterns(LatestVersion()))
 	expectIgnoredCursorGate(mock, "`testdb`", false, nil, false)
+	expectTempResidueNoop(mock, "`testdb`")
 	expectMigrationLockProbe(mock, "testdb", 1)
 
 	prepared := 0
@@ -501,6 +503,7 @@ func TestAlreadyConvergedDeclinesWhileTheMigrationLockIsHeld(t *testing.T) {
 			expectNoMigrationWorkNeeded(mock)
 			expectDoltIgnoreRead(mock, unqualifiedDoltIgnore, seededIgnorePatterns(LatestVersion()))
 			expectIgnoredCursorGate(mock, "", false, nil, false)
+			expectTempResidueNoop(mock, "")
 			expectMigrationLockProbe(mock, "testdb", tt.free)
 
 			converged, err := alreadyConverged(context.Background(), db, "testdb", nil)
@@ -661,6 +664,7 @@ func TestAlreadyConvergedAcceptsOverriddenIgnorePattern(t *testing.T) {
 	// column, so a query that filtered on it would not match this expectation.
 	expectDoltIgnoreRead(mock, unqualifiedDoltIgnore, seededIgnorePatterns(LatestVersion()))
 	expectIgnoredCursorGate(mock, "", false, nil, false)
+	expectTempResidueNoop(mock, "")
 	expectMigrationLockProbe(mock, "testdb", 1)
 
 	converged, err := alreadyConverged(context.Background(), db, "testdb", nil)
@@ -691,6 +695,7 @@ func TestAlreadyConvergedOnForwardSkew(t *testing.T) {
 	expectNoMigrationWorkNeededAtVersion(mock, ahead)
 	expectDoltIgnoreRead(mock, unqualifiedDoltIgnore, seededIgnorePatterns(ahead))
 	expectIgnoredCursorGate(mock, "", false, nil, false)
+	expectTempResidueNoop(mock, "")
 	expectMigrationLockProbe(mock, "testdb", 1)
 
 	converged, err := alreadyConverged(context.Background(), db, "testdb", nil)
@@ -751,6 +756,7 @@ func TestAlreadyConvergedFailsClosedOnUnreadableState(t *testing.T) {
 		expectNoMigrationWorkNeeded(mock)
 		expectDoltIgnoreRead(mock, unqualifiedDoltIgnore, seededIgnorePatterns(LatestVersion()))
 		expectIgnoredCursorGate(mock, "", false, nil, false)
+		expectTempResidueNoop(mock, "")
 		mock.ExpectQuery(regexp.QuoteMeta("SELECT IS_FREE_LOCK(?)")).
 			WillReturnError(sql.ErrConnDone)
 

@@ -239,10 +239,11 @@ func TestMigrateUpSeedsIgnorePatternsWhenNoWorkNeeded(t *testing.T) {
 	defer db.Close()
 
 	expectIgnorePatternSeed(mock, LatestVersion())
-	// #4356: the open-time untrack reconcile runs right after the seed and
-	// before the no-work short-circuit. On a healthy database it is two reads
+	// #4356 and #7073: the open-time reconciles run right after the seed and
+	// before the no-work short-circuit. On a healthy database they are reads
 	// and no writes.
 	expectIgnoredCursorHealNoop(mock)
+	expectTempResidueNoop(mock, "")
 	// migrationWorkNeeded: both cursors at latest, both content_hash columns
 	// present, no custom backfill pending -> no work, MigrateUp short-circuits.
 	expectCursorProbe(mock, "schema_migrations", true)
@@ -286,10 +287,11 @@ func TestMigrateUpSkipsSeedCommitWhenNothingChanged(t *testing.T) {
 	defer db.Close()
 
 	expectIgnorePatternSeedNoop(mock, LatestVersion())
-	// #4356: the open-time untrack reconcile runs right after the seed and
-	// before the no-work short-circuit. On a healthy database it is two reads
+	// #4356 and #7073: the open-time reconciles run right after the seed and
+	// before the no-work short-circuit. On a healthy database they are reads
 	// and no writes.
 	expectIgnoredCursorHealNoop(mock)
+	expectTempResidueNoop(mock, "")
 	// migrationWorkNeeded: no work, MigrateUp short-circuits.
 	expectCursorProbe(mock, "schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", LatestVersion())
@@ -374,10 +376,11 @@ func expectOnePendingMigration(t *testing.T, mock sqlmock.Sqlmock) {
 	latestIgnored := LatestIgnoredVersion()
 
 	expectIgnorePatternSeed(mock, latest-1)
-	// #4356: the open-time untrack reconcile runs right after the seed and
-	// before the no-work short-circuit. On a healthy database it is two reads
+	// #4356 and #7073: the open-time reconciles run right after the seed and
+	// before the no-work short-circuit. On a healthy database they are reads
 	// and no writes.
 	expectIgnoredCursorHealNoop(mock)
+	expectTempResidueNoop(mock, "")
 	expectCursorProbe(mock, "schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", latest-1)
 	expectDoltStatusRows(mock)
@@ -549,10 +552,11 @@ func expectDirtyGuardRefusal(t *testing.T, mock sqlmock.Sqlmock) {
 	cursor := eventsFlipVersion - 1
 
 	expectIgnorePatternSeedNoop(mock, cursor)
-	// #4356: the open-time untrack reconcile runs right after the seed and
-	// before the no-work short-circuit. On a healthy database it is two reads
+	// #4356 and #7073: the open-time reconciles run right after the seed and
+	// before the no-work short-circuit. On a healthy database they are reads
 	// and no writes.
 	expectIgnoredCursorHealNoop(mock)
+	expectTempResidueNoop(mock, "")
 	// migrationWorkNeeded: main cursor behind -> work needed (short-circuits).
 	expectCursorProbe(mock, "schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", cursor)
@@ -978,10 +982,11 @@ func TestMigrateUpWithLockFreshBootstrapHealCapabilityIsOneShot(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"status"}))
 	// The reset returns to the v60 HEAD used by expectDirtyGuardRefusal. The
 	// rerun repeats main's unconditional ignore-pattern seed and the #4356
-	// reconcile gate before reaching migrationWorkNeeded, where the injected
-	// transient failure occurs.
+	// and #7073 reconcile gates before reaching migrationWorkNeeded, where
+	// the injected transient failure occurs.
 	expectIgnorePatternSeedNoop(mock, LatestVersion()-2)
 	expectIgnoredCursorHealNoop(mock)
+	expectTempResidueNoop(mock, "")
 	expectCursorProbe(mock, "schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", LatestVersion()-2)
 	mock.ExpectQuery("(?s)SELECT s\\.table_name, s\\.staged\\s+FROM dolt_status s").

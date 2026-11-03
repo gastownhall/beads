@@ -1165,6 +1165,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A lineage whose history carries a committed `__temp__…` table-rebuild
+  intermediate no longer wedges every fresh clone's pull (#7073, reported by
+  @bee-ghosttrack). Older binaries could commit such an intermediate into
+  HEAD; on every new clone the rebuild migrations then renamed it onto its
+  ignored final name, an unstageable delta that made `bd dolt pull` fail with
+  "failed to update table; malformed database: chunk … required but not
+  found" (and, on older releases, made the first open fail with "the table(s)
+  … do not exist"). Every writable open now cached-untracks the residue out of
+  HEAD before the rebuild migrations run — preserving any rows the
+  intermediate still holds in the working set — and commits the removal, so
+  the clone converges on its first open and pulls again. The repair runs as
+  part of schema migration, so it respects the same consent gate as any
+  migration pass and declines without error when the account lacks the
+  permissions it needs; an interrupted or refused repair leaves the database
+  exactly as it was, and the next writable open retries it. Push the repaired
+  HEAD with an ordinary `bd dolt push` so clones and peers stop inheriting the
+  residue. An intermediate deliberately kept versioned by an exact
+  `dolt_ignore` override is left alone.
 - `bd create --file` and other batch creates no longer fail with "issue
   already exists" on an id bd generated itself. The batch chose every id
   before it wrote any row, so two of its items could be handed the same short

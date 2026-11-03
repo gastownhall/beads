@@ -624,8 +624,10 @@ var doltIgnorePatterns = []string{
 	// __temp__X at HEAD, the pattern keeps that table's drop or rename delta
 	// out of every ignore-filtered staging candidate set (dirtyTables with
 	// excludeIgnored, existingCommittableTables), so no migration commit
-	// stages it, and dolt pull refuses the uncommitted non-add delta until
-	// the store is repaired by hand. And it must be asserted before the
+	// stages it, and dolt pull refuses the uncommitted non-add delta — the
+	// wedge temp_residue_untrack.go repairs at every writable open by
+	// cached-untracking the residue out of HEAD (gastownhall/beads#7073).
+	// And it must be asserted before the
 	// ignored series runs: on a
 	// @@dolt_transaction_commit=1 server an unignored CREATE __temp__X
 	// auto-commits a real table at HEAD, and the rename to the ignored final
@@ -952,18 +954,34 @@ func migrateUpConsented(ctx context.Context, db DBConn) (int, error) {
 		return 0, fmt.Errorf("untracking legacy %s: %w", ignoredSource.cursorTable, err)
 	}
 
-	// A heal counts toward the returned total because every caller of this
-	// function asks the same question of it — did this pass change the
-	// database? — and a heal answers yes emphatically: it runs DDL and moves
-	// HEAD. Reporting 0 told DoltStore.Open not to rebuild the pool it had
-	// already pinned to the pre-migration session root (be-itm5: that
-	// connection serves stale reads and does not self-heal on retry), and
-	// told `bd migrate` to print "already at vN" and skip commandDidWrite
-	// immediately after minting a fleet-visible commit. The heal's own log
-	// line, not this counter, is what tells an operator WHAT happened.
+	// Same reasoning, one plane over: committed __temp__ rebuild residue
+	// (gastownhall/beads#7073) survives the pattern seed as a HEAD-tracked
+	// table no ignore-filtered staging path can touch, and it must be
+	// untracked BEFORE the series run — the ignored series renames the
+	// residue onto its ignored final name on a fresh clone, and that rename
+	// is the unstageable delta that wedges every pull. Re-probing at every
+	// writable open, rather than a numbered migration, is what catches the
+	// clones that keep arriving from an unrepaired hub.
+	residueFixed, err := reconcileTempResidue(ctx, db)
+	if err != nil {
+		return 0, fmt.Errorf("untracking __temp__ residue: %w", err)
+	}
+
+	// A heal or repair counts toward the returned total because every caller
+	// of this function asks the same question of it — did this pass change
+	// the database? — and both answer yes emphatically: they move HEAD.
+	// Reporting 0 told DoltStore.Open not to rebuild the pool it had already
+	// pinned to the pre-migration session root (be-itm5: that connection
+	// serves stale reads and does not self-heal on retry), and told
+	// `bd migrate` to print "already at vN" and skip commandDidWrite
+	// immediately after minting a fleet-visible commit. The repairs' own log
+	// lines, not this counter, are what tell an operator WHAT happened.
 	reconciled := 0
 	if healed {
 		reconciled = 1
+	}
+	if residueFixed {
+		reconciled++
 	}
 
 	applied, err := migrateUpAfterReconcile(ctx, db, seedChanged)

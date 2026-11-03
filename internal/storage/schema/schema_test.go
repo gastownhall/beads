@@ -68,10 +68,11 @@ func TestMigrateUpReturnsDirtyTablesErrorForPreExistingDirtyTable(t *testing.T) 
 	// else (GH#4378); the rows changed, so a scoped commit lands before the
 	// pass runs (#4566: the seed must not ride the per-step pass commits).
 	expectIgnorePatternSeed(mock, 42)
-	// #4356: the open-time untrack reconcile runs right after the seed and
-	// before the no-work short-circuit. On a healthy database it is two reads
+	// #4356 and #7073: the open-time reconciles run right after the seed and
+	// before the no-work short-circuit. On a healthy database they are reads
 	// and no writes.
 	expectIgnoredCursorHealNoop(mock)
+	expectTempResidueNoop(mock, "")
 	// migrationWorkNeeded: mainSource.atLatest reads the current cursor; v42
 	// is behind LatestVersion(), so the || short-circuits before checking
 	// ignoredSource.atLatest or the content-hash/backfill probes.
