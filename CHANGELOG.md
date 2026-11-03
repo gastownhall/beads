@@ -21,7 +21,10 @@ unchanged: upgrading from 1.3.x or 1.3.3-rc.1 is a binary swap.
 
 Before promotion, 1.3.3-rc.1 passed gascity's RC Gate with bd pinned to the
 candidate: the same 155 jobs as the 1.3.2 gate, 151 passing and 3 skipped,
-the remaining one being an advisory probe that builds bd from `main`.
+the remaining one being an advisory probe that builds bd from `main`. For
+that run, two checks that track moving upstream heads, that probe and a
+pack-pin check, were made non-blocking; both failed on upstream drift, not
+on the candidate.
 
 ### Upgrade notes
 
@@ -33,7 +36,8 @@ the remaining one being an advisory probe that builds bd from `main`.
   to apply, and `bd delete` needs full ids.
 - Read the [1.3.3-rc.1] **Known issues**, in particular the warning not to
   run `bd compact` or `bd flatten` on a clone that adopted migration 0062 by
-  pull ([#7039](https://github.com/gastownhall/beads/issues/7039)).
+  `bd dolt pull` or `bd bootstrap`, or was cloned after it
+  ([#7039](https://github.com/gastownhall/beads/issues/7039)).
 - The 1.3.2 upgrade note still applies: run `bd recompute-blocked` once per
   workspace whose store crossed migration 0059 under bd 1.3.0 or later,
   which includes any workspace first created by bd 1.2.x or earlier
