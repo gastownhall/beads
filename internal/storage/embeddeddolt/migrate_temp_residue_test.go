@@ -384,3 +384,67 @@ func TestEmbeddedHealthyReopenMintsNoResidueCommit(t *testing.T) {
 		}
 	})
 }
+
+// The interrupted-repair half of #7073's failure contract: a reconcile killed
+// between its DOLT_RM and the removal commit leaves the staged root missing a
+// name HEAD still carries, while the residue's working rows sit untouched
+// (cached removal). The next open must not treat that state as fatal — the
+// reconcile re-runs from the top, the unstage sweep's DOLT_RESET re-arms the
+// staged root, and the repair converges: the residue leaves HEAD, the rows
+// survive, and no resume state machine is needed (AC-8).
+func TestEmbeddedTempResidueCrashWindowConvergesOnReopen(t *testing.T) {
+	ctx := t.Context()
+	f := newPristineEmbeddedDoltFixture(t, "residuecrash")
+	closeEmbeddedDoltStore(t, f.store)
+
+	withRawConn(t, f.dataDir, f.database, func(conn *sql.Conn) {
+		// Commit the residue the way an older binary did.
+		mustExecOn(t, ctx, conn, "DELETE FROM dolt_ignore WHERE pattern='__temp__%'")
+		mustExecOn(t, ctx, conn, "CALL DOLT_COMMIT('-Am', 'test: drop the __temp__ ignore pattern')")
+		mustExecOn(t, ctx, conn, "CREATE TABLE __temp__wisp_child_counters (parent_id VARCHAR(255) NOT NULL PRIMARY KEY, last_child INT NOT NULL DEFAULT 0)")
+		mustExecOn(t, ctx, conn, "INSERT INTO __temp__wisp_child_counters VALUES ('p1', 3), ('p2', 7)")
+		mustExecOn(t, ctx, conn, "CALL DOLT_ADD('-A')")
+		mustExecOn(t, ctx, conn, "CALL DOLT_COMMIT('-m', 'test: auto-commit caught the rebuild intermediate')")
+		mustExecOn(t, ctx, conn, "INSERT INTO dolt_ignore (pattern, ignored) VALUES ('__temp__%', true)")
+		mustExecOn(t, ctx, conn, "CALL DOLT_COMMIT('-Am', 'test: restore the __temp__ ignore pattern')")
+		// The crash window: the cached removal was issued and the process died
+		// before the removal commit, leaving the repair exactly mid-flight.
+		mustExecOn(t, ctx, conn, "CALL DOLT_RM('--cached', '__temp__wisp_child_counters')")
+
+		if !trackedAtHead(t, ctx, conn, "__temp__wisp_child_counters") {
+			t.Fatal("__temp__wisp_child_counters is not tracked at HEAD: the fixture does not reproduce the crash window")
+		}
+		var rows int
+		if err := conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM __temp__wisp_child_counters").Scan(&rows); err != nil {
+			t.Fatalf("counting residue rows in the crash window: %v", err)
+		}
+		if rows != 2 {
+			t.Fatalf("residue rows in the crash window = %d, want 2: the cached removal must preserve them", rows)
+		}
+	})
+
+	// The later permitted open: not fatal, and convergent in one pass.
+	store, err := embeddeddolt.Open(ctx, f.beadsDir, f.database, "main")
+	if err != nil {
+		t.Fatalf("open in the RM crash window: %v; the repair must not make an open fatal", err)
+	}
+	closeEmbeddedDoltStore(t, store)
+
+	withRawConn(t, f.dataDir, f.database, func(conn *sql.Conn) {
+		if tracked := trackedAtHead(t, ctx, conn, "__temp__wisp_child_counters"); tracked {
+			t.Error("__temp__wisp_child_counters is still tracked at HEAD after the reopened repair")
+		}
+		var rows int
+		if err := conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM __temp__wisp_child_counters").Scan(&rows); err != nil {
+			t.Fatalf("counting residue rows after the reopened repair: %v", err)
+		}
+		if rows != 2 {
+			t.Errorf("residue rows after the reopened repair = %d, want 2: no pass may lose them", rows)
+		}
+		for _, dirty := range dirtyTableNames(t, ctx, conn) {
+			if slices.Contains([]string{"__temp__wisp_child_counters", "wisp_child_counters"}, dirty) {
+				t.Errorf("dolt_status reports %q after the reopened repair, want no rebuild residue", dirty)
+			}
+		}
+	})
+}

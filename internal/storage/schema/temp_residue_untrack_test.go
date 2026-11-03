@@ -144,3 +144,114 @@ func TestTempResidueCachedUntrackPreservesCursorScratchRows(t *testing.T) {
 		t.Fatalf("unmet SQL expectations: %v", err)
 	}
 }
+
+// primeTempResidueRepair primes the reconcile's full happy path up to the
+// DOLT_RM: the gate's HEAD listing and ignore resolution, an empty staging
+// area (the sweep's read, nothing to clear), the bare COMMIT, and the
+// staged-root listing that proves the residue is removable.
+func primeTempResidueRepair(mock sqlmock.Sqlmock, table string) {
+	expectTempResidueHeadListing(mock, "", table)
+	expectIgnoreResolution(mock, "", table,
+		[]doltIgnoreRow{{pattern: tempResiduePrefix + "%", ignored: true}})
+	expectIgnoredCursorUnstage(mock)
+	mock.ExpectExec(regexp.QuoteMeta("COMMIT")).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	expectTempResidueStagedListing(mock, table)
+}
+
+// The #7073 failure policy, pre-mutation half: a repair whose unstage sweep
+// is fenced (a client without the privilege to CALL DOLT_RESET) must decline
+// advisorially — no repair counted, nothing else issued, the residue left for
+// the next permitted open. In ordered sqlmock the COMMIT and DOLT_RM the
+// happy path would issue next are unprimed, so any attempt to straggle past
+// the refusal fails the run.
+func TestTempResidueRepairDeclinesWhenUnstagingIsDenied(t *testing.T) {
+	db, mock := newMockDB(t)
+	advisory := captureTempResidueAdvisory(t)
+
+	expectTempResidueHeadListing(mock, "", "__temp__wisp_child_counters")
+	expectIgnoreResolution(mock, "", "__temp__wisp_child_counters",
+		[]doltIgnoreRow{{pattern: tempResiduePrefix + "%", ignored: true}})
+	// The sweep sees a staged unrelated table, and clearing it is denied.
+	mock.ExpectQuery("(?s)SELECT s\\.table_name, s\\.staged\\s+FROM dolt_status s").
+		WillReturnRows(sqlmock.NewRows([]string{"table_name", "staged"}).AddRow("issues", true))
+	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_RESET(?)")).
+		WithArgs("issues").
+		WillReturnError(fmt.Errorf("Error 1227: Access denied; you need (at least one of) the SUPER privilege(s)"))
+
+	fixed, err := reconcileTempResidue(context.Background(), db)
+	if err != nil {
+		t.Fatalf("reconcileTempResidue() error = %v, want nil: a fenced sweep must decline, not fail the open", err)
+	}
+	if fixed {
+		t.Fatal("reconcileTempResidue() reported a repair on a denied unstage, want none: HEAD was never touched")
+	}
+	if !strings.Contains(*advisory, "cannot clear the staging area") {
+		t.Errorf("advisory = %q, want the staging-area decline named", *advisory)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}
+
+// Post-mutation half, RM failure: once the cached removal is issued, its
+// failure no longer proves HEAD stayed unchanged (an automatic transaction
+// commit may already have landed the removal), so the repair reports a
+// possible change rather than a clean decline — and issues no commit whose
+// message would claim a state it cannot prove. The rows stay untouched: with
+// --cached the removal never read them.
+func TestTempResidueRepairReportsPossibleChangeWhenRMFails(t *testing.T) {
+	db, mock := newMockDB(t)
+	advisory := captureTempResidueAdvisory(t)
+
+	primeTempResidueRepair(mock, "__temp__wisp_child_counters")
+	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_RM('--cached', ?)")).
+		WithArgs("__temp__wisp_child_counters").
+		WillReturnError(fmt.Errorf("Error 1105: foreign key constraint would be violated"))
+
+	fixed, err := reconcileTempResidue(context.Background(), db)
+	if err != nil {
+		t.Fatalf("reconcileTempResidue() error = %v, want nil: an RM failure must not fail the open", err)
+	}
+	if !fixed {
+		t.Fatal("reconcileTempResidue() reported no change on a failed RM, want a possible change: the removal may have partially landed")
+	}
+	if !strings.Contains(*advisory, "may have partially applied") {
+		t.Errorf("advisory = %q, want the possible-change accounting named", *advisory)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}
+
+// Post-mutation half, commit failure: a DOLT_RM that succeeded followed by a
+// DOLT_COMMIT that failed is in the same epistemic position — the removal is
+// in the staged root and any automatic transaction commit may have already
+// published it — so the repair again reports a possible change, never a
+// false no-change and never a false repair.
+func TestTempResidueRepairReportsPossibleChangeWhenCommitFails(t *testing.T) {
+	db, mock := newMockDB(t)
+	advisory := captureTempResidueAdvisory(t)
+
+	primeTempResidueRepair(mock, "__temp__wisp_child_counters")
+	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_RM('--cached', ?)")).
+		WithArgs("__temp__wisp_child_counters").
+		WillReturnRows(sqlmock.NewRows([]string{"status"}))
+	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_COMMIT('--skip-empty', '-m', ?)")).
+		WithArgs(tempResidueUntrackCommitSubject + ": __temp__wisp_child_counters").
+		WillReturnError(fmt.Errorf("Error 1105: commit failed mid-statement"))
+
+	fixed, err := reconcileTempResidue(context.Background(), db)
+	if err != nil {
+		t.Fatalf("reconcileTempResidue() error = %v, want nil: a commit failure must not fail the open", err)
+	}
+	if !fixed {
+		t.Fatal("reconcileTempResidue() reported no change on a failed commit, want a possible change: the removal already reached the staged root")
+	}
+	if !strings.Contains(*advisory, "may have partially applied") {
+		t.Errorf("advisory = %q, want the possible-change accounting named", *advisory)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}
