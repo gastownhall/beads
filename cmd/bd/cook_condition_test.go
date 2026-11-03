@@ -148,6 +148,18 @@ func TestRunCookAppliesStepConditionsInRuntimeMode(t *testing.T) {
 		}
 	})
 
+	// AC-4 guard: compile mode keeps every step and its condition, so the
+	// template structure survives for compile-time use.
+	t.Run("compile mode keeps every step and its condition", func(t *testing.T) {
+		out := runCookJSON(t, newCookConditionCommand(t, false, false), formulaPath)
+		if got := cookedStepIDs(out.Steps); len(got) != 2 || got[0] != "build" || got[1] != "deploy" {
+			t.Fatalf("compile cook steps = %v, want build and deploy", got)
+		}
+		if out.Steps[1].Condition != "{{deploy}}" {
+			t.Errorf("compile cook deploy condition = %q, want the placeholder intact", out.Steps[1].Condition)
+		}
+	})
+
 	// Parity with pour: the same formula, the same variable values, the same
 	// surviving steps (resolveAndCookFormulaWithVars is pour's own path).
 	t.Run("pour parity", func(t *testing.T) {
