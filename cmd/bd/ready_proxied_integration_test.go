@@ -782,6 +782,9 @@ func TestProxiedServerReady2(t *testing.T) {
 			{name: "env cap equals the result", uncapped: nil, env: []string{"BEADS_MAX_ROWS=3"}},
 			{name: "cap equals a truncating limit", uncapped: []string{"--limit", "2"}, capped: []string{"--limit", "2", "--max-rows", "2"}},
 			{name: "env cap equals a truncating limit", uncapped: []string{"--limit", "2"}, capped: []string{"--limit", "2"}, env: []string{"BEADS_MAX_ROWS=2"}},
+			{name: "flag cap above the result", uncapped: nil, capped: []string{"--max-rows", "5"}},
+			{name: "flag cap above a one-row page", uncapped: []string{"--limit", "1"}, capped: []string{"--limit", "1", "--max-rows", "2"}},
+			{name: "env cap above a one-row page", uncapped: []string{"--limit", "1"}, capped: []string{"--limit", "1"}, env: []string{"BEADS_MAX_ROWS=2"}},
 		} {
 			for _, format := range [][]string{nil, {"--json"}} {
 				want := run(nil, append(append([]string{}, tc.uncapped...), format...)...)
@@ -790,6 +793,45 @@ func TestProxiedServerReady2(t *testing.T) {
 					t.Errorf("%s %v: capped output differs from uncapped\ncapped:\n%s\nuncapped:\n%s", tc.name, format, got, want)
 				}
 			}
+		}
+
+		// The one page a cap may refuse is the one that reaches past its own
+		// skipped rows: --offset 2 --limit 1 touches three rows, two skipped
+		// plus the page, and pays a cap of 2 on what it touched. The same page
+		// without the offset fits the cap (above), and the same offset with no
+		// cap keeps paging: one row, the third.
+		for _, tc := range []struct {
+			name   string
+			env    []string
+			args   []string
+			source string
+		}{
+			{name: "flag text", args: []string{"--max-rows", "2"}, source: "--max-rows"},
+			{name: "flag json", args: []string{"--json", "--max-rows", "2"}, source: "--max-rows"},
+			{name: "env text", env: []string{"BEADS_MAX_ROWS=2"}, source: "BEADS_MAX_ROWS"},
+			{name: "env json", env: []string{"BEADS_MAX_ROWS=2"}, args: []string{"--json"}, source: "BEADS_MAX_ROWS"},
+		} {
+			args := append([]string{"ready", "--label", "rcmu-cap", "--offset", "2", "--limit", "1"}, tc.args...)
+			stdout, stderr, err := bdProxiedRunBuffersWithEnv(t, bd, p.dir, tc.env, args...)
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) || exitErr.ExitCode() != 2 {
+				t.Errorf("offset %s: err = %v, want exit 2\nstdout:\n%s\nstderr:\n%s", tc.name, err, stdout, stderr)
+				continue
+			}
+			if want := fmt.Sprintf("%s=2 exceeded", tc.source); !strings.Contains(stderr, want) {
+				t.Errorf("offset %s: stderr = %q, want it to name %q", tc.name, stderr, want)
+			}
+			if stdout != "" {
+				t.Errorf("offset %s: stdout = %q, want nothing on a cap overage", tc.name, stdout)
+			}
+		}
+		all := bdProxiedReadyJSON(t, bd, p, "--label", "rcmu-cap")
+		page := bdProxiedReadyJSON(t, bd, p, "--label", "rcmu-cap", "--offset", "2", "--limit", "1")
+		if len(all) != 3 || len(page) != 1 || page[0].ID != all[2].ID {
+			t.Errorf("uncapped --offset 2 --limit 1 = %+v, want the third of %+v", page, all)
+		}
+		if text := run(nil, "--offset", "2", "--limit", "1"); !strings.Contains(text, all[2].ID) || strings.Contains(text, all[0].ID) || strings.Contains(text, all[1].ID) {
+			t.Errorf("uncapped text --offset 2 --limit 1 should show only %s:\n%s", all[2].ID, text)
 		}
 	})
 
