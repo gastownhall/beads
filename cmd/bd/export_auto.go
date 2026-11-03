@@ -85,6 +85,20 @@ type exportAutoState struct {
 const exportAutoStateFile = "export-state.json"
 const gitAddTimeout = 5 * time.Second
 
+// autoExportPath is the file maybeAutoExport writes under beadsDir.
+// `bd doctor --check=export` reads the same file.
+func autoExportPath(beadsDir string) string {
+	exportPath := config.GetString("export.path")
+	if exportPath == "" {
+		if globalFlag {
+			exportPath = "global-issues.jsonl"
+		} else {
+			exportPath = "issues.jsonl"
+		}
+	}
+	return filepath.Join(beadsDir, exportPath)
+}
+
 // maybeAutoExport writes a git-tracked JSONL file if enabled and due.
 // Called from PersistentPostRun after auto-backup.
 //
@@ -116,15 +130,7 @@ func maybeAutoExport(ctx context.Context, allowEmptyOverwrite bool) error {
 
 	// Resolve the export path before throttle/check detection so all decisions
 	// refer to the path that would actually be written.
-	exportPath := config.GetString("export.path")
-	if exportPath == "" {
-		if globalFlag {
-			exportPath = "global-issues.jsonl"
-		} else {
-			exportPath = "issues.jsonl"
-		}
-	}
-	fullPath := filepath.Join(beadsDir, exportPath)
+	fullPath := autoExportPath(beadsDir)
 
 	// Load state + interval.
 	state := loadExportAutoState(beadsDir)

@@ -1744,7 +1744,7 @@ bd doctor
     | Storage Availability:
     |   Full diagnostics, --perf, --deep, --server, --migration, and
     |   --check=validate currently require Dolt server mode. Embedded Dolt
-    |   supports --check=artifacts, --check=conventions, and
+    |   supports --check=artifacts, --check=conventions, --check=export, and
     |   --check=pollution. --check-health has a limited hook-health fallback.
     |   Unsupported combinations return a notice without changing storage.
     |
@@ -1765,6 +1765,9 @@ bd doctor
     |     (stale JSONL, SQLite files, cruft .beads dirs). Use with --clean.
     |   - conventions: Check for convention drift (lint warnings, stale
     |     issues, orphaned issues). Advisory only - warns, never blocks.
+    |   - export: Report in-scope issues missing from the JSONL export
+    |     (export.path). The export lags the database by design; refresh it
+    |     with bd export -o <path>. Read-only; warns, never blocks.
     |   - pollution: Detect and optionally clean test issues from database
     |   - validate: Run focused data-integrity checks (duplicates, orphaned
     |     deps, test pollution, git conflicts). Use with --fix to auto-repair.
@@ -1832,6 +1835,7 @@ bd doctor
     |   bd doctor --check=artifacts           # Show classic artifacts (JSONL, SQLite, cruft dirs)
     |   bd doctor --check=artifacts --clean  # Delete safe-to-delete artifacts (with confirmation)
     |   bd doctor --check=conventions        # Convention drift check (lint, stale, orphans)
+    |   bd doctor --check=export             # Issues missing from the JSONL export
     |   bd doctor --check=pollution          # Show potential test issues
     |   bd doctor --check=pollution --clean  # Delete test issues (with confirmation)
     |   bd doctor --check=validate         # Data-integrity checks only

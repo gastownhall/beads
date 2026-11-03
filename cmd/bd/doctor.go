@@ -103,7 +103,7 @@ This command checks:
 Storage Availability:
   Full diagnostics, --perf, --deep, --server, --migration, and
   --check=validate currently require Dolt server mode. Embedded Dolt
-  supports --check=artifacts, --check=conventions, and
+  supports --check=artifacts, --check=conventions, --check=export, and
   --check=pollution. --check-health has a limited hook-health fallback.
   Unsupported combinations return a notice without changing storage.
 
@@ -124,6 +124,9 @@ Specific Check Mode (--check):
     (stale JSONL, SQLite files, cruft .beads dirs). Use with --clean.
   - conventions: Check for convention drift (lint warnings, stale
     issues, orphaned issues). Advisory only - warns, never blocks.
+  - export: Report in-scope issues missing from the JSONL export
+    (export.path). The export lags the database by design; refresh it
+    with bd export -o <path>. Read-only; warns, never blocks.
   - pollution: Detect and optionally clean test issues from database
   - validate: Run focused data-integrity checks (duplicates, orphaned
     deps, test pollution, git conflicts). Use with --fix to auto-repair.
@@ -191,6 +194,7 @@ Examples:
   bd doctor --check=artifacts           # Show classic artifacts (JSONL, SQLite, cruft dirs)
   bd doctor --check=artifacts --clean  # Delete safe-to-delete artifacts (with confirmation)
   bd doctor --check=conventions        # Convention drift check (lint, stale, orphans)
+  bd doctor --check=export             # Issues missing from the JSONL export
   bd doctor --check=pollution          # Show potential test issues
   bd doctor --check=pollution --clean  # Delete test issues (with confirmation)
   bd doctor --check=validate         # Data-integrity checks only
@@ -262,7 +266,7 @@ Examples:
 		// read-only paths skip the probe; memoised so repeats cannot disagree.
 		schemaGate := newSchemaGate(absPath)
 
-		// artifacts, conventions, and pollution work in embedded mode and run
+		// artifacts, conventions, export, and pollution work in embedded mode and run
 		// unconditionally; validate still requires a server-mode connection
 		// and stays gated (GH#3597).
 		if doctorCheckFlag != "" {
@@ -276,6 +280,8 @@ Examples:
 				return runArtifactsCheck(absPath, doctorClean, doctorYes)
 			case "conventions":
 				return runConventionsCheck(absPath)
+			case "export":
+				return runExportCheck(absPath)
 			case "pollution":
 				return runPollutionCheck(absPath, doctorClean, doctorYes)
 			case "validate":
@@ -285,7 +291,7 @@ Examples:
 				}
 				return runValidateCheck(absPath)
 			default:
-				return HandleErrorWithHint(fmt.Sprintf("unknown check %q", doctorCheckFlag), "Available checks: artifacts, conventions, pollution, validate")
+				return HandleErrorWithHint(fmt.Sprintf("unknown check %q", doctorCheckFlag), "Available checks: artifacts, conventions, export, pollution, validate")
 			}
 		}
 
@@ -479,7 +485,7 @@ func printEmbeddedUnsupported(commandLabel string) {
 		"If it will not open:     preserve it first, then recover: " + doctor.EngineWontOpenRecoveryURL,
 		"Switch to server mode:   bd init --server",
 	}
-	supported := []string{"artifacts", "conventions", "pollution"}
+	supported := []string{"artifacts", "conventions", "export", "pollution"}
 	unsupported := []string{"validate"}
 
 	if jsonOutput || doctorAgent {
@@ -508,6 +514,7 @@ func printEmbeddedUnsupported(commandLabel string) {
 	fmt.Fprintln(os.Stderr, "Checks available in embedded mode:")
 	fmt.Fprintln(os.Stderr, "  • bd doctor --check=artifacts")
 	fmt.Fprintln(os.Stderr, "  • bd doctor --check=conventions")
+	fmt.Fprintln(os.Stderr, "  • bd doctor --check=export")
 	fmt.Fprintln(os.Stderr, "  • bd doctor --check=pollution")
 }
 
