@@ -21,7 +21,38 @@ npm test
 
 **Duration**: <1 second
 
-### 2. Integration Tests (`npm run test:integration`)
+### 2. Postinstall Regression Tests (`npm run test:postinstall`)
+
+**Location**: `test/redirect-race.test.js`, `test/postinstall-module.test.js`
+
+**Purpose**: Deterministic, network-free coverage of the postinstall
+downloader and its module-load contract.
+
+**Tests** (`test/redirect-race.test.js`, run serially in one process):
+
+- Direct 200, 302 redirect and 301 → 302 → 200 chain all preserve exact bytes
+- A redirected download truncates longer stale content at the destination
+- Redirect to 404 rejects with the HTTP error and cleans up the destination
+- Every `fs.unlink` the downloader schedules is held until the download
+  promise settles and then executed to completion — the schedule in which the
+  old redirect-path unlink deleted a finished archive (`tar: No such file or
+  directory`), reproduced without threadpool timing
+- `test/postinstall-module.test.js`: requiring `scripts/postinstall.js` with
+  CI unset exports `downloadFile` and starts no installation (checked in an
+  isolated child process); direct execution with `CI=1` still prints the
+  skip message and exits 0
+
+The download runs against a local HTTP server on `127.0.0.1`; no external
+network is needed.
+
+**Run**:
+```bash
+npm run test:postinstall
+```
+
+**Duration**: <5 seconds
+
+### 3. Integration Tests (`npm run test:integration`)
 
 **Location**: `test/integration.test.js`
 
@@ -70,9 +101,12 @@ npm run test:integration
 
 **Duration**: ~30-60 seconds (downloads binaries)
 
-### 3. All Tests (`npm run test:all`)
+### 4. All Tests (`npm run test:all`)
 
-Runs both unit and integration tests sequentially.
+Runs the unit, postinstall regression and integration tests sequentially:
+`npm test` → `npm run test:postinstall` → `npm run test:integration`. A
+failure in any suite, including the postinstall regression suite, fails the
+whole command.
 
 ```bash
 npm run test:all

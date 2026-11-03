@@ -1165,6 +1165,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `npm install @beads/bd` no longer intermittently deletes its own download
+  when the release archive is served behind a redirect (#7791). The
+  postinstall redirect path fired an unawaited unlink of the destination
+  immediately before re-downloading to the same path; both operations share
+  libuv's thread pool with no ordering guarantee, so a late unlink removed
+  the finished archive and extraction failed with `tar: No such file or
+  directory`. The redundant unlink is gone, and a deterministic regression
+  suite now covers the redirect path.
 - `bd create --file` and other batch creates no longer fail with "issue
   already exists" on an id bd generated itself. The batch chose every id
   before it wrote any row, so two of its items could be handed the same short
