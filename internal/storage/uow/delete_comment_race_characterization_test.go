@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -17,13 +18,22 @@ import (
 	publicops "github.com/steveyegge/beads/issueops"
 )
 
+// envExpectSerialDeleteComment is the same desired-outcome reproduction
+// switch the direct-store harness (internal/storage/dolt/
+// guarded_delete_comment_race_test.go) keys on: unset, this suite asserts
+// the VERIFIED CURRENT behavior of the pinned server; "1" asserts the
+// DESIRED serial outcome, which the characterized server does not deliver
+// on the journal-off configurations, so those cases fail with the observed
+// storage error — the executable red regression, never a green gate.
+const envExpectSerialDeleteComment = "BEADS_TEST_EXPECT_SERIAL_DELETE_COMMENT"
+
 // TestUOWDeleteCommentRaceCharacterization is the guarded-delete/comment
 // race characterization (bd-ecggzy / PR #8026) on the UNIT-OF-WORK path —
 // the plumbing every proxied CLI command and bd serve write reaches. It is
 // the uow twin of internal/storage/dolt's
 // TestGuardedDeleteCommentRaceCharacterization: the same interleavings, the
-// same evidence contract, through the second supported server commit
-// path.
+// same evidence contract, the same reproduction switch, through the second
+// supported server commit path.
 //
 // THE RACE, in this plumbing's terms. A guarded delete runs deleteInUOW in
 // one unit of work whose commit is CALL DOLT_COMMIT('-Am') (or, in batch
@@ -48,12 +58,11 @@ import (
 // committed and visible in the replay's FRESH snapshot — the production
 // replay semantics.
 //
-// MEASUREMENT, NOT FIX. Every executed case records its evidence as one
-// structured `race-evidence:` line, so a run of this suite IS the evidence
-// report; the outcome assertions live with the reproduction switch. See the
-// direct-store twin for the full defect narrative and
-// engdocs/design/dolt-concurrency.md, "Guarded delete vs. concurrent
-// comment", for the recorded dependency contract.
+// MEASUREMENT, NOT FIX. The assertions pin what the characterized server
+// actually does; the desired serial outcome lives only behind
+// envExpectSerialDeleteComment. See the direct-store twin for the full
+// defect narrative and engdocs/design/dolt-concurrency.md, "Guarded delete
+// vs. concurrent comment", for the recorded dependency contract.
 func TestUOWDeleteCommentRaceCharacterization(t *testing.T) {
 	const prefix = "rdcr"
 	rootCtx := context.Background()
@@ -66,6 +75,8 @@ func TestUOWDeleteCommentRaceCharacterization(t *testing.T) {
 	if !ok {
 		t.Fatalf("uow provider does not implement storage.EventsJournalConfigurer; the events journal cannot be controlled for the characterization")
 	}
+
+	expectSerial := os.Getenv(envExpectSerialDeleteComment) == "1"
 
 	settingsCtx, settingsCancel := context.WithTimeout(rootCtx, 30*time.Second)
 	defer settingsCancel()
@@ -138,7 +149,7 @@ func TestUOWDeleteCommentRaceCharacterization(t *testing.T) {
 			defer caseCancel()
 			ev := runUOWDeleteCommentRace(caseCtx, t, provider, configurer, kit, tc)
 			ev.log(t, settings, tc)
-			assertRaceHarnessIntegrity(t, tc, ev)
+			assertRaceCharacterizedOutcome(t, tc, ev, expectSerial)
 		})
 	}
 
@@ -530,14 +541,112 @@ func runUOWSerialControl(ctx context.Context, t *testing.T, provider UnitOfWorkP
 	})
 }
 
-// assertRaceHarnessIntegrity asserts only what the HARNESS promises — the
-// racing session landed, the loser ran at least once, and the barrier
-// synchronized the interleaving — so the characterization's evidence is
-// recorded without gating on the (unresolved) server behavior.
-func assertRaceHarnessIntegrity(t *testing.T, tc deleteCommentRaceCase, ev deleteCommentRaceEvidence) {
+// assertRaceCharacterizedOutcome holds the reproduction split, the uow twin
+// of the direct-store harness's assertCharacterizedOutcome. expectSerial is
+// false in the ordinary gates: the assertions pin the VERIFIED current
+// behavior and the data-integrity observations of the characterized server.
+// With BEADS_TEST_EXPECT_SERIAL_DELETE_COMMENT=1 the same evidence is instead
+// asserted against the desired serial outcome, which fails on the
+// journal-off configurations with the observed storage error.
+func assertRaceCharacterizedOutcome(t *testing.T, tc deleteCommentRaceCase, ev deleteCommentRaceEvidence, expectSerial bool) {
 	t.Helper()
-	if ev.Attempts < 1 {
-		t.Errorf("harness: the loser's retry boundary never ran an attempt")
+
+	if expectSerial {
+		switch tc.loser {
+		case "guarded_delete":
+			// Desired: the delete wins the serial ordering — it succeeds and
+			// its cascade takes the racing comment with it.
+			if ev.loserFailed() || ev.LoserDeleted != 1 {
+				t.Errorf("desired serial outcome NOT delivered: guarded delete after a concurrent comment returned err=%q (code %d, sqlstate %s) deleted=%d after %d attempt(s); want a successful deletion of 1",
+					ev.LoserErrText, ev.LoserErrCode, ev.LoserSQLState, ev.LoserDeleted, ev.Attempts)
+			}
+			if ev.DanglingRows != 0 {
+				t.Errorf("desired serial outcome NOT delivered: %d comment row(s) outlived the deleted parent; want 0 (cascade removes the racing comment)",
+					ev.DanglingRows)
+			}
+		case "comment":
+			// Desired: the comment loses the serial ordering with the typed
+			// not-found refusal the Commenter role promises.
+			if !ev.LoserErrIsNotFound {
+				t.Errorf("desired serial outcome NOT delivered: comment after a concurrent delete returned err=%q (code %d, sqlstate %s, typed_not_found=%v); want %v",
+					ev.LoserErrText, ev.LoserErrCode, ev.LoserSQLState, ev.LoserErrIsNotFound, storage.ErrNotFound)
+			}
+			if ev.DanglingRows != 0 {
+				t.Errorf("desired serial outcome NOT delivered: %d comment row(s) landed on the deleted parent; want 0",
+					ev.DanglingRows)
+			}
+		}
+		return
+	}
+
+	// ORDINARY MODE: the verified current behavior of the pinned server.
+	// Every literal below was measured on the characterized artifact and is
+	// quoted with its evidence line in engdocs/design/dolt-concurrency.md.
+	// A future server that changes any of them either fixes the defect
+	// (promote the repro-mode assertions) or regresses the contract
+	// (investigate before touching these).
+	assertFKConstraintRefusal := func(want string) {
+		t.Helper()
+		if !ev.loserFailed() {
+			t.Errorf("characterized race unexpectedly SUCCEEDED without the journal's replay serialization (%s): deleted=%d parent_exists=%v", tc.name, ev.LoserDeleted, ev.IssueExists)
+			return
+		}
+		// Measured: the commit is refused with MySQL 1105 (HY000) naming the
+		// FK constraint — permanent, because RunTxResult replays only
+		// serialization failures and this constraint-violation 1105 is not
+		// one (isDoltAutocommitRollbackError is the merge-conflict 1105).
+		if ev.LoserErrCode != 1105 || ev.LoserSQLState != "HY000" {
+			t.Errorf("characterized refusal changed: code=%d sqlstate=%q, want 1105/HY000", ev.LoserErrCode, ev.LoserSQLState)
+		}
+		if !strings.Contains(ev.LoserErrText, want) || !strings.Contains(ev.LoserErrText, "Foreign Key Constraint Violation") {
+			t.Errorf("characterized refusal no longer names the %s FK constraint: %q", want, ev.LoserErrText)
+		}
+		if ev.LoserErrIsNotFound || ev.LoserErrIsVersionMismatch || ev.LoserErrIsSerialization {
+			t.Errorf("characterized refusal is now classified retryable/typed (not_found=%v version_mismatch=%v serialization=%v); the guard contract has changed", ev.LoserErrIsNotFound, ev.LoserErrIsVersionMismatch, ev.LoserErrIsSerialization)
+		}
+		if ev.Attempts != 1 {
+			t.Errorf("characterized refusal was replayed %d time(s); want the single permanent attempt", ev.Attempts-1)
+		}
+	}
+	switch {
+	case tc.journalOn && tc.loser == "guarded_delete":
+		// Measured on the direct-store twin: with the journal ON, the loser's
+		// journal writes conflict with the racing session's committed journal
+		// rows in Dolt's commit-time merge, the first attempt's commit is
+		// refused with a serialization failure, and the replay — whose fresh
+		// snapshot already contains the racing comment — succeeds, its
+		// cascade taking the comment. The DESIRED serial outcome, delivered
+		// by the journal's write-write conflict, not by the guard.
+		if ev.loserFailed() || ev.LoserDeleted != 1 {
+			t.Errorf("journal-on guarded delete no longer wins via the replay: err=%q deleted=%d attempts=%d", ev.LoserErrText, ev.LoserDeleted, ev.Attempts)
+		}
+		if ev.Attempts < 2 {
+			t.Errorf("journal-on race completed without the replay (%d attempt(s)); the journal's write-write serialization has changed", ev.Attempts)
+		}
+		if ev.IssueExists || ev.CommentRows != 0 || ev.DanglingRows != 0 {
+			t.Errorf("journal-on guarded delete left state the serial outcome forbids: parent_exists=%v comment_rows=%d dangling=%d", ev.IssueExists, ev.CommentRows, ev.DanglingRows)
+		}
+	case tc.loser == "guarded_delete":
+		constraint := "fk_comments_issue"
+		if tc.wisp {
+			constraint = "fk_wisp_comments_issue"
+		}
+		assertFKConstraintRefusal(constraint)
+		// The operation body SUCCEEDED inside the refused unit of work (the
+		// version guard passed and the delete reported the deletion) — pinned
+		// because it is the shape a caller sees: a Delete result of 1 with
+		// an error, and neither row gone.
+		if ev.LoserDeleted != 1 {
+			t.Errorf("characterized in-tx delete result changed: deleted=%d, want 1 (the body ran; the commit was refused)", ev.LoserDeleted)
+		}
+		if !ev.IssueExists || ev.CommentRows != 1 || ev.DanglingRows != 0 {
+			t.Errorf("characterized final state changed: parent_exists=%v comment_rows=%d dangling=%d, want true/1/0 (refused delete, intact comment, no orphan)", ev.IssueExists, ev.CommentRows, ev.DanglingRows)
+		}
+	case tc.loser == "comment":
+		assertFKConstraintRefusal("fk_comments_issue")
+		if ev.IssueExists || ev.CommentRows != 0 || ev.DanglingRows != 0 {
+			t.Errorf("characterized final state changed: parent_exists=%v comment_rows=%d dangling=%d, want false/0/0 (delete landed, comment refused, no orphan)", ev.IssueExists, ev.CommentRows, ev.DanglingRows)
+		}
 	}
 }
 
