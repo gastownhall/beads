@@ -21,6 +21,7 @@ import (
 	"github.com/steveyegge/beads/internal/execenv"
 	"github.com/steveyegge/beads/internal/githooksenv"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/peercred"
 )
 
 // Credential storage and encryption for federation peers.
@@ -235,8 +236,15 @@ func decryptWithKey(encrypted []byte, key []byte) (string, error) {
 	return string(plaintext), nil
 }
 
-// encryptPassword encrypts a password using AES-GCM with the store's credential key.
-func (s *DoltStore) encryptPassword(password string) ([]byte, error) {
+// peerBinding is the identity a peer's stored password is sealed to: the
+// row's stored name, exact URL and username.
+func peerBinding(p *storage.FederationPeer) peercred.Binding {
+	return peercred.Binding{Name: p.Name, URL: p.RemoteURL, Username: p.Username}
+}
+
+// encryptPassword seals a password for the peer binding b with the store's
+// credential key.
+func (s *DoltStore) encryptPassword(b peercred.Binding, password string) ([]byte, error) {
 	if password == "" {
 		return nil, nil
 	}
@@ -246,11 +254,12 @@ func (s *DoltStore) encryptPassword(password string) ([]byte, error) {
 	if key == nil {
 		return nil, fmt.Errorf("credential encryption key not initialized")
 	}
-	return encryptWithKey(password, key)
+	return peercred.Seal(key, b, password)
 }
 
-// decryptPassword decrypts a password using AES-GCM with the store's credential key.
-func (s *DoltStore) decryptPassword(encrypted []byte) (string, error) {
+// decryptPassword opens a password sealed for the peer binding b with the
+// store's credential key.
+func (s *DoltStore) decryptPassword(b peercred.Binding, encrypted []byte) (string, error) {
 	if len(encrypted) == 0 {
 		return "", nil
 	}
@@ -263,22 +272,24 @@ func (s *DoltStore) decryptPassword(encrypted []byte) (string, error) {
 		// the peer. Labeling it a mismatch would prescribe the wrong action.
 		return "", fmt.Errorf("credential encryption key not initialized")
 	}
-	plaintext, err := decryptWithKey(encrypted, key)
-	if err != nil {
+	plaintext, err := peercred.Open(key, b, encrypted)
+	if errors.Is(err, peercred.ErrNotAuthenticated) || errors.Is(err, peercred.ErrLegacyFormat) {
 		// federation_peers rows travel with the database, the key file does
 		// not, so a database opened on a second machine reaches here with a
-		// key that cannot read the stored password. Enrich at this single
-		// decrypt funnel, as embeddeddolt does, so every reader reports the
-		// credential problem rather than a bare cipher error. decryptWithKey
-		// stays unwrapped for the key-rotation path, which reads old keys on
-		// purpose and must not report a rotation miss as a mismatch. Name the
-		// resolved path rather than the bare filename: initCredentialKey looks
-		// this same basename up under both beadsDir and the legacy dbPath, so
-		// during the migration window two files carrying different keys can
-		// share the name and the bare one does not say which is meant.
+		// key that cannot read the stored password. A blob copied from another
+		// peer row, a corrupt blob and an unmigrated legacy blob fail the same
+		// way. Enrich at this single decrypt funnel, as embeddeddolt does, so
+		// every reader reports the credential problem rather than a bare cipher
+		// error. decryptWithKey stays unwrapped for the key-rotation path,
+		// which reads old keys on purpose and must not report a rotation miss
+		// as a mismatch. Name the resolved path rather than the bare filename:
+		// initCredentialKey looks this same basename up under both beadsDir and
+		// the legacy dbPath, so during the migration window two files carrying
+		// different keys can share the name and the bare one does not say
+		// which is meant.
 		return "", storage.CredentialKeyMismatchError(filepath.Join(s.beadsDir, credentialKeyFile), err)
 	}
-	return plaintext, nil
+	return plaintext, err
 }
 
 // AddFederationPeer adds or updates a federation peer with credentials.
@@ -302,7 +313,7 @@ func (s *DoltStore) addFederationPeer(ctx context.Context, peer *storage.Federat
 		if err := s.ensureCredentialKey(ctx); err != nil {
 			return fmt.Errorf("failed to initialize credential key: %w", err)
 		}
-		encryptedPwd, err = s.encryptPassword(peer.Password)
+		encryptedPwd, err = s.encryptPassword(peerBinding(peer), peer.Password)
 		if err != nil {
 			return fmt.Errorf("failed to encrypt password: %w", err)
 		}
@@ -371,7 +382,7 @@ func (s *DoltStore) GetFederationPeer(ctx context.Context, name string) (*storag
 		if err := s.ensureCredentialKey(ctx); err != nil {
 			return nil, fmt.Errorf("failed to initialize credential key: %w", err)
 		}
-		peer.Password, err = s.decryptPassword(encryptedPwd)
+		peer.Password, err = s.decryptPassword(peerBinding(&peer), encryptedPwd)
 		if err != nil {
 			// decryptPassword already classifies the local-key case; name the
 			// peer and preserve the sentinel for errors.Is/As.
@@ -416,7 +427,7 @@ func (s *DoltStore) ListFederationPeers(ctx context.Context) ([]*storage.Federat
 			if err := s.ensureCredentialKey(ctx); err != nil {
 				return nil, fmt.Errorf("failed to initialize credential key: %w", err)
 			}
-			peer.Password, err = s.decryptPassword(encryptedPwd)
+			peer.Password, err = s.decryptPassword(peerBinding(&peer), encryptedPwd)
 			if err != nil {
 				// Same as GetFederationPeer: the funnel classified it, the
 				// caller only names which peer failed.
