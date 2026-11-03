@@ -789,6 +789,75 @@ func TestFilterStaleImportIssuesSkipsProvenUnchangedRowsOnResume(t *testing.T) {
 	}
 }
 
+// bd-413ovu: PersistComments keeps a stored comment's fields on a same-issue
+// id match, so a tie row whose comment is already stored by id is a no-op
+// write even when the incoming comment text differs — the proof accepts the id
+// alone. Content equality under a different id still proves (the historical
+// content dedup), an id the issue does not own proves nothing (the storage
+// layer owns reporting that conflict), and the other no-op axes (zero
+// timestamps, a missing label) keep the row in the write set.
+func TestFilterStaleImportIssuesProvesStoredCommentIDUnchanged(t *testing.T) {
+	base := time.Date(2026, 8, 31, 14, 0, 0, 0, time.UTC)
+	commentAt := base.Add(-time.Hour)
+	tie := func(id string, label string, comment *types.Comment) *types.Issue {
+		return &types.Issue{
+			ID: id, Title: "row " + id, UpdatedAt: base,
+			Labels:   []string{label},
+			Comments: []*types.Comment{comment},
+		}
+	}
+	stored := func(id, text string) *types.Comment {
+		return &types.Comment{ID: id, IssueID: "x", Author: "cat", Text: text, CreatedAt: commentAt}
+	}
+	incoming := []*types.Issue{
+		tie("bd-kept", "lane:beads", &types.Comment{ID: "c-kept", Author: "cat", Text: "edited", CreatedAt: commentAt}),
+		tie("bd-zero", "lane:beads", &types.Comment{ID: "c-zero", Author: "cat", Text: "edited", CreatedAt: time.Time{}}),
+		tie("bd-noidzero", "lane:beads", &types.Comment{Author: "cat", Text: "edited", CreatedAt: time.Time{}}),
+		tie("bd-foreign", "lane:beads", &types.Comment{ID: "c-foreign", Author: "cat", Text: "foreign", CreatedAt: commentAt}),
+		tie("bd-diffid", "lane:beads", &types.Comment{ID: "c-new", Author: "cat", Text: "stored text", CreatedAt: commentAt}),
+		tie("bd-newlabel", "lane:beads,broken", &types.Comment{ID: "c-kept", Author: "cat", Text: "edited", CreatedAt: commentAt}),
+	}
+	local := func(id string) *types.Issue {
+		return &types.Issue{ID: id, Title: "row " + id, UpdatedAt: base, Labels: []string{"lane:beads"}}
+	}
+	store := &fakeImportRelationStore{
+		fakeImportIssueLookupStore: fakeImportIssueLookupStore{issues: []*types.Issue{
+			local("bd-kept"), local("bd-zero"), local("bd-noidzero"),
+			local("bd-foreign"), local("bd-diffid"), local("bd-newlabel"),
+		}},
+		comments: map[string][]*types.Comment{
+			"bd-kept":     {stored("c-kept", "stored text")},
+			"bd-zero":     {stored("c-zero", "stored text")},
+			"bd-noidzero": {stored("c-noid", "")},
+			"bd-foreign":  {stored("c-mine", "mine")},
+			"bd-diffid":   {stored("c-old", "stored text")},
+		},
+	}
+
+	filtered, skippedIDs, plan, err := filterStaleImportIssues(context.Background(), store, incoming)
+	if err != nil {
+		t.Fatalf("filterStaleImportIssues: %v", err)
+	}
+	if len(skippedIDs) != 0 {
+		t.Fatalf("skippedIDs = %#v, want none (all rows tie or are newer)", skippedIDs)
+	}
+	var kept []string
+	for _, issue := range filtered {
+		kept = append(kept, issue.ID)
+	}
+	want := []string{"bd-noidzero", "bd-foreign", "bd-newlabel"}
+	if strings.Join(kept, ",") != strings.Join(want, ",") {
+		t.Fatalf("write set = %v, want %v (only id/content-proven comment rows leave it, order preserved)", kept, want)
+	}
+	wantUnchanged := []string{"bd-kept", "bd-zero", "bd-diffid"}
+	if strings.Join(plan.Unchanged, ",") != strings.Join(wantUnchanged, ",") {
+		t.Fatalf("plan.Unchanged = %v, want %v", plan.Unchanged, wantUnchanged)
+	}
+	if len(plan.TieKeptLocal) != 0 || len(plan.Updates) != 0 {
+		t.Fatalf("plan = %+v, want no tie conflicts or updates", plan)
+	}
+}
+
 // A fresh import (no local match) must not pay for the aux loads at all, and
 // a store without the bulk loaders keeps the pre-wy-sbgucn behavior: every
 // tie row stays in the write set.

@@ -905,9 +905,10 @@ func filterStaleImportIssues(ctx context.Context, store importIssueLookup, issue
 // the rewrite would change nothing. Anything short of proof — a store without
 // bulk loaders, a comment with no timestamp, an untyped dependency, an aux row
 // not yet stored, a lease row the rewrite would insert, replace or drop —
-// keeps the row in the write set, i.e. today's behavior. Comments are keyed
-// the way PersistComments checks existence (author, created_at as stored,
-// text).
+// keeps the row in the write set, i.e. today's behavior. A comment is proven
+// when either its nonempty id is already stored on the issue (PersistComments
+// keeps the stored fields on a same-issue id match, bd-413ovu) or its content
+// (author, created_at as stored, text) is.
 func proveUnchangedImportRows(ctx context.Context, store importIssueLookup, filtered []*types.Issue, candidates map[int]struct{}, localByID map[string]*types.Issue) (map[int]struct{}, error) {
 	rel, ok := store.(importRelationLookup)
 	if !ok {
@@ -1011,11 +1012,28 @@ func importAuxAlreadyStored(incoming, local *types.Issue, storedComments []*type
 		return c.Author + "\x00" + issueops.FormatAuxTime(c.CreatedAt) + "\x00" + c.Text
 	}
 	stored = make(map[string]struct{}, len(storedComments))
+	storedCommentIDs := make(map[string]struct{}, len(storedComments))
 	for _, c := range storedComments {
 		stored[commentKey(c)] = struct{}{}
+		if c.ID != "" {
+			storedCommentIDs[c.ID] = struct{}{}
+		}
 	}
 	for _, c := range incoming.Comments {
-		if c == nil || c.CreatedAt.IsZero() {
+		if c == nil {
+			return false // a nil comment is not aux data the rewrite would skip
+		}
+		// A nonempty id already stored on this issue resolves to the stored
+		// comment (PersistComments keeps its fields on a same-issue id match,
+		// bd-413ovu), so the write is a no-op with or without a timestamp. An
+		// id owned only by another issue proves nothing: it is not in this
+		// issue's set, and the storage layer owns reporting that conflict.
+		if c.ID != "" {
+			if _, ok := storedCommentIDs[c.ID]; ok {
+				continue
+			}
+		}
+		if c.CreatedAt.IsZero() {
 			return false // would be stamped live on write: not provably a no-op
 		}
 		if _, ok := stored[commentKey(c)]; !ok {
