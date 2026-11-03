@@ -1202,6 +1202,100 @@ func TestVerifyProjectIdentity_ReadErrors(t *testing.T) {
 	})
 }
 
+// trackedConnErr is a retryable "invalid connection" failure that records
+// which attempt numbers were ever handed to the retry loop: sqlmock consumes
+// its ExpectBegin expectations in order, so the highest recorded number is
+// the number of attempts that ran.
+type trackedConnErr struct {
+	n    int
+	mu   *sync.Mutex
+	seen *map[int]bool
+}
+
+func (e *trackedConnErr) Error() string {
+	e.mu.Lock()
+	(*e.seen)[e.n] = true
+	e.mu.Unlock()
+	return fmt.Sprintf("invalid connection (attempt %d)", e.n)
+}
+
+// TestVerifyProjectIdentity_ReadRetry pins the verifier's retry wiring
+// (bd-8b6e39 / PR #7565): GetMetadata already rides withReadTx → withRetry,
+// so the verifier must simply consume that result — a warming-window blip is
+// waited out by the existing bounded retry, and whatever survives it is
+// refused without the verifier adding a retry loop of its own.
+func TestVerifyProjectIdentity_ReadRetry(t *testing.T) {
+	const localID = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+	const database = "shared_db"
+
+	t.Run("transient failure retries then the read decides", func(t *testing.T) {
+		for name, dbID := range map[string]string{
+			"matching identity passes": localID,
+			"recovered mismatch still refuses": "dddddddd-dddd-dddd-dddd-dddddddddddd",
+		} {
+			t.Run(name, func(t *testing.T) {
+				store, mock, beadsDir := newIdentityUnitStore(t, localID, database)
+				// A connection reaped mid-open, then the read transaction
+				// succeeds on the retry. Ordered expectations make this
+				// two attempts: a verifier that surfaced the first failure
+				// as terminal fails here.
+				mock.ExpectBegin().WillReturnError(errors.New("invalid connection"))
+				expectIdentityRead(mock, &dbID, nil)
+				err := store.verifyProjectIdentity(context.Background(), beadsDir, false)
+				if dbID == localID {
+					if err != nil {
+						t.Errorf("verifyProjectIdentity() = %v; want the retried matching read to pass", err)
+					}
+				} else if err == nil || !strings.Contains(err.Error(), "PROJECT IDENTITY MISMATCH") {
+					t.Errorf("verifyProjectIdentity() = %v; want the recovered mismatch to still refuse", err)
+				}
+				if err := mock.ExpectationsWereMet(); err != nil {
+					t.Errorf("unfulfilled sqlmock expectations: %v", err)
+				}
+			})
+		}
+	})
+
+	t.Run("persistent failure refuses after bounded retry", func(t *testing.T) {
+		store, mock, beadsDir := newIdentityUnitStore(t, localID, database)
+		var mu sync.Mutex
+		seen := make(map[int]bool)
+		// Far more expectations than the budget below can fit: an exhausted
+		// mock would end the loop on sqlmock's own non-retryable
+		// "not expected" error instead of the retry budget.
+		for i := 1; i <= 20; i++ {
+			mock.ExpectBegin().WillReturnError(&trackedConnErr{n: i, mu: &mu, seen: &seen})
+		}
+		// Bound the wait without touching the production backoff: the
+		// retry budget (serverRetryMaxElapsed, 30s) is far larger than any
+		// test wants to wait. A context deadline ends the loop with a
+		// terminal error, which the refusal must wrap.
+		ctx, cancel := context.WithTimeout(context.Background(), 1200*time.Millisecond)
+		defer cancel()
+		err := store.verifyProjectIdentity(ctx, beadsDir, false)
+		if err == nil {
+			t.Fatal("verifyProjectIdentity() = nil; a persistent identity-read failure must refuse")
+		}
+		if !strings.Contains(err.Error(), "cannot verify project identity") {
+			t.Errorf("refusal missing its name:\n%s", err)
+		}
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("refusal does not wrap the retry path's terminal context error:\n%v", err)
+		}
+		mu.Lock()
+		attempts := 0
+		for n := range seen {
+			if n > attempts {
+				attempts = n
+			}
+		}
+		mu.Unlock()
+		if attempts < 2 {
+			t.Errorf("the bounded retry ran %d attempt(s); a persistent transient failure must be retried before the refusal", attempts)
+		}
+	})
+}
+
 // TestCrossProject_IdentityCheck_ReadErrorRefuses covers the verifier's
 // refusal on a database whose _project_id cannot be READ (bd-8b6e39 /
 // PR #7565). The metadata table exists but cannot yield the identity — here
