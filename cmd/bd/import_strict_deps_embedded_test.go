@@ -3,6 +3,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -116,6 +117,44 @@ func TestEmbeddedImportStrictDeps(t *testing.T) {
 		show.Env = bdEnv(dir)
 		if out, err := show.CombinedOutput(); err != nil {
 			t.Errorf("strict failure must leave the source row committed, but bd show imsd-src2 failed: %v\n%s", err, out)
+		}
+	})
+
+	t.Run("strict_json_contract", func(t *testing.T) {
+		stdout, stderr, err := runImport("--json", "--strict-deps", absentTargetFile("imsd-src3"))
+		if err == nil {
+			t.Fatalf("strict JSON import must exit nonzero when edges are reported skipped\nstderr:\n%s", stderr)
+		}
+		// stdout holds exactly one existing-shape result object, with the
+		// skipped edges in skipped_dependencies — no appended error object.
+		obj := decodeSingleJSONObject(t, "stdout", stdout)
+		gotSkips, ok := obj["skipped_dependencies"].([]any)
+		if !ok || len(gotSkips) != 1 {
+			t.Errorf("skipped_dependencies = %v, want the 1 reported edge", obj["skipped_dependencies"])
+		}
+		if len(gotSkips) == 1 {
+			if s, _ := gotSkips[0].(string); !strings.Contains(s, "imsd-src3 -> imsd-tgt") {
+				t.Errorf("skipped_dependencies[0] = %q, want the imsd-src3 edge", s)
+			}
+		}
+		// stderr carries the JSON error envelope with the count and hint.
+		var envelope map[string]any
+		if jErr := json.Unmarshal([]byte(stderr), &envelope); jErr != nil {
+			t.Fatalf("stderr is not one JSON error envelope: %v\n%s", jErr, stderr)
+		}
+		if msg, _ := envelope["error"].(string); !strings.Contains(msg, "1 dependency edge(s) were reported skipped") || !strings.Contains(msg, "--strict-deps") {
+			t.Errorf("JSON error = %v, want the skip count and the flag named", envelope["error"])
+		}
+		if hint, _ := envelope["hint"].(string); !strings.Contains(hint, "re-run") {
+			t.Errorf("JSON hint = %v, want the recovery hint", envelope["hint"])
+		}
+
+		// The verdict lands after persistence: the source row is committed.
+		show := exec.Command(bd, "show", "imsd-src3")
+		show.Dir = dir
+		show.Env = bdEnv(dir)
+		if out, err := show.CombinedOutput(); err != nil {
+			t.Errorf("strict failure must leave the source row committed, but bd show imsd-src3 failed: %v\n%s", err, out)
 		}
 	})
 }

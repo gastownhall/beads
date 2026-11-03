@@ -167,4 +167,40 @@ func TestRenderImportOutcomeSkippedDependencies(t *testing.T) {
 			t.Errorf("strict mode must not also print the default summary warning:\n%s", stderr)
 		}
 	})
+
+	t.Run("json_strict_error_envelope", func(t *testing.T) {
+		jsonOutput, importStrictDeps = true, true
+		var stdout, stderr string
+		var err error
+		stdout, stderr, err = captureImportOutcome(t, func() error {
+			return renderImportOutcome(importResultJSON{Source: "chunk.jsonl", Created: 1, SkippedDependencies: skips}, "chunk.jsonl", 0)
+		})
+		exitErr, ok := err.(*exitError)
+		if !ok {
+			t.Fatalf("strict JSON import must fail with an exit error, got %v", err)
+		}
+		if exitErr.Code != 1 {
+			t.Errorf("strict exit code = %d, want 1", exitErr.Code)
+		}
+		// stdout keeps exactly the one existing-shape result object.
+		obj := decodeSingleJSONObject(t, "stdout", stdout)
+		gotSkips, ok := obj["skipped_dependencies"].([]any)
+		if !ok || len(gotSkips) != len(skips) {
+			t.Errorf("skipped_dependencies = %v, want the %d reported edges", obj["skipped_dependencies"], len(skips))
+		}
+		// stderr carries the JSON error envelope with the count and hint.
+		var envelope map[string]any
+		if jErr := json.Unmarshal([]byte(stderr), &envelope); jErr != nil {
+			t.Fatalf("stderr is not one JSON error envelope: %v\n%s", jErr, stderr)
+		}
+		if msg, _ := envelope["error"].(string); !strings.Contains(msg, "2 dependency edge(s) were reported skipped") || !strings.Contains(msg, "--strict-deps") {
+			t.Errorf("JSON error = %v, want the skip count and the flag named", envelope["error"])
+		}
+		if hint, _ := envelope["hint"].(string); !strings.Contains(hint, "re-run") {
+			t.Errorf("JSON hint = %v, want the recovery hint", envelope["hint"])
+		}
+		if strings.Contains(stderr, "Warning:") {
+			t.Errorf("strict mode must not also print the default summary warning:\n%s", stderr)
+		}
+	})
 }

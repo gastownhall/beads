@@ -631,5 +631,39 @@ func TestProxiedServerImport(t *testing.T) {
 		if got := proxiedImportQueryInt(t, db, "SELECT COUNT(*) FROM dependencies WHERE issue_id LIKE 'imsx-%'"); got != 0 {
 			t.Errorf("skipped edges landed anyway: %d rows", got)
 		}
+
+		// JSON strict: stdout keeps exactly one existing-shape result
+		// object with skipped_dependencies; the error envelope goes to
+		// stderr; the row still commits; exit is 1.
+		jsonFixture := importFixtureJSONL(t, []*types.Issue{{
+			ID: "imsx-src3", Title: "Third source with an absent target", Status: types.StatusOpen,
+			IssueType: types.TypeTask, Priority: 2, CreatedAt: when, UpdatedAt: when,
+			Dependencies: []*types.Dependency{{
+				IssueID: "imsx-src3", DependsOnID: "imsx-tgt", Type: types.DepBlocks,
+			}},
+		}})
+		jsonPath := filepath.Join(p.dir, "strict3.jsonl")
+		if err := os.WriteFile(jsonPath, []byte(jsonFixture), 0o644); err != nil {
+			t.Fatalf("write fixture: %v", err)
+		}
+		stdout, stderr, err = bdProxiedImportWithInput(t, bd, p.dir, "", "--json", "--strict-deps", jsonPath)
+		if err == nil {
+			t.Fatalf("strict JSON proxied import must exit 1\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+		}
+		obj := decodeSingleJSONObject(t, "stdout", stdout)
+		gotSkips, ok := obj["skipped_dependencies"].([]any)
+		if !ok || len(gotSkips) != 1 {
+			t.Errorf("skipped_dependencies = %v, want the 1 reported edge", obj["skipped_dependencies"])
+		}
+		var envelope map[string]any
+		if jErr := json.Unmarshal([]byte(stderr), &envelope); jErr != nil {
+			t.Fatalf("stderr is not one JSON error envelope: %v\n%s", jErr, stderr)
+		}
+		if msg, _ := envelope["error"].(string); !strings.Contains(msg, "1 dependency edge(s) were reported skipped") || !strings.Contains(msg, "--strict-deps") {
+			t.Errorf("JSON error = %v, want the skip count and the flag named", envelope["error"])
+		}
+		if got := proxiedImportQueryInt(t, db, "SELECT COUNT(*) FROM issues WHERE id = 'imsx-src3'"); got != 1 {
+			t.Errorf("strict JSON failure must leave the source row committed, got %d rows", got)
+		}
 	})
 }
