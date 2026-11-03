@@ -19,6 +19,8 @@
 package dolt
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -27,6 +29,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	sqlmock "github.com/DATA-DOG/go-sqlmock"
+	mysql "github.com/go-sql-driver/mysql"
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/types"
@@ -949,4 +954,163 @@ func TestCrossProject_IdentityCheck_Gateway_SkipsVerification(t *testing.T) {
 		t.Fatalf("gateway open must skip identity verification (reconciled by resolveInitProjectID instead), got error: %v", err)
 	}
 	gatewayStore.Close()
+}
+
+// TestCrossProject_IdentityCheck_ReadErrorRefuses: when the database's
+// _project_id cannot be READ, the identity check has no proof of ownership
+// and must refuse the open with a named error, not treat the failed read
+// like an empty (old-style) _project_id and silently connect (bd-8b6e39 /
+// PR #7565). The read here fails because metadata has lost its value column;
+// a missing metadata table is the no-schema compatibility skip instead (see
+// TestCrossProject_IdentityCheck_SoftSkip_NoBdSchema).
+func TestCrossProject_IdentityCheck_ReadErrorRefuses(t *testing.T) {
+	skipIfNoDolt(t)
+	acquireTestSlot()
+	t.Cleanup(releaseTestSlot)
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	f := newIdentityTestFixture(t, "readerr")
+	ownerID := "77777777-7777-7777-7777-777777777777"
+	f.saveLocalProjectID(t, ownerID)
+
+	ownerStore, err := openStoreWithOwnBudget(t, f.config())
+	if err != nil {
+		t.Fatalf("create owner store: %v", err)
+	}
+	if err := ownerStore.SetMetadata(ctx, "_project_id", ownerID); err != nil {
+		ownerStore.Close()
+		t.Fatalf("seed _project_id: %v", err)
+	}
+	for _, stmt := range []string{
+		"DROP TABLE metadata",
+		"CREATE TABLE metadata (`key` VARCHAR(255) PRIMARY KEY)",
+		"INSERT INTO metadata (`key`) VALUES ('_project_id')",
+	} {
+		if _, err := ownerStore.db.ExecContext(ctx, stmt); err != nil {
+			ownerStore.Close()
+			t.Fatalf("damage metadata table (%s): %v", stmt, err)
+		}
+	}
+	ownerStore.Close()
+
+	for _, openedByInit := range []bool{false, true} {
+		cfg := f.config()
+		cfg.OpenedByInit = openedByInit
+		reopenStore, err := openStoreWithOwnBudget(t, cfg)
+		if err == nil {
+			reopenStore.Close()
+			t.Fatalf("OpenedByInit=%v: expected the open to refuse when _project_id cannot be read, got nil (identity check silently skipped)", openedByInit)
+		}
+		if !strings.Contains(err.Error(), "cannot verify project identity") || !strings.Contains(err.Error(), f.dbName) {
+			t.Fatalf("OpenedByInit=%v: expected a 'cannot verify project identity' refusal naming %s, got: %v", openedByInit, f.dbName, err)
+		}
+	}
+
+	// The refusal came before any schema write: the damaged table is as the
+	// test left it, not repaired or rebuilt by migrations.
+	db := rawTestConn(t, testServerPort)
+	defer db.Close()
+	rows, err := db.QueryContext(ctx, "SHOW COLUMNS FROM `"+f.dbName+"`.metadata")
+	if err != nil {
+		t.Fatalf("show metadata columns: %v", err)
+	}
+	defer rows.Close()
+	cols, err := rows.Columns()
+	if err != nil {
+		t.Fatalf("columns: %v", err)
+	}
+	var fields []string
+	for rows.Next() {
+		vals := make([]any, len(cols))
+		ptrs := make([]any, len(cols))
+		for i := range vals {
+			ptrs[i] = &vals[i]
+		}
+		if err := rows.Scan(ptrs...); err != nil {
+			t.Fatalf("scan metadata column: %v", err)
+		}
+		fields = append(fields, fmt.Sprintf("%s", vals[0]))
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate metadata columns: %v", err)
+	}
+	if len(fields) != 1 || fields[0] != "key" {
+		t.Fatalf("metadata columns after the refused opens = %v, want only [key] (refusal must precede schema writes)", fields)
+	}
+}
+
+// identityMockStore is a store over sqlmock whose beadsDir carries localID in
+// metadata.json, so verifyProjectIdentity runs against scripted metadata
+// reads. hasLocal false writes no metadata.json at all.
+func identityMockStore(t *testing.T, localID string, hasLocal bool) (*DoltStore, sqlmock.Sqlmock, string) {
+	t.Helper()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	beadsDir := t.TempDir()
+	if hasLocal {
+		if err := (&configfile.Config{ProjectID: localID}).Save(beadsDir); err != nil {
+			t.Fatalf("save metadata.json: %v", err)
+		}
+	}
+	return &DoltStore{db: db, database: "beads_proj"}, mock, beadsDir
+}
+
+// expectProjectIDRead scripts one GetMetadata("_project_id") attempt.
+func expectProjectIDRead(mock sqlmock.Sqlmock, value *string, readErr error) {
+	mock.ExpectBegin()
+	q := mock.ExpectQuery("SELECT value FROM metadata WHERE `key` = \\?").WithArgs("_project_id")
+	switch {
+	case readErr != nil:
+		q.WillReturnError(readErr)
+	case value != nil:
+		q.WillReturnRows(sqlmock.NewRows([]string{"value"}).AddRow(*value))
+	default:
+		q.WillReturnRows(sqlmock.NewRows([]string{"value"}))
+	}
+	mock.ExpectRollback()
+}
+
+// TestVerifyProjectIdentity_ReadErrors runs the real verifier against
+// scripted _project_id reads: a read that fails for any reason but a missing
+// metadata table is no proof of ownership and refuses, wrapping the cause.
+func TestVerifyProjectIdentity_ReadErrors(t *testing.T) {
+	errGeneric := errors.New("metadata read failed")
+	refusals := []struct {
+		name    string
+		readErr error
+	}{
+		{"access denied", &mysql.MySQLError{Number: 1142, Message: "SELECT command denied to user 'bd'@'%' for table 'metadata'"}},
+		{"non-retryable generic", errGeneric},
+		{"missing value column", &mysql.MySQLError{Number: 1054, Message: "Unknown column 'value' in 'field list'"}},
+		{"another missing table", &mysql.MySQLError{Number: 1146, Message: "table not found: issues"}},
+		{"unidentifiable missing table", &mysql.MySQLError{Number: 1146, Message: "table not found"}},
+	}
+	for _, tc := range refusals {
+		t.Run("refuses/"+tc.name, func(t *testing.T) {
+			store, mock, beadsDir := identityMockStore(t, "11111111-1111-1111-1111-111111111111", true)
+			expectProjectIDRead(mock, nil, tc.readErr)
+
+			err := store.verifyProjectIdentity(context.Background(), beadsDir, false)
+			if err == nil {
+				t.Fatalf("verifyProjectIdentity = nil, want a refusal for read error %v", tc.readErr)
+			}
+			if !strings.Contains(err.Error(), "cannot verify project identity") || !strings.Contains(err.Error(), "beads_proj") {
+				t.Fatalf("error = %q, want 'cannot verify project identity' naming the database", err)
+			}
+			if !errors.Is(err, tc.readErr) {
+				t.Fatalf("error %v does not wrap the read error %v", err, tc.readErr)
+			}
+			var mysqlErr *mysql.MySQLError
+			if want, ok := tc.readErr.(*mysql.MySQLError); ok && (!errors.As(err, &mysqlErr) || mysqlErr.Number != want.Number) {
+				t.Fatalf("errors.As did not reach MySQL error %d through %v", want.Number, err)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
 }

@@ -2715,9 +2715,14 @@ func (s *DoltStore) verifyProjectIdentity(ctx context.Context, beadsDir string, 
 		return nil // old-style metadata.json without project_id — skip
 	}
 
-	// Read project ID from database metadata table
+	// Read project ID from database metadata table. GetMetadata already
+	// retries transient failures; an error that survives it is no proof of
+	// ownership, so it refuses rather than reading as an empty ID.
 	dbID, err := s.GetMetadata(ctx, "_project_id")
-	if err != nil || dbID == "" {
+	if err != nil {
+		return projectIdentityUnreadableError(s.database, err)
+	}
+	if dbID == "" {
 		return nil // old database without project_id — skip
 	}
 
@@ -2772,6 +2777,12 @@ func projectIdentityMismatchError(localID, dbID, database string, openedByInit b
 			"To diagnose: bd dolt status\n"+
 			"Do NOT run 'bd init' — your data likely exists, just on a different server.",
 		localID, dbID)
+}
+
+// projectIdentityUnreadableError builds verifyProjectIdentity's refusal when
+// the database's _project_id cannot be read.
+func projectIdentityUnreadableError(database string, cause error) error {
+	return fmt.Errorf("cannot verify project identity of database %q: %w", database, cause)
 }
 
 func (s *DoltStore) verifyGlobalProjectIdentity(ctx context.Context, beadsDir string) error {
