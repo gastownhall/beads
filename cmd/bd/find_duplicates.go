@@ -68,7 +68,7 @@ func init() {
 	findDuplicatesCmd.Flags().IntP("limit", "n", 50, "Maximum number of pairs to show")
 	findDuplicatesCmd.Flags().String("model", "", "AI model to use (only with --method ai; default from config ai.model)")
 	// Defensive row cap (be-x42v): exits 2 on overage, default disabled.
-	addMaxRowsFlag(findDuplicatesCmd)
+	addRoutedMaxRowsFlag(findDuplicatesCmd)
 	rootCmd.AddCommand(findDuplicatesCmd)
 }
 
@@ -124,13 +124,6 @@ func runFindDuplicates(cmd *cobra.Command, _ []string) error {
 	}
 
 	if usesProxiedServer() {
-		// maxRows was already resolved above (to build filter); reject using
-		// that value directly instead of re-resolving via
-		// rejectMaxRowsUnderProxiedServer, which would call resolveMaxRows a
-		// second time and double any malformed-env warning it emits.
-		if err := rejectResolvedMaxRowsUnderProxiedServer(maxRows); err != nil {
-			return err
-		}
 		return runFindDuplicatesProxiedServer(rootCtx, filter, status, method, threshold, limit, model)
 	}
 

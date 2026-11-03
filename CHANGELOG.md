@@ -612,6 +612,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`--max-rows` / `BEADS_MAX_ROWS` is honored by `bd ready`, `bd graph` and
+  `bd find-duplicates` under `--proxied-server`.** A positive cap used to be
+  refused there with `proxy.max_rows.unsupported`; it now works as on the
+  direct route: over the cap the command exits 2, names the flag or variable
+  that set it on stderr, and prints nothing on stdout. `bd ready --claim`
+  claims one issue whatever the cap, `bd ready --gated` ignores the cap, and
+  `bd graph --all` applies it to each status separately, as on the direct
+  route. `bd graph` now rejects a negative `--max-rows` before it looks up the
+  issue ID.
 - **`bd rules compact` previews by default and applies only with `--force`.**
   It used to apply merges by default, writing the composite and deleting the
   source rules. Scripts using `--auto` or `--group` to apply merges must add
