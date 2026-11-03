@@ -349,3 +349,107 @@ func TestEmbeddedFederationConcurrent(t *testing.T) {
 	}
 	t.Logf("%d/%d federation workers succeeded", successes, numWorkers)
 }
+
+// runBdFederationBuffers runs "bd federation" with extra args, returning the
+// command's stdout and stderr separately: the filtered-push notice belongs on
+// stderr and must not leak into --json stdout.
+func runBdFederationBuffers(t *testing.T, bd, dir string, args ...string) (stdout, stderr string) {
+	t.Helper()
+	cmd := exec.Command(bd, append([]string{"federation"}, args...)...)
+	cmd.Dir = dir
+	cmd.Env = bdEnv(dir)
+	out, errBuf, err := runCommandBuffers(t, cmd)
+	if err != nil {
+		t.Fatalf("bd federation %s failed: %v\nstdout:\n%s\nstderr:\n%s",
+			strings.Join(args, " "), err, out.String(), errBuf.String())
+	}
+	return out.String(), errBuf.String()
+}
+
+func runBdOK(t *testing.T, bd, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command(bd, args...)
+	cmd.Dir = dir
+	cmd.Env = bdEnv(dir)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("bd %s failed: %v\n%s", strings.Join(args, " "), err, out)
+	}
+}
+
+// Filtered publications to two peers in one real CLI invocation render one
+// history-visibility notice on stderr, in human mode and in JSON mode, where
+// stdout stays a valid document whose results identify each filtered
+// publication. Ported from the GLM candidate.
+func TestEmbeddedFederationSyncFilteredNotice(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt federation tests")
+	}
+	const notice = "withheld matching issues from the pushed tip only"
+	const pushedLine = "Pushed (excluded issue types withheld from the tip)"
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "fdfil")
+	for _, peer := range []string{"alpha", "beta"} {
+		peerDir := filepath.Join(t.TempDir(), peer)
+		if err := os.MkdirAll(peerDir, 0o700); err != nil {
+			t.Fatalf("create peer dir: %v", err)
+		}
+		bdFederation(t, bd, dir, "add-peer", peer, "file://"+peerDir)
+		// An unfiltered bootstrap before the excluded issue exists, so no
+		// peer holds it and each sync genuinely withholds a row.
+		runBdOK(t, bd, dir, "dolt", "push", peer)
+	}
+
+	// Exclude a versioned built-in type: wisps live in dolt_ignore'd tables
+	// and are never pushed, so filtering them changes no publication.
+	configPath := filepath.Join(beadsDir, "config.yaml")
+	existing, err := os.ReadFile(configPath)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("read workspace config: %v", err)
+	}
+	cfg := string(existing) + "\nfederation:\n  exclude_types:\n    - chore\n"
+	if err := os.WriteFile(configPath, []byte(cfg), 0o600); err != nil {
+		t.Fatalf("write workspace config: %v", err)
+	}
+	runBdOK(t, bd, dir, "create", "--id", "fdfil-chore", "--type", "chore", "chore to withhold")
+	// A shared change too: with only the withheld chore new, the filtered
+	// payload would equal each peer's tip and nothing would be published.
+	runBdOK(t, bd, dir, "create", "--type", "task", "first shared task")
+
+	stdout, stderr := runBdFederationBuffers(t, bd, dir, "sync")
+	if got := strings.Count(stdout, pushedLine); got != 2 {
+		t.Errorf("human sync marks %d filtered pushes, want 2:\n%s", got, stdout)
+	}
+	if got := strings.Count(stderr, notice); got != 1 {
+		t.Errorf("human sync printed %d notices on stderr, want 1:\n%s", got, stderr)
+	}
+
+	// A new shared change, so the second invocation publishes again rather
+	// than finding an unchanged payload.
+	runBdOK(t, bd, dir, "create", "--type", "task", "second shared task")
+	stdout, stderr = runBdFederationBuffers(t, bd, dir, "sync", "--json")
+	var payload struct {
+		Results []struct {
+			Peer         string
+			Pushed       bool
+			PushFiltered bool
+		} `json:"results"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+		t.Fatalf("sync --json stdout is not valid JSON: %v\n%s", err, stdout)
+	}
+	if len(payload.Results) != 2 {
+		t.Fatalf("sync --json has %d results, want 2:\n%s", len(payload.Results), stdout)
+	}
+	for _, r := range payload.Results {
+		if !r.Pushed || !r.PushFiltered {
+			t.Errorf("sync --json result for %s: Pushed=%v PushFiltered=%v, want both true", r.Peer, r.Pushed, r.PushFiltered)
+		}
+	}
+	if got := strings.Count(stderr, notice); got != 1 {
+		t.Errorf("JSON sync printed %d notices on stderr, want 1:\n%s", got, stderr)
+	}
+	if strings.Contains(stdout, notice) {
+		t.Errorf("notice leaked into --json stdout:\n%s", stdout)
+	}
+}

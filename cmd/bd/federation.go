@@ -261,10 +261,12 @@ func runFederationSync(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// filteredPushNotice explains what a filtered publication does not hide.
-const filteredPushNotice = "Note: federation.exclude_types withheld matching issues from the pushed tip only. " +
-	"Peers can still read them in the history they received, and a direct fetch of this branch " +
-	"or an unfiltered push (bd dolt push) is not filtered."
+// filteredPushNotice explains what a filtered publication does not hide. The
+// history-visibility wording follows the warning in Wenjix's PR #7891.
+const filteredPushNotice = "Warning: federation.exclude_types withheld matching issues from the pushed tip only. " +
+	"Earlier commits in the pushed history still contain them, so a peer that reads history can recover them, " +
+	"and a direct fetch of this branch or an unfiltered push (bd dolt push) is not filtered. " +
+	"See https://beads.gascity.com/multi-agent/federation"
 
 func runFederationStatus(cmd *cobra.Command, args []string) error {
 	if usesProxiedServer() {

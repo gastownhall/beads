@@ -187,18 +187,22 @@ v1.3.2 the filter works like this:
 - Only issues the peer's tip does not already hold are withheld. An issue the
   peer already received stays there; changing its type later does not
   retract it.
-- The filter changes the pushed tip, not the history. Peers can still read
-  withheld issues in the history they received, so this is not a privacy
-  control. A direct fetch of the branch, and an unfiltered push such as
-  `bd dolt push`, are not filtered at all.
+- The filter changes the pushed tip, not the history. The pushed tip descends
+  from your unfiltered commit, so earlier commits in the pushed history still
+  contain withheld issues and a peer that reads history can recover them. This
+  is not a privacy control. A direct fetch of the branch, and an unfiltered
+  push such as `bd dolt push`, are not filtered at all.
 - Your local data is kept. Each filtered push leaves a filter commit and its
   revert in local history, and a sync that fails partway (a push error, a
   cancelled run) leaves local issues, wisps and the checked-out branch as
-  they were.
+  they were. If another command commits to the branch, or leaves uncommitted
+  changes on it, while the sync prepares a filtered push, nothing is pushed
+  and that change is kept; run the sync again.
 - When a push withholds anything, the peer's line reads
   `✓ Pushed (excluded issue types withheld from the tip)`, one notice per run
   is printed on stderr, and the `--json` result for that peer carries
-  `"PushFiltered": true`.
+  `"PushFiltered": true`. When the filtered tip already matches what the peer
+  holds, nothing is pushed and no notice is printed.
 
 ### Topologies
 
