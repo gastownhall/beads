@@ -31,11 +31,15 @@ workspace after upgrading from bd ≤1.3.0,
   environment, so a contributor could commit
   `BEADS_DOLT_CREDENTIAL_COMMAND=<command>` and bd ran it with `sh -c` on the
   next user's machine. bd now imports only an allowlist from that file:
-  `BEADS_*` and `BD_*` keys that neither name a command nor redirect where
-  credentials go, and, of the `DOLT_*` namespace, only `DOLT_REMOTE_USER` and
-  `DOLT_REMOTE_PASSWORD`. Keys match case-insensitively and never override the
-  shell environment. Every other key is ignored with
-  `beads: ignoring <KEY> from .beads/.env (<reason>)` on stderr. Separately,
+  `BEADS_*` and `BD_*` keys other than the command keys and the four
+  credential-redirect keys listed under **Upgrade notes**, and, of the
+  `DOLT_*` namespace, only `DOLT_REMOTE_USER` and `DOLT_REMOTE_PASSWORD`.
+  Keys match case-insensitively and never override the shell environment.
+  Every other key is ignored with
+  `beads: ignoring <KEY> from .beads/.env (<reason>)` on stderr. The other
+  `BD_*` keys still set config values, so the file can still name an
+  endpoint that receives credentials, such as `BD_AI_BASE_URL` or
+  `BD_DOLT_HOST`; see the first item under **Known issues**. Separately,
   `bd mail` ran `mail.delegate` from project `config.yaml` or the replicated
   database config, where `PUT /v0/beads/config/mail.delegate` could store it.
   `bd mail` now reads `mail.delegate` only from the environment and user
@@ -83,8 +87,8 @@ workspace after upgrading from bd ≤1.3.0,
     `main` to fastmcp 4.x; this line stays on 3.x); `joserfc` 1.7.7 and `mcp`
     1.30.0 (no source PR: `main` moved past them with fastmcp 4.x);
     `pyjwt` 2.15.1 and `urllib3` 2.8.0 (backport of
-    [#7466](https://github.com/gastownhall/beads/pull/7466)); `authlib` 1.9.1
-    and `dnspython` 2.9.0 on Python ≥3.11 (backport of
+    [#7466](https://github.com/gastownhall/beads/pull/7466)); `authlib` 1.9.1,
+    and `dnspython` 2.9.0 on Python ≥3.11 only (backport of
     [#7925](https://github.com/gastownhall/beads/pull/7925)). One osv-scanner
     advisory remains: `dnspython` 2.8.0 on Python 3.10, which no fixed
     `dnspython` release supports.
@@ -117,13 +121,14 @@ workspace after upgrading from bd ≤1.3.0,
 - **`bd delete` no longer resolves an id it cannot find to a different issue
   whose id begins with it**
   ([#8083](https://github.com/gastownhall/beads/pull/8083), backport of
-  [#7375](https://github.com/gastownhall/beads/pull/7375)). bd delete
-  resolved each id with the abbreviation-tolerant resolver, so an id that was
-  already gone (a retried delete, a re-run `--from-file` list, a parent whose
-  child survives) resolved by leading-prefix match to whichever surviving
-  issue's id it begins: after `fx-t00003` was deleted, `bd delete fx-t00003`
-  previewed `fx-t000031` and printed `bd delete fx-t000031 --force` as the
-  next step, and with `--force` deleted it. `--quiet` silenced the partial-id
+  [#7375](https://github.com/gastownhall/beads/pull/7375) by @A3Ackerman).
+  bd delete resolved each id with the abbreviation-tolerant resolver, so an
+  id that was already gone (a retried delete, a re-run `--from-file` list, a
+  parent whose child survives) resolved by leading-prefix match to whichever
+  surviving issue's id it begins: after `fx-t00003` was deleted,
+  `bd delete fx-t00003` previewed `fx-t000031` and printed
+  `bd delete fx-t000031 --force` as the next step, and with `--force`
+  deleted it. `--quiet` silenced the partial-id
   notice, so a `--force --quiet` re-run deleted issues it never named without
   a word. `bd delete` now requires an exact id on the preview and with
   `--force`, as the team-server route already did; full ids, bare full
@@ -195,10 +200,11 @@ workspace after upgrading from bd ≤1.3.0,
 - **`bd rules compact` no longer deletes rules without confirmation or a
   backup** ([#8083](https://github.com/gastownhall/beads/pull/8083), backport
   of [#8051](https://github.com/gastownhall/beads/pull/8051), fixes
-  [#5719](https://github.com/gastownhall/beads/issues/5719)). It applied
-  merges by default, writing the composite and deleting the source rules,
-  and a composite keeps only the `**Do:**` and `**Don't:**` lines, so the rest
-  of each source (rationale, exceptions, frontmatter) was gone. Compact now
+  [#5719](https://github.com/gastownhall/beads/issues/5719), reported by
+  @postoso). It applied merges by default, writing the composite and deleting
+  the source rules, and a composite keeps only the `**Do:**` and `**Don't:**`
+  lines, so the rest of each source (rationale, exceptions, frontmatter) was
+  gone. Compact now
   previews unless `--force` is given, and the preview lists, by source, every
   line the composite drops. Applying copies each source to
   `<name>.md.backup` before deleting it; undo a merge by deleting the
@@ -328,11 +334,14 @@ workspace after upgrading from bd ≤1.3.0,
   ([#8068](https://github.com/gastownhall/beads/pull/8068)): it reads the
   configured repository (`GET /repos/{owner}/{repo}`, following redirects)
   to learn its current name, plus one request for each other repository on
-  the same host that a local bead's link names. The lookup is best-effort:
-  if it fails, that run accepts only the configured name. After changing
-  `github.owner`/`github.repo` to a repository's new name, relink beads that
-  still name the old one before the next pull (README, "GitHub Issues
-  Sync").
+  the same host that a local bead's link names, to learn whether that name
+  is a former name of the configured repository. The lookup is best-effort:
+  if it fails, that run accepts only the configured name. Beads linked under
+  a name the lookup does not tie to the repository (the request failed, or
+  the old name now belongs to another repository) count as another
+  repository's: relink them (`bd update <id> --external-ref <new-url>`), or
+  the next pull imports their issues again as new beads (README, "GitHub
+  Issues Sync").
 - **Newly generated `config.yaml` files carry a
   `# beads-chosen-listener-port: N` line** after the managed marker. It is
   how bd tells a port it chose from one an operator set. A port is moved only
@@ -371,20 +380,27 @@ These are not fixed in 1.3.3.
   ([#7886](https://github.com/gastownhall/beads/issues/7886)). Tracker
   tokens (GitHub, GitLab, Azure DevOps, Jira, Linear), the AI API key and
   `BEADS_DOLT_PASSWORD` go to whatever endpoint the workspace configures,
-  including one set in a committed `.beads/config.yaml` or
-  `.beads/metadata.json`, or replicated through the Dolt `config` table. A
-  repository contributor or Dolt peer can therefore point them at a server
-  they control. Workaround: in a clone you do not fully trust, check the
-  endpoints it configures (`*.url` keys, `ai.base_url`, `dolt.host` in
-  `.beads/config.yaml`, `dolt_server_host` in `.beads/metadata.json`, and
-  `bd config list`) before running bd with those credentials set, or unset
-  the credentials for that clone. Fixed on `main` by
+  including one set in a committed `.beads/config.yaml`,
+  `.beads/metadata.json` or `.beads/.env` (as a `BD_*` key), or replicated
+  through the Dolt `config` table. A repository contributor or Dolt peer can
+  therefore point them at a server they control. Workaround: in a clone you
+  do not fully trust, check the endpoints it configures before running bd
+  with those credentials set, or unset the credentials for that clone. Read
+  the Dolt server host from the files first, because in server mode any bd
+  command that opens the database, `bd config list` included, sends
+  `BEADS_DOLT_PASSWORD` to it: `dolt_server_host` in `.beads/metadata.json`,
+  `dolt.host` in `.beads/config.yaml` (or `config.local.yaml`), and
+  `BD_DOLT_HOST` in `.beads/.env`. Then check `ai.base_url` in those YAML
+  files and `BD_AI_BASE_URL` in `.beads/.env`, and the tracker
+  endpoints `github.url`, `gitlab.url`, `ado.url`, `jira.url` and
+  `linear.api_endpoint` in `bd config list`. Fixed on `main` by
   [#7887](https://github.com/gastownhall/beads/pull/7887), which refuses an
   endpoint from shared configuration until you confirm it once from your
   environment or user config.
 - **A server-mode workspace can push, pull and reset from a stale local copy
-  of its database.** When bd's Dolt server does not serve the workspace's
-  `.beads/dolt` directory but `.beads/dolt/<database>` still holds a database
+  of its database.** When the Dolt server bd connects to does not serve the
+  workspace's `.beads/dolt` directory (for example, a server in a container
+  or another checkout) but `.beads/dolt/<database>` still holds a database
   (a leftover from embedded mode, or a copy), `bd dolt push` and
   `bd dolt pull` use that copy instead of the server's data, and
   `bd dolt push --force` or `bd dolt remote reset-data` can replace the
