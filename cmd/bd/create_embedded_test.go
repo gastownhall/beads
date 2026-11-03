@@ -1685,3 +1685,32 @@ func TestEmbeddedCreateConcurrent(t *testing.T) {
 		}
 	}
 }
+
+// TestEmbeddedCreateChildOfAForeignPrefixParent is the embedded-CLI half of
+// GH#7965: a child minted under a parent admitted with --force inherits the
+// parent's foreign prefix without needing --force of its own. The caller
+// cannot name a minted child's ID any way other than through the parent it
+// already owns, so demanding the override for export-work.1 was demanding it
+// for a row that had no other spelling.
+func TestEmbeddedCreateChildOfAForeignPrefixParent(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt create tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "walkthrough")
+
+	parent := bdCreate(t, bd, dir, "Parent", "--id", "export-work", "--force")
+	if parent.ID != "export-work" {
+		t.Fatalf("forced parent create = %+v, want the requested id export-work", parent)
+	}
+
+	child := bdCreate(t, bd, dir, "Child", "--parent", "export-work")
+	if child.ID != "export-work.1" {
+		t.Fatalf("unforced child of the foreign-prefix parent = %+v, want the minted id export-work.1", child)
+	}
+	if child.Title != "Child" {
+		t.Fatalf("minted child title = %q, want Child", child.Title)
+	}
+}
