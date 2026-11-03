@@ -202,6 +202,7 @@
 40 6 TestEmbeddedMergeAndSettleSkipsNonMemoryConfigConflict
 40 6 TestEmbeddedReaderListKeysetPositionNarrowsWithoutReplacingTheOtherPredicates
 40 6 TestEmbeddedRelationsAnswersAWispTargetInTheOutDirection
+40 6 TestEmbeddedTempResidueCrashWindowConvergesOnReopen
 40 6 TestEmbeddedUpgradeFromSchema27UnderTransactionCommit_4137
 40 6 TestPromoteStillWorksWithCollisionGuard
 40 6 TestSearchWithMissingWispPlaneTables
@@ -228,6 +229,7 @@
 40 8 TestEmbeddedRelationsOrdersNeighborsFromBothPlanesTogether
 40 8 TestEmbeddedReopenIssueCategorySemantics
 40 8 TestGetIssueCommentsPageEmbedded
+40 8 TestIgnoredCursorScratchTrackedAtHeadIsSweptOnOpen
 40 8 TestJournalShapeProbeOncePerOpen
 40 8 TestListWisps
 
@@ -242,6 +244,7 @@
 40 9 TestGetReadyWorkIncludeEphemeralExcludesNonReadyWisps
 40 9 TestMergeWithStrategy_LeavesPreMergePendingChanges
 40 9 TestPristineEmbeddedDoltFixtureRelocatesPrefixes
+40 9 TestTempResidueRenamedStoreConvergesOnOpen
 40 9 TestUpdateMergeOps_DoltEngine
 
 40 10 TestEmbeddedClaimerStampsStartedAtOnceAcrossTheTwoWritesItChoosesBetween
@@ -267,6 +270,7 @@
 40 11 TestEmbeddedReaderListMaxRowsBoundaryIsLimitPlusOffset
 40 11 TestEmbeddedReadyClaimerRecordsOneHistoryEntryForAWin
 40 11 TestEventsJournal_ActorMatrixOnEmbedded
+40 11 TestFreshCloneOfTempResidueLineagePulls
 40 11 TestMemoriesContract
 40 11 TestWithPeerAuth_WarnsWhenStoredPeerSuppressesAmbientPasswordStored
 
@@ -417,6 +421,7 @@
 40 22 TestEmbeddedDepRekeyAbortLeavesMarkerUnrecorded
 40 22 TestEmbeddedDepRekeyRefusesToWriteIntoDirtyDependencies
 40 22 TestEmbeddedDependencyEditorRefusesSelfDependencyWithTheProbeSkipped
+40 22 TestEmbeddedHealthyReopenMintsNoResidueCommit
 40 22 TestEmbeddedReaderListStatusAcceptsACommaSeparatedORSet
 40 22 TestEmbeddedReaderReadyLimitBoundary
 40 22 TestEmbeddedUpgradeFromSchema27FaultRestoresTransactionCommit_4137
@@ -507,6 +512,7 @@
 40 28 TestEmbeddedIssueOperationsUpdateRefusesATypeOutsideTheWorkspaceVocabulary
 40 28 TestEmbeddedMigrateRetryAfterFaultConverges_4470
 40 28 TestEmbeddedReaderListReadyFlagAnswersTheBlockerAwareSet
+40 28 TestIgnoredCursorScratchPendingDeletionIsSweptOnOpen
 40 28 TestMergeAndSettleWithStrategy_KeepsCleanMergedTables
 40 28 TestRenameLabel
 40 28 TestUpdateIssueType
@@ -571,6 +577,7 @@
 40 32 TestGetNextChildID
 40 32 TestRemoteVerbPlainRemoteKeepsAmbientEnv
 40 32 TestRowVersionContract
+40 32 TestTempResidueUntrackCommitsOnlyTheRemovals
 40 32 TestWithPeerAuth_MissingRemoteFailsClosed
 
 40 33 TestEmbeddedBatchCloserDuplicateItemRecloseAtItsOwnIndex
@@ -587,6 +594,7 @@
 40 33 TestGetDependentRecordsEmbedded
 40 33 TestPruneEventsBatchDeletesTheLowestSeqsOnly
 40 33 TestRestoreDatabaseRefusesNonBackupDirBeforeConnecting
+40 33 TestTempResidueUntrackKeepsRowsForTheirOwner
 40 33 TestTreeWalkerContract
 
 40 34 TestAddLabel
@@ -603,6 +611,7 @@
 40 34 TestMissingRequiredColumnRefusesAtOpen
 40 34 TestQuerierContract
 40 34 TestReadyWorkStatementBudget
+40 34 TestScratchHeadProbeSucceedsOnABrandNewDatabase
 
 40 35 TestCreateBatchFastPathsMatchPerRowSettled_Embedded
 40 35 TestEmbeddedBatchCloserAllIdempotentBatchLandsNothing
@@ -630,6 +639,7 @@
 40 36 TestEmbeddedReaderListReadyFlagRefusesAFilterItCannotCarry
 40 36 TestEmbeddedRelationsRefusesAnUnusableTypeFilter
 40 36 TestGetReadyWorkMoleculeFilter
+40 36 TestIgnoredCursorScratchPendingDeletionWithCursorMissingSweepsOnly
 40 36 TestMergeWithStrategy_KeepsCleanMergedTables
 40 36 TestReleaserContract
 40 36 TestSchemaAfterInit
