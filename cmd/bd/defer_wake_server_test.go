@@ -227,6 +227,36 @@ func TestServerModeDeferAutoWake(t *testing.T) {
 		}
 	})
 
+	t.Run("suppressed_defer_wakes_on_next_unfrozen_ready", func(t *testing.T) {
+		// bd-6zf0q5 (AC-3): suppression is per-invocation, not a lasting
+		// state change: once the freeze is gone, the next ready read wakes
+		// the expired defer exactly as before.
+		issue := bdCreate(t, bd, p.dir, "Suppressed snooze wakes after the freeze (server mode)", "--type", "task")
+		bdDefer(t, bd, p.dir, issue.ID, "--until", "2020-01-01")
+
+		marker := writeFreezeMarker(t, t.TempDir(), "migrator", "bd-6zf0q5 thaw wake")
+		freezeEnv := []string{migration.EnvFreezeFile + "=" + marker}
+
+		ids := wakeReadyIDsWithEnv(t, bd, p.dir, freezeEnv)
+		if ids[issue.ID] {
+			t.Fatalf("expired defer %s must stay suppressed during the frozen read", issue.ID)
+		}
+		if status, _ := showDeferState(t, bd, p.dir, issue.ID); status != "deferred" {
+			t.Fatalf("precondition: expected the frozen read to leave status=deferred, got %q", status)
+		}
+
+		ids = wakeReadyIDs(t, bd, p.dir)
+		if !ids[issue.ID] {
+			t.Errorf("expected %s in bd ready on the first read after the freeze lifted", issue.ID)
+		}
+		status, deferUntil := showDeferState(t, bd, p.dir, issue.ID)
+		if status != "open" {
+			t.Errorf("expected status=open after the post-freeze wake, got %q", status)
+		}
+		if deferUntil != nil {
+			t.Errorf("expected defer_until cleared after the post-freeze wake (undefer's shape), got %v", deferUntil)
+		}
+	})
 }
 
 // TestServerModeDeferWakeSkippedUnderMigrationFreeze (bd-6zf0q5, follow-up to
