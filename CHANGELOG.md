@@ -616,11 +616,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `bd find-duplicates` under `--proxied-server`.** A positive cap used to be
   refused there with `proxy.max_rows.unsupported`; it now works as on the
   direct route: over the cap the command exits 2, names the flag or variable
-  that set it on stderr, and prints nothing on stdout. `bd ready --claim`
+  that set it on stderr, and prints nothing on stdout; a cap the result fits
+  inside answers with the uncapped output
+  ([#7408](https://github.com/gastownhall/beads/pull/7408)). `bd ready --claim`
   claims one issue whatever the cap, `bd ready --gated` ignores the cap, and
-  `bd graph --all` applies it to each status separately, as on the direct
-  route. `bd graph` now rejects a negative `--max-rows` before it looks up the
-  issue ID.
+  `bd ready --offset` counts the rows it skips against the cap, so
+  `--offset 2 --limit 1 --max-rows 2` over three ready issues exits 2.
+  `bd graph --all` applies the cap to each status separately, as on the direct
+  route; a single-issue `bd graph` walks the whole connected component and then
+  checks its node count, so the cap does not bound the walk's memory.
+  `bd find-duplicates` counts a closed issue its search matched before it drops
+  closed issues from the report. `bd ready --mol` and `--explain` do not enforce
+  the cap on either route. `bd graph` now rejects a negative `--max-rows`
+  before it looks up the issue ID.
 - **`bd rules compact` previews by default and applies only with `--force`.**
   It used to apply merges by default, writing the composite and deleting the
   source rules. Scripts using `--auto` or `--group` to apply merges must add
@@ -4887,15 +4895,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   each label by what actually happened to it. The exit code is still 0, so
   idempotent callers are unaffected.
 
-- **Proxied `--repo` and row-cap refusals are typed again**
+- **Proxied `--repo` refusals are typed again**
   ([#6293](https://github.com/gastownhall/beads/pull/6293)). `bd create --repo`
   under `--proxied-server` answers `--json` with the stable
   `{"code": "proxy.repo.unsupported", …, "mutates": false}` on stdout rather
-  than prose on stderr, and `bd ready --claim --max-rows N` refuses with the
-  same `proxy.max_rows.unsupported` shape as `bd ready --max-rows N`: `--claim`
-  does not exempt a row cap the proxied route cannot enforce either way.
-  `bd create` is the only command that registers `--repo`, so it is the only
-  command this refusal applies to.
+  than prose on stderr. `bd create` is the only command that registers
+  `--repo`, so it is the only command this refusal applies to. (The same PR
+  also typed the row-cap refusal for `bd ready`; that refusal is gone by the
+  end of this release: see the `--max-rows` entry under Changed.)
 - **`bd ready --gated` runs under `--proxied-server` with a row cap set**
   ([#6697](https://github.com/gastownhall/beads/pull/6697)). It was refused
   whenever `--max-rows` or `BEADS_MAX_ROWS` resolved to a positive cap, while
@@ -4903,8 +4910,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   was not, so one command line behaved differently under its two spellings. The
   gated arm lists molecules whose gate closed rather than ready rows and threads
   no cap on either route, so it no longer consults one; a cap passed alongside
-  `--gated` is ignored, matching what the direct route has always done. Every
-  other `bd ready` arm still refuses an active cap, `--claim` included.
+  `--gated` is ignored, matching what the direct route has always done. The
+  other `bd ready` arms now honor an active cap on the proxied route too (see
+  the `--max-rows` entry under Changed), and `--claim` stays capless on both
+  routes.
 - **The proxied `bd admin compact` refusal names the command it means**
   ([#6293](https://github.com/gastownhall/beads/pull/6293)). The message is now
   "only 'bd admin compact --dolt' is supported in proxied-server mode"; it read
