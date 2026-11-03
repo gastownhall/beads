@@ -10,7 +10,13 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-func runGraphProxiedServer(ctx context.Context, out io.Writer, args []string) error {
+// runGraphProxiedServer carries the cap the RunE resolved once, and enforces
+// it the way each arm's direct counterpart does: --all threads it into every
+// per-status search (loadAllGraphSubgraphsUOW), a single-issue graph checks
+// the connected-component node count after the walk
+// (enforceGraphSubgraphCap). A cap overage exits 2 through the shared
+// handleMaxRowsError mapping, with nothing rendered.
+func runGraphProxiedServer(ctx context.Context, out io.Writer, args []string, maxRows int, maxRowsSource string) error {
 	uw, err := openProxiedListUOW(ctx)
 	if err != nil {
 		return HandleError("%v", err)
@@ -18,8 +24,11 @@ func runGraphProxiedServer(ctx context.Context, out io.Writer, args []string) er
 	defer uw.Close(ctx)
 
 	if graphAll {
-		subgraphs, err := loadAllGraphSubgraphsUOW(ctx, uw)
+		subgraphs, err := loadAllGraphSubgraphsUOW(ctx, uw, maxRows, maxRowsSource)
 		if err != nil {
+			if capErr := handleMaxRowsError(err); capErr != nil {
+				return capErr
+			}
 			return HandleErrorRespectJSON("loading all issues: %v", err)
 		}
 		return renderGraphAllSubgraphs(out, subgraphs)
@@ -32,6 +41,9 @@ func runGraphProxiedServer(ctx context.Context, out io.Writer, args []string) er
 	subgraph, err := loadGraphSubgraphUOW(ctx, uw, root)
 	if err != nil {
 		return HandleErrorRespectJSON("loading graph: %v", err)
+	}
+	if err := enforceGraphSubgraphCap(subgraph, maxRows, maxRowsSource); err != nil {
+		return err
 	}
 	return renderGraphSingleSubgraph(out, subgraph)
 }
@@ -103,11 +115,20 @@ func loadGraphSubgraphUOW(ctx context.Context, uw uow.UnitOfWork, root *types.Is
 	return subgraph, nil
 }
 
-func loadAllGraphSubgraphsUOW(ctx context.Context, uw uow.UnitOfWork) ([]*TemplateSubgraph, error) {
+// loadAllGraphSubgraphsUOW is the proxied twin of loadAllGraphSubgraphs, and
+// the cap flows the same way: propagated to each per-status SearchIssues call
+// so any single status that exceeds it returns the typed error directly — the
+// direct route's documented per-status behavior (up to 3x the cap can load
+// in total before one status trips it), not a bound on the union.
+func loadAllGraphSubgraphsUOW(ctx context.Context, uw uow.UnitOfWork, maxRows int, maxRowsSource string) ([]*TemplateSubgraph, error) {
 	var allIssues []*types.Issue
 	for _, status := range []types.Status{types.StatusOpen, types.StatusInProgress, types.StatusBlocked} {
 		statusCopy := status
-		page, err := uw.IssueUseCase().SearchIssues(ctx, "", types.IssueFilter{Status: &statusCopy})
+		page, err := uw.IssueUseCase().SearchIssues(ctx, "", types.IssueFilter{
+			Status:        &statusCopy,
+			MaxRows:       maxRows,
+			MaxRowsSource: maxRowsSource,
+		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to search issues: %w", err)
 		}

@@ -465,6 +465,21 @@ var capabilityProbes = []probe{
 		},
 	},
 
+	{
+		// bd-7fnvhp: both graph arms enforce the cap on the proxied route —
+		// --all threads it into each per-status search, a single-issue graph
+		// caps the connected-component node count after the walk — so the
+		// refusal recorded here used to block a working safety limit.
+		name: "graph --all --max-rows",
+		args: []string{"graph", "--all", "--max-rows", "5"},
+		direct: expectation{
+			outcome: outcomeHonored, reason: reasonNA,
+		},
+		proxied: expectation{
+			outcome: outcomeHonored, reason: reasonNA,
+		},
+	},
+
 	// --- compact -------------------------------------------------------------
 	{
 		// HONORED proxied, which is NOT what proxyMaintenanceRefusals["compact"]

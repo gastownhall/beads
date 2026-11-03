@@ -550,7 +550,7 @@ func TestProxyCapabilityCommandRows(t *testing.T) {
 		{"list", "--max-rows", ProxyOutcomeHonored},
 		{"dep tree", "--max-rows", ProxyOutcomeHonored},
 		{"ready", "--max-rows", ProxyOutcomeHonored},
-		{"graph", "--max-rows", ProxyOutcomeRefused},
+		{"graph", "--max-rows", ProxyOutcomeHonored},
 		{"find-duplicates", "--max-rows", ProxyOutcomeRefused},
 		{"show", "--watch", ProxyOutcomeHonored},
 		{"list", "--watch", ProxyOutcomeHonored},

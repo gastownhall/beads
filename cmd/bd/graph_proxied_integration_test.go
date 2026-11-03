@@ -4,6 +4,8 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -190,6 +192,96 @@ func TestProxiedServerGraph(t *testing.T) {
 		}
 		if !strings.Contains(string(out), "digraph") {
 			t.Errorf("expected 'digraph' in all+dot: %s", out)
+		}
+	})
+
+	t.Run("max_rows_is_honored", func(t *testing.T) {
+		// The epic's component is three nodes (epic, c1, c2), so a single-
+		// issue graph is the post-walk check: the whole subgraph walks first,
+		// then the node count pays the cap. Cap 2 exits 2 naming its source
+		// with nothing rendered; cap 3 — the component's exact size —
+		// answers with the uncapped graph's bytes.
+		for _, tc := range []struct {
+			name string
+			env  []string
+			args []string
+			want string
+		}{
+			{name: "flag", args: []string{"graph", "--max-rows", "2", epic.ID}, want: "--max-rows=2 exceeded."},
+			{name: "env", env: []string{"BEADS_MAX_ROWS=2"}, args: []string{"graph", epic.ID}, want: "BEADS_MAX_ROWS=2 exceeded."},
+		} {
+			stdout, stderr, err := bdProxiedRunBuffersWithEnv(t, bd, p.dir, tc.env, tc.args...)
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) || exitErr.ExitCode() != 2 {
+				t.Errorf("%s: exit=%v, want exit 2 with the cap diagnosis on stderr (stderr=%q)", tc.name, err, stderr)
+				continue
+			}
+			if stdout != "" {
+				t.Errorf("%s: stdout = %q, want nothing rendered under a refused cap", tc.name, stdout)
+			}
+			if combined := stdout + stderr; !strings.Contains(combined, "too many rows") || !strings.Contains(combined, tc.want) {
+				t.Errorf("%s: expected the cap diagnosis naming %q, got:\n%s", tc.name, tc.want, combined)
+			}
+			if combined := stdout + stderr; strings.Contains(combined, "not supported in proxied-server mode") {
+				t.Errorf("%s: the stale unsupported-cap refusal still fired, got:\n%s", tc.name, combined)
+			}
+		}
+
+		wantJSON, err := bdProxiedRun(t, bd, p.dir, "graph", epic.ID, "--json")
+		if err != nil {
+			t.Fatalf("uncapped graph --json: %v\n%s", err, wantJSON)
+		}
+		for _, tc := range []struct {
+			name string
+			env  []string
+			args []string
+		}{
+			{name: "cap_fits_flag", args: []string{"graph", "--max-rows", "3", epic.ID, "--json"}},
+			{name: "cap_fits_env", env: []string{"BEADS_MAX_ROWS=3"}, args: []string{"graph", epic.ID, "--json"}},
+		} {
+			stdout, stderr, err := bdProxiedRunBuffersWithEnv(t, bd, p.dir, tc.env, tc.args...)
+			if err != nil {
+				t.Errorf("%s: expected success under a cap the component fits inside: %v\nstderr:\n%s", tc.name, err, stderr)
+				continue
+			}
+			if string(stdout) != string(wantJSON) {
+				t.Errorf("%s: capped graph differs from the uncapped one:\ncapped:\n%s\nuncapped:\n%s", tc.name, stdout, wantJSON)
+			}
+		}
+
+		// --all binds the cap per status, the direct route's documented
+		// behavior: all four issues here are open, so cap 4 shows every
+		// node while cap 2 refuses the one status search that matched four.
+		out, err := bdProxiedRun(t, bd, p.dir, "graph", "--all", "--max-rows", "4", "--json")
+		if err != nil {
+			t.Fatalf("graph --all under a per-status cap the set fits inside: %v\n%s", err, out)
+		}
+		for _, id := range []string{epic.ID, c1.ID, c2.ID, standalone.ID} {
+			if !strings.Contains(string(out), id) {
+				t.Errorf("graph --all under cap 4 is missing %s:\n%s", id, out)
+			}
+		}
+		for _, tc := range []struct {
+			name string
+			env  []string
+			args []string
+			want string
+		}{
+			{name: "flag", args: []string{"graph", "--all", "--max-rows", "2", "--json"}, want: "--max-rows=2 exceeded."},
+			{name: "env", env: []string{"BEADS_MAX_ROWS=2"}, args: []string{"graph", "--all", "--json"}, want: "BEADS_MAX_ROWS=2 exceeded."},
+		} {
+			stdout, stderr, err := bdProxiedRunBuffersWithEnv(t, bd, p.dir, tc.env, tc.args...)
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) || exitErr.ExitCode() != 2 {
+				t.Errorf("%s: exit=%v, want exit 2 with the cap diagnosis on stderr (stderr=%q)", tc.name, err, stderr)
+				continue
+			}
+			if stdout != "" {
+				t.Errorf("%s: stdout = %q, want nothing rendered under a refused cap", tc.name, stdout)
+			}
+			if combined := stdout + stderr; !strings.Contains(combined, "too many rows") || !strings.Contains(combined, tc.want) {
+				t.Errorf("%s: expected the cap diagnosis naming %q, got:\n%s", tc.name, tc.want, combined)
+			}
 		}
 	})
 

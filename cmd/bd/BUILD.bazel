@@ -869,6 +869,7 @@ go_test(
         "graph_apply_thread_spawner_embedded_test.go",
         "graph_embedded_test.go",
         "graph_export_test.go",
+        "graph_max_rows_proxied_test.go",
         "graph_mode_admission_e2e_test.go",
         "graph_mode_dependency_embedded_test.go",
         "graph_proxied_integration_test.go",

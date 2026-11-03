@@ -146,13 +146,21 @@ func (stubReadyDeps) GetForIssueIDs(context.Context, []string) (map[string][]*ty
 type stubReadyUOW struct {
 	uow.UnitOfWork
 	issues domain.IssueUseCase
+	// deps overrides the no-dependency default for routes that walk one, like
+	// the graph loaders; nil means stubReadyDeps.
+	deps domain.DependencyUseCase
 }
 
-func (u stubReadyUOW) Close(context.Context)                       {}
-func (u stubReadyUOW) IssueUseCase() domain.IssueUseCase           { return u.issues }
-func (u stubReadyUOW) DependencyUseCase() domain.DependencyUseCase { return stubReadyDeps{} }
-func (u stubReadyUOW) LabelUseCase() domain.LabelUseCase           { return nil }
-func (u stubReadyUOW) CommentUseCase() domain.CommentUseCase       { return nil }
+func (u stubReadyUOW) Close(context.Context)             {}
+func (u stubReadyUOW) IssueUseCase() domain.IssueUseCase { return u.issues }
+func (u stubReadyUOW) DependencyUseCase() domain.DependencyUseCase {
+	if u.deps != nil {
+		return u.deps
+	}
+	return stubReadyDeps{}
+}
+func (u stubReadyUOW) LabelUseCase() domain.LabelUseCase     { return nil }
+func (u stubReadyUOW) CommentUseCase() domain.CommentUseCase { return nil }
 
 // stubReadyProvider serves the proxied ready route. The real provider's
 // capability accessors are where decorators attach; a test that needs the
@@ -160,6 +168,9 @@ func (u stubReadyUOW) CommentUseCase() domain.CommentUseCase       { return nil 
 type stubReadyProvider struct {
 	issues  domain.IssueUseCase
 	claimer *stubReadyClaimer
+	// deps rides along to the UOWs this provider opens, for routes that walk
+	// a dependency plane (the graph loaders); nil keeps the ready default.
+	deps domain.DependencyUseCase
 }
 
 // ReadyClaimer is the claim surface the proxied claim route reaches through
@@ -170,7 +181,7 @@ func (p stubReadyProvider) ReadyClaimer() (issueops.ReadyClaimer, error) {
 }
 
 func (p stubReadyProvider) NewUOW(context.Context) (uow.UnitOfWork, error) {
-	return stubReadyUOW{issues: p.issues}, nil
+	return stubReadyUOW{issues: p.issues, deps: p.deps}, nil
 }
 
 func (p stubReadyProvider) Close(context.Context) error { return nil }

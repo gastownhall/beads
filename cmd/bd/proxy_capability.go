@@ -230,7 +230,10 @@ var proxyCommandCapabilities = map[string]map[ProxyMode]map[ProxyCapability]prox
 	// cap) and --gated still resolves none (readyGatedArm).
 	"ready":           {ProxyModeProxied: {ProxyCapMaxRows: honored()}},
 	"mol ready":       {ProxyModeProxied: {ProxyCapMaxRows: notApplicable()}},
-	"graph":           {ProxyModeProxied: {ProxyCapMaxRows: maxRowsRefusal}},
+	// Both graph arms thread the cap the way the direct route does: --all
+	// caps each per-status search, a single-issue graph caps the
+	// connected-component node count after the walk (enforceGraphSubgraphCap).
+	"graph":           {ProxyModeProxied: {ProxyCapMaxRows: honored()}},
 	"find-duplicates": {ProxyModeProxied: {ProxyCapMaxRows: maxRowsRefusal}},
 }
 
@@ -354,11 +357,12 @@ func validateProxyCapabilitiesBeforeProvider(cmd *cobra.Command) error {
 	if path == "create" && cmd.Flags().Changed("repo") {
 		return HandleProxyCapabilityError(AssertProxyCapability(ProxyModeProxied, ProxyCapRepo))
 	}
-	// `bd ready` threads its cap into the proxied ready query (honored above),
-	// and its RunE resolves the flag for validation — malformed or negative
-	// values are usage errors raised in the gather, before any store call —
-	// so the front door has nothing left to decide for it.
-	if path == "graph" || path == "find-duplicates" {
+	// `bd ready` threads its cap into the proxied ready query and `bd graph`
+	// into its per-status searches and post-walk subgraph check (both
+	// honored above), and each RunE resolves the flag for validation —
+	// malformed or negative values are usage errors raised before any store
+	// call — so the front door has nothing left to decide for either.
+	if path == "find-duplicates" {
 		maxRows, err := resolveMaxRowsQuiet(cmd)
 		if err != nil {
 			return err
