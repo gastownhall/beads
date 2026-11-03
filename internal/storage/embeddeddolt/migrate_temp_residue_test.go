@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
+	"github.com/steveyegge/beads/internal/storage/schema"
 )
 
 // The #7073 shape (reported by @bee-ghosttrack): a lineage whose HEAD carries
@@ -206,5 +207,78 @@ func TestEmbeddedTempResidueUnwedgesARenamedStore(t *testing.T) {
 	closeEmbeddedDoltStore(t, store)
 	if perr != nil {
 		t.Fatalf("pull after the residue reconcile: %v", perr)
+	}
+}
+
+// The #7073 residue meeting the bd-red8u events flip: an auto-commit caught
+// 0062's Phase 1 scratch (__temp__events_flip, holding the only other copy
+// of the events rows) at HEAD before Phase 2 could run. The full MigrateUp
+// path must untrack the scratch with its working rows intact, after which
+// 0062's own union and restore (Phase 1's IF NOT EXISTS + INSERT IGNORE,
+// Phase 4's restore) consume them under the contract that was already
+// written for an interrupted flip.
+func TestEmbeddedTempResidueUntrackPreservesEventsFlipRows(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+
+	dataDir := seedMainSchemaAt(t, ctx, 61)
+	conn, closeConn := openPinnedConn(t, ctx, dataDir)
+	defer closeConn()
+
+	// Seed a committed issue + audit event on the (still versioned) events
+	// plane, the way the flip test does.
+	execFrozenGuard(t, ctx, conn, `
+INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type)
+VALUES ('flip-1', 'flip seed', '', '', '', '', 'open', 2, 'task');
+INSERT INTO events (issue_id, event_type, actor, created_at, id)
+VALUES ('flip-1', 'created', 'tester', '2026-07-30 00:00:00', 'evt-seed-1');
+`)
+	mustDrain(t, ctx, conn, "CALL DOLT_ADD('-A')")
+	mustDrain(t, ctx, conn, "CALL DOLT_COMMIT('-m', 'test: seed committed events row')")
+
+	// The residue: Phase 1's exact scratch DDL and row copy, committed at
+	// HEAD by an unrelated auto-commit before Phase 2 ran.
+	execFrozenGuard(t, ctx, conn, `
+CREATE TABLE __temp__events_flip (
+    issue_id VARCHAR(255) NOT NULL,
+    event_type VARCHAR(32) NOT NULL,
+    actor VARCHAR(255) NOT NULL,
+    old_value LONGTEXT,
+    new_value LONGTEXT,
+    comment TEXT,
+    created_at DATETIME NOT NULL,
+    id CHAR(36) NOT NULL,
+    PRIMARY KEY (id)
+);
+INSERT IGNORE INTO __temp__events_flip (issue_id, event_type, actor, old_value, new_value, comment, created_at, id)
+    SELECT issue_id, event_type, actor, old_value, new_value, comment, created_at, id FROM events;
+`)
+	mustDrain(t, ctx, conn, "CALL DOLT_ADD('-f', '__temp__events_flip')")
+	mustDrain(t, ctx, conn, "CALL DOLT_COMMIT('-m', 'test: auto-commit catches the flip scratch')")
+	if !trackedAtHead(t, ctx, conn, "__temp__events_flip") {
+		t.Fatal("__temp__events_flip is not tracked at HEAD: the fixture does not reproduce the residue")
+	}
+
+	// The production path: the reconcile cached-untracks the scratch before
+	// the series run, and 0062 finishes the flip from the working copy.
+	if _, err := schema.MigrateUp(ctx, conn); err != nil {
+		t.Fatalf("MigrateUp(): %v", err)
+	}
+
+	if tracked := trackedAtHead(t, ctx, conn, "__temp__events_flip"); tracked {
+		t.Error("__temp__events_flip is still tracked at HEAD after the residue reconcile")
+	}
+	// The flip completed: events is out of HEAD and the seed row is back in
+	// the working set, restored from the scratch the reconcile preserved.
+	if err := conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM events AS OF 'HEAD'").Scan(new(int)); err == nil {
+		t.Error("events still exists at HEAD; want the flip's drop committed")
+	}
+	if got := scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM events WHERE id = 'evt-seed-1'"); got != 1 {
+		t.Errorf("post-flip working-set events row evt-seed-1 = %d, want 1", got)
+	}
+	for _, dirty := range dirtyTableNames(t, ctx, conn) {
+		if slices.Contains([]string{"events", "__temp__events_flip"}, dirty) {
+			t.Errorf("dolt_status reports %q after the flip, want no rebuild residue", dirty)
+		}
 	}
 }
