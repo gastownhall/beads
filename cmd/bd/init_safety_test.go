@@ -522,6 +522,63 @@ func TestCheckRemoteSafety_GuardMatrix(t *testing.T) {
 			ActionRefuseDivergence, ExitRemoteDivergenceRefused,
 		},
 
+		// Probe-unknown × discard intent (gascity#7665 AC-3): naming
+		// --discard-remote opts out of both the origin fallback and the
+		// unverified-remote refusal, into the UNCHANGED destroy-token flow.
+		// An unknown probe is treated as conservatively as confirmed history
+		// on the destructive path: non-interactive callers still need a
+		// token, a supplied token is still validated, and interactive callers
+		// still defer to the typed-confirmation prompt.
+		{
+			"probe-unknown/origin/discard-remote/non-interactive/no-token",
+			RemoteSafetyInput{
+				RemoteHasDoltData: true, RemoteProbeUnknown: true, RemoteIsGitOrigin: true,
+				DiscardRemote: true, ExpectedToken: "DESTROY-bd",
+			},
+			ActionRequireDestroyToken, ExitDestroyTokenMissing,
+		},
+		{
+			"probe-unknown/origin/discard-remote/non-interactive/wrong-token",
+			RemoteSafetyInput{
+				RemoteHasDoltData: true, RemoteProbeUnknown: true, RemoteIsGitOrigin: true,
+				DiscardRemote: true, DestroyToken: "DESTROY-wrong", ExpectedToken: "DESTROY-bd",
+			},
+			ActionRequireDestroyToken, ExitDestroyTokenMissing,
+		},
+		{
+			"probe-unknown/origin/discard-remote/non-interactive/matching-token",
+			RemoteSafetyInput{
+				RemoteHasDoltData: true, RemoteProbeUnknown: true, RemoteIsGitOrigin: true,
+				DiscardRemote: true, DestroyToken: "DESTROY-bd", ExpectedToken: "DESTROY-bd",
+			},
+			ActionProceedWithDivergence, 0,
+		},
+		{
+			"probe-unknown/origin/discard-remote/interactive",
+			RemoteSafetyInput{
+				RemoteHasDoltData: true, RemoteProbeUnknown: true, RemoteIsGitOrigin: true,
+				DiscardRemote: true, IsInteractive: true,
+			},
+			ActionProceedWithDivergence, 0,
+		},
+		{
+			"probe-unknown/origin/discard-remote/interactive/wrong-token",
+			RemoteSafetyInput{
+				RemoteHasDoltData: true, RemoteProbeUnknown: true, RemoteIsGitOrigin: true,
+				DiscardRemote: true, IsInteractive: true,
+				DestroyToken: "WRONG", ExpectedToken: "DESTROY-bd",
+			},
+			ActionRequireDestroyToken, ExitDestroyTokenMissing,
+		},
+		{
+			"probe-unknown/configured/discard-remote/non-interactive/matching-token",
+			RemoteSafetyInput{
+				RemoteHasDoltData: true, RemoteProbeUnknown: true,
+				DiscardRemote: true, DestroyToken: "DESTROY-bd", ExpectedToken: "DESTROY-bd",
+			},
+			ActionProceedWithDivergence, 0,
+		},
+
 		// Remote-has-data column, user did NOT force: bootstrap is the
 		// adoption path. This is the existing correct behavior.
 		{"remote/no-flags", RemoteSafetyInput{RemoteHasDoltData: true}, ActionBootstrap, 0},
@@ -1282,6 +1339,60 @@ func TestInitFromJSONLExplicitRemoteRefusesWhenRemoteHasDoltData(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(beadsDir, "embeddeddolt")); err == nil {
 		t.Errorf("refusal should not have created an embedded Dolt database")
+	}
+}
+
+// TestInitDiscardRemoteWithUnreachableOriginProceedsWithToken pins AC-3 at
+// the CLI seam: a matching destroy-token authorizes --discard-remote even
+// when the probe could not read the origin, because the unknown probe is
+// treated as conservatively as confirmed history on the destructive path.
+// A wrong token must still be refused with exit 12 in the same situation.
+func TestInitDiscardRemoteWithUnreachableOriginProceedsWithToken(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		token    string
+		wantExit int
+	}{
+		{"matching token proceeds", "DESTROY-org", 0},
+		{"wrong token refuses with 12", "DESTROY-wrong", ExitDestroyTokenMissing},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bdBin := buildBDForInitTests(t)
+
+			workDir := t.TempDir()
+			runGitForBootstrapTest(t, workDir, "init", "-b", "main")
+			runGitForBootstrapTest(t, workDir, "config", "core.hooksPath", ".git/hooks")
+			runGitForBootstrapTest(t, workDir, "remote", "add", "origin",
+				filepath.Join(t.TempDir(), "does-not-exist.git"))
+
+			homeDir := t.TempDir()
+
+			cmd := exec.Command(bdBin, "init", "--reinit-local", "--discard-remote", "--destroy-token", tc.token,
+				"--prefix", "org", "--quiet", "--non-interactive", "--skip-hooks", "--skip-agents")
+			cmd.Dir = workDir
+			cmd.Env = hermeticInitEnv(homeDir)
+			var out bytes.Buffer
+			cmd.Stdout = &out
+			cmd.Stderr = &out
+			err := cmd.Run()
+
+			if tc.wantExit == 0 {
+				if err != nil {
+					t.Fatalf("bd init --discard-remote with a matching token against an unreachable origin failed: %v\noutput:\n%s", err, out.String())
+				}
+				if _, serr := os.Stat(filepath.Join(workDir, ".beads")); serr != nil {
+					t.Fatalf(".beads should have been created by a successful init: %v", serr)
+				}
+				return
+			}
+			exitErr, ok := err.(*exec.ExitError)
+			if !ok {
+				t.Fatalf("non-exec-exit error: %v\noutput:\n%s", err, out.String())
+			}
+			if code := exitErr.ExitCode(); code != tc.wantExit {
+				t.Errorf("exit code = %d, want %d\noutput:\n%s", code, tc.wantExit, out.String())
+			}
+		})
 	}
 }
 
