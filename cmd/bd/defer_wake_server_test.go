@@ -132,6 +132,35 @@ func TestServerModeDeferAutoWake(t *testing.T) {
 		}
 	})
 
+	t.Run("expired_dated_defer_stays_deferred_on_list_ready_under_migration_freeze", func(t *testing.T) {
+		control := bdCreate(t, bd, p.dir, "Open control under a freeze (server mode, list)", "--type", "task")
+		issue := bdCreate(t, bd, p.dir, "Expired snooze under a freeze (server mode, list)", "--type", "task")
+		bdDefer(t, bd, p.dir, issue.ID, "--until", "2020-01-01")
+		status, deferUntil := showDeferState(t, bd, p.dir, issue.ID)
+		if status != "deferred" || deferUntil == nil {
+			t.Fatalf("precondition: expected a dated deferred issue, got status=%q defer_until=%v", status, deferUntil)
+		}
+
+		commitsBefore := doltLogCount(t, db)
+		issues := bdListJSONWithEnv(t, bd, p.dir, frozenEnv, "--ready")
+		commitsAfter := doltLogCount(t, db)
+
+		listed := map[string]bool{}
+		for _, iss := range issues {
+			listed[iss.ID] = true
+		}
+		if !listed[control.ID] {
+			t.Errorf("open control %s missing from frozen bd list --ready: the read must still answer", control.ID)
+		}
+		if listed[issue.ID] {
+			t.Errorf("expired defer %s appeared in frozen bd list --ready: the wake sweep wrote past the freeze", issue.ID)
+		}
+		assertDeferUnchanged(t, bd, p.dir, issue.ID, deferUntil)
+		if commitsAfter != commitsBefore {
+			t.Errorf("frozen bd list --ready added %d Dolt commit(s); a frozen read must not commit", commitsAfter-commitsBefore)
+		}
+	})
+
 	// A migration freeze withholds ClassifiedRead (classifiedReadOpen's frozen
 	// term at the main.go call site), so the sweep — a write — must not run
 	// while the marker is up. The predicate is unit-tested on its own; this
