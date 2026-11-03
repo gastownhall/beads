@@ -5270,6 +5270,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for it, so upgrade every bd that shares the workspace, or run `bd dolt stop`
   before going back to an older one.
 
+### Fixed
+
+- **`bd defer` on a parent now holds its direct children back from `bd ready` (GH#7300, PR #7304).**
+  An undated `bd defer` sets only the parent's status, and the ready-work child
+  exclusion recognized only a future `defer_until` date (the #1190/#1740 fix),
+  so the open children of an indefinitely deferred epic stayed in `bd ready` and
+  could still be picked - even by `bd ready --claim` - while the whole subtree
+  was meant to be on ice. A parent now holds its direct children whenever its
+  status is `deferred`, exactly as a future `--until` date always has; a dated
+  and an undated defer behave the same. Every writer that persists
+  `status=deferred` has the same effect, including `bd update --status deferred`
+  and tracker syncs that map a remote state to deferred (Azure DevOps Removed,
+  Linear deferred, Notion deferred). `bd ready --include-deferred` lists those
+  children again without ever admitting the deferred parent itself. Because the
+  hold follows the persisted status, an expired dated defer whose lazy wake has
+  not run yet (a read-only store, or a client whose wake sweep failed) keeps
+  holding its children until a writable client's ready read wakes the parent or
+  someone runs `bd undefer`.
+
 ## [1.3.2] - 2026-10-23
 
 First stable release of the 1.3.2 patch line. It ships the same code as

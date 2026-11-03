@@ -1480,6 +1480,15 @@ bd defer
     | A defer WITHOUT a date is the indefinite icebox: it stays deferred until
     | someone runs 'bd undefer'.
     |
+    | Deferring a parent also holds its DIRECT children back from 'bd ready' -
+    | for both a dated and an undated defer - so the subtree stays on ice while
+    | the defer lasts. 'bd ready --include-deferred' lists those children again.
+    | The hold follows the parent's persisted status, so 'bd update <id>
+    | --status deferred' holds children the same way, and it ends the same
+    | ways the defer does: the date passes and a ready read wakes the parent,
+    | or someone runs 'bd undefer'. Until that wake runs (for example on a
+    | read-only store), an expired dated defer keeps holding its children.
+    |
     | Examples:
     |   bd defer bd-abc                  # Icebox indefinitely (until bd undefer)
     |   bd defer bd-abc --until=tomorrow # Snooze: auto-wakes once the date passes
@@ -6031,7 +6040,7 @@ bd ready
   flag --flat type=bool default="false" usage="Alias for --plain, spelled the way bd list spells it"
   flag --gated type=bool default="false" usage="Find molecules ready for gate-resume dispatch"
   flag --has-metadata-key type=string default="" usage="Filter issues that have this metadata key set"
-  flag --include-deferred type=bool default="false" usage="Include issues with future defer_until timestamps"
+  flag --include-deferred type=bool default="false" usage="Include deferred issues (future defer_until) and children held back by a deferred parent"
   flag --include-ephemeral type=bool default="false" usage="Include ephemeral issues (wisps) in results"
   flag --label -l type=stringSlice default="[]" usage="Filter by labels (AND: must have ALL). Can combine with --label-any"
   flag --label-any type=stringSlice default="[]" usage="Filter by labels (OR: must have AT LEAST ONE). Can combine with --label"

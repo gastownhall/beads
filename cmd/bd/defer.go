@@ -38,6 +38,15 @@ read returns the issue to open automatically (same shape as 'bd undefer').
 A defer WITHOUT a date is the indefinite icebox: it stays deferred until
 someone runs 'bd undefer'.
 
+Deferring a parent also holds its DIRECT children back from 'bd ready' -
+for both a dated and an undated defer - so the subtree stays on ice while
+the defer lasts. 'bd ready --include-deferred' lists those children again.
+The hold follows the parent's persisted status, so 'bd update <id>
+--status deferred' holds children the same way, and it ends the same
+ways the defer does: the date passes and a ready read wakes the parent,
+or someone runs 'bd undefer'. Until that wake runs (for example on a
+read-only store), an expired dated defer keeps holding its children.
+
 Examples:
   bd defer bd-abc                  # Icebox indefinitely (until bd undefer)
   bd defer bd-abc --until=tomorrow # Snooze: auto-wakes once the date passes
