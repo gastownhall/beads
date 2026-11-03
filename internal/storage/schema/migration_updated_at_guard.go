@@ -130,6 +130,17 @@ func (s updatedAtGuardSpec) restoredTables() []string {
 	return tables
 }
 
+// presentFlag returns the flag column to read with table's rows, given the
+// table's current columns: flagFor's, or none when the table does not (yet)
+// carry it, as before a step that adds the flag.
+func (s updatedAtGuardSpec) presentFlag(table string, cols []string) string {
+	flag := s.flagFor(table)
+	if flag == "" || !hasColumnFold(cols, flag) {
+		return ""
+	}
+	return flag
+}
+
 // flagFor returns the flag column read with table's rows: the step's flag on
 // a restore target, none on any other table.
 func (s updatedAtGuardSpec) flagFor(table string) string {
@@ -201,21 +212,19 @@ func snapshotUpdatedAt(ctx context.Context, db DBConn, src migrationSource, vers
 		fingerprintColumns: map[string][]string{},
 	}
 	for _, table := range spec.snapshotTables() {
-		present, err := schemaColumnExists(ctx, db, table, "updated_at")
+		cols, err := guardColumnsOf(ctx, db, table)
 		if err != nil {
-			return nil, fmt.Errorf("probing %s.updated_at: %w", table, err)
+			return nil, err
 		}
-		if !present {
+		if !hasColumnFold(cols, "updated_at") {
 			continue
 		}
 		var fpCols []string
 		if spec.fingerprints(table) {
-			if fpCols, err = fingerprintColumnsOf(ctx, db, table); err != nil {
-				return nil, err
-			}
+			fpCols = fingerprintColumns(cols)
 			snap.fingerprintColumns[table] = fpCols
 		}
-		rows, err := readGuardedRows(ctx, db, table, spec.flagFor(table), fpCols)
+		rows, err := readUpdatedAt(ctx, db, table, spec.presentFlag(table, cols), fpCols)
 		if err != nil {
 			return nil, err
 		}
@@ -239,18 +248,15 @@ func (s *updatedAtSnapshot) restore(ctx context.Context, db DBConn) error {
 		return nil
 	}
 	for _, table := range s.spec.restoredTables() {
-		present, err := schemaColumnExists(ctx, db, table, "updated_at")
-		if err != nil {
-			return fmt.Errorf("probing %s.updated_at: %w", table, err)
-		}
-		if !present {
-			continue
-		}
-		fpCols, err := s.postBodyFingerprintColumns(ctx, db, table)
+		cols, err := guardColumnsOf(ctx, db, table)
 		if err != nil {
 			return err
 		}
-		current, err := readGuardedRows(ctx, db, table, s.spec.flagFor(table), fpCols)
+		if !hasColumnFold(cols, "updated_at") {
+			continue
+		}
+		fpCols := s.postBodyFingerprintColumns(table, cols)
+		current, err := readUpdatedAt(ctx, db, table, s.spec.presentFlag(table, cols), fpCols)
 		if err != nil {
 			return err
 		}
@@ -266,25 +272,23 @@ func (s *updatedAtSnapshot) restore(ctx context.Context, db DBConn) error {
 }
 
 // postBodyFingerprintColumns returns the columns the post-body read of table
-// fingerprints: the snapshot's, when every one of them still exists. It
-// returns nil, which turns the join rule off for table, when table was not
-// fingerprinted or the step dropped one of those columns, since a fingerprint
-// over different columns cannot match.
-func (s *updatedAtSnapshot) postBodyFingerprintColumns(ctx context.Context, db DBConn, table string) ([]string, error) {
+// fingerprints, given the table's columns as listed after the body: the
+// snapshot's, when every one of them still exists. It returns nil, which
+// turns the join rule off for table, when table was not fingerprinted or the
+// step dropped one of those columns, since a fingerprint over different
+// columns cannot match.
+func (s *updatedAtSnapshot) postBodyFingerprintColumns(table string, cols []string) []string {
 	want, ok := s.fingerprintColumns[table]
 	if !ok {
-		return nil, nil
+		return nil
 	}
-	have, err := fingerprintColumnsOf(ctx, db, table)
-	if err != nil {
-		return nil, err
-	}
+	have := fingerprintColumns(cols)
 	for _, col := range want {
 		if !slices.Contains(have, col) {
-			return nil, nil
+			return nil
 		}
 	}
-	return want, nil
+	return want
 }
 
 // stampedRows returns the rows of table, as read after the step's body, whose
@@ -340,23 +344,59 @@ type updatedAtChange struct {
 	want, got any
 }
 
-// fingerprintColumnsOf returns table's columns other than updated_at, in
-// table order.
-func fingerprintColumnsOf(ctx context.Context, db DBConn, table string) ([]string, error) {
-	rows, err := db.QueryContext(ctx, `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
-		WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME <> 'updated_at'
-		ORDER BY ORDINAL_POSITION`, table)
+// guardColumnsOf returns table's column names in table order, or nil when
+// the session's database has no such table, in one SHOW TABLES and (for a
+// present table) one SHOW COLUMNS. Every column question the guard asks
+// (updated_at, the step's flag, the fingerprint columns) is answered from
+// this one listing.
+//
+// It does not read INFORMATION_SCHEMA: Dolt does not push that predicate
+// down, so each COLUMNS probe walks every database on the server, and the
+// guard probes while holding the schema migration lock. Measured on a
+// scratch Dolt 2.6.0 sql-server, one INFORMATION_SCHEMA.COLUMNS probe took
+// 0.09 s with 1 database, 1.7 s with 150 and ~6.3 s with 300; SHOW COLUMNS
+// took 0.1 s at 300 (see showColumnExists for the same finding on the
+// content-hash probe).
+//
+// SHOW COLUMNS fails on a missing table, and a failed statement pins a
+// pooled Dolt session to its catalog snapshot (be-bv7x), so the table's
+// existence is read first with showTableExists, whose listing succeeds
+// whether or not the table is there; a clone without wisps reads as absent
+// without ever sending a failing statement. Names compare case-insensitively
+// (hasColumnFold, showTableExists). table comes from the fixed
+// updatedAtGuards registry, never input.
+func guardColumnsOf(ctx context.Context, db DBConn, table string) ([]string, error) {
+	present, err := showTableExists(ctx, db, table)
+	if err != nil {
+		return nil, fmt.Errorf("probing %s: %w", table, err)
+	}
+	if !present {
+		return nil, nil
+	}
+	rows, err := db.QueryContext(ctx, "SHOW COLUMNS FROM "+table)
 	if err != nil {
 		return nil, fmt.Errorf("listing %s columns: %w", table, err)
 	}
-	defer rows.Close()
-	var cols []string
+	defer func() { _ = rows.Close() }()
+	names, err := rows.Columns()
+	if err != nil {
+		return nil, fmt.Errorf("listing %s columns: %w", table, err)
+	}
+	// SHOW COLUMNS returns Field, Type, Null, Key, Default, Extra (more on
+	// some servers), one row per column in table order; Field is the name.
+	cells := make([]sql.RawBytes, len(names))
+	dest := make([]any, len(names))
+	for i := range cells {
+		dest[i] = &cells[i]
+	}
+	cols := []string{}
 	for rows.Next() {
-		var col string
-		if err := rows.Scan(&col); err != nil {
+		if err := rows.Scan(dest...); err != nil {
 			return nil, fmt.Errorf("listing %s columns: %w", table, err)
 		}
-		cols = append(cols, col)
+		if len(cells) > 0 {
+			cols = append(cols, string(cells[0]))
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("listing %s columns: %w", table, err)
@@ -364,21 +404,22 @@ func fingerprintColumnsOf(ctx context.Context, db DBConn, table string) ([]strin
 	return cols, nil
 }
 
-// readGuardedRows reads every row of table in id order: its id, its
-// updated_at, flag when flag is named and the column exists, and a
-// fingerprint of fpCols when fpCols is non-empty. The caller has checked that
-// table has an updated_at column.
-func readGuardedRows(ctx context.Context, db DBConn, table, flag string, fpCols []string) ([]updatedAtRow, error) {
-	if flag != "" {
-		hasFlag, err := schemaColumnExists(ctx, db, table, flag)
-		if err != nil {
-			return nil, fmt.Errorf("probing %s.%s: %w", table, flag, err)
-		}
-		if !hasFlag {
-			flag = ""
+// hasColumnFold reports whether cols names column, compared
+// case-insensitively as MySQL compares column names.
+func hasColumnFold(cols []string, column string) bool {
+	return slices.ContainsFunc(cols, func(c string) bool { return strings.EqualFold(c, column) })
+}
+
+// fingerprintColumns returns cols without updated_at, in table order: the
+// columns a joinStamped table's fingerprint covers.
+func fingerprintColumns(cols []string) []string {
+	out := make([]string, 0, len(cols))
+	for _, col := range cols {
+		if !strings.EqualFold(col, "updated_at") {
+			out = append(out, col)
 		}
 	}
-	return readUpdatedAt(ctx, db, table, flag, fpCols)
+	return out
 }
 
 // readUpdatedAt reads every (id, updated_at[, flag][, fingerprint]) of table
@@ -393,7 +434,7 @@ func readUpdatedAt(ctx context.Context, db DBConn, table, flag string, fpCols []
 		cols += ", " + fingerprintSQL(fpCols)
 	}
 	// table and flag come from the fixed updatedAtGuards registry, and
-	// fpCols from INFORMATION_SCHEMA (quoted), never input.
+	// fpCols from SHOW COLUMNS (quoted), never input.
 	rows, err := db.QueryContext(ctx, "SELECT "+cols+" FROM "+table+" ORDER BY id")
 	if err != nil {
 		return nil, fmt.Errorf("reading %s.updated_at: %w", table, err)

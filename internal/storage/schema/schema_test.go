@@ -493,11 +493,10 @@ func TestRunMigrationsSnapshotsDirtyTablesBeforeRepairSoRepairMutationsCommitAto
 	// 2. The updated_at guard snapshots 0053's restore target (issues, with
 	// the ephemeral flag the body sets) and move source (wisps, absent here)
 	// BEFORE the repair can touch them.
-	guardExpectColumn(mock, "issues", "updated_at", true)
-	guardExpectColumn(mock, "issues", "ephemeral", true)
+	guardExpectColumns(mock, "issues", "id", "updated_at", "ephemeral")
 	mock.ExpectQuery(`SELECT id, updated_at, ephemeral FROM issues ORDER BY id`).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "updated_at", "ephemeral"}).AddRow("bd-1", "2025-03-01 09:30:00", 1))
-	guardExpectColumn(mock, "wisps", "updated_at", false)
+	guardExpectAbsentTable(mock)
 
 	// 3. preMigrationRepair(53): ensureIssuesRigColumns (all present, no
 	// exec), ensureWispDependenciesSplitTargets (table absent, no-op), then
@@ -532,14 +531,13 @@ func TestRunMigrationsSnapshotsDirtyTablesBeforeRepairSoRepairMutationsCommitAto
 	// and checks its joinStamped wisps (absent here), BEFORE the cursor row
 	// is recorded.
 	mock.ExpectExec(`SET FOREIGN_KEY_CHECKS = 0`).WillReturnResult(sqlmock.NewResult(0, 0))
-	guardExpectColumn(mock, "issues", "updated_at", true)
-	guardExpectColumn(mock, "issues", "ephemeral", true)
+	guardExpectColumns(mock, "issues", "id", "updated_at", "ephemeral")
 	mock.ExpectQuery(`SELECT id, updated_at, ephemeral FROM issues ORDER BY id`).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "updated_at", "ephemeral"}).AddRow("bd-1", "2026-11-02 04:00:00", 0))
 	mock.ExpectExec(guardRestoreSQL("issues", 1)).
 		WithArgs(guardRestoreArgs(guardRestoreRow{"bd-1", "2025-03-01 09:30:00", "2026-11-02 04:00:00"})...).
 		WillReturnResult(sqlmock.NewResult(0, 1))
-	guardExpectColumn(mock, "wisps", "updated_at", false)
+	guardExpectAbsentTable(mock)
 	mock.ExpectExec(`INSERT IGNORE INTO schema_migrations`).WithArgs(53, sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
