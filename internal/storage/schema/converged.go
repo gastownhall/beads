@@ -110,6 +110,18 @@ func alreadyConverged(ctx context.Context, db DBConn, databaseName string, selec
 		return false, nil
 	}
 
+	// MigrateUp's other reconcile, read the same way: a __temp__ table-rebuild
+	// intermediate committed at HEAD wedges the pulls of every fresh clone
+	// (gastownhall/beads#7073). One more HEAD listing on the hot path, empty
+	// on a healthy database.
+	residue, err := readTempResidue(ctx, db, qualifier)
+	if err != nil {
+		return false, err
+	}
+	if len(residue) > 0 {
+		return false, nil
+	}
+
 	// LAST, and deliberately so: everything above is the cheap steady-state
 	// question and short-circuits first. This term closes the window where a
 	// peer is midway through a real migration pass. migrationWorkNeeded only
