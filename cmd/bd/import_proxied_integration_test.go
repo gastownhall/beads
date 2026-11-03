@@ -502,6 +502,61 @@ func TestProxiedServerImport(t *testing.T) {
 		}
 	})
 
+	// GH#6113: the proxied route assembles its own skipped-edge list
+	// (uow importer) before the shared renderer judges it, so --strict-deps
+	// is pinned here as well as on the classic route
+	// (TestEmbeddedImportStrictDeps).
+	t.Run("strict_deps", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "impk")
+		db := openProxiedDB(t, p)
+
+		// impk-a blocks on impk-b, which a later part would carry.
+		fixture := importFixtureJSONL(t, []*types.Issue{{
+			ID: "impk-a", Title: "Edge into a later part", Status: types.StatusOpen,
+			IssueType: types.TypeTask, Priority: 2,
+			Dependencies: []*types.Dependency{{IssueID: "impk-a", DependsOnID: "impk-b", Type: types.DepBlocks}},
+			CreatedAt:    when, UpdatedAt: when,
+		}})
+		exitCode := func(err error) int {
+			if err == nil {
+				return 0
+			}
+			exitErr, ok := err.(*exec.ExitError)
+			if !ok {
+				t.Fatalf("bd import: %v", err)
+			}
+			return exitErr.ExitCode()
+		}
+
+		// Strict first, on the fresh project: the row it leaves behind is its
+		// own commit, not an earlier default import's.
+		_, stderr, err := bdProxiedImportWithInput(t, bd, p.dir, fixture, "--strict-deps", "-")
+		if code := exitCode(err); code != 1 {
+			t.Fatalf("--strict-deps import exit = %d, want 1\n%s", code, stderr)
+		}
+		if !strings.Contains(stderr, "Skipped dependency: impk-a -> impk-b: target not found") {
+			t.Errorf("--strict-deps stderr lacks the per-edge report:\n%s", stderr)
+		}
+		if !strings.Contains(stderr, "Error: --strict-deps: 1 dependency edge(s) were reported skipped; imported rows remain committed") {
+			t.Errorf("--strict-deps stderr lacks the strict-deps error:\n%s", stderr)
+		}
+		if got := proxiedImportQueryInt(t, db, "SELECT COUNT(*) FROM issues WHERE id = 'impk-a'"); got != 1 {
+			t.Errorf("source row = %d, want 1 (committed despite the skipped edge)", got)
+		}
+		if got := proxiedImportQueryInt(t, db, "SELECT COUNT(*) FROM dependencies WHERE issue_id = 'impk-a'"); got != 0 {
+			t.Errorf("edges from impk-a = %d, want 0 (target absent)", got)
+		}
+
+		_, stderr, err = bdProxiedImportWithInput(t, bd, p.dir, fixture, "-")
+		if code := exitCode(err); code != 0 {
+			t.Fatalf("default import exit = %d, want 0\n%s", code, stderr)
+		}
+		if !strings.Contains(stderr, "Warning: 1 dependency edge(s) were reported skipped") {
+			t.Errorf("default import stderr lacks the skipped-count summary:\n%s", stderr)
+		}
+	})
+
 	t.Run("dedup_skips_matching_open_title", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "impe")
