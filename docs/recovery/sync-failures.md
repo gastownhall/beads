@@ -99,6 +99,13 @@ Error: dolt push failed: … unknown push error; Found dangling references to Ha
 `bd sync` reports the same refusal after `Error: sync failed: push: `, and
 dolt auto-push after `Warning: dolt auto-push failed: `.
 
+When bd reports a failed CLI transfer (`dolt push failed: …`, `… timed out
+after …`), it removes credentials embedded in the remote URL before showing
+the error: HTTP(S) userinfo such as `x-access-token:<token>` is dropped
+whole, and an SSH URL keeps the account but drops only the password. The
+host, path and failure detail are preserved, so a redacted URL like
+`git+https://github.com/org/repo` is still recognizable.
+
 **What it means:** before Dolt moves the remote branch, it asks the remote
 whether it has every chunk the pushed data points to. The remote said it does
 not have the chunk named in the message, so Dolt refused the push. The remote

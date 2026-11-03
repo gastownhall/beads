@@ -3,6 +3,7 @@ package dolt
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -218,6 +219,53 @@ func TestCLITransferErrorTimeoutRedactsAllInputs(t *testing.T) {
 			var unwrapped stubTransferCause
 			if !errors.As(err, &unwrapped) {
 				t.Errorf("cause not discoverable through errors.As: %v", err)
+			}
+		})
+	}
+}
+
+// TestCLITransferErrorCredentialFreeUnchanged pins that the redaction is
+// byte-identical to the pre-redaction behavior for credential-free inputs:
+// plain remote names, scp-style remotes and URLs without userinfo, on both
+// the ordinary and the timeout branch, with subprocess output whitespace
+// still trimmed and the cause still wrapped.
+func TestCLITransferErrorCredentialFreeUnchanged(t *testing.T) {
+	t.Setenv(cliExecTimeoutEnv, "45s")
+	cause := errors.New("exit status 128")
+	// Surrounding whitespace is trimmed from subprocess output, as before.
+	out := []byte("  fatal: remote 'gcs' not found  \n")
+
+	expired, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+
+	plainFailure := "dolt push failed: fatal: remote 'gcs' not found: exit status 128"
+	timeoutFormat := "dolt push to %q timed out after 45s (override with BEADS_CLI_TRANSFER_TIMEOUT=<duration>; large transfers to cloud remotes can run long, and a busy dolt sql-server serving the database directory can stall CLI transfers): fatal: remote 'gcs' not found: exit status 128"
+
+	for _, tc := range []struct {
+		name   string
+		remote string
+	}{
+		{"plain remote name", "gcs"},
+		{"scp style remote", "git@github.com:org/repo.git"},
+		{"credential-free URL", "https://github.com/org/repo.git"},
+	} {
+		t.Run(tc.name+"/failure", func(t *testing.T) {
+			err := cliTransferError("dolt push", tc.remote, context.Background(), out, cause)
+			if got := err.Error(); got != plainFailure {
+				t.Fatalf("ordinary failure = %q, want %q", got, plainFailure)
+			}
+			if !errors.Is(err, cause) {
+				t.Errorf("cause not wrapped: %v", err)
+			}
+		})
+		t.Run(tc.name+"/timeout", func(t *testing.T) {
+			err := cliTransferError("dolt push", tc.remote, expired, out, cause)
+			want := fmt.Sprintf(timeoutFormat, tc.remote)
+			if got := err.Error(); got != want {
+				t.Fatalf("timeout failure = %q, want %q", got, want)
+			}
+			if !errors.Is(err, cause) {
+				t.Errorf("cause not wrapped: %v", err)
 			}
 		})
 	}
