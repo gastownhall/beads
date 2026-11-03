@@ -61,7 +61,9 @@ func expectHeadTableProbe(mock sqlmock.Sqlmock, qualifier, table string, tracked
 		WillReturnRows(rows)
 }
 
-// doltIgnoreRow is one dolt_ignore row the resolution probe reads back.
+// doltIgnoreRow is one dolt_ignore row the resolution probe reads back: one
+// whose pattern LIKE-matches the table, or any ignored=0 row, which the probe
+// reads whether or not it matches.
 type doltIgnoreRow struct {
 	pattern string
 	ignored bool
@@ -82,7 +84,7 @@ func expectIgnoreResolution(mock sqlmock.Sqlmock, qualifier, table string, match
 	for _, m := range matches {
 		rows.AddRow(m.pattern, m.ignored)
 	}
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT pattern, ignored FROM " + doltIgnore + " WHERE ? LIKE pattern")).
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT pattern, ignored FROM " + doltIgnore + " WHERE ? LIKE pattern OR ignored = 0")).
 		WithArgs(table).
 		WillReturnRows(rows)
 }

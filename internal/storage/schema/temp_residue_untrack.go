@@ -57,8 +57,9 @@ const (
 // matches LIKE '__temp__%', where every underscore is a single-character
 // wildcard, so the literal prefix is checked again here. Eligibility is
 // tableActivelyIgnored's, veto and all: an operator who versions an
-// intermediate on purpose (an exact ignored=0 row) keeps it tracked, and a
-// conflicting wildcard declines rather than guesses.
+// intermediate on purpose keeps it tracked, whether the ignored=0 row names it
+// exactly or is a wildcard Dolt may apply to it ('__temp__keep*'), which
+// declines rather than guesses.
 //
 // qualifier is as for readIgnoredCursorState.
 func readTempResidue(ctx context.Context, db DBConn, qualifier string) ([]string, error) {
@@ -128,9 +129,11 @@ func listTempTables(ctx context.Context, db DBConn, qualifier, revision string) 
 //
 // Failure policy follows the cursor heal's #5816 rule that a repair must
 // never mint an un-openable database. Everything before DOLT_RM is a read or
-// a staging-area reset and declines advisorially. DOLT_RM and the commit are
-// the only HEAD-moving steps; once DOLT_RM has been issued the change is
-// counted even when a later step fails, because a failed commit does not
+// a staging-area reset and declines advisorially, and so does a DOLT_RM
+// refused for access: the CALL is authorized, and DOLT_RM checks its branch
+// permission, before any root changes. DOLT_RM and the commit are the only
+// HEAD-moving steps; once DOLT_RM has run, or failed any other way, the change
+// is counted even when a later step fails, because a failed commit does not
 // prove HEAD stayed put (DOLT_RM commits its own SQL transaction, which on a
 // @@dolt_transaction_commit=1 server is already a Dolt commit), and a false
 // "nothing changed" leaves the caller's pool pinned to a stale root. Those
@@ -174,17 +177,31 @@ func untrackTempResidue(ctx context.Context, db DBConn) (bool, error) {
 		return false, nil
 	}
 
-	log.Printf("schema: %s committed at HEAD on this database, which wedges `bd dolt pull` on every fresh clone; untracking and keeping the rows (gastownhall/beads#7073)",
-		strings.Join(targets, ", "))
-
 	placeholders := strings.TrimSuffix(strings.Repeat("?, ", len(targets)), ", ")
 	args := make([]any, len(targets))
 	for i, table := range targets {
 		args[i] = table
 	}
 	if err := DrainCall(ctx, db, "CALL DOLT_RM('--cached', "+placeholders+")", args...); err != nil {
+		if dberrors.IsAccessDenied(err) {
+			// Refused before any root changed, so unlike every failure
+			// below this counts nothing, and the cursor heal's rule holds: a
+			// client that may not repair is never told, at every open, that
+			// its database is being repaired.
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return false, ctxErr
+			}
+			ignoredCursorAdvisory("schema: not permitted to untrack committed %s; continuing without it: %v\n",
+				strings.Join(targets, ", "), err)
+			return false, nil
+		}
 		return tempResidueUntrackFailed(ctx, "untracking", targets, err)
 	}
+
+	// Announced only now that DOLT_RM has run: a refused one claims nothing.
+	log.Printf("schema: %s committed at HEAD on this database, which wedges `bd dolt pull` on every fresh clone; untracking and keeping the rows (gastownhall/beads#7073)",
+		strings.Join(targets, ", "))
+
 	if err := DrainCall(ctx, db, "CALL DOLT_COMMIT('--skip-empty', '-m', ?)", tempResidueUntrackCommitMessage); err != nil {
 		return tempResidueUntrackFailed(ctx, "committing the untrack of", targets, err)
 	}
@@ -202,19 +219,15 @@ func declineTempResidueUntrack(ctx context.Context, what string, tables []string
 	return false, nil
 }
 
-// tempResidueUntrackFailed is the exit for a failure once DOLT_RM was issued:
-// the change is counted (see untrackTempResidue), and the open goes on.
+// tempResidueUntrackFailed is the exit for a failure once DOLT_RM was issued
+// and not refused: the change is counted (see untrackTempResidue), and the
+// open goes on.
 func tempResidueUntrackFailed(ctx context.Context, step string, tables []string, err error) (bool, error) {
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return true, ctxErr
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return true, err
-	}
-	if dberrors.IsAccessDenied(err) {
-		ignoredCursorAdvisory("schema: not permitted to untrack committed %s; continuing without it: %v\n",
-			strings.Join(tables, ", "), err)
-		return true, nil
 	}
 	log.Printf("schema: warning: %s committed %s failed, rows kept, the next writable open retries: %v",
 		step, strings.Join(tables, ", "), err)

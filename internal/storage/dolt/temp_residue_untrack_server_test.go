@@ -32,11 +32,18 @@ func TestTempResidueUntrackOnSQLServer(t *testing.T) {
 	}
 }
 
-func runTempResidueUntrackOnSQLServer(t *testing.T, txCommit int) {
-	const residue = "__temp__wisp_child_counters"
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
-	t.Cleanup(cancel)
+// tempResidueServerDB is one fresh database on the test sql-server: a pool for
+// it and one pinned session, both closed on cleanup.
+type tempResidueServerDB struct {
+	t    *testing.T
+	ctx  context.Context
+	name string
+	db   *sql.DB
+	conn *sql.Conn
+}
 
+func newTempResidueServerDB(t *testing.T, ctx context.Context) *tempResidueServerDB {
+	t.Helper()
 	dbName := uniqueTestDBName(t)
 	admin, err := sql.Open("mysql", doltutil.ServerDSN{
 		Host: "127.0.0.1", Port: testServerPort, User: "root", Timeout: 10 * time.Second,
@@ -62,23 +69,34 @@ func runTempResidueUntrackOnSQLServer(t *testing.T, txCommit int) {
 		t.Fatalf("pin connection: %v", err)
 	}
 	t.Cleanup(func() { conn.Close() })
+	return &tempResidueServerDB{t: t, ctx: ctx, name: dbName, db: db, conn: conn}
+}
 
-	exec := func(query string, args ...any) {
-		t.Helper()
-		if _, err := conn.ExecContext(ctx, query, args...); err != nil {
-			t.Fatalf("exec %.60q: %v", query, err)
-		}
+func (s *tempResidueServerDB) exec(query string, args ...any) {
+	s.t.Helper()
+	if _, err := s.conn.ExecContext(s.ctx, query, args...); err != nil {
+		s.t.Fatalf("exec %.60q: %v", query, err)
 	}
-	scalar := func(q interface {
-		QueryRowContext(context.Context, string, ...any) *sql.Row
-	}, query string) string {
-		t.Helper()
-		var v string
-		if err := q.QueryRowContext(ctx, query).Scan(&v); err != nil {
-			t.Fatalf("%.60q: %v", query, err)
-		}
-		return v
+}
+
+func (s *tempResidueServerDB) scalar(q interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}, query string) string {
+	s.t.Helper()
+	var v string
+	if err := q.QueryRowContext(s.ctx, query).Scan(&v); err != nil {
+		s.t.Fatalf("%.60q: %v", query, err)
 	}
+	return v
+}
+
+func runTempResidueUntrackOnSQLServer(t *testing.T, txCommit int) {
+	const residue = "__temp__wisp_child_counters"
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	t.Cleanup(cancel)
+
+	s := newTempResidueServerDB(t, ctx)
+	dbName, db, conn, exec, scalar := s.name, s.db, s.conn, s.exec, s.scalar
 
 	// An at-latest database, then the older binary's residue: committed with
 	// the pattern absent, and the pattern restored afterwards the way an
@@ -167,5 +185,94 @@ func runTempResidueUntrackOnSQLServer(t *testing.T, txCommit int) {
 	}
 	if got := scalar(conn, "SELECT HASHOF('HEAD')"); got != head {
 		t.Errorf("the second call moved HEAD from %s to %s", head, got)
+	}
+}
+
+// TestTempResidueGlobVetoStaysVersionedOnSQLServer pins the wildcard veto
+// through both gate callers on a real sql-server. Beside the seeded
+// ('__temp__%', 1), an operator's ('__temp__keep*', 0) makes Dolt's own
+// staging TRACK __temp__keep_rows: Dolt reads the pattern as a glob, which SQL
+// LIKE cannot, and keeps the more specific of the two. The lock-free fast
+// path must stay armed (the migration gate runs only on the locked path, so it
+// is never consulted), a direct MigrateUp must find nothing to repair, and
+// HEAD must keep the table throughout.
+func TestTempResidueGlobVetoStaysVersionedOnSQLServer(t *testing.T) {
+	skipIfNoDolt(t)
+	acquireTestSlot()
+	t.Cleanup(releaseTestSlot)
+	const kept = "__temp__keep_rows"
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	t.Cleanup(cancel)
+	s := newTempResidueServerDB(t, ctx)
+
+	if _, err := schema.MigrateUpWithLock(ctx, s.conn, s.name); err != nil {
+		t.Fatalf("MigrateUpWithLock (bootstrap): %v", err)
+	}
+	s.exec("INSERT INTO dolt_ignore (pattern, ignored) VALUES ('__temp__keep*', 0)")
+	s.exec("CREATE TABLE " + kept + " (id INT NOT NULL PRIMARY KEY, note VARCHAR(64) NOT NULL)")
+	s.exec("INSERT INTO " + kept + " VALUES (1, 'versioned on purpose')")
+	// A plain -A, not a forced add: Dolt's own resolution decides what it takes.
+	s.exec("CALL DOLT_COMMIT('-Am', 'test: version an intermediate on purpose')")
+
+	// trackedAtHead reports whether q's session lists kept at HEAD.
+	trackedAtHead := func(q interface {
+		QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+	}) bool {
+		t.Helper()
+		rows, err := q.QueryContext(ctx, "SHOW TABLES AS OF 'HEAD' LIKE '__temp__%'")
+		if err != nil {
+			t.Fatalf("list __temp__ tables at HEAD: %v", err)
+		}
+		defer rows.Close()
+		found := false
+		for rows.Next() {
+			var name string
+			if err := rows.Scan(&name); err != nil {
+				t.Fatalf("list __temp__ tables at HEAD: %v", err)
+			}
+			found = found || name == kept
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatalf("list __temp__ tables at HEAD: %v", err)
+		}
+		return found
+	}
+	if !trackedAtHead(s.conn) {
+		t.Fatalf("Dolt did not track %s under ('__temp__keep*', 0); the veto is not reproduced", kept)
+	}
+	head := s.scalar(s.conn, "SELECT HASHOF('HEAD')")
+
+	lockedPath := 0
+	applied, err := schema.MigrateUpWithLock(ctx, s.conn, s.name, schema.WithMigrationGate(
+		func(context.Context, *sql.Conn) error {
+			lockedPath++
+			return nil
+		}))
+	if err != nil {
+		t.Fatalf("MigrateUpWithLock: %v", err)
+	}
+	if lockedPath != 0 {
+		t.Errorf("MigrateUpWithLock took the locked path: the fast path declined a deliberately versioned intermediate")
+	}
+	if applied != 0 {
+		t.Errorf("MigrateUpWithLock returned %d, want 0: the veto leaves nothing to repair", applied)
+	}
+
+	applied, err = schema.MigrateUp(ctx, s.conn)
+	if err != nil {
+		t.Fatalf("MigrateUp: %v", err)
+	}
+	if applied != 0 {
+		t.Errorf("MigrateUp returned %d, want 0: the veto leaves nothing to repair", applied)
+	}
+
+	if got := s.scalar(s.conn, "SELECT HASHOF('HEAD')"); got != head {
+		t.Errorf("HEAD moved from %s to %s under the operator's veto", head, got)
+	}
+	if !trackedAtHead(s.db) {
+		t.Errorf("another session no longer sees %s at HEAD: the reconcile committed away a table the veto keeps versioned", kept)
+	}
+	if got := s.scalar(s.conn, "SELECT note FROM "+kept+" WHERE id = 1"); got != "versioned on purpose" {
+		t.Errorf("%s working row = %q, want it untouched", kept, got)
 	}
 }

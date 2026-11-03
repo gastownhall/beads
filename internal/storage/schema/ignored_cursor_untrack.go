@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"regexp"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/debug"
@@ -308,26 +309,33 @@ func tableTrackedAtHead(ctx context.Context, db DBConn, qualifier, table string)
 // there would make this file drop and commit away a table the operator
 // explicitly chose to keep versioned, which is unrecoverable.
 //
-// Rather than re-implement Dolt's specificity ordering (and its LIKE
-// semantics) in Go, this resolves the two cases it can prove and declines
-// otherwise:
+// Rather than re-implement Dolt's specificity ordering in Go, this resolves
+// the two cases it can prove and declines otherwise:
 //
 //   - an exact-name row is maximally specific, so it always wins outright;
-//   - with no exact row, any matching ignored=0 pattern means the operator's
-//     intent cannot be established from a wildcard comparison we are not
-//     doing — decline.
+//   - with no exact row, any ignored=0 pattern that may match means the
+//     operator's intent cannot be established from a wildcard comparison we
+//     are not doing — decline.
+//
+// "May match" cannot be the LIKE that finds the ignored=1 rows. Dolt reads a
+// pattern as a glob (doltdb.MatchTablePattern), and LIKE reads its '*' and
+// '?' literally: ('__temp__keep*', 0) never matches the LIKE, yet beside the
+// seeded ('__temp__%', 1) it is the more specific pattern, so Dolt TRACKS
+// __temp__keep_rows. The query therefore returns every ignored=0 row, and
+// ignorePatternMayMatch tests each one.
 //
 // Declining is always safe: it skips the repair, and the database is exactly
-// as it was. Every canonical pattern this file cares about is seeded by
-// seedDoltIgnorePatterns as an exact name, so the common paths take the first
-// branch.
+// as it was. The cursor table's canonical pattern is seeded by
+// seedDoltIgnorePatterns as an exact name, so the cursor heal takes the first
+// branch; the __temp__ residue's is the "__temp__%" wildcard, so
+// readTempResidue takes the second.
 func tableActivelyIgnored(ctx context.Context, db DBConn, qualifier, table string) (bool, error) {
 	doltIgnore := "dolt_ignore"
 	if qualifier != "" {
 		doltIgnore = qualifier + ".dolt_ignore"
 	}
 	rows, err := db.QueryContext(ctx,
-		"SELECT pattern, ignored FROM "+doltIgnore+" WHERE ? LIKE pattern", table)
+		"SELECT pattern, ignored FROM "+doltIgnore+" WHERE ? LIKE pattern OR ignored = 0", table)
 	if err != nil {
 		return false, fmt.Errorf("reading dolt_ignore: %w", err)
 	}
@@ -343,9 +351,10 @@ func tableActivelyIgnored(ctx context.Context, db DBConn, qualifier, table strin
 		if strings.EqualFold(pattern, table) {
 			return ignored, nil
 		}
-		if ignored {
+		switch {
+		case ignored:
 			wildcardIgnored = true
-		} else {
+		case ignorePatternMayMatch(pattern, table):
 			wildcardTracked = true
 		}
 	}
@@ -356,6 +365,32 @@ func tableActivelyIgnored(ctx context.Context, db DBConn, qualifier, table strin
 		return false, nil
 	}
 	return wildcardIgnored, nil
+}
+
+// ignorePatternMayMatch reports whether a dolt_ignore pattern could match
+// table, erring towards yes: it decides vetoes, and a veto missed is a table
+// committed away. Dolt reads '%' and '*' as any run of characters, '?' as any
+// one character, and the rest literally and case-sensitively, '_' and '\'
+// included (doltdb.MatchTablePattern). This also reads '_' as any one
+// character and '\' as a run, which covers both its literal reading and the
+// escape reading Dolt notes it may adopt, and it ignores case, so every name
+// Dolt's reading matches, this matches.
+func ignorePatternMayMatch(pattern, table string) bool {
+	var expr strings.Builder
+	expr.WriteString("(?is)^")
+	for _, r := range pattern {
+		switch r {
+		case '%', '*', '\\':
+			expr.WriteString(".*")
+		case '?', '_':
+			expr.WriteString(".")
+		default:
+			expr.WriteString(regexp.QuoteMeta(string(r)))
+		}
+	}
+	expr.WriteString("$")
+	matched, err := regexp.MatchString(expr.String(), table)
+	return err != nil || matched
 }
 
 // backupIgnoredCursorRows mirrors the cursor rows into the scratch table.

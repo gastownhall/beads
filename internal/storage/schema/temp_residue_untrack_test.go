@@ -103,14 +103,18 @@ func TestTempResidueGateIgnoresLikeWildcardLookalikes(t *testing.T) {
 }
 
 // expectTempResidueUntrackStart mocks the reconcile up to, not including,
-// DOLT_RM for one eligible table: the gate, an unstage that finds nothing
-// staged, the publishing COMMIT and the staged listing.
-func expectTempResidueUntrackStart(mock sqlmock.Sqlmock, table string) {
-	expectTempListing(mock, "", "HEAD", table)
-	expectIgnoreResolution(mock, "", table, []doltIgnoreRow{{pattern: "__temp__%", ignored: true}})
+// DOLT_RM for the eligible tables, given sorted: the gate (the HEAD listing,
+// then each table's dolt_ignore resolution, the seeded wildcard alone), an
+// unstage that finds nothing staged, the publishing COMMIT and the staged
+// listing.
+func expectTempResidueUntrackStart(mock sqlmock.Sqlmock, tables ...string) {
+	expectTempListing(mock, "", "HEAD", tables...)
+	for _, table := range tables {
+		expectIgnoreResolution(mock, "", table, []doltIgnoreRow{{pattern: "__temp__%", ignored: true}})
+	}
 	expectIgnoredCursorUnstage(mock)
 	mock.ExpectExec(regexp.QuoteMeta("COMMIT")).WillReturnResult(sqlmock.NewResult(0, 0))
-	expectTempListing(mock, "", "STAGED", table)
+	expectTempListing(mock, "", "STAGED", tables...)
 }
 
 func expectTempResidueRM(mock sqlmock.Sqlmock, table string) *sqlmock.ExpectedQuery {
@@ -152,25 +156,68 @@ func TestTempResidueUntrackDeclinesWhenTheUnstageIsDenied(t *testing.T) {
 	}
 }
 
+// tempResidueAnnouncement is the stderr line a repair that ran prints.
+const tempResidueAnnouncement = "untracking and keeping the rows"
+
+// TestTempResidueUntrackDeclinesWhenDoltRMIsDenied: a client that can see the
+// residue but may not CALL procedures is refused at DOLT_RM's authorization,
+// before any root changes. That is a decline like any before DOLT_RM: nothing
+// counted (no pool rebuild, no "Applied" from bd migrate), no repair
+// announced, and the next permitted open converges.
+func TestTempResidueUntrackDeclinesWhenDoltRMIsDenied(t *testing.T) {
+	const table = "__temp__wisp_child_counters"
+	db, mock := newMockDB(t)
+	advisory := allowSwallowedAdvisory(t)
+	logged := captureStdLog(t)
+
+	expectTempResidueUntrackStart(mock, table)
+	expectTempResidueRM(mock, table).WillReturnError(
+		&mysql.MySQLError{Number: 1142, Message: "EXECUTE command denied to user 'fenced'@'%' for routine 'dolt_rm'"})
+
+	untracked, err := untrackTempResidue(context.Background(), db)
+	if err != nil {
+		t.Fatalf("untrackTempResidue() error = %v, want nil: the repair is optional", err)
+	}
+	if untracked {
+		t.Fatal("untrackTempResidue() counted a DOLT_RM refused before any root changed")
+	}
+	if !strings.Contains(*advisory, "not permitted to untrack") {
+		t.Errorf("advisory = %q, want it to say the client may not untrack", *advisory)
+	}
+	if strings.Contains(logged.String(), tempResidueAnnouncement) {
+		t.Errorf("a refused DOLT_RM announced a repair: %q", logged.String())
+	}
+
+	// The next, permitted open finds the residue again and converges.
+	expectTempResidueUntrackStart(mock, table)
+	expectTempResidueRM(mock, table).WillReturnRows(sqlmock.NewRows([]string{"status"}))
+	expectTempResidueCommit(mock).WillReturnRows(sqlmock.NewRows([]string{"hash"}))
+	untracked, err = untrackTempResidue(context.Background(), db)
+	if err != nil || !untracked {
+		t.Fatalf("retry untrackTempResidue() = %v, %v; want true, nil", untracked, err)
+	}
+	if !strings.Contains(logged.String(), tempResidueAnnouncement) {
+		t.Errorf("the permitted open did not announce its repair: %q", logged.String())
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}
+
 // TestTempResidueUntrackFailuresAfterTheRemovalAreCountedNotFatal covers a
-// failure once DOLT_RM was issued: denied, failed, or removed but not
+// failure once DOLT_RM was issued and not refused: failed, or removed but not
 // committed. None may fail the open, each must count as possible mutation
 // (HEAD may have moved, so the caller must not keep a stale root), and a
-// later permitted open must converge.
+// later permitted open must converge. Only a DOLT_RM that ran announces the
+// repair.
 func TestTempResidueUntrackFailuresAfterTheRemovalAreCountedNotFatal(t *testing.T) {
 	const table = "__temp__wisp_child_counters"
-	denied := &mysql.MySQLError{Number: 1142, Message: "DELETE command denied to user 'fenced'@'%'"}
 	for _, tc := range []struct {
-		name    string
-		fail    func(mock sqlmock.Sqlmock)
-		advises string
-		warns   string
+		name      string
+		fail      func(mock sqlmock.Sqlmock)
+		warns     string
+		announced bool
 	}{
-		{
-			name:    "rm denied",
-			fail:    func(mock sqlmock.Sqlmock) { expectTempResidueRM(mock, table).WillReturnError(denied) },
-			advises: "not permitted to untrack",
-		},
 		{
 			name: "rm failed",
 			fail: func(mock sqlmock.Sqlmock) {
@@ -184,12 +231,12 @@ func TestTempResidueUntrackFailuresAfterTheRemovalAreCountedNotFatal(t *testing.
 				expectTempResidueRM(mock, table).WillReturnRows(sqlmock.NewRows([]string{"status"}))
 				expectTempResidueCommit(mock).WillReturnError(errors.New("injected DOLT_COMMIT failure"))
 			},
-			warns: "committing the untrack of committed " + table + " failed",
+			warns:     "committing the untrack of committed " + table + " failed",
+			announced: true,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			db, mock := newMockDB(t)
-			advisory := allowSwallowedAdvisory(t)
 			logged := captureStdLog(t)
 
 			expectTempResidueUntrackStart(mock, table)
@@ -201,11 +248,11 @@ func TestTempResidueUntrackFailuresAfterTheRemovalAreCountedNotFatal(t *testing.
 			if !untracked {
 				t.Fatal("untrackTempResidue() = false after DOLT_RM was issued; possible mutation must be counted")
 			}
-			if tc.advises != "" && !strings.Contains(*advisory, tc.advises) {
-				t.Errorf("advisory = %q, want %q", *advisory, tc.advises)
-			}
-			if tc.warns != "" && !strings.Contains(logged.String(), tc.warns) {
+			if !strings.Contains(logged.String(), tc.warns) {
 				t.Errorf("log = %q, want %q", logged.String(), tc.warns)
+			}
+			if got := strings.Contains(logged.String(), tempResidueAnnouncement); got != tc.announced {
+				t.Errorf("repair announced = %v, want %v: log %q", got, tc.announced, logged.String())
 			}
 
 			// The next, permitted open finds the residue again and converges.
@@ -264,5 +311,166 @@ func TestTempResidueUntrackReachesAHeadOnlyCursorScratch(t *testing.T) {
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}
+
+// TestTempResidueUntrackRemovesEveryIntermediateInOneCall pins the field
+// shape: one blanket commit catches several intermediates (ignored/0001 alone
+// stages seven), and the reconcile must take every eligible one out of HEAD
+// in a single DOLT_RM, each name its own bound argument, and announce them
+// all, rather than converge one table per open.
+func TestTempResidueUntrackRemovesEveryIntermediateInOneCall(t *testing.T) {
+	const first, second = "__temp__local_metadata", "__temp__wisp_child_counters"
+	db, mock := newMockDB(t)
+	logged := captureStdLog(t)
+
+	expectTempResidueUntrackStart(mock, first, second)
+	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_RM('--cached', ?, ?)")).
+		WithArgs(first, second).
+		WillReturnRows(sqlmock.NewRows([]string{"status"}))
+	expectTempResidueCommit(mock).WillReturnRows(sqlmock.NewRows([]string{"hash"}))
+
+	untracked, err := untrackTempResidue(context.Background(), db)
+	if err != nil {
+		t.Fatalf("untrackTempResidue() error = %v, want nil", err)
+	}
+	if !untracked {
+		t.Fatal("untrackTempResidue() reported no repair for two committed intermediates")
+	}
+	if want := first + ", " + second; !strings.Contains(logged.String(), want) {
+		t.Errorf("announcement = %q, want it to name both intermediates (%s)", logged.String(), want)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}
+
+// TestTempResidueGateHonorsDoltGlobVetoes is the #7073 data-loss guard for a
+// wildcard veto. Dolt reads dolt_ignore patterns as globs and keeps the more
+// specific of two conflicting ones, so beside the seeded ('__temp__%', 1) an
+// operator's ('__temp__keep*', 0) keeps __temp__keep_rows TRACKED. SQL LIKE
+// reads '*' literally and never matches that row; believing it would commit
+// the table out of HEAD, and a push would publish the deletion.
+func TestTempResidueGateHonorsDoltGlobVetoes(t *testing.T) {
+	const table = "__temp__keep_rows"
+	seeded := doltIgnoreRow{pattern: "__temp__%", ignored: true}
+	for _, tt := range []struct {
+		name string
+		veto []doltIgnoreRow
+		want bool
+		why  string
+	}{
+		{
+			name: "star veto",
+			veto: []doltIgnoreRow{{pattern: "__temp__keep*", ignored: false}},
+			want: false,
+			why:  "Dolt keeps the table tracked under the more specific glob",
+		},
+		{
+			name: "question-mark veto",
+			veto: []doltIgnoreRow{{pattern: "__temp__keep_?ows", ignored: false}},
+			want: false,
+			why:  "'?' is one character to Dolt",
+		},
+		{
+			name: "vetoes for other names",
+			veto: []doltIgnoreRow{{pattern: "__temp__other*", ignored: false}, {pattern: "audit_*", ignored: false}},
+			want: true,
+			why:  "a veto that cannot match must not block the repair",
+		},
+		{
+			name: "exact name beside a star veto",
+			veto: []doltIgnoreRow{{pattern: "__temp__keep*", ignored: false}, {pattern: table, ignored: true}},
+			want: true,
+			why:  "an exact row is more specific than any glob, in Dolt too",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			db, mock := newMockDB(t)
+			expectIgnoreResolution(mock, "", table, append([]doltIgnoreRow{seeded}, tt.veto...))
+
+			got, err := tableActivelyIgnored(context.Background(), db, "", table)
+			if err != nil {
+				t.Fatalf("tableActivelyIgnored() error = %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("tableActivelyIgnored(%s) = %v, want %v (%s)", table, got, tt.want, tt.why)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("unmet SQL expectations: %v", err)
+			}
+		})
+	}
+}
+
+// doltReads is Dolt's own reading of a dolt_ignore pattern, restated from
+// doltdb.compilePattern (libraries/doltcore/doltdb/table_name_patterns.go at
+// the pinned Dolt): the oracle ignorePatternMayMatch must cover.
+func doltReads(pattern, table string) bool {
+	expr := "^" + regexp.QuoteMeta(pattern) + "$"
+	expr = strings.ReplaceAll(expr, `\?`, ".")
+	expr = strings.ReplaceAll(expr, `\*`, ".*")
+	expr = strings.ReplaceAll(expr, "%", ".*")
+	re, err := regexp.Compile(expr)
+	return err == nil && re.MatchString(table)
+}
+
+// TestIgnorePatternMayMatchCoversDoltsReading pins the veto test's direction
+// against Dolt's own reading: every name Dolt's glob matches must match here,
+// for every pattern three fragments build, wildcards, '_' and '\' included.
+// The looser readings may only add matches, as the examples show.
+func TestIgnorePatternMayMatchCoversDoltsReading(t *testing.T) {
+	for _, tt := range []struct {
+		pattern string
+		want    bool
+		why     string
+	}{
+		{"__temp__%", true, "the seeded wildcard"},
+		{"__temp__keep*", true, "Dolt's '*' is any run"},
+		{"__temp__keep_?ows", true, "Dolt's '?' is one character"},
+		{"__temp__keep_rows", true, "the exact name"},
+		{"__TEMP__KEEP*", true, "Dolt compares case-sensitively; a veto errs towards yes"},
+		{"__t_mp__keep*", true, "Dolt's '_' is literal; a veto errs towards yes"},
+		{`__temp__keep\*`, true, `Dolt's '\' is literal; a veto errs towards yes`},
+		{"__temp__other*", false, "another name's veto"},
+		{"keep*", false, "anchored at the start"},
+		{"__temp__keep", false, "anchored at the end"},
+		{"__temp__keep_rows?", false, "'?' needs a character"},
+		{"__temp__kee[p]*", false, "brackets are literal, not a class"},
+	} {
+		if got := ignorePatternMayMatch(tt.pattern, "__temp__keep_rows"); got != tt.want {
+			t.Errorf("ignorePatternMayMatch(%q, __temp__keep_rows) = %v, want %v (%s)", tt.pattern, got, tt.want, tt.why)
+		}
+	}
+
+	fragments := []string{"__temp__", "keep", "_", "%", "*", "?", `\`, "K", "rows"}
+	names := []string{"__temp__keep_rows", "__temp__wisp_child_counters", "__temp__", "keep", "_", "x", "",
+		`__temp__keep\rows`, "__TEMP__KEEP_ROWS", "K?", "%*"}
+	var patterns []string
+	level := []string{""}
+	for range 3 {
+		var next []string
+		for _, prefix := range level {
+			for _, fragment := range fragments {
+				next = append(next, prefix+fragment)
+			}
+		}
+		patterns = append(patterns, next...)
+		level = next
+	}
+	covered := 0
+	for _, pattern := range patterns {
+		for _, name := range names {
+			if !doltReads(pattern, name) {
+				continue
+			}
+			covered++
+			if !ignorePatternMayMatch(pattern, name) {
+				t.Errorf("Dolt reads %q as matching %q but ignorePatternMayMatch does not: a veto it would miss", pattern, name)
+			}
+		}
+	}
+	if covered == 0 {
+		t.Fatal("no corpus pattern matched a name under Dolt's reading; the cross-check checked nothing")
 	}
 }
