@@ -1165,6 +1165,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `npm install @beads/bd` no longer intermittently fails with
+  `tar: ... No such file or directory` after a successful download. Following
+  the GitHub release redirect, the postinstall script scheduled a delete of
+  the archive path and then downloaded to that same path, so the delete could
+  remove the finished archive before extraction (#7791).
 - `bd create --file` and other batch creates no longer fail with "issue
   already exists" on an id bd generated itself. The batch chose every id
   before it wrote any row, so two of its items could be handed the same short
