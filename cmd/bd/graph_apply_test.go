@@ -52,6 +52,31 @@ func TestDocsGraphPlanExampleValidates(t *testing.T) {
 	}
 }
 
+// TestDocsGraphPlanEdgeNotesNameTheDependent pins the --graph supplement's
+// statement of edge direction: an edge's from end is stored as the dependent
+// (IssueID) and its to end as the dependency (DependsOnID), the argument order
+// of `bd dep add [issue-id] [depends-on-id]`. A plan read the other way
+// validates and applies with every edge reversed, so the notes must say it.
+func TestDocsGraphPlanEdgeNotesNameTheDependent(t *testing.T) {
+	_, notes, ok := strings.Cut(createGraphPlanSupplement, "Edge notes:")
+	if !ok {
+		t.Fatal("Edge notes not found in create_graph_plan.md supplement")
+	}
+	notes = strings.Join(strings.Fields(notes), " ")
+	for _, want := range []string{
+		"`from_key`/`from_id` is the dependent and `to_key`/`to_id` is its dependency",
+		"`bd dep add <from> <to>`",
+		"For `blocks`, `from` waits for `to`",
+	} {
+		if !strings.Contains(notes, want) {
+			t.Errorf("Edge notes must say %q", want)
+		}
+	}
+	if got, want := depAddCmd.Use, "add [issue-id] [depends-on-id]"; got != want {
+		t.Errorf("bd dep add Use = %q, want %q: the Edge notes map from/to onto this order", got, want)
+	}
+}
+
 func TestValidateGraphApplyPlanAcceptsCustomTypes(t *testing.T) {
 	plan := &GraphApplyPlan{
 		Nodes: []GraphApplyNode{

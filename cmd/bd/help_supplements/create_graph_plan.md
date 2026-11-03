@@ -70,6 +70,12 @@ Node notes:
 
 Edge notes:
 
+- `from_key`/`from_id` is the dependent and `to_key`/`to_id` is its
+  dependency: an edge from `a` to `b` means `a` depends on `b`, the same
+  order as `bd dep add <from> <to>`. For `blocks`, `from` waits for `to`:
+  `a` is not ready until `b` closes. Reading an edge subject-first ("`a`
+  blocks `b`") inverts every edge in the plan; the plan still validates and
+  applies, so the only symptom is the wrong work coming up ready.
 - `type` defaults to `blocks`. `parent_key`/`parent_id` on nodes already
   create `parent-child` edges; don't repeat them in `edges`.
 - `gate` (`all-children` | `any-children`) and `spawner_key`/`spawner_id`
