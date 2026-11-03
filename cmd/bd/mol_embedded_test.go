@@ -5,6 +5,9 @@ package main
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/formula"
@@ -171,5 +174,40 @@ func TestEmbeddedSpawnMolecule_SubstitutesTemplatedStepFields(t *testing.T) {
 	}
 	if err := validation.AssigneeMatches(actor, false)(newQAID, issue); err != nil {
 		t.Errorf("spawned issue is not closable by the pouring actor %q: %v", actor, err)
+	}
+}
+
+// TestEmbeddedCookPersistAppliesStepConditions pins GH#7639 on the persist
+// path: bd cook --persist with --var deploy=false writes the build child of
+// the proto and no deploy child, as bd mol pour would.
+func TestEmbeddedCookPersistAppliesStepConditions(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "cp")
+	formulaPath := filepath.Join(dir, "cond-proto.formula.toml")
+	if err := os.WriteFile(formulaPath, []byte(strings.Replace(stepConditionFormulaTOML, `"cond-cook"`, `"cond-proto"`, 1)), 0o600); err != nil {
+		t.Fatalf("write formula: %v", err)
+	}
+	bdCommand(t, bd, dir, "cook", formulaPath, "--persist", "--var", "deploy=false")
+
+	s := openStore(t, beadsDir, "cp")
+	defer s.Close()
+	children, err := s.GetDependents(t.Context(), "cond-proto")
+	if err != nil {
+		t.Fatalf("GetDependents(cond-proto): %v", err)
+	}
+	var ids []string
+	for _, child := range children {
+		ids = append(ids, child.ID)
+	}
+	slices.Sort(ids)
+	if want := []string{"cond-proto.build"}; !slices.Equal(ids, want) {
+		t.Fatalf("persisted proto children = %v, want %v", ids, want)
+	}
+	if issue, err := s.GetIssue(t.Context(), "cond-proto.deploy"); err == nil && issue != nil {
+		t.Fatalf("cook --persist wrote %s, whose condition is false", issue.ID)
 	}
 }
