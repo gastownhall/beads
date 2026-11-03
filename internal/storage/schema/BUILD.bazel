@@ -153,6 +153,7 @@ go_test(
         "cli_prepared_ddl_test.go",
         "content_hash_test.go",
         "content_skew_test.go",
+        "converged_temp_residue_test.go",
         "converged_test.go",
         "cursor_reality_test.go",
         "dep_id_backfill_test.go",
