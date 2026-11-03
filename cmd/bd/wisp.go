@@ -14,6 +14,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/issueops"
 )
 
 // Wisp commands - manage ephemeral molecules
@@ -1029,14 +1030,82 @@ func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, excludeTyp
 	// Without cascade, closed wisps are deleted and live dependents are
 	// orphaned (edges dropped, is_blocked recomputed) — the same semantics as
 	// a plain `bd delete`.
-	if err := deleteBatch(nil, ids, force, dryRun, false, jsonOutput, false, nil, "wisp gc --closed"); err != nil {
-		return HandleError("%v", err)
+	if dryRun {
+		if err := deleteBatch(nil, ids, force, dryRun, false, jsonOutput, false, nil, "wisp gc --closed"); err != nil {
+			return HandleError("%v", err)
+		}
+		return nil
 	}
 
-	if !dryRun && force && !jsonOutput {
+	deleted, result, err := purgeClosedWispsInBatches(ctx, ids, wispPurgeBatchSize)
+	if err != nil {
+		return HandleError("%v", err)
+	}
+	if err := renderDeleteResult(deleted, result, nil); err != nil {
+		return err
+	}
+	if !jsonOutput {
 		fmt.Printf("\nHint: Run 'bd compact --dolt' to reclaim disk space\n")
 	}
 	return nil
+}
+
+// wispPurgeBatchSize is how many closed wisps one `wisp gc --closed --force`
+// transaction deletes (GH#4684), the batch deleteWispBatch uses for the same
+// reason.
+const wispPurgeBatchSize = 200
+
+// purgeClosedWispsInBatches deletes ids, without cascade, in transactions of
+// at most size ids, and returns the ids deleted and the summed result.
+//
+// Each batch commits before the next starts. One transaction over the whole
+// candidate set (up to 5000 wisps) rolled back to nothing when the caller's
+// deadline cut it short, so every retry started over and never finished. Now
+// a cut-short run keeps the batches it committed and the next run deletes
+// the rest. A dependent in a later batch is not orphaned: it is deleted too.
+func purgeClosedWispsInBatches(ctx context.Context, ids []string, size int) ([]string, issueops.DeleteResult, error) {
+	var total issueops.DeleteResult
+	deleter, err := store.Deleter()
+	if err != nil {
+		return nil, total, err
+	}
+	opsCtx, err := issueOpsContext(ctx)
+	if err != nil {
+		return nil, total, err
+	}
+	inPurge := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		inPurge[id] = true
+	}
+	orphaned := make(map[string]bool)
+	actor := currentActor()
+	deleted := make([]string, 0, len(ids))
+	for start := 0; start < len(ids); start += size {
+		batch := ids[start:min(start+size, len(ids))]
+		result, err := deleter.Delete(opsCtx, issueops.DeleteRequest{Actor: actor, IDs: batch, Force: true})
+		if err != nil {
+			return deleted, total, fmt.Errorf("deleted %d of %d closed wisp(s), then a batch failed; run the command again to delete the rest: %w",
+				total.Deleted, len(ids), err)
+		}
+		commandDidWrite.Store(true)
+		commandDeletedIssueIDs.add(batch...)
+		deleted = append(deleted, batch...)
+		total.Deleted += result.Deleted
+		total.Dependencies += result.Dependencies
+		total.Labels += result.Labels
+		total.Events += result.Events
+		total.ReferencesUpdated += result.ReferencesUpdated
+		for _, id := range result.Orphaned {
+			if !inPurge[id] {
+				orphaned[id] = true
+			}
+		}
+	}
+	for id := range orphaned {
+		total.Orphaned = append(total.Orphaned, id)
+	}
+	slices.Sort(total.Orphaned)
+	return deleted, total, nil
 }
 
 func init() {
