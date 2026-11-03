@@ -747,8 +747,12 @@ func (b *bootstrapPreparer) prepare(ctx context.Context, conn *sql.Conn) (*schem
 	return b.heal, nil
 }
 
-func buildDSN(ep proxy.Endpoint, database, user, password, tlsConfigName string) string {
+// buildDSN renders the MySQL DSN for a proxy endpoint over the given dial
+// network: proxy.DataNetwork for managed connections (the bdproxy dialer
+// sends the BDPROXY1 handshake) or "tcp" for a raw server in tests.
+func buildDSN(network string, ep proxy.Endpoint, database, user, password, tlsConfigName string) string {
 	return util.DoltServerDSN{
+		Net:             network,
 		Host:            ep.Host,
 		Port:            ep.Port,
 		User:            user,
@@ -830,18 +834,24 @@ func isTransientPingError(err error) bool {
 // upstream. A var so tests can shorten it.
 var upstreamOutageRetryWindow = time.Second
 
-// outageWindowBackOff clamps the wrapped backoff so that, once the first
-// upstream-outage report has been seen, no wait runs past the end of
-// upstreamOutageRetryWindow: the last attempt lands at the window's end
-// rather than up to one backoff interval after it.
+// outageWindowBackOff clamps the wait after an upstream-outage report so it
+// does not run past the end of upstreamOutageRetryWindow, measured from the
+// first report: the last attempt lands at the window's end rather than up to
+// one backoff interval after it. Only the wait that follows an outage report
+// is clamped. A wait after any other transient error keeps the wrapped
+// backoff's own interval; clamping it to a deadline that has already passed
+// would make it zero and spin the retry loop at CPU rate (#7183).
 type outageWindowBackOff struct {
 	backoff.BackOff
 	deadline time.Time // zero until the first upstream-outage report
+	armClamp bool      // the failure this wait follows was an outage report
 }
 
 func (b *outageWindowBackOff) NextBackOff() time.Duration {
 	d := b.BackOff.NextBackOff()
-	if d == backoff.Stop || b.deadline.IsZero() {
+	clamp := b.armClamp
+	b.armClamp = false
+	if d == backoff.Stop || b.deadline.IsZero() || !clamp {
 		return d
 	}
 	if remaining := time.Until(b.deadline); remaining < d {
@@ -851,12 +861,15 @@ func (b *outageWindowBackOff) NextBackOff() time.Duration {
 }
 
 // pingWithRetry pings until the server answers, the error proves durable, or
-// bo's MaxElapsedTime is spent. Each attempt gets its own deadline:
-// backoff.Retry bounds the gap between attempts but cannot interrupt one
-// already in flight, so without this cap a server that accepts TCP and then
-// stalls blocks for the caller's entire context. The db proxy's
+// the wrapped backoff's budget stops fitting another wait — an upper bound,
+// not a promise to keep retrying for all of MaxElapsedTime. Each attempt gets
+// its own deadline: backoff.Retry bounds the gap between attempts but cannot
+// interrupt one already in flight, so without this cap a server that accepts
+// TCP and then stalls blocks for the caller's entire context. The db proxy's
 // upstream-outage report is retried only for upstreamOutageRetryWindow from
-// the first time it is seen.
+// the first time it is seen, and only the wait right after such a report is
+// clamped to that window; waits after ordinary transient errors keep the
+// wrapped backoff's own intervals.
 func pingWithRetry(ctx context.Context, p pinger, bo *backoff.ExponentialBackOff, attemptTimeout time.Duration) error {
 	window := &outageWindowBackOff{BackOff: bo}
 	return backoff.Retry(func() error {
@@ -881,6 +894,7 @@ func pingWithRetry(ctx context.Context, p pinger, bo *backoff.ExponentialBackOff
 			if !time.Now().Before(window.deadline) {
 				return backoff.Permanent(err)
 			}
+			window.armClamp = true
 			return err
 		}
 		if isTransientPingError(err) {
@@ -975,10 +989,12 @@ func requireServerDoltVersion(ctx context.Context, q doltversion.RowQuerier, ep 
 	})
 }
 
-// openAndInitSchema opens the provider through the proxy at ep. backend
-// names the server behind it when bd does not run that server (see
-// requireServerDoltVersion), and is empty otherwise.
-func openAndInitSchema(ctx context.Context, ep proxy.Endpoint, backend, database, rootUser, rootPassword, tlsConfigName string, teamServer bool, expectedProjectID string, opts providerOptions) (UnitOfWorkProvider, error) {
+// openAndInitSchema opens the provider through the endpoint ep over the
+// given MySQL dial network — proxy.DataNetwork for a bd-managed proxy
+// (which requires the BDPROXY1 handshake) or "tcp" for a raw server.
+// backend names the server behind it when bd does not run that server
+// (see requireServerDoltVersion), and is empty otherwise.
+func openAndInitSchema(ctx context.Context, network string, ep proxy.Endpoint, backend, database, rootUser, rootPassword, tlsConfigName string, teamServer bool, expectedProjectID string, opts providerOptions) (UnitOfWorkProvider, error) {
 	newProvider := func(pool *sql.DB) *doltSQLProvider {
 		return &doltSQLProvider{
 			defaultBranch:     defaultBranch,
@@ -1034,7 +1050,7 @@ func openAndInitSchema(ctx context.Context, ep proxy.Endpoint, backend, database
 	// signal, and every error message callers already match on. The probe is
 	// single-shot (openDBProbe) precisely so that fall-through cannot cost a
 	// second full retry budget.
-	probeConn, probeErr := openDBProbe(ctx, buildDSN(ep, database, rootUser, rootPassword, tlsConfigName))
+	probeConn, probeErr := openDBProbe(ctx, buildDSN(network, ep, database, rootUser, rootPassword, tlsConfigName))
 	if probeErr == nil {
 		if err := requireServerDoltVersion(ctx, probeConn, ep, backend); err != nil {
 			return nil, errors.Join(err, probeConn.Close())
@@ -1056,7 +1072,7 @@ func openAndInitSchema(ctx context.Context, ep proxy.Endpoint, backend, database
 	debug.Logf("uow: single-session open unavailable for %q, using the no-database init connection: %v\n",
 		database, probeErr)
 
-	initDB, err := openDB(ctx, buildDSN(ep, "", rootUser, rootPassword, tlsConfigName))
+	initDB, err := openDB(ctx, buildDSN(network, ep, "", rootUser, rootPassword, tlsConfigName))
 	if err != nil {
 		return nil, err
 	}
@@ -1077,7 +1093,7 @@ func openAndInitSchema(ctx context.Context, ep proxy.Endpoint, backend, database
 		return nil, fmt.Errorf("uow: close init db: %w", err)
 	}
 
-	dbConn, err := openDB(ctx, buildDSN(ep, database, rootUser, rootPassword, tlsConfigName))
+	dbConn, err := openDB(ctx, buildDSN(network, ep, database, rootUser, rootPassword, tlsConfigName))
 	if err != nil {
 		return nil, err
 	}

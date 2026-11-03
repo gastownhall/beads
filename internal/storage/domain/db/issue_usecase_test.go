@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/beads/internal/idgen"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/types"
@@ -18,6 +19,8 @@ func (s *testSuite) TestIssueUseCase_MintTopLevelID() {
 	s.Run("IssuePrefixOverrideHonored", s.useCaseMintRespectsPrefixOverride)
 	s.Run("IDPrefixSubprefixHonored", s.useCaseMintRespectsIDPrefix)
 	s.Run("WispUsesWispPrefix", s.useCaseMintWispPrefix)
+	s.Run("HashModePassesOverTheOtherPlanesIDs", s.useCaseMintPassesOverTheOtherPlane)
+	s.Run("MintPassesOverClaimedIDs", s.useCaseMintPassesOverClaimedIDs)
 	s.Run("MissingConfigPrefixErrors", s.useCaseMintMissingPrefix)
 	s.Run("ExplicitIDRequiresConfiguredPrefixUnlessForced", s.useCaseExplicitIDPrefixGuard)
 	s.Run("CreateOnlyRefusesOccupiedID", s.useCaseCreateOnlyRefusesOccupiedID)
@@ -146,6 +149,85 @@ func (s *testSuite) useCaseMintWispPrefix() {
 	}, "tester")
 	s.Require().NoError(err)
 	s.True(strings.HasPrefix(res.Issue.ID, "bd-wisp-"), "expected bd-wisp- prefix, got %q", res.Issue.ID)
+}
+
+// useCaseMintPassesOverTheOtherPlane pins that a hash mint never hands out an
+// id the OTHER plane holds: issues and wisps share one id space. It occupies
+// the nonce-0 candidate the mint tries first, at every length it can start at,
+// in the plane the create is not bound for. A minted create is not create-only
+// here, so before the two-plane probe the id landed silently beside the
+// occupant, one id in both tables (GH#5106).
+func (s *testSuite) useCaseMintPassesOverTheOtherPlane() {
+	s.resetMintConfig("xp", "")
+	uc := s.issueUseCase()
+	at := time.Date(2022, time.January, 2, 3, 4, 5, 678901234, time.UTC)
+	firstCandidates := func(prefix, title string) []string {
+		var ids []string
+		for length := 3; length <= 8; length++ {
+			ids = append(ids, idgen.GenerateHashID(prefix, title, "", "tester", at, length, 0))
+		}
+		return ids
+	}
+	occupy := func(ids []string, wisp bool) {
+		for _, id := range ids {
+			params := domain.CreateIssueParams{
+				Issue:      &types.Issue{Title: "occupant", IssueType: types.TypeTask, Priority: 2, Ephemeral: wisp},
+				ExplicitID: id,
+				CreateOnly: true,
+			}
+			var err error
+			if wisp {
+				_, err = uc.CreateWisp(s.Ctx(), params, "seeder")
+			} else {
+				_, err = uc.CreateIssue(s.Ctx(), params, "seeder")
+			}
+			s.Require().NoError(err, "occupy %s", id)
+		}
+	}
+
+	heldByWisps := firstCandidates("xp", "issue over wisp")
+	occupy(heldByWisps, true)
+	issue, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue: &types.Issue{Title: "issue over wisp", IssueType: types.TypeTask, Priority: 2, CreatedAt: at},
+	}, "tester")
+	s.Require().NoError(err)
+	s.NotContains(heldByWisps, issue.Issue.ID, "minted an issue id a wisp holds")
+
+	heldByIssues := firstCandidates("xp-wisp", "wisp over issue")
+	occupy(heldByIssues, false)
+	wisp, err := uc.CreateWisp(s.Ctx(), domain.CreateIssueParams{
+		Issue: &types.Issue{Title: "wisp over issue", IssueType: types.TypeTask, Priority: 2, Ephemeral: true, CreatedAt: at},
+	}, "tester")
+	s.Require().NoError(err)
+	s.NotContains(heldByIssues, wisp.Issue.ID, "minted a wisp id an issue holds")
+}
+
+// useCaseMintPassesOverClaimedIDs pins CreateIssueParams.ClaimedIDs, the ids a
+// caller's batch will write in a LATER item and so are in no table yet: the
+// mint passes over them in both modes, as it passes over a held id.
+func (s *testSuite) useCaseMintPassesOverClaimedIDs() {
+	uc := s.issueUseCase()
+
+	s.resetMintConfig("cl", "")
+	at := time.Date(2022, time.January, 2, 3, 4, 5, 678901234, time.UTC)
+	claimed := map[string]bool{}
+	for length := 3; length <= 8; length++ {
+		claimed[idgen.GenerateHashID("cl", "claimed", "", "tester", at, length, 0)] = true
+	}
+	hashed, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue:      &types.Issue{Title: "claimed", IssueType: types.TypeTask, Priority: 2, CreatedAt: at},
+		ClaimedIDs: claimed,
+	}, "tester")
+	s.Require().NoError(err)
+	s.False(claimed[hashed.Issue.ID], "hash mode minted the claimed %s", hashed.Issue.ID)
+
+	s.resetMintConfig("clc", "counter")
+	counted, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue:      &types.Issue{Title: "counted", IssueType: types.TypeTask, Priority: 2},
+		ClaimedIDs: map[string]bool{"clc-1": true},
+	}, "tester")
+	s.Require().NoError(err)
+	s.Equal("clc-2", counted.Issue.ID, "counter mode must pass over the claimed clc-1")
 }
 
 func (s *testSuite) useCaseMintMissingPrefix() {

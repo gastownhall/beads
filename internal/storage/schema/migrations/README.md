@@ -84,6 +84,57 @@ outcomes by reading `INFORMATION_SCHEMA`, never an exit code, and test guarded
 migrations through the embedded (cgo) engine, where `PREPARE`/`EXECUTE` behaves
 normally. See `internal/storage/embeddeddolt/migrate_frozen_guard_convergence_test.go`.
 
+**Moving a tracked table onto the dolt_ignored plane loses its rows on every
+clone but the one that migrates.** 0062 drops versioned `events`, commits the
+drop, and recreates the table ignored, refilled from a temp copy. The commit
+replicates; the refill does not. A clone that pulls the migration, or clones
+after it, gets the drop and an empty table, while its rows still sit in its own
+history at the drop commit's first parent (gastownhall/beads#7039). A future
+flip must plan the refill for every clone, not only the migrator's, and that
+refill cannot live in frozen SQL: the drop commit is only findable by its
+frozen message, and the old rows are only readable `AS OF` its first parent
+(`dolt_commit_ancestors.parent_hash` with `parent_index = 0`; the table's
+`commit_hash` column names the child). Ignored 0031 is the shape to copy: an
+inert marker whose Go repair (`../events_preflip_seed.go`) does the reads and
+writes, with a header comment that names the table it writes so the raw-text
+dirty-table guard still sees it (`migrationSQLTouchesTable` scans comments on
+purpose). Never edit the frozen drop message; the repair matches it exactly.
+
+**An UPDATE that does not assign `updated_at` stamps it.** `issues`, `wisps`,
+`routes` and `federation_peers` declare `updated_at ... ON UPDATE
+CURRENT_TIMESTAMP`, so any UPDATE that changes one of their rows overwrites its
+last-modified time with the migration's wall clock (#5981: 0046/0047's
+`is_blocked` recompute stamped every blocked issue on upgrade). Assign it
+yourself in every UPDATE of those tables, `SET is_blocked = 0, updated_at =
+updated_at`, as 0059 and ignored 0015 do; an explicit assignment suppresses the
+clause. `TestMigrationUpdatesOfAutoStampedTablesKeepUpdatedAt` parses both
+series and fails on an UPDATE that does not.
+
+**So does an UPDATE that only joins one of those tables.** go-mysql-server,
+unlike MySQL, applies the `ON UPDATE` clause of every table a multi-table
+UPDATE joins, and writes the joined row back: 0041's `UPDATE dependencies d
+JOIN issues i ON i.id = d.depends_on_id SET d.depends_on_issue_id = ...`
+stamped every issue a dependency points at. Assign the joined table's
+`updated_at` to itself as well (`SET d.x = ..., i.updated_at = i.updated_at`),
+or test the other table with `IN (SELECT id FROM issues)` instead of joining
+it. The census fails on a join that does neither.
+
+The frozen migrations that predate these rules are listed in `updatedAtGuards`
+(`../migration_updated_at_guard.go`). Main 0035, 0046, 0047 and 0053 and
+ignored 0007 rewrite rows of an auto-stamped table: each entry names the one
+column the step rewrites (`is_blocked` or `ephemeral`). Main 0041, 0047 and
+0053 and ignored 0003 and 0011 join one: each entry lists it as
+`joinStamped`. The runner snapshots `(id, updated_at, <column>)` of the step's
+tables, plus a fingerprint of every other column of a `joinStamped` table,
+before its pre-migration repair and body. After the body, before the step's
+cursor row and commit, it writes the old `updated_at` back on the rows the
+body rewrote: a row whose column changed, and on a `joinStamped` table a row
+whose other columns are all unchanged. A row whose column shows the body left
+it alone, and whose other columns changed, keeps whatever time another writer
+gave it during the step. The census also fails if a guarded step's UPDATE
+assigns anything but its registered column. That registry is closed: a new
+migration self-assigns instead of joining it.
+
 ## Testing
 
 `sqlmock` statement-echo tests cannot exercise any of the above; they assert the

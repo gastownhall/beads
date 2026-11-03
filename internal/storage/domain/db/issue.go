@@ -690,13 +690,13 @@ func (r *issueSQLRepositoryImpl) Exists(ctx context.Context, id string, opts dom
 	return true, nil
 }
 
-// Taken reports whether a fresh create may not mint id into the plane opts
-// names: a live row there holds it, or a retaining sweep retired it.
-func (r *issueSQLRepositoryImpl) Taken(ctx context.Context, id string, opts domain.IssueTableOpts) (bool, error) {
+// Taken reports whether a fresh create may not mint id into either plane: a
+// live row of either table holds it, or a retaining sweep retired it.
+func (r *issueSQLRepositoryImpl) Taken(ctx context.Context, id string) (bool, error) {
 	if id == "" {
 		return false, errors.New("db: Taken: id must not be empty")
 	}
-	taken, err := issueops.IDTakenInTx(ctx, r.runner, pickIssueTable(opts.UseWispsTable), id)
+	taken, err := issueops.IDTakenInTx(ctx, r.runner, id)
 	if err != nil {
 		return false, fmt.Errorf("db: Taken %s: %w", id, err)
 	}

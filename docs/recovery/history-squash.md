@@ -146,7 +146,7 @@ both.
 
 The restart matters: a running sql-server keeps its view of every git
 remote it has used, the force-push above included. Releases up to and
-including v1.3.2 delete the remote's Dolt data refs and then force-push.
+including v1.3.3 delete the remote's Dolt data refs and then force-push.
 Once the refs are deleted under that view, the push through the server
 hangs until a read timeout or reports success having written nothing, and
 the remote is left without its Dolt data; running reset-data again right
@@ -154,7 +154,7 @@ after a restart rebuilds it. Deleting the refs by hand
 (`git push origin :refs/dolt/data`) and force-pushing runs into the same
 trap, so use reset-data.
 
-Through a server, releases after v1.3.2 never delete the data refs first:
+Through a server, bd v1.4.0 and later never delete the data refs first:
 reset-data pushes the fresh store to a temporary ref and then moves the
 data ref to it, so the remote keeps its data until the new store is
 complete, and the restart before it does no harm. The move leaves the

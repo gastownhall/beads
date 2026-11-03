@@ -396,6 +396,15 @@ func applyResolvedConfig(ctx context.Context, beadsDir string, fileCfg *configfi
 		cfg.ServerPortSource = ep.PortSource
 		cfg.ServerPortSharedServer = ep.PortSharedServer
 	}
+	if os.Getenv("BEADS_DOLT_PASSWORD") != "" {
+		socket := cfg.ServerSocket
+		if socket == "" {
+			socket = ep.Socket
+		}
+		if err := CheckServerEndpointTrust(beadsDir, fileCfg, cfg.ServerHost, cfg.ServerPort, socket); err != nil {
+			return err
+		}
+	}
 	// Resolve the server-mode credential (the connection username). In server mode a
 	// configured credential command takes precedence over the static user; it fails
 	// closed (see ApplyGatewayCredential). The command runs only in server mode — an

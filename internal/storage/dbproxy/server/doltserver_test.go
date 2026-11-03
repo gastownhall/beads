@@ -827,7 +827,9 @@ func TestDoltServer_Start_PolicyDeclines(t *testing.T) {
 
 // TestDoltServer_Start_QuietLogLevelUsesDialReadiness pins the fallback: at
 // log_level warning dolt never logs its (info-level) ready line, so Start
-// must accept a dial alone rather than wait for a line that cannot come.
+// must not wait for a line that cannot come: it accepts the dial once the
+// listener is shown to be the child's, or the dial alone where ownership
+// cannot be determined.
 func TestDoltServer_Start_QuietLogLevelUsesDialReadiness(t *testing.T) {
 	bin := requireDolt(t)
 	t.Setenv("HOME", t.TempDir())

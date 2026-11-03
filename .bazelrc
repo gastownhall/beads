@@ -215,6 +215,10 @@ test:dolt-race --norun_validations
 # //internal/storage/dolt:dolt_server_{conformance,full}_test
 # (dolt-server-integration tag): the integration-tagged internal/storage/dolt
 # tests, non-race like the jobs' binary, against a local dolt sql-server.
+# The tag also selects
+# //internal/storage/versioncontrolops:versioncontrolops_dolt_test, that
+# package's race test binary against a local dolt sql-server, which no PR
+# Risk job ran (its BUILD comment says why it is in this tier).
 # The build flags are exactly --config=integration's (the tags, and race for
 # everything the variants do not turn off), so the two lanes share every
 # compile: the variants' race-off binary lands in the configuration
@@ -319,8 +323,9 @@ test:doltserver-cmd --norun_validations
 # test_summary, the eternal 1200s timeout, GO_TEST_WRAP_TESTV=1,
 # -test.parallel=4, local_test_jobs, remote_download_regex and
 # norun_validations. So each member target's test action is unchanged in the
-# sense that matters for caching (aquery: all 63 TestRunner actions' remote
-# action digests are byte-identical, the key RBE's cache lookups use), though
+# sense that matters for caching (aquery at the cutover: all 63 TestRunner
+# actions' remote action digests are byte-identical, the key RBE's cache
+# lookups use; 64 since versioncontrolops_dolt_test), though
 # each action's local actionKey differs since these flags now reach the
 # target via its own env/args rather than the member's build configuration.
 # Cached results carry over both ways regardless.
