@@ -8326,12 +8326,24 @@ components:
         dependency_count:
           type: integer
           format: int64
+          description: >-
+            Number of dependency edges. Absent when the count query failed:
+            an absent key means unknown, a present 0 means the query
+            succeeded and counted none.
         dependent_count:
           type: integer
           format: int64
+          description: >-
+            Number of issues that depend on this one. Absent when the count
+            query failed: an absent key means unknown, a present 0 means the
+            query succeeded and counted none.
         comment_count:
           type: integer
           format: int64
+          description: >-
+            Number of comments on this issue. Absent when the count query
+            failed: an absent key means unknown, a present 0 means the query
+            succeeded and counted none.
         gated_by:
           type: array
           description: >-
@@ -8366,7 +8378,9 @@ components:
             True when `comment_count` is nonzero and `comments` was left out —
             every such issue on a request that did not set `include_comments`.
             Without it, an absent `comments` key is ambiguous between "no
-            comments" and "comments not included in this response".
+            comments" and "comments not included in this response". Set only
+            from a successful count: when the `comment_count` query failed,
+            both `comment_count` and this marker are absent.
         unresolvable_dependencies:
           type: integer
           format: int64

@@ -1301,7 +1301,10 @@ type IssueDetails struct {
 	// it, a positive CommentCount with no Comments key reads as a client bug,
 	// and a caller checking only `.comments` sees `null`/absent and concludes
 	// "no comments" — both wrong (ga-clgh). Never set alongside a populated
-	// Comments slice or a zero count: a true empty stays plain omission.
+	// Comments slice or a zero count: a true empty stays plain omission, and
+	// a count whose query failed supports no omission assertion either way
+	// (GH#7563) — the list path applies the same rule to untrustworthy
+	// counts.
 	CommentsOmitted *bool `json:"comments_omitted,omitempty"`
 
 	// GatedBy names the gates actively blocking this issue — the derived

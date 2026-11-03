@@ -1165,6 +1165,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd show --json` no longer reports a failed count as 0. When the query
+  behind `dependent_count`, `dependency_count` or `comment_count` fails (in
+  practice, a statement past its read deadline on a loaded Dolt server), the
+  detail view published the value the store returned beside its error —
+  usually 0 — so a failed read was indistinguishable from "counted none"
+  and a script guarding on `dependent_count > 6` passed silently; a failed
+  comment count also suppressed `comments_omitted`, and with
+  `--include-comments` the response could carry a comment beside
+  `"comment_count": 0`. The view still succeeds — counts stay best effort —
+  but a count whose query failed is now omitted entirely: an absent key
+  means unknown, a present 0 means the query ran and counted none, and
+  `comments_omitted` is derived only from a successful count. Consumers
+  that need a count can fail closed on the missing key, e.g.
+  `.dependent_count // error("dependent_count unavailable")` in jq; omission
+  alone cannot repair a consumer that ignores missing keys
+  (#7563, reported by @A3Ackerman).
 - `bd create --file` and other batch creates no longer fail with "issue
   already exists" on an id bd generated itself. The batch chose every id
   before it wrote any row, so two of its items could be handed the same short

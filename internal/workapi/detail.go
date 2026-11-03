@@ -206,10 +206,14 @@ func BuildIssueDetails(ctx context.Context, src DetailSource, issue *types.Issue
 			return nil, err
 		}
 		details.Comments = comments
-	} else if commentCount > 0 {
+	} else if commentCountErr == nil && commentCount > 0 {
 		// ga-clgh: comment_count alone announces content exists without
 		// saying the representation is partial. Flag it explicitly so a
 		// caller reading only `.comments` doesn't read absence as "none".
+		// Only from a successful count (GH#7563): an unknown comment
+		// count supports no omission assertion either way, the same rule
+		// the list path applies to counts it could not trust
+		// (list_comments.go's markCommentsOmitted).
 		omitted := true
 		details.CommentsOmitted = &omitted
 	}

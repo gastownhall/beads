@@ -499,6 +499,29 @@ func TestBuildIssueDetails_FailedCountIsAbsentNotZero(t *testing.T) {
 			wantDependency: ptr64(1),
 			wantCommentIDs: []string{"c-1"},
 		},
+		// AC-2: count-only view, failed comment count — both the count
+		// and the omission marker derived from it must stay absent.
+		{
+			name: "ac2_comment_count_failed_returns_zero",
+			src: skewSource{
+				issue: issue, deps: oneDep, depCount: 1,
+				commentCount: 0, commentCountErr: boom,
+			},
+			wantDependent:  ptr64(0),
+			wantDependency: ptr64(1),
+		},
+		{
+			// Catches the incomplete fix that omits the pointer but
+			// still derives comments_omitted from the raw value: 4 is
+			// not evidence that comments were left out.
+			name: "ac2_comment_count_failed_returns_positive",
+			src: skewSource{
+				issue: issue, deps: oneDep, depCount: 1,
+				commentCount: 4, commentCountErr: boom,
+			},
+			wantDependent:  ptr64(0),
+			wantDependency: ptr64(1),
+		},
 	}
 
 	for _, tc := range tests {
