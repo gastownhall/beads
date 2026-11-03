@@ -139,10 +139,11 @@ func TestReadyFilterGoldenDivergences(t *testing.T) {
 		"offset_positive":     "direct never sets Offset; its RunE rejects --offset upstream",
 		"everything_together": "same as offset_positive: Offset only, via --offset 2",
 
-		// Kept: direct's. --max-rows / BEADS_MAX_ROWS is a direct-path knob;
-		// the proxied path rejects a live cap outright and deliberately
-		// ignores it for --claim. cmd/bd resolves it and stamps it onto the
-		// filter, so it stays out of the shared params.
+		// Kept: direct's, and since taken by the proxied route too. The
+		// pre-collapse proxied builder had no cap to thread; cmd/bd now
+		// resolves --max-rows / BEADS_MAX_ROWS on both routes (every arm but
+		// --gated) and stamps it onto the filter, so it stays out of the
+		// shared params.
 		"max_rows_flag":     "direct sets MaxRows/MaxRowsSource; the proxied path has no cap to thread",
 		"max_rows_negative": "direct validates --max-rows; the proxied RunE does that itself before gathering",
 
