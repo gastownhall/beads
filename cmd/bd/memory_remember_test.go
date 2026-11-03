@@ -486,3 +486,78 @@ func TestRememberExplicitKeyWritesUnrestrictedKeys(t *testing.T) {
 		}
 	})
 }
+
+// TestRememberContentOutsideBareKeyGrammarKeepsWriting pins the content path
+// the fix must not narrow: prose derives its key and stores, and empty,
+// separator-only or otherwise underivable content keeps the role's validation
+// refusal. None of these inputs may grow a read branch.
+func TestRememberContentOutsideBareKeyGrammarKeepsWriting(t *testing.T) {
+	t.Run("prose derives its key and stores", func(t *testing.T) {
+		m, fake := setupRememberCommand(t)
+		m.rememberErr = nil
+		insight := "always run tests with the race flag"
+
+		var runErr error
+		stdout, _ := captureStdio(t, func() { runErr = runRemember(insight) })
+		if runErr != nil {
+			t.Fatalf("bd remember %q = %v, want the write to succeed", insight, runErr)
+		}
+		derived := memoryapi.DeriveKey(insight)
+		if len(m.remembers) != 1 || m.remembers[0] != (memoryops.RememberRequest{Key: "", Content: insight}) {
+			t.Errorf("Remember requests = %+v, want one deriving the key from the prose", m.remembers)
+		}
+		if m.rows[derived] != insight {
+			t.Errorf("stored under %q = %q, want the prose", derived, m.rows[derived])
+		}
+		if !strings.Contains(stdout, "Remembered ["+derived+"]") {
+			t.Errorf("stdout = %q, want the write to name the derived key", stdout)
+		}
+		if fake.commits != 1 {
+			t.Errorf("commits = %d, want one for the write", fake.commits)
+		}
+	})
+
+	t.Run("uppercase and underscored prose stays content", func(t *testing.T) {
+		m, _ := setupRememberCommand(t)
+		m.rememberErr = nil
+		insight := "The Auth Module uses JWT not sessions"
+
+		var runErr error
+		captureStdio(t, func() { runErr = runRemember(insight) })
+		if runErr != nil {
+			t.Fatalf("bd remember %q = %v, want the write to succeed", insight, runErr)
+		}
+		if len(m.remembers) != 1 || m.remembers[0].Key != "" {
+			t.Errorf("Remember requests = %+v, want the prose on the content path", m.remembers)
+		}
+	})
+
+	// Inputs the grammar rejects that derive no key keep the role's
+	// underivable-content refusal — the reason "." and "-" are not read
+	// shapes: there is no key there to recall.
+	for _, tc := range []struct{ insight, want string }{
+		{"", "memory content cannot be empty"},
+		{"   ", "memory content cannot be empty"},
+		{".", "could not generate key from content"},
+		{"-", "could not generate key from content"},
+		{"!!!", "could not generate key from content"},
+	} {
+		t.Run("underivable "+tc.insight, func(t *testing.T) {
+			m, fake := setupRememberCommand(t)
+			m.rememberErr = nil
+
+			var runErr error
+			stdout, stderr := captureStdio(t, func() { runErr = runRemember(tc.insight) })
+			exitOne(t, runErr)
+			if !strings.Contains(stdout+stderr, tc.want) {
+				t.Errorf("output = %q / %q, want the role refusal %q", stdout, stderr, tc.want)
+			}
+			if len(m.rows) != 0 {
+				t.Errorf("refusal stored %v, want nothing", m.rows)
+			}
+			if fake.commits != 0 {
+				t.Errorf("commits = %d, want none for a refused write", fake.commits)
+			}
+		})
+	}
+}
