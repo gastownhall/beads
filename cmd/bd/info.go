@@ -221,6 +221,13 @@ type VersionChange struct {
 // versionChanges contains agent-actionable changes for recent versions
 var versionChanges = []VersionChange{
 	{
+		Version: "1.3.3",
+		Date:    "2026-11-03",
+		Changes: []string{
+			"STABLE: first stable 1.3.3 release. Same code as 1.3.3-rc.1; only the version stamp changed. No new migration file and the embedded Dolt engine is unchanged, so upgrading from 1.3.x or 1.3.3-rc.1 is a binary swap. The 1.3.3-rc.1 entry below applies in full: read its CHANGE, UPGRADE and known-issue lines before upgrading from 1.3.2 or earlier. The 1.3.2 'bd recompute-blocked' note still applies (#7037).",
+		},
+	},
+	{
 		Version: "1.3.3-rc.1",
 		Date:    "2026-11-03",
 		Changes: []string{

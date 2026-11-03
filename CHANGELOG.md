@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.3] - 2026-11-03
+
+First stable release of the 1.3.3 patch line. It ships the same code as
+[1.3.3-rc.1]; the only change since that candidate is the version stamp. The
+full notes are in the [1.3.3-rc.1] section below, which covers everything
+since [1.3.2]: security fixes, data-loss fixes and dependency updates, the
+behaviour changes under **Upgrade notes**, and the **Known issues** that
+1.3.3 does not fix, with their workarounds.
+
+There is **no new migration file**, and the embedded Dolt engine is
+unchanged: upgrading from 1.3.x or 1.3.3-rc.1 is a binary swap.
+
+Before promotion, 1.3.3-rc.1 passed gascity's RC Gate with bd pinned to the
+candidate: the same 155 jobs as the 1.3.2 gate, 151 passing and 3 skipped,
+the remaining one being an advisory probe that builds bd from `main`.
+
+### Upgrade notes
+
+- Coming from 1.3.2 or earlier, read the [1.3.3-rc.1] **Upgrade notes**
+  before upgrading. Several commands change what they accept or print:
+  `.beads/.env` keys outside the allowlist are ignored with a warning,
+  `mail.delegate` is read only from the environment and user config,
+  option-shaped remote URLs are refused, `bd rules compact` needs `--force`
+  to apply, and `bd delete` needs full ids.
+- Read the [1.3.3-rc.1] **Known issues**, in particular the warning not to
+  run `bd compact` or `bd flatten` on a clone that adopted migration 0062 by
+  pull ([#7039](https://github.com/gastownhall/beads/issues/7039)).
+- The 1.3.2 upgrade note still applies: run `bd recompute-blocked` once per
+  workspace whose store crossed migration 0059 under bd 1.3.0 or later,
+  which includes any workspace first created by bd 1.2.x or earlier
+  ([#7037](https://github.com/gastownhall/beads/issues/7037)).
+- Coming from 1.3.3-rc.1, nothing changes in behaviour.
+
 ## [1.3.3-rc.1] - 2026-11-03
 
 First release candidate for 1.3.3, a patch on top of 1.3.2 that backports
