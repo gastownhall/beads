@@ -18,8 +18,11 @@ func runGraphProxiedServer(ctx context.Context, out io.Writer, args []string, ma
 	defer uw.Close(ctx)
 
 	if graphAll {
-		subgraphs, err := loadAllGraphSubgraphsUOW(ctx, uw)
+		subgraphs, err := loadAllGraphSubgraphsUOW(ctx, uw, maxRows, maxRowsSource)
 		if err != nil {
+			if capErr := handleMaxRowsError(err); capErr != nil {
+				return capErr
+			}
 			return HandleErrorRespectJSON("loading all issues: %v", err)
 		}
 		return renderGraphAllSubgraphs(out, subgraphs)
@@ -106,11 +109,18 @@ func loadGraphSubgraphUOW(ctx context.Context, uw uow.UnitOfWork, root *types.Is
 	return subgraph, nil
 }
 
-func loadAllGraphSubgraphsUOW(ctx context.Context, uw uow.UnitOfWork) ([]*TemplateSubgraph, error) {
+// loadAllGraphSubgraphsUOW is loadAllGraphSubgraphs on the proxied route, and
+// carries the defensive row cap the same way: on each per-status search, so a
+// status over the cap returns the store's typed error.
+func loadAllGraphSubgraphsUOW(ctx context.Context, uw uow.UnitOfWork, maxRows int, maxRowsSource string) ([]*TemplateSubgraph, error) {
 	var allIssues []*types.Issue
 	for _, status := range []types.Status{types.StatusOpen, types.StatusInProgress, types.StatusBlocked} {
 		statusCopy := status
-		page, err := uw.IssueUseCase().SearchIssues(ctx, "", types.IssueFilter{Status: &statusCopy})
+		page, err := uw.IssueUseCase().SearchIssues(ctx, "", types.IssueFilter{
+			Status:        &statusCopy,
+			MaxRows:       maxRows,
+			MaxRowsSource: maxRowsSource,
+		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to search issues: %w", err)
 		}
