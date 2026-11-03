@@ -29,7 +29,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   paths — `bd dolt status`, `bd dolt clean-databases`, and the `bd doctor`
   checks and `bd doctor --fix` repairs — which build their own connections
   outside the store's open, so none of them can be used to harvest
-  `BEADS_DOLT_PASSWORD` by naming an attacker's host. Dolt remote credentials
+  `BEADS_DOLT_PASSWORD` by naming an attacker's host. A Dolt host or socket
+  that is not a plain host name, IP literal or socket path (for example
+  `localhost#@tcp(evil.example`, which the trust check read as bd's own server
+  while the MySQL driver dialed `evil.example`) is refused before the password
+  is sent. Dolt remote credentials
   (`DOLT_REMOTE_USER`/`DOLT_REMOTE_PASSWORD` for `sync.remote` and federation
   peers) are not covered by these pins.
 

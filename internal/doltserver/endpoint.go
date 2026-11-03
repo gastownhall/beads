@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -235,6 +236,12 @@ func CheckEndpointTrust(beadsDir string, fileCfg *configfile.Config, host string
 	if fileCfg == nil {
 		fileCfg = loadEndpointConfig(beadsDir)
 	}
+	if host == "" {
+		host = fileCfg.GetDoltServerHost()
+	}
+	if err := validateCredentialDialTarget(host, socket); err != nil {
+		return err
+	}
 	fromPrivate := config.PrivateGetenv("BEADS_DOLT_SERVER_HOST") != "" ||
 		(fileCfg.DoltServerHost == "" && !config.IsFromProjectConfig("dolt.host"))
 	if beadsDir == "" {
@@ -246,9 +253,6 @@ func CheckEndpointTrust(beadsDir string, fileCfg *configfile.Config, host string
 			return err
 		}
 	}
-	if host == "" {
-		host = fileCfg.GetDoltServerHost()
-	}
 	if port <= 0 {
 		port = fileCfg.GetDoltServerPort()
 	}
@@ -257,6 +261,40 @@ func CheckEndpointTrust(beadsDir string, fileCfg *configfile.Config, host string
 	}
 	endpoint = "mysql://" + net.JoinHostPort(configfile.UnbracketHost(host), strconv.Itoa(port))
 	return endpointtrust.Check(beadsDir, "dolt-server", endpoint, fromPrivate)
+}
+
+// validateCredentialDialTarget refuses a Dolt host or socket that the trust
+// check and the MySQL driver would read as two different servers. The trust
+// check classifies the host by re-parsing a synthesized mysql://host:port URL,
+// while the dial goes through go-sql-driver's DSN grammar
+// (user:pass@net(addr)/db), which FormatDSN does not escape: a committed host
+// such as "localhost#@tcp(evil.example" parses as "localhost" for the trust
+// check (bd's own server, trusted without a pin) but makes the driver dial
+// evil.example with the password. A socket path holding the DSN delimiters
+// '@', '(' or ')' redirects the driver the same way. A real host is a DNS name
+// or an IP literal, and a real socket path never needs those delimiters, so
+// anything else is refused before a credential is sent (GH#7886).
+func validateCredentialDialTarget(host, socket string) error {
+	if h := configfile.UnbracketHost(host); h != "" {
+		invalid := fmt.Errorf("dolt server host %s is not a host name or IP address; your Dolt credential was not sent", remedy.PrintedValue(host))
+		// Host-name and IP-literal characters only, zones included: netip does
+		// not validate an IPv6 zone's characters, so the charset applies to
+		// the whole host, and anything with ':' or '%' must be an IP literal.
+		for _, r := range h {
+			if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '.' || r == '-' || r == '_' || r == ':' || r == '%') {
+				return invalid
+			}
+		}
+		if strings.ContainsAny(h, ":%") {
+			if _, err := netip.ParseAddr(h); err != nil {
+				return invalid
+			}
+		}
+	}
+	if strings.ContainsAny(socket, "@()") {
+		return fmt.Errorf("dolt server socket %s contains a character ('@', '(' or ')') the connection string cannot carry; your Dolt credential was not sent", remedy.PrintedValue(socket))
+	}
+	return nil
 }
 
 // EnsureTrustedForCredential checks e's endpoint against the workspace pins
