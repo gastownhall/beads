@@ -1664,3 +1664,43 @@ func TestRenderTreeDependentsDoNotBlockTheRoot(t *testing.T) {
 		})
 	}
 }
+
+// TestRenderTreeVisibleBlockerMarksRootWithoutTheFlag (bd-42wxtt): the stored
+// flag is one input, not the only one. A down tree whose root has a visible
+// open direct blocking dependency renders [BLOCKED] when the root's IsBlocked
+// is false or omitted (a server that predates the member, a synthetic
+// external leaf the store never saw). Closed and non-blocking children do
+// not count, and a flagged root with no visible blocker is still [BLOCKED].
+func TestRenderTreeVisibleBlockerMarksRootWithoutTheFlag(t *testing.T) {
+	root := func(blocked bool) *types.TreeNode {
+		return &types.TreeNode{Issue: types.Issue{ID: "R", Title: "R", Status: types.StatusOpen, Priority: 2, IsBlocked: blocked}}
+	}
+	child := func(id string, status types.Status, edge types.DependencyType) *types.TreeNode {
+		return &types.TreeNode{Issue: types.Issue{ID: id, Title: id, Status: status, Priority: 2}, Depth: 1, ParentID: "R", EdgeFromParent: edge}
+	}
+	for _, tt := range []struct {
+		name, direction, want string
+		tree                  []*types.TreeNode
+	}{
+		{"open blocks child", "down", "[BLOCKED]", []*types.TreeNode{root(false), child("B", types.StatusOpen, types.DepBlocks)}},
+		{"in-progress waits-for child", "down", "[BLOCKED]", []*types.TreeNode{root(false), child("W", types.StatusInProgress, types.DepWaitsFor)}},
+		{"synthetic external blocker", "down", "[BLOCKED]", []*types.TreeNode{root(false), child("external:remote:payments", types.StatusOpen, types.DepBlocks)}},
+		{"both, down blocker", "both", "[BLOCKED]", []*types.TreeNode{root(false), child("B", types.StatusOpen, types.DepBlocks)}},
+		{"closed blocker", "down", "[READY]", []*types.TreeNode{root(false), child("B", types.StatusClosed, types.DepBlocks)}},
+		{"parent-child child", "down", "[READY]", []*types.TreeNode{root(false), child("C", types.StatusOpen, types.DepParentChild)}},
+		{"flagged root, no visible blocker", "down", "[BLOCKED]", []*types.TreeNode{root(true)}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			wantRenderedMarker(t, renderedRootLine(t, tt.tree, tt.direction, "R"), tt.want)
+		})
+	}
+
+	t.Run("closed root has no marker", func(t *testing.T) {
+		closed := root(true)
+		closed.Status = types.StatusClosed
+		line := renderedRootLine(t, []*types.TreeNode{closed, child("B", types.StatusOpen, types.DepBlocks)}, "down", "R")
+		if strings.Contains(line, "[BLOCKED]") || strings.Contains(line, "[READY]") {
+			t.Fatalf("closed root line = %q, want no readiness marker", line)
+		}
+	})
+}
