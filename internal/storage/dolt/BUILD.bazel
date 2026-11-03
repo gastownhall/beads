@@ -331,6 +331,7 @@ go_test(
         "ready_claimer_contract_test.go",
         "ready_counter_contract_test.go",
         "ready_deferred_bypass_test.go",
+        "ready_deferred_expiry_test.go",
         "ready_deferred_variants_test.go",
         "relations_contract_test.go",
         "releaser_contract_test.go",
