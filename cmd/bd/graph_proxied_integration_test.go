@@ -208,6 +208,64 @@ func TestProxiedServerGraph(t *testing.T) {
 		}
 	})
 
+	t.Run("max_rows_caps_each_status_of_all", func(t *testing.T) {
+		cp := newSharedProxiedProject(t, bd, "grpall")
+		want := map[string]bool{}
+		for _, status := range []string{"open", "in_progress", "blocked"} {
+			for i := 0; i < 2; i++ {
+				iss := bdProxiedCreate(t, bd, cp.dir, fmt.Sprintf("All %s %d", status, i), "--type", "task")
+				if status != "open" {
+					if out, err := bdProxiedRun(t, bd, cp.dir, "update", iss.ID, "--status", status); err != nil {
+						t.Fatalf("update %s --status %s: %v\n%s", iss.ID, status, err, out)
+					}
+				}
+				want[iss.ID] = true
+			}
+		}
+
+		for _, src := range capSources {
+			env, flags := src.args(2)
+			stdout, stderr, code := capRun(t, cp.dir, env, append([]string{"graph", "--all", "--json"}, flags...)...)
+			if code != 0 {
+				t.Fatalf("%s cap 2: exit = %d, want 0\nstderr:\n%s", src.name, code, stderr)
+			}
+			var subgraphs []struct {
+				Issues []struct {
+					ID string `json:"id"`
+				} `json:"Issues"`
+			}
+			if err := json.Unmarshal([]byte(stdout), &subgraphs); err != nil {
+				t.Fatalf("%s cap 2: unmarshal: %v\n%s", src.name, err, stdout)
+			}
+			got := map[string]bool{}
+			for _, sg := range subgraphs {
+				for _, iss := range sg.Issues {
+					got[iss.ID] = true
+				}
+			}
+			if len(got) != len(want) {
+				t.Errorf("%s cap 2: graph --all holds %v, want all six of %v", src.name, got, want)
+			}
+			for id := range want {
+				if !got[id] {
+					t.Errorf("%s cap 2: graph --all is missing %s", src.name, id)
+				}
+			}
+
+			env, flags = src.args(1)
+			stdout, stderr, code = capRun(t, cp.dir, env, append([]string{"graph", "--all"}, flags...)...)
+			if code != 2 {
+				t.Errorf("%s cap 1: exit = %d, want 2\nstdout:\n%s\nstderr:\n%s", src.name, code, stdout, stderr)
+			}
+			if want := src.source + "=1 exceeded"; !strings.Contains(stderr, want) {
+				t.Errorf("%s cap 1: stderr = %q, want %q", src.name, stderr, want)
+			}
+			if stdout != "" {
+				t.Errorf("%s cap 1: stdout = %q, want nothing on a cap overage", src.name, stdout)
+			}
+		}
+	})
+
 	t.Run("all_has_component", func(t *testing.T) {
 		out, err := bdProxiedRun(t, bd, p.dir, "graph", "--all", "--json")
 		if err != nil {
