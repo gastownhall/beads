@@ -75,6 +75,13 @@ Benefits:
 - No namespace collision (parent hash is unique)
 - Up to 3 levels of nesting
 
+A minted child ID inherits its parent's prefix whatever that prefix is: a
+parent admitted under a foreign prefix with `--force`
+(`bd create "Export" --id export-work --force`) mints `export-work.1` for its
+children with no `--force` of their own, because a minted child's ID cannot be
+spelled except through its parent. An explicit foreign `--id` still requires
+`--force`.
+
 ## ID Configuration
 
 Configure ID prefix and length:

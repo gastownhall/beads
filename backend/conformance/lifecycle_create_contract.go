@@ -349,7 +349,7 @@ func RunLifecycleCreateRefusesAForeignIDPrefix(t *testing.T, ctx context.Context
 	}
 	named := "lccforeign-" + fixture.IssuePrefix + "-named"
 	_, err := fixture.Lifecycle.Create(ctx, publicops.CreateRequest{
-		Actor: "writer",
+		Actor:    "writer",
 		ParentID: foreignParent,
 		Issue: &types.Issue{
 			ID: named, Title: "caller-named child", Status: types.StatusOpen,
@@ -415,7 +415,7 @@ func RunLifecycleCreateMintsAChildUnderAForeignPrefixParent(t *testing.T, ctx co
 	// extended, so the create must land it whatever prefix that namespace
 	// carries.
 	child, err := fixture.Lifecycle.Create(ctx, publicops.CreateRequest{
-		Actor: "writer",
+		Actor:    "writer",
 		ParentID: parent,
 		Issue: &types.Issue{
 			Title: "minted child", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
@@ -434,7 +434,7 @@ func RunLifecycleCreateMintsAChildUnderAForeignPrefixParent(t *testing.T, ctx co
 	// The same mint one level down: a grandchild is derived the same way, from
 	// a row this very case just landed.
 	grandchild, err := fixture.Lifecycle.Create(ctx, publicops.CreateRequest{
-		Actor: "writer",
+		Actor:    "writer",
 		ParentID: parent + ".1",
 		Issue: &types.Issue{
 			Title: "minted grandchild", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
@@ -452,7 +452,7 @@ func RunLifecycleCreateMintsAChildUnderAForeignPrefixParent(t *testing.T, ctx co
 	ordinary := fixture.IssuePrefix + "-lcc-mint-parent"
 	seedLifecycleCreateIssue(t, ctx, fixture, lifecycleCreateIssue(ordinary))
 	ownChild, err := fixture.Lifecycle.Create(ctx, publicops.CreateRequest{
-		Actor: "writer",
+		Actor:    "writer",
 		ParentID: ordinary,
 		Issue: &types.Issue{
 			Title: "child of an ordinary parent", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,

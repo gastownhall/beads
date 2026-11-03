@@ -4,12 +4,17 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/issueops"
 )
 
 // TestCreateDirectModeRejectsAllowEmptyDescriptionWithFile is a regression
@@ -212,5 +217,62 @@ func TestCreateFileDispatchRejectsPositionalTitle(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "--body-file") {
 		t.Fatalf("expected title/--file conflict to hint at --body-file, got: %v (err: %v)", stderr, err)
+	}
+}
+
+// prefixRefusalOps is an issueops.Lifecycle whose Create always answers the
+// wrapped prefix-mismatch refusal the direct route renders. Reaching the
+// route's role-error branch requires it: the route's own explicit-ID precheck
+// answers a foreign unforced --id before the role ever sees it, so only a
+// role-side refusal exercises this render.
+type prefixRefusalOps struct{ issueops.Lifecycle }
+
+func (prefixRefusalOps) Create(context.Context, issueops.CreateRequest) (issueops.CreateResult, error) {
+	return issueops.CreateResult{}, fmt.Errorf("validation failed: prefix validation failed for ref-1: %w", storage.ErrPrefixMismatch)
+}
+
+// TestCreateRefusalTextNamesForceForPrefixMismatch pins the renderer the direct
+// and proxied create routes share: a refusal wrapping storage.ErrPrefixMismatch
+// gains " (use --force to override)" — the one create refusal that has an
+// override the caller can re-offer — and every other error keeps its own text
+// untouched. The wiring arm then drives the direct route's render branch with
+// the role stubbed through the documented newIssueOperations seam.
+func TestCreateRefusalTextNamesForceForPrefixMismatch(t *testing.T) {
+	wrapped := fmt.Errorf("validation failed: prefix validation failed for ref-1: %w", storage.ErrPrefixMismatch)
+	if got := createRefusalText(wrapped); got != wrapped.Error()+" (use --force to override)" {
+		t.Errorf("createRefusalText(wrapped ErrPrefixMismatch) = %q, want the text plus \" (use --force to override)\"", got)
+	}
+	// The hint is the prefix guard's, not every create refusal's: other refusals
+	// keep their own text and their own reporting.
+	occupied := fmt.Errorf("occupied: %w", storage.ErrAlreadyExists)
+	if got := createRefusalText(occupied); got != occupied.Error() {
+		t.Errorf("createRefusalText(ErrAlreadyExists) = %q, want the error's own text unchanged", got)
+	}
+	plain := errors.New("boom")
+	if got := createRefusalText(plain); got != "boom" {
+		t.Errorf("createRefusalText(plain error) = %q, want the error's own text unchanged", got)
+	}
+
+	// The wiring: the direct route renders a role-side prefix refusal naming
+	// the override on stderr.
+	saveAndRestoreGlobals(t)
+	ensureCleanGlobalState(t)
+	savedRootCtx, savedJSONOutput, savedOps := rootCtx, jsonOutput, newIssueOperations
+	t.Cleanup(func() { rootCtx, jsonOutput, newIssueOperations = savedRootCtx, savedJSONOutput, savedOps })
+
+	jsonOutput = false
+	newIssueOperations = func(beads.Storage) (issueops.Lifecycle, error) {
+		return prefixRefusalOps{}, nil
+	}
+
+	var err error
+	stderr := captureStderr(t, func() {
+		err = createCmd.RunE(createCmd, []string{"Refused child"})
+	})
+	if err == nil {
+		t.Fatal("create over a prefix-refusing role should exit nonzero")
+	}
+	if !strings.Contains(stderr, "--force") {
+		t.Errorf("direct route role refusal = %q, want it to name --force", stderr)
 	}
 }

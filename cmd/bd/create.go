@@ -615,7 +615,10 @@ var createCmd = &cobra.Command{
 			if errors.Is(err, storage.ErrAlreadyExists) && explicitID != "" {
 				return HandleErrorRespectJSON("%s already exists; use bd update, or bd import for upsert semantics", explicitID)
 			}
-			return HandleErrorRespectJSON("%v", err)
+			// The role can still refuse an id the local precheck passed (a
+			// prefix the routing resolved late, a backend that disagrees), and
+			// its prefix refusals name the override like the route's own do.
+			return HandleErrorRespectJSON("%s", createRefusalText(err))
 		}
 		// Every post-write read comes from the facade's result snapshot, never
 		// from the local struct: the facade clones its request, so the local

@@ -640,6 +640,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   array (under `closed` with `--suggest-next`, `--continue` or
   `--claim-next`).
 
+### Fixed
+
+- **`bd create --parent` no longer needs `--force` for a parent that already
+  used it ([#7965](https://github.com/gastownhall/beads/issues/7965)).** A
+  child ID the create itself mints (`<parent>.1`, `<parent>.2`, …) is the
+  parent's namespace extended, so a parent admitted under a foreign prefix —
+  `bd create "Parent" --id export-work --force` — now lands its children
+  (`export-work.1`) without the child needing `--force` of its own; before,
+  the embedded, Dolt-server and served routes demanded it while the proxied
+  route landed the same create. Explicit IDs are unchanged: an unforced
+  `--id` outside the configured and allowed prefixes is still refused, and
+  both the direct and proxied routes now name `--force` in that refusal's
+  rendered text and JSON error object.
+
 ### Changed
 
 - **`bd rules compact` previews by default and applies only with `--force`.**
