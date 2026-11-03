@@ -2696,7 +2696,10 @@ func shouldPersistResolvedPortFile() bool {
 
 // verifyProjectIdentity checks that the database belongs to the expected project.
 // If both the local metadata.json and the database have a project_id, they must match.
-// Returns nil if verification passes or is not applicable (missing IDs = old setup).
+// Returns nil if verification passes or is not applicable (missing IDs = old
+// setup), and a projectIdentityReadError refusal when the database's recorded
+// identity cannot be read: a failed read is a failed proof, not an old-style
+// database (PR #7565).
 // openedByInit is Config.OpenedByInit: it only shapes the error's advice (see
 // projectIdentityMismatchError), never whether the check runs.
 func (s *DoltStore) verifyProjectIdentity(ctx context.Context, beadsDir string, openedByInit bool) error {
@@ -2717,7 +2720,14 @@ func (s *DoltStore) verifyProjectIdentity(ctx context.Context, beadsDir string, 
 
 	// Read project ID from database metadata table
 	dbID, err := s.GetMetadata(ctx, "_project_id")
-	if err != nil || dbID == "" {
+	if err != nil {
+		// A failed read is not evidence of an old-style database: it is a
+		// failed proof. Treating it like one silently disarms the
+		// connect-time identity guard exactly when a server warming window
+		// makes reads fail, so refuse instead (PR #7565).
+		return projectIdentityReadError(s.database, err)
+	}
+	if dbID == "" {
 		return nil // old database without project_id — skip
 	}
 
@@ -2725,6 +2735,19 @@ func (s *DoltStore) verifyProjectIdentity(ctx context.Context, beadsDir string, 
 		return projectIdentityMismatchError(localID, dbID, s.database, openedByInit)
 	}
 	return nil
+}
+
+// projectIdentityReadError builds verifyProjectIdentity's refusal when the
+// database's recorded project identity cannot be read: unlike
+// projectIdentityMismatchError, which reports two identities that were both
+// read and differ, this is a failed read — no proof either way — and the
+// open refuses rather than silently adopt the database (the adoption vector
+// GH#4637 Part A guards). The cause stays wrapped, so errors.Is/errors.As
+// reach it.
+func projectIdentityReadError(database string, cause error) error {
+	return fmt.Errorf(
+		"cannot verify project identity — refusing to connect to database %q: %w",
+		database, cause)
 }
 
 // projectIdentityMismatchError builds verifyProjectIdentity's refusal when

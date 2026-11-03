@@ -19,14 +19,20 @@
 package dolt
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	sqlmock "github.com/DATA-DOG/go-sqlmock"
+	mysql "github.com/go-sql-driver/mysql"
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/types"
@@ -949,4 +955,173 @@ func TestCrossProject_IdentityCheck_Gateway_SkipsVerification(t *testing.T) {
 		t.Fatalf("gateway open must skip identity verification (reconciled by resolveInitProjectID instead), got error: %v", err)
 	}
 	gatewayStore.Close()
+}
+
+// --- verifyProjectIdentity hermetic coverage (sqlmock) ---
+//
+// The Dolt-backed tests above exercise the verifier through a real open;
+// these call verifyProjectIdentity itself against a sqlmock db, so read
+// failures that are hard to stage against a live server — an access denial,
+// a corrupted metadata table, a warming-window connection error — each pin
+// the verifier's own decision.
+
+// newIdentityUnitStore builds the fields verifyProjectIdentity reads: a
+// sqlmock db, the database name its refusals name, and a temp beadsDir whose
+// metadata.json records localID (saved even when empty — an empty local
+// project_id is the old-style skip, a distinct case from no metadata.json).
+func newIdentityUnitStore(t *testing.T, localID, database string) (*DoltStore, sqlmock.Sqlmock, string) {
+	t.Helper()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	beadsDir := t.TempDir()
+	if err := (&configfile.Config{ProjectID: localID}).Save(beadsDir); err != nil {
+		t.Fatalf("save metadata.json: %v", err)
+	}
+	return &DoltStore{db: db, database: database}, mock, beadsDir
+}
+
+// expectIdentityRead stages one GetMetadata("_project_id") read: the read
+// transaction's Begin, the query, and the Rollback that always follows. A
+// nil value with a nil err answers with no rows (the key is absent); a
+// non-nil err fails the query itself.
+func expectIdentityRead(mock sqlmock.Sqlmock, value *string, err error) {
+	mock.ExpectBegin()
+	q := mock.ExpectQuery(regexp.QuoteMeta("SELECT value FROM metadata WHERE `key` = ?")).
+		WithArgs("_project_id")
+	switch {
+	case err != nil:
+		q.WillReturnError(err)
+	case value == nil:
+		q.WillReturnRows(sqlmock.NewRows([]string{"value"}))
+	default:
+		q.WillReturnRows(sqlmock.NewRows([]string{"value"}).AddRow(*value))
+	}
+	mock.ExpectRollback()
+}
+
+// TestVerifyProjectIdentity_ReadErrors pins the verifier's decision on a
+// failed identity read (bd-8b6e39 / PR #7565): a database whose _project_id
+// cannot be read offers a failed proof, not an empty (old-style) one, so an
+// applicable check must refuse the open with a named, greppable error that
+// still wraps the underlying cause — not silently skip.
+func TestVerifyProjectIdentity_ReadErrors(t *testing.T) {
+	const localID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+	const database = "shared_db"
+
+	expectRefusal := func(t *testing.T, err error, wantCause error) {
+		t.Helper()
+		if err == nil {
+			t.Fatalf("verifyProjectIdentity() = nil; a failed identity read must refuse, not silently skip")
+		}
+		for _, want := range []string{
+			"cannot verify project identity",
+			`"` + database + `"`,
+		} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("refusal missing %q:\n%s", want, err)
+			}
+		}
+		if wantCause != nil && !errors.Is(err, wantCause) {
+			t.Errorf("refusal does not wrap the underlying cause:\n%v", err)
+		}
+	}
+
+	t.Run("access denial refuses", func(t *testing.T) {
+		denied := &mysql.MySQLError{
+			Number:  1142,
+			Message: "SELECT command denied to user 'bd'@'%' for table 'metadata'",
+		}
+		store, mock, beadsDir := newIdentityUnitStore(t, localID, database)
+		expectIdentityRead(mock, nil, denied)
+		expectRefusal(t, store.verifyProjectIdentity(context.Background(), beadsDir, false), denied)
+	})
+
+	t.Run("generic read error refuses", func(t *testing.T) {
+		cause := errors.New("metadata unreadable: disk error")
+		store, mock, beadsDir := newIdentityUnitStore(t, localID, database)
+		expectIdentityRead(mock, nil, cause)
+		expectRefusal(t, store.verifyProjectIdentity(context.Background(), beadsDir, false), cause)
+	})
+
+	t.Run("refusal covers init and normal opens", func(t *testing.T) {
+		for _, openedByInit := range []bool{false, true} {
+			cause := errors.New("metadata unreadable: disk error")
+			store, mock, beadsDir := newIdentityUnitStore(t, localID, database)
+			expectIdentityRead(mock, nil, cause)
+			expectRefusal(t, store.verifyProjectIdentity(context.Background(), beadsDir, openedByInit), cause)
+		}
+	})
+}
+
+// TestCrossProject_IdentityCheck_ReadErrorRefuses covers the verifier's
+// refusal on a database whose _project_id cannot be READ (bd-8b6e39 /
+// PR #7565). The metadata table exists but cannot yield the identity — here
+// it lost the `value` column the verifier selects — so unlike an absent
+// metadata table (the preserved pre-created-database compatibility skip,
+// pinned by TestCrossProject_IdentityCheck_SoftSkip_NoBdSchema), this is a
+// damaged read, not a schema-less database, and the open must refuse with
+// the named error instead of treating the failure like an empty (old-style)
+// _project_id. The damaged table is also proven unchanged after the refused
+// opens: the refusal fires before any schema write. (The table is dropped
+// and recreated within this disposable per-test database; DROP DATABASE is
+// never run against the shared container.)
+func TestCrossProject_IdentityCheck_ReadErrorRefuses(t *testing.T) {
+	skipIfNoDolt(t)
+	acquireTestSlot()
+	t.Cleanup(releaseTestSlot)
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	f := newIdentityTestFixture(t, "readerr")
+	ownerID := "77777777-7777-7777-7777-777777777777"
+	f.saveLocalProjectID(t, ownerID)
+
+	ownerStore, err := openStoreWithOwnBudget(t, f.config())
+	if err != nil {
+		t.Fatalf("create owner store: %v", err)
+	}
+	if err := ownerStore.SetMetadata(ctx, "_project_id", ownerID); err != nil {
+		ownerStore.Close()
+		t.Fatalf("seed _project_id: %v", err)
+	}
+	if _, err := ownerStore.db.ExecContext(ctx, "DROP TABLE metadata"); err != nil {
+		ownerStore.Close()
+		t.Fatalf("drop metadata table: %v", err)
+	}
+	if _, err := ownerStore.db.ExecContext(ctx,
+		"CREATE TABLE metadata (`key` varchar(255) primary key)"); err != nil {
+		ownerStore.Close()
+		t.Fatalf("recreate damaged metadata table: %v", err)
+	}
+	ownerStore.Close()
+
+	for _, openedByInit := range []bool{false, true} {
+		cfg := f.config()
+		cfg.OpenedByInit = openedByInit
+		reopenStore, reopenErr := openStoreWithOwnBudget(t, cfg)
+		if reopenErr == nil {
+			reopenStore.Close()
+			t.Fatalf("open with OpenedByInit=%v: expected a 'cannot verify project identity' refusal, got nil (identity check silently skipped)", openedByInit)
+		}
+		if !strings.Contains(reopenErr.Error(), "cannot verify project identity") {
+			t.Errorf("open with OpenedByInit=%v: expected a 'cannot verify project identity' refusal, got: %v", openedByInit, reopenErr)
+		}
+	}
+
+	// Refusal before schema writes: the damaged table is exactly as we left
+	// it — still present, and still unreadable the way the verifier reads it.
+	raw := rawTestConn(t, testServerPort)
+	defer raw.Close()
+	var rows int
+	if err := raw.QueryRowContext(ctx, "SELECT COUNT(*) FROM `"+f.dbName+"`.metadata").Scan(&rows); err != nil {
+		t.Fatalf("the damaged metadata table must still exist after the refused opens: %v", err)
+	}
+	var value string
+	if err := raw.QueryRowContext(ctx,
+		"SELECT value FROM `"+f.dbName+"`.metadata WHERE `key` = '_project_id'").Scan(&value); err == nil {
+		t.Fatalf("the damaged metadata table was repaired during the refused open; the refusal must fire before any schema write")
+	}
 }
