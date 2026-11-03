@@ -1219,7 +1219,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dependencies no longer joins the tables it would stamp (#5981). An edit
   another process makes during the step to an issue the step does not rewrite
   keeps its own time. Values already stamped by an earlier upgrade are not
-  repaired.
+  repaired. The check lists each table's columns with `SHOW TABLES` and
+  `SHOW COLUMNS` rather than `INFORMATION_SCHEMA`, which Dolt answers by
+  scanning every database on the server, so on a shared server it adds little
+  to the time other bd commands wait on the migration lock.
 - `bd dolt push <remote>` and `bd dolt pull <remote>` now push to and pull
   from the named remote. bd ignored the name, so `bd dolt push 1st` pushed to
   the default remote and reported "Push complete."; a name that differs from
