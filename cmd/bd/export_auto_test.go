@@ -2010,15 +2010,17 @@ func TestMaybeAutoExport_HistoryRewindDoesNotProveDeletion(t *testing.T) {
 }
 
 // TestMaybeAutoExport_EmbeddedModeFallsBackToFullExportCleanly documents and
-// locks in embedded mode's contract: EmbeddedDoltStore implements neither
-// StateHasher nor DiffStore, so it can never take the incremental path —
+// locks in embedded mode's contract: EmbeddedDoltStore does not implement
+// DiffStore (it gained StateHasher for GH#6955), so it can never take the
+// incremental path —
 // but per the fix (be-shbed / PR #5806 review item 3) it must still fall
 // back to a full export cleanly, rather than silently producing nothing.
 // This is deliberately a fake-store unit test, not a real embedded-mode
 // integration test: exercising a genuine EmbeddedDoltStore end-to-end is
 // out of scope (the bead explicitly excludes implementing DiffStore/
 // StateHasher on it), and fakeHeadOnlyStore already models exactly the
-// capability gap that matters here — no StateHasher, no DiffStore.
+// capability gap that matters here — no DiffStore. Its HEAD-only change
+// detection is the fallback for a store without StateHasher.
 func TestMaybeAutoExport_EmbeddedModeFallsBackToFullExportCleanly(t *testing.T) {
 	initConfigForTest(t)
 	config.Set("export.auto", true)

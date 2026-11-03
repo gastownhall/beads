@@ -25,7 +25,9 @@ import (
 //
 // They run against a fake store that models EMBEDDED mode's capability set —
 // the default open path, and the one the in-window #5806 fix could not reach:
-// no StateHasher, no DiffStore, but CommitExists and (new) HistoryPresence.
+// no DiffStore, but CommitExists and (new) HistoryPresence. Its HEAD-only
+// change detection predates the embedded StateHasher (GH#6955); the guard
+// wiring these tests pin does not depend on it.
 // That is the same deliberate split TestMaybeAutoExport_EmbeddedModeFallsBack
 // CleanlyToFullExport makes: what these assert is the GUARD's wiring — which
 // proof sources it consults, what it does with the answers, what reaches the
@@ -33,7 +35,7 @@ import (
 // pinned by the cross-store contract in internal/storage/storagecontract.
 
 // fakeEmbeddedStore models EmbeddedDoltStore's capability surface for
-// auto-export: HEAD-only change detection, no dolt_diff, but able to answer
+// auto-export's guards: no dolt_diff, but able to answer
 // "was this id ever in my history".
 type fakeEmbeddedStore struct {
 	storage.DoltStorage
