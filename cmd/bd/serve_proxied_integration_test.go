@@ -382,6 +382,39 @@ func TestProxiedServerServeLifecycle(t *testing.T) {
 	}
 }
 
+// TestProxiedServerServeSurvivesProxyIdleGap is GH#7295: a proxied-server
+// workspace whose proxy has a finite idle timeout must keep answering
+// database-backed reads after a quiet period. serve's pool retires its last
+// idle connection after 20s (servePoolLimits.ConnMaxIdleTime); the proxy then
+// sees zero clients and exits after its idle timeout, and serve must not be
+// left dialing the dead port. A 2s proxy timeout stands in for the 30s default
+// so the gap is ~30s instead of ~75s; the shape is the same.
+func TestProxiedServerServeSurvivesProxyIdleGap(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
+	p := newSharedProxiedProject(t, bd, "srvidle", "--proxied-server-idle-timeout", "2s")
+
+	sp := startServe(t, bd, p.dir, bdProxiedEnv(p.dir))
+	t.Cleanup(func() { sp.shutdown(t) })
+
+	if status, body, _ := sp.get(t, "/v0/beads/ready?limit=1"); status != http.StatusOK {
+		t.Fatalf("first read: status = %d, want 200: %v", status, body)
+	}
+
+	// 20s pool idle + 2s proxy idle + margin.
+	time.Sleep(30 * time.Second)
+
+	status, body, _ := sp.get(t, "/v0/beads/ready?limit=1")
+	if status != http.StatusOK {
+		t.Fatalf("read after an idle gap: status = %d, want 200 (serve stranded on the exited proxy's port): %v\nstderr:\n%s",
+			status, body, sp.stderr.String())
+	}
+	if status, _, _ := sp.get(t, "/healthz"); status != http.StatusOK {
+		t.Fatalf("/healthz after recovery: status = %d, want 200", status)
+	}
+}
+
 // TestProxiedServerServeModeGate covers the refusals an operator can actually
 // hit from the command line.
 //

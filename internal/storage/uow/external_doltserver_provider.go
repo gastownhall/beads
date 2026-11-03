@@ -58,19 +58,23 @@ func NewExternalDoltServerUOWProvider(
 	}
 
 	resolved := applyProviderOptions(opts)
-	ep, err := proxy.GetCreateDatabaseProxyServerEndpoint(absServerRootDir, proxy.OpenOpts{
+	openOpts := proxy.OpenOpts{
 		Backend:       proxy.BackendExternal,
 		LogFilePath:   serverLogFilePath,
 		RotateLogFile: resolved.rotateServerLog,
 		External:      external,
 		IdleTimeout:   idleTimeout,
 		Port:          proxyPort,
-	})
+	}
+	ep, err := proxy.GetCreateDatabaseProxyServerEndpoint(absServerRootDir, openOpts)
 	if err != nil {
 		return nil, fmt.Errorf("uow: get proxy endpoint: %w", err)
 	}
 
-	return openAndInitSchema(ctx, proxy.DataNetwork, ep, externalBackendAddress(external), database, rootUser, rootPassword, tlsConfigName, teamServer, expectedProjectID, resolved)
+	resolver := proxy.NewEndpointResolver(absServerRootDir, openOpts, ep)
+	return openWithResolver(ctx, resolver, func() (UnitOfWorkProvider, error) {
+		return openAndInitSchema(ctx, proxy.DataNetwork, ep, resolver, externalBackendAddress(external), database, rootUser, rootPassword, tlsConfigName, teamServer, expectedProjectID, resolved)
+	})
 }
 
 // externalBackendAddress names the external server behind the proxy: its
