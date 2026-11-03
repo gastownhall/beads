@@ -74,6 +74,7 @@ func ExecuteCreate(ctx context.Context, tx *sql.Tx, request publicops.CreateRequ
 		issue.Labels = append(issue.Labels, labels...)
 	}
 	childCounterChanged := false
+	mintedFromParent := false
 	if issue.ID == "" && attempt.ParentID != "" {
 		parentIsWisp := IsActiveWispInTx(ctx, tx, attempt.ParentID)
 		issue.ID, err = GetNextChildIDTx(ctx, tx, attempt.ParentID)
@@ -81,7 +82,15 @@ func ExecuteCreate(ctx context.Context, tx *sql.Tx, request publicops.CreateRequ
 			return publicops.CreateResult{}, nil, ClassifyPublicCreateError(err)
 		}
 		childCounterChanged = !parentIsWisp
+		mintedFromParent = true
 	}
+	// The prefix guard applies to caller-named IDs, not to IDs the create
+	// derives from a parent the guard already admitted (with ForceIDPrefix or
+	// an allowed prefix): a minted child is <parent>.<n>, so holding it to the
+	// configured prefix demanded --force for a row the caller had no way to
+	// name any other way. The unit-of-work backend already worked this way,
+	// which is the parity this skip restores.
+	batch.Opts.SkipPrefixValidation = attempt.ForceIDPrefix || mintedFromParent
 	if err := assignCreateIssueIDInTx(ctx, tx, batch, issue, attempt.Actor, nil); err != nil {
 		return publicops.CreateResult{}, nil, ClassifyPublicCreateError(err)
 	}
@@ -92,7 +101,7 @@ func ExecuteCreate(ctx context.Context, tx *sql.Tx, request publicops.CreateRequ
 	// CreateIssuesInTxWithResult would) only repeats the same reads.
 	createContext := *batch
 	createContext.Opts = storage.BatchCreateOptions{
-		CreateOnly: true, SkipPrefixValidation: attempt.ForceIDPrefix,
+		CreateOnly: true, SkipPrefixValidation: batch.Opts.SkipPrefixValidation,
 		OnSkippedDependency: func(issueID, dependsOnID, reason string) {
 			skipped = append(skipped, skippedDependency{issueID: issueID, dependsOnID: dependsOnID, reason: reason})
 		},

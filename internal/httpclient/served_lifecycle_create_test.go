@@ -87,6 +87,17 @@ func TestServedLifecycleCreateRefusesAForeignIDPrefix(t *testing.T) {
 	conformance.RunLifecycleCreateRefusesAForeignIDPrefix(t, t.Context(), newServedCreateFixture(t, "hlc4"))
 }
 
+// TestServedLifecycleCreateMintsAChildUnderAForeignPrefixParent is the served
+// leg of the minted-child parity GH#7965 asked for, and unlike the two parks
+// above it RUNS whole: the case's arms all end in a create that LANDS, so none
+// of them depends on a typed refusal the wire cannot carry. The refusal the
+// fix removed was the shared create body demanding --force for an id its
+// caller could not have named any other way, and the mint half is exactly
+// what that refusal broke on the served route while the proxied one landed it.
+func TestServedLifecycleCreateMintsAChildUnderAForeignPrefixParent(t *testing.T) {
+	conformance.RunLifecycleCreateMintsAChildUnderAForeignPrefixParent(t, t.Context(), newServedCreateFixture(t, "hlcm"))
+}
+
 // TestServedLifecycleCreateWritesEveryScalarField is PARKED on
 // W-CreateRequest.Issue: seventeen of its members are the create vocabulary the
 // wire publishes and five are not — spec_id, await_id, closed_by_session, and

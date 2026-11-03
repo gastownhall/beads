@@ -335,6 +335,95 @@ func RunLifecycleCreateRefusesAForeignIDPrefix(t *testing.T, ctx context.Context
 	}
 }
 
+// RunLifecycleCreateMintsAChildUnderAForeignPrefixParent pins the parity
+// GH#7965 asked for: a child whose ID the create MINTS inherits the namespace
+// of a parent that is already admitted, whatever prefix that namespace
+// carries. The caller cannot name a minted child's ID — it is <parent>.<n>,
+// derived from a row the prefix guard already let in (with ForceIDPrefix or an
+// allowed prefix) — so holding it to the configured prefix demanded --force
+// for a row the caller had no way to name any other way, and the two backends
+// disagreed about whether to: the unit-of-work one landed it, the shared
+// create body refused it.
+//
+// The parent is seeded through the verb under test, but with the prefix
+// guard's own override and with the seed's success asserted before the child
+// runs — the unit-of-work leg's CreateIssue seed hook routes through its
+// guarded create, so a raw seed of a foreign-prefix parent would be refused
+// there, and the forced create is the guard's own contract rather than a
+// detour around it.
+func RunLifecycleCreateMintsAChildUnderAForeignPrefixParent(t *testing.T, ctx context.Context, fixture LifecycleCreateFixture) {
+	t.Helper()
+
+	// A parent under a prefix no fixture configures, admitted the way every
+	// foreign prefix row is: through the prefix guard's own override. Seeding
+	// raw is not an option here — the unit-of-work leg's CreateIssue hook
+	// routes through its guarded create, which would refuse the parent — and
+	// the forced arm is the guard's own contract (RefusesAForeignIDPrefix's
+	// second half), so the premise is pinned by a case that runs before this
+	// one on every leg.
+	parent := "lccforeign-" + fixture.IssuePrefix + "-parent"
+	if _, err := fixture.Lifecycle.Create(ctx, publicops.CreateRequest{
+		Actor: "writer", ForceIDPrefix: true,
+		Issue: lifecycleCreateIssue(parent),
+	}); err != nil {
+		t.Fatalf("seed the foreign-prefix parent %s: %v", parent, err)
+	}
+
+	// The minted child: no ID, no force. Its ID is the parent's namespace
+	// extended, so the create must land it whatever prefix that namespace
+	// carries.
+	child, err := fixture.Lifecycle.Create(ctx, publicops.CreateRequest{
+		Actor: "writer",
+		ParentID: parent,
+		Issue: &types.Issue{
+			Title: "minted child", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create minting a child under the foreign-prefix parent %s: %v", parent, err)
+	}
+	if child.Issue == nil || child.Issue.ID != parent+".1" {
+		t.Fatalf("minted child result = %+v, want the id %q", child.Issue, parent+".1")
+	}
+	if stored := lifecycleCreateRow(t, ctx, fixture, parent+".1"); stored.Title != "minted child" {
+		t.Errorf("stored %s title = %q, want %q", parent+".1", stored.Title, "minted child")
+	}
+
+	// The same mint one level down: a grandchild is derived the same way, from
+	// a row this very case just landed.
+	grandchild, err := fixture.Lifecycle.Create(ctx, publicops.CreateRequest{
+		Actor: "writer",
+		ParentID: parent + ".1",
+		Issue: &types.Issue{
+			Title: "minted grandchild", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create minting a grandchild under %s: %v", parent+".1", err)
+	}
+	if grandchild.Issue == nil || grandchild.Issue.ID != parent+".1.1" {
+		t.Fatalf("minted grandchild result = %+v, want the id %q", grandchild.Issue, parent+".1.1")
+	}
+
+	// The ordinary case the exemption must not disturb: a parent inside the
+	// configured prefix mints its child exactly as before.
+	ordinary := fixture.IssuePrefix + "-lcc-mint-parent"
+	seedLifecycleCreateIssue(t, ctx, fixture, lifecycleCreateIssue(ordinary))
+	ownChild, err := fixture.Lifecycle.Create(ctx, publicops.CreateRequest{
+		Actor: "writer",
+		ParentID: ordinary,
+		Issue: &types.Issue{
+			Title: "child of an ordinary parent", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create minting a child under the configured-prefix parent %s: %v", ordinary, err)
+	}
+	if ownChild.Issue == nil || ownChild.Issue.ID != ordinary+".1" {
+		t.Fatalf("ordinary parent's child result = %+v, want the id %q", ownChild.Issue, ordinary+".1")
+	}
+}
+
 // RunLifecycleCreateInheritsParentLabels pins
 // CreateRequest.InheritLabelsFromParent — "copies the parent's labels at
 // creation" — against CreateRequest.Issue's own "Labels are authoritative" (both
