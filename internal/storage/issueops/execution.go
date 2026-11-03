@@ -74,6 +74,11 @@ func ExecuteCreate(ctx context.Context, tx *sql.Tx, request publicops.CreateRequ
 		issue.Labels = append(issue.Labels, labels...)
 	}
 	childCounterChanged := false
+	// The prefix guard is for IDs the caller names. A child minted here as
+	// <ParentID>.<n> inherits an existing parent's prefix, which the caller
+	// could not have chosen, so it is admitted without ForceIDPrefix (GH#7965),
+	// as the unit-of-work backend already admits it.
+	skipPrefixValidation := attempt.ForceIDPrefix
 	if issue.ID == "" && attempt.ParentID != "" {
 		parentIsWisp := IsActiveWispInTx(ctx, tx, attempt.ParentID)
 		issue.ID, err = GetNextChildIDTx(ctx, tx, attempt.ParentID)
@@ -81,7 +86,9 @@ func ExecuteCreate(ctx context.Context, tx *sql.Tx, request publicops.CreateRequ
 			return publicops.CreateResult{}, nil, ClassifyPublicCreateError(err)
 		}
 		childCounterChanged = !parentIsWisp
+		skipPrefixValidation = true
 	}
+	batch.Opts.SkipPrefixValidation = skipPrefixValidation
 	if err := assignCreateIssueIDInTx(ctx, tx, batch, issue, attempt.Actor, nil); err != nil {
 		return publicops.CreateResult{}, nil, ClassifyPublicCreateError(err)
 	}
@@ -92,7 +99,7 @@ func ExecuteCreate(ctx context.Context, tx *sql.Tx, request publicops.CreateRequ
 	// CreateIssuesInTxWithResult would) only repeats the same reads.
 	createContext := *batch
 	createContext.Opts = storage.BatchCreateOptions{
-		CreateOnly: true, SkipPrefixValidation: attempt.ForceIDPrefix,
+		CreateOnly: true, SkipPrefixValidation: skipPrefixValidation,
 		OnSkippedDependency: func(issueID, dependsOnID, reason string) {
 			skipped = append(skipped, skippedDependency{issueID: issueID, dependsOnID: dependsOnID, reason: reason})
 		},

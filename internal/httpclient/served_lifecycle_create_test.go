@@ -87,6 +87,13 @@ func TestServedLifecycleCreateRefusesAForeignIDPrefix(t *testing.T) {
 	conformance.RunLifecycleCreateRefusesAForeignIDPrefix(t, t.Context(), newServedCreateFixture(t, "hlc4"))
 }
 
+// TestServedLifecycleCreateMintsAChildUnderAForeignPrefixParent RUNS: its
+// refusal arms assert a refusal and an absent row rather than a sentinel, so
+// nothing in it waits on L-create-prefix.
+func TestServedLifecycleCreateMintsAChildUnderAForeignPrefixParent(t *testing.T) {
+	conformance.RunLifecycleCreateMintsAChildUnderAForeignPrefixParent(t, t.Context(), newServedCreateFixture(t, "hlcchild"))
+}
+
 // TestServedLifecycleCreateWritesEveryScalarField is PARKED on
 // W-CreateRequest.Issue: seventeen of its members are the create vocabulary the
 // wire publishes and five are not — spec_id, await_id, closed_by_session, and
