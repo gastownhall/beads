@@ -369,3 +369,69 @@ VALUES ('flip-1', 'created', 'tester', '2026-07-30 00:00:00', 'evt-live'),
 		t.Errorf("events after MigrateUp = %s, want %s (the copy's rows restored by 0062)", got, want)
 	}
 }
+
+// TestTempResidueUntrackCommitsOnlyTheRemovals pins the repair's scope on a
+// store that also carries unrelated work: a staged config edit and an
+// unstaged one. The repair commit may hold nothing but the intermediate's
+// removal, and both edits must stay uncommitted in the working set.
+func TestTempResidueUntrackCommitsOnlyTheRemovals(t *testing.T) {
+	ctx := t.Context()
+	hub := newTempResidueLineage(t, "residuescope", true).hub
+
+	withRawConn(t, hub.dataDir, hub.database, func(conn *sql.Conn) {
+		mustExecOn(t, ctx, conn, "INSERT INTO dolt_ignore (pattern, ignored) VALUES ('__temp__%', 1)")
+		mustExecOn(t, ctx, conn, "CALL DOLT_ADD('dolt_ignore')")
+		mustExecOn(t, ctx, conn, "CALL DOLT_COMMIT('-m', 'reseed __temp__%')")
+		mustExecOn(t, ctx, conn, "INSERT INTO config (`key`, value) VALUES ('scope.staged', 'staged edit')")
+		mustExecOn(t, ctx, conn, "CALL DOLT_ADD('config')")
+		mustExecOn(t, ctx, conn, "INSERT INTO config (`key`, value) VALUES ('scope.unstaged', 'unstaged edit')")
+
+		if _, err := schema.MigrateUp(ctx, conn); err != nil {
+			t.Fatalf("MigrateUp: %v", err)
+		}
+
+		var repair string
+		err := conn.QueryRowContext(ctx,
+			"SELECT commit_hash FROM dolt_log WHERE message LIKE 'schema: untrack committed __temp__%' LIMIT 1").Scan(&repair)
+		if err != nil {
+			t.Fatalf("finding the repair commit: %v", err)
+		}
+		rows, err := conn.QueryContext(ctx,
+			"SELECT to_table_name, from_table_name, diff_type FROM dolt_diff_summary(?, ?)", repair+"~1", repair)
+		if err != nil {
+			t.Fatalf("reading the repair commit's diff: %v", err)
+		}
+		var changes []string
+		for rows.Next() {
+			var to, from, kind string
+			if err := rows.Scan(&to, &from, &kind); err != nil {
+				t.Fatalf("reading the repair commit's diff: %v", err)
+			}
+			changes = append(changes, fmt.Sprintf("%s%s %s", from, to, kind))
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatalf("reading the repair commit's diff: %v", err)
+		}
+		_ = rows.Close()
+		if want := tempResidueTable + " dropped"; len(changes) != 1 || changes[0] != want {
+			t.Errorf("repair commit changes = %v, want only [%s]", changes, want)
+		}
+
+		for _, key := range []string{"scope.staged", "scope.unstaged"} {
+			var atHead int
+			if err := conn.QueryRowContext(ctx,
+				"SELECT COUNT(*) FROM config AS OF 'HEAD' WHERE `key` = ?", key).Scan(&atHead); err != nil {
+				t.Fatalf("reading config at HEAD: %v", err)
+			}
+			if atHead != 0 {
+				t.Errorf("%s was committed by the repair; unrelated edits must stay uncommitted", key)
+			}
+			if got := configValue(t, ctx, conn, key); got == "" {
+				t.Errorf("%s is gone from the working set", key)
+			}
+		}
+		if got := statusOf(t, ctx, conn, "config"); len(got) == 0 {
+			t.Errorf("config is clean in dolt_status; the unrelated edits were lost or committed")
+		}
+	})
+}
