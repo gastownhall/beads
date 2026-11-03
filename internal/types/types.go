@@ -1287,6 +1287,11 @@ type IssueDetails struct {
 	// Cardinality fields — emitted by default (count-only mode).
 	// Slice fields (Dependents, Comments) are nil when count-only is active.
 	// Use --include-dependents / --include-comments to populate the slices.
+	//
+	// A count whose query failed is left unset (GH#7563): an absent key means
+	// unknown, a present 0 means the query succeeded and counted none. Stores
+	// return a value (usually 0) beside the error; publishing it would let a
+	// guard like `dependent_count > 6` pass on a count nobody read.
 	DependentCount  *int64 `json:"dependent_count,omitempty"`
 	DependencyCount *int64 `json:"dependency_count,omitempty"`
 	CommentCount    *int64 `json:"comment_count,omitempty"`

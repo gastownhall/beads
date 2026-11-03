@@ -106,9 +106,13 @@ func GetIssueOrWisp(ctx context.Context, src DetailSource, id string) (*types.Is
 //
 // Labels, dependencies, and counts are best effort, matching what both CLI
 // paths have always shipped: a detail view missing an edge list still beats
-// refusing to show the issue. The opt-in row streams are not best effort,
-// because a caller that asked for the rows gets a truthful answer or an
-// error rather than a silently short list.
+// refusing to show the issue. Best effort does not mean fabrication: a count
+// whose query failed is omitted entirely rather than published as the value
+// the store returned beside its error (usually 0) — an absent key means
+// unknown, a present 0 means the query succeeded and counted none (GH#7563).
+// The opt-in row streams are not best effort, because a caller that asked
+// for the rows gets a truthful answer or an error rather than a silently
+// short list.
 func BuildIssueDetails(ctx context.Context, src DetailSource, issue *types.Issue, isWisp bool, opts DetailOptions) (*types.IssueDetails, error) {
 	if issue == nil {
 		return nil, errors.New("build issue details: issue must not be nil")
@@ -132,10 +136,21 @@ func BuildIssueDetails(ctx context.Context, src DetailSource, issue *types.Issue
 	// residual and is why this is an ordering mitigation rather than a fix —
 	// only a shared snapshot or a direct count of unresolvable edges closes
 	// it (be-lpi).
+	//
+	// Each count is published only when its query succeeded (GH#7563): the
+	// store returns a value (usually 0) beside the error, and publishing it
+	// would dress an unknown up as data — a script guarding on
+	// `dependent_count > 6` passes silently on a count nobody read. Absence
+	// is the signal: the fields are optional, so unknown and counted-none
+	// stay distinguishable on the wire.
 	dependentCount, dependentCountErr := src.CountDependents(ctx, id, isWisp)
-	details.DependentCount = &dependentCount
+	if dependentCountErr == nil {
+		details.DependentCount = &dependentCount
+	}
 	dependencyCount, dependencyCountErr := src.CountDependencies(ctx, id, isWisp)
-	details.DependencyCount = &dependencyCount
+	if dependencyCountErr == nil {
+		details.DependencyCount = &dependencyCount
+	}
 	commentCount, _ := src.CountComments(ctx, id, isWisp)
 	details.CommentCount = &commentCount
 

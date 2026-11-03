@@ -2,8 +2,10 @@ package workapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage"
@@ -33,6 +35,10 @@ type skewSource struct {
 	depCountErr  error
 	rdepCount    int64
 	rdepCountErr error
+
+	commentCount    int64
+	commentCountErr error
+	comments        []*types.Comment
 }
 
 func (s skewSource) GetIssue(_ context.Context, _ string) (*types.Issue, error) { return s.issue, nil }
@@ -50,13 +56,13 @@ func (s skewSource) CountDependents(_ context.Context, _ string, _ bool) (int64,
 	return s.rdepCount, s.rdepCountErr
 }
 func (s skewSource) CountComments(_ context.Context, _ string, _ bool) (int64, error) {
-	return 0, nil
+	return s.commentCount, s.commentCountErr
 }
 func (s skewSource) IterDependents(_ context.Context, _ string, _ bool) (storage.Iter[types.IssueWithDependencyMetadata], error) {
 	return storage.NewSliceIter(s.dependents), nil
 }
 func (s skewSource) IterComments(_ context.Context, _ string, _ bool) (storage.Iter[types.Comment], error) {
-	return storage.NewSliceIter[types.Comment](nil), nil
+	return storage.NewSliceIter(s.comments), nil
 }
 
 func depRow(id string, t types.DependencyType) *types.IssueWithDependencyMetadata {
@@ -78,16 +84,16 @@ func TestBuildIssueDetails_UnresolvableDependencies(t *testing.T) {
 	issue := &types.Issue{ID: "rp-1"}
 
 	tests := []struct {
-		name  string
-		src   skewSource
-		want  *int64
-		count int64
+		name      string
+		src       skewSource
+		want      *int64
+		wantCount *int64
 	}{
 		{
-			name:  "all edges unresolvable",
-			src:   skewSource{issue: issue, deps: nil, depCount: 1},
-			want:  ptr64(1),
-			count: 1,
+			name:      "all edges unresolvable",
+			src:       skewSource{issue: issue, deps: nil, depCount: 1},
+			want:      ptr64(1),
+			wantCount: ptr64(1),
 		},
 		{
 			name: "one of two edges unresolvable",
@@ -96,8 +102,8 @@ func TestBuildIssueDetails_UnresolvableDependencies(t *testing.T) {
 				deps:     []*types.IssueWithDependencyMetadata{depRow("rp-2", types.DepBlocks)},
 				depCount: 2,
 			},
-			want:  ptr64(1),
-			count: 2,
+			want:      ptr64(1),
+			wantCount: ptr64(2),
 		},
 		{
 			// The negative control. A fully local store must be
@@ -109,37 +115,42 @@ func TestBuildIssueDetails_UnresolvableDependencies(t *testing.T) {
 				deps:     []*types.IssueWithDependencyMetadata{depRow("rp-2", types.DepBlocks)},
 				depCount: 1,
 			},
-			want:  nil,
-			count: 1,
+			want:      nil,
+			wantCount: ptr64(1),
 		},
 		{
-			name:  "no dependencies at all",
-			src:   skewSource{issue: issue, depCount: 0},
-			want:  nil,
-			count: 0,
+			name:      "no dependencies at all",
+			src:       skewSource{issue: issue, depCount: 0},
+			want:      nil,
+			wantCount: ptr64(0),
 		},
 		{
 			// A FAILED read and a SHORT read both leave the slice
 			// empty. Only the first must stay silent: reporting it
 			// would announce a data property on the strength of a
-			// query that never ran.
-			name:  "dependency read failed, not merely short",
-			src:   skewSource{issue: issue, depsErr: errors.New("backend down"), depCount: 3},
-			want:  nil,
-			count: 3,
+			// query that never ran. The count itself succeeded and
+			// stays published, 3 included.
+			name:      "dependency read failed, not merely short",
+			src:       skewSource{issue: issue, depsErr: errors.New("backend down"), depCount: 3},
+			want:      nil,
+			wantCount: ptr64(3),
 		},
 		{
-			// Symmetric: a failed COUNT yields 0, and 0 minus a
-			// populated slice is negative, but say so explicitly
-			// rather than relying on the sign.
+			// A failed COUNT publishes nothing at all: neither the
+			// value the store returned beside its error nor a delta
+			// derived from it. The source answers 5 against one
+			// readable row, and 4 unrenderable edges is exactly the
+			// conclusion the data cannot support — the 5 is unknown,
+			// not evidence (GH#7563).
 			name: "count read failed",
 			src: skewSource{
 				issue:       issue,
 				deps:        []*types.IssueWithDependencyMetadata{depRow("rp-2", types.DepBlocks)},
+				depCount:    5,
 				depCountErr: errors.New("backend down"),
 			},
-			want:  nil,
-			count: 0,
+			want:      nil,
+			wantCount: nil,
 		},
 	}
 
@@ -149,8 +160,11 @@ func TestBuildIssueDetails_UnresolvableDependencies(t *testing.T) {
 			if err != nil {
 				t.Fatalf("BuildIssueDetails: %v", err)
 			}
-			if details.DependencyCount == nil || *details.DependencyCount != tc.count {
-				t.Errorf("DependencyCount = %v, want %d", details.DependencyCount, tc.count)
+			switch {
+			case tc.wantCount == nil && details.DependencyCount != nil:
+				t.Errorf("DependencyCount = %d, want unset: its query failed", *details.DependencyCount)
+			case tc.wantCount != nil && (details.DependencyCount == nil || *details.DependencyCount != *tc.wantCount):
+				t.Errorf("DependencyCount = %v, want %d", details.DependencyCount, *tc.wantCount)
 			}
 			switch {
 			case tc.want == nil && details.UnresolvableDependencies != nil:
@@ -291,3 +305,204 @@ func TestBuildIssueDetails_ConcurrentAddIsNotReportedAsUnresolvable(t *testing.T
 }
 
 func ptr64(v int64) *int64 { return &v }
+
+func ptrBool(v bool) *bool { return &v }
+
+// commentIDs / dependentIDs collapse the collected rows to their ids so a
+// case can assert which rows survived without pinning their full shape.
+func commentIDs(comments []*types.Comment) []string {
+	if len(comments) == 0 {
+		return nil
+	}
+	ids := make([]string, len(comments))
+	for i, c := range comments {
+		ids[i] = c.ID
+	}
+	return ids
+}
+
+func dependentIDs(deps []*types.IssueWithDependencyMetadata) []string {
+	if len(deps) == 0 {
+		return nil
+	}
+	ids := make([]string, len(deps))
+	for i, d := range deps {
+		ids[i] = d.Issue.ID
+	}
+	return ids
+}
+
+func marshalDetails(t *testing.T, details *types.IssueDetails) map[string]json.RawMessage {
+	t.Helper()
+	b, err := json.Marshal(details)
+	if err != nil {
+		t.Fatalf("marshal details: %v", err)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(b, &raw); err != nil {
+		t.Fatalf("unmarshal details: %v", err)
+	}
+	return raw
+}
+
+// checkInt64Key asserts both the pointer and the marshaled key. A want of nil
+// means the value must be wholly absent: a present `null` or a present `0` is
+// the defect this pins (GH#7563) — an unreadable count dressed up as data,
+// indistinguishable from "counted none".
+func checkInt64Key(t *testing.T, raw map[string]json.RawMessage, key string, got, want *int64) {
+	t.Helper()
+	_, present := raw[key]
+	switch {
+	case want == nil:
+		if got != nil {
+			t.Errorf("%s = %d, want unset: its query failed", key, *got)
+		}
+		if present {
+			t.Errorf("%s present in JSON as %s, want the key absent", key, raw[key])
+		}
+	default:
+		if got == nil || *got != *want {
+			t.Errorf("%s = %v, want %d", key, got, *want)
+		}
+		if !present {
+			t.Errorf("%s absent from JSON, want %d", key, *want)
+		}
+	}
+}
+
+func checkBoolKey(t *testing.T, raw map[string]json.RawMessage, key string, got, want *bool) {
+	t.Helper()
+	_, present := raw[key]
+	switch {
+	case want == nil:
+		if got != nil {
+			t.Errorf("%s = %v, want unset", key, *got)
+		}
+		if present {
+			t.Errorf("%s present in JSON as %s, want the key absent", key, raw[key])
+		}
+	default:
+		if got == nil || *got != *want {
+			t.Errorf("%s = %v, want %v", key, got, *want)
+		}
+		if !present {
+			t.Errorf("%s absent from JSON, want %v", key, *want)
+		}
+	}
+}
+
+// TestBuildIssueDetails_FailedCountIsAbsentNotZero pins bd-cyry49 (GH#7563):
+// a count whose query failed is left unset rather than published as the value
+// the store returned beside its error — usually 0 — while a count that
+// succeeded is published as-is, including a genuine zero. Absence is the only
+// honest signal the optional fields have: an absent key means unknown, a
+// present 0 means the query ran and counted none. That is already the rule
+// the derived unresolvable_* fields follow and the list path applies to
+// comments_omitted; the detail path published the meaningless zero instead.
+func TestBuildIssueDetails_FailedCountIsAbsentNotZero(t *testing.T) {
+	ctx := context.Background()
+	issue := &types.Issue{ID: "rp-1", Title: "count repro", Status: types.StatusOpen}
+	boom := errors.New("simulated count failure")
+	oneDep := []*types.IssueWithDependencyMetadata{depRow("rp-2", types.DepBlocks)}
+	oneDependent := []*types.IssueWithDependencyMetadata{depRow("rp-3", types.DepBlocks)}
+
+	tests := []struct {
+		name string
+		src  skewSource
+		opts DetailOptions
+
+		wantDependent         *int64
+		wantDependency        *int64
+		wantComment           *int64
+		wantCommentsOmitted   *bool
+		wantUnresolvableDeps  *int64
+		wantUnresolvableRdeps *int64
+		wantCommentIDs        []string
+		wantDependentIDs      []string
+	}{
+		// AC-1: a failed edge count is omitted; successful siblings stay.
+		{
+			name: "ac1_dependent_count_failed_returns_zero",
+			src: skewSource{
+				issue: issue, deps: oneDep, depCount: 1,
+				rdepCount: 0, rdepCountErr: boom,
+			},
+			wantDependency: ptr64(1),
+			wantComment:    ptr64(0),
+		},
+		{
+			name: "ac1_dependent_count_failed_returns_nonzero",
+			src: skewSource{
+				issue: issue, deps: oneDep, depCount: 1,
+				rdepCount: 7, rdepCountErr: boom,
+			},
+			wantDependency: ptr64(1),
+			wantComment:    ptr64(0),
+		},
+		{
+			name: "ac1_dependency_count_failed_returns_zero",
+			src: skewSource{
+				issue: issue, deps: oneDep,
+				depCount: 0, depCountErr: boom, rdepCount: 2,
+			},
+			wantDependent: ptr64(2),
+			wantComment:   ptr64(0),
+		},
+		{
+			// The failed count answers 5 against one readable row. The
+			// 4-edge difference must not be reported as unresolvable:
+			// the 5 is unknown, not evidence of unrenderable edges.
+			name: "ac1_dependency_count_failed_greater_than_rows",
+			src: skewSource{
+				issue: issue, deps: oneDep,
+				depCount: 5, depCountErr: boom, rdepCount: 2,
+			},
+			wantDependent: ptr64(2),
+			wantComment:   ptr64(0),
+		},
+		{
+			name: "ac1_both_edge_counts_failed",
+			src: skewSource{
+				issue: issue, deps: oneDep,
+				depCount: 9, depCountErr: boom,
+				rdepCount: 8, rdepCountErr: boom,
+			},
+			wantComment: ptr64(0),
+		},
+		{
+			// The readable dependent row survives; only its count is
+			// withheld, and the 9-over-1 difference stays unreported.
+			name: "ac1_dependent_count_failed_under_include_dependents",
+			src: skewSource{
+				issue: issue, deps: oneDep, depCount: 1,
+				dependents: oneDependent, rdepCount: 9, rdepCountErr: boom,
+			},
+			opts:             DetailOptions{IncludeDependents: true},
+			wantDependency:   ptr64(1),
+			wantComment:      ptr64(0),
+			wantDependentIDs: []string{"rp-3"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			details, err := BuildIssueDetails(ctx, tc.src, issue, false, tc.opts)
+			if err != nil {
+				t.Fatalf("BuildIssueDetails: %v", err)
+			}
+			raw := marshalDetails(t, details)
+			checkInt64Key(t, raw, "dependent_count", details.DependentCount, tc.wantDependent)
+			checkInt64Key(t, raw, "dependency_count", details.DependencyCount, tc.wantDependency)
+			checkInt64Key(t, raw, "comment_count", details.CommentCount, tc.wantComment)
+			checkBoolKey(t, raw, "comments_omitted", details.CommentsOmitted, tc.wantCommentsOmitted)
+			checkInt64Key(t, raw, "unresolvable_dependencies", details.UnresolvableDependencies, tc.wantUnresolvableDeps)
+			checkInt64Key(t, raw, "unresolvable_dependents", details.UnresolvableDependents, tc.wantUnresolvableRdeps)
+			if got := commentIDs(details.Comments); !reflect.DeepEqual(got, tc.wantCommentIDs) {
+				t.Errorf("comments ids = %v, want %v", got, tc.wantCommentIDs)
+			}
+			if got := dependentIDs(details.Dependents); !reflect.DeepEqual(got, tc.wantDependentIDs) {
+				t.Errorf("dependents ids = %v, want %v", got, tc.wantDependentIDs)
+			}
+		})
+	}
+}
