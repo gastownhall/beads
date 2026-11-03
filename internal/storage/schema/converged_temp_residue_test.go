@@ -3,6 +3,8 @@ package schema
 import (
 	"context"
 	"testing"
+
+	"github.com/DATA-DOG/go-sqlmock"
 )
 
 // The #7073 gate's healthy-path contracts, pinned through the two callers
@@ -63,6 +65,75 @@ func TestAlreadyConvergedProbesTempResidueBeforeTheLock(t *testing.T) {
 	}
 	if !converged {
 		t.Fatal("alreadyConverged() = false on a healthy database, want true (the fast path must stay armed)")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}
+
+// expectVetoedTempResidueListing primes the gate's HEAD listing returning one
+// committed residue name, followed by the dolt_ignore resolution that vetoes
+// it: an exact-name row with ignored=false, alongside the seeded wildcard the
+// name also matches. The operator's exact-name override must win over the
+// wildcard, so the gate yields nothing eligible.
+func expectVetoedTempResidueListing(mock sqlmock.Sqlmock, table string) {
+	expectTempListing(mock, "", "HEAD", table)
+	expectIgnoreResolution(mock, "", table, []doltIgnoreRow{
+		{pattern: "__temp__%", ignored: true},
+		{pattern: table, ignored: false},
+	})
+}
+
+// TestMigrateUpLeavesAVetoedIntermediateTracked pins the veto half of the
+// gate: a __temp__ name committed at HEAD whose dolt_ignore carries an
+// exact-name override with ignored=false is versioned on purpose. Its
+// presence alone must trigger no repair (no unstage, no COMMIT, no DOLT_RM,
+// none of which the ordered mock would let pass unprimed) and the pass must
+// still report no work.
+func TestMigrateUpLeavesAVetoedIntermediateTracked(t *testing.T) {
+	db, mock := newMockDB(t)
+	failOnSwallowedAdvisory(t)
+
+	expectIgnorePatternSeedNoop(mock, LatestVersion())
+	expectIgnoredCursorGate(mock, "", false, nil, false)
+	expectVetoedTempResidueListing(mock, "__temp__wisp_child_counters")
+	expectNoMigrationWorkNeeded(mock)
+
+	applied, err := MigrateUp(context.Background(), db)
+	if err != nil {
+		t.Fatalf("MigrateUp() error = %v, want nil: a vetoed intermediate must not break the pass", err)
+	}
+	if applied != 0 {
+		t.Fatalf("MigrateUp() = %d with a vetoed intermediate, want 0: the veto must trigger no repair", applied)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations (a vetoed intermediate must stay tracked and unwritten): %v", err)
+	}
+}
+
+// TestAlreadyConvergedIgnoresAVetoedIntermediate pins the same veto on the
+// lock-free fast path: the gate evaluates the listing and the veto's
+// resolution read, yields nothing eligible, and the probe stays armed. A
+// deliberately versioned __temp__ table must not defeat convergence the way
+// genuinely ignored residue does, or every open of that database would take
+// the migration lock forever.
+func TestAlreadyConvergedIgnoresAVetoedIntermediate(t *testing.T) {
+	db, mock := newMockDB(t)
+	failOnSwallowedAdvisory(t)
+
+	expectCurrentDatabase(mock, "testdb")
+	expectNoMigrationWorkNeeded(mock)
+	expectDoltIgnoreRead(mock, unqualifiedDoltIgnore, seededIgnorePatterns(LatestVersion()))
+	expectIgnoredCursorGate(mock, "", false, nil, false)
+	expectVetoedTempResidueListing(mock, "__temp__wisp_child_counters")
+	expectMigrationLockProbe(mock, "testdb", 1)
+
+	converged, err := alreadyConverged(context.Background(), db, "testdb", nil)
+	if err != nil {
+		t.Fatalf("alreadyConverged() error = %v, want nil: a vetoed intermediate must not break the probe", err)
+	}
+	if !converged {
+		t.Fatal("alreadyConverged() = false with a vetoed intermediate, want true (the fast path must stay armed)")
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet SQL expectations: %v", err)
