@@ -6038,7 +6038,7 @@ bd ready
   flag --label-pattern type=string default="" usage="Filter by label glob pattern (e.g., 'tech-*' matches tech-debt, tech-legacy)"
   flag --label-regex type=string default="" usage="Filter by label regex pattern (e.g., 'tech-(debt|legacy)')"
   flag --limit -n type=int default="100" usage="Maximum issues to show (use 0 for unlimited)"
-  flag --max-rows type=int default="0" usage="Hard upper bound on rows fetched from storage. Returns a non-zero exit (code 2) and an error to stderr if exceeded. 0 disables (the default). Overrides BEADS_MAX_ROWS for this invocation. Useful in CI/agent rigs that want a circuit breaker against pathological queries. Not supported under --proxied-server: an explicit --max-rows or BEADS_MAX_ROWS cap errors out rather than silently going unenforced."
+  flag --max-rows type=int default="0" usage="Hard upper bound on rows returned. Returns a non-zero exit (code 2) and an error to stderr if exceeded. 0 disables (the default). Overrides BEADS_MAX_ROWS for this invocation. Useful in CI/agent rigs that want a circuit breaker against pathological queries. Honored on both the direct and the --proxied-server route."
   flag --metadata-field type=stringArray default="[]" usage="Filter by metadata field (key=value, repeatable)"
   flag --mol type=string default="" usage="Filter to steps within a specific molecule"
   flag --mol-type type=string default="" usage="Filter by molecule type: swarm, patrol, or work"

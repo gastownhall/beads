@@ -28,13 +28,17 @@ func runReadyProxiedServer(cmd *cobra.Command, ctx context.Context) error {
 		return HandleError("--offset must be >= 0")
 	}
 
-	// No cap resolver: --max-rows / BEADS_MAX_ROWS has already been resolved
-	// twice before this route runs — once at the proxied front door and once
-	// in the RunE that routed here — and any positive cap was refused by both,
-	// on --claim as much as on a bulk read. Resolving it a third time would
-	// repeat the malformed-value warning and stamp a cap this route cannot
-	// enforce.
-	in, err := gatherReadyInput(cmd, nil)
+	// The cap is resolved here, once, before any store call: the front door
+	// no longer resolves it, so this is where a negative --max-rows is a usage
+	// error and a malformed BEADS_MAX_ROWS warns. The gate-resume arm takes no
+	// cap at all, as on the direct route, which dispatches it before resolving.
+	// A claim carries the cap on its filter but never applies it:
+	// claimNextRequest builds a capless request, on both routes.
+	resolveCap := resolveMaxRows
+	if readyGatedArm(cmd) {
+		resolveCap = nil
+	}
+	in, err := gatherReadyInput(cmd, resolveCap)
 	if err != nil {
 		return err
 	}
@@ -94,6 +98,9 @@ func runReadyProxiedList(ctx context.Context, uw uow.UnitOfWork, in readyInput) 
 	if in.jsonOut {
 		page, err := uw.IssueUseCase().GetReadyWorkWithCounts(ctx, in.filter)
 		if err != nil {
+			if capErr := handleMaxRowsError(err); capErr != nil {
+				return capErr
+			}
 			return HandleError("%v", err)
 		}
 		// The same epilogue issueops.Reader.Ready runs, through the same
@@ -131,6 +138,9 @@ func runReadyProxiedList(ctx context.Context, uw uow.UnitOfWork, in readyInput) 
 
 	page, err := uw.IssueUseCase().GetReadyWork(ctx, in.filter)
 	if err != nil {
+		if capErr := handleMaxRowsError(err); capErr != nil {
+			return capErr
+		}
 		return HandleError("%v", err)
 	}
 	issues, truncated := workapi.FinishPage(page.Items, "", false, in.filter.Limit, page.HasMore)

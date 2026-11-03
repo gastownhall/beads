@@ -452,19 +452,11 @@ var capabilityProbes = []probe{
 
 	// --- flag-level capability ------------------------------------------------
 	{
-		// The cap is refused rather than silently dropped, which is correct.
-		// The fix is threading it through the UOW reader as `list` already
-		// does, not lifting the refusal.
-		name: "ready --max-rows",
-		args: []string{"ready", "--max-rows", "5"},
-		direct: expectation{
-			outcome: outcomeHonored, reason: reasonNA,
-		},
-		proxied: expectation{
-			outcome: outcomeRefusedTyped, code: "proxy.max_rows.unsupported",
-			substr: "--max-rows / BEADS_MAX_ROWS is not supported in proxied-server mode",
-			reason: reasonUnimplemented,
-		},
+		// The proxied ready read threads the cap as `list` does (bd-7fnvhp).
+		name:    "ready --max-rows",
+		args:    []string{"ready", "--max-rows", "5"},
+		direct:  expectation{outcome: outcomeHonored, reason: reasonNA},
+		proxied: expectation{outcome: outcomeHonored, reason: reasonNA},
 	},
 
 	// --- compact -------------------------------------------------------------
