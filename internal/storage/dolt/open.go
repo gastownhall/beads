@@ -376,6 +376,14 @@ func applyResolvedConfig(ctx context.Context, beadsDir string, fileCfg *configfi
 	if cfg.ServerHost == "" {
 		cfg.ServerHost = fileCfg.GetDoltServerHost()
 	}
+	// The socket resolves the way the CLI open's mirror
+	// (resolveDoltServerConnection) does: caller-supplied, else the getter's
+	// BEADS_DOLT_SERVER_SOCKET over metadata.json's dolt_server_socket.
+	// Without it a config open beside a configured socket dialed TCP, where
+	// auto-start could start a second server with an empty database.
+	if cfg.ServerSocket == "" {
+		cfg.ServerSocket = fileCfg.GetDoltServerSocket()
+	}
 	// The port and the password come from the endpoint New will dial
 	// (FillServerEndpoint): the store's port rule, the legacy BEADS_DOLT_PORT
 	// included, and the credentials-file entry for that host and port. The

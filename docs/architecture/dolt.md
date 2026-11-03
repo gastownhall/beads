@@ -366,7 +366,12 @@ instead of TCP. This avoids port conflicts between concurrent projects and is
 useful in sandboxed environments (e.g., Claude Code) where file-level access
 control is simpler than network allowlists. The Dolt server must be started
 with `dolt sql-server --socket <path>`. Auto-start is not supported in socket
-mode.
+mode. Metadata-driven Dolt opens (`beads.OpenFromConfig` and the other config
+openings, `bd doctor`'s library opens included) resolve the socket with the
+same precedence as the CLI: caller-supplied, then `BEADS_DOLT_SERVER_SOCKET`,
+then metadata.json's `dolt_server_socket`; a configured socket stays a
+preference, with TCP fallback when the socket is down and the configured port
+answers. (A direct `beads.Open` does not read metadata.json at all.)
 
 Switch to server mode when you need:
 - Multiple agents writing simultaneously

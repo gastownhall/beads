@@ -657,6 +657,58 @@ func TestApplyResolvedConfig(t *testing.T) {
 		}
 	})
 
+	t.Run("socket takes caller > env > metadata precedence (bd-1yc9q0)", func(t *testing.T) {
+		// The credential command runs during the resolve in server mode;
+		// clearing it keeps that run out of this precedence table.
+		t.Setenv("BEADS_DOLT_CREDENTIAL_COMMAND", "")
+		socketFileCfg := func(socket string) *configfile.Config {
+			return &configfile.Config{
+				Backend:          configfile.BackendDolt,
+				DoltMode:         configfile.DoltModeServer,
+				DoltDatabase:     "socket_prec",
+				DoltServerSocket: socket,
+			}
+		}
+		for _, tc := range []struct {
+			name   string
+			caller string // the socket the caller preset, if any
+			env    string // BEADS_DOLT_SERVER_SOCKET
+			want   string
+		}{
+			{name: "metadata socket reaches the store config", want: "/metadata/dolt.sock"},
+			{name: "caller socket wins over env and metadata", caller: "/caller/dolt.sock", env: "/env/dolt.sock", want: "/caller/dolt.sock"},
+			{name: "env socket wins over metadata", env: "/env/dolt.sock", want: "/env/dolt.sock"},
+			{name: "no socket anywhere leaves the socket empty", want: ""},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Setenv("BEADS_DOLT_SERVER_SOCKET", tc.env)
+				fileCfg := socketFileCfg("/metadata/dolt.sock")
+				if tc.want == "" {
+					fileCfg.DoltServerSocket = ""
+				}
+				cfg := &Config{ServerSocket: tc.caller}
+				if err := applyResolvedConfig(context.Background(), t.TempDir(), fileCfg, cfg); err != nil {
+					t.Fatalf("applyResolvedConfig: %v", err)
+				}
+				if cfg.ServerSocket != tc.want {
+					t.Fatalf("ServerSocket = %q, want %q", cfg.ServerSocket, tc.want)
+				}
+				if tc.want == "" {
+					// No invented default socket, and the rest of the
+					// endpoint as before: the host and the port the legacy
+					// metadata subtest above resolves.
+					if cfg.ServerHost != fileCfg.GetDoltServerHost() {
+						t.Fatalf("ServerHost = %q, want %q unchanged", cfg.ServerHost, fileCfg.GetDoltServerHost())
+					}
+					beadsDir := cfg.BeadsDir
+					if want := doltserver.DefaultConfig(beadsDir).Port; cfg.ServerPort != want {
+						t.Fatalf("ServerPort = %d, want %d unchanged", cfg.ServerPort, want)
+					}
+				}
+			})
+		}
+	})
+
 	t.Run("pool timeouts populate from env vars (bd-vz0y9)", func(t *testing.T) {
 		t.Setenv("BEADS_DOLT_POOL_READ_TIMEOUT", "90s")
 		t.Setenv("BEADS_DOLT_POOL_WRITE_TIMEOUT", "45")
@@ -785,6 +837,26 @@ func TestApplyResolvedConfig(t *testing.T) {
 			t.Fatalf("ServerPortSource = %q, want %q", cfg.ServerPortSource, doltserver.PortSourceCallerExplicit)
 		}
 	})
+}
+
+// bd-1yc9q0: metadata.json's dolt_server_socket must reach the store config on
+// NewFromConfig* opens, as it does on the CLI's resolveDoltServerConnection.
+func TestApplyResolvedConfigMetadataSocket(t *testing.T) {
+	t.Setenv("BEADS_DOLT_SERVER_SOCKET", "")
+	t.Setenv("BEADS_DOLT_CREDENTIAL_COMMAND", "")
+	fileCfg := &configfile.Config{
+		Backend:          configfile.BackendDolt,
+		DoltMode:         configfile.DoltModeServer,
+		DoltDatabase:     "rp",
+		DoltServerSocket: "/metadata/dolt.sock",
+	}
+	cfg := &Config{}
+	if err := applyResolvedConfig(context.Background(), t.TempDir(), fileCfg, cfg); err != nil {
+		t.Fatalf("applyResolvedConfig: %v", err)
+	}
+	if cfg.ServerSocket != "/metadata/dolt.sock" {
+		t.Fatalf("ServerSocket = %q, want metadata.json's /metadata/dolt.sock", cfg.ServerSocket)
+	}
 }
 
 // TestConfigConstructorsRefuseHistoricalSQLiteWorkspace pins that every
