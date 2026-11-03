@@ -50,7 +50,10 @@ bd init refuses: remote 'origin' already has Dolt history (refs/dolt/data).
 data-safety guard, and only that guard: neither flag bypasses this refusal
 or the [missing server-side database refusal](#init-missing-server-db).
 `bd init --from-jsonl` selects a local JSONL export as the source. But the
-remote already has project history. Proceeding would create an orphan local
+remote already has project history — history `bd` actually read (the
+`refs/dolt/data` probe reached the remote and found the ref; a remote the
+probe could not read is a different situation, below). Proceeding would
+create an orphan local
 Dolt branch with no common ancestor on origin. The
 next `bd dolt push` would either fail (no common ancestor) or — worse, if
 force-pushed — destroy the team's data.
@@ -93,6 +96,28 @@ See `bd help init-safety` for the token format.
 After `bd init --reinit-local --discard-remote`, your next
 `bd dolt push` must be a history-replacing push. Coordinate with your
 team before doing this.
+
+### If bd could not read the remote at all
+
+This refusal fires on a remote whose Dolt history was **observed** — the
+`refs/dolt/data` probe read the remote and found the ref. A probe that
+could not read the remote at all (unreachable URL, missing credentials,
+transport the probe cannot speak) observed nothing, and the two are
+treated differently:
+
+- A **git origin** (the remote your repository was cloned from, not a
+  `sync.remote` you configured for bd) that cannot be read is not treated
+  as confirmed history. `bd init` — plain, `--reinit-local`, `--force`,
+  or `--from-jsonl` — proceeds with a fresh local database and warns
+  `could not verify refs/dolt/data` / `initializing a fresh local database
+  without verifying the git origin's Dolt history`. Nothing is claimed
+  about the remote either way: it was never read. Run `bd bootstrap` with
+  working credentials to adopt the remote instead.
+- A **configured or explicit remote** (`sync.remote` or `--remote`) that
+  cannot be read still refuses local-source init with exit code 10 and
+  the ordinary refusal text above: a URL named for bd is one bd is
+  expected to read, so an unreadable one does not become an automatic
+  bypass.
 
 ---
 

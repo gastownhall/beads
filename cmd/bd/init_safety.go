@@ -9,7 +9,10 @@ package main
 // it never authorizes silent divergence of remote history. When origin
 // advertises `refs/dolt/data`, `bd init` refuses unless the caller
 // authorizes the cross-boundary operation via `--discard-remote` + a
-// destroy-token.
+// destroy-token. A probe that could not READ the remote observed no
+// history: an unverified origin falls back to local initialization, while
+// an unverified configured/explicit remote keeps the conservative gates
+// (gascity#7665).
 //
 // Error-message contract: no runtime error may emit a complete destructive
 // invocation. Flag identifiers and safe-tool names are permitted; token
@@ -126,6 +129,24 @@ type RemoteSafetyInput struct {
 	// Observed state.
 	RemoteHasDoltData bool
 
+	// RemoteProbeUnknown is true when the refs/dolt/data probe could not
+	// observe the remote at all — unreachable URL, missing credentials,
+	// transport the probe cannot speak. The probe helper still resolves the
+	// fail-closed RemoteHasDoltData above to true (an unreadable remote must
+	// never read as confirmed absence), so this field is what tells the
+	// decision that a true RemoteHasDoltData here means "unverified", not
+	// "confirmed history".
+	RemoteProbeUnknown bool
+
+	// RemoteIsGitOrigin is true only when the probed URL came from the git
+	// origin fallback — a repository the caller cloned, whose origin nobody
+	// configured as a sync remote for bd. It is false for a configured
+	// sync.remote and for an explicit --remote: a URL the user (or project
+	// config) named for bd is a remote bd is expected to read, so an
+	// unreadable one may not silently fall back to local initialization the
+	// way an unverified origin does.
+	RemoteIsGitOrigin bool
+
 	// IsInteractive is true when the caller is attached to a TTY.
 	// Interactive callers can prompt for destroy-token confirmation, so the
 	// decision returned for an interactive caller that supplied NO token
@@ -151,8 +172,10 @@ type RemoteSafetyDecision struct {
 // function — never add a new `&& !someFlag` at the call site. See the
 // guard matrix test in init_safety_test.go.
 func CheckRemoteSafety(in RemoteSafetyInput) RemoteSafetyDecision {
-	// No remote data → no cross-boundary concern. Proceed.
-	if !in.RemoteHasDoltData {
+	// No remote data → no cross-boundary concern. Proceed. An UNKNOWN probe
+	// is not absence: nothing was observed, so it must not take this exit —
+	// that is the conflation this tri-state fixes (gascity#7665).
+	if !in.RemoteHasDoltData && !in.RemoteProbeUnknown {
 		return RemoteSafetyDecision{Action: ActionNoRemoteData, Reason: "no-remote-data"}
 	}
 
@@ -162,6 +185,25 @@ func CheckRemoteSafety(in RemoteSafetyInput) RemoteSafetyDecision {
 	// is treated as override-intent too — naming discard explicitly
 	// implies the user knows the remote has data and wants to replace it.
 	userOverride := in.Force || in.ReinitLocal || in.FromJSONL || in.DiscardRemote
+
+	if in.RemoteProbeUnknown {
+		// The probe never observed the remote, so nothing about its history
+		// is confirmed — not its presence, and not its absence either. An
+		// inferred git origin falls back to local initialization: plain init
+		// already did (the bootstrap clone would run against the same
+		// unreachable origin and fail the same way the probe did), and a
+		// local-source override is not silently diverging history that was
+		// never observed to exist. Discard intent opts out of the fallback:
+		// the caller named the destructive operation, so the destroy-token
+		// flow below runs unchanged.
+		if in.RemoteIsGitOrigin && !in.DiscardRemote {
+			return RemoteSafetyDecision{Action: ActionNoRemoteData, Reason: "origin-unverified"}
+		}
+		// An unverified CONFIGURED or EXPLICIT remote does not get the
+		// fallback: a URL named for bd is one bd is expected to read, and
+		// this decision continues below with the conservative reading
+		// (unknown counts as has-data for the refusal and bootstrap gates).
+	}
 
 	// Remote has data, user did not override anything. Bootstrap is the
 	// safe adoption path — this is the existing correct behavior.

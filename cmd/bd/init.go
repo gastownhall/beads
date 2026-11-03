@@ -1109,6 +1109,8 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			var earlySyncURL string
 			earlyRemoteSource := initSyncRemoteNone
 			earlyRemoteHasDoltData := false
+			earlyProbeUnknown := false
+			earlyRemoteIsGitOrigin := false
 			var earlyProbeNote string
 			if !initRemoteChanged {
 				if _, err := resolveSyncRemoteChecked(); err != nil {
@@ -1125,6 +1127,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				if fromJSONL {
 					hasData, err := gitRemoteHasDoltDataRefStatus(earlySyncURL)
 					earlyRemoteHasDoltData, earlyProbeNote = resolveRemoteHasDoltDataProbe(earlySyncURL, hasData, err)
+					earlyProbeUnknown = err != nil
 				}
 			} else if earlyRemoteSource == initSyncRemoteConfigured {
 				// Probe refs/dolt/data — do NOT treat mere presence of
@@ -1133,6 +1136,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				// --reinit-local / local init.
 				hasData, err := gitRemoteHasDoltDataRefStatus(earlySyncURL)
 				earlyRemoteHasDoltData, earlyProbeNote = resolveRemoteHasDoltDataProbe(earlySyncURL, hasData, err)
+				earlyProbeUnknown = err != nil
 			} else if earlyRemoteSource == initSyncRemoteNone && !stealth && !keepHomeClean && isGitRepo() && !isBareGitRepo() {
 				// Not under keepHomeClean: a repository git finds from the
 				// home is not the project's, so its origin is not this
@@ -1141,6 +1145,8 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 					earlySyncURL = normalizeRemoteURL(originURL)
 					hasData, probeErr := gitOriginHasDoltDataRefStatus()
 					earlyRemoteHasDoltData, earlyProbeNote = resolveRemoteHasDoltDataProbe(earlySyncURL, hasData, probeErr)
+					earlyProbeUnknown = probeErr != nil
+					earlyRemoteIsGitOrigin = true
 				}
 			}
 			if earlySyncURL != "" {
@@ -1148,14 +1154,16 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 					fmt.Fprintf(os.Stderr, "%s %s\n", ui.RenderWarn("!"), earlyProbeNote)
 				}
 				earlyDecision := CheckRemoteSafety(RemoteSafetyInput{
-					Force:             force,
-					ReinitLocal:       reinitLocal,
-					FromJSONL:         fromJSONL,
-					DiscardRemote:     discardRemote,
-					DestroyToken:      destroyToken,
-					ExpectedToken:     FormatDestroyToken(prefix),
-					RemoteHasDoltData: earlyRemoteHasDoltData,
-					IsInteractive:     term.IsTerminal(int(os.Stdin.Fd())),
+					Force:              force,
+					ReinitLocal:        reinitLocal,
+					FromJSONL:          fromJSONL,
+					DiscardRemote:      discardRemote,
+					DestroyToken:       destroyToken,
+					ExpectedToken:      FormatDestroyToken(prefix),
+					RemoteHasDoltData:  earlyRemoteHasDoltData,
+					RemoteProbeUnknown: earlyProbeUnknown,
+					RemoteIsGitOrigin:  earlyRemoteIsGitOrigin,
+					IsInteractive:      term.IsTerminal(int(os.Stdin.Fd())),
 				})
 				if _, err := handleRemoteSafetyDecision(earlyDecision, prefix, earlySyncURL, destroyToken, func() (bool, error) {
 					switch earlyRemoteSource {
@@ -1489,6 +1497,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		syncFromRemote := false
 		syncURLFromGitOrigin := false
 		remoteHasDoltData := false
+		lateProbeUnknown := false
 		var lateProbeNote string
 
 		if syncURL != "" {
@@ -1506,19 +1515,25 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				// from a configured URL alone (GH#4861).
 				hasData, err := gitRemoteHasDoltDataRefStatus(syncURL)
 				remoteHasDoltData, lateProbeNote = resolveRemoteHasDoltDataProbe(syncURL, hasData, err)
+				lateProbeUnknown = err != nil
 			}
 			if lateProbeNote != "" {
 				fmt.Fprintf(os.Stderr, "%s %s\n", ui.RenderWarn("!"), lateProbeNote)
 			}
 			if !syncFromRemote {
 				decision := CheckRemoteSafety(RemoteSafetyInput{
-					Force:             force,
-					ReinitLocal:       reinitLocal,
-					FromJSONL:         fromJSONL,
-					DiscardRemote:     discardRemote,
-					DestroyToken:      destroyToken,
-					ExpectedToken:     FormatDestroyToken(prefix),
-					RemoteHasDoltData: remoteHasDoltData,
+					Force:              force,
+					ReinitLocal:        reinitLocal,
+					FromJSONL:          fromJSONL,
+					DiscardRemote:      discardRemote,
+					DestroyToken:       destroyToken,
+					ExpectedToken:      FormatDestroyToken(prefix),
+					RemoteHasDoltData:  remoteHasDoltData,
+					RemoteProbeUnknown: lateProbeUnknown,
+					// A configured or explicit --remote URL is not the git
+					// origin fallback: an unreadable one may not silently
+					// fall back to local initialization.
+					RemoteIsGitOrigin: false,
 					IsInteractive:     term.IsTerminal(int(os.Stdin.Fd())),
 				})
 				bootstrap, err := handleRemoteSafetyDecision(decision, prefix, syncURL, destroyToken, func() (bool, error) {
@@ -1547,36 +1562,35 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				}
 
 				decision := CheckRemoteSafety(RemoteSafetyInput{
-					Force:             force,
-					ReinitLocal:       reinitLocal,
-					FromJSONL:         fromJSONL,
-					DiscardRemote:     discardRemote,
-					DestroyToken:      destroyToken,
-					ExpectedToken:     FormatDestroyToken(prefix),
-					RemoteHasDoltData: remoteHasDoltData,
-					IsInteractive:     term.IsTerminal(int(os.Stdin.Fd())),
+					Force:              force,
+					ReinitLocal:        reinitLocal,
+					FromJSONL:          fromJSONL,
+					DiscardRemote:      discardRemote,
+					DestroyToken:       destroyToken,
+					ExpectedToken:      FormatDestroyToken(prefix),
+					RemoteHasDoltData:  remoteHasDoltData,
+					RemoteProbeUnknown: probeErr != nil,
+					RemoteIsGitOrigin:  true,
+					IsInteractive:      term.IsTerminal(int(os.Stdin.Fd())),
 				})
 
 				bootstrap, err := handleRemoteSafetyDecision(decision, prefix, syncURL, destroyToken, gitOriginHasDoltDataRefStatus, remoteHasDoltData, &remoteDivergenceConfirmed)
 				if err != nil {
 					return err
 				}
-				if bootstrap {
-					if probeErr != nil {
-						// The fail-closed UNKNOWN kept the refusal gate shut
-						// above, but reaching here means no override flag was
-						// passed and there is no local history to protect —
-						// and the bootstrap clone would run against the same
-						// origin the probe could not reach, turning every
-						// credential-less clone of a private repo into a hard
-						// init failure. Fall back to a fresh local database,
-						// which is what init did here before the probe existed.
-						if !quiet {
-							fmt.Printf("  %s Could not verify the git origin's Dolt history; initialized a fresh local database\n", ui.RenderWarn("!"))
-						}
-					} else {
-						syncFromRemote = true
-					}
+				// The central decision now produces the plain-init fallback
+				// itself: an unverified origin never confirmed any history,
+				// so it comes back ActionNoRemoteData ("origin-unverified")
+				// rather than ActionBootstrap, and no clone runs against the
+				// same origin the probe could not reach.
+				syncFromRemote = bootstrap
+				if decision.Reason == "origin-unverified" {
+					// Truthful and only truthful: the remote's history was
+					// NOT verified — neither present nor absent. Point at the
+					// adoption path with working credentials. Warn on stderr
+					// so it survives --quiet.
+					fmt.Fprintf(os.Stderr, "%s Initializing a fresh local database without verifying the git origin's Dolt history (%s). Run 'bd bootstrap' with working credentials to adopt the remote instead.\n",
+						ui.RenderWarn("!"), remedy.PrintedValue(syncURL))
 				}
 			}
 		}
@@ -3638,12 +3652,17 @@ func shouldWriteInitDoltRemote(gateway bool, syncURL string, syncFromRemote, syn
 }
 
 // resolveRemoteHasDoltDataProbe fails closed: a probe error is UNKNOWN, and
-// ADR-0002 treats unknown as has-data (refuse) rather than no-data. Returns
-// the resolved bool for CheckRemoteSafety plus a note naming the probe
-// failure (empty on success) so the caller can tell the user why.
+// the resolved bool keeps unknown reading as has-data (never as no-data) so
+// no caller mistakes an unreadable remote for a confirmed-empty one. What the
+// bool means — observed history vs unverified — is CheckRemoteSafety's to
+// decide, from each call site's retained probe error (RemoteProbeUnknown).
+// Returns the resolved bool plus a note naming the probe failure (empty on
+// success) so the caller can tell the user why. The note states the fact
+// only: it does not claim the remote has history, because nothing was
+// observed.
 func resolveRemoteHasDoltDataProbe(syncURL string, hasData bool, err error) (bool, string) {
 	if err != nil {
-		return true, fmt.Sprintf("could not verify refs/dolt/data on %s (%s); treating remote as having Dolt history", remedy.PrintedValue(syncURL), remedy.PrintedText(err.Error()))
+		return true, fmt.Sprintf("could not verify refs/dolt/data on %s (%s)", remedy.PrintedValue(syncURL), remedy.PrintedText(err.Error()))
 	}
 	return hasData, ""
 }

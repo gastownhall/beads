@@ -118,10 +118,130 @@ func TestInitFreshWithUnreachableGitOriginSucceeds(t *testing.T) {
 		t.Fatalf(".beads should have been created by a successful init: %v", err)
 	}
 
+	// The fallback's wording is part of the contract (gascity#7665): the
+	// user must be told the origin's history was UNVERIFIED, never that the
+	// remote has history (nothing was observed) or that it has none (equally
+	// unobserved). Warnings go to stderr, so they survive --quiet.
+	output := out.String()
+	if !strings.Contains(output, "could not verify") {
+		t.Errorf("unverified-origin init must say the remote could not be verified:\n%s", output)
+	}
+	for _, banned := range []string{"already has Dolt history", "has no Dolt data"} {
+		if strings.Contains(output, banned) {
+			t.Errorf("unverified-origin init must not claim %q:\n%s", banned, output)
+		}
+	}
+
 	if _, err := os.Stat(filepath.Join(homeDir, ".beads", "eventsData")); !os.IsNotExist(err) {
 		t.Errorf("metrics queue dir was created under the isolated HOME (err=%v); "+
 			"the detached send-metrics child will race t.TempDir cleanup "+
 			"(see test_repo_beads_guard_test.go:118)", err)
+	}
+}
+
+// TestInitReinitLocalWithUnreachableGitOriginSucceeds is the override-path
+// twin of TestInitFreshWithUnreachableGitOriginSucceeds (gascity#7665): an
+// origin the probe cannot reach never confirmed any Dolt history, so
+// `bd init --reinit-local` must not refuse with "remote already has Dolt
+// history" (ExitRemoteDivergenceRefused).
+func TestInitReinitLocalWithUnreachableGitOriginSucceeds(t *testing.T) {
+	bdBin := buildBDForInitTests(t)
+
+	workDir := t.TempDir()
+	runGitForBootstrapTest(t, workDir, "init", "-b", "main")
+	runGitForBootstrapTest(t, workDir, "config", "core.hooksPath", ".git/hooks")
+	runGitForBootstrapTest(t, workDir, "remote", "add", "origin",
+		filepath.Join(t.TempDir(), "does-not-exist.git"))
+
+	homeDir := t.TempDir()
+
+	cmd := exec.Command(bdBin, "init", "--reinit-local", "--prefix", "org", "--quiet", "--non-interactive", "--skip-hooks", "--skip-agents")
+	cmd.Dir = workDir
+	cmd.Env = hermeticInitEnv(homeDir)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("bd init --reinit-local with an unreachable git origin failed: %v\noutput:\n%s", err, out.String())
+	}
+
+	if _, err := os.Stat(filepath.Join(workDir, ".beads")); err != nil {
+		t.Fatalf(".beads should have been created by a successful init: %v", err)
+	}
+}
+
+// TestInitLocalSourceOverridesWithUnreachableGitOriginSucceeds covers the
+// other two local-source override flags of gascity#7665's AC-1: --force
+// (the deprecated alias) and a seeded --from-jsonl. The probe never observed
+// the origin, so neither may be refused as remote divergence — and
+// --from-jsonl must still import the seed it selected.
+func TestInitLocalSourceOverridesWithUnreachableGitOriginSucceeds(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		args    []string
+		prefix  string
+		seed    bool
+		wantSeed string
+	}{
+		{
+			name:   "force",
+			args:   []string{"--force"},
+			prefix: "org",
+		},
+		{
+			name:     "from-jsonl",
+			args:     []string{"--from-jsonl"},
+			prefix:   "jl",
+			seed:     true,
+			wantSeed: "jl-seed1",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bdBin := buildBDForInitTests(t)
+
+			workDir := t.TempDir()
+			runGitForBootstrapTest(t, workDir, "init", "-b", "main")
+			runGitForBootstrapTest(t, workDir, "config", "core.hooksPath", ".git/hooks")
+			runGitForBootstrapTest(t, workDir, "remote", "add", "origin",
+				filepath.Join(t.TempDir(), "does-not-exist.git"))
+
+			if tc.seed {
+				beadsDir := filepath.Join(workDir, ".beads")
+				if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+					t.Fatal(err)
+				}
+				seed := `{"id":"jl-seed1","title":"Local JSONL seed","type":"task","status":"open","priority":2}` + "\n"
+				if err := os.WriteFile(filepath.Join(beadsDir, "issues.jsonl"), []byte(seed), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			homeDir := t.TempDir()
+
+			args := append([]string{"init"}, tc.args...)
+			args = append(args, "--prefix", tc.prefix, "--quiet", "--non-interactive", "--skip-hooks", "--skip-agents")
+			cmd := exec.Command(bdBin, args...)
+			cmd.Dir = workDir
+			cmd.Env = hermeticInitEnv(homeDir)
+			var out bytes.Buffer
+			cmd.Stdout = &out
+			cmd.Stderr = &out
+			if err := cmd.Run(); err != nil {
+				t.Fatalf("bd init %v with an unreachable git origin failed: %v\noutput:\n%s", tc.args, err, out.String())
+			}
+
+			if _, err := os.Stat(filepath.Join(workDir, ".beads")); err != nil {
+				t.Fatalf(".beads should have been created by a successful init: %v", err)
+			}
+			if tc.wantSeed != "" {
+				show := exec.Command(bdBin, "show", tc.wantSeed)
+				show.Dir = workDir
+				show.Env = hermeticInitEnv(homeDir)
+				if err := show.Run(); err != nil {
+					t.Errorf("--from-jsonl did not import the seed issue %s: %v", tc.wantSeed, err)
+				}
+			}
+		})
 	}
 }
 
@@ -186,6 +306,55 @@ func TestCheckRemoteSafety_GuardMatrix(t *testing.T) {
 		{"fresh/from-jsonl", RemoteSafetyInput{FromJSONL: true}, ActionNoRemoteData, 0},
 		{"fresh/discard-remote", RemoteSafetyInput{DiscardRemote: true}, ActionNoRemoteData, 0},
 		{"fresh/force+discard", RemoteSafetyInput{Force: true, DiscardRemote: true}, ActionNoRemoteData, 0},
+
+		// Probe-unknown column (gascity#7665): the refs/dolt/data probe could
+		// not read the remote, so NOTHING about its history is confirmed —
+		// including its absence. The fail-closed bool still reads true; the
+		// RemoteProbeUnknown field is what tells the decision that. An
+		// unverified INFERRED GIT ORIGIN falls back to local initialization
+		// for plain init and every local-source override alike: the bootstrap
+		// clone would run against the same origin the probe could not reach.
+		{
+			"probe-unknown/origin/no-flags",
+			RemoteSafetyInput{RemoteHasDoltData: true, RemoteProbeUnknown: true, RemoteIsGitOrigin: true},
+			ActionNoRemoteData, 0,
+		},
+		{
+			"probe-unknown/origin/force",
+			RemoteSafetyInput{RemoteHasDoltData: true, RemoteProbeUnknown: true, RemoteIsGitOrigin: true, Force: true},
+			ActionNoRemoteData, 0,
+		},
+		{
+			"probe-unknown/origin/reinit-local",
+			RemoteSafetyInput{RemoteHasDoltData: true, RemoteProbeUnknown: true, RemoteIsGitOrigin: true, ReinitLocal: true},
+			ActionNoRemoteData, 0,
+		},
+		{
+			"probe-unknown/origin/from-jsonl",
+			RemoteSafetyInput{RemoteHasDoltData: true, RemoteProbeUnknown: true, RemoteIsGitOrigin: true, FromJSONL: true},
+			ActionNoRemoteData, 0,
+		},
+		{
+			"probe-unknown/origin/force+reinit-local",
+			RemoteSafetyInput{RemoteHasDoltData: true, RemoteProbeUnknown: true, RemoteIsGitOrigin: true, Force: true, ReinitLocal: true},
+			ActionNoRemoteData, 0,
+		},
+
+		// An unverified CONFIGURED or EXPLICIT remote keeps the conservative
+		// gates: a URL named for bd is one bd is expected to read. Plain init
+		// still selects bootstrap (the clone then fails loudly with the same
+		// error the probe did), and a local-source override still refuses
+		// rather than silently diverging a remote bd could not verify.
+		{
+			"probe-unknown/configured/no-flags",
+			RemoteSafetyInput{RemoteHasDoltData: true, RemoteProbeUnknown: true},
+			ActionBootstrap, 0,
+		},
+		{
+			"probe-unknown/configured/reinit-local",
+			RemoteSafetyInput{RemoteHasDoltData: true, RemoteProbeUnknown: true, ReinitLocal: true},
+			ActionRefuseDivergence, ExitRemoteDivergenceRefused,
+		},
 
 		// Remote-has-data column, user did NOT force: bootstrap is the
 		// adoption path. This is the existing correct behavior.
