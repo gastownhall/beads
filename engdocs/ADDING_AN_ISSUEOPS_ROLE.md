@@ -494,8 +494,8 @@ does not. What the test is NOT is "does the namespace have a package below the
 role" — `internal/memoryapi` is exactly that, holds `DeriveKey`, the two
 refusals and the search filter, and is deliberately importable from `cmd/bd`
 (`internal/memoryapi/memoryapi.go:7-13`),
-because the `bd remember` front door has to derive a key to recognize the
-bare-slug case before it knows which method to call. Denying the meaning layer
+because the `bd remember` front door has to derive a key to suggest one for a
+refused bare slug before it knows which method to call. Denying the meaning layer
 would be denying step 2, which every role depends on being reachable.
 Constructors are the boundary; meaning functions are not.
 
