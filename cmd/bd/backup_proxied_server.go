@@ -210,7 +210,15 @@ func runBackupSyncProxiedWithGracePeriod(ctx context.Context, gracePeriod time.D
 	}
 
 	start := time.Now()
+	var pruneOutcome versioncontrolops.BackupPruneOutcome
 	err := runProxiedNonTx(ctx, func(ctx context.Context, conn *sql.Conn) error {
+		if gracePeriod > 0 {
+			if err := requireFileBackupForPrune(ctx, func(ctx context.Context, name string) (string, error) {
+				return versioncontrolops.BackupRemoteURL(ctx, conn, name)
+			}); err != nil {
+				return err
+			}
+		}
 		if err := commitWorkingSetBeforeBackup(ctx, conn); err != nil {
 			// Same posture as the direct path: a failed pre-backup commit
 			// means the backup may miss the newest writes, which is worth
@@ -218,7 +226,9 @@ func runBackupSyncProxiedWithGracePeriod(ctx context.Context, gracePeriod time.D
 			fmt.Fprintf(os.Stderr, "Warning: failed to commit pending changes: %v\n", err)
 		}
 		if gracePeriod > 0 {
-			return versioncontrolops.BackupSyncWithPrune(ctx, conn, proxiedBackupTargetName, gracePeriod)
+			var err error
+			pruneOutcome, err = versioncontrolops.BackupSyncWithPrune(ctx, conn, proxiedBackupTargetName, gracePeriod)
+			return err
 		}
 		return versioncontrolops.BackupSync(ctx, conn, proxiedBackupTargetName)
 	})
@@ -235,12 +245,19 @@ func runBackupSyncProxiedWithGracePeriod(ctx context.Context, gracePeriod time.D
 	}
 
 	if jsonOutput {
-		return outputJSON(map[string]interface{}{
+		result := map[string]interface{}{
 			"synced":   true,
 			"duration": elapsed.String(),
-		})
+		}
+		if gracePeriod > 0 {
+			result["prune"] = pruneOutcome
+		}
+		return outputJSON(result)
 	}
 	fmt.Printf("Backup synced in %s\n", elapsed.Round(time.Millisecond))
+	if gracePeriod > 0 {
+		fmt.Printf("Prune outcome: %s\n", pruneOutcome.Summary())
+	}
 	return nil
 }
 

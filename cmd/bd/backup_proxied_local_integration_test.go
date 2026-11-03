@@ -69,8 +69,22 @@ func TestManagedLocalProxiedBackupRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	ageBackupDestinationEntries(t, dest, 20*time.Minute)
-	if out, err := bdProxiedRun(t, bd, p.dir, "backup", "sync", "--prune-with-grace-period", "10m"); err != nil {
+	out, err := bdProxiedRun(t, bd, p.dir, "backup", "sync", "--json", "--prune-with-grace-period", "10m")
+	if err != nil {
 		t.Fatalf("bd backup sync --prune-with-grace-period 10m: %v\n%s", err, out)
+	}
+	var pruneResult struct {
+		Synced bool `json:"synced"`
+		Prune  struct {
+			Status  string `json:"status"`
+			Message string `json:"message"`
+		} `json:"prune"`
+	}
+	if err := json.Unmarshal(out, &pruneResult); err != nil {
+		t.Fatalf("parse proxied prune JSON: %v\n%s", err, out)
+	}
+	if !pruneResult.Synced || pruneResult.Prune.Status != "unavailable" || !strings.Contains(pruneResult.Prune.Message, "did not return a prune summary") {
+		t.Fatalf("proxied prune result = %+v, want successful sync with unavailable outcome explanation", pruneResult)
 	}
 	if _, err := os.Stat(orphan); !os.IsNotExist(err) {
 		t.Fatalf("pruned sync left the orphan in place; stat error: %v", err)
@@ -118,7 +132,7 @@ func TestManagedLocalProxiedBackupRoundTrip(t *testing.T) {
 		t.Fatalf("the refused restore changed the issues: got %v, want %v", got, idsBefore)
 	}
 
-	out, err := bdProxiedRun(t, bd, p.dir, "backup", "restore", dest, "--force", "--json")
+	out, err = bdProxiedRun(t, bd, p.dir, "backup", "restore", dest, "--force", "--json")
 	if err != nil {
 		t.Fatalf("bd backup restore %s --force: %v\n%s", dest, err, out)
 	}
