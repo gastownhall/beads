@@ -16,6 +16,7 @@ go_library(
         "bootstrapper.go",
         "circuit.go",
         "claim_verify.go",
+        "cli_transfer_redact.go",
         "commenter.go",
         "compact.go",
         "config.go",
