@@ -248,3 +248,44 @@ func decodeStrictDepsJSONError(t *testing.T, stderr string) map[string]string {
 	}
 	return out
 }
+
+// TestImportDryRunStrictDepsMutuallyExclusive pins that bd import refuses
+// --dry-run with --strict-deps: a dry run writes no edge, so a strict pass
+// would be a check it never made.
+func TestImportDryRunStrictDepsMutuallyExclusive(t *testing.T) {
+	stdioMutex.Lock()
+	defer stdioMutex.Unlock()
+
+	flags := importCmd.Flags()
+	names := []string{"dry-run", "strict-deps"}
+	// Restore each flag's prior value and Changed state, not the defaults:
+	// another test in the process may have left them set on purpose.
+	type flagState struct {
+		value   string
+		changed bool
+	}
+	prior := map[string]flagState{}
+	for _, name := range names {
+		f := flags.Lookup(name)
+		prior[name] = flagState{value: f.Value.String(), changed: f.Changed}
+	}
+	defer func() {
+		for _, name := range names {
+			_ = flags.Set(name, prior[name].value)
+			flags.Lookup(name).Changed = prior[name].changed
+		}
+	}()
+
+	for _, name := range names {
+		if err := flags.Set(name, "true"); err != nil {
+			t.Fatalf("set --%s: %v", name, err)
+		}
+	}
+	err := importCmd.ValidateFlagGroups()
+	if err == nil {
+		t.Fatal("ValidateFlagGroups accepted --dry-run with --strict-deps, want a mutually-exclusive refusal")
+	}
+	if msg := err.Error(); !strings.Contains(msg, "dry-run") || !strings.Contains(msg, "strict-deps") || !strings.Contains(msg, "none of the others can be") {
+		t.Errorf("refusal = %q, want cobra's mutually-exclusive diagnostic naming both flags", msg)
+	}
+}
