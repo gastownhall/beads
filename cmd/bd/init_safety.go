@@ -195,6 +195,17 @@ func CheckRemoteSafety(in RemoteSafetyInput) RemoteSafetyDecision {
 	// (`--force`, `--reinit-local`, or `--from-jsonl`) without
 	// `--discard-remote`. Refuse with structured message.
 	if !in.DiscardRemote {
+		// A configured or explicit remote the probe could not read stays
+		// closed — its transport may be one the git probe cannot answer for
+		// — but the refusal must not claim history nobody observed.
+		if in.RemoteProbeUnknown {
+			return RemoteSafetyDecision{
+				Action:      ActionRefuseDivergence,
+				Reason:      "override-remote-unverified",
+				ExitCode:    ExitRemoteDivergenceRefused,
+				UserMessage: refusalMessageUnverified(),
+			}
+		}
 		return RemoteSafetyDecision{
 			Action:      ActionRefuseDivergence,
 			Reason:      "force-without-discard-remote",
@@ -251,6 +262,29 @@ func refusalMessageDivergence() string {
 
     Diagnose first:
       bd doctor
+
+    Overwrite the remote intentionally (destructive):
+      See 'bd help init-safety' for the --discard-remote workflow.`
+}
+
+// refusalMessageUnverified returns the What/Why/Next refusal text for a
+// local-source override against a configured or explicit remote whose
+// refs/dolt/data probe failed. Same no-echo contract as
+// refusalMessageDivergence.
+func refusalMessageUnverified() string {
+	return `bd init refuses: could not verify whether the remote has Dolt history (refs/dolt/data).
+
+  Why: this init mode would create or reuse local history instead of
+       adopting the remote, and bd could not rule out history it would
+       diverge from. --force / --reinit-local bypasses only the LOCAL
+       data-safety guard; --from-jsonl selects JSONL as the local source.
+       Neither authorizes divergence from a remote bd cannot read.
+
+  Next:
+    Check the remote URL and your credentials, then re-run.
+
+    Adopt the remote (recommended):
+      bd bootstrap
 
     Overwrite the remote intentionally (destructive):
       See 'bd help init-safety' for the --discard-remote workflow.`

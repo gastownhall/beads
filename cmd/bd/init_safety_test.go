@@ -263,6 +263,128 @@ func TestInitReinitLocalConfiguredRemoteWithDoltDataRefuses(t *testing.T) {
 	}
 }
 
+// TestInitReinitLocalConfiguredUnverifiedRemoteRefuses pins the other side of
+// gascity#7665: a configured sync.remote or an explicit --remote is not the
+// inferred git origin, and may use a transport `git ls-remote` cannot answer
+// for, so a local-source override against one the probe could not read still
+// refuses (exit 10) before creating a database. The refusal says the history
+// could not be verified instead of claiming the remote has it.
+func TestInitReinitLocalConfiguredUnverifiedRemoteRefuses(t *testing.T) {
+	bdBin := buildBDForInitTests(t)
+
+	cases := []struct {
+		name string
+		args []string
+		env  func(remote string) []string
+	}{
+		{
+			"configured/reinit-local",
+			[]string{"--reinit-local"},
+			func(remote string) []string { return []string{"BD_SYNC_REMOTE=" + remote} },
+		},
+		{
+			"configured/from-jsonl",
+			[]string{"--from-jsonl"},
+			func(remote string) []string { return []string{"BD_SYNC_REMOTE=" + remote} },
+		},
+		{
+			"explicit/from-jsonl",
+			[]string{"--from-jsonl", "--remote", ""},
+			func(string) []string { return nil },
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// A missing path: git ls-remote exits 128, so the probe errors.
+			remote := filepath.Join(t.TempDir(), "does-not-exist.git")
+
+			workDir := t.TempDir()
+			runGitForBootstrapTest(t, workDir, "init", "-b", "main")
+			runGitForBootstrapTest(t, workDir, "config", "core.hooksPath", ".git/hooks")
+			beadsDir := filepath.Join(workDir, ".beads")
+			if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(beadsDir, "issues.jsonl"), []byte(`{"id":"cfg-abc123","title":"Local JSONL","type":"task","status":"open","priority":2}`+"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			homeDir := t.TempDir()
+
+			args := []string{"init"}
+			for _, a := range tc.args {
+				if a == "" {
+					a = remote
+				}
+				args = append(args, a)
+			}
+			args = append(args, "--prefix", "cfg", "--quiet", "--non-interactive", "--skip-hooks", "--skip-agents")
+			cmd := exec.Command(bdBin, args...)
+			cmd.Dir = workDir
+			cmd.Env = hermeticInitEnv(homeDir, tc.env(remote)...)
+			var stderr bytes.Buffer
+			cmd.Stderr = &stderr
+			err := cmd.Run()
+			if err == nil {
+				t.Fatalf("bd init succeeded against an unverifiable remote; expected refusal. stderr:\n%s", stderr.String())
+			}
+			exitErr, ok := err.(*exec.ExitError)
+			if !ok {
+				t.Fatalf("non-exec-exit error: %v\nstderr:\n%s", err, stderr.String())
+			}
+			if code := exitErr.ExitCode(); code != ExitRemoteDivergenceRefused {
+				t.Errorf("exit code = %d, want %d (ExitRemoteDivergenceRefused)\nstderr:\n%s", code, ExitRemoteDivergenceRefused, stderr.String())
+			}
+
+			got := stderr.String()
+			for _, must := range []string{"could not verify", "bd bootstrap", "bd help init-safety"} {
+				if !strings.Contains(got, must) {
+					t.Errorf("refusal missing %q:\n%s", must, got)
+				}
+			}
+			for _, banned := range []string{"already has Dolt history", "DESTROY-", "--destroy-token="} {
+				if strings.Contains(got, banned) {
+					t.Errorf("refusal contains %q:\n%s", banned, got)
+				}
+			}
+			if strings.Contains(got, "failed to clone remote") {
+				t.Errorf("refusal should precede any clone attempt:\n%s", got)
+			}
+			if _, err := os.Stat(filepath.Join(beadsDir, "embeddeddolt")); err == nil {
+				t.Errorf("refusal should not have created an embedded Dolt database")
+			}
+		})
+	}
+}
+
+// TestInitExplicitUnverifiedRemoteStillClones pins that an explicit --remote
+// without --from-jsonl keeps selecting the clone: init does not probe it, so an
+// unreachable one fails the clone rather than refusing or initializing locally.
+func TestInitExplicitUnverifiedRemoteStillClones(t *testing.T) {
+	bdBin := buildBDForInitTests(t)
+
+	remote := filepath.Join(t.TempDir(), "does-not-exist.git")
+	workDir := t.TempDir()
+	runGitForBootstrapTest(t, workDir, "init", "-b", "main")
+	runGitForBootstrapTest(t, workDir, "config", "core.hooksPath", ".git/hooks")
+	homeDir := t.TempDir()
+
+	cmd := exec.Command(bdBin, "init", "--reinit-local", "--remote", remote, "--prefix", "cfg", "--quiet", "--non-interactive", "--skip-hooks", "--skip-agents")
+	cmd.Dir = workDir
+	cmd.Env = hermeticInitEnv(homeDir)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if err == nil {
+		t.Fatalf("bd init --remote <unreachable> succeeded; expected the clone to fail. stderr:\n%s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "failed to clone remote") {
+		t.Errorf("explicit --remote should still attempt the clone:\n%s", stderr.String())
+	}
+	if code, _ := err.(*exec.ExitError); code != nil && code.ExitCode() == ExitRemoteDivergenceRefused {
+		t.Errorf("explicit --remote without --from-jsonl must not hit the divergence refusal:\n%s", stderr.String())
+	}
+}
+
 func TestCheckRemoteSafety_GuardMatrix(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -333,6 +455,34 @@ func TestCheckRemoteSafety_GuardMatrix(t *testing.T) {
 			"unknown-origin/force+reinit-local+from-jsonl",
 			RemoteSafetyInput{RemoteHasDoltData: true, RemoteProbeUnknown: true, RemoteIsGitOrigin: true, Force: true, ReinitLocal: true, FromJSONL: true},
 			ActionNoRemoteData, 0,
+		},
+		// Unverified configured/explicit remote (RemoteIsGitOrigin false): a
+		// transport the git probe cannot read gets no bypass. No override
+		// keeps the bootstrap; a local-source override refuses.
+		{
+			"unknown-configured/no-flags",
+			RemoteSafetyInput{RemoteHasDoltData: true, RemoteProbeUnknown: true},
+			ActionBootstrap, 0,
+		},
+		{
+			"unknown-configured/force",
+			RemoteSafetyInput{RemoteHasDoltData: true, RemoteProbeUnknown: true, Force: true},
+			ActionRefuseDivergence, ExitRemoteDivergenceRefused,
+		},
+		{
+			"unknown-configured/reinit-local",
+			RemoteSafetyInput{RemoteHasDoltData: true, RemoteProbeUnknown: true, ReinitLocal: true},
+			ActionRefuseDivergence, ExitRemoteDivergenceRefused,
+		},
+		{
+			"unknown-configured/from-jsonl",
+			RemoteSafetyInput{RemoteHasDoltData: true, RemoteProbeUnknown: true, FromJSONL: true},
+			ActionRefuseDivergence, ExitRemoteDivergenceRefused,
+		},
+		{
+			"unknown-configured/force+reinit-local+from-jsonl",
+			RemoteSafetyInput{RemoteHasDoltData: true, RemoteProbeUnknown: true, Force: true, ReinitLocal: true, FromJSONL: true},
+			ActionRefuseDivergence, ExitRemoteDivergenceRefused,
 		},
 		// Provenance alone is not a bypass: a confirmed-history origin
 		// still bootstraps or refuses exactly as before.
@@ -702,6 +852,20 @@ func TestCheckRemoteSafety_RefusalTextNoEcho(t *testing.T) {
 	}
 	if !strings.Contains(msg, "--from-jsonl") {
 		t.Errorf("refusal text does not name the JSONL local-source flag:\n%s", msg)
+	}
+
+	// The unverified-remote refusal keeps the same contract and claims no
+	// history it did not observe.
+	unverified := CheckRemoteSafety(RemoteSafetyInput{RemoteHasDoltData: true, RemoteProbeUnknown: true, ReinitLocal: true}).UserMessage
+	for _, banned := range append(bannedEchoes, "already has Dolt history") {
+		if strings.Contains(unverified, banned) {
+			t.Errorf("unverified-remote refusal contains %q:\n%s", banned, unverified)
+		}
+	}
+	for _, must := range []string{"could not verify", "bd bootstrap", "bd help init-safety", "--from-jsonl"} {
+		if !strings.Contains(unverified, must) {
+			t.Errorf("unverified-remote refusal does not name %q:\n%s", must, unverified)
+		}
 	}
 }
 

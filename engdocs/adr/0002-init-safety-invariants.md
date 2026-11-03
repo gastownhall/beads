@@ -99,6 +99,20 @@ bd init --force                 deprecated alias for --reinit-local (≥2 releas
 bd bootstrap                    adopt remote — signposted by init refusal
 ```
 
+### Unverified remotes
+
+A failed `refs/dolt/data` probe is unknown, not confirmed history or
+confirmed absence; `CheckRemoteSafety` receives it as `RemoteProbeUnknown`
+together with the URL's provenance (`RemoteIsGitOrigin`). For a git origin
+inferred because no `sync.remote` or `--remote` names a remote, init
+initializes locally with or without `--force`/`--reinit-local`/`--from-jsonl`
+(reason `origin-unverified`), matching what plain `bd init` already did. A
+configured or explicit remote may use a transport the git probe cannot
+answer for, so a local-source override against one still refuses with exit
+10, with text that says the history could not be verified
+(`override-remote-unverified`). `--discard-remote` keeps its token and
+confirmation rules either way.
+
 ### Exit codes (stable, grep-safe)
 
 ```

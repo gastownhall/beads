@@ -94,6 +94,29 @@ After `bd init --reinit-local --discard-remote`, your next
 `bd dolt push` must be a history-replacing push. Coordinate with your
 team before doing this.
 
+### When bd could not read the remote
+
+Before `bd init` refuses, it asks the remote whether it has
+`refs/dolt/data`. If that check fails (a missing path, no network, no
+credentials for a private repository), `bd` doesn't know whether the remote
+has history. v1.3.2 treats that as history and refuses with the message
+above. In releases after v1.3.2 the outcome depends on where the remote came
+from:
+
+- **Your git origin, inferred because no `sync.remote` or `--remote` is set:**
+  `bd init`, `--reinit-local`, `--force` and `--from-jsonl` all initialize a
+  fresh local database and warn that the origin's Dolt history went
+  unverified. If the origin does have history, run `bd bootstrap` once you
+  can reach it.
+- **A configured `sync.remote` or an explicit `--remote`:** `--reinit-local`,
+  `--force` and `--from-jsonl` still refuse with exit code `10`, but the
+  message says `bd init refuses: could not verify whether the remote has Dolt
+  history`. Check the URL and your credentials and re-run, or adopt the remote
+  with `bd bootstrap`.
+
+`--discard-remote` follows the same confirmation and `--destroy-token` rules
+in both cases.
+
 ---
 
 ## init-token-missing
