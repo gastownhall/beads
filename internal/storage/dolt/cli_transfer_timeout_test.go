@@ -258,3 +258,126 @@ func stubDoltVersionOnPath(t *testing.T, version string) (calls string) {
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	return calls
 }
+
+// syntheticToken is an obviously fake credential for the redaction tests; no
+// real secret is involved.
+const syntheticToken = "ghp_TESTTOKEN"
+
+// tokenRemote is the CI-style sync.remote whose rejection output leaked.
+const tokenRemote = "git+https://x-access-token:" + syntheticToken + "@github.com/org/repo"
+
+// assertNoCredentials fails t if msg carries the synthetic token or the
+// x-access-token userinfo it was paired with.
+func assertNoCredentials(t *testing.T, msg string) {
+	t.Helper()
+	for _, secret := range []string{syntheticToken, "x-access-token", "hunter2"} {
+		if strings.Contains(msg, secret) {
+			t.Errorf("error leaks %q: %s", secret, msg)
+		}
+	}
+}
+
+// TestCLITransferErrorRedactsRemoteCredentials pins that a failed CLI transfer
+// never echoes URL userinfo from dolt's output or the operation into the
+// wrapped error: a non-fast-forward rejection echoes the full stored remote,
+// and the error reaches the terminal, agent transcripts and auto-push warnings.
+// Host, path, the rejection detail and the cause must survive.
+func TestCLITransferErrorRedactsRemoteCredentials(t *testing.T) {
+	out := []byte("To " + tokenRemote + "\n ! [rejected]        main -> main (non-fast-forward)\nerror: failed to push some refs to '" + tokenRemote + "'\n")
+
+	// The operation shapes of every caller: doltCLIPush, doltCLIPull and the
+	// federation peer push/pull/fetch, whose op names the peer argument.
+	for name, op := range map[string]string{
+		"push":       "dolt push",
+		"pull":       "dolt pull",
+		"peer push":  "push to peer " + tokenRemote,
+		"peer pull":  "pull from peer " + tokenRemote,
+		"peer fetch": "fetch from peer " + tokenRemote,
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Hour)
+			defer cancel()
+			cause := errors.New("exit status 1")
+
+			err := cliTransferError(op, "origin", ctx, out, cause)
+			msg := err.Error()
+			assertNoCredentials(t, msg)
+			for _, keep := range []string{"git+https://github.com/org/repo", "non-fast-forward", "failed to push some refs", "exit status 1"} {
+				if !strings.Contains(msg, keep) {
+					t.Errorf("error lost %q: %s", keep, msg)
+				}
+			}
+			if !errors.Is(err, cause) {
+				t.Errorf("errors.Is(err, cause) = false; cause no longer wrapped: %v", err)
+			}
+		})
+	}
+}
+
+// TestCLITransferErrorRedactsEchoedRemote is the triage reproduction: dolt
+// echoes the credential-bearing remote on its "To" line and in the rejection,
+// and neither the token nor its userinfo may reach the wrapped error.
+func TestCLITransferErrorRedactsEchoedRemote(t *testing.T) {
+	const token = "fake-tok-42"
+	remote := "git+https://x-access-token:" + token + "@github.com/org/repo"
+	out := []byte("To " + remote + "\n ! [rejected]        main -> main (non-fast-forward)\nerror: failed to push some refs to '" + remote + "'\n")
+	cause := errors.New("exit status 1")
+
+	for name, ctx := range map[string]context.Context{"failure": context.Background()} {
+		msg := cliTransferError("dolt push", remote, ctx, out, cause).Error()
+		if strings.Contains(msg, token) || strings.Contains(msg, "x-access-token") {
+			t.Errorf("%s: error leaks credentials: %s", name, msg)
+		}
+		if !strings.Contains(msg, "github.com/org/repo") || !strings.Contains(msg, "non-fast-forward") {
+			t.Errorf("%s: error lost host or cause: %s", name, msg)
+		}
+	}
+}
+
+// TestCLITransferErrorRedactsRejectionKeepsDetail reproduces the reported
+// leak: a rejected push to a credential-bearing git+https remote makes dolt
+// echo the full URL, userinfo included. Host, ref and cause must survive;
+// username and token must not.
+func TestCLITransferErrorRedactsRejectionKeepsDetail(t *testing.T) {
+	const (
+		user  = "x-access-token"
+		token = "SYNTHETIC-fixture-token-7f3a9c"
+	)
+	remote := "git+https://" + user + ":" + token + "@github.com/example/repo"
+	out := []byte(" ! [rejected]        main -> main (non-fast-forward)\n" +
+		"error: failed to push some refs to '" + remote + "'\n" +
+		"hint: Updates were rejected because the tip of your current branch is behind\n")
+	runErr := errors.New("exit status 1")
+
+	assertRedacted := func(t *testing.T, err error) {
+		t.Helper()
+		msg := err.Error()
+		for _, secret := range []string{user, token} {
+			if strings.Contains(msg, secret) {
+				t.Errorf("error leaks %q: %s", secret, msg)
+			}
+		}
+		for _, kept := range []string{"github.com/example/repo", "non-fast-forward", "failed to push some refs", "exit status 1"} {
+			if !strings.Contains(msg, kept) {
+				t.Errorf("error lost actionable detail %q: %s", kept, msg)
+			}
+		}
+		if !errors.Is(err, runErr) {
+			t.Errorf("errors.Is(err, runErr) = false: %v", err)
+		}
+	}
+
+	t.Run("ordinary rejection", func(t *testing.T) {
+		assertRedacted(t, cliTransferError("dolt push", remote, context.Background(), out, runErr))
+	})
+	t.Run("credential-free output is unchanged", func(t *testing.T) {
+		plain := []byte("error: failed to push some refs to 'https://github.com/example/repo'\n")
+		err := cliTransferError("dolt push", "https://github.com/example/repo", context.Background(), plain, runErr)
+		if !strings.Contains(err.Error(), "'https://github.com/example/repo'") {
+			t.Errorf("credential-free URL was altered: %s", err)
+		}
+		if !errors.Is(err, runErr) {
+			t.Errorf("errors.Is(err, runErr) = false: %v", err)
+		}
+	})
+}

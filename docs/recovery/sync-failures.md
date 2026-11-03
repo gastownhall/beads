@@ -34,6 +34,12 @@ bd dolt show
 tail -50 .beads/dolt-server.log   # server mode
 ```
 
+A failed `dolt push`/`dolt pull` over a git-protocol remote reports dolt's own
+output. URL credentials in it are redacted: HTTP(S) userinfo such as
+`x-access-token:<token>@` is removed whole, and an SSH remote keeps its account
+(`git@`) but loses any password. The host, path and rejection detail (for
+example `non-fast-forward`) are kept, so the message still names what failed.
+
 ## Solution
 
 **Step 1:** Stop the Dolt server
