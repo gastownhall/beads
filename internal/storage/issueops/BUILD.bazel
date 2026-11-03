@@ -247,6 +247,7 @@ go_test(
         "//internal/config",
         "//internal/idgen",
         "//internal/storage",
+        "//internal/storage/dberrors",
         "//internal/storage/depid",
         "//internal/storage/domain",
         "//internal/storage/journalscan",

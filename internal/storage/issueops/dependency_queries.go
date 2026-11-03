@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/types"
 	publicops "github.com/steveyegge/beads/issueops"
 )
@@ -1191,10 +1192,69 @@ func IsBlockedBatchInTx(ctx context.Context, tx DBTX, ids []string) (map[string]
 }
 
 // treeBlockedBatchInTx is the blocked flag a dependency tree shows for each of
-// ids: the stored, transitive is_blocked flag IsBlockedBatchInTx reads, the
-// one bd ready and bd blocked read. ids missing from both tables read false.
+// ids: the stored, transitive is_blocked flag IsBlockedBatchInTx reads (issues
+// first on a collision, a false issues flag included), qualified as ready work
+// qualifies it. A true flag on a row with no ready-affecting edge of its own in
+// its family's dependency table is stale (sqlbuild.OwnReadyAffectingEdgeSQL)
+// and reads false; the stored flag is left as it is. Only the walked ids with a
+// true flag are probed, so the cost follows the tree, not the database. A
+// missing optional wisps table is skipped and a missing wisp_dependencies
+// table keeps the raw wisp flags, as staleBlockedWispSetInTx does. ids missing
+// from both tables read false.
 func treeBlockedBatchInTx(ctx context.Context, tx DBTX, ids []string) (map[string]bool, error) {
-	return IsBlockedBatchInTx(ctx, tx, ids)
+	blocked := make(map[string]bool, len(ids))
+	if len(ids) == 0 {
+		return blocked, nil
+	}
+	seen := make(map[string]bool, len(ids))
+	for _, tables := range []FilterTables{IssuesFilterTables, WispsFilterTables} {
+		flags := make(map[string]bool)
+		if err := readIsBlockedIntoFromTable(ctx, tx, tables.Main, ids, seen, flags); err != nil {
+			if optionalBlockedTable(tables.Main) && isTableNotExistError(err) {
+				continue
+			}
+			return nil, err
+		}
+		var flagged []string
+		for _, id := range ids {
+			if flags[id] {
+				flagged = append(flagged, id)
+			}
+		}
+		own, err := ownReadyAffectingEdgeSetInTx(ctx, tx, tables, flagged)
+		if err != nil {
+			if !missingOptionalWispTable(err) {
+				return nil, err
+			}
+			own = make(map[string]bool, len(flagged))
+			for _, id := range flagged {
+				own[id] = true
+			}
+		}
+		for id, b := range flags {
+			blocked[id] = b && own[id]
+		}
+	}
+	return blocked, nil
+}
+
+// ownReadyAffectingEdgeSetInTx returns which of ids have an own
+// ready-affecting edge in tables' dependency table, batched at queryBatchSize.
+// No ids, no query.
+func ownReadyAffectingEdgeSetInTx(ctx context.Context, tx DBTX, tables FilterTables, ids []string) (map[string]bool, error) {
+	own := make(map[string]bool, len(ids))
+	for start := 0; start < len(ids); start += queryBatchSize {
+		end := min(start+queryBatchSize, len(ids))
+		query, args := sqlbuild.OwnReadyAffectingEdgeIDsSQL(tables, ids[start:end])
+		found, err := queryIDs(ctx, tx, query, args...)
+		if err != nil {
+			return nil, fmt.Errorf("read ready-affecting edges from %s: %w", tables.Dependencies, err)
+		}
+		for _, id := range found {
+			own[id] = true
+		}
+	}
+	return own, nil
 }
 
 //nolint:gosec // G201: table is a hardcoded "issues" or "wisps"; placeholders are ? only.

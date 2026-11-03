@@ -130,3 +130,27 @@ func TestEmbeddedDepTreeJSONCarriesInheritedBlock(t *testing.T) {
 		t.Fatalf("dep tree %s --json: unblocked %s is_blocked = %#v, want the member omitted", child.ID, blocker.ID, b)
 	}
 }
+
+// TestEmbeddedDepTreeIgnoresStaleFlagOnEdgelessIssue: a stored is_blocked = 1
+// on an open issue with no dependency of its own is stale (GH#3268), and bd
+// ready lists the issue, so dep tree keeps it [READY] and its --json omits
+// is_blocked. Reading the tree leaves the stored flag alone (bd-42wxtt).
+func TestEmbeddedDepTreeIgnoresStaleFlagOnEdgelessIssue(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "ds")
+	edgeless := bdCreate(t, bd, dir, "Stale flag, no edges", "--type", "task")
+	plantStaleBlockedFlag(t, beadsDir, "ds", edgeless.ID)
+
+	wantRootMarker(t, depTreeRootLine(t, bd, dir, edgeless.ID), "[READY]")
+	if got := depTreeBlockedJSON(t, bd, dir, edgeless.ID); got[edgeless.ID] != nil {
+		t.Fatalf("dep tree %s --json: is_blocked = %#v, want the member omitted for a stale flag", edgeless.ID, got[edgeless.ID])
+	}
+	if !storedBlockedFlag(t, bd, dir, edgeless.ID) {
+		t.Fatalf("stored is_blocked on %s was cleared; a tree read must not write the flag", edgeless.ID)
+	}
+}
