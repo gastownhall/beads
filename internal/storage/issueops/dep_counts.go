@@ -7,6 +7,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/storage/domain"
+	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -33,7 +34,110 @@ func CountDependencyEdgesInTx(ctx context.Context, tx DBTX, sourceID string, dir
 		total += n
 	}
 	if dir == domain.DepDirectionIn || dir == domain.DepDirectionBoth {
-		n, err := countDistinctEdges(ctx, tx, DepTargetExpr+" = ?", "issue_id", "", typeClause, sourceID, typeArgs)
+		n, err := countInboundDistinctEdges(ctx, tx, sourceID, typeClause, typeArgs)
+		if err != nil {
+			return 0, err
+		}
+		total += n
+	}
+	return total, nil
+}
+
+// countInboundDistinctEdges is the inbound leg of CountDependencyEdgesInTx. The
+// target predicate cannot stay a COALESCE equality — no index matches the
+// wrapper — so it is split per typed target column into guarded arms
+// (sqlbuild.DepTargetArmsFor, gascity#7666); each arm probes the column's own
+// target index, and the earlier-column IS NULL guards keep the arms disjoint,
+// so the outer SUM returns exactly what one COALESCE-equality count returned.
+//
+// The wisp leg keeps the durable-first far-end rule: a wisp row whose source
+// the durable plane already holds an edge for — under ANY target kind — is
+// the same edge, not a second one. The exclusion therefore spans all three
+// arms and is unfiltered by dependency type, exactly as the single-probe
+// form's NOT IN subquery was.
+func countInboundDistinctEdges(ctx context.Context, tx DBTX, sourceID, typeClause string, typeArgs []any) (int64, error) {
+	arms := sqlbuild.DepTargetArmsFor("", "= ?")
+
+	// Durable plane: one guarded arm per typed column, one COUNT each, summed
+	// by the outer aggregate. Each WHERE binds the target once plus the type
+	// filter.
+	durableSQL := sqlbuild.DepTargetArmsSQL(arms, func(arm sqlbuild.DepTargetArm) string {
+		return fmt.Sprintf("SELECT COUNT(*) AS n FROM dependencies WHERE %s%s", arm.Where, armsSuffix(typeClause))
+	})
+	durableArgs := make([]any, 0, len(arms)*(1+len(typeArgs)))
+	for range arms {
+		durableArgs = append(durableArgs, sourceID)
+		durableArgs = append(durableArgs, typeArgs...)
+	}
+	durable, err := countArmsSum(ctx, tx, "dependencies", durableSQL, durableArgs)
+	if err != nil {
+		return 0, err
+	}
+
+	// The durable-far subquery each wisp arm excludes: the durable rows whose
+	// target resolves to sourceID, per arm, unnamed by type.
+	durableFarSQL := sqlbuild.DepTargetArmsSQL(arms, func(arm sqlbuild.DepTargetArm) string {
+		return fmt.Sprintf("SELECT issue_id FROM dependencies WHERE %s", arm.Where)
+	})
+	wispSQL := sqlbuild.DepTargetArmsSQL(arms, func(arm sqlbuild.DepTargetArm) string {
+		return fmt.Sprintf("SELECT COUNT(*) AS n FROM wisp_dependencies WHERE %s AND issue_id NOT IN (%s)%s",
+			arm.Where, durableFarSQL, armsSuffix(typeClause))
+	})
+	wispArgs := make([]any, 0, len(arms)*(4+len(typeArgs)))
+	for range arms {
+		wispArgs = append(wispArgs, sourceID) // this arm's target predicate
+		wispArgs = append(wispArgs, sourceID, sourceID, sourceID)
+		wispArgs = append(wispArgs, typeArgs...)
+	}
+	wisp, err := countArmsSum(ctx, tx, "wisp_dependencies", wispSQL, wispArgs)
+	if err != nil {
+		if optionalBlockedTable("wisp_dependencies") && dberrors.IsMissingTable(err, "wisp_dependencies") {
+			return durable, nil
+		}
+		return 0, err
+	}
+	return durable + wisp, nil
+}
+
+func armsSuffix(typeClause string) string {
+	if typeClause == "" {
+		return ""
+	}
+	return " AND " + typeClause
+}
+
+// countArmsSum sums a UNION ALL of per-arm COUNT(*) subqueries, tolerating an
+// empty arms relation (COALESCE(SUM(n), 0), the same zero the single count(*)
+// returned for an empty table).
+func countArmsSum(ctx context.Context, tx DBTX, table, armsSQL string, args []any) (int64, error) {
+	q := fmt.Sprintf("SELECT COALESCE(SUM(n), 0) FROM (%s) target_arms", armsSQL) //nolint:gosec // fixed fragments and ? placeholders only
+	var n int64
+	if err := tx.QueryRowContext(ctx, q, args...).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count %s: %w", table, err)
+	}
+	return n, nil
+}
+
+// CountDependentsByStatusInTx counts issueID's dependents whose source row is
+// in status, across both planes joined to each source's home table
+// (dependencies→issues, wisp_dependencies→wisps). Both stores and the unit-of-
+// work path share it; the target predicate is the same guarded-arms split as
+// countInboundDistinctEdges (sqlbuild.DepTargetArmsFor, gascity#7666) in place
+// of the COALESCE equality both stores ran separately before.
+func CountDependentsByStatusInTx(ctx context.Context, tx DBTX, issueID, status string) (int64, error) {
+	arms := sqlbuild.DepTargetArmsFor("d", "= ?")
+	var total int64
+	for _, plane := range edgeCountPlanes {
+		armsSQL := sqlbuild.DepTargetArmsSQL(arms, func(arm sqlbuild.DepTargetArm) string {
+			//nolint:gosec // G201: plane names come from the hardcoded edgeCountPlanes list.
+			return fmt.Sprintf("SELECT COUNT(*) AS n FROM %s d JOIN %s s ON s.id = d.issue_id WHERE %s AND s.status = ?",
+				plane.dependencies, plane.sources, arm.Where)
+		})
+		args := make([]any, 0, len(arms)*2)
+		for range arms {
+			args = append(args, issueID, status)
+		}
+		n, err := countArmsSum(ctx, tx, plane.dependencies, armsSQL, args)
 		if err != nil {
 			return 0, err
 		}

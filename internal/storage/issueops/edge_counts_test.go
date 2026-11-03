@@ -135,16 +135,34 @@ func TestFinishEdgeCountAnswersInAnchorOrderAndNeverNil(t *testing.T) {
 func TestBuildEdgeCountQueryResolvesTheTargetWithoutTheGeneratedColumn(t *testing.T) {
 	// Inside an aggregate the pure-Go GMS analyzer can prune the base columns
 	// the STORED `depends_on_id` derives from and then fail to resolve it, which
-	// is why every count over these tables spells the COALESCE out. A query that
-	// named the generated column would work on one engine and fail on the other.
+	// is why every count over these tables spells the target out from the base
+	// columns. A query that named the generated column would work on one engine
+	// and fail on the other. The inbound count goes further (gascity#7666): a
+	// COALESCE in the filter position matches no index, so the target predicate
+	// is one guarded arm per typed column, each a bare indexed column the arm
+	// groups by, re-grouped by anchor outside — a row carrying more than one
+	// typed target still counts once, under its precedence column.
 	inbound := buildEdgeCountQuery("dependencies", "issues", 2, publicops.EdgeCountRequest{
 		Direction: publicops.EdgeDirectionIn,
 	})
 	if strings.Contains(inbound, "depends_on_id") {
 		t.Errorf("the inbound count names the generated column:\n%s", inbound)
 	}
-	if !strings.Contains(inbound, "COALESCE(d.depends_on_issue_id") {
-		t.Errorf("the inbound count does not resolve the target from the base columns:\n%s", inbound)
+	if strings.Contains(inbound, "COALESCE") {
+		t.Errorf("the inbound count must not filter on the COALESCE wrapper:\n%s", inbound)
+	}
+	if strings.Count(inbound, "UNION ALL") != 2 {
+		t.Errorf("the inbound count must be the three target arms joined by UNION ALL, got %d joins:\n%s", strings.Count(inbound, "UNION ALL"), inbound)
+	}
+	for _, want := range []string{
+		"SELECT d.depends_on_issue_id AS anchor, COUNT(*) AS n FROM dependencies d WHERE d.depends_on_issue_id IN (?,?) GROUP BY d.depends_on_issue_id",
+		"SELECT d.depends_on_wisp_id AS anchor, COUNT(*) AS n FROM dependencies d WHERE d.depends_on_wisp_id IN (?,?) AND d.depends_on_issue_id IS NULL GROUP BY d.depends_on_wisp_id",
+		"SELECT d.depends_on_external AS anchor, COUNT(*) AS n FROM dependencies d WHERE d.depends_on_external IN (?,?) AND d.depends_on_issue_id IS NULL AND d.depends_on_wisp_id IS NULL GROUP BY d.depends_on_external",
+		"SELECT anchor, SUM(n) AS n FROM (",
+	} {
+		if !strings.Contains(inbound, want) {
+			t.Errorf("the inbound count missing guarded arm %q:\n%s", want, inbound)
+		}
 	}
 	if strings.Contains(inbound, "JOIN") {
 		t.Errorf("an unnarrowed inbound count joins the dependent's plane for nothing:\n%s", inbound)
@@ -153,8 +171,11 @@ func TestBuildEdgeCountQueryResolvesTheTargetWithoutTheGeneratedColumn(t *testin
 	statusNarrowed := buildEdgeCountQuery("wisp_dependencies", "wisps", 1, publicops.EdgeCountRequest{
 		Direction: publicops.EdgeDirectionIn, Status: string(types.StatusOpen),
 	})
-	if !strings.Contains(statusNarrowed, "JOIN wisps s ON s.id = d.issue_id") {
-		t.Errorf("the status narrowing does not join the DEPENDENT's own plane:\n%s", statusNarrowed)
+	if strings.Count(statusNarrowed, "JOIN wisps s ON s.id = d.issue_id") != 3 {
+		t.Errorf("every arm of the status-narrowed count must join the DEPENDENT's own plane:\n%s", statusNarrowed)
+	}
+	if strings.Count(statusNarrowed, "AND s.status = ?") != 3 {
+		t.Errorf("every arm of the status-narrowed count must narrow by status:\n%s", statusNarrowed)
 	}
 
 	outbound := buildEdgeCountQuery("dependencies", "issues", 3, publicops.EdgeCountRequest{
@@ -163,15 +184,22 @@ func TestBuildEdgeCountQueryResolvesTheTargetWithoutTheGeneratedColumn(t *testin
 	if !strings.Contains(outbound, "d.issue_id IN (?,?,?)") {
 		t.Errorf("the outbound count is not keyed by source over the whole batch:\n%s", outbound)
 	}
+	if strings.Contains(outbound, "UNION ALL") {
+		t.Errorf("the outbound count anchors on the source column alone and needs no target arms:\n%s", outbound)
+	}
 }
 
 func TestEdgeCountArgsBindInPlaceholderOrder(t *testing.T) {
+	// The inbound query inlines one UNION ALL per target arm, each restating the
+	// full placeholder sequence, so the args repeat the ids, the type filter and
+	// the status once per arm — three of each, in arm order.
 	args := edgeCountArgs([]string{"a", "b"}, publicops.EdgeCountRequest{
 		Direction: publicops.EdgeDirectionIn,
 		Types:     []types.DependencyType{types.DepBlocks},
 		Status:    string(types.StatusOpen),
 	})
-	want := []any{"a", "b", string(types.DepBlocks), string(types.StatusOpen)}
+	perArm := []any{"a", "b", string(types.DepBlocks), string(types.StatusOpen)}
+	want := append(append(append([]any{}, perArm...), perArm...), perArm...)
 	if len(args) != len(want) {
 		t.Fatalf("args = %v, want %v", args, want)
 	}
@@ -182,12 +210,23 @@ func TestEdgeCountArgsBindInPlaceholderOrder(t *testing.T) {
 	}
 
 	// The status binds only where the query names it, so an outbound request
-	// must not carry a fourth argument its SQL has no placeholder for.
+	// must not carry a fourth argument its SQL has no placeholder for. The
+	// outbound query has a single source-keyed predicate, so its args bind once.
 	outbound := edgeCountArgs([]string{"a"}, publicops.EdgeCountRequest{
 		Direction: publicops.EdgeDirectionOut,
 		Types:     []types.DependencyType{types.DepBlocks},
 	})
 	if len(outbound) != 2 {
 		t.Fatalf("outbound args = %v, want the ids plus the type filter only", outbound)
+	}
+
+	// An inbound request with no status still binds the ids and the type filter
+	// three times — once per target arm.
+	inboundNoStatus := edgeCountArgs([]string{"a"}, publicops.EdgeCountRequest{
+		Direction: publicops.EdgeDirectionIn,
+		Types:     []types.DependencyType{types.DepBlocks},
+	})
+	if len(inboundNoStatus) != 6 {
+		t.Fatalf("inbound args without a status = %v, want the ids plus the type filter three times", inboundNoStatus)
 	}
 }

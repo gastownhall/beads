@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/types"
 	publicops "github.com/steveyegge/beads/issueops"
 )
@@ -172,13 +173,16 @@ func tallyEdgesInTx(ctx context.Context, tx DBTX, anchors []string, request publ
 // buildEdgeCountQuery returns the grouped count for one dependency plane, keyed
 // by the anchor end the request's direction names.
 //
-// THE TARGET END IS ALWAYS THE COALESCE EXPRESSION, never the STORED generated
-// `depends_on_id` column. Both dependency tables define that column as
-// GENERATED ALWAYS AS the same COALESCE, and inside an aggregate the pure-Go
-// GMS analyzer can prune the base columns it derives from and then fail with
-// "column depends_on_id could not be found in any table in scope"
-// (dolt/counts.go says so at depTargetExpr). Every other aggregate over these
-// tables in this package resolves the target the same way.
+// THE TARGET END IS NEVER THE STORED generated `depends_on_id` column: both
+// dependency tables define that column as GENERATED ALWAYS AS the target
+// COALESCE, and inside an aggregate the pure-Go GMS analyzer can prune the base
+// columns it derives from and then fail with "column depends_on_id could not be
+// found in any table in scope". It is also never the COALESCE wrapper in a
+// filter position: no index matches the expression, so the inbound count is
+// split per typed target column into guarded arms (sqlbuild.DepTargetArmsFor,
+// gascity#7666). Each arm counts one indexed column and groups by it; the outer
+// query re-groups the summed arms by anchor, so a row carrying more than one
+// typed target still counts once, under its precedence column.
 func buildEdgeCountQuery(depTable, sourceTable string, batchSize int, request publicops.EdgeCountRequest) string {
 	placeholders := strings.TrimSuffix(strings.Repeat("?,", batchSize), ",")
 
@@ -194,34 +198,48 @@ func buildEdgeCountQuery(depTable, sourceTable string, batchSize int, request pu
 			depTable, placeholders, typeClause)
 	}
 
-	anchorExpr := depTargetExpr("d")
-	if request.Status == "" {
-		//nolint:gosec // G201: table names are hardcoded literals and the IN clause holds only ? placeholders.
-		return fmt.Sprintf(
-			"SELECT %s AS anchor, COUNT(*) AS n FROM %s d WHERE %s%s GROUP BY %s",
-			anchorExpr, depTable, depTargetIn("d", placeholders), typeClause, anchorExpr)
-	}
-	// A status narrows by the DEPENDENT's row, which lives on the same plane as
-	// the edge: `dependencies` sources are durable issues, `wisp_dependencies`
-	// sources are wisps. An edge whose source row is gone joins to nothing and
-	// drops out, which the leaf doc states.
-	//nolint:gosec // G201: table names are hardcoded literals and the IN clause holds only ? placeholders.
-	return fmt.Sprintf(
-		"SELECT %s AS anchor, COUNT(*) AS n FROM %s d JOIN %s s ON s.id = d.issue_id WHERE %s%s AND s.status = ? GROUP BY %s",
-		anchorExpr, depTable, sourceTable, depTargetIn("d", placeholders), typeClause, anchorExpr)
+	// Inbound: the anchor is the edge's target, matched per typed column in
+	// guarded arms so each arm seeks the column's own target index for the
+	// whole batch. A status narrows by the DEPENDENT's row, which lives on the
+	// same plane as the edge: `dependencies` sources are durable issues,
+	// `wisp_dependencies` sources are wisps. An edge whose source row is gone
+	// joins to nothing and drops out, which the leaf doc states.
+	arms := sqlbuild.DepTargetArmsFor("d", "IN ("+placeholders+")")
+	armsSQL := sqlbuild.DepTargetArmsSQL(arms, func(arm sqlbuild.DepTargetArm) string {
+		q := fmt.Sprintf("SELECT %s AS anchor, COUNT(*) AS n FROM %s d", arm.Select, depTable)
+		if request.Status != "" {
+			//nolint:gosec // G201: table names are hardcoded literals and the IN clause holds only ? placeholders.
+			q += fmt.Sprintf(" JOIN %s s ON s.id = d.issue_id", sourceTable)
+		}
+		q += fmt.Sprintf(" WHERE %s%s", arm.Where, typeClause)
+		if request.Status != "" {
+			q += " AND s.status = ?"
+		}
+		return q + fmt.Sprintf(" GROUP BY %s", arm.Select)
+	})
+	return fmt.Sprintf("SELECT anchor, SUM(n) AS n FROM (%s) target_arms GROUP BY anchor", armsSQL)
 }
 
 // edgeCountArgs binds the batch's anchor ids, then the type filter, then the
-// status — the order buildEdgeCountQuery emits its placeholders in.
+// status — the order buildEdgeCountQuery emits its placeholders in. The
+// inbound query repeats that sequence once per target arm (three), matching the
+// UNION ALL the query text inlines.
 func edgeCountArgs(batch []string, request publicops.EdgeCountRequest) []any {
-	args := make([]any, 0, len(batch)+len(request.Types)+1)
+	perArm := make([]any, 0, len(batch)+len(request.Types)+1)
 	for _, id := range batch {
-		args = append(args, id)
+		perArm = append(perArm, id)
 	}
 	_, typeArgs := buildDepTypeClause(request.Types)
-	args = append(args, typeArgs...)
+	perArm = append(perArm, typeArgs...)
 	if request.Direction == publicops.EdgeDirectionIn && request.Status != "" {
-		args = append(args, request.Status)
+		perArm = append(perArm, request.Status)
+	}
+	if request.Direction == publicops.EdgeDirectionOut {
+		return perArm
+	}
+	args := make([]any, 0, len(perArm)*3)
+	for range 3 {
+		args = append(args, perArm...)
 	}
 	return args
 }

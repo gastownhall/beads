@@ -176,11 +176,13 @@ func finishReadyWorkWithCounts(items []*types.IssueWithCounts, filter types.Work
 // For a bounded page (limit > 0) it first resolves the ≤limit ready IDs with the
 // cheap indexed ID query (the same SELECT id … the non-counts GetReadyWork path
 // uses), then hydrates the counts constrained to exactly those IDs. This is what
-// de-quadratics the query: the reverse-blocker subquery rc joins on
-// COALESCE(depends_on_issue_id, …), an expression the pure-Go GMS analyzer
-// cannot auto-index, so the planner re-scans rc's whole materialization once per
-// driver row. Bounding the driver to the page turns that O(candidates × blockers)
-// scan into O(page × blockers). Each per-issue count is a function of the full
+// de-quadratics the query: the reverse-blocker subquery rc aggregates the
+// dependency tables up front — in the predicate form as one COALESCE(
+// depends_on_issue_id, …) projection, an expression the pure-Go GMS analyzer
+// cannot auto-index, and in the by-IDs form the same expression's per-column
+// target arms (sqlbuild.DepTargetArmsFor, gascity#7666) — so the planner
+// re-scans rc's whole materialization once per driver row. Bounding the driver
+// to the page turns that O(candidates × blockers) scan into O(page × blockers). Each per-issue count is a function of the full
 // dependency graph, not of the candidate set, so constraining the driver leaves
 // every emitted count byte-identical to the unbounded mega-query; the page is
 // the same top-N the ORDER BY … LIMIT selected because the ready order ends in a
@@ -188,7 +190,9 @@ func finishReadyWorkWithCounts(items []*types.IssueWithCounts, filter types.Work
 //
 // The page IDs are chunked into sqlbuild.QueryBatchSize batches so a large page
 // stays within every backend's per-statement placeholder limit (the by-IDs form
-// binds the page up to eight times) without falling back to the quadratic query.
+// binds the page up to twelve times: once per injection point, and the
+// reverse-blocker arms bind it once per typed target column) without falling
+// back to the quadratic query.
 //
 // For limit <= 0 (unbounded) there is no page to push down, so it runs the
 // predicate-form mega-query unchanged.

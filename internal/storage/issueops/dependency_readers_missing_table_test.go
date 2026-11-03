@@ -252,6 +252,18 @@ var edgeCountEntryPoints = []edgeCountEntryPoint{
 	{name: "CountDependencyEdgesInTx/out", dir: domain.DepDirectionOut},
 }
 
+// edgeCountQueryRegex matches the first count query CountDependencyEdgesInTx
+// issues against a plane. The shape differs by direction (gascity#7666): the
+// outbound leg anchors on the source column and keeps the single-predicate
+// count(*), while the inbound leg resolves the target in guarded arms under an
+// outer SUM, so its SQL opens with the arms subquery instead.
+func edgeCountQueryRegex(dir domain.DepDirection, table string) string {
+	if dir == domain.DepDirectionOut {
+		return `^SELECT count\(\*\) FROM ` + table + ` WHERE `
+	}
+	return `^SELECT COALESCE\(SUM\(n\), 0\) FROM \(SELECT COUNT\(\*\) AS n FROM ` + table + ` WHERE `
+}
+
 // TestCountDependencyEdgesMissingWispPlaneIsNotAnError: with no
 // wisp_dependencies the durable count is the whole answer, as it is for the
 // listing, instead of an error that publishes a count of 0.
@@ -259,9 +271,9 @@ func TestCountDependencyEdgesMissingWispPlaneIsNotAnError(t *testing.T) {
 	for _, ep := range edgeCountEntryPoints {
 		t.Run(ep.name, func(t *testing.T) {
 			_, mock, tx := beginMockTx(t)
-			mock.ExpectQuery(`^SELECT count\(\*\) FROM dependencies WHERE `).
+			mock.ExpectQuery(edgeCountQueryRegex(ep.dir, "dependencies")).
 				WillReturnRows(scalarCountRows(3))
-			mock.ExpectQuery(`^SELECT count\(\*\) FROM wisp_dependencies WHERE `).
+			mock.ExpectQuery(edgeCountQueryRegex(ep.dir, "wisp_dependencies")).
 				WillReturnError(tableNotFound("wisp_dependencies"))
 
 			n, err := CountDependencyEdgesInTx(context.Background(), tx, "epic-1", ep.dir, nil)
@@ -367,11 +379,11 @@ func TestCountDependencyEdgesBrokenPlaneIsAnError(t *testing.T) {
 				_, mock, tx := beginMockTx(t)
 				gone := tc.durable
 				if gone != nil {
-					mock.ExpectQuery(`^SELECT count\(\*\) FROM dependencies WHERE `).WillReturnError(gone)
+					mock.ExpectQuery(edgeCountQueryRegex(ep.dir, "dependencies")).WillReturnError(gone)
 				} else {
 					gone = tc.wisp
-					mock.ExpectQuery(`^SELECT count\(\*\) FROM dependencies WHERE `).WillReturnRows(scalarCountRows(3))
-					mock.ExpectQuery(`^SELECT count\(\*\) FROM wisp_dependencies WHERE `).WillReturnError(gone)
+					mock.ExpectQuery(edgeCountQueryRegex(ep.dir, "dependencies")).WillReturnRows(scalarCountRows(3))
+					mock.ExpectQuery(edgeCountQueryRegex(ep.dir, "wisp_dependencies")).WillReturnError(gone)
 				}
 
 				n, err := CountDependencyEdgesInTx(context.Background(), tx, "epic-1", ep.dir, nil)

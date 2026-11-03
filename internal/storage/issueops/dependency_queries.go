@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/types"
 	publicops "github.com/steveyegge/beads/issueops"
 )
@@ -533,13 +534,26 @@ func GetDependencyCountsInTx(ctx context.Context, tx DBTX, issueIDs []string) (m
 				return nil, fmt.Errorf("get dependency counts: blocker rows: %w", err)
 			}
 
+			// The dependent lookup matches the target per typed column in
+			// guarded arms (sqlbuild.DepTargetArmsFor, gascity#7666) so each
+			// arm probes its own target index against the batch; the guards
+			// keep a multi-target row counted once, under its precedence
+			// column, which is what the COALESCE-equality form this replaces
+			// selected and grouped.
+			depArms := sqlbuild.DepTargetArmsFor("", "IN ("+inClause+")")
+			dependentSQL := sqlbuild.DepTargetArmsSQL(depArms, func(arm sqlbuild.DepTargetArm) string {
+				return fmt.Sprintf("SELECT %s AS depends_on_id FROM %s WHERE type = 'blocks' AND %s", arm.Select, depTable, arm.Where)
+			})
+			armArgs := make([]any, 0, len(args)*len(depArms))
+			for range depArms {
+				armArgs = append(armArgs, args...)
+			}
 			//nolint:gosec // G201: depTable is hardcoded and inClause contains only ? placeholders.
 			blockingRows, err := tx.QueryContext(ctx, fmt.Sprintf(`
-				SELECT %s AS depends_on_id, COUNT(*) as cnt
-				FROM %s
-				WHERE %s AND type = 'blocks'
-				GROUP BY %s
-			`, DepTargetExpr, depTable, depTargetIn("", inClause), DepTargetExpr), args...)
+				SELECT depends_on_id, COUNT(*) as cnt
+				FROM (%s) target_arms
+				GROUP BY depends_on_id
+			`, dependentSQL), armArgs...)
 			if err != nil {
 				if optionalBlockedTable(depTable) && isTableNotExistError(err) {
 					continue

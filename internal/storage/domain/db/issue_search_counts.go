@@ -132,7 +132,7 @@ func readyHydrationFor(filter types.WorkFilter) sqlbuild.CountsHydration {
 // not hand-build an id predicate for the predicate form: that form renders
 // whereSQL inside a derived subquery, so a caller-written "i."-qualified
 // clause would silently couple to the subquery's internal alias. The IDs are
-// chunked so the by-IDs form's up-to-eightfold placeholder binding stays
+// chunked so the by-IDs form's up-to-twelvefold placeholder binding stays
 // within per-statement limits (mirrors issueops.runReadyCountsInTx).
 func (r *issueSQLRepositoryImpl) fetchCountsByIDs(ctx context.Context, ids []string, tables filterTables, includeWispReverseDeps bool, hyd sqlbuild.CountsHydration) (map[string]*types.IssueWithCounts, error) {
 	out := make(map[string]*types.IssueWithCounts, len(ids))

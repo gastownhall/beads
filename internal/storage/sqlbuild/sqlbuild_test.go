@@ -511,12 +511,50 @@ func TestBuildReadyWorkWhereLabelRegex(t *testing.T) {
 	}
 }
 
+// TestDepTargetArmsForGuardsEarlierColumnsInPrecedenceOrder pins the guarded
+// disjoint split of a dependency-target predicate (gascity#7666): one arm per
+// typed target column in DepTargetExpr's precedence order, each carrying the
+// caller's column predicate on that column and IS NULL on every EARLIER
+// column, so the arms partition rows exactly the way the COALESCE resolves
+// them and a UNION ALL over them counts what one COALESCE predicate did.
+func TestDepTargetArmsForGuardsEarlierColumnsInPrecedenceOrder(t *testing.T) {
+	t.Parallel()
+
+	arms := DepTargetArmsFor("d", "= ?")
+	want := []struct{ selectSQL, whereSQL string }{
+		{"d.depends_on_issue_id", "d.depends_on_issue_id = ?"},
+		{"d.depends_on_wisp_id", "d.depends_on_wisp_id = ? AND d.depends_on_issue_id IS NULL"},
+		{"d.depends_on_external", "d.depends_on_external = ? AND d.depends_on_issue_id IS NULL AND d.depends_on_wisp_id IS NULL"},
+	}
+	if len(arms) != len(want) {
+		t.Fatalf("arms = %d, want %d (one per typed target column)", len(arms), len(want))
+	}
+	for i, w := range want {
+		if arms[i].Select != w.selectSQL || arms[i].Where != w.whereSQL {
+			t.Errorf("arm %d = {%s | %s}, want {%s | %s}", i, arms[i].Select, arms[i].Where, w.selectSQL, w.whereSQL)
+		}
+	}
+
+	// An empty alias renders bare columns and the predicate text passes
+	// through verbatim — a caller's "IN (?,?)" must land on each column.
+	bare := DepTargetArmsFor("", "IN (?,?)")
+	if bare[0].Where != "depends_on_issue_id IN (?,?)" || bare[2].Where != "depends_on_external IN (?,?) AND depends_on_issue_id IS NULL AND depends_on_wisp_id IS NULL" {
+		t.Errorf("bare arms = %v, want the predicate per column with bare guards", bare)
+	}
+}
+
 func TestSearchCountsSQLShape(t *testing.T) {
 	t.Parallel()
 
 	sql, args := SearchCountsSQL(WispsFilterTables, nil, "WHERE x = ?", "ORDER BY y", "LIMIT 5", true, CountsHydration{})
 	if args != nil {
 		t.Errorf("predicate form must not return generated args, got %d", len(args))
+	}
+	// The predicate form's reverse-blocker lookup has no target predicate to
+	// make sargable — it aggregates a whole plane — so it keeps the single
+	// COALESCE projection (one scan, no per-row index to defeat).
+	if !strings.Contains(sql, "SELECT COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) AS dep_id") {
+		t.Errorf("predicate form must keep the COALESCE target projection:\n%s", sql)
 	}
 	for _, want := range []string{
 		"FROM wisps i",
@@ -580,8 +618,13 @@ func TestSearchCountsSQLShape(t *testing.T) {
 	}
 
 	// By-IDs form: driver and every subquery are constrained to the ids, and the
-	// arg count matches the placeholder injection points (labels, dc, rc-deps,
-	// rc-wisp, cc, pc, d, driver = 8 for the wisp family with labels).
+	// arg count matches the placeholder injection points (labels, dc, the three
+	// rc-deps target arms, the three rc-wisp target arms, cc, pc, d, driver = 12
+	// for the wisp family with labels). The reverse-blocker lookup resolves the
+	// target in guarded arms (gascity#7666): no COALESCE over the typed columns
+	// in a filter position, one bare indexed column per arm, and the arm's
+	// earlier columns guarded IS NULL so the arms partition rows exactly the way
+	// the COALESCE projection resolved them.
 	byIDs, idArgs := SearchCountsSQL(WispsFilterTables, []string{"a", "b"}, "", "", "", true, CountsHydration{})
 	if !strings.Contains(byIDs, "WHERE i.id IN (?,?)") {
 		t.Errorf("by-IDs counts SQL missing driver id filter:\n%s", byIDs)
@@ -595,15 +638,32 @@ func TestSearchCountsSQLShape(t *testing.T) {
 	if strings.Contains(byIDs, "ORDER BY") || strings.Contains(byIDs, "LIMIT") {
 		t.Error("by-IDs counts SQL must not carry ORDER BY / LIMIT (order restored in Go)")
 	}
-	if len(idArgs) != 8*2 {
-		t.Errorf("by-IDs args = %d, want %d", len(idArgs), 8*2)
+	if len(idArgs) != 12*2 {
+		t.Errorf("by-IDs args = %d, want %d", len(idArgs), 12*2)
+	}
+	if strings.Contains(byIDs, "COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) IN") {
+		t.Errorf("the by-IDs reverse-blocker lookup must not filter on the COALESCE wrapper:\n%s", byIDs)
+	}
+	for _, want := range []string{
+		"SELECT depends_on_issue_id AS dep_id FROM dependencies WHERE type = 'blocks' AND depends_on_issue_id IN (?,?)",
+		"SELECT depends_on_wisp_id AS dep_id FROM dependencies WHERE type = 'blocks' AND depends_on_wisp_id IN (?,?) AND depends_on_issue_id IS NULL",
+		"SELECT depends_on_external AS dep_id FROM dependencies WHERE type = 'blocks' AND depends_on_external IN (?,?) AND depends_on_issue_id IS NULL AND depends_on_wisp_id IS NULL",
+		"SELECT depends_on_wisp_id AS dep_id FROM wisp_dependencies WHERE type = 'blocks' AND depends_on_wisp_id IN (?,?) AND depends_on_issue_id IS NULL",
+	} {
+		if !strings.Contains(byIDs, want) {
+			t.Errorf("by-IDs counts SQL missing guarded arm %q:\n%s", want, byIDs)
+		}
+	}
+	if strings.Count(byIDs, "UNION ALL") != 5 {
+		t.Errorf("by-IDs counts SQL unions the 5 arms (3 target columns x 2 planes), got %d UNION ALL", strings.Count(byIDs, "UNION ALL"))
 	}
 
 	// skipLabels drops the labels point and !includeWispReverseDeps drops the
-	// rc-wisp point, leaving 6 injection points (dc, rc-deps, cc, pc, d, driver).
+	// rc-wisp arms, leaving 8 injection points (dc, the 3 rc-deps arms, cc, pc,
+	// d, driver).
 	_, idArgsNoLabels := SearchCountsSQL(IssuesFilterTables, []string{"a", "b"}, "", "", "", false, CountsHydration{SkipLabels: true})
-	if len(idArgsNoLabels) != 6*2 {
-		t.Errorf("by-IDs args (skipLabels, no wisp deps) = %d, want %d", len(idArgsNoLabels), 6*2)
+	if len(idArgsNoLabels) != 8*2 {
+		t.Errorf("by-IDs args (skipLabels, no wisp deps) = %d, want %d", len(idArgsNoLabels), 8*2)
 	}
 
 	// SkipCounts drops the three cardinality joins and projects constants in
