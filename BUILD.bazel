@@ -114,6 +114,14 @@ exports_files(
     visibility = ["//test/docsync:__pkg__"],
 )
 
+# //cmd/bd:bd_test: the gate-docs guard (gate_docs_guard_test.go) runs the
+# page's gate-creation examples, so the page itself must be readable as test
+# data under `bazel test`.
+exports_files(
+    ["docs/core-concepts/dependencies.md"],
+    visibility = ["//cmd/bd:__pkg__"],
+)
+
 # //cmd/bd:bd_test: tracked git hooks (generator parity) and the formula
 # primitive fixtures.
 filegroup(
