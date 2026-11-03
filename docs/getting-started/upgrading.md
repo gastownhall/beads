@@ -422,7 +422,7 @@ clone that takes the pull in step 3 above, one re-cloned by `bd bootstrap`,
 and a fresh clone made after the migration. The old rows are not gone: they
 stay in the clone's own Dolt history, just below the drop commit.
 
-**Releases after v1.3.2** put them back once, on the first open, with no
+**bd v1.4.0 and later** put them back once, on the first open, with no
 extra step or consent. bd reads the table as of each commit just before a
 drop, adds only the rows the live table is missing, and prints:
 
@@ -472,7 +472,7 @@ The statement also removes the markers of any later clone-local migrations,
 which the next command re-applies. Otherwise, recover the rows from a clone
 or backup that can read that history and copy them in by hand as shown below.
 
-To recover the rows **with v1.3.2 or earlier**, copy them in by hand with the
+To recover the rows **with v1.3.3 or earlier**, copy them in by hand with the
 [Dolt CLI](https://docs.dolthub.com/cli-reference/cli) while no `bd` command
 runs. This is only safe when the live table is still empty and history holds
 exactly one drop commit; otherwise install a newer release, which merges the

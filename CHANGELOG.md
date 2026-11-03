@@ -1233,7 +1233,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   migration lock is held. It makes no Dolt commit, and the restored rows
   stay clone-local.
   [Upgrading](docs/getting-started/upgrading.md) gives a manual recipe for
-  v1.3.2 and earlier, and how to retry a restore that skipped history
+  v1.3.3 and earlier, and how to retry a restore that skipped history
   (#7039).
 - Upgrading an older database no longer rewrites issue and wisp `updated_at`
   values with the time of the upgrade. Schema migrations 0035, 0046, 0047 and
