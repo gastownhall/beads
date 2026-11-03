@@ -555,6 +555,40 @@ func TestProxiedServerImport(t *testing.T) {
 		if !strings.Contains(stderr, "Warning: 1 dependency edge(s) were reported skipped") {
 			t.Errorf("default import stderr lacks the skipped-count summary:\n%s", stderr)
 		}
+
+		// --json: stdout stays the one result object (decoded through EOF),
+		// the strict-deps error goes to stderr. A fresh source row, so the
+		// row left behind is this failing import's own commit.
+		jsonFixture := importFixtureJSONL(t, []*types.Issue{{
+			ID: "impk-c", Title: "Fresh source with an absent target", Status: types.StatusOpen,
+			IssueType: types.TypeTask, Priority: 2,
+			Dependencies: []*types.Dependency{{IssueID: "impk-c", DependsOnID: "impk-b", Type: types.DepBlocks}},
+			CreatedAt:    when, UpdatedAt: when,
+		}})
+		if got := proxiedImportQueryInt(t, db, "SELECT COUNT(*) FROM issues WHERE id = 'impk-c'"); got != 0 {
+			t.Fatalf("fresh source row = %d before the --json import, want 0", got)
+		}
+		stdout, stderr, err := bdProxiedImportWithInput(t, bd, p.dir, jsonFixture, "--json", "--strict-deps", "-")
+		if code := exitCode(err); code != 1 {
+			t.Fatalf("--json --strict-deps import exit = %d, want 1\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+		}
+		obj := decodeSingleJSONObject(t, stdout)
+		if deps, _ := obj["skipped_dependencies"].([]any); len(deps) != 1 {
+			t.Errorf("skipped_dependencies = %v, want the one skipped edge", obj["skipped_dependencies"])
+		}
+		msg := decodeStrictDepsJSONError(t, stderr)
+		if !strings.Contains(msg["error"], "1 dependency edge(s) were reported skipped") || !strings.Contains(msg["error"], "--strict-deps") {
+			t.Errorf("stderr error = %q, want the skipped-edge count and the flag named", msg["error"])
+		}
+		if !strings.Contains(msg["hint"], "re-run") {
+			t.Errorf("stderr hint = %q, want the recovery hint", msg["hint"])
+		}
+		if got := proxiedImportQueryInt(t, db, "SELECT COUNT(*) FROM issues WHERE id = 'impk-c'"); got != 1 {
+			t.Errorf("fresh source row = %d after the --json import, want 1 (committed despite the failure)", got)
+		}
+		if got := proxiedImportQueryInt(t, db, "SELECT COUNT(*) FROM dependencies WHERE issue_id = 'impk-c'"); got != 0 {
+			t.Errorf("edges from impk-c = %d, want 0 (target absent)", got)
+		}
 	})
 
 	t.Run("dedup_skips_matching_open_title", func(t *testing.T) {

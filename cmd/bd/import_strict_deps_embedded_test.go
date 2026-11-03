@@ -170,4 +170,33 @@ func TestEmbeddedImportStrictDeps(t *testing.T) {
 			t.Errorf("after --strict-deps import rows = %v edges = %v, want [sdtxt-a] and no edge", ids, edges)
 		}
 	})
+
+	t.Run("strict_json_exits_one_one_result_object", func(t *testing.T) {
+		t.Parallel()
+		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "sdjsn")
+
+		stdout, stderr, code := strictDepsImport(t, bd, dir, "--json", "--strict-deps", partA(t, "sdjsn"))
+		if code != 1 {
+			t.Fatalf("--json --strict-deps import exit = %d, want 1\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+		}
+		obj := decodeSingleJSONObject(t, stdout)
+		deps, _ := obj["skipped_dependencies"].([]any)
+		if len(deps) != 1 || deps[0] != "sdjsn-a -> sdjsn-b: target not found" {
+			t.Errorf("skipped_dependencies = %v, want the one skipped edge", obj["skipped_dependencies"])
+		}
+		if created, _ := obj["created"].(float64); created != 1 {
+			t.Errorf("created = %v, want 1", obj["created"])
+		}
+		msg := decodeStrictDepsJSONError(t, stderr)
+		if !strings.Contains(msg["error"], "1 dependency edge(s)") || !strings.Contains(msg["error"], "imported rows remain committed") {
+			t.Errorf("stderr error = %q, want the count and the committed-rows note", msg["error"])
+		}
+		if !strings.Contains(msg["hint"], "re-run") {
+			t.Errorf("stderr hint = %q, want the recovery hint", msg["hint"])
+		}
+		ids, edges := strictDepsRows(t, beadsDir, "sdjsn")
+		if strings.Join(ids, ",") != "sdjsn-a" || len(edges) != 0 {
+			t.Errorf("after --json --strict-deps import rows = %v edges = %v, want [sdjsn-a] and no edge", ids, edges)
+		}
+	})
 }
