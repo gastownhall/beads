@@ -141,3 +141,20 @@ func TestAssociatedDataIsUnambiguous(t *testing.T) {
 		t.Error("distinct bindings encode to the same associated data")
 	}
 }
+
+// From the GLM candidate: each Seal draws a fresh nonce, so two seals of one
+// password for one binding never repeat a ciphertext.
+func TestSealIsRandomized(t *testing.T) {
+	key := testKey(1)
+	a, err := Seal(key, team, "s3cret")
+	if err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+	b, err := Seal(key, team, "s3cret")
+	if err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+	if bytes.Equal(a, b) {
+		t.Fatal("two seals of one password produced identical ciphertext")
+	}
+}

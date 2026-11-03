@@ -951,7 +951,7 @@ func TestFederationPeerDecryptKeyMismatchNamesTheLocalKey(t *testing.T) {
 		// legacy dbPath and the bare name would not say which file is meant.
 		"stored peer credentials cannot be decrypted with this machine's credential key " +
 			"(the key file " + filepath.Join(beadsDir, credentialKeyFile) + " is machine-local and does not replicate with the database); " +
-			"re-run 'bd federation add-peer <name> <url> --user <user>' on this machine",
+			"re-run `bd federation add-peer team <url> --user peeruser` on this machine",
 		// The cipher error stays wrapped, so the raw cause is still readable.
 		"cipher: message authentication failed",
 	}
@@ -1437,4 +1437,145 @@ func decryptWithKey(encrypted []byte, key []byte) (string, error) {
 		return "", err
 	}
 	return string(plaintext), nil
+}
+
+// peerRowColumns are the columns GetFederationPeer and ListFederationPeers
+// read, for sqlmock rows.
+var peerRowColumns = []string{
+	"name", "remote_url", "username", "password_encrypted",
+	"sovereignty", "last_sync", "created_at", "updated_at",
+}
+
+// newMarkedCredentialMockStore is a sqlmock-backed store whose legacy
+// credential upgrade already completed under key, so reads go straight to the
+// row without a live server.
+func newMarkedCredentialMockStore(t *testing.T, key []byte) (*DoltStore, sqlmock.Sqlmock) {
+	t.Helper()
+	beadsDir := t.TempDir()
+	if err := peercred.WriteMarker(filepath.Join(beadsDir, credentialKeyFile), key); err != nil {
+		t.Fatalf("WriteMarker: %v", err)
+	}
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return &DoltStore{db: db, credentialKey: key, beadsDir: beadsDir}, mock
+}
+
+// Ported from PR #7891 (Wenjix): a row naming the attacker's URL that carries
+// a password sealed for another peer must not decrypt, and the peer operation
+// must never receive it. Runs without a server, so the PR lane pins it.
+func TestServerCopiedCiphertextNeverReachesPeerOperation(t *testing.T) {
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i)
+	}
+	blob, err := peercred.Seal(key, peercred.Binding{
+		Name: "good", URL: "https://good.example/beads", Username: "good-user",
+	}, "good-password")
+	if err != nil {
+		t.Fatalf("peercred.Seal: %v", err)
+	}
+	store, mock := newMarkedCredentialMockStore(t, key)
+	now := time.Now()
+	mock.ExpectQuery(regexp.QuoteMeta("FROM federation_peers WHERE name = ?")).
+		WithArgs("evil").
+		WillReturnRows(sqlmock.NewRows(peerRowColumns).
+			AddRow("evil", "https://evil.example/beads", "good-user", blob, "T2", nil, now, now))
+
+	called := false
+	err = store.withPeerCredentials(t.Context(), "evil", func(*remoteCredentials) error {
+		called = true
+		return nil
+	})
+	if err == nil {
+		t.Fatal("withPeerCredentials accepted a password copied from another peer")
+	}
+	if called {
+		t.Fatal("withPeerCredentials invoked its callback with a copied password")
+	}
+	if !errors.Is(err, storage.ErrCredentialKeyMismatch) || !errors.Is(err, peercred.ErrNotAuthenticated) {
+		t.Errorf("error = %v, want errors.Is ErrCredentialKeyMismatch and peercred.ErrNotAuthenticated", err)
+	}
+	if !strings.Contains(err.Error(), "re-run `bd federation add-peer evil <url> --user good-user` on this machine") {
+		t.Errorf("error = %v, want the peer-specific add-peer remedy", err)
+	}
+	if strings.Contains(err.Error(), "good-password") || strings.Contains(err.Error(), "evil.example") {
+		t.Errorf("error %q prints the password or the stored URL", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("sqlmock expectations: %v", err)
+	}
+}
+
+// Ported from PR #7891 (Wenjix): once the upgrade completed, a legacy blob
+// that arrives later (a pull, a direct write) is refused with the re-add
+// remedy rather than decrypted or resealed.
+func TestServerLegacyCredentialRejectedAfterMigrationMarker(t *testing.T) {
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i)
+	}
+	legacy, err := encryptWithKey("legacy-password", key)
+	if err != nil {
+		t.Fatalf("encryptWithKey: %v", err)
+	}
+	store, mock := newMarkedCredentialMockStore(t, key)
+	now := time.Now()
+	mock.ExpectQuery(regexp.QuoteMeta("FROM federation_peers WHERE name = ?")).
+		WithArgs("legacy").
+		WillReturnRows(sqlmock.NewRows(peerRowColumns).
+			AddRow("legacy", "https://legacy.example/beads", "legacy-user", legacy, "T2", nil, now, now))
+
+	_, err = store.GetFederationPeer(t.Context(), "legacy")
+	if !errors.Is(err, peercred.ErrLegacyFormat) || !errors.Is(err, storage.ErrCredentialKeyMismatch) {
+		t.Fatalf("GetFederationPeer error = %v, want errors.Is peercred.ErrLegacyFormat and ErrCredentialKeyMismatch", err)
+	}
+	if !strings.Contains(err.Error(), "bd federation add-peer legacy <url> --user legacy-user") {
+		t.Errorf("error = %v, want add-peer remediation", err)
+	}
+	// No UPDATE ran: the refused blob is not resealed.
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("sqlmock expectations: %v", err)
+	}
+}
+
+// The remedy's values come from a replicated row: a name or username a
+// shell would split, or carrying terminal controls, prints as a placeholder
+// with an escaped note, and the stored URL (which may embed credentials)
+// never prints.
+func TestServerRejectedCredentialRemedyEscapesRowValues(t *testing.T) {
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i)
+	}
+	blob, err := peercred.Seal(key, peercred.Binding{Name: "good", URL: "https://good.example/db", Username: "u"}, "pw")
+	if err != nil {
+		t.Fatalf("peercred.Seal: %v", err)
+	}
+	store, mock := newMarkedCredentialMockStore(t, key)
+	now := time.Now()
+	name, user := "evil\r\x1b[2Kok", "a b;rm"
+	mock.ExpectQuery(regexp.QuoteMeta("FROM federation_peers ORDER BY name")).
+		WillReturnRows(sqlmock.NewRows(peerRowColumns).
+			AddRow(name, "https://admin:hunter2@evil.example/db", user, blob, "T2", nil, now, now))
+
+	_, err = store.ListFederationPeers(t.Context())
+	if !errors.Is(err, storage.ErrCredentialKeyMismatch) {
+		t.Fatalf("ListFederationPeers error = %v, want errors.Is ErrCredentialKeyMismatch", err)
+	}
+	msg := err.Error()
+	if strings.ContainsAny(msg, "\r\x1b") {
+		t.Errorf("error %q carries raw terminal controls from the row", msg)
+	}
+	if strings.Contains(msg, "hunter2") || strings.Contains(msg, "evil.example") {
+		t.Errorf("error %q prints the stored URL", msg)
+	}
+	if !strings.Contains(msg, "bd federation add-peer <name> <url> --user ") {
+		t.Errorf("error %q does not hold the name placeholder in the remedy", msg)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("sqlmock expectations: %v", err)
+	}
 }

@@ -53,6 +53,14 @@ func TestFederationCredentialBindingRejectsCopiedCiphertext(t *testing.T) {
 	if strings.Contains(err.Error(), "victim-secret") {
 		t.Errorf("error %q leaks the victim's password", err)
 	}
+	// The remedy names the row's peer and username but takes a literal <url>:
+	// the copied row's URL is exactly the one not to trust or print.
+	if !strings.Contains(err.Error(), "re-run `bd federation add-peer attacker <url> --user victim-user` on this machine") {
+		t.Errorf("error %q does not name the peer-specific add-peer remedy", err)
+	}
+	if strings.Contains(err.Error(), "attacker.example") {
+		t.Errorf("error %q prints the stored URL", err)
+	}
 
 	called := false
 	err = store.withPeerAuth(ctx, "attacker", func(string) error {

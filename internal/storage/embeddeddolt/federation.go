@@ -172,7 +172,7 @@ func (s *EmbeddedDoltStore) decryptPassword(b peercred.Binding, encrypted []byte
 		if errors.Is(err, peercred.ErrLegacyFormat) && s.readOnly {
 			err = fmt.Errorf("%w; a read-only store does not upgrade it, so run bd federation list-peers without --readonly first", err)
 		}
-		return "", storage.CredentialKeyMismatchError(filepath.Join(s.beadsDir, credentialKeyFile), err)
+		return "", storage.CredentialKeyMismatchError(filepath.Join(s.beadsDir, credentialKeyFile), b.Name, b.Username, err)
 	}
 	return plaintext, err
 }
@@ -220,7 +220,7 @@ func (s *EmbeddedDoltStore) GetFederationPeer(ctx context.Context, name string) 
 	if len(row.EncryptedPwd) > 0 {
 		row.Peer.Password, err = s.decryptPassword(peerBinding(&row.Peer), row.EncryptedPwd)
 		if err != nil {
-			return nil, fmt.Errorf("decrypt password for peer %s: %w", name, err)
+			return nil, fmt.Errorf("decrypt password for peer %s: %w", remedy.PrintedValue(name), err)
 		}
 	}
 	return &row.Peer, nil
@@ -390,7 +390,7 @@ func (s *EmbeddedDoltStore) ListFederationPeers(ctx context.Context) ([]*storage
 		if len(row.EncryptedPwd) > 0 {
 			pwd, err := s.decryptPassword(peerBinding(&row.Peer), row.EncryptedPwd)
 			if err != nil {
-				return nil, fmt.Errorf("decrypt password for peer %s: %w", row.Peer.Name, err)
+				return nil, fmt.Errorf("decrypt password for peer %s: %w", remedy.PrintedValue(row.Peer.Name), err)
 			}
 			row.Peer.Password = pwd
 		}

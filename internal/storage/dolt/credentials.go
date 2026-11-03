@@ -19,6 +19,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/execenv"
 	"github.com/steveyegge/beads/internal/githooksenv"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/peercred"
 )
@@ -277,7 +278,7 @@ func (s *DoltStore) decryptPassword(b peercred.Binding, encrypted []byte) (strin
 		if errors.Is(err, peercred.ErrLegacyFormat) && s.readOnly {
 			err = fmt.Errorf("%w; a read-only store does not upgrade it, so run bd federation list-peers without --readonly first", err)
 		}
-		return "", storage.CredentialKeyMismatchError(filepath.Join(s.beadsDir, credentialKeyFile), err)
+		return "", storage.CredentialKeyMismatchError(filepath.Join(s.beadsDir, credentialKeyFile), b.Name, b.Username, err)
 	}
 	return plaintext, err
 }
@@ -383,7 +384,7 @@ func (s *DoltStore) GetFederationPeer(ctx context.Context, name string) (*storag
 		if err != nil {
 			// decryptPassword already classifies the local-key case; name the
 			// peer and preserve the sentinel for errors.Is/As.
-			return nil, fmt.Errorf("failed to decrypt password for peer %s: %w", name, err)
+			return nil, fmt.Errorf("failed to decrypt password for peer %s: %w", remedy.PrintedValue(name), err)
 		}
 	}
 
@@ -431,7 +432,7 @@ func (s *DoltStore) ListFederationPeers(ctx context.Context) ([]*storage.Federat
 			if err != nil {
 				// Same as GetFederationPeer: the funnel classified it, the
 				// caller only names which peer failed.
-				return nil, fmt.Errorf("failed to decrypt password for peer %s: %w", peer.Name, err)
+				return nil, fmt.Errorf("failed to decrypt password for peer %s: %w", remedy.PrintedValue(peer.Name), err)
 			}
 		}
 
