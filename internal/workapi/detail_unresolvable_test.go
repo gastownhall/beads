@@ -403,6 +403,21 @@ func TestBuildIssueDetails_FailedCountIsAbsentNotZero(t *testing.T) {
 			dependentCount:  ptr64(0),
 			dependencyCount: ptr64(0),
 		},
+
+		// AC-3: with the rows requested, a failed comment count leaves the
+		// readable comment in place beside no count, rather than beside a
+		// contradicting comment_count 0.
+		{
+			name: "comment count failed with comments included",
+			src: skewSource{
+				issue: issue, commentCountErr: boom,
+				comments: []*types.Comment{{ID: "c-1", IssueID: "rp-1", Author: "alice", Text: "a real comment"}},
+			},
+			opts:            DetailOptions{IncludeComments: true},
+			dependentCount:  ptr64(0),
+			dependencyCount: ptr64(0),
+			comments:        1,
+		},
 	}
 
 	for _, tc := range tests {
