@@ -349,8 +349,9 @@ type MoleculeStepInfo struct {
 	CanParallel   []string `json:"can_parallel"`   // Steps that can run in parallel with this one
 }
 
-// MoleculeAnalysis is the readiness and parallelism of every node of a
-// molecule, root included.
+// MoleculeAnalysis is the readiness and parallelism of every step of a
+// molecule. The root is the molecule itself, not a step: it is in neither the
+// counts, Steps nor any parallel group.
 type MoleculeAnalysis struct {
 	MoleculeID     string                       `json:"molecule_id"`
 	TotalSteps     int                          `json:"total_steps"`
@@ -370,7 +371,6 @@ type MoleculeAnalysis struct {
 func AnalyzeMolecule(g *MoleculeGraph) *MoleculeAnalysis {
 	analysis := &MoleculeAnalysis{
 		MoleculeID:     g.Root.ID,
-		TotalSteps:     len(g.Issues),
 		ParallelGroups: make(map[string][]string),
 		Steps:          make(map[string]*MoleculeStepInfo),
 	}
@@ -425,6 +425,9 @@ func AnalyzeMolecule(g *MoleculeGraph) *MoleculeAnalysis {
 	inheritBlockedParents(g, parentChildren, childParents, blockedBy, blocks)
 
 	for _, issue := range g.Issues {
+		if issue.ID == g.Root.ID {
+			continue
+		}
 		info := &MoleculeStepInfo{StepID: issue.ID, Status: string(issue.Status), BlockedBy: []string{}, Blocks: []string{}}
 		for blockerID := range blockedBy[issue.ID] {
 			if blocker := g.IssueMap[blockerID]; blocker != nil && blocker.Status != types.StatusClosed {
@@ -442,10 +445,14 @@ func AnalyzeMolecule(g *MoleculeGraph) *MoleculeAnalysis {
 		sort.Strings(info.Blocks)
 		analysis.Steps[issue.ID] = info
 	}
+	analysis.TotalSteps = len(analysis.Steps)
 
 	depths := blockingDepths(g, blockedBy)
 	depthGroups := make(map[int][]string)
 	for _, issue := range g.Issues {
+		if issue.ID == g.Root.ID {
+			continue
+		}
 		depthGroups[depths[issue.ID]] = append(depthGroups[depths[issue.ID]], issue.ID)
 	}
 	groupCounter := 0
@@ -662,8 +669,8 @@ type MoleculeView struct {
 	// several are); NextStep the first ready step.
 	CurrentStep *Issue
 	NextStep    *Issue
-	// Ready holds every node the analysis marks ready (open or in progress
-	// with no open blocker inside the molecule), root included, in graph
+	// Ready holds every step the analysis marks ready (open or in progress
+	// with no open blocker inside the molecule), the root excluded, in graph
 	// order: `bd ready --mol`'s list, hydrated rows (assignee and all).
 	Ready []*Issue
 }

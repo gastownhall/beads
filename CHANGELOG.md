@@ -642,6 +642,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `bd ready --mol` and `bd mol show --parallel` no longer count the molecule
+  root as a step. `total_steps` and `ready_steps` (and the `Total:` and
+  `Steps:` lines) count only the root's steps, and the root no longer appears
+  among the ready steps, the parallel groups or any step's `can_parallel`.
 - **`bd rules compact` previews by default and applies only with `--force`.**
   It used to apply merges by default, writing the composite and deleting the
   source rules. Scripts using `--auto` or `--group` to apply merges must add
