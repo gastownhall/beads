@@ -17,10 +17,13 @@ const ignoredMigration0031Up = "0031_restore_preflip_events.up.sql"
 // TestLatestIgnoredVersionIncludesMigration0031 pins the ignored slot the
 // pre-upgrade events restore claims (gastownhall/beads#7039), directly above
 // wisp_id_tombstones' (ignored 0030), and that the slot carries its repair.
+// 0031 is no longer the top of the ignored series: that pin moved to
+// TestIgnored32IsLatest when ignored 0032 claimed the
+// next slot.
 func TestLatestIgnoredVersionIncludesMigration0031(t *testing.T) {
 	const wantIgnored = 31
-	if got := LatestIgnoredVersion(); got != wantIgnored {
-		t.Fatalf("LatestIgnoredVersion() = %d, want %d (pre-upgrade events restore)", got, wantIgnored)
+	if got := LatestIgnoredVersion(); got < wantIgnored {
+		t.Fatalf("LatestIgnoredVersion() = %d, want at least %d (pre-upgrade events restore)", got, wantIgnored)
 	}
 	if _, ok := preMigrationRepairs[repairKey{ignoredSource.cursorTable, wantIgnored}]; !ok {
 		t.Fatalf("ignored 0031 has no pre-migration repair registered; the marker alone restores nothing")

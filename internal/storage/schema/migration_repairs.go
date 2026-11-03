@@ -39,6 +39,7 @@ var preMigrationRepairs = map[repairKey]func(context.Context, DBConn) error{
 	{"ignored_schema_migrations", 7}:  ensureWispIsBlockedForRecompute,
 	{"ignored_schema_migrations", 15}: ensureWispIsBlockedForRecompute,
 	{"ignored_schema_migrations", 31}: seedEventsFromPreflipHistory,
+	{"ignored_schema_migrations", 32}: ensureWispIsBlockedForRecompute,
 }
 
 // preMigrationRepair dispatches any repair registered for (source, version).
@@ -299,6 +300,14 @@ func ensureWispTablesForMixedBlockedRecompute(ctx context.Context, db DBConn) er
 // index are present rather than re-adding them. It mirrors ignored/0006's
 // own two statements so a clone that never ran 0006 to completion still
 // ends up in the shape 0006 would have produced.
+//
+// Neither registration helps a clone whose ignored cursor is already past 15
+// when the column goes missing: nothing below its cursor is pending again, so
+// the same function is registered a third time at
+// {ignored_schema_migrations, 32}, a marker with no SQL of its own
+// (gastownhall/beads#4468, #5257). Every clone runs it once on its next
+// write-intent open; a clone that has the column pays three probes and no
+// DDL.
 func ensureWispIsBlockedForRecompute(ctx context.Context, db DBConn) error {
 	hasWisps, err := schemaTableExists(ctx, db, "wisps")
 	if err != nil {

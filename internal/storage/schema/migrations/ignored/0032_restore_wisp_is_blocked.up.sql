@@ -1,0 +1,25 @@
+-- Ignored migration 0032: clone-local marker that restores wisps.is_blocked
+-- (and idx_wisps_is_blocked) on a clone whose ignored cursor is already past
+-- the migrations that create it (gastownhall/beads#4468, #5257).
+--
+-- ignored/0006 adds the column, but only while 0006 is pending. A clone can
+-- reach the top of the ignored series with wisps materialized without it (the
+-- shapes ensureWispIsBlockedForRecompute's doc comment lists), and the repairs
+-- registered at ignored 7 and 15 only fire while one of those is pending. On
+-- such a clone every blocked-state read or write that touches the wisp family
+-- fails: bd ready ("stale blocked flags: table ... does not have column
+-- is_blocked"), bd create --ephemeral ("recompute is_blocked (unmark)"), and,
+-- on older trees, bd close. Nothing in the tool ever heals it.
+--
+-- The work happens in code, not here: ensureWispIsBlockedForRecompute is
+-- registered in preMigrationRepairs for this version too, so it runs
+-- immediately before this marker is recorded. It is ignored/0006's own two
+-- statements, ALTER TABLE wisps ADD COLUMN is_blocked and CREATE INDEX
+-- idx_wisps_is_blocked, each behind a probe, so on a healthy clone it is
+-- three probes and no DDL. The restored column starts at 0 for every wisp;
+-- no frozen recompute is replayed (ignored/0007 would restamp updated_at).
+-- The ready path reads around stale flags, the next write to a wisp's graph
+-- recomputes it, and bd doctor --fix recomputes the whole plane.
+--
+-- The marker itself changes nothing.
+SELECT 1;
