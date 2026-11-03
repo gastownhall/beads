@@ -424,3 +424,65 @@ func TestRememberBareKeySuggestsDerivedKey(t *testing.T) {
 		}
 	})
 }
+
+// TestRememberExplicitKeyWritesUnrestrictedKeys pins that --key keeps stating
+// write intent for the keys the bare-key grammar would read: long, dotted and
+// otherwise unrestricted keys store the content under the exact key given,
+// including when the content is itself a bare key. The write contract is the
+// shipped one; this guards the fix against swallowing explicit writes.
+func TestRememberExplicitKeyWritesUnrestrictedKeys(t *testing.T) {
+	keys := append(append([]string{}, bareKeyShapesGH7275...), "Some_Key", "trail-")
+	for _, asJSON := range []bool{false, true} {
+		for _, key := range keys {
+			t.Run(fmt.Sprintf("json=%v/%s", asJSON, key), func(t *testing.T) {
+				m, fake := setupRememberCommand(t)
+				m.rememberErr = nil // a write is the expected outcome
+				memoryKeyFlag = key
+				jsonOutput = asJSON
+				content := "deliberate insight under an explicit key"
+
+				var runErr error
+				stdout, _ := captureStdio(t, func() { runErr = runRemember(content) })
+				if runErr != nil {
+					t.Fatalf("bd remember --key %q = %v, want the explicit write to succeed", key, runErr)
+				}
+				if len(m.remembers) != 1 || m.remembers[0] != (memoryops.RememberRequest{Key: key, Content: content}) {
+					t.Errorf("Remember requests = %+v, want exactly one storing %q under %q", m.remembers, content, key)
+				}
+				if m.rows[key] != content {
+					t.Errorf("stored under %q = %q, want %q", key, m.rows[key], content)
+				}
+				if fake.commits != 1 {
+					t.Errorf("commits = %d, want one for the write", fake.commits)
+				}
+				if !asJSON {
+					if !strings.Contains(stdout, "Remembered ["+key+"]") {
+						t.Errorf("stdout = %q, want the write to name the explicit key", stdout)
+					}
+				}
+			})
+		}
+	}
+
+	// Slug-like CONTENT with an explicit key is a write, never a read.
+	t.Run("bare-slug content with an explicit key stores", func(t *testing.T) {
+		m, fake := setupRememberCommand(t)
+		m.rememberErr = nil
+		memoryKeyFlag = "config.v2"
+
+		var runErr error
+		captureStdio(t, func() { runErr = runRemember("auth-flow") })
+		if runErr != nil {
+			t.Fatalf("bd remember auth-flow --key config.v2 = %v, want a write", runErr)
+		}
+		if len(m.remembers) != 1 || m.remembers[0] != (memoryops.RememberRequest{Key: "config.v2", Content: "auth-flow"}) {
+			t.Errorf("Remember requests = %+v, want the slug stored as content under config.v2", m.remembers)
+		}
+		if m.rows["config.v2"] != "auth-flow" {
+			t.Errorf("stored under config.v2 = %q, want the slug content", m.rows["config.v2"])
+		}
+		if fake.commits != 1 {
+			t.Errorf("commits = %d, want one for the write", fake.commits)
+		}
+	})
+}
