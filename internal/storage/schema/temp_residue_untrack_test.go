@@ -98,3 +98,61 @@ func TestTempResidueGateIgnoresLikeWildcardLookalikes(t *testing.T) {
 		t.Fatalf("unmet SQL expectations: %v", err)
 	}
 }
+
+// vetoedTempResidue is an operator who versions one intermediate on purpose:
+// an exact ignored=0 row, which Dolt resolves over the broader seeded
+// __temp__% pattern.
+var vetoedTempResidue = []doltIgnoreRow{
+	{pattern: "__temp__%", ignored: true},
+	{pattern: "__temp__wisp_child_counters", ignored: false},
+}
+
+// TestTempResidueUntrackRespectsAnOperatorVeto: the vetoed table is no
+// residue, so its presence at HEAD neither starts a repair nor writes.
+func TestTempResidueUntrackRespectsAnOperatorVeto(t *testing.T) {
+	db, mock := newMockDB(t)
+	logged := captureStdLog(t)
+
+	expectTempListing(mock, "", "HEAD", "__temp__wisp_child_counters")
+	expectIgnoreResolution(mock, "", "__temp__wisp_child_counters", vetoedTempResidue)
+
+	untracked, err := untrackTempResidue(context.Background(), db)
+	if err != nil {
+		t.Fatalf("untrackTempResidue() error = %v, want nil", err)
+	}
+	if untracked {
+		t.Fatal("untrackTempResidue() untracked a table the operator versions on purpose")
+	}
+	if logged.Len() > 0 {
+		t.Errorf("untrackTempResidue() logged for a vetoed table: %q", logged.String())
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}
+
+// TestAlreadyConvergedAcceptsAVetoedTempTable: the same veto must not cost
+// the lock-free fast path either, or every open of that database would take
+// the migration lock forever.
+func TestAlreadyConvergedAcceptsAVetoedTempTable(t *testing.T) {
+	db, mock := newMockDB(t)
+
+	expectCurrentDatabase(mock, "testdb")
+	expectNoMigrationWorkNeeded(mock)
+	expectDoltIgnoreRead(mock, unqualifiedDoltIgnore, seededIgnorePatterns(LatestVersion()))
+	expectIgnoredCursorGate(mock, "", false, nil, false)
+	expectTempListing(mock, "", "HEAD", "__temp__wisp_child_counters")
+	expectIgnoreResolution(mock, "", "__temp__wisp_child_counters", vetoedTempResidue)
+	expectMigrationLockProbe(mock, "testdb", 1)
+
+	converged, err := alreadyConverged(context.Background(), db, "testdb", nil)
+	if err != nil {
+		t.Fatalf("alreadyConverged() error = %v", err)
+	}
+	if !converged {
+		t.Fatal("alreadyConverged() = false on a database whose operator versions the intermediate, want true")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}
