@@ -34,6 +34,34 @@ Do not use routine `bd import .beads/issues.jsonl` as a replacement for
 `bd dolt pull`. JSONL import is upsert-only; it cannot infer that records absent
 from an export were deleted, pruned, or simply never exported.
 
+### Importing an export in parts
+
+One `bd import` adds every dependency edge whose target is in the same input,
+whatever order its lines come in. An edge whose target is in neither the
+database nor that input is skipped: `bd import` prints
+`Skipped dependency: <from> -> <to>: target not found` on stderr, lists the
+edge in `skipped_dependencies` under `--json`, and still exits 0. Edges refused
+by validation (a cycle or an invalid hierarchy) are reported the same way.
+
+So an export restored in several parts skips each edge whose target only a
+later part carries. Prefer one combined import when it fits. Otherwise import
+every part, then import again each part that reported skipped edges: its rows
+upsert and each edge is added once. A re-run adds an edge only when its row is
+imported again. A row skipped as stale (listed in `stale_skipped_ids`, because
+the local issue changed after the export) keeps the local state, and its edges
+are neither added nor reported. Do not pass `--allow-stale` to force them in:
+it overwrites the newer local rows.
+
+A script can gate each part on the JSON result:
+
+```bash
+set -o pipefail
+bd import --json part-2.jsonl | jq -e '(.skipped_dependencies // []) | length == 0'
+```
+
+This checks skipped dependency edges only, not rows skipped for other reasons
+(`stale_skipped_ids`, `retired_ids`), and is not an audit of the whole graph.
+
 ## Hooks
 
 The pre-commit hook refreshes `.beads/issues.jsonl` when `export.auto=true`.
