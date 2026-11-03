@@ -2730,7 +2730,7 @@ func (s *DoltStore) verifyProjectIdentity(ctx context.Context, beadsDir string, 
 		if dberrors.IsMissingTable(err, "metadata") {
 			return nil // no bd schema yet — skip
 		}
-		return projectIdentityUnreadableError(s.database, err)
+		return projectIdentityUnreadableError(s.database, openedByInit, err)
 	}
 	if dbID == "" {
 		return nil // old database without project_id — skip
@@ -2790,9 +2790,28 @@ func projectIdentityMismatchError(localID, dbID, database string, openedByInit b
 }
 
 // projectIdentityUnreadableError builds verifyProjectIdentity's refusal when
-// the database's _project_id cannot be read.
-func projectIdentityUnreadableError(database string, cause error) error {
-	return fmt.Errorf("cannot verify project identity of database %q: %w", database, cause)
+// the database's _project_id cannot be read. A failed read proves nothing
+// about who owns the database, so the advice is to diagnose, not to recover:
+// the database may well be this project's, behind a server that is down or
+// credentials that cannot read it. openedByInit picks the wording, as in
+// projectIdentityMismatchError. The cause is a driver error that can repeat
+// server-supplied text, so it is spelled by remedy.PrintedError, which keeps
+// it on the error chain.
+func projectIdentityUnreadableError(database string, openedByInit bool, cause error) error {
+	refusal := "refusing to connect"
+	if openedByInit {
+		refusal = "refusing to initialize against an existing database"
+	}
+	return fmt.Errorf(
+		"cannot verify project identity — %s\n\n"+
+			"  Database:   %q\n"+
+			"  Read error: %w\n\n"+
+			"bd could not read the project ID this database records, so it cannot\n"+
+			"confirm the database belongs to this project.\n\n"+
+			"To diagnose: bd dolt status\n"+
+			"Check that bd points at the intended server and database, and that its\n"+
+			"credentials can read that database, then retry.",
+		refusal, database, remedy.PrintedError(cause))
 }
 
 func (s *DoltStore) verifyGlobalProjectIdentity(ctx context.Context, beadsDir string) error {

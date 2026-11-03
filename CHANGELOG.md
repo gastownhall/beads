@@ -1135,6 +1135,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Opening a server database whose recorded project ID cannot be read now
+  refuses with `cannot verify project identity` instead of skipping the
+  project identity check. A read error was treated like an empty project ID,
+  so a failed read let bd connect to a database it could not show belonged to
+  this project. bd still retries transient connection errors first. A
+  database with no project ID recorded, or with no bd tables yet (no
+  `metadata` table), still connects as before. The refusal names the read
+  error and points at `bd dolt status` (#7565).
 - `bd create --file` and other batch creates no longer fail with "issue
   already exists" on an id bd generated itself. The batch chose every id
   before it wrote any row, so two of its items could be handed the same short
