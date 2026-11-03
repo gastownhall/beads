@@ -181,29 +181,32 @@ func TestProxiedServerGraph(t *testing.T) {
 				t.Fatalf("dep add: %v\n%s", err, out)
 			}
 		}
-		wantOut, wantErr, code := capRun(t, cp.dir, nil, "graph", a.ID)
-		if code != 0 {
-			t.Fatalf("uncapped graph %s exited %d: %s", a.ID, code, wantErr)
-		}
-
-		for _, src := range capSources {
-			env, flags := src.args(2)
-			stdout, stderr, code := capRun(t, cp.dir, env, append([]string{"graph", a.ID}, flags...)...)
-			if code != 2 {
-				t.Errorf("%s cap 2: exit = %d, want 2\nstdout:\n%s\nstderr:\n%s", src.name, code, stdout, stderr)
-			}
-			if want := "3 found, " + src.source + "=2 exceeded"; !strings.Contains(stderr, want) {
-				t.Errorf("%s cap 2: stderr = %q, want %q", src.name, stderr, want)
-			}
-			if stdout != "" {
-				t.Errorf("%s cap 2: stdout = %q, want nothing on a cap overage", src.name, stdout)
+		for _, format := range [][]string{nil, {"--json"}} {
+			base := append([]string{"graph", a.ID}, format...)
+			wantOut, wantErr, code := capRun(t, cp.dir, nil, base...)
+			if code != 0 {
+				t.Fatalf("uncapped graph %s %v exited %d: %s", a.ID, format, code, wantErr)
 			}
 
-			env, flags = src.args(3)
-			stdout, stderr, code = capRun(t, cp.dir, env, append([]string{"graph", a.ID}, flags...)...)
-			if code != 0 || stdout != wantOut || stderr != wantErr {
-				t.Errorf("%s cap 3: exit %d, output differs from uncapped\ncapped:\n%s%s\nuncapped:\n%s%s",
-					src.name, code, stdout, stderr, wantOut, wantErr)
+			for _, src := range capSources {
+				env, flags := src.args(2)
+				stdout, stderr, code := capRun(t, cp.dir, env, append(append([]string{}, base...), flags...)...)
+				if code != 2 {
+					t.Errorf("%s %v cap 2: exit = %d, want 2\nstdout:\n%s\nstderr:\n%s", src.name, format, code, stdout, stderr)
+				}
+				if want := "3 found, " + src.source + "=2 exceeded"; !strings.Contains(stderr, want) {
+					t.Errorf("%s %v cap 2: stderr = %q, want %q", src.name, format, stderr, want)
+				}
+				if stdout != "" {
+					t.Errorf("%s %v cap 2: stdout = %q, want nothing on a cap overage", src.name, format, stdout)
+				}
+
+				env, flags = src.args(3)
+				stdout, stderr, code = capRun(t, cp.dir, env, append(append([]string{}, base...), flags...)...)
+				if code != 0 || stdout != wantOut || stderr != wantErr {
+					t.Errorf("%s %v cap 3: exit %d, output differs from uncapped\ncapped:\n%s%s\nuncapped:\n%s%s",
+						src.name, format, code, stdout, stderr, wantOut, wantErr)
+				}
 			}
 		}
 	})

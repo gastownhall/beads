@@ -708,3 +708,42 @@ func TestGraphValidatesMaxRowsBeforeLookup(t *testing.T) {
 		})
 	}
 }
+
+// TestGraphReachesProxiedRouteUnderPositiveMaxRows pins that a positive cap
+// from either source no longer stops `bd graph` before its proxied route. The
+// assertion is two-sided: no refusal, AND the run reached the proxied route,
+// which with a nil uowProvider fails opening its unit of work rather than
+// dialing a server.
+func TestGraphReachesProxiedRouteUnderPositiveMaxRows(t *testing.T) {
+	pinProxiedServerMode(t)
+	pinJSONOutput(t, false)
+
+	if uowProvider != nil {
+		t.Fatal("precondition: uowProvider must be nil so the route cannot open a real proxied connection")
+	}
+
+	for _, source := range []string{"flag", "env"} {
+		t.Run(source, func(t *testing.T) {
+			cmd := &cobra.Command{Use: "graph"}
+			addRoutedMaxRowsFlag(cmd)
+			if source == "flag" {
+				t.Setenv(maxRowsEnvVar, "")
+				if err := cmd.Flags().Set(maxRowsFlagName, "5"); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				t.Setenv(maxRowsEnvVar, "5")
+			}
+
+			var err error
+			stderr := captureStderr(t, func() { err = graphCmd.RunE(cmd, []string{"bd-1"}) })
+
+			if strings.Contains(stderr, "not supported in proxied-server mode") {
+				t.Fatalf("proxied `bd graph` refused a cap the proxied route enforces: %q", stderr)
+			}
+			if !strings.Contains(stderr, "proxied-server UOW provider not initialized") {
+				t.Fatalf("proxied `bd graph` did not reach the proxied route: err=%v stderr=%q", err, stderr)
+			}
+		})
+	}
+}
