@@ -1182,8 +1182,18 @@ func PersistComments(ctx context.Context, tx DBTX, issue *types.Issue) (CreateIs
 		if exists > 0 {
 			continue
 		}
+		// No content match: the id itself may already be stored. Import is
+		// additive for comments, so a same-issue id keeps its stored row
+		// whatever this snapshot says about it.
+		stored, err := commentIDOwner(ctx, tx, commentTable, comment.ID)
+		if err != nil {
+			return result, fmt.Errorf("failed to check comment %s for %s: %w", comment.ID, issue.ID, err)
+		}
+		if stored == issue.ID {
+			continue
+		}
 		//nolint:gosec // G201: table is determined by ephemeral flag
-		_, err := tx.ExecContext(ctx, fmt.Sprintf(`
+		_, err = tx.ExecContext(ctx, fmt.Sprintf(`
 			INSERT INTO %s (id, issue_id, author, text, created_at)
 			VALUES (?, ?, ?, ?, ?)
 		`, commentTable), comment.ID, issue.ID, comment.Author, comment.Text, createdAtText)
@@ -1196,6 +1206,18 @@ func PersistComments(ctx context.Context, tx DBTX, issue *types.Issue) (CreateIs
 		})
 	}
 	return result, nil
+}
+
+// commentIDOwner returns the issue that stores comment id in commentTable, or
+// "" when no row has that id.
+func commentIDOwner(ctx context.Context, tx DBTX, commentTable, id string) (string, error) {
+	var owner string
+	//nolint:gosec // G201: table is determined by ephemeral flag
+	err := tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT issue_id FROM %s WHERE id = ?`, commentTable), id).Scan(&owner)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return owner, err
 }
 
 func PersistDependencies(ctx context.Context, tx DBTX, issues []*types.Issue, actor string) error {
