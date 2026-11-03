@@ -3967,6 +3967,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   string, and is deleted on the first forget. Only a key with no row is a
   miss.
 
+- **`bd remember <key>` recalls a long or dotted key instead of overwriting
+  another memory** ([#7275](https://github.com/gastownhall/beads/issues/7275)).
+  A bare argument was read as a key only when the key derived from it was the
+  argument itself, so a key with more than eight segments, over 60 bytes, or a
+  dot (`bd remember api.v2`) was stored as content under its derived key
+  (`api-v2`), replacing any memory already there. A bare argument made of
+  lowercase letters and digits joined by single dots or hyphens is now always
+  read as that exact key: `bd remember` prints its memory, or exits 1 without
+  writing anything. When only the derived key holds a memory, the refusal adds
+  a hint naming that key and its `bd recall` command. Text of that shape that
+  used to be stored now needs `--key` (`bd remember api.v2 --key <key>`).
+
 - **`bd doctor` no longer flags a `.local_version` that starts with `v`.** The
   canonical spelling of a Go module version — and the string a build stamped
   from a Go pseudo-version reports and writes into `.local_version` itself —
