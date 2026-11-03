@@ -873,6 +873,7 @@ go_test(
         "graph_export_test.go",
         "graph_mode_admission_e2e_test.go",
         "graph_mode_dependency_embedded_test.go",
+        "graph_plan_edge_direction_guard_test.go",
         "graph_proxied_integration_test.go",
         "graph_test.go",
         "graph_visual_test.go",

@@ -70,6 +70,10 @@ Node notes:
 
 Edge notes:
 
+- `from_key`/`from_id` names the DEPENDENT — the issue doing the waiting —
+  and `to_key`/`to_id` its DEPENDENCY: each edge applies as
+  `bd dep add <from> <to>`, so for a `blocks` edge `from` waits for `to`
+  and stays out of `bd ready` until `to` closes.
 - `type` defaults to `blocks`. `parent_key`/`parent_id` on nodes already
   create `parent-child` edges; don't repeat them in `edges`.
 - `gate` (`all-children` | `any-children`) and `spawner_key`/`spawner_id`
