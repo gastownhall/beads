@@ -1,10 +1,11 @@
 # Step.Condition — variable-driven step inclusion.
 #
-# A step with `condition` is filtered out at cook time when the condition
-# evaluates to false against the current variable bindings. With the
-# default {{deploy}} = "false", the deploy step is excluded (2 child
-# issues). Override at cook time with --var deploy=true to include it
-# (3 child issues). The smoke harness exercises both branches.
+# A step with `condition` is filtered out by pour and by runtime-mode cook
+# (`bd cook --var ...` or `--mode=runtime`) when the condition evaluates to
+# false against the current variable bindings; compile-mode cook keeps it
+# with its condition unevaluated. With the default {{deploy}} = "false", the
+# deploy step is excluded (2 child issues). Override with --var deploy=true
+# to include it (3 child issues). The smoke harness exercises both branches.
 formula = "condition"
 description = "Step.Condition: deploy step is included only when deploy var is true."
 version = 1

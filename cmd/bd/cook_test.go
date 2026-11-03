@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -83,6 +84,103 @@ title = "Publish with {{policy}}"
 			}
 		})
 	}
+}
+
+// stepConditionFormulaTOML is the workflow of GH#7639: an unconditional
+// build step and a deploy step that only a true {{deploy}} keeps.
+const stepConditionFormulaTOML = `formula = "cond-cook"
+version = 1
+type = "workflow"
+
+[vars.deploy]
+default = "false"
+
+[[steps]]
+id = "build"
+title = "Build the project"
+
+[[steps]]
+id = "deploy"
+title = "Deploy to production"
+needs = ["build"]
+condition = "{{deploy}}"
+`
+
+// TestRunCookAppliesStepConditionsInRuntimeMode pins GH#7639: runtime cook
+// omits a step whose condition is false, as bd mol pour does, while compile
+// mode keeps every step with its condition unevaluated.
+func TestRunCookAppliesStepConditionsInRuntimeMode(t *testing.T) {
+	formulaDir := t.TempDir()
+	formulaPath := writeCookConditionFormula(t, formulaDir, "cond-cook", stepConditionFormulaTOML)
+
+	t.Run("dry run lists only the steps pour keeps", func(t *testing.T) {
+		cmd := newCookConditionTestCommand(true, "", "deploy=false")
+		stdout, stderr, err := runCookCapturingOutput(t, cmd, formulaPath)
+		if err != nil {
+			t.Fatalf("runCook: %v; stderr = %q", err, stderr)
+		}
+		got := cookDryRunStepIDs(stdout)
+		if want := []string{"build"}; !slices.Equal(got, want) {
+			t.Fatalf("dry-run steps = %v, want %v:\n%s", got, want, stdout)
+		}
+
+		sg, err := resolveAndCookFormulaWithVars("cond-cook", []string{formulaDir}, map[string]string{"deploy": "false"})
+		if err != nil {
+			t.Fatalf("resolveAndCookFormulaWithVars: %v", err)
+		}
+		if pour := subgraphStepIDs(sg); !slices.Equal(got, pour) {
+			t.Fatalf("runtime cook steps = %v, pour steps = %v; want the same set", got, pour)
+		}
+	})
+}
+
+func writeCookConditionFormula(t *testing.T, dir, name, toml string) string {
+	t.Helper()
+	path := filepath.Join(dir, name+".formula.toml")
+	if err := os.WriteFile(path, []byte(toml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// newCookConditionTestCommand builds the cook flag set with any number of
+// --var values (none leaves runtime mode to --mode).
+func newCookConditionTestCommand(dryRun bool, mode string, vars ...string) *cobra.Command {
+	cmd := &cobra.Command{}
+	cmd.Flags().Bool("dry-run", dryRun, "")
+	cmd.Flags().Bool("persist", false, "")
+	cmd.Flags().Bool("force", false, "")
+	cmd.Flags().StringSlice("search-path", nil, "")
+	cmd.Flags().String("prefix", "", "")
+	cmd.Flags().StringArray("var", vars, "")
+	cmd.Flags().String("mode", mode, "")
+	return cmd
+}
+
+var cookDryRunStepLine = regexp.MustCompile(`(?m)[├└]── ([^:\s]+): `)
+
+// cookDryRunStepIDs returns the sorted step IDs a cook dry run lists.
+func cookDryRunStepIDs(stdout string) []string {
+	var ids []string
+	for _, m := range cookDryRunStepLine.FindAllStringSubmatch(stdout, -1) {
+		ids = append(ids, m[1])
+	}
+	slices.Sort(ids)
+	return ids
+}
+
+// subgraphStepIDs returns the sorted step IDs of a cooked subgraph, without
+// the root.
+func subgraphStepIDs(sg *TemplateSubgraph) []string {
+	var ids []string
+	for _, issue := range sg.Issues {
+		if issue == sg.Root {
+			continue
+		}
+		ids = append(ids, strings.TrimPrefix(issue.ID, sg.Root.ID+"."))
+	}
+	slices.Sort(ids)
+	return ids
 }
 
 func runCookCapturingOutput(t *testing.T, cmd *cobra.Command, formulaArg string) (string, string, error) {

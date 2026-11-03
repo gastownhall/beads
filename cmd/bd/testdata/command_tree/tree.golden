@@ -1247,11 +1247,13 @@ bd cook
     |     Produces a proto with {{variable}} placeholders intact.
     |     Use for: modeling, estimation, contractor handoff, planning.
     |     Variables are NOT substituted - the output shows the template structure.
+    |     Step conditions are kept as written, not evaluated.
     |
     |   RUNTIME (--mode=runtime or when --var flags provided):
     |     Produces a fully-resolved proto with variables substituted.
     |     Use for: final validation before pour, seeing exact output.
     |     Requires all variables to have values (via --var or defaults).
+    |     Steps whose condition is false are omitted, as pour omits them.
     |
     | Formulas are high-level workflow templates that support:
     |   - Variable definitions with defaults and validation

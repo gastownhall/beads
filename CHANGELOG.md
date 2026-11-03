@@ -1165,6 +1165,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd cook` in runtime mode (`--mode=runtime` or any `--var`) now omits a step
+  whose `condition` is false, as `bd mol pour` does, in its `--dry-run`
+  listing, its JSON output and the proto `--persist` writes. It listed and
+  persisted such steps before, and its JSON output could demand a value for a
+  variable only an omitted step used. Compile mode still keeps every step with
+  its condition unevaluated (GH#7639).
 - `bd create --file` and other batch creates no longer fail with "issue
   already exists" on an id bd generated itself. The batch chose every id
   before it wrote any row, so two of its items could be handed the same short
