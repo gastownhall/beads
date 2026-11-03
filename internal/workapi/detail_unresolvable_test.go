@@ -2,6 +2,7 @@ package workapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"testing"
@@ -33,6 +34,10 @@ type skewSource struct {
 	depCountErr  error
 	rdepCount    int64
 	rdepCountErr error
+
+	commentCount    int64
+	commentCountErr error
+	comments        []*types.Comment
 }
 
 func (s skewSource) GetIssue(_ context.Context, _ string) (*types.Issue, error) { return s.issue, nil }
@@ -50,13 +55,13 @@ func (s skewSource) CountDependents(_ context.Context, _ string, _ bool) (int64,
 	return s.rdepCount, s.rdepCountErr
 }
 func (s skewSource) CountComments(_ context.Context, _ string, _ bool) (int64, error) {
-	return 0, nil
+	return s.commentCount, s.commentCountErr
 }
 func (s skewSource) IterDependents(_ context.Context, _ string, _ bool) (storage.Iter[types.IssueWithDependencyMetadata], error) {
 	return storage.NewSliceIter(s.dependents), nil
 }
 func (s skewSource) IterComments(_ context.Context, _ string, _ bool) (storage.Iter[types.Comment], error) {
-	return storage.NewSliceIter[types.Comment](nil), nil
+	return storage.NewSliceIter(s.comments), nil
 }
 
 func depRow(id string, t types.DependencyType) *types.IssueWithDependencyMetadata {
@@ -81,13 +86,13 @@ func TestBuildIssueDetails_UnresolvableDependencies(t *testing.T) {
 		name  string
 		src   skewSource
 		want  *int64
-		count int64
+		count *int64
 	}{
 		{
 			name:  "all edges unresolvable",
 			src:   skewSource{issue: issue, deps: nil, depCount: 1},
 			want:  ptr64(1),
-			count: 1,
+			count: ptr64(1),
 		},
 		{
 			name: "one of two edges unresolvable",
@@ -97,7 +102,7 @@ func TestBuildIssueDetails_UnresolvableDependencies(t *testing.T) {
 				depCount: 2,
 			},
 			want:  ptr64(1),
-			count: 2,
+			count: ptr64(2),
 		},
 		{
 			// The negative control. A fully local store must be
@@ -110,13 +115,13 @@ func TestBuildIssueDetails_UnresolvableDependencies(t *testing.T) {
 				depCount: 1,
 			},
 			want:  nil,
-			count: 1,
+			count: ptr64(1),
 		},
 		{
 			name:  "no dependencies at all",
 			src:   skewSource{issue: issue, depCount: 0},
 			want:  nil,
-			count: 0,
+			count: ptr64(0),
 		},
 		{
 			// A FAILED read and a SHORT read both leave the slice
@@ -126,20 +131,23 @@ func TestBuildIssueDetails_UnresolvableDependencies(t *testing.T) {
 			name:  "dependency read failed, not merely short",
 			src:   skewSource{issue: issue, depsErr: errors.New("backend down"), depCount: 3},
 			want:  nil,
-			count: 3,
+			count: ptr64(3),
 		},
 		{
-			// Symmetric: a failed COUNT yields 0, and 0 minus a
-			// populated slice is negative, but say so explicitly
-			// rather than relying on the sign.
+			// Symmetric: a failed COUNT is no count at all, so it is
+			// neither published nor compared against the slice. The
+			// source returns a value above the row count beside its
+			// error, which a delta taken from it would report as
+			// unresolvable: only the error gate keeps it silent.
 			name: "count read failed",
 			src: skewSource{
 				issue:       issue,
 				deps:        []*types.IssueWithDependencyMetadata{depRow("rp-2", types.DepBlocks)},
+				depCount:    3,
 				depCountErr: errors.New("backend down"),
 			},
 			want:  nil,
-			count: 0,
+			count: nil,
 		},
 	}
 
@@ -149,8 +157,13 @@ func TestBuildIssueDetails_UnresolvableDependencies(t *testing.T) {
 			if err != nil {
 				t.Fatalf("BuildIssueDetails: %v", err)
 			}
-			if details.DependencyCount == nil || *details.DependencyCount != tc.count {
-				t.Errorf("DependencyCount = %v, want %d", details.DependencyCount, tc.count)
+			switch {
+			case tc.count == nil && details.DependencyCount != nil:
+				t.Errorf("DependencyCount = %d, want unset: its query failed", *details.DependencyCount)
+			case tc.count != nil && details.DependencyCount == nil:
+				t.Errorf("DependencyCount unset, want %d", *tc.count)
+			case tc.count != nil && *details.DependencyCount != *tc.count:
+				t.Errorf("DependencyCount = %d, want %d", *details.DependencyCount, *tc.count)
 			}
 			switch {
 			case tc.want == nil && details.UnresolvableDependencies != nil:
@@ -162,6 +175,35 @@ func TestBuildIssueDetails_UnresolvableDependencies(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestBuildIssueDetails_FailedCountsAreUnset pins GH#7563: a Count* method
+// that returns an error must leave the matching IssueDetails field unset
+// (DependentCount/DependencyCount/CommentCount are *int64 with omitempty for
+// exactly this), not published as the zero value Count* also returns on
+// error. A published 0 is indistinguishable from an issue that genuinely has
+// none, which is already how the UnresolvableDependencies/UnresolvableDependents
+// deltas treat a count error - they go silent rather than report a delta
+// against a count of 0 - so the raw count was the one field still
+// contradicting that rule.
+func TestBuildIssueDetails_FailedCountsAreUnset(t *testing.T) {
+	ctx := context.Background()
+	issue := &types.Issue{ID: "rp-1"}
+	boom := errors.New("simulated count failure")
+
+	t.Run("dependent and dependency counts", func(t *testing.T) {
+		src := skewSource{issue: issue, depCountErr: boom, rdepCountErr: boom}
+		details, err := BuildIssueDetails(ctx, src, issue, false, DetailOptions{})
+		if err != nil {
+			t.Fatalf("BuildIssueDetails: %v", err)
+		}
+		if details.DependentCount != nil {
+			t.Errorf("DependentCount = %d, want unset", *details.DependentCount)
+		}
+		if details.DependencyCount != nil {
+			t.Errorf("DependencyCount = %d, want unset", *details.DependencyCount)
+		}
+	})
 }
 
 // TestBuildIssueDetails_UnresolvableDependents pins the inbound half, and in
@@ -287,6 +329,158 @@ func TestBuildIssueDetails_ConcurrentAddIsNotReportedAsUnresolvable(t *testing.T
 	if details.UnresolvableDependencies != nil {
 		t.Errorf("UnresolvableDependencies = %d, want unset — a count read before a concurrent add is stale-low, not evidence of an unrenderable edge; are the two reads still in count-then-listing order?",
 			*details.UnresolvableDependencies)
+	}
+}
+
+// TestBuildIssueDetails_FailedCountIsAbsentNotZero pins bd-cyry49 (GH#7563):
+// the counts are best effort, so a count whose query failed leaves the view
+// standing, but it must be left out rather than published as whatever value
+// came back beside the error. A published 0 reads as "none" to every caller
+// guarding on the count; an absent key is the only honest "unknown". The
+// sources below return a NONZERO value beside most errors, so a fix that only
+// stopped the zero from leaking would still fail here.
+//
+// Key presence is checked on the marshaled JSON, not only on the pointers:
+// the contract consumers read is "key absent", and a null would not be it.
+func TestBuildIssueDetails_FailedCountIsAbsentNotZero(t *testing.T) {
+	ctx := context.Background()
+	issue := &types.Issue{ID: "rp-1", Title: "count repro", Status: types.StatusOpen}
+	boom := errors.New("simulated count failure")
+	oneDep := []*types.IssueWithDependencyMetadata{depRow("rp-2", types.DepBlocks)}
+
+	tests := []struct {
+		name string
+		src  skewSource
+		opts DetailOptions
+
+		// nil means the key must be absent.
+		dependentCount  *int64
+		dependencyCount *int64
+		commentCount    *int64
+		commentsOmitted bool
+		comments        int
+
+		dependencies             int
+		dependents               int
+		unresolvableDependencies *int64
+		unresolvableDependents   *int64
+	}{
+		// AC-1: failed edge counts are absent; successful siblings stay.
+		{
+			name:            "dependent count failed with zero",
+			src:             skewSource{issue: issue, rdepCountErr: boom, depCount: 1, deps: oneDep},
+			dependencyCount: ptr64(1),
+			commentCount:    ptr64(0),
+			dependencies:    1,
+		},
+		{
+			name:            "dependent count failed with nonzero",
+			src:             skewSource{issue: issue, rdepCount: 4, rdepCountErr: boom, depCount: 1, deps: oneDep},
+			dependencyCount: ptr64(1),
+			commentCount:    ptr64(0),
+			dependencies:    1,
+		},
+		{
+			name:           "dependency count failed with zero",
+			src:            skewSource{issue: issue, depCountErr: boom, rdepCount: 2, deps: oneDep},
+			dependentCount: ptr64(2),
+			commentCount:   ptr64(0),
+			dependencies:   1,
+		},
+		{
+			// The value beside the error exceeds the readable rows, so a
+			// delta taken from it would publish unresolvable_dependencies.
+			name:           "dependency count failed with nonzero above its rows",
+			src:            skewSource{issue: issue, depCount: 5, depCountErr: boom, rdepCount: 2, deps: oneDep},
+			dependentCount: ptr64(2),
+			commentCount:   ptr64(0),
+			dependencies:   1,
+		},
+		{
+			name:         "both edge counts failed",
+			src:          skewSource{issue: issue, depCount: 3, depCountErr: boom, rdepCount: 3, rdepCountErr: boom, deps: oneDep},
+			commentCount: ptr64(0),
+			dependencies: 1,
+		},
+		{
+			// The dependent row survives; the count and the delta against
+			// it do not.
+			name: "dependent count failed above its rows with dependents included",
+			src: skewSource{
+				issue: issue, rdepCount: 3, rdepCountErr: boom,
+				dependents: []*types.IssueWithDependencyMetadata{depRow("rp-3", types.DepBlocks)},
+			},
+			opts:            DetailOptions{IncludeDependents: true},
+			dependencyCount: ptr64(0),
+			commentCount:    ptr64(0),
+			dependents:      1,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			details, err := BuildIssueDetails(ctx, tc.src, issue, false, tc.opts)
+			if err != nil {
+				t.Fatalf("BuildIssueDetails: %v, want the view despite the failed count", err)
+			}
+			if details.ID != issue.ID || details.Title != issue.Title {
+				t.Errorf("issue body = %q/%q, want %q/%q", details.ID, details.Title, issue.ID, issue.Title)
+			}
+			b, err := json.Marshal(details)
+			if err != nil {
+				t.Fatalf("json.Marshal: %v", err)
+			}
+			var raw map[string]json.RawMessage
+			if err := json.Unmarshal(b, &raw); err != nil {
+				t.Fatalf("json.Unmarshal: %v", err)
+			}
+
+			assertCountKey(t, raw, "dependent_count", details.DependentCount, tc.dependentCount)
+			assertCountKey(t, raw, "dependency_count", details.DependencyCount, tc.dependencyCount)
+			assertCountKey(t, raw, "comment_count", details.CommentCount, tc.commentCount)
+			assertCountKey(t, raw, "unresolvable_dependencies", details.UnresolvableDependencies, tc.unresolvableDependencies)
+			assertCountKey(t, raw, "unresolvable_dependents", details.UnresolvableDependents, tc.unresolvableDependents)
+
+			if _, ok := raw["comments_omitted"]; ok != tc.commentsOmitted {
+				t.Errorf("comments_omitted present = %v, want %v (%s)", ok, tc.commentsOmitted, b)
+			}
+			if tc.commentsOmitted && (details.CommentsOmitted == nil || !*details.CommentsOmitted) {
+				t.Errorf("CommentsOmitted = %v, want true", details.CommentsOmitted)
+			}
+			if got := len(details.Comments); got != tc.comments {
+				t.Errorf("len(Comments) = %d, want %d", got, tc.comments)
+			}
+			if got := len(details.Dependencies); got != tc.dependencies {
+				t.Errorf("len(Dependencies) = %d, want %d", got, tc.dependencies)
+			}
+			if got := len(details.Dependents); got != tc.dependents {
+				t.Errorf("len(Dependents) = %d, want %d", got, tc.dependents)
+			}
+		})
+	}
+}
+
+// assertCountKey checks one optional count both ways: the pointer and the
+// marshaled key. want nil means the key must be absent from the JSON.
+func assertCountKey(t *testing.T, raw map[string]json.RawMessage, key string, got, want *int64) {
+	t.Helper()
+	v, present := raw[key]
+	switch {
+	case want == nil && present:
+		t.Errorf("%s = %s, want the key absent", key, v)
+	case want == nil && got != nil:
+		t.Errorf("%s pointer = %d, want unset", key, *got)
+	case want != nil && (got == nil || *got != *want):
+		t.Errorf("%s pointer = %v, want %d", key, got, *want)
+	case want != nil && !present:
+		t.Errorf("%s absent, want %d", key, *want)
+	case want != nil:
+		var n int64
+		if err := json.Unmarshal(v, &n); err != nil {
+			t.Errorf("%s = %s: %v", key, v, err)
+		} else if n != *want {
+			t.Errorf("%s = %d, want %d", key, n, *want)
+		}
 	}
 }
 
