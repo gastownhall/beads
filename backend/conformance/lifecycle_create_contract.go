@@ -333,6 +333,48 @@ func RunLifecycleCreateRefusesAForeignIDPrefix(t *testing.T, ctx context.Context
 			}
 		})
 	}
+
+	// The guard stays the CALLER-NAMED ID's even when the ID names a child of
+	// a foreign-prefix parent that is itself admitted: the mint exemption
+	// (MintsAChildUnderAForeignPrefixParent) is the mint's, not the parent's,
+	// so an explicit foreign ID under such a parent is still refused without
+	// force and still overridable with it. This arm is what proves the mint
+	// fix did not widen the exemption to every create that can name a parent.
+	foreignParent := "lccforeign-" + fixture.IssuePrefix + "-refuse-parent"
+	if _, err := fixture.Lifecycle.Create(ctx, publicops.CreateRequest{
+		Actor: "writer", ForceIDPrefix: true,
+		Issue: lifecycleCreateIssue(foreignParent),
+	}); err != nil {
+		t.Fatalf("seed the foreign-prefix parent %s: %v", foreignParent, err)
+	}
+	named := "lccforeign-" + fixture.IssuePrefix + "-named"
+	_, err := fixture.Lifecycle.Create(ctx, publicops.CreateRequest{
+		Actor: "writer",
+		ParentID: foreignParent,
+		Issue: &types.Issue{
+			ID: named, Title: "caller-named child", Status: types.StatusOpen,
+			Priority: 2, IssueType: types.TypeTask,
+		},
+	})
+	if !errors.Is(err, storage.ErrPrefixMismatch) {
+		t.Fatalf("unforced create at the caller-named foreign ID %q: err = %v, want ErrPrefixMismatch", named, err)
+	}
+	assertLifecycleCreateAbsent(t, ctx, fixture, named, "after the unforced caller-named foreign-prefix create")
+
+	// The override half, same as every arm above.
+	if _, err := fixture.Lifecycle.Create(ctx, publicops.CreateRequest{
+		Actor: "writer", ForceIDPrefix: true,
+		ParentID: foreignParent,
+		Issue: &types.Issue{
+			ID: named, Title: "caller-named child", Status: types.StatusOpen,
+			Priority: 2, IssueType: types.TypeTask,
+		},
+	}); err != nil {
+		t.Fatalf("forced create at the caller-named foreign ID %q: %v", named, err)
+	}
+	if stored := lifecycleCreateRow(t, ctx, fixture, named); stored.Title != "caller-named child" {
+		t.Errorf("stored %s title = %q, want %q", named, stored.Title, "caller-named child")
+	}
 }
 
 // RunLifecycleCreateMintsAChildUnderAForeignPrefixParent pins what the prefix
