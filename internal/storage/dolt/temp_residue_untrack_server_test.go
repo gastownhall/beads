@@ -19,7 +19,8 @@ import (
 // intermediate (keeping its working rows) and count it, and the second call
 // must find nothing to do and leave HEAD where it was. Both settings of
 // @@dolt_transaction_commit run, since under 1 every SQL transaction commit is
-// already a Dolt commit.
+// already a Dolt commit. Under 0 an unrelated staged edit must also stay out
+// of the repair's commit and remain in the working set.
 func TestTempResidueUntrackOnSQLServer(t *testing.T) {
 	skipIfNoDolt(t)
 	for _, txCommit := range []int{0, 1} {
@@ -92,6 +93,15 @@ func runTempResidueUntrackOnSQLServer(t *testing.T, txCommit int) {
 	exec("INSERT INTO dolt_ignore (pattern, ignored) VALUES ('__temp__%', 1)")
 	exec("CALL DOLT_ADD('dolt_ignore')")
 	exec("CALL DOLT_COMMIT('-m', 'test: reseed __temp__%')")
+	// An unrelated STAGED edit, the scoping hazard: the repair must clear it
+	// from the staging area without discarding it, and its commit must not
+	// pick it up. Only assertable with @@dolt_transaction_commit=0: under 1
+	// the mode itself publishes every non-ignored working delta at every
+	// statement boundary, with or without this repair.
+	if txCommit == 0 {
+		exec("INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) VALUES ('unrelated-staged', 'staged edit', '', '', '', '', 'open', 2, 'task')")
+		exec("CALL DOLT_ADD('issues')")
+	}
 	exec(fmt.Sprintf("SET @@dolt_transaction_commit = %d", txCommit))
 
 	// headTemps counts the __temp__ tables at HEAD as q's session sees them.
@@ -133,6 +143,18 @@ func runTempResidueUntrackOnSQLServer(t *testing.T, txCommit int) {
 	}
 	if got := scalar(conn, "SELECT last_child FROM "+residue+" WHERE parent_id = 'srv-parent'"); got != "4" {
 		t.Errorf("%s working row = %s, want 4: the repair must keep the rows", residue, got)
+	}
+	if txCommit == 0 {
+		if got := scalar(conn, "SELECT COUNT(*) FROM issues AS OF 'HEAD' WHERE id = 'unrelated-staged'"); got != "0" {
+			t.Errorf("unrelated row committed at HEAD (%s), want 0: the repair's commit is scoped to the residue", got)
+		}
+		if got := scalar(conn, "SELECT COUNT(*) FROM issues WHERE id = 'unrelated-staged'"); got != "1" {
+			t.Errorf("unrelated working rows after the repair = %s, want 1: the unstage must not discard them", got)
+		}
+		const want = "schema: untrack committed __temp__ table-rebuild intermediates so dolt_ignore can apply (gastownhall/beads#7073)"
+		if got := scalar(conn, "SELECT message FROM dolt_log LIMIT 1"); got != want {
+			t.Errorf("latest commit message = %q, want the scoped untrack %q", got, want)
+		}
 	}
 
 	head := scalar(conn, "SELECT HASHOF('HEAD')")
