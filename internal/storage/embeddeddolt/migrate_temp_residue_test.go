@@ -282,3 +282,73 @@ INSERT IGNORE INTO __temp__events_flip (issue_id, event_type, actor, old_value, 
 		}
 	}
 }
+
+// The #7073 repair must be scoped: with residue at HEAD and unrelated edits
+// around it — one staged, one unstaged — the untrack commit carries only the
+// eligible residue removal, and the unrelated edits stay uncommitted in the
+// working set (the unstage sweep retains them; nothing sweeps them into the
+// repair's commit).
+func TestEmbeddedTempResidueUntrackCommitsOnlyEligibleRemovals(t *testing.T) {
+	ctx := t.Context()
+	f := newPristineEmbeddedDoltFixture(t, "residuescoped")
+	closeEmbeddedDoltStore(t, f.store)
+
+	withRawConn(t, f.dataDir, f.database, func(conn *sql.Conn) {
+		// Commit the residue the way an older binary did.
+		mustExecOn(t, ctx, conn, "DELETE FROM dolt_ignore WHERE pattern='__temp__%'")
+		mustExecOn(t, ctx, conn, "CALL DOLT_COMMIT('-Am', 'drop the __temp__ ignore pattern')")
+		mustExecOn(t, ctx, conn, "CREATE TABLE __temp__wisp_child_counters (parent_id VARCHAR(255) NOT NULL PRIMARY KEY, last_child INT NOT NULL DEFAULT 0)")
+		mustExecOn(t, ctx, conn, "CALL DOLT_ADD('-A')")
+		mustExecOn(t, ctx, conn, "CALL DOLT_COMMIT('-m', 'auto-commit caught the rebuild intermediate')")
+		mustExecOn(t, ctx, conn, "INSERT INTO dolt_ignore (pattern, ignored) VALUES ('__temp__%', true)")
+		mustExecOn(t, ctx, conn, "CALL DOLT_COMMIT('-Am', 'restore the __temp__ ignore pattern')")
+		// Unrelated edits around the repair: one staged, one left unstaged.
+		mustExecOn(t, ctx, conn, "INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) VALUES ('unrelated-staged', 'staged edit', '', '', '', '', 'open', 2, 'task')")
+		mustExecOn(t, ctx, conn, "CALL DOLT_ADD('issues')")
+		mustExecOn(t, ctx, conn, "INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) VALUES ('unrelated-unstaged', 'unstaged edit', '', '', '', '', 'open', 2, 'task')")
+	})
+
+	// The writable open repairs.
+	store, err := embeddeddolt.Open(ctx, f.beadsDir, f.database, "main")
+	if err != nil {
+		t.Fatalf("open for the residue repair: %v", err)
+	}
+	closeEmbeddedDoltStore(t, store)
+
+	withRawConn(t, f.dataDir, f.database, func(conn *sql.Conn) {
+		if tracked := trackedAtHead(t, ctx, conn, "__temp__wisp_child_counters"); tracked {
+			t.Error("__temp__wisp_child_counters is still tracked at HEAD after the residue reconcile")
+		}
+		// The repair's commit carries only the removal: both unrelated rows
+		// are absent from HEAD ...
+		var headUnrelated int
+		if err := conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM issues AS OF 'HEAD' WHERE id IN ('unrelated-staged', 'unrelated-unstaged')").Scan(&headUnrelated); err != nil {
+			t.Fatalf("counting unrelated rows at HEAD: %v", err)
+		}
+		if headUnrelated != 0 {
+			t.Errorf("unrelated rows committed at HEAD = %d, want 0: the untrack commit must carry only the residue removal", headUnrelated)
+		}
+		// ... and still present, uncommitted, in the working set. The sweep
+		// unstages the staged one; both edits survive as working changes.
+		var workingUnrelated int
+		if err := conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM issues WHERE id IN ('unrelated-staged', 'unrelated-unstaged')").Scan(&workingUnrelated); err != nil {
+			t.Fatalf("counting unrelated working rows: %v", err)
+		}
+		if workingUnrelated != 2 {
+			t.Errorf("unrelated rows in the working set = %d, want 2: the repair must neither commit nor discard them", workingUnrelated)
+		}
+		if !slices.Contains(dirtyTableNames(t, ctx, conn), "issues") {
+			t.Error("issues is not dirty after the repair: the unrelated edits must remain uncommitted")
+		}
+		// The commit itself: the newest history entry is the residue
+		// untrack, naming the residue table.
+		var message string
+		if err := conn.QueryRowContext(ctx, "SELECT message FROM dolt_log LIMIT 1").Scan(&message); err != nil {
+			t.Fatalf("reading the latest commit message: %v", err)
+		}
+		want := "schema: untrack committed __temp__ rebuild residue (gastownhall/beads#7073): __temp__wisp_child_counters"
+		if message != want {
+			t.Errorf("latest commit message = %q, want %q", message, want)
+		}
+	})
+}
