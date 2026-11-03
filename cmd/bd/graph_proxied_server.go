@@ -10,7 +10,7 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-func runGraphProxiedServer(ctx context.Context, out io.Writer, args []string) error {
+func runGraphProxiedServer(ctx context.Context, out io.Writer, args []string, maxRows int, maxRowsSource string) error {
 	uw, err := openProxiedListUOW(ctx)
 	if err != nil {
 		return HandleError("%v", err)
@@ -32,6 +32,9 @@ func runGraphProxiedServer(ctx context.Context, out io.Writer, args []string) er
 	subgraph, err := loadGraphSubgraphUOW(ctx, uw, root)
 	if err != nil {
 		return HandleErrorRespectJSON("loading graph: %v", err)
+	}
+	if capErr := enforceGraphSubgraphCap(subgraph, maxRows, maxRowsSource); capErr != nil {
+		return capErr
 	}
 	return renderGraphSingleSubgraph(out, subgraph)
 }

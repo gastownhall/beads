@@ -1,7 +1,11 @@
 package main
 
 import (
+	"fmt"
+	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
 
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -669,4 +673,38 @@ func TestFilterSubgraphOpen(t *testing.T) {
 			t.Error("expected parent-child dep to be preserved")
 		}
 	})
+}
+
+// TestGraphValidatesMaxRowsBeforeLookup pins where `bd graph` rejects a
+// negative --max-rows: once, in RunE, ahead of either route and of any store
+// or ID lookup. Neither route has a store here, so a validation that moved
+// below the lookup would surface as the route's own error instead.
+func TestGraphValidatesMaxRowsBeforeLookup(t *testing.T) {
+	pinJSONOutput(t, false)
+	t.Setenv(maxRowsEnvVar, "")
+	oldStore, oldProvider, oldMode := store, uowProvider, proxiedServerMode
+	store, uowProvider = nil, nil
+	t.Cleanup(func() {
+		store, uowProvider, proxiedServerMode = oldStore, oldProvider, oldMode
+		resetCommandContext()
+	})
+
+	for _, proxied := range []bool{false, true} {
+		t.Run(fmt.Sprintf("proxied=%v", proxied), func(t *testing.T) {
+			proxiedServerMode = proxied
+			resetCommandContext()
+			cmd := &cobra.Command{Use: "graph"}
+			addRoutedMaxRowsFlag(cmd)
+			if err := cmd.Flags().Set(maxRowsFlagName, "-1"); err != nil {
+				t.Fatal(err)
+			}
+
+			var err error
+			stderr := captureStderr(t, func() { err = graphCmd.RunE(cmd, []string{"grp-x"}) })
+			assertExitCode(t, err, 1)
+			if !strings.Contains(stderr, "--max-rows must be non-negative") {
+				t.Fatalf("stderr = %q, want the negative --max-rows usage error", stderr)
+			}
+		})
+	}
 }
