@@ -181,6 +181,17 @@ function testRedirectTo404() {
   });
 }
 
+// The npm package CI gate (scripts/ci/package-npm.sh) runs `npm run test:all`.
+// This suite must be one of its &&-chained steps so a failure here fails it.
+function testWiredIntoTestAll() {
+  const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
+  const self = `node test/${path.basename(__filename)}`;
+  assert.strictEqual(pkg.scripts['test:postinstall'], self, 'test:postinstall does not run this suite');
+  const steps = pkg.scripts['test:all'].split('&&').map((step) => step.trim());
+  assert.deepStrictEqual(steps, ['npm test', 'npm run test:postinstall', 'npm run test:integration'],
+    'test:all does not chain test:postinstall with &&');
+}
+
 const TESTS = [
   ['302 redirect keeps the archive after held unlinks run', expectArchive('/redirect-302')],
   ['301 -> 302 -> 200 chain keeps the archive', expectArchive('/redirect-301')],
@@ -188,6 +199,7 @@ const TESTS = [
   ['redirect truncates longer stale content', expectArchive('/redirect-302', Buffer.alloc(PAYLOAD.length * 3, 'x'))],
   ['redirect to 404 rejects and removes the file', testRedirectTo404],
   ['require() exports downloadFile without installing', testRequireDoesNotInstall],
+  ['npm run test:all runs this suite', testWiredIntoTestAll],
 ];
 
 async function main() {
