@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/beads/internal/storage/issueops"
 )
@@ -18,6 +19,15 @@ const FilteredPushCommitMsg = "federation: exclude private issue types"
 // recompute reads. A new branch's working set starts from its commit, so it
 // lacks them until they are recreated (empty) on the staging branch.
 var filteredPushRecomputeTables = []string{"wisps", "wisp_dependencies"}
+
+// ErrFilteredPushSourceChanged reports that another writer advanced or dirtied
+// the source branch while a filtered publication was being prepared. Nothing
+// is published and the other writer's changes are kept; a new sync retries.
+var ErrFilteredPushSourceChanged = errors.New("source branch changed during the filtered publication; nothing was pushed")
+
+// filteredPushAbortTimeout bounds the abort of a failed keep merge, which runs
+// on a fresh context so a canceled sync still aborts its own merge.
+const filteredPushAbortTimeout = 30 * time.Second
 
 // FilteredPushRequest describes one filtered publication to a peer.
 type FilteredPushRequest struct {
@@ -136,7 +146,7 @@ func runFilteredPush(ctx context.Context, conn BlockedRecomputeConn, req Filtere
 		if err := FilteredPushStage(ctx, "keep", conn, req); err != nil {
 			return res, err
 		}
-		if err := keepFilterAncestry(ctx, conn, req, filterCommit); err != nil {
+		if err := keepFilterAncestry(ctx, conn, req, snapshot, filterCommit); err != nil {
 			return res, err
 		}
 	}
@@ -266,9 +276,12 @@ func deleteWithheldIssues(ctx context.Context, conn DBConn, excludeTypes []strin
 }
 
 // keepFilterAncestry makes filterCommit an ancestor of req.Source without
-// changing its contents: revert it on the keep branch, then merge that revert
-// into Source. A failed merge is aborted so Source is left as it was.
-func keepFilterAncestry(ctx context.Context, conn DBConn, req FilteredPushRequest, filterCommit string) error {
+// changing its contents: revert it on the keep branch, then fast-forward
+// Source to that revert. Source must still be the clean snapshot it was staged
+// from; if another writer advanced or dirtied it, nothing is merged or
+// published and that writer's changes are kept (never reset). A failed or
+// non-fast-forward merge is aborted so this operation leaves no merge behind.
+func keepFilterAncestry(ctx context.Context, conn DBConn, req FilteredPushRequest, snapshot, filterCommit string) error {
 	if _, err := conn.ExecContext(ctx, "CALL DOLT_BRANCH(?, ?)", req.Keep, filterCommit); err != nil {
 		return fmt.Errorf("federation filter: create keep branch: %w", err)
 	}
@@ -284,6 +297,9 @@ func keepFilterAncestry(ctx context.Context, conn DBConn, req FilteredPushReques
 	if err := CheckoutBranch(ctx, conn, req.Source); err != nil {
 		return fmt.Errorf("federation filter: restore branch %s: %w", req.Source, err)
 	}
+	if err := sourceUnchanged(ctx, conn, req.Source, snapshot); err != nil {
+		return err
+	}
 	if err := FilteredPushStage(ctx, "merge", conn, req); err != nil {
 		return err
 	}
@@ -291,13 +307,67 @@ func keepFilterAncestry(ctx context.Context, conn DBConn, req FilteredPushReques
 	if err == nil && len(conflicts) > 0 {
 		err = fmt.Errorf("merge branch %s: %d conflict(s)", req.Keep, len(conflicts))
 	}
+	if err == nil {
+		// A writer that advanced Source after the check above turns the
+		// fast-forward into a merge (or a conflict a session allowing commit
+		// conflicts leaves in progress); refuse to publish over it.
+		err = fastForwardedTo(ctx, conn, req.Source, req.Keep)
+	}
 	if err != nil {
-		if merging, _ := mergeInProgress(ctx, conn); merging {
-			if _, abortErr := conn.ExecContext(ctx, "CALL DOLT_MERGE('--abort')"); abortErr != nil {
+		abortCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), filteredPushAbortTimeout)
+		defer cancel()
+		merging, mergingErr := mergeInProgress(abortCtx, conn)
+		if mergingErr != nil {
+			err = errors.Join(err, fmt.Errorf("check keep merge: %w", mergingErr))
+		}
+		if merging {
+			if _, abortErr := conn.ExecContext(abortCtx, "CALL DOLT_MERGE('--abort')"); abortErr != nil {
 				err = errors.Join(err, fmt.Errorf("abort keep merge: %w", abortErr))
 			}
 		}
 		return fmt.Errorf("federation filter: keep local excluded issues: %w", err)
+	}
+	return nil
+}
+
+// sourceUnchanged fails with ErrFilteredPushSourceChanged unless the checked-out
+// source is still at snapshot with no pending changes and no merge in progress,
+// so any merge left after the keep merge is this operation's own.
+func sourceUnchanged(ctx context.Context, conn DBConn, source, snapshot string) error {
+	head, err := branchHead(ctx, conn, source)
+	if err != nil {
+		return fmt.Errorf("federation filter: read %s: %w", source, err)
+	}
+	if head != snapshot {
+		return fmt.Errorf("federation filter: %s advanced from %s to %s: %w", source, snapshot, head, ErrFilteredPushSourceChanged)
+	}
+	merging, err := mergeInProgress(ctx, conn)
+	if err != nil {
+		return fmt.Errorf("federation filter: %w", err)
+	}
+	dirty, err := issueops.HasPendingChanges(ctx, conn)
+	if err != nil {
+		return fmt.Errorf("federation filter: %w", err)
+	}
+	if merging || dirty {
+		return fmt.Errorf("federation filter: %s has uncommitted changes: %w", source, ErrFilteredPushSourceChanged)
+	}
+	return nil
+}
+
+// fastForwardedTo fails with ErrFilteredPushSourceChanged unless the keep merge
+// fast-forwarded source to keep.
+func fastForwardedTo(ctx context.Context, conn DBConn, source, keep string) error {
+	head, err := branchHead(ctx, conn, source)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", source, err)
+	}
+	want, err := branchHead(ctx, conn, keep)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", keep, err)
+	}
+	if head != want {
+		return fmt.Errorf("%s is at %s, not the keep commit %s: %w", source, head, want, ErrFilteredPushSourceChanged)
 	}
 	return nil
 }

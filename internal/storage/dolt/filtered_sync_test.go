@@ -271,6 +271,35 @@ func installFaultStages(t *testing.T) *faultStages {
 	return fs
 }
 
+// writeOnSource returns a stage fault that, at stage, lands an issue on the
+// source as another writer would, committing it unless commit is false, and
+// then restores the checkout the publication had.
+func writeOnSource(stage, id string, commit bool) func(context.Context, string, versioncontrolops.DBConn, versioncontrolops.FilteredPushRequest) error {
+	return func(ctx context.Context, at string, conn versioncontrolops.DBConn, req versioncontrolops.FilteredPushRequest) error {
+		if at != stage {
+			return nil
+		}
+		var active string
+		if err := conn.QueryRowContext(ctx, "SELECT active_branch()").Scan(&active); err != nil {
+			return err
+		}
+		stmts := []string{
+			"CALL DOLT_CHECKOUT('" + req.Source + "')",
+			"INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, issue_type, status, priority) VALUES ('" + id + "', 'other writer', '', '', '', '', 'task', 'open', 2)",
+		}
+		if commit {
+			stmts = append(stmts, "CALL DOLT_COMMIT('-am', 'other writer')")
+		}
+		stmts = append(stmts, "CALL DOLT_CHECKOUT('"+active+"')")
+		for _, stmt := range stmts {
+			if _, err := conn.ExecContext(ctx, stmt); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+}
+
 func failAt(want string, err error) func(context.Context, string, versioncontrolops.DBConn, versioncontrolops.FilteredPushRequest) error {
 	return func(_ context.Context, stage string, _ versioncontrolops.DBConn, _ versioncontrolops.FilteredPushRequest) error {
 		if stage == want {
@@ -377,30 +406,28 @@ func TestFilteredSyncFailureKeepsLocalData(t *testing.T) {
 	failedSync("cancel", cancelCtx, context.Canceled)
 	cancelSync()
 
-	// Another writer advances the source between staging and keep.
-	other := "test-other"
-	fs.fault = func(ctx context.Context, stage string, conn versioncontrolops.DBConn, req versioncontrolops.FilteredPushRequest) error {
-		if stage != "keep" {
-			return nil
+	// Another writer advances the source between staging and keep, or leaves
+	// it dirty, or advances it after the check, just before the keep merge:
+	// nothing is published and the other writer's change is kept, never reset.
+	for i, c := range []struct {
+		label, stage string
+		commit       bool
+	}{
+		{"advance", "keep", true},
+		{"dirty", "keep", false},
+		{"advance before merge", "merge", true},
+	} {
+		other := fmt.Sprintf("test-other%d", i)
+		fs.fault = writeOnSource(c.stage, other, c.commit)
+		failedSync(c.label, ctx, versioncontrolops.ErrFilteredPushSourceChanged)
+		// Commit an uncommitted write first: AS OF reads the branch commit.
+		if !c.commit {
+			f.commit(t, ctx, "other writer")
 		}
-		for _, stmt := range []string{
-			"CALL DOLT_CHECKOUT('" + req.Source + "')",
-			"INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, issue_type, status, priority) VALUES ('" + other + "', 'other writer', '', '', '', '', 'task', 'open', 2)",
-			"CALL DOLT_COMMIT('-am', 'other writer')",
-			"CALL DOLT_CHECKOUT('" + req.Staging + "')",
-		} {
-			if _, err := conn.ExecContext(ctx, stmt); err != nil {
-				return err
-			}
+		if f.issueCount(t, ctx, f.store.branch, other) != 1 {
+			t.Fatalf("%s: the other writer's issue was lost", c.label)
 		}
-		return nil
 	}
-	f.sync(t, ctx)
-	f.assertLocalIntact(t, ctx, "advance")
-	if f.issueCount(t, ctx, f.store.branch, other) != 1 {
-		t.Fatal("advance: keep merge dropped the other writer's issue")
-	}
-	tip = f.tipHash(t, ctx)
 
 	// A transport failure after the keep merge leaves contents unchanged.
 	errTransport := errors.New("injected transport failure")
@@ -414,8 +441,8 @@ func TestFilteredSyncFailureKeepsLocalData(t *testing.T) {
 	if err != nil {
 		t.Fatalf("cleanup: Sync: %v", err)
 	}
-	if !res.Pushed || !errors.Is(res.PushError, errCleanup) {
-		t.Fatalf("cleanup: pushed=%v push error=%v, want a reported cleanup failure after the push", res.Pushed, res.PushError)
+	if !res.Pushed || !res.PushFiltered || !errors.Is(res.PushError, errCleanup) {
+		t.Fatalf("cleanup: pushed=%v filtered=%v push error=%v, want a reported cleanup failure after the filtered push", res.Pushed, res.PushFiltered, res.PushError)
 	}
 	if got := f.tipHash(t, ctx); got == tip {
 		t.Fatal("cleanup: peer tip did not move")

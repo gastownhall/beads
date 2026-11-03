@@ -477,8 +477,9 @@ func (s *DoltStore) Sync(ctx context.Context, peer string, strategy string) (*Sy
 		// Push failure is not fatal - peer may not accept pushes
 		result.PushError = err
 	}
-	// A cleanup failure after the push is reported but does not undo it.
-	result.Pushed = err == nil || pushRes.Pushed
+	// Pushed means a publication landed: an unchanged payload pushes nothing,
+	// and a cleanup failure after the push is reported but does not undo it.
+	result.Pushed = pushRes.Pushed
 	result.PushFiltered = pushRes.Filtered
 
 	// Record last sync time

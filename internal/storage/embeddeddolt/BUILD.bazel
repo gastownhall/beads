@@ -165,6 +165,7 @@ go_test(
         "federation_credential_migration_test.go",
         "federation_credential_provenance_test.go",
         "federation_credentials_test.go",
+        "federation_filtered_push_faults_test.go",
         "federation_filtered_sync_test.go",
         "get_issue_test.go",
         "git_ref_pin_test.go",
