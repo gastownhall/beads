@@ -248,6 +248,7 @@ go_test(
         "git_remote_test.go",
         "gm2g3g5r_leak_repro_test.go",
         "graph_counter_contract_test.go",
+        "guarded_delete_comment_race_test.go",
         "heartbeater_contract_test.go",
         "history_off_differential_test.go",
         "history_presence_contract_test.go",

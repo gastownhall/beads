@@ -114,6 +114,7 @@ go_test(
         "cross_record_invariant_contract_test.go",
         "cycle_detector_contract_test.go",
         "data_behind_migrate_gate_test.go",
+        "delete_comment_race_characterization_test.go",
         "deleter_contract_test.go",
         "dependency_editor_contract_test.go",
         "dolt_sql_provider_lock_test.go",
