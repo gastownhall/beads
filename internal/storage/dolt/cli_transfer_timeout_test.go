@@ -536,3 +536,42 @@ func TestCLITransferErrorCredentialFreeUnchanged(t *testing.T) {
 		})
 	}
 }
+
+// TestCLITransferErrorRedactsApostropheInPassword pins a password holding a
+// raw "'", which used to end the URL match inside the single quotes dolt puts
+// around the rejected remote, so the whole password was echoed. Both branches
+// must drop it from the operation, the remote and dolt's output, keep the
+// quotes and the rejection detail, and still wrap the cause.
+func TestCLITransferErrorRedactsApostropheInPassword(t *testing.T) {
+	t.Setenv(cliExecTimeoutEnv, "7m")
+	const remote = "git+https://user:canary'secret@github.com/org/repo"
+	out := []byte(" ! [rejected]        main -> main (non-fast-forward)\nerror: failed to push some refs to '" + remote + "'\n")
+	const detail = "! [rejected]        main -> main (non-fast-forward)\nerror: failed to push some refs to 'git+https://github.com/org/repo': exit status 1"
+	cause := errors.New("exit status 1")
+	expired, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+
+	for name, tc := range map[string]struct {
+		ctx  context.Context
+		want string
+	}{
+		"failure": {
+			ctx:  context.Background(),
+			want: "push to peer git+https://github.com/org/repo failed: " + detail,
+		},
+		"timeout": {
+			ctx:  expired,
+			want: `push to peer git+https://github.com/org/repo to "git+https://github.com/org/repo" timed out after 7m0s (override with BEADS_CLI_TRANSFER_TIMEOUT=<duration>; large transfers to cloud remotes can run long, and a busy dolt sql-server serving the database directory can stall CLI transfers): ` + detail,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := cliTransferError("push to peer "+remote, remote, tc.ctx, out, cause)
+			if got := err.Error(); got != tc.want {
+				t.Errorf("cliTransferError() =\n%q\nwant\n%q", got, tc.want)
+			}
+			if !errors.Is(err, cause) {
+				t.Errorf("errors.Is(err, cause) = false: %v", err)
+			}
+		})
+	}
+}

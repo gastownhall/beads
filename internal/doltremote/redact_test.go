@@ -1,12 +1,16 @@
-package dolt
+package doltremote
 
-import "testing"
+import (
+	"errors"
+	"fmt"
+	"testing"
+)
 
-// TestRedactURLCredentials pins the per-scheme rule, kept in step with
-// TestRedactRemoteURL in cmd/bd: HTTP(S) userinfo is dropped whole, an SSH
-// account is kept and only its password dropped, and host spelling, port and
-// path are preserved.
-func TestRedactURLCredentials(t *testing.T) {
+// TestRedact pins the per-scheme rule: HTTP(S) userinfo is dropped whole, an
+// SSH account is kept and only its password dropped, and host spelling, port
+// and path are preserved. cmd/bd's TestRedactRemoteURL reaches the same rule
+// through redactRemoteURL.
+func TestRedact(t *testing.T) {
 	tests := []struct {
 		name string
 		in   string
@@ -39,6 +43,11 @@ func TestRedactURLCredentials(t *testing.T) {
 			name: "unencoded at sign in password is dropped",
 			in:   "https://user:p@ss@github.com/org/repo",
 			want: "https://github.com/org/repo",
+		},
+		{
+			name: "apostrophe in password is dropped",
+			in:   "git+https://user:canary'secret@github.com/org/repo",
+			want: "git+https://github.com/org/repo",
 		},
 		{
 			name: "host case is preserved",
@@ -83,17 +92,18 @@ func TestRedactURLCredentials(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := redactURLCredentials(tt.in); got != tt.want {
-				t.Errorf("redactURLCredentials(%q) = %q, want %q", tt.in, got, tt.want)
+			if got := Redact(tt.in); got != tt.want {
+				t.Errorf("Redact(%q) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
 	}
 }
 
-// TestScrubTransferText covers credential-bearing URLs embedded in dolt's
-// output or an operation, kept in step with TestScrubURLCredentials in cmd/bd.
-// Credential-free diagnostics must pass through untouched.
-func TestScrubTransferText(t *testing.T) {
+// TestRedactText covers credential-bearing URLs embedded in git or Dolt
+// output, an operation or an error; cmd/bd's TestScrubURLCredentials reaches
+// the same rule through scrubURLCredentials. Credential-free diagnostics must
+// pass through untouched.
+func TestRedactText(t *testing.T) {
 	tests := []struct {
 		name string
 		in   string
@@ -110,6 +120,41 @@ func TestScrubTransferText(t *testing.T) {
 			want: `remote "https://github.com/org/repo" not reachable`,
 		},
 		{
+			// The userinfo run used to stop at the quote, so this matched
+			// nothing and the whole password was echoed.
+			name: "apostrophe in a quoted URL's password",
+			in:   "error: failed to push some refs to 'git+https://user:canary'secret@github.com/org/repo'",
+			want: "error: failed to push some refs to 'git+https://github.com/org/repo'",
+		},
+		{
+			name: "apostrophe in a quoted URL's password, no path",
+			in:   "remote 'https://user:it's@github.com' could not be accessed",
+			want: "remote 'https://github.com' could not be accessed",
+		},
+		{
+			name: "double quote in a password",
+			in:   `remote "https://user:pa"ss@github.com/org/repo" not reachable`,
+			want: `remote "https://github.com/org/repo" not reachable`,
+		},
+		{
+			name: "apostrophe in an ssh password, account kept",
+			in:   "cannot reach 'ssh://alice:it's@dolt.example.com/org/db'",
+			want: "cannot reach 'ssh://alice@dolt.example.com/org/db'",
+		},
+		{
+			// Dolt's procedure errors: HandleInitRemoteStorageClientErr quotes
+			// the stored URL, and a failed remote read names it after the
+			// remote and an "@".
+			name: "dolt remote access error",
+			in:   "failed to get remote db; the remote: origin 'git+https://x-access-token:ghp_TESTTOKEN@127.0.0.1:9/org/repo' could not be accessed; exit status 128",
+			want: "failed to get remote db; the remote: origin 'git+https://127.0.0.1:9/org/repo' could not be accessed; exit status 128",
+		},
+		{
+			name: "dolt remote read error",
+			in:   "failed to read latest version of remote database origin@git+https://x-access-token:ghp_TESTTOKEN@github.com/org/repo: EOF",
+			want: "failed to read latest version of remote database origin@git+https://github.com/org/repo: EOF",
+		},
+		{
 			name: "ssh password embedded in text is dropped, account kept",
 			in:   "note: not cloning ssh://alice:hunter2@dolt.example.com/org/db right now",
 			want: "note: not cloning ssh://alice@dolt.example.com/org/db right now",
@@ -118,6 +163,18 @@ func TestScrubTransferText(t *testing.T) {
 			name: "two credential URLs in one text are both scrubbed",
 			in:   "To https://u:p@a.example.com:8443/x\nfrom git+ssh://git:q@b.example.com/y",
 			want: "To https://a.example.com:8443/x\nfrom git+ssh://git@b.example.com/y",
+		},
+		{
+			// The userinfo run stops at the first "/", so a credential-free URL
+			// cannot swallow the credentials of the URL that follows it.
+			name: "credential URL after a credential-free one with no space between",
+			in:   "'https://a.example.com/x','https://v:q@b.example.com/y'",
+			want: "'https://a.example.com/x','https://b.example.com/y'",
+		},
+		{
+			name: "credential URL after a credential-free one in a comma list",
+			in:   "https://a.example.com/x,https://v:q@b.example.com/y",
+			want: "https://a.example.com/x,https://b.example.com/y",
 		},
 		{
 			name: "credential-free rejection is unchanged",
@@ -157,9 +214,46 @@ func TestScrubTransferText(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := scrubTransferText(tt.in); got != tt.want {
-				t.Errorf("scrubTransferText(%q) = %q, want %q", tt.in, got, tt.want)
+			if got := RedactText(tt.in); got != tt.want {
+				t.Errorf("RedactText(%q) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
+	}
+}
+
+// stubCause is a typed cause for asserting that a redacted error still
+// unwraps to it.
+type stubCause struct{ msg string }
+
+func (c *stubCause) Error() string { return c.msg }
+
+// TestRedactError pins that an error quoting a credential-bearing URL reads
+// redacted while errors.Is and errors.As still reach its cause, and that an
+// error with nothing to redact comes back as itself.
+func TestRedactError(t *testing.T) {
+	if got := RedactError(nil); got != nil {
+		t.Errorf("RedactError(nil) = %v, want nil", got)
+	}
+
+	clean := errors.New("push to origin/main: remote 'origin' not found")
+	if got := RedactError(clean); got != clean {
+		t.Errorf("RedactError(credential-free) = %#v, want the same error back", got)
+	}
+
+	cause := &stubCause{"the remote: origin 'git+https://x-access-token:ghp_TESTTOKEN@github.com/org/repo' could not be accessed"}
+	err := RedactError(fmt.Errorf("push to origin/main: %w", cause))
+	const want = "push to origin/main: the remote: origin 'git+https://github.com/org/repo' could not be accessed"
+	if got := err.Error(); got != want {
+		t.Errorf("Error() = %q, want %q", got, want)
+	}
+	if !errors.Is(err, cause) {
+		t.Errorf("errors.Is(err, cause) = false: %v", err)
+	}
+	var unwrapped *stubCause
+	if !errors.As(err, &unwrapped) || unwrapped != cause {
+		t.Errorf("errors.As did not recover the cause: %v", err)
+	}
+	if wrapped := fmt.Errorf("push: %w", err); wrapped.Error() != "push: "+want {
+		t.Errorf("an outer wrap reads %q, want the redacted text", wrapped)
 	}
 }

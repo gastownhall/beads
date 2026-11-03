@@ -43,6 +43,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/debug"
+	"github.com/steveyegge/beads/internal/doltremote"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/doltversion"
 	"github.com/steveyegge/beads/internal/gittraceenv"
@@ -2896,6 +2897,10 @@ func buildServerDSN(cfg *Config, database string) string {
 // GetRefSpecs), which are remote config rather than session state, and a
 // fetch writes only remote-tracking refs, never the working branch. Neither
 // depends on this fresh connection's default checkout.
+//
+// The statement's error is redacted (doltremote.RedactError): Dolt's transfer
+// procedures quote the stored remote URL, credentials included, in their
+// errors, which reach the terminal and agent transcripts.
 func (s *DoltStore) execWithLongTimeout(ctx context.Context, query string, args ...any) error {
 	cfg, err := mysql.ParseDSN(s.connStr)
 	if err != nil {
@@ -2914,7 +2919,7 @@ func (s *DoltStore) execWithLongTimeout(ctx context.Context, query string, args 
 	}
 	if _, err := tx.ExecContext(ctx, query, args...); err != nil {
 		_ = tx.Rollback()
-		return err
+		return doltremote.RedactError(err)
 	}
 	return tx.Commit()
 }
@@ -2927,6 +2932,8 @@ func (s *DoltStore) execWithLongTimeout(ctx context.Context, query string, args 
 // Audited for be-b0am's fresh-connection branch hazard: safe. Every caller
 // passes s.branch explicitly as a CALL DOLT_PUSH(...) arg, so this fresh
 // connection's default checkout never matters.
+//
+// The statement's error is redacted as in execWithLongTimeout.
 func (s *DoltStore) execWithLongTimeoutNoTx(ctx context.Context, query string, args ...any) error {
 	db, err := s.oneShotConn(5 * time.Minute)
 	if err != nil {
@@ -2934,7 +2941,7 @@ func (s *DoltStore) execWithLongTimeoutNoTx(ctx context.Context, query string, a
 	}
 	defer db.Close()
 	_, err = db.ExecContext(ctx, query, args...)
-	return err
+	return doltremote.RedactError(err)
 }
 
 // oneShotConn opens a one-shot connection with the given read deadline
@@ -5177,9 +5184,9 @@ func (s *DoltStore) doltCLIPush(ctx context.Context, remote string, force bool, 
 // warnings. The remote is redacted before %q so its escaped form need not be
 // recognized.
 func cliTransferError(op, remote string, transferCtx context.Context, out []byte, err error) error {
-	op = scrubTransferText(op)
-	remote = redactURLCredentials(remote)
-	detail := scrubTransferText(strings.TrimSpace(string(out)))
+	op = doltremote.RedactText(op)
+	remote = doltremote.Redact(remote)
+	detail := doltremote.RedactText(strings.TrimSpace(string(out)))
 	if errors.Is(transferCtx.Err(), context.DeadlineExceeded) {
 		return fmt.Errorf("%s to %q timed out after %s (override with %s=<duration>; large transfers to cloud remotes can run long, and a busy dolt sql-server serving the database directory can stall CLI transfers): %s: %w",
 			op, remote, cliExecTimeoutDuration(), cliExecTimeoutEnv, detail, err)
@@ -5620,7 +5627,8 @@ func (s *DoltStore) refreshTrackingRef(ctx context.Context, remote string) error
 	}
 	defer db.Close()
 	return withRemoteOperationEnv(s.credentialsForRemote(remote), s.isS3Remote(ctx, remote), func() error {
-		return schema.DrainCall(ctx, db, "CALL DOLT_FETCH(?, ?)", remote, s.branch)
+		// Redacted as in execWithLongTimeout: verifyPullLanded logs this error.
+		return doltremote.RedactError(schema.DrainCall(ctx, db, "CALL DOLT_FETCH(?, ?)", remote, s.branch))
 	})
 }
 
@@ -5734,6 +5742,9 @@ func (s *DoltStore) pullWithAutoResolve(ctx context.Context, remote string, quer
 // pullWithAutoResolveReporting is pullWithAutoResolve plus the row the pull (or
 // the fetch+merge fallback) returned — the engine's own account of whether
 // anything merged. See pullReport.
+//
+// Its error is redacted as in execWithLongTimeout: DOLT_PULL's and the
+// fallback DOLT_FETCH's errors quote the stored remote URL.
 func (s *DoltStore) pullWithAutoResolveReporting(ctx context.Context, remote string, query string, args ...any) (pullReport, error) {
 	var report pullReport
 	err := s.withCircuitWrite(ctx, func(ctx context.Context) error {
@@ -5741,7 +5752,7 @@ func (s *DoltStore) pullWithAutoResolveReporting(ctx context.Context, remote str
 		report, err = s.pullWithAutoResolveUnchecked(ctx, remote, query, args...)
 		return err
 	})
-	return report, err
+	return report, doltremote.RedactError(err)
 }
 
 func (s *DoltStore) pullWithAutoResolveUnchecked(ctx context.Context, remote string, query string, args ...any) (pullReport, error) {
