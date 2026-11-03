@@ -259,6 +259,38 @@ func TestMoleculeReadyLetsAChildGoReadyOnceItsClosedParentStopsBlocking(t *testi
 	}
 }
 
+// TestMoleculeReadyEpicCloseGateOnOwnChildrenIsNotLocked pins GH#7652
+// Finding 2: a parent-child edge must propagate only EXOGENOUS blockedness
+// (internal/storage/issueops/blocked_consistency.go's #6506 contract), not
+// whatever set parentInfo.BlockedBy. The root here blocks on its own
+// children — the "close gate on the epic" idiom — so neither child's
+// blocker is outside the root's own subtree. Before this fix that still
+// read as blocked (len(BlockedBy) > 0 regardless of target), so both
+// children locked forever: nothing could ever close, so the gate could
+// never open.
+func TestMoleculeReadyEpicCloseGateOnOwnChildrenIsNotLocked(t *testing.T) {
+	f := newFakeMolecules()
+	f.add("m", types.TypeMolecule, types.StatusOpen)
+	f.add("m.a", types.TypeTask, types.StatusOpen)
+	f.add("m.b", types.TypeTask, types.StatusOpen)
+	f.edge("m.a", "m", types.DepParentChild)
+	f.edge("m.b", "m", types.DepParentChild)
+	f.edge("m", "m.a", types.DepBlocks) // the root cannot close before its own children
+	f.edge("m", "m.b", types.DepBlocks)
+
+	view, err := issueops.ViewMolecule(context.Background(), f.reader(), "m")
+	if err != nil {
+		t.Fatalf("ViewMolecule: %v", err)
+	}
+	ready := map[string]bool{}
+	for _, issue := range view.Ready {
+		ready[issue.ID] = true
+	}
+	if want := map[string]bool{"m.a": true, "m.b": true}; !reflect.DeepEqual(ready, want) {
+		t.Fatalf("Ready = %v, want %v: the root's own close-gate blockers are inside its own subtree, so they must not darken the children it is waiting for", ready, want)
+	}
+}
+
 // TestMoleculeReadyParentBlockedBySiblingStillLocksChild is the mirror of
 // the test above: the parent's blocker is a true sibling, OUTSIDE the
 // parent's subtree, so the exogenous-only narrowing above must not weaken
