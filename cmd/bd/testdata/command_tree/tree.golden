@@ -3298,7 +3298,7 @@ bd graph
   flag --compact type=bool default="false" usage="Tree format, one line per issue, more scannable"
   flag --dot type=bool default="false" usage="Output Graphviz DOT format (pipe to: dot -Tsvg > graph.svg)"
   flag --html type=bool default="false" usage="Output self-contained interactive HTML (redirect to file)"
-  flag --max-rows type=int default="0" usage="Hard upper bound on rows fetched from storage. Returns a non-zero exit (code 2) and an error to stderr if exceeded. 0 disables (the default). Overrides BEADS_MAX_ROWS for this invocation. Useful in CI/agent rigs that want a circuit breaker against pathological queries. Not supported under --proxied-server: an explicit --max-rows or BEADS_MAX_ROWS cap errors out rather than silently going unenforced."
+  flag --max-rows type=int default="0" usage="Hard upper bound on rows returned. Returns a non-zero exit (code 2) and an error to stderr if exceeded. 0 disables (the default). Overrides BEADS_MAX_ROWS for this invocation. Useful in CI/agent rigs that want a circuit breaker against pathological queries. Honored on both the direct and the --proxied-server route."
   flag --open type=bool default="false" usage="Show only open issues (filters out closed/deferred), forces compact layer format"
 
 bd graph check
