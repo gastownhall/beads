@@ -343,6 +343,12 @@ type DoltStore struct {
 	readOnly         bool         // True if opened in read-only mode
 	classifiedRead   bool         // True if readOnly came from command classification (GH#804), not strict --readonly/preview/foreign-project; still eligible for the defer-wake sweep (be-vbhpf)
 	credentialKey    []byte       // Random encryption key for federation credentials
+	// credMigrationMu serializes the one-time legacy credential migration
+	// (ensurePeerCredentialMigration, credentials_migration.go). It is not
+	// the store's general mu: the migration holds it across history reads and
+	// a table commit. credMigrationDone latches completion for this process.
+	credMigrationMu   sync.Mutex
+	credMigrationDone bool
 
 	// localActiveDatabaseDir is the exact active database directory when this
 	// store instance has authoritative local filesystem access. It is resolved

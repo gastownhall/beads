@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -73,6 +74,14 @@ type EmbeddedDoltStore struct {
 	// (e.g. the post-command autocommit net, or the commit itself) - only the
 	// migration step is skipped.
 	intent openIntent
+	// credMigrationMu serializes the one-time legacy credential migration
+	// (ensurePeerCredentialMigration). It is deliberately NOT the store's
+	// general engine lock: the migration holds it across history reads and a
+	// table commit, and the engine's own serialization covers statement
+	// atomicity. credMigrationDone latches completion for this process, so a
+	// finished migration costs one mutex acquisition per credential operation.
+	credMigrationMu   sync.Mutex
+	credMigrationDone bool
 }
 
 // lenientSharedGateGuidance is the blunt migrate-or-adopt block shared by the

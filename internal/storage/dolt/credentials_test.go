@@ -486,7 +486,7 @@ func TestCredentialKeyFileGeneration(t *testing.T) {
 	}
 
 	// initCredentialKey should generate and save a key
-	if err := store.initCredentialKey(t.Context()); err != nil {
+	if err := store.initCredentialKey(); err != nil {
 		t.Fatalf("initCredentialKey failed: %v", err)
 	}
 
@@ -521,13 +521,13 @@ func TestCredentialKeyFileReload(t *testing.T) {
 
 	// First store generates the key
 	store1 := &DoltStore{dbPath: tmpDir, beadsDir: tmpDir}
-	if err := store1.initCredentialKey(t.Context()); err != nil {
+	if err := store1.initCredentialKey(); err != nil {
 		t.Fatalf("initCredentialKey (store1) failed: %v", err)
 	}
 
 	// Second store should load the same key from file
 	store2 := &DoltStore{dbPath: tmpDir, beadsDir: tmpDir}
-	if err := store2.initCredentialKey(t.Context()); err != nil {
+	if err := store2.initCredentialKey(); err != nil {
 		t.Fatalf("initCredentialKey (store2) failed: %v", err)
 	}
 
@@ -541,12 +541,12 @@ func TestCredentialKeyNotPredictable(t *testing.T) {
 	tmpDir2 := t.TempDir()
 
 	store1 := &DoltStore{dbPath: tmpDir1, beadsDir: tmpDir1}
-	if err := store1.initCredentialKey(t.Context()); err != nil {
+	if err := store1.initCredentialKey(); err != nil {
 		t.Fatalf("initCredentialKey (store1) failed: %v", err)
 	}
 
 	store2 := &DoltStore{dbPath: tmpDir2, beadsDir: tmpDir2}
-	if err := store2.initCredentialKey(t.Context()); err != nil {
+	if err := store2.initCredentialKey(); err != nil {
 		t.Fatalf("initCredentialKey (store2) failed: %v", err)
 	}
 
@@ -559,7 +559,7 @@ func TestCredentialKeyNotPredictable(t *testing.T) {
 func TestEncryptDecryptRoundTrip(t *testing.T) {
 	tmpDir := t.TempDir()
 	store := &DoltStore{dbPath: tmpDir, beadsDir: tmpDir}
-	if err := store.initCredentialKey(t.Context()); err != nil {
+	if err := store.initCredentialKey(); err != nil {
 		t.Fatalf("initCredentialKey failed: %v", err)
 	}
 
@@ -616,7 +616,7 @@ func TestEncryptPasswordNoKey(t *testing.T) {
 
 func TestInitCredentialKeyEmptyDbPath(t *testing.T) {
 	store := &DoltStore{dbPath: ""}
-	if err := store.initCredentialKey(t.Context()); err != nil {
+	if err := store.initCredentialKey(); err != nil {
 		t.Fatalf("initCredentialKey with empty dbPath should not fail: %v", err)
 	}
 	if store.credentialKey != nil {
@@ -633,7 +633,7 @@ func TestEnsureCredentialKeyAlreadyInitialized(t *testing.T) {
 		credentialKey: append([]byte(nil), key...),
 	}
 
-	if err := store.ensureCredentialKey(t.Context()); err != nil {
+	if err := store.ensureCredentialKey(); err != nil {
 		t.Fatalf("ensureCredentialKey() error = %v", err)
 	}
 	if string(store.credentialKey) != string(key) {
@@ -651,7 +651,7 @@ func TestEnsureCredentialKeyInitializesWhenMissing(t *testing.T) {
 		beadsDir: tmpDir,
 	}
 
-	if err := store.ensureCredentialKey(t.Context()); err != nil {
+	if err := store.ensureCredentialKey(); err != nil {
 		t.Fatalf("ensureCredentialKey() error = %v", err)
 	}
 	if len(store.credentialKey) != 32 {
@@ -742,7 +742,7 @@ func TestCredentialKeyMigrationFromDbPath(t *testing.T) {
 	}
 
 	store := &DoltStore{dbPath: dbPath, beadsDir: beadsDir}
-	if err := store.initCredentialKey(t.Context()); err != nil {
+	if err := store.initCredentialKey(); err != nil {
 		t.Fatalf("initCredentialKey failed: %v", err)
 	}
 
@@ -773,7 +773,7 @@ func TestCredentialKeyNoGhostDir(t *testing.T) {
 	dbPath := filepath.Join(beadsDir, "dolt") // does not exist
 
 	store := &DoltStore{dbPath: dbPath, beadsDir: beadsDir}
-	if err := store.initCredentialKey(t.Context()); err != nil {
+	if err := store.initCredentialKey(); err != nil {
 		t.Fatalf("initCredentialKey failed: %v", err)
 	}
 
@@ -796,7 +796,7 @@ func TestCredentialKeyCreatesBeadsDir(t *testing.T) {
 	beadsDir := filepath.Join(parentDir, ".beads") // does not exist yet
 
 	store := &DoltStore{dbPath: "", beadsDir: beadsDir}
-	if err := store.initCredentialKey(t.Context()); err != nil {
+	if err := store.initCredentialKey(); err != nil {
 		t.Fatalf("initCredentialKey failed when beadsDir doesn't exist: %v", err)
 	}
 
@@ -922,6 +922,12 @@ func TestFederationPeerDecryptKeyMismatchNamesTheLocalKey(t *testing.T) {
 			t.Fatalf("sqlmock: %v", err)
 		}
 		t.Cleanup(func() { _ = db.Close() })
+		// The one-time credential migration is complete for this key: the
+		// reads under test happen behind the key-bound marker, so they must
+		// not re-run it (and the sqlmock db expects no migration queries).
+		if err := os.WriteFile(filepath.Join(beadsDir, peercred.MarkerFile), peercred.MarkerValue(localKey), 0600); err != nil {
+			t.Fatalf("write migration marker: %v", err)
+		}
 		return &DoltStore{db: db, credentialKey: localKey, beadsDir: beadsDir}, mock
 	}
 

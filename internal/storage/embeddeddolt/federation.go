@@ -104,6 +104,12 @@ func (s *EmbeddedDoltStore) decryptPassword(encrypted []byte, b peercred.Binding
 // ---------------------------------------------------------------------------
 
 func (s *EmbeddedDoltStore) AddFederationPeer(ctx context.Context, peer *storage.FederationPeer) error {
+	// The first credential operation on a writable store finishes the legacy
+	// credential migration before any new ciphertext is written, so the table
+	// the new row joins is uniformly v2.
+	if err := s.ensurePeerCredentialMigration(ctx); err != nil {
+		return fmt.Errorf("migrate legacy peer credentials: %w", err)
+	}
 	encryptedPwd, err := s.encryptPassword(peer.Password, peerBinding(peer))
 	if err != nil {
 		return fmt.Errorf("encrypt password: %w", err)
@@ -122,6 +128,11 @@ func (s *EmbeddedDoltStore) AddFederationPeer(ctx context.Context, peer *storage
 }
 
 func (s *EmbeddedDoltStore) GetFederationPeer(ctx context.Context, name string) (*storage.FederationPeer, error) {
+	// Migrate before reading: a row still carrying a legacy blob must be
+	// re-sealed or refused here, not decrypted.
+	if err := s.ensurePeerCredentialMigration(ctx); err != nil {
+		return nil, fmt.Errorf("migrate legacy peer credentials: %w", err)
+	}
 	var row *issueops.FederationPeerRow
 	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
 		var err error
@@ -287,6 +298,9 @@ func overrideEnv(key, value string) func() {
 }
 
 func (s *EmbeddedDoltStore) ListFederationPeers(ctx context.Context) ([]*storage.FederationPeer, error) {
+	if err := s.ensurePeerCredentialMigration(ctx); err != nil {
+		return nil, fmt.Errorf("migrate legacy peer credentials: %w", err)
+	}
 	var rows []*issueops.FederationPeerRow
 	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
 		var err error

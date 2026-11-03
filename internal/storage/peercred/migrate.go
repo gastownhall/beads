@@ -109,6 +109,28 @@ func PlanMigration(key, legacyKey []byte, current, history []ObservedBinding) Mi
 	return plan
 }
 
+// HasOpenableLegacyBlob reports whether observations contain a legacy
+// (non-v2) blob that decrypts under key or, when non-nil, the additional
+// legacyKey (the server store's historical dbPath-derived key). It gates the
+// caller's history walk: only a re-sealable blob can make provenance evidence
+// from history matter, so no openable legacy blob means no walk.
+func HasOpenableLegacyBlob(observations []ObservedBinding, key, legacyKey []byte) bool {
+	for _, o := range observations {
+		if len(o.Blob) == 0 || IsV2(o.Blob) {
+			continue
+		}
+		if _, err := OpenLegacy(o.Blob, key); err == nil {
+			return true
+		}
+		if legacyKey != nil {
+			if _, err := OpenLegacy(o.Blob, legacyKey); err == nil {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // RebindWarnings renders one per-peer re-add line for each skipped
 // credential. goos selects the shell quoting of the peer name
 // (remedy.CommandArg); the URL stays a placeholder because it is typed by the

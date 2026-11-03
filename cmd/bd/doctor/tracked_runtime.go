@@ -68,6 +68,7 @@ var trackedRuntimeDirPrefixes = []string{
 // committed anywhere under .beads/.
 var sensitiveFileNames = []string{
 	".beads-credential-key",
+	".beads-credential-key.v2-migrated",
 	"credential-key",
 }
 
