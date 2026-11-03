@@ -522,6 +522,54 @@ func TestBuildIssueDetails_FailedCountIsAbsentNotZero(t *testing.T) {
 			wantDependent:  ptr64(0),
 			wantDependency: ptr64(1),
 		},
+		// AC-4: successful counts are published with their value,
+		// including zero, and comments_omitted is true exactly when the
+		// comments were not requested and their successful count is
+		// positive.
+		{
+			name:           "ac4_all_counts_zero",
+			src:            skewSource{issue: issue, depCount: 0, rdepCount: 0, commentCount: 0},
+			wantDependent:  ptr64(0),
+			wantDependency: ptr64(0),
+			wantComment:    ptr64(0),
+		},
+		{
+			name: "ac4_positive_counts_count_only",
+			src: skewSource{
+				issue: issue, deps: oneDep, depCount: 1,
+				rdepCount: 2, commentCount: 2, comments: twoComments,
+			},
+			wantDependent:       ptr64(2),
+			wantDependency:      ptr64(1),
+			wantComment:         ptr64(2),
+			wantCommentsOmitted: ptrBool(true),
+		},
+		{
+			name: "ac4_positive_counts_include_comments",
+			src: skewSource{
+				issue: issue, deps: oneDep, depCount: 1,
+				rdepCount: 2, commentCount: 2, comments: twoComments,
+			},
+			opts:           DetailOptions{IncludeComments: true},
+			wantDependent:  ptr64(2),
+			wantDependency: ptr64(1),
+			wantComment:    ptr64(2),
+			wantCommentIDs: []string{"c-1", "c-2"},
+		},
+		{
+			// One failed count suppresses nothing else: the successful
+			// zero dependency and successful comment count two are
+			// still published, and comments_omitted still fires.
+			name: "ac4_mixed_failed_and_successful",
+			src: skewSource{
+				issue:     issue,
+				rdepCount: 3, rdepCountErr: boom,
+				depCount: 0, commentCount: 2, comments: twoComments,
+			},
+			wantDependency:      ptr64(0),
+			wantComment:         ptr64(2),
+			wantCommentsOmitted: ptrBool(true),
+		},
 	}
 
 	for _, tc := range tests {
