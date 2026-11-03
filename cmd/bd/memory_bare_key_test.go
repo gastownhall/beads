@@ -454,3 +454,60 @@ func TestRememberExplicitKeyStoresVerbatim(t *testing.T) {
 		}
 	}
 }
+
+// TestRememberNonKeyContentTakesContentPath pins that content outside the
+// bare-key grammar keeps the content path, reading nothing first: prose and
+// key-like-but-irregular tokens are stored under their derived key, and empty
+// or underivable content keeps the role's validation refusal.
+func TestRememberNonKeyContentTakesContentPath(t *testing.T) {
+	for _, content := range []string{
+		"always run tests with the -race flag",
+		"Config.V2",
+		"snake_case_word",
+		"a--b",
+		"trailing-",
+	} {
+		for _, asJSON := range []bool{false, true} {
+			t.Run(bareKeyCaseName(asJSON, strconv.Quote(content)), func(t *testing.T) {
+				mem := &bareKeyMemories{allowWrites: true, stored: map[string]string{}}
+				run := runRememberCmd(t, mem, content, "", asJSON)
+				derived := memoryapi.DeriveKey(content)
+				assertRememberWrote(t, run, mem, asJSON, memoryops.RememberRequest{Content: content}, derived, content)
+			})
+		}
+	}
+
+	for _, tc := range []struct{ content, want string }{
+		{"", "memory content cannot be empty"},
+		{"   ", "memory content cannot be empty"},
+		{".", "could not generate key from content; use --key to specify one"},
+		{"-", "could not generate key from content; use --key to specify one"},
+		{"!!!", "could not generate key from content; use --key to specify one"},
+	} {
+		for _, asJSON := range []bool{false, true} {
+			t.Run(bareKeyCaseName(asJSON, strconv.Quote(tc.content)), func(t *testing.T) {
+				mem := &bareKeyMemories{allowWrites: true, stored: map[string]string{}}
+				run := runRememberCmd(t, mem, tc.content, "", asJSON)
+				var exit *exitError
+				if !errors.As(run.err, &exit) || exit.Code != 1 {
+					t.Fatalf("err = %v, want exit 1", run.err)
+				}
+				if len(mem.recalls) != 0 {
+					t.Errorf("recalled %q, want the content path's refusal with no read", mem.recalls)
+				}
+				if len(mem.stored) != 0 {
+					t.Errorf("stored %v, want nothing", mem.stored)
+				}
+				if asJSON {
+					if body := decodeJSONBody(t, run.stdout); body["error"] != tc.want {
+						t.Errorf("error = %q, want %q", body["error"], tc.want)
+					}
+					return
+				}
+				if want := "Error: " + tc.want + "\n"; run.stderr != want {
+					t.Errorf("stderr = %q, want %q", run.stderr, want)
+				}
+			})
+		}
+	}
+}
