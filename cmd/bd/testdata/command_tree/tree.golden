@@ -4148,6 +4148,10 @@ bd linear
     |     bd config set linear.state_map.canceled closed
     |     bd config set linear.state_map.my_custom_state in_progress  # Custom state names
     |
+    |   Push target, for a status that several Linear states map to (exact state name):
+    |     bd config set linear.outbound_state_map.open Todo
+    |     bd config set linear.outbound_state_map.closed Done
+    |
     |   Label to issue type mapping:
     |     bd config set linear.label_type_map.bug bug
     |     bd config set linear.label_type_map.feature feature
