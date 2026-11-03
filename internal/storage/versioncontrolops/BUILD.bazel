@@ -46,6 +46,7 @@ go_test(
         "compact_verify_test.go",
         "conflicts_test.go",
         "fastforward_test.go",
+        "filtered_push_failure_test.go",
         "gc_test.go",
         "mergesettle_draincall_regression_test.go",
         "remotes_githooks_test.go",
@@ -55,6 +56,7 @@ go_test(
     embed = [":versioncontrolops"],
     deps = [
         "//internal/githooksenv",
+        "//internal/storage/schema",
         "//internal/testutil",
         "@com_github_data_dog_go_sqlmock//:go-sqlmock",
         "@com_github_go_sql_driver_mysql//:mysql",

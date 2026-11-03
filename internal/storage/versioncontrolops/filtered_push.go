@@ -76,10 +76,13 @@ type FilteredPushResult struct {
 // silently leaves excluded issues in the pushed tip is worse than no push.
 //
 // Branch state is session-scoped, so every step runs on conn. Callers pin
-// one connection for the whole call. On failure the session may be left on
-// StagingBranch; each caller's cleanup restores SourceBranch and deletes
-// StagingBranch on a fresh connection (see dolt's cleanupFilteredStaging and
-// embeddeddolt's cleanupFilteredStaging).
+// one connection for the whole call. A failure with the connection still
+// serving it — an ordinary recoverable failure — restores the source
+// checkout before returning, so no caller is left on a temporary branch its
+// own cleanup is about to delete; each caller's cleanup stays armed as the
+// backstop for a dead connection, deleting StagingBranch and KeepBranch and
+// restoring SourceBranch on a fresh connection (see dolt's
+// cleanupFilteredStaging and embeddeddolt's cleanupFilteredStaging).
 func PushFilteredBranch(ctx context.Context, conn FilteredConn, opts FilteredPushOptions) (*FilteredPushResult, error) {
 	if opts.Push == nil {
 		return nil, fmt.Errorf("federation filter: no push callback")
@@ -94,6 +97,24 @@ func PushFilteredBranch(ctx context.Context, conn FilteredConn, opts FilteredPus
 		return nil, fmt.Errorf("federation filter: checkout staging: %w", err)
 	}
 
+	result, err := publishFilteredStaging(ctx, conn, opts)
+	if err != nil {
+		// Restore the source checkout on an ordinary recoverable failure. A
+		// restore that fails too — a dead connection, a canceled context —
+		// is joined, never swallowed, and the caller's cleanup remains the
+		// backstop.
+		if restoreErr := CheckoutBranch(ctx, conn, opts.SourceBranch); restoreErr != nil {
+			err = errors.Join(err, fmt.Errorf("federation filter: restore branch %s: %w", opts.SourceBranch, restoreErr))
+		}
+	}
+	return result, err
+}
+
+// publishFilteredStaging is PushFilteredBranch's work after the staging
+// checkout: the DELETE runs only when the session is on the staging branch,
+// so any failure before it leaves the caller checked out on staging — the
+// caller-facing restore lives in PushFilteredBranch.
+func publishFilteredStaging(ctx context.Context, conn FilteredConn, opts FilteredPushOptions) (*FilteredPushResult, error) {
 	peerIDs, err := peerExcludedIDs(ctx, conn, opts.PeerRef, opts.ExcludeTypes)
 	if err != nil {
 		return nil, err

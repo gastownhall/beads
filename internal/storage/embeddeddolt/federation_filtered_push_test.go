@@ -437,3 +437,113 @@ func TestFilteredFederationSyncKeepsLocalExcludedIssues(t *testing.T) {
 
 	assertNoFederationStagingBranches(t, store)
 }
+
+// A filtering failure before publication fails safely (AC: GH#7890): Sync
+// reports the failure without failing the command, no push reaches the peer,
+// the sender's excluded issue and its dependency row are untouched, the
+// source checkout is restored, and the ordinary cleanup path removes the
+// temporary branches. The injected failure is the staged is_blocked
+// recompute reading a wisp plane the staging branch does not carry — the
+// fixture deliberately leaves the wisp tables dolt_ignore'd, so no wisp
+// versioning runs here (see versionWispTablesForFilteredPush).
+func TestFilteredFederationSyncFilterFailureBeforePushFailsSafely(t *testing.T) {
+	ctx := context.Background()
+	store := newPeerAuthTestStore(t)
+
+	remoteDir := filepath.Join(t.TempDir(), "peer")
+	if err := os.MkdirAll(remoteDir, 0o700); err != nil {
+		t.Fatalf("create peer remote dir: %v", err)
+	}
+	remoteURL := "file://" + remoteDir
+	if err := store.AddRemote(ctx, "peer", remoteURL); err != nil {
+		t.Fatalf("add peer remote: %v", err)
+	}
+
+	insertFilteredPushIssue(t, store, "ff-held-secret", "secret")
+	insertFilteredPushIssue(t, store, "ff-shared-task", "task")
+	if _, err := store.commitAll(ctx, "seed peer tip", true); err != nil {
+		t.Fatalf("commit peer tip seed: %v", err)
+	}
+	if err := store.PushTo(ctx, "peer"); err != nil {
+		t.Fatalf("PushTo to establish peer tip: %v", err)
+	}
+
+	insertFilteredPushIssue(t, store, "ff-new-secret", "secret")
+	insertFilteredPushIssue(t, store, "ff-local-task", "task")
+	if err := store.AddDependency(ctx, &types.Dependency{
+		IssueID: "ff-local-task", DependsOnID: "ff-new-secret", Type: types.DepBlocks,
+	}, "test"); err != nil {
+		t.Fatalf("add new dependency: %v", err)
+	}
+	if _, err := store.commitAll(ctx, "add new local issues", true); err != nil {
+		t.Fatalf("commit new local issues: %v", err)
+	}
+
+	prevExcludes := config.GetFederationConfig().ExcludeTypes
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("initialize config: %v", err)
+	}
+	config.Set("federation.exclude_types", []string{"secret"})
+	t.Cleanup(func() { config.Set("federation.exclude_types", prevExcludes) })
+
+	result, err := store.Sync(ctx, "peer", "")
+	if err != nil {
+		t.Fatalf("Sync returned an error on a push failure: %v", err)
+	}
+	if result.PushError == nil {
+		t.Fatal("Sync did not report the filtering failure (PushError = nil)")
+	}
+	if !strings.Contains(result.PushError.Error(), "federation filter") {
+		t.Fatalf("Sync push error = %v, want the filtered-push failure", result.PushError)
+	}
+	if result.Pushed {
+		t.Fatal("Sync reported a push after a pre-publication failure")
+	}
+
+	// The operation has not deleted local excluded data.
+	if !storedIssueExists(t, store, "ff-new-secret") {
+		t.Fatal("failed publication deleted the sender's local excluded issue")
+	}
+	var depCount int
+	err = store.withConn(t.Context(), false, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(t.Context(),
+			`SELECT COUNT(*) FROM dependencies WHERE issue_id = ? AND depends_on_issue_id = ?`,
+			"ff-local-task", "ff-new-secret").Scan(&depCount)
+	})
+	if err != nil {
+		t.Fatalf("read sender dependency: %v", err)
+	}
+	if depCount != 1 {
+		t.Fatalf("sender's dependency row for the excluded issue count = %d, want 1", depCount)
+	}
+
+	// No push occurred: the peer's tip is exactly what it held before.
+	tip := clonePeerTip(t, remoteURL, store.database)
+	for _, id := range []string{"ff-held-secret", "ff-shared-task"} {
+		if _, ok := tip.issues[id]; !ok {
+			t.Errorf("peer tip lost the issue %s it already held", id)
+		}
+	}
+	for _, id := range []string{"ff-new-secret", "ff-local-task"} {
+		if _, ok := tip.issues[id]; ok {
+			t.Errorf("issue %s reached the peer despite the pre-publication failure", id)
+		}
+	}
+
+	// The source checkout is restored: a fresh session sits on the store's
+	// branch, not on the abandoned staging branch.
+	err = store.withDBConn(t.Context(), func(db versioncontrolops.DBConn) error {
+		branch, err := versioncontrolops.CurrentBranch(t.Context(), db)
+		if err != nil {
+			return err
+		}
+		if branch != "main" {
+			t.Errorf("session checked out on %s after the failure, want main", branch)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("read current branch: %v", err)
+	}
+	assertNoFederationStagingBranches(t, store)
+}
