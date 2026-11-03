@@ -16,9 +16,12 @@ migration file**, and the embedded Dolt engine is unchanged, so upgrading from
 1.3.x is a binary swap. A store from an older release still runs its pending
 migrations on first open, now without restamping `updated_at`. Several fixes
 change what a command accepts or prints; read **Upgrade notes** before
-upgrading. The 1.3.2 upgrade note (run `bd recompute-blocked` once per
-workspace after upgrading from bd ≤1.3.0,
-[#7037](https://github.com/gastownhall/beads/issues/7037)) still applies.
+upgrading. The 1.3.2 upgrade note still applies: run `bd recompute-blocked`
+once per workspace whose store crossed migration 0059 under bd 1.3.0 or
+later, which includes any workspace first created by bd 1.2.x or earlier,
+whichever 1.3.x release it is on now
+([#7037](https://github.com/gastownhall/beads/issues/7037)). On an
+unaffected workspace it changes nothing.
 
 ### Security
 
