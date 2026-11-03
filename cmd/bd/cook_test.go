@@ -132,6 +132,155 @@ func TestRunCookAppliesStepConditionsInRuntimeMode(t *testing.T) {
 			t.Fatalf("runtime cook steps = %v, pour steps = %v; want the same set", got, pour)
 		}
 	})
+
+	t.Run("JSON keeps only the steps the default or an override selects", func(t *testing.T) {
+		cmd := newCookConditionTestCommand(false, "runtime")
+		if got, want := cookJSONStepIDs(t, cmd, formulaPath), []string{"build"}; !slices.Equal(got, want) {
+			t.Fatalf("default JSON steps = %v, want %v", got, want)
+		}
+
+		cmd = newCookConditionTestCommand(false, "", "deploy=true")
+		if got, want := cookJSONStepIDs(t, cmd, formulaPath), []string{"build", "deploy"}; !slices.Equal(got, want) {
+			t.Fatalf("deploy=true JSON steps = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("condition forms and nested children", func(t *testing.T) {
+		path := writeCookConditionFormula(t, formulaDir, "cond-forms", `formula = "cond-forms"
+version = 1
+type = "workflow"
+
+[vars.env]
+default = "staging"
+
+[vars.fast]
+default = "no"
+
+[[steps]]
+id = "prod-only"
+title = "Prod only"
+condition = "{{env}} == prod"
+
+[[steps]]
+id = "not-prod"
+title = "Not prod"
+condition = "{{env}} != 'prod'"
+
+[[steps]]
+id = "slow"
+title = "Slow path"
+condition = "!{{fast}}"
+
+[[steps]]
+id = "unset"
+title = "Needs an undeclared var"
+condition = "{{undeclared}}"
+
+[[steps]]
+id = "group"
+title = "Group"
+
+[[steps.children]]
+id = "kept-child"
+title = "Kept child"
+
+[[steps.children]]
+id = "fast-child"
+title = "Fast child"
+condition = "{{fast}}"
+
+[[steps.children.children]]
+id = "grandchild"
+title = "Grandchild of a dropped child"
+`)
+		cmd := newCookConditionTestCommand(false, "runtime")
+		got := cookJSONStepIDs(t, cmd, path)
+		if want := []string{"group", "kept-child", "not-prod", "slow"}; !slices.Equal(got, want) {
+			t.Fatalf("defaults: JSON steps = %v, want %v", got, want)
+		}
+
+		cmd = newCookConditionTestCommand(false, "", "env=prod", "fast=yes", "undeclared=1")
+		got = cookJSONStepIDs(t, cmd, path)
+		if want := []string{"fast-child", "grandchild", "group", "kept-child", "prod-only", "unset"}; !slices.Equal(got, want) {
+			t.Fatalf("overrides: JSON steps = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("a placeholder only a dropped step uses is not demanded", func(t *testing.T) {
+		path := writeCookConditionFormula(t, formulaDir, "cond-placeholder", `formula = "cond-placeholder"
+version = 1
+type = "workflow"
+
+[vars.deploy]
+default = "false"
+
+[[steps]]
+id = "build"
+title = "Build the project"
+
+[[steps]]
+id = "deploy"
+title = "Deploy to {{target}}"
+condition = "{{deploy}}"
+`)
+		cmd := newCookConditionTestCommand(false, "runtime")
+		if got, want := cookJSONStepIDs(t, cmd, path), []string{"build"}; !slices.Equal(got, want) {
+			t.Fatalf("JSON steps = %v, want %v", got, want)
+		}
+
+		cmd = newCookConditionTestCommand(false, "", "deploy=true")
+		_, stderr, err := runCookCapturingOutput(t, cmd, path)
+		if err == nil || !strings.Contains(stderr, "Missing: target") {
+			t.Fatalf("deploy=true: err = %v, stderr = %q; want the kept step's placeholder demanded", err, stderr)
+		}
+	})
+
+	t.Run("required variables are validated before filtering", func(t *testing.T) {
+		path := writeCookConditionFormula(t, formulaDir, "cond-required", `formula = "cond-required"
+version = 1
+type = "workflow"
+
+[vars.deploy]
+default = "false"
+
+[vars.target]
+required = true
+
+[[steps]]
+id = "build"
+title = "Build the project"
+
+[[steps]]
+id = "deploy"
+title = "Deploy to {{target}}"
+condition = "{{deploy}}"
+`)
+		cmd := newCookConditionTestCommand(false, "runtime")
+		stdout, stderr, err := runCookCapturingOutput(t, cmd, path)
+		if err == nil || !strings.Contains(stderr, `variable "target" is required`) {
+			t.Fatalf("err = %v, stderr = %q, stdout = %q; want the required variable refused", err, stderr, stdout)
+		}
+	})
+
+	t.Run("a malformed condition is an error", func(t *testing.T) {
+		path := writeCookConditionFormula(t, formulaDir, "cond-malformed", `formula = "cond-malformed"
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "odd"
+title = "Odd"
+condition = "deploy is on"
+`)
+		cmd := newCookConditionTestCommand(false, "runtime")
+		stdout, stderr, err := runCookCapturingOutput(t, cmd, path)
+		if err == nil || !strings.Contains(stderr, "filtering steps by condition") || !strings.Contains(stderr, "invalid step condition format") {
+			t.Fatalf("err = %v, stderr = %q; want the malformed condition refused", err, stderr)
+		}
+		if stdout != "" {
+			t.Fatalf("stdout = %q, want no output after the refusal", stdout)
+		}
+	})
 }
 
 func writeCookConditionFormula(t *testing.T, dir, name, toml string) string {
@@ -155,6 +304,31 @@ func newCookConditionTestCommand(dryRun bool, mode string, vars ...string) *cobr
 	cmd.Flags().StringArray("var", vars, "")
 	cmd.Flags().String("mode", mode, "")
 	return cmd
+}
+
+// cookJSONStepIDs runs an ephemeral cook and returns the sorted IDs of every
+// step, nested children included, in its JSON output.
+func cookJSONStepIDs(t *testing.T, cmd *cobra.Command, formulaArg string) []string {
+	t.Helper()
+	stdout, stderr, err := runCookCapturingOutput(t, cmd, formulaArg)
+	if err != nil {
+		t.Fatalf("runCook: %v; stderr = %q", err, stderr)
+	}
+	var cooked formula.Formula
+	if err := json.Unmarshal([]byte(stdout), &cooked); err != nil {
+		t.Fatalf("parse cook JSON: %v\n%s", err, stdout)
+	}
+	var ids []string
+	var walk func([]*formula.Step)
+	walk = func(steps []*formula.Step) {
+		for _, step := range steps {
+			ids = append(ids, step.ID)
+			walk(step.Children)
+		}
+	}
+	walk(cooked.Steps)
+	slices.Sort(ids)
+	return ids
 }
 
 var cookDryRunStepLine = regexp.MustCompile(`(?m)[├└]── ([^:\s]+): `)
