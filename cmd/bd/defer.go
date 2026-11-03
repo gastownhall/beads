@@ -32,6 +32,9 @@ dependency keeping them from being worked. Unlike closed issues, they will
 be revisited.
 
 Deferred issues don't show in 'bd ready' but remain visible in 'bd list'.
+A deferred parent, dated or not, also keeps its direct children out of
+'bd ready' while it stays deferred; 'bd ready --include-deferred' lists
+them anyway.
 
 A defer WITH a date is a snooze: once --until passes, the next ready-front
 read returns the issue to open automatically (same shape as 'bd undefer').

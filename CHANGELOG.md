@@ -1165,6 +1165,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd ready` no longer lists the children of a parent deferred without a
+  date (#7300, reported by @seniorquico; fix by @drakeo338 in #7304). Only a
+  parent with a future `defer_until` used to hold its direct children back, so
+  an epic put in the indefinite icebox with `bd defer <id>` left its open
+  children ready, and `bd ready --claim` could pick one up. Every parent stored
+  with status `deferred` now holds its direct children, whichever writer set
+  it: `bd defer` with or without `--until`, `bd update --status deferred`, and
+  tracker syncs that map a remote state to deferred (Azure DevOps Removed,
+  Linear and Notion deferred). Grandchildren are not held, and
+  `bd ready --include-deferred` still lists the children. A dated defer whose
+  date has passed keeps holding its children until the next ready read wakes
+  it; on a store that cannot run the wake (`--readonly`, or a wake that
+  fails) they stay held until the parent is undeferred.
 - `bd create --file` and other batch creates no longer fail with "issue
   already exists" on an id bd generated itself. The batch chose every id
   before it wrote any row, so two of its items could be handed the same short
