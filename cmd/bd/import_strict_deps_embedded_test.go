@@ -199,4 +199,35 @@ func TestEmbeddedImportStrictDeps(t *testing.T) {
 			t.Errorf("after --json --strict-deps import rows = %v edges = %v, want [sdjsn-a] and no edge", ids, edges)
 		}
 	})
+
+	t.Run("strict_with_available_targets_exits_zero", func(t *testing.T) {
+		t.Parallel()
+		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "sdok")
+
+		// sdok-db is already in the database; sdok-x targets it, and sdok-y
+		// targets sdok-x in the same input.
+		first := filepath.Join(t.TempDir(), "first.jsonl")
+		writeJSONLFile(t, first, []types.Issue{issue("sdok-db")})
+		if stdout, stderr, code := strictDepsImport(t, bd, dir, "--strict-deps", first); code != 0 {
+			t.Fatalf("seed import exit = %d, want 0\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+		}
+		second := filepath.Join(t.TempDir(), "second.jsonl")
+		writeJSONLFile(t, second, []types.Issue{issue("sdok-y", "sdok-x"), issue("sdok-x", "sdok-db")})
+
+		for _, args := range [][]string{{"--strict-deps", second}, {"--json", "--strict-deps", second}} {
+			stdout, stderr, code := strictDepsImport(t, bd, dir, args...)
+			if code != 0 {
+				t.Fatalf("bd import %v exit = %d, want 0\nstdout:\n%s\nstderr:\n%s", args, code, stdout, stderr)
+			}
+			for _, unwanted := range []string{"Skipped dependency", "dependency edge(s)", "Error:", "Hint:", `"error"`} {
+				if strings.Contains(stderr, unwanted) || strings.Contains(stdout, unwanted) {
+					t.Errorf("bd import %v reported %q on a clean import\nstdout:\n%s\nstderr:\n%s", args, unwanted, stdout, stderr)
+				}
+			}
+		}
+		_, edges := strictDepsRows(t, beadsDir, "sdok")
+		if want := "sdok-x -> sdok-db,sdok-y -> sdok-x"; strings.Join(edges, ",") != want {
+			t.Errorf("edges = %v, want %s", edges, want)
+		}
+	})
 }

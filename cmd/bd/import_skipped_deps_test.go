@@ -190,6 +190,23 @@ func TestRenderImportOutcomeSkippedDependencies(t *testing.T) {
 			t.Errorf("clean import reported skipped dependencies:\n%s", stderr)
 		}
 	})
+
+	t.Run("strict_without_skips_succeeds_quietly", func(t *testing.T) {
+		for _, asJSON := range []bool{false, true} {
+			stdout, stderr, err := renderImportOutcomeStreams(t, asJSON, true, importResultJSON{Source: "chunk.jsonl", Created: 2})
+			if err != nil {
+				t.Fatalf("json=%v: renderImportOutcome = %v, want nil (exit 0)", asJSON, err)
+			}
+			if strings.Contains(stderr, "Error:") || strings.Contains(stderr, "Warning:") || strings.Contains(stderr, "Hint:") || strings.Contains(stderr, "dependency") {
+				t.Errorf("json=%v: clean --strict-deps import reported skipped dependencies:\n%s", asJSON, stderr)
+			}
+			if asJSON {
+				if obj := decodeSingleJSONObject(t, stdout); obj["skipped_dependencies"] != nil {
+					t.Errorf("clean import result carries skipped_dependencies %v", obj["skipped_dependencies"])
+				}
+			}
+		}
+	})
 }
 
 // requireImportExitCode fails unless err is the exitError runImport passes
