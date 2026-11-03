@@ -44,6 +44,45 @@ func TestMatchesKnownCommand(t *testing.T) {
 	}
 }
 
+// TestIsBareMemoryKey pins the read-detection grammar for `bd remember`'s
+// bare-key path (GH#7275): lowercase alphanumeric segments joined by single
+// '.' or '-' separators, with no byte or segment cap. It is a grammar, not a
+// derivation, so the keys DeriveKey rewrites (dots, nine-plus segments, over
+// 60 bytes) are still reads — and everything else keeps the content path.
+func TestIsBareMemoryKey(t *testing.T) {
+	// Reads: every key the old round-trip gate accepted (a derived key is
+	// always a bare key), plus the shapes derivation rewrites.
+	reads := []string{
+		"dolt-phantoms",                       // canonical short slug; round-trips through DeriveKey
+		"always-run-tests-with-the-race-flag", // an eight-segment derived key
+		"singleword",
+		"123",
+		"config.v2", // dot separators
+		"a-b.c-d",   // mixed separators
+		"one-two-three-four-five-six-seven-eight-nine", // nine segments; DeriveKey keeps eight
+		strings.Repeat("m", 61),                        // one segment past the 60-byte cap
+	}
+	for _, value := range reads {
+		if !isBareMemoryKey(value) {
+			t.Errorf("isBareMemoryKey(%q) = false, want it read as a bare key", value)
+		}
+	}
+	// Content: uppercase, underscores, whitespace, Unicode, irregular
+	// separators — and the separator-only tokens, which must stay on the
+	// content path so they keep the role's underivable-content refusal.
+	content := []string{
+		"", "   ", " slug", "slug\n", "a\tb", "two words",
+		"CAPS", "a_b", "café", "!!!",
+		".", "-", // separator-only: no key there to recall, and DeriveKey("") is ""
+		"trail-", "-lead", "a--b", "a..b", "x.", ".x",
+	}
+	for _, value := range content {
+		if isBareMemoryKey(value) {
+			t.Errorf("isBareMemoryKey(%q) = true, want it to stay on the content path", value)
+		}
+	}
+}
+
 // TestPrintRecallResult guards the bd-5963 fix: presence must come from
 // `RecallResult.Found` (row existence), never from `value != ""`. Before the
 // fix, `bd recall` on a memory stored as the empty string printed "No memory

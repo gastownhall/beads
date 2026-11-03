@@ -395,6 +395,40 @@ func TestEmbeddedMemory(t *testing.T) {
 	})
 }
 
+// TestEmbeddedMemoryBareKeyRecallsKeysDeriveKeyChanges pins GH#7275: a bare
+// `bd remember <exact-key>` recalls an existing memory even when the key does
+// not round-trip through DeriveKey (more than eight segments, over 60 bytes,
+// or a dot), and never writes a memory.
+func TestEmbeddedMemoryBareKeyRecallsKeysDeriveKeyChanges(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "tk")
+
+	for _, key := range []string{
+		"one-two-three-four-five-six-seven-eight-nine",
+		"a-very-long-single-key-that-is-well-over-sixty-bytes-in-total",
+		"config.v2",
+	} {
+		t.Run(key, func(t *testing.T) {
+			content := "keep this content for " + key
+			bdRemember(t, bd, dir, content, "--key", key)
+			before := bdMemories(t, bd, dir, "--json")
+
+			out := bdRemember(t, bd, dir, key)
+			if !strings.Contains(out, content) {
+				t.Errorf("bare `bd remember %s` should recall %q, got: %s", key, content, out)
+			}
+			if after := bdMemories(t, bd, dir, "--json"); after != before {
+				t.Errorf("bare `bd remember %s` changed the memories:\nbefore: %s\nafter:  %s", key, before, after)
+			}
+		})
+	}
+}
+
 // TestEmbeddedMemoryConcurrent exercises memory operations concurrently.
 func TestEmbeddedMemoryConcurrent(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {

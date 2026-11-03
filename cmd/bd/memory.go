@@ -216,13 +216,44 @@ func rememberBudgetVerdict(existing map[string]string, key, content string, budg
 	return memoryBudgetLine(projectedMemoryCorpusChars(existing, key, content), budget, force)
 }
 
+// isBareMemoryKey reports whether a `bd remember` argument with no --key is
+// key-SHAPED: lowercase alphanumeric segments joined by single '.' or '-'
+// separators — a bare key — with no byte or segment cap. It is the front
+// door's read detector, and it is deliberately NOT DeriveKey: explicit keys
+// are unrestricted, so a dotted key, or one longer than DeriveKey's eight
+// segments or 60 bytes, does not survive its own derivation, and the old
+// round-trip gate (`DeriveKey(insight) == insight`) classified exactly those
+// keys as content — the GH#7275 bug. The grammar accepts every input the
+// round-trip gate did (a derived key is always a bare key) and adds exactly
+// the shapes derivation rewrites. Everything else — uppercase, underscores,
+// whitespace, Unicode, leading/trailing or doubled separators, and
+// separator-only tokens like "." or "-" — stays on the content path, where it
+// always was.
+func isBareMemoryKey(value string) bool {
+	prevSep := true // the grammar has no leading separator
+	for _, c := range value {
+		switch {
+		case c >= 'a' && c <= 'z' || c >= '0' && c <= '9':
+			prevSep = false
+		case c == '.' || c == '-':
+			if prevSep {
+				return false
+			}
+			prevSep = true
+		default:
+			return false
+		}
+	}
+	return !prevSep
+}
+
 // rememberBareKeyPath implements the desire-path / footgun guard for
-// `bd remember <bare-slug>` (no --key): a bare slug naming an EXISTING memory
-// is recalled instead of stored; a bare slug naming nothing is refused. The
-// caller only invokes it when memoryKeyFlag == "" and the insight round-trips
-// through memoryapi.DeriveKey unchanged, having already read the key. As in
+// `bd remember <bare-key>` (no --key): a bare key naming an EXISTING memory
+// is recalled instead of stored; a bare key naming nothing is refused. The
+// caller only invokes it when memoryKeyFlag == "" and the insight is
+// key-shaped (isBareMemoryKey), having already read the key. As in
 // printRecallResult, presence is found (row existence), never existing != "":
-// a bare slug naming a memory stored as the empty string recalls it.
+// a bare key naming a memory stored as the empty string recalls it.
 func rememberBareKeyPath(key, insight, existing string, found bool) error {
 	if found {
 		if jsonOutput {
@@ -452,9 +483,9 @@ Examples:
 		// Desire path + footgun guard: `bd remember <x>` is a WRITE whose positional arg is
 		// the CONTENT, not a key -- but "remember X" reads as a getter in English, so agents
 		// routinely type `bd remember some-key` meaning "do you remember X?". The tell-tale of
-		// a mistyped read is content that round-trips through the key derivation unchanged (a
-		// bare slug); real prose insights never do. When that happens and no explicit --key was
-		// given:
+		// a mistyped read is a bare key (isBareMemoryKey: lowercase alphanumeric segments
+		// joined by single '.' or '-' separators); real prose insights never match. When that
+		// happens and no explicit --key was given:
 		//   - the key EXISTS  -> pave the desire path: recall it instead of writing
 		//   - no such key     -> refuse; storing a key-like token as its own content would
 		//                        create a junk memory that hides the mistake
@@ -462,21 +493,23 @@ Examples:
 		//
 		// It stays ABOVE the role because it decides WHETHER TO WRITE AT ALL, and
 		// because it exists to disambiguate English: an HTTP POST is not ambiguous
-		// and must not inherit it. The read below is a plain Recall, so this whole
+		// and must not inherit it. The reads below are plain Recalls, so this whole
 		// branch touches nothing.
 		//
-		// `derived != ""` is load-bearing and is not decoration: DeriveKey("")
-		// is "", so without it every empty or unslugifiable insight would satisfy
-		// derived == insight and be routed into a "recall" of the empty key. The
-		// shipped code was saved from that by an empty-content check that ran
-		// first; that check is the role's now, so the condition has to say it.
-		derived := memoryapi.DeriveKey(insight)
-		if memoryKeyFlag == "" && derived != "" && derived == insight {
-			recalled, err := memories.Recall(rootCtx, memoryops.RecallRequest{Key: derived})
+		// The classifier is isBareMemoryKey, not DeriveKey, and the difference is
+		// GH#7275: explicit keys are unrestricted, so a key with nine-plus
+		// segments, over 60 bytes, or a dot does not survive its own derivation,
+		// and the old round-trip gate (`DeriveKey(insight) == insight`) routed
+		// exactly those keys onto the write path — storing the key as its own
+		// content, over a derived-key collision if one was there. The grammar
+		// accepts every input the round trip did (a derived key is always a
+		// bare key) and adds the shapes it missed, so no shipped read narrows.
+		if memoryKeyFlag == "" && isBareMemoryKey(insight) {
+			recalled, err := memories.Recall(rootCtx, memoryops.RecallRequest{Key: insight})
 			if err != nil {
 				return HandleErrorRespectJSON("recalling memory: %v", err)
 			}
-			return rememberBareKeyPath(derived, insight, recalled.Value, recalled.Found)
+			return rememberBareKeyPath(insight, insight, recalled.Value, recalled.Found)
 		}
 
 		// Corpus budget (memories.budget-chars, OPT-IN, 0 = off). The
