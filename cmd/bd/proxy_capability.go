@@ -224,7 +224,11 @@ var proxyCommandCapabilities = map[string]map[ProxyMode]map[ProxyCapability]prox
 	"show":            {ProxyModeProxied: {ProxyCapWatch: honored()}},
 	"list":            {ProxyModeProxied: {ProxyCapWatch: honored(), ProxyCapMaxRows: honored(), ProxyCapRepo: notApplicable()}},
 	"dep tree":        {ProxyModeProxied: {ProxyCapMaxRows: honored()}},
-	"ready":           {ProxyModeProxied: {ProxyCapMaxRows: maxRowsRefusal}},
+	// The ready role's proxied query sizes its window from filter.MaxRows
+	// (readyWindowForFilter), so the cap is honored here as it is on the direct
+	// route. --claim stays exempt on both routes (claimNextRequest carries no
+	// cap) and --gated still resolves none (readyGatedArm).
+	"ready":           {ProxyModeProxied: {ProxyCapMaxRows: honored()}},
 	"mol ready":       {ProxyModeProxied: {ProxyCapMaxRows: notApplicable()}},
 	"graph":           {ProxyModeProxied: {ProxyCapMaxRows: maxRowsRefusal}},
 	"find-duplicates": {ProxyModeProxied: {ProxyCapMaxRows: maxRowsRefusal}},
@@ -350,28 +354,10 @@ func validateProxyCapabilitiesBeforeProvider(cmd *cobra.Command) error {
 	if path == "create" && cmd.Flags().Changed("repo") {
 		return HandleProxyCapabilityError(AssertProxyCapability(ProxyModeProxied, ProxyCapRepo))
 	}
-	if path == "ready" && !readyGatedArm(cmd) {
-		// --claim is NOT exempt. The proxied ready role cannot enforce a row
-		// cap on either arm, and ready.go refuses a positive cap on both (see
-		// its comment above rejectMaxRowsUnderProxiedServer) — so exempting
-		// the claim here would not have let it through, only downgraded the
-		// same refusal to an untyped one raised after the provider opened.
-		// A malformed or negative value is still rejected here, before any
-		// provider work, which is what the claim path gained.
-		//
-		// --gated IS exempt, and the guard sits on the branch rather than
-		// inside it so the arm skips the resolver too: the direct route never
-		// resolves a cap before dispatching --gated, so resolving one here
-		// would make a malformed or negative value fail on the proxied route
-		// alone. See readyGatedArm for why the arm takes no cap at all.
-		maxRows, err := resolveMaxRowsQuiet(cmd)
-		if err != nil {
-			return err
-		}
-		if maxRows > 0 {
-			return HandleProxyCapabilityError(AssertProxyCommandCapability(path, ProxyModeProxied, ProxyCapMaxRows))
-		}
-	}
+	// `bd ready` threads its cap into the proxied ready query (honored above),
+	// and its RunE resolves the flag for validation — malformed or negative
+	// values are usage errors raised in the gather, before any store call —
+	// so the front door has nothing left to decide for it.
 	if path == "graph" || path == "find-duplicates" {
 		maxRows, err := resolveMaxRowsQuiet(cmd)
 		if err != nil {

@@ -1,8 +1,19 @@
 package main
 
 import (
+	"bytes"
+	"context"
+	"fmt"
+	"os"
 	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
+
+	"github.com/steveyegge/beads/internal/storage/domain"
+	storageissueops "github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/steveyegge/beads/internal/storage/uow"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 // pinProxiedServerMode routes usesProxiedServer() down the proxied branch for
@@ -20,89 +31,275 @@ func pinProxiedServerMode(t *testing.T) {
 	})
 }
 
-// TestReadyRefusesMaxRowsUnderProxiedServerOnClaim pins the --max-rows refusal
-// on `bd ready --claim` specifically.
-//
-// The refusal lives in readyCmd's RunE, above the dispatch into
-// runReadyProxiedServer, and --claim is the one ready invocation that takes a
-// mutating path on the far side of it. Nothing below that dispatch can enforce
-// the cap: runReadyProxiedServer deliberately passes a nil resolver to
-// gatherReadyInput, and the proxied claim role never threads MaxRows. So the
-// only thing standing between an operator's explicit row cap and a silent
-// unbounded claim is this one call, and it is reachable only through RunE --
-// the existing gatherReadyInput coverage sits entirely below it and cannot see
-// it at all.
-//
-// Both cap sources are exercised: resolveMaxRows honors --max-rows and
-// BEADS_MAX_ROWS, and a guard wired to only the flag would leave every rig that
-// sets the env var running uncapped.
-func TestReadyRefusesMaxRowsUnderProxiedServerOnClaim(t *testing.T) {
-	pinProxiedServerMode(t)
-	pinJSONOutput(t, false)
+// stubReadyIssues answers exactly the reads the proxied ready route makes: the
+// two ready listings and the advisory defer-wake sweep that runs before them.
+// Its cap check is the storage layer's own (issueops.EnforceMaxRowsCap over
+// the filter the gatherer built), so what reaches the command — and what the
+// command does with it — is the real contract, not a stub's imitation.
+type stubReadyIssues struct {
+	domain.IssueUseCase // any other method is a nil call: these paths must not reach one
+	items               []*types.Issue
 
-	// The regression safety net. If the refusal ever stops firing, RunE falls
-	// through to runReadyProxiedServer, which hits an uninitialized provider
-	// and returns its own error rather than dialing a real server -- so the
-	// stderr assertion below, not the exit code, is what fails. Both errors
-	// carry exit code 1.
-	if uowProvider != nil {
-		t.Fatal("precondition: uowProvider must be nil so a regression cannot open a real proxied connection")
+	// filter records what the listing actually ran with, so a test can prove
+	// the cap reached the query.
+	filter types.WorkFilter
+}
+
+func (s *stubReadyIssues) WakeExpiredDefers(context.Context) (int, int, error) {
+	return 0, 0, nil
+}
+
+func (s *stubReadyIssues) capErr(filter types.WorkFilter) error {
+	if filter.MaxRows > 0 && len(s.items) > filter.MaxRows {
+		return fmt.Errorf("ready work union: %w", &storageissueops.ErrTooManyRows{
+			Found:  len(s.items),
+			Cap:    filter.MaxRows,
+			Source: filter.MaxRowsSource,
+		})
 	}
+	return nil
+}
 
+func (s *stubReadyIssues) GetReadyWork(_ context.Context, filter types.WorkFilter) (domain.SearchPage, error) {
+	s.filter = filter
+	if err := s.capErr(filter); err != nil {
+		return domain.SearchPage{}, err
+	}
+	return domain.SearchPage{Items: s.items}, nil
+}
+
+func (s *stubReadyIssues) GetReadyWorkWithCounts(_ context.Context, filter types.WorkFilter) (domain.SearchCountsPage, error) {
+	s.filter = filter
+	if err := s.capErr(filter); err != nil {
+		return domain.SearchCountsPage{}, err
+	}
+	items := make([]*types.IssueWithCounts, len(s.items))
+	for i, issue := range s.items {
+		items[i] = &types.IssueWithCounts{Issue: issue}
+	}
+	return domain.SearchCountsPage{Items: items}, nil
+}
+
+// stubReadyDeps answers buildParentEpicMapProxied's one read with "no
+// dependencies", so the listing renders without touching a dependency store.
+type stubReadyDeps struct {
+	domain.DependencyUseCase
+}
+
+func (stubReadyDeps) GetForIssueIDs(context.Context, []string) (map[string][]*types.Dependency, error) {
+	return nil, nil
+}
+
+type stubReadyUOW struct {
+	uow.UnitOfWork
+	issues domain.IssueUseCase
+}
+
+func (u stubReadyUOW) Close(context.Context)                       {}
+func (u stubReadyUOW) IssueUseCase() domain.IssueUseCase           { return u.issues }
+func (u stubReadyUOW) DependencyUseCase() domain.DependencyUseCase { return stubReadyDeps{} }
+func (u stubReadyUOW) LabelUseCase() domain.LabelUseCase           { return nil }
+func (u stubReadyUOW) CommentUseCase() domain.CommentUseCase       { return nil }
+
+// stubReadyProvider serves the proxied ready route. The real provider's
+// capability accessors are where decorators attach; a test that needs the
+// claim or counter surface embeds this and adds the accessor.
+type stubReadyProvider struct {
+	issues domain.IssueUseCase
+}
+
+func (p stubReadyProvider) NewUOW(context.Context) (uow.UnitOfWork, error) {
+	return stubReadyUOW{issues: p.issues}, nil
+}
+
+func (p stubReadyProvider) Close(context.Context) error { return nil }
+
+// withStubbedProxiedReady points the proxied ready route at a stub whose
+// ready set is items, and pins the route to proxied for the test.
+func withStubbedProxiedReady(t *testing.T, items []*types.Issue) *stubReadyIssues {
+	t.Helper()
+	stub := &stubReadyIssues{items: items}
+	oldProvider := uowProvider
+	uowProvider = stubReadyProvider{issues: stub}
+	pinProxiedServerMode(t)
+	t.Cleanup(func() { uowProvider = oldProvider })
+	return stub
+}
+
+// runReadyCaptured runs readyCmd.RunE under captured streams and returns the
+// error with everything the invocation printed.
+func runReadyCaptured(t *testing.T, cmd *cobra.Command) (error, string, string) {
+	t.Helper()
+	stdioMutex.Lock()
+	defer stdioMutex.Unlock()
+	// RunE hands runReadyProxiedServer the global rootCtx, and a test never
+	// went through Execute to set it — nil would panic in the defer-wake
+	// sweep's first ctx use. Pin a background ctx, as the proxied backup
+	// tests do, and put it back.
+	oldRootCtx := rootCtx
+	rootCtx = context.Background()
+	defer func() { rootCtx = oldRootCtx }()
+	oldStdout, oldStderr := os.Stdout, os.Stderr
+	rOut, wOut, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	rErr, wErr, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	os.Stdout, os.Stderr = wOut, wErr
+	var runErr error
+	stdoutCh, stderrCh := make(chan string, 1), make(chan string, 1)
+	go func() {
+		var buf bytes.Buffer
+		_, _ = buf.ReadFrom(rOut)
+		stdoutCh <- buf.String()
+	}()
+	go func() {
+		var buf bytes.Buffer
+		_, _ = buf.ReadFrom(rErr)
+		stderrCh <- buf.String()
+	}()
+	runErr = readyCmd.RunE(cmd, nil)
+	wOut.Close()
+	wErr.Close()
+	os.Stdout, os.Stderr = oldStdout, oldStderr
+	stdout, stderr := <-stdoutCh, <-stderrCh
+	_ = rOut.Close()
+	_ = rErr.Close()
+	return runErr, stdout, stderr
+}
+
+func stubReadyIssue(i int) *types.Issue {
+	return &types.Issue{
+		ID:     fmt.Sprintf("bd-stub%d", i),
+		Title:  fmt.Sprintf("Stub ready issue %d", i),
+		Status: types.StatusOpen,
+	}
+}
+
+// TestReadyHonorsMaxRowsUnderProxiedServer is the bd-7fnvhp regression: a
+// positive --max-rows / BEADS_MAX_ROWS cap is honored by proxied `bd ready`
+// rather than refused. The front door used to reject it before the provider
+// opened, and the RunE used to reject it again behind the dispatch — three
+// commands' worth of refusals for a cap the proxied ready query has been able
+// to enforce all along (its window sizes itself from filter.MaxRows).
+//
+// The stub enforces the cap exactly where the storage layer does, so a green
+// run proves the whole chain: no refusal anywhere ahead of the query, the cap
+// resolved onto the filter the gatherer built (flag and env, with their
+// source strings), the query's typed overage error mapped to exit 2 with the
+// three-line stderr diagnosis, and stdout left empty so a jq pipeline sees
+// nothing half-rendered.
+func TestReadyHonorsMaxRowsUnderProxiedServer(t *testing.T) {
 	for _, tc := range []struct {
 		name string
+		json bool
 		args []string
 		env  string
+		// wantSource is the attribution the storage error must carry.
+		wantSource string
 	}{
-		{name: "flag", args: []string{"--claim", "--max-rows", "5"}},
-		{name: "env", args: []string{"--claim"}, env: "5"},
+		{name: "flag_text", args: []string{"--max-rows", "1"}, wantSource: "--max-rows"},
+		{name: "flag_json", json: true, args: []string{"--max-rows", "1"}, wantSource: "--max-rows"},
+		{name: "env_text", env: "1", wantSource: maxRowsEnvVar},
+		{name: "env_json", json: true, env: "1", wantSource: maxRowsEnvVar},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			pinJSONOutput(t, tc.json)
 			t.Setenv(maxRowsEnvVar, tc.env)
+			stub := withStubbedProxiedReady(t, []*types.Issue{stubReadyIssue(1), stubReadyIssue(2), stubReadyIssue(3)})
 
-			// A cloned flag set, not readyCmd's own: RunE reads its flags off
-			// the command it is handed, and mutating the shared readyCmd would
-			// leak --claim into every other test in the package.
 			cmd := newReadyFlagsCommand(t, tc.args...)
+			err, stdout, stderr := runReadyCaptured(t, cmd)
 
-			var err error
-			stderr := captureStderr(t, func() { err = readyCmd.RunE(cmd, nil) })
-
-			assertExitCode(t, err, 1)
-			if !strings.Contains(stderr, "--max-rows / BEADS_MAX_ROWS is not supported in proxied-server mode") {
-				t.Fatalf("stderr = %q, want the proxied --max-rows refusal", stderr)
+			if code, ok := exitCodeFromError(err); !ok || code != 2 {
+				t.Fatalf("exit = %v (code=%d typed=%v), want 2 (stderr=%q)", err, code, ok, stderr)
+			}
+			if stdout != "" {
+				t.Errorf("stdout = %q, want it empty so a --json pipeline reads no half-rendered rows", stdout)
+			}
+			wantFirst := fmt.Sprintf("Error: too many rows: 3 found, %s=1 exceeded.", tc.wantSource)
+			if got := strings.SplitN(stderr, "\n", 2)[0]; got != wantFirst {
+				t.Errorf("stderr first line = %q, want %q", got, wantFirst)
+			}
+			if strings.Count(stderr, "Refine the query") != 1 {
+				t.Errorf("expected the one three-line cap diagnosis on stderr, got: %q", stderr)
+			}
+			if strings.Contains(stderr, "not supported in proxied-server mode") {
+				t.Errorf("the unsupported-cap refusal still fired: %q", stderr)
+			}
+			if stub.filter.MaxRows != 1 || stub.filter.MaxRowsSource != tc.wantSource {
+				t.Errorf("the ready query ran with MaxRows=%d Source=%q, want the cap the flag/env set (%s)",
+					stub.filter.MaxRows, stub.filter.MaxRowsSource, tc.wantSource)
 			}
 		})
 	}
 }
 
-// TestReadyGatedSkipsMaxRowsRefusalUnderProxiedServer pins the third arm.
-// `bd ready --gated` and `bd mol ready --gated` are documented as the same
-// gate-resume scan, and on the proxied route they literally are one:
-// runReadyProxiedGated discards its readyInput and calls the same
-// findGateReadyMolecules as runMolReadyGatedProxiedServer. Neither threads a
-// row cap, so a cap must not refuse either spelling -- refusing only the
-// `bd ready` one split a single documented command line in half for anyone
-// with BEADS_MAX_ROWS exported.
-//
-// This goes through RunE rather than calling the helper, because RunE is where
-// the second refusal site lives: the pre-provider front door is pinned
-// separately against the real command tree in
-// TestProxyCapabilityFrontDoorAllowsSupportedCommands, and exempting one site
-// without the other just moves the refusal rather than removing it.
-//
-// The assertion is two-sided on purpose. A guard that swallowed the error
-// entirely would pass a "no refusal" check alone, so the test also requires
-// RunE to have reached the proxied dispatch -- uowProvider is nil here, so
-// runReadyProxiedServer's own message is the proof it got that far.
-func TestReadyGatedSkipsMaxRowsRefusalUnderProxiedServer(t *testing.T) {
+// TestReadyValidatesMaxRowsUnderProxiedServerBeforeTheStore pins where a
+// negative cap is rejected on the proxied route. The front door used to
+// resolve it before the provider opened; with the cap honored there instead,
+// the gatherer is the one place it is validated — ahead of any store call.
+// The nil provider is the sentinel: RunE must fail on the flag itself, not
+// reach the provider error a passing validation would fall through to.
+func TestReadyValidatesMaxRowsUnderProxiedServerBeforeTheStore(t *testing.T) {
 	pinProxiedServerMode(t)
 	pinJSONOutput(t, false)
-
 	if uowProvider != nil {
-		t.Fatal("precondition: uowProvider must be nil so the dispatch cannot open a real proxied connection")
+		t.Fatal("precondition: uowProvider must be nil so a passing validation cannot open a real proxied connection")
 	}
 
+	var err error
+	stderr := captureStderr(t, func() { err = readyCmd.RunE(newReadyFlagsCommand(t, "--max-rows", "-1"), nil) })
+	assertExitCode(t, err, 1)
+	if !strings.Contains(stderr, "--max-rows must be non-negative") {
+		t.Fatalf("stderr = %q, want the negative-cap usage error", stderr)
+	}
+	if strings.Contains(stderr, "proxied-server UOW provider not initialized") {
+		t.Fatalf("the negative cap reached the proxied dispatch: %q", stderr)
+	}
+
+	// A claim conflict is decided before the cap is resolved, so the doubly
+	// invalid `--claim --gated --max-rows -1` reports the flag pair, not the
+	// cap — the same order the direct route has always reported.
+	stderr = captureStderr(t, func() { err = readyCmd.RunE(newReadyFlagsCommand(t, "--claim", "--gated", "--max-rows", "-1"), nil) })
+	assertExitCode(t, err, 1)
+	if !strings.Contains(stderr, "--claim cannot be combined with --gated") {
+		t.Fatalf("stderr = %q, want the claim/gated conflict decided before the cap", stderr)
+	}
+}
+
+// TestReadyWarnsOnceForMalformedMaxRowsUnderProxiedServer pins the
+// malformed-env advisory on the proxied route: the value disables the cap and
+// the command goes on, and the warning appears exactly once — the gatherer
+// resolves the cap once, and no second resolution site may repeat it.
+func TestReadyWarnsOnceForMalformedMaxRowsUnderProxiedServer(t *testing.T) {
+	pinProxiedServerMode(t)
+	pinJSONOutput(t, false)
+	t.Setenv(maxRowsEnvVar, "bogus")
+	if uowProvider != nil {
+		t.Fatal("precondition: uowProvider must be nil so the run stops at the provider sentinel")
+	}
+
+	var err error
+	stderr := captureStderr(t, func() { err = readyCmd.RunE(newReadyFlagsCommand(t), nil) })
+	if !strings.Contains(stderr, "proxied-server UOW provider not initialized") {
+		t.Fatalf("the run should have proceeded past the cap to the provider sentinel: err=%v stderr=%q", err, stderr)
+	}
+	if n := strings.Count(stderr, fmt.Sprintf("Warning: %s=%q is not a non-negative integer", maxRowsEnvVar, "bogus")); n != 1 {
+		t.Fatalf("malformed %s warning appears %d times, want exactly 1: %q", maxRowsEnvVar, n, stderr)
+	}
+}
+
+// TestReadyGatedIgnoresMaxRowsUnderProxiedServer keeps the --gated exemption
+// whole across the change: `bd ready --gated` and `bd mol ready --gated` are
+// one documented command line, and neither resolves a cap — not a positive
+// one, not a malformed one. The proxied route passes the gatherer a nil
+// resolver on that arm, exactly as the direct route never reaches resolution
+// at all.
+func TestReadyGatedIgnoresMaxRowsUnderProxiedServer(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		args []string
@@ -110,72 +307,31 @@ func TestReadyGatedSkipsMaxRowsRefusalUnderProxiedServer(t *testing.T) {
 	}{
 		{name: "flag", args: []string{"--gated", "--max-rows", "5"}},
 		{name: "env", args: []string{"--gated"}, env: "5"},
+		{name: "malformed_env", args: []string{"--gated"}, env: "bogus"},
+		{name: "negative_flag", args: []string{"--gated", "--max-rows", "-1"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			pinProxiedServerMode(t)
+			pinJSONOutput(t, false)
 			t.Setenv(maxRowsEnvVar, tc.env)
-			cmd := newReadyFlagsCommand(t, tc.args...)
+			if uowProvider != nil {
+				t.Fatal("precondition: uowProvider must be nil so the dispatch cannot open a real proxied connection")
+			}
 
 			var err error
-			stderr := captureStderr(t, func() { err = readyCmd.RunE(cmd, nil) })
-
-			if strings.Contains(stderr, "--max-rows / BEADS_MAX_ROWS is not supported in proxied-server mode") {
-				t.Fatalf("proxied `bd ready %s` was refused for a cap the gated arm never uses: %q",
-					strings.Join(tc.args, " "), stderr)
+			stderr := captureStderr(t, func() { err = readyCmd.RunE(newReadyFlagsCommand(t, tc.args...), nil) })
+			for _, bad := range []string{
+				"not supported in proxied-server mode",
+				"must be non-negative",
+				"is not a non-negative integer",
+				"too many rows",
+			} {
+				if strings.Contains(stderr, bad) {
+					t.Errorf("the gated arm consulted a cap it never uses: %q", stderr)
+				}
 			}
 			if !strings.Contains(stderr, "proxied-server UOW provider not initialized") {
-				t.Fatalf("proxied `bd ready %s` did not reach the proxied dispatch: err=%v stderr=%q",
-					strings.Join(tc.args, " "), err, stderr)
-			}
-		})
-	}
-}
-
-// TestReadyClaimGatedKeepsMaxRowsRefusalUnderProxiedServer is the boundary of
-// the exemption above. `--claim --gated` is a usage error rather than a gated
-// run, so it must not pick up the gated arm's pass: the claim arm is the one
-// invocation that mutates on the far side of this guard, and it keeps the
-// refusal on every path into it. Without this, widening the exemption to a bare
-// `--gated` check would look correct.
-func TestReadyClaimGatedKeepsMaxRowsRefusalUnderProxiedServer(t *testing.T) {
-	pinProxiedServerMode(t)
-	pinJSONOutput(t, false)
-	t.Setenv(maxRowsEnvVar, "5")
-
-	err := rejectReadyMaxRowsUnderProxiedServer(newReadyFlagsCommand(t, "--claim", "--gated"))
-	if err == nil {
-		t.Fatal("proxied `bd ready --claim --gated` under a live cap was allowed; want the refusal the claim arm is owed")
-	}
-	assertExitCode(t, err, 1)
-}
-
-// TestReadyClaimWithoutLiveCapIsNotRefusedUnderProxiedServer is the other half:
-// the refusal is conditioned on a live cap, not on --claim. Without it, a guard
-// that rejected every proxied --claim would pass the test above.
-//
-// This one calls the helper directly rather than going through RunE. With
-// nothing to refuse, RunE proceeds into the proxied query path, and the
-// assertion would then be about whatever that path does next instead of about
-// the guard.
-func TestReadyClaimWithoutLiveCapIsNotRefusedUnderProxiedServer(t *testing.T) {
-	pinProxiedServerMode(t)
-	pinJSONOutput(t, false)
-	t.Setenv(maxRowsEnvVar, "")
-
-	// --max-rows 0 is an explicit disable that outranks BEADS_MAX_ROWS, so it
-	// is not a live cap either even with the env var set.
-	for _, tc := range []struct {
-		name string
-		args []string
-		env  string
-	}{
-		{name: "no_cap", args: []string{"--claim"}},
-		{name: "flag_zero", args: []string{"--claim", "--max-rows", "0"}},
-		{name: "flag_zero_overrides_env", args: []string{"--claim", "--max-rows", "0"}, env: "5"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv(maxRowsEnvVar, tc.env)
-			if err := rejectMaxRowsUnderProxiedServer(newReadyFlagsCommand(t, tc.args...)); err != nil {
-				t.Fatalf("proxied `bd ready %s` was refused with no live cap: %v", strings.Join(tc.args, " "), err)
+				t.Errorf("proxied `bd ready --gated` did not reach the proxied dispatch: err=%v stderr=%q", err, stderr)
 			}
 		})
 	}

@@ -452,18 +452,16 @@ var capabilityProbes = []probe{
 
 	// --- flag-level capability ------------------------------------------------
 	{
-		// The cap is refused rather than silently dropped, which is correct.
-		// The fix is threading it through the UOW reader as `list` already
-		// does, not lifting the refusal.
+		// bd-7fnvhp: the proxied ready query sizes its window from
+		// filter.MaxRows, so the cap is honored on both routes now — the
+		// refusal recorded here used to block it before the provider opened.
 		name: "ready --max-rows",
 		args: []string{"ready", "--max-rows", "5"},
 		direct: expectation{
 			outcome: outcomeHonored, reason: reasonNA,
 		},
 		proxied: expectation{
-			outcome: outcomeRefusedTyped, code: "proxy.max_rows.unsupported",
-			substr: "--max-rows / BEADS_MAX_ROWS is not supported in proxied-server mode",
-			reason: reasonUnimplemented,
+			outcome: outcomeHonored, reason: reasonNA,
 		},
 	},
 
