@@ -233,8 +233,11 @@ var proxyCommandCapabilities = map[string]map[ProxyMode]map[ProxyCapability]prox
 	// Both graph arms thread the cap the way the direct route does: --all
 	// caps each per-status search, a single-issue graph caps the
 	// connected-component node count after the walk (enforceGraphSubgraphCap).
-	"graph":           {ProxyModeProxied: {ProxyCapMaxRows: honored()}},
-	"find-duplicates": {ProxyModeProxied: {ProxyCapMaxRows: maxRowsRefusal}},
+	"graph": {ProxyModeProxied: {ProxyCapMaxRows: honored()}},
+	// The find-duplicates search carries the cap on its filter, and the
+	// proxied search threads it (searchWindowForFilter), so the cap is
+	// honored here as it is on the direct route.
+	"find-duplicates": {ProxyModeProxied: {ProxyCapMaxRows: honored()}},
 }
 
 // proxyCapabilityRows materializes the policy for every supported proxied
@@ -357,19 +360,15 @@ func validateProxyCapabilitiesBeforeProvider(cmd *cobra.Command) error {
 	if path == "create" && cmd.Flags().Changed("repo") {
 		return HandleProxyCapabilityError(AssertProxyCapability(ProxyModeProxied, ProxyCapRepo))
 	}
-	// `bd ready` threads its cap into the proxied ready query and `bd graph`
-	// into its per-status searches and post-walk subgraph check (both
-	// honored above), and each RunE resolves the flag for validation —
-	// malformed or negative values are usage errors raised before any store
-	// call — so the front door has nothing left to decide for either.
-	if path == "find-duplicates" {
-		maxRows, err := resolveMaxRowsQuiet(cmd)
-		if err != nil {
-			return err
-		}
-		if maxRows > 0 {
-			return HandleProxyCapabilityError(AssertProxyCommandCapability(path, ProxyModeProxied, ProxyCapMaxRows))
-		}
-	}
+	// No max-rows branch remains: every command that registers --max-rows
+	// now threads the cap into a query the proxied route actually runs
+	// (`list`, `dep tree`, `ready`, `graph`, `find-duplicates` — all honored
+	// above), and each RunE resolves the flag for validation, so a malformed
+	// or negative value is a usage error raised before any store call. The
+	// mode-wide default a future command inherits when it registers the flag
+	// without threading it stays where it always was: a row-less
+	// LookupProxyCommandCapability falls back to the mode table, whose
+	// ProxyCapMaxRows answer is still the refusal — the front door just no
+	// longer needs to say so on behalf of any command that carries a row.
 	return nil
 }

@@ -4878,15 +4878,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   each label by what actually happened to it. The exit code is still 0, so
   idempotent callers are unaffected.
 
-- **Proxied `--repo` and row-cap refusals are typed again**
+- **Proxied `--repo` refusals are typed again**
   ([#6293](https://github.com/gastownhall/beads/pull/6293)). `bd create --repo`
   under `--proxied-server` answers `--json` with the stable
   `{"code": "proxy.repo.unsupported", …, "mutates": false}` on stdout rather
-  than prose on stderr, and `bd ready --claim --max-rows N` refuses with the
-  same `proxy.max_rows.unsupported` shape as `bd ready --max-rows N`: `--claim`
-  does not exempt a row cap the proxied route cannot enforce either way.
-  `bd create` is the only command that registers `--repo`, so it is the only
-  command this refusal applies to.
+  than prose on stderr. `bd create` is the only command that registers
+  `--repo`, so it is the only command this refusal applies to. (The same PR
+  also typed the row-cap refusal for `bd ready`; that refusal is gone by the
+  end of this release — see the `bd ready` / `bd graph` / `bd find-duplicates`
+  entry below.)
 - **`bd ready --gated` runs under `--proxied-server` with a row cap set**
   ([#6697](https://github.com/gastownhall/beads/pull/6697)). It was refused
   whenever `--max-rows` or `BEADS_MAX_ROWS` resolved to a positive cap, while
@@ -4894,8 +4894,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   was not, so one command line behaved differently under its two spellings. The
   gated arm lists molecules whose gate closed rather than ready rows and threads
   no cap on either route, so it no longer consults one; a cap passed alongside
-  `--gated` is ignored, matching what the direct route has always done. Every
-  other `bd ready` arm still refuses an active cap, `--claim` included.
+  `--gated` is ignored, matching what the direct route has always done. The
+  other `bd ready` arms honor an active cap on the proxied route too (see the
+  next entry), and `--claim` stays capless on both routes.
+
+- **`bd ready`, `bd graph` and `bd find-duplicates` honor `--max-rows` /
+  `BEADS_MAX_ROWS` under `--proxied-server`**
+  ([#7408](https://github.com/gastownhall/beads/pull/7408)). They were the
+  last commands to refuse an explicit cap there — with the
+  `proxy.max_rows.unsupported` refusal 1.3.0 introduced — rather than enforce
+  it. The cap now reaches the queries the proxied routes actually run, with
+  the same exit-2 overage semantics as the direct route and as `bd list` /
+  `bd dep tree`: an overage exits 2 with the cap diagnosis (source and value
+  named) on stderr and nothing on stdout, and a cap the result set fits
+  inside answers with the uncapped invocation's output. `bd ready` sizes its
+  window from the cap, and `--claim` no longer refuses one — a claim under a
+  global `BEADS_MAX_ROWS` succeeds again on both routes; `bd graph --all`
+  caps each per-status search and a single-issue graph caps the walked
+  component's node count; `bd find-duplicates` caps the search, so a closed
+  row it matched counts against the cap exactly as on the direct route. The
+  mode-wide default still refuses the flag for a future command that
+  registers it without threading it, and `--gated` still resolves none.
 - **The proxied `bd admin compact` refusal names the command it means**
   ([#6293](https://github.com/gastownhall/beads/pull/6293)). The message is now
   "only 'bd admin compact --dolt' is supported in proxied-server mode"; it read

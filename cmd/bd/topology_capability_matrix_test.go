@@ -480,6 +480,21 @@ var capabilityProbes = []probe{
 		},
 	},
 
+	{
+		// bd-7fnvhp: the find-duplicates search carries the cap on its filter
+		// and the proxied search threads it, so the cap is honored on both
+		// routes — the refusal recorded here used to block a working safety
+		// limit before the provider opened.
+		name: "find-duplicates --max-rows",
+		args: []string{"find-duplicates", "--max-rows", "5"},
+		direct: expectation{
+			outcome: outcomeHonored, reason: reasonNA,
+		},
+		proxied: expectation{
+			outcome: outcomeHonored, reason: reasonNA,
+		},
+	},
+
 	// --- compact -------------------------------------------------------------
 	{
 		// HONORED proxied, which is NOT what proxyMaintenanceRefusals["compact"]

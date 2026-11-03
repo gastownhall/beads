@@ -351,6 +351,15 @@ func TestProxyCapabilityFrontDoorAllowsSupportedCommands(t *testing.T) {
 		{path: "ready", cappedEnv: true},
 		{path: "ready", flags: []string{"claim"}, cappedEnv: true},
 		{path: "ready", flags: []string{"claim", "gated"}, cappedEnv: true},
+		// Both graph arms thread the cap (--all per-status searches; the
+		// single-issue post-walk component check), and find-duplicates
+		// carries it on the filter its proxied search already threads, so
+		// the front door allows all three from either cap source.
+		{path: "graph"},
+		{path: "graph", cappedEnv: true},
+		{path: "graph", flags: []string{"all"}, cappedEnv: true},
+		{path: "find-duplicates"},
+		{path: "find-duplicates", cappedEnv: true},
 	} {
 		name := tc.path
 		for _, flag := range tc.flags {
@@ -551,7 +560,7 @@ func TestProxyCapabilityCommandRows(t *testing.T) {
 		{"dep tree", "--max-rows", ProxyOutcomeHonored},
 		{"ready", "--max-rows", ProxyOutcomeHonored},
 		{"graph", "--max-rows", ProxyOutcomeHonored},
-		{"find-duplicates", "--max-rows", ProxyOutcomeRefused},
+		{"find-duplicates", "--max-rows", ProxyOutcomeHonored},
 		{"show", "--watch", ProxyOutcomeHonored},
 		{"list", "--watch", ProxyOutcomeHonored},
 	}

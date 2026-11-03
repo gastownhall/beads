@@ -4,7 +4,9 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -357,6 +359,94 @@ func TestProxiedServerFindDuplicates(t *testing.T) {
 		}
 		if !strings.Contains(s, "Pair") {
 			t.Errorf("expected 'Pair' in human-readable output: %s", s)
+		}
+	})
+
+	t.Run("max_rows_is_honored", func(t *testing.T) {
+		t.Parallel()
+
+		// A negative cap stays a usage error, raised in RunE ahead of any
+		// search rather than at the pre-provider front door.
+		out, err := bdProxiedRun(t, bd, p.dir, "find-duplicates", "--max-rows", "-1")
+		if err == nil {
+			t.Fatalf("expected the negative cap to be a usage error, got success: %s", out)
+		}
+		if !strings.Contains(string(out), "must be non-negative") {
+			t.Errorf("expected --max-rows usage-error rejection, got: %s", out)
+		}
+
+		// The project holds five open issues plus the closed near-duplicate:
+		// the default search matches all six. A cap under that fires with its
+		// source named, from both cap sources, exiting 2 with stdout empty.
+		for _, tc := range []struct {
+			name string
+			env  []string
+			args []string
+			want string
+		}{
+			{name: "flag", args: []string{"--max-rows", "2"}, want: "--max-rows=2 exceeded."},
+			{name: "env", env: []string{"BEADS_MAX_ROWS=2"}, want: "BEADS_MAX_ROWS=2 exceeded."},
+		} {
+			stdout, stderr, err := bdProxiedRunBuffersWithEnv(t, bd, p.dir, tc.env,
+				append([]string{"find-duplicates", "--json"}, tc.args...)...)
+			if err == nil {
+				t.Errorf("%s: expected the cap to fire, got success:\nstdout:\n%s\nstderr:\n%s", tc.name, stdout, stderr)
+				continue
+			}
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) || exitErr.ExitCode() != 2 {
+				t.Errorf("%s: exit=%v, want exit 2 with the cap diagnosis on stderr (stderr=%q)", tc.name, err, stderr)
+			}
+			if stdout != "" {
+				t.Errorf("%s: stdout = %q, want it empty so a --json pipeline reads no half-rendered rows", tc.name, stdout)
+			}
+			if combined := stdout + stderr; !strings.Contains(combined, "too many rows") || !strings.Contains(combined, tc.want) {
+				t.Errorf("%s: expected the cap diagnosis naming %q, got:\n%s", tc.name, tc.want, combined)
+			}
+			if combined := stdout + stderr; strings.Contains(combined, "not supported in proxied-server mode") {
+				t.Errorf("%s: the stale unsupported-cap refusal still fired, got:\n%s", tc.name, combined)
+			}
+		}
+
+		// Cap 5 over the six matched rows still refuses with "6 found": the
+		// closed near-duplicate counts against the cap because the search
+		// matched it, and the default closed-row removal runs only afterward.
+		stdout, stderr, err := bdProxiedRunBuffersWithEnv(t, bd, p.dir, nil,
+			"find-duplicates", "--max-rows", "5")
+		if err == nil {
+			t.Fatalf("expected cap 5 to count the closed row and fire over 6 matched, got success:\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+		}
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 2 {
+			t.Errorf("closed-row count: exit=%v, want exit 2 (stderr=%q)", err, stderr)
+		}
+		if combined := stdout + stderr; !strings.Contains(combined, "6 found, --max-rows=5 exceeded.") {
+			t.Errorf("closed-row count: expected the diagnosis to count all 6 matched rows, got:\n%s", combined)
+		}
+
+		// A cap the matched set fits inside answers with the uncapped
+		// invocation's report, byte-identical, from both cap sources.
+		uncapped, err := bdProxiedRun(t, bd, p.dir, "find-duplicates", "--json", "--threshold", "0.15")
+		if err != nil {
+			t.Fatalf("uncapped find-duplicates: %v\n%s", err, uncapped)
+		}
+		for _, tc := range []struct {
+			name string
+			env  []string
+			args []string
+		}{
+			{name: "flag", args: []string{"--max-rows", "6"}},
+			{name: "env", env: []string{"BEADS_MAX_ROWS=6"}},
+		} {
+			stdout, stderr, err := bdProxiedRunBuffersWithEnv(t, bd, p.dir, tc.env,
+				append([]string{"find-duplicates", "--json", "--threshold", "0.15"}, tc.args...)...)
+			if err != nil {
+				t.Errorf("%s: find-duplicates under a cap the set fits inside failed: %v\nstdout:\n%s\nstderr:\n%s", tc.name, err, stdout, stderr)
+				continue
+			}
+			if stdout != string(uncapped) {
+				t.Errorf("%s: capped report differs from the uncapped one:\ncapped:\n%s\nuncapped:\n%s", tc.name, stdout, uncapped)
+			}
 		}
 	})
 

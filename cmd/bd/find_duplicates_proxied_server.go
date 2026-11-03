@@ -15,6 +15,12 @@ func runFindDuplicatesProxiedServer(ctx context.Context, filter types.IssueFilte
 
 	page, err := uw.IssueUseCase().SearchIssues(ctx, "", filter)
 	if err != nil {
+		// The cap is enforced by the search itself, before the default
+		// closed-row removal below: closed rows the search matched count
+		// against it, exactly as they do on the direct route.
+		if capErr := handleMaxRowsError(err); capErr != nil {
+			return capErr
+		}
 		return HandleErrorRespectJSON("fetching issues: %v", err)
 	}
 	issues := filterClosedIfNoStatus(page.Items, status)
