@@ -787,6 +787,71 @@ func TestApplyResolvedConfig(t *testing.T) {
 	})
 }
 
+// TestConfigOpenWithMetadataSocketDoesNotAutoStart pins what the metadata
+// socket buys a NewFromConfig* open of a workspace that resolves no port: the
+// socket's outage, not an auto-started TCP server beside it. Without the
+// socket such an open is eligible to auto-start, so a dropped socket starts
+// one (and OpenFromConfig then creates an empty database on it).
+func TestConfigOpenWithMetadataSocketDoesNotAutoStart(t *testing.T) {
+	isolateUnresolvedPortEnv(t)
+	for _, key := range []string{
+		"BEADS_DOLT_SERVER_HOST",
+		"BEADS_DOLT_SERVER_MODE",
+		"BEADS_CENTRAL_CONFIG",
+		"BEADS_DOLT_CREDENTIAL_COMMAND",
+	} {
+		t.Setenv(key, "")
+	}
+	t.Setenv("HOME", t.TempDir())
+
+	beadsDir := t.TempDir()
+	socket := filepath.Join(t.TempDir(), "absent.sock")
+	fileCfg := &configfile.Config{
+		Backend:          configfile.BackendDolt,
+		DoltMode:         configfile.DoltModeServer,
+		DoltDatabase:     "socketonly",
+		DoltServerSocket: socket,
+	}
+	cfg := &Config{}
+	if err := applyResolvedConfig(context.Background(), beadsDir, fileCfg, cfg); err != nil {
+		t.Fatalf("applyResolvedConfig: %v", err)
+	}
+	if cfg.ServerPort != 0 {
+		t.Fatalf("ServerPort = %d, want 0: the premise is a workspace with no port source", cfg.ServerPort)
+	}
+	// Auto-start otherwise permitted, as baseAutoStartCfg sets it up: only the
+	// socket may keep this open from starting a server.
+	cfg.AutoStart = true
+	cfg.DisableAutoStart = false
+	withoutSocket := *cfg
+	withoutSocket.ServerSocket = ""
+	if !serverOpenCanAutoStart(&withoutSocket) || doltserver.IsAutoStartDisabled() {
+		t.Fatal("auto-start is not permitted for this config without its socket; the test would pass vacuously")
+	}
+
+	starts := 0
+	orig := ensureRunningDetailed
+	t.Cleanup(func() { ensureRunningDetailed = orig })
+	ensureRunningDetailed = func(string) (int, bool, error) {
+		starts++
+		return 0, false, errors.New("stub: auto-start refused")
+	}
+
+	_, err := newServerMode(context.Background(), cfg)
+	if starts != 0 {
+		t.Errorf("auto-start ran %d time(s) for a workspace whose metadata.json names socket %s", starts, socket)
+	}
+	if err == nil {
+		t.Fatal("open succeeded with nothing listening on the socket")
+	}
+	msg := err.Error()
+	for _, want := range []string{socket, "Auto-start is not supported in socket mode."} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error does not contain %q:\n%s", want, msg)
+		}
+	}
+}
+
 // TestConfigConstructorsRefuseHistoricalSQLiteWorkspace pins that every
 // metadata-driven constructor, and the pre-check a caller runs before writing
 // into a workspace it then opens (RequireDiscoveredDoltBackend, OpenGated's),
