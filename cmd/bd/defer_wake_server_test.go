@@ -3,10 +3,38 @@
 package main
 
 import (
+	"context"
+	"database/sql"
+	"os/exec"
+	"strings"
 	"testing"
 
+	_ "github.com/go-sql-driver/mysql"
+
+	"github.com/steveyegge/beads/internal/migration"
+	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/types"
 )
+
+// serverModeDoltLogCount reads the project database's history length straight
+// from the shared test server. Counting through a bd invocation of its own
+// would blur the measurement: any unfrozen bd run's post-command maintenance
+// may commit on its own, so the counts around a frozen read must come from
+// SQL the invoked binary never touches (bd-6zf0q5).
+func serverModeDoltLogCount(t *testing.T, p serverModeProject) int {
+	t.Helper()
+	port := requireSharedProxiedServer(t)
+	db, err := sql.Open("mysql", doltutil.ServerDSN{Host: "127.0.0.1", Port: port, User: "root", Database: p.database}.String())
+	if err != nil {
+		t.Fatalf("connecting to the shared test server: %v", err)
+	}
+	defer db.Close()
+	var n int
+	if err := db.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM dolt_log").Scan(&n); err != nil {
+		t.Fatalf("reading dolt_log in %s: %v", p.database, err)
+	}
+	return n
+}
 
 // TestServerModeDeferAutoWake documents the same defer/wake contract as
 // TestEmbeddedDeferAutoWake (defer_wake_embedded_test.go) and
@@ -115,4 +143,79 @@ func TestServerModeDeferAutoWake(t *testing.T) {
 			t.Errorf("expired defer must stay deferred under strict --readonly, got %q", status)
 		}
 	})
+
+	t.Run("expired_dated_defer_stays_deferred_under_frozen_ready", func(t *testing.T) {
+		// bd-6zf0q5 (AC-1): the migration freeze deliberately lets a
+		// classified read-only command past the write gate, but the lazy
+		// defer-wake sweep such an open enables is itself a write. A frozen
+		// `bd ready` must answer, keep the workspace's other ready work
+		// visible, leave the expired defer exactly as it is, and mint no
+		// Dolt history for it.
+		issue := bdCreate(t, bd, p.dir, "Expired snooze under a migration freeze (bd ready, server mode)", "--type", "task")
+		bdDefer(t, bd, p.dir, issue.ID, "--until", "2020-01-01")
+		status, savedDeferUntil := showDeferState(t, bd, p.dir, issue.ID)
+		if status != "deferred" {
+			t.Fatalf("precondition: expected status=deferred, got %q", status)
+		}
+		control := bdCreate(t, bd, p.dir, "Open control during a migration freeze (server mode)", "--type", "task")
+
+		marker := writeFreezeMarker(t, t.TempDir(), "migrator", "bd-6zf0q5 frozen bd ready")
+		freezeEnv := []string{migration.EnvFreezeFile + "=" + marker}
+
+		before := serverModeDoltLogCount(t, p)
+		ids := wakeReadyIDsWithEnv(t, bd, p.dir, freezeEnv)
+		after := serverModeDoltLogCount(t, p)
+		if after != before {
+			t.Errorf("frozen bd ready minted Dolt history (%d -> %d commits): the defer-wake sweep wrote past the freeze marker", before, after)
+		}
+		if ids[issue.ID] {
+			t.Errorf("expired defer %s woke into bd ready under a migration freeze", issue.ID)
+		}
+		if !ids[control.ID] {
+			t.Errorf("open control issue %s must stay visible in bd ready during a freeze", control.ID)
+		}
+		status, deferUntil := showDeferState(t, bd, p.dir, issue.ID)
+		if status != "deferred" {
+			t.Errorf("expired defer must stay deferred under a migration freeze, got status=%q (server-mode bd ready woke it)", status)
+		}
+		if deferUntil != savedDeferUntil {
+			t.Errorf("defer_until must stay %v during a freeze, got %v", savedDeferUntil, deferUntil)
+		}
+	})
+
+}
+
+// TestServerModeDeferWakeSkippedUnderMigrationFreeze (bd-6zf0q5, follow-up to
+// be-vbhpf/#6424): a migration freeze lets read-only commands such as
+// `bd ready` past the write gate, but the lazy defer-wake sweep the
+// classified-read open enables is a write. Under an active freeze the read
+// must still answer, and the expired defer must stay deferred.
+func TestServerModeDeferWakeSkippedUnderMigrationFreeze(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	p := newServerModeProject(t, bd, "dwf")
+
+	issue := bdCreate(t, bd, p.dir, "Expired snooze under a migration freeze (server mode)", "--type", "task")
+	bdDefer(t, bd, p.dir, issue.ID, "--until", "2020-01-01")
+	if status, _ := showDeferState(t, bd, p.dir, issue.ID); status != "deferred" {
+		t.Fatalf("precondition: expected status=deferred, got %q", status)
+	}
+
+	marker := writeFreezeMarker(t, t.TempDir(), "migrator", "bd-6zf0q5 repro")
+	cmd := exec.Command(bd, "ready", "--json")
+	cmd.Dir = p.dir
+	cmd.Env = append(bdEnv(p.dir), migration.EnvFreezeFile+"="+marker)
+	stdout, stderr, err := runCommandBuffers(t, cmd)
+	if err != nil {
+		t.Fatalf("bd ready must still run under a freeze: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stdout.String(), `"`+issue.ID+`"`) {
+		t.Errorf("expired defer %s appeared in bd ready under a migration freeze: the wake sweep wrote past the marker", issue.ID)
+	}
+
+	if status, _ := showDeferState(t, bd, p.dir, issue.ID); status != "deferred" {
+		t.Errorf("expired defer must stay deferred under a migration freeze, got status=%q (server-mode bd ready woke it)", status)
+	}
 }

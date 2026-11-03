@@ -398,11 +398,14 @@ type Config struct {
 	// ClassifiedRead marks a ReadOnly open whose read-only-ness comes purely
 	// from command classification (GH#804: bd ready/bd list are read-only for
 	// the CURRENT project) rather than strict --readonly, an explicit preview,
-	// or a foreign-project lookup. Only a classified-read open is eligible for
-	// the lazy defer-wake sweep (be-vbhpf) — the others must never mutate.
+	// an active migration freeze, or a foreign-project lookup. Only a
+	// classified-read open is eligible for the lazy defer-wake sweep
+	// (be-vbhpf) — the others must never mutate.
 	//
-	// Strict --readonly and preview are excluded by the policy expression that
-	// computes this field; foreign-project and auxiliary opens are excluded
+	// Strict --readonly, preview, and freeze are excluded by the policy
+	// expression that computes this field (the CLI's classifiedReadOpen,
+	// bd-6zf0q5: a freeze lets the read through but not its incidental
+	// write); foreign-project and auxiliary opens are excluded
 	// because they construct their own Config and leave this at its false zero
 	// value. That default is the guarantee — setting it true on such an open
 	// would make it eligible to sweep.

@@ -2039,10 +2039,14 @@ var rootCmd = &cobra.Command{
 			// Bulk loads outlive the pool's 10s fast-fail on every server
 			// pause (wy-sbgucn); explicit env/config settings still win.
 			PoolReadTimeoutFallback: bulkLoadPoolReadTimeout(cmd),
-			// Classification-only read (GH#804), never strict --readonly or a
-			// preview: the store is genuinely writable underneath, so the
-			// lazy defer-wake sweep may still run (be-vbhpf).
-			ClassifiedRead: policy.readOnly && !readonlyMode && !previewMode,
+			// Classification-only read (GH#804), never strict --readonly, a
+			// preview, or an active migration freeze (bd-6zf0q5): the store
+			// is genuinely writable underneath, so the lazy defer-wake sweep
+			// may still run (be-vbhpf) — and that sweep is a write, which a
+			// freeze suppresses even though it lets this read through.
+			// classifiedReadOpen reuses the commandFreeze lookup resolved
+			// above rather than repeating the marker walk.
+			ClassifiedRead: classifiedReadOpen(policy.readOnly, readonlyMode, previewMode, commandFreeze.Frozen()),
 			// A read-only or gateway open does not migrate, so a schema too
 			// old for this binary's issue reads is refused at open instead of
 			// failing each read on an unknown column. Not for a preview,
