@@ -306,9 +306,18 @@ async function install() {
   }
 }
 
-// Run installation if not in CI environment
-if (!process.env.CI) {
-  install();
-} else {
-  console.log('Skipping binary download in CI environment');
+// Run installation only when executed as a script (npm postinstall), not when
+// a test requires this file. `typeof module` keeps the source loadable by
+// harnesses that evaluate it outside the CommonJS wrapper.
+if (typeof module === 'undefined' || require.main === module) {
+  // Run installation if not in CI environment
+  if (!process.env.CI) {
+    install();
+  } else {
+    console.log('Skipping binary download in CI environment');
+  }
+}
+
+if (typeof module !== 'undefined') {
+  module.exports = { downloadFile };
 }
