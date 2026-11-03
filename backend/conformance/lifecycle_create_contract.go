@@ -349,7 +349,7 @@ func RunLifecycleCreateRefusesAForeignIDPrefix(t *testing.T, ctx context.Context
 	}
 	named := "lccforeign-" + fixture.IssuePrefix + "-named"
 	_, err := fixture.Lifecycle.Create(ctx, publicops.CreateRequest{
-		Actor: "writer",
+		Actor:    "writer",
 		ParentID: foreignParent,
 		Issue: &types.Issue{
 			ID: named, Title: "caller-named child", Status: types.StatusOpen,
