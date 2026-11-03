@@ -359,3 +359,31 @@ func TestEndpointResolver_DiscoveryCooldown(t *testing.T) {
 		t.Fatalf("discovery calls = %d, want 2", got)
 	}
 }
+
+// TestEndpointResolver_UnarmedDialNeverRediscovers: until Arm, a failed dial
+// is returned as it is — the opener's construction keeps its own retries and
+// errors — and discovery never runs. Arm is what enables recovery.
+func TestEndpointResolver_UnarmedDialNeverRediscovers(t *testing.T) {
+	d := newFakeDiscovery()
+	r, rootDir, _ := newTestResolver(t, refusedEndpoint(t), d)
+	replacement := newResolverTestListener(t, rootDir, modeProve)
+	d.set(replacement.endpoint(), nil)
+
+	_, err := dialWithin(r, time.Second)
+	if !errors.Is(err, syscall.ECONNREFUSED) || IsEndpointUnavailable(err) {
+		t.Fatalf("unarmed dial: %v, want the bare refusal", err)
+	}
+	if got := d.calls.Load(); got != 0 {
+		t.Fatalf("discovery calls = %d before Arm, want 0", got)
+	}
+
+	r.Arm()
+	conn, err := dialWithin(r, 5*time.Second)
+	if err != nil {
+		t.Fatalf("armed dial: %v, want the replacement", err)
+	}
+	_ = conn.Close()
+	if got := d.calls.Load(); got != 1 {
+		t.Fatalf("discovery calls = %d after Arm, want 1", got)
+	}
+}
