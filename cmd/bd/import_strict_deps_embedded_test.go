@@ -157,4 +157,39 @@ func TestEmbeddedImportStrictDeps(t *testing.T) {
 			t.Errorf("strict failure must leave the source row committed, but bd show imsd-src3 failed: %v\n%s", err, out)
 		}
 	})
+
+	t.Run("strict_valid_deps_exit0", func(t *testing.T) {
+		// A clean stream: the target row is in the same import, so every
+		// edge lands and --strict-deps has nothing to fail on.
+		cleanFile := filepath.Join(t.TempDir(), "clean.jsonl")
+		writeJSONLFile(t, cleanFile, []types.Issue{
+			{ID: "imsd-tgt2", Title: "Target present in stream", Status: types.StatusOpen, IssueType: types.TypeTask, CreatedAt: now, UpdatedAt: now},
+			{ID: "imsd-src4", Title: "Source with an in-stream target", Status: types.StatusOpen, IssueType: types.TypeTask,
+				CreatedAt: now, UpdatedAt: now,
+				Dependencies: []*types.Dependency{{IssueID: "imsd-src4", DependsOnID: "imsd-tgt2", Type: types.DepBlocks, CreatedAt: now}}},
+		})
+		stdout, stderr, err := runImport("--strict-deps", cleanFile)
+		if err != nil {
+			t.Fatalf("strict import with no skipped edges must exit 0, got %v\nstderr:\n%s", err, stderr)
+		}
+		if strings.Contains(stderr, "dependency edge") {
+			t.Errorf("no skipped edges, but the report mentions them:\n%s", stderr)
+		}
+		if strings.Contains(stderr, "Warning:") || strings.Contains(stderr, "Error:") || strings.Contains(stderr, "Hint:") {
+			t.Errorf("a clean strict import must print no summary or error:\n%s", stderr)
+		}
+		if stdout != "" {
+			t.Errorf("text mode must keep stdout clean, got:\n%s", stdout)
+		}
+		show := exec.Command(bd, "show", "imsd-src4", "--json")
+		show.Dir = dir
+		show.Env = bdEnv(dir)
+		out, err := show.CombinedOutput()
+		if err != nil {
+			t.Fatalf("bd show imsd-src4: %v\n%s", err, out)
+		}
+		if !strings.Contains(string(out), "imsd-tgt2") {
+			t.Errorf("the blocks edge did not land in the stored row:\n%s", out)
+		}
+	})
 }
