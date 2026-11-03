@@ -23,6 +23,12 @@ import (
 // Each operation appends a UUID so concurrent pushes cannot collide.
 const federationStagingBranchPrefix = "__federation_push_staging_"
 
+// federationKeepBranchPrefix identifies the temporary branches that retain
+// excluded issues through a filtered publication (see versioncontrolops.
+// retainExcludedRows). A separate prefix from the staging one so
+// staging-branch observers see exactly the staged ref.
+const federationKeepBranchPrefix = "__federation_push_keep_"
+
 // federationStagingCleanupTimeout bounds best-effort cleanup after the caller
 // has canceled or its deadline has expired.
 const federationStagingCleanupTimeout = 30 * time.Second
@@ -508,6 +514,7 @@ func (s *DoltStore) filteredPushToPeer(ctx context.Context, peer string, exclude
 		return fmt.Errorf("federation filter: generate staging branch: %w", err)
 	}
 	stagingBranch := federationStagingBranchPrefix + operationID.String()
+	keepBranch := federationKeepBranchPrefix + operationID.String()
 
 	// Pin a single long-timeout connection for the session-scoped staging
 	// operation. RecomputeAllIsBlockedInTx can exceed the shared pool's
@@ -535,7 +542,7 @@ func (s *DoltStore) filteredPushToPeer(ctx context.Context, peer string, exclude
 	// query makes go-sql-driver/mysql invalidate the operation connection, so
 	// cleanup reopens a fresh one.
 	defer func() {
-		if cleanupErr := cleanupFilteredStaging(ctx, db, conn, sourceBranch, stagingBranch); cleanupErr != nil {
+		if cleanupErr := cleanupFilteredStaging(ctx, db, conn, sourceBranch, stagingBranch, keepBranch); cleanupErr != nil {
 			retErr = errors.Join(retErr, fmt.Errorf("federation filter: cleanup: %w", cleanupErr))
 		}
 	}()
@@ -543,6 +550,7 @@ func (s *DoltStore) filteredPushToPeer(ctx context.Context, peer string, exclude
 	_, err = versioncontrolops.PushFilteredBranch(ctx, conn, versioncontrolops.FilteredPushOptions{
 		SourceBranch:  sourceBranch,
 		StagingBranch: stagingBranch,
+		KeepBranch:    keepBranch,
 		ExcludeTypes:  excludeTypes,
 		PeerRef:       "remotes/" + peer + "/" + sourceBranch,
 		Push: func(ctx context.Context, refspec string) error {
@@ -553,10 +561,12 @@ func (s *DoltStore) filteredPushToPeer(ctx context.Context, peer string, exclude
 }
 
 // cleanupFilteredStaging discards the operation connection (an in-flight cancel
-// invalidates it), then restores sourceBranch and deletes stagingBranch on a
-// fresh, uncanceled, bounded connection. Errors are joined; a non-nil result is
-// wrapped by the caller with the "federation filter: cleanup" context.
-func cleanupFilteredStaging(ctx context.Context, db *sql.DB, conn *sql.Conn, sourceBranch, stagingBranch string) error {
+// invalidates it), then restores sourceBranch and deletes the staging and keep
+// branches on a fresh, uncanceled, bounded connection. A branch that never
+// came to exist (the operation failed before creating it) is tolerated.
+// Errors are joined; a non-nil result is wrapped by the caller with the
+// "federation filter: cleanup" context.
+func cleanupFilteredStaging(ctx context.Context, db *sql.DB, conn *sql.Conn, sourceBranch, stagingBranch, keepBranch string) error {
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), federationStagingCleanupTimeout)
 	defer cancel()
 	var cleanupErr error
@@ -573,6 +583,9 @@ func cleanupFilteredStaging(ctx context.Context, db *sql.DB, conn *sql.Conn, sou
 		}
 		if err := deleteFederationStagingBranch(cleanupCtx, cleanupConn, stagingBranch); err != nil {
 			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("delete staging branch: %w", err))
+		}
+		if err := deleteFederationStagingBranch(cleanupCtx, cleanupConn, keepBranch); err != nil {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("delete keep branch: %w", err))
 		}
 	}
 	return cleanupErr

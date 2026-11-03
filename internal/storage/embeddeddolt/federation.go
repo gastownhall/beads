@@ -31,6 +31,11 @@ import (
 // pushes cannot collide.
 const federationStagingBranchPrefix = "__federation_push_staging_"
 
+// federationKeepBranchPrefix identifies the temporary branches that retain
+// excluded issues through a filtered publication (see versioncontrolops.
+// retainExcludedRows), matching the server-mode prefix.
+const federationKeepBranchPrefix = "__federation_push_keep_"
+
 // federationStagingCleanupTimeout bounds best-effort cleanup after the caller
 // has canceled or its deadline has expired.
 const federationStagingCleanupTimeout = 30 * time.Second
@@ -476,12 +481,13 @@ func (s *EmbeddedDoltStore) filteredPushToPeer(ctx context.Context, peer string,
 		return fmt.Errorf("federation filter: generate staging branch: %w", err)
 	}
 	stagingBranch := federationStagingBranchPrefix + operationID.String()
+	keepBranch := federationKeepBranchPrefix + operationID.String()
 
 	// Arm cleanup before staging exists: the staging branch can outlive a
 	// failed call, and the operation context may be canceled by then, so
 	// cleanup runs on a fresh connection under its own deadline.
 	defer func() {
-		if cleanupErr := s.cleanupFilteredStaging(ctx, stagingBranch); cleanupErr != nil {
+		if cleanupErr := s.cleanupFilteredStaging(ctx, stagingBranch, keepBranch); cleanupErr != nil {
 			retErr = errors.Join(retErr, fmt.Errorf("federation filter: cleanup: %w", cleanupErr))
 		}
 	}()
@@ -495,6 +501,7 @@ func (s *EmbeddedDoltStore) filteredPushToPeer(ctx context.Context, peer string,
 			_, err := versioncontrolops.PushFilteredBranch(ctx, conn, versioncontrolops.FilteredPushOptions{
 				SourceBranch:  sourceBranch,
 				StagingBranch: stagingBranch,
+				KeepBranch:    keepBranch,
 				ExcludeTypes:  excludeTypes,
 				PeerRef:       "remotes/" + peer + "/" + sourceBranch,
 				Push: func(ctx context.Context, refspec string) error {
@@ -507,23 +514,26 @@ func (s *EmbeddedDoltStore) filteredPushToPeer(ctx context.Context, peer string,
 	return err
 }
 
-// cleanupFilteredStaging deletes the filtered-push staging branch on a fresh,
-// uncanceled connection. Unlike server mode there is no operation connection
-// to discard — embedded branch state is session-scoped (a fresh session starts
-// on the store's branch), so the pinned staging session simply ends with its
-// connection — but the branch itself is durable and must be deleted even when
-// the push failed.
-func (s *EmbeddedDoltStore) cleanupFilteredStaging(ctx context.Context, stagingBranch string) error {
+// cleanupFilteredStaging deletes the filtered-push staging and keep branches
+// on a fresh, uncanceled connection. Unlike server mode there is no operation
+// connection to discard — embedded branch state is session-scoped (a fresh
+// session starts on the store's branch), so the pinned staging session simply
+// ends with its connection — but the branches themselves are durable and must
+// be deleted even when the push failed. A branch that never came to exist is
+// tolerated.
+func (s *EmbeddedDoltStore) cleanupFilteredStaging(ctx context.Context, stagingBranch, keepBranch string) error {
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), federationStagingCleanupTimeout)
 	defer cancel()
 	return s.withMutatingDBConn(cleanupCtx, func(db versioncontrolops.DBConn) error {
-		if err := schema.DrainCall(cleanupCtx, db, "CALL DOLT_BRANCH('-Df', ?)", stagingBranch); err != nil {
-			msg := strings.ToLower(err.Error())
-			if strings.Contains(msg, "not found") || strings.Contains(msg, "does not exist") {
-				// The branch was never created, or cleanup already ran.
-				return nil
+		for _, branch := range []string{stagingBranch, keepBranch} {
+			if err := schema.DrainCall(cleanupCtx, db, "CALL DOLT_BRANCH('-Df', ?)", branch); err != nil {
+				msg := strings.ToLower(err.Error())
+				if strings.Contains(msg, "not found") || strings.Contains(msg, "does not exist") {
+					// The branch was never created, or cleanup already ran.
+					continue
+				}
+				return fmt.Errorf("delete staging branch %s: %w", branch, err)
 			}
-			return fmt.Errorf("delete staging branch: %w", err)
 		}
 		return nil
 	})

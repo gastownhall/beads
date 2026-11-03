@@ -37,6 +37,10 @@ type FilteredPushOptions struct {
 	// and leaves it behind, on success and failure alike, because cleanup
 	// needs a fresh connection that survives cancellation of a failed push.
 	StagingBranch string
+	// KeepBranch is a fresh branch name used to merge the filter commit
+	// back into SourceBranch (see retainExcludedRows). Cleanup contract as
+	// StagingBranch. Required whenever the filter removes rows.
+	KeepBranch string
 	// ExcludeTypes lists the issue types to withhold from the peer; the
 	// special "wisp" entry matches ephemeral rows.
 	ExcludeTypes []string
@@ -62,8 +66,10 @@ type FilteredPushResult struct {
 // PushFilteredBranch publishes a privacy-filtered copy of opts.SourceBranch:
 // it stages the branch on opts.StagingBranch, deletes the excluded issue
 // types from it (preserving the ones the peer already holds), repairs and
-// commits the filtered graph, restores SourceBranch, and hands the staged
-// refspec to opts.Push.
+// commits the filtered graph, merges the filter commit back into
+// opts.SourceBranch through opts.KeepBranch (see retainExcludedRows) so the
+// sender retains its excluded rows, and hands the staged refspec to
+// opts.Push.
 //
 // A DELETE that fails now fails the publication: the filter guards issue data
 // the sender has chosen not to replicate, so a best-effort delete that
@@ -97,15 +103,26 @@ func PushFilteredBranch(ctx context.Context, conn FilteredConn, opts FilteredPus
 		return nil, err
 	}
 	if deleted {
+		if opts.KeepBranch == "" {
+			return nil, fmt.Errorf("federation filter: no keep branch for the filter merge")
+		}
 		if err := CommitFilteredRows(ctx, conn, opts.CommitMessage); err != nil {
 			return nil, err
 		}
-	}
-
-	// Restore the source branch before pushing: the refspec names the
-	// staging ref explicitly, but the connection must not be left on a
-	// branch whose life ends with the cleanup.
-	if err := CheckoutBranch(ctx, conn, opts.SourceBranch); err != nil {
+		filterHash, err := branchHead(ctx, conn)
+		if err != nil {
+			return nil, err
+		}
+		// The keep merge restores the source branch (its checkout step) and
+		// makes the filter commit an ancestor of it; without a deleted row
+		// the plain restore below covers the same invariant.
+		if err := retainExcludedRows(ctx, conn, opts.SourceBranch, opts.StagingBranch, opts.KeepBranch, filterHash); err != nil {
+			return nil, err
+		}
+	} else if err := CheckoutBranch(ctx, conn, opts.SourceBranch); err != nil {
+		// Restore the source branch before pushing: the refspec names the
+		// staging ref explicitly, but the connection must not be left on a
+		// branch whose life ends with the cleanup.
 		return nil, fmt.Errorf("federation filter: restore branch %s: %w", opts.SourceBranch, err)
 	}
 
@@ -114,6 +131,47 @@ func PushFilteredBranch(ctx context.Context, conn FilteredConn, opts FilteredPus
 		return nil, err
 	}
 	return &FilteredPushResult{Filtered: deleted}, nil
+}
+
+// retainExcludedRows merges the filter commit back into the source branch
+// through a keep branch, BEFORE the push publishes the staged tip: keep is
+// branched from the staged tip F, the filter commit is reverted on it
+// (restoring the excluded rows), and keep is merged into the source branch —
+// a fast-forward, since keep descends from source — so the source branch's
+// content is unchanged while the filter commit becomes an ancestor of it.
+//
+// That ancestry is the whole point: the peer's main ends up containing F, and
+// the next sync's fetch+merge would otherwise apply F's deletions to the
+// sender's own branch (GH#7890). With F already merged — inverted by the
+// revert — the later merge is a no-op and the sender keeps its excluded
+// issues. Every step runs on conn, which is left on sourceBranch.
+func retainExcludedRows(ctx context.Context, conn FilteredConn, sourceBranch, stagingBranch, keepBranch, filterHash string) error {
+	if _, err := conn.ExecContext(ctx, "CALL DOLT_BRANCH(?, ?)", keepBranch, stagingBranch); err != nil {
+		return fmt.Errorf("federation filter: create keep branch: %w", err)
+	}
+	if err := CheckoutBranch(ctx, conn, keepBranch); err != nil {
+		return fmt.Errorf("federation filter: checkout keep branch: %w", err)
+	}
+	if err := schema.DrainCall(ctx, conn, "CALL DOLT_REVERT(?)", filterHash); err != nil {
+		return fmt.Errorf("federation filter: revert filter commit on keep branch: %w", err)
+	}
+	if err := CheckoutBranch(ctx, conn, sourceBranch); err != nil {
+		return fmt.Errorf("federation filter: restore branch %s: %w", sourceBranch, err)
+	}
+	if err := schema.DrainCall(ctx, conn, "CALL DOLT_MERGE(?)", keepBranch); err != nil {
+		return fmt.Errorf("federation filter: merge keep branch into %s: %w", sourceBranch, err)
+	}
+	return nil
+}
+
+// branchHead returns the current branch's head commit as seen by this
+// connection's session.
+func branchHead(ctx context.Context, conn DBConn) (string, error) {
+	var hash string
+	if err := conn.QueryRowContext(ctx, "SELECT commit_hash FROM dolt_log LIMIT 1").Scan(&hash); err != nil {
+		return "", fmt.Errorf("federation filter: read staged filter commit: %w", err)
+	}
+	return hash, nil
 }
 
 // peerExcludedIDs returns the ids of excluded-typed issues the receiving

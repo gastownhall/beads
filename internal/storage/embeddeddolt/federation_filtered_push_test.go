@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 	"github.com/steveyegge/beads/internal/types"
@@ -164,8 +165,12 @@ func clonePeerTip(t *testing.T, remoteURL, dbName string) peerTip {
 // against commits that predate the embedded filtered push.
 const federationStagingPrefix = "__federation_push_staging_"
 
-// assertNoFederationStagingBranches fails when a filtered push left its
-// staging branch behind.
+// federationKeepPrefix is the keep-branch prefix (see versioncontrolops.
+// retainExcludedRows), spelled out for the same reason as the staging one.
+const federationKeepPrefix = "__federation_push_keep_"
+
+// assertNoFederationStagingBranches fails when a filtered push left a staging
+// or keep branch behind.
 func assertNoFederationStagingBranches(t *testing.T, store *EmbeddedDoltStore) {
 	t.Helper()
 	var branches []string
@@ -178,8 +183,10 @@ func assertNoFederationStagingBranches(t *testing.T, store *EmbeddedDoltStore) {
 		t.Fatalf("list branches: %v", err)
 	}
 	for _, b := range branches {
-		if strings.HasPrefix(b, federationStagingPrefix) {
-			t.Errorf("staging branch %s was not cleaned up", b)
+		for _, prefix := range []string{federationStagingPrefix, federationKeepPrefix} {
+			if strings.HasPrefix(b, prefix) {
+				t.Errorf("temporary branch %s was not cleaned up", b)
+			}
 		}
 	}
 }
@@ -294,4 +301,139 @@ func TestFederationSyncFiltersExcludedIssueTypesForPush(t *testing.T) {
 	if !heldDep {
 		t.Error("dependency row associated with the peer-held excluded issue was dropped from the pushed tip")
 	}
+}
+
+// After a successful filtered publication, the sender keeps its local excluded
+// issue through later syncs: the filter commit is merged back into the source
+// branch — inverted by a revert on the keep branch — BEFORE the staged tip is
+// pushed, so the peer's own copy of the filter commit, which the next sync
+// fetches and merges, deletes nothing locally. At publication time the filter
+// commit is already an ancestor of the sender's source branch (AC: GH#7890).
+func TestFilteredFederationSyncKeepsLocalExcludedIssues(t *testing.T) {
+	ctx := context.Background()
+	store := newPeerAuthTestStore(t)
+
+	remoteDir := filepath.Join(t.TempDir(), "peer")
+	if err := os.MkdirAll(remoteDir, 0o700); err != nil {
+		t.Fatalf("create peer remote dir: %v", err)
+	}
+	remoteURL := "file://" + remoteDir
+	if err := store.AddRemote(ctx, "peer", remoteURL); err != nil {
+		t.Fatalf("add peer remote: %v", err)
+	}
+	versionWispTablesForFilteredPush(t, store)
+
+	insertFilteredPushIssue(t, store, "ff-held-secret", "secret")
+	insertFilteredPushIssue(t, store, "ff-shared-task", "task")
+	if err := store.AddDependency(ctx, &types.Dependency{
+		IssueID: "ff-shared-task", DependsOnID: "ff-held-secret", Type: types.DepBlocks,
+	}, "test"); err != nil {
+		t.Fatalf("add held dependency: %v", err)
+	}
+	if _, err := store.commitAll(ctx, "seed peer-held issues", true); err != nil {
+		t.Fatalf("commit peer-held issues: %v", err)
+	}
+	if err := store.PushTo(ctx, "peer"); err != nil {
+		t.Fatalf("PushTo to establish peer tip: %v", err)
+	}
+
+	insertFilteredPushIssue(t, store, "ff-new-secret", "secret")
+	insertFilteredPushIssue(t, store, "ff-local-task", "task")
+	if err := store.AddDependency(ctx, &types.Dependency{
+		IssueID: "ff-local-task", DependsOnID: "ff-new-secret", Type: types.DepBlocks,
+	}, "test"); err != nil {
+		t.Fatalf("add new dependency: %v", err)
+	}
+	if _, err := store.commitAll(ctx, "add new local issues", true); err != nil {
+		t.Fatalf("commit new local issues: %v", err)
+	}
+
+	prevExcludes := config.GetFederationConfig().ExcludeTypes
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("initialize config: %v", err)
+	}
+	config.Set("federation.exclude_types", []string{"secret"})
+	t.Cleanup(func() { config.Set("federation.exclude_types", prevExcludes) })
+
+	// First filtered sync: publishes the staged tip.
+	result, err := store.Sync(ctx, "peer", "")
+	if err != nil {
+		t.Fatalf("first Sync: %v", err)
+	}
+	if result.PushError != nil {
+		t.Fatalf("first Sync push error: %v", result.PushError)
+	}
+
+	// At publication time the filter commit was already an ancestor of the
+	// sender's source branch — dolt_log on the source branch reaches it.
+	var filterCommits int
+	err = store.withConn(t.Context(), false, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(t.Context(),
+			`SELECT COUNT(*) FROM dolt_log WHERE message = ?`,
+			"federation: exclude private issue types").Scan(&filterCommits)
+	})
+	if err != nil {
+		t.Fatalf("read source branch log: %v", err)
+	}
+	if filterCommits == 0 {
+		t.Fatal("the filter commit is not an ancestor of the sender's source branch")
+	}
+
+	// A later sync fetches the peer's copy of the filter commit and merges
+	// it; the sender must retain the local excluded issue and its
+	// associated dependency row.
+	if _, err := store.Sync(ctx, "peer", ""); err != nil {
+		t.Fatalf("second Sync: %v", err)
+	}
+	if !storedIssueExists(t, store, "ff-new-secret") {
+		t.Fatal("later sync deleted the sender's local excluded issue")
+	}
+	var depCount int
+	err = store.withConn(t.Context(), false, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(t.Context(),
+			`SELECT COUNT(*) FROM dependencies WHERE issue_id = ? AND depends_on_issue_id = ?`,
+			"ff-local-task", "ff-new-secret").Scan(&depCount)
+	})
+	if err != nil {
+		t.Fatalf("read sender dependency: %v", err)
+	}
+	if depCount != 1 {
+		t.Fatalf("sender's dependency row for the excluded issue count = %d, want 1", depCount)
+	}
+
+	// The peer's tip — read through the fetch-updated tracking ref — still
+	// carries only the peer-held excluded issue.
+	var peerHash string
+	err = store.withConn(t.Context(), false, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(t.Context(),
+			`SELECT hash FROM dolt_remote_branches WHERE name = ?`, "remotes/peer/main").Scan(&peerHash)
+	})
+	if err != nil {
+		t.Fatalf("read peer tracking ref: %v", err)
+	}
+	if err := issueops.ValidateRef(peerHash); err != nil {
+		t.Fatalf("peer tracking hash %q: %v", peerHash, err)
+	}
+	for _, tc := range []struct {
+		id   string
+		want int
+	}{
+		{"ff-new-secret", 0},
+		{"ff-held-secret", 1},
+	} {
+		var n int
+		//nolint:gosec // G201: peerHash is read from dolt_remote_branches and validated above; AS OF requires a literal
+		err = store.withConn(t.Context(), false, func(tx *sql.Tx) error {
+			return tx.QueryRowContext(t.Context(), fmt.Sprintf(
+				`SELECT COUNT(*) FROM issues AS OF '%s' WHERE id = ?`, peerHash), tc.id).Scan(&n)
+		})
+		if err != nil {
+			t.Fatalf("read peer tip for %s: %v", tc.id, err)
+		}
+		if n != tc.want {
+			t.Errorf("peer tip count for %s = %d, want %d", tc.id, n, tc.want)
+		}
+	}
+
+	assertNoFederationStagingBranches(t, store)
 }
