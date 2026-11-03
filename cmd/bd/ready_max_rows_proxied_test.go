@@ -180,3 +180,55 @@ func TestReadyClaimWithoutLiveCapIsNotRefusedUnderProxiedServer(t *testing.T) {
 		})
 	}
 }
+
+// TestReproBd7fnvhpProxiedMaxRowsHonored asserts the expected behaviour from
+// bd-7fnvhp (PR #7408): under --proxied-server, a positive BEADS_MAX_ROWS cap is
+// honored by `bd ready`, `bd graph` and `bd find-duplicates` (as `bd list` and
+// `bd dep tree` already do), so the pre-provider front door must not refuse it.
+func TestReproBd7fnvhpProxiedMaxRowsHonored(t *testing.T) {
+	pinJSONOutput(t, false)
+	for _, path := range []string{"ready", "graph", "find-duplicates"} {
+		t.Run(path, func(t *testing.T) {
+			t.Setenv(maxRowsEnvVar, "5")
+			cmd := realCommandAtPath(t, path)
+			var err error
+			stderr := captureStderr(t, func() { err = validateProxyCapabilitiesBeforeProvider(cmd) })
+			if err != nil {
+				t.Fatalf("proxied `bd %s` with %s=5 was refused before the provider: %v (stderr=%q)", path, maxRowsEnvVar, err, stderr)
+			}
+		})
+	}
+}
+
+// TestReadyValidatesMaxRowsUnderProxiedServerBeforeTheStore pins where a
+// negative --max-rows is rejected now that the front door no longer resolves
+// the cap: in RunE, before the route touches the provider. uowProvider is nil
+// here, so a validation that moved below the store would surface as the
+// provider's own message instead of the usage error.
+func TestReadyValidatesMaxRowsUnderProxiedServerBeforeTheStore(t *testing.T) {
+	pinProxiedServerMode(t)
+	pinJSONOutput(t, false)
+	t.Setenv(maxRowsEnvVar, "")
+
+	if uowProvider != nil {
+		t.Fatal("precondition: uowProvider must be nil so the dispatch cannot open a real proxied connection")
+	}
+
+	for _, args := range [][]string{
+		{"--max-rows", "-1"},
+		{"--claim", "--max-rows", "-1"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			cmd := newReadyFlagsCommand(t, args...)
+			var err error
+			stderr := captureStderr(t, func() { err = readyCmd.RunE(cmd, nil) })
+			assertExitCode(t, err, 1)
+			if !strings.Contains(stderr, "--max-rows must be non-negative") {
+				t.Fatalf("stderr = %q, want the negative --max-rows usage error", stderr)
+			}
+			if strings.Contains(stderr, "provider not initialized") {
+				t.Fatalf("negative --max-rows reached the provider before it was rejected: %q", stderr)
+			}
+		})
+	}
+}

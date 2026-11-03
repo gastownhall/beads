@@ -152,35 +152,6 @@ func parseMaxRowsEnv() (int, string, string, bool) {
 	return n, maxRowsEnvVar, raw, true
 }
 
-// resolveMaxRowsQuiet resolves the effective cap like resolveMaxRows but never
-// emits the malformed-BEADS_MAX_ROWS advisory.
-//
-// It exists for the proxied capability front door, which resolves the cap in
-// PersistentPreRunE to decide a refusal before the provider is constructed.
-// Every command that reads the cap resolves it again in its own body, and the
-// advisory is a side effect of resolving, so warning in the front door too
-// would print one typo twice. The body's resolution stays the one that warns:
-// the message keeps appearing exactly once, at the same point in the output it
-// appeared at before the front door existed. A malformed value disables the
-// cap, so the front door reaching the same "no cap" conclusion silently is the
-// correct decision, not a suppressed one.
-//
-// An explicit --max-rows is still resolved through resolveMaxRows: that path
-// never reads the environment, and rejecting a negative flag before the
-// provider opens is the front door's job.
-//
-// No source string, unlike resolveMaxRows: the front door decides whether a
-// cap is set, not how to attribute one in a message. The command body resolves
-// the source for the message it prints.
-func resolveMaxRowsQuiet(cmd *cobra.Command) (int, error) {
-	if cmd != nil && cmd.Flags().Changed(maxRowsFlagName) {
-		n, _, err := resolveMaxRows(cmd)
-		return n, err
-	}
-	n, _, _, _ := parseMaxRowsEnv()
-	return n, nil
-}
-
 // handleMaxRowsError checks whether err is a *issueops.ErrTooManyRows from
 // the storage layer and, if so, emits the two-line stderr error message
 // (designer §2.3) and returns an exit-coded error (code 2, main.go's
