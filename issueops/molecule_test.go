@@ -593,3 +593,231 @@ func TestActiveMoleculeIDsFallsBackToHookedWork(t *testing.T) {
 		t.Fatalf("ActiveMoleculeIDs (nobody's work) = %v, %v, want none", ids, err)
 	}
 }
+
+// seedBlockedGroupMolecule builds the GH#7638 molecule: open steps Brief and
+// Group, Group blocked by Brief, children A and B under Group, and B blocked
+// by A. At base, A reads ready even though its parent is blocked.
+func seedBlockedGroupMolecule(f *fakeMolecules) {
+	f.add("m", types.TypeMolecule, types.StatusOpen)
+	f.add("m.brief", types.TypeTask, types.StatusOpen)
+	f.add("m.group", types.TypeTask, types.StatusOpen)
+	f.add("m.a", types.TypeTask, types.StatusOpen)
+	f.add("m.b", types.TypeTask, types.StatusOpen)
+	for _, id := range []string{"m.brief", "m.group"} {
+		f.edge(id, "m", types.DepParentChild)
+	}
+	for _, id := range []string{"m.a", "m.b"} {
+		f.edge(id, "m.group", types.DepParentChild)
+	}
+	f.edge("m.group", "m.brief", types.DepBlocks)
+	f.edge("m.b", "m.a", types.DepBlocks)
+}
+
+// TestMoleculeAnalysisInheritsAnExogenouslyBlockedParent pins GH#7638: a
+// parent blocked from outside its own subtree darkens its children, so
+// molecule readiness agrees with bd ready and bd blocked.
+func TestMoleculeAnalysisInheritsAnExogenouslyBlockedParent(t *testing.T) {
+	ctx := context.Background()
+
+	f := newFakeMolecules()
+	seedBlockedGroupMolecule(f)
+	view, err := issueops.ViewMolecule(ctx, f.reader(), "m")
+	if err != nil {
+		t.Fatalf("ViewMolecule: %v", err)
+	}
+	analysis := view.Analysis
+	if analysis.Steps["m.brief"] == nil || !analysis.Steps["m.brief"].IsReady {
+		t.Errorf("brief = %+v, want ready (blocked by nothing)", analysis.Steps["m.brief"])
+	}
+	for _, id := range []string{"m.group", "m.a", "m.b"} {
+		if analysis.Steps[id].IsReady {
+			t.Errorf("%s is ready; want blocked (its parent group is blocked by brief, GH#7638)", id)
+		}
+	}
+	for _, id := range []string{"m.a", "m.b"} {
+		if got := analysis.Steps[id].BlockedBy; !slices.Equal(got, []string{"m.group"}) {
+			if id == "m.b" && len(got) == 2 && slices.Contains(got, "m.group") && slices.Contains(got, "m.a") {
+				continue
+			}
+			t.Errorf("%s.BlockedBy = %v, want the blocked parent m.group listed", id, got)
+		}
+	}
+	states := map[string]string{}
+	for _, step := range view.Steps {
+		states[step.Issue.ID] = step.State
+	}
+	for id, want := range map[string]string{"m.brief": "ready", "m.group": "pending", "m.a": "pending", "m.b": "pending"} {
+		if states[id] != want {
+			t.Errorf("state[%s] = %q, want %q", id, states[id], want)
+		}
+	}
+
+	// Closing Brief frees A, which no longer inherits; B still waits on A.
+	f.issues["m.brief"].Status = types.StatusClosed
+	view, err = issueops.ViewMolecule(ctx, f.reader(), "m")
+	if err != nil {
+		t.Fatalf("ViewMolecule after closing brief: %v", err)
+	}
+	analysis = view.Analysis
+	if !analysis.Steps["m.a"].IsReady {
+		t.Errorf("m.a after closing brief = %+v, want ready (nothing blocks it anymore)", analysis.Steps["m.a"])
+	}
+	if analysis.Steps["m.b"].IsReady || !slices.Equal(analysis.Steps["m.b"].BlockedBy, []string{"m.a"}) {
+		t.Errorf("m.b after closing brief = %+v, want still blocked by m.a only", analysis.Steps["m.b"])
+	}
+}
+
+// TestMoleculeAnalysisInheritanceSubtests covers the inheritance rule's
+// edges: transitive propagation through an intermediate parent, a close-gate
+// parent never darkening its own children, closed and pinned parents neither
+// darkening nor relaying, an in-progress parent still darkening, multiple
+// parents where one is dark, a close gate deeper than the storage walk's
+// horizon, and a parent-child cycle terminating the walks.
+func TestMoleculeAnalysisInheritanceSubtests(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("transitive through an intermediate parent", func(t *testing.T) {
+		f := newFakeMolecules()
+		f.add("m", types.TypeMolecule, types.StatusOpen)
+		f.add("m.blocker", types.TypeTask, types.StatusOpen)
+		f.add("m.mid", types.TypeTask, types.StatusOpen)
+		f.add("m.leaf", types.TypeTask, types.StatusOpen)
+		f.edge("m.blocker", "m", types.DepParentChild)
+		f.edge("m.mid", "m", types.DepParentChild)
+		f.edge("m.leaf", "m.mid", types.DepParentChild)
+		f.edge("m.mid", "m.blocker", types.DepBlocks)
+		view, err := issueops.ViewMolecule(ctx, f.reader(), "m")
+		if err != nil {
+			t.Fatalf("ViewMolecule: %v", err)
+		}
+		for _, id := range []string{"m.mid", "m.leaf"} {
+			if view.Analysis.Steps[id].IsReady {
+				t.Errorf("%s is ready; want blocked (m.mid is blocked exogenously and darkens its subtree)", id)
+			}
+		}
+		if got := view.Analysis.Steps["m.leaf"].BlockedBy; !slices.Equal(got, []string{"m.mid"}) {
+			t.Errorf("m.leaf.BlockedBy = %v, want the immediate parent m.mid only", got)
+		}
+	})
+
+	t.Run("closed and pinned parents neither darken nor relay", func(t *testing.T) {
+		f := newFakeMolecules()
+		f.add("m", types.TypeMolecule, types.StatusOpen)
+		f.add("m.blocker", types.TypeTask, types.StatusOpen)
+		f.add("m.closedp", types.TypeTask, types.StatusClosed)
+		f.add("m.pinnedp", types.TypeTask, types.StatusPinned)
+		f.add("m.underclosed", types.TypeTask, types.StatusOpen)
+		f.add("m.underpinned", types.TypeTask, types.StatusOpen)
+		f.edge("m.blocker", "m", types.DepParentChild)
+		for _, pair := range [][2]string{{"m.closedp", "m"}, {"m.pinnedp", "m"}, {"m.underclosed", "m.closedp"}, {"m.underpinned", "m.pinnedp"}} {
+			f.edge(pair[0], pair[1], types.DepParentChild)
+		}
+		// A stale dark parent: closedp and pinnedp are blocked from outside
+		// but can never darken anything (GH#7626's rule).
+		f.edge("m.closedp", "m.blocker", types.DepBlocks)
+		f.edge("m.pinnedp", "m.blocker", types.DepBlocks)
+		view, err := issueops.ViewMolecule(ctx, f.reader(), "m")
+		if err != nil {
+			t.Fatalf("ViewMolecule: %v", err)
+		}
+		for _, id := range []string{"m.underclosed", "m.underpinned"} {
+			if !view.Analysis.Steps[id].IsReady {
+				t.Errorf("%s is blocked; its parent is closed/pinned and never darkens (GH#7626)", id)
+			}
+		}
+	})
+
+	t.Run("an in-progress parent still darkens", func(t *testing.T) {
+		f := newFakeMolecules()
+		f.add("m", types.TypeMolecule, types.StatusOpen)
+		f.add("m.blocker", types.TypeTask, types.StatusOpen)
+		f.add("m.mid", types.TypeTask, types.StatusInProgress)
+		f.add("m.leaf", types.TypeTask, types.StatusOpen)
+		f.edge("m.blocker", "m", types.DepParentChild)
+		f.edge("m.mid", "m", types.DepParentChild)
+		f.edge("m.leaf", "m.mid", types.DepParentChild)
+		f.edge("m.mid", "m.blocker", types.DepBlocks)
+		view, err := issueops.ViewMolecule(ctx, f.reader(), "m")
+		if err != nil {
+			t.Fatalf("ViewMolecule: %v", err)
+		}
+		if view.Analysis.Steps["m.leaf"].IsReady {
+			t.Error("m.leaf is ready; its in-progress parent m.mid is blocked exogenously and darkens it")
+		}
+	})
+
+	t.Run("multiple parents darken through the dark one", func(t *testing.T) {
+		f := newFakeMolecules()
+		f.add("m", types.TypeMolecule, types.StatusOpen)
+		f.add("m.dark", types.TypeTask, types.StatusOpen)
+		f.add("m.bright", types.TypeTask, types.StatusOpen)
+		f.add("m.blocker", types.TypeTask, types.StatusOpen)
+		f.add("m.kid", types.TypeTask, types.StatusOpen)
+		f.edge("m.dark", "m", types.DepParentChild)
+		f.edge("m.bright", "m", types.DepParentChild)
+		f.edge("m.blocker", "m", types.DepParentChild)
+		f.edge("m.kid", "m.dark", types.DepParentChild)
+		f.edge("m.kid", "m.bright", types.DepParentChild)
+		f.edge("m.dark", "m.blocker", types.DepBlocks)
+		view, err := issueops.ViewMolecule(ctx, f.reader(), "m")
+		if err != nil {
+			t.Fatalf("ViewMolecule: %v", err)
+		}
+		if view.Analysis.Steps["m.kid"].IsReady {
+			t.Error("m.kid is ready; one of its parents (m.dark) is blocked exogenously")
+		}
+	})
+
+	t.Run("a close gate deeper than the storage horizon stays open", func(t *testing.T) {
+		// P is blocked ONLY by its own descendants five edges down; the
+		// in-memory walk has no depth-four horizon, so P never darkens
+		// anyone (and a grandparent's reason is seen for what it is).
+		f := newFakeMolecules()
+		f.add("m", types.TypeMolecule, types.StatusOpen)
+		f.add("m.gate", types.TypeTask, types.StatusOpen)
+		f.edge("m.gate", "m", types.DepParentChild)
+		chain := []string{"m.gate"}
+		for i := 0; i < 5; i++ {
+			kid := fmt.Sprintf("m.gate.%d", i)
+			f.add(kid, types.TypeTask, types.StatusOpen)
+			f.edge(kid, chain[len(chain)-1], types.DepParentChild)
+			chain = append(chain, kid)
+		}
+		f.edge("m.gate", chain[len(chain)-1], types.DepBlocks)
+		view, err := issueops.ViewMolecule(ctx, f.reader(), "m")
+		if err != nil {
+			t.Fatalf("ViewMolecule: %v", err)
+		}
+		for _, id := range chain[1:] {
+			if !view.Analysis.Steps[id].IsReady {
+				t.Errorf("%s is blocked; m.gate is blocked only by its own subtree (close gate)", id)
+			}
+		}
+	})
+
+	t.Run("a parent-child cycle terminates the walks", func(t *testing.T) {
+		f := newFakeMolecules()
+		f.add("m", types.TypeMolecule, types.StatusOpen)
+		f.add("m.blocker", types.TypeTask, types.StatusOpen)
+		f.add("m.p1", types.TypeTask, types.StatusOpen)
+		f.add("m.p2", types.TypeTask, types.StatusOpen)
+		f.add("m.kid", types.TypeTask, types.StatusOpen)
+		f.edge("m.blocker", "m", types.DepParentChild)
+		f.edge("m.p1", "m", types.DepParentChild)
+		f.edge("m.p2", "m", types.DepParentChild)
+		f.edge("m.kid", "m.p1", types.DepParentChild)
+		f.edge("m.p2", "m.p1", types.DepParentChild) // p1 -> p2 -> p1 cycle
+		f.edge("m.p1", "m.p2", types.DepParentChild)
+		f.edge("m.p1", "m.blocker", types.DepBlocks)
+		view, err := issueops.ViewMolecule(ctx, f.reader(), "m")
+		if err != nil {
+			t.Fatalf("ViewMolecule: %v", err)
+		}
+		if view.Analysis.Steps["m.kid"].IsReady {
+			t.Error("m.kid is ready; its parent m.p1 is blocked exogenously (a cycle must not hide that)")
+		}
+		if view.Analysis.Steps["m.p2"].IsReady {
+			t.Error("m.p2 is ready; its parent m.p1 is blocked exogenously")
+		}
+	})
+}
