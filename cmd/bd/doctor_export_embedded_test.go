@@ -82,3 +82,33 @@ func TestEmbeddedDoctorExportCheckReportsMissing(t *testing.T) {
 		t.Fatalf("check = %+v, want %s sampled and the bd export -o refresh", c, stale)
 	}
 }
+
+// TestEmbeddedDoctorExportCheckCleanAfterManualExport pins the refresh the
+// check suggests: once `bd export -o` rewrites a stale export, every
+// in-scope id is in the file and the check reports nothing missing.
+func TestEmbeddedDoctorExportCheckCleanAfterManualExport(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt doctor tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "dr")
+	exportPath := filepath.Join(beadsDir, "issues.jsonl")
+
+	bdCreateSilent(t, bd, dir, "first issue")
+	bdExport(t, bd, dir, "-o", exportPath)
+	stale := strings.TrimSpace(bdCreateSilent(t, bd, dir, "second issue"))
+	if got := runDoctorExportCheck(t, bd, dir); got.Export.Missing != 1 || !reflect.DeepEqual(got.Export.MissingIDs, []string{stale}) {
+		t.Fatalf("before the refresh: export report = %+v, want only %s missing", got.Export, stale)
+	}
+
+	bdExport(t, bd, dir, "-o", exportPath)
+	got := runDoctorExportCheck(t, bd, dir)
+	if got.Export.InScope != 2 || got.Export.Missing != 0 || len(got.Export.MissingIDs) != 0 {
+		t.Fatalf("after bd export -o: export report = %+v, want both issues present and none missing", got.Export)
+	}
+	if c := got.Checks[0]; c.Status != statusOK || c.Fix != "" {
+		t.Fatalf("after bd export -o: check = %+v, want ok with no fix", c)
+	}
+}
