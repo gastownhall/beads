@@ -50,6 +50,11 @@ Handles merge conflicts using the configured strategy:
 If no strategy is specified and conflicts occur, the sync will pause
 and report which tables have conflicts for manual resolution.
 
+With federation.exclude_types set, issues of those types that a peer does
+not already hold are withheld from the pushed tip, and a notice is printed
+on stderr. The pushed history still contains them, so this is not a privacy
+control.
+
 Examples:
   bd federation sync                      # Sync with all peers
   bd federation sync --peer town-beta     # Sync with specific peer
@@ -229,11 +234,21 @@ func runFederationSync(cmd *cobra.Command, args []string) error {
 					}
 				}
 			}
-			if result.Pushed {
+			if result.PushFiltered {
+				fmt.Printf("  %s Pushed (excluded issue types withheld from the tip)\n", ui.RenderPass("✓"))
+			} else if result.Pushed {
 				fmt.Printf("  %s Pushed\n", ui.RenderPass("✓"))
 			} else if result.PushError != nil {
 				fmt.Printf("  %s Push skipped: %v\n", ui.RenderMuted("○"), result.PushError)
 			}
+		}
+	}
+
+	// One notice per invocation, only after a publication that withheld rows.
+	for _, result := range results {
+		if result != nil && result.PushFiltered {
+			fmt.Fprintln(os.Stderr, filteredPushNotice)
+			break
 		}
 	}
 
@@ -245,6 +260,11 @@ func runFederationSync(cmd *cobra.Command, args []string) error {
 	}
 	return nil
 }
+
+// filteredPushNotice explains what a filtered publication does not hide.
+const filteredPushNotice = "Note: federation.exclude_types withheld matching issues from the pushed tip only. " +
+	"Peers can still read them in the history they received, and a direct fetch of this branch " +
+	"or an unfiltered push (bd dolt push) is not filtered."
 
 func runFederationStatus(cmd *cobra.Command, args []string) error {
 	if usesProxiedServer() {

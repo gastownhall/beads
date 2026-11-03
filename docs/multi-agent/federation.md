@@ -172,6 +172,28 @@ bd federation status --peer town-beta
 Without `--strategy`, a sync that hits merge conflicts pauses and reports the
 conflicting tables for manual resolution instead of auto-resolving.
 
+### Excluded issue types
+
+`federation.exclude_types` (default `[wisp]`) names issue types that
+`bd federation sync` keeps off the tip it pushes to a peer. In releases after
+v1.3.2 the filter works like this:
+
+- Only issues the peer's tip does not already hold are withheld. An issue the
+  peer already received stays there; changing its type later does not
+  retract it.
+- The filter changes the pushed tip, not the history. Peers can still read
+  withheld issues in the history they received, so this is not a privacy
+  control. A direct fetch of the branch, and an unfiltered push such as
+  `bd dolt push`, are not filtered at all.
+- Your local data is kept. Each filtered push leaves a filter commit and its
+  revert in local history, and a sync that fails partway (a push error, a
+  cancelled run) leaves local issues, wisps and the checked-out branch as
+  they were.
+- When a push withholds anything, the peer's line reads
+  `✓ Pushed (excluded issue types withheld from the tip)`, one notice per run
+  is printed on stderr, and the `--json` result for that peer carries
+  `"PushFiltered": true`.
+
 ### Topologies
 
 | Pattern | Description | Use Case |

@@ -479,6 +479,7 @@ func (s *DoltStore) Sync(ctx context.Context, peer string, strategy string) (*Sy
 	}
 	// A cleanup failure after the push is reported but does not undo it.
 	result.Pushed = err == nil || pushRes.Pushed
+	result.PushFiltered = pushRes.Filtered
 
 	// Record last sync time
 	_ = s.setLastSyncTime(ctx, peer) // Best effort: sync timestamp is advisory for scheduling
