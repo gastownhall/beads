@@ -607,15 +607,7 @@ var createCmd = &cobra.Command{
 			DefaultPriority:         priorityDefault,
 		})
 		if err != nil {
-			if handled, rendered := reportCreateOfRetiredID(err); handled {
-				return rendered
-			}
-			// RULING R1: an occupied --id is a refusal, not a silent full-row
-			// upsert reported as success.
-			if errors.Is(err, storage.ErrAlreadyExists) && explicitID != "" {
-				return HandleErrorRespectJSON("%s already exists; use bd update, or bd import for upsert semantics", explicitID)
-			}
-			return HandleErrorRespectJSON("%v", err)
+			return reportCreateRoleError(err, explicitID)
 		}
 		// Every post-write read comes from the facade's result snapshot, never
 		// from the local struct: the facade clones its request, so the local
