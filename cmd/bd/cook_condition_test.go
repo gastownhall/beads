@@ -132,6 +132,22 @@ func TestRunCookAppliesStepConditionsInRuntimeMode(t *testing.T) {
 		}
 	})
 
+	// AC-2: the JSON the runtime cook emits applies the formula's default.
+	t.Run("runtime json keeps a false default out", func(t *testing.T) {
+		out := runCookJSON(t, newCookConditionCommand(t, true, false), formulaPath)
+		if got := cookedStepIDs(out.Steps); len(got) != 1 || got[0] != "build" {
+			t.Errorf("runtime cook steps = %v, want only the build step (default deploy=false)", got)
+		}
+	})
+
+	// AC-2: an explicit override keeps the conditioned step in.
+	t.Run("runtime json keeps an overridden step in", func(t *testing.T) {
+		out := runCookJSON(t, newCookConditionCommand(t, true, false, "deploy=true"), formulaPath)
+		if got := cookedStepIDs(out.Steps); len(got) != 2 || got[0] != "build" || got[1] != "deploy" {
+			t.Errorf("runtime cook steps = %v, want build and deploy (deploy=true)", got)
+		}
+	})
+
 	// Parity with pour: the same formula, the same variable values, the same
 	// surviving steps (resolveAndCookFormulaWithVars is pour's own path).
 	t.Run("pour parity", func(t *testing.T) {
