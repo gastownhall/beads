@@ -254,7 +254,11 @@ func isBareMemoryKey(s string) bool {
 // key (isBareMemoryKey), having already read that exact key. As in
 // printRecallResult, presence is found (row existence), never existing != "":
 // a bare slug naming a memory stored as the empty string recalls it.
-func rememberBareKeyPath(key, insight, existing string, found bool) error {
+//
+// suggestion, when not empty, is a key holding a memory that the refusal
+// should point at (the bare key's derived key); it is named in a separate
+// hint, never recalled in the key's place.
+func rememberBareKeyPath(key, insight, existing string, found bool, suggestion string) error {
 	if found {
 		if jsonOutput {
 			return outputJSON(map[string]interface{}{
@@ -272,11 +276,18 @@ func rememberBareKeyPath(key, insight, existing string, found bool) error {
 		return nil
 	}
 	keyArg, keyNote := remedy.CommandArg(runtime.GOOS, key, "<key>")
-	return HandleErrorRespectJSON(
+	message := fmt.Sprintf(
 		"no memory named %q to recall -- and refusing to store a bare key-like token as its own content. "+
 			"bd remember WRITES (its positional arg is CONTENT, not a key). "+
 			"To browse keys: bd memories. To store it anyway, run: bd remember %q --key %s%s",
 		key, insight, keyArg, keyNote)
+	if suggestion == "" {
+		return HandleErrorRespectJSON("%s", message)
+	}
+	suggestionArg, suggestionNote := remedy.CommandArg(runtime.GOOS, suggestion, "<key>")
+	return HandleErrorWithHintRespectJSON(message, fmt.Sprintf(
+		"did you mean %s? A memory exists under that derived key; to read it, run: bd recall %s%s",
+		remedy.PrintedWord(suggestion), suggestionArg, suggestionNote))
 }
 
 // printRememberResult renders the `bd remember` success output. commitErr is
@@ -505,7 +516,20 @@ Examples:
 			if err != nil {
 				return HandleErrorRespectJSON("recalling memory: %v", err)
 			}
-			return rememberBareKeyPath(insight, insight, recalled.Value, recalled.Found)
+			// On a miss the derived key is read for a SUGGESTION only: its
+			// memory answers a different question, so the refusal names the
+			// key and never its content.
+			var suggestion string
+			if derived := memoryapi.DeriveKey(insight); !recalled.Found && derived != "" && derived != insight {
+				alt, err := memories.Recall(rootCtx, memoryops.RecallRequest{Key: derived})
+				if err != nil {
+					return HandleErrorRespectJSON("recalling memory: %v", err)
+				}
+				if alt.Found {
+					suggestion = derived
+				}
+			}
+			return rememberBareKeyPath(insight, insight, recalled.Value, recalled.Found, suggestion)
 		}
 
 		// Corpus budget (memories.budget-chars, OPT-IN, 0 = off). The
