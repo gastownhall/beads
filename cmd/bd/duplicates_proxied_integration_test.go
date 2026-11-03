@@ -4,7 +4,10 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -207,6 +210,67 @@ func TestProxiedServerFindDuplicates(t *testing.T) {
 		}
 		return m
 	}
+
+	t.Run("max_rows_caps_the_search", func(t *testing.T) {
+		cp := newSharedProxiedProject(t, bd, "fdpcap")
+		for i := 0; i < 3; i++ {
+			bdProxiedCreate(t, bd, cp.dir, fmt.Sprintf("Fix login page timeout error %d", i), "--type", "bug",
+				"--description", "The login page throws a timeout error after 30 seconds of inactivity")
+		}
+		run := func(env []string, args ...string) (string, string, int) {
+			t.Helper()
+			full := append([]string{"find-duplicates", "--threshold", "0.2"}, args...)
+			stdout, stderr, err := bdProxiedRunBuffersWithEnv(t, bd, cp.dir, env, full...)
+			var exitErr *exec.ExitError
+			switch {
+			case err == nil:
+				return stdout, stderr, 0
+			case errors.As(err, &exitErr):
+				return stdout, stderr, exitErr.ExitCode()
+			default:
+				t.Fatalf("bd %s: %v", strings.Join(full, " "), err)
+				return "", "", -1
+			}
+		}
+
+		for _, format := range [][]string{nil, {"--json"}} {
+			wantOut, wantErr, code := run(nil, format...)
+			if code != 0 {
+				t.Fatalf("uncapped find-duplicates %v exited %d: %s", format, code, wantErr)
+			}
+			for _, src := range []struct {
+				name   string
+				source string
+				args   func(n int) ([]string, []string)
+			}{
+				{name: "flag", source: "--max-rows", args: func(n int) ([]string, []string) {
+					return nil, []string{"--max-rows", fmt.Sprint(n)}
+				}},
+				{name: "env", source: "BEADS_MAX_ROWS", args: func(n int) ([]string, []string) {
+					return []string{fmt.Sprintf("BEADS_MAX_ROWS=%d", n)}, nil
+				}},
+			} {
+				env, flags := src.args(2)
+				stdout, stderr, code := run(env, append(append([]string{}, format...), flags...)...)
+				if code != 2 {
+					t.Errorf("%s %v cap 2: exit = %d, want 2\nstdout:\n%s\nstderr:\n%s", src.name, format, code, stdout, stderr)
+				}
+				if want := src.source + "=2 exceeded"; !strings.Contains(stderr, want) {
+					t.Errorf("%s %v cap 2: stderr = %q, want %q", src.name, format, stderr, want)
+				}
+				if stdout != "" {
+					t.Errorf("%s %v cap 2: stdout = %q, want nothing on a cap overage", src.name, format, stdout)
+				}
+
+				env, flags = src.args(3)
+				stdout, stderr, code = run(env, append(append([]string{}, format...), flags...)...)
+				if code != 0 || stdout != wantOut || stderr != wantErr {
+					t.Errorf("%s %v cap 3: exit %d, output differs from uncapped\ncapped:\n%s%s\nuncapped:\n%s%s",
+						src.name, format, code, stdout, stderr, wantOut, wantErr)
+				}
+			}
+		}
+	})
 
 	t.Run("mechanical_finds_near_identical", func(t *testing.T) {
 		m := fdJSON(t, "--threshold", "0.15")

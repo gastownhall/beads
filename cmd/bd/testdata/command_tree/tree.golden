@@ -2667,7 +2667,7 @@ bd find-duplicates
     |   bd find-duplicates --limit 20            # Show top 20 pairs
     |   bd find-duplicates --json                # JSON output
   flag --limit -n type=int default="50" usage="Maximum number of pairs to show"
-  flag --max-rows type=int default="0" usage="Hard upper bound on rows fetched from storage. Returns a non-zero exit (code 2) and an error to stderr if exceeded. 0 disables (the default). Overrides BEADS_MAX_ROWS for this invocation. Useful in CI/agent rigs that want a circuit breaker against pathological queries. Not supported under --proxied-server: an explicit --max-rows or BEADS_MAX_ROWS cap errors out rather than silently going unenforced."
+  flag --max-rows type=int default="0" usage="Hard upper bound on rows returned. Returns a non-zero exit (code 2) and an error to stderr if exceeded. 0 disables (the default). Overrides BEADS_MAX_ROWS for this invocation. Useful in CI/agent rigs that want a circuit breaker against pathological queries. Honored on both the direct and the --proxied-server route."
   flag --method type=string default="mechanical" usage="Detection method: mechanical, ai"
   flag --model type=string default="" usage="AI model to use (only with --method ai; default from config ai.model)"
   flag --status -s type=string default="" usage="Filter by status (default: non-closed)"
