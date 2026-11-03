@@ -5,8 +5,10 @@ package embeddeddolt
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/config"
@@ -245,4 +247,197 @@ func TestFilteredFederationSyncKeepsLocalExcludedIssues(t *testing.T) {
 	if f.issueCount(t, tip, f.newChore) != 0 || f.childRows(t, tip, f.newChore) != 0 || f.issueCount(t, tip, f.wisp) != 0 {
 		t.Error("peer tip holds withheld data after the later sync")
 	}
+}
+
+// faultStages installs a stage hook that records each stage reached and runs
+// the current fault, which the caller swaps per case.
+type faultStages struct {
+	seen  []string
+	fault func(ctx context.Context, stage string, conn versioncontrolops.DBConn, req versioncontrolops.FilteredPushRequest) error
+}
+
+func installFaultStages(t *testing.T) *faultStages {
+	t.Helper()
+	fs := &faultStages{}
+	t.Cleanup(versioncontrolops.SetFilteredPushStageHookForTest(func(ctx context.Context, stage string, conn versioncontrolops.DBConn, req versioncontrolops.FilteredPushRequest) error {
+		fs.seen = append(fs.seen, stage)
+		if fs.fault == nil {
+			return nil
+		}
+		return fs.fault(ctx, stage, conn, req)
+	}))
+	return fs
+}
+
+func failAt(want string, err error) func(context.Context, string, versioncontrolops.DBConn, versioncontrolops.FilteredPushRequest) error {
+	return func(_ context.Context, stage string, _ versioncontrolops.DBConn, _ versioncontrolops.FilteredPushRequest) error {
+		if stage == want {
+			return err
+		}
+		return nil
+	}
+}
+
+func (f *filteredSyncFixture) exec(t *testing.T, query string, args ...any) {
+	t.Helper()
+	if err := f.store.withConn(t.Context(), true, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(t.Context(), query, args...)
+		return err
+	}); err != nil {
+		t.Fatalf("exec %q: %v", query, err)
+	}
+}
+
+func (f *filteredSyncFixture) commit(t *testing.T) {
+	t.Helper()
+	if _, err := f.store.CommitPending(t.Context(), "test"); err != nil {
+		t.Fatalf("CommitPending: %v", err)
+	}
+}
+
+func (f *filteredSyncFixture) tipHash(t *testing.T) string {
+	t.Helper()
+	f.peerTip(t)
+	var hash string
+	if err := f.store.withDBConn(t.Context(), func(db versioncontrolops.DBConn) error {
+		var err error
+		hash, err = versioncontrolops.RemoteBranchTip(t.Context(), db, f.peer, "main")
+		return err
+	}); err != nil {
+		t.Fatalf("RemoteBranchTip: %v", err)
+	}
+	return hash
+}
+
+// assertLocalIntact checks that the local excluded data survived, the source
+// is checked out and no temporary branch is left behind.
+func (f *filteredSyncFixture) assertLocalIntact(t *testing.T, label string) {
+	t.Helper()
+	if f.issueCount(t, "main", f.newChore) != 1 || f.childRows(t, "main", f.newChore) != 3 || f.issueCount(t, "main", f.wisp) != 1 {
+		t.Fatalf("%s: local excluded data lost: chore=%d rows=%d wisp=%d", label,
+			f.issueCount(t, "main", f.newChore), f.childRows(t, "main", f.newChore), f.issueCount(t, "main", f.wisp))
+	}
+	var branch string
+	var n int
+	if err := f.store.withConn(t.Context(), false, func(tx *sql.Tx) error {
+		if err := tx.QueryRowContext(t.Context(), "SELECT active_branch()").Scan(&branch); err != nil {
+			return err
+		}
+		return tx.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM dolt_branches WHERE name LIKE '\\_\\_federation\\_push\\_%'").Scan(&n)
+	}); err != nil {
+		t.Fatalf("%s: read branches: %v", label, err)
+	}
+	if branch != "main" || n != 0 {
+		t.Fatalf("%s: checkout %q with %d temporary branches left behind, want main and none", label, branch, n)
+	}
+}
+
+// A filtering or keep failure before publication pushes nothing, reports the
+// failure, keeps local excluded data, restores the checkout and removes the
+// temporary branches. A transport failure after the keep merge leaves contents
+// unchanged, and a cleanup failure after a publication is reported without
+// hiding the push.
+func TestFilteredFederationSyncFailureKeepsLocalData(t *testing.T) {
+	ctx := t.Context()
+	f := newFilteredSyncFixture(t)
+	configureFederationExcludeTypes(t, "chore", "wisp")
+	fs := installFaultStages(t)
+	tip := f.tipHash(t)
+
+	failedSync := func(label string, syncCtx context.Context, want error) {
+		t.Helper()
+		fs.seen = nil
+		res, err := f.store.Sync(syncCtx, f.peer, "")
+		if err != nil {
+			t.Fatalf("%s: Sync: %v", label, err)
+		}
+		if res.PushError == nil || res.Pushed {
+			t.Fatalf("%s: pushed=%v push error=%v, want a reported failure", label, res.Pushed, res.PushError)
+		}
+		if want != nil && !errors.Is(res.PushError, want) {
+			t.Fatalf("%s: push error %v, want %v", label, res.PushError, want)
+		}
+		if got := f.tipHash(t); got != tip {
+			t.Fatalf("%s: peer tip moved from %s to %s", label, tip, got)
+		}
+		f.assertLocalIntact(t, label)
+	}
+
+	// A restrictive foreign key makes the DELETE itself fail.
+	f.exec(t, `CREATE TABLE fault_guard (issue_id VARCHAR(255) NOT NULL,
+		FOREIGN KEY (issue_id) REFERENCES issues(id) ON DELETE RESTRICT)`)
+	f.exec(t, "INSERT INTO fault_guard VALUES (?)", f.newChore)
+	f.commit(t)
+	failedSync("delete", ctx, nil)
+	if slices.Contains(fs.seen, "push") {
+		t.Fatal("delete: reached the push stage")
+	}
+	f.exec(t, "DROP TABLE fault_guard")
+	f.commit(t)
+
+	errInjected := errors.New("injected fault")
+	for _, stage := range []string{"commit", "keep", "revert", "merge"} {
+		fs.fault = failAt(stage, errInjected)
+		failedSync(stage, ctx, errInjected)
+		if !slices.Contains(fs.seen, stage) || slices.Contains(fs.seen, "push") {
+			t.Fatalf("%s: stages %v, want the fault stage and no push", stage, fs.seen)
+		}
+	}
+
+	// Cancellation between the filter commit and the keep merge.
+	cancelCtx, cancelSync := context.WithCancel(ctx)
+	fs.fault = func(_ context.Context, stage string, _ versioncontrolops.DBConn, _ versioncontrolops.FilteredPushRequest) error {
+		if stage == "keep" {
+			cancelSync()
+		}
+		return nil
+	}
+	failedSync("cancel", cancelCtx, context.Canceled)
+	cancelSync()
+
+	// Another writer advances the source between staging and keep.
+	other := "fedauth-other"
+	fs.fault = func(ctx context.Context, stage string, conn versioncontrolops.DBConn, req versioncontrolops.FilteredPushRequest) error {
+		if stage != "keep" {
+			return nil
+		}
+		for _, stmt := range []string{
+			"CALL DOLT_CHECKOUT('" + req.Source + "')",
+			"INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, issue_type, status, priority) VALUES ('" + other + "', 'other writer', '', '', '', '', 'task', 'open', 2)",
+			"CALL DOLT_COMMIT('-am', 'other writer')",
+			"CALL DOLT_CHECKOUT('" + req.Staging + "')",
+		} {
+			if _, err := conn.ExecContext(ctx, stmt); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	f.sync(t)
+	f.assertLocalIntact(t, "advance")
+	if f.issueCount(t, "main", other) != 1 {
+		t.Fatal("advance: keep merge dropped the other writer's issue")
+	}
+	tip = f.tipHash(t)
+
+	// A transport failure after the keep merge leaves contents unchanged.
+	errTransport := errors.New("injected transport failure")
+	fs.fault = failAt("push", errTransport)
+	failedSync("transport", ctx, errTransport)
+
+	// A cleanup failure after the push is reported and the push still counts.
+	errCleanup := errors.New("injected cleanup failure")
+	fs.fault = failAt("cleanup", errCleanup)
+	res, err := f.store.Sync(ctx, f.peer, "")
+	if err != nil {
+		t.Fatalf("cleanup: Sync: %v", err)
+	}
+	if !res.Pushed || !errors.Is(res.PushError, errCleanup) {
+		t.Fatalf("cleanup: pushed=%v push error=%v, want a reported cleanup failure after the push", res.Pushed, res.PushError)
+	}
+	if got := f.tipHash(t); got == tip {
+		t.Fatal("cleanup: peer tip did not move")
+	}
+	fs.fault = nil
+	f.assertLocalIntact(t, "cleanup")
 }

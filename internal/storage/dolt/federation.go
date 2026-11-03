@@ -472,12 +472,13 @@ func (s *DoltStore) Sync(ctx context.Context, peer string, strategy string) (*Sy
 
 	// Step 5: Push our changes to peer, filtering excluded types.
 	excludeTypes := config.GetFederationConfig().ExcludeTypes
-	if err := s.filteredPushToPeer(ctx, peer, excludeTypes); err != nil {
+	pushRes, err := s.filteredPublishToPeer(ctx, peer, excludeTypes)
+	if err != nil {
 		// Push failure is not fatal - peer may not accept pushes
 		result.PushError = err
-	} else {
-		result.Pushed = true
 	}
+	// A cleanup failure after the push is reported but does not undo it.
+	result.Pushed = err == nil || pushRes.Pushed
 
 	// Record last sync time
 	_ = s.setLastSyncTime(ctx, peer) // Best effort: sync timestamp is advisory for scheduling
@@ -498,14 +499,22 @@ func (s *DoltStore) Sync(ctx context.Context, peer string, strategy string) (*Sy
 // The special type "wisp" matches issues with ephemeral=true in the committed
 // issues table. Wisps normally live in dolt_ignore'd tables and are not pushed,
 // so this acts as a defense-in-depth safety net.
-func (s *DoltStore) filteredPushToPeer(ctx context.Context, peer string, excludeTypes []string) (retErr error) {
+func (s *DoltStore) filteredPushToPeer(ctx context.Context, peer string, excludeTypes []string) error {
+	_, err := s.filteredPublishToPeer(ctx, peer, excludeTypes)
+	return err
+}
+
+// filteredPublishToPeer is filteredPushToPeer that also reports what the
+// publication did; res.Pushed stays set when cleanup fails after the push.
+func (s *DoltStore) filteredPublishToPeer(ctx context.Context, peer string, excludeTypes []string) (res versioncontrolops.FilteredPushResult, retErr error) {
 	if len(excludeTypes) == 0 {
-		return s.PushTo(ctx, peer)
+		err := s.PushTo(ctx, peer)
+		return versioncontrolops.FilteredPushResult{Pushed: err == nil}, err
 	}
 	sourceBranch := s.branch
 	operationID, err := uuid.NewRandom()
 	if err != nil {
-		return fmt.Errorf("federation filter: generate staging branch: %w", err)
+		return res, fmt.Errorf("federation filter: generate staging branch: %w", err)
 	}
 	stagingBranch := federationStagingBranchPrefix + operationID.String()
 	keepBranch := federationKeepBranchPrefix + operationID.String()
@@ -521,13 +530,13 @@ func (s *DoltStore) filteredPushToPeer(ctx context.Context, peer string, exclude
 	// so the source ref is named, not inherited.
 	db, err := s.openLongTimeoutConn()
 	if err != nil {
-		return fmt.Errorf("federation filter: open long-timeout connection: %w", err)
+		return res, fmt.Errorf("federation filter: open long-timeout connection: %w", err)
 	}
 	defer db.Close()
 	db.SetMaxIdleConns(0)
 	conn, err := db.Conn(ctx)
 	if err != nil {
-		return fmt.Errorf("federation filter: acquire long-timeout connection: %w", err)
+		return res, fmt.Errorf("federation filter: acquire long-timeout connection: %w", err)
 	}
 	defer conn.Close()
 
@@ -543,9 +552,9 @@ func (s *DoltStore) filteredPushToPeer(ctx context.Context, peer string, exclude
 
 	peerTip, err := versioncontrolops.RemoteBranchTip(ctx, conn, peer, sourceBranch)
 	if err != nil {
-		return fmt.Errorf("federation filter: %w", err)
+		return res, fmt.Errorf("federation filter: %w", err)
 	}
-	_, err = versioncontrolops.RunFilteredPush(ctx, conn, versioncontrolops.FilteredPushRequest{
+	return versioncontrolops.RunFilteredPush(ctx, conn, versioncontrolops.FilteredPushRequest{
 		Source:       sourceBranch,
 		Staging:      stagingBranch,
 		Keep:         keepBranch,
@@ -556,7 +565,6 @@ func (s *DoltStore) filteredPushToPeer(ctx context.Context, peer string, exclude
 			return s.pushRefToPeer(ctx, peer, refspec)
 		},
 	})
-	return err
 }
 
 // cleanupFilteredStaging discards the operation connection (an in-flight cancel
@@ -576,6 +584,9 @@ func cleanupFilteredStaging(ctx context.Context, db *sql.DB, conn *sql.Conn, sou
 		cleanupErr = errors.Join(cleanupErr, fmt.Errorf("acquire cleanup connection: %w", err))
 	} else {
 		defer cleanupConn.Close()
+		if err := versioncontrolops.FilteredPushStage(cleanupCtx, "cleanup", cleanupConn, versioncontrolops.FilteredPushRequest{Source: sourceBranch}); err != nil {
+			cleanupErr = errors.Join(cleanupErr, err)
+		}
 		if err := schema.DrainCall(cleanupCtx, cleanupConn, "CALL DOLT_CHECKOUT(?)", sourceBranch); err != nil {
 			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("restore branch %s: %w", sourceBranch, err))
 		}
