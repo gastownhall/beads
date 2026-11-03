@@ -169,6 +169,60 @@ func TestCLITransferErrorRedactsRemoteCredentials(t *testing.T) {
 	}
 }
 
+// stubTransferCause is a typed cause for asserting that wrapped transfer
+// errors stay discoverable through errors.As.
+type stubTransferCause struct{ msg string }
+
+func (c stubTransferCause) Error() string { return c.msg }
+
+// TestCLITransferErrorTimeoutRedactsAllInputs pins the timeout branch of
+// cliTransferError: with an expired transfer context, credential-bearing URLs
+// in the operation description, the remote and the subprocess output must all
+// be redacted, while the configured timeout duration, the
+// BEADS_CLI_TRANSFER_TIMEOUT guidance and the cause stay intact.
+func TestCLITransferErrorTimeoutRedactsAllInputs(t *testing.T) {
+	t.Setenv(cliExecTimeoutEnv, "45s")
+	const token = "ghp_TESTTOKEN"
+	const pass = "hunter2"
+	opURL := "git+https://deploy:" + token + "@github.com/org/repo"
+	remoteURL := "ssh://alice:" + pass + "@dolt.example.com/org/db"
+	out := []byte("  pushing to " + opURL + " timed out on the wire  \n")
+	cause := stubTransferCause{"signal: killed"}
+
+	expired, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+
+	for name, op := range map[string]string{
+		"dolt push": "dolt push",
+		"peer push": "push to peer " + opURL,
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := cliTransferError(op, remoteURL, expired, out, cause)
+			msg := err.Error()
+			for _, leak := range []string{token, "deploy:", pass, "alice:"} {
+				if strings.Contains(msg, leak) {
+					t.Errorf("timeout error leaks %q: %s", leak, msg)
+				}
+			}
+			for _, want := range []string{
+				"timed out after 45s",
+				cliExecTimeoutEnv + "=<duration>",
+				`to "ssh://alice@dolt.example.com/org/db"`,
+				"pushing to git+https://github.com/org/repo timed out on the wire",
+				"signal: killed",
+			} {
+				if !strings.Contains(msg, want) {
+					t.Errorf("timeout error lost %q: %s", want, msg)
+				}
+			}
+			var unwrapped stubTransferCause
+			if !errors.As(err, &unwrapped) {
+				t.Errorf("cause not discoverable through errors.As: %v", err)
+			}
+		})
+	}
+}
+
 // withNoDoltOnPath points PATH at an empty directory for t, so a test of the
 // command prepareDoltCLITransferCommand builds does not depend on the host's
 // dolt, whose version the function checks first (a dolt not on PATH is not
