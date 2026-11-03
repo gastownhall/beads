@@ -241,6 +241,7 @@ go_test(
         "federation_pull_settle_test.go",
         "federation_test.go",
         "field_length_test.go",
+        "filtered_sync_test.go",
         "filters_test.go",
         "fk_cascade_merge_test.go",
         "fresh_bootstrap_heal_integration_test.go",

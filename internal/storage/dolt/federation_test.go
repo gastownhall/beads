@@ -1572,7 +1572,7 @@ func TestFilteredStagingPublishesRetainedWaiterUnblocked(t *testing.T) {
 	if deleted, err := result.RowsAffected(); err != nil || deleted != 1 {
 		t.Fatalf("deleted blockers = %d, err = %v, want 1, nil", deleted, err)
 	}
-	if err := store.commitFilteredStaging(ctx, conn); err != nil {
+	if _, err := versioncontrolops.CommitFilteredStaging(ctx, conn, stagingBranch); err != nil {
 		t.Fatalf("commit filtered staging: %v", err)
 	}
 
