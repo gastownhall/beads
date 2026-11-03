@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/steveyegge/beads/internal/timeparsing"
 )
@@ -105,14 +106,15 @@ func NewLexer(input string) *Lexer {
 	return &Lexer{input: input}
 }
 
-// next returns the next rune and advances position.
+// next decodes the next UTF-8 rune and advances position past it. An invalid
+// byte decodes as utf8.RuneError with width 1.
 func (l *Lexer) next() rune {
 	if l.pos >= len(l.input) {
 		l.width = 0
 		return 0
 	}
-	r := rune(l.input[l.pos])
-	l.width = 1
+	r, w := utf8.DecodeRuneInString(l.input[l.pos:])
+	l.width = w
 	l.pos += l.width
 	return r
 }
@@ -122,7 +124,8 @@ func (l *Lexer) peek() rune {
 	if l.pos >= len(l.input) {
 		return 0
 	}
-	return rune(l.input[l.pos])
+	r, _ := utf8.DecodeRuneInString(l.input[l.pos:])
+	return r
 }
 
 // backup steps back one rune.
@@ -194,7 +197,9 @@ func (l *Lexer) NextToken() (Token, error) {
 	}
 }
 
-// readString reads a quoted string.
+// readString reads a quoted string. Ordinary characters are copied from the
+// input bytes rather than re-encoded, so a value round-trips exactly as typed
+// (an invalid UTF-8 byte included).
 func (l *Lexer) readString(quote rune, startPos int) (Token, error) {
 	var sb strings.Builder
 	for {
@@ -222,10 +227,10 @@ func (l *Lexer) readString(quote rune, startPos int) (Token, error) {
 			case 0:
 				return Token{}, fmt.Errorf("unterminated escape sequence at position %d", l.pos-1)
 			default:
-				sb.WriteRune(escaped)
+				sb.WriteString(l.input[l.pos-l.width : l.pos])
 			}
 		} else {
-			sb.WriteRune(r)
+			sb.WriteString(l.input[l.pos-l.width : l.pos])
 		}
 	}
 }
