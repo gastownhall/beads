@@ -1165,6 +1165,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd mol wisp gc --closed --force` deletes closed wisps 200 per transaction
+  instead of all of them (up to 5000) in one. Before, a run cut short by a
+  caller's timeout rolled back to nothing, so on a large store every retry
+  started over and none finished. Now the batches it committed stay deleted,
+  the error says how many were deleted and that running the command again
+  deletes the rest, and the next run picks up the remainder (#4684).
 - `bd create --file` and other batch creates no longer fail with "issue
   already exists" on an id bd generated itself. The batch chose every id
   before it wrote any row, so two of its items could be handed the same short

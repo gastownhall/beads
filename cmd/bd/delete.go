@@ -490,9 +490,17 @@ func deleteBatchReporting(issueIDs []string, force, dryRun, cascade, jsonOutput 
 	// the role versions the deletion itself, on the store the rows were
 	// deleted from, and defers it in batch and off modes.
 
+	return renderDeleteResult(resolvedIDs, result, report, jsonOutput)
+}
+
+// renderDeleteResult prints a completed deletion: the --json answer, with
+// report's members added, or the text summary. jsonOutput is the caller's
+// choice, not the package flag: deleteBatch's callers pass their own value
+// (mol burn's persistent-molecule loop passes false under --json).
+func renderDeleteResult(deletedIDs []string, result issueops.DeleteResult, report map[string]interface{}, jsonOutput bool) error {
 	if jsonOutput {
 		answer := map[string]interface{}{
-			"deleted":              resolvedIDs,
+			"deleted":              deletedIDs,
 			"deleted_count":        result.Deleted,
 			"dependencies_removed": result.Dependencies,
 			"labels_removed":       result.Labels,
@@ -503,19 +511,16 @@ func deleteBatchReporting(issueIDs []string, force, dryRun, cascade, jsonOutput 
 		for key, value := range report {
 			answer[key] = value
 		}
-		if err := outputJSON(answer); err != nil {
-			return err
-		}
-	} else {
-		fmt.Printf("%s Deleted %d issue(s)\n", ui.RenderPass("✓"), result.Deleted)
-		fmt.Printf("  Removed %d dependency link(s)\n", result.Dependencies)
-		fmt.Printf("  Removed %d label(s)\n", result.Labels)
-		fmt.Printf("  Removed %d event(s)\n", result.Events)
-		fmt.Printf("  Updated text references in %d issue(s)\n", result.ReferencesUpdated)
-		if len(result.Orphaned) > 0 {
-			fmt.Printf("  %s Orphaned %d issue(s): %s\n",
-				ui.RenderWarn("⚠"), len(result.Orphaned), strings.Join(result.Orphaned, ", "))
-		}
+		return outputJSON(answer)
+	}
+	fmt.Printf("%s Deleted %d issue(s)\n", ui.RenderPass("✓"), result.Deleted)
+	fmt.Printf("  Removed %d dependency link(s)\n", result.Dependencies)
+	fmt.Printf("  Removed %d label(s)\n", result.Labels)
+	fmt.Printf("  Removed %d event(s)\n", result.Events)
+	fmt.Printf("  Updated text references in %d issue(s)\n", result.ReferencesUpdated)
+	if len(result.Orphaned) > 0 {
+		fmt.Printf("  %s Orphaned %d issue(s): %s\n",
+			ui.RenderWarn("⚠"), len(result.Orphaned), strings.Join(result.Orphaned, ", "))
 	}
 	return nil
 }
