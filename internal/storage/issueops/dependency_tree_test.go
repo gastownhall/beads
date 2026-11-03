@@ -4,12 +4,15 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"errors"
+	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -356,24 +359,82 @@ func TestGetDependencyTreeInTxDepthCutoffBeatsStub(t *testing.T) {
 	}
 }
 
-// expectTreeBlocked expects the walk's one post-walk read of the stored
-// is_blocked flag for ids (its distinct ids in encounter order): issues, then
-// wisps. Flags absent from a map return no row from that table.
+// expectTreeBlocked expects the walk's one post-walk read of the effective
+// blocked flag for ids (its distinct ids in encounter order), every true flag
+// backed by an own ready-affecting edge. Flags absent from a map return no row
+// from that table.
 func expectTreeBlocked(mock sqlmock.Sqlmock, ids []string, issues, wisps map[string]bool) {
-	for _, table := range []struct {
-		name  string
-		flags map[string]bool
-	}{{"issues", issues}, {"wisps", wisps}} {
-		rows := sqlmock.NewRows([]string{"id", "is_blocked"})
-		for _, id := range ids {
-			if b, ok := table.flags[id]; ok {
-				rows.AddRow(id, map[bool]int{false: 0, true: 1}[b])
+	expectTreeBlockedEdges(mock, ids, treeFamily{flags: issues, edges: issues}, treeFamily{flags: wisps, edges: wisps})
+}
+
+// treeFamily is one table family's answers to the post-walk blocked read: the
+// stored flags its main table returns and the ids its dependency table names
+// as having an own ready-affecting edge (a true value). A non-nil flagsErr or
+// edgesErr is returned by that query instead.
+type treeFamily struct {
+	flags, edges       map[string]bool
+	flagsErr, edgesErr error
+}
+
+// expectTreeBlockedEdges expects the post-walk blocked read: per family,
+// issues then wisps, the is_blocked read, then the own-edge probe for that
+// family's first-seen true flags only (none when there are none), each split
+// into queryBatchSize batches the way the reads run. No ids, no read. An error
+// ends the expectations at the first batch: issues errors propagate, and
+// wisps is the last read.
+func expectTreeBlockedEdges(mock sqlmock.Sqlmock, ids []string, issues, wisps treeFamily) {
+	seen := map[string]bool{}
+	for _, family := range []struct {
+		tables sqlbuild.FilterTables
+		treeFamily
+	}{{sqlbuild.IssuesFilterTables, issues}, {sqlbuild.WispsFilterTables, wisps}} {
+		var flagged []string
+		for _, batch := range idBatches(ids) {
+			read := mock.ExpectQuery(regexp.QuoteMeta("SELECT id, is_blocked FROM " + family.tables.Main + " WHERE id IN (" + placeholderList(len(batch)) + ")")).
+				WithArgs(stringArgs(batch)...)
+			if family.flagsErr != nil {
+				read.WillReturnError(family.flagsErr)
+				return
 			}
+			rows := sqlmock.NewRows([]string{"id", "is_blocked"})
+			for _, id := range batch {
+				b, ok := family.flags[id]
+				if !ok {
+					continue
+				}
+				rows.AddRow(id, map[bool]int{false: 0, true: 1}[b])
+				if b && !seen[id] {
+					flagged = append(flagged, id)
+				}
+				seen[id] = true
+			}
+			read.WillReturnRows(rows)
 		}
-		mock.ExpectQuery(regexp.QuoteMeta("SELECT id, is_blocked FROM " + table.name + " WHERE id IN (" + placeholderList(len(ids)) + ")")).
-			WithArgs(stringArgs(ids)...).
-			WillReturnRows(rows)
+		for _, batch := range idBatches(flagged) {
+			query, _ := sqlbuild.OwnReadyAffectingEdgeIDsSQL(family.tables, batch)
+			probe := mock.ExpectQuery(regexp.QuoteMeta(query)).WithArgs(stringArgs(batch)...)
+			if family.edgesErr != nil {
+				probe.WillReturnError(family.edgesErr)
+				return
+			}
+			edgeRows := sqlmock.NewRows([]string{"issue_id"})
+			for _, id := range batch {
+				if family.edges[id] {
+					edgeRows.AddRow(id)
+				}
+			}
+			probe.WillReturnRows(edgeRows)
+		}
 	}
+}
+
+// idBatches splits ids into the queryBatchSize batches the blocked reads use.
+func idBatches(ids []string) [][]string {
+	var batches [][]string
+	for start := 0; start < len(ids); start += queryBatchSize {
+		batches = append(batches, ids[start:min(start+queryBatchSize, len(ids))])
+	}
+	return batches
 }
 
 func placeholderList(n int) string {
@@ -477,5 +538,192 @@ func TestGetDependencyTreeInTxTellsABackEdgeFromACrossEdge(t *testing.T) {
 				t.Fatalf("stub of c = parent %q depth %d edge %q, want %s/%s/blocks", stub.ParentID, stub.Depth, stub.EdgeFromParent, tt.stub[0], tt.stub[1])
 			}
 		})
+	}
+}
+
+// TestTreeBlockedBatchInTxQualifiesStoredFlags pins the flag a dependency tree
+// shows (bd-42wxtt): the stored is_blocked flag, issues first, except that a
+// true flag on a row with no ready-affecting edge of its own in its family's
+// dependency table is stale and reads false, as ready work reads it (GH#3268).
+// Only first-seen true flags are probed, so an all-false read issues no probe:
+// sqlmock refuses a query it was not told to expect.
+func TestTreeBlockedBatchInTxQualifiesStoredFlags(t *testing.T) {
+	probeErr := errors.New("probe failed")
+	readErr := errors.New("connection lost")
+	// Past the batch boundary: 250 flagged issues, so the flag reads and the
+	// probes each split at queryBatchSize (200) into two batches.
+	var batchIDs []string
+	batchFlags := make(map[string]bool, 250)
+	for i := 0; i < 250; i++ {
+		id := fmt.Sprintf("flagged-%03d", i)
+		batchIDs = append(batchIDs, id)
+		batchFlags[id] = true
+	}
+	for _, tt := range []struct {
+		name           string
+		ids            []string
+		issues, wisps  treeFamily
+		want           map[string]bool
+		wantErr        error
+		wantErrMissing string
+	}{
+		{
+			name:   "stale edgeless flag reads false",
+			ids:    []string{"a"},
+			issues: treeFamily{flags: map[string]bool{"a": true}},
+			want:   map[string]bool{"a": false},
+		},
+		{
+			name:   "flag backed by an own edge reads true",
+			ids:    []string{"a", "b"},
+			issues: treeFamily{flags: map[string]bool{"a": true, "b": true}, edges: map[string]bool{"b": true}},
+			want:   map[string]bool{"a": false, "b": true},
+		},
+		{
+			name:   "all false probes nothing",
+			ids:    []string{"a", "b"},
+			issues: treeFamily{flags: map[string]bool{"a": false, "b": false}},
+			want:   map[string]bool{"a": false, "b": false},
+		},
+		{
+			name:   "absent id reads false",
+			ids:    []string{"a", "gone"},
+			issues: treeFamily{flags: map[string]bool{"a": true}, edges: map[string]bool{"a": true}},
+			want:   map[string]bool{"a": true, "gone": false},
+		},
+		{
+			name:  "wisp flags are qualified by wisp_dependencies",
+			ids:   []string{"w1", "w2"},
+			wisps: treeFamily{flags: map[string]bool{"w1": true, "w2": true}, edges: map[string]bool{"w1": true}},
+			want:  map[string]bool{"w1": true, "w2": false},
+		},
+		{
+			name:   "issues row wins a collision, a false one included",
+			ids:    []string{"x", "y"},
+			issues: treeFamily{flags: map[string]bool{"x": false, "y": true}, edges: map[string]bool{"y": true}},
+			wisps:  treeFamily{flags: map[string]bool{"x": true, "y": false}, edges: map[string]bool{"x": true}},
+			want:   map[string]bool{"x": false, "y": true},
+		},
+		{
+			name:   "missing wisps table is skipped",
+			ids:    []string{"a"},
+			issues: treeFamily{flags: map[string]bool{"a": true}, edges: map[string]bool{"a": true}},
+			wisps:  treeFamily{flagsErr: tableNotFound("wisps")},
+			want:   map[string]bool{"a": true},
+		},
+		{
+			name:  "missing wisp_dependencies keeps the raw wisp flag",
+			ids:   []string{"w"},
+			wisps: treeFamily{flags: map[string]bool{"w": true}, edgesErr: tableNotFound("wisp_dependencies")},
+			want:  map[string]bool{"w": true},
+		},
+		{
+			name:    "issues edge probe error propagates",
+			ids:     []string{"a"},
+			issues:  treeFamily{flags: map[string]bool{"a": true}, edgesErr: probeErr},
+			wantErr: probeErr,
+		},
+		{
+			name: "empty request reads nothing",
+			want: map[string]bool{},
+		},
+		{
+			name:   "reads and probes batch at queryBatchSize",
+			ids:    batchIDs,
+			issues: treeFamily{flags: batchFlags, edges: batchFlags},
+			wisps:  treeFamily{flagsErr: tableNotFound("wisps")},
+			want:   batchFlags,
+		},
+		{
+			name:    "issues read error propagates",
+			ids:     []string{"a"},
+			issues:  treeFamily{flagsErr: readErr},
+			wantErr: readErr,
+		},
+		{
+			name:    "wisps read error other than a missing table propagates",
+			ids:     []string{"a"},
+			issues:  treeFamily{flags: map[string]bool{"a": true}, edges: map[string]bool{"a": true}},
+			wisps:   treeFamily{flagsErr: readErr},
+			wantErr: readErr,
+		},
+		{
+			name:    "wisp edge probe error propagates",
+			ids:     []string{"w"},
+			wisps:   treeFamily{flags: map[string]bool{"w": true}, edgesErr: probeErr},
+			wantErr: probeErr,
+		},
+		{
+			name:           "missing dependencies table propagates",
+			ids:            []string{"a"},
+			issues:         treeFamily{flags: map[string]bool{"a": true}, edgesErr: tableNotFound("dependencies")},
+			wantErrMissing: "dependencies",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("sqlmock.New: %v", err)
+			}
+			defer db.Close()
+			mock.ExpectBegin()
+			expectTreeBlockedEdges(mock, tt.ids, tt.issues, tt.wisps)
+			tx, err := db.BeginTx(context.Background(), nil)
+			if err != nil {
+				t.Fatalf("BeginTx: %v", err)
+			}
+
+			got, err := treeBlockedBatchInTx(context.Background(), tx, tt.ids)
+			switch {
+			case tt.wantErr != nil:
+				if !errors.Is(err, tt.wantErr) {
+					t.Fatalf("err = %v, want %v", err, tt.wantErr)
+				}
+			case tt.wantErrMissing != "":
+				if name, ok := dberrors.MissingTableName(err); !ok || name != tt.wantErrMissing {
+					t.Fatalf("err = %v, want missing table %s", err, tt.wantErrMissing)
+				}
+			default:
+				if err != nil {
+					t.Fatalf("treeBlockedBatchInTx: %v", err)
+				}
+				for _, id := range tt.ids {
+					if got[id] != tt.want[id] {
+						t.Errorf("%s = %v, want %v (all: %v)", id, got[id], tt.want[id], got)
+					}
+				}
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("expectations: %v", err)
+			}
+		})
+	}
+}
+
+// TestStampTreeBlockedInTxEmptyWalkReadsNothing pins that an empty walk (a
+// depth bound of 0, a nonexistent root) reads no flags at all: the ordered
+// mock names only the transaction markers, so any read would fail it.
+func TestStampTreeBlockedInTxEmptyWalkReadsNothing(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectBegin()
+	tx, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("BeginTx: %v", err)
+	}
+	if err := stampTreeBlockedInTx(context.Background(), tx, nil); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("stampTreeBlockedInTx on an empty walk: %v", err)
+	}
+	mock.ExpectRollback()
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("Rollback: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
 	}
 }

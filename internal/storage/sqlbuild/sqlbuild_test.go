@@ -750,3 +750,27 @@ func TestColumnNames(t *testing.T) {
 		t.Errorf("QualifyColumns = %q, want %q", got, want)
 	}
 }
+
+// OwnReadyAffectingEdgeIDsSQL is the by-id probe a dependency tree qualifies
+// its walked rows' flags with (bd-42wxtt): one family's dependency table,
+// bounded to the given ids, over the same ready-affecting types the stale
+// query reads.
+func TestOwnReadyAffectingEdgeIDsSQL(t *testing.T) {
+	t.Parallel()
+	for _, tables := range []FilterTables{IssuesFilterTables, WispsFilterTables} {
+		q, args := OwnReadyAffectingEdgeIDsSQL(tables, []string{"a", "b"})
+		want := "SELECT DISTINCT issue_id FROM " + tables.Dependencies + " WHERE issue_id IN (?,?) AND type IN (" + readyAffectingTypesSQL() + ")"
+		if q != want {
+			t.Errorf("%s query = %q, want %q", tables.Main, q, want)
+		}
+		if !slices.Equal(args, []any{"a", "b"}) {
+			t.Errorf("%s args = %v, want [a b]", tables.Main, args)
+		}
+		if !strings.Contains(StaleBlockedIDsSQL(tables), "d.type IN ("+readyAffectingTypesSQL()+")") {
+			t.Errorf("%s: the stale query and the by-id probe must read the same types", tables.Main)
+		}
+	}
+	if !strings.Contains(readyAffectingTypesSQL(), "'"+string(types.DepParentChild)+"'") {
+		t.Errorf("ready-affecting types %s omit parent-child: a child blocked through its parent has only that edge", readyAffectingTypesSQL())
+	}
+}
