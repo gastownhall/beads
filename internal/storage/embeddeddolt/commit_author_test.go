@@ -445,3 +445,132 @@ func TestEmbeddedCommitAuthorNormalizesName(t *testing.T) {
 	}
 	requireNewCommitBy(t, "transaction", before, te.readHead(t, ctx), "Alice bot x", "alice@example.com")
 }
+
+// countingFallback returns a commit identity fallback that answers name/email
+// and counts its calls.
+func countingFallback(name, email string) (func() (string, string), *int) {
+	calls := 0
+	return func() (string, string) {
+		calls++
+		return name, email
+	}, &calls
+}
+
+// createInTx creates one issue in a committing transaction.
+func createInTx(t *testing.T, ctx context.Context, te *testEnv, title string) *types.Issue {
+	t.Helper()
+	issue := &types.Issue{Title: title, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	if err := te.store.RunInTransaction(ctx, "bd: create "+title, func(tx storage.Transaction) error {
+		return tx.CreateIssue(ctx, issue, "tester")
+	}); err != nil {
+		t.Fatalf("create %s: %v", title, err)
+	}
+	return issue
+}
+
+// TestEmbeddedCommitIdentityFallback pins storage.CommitIdentityConfigurer on
+// the embedded store: the fallback is consulted lazily, once per
+// configuration, only when the environment leaves a field empty, and only by
+// a store it was installed on.
+func TestEmbeddedCommitIdentityFallback(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+
+	t.Run("lazy, memoized, reset by reconfiguration", func(t *testing.T) {
+		setGitAuthorEnv(t, "", "")
+		ctx := t.Context()
+		te := newTestEnv(t, "idfb")
+		fallback, calls := countingFallback("Cli Actor", "cli@example.com")
+		te.store.SetCommitIdentityFallback(fallback)
+
+		// Reads and a transaction that writes nothing never resolve it.
+		seed := createInTx(t, ctx, te, "seed")
+		*calls = 0
+		te.store.SetCommitIdentityFallback(fallback)
+		if _, err := te.store.GetIssue(ctx, seed.ID); err != nil {
+			t.Fatalf("GetIssue: %v", err)
+		}
+		before := te.readHead(t, ctx)
+		if err := te.store.RunInTransaction(ctx, "bd: read only", func(tx storage.Transaction) error {
+			_, err := tx.GetIssue(ctx, seed.ID)
+			return err
+		}); err != nil {
+			t.Fatalf("read-only transaction: %v", err)
+		}
+		if head := te.readHead(t, ctx); head.hash != before.hash {
+			t.Fatalf("read-only transaction committed %q", head.message)
+		}
+		if *calls != 0 {
+			t.Fatalf("fallback called %d times by reads and a clean transaction, want 0", *calls)
+		}
+
+		createInTx(t, ctx, te, "first")
+		requireNewCommitBy(t, "first write", before, te.readHead(t, ctx), "Cli Actor", "cli@example.com")
+		before = te.readHead(t, ctx)
+		te.exec(t, ctx, "INSERT INTO config (`key`, value) VALUES ('test.identity.memo', 'v')")
+		if err := te.store.Commit(ctx, "test: Commit"); err != nil {
+			t.Fatalf("Commit: %v", err)
+		}
+		requireNewCommitBy(t, "second write", before, te.readHead(t, ctx), "Cli Actor", "cli@example.com")
+		if *calls != 1 {
+			t.Fatalf("fallback called %d times across two commits, want 1", *calls)
+		}
+
+		next, nextCalls := countingFallback("Next Actor", "")
+		te.store.SetCommitIdentityFallback(next)
+		before = te.readHead(t, ctx)
+		createInTx(t, ctx, te, "reconfigured")
+		requireNewCommitBy(t, "after reconfiguration", before, te.readHead(t, ctx), "Next Actor", "beads@local")
+		if *nextCalls != 1 || *calls != 1 {
+			t.Fatalf("after reconfiguration: new fallback called %d times (want 1), old %d (want 1)", *nextCalls, *calls)
+		}
+
+		te.store.SetCommitIdentityFallback(nil)
+		before = te.readHead(t, ctx)
+		createInTx(t, ctx, te, "removed")
+		requireNewCommitBy(t, "after removal", before, te.readHead(t, ctx), "beads", "beads@local")
+	})
+
+	t.Run("complete environment never calls it", func(t *testing.T) {
+		setGitAuthorEnv(t, "Alice Author", "alice@example.com")
+		ctx := t.Context()
+		te := newTestEnv(t, "idfe")
+		fallback, calls := countingFallback("Cli Actor", "cli@example.com")
+		te.store.SetCommitIdentityFallback(fallback)
+		before := te.readHead(t, ctx)
+		createInTx(t, ctx, te, "env")
+		requireNewCommitBy(t, "env write", before, te.readHead(t, ctx), "Alice Author", "alice@example.com")
+		if *calls != 0 {
+			t.Fatalf("fallback called %d times with a complete environment, want 0", *calls)
+		}
+	})
+
+	t.Run("partial and empty-once-cleaned environment fields", func(t *testing.T) {
+		setGitAuthorEnv(t, "<>()", "alice@example.com")
+		ctx := t.Context()
+		te := newTestEnv(t, "idfp")
+		fallback, calls := countingFallback("Zoë Ñandú", "cli@example.com")
+		te.store.SetCommitIdentityFallback(fallback)
+		before := te.readHead(t, ctx)
+		createInTx(t, ctx, te, "partial")
+		requireNewCommitBy(t, "partial env write", before, te.readHead(t, ctx), "Zoë Ñandú", "alice@example.com")
+		if *calls != 1 {
+			t.Fatalf("fallback called %d times, want 1", *calls)
+		}
+	})
+
+	t.Run("each store keeps its own identity", func(t *testing.T) {
+		setGitAuthorEnv(t, "", "")
+		ctx := t.Context()
+		first, second := newTestEnv(t, "idfa"), newTestEnv(t, "idfs")
+		firstFallback, _ := countingFallback("First Actor", "first@example.com")
+		secondFallback, _ := countingFallback("Second Actor", "second@example.com")
+		first.store.SetCommitIdentityFallback(firstFallback)
+		second.store.SetCommitIdentityFallback(secondFallback)
+
+		firstBefore, secondBefore := first.readHead(t, ctx), second.readHead(t, ctx)
+		createInTx(t, ctx, first, "first")
+		createInTx(t, ctx, second, "second")
+		requireNewCommitBy(t, "first store", firstBefore, first.readHead(t, ctx), "First Actor", "first@example.com")
+		requireNewCommitBy(t, "second store", secondBefore, second.readHead(t, ctx), "Second Actor", "second@example.com")
+	})
+}

@@ -297,22 +297,33 @@ export BEADS_ACTOR="my-github-handle"
 
 ### Dolt Commit Author (Embedded Mode)
 
-In releases after v1.3.2, the Dolt commits an embedded-mode workspace records
-(every write, `bd dolt commit`, merges from `bd dolt pull`, and blocked-state
-repairs) carry this author. bd resolves the name and the email separately:
+In releases after v1.3.2, an embedded-mode workspace records this author on
+the Dolt commits bd makes for issue writes, `bd init`, `bd dolt commit` and
+other whole-working-set commits, `bd vc merge` merge commits, and the
+blocked-state repair commits that follow a merge or pull and
+`bd recompute-blocked`. bd resolves the name and the email separately, each
+from the first source that sets it:
 
-- **Name:** `GIT_AUTHOR_NAME`, else the actor resolved
-  [above](#actor-identity-resolution) (including `actor` in `config.yaml`),
-  else `beads`. The final `"unknown"` fallback does not count as an actor;
-  an `"unknown"` you set on purpose does.
-- **Email:** `GIT_AUTHOR_EMAIL`, else `git config user.email`, else
+- **Name:** `GIT_AUTHOR_NAME`, `--actor`, `BEADS_ACTOR`, `BD_ACTOR`, `actor`
+  in `config.yaml`, `git config user.name`, `$USER`, then `beads`. The final
+  `"unknown"` fallback [above](#actor-identity-resolution) does not count as
+  an actor; an `"unknown"` you set on purpose does.
+- **Email:** `GIT_AUTHOR_EMAIL`, `git config user.email`, then
   `beads@local`.
 
 bd drops `<`, `>`, `(` and `)` from each value and collapses runs of
 whitespace (line breaks included) to one space, so a name such as
 `Alice (bot)` is recorded as `Alice bot`. A value left empty falls through to
-the next source. v1.3.2 and earlier record `beads <beads@local>` for most of
-these commits, and `root <root@%>` for some.
+the next source. To keep the anonymous author, set
+`GIT_AUTHOR_NAME=beads GIT_AUTHOR_EMAIL=beads@local`.
+
+Other embedded commits keep the author they had before: the commit that
+creates the database (which reads only `GIT_AUTHOR_NAME` /
+`GIT_AUTHOR_EMAIL`, else `beads <beads@local>`), schema migrations,
+`bd doctor` repairs, compaction and history flattening, and the merge commit
+`bd dolt pull` makes itself. Server mode, commit messages and existing
+history are unchanged. v1.3.2 and earlier record `beads <beads@local>` for
+most embedded commits, and `root <root@%>` for some.
 
 ## Project-Level Settings (Database)
 

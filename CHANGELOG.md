@@ -1208,15 +1208,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Embedded-mode Dolt commits now record who made them (#7628). They were
+- Embedded-mode Dolt commits for issue writes, `bd init`, `bd dolt commit`,
+  `bd vc merge` and the blocked-state repairs after a merge, pull or
+  `bd recompute-blocked` now record who made them (#7628). They were
   authored `beads <beads@local>`, or `root <root@%>` for `bd dolt commit` and
-  other whole-working-set commits, whatever the environment said. The author
-  is now `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL`, else bd's resolved actor
-  (`--actor`, `BEADS_ACTOR`, config `actor`, `git config user.name`) and
-  `git config user.email`, else `beads <beads@local>`, each field resolved on
-  its own. Transactional writes, `bd dolt commit`, merges and the
-  blocked-state repair commits all carry it. Characters Dolt's author parser
-  rejects or truncates on (`<>()`, line breaks) are dropped. See
+  other whole-working-set commits, whatever the environment said. The name is
+  now `GIT_AUTHOR_NAME`, else bd's actor (`--actor`, `BEADS_ACTOR`,
+  `BD_ACTOR`, config `actor`, `git config user.name`, `$USER`), else `beads`;
+  the email is `GIT_AUTHOR_EMAIL`, else `git config user.email`, else
+  `beads@local`. Characters Dolt's author parser rejects or truncates on
+  (`<>()`, line breaks) are dropped. Migrations, doctor repairs, compaction
+  and `bd dolt pull`'s own merge commit keep their previous author. See
   [Dolt Commit Author](docs/reference/configuration.md#dolt-commit-author-embedded-mode).
 
 - `bd config get` for a config.yaml, git-config or user-global key no longer

@@ -153,6 +153,7 @@
 40 3 TestCrossRecordInvariantContract
 40 3 TestDepRekeyMarkerStillInIgnoredSeries
 40 3 TestDoltCommitResponseLossIsIndeterminate
+40 3 TestEmbeddedCommitIdentityFallback
 40 3 TestEmbeddedDependencyEditorRefusesADottedChildGatedOnItsOwnParent
 40 3 TestEmbeddedDoltStoreIssueLifecycleBuildsOperations
 40 3 TestEmbeddedDoltStoreIssueLifecycleRejectsNilStore
@@ -197,6 +198,7 @@
 40 5 TestWithPeerAuth
 
 40 6 TestCreateBatchFastPathsMatchPerRowApplyWaitsFor_Embedded
+40 6 TestEmbeddedCommitAuthorNormalizesName
 40 6 TestEmbeddedIgnoredMigration0030RestoresALostTombstoneTable
 40 6 TestEmbeddedMergeAndSettleFKCascadeRepair
 40 6 TestEmbeddedMergeAndSettleSkipsNonMemoryConfigConflict
@@ -297,6 +299,7 @@
 40 14 TestArrivalSeq_EmbeddedReplayedCounterSeedClearsTheStamps
 40 14 TestBatchCreatorContract
 40 14 TestBlockingAnnotatorContract
+40 14 TestBuildDSN_CommitIdentityNormalizedOrDefault
 40 14 TestCountsIncludeWispDependencies
 40 14 TestEmbeddedIssueOperationsPersistenceRollbackWispAndDetachedResults
 40 14 TestEmbeddedMigrateGuardKeepsUpdatedAtAutoStampDefinitions
@@ -321,6 +324,7 @@
 40 15 TestLegacyTrackedIgnoredCursorHealsOnOpen
 40 15 TestMoleculeContract
 40 15 TestReadyWorkPageTotalFilterMatrix
+40 15 TestResolveCommitIdentity
 
 40 16 TestDescendantWalkReachesEveryTargetKindAndStopsOnCycles
 40 16 TestEmbeddedDeferredActivationRecordsFromTheFirstWrite
@@ -412,6 +416,7 @@
 
 40 22 TestEdgeReaderContract
 40 22 TestEmbeddedChildCounterNeverReissuesASweptChild
+40 22 TestEmbeddedCommitAuthorDefaults
 40 22 TestEmbeddedDepRekeyAbortLeavesMarkerUnrecorded
 40 22 TestEmbeddedDepRekeyRefusesToWriteIntoDirtyDependencies
 40 22 TestEmbeddedDependencyEditorRefusesSelfDependencyWithTheProbeSkipped
@@ -437,6 +442,7 @@
 40 23 TestJournalContract
 
 40 24 TestBootstrapperContract
+40 24 TestBuildDSN_CommitIdentityFromGitAuthorEnv
 40 24 TestEmbeddedBatchCloserOutcomesMirrorItemsIndexForIndex
 40 24 TestEmbeddedClaimerReclaimsAcrossSpellingWithoutWriting
 40 24 TestEmbeddedConfigCommitStagesConfig
@@ -510,6 +516,7 @@
 40 28 TestUpdateIssueType
 40 28 TestWithPeerAuth_RestoresEnvWhenCallbackFails
 
+40 29 TestCleanCommitIdentityField
 40 29 TestEmbeddedBatchCloserClaimFilterValueFailureIsARequestValidationFailure
 40 29 TestEmbeddedBatchCloserClaimNextIsNilWhenTheFrontIsEmpty
 40 29 TestEmbeddedDepRekeyMergesFreshDuplicateEdges
@@ -600,6 +607,7 @@
 40 35 TestCreateBatchFastPathsMatchPerRowSettled_Embedded
 40 35 TestEmbeddedBatchCloserAllIdempotentBatchLandsNothing
 40 35 TestEmbeddedClaimIssueWrapperClaimsTheWispPlane
+40 35 TestEmbeddedCommitAuthorFollowsGitAuthorEnv
 40 35 TestEmbeddedDependencyEditorGateScopeFollowsTheEdgeType
 40 35 TestEmbeddedDependencyEditorRefusesASamePlaneEdgeClosingACrossPlaneCycle
 40 35 TestEmbeddedDependencyEditorRepeatsWithinOneRequestCollapse
