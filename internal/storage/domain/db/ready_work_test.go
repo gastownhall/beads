@@ -298,6 +298,69 @@ func (s *testSuite) readyIncludeDeferred() {
 	s.Contains(issueIDsFrom(out), "bd-rdy-idf-1")
 }
 
+// TestIssueGetReadyWorkHoldsChildrenOfUndatedDeferredParent pins GH#7300: a
+// parent with status 'deferred' and no defer_until hides its direct children,
+// durable and wisp alike, from the list and the counts read. It is its own
+// suite test, not a TestIssueGetReadyWork subtest, so SetupTest resets the
+// database first: the subtests there leave future-dated rows behind, which
+// would open the deferred-parent gate without the status.
+func (s *testSuite) TestIssueGetReadyWorkHoldsChildrenOfUndatedDeferredParent() {
+	r := s.issueRepo()
+	parent := newTestIssue("bd-rdy-udp-parent", "undated deferred parent")
+	parent.IssueType = types.TypeEpic
+	parent.Status = types.StatusDeferred
+	s.Require().NoError(r.Insert(s.Ctx(), parent, "tester", domain.InsertIssueOpts{}))
+	child := newTestIssue("bd-rdy-udp-child", "child of undated deferred parent")
+	s.Require().NoError(r.Insert(s.Ctx(), child, "tester", domain.InsertIssueOpts{}))
+	s.Require().NoError(s.depRepo().Insert(s.Ctx(),
+		newDep(child.ID, parent.ID, types.DepParentChild), "tester", domain.DepInsertOpts{}))
+	wispChild := newTestIssue("bd-rdy-udp-wisp", "wisp child of undated deferred parent")
+	wispChild.Ephemeral = true
+	s.Require().NoError(r.Insert(s.Ctx(), wispChild, "tester", domain.InsertIssueOpts{UseWispsTable: true}))
+	s.Require().NoError(s.depRepo().Insert(s.Ctx(),
+		newDep(wispChild.ID, parent.ID, types.DepParentChild), "tester", domain.DepInsertOpts{UseWispsTable: true}))
+	free := newTestIssue("bd-rdy-udp-free", "unrelated ready issue")
+	s.Require().NoError(r.Insert(s.Ctx(), free, "tester", domain.InsertIssueOpts{}))
+	for _, table := range []string{"issues", "wisps"} {
+		var dated int
+		//nolint:gosec // G201: table is a hardcoded constant.
+		s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(), fmt.Sprintf(
+			"SELECT COUNT(*) FROM %s WHERE defer_until > UTC_TIMESTAMP()", table)).Scan(&dated))
+		s.Require().Zero(dated, "no %s row may have a future defer_until: only the status may hold the children", table)
+	}
+
+	countsIDs := func(page domain.SearchCountsPage) []string {
+		ids := make([]string, 0, len(page.Items))
+		for _, item := range page.Items {
+			ids = append(ids, item.ID)
+		}
+		return ids
+	}
+	held := types.WorkFilter{IncludeEphemeral: true}
+	out, err := r.GetReadyWork(s.Ctx(), held)
+	s.Require().NoError(err)
+	s.Contains(issueIDsFrom(out), free.ID, "the fixture must have ready work")
+	s.NotContains(issueIDsFrom(out), child.ID)
+	s.NotContains(issueIDsFrom(out), wispChild.ID)
+	counted, err := r.GetReadyWorkWithCounts(s.Ctx(), held)
+	s.Require().NoError(err)
+	s.Contains(countsIDs(counted), free.ID)
+	s.NotContains(countsIDs(counted), child.ID)
+	s.NotContains(countsIDs(counted), wispChild.ID)
+
+	// The control: with the hold lifted both children are ready, so the
+	// exclusion above is the deferred parent's and not the fixture's.
+	bypass := types.WorkFilter{IncludeEphemeral: true, IncludeDeferred: true}
+	out, err = r.GetReadyWork(s.Ctx(), bypass)
+	s.Require().NoError(err)
+	s.Contains(issueIDsFrom(out), child.ID)
+	s.Contains(issueIDsFrom(out), wispChild.ID)
+	counted, err = r.GetReadyWorkWithCounts(s.Ctx(), bypass)
+	s.Require().NoError(err)
+	s.Contains(countsIDs(counted), child.ID)
+	s.Contains(countsIDs(counted), wispChild.ID)
+}
+
 func (s *testSuite) readyLabelFilter() {
 	r := s.issueRepo()
 	labelRepo := NewLabelSQLRepository(s.Runner())
