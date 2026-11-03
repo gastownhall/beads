@@ -27,6 +27,7 @@ func (s *testSuite) TestIssueGetReadyWork() {
 	s.Run("Unassigned", s.readyUnassigned)
 	s.Run("ExcludesDeferred", s.readyExcludesDeferred)
 	s.Run("IncludeDeferred", s.readyIncludeDeferred)
+	s.Run("ExcludesChildrenOfUndatedDeferredParent", s.readyExcludesChildrenOfUndatedDeferredParent)
 	s.Run("LabelFilter", s.readyLabelFilter)
 	s.Run("LimitRespected", s.readyLimitRespected)
 	s.Run("SortByPriority", s.readySortByPriority)
@@ -296,6 +297,55 @@ func (s *testSuite) readyIncludeDeferred() {
 	out, err := r.GetReadyWork(s.Ctx(), types.WorkFilter{IncludeDeferred: true})
 	s.Require().NoError(err)
 	s.Contains(issueIDsFrom(out), "bd-rdy-idf-1")
+}
+
+// readyExcludesChildrenOfUndatedDeferredParent pins GH#7300 on the domain/db
+// reader: a parent with status 'deferred' and no defer_until hides its direct
+// children, durable and wisp alike, matching the classic reader. No row in the
+// database has a future defer_until, so only the status can trip the
+// deferred-parent probe. The wisp child needs ephemeral inclusion to be
+// otherwise-ready at all.
+func (s *testSuite) readyExcludesChildrenOfUndatedDeferredParent() {
+	r := s.issueRepo()
+	parent := newTestIssue("bd-rdy-udp-parent", "undated deferred parent")
+	parent.IssueType = types.TypeEpic
+	parent.Status = types.StatusDeferred
+	s.Require().NoError(r.Insert(s.Ctx(), parent, "tester", domain.InsertIssueOpts{}))
+
+	child := newTestIssue("bd-rdy-udp-child", "child of undated deferred parent")
+	s.Require().NoError(r.Insert(s.Ctx(), child, "tester", domain.InsertIssueOpts{}))
+	s.Require().NoError(s.depRepo().Insert(s.Ctx(),
+		newDep(child.ID, parent.ID, types.DepParentChild), "tester", domain.DepInsertOpts{}))
+
+	wispChild := newTestIssue("bd-rdy-udp-wisp", "wisp child of undated deferred parent")
+	wispChild.Ephemeral = true
+	s.Require().NoError(r.Insert(s.Ctx(), wispChild, "tester", domain.InsertIssueOpts{UseWispsTable: true}))
+	s.Require().NoError(s.depRepo().Insert(s.Ctx(),
+		newDep(wispChild.ID, parent.ID, types.DepParentChild), "tester", domain.DepInsertOpts{UseWispsTable: true}))
+
+	filter := types.WorkFilter{IncludeEphemeral: true}
+
+	out, err := r.GetReadyWork(s.Ctx(), filter)
+	s.Require().NoError(err)
+	got := issueIDsFrom(out)
+	s.NotContains(got, child.ID, "the durable child of an undated deferred parent must not be ready")
+	s.NotContains(got, wispChild.ID, "the wisp child of an undated deferred parent must not be ready")
+
+	counts, err := r.GetReadyWorkWithCounts(s.Ctx(), filter)
+	s.Require().NoError(err)
+	gotCounts := issueIDsFromCounts(counts)
+	s.NotContains(gotCounts, child.ID)
+	s.NotContains(gotCounts, wispChild.ID)
+
+	// The bypass: --include-deferred lifts the parent hold, so both children
+	// are listed again while the parent itself stays hidden by its status.
+	bypass := types.WorkFilter{IncludeEphemeral: true, IncludeDeferred: true}
+	out, err = r.GetReadyWork(s.Ctx(), bypass)
+	s.Require().NoError(err)
+	got = issueIDsFrom(out)
+	s.Contains(got, child.ID)
+	s.Contains(got, wispChild.ID)
+	s.NotContains(got, parent.ID, "IncludeDeferred bypasses the parent hold, not the status filter")
 }
 
 func (s *testSuite) readyLabelFilter() {
