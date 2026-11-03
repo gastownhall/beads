@@ -21,6 +21,7 @@ go_library(
         "remote_migrate_gate.go",
         "schema.go",
         "smart_remote_migrate_gate.go",
+        "temp_residue_untrack.go",
         "wisp_dep_forward_repair.go",
     ],
     embedsrcs = [
@@ -152,6 +153,7 @@ go_test(
         "cli_prepared_ddl_test.go",
         "content_hash_test.go",
         "content_skew_test.go",
+        "converged_temp_residue_test.go",
         "converged_test.go",
         "cursor_reality_test.go",
         "dep_id_backfill_test.go",
@@ -181,6 +183,7 @@ go_test(
         "schema_test.go",
         "shared_store_migrate_gate_test.go",
         "smart_remote_migrate_gate_test.go",
+        "temp_residue_untrack_test.go",
     ],
     data = [":migrations"],
     embed = [":schema"],

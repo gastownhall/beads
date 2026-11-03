@@ -1165,6 +1165,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A fresh clone of a database whose history carries a `__temp__`
+  table-rebuild intermediate committed by an older `bd` no longer breaks
+  `bd dolt pull`. The clone's first migration renamed the committed
+  intermediate in a way Dolt cannot stage, and every later pull failed with
+  "malformed database: chunk … required but not found" (or "cannot merge with
+  uncommitted changes"), which reads as corruption. A writable open now
+  removes such intermediates from HEAD in one scoped commit and keeps their
+  rows, before migrations run, so new clones open clean and clones already in
+  the broken state recover. Push once after the repair so later clones no
+  longer receive the intermediate. A user without commit permission, or a
+  database waiting for migration consent, skips the repair and stays usable.
+  An intermediate that a `dolt_ignore` row with `ignored = 0` keeps
+  versioned, by exact name or by wildcard, is left alone. On a shared Dolt
+  server the convergence fast path checks for the same intermediates (#7073,
+  reported by @bee-ghosttrack).
 - `bd create --file` and other batch creates no longer fail with "issue
   already exists" on an id bd generated itself. The batch chose every id
   before it wrote any row, so two of its items could be handed the same short

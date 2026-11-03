@@ -71,7 +71,7 @@ func TestMigrateUpReturnsDirtyTablesErrorForPreExistingDirtyTable(t *testing.T) 
 	// #4356: the open-time untrack reconcile runs right after the seed and
 	// before the no-work short-circuit. On a healthy database it is two reads
 	// and no writes.
-	expectIgnoredCursorHealNoop(mock)
+	expectOpenReconcilesNoop(mock)
 	// migrationWorkNeeded: mainSource.atLatest reads the current cursor; v42
 	// is behind LatestVersion(), so the || short-circuits before checking
 	// ignoredSource.atLatest or the content-hash/backfill probes.

@@ -624,8 +624,11 @@ var doltIgnorePatterns = []string{
 	// __temp__X at HEAD, the pattern keeps that table's drop or rename delta
 	// out of every ignore-filtered staging candidate set (dirtyTables with
 	// excludeIgnored, existingCommittableTables), so no migration commit
-	// stages it, and dolt pull refuses the uncommitted non-add delta until
-	// the store is repaired by hand. And it must be asserted before the
+	// stages it, and dolt pull refuses the uncommitted non-add delta (for a
+	// rename onto the final name, with "malformed database: chunk …
+	// required but not found"). untrackTempResidue repairs that before the
+	// ignored series runs (temp_residue_untrack.go). And it must be asserted
+	// before the
 	// ignored series runs: on a
 	// @@dolt_transaction_commit=1 server an unignored CREATE __temp__X
 	// auto-commits a real table at HEAD, and the rename to the ignored final
@@ -964,6 +967,19 @@ func migrateUpConsented(ctx context.Context, db DBConn) (int, error) {
 	reconciled := 0
 	if healed {
 		reconciled = 1
+	}
+
+	// The same add-delta trap, for table-rebuild intermediates an older binary
+	// committed at HEAD (gastownhall/beads#7073). It must run before the
+	// ignored series: on a fresh clone that series is what renames the
+	// tracked intermediate into an unstageable delta. It counts toward the
+	// total for the heal's reason, and counts whenever it may have moved HEAD.
+	untracked, err := untrackTempResidue(ctx, db)
+	if untracked {
+		reconciled++
+	}
+	if err != nil {
+		return reconciled, fmt.Errorf("untracking committed __temp__ intermediates: %w", err)
 	}
 
 	applied, err := migrateUpAfterReconcile(ctx, db, seedChanged)
