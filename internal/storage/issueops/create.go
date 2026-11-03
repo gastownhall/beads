@@ -1177,7 +1177,8 @@ func PersistComments(ctx context.Context, tx DBTX, issue *types.Issue) (CreateIs
 		// id before writing: comment merge is additive, so a comment already
 		// stored on this issue keeps its stored fields in every mode — no
 		// rewrite, no comment journal event, whatever the issue row's own
-		// stale guard decided.
+		// stale guard decided. An id owned by a different issue is a conflict
+		// the caller must see (not a silent remap, drop or duplicate).
 		var exists int
 		//nolint:gosec // G201: table is determined by ephemeral flag
 		if err := tx.QueryRowContext(ctx, fmt.Sprintf(`
@@ -1203,6 +1204,10 @@ func PersistComments(ctx context.Context, tx DBTX, issue *types.Issue) (CreateIs
 			// Already stored on this issue: keep the stored comment (fields
 			// and journal state), whatever the incoming snapshot says.
 			continue
+		default:
+			return result, fmt.Errorf(
+				"cannot import comment %s on issue %s: it is already stored on issue %s",
+				comment.ID, issue.ID, owner)
 		}
 		//nolint:gosec // G201: table is determined by ephemeral flag
 		_, err = tx.ExecContext(ctx, fmt.Sprintf(`
