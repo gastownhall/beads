@@ -148,7 +148,8 @@ func idBatchClauses(format string, ids []string) ([]string, []any) {
 // clause folds in. Computing them takes queries, which is execution-context
 // work each stack does its own way.
 type ReadyWorkWhereInputs struct {
-	// DeferredChildIDs are children of future-deferred parents; consulted
+	// DeferredChildIDs are children of deferred parents (status 'deferred'
+	// or a future defer_until, DeferredParentPredicate); consulted
 	// only when !filter.IncludeDeferred.
 	DeferredChildIDs []string
 	// ParentDescendantIDs are the transitive descendants of *filter.ParentID;
@@ -282,4 +283,17 @@ func BuildReadyWorkWhere(filter types.WorkFilter, tables FilterTables, in ReadyW
 	}
 
 	return "WHERE " + strings.Join(whereClauses, " AND "), args, nil
+}
+
+// DeferredParentPredicate renders the condition that makes a row a deferred
+// parent, whose children ready work hides: its status is 'deferred' (with or
+// without a defer_until) or its defer_until is still in the future (GH#7300).
+// qualifier prefixes each column (for example "parent."); pass "" for an
+// unqualified single-table query. Parenthesize the whole predicate wherever it
+// combines with other conditions, so the date arm cannot leak onto rows of
+// another kind.
+func DeferredParentPredicate(qualifier string) string {
+	return qualifier + "status = 'deferred' OR (" +
+		qualifier + "defer_until IS NOT NULL AND " +
+		qualifier + "defer_until > UTC_TIMESTAMP())"
 }

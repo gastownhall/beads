@@ -560,7 +560,9 @@ var (
 )
 
 // deferredChildrenQuery selects the children, recorded in depTable, of parents
-// in issueTable whose defer_until is still in the future.
+// in issueTable that are deferred: status is 'deferred', or defer_until is
+// still in the future (GH#7300 — bd defer without --until sets only the
+// status, and its children must be held all the same).
 func deferredChildrenQuery(depTable, issueTable string) string {
 	targetCol := "depends_on_issue_id"
 	if issueTable == "wisps" {
@@ -571,9 +573,8 @@ func deferredChildrenQuery(depTable, issueTable string) string {
 				FROM %s dep
 				JOIN %s parent ON parent.id = dep.%s
 				WHERE dep.type = 'parent-child'
-				  AND parent.defer_until IS NOT NULL
-				  AND parent.defer_until > UTC_TIMESTAMP()
-			`, depTable, issueTable, targetCol)
+				  AND (%s)
+			`, depTable, issueTable, targetCol, sqlbuild.DeferredParentPredicate("parent."))
 }
 
 // getDeferredChildrenAllTablesInTx is getChildrenOfDeferredParentsInTx's
@@ -608,8 +609,9 @@ func getDeferredChildrenAllTablesInTx(ctx context.Context, tx DBTX) ([]string, e
 	return childIDs, nil
 }
 
-// getChildrenOfDeferredParentsInTx returns IDs of issues whose parent has a
-// future defer_until. Works within an existing transaction.
+// getChildrenOfDeferredParentsInTx returns IDs of issues whose parent is
+// deferred (status 'deferred' or a future defer_until). Works within an
+// existing transaction.
 //
 //nolint:gosec // G201: depTable is selected from a hardcoded list below.
 func getChildrenOfDeferredParentsInTx(ctx context.Context, tx DBTX) ([]string, error) {
@@ -619,10 +621,9 @@ func getChildrenOfDeferredParentsInTx(ctx context.Context, tx DBTX) ([]string, e
 		var exists int
 		err := tx.QueryRowContext(ctx, fmt.Sprintf(`
 			SELECT 1 FROM %s
-			WHERE defer_until IS NOT NULL
-			  AND defer_until > UTC_TIMESTAMP()
+			WHERE %s
 			LIMIT 1
-		`, issueTable)).Scan(&exists)
+		`, issueTable, sqlbuild.DeferredParentPredicate(""))).Scan(&exists)
 		if err == nil {
 			hasDeferredParent = true
 			break
@@ -633,7 +634,7 @@ func getChildrenOfDeferredParentsInTx(ctx context.Context, tx DBTX) ([]string, e
 		if issueTable == "wisps" && isTableNotExistError(err) {
 			continue
 		}
-		return nil, fmt.Errorf("deferred parents: check future-deferred parents from %s: %w", issueTable, err)
+		return nil, fmt.Errorf("deferred parents: check deferred parents from %s: %w", issueTable, err)
 	}
 	if !hasDeferredParent {
 		return nil, nil
