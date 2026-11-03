@@ -230,4 +230,39 @@ func TestEmbeddedImportStrictDeps(t *testing.T) {
 			t.Errorf("edges = %v, want %s", edges, want)
 		}
 	})
+
+	// The split restore of GH#6113: part A carries A -> B, part B carries B.
+	// Strict-importing A first fails (the gate a restore script needs);
+	// importing B, then strict-importing A again, wires the edge exactly once.
+	t.Run("split_restore_rerun_converges", func(t *testing.T) {
+		t.Parallel()
+		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "sdspl")
+		pathA := partA(t, "sdspl")
+		pathB := filepath.Join(t.TempDir(), "part-b.jsonl")
+		writeJSONLFile(t, pathB, []types.Issue{issue("sdspl-b")})
+
+		if stdout, stderr, code := strictDepsImport(t, bd, dir, "--strict-deps", pathA); code != 1 {
+			t.Fatalf("first strict import of part A exit = %d, want 1\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+		}
+		if ids, _ := strictDepsRows(t, beadsDir, "sdspl"); strings.Join(ids, ",") != "sdspl-a" {
+			t.Fatalf("after part A rows = %v, want [sdspl-a] committed", ids)
+		}
+		if stdout, stderr, code := strictDepsImport(t, bd, dir, pathB); code != 0 {
+			t.Fatalf("import of part B exit = %d, want 0\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+		}
+		stdout, stderr, code := strictDepsImport(t, bd, dir, "--strict-deps", pathA)
+		if code != 0 {
+			t.Fatalf("strict re-import of part A exit = %d, want 0\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+		}
+		if strings.Contains(stderr, "Skipped dependency") {
+			t.Errorf("re-import still skipped an edge:\n%s", stderr)
+		}
+		ids, edges := strictDepsRows(t, beadsDir, "sdspl")
+		if strings.Join(ids, ",") != "sdspl-a,sdspl-b" {
+			t.Errorf("rows = %v, want [sdspl-a sdspl-b]", ids)
+		}
+		if want := "sdspl-a -> sdspl-b"; strings.Join(edges, ",") != want {
+			t.Errorf("edges = %v, want exactly [%s] (no duplicate)", edges, want)
+		}
+	})
 }
