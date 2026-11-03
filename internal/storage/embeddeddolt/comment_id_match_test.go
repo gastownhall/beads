@@ -5,6 +5,7 @@ package embeddeddolt_test
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -133,4 +134,118 @@ func TestCreateIssuesCommentIDMatch(t *testing.T) {
 			}
 		}
 	}
+
+	// AC-3: an id stored on another issue is an ownership error naming the
+	// comment and both issues; the failing transaction writes nothing.
+	assertOwnershipError := func(t *testing.T, err error, commentID, owner, incoming string) {
+		t.Helper()
+		if err == nil {
+			t.Fatalf("import of comment %s on %s succeeded, want ownership error", commentID, incoming)
+		}
+		msg := err.Error()
+		for _, want := range []string{commentID, owner, incoming} {
+			if !strings.Contains(msg, want) {
+				t.Fatalf("error %q does not name %q", msg, want)
+			}
+		}
+		if strings.Contains(msg, "1062") || strings.Contains(msg, "duplicate primary key") {
+			t.Fatalf("error %q is the opaque primary-key collision", msg)
+		}
+	}
+	issueRows := func(t *testing.T, te *testEnv, ctx context.Context, id string) int {
+		t.Helper()
+		var n int
+		te.queryScalar(t, ctx, "SELECT COUNT(*) FROM issues WHERE id = ?", []any{id}, &n)
+		return n
+	}
+	for _, tc := range []struct {
+		name      string
+		commentID string
+		opts      storage.BatchCreateOptions
+	}{
+		{"uuid_id_new_issue", commentID, plain},
+		{"uuid_id_new_issue_conflict_skip", commentID, storage.BatchCreateOptions{SkipPrefixValidation: true, ConflictSkip: true}},
+		{"uuid_id_new_issue_reject_stale", commentID, storage.BatchCreateOptions{SkipPrefixValidation: true, RejectStaleUpserts: true}},
+		{"legacy_numeric_id_new_issue", "42", plain},
+	} {
+		t.Run("other_issue_id_errors/"+tc.name, func(t *testing.T) {
+			te := newEnv(t, "cio")
+			ctx := t.Context()
+			owned := original("cio-j")
+			owned.ID = tc.commentID
+			if err := create(t, te, ctx, plain, issueWith("cio-j", false, base, owned)); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+			journalBefore := commentJournal(t, te, ctx, "cio-i")
+
+			incoming := original("cio-i")
+			incoming.ID = tc.commentID
+			incoming.Text = "text on the other issue"
+			err := create(t, te, ctx, tc.opts, issueWith("cio-i", false, base, incoming))
+			assertOwnershipError(t, err, tc.commentID, "cio-j", "cio-i")
+
+			assertStoredComment(t, te, ctx, "comments", tc.commentID, owned)
+			if n := issueRows(t, te, ctx, "cio-i"); n != 0 {
+				t.Fatalf("issue cio-i rows = %d, want the failing create rolled back", n)
+			}
+			if d := commentJournal(t, te, ctx, "cio-i") - journalBefore; d != 0 {
+				t.Fatalf("comment journal events on cio-i = %d, want 0", d)
+			}
+		})
+	}
+	for _, opts := range []struct {
+		name string
+		opts storage.BatchCreateOptions
+	}{
+		{"plain_upsert", plain},
+		{"conflict_skip", storage.BatchCreateOptions{SkipPrefixValidation: true, ConflictSkip: true}},
+	} {
+		t.Run("other_issue_id_errors/existing_issue_rolls_back_aux/"+opts.name, func(t *testing.T) {
+			te := newEnv(t, "cio")
+			ctx := t.Context()
+			if err := create(t, te, ctx, plain,
+				issueWith("cio-j", false, base, original("cio-j")),
+				issueWith("cio-i", false, base)); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+
+			incoming := issueWith("cio-i", false, base, original("cio-i"))
+			incoming.Labels = []string{"from-import"}
+			err := create(t, te, ctx, opts.opts, incoming)
+			assertOwnershipError(t, err, commentID, "cio-j", "cio-i")
+
+			assertStoredComment(t, te, ctx, "comments", commentID, original("cio-j"))
+			var labels int
+			te.queryScalar(t, ctx, "SELECT COUNT(*) FROM labels WHERE issue_id = ?", []any{"cio-i"}, &labels)
+			if labels != 0 {
+				t.Fatalf("labels on cio-i = %d, want the failing transaction's label rolled back", labels)
+			}
+			if n := commentCount(t, te, ctx, "comments", "cio-i"); n != 0 {
+				t.Fatalf("comment rows on cio-i = %d, want 0", n)
+			}
+		})
+	}
+	t.Run("other_issue_id_errors/after_rename", func(t *testing.T) {
+		// A rename moves the comment to the new id; importing the old id
+		// with that comment is reported, not remapped or silently accepted.
+		te := newEnv(t, "cio")
+		ctx := t.Context()
+		if err := create(t, te, ctx, plain, issueWith("cio-a", false, base, original("cio-a"))); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		renamed, err := te.store.GetIssue(ctx, "cio-a")
+		if err != nil {
+			t.Fatalf("get cio-a: %v", err)
+		}
+		renamed.ID = "cio-b"
+		if err := te.store.UpdateIssueID(ctx, "cio-a", "cio-b", renamed, "tester"); err != nil {
+			t.Fatalf("rename cio-a -> cio-b: %v", err)
+		}
+
+		// Another actor: the same actor would collide first on cio-a's
+		// derived created-event id, a separate rename gap.
+		err = te.store.CreateIssuesWithFullOptions(ctx, []*types.Issue{issueWith("cio-a", false, base, original("cio-a"))}, "importer", plain)
+		assertOwnershipError(t, err, commentID, "cio-b", "cio-a")
+		assertStoredComment(t, te, ctx, "comments", commentID, original("cio-b"))
+	})
 }

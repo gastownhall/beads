@@ -1192,6 +1192,9 @@ func PersistComments(ctx context.Context, tx DBTX, issue *types.Issue) (CreateIs
 		if stored == issue.ID {
 			continue
 		}
+		if stored != "" {
+			return result, fmt.Errorf("failed to insert comment for %s: comment %s already belongs to issue %s", issue.ID, comment.ID, stored)
+		}
 		//nolint:gosec // G201: table is determined by ephemeral flag
 		_, err = tx.ExecContext(ctx, fmt.Sprintf(`
 			INSERT INTO %s (id, issue_id, author, text, created_at)
