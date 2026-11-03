@@ -183,6 +183,50 @@ func TestServerModeDeferAutoWake(t *testing.T) {
 		}
 	})
 
+	t.Run("expired_dated_defer_stays_deferred_under_frozen_list_ready", func(t *testing.T) {
+		// bd-6zf0q5 (AC-2): the same freeze suppression for bd list --ready,
+		// the other ready-front read whose store open carries the
+		// classified-read permission.
+		issue := bdCreate(t, bd, p.dir, "Expired snooze under a migration freeze (bd list --ready, server mode)", "--type", "task")
+		bdDefer(t, bd, p.dir, issue.ID, "--until", "2020-01-01")
+		status, savedDeferUntil := showDeferState(t, bd, p.dir, issue.ID)
+		if status != "deferred" {
+			t.Fatalf("precondition: expected status=deferred, got %q", status)
+		}
+		control := bdCreate(t, bd, p.dir, "Open list control during a migration freeze (server mode)", "--type", "task")
+
+		marker := writeFreezeMarker(t, t.TempDir(), "migrator", "bd-6zf0q5 frozen bd list --ready")
+		freezeEnv := []string{migration.EnvFreezeFile + "=" + marker}
+
+		before := serverModeDoltLogCount(t, p)
+		issues := bdListJSONWithEnv(t, bd, p.dir, freezeEnv, "--ready")
+		after := serverModeDoltLogCount(t, p)
+		if after != before {
+			t.Errorf("frozen bd list --ready minted Dolt history (%d -> %d commits): the defer-wake sweep wrote past the freeze marker", before, after)
+		}
+		for _, iss := range issues {
+			if iss.ID == issue.ID {
+				t.Errorf("expired defer %s woke into bd list --ready under a migration freeze", issue.ID)
+			}
+		}
+		var controlVisible bool
+		for _, iss := range issues {
+			if iss.ID == control.ID {
+				controlVisible = true
+			}
+		}
+		if !controlVisible {
+			t.Errorf("open control issue %s must stay visible in bd list --ready during a freeze", control.ID)
+		}
+		status, deferUntil := showDeferState(t, bd, p.dir, issue.ID)
+		if status != "deferred" {
+			t.Errorf("expired defer must stay deferred under a migration freeze, got status=%q (server-mode bd list --ready woke it)", status)
+		}
+		if deferUntil != savedDeferUntil {
+			t.Errorf("defer_until must stay %v during a freeze, got %v", savedDeferUntil, deferUntil)
+		}
+	})
+
 }
 
 // TestServerModeDeferWakeSkippedUnderMigrationFreeze (bd-6zf0q5, follow-up to
