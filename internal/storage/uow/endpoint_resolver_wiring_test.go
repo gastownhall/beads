@@ -68,3 +68,27 @@ func TestOpenWithResolver_ConstructionNeverRediscovers(t *testing.T) {
 		t.Fatalf("dial after construction: %v, want rediscovery", err)
 	}
 }
+
+// TestDoltSQLProviderClose_StopsRediscovery: once a provider is closed, a
+// dial through its resolver can no longer start discovery, and closing again
+// is harmless.
+func TestDoltSQLProviderClose_StopsRediscovery(t *testing.T) {
+	ctx := context.Background()
+	r := refusedResolver(t)
+	provider, err := openWithResolver(ctx, r, func() (UnitOfWorkProvider, error) {
+		return &doltSQLProvider{resolver: r}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.Close(ctx); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	_, err = r.DialContext(ctx, proxy.DataNetwork, "")
+	if err == nil || rediscovered(err) {
+		t.Fatalf("dial after Close: %v, want a failure that ran no discovery", err)
+	}
+	if err := provider.Close(ctx); err != nil {
+		t.Fatalf("second Close: %v", err)
+	}
+}
