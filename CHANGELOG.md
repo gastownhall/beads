@@ -1141,7 +1141,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   blocked flag `bd ready` and `bd blocked` use, still ignoring a stale flag
   on an issue with no dependency that can block it, and `bd dep tree --json`
   (direct, proxied and served) adds `is_blocked: true` to each blocked node
-  (refs #6630).
+  (refs #6630). With `--direction up` or `both`, an issue that depends on the
+  root no longer marks an unblocked root `[BLOCKED]`.
 - `bd create --file` and other batch creates no longer fail with "issue
   already exists" on an id bd generated itself. The batch chose every id
   before it wrote any row, so two of its items could be handed the same short
