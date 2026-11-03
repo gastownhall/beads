@@ -7709,10 +7709,11 @@ components:
             dependency graph; never set by a client.
 
 
-            NOT POPULATED by the /v0 read endpoints today: they hydrate issues
-            without it, so the field is absent from their responses and its
-            absence says nothing about whether an issue is blocked. Use
-            `/v0/beads/ready` or the dependency endpoints to answer that. The
+            NOT POPULATED by the /v0 issue read endpoints today: they hydrate
+            issues without it, so the field is absent from their responses and
+            its absence says nothing about whether an issue is blocked. Use
+            `/v0/beads/ready` or the dependency endpoints to answer that; the
+            dependency tree's rows (TreeNode) do carry it. The
             field is carried by events-journal snapshots, which is where it is
             read back, and it is documented here because those snapshots
             serialize the same type this schema is pinned to.
@@ -7941,10 +7942,11 @@ components:
             dependency graph; never set by a client.
 
 
-            NOT POPULATED by the /v0 read endpoints today: they hydrate issues
-            without it, so the field is absent from their responses and its
-            absence says nothing about whether an issue is blocked. Use
-            `/v0/beads/ready` or the dependency endpoints to answer that. The
+            NOT POPULATED by the /v0 issue read endpoints today: they hydrate
+            issues without it, so the field is absent from their responses and
+            its absence says nothing about whether an issue is blocked. Use
+            `/v0/beads/ready` or the dependency endpoints to answer that; the
+            dependency tree's rows (TreeNode) do carry it. The
             field is carried by events-journal snapshots, which is where it is
             read back, and it is documented here because those snapshots
             serialize the same type this schema is pinned to.
@@ -8581,7 +8583,18 @@ components:
         status: { type: string }
         priority: { type: integer }
         issue_type: { type: string }
-        is_blocked: { type: boolean }
+        is_blocked:
+          type: boolean
+          description: >-
+            True when the issue is blocked: the stored, transitive flag
+            `/v0/beads/ready` reads, so blocking inherited through a parent or
+            from a blocker past `max_depth` counts. Absent when the issue is
+            not blocked, which includes a stale flag on an issue with no
+            ready-affecting dependency of its own. A server that predates this
+            member never sends it, so its absence there says nothing. Nor
+            does it on a synthetic external-dependency row, which no store
+            read stamps, or on a node whose only visible open blocker is such
+            a row: check the node's visible blocking edges as well.
         assignee: { type: string }
         owner: { type: string }
         estimated_minutes: { type: integer }
