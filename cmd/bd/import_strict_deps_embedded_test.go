@@ -192,4 +192,28 @@ func TestEmbeddedImportStrictDeps(t *testing.T) {
 			t.Errorf("the blocks edge did not land in the stored row:\n%s", out)
 		}
 	})
+
+	t.Run("dry_run_and_strict_deps_refused", func(t *testing.T) {
+		// A dry run never writes dependencies, so accepting --strict-deps
+		// alongside it would report a fake all-clear. The combination is
+		// refused before any row is imported.
+		file := absentTargetFile("imsd-src5")
+		stdout, stderr, err := runImport("--dry-run", "--strict-deps", file)
+		if err == nil {
+			t.Fatalf("dry-run + strict-deps must be refused\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+		}
+		if !strings.Contains(stderr, "none of the others can be") {
+			t.Errorf("missing mutually-exclusive-flags diagnostic in stderr:\n%s", stderr)
+		}
+		if !strings.Contains(stderr, "dry-run") || !strings.Contains(stderr, "strict-deps") {
+			t.Errorf("the diagnostic must name both flags:\n%s", stderr)
+		}
+		// Refused before importing: nothing landed.
+		show := exec.Command(bd, "show", "imsd-src5")
+		show.Dir = dir
+		show.Env = bdEnv(dir)
+		if out, err := show.CombinedOutput(); err == nil {
+			t.Errorf("the refused import still landed a row:\n%s", out)
+		}
+	})
 }
