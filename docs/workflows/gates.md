@@ -98,9 +98,12 @@ bd gate discover
 bd gate check --type=gl
 ```
 
-Discovery fills an empty pipeline `await_id` with the newest pipeline matching
-both the current branch and HEAD commit. It preserves existing IDs and honors
-`--dry-run`. Formula gates can also set `repo` for either GitLab type.
+Discovery fills an empty pipeline `await_id` with the newest pipeline for the
+HEAD commit that ran on the current branch, or on the merge request head ref
+(`refs/merge-requests/<iid>/head`) for a merge request event, as projects that
+only run merge request pipelines report. It inspects the newest 20 pipelines for
+that commit and skips tag and other-branch pipelines. It preserves existing IDs
+and honors `--dry-run`. Formula gates can also set `repo` for either GitLab type.
 
 `bd close` uses the same GitLab checks: pending and failed conditions require
 `--force`. As with GitHub gates, a CLI or API error produces a warning and

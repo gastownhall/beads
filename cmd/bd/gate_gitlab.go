@@ -20,6 +20,7 @@ type glPipeline struct {
 	Status string `json:"status"`
 	SHA    string `json:"sha"`
 	Ref    string `json:"ref"`
+	Source string `json:"source"`
 }
 
 type glMergeRequest struct {
@@ -182,6 +183,57 @@ func checkGLMRWithRunner(gate *types.Issue, runGL ghCommandRunner) (resolved, es
 	}
 }
 
+// glDiscoveryPageSize bounds how many of the newest pipelines for the HEAD
+// commit are inspected. One request keeps discovery cheap while letting an
+// unrelated newest pipeline (for example a tag pipeline on the same commit)
+// avoid shadowing a valid branch or merge request pipeline behind it.
+const glDiscoveryPageSize = 20
+
+const (
+	glMergeRequestRefPrefix = "refs/merge-requests/"
+	glMergeRequestRefSuffix = "/head"
+	glMergeRequestEvent     = "merge_request_event"
+)
+
+// isGLMergeRequestHeadRef reports whether ref is exactly
+// refs/merge-requests/<positive iid>/head, the ref GitLab reports for
+// pipelines that run only for merge requests.
+func isGLMergeRequestHeadRef(ref string) bool {
+	if !strings.HasPrefix(ref, glMergeRequestRefPrefix) || !strings.HasSuffix(ref, glMergeRequestRefSuffix) {
+		return false
+	}
+	iid := strings.TrimSuffix(strings.TrimPrefix(ref, glMergeRequestRefPrefix), glMergeRequestRefSuffix)
+	if iid == "" || iid[0] == '0' {
+		return false
+	}
+	for _, c := range iid {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// acceptsGLDiscoveredPipeline requires the exact HEAD commit and either the
+// requested branch ref, or a merge request head ref created by a merge request
+// event. Tag, foreign-branch, merge-result and other-source pipelines are not
+// accepted.
+func acceptsGLDiscoveredPipeline(pipeline glPipeline, branch, sha string) bool {
+	if pipeline.ID <= 0 || pipeline.SHA != sha {
+		return false
+	}
+	if pipeline.Ref == branch {
+		return true
+	}
+	return pipeline.Source == glMergeRequestEvent && isGLMergeRequestHeadRef(pipeline.Ref)
+}
+
+// discoverGLPipelineWithRunner returns the newest pipeline for sha that ran on
+// branch or, for merge-request-only projects, on a merge request head ref. The
+// request filters by commit only, because GitLab's ref filter would exclude
+// merge request pipelines, and the response is checked client side. An empty
+// result list means no pipeline exists yet; a non-empty list with no accepted
+// pipeline is an error.
 func discoverGLPipelineWithRunner(gate *types.Issue, branch, sha string, runGL ghCommandRunner) (string, error) {
 	if branch == "" || branch == "HEAD" || sha == "" {
 		return "", fmt.Errorf("GitLab discovery requires the current branch and HEAD commit")
@@ -190,7 +242,7 @@ func discoverGLPipelineWithRunner(gate *types.Issue, branch, sha string, runGL g
 	if err != nil {
 		return "", err
 	}
-	query := url.Values{"ref": {branch}, "sha": {sha}, "order_by": {"id"}, "sort": {"desc"}, "per_page": {"1"}}
+	query := url.Values{"sha": {sha}, "order_by": {"id"}, "sort": {"desc"}, "per_page": {strconv.Itoa(glDiscoveryPageSize)}}
 	var pipelines []glPipeline
 	if err := queryGitLabAPI(repo, "pipelines?"+query.Encode(), runGL, &pipelines); err != nil {
 		return "", err
@@ -198,9 +250,10 @@ func discoverGLPipelineWithRunner(gate *types.Issue, branch, sha string, runGL g
 	if len(pipelines) == 0 {
 		return "", nil
 	}
-	pipeline := pipelines[0]
-	if pipeline.ID <= 0 || pipeline.SHA != sha || pipeline.Ref != branch {
-		return "", fmt.Errorf("GitLab pipeline response does not match the requested branch HEAD")
+	for _, pipeline := range pipelines {
+		if acceptsGLDiscoveredPipeline(pipeline, branch, sha) {
+			return strconv.FormatInt(pipeline.ID, 10), nil
+		}
 	}
-	return strconv.FormatInt(pipeline.ID, 10), nil
+	return "", fmt.Errorf("no GitLab pipeline among the newest %d for the requested HEAD matches the branch or a merge request head ref", glDiscoveryPageSize)
 }

@@ -297,7 +297,8 @@ bd gate discover --branch main   # Filter by branch
 ```
 
 For a `gl:pipeline` gate, leave `await_id` empty to discover the newest
-pipeline matching both the current branch and HEAD commit:
+pipeline for the HEAD commit that ran on the current branch or on its merge
+request head ref (merge request pipelines):
 
 ```bash
 bd gate create --type=gl:pipeline --blocks bd-abc

@@ -50,8 +50,11 @@ Once matched, the gate's await_id is updated with the GitHub run ID, enabling
 subsequent polling to check the run's status.
 
 GitLab gl:pipeline gates with an empty await_id are matched to the newest
-pipeline for the current branch HEAD using glab. Pipeline discovery requires
-the current Git branch and commit; --branch can select the branch to query.
+pipeline for the current HEAD commit that ran on the branch, or on a merge
+request head ref (refs/merge-requests/<iid>/head) for a merge request event,
+using glab. Only the newest 20 pipelines for the commit are inspected.
+Pipeline discovery requires the current Git branch and commit; --branch can
+select the branch to query.
 
 A gate whose metadata.repo targets another repository is only matched
 against runs queried from that repository, never against the current

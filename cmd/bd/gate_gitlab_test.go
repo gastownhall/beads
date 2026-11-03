@@ -151,7 +151,7 @@ func TestGitLabDiscoveryAtBranchHEAD(t *testing.T) {
 			t.Fatalf("args = %q", args)
 		}
 		u, err := url.Parse(args[1])
-		if err != nil || u.Query().Get("ref") != "feature/a" || u.Query().Get("sha") != "abc123" || u.Query().Get("per_page") != "1" || u.Query().Get("sort") != "desc" {
+		if _, hasRef := u.Query()["ref"]; err != nil || hasRef || u.Query().Get("sha") != "abc123" || u.Query().Get("per_page") != "20" || u.Query().Get("order_by") != "id" || u.Query().Get("sort") != "desc" {
 			t.Fatalf("invalid discovery query: %s", args[1])
 		}
 		return []byte(`[{"id":456,"iid":2,"sha":"abc123","ref":"feature/a","status":"running"}]`), nil, nil
@@ -172,6 +172,47 @@ func TestGitLabDiscoveryAtBranchHEAD(t *testing.T) {
 	}
 	if !needsDiscovery(&types.Issue{AwaitType: "gl:pipeline"}) || needsDiscovery(&types.Issue{AwaitType: "gl:mr"}) || needsDiscovery(&types.Issue{AwaitType: "gl:pipeline", AwaitID: "456"}) {
 		t.Fatal("incorrect GitLab discovery selection")
+	}
+}
+
+func TestGitLabDiscoveryMergeRequestPipelines(t *testing.T) {
+	const head = "abc123"
+	tests := []struct {
+		name     string
+		response string
+		wantID   string
+		wantErr  bool
+	}{
+		{"branch ref", `[{"id":10,"sha":"abc123","ref":"feature/a","source":"push"}]`, "10", false},
+		{"branch ref without source", `[{"id":10,"sha":"abc123","ref":"feature/a"}]`, "10", false},
+		{"merge request head ref", `[{"id":11,"sha":"abc123","ref":"refs/merge-requests/7/head","source":"merge_request_event"}]`, "11", false},
+		{"valid branch pipeline after rejected tag pipeline", `[{"id":13,"sha":"abc123","ref":"v1.0","source":"push"},{"id":12,"sha":"abc123","ref":"feature/a","source":"push"}]`, "12", false},
+		{"valid merge request pipeline after rejected foreign branch", `[{"id":15,"sha":"abc123","ref":"other","source":"push"},{"id":14,"sha":"abc123","ref":"refs/merge-requests/8/head","source":"merge_request_event"}]`, "14", false},
+		{"newest accepted pipeline wins", `[{"id":17,"sha":"abc123","ref":"refs/merge-requests/8/head","source":"merge_request_event"},{"id":16,"sha":"abc123","ref":"feature/a","source":"push"}]`, "17", false},
+		{"merge request ref with push source", `[{"id":18,"sha":"abc123","ref":"refs/merge-requests/7/head","source":"push"}]`, "", true},
+		{"merge request ref without source", `[{"id":18,"sha":"abc123","ref":"refs/merge-requests/7/head"}]`, "", true},
+		{"merge result ref", `[{"id":19,"sha":"abc123","ref":"refs/merge-requests/7/merge","source":"merge_request_event"}]`, "", true},
+		{"nonnumeric merge request ref", `[{"id":20,"sha":"abc123","ref":"refs/merge-requests/x/head","source":"merge_request_event"}]`, "", true},
+		{"empty merge request ref", `[{"id":20,"sha":"abc123","ref":"refs/merge-requests//head","source":"merge_request_event"}]`, "", true},
+		{"zero merge request ref", `[{"id":20,"sha":"abc123","ref":"refs/merge-requests/0/head","source":"merge_request_event"}]`, "", true},
+		{"nested merge request ref", `[{"id":20,"sha":"abc123","ref":"refs/merge-requests/7/8/head","source":"merge_request_event"}]`, "", true},
+		{"foreign merge request namespace", `[{"id":21,"sha":"abc123","ref":"refs/heads/refs/merge-requests/7/head","source":"merge_request_event"}]`, "", true},
+		{"foreign branch", `[{"id":22,"sha":"abc123","ref":"other","source":"merge_request_event"}]`, "", true},
+		{"tag ref", `[{"id":23,"sha":"abc123","ref":"v1.0","source":"push"}]`, "", true},
+		{"wrong sha on branch ref", `[{"id":24,"sha":"def456","ref":"feature/a","source":"push"}]`, "", true},
+		{"wrong sha on merge request ref", `[{"id":25,"sha":"def456","ref":"refs/merge-requests/7/head","source":"merge_request_event"}]`, "", true},
+		{"nonpositive ID", `[{"id":0,"sha":"abc123","ref":"feature/a"}]`, "", true},
+		{"no pipelines yet", `[]`, "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gate := &types.Issue{AwaitType: "gl:pipeline"}
+			run := glFixtureRunner(t, []string{"api", "projects/:fullpath/pipelines?order_by=id&per_page=20&sha=abc123&sort=desc", "--method", "GET"}, tt.response)
+			id, err := discoverGLPipelineWithRunner(gate, "feature/a", head, run)
+			if (err != nil) != tt.wantErr || id != tt.wantID {
+				t.Fatalf("discovery = %q, %v; want %q, error=%v", id, err, tt.wantID, tt.wantErr)
+			}
+		})
 	}
 }
 
