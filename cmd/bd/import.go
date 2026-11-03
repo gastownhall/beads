@@ -76,6 +76,13 @@ an import is visible. To deliberately restore an older snapshot, pass
 --allow-stale, which imports every row even when it overwrites newer
 local state.
 
+Comment ids resolve before insert: a comment whose id is already stored on
+the same issue keeps its stored text, author and time — comment merge is
+additive, so this holds also under --allow-stale, where the issue row
+itself is rewritten — and a comment id already stored on a different issue
+fails the import with an error naming the comment, its owner and the
+incoming issue instead of colliding on the database's primary key.
+
 The staleness guard is import's ONLY overwrite guard: the per-field
 fences that bd update enforces (notes overwrite, live-claim reassign,
 close policy) do not apply to imported rows. Import replaces rows

@@ -1165,6 +1165,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd import` no longer fails with "duplicate primary key given" when a
+  comment id in the JSONL already exists locally with edited text, author or
+  time. The import deduplicated an incoming-id comment by content only and
+  then inserted it with the incoming id, so a re-import of an edited comment
+  collided on the comments primary key and rolled back the whole chunk. The
+  id now resolves before the insert: a comment already stored on the same
+  issue keeps its stored fields (comment merge is additive — in every mode,
+  including `--allow-stale`, where the issue row itself is rewritten), an
+  equal-timestamp snapshot whose only difference is an edited comment is
+  classified unchanged and writes no journal or version rows on repeat
+  imports, and a comment id owned by a different issue fails with an error
+  naming the comment, its owner and the incoming issue (#7114).
 - `bd create --file` and other batch creates no longer fail with "issue
   already exists" on an id bd generated itself. The batch chose every id
   before it wrote any row, so two of its items could be handed the same short
