@@ -181,3 +181,118 @@ func TestFreshCloneOfTempResidueLineagePulls(t *testing.T) {
 		})
 	}
 }
+
+// statusOf returns the dolt_status rows for names containing needle, as
+// "table_name staged=<bool> status", for preconditions and diagnostics.
+func statusOf(t *testing.T, ctx context.Context, conn *sql.Conn, needle string) []string {
+	t.Helper()
+	rows, err := conn.QueryContext(ctx, "SELECT table_name, staged, status FROM dolt_status")
+	if err != nil {
+		t.Fatalf("reading dolt_status: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []string
+	for rows.Next() {
+		var name, status string
+		var staged bool
+		if err := rows.Scan(&name, &staged, &status); err != nil {
+			t.Fatalf("reading dolt_status: %v", err)
+		}
+		if strings.Contains(name, needle) {
+			out = append(out, fmt.Sprintf("%s staged=%v %s", name, staged, status))
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("reading dolt_status: %v", err)
+	}
+	return out
+}
+
+func childCounterRows(t *testing.T, ctx context.Context, conn *sql.Conn) []string {
+	t.Helper()
+	rows, err := conn.QueryContext(ctx,
+		"SELECT parent_id, last_child FROM wisp_child_counters ORDER BY parent_id")
+	if err != nil {
+		t.Fatalf("reading wisp_child_counters: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []string
+	for rows.Next() {
+		var parent string
+		var last int
+		if err := rows.Scan(&parent, &last); err != nil {
+			t.Fatalf("reading wisp_child_counters: %v", err)
+		}
+		out = append(out, fmt.Sprintf("%s=%d", parent, last))
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("reading wisp_child_counters: %v", err)
+	}
+	return out
+}
+
+// TestTempResidueRenamedStoreConvergesOnOpen covers a store that already
+// reached the wedge before upgrading: the HEAD-tracked intermediate has been
+// renamed onto wisp_child_counters, which holds live rows. One writable open
+// must untrack the old name without touching the final table, after which
+// the pull goes through.
+func TestTempResidueRenamedStoreConvergesOnOpen(t *testing.T) {
+	ctx := t.Context()
+	lineage := newTempResidueLineage(t, "residuerenamed", true)
+	hub := lineage.hub
+
+	// A peer that never ran bd publishes a commit for the wedged store to pull.
+	_, writerData := lineage.clone(t)
+	withRawConn(t, writerData, hub.database, func(conn *sql.Conn) {
+		mustExecOn(t, ctx, conn, "INSERT INTO config (`key`, value) VALUES ('writer.marker', 'from the writer')")
+		mustExecOn(t, ctx, conn, "CALL DOLT_COMMIT('-Am', 'writer: publish a marker')")
+		mustExecOn(t, ctx, conn, "CALL DOLT_PUSH('origin', 'main')")
+	})
+
+	// Drive the store into the field's renamed state: what the pre-fix ignored
+	// series did on a fresh clone, then rows written through the final name.
+	want := []string{"wedge-a=3", "wedge-b=9"}
+	withRawConn(t, hub.dataDir, hub.database, func(conn *sql.Conn) {
+		mustExecOn(t, ctx, conn, "INSERT INTO dolt_ignore (pattern, ignored) VALUES ('__temp__%', 1)")
+		mustExecOn(t, ctx, conn, "CALL DOLT_ADD('dolt_ignore')")
+		mustExecOn(t, ctx, conn, "CALL DOLT_COMMIT('-m', 'reseed __temp__%')")
+		mustExecOn(t, ctx, conn, "DROP TABLE wisp_child_counters")
+		mustExecOn(t, ctx, conn, "RENAME TABLE "+tempResidueTable+" TO wisp_child_counters")
+		mustExecOn(t, ctx, conn, "INSERT INTO wisp_child_counters (parent_id, last_child) VALUES ('wedge-a', 3), ('wedge-b', 9)")
+		got := statusOf(t, ctx, conn, tempResidueTable)
+		if len(got) != 1 || !strings.Contains(got[0], "renamed") {
+			t.Fatalf("dolt_status for %s = %v, want the unstageable rename the field reports", tempResidueTable, got)
+		}
+		if !trackedAtHead(t, ctx, conn, tempResidueTable) {
+			t.Fatalf("%s is not tracked at HEAD; the wedge is not reproduced", tempResidueTable)
+		}
+	})
+
+	openAndClose(t, hub.beadsDir, hub.database)
+	withRawConn(t, hub.dataDir, hub.database, func(conn *sql.Conn) {
+		if trackedAtHead(t, ctx, conn, tempResidueTable) {
+			t.Errorf("%s is still tracked at HEAD after a writable open", tempResidueTable)
+		}
+		if got := statusOf(t, ctx, conn, tempResidueTable); len(got) > 0 {
+			t.Errorf("dolt_status still carries %v after a writable open", got)
+		}
+		if got := childCounterRows(t, ctx, conn); strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Errorf("wisp_child_counters rows after the repair = %v, want %v", got, want)
+		}
+	})
+
+	if err := pullOnce(t, hub.beadsDir, hub.database); err != nil {
+		t.Fatalf("pull after the repair failed: %v", err)
+	}
+	withRawConn(t, hub.dataDir, hub.database, func(conn *sql.Conn) {
+		if got := configValue(t, ctx, conn, "writer.marker"); got != "from the writer" {
+			t.Errorf("pulled writer marker = %q, want %q", got, "from the writer")
+		}
+		if got := childCounterRows(t, ctx, conn); strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Errorf("wisp_child_counters rows after the pull = %v, want %v", got, want)
+		}
+		if trackedAtHead(t, ctx, conn, tempResidueTable) {
+			t.Errorf("%s is tracked at HEAD again after the pull", tempResidueTable)
+		}
+	})
+}
