@@ -373,6 +373,7 @@ go_test(
         "sweeper_contract_test.go",
         "sweeper_retry_test.go",
         "sweeper_typed_wisp_test.go",
+        "temp_residue_untrack_server_test.go",
         "testmain_helper_sentinel_test.go",
         "testmain_test.go",
         "transaction_borrow_test.go",
