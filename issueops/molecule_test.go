@@ -821,3 +821,43 @@ func TestMoleculeAnalysisInheritanceSubtests(t *testing.T) {
 		}
 	})
 }
+
+// TestMoleculeAnalysisCloseGateParentDoesNotDarkenItsChildren pins the
+// other half of GH#7638: a parent blocked only by its own open children (a
+// close gate) is not blocked exogenously, so its children stay ready — the
+// in-memory inheritance must not turn a molecule's close gate into a
+// deadlock.
+func TestMoleculeAnalysisCloseGateParentDoesNotDarkenItsChildren(t *testing.T) {
+	ctx := context.Background()
+
+	f := newFakeMolecules()
+	f.add("m", types.TypeMolecule, types.StatusOpen)
+	f.add("m.gate", types.TypeTask, types.StatusOpen)
+	f.add("m.c1", types.TypeTask, types.StatusOpen)
+	f.add("m.c2", types.TypeTask, types.StatusOpen)
+	for _, id := range []string{"m.gate", "m.c1", "m.c2"} {
+		f.edge(id, "m", types.DepParentChild)
+	}
+	f.edge("m.gate", "m.c1", types.DepBlocks)
+	f.edge("m.gate", "m.c2", types.DepBlocks)
+
+	view, err := issueops.ViewMolecule(ctx, f.reader(), "m")
+	if err != nil {
+		t.Fatalf("ViewMolecule: %v", err)
+	}
+	analysis := view.Analysis
+	if analysis.Steps["m.gate"].IsReady {
+		t.Error("m.gate is ready; want blocked by its own open children")
+	}
+	for _, id := range []string{"m.c1", "m.c2"} {
+		if !analysis.Steps[id].IsReady {
+			t.Errorf("%s is blocked; its parent is blocked only by its own subtree (close gate, GH#7638)", id)
+		}
+		if len(analysis.Steps[id].BlockedBy) != 0 {
+			t.Errorf("%s.BlockedBy = %v, want empty (no synthetic edges from a close-gate parent)", id, analysis.Steps[id].BlockedBy)
+		}
+	}
+	if got := view.ReadySteps(); len(got) != 2 {
+		t.Errorf("ReadySteps = %v, want c1 and c2", got)
+	}
+}
