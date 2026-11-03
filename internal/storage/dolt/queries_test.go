@@ -1612,6 +1612,100 @@ func TestGetReadyWork_DeferredParentKindsHoldTheirChildren(t *testing.T) {
 	}
 }
 
+// TestGetReadyWork_ExpiredDeferredParentHoldsChildrenUntilWoken pins the
+// expiry contract of GH#7300's hold. The hold keys on the parent's persisted
+// 'deferred' status, so a dated defer whose date has passed keeps holding its
+// child until the lazy wake reopens it. A wake that succeeds releases parent
+// and child together; a store that skips the wake (strict read-only) or a wake
+// that fails (the reader tolerates it) leaves the child held, and
+// IncludeDeferred still lifts the hold.
+func TestGetReadyWork_ExpiredDeferredParentHoldsChildrenUntilWoken(t *testing.T) {
+	const parent, child = "rw-exp-epic", "rw-exp-child"
+	seed := func(ctx context.Context, t *testing.T, store *DoltStore) {
+		t.Helper()
+		past := time.Now().UTC().Add(-time.Hour)
+		seedReadyIssues(ctx, t, store, []*types.Issue{
+			{ID: parent, Status: types.StatusDeferred, IssueType: types.TypeEpic, DeferUntil: &past},
+			{ID: child, Status: types.StatusOpen},
+		}, map[string]string{child: parent})
+	}
+	parentStatus := func(ctx context.Context, t *testing.T, store *DoltStore) types.Status {
+		t.Helper()
+		issue, err := store.GetIssue(ctx, parent)
+		if err != nil {
+			t.Fatalf("GetIssue %s: %v", parent, err)
+		}
+		return issue.Status
+	}
+	assertHeld := func(ctx context.Context, t *testing.T, store *DoltStore) {
+		t.Helper()
+		if ready := readyReads(ctx, t, store, types.WorkFilter{}); slices.Contains(ready, child) || slices.Contains(ready, parent) {
+			t.Errorf("ready = %v, want neither %s nor its unwoken parent %s", ready, child, parent)
+		}
+		if got := parentStatus(ctx, t, store); got != types.StatusDeferred {
+			t.Fatalf("%s status = %q after the read, want it still deferred (no wake)", parent, got)
+		}
+		if bypass := readyReads(ctx, t, store, types.WorkFilter{IncludeDeferred: true}); !slices.Contains(bypass, child) {
+			t.Errorf("IncludeDeferred ready = %v, want it to list %s", bypass, child)
+		}
+	}
+
+	t.Run("wake succeeds", func(t *testing.T) {
+		store, cleanup := setupTestStore(t)
+		defer cleanup()
+		ctx, cancel := testContext(t)
+		defer cancel()
+		seed(ctx, t, store)
+
+		ready := readyReads(ctx, t, store, types.WorkFilter{})
+		if !slices.Contains(ready, parent) || !slices.Contains(ready, child) {
+			t.Errorf("ready = %v, want the woken %s and its child %s", ready, parent, child)
+		}
+		if got := parentStatus(ctx, t, store); got != types.StatusOpen {
+			t.Errorf("%s status = %q, want open after the wake", parent, got)
+		}
+	})
+
+	t.Run("wake skipped on a strict read-only store", func(t *testing.T) {
+		store, cleanup := setupTestStore(t)
+		defer cleanup()
+		ctx, cancel := testContext(t)
+		defer cancel()
+		seed(ctx, t, store)
+
+		store.readOnly = true
+		defer func() { store.readOnly = false }()
+		if deferWakeSweepEligible(store.readOnly, store.classifiedRead) {
+			t.Fatal("fixture: a strict read-only store must not be wake-eligible")
+		}
+		assertHeld(ctx, t, store)
+	})
+
+	t.Run("wake fails", func(t *testing.T) {
+		store, cleanup := setupTestStore(t)
+		defer cleanup()
+		ctx, cancel := testContext(t)
+		defer cancel()
+		seed(ctx, t, store)
+
+		// Every UPDATE of issues fails, so the wake sweep errors out and the
+		// reader goes on without it. The trigger lives on this test's branch.
+		if _, err := store.db.ExecContext(ctx, `CREATE TRIGGER rw_exp_block_wake
+			BEFORE UPDATE ON issues FOR EACH ROW
+			BEGIN
+				SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'test: wake blocked';
+			END`); err != nil {
+			t.Fatalf("create wake-blocking trigger: %v", err)
+		}
+		defer func() {
+			if _, err := store.db.ExecContext(context.Background(), "DROP TRIGGER IF EXISTS rw_exp_block_wake"); err != nil {
+				t.Errorf("drop wake-blocking trigger: %v", err)
+			}
+		}()
+		assertHeld(ctx, t, store)
+	})
+}
+
 // =============================================================================
 // GetBlockedIssues tests
 // =============================================================================
