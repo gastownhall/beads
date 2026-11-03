@@ -1165,6 +1165,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd ready --mol`, `bd mol show --parallel` and a molecule's auto-advance on
+  close no longer offer (or claim) a step whose parent step is blocked from
+  outside that parent. Molecule readiness read only a step's own blocking
+  edges, so the children of a blocked group showed as ready, disagreeing with
+  `bd ready` and `bd blocked`. Such a child now lists its parent in
+  `blocked_by`. A parent blocked only by its own children (a close gate) still
+  leaves them ready (GH#7638).
 - `bd cook` in runtime mode (`--mode=runtime` or any `--var`) now omits a step
   whose `condition` is false, as `bd mol pour` does, in its `--dry-run`
   listing, its JSON output and the proto `--persist` writes. It listed and

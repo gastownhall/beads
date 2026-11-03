@@ -363,8 +363,10 @@ type MoleculeAnalysis struct {
 // rather than from the workspace ready query, which excludes ephemeral rows (a
 // wisp molecule's steps are ephemeral by definition). A node is ready when it
 // is open or in progress and no open node blocks it through a blocks,
-// conditional-blocks or waits-for edge. Nodes at the same blocking depth that
-// do not block each other share a parallel group.
+// conditional-blocks or waits-for edge, or through its parent: a child of a
+// parent blocked from outside its own subtree lists that parent in BlockedBy
+// (inheritBlockedParents). Nodes at the same blocking depth that do not block
+// each other share a parallel group.
 func AnalyzeMolecule(g *MoleculeGraph) *MoleculeAnalysis {
 	analysis := &MoleculeAnalysis{
 		MoleculeID:     g.Root.ID,
@@ -376,6 +378,7 @@ func AnalyzeMolecule(g *MoleculeGraph) *MoleculeAnalysis {
 	blockedBy := make(map[string]map[string]bool)
 	blocks := make(map[string]map[string]bool)
 	parentChildren := make(map[string][]string)
+	childParents := make(map[string][]string)
 	for _, issue := range g.Issues {
 		blockedBy[issue.ID] = make(map[string]bool)
 		blocks[issue.ID] = make(map[string]bool)
@@ -383,6 +386,7 @@ func AnalyzeMolecule(g *MoleculeGraph) *MoleculeAnalysis {
 	for _, dep := range g.Dependencies {
 		if dep.Type == types.DepParentChild {
 			parentChildren[dep.DependsOnID] = append(parentChildren[dep.DependsOnID], dep.IssueID)
+			childParents[dep.IssueID] = append(childParents[dep.IssueID], dep.DependsOnID)
 		}
 	}
 	for _, dep := range g.Dependencies {
@@ -418,6 +422,7 @@ func AnalyzeMolecule(g *MoleculeGraph) *MoleculeAnalysis {
 			}
 		}
 	}
+	inheritBlockedParents(g, parentChildren, childParents, blockedBy, blocks)
 
 	for _, issue := range g.Issues {
 		info := &MoleculeStepInfo{StepID: issue.ID, Status: string(issue.Status), BlockedBy: []string{}, Blocks: []string{}}
@@ -448,6 +453,82 @@ func AnalyzeMolecule(g *MoleculeGraph) *MoleculeAnalysis {
 		groupCounter = groupParallelSteps(analysis, depthGroups[depth], blocks, blockedBy, groupCounter)
 	}
 	return analysis
+}
+
+// inheritBlockedParents carries a blocked parent's state down to its
+// children, under the parent-child contract bd ready and bd blocked keep
+// (parentsExplainedBySubtreeSQL in internal/storage/issueops): a parent that
+// is neither closed nor pinned cascades when one of its own live blockers
+// (present and not closed) lies outside its subtree, or when a parent of its
+// own cascades. A parent blocked only by its descendants — the close gate on
+// an epic — does not darken the children it waits for. Each child of a
+// cascading parent gains that parent (not every ancestor) as a blocker in
+// blockedBy and blocks, so readiness, blocking depths and parallel groups all
+// read one graph. Nothing is written back to storage.
+//
+// Unlike the SQL, the subtree walk has no depth horizon: the whole graph is in
+// memory. A parent-child cycle terminates, and a node missing from the graph
+// never relays.
+func inheritBlockedParents(g *MoleculeGraph, parentChildren, childParents map[string][]string, blockedBy, blocks map[string]map[string]bool) {
+	relays := func(id string) bool {
+		issue := g.IssueMap[id]
+		return issue != nil && issue.Status != types.StatusClosed && issue.Status != types.StatusPinned
+	}
+	// inSubtree reports whether id is ancestorID or one of its descendants,
+	// walking every parent link up from id.
+	inSubtree := func(id, ancestorID string) bool {
+		seen := make(map[string]bool)
+		pending := []string{id}
+		for len(pending) > 0 {
+			cur := pending[len(pending)-1]
+			pending = pending[:len(pending)-1]
+			if cur == ancestorID {
+				return true
+			}
+			if seen[cur] {
+				continue
+			}
+			seen[cur] = true
+			pending = append(pending, childParents[cur]...)
+		}
+		return false
+	}
+
+	cascading := make(map[string]bool)
+	var queue []string
+	for _, issue := range g.Issues {
+		if !relays(issue.ID) {
+			continue
+		}
+		for blockerID := range blockedBy[issue.ID] {
+			blocker := g.IssueMap[blockerID]
+			if blocker != nil && blocker.Status != types.StatusClosed && !inSubtree(blockerID, issue.ID) {
+				cascading[issue.ID] = true
+				queue = append(queue, issue.ID)
+				break
+			}
+		}
+	}
+	for len(queue) > 0 {
+		id := queue[0]
+		queue = queue[1:]
+		for _, childID := range parentChildren[id] {
+			if !cascading[childID] && relays(childID) {
+				cascading[childID] = true
+				queue = append(queue, childID)
+			}
+		}
+	}
+
+	for parentID := range cascading {
+		for _, childID := range parentChildren[parentID] {
+			if _, ok := blockedBy[childID]; !ok {
+				continue
+			}
+			blockedBy[childID][parentID] = true
+			blocks[parentID][childID] = true
+		}
+	}
 }
 
 func anyClosed(g *MoleculeGraph, ids []string) bool {
