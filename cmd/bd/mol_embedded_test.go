@@ -193,21 +193,31 @@ func TestEmbeddedCookPersistAppliesStepConditions(t *testing.T) {
 	}
 	bdCommand(t, bd, dir, "cook", formulaPath, "--persist", "--var", "deploy=false")
 
-	s := openStore(t, beadsDir, "cp")
-	defer s.Close()
-	children, err := s.GetDependents(t.Context(), "cond-proto")
-	if err != nil {
-		t.Fatalf("GetDependents(cond-proto): %v", err)
-	}
-	var ids []string
-	for _, child := range children {
-		ids = append(ids, child.ID)
-	}
-	slices.Sort(ids)
-	if want := []string{"cond-proto.build"}; !slices.Equal(ids, want) {
-		t.Fatalf("persisted proto children = %v, want %v", ids, want)
-	}
-	if issue, err := s.GetIssue(t.Context(), "cond-proto.deploy"); err == nil && issue != nil {
-		t.Fatalf("cook --persist wrote %s, whose condition is false", issue.ID)
+	func() {
+		s := openStore(t, beadsDir, "cp")
+		defer s.Close()
+		children, err := s.GetDependents(t.Context(), "cond-proto")
+		if err != nil {
+			t.Fatalf("GetDependents(cond-proto): %v", err)
+		}
+		var ids []string
+		for _, child := range children {
+			ids = append(ids, child.ID)
+		}
+		slices.Sort(ids)
+		if want := []string{"cond-proto.build"}; !slices.Equal(ids, want) {
+			t.Fatalf("persisted proto children = %v, want %v", ids, want)
+		}
+		if issue, err := s.GetIssue(t.Context(), "cond-proto.deploy"); err == nil && issue != nil {
+			t.Fatalf("cook --persist wrote %s, whose condition is false", issue.ID)
+		}
+	}()
+
+	// The override brings the conditioned step back, so the filter — not
+	// something else — is what kept it out.
+	bdCommand(t, bd, dir, "cook", formulaPath, "--persist", "--force", "--var", "deploy=true")
+	deploy := bdShow(t, bd, dir, "cond-proto.deploy")
+	if deploy.Status != types.StatusOpen {
+		t.Errorf("persisted deploy child with deploy=true: status = %s, want open", deploy.Status)
 	}
 }
