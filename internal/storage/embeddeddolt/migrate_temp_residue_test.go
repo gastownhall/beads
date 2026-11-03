@@ -352,3 +352,35 @@ func TestEmbeddedTempResidueUntrackCommitsOnlyEligibleRemovals(t *testing.T) {
 		}
 	})
 }
+
+// The healthy-path guard: a database with no residue must see its writable
+// open mint no commit — the reconcile's gate is one read and nothing else.
+func TestEmbeddedHealthyReopenMintsNoResidueCommit(t *testing.T) {
+	ctx := t.Context()
+	f := newPristineEmbeddedDoltFixture(t, "residuehealthy")
+	closeEmbeddedDoltStore(t, f.store)
+
+	committedBefore := 0
+	withRawConn(t, f.dataDir, f.database, func(conn *sql.Conn) {
+		if err := conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_log").Scan(&committedBefore); err != nil {
+			t.Fatalf("counting history before the reopen: %v", err)
+		}
+	})
+
+	store, err := embeddeddolt.Open(ctx, f.beadsDir, f.database, "main")
+	if err != nil {
+		t.Fatalf("healthy reopen: %v", err)
+	}
+	closeEmbeddedDoltStore(t, store)
+
+	withRawConn(t, f.dataDir, f.database, func(conn *sql.Conn) {
+		committedAfter := 0
+		if err := conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_log").Scan(&committedAfter); err != nil {
+			t.Fatalf("counting history after the reopen: %v", err)
+		}
+		if committedAfter != committedBefore {
+			t.Errorf("healthy reopen minted %d commit(s) (history %d -> %d); the residue gate must not write",
+				committedAfter-committedBefore, committedBefore, committedAfter)
+		}
+	})
+}
