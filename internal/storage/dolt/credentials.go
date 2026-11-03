@@ -149,11 +149,14 @@ func (s *DoltStore) ensureCredentialsMigrated(ctx context.Context) error {
 		return nil
 	}
 	s.credMigrateMu.Lock()
-	defer s.credMigrateMu.Unlock()
-	if s.credMigrated {
+	migrated := s.credMigrated
+	s.credMigrateMu.Unlock()
+	if migrated {
 		return nil
 	}
 
+	// The no-key probe runs outside the guard so concurrent credential
+	// readers each wait on the pool rather than queue behind this query.
 	keyPath := filepath.Join(s.beadsDir, credentialKeyFile)
 	s.mu.RLock()
 	loaded := s.credentialKey != nil
@@ -168,6 +171,12 @@ func (s *DoltStore) ensureCredentialsMigrated(ctx context.Context) error {
 			// mint a key just to look.
 			return nil
 		}
+	}
+
+	s.credMigrateMu.Lock()
+	defer s.credMigrateMu.Unlock()
+	if s.credMigrated {
+		return nil
 	}
 	if err := s.ensureCredentialKey(ctx); err != nil {
 		return fmt.Errorf("failed to initialize credential key: %w", err)

@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
@@ -501,8 +502,8 @@ func (s *EmbeddedDoltStore) Sync(ctx context.Context, peer string, strategy stri
 		result.PulledCommits = 1
 	}
 
-	// Step 5: Push
-	if err := s.PushTo(ctx, peer); err != nil {
+	// Step 5: Push, filtering excluded types.
+	if err := s.filteredPushToPeer(ctx, peer, config.GetFederationConfig().ExcludeTypes); err != nil {
 		result.PushError = err
 	} else {
 		result.Pushed = true
@@ -513,6 +514,59 @@ func (s *EmbeddedDoltStore) Sync(ctx context.Context, peer string, strategy stri
 
 	result.EndTime = time.Now()
 	return result, nil
+}
+
+// federationStagingBranchPrefix names the temporary branches of a filtered
+// push, matching the server driver.
+const federationStagingBranchPrefix = "__federation_push_staging_"
+
+// federationStagingCleanupTimeout bounds the cleanup of a filtered push.
+const federationStagingCleanupTimeout = 30 * time.Second
+
+// filteredPushToPeer pushes to a peer after filtering out excluded issue types
+// with versioncontrolops.RunFilteredPush. When excludeTypes is empty it
+// delegates to PushTo. The filter runs on one pinned connection, which also
+// performs the push, so no second connection is opened while it is held.
+func (s *EmbeddedDoltStore) filteredPushToPeer(ctx context.Context, peer string, excludeTypes []string) error {
+	if len(excludeTypes) == 0 {
+		return s.PushTo(ctx, peer)
+	}
+	var suffix [16]byte
+	if _, err := rand.Read(suffix[:]); err != nil {
+		return fmt.Errorf("federation filter: generate staging branch: %w", err)
+	}
+	stagingBranch := federationStagingBranchPrefix + fmt.Sprintf("%x", suffix)
+	return s.withPeerAuth(ctx, peer, func(user string) error {
+		return s.withMutatingPinnedDBConn(ctx, func(db versioncontrolops.DBConn) (retErr error) {
+			conn, ok := db.(versioncontrolops.BlockedRecomputeConn)
+			if !ok {
+				return fmt.Errorf("federation filter: pinned connection cannot open transactions")
+			}
+			// Armed before the branch is created; bounded and uncanceled so
+			// a canceled sync still removes the staging branch.
+			defer func() {
+				cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), federationStagingCleanupTimeout)
+				defer cancel()
+				if err := versioncontrolops.CleanupFilteredPush(cleanupCtx, db, s.branch, stagingBranch); err != nil {
+					retErr = errors.Join(retErr, fmt.Errorf("federation filter: cleanup: %w", err))
+				}
+			}()
+			peerTip, err := versioncontrolops.RemoteBranchTip(ctx, db, peer, s.branch)
+			if err != nil {
+				return fmt.Errorf("federation filter: %w", err)
+			}
+			_, err = versioncontrolops.RunFilteredPush(ctx, conn, versioncontrolops.FilteredPushRequest{
+				Source:       s.branch,
+				Staging:      stagingBranch,
+				PeerTip:      peerTip,
+				ExcludeTypes: excludeTypes,
+				Push: func(ctx context.Context, refspec string) error {
+					return versioncontrolops.Push(ctx, db, peer, refspec, user)
+				},
+			})
+			return err
+		})
+	})
 }
 
 // SyncStatus returns the synchronization status with a peer.

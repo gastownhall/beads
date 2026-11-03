@@ -485,9 +485,10 @@ func (s *DoltStore) Sync(ctx context.Context, peer string, strategy string) (*Sy
 // filteredPushToPeer pushes to a peer after filtering out excluded issue types.
 // When excludeTypes is empty, delegates directly to PushTo (no filtering).
 //
-// For non-empty excludeTypes, the method creates a temporary staging branch,
-// deletes matching issues, commits the filtered state, and pushes the staging
-// branch to the peer using a refspec. The staging branch is always cleaned up.
+// For non-empty excludeTypes, versioncontrolops.RunFilteredPush stages the
+// source branch, withholds excluded issues the peer's fetched tip does not
+// already hold, and pushes the staging branch to the peer using a refspec. The
+// staging branch is always cleaned up.
 //
 // The special type "wisp" matches issues with ephemeral=true in the committed
 // issues table. Wisps normally live in dolt_ignore'd tables and are not pushed,
@@ -509,10 +510,9 @@ func (s *DoltStore) filteredPushToPeer(ctx context.Context, peer string, exclude
 	//
 	// Audited for be-b0am's fresh-connection branch hazard: safe. Unlike
 	// recomputeAllBlocked/recomputeBlockedTx, this never depends on the
-	// fresh connection's default checkout — it explicitly creates
-	// stagingBranch FROM sourceBranch (CALL DOLT_BRANCH(stagingBranch,
-	// sourceBranch) in stageFilteredBranch) and checks that out by name, so
-	// the source ref is named, not inherited.
+	// fresh connection's default checkout — RunFilteredPush checks out
+	// sourceBranch by name and creates stagingBranch from its captured head,
+	// so the source ref is named, not inherited.
 	db, err := s.openLongTimeoutConn()
 	if err != nil {
 		return fmt.Errorf("federation filter: open long-timeout connection: %w", err)
@@ -535,75 +535,28 @@ func (s *DoltStore) filteredPushToPeer(ctx context.Context, peer string, exclude
 		}
 	}()
 
-	if err := s.stageFilteredBranch(ctx, conn, sourceBranch, stagingBranch, excludeTypes); err != nil {
-		return err
+	peerTip, err := versioncontrolops.RemoteBranchTip(ctx, conn, peer, sourceBranch)
+	if err != nil {
+		return fmt.Errorf("federation filter: %w", err)
 	}
-
-	// Push staging branch to peer, mapped to the peer's expected branch name.
-	refspec := stagingBranch + ":" + sourceBranch
-	return s.pushRefToPeer(ctx, peer, refspec)
-}
-
-// stageFilteredBranch creates the UUID staging branch from sourceBranch on the
-// pinned connection, deletes the excluded issue types on it, recomputes and
-// commits is_blocked when any rows were removed, and restores sourceBranch so
-// the caller can push the staging ref. Branch state is session-scoped, so every
-// step stays on conn.
-func (s *DoltStore) stageFilteredBranch(ctx context.Context, conn *sql.Conn, sourceBranch, stagingBranch string, excludeTypes []string) error {
-	// Create staging branch from the current branch. Cleanup is already armed:
-	// a lost response can make this call fail after Dolt created the branch.
-	if _, err := conn.ExecContext(ctx, "CALL DOLT_BRANCH(?, ?)", stagingBranch, sourceBranch); err != nil {
-		return fmt.Errorf("federation filter: create staging branch: %w", err)
-	}
-
-	// Checkout staging branch.
-	if err := versioncontrolops.CheckoutBranch(ctx, conn, stagingBranch); err != nil {
-		return fmt.Errorf("federation filter: checkout staging: %w", err)
-	}
-
-	if deleteExcludedIssues(ctx, conn, excludeTypes) {
-		if err := s.commitFilteredStaging(ctx, conn); err != nil {
-			return err
-		}
-	}
-
-	// Restore original branch context before pushing.
-	if err := versioncontrolops.CheckoutBranch(ctx, conn, sourceBranch); err != nil {
-		return fmt.Errorf("federation filter: restore branch %s: %w", sourceBranch, err)
-	}
-	return nil
-}
-
-// deleteExcludedIssues removes issues matching excludeTypes from the committed
-// issues table on conn's current (staging) branch and reports whether any rows
-// were deleted. The special type "wisp" matches ephemeral rows. A DELETE error
-// is intentionally ignored (deleted stays false for that type), preserving the
-// pre-existing best-effort filtering behavior; the caller only recomputes and
-// commits when something was actually removed.
-func deleteExcludedIssues(ctx context.Context, conn *sql.Conn, excludeTypes []string) bool {
-	deleted := false
-	for _, excludeType := range excludeTypes {
-		var result interface{ RowsAffected() (int64, error) }
-		var execErr error
-		if excludeType == "wisp" {
-			result, execErr = conn.ExecContext(ctx, "DELETE FROM issues WHERE ephemeral = 1")
-		} else {
-			result, execErr = conn.ExecContext(ctx, "DELETE FROM issues WHERE issue_type = ?", excludeType)
-		}
-		if execErr == nil {
-			if n, _ := result.RowsAffected(); n > 0 {
-				deleted = true
-			}
-		}
-	}
-	return deleted
+	_, err = versioncontrolops.RunFilteredPush(ctx, conn, versioncontrolops.FilteredPushRequest{
+		Source:       sourceBranch,
+		Staging:      stagingBranch,
+		PeerTip:      peerTip,
+		ExcludeTypes: excludeTypes,
+		Push: func(ctx context.Context, refspec string) error {
+			return s.pushRefToPeer(ctx, peer, refspec)
+		},
+	})
+	return err
 }
 
 // cleanupFilteredStaging discards the operation connection (an in-flight cancel
-// invalidates it), then restores sourceBranch and deletes stagingBranch on a
-// fresh, uncanceled, bounded connection. Errors are joined; a non-nil result is
-// wrapped by the caller with the "federation filter: cleanup" context.
-func cleanupFilteredStaging(ctx context.Context, db *sql.DB, conn *sql.Conn, sourceBranch, stagingBranch string) error {
+// invalidates it), then restores sourceBranch and deletes the temporary
+// branches on a fresh, uncanceled, bounded connection. Errors are joined; a
+// non-nil result is wrapped by the caller with the "federation filter: cleanup"
+// context.
+func cleanupFilteredStaging(ctx context.Context, db *sql.DB, conn *sql.Conn, sourceBranch string, branches ...string) error {
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), federationStagingCleanupTimeout)
 	defer cancel()
 	var cleanupErr error
@@ -618,8 +571,10 @@ func cleanupFilteredStaging(ctx context.Context, db *sql.DB, conn *sql.Conn, sou
 		if err := schema.DrainCall(cleanupCtx, cleanupConn, "CALL DOLT_CHECKOUT(?)", sourceBranch); err != nil {
 			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("restore branch %s: %w", sourceBranch, err))
 		}
-		if err := deleteFederationStagingBranch(cleanupCtx, cleanupConn, stagingBranch); err != nil {
-			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("delete staging branch: %w", err))
+		for _, branch := range branches {
+			if err := deleteFederationStagingBranch(cleanupCtx, cleanupConn, branch); err != nil {
+				cleanupErr = errors.Join(cleanupErr, fmt.Errorf("delete temporary branch %s: %w", branch, err))
+			}
 		}
 	}
 	return cleanupErr
@@ -636,28 +591,6 @@ func deleteFederationStagingBranch(ctx context.Context, conn *sql.Conn, stagingB
 		return nil
 	}
 	return err
-}
-
-// commitFilteredStaging repairs and commits the filtered graph on the staging
-// branch selected by conn. Dolt branch state is session-scoped, so every step
-// stays on that pinned connection.
-func (s *DoltStore) commitFilteredStaging(ctx context.Context, conn *sql.Conn) error {
-	tx, err := conn.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("federation filter: begin staged is_blocked recompute: %w", err)
-	}
-	if _, err := issueops.RecomputeAllIsBlockedInTx(ctx, tx); err != nil {
-		_ = tx.Rollback()
-		return fmt.Errorf("federation filter: recompute staged is_blocked: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("federation filter: commit staged is_blocked recompute: %w", err)
-	}
-	if _, err := conn.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', ?)",
-		"federation: exclude private issue types"); err != nil {
-		return fmt.Errorf("federation filter: commit filtered state: %w", err)
-	}
-	return nil
 }
 
 // prepareCLIRouteForPeerGitProtocol reports whether the SQL-visible peer
