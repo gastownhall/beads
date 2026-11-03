@@ -861,3 +861,80 @@ func TestMoleculeAnalysisCloseGateParentDoesNotDarkenItsChildren(t *testing.T) {
 		t.Errorf("ReadySteps = %v, want c1 and c2", got)
 	}
 }
+
+// TestMoleculeAnalysisExcludesTheRoot pins GH#7638's counting half: the
+// molecule root is a container, not a step, so the analysis reports the
+// non-root nodes only — and a root-only molecule reports zero steps.
+func TestMoleculeAnalysisExcludesTheRoot(t *testing.T) {
+	ctx := context.Background()
+
+	build := func() *fakeMolecules {
+		f := newFakeMolecules()
+		f.add("m", types.TypeMolecule, types.StatusOpen)
+		f.add("m.a", types.TypeTask, types.StatusOpen)
+		f.add("m.b", types.TypeTask, types.StatusOpen)
+		f.add("m.c", types.TypeTask, types.StatusOpen)
+		for _, id := range []string{"m.a", "m.b", "m.c"} {
+			f.edge(id, "m", types.DepParentChild)
+		}
+		f.edge("m.b", "m.a", types.DepBlocks)
+		return f
+	}
+
+	f := build()
+	view, err := issueops.ViewMolecule(ctx, f.reader(), "m")
+	if err != nil {
+		t.Fatalf("ViewMolecule: %v", err)
+	}
+	analysis := view.Analysis
+	if _, ok := analysis.Steps["m"]; ok {
+		t.Error("analysis.Steps contains the root; the root is not a step")
+	}
+	if got := len(analysis.Steps); got != 3 {
+		t.Errorf("len(analysis.Steps) = %d, want 3 (the non-root nodes)", got)
+	}
+	if analysis.TotalSteps != 3 {
+		t.Errorf("TotalSteps = %d, want 3", analysis.TotalSteps)
+	}
+	if analysis.ReadySteps != 2 {
+		t.Errorf("ReadySteps = %d, want 2 (a and c)", analysis.ReadySteps)
+	}
+	for id := range analysis.Steps {
+		for _, p := range analysis.Steps[id].CanParallel {
+			if p == "m" {
+				t.Errorf("%s.CanParallel contains the root; the root parallelizes with nothing", id)
+			}
+		}
+	}
+	for _, members := range analysis.ParallelGroups {
+		if slices.Contains(members, "m") {
+			t.Errorf("ParallelGroups member list %v contains the root", members)
+		}
+	}
+	for _, step := range view.Steps {
+		if step.Issue.ID == "m" {
+			t.Error("view.Steps contains the root")
+		}
+	}
+	if got := view.ReadySteps(); len(got) != 2 {
+		t.Errorf("ReadySteps() = %v, want a and c (the root is not a ready step)", got)
+	}
+	if view.Total != 3 {
+		t.Errorf("view.Total = %d, want 3", view.Total)
+	}
+
+	// A root-only molecule has no steps at all.
+	f = newFakeMolecules()
+	f.add("lonely", types.TypeMolecule, types.StatusOpen)
+	view, err = issueops.ViewMolecule(ctx, f.reader(), "lonely")
+	if err != nil {
+		t.Fatalf("ViewMolecule on a root-only molecule: %v", err)
+	}
+	if view.Analysis.TotalSteps != 0 || view.Analysis.ReadySteps != 0 || len(view.Analysis.Steps) != 0 {
+		t.Errorf("root-only molecule: TotalSteps = %d, ReadySteps = %d, Steps = %v; want all zero",
+			view.Analysis.TotalSteps, view.Analysis.ReadySteps, view.Analysis.Steps)
+	}
+	if len(view.Ready) != 0 {
+		t.Errorf("root-only molecule view.Ready = %v, want empty", view.Ready)
+	}
+}

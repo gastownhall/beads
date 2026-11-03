@@ -1165,6 +1165,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Molecule readiness now inherits a blocked parent (`bd mol view`,
+  `bd ready --mol`, the stepper). A step whose parent is blocked by something
+  outside the parent's own subtree read as ready, so bd offered work that
+  `bd ready` and `bd blocked` refused. The analysis now darkens such a
+  parent's children with analysis-only edges (never persisted), seeded only
+  by exogenous live blockers: a parent blocked only by its own descendants
+  (a close gate) darkens nothing, and closed or pinned nodes never darken or
+  relay. The molecule root is also no longer counted as a step, so
+  `bd mol view`'s totals, ready list and parallel groups report the work
+  items, and a molecule with no children reports zero steps (#7638).
 - `bd cook --mode=runtime` now filters out steps whose `condition` evaluates
   to false, matching `bd mol pour`. Runtime cook previously listed — and
   `--persist` created children for — steps that pour correctly omits, across

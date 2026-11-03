@@ -366,11 +366,12 @@ type MoleculeAnalysis struct {
 // conditional-blocks or waits-for edge. A parent blocked from outside its own
 // subtree also blocks its children (inheritBlockedParents, GH#7638). Nodes at
 // the same blocking depth that
-// do not block each other share a parallel group.
+// do not block each other share a parallel group. The root is not a step:
+// it appears in neither Steps, ReadySteps, TotalSteps nor the parallel
+// groups (GH#7638), so a root-only molecule has zero steps.
 func AnalyzeMolecule(g *MoleculeGraph) *MoleculeAnalysis {
 	analysis := &MoleculeAnalysis{
 		MoleculeID:     g.Root.ID,
-		TotalSteps:     len(g.Issues),
 		ParallelGroups: make(map[string][]string),
 		Steps:          make(map[string]*MoleculeStepInfo),
 	}
@@ -432,6 +433,9 @@ func AnalyzeMolecule(g *MoleculeGraph) *MoleculeAnalysis {
 	inheritBlockedParents(g, blockedBy, blocks, parentChildren, childParents)
 
 	for _, issue := range g.Issues {
+		if issue.ID == g.Root.ID {
+			continue // the root is not a step (GH#7638)
+		}
 		info := &MoleculeStepInfo{StepID: issue.ID, Status: string(issue.Status), BlockedBy: []string{}, Blocks: []string{}}
 		for blockerID := range blockedBy[issue.ID] {
 			if blocker := g.IssueMap[blockerID]; blocker != nil && blocker.Status != types.StatusClosed {
@@ -453,12 +457,16 @@ func AnalyzeMolecule(g *MoleculeGraph) *MoleculeAnalysis {
 	depths := blockingDepths(g, blockedBy)
 	depthGroups := make(map[int][]string)
 	for _, issue := range g.Issues {
+		if issue.ID == g.Root.ID {
+			continue // the root joins no parallel group (GH#7638)
+		}
 		depthGroups[depths[issue.ID]] = append(depthGroups[depths[issue.ID]], issue.ID)
 	}
 	groupCounter := 0
 	for depth := 0; depth <= len(g.Issues); depth++ {
 		groupCounter = groupParallelSteps(analysis, depthGroups[depth], blocks, blockedBy, groupCounter)
 	}
+	analysis.TotalSteps = len(analysis.Steps)
 	return analysis
 }
 
@@ -678,9 +686,9 @@ type MoleculeView struct {
 	// several are); NextStep the first ready step.
 	CurrentStep *Issue
 	NextStep    *Issue
-	// Ready holds every node the analysis marks ready (open or in progress
-	// with no open blocker inside the molecule), root included, in graph
-	// order: `bd ready --mol`'s list, hydrated rows (assignee and all).
+	// Ready holds every step the analysis marks ready (open or in progress
+	// with no open blocker inside the molecule), the root never a step, in
+	// graph order: `bd ready --mol`'s list, hydrated rows (assignee and all).
 	Ready []*Issue
 }
 
