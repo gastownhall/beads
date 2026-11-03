@@ -13,7 +13,10 @@ go_library(
 
 go_test(
     name = "peercred_test",
-    srcs = ["peercred_test.go"],
+    srcs = [
+        "migrate_test.go",
+        "peercred_test.go",
+    ],
     embed = [":peercred"],
 )
 

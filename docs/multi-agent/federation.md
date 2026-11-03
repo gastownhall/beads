@@ -109,6 +109,29 @@ Stored credentials are used automatically during sync:
 bd federation add-peer town-gamma 192.168.1.100:3306/beads --user sync-bot
 ```
 
+The key is a machine-local file (`.beads/.beads-credential-key`) that never
+replicates. The encrypted password itself is a row in the database, so it
+travels with every push and pull.
+
+In releases after v1.3.2, a stored password is bound to its peer's name, its
+exact URL and its username. If a password is copied into another peer's row,
+or that row's URL or username changes, it no longer decrypts there. bd refuses
+the peer's credential and never falls back to environment credentials. Re-add
+the peer to store a fresh password.
+
+The first federation command after upgrading converts this machine's older,
+unbound passwords to the bound format. It commits that change and records
+completion in `.beads/.beads-credential-key.v2-migrated` (machine-local and
+gitignored). A read-only command does not convert them, so run
+`bd federation list-peers` first. An encrypted password can appear in the
+database's history under another peer's name, URL or username. bd cannot know
+whose password that is, so it does not convert it. It prints a warning naming
+the peer and the `bd federation add-peer` command that re-adds it. That peer's
+stored password stays unusable until you re-add it. If you did not copy the
+password between peers yourself, rotate it. An older-format password that
+arrives after the conversion (for example from a pull) is refused, not
+converted.
+
 ### JSON Output
 
 For scripting, use the `--json` flag:

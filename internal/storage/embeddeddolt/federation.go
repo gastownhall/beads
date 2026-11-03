@@ -110,8 +110,10 @@ func (s *EmbeddedDoltStore) ensureCredentialsMigrated(ctx context.Context) error
 		return nil
 	}
 
+	var res peercred.MigrationResult
 	if err := s.withMutatingPinnedDBConn(ctx, func(db versioncontrolops.DBConn) error {
-		res, err := peercred.Migrate(ctx, db, key, [][]byte{key})
+		var err error
+		res, err = peercred.Migrate(ctx, db, key, [][]byte{key})
 		if err != nil {
 			return err
 		}
@@ -122,6 +124,9 @@ func (s *EmbeddedDoltStore) ensureCredentialsMigrated(ctx context.Context) error
 			"federation: bind stored peer credentials to their peers", commitAuthor)
 	}); err != nil {
 		return fmt.Errorf("upgrade stored peer credentials: %w", err)
+	}
+	for _, r := range res.Skipped {
+		fmt.Fprint(federationWarnWriter, peercred.SkipWarning(runtime.GOOS, r))
 	}
 	if err := peercred.WriteMarker(keyPath, key); err != nil {
 		return err

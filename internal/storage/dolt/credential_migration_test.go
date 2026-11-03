@@ -30,6 +30,15 @@ func reopenCredentialTestStore(t *testing.T, prev *DoltStore) *DoltStore {
 	return store
 }
 
+// removeMarker drops the completion marker the seed store wrote while adding
+// its peers: the upgrade replaces the binary, not the store.
+func removeMarker(t *testing.T, store *DoltStore) {
+	t.Helper()
+	if err := os.Remove(filepath.Join(store.beadsDir, credentialKeyFile+".v2-migrated")); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+}
+
 func serverBlob(t *testing.T, store *DoltStore, peer string) []byte {
 	t.Helper()
 	var blob []byte
@@ -84,8 +93,8 @@ func TestServerLegacyCredentialsMigrateOnce(t *testing.T) {
 	if err := seed.doltAddAndCommit(ctx, []string{"federation_peers"}, "legacy credentials"); err != nil {
 		t.Fatalf("commit legacy rows: %v", err)
 	}
+	removeMarker(t, seed)
 	markerPath := filepath.Join(seed.beadsDir, credentialKeyFile+".v2-migrated")
-	_ = os.Remove(markerPath)
 
 	store := reopenCredentialTestStore(t, seed)
 	for peer, want := range map[string]string{"team": "team-secret", "derived": "derived-secret"} {
