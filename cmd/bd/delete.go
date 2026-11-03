@@ -490,12 +490,14 @@ func deleteBatchReporting(issueIDs []string, force, dryRun, cascade, jsonOutput 
 	// the role versions the deletion itself, on the store the rows were
 	// deleted from, and defers it in batch and off modes.
 
-	return renderDeleteResult(resolvedIDs, result, report)
+	return renderDeleteResult(resolvedIDs, result, report, jsonOutput)
 }
 
 // renderDeleteResult prints a completed deletion: the --json answer, with
-// report's members added, or the text summary.
-func renderDeleteResult(deletedIDs []string, result issueops.DeleteResult, report map[string]interface{}) error {
+// report's members added, or the text summary. jsonOutput is the caller's
+// choice, not the package flag: deleteBatch's callers pass their own value
+// (mol burn's persistent-molecule loop passes false under --json).
+func renderDeleteResult(deletedIDs []string, result issueops.DeleteResult, report map[string]interface{}, jsonOutput bool) error {
 	if jsonOutput {
 		answer := map[string]interface{}{
 			"deleted":              deletedIDs,

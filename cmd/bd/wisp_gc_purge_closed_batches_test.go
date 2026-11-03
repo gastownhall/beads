@@ -81,11 +81,40 @@ func usePurgeBatchStore(t *testing.T, n int, d *recordingDeleter) []string {
 		ids[i] = fmt.Sprintf("closed-%04d", i)
 		issues[i] = &types.Issue{ID: ids[i], Status: types.StatusClosed, Ephemeral: true, IssueType: types.TypeTask}
 	}
-	oldStore, oldJSON := store, jsonOutput
+	oldStore, oldJSON, oldRootCtx, oldDidWrite := store, jsonOutput, rootCtx, commandDidWrite.Load()
 	store = &purgeBatchStore{issues: issues, deleter: d}
 	jsonOutput = false
-	t.Cleanup(func() { store, jsonOutput = oldStore, oldJSON })
+	rootCtx = context.Background()
+	commandDidWrite.Store(false)
+	commandDeletedIssueIDs.reset()
+	t.Cleanup(func() {
+		store, jsonOutput, rootCtx = oldStore, oldJSON, oldRootCtx
+		commandDidWrite.Store(oldDidWrite)
+		commandDeletedIssueIDs.reset()
+	})
 	return ids
+}
+
+// assertExportBookkeeping pins the GH#5896 handoff to auto-export: a write
+// happened, and exactly the committed ids are recorded as deleted. Without
+// it the export's orphan guard sees them as JSONL-only records and wedges.
+func assertExportBookkeeping(t *testing.T, committed, notCommitted []string) {
+	t.Helper()
+	if !commandDidWrite.Load() {
+		t.Error("commandDidWrite is false after committed batches; auto-export would skip the write")
+	}
+	for _, id := range committed {
+		if !commandDeletedIssueIDs.has(id) {
+			t.Errorf("committed id %s is not in commandDeletedIssueIDs; the export orphan guard would wedge on it", id)
+			break
+		}
+	}
+	for _, id := range notCommitted {
+		if commandDeletedIssueIDs.has(id) {
+			t.Errorf("id %s of an uncommitted batch is in commandDeletedIssueIDs", id)
+			break
+		}
+	}
 }
 
 // TestWispPurgeClosedForceCommitsInBoundedBatches is the regression test for
@@ -120,6 +149,7 @@ func TestWispPurgeClosedForceCommitsInBoundedBatches(t *testing.T) {
 	if !slices.Equal(got, ids) {
 		t.Errorf("batches deleted %d ids; want each of the %d candidates once, in order", len(got), len(ids))
 	}
+	assertExportBookkeeping(t, ids, nil)
 }
 
 // TestWispPurgeClosedForceReportsProgressOnFailure pins what a cut-short run
@@ -127,7 +157,7 @@ func TestWispPurgeClosedForceCommitsInBoundedBatches(t *testing.T) {
 // and the error tells the caller how far it got and that a rerun continues.
 func TestWispPurgeClosedForceReportsProgressOnFailure(t *testing.T) {
 	d := &recordingDeleter{failOn: 2}
-	usePurgeBatchStore(t, 401, d)
+	ids := usePurgeBatchStore(t, 401, d)
 
 	var err error
 	stderr := captureStderr(t, func() {
@@ -147,6 +177,7 @@ func TestWispPurgeClosedForceReportsProgressOnFailure(t *testing.T) {
 			t.Errorf("stderr %q does not say %q", stderr, want)
 		}
 	}
+	assertExportBookkeeping(t, ids[:200], ids[200:])
 }
 
 // TestWispPurgeClosedForceOrphansOnlySurvivors: a batch reports as orphaned a
@@ -181,4 +212,46 @@ func TestWispPurgeClosedForceOrphansOnlySurvivors(t *testing.T) {
 	if !slices.Equal(answer.Orphaned, []string{"live-step"}) {
 		t.Errorf("orphaned_issues = %v; want only the surviving dependent [live-step]", answer.Orphaned)
 	}
+}
+
+// TestDeleteBatchJSONFollowsCallerParameter: deleteBatch prints its result in
+// the mode its caller passes, not the package --json flag. `bd mol burn A B
+// --force --json` deletes each persistent molecule with deleteBatch(...,
+// jsonOutput=false, ...) (mol_burn.go) and prints one BatchBurnResult at the
+// end; a per-molecule delete document before it would be read first by a
+// consumer decoding one JSON value.
+func TestDeleteBatchJSONFollowsCallerParameter(t *testing.T) {
+	t.Run("false under global --json prints the text summary", func(t *testing.T) {
+		ids := usePurgeBatchStore(t, 2, &recordingDeleter{})
+		jsonOutput = true
+
+		out := captureStdout(t, func() error {
+			return deleteBatch(nil, ids, true, false, false, false, false, nil, "mol burn")
+		})
+
+		if json.Valid([]byte(strings.TrimSpace(out))) {
+			t.Fatalf("caller passed jsonOutput=false, got a JSON document: %q", out)
+		}
+		if !strings.Contains(out, "Deleted 2 issue(s)") {
+			t.Errorf("want the text summary, got %q", out)
+		}
+	})
+	t.Run("true without global --json prints the JSON answer", func(t *testing.T) {
+		ids := usePurgeBatchStore(t, 2, &recordingDeleter{})
+
+		out := captureStdout(t, func() error {
+			return deleteBatch(nil, ids, true, false, false, true, false, nil, "mol burn")
+		})
+
+		var answer struct {
+			Deleted      []string `json:"deleted"`
+			DeletedCount int      `json:"deleted_count"`
+		}
+		if err := json.Unmarshal([]byte(out), &answer); err != nil {
+			t.Fatalf("caller passed jsonOutput=true, want one JSON answer, got %q: %v", out, err)
+		}
+		if answer.DeletedCount != 2 || !slices.Equal(answer.Deleted, ids) {
+			t.Errorf("deleted=%v deleted_count=%d; want %v, 2", answer.Deleted, answer.DeletedCount, ids)
+		}
+	})
 }

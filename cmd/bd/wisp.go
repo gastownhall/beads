@@ -1041,7 +1041,7 @@ func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, excludeTyp
 	if err != nil {
 		return HandleError("%v", err)
 	}
-	if err := renderDeleteResult(deleted, result, nil); err != nil {
+	if err := renderDeleteResult(deleted, result, nil, jsonOutput); err != nil {
 		return err
 	}
 	if !jsonOutput {
