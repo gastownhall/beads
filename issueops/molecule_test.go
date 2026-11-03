@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"sort"
 	"testing"
@@ -968,4 +969,61 @@ func TestMoleculeAnalysisCloseGateParentDoesNotDarkenItsChildren(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestMoleculeAnalysisExcludesTheRoot pins that the analysis covers the
+// molecule's steps only: the root is the molecule itself, not a step to run.
+func TestMoleculeAnalysisExcludesTheRoot(t *testing.T) {
+	t.Run("a root with three steps", func(t *testing.T) {
+		f := newFakeMolecules()
+		f.add("m", types.TypeMolecule, types.StatusOpen)
+		for _, id := range []string{"m.a", "m.b", "m.c"} {
+			f.add(id, types.TypeTask, types.StatusOpen)
+			f.edge(id, "m", types.DepParentChild)
+		}
+		f.edge("m.c", "m.a", types.DepBlocks)
+		view, err := issueops.ViewMolecule(context.Background(), f.reader(), "m")
+		if err != nil {
+			t.Fatalf("ViewMolecule: %v", err)
+		}
+		a := view.Analysis
+		if a.TotalSteps != 3 || a.ReadySteps != 2 {
+			t.Errorf("TotalSteps, ReadySteps = %d, %d, want 3, 2", a.TotalSteps, a.ReadySteps)
+		}
+		if _, ok := a.Steps["m"]; ok || len(a.Steps) != 3 {
+			t.Errorf("Steps = %v, want m.a, m.b and m.c without the root", slices.Sorted(maps.Keys(a.Steps)))
+		}
+		for _, issue := range view.Ready {
+			if issue.ID == "m" {
+				t.Errorf("Ready lists the root m")
+			}
+		}
+		for name, members := range a.ParallelGroups {
+			if slices.Contains(members, "m") {
+				t.Errorf("parallel group %s = %v, want no root", name, members)
+			}
+		}
+		for id, info := range a.Steps {
+			if slices.Contains(info.CanParallel, "m") {
+				t.Errorf("%s CanParallel = %v, want no root", id, info.CanParallel)
+			}
+		}
+		if got := a.Steps["m.a"].CanParallel; !slices.Equal(got, []string{"m.b"}) {
+			t.Errorf("m.a CanParallel = %v, want [m.b]", got)
+		}
+	})
+
+	t.Run("a root with no steps", func(t *testing.T) {
+		f := newFakeMolecules()
+		f.add("m", types.TypeMolecule, types.StatusOpen)
+		view, err := issueops.ViewMolecule(context.Background(), f.reader(), "m")
+		if err != nil {
+			t.Fatalf("ViewMolecule: %v", err)
+		}
+		a := view.Analysis
+		if a.TotalSteps != 0 || a.ReadySteps != 0 || len(a.Steps) != 0 || len(a.ParallelGroups) != 0 || len(view.Ready) != 0 {
+			t.Errorf("analysis = %d steps, %d ready, %v, groups %v, view ready %v, want all empty",
+				a.TotalSteps, a.ReadySteps, a.Steps, a.ParallelGroups, view.Ready)
+		}
+	})
 }
