@@ -8,6 +8,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -161,5 +162,87 @@ func TestFilteredSyncExcludesTypes(t *testing.T) {
 	src := f.store.branch
 	if f.issueCount(t, ctx, src, f.newChore) != 1 || f.childRows(t, ctx, src, f.newChore) != 3 || f.issueCount(t, ctx, src, f.wisp) != 1 {
 		t.Error("filtered sync removed local excluded data")
+	}
+}
+
+// checkFilterAncestryAtPush fails each filtered publication whose filter commit
+// is not yet an ancestor of the source branch, and returns a count of the
+// filtered publications it checked.
+func checkFilterAncestryAtPush(t *testing.T) *int {
+	t.Helper()
+	checked := new(int)
+	t.Cleanup(versioncontrolops.SetFilteredPushStageHookForTest(func(ctx context.Context, stage string, conn versioncontrolops.DBConn, req versioncontrolops.FilteredPushRequest) error {
+		if stage != "push" {
+			return nil
+		}
+		var head, msg string
+		if err := conn.QueryRowContext(ctx, fmt.Sprintf("SELECT commit_hash, message FROM dolt_log('%s') LIMIT 1", req.Staging)).Scan(&head, &msg); err != nil {
+			return err
+		}
+		if msg != versioncontrolops.FilteredPushCommitMsg {
+			return nil
+		}
+		*checked++
+		var n int
+		if err := conn.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM dolt_log('%s') WHERE commit_hash = ?", req.Source), head).Scan(&n); err != nil {
+			return err
+		}
+		if n == 0 {
+			return fmt.Errorf("filter commit %s is not an ancestor of %s at publication", head, req.Source)
+		}
+		return nil
+	}))
+	return checked
+}
+
+func (f *filteredSyncFixture) sync(t *testing.T, ctx context.Context) {
+	t.Helper()
+	res, err := f.store.Sync(ctx, f.peer, "")
+	if err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if res.PushError != nil {
+		t.Fatalf("Sync push error: %v", res.PushError)
+	}
+}
+
+// Later syncs keep the sender's excluded data: the filter commit is an ancestor
+// of the source when it is published, so merging the peer's tip back cannot
+// delete the withheld rows.
+func TestFilteredSyncKeepsLocalExcludedIssues(t *testing.T) {
+	ctx, cancel := testContext(t)
+	defer cancel()
+	f := newFilteredSyncFixture(t, ctx)
+	configureFederationExcludeTypes(t, "chore", "wisp")
+	checked := checkFilterAncestryAtPush(t)
+
+	f.sync(t, ctx)
+	// Edit the excluded issue locally and add a shared one between syncs.
+	if _, err := f.store.AddIssueComment(ctx, f.newChore, "test", "second comment"); err != nil {
+		t.Fatalf("AddIssueComment: %v", err)
+	}
+	if err := f.store.UpdateIssue(ctx, f.newChore, map[string]interface{}{"title": "local chore, edited"}, "test"); err != nil {
+		t.Fatalf("UpdateIssue: %v", err)
+	}
+	task2 := "test-task2"
+	f.create(t, ctx, &types.Issue{ID: task2, Title: "second shared task", IssueType: types.TypeTask, Status: types.StatusOpen, Priority: 2})
+	f.commit(t, ctx, "second round")
+	f.sync(t, ctx)
+	f.sync(t, ctx)
+
+	if *checked < 2 {
+		t.Fatalf("checked %d filtered publications, want 2", *checked)
+	}
+	src := f.store.branch
+	if f.issueCount(t, ctx, src, f.newChore) != 1 || f.childRows(t, ctx, src, f.newChore) != 4 || f.issueCount(t, ctx, src, f.wisp) != 1 {
+		t.Errorf("later sync removed local excluded data: chore=%d rows=%d wisp=%d",
+			f.issueCount(t, ctx, src, f.newChore), f.childRows(t, ctx, src, f.newChore), f.issueCount(t, ctx, src, f.wisp))
+	}
+	tip := f.peerTip(t, ctx)
+	if f.issueCount(t, ctx, tip, task2) != 1 {
+		t.Fatal("peer tip lacks the second shared task")
+	}
+	if f.issueCount(t, ctx, tip, f.newChore) != 0 || f.childRows(t, ctx, tip, f.newChore) != 0 || f.issueCount(t, ctx, tip, f.wisp) != 0 {
+		t.Error("peer tip holds withheld data after the later sync")
 	}
 }
