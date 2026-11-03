@@ -103,13 +103,16 @@ workspace after upgrading from bd ≤1.3.0,
   and the first command after an idle restart then failed with
   `unexpected EOF` followed by `uow: ping db: ... connection refused`.
   Readiness now requires Dolt's own `Server ready. Accepting connections.`
-  line on the child's output (at `log_level` info, which every generated
-  config uses; a quieter level keeps the dial-only check), and a child that
-  reports its port taken is `ErrPortInUse`. When the port is one Beads chose,
-  the proxy relaunches Dolt on a free port, up to five ports, from
-  `.beads/dolt/proxy-child.runtime-config.yaml`: a copy of `config.yaml` with
-  only `listener.port` changed. That file is removed or replaced at the next
-  start (a `bd dolt stop` kills the child and can leave it behind until then).
+  line on the child's output (at `log_level` info or more verbose, which every
+  generated config uses; a quieter level keeps the dial-only check), and a
+  child that reports its port taken fails with
+  `dolt sql-server listener port is already in use`. When the port is one
+  Beads chose, the proxy relaunches Dolt on a fresh free port, trying at most
+  five ports in all (the configured one plus up to four others), from
+  `.beads/dolt/proxy-child.runtime-config.yaml`: `config.yaml`'s settings
+  re-rendered with only `listener.port` changed. That file is removed or
+  replaced at the next start (a `bd dolt stop` kills the child and can leave
+  it behind until then).
   `config.yaml` itself is never rewritten.
 - **`bd delete` no longer resolves an id it cannot find to a different issue
   whose id begins with it**
@@ -147,17 +150,20 @@ workspace after upgrading from bd ≤1.3.0,
   out of history order**
   ([#8083](https://github.com/gastownhall/beads/pull/8083), backport of
   [#8050](https://github.com/gastownhall/beads/pull/8050) and
-  [#6644](https://github.com/gastownhall/beads/pull/6644), fixes
+  [#6644](https://github.com/gastownhall/beads/pull/6644) by @vishnujayvel,
+  fixes
   [#6645](https://github.com/gastownhall/beads/issues/6645), reported by
   @bee-ghosttrack, and [#6516](https://github.com/gastownhall/beads/issues/6516),
   reported by @postoso). Dolt does not require commit dates to rise along the
   parent chain (a host clock that jumped back). `bd compact --days N`
   replayed the recent commits in date order, so a child dated before its
-  parent conflicted on any shared row; it now replays them in Dolt's
+  parent could conflict on a row both commits changed; it now replays them in
+  Dolt's
   `commit_order`. When a recent-dated commit came before an old-dated one in
   history, the squashed base already held the recent commit, and replaying it
   again could undo the later old commit's edit while reporting "Compacted".
-  Compact now refuses such a history up front, names both commits and their
+  Compact now refuses such a history (a recent commit at or before an old
+  one in commit order) up front, names both commits and their
   dates, and changes nothing; `--force` does not override the refusal, and
   `--dry-run` reports it. The squashed base now ends at the last old commit
   in history rather than the newest-dated one, so an old window whose dates
@@ -166,7 +172,9 @@ workspace after upgrading from bd ≤1.3.0,
   it in and aborts, leaving `main` untouched, on any difference.
 - **`bd compact` no longer discards writes that reach `main` while it runs**
   ([#8083](https://github.com/gastownhall/beads/pull/8083), backport of
-  [#8046](https://github.com/gastownhall/beads/pull/8046)). It finished by
+  [#8046](https://github.com/gastownhall/beads/pull/8046), carrying forward
+  [#7789](https://github.com/gastownhall/beads/pull/7789) by
+  @csauer02-personal-user). It finished by
   hard-resetting `main` onto the rebuilt history, which dropped changes in
   `main`'s working set that no Dolt commit held yet (a batch under batched or
   disabled auto-commit, or a write between its SQL commit and its Dolt
@@ -179,7 +187,11 @@ workspace after upgrading from bd ≤1.3.0,
   started join that commit. The replay check above compares with `main` as
   `bd compact` read it, so a write that lands meanwhile is kept, not refused
   as a divergent replay. If the follow-up commit fails, `bd compact` stops
-  with the changes staged on `main`, for `bd dolt commit`.
+  with the changes staged on `main`, for `bd dolt commit` (which also commits
+  any other pending changes). This needs Dolt 2.x, as pinned: on an older
+  Dolt sql-server the soft reset unstages those changes, so no follow-up
+  commit is made and they stay pending in the working set, for
+  `bd dolt commit`.
 - **`bd rules compact` no longer deletes rules without confirmation or a
   backup** ([#8083](https://github.com/gastownhall/beads/pull/8083), backport
   of [#8051](https://github.com/gastownhall/beads/pull/8051), fixes
@@ -325,22 +337,31 @@ workspace after upgrading from bd ≤1.3.0,
   `# beads-chosen-listener-port: N` line** after the managed marker. It is
   how bd tells a port it chose from one an operator set. A port is moved only
   when the file has the marker and either that record with an unchanged
-  `listener.port`, or is byte-identical to the file 1.3.0–1.3.2 generated, so
-  existing unedited workspaces recover too. A hand-set or hand-edited port is
-  treated as pinned and is not moved: the proxy child exits instead of
-  reporting ready. The command itself fails after about 15s with
+  `listener.port`, or is byte-identical to the file bd 1.2.0–1.2.1 or
+  1.3.0–1.3.2 generated, so existing unedited workspaces recover too (a
+  `config.yaml` written by 1.1.x or 1.2.2 has no managed marker and stays
+  pinned). A hand-set or hand-edited port is treated as pinned and is not
+  moved: the proxy child exits instead of reporting ready. The command itself
+  fails after about 15s, usually with
   `uow: get proxy endpoint: timeout waiting for proxy to become ready on its
-  OS-assigned port`; the `ErrPortInUse` message naming the taken port and the
-  remedy (free the port, set `listener.port` in `config.yaml` to a free port,
-  or delete a generated `config.yaml` so Beads regenerates it) is in
-  `.beads/dolt/server.log`. The same applies if five consecutive free ports
-  are all taken.
+  OS-assigned port` (sometimes `proxy child exited before publishing its
+  OS-assigned port`); bd retries the start meanwhile, so the log holds several
+  copies of the error. That error, `dolt sql-server listener port is already
+  in use`, naming the taken port and the remedy (free the port, set
+  `listener.port` in `config.yaml` to a free port, or delete a generated
+  `config.yaml` so Beads regenerates it), is in `.beads/dolt/server.log`. If
+  the configured port and the four free ports tried after it are all taken,
+  the command fails the same way, and the log says
+  `gave up after 5 ports, the last P; something on this host keeps taking
+  them`.
 - **After a move, the Dolt child runs with
-  `--config <root>/proxy-child.runtime-config.yaml`**, and the backend pid
-  record and the proxy's DSN carry the effective port. Tools that identify
-  bd's Dolt by its `--config` path ending in `config.yaml`, or that read the
-  Dolt port from `config.yaml`, should also accept the runtime config and
-  read the port from the backend pid record.
+  `--config <root>/proxy-child.runtime-config.yaml`** (`<root>` is
+  `.beads/dolt` by default), and the backend pid record
+  `<root>/proxy-child.pid` (its `port` field) and the proxy's DSN carry the
+  effective port. Tools that identify bd's Dolt by its `--config` path ending
+  in `config.yaml`, or that read the Dolt port from `config.yaml`, should also
+  accept the runtime config and read the port from `proxy-child.pid` (not
+  `proxy.pid`, which holds the proxy's own port).
 
 ### Known issues
 
@@ -384,11 +405,14 @@ These are not fixed in 1.3.3.
 - **A clone that adopted migration 0062 by `bd dolt pull` or
   `bd bootstrap`, or was cloned after it, has an empty `events` table**
   ([#7039](https://github.com/gastownhall/beads/issues/7039)); only the
-  clone that ran the migration kept its rows. The next release restores the
-  missing events from the clone's own Dolt history automatically on first
-  open ([#8047](https://github.com/gastownhall/beads/pull/8047)). Until then,
-  do not run `bd compact` or `bd flatten` on such a clone: both rewrite Dolt
-  history, and would delete the history that restore reads.
+  clone that ran the migration kept its rows, and the others hold only
+  events written since. Fixed on `main` by
+  [#8047](https://github.com/gastownhall/beads/pull/8047), which restores the
+  missing events from the clone's own Dolt history on first open; it is
+  **not** in 1.3.3. Until you run a release whose notes include #8047, do not
+  run `bd compact` or `bd flatten` on such a clone: both rewrite Dolt history
+  and can delete the history that restore reads. #7039 has a manual backfill
+  recipe.
 
 ## [1.3.2] - 2026-10-23
 
