@@ -13,6 +13,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
 
 // endpointTestEnv clears every setting ResolveEndpoint reads, points the
@@ -401,5 +402,99 @@ func TestUnresolvedErrorNamesTheHostEscaped(t *testing.T) {
 	}
 	if err := (Endpoint{Host: hostile, Socket: "/tmp/" + hostile + ".sock"}).UnresolvedError(); err != nil {
 		t.Errorf("socket-only endpoint: UnresolvedError = %v, want nil", err)
+	}
+}
+
+// TestCheckEndpointTrustGatesTheServerPasswordSend pins the credential-trust
+// gate the diagnostic and maintenance connection paths share (bd dolt status,
+// bd dolt clean-databases, the bd doctor checks): a remote Dolt host named only
+// by shared configuration (metadata.json dolt_server_host) is refused on first
+// use, and a private source (the caller's own BEADS_DOLT_SERVER_HOST) confirms
+// it. The local server and the vendor default are trusted without confirmation.
+func TestCheckEndpointTrustGatesTheServerPasswordSend(t *testing.T) {
+	beadsDir := endpointTestEnv(t, nil)
+	writeEndpointMetadata(t, beadsDir, &configfile.Config{
+		DoltMode:       configfile.DoltModeServer,
+		DoltServerHost: "evil.example",
+		DoltServerPort: 13306,
+		DoltDatabase:   "endpoint_trust",
+	})
+
+	// bd's own local server is trusted without any confirmation.
+	if err := CheckEndpointTrust(beadsDir, nil, "127.0.0.1", 3307, ""); err != nil {
+		t.Fatalf("local server must be trusted: %v", err)
+	}
+
+	// A remote host from shared config is refused on first use.
+	err := CheckEndpointTrust(beadsDir, nil, "evil.example", 13306, "")
+	if err == nil {
+		t.Fatal("an unpinned shared remote endpoint must be refused")
+	}
+	if !strings.Contains(err.Error(), "credential was not sent") {
+		t.Fatalf("error must say the credential was not sent, got %v", err)
+	}
+	// The Endpoint method is equivalent.
+	ep := Endpoint{BeadsDir: beadsDir, Host: "evil.example", Port: 13306}
+	if err := ep.EnsureTrustedForCredential(nil); err == nil {
+		t.Fatal("EnsureTrustedForCredential must refuse the same unpinned endpoint")
+	}
+
+	// A private source (the caller's environment) confirms it; it then pins.
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "evil.example")
+	if err := CheckEndpointTrust(beadsDir, nil, "evil.example", 13306, ""); err != nil {
+		t.Fatalf("private confirmation must pass: %v", err)
+	}
+	// Once pinned, it is trusted even without the env var; a different host is a mismatch.
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	if err := CheckEndpointTrust(beadsDir, nil, "evil.example", 13306, ""); err != nil {
+		t.Fatalf("pinned endpoint must stay trusted: %v", err)
+	}
+	if err := CheckEndpointTrust(beadsDir, nil, "other.example", 13306, ""); err == nil {
+		t.Fatal("a changed shared host must be refused after the pin")
+	}
+}
+
+// TestCheckEndpointTrustRefusesDSNSmuggledHost pins the parser-differential
+// guard: a committed host the trust check would read as bd's own local server
+// while go-sql-driver's DSN grammar dials another host must be refused before
+// the password is sent. go-sql-driver's ParseDSN splits user:pass at the last
+// '@' before the final '/', and FormatDSN does not escape the address, so a
+// DSN carrying a second "@tcp(evil.example:3306)" dials evil.example with the
+// password (verified against ParseDSN; asserted here on the DSN shape so this
+// untagged test needs no new driver dependency).
+func TestCheckEndpointTrustRefusesDSNSmuggledHost(t *testing.T) {
+	beadsDir := endpointTestEnv(t, nil)
+	writeEndpointMetadata(t, beadsDir, &configfile.Config{DoltMode: configfile.DoltModeServer, DoltDatabase: "smuggle"})
+
+	for _, host := range []string{"localhost#@tcp(evil.example", "127.0.0.1/x@tcp(evil.example"} {
+		dsn := doltutil.ServerDSN{Host: host, Port: 3306, User: "u", Password: "pw"}.String()
+		if !strings.Contains(dsn, "@tcp(evil.example:3306)/") {
+			t.Fatalf("precondition: host %q should smuggle a second @tcp(evil.example:3306) into the DSN, got %q", host, dsn)
+		}
+		err := CheckEndpointTrust(beadsDir, nil, host, 3306, "")
+		if err == nil || !strings.Contains(err.Error(), "credential was not sent") {
+			t.Fatalf("host %q: smuggled DSN host must be refused, got %v", host, err)
+		}
+	}
+	if err := CheckEndpointTrust(beadsDir, nil, "127.0.0.1", 3306, "/tmp/a@tcp(evil.example:3306"); err == nil {
+		t.Fatal("a socket path carrying DSN delimiters must be refused")
+	}
+	// netip accepts any IPv6 zone text, so a zone must not smuggle delimiters either.
+	if err := CheckEndpointTrust(beadsDir, nil, "fe80::1%25@tcp(evil.example", 3306, ""); err == nil || !strings.Contains(err.Error(), "not a host name") {
+		t.Fatalf("a zoned IPv6 literal carrying DSN delimiters must be refused by the guard, got %v", err)
+	}
+
+	// Legitimate spellings are untouched: local ones are trusted, a plain
+	// remote name reaches the ordinary pin check (first use), not the guard.
+	for _, host := range []string{"127.0.0.1", "localhost", "::1", "[::1]", "0.0.0.0"} {
+		if err := CheckEndpointTrust(beadsDir, nil, host, 3306, ""); err != nil {
+			t.Errorf("local host %q must stay trusted: %v", host, err)
+		}
+	}
+	for _, host := range []string{"db.example.com", "team-dolt_1.internal", "2001:db8::1", "fe80::1%eth0", "[2001:db8::1]"} {
+		err := CheckEndpointTrust(beadsDir, nil, host, 3306, "")
+		if err != nil && strings.Contains(err.Error(), "not a host name") {
+			t.Errorf("valid host %q was rejected by the smuggling guard: %v", host, err)
+		}
 	}
 }

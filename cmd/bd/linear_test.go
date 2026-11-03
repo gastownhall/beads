@@ -1897,6 +1897,11 @@ func TestLinearSyncOverlapKeepsEchoOfNameMappedStatus(t *testing.T) {
 	}
 	server := httptest.NewServer(api)
 	defer server.Close()
+	// The endpoint trust gate needs a workspace to key the pin on, and the
+	// store-config linear.api_endpoint is shared configuration that a
+	// private source must confirm before the key goes out.
+	setupEndpointTrustWorkspaceForTest(t)
+	t.Setenv("LINEAR_API_ENDPOINT", server.URL)
 
 	linkedRef := ref
 	store := &linearSyncStore{

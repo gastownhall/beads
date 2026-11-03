@@ -70,11 +70,18 @@ func applyInitGatewayCredential(ctx context.Context, beadsDir string, doltCfg *d
 	if fileCfg == nil {
 		fileCfg = configfile.DefaultConfig()
 	}
-	applied, err := dolt.ApplyGatewayCredential(ctx, fileCfg, doltCfg)
+	gatewayCfg := *doltCfg
+	if gatewayCfg.BeadsDir == "" {
+		gatewayCfg.BeadsDir = beadsDir
+	}
+	applied, err := dolt.ApplyGatewayCredential(ctx, fileCfg, &gatewayCfg)
 	if err != nil {
 		return err
 	}
 	if applied {
+		doltCfg.ServerUser = gatewayCfg.ServerUser
+		doltCfg.Gateway = gatewayCfg.Gateway
+		doltCfg.DisableAutoStart = gatewayCfg.DisableAutoStart
 		// ApplyGatewayCredential sets DisableAutoStart, but the hand-built init
 		// config path never runs ApplyCLIAutoStart to translate that into the
 		// AutoStart field the store's auto-start block actually consults.

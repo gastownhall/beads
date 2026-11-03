@@ -1635,6 +1635,19 @@ func runExternalDoltStatus(beadsDir string, cfg *configfile.Config) {
 	runExternalDoltStatusAt(doltserver.ResolveEndpoint(beadsDir, cfg), cfg)
 }
 
+// endpointTrustErrForCredential reports a workspace-pin violation when password
+// is non-empty, so a caller that builds its own authenticated DSN (rather than
+// going through the store's gated open) refuses to send BEADS_DOLT_PASSWORD or a
+// credentials-file password to a shared-config endpoint it never pinned
+// (GH#7886). It is nil when nothing authenticates (no password) and a no-op for
+// bd's own local server and the vendor default.
+func endpointTrustErrForCredential(ep doltserver.Endpoint, cfg *configfile.Config, password string) error {
+	if password == "" {
+		return nil
+	}
+	return ep.EnsureTrustedForCredential(cfg)
+}
+
 // runExternalDoltStatusAt is runExternalDoltStatus for ep, an endpoint the
 // caller already resolved for cfg's workspace (doltserver.ResolveEndpoint).
 // It names the server it dialed: the unix socket when it dialed one (Socket,
@@ -1659,6 +1672,12 @@ func runExternalDoltStatusAt(ep doltserver.Endpoint, cfg *configfile.Config) {
 		// No port resolved and no socket: nothing to dial. Give the store's
 		// advice for this server, not a dial of 127.0.0.1:0.
 		connErr = unresolved
+	} else if trustErr := endpointTrustErrForCredential(ep, cfg, password); trustErr != nil {
+		// The password would be sent to a shared-config host (metadata.json
+		// dolt_server_host / config.yaml dolt.host) the workspace never pinned:
+		// refuse the authenticated probe rather than hand BEADS_DOLT_PASSWORD to
+		// it (the store's open refuses the same change — GH#7886).
+		connErr = trustErr
 	} else {
 		// The connection the store makes, over its transport: a live unix
 		// socket first, else TCP (doltserver.Endpoint.Transport). Resolved
@@ -2876,6 +2895,13 @@ func openDoltServerConnection() (*sql.DB, func(), error) {
 	}
 	user := cfg.GetDoltServerUser()
 	password := os.Getenv("BEADS_DOLT_PASSWORD")
+	if password != "" {
+		// Refuse to send BEADS_DOLT_PASSWORD to a shared-config host the
+		// workspace never pinned, as the store's open does (GH#7886).
+		if err := doltserver.CheckEndpointTrust(beadsDir, cfg, host, port, cfg.GetDoltServerSocket()); err != nil {
+			return nil, nil, HandleError("%v", err)
+		}
+	}
 
 	connStr := doltutil.ServerDSN{
 		Host:     host,
