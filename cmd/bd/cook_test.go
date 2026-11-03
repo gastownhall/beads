@@ -281,6 +281,30 @@ condition = "deploy is on"
 			t.Fatalf("stdout = %q, want no output after the refusal", stdout)
 		}
 	})
+
+	t.Run("compile mode keeps every step and its condition", func(t *testing.T) {
+		cmd := newCookConditionTestCommand(false, "")
+		stdout, stderr, err := runCookCapturingOutput(t, cmd, formulaPath)
+		if err != nil {
+			t.Fatalf("runCook: %v; stderr = %q", err, stderr)
+		}
+		var cooked formula.Formula
+		if err := json.Unmarshal([]byte(stdout), &cooked); err != nil {
+			t.Fatalf("parse cook JSON: %v\n%s", err, stdout)
+		}
+		var ids []string
+		conditions := map[string]string{}
+		for _, step := range cooked.Steps {
+			ids = append(ids, step.ID)
+			conditions[step.ID] = step.Condition
+		}
+		if want := []string{"build", "deploy"}; !slices.Equal(ids, want) {
+			t.Fatalf("compile-mode steps = %v, want %v", ids, want)
+		}
+		if got := conditions["deploy"]; got != "{{deploy}}" {
+			t.Fatalf("deploy condition = %q, want %q kept unevaluated", got, "{{deploy}}")
+		}
+	})
 }
 
 func writeCookConditionFormula(t *testing.T, dir, name, toml string) string {
