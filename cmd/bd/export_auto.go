@@ -248,17 +248,23 @@ func maybeAutoExport(ctx context.Context, allowEmptyOverwrite bool) error {
 		issueCount, memoryCount, fullPath, mode, time.Since(exportStart).Round(time.Millisecond))
 
 	// Don't prime the throttle on an empty export (e.g. immediately after
-	// `bd init`). Saving state here would block the first real `bd create`
-	// from exporting for up to export.interval seconds even though the data
-	// has changed. Remove the empty file too so users don't see a stale 0-byte
-	// issues.jsonl before any issues exist.
+	// `bd init` or opting in via `bd config set export.auto true`, whose own
+	// post-command pass sees an empty store). Saving a fresh Timestamp here
+	// would block the first real `bd create` from exporting for up to
+	// export.interval seconds even though the data has changed — with no
+	// further write, indefinitely (GH#6955). Keep the previous timestamp
+	// instead: the branch only runs after shouldExport said yes, so that
+	// timestamp is already eligible (or zero) and a following changed state
+	// can export immediately. The state hash below still short-circuits an
+	// unchanged empty store. Remove the empty file too so users don't see a
+	// stale 0-byte issues.jsonl before any issues exist.
 	if issueCount == 0 && memoryCount == 0 {
 		_ = os.Remove(fullPath)
 		saveExportAutoState(beadsDir, &exportAutoState{
 			LastDoltCommit: currentCommit,
 			LastDiffAnchor: anchorCommit,
 			LastDirtyIDs:   dirtyIDs,
-			Timestamp:      time.Now(),
+			Timestamp:      state.Timestamp,
 			Issues:         0,
 			Memories:       0,
 		})
