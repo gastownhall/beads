@@ -211,6 +211,19 @@ func CheckRemoteSafety(in RemoteSafetyInput) RemoteSafetyDecision {
 		return RemoteSafetyDecision{Action: ActionBootstrap, Reason: "bootstrap-from-remote"}
 	}
 
+	// A local-source override against a CONFIGURED or EXPLICIT remote the
+	// probe could not read. Same exit code as confirmed-history divergence,
+	// but the message must tell the truth: nothing was observed, the history
+	// is unverified — not "already has Dolt history" (gascity#7665).
+	if in.RemoteProbeUnknown && !in.RemoteIsGitOrigin && !in.DiscardRemote {
+		return RemoteSafetyDecision{
+			Action:      ActionRefuseDivergence,
+			Reason:      "unverified-remote-history",
+			ExitCode:    ExitRemoteDivergenceRefused,
+			UserMessage: refusalMessageUnverifiedRemote(),
+		}
+	}
+
 	// User wanted to override but did NOT authorize the cross-boundary
 	// operation. This is the bd-q83 bug class: a local-source init flag
 	// (`--force`, `--reinit-local`, or `--from-jsonl`) without
@@ -274,6 +287,33 @@ func refusalMessageDivergence() string {
       bd doctor
 
     Overwrite the remote intentionally (destructive):
+      See 'bd help init-safety' for the --discard-remote workflow.`
+}
+
+// refusalMessageUnverifiedRemote returns the What/Why/Next refusal text for a
+// local-source init against a configured or explicit remote whose Dolt history
+// the probe could not verify. Unlike refusalMessageDivergence it must not
+// claim the remote has history — nothing was observed — only that bd could
+// not read it, and that an unreadable remote is not proof it is empty. Same
+// error-text-no-echo invariant: names the safe tools, never a complete
+// destructive invocation.
+func refusalMessageUnverifiedRemote() string {
+	return `bd init refuses: the remote's Dolt history could not be verified.
+
+  Why: this init mode would create or reuse local history instead of
+       adopting the remote, and bd could not read the remote to check
+       for Dolt history (refs/dolt/data). An unreadable remote is not
+       proof it is empty, so refusing is the safe default.
+
+  Next:
+    Verify the remote URL and credentials, then re-run; or adopt the
+    remote with working credentials:
+      bd bootstrap
+
+    Diagnose first:
+      bd doctor
+
+    Intentionally overwrite the remote (destructive):
       See 'bd help init-safety' for the --discard-remote workflow.`
 }
 

@@ -23,6 +23,7 @@ See also: `bd help init-safety`, and
 ## Table of contents
 
 - [init-force-refused — `bd init --force`/`--reinit-local` refused because origin has Dolt history](#init-force-refused)
+- [init-remote-unverified — a local-source init refused because the configured remote's Dolt history could not be verified](#init-remote-unverified)
 - [init-token-missing — a destructive re-init refused because `--destroy-token` is missing or wrong](#init-token-missing)
 - [init-local-exists — `bd init --reinit-local` refused because local data already exists](#init-local-exists)
 - [init-home-refused — `bd init` refused because the working directory is your home directory](#init-home-refused)
@@ -114,10 +115,49 @@ treated differently:
   about the remote either way: it was never read. Run `bd bootstrap` with
   working credentials to adopt the remote instead.
 - A **configured or explicit remote** (`sync.remote` or `--remote`) that
-  cannot be read still refuses local-source init with exit code 10 and
-  the ordinary refusal text above: a URL named for bd is one bd is
-  expected to read, so an unreadable one does not become an automatic
-  bypass.
+  cannot be read still refuses local-source init with exit code 10, but
+  the message says the history could not be **verified**, not that the
+  remote has it — see [init-remote-unverified](#init-remote-unverified).
+
+---
+
+## init-remote-unverified
+
+**Exit code:** `10` (`ExitRemoteDivergenceRefused`)
+
+**Symptom**
+
+```
+bd init refuses: the remote's Dolt history could not be verified.
+  Why: this init mode would create or reuse local history instead of
+       adopting the remote, and bd could not read the remote to check
+       for Dolt history (refs/dolt/data). ...
+```
+
+**Why this happens**
+
+`bd init` probes `refs/dolt/data` on the remote named by `sync.remote`
+(or `--remote`) before any local-source init. The probe failed: the URL
+is unreachable, credentials are missing or rejected, or the transport is
+one the probe cannot speak. An unreadable remote is not proof it is
+empty, so `bd init --reinit-local` / `--force` / `--from-jsonl` refuses
+rather than mint a local identity that could orphan-push over history
+it could not see. This is a refusal about a remote bd was *asked* to
+use — the git-origin fallback above is the one case that proceeds
+without verification.
+
+**Recovery paths**
+
+1. Fix the read first: verify the remote URL and credentials (for a git
+   URL, `git ls-remote <url>`), then re-run. Once the probe can read the
+   remote, init proceeds on its observed state: bootstrap when history
+   exists, or the ordinary [init-force-refused](#init-force-refused)
+   refusal for a local-source override against confirmed history.
+2. Adopt the remote with working credentials: `bd bootstrap`.
+3. Intentionally overwrite (destructive): pair the local-source flag
+   with `--discard-remote`. The destroy-token flow is unchanged — an
+   unverified remote is treated just as conservatively as a confirmed
+   one on the destructive path. See `bd help init-safety`.
 
 ---
 

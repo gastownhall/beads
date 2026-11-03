@@ -132,6 +132,34 @@ names the substitute.
    for the bd-q83 bug, using a synthetic `refs/dolt/data` git ref
    fixture (no real Dolt push needed).
 
+### Refinement (2026-11-03, gascity#7665): observed vs unverified history
+
+The decision function above was refined, without changing Invariant 2's
+scope, to distinguish history the probe **observed** from a remote the
+probe could not **read**. `CheckRemoteSafety` gains two inputs:
+`RemoteProbeUnknown` (the probe errored; the fail-closed bool still reads
+has-data so unknown never counts as confirmed absence) and
+`RemoteIsGitOrigin` (the URL came from the git origin fallback, not from
+a configured `sync.remote` or an explicit `--remote`).
+
+- An unverified **git origin** falls back to local initialization for
+  plain init and every local-source override (`--reinit-local`,
+  `--force`, `--from-jsonl`): nothing was observed, so nothing is being
+  diverged, and the bootstrap clone would fail against the same
+  unreachable origin. The fallback warns that history was unverified and
+  never claims presence or absence.
+- An unverified **configured or explicit remote** keeps the conservative
+  gates: a URL named for bd is one bd is expected to read, so plain init
+  still selects bootstrap (the clone then fails loudly) and a
+  local-source override still refuses with exit 10 — with a refusal that
+  says the history could not be verified, not that the remote has it.
+- `--discard-remote` intent is unchanged for confirmed history AND for
+  an unknown probe: the destroy-token validation, interactive typed
+  confirmation, and confirmation-window re-probe behave exactly as this
+  ADR specifies. The refusal for an unverified remote deliberately does
+  not claim the remote advertises history, but the destructive path
+  still demands the same authorization.
+
 Mutation-testing ritual (optional but recommended): flip `!force &&` to
 `!force ||` in the legacy gate, or flip any decision tree branch in
 `CheckRemoteSafety`, and confirm both the matrix test and the
