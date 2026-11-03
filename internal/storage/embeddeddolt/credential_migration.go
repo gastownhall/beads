@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/peercred"
@@ -122,6 +123,13 @@ func (s *EmbeddedDoltStore) runPeerCredentialMigration(ctx context.Context) (boo
 	// migration unmarked.
 	if err := os.WriteFile(markerPath, peercred.MarkerValue(s.credentialKey), 0600); err != nil {
 		return false, fmt.Errorf("write credential migration marker: %w", err)
+	}
+
+	// Skipped credentials stay encrypted and unusable by design; the operator
+	// learns which peers need a manual re-add from the migration itself,
+	// once, because the marker above keeps this path from running again.
+	for _, line := range plan.RebindWarnings(runtime.GOOS) {
+		fmt.Fprintf(federationWarnWriter, "%s\n", line)
 	}
 	return true, nil
 }

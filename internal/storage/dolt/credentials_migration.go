@@ -4,8 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/peercred"
@@ -124,5 +126,18 @@ func (s *DoltStore) runPeerCredentialMigration(ctx context.Context) (bool, error
 	if err := os.WriteFile(markerPath, peercred.MarkerValue(s.credentialKey), 0600); err != nil {
 		return false, fmt.Errorf("write credential migration marker: %w", err)
 	}
+
+	// Skipped credentials stay encrypted and unusable by design; the operator
+	// learns which peers need a manual re-add from the migration itself,
+	// once, because the marker above keeps this path from running again.
+	for _, line := range plan.RebindWarnings(runtime.GOOS) {
+		fmt.Fprintf(credentialWarnWriter, "%s\n", line)
+	}
 	return true, nil
 }
+
+// credentialWarnWriter receives the credential-migration diagnostics. Defaults
+// to os.Stderr, matching the unconditional warnings this package writes from
+// federation.go; overridable in tests, as embeddeddolt's federationWarnWriter
+// is.
+var credentialWarnWriter io.Writer = os.Stderr
