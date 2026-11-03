@@ -123,8 +123,20 @@ type RemoteSafetyInput struct {
 	DestroyToken  string
 	ExpectedToken string
 
-	// Observed state.
+	// Observed state. RemoteHasDoltData stays true when the probe failed
+	// (resolveRemoteHasDoltDataProbe's conservative answer), so a caller that
+	// never sets RemoteProbeUnknown keeps the fail-closed decision.
 	RemoteHasDoltData bool
+	// RemoteProbeUnknown is true when the refs/dolt/data probe failed, so
+	// RemoteHasDoltData is a fallback rather than an observation: nothing was
+	// confirmed either way.
+	RemoteProbeUnknown bool
+	// RemoteIsGitOrigin is true only when the URL came from init's git-origin
+	// fallback (no --remote, no sync.remote). Plain init has always initialized
+	// locally against an origin it could not read; a configured or explicit
+	// remote may use a transport the git probe cannot answer for, so it gets
+	// no such exception.
+	RemoteIsGitOrigin bool
 
 	// IsInteractive is true when the caller is attached to a TTY.
 	// Interactive callers can prompt for destroy-token confirmation, so the
@@ -151,9 +163,18 @@ type RemoteSafetyDecision struct {
 // function — never add a new `&& !someFlag` at the call site. See the
 // guard matrix test in init_safety_test.go.
 func CheckRemoteSafety(in RemoteSafetyInput) RemoteSafetyDecision {
-	// No remote data → no cross-boundary concern. Proceed.
-	if !in.RemoteHasDoltData {
+	// No remote data → no cross-boundary concern. Proceed. An unknown probe
+	// is not confirmed absence.
+	if !in.RemoteHasDoltData && !in.RemoteProbeUnknown {
 		return RemoteSafetyDecision{Action: ActionNoRemoteData, Reason: "no-remote-data"}
+	}
+
+	// An inferred git origin the probe could not read: initialize locally
+	// with or without a local-source override, as plain init always has —
+	// refusing would claim history nobody observed (gascity#7665). Naming
+	// --discard-remote still runs the destroy-token flow below.
+	if in.RemoteProbeUnknown && in.RemoteIsGitOrigin && !in.DiscardRemote {
+		return RemoteSafetyDecision{Action: ActionNoRemoteData, Reason: "origin-unverified"}
 	}
 
 	// Any explicit override intent (force / reinit-local / from-jsonl /
@@ -233,6 +254,13 @@ func refusalMessageDivergence() string {
 
     Overwrite the remote intentionally (destructive):
       See 'bd help init-safety' for the --discard-remote workflow.`
+}
+
+// originUnverifiedNotice is the warning for an "origin-unverified" decision:
+// init proceeds with a fresh local database without knowing whether the
+// origin holds Dolt history, so it claims neither history nor its absence.
+func originUnverifiedNotice() string {
+	return "proceeding with a fresh local database without verifying the git origin's Dolt history; if it has any, adopt it with 'bd bootstrap' once the origin is reachable"
 }
 
 // refusalMessageTokenMissing returns the What/Why/Next refusal text for

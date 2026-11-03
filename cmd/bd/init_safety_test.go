@@ -103,25 +103,116 @@ func TestInitFreshWithUnreachableGitOriginSucceeds(t *testing.T) {
 	cmd := exec.Command(bdBin, "init", "--backend", "dolt", "--prefix", "org", "--quiet", "--non-interactive", "--skip-hooks", "--skip-agents")
 	cmd.Dir = workDir
 	cmd.Env = hermeticInitEnv(homeDir)
-	var out bytes.Buffer
+	var out, stderr bytes.Buffer
 	cmd.Stdout = &out
-	cmd.Stderr = &out
+	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		lower := strings.ToLower(out.String())
+		lower := strings.ToLower(out.String() + stderr.String())
 		if strings.Contains(lower, "dolt") && (strings.Contains(lower, "not supported") || strings.Contains(lower, "not available") || strings.Contains(lower, "unknown")) {
-			t.Skipf("dolt backend not available: %s", out.String())
+			t.Skipf("dolt backend not available: %s%s", out.String(), stderr.String())
 		}
-		t.Fatalf("bd init with an unreachable git origin failed: %v\noutput:\n%s", err, out.String())
+		t.Fatalf("bd init with an unreachable git origin failed: %v\nstdout:\n%s\nstderr:\n%s", err, out.String(), stderr.String())
 	}
 
 	if _, err := os.Stat(filepath.Join(workDir, ".beads")); err != nil {
 		t.Fatalf(".beads should have been created by a successful init: %v", err)
 	}
+	assertUnverifiedOriginWarning(t, stderr.String())
 
 	if _, err := os.Stat(filepath.Join(homeDir, ".beads", "eventsData")); !os.IsNotExist(err) {
 		t.Errorf("metrics queue dir was created under the isolated HOME (err=%v); "+
 			"the detached send-metrics child will race t.TempDir cleanup "+
 			"(see test_repo_beads_guard_test.go:118)", err)
+	}
+}
+
+// TestInitReinitLocalWithUnreachableGitOriginSucceeds is the override-path twin
+// of TestInitFreshWithUnreachableGitOriginSucceeds (gascity#7665): an inferred
+// git origin the probe cannot reach never confirmed any Dolt history, so the
+// local-source overrides (--reinit-local, its --force alias, --from-jsonl)
+// must not refuse with "remote already has Dolt history"
+// (ExitRemoteDivergenceRefused). Plain `bd init` already initializes locally
+// against the same origin; the overrides get the same outcome, and say the
+// remote went unverified rather than claiming it is empty or populated.
+func TestInitReinitLocalWithUnreachableGitOriginSucceeds(t *testing.T) {
+	bdBin := buildBDForInitTests(t)
+
+	cases := []struct {
+		name      string
+		flag      string
+		seedJSONL bool
+	}{
+		{"reinit-local", "--reinit-local", false},
+		{"force", "--force", false},
+		{"from-jsonl", "--from-jsonl", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			workDir := t.TempDir()
+			runGitForBootstrapTest(t, workDir, "init", "-b", "main")
+			runGitForBootstrapTest(t, workDir, "config", "core.hooksPath", ".git/hooks")
+			// An origin whose probe errors (missing path -> git ls-remote
+			// exit 128), not one that answers "no refs/dolt/data".
+			runGitForBootstrapTest(t, workDir, "remote", "add", "origin",
+				filepath.Join(t.TempDir(), "does-not-exist.git"))
+
+			beadsDir := filepath.Join(workDir, ".beads")
+			if tc.seedJSONL {
+				if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(beadsDir, "issues.jsonl"), []byte(`{"id":"org-abc123","title":"Seeded JSONL issue","type":"task","status":"open","priority":2}`+"\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			homeDir := t.TempDir() // must differ from workDir: metrics.go caches to $HOME/.beads
+
+			cmd := exec.Command(bdBin, "init", tc.flag, "--prefix", "org", "--quiet", "--non-interactive", "--skip-hooks", "--skip-agents")
+			cmd.Dir = workDir
+			cmd.Env = hermeticInitEnv(homeDir)
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout = &stdout
+			cmd.Stderr = &stderr
+			if err := cmd.Run(); err != nil {
+				t.Fatalf("bd init %s with an unreachable git origin failed: %v\nstdout:\n%s\nstderr:\n%s", tc.flag, err, stdout.String(), stderr.String())
+			}
+
+			if _, err := os.Stat(beadsDir); err != nil {
+				t.Fatalf(".beads should have been created by a successful init: %v", err)
+			}
+			assertUnverifiedOriginWarning(t, stderr.String())
+
+			if tc.seedJSONL {
+				show := exec.Command(bdBin, "show", "org-abc123", "--json")
+				show.Dir = workDir
+				show.Env = hermeticInitEnv(homeDir)
+				out, err := show.CombinedOutput()
+				if err != nil {
+					t.Fatalf("seeded JSONL issue was not imported: %v\n%s", err, out)
+				}
+				if !strings.Contains(string(out), "Seeded JSONL issue") {
+					t.Fatalf("imported issue title missing from show output:\n%s", out)
+				}
+			}
+		})
+	}
+}
+
+// assertUnverifiedOriginWarning checks init's stderr (visible under --quiet)
+// for an inferred origin whose probe failed: it names the unverified origin
+// and the adoption path, and claims neither confirmed history nor absence.
+func assertUnverifiedOriginWarning(t *testing.T, stderr string) {
+	t.Helper()
+	for _, must := range []string{"could not verify refs/dolt/data", "bd bootstrap"} {
+		if !strings.Contains(stderr, must) {
+			t.Errorf("stderr missing %q:\n%s", must, stderr)
+		}
+	}
+	for _, banned := range []string{"already has Dolt history", "treating remote as having Dolt history", "no Dolt data"} {
+		if strings.Contains(stderr, banned) {
+			t.Errorf("stderr claims an unverified remote state (%q):\n%s", banned, stderr)
+		}
 	}
 }
 
@@ -211,6 +302,48 @@ func TestCheckRemoteSafety_GuardMatrix(t *testing.T) {
 		{
 			"remote/from-jsonl",
 			RemoteSafetyInput{RemoteHasDoltData: true, FromJSONL: true},
+			ActionRefuseDivergence, ExitRemoteDivergenceRefused,
+		},
+
+		// Unverified-origin column (gascity#7665): the probe of an inferred
+		// git origin failed, so RemoteHasDoltData is only the fail-closed
+		// fallback. Plain init and every local-source override initialize
+		// locally, as plain init always has; nothing confirmed history.
+		{
+			"unknown-origin/no-flags",
+			RemoteSafetyInput{RemoteHasDoltData: true, RemoteProbeUnknown: true, RemoteIsGitOrigin: true},
+			ActionNoRemoteData, 0,
+		},
+		{
+			"unknown-origin/force",
+			RemoteSafetyInput{RemoteHasDoltData: true, RemoteProbeUnknown: true, RemoteIsGitOrigin: true, Force: true},
+			ActionNoRemoteData, 0,
+		},
+		{
+			"unknown-origin/reinit-local",
+			RemoteSafetyInput{RemoteHasDoltData: true, RemoteProbeUnknown: true, RemoteIsGitOrigin: true, ReinitLocal: true},
+			ActionNoRemoteData, 0,
+		},
+		{
+			"unknown-origin/from-jsonl",
+			RemoteSafetyInput{RemoteHasDoltData: true, RemoteProbeUnknown: true, RemoteIsGitOrigin: true, FromJSONL: true},
+			ActionNoRemoteData, 0,
+		},
+		{
+			"unknown-origin/force+reinit-local+from-jsonl",
+			RemoteSafetyInput{RemoteHasDoltData: true, RemoteProbeUnknown: true, RemoteIsGitOrigin: true, Force: true, ReinitLocal: true, FromJSONL: true},
+			ActionNoRemoteData, 0,
+		},
+		// Provenance alone is not a bypass: a confirmed-history origin
+		// still bootstraps or refuses exactly as before.
+		{
+			"remote-origin/no-flags",
+			RemoteSafetyInput{RemoteHasDoltData: true, RemoteIsGitOrigin: true},
+			ActionBootstrap, 0,
+		},
+		{
+			"remote-origin/reinit-local",
+			RemoteSafetyInput{RemoteHasDoltData: true, RemoteIsGitOrigin: true, ReinitLocal: true},
 			ActionRefuseDivergence, ExitRemoteDivergenceRefused,
 		},
 
