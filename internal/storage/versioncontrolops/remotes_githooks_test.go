@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/DATA-DOG/go-sqlmock"
+
 	"github.com/steveyegge/beads/internal/githooksenv"
 )
 
@@ -33,8 +35,21 @@ func (c *envRecordingConn) QueryContext(context.Context, string, ...any) (*sql.R
 
 var errStubConn = errors.New("envRecordingConn: queries are not supported")
 
-func (c *envRecordingConn) QueryRowContext(context.Context, string, ...any) *sql.Row {
-	return nil
+// QueryRowContext returns a row whose Scan fails with errStubConn, for the
+// same reason: Pull counts ahead/behind with QueryRowContext after the fetch.
+func (c *envRecordingConn) QueryRowContext(ctx context.Context, _ string, _ ...any) *sql.Row {
+	return stubErrRow(ctx)
+}
+
+// stubErrRow returns a *sql.Row whose Scan fails with errStubConn. database/sql
+// offers no way to build one directly, so it comes from a sqlmock query.
+func stubErrRow(ctx context.Context) *sql.Row {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		panic(err)
+	}
+	mock.ExpectQuery(".").WillReturnError(errStubConn)
+	return db.QueryRowContext(ctx, "stub")
 }
 
 // TestRemoteCallsDisableGitHooks is the regression test for GH#4272. PR #3740
