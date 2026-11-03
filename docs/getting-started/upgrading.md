@@ -543,7 +543,10 @@ before trying anything else. A push from this clone publishes the migrated
 history, so every clone still on 1.2.2 or older first publishes its work and
 stops writing, as that section describes. Then a plain `bd dolt push` (no
 `--force`) shows whether the remote was only behind this clone: if it
-succeeds, the next pull has nothing to merge. If the push is rejected as a
+succeeds, the next pull has nothing to merge. That case arises in server mode
+and with v1.3.3 or earlier. In embedded mode, bd v1.4.0 and later skip the
+merge when the remote is only behind, so there the refusal already means the
+remote has diverged and the push is rejected. If the push is rejected as a
 non-fast-forward, or the merge stops on an `events` schema conflict instead,
 follow that section's steps.
 

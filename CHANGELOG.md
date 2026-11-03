@@ -1174,6 +1174,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `$GT_ROOT/.beads/molecules.jsonl` is template data), so it names no command
   and no credential target. Shell environment still wins over the file.
 
+- `bd sync` and `bd dolt pull` in embedded mode no longer fail with "local
+  changes would be stomped by merge" when the remote has no commits the local
+  branch lacks. Dolt runs that check before it finds there is nothing to
+  merge, and the check ignores `dolt_ignore`, so a table the remote still
+  tracks but the local branch untracked into `dolt_ignore` (such as `events`)
+  failed every pull and sync never reached the push that drops it from the
+  remote. The pull now skips the merge when the remote is level with or
+  behind the local branch. Server mode and a remote that has diverged are
+  unchanged (#6368).
+
 - `bd create --file` and other batch creates no longer fail with "issue
   already exists" on an id bd generated itself. The batch chose every id
   before it wrote any row, so two of its items could be handed the same short

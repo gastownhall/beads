@@ -140,7 +140,8 @@ func Pull(ctx context.Context, db DBConn, remote, branch, user string) error {
 // non-empty, resolved with strategy ("ours" or "theirs") instead of aborting
 // the pull for the operator to resolve out-of-band. strategy == "" is exactly
 // Pull's behavior. See MergeAndSettleWithStrategy/SettleMerge for the
-// resolution logic.
+// resolution logic. When the fetched remote has no commits local lacks, the
+// merge is skipped.
 func PullWithStrategy(ctx context.Context, db DBConn, remote, branch, user, strategy string) error {
 	if err := withRemoteEnvGuards(func() error {
 		if user != "" {
@@ -153,6 +154,15 @@ func PullWithStrategy(ctx context.Context, db DBConn, remote, branch, user, stra
 		return fmt.Errorf("fetch from %s/%s: %w", remote, branch, err)
 	}
 	trackingRef := remote + "/" + branch
+	// A remote with no commits we lack has nothing to merge, so skip the
+	// merge. Dolt would no-op it, but only after its stomp check, which does
+	// not honor dolt_ignore: a table the remote still tracks and local HEAD
+	// has dropped to an ignored working-set table fails that check even
+	// here, and the push that would clear it never runs (GH#6368). If the
+	// count fails, the merge runs as before.
+	if _, behind, err := LocalAheadBehind(ctx, db, trackingRef); err == nil && behind == 0 {
+		return nil
+	}
 	if err := MergeAndSettleWithStrategy(ctx, db, trackingRef, strategy); err != nil {
 		return fmt.Errorf("merge %s: %w", trackingRef, err)
 	}
