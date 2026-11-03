@@ -2626,6 +2626,13 @@ bd federation sync
     | If no strategy is specified and conflicts occur, the sync will pause
     | and report which tables have conflicts for manual resolution.
     |
+    | When federation.exclude_types is configured (default: wisp), pushes
+    | withhold issues of the excluded types from the peer's tip only: they
+    | remain in the local commit history and on peers that already held
+    | them, and any fetch of the full local branch receives them. Each sync
+    | whose publication actually withheld rows prints one history-visibility
+    | notice on stderr.
+    |
     | Examples:
     |   bd federation sync                      # Sync with all peers
     |   bd federation sync --peer town-beta     # Sync with specific peer

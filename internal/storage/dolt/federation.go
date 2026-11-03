@@ -474,11 +474,13 @@ func (s *DoltStore) Sync(ctx context.Context, peer string, strategy string) (*Sy
 
 	// Step 5: Push our changes to peer, filtering excluded types.
 	excludeTypes := config.GetFederationConfig().ExcludeTypes
-	if err := s.filteredPushToPeer(ctx, peer, excludeTypes); err != nil {
+	filtered, err := s.filteredPushToPeer(ctx, peer, excludeTypes)
+	if err != nil {
 		// Push failure is not fatal - peer may not accept pushes
 		result.PushError = err
 	} else {
 		result.Pushed = true
+		result.PushFiltered = filtered
 	}
 
 	// Record last sync time
@@ -504,14 +506,17 @@ func (s *DoltStore) Sync(ctx context.Context, peer string, strategy string) (*Sy
 // The special type "wisp" matches issues with ephemeral=true in the committed
 // issues table. Wisps normally live in dolt_ignore'd tables and are not pushed,
 // so this acts as a defense-in-depth safety net.
-func (s *DoltStore) filteredPushToPeer(ctx context.Context, peer string, excludeTypes []string) (retErr error) {
+// filteredPushToPeer returns whether the successful publication actually
+// withheld excluded-typed rows from the pushed tip (false when it delegated
+// to the plain PushTo or nothing needed filtering), plus the push error.
+func (s *DoltStore) filteredPushToPeer(ctx context.Context, peer string, excludeTypes []string) (filtered bool, retErr error) {
 	if len(excludeTypes) == 0 {
-		return s.PushTo(ctx, peer)
+		return false, s.PushTo(ctx, peer)
 	}
 	sourceBranch := s.branch
 	operationID, err := uuid.NewRandom()
 	if err != nil {
-		return fmt.Errorf("federation filter: generate staging branch: %w", err)
+		return false, fmt.Errorf("federation filter: generate staging branch: %w", err)
 	}
 	stagingBranch := federationStagingBranchPrefix + operationID.String()
 	keepBranch := federationKeepBranchPrefix + operationID.String()
@@ -527,13 +532,13 @@ func (s *DoltStore) filteredPushToPeer(ctx context.Context, peer string, exclude
 	// so the source ref is named, not inherited.
 	db, err := s.openLongTimeoutConn()
 	if err != nil {
-		return fmt.Errorf("federation filter: open long-timeout connection: %w", err)
+		return false, fmt.Errorf("federation filter: open long-timeout connection: %w", err)
 	}
 	defer db.Close()
 	db.SetMaxIdleConns(0)
 	conn, err := db.Conn(ctx)
 	if err != nil {
-		return fmt.Errorf("federation filter: acquire long-timeout connection: %w", err)
+		return false, fmt.Errorf("federation filter: acquire long-timeout connection: %w", err)
 	}
 	defer conn.Close()
 
@@ -547,7 +552,7 @@ func (s *DoltStore) filteredPushToPeer(ctx context.Context, peer string, exclude
 		}
 	}()
 
-	_, err = versioncontrolops.PushFilteredBranch(ctx, conn, versioncontrolops.FilteredPushOptions{
+	pushResult, err := versioncontrolops.PushFilteredBranch(ctx, conn, versioncontrolops.FilteredPushOptions{
 		SourceBranch:  sourceBranch,
 		StagingBranch: stagingBranch,
 		KeepBranch:    keepBranch,
@@ -557,7 +562,7 @@ func (s *DoltStore) filteredPushToPeer(ctx context.Context, peer string, exclude
 			return s.pushRefToPeer(ctx, peer, refspec)
 		},
 	})
-	return err
+	return pushResult != nil && pushResult.Filtered, err
 }
 
 // cleanupFilteredStaging discards the operation connection (an in-flight cancel

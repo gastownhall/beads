@@ -349,3 +349,119 @@ func TestEmbeddedFederationConcurrent(t *testing.T) {
 	}
 	t.Logf("%d/%d federation workers succeeded", successes, numWorkers)
 }
+
+// runBdFederationBuffers runs "bd federation" with extra args, returning the
+// command's stdout and stderr separately — the filtered-push notice is
+// asserted on stderr and must not leak into --json stdout.
+func runBdFederationBuffers(t *testing.T, bd, dir string, args ...string) (stdout, stderr string) {
+	t.Helper()
+	fullArgs := append([]string{"federation"}, args...)
+	cmd := exec.Command(bd, fullArgs...)
+	cmd.Dir = dir
+	cmd.Env = bdEnv(dir)
+	out, errBuf, err := runCommandBuffers(t, cmd)
+	if err != nil {
+		t.Fatalf("bd federation %s failed: %v\nstdout:\n%s\nstderr:\n%s",
+			strings.Join(args, " "), err, out.String(), errBuf.String())
+	}
+	return out.String(), errBuf.String()
+}
+
+// countOccurrences counts non-overlapping occurrences of sub in s.
+func countOccurrences(s, sub string) int {
+	return strings.Count(s, sub)
+}
+
+// GH#7890 / AC-7: multiple filtered publications in one CLI invocation render
+// exactly one history-visibility notice on stderr — in human mode and in JSON
+// mode, where stdout must stay a valid JSON document whose results identify
+// the filtered publications. exclude_types defaults to [wisp], so an
+// ephemeral issue makes every publication of this branch actually withhold a
+// row.
+func TestEmbeddedFederationSyncFilteredNotice(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt federation tests")
+	}
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "fdfil")
+
+	peerA := filepath.Join(t.TempDir(), "alpha")
+	peerB := filepath.Join(t.TempDir(), "beta")
+	if err := os.MkdirAll(peerA, 0o700); err != nil {
+		t.Fatalf("create peer dir: %v", err)
+	}
+	if err := os.MkdirAll(peerB, 0o700); err != nil {
+		t.Fatalf("create peer dir: %v", err)
+	}
+	bdFederation(t, bd, dir, "add-peer", "alpha", "file://"+peerA)
+	bdFederation(t, bd, dir, "add-peer", "beta", "file://"+peerB)
+
+	// Bootstrap each peer's tip with an unfiltered push — before the excluded
+	// issue exists, so the peer never holds it and the sync's filtered push
+	// genuinely withholds a row.
+	for _, peer := range []string{"alpha", "beta"} {
+		push := exec.Command(bd, "dolt", "push", peer)
+		push.Dir = dir
+		push.Env = bdEnv(dir)
+		if out, err := push.CombinedOutput(); err != nil {
+			t.Fatalf("bd dolt push %s failed: %v\n%s", peer, err, out)
+		}
+	}
+
+	// Exclude a built-in, versioned issue type: wisps live in dolt_ignore'd
+	// tables and are never pushed, so filtering them changes no publication.
+	configYaml := "federation:\n  exclude_types:\n    - chore\n"
+	if err := os.WriteFile(filepath.Join(dir, ".beads", "config.yaml"), []byte(configYaml), 0o600); err != nil {
+		t.Fatalf("write workspace config: %v", err)
+	}
+
+	// An issue of the excluded type: every later publication of this branch
+	// actually withholds a row.
+	create := exec.Command(bd, "create", "--id", "fdfil-chore", "--type", "chore", "chore to withhold")
+	create.Dir = dir
+	create.Env = bdEnv(dir)
+	if out, err := create.CombinedOutput(); err != nil {
+		t.Fatalf("bd create --type chore failed: %v\n%s", err, out)
+	}
+
+	// Human mode: filtered publications marked on stdout, exactly one
+	// history-visibility notice on stderr.
+	stdout, stderr := runBdFederationBuffers(t, bd, dir, "sync")
+	if !strings.Contains(stdout, "Pushed (filtered)") {
+		t.Errorf("human sync output lacks \"Pushed (filtered)\":\n%s", stdout)
+	}
+	if got := countOccurrences(stderr, "Filtered push:"); got != 1 {
+		t.Errorf("human-mode history-visibility notices on stderr = %d, want exactly 1:\n%s", got, stderr)
+	}
+
+	// JSON mode: stdout stays a valid document identifying the filtered
+	// publications; the notice stays on stderr, exactly once.
+	stdout, stderr = runBdFederationBuffers(t, bd, dir, "sync", "--json")
+	var payload struct {
+		Peers   []string `json:"peers"`
+		Results []struct {
+			Peer         string `json:"Peer"`
+			Pushed       bool   `json:"Pushed"`
+			PushFiltered bool   `json:"PushFiltered"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+		t.Fatalf("sync --json stdout is not valid JSON: %v\n%s", err, stdout)
+	}
+	if len(payload.Results) != 2 {
+		t.Fatalf("sync --json results = %d, want 2 (one per peer):\n%s", len(payload.Results), stdout)
+	}
+	for _, r := range payload.Results {
+		if !r.Pushed || !r.PushFiltered {
+			t.Errorf("sync --json result for %s Pushed=%v PushFiltered=%v, want both true (structured results must identify filtered publications)",
+				r.Peer, r.Pushed, r.PushFiltered)
+		}
+	}
+	if got := countOccurrences(stderr, "Filtered push:"); got != 1 {
+		t.Errorf("JSON-mode history-visibility notices on stderr = %d, want exactly 1:\n%s", got, stderr)
+	}
+	if strings.Contains(stdout, "Filtered push:") {
+		t.Errorf("history-visibility notice leaked into --json stdout:\n%s", stdout)
+	}
+}

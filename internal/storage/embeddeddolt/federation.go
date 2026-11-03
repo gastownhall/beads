@@ -449,10 +449,12 @@ func (s *EmbeddedDoltStore) Sync(ctx context.Context, peer string, strategy stri
 	// Sync (dolt/federation.go), which never publishes a plain PushTo when
 	// federation.exclude_types is configured.
 	excludeTypes := config.GetFederationConfig().ExcludeTypes
-	if err := s.filteredPushToPeer(ctx, peer, excludeTypes); err != nil {
+	filtered, err := s.filteredPushToPeer(ctx, peer, excludeTypes)
+	if err != nil {
 		result.PushError = err
 	} else {
 		result.Pushed = true
+		result.PushFiltered = filtered
 	}
 
 	// Record last sync time in metadata.
@@ -466,19 +468,22 @@ func (s *EmbeddedDoltStore) Sync(ctx context.Context, peer string, strategy stri
 // types, the embedded twin of dolt/federation.go's filteredPushToPeer. When
 // excludeTypes is empty it delegates directly to PushTo (no filtering).
 //
+// It returns whether the successful publication actually withheld
+// excluded-typed rows from the pushed tip, plus the push error.
+//
 // The staging itself lives in versioncontrolops.PushFilteredBranch, shared
 // with the server driver; this wrapper supplies the embedded connection and
 // the push: credentials resolve through withPeerAuth BEFORE the pinned
 // connection opens, because embedded OpenSQL serializes engine handles — the
 // push callback must run on the same connection as the staging steps.
-func (s *EmbeddedDoltStore) filteredPushToPeer(ctx context.Context, peer string, excludeTypes []string) (retErr error) {
+func (s *EmbeddedDoltStore) filteredPushToPeer(ctx context.Context, peer string, excludeTypes []string) (filtered bool, retErr error) {
 	if len(excludeTypes) == 0 {
-		return s.PushTo(ctx, peer)
+		return false, s.PushTo(ctx, peer)
 	}
 	sourceBranch := s.branch
 	operationID, err := uuid.NewRandom()
 	if err != nil {
-		return fmt.Errorf("federation filter: generate staging branch: %w", err)
+		return false, fmt.Errorf("federation filter: generate staging branch: %w", err)
 	}
 	stagingBranch := federationStagingBranchPrefix + operationID.String()
 	keepBranch := federationKeepBranchPrefix + operationID.String()
@@ -498,7 +503,7 @@ func (s *EmbeddedDoltStore) filteredPushToPeer(ctx context.Context, peer string,
 			if !ok {
 				return fmt.Errorf("federation filter: pinned connection %T cannot open transactions", db)
 			}
-			_, err := versioncontrolops.PushFilteredBranch(ctx, conn, versioncontrolops.FilteredPushOptions{
+			pushResult, err := versioncontrolops.PushFilteredBranch(ctx, conn, versioncontrolops.FilteredPushOptions{
 				SourceBranch:  sourceBranch,
 				StagingBranch: stagingBranch,
 				KeepBranch:    keepBranch,
@@ -508,10 +513,11 @@ func (s *EmbeddedDoltStore) filteredPushToPeer(ctx context.Context, peer string,
 					return versioncontrolops.PushRefspec(ctx, conn, peer, refspec, user)
 				},
 			})
+			filtered = pushResult != nil && pushResult.Filtered
 			return err
 		})
 	})
-	return err
+	return filtered, err
 }
 
 // cleanupFilteredStaging deletes the filtered-push staging and keep branches

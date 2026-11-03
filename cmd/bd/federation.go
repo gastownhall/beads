@@ -50,6 +50,13 @@ Handles merge conflicts using the configured strategy:
 If no strategy is specified and conflicts occur, the sync will pause
 and report which tables have conflicts for manual resolution.
 
+When federation.exclude_types is configured (default: wisp), pushes
+withhold issues of the excluded types from the peer's tip only: they
+remain in the local commit history and on peers that already held
+them, and any fetch of the full local branch receives them. Each sync
+whose publication actually withheld rows prints one history-visibility
+notice on stderr.
+
 Examples:
   bd federation sync                      # Sync with all peers
   bd federation sync --peer town-beta     # Sync with specific peer
@@ -191,6 +198,7 @@ func runFederationSync(cmd *cobra.Command, args []string) error {
 
 	// Sync with each peer
 	var results []*storage.SyncResult
+	anyPushFiltered := false
 	for _, peer := range peers {
 		if !jsonOutput {
 			fmt.Printf("%s Syncing with %s...\n", ui.RenderAccent("🔄"), peer)
@@ -204,6 +212,10 @@ func runFederationSync(cmd *cobra.Command, args []string) error {
 				fmt.Printf("  %s %v\n", ui.RenderFail("✗"), err)
 			}
 			continue
+		}
+
+		if result.Pushed && result.PushFiltered {
+			anyPushFiltered = true
 		}
 
 		if !jsonOutput {
@@ -229,12 +241,25 @@ func runFederationSync(cmd *cobra.Command, args []string) error {
 					}
 				}
 			}
-			if result.Pushed {
+			if result.Pushed && result.PushFiltered {
+				fmt.Printf("  %s Pushed (filtered)\n", ui.RenderPass("✓"))
+			} else if result.Pushed {
 				fmt.Printf("  %s Pushed\n", ui.RenderPass("✓"))
 			} else if result.PushError != nil {
 				fmt.Printf("  %s Push skipped: %v\n", ui.RenderMuted("○"), result.PushError)
 			}
 		}
+	}
+
+	// One history-visibility notice per invocation when any publication
+	// actually withheld rows — stderr, so --json's stdout stays a valid
+	// document. The notice is deliberately not per-peer: N filtered peers
+	// would render N copies of the same warning.
+	if anyPushFiltered {
+		fmt.Fprintln(os.Stderr,
+			ui.RenderWarn("⚠")+" Filtered push: excluded issue types were withheld from the pushed tip only. "+
+				"They remain in this repository's commit history, on peers that already held them, "+
+				"and in any direct fetch of the full branch.")
 	}
 
 	if jsonOutput {

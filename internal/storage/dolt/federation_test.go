@@ -678,7 +678,7 @@ func TestFilteredPushExcludesWisp(t *testing.T) {
 	// Run filteredPushToPeer — push will fail (no remote) but the staging
 	// branch logic runs first. We verify the staging branch behavior by
 	// checking that the original branch is untouched afterward.
-	pushErr := store.filteredPushToPeer(ctx, "nonexistent-peer", []string{"wisp"})
+	_, pushErr := store.filteredPushToPeer(ctx, "nonexistent-peer", []string{"wisp"})
 	if pushErr == nil {
 		t.Fatal("expected push error for nonexistent peer")
 	}
@@ -740,7 +740,8 @@ func TestFilteredPushUsesDedicatedLongTimeoutConnection(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- store.filteredPushToPeer(ctx, "nonexistent-peer", []string{"wisp"})
+		_, err := store.filteredPushToPeer(ctx, "nonexistent-peer", []string{"wisp"})
+		errCh <- err
 	}()
 
 	waitForFilteredStagingCommit(t, ctx, observer, errCh, waiterID, blockerID)
@@ -789,11 +790,13 @@ func TestFilteredPushConcurrentOperationsUseDistinctStagingBranches(t *testing.T
 	defer cancelSecond()
 	errCh := make(chan error, 2)
 	go func() {
-		errCh <- store.filteredPushToPeer(firstCtx, "nonexistent-peer", []string{"wisp"})
+		_, err := store.filteredPushToPeer(firstCtx, "nonexistent-peer", []string{"wisp"})
+		errCh <- err
 	}()
 	waitForPoolWait(t, ctx, store.db, initialWaitCount)
 	go func() {
-		errCh <- store.filteredPushToPeer(secondCtx, "nonexistent-peer", []string{"wisp"})
+		_, err := store.filteredPushToPeer(secondCtx, "nonexistent-peer", []string{"wisp"})
+		errCh <- err
 	}()
 	waitForPoolWait(t, ctx, store.db, initialWaitCount+1)
 
@@ -837,7 +840,8 @@ func TestFilteredPushCleanupSurvivesLostBranchCreateResponse(t *testing.T) {
 	pushCtx, cancelPush := context.WithCancel(ctx)
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- store.filteredPushToPeer(pushCtx, "nonexistent-peer", []string{"wisp"})
+		_, err := store.filteredPushToPeer(pushCtx, "nonexistent-peer", []string{"wisp"})
+		errCh <- err
 	}()
 
 	select {
@@ -948,7 +952,8 @@ func TestFilteredPushCleanupSurvivesCallerCancellation(t *testing.T) {
 	pushCtx, cancelPush := context.WithCancel(ctx)
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- store.filteredPushToPeer(pushCtx, "nonexistent-peer", []string{"wisp"})
+		_, err := store.filteredPushToPeer(pushCtx, "nonexistent-peer", []string{"wisp"})
+		errCh <- err
 	}()
 
 	waitForFederationQuery(t, ctx, observer, errCh, store.database, "DELETE FROM issues WHERE ephemeral = 1")
@@ -1022,7 +1027,8 @@ func TestFilteredPushCleanupDeletesStagingAfterRestoreFailure(t *testing.T) {
 	pushCtx, cancelPush := context.WithCancel(ctx)
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- store.filteredPushToPeer(pushCtx, "nonexistent-peer", []string{"wisp"})
+		_, err := store.filteredPushToPeer(pushCtx, "nonexistent-peer", []string{"wisp"})
+		errCh <- err
 	}()
 
 	waitForFilteredStagingCommit(t, ctx, observer, errCh, waiterID, blockerID)
@@ -1369,7 +1375,7 @@ func TestFilteredPushOptOut(t *testing.T) {
 	// With empty exclude list, filteredPushToPeer delegates directly to PushTo
 	// (no staging branch created). It will fail due to no remote, but the
 	// important thing is no staging branch is created.
-	pushErr := store.filteredPushToPeer(ctx, "nonexistent-peer", []string{})
+	_, pushErr := store.filteredPushToPeer(ctx, "nonexistent-peer", []string{})
 	if pushErr == nil {
 		t.Fatal("expected push error for nonexistent peer")
 	}
@@ -1444,7 +1450,8 @@ func TestFilteredPushExcludesCustomType(t *testing.T) {
 	initialWaitCount := store.db.Stats().WaitCount
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- store.filteredPushToPeer(ctx, "nonexistent-peer", []string{"chore"})
+		_, err := store.filteredPushToPeer(ctx, "nonexistent-peer", []string{"chore"})
+		errCh <- err
 	}()
 	waitForPoolWait(t, ctx, store.db, initialWaitCount)
 
@@ -1610,7 +1617,7 @@ func TestFilteredPushStagingBranchCleanupOnError(t *testing.T) {
 
 	// Run filtered push to a nonexistent peer — will fail, but staging
 	// branch should still be cleaned up.
-	_ = store.filteredPushToPeer(ctx, "no-such-peer", []string{"wisp", "message"})
+	_, _ = store.filteredPushToPeer(ctx, "no-such-peer", []string{"wisp", "message"})
 
 	branches, err := store.ListBranches(ctx)
 	if err != nil {

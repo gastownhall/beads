@@ -19,6 +19,12 @@ type SyncResult struct {
 	ConflictsResolved bool
 	Error             error
 	PushError         error // Non-fatal push error
+	// PushFiltered is true when the successful publication actually
+	// withheld rows — excluded issue types were filtered out of the pushed
+	// tip. It says nothing about why or what: the excluded rows stay in the
+	// sender's history and on peers that already held them, and the CLI
+	// renders the history-visibility notice from this flag.
+	PushFiltered bool
 }
 
 // SyncStore provides sync operations with peers.
