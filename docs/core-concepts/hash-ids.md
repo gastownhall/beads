@@ -91,6 +91,13 @@ bd create "Test"
 # Returns: myproject-a1b2c3
 ```
 
+An ID you pass with `--id` must start with the configured prefix (or one of
+`allowed_prefixes`). Add `--force` to create an issue under another prefix:
+
+```bash
+bd create "Add CSV export" --id export-work --force
+```
+
 ## Collision Handling
 
 While rare, collisions are handled automatically:

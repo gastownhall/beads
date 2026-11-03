@@ -1165,6 +1165,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd create --parent <id>` no longer needs `--force` when the parent's ID is
+  outside the workspace prefix (for example a parent created with
+  `bd create --id export-work --force`). The child's ID is minted from its
+  parent, so only the parent needed the override; proxied-server workspaces
+  already accepted it. A prefix refusal for an explicit `--id` now says
+  `(use --force to override)` on every route, and on a proxied-server
+  workspace `--json` reports it as a JSON error (GH#7965).
 - `bd create --file` and other batch creates no longer fail with "issue
   already exists" on an id bd generated itself. The batch chose every id
   before it wrote any row, so two of its items could be handed the same short
