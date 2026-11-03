@@ -1562,6 +1562,56 @@ func TestGetReadyWork_IncludeDeferredListsChildOfUndatedDeferredParent(t *testin
 	}
 }
 
+// TestGetReadyWork_DeferredParentKindsHoldTheirChildren pins which parents hold
+// their direct children out of ready work (GH#7300): a status-deferred parent
+// with no date, and a parent whose status is still open but whose defer_until
+// is in the future. A child of an ordinary open parent stays ready.
+func TestGetReadyWork_DeferredParentKindsHoldTheirChildren(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	future := time.Now().UTC().Add(24 * time.Hour)
+	seedReadyIssues(ctx, t, store, []*types.Issue{
+		{ID: "rw-kind-status", Status: types.StatusDeferred, IssueType: types.TypeEpic},
+		{ID: "rw-kind-status-child", Status: types.StatusOpen},
+		{ID: "rw-kind-dated", Status: types.StatusOpen, IssueType: types.TypeEpic},
+		{ID: "rw-kind-dated-child", Status: types.StatusOpen},
+		{ID: "rw-kind-open", Status: types.StatusOpen, IssueType: types.TypeEpic},
+		{ID: "rw-kind-open-child", Status: types.StatusOpen},
+	}, map[string]string{
+		"rw-kind-status-child": "rw-kind-status",
+		"rw-kind-dated-child":  "rw-kind-dated",
+		"rw-kind-open-child":   "rw-kind-open",
+	})
+	// A future date without the deferred status (bd update --defer leaves the
+	// status alone).
+	if err := store.UpdateIssue(ctx, "rw-kind-dated", map[string]interface{}{
+		"defer_until": future,
+	}, "tester"); err != nil {
+		t.Fatalf("date rw-kind-dated: %v", err)
+	}
+	dated, err := store.GetIssue(ctx, "rw-kind-dated")
+	if err != nil {
+		t.Fatalf("GetIssue rw-kind-dated: %v", err)
+	}
+	if dated.Status != types.StatusOpen || dated.DeferUntil == nil {
+		t.Fatalf("rw-kind-dated = status %q, defer_until %v; want open with a future date", dated.Status, dated.DeferUntil)
+	}
+
+	ready := readyReads(ctx, t, store, types.WorkFilter{})
+	for _, held := range []string{"rw-kind-status-child", "rw-kind-dated-child"} {
+		if slices.Contains(ready, held) {
+			t.Errorf("%s is ready, but its parent is deferred; ready = %v", held, ready)
+		}
+	}
+	if !slices.Contains(ready, "rw-kind-open-child") {
+		t.Errorf("rw-kind-open-child is not ready, but its parent is an ordinary open issue; ready = %v", ready)
+	}
+}
+
 // =============================================================================
 // GetBlockedIssues tests
 // =============================================================================
