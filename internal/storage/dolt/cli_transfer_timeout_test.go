@@ -131,6 +131,44 @@ func TestCLITransferErrorPlainFailure(t *testing.T) {
 	}
 }
 
+// TestCLITransferErrorRedactsRemoteCredentials asserts that a failed CLI
+// transfer never echoes URL userinfo that dolt's output carries. CI commonly
+// configures sync.remote as git+https://x-access-token:<token>@github.com/...,
+// and a non-fast-forward rejection makes dolt echo the full remote, so
+// wrapping that output verbatim would leak the token into the terminal,
+// agent transcripts and the auto-push warning.
+func TestCLITransferErrorRedactsRemoteCredentials(t *testing.T) {
+	const token = "ghp_TESTTOKEN"
+	credURL := "git+https://x-access-token:" + token + "@github.com/org/repo"
+	cleanURL := "git+https://github.com/org/repo"
+	rejection := []byte("To " + credURL + "\n ! [rejected]        main -> main (non-fast-forward)\nerror: failed to push some refs to '" + credURL + "'\nfatal: unable to access '" + credURL + "': The requested URL returned error: 403\n")
+	cause := errors.New("exit status 1")
+
+	for name, op := range map[string]string{
+		"dolt push":  "dolt push",
+		"dolt pull":  "dolt pull",
+		"peer push":  "push to peer origin",
+		"peer pull":  "pull from peer origin",
+		"peer fetch": "fetch from peer origin",
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := cliTransferError(op, "origin", context.Background(), rejection, cause)
+			msg := err.Error()
+			if strings.Contains(msg, token) || strings.Contains(msg, "x-access-token") {
+				t.Fatalf("error leaks credentials: %s", msg)
+			}
+			for _, want := range []string{cleanURL, "non-fast-forward", "failed to push some refs", "exit status 1"} {
+				if !strings.Contains(msg, want) {
+					t.Errorf("error lost %q: %s", want, msg)
+				}
+			}
+			if !errors.Is(err, cause) {
+				t.Errorf("wrapped cause is not discoverable through errors.Is: %v", err)
+			}
+		})
+	}
+}
+
 // withNoDoltOnPath points PATH at an empty directory for t, so a test of the
 // command prepareDoltCLITransferCommand builds does not depend on the host's
 // dolt, whose version the function checks first (a dolt not on PATH is not
