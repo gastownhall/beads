@@ -384,3 +384,73 @@ func TestRememberBareKeyReadErrorsNeverWrite(t *testing.T) {
 		}
 	}
 }
+
+// assertRememberWrote checks a run stored content under key with exactly the
+// request wantReq and printed the shipped write result.
+func assertRememberWrote(t *testing.T, run bareKeyRun, mem *bareKeyMemories, asJSON bool, wantReq memoryops.RememberRequest, key, content string) {
+	t.Helper()
+	if run.err != nil {
+		t.Fatalf("err = %v, want the write\nstdout:\n%s\nstderr:\n%s", run.err, run.stdout, run.stderr)
+	}
+	if want := []memoryops.RememberRequest{wantReq}; !slices.Equal(mem.writes, want) {
+		t.Errorf("writes = %v, want %v", mem.writes, want)
+	}
+	if run.commits != 1 {
+		t.Errorf("commits = %d, want one for the write", run.commits)
+	}
+	if len(mem.recalls) != 0 {
+		t.Errorf("recalled %q, want no read on the write path", mem.recalls)
+	}
+	if got, ok := mem.stored[key]; !ok || got != content {
+		t.Errorf("stored[%q] = %q (present %v), want %q", key, got, ok, content)
+	}
+	if asJSON {
+		body := decodeJSONBody(t, run.stdout)
+		if body["key"] != key || body["value"] != content {
+			t.Errorf("body = %v, want key %q, value %q", body, key, content)
+		}
+		return
+	}
+	if !strings.Contains(run.stdout, "["+key+"]: "+content) {
+		t.Errorf("stdout = %q, want the write result for [%s]", run.stdout, key)
+	}
+}
+
+// TestRememberExplicitKeyStoresVerbatim pins that --key keeps its write
+// contract: the content is stored under the key as given, whatever its shape,
+// even when the content is itself a bare key naming an existing memory.
+func TestRememberExplicitKeyStoresVerbatim(t *testing.T) {
+	keys := []string{
+		"one-two-three-four-five-six-seven-eight-nine",
+		"a-very-long-single-key-that-is-well-over-sixty-bytes-in-total",
+		strings.Repeat("k", 61),
+		"config.v2",
+		"Mixed Case_key with spaces",
+		"Some_Key",
+		"trail-",
+	}
+	contents := []string{"config.v2", "the auth module uses JWT"}
+	for _, key := range keys {
+		for _, content := range contents {
+			for _, asJSON := range []bool{false, true} {
+				t.Run(bareKeyCaseName(asJSON, strconv.Quote(key)+" "+strconv.Quote(content)), func(t *testing.T) {
+					// The content names an existing memory, which must neither
+					// answer nor change.
+					mem := &bareKeyMemories{allowWrites: true, stored: map[string]string{"config.v2": "existing"}}
+					if key == "config.v2" {
+						mem.stored = map[string]string{"config-v2": "existing"}
+					}
+					others := maps.Clone(mem.stored)
+
+					run := runRememberCmd(t, mem, content, key, asJSON)
+					assertRememberWrote(t, run, mem, asJSON, memoryops.RememberRequest{Key: key, Content: content}, key, content)
+					for k, v := range others {
+						if mem.stored[k] != v {
+							t.Errorf("stored[%q] = %q, want it untouched (%q)", k, mem.stored[k], v)
+						}
+					}
+				})
+			}
+		}
+	}
+}
