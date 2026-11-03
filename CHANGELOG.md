@@ -7,6 +7,389 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.3-rc.1] - 2026-11-03
+
+First release candidate for 1.3.3, a patch on top of 1.3.2 that backports
+security fixes, data-loss fixes and dependency updates from `main`
+([#8083](https://github.com/gastownhall/beads/pull/8083)). It adds **no new
+migration file**, and the embedded Dolt engine is unchanged, so upgrading from
+1.3.x is a binary swap. A store from an older release still runs its pending
+migrations on first open, now without restamping `updated_at`. Several fixes
+change what a command accepts or prints; read **Upgrade notes** before
+upgrading. The 1.3.2 upgrade note (run `bd recompute-blocked` once per
+workspace after upgrading from bd ≤1.3.0,
+[#7037](https://github.com/gastownhall/beads/issues/7037)) still applies.
+
+### Security
+
+- **A committed `.beads/.env` can no longer make bd run a command, and
+  workspace settings can no longer set the command `bd mail` runs**
+  ([#8083](https://github.com/gastownhall/beads/pull/8083), backport of
+  [#7879](https://github.com/gastownhall/beads/pull/7879), fixes
+  [#7878](https://github.com/gastownhall/beads/issues/7878), reported and
+  fixed by @Wenjix). bd loaded every key in `.beads/.env` into its
+  environment, so a contributor could commit
+  `BEADS_DOLT_CREDENTIAL_COMMAND=<command>` and bd ran it with `sh -c` on the
+  next user's machine. bd now imports only an allowlist from that file:
+  `BEADS_*` and `BD_*` keys that neither name a command nor redirect where
+  credentials go, and, of the `DOLT_*` namespace, only `DOLT_REMOTE_USER` and
+  `DOLT_REMOTE_PASSWORD`. Keys match case-insensitively and never override the
+  shell environment. Every other key is ignored with
+  `beads: ignoring <KEY> from .beads/.env (<reason>)` on stderr. Separately,
+  `bd mail` ran `mail.delegate` from project `config.yaml` or the replicated
+  database config, where `PUT /v0/beads/config/mail.delegate` could store it.
+  `bd mail` now reads `mail.delegate` only from the environment and user
+  config (`~/.config/bd/config.yaml`), and the settings API refuses the key
+  with HTTP 400.
+- **A cloned repository's committed config can no longer make bd run a
+  command through a remote URL that git or ssh reads as an option**
+  ([#8083](https://github.com/gastownhall/beads/pull/8083), backport of
+  [#7881](https://github.com/gastownhall/beads/pull/7881), fixes
+  [#7880](https://github.com/gastownhall/beads/issues/7880), reported and
+  fixed by @Wenjix). A `sync.remote` or `sync.git-remote` starting with `-`,
+  also after `git+`, such as `--upload-pack=<command>`, reached
+  `git ls-remote` as an option in `bd bootstrap` and `bd init`, and
+  `bd dolt remote reset-data` passed its remote's URL to `git ls-remote` and
+  `git push` the same way. An `ssh://` URL whose user name (percent-decoded)
+  or host starts with `-`, such as `ssh://-oProxyCommand=<command>@host/path`,
+  reached ssh as an option through Dolt's `ssh://` transport, and an ssh
+  without OpenSSH 9.6's host name check (CVE-2023-51385) ran the command.
+  bd now refuses such a URL from `sync.remote` and `sync.git-remote` (naming
+  the key), `routing.*`, `repos.additional` and `federation.remote`
+  (`bd config apply` checks it before opening the store), and when it adds a
+  Dolt remote or clones; the `refs/dolt/data` probe and reset-data pass the
+  URL to git after `--`. beads-mcp no longer passes tool arguments where bd
+  reads them as flags (a comment of `--file=<path>` made bd read that file
+  into the comment): it passes each flag value as one `--flag=value` argument
+  and puts ids and text after `--`.
+- **Dependency updates for published advisories**
+  ([#8083](https://github.com/gastownhall/beads/pull/8083)). `govulncheck`
+  reported 2 reachable advisories on 1.3.2's module set and none on this one.
+  - Go: `github.com/go-jose/go-jose/v4` 4.1.6 and `golang.org/x/net` 0.62.0,
+    with `x/crypto` 0.58.0, `x/text` 0.43.0, `x/tools` 0.51.0, `x/sync`,
+    `x/sys`, `x/term` and `x/telemetry` raised with them (backport of
+    [#7925](https://github.com/gastownhall/beads/pull/7925)), and
+    `github.com/getkin/kin-openapi` 0.149.0, a tool-only dependency of the
+    API code generator that is not in the bd binary (backport of
+    [#7812](https://github.com/gastownhall/beads/pull/7812)).
+  - Release workflow: uv 0.13.6, which also rejects chains through the
+    compromised eMudhra intermediate CAs and ships patched CPython builds, and
+    Python 3.14.10 (backport of
+    [#7925](https://github.com/gastownhall/beads/pull/7925)).
+  - beads-mcp `uv.lock`: `opentelemetry-api` 1.45.1 (backport of
+    [#7813](https://github.com/gastownhall/beads/pull/7813)); `fastmcp` 3.4.11
+    and `certifi` 2026.10.23 (adapted from
+    [#7814](https://github.com/gastownhall/beads/pull/7814), which moves
+    `main` to fastmcp 4.x; this line stays on 3.x); `joserfc` 1.7.7 and `mcp`
+    1.30.0 (no source PR: `main` moved past them with fastmcp 4.x);
+    `pyjwt` 2.15.1 and `urllib3` 2.8.0 (backport of
+    [#7466](https://github.com/gastownhall/beads/pull/7466)); `authlib` 1.9.1
+    and `dnspython` 2.9.0 on Python ≥3.11 (backport of
+    [#7925](https://github.com/gastownhall/beads/pull/7925)). One osv-scanner
+    advisory remains: `dnspython` 2.8.0 on Python 3.10, which no fixed
+    `dnspython` release supports.
+
+### Fixed
+
+- **A managed-local proxied server no longer fails to start when another
+  process takes its Dolt port first**
+  ([#8083](https://github.com/gastownhall/beads/pull/8083), backport of
+  [#7184](https://github.com/gastownhall/beads/pull/7184)). bd picks the Dolt
+  port by binding and closing it when it writes the generated
+  `.beads/dolt/config.yaml`, and `dolt sql-server` binds it only later. If
+  another process took the port in between, Dolt logged
+  `Port N already in use.` and exited, but the proxy dialed the port, reached
+  the other process, and reported the server ready. `bd init --proxied-server`
+  and the first command after an idle restart then failed with
+  `unexpected EOF` followed by `uow: ping db: ... connection refused`.
+  Readiness now requires Dolt's own `Server ready. Accepting connections.`
+  line on the child's output (at `log_level` info, which every generated
+  config uses; a quieter level keeps the dial-only check), and a child that
+  reports its port taken is `ErrPortInUse`. When the port is one Beads chose,
+  the proxy relaunches Dolt on a free port, up to five ports, from
+  `.beads/dolt/proxy-child.runtime-config.yaml`: a copy of `config.yaml` with
+  only `listener.port` changed. That file is removed or replaced at the next
+  start (a `bd dolt stop` kills the child and can leave it behind until then).
+  `config.yaml` itself is never rewritten.
+- **`bd delete` no longer resolves an id it cannot find to a different issue
+  whose id begins with it**
+  ([#8083](https://github.com/gastownhall/beads/pull/8083), backport of
+  [#7375](https://github.com/gastownhall/beads/pull/7375)). bd delete
+  resolved each id with the abbreviation-tolerant resolver, so an id that was
+  already gone (a retried delete, a re-run `--from-file` list, a parent whose
+  child survives) resolved by leading-prefix match to whichever surviving
+  issue's id it begins: after `fx-t00003` was deleted, `bd delete fx-t00003`
+  previewed `fx-t000031` and printed `bd delete fx-t000031 --force` as the
+  next step, and with `--force` deleted it. `--quiet` silenced the partial-id
+  notice, so a `--force --quiet` re-run deleted issues it never named without
+  a word. `bd delete` now requires an exact id on the preview and with
+  `--force`, as the team-server route already did; full ids, bare full
+  hashes, child ids and routed ids resolve as before. An abbreviation is
+  refused with `issue "t000" not found: bd delete needs the full issue id, and
+  "t000" is only the start of fx-t000031`, naming every id it matches. Reads
+  and other writes, `bd comment` included, keep accepting abbreviations.
+- **`bd doctor --fix` no longer imports the tracked `issues.jsonl` over a
+  server database**
+  ([#8083](https://github.com/gastownhall/beads/pull/8083), backport of
+  [#7899](https://github.com/gastownhall/beads/pull/7899)). Its Database
+  repair took a missing `.beads/dolt` directory for a missing database. A
+  server-mode workspace has no such directory in a fresh clone or on another
+  machine, so whenever `bd doctor` reported a Database problem it repairs
+  there, such as a database last stamped by another bd version, the repair
+  opened the server's existing database and imported `.beads/issues.jsonl`
+  into it. That rewrote the database's rows to the tracked copy and recreated
+  issues deleted since. The repair now imports only into a database its own
+  open created or one with no issues. A database already on the server with
+  issues gets the local directory and its metadata update, and nothing is
+  imported. The Schema Compatibility repair runs the same code and is fixed
+  too.
+- **`bd compact` no longer silently changes row data when commit dates are
+  out of history order**
+  ([#8083](https://github.com/gastownhall/beads/pull/8083), backport of
+  [#8050](https://github.com/gastownhall/beads/pull/8050) and
+  [#6644](https://github.com/gastownhall/beads/pull/6644), fixes
+  [#6645](https://github.com/gastownhall/beads/issues/6645), reported by
+  @bee-ghosttrack, and [#6516](https://github.com/gastownhall/beads/issues/6516),
+  reported by @postoso). Dolt does not require commit dates to rise along the
+  parent chain (a host clock that jumped back). `bd compact --days N`
+  replayed the recent commits in date order, so a child dated before its
+  parent conflicted on any shared row; it now replays them in Dolt's
+  `commit_order`. When a recent-dated commit came before an old-dated one in
+  history, the squashed base already held the recent commit, and replaying it
+  again could undo the later old commit's edit while reporting "Compacted".
+  Compact now refuses such a history up front, names both commits and their
+  dates, and changes nothing; `--force` does not override the refusal, and
+  `--dry-run` reports it. The squashed base now ends at the last old commit
+  in history rather than the newest-dated one, so an old window whose dates
+  are shuffled no longer loses its final edits. As a general net, compact
+  compares the replayed history's committed data with `main` before swapping
+  it in and aborts, leaving `main` untouched, on any difference.
+- **`bd compact` no longer discards writes that reach `main` while it runs**
+  ([#8083](https://github.com/gastownhall/beads/pull/8083), backport of
+  [#8046](https://github.com/gastownhall/beads/pull/8046)). It finished by
+  hard-resetting `main` onto the rebuilt history, which dropped changes in
+  `main`'s working set that no Dolt commit held yet (a batch under batched or
+  disabled auto-commit, or a write between its SQL commit and its Dolt
+  commit) and any commit that landed on `main` during the rebuild, after
+  their writers had been told they succeeded. It now moves `main` with a soft
+  reset: working-set changes stay pending, and a commit that landed during
+  the rebuild is kept in one follow-up commit
+  (`compact: commit changes that reached main during compaction`), without
+  its own hash, message or author; changes already staged when `bd compact`
+  started join that commit. The replay check above compares with `main` as
+  `bd compact` read it, so a write that lands meanwhile is kept, not refused
+  as a divergent replay. If the follow-up commit fails, `bd compact` stops
+  with the changes staged on `main`, for `bd dolt commit`.
+- **`bd rules compact` no longer deletes rules without confirmation or a
+  backup** ([#8083](https://github.com/gastownhall/beads/pull/8083), backport
+  of [#8051](https://github.com/gastownhall/beads/pull/8051), fixes
+  [#5719](https://github.com/gastownhall/beads/issues/5719)). It applied
+  merges by default, writing the composite and deleting the source rules,
+  and a composite keeps only the `**Do:**` and `**Don't:**` lines, so the rest
+  of each source (rationale, exceptions, frontmatter) was gone. Compact now
+  previews unless `--force` is given, and the preview lists, by source, every
+  line the composite drops. Applying copies each source to
+  `<name>.md.backup` before deleting it; undo a merge by deleting the
+  composite and renaming each backup back. A group whose composite or backup
+  path already exists is refused, in preview as well as apply, and a rule
+  with no Do/Don't lines is skipped by `--auto` and refused by `--group`.
+- **`bd dolt remote reset-data` no longer deletes a git checkout used as a
+  `file://` remote**
+  ([#8083](https://github.com/gastownhall/beads/pull/8083), partial backport
+  of [#7902](https://github.com/gastownhall/beads/pull/7902)). Dolt makes a
+  file URL a git remote only when it ends in `.git`, so any other `file://`
+  remote is a Dolt file store, even in a git repository, where Dolt writes
+  its files among the repository's. Once Dolt had pushed into a checkout,
+  reset-data took the directory for a file store and cleared it, `.git` and
+  every working file included, then reported the reset; a bare repository
+  kept every old table file while reset-data reported success. reset-data now
+  refuses a `file://` remote whose directory is a git repository, bare or a
+  checkout, saying to replace the remote with a fresh URL, as for a cloud
+  remote. The rest of #7902 is not in 1.3.3; see **Known issues**.
+- **`bd doctor`'s Classic Artifacts cleanup deletes only what one
+  positive-ownership plan marks safe, and never a database**
+  ([#8083](https://github.com/gastownhall/beads/pull/8083), backport of
+  [#7828](https://github.com/gastownhall/beads/pull/7828)). The cleanup
+  (`bd doctor --fix` and `bd doctor --check=artifacts --clean`) emptied every
+  `.beads` whose path looks like an orchestrator worktree (`crew/*`,
+  `polecats/*`, `refinery/rig`, `.git/beads-worktrees/*`, or a rig root
+  beside `mayor/rig/.beads`) of everything but its `redirect`, `.gitkeep`
+  and, beside a redirect, its metadata. An embedded Dolt workspace there lost
+  its database, a server-mode workspace lost the `metadata.json` and
+  `config.yaml` that record which server database it opens, a SQLite
+  workspace lost its database whatever the file was named, a Dolt backup or
+  remote kept there lost the whole store, and a rig root that
+  `mayor/rig/.beads` redirects to lost the files every checkout routes
+  through. It also removed the WAL, SHM and backups of a nested `.beads` it
+  could not classify. The check and the cleanup now share one classification,
+  and the cleanup removes only an orphaned `beads.db-wal`/`beads.db-shm` in a
+  `.beads` with positive Dolt evidence and the leftovers of a redirect-only
+  stub that holds no database. It never removes database state (`*.db`,
+  `*.db3`, `*.sqlite`, `*.sqlite3` in any case, including the
+  `beads.backup-*.db` backups it used to delete; any file with the SQLite
+  header; the WAL/SHM of a database still beside them; Dolt store, embedded
+  Dolt and backup directories; a raw Dolt chunk store; or a symlink to any of
+  these). Anything else it finds is reported for review and left as it was.
+- **`bd github` sync no longer matches a pulled issue to a bead linked to
+  another repository's issue with the same number**
+  ([#8083](https://github.com/gastownhall/beads/pull/8083), backport of
+  [#8068](https://github.com/gastownhall/beads/pull/8068), fixes
+  [#7781](https://github.com/gastownhall/beads/issues/7781), reported and
+  first fixed by @NahumLitvin in
+  [#7794](https://github.com/gastownhall/beads/pull/7794)). Pulling issue
+  1313 from a second repository reported "0 created, 1 updated" and
+  overwrote the bead linked to the first repository's issue 1313; push,
+  conflict detection and selective pull likewise read another repository's
+  link as the configured repository's issue. Issue URLs now count only when
+  they name the configured host and repository, by its configured owner/repo
+  or by another name GitHub resolves to it (its current name, or a former
+  name beads are still linked under), so a renamed or transferred repository
+  keeps syncing. `--dry-run` push reports beads linked elsewhere as skipped,
+  and `bd github pull <bead-id>` says when a bead's link is not an issue the
+  tracker can address.
+- **Upgrading an older database no longer rewrites issue and wisp
+  `updated_at` values with the time of the upgrade**
+  ([#8083](https://github.com/gastownhall/beads/pull/8083), backport of
+  [#8053](https://github.com/gastownhall/beads/pull/8053) and
+  [#8080](https://github.com/gastownhall/beads/pull/8080), refs
+  [#5981](https://github.com/gastownhall/beads/issues/5981)). Schema
+  migrations 0035, 0046, 0047 and 0053 and ignored migration 0007 update rows
+  without assigning `updated_at`, so its `ON UPDATE CURRENT_TIMESTAMP`
+  stamped every row they touched (every blocked issue on a 1.0.x upgrade, for
+  example). Migration 0041 and ignored migrations 0003 and 0011 stamped rows
+  they only join: the engine applies `ON UPDATE` to every table a
+  multi-table UPDATE joins. Their SQL is frozen, so bd now records the
+  affected rows' `updated_at` before each of these steps and writes it back
+  on the rows the step rewrote before the step is recorded and committed; the
+  pre-0047/0053 repair that splits legacy wisp dependencies no longer joins
+  the tables it would stamp. An edit another process makes during the step
+  to an issue the step does not rewrite keeps its own time. Values already
+  stamped by an earlier upgrade are not repaired. The check lists each
+  table's columns with `SHOW TABLES` and `SHOW COLUMNS` rather than
+  `INFORMATION_SCHEMA`, which Dolt answers by scanning every database on the
+  server, so on a shared server it adds little to the time other bd commands
+  wait on the migration lock.
+
+### Upgrade notes
+
+- **`.beads/.env` keys outside the allowlist are ignored, with a
+  `beads: ignoring <KEY> from .beads/.env` warning on every command**
+  ([#7879](https://github.com/gastownhall/beads/pull/7879)). Notable ones:
+  the credential commands `BEADS_DOLT_CREDENTIAL_COMMAND` and
+  `BEADS_HTTP_TOKEN_COMMAND`, `BEADS_MAIL_DELEGATE`/`BD_MAIL_DELEGATE`,
+  `EDITOR`, `VISUAL`, `PAGER`, `BD_PAGER`, `BEADS_DOLT_BIN`, the credential
+  redirects `BEADS_DOLT_SERVER_HOST`, `BEADS_CREDENTIALS_FILE`,
+  `BEADS_CENTRAL_CONFIG` and `BEADS_HTTP_CA_FILE`, tracker tokens such as
+  `GITHUB_TOKEN` and `LINEAR_API_KEY`, every `DOLT_*` key other than
+  `DOLT_REMOTE_USER` and `DOLT_REMOTE_PASSWORD` (such as `DOLT_SSH_COMMAND`
+  and `DOLT_ROOT_PATH`), and other process variables (`GIT_*`, `SSH_*`,
+  `LD_*`, `DYLD_*`). Move them to your shell environment or user config
+  (`~/.config/bd/config.yaml`), then delete them from `.beads/.env` to stop
+  the warning.
+- **`bd config set mail.delegate` writes user config
+  (`~/.config/bd/config.yaml`)**, and `bd mail` ignores `mail.delegate` in
+  project `config.yaml` and in the database; a leftover database row prints a
+  migration notice. Re-run `bd config set mail.delegate <command>` (or set
+  `BEADS_MAIL_DELEGATE`) on each machine that uses `bd mail`
+  ([#7879](https://github.com/gastownhall/beads/pull/7879)).
+- **Option-shaped remote URLs are refused**
+  ([#7881](https://github.com/gastownhall/beads/pull/7881)): a value
+  starting with `-` (also after `git+`), or an `ssh://` URL whose user or
+  host starts with `-`, in `sync.remote`, `sync.git-remote`, `routing.*`,
+  `repos.additional` or `federation.remote`. No valid remote has that shape.
+  `bd init` stops before writing anything, and `bd bootstrap` does not
+  contact the remote: it restores a local backup or `issues.jsonl` if one
+  exists and otherwise reports a blocked plan. Fix the config value.
+- **`bd rules compact` previews unless `--force` is given**
+  ([#8051](https://github.com/gastownhall/beads/pull/8051)). Scripts that
+  use `--auto` or `--group` to apply merges must add `--force`. Its JSON
+  changed shape: each group carries `sources` (each with `file`, `backup`,
+  `not_carried`, `backed_up` and `deleted`) and, when refused, `error`;
+  `applied` is true only under `--force`. A refused group makes the command
+  exit non-zero.
+- **`bd delete` refuses abbreviated ids**
+  ([#7375](https://github.com/gastownhall/beads/pull/7375)). A script or
+  habit that deletes by abbreviation now gets the
+  `bd delete needs the full issue id` error, which names the full ids the
+  input matches; pass one of them.
+- **`bd github` makes one more API request per command**
+  ([#8068](https://github.com/gastownhall/beads/pull/8068)): it reads the
+  configured repository (`GET /repos/{owner}/{repo}`, following redirects)
+  to learn its current name, plus one request for each other repository on
+  the same host that a local bead's link names. The lookup is best-effort:
+  if it fails, that run accepts only the configured name. After changing
+  `github.owner`/`github.repo` to a repository's new name, relink beads that
+  still name the old one before the next pull (README, "GitHub Issues
+  Sync").
+- **Newly generated `config.yaml` files carry a
+  `# beads-chosen-listener-port: N` line** after the managed marker. It is
+  how bd tells a port it chose from one an operator set. A port is moved only
+  when the file has the marker and either that record with an unchanged
+  `listener.port`, or is byte-identical to the file 1.3.0–1.3.2 generated, so
+  existing unedited workspaces recover too. A hand-set or hand-edited port is
+  treated as pinned and is not moved: the proxy child exits instead of
+  reporting ready. The command itself fails after about 15s with
+  `uow: get proxy endpoint: timeout waiting for proxy to become ready on its
+  OS-assigned port`; the `ErrPortInUse` message naming the taken port and the
+  remedy (free the port, set `listener.port` in `config.yaml` to a free port,
+  or delete a generated `config.yaml` so Beads regenerates it) is in
+  `.beads/dolt/server.log`. The same applies if five consecutive free ports
+  are all taken.
+- **After a move, the Dolt child runs with
+  `--config <root>/proxy-child.runtime-config.yaml`**, and the backend pid
+  record and the proxy's DSN carry the effective port. Tools that identify
+  bd's Dolt by its `--config` path ending in `config.yaml`, or that read the
+  Dolt port from `config.yaml`, should also accept the runtime config and
+  read the port from the backend pid record.
+
+### Known issues
+
+These are not fixed in 1.3.3.
+
+- **bd sends private credentials to endpoints named in shared configuration**
+  ([#7886](https://github.com/gastownhall/beads/issues/7886)). Tracker
+  tokens (GitHub, GitLab, Azure DevOps, Jira, Linear), the AI API key and
+  `BEADS_DOLT_PASSWORD` go to whatever endpoint the workspace configures,
+  including one set in a committed `.beads/config.yaml` or
+  `.beads/metadata.json`, or replicated through the Dolt `config` table. A
+  repository contributor or Dolt peer can therefore point them at a server
+  they control. Workaround: in a clone you do not fully trust, check the
+  endpoints it configures (`*.url` keys, `ai.base_url`, `dolt.host` in
+  `.beads/config.yaml`, `dolt_server_host` in `.beads/metadata.json`, and
+  `bd config list`) before running bd with those credentials set, or unset
+  the credentials for that clone. Fixed on `main` by
+  [#7887](https://github.com/gastownhall/beads/pull/7887), which refuses an
+  endpoint from shared configuration until you confirm it once from your
+  environment or user config.
+- **A server-mode workspace can push, pull and reset from a stale local copy
+  of its database.** When bd's Dolt server does not serve the workspace's
+  `.beads/dolt` directory but `.beads/dolt/<database>` still holds a database
+  (a leftover from embedded mode, or a copy), `bd dolt push` and
+  `bd dolt pull` use that copy instead of the server's data, and
+  `bd dolt push --force` or `bd dolt remote reset-data` can replace the
+  remote with it. Workaround: move the copy out of `.beads/dolt` (for
+  example `mv .beads/dolt/<database> ~/<database>.copy`) before pushing,
+  pulling or resetting. Fixed on `main` by
+  [#7902](https://github.com/gastownhall/beads/pull/7902).
+- **`bd dolt remote reset-data` through a Dolt sql-server can leave the
+  remote without its Dolt data.** A running sql-server keeps its view of
+  every git remote it has used, so after reset-data deletes the remote's data
+  refs, the force-push through the server can hang or write nothing.
+  Workaround: restart the Dolt server right before running reset-data
+  (`bd dolt stop`, then `bd dolt start`, for bd's own server). If a reset
+  already left the remote empty, restart the server and run
+  `bd dolt remote reset-data <name> --yes` again. Do not delete
+  `refs/dolt/data` on the remote by hand. Fixed on `main` by
+  [#7902](https://github.com/gastownhall/beads/pull/7902).
+- **A clone that adopted migration 0062 by `bd dolt pull` or
+  `bd bootstrap`, or was cloned after it, has an empty `events` table**
+  ([#7039](https://github.com/gastownhall/beads/issues/7039)); only the
+  clone that ran the migration kept its rows. The next release restores the
+  missing events from the clone's own Dolt history automatically on first
+  open ([#8047](https://github.com/gastownhall/beads/pull/8047)). Until then,
+  do not run `bd compact` or `bd flatten` on such a clone: both rewrite Dolt
+  history, and would delete the history that restore reads.
+
 ## [1.3.2] - 2026-10-23
 
 First stable release of the 1.3.2 patch line. It ships the same code as
