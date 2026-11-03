@@ -75,6 +75,13 @@ Benefits:
 - No namespace collision (parent hash is unique)
 - Up to 3 levels of nesting
 
+A minted child ID inherits its parent's prefix whatever that prefix is. In bd
+releases after v1.3.2, a parent admitted under a foreign prefix with `--force`
+(`bd create "Export" --id export-work --force`) mints `export-work.1` for its
+children with no `--force` of their own, because a minted child's ID cannot be
+spelled except through its parent; v1.3.2 and earlier also need `--force` on
+each `--parent` create. An explicit foreign `--id` still requires `--force`.
+
 ## ID Configuration
 
 Configure ID prefix and length:
@@ -89,6 +96,13 @@ bd config set id.hash_length 6
 # New issues use new format
 bd create "Test"
 # Returns: myproject-a1b2c3
+```
+
+An ID you pass with `--id` must start with the configured prefix (or one of
+`allowed_prefixes`). Add `--force` to create an issue under another prefix:
+
+```bash
+bd create "Add CSV export" --id export-work --force
 ```
 
 ## Collision Handling
