@@ -63,6 +63,44 @@ func TestParseDoltProcessPIDs(t *testing.T) {
 			want:     []int{125, 126, 127},
 		},
 		{
+			name: "absolute executable path containing spaces is recognised",
+			snapshot: "301 S /Users/John Smith/bin/dolt sql-server --config x.yaml\n" +
+				"302 S /Users/u/Library/Application Support/tools/dolt sql-server\n" +
+				"303 Sl /Users/John Smith/bin/dolt --prof cpu sql-server\n",
+			want: []int{301, 302, 303},
+		},
+		{
+			name: "empty state column with spaced executable path",
+			snapshot: "304 /Users/John Smith/bin/dolt sql-server\n" +
+				"305 /Users/u/Library/Application Support/tools/dolt sql-server --port 3307\n" +
+				"306 dolt sql-server\n",
+			want: []int{304, 305, 306},
+		},
+		{
+			name: "zombie and dead states are rejected for spaced executable path",
+			snapshot: "307 Z /Users/John Smith/bin/dolt sql-server\n" +
+				"308 X< /Users/u/Library/Application Support/tools/dolt sql-server\n",
+		},
+		{
+			name: "spaced path with a different executable name is rejected",
+			snapshot: "309 S /Users/John Smith/bin/dolt-helper sql-server\n" +
+				"310 /Users/John Smith/bin/not-dolt sql-server\n" +
+				"311 S /Users/John Smith/bin/dolt/helper sql-server\n",
+		},
+		{
+			name: "spaced path without a whole sql-server argument is rejected",
+			snapshot: "312 S /Users/John Smith/bin/dolt version\n" +
+				"313 S /Users/John Smith/bin/dolt sql-server.yaml\n" +
+				"314 /Users/John Smith/bin/dolt --config=sql-server\n",
+		},
+		{
+			name: "another program's path or flag arguments are not a dolt path",
+			snapshot: "315 S /usr/bin/cat /opt/bin/dolt sql-server\n" +
+				"316 S /usr/bin/tool --opt /opt/bin/dolt sql-server\n" +
+				"317 /usr/bin/env dolt sql-server\n" +
+				"318 S /usr/bin/python3 -c dolt sql-server\n",
+		},
+		{
 			name:     "sql server before dolt is rejected",
 			snapshot: "104 S sql-server then dolt\n",
 		},

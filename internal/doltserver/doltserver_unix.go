@@ -111,15 +111,51 @@ func parseDoltProcessPIDs(snapshot []byte) []int {
 // arguments that merely contain the words.
 func isDoltSQLServerCommand(command string) bool {
 	fields := strings.Fields(command)
-	if len(fields) == 0 || filepath.Base(fields[0]) != "dolt" {
+	end := doltExecutableEnd(fields)
+	if end < 0 {
 		return false
 	}
-	for _, arg := range fields[1:] {
+	for _, arg := range fields[end+1:] {
 		if arg == "sql-server" {
 			return true
 		}
 	}
 	return false
+}
+
+// doltExecutableEnd returns the index of the last whitespace-separated field
+// of the Dolt executable in fields, or -1 when the command does not start with
+// a binary named exactly "dolt".
+//
+// The `ps` command column does not distinguish a space inside the executable
+// path (for example "/Users/John Smith/bin/dolt") from an argument separator.
+// A non-absolute command is therefore judged by its first field alone. An
+// absolute command may span several fields: the leading fields are pieces of
+// one path, so a later field ending in "/dolt" ends it. A piece after the
+// first cannot be a flag or begin a new absolute path, which keeps arguments
+// of another program, such as `/usr/bin/cat /opt/bin/dolt sql-server` or
+// `/usr/bin/tool --opt /opt/bin/dolt sql-server`, from being read as a Dolt
+// path. A directory component named exactly "dolt" directly before a space in
+// an absolute path remains ambiguous.
+func doltExecutableEnd(fields []string) int {
+	if len(fields) == 0 {
+		return -1
+	}
+	if !strings.HasPrefix(fields[0], "/") {
+		if filepath.Base(fields[0]) == "dolt" {
+			return 0
+		}
+		return -1
+	}
+	for i, field := range fields {
+		if i > 0 && (strings.HasPrefix(field, "-") || strings.HasPrefix(field, "/")) {
+			return -1
+		}
+		if strings.HasSuffix(field, "/dolt") {
+			return i
+		}
+	}
+	return -1
 }
 
 // splitPSField separates the next whitespace-delimited ps field from the
