@@ -913,3 +913,59 @@ func TestMoleculeAnalysisInheritsAnExogenouslyBlockedParent(t *testing.T) {
 		}
 	})
 }
+
+// TestMoleculeAnalysisCloseGateParentDoesNotDarkenItsChildren pins the
+// close-gate exception of the parent-child contract: a parent blocked only by
+// its own descendants waits on them, and they stay ready.
+func TestMoleculeAnalysisCloseGateParentDoesNotDarkenItsChildren(t *testing.T) {
+	t.Run("blocked by its own children", func(t *testing.T) {
+		f := newFakeMolecules()
+		f.add("m", types.TypeMolecule, types.StatusOpen)
+		f.add("m.p", types.TypeEpic, types.StatusOpen)
+		f.edge("m.p", "m", types.DepParentChild)
+		for _, id := range []string{"m.p.c1", "m.p.c2"} {
+			f.add(id, types.TypeTask, types.StatusOpen)
+			f.edge(id, "m.p", types.DepParentChild)
+			f.edge("m.p", id, types.DepBlocks)
+		}
+		a := analysisOf(t, f, "m")
+		if got, want := readyStepIDs(a, "m"), []string{"m.p.c1", "m.p.c2"}; !slices.Equal(got, want) {
+			t.Fatalf("ready = %v, want %v", got, want)
+		}
+		if got, want := blockedByOf(t, a, "m.p"), []string{"m.p.c1", "m.p.c2"}; !slices.Equal(got, want) {
+			t.Errorf("m.p BlockedBy = %v, want %v", got, want)
+		}
+	})
+
+	// A gate on a descendant depth levels below the parent: depth 2 is a
+	// grandchild, depth 6 lies past the SQL walk's four-level horizon.
+	for _, depth := range []int{2, 6} {
+		t.Run(fmt.Sprintf("blocked by a descendant %d levels down", depth), func(t *testing.T) {
+			f := newFakeMolecules()
+			f.add("m", types.TypeMolecule, types.StatusOpen)
+			f.add("m.p", types.TypeEpic, types.StatusOpen)
+			f.edge("m.p", "m", types.DepParentChild)
+			chain := []string{"m.p"}
+			for i := 1; i <= depth; i++ {
+				id := fmt.Sprintf("%s.%d", chain[len(chain)-1], i)
+				f.add(id, types.TypeTask, types.StatusOpen)
+				f.edge(id, chain[len(chain)-1], types.DepParentChild)
+				chain = append(chain, id)
+			}
+			leaf := chain[len(chain)-1]
+			f.edge("m.p", leaf, types.DepBlocks)
+			a := analysisOf(t, f, "m")
+			if a.Steps["m.p"].IsReady {
+				t.Errorf("m.p ready, want it waiting on %s", leaf)
+			}
+			for _, id := range chain[1:] {
+				if slices.Contains(blockedByOf(t, a, id), "m.p") {
+					t.Errorf("%s BlockedBy = %v, want no m.p: the gate is inside m.p's subtree", id, a.Steps[id].BlockedBy)
+				}
+			}
+			if !a.Steps[leaf].IsReady {
+				t.Errorf("%s BlockedBy = %v, want ready", leaf, a.Steps[leaf].BlockedBy)
+			}
+		})
+	}
+}
