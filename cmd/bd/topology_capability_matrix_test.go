@@ -458,6 +458,22 @@ var capabilityProbes = []probe{
 		direct:  expectation{outcome: outcomeHonored, reason: reasonNA},
 		proxied: expectation{outcome: outcomeHonored, reason: reasonNA},
 	},
+	{
+		// --all threads the cap into each per-status search; a single-issue
+		// graph checks the walked component's node count (bd-7fnvhp).
+		name:    "graph --all --max-rows",
+		args:    []string{"graph", "--all", "--max-rows", "5"},
+		direct:  expectation{outcome: outcomeHonored, reason: reasonNA},
+		proxied: expectation{outcome: outcomeHonored, reason: reasonNA},
+	},
+	{
+		// The search filter carries the cap and the proxied search threads
+		// it (bd-7fnvhp).
+		name:    "find-duplicates --max-rows",
+		args:    []string{"find-duplicates", "--max-rows", "5"},
+		direct:  expectation{outcome: outcomeHonored, reason: reasonNA},
+		proxied: expectation{outcome: outcomeHonored, reason: reasonNA},
+	},
 
 	// --- compact -------------------------------------------------------------
 	{
