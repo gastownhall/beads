@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -712,42 +713,45 @@ func TestProxiedServerReady2(t *testing.T) {
 		}
 	})
 
-	t.Run("max_rows_claim_policy_and_transaction", func(t *testing.T) {
+	t.Run("max_rows_overage_exits_2", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "rcmr")
 		for i := 0; i < 3; i++ {
-			bdProxiedCreate(t, bd, p.dir, fmt.Sprintf("Claim under cap %d", i), "--label", "rcmr-claim")
+			bdProxiedCreate(t, bd, p.dir, fmt.Sprintf("Ready under cap %d", i), "--label", "rcmr-cap")
 		}
 
 		out := bdProxiedReadyFail(t, bd, p, "--claim", "--max-rows", "-1")
 		if !strings.Contains(out, "must be non-negative") {
 			t.Errorf("expected --max-rows usage-error rejection, got: %s", out)
 		}
-		out = bdProxiedReadyFail(t, bd, p, "--max-rows", "1")
-		if !strings.Contains(out, "not supported in proxied-server mode") {
-			t.Errorf("expected --max-rows proxied-server rejection for bulk ready, got: %s", out)
-		}
-		stdout, stderr, err := bdProxiedRunBuffersWithEnv(t, bd, p.dir,
-			[]string{"BEADS_MAX_ROWS=1"}, "ready")
-		if err == nil {
-			t.Fatalf("expected BEADS_MAX_ROWS under proxied bulk ready to fail, but it succeeded:\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
-		}
-		if out := stdout + stderr; !strings.Contains(out, "not supported in proxied-server mode") {
-			t.Errorf("expected BEADS_MAX_ROWS proxied-server rejection for bulk ready, got: %s", out)
-		}
 
-		before := bdProxiedReadyJSON(t, bd, p, "--label", "rcmr-claim")
-		stdout, stderr, err = bdProxiedRunBuffersWithEnv(t, bd, p.dir,
-			[]string{"BEADS_MAX_ROWS=1"}, "ready", "--claim", "--json", "--label", "rcmr-claim")
-		if err == nil {
-			t.Fatalf("bd ready --claim --json under BEADS_MAX_ROWS=1 should refuse")
-		}
-		if out := stdout + stderr; !strings.Contains(out, "not supported in proxied-server mode") {
-			t.Fatalf("expected cap refusal, got:\n%s", out)
-		}
-		after := bdProxiedReadyJSON(t, bd, p, "--label", "rcmr-claim")
-		if len(after) != len(before) {
-			t.Fatalf("claim refusal mutated ready set: before=%d after=%d", len(before), len(after))
+		for _, tc := range []struct {
+			name   string
+			env    []string
+			args   []string
+			source string
+		}{
+			{name: "flag text", args: []string{"--max-rows", "1"}, source: "--max-rows"},
+			{name: "flag json", args: []string{"--json", "--max-rows", "1"}, source: "--max-rows"},
+			{name: "env text", env: []string{"BEADS_MAX_ROWS=1"}, source: "BEADS_MAX_ROWS"},
+			{name: "env json", env: []string{"BEADS_MAX_ROWS=1"}, args: []string{"--json"}, source: "BEADS_MAX_ROWS"},
+		} {
+			args := append([]string{"ready", "--label", "rcmr-cap"}, tc.args...)
+			stdout, stderr, err := bdProxiedRunBuffersWithEnv(t, bd, p.dir, tc.env, args...)
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) || exitErr.ExitCode() != 2 {
+				t.Errorf("%s: err = %v, want exit 2\nstdout:\n%s\nstderr:\n%s", tc.name, err, stdout, stderr)
+				continue
+			}
+			if want := fmt.Sprintf("%s=1 exceeded", tc.source); !strings.Contains(stderr, want) {
+				t.Errorf("%s: stderr = %q, want it to name %q", tc.name, stderr, want)
+			}
+			if strings.Contains(stderr, "not supported in proxied-server mode") {
+				t.Errorf("%s: the cap was refused instead of enforced: %q", tc.name, stderr)
+			}
+			if stdout != "" {
+				t.Errorf("%s: stdout = %q, want nothing on a cap overage", tc.name, stdout)
+			}
 		}
 	})
 }

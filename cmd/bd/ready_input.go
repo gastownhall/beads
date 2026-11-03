@@ -46,10 +46,9 @@ type readyInput struct {
 // behavior that replaced them.
 //
 // resolveCap resolves --max-rows / BEADS_MAX_ROWS and is passed in rather than
-// called directly because only the direct route has a cap to enforce: the
-// proxied route rejects a live one in its own RunE and ignores it for --claim,
-// and resolving a second time here would repeat resolveMaxRowsEnvOnly's
-// malformed-value warning. It runs where the direct route's inline builder ran
+// called directly because not every arm takes a cap: the proxied route passes
+// nil for the gate-resume arm, which the direct route dispatches before any
+// cap resolution. It runs where the direct route's inline builder ran
 // it, ahead of the metadata and sort checks, so a doubly-invalid command line
 // still reports the cap first and a malformed BEADS_MAX_ROWS still warns even
 // when a later check aborts the command.
