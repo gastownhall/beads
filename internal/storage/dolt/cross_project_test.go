@@ -1089,7 +1089,13 @@ func TestCrossProject_IdentityCheck_SoftSkip_NoBdSchema(t *testing.T) {
 // reads. hasLocal false writes no metadata.json at all.
 func identityMockStore(t *testing.T, localID string, hasLocal bool) (*DoltStore, sqlmock.Sqlmock, string) {
 	t.Helper()
-	db, mock, err := sqlmock.New()
+	return identityMockStoreMatching(t, localID, hasLocal, sqlmock.QueryMatcherRegexp)
+}
+
+// identityMockStoreMatching is identityMockStore with its own query matcher.
+func identityMockStoreMatching(t *testing.T, localID string, hasLocal bool, matcher sqlmock.QueryMatcher) (*DoltStore, sqlmock.Sqlmock, string) {
+	t.Helper()
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(matcher))
 	if err != nil {
 		t.Fatalf("sqlmock: %v", err)
 	}
@@ -1222,4 +1228,60 @@ func TestVerifyProjectIdentity_ReadErrors(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestVerifyProjectIdentity_ReadRetry pins the verifier's use of GetMetadata's
+// existing retry: a retryable read failure followed by the matching identity
+// passes, and a failure that outlasts the retry refuses with the terminal
+// error wrapped. The non-retryable refusals in
+// TestVerifyProjectIdentity_ReadErrors each consume exactly one scripted read,
+// so the verifier adds no retry loop of its own.
+func TestVerifyProjectIdentity_ReadRetry(t *testing.T) {
+	const localID = "11111111-1111-1111-1111-111111111111"
+
+	t.Run("retryable failure then matching identity", func(t *testing.T) {
+		store, mock, beadsDir := identityMockStore(t, localID, true)
+		expectProjectIDRead(mock, nil, errors.New("invalid connection"))
+		match := localID
+		expectProjectIDRead(mock, &match, nil)
+
+		if err := store.verifyProjectIdentity(context.Background(), beadsDir, false); err != nil {
+			t.Fatalf("verifyProjectIdentity = %v, want nil once the retried read returns the matching id", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("retryable failure outlasting the retry refuses", func(t *testing.T) {
+		var attempts atomic.Int32
+		counting := sqlmock.QueryMatcherFunc(func(expectedSQL, actualSQL string) error {
+			attempts.Add(1)
+			return sqlmock.QueryMatcherRegexp.Match(expectedSQL, actualSQL)
+		})
+		store, mock, beadsDir := identityMockStoreMatching(t, localID, true, counting)
+		// More scripted failures than the bounded context leaves time for.
+		for range 20 {
+			expectProjectIDRead(mock, nil, errors.New("invalid connection"))
+		}
+
+		// The context, not the 30s production budget, bounds the retry here;
+		// three seconds leaves the backoff's jittered first waits room for a
+		// second attempt.
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		err := store.verifyProjectIdentity(ctx, beadsDir, false)
+		if err == nil {
+			t.Fatal("verifyProjectIdentity = nil, want a refusal when every read fails")
+		}
+		if !strings.Contains(err.Error(), "cannot verify project identity") {
+			t.Fatalf("error = %q, want the 'cannot verify project identity' refusal", err)
+		}
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("error %v does not wrap the retry's terminal context error", err)
+		}
+		if n := attempts.Load(); n < 2 {
+			t.Fatalf("read attempted %d time(s), want the existing retry to have run (>= 2)", n)
+		}
+	})
 }
