@@ -905,11 +905,9 @@ func filterStaleImportIssues(ctx context.Context, store importIssueLookup, issue
 // the rewrite would change nothing. Anything short of proof — a store without
 // bulk loaders, a comment with no timestamp, an untyped dependency, an aux row
 // not yet stored, a lease row the rewrite would insert, replace or drop —
-// keeps the row in the write set, i.e. today's behavior. Comments are matched
-// the way PersistComments checks existence: by content (author, created_at as
-// stored, text), and failing that by an id already stored on this same issue,
-// whose stored row the write keeps whatever the incoming content says. An id
-// stored only on another issue proves nothing (the write reports it).
+// keeps the row in the write set, i.e. today's behavior. Comments are keyed
+// the way PersistComments checks existence (author, created_at as stored,
+// text).
 func proveUnchangedImportRows(ctx context.Context, store importIssueLookup, filtered []*types.Issue, candidates map[int]struct{}, localByID map[string]*types.Issue) (map[int]struct{}, error) {
 	rel, ok := store.(importRelationLookup)
 	if !ok {
@@ -999,6 +997,13 @@ func timePtrEqualSecond(a, b *time.Time) bool {
 	return a.UTC().Truncate(time.Second).Equal(b.UTC().Truncate(time.Second))
 }
 
+// importAuxAlreadyStored reports whether every incoming label, comment and
+// dependency of a tie row is already stored on the local issue, so rewriting
+// the row would add none of them (see proveUnchangedImportRows). A comment
+// counts as stored when its content key (author, created_at as stored, text)
+// is, or failing that when its id is already stored on this same issue:
+// PersistComments keeps that stored row whatever the incoming content says. An
+// id stored only on another issue proves nothing (the write reports it).
 func importAuxAlreadyStored(incoming, local *types.Issue, storedComments []*types.Comment, storedDeps []*types.Dependency) bool {
 	stored := make(map[string]struct{}, len(local.Labels))
 	for _, l := range local.Labels {
