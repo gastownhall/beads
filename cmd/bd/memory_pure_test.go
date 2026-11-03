@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/memoryapi"
 )
 
 // TestMatchesKnownCommand guards the `bd remember <subcommand>` misfire fix
@@ -216,4 +218,64 @@ func TestRememberBareKeyPath(t *testing.T) {
 			t.Errorf("refusal = %q\nwant it to end %q", out, want)
 		}
 	})
+}
+
+// TestIsBareMemoryKey pins the `bd remember` read gate's grammar: lowercase
+// ASCII alphanumeric runs joined by single dots or hyphens, with no length or
+// segment cap (GH#7275). Everything else keeps the content path.
+func TestIsBareMemoryKey(t *testing.T) {
+	for _, s := range []string{
+		"a",
+		"7",
+		"auth-jwt",
+		"config.v2",
+		"api.v2-rate-limits.v10",
+		"gh4078",
+		"one-two-three-four-five-six-seven-eight-nine",
+		strings.Repeat("a", 61),
+		strings.Repeat("ab-", 30) + "end",
+	} {
+		if !isBareMemoryKey(s) {
+			t.Errorf("isBareMemoryKey(%q) = false, want a bare key", s)
+		}
+	}
+	for _, s := range []string{
+		"",
+		" ",
+		"auth jwt",
+		" auth-jwt",
+		"auth-jwt\n",
+		"Auth-JWT",
+		"snake_case",
+		"café",
+		".",
+		"-",
+		"!!!",
+		".hidden",
+		"-leading",
+		"trailing-",
+		"trailing.",
+		"a--b",
+		"a..b",
+		"a.-b",
+		"always run tests with the -race flag",
+	} {
+		if isBareMemoryKey(s) {
+			t.Errorf("isBareMemoryKey(%q) = true, want content", s)
+		}
+	}
+
+	// Every non-empty key the derivation mints is still read by the gate, as
+	// it was when the gate was DeriveKey(insight) == insight.
+	for _, content := range []string{
+		"always run tests with -race flag",
+		"Dolt phantom DBs hide in three places",
+		"one two three four five six seven eight nine ten eleven",
+		strings.Repeat("abcdefghij ", 8),
+		"config.v2 is the new format",
+	} {
+		if key := memoryapi.DeriveKey(content); !isBareMemoryKey(key) {
+			t.Errorf("isBareMemoryKey(DeriveKey(%q) = %q) = false, want a derived key to read", content, key)
+		}
+	}
 }
