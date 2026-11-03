@@ -131,6 +131,7 @@ go_test(
         "comment_id_cross_issue_test.go",
         "comment_id_match_test.go",
         "comment_content_dedup_test.go",
+        "comment_insert_reimport_test.go",
         "commenter_contract_test.go",
         "comments_page_test.go",
         "commit_all_cgo_test.go",
