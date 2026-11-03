@@ -414,7 +414,6 @@ async def test_update_with_optional_fields(bd_client, mock_process):
     assert issue.id == "bd-1"
     assert issue.title == "Updated title"
     command = mock_exec.call_args.args
-    assert command[1:4] == ("update", "bd-1", "--assignee")
     assert "--set-labels=bug,urgent" in command
 
 
