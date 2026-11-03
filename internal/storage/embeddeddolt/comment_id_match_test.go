@@ -356,4 +356,75 @@ func TestCreateIssuesCommentIDMatch(t *testing.T) {
 		assertOwnershipError(t, err, commentID, "cio-j", "cio-i")
 		assertStoredComment(t, te, ctx, "wisp_comments", commentID, original("cio-j"))
 	})
+
+	// AC-4: content already stored on the issue under another id deduplicates,
+	// whatever id (or none) the incoming record carries.
+	const otherUUID = "0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5c"
+	for _, tc := range []struct {
+		name       string
+		storedID   string
+		incomingID string
+		opts       storage.BatchCreateOptions
+	}{
+		{"uuid_over_legacy_numeric", "42", commentID, plain},
+		{"numeric_over_legacy_numeric", "42", "43", plain},
+		{"derived_over_legacy_numeric", "42", "", plain},
+		{"uuid_over_legacy_numeric_conflict_skip", "42", commentID, storage.BatchCreateOptions{SkipPrefixValidation: true, ConflictSkip: true}},
+		{"uuid_over_uuid", commentID, otherUUID, storage.BatchCreateOptions{SkipPrefixValidation: true, RejectStaleUpserts: true}},
+		{"derived_shaped_over_uuid", commentID, "cic-derived-9f2a", storage.BatchCreateOptions{SkipPrefixValidation: true, RejectStaleUpserts: true}},
+	} {
+		t.Run("same_content_other_id_dedups/"+tc.name, func(t *testing.T) {
+			te := newEnv(t, "cic")
+			ctx := t.Context()
+			stored := original("cic-1")
+			stored.ID = tc.storedID
+			if err := create(t, te, ctx, plain, issueWith("cic-1", false, base, stored)); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+			journalBefore := commentJournal(t, te, ctx, "cic-1")
+
+			incoming := original("cic-1")
+			incoming.ID = tc.incomingID
+			if err := create(t, te, ctx, tc.opts, issueWith("cic-1", false, base, incoming)); err != nil {
+				t.Fatalf("import same content under id %q: %v", tc.incomingID, err)
+			}
+
+			if n := commentCount(t, te, ctx, "comments", "cic-1"); n != 1 {
+				t.Fatalf("comment rows = %d, want 1 (content dedup)", n)
+			}
+			assertStoredComment(t, te, ctx, "comments", tc.storedID, stored)
+			if d := commentJournal(t, te, ctx, "cic-1") - journalBefore; d != 0 {
+				t.Fatalf("comment journal events = %d, want 0", d)
+			}
+		})
+	}
+	t.Run("same_content_other_id_dedups/despite_foreign_owner", func(t *testing.T) {
+		// The incoming id belongs to another issue, but its content is
+		// already stored on the destination: content dedup wins, so the
+		// import neither errors nor duplicates and the owner keeps its row.
+		te := newEnv(t, "cic")
+		ctx := t.Context()
+		local := original("cic-1")
+		local.ID = otherUUID
+		if err := create(t, te, ctx, plain,
+			issueWith("cic-j", false, base, original("cic-j")),
+			issueWith("cic-1", false, base, local)); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		journalBefore := commentJournal(t, te, ctx, "cic-1")
+
+		opts := storage.BatchCreateOptions{SkipPrefixValidation: true, RejectStaleUpserts: true}
+		if err := create(t, te, ctx, opts, issueWith("cic-1", false, base, original("cic-1"))); err != nil {
+			t.Fatalf("import content already on cic-1 under a foreign-owned id: %v", err)
+		}
+
+		if n := commentCount(t, te, ctx, "comments", "cic-1"); n != 1 {
+			t.Fatalf("comment rows on cic-1 = %d, want 1 (content dedup)", n)
+		}
+		assertStoredComment(t, te, ctx, "comments", otherUUID, local)
+		assertStoredComment(t, te, ctx, "comments", commentID, original("cic-j"))
+		if d := commentJournal(t, te, ctx, "cic-1") - journalBefore; d != 0 {
+			t.Fatalf("comment journal events = %d, want 0", d)
+		}
+	})
 }
