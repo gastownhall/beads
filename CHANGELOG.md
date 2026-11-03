@@ -1165,6 +1165,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd import` no longer fails with "Error 1062: duplicate primary key" when a
+  comment's id is already stored with different text, author or time; the
+  failure rolled back the chunk and a re-run did not converge. Comments merge
+  additively: the stored comment is kept (also under `--allow-stale`), and a
+  default re-import of such an otherwise unchanged issue writes nothing. A
+  comment id stored on a different issue now fails with an error naming the
+  comment and both issues (#7114).
 - `bd create --file` and other batch creates no longer fail with "issue
   already exists" on an id bd generated itself. The batch chose every id
   before it wrote any row, so two of its items could be handed the same short

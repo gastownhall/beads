@@ -789,6 +789,65 @@ func TestFilterStaleImportIssuesSkipsProvenUnchangedRowsOnResume(t *testing.T) {
 	}
 }
 
+// bd-413ovu: import keeps a comment whose id is already stored on the issue
+// (PersistComments matches by id after a content miss), so a tie row whose
+// only difference is that comment's content is provably a no-op write. The id
+// proves only on its own issue; an id-less or unknown-id comment still needs
+// the timestamp/content proof, and other aux rows still have to be stored.
+func TestFilterStaleImportIssuesProvesStoredCommentIDUnchanged(t *testing.T) {
+	base := time.Date(2026, 8, 31, 14, 0, 0, 0, time.UTC)
+	commentAt := base.Add(-time.Hour)
+	stored := func(issueID string) *types.Comment {
+		return &types.Comment{ID: "c-" + issueID, IssueID: issueID, Author: "cat", Text: "stored text", CreatedAt: commentAt}
+	}
+	cases := []struct {
+		id      string
+		comment *types.Comment
+		labels  []string
+		lease   bool // local row carries an orphaned lease reconcile would drop
+		proven  bool
+	}{
+		{id: "bd-edited", comment: &types.Comment{ID: "c-bd-edited", Author: "dog", Text: "edited text", CreatedAt: commentAt.Add(time.Minute)}, proven: true},
+		{id: "bd-notime", comment: &types.Comment{ID: "c-bd-notime", Author: "cat", Text: "edited text"}, proven: true},
+		{id: "bd-noid-notime", comment: &types.Comment{Author: "cat", Text: "stored text"}, proven: false},
+		{id: "bd-otherowner", comment: &types.Comment{ID: "c-bd-elsewhere", Author: "cat", Text: "edited text", CreatedAt: commentAt}, proven: false},
+		{id: "bd-otherid", comment: &types.Comment{ID: "c-legacy-7", Author: "cat", Text: "stored text", CreatedAt: commentAt}, proven: true},
+		{id: "bd-newlabel", comment: &types.Comment{ID: "c-bd-newlabel", Author: "cat", Text: "edited text", CreatedAt: commentAt}, labels: []string{"new"}, proven: false},
+		{id: "bd-lease", comment: &types.Comment{ID: "c-bd-lease", Author: "cat", Text: "edited text", CreatedAt: commentAt}, lease: true, proven: false},
+	}
+	var incoming, local []*types.Issue
+	comments := map[string][]*types.Comment{"bd-elsewhere": {stored("bd-elsewhere")}}
+	var want []string
+	for _, tc := range cases {
+		incoming = append(incoming, &types.Issue{ID: tc.id, Title: "t", UpdatedAt: base, Labels: tc.labels, Comments: []*types.Comment{tc.comment}})
+		l := &types.Issue{ID: tc.id, Title: "t", UpdatedAt: base}
+		if tc.lease {
+			expires := base.Add(time.Hour)
+			l.LeaseExpiresAt = &expires
+		}
+		local = append(local, l)
+		comments[tc.id] = []*types.Comment{stored(tc.id)}
+		if tc.proven {
+			want = append(want, tc.id)
+		}
+	}
+	store := &fakeImportRelationStore{
+		fakeImportIssueLookupStore: fakeImportIssueLookupStore{issues: local},
+		comments:                   comments,
+	}
+
+	_, _, plan, err := filterStaleImportIssues(context.Background(), store, incoming)
+	if err != nil {
+		t.Fatalf("filterStaleImportIssues: %v", err)
+	}
+	got := append([]string(nil), plan.Unchanged...)
+	slices.Sort(got)
+	slices.Sort(want)
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("plan.Unchanged = %v, want %v", got, want)
+	}
+}
+
 // A fresh import (no local match) must not pay for the aux loads at all, and
 // a store without the bulk loaders keeps the pre-wy-sbgucn behavior: every
 // tie row stays in the write set.
