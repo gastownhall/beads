@@ -9,9 +9,15 @@
 
 const assert = require('assert');
 const { execFileSync } = require('child_process');
+const fs = require('fs');
+const http = require('http');
+const https = require('https');
+const os = require('os');
 const path = require('path');
 
 const POSTINSTALL = path.join(__dirname, '..', 'scripts', 'postinstall.js');
+const PAYLOAD = Buffer.from('known archive bytes\n'.repeat(64));
+const CASE_TIMEOUT_MS = 10000;
 
 // Requiring postinstall.js with CI unset must export downloadFile without
 // starting an installation. The check runs in a child process whose network,
@@ -57,7 +63,130 @@ function testRequireDoesNotInstall() {
   assert.strictEqual(result.downloadFile, 'function', 'downloadFile is not exported');
 }
 
+// Local server standing in for GitHub releases: /archive serves PAYLOAD and
+// the other routes redirect to it, or to a 404, the way release downloads do.
+function startServer() {
+  const routes = {
+    '/archive': { status: 200 },
+    '/redirect-302': { status: 302, location: '/archive' },
+    '/redirect-301': { status: 301, location: '/redirect-302' },
+    '/redirect-404': { status: 302, location: '/missing' },
+  };
+  const server = http.createServer((req, res) => {
+    const route = routes[req.url];
+    if (!route) {
+      res.writeHead(404);
+      res.end('not found');
+    } else if (route.location) {
+      res.writeHead(route.status, { Location: base + route.location });
+      res.end();
+    } else {
+      res.writeHead(200, { 'Content-Length': PAYLOAD.length });
+      res.end(PAYLOAD);
+    }
+  });
+  let base;
+  return new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      base = `http://127.0.0.1:${server.address().port}`;
+      resolve({ server, base });
+    });
+  });
+}
+
+function withTimeout(promise, what) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${what} timed out`)), CASE_TIMEOUT_MS);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+// Runs downloadFile(url, dest) against the local server while holding every
+// fs.unlink it schedules until the download settles, then runs the held
+// unlinks to completion. libuv gives no ordering between such an unlink and
+// the recursive download's open of the same path, so this selects the late
+// schedule deterministically. Returns { error } (null on resolve).
+async function downloadHoldingUnlinks(url, dest) {
+  const { downloadFile } = require(POSTINSTALL);
+  const origUnlink = fs.unlink;
+  const origHttpsGet = https.get;
+  const origLog = console.log;
+  const held = [];
+  fs.unlink = (p, cb) => {
+    held.push([p, cb]);
+  };
+  https.get = http.get;
+  console.log = () => {};
+  let error = null;
+  try {
+    try {
+      await withTimeout(downloadFile(url, dest), `download of ${url}`);
+    } catch (err) {
+      error = err;
+    }
+  } finally {
+    fs.unlink = origUnlink;
+    https.get = origHttpsGet;
+    console.log = origLog;
+  }
+  for (const [p, cb] of held) {
+    await new Promise((resolve, reject) => {
+      origUnlink(p, (err) => {
+        cb(err);
+        // A duplicate cleanup of an already removed file is fine.
+        if (err && err.code !== 'ENOENT') reject(err);
+        else resolve();
+      });
+    });
+  }
+  return { error };
+}
+
+async function withServerAndDir(fn) {
+  const { server, base } = await startServer();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bd-postinstall-test-'));
+  try {
+    await fn(base, path.join(dir, 'beads.tar.gz'));
+  } finally {
+    server.close();
+    for (const name of fs.readdirSync(dir)) {
+      fs.unlinkSync(path.join(dir, name));
+    }
+    fs.rmdirSync(dir);
+  }
+}
+
+function assertArchive(dest) {
+  assert.ok(fs.existsSync(dest), `archive ${dest} is missing after the download resolved`);
+  assert.ok(fs.readFileSync(dest).equals(PAYLOAD), 'archive bytes differ from the served bytes');
+}
+
+function expectArchive(route, seed) {
+  return () => withServerAndDir(async (base, dest) => {
+    if (seed) fs.writeFileSync(dest, seed);
+    const { error } = await downloadHoldingUnlinks(base + route, dest);
+    if (error) throw error;
+    assertArchive(dest);
+  });
+}
+
+function testRedirectTo404() {
+  return withServerAndDir(async (base, dest) => {
+    const { error } = await downloadHoldingUnlinks(`${base}/redirect-404`, dest);
+    assert.ok(error, 'download of a redirect to 404 resolved');
+    assert.strictEqual(error.message, 'Failed to download: HTTP 404');
+    assert.ok(!fs.existsSync(dest), 'failed download left a file behind');
+  });
+}
+
 const TESTS = [
+  ['302 redirect keeps the archive after held unlinks run', expectArchive('/redirect-302')],
+  ['301 -> 302 -> 200 chain keeps the archive', expectArchive('/redirect-301')],
+  ['direct 200 keeps the archive', expectArchive('/archive')],
+  ['redirect truncates longer stale content', expectArchive('/redirect-302', Buffer.alloc(PAYLOAD.length * 3, 'x'))],
+  ['redirect to 404 rejects and removes the file', testRedirectTo404],
   ['require() exports downloadFile without installing', testRequireDoesNotInstall],
 ];
 

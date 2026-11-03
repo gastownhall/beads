@@ -72,7 +72,7 @@ function downloadFile(url, dest) {
             reject(closeErr);
             return;
           }
-          fs.unlink(dest, () => {});
+          // The recursive stream truncates dest; an asynchronous unlink could remove its download.
           downloadFile(redirectUrl, dest).then(resolve).catch(reject);
         });
         return;
