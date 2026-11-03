@@ -39,6 +39,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`bd import --strict-deps`: a gateable signal for dropped dependency
+  edges (GH#6113).** An import whose input references a target issue that
+  is neither in the database nor in the import stream drops that edge, and
+  the command exits 0 — a restore split into chunks could lose a third of
+  its dependency graph with every chunk succeeding, only per-edge stderr
+  lines as the trace. The default still exits 0 but now adds one aggregate
+  warning with the count of every reported skip (missing targets and
+  validation refusals alike) and a recovery hint; `--strict-deps` exits 1
+  after the rows are committed, so a restore script can fail instead of
+  certifying a truncated graph. `--json` output keeps its exact
+  single-object shape (the strict error goes to stderr as the JSON error
+  envelope), and `--dry-run` and `--strict-deps` are mutually exclusive.
+  Skipped edges recover by importing the missing targets and re-running
+  the affected import; a re-run converges subject to the staleness guard.
 - **`arrival_seq`, a commit-ordered create sequence on wisp-plane rows.**
   While a workspace journals, every `ephemeral` or `no_history` bead it creates
   is stamped with the `seq` of its own `create` journal record, in the same

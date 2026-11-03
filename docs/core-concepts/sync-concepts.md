@@ -34,6 +34,26 @@ Do not use routine `bd import .beads/issues.jsonl` as a replacement for
 `bd dolt pull`. JSONL import is upsert-only; it cannot infer that records absent
 from an export were deleted, pruned, or simply never exported.
 
+### Split and partial imports
+
+A partial import — restoring a large export in chunks, or importing an
+incremental slice — drops a dependency edge whose target issue is not yet in
+the database and not in the same stream: the source row lands, the edge does
+not, and the report names each dropped edge (`skipped_dependencies` in
+`--json` output). A restore split across invocations must be re-run once every
+chunk has landed. Re-importing converges — rows upsert, and labels, comments
+and dependency edges deduplicate — subject to the staleness guard: a row a
+rival updated since its chunk committed is stale-skipped wholesale, its edges
+included, so a re-run only wires edges whose rows it is still allowed to
+write.
+
+Verify a restore by comparing the dependency edge set against the export,
+not by row counts alone: a chunked restore can land every issue, comment and
+label and still be missing a third of its edges, which is exactly what makes
+the loss easy to miss. A scripted restore can gate on it with
+`set -o pipefail`, importing with `--json` and failing when the
+`skipped_dependencies` array is non-empty.
+
 ## Hooks
 
 The pre-commit hook refreshes `.beads/issues.jsonl` when `export.auto=true`.

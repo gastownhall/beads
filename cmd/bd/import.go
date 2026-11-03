@@ -93,6 +93,18 @@ the already-committed chunks are durable and the command exits nonzero;
 re-running the same import is safe and converges (rows upsert,
 labels/comments/dependencies deduplicate).
 
+Dependency edges whose target issue is neither in the database nor in the
+import stream are skipped: the source row still lands, each dropped edge
+is reported, and one aggregate summary names the count. Pass --strict-deps
+to exit nonzero after the import commits when any edge was reported
+skipped, so a restore script can fail instead of certifying a truncated
+graph; the rows are already committed either way. A --dry-run preview
+writes no edges, so --dry-run and --strict-deps are mutually exclusive.
+Skipped edges recover by importing the missing target issues and re-running
+the affected import — a re-run converges subject to the staleness guard, so
+a restore split across invocations should be re-run once every chunk has
+landed.
+
 EXAMPLES:
   bd import                        # Import from configured import.path
   bd import backup.jsonl           # Import from a specific file
@@ -102,6 +114,7 @@ EXAMPLES:
   bd import --dry-run              # Show what would be imported
   bd import --dedup                # Skip issues with duplicate titles
   bd import --allow-stale old.jsonl # Restore an older snapshot (overwrites newer local rows)
+  bd import --strict-deps backup.jsonl # Exit nonzero if any dependency edge was skipped
   bd import --json                 # Structured output with created and skipped IDs`,
 	GroupID:       "sync",
 	SilenceUsage:  true,

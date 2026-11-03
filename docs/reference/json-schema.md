@@ -3,7 +3,7 @@ title: JSON Output Schema Contract
 description: The stable JSON output contract for bd --json commands, covering the schema_version envelope, per-command fields, and consumer guidelines.
 ---
 
-Last reviewed: 2026-08-07
+Last reviewed: 2026-11-03
 
 Freshness source: `cmd/bd/output.go`, `cmd/bd/errors.go`, and
 `cmd/bd/protocol/json_contract_test.go`.
@@ -257,7 +257,10 @@ Returns a summary object when `--json` is active:
 - `updated_issues` (object[]): Per-issue summary of what an update changed
 - `tie_kept_local_ids` (string[]): Equal-`updated_at` rows where local state won
 - `stale_skipped_ids` (string[]): Rows older than the local issue, skipped
-- `skipped_dependencies` (string[]): Dependency edges whose target id was absent
+- `skipped_dependencies` (string[]): Dependency edges that were reported skipped —
+  a target id absent from the database and the import stream, and edges the
+  dependency validation refused (cycles, hierarchy violations). The source row
+  still lands; only the edge is dropped
 - `dry_run` (boolean): Whether `--dry-run` was active
 
 ### bd export --json
