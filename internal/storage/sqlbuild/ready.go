@@ -166,8 +166,9 @@ type ReadyWorkWhereInputs struct {
 	StaleBlockedIDs map[string][]string
 	// ActiveCustomStatuses are category='active' custom status names;
 	// when provided and filter.Status == types.StatusOpen, readyStatusClause
-	// parameterizes them directly into status = ? or status IN (?, ...) instead
-	// of an unindexed subquery.
+	// parameterizes them directly into status = ? or status IN (?, ...).
+	// Nil leaves active names unresolved and retains the SQL subquery; a
+	// non-nil empty slice means no active custom names.
 	ActiveCustomStatuses []string
 }
 

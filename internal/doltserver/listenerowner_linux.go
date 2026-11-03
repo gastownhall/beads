@@ -17,6 +17,8 @@ import (
 // tree.
 var procRoot = "/proc"
 
+var listenerOwnershipChecked = true
+
 // classifyListener reports whether a TCP listener on port belongs to pid or
 // one of its descendants. Descendants cover a dolt behind a wrapper script
 // that does not exec; finding them needs task/*/children

@@ -12,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/endpointtrust"
 	"github.com/steveyegge/beads/internal/github"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
@@ -288,12 +289,15 @@ func maskGitHubToken(token string) string {
 }
 
 // getGitHubClient creates a GitHub client from the current configuration.
-func getGitHubClient(config GitHubConfig) *github.Client {
+func getGitHubClient(config GitHubConfig) (*github.Client, error) {
+	if err := endpointtrust.Check(endpointtrust.WorkspaceKey(), "github", config.URL, endpointtrust.PrivateMatch("github.url", "GITHUB_API_URL", config.URL)); err != nil {
+		return nil, err
+	}
 	client := github.NewClient(config.Token, config.Owner, config.Repo)
 	if config.URL != "" {
 		client = client.WithBaseURL(config.URL)
 	}
-	return client
+	return client, nil
 }
 
 // runGitHubStatus implements the github status command.
@@ -349,7 +353,10 @@ func runGitHubRepos(cmd *cobra.Command, args []string) error {
 	}
 
 	out := cmd.OutOrStdout()
-	client := getGitHubClient(config)
+	client, err := getGitHubClient(config)
+	if err != nil {
+		return HandleError("%v", err)
+	}
 	ctx := context.Background()
 
 	repos, err := client.ListRepositories(ctx)

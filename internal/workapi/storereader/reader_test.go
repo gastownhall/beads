@@ -300,3 +300,21 @@ func TestStoreReaderRefusesANilStore(t *testing.T) {
 		t.Errorf("ErrUnsupported.Op = %q, want storereader.New — the Op names the function that refused", unsupported.Op)
 	}
 }
+
+// TestStoreReaderReadyPreservesActiveSelector records request translation;
+// membership itself is exercised separately against a real store.
+func TestStoreReaderReadyPreservesActiveSelector(t *testing.T) {
+	rd, store := storeReaderFor(t, readerFixture(3))
+	limit := 1
+	_, err := rd.Ready(t.Context(), issueops.ReadyRequest{Sort: "priority", Labels: []string{"focus"}, Assignee: "alice", IncludeEphemeral: true, Limit: &limit})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(store.readyFilters) != 1 {
+		t.Fatalf("ready calls=%d, want1", len(store.readyFilters))
+	}
+	f := store.readyFilters[0]
+	if f.Status != types.StatusOpen || len(f.Statuses) != 0 || f.Assignee == nil || *f.Assignee != "alice" || !f.IncludeEphemeral || f.Limit != 2 || !slices.Equal(f.Labels, []string{"focus"}) {
+		t.Fatalf("translated filter=%+v, want singularopen assignee+label wisps limit2", f)
+	}
+}

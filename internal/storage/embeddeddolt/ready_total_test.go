@@ -11,9 +11,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/storage/domain/db"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
+	publicops "github.com/steveyegge/beads/issueops"
 )
 
 // countingTx counts the statements a read issues. Against a remote SQL server
@@ -245,24 +247,38 @@ func TestReadyWorkStatementBudget(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
 
 	cases := []struct {
-		name  string
-		world readyTotalWorld
-		limit int
-		want  int
+		name   string
+		world  readyTotalWorld
+		limit  int
+		want   int
+		status types.Status
+		active bool
 	}{
 		// probe + mega-query
-		{"issues_only/limit0", readyTotalWorld{}, 0, 2},
+		{"issues_only/limit0", readyTotalWorld{}, 0, 2, "", false},
 		// probe + (ID page with window total + counts hydration)
-		{"issues_only/limit1", readyTotalWorld{}, 1, 3},
+		{"issues_only/limit1", readyTotalWorld{}, 1, 3, "", false},
 		// probe + mega-query per family
-		{"wisps/limit0", readyTotalWorld{wisps: true}, 0, 3},
+		{"wisps/limit0", readyTotalWorld{wisps: true}, 0, 3, "", false},
 		// probe + (ID page + hydration) per family
-		{"wisps/limit1", readyTotalWorld{wisps: true}, 1, 5},
+		{"wisps/limit1", readyTotalWorld{wisps: true}, 1, 5, "", false},
 		// + one statement for every deferred-parent child leg
-		{"wisps_deferred_parent/limit0", readyTotalWorld{wisps: true, deferredParent: true}, 0, 4},
-		{"wisps_deferred_parent/limit1", readyTotalWorld{wisps: true, deferredParent: true}, 1, 6},
+		{"wisps_deferred_parent/limit0", readyTotalWorld{wisps: true, deferredParent: true}, 0, 4, "", false},
+		{"wisps_deferred_parent/limit1", readyTotalWorld{wisps: true, deferredParent: true}, 1, 6, "", false},
 		// + the overlap count, only because an ID sits in both tables
-		{"wisps_collision/limit1", readyTotalWorld{wisps: true, collision: true}, 1, 6},
+		{"wisps_collision/limit1", readyTotalWorld{wisps: true, collision: true}, 1, 6, "", false},
+		// Explicit StatusOpen uses the active-status probe. Empty custom sets
+		// retain the existing budgets; a populated set costs one shared read.
+		{"status_open/issues_only/limit0", readyTotalWorld{}, 0, 2, types.StatusOpen, false},
+		{"status_open/issues_only/limit1", readyTotalWorld{}, 1, 3, types.StatusOpen, false},
+		{"status_open/wisps/limit0", readyTotalWorld{wisps: true}, 0, 3, types.StatusOpen, false},
+		{"status_open/wisps/limit1", readyTotalWorld{wisps: true}, 1, 5, types.StatusOpen, false},
+		{"status_open/collision/limit1", readyTotalWorld{wisps: true, collision: true}, 1, 6, types.StatusOpen, false},
+		{"active_custom/issues_only/limit0", readyTotalWorld{}, 0, 3, types.StatusOpen, true},
+		{"active_custom/issues_only/limit1", readyTotalWorld{}, 1, 4, types.StatusOpen, true},
+		{"active_custom/wisps/limit0", readyTotalWorld{wisps: true}, 0, 4, types.StatusOpen, true},
+		{"active_custom/wisps/limit1", readyTotalWorld{wisps: true}, 1, 6, types.StatusOpen, true},
+		{"active_custom/collision/limit1", readyTotalWorld{wisps: true, collision: true}, 1, 7, types.StatusOpen, true},
 	}
 	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -270,7 +286,12 @@ func TestReadyWorkStatementBudget(t *testing.T) {
 			te := newTestEnv(t, prefix)
 			seedReadyTotalWorld(t, te, prefix, tc.world)
 
-			filter := types.WorkFilter{IncludeEphemeral: true, Limit: tc.limit}
+			if tc.active {
+				if err := te.store.SetConfig(t.Context(), "status.custom", "review:active"); err != nil {
+					t.Fatalf("SetConfig(status.custom): %v", err)
+				}
+			}
+			filter := types.WorkFilter{Status: tc.status, IncludeEphemeral: true, Limit: tc.limit}
 			var total int
 			stmts := withCountingReadTx(t, te, func(tx issueops.DBTX) error {
 				var err error
@@ -279,6 +300,24 @@ func TestReadyWorkStatementBudget(t *testing.T) {
 			})
 			if total == 0 {
 				t.Fatalf("total = 0; the seeded world has ready work")
+			}
+			if tc.status == types.StatusOpen {
+				nameReads := 0
+				for _, stmt := range stmts {
+					if strings.HasPrefix(stmt, "SELECT name FROM custom_statuses ") {
+						nameReads++
+					}
+					if strings.Contains(stmt, "status IN (SELECT name FROM custom_statuses") {
+						t.Errorf("StatusOpen candidate kept the unhydrated subquery: %s", stmt)
+					}
+				}
+				wantNameReads := 0
+				if tc.active {
+					wantNameReads = 1
+				}
+				if nameReads != wantNameReads {
+					t.Errorf("active-status names read %d times, want %d per operation", nameReads, wantNameReads)
+				}
 			}
 			// A ceiling, not an exact pin: a change that saves a statement
 			// should not have to edit this table, but one that adds a round
@@ -392,5 +431,326 @@ func TestReadyWorkPageTotalFilterMatrix(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestReadyProbeRejectsMissingCustomStatusName preserves the required schema
+// dependency even when no active custom statuses exist.
+func TestReadyProbeRejectsMissingCustomStatusName(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	te := newTestEnv(t, "missingname")
+	if err := te.store.CreateIssue(ctx, &types.Issue{ID: "missingname-open", Title: "open", Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2}, "tester"); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+	filter := types.WorkFilter{Status: types.StatusOpen, IncludeEphemeral: true}
+	withCountingReadTx(t, te, func(tx issueops.DBTX) error {
+		n, err := issueops.CountReadyWorkInTx(ctx, tx, filter)
+		if err != nil {
+			return err
+		}
+		if n != 1 {
+			t.Fatalf("healthy count = %d, want 1", n)
+		}
+		return nil
+	})
+	te.exec(t, ctx, "DROP TABLE custom_statuses")
+	te.exec(t, ctx, "CREATE TABLE custom_statuses (category VARCHAR(255))")
+	var countErr error
+	withCountingReadTx(t, te, func(tx issueops.DBTX) error {
+		_, countErr = issueops.CountReadyWorkInTx(ctx, tx, filter)
+		return nil
+	})
+	if countErr == nil {
+		t.Fatal("missing custom_statuses.name unexpectedly produced a successful count")
+	}
+	message := strings.ToLower(countErr.Error())
+	if !strings.Contains(message, "column") || !strings.Contains(message, "name") {
+		t.Fatalf("expected missing-name column error, got: %v", countErr)
+	}
+}
+
+// seedReadyActiveStatusWorld keeps real dependency/deferred state while giving
+// the active ready front a deterministic priority order and distinct statuses.
+func seedReadyActiveStatusWorld(t *testing.T, te *testEnv, prefix string) {
+	t.Helper()
+	ctx := t.Context()
+	if err := te.store.SetConfig(ctx, "status.custom", "review:active,triage:active,polishing:wip,merged:done"); err != nil {
+		t.Fatal(err)
+	}
+	seedReadyTotalWorld(t, te, prefix, readyTotalWorld{wisps: true, deferredParent: true})
+	rows := []struct {
+		suffix, status string
+		priority       int
+		ephemeral      bool
+	}{
+		{"r0", "review", 0, false}, {"r1", "triage", 1, false}, {"r4", "open", 2, false},
+		{"w0", "review", 3, true}, {"w1", "triage", 4, false},
+		{"r2", "polishing", 5, false}, {"w2", "polishing", 6, true}, {"r3", "merged", 7, false},
+		{"dparent", "review", 8, false}, {"dchild", "review", 9, false}, {"wdchild", "review", 10, true},
+		{"blocked", "review", 11, false}, {"blocker", "in_progress", 1, false},
+	}
+	for _, row := range rows {
+		update := "UPDATE issues SET status = ?, priority = ?, ephemeral = ? WHERE id = ?"
+		query := "SELECT status, priority, ephemeral FROM issues WHERE id = ?"
+		if strings.HasPrefix(row.suffix, "w") {
+			update = "UPDATE wisps SET status = ?, priority = ?, ephemeral = ? WHERE id = ?"
+			query = "SELECT status, priority, ephemeral FROM wisps WHERE id = ?"
+		}
+		id := prefix + "-" + row.suffix
+		te.exec(t, ctx, update, row.status, row.priority, row.ephemeral, id)
+		var status string
+		var priority int
+		var ephemeral bool
+		te.queryScalar(t, ctx, query, []any{id}, &status, &priority, &ephemeral)
+		if status != row.status || priority != row.priority || ephemeral != row.ephemeral {
+			t.Fatalf("stored fixture %s = %s/%d/%v, want %s/%d/%v", id, status, priority, ephemeral, row.status, row.priority, row.ephemeral)
+		}
+	}
+	var blocked, deferred bool
+	te.queryScalar(t, ctx, "SELECT is_blocked FROM issues WHERE id = ?", []any{prefix + "-blocked"}, &blocked)
+	te.queryScalar(t, ctx, "SELECT defer_until > UTC_TIMESTAMP() FROM issues WHERE id = ?", []any{prefix + "-dparent"}, &deferred)
+	if !blocked || !deferred {
+		t.Fatal("negative fixture lost real blocked/deferred state")
+	}
+	for _, suffix := range []string{"r1", "w0"} {
+		id := prefix + "-" + suffix
+		if err := te.store.AddLabel(ctx, id, "focus", "tester"); err != nil {
+			t.Fatal(err)
+		}
+		if err := te.store.UpdateIssue(ctx, id, map[string]interface{}{"assignee": "alice"}, "tester"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	te.exec(t, ctx, "INSERT INTO comments (id, issue_id, author, text) VALUES (UUID(), ?, ?, ?)", prefix+"-r1", "tester", "one comment")
+}
+
+// assertReadyActiveRead uses a handwritten ordered oracle for each operation;
+// agreement among readers alone would not establish membership or total.
+func assertReadyActiveRead(t *testing.T, te *testEnv, filter types.WorkFilter, want []string, total int, more bool) {
+	t.Helper()
+	check := func(label string, got []string) {
+		t.Helper()
+		if !slices.Equal(got, want) {
+			t.Fatalf("%s IDs = %v, want %v", label, got, want)
+		}
+	}
+	checkCounts := func(label string, items []*types.IssueWithCounts) {
+		t.Helper()
+		check(label, readyIDs(items))
+		for _, item := range items {
+			if strings.HasSuffix(item.Issue.ID, "-r1") && (item.CommentCount != 1 || !slices.Contains(item.Issue.Labels, "focus")) {
+				t.Fatalf("%s lost custom-row comment/label hydration: %+v", label, item)
+			}
+		}
+	}
+	withCountingReadTx(t, te, func(tx issueops.DBTX) error {
+		items, err := issueops.GetReadyWorkWithCountsInTx(t.Context(), tx, filter)
+		if err != nil {
+			return err
+		}
+		checkCounts("issueops counts", items)
+		items, found, err := issueops.GetReadyWorkWithCountsAndTotalInTx(t.Context(), tx, filter)
+		if err != nil {
+			return err
+		}
+		checkCounts("issueops page+total", items)
+		if found != total {
+			t.Fatalf("page total = %d, want literal %d", found, total)
+		}
+		found, err = issueops.CountReadyWorkInTx(t.Context(), tx, filter)
+		if err != nil {
+			return err
+		}
+		if found != total {
+			t.Fatalf("count = %d, want literal %d", found, total)
+		}
+		repo := db.NewIssueSQLRepository(tx)
+		page, err := repo.GetReadyWork(t.Context(), filter)
+		if err != nil {
+			return err
+		}
+		ids := make([]string, 0, len(page.Items))
+		for _, item := range page.Items {
+			ids = append(ids, item.ID)
+		}
+		check("domain plain", ids)
+		if page.HasMore != more {
+			t.Fatalf("domain plain HasMore = %v, want %v", page.HasMore, more)
+		}
+		counted, err := repo.GetReadyWorkWithCounts(t.Context(), filter)
+		if err != nil {
+			return err
+		}
+		checkCounts("domain counts", counted.Items)
+		if counted.HasMore != more {
+			t.Fatalf("domain counts HasMore = %v, want %v", counted.HasMore, more)
+		}
+		return nil
+	})
+}
+
+func TestReadyWorkCustomActiveSemantics(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	te := newTestEnv(t, "ac")
+	seedReadyActiveStatusWorld(t, te, "ac")
+	base := types.WorkFilter{Status: types.StatusOpen, IncludeEphemeral: true, SortPolicy: types.SortPolicyPriority}
+	all := []string{"ac-r0", "ac-r1", "ac-r4", "ac-w0", "ac-w1"}
+	for _, tc := range []struct {
+		name      string
+		limit     int
+		ephemeral bool
+		want      []string
+		more      bool
+	}{
+		{"unbounded", 0, true, all, false}, {"hide_ephemeral", 0, false, []string{"ac-r0", "ac-r1", "ac-r4", "ac-w1"}, false},
+		{"limit4", 4, true, []string{"ac-r0", "ac-r1", "ac-r4", "ac-w0"}, true}, {"exact_limit5", 5, true, all, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			filter := base
+			filter.Limit = tc.limit
+			filter.IncludeEphemeral = tc.ephemeral
+			total := 5
+			if !tc.ephemeral {
+				total = 4
+			}
+			assertReadyActiveRead(t, te, filter, tc.want, total, tc.more)
+		})
+	}
+	alice, parent := "alice", "ac-dparent"
+	for _, tc := range []struct {
+		name   string
+		filter types.WorkFilter
+		want   []string
+	}{
+		{"exact_wip", types.WorkFilter{Status: "polishing"}, []string{"ac-r2", "ac-w2"}},
+		{"default", types.WorkFilter{}, []string{"ac-blocker", "ac-r4"}},
+		{"plural_open", types.WorkFilter{Statuses: []types.Status{types.StatusOpen}}, []string{"ac-r4"}},
+		{"plural_review_and_progress", types.WorkFilter{Statuses: []types.Status{"review", types.StatusInProgress}}, []string{"ac-r0", "ac-blocker", "ac-w0"}},
+		{"label_and_assignee", types.WorkFilter{Status: types.StatusOpen, Labels: []string{"focus"}, Assignee: &alice}, []string{"ac-r1", "ac-w0"}},
+		{"label_assignee_exclusion", types.WorkFilter{Status: types.StatusOpen, Labels: []string{"focus"}, Assignee: &alice, ExcludeIDs: []string{"ac-w0"}}, []string{"ac-r1"}},
+		{"nonmatching_label", types.WorkFilter{Status: types.StatusOpen, Labels: []string{"area4-no-such-label"}, Limit: 1}, []string{}},
+		{"parent_with_deferred", types.WorkFilter{Status: types.StatusOpen, ParentID: &parent, IncludeDeferred: true}, []string{"ac-dchild", "ac-wdchild"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			filter := tc.filter
+			filter.IncludeEphemeral = true
+			filter.SortPolicy = types.SortPolicyPriority
+			assertReadyActiveRead(t, te, filter, tc.want, len(tc.want), false)
+		})
+	}
+	t.Run("bare_wisp_characterization", func(t *testing.T) {
+		withCountingReadTx(t, te, func(tx issueops.DBTX) error {
+			rows, err := issueops.GetReadyWorkInTx(t.Context(), tx, base)
+			if err != nil {
+				return err
+			}
+			ids := make([]string, 0, len(rows))
+			for _, row := range rows {
+				ids = append(ids, row.ID)
+			}
+			if !slices.Equal(ids, []string{"ac-r0", "ac-r1", "ac-r4"}) {
+				t.Fatalf("bare selector contract = %v", ids)
+			}
+			return nil
+		})
+	})
+	t.Run("collision", func(t *testing.T) {
+		te.exec(t, t.Context(), "INSERT INTO wisps (id, title, status, priority, issue_type, ephemeral, created_at, updated_at) SELECT id, 'canonical-wisp', status, priority, issue_type, 1, created_at, updated_at FROM issues WHERE id = ?", "ac-r0")
+		assertReadyActiveRead(t, te, base, all, 5, false)
+		withCountingReadTx(t, te, func(tx issueops.DBTX) error {
+			items, err := issueops.GetReadyWorkWithCountsInTx(t.Context(), tx, base)
+			if err != nil {
+				return err
+			}
+			if items[0].Issue.Title != "canonical-wisp" {
+				t.Fatalf("collision winner = %q", items[0].Issue.Title)
+			}
+			page, err := db.NewIssueSQLRepository(tx).GetReadyWork(t.Context(), base)
+			if err != nil {
+				return err
+			}
+			if page.Items[0].Title != "canonical-wisp" {
+				t.Fatalf("domain collision winner = %q", page.Items[0].Title)
+			}
+			filter := base
+			filter.Limit = 4
+			items, total, err := issueops.GetReadyWorkWithCountsAndTotalInTx(t.Context(), tx, filter)
+			if err != nil {
+				return err
+			}
+			if total != 5 || !slices.Equal(readyIDs(items), all[:4]) {
+				t.Fatalf("collision bounded IDs/total = %v/%d, want %v/5", readyIDs(items), total, all[:4])
+			}
+			return nil
+		})
+		te.exec(t, t.Context(), "UPDATE issues SET status = 'polishing' WHERE id = ?", "ac-r0")
+		assertReadyActiveRead(t, te, base, all, 5, false)
+		withCountingReadTx(t, te, func(tx issueops.DBTX) error {
+			filter := base
+			filter.Limit = 4
+			_, total, err := issueops.GetReadyWorkWithCountsAndTotalInTx(t.Context(), tx, filter)
+			if err == nil && total != 5 {
+				t.Fatalf("asymmetric collision total = %d, want 5", total)
+			}
+			return err
+		})
+	})
+}
+
+func TestReadyWorkCustomActiveRefresh(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	te := newTestEnv(t, "ar")
+	seedReadyActiveStatusWorld(t, te, "ar")
+	filter := types.WorkFilter{Status: types.StatusOpen, IncludeEphemeral: true, SortPolicy: types.SortPolicyPriority}
+	for _, phase := range []struct {
+		name, config string
+		active       int
+		want         []string
+	}{
+		{"initial", "review:active,triage:active,polishing:wip,merged:done", 2, []string{"ar-r0", "ar-r1", "ar-r4", "ar-w0", "ar-w1"}},
+		{"zero_active", "review:wip,triage:wip,polishing:wip,merged:done", 0, []string{"ar-r4"}},
+		{"triage_only", "review:wip,triage:active,polishing:wip,merged:done", 1, []string{"ar-r1", "ar-r4", "ar-w1"}},
+	} {
+		t.Run(phase.name, func(t *testing.T) {
+			if err := te.store.SetConfig(t.Context(), "status.custom", phase.config); err != nil {
+				t.Fatal(err)
+			}
+			var active int
+			te.queryScalar(t, t.Context(), "SELECT COUNT(*) FROM custom_statuses WHERE category = 'active'", nil, &active)
+			if active != phase.active {
+				t.Fatalf("stored active names = %d, want %d", active, phase.active)
+			}
+			assertReadyActiveRead(t, te, filter, phase.want, len(phase.want), false)
+		})
+	}
+}
+
+// TestReadyReaderCustomActiveConsumer reaches the store's public accessor and
+// its request builder, over-fetch and trimming against persisted custom rows.
+func TestReadyReaderCustomActiveConsumer(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	te := newTestEnv(t, "rc")
+	seedReadyActiveStatusWorld(t, te, "rc")
+	reader, err := te.store.IssueReader()
+	if err != nil {
+		t.Fatal(err)
+	}
+	limit := 1
+	req := publicops.ReadyRequest{Sort: "priority", Labels: []string{"focus"}, Assignee: "alice", IncludeEphemeral: true, Limit: &limit}
+	page, err := reader.Ready(t.Context(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(readyIDs(page.Items), []string{"rc-r1"}) || !page.HasMore {
+		t.Fatalf("bounded page=%v more=%v, want custom durable and more", readyIDs(page.Items), page.HasMore)
+	}
+	limit = 0
+	page, err = reader.Ready(t.Context(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(readyIDs(page.Items), []string{"rc-r1", "rc-w0"}) || page.HasMore {
+		t.Fatalf("unbounded page=%v more=%v, want custom durable+wisp", readyIDs(page.Items), page.HasMore)
 	}
 }

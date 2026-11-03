@@ -1,4 +1,5 @@
 load("@rules_go//go:def.bzl", "go_library", "go_test")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
 go_library(
     name = "versioncontrolops",
@@ -40,6 +41,8 @@ go_test(
         "backup_test.go",
         "clone_test.go",
         "commit_empty_test.go",
+        "compact_softreset_dolt_test.go",
+        "compact_verify_test.go",
         "conflicts_test.go",
         "fastforward_test.go",
         "gc_test.go",
@@ -51,8 +54,41 @@ go_test(
     embed = [":versioncontrolops"],
     deps = [
         "//internal/githooksenv",
+        "//internal/testutil",
         "@com_github_data_dog_go_sqlmock//:go-sqlmock",
+        "@com_github_go_sql_driver_mysql//:mysql",
     ],
+)
+
+# versioncontrolops_test on the server-Dolt storage tier: the Compact tests in
+# compact_softreset_dolt_test.go run against a real dolt sql-server, which
+# every other configuration of versioncontrolops_test skips
+# (BEADS_TEST_SKIP=dolt). Not on the dolt-server lane: its union with the
+# proxied tier (--config=dolt-race) already runs as many test actions as
+# --jobs allows (scripts/bazel_dolt_race_test.go), so this target takes the
+# last free slot of --config=dolt-int, the server-storage + cmd-dolt union
+# (scripts/bazel_dolt_int_test.go). The package has no integration-tagged
+# files, so the tier's integration build compiles the same tests, in the
+# binary --config=integration already builds.
+#
+# Tags:
+#   dolt-server-integration: starts hermetic dolt sql-servers from the pinned
+#     dolt in the test wrapper's runfiles (BEADS_TEST_DOLT_SERVER=local),
+#     under the integration build tag; excluded from --config=prcore/ci and
+#     --config=integration, selected by --config=doltserver-integration.
+sh_test(
+    name = "versioncontrolops_dolt_test",
+    size = "medium",
+    srcs = ["//tools/bazel:go_test_variant.sh"],
+    args = [
+        "$(rootpath :versioncontrolops_test)",
+    ],
+    data = [":versioncontrolops_test"],
+    env = {
+        "BEADS_TEST_DOLT_SERVER": "local",
+        "BEADS_TEST_REQUIRE_DOLT_CONTAINER": "1",
+    },
+    tags = ["dolt-server-integration"],
 )
 
 # --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---

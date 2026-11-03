@@ -16,6 +16,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/compact"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/remedy"
@@ -94,19 +95,27 @@ func runFindDuplicates(cmd *cobra.Command, _ []string) error {
 	status, _ := cmd.Flags().GetString("status")
 	limit, _ := cmd.Flags().GetInt("limit")
 	model, _ := cmd.Flags().GetString("model")
-	if model == "" {
-		_, keySource := config.ResolveAIAPIKey("")
-		model = config.DefaultAIModelFor(keySource)
-	}
 
 	if method != "mechanical" && method != "ai" {
 		return HandleErrorRespectJSON("invalid method %q (use: mechanical, ai)", method)
 	}
 
+	var aiOptions []option.RequestOption
+	keySource := config.AIAPIKeySourceNone
 	if method == "ai" {
-		if apiKey, _ := config.ResolveAIAPIKey(""); apiKey == "" {
-			return HandleErrorRespectJSON("--method ai requires ANTHROPIC_API_KEY, MINIMAX_API_KEY, or ai.api_key in config")
+		options, source, _, err := compact.NewAIClientOptions("")
+		if err != nil {
+			if strings.Contains(err.Error(), "API key required") {
+				return HandleErrorRespectJSON("--method ai requires ANTHROPIC_API_KEY, MINIMAX_API_KEY, or ai.api_key in config")
+			}
+			return err
 		}
+		aiOptions, keySource = options, source
+	} else {
+		_, keySource = config.ResolveAIAPIKey("")
+	}
+	if model == "" {
+		model = config.DefaultAIModelFor(keySource)
 	}
 
 	// Fetch issues
@@ -143,7 +152,7 @@ func runFindDuplicates(cmd *cobra.Command, _ []string) error {
 	}
 	issues = filterClosedIfNoStatus(issues, status)
 
-	return reportFindDuplicates(rootCtx, issues, method, threshold, limit, model)
+	return reportFindDuplicates(rootCtx, issues, method, threshold, limit, model, aiOptions)
 }
 
 func filterClosedIfNoStatus(issues []*types.Issue, status string) []*types.Issue {
@@ -159,7 +168,7 @@ func filterClosedIfNoStatus(issues []*types.Issue, status string) []*types.Issue
 	return filtered
 }
 
-func reportFindDuplicates(ctx context.Context, issues []*types.Issue, method string, threshold float64, limit int, model string) error {
+func reportFindDuplicates(ctx context.Context, issues []*types.Issue, method string, threshold float64, limit int, model string, aiOptions []option.RequestOption) error {
 	if len(issues) < 2 {
 		if jsonOutput {
 			return outputJSON(map[string]interface{}{
@@ -177,7 +186,14 @@ func reportFindDuplicates(ctx context.Context, issues []*types.Issue, method str
 	case "mechanical":
 		pairs = findMechanicalDuplicates(issues, threshold)
 	case "ai":
-		pairs = findAIDuplicates(ctx, issues, threshold, model)
+		if len(aiOptions) == 0 {
+			var err error
+			aiOptions, _, _, err = compact.NewAIClientOptions("")
+			if err != nil {
+				return err
+			}
+		}
+		pairs = findAIDuplicates(ctx, issues, threshold, model, aiOptions)
 	}
 
 	// Sort by similarity (highest first)
@@ -392,7 +408,7 @@ func findMechanicalDuplicates(issues []*types.Issue, threshold float64) []duplic
 
 // findAIDuplicates uses LLM-based semantic comparison to find duplicates.
 // It first pre-filters with mechanical similarity to reduce API calls.
-func findAIDuplicates(ctx context.Context, issues []*types.Issue, threshold float64, model string) []duplicatePair {
+func findAIDuplicates(ctx context.Context, issues []*types.Issue, threshold float64, model string, clientOptions []option.RequestOption) []duplicatePair {
 	// Pre-filter: use mechanical similarity with a lower threshold to find candidates
 	preFilterThreshold := threshold * 0.5 // Cast a wider net for pre-filtering
 	if preFilterThreshold < 0.15 {
@@ -416,11 +432,6 @@ func findAIDuplicates(ctx context.Context, issues []*types.Issue, threshold floa
 
 	fmt.Fprintf(os.Stderr, "Analyzing %d candidate pairs with AI...\n", len(candidates))
 
-	apiKey, keySource := config.ResolveAIAPIKey("")
-	clientOptions := []option.RequestOption{option.WithAPIKey(apiKey)}
-	if baseURL := config.DefaultAIBaseURL(keySource); baseURL != "" {
-		clientOptions = append(clientOptions, option.WithBaseURL(baseURL))
-	}
 	client := anthropic.NewClient(clientOptions...)
 
 	var pairs []duplicatePair

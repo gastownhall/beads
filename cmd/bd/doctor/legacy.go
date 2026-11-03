@@ -509,6 +509,13 @@ func CheckFreshClone(repoPath string) DoctorCheck {
 			// The server its repair writes (freshCloneRepairTransport), as
 			// the user its repair presents there (freshCloneRepairUser).
 			socket := freshCloneRepairTransport(ep)
+			if password != "" {
+				// Refuse to send BEADS_DOLT_PASSWORD to a shared-config host the
+				// workspace never pinned, as the store's open does (GH#7886).
+				if err := ep.EnsureTrustedForCredential(cfg); err != nil {
+					return freshCloneServerUnreachableResult(dbName, host, port, socket, err)
+				}
+			}
 			user, err := freshCloneRepairUser(ep)
 			if err != nil {
 				return freshCloneServerUnreachableResult(dbName, host, port, socket, err)

@@ -26,6 +26,7 @@ func (s *testSuite) TestIssueClaimReadyIssue() {
 	s.Run("SkipsAlreadyClaimedByOther", s.claimReadySkipsForeign)
 	s.Run("RespectsPriorityFilter", s.claimReadyPriorityFilter)
 	s.Run("ExcludesBlocked", s.claimReadyExcludesBlocked)
+	s.Run("CustomActiveSelection", s.claimReadyCustomActiveSelection)
 }
 
 func (s *testSuite) TestIssueClaimReadyWisp() {
@@ -550,4 +551,31 @@ func cycleNodeIDs(cycle []*types.Issue) []string {
 		out = append(out, iss.ID)
 	}
 	return out
+}
+
+func (s *testSuite) claimReadyCustomActiveSelection() {
+	s.resetDB()
+	_, err := s.Runner().ExecContext(s.Ctx(), "INSERT INTO custom_statuses (name, category) VALUES ('triaged', 'active'), ('polishing', 'wip')")
+	s.Require().NoError(err)
+	r := s.issueRepo()
+	active := newTestIssue("bd-clr-custom-active", "active custom winner")
+	active.Status, active.Priority = "triaged", 1
+	wip := newTestIssue("bd-clr-custom-wip", "earlier priority but already working")
+	wip.Status, wip.Priority = "polishing", 0
+	s.Require().NoError(r.Insert(s.Ctx(), active, "tester", domain.InsertIssueOpts{}))
+	s.Require().NoError(r.Insert(s.Ctx(), wip, "tester", domain.InsertIssueOpts{}))
+	winner, err := r.ClaimReadyIssue(s.Ctx(), types.WorkFilter{SortPolicy: types.SortPolicyPriority}, "alice")
+	s.Require().NoError(err)
+	s.Require().NotNil(winner)
+	s.Equal(active.ID, winner.ID, "ready selection must admit active customs without stealing an earlier-priority wip")
+	stored, err := r.Get(s.Ctx(), active.ID, domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.Equal(types.StatusInProgress, stored.Status)
+	s.Equal("alice", stored.Assignee)
+	s.NotNil(stored.StartedAt)
+	untouched, err := r.Get(s.Ctx(), wip.ID, domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.Equal(types.Status("polishing"), untouched.Status)
+	s.Empty(untouched.Assignee)
+	s.Nil(untouched.StartedAt)
 }

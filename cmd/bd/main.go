@@ -27,6 +27,7 @@ import (
 	"github.com/steveyegge/beads/internal/ceiling"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/creds"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/hooks"
@@ -334,6 +335,12 @@ func resolveDoltServerConnection(ctx context.Context, beadsDir string, fileCfg *
 	// read as a caller assertion (see ApplyResolvedServerPort).
 	dolt.ApplyResolvedServerPort(beadsDir, doltCfg)
 	doltCfg.ServerSocket = fileCfg.GetDoltServerSocket()
+	doltCfg.BeadsDir = beadsDir
+	if os.Getenv("BEADS_DOLT_PASSWORD") != "" {
+		if err := dolt.CheckServerEndpointTrust(beadsDir, fileCfg, doltCfg.ServerHost, doltCfg.ServerPort, doltCfg.ServerSocket); err != nil {
+			return err
+		}
+	}
 	// A configured credential command targets an authenticating gateway server:
 	// run it for a short-lived token used as the connection username. Fail closed
 	// — never fall back to the static/root user when a command was configured but
@@ -553,16 +560,26 @@ func applyNoColorFlag() {
 }
 
 // loadBeadsEnvFile loads .beads/.env into process environment for per-project
-// Dolt credentials (GH#2520). Uses gotenv.Load which is non-overriding —
+// Dolt credentials (GH#2520). Imports are non-overriding —
 // existing shell env vars always take precedence.
 // Safe to call with an empty beadsDir (no-op).
 func loadBeadsEnvFile(beadsDir string) {
 	if beadsDir == "" {
 		return
 	}
+	if !config.IsDotenvKey("BEADS_DIR") {
+		config.RecordWorkspaceBeadsDir(beadsDir)
+	}
 	envFile := filepath.Join(beadsDir, ".env")
 	if _, err := os.Stat(envFile); err != nil {
 		return
+	}
+	if pairs, err := gotenv.Read(envFile); err == nil {
+		for key, val := range pairs {
+			if os.Getenv(key) == "" && val != "" {
+				config.MarkDotenvValue(key, val)
+			}
+		}
 	}
 	// A .env-provided BEADS_DIR is user-authored selection wherever it is
 	// imported from, not only via loadBeadsSelectionEnvFile: that loader
@@ -572,7 +589,28 @@ func loadBeadsEnvFile(beadsDir string) {
 	// thing, instead of target-role or CWD-role depending on the caller's
 	// unrelated BEADS_DB export.
 	beadsDirWasSet := os.Getenv("BEADS_DIR") != ""
-	_ = gotenv.Load(envFile)
+	env, err := gotenv.Read(envFile)
+	if err != nil {
+		return
+	}
+	keys := make([]string, 0, len(env))
+	for key := range env {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	for _, key := range keys {
+		value := env[key]
+		if ok, reason := creds.AllowedProjectEnvKey(key); !ok {
+			fmt.Fprintf(os.Stderr, "beads: ignoring %s from .beads/.env (%s)\n", key, reason)
+			continue
+		}
+		upper := strings.ToUpper(strings.TrimSpace(key))
+		if _, exists := os.LookupEnv(key); !exists {
+			if _, upperExists := os.LookupEnv(upper); !upperExists {
+				_ = os.Setenv(upper, value)
+			}
+		}
+	}
 	if !beadsDirWasSet && os.Getenv("BEADS_DIR") != "" {
 		beadsDirProvidedAtStartup = true
 	}
@@ -599,6 +637,7 @@ func loadBeadsSelectionEnvFile(beadsDir string) {
 	if beadsDir == "" {
 		return
 	}
+	config.RecordWorkspaceBeadsDir(beadsDir)
 	envFile := filepath.Join(beadsDir, ".env")
 	pairs, err := gotenv.Read(envFile)
 	if err != nil {
@@ -610,6 +649,7 @@ func loadBeadsSelectionEnvFile(beadsDir string) {
 		}
 		if value, ok := pairs[key]; ok && strings.TrimSpace(value) != "" {
 			_ = os.Setenv(key, value)
+			config.MarkDotenvValue(key, value)
 			if key == "BEADS_DIR" {
 				// A .beads/.env that routes commands via BEADS_DIR is
 				// user-authored selection, same as exporting the variable

@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Shared workspace configuration can no longer redirect your private
+  credentials to an attacker's endpoint (GH#7886, #7560).** A committed
+  `.beads/config.yaml` / `.beads/config.local.yaml` / `.beads/.env`, a
+  committed `.beads/metadata.json`, or a row replicated through the synced Dolt
+  `config` table could point an AI endpoint (`ai.base_url`), a tracker endpoint
+  (`github.url`, `gitlab.url`, `ado.url`, `jira.url`, `linear.api_endpoint`) or
+  the remote Dolt server (`dolt_server_host`) at a server the attacker runs, and
+  `bd` would send your `ANTHROPIC_API_KEY`/`MINIMAX_API_KEY`, your tracker token,
+  or `BEADS_DOLT_PASSWORD` there. `bd` now pins each of these endpoints on first
+  use in a user-private file (`~/.config/beads/trusted-endpoints.json`) and
+  refuses to send the credential when a shared endpoint differs from the pin or
+  was never privately confirmed. Confirm an intended endpoint by setting its
+  environment variable in your shell (not in `.beads/.env`) or the key in
+  `~/.config/bd/config.yaml`. The pin store's own location is resolved from
+  private environment only, so a committed `.beads/.env` cannot relocate it with
+  `XDG_CONFIG_HOME`/`APPDATA`/`HOME` and pre-authorize its own endpoints. The
+  guard also covers the Dolt server password on the diagnostic and maintenance
+  paths — `bd dolt status`, `bd dolt clean-databases`, and the `bd doctor`
+  checks and `bd doctor --fix` repairs — which build their own connections
+  outside the store's open, so none of them can be used to harvest
+  `BEADS_DOLT_PASSWORD` by naming an attacker's host. A Dolt host or socket
+  that is not a plain host name, IP literal or socket path (for example
+  `localhost#@tcp(evil.example`, which the trust check read as bd's own server
+  while the MySQL driver dialed `evil.example`) is refused before the password
+  is sent. Dolt remote credentials
+  (`DOLT_REMOTE_USER`/`DOLT_REMOTE_PASSWORD` for `sync.remote` and federation
+  peers) are not covered by these pins.
+
 ### Added
 
 - **`arrival_seq`, a commit-ordered create sequence on wisp-plane rows.**
@@ -612,6 +642,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`bd rules compact` previews by default and applies only with `--force`.**
+  It used to apply merges by default, writing the composite and deleting the
+  source rules. Scripts using `--auto` or `--group` to apply merges must add
+  `--force`. Applying now copies each source to `<name>.md.backup` before
+  deleting it; undo a merge by deleting the composite and renaming each
+  backup back. The preview lists, by source, every line the composite drops
+  (it keeps only `**Do:**` and `**Don't:**` lines), and a rule with no such
+  lines is skipped by `--auto` and refused by `--group`.
+  ([#5719](https://github.com/gastownhall/beads/issues/5719))
 - **`bd` requires Dolt 2.6.0 or newer outside embedded mode, and refuses
   anything older.** `doltversion.RecommendedMin` (2.5.0, a warning) is now
   `doltversion.RequiredMin` (2.6.0, an error). `bd dolt start` and
@@ -1126,9 +1165,94 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- `bd ready` parameterizes active custom statuses into `status = ?` or
-  `status IN (?, ...)` instead of evaluating an unindexed subquery inside an
-  `OR` clause, restoring index range scans on Dolt and relational backends (#8045).
+- `bd create --file` and other batch creates no longer fail with "issue
+  already exists" on an id bd generated itself. The batch chose every id
+  before it wrote any row, so two of its items could be handed the same short
+  hash id, and a generated id (hash or counter) could be the one a later item
+  of the same batch names explicitly. Generated hash ids also skip ids held in
+  the other storage plane. A wisp or `--no-history` create could be refused
+  because an imported or promoted wisp's row in the durable table already
+  held its id. On a proxied-server workspace the same id was instead written
+  into both tables (#5106).
+- `bd compact` no longer silently changes row data when commit dates are out
+  of history order across the cutoff. When a recent-dated commit came before
+  an old-dated one in history (a host clock that jumped back), the squashed
+  base already held the recent commit, and replaying it again could undo the
+  later old commit's edit while reporting "Compacted". Compact now refuses
+  such a history up front, names both commits and their dates, and changes
+  nothing; `--force` does not override the refusal. The squashed base now
+  also ends at the last old commit in history rather than the newest-dated
+  one, so an old window whose dates are shuffled no longer loses its final
+  edits. As a general net, compact now compares the replayed history's
+  committed data with main before swapping it in and aborts, leaving main
+  untouched, on any difference (#6645, reported by @bee-ghosttrack).
+- GitHub sync no longer matches a pulled issue to a bead linked to another
+  repository's issue with the same number. Pulling issue 1313 from a second
+  repository reported "0 created, 1 updated" and overwrote the bead linked to
+  the first repository's issue 1313; push, conflict detection and selective
+  pull likewise read another repository's link as the configured
+  repository's issue. Issue URLs now count only when they name the configured
+  host and repository, by its configured owner/repo or by another name GitHub
+  resolves to it (its current name, or a former name beads are still linked
+  under), so a renamed or transferred repository keeps syncing its beads
+  whether the config names its old name or its new one. `--dry-run` push
+  reports beads linked elsewhere as skipped, and `bd github pull <bead-id>`
+  says their link is not an issue the tracker can address (#7781, reported
+  and first fixed by @NahumLitvin in #7794).
+- `bd compact` no longer discards writes that reach `main` while it runs. It
+  finished by hard-resetting `main` onto the rebuilt history, which dropped
+  changes in `main`'s working set that no Dolt commit held yet (a batch under
+  batched or disabled auto-commit, or a write between its SQL commit and its
+  Dolt commit) and any commit that landed on `main` during the rebuild, after
+  their writers had been told they succeeded. It now moves `main` with a soft
+  reset: working-set changes stay pending, and a commit that landed during the
+  rebuild is kept in one follow-up commit
+  (`compact: commit changes that reached main during compaction`), without its
+  own hash, message or author; changes already staged when `bd compact` started
+  join that commit. The check that the replay reproduces `main`'s data (#6645)
+  compares it with `main` as `bd compact` read it, so a write that lands
+  meanwhile is kept, not refused as a divergent replay. If the follow-up
+  commit fails, `bd compact` stops before garbage collection with the changes
+  staged on `main`, for `bd dolt commit`. `bd flatten` and the merge-settle
+  path are unchanged. See
+  [Writes that reach `main` while `bd compact` runs](docs/architecture/dolt.md#maintenance--bd-prune-and-bd-purge).
+- A clone that adopts the 1.3.0 `events` flip (migration 0062) by
+  `bd dolt pull` or `bd bootstrap`, or clones after it, no longer starts with
+  an empty `events` audit table. Only the migrating clone kept its rows. The
+  first open now restores the missing events once from the clone's own
+  pre-upgrade history: it adds only the rows the live table lacks (a row
+  history holds twice is restored up to twice), keeps rows already present
+  and their ids, skips and counts events of deleted or renamed issues, and
+  resumes an interrupted restore without duplicates. History it cannot
+  read (a missing chunk, schema-encoding drift) never blocks an open: it
+  warns that the audit history is incomplete and carries on, and a shallow
+  clone that ends at the upgrade has nothing to restore. A cancelled,
+  transient or live-table failure leaves the restore to retry on the next
+  open. Reads and writes are batched: 100,000 events restore in about 20
+  seconds rather than several minutes, which is how long a shared server's
+  migration lock is held. It makes no Dolt commit, and the restored rows
+  stay clone-local.
+  [Upgrading](docs/getting-started/upgrading.md) gives a manual recipe for
+  v1.3.3 and earlier, and how to retry a restore that skipped history
+  (#7039).
+- Upgrading an older database no longer rewrites issue and wisp `updated_at`
+  values with the time of the upgrade. Schema migrations 0035, 0046, 0047 and
+  0053 and ignored migration 0007 update rows without assigning `updated_at`,
+  so its `ON UPDATE CURRENT_TIMESTAMP` stamped every row they touched (every
+  blocked issue on a 1.0.x upgrade, for example). Migration 0041 and ignored
+  migrations 0003 and 0011 stamped rows they only join: the engine applies
+  `ON UPDATE` to every table a multi-table UPDATE joins, so 0041's dependency
+  split stamped every issue and wisp a dependency points at. Their SQL is
+  frozen, so bd now records the affected rows' `updated_at` before each of
+  these steps and writes it back on the rows the step rewrote before the step
+  is recorded and committed; the pre-0047/0053 repair that splits legacy wisp
+  dependencies no longer joins the tables it would stamp (#5981). An edit
+  another process makes during the step to an issue the step does not rewrite
+  keeps its own time. Values already stamped by an earlier upgrade are not
+  repaired. The check lists each table's columns with `SHOW TABLES` and
+  `SHOW COLUMNS` rather than `INFORMATION_SCHEMA`, which Dolt answers by
+  scanning every database on the server, so on a shared server it adds little
+  to the time other bd commands wait on the migration lock.
 - `bd dolt push <remote>` and `bd dolt pull <remote>` now push to and pull
   from the named remote. bd ignored the name, so `bd dolt push 1st` pushed to
   the default remote and reported "Push complete."; a name that differs from
@@ -3479,6 +3603,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rises from 30s to 60s, since back-to-back inits under load take 10-15s
   each.
 
+- **`bd rules compact` no longer overwrites an existing file.** A source named
+  like the composite was overwritten and then deleted with the other sources,
+  leaving nothing, and an unrelated rule with that name was silently replaced.
+  Compact now refuses a group whose output or backup path already exists
+  (a dangling symlink included), naming it, and leaves that group untouched
+  while other `--auto` groups apply. A failed backup deletes no source; a
+  failed delete is reported with exactly what was written, backed up and
+  deleted, and every backup is kept.
+  ([#5719](https://github.com/gastownhall/beads/issues/5719))
+
 - **Concurrent `bd init --shared-server` runs in different projects no
   longer refuse each other.** Every shared-server project gates the one shared
   dolt data dir, and `bd init` holds that gate exclusively for its ~8s run but
@@ -4252,6 +4386,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ACCEPTANCE CRITERIA, and comment bodies, direct and proxied alike — not
   just `bd show`'s DESCRIPTION field. An explicit `GLAMOUR_STYLE` override
   still takes priority over the detected background.
+- `bd ready` expands singular open-status reads with bound active custom
+  status names across plain, count-aware and domain readiness paths, allowing
+  direct status predicates on Dolt. Active names are resolved per operation
+  and shared across its query legs; default and plural-status selector semantics
+  are preserved (#8045).
 
 ### Added
 
@@ -5090,6 +5229,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (GH#5700): its git-backed operations skip or fail instead of running there,
   and `bd context` still shows the workspace. Add the repository to
   `safe.directory` if you trust it.
+
+- A cloned repository's committed config can no longer make bd run a command
+  through a remote URL that git or ssh reads as an option. A `sync.remote` or
+  `sync.git-remote` starting with `-`, also after `git+`, such as
+  `--upload-pack=<command>`, reached `git ls-remote` as an option in
+  `bd bootstrap` and `bd init`, and `bd dolt remote reset-data` passed its
+  remote's URL to `git ls-remote`, `git fetch` and `git push` the same way.
+  An `ssh://` URL whose user name or host starts with `-`, such as
+  `ssh://-oProxyCommand=<command>@host/path`, reached ssh as an option
+  through Dolt's `ssh://` transport, which runs `ssh [user@]host <command>`,
+  and an ssh without OpenSSH 9.6's host name check (CVE-2023-51385) ran the
+  command; such a URL came from `sync.remote` (`bd bootstrap`, `bd init`),
+  `routing.*` (`bd create`), `repos.additional` (`bd repo sync`) or
+  `federation.remote` (`bd config apply`). bd now refuses these URLs before
+  it probes, clones or adds a remote, and passes remote URLs to git after
+  `--`; `bd bootstrap` still restores a local backup or `issues.jsonl` when
+  one exists. beads-mcp no longer passes tool arguments where bd reads them
+  as flags (a comment of `--file=<path>` made bd read that file into the
+  comment): it passes each value as one `--flag=value` argument and ids and
+  text after `--` (#7880, reported and fixed by @Wenjix in #7881).
+
+- **On a host shared with other accounts, the proxied-server proxy and
+  bd-managed Dolt startup no longer trust whoever answers on loopback**
+  (#7884). The proxy's data port opens every connection with a `BDPROXY1`
+  exchange keyed by the owner-only `proxy.secret`, which rotates on every
+  proxy start: the client proves the secret before the proxy dials its
+  backend, and the proxy proves it back before bd sends any SQL, so a process
+  that takes over a dead proxy's port (as another user can, under a long-lived
+  `bd serve`) receives no session. Only bd can use that port now (`bd sql`
+  runs ad-hoc queries through it). The control probe sends a MAC of a fresh
+  nonce instead of the secret. The proxy child validates and launches Dolt
+  from an owner-only snapshot of its config, so the config cannot change
+  between the check and Dolt reading it. bd-managed Dolt startup no longer
+  takes a listener another account put on its port for its own server: on
+  Linux and macOS it checks which process holds the listener wherever the host
+  can show that (on macOS a listener `lsof` cannot see counts as another
+  user's), and on other platforms, Windows included, the server logs at `info`
+  and startup waits for Dolt's own ready line. A group-writable HTTP CA file
+  (`BEADS_HTTP_CA_FILE`, `bd connect --ca-file`) is accepted only when
+  `/etc/passwd` and `/etc/group` show no other account in its group.
+  **Upgrading:** the first bd of this version to open a proxied workspace
+  stops a proxy an older bd started (verified through its pidfile) and starts
+  its own; an older bd cannot use that proxy and fails with a timeout waiting
+  for it, so upgrade every bd that shares the workspace, or run `bd dolt stop`
+  before going back to an older one.
 
 ## [1.3.2] - 2026-10-23
 

@@ -11,7 +11,17 @@ import (
 )
 
 func (r *issueSQLRepositoryImpl) getReadyWorkIDPage(ctx context.Context, filter types.WorkFilter) (idSrcPage, bool, error) {
-	issuePreds, err := r.buildReadyWorkPredicates(ctx, filter, issuesFilterTables)
+	// Resolve names for this operation, sharing them across both query legs.
+	// Do not cache them on the repository: the next operation may see new config.
+	var activeStatuses []string
+	if filter.Status == types.StatusOpen {
+		var err error
+		activeStatuses, err = r.getActiveCustomStatuses(ctx)
+		if err != nil {
+			return idSrcPage{}, false, fmt.Errorf("get ready work: active custom statuses: %w", err)
+		}
+	}
+	issuePreds, err := r.buildReadyWorkPredicates(ctx, filter, issuesFilterTables, activeStatuses)
 	if err != nil {
 		return idSrcPage{}, false, err
 	}
@@ -37,7 +47,7 @@ func (r *issueSQLRepositoryImpl) getReadyWorkIDPage(ctx context.Context, filter 
 		// holds non-ephemeral NoHistory beads (ephemeral=0), so forcing
 		// IncludeEphemeral here would leak true ephemerals into default ready
 		// work — issueops.getReadyWispsInTx filters them the same way.
-		wispPreds, err := r.buildReadyWorkPredicates(ctx, filter, wispsFilterTables)
+		wispPreds, err := r.buildReadyWorkPredicates(ctx, filter, wispsFilterTables, activeStatuses)
 		if err != nil {
 			return idSrcPage{}, false, err
 		}
