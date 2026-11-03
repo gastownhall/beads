@@ -239,19 +239,17 @@ func TestEmbeddedMemory(t *testing.T) {
 		bdRecallFail(t, bd, dir, "brand-new-slug-memory")
 	})
 
-	// The two refusals that sit either side of the desire path, and the reason
-	// the bare-slug test is `derived != "" && derived == insight` rather than
-	// the shipped `slugify(insight) == insight`: DeriveKey("") is "", so empty
-	// and underivable content satisfies derived == insight and would be routed
-	// into a "recall" of the empty key instead of being refused. The shipped
-	// code was saved from that by an empty-content check that ran BEFORE the
-	// branch; that check belongs to the role now, so the branch has to exclude
-	// the empty key itself.
+	// The two refusals that sit either side of the desire path. Empty,
+	// whitespace and separator-only arguments are not bare keys
+	// (isBareMemoryKey), so they reach the role and get its refusal instead of
+	// being routed into a "recall" of a key nothing could ever store. A lone
+	// dot is the case a dotted-key grammar could get wrong (GH#7275).
 	t.Run("remember_refuses_content_no_key_derives_from", func(t *testing.T) {
 		for _, tc := range []struct{ insight, want string }{
 			{"", "memory content cannot be empty"},
 			{"   ", "memory content cannot be empty"},
 			{"!!!", "could not generate key from content"},
+			{".", "could not generate key from content"},
 		} {
 			out := bdRememberFail(t, bd, dir, tc.insight)
 			if !strings.Contains(out, tc.want) {
