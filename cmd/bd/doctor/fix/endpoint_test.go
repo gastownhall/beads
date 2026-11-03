@@ -102,10 +102,9 @@ func TestServerMetadataReconcileNeverDialsAnUnresolvedPort(t *testing.T) {
 		// A socket-only server is deliberately still refused, as before: the
 		// catalog read stays TCP-only, so bd bootstrap stops at the reconcile
 		// and writes nothing. Its later steps cannot reach a socket-only
-		// server yet (the store's library open ignores metadata.json's
-		// dolt_server_socket, and the jsonl-import, init and restore actions
-		// open an embedded store), so letting the reconcile pass would report
-		// a bootstrap that left the workspace broken.
+		// server yet (the jsonl-import, init and restore actions open an
+		// embedded store), so letting the reconcile pass would report a
+		// bootstrap that left the workspace broken.
 		{name: "unix socket only, still refused", socket: true, refuse: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

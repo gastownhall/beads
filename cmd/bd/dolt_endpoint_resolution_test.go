@@ -825,11 +825,13 @@ func TestDoctorScansReadTheServerTheirFixesWrite(t *testing.T) {
 // fix.ChildParentDependencies, Dependency Keys and fix.DependencyKeys, and
 // Blocked State and fix.RecomputeBlocked. The SQL fixes dial TCP at the port
 // (openFixDB). The Fresh Clone repair opens the store through the library
-// open, which dials BEADS_DOLT_SERVER_SOCKET socket first and never reads
-// metadata.json's dolt_server_socket. The checks dialed the live socket the
-// CLI's store dials, so --fix repaired the server at the port while the
-// check had read the socket's, and Fresh Clone's repair imported
-// issues.jsonl over live rows there (#7874 review). Orphaned Dependencies,
+// open, which dials the socket first, BEADS_DOLT_SERVER_SOCKET else
+// metadata.json's dolt_server_socket, as the CLI's store does. The checks
+// dialed the live socket the CLI's store dials, so --fix repaired the server
+// at the port while the check had read the socket's, and Fresh Clone's repair
+// imported issues.jsonl over live rows there (#7874 review). Once the library
+// open took metadata.json's socket, a Fresh Clone check still dialing TCP
+// beside it read the server at the port while its repair wrote the socket's. Orphaned Dependencies,
 // Child-Parent Dependencies, Dependency Keys and Blocked State still read the
 // store's socket once the first three read the server their repairs write,
 // so their repairs deleted, re-keyed or recomputed rows at the port that the
@@ -913,7 +915,7 @@ func TestDoctorChecksReadTheServerTheirRepairsWrite(t *testing.T) {
 					repair: func() { _ = fix.RecomputeBlocked(repo) }},
 			} {
 				want, other := tcp, socketServer
-				if pair.libraryOpen && tc.inEnv {
+				if pair.libraryOpen {
 					want, other = socketServer, tcp
 				}
 				var users [2][]string // the users the check, then its repair, logged in as
