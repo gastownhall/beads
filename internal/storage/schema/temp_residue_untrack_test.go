@@ -222,3 +222,47 @@ func TestTempResidueUntrackFailuresAfterTheRemovalAreCountedNotFatal(t *testing.
 		})
 	}
 }
+
+// TestTempResidueUntrackReachesAHeadOnlyCursorScratch covers statements, not
+// row restoration: the #4356 cursor heal's scratch table
+// (__temp__ignored_schema_migrations_untrack), committed at HEAD by an older
+// blanket commit while the working set no longer carries it, is a shape the
+// heal's gate cannot see, so it declines. The residue reconcile is then the
+// only repair that reaches it, and it must do so with a CACHED removal only:
+// a DROP TABLE or a forced DOLT_ADD staging a delete would destroy whatever
+// working rows the scratch still holds for the heal. Ordered sqlmock fails
+// any statement nobody primed and failOnSwallowedAdvisory makes the
+// resulting advisory decline fatal, so the expectations below pin the whole
+// repair to the two procedure calls and nothing else.
+func TestTempResidueUntrackReachesAHeadOnlyCursorScratch(t *testing.T) {
+	db, mock := newMockDB(t)
+	failOnSwallowedAdvisory(t)
+
+	// The heal's read-only gate: cursor table not tracked at HEAD, no stray
+	// scratch in the working set, so the heal touches nothing.
+	expectIgnoredCursorGate(mock, "", false, nil, false)
+
+	expectTempResidueUntrackStart(mock, ignoredCursorUntrackTempTable)
+	expectTempResidueRM(mock, ignoredCursorUntrackTempTable).WillReturnRows(sqlmock.NewRows([]string{"status"}))
+	expectTempResidueCommit(mock).WillReturnRows(sqlmock.NewRows([]string{"hash"}))
+
+	ctx := context.Background()
+	healed, err := healTrackedIgnoredCursorTable(ctx, db)
+	if err != nil {
+		t.Fatalf("healTrackedIgnoredCursorTable() error = %v, want nil", err)
+	}
+	if healed {
+		t.Fatal("healTrackedIgnoredCursorTable() reported a heal on a database whose gate it cannot see")
+	}
+
+	untracked, err := untrackTempResidue(ctx, db)
+	if err != nil {
+		t.Fatalf("untrackTempResidue() error = %v, want nil", err)
+	}
+	if !untracked {
+		t.Fatal("untrackTempResidue() reported no repair on a HEAD-only cursor scratch")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}
