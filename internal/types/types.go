@@ -1300,6 +1300,8 @@ type IssueDetails struct {
 	// and a caller checking only `.comments` sees `null`/absent and concludes
 	// "no comments" — both wrong (ga-clgh). Never set alongside a populated
 	// Comments slice or a zero count: a true empty stays plain omission.
+	// Nor when the comment count failed (CommentCount nil): an unknown count
+	// supports no claim that comments were left out (GH#7563).
 	CommentsOmitted *bool `json:"comments_omitted,omitempty"`
 
 	// GatedBy names the gates actively blocking this issue — the derived

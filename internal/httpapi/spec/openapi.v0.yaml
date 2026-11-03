@@ -8342,6 +8342,12 @@ components:
         comment_count:
           type: integer
           format: int64
+          description: >-
+            How many comments this issue has. Absent when the count could not
+            be read, which leaves the rest of the view intact (and
+            `comments_omitted` unset); a present 0 means the count ran and
+            found none, so a consumer must treat absence as unknown rather
+            than as 0.
         gated_by:
           type: array
           description: >-
@@ -8376,7 +8382,9 @@ components:
             True when `comment_count` is nonzero and `comments` was left out —
             every such issue on a request that did not set `include_comments`.
             Without it, an absent `comments` key is ambiguous between "no
-            comments" and "comments not included in this response".
+            comments" and "comments not included in this response". Never set
+            when `comment_count` is absent because the count could not be
+            read: an unknown count establishes nothing either way.
         unresolvable_dependencies:
           type: integer
           format: int64

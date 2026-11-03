@@ -386,6 +386,23 @@ func TestBuildIssueDetails_FailedCountIsAbsentNotZero(t *testing.T) {
 			commentCount:    ptr64(0),
 			dependents:      1,
 		},
+
+		// AC-2: a failed comment count in count-only mode leaves both
+		// comment_count and comments_omitted out. The positive value
+		// beside the error catches a fix that drops the pointer but
+		// still derives the marker from the raw value.
+		{
+			name:            "comment count failed with zero",
+			src:             skewSource{issue: issue, commentCountErr: boom},
+			dependentCount:  ptr64(0),
+			dependencyCount: ptr64(0),
+		},
+		{
+			name:            "comment count failed with positive",
+			src:             skewSource{issue: issue, commentCount: 2, commentCountErr: boom},
+			dependentCount:  ptr64(0),
+			dependencyCount: ptr64(0),
+		},
 	}
 
 	for _, tc := range tests {

@@ -1166,11 +1166,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - `bd show --json` (and the `bd serve` issue detail view) no longer reports
-  `dependent_count` or `dependency_count` as `0` when the query behind the
-  count failed, which read the same as an issue with no dependents or
-  dependencies. A count that could not be read is now left out of the
-  response, and the rest of the issue is still shown; a present `0` means the
-  count ran and found none. Scripts that guard on these counts should treat a
+  `dependent_count`, `dependency_count` or `comment_count` as `0` when the
+  query behind the count failed, which read the same as an issue with no
+  dependents, dependencies or comments. A count that could not be read is now
+  left out of the response, and the rest of the issue is still shown; a
+  present `0` means the count ran and found none. A failed comment count also
+  no longer decides `comments_omitted`: the marker is left unset, and with
+  `--include-comments` the comments are listed without a contradicting
+  `"comment_count": 0`. Scripts that guard on these counts should treat a
   missing key as unknown, not as `0`, for example
   `.dependent_count // error("dependent_count unavailable")` in jq (#7563,
   reported by @A3Ackerman).
