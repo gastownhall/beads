@@ -401,11 +401,12 @@ type Config struct {
 	// or a foreign-project lookup. Only a classified-read open is eligible for
 	// the lazy defer-wake sweep (be-vbhpf) — the others must never mutate.
 	//
-	// Strict --readonly and preview are excluded by the policy expression that
-	// computes this field; foreign-project and auxiliary opens are excluded
-	// because they construct their own Config and leave this at its false zero
-	// value. That default is the guarantee — setting it true on such an open
-	// would make it eligible to sweep.
+	// Strict --readonly, preview, and an active migration freeze (bd-6zf0q5)
+	// are excluded by the policy expression that computes this field
+	// (classifiedReadOpen in cmd/bd); foreign-project and auxiliary opens are
+	// excluded because they construct their own Config and leave this at its
+	// false zero value. That default is the guarantee — setting it true on
+	// such an open would make it eligible to sweep.
 	ClassifiedRead bool
 
 	// RequireReadableSchema makes an open that will not migrate the database

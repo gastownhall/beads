@@ -54,6 +54,7 @@ go_library(
         "branch.go",
         "capability_registry.go",
         "children.go",
+        "classified_read.go",
         "cleanup.go",
         "close.go",
         "close_direct.go",

@@ -88,10 +88,10 @@ func (s *DoltStore) SearchIssuesWithCounts(ctx context.Context, query string, fi
 // readOnly/classifiedRead flags may run the lazy defer-wake sweep. A
 // classified-read open (GH#804: bd ready/bd list are read-only for the
 // CURRENT project) is eligible despite readOnly=true because the store is
-// genuinely writable underneath; strict --readonly, preview, and
-// foreign-project opens are not (be-vbhpf).
+// genuinely writable underneath; strict --readonly, preview, frozen
+// (migration freeze, bd-6zf0q5), and foreign-project opens are not (be-vbhpf).
 //
-// Only the strict --readonly and preview cases are decided here, by
+// Only the strict --readonly, preview, and freeze cases are decided here, by
 // classifiedRead being false. Foreign-project and other auxiliary opens are
 // excluded one layer up: they build their own dolt.Config literals and never
 // set ClassifiedRead, so they reach this guard already fail-closed. Do not
