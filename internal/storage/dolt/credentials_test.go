@@ -18,6 +18,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
+	"github.com/steveyegge/beads/internal/storage/peercred"
 	"github.com/steveyegge/beads/internal/testutil"
 )
 
@@ -564,12 +565,13 @@ func TestEncryptDecryptRoundTrip(t *testing.T) {
 
 	password := "my-federation-password-123!"
 
-	encrypted, err := store.encryptPassword(password)
+	binding := peerBinding(&storage.FederationPeer{Name: "team", RemoteURL: "https://peer.example/db", Username: "peeruser"})
+	encrypted, err := store.encryptPassword(password, binding)
 	if err != nil {
 		t.Fatalf("encryptPassword failed: %v", err)
 	}
 
-	decrypted, err := store.decryptPassword(encrypted)
+	decrypted, err := store.decryptPassword(encrypted, binding)
 	if err != nil {
 		t.Fatalf("decryptPassword failed: %v", err)
 	}
@@ -582,7 +584,7 @@ func TestEncryptDecryptRoundTrip(t *testing.T) {
 func TestEncryptPasswordEmpty(t *testing.T) {
 	store := &DoltStore{}
 
-	encrypted, err := store.encryptPassword("")
+	encrypted, err := store.encryptPassword("", peerBinding(&storage.FederationPeer{Name: "team"}))
 	if err != nil {
 		t.Fatalf("encryptPassword with empty string failed: %v", err)
 	}
@@ -594,7 +596,7 @@ func TestEncryptPasswordEmpty(t *testing.T) {
 func TestDecryptPasswordEmpty(t *testing.T) {
 	store := &DoltStore{}
 
-	decrypted, err := store.decryptPassword(nil)
+	decrypted, err := store.decryptPassword(nil, peerBinding(&storage.FederationPeer{Name: "team"}))
 	if err != nil {
 		t.Fatalf("decryptPassword with nil failed: %v", err)
 	}
@@ -606,7 +608,7 @@ func TestDecryptPasswordEmpty(t *testing.T) {
 func TestEncryptPasswordNoKey(t *testing.T) {
 	store := &DoltStore{}
 
-	_, err := store.encryptPassword("password")
+	_, err := store.encryptPassword("password", peerBinding(&storage.FederationPeer{Name: "team"}))
 	if err == nil {
 		t.Fatal("expected error when key is not initialized")
 	}
@@ -898,9 +900,13 @@ func TestFederationPeerDecryptKeyMismatchNamesTheLocalKey(t *testing.T) {
 		localKey[i] = byte(i + 1)
 	}
 
-	encrypted, err := encryptWithKey("peerpass", writerKey)
+	// A v2 blob sealed for this row under the writer machine's key: the
+	// binding matches, so the open isolates the key mismatch.
+	encrypted, err := peercred.Seal("peerpass", writerKey, peercred.Binding{
+		Name: "team", URL: "https://peer.example/peerdb", Username: "peeruser",
+	})
 	if err != nil {
-		t.Fatalf("encryptWithKey() error = %v", err)
+		t.Fatalf("peercred.Seal() error = %v", err)
 	}
 
 	// beadsDir is set only so the enrichment can resolve the key path it names;
@@ -939,8 +945,9 @@ func TestFederationPeerDecryptKeyMismatchNamesTheLocalKey(t *testing.T) {
 		"stored peer credentials cannot be decrypted with this machine's credential key " +
 			"(the key file " + filepath.Join(beadsDir, credentialKeyFile) + " is machine-local and does not replicate with the database); " +
 			"re-run 'bd federation add-peer <name> <url> --user <user>' on this machine",
-		// The cipher error stays wrapped, so the raw cause is still readable.
-		"cipher: message authentication failed",
+		// The authentication error stays wrapped, so the raw cause is still
+		// readable: this row's identity matches, so the failure is the key.
+		"peer credential failed authentication: it does not match this peer row's identity or this machine's credential key",
 	}
 
 	assertMismatch := func(t *testing.T, err error) {

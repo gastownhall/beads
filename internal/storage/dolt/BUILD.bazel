@@ -101,6 +101,7 @@ go_library(
         "//internal/storage/issueops",
         "//internal/storage/kvkeys",
         "//internal/storage/memoryops",
+        "//internal/storage/peercred",
         "//internal/storage/schema",
         "//internal/storage/sqlbuild",
         "//internal/storage/versioncontrolops",

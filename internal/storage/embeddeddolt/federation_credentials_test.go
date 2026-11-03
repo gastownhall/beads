@@ -469,7 +469,7 @@ func TestDecryptPassword_KeyMismatchNamesTheLocalKey(t *testing.T) {
 func TestDecryptPassword_ShortCiphertextClassifiesAsKeyMismatch(t *testing.T) {
 	store := newPeerAuthTestStore(t)
 
-	_, err := store.decryptPassword([]byte("short"))
+	_, err := store.decryptPassword([]byte("v2:short"), peerBinding(&storage.FederationPeer{Name: "team"}))
 	if err == nil {
 		t.Fatal("decryptPassword succeeded, want short-ciphertext failure")
 	}
