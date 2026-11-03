@@ -8326,9 +8326,19 @@ components:
         dependency_count:
           type: integer
           format: int64
+          description: >-
+            How many dependency edges this issue has. Absent when the count
+            could not be read, which leaves the rest of the view intact; a
+            present 0 means the count ran and found none, so a consumer must
+            treat absence as unknown rather than as 0.
         dependent_count:
           type: integer
           format: int64
+          description: >-
+            How many issues depend on this one. Absent when the count could
+            not be read, which leaves the rest of the view intact; a present 0
+            means the count ran and found none, so a consumer must treat
+            absence as unknown rather than as 0.
         comment_count:
           type: integer
           format: int64

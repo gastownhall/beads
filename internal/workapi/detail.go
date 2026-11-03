@@ -106,7 +106,8 @@ func GetIssueOrWisp(ctx context.Context, src DetailSource, id string) (*types.Is
 //
 // Labels, dependencies, and counts are best effort, matching what both CLI
 // paths have always shipped: a detail view missing an edge list still beats
-// refusing to show the issue. The opt-in row streams are not best effort,
+// refusing to show the issue. A count whose query failed is omitted, never
+// published as a value, so a present count (zero included) is one that ran. The opt-in row streams are not best effort,
 // because a caller that asked for the rows gets a truthful answer or an
 // error rather than a silently short list.
 func BuildIssueDetails(ctx context.Context, src DetailSource, issue *types.Issue, isWisp bool, opts DetailOptions) (*types.IssueDetails, error) {
@@ -132,10 +133,19 @@ func BuildIssueDetails(ctx context.Context, src DetailSource, issue *types.Issue
 	// residual and is why this is an ordering mitigation rather than a fix —
 	// only a shared snapshot or a direct count of unresolvable edges closes
 	// it (be-lpi).
+	//
+	// A count whose query failed is left unset rather than published: the
+	// value that comes back beside the error means nothing, and a published 0
+	// reads as "none" to every caller guarding on it (GH#7563). Absent is
+	// "unknown"; a present 0 is a count that ran and found nothing.
 	dependentCount, dependentCountErr := src.CountDependents(ctx, id, isWisp)
-	details.DependentCount = &dependentCount
+	if dependentCountErr == nil {
+		details.DependentCount = &dependentCount
+	}
 	dependencyCount, dependencyCountErr := src.CountDependencies(ctx, id, isWisp)
-	details.DependencyCount = &dependencyCount
+	if dependencyCountErr == nil {
+		details.DependencyCount = &dependencyCount
+	}
 	commentCount, _ := src.CountComments(ctx, id, isWisp)
 	details.CommentCount = &commentCount
 

@@ -1165,6 +1165,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd show --json` (and the `bd serve` issue detail view) no longer reports
+  `dependent_count` or `dependency_count` as `0` when the query behind the
+  count failed, which read the same as an issue with no dependents or
+  dependencies. A count that could not be read is now left out of the
+  response, and the rest of the issue is still shown; a present `0` means the
+  count ran and found none. Scripts that guard on these counts should treat a
+  missing key as unknown, not as `0`, for example
+  `.dependent_count // error("dependent_count unavailable")` in jq (#7563,
+  reported by @A3Ackerman).
 - `bd create --file` and other batch creates no longer fail with "issue
   already exists" on an id bd generated itself. The batch chose every id
   before it wrote any row, so two of its items could be handed the same short
