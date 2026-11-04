@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/storage"
 )
 
 var backupCmd = &cobra.Command{
@@ -51,9 +52,11 @@ Auto-backup default:
 
 type backupSizeFunc func(context.Context) (bytes int64, available bool, err error)
 
-var backupStatusCmd = newBackupStatusCommand(doltBackupSize)
+type backupListFunc func(context.Context) (destinations []storage.BackupDestination, available bool, err error)
 
-func newBackupStatusCommand(sizeDatabase backupSizeFunc) *cobra.Command {
+var backupStatusCmd = newBackupStatusCommand(doltBackupSize, doltBackupDestinations)
+
+func newBackupStatusCommand(sizeDatabase backupSizeFunc, listBackups backupListFunc) *cobra.Command {
 	return &cobra.Command{
 		Use:           "status",
 		Short:         "Show last backup status",
@@ -85,11 +88,19 @@ func newBackupStatusCommand(sizeDatabase backupSizeFunc) *cobra.Command {
 			if err != nil {
 				return HandleErrorRespectJSON("measure database size: %v", err)
 			}
+			destinations, listed, err := listBackups(cmd.Context())
+			if err != nil {
+				return HandleErrorRespectJSON("list backup destinations: %v", err)
+			}
 
 			if jsonOutput {
+				dolt := showDoltBackupStatusJSON()
+				if listed {
+					dolt["destinations"] = showBackupDestinationsJSON(destinations)
+				}
 				result := map[string]interface{}{
 					"backup":   state,
-					"dolt":     showDoltBackupStatusJSON(),
+					"dolt":     dolt,
 					"size_cap": showSizeCapStatusJSON(dir),
 				}
 				if sizeAvailable {
@@ -104,7 +115,7 @@ func newBackupStatusCommand(sizeDatabase backupSizeFunc) *cobra.Command {
 			}
 
 			hasBackup := state.LastDoltCommit != ""
-			hasDolt := false
+			hasDolt := len(destinations) > 0
 			if cfg, _ := loadDoltBackupConfig(); cfg != nil {
 				hasDolt = true
 			}
@@ -142,6 +153,7 @@ func newBackupStatusCommand(sizeDatabase backupSizeFunc) *cobra.Command {
 
 			// Show Dolt backup info
 			showDoltBackupStatus()
+			showBackupDestinations(destinations)
 
 			// Show database size when the active backend can measure it locally.
 			if sizeAvailable {

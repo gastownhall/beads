@@ -2061,6 +2061,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rolled-back ID. When the transaction rolled back they are now empty again;
   an error wrapping `storage.ErrCommitIndeterminate` keeps them. `bd create`
   was not affected.
+- **`bd backup status` lists every Dolt backup destination** (#5209). It
+  read only what `bd backup init` saved, so a destination registered under
+  another name, such as auto-backup's `backup_export`, was reported as
+  `"configured": false` and "No backup has been performed yet." while it was
+  being synced. Status now lists each registered destination by name and URL
+  (`dolt.destinations` in `--json`, credentials left out). `configured` still
+  means a `bd backup init` destination, the one `bd backup sync` pushes to.
 
 - **bd again reads `GT_ROOT` from a rig's `.beads/.env`** (#8117; also
   shipped in 1.3.4). `gc rig add` writes the city root there, and the
