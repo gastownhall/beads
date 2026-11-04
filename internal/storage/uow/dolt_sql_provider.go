@@ -333,11 +333,11 @@ func (p *doltSQLProvider) initSchemaAttempt(ctx context.Context, database string
 	// path refuses it (dolt store, embeddeddolt, team server): MigrateUp reads
 	// "cursor >= latest" as nothing to do, so without this an older bd reads
 	// and writes a newer schema with no warning. The check runs on whichever
-	// path MigrateUpWithLock takes: inside the gate on the locked path, after
-	// the shared-store check (which finds nothing pending on an ahead database
-	// and passes it), so the refusal lands before MigrateUp's first write, and
-	// after the call on the
-	// converged fast path, which writes nothing and never reaches the gate.
+	// path MigrateUpWithLock takes. On the locked path it runs inside the gate,
+	// after the shared-store check (which finds nothing pending on an ahead
+	// database and passes it), so the refusal lands before MigrateUp's first
+	// write. On the converged fast path, which writes nothing and never reaches
+	// the gate, it runs after the call.
 	forwardDriftChecked := false
 	if _, err := migrateUpWithLock(ctx, conn, database,
 		schema.WithDatabaseSelector(selectProbeDatabase),
