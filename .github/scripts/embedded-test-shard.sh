@@ -38,7 +38,10 @@ MANIFEST="${BEADS_TEST_SHARD_MANIFEST:-.github/scripts/embedded-cmd-test-shards.
 # test gated on BEADS_TEST_EMBEDDED_DOLT runs in this lane or in none, wherever
 # it lives. scripts/embedded_lane_coverage_test.go fails on a gated test this
 # selection misses.
-ALL_TESTS=$(grep -rh '^func TestEmbedded' cmd/bd/*_test.go \
+# No -r: the operands are files, and BSD grep -r skips the symlinks Bazel
+# runfiles hold them as, which would leave ALL_TESTS empty and stop the
+# script under set -e with no output.
+ALL_TESTS=$(grep -h '^func TestEmbedded' cmd/bd/*_test.go \
   | sed 's/func \(TestEmbedded[A-Za-z0-9_]*\).*/\1/' \
   | sort -u)
 
@@ -47,12 +50,14 @@ if [ -z "$ALL_TESTS" ]; then
   exit 1
 fi
 
-declare -A ALL_TEST_SET=()
+# No associative arrays: Bazel runs this under the host bash, which is 3.2 on
+# macOS. Test names are identifiers, so each discovered test sets _test_<name>
+# and each manifest entry _shard_<name>, read back with ${!var}.
 while IFS= read -r name; do
-  ALL_TEST_SET["$name"]=1
+  printf -v "_test_$name" 1
 done <<< "$ALL_TESTS"
 
-declare -A MANIFEST_SHARDS=()
+MANIFEST_NAMES=()
 if [ -f "$MANIFEST" ]; then
   while IFS= read -r line || [ -n "$line" ]; do
     line="${line%%#*}"
@@ -71,16 +76,19 @@ if [ -f "$MANIFEST" ]; then
       echo "Invalid shard ${manifest_shard}/${manifest_total} for $test_name in $MANIFEST" >&2
       exit 1
     fi
-    if [ -n "${MANIFEST_SHARDS[$test_name]:-}" ]; then
+    shard_var="_shard_$test_name"
+    if [ -n "${!shard_var:-}" ]; then
       echo "Duplicate shard manifest entry for $test_name in $MANIFEST" >&2
       exit 1
     fi
-    MANIFEST_SHARDS["$test_name"]="$manifest_shard"
+    printf -v "$shard_var" %s "$manifest_shard"
+    MANIFEST_NAMES+=("$test_name")
   done < "$MANIFEST"
 fi
 
-for name in "${!MANIFEST_SHARDS[@]}"; do
-  if [ -z "${ALL_TEST_SET[$name]:-}" ]; then
+for name in ${MANIFEST_NAMES[@]+"${MANIFEST_NAMES[@]}"}; do
+  test_var="_test_$name"
+  if [ -z "${!test_var:-}" ]; then
     echo "Shard manifest entry does not match a discovered test: $name" >&2
     exit 1
   fi
@@ -90,7 +98,8 @@ SHARD_TESTS=()
 MANIFEST_COUNT=0
 FALLBACK_COUNT=0
 while IFS= read -r name; do
-  assigned_shard="${MANIFEST_SHARDS[$name]:-}"
+  shard_var="_shard_$name"
+  assigned_shard="${!shard_var:-}"
   if [ -n "$assigned_shard" ]; then
     if (( assigned_shard == SHARD_NUMBER )); then
       SHARD_TESTS+=("$name")

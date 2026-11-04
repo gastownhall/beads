@@ -1081,7 +1081,7 @@ func TestServerStorageShardScriptRunsPrebuiltBinaryFromPackageDir(t *testing.T) 
 		return -1
 	}
 
-	discoveryIndex := indexOfContains(`grep -rh '^func Test' internal/storage/dolt/*_test.go`)
+	discoveryIndex := indexOfContains(`grep -h '^func Test' internal/storage/dolt/*_test.go`)
 	if discoveryIndex < 0 {
 		t.Fatal("could not find repo-root-relative test-discovery grep line")
 	}
