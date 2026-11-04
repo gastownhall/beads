@@ -238,3 +238,59 @@ func TestNewDoltServerUOWProvider_AdoptsReplacementProxy(t *testing.T) {
 		"recovery must adopt the running replacement, not spawn a second proxy")
 	require.True(t, afterAdopt.BackendRunning, "the supervised backend must still be running after adoption")
 }
+
+// TestNewDoltServerUOWProvider_ConstructionNeverRediscovers is AC-3: a
+// provider under construction gets its own retries and errors — no
+// rediscovery behind the constructor's back — and only a construction that
+// succeeds arms recovery. The first half stops the fresh proxy while the
+// constructor is still dialing and pins that the failure is the historical
+// one (raw, unclassified, nothing respawned by construction retries); the
+// second half constructs again successfully and proves that THAT provider
+// recovers a proxy exit.
+func TestNewDoltServerUOWProvider_ConstructionNeverRediscovers(t *testing.T) {
+	f := newRecoveryFixture(t)
+
+	// Kill the proxy as soon as the constructor's GetCreate has published
+	// one, so the construction dials that follow race only against a
+	// proxy that is already gone.
+	stopped := make(chan struct{})
+	stopperDone := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		defer close(stopperDone)
+		deadline := time.Now().Add(2 * time.Minute)
+		for time.Now().Before(deadline) {
+			if proxy.ReadStatus(f.root).ProxyRunning {
+				_ = proxy.Shutdown(f.root)
+				return
+			}
+			select {
+			case <-time.After(20 * time.Millisecond):
+			}
+		}
+	}()
+	t.Cleanup(func() { <-stopperDone })
+
+	_, err := f.openE(5 * time.Minute)
+	<-stopped
+	require.Error(t, err, "construction must fail when its proxy died")
+	require.NotContains(t, err.Error(), "proxy endpoint unavailable",
+		"a construction failure keeps its historical shape; recovery is unarmed until the open succeeds: %v", err)
+	require.ErrorContains(t, err, "uow:", "the historical construction error wrapper")
+
+	// Nothing respawned the proxy while construction was retrying: only
+	// the constructor's explicit GetCreate — which the stopper's Shutdown
+	// already retired — may start one.
+	st := f.waitForProxyStopped(2 * time.Second)
+	require.False(t, st.ProxyRunning, "no construction retry may respawn the proxy")
+
+	// Successful construction arms recovery: on a build without recovery
+	// (AC-1), this second half is the red one.
+	provider := f.open(5 * time.Minute)
+	if err := f.read(provider); err != nil {
+		t.Fatalf("read after successful construction: %v", err)
+	}
+	require.NoError(t, proxy.Shutdown(f.root))
+	f.waitForProxyStopped(5 * time.Second)
+	f.mustRecoverRead(provider, 60*time.Second)
+}

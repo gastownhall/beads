@@ -127,6 +127,32 @@ func dialCtx() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), 5*time.Second)
 }
 
+// TestEndpointResolver_UnarmedNeverDiscovers is AC-3: a construction dial
+// that fails gets its error unchanged and no rediscovery, because the
+// constructor owns its own retries and errors — arming happens only after
+// the open succeeds.
+func TestEndpointResolver_UnarmedNeverDiscovers(t *testing.T) {
+	secret := "6464646464646464646464646464646464646464646464646464646464646464"
+	// A dead endpoint: the listener is closed, so dials are refused the way
+	// an idle-exited proxy's port is.
+	dead := Endpoint{Host: "127.0.0.1", Port: freePortOrZero(t)}
+	r := newTestResolver(t, secret, dead)
+	discover, calls := recordingDiscover(func(int) (Endpoint, error) {
+		t.Error("unarmed dial ran discovery")
+		return Endpoint{}, nil
+	})
+	r.discover = discover
+	// Deliberately NOT armed.
+
+	ctx, cancel := dialCtx()
+	defer cancel()
+	_, err := r.DialContext(ctx, "bdproxy", dead.Address())
+	require.Error(t, err)
+	require.False(t, IsEndpointUnavailable(err), "an unarmed failure is the caller's own error")
+	require.ErrorIs(t, err, syscall.ECONNREFUSED, "the raw dial refusal must survive unchanged")
+	require.EqualValues(t, 0, calls.Load())
+}
+
 // TestEndpointResolver_RefusedDialRediscoversAndRedials is the core recovery
 // shape (AC-1, resolver level): a refused dial at generation g starts one
 // discovery, which publishes a replacement endpoint, and the same dial
