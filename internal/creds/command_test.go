@@ -171,3 +171,52 @@ func TestCredentialCommandFixtureProtocol(t *testing.T) {
 		t.Fatalf("credential command marker = %q, want invoked", got)
 	}
 }
+
+// TestAllowedProjectEnvKeyRefusesExecutableAndBearerSettings pins what a
+// project .beads/.env must never supply beyond the exact command list: a
+// setting whose name marks it as executable (a *_COMMAND, *_BIN or *_BINARY
+// key, matched by suffix so a command setting added later is refused without
+// anyone extending CommandEnvKeys); the http backend's bearer token, which
+// outranks every credential source the caller configured; the plaintext grant
+// that lets that bearer cross the network in the clear; and the token file
+// that decides which bearers bd serve accepts. The documented per-project Dolt
+// passwords (GH#2520) and ordinary BEADS_*/BD_* settings, including ones that
+// merely contain COMMAND or TOKEN, stay admitted.
+func TestAllowedProjectEnvKeyRefusesExecutableAndBearerSettings(t *testing.T) {
+	const (
+		commandReason    = "command settings must come from your shell environment or user config"
+		credentialReason = "credential settings must come from your shell environment or user config"
+		targetReason     = "credential target settings must come from your shell environment or user config"
+	)
+	for _, tc := range []struct {
+		key    string
+		ok     bool
+		reason string
+	}{
+		{key: "BEADS_DOLT_PASSWORD_COMMAND", reason: commandReason},
+		{key: "BEADS_EXAMPLE_HELPER_COMMAND", reason: commandReason},
+		{key: "BD_EXAMPLE_COMMAND", reason: commandReason},
+		{key: "beads_example_command", reason: commandReason},
+		{key: " Bd_Example_Command ", reason: commandReason},
+		{key: "BEADS_EXAMPLE_BIN", reason: commandReason},
+		{key: "BD_EXAMPLE_BINARY", reason: commandReason},
+		{key: "BEADS_HTTP_TOKEN", reason: credentialReason},
+		{key: "beads_http_token", reason: credentialReason},
+		{key: "BEADS_HTTP_ALLOW_INSECURE", reason: targetReason},
+		{key: "BEADS_SERVE_TOKEN_FILE", reason: targetReason},
+		{key: "BEADS_DOLT_PASSWORD", ok: true},
+		{key: "DOLT_REMOTE_PASSWORD", ok: true},
+		{key: "GT_ROOT", ok: true},
+		{key: "BEADS_ACTOR", ok: true},
+		{key: "BEADS_HTTP_RESPONSE_HEADER_TIMEOUT", ok: true},
+		{key: "BEADS_COMMAND_TIMEOUT", ok: true},
+		{key: "BD_TOKEN_BUDGET", ok: true},
+	} {
+		t.Run(tc.key, func(t *testing.T) {
+			ok, reason := AllowedProjectEnvKey(tc.key)
+			if ok != tc.ok || reason != tc.reason {
+				t.Errorf("AllowedProjectEnvKey(%q) = (%v, %q), want (%v, %q)", tc.key, ok, reason, tc.ok, tc.reason)
+			}
+		})
+	}
+}
