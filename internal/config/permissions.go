@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"runtime"
+
+	"github.com/steveyegge/beads/internal/remedy"
 )
 
 const (
@@ -29,7 +32,11 @@ func CheckBeadsDirPermissions(path string) {
 	}
 	perm := info.Mode().Perm()
 	if perm&0077 != 0 {
-		fmt.Fprintf(os.Stderr, "Warning: %s has permissions %04o (recommended: 0700). Run: chmod 700 %s\n", path, perm, path)
+		// The path is named and passed to chmod through the remedy printer:
+		// one shell word, and a <path> placeholder when no quoting passes it
+		// on unchanged (internal/remedy).
+		arg, note := remedy.CommandArg(runtime.GOOS, path, "<path>")
+		fmt.Fprintf(os.Stderr, "Warning: %s has permissions %04o (recommended: 0700). Run: chmod 700 %s%s\n", remedy.PrintedValue(path), perm, arg, note)
 	}
 }
 

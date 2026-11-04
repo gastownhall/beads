@@ -90,8 +90,11 @@ import (
 //     built by this phase — so there is nothing yet for a case to run
 //     against. FR-4 has no dedicated case here for that reason, not because
 //     it was missed.
-//   - FR-8 (`wisps.current_revision`/`wisps.participation_generation` are
-//     never read or written by this phase). None of this fixture's five
+//   - FR-8 (`wisps.current_revision` is never read or written by this
+//     phase, and `wisps.participation_generation` only carries a demoted
+//     row's participation to its move back out, which
+//     dualwrite_participation_generation_contract.go's round-trip cases
+//     pin). None of this fixture's five
 //     closures can express it: Mutate's front door is CreateIssue against
 //     the issues table, so this fixture has no wisp-routed id to check in
 //     the first place. FR-8 is a routing exclusion, not a property of a

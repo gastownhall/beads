@@ -90,8 +90,25 @@ orchestration layer.
 introspection, storage-specific retry or crash-recovery logic, or public SDK
 return types that leak driver internals. If the boundary is too narrow, widen
 the interface or route the issue to the driver instead of patching around it
-in beads. `bd doctor` support for embedded mode is enabled one subcommand at a
-time, each human-vetted (GH#3794): do not lift the embedded-mode gate in
+in beads. One maintainer-granted exception: `databaseLocked` in
+`internal/doltserver` takes a shared, non-blocking lock on Dolt's own
+`.dolt/noms/LOCK` and releases it at once (it never creates or writes the
+file), only to decide whether the workspace's Dolt database directory (the
+store's CLI directory: `.beads/dolt/<db>` by default, or `<db>` under a
+custom `dolt_data_dir` or under the shared server's data directory) is served
+by a live dolt process, so bd runs the dolt CLI there only for a served
+directory. A busy lock (another process holds it, as every dolt process with
+the database open does) counts as served. A probe
+that cannot open the file, or whose lock call fails for any other reason,
+counts as not served, which sends bd through the SQL server (the safe
+direction). The exception ends once the Dolt driver can report whether a
+directory is served, and covers no other lock (the test-only
+`testutil.HoldDoltDatabaseLock` is outside it). The same proof also reads
+Dolt's `.dolt/sql-server.info` for the port and PID it names, as the dolt CLI
+does, the way bd already reads the remotes in Dolt's repo state file
+(`PersistedRemoteInfos`). `bd doctor` support for
+embedded mode is enabled one subcommand at a time, each human-vetted
+(GH#3794): do not lift the embedded-mode gate in
 `cmd/bd/doctor.go` wholesale, and keep database-layer checks and fixes
 server-gated until the driver interface covers them.
 

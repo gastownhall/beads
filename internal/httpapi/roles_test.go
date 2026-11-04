@@ -15,6 +15,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/workapi"
 	"github.com/steveyegge/beads/issueops"
 	"github.com/steveyegge/beads/memoryops"
 )
@@ -891,7 +892,8 @@ type roleSettings struct {
 	// sent", which is the role's own promise for every key this plane accepts;
 	// a case that wants to prove the response carries the STORED value rather
 	// than the request sets it.
-	stored string
+	stored        string
+	validateWrite bool
 
 	mu     sync.Mutex
 	gets   []issueops.GetSettingRequest
@@ -922,6 +924,13 @@ func (c *roleSettings) SetSetting(_ context.Context, req issueops.SetSettingRequ
 	c.mu.Unlock()
 	if c.writeErr != nil {
 		return issueops.SetSettingResult{}, c.writeErr
+	}
+	if c.validateWrite {
+		v, err := workapi.ValidateSettingWrite(req.Key, req.Value)
+		if err != nil {
+			return issueops.SetSettingResult{}, err
+		}
+		return issueops.SetSettingResult{Key: req.Key, Value: v}, nil
 	}
 	value := req.Value
 	if c.stored != "" {

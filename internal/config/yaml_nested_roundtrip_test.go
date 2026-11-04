@@ -410,6 +410,96 @@ func TestUnsetRemovesADottedKeyInEveryShape(t *testing.T) {
 			key:       "dolt.host",
 			survivors: map[string]string{"other.dolt.host": "should-survive"},
 		},
+		{
+			// The key's own section spelled as a list of mappings. A dotted key
+			// names mappings only, so nothing here is dolt.host, but the walk never
+			// saw the `- ` line, read the item's `host:` as the section's direct
+			// child, and commented it out with a success exit (mc-2nfr1).
+			name: "section spelled as a list of mappings",
+			seed: "dolt:\n  - port: 3307\n    host: 10.0.0.1\n  - port: 3308\n    host: 10.0.0.2\n",
+			key:  "dolt.host",
+		},
+		{
+			// YAML lets the list sit at the section's own indentation.
+			name: "section spelled as a list at its own indentation",
+			seed: "dolt:\n- port: 3307\n  host: 10.0.0.1\n",
+			key:  "dolt.host",
+		},
+		{
+			// A key yamlKeyOnLine cannot read is a subtree of its own, so the
+			// host under it is not dolt.host. As the section's first child it
+			// used to bypass the walk, which commented out that host and left
+			// the real one live.
+			name:      "unreadable key as the section's first child",
+			seed:      "dolt:\n  \"weird key\":\n    host: keep\n  host: target\n",
+			key:       "dolt.host",
+			survivors: map[string]string{"dolt.weird key.host": "keep"},
+		},
+		{
+			// The same for an explicit key: the host under `? complex` and its
+			// `:` belongs to that entry.
+			name:      "explicit key as the section's first child",
+			seed:      "dolt:\n  ? complex\n  :\n    host: wrong\n  host: x\n",
+			key:       "dolt.host",
+			survivors: map[string]string{"dolt.complex.host": "wrong"},
+		},
+		{
+			// A list nested in a section the key does not own must not end the
+			// skip over that section: the leaf name after it is still other.host.
+			name:      "list inside a section the key does not own",
+			seed:      "dolt:\n  other:\n    list:\n    - a\n    host: keep\n",
+			key:       "dolt.host",
+			survivors: map[string]string{"dolt.other.host": "keep"},
+		},
+		{
+			// Blank lines and comments declare no key either, but they are not
+			// content: the key beneath them is still the target.
+			name: "blank line and comment between the section and the key",
+			seed: "sync:\n\n# where bd pushes\n    remote: \"file:///origin.git\"\n",
+			key:  "sync.remote",
+		},
+		{
+			// A comment that itself holds " #" is still only a comment. It was
+			// read as content up to that " #", so the skip it armed hid the
+			// target while the unset reported it was never set.
+			name: "comment naming an issue between the section and the key",
+			seed: "sync:\n# where bd pushes (see #12)\n    remote: \"file:///origin.git\"\n",
+			key:  "sync.remote",
+		},
+		{
+			// An anchor or a tag alone on its line declares no key either, but it
+			// decorates the section's own mapping beneath it, so the key under it
+			// is the target. Skipping it as a subtree left dolt.host live while
+			// the unset reported it was never set.
+			name: "anchor alone on the line under the section",
+			seed: "dolt:\n  &a\n    host: kill-me\n",
+			key:  "dolt.host",
+		},
+		{
+			name: "tag alone on the line under the section",
+			seed: "dolt:\n  !!map\n    host: kill-me\n",
+			key:  "dolt.host",
+		},
+		{
+			// A node may carry an anchor and a tag at once.
+			name: "anchor and tag together on the line under the section",
+			seed: "dolt:\n  &a !!map\n    host: kill-me\n",
+			key:  "dolt.host",
+		},
+		{
+			// A tab sets a comment off as well as a space does.
+			name: "anchor and a tab-separated comment under the section",
+			seed: "dolt:\n  &a\t# shared\n    host: kill-me\n",
+			key:  "dolt.host",
+		},
+		{
+			// yaml.v3 accepts a quoted value continued at column 0. That line
+			// declares no key, and it must not hide the target that follows it.
+			name:      "quoted value continued at column 0 before the target",
+			seed:      "dolt:\n  note: \"line one\nline two\"\n  host: kill-me\n",
+			key:       "dolt.host",
+			survivors: map[string]string{"dolt.note": "line one line two"},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -447,6 +537,12 @@ func TestUnsetRemovesADottedKeyInEveryShape(t *testing.T) {
 			// stated contract, so it must still be visible — commented.
 			if wasSet && !strings.Contains(string(body), leaf+":") {
 				t.Errorf("unset removed the key instead of commenting it out:\n%s", body)
+			}
+			// A key that was never set leaves nothing to comment out. Checked on
+			// the text because a key inside a list item has no dotted spelling
+			// the survivors below could read it back by.
+			if !wasSet && string(body) != tc.seed {
+				t.Errorf("unset of a key that was never set edited the file:\n%s", body)
 			}
 			// Anything the unset was not asked about is none of its business.
 			for key, want := range tc.survivors {
@@ -496,8 +592,12 @@ func TestUnsetRefusesShapesItCannotEdit(t *testing.T) {
 		// Only a comment, an anchor or a tag after the colon still leaves the
 		// value to the lines beneath.
 		{name: "trailing comment on a mapping-valued key", seed: "backup:  # note\n  enabled: false\n", key: "backup", want: "lines beneath it"},
+		// The comment may itself hold " #"; it is still only a comment.
+		{name: "trailing comment naming an issue on a mapping-valued key", seed: "backup:  # see #12\n  enabled: false\n", key: "backup", want: "lines beneath it"},
 		{name: "anchored mapping-valued key", seed: "base: &b\n  c: 1\n", key: "base", want: "lines beneath it"},
 		{name: "anchored mapping-valued key with a comment", seed: "base: &b  # shared\n  c: 1\n", key: "base", want: "lines beneath it"},
+		// A tab sets the comment off as well as a space does.
+		{name: "anchored mapping-valued key with a tab-separated comment", seed: "base: &b\t# shared\n  c: 1\n", key: "base", want: "lines beneath it"},
 		// A tag alone after the colon still leaves the value below.
 		{name: "tagged mapping-valued key", seed: "m: !!map\n  a: 1\n", key: "m", want: "lines beneath it"},
 		// A single-segment key's block scalar is refused like a dotted one's:

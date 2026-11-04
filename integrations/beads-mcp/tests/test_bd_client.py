@@ -1,5 +1,6 @@
 """Unit tests for BdClient."""
 
+import contextlib
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -193,8 +194,7 @@ async def test_ready_with_issue_type(bd_client, mock_process):
     assert issues[0].issue_type == "bug"
     # Verify --type flag was passed to CLI
     call_args = mock_exec.call_args[0]
-    assert "--type" in call_args
-    assert call_args[call_args.index("--type") + 1] == "bug"
+    assert "--type=bug" in call_args
 
 
 @pytest.mark.asyncio
@@ -414,6 +414,30 @@ async def test_update_with_optional_fields(bd_client, mock_process):
 
 
 @pytest.mark.asyncio
+async def test_update_defer_until(bd_client, mock_process):
+    """defer_until="" sends --defer= (bd clears the defer); left unset, no --defer is sent."""
+    issue_data = {
+        "id": "bd-1",
+        "title": "Test issue",
+        "status": "open",
+        "priority": 1,
+        "issue_type": "bug",
+        "created_at": "2025-01-25T00:00:00Z",
+        "updated_at": "2025-01-25T00:00:00Z",
+    }
+    mock_process.communicate = AsyncMock(return_value=(json.dumps(issue_data).encode(), b""))
+
+    with patch("asyncio.create_subprocess_exec", return_value=mock_process) as mock_exec:
+        await bd_client.update(UpdateIssueParams(issue_id="bd-1", status="open", defer_until=""))
+        cleared = mock_exec.call_args[0]
+        await bd_client.update(UpdateIssueParams(issue_id="bd-1", status="open"))
+        unset = mock_exec.call_args[0]
+
+    assert "--defer=" in cleared
+    assert not any(arg.startswith("--defer") for arg in unset)
+
+
+@pytest.mark.asyncio
 async def test_update_invalid_response(bd_client, mock_process):
     """Test update method with invalid response type."""
     mock_process.communicate = AsyncMock(return_value=(json.dumps(["not a dict"]).encode(), b""))
@@ -601,6 +625,20 @@ async def test_reopen_invalid_response(bd_client, mock_process):
     ):
         params = ReopenIssueParams(issue_ids=["bd-1"])
         await bd_client.reopen(params)
+
+
+@pytest.mark.asyncio
+async def test_reopen_noop_returns_empty_list(bd_client, mock_process):
+    """Issue #6872: bd reopen reports no-ops (already open, or not a done
+    status) on stderr only and prints nothing on stdout with exit 0; that
+    must parse as an empty result, not "Invalid response for reopen"."""
+    mock_process.communicate = AsyncMock(return_value=(b"", b"bd-1 is already open\n"))
+
+    with patch("asyncio.create_subprocess_exec", return_value=mock_process):
+        params = ReopenIssueParams(issue_ids=["bd-1"])
+        issues = await bd_client.reopen(params)
+
+    assert issues == []
 
 
 @pytest.mark.asyncio
@@ -914,3 +952,119 @@ async def test_list_comments_invalid_response(bd_client, mock_process):
         comments = await bd_client.list_comments(params)
 
     assert comments == []
+
+
+def _bd_argv(mock_exec):
+    """Return the argv bd was spawned with, minus the bd path."""
+    return list(mock_exec.call_args[0][1:])
+
+
+@pytest.mark.asyncio
+async def test_add_comment_option_text_stays_literal(bd_client, mock_process):
+    """Comment text that looks like a bd flag goes after `--` as data."""
+    mock_process.communicate = AsyncMock(return_value=(b"Comment added\n", b""))
+    text = "--body-file=/home/victim/.ssh/id_rsa"
+
+    with patch("asyncio.create_subprocess_exec", return_value=mock_process) as mock_exec:
+        await bd_client.add_comment(AddCommentParams(issue_id="--file=/etc/passwd", text=text))
+
+    argv = _bd_argv(mock_exec)
+    assert argv[0] == "comment"
+    assert argv[-3:] == ["--", "--file=/etc/passwd", text]
+    assert text not in argv[: argv.index("--")]
+
+
+@pytest.mark.asyncio
+async def test_add_note_option_text_stays_literal(bd_client, mock_process):
+    mock_process.communicate = AsyncMock(return_value=(b"Note appended\n", b""))
+    text = "--file=/home/victim/.ssh/id_rsa"
+
+    with patch("asyncio.create_subprocess_exec", return_value=mock_process) as mock_exec:
+        await bd_client.add_note(AddNoteParams(issue_id="bd-1", text=text))
+
+    assert _bd_argv(mock_exec)[-3:] == ["--", "bd-1", text]
+
+
+@pytest.mark.asyncio
+async def test_create_passes_caller_values_as_single_flag_tokens(bd_client, mock_process):
+    """Each caller value rides in one `--flag=value` token, never its own argv element."""
+    issue_data = {
+        "id": "bd-1",
+        "title": "--body-file=/etc/passwd",
+        "status": "open",
+        "priority": 1,
+        "issue_type": "bug",
+        "created_at": "2025-01-25T00:00:00Z",
+        "updated_at": "2025-01-25T00:00:00Z",
+    }
+    mock_process.communicate = AsyncMock(return_value=(json.dumps(issue_data).encode(), b""))
+
+    with patch("asyncio.create_subprocess_exec", return_value=mock_process) as mock_exec:
+        await bd_client.create(
+            CreateIssueParams(
+                title="--body-file=/etc/passwd",
+                description="--design-file=/etc/shadow",
+                priority=1,
+                issue_type="bug",
+                labels=["--x"],
+            )
+        )
+
+    argv = _bd_argv(mock_exec)
+    assert argv[0] == "create"
+    assert "--title=--body-file=/etc/passwd" in argv
+    assert "--description=--design-file=/etc/shadow" in argv
+    assert "--labels=--x" in argv
+    assert "--body-file=/etc/passwd" not in argv
+    assert "--design-file=/etc/shadow" not in argv
+
+
+@pytest.mark.asyncio
+async def test_update_puts_issue_id_after_double_dash(bd_client, mock_process):
+    issue_data = {
+        "id": "bd-1",
+        "title": "t",
+        "status": "open",
+        "priority": 1,
+        "issue_type": "bug",
+        "created_at": "2025-01-25T00:00:00Z",
+        "updated_at": "2025-01-25T00:00:00Z",
+    }
+    mock_process.communicate = AsyncMock(return_value=(json.dumps([issue_data]).encode(), b""))
+
+    with patch("asyncio.create_subprocess_exec", return_value=mock_process) as mock_exec:
+        await bd_client.update(UpdateIssueParams(issue_id="--body-file=/etc/passwd", notes="--notes-file=/x"))
+
+    argv = _bd_argv(mock_exec)
+    assert argv[-2:] == ["--", "--body-file=/etc/passwd"]
+    assert "--notes=--notes-file=/x" in argv
+    assert argv.index("--json") < argv.index("--")
+
+
+@pytest.mark.asyncio
+async def test_id_operands_follow_double_dash(bd_client, mock_process):
+    """show, comments, close, reopen and dep add keep every id after `--`."""
+    mock_process.communicate = AsyncMock(return_value=(b"[]", b""))
+    evil = "--body-file=/etc/passwd"
+
+    with patch("asyncio.create_subprocess_exec", return_value=mock_process) as mock_exec:
+        await bd_client.list_comments(ListCommentsParams(issue_id=evil))
+        assert _bd_argv(mock_exec)[-2:] == ["--", evil]
+
+        with contextlib.suppress(BdCommandError, ValueError):
+            await bd_client.show(ShowIssueParams(issue_id=evil))
+        assert _bd_argv(mock_exec)[-2:] == ["--", evil]
+
+        with contextlib.suppress(BdCommandError, ValueError):
+            await bd_client.close(CloseIssueParams(issue_id=evil, reason="--x"))
+        argv = _bd_argv(mock_exec)
+        assert argv[-2:] == ["--", evil]
+        assert "--reason=--x" in argv
+
+        await bd_client.reopen(ReopenIssueParams(issue_ids=[evil, "bd-2"]))
+        assert _bd_argv(mock_exec)[-3:] == ["--", evil, "bd-2"]
+
+        await bd_client.add_dependency(AddDependencyParams(issue_id=evil, depends_on_id="bd-2", dep_type="blocks"))
+        argv = _bd_argv(mock_exec)
+        assert argv[:3] == ["dep", "add", "--type=blocks"]
+        assert argv[-3:] == ["--", evil, "bd-2"]

@@ -787,3 +787,29 @@ func TestBatchItemMembersSurviveTheDecode(t *testing.T) {
 }
 
 func problemBoolPtr(b bool) *bool { return &b }
+
+// TestIdempotencyExpiredReconstructsTheTypedRefusal pins the 410: the code maps
+// to *issueops.IdempotencyExpiredError, built from `item_issue_id` and
+// `closed_at`, matching ErrIdempotencyExpired and never ErrAlreadyExists — so a
+// caller classifies a retired id over http exactly as it does locally. A 410
+// without the optional members still maps, with the zero time.
+func TestIdempotencyExpiredReconstructsTheTypedRefusal(t *testing.T) {
+	body := `{"status":410,"code":"idempotency_expired","param":"items[1].create.id","item_index":1,` +
+		`"item_kind":"create","item_issue_id":"bd-op-1","closed_at":"2026-03-01T12:00:00Z","request_id":"r1"}`
+	err := refuseWith(t, 410, body, nil, listIssues())
+	if !errors.Is(err, issueops.ErrIdempotencyExpired) || errors.Is(err, issueops.ErrAlreadyExists) {
+		t.Fatalf("err = %v, want ErrIdempotencyExpired and not ErrAlreadyExists", err)
+	}
+	var expired *issueops.IdempotencyExpiredError
+	if !errors.As(err, &expired) {
+		t.Fatalf("err is %T, want *issueops.IdempotencyExpiredError", err)
+	}
+	if expired.ID != "bd-op-1" || !expired.ClosedAt.Equal(time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)) {
+		t.Errorf("IdempotencyExpiredError = %+v, want bd-op-1 closed 2026-03-01T12:00:00Z", expired)
+	}
+
+	bare := refuseWith(t, 410, `{"status":410,"code":"idempotency_expired","param":"id","request_id":"r2"}`, nil, listIssues())
+	if !errors.As(bare, &expired) || !expired.ClosedAt.IsZero() || expired.ID != "" {
+		t.Errorf("bare 410 = %+v, want an IdempotencyExpiredError with no id and the zero time", expired)
+	}
+}

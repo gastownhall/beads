@@ -594,3 +594,81 @@ func TestCursorTemplateFormatting(t *testing.T) {
 		t.Error("Missing Context Loading section")
 	}
 }
+
+// Remove takes bd's rule out of .cursor/rules and the agent skill out of
+// .agents/skills/beads and then removes each directory if they were all it
+// held, but it never removes one that is a symlink, since that unlinks it
+// whatever its target holds.
+func TestRemoveCursorKeepsDirsItDidNotEmpty(t *testing.T) {
+	rules := filepath.Join(".cursor", "rules")
+	agents := ".agents"
+	skills := filepath.Join(agents, "skills")
+	for _, tt := range []struct {
+		name string
+		link string // the directory that is a symlink to one beside the workspace
+		mine bool   // .cursor/rules holds a rule of the user's too
+		bare bool   // bd setup cursor did not run first; the user made an empty .cursor/rules
+		want map[string]string
+	}{
+		{name: "linked .cursor/rules holding a rule of the user's", link: rules, mine: true,
+			want: map[string]string{rules: "link"}},
+		{name: "linked .cursor/rules holding only bd's rule", link: rules,
+			want: map[string]string{rules: "link"}},
+		{name: "linked .agents/skills holding only bd's skill", link: skills,
+			want: map[string]string{rules: "gone", agents: "dir", skills: "link", filepath.Join(skills, "beads"): "gone"}},
+		{name: "real .cursor/rules holding a rule of the user's", mine: true,
+			want: map[string]string{rules: "dir"}},
+		{name: "real directories holding only bd's files",
+			want: map[string]string{rules: "gone", agents: "gone"}},
+		{name: "real empty .cursor/rules, nothing installed", bare: true,
+			want: map[string]string{rules: "dir"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			ws := filepath.Join(root, "ws")
+			if err := os.MkdirAll(ws, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			rulesDir := filepath.Join(ws, rules)
+			if tt.link != "" {
+				link := filepath.Join(ws, tt.link)
+				if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				symlinkDir(t, filepath.Join(root, "shared"), link)
+				if tt.link == rules {
+					rulesDir = filepath.Join(root, "shared")
+				}
+			}
+			if tt.bare {
+				if err := os.MkdirAll(rulesDir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Chdir(ws)
+			if !tt.bare {
+				if err := InstallCursor(false); err != nil {
+					t.Fatalf("InstallCursor: %v", err)
+				}
+			}
+			mine := filepath.Join(rulesDir, "mine.mdc")
+			if tt.mine {
+				if err := os.WriteFile(mine, []byte("my rule\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			if err := RemoveCursor(false); err != nil {
+				t.Fatalf("RemoveCursor: %v", err)
+			}
+			requireGone(t, filepath.Join(rulesDir, "beads.mdc"))
+			requireGone(t, agentSkillPath(ws))
+			if tt.mine && !FileExists(mine) {
+				t.Errorf("remove should keep the user's rule %s", mine)
+			}
+			for rel, want := range tt.want {
+				requireState(t, filepath.Join(ws, rel), want)
+			}
+		})
+	}
+}

@@ -249,8 +249,17 @@ func (s *DoltStore) runDoltTransactionRecording(ctx context.Context, commitMsg s
 	// CLI transact wrappers — commits durably while minting no version row, so
 	// the bead has no creation version and the first later mutation that does
 	// run scoped is minted as revision 1: the history then asserts that the
-	// update IS the creation.
-	clearVersionScope := issueops.ScopeVersionedHistoryTransaction(regularTx, s.versionedHistoryEnabled.Load())
+	// update IS the creation. A switch read that fails here fails the operation
+	// before fn runs, for the same reason (VersionedHistorySwitch.ResolveIn).
+	versioned, err := s.versionedHistory.ResolveIn(ctx, regularTx)
+	if err != nil {
+		_ = regularTx.Rollback()
+		if !journalEnabled {
+			_ = ignoredTx.Rollback()
+		}
+		return issueops.BlockedRecheck{}, err
+	}
+	clearVersionScope := issueops.ScopeVersionedHistoryTransaction(regularTx, versioned)
 	defer clearVersionScope()
 	// Unblocking writes record their dependents on whichever transaction they
 	// ran in: the regular one, or the ignored one wisps use when the journal
@@ -331,7 +340,7 @@ func (s *DoltStore) finishDoltTransaction(ctx context.Context, conn *sql.Conn, t
 	// regularTx (see runDoltTransaction), so anything they minted has to be
 	// staged with them or the version rows never reach this operation's Dolt
 	// commit. Marked here, once, rather than at each MarkDirty call site.
-	tx.dirty.MarkVersionedHistoryDirty(s.versionedHistoryEnabled.Load())
+	tx.dirty.MarkVersionedHistoryDirty(s.versionedHistory.Enabled())
 
 	if err := versioncontrolops.StageAndCommit(ctx, conn, tx.dirty.DirtyTables(), commitMsg, s.commitAuthorString()); err != nil {
 		rollbackIgnored()

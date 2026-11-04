@@ -7,6 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
@@ -206,7 +207,7 @@ func burnMultipleMolecules(ctx context.Context, moleculeIDs []string, dryRun, fo
 		subgraph, err := loadTemplateSubgraph(ctx, store, id)
 		if err != nil {
 			if !jsonOutput {
-				fmt.Fprintf(os.Stderr, "Warning: failed to load subgraph for %s: %v\n", id, err)
+				fmt.Fprintf(os.Stderr, "Warning: failed to load subgraph for %s: %s\n", id, remedy.PrintedMessage(err))
 			}
 			batchResult.FailedCount++
 			continue

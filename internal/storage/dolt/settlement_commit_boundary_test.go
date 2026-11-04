@@ -107,14 +107,14 @@ func TestServerSettlementSQLCommitResponseLossIsIndeterminate(t *testing.T) {
 		mock.ExpectBegin()
 		mock.ExpectQuery(regexp.QuoteMeta("SELECT `table`, num_conflicts FROM dolt_conflicts")).
 			WillReturnRows(sqlmock.NewRows([]string{"table", "num_conflicts"}).AddRow("metadata", 1))
-		mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_CONFLICTS_RESOLVE('--theirs', 'metadata')")).
-			WillReturnResult(sqlmock.NewResult(0, 1))
-		mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_ADD('metadata')")).
-			WillReturnResult(sqlmock.NewResult(0, 1))
+		mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_CONFLICTS_RESOLVE('--theirs', 'metadata')")).
+			WillReturnRows(sqlmock.NewRows([]string{"status"}))
+		mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_ADD('metadata')")).
+			WillReturnRows(sqlmock.NewRows([]string{"status"}))
 		mock.ExpectQuery(regexp.QuoteMeta("SELECT `table` FROM dolt_constraint_violations WHERE num_violations > 0")).
 			WillReturnRows(sqlmock.NewRows([]string{"table"}))
-		mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', 'auto-resolve merge conflicts: metadata, dependencies, schema_migrations, config, issues (field-level three-way merge), labels/comments/events (union)')")).
-			WillReturnResult(sqlmock.NewResult(0, 1))
+		mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', 'auto-resolve merge conflicts: metadata, dependencies, schema_migrations, config, issues (field-level three-way merge), labels/comments/events (union)')")).
+			WillReturnRows(sqlmock.NewRows([]string{"status"}))
 		responseLoss := errors.New("CLI repair SQL commit response lost")
 		mock.ExpectCommit().WillReturnError(responseLoss)
 		mock.ExpectExec(regexp.QuoteMeta("SET @@dolt_allow_commit_conflicts = 0")).
