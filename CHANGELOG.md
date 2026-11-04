@@ -1181,6 +1181,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A server-mode store no longer keeps an empty custom status and type
+  vocabulary after one failed read of it (#5581). When reading
+  `status.custom` and `types.custom` failed, for example on a transient
+  connection error, the store cached the YAML fallback (often empty) for the
+  rest of its life, so a long-lived process could reject valid custom statuses
+  and types until restart. The failed call still answers from the fallback;
+  the next call reads the database again.
+
 - **bd again reads `GT_ROOT` from a rig's `.beads/.env`** (#8117; also
   shipped in 1.3.4). `gc rig add` writes the city root there, and the
   `.beads/.env` allowlist from #7879 (also in 1.3.3) dropped it, printing

@@ -167,11 +167,14 @@ func (s *DoltStore) loadCustomConfigCache(ctx context.Context) {
 	if !s.customStatusCached {
 		s.customStatusDetailedCache = statuses
 		s.customStatusCache = types.CustomStatusNames(statuses)
-		s.customStatusCached = true
+		// A failed read serves the YAML fallback to this call only. Caching
+		// it would keep a degraded (often empty) vocabulary for the store's
+		// lifetime, so the next call reads the database again.
+		s.customStatusCached = err == nil
 	}
 	if !s.customTypeCached {
 		s.customTypeCache = customTypes
-		s.customTypeCached = true
+		s.customTypeCached = err == nil
 	}
 	s.cacheMu.Unlock()
 }
