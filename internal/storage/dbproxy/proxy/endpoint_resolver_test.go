@@ -458,3 +458,63 @@ func TestEndpointResolver_SharedFlightWaitersReturnByDeadline(t *testing.T) {
 		t.Fatalf("discovery calls = %d after publication, want 1", got)
 	}
 }
+
+// TestEndpointResolver_CloseJoinsFlightAndPreventsAnother: Close waits for a
+// running flight within its context, reports the flight when the context ends
+// first, and once it returns nil the flight is over, published nothing, and
+// no later dial can start another.
+func TestEndpointResolver_CloseJoinsFlightAndPreventsAnother(t *testing.T) {
+	d := newFakeDiscovery()
+	d.gate = make(chan struct{})
+	original := refusedEndpoint(t)
+	r, rootDir, clock := newTestResolver(t, original, d)
+	released := false
+	release := func() {
+		if !released {
+			released = true
+			close(d.gate)
+		}
+	}
+	t.Cleanup(release)
+	replacement := newResolverTestListener(t, rootDir, modeProve)
+	d.set(replacement.endpoint(), nil)
+	r.Arm()
+
+	go func() { _, _ = dialWithin(r, 50*time.Millisecond) }()
+	waitEntered(t, d)
+
+	short, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if err := r.Close(short); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Close with the flight blocked: %v, want its context's deadline", err)
+	}
+
+	closed := make(chan error, 1)
+	go func() { closed <- r.Close(context.Background()) }()
+	select {
+	case err := <-closed:
+		t.Fatalf("Close returned %v while the flight was still running", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	release()
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatalf("Close after the flight finished: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not return once the flight finished")
+	}
+	if got := r.Endpoint(); got != original {
+		t.Fatalf("endpoint = %v after Close, want the flight to publish nothing", got)
+	}
+
+	clock.advance(discoveryCooldown)
+	_, err := dialWithin(r, time.Second)
+	if !IsEndpointUnavailable(err) || !errors.Is(err, errResolverClosed) {
+		t.Fatalf("dial after Close: %v, want unavailable because the resolver is closed", err)
+	}
+	if got := d.calls.Load(); got != 1 {
+		t.Fatalf("discovery calls = %d, want no flight after Close", got)
+	}
+}
