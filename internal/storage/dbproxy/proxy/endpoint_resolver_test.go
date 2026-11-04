@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -235,6 +236,91 @@ func TestEndpointResolver_RecycledPortRefusesDataAndRecovers(t *testing.T) {
 	require.EqualValues(t, 1, replacement.accepts.Load())
 }
 
+// TestEndpointResolver_ConcurrentFailuresShareOneFlight is AC-4: with
+// discovery barrier-blocked, concurrent failed dials at one generation run
+// exactly one discovery flight, and each waiter that stays within budget
+// returns through the publish.
+func TestEndpointResolver_ConcurrentFailuresShareOneFlight(t *testing.T) {
+	secret := "6464646464646464646464646464646464646464646464646464646464646464"
+	dead := Endpoint{Host: "127.0.0.1", Port: freePortOrZero(t)}
+	r := newTestResolver(t, secret, dead)
+	replacement := startAuthLoopback(t, secret)
+
+	var mu sync.Mutex
+	started := make(chan struct{}, 1)
+	discover, calls := recordingDiscover(func(int) (Endpoint, error) {
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		return replacement.endpoint(), nil
+	})
+	r.discover = discover
+	r.Arm()
+
+	const waiters = 5
+	var wg sync.WaitGroup
+	results := make([]error, waiters)
+	for i := 0; i < waiters; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			ctx, cancel := dialCtx()
+			defer cancel()
+			_, err := r.DialContext(ctx, "bdproxy", dead.Address())
+			results[i] = err
+		}(i)
+	}
+	<-started
+	wg.Wait()
+
+	require.EqualValues(t, 1, calls.Load(), "concurrent failed dials must share one flight")
+	require.EqualValues(t, waiters, replacement.accepts.Load(), "each waiter redials the published endpoint")
+	for i, err := range results {
+		require.NoErrorf(t, err, "waiter %d", i)
+	}
+}
+
+// TestEndpointResolver_WaiterReturnsByDeadlineWhileDiscoveryBlocked is the
+// other half of AC-4: a discovery that outlasts a dial's budget does not
+// hold the dial — it returns unavailable within budget, and the flight keeps
+// running for later callers.
+func TestEndpointResolver_WaiterReturnsByDeadlineWhileDiscoveryBlocked(t *testing.T) {
+	secret := "6464646464646464646464646464646464646464646464646464646464646464"
+	dead := Endpoint{Host: "127.0.0.1", Port: freePortOrZero(t)}
+	r := newTestResolver(t, secret, dead)
+	replacement := startAuthLoopback(t, secret)
+	release := make(chan struct{})
+	discover, calls := recordingDiscover(func(int) (Endpoint, error) {
+		<-release
+		return replacement.endpoint(), nil
+	})
+	r.discover = discover
+	r.Arm()
+
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	_, err := r.DialContext(ctx, "bdproxy", dead.Address())
+	elapsed := time.Since(start)
+	require.Error(t, err)
+	require.True(t, IsEndpointUnavailable(err), "a dial that outlived its budget reports unavailability, got: %v", err)
+	require.Less(t, elapsed, 2*time.Second, "the waiter must return by its dial deadline, took %s", elapsed)
+	require.ErrorIs(t, err, syscall.ECONNREFUSED, "the triggering refusal is preserved as the cause")
+
+	// The flight is still running; releasing it publishes for later callers.
+	close(release)
+	require.Eventually(t, func() bool {
+		ctx, cancel := dialCtx()
+		defer cancel()
+		_, err := r.DialContext(ctx, "bdproxy", dead.Address())
+		return err == nil
+	}, 5*time.Second, 50*time.Millisecond, "a later dial must find the published replacement")
+	require.EqualValues(t, 1, calls.Load(), "the later dial reuses the published flight, not a new one")
+}
+
 // TestEndpointResolver_SamePortRespawnAdvancesGeneration pins the same-port
 // incarnation: publishing an endpoint whose ADDRESS did not change is still
 // a new generation. The resolver cannot compare ports to deduplicate — a
@@ -280,6 +366,53 @@ func TestEndpointResolver_SamePortRespawnAdvancesGeneration(t *testing.T) {
 	require.NoError(t, conn.Close())
 	require.EqualValues(t, 1, calls.Load(), "the redial at the new generation does not rediscover")
 	require.EqualValues(t, 1, respawn.accepts.Load())
+}
+
+// TestEndpointResolver_CooldownBoundsFlightRestarts pins the "at most once
+// per second" rate: a failure right after a flight does not start another,
+// reports unavailability retaining the prior discovery error, and is not
+// latched — once the interval elapses, the next eligible failure may fly
+// again and succeed.
+func TestEndpointResolver_CooldownBoundsFlightRestarts(t *testing.T) {
+	secret := "6464646464646464646464646464646464646464646464646464646464646464"
+	dead := Endpoint{Host: "127.0.0.1", Port: freePortOrZero(t)}
+	r := newTestResolver(t, secret, dead)
+	replacement := startAuthLoopback(t, secret)
+	r.minFlightInterval = time.Hour // every flight after the first is inside the cooldown
+
+	fly := false
+	discover, calls := recordingDiscover(func(int) (Endpoint, error) {
+		if !fly {
+			fly = true
+			return Endpoint{}, errors.New("spawn refused")
+		}
+		return replacement.endpoint(), nil
+	})
+	r.discover = discover
+	r.Arm()
+
+	ctx, cancel := dialCtx()
+	defer cancel()
+	_, err := r.DialContext(ctx, "bdproxy", dead.Address())
+	require.Error(t, err)
+	require.True(t, IsEndpointUnavailable(err))
+	require.EqualValues(t, 1, calls.Load())
+
+	// Inside the cooldown: unavailable, retaining the prior discovery error,
+	// and no second flight.
+	_, err = r.DialContext(ctx, "bdproxy", dead.Address())
+	require.Error(t, err)
+	require.True(t, IsEndpointUnavailable(err))
+	require.ErrorContains(t, err, "spawn refused", "the cooldown response retains the prior discovery error")
+	require.EqualValues(t, 1, calls.Load(), "the cooldown must not start a second flight")
+
+	// Not latched: the interval is measured from the flight's start, and a
+	// fake clock that has moved past it allows another flight.
+	r.now = func() time.Time { return time.Now().Add(2 * time.Hour) }
+	conn, err := r.DialContext(ctx, "bdproxy", dead.Address())
+	require.NoError(t, err, "after the cooldown a failed discovery is not latched")
+	require.NoError(t, conn.Close())
+	require.EqualValues(t, 2, calls.Load())
 }
 
 // freePortOrZero grabs an OS-assigned port and closes its listener again:
