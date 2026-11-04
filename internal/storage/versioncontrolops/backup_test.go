@@ -8,8 +8,11 @@ import (
 	neturl "net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/DATA-DOG/go-sqlmock"
 )
 
 // TestDirToFileURLRejectsSchemes pins the guard that stops a URL being turned
@@ -258,5 +261,41 @@ func TestBackupRestorePassesURLVerbatim(t *testing.T) {
 				t.Errorf("force=%v: restore args = %q, want [%q %q]", force, got, url, "beads")
 			}
 		}
+	}
+}
+
+// TestBackupListReturnsEveryDestination pins GH#5209: the list holds every
+// registered destination, not only "default", and names each URL without the
+// credentials a remote URL can carry.
+func TestBackupListReturnsEveryDestination(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT name, url FROM dolt_backups ORDER BY name")).
+		WillReturnRows(sqlmock.NewRows([]string{"name", "url"}).
+			AddRow("backup_export", "file:///repo/.beads/backup").
+			AddRow("default", "https://user:hunter2@localhost:50051/org/db"))
+
+	got, err := BackupList(context.Background(), db)
+	if err != nil {
+		t.Fatalf("BackupList: %v", err)
+	}
+	want := []string{
+		"backup_export=file:///repo/.beads/backup",
+		"default=https://localhost:50051/org/db",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("BackupList = %+v, want %d destinations", got, len(want))
+	}
+	for i, d := range got {
+		if d.Name+"="+d.URL != want[i] {
+			t.Errorf("destination %d = %s=%s, want %s", i, d.Name, d.URL, want[i])
+		}
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet expectations: %v", err)
 	}
 }

@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/steveyegge/beads/internal/storage"
 )
 
 // ExportBackupName is the Dolt backup remote the auto-backup path registers
@@ -20,6 +22,28 @@ func BackupAdd(ctx context.Context, db DBConn, name, url string) error {
 		return fmt.Errorf("add backup %s: %w", name, err)
 	}
 	return nil
+}
+
+// BackupList returns every registered Dolt backup destination, sorted by
+// name, each URL named as backupRestoreSafeURL names it so a status line
+// cannot print credentials a remote URL carries.
+func BackupList(ctx context.Context, db DBConn) ([]storage.BackupDestination, error) {
+	rows, err := db.QueryContext(ctx, "SELECT name, url FROM dolt_backups ORDER BY name")
+	if err != nil {
+		return nil, fmt.Errorf("list backups: %w", err)
+	}
+	defer rows.Close()
+
+	var backups []storage.BackupDestination
+	for rows.Next() {
+		var b storage.BackupDestination
+		if err := rows.Scan(&b.Name, &b.URL); err != nil {
+			return nil, fmt.Errorf("scan backup: %w", err)
+		}
+		b.URL, _ = backupRestoreSafeURL(b.URL)
+		backups = append(backups, b)
+	}
+	return backups, rows.Err()
 }
 
 // BackupSync pushes the database to the named backup destination.

@@ -308,6 +308,7 @@ var _ storage.DoltStorage = (*DoltStore)(nil)
 var _ storage.RawDBAccessor = (*DoltStore)(nil)
 var _ storage.StoreLocator = (*DoltStore)(nil)
 var _ storage.ActiveDatabaseSizer = (*DoltStore)(nil)
+var _ storage.BackupLister = (*DoltStore)(nil)
 var _ storage.LifecycleManager = (*DoltStore)(nil)
 var _ storage.PendingCommitter = (*DoltStore)(nil)
 var _ storage.GarbageCollector = (*DoltStore)(nil)
@@ -1594,6 +1595,11 @@ func (s *DoltStore) RemoteName() string {
 // BackupAdd registers a Dolt backup destination.
 func (s *DoltStore) BackupAdd(ctx context.Context, name, url string) error {
 	return versioncontrolops.BackupAdd(ctx, s.db, name, url)
+}
+
+// BackupList returns every registered Dolt backup destination.
+func (s *DoltStore) BackupList(ctx context.Context) ([]storage.BackupDestination, error) {
+	return versioncontrolops.BackupList(ctx, s.db)
 }
 
 // BackupSync pushes the database to the named backup destination.
