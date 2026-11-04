@@ -147,8 +147,8 @@ func initialize(beadsDirSetting string) error {
 	// here because Initialize is an implicit read path: absent user config is a
 	// supported state, while a relative root must never reach os.Stat.
 	userConfigPaths := currentUserConfigYamlCandidates()
-	appendExistingUserConfig := func(path string) {
-		if !userConfigPathExists(path) {
+	appendExistingUserConfig := func(path string, exists bool) {
+		if !exists {
 			return
 		}
 		for _, existing := range configPaths {
@@ -160,9 +160,22 @@ func initialize(beadsDirSetting string) error {
 	}
 
 	// Lowest to highest user-level precedence: legacy, native, documented.
-	appendExistingUserConfig(userConfigPaths.legacy)
-	appendExistingUserConfig(userConfigPaths.native)
-	appendExistingUserConfig(userConfigPaths.documented)
+	// The native os.UserConfigDir()/bd/config.yaml location is not one of the
+	// documented config locations (docs/reference/configuration.md) — it only
+	// exists as a fallback for users who never migrated to the documented
+	// <home>/.config/bd path. Stat it only when the documented path is absent:
+	// probing it unconditionally stats a directory outside bd's own config
+	// tree on every launch, which macOS 26 flags with an "access data from
+	// other apps" prompt even when the native file is never read
+	// (gastownhall/beads#8113). selectUserConfigYamlPath already makes this
+	// same documented-first, native-as-fallback choice for the single-file
+	// read/write path; this keeps the merge path consistent with it.
+	documentedExists := userConfigPathExists(userConfigPaths.documented)
+	appendExistingUserConfig(userConfigPaths.legacy, userConfigPathExists(userConfigPaths.legacy))
+	if !documentedExists {
+		appendExistingUserConfig(userConfigPaths.native, userConfigPathExists(userConfigPaths.native))
+	}
+	appendExistingUserConfig(userConfigPaths.documented, documentedExists)
 	userConfigPathCount := len(configPaths)
 
 	// 1. Project: walk up from CWD to find .beads/config.yaml

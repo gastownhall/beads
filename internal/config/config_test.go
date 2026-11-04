@@ -2073,6 +2073,107 @@ func TestXDGConfigPath_Missing(t *testing.T) {
 	}
 }
 
+// TestNativeConfigPath_NotProbedWhenDocumentedExists is a regression test for
+// gastownhall/beads#8113: Initialize must not stat the native
+// os.UserConfigDir()/bd/config.yaml location once the documented
+// ~/.config/bd/config.yaml file is confirmed present. The native location is
+// replaced with a directory (not a regular file) here as a trap: os.Stat on a
+// directory succeeds, so if initialize() still appended it to configPaths,
+// viper's MergeInConfig would fail trying to read it as YAML and Initialize
+// would return an error. A passing Initialize() proves the native path was
+// never merged in — i.e. never needed probing beyond the existence check that
+// decides to skip it.
+func TestNativeConfigPath_NotProbedWhenDocumentedExists(t *testing.T) {
+	restore := envSnapshot(t)
+	defer restore()
+
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	t.Setenv("USERPROFILE", tmpHome)
+
+	// Documented path: ~/.config/bd/config.yaml, present with a distinctive value.
+	documentedDir := filepath.Join(tmpHome, ".config", "bd")
+	if err := os.MkdirAll(documentedDir, 0o755); err != nil {
+		t.Fatalf("failed to create documented config dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(documentedDir, "config.yaml"),
+		[]byte("actor: documented-user\n"), 0o600); err != nil {
+		t.Fatalf("failed to write documented config: %v", err)
+	}
+
+	// Native path: os.UserConfigDir()/bd/config.yaml, simulated via a distinct
+	// XDG_CONFIG_HOME (macOS shape). Make the "file" a directory, which traps
+	// any code path that still tries to merge it in as YAML.
+	altConfigDir := filepath.Join(tmpHome, "Library", "Application Support")
+	nativeConfigPath := filepath.Join(altConfigDir, "bd", "config.yaml")
+	if err := os.MkdirAll(nativeConfigPath, 0o755); err != nil {
+		t.Fatalf("failed to create trap directory at native config path: %v", err)
+	}
+	t.Setenv("XDG_CONFIG_HOME", altConfigDir)
+
+	t.Chdir(tmpHome)
+
+	ResetForTesting()
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize() returned error: %v (native config.yaml path was probed/merged even though the documented path exists)", err)
+	}
+
+	if got := GetString("actor"); got != "documented-user" {
+		t.Errorf("GetString(actor) = %q, want %q (from documented ~/.config/bd/config.yaml)", got, "documented-user")
+	}
+}
+
+// TestNativeConfigPath_FallbackWhenDocumentedMissing verifies the native
+// os.UserConfigDir()/bd/config.yaml location still loads as a fallback when
+// the documented ~/.config/bd/config.yaml does not exist. This is the
+// existing-behavior half of the #8113 regression test: the fix must only skip
+// the native probe when the documented file is present, never remove the
+// fallback outright.
+func TestNativeConfigPath_FallbackWhenDocumentedMissing(t *testing.T) {
+	restore := envSnapshot(t)
+	defer restore()
+
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	t.Setenv("USERPROFILE", tmpHome)
+
+	// No ~/.config/bd/config.yaml is created: the documented path is absent.
+
+	// Native path: os.UserConfigDir()/bd/config.yaml, simulated via a distinct
+	// XDG_CONFIG_HOME (macOS shape), present with a distinctive value.
+	altConfigDir := filepath.Join(tmpHome, "Library", "Application Support")
+	nativeConfigDir := filepath.Join(altConfigDir, "bd")
+	if err := os.MkdirAll(nativeConfigDir, 0o755); err != nil {
+		t.Fatalf("failed to create native config dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(nativeConfigDir, "config.yaml"),
+		[]byte("actor: native-fallback-user\n"), 0o600); err != nil {
+		t.Fatalf("failed to write native config: %v", err)
+	}
+	t.Setenv("XDG_CONFIG_HOME", altConfigDir)
+
+	t.Chdir(tmpHome)
+
+	ResetForTesting()
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize() returned error: %v", err)
+	}
+
+	if got := GetString("actor"); got != "native-fallback-user" {
+		t.Errorf("GetString(actor) = %q, want %q (from native os.UserConfigDir() fallback)", got, "native-fallback-user")
+	}
+}
+
 func TestInitialize_ExternalBEADSDirDoesNotMergeCallerProjectConfig(t *testing.T) {
 	restore := envSnapshot(t)
 	defer restore()
