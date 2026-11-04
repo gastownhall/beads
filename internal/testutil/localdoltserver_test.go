@@ -397,7 +397,11 @@ func TestLocalDoltServer_StateOutsideSuiteRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(root)
-	if !PathUnderSuiteRoot(filepath.Join(os.TempDir(), "x"), root) {
+	// Check os.TempDir() itself, not a child that does not exist:
+	// PathUnderSuiteRoot can only resolve symlinks in existing paths, so a
+	// missing child under a symlinked TMPDIR (macOS /tmp -> /private/tmp)
+	// stays unresolved and never matches the resolved root.
+	if !PathUnderSuiteRoot(os.TempDir(), root) {
 		t.Fatalf("PinSuiteTempRoot did not re-point os.TempDir() under %s", root)
 	}
 
