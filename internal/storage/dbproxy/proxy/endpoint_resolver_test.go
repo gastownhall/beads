@@ -632,3 +632,36 @@ func TestEndpointResolver_IneligibleFailuresPassThrough(t *testing.T) {
 		}
 	})
 }
+
+// TestEndpointResolver_HealthyDialAuthenticatesWithoutDiscovery: a dial to a
+// healthy proxy is one connection proving the secret as it is on disk now —
+// a rotated secret, with no cached copy — and nothing else: no discovery and
+// no extra connection.
+func TestEndpointResolver_HealthyDialAuthenticatesWithoutDiscovery(t *testing.T) {
+	d := newFakeDiscovery()
+	d.set(Endpoint{}, errors.New("discovery must not run"))
+	r, rootDir, _ := newTestResolver(t, Endpoint{}, d)
+	l := newResolverTestListener(t, rootDir, modeProve)
+	r.endpoint = l.endpoint()
+	r.Arm()
+
+	for i := 1; i <= 2; i++ {
+		if _, err := identity.WriteSecret(rootDir); err != nil {
+			t.Fatal(err)
+		}
+		conn, err := dialWithin(r, 5*time.Second)
+		if err != nil {
+			t.Fatalf("dial %d after rotating the secret: %v", i, err)
+		}
+		_ = conn.Close()
+		if got := l.accepted.Load(); got != int32(i) {
+			t.Fatalf("after dial %d the proxy accepted %d connections, want %d", i, got, i)
+		}
+	}
+	if got := d.calls.Load(); got != 0 {
+		t.Fatalf("discovery calls = %d, want 0", got)
+	}
+	if got := r.Endpoint(); got != l.endpoint() {
+		t.Fatalf("endpoint = %v, want %v", got, l.endpoint())
+	}
+}
