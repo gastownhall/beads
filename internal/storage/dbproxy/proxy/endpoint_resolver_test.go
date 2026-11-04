@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -72,6 +73,29 @@ func serveAuthLoopback(t *testing.T, ln net.Listener, secret string) *authLoopba
 
 func (a *authLoopback) endpoint() Endpoint {
 	return Endpoint{Host: "127.0.0.1", Port: a.port}
+}
+
+// startSilentAuthLoopback binds a listener that accepts and answers nothing:
+// every connection is held open, silently, until the client gives up on it —
+// the "port taken, but no BDPROXY1 proof will ever arrive" shape.
+func startSilentAuthLoopback(t *testing.T) *authLoopback {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	return serveSilentAuthLoopback(t, ln)
+}
+
+func serveSilentAuthLoopback(t *testing.T, ln net.Listener) *authLoopback {
+	t.Helper()
+	a := &authLoopback{
+		ln:     ln,
+		addr:   ln.Addr().String(),
+		port:   ln.Addr().(*net.TCPAddr).Port,
+		silent: true,
+	}
+	go a.serve()
+	t.Cleanup(func() { _ = ln.Close() })
+	return a
 }
 func (a *authLoopback) serve() {
 	for {
@@ -389,6 +413,100 @@ func TestEndpointResolver_CloseJoinsFlightAndStopsDiscovery(t *testing.T) {
 
 	// Close is idempotent and, with no flight, immediate.
 	require.NoError(t, r.Close(closeCtx))
+}
+
+// TestEndpointResolver_IneligibleFailuresNeverRecover is AC-7: a secret-read
+// failure, an invalid address, a deadline that struck before the connect, an
+// explicit cancellation, and a MySQL error that never reached the dial are
+// surfaced unchanged — no endpoint-unavailable marker, no discovery.
+func TestEndpointResolver_IneligibleFailuresNeverRecover(t *testing.T) {
+	secret := "6464646464646464646464646464646464646464646464646464646464646464"
+	t.Run("secret read failure", func(t *testing.T) {
+		// A root with NO secret: a retired topology. Rediscovery must not
+		// recreate it, and the dial must fail as its own error.
+		r := NewEndpointResolver(t.TempDir(), OpenOpts{Backend: BackendExternal}, Endpoint{Host: "127.0.0.1", Port: 1})
+		discover, calls := recordingDiscover(func(int) (Endpoint, error) {
+			t.Error("secret-read failure ran discovery")
+			return Endpoint{}, nil
+		})
+		r.discover = discover
+		r.Arm()
+		ctx, cancel := dialCtx()
+		defer cancel()
+		_, err := r.DialContext(ctx, "bdproxy", "127.0.0.1:1")
+		require.Error(t, err)
+		require.False(t, IsEndpointUnavailable(err))
+		stage, ok := dialStageOf(err)
+		require.True(t, ok)
+		require.Equal(t, stageSecretRead, stage)
+		require.EqualValues(t, 0, calls.Load())
+	})
+	t.Run("invalid address", func(t *testing.T) {
+		r := newTestResolver(t, secret, Endpoint{Host: "127.0.0.1", Port: -1})
+		discover, calls := recordingDiscover(func(int) (Endpoint, error) {
+			t.Error("invalid address ran discovery")
+			return Endpoint{}, nil
+		})
+		r.discover = discover
+		r.Arm()
+		ctx, cancel := dialCtx()
+		defer cancel()
+		_, err := r.DialContext(ctx, "bdproxy", "127.0.0.1:-1")
+		require.Error(t, err)
+		require.False(t, IsEndpointUnavailable(err))
+		require.EqualValues(t, 0, calls.Load())
+	})
+	t.Run("pre-connect deadline", func(t *testing.T) {
+		a := startAuthLoopback(t, secret)
+		r := newTestResolver(t, secret, a.endpoint())
+		discover, calls := recordingDiscover(func(int) (Endpoint, error) {
+			t.Error("pre-connect deadline ran discovery")
+			return Endpoint{}, nil
+		})
+		r.discover = discover
+		r.Arm()
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		defer cancel()
+		<-ctx.Done() // spend the budget BEFORE the dial
+		_, err := r.DialContext(ctx, "bdproxy", a.addr)
+		require.Error(t, err)
+		require.ErrorIs(t, err, context.DeadlineExceeded, "a spent budget is the caller's deadline error")
+		require.False(t, IsEndpointUnavailable(err), "a pre-connect deadline is never an unavailability claim")
+		require.EqualValues(t, 0, calls.Load())
+	})
+	t.Run("explicit cancellation", func(t *testing.T) {
+		// A listener that accepts and goes silent holds the dial in the
+		// handshake; an explicit cancel must come back as itself.
+		silent := startSilentAuthLoopback(t)
+		r := newTestResolver(t, secret, silent.endpoint())
+		discover, calls := recordingDiscover(func(int) (Endpoint, error) {
+			t.Error("explicit cancellation ran discovery")
+			return Endpoint{}, nil
+		})
+		r.discover = discover
+		r.Arm()
+		ctx, cancel := context.WithCancel(context.Background())
+		go func() {
+			time.Sleep(100 * time.Millisecond)
+			cancel()
+		}()
+		_, err := r.DialContext(ctx, "bdproxy", silent.addr)
+		require.Error(t, err)
+		require.ErrorIs(t, err, context.Canceled, "explicit cancellation must survive as itself")
+		require.False(t, IsEndpointUnavailable(err))
+		require.EqualValues(t, 0, calls.Load())
+	})
+	t.Run("mysql error never reaches the dial", func(t *testing.T) {
+		// MySQL authentication, TLS and SQL failures happen AFTER the dial
+		// returns, on the connection itself; they never pass through
+		// authDataDial, so they carry no stageError and no marker can reach
+		// them. Pin that the classifier fires only on marked failures.
+		mysqlAuth := fmt.Errorf("Error 1045 (28000): Access denied for user 'root'")
+		require.False(t, IsEndpointUnavailable(fmt.Errorf("uow: pin connection: %w", mysqlAuth)))
+		// An EOF that the driver surfaces mid-handshake is likewise
+		// untagged here: only authDataDial's stages can claim eligibility.
+		require.False(t, IsEndpointUnavailable(fmt.Errorf("uow: pin connection: %w", io.ErrUnexpectedEOF)))
+	})
 }
 
 // TestEndpointResolver_SamePortRespawnAdvancesGeneration pins the same-port
