@@ -200,11 +200,15 @@ type DependencyEditor interface {
 }
 
 // DottedChildDependencyError refuses an explicit edge from a dotted-id child to
-// its own ancestor. The id already says "bd-abc.1 is under bd-abc": a child
-// inherits its parent's completion through the hierarchy, so a blocking (or any
-// other) explicit edge back up the tree either duplicates that structure or, for
-// a blocking type, deadlocks it — the parent cannot close before the child, and
-// the child would wait on the parent.
+// its own ancestor. The id already says "bd-abc.1 is under bd-abc", so a
+// non-blocking explicit edge back up the tree only duplicates that structure,
+// and a blocking one can never clear: the parent cannot close until its
+// children finish, and the child would wait on the parent.
+//
+// The hierarchy does NOT gate a child on its parent's completion: a child of an
+// open or in-progress parent is ready (gastownhall/beads#5036). The message
+// used to say "Children inherit dependency on parent completion via
+// hierarchy", which told the caller the gate they asked for already existed.
 //
 // The one edge it allows is the hierarchy itself: a parent-child edge to the
 // IMMEDIATE dotted parent. A parent-child edge to a higher ancestor is refused
@@ -213,9 +217,11 @@ type DependencyEditor interface {
 // It unwraps to ErrValidation: the refusal is decidable from the two ids and
 // the type alone, with no read, so it is a property of the request.
 //
-// The message is the sentence `bd dep add` already printed, kept verbatim, so
-// it says "deadlock" whatever the type; Type is carried for callers that
-// inspect the refusal and is not rendered.
+// The message keeps the prefix `bd dep add` has always printed ("cannot add
+// dependency: <child> is already a child of <parent>."), which `bd batch`
+// reports for the same edge, and gives the reason by Type: a blocking type
+// (IsBlockingEdge) is told why the gate would never clear and how to wait on
+// work instead; any other type is told the hierarchy already links the pair.
 type DottedChildDependencyError struct {
 	IssueID     string
 	DependsOnID string
@@ -223,7 +229,11 @@ type DottedChildDependencyError struct {
 }
 
 func (e *DottedChildDependencyError) Error() string {
-	return fmt.Sprintf("cannot add dependency: %s is already a child of %s. Children inherit dependency on parent completion via hierarchy. Adding an explicit dependency would create a deadlock",
+	if e.Type.IsBlockingEdge() {
+		return fmt.Sprintf("cannot add dependency: %s is already a child of %s. A child does not wait for its parent to close, and %s cannot close until its children finish, so this gate would never clear. To make %s wait for work, put that work in a sibling issue and block on that",
+			e.IssueID, e.DependsOnID, e.DependsOnID, e.IssueID)
+	}
+	return fmt.Sprintf("cannot add dependency: %s is already a child of %s. The hierarchy already links them, so an explicit edge back up the tree is refused",
 		e.IssueID, e.DependsOnID)
 }
 
