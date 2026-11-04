@@ -275,7 +275,7 @@ func TestOpenDBRidesOutAnUpstreamThatReturnsInsideTheOutageWindow(t *testing.T) 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	start := time.Now()
-	db, err := openDB(ctx, "root@tcp("+front.addr+")/?timeout=5s")
+	db, err := openDB(ctx, "root@tcp("+front.addr+")/?timeout=5s", nil)
 	if err != nil {
 		t.Fatalf("openDB() error = %v, want recovery once the upstream returned", err)
 	}
@@ -293,7 +293,7 @@ func TestOpenDBFailsFastWhenTheUpstreamStaysUnreachable(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	start := time.Now()
-	_, err := openDB(ctx, "root@tcp("+front.addr+")/?timeout=5s")
+	_, err := openDB(ctx, "root@tcp("+front.addr+")/?timeout=5s", nil)
 	elapsed := time.Since(start)
 	if !proxy.IsUpstreamOutageError(err) {
 		t.Fatalf("openDB() error = %v, want the proxy's outage report", err)
