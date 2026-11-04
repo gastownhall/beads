@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -644,6 +645,55 @@ func TestGetCustomTypes(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected 'agent' in custom types, got %v", types)
+	}
+}
+
+// TestCustomConfigCacheRetriesAfterFailedRead pins #5581: a failed read of
+// the custom status/type vocabulary must not be cached for the store's
+// lifetime. The cancelled context makes the read fail the way a transient
+// connection error does; the next call with a live context must see the
+// configured values, not the degraded fallback from the failed call.
+func TestCustomConfigCacheRetriesAfterFailedRead(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	if err := store.SetConfig(ctx, "status.custom", "review:wip"); err != nil {
+		t.Fatalf("SetConfig(status.custom) failed: %v", err)
+	}
+	if err := store.SetConfig(ctx, "types.custom", "molecule"); err != nil {
+		t.Fatalf("SetConfig(types.custom) failed: %v", err)
+	}
+
+	failed, failedCancel := context.WithCancel(ctx)
+	failedCancel()
+	// The failed read still answers; its result is the fallback, whatever
+	// the YAML config holds, and is not under test here.
+	_, _ = store.GetCustomStatuses(failed)
+	_, _ = store.GetCustomTypes(failed)
+
+	statuses, err := store.GetCustomStatuses(ctx)
+	if err != nil {
+		t.Fatalf("GetCustomStatuses failed: %v", err)
+	}
+	if !slices.Contains(statuses, "review") {
+		t.Errorf("GetCustomStatuses after a failed read = %v, want it to contain %q", statuses, "review")
+	}
+	detailed, err := store.GetCustomStatusesDetailed(ctx)
+	if err != nil {
+		t.Fatalf("GetCustomStatusesDetailed failed: %v", err)
+	}
+	if len(detailed) != 1 || detailed[0].Name != "review" {
+		t.Errorf("GetCustomStatusesDetailed after a failed read = %+v, want one status %q", detailed, "review")
+	}
+	customTypes, err := store.GetCustomTypes(ctx)
+	if err != nil {
+		t.Fatalf("GetCustomTypes failed: %v", err)
+	}
+	if !slices.Contains(customTypes, "molecule") {
+		t.Errorf("GetCustomTypes after a failed read = %v, want it to contain %q", customTypes, "molecule")
 	}
 }
 
