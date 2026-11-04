@@ -195,9 +195,9 @@ after 20s and the proxy exits after its own idle timeout (30s by default), so a
 quiet server routinely has no proxy. The first request after the gap fails to
 dial, rediscovers the proxy (adopting one another `bd` process started, or
 starting it under the workspace's idle policy) and redials once. A request whose
-5s dial budget ends before the proxy is back fails, and a later request picks
-the proxy up; nothing is replayed. Expect such failures during a cold start,
-not only during an outage. To keep the
+5s dial budget ends before the proxy is back answers 503 `db_unavailable` with
+`Retry-After`, and a later request picks the proxy up; nothing is replayed.
+Expect such 503s during a cold start, not only during an outage. To keep the
 proxy down — `bd dolt stop`, a migration — stop `bd serve` first: a running
 server starts it again on its next request.
 

@@ -5,7 +5,17 @@ import (
 	"strings"
 
 	mysql "github.com/go-sql-driver/mysql"
+
+	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
 )
+
+// IsEndpointUnavailable reports whether err is a dial a proxied-server
+// provider could not complete because its workspace proxy was gone and
+// rediscovering it did not succeed within the dial's budget. The failure is
+// retryable: a later dial picks up the proxy once it is back.
+func IsEndpointUnavailable(err error) bool {
+	return proxy.IsEndpointUnavailable(err)
+}
 
 // IsSerializationError reports whether err is a retryable database transaction
 // failure that guarantees the server rolled the transaction back. Because the

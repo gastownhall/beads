@@ -18,9 +18,11 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
@@ -582,6 +584,31 @@ func TestHealthzStaysUpWhileTheDatabaseIsDown(t *testing.T) {
 		if resp := ts.get(t, path); resp.StatusCode != http.StatusOK {
 			t.Errorf("GET %s status = %d, want 200 with the database unreachable", path, resp.StatusCode)
 		}
+	}
+}
+
+// TestProxyEndpointUnavailableIsRetryableNotReady: a read whose provider
+// could not reach the workspace proxy in its dial budget answers 503
+// db_unavailable with Retry-After, and liveness stays green.
+func TestProxyEndpointUnavailableIsRetryableNotReady(t *testing.T) {
+	gone := &fakeProvider{err: fmt.Errorf("uow: pin connection: %w", &proxy.EndpointUnavailableError{
+		Dial:      &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED},
+		Discovery: context.DeadlineExceeded,
+	})}
+	ts := newTestServer(t, Config{Provider: gone})
+
+	resp := ts.get(t, "/v0/beads/ready?limit=1")
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("ready status = %d, want 503", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Retry-After"); got != strconv.Itoa(retryAfterContention) {
+		t.Errorf("Retry-After = %q, want %d", got, retryAfterContention)
+	}
+	if got := decodeBody(t, resp)["code"]; got != string(CodeDBUnavailable) {
+		t.Errorf("code = %v, want %s", got, CodeDBUnavailable)
+	}
+	if resp := ts.get(t, "/healthz"); resp.StatusCode != http.StatusOK {
+		t.Errorf("/healthz status = %d, want 200", resp.StatusCode)
 	}
 }
 
