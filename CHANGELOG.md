@@ -24,13 +24,21 @@ candidate, on a throwaway branch off gascity's `hotfix/1.5.1`
   with the same result: 151 passing and 3 skipped.
 - The one red job is an advisory probe that builds bd from `main`. That
   branch, like 1.3.3's, made two upstream-drift checks non-blocking.
-- No job log shows the `ignoring GT_ROOT` notice.
+- The gate does not demonstrate the fix: the 1.3.3-rc.1 gate ran bd without
+  it and got the same results, and no job log in either run mentions
+  `GT_ROOT`.
 
 ### Upgrade notes
 
-- Coming from 1.3.2 or earlier, read the [1.3.3-rc.1] **Upgrade notes** and
-  **Known issues** before upgrading. They still apply, except the dropped
-  `GT_ROOT`, which 1.3.4 fixes.
+- Coming from 1.3.2 or earlier, read the [1.3.3-rc.1] **Upgrade notes**
+  before upgrading. They still apply, except that `GT_ROOT` is no longer one
+  of the `.beads/.env` keys bd ignores.
+- The [1.3.3-rc.1] **Known issues** are not fixed in 1.3.4, whichever release
+  you upgrade from. 1.3.4 does not include the #7039 restore
+  ([#8047](https://github.com/gastownhall/beads/pull/8047)), so do not run
+  `bd compact` or `bd flatten` on a clone that adopted migration 0062 by
+  `bd dolt pull` or `bd bootstrap`, or was cloned after it
+  ([#7039](https://github.com/gastownhall/beads/issues/7039)).
 - The 1.3.2 upgrade note still applies: run `bd recompute-blocked` once per
   workspace whose store crossed migration 0059 under bd 1.3.0 or later,
   which includes any workspace first created by bd 1.2.x or earlier
