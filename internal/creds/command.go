@@ -63,11 +63,20 @@ var AllowedDoltEnvKeys = []string{
 // bd run inside a rig finds the city's formulas and molecules.
 //
 // What a committed value can reach, and why that is acceptable:
-//   - bd itself only reads from GT_ROOT. It appends $GT_ROOT/.beads/formulas
-//     as the last formula search path, loads $GT_ROOT/.beads/molecules.jsonl
-//     as template data (the town catalog loads first, so a town template wins
-//     over a same-ID template in ~/.beads), and prints it in diagnostics. None
-//     of these runs a command or picks a credential target.
+//   - bd reads from GT_ROOT: it appends $GT_ROOT/.beads/formulas as the last
+//     formula search path, loads $GT_ROOT/.beads/molecules.jsonl as template
+//     data (the town catalog loads first, so a town template wins over a
+//     same-ID template in ~/.beads), and prints it in diagnostics. None of
+//     these runs a command or picks a credential target.
+//   - bd also has commands that write or delete formula files in a directory
+//     chosen from the search paths: `bd formula convert` (by name, --all,
+//     --delete) and `bd mol distill` (first writable directory). When GT_ROOT
+//     came from .beads/.env (config.GTRootFromProjectEnv), those commands
+//     treat $GT_ROOT/.beads/formulas as read-only: --all skips it with a note,
+//     convert by name refuses, and distill falls through to the next writable
+//     directory. A caller who exports GT_ROOT in their shell can still write
+//     there, and an explicit path (convert ./x.formula.json, distill --output)
+//     is the caller's own choice.
 //   - Once imported, GT_ROOT is inherited by every child process. git, dolt,
 //     ssh, gh, editors and pagers ignore it. Gas Town's gt (run by
 //     `bd gate check --escalate` or as a mail delegate) consults it only after
