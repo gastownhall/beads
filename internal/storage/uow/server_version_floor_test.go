@@ -105,7 +105,7 @@ func TestOpenAndInitSchemaRefusesBelowRequiredMin(t *testing.T) {
 	doltversion.RequiredMin = doltversion.MustParse("99.0.0")
 	t.Cleanup(func() { doltversion.RequiredMin = prev })
 	for _, database := range []string{"floor_existing", "floor_fresh"} {
-		provider, err := openAndInitSchema(ctx, "tcp", ep, "", database, "root", "", "", false, "", providerOptions{})
+		provider, err := openAndInitSchema(ctx, "tcp", ep, "", database, "root", "", "", false, "", providerOptions{}, nil)
 		if provider != nil {
 			_ = provider.Close(ctx)
 			t.Errorf("%s: openAndInitSchema returned a provider along with its refusal", database)

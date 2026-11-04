@@ -118,6 +118,7 @@ go_test(
         "dependency_editor_contract_test.go",
         "dolt_sql_provider_lock_test.go",
         "dolt_sql_provider_test.go",
+        "doltserver_provider_recovery_test.go",
         "doltserver_provider_test.go",
         "doltserver_tx_test.go",
         "dualwrite_history_contract_test.go",

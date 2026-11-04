@@ -59,7 +59,7 @@ func NewDoltServerUOWProvider(
 	}
 
 	resolved := applyProviderOptions(opts)
-	ep, err := proxy.GetCreateDatabaseProxyServerEndpoint(absServerRootDir, proxy.OpenOpts{
+	openOpts := proxy.OpenOpts{
 		Backend:        backend,
 		ConfigFilePath: serverConfigFilePath,
 		LogFilePath:    serverLogFilePath,
@@ -68,10 +68,19 @@ func NewDoltServerUOWProvider(
 		Database:       database,
 		IdleTimeout:    idleTimeout,
 		Port:           proxyPort,
-	})
+	}
+	ep, err := proxy.GetCreateDatabaseProxyServerEndpoint(absServerRootDir, openOpts)
 	if err != nil {
 		return nil, fmt.Errorf("uow: get proxy endpoint: %w", err)
 	}
 
-	return openAndInitSchema(ctx, proxy.DataNetwork, ep, "", database, rootUser, rootPassword, "", teamServer, expectedProjectID, resolved)
+	// The resolver rediscovers this workspace's proxy when the endpoint just
+	// resolved stops answering — an idle-exited proxy leaves a long-lived
+	// provider (bd serve) dialing a dead port forever otherwise
+	// (gastownhall/beads#7295). Pinned to the endpoint the constructor
+	// resolved, unarmed until the open below succeeds, and reusing the SAME
+	// OpenOpts so rediscovery adopts or spawns under the workspace's own
+	// identity and idle policy rather than promoting anything to never-idle.
+	resolver := proxy.NewEndpointResolver(absServerRootDir, openOpts, ep)
+	return openAndInitSchema(ctx, proxy.DataNetwork, ep, "", database, rootUser, rootPassword, "", teamServer, expectedProjectID, resolved, resolver)
 }

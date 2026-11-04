@@ -173,22 +173,76 @@ func registerDataAddress(rootDir string, endpoint Endpoint) {
 	RegisterDataAddress(rootDir, endpoint)
 }
 
-func dialData(ctx context.Context, addr string) (net.Conn, error) {
-	value, ok := dataAddressRoots.Load(addr)
-	if !ok {
-		return nil, fmt.Errorf("dbproxy: unknown data address %q", addr)
+// dialStage names where an authenticated data dial gave up, so a long-lived
+// client can tell a dead proxy (recoverable by rediscovering the endpoint)
+// from a failure rediscovery cannot fix. The stages exist because the raw
+// errors are ambiguous across them: io.EOF from a refused dial and io.EOF from
+// an unproven listener mean different things, and context.DeadlineExceeded
+// before the TCP connect (the caller's budget was already spent) means a third.
+type dialStage uint8
+
+const (
+	// stageSecretRead: the workspace's proxy.secret could not be read. A
+	// missing secret may mean a retired topology (internal/…/migrate_dolt_mode
+	// removes it); redialing cannot recreate it, so it is never recoverable.
+	stageSecretRead dialStage = iota
+	// stagePreConnect: the caller's context was already done before the dial
+	// began. Not a proxy failure at all.
+	stagePreConnect
+	// stageInvalidAddress: the address the client was asked to dial is not a
+	// host:port. Misconfiguration, not a dead proxy.
+	stageInvalidAddress
+	// stageConnect: the TCP connect itself failed. A refusal or reset here is
+	// the shape of an idle-exited (or stopped) proxy.
+	stageConnect
+	// stageHandshake: the listener accepted but did not prove it holds the
+	// workspace secret — wrong proof, EOF, silence, reset or timeout. Either
+	// the proxy exited and something else took the port, or it is gone
+	// entirely; both are the rediscovery shapes.
+	stageHandshake
+)
+
+// stageError tags err with the dial stage it failed at. Unwrapping reaches
+// the underlying error, so existing callers keep matching on cause.
+type stageError struct {
+	stage dialStage
+	err   error
+}
+
+func (e *stageError) Error() string {
+	return e.err.Error()
+}
+
+func (e *stageError) Unwrap() error {
+	return e.err
+}
+
+// dialStageOf reports the stage a data-dial error failed at, and whether it
+// was tagged at all. An untagged error was not produced by authDataDial.
+func dialStageOf(err error) (dialStage, bool) {
+	var se *stageError
+	if errors.As(err, &se) {
+		return se.stage, true
 	}
-	rootDir, ok := value.(string)
-	if !ok {
-		return nil, fmt.Errorf("dbproxy: invalid data address registration for %q", addr)
+	return 0, false
+}
+
+// authDataDial dials addr and authenticates it as rootDir's proxy data port:
+// it reads the workspace secret, connects, and completes the BDPROXY1 exchange
+// before returning the connection. It is the shared body of the registered
+// bdproxy dialer (dialData) and the EndpointResolver, which needs the failure
+// stages to decide whether rediscovery can help.
+func authDataDial(ctx context.Context, rootDir, addr string) (net.Conn, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, &stageError{stage: stagePreConnect, err: fmt.Errorf("dbproxy: data dial %s: %w", addr, err)}
 	}
 	_, portStr, err := net.SplitHostPort(addr)
 	if err != nil {
-		return nil, fmt.Errorf("dbproxy: invalid data address %q: %w", addr, err)
+		return nil, &stageError{stage: stageInvalidAddress, err: fmt.Errorf("dbproxy: invalid data address %q: %w", addr, err)}
 	}
 	port, err := strconv.Atoi(portStr)
 	if err != nil || port <= 0 {
-		return nil, fmt.Errorf("dbproxy: invalid data port in %q", addr)
+		return nil, &stageError{stage: stageInvalidAddress, err: fmt.Errorf("dbproxy: invalid data port in %q", addr)}
 	}
 	// The address was registered only after readAndDial or spawn verified
 	// the proxy that owns it, so the pidfile is not re-read on every pool
@@ -199,15 +253,27 @@ func dialData(ctx context.Context, addr string) (net.Conn, error) {
 	// (clientDataHandshake) before the driver sends it anything.
 	secret, err := identity.ReadSecret(rootDir)
 	if err != nil {
-		return nil, fmt.Errorf("dbproxy: read data authentication secret: %w", err)
+		return nil, &stageError{stage: stageSecretRead, err: fmt.Errorf("dbproxy: read data authentication secret: %w", err)}
 	}
 	conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", addr)
 	if err != nil {
-		return nil, err
+		return nil, &stageError{stage: stageConnect, err: err}
 	}
 	if err := clientDataHandshake(ctx, conn, secret, port); err != nil {
 		_ = conn.Close()
-		return nil, err
+		return nil, &stageError{stage: stageHandshake, err: err}
 	}
 	return conn, nil
+}
+
+func dialData(ctx context.Context, addr string) (net.Conn, error) {
+	value, ok := dataAddressRoots.Load(addr)
+	if !ok {
+		return nil, fmt.Errorf("dbproxy: unknown data address %q", addr)
+	}
+	rootDir, ok := value.(string)
+	if !ok {
+		return nil, fmt.Errorf("dbproxy: invalid data address registration for %q", addr)
+	}
+	return authDataDial(ctx, rootDir, addr)
 }
