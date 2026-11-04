@@ -42,12 +42,9 @@ Contains workflow instructions that Junie reads automatically:
 
 ### MCP Config (`.junie/mcp/mcp.json`)
 
-<Warning>
-`bd setup junie` currently writes an MCP config that invokes `bd mcp`, a
-command that does not exist in current bd builds — that config will not
-start a server. Until the recipe is fixed, point Junie at the standalone
-`beads-mcp` server instead:
-</Warning>
+`bd setup junie` points Junie at the standalone `beads-mcp` server, launched
+with `uvx` (part of [uv](https://docs.astral.sh/uv/)), so `uvx` must be on the
+`PATH` Junie starts it with:
 
 ```json
 {
