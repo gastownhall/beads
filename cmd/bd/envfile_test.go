@@ -77,16 +77,20 @@ func TestLoadBeadsEnvFileRejectsCommands(t *testing.T) {
 		// admitted: DOLT_SSH_COMMAND runs a command in dolt's ssh transport,
 		// DOLT_ROOT_PATH redirects dolt's global config (which can name an
 		// executable credential helper), and a bare DOLT_* key is refused too.
-		{"DOLT_SSH_COMMAND", "only BEADS_*, BD_*, and the Dolt remote credential variables (DOLT_REMOTE_USER, DOLT_REMOTE_PASSWORD) are allowed in .beads/.env"},
-		{"DOLT_ROOT_PATH", "only BEADS_*, BD_*, and the Dolt remote credential variables (DOLT_REMOTE_USER, DOLT_REMOTE_PASSWORD) are allowed in .beads/.env"},
-		{"DOLT_PAGER", "only BEADS_*, BD_*, and the Dolt remote credential variables (DOLT_REMOTE_USER, DOLT_REMOTE_PASSWORD) are allowed in .beads/.env"},
-		{"dolt_ssh_command", "only BEADS_*, BD_*, and the Dolt remote credential variables (DOLT_REMOTE_USER, DOLT_REMOTE_PASSWORD) are allowed in .beads/.env"},
-		{"GIT_CONFIG_COUNT", "only BEADS_*, BD_*, and the Dolt remote credential variables (DOLT_REMOTE_USER, DOLT_REMOTE_PASSWORD) are allowed in .beads/.env"},
-		{"GIT_SSH_COMMAND", "only BEADS_*, BD_*, and the Dolt remote credential variables (DOLT_REMOTE_USER, DOLT_REMOTE_PASSWORD) are allowed in .beads/.env"},
-		{"GIT_ASKPASS", "only BEADS_*, BD_*, and the Dolt remote credential variables (DOLT_REMOTE_USER, DOLT_REMOTE_PASSWORD) are allowed in .beads/.env"},
-		{"SSH_ASKPASS", "only BEADS_*, BD_*, and the Dolt remote credential variables (DOLT_REMOTE_USER, DOLT_REMOTE_PASSWORD) are allowed in .beads/.env"},
-		{"LD_PRELOAD", "only BEADS_*, BD_*, and the Dolt remote credential variables (DOLT_REMOTE_USER, DOLT_REMOTE_PASSWORD) are allowed in .beads/.env"},
-		{"DYLD_INSERT_LIBRARIES", "only BEADS_*, BD_*, and the Dolt remote credential variables (DOLT_REMOTE_USER, DOLT_REMOTE_PASSWORD) are allowed in .beads/.env"},
+		{"DOLT_SSH_COMMAND", "only BEADS_*, BD_*, GT_ROOT, and the Dolt remote credential variables (DOLT_REMOTE_USER, DOLT_REMOTE_PASSWORD) are allowed in .beads/.env"},
+		{"DOLT_ROOT_PATH", "only BEADS_*, BD_*, GT_ROOT, and the Dolt remote credential variables (DOLT_REMOTE_USER, DOLT_REMOTE_PASSWORD) are allowed in .beads/.env"},
+		{"DOLT_PAGER", "only BEADS_*, BD_*, GT_ROOT, and the Dolt remote credential variables (DOLT_REMOTE_USER, DOLT_REMOTE_PASSWORD) are allowed in .beads/.env"},
+		{"dolt_ssh_command", "only BEADS_*, BD_*, GT_ROOT, and the Dolt remote credential variables (DOLT_REMOTE_USER, DOLT_REMOTE_PASSWORD) are allowed in .beads/.env"},
+		{"GIT_CONFIG_COUNT", "only BEADS_*, BD_*, GT_ROOT, and the Dolt remote credential variables (DOLT_REMOTE_USER, DOLT_REMOTE_PASSWORD) are allowed in .beads/.env"},
+		{"GIT_SSH_COMMAND", "only BEADS_*, BD_*, GT_ROOT, and the Dolt remote credential variables (DOLT_REMOTE_USER, DOLT_REMOTE_PASSWORD) are allowed in .beads/.env"},
+		{"GIT_ASKPASS", "only BEADS_*, BD_*, GT_ROOT, and the Dolt remote credential variables (DOLT_REMOTE_USER, DOLT_REMOTE_PASSWORD) are allowed in .beads/.env"},
+		{"SSH_ASKPASS", "only BEADS_*, BD_*, GT_ROOT, and the Dolt remote credential variables (DOLT_REMOTE_USER, DOLT_REMOTE_PASSWORD) are allowed in .beads/.env"},
+		{"LD_PRELOAD", "only BEADS_*, BD_*, GT_ROOT, and the Dolt remote credential variables (DOLT_REMOTE_USER, DOLT_REMOTE_PASSWORD) are allowed in .beads/.env"},
+		{"DYLD_INSERT_LIBRARIES", "only BEADS_*, BD_*, GT_ROOT, and the Dolt remote credential variables (DOLT_REMOTE_USER, DOLT_REMOTE_PASSWORD) are allowed in .beads/.env"},
+		// Only the exact orchestrator key GT_ROOT is admitted; its near
+		// misses and the rest of the GT_* namespace stay refused.
+		{"GT_TOWN_ROOT", "only BEADS_*, BD_*, GT_ROOT, and the Dolt remote credential variables (DOLT_REMOTE_USER, DOLT_REMOTE_PASSWORD) are allowed in .beads/.env"},
+		{"GT_ROOT_X", "only BEADS_*, BD_*, GT_ROOT, and the Dolt remote credential variables (DOLT_REMOTE_USER, DOLT_REMOTE_PASSWORD) are allowed in .beads/.env"},
 	} {
 		t.Run(tc.key, func(t *testing.T) {
 			dir := t.TempDir()
@@ -145,6 +149,41 @@ func TestLoadBeadsEnvFileAdmitsDoltRemoteCredentials(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestLoadBeadsEnvFileAdmitsGTRoot pins that the orchestrator root Gas City
+// writes into a rig's .beads/.env (`gc rig add`) still imports, without the
+// "ignoring" warning, so bd run in a rig keeps finding the city's formulas.
+// Shell environment still wins over the file.
+func TestLoadBeadsEnvFileAdmitsGTRoot(t *testing.T) {
+	for _, key := range []string{"GT_ROOT", "gt_root"} {
+		t.Run(key, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, ".env"), []byte(key+"=/city/root\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("GT_ROOT", "")
+			os.Unsetenv("GT_ROOT")
+			warning := captureStderr(t, func() { loadBeadsEnvFile(dir) })
+			if got := os.Getenv("GT_ROOT"); got != "/city/root" {
+				t.Errorf("GT_ROOT = %q, want %q (orchestrator root must import from .beads/.env)", got, "/city/root")
+			}
+			if strings.Contains(strings.ToUpper(warning), "IGNORING GT_ROOT") {
+				t.Errorf("GT_ROOT was warned about but should be admitted: %q", warning)
+			}
+		})
+	}
+	t.Run("shell env wins", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("GT_ROOT=/from/file\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("GT_ROOT", "/from/shell")
+		loadBeadsEnvFile(dir)
+		if got := os.Getenv("GT_ROOT"); got != "/from/shell" {
+			t.Errorf("GT_ROOT = %q, want the shell value %q", got, "/from/shell")
+		}
+	})
 }
 
 func TestLoadBeadsEnvFile(t *testing.T) {
