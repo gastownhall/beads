@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -18,6 +19,7 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
+	"github.com/steveyegge/beads/internal/execenv"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
@@ -26,8 +28,9 @@ import (
 // incrementalExportThreshold caps the number of changed issue IDs we'll
 // incrementally re-encode before falling back to a full export. At high
 // change counts the per-issue SQL work (bulk loaders × changed set) stops
-// being cheaper than one `SearchIssues(Limit:0)` sweep.
-const incrementalExportThreshold = 5000
+// being cheaper than one `SearchIssues(Limit:0)` sweep. A var only so a
+// test can exercise the fallback without seeding 5000 issues.
+var incrementalExportThreshold = 5000
 
 // doltWorkingRef is the literal dolt_diff() accepts as an endpoint meaning
 // "the current working set", including uncommitted writes. Passing this
@@ -713,7 +716,8 @@ func buildAutoExportFilter(ctx context.Context) (types.IssueFilter, map[string]b
 
 // exportToFile atomically exports issues + memories to the given file path.
 // Writes to a temp file first, then renames into place so readers never see
-// a partial or truncated export. Used by both `bd export -o` and auto-export.
+// a partial or truncated export. This is the full auto-export writer;
+// `bd export -o` goes through runExport and its exportSource instead.
 func exportToFile(ctx context.Context, path string, includeMemories bool) (issueCount, memoryCount int, err error) {
 	w, err := atomicfile.Create(path, 0o644)
 	if err != nil {
@@ -762,33 +766,35 @@ func exportToFile(ctx context.Context, path string, includeMemories bool) (issue
 		for i, issue := range issues {
 			issueIDs[i] = issue.ID
 		}
-		labelsMap, _ := store.GetLabelsForIssues(ctx, issueIDs)
-		allDeps, _ := store.GetDependencyRecordsForIssues(ctx, issueIDs)
-		commentsMap, _ := store.GetCommentsForIssues(ctx, issueIDs)
-		commentCounts, _ := store.GetCommentCounts(ctx, issueIDs)
-		depCounts, _ := store.GetDependencyCounts(ctx, issueIDs)
+		// Returned explicitly so the named err is set and the deferred
+		// Abort drops the temp file, keeping the previous export (GH#6870).
+		relations, err := loadClassicExportRelations(ctx, issueIDs)
+		if err != nil {
+			return 0, 0, err
+		}
 
 		for _, issue := range issues {
-			issue.Labels = labelsMap[issue.ID]
-			issue.Dependencies = allDeps[issue.ID]
-			issue.Comments = commentsMap[issue.ID]
+			issue.Labels = relations.labels[issue.ID]
+			issue.Dependencies = relations.deps[issue.ID]
+			issue.Comments = relations.comments[issue.ID]
 		}
 
 		// Write issues
 		enc := json.NewEncoder(w)
 		for _, issue := range issues {
-			counts := depCounts[issue.ID]
+			counts := relations.depCounts[issue.ID]
 			if counts == nil {
 				counts = &types.DependencyCounts{}
 			}
 			sanitizeZeroTime(issue)
+			stripCloneLocalFields(issue)
 			record := &exportIssueRecord{
 				RecordType: "issue",
 				IssueWithCounts: &types.IssueWithCounts{
 					Issue:           issue,
 					DependencyCount: counts.DependencyCount,
 					DependentCount:  counts.DependentCount,
-					CommentCount:    commentCounts[issue.ID],
+					CommentCount:    relations.commentCounts[issue.ID],
 				},
 			}
 			if err := enc.Encode(record); err != nil {
@@ -1072,6 +1078,10 @@ func gitIndexLockPath(path string, env []string) (string, error) {
 	return filepath.Join(gitDir, "index.lock"), nil
 }
 
+// hookEnvGOOS lets both hook filters exercise either key policy on every test host.
+// Process-wide seam: tests that swap it must not run in parallel.
+var hookEnvGOOS = runtime.GOOS
+
 // scrubGitHookEnv returns env with the GIT_* variables that can poison
 // git's repo/worktree auto-discovery or object-store resolution removed,
 // so git falls back to auto-discovery from cwd. The scrub is
@@ -1090,34 +1100,28 @@ func gitIndexLockPath(path string, env []string) (string, error) {
 //     GIT_CONFIG namespace, which includes _COUNT, _KEY_n, _VALUE_n,
 //     _GLOBAL, _SYSTEM, _NOSYSTEM, and the legacy GIT_CONFIG itself.
 func scrubGitHookEnv(env []string) []string {
+	return scrubGitHookEnvForOS(env, hookEnvGOOS)
+}
+
+func scrubGitHookEnvForOS(env []string, goos string) []string {
 	// The GIT_CONFIG prefix (no trailing "=") is intentional: it matches
 	// GIT_CONFIG=, GIT_CONFIG_COUNT=, GIT_CONFIG_KEY_n=, GIT_CONFIG_VALUE_n=,
 	// GIT_CONFIG_PARAMETERS=, GIT_CONFIG_GLOBAL=, GIT_CONFIG_SYSTEM=, and
 	// GIT_CONFIG_NOSYSTEM= — the whole family — in one entry. No standard
 	// git env var starts with GIT_CONFIG that we want to preserve.
-	prefixes := []string{
-		"GIT_DIR=",
-		"GIT_WORK_TREE=",
-		"GIT_INDEX_FILE=",
-		"GIT_COMMON_DIR=",
-		"GIT_PREFIX=",
-		"GIT_OBJECT_DIRECTORY=",
-		"GIT_ALTERNATE_OBJECT_DIRECTORIES=",
-		"GIT_CEILING_DIRECTORIES=",
-		"GIT_DISCOVERY_ACROSS_FILESYSTEM=",
-		"GIT_CONFIG",
-	}
-	out := make([]string, 0, len(env))
-	for _, e := range env {
-		skip := false
-		for _, p := range prefixes {
-			if strings.HasPrefix(e, p) {
-				skip = true
-				break
-			}
-		}
-		if !skip {
-			out = append(out, e)
+	cleaned := execenv.WithoutForOS(env, goos,
+		"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
+		"GIT_PREFIX", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+		"GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+	)
+	// Without owns a fresh slice, so this second filter cannot mutate env.
+	out := cleaned[:0]
+	for _, entry := range cleaned {
+		// Prefix policy also drops valueless GIT_CONFIG entries. Without
+		// intentionally preserves valueless exact keys such as GIT_DIR.
+		key := execenv.EntryKey(entry)
+		if !execenv.KeyHasPrefixForOS(key, "GIT_CONFIG", goos) {
+			out = append(out, entry)
 		}
 	}
 	return out
@@ -1271,6 +1275,10 @@ func tryIncrementalExport(ctx context.Context, fullPath, fromCommit, toCommit st
 	var records map[string][]byte
 	droppedByFilter := make(map[string]bool)
 	if len(upsertIDs) > 0 {
+		// TODO(batchgetter): this read is unbounded; issueops.BatchGetter caps a
+		// request at MaxGetManyIDs (1000) and this call site has not been
+		// audited for id volume or given chunking, so it still goes through
+		// GetIssuesByIDs rather than the role. See issueops.BatchGetter's doc.
 		issues, fetchErr := store.GetIssuesByIDs(ctx, upsertIDs)
 		if fetchErr != nil {
 			return 0, 0, nil, false, fmt.Errorf("GetIssuesByIDs: %w", fetchErr)
@@ -1508,8 +1516,9 @@ func loadExistingIssueLines(path string) (*orderedIssueLines, error) {
 }
 
 // encodeIssueRecords produces the JSON wire form for a batch of issues
-// using the same bulk-loader pattern the full export uses. Returns a map
-// from issue ID → line bytes (no trailing newline).
+// using the same bulk loader the full export uses. Returns a map from
+// issue ID → line bytes (no trailing newline), or an error and no records
+// when any relation fails to load (GH#6870).
 func encodeIssueRecords(ctx context.Context, issues []*types.Issue) (map[string][]byte, error) {
 	if len(issues) == 0 {
 		return nil, nil
@@ -1518,29 +1527,29 @@ func encodeIssueRecords(ctx context.Context, issues []*types.Issue) (map[string]
 	for i, iss := range issues {
 		ids[i] = iss.ID
 	}
-	labelsMap, _ := store.GetLabelsForIssues(ctx, ids)
-	allDeps, _ := store.GetDependencyRecordsForIssues(ctx, ids)
-	commentsMap, _ := store.GetCommentsForIssues(ctx, ids)
-	commentCounts, _ := store.GetCommentCounts(ctx, ids)
-	depCounts, _ := store.GetDependencyCounts(ctx, ids)
+	relations, err := loadClassicExportRelations(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
 
 	out := make(map[string][]byte, len(issues))
 	for _, iss := range issues {
-		iss.Labels = labelsMap[iss.ID]
-		iss.Dependencies = allDeps[iss.ID]
-		iss.Comments = commentsMap[iss.ID]
-		counts := depCounts[iss.ID]
+		iss.Labels = relations.labels[iss.ID]
+		iss.Dependencies = relations.deps[iss.ID]
+		iss.Comments = relations.comments[iss.ID]
+		counts := relations.depCounts[iss.ID]
 		if counts == nil {
 			counts = &types.DependencyCounts{}
 		}
 		sanitizeZeroTime(iss)
+		stripCloneLocalFields(iss)
 		rec := &exportIssueRecord{
 			RecordType: "issue",
 			IssueWithCounts: &types.IssueWithCounts{
 				Issue:           iss,
 				DependencyCount: counts.DependencyCount,
 				DependentCount:  counts.DependentCount,
-				CommentCount:    commentCounts[iss.ID],
+				CommentCount:    relations.commentCounts[iss.ID],
 			},
 		}
 		data, err := json.Marshal(rec)

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 
 	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/ceiling"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/utils"
@@ -63,7 +64,8 @@ func resolveBeadsDirForDBPath(dbPath string) string {
 	}
 
 	addAncestorCandidates := func(path string) {
-		for dir := path; dir != "" && dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
+		bound := ceiling.For(path)
+		for dir := path; dir != "" && dir != filepath.Dir(dir) && !bound.Excludes(dir); dir = filepath.Dir(dir) {
 			addCandidate(filepath.Join(dir, ".beads"))
 			if filepath.Base(dir) == ".beads" {
 				addCandidate(dir)
@@ -89,7 +91,10 @@ func resolveBeadsDirForDBPath(dbPath string) string {
 	}
 
 	for _, beadsDir := range candidates {
-		cfg, err := configfile.Load(beadsDir)
+		// Read-only: --db, BEADS_DB and create --repo resolve their target
+		// here before command admission classifies it, and configfile.Load
+		// would migrate a candidate's legacy config.json on the way.
+		cfg, err := configfile.LoadForDiscovery(beadsDir)
 		if err != nil || cfg == nil {
 			continue
 		}

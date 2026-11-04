@@ -48,29 +48,35 @@ func (r *issueRelations) Related(ctx context.Context, request publicops.RelatedR
 	if err := storageissueops.ValidateRelatedRequest(request); err != nil {
 		return nil, err
 	}
+	return RunTxRead(ctx, r.provider, func(ctx context.Context, uw UnitOfWork) ([]*publicops.RelatedIssue, error) {
+		return RelatedInUOW(ctx, uw, request)
+	})
+}
+
+// RelatedInUOW is the Relations body, run inside the caller's unit of work.
+// The request must already be validated.
+func RelatedInUOW(ctx context.Context, uw UnitOfWork, request publicops.RelatedRequest) ([]*publicops.RelatedIssue, error) {
 	direction := domain.DepDirectionOut
 	if request.Direction == publicops.RelationIn {
 		direction = domain.DepDirectionIn
 	}
-	return RunTxRead(ctx, r.provider, func(ctx context.Context, uw UnitOfWork) ([]*publicops.RelatedIssue, error) {
-		issue, isWisp, err := workapi.GetIssueOrWisp(ctx, workapi.NewUOWDetailSource(uw), request.ID)
-		if err != nil {
-			return nil, err
-		}
-		filter := domain.DepListFilter{Direction: direction}
-		var items []*publicops.RelatedIssue
-		if isWisp {
-			items, err = uw.DependencyUseCase().ListWispWithIssueMetadata(ctx, issue.ID, filter)
-		} else {
-			items, err = uw.DependencyUseCase().ListWithIssueMetadata(ctx, issue.ID, filter)
-		}
-		if err != nil {
-			return nil, err
-		}
-		// The filter runs HERE rather than in the use-case call above so both
-		// implementations narrow and order through one function; passing
-		// filter.Types down would put the narrowing in the query on one side
-		// and in Go on the other.
-		return storageissueops.FinishRelatedPage(items, request.Types), nil
-	})
+	issue, isWisp, err := workapi.GetIssueOrWisp(ctx, workapi.NewUOWDetailSource(uw), request.ID)
+	if err != nil {
+		return nil, err
+	}
+	filter := domain.DepListFilter{Direction: direction}
+	var items []*publicops.RelatedIssue
+	if isWisp {
+		items, err = uw.DependencyUseCase().ListWispWithIssueMetadata(ctx, issue.ID, filter)
+	} else {
+		items, err = uw.DependencyUseCase().ListWithIssueMetadata(ctx, issue.ID, filter)
+	}
+	if err != nil {
+		return nil, err
+	}
+	// The filter runs HERE rather than in the use-case call above so both
+	// implementations narrow and order through one function; passing
+	// filter.Types down would put the narrowing in the query on one side
+	// and in Go on the other.
+	return storageissueops.FinishRelatedPage(items, request.Types), nil
 }

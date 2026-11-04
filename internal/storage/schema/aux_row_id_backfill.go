@@ -268,8 +268,11 @@ func clearAuxRekeyDrifted(ctx context.Context, db DBConn) error {
 
 // auxRekeyTable describes one table covered by the re-key. columns is the
 // frozen SELECT list of every non-id column, in creation order, with datetime
-// columns CAST to CHAR server-side so the scanned text is identical across
-// drivers and connection settings.
+// columns rendered via DATE_FORMAT(x, '%Y-%m-%d %H:%i:%s') server-side so the
+// scanned text matches issueops.AuxTimeLayout — the Go-side stamp every
+// insert-time row binds — byte-for-byte, rather than depending on
+// CAST(x AS CHAR)'s engine-default rendering (see
+// TestAuxTimeDateFormatMatchesGoRendering in internal/storage/dolt).
 //
 // These lists are part of the id derivation and are FROZEN: they must keep
 // naming exactly the columns the tables had when this backfill shipped, even
@@ -290,19 +293,19 @@ type auxRekeyTable struct {
 var auxRekeyTables = []auxRekeyTable{
 	{
 		name:    "events",
-		columns: "issue_id, event_type, actor, old_value, new_value, comment, CAST(created_at AS CHAR)",
+		columns: "issue_id, event_type, actor, old_value, new_value, comment, DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s')",
 	},
 	{
 		name:    "comments",
-		columns: "issue_id, author, text, CAST(created_at AS CHAR)",
+		columns: "issue_id, author, text, DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s')",
 	},
 	{
 		name:    "issue_snapshots",
-		columns: "issue_id, CAST(snapshot_time AS CHAR), compaction_level, original_size, compressed_size, original_content, archived_events",
+		columns: "issue_id, DATE_FORMAT(snapshot_time, '%Y-%m-%d %H:%i:%s'), compaction_level, original_size, compressed_size, original_content, archived_events",
 	},
 	{
 		name:    "compaction_snapshots",
-		columns: "issue_id, compaction_level, snapshot_json, CAST(created_at AS CHAR)",
+		columns: "issue_id, compaction_level, snapshot_json, DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s')",
 	},
 }
 
@@ -572,7 +575,17 @@ func rekeyAuxRowTable(ctx context.Context, db DBConn, t auxRekeyTable) (bool, er
 	if err != nil {
 		return false, err
 	}
-	nFields := strings.Count(t.columns, ",") + 1
+	// Derive the field count from the driver's own column list rather than
+	// counting commas in t.columns: a column expression can contain an
+	// internal comma (DATE_FORMAT(x, '%Y-%m-%d %H:%i:%s')'s format-string
+	// argument), which a naive strings.Count over-counts as an extra
+	// top-level field.
+	colNames, err := rows.Columns()
+	if err != nil {
+		_ = rows.Close()
+		return false, err
+	}
+	nFields := len(colNames) - 1
 	groups := make(map[string][]string)
 	for rows.Next() {
 		var id string

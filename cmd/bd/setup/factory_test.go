@@ -82,7 +82,6 @@ Beads content
 More content`,
 			expected: `# My Project
 
-
 More content`,
 		},
 		{
@@ -97,7 +96,6 @@ Beads content
 			expected: `# My Project
 
 Content
-
 `,
 		},
 		{
@@ -111,9 +109,39 @@ Content
 			expected: "# My Project\n<!-- BEGIN BEADS INTEGRATION -->\nContent",
 		},
 		{
-			name:     "preserve surrounding whitespace and unrelated content",
+			name:     "rejoin surrounding content with one blank line",
 			content:  "Header\n\n" + agents.EmbeddedBeadsSection() + "\n\nFooter\n",
-			expected: "Header\n\n\n\nFooter\n",
+			expected: "Header\n\nFooter\n",
+		},
+		{
+			name:     "remove section at top",
+			content:  agents.EmbeddedBeadsSection() + "\n# My Project\n",
+			expected: "# My Project\n",
+		},
+		{
+			name:     "remove section from a new agents file",
+			content:  createNewAgentsFile(),
+			expected: strings.Replace(createNewAgentsFile(), agents.RenderSection(agents.ProfileFull)+"\n\n", "", 1),
+		},
+		{
+			name:     "CRLF line endings",
+			content:  "Header\r\n\r\n<!-- BEGIN BEADS INTEGRATION -->\r\nBeads content\r\n<!-- END BEADS INTEGRATION -->\r\n\r\nFooter\r\n",
+			expected: "Header\r\n\r\nFooter\r\n",
+		},
+		{
+			name:     "no blank line added where the section had none",
+			content:  "Header\n<!-- BEGIN BEADS INTEGRATION -->\nBeads content\n<!-- END BEADS INTEGRATION -->\nFooter\n",
+			expected: "Header\nFooter\n",
+		},
+		{
+			name:     "marker sharing a line with text is cut exactly",
+			content:  "Intro <!-- BEGIN BEADS INTEGRATION -->\nBeads content\n<!-- END BEADS INTEGRATION -->\n\nFooter\n",
+			expected: "Intro \nFooter\n",
+		},
+		{
+			name:     "file holding only the section becomes empty",
+			content:  agents.EmbeddedBeadsSection(),
+			expected: "",
 		},
 	}
 

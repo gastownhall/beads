@@ -167,8 +167,10 @@ var (
 	// is threading it through the UOW reader the way `list` already does, so
 	// the refusal itself is the gap.
 	maxRowsRefusal = refused("proxy.max_rows.unsupported", "--max-rows / BEADS_MAX_ROWS is not supported in proxied-server mode", ProxyReasonUnimplemented, trackLongTail)
-	// `list --watch` is routed, so watching is possible over the provider;
-	// nothing else has been wired to it.
+	// The mode-wide default for a --watch that has not been wired to the
+	// provider. Both commands that register the flag (`list`, `show`) poll the
+	// provider and are honored per-command below, so this refuses only a
+	// future --watch until someone routes it.
 	watchRefusal = refused("proxy.watch.unsupported", "watch mode not supported in proxied-server mode", ProxyReasonUnimplemented, trackLongTail)
 	// --repo routes to another workspace, bypassing the proxied root entirely,
 	// which is why it is design rather than a gap. `bd create` is the only
@@ -219,7 +221,7 @@ var proxyCapabilityMatrix = map[ProxyMode]map[ProxyCapability]proxyCapabilityRul
 // command line can reach. TestProxyCapabilityRowsNameFlagsTheCommandRegisters
 // enforces both directions of that rule.
 var proxyCommandCapabilities = map[string]map[ProxyMode]map[ProxyCapability]proxyCapabilityRule{
-	"show":            {ProxyModeProxied: {ProxyCapWatch: watchRefusal}},
+	"show":            {ProxyModeProxied: {ProxyCapWatch: honored()}},
 	"list":            {ProxyModeProxied: {ProxyCapWatch: honored(), ProxyCapMaxRows: honored(), ProxyCapRepo: notApplicable()}},
 	"dep tree":        {ProxyModeProxied: {ProxyCapMaxRows: honored()}},
 	"ready":           {ProxyModeProxied: {ProxyCapMaxRows: maxRowsRefusal}},
@@ -347,11 +349,6 @@ func validateProxyCapabilitiesBeforeProvider(cmd *cobra.Command) error {
 	path := commandRegistryPath(cmd)
 	if path == "create" && cmd.Flags().Changed("repo") {
 		return HandleProxyCapabilityError(AssertProxyCapability(ProxyModeProxied, ProxyCapRepo))
-	}
-	if path == "show" {
-		if watch, _ := cmd.Flags().GetBool("watch"); watch {
-			return HandleProxyCapabilityError(AssertProxyCommandCapability(path, ProxyModeProxied, ProxyCapWatch))
-		}
 	}
 	if path == "ready" && !readyGatedArm(cmd) {
 		// --claim is NOT exempt. The proxied ready role cannot enforce a row

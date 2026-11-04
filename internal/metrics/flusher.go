@@ -32,10 +32,14 @@ func RunSendMetrics() int {
 	// children on a backed-up spool were observed alive for ~15 minutes
 	// against this 30s advertised bound (GH#5871). Giving it a budget bounds
 	// the part that ran away. It does not make the child's total wall clock
-	// flushTimeout: the prune may still overrun (see PruneQueue, which
-	// finishes its listing when stopping would leave the queue unbounded),
-	// eventkit's own flush prologue lists the directory unbounded, and the
-	// prune's cap-unlink pass runs after the budget check that admitted it.
+	// flushTimeout. The prune's own overrun is now at most one chunk of stats,
+	// plus the unlinks that chunk's own cap evictions perform: it consults this
+	// deadline once per directory chunk and stops at the first boundary past it
+	// with no exception, because its caps are applied inline as the walk goes
+	// rather than in a pass after the budget check that admitted it
+	// (be-wwy2.3 — applying them inline is what moved those unlinks into the
+	// budgeted region). What is still un-budgeted is eventkit's own
+	// flush prologue, which lists the directory unbounded.
 	pruneCtx, cancelPrune := context.WithTimeout(context.Background(), flushTimeout)
 	defer cancelPrune()
 

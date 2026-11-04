@@ -12,20 +12,21 @@ import (
 	"github.com/steveyegge/beads/internal/testutil"
 )
 
-// findDroppedDirCmd locates the .dolt_dropped_databases directory anywhere in
-// the container.
+// findDroppedDirCmd locates the .dolt_dropped_databases directory under the
+// server's data directory.
 //
-// It deliberately does NOT use `find -xdev`. The Dolt image declares
-// VOLUME /var/lib/dolt (`docker image inspect dolthub/dolt-sql-server:2.2.0`
-// -> `{"/var/lib/dolt":{}}`), so the data dir is a *separate mount* from `/`:
-// inside the container `stat -c %d / /var/lib/dolt` reports different device
-// IDs. `-xdev` stops the walk dead at that boundary, so it never reaches the
-// data dir at all — the probe returned "" on every run, the entry count was
-// always 0, and the leak assertion below was vacuously true whether or not
-// dropBenchDB purged anything (PR #5792 review, finding 1). The pseudo
-// filesystems `-xdev` was there to skip are pruned explicitly instead.
-const findDroppedDirCmd = `find / -maxdepth 6 \( -path /proc -o -path /sys -o -path /dev \) -prune ` +
-	`-o -type d -name .dolt_dropped_databases -print 2>/dev/null`
+// It is relative on purpose: IsolatedDoltContainer.Exec runs with the data
+// directory as its working directory in both test server backends (the
+// container's WORKDIR is its data dir, /var/lib/dolt; the local backend runs
+// the command on the host in the local server's data dir). A walk from `/`
+// would, with the local backend, search the host instead of one server's data.
+//
+// Walking from `.` also sidesteps the trap an earlier `find / -xdev` fell into:
+// the image declares VOLUME /var/lib/dolt, a separate mount from `/`, and
+// `-xdev` stopped at that boundary, so the probe returned "" on every run and
+// the leak assertion below was vacuously true (PR #5792 review, finding 1).
+// requireLeakIsObservable (the positive control) guards against a blind probe.
+const findDroppedDirCmd = `find . -maxdepth 4 -type d -name .dolt_dropped_databases -print 2>/dev/null`
 
 // TestBenchDBPurgeDoesNotLeak is the regression gate for be-pq5: dropBenchDB
 // must DROP and then PURGE so the dropped-databases dir does not grow across
@@ -35,8 +36,8 @@ const findDroppedDirCmd = `find / -maxdepth 6 \( -path /proc -o -path /sys -o -p
 //
 // Dolt 1.86 exposes no SQL view for the dropped-databases list, so the only
 // way to detect a leak is to count entries in the server's
-// .dolt_dropped_databases/ directory, which has no host-visible path — hence
-// reading it by exec'ing into the container.
+// .dolt_dropped_databases/ directory, which with the container backend has no
+// host-visible path — hence reading it through IsolatedDoltContainer.Exec.
 //
 // This runs against its own isolated container, not the shared TestMain one.
 // Six sites in this package refuse to DROP DATABASE against the shared

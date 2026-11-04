@@ -382,6 +382,12 @@ func TestReplacesExistingNotes(t *testing.T) {
 			fields:   map[string]any{"notes": "unchanged notes"},
 			want:     false,
 		},
+		{
+			name:     "explicit clear",
+			existing: "old notes",
+			fields:   map[string]any{"notes": ""},
+			want:     false,
+		},
 	}
 
 	for _, tt := range tests {

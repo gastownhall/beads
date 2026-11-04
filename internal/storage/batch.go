@@ -30,7 +30,10 @@ type BatchCreateOptions struct {
 	// leave it false.
 	RejectStaleUpserts bool
 	// SkipDependencyValidationErrors skips dependency validation failures that
-	// legacy imports tolerated, such as cycles or self-dependencies.
+	// legacy imports tolerated: typed refusals of an edge (a cycle, a
+	// self-dependency, or a blocker in the issue's own hierarchy). An error
+	// from the validation queries themselves is still returned, never recorded
+	// as a skipped edge.
 	SkipDependencyValidationErrors bool
 	// OnSkippedDependency records dependency edges skipped during batch create.
 	OnSkippedDependency func(issueID, dependsOnID, reason string)
@@ -40,4 +43,16 @@ type BatchCreateOptions struct {
 	// them as skipped rather than created. May fire more than once per issue
 	// if the enclosing transaction retries; callers should dedup by ID.
 	OnStaleRejected func(issueID string)
+	// OnRetiredID, when set, makes an UPSERT-mode batch (CreateOnly false)
+	// skip a row whose explicit id a retaining retention sweep retired and
+	// report it here instead of refusing the batch with
+	// *issueops.IdempotencyExpiredError. The skipped row writes nothing — no
+	// row, labels, comments or edges — and an edge into it is reported
+	// through OnSkippedDependency. ConflictSkip skips such rows too, and
+	// still reports each one here when this is set, so a ConflictSkip caller
+	// that counts the rows it wrote can leave out the retired ones. It is how
+	// an import reports a swept row rather than resurrecting it. May fire more
+	// than once per issue if the enclosing transaction retries; callers
+	// should dedup by ID.
+	OnRetiredID func(issueID string)
 }

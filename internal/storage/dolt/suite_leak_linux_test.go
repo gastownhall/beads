@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/testutil"
+	"github.com/steveyegge/beads/internal/testutil/bazeltest"
 )
 
 // This process boundary exercises the real TestMain allocation and exit policy,
@@ -66,6 +68,10 @@ func TestSuiteFixtureLeakFailsOwningSuite(t *testing.T) {
 	defer writeEnd.Close()
 	t.Setenv("BEADS_SUITE_LEAK_PROBE", "1")
 	t.Setenv("BEADS_TEST_SKIP", "dolt")
+	// The child skips Dolt on purpose, so a lane's fail-closed switch (set
+	// when this suite runs against a required server) must not turn that
+	// skip into a FATAL before the child reaches its leak sweep.
+	t.Setenv(testutil.EnvRequireDoltContainer, "")
 	t.Setenv(doltserver.AllowLeakEnv, "")
 	// This child is a complete suite, not one of the schema-init helpers
 	// which deliberately bypass suite ownership and shutdown.
@@ -75,6 +81,7 @@ func TestSuiteFixtureLeakFailsOwningSuite(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	child := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestSuiteFixtureLeakFailsOwningSuite$", "-test.count=1")
+	child.Env = bazeltest.ShardFreeEnv(os.Environ())
 	child.ExtraFiles = []*os.File{readEnd}
 	out, err := child.CombinedOutput()
 	var exitErr *exec.ExitError

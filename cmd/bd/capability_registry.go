@@ -79,6 +79,9 @@ const (
 	trackSync        = "proxied-parity S5 (bd sync)"
 	trackDegradation = "proxied-parity S6 (doctor, config show, degradations)"
 	trackLongTail    = "proxied-parity S7 (long-tail policy pass)"
+	// Versioned history (gastownhall/beads#6132) is not a proxied-parity slice:
+	// its reads need a storage.VersionLister over the proxied uow provider.
+	trackVersionedHistory = "versioned history: VersionLister over the proxied uow provider (gastownhall/beads#6132)"
 )
 
 // capabilityRow is one command-path policy row. ArgSet is the sorted set of
@@ -324,12 +327,13 @@ var proxyCapabilityRegistry = []capabilityRow{
 	refusedPath("repo sync", "proxy.repo.unsupported", ProxyReasonDesign, ""),
 
 	// --- dolt version-control verbs -----------------------------------------
-	// CALL DOLT_PUSH/DOLT_PULL/DOLT_COMMIT are SQL procedures and the generic
-	// repository that wraps them is already written; these need a use case and
-	// a route, not proxy work. `dolt remote remove` is already routed, which is
-	// the precedent.
-	refusedPath("dolt commit", "proxy.dolt_commit.unsupported", ProxyReasonUnimplemented, trackVersionCtl).
-		withHistory(HistoryDirectOnly),
+	// CALL DOLT_PUSH/DOLT_PULL are SQL procedures and the generic repository
+	// that wraps them is already written; these need a use case and a route,
+	// not proxy work. `dolt remote remove` is already routed, which is the
+	// precedent — and `dolt commit` has now followed it: GH#4995 supplied the
+	// use case (it is the flush point dolt.auto-commit=batch/off defers to) and
+	// runDoltCommitProxiedServer supplied the route, so its row moved to the
+	// routed-history block below.
 	refusedPath("dolt push", "proxy.dolt_push.unsupported", ProxyReasonUnimplemented, trackVersionCtl).
 		withHistory(HistoryDirectOnly),
 	refusedPath("dolt pull", "proxy.dolt_pull.unsupported", ProxyReasonUnimplemented, trackVersionCtl).
@@ -441,10 +445,24 @@ var proxyCapabilityRegistry = []capabilityRow{
 	{Path: "duplicates", ArgSet: "--auto-merge --dry-run", Rule: proxyCapabilityRule{Outcome: ProxyOutcomeHonored}},
 
 	// --- routed history -----------------------------------------------------
-	// The two paths that already have a proxied route, recorded so the class is
+	// The paths that already have a proxied route, recorded so the class is
 	// asserted rather than remembered.
 	permitted("history").withHistory(HistoryProxySupported),
 	permitted("dolt remote remove").withHistory(HistoryProxySupported),
+	// `dolt commit` is routed by runDoltCommitProxiedServer. It is also the
+	// flush point dolt.auto-commit=batch/off defers to (GH#4995), so refusing it
+	// at the front door would leave those modes with no way to flush.
+	permitted("dolt commit").withHistory(HistoryProxySupported),
+
+	// --- versioned history ----------------------------------------------------
+	// `bd versions` is a pure read (issueops.ListVersionsInTx in one read
+	// transaction), so nothing about it is unsafe on a shared backend. It is
+	// refused only because no proxied route exists yet: it reaches the backend
+	// through the optional storage.VersionLister, which the dolt and embedded
+	// stores implement and the uow provider does not. Permitting it would open
+	// the proxied provider in the root pre-run and then fail untyped at
+	// errVersionsUnsupported, so it is refused here, before any side effect.
+	refusedPath("versions", "proxy.versions.unsupported", ProxyReasonUnimplemented, trackVersionedHistory),
 
 	// --- untyped refusals inside RunE ---------------------------------------
 	// The gate permits these paths and the command refuses itself with a bare
@@ -488,7 +506,7 @@ var proxyPermittedPaths = []string{
 	"comments", "comments add", "comments list",
 	"dep", "dep add", "dep cycles", "dep list", "dep relate", "dep remove", "dep tree", "dep unrelate",
 	"kv clear", "kv get", "kv list", "kv set",
-	"label add", "label list", "label list-all", "label propagate", "label remove",
+	"label add", "label list", "label list-all", "label propagate", "label remove", "label rename",
 
 	// molecules, epics, todos, state
 	"epic close-eligible", "epic status",
@@ -506,7 +524,7 @@ var proxyPermittedPaths = []string{
 
 	// workspace lifecycle and configuration
 	"bootstrap", "config apply", "config drift", "config get", "config list", "config set",
-	"config set-many", "config show", "config unset", "config validate", "context",
+	"config set-many", "config show", "config unset", "config validate", "connect", "context",
 	"init", "init-safety", "onboard", "preflight", "quickstart", "schema", "setup", "where",
 	"version", "worktree create", "worktree info", "worktree list", "worktree remove",
 

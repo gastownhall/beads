@@ -43,6 +43,10 @@ type listInput struct {
 func gatherListInput(cmd *cobra.Command) (listInput, error) {
 	in := listInput{}
 
+	// The custom filter values persist across in-process Execute() calls;
+	// clear them once this read has copied them out.
+	defer resetListFilterFlags(cmd.Flags())
+
 	in.Status, _ = cmd.Flags().GetString("status")
 	if in.Status == "" {
 		in.Status, _ = cmd.Flags().GetString("state")
@@ -65,6 +69,16 @@ func gatherListInput(cmd *cobra.Command) (listInput, error) {
 	if strings.EqualFold(in.formatStr, "json") {
 		jsonOutput = true
 		in.formatStr = ""
+	} else if in.formatStr != "" && cmd.Flags().Changed("format") && !commandJSONFlagChanged(cmd) {
+		// A --format the caller typed outranks a json default from config or
+		// the environment (GH#6278). The root pre-run promotes `json: true`
+		// into jsonOutput unless the ROOT --format changed, but this command's
+		// own --format shadows the root one, so that check never sees it and
+		// the JSON branch would replace the requested graph or template. An
+		// explicit --json still wins (the !commandJSONFlagChanged conjunct
+		// above is what preserves it); note no flag's help text states that
+		// precedence, so this comment is its only record.
+		jsonOutput = false
 	}
 	in.jsonOutput = jsonOutput
 
@@ -91,6 +105,7 @@ func gatherListInput(cmd *cobra.Command) (listInput, error) {
 	in.NoLabels, _ = cmd.Flags().GetBool("no-labels")
 
 	in.Brief, _ = cmd.Flags().GetBool("brief")
+	in.IncludeComments, _ = cmd.Flags().GetBool("include-comments")
 	in.SkipLabels, _ = cmd.Flags().GetBool("skip-labels")
 	if in.SkipLabels {
 		conflicts := skipLabelsConflicts(in.Labels, in.LabelsAny, in.LabelPattern, in.LabelRegex, in.ExcludeLabels, in.NoLabels)
@@ -248,6 +263,13 @@ func gatherListInput(cmd *cobra.Command) (listInput, error) {
 	in.prettyFormat = (prettyFormat || treeFormat) && !in.jsonOutput && in.formatStr == ""
 	in.watchMode, _ = cmd.Flags().GetBool("watch")
 	if in.watchMode {
+		// --watch re-renders the pretty listing on every tick, so a --format
+		// template would be dropped without a word (GH#6277). Refused here,
+		// ahead of the route split, so the direct and proxied routes answer
+		// the same way.
+		if in.formatStr != "" {
+			return in, HandleError("--format cannot be combined with --watch; --watch always renders the pretty listing")
+		}
 		in.prettyFormat = true
 	}
 	in.noPager, _ = cmd.Flags().GetBool("no-pager")
@@ -258,7 +280,7 @@ func gatherListInput(cmd *cobra.Command) (listInput, error) {
 	// issueops.Reader.List, whose query reads types.IssueFilter.Lite; the three
 	// below leave that query.
 	//
-	//   --watch re-queries on a ticker through loadWatchedIssues, whose --ready
+	//   --watch re-queries every poll interval through loadWatchedIssues, whose --ready
 	//   arm calls the bare GetReadyWork and whose --parent arm walks the tree;
 	//   neither reads Lite.
 	//

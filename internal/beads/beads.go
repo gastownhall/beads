@@ -13,14 +13,17 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/steveyegge/beads/internal/ceiling"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/git"
+	"github.com/steveyegge/beads/internal/gitenv"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/backends"
 	"github.com/steveyegge/beads/internal/utils"
@@ -228,12 +231,12 @@ func preferStableBranchWorktreeBeadsDir(beadsDir string) string {
 		return ""
 	}
 
-	branch, err := gitOutput(repoRoot, "rev-parse", "--abbrev-ref", "HEAD")
+	branch, err := selectedBeadsGitOutput(repoRoot, "rev-parse", "--abbrev-ref", "HEAD")
 	if err != nil || branch != "HEAD" {
 		return ""
 	}
 
-	head, err := gitOutput(repoRoot, "rev-parse", "HEAD")
+	head, err := selectedBeadsGitOutput(repoRoot, "rev-parse", "HEAD")
 	if err != nil || head == "" {
 		return ""
 	}
@@ -282,9 +285,21 @@ func isDetachedCommitWorktreePath(path string) bool {
 }
 
 func gitOutput(dir string, args ...string) (string, error) {
+	return gitOutputEnv(nil, dir, args...)
+}
+
+// selectedBeadsGitOutput probes the repository of an already selected .beads path.
+// The shared filter retains NOSYSTEM and null GLOBAL/SYSTEM suppression,
+// while discarding custom config paths and inline config overrides.
+func selectedBeadsGitOutput(dir string, args ...string) (string, error) {
+	return gitOutputEnv(gitenv.ScrubRouting(os.Environ()), dir, args...)
+}
+
+func gitOutputEnv(env []string, dir string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...) //nolint:gosec // args are internal, not user-supplied
+	cmd.Env = env
 	output, err := cmd.Output()
 	if err != nil {
 		return "", err
@@ -293,7 +308,7 @@ func gitOutput(dir string, args ...string) (string, error) {
 }
 
 func listWorktrees(repoRoot string) ([]worktreeInfo, error) {
-	output, err := gitOutput(repoRoot, "worktree", "list", "--porcelain")
+	output, err := selectedBeadsGitOutput(repoRoot, "worktree", "list", "--porcelain")
 	if err != nil {
 		return nil, err
 	}
@@ -348,16 +363,59 @@ type RedirectInfo struct {
 // BEADS_DIR is set. This handles the case where BEADS_DIR is pre-set to the redirect target
 // (e.g., by shell environment or tooling), but we still need to detect that a redirect exists.
 func GetRedirectInfo() RedirectInfo {
+	return redirectInfoFor(findLocalBdsDirInRepo(), findLocalBeadsDir)
+}
+
+// GetDiscoveredRedirectInfo is GetRedirectInfo without the BEADS_DIR override:
+// it reports the redirect that discovery finds from the cwd, the one the cwd's
+// own workspace holds. GetRedirectInfo cannot answer that once BEADS_DIR is
+// set, because when the repo root's .beads holds no redirect it checks
+// BEADS_DIR itself. A workspace redirect nested below the repo root or
+// inherited by a git worktree is then masked, and a BEADS_DIR naming another
+// workspace's redirected .beads reports that redirect as if the cwd held it.
+func GetDiscoveredRedirectInfo() RedirectInfo {
+	return redirectInfoFor(findLocalBdsDirInRepo(), findDiscoveredLocalBeadsDir)
+}
+
+// GetRedirectInfoFrom is GetRedirectInfo for the workspace at dir rather than
+// the process cwd: the .beads directory at dir's git repository root is
+// checked for a redirect first, then the nearest .beads walking up from dir.
+// BEADS_DIR is not consulted, since a caller asking about dir has already
+// resolved it (under `bd -C dir` it names the redirect target itself, which
+// would mask the clone's redirect). Used by `bd -C dir prime` so the redirect
+// notice describes the primed workspace (gastownhall/beads#5509).
+//
+// NOTE: the non-git fallback here is the walk-up probe alone, so relative to
+// GetRedirectInfo this drops three cwd-specific tiers: BEADS_DIR (deliberate,
+// see above), the worktree-local redirect / separate-DB probe, and
+// GetWorktreeFallbackBeadsDir. Inside a git worktree those tiers can answer
+// differently, so a caller that has not already resolved dir the way
+// `bd -C dir` does wants GetRedirectInfo, not this.
+func GetRedirectInfoFrom(dir string) RedirectInfo {
+	// The repository root bounds this answer twice: the repo-local .beads
+	// candidate below, and the ancestor walk's user-global skip
+	// (skipsUserGlobalBeads) above.
+	repoRoot := ""
+	if out, err := gitOutput(dir, "rev-parse", "--show-toplevel"); err == nil {
+		repoRoot = out
+	}
+	return redirectInfoFor(repoLocalBeadsDir(repoRoot), func() string { return findBeadsDirUpward(dir, repoRoot) })
+}
+
+// redirectInfoFor reports the redirect state given the repo-local .beads
+// directory ("" outside a git repository) and a fallback locator for the
+// non-git case.
+func redirectInfoFor(repoLocalBeadsDir string, fallback func() string) RedirectInfo {
 	// First, always check the git repo's local .beads directory for redirects
 	// This handles the case where BEADS_DIR is pre-set to the redirect target
-	if localBeadsDir := findLocalBdsDirInRepo(); localBeadsDir != "" {
-		if info := checkRedirectInDir(localBeadsDir); info.IsRedirected {
+	if repoLocalBeadsDir != "" {
+		if info := checkRedirectInDir(repoLocalBeadsDir); info.IsRedirected {
 			return info
 		}
 	}
 
 	// Fall back to original logic for non-git-repo cases
-	if localBeadsDir := findLocalBeadsDir(); localBeadsDir != "" {
+	if localBeadsDir := fallback(); localBeadsDir != "" {
 		return checkRedirectInDir(localBeadsDir)
 	}
 
@@ -392,13 +450,26 @@ func checkRedirectInDir(beadsDir string) RedirectInfo {
 // This ignores BEADS_DIR to find the "true local" .beads for redirect detection.
 // bd-wayc3: Added to detect redirects even when BEADS_DIR is pre-set.
 func findLocalBdsDirInRepo() string {
-	// Get git repo root
-	repoRoot := git.GetRepoRoot()
+	return repoLocalBeadsDir(git.GetRepoRoot())
+}
+
+// repoLocalBeadsDir returns <repoRoot>/.beads when repoRoot is known and the
+// directory exists, else "".
+//
+// repoRoot is canonicalized here so both locators share one form: the cwd
+// variant receives it pre-canonicalized from git.GetRepoRoot(), while the From
+// variant hands over raw `git rev-parse --show-toplevel` output, which on
+// Windows is `C:/...` or msys `/c/...`. Left un-normalized, the os.Stat below
+// misses and the repo-local tier falls through to the walk-up locator — the
+// fallback bd-wayc3 exists to beat. Canonicalizing after the "" guard is
+// deliberate: utils.CanonicalizePath("") resolves to the process cwd, which
+// would leak the cwd's .beads into an answer about another directory.
+func repoLocalBeadsDir(repoRoot string) string {
 	if repoRoot == "" {
 		return ""
 	}
 
-	beadsDir := filepath.Join(repoRoot, ".beads")
+	beadsDir := filepath.Join(utils.CanonicalizePath(git.NormalizePath(repoRoot)), ".beads")
 	if info, err := os.Stat(beadsDir); err == nil && info.IsDir() {
 		return beadsDir
 	}
@@ -413,7 +484,12 @@ func findLocalBeadsDir() string {
 	if beadsDir := os.Getenv("BEADS_DIR"); beadsDir != "" {
 		return canonicalizeBeadsDirPath(beadsDir)
 	}
+	return findDiscoveredLocalBeadsDir()
+}
 
+// findDiscoveredLocalBeadsDir is findLocalBeadsDir without the BEADS_DIR
+// override: the local .beads directory discovery finds from the cwd.
+func findDiscoveredLocalBeadsDir() string {
 	// For worktrees, check worktree-local redirect first (per-worktree override).
 	// Returns the raw worktree .beads dir (not the resolved target) since
 	// findLocalBeadsDir doesn't follow redirects — callers use FollowRedirect.
@@ -444,22 +520,22 @@ func findLocalBeadsDir() string {
 	if err != nil {
 		return ""
 	}
+	return findBeadsDirUpward(cwd, git.GetRepoRoot())
+}
 
-	for dir := cwd; dir != "/" && dir != "."; {
+// findBeadsDirUpward returns the nearest .beads directory at or above start,
+// without following redirects, or "" when there is none. repoRoot is the
+// repository root bounding the walk ("" for none); the walk passes over the
+// user-global <home>/.beads unless repoRoot is the home directory
+// (passOverUserGlobalBeads).
+func findBeadsDirUpward(start, repoRoot string) string {
+	walk := NewAncestorDirWalk(start, start).passOverUserGlobalBeads(repoRoot, false)
+	for dir, ok := walk.Next(); ok; dir, ok = walk.Next() {
 		beadsDir := filepath.Join(dir, ".beads")
 		if info, err := os.Stat(beadsDir); err == nil && info.IsDir() {
 			return beadsDir
 		}
 
-		// Move up one directory
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			// Reached filesystem root (works on both Unix and Windows)
-			// On Unix: filepath.Dir("/") returns "/"
-			// On Windows: filepath.Dir("C:\\") returns "C:\\"
-			break
-		}
-		dir = parent
 	}
 
 	return ""
@@ -472,8 +548,10 @@ func findLocalBeadsDir() string {
 // Embedded Dolt checks both embeddeddolt/ and the legacy dolt/ path. Returns
 // empty string if no database is configured or found.
 func findDatabaseInBeadsDir(beadsDir string, _ bool) string {
-	// Check for metadata.json first (single source of truth)
-	cfg, err := configfile.Load(beadsDir)
+	// Check for metadata.json first (single source of truth). Discovery reads
+	// it without migrating a legacy config.json: callers locate a workspace
+	// here before admission has decided whether this build may touch it.
+	cfg, err := configfile.LoadForDiscovery(beadsDir)
 	if err != nil {
 		// A present but unreadable/invalid metadata file is authoritative. Do
 		// not bypass it by discovering a leftover local Dolt directory; callers
@@ -598,7 +676,7 @@ func FindBeadsDirFrom(startDir string) string {
 
 	startDir = utils.CanonicalizePath(startDir)
 	repoRoot := ""
-	if out, err := gitOutput(startDir, "rev-parse", "--show-toplevel"); err == nil {
+	if out, err := selectedBeadsGitOutput(startDir, "rev-parse", "--show-toplevel"); err == nil {
 		repoRoot = utils.CanonicalizePath(out)
 	}
 
@@ -630,7 +708,8 @@ func FindBeadsDirFrom(startDir string) string {
 		}
 	}
 
-	for dir := startDir; dir != "/" && dir != "."; {
+	walk := NewAncestorDirWalk(startDir, startDir).passOverUserGlobalBeads(repoRoot, true)
+	for dir, ok := walk.Next(); ok; dir, ok = walk.Next() {
 		beadsDir := filepath.Join(dir, ".beads")
 		if info, err := os.Stat(beadsDir); err == nil && info.IsDir() {
 			resolved := FollowRedirect(beadsDir)
@@ -649,11 +728,6 @@ func FindBeadsDirFrom(startDir string) string {
 			}
 		}
 
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			break
-		}
-		dir = parent
 	}
 
 	if fallbackBeadsDir != "" {
@@ -670,6 +744,15 @@ func FindBeadsDirFrom(startDir string) string {
 	}
 
 	return ""
+}
+
+// HasProjectFiles reports whether discovery treats beadsDir as a beads
+// workspace (hasBeadsProjectFiles). bd run in a directory whose .beads it
+// does not treat as one finds no workspace there ("no beads database
+// found"), so a path that reaches such a .beads from another workspace
+// treats it the same way rather than opening it.
+func HasProjectFiles(beadsDir string) bool {
+	return hasBeadsProjectFiles(beadsDir)
 }
 
 // hasBeadsProjectFiles checks if a .beads directory contains actual project files.
@@ -709,6 +792,122 @@ func hasBeadsProjectFiles(beadsDir string) bool {
 	return false
 }
 
+// AncestorDirWalk yields canonical directories from startDir upward, up to and
+// including the filesystem root.
+//
+// The OS temp root is an ancestor ceiling that *ends* the walk rather than
+// skipping one directory: a walk that starts below the temp root stops there
+// without yielding it, so the temp root's own ancestors are unreachable from
+// below. That matters when TMPDIR points inside a project (TMPDIR=$REPO/tmp),
+// where the project's own .beads sits above the ceiling and is not discovered
+// from a path under $REPO/tmp. Terminating is the deliberate choice: resuming
+// above the temp root would let a walk started below it adopt ambient state
+// from the temp root's ancestors, which is the capture this ceiling exists to
+// prevent. A caller whose actual discovery origin is the temp root may inspect
+// that starting directory exactly once, which keeps a deliberately initialized
+// /tmp workspace usable without letting ambient /tmp/.beads state capture
+// projects below it. Both paths are canonicalized once so macOS
+// /var -> /private/var aliases cannot bypass the ceiling.
+//
+// The filesystem root is yielded. The hand-rolled loops this type replaces were
+// inconsistent about it — most stopped before "/" while findDatabaseInTree and
+// FindAllDatabases inspected it — and the resolvers are easier to reason about
+// when they agree on which ancestors exist. The ceiling is not extended to "/"
+// because it guards against ambient state in a world-writable shared root,
+// which the filesystem root is not.
+//
+// BEADS_CEILING_DIRECTORIES (package ceiling) also ends the walk: no directory
+// at or above a ceiling containing the origin is yielded.
+//
+// A walk that discovers a workspace also passes over the account home
+// directory, whose .beads is the user-global one, and usually ends there
+// (passOverUserGlobalBeads).
+type AncestorDirWalk struct {
+	next     string
+	origin   string
+	tempRoot string
+	bound    *ceiling.Bound
+	done     bool
+	home     *userGlobalPass
+}
+
+// NewAncestorDirWalk constructs an upward directory walk. originDir is the
+// caller's actual discovery start even when startDir begins a later segment of
+// a bounded walk.
+func NewAncestorDirWalk(startDir, originDir string) *AncestorDirWalk {
+	origin := canonicalizeAncestorWalkPath(originDir)
+	return &AncestorDirWalk{
+		next:     canonicalizeAncestorWalkPath(startDir),
+		origin:   origin,
+		tempRoot: canonicalizeAncestorWalkPath(os.TempDir()),
+		bound:    ceiling.For(origin),
+	}
+}
+
+// canonicalizeAncestorWalkPath resolves the longest existing ancestor and
+// reattaches any missing tail. Discovery often starts from a not-yet-created
+// project path; a bare EvalSymlinks would leave /var unresolved while the
+// existing temp root resolves to /private/var, defeating the ceiling.
+func canonicalizeAncestorWalkPath(path string) string {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return filepath.Clean(path)
+	}
+	cur := filepath.Clean(abs)
+	remainder := ""
+	for {
+		if resolved, err := filepath.EvalSymlinks(cur); err == nil {
+			resolved = utils.CanonicalizePath(resolved)
+			if remainder == "" {
+				return resolved
+			}
+			return filepath.Join(resolved, remainder)
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return filepath.Clean(abs)
+		}
+		remainder = filepath.Join(filepath.Base(cur), remainder)
+		cur = parent
+	}
+}
+
+// Next returns the next directory permitted by the temp-root and
+// BEADS_CEILING_DIRECTORIES ceilings and, in a walk that passes over the
+// account home directory, by that pass (passOverUserGlobalBeads).
+func (w *AncestorDirWalk) Next() (string, bool) {
+	dir, ok := w.step()
+	if ok && w.home != nil {
+		return w.home.visit(w, dir)
+	}
+	return dir, ok
+}
+
+// step returns the next directory permitted by the temp-root and
+// BEADS_CEILING_DIRECTORIES ceilings.
+func (w *AncestorDirWalk) step() (string, bool) {
+	if w == nil || w.done || w.next == "" || w.next == "." {
+		return "", false
+	}
+	dir := w.next
+	if w.bound.Excludes(dir) {
+		w.done = true
+		return "", false
+	}
+	if w.tempRoot != "" && dir == w.tempRoot && dir != w.origin {
+		w.done = true
+		return "", false
+	}
+
+	parent := filepath.Dir(dir)
+	if parent == dir || (w.tempRoot != "" && dir == w.tempRoot) {
+		w.done = true
+	} else {
+		w.next = parent
+	}
+	return dir, true
+}
+
 // hasBeadsDatabase is the strict counterpart to hasBeadsProjectFiles: it
 // returns true only when beadsDir contains an actual database — a dolt/
 // directory, an embeddeddolt/ directory, or a non-backup *.db file. Mere
@@ -737,11 +936,272 @@ func hasBeadsDatabase(beadsDir string) bool {
 	return false
 }
 
+// userHomeDir is the home directory whose .beads the ancestor walks pass over
+// (skipsUserGlobalBeads). A package var so tests can stub it
+// (SetUserHomeDirForTesting).
+var userHomeDir = defaultUserHomeDir
+
+// defaultUserHomeDir returns the account's home directory: the OS account
+// database's entry for the current user, else $HOME (os.UserHomeDir) when that
+// lookup is unavailable (a CGO-free build whose user is not in /etc/passwd),
+// or "" when neither names an absolute directory.
+//
+// The account database comes first, as it does for `bd init`'s home guard
+// (cmd/bd resolveUserHomeDir) and for isPathInSafeBoundary, so the walks pass
+// over the .beads of the home those guards protect:
+//   - test harnesses and sandboxes point $HOME at a scratch directory and run
+//     bd there. A .beads bd initialized in that directory is their workspace,
+//     not the user's global one, so discovery keeps finding it;
+//   - an empty or unset $HOME (env -u HOME, some sudo setups) does not turn
+//     the skip off while a walk still climbs into the account's home.
+func defaultUserHomeDir() string {
+	home := ""
+	if u, err := user.Current(); err == nil {
+		home = u.HomeDir
+	}
+	if home == "" {
+		home, _ = os.UserHomeDir()
+	}
+	if home == "" || !filepath.IsAbs(home) {
+		return ""
+	}
+	return home
+}
+
+// SetUserHomeDirForTesting points the user-global skip at home until restore
+// runs, so a test in another package can run discovery under a fixture home
+// directory. The skip reads the OS account database (defaultUserHomeDir),
+// which a test cannot repoint the way it repoints $HOME. Like
+// git.PinNoRepositoryUnderForTesting, it lives in production code only so
+// that another package's tests can reach it: production code must never call
+// it.
+//
+// WARNING: Not thread-safe. Call it only from a test that does not run in
+// parallel.
+func SetUserHomeDirForTesting(home string) (restore func()) {
+	prev := userHomeDir
+	userHomeDir = func() string { return home }
+	return func() { userHomeDir = prev }
+}
+
+// IsAccountHomeDir reports whether dir is the account home directory
+// (userHomeDir), the one whose .beads the ancestor walks pass over as the
+// user-global directory. An ancestor walk outside this package that must not
+// adopt that directory, such as bd bootstrap's parent-config walk, asks this.
+func IsAccountHomeDir(dir string) bool {
+	home := userHomeDir()
+	return home != "" && utils.PathsEqual(dir, home)
+}
+
+// skipsUserGlobalBeads reports whether discovery must pass over dir's .beads
+// candidate: dir is the user's home directory (userHomeDir) and repoRoot —
+// the repository root bounding the walk, "" when there is none — is not the
+// home directory itself. The ancestor walks apply it through
+// passOverUserGlobalBeads, which also ends them there.
+//
+// GH#4402: the explicit ~/.beads fallback was removed on purpose
+// (a971762b0e, FindDatabasePath: "No fallback to ~/.beads"), but outside a
+// repository the ancestor walks had no boundary left above the home
+// directory, and hasBeadsProjectFiles is a content guard, not a boundary
+// guard: a legacy ~/.beads holding config.yaml or a database let the walk
+// adopt the user-global directory as a workspace, so writes (bd remember,
+// bd admin reset) landed in the global database with no warning. The skip is
+// positional — only the walk's own <home>/.beads candidate is passed over,
+// together with any redirect file inside it, while a project's
+// .beads/redirect pointing at <home>/.beads remains an explicit on-disk
+// choice, and BEADS_DIR, BEADS_DB and --db never reach discovery at all.
+// When the bounding repository root IS the home directory (a dotfiles
+// repository), ~/.beads is that repository's own beads directory and is not
+// skipped.
+func skipsUserGlobalBeads(dir, repoRoot string) bool {
+	if !IsAccountHomeDir(dir) {
+		return false
+	}
+	// Never canonicalize a "" repoRoot for comparison: it resolves to the
+	// process cwd (see repoLocalBeadsDir for the same trap).
+	if repoRoot != "" && utils.PathsEqual(repoRoot, dir) {
+		return false
+	}
+	return true
+}
+
+// userGlobalPass is how an ancestor walk passes over the account home
+// directory (passOverUserGlobalBeads).
+type userGlobalPass struct {
+	home   string // the account home directory, canonical
+	root   string // the bounding repository root when it lies above home, else ""
+	record bool   // record the pass for SkippedUserGlobalBeadsDir
+	passed bool   // the walk is past the home directory
+}
+
+// passOverUserGlobalBeads makes w pass over the account home directory
+// (userHomeDir), whose .beads is the user-global one (skipsUserGlobalBeads),
+// unless repoRoot, the repository root bounding the walk ("" for none), is
+// the home directory itself.
+//
+// The walk does not yield the home directory, and it ends there: nothing
+// above the home directory is a workspace of a directory under it, so a .beads
+// up there (/home/.beads, /.beads), which the user-global one used to shadow,
+// is not adopted in its place. Only a repository root above the home
+// directory takes the walk past it, up to that root and no further. bd
+// bootstrap's parent-config walk (cmd/bd findParentConfig) ends at the home
+// directory too, and never goes past it, even below such a root.
+//
+// With record set (the walks that select the workspace), the pass is
+// recorded for SkippedUserGlobalBeadsDir where it can be why selection finds
+// no workspace: no repository bounds the walk, or the walk starts in the home
+// directory. A walk that meets the home directory on its way to another
+// repository root, as a linked worktree's walk toward a main checkout that
+// lies elsewhere does, records nothing: inside a repository the remedy is
+// that repository's own .beads, not BEADS_DIR=~/.beads.
+func (w *AncestorDirWalk) passOverUserGlobalBeads(repoRoot string, record bool) *AncestorDirWalk {
+	home := userHomeDir()
+	if home == "" {
+		return w
+	}
+	pass := &userGlobalPass{home: canonicalizeAncestorWalkPath(home)}
+	if repoRoot != "" {
+		root := canonicalizeAncestorWalkPath(repoRoot)
+		if root == pass.home {
+			return w
+		}
+		if dirIsAbove(root, pass.home) {
+			pass.root = root
+		}
+	}
+	pass.record = record && (repoRoot == "" || w.origin == pass.home)
+	w.home = pass
+	return w
+}
+
+// visit is Next's answer for dir, the next directory the ceilings permit: at
+// the home directory, it records the pass and ends the walk, or, below a
+// repository root above the home directory, yields the directory above it in
+// its place and ends the walk at that root.
+func (p *userGlobalPass) visit(w *AncestorDirWalk, dir string) (string, bool) {
+	if dir == p.home {
+		if p.record {
+			recordPassedOverUserGlobalBeads(filepath.Join(dir, ".beads"))
+		}
+		if p.root == "" {
+			w.done = true
+			return "", false
+		}
+		p.passed = true
+		var ok bool
+		if dir, ok = w.step(); !ok {
+			return "", false
+		}
+	}
+	if p.passed && dir == p.root {
+		w.done = true
+	}
+	return dir, true
+}
+
+// dirIsAbove reports whether dir is a proper ancestor of path; both are
+// canonical (canonicalizeAncestorWalkPath).
+func dirIsAbove(dir, path string) bool {
+	rel, err := filepath.Rel(dir, path)
+	return err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// passedOverUserGlobalBeads is the <home>/.beads directory a
+// workspace-selection walk passed over in this process (GH#4402), or "" until
+// one does. SkippedUserGlobalBeadsDir reports it; ResetCaches clears it.
+var passedOverUserGlobalBeads struct {
+	sync.Mutex
+	dir string
+}
+
+// recordPassedOverUserGlobalBeads records beadsDir as the user-global
+// directory workspace selection passed over (SkippedUserGlobalBeadsDir).
+func recordPassedOverUserGlobalBeads(beadsDir string) {
+	passedOverUserGlobalBeads.Lock()
+	passedOverUserGlobalBeads.dir = beadsDir
+	passedOverUserGlobalBeads.Unlock()
+}
+
+// selectionSkipsUserGlobalBeads is skipsUserGlobalBeads for
+// findDatabaseInTree's check of the working directory itself, which runs
+// before its walk. A pass there is a walk starting in the home directory, so
+// it is recorded (passOverUserGlobalBeads).
+func selectionSkipsUserGlobalBeads(dir, repoRoot string) bool {
+	if !skipsUserGlobalBeads(dir, repoRoot) {
+		return false
+	}
+	recordPassedOverUserGlobalBeads(filepath.Join(dir, ".beads"))
+	return true
+}
+
+// SkippedUserGlobalBeadsDir returns the user-global <home>/.beads directory
+// that a workspace-selection walk in this process passed over, or "" when
+// none did or the directory holds no workspace to name.
+//
+// It reports a skip that happened, not one a walk might make. Inside a git
+// repository under the home directory, selection stops at the repository root
+// before it reaches the home directory, and a walk that meets the home
+// directory on its way to another repository root (a linked worktree whose
+// main checkout lies elsewhere) does not record it (passOverUserGlobalBeads).
+// An explicit BEADS_DIR or BEADS_DB runs no walk at all. None of them gets
+// the directory named. The directory is named only when it holds a redirect
+// file, metadata.json or a database (hasBeadsDatabase): a config.yaml-only
+// <home>/.beads holds the user's configuration, not a workspace.
+//
+// cmd/bd uses this to name the skipped directory in its no-workspace
+// refusals and in `bd where`.
+func SkippedUserGlobalBeadsDir() string {
+	passedOverUserGlobalBeads.Lock()
+	beadsDir := passedOverUserGlobalBeads.dir
+	passedOverUserGlobalBeads.Unlock()
+	if beadsDir == "" {
+		return ""
+	}
+	if info, err := os.Stat(beadsDir); err != nil || !info.IsDir() {
+		return ""
+	}
+	if _, err := os.Stat(filepath.Join(beadsDir, RedirectFileName)); err == nil {
+		return beadsDir
+	}
+	if _, err := os.Stat(filepath.Join(beadsDir, "metadata.json")); err == nil {
+		return beadsDir
+	}
+	if hasBeadsDatabase(beadsDir) {
+		return beadsDir
+	}
+	return ""
+}
+
+// SkipsUserGlobalBeadsAt reports whether implicit discovery from the current
+// working directory passes over dir's .beads as the user-global directory:
+// dir is the home directory, and the working directory's repository root is
+// not (skipsUserGlobalBeads). bd import asks this about the working
+// directory before it falls back to the working directory's own .beads, so
+// a run from the home directory does not write into the global database.
+func SkipsUserGlobalBeadsAt(dir string) bool {
+	return skipsUserGlobalBeads(dir, findGitRoot())
+}
+
+// ExplicitBeadsDir returns the .beads directory named by the BEADS_DIR
+// environment variable, canonicalized and with any redirect followed, or ""
+// when BEADS_DIR is unset. Unlike FindBeadsDir it does not require the
+// directory to exist or to hold project files, so commands that create a
+// workspace can target the caller's explicit choice instead of CWD.
+func ExplicitBeadsDir() string {
+	beadsDir := os.Getenv("BEADS_DIR")
+	if beadsDir == "" {
+		return ""
+	}
+	return FollowRedirect(canonicalizeBeadsDirPath(beadsDir))
+}
+
 // FindBeadsDir finds the .beads/ directory in the current directory tree.
 // Returns empty string if not found.
 //
 // Resolution order:
-//  1. BEADS_DIR environment variable (highest priority)
+//  1. BEADS_DIR environment variable (highest priority). An explicit
+//     BEADS_DIR is authoritative: when it does not (yet) hold project files,
+//     FindBeadsDir returns "" instead of discovering some other workspace.
 //  2. Walk up from CWD toward repo root boundary, checking each directory
 //     for .beads/ with valid project files. For worktrees, stops at the
 //     worktree root; for non-worktrees, stops at the git root.
@@ -756,18 +1216,20 @@ func hasBeadsDatabase(beadsDir string) bool {
 // contents are used as the actual .beads directory path.
 func FindBeadsDir() string {
 	// 1. Check BEADS_DIR environment variable (preferred)
-	if beadsDir := os.Getenv("BEADS_DIR"); beadsDir != "" {
-		absBeadsDir := canonicalizeBeadsDirPath(beadsDir)
-
-		// Follow redirect if present
-		absBeadsDir = FollowRedirect(absBeadsDir)
-
+	if absBeadsDir := ExplicitBeadsDir(); absBeadsDir != "" {
 		if info, err := os.Stat(absBeadsDir); err == nil && info.IsDir() {
 			// Validate directory contains actual project files
 			if hasBeadsProjectFiles(absBeadsDir) {
 				return absBeadsDir
 			}
 		}
+
+		// The caller named this directory explicitly. Walking up from CWD
+		// here would bind an unrelated ancestor workspace (and PersistentPreRun
+		// would then rewrite BEADS_DIR to it), so `bd init` and every other
+		// command would act on the wrong store. Report "not found" instead,
+		// matching FindDatabasePath.
+		return ""
 	}
 
 	// 2. Walk up from CWD toward the repo root, checking each directory for .beads/.
@@ -819,7 +1281,8 @@ func FindBeadsDir() string {
 	if walkBoundary != "" {
 		walkBoundaryCanonical = utils.CanonicalizePath(walkBoundary)
 	}
-	for dir := cwdCanonical; dir != "/" && dir != "."; {
+	walk := NewAncestorDirWalk(cwdCanonical, cwdCanonical).passOverUserGlobalBeads(walkBoundaryCanonical, true)
+	for dir, ok := walk.Next(); ok; dir, ok = walk.Next() {
 		// Stop at the walk boundary (exclusive — don't check this directory).
 		// For worktrees: stops before worktree root so step 3 handles it.
 		// For non-worktrees: stops before git root (which is checked below in the
@@ -827,7 +1290,6 @@ func FindBeadsDir() string {
 		if walkBoundaryCanonical != "" && dir == walkBoundaryCanonical {
 			break
 		}
-
 		beadsDir := filepath.Join(dir, ".beads")
 		if info, err := os.Stat(beadsDir); err == nil && info.IsDir() {
 			beadsDir = FollowRedirect(beadsDir)
@@ -836,11 +1298,6 @@ func FindBeadsDir() string {
 			}
 		}
 
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			break
-		}
-		dir = parent
 	}
 
 	// 3. Worktree-specific fallback: redirect, own .beads, shared .beads.
@@ -968,7 +1425,8 @@ func FindBeadsDir() string {
 			extendedRootCanonical = utils.CanonicalizePath(extendedRoot)
 		}
 
-		for dir := walkBoundaryCanonical; dir != "/" && dir != "."; {
+		extendedWalk := NewAncestorDirWalk(walkBoundaryCanonical, cwdCanonical).passOverUserGlobalBeads(extendedRootCanonical, true)
+		for dir, ok := extendedWalk.Next(); ok; dir, ok = extendedWalk.Next() {
 			beadsDir := filepath.Join(dir, ".beads")
 			if info, err := os.Stat(beadsDir); err == nil && info.IsDir() {
 				beadsDir = FollowRedirect(beadsDir)
@@ -982,11 +1440,6 @@ func FindBeadsDir() string {
 				break
 			}
 
-			parent := filepath.Dir(dir)
-			if parent == dir {
-				break
-			}
-			dir = parent
 		}
 	}
 
@@ -1053,6 +1506,7 @@ func ResolveBeadsDirForRepo(repoPath string) string {
 
 func worktreeFallbackBeadsDirForRepo(repoPath string) string {
 	cmd := exec.Command("git", "-C", repoPath, "rev-parse", "--git-dir", "--git-common-dir")
+	cmd.Env = gitenv.ScrubRouting(os.Environ())
 	output, err := cmd.Output()
 	if err != nil {
 		return ""
@@ -1133,6 +1587,12 @@ func findDatabaseInTree() string {
 	// canonicalization strategy in FindBeadsDir.
 	dir = utils.CanonicalizePath(dir)
 
+	// The repository root bounds the user-global skip below (and the walk's
+	// break boundary further down). Computed here so the cwd check participates
+	// in the skip too: standing in the home directory itself must not adopt
+	// <home>/.beads unless the home directory is the repository root.
+	gitRoot := findGitRoot()
+
 	isWt := git.IsWorktree()
 	var jjSecondaryRoot string
 	var isJJSecondary bool
@@ -1149,7 +1609,8 @@ func findDatabaseInTree() string {
 	// findDatabaseInBeadsDir returns a path regardless of whether the data
 	// directory exists, so without this skip bd would open an empty DB.
 	{
-		skipCwdCheck := (isWt && dir == utils.CanonicalizePath(git.GetRepoRoot())) ||
+		skipCwdCheck := selectionSkipsUserGlobalBeads(dir, gitRoot) ||
+			(isWt && dir == utils.CanonicalizePath(git.GetRepoRoot())) ||
 			(isJJSecondary && dir == utils.CanonicalizePath(jjSecondaryRoot))
 		if !skipCwdCheck {
 			cwdBeadsDir := filepath.Join(dir, ".beads")
@@ -1232,8 +1693,9 @@ func findDatabaseInTree() string {
 		}
 	}
 
-	// Find git root to limit the search
-	gitRoot := findGitRoot()
+	// Limit the search to the repository root: the main repo root for
+	// worktrees and jj secondaries, the cwd's own root otherwise (hoisted
+	// above the cwd check for the user-global skip).
 	if (isWt || isJJSecondary) && mainRepoRoot != "" {
 		gitRoot = mainRepoRoot
 	}
@@ -1245,7 +1707,8 @@ func findDatabaseInTree() string {
 	}
 
 	// Walk up directory tree (regular repository or worktree fallback)
-	for {
+	walk := NewAncestorDirWalk(dir, dir).passOverUserGlobalBeads(gitRootCanonical, true)
+	for dir, ok := walk.Next(); ok; dir, ok = walk.Next() {
 		beadsDir := filepath.Join(dir, ".beads")
 		if info, err := os.Stat(beadsDir); err == nil && info.IsDir() {
 			// Follow redirect if present
@@ -1257,19 +1720,10 @@ func findDatabaseInTree() string {
 			}
 		}
 
-		// Move up one directory
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			// Reached filesystem root
-			break
-		}
-
 		// Stop at git root to avoid finding unrelated databases
 		if gitRootCanonical != "" && dir == gitRootCanonical {
 			break
 		}
-
-		dir = parent
 	}
 
 	return ""
@@ -1291,11 +1745,20 @@ func FindAllDatabases() []DatabaseInfo {
 		return databases
 	}
 
-	// Find git root to limit the search
+	// Find git root to limit the search. Canonicalize the boundary so the
+	// `dir == gitRoot` comparison below is robust against symlink or case-form
+	// mismatches, but only when there is a boundary: outside a git repository
+	// findGitRoot returns "" and CanonicalizePath("") resolves to the current
+	// working directory, which would fire the break on the walk's first
+	// iteration and stop discovery at the CWD. Mirrors findDatabaseInTree.
 	gitRoot := findGitRoot()
+	if gitRoot != "" {
+		gitRoot = utils.CanonicalizePath(gitRoot)
+	}
 
 	// Walk up directory tree
-	for {
+	walk := NewAncestorDirWalk(dir, dir).passOverUserGlobalBeads(gitRoot, false)
+	for dir, ok := walk.Next(); ok; dir, ok = walk.Next() {
 		beadsDir := filepath.Join(dir, ".beads")
 		if info, err := os.Stat(beadsDir); err == nil && info.IsDir() {
 			// Follow redirect if present
@@ -1323,12 +1786,6 @@ func FindAllDatabases() []DatabaseInfo {
 
 				// Skip if we've already seen this database (via symlink or other path)
 				if seen[canonicalPath] {
-					// Move up one directory
-					parent := filepath.Dir(dir)
-					if parent == dir {
-						break
-					}
-					dir = parent
 					continue
 				}
 				seen[canonicalPath] = true
@@ -1344,19 +1801,10 @@ func FindAllDatabases() []DatabaseInfo {
 			}
 		}
 
-		// Move up one directory
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			// Reached filesystem root
-			break
-		}
-
 		// Stop at git root to avoid finding unrelated databases
 		if gitRoot != "" && dir == gitRoot {
 			break
 		}
-
-		dir = parent
 	}
 
 	return databases

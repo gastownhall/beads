@@ -118,7 +118,7 @@ func eventsJournalMaintenanceRunnerFor(plumbing any) issueops.EventsMaintenanceR
 //     with OpenForReadOnlyCommand, which is "otherwise a normal writable
 //     store", so nothing underneath refuses a maintenance delete. Drop this
 //     check and `bd list` prunes the journal — which
-//     TestAutoPruneDoesNotRunForReadOnlyCommands catches.
+//     TestEmbeddedAutoPruneDoesNotRunForReadOnlyCommands catches.
 //
 // Two more gates are specific to this trigger:
 //

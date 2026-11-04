@@ -36,13 +36,34 @@ func proxiedCycleDetector() (issueops.CycleDetector, error) {
 	return src.CycleDetector()
 }
 
-// runDepCycles is the whole of `bd dep cycles` on both routes.
-func runDepCycles() error {
+// runDepCycles is the whole of `bd dep cycles` on both routes. includeTracks
+// widens the walk per issueops.DetectCyclesRequest.IncludeTracks; the default
+// invocation leaves it false and the walk unchanged.
+//
+// limit caps how many cycles are PRINTED, and nothing else: 0 prints them all.
+// THE CAP IS UNCONDITIONAL — it does not consult includeTracks, so it bounds
+// the default walk's rendering too, and plain `bd dep cycles` now prints at most
+// 50 cycles where before this change it printed every one. The widened walk is
+// what makes the cap necessary rather than what scopes it: that walk is bounded
+// by the scheduling-edge count and not by the number of deadlocks (see that
+// field's BOUND), so a tracks-dense workspace can hold a correct report longer
+// than anyone can read. Capping both walks by one rule is the deliberate
+// choice — an operator can predict one rendering rule, and a --limit that
+// silently did nothing without a second flag would be the worse surprise. It
+// also matches --limit in list/search/stale/find_duplicates, which cap
+// unconditionally.
+//
+// It stays a rendering cap rather than a narrower request on EITHER walk:
+// CycleReport.Cycles promises to omit no cycle, and a --json consumer diffing
+// two snapshots needs the whole of it. So the count this prints is always the
+// whole report's, the truncation says how much it held back, and the --json
+// branch below is never capped.
+func runDepCycles(includeTracks bool, limit int) error {
 	detector, err := openCycleDetector()
 	if err != nil {
 		return HandleErrorRespectJSON("%v", err)
 	}
-	report, err := detector.DetectCycles(rootCtx, issueops.DetectCyclesRequest{})
+	report, err := detector.DetectCycles(rootCtx, issueops.DetectCyclesRequest{IncludeTracks: includeTracks})
 	if err != nil {
 		return HandleErrorRespectJSON("%v", err)
 	}
@@ -59,7 +80,11 @@ func runDepCycles() error {
 	}
 
 	fmt.Printf("\n%s Found %d dependency cycles:\n\n", ui.RenderFail("⚠"), len(report.Cycles))
-	for i, cycle := range report.Cycles {
+	shown := report.Cycles
+	if limit > 0 && len(shown) > limit {
+		shown = shown[:limit]
+	}
+	for i, cycle := range shown {
 		if missing := unknownCycleMembers(cycle); missing > 0 {
 			fmt.Printf("%d. Cycle involving (%d of %d members have no record in this database):\n",
 				i+1, missing, len(cycle.Members))
@@ -70,6 +95,10 @@ func runDepCycles() error {
 			fmt.Printf("   - %s: %s\n", member.ID, cycleMemberTitle(member))
 		}
 		fmt.Println()
+	}
+	if len(shown) < len(report.Cycles) {
+		fmt.Printf("... and %d more not shown. The count above is the whole report; use --limit 0 to print all of it.\n\n",
+			len(report.Cycles)-len(shown))
 	}
 	return nil
 }

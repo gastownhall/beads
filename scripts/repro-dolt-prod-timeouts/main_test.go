@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/steveyegge/beads/internal/execenv"
 	"github.com/steveyegge/beads/internal/storage/depid"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/storage/schema"
@@ -238,7 +239,7 @@ func TestBenchmarkCommandBuildersStripDoltEnvOverrides(t *testing.T) {
 			for _, key := range subprocessEnvDenylist {
 				for _, entry := range cmd.Env {
 					gotKey, _, _ := strings.Cut(entry, "=")
-					if environmentKeyIdentity(gotKey) == environmentKeyIdentity(key) {
+					if execenv.KeyEqual(gotKey, key) {
 						t.Fatalf("Env retained ambient denied override %q", entry)
 					}
 				}

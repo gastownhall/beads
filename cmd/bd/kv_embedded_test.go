@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -40,20 +41,24 @@ func bdKVFail(t *testing.T, bd, dir string, args ...string) string {
 	return string(out)
 }
 
-// bdKVListJSON runs "bd kv list --json" and returns parsed map.
-func bdKVListJSON(t *testing.T, bd, dir string) map[string]string {
+// bdKVListJSON runs "bd kv list --json" plus any extra args (such as
+// --prefix) and returns the parsed map. Output with no JSON object fails the
+// test rather than reading as an empty listing, which would let a check for
+// "no pairs" pass on output that is not the JSON shape at all.
+func bdKVListJSON(t *testing.T, bd, dir string, extraArgs ...string) map[string]string {
 	t.Helper()
-	cmd := exec.Command(bd, "kv", "list", "--json")
+	args := append([]string{"kv", "list", "--json"}, extraArgs...)
+	cmd := exec.Command(bd, args...)
 	cmd.Dir = dir
 	cmd.Env = bdEnv(dir)
 	stdout, stderr, err := runCommandBuffers(t, cmd)
 	if err != nil {
-		t.Fatalf("bd kv list --json failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+		t.Fatalf("bd %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
 	}
 	s := strings.TrimSpace(stdout.String())
 	start := strings.Index(s, "{")
 	if start < 0 {
-		return map[string]string{}
+		t.Fatalf("no JSON object in bd %s output: %s", strings.Join(args, " "), s)
 	}
 	var raw map[string]interface{}
 	if err := json.Unmarshal([]byte(s[start:]), &raw); err != nil {
@@ -120,6 +125,28 @@ func TestEmbeddedKV(t *testing.T) {
 		m := bdKVListJSON(t, bd, dir)
 		if v, ok := m["mykey"]; !ok || v != "myvalue" {
 			t.Errorf("expected mykey=myvalue in JSON, got %q (exists=%v)", v, ok)
+		}
+	})
+
+	t.Run("kv_list_prefix_json", func(t *testing.T) {
+		// mail.doggerel.* shares mail.dog.'s leading characters, so a match
+		// that dropped the prefix's trailing dot would leak it. The keys set
+		// by the subtests above must not leak either.
+		for _, kvp := range [][2]string{
+			{"mail.dog.m1", "first"},
+			{"mail.dog.m2", "second"},
+			{"mail.doggerel.m3", "sibling"},
+		} {
+			bdKV(t, bd, dir, "set", kvp[0], kvp[1])
+		}
+
+		m := bdKVListJSON(t, bd, dir, "--prefix", "mail.dog.")
+		if want := map[string]string{"mail.dog.m1": "first", "mail.dog.m2": "second"}; !reflect.DeepEqual(m, want) {
+			t.Errorf("kv list --prefix mail.dog. --json = %v; want %v", m, want)
+		}
+
+		if m := bdKVListJSON(t, bd, dir, "--prefix", "mail.owl."); len(m) != 0 {
+			t.Errorf("kv list --prefix mail.owl. --json = %v; want no pairs", m)
 		}
 	})
 

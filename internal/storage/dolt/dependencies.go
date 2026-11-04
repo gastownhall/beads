@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
@@ -104,10 +105,21 @@ func (s *DoltStore) RemoveDependencyWithOptions(ctx context.Context, issueID, de
 			defer func() { _ = tx.Rollback() }()
 			clearJournalScope := s.scopeEventsJournalTransaction(tx)
 			defer clearJournalScope()
+			// Scoped even though RecordVersionInTx returns early on IsWisp and
+			// can mint nothing here: the two arms below share one mutator, and
+			// a scope that is present on one arm only is the asymmetry this
+			// method's own history is made of. Uniform beats clever.
+			clearVersionScope, err := s.scopeVersionedHistoryTransaction(ctx, tx)
+			if err != nil {
+				return err
+			}
+			defer clearVersionScope()
+			clearRecheckScope := issueops.ScopeBlockedRecheckTransaction(tx)
+			defer clearRecheckScope()
 			if _, err := issueops.RemoveDependencyInTx(ctx, tx, issueID, dependsOnID, actor, rmOpts.EmitEvent); err != nil {
 				return err
 			}
-			if err := s.commitSQLTx(ctx, "commit remove wisp dependency", tx); err != nil {
+			if err := s.commitSQLTxAndRecheck(ctx, "commit remove wisp dependency", tx); err != nil {
 				return err
 			}
 			return nil
@@ -121,6 +133,17 @@ func (s *DoltStore) RemoveDependencyWithOptions(ctx context.Context, issueID, de
 
 		clearJournalScope := s.scopeEventsJournalTransaction(tx)
 		defer clearJournalScope()
+		// The non-wisp arm: this removal mutates the issues plane, so the
+		// referencing issue must be versioned with it. RemoveDependencyInTx
+		// calls RecordVersionInTx on the row delete, and that seam no-ops
+		// unless activation is bound to THIS transaction.
+		clearVersionScope, err := s.scopeVersionedHistoryTransaction(ctx, tx)
+		if err != nil {
+			return err
+		}
+		defer clearVersionScope()
+		clearRecheckScope := issueops.ScopeBlockedRecheckTransaction(tx)
+		defer clearRecheckScope()
 
 		eventWritten, err := issueops.RemoveDependencyInTx(ctx, tx, issueID, dependsOnID, actor, rmOpts.EmitEvent)
 		if err != nil {
@@ -130,6 +153,10 @@ func (s *DoltStore) RemoveDependencyWithOptions(ctx context.Context, issueID, de
 		if err := s.commitSQLTx(ctx, "sql commit", tx); err != nil {
 			return err
 		}
+		// The removal is durable; its dependents are settled after this
+		// removal's own Dolt commit so the recheck's commit follows it.
+		pending := issueops.TakeBlockedRecheck(tx)
+		defer s.settleBlockedRecheck(ctx, pending)
 		// GH#2455: Use explicit DOLT_ADD to avoid sweeping up stale config changes.
 		// Stage events only when RemoveDependencyInTx actually recorded a
 		// dependency_removed event (explicit verb + genuine edge removal). A
@@ -406,6 +433,21 @@ func (s *DoltStore) IsBlocked(ctx context.Context, issueID string) (bool, []stri
 	return blocked, blockers, nil
 }
 
+// IsBlockedWithBlockersBatch answers IsBlocked for every id in one read
+// transaction (storage.BlockersBatchStore).
+func (s *DoltStore) IsBlockedWithBlockersBatch(ctx context.Context, ids []string) (map[string][]string, error) {
+	var result map[string][]string
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.IsBlockedWithBlockersBatchInTx(ctx, tx, ids)
+		return err
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to batch-check blockers: %w", err)
+	}
+	return result, nil
+}
+
 // IsBlockedBatch returns the denormalized transitive is_blocked flag for each id
 // in one batched read. Delegates to issueops.IsBlockedBatchInTx.
 func (s *DoltStore) IsBlockedBatch(ctx context.Context, ids []string) (map[string]bool, error) {
@@ -529,4 +571,18 @@ func scanDependencyRow(rows *sql.Rows) (*types.Dependency, error) {
 	}
 
 	return &dep, nil
+}
+
+// RetiredIssueIDs returns which of ids a retaining retention sweep retired,
+// with the closed_at each tombstone recorded (issueops.RetiredIDsInTx). The
+// import dry run reads it so its preview skips a retired row as the real
+// import does.
+func (s *DoltStore) RetiredIssueIDs(ctx context.Context, ids []string) (map[string]time.Time, error) {
+	var retired map[string]time.Time
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		retired, err = issueops.RetiredIDsInTx(ctx, tx, ids)
+		return err
+	})
+	return retired, err
 }

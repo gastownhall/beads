@@ -83,8 +83,24 @@ func (r *labelSQLRepositoryImpl) Insert(ctx context.Context, issueID, label, act
 		return err
 	}
 	// A label is part of the bead snapshot; the idempotent no-op path above
-	// returns without writing and journals nothing.
-	return issueops.RecordEventInTx(ctx, r.runner, issueops.EventUpdate, issueID, actor)
+	// returns without writing, journals nothing and mints nothing. An inserted
+	// row is a durable-state change and is versioned, as AddLabelInTx does.
+	if err := issueops.RecordEventInTx(ctx, r.runner, issueops.EventUpdate, issueID, actor); err != nil {
+		return err
+	}
+	return issueops.RecordVersionInTx(ctx, r.runner, issueID, actor)
+}
+
+// RenameLabel sweeps both label planes (labels and wisp_labels) for oldLabel,
+// reusing issueops.RenameLabelInTx rather than restating its SQL shape here:
+// r.runner satisfies issueops.DBTX structurally, so this is the exact same
+// merge logic, same-name refusal (issueops.ErrRenameLabelSameName) and
+// EventLabelRenamed emission the direct DoltStore/EmbeddedDoltStore route
+// uses. That identity, not merely a matching shape, is what keeps this route
+// and the direct one from drifting the way runLabelRenameProxiedServer's
+// hand-rolled add-then-remove fan-out used to.
+func (r *labelSQLRepositoryImpl) RenameLabel(ctx context.Context, oldLabel, newLabel, actor string) (renamed, merged int, ids []string, err error) {
+	return issueops.RenameLabelInTx(ctx, r.runner, oldLabel, newLabel, actor)
 }
 
 func (r *labelSQLRepositoryImpl) Delete(ctx context.Context, issueID, label, actor string, opts domain.LabelOpts) error {
@@ -118,7 +134,12 @@ func (r *labelSQLRepositoryImpl) Delete(ctx context.Context, issueID, label, act
 	}, domain.RecordEventOpts{UseWispsTable: opts.UseWispsTable}); err != nil {
 		return err
 	}
-	return issueops.RecordEventInTx(ctx, r.runner, issueops.EventUpdate, issueID, actor)
+	// The rows == 0 return above keeps this actually-deleted-only, so the
+	// version row is minted for a real change, as RemoveLabelInTx does.
+	if err := issueops.RecordEventInTx(ctx, r.runner, issueops.EventUpdate, issueID, actor); err != nil {
+		return err
+	}
+	return issueops.RecordVersionInTx(ctx, r.runner, issueID, actor)
 }
 
 func (r *labelSQLRepositoryImpl) List(ctx context.Context, issueID string, opts domain.LabelOpts) ([]string, error) {

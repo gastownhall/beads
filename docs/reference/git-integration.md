@@ -130,12 +130,16 @@ hooks {
 
 The hook shim applies a soft deadline to `bd hooks run` when a compatible
 helper is available. It
-uses `timeout` or `gtimeout` only after a successful GNU coreutils identity
-probe, avoiding the incompatible `timeout.exe` that native Windows can place
-on `PATH`. GNU timeout sends `TERM` at the configured deadline. On POSIX hosts,
-the Perl fallback uses `SIGALRM` on the direct `bd` process at the deadline.
-Git for Windows Perl does not guarantee that alarm across `exec`, so GNU
-coreutils is the preferred deadline backend there.
+uses `timeout` or `gtimeout` only after a successful identity probe for GNU
+coreutils or uutils coreutils (same command line, same exit status), avoiding
+the incompatible `timeout.exe` that native Windows can place on `PATH`. At the
+configured deadline the coreutils helper sends `TERM` to `bd` and its process
+group, which holds the chained hook and the `bd export` or `bd import` that
+`bd` waits on. Without one, the Perl fallback runs `bd` in a process group of
+its own and does the same, then sends the group `KILL` if `bd` is still
+running two seconds later. A Ctrl-C, hangup, or `TERM` that reaches the hook
+is passed on to that group. On Git for Windows a coreutils `timeout` (GNU or
+uutils) is the preferred deadline backend.
 
 The default deadline is **300 seconds** (5 minutes), which accommodates chained
 pre-commit pipelines (eslint, prettier, TypeScript compilation). Override it
@@ -151,14 +155,20 @@ BEADS_HOOK_TIMEOUT=600 git commit -m "..."
 
 The value must be a positive whole number of seconds. Invalid values and zero
 produce a warning and use the 300-second default. These are soft process
-deadlines, not process-tree containment: TERM-resistant work or descendants
-can outlive them. If neither GNU timeout nor Perl is available, the hook warns
-and runs directly without a deadline; that last-resort path can hang until the
-hook itself returns.
+deadlines, not process-tree containment: a process that ignores `TERM` can
+outlive them. Both helpers run `bd` outside the terminal's foreground process
+group, so a chained hook that reads from the terminal is stopped until the
+deadline ends it. If neither a coreutils timeout nor Perl is available, the hook
+warns and runs directly without a deadline; that last-resort path can hang until
+the hook itself returns.
 
-After upgrading from a release whose generated hooks used a name-only timeout
-check, run `bd hooks install` once to refresh already-installed canonical hook
-sections. Automatic generated-policy adoption is tracked separately.
+Already-installed hook sections are not refreshed automatically. After upgrading
+to a release that changed the generated timeout probe — the name-only check,
+the uutils coreutils banner, or the Perl fallback that could not stop `bd`
+([#7753](https://github.com/gastownhall/beads/issues/7753)) — run
+`bd hooks install` once to refresh
+already-installed canonical hook sections. Automatic generated-policy adoption is
+tracked separately.
 
 When the timeout is reached, beads prints a warning and lets the git
 operation proceed — the commit or push is not blocked.

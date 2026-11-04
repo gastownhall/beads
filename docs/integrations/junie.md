@@ -199,7 +199,8 @@ bd setup junie --remove
 This removes:
 - `.junie/guidelines.md`
 - `.junie/mcp/mcp.json`
-- Empty `.junie/mcp/` and `.junie/` directories
+- Empty `.junie/mcp/` and `.junie/` directories (only real directories this
+  removal emptied; a symlinked one stays)
 
 ## See Also
 

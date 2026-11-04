@@ -14,6 +14,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage/dbproxy/pidfile"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/server"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/util"
+	"github.com/steveyegge/beads/internal/testutil/bazeltest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -197,7 +198,7 @@ func startNamedForceStopHelper(t *testing.T, dir, name string) helperProcess {
 	}
 
 	cmd := exec.Command(executable, "-test.run=^TestForceStopHelperProcess$")
-	cmd.Env = append(os.Environ(), forceStopHelperEnv+"=1")
+	cmd.Env = append(bazeltest.ShardFreeEnv(os.Environ()), forceStopHelperEnv+"=1")
 	require.NoError(t, cmd.Start())
 	token, err := procid.Capture(cmd.Process.Pid)
 	require.NoError(t, err)

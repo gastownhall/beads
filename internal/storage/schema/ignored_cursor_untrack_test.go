@@ -120,7 +120,7 @@ func expectIgnoredCursorGate(mock sqlmock.Sqlmock, qualifier string, tracked boo
 	if tracked {
 		expectIgnoreResolution(mock, qualifier, ignoredSource.cursorTable, matches)
 	}
-	expectSchemaTableExists(mock, ignoredCursorUntrackTempTable, stray)
+	expectShowTable(mock, ignoredCursorUntrackTempTable, stray)
 }
 
 // expectIgnoredCursorHealNoop mocks the whole open-time reconcile on a healthy
@@ -184,7 +184,12 @@ func expectIgnoredCursorScratchDrop(mock sqlmock.Sqlmock, sweptIntoHead bool) {
 		return
 	}
 	expectIgnoredCursorUnstage(mock)
-	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_ADD(?)")).
+	// Forced: the scratch's name matches the seeded "__temp__%" pattern, and
+	// an unforced DOLT_ADD would drop it from the staging list silently — the
+	// filter classifies by pattern alone and never consults HEAD, so being
+	// committed at HEAD does not exempt it. --skip-empty would then report
+	// success having committed nothing.
+	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_ADD('-f', ?)")).
 		WithArgs(ignoredCursorUntrackTempTable).
 		WillReturnRows(sqlmock.NewRows([]string{"status"}))
 	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', ?, '--skip-empty')")).
@@ -483,12 +488,13 @@ func TestHealCopiesLegacyShapeWithoutContentHash(t *testing.T) {
 	}
 }
 
-// The scratch table carries a perfectly committable name, so a concurrent
-// writer's blanket commit can sweep it into HEAD during the repair window.
-// Dropping it locally would then leave a permanent delete delta — the same
-// class of tracked residue this whole fix exists to remove — so the deletion
-// is committed, scoped to that table, after the staging area is cleared so
-// nothing unrelated rides along under its message.
+// The scratch table can be committed at HEAD by any writer that predates the
+// "__temp__%" pattern — a lineage repaired before it shipped, an older binary's
+// blanket commit, or replication from such a peer. Dropping it locally would
+// then leave a permanent delete delta — the same class of tracked residue this
+// whole fix exists to remove — so the deletion is committed, scoped to that
+// table, after the staging area is cleared so nothing unrelated rides along
+// under its message, and FORCED past the pattern that now matches its name.
 func TestHealCommitsAStrayScratchTableOutOfHead(t *testing.T) {
 	db, mock := newMockDB(t)
 
@@ -758,7 +764,7 @@ func TestAlreadyConvergedDeclinesOnALegacyTrackedCursor(t *testing.T) {
 	expectDoltIgnoreRead(mock, unqualifiedDoltIgnore, seededIgnorePatterns(LatestVersion()))
 	expectHeadTableProbe(mock, "", ignoredSource.cursorTable, true)
 	expectIgnoreResolution(mock, "", ignoredSource.cursorTable, exactlyIgnored(true))
-	expectSchemaTableExists(mock, ignoredCursorUntrackTempTable, false)
+	expectShowTable(mock, ignoredCursorUntrackTempTable, false)
 
 	converged, err := alreadyConverged(context.Background(), db, "testdb", nil)
 	if err != nil {
@@ -787,7 +793,7 @@ func TestAlreadyConvergedDeclinesOnASurvivingScratchTable(t *testing.T) {
 	expectNoMigrationWorkNeeded(mock)
 	expectDoltIgnoreRead(mock, unqualifiedDoltIgnore, seededIgnorePatterns(LatestVersion()))
 	expectHeadTableProbe(mock, "", ignoredSource.cursorTable, false)
-	expectSchemaTableExists(mock, ignoredCursorUntrackTempTable, true)
+	expectShowTable(mock, ignoredCursorUntrackTempTable, true)
 
 	converged, err := alreadyConverged(context.Background(), db, "testdb", nil)
 	if err != nil {
@@ -814,7 +820,7 @@ func TestAlreadyConvergedAcceptsATrackedCursorTheOperatorUnignored(t *testing.T)
 	expectDoltIgnoreRead(mock, unqualifiedDoltIgnore, seededIgnorePatterns(LatestVersion()))
 	expectHeadTableProbe(mock, "", ignoredSource.cursorTable, true)
 	expectIgnoreResolution(mock, "", ignoredSource.cursorTable, exactlyIgnored(false))
-	expectSchemaTableExists(mock, ignoredCursorUntrackTempTable, false)
+	expectShowTable(mock, ignoredCursorUntrackTempTable, false)
 	expectMigrationLockProbe(mock, "testdb", 1)
 
 	converged, err := alreadyConverged(context.Background(), db, "testdb", nil)
@@ -858,7 +864,7 @@ func TestAlreadyConvergedKeepsTheLockProbeLast(t *testing.T) {
 	expectDoltIgnoreRead(mock, unqualifiedDoltIgnore, seededIgnorePatterns(LatestVersion()))
 	expectHeadTableProbe(mock, "", ignoredSource.cursorTable, true)
 	expectIgnoreResolution(mock, "", ignoredSource.cursorTable, exactlyIgnored(true))
-	expectSchemaTableExists(mock, ignoredCursorUntrackTempTable, false)
+	expectShowTable(mock, ignoredCursorUntrackTempTable, false)
 
 	if _, err := alreadyConverged(context.Background(), db, "testdb", nil); err != nil {
 		t.Fatalf("alreadyConverged() error = %v", err)

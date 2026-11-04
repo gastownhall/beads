@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -59,7 +60,7 @@ func UnclaimIssueInTx(ctx context.Context, tx DBTX, id string, actor string, for
 	// spelling (ga-5ksp5) is not refused as a stranger.
 	if !force && !actorMatches(oldIssue.Assignee, actor) {
 		return fmt.Errorf("%w: %s is held by %s; coordinate with the holder — pass --force only if their claim is abandoned (crashed agent, expired lease)",
-			storage.ErrNotOwner, id, oldIssue.Assignee)
+			storage.ErrNotOwner, id, remedy.PrintedValue(oldIssue.Assignee))
 	}
 
 	now := time.Now().UTC()
@@ -101,7 +102,7 @@ func UnclaimIssueInTx(ctx context.Context, tx DBTX, id string, actor string, for
 		}
 		if !force && !actorMatches(current.Assignee, actor) {
 			return fmt.Errorf("%w: %s is held by %s; coordinate with the holder — pass --force only if their claim is abandoned (crashed agent, expired lease)",
-				storage.ErrNotOwner, id, current.Assignee)
+				storage.ErrNotOwner, id, remedy.PrintedValue(current.Assignee))
 		}
 		return fmt.Errorf("failed to unclaim issue %s: no matching row", id)
 	}
@@ -129,8 +130,12 @@ func finishUnclaimInTx(ctx context.Context, tx DBTX, eventTable string, id strin
 	}
 	// A release changes assignee and status, so it journals as an update. Both
 	// unclaim entry points funnel through here after their CAS succeeded, so
-	// this covers the conditional release too.
-	return RecordEventInTx(ctx, tx, EventUpdate, id, actor)
+	// this covers the conditional release too — and the version row minted
+	// beside it, for the same durable-state change.
+	if err := RecordEventInTx(ctx, tx, EventUpdate, id, actor); err != nil {
+		return err
+	}
+	return RecordVersionInTx(ctx, tx, id, actor)
 }
 
 // UnclaimIssueIfAssigneeInTx atomically releases a claim only while the issue is

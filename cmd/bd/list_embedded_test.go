@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -27,6 +28,12 @@ func bdList(t *testing.T, bd, dir string, args ...string) string {
 		t.Fatalf("bd list %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
 	}
 	return stdout.String()
+}
+
+// outputHasIssueID reports whether id appears in out as a whole ID, so a
+// hierarchical ID such as tl-x.1 is not found inside tl-x.1.2 or tl-x.10.
+func outputHasIssueID(out, id string) bool {
+	return regexp.MustCompile(`(^|[^\w.-])` + regexp.QuoteMeta(id) + `($|[^\w.-])`).MatchString(out)
 }
 
 // bdListJSON runs "bd list --json" and parses the result as an array of IssueWithCounts.
@@ -177,17 +184,33 @@ type testSeedData struct {
 	readyTask     string // P0, labels: backend, no blockers
 }
 
-func TestEmbeddedList(t *testing.T) {
+// seededListWorkspace is the TestEmbeddedList* tests' shared setup: an
+// initialized workspace seeded by seedTestData.
+func seededListWorkspace(t *testing.T) (bd, dir string, seed testSeedData) {
+	t.Helper()
+	bd = buildEmbeddedBD(t)
+	dir, _, _ = bdInit(t, bd, "--prefix", "tl")
+
+	// Seed test data
+	seed = seedTestData(t, bd, dir)
+	return bd, dir, seed
+}
+
+// The TestEmbeddedListFiltering* and TestEmbeddedListSearchAndOutput* tests
+// were split from TestEmbeddedList (originally ~298s, measured under
+// --config=embedded) into top-level tests over disjoint subtest groups, each
+// on its own seeded workspace, for CI shard balance (see
+// scripts/ci/embedded_cmd_test_durations.json and engdocs/TESTING.md). Every
+// original subtest is preserved exactly once, in its original order within
+// its group; each group ran on the unmodified seed in the original too (the
+// subtests before each split point create no issues).
+func TestEmbeddedListFilteringBasicAndLabels(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
 	t.Parallel()
 
-	bd := buildEmbeddedBD(t)
-	dir, _, _ := bdInit(t, bd, "--prefix", "tl")
-
-	// Seed test data
-	seed := seedTestData(t, bd, dir)
+	bd, dir, seed := seededListWorkspace(t)
 
 	// --- A. Basic filtering ---
 
@@ -449,6 +472,15 @@ func TestEmbeddedList(t *testing.T) {
 			t.Fatalf("--skip-labels JSON leaked labels: %v", out.Issues[0].Labels)
 		}
 	})
+}
+
+func TestEmbeddedListFilteringStatusAndHierarchy(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd, dir, seed := seededListWorkspace(t)
 
 	// --- C. Status/special filtering ---
 	// Note: --ready, --pinned, --status closed/deferred/in_progress tests are
@@ -500,6 +532,29 @@ func TestEmbeddedList(t *testing.T) {
 		}
 		if !containsID(issues, seed.childTaskB) {
 			t.Errorf("child B should appear with --parent, got %v", ids)
+		}
+	})
+
+	t.Run("parent_filter_short_id", func(t *testing.T) {
+		// Regression for #5440: a --parent value without its project prefix
+		// (e.g. "c7v" instead of "tl-c7v") must resolve the same way
+		// `bd history <shortid>` already does (GH#4868), not error "not found".
+		// Uses the plain (non-JSON) render, matching the issue's own repro and
+		// tree_parent above -- --json --parent takes a different code path
+		// (reader.List's own filter, not getHierarchicalChildren) that this
+		// fix does not touch; see the relay notes for that separate finding.
+		idParts := strings.Split(seed.epic, "-")
+		shortID := idParts[len(idParts)-1]
+		if shortID == seed.epic {
+			t.Fatalf("test setup: seed.epic %q has no prefix to strip", seed.epic)
+		}
+
+		out := bdList(t, bd, dir, "--parent", shortID)
+		if !strings.Contains(out, seed.childTaskA) {
+			t.Errorf("child A %s should appear with --parent %s (short id):\n%s", seed.childTaskA, shortID, out)
+		}
+		if !strings.Contains(out, seed.childTaskB) {
+			t.Errorf("child B %s should appear with --parent %s (short id):\n%s", seed.childTaskB, shortID, out)
 		}
 	})
 
@@ -575,6 +630,46 @@ func TestEmbeddedList(t *testing.T) {
 		}
 	})
 
+	// --pretty --parent renders the tree storage.SearchDescendants walks
+	// (GH#3415). Without --all the walk is filtered at every level, so the
+	// closed mid-level child is left out and nothing below it is reached
+	// through it; everything outside its subtree still shows.
+	t.Run("pretty_parent_tree_with_closed_mid_level_child", func(t *testing.T) {
+		epic := bdCreate(t, bd, dir, "Pretty tree epic", "--type", "epic").ID
+		child := func(title, parent string) string {
+			return bdCreate(t, bd, dir, title, "--type", "task", "--parent", parent).ID
+		}
+		a := child("Pretty tree A", epic)
+		b := child("Pretty tree B", epic)
+		closedMid := child("Pretty tree closed mid", a)
+		underClosed := child("Pretty tree under closed", closedMid)
+		a2 := child("Pretty tree A2", a)
+		a2x := child("Pretty tree A2x", a2)
+		b1 := child("Pretty tree B1", b)
+		b1x := child("Pretty tree B1x", b1)
+		bdClose(t, bd, dir, closedMid, "--force")
+
+		all := bdList(t, bd, dir, "--parent", epic, "--pretty", "--all")
+		for _, id := range []string{epic, a, b, closedMid, underClosed, a2, a2x, b1, b1x} {
+			if !outputHasIssueID(all, id) {
+				t.Errorf("--pretty --all tree is missing %s:\n%s", id, all)
+			}
+		}
+
+		open := bdList(t, bd, dir, "--parent", epic, "--pretty")
+		for _, id := range []string{epic, a, b, a2, a2x, b1, b1x} {
+			if !outputHasIssueID(open, id) {
+				t.Errorf("--pretty tree is missing open descendant %s:\n%s", id, open)
+			}
+		}
+		if outputHasIssueID(open, closedMid) {
+			t.Errorf("--pretty tree without --all shows closed %s:\n%s", closedMid, open)
+		}
+		if outputHasIssueID(open, underClosed) {
+			t.Errorf("--pretty tree without --all shows %s, reachable only through closed %s:\n%s", underClosed, closedMid, open)
+		}
+	})
+
 	t.Run("flat", func(t *testing.T) {
 		// --flat disables tree format, uses legacy flat list
 		out := bdList(t, bd, dir, "--flat")
@@ -582,6 +677,15 @@ func TestEmbeddedList(t *testing.T) {
 			t.Error("--flat should not contain tree characters")
 		}
 	})
+}
+
+func TestEmbeddedListSearchAndOutputSearchAndSort(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd, dir, seed := seededListWorkspace(t)
 
 	// --- E. Content search ---
 
@@ -684,6 +788,15 @@ func TestEmbeddedList(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestEmbeddedListSearchAndOutputFormats(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd, dir, seed := seededListWorkspace(t)
 
 	// --- I. Output formats ---
 
@@ -745,6 +858,7 @@ func TestEmbeddedList(t *testing.T) {
 		if !strings.Contains(out, "digraph") {
 			t.Errorf("dot output should contain 'digraph' header, got: %s", out)
 		}
+		assertDotCanonicalOrder(t, out)
 	})
 
 	t.Run("format_dot_output_error", func(t *testing.T) {
@@ -1000,4 +1114,12 @@ func TestEmbeddedListConcurrent(t *testing.T) {
 			t.Fatalf("authoritative list omitted concurrent snapshot ID %q", id)
 		}
 	}
+
+	t.Run("watch_leaves_list_and_show_free", func(t *testing.T) {
+		testListWatchLeavesListAndShowFree(t, bd)
+	})
+
+	t.Run("watch_parent_tree_leaves_commands_free", func(t *testing.T) {
+		testListWatchParentTreeLeavesCommandsFree(t, bd)
+	})
 }

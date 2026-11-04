@@ -1,14 +1,29 @@
 package doltremote
 
-import "strings"
+import (
+	"regexp"
+	"strings"
+)
 
 // NativeSchemes are URL schemes that Dolt understands natively and should not
 // be converted through FromGitURL.
+//
+// This list is deliberately narrower than remotecache.remoteSchemes, the repo's
+// fuller scheme authority: az:// and oci:// are absent here. For az:// that gap
+// is tracked in #6227, which also covers dolt.IsBackupURL - the site where the
+// gap actually changes behavior - so completing this list on its own would
+// close only half of it.
+//
+// Membership is not load-bearing either way. Every entry contains "://", which
+// isSCPStyleGitURL rejects outright, so Normalize's closing "return url"
+// already hands back any of these URLs byte-identical whether or not they are
+// listed. The list records intent; the "://" guard is what preserves the bytes.
 var NativeSchemes = []string{
 	"dolthub://",
 	"file://",
 	"aws://",
 	"gs://",
+	"s3://",
 	"git+https://",
 	"git+ssh://",
 	"git+http://",
@@ -16,9 +31,14 @@ var NativeSchemes = []string{
 }
 
 // Normalize converts a remote URL to a Dolt-compatible format.
-// Dolt-native URLs (dolthub://, file://, aws://, gs://, git+...) are returned
+// Dolt-native URLs (dolthub://, file://, aws://, gs://, s3://, git+...) are returned
 // as-is. Git URLs (https://, ssh://, git@...) are converted via FromGitURL.
 // Unknown schemes are returned as-is and let dolt clone decide.
+//
+// The NativeSchemes loop is only a shortcut. What actually keeps every scheme
+// URL intact is the "://" guard in isSCPStyleGitURL: it stops a path or query
+// containing "@" from being read as an SCP-style git remote, so an unlisted
+// scheme still falls through to the closing "return url".
 func Normalize(url string) string {
 	for _, scheme := range NativeSchemes {
 		if strings.HasPrefix(url, scheme) {
@@ -43,6 +63,15 @@ func Normalize(url string) string {
 // SCP-style SSH URLs are converted: git@host:path -> git+ssh://git@host/path
 // SSH URLs get "git+" prefix: ssh://... -> git+ssh://...
 // URLs that already have "git+" prefix are returned as-is.
+//
+// The SCP split obeys the same "://" rule as isSCPStyleGitURL, so a scheme URL
+// handed to this exported entry point directly - rather than routed here by
+// Normalize - cannot be rebuilt into git+ssh://s3///bucket/team@prod/db. The
+// narrower shape test stays in isSCPStyleGitURL, which is what Normalize
+// classifies on. Gating here on that predicate instead would additionally stop
+// converting the SCP hosts it deliberately declines to classify (IDN hosts,
+// non-ASCII userinfo, dotless aliases) - measured at 8 further inputs changed
+// over the package's own corpus, none of them the bug this guard closes.
 func FromGitURL(url string) string {
 	if strings.HasPrefix(url, "git+") {
 		return url
@@ -56,37 +85,37 @@ func FromGitURL(url string) string {
 	if isWindowsDrivePath(url) {
 		return "git+" + url
 	}
-	if idx := strings.Index(url, ":"); idx > 0 && !strings.Contains(url[:idx], "/") {
-		return "git+ssh://" + url[:idx] + "/" + url[idx+1:]
+	if !strings.Contains(url, "://") {
+		if idx := strings.Index(url, ":"); idx > 0 && !strings.Contains(url[:idx], "/") {
+			return "git+ssh://" + url[:idx] + "/" + url[idx+1:]
+		}
 	}
 	return "git+" + url
 }
 
+// scpStyleGitURLPattern matches SCP-style git remotes. Its first alternative
+// (user@host) is byte-identical to remotecache.gitSSHPattern in
+// internal/remotecache/url.go; this pattern is a superset by exactly its second
+// alternative, the user-less dotted-host form ("github.com:org/repo.git"),
+// which remotecache.IsRemoteURL intentionally reports as false. The two are
+// otherwise one grammar with no cross-reference, so keep them in sync; the
+// divergence is pinned by TestSCPGrammarDivergesFromRemotecacheOnlyOnDottedHost
+// here and by TestIsRemoteURLRejectsUserlessDottedHost on the remotecache side.
+var scpStyleGitURLPattern = regexp.MustCompile(`^(?:[a-zA-Z0-9._-]+@[a-zA-Z0-9][a-zA-Z0-9._-]*|[a-zA-Z0-9][a-zA-Z0-9._-]*\.[a-zA-Z0-9._-]*):[^\x00-\x1f\x7f]+$`)
+
 // isSCPStyleGitURL reports whether url looks like an SCP-style git remote:
-// either the classic user form (git@host:path) or the user-less form
-// (host:path). The user-less form is only recognized when the pre-colon
-// token looks like a hostname (contains a ".") so that dotless tokens such
-// as a Windows drive letter ("C:foo") are not mistaken for a host.
+// user@host:path, or host:path when the pre-colon token contains a "." so a
+// Windows drive letter ("C:foo") is not mistaken for a host. Anything that
+// carries a "://" scheme is never SCP-style, whatever else it contains, so a
+// query or path with "@" in it cannot turn an s3:// URL into a git remote.
 //
-// Known limitation: git itself also accepts dotless SSH config aliases in
-// this position (e.g. "github:org/repo.git", "localhost:repo.git"), which
-// the "." check above rejects. Those origins pass through unconverted and
-// won't canonically match an equivalent git+ssh://alias/... or
-// user@alias:path Dolt remote. This is a deliberate trade-off to keep
-// isWindowsDrivePath's single-letter-drive check from being the only guard
-// against misreading "C:foo" as a host; widening the rule (e.g. following
-// git's own convention of treating anything host:path as SCP-style unless
-// the pre-colon token is a single-letter drive) is tracked as a follow-up
-// rather than fixed here.
+// Known limitations: git also accepts dotless SSH config aliases
+// ("github:org/repo.git"); those pass through unconverted and will not
+// canonically match an equivalent git+ssh:// form. User and host are limited
+// to [a-zA-Z0-9._-], so non-ASCII userinfo and IDN hosts are not recognized
+// either.
 func isSCPStyleGitURL(url string) bool {
-	idx := strings.Index(url, ":")
-	if idx <= 0 || strings.Contains(url[:idx], "/") {
-		return false
-	}
-	if strings.Contains(url, "@") {
-		return true
-	}
-	return strings.Contains(url[:idx], ".")
+	return !strings.Contains(url, "://") && scpStyleGitURLPattern.MatchString(url)
 }
 
 // CanonicalForComparison returns a form of url suitable for equality checks

@@ -35,6 +35,24 @@ func TestSweeperContract(t *testing.T) {
 	t.Run("TreatsALegacyTypedWispAsEphemeralTier", func(t *testing.T) {
 		conformance.RunSweeperTreatsALegacyTypedWispAsEphemeralTier(t, ctx, fixture)
 	})
+	t.Run("WispsPlaneClearsTheWholeWispsTable", func(t *testing.T) {
+		conformance.RunSweeperWispsPlaneClearsTheWholeWispsTable(t, ctx, fixture)
+	})
+	t.Run("WispsPlaneRequiresAFilter", func(t *testing.T) {
+		conformance.RunSweeperWispsPlaneRequiresAFilter(t, ctx, fixture)
+	})
+	t.Run("ProtectsLiveDependents", func(t *testing.T) {
+		conformance.RunSweeperProtectsLiveDependents(t, ctx, fixture)
+	})
+	t.Run("ProtectsTransitiveLiveDependents", func(t *testing.T) {
+		conformance.RunSweeperProtectsTransitiveLiveDependents(t, ctx, fixture)
+	})
+	t.Run("ProtectsLiveDependentsAcrossPlanes", func(t *testing.T) {
+		conformance.RunSweeperProtectsLiveDependentsAcrossPlanes(t, ctx, fixture)
+	})
+	t.Run("LimitTakesTheOldestClosedFirst", func(t *testing.T) {
+		conformance.RunSweeperLimitTakesTheOldestClosedFirst(t, ctx, fixture)
+	})
 	t.Run("LeavesNoHistoryBeadsToTheDurableTier", func(t *testing.T) {
 		conformance.RunSweeperLeavesNoHistoryBeadsToTheDurableTier(t, ctx, fixture)
 	})
@@ -68,7 +86,22 @@ func TestSweeperContract(t *testing.T) {
 // accessor.
 func newDoltSweeperFixture(t *testing.T, prefix string) (conformance.SweeperFixture, context.Context, func()) {
 	t.Helper()
+	fixture, _, ctx, stop := newDoltSweeperFixtureOnStore(t, prefix)
+	return fixture, ctx, stop
+}
+
+// newDoltSweeperFixtureOnStore is newDoltSweeperFixture also handing back the
+// store, for a contract that composes more of its roles beside the sweeper.
+func newDoltSweeperFixtureOnStore(t *testing.T, prefix string) (conformance.SweeperFixture, *DoltStore, context.Context, func()) {
+	t.Helper()
 	store, storeCleanup := setupTestStore(t)
+	return newDoltSweeperFixtureFor(t, store, storeCleanup, prefix)
+}
+
+// newDoltSweeperFixtureFor is newDoltSweeperFixtureOnStore over a store the
+// caller set up, which storeCleanup tears down.
+func newDoltSweeperFixtureFor(t *testing.T, store *DoltStore, storeCleanup func(), prefix string) (conformance.SweeperFixture, *DoltStore, context.Context, func()) {
+	t.Helper()
 	ctx, cancel := testContext(t)
 	stop := func() {
 		cancel()
@@ -98,6 +131,16 @@ func newDoltSweeperFixture(t *testing.T, prefix string) (conformance.SweeperFixt
 			}
 			return nil
 		},
+		AddDependencies: func(ctx context.Context, req issueops.AddDependenciesRequest) error {
+			// Through the DependencyEditor ROLE, which routes each edge to its
+			// source plane's dependency table itself.
+			editor, err := store.DependencyEditor()
+			if err != nil {
+				return err
+			}
+			_, err = editor.AddDependencies(ctx, req)
+			return err
+		},
 		AddComment: func(ctx context.Context, issueID, author, text string) error {
 			// Through the Commenter ROLE, which resolves the plane itself, so
 			// the case can cite from a wisp's comment without knowing how this
@@ -111,5 +154,5 @@ func newDoltSweeperFixture(t *testing.T, prefix string) (conformance.SweeperFixt
 			})
 			return err
 		},
-	}, ctx, stop
+	}, store, ctx, stop
 }

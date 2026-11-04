@@ -110,6 +110,27 @@ func (r *issueSQLRepositoryImpl) GetDescendants(ctx context.Context, rootID stri
 // found it, so re-expanding them would only multiply duplicate rows.
 // Filter predicates are hoisted into named matches CTEs (see predBundle) to
 // dodge a dolt 2.1.6 analyzer bug.
+//
+// Edge members resolve the parent across all three typed target columns, the
+// same set and precedence as depTargetExpr / sqlbuild.DepTargetExpr and as the
+// classic ParentID filter this walk mirrors. Until be-qfm they named only
+// depends_on_issue_id and depends_on_wisp_id, so a child whose parent is
+// recorded in depends_on_external (a cross-prefix or foreign-repo parent) was
+// invisible to GetDescendants while the classic filter matched it;
+// ck_dep_one_target (migration 0041) leaves exactly one target column set, so
+// those rows coalesced to NULL and no edge ever matched. Adding the column is
+// therefore strictly additive. TestBuildDescendantsCTEResolvesEveryDepTargetColumn
+// binds this expression to sqlbuild.DepTargetExpr so the two cannot drift again.
+//
+// These members still join the frontier through that COALESCE, which is the
+// shape sqlbuild.DescendantWalkQuery was reshaped away from in be-qfm because
+// Dolt cannot probe idx_dep_type_* through it. Migrating this walk to the same
+// per-(table, column) member form is deliberately NOT done here: it is a
+// different query — (id, src, via) projection, a dotted-ID fallback recursion,
+// hoisted per-level filter predicates, no depth cap and no path cycle guard —
+// and per-column members would triple its branch count (8 to 16 with wisps),
+// which is exactly what the predBundle comment above records as tripping the
+// dolt analyzer. Tracked separately in bd-tztam.
 func buildDescendantsCTE(rootID string, walkWisps bool, issuePred, wispPred predBundle) (string, []any) {
 	var b strings.Builder
 	var args []any
@@ -130,7 +151,7 @@ func buildDescendantsCTE(rootID string, walkWisps bool, issuePred, wispPred pred
     FROM issues i
     JOIN dependencies d ON d.issue_id = i.id
     WHERE d.type = 'parent-child'
-      AND COALESCE(d.depends_on_issue_id, d.depends_on_wisp_id) = ?
+      AND COALESCE(d.depends_on_issue_id, d.depends_on_wisp_id, d.depends_on_external) = ?
       %s`, issuePred.snippet)
 	args = append(args, rootID)
 
@@ -148,7 +169,7 @@ func buildDescendantsCTE(rootID string, walkWisps bool, issuePred, wispPred pred
     FROM wisps w
     JOIN wisp_dependencies wd ON wd.issue_id = w.id
     WHERE wd.type = 'parent-child'
-      AND COALESCE(wd.depends_on_issue_id, wd.depends_on_wisp_id) = ?
+      AND COALESCE(wd.depends_on_issue_id, wd.depends_on_wisp_id, wd.depends_on_external) = ?
       %s`, wispPred.snippet)
 		args = append(args, rootID)
 
@@ -166,7 +187,7 @@ func buildDescendantsCTE(rootID string, walkWisps bool, issuePred, wispPred pred
 	fmt.Fprintf(&b, `    SELECT i.id, 'i' AS src, 'e' AS via
     FROM issues i
     JOIN dependencies d ON d.issue_id = i.id
-    JOIN descendants p ON COALESCE(d.depends_on_issue_id, d.depends_on_wisp_id) = p.id
+    JOIN descendants p ON COALESCE(d.depends_on_issue_id, d.depends_on_wisp_id, d.depends_on_external) = p.id
     WHERE d.type = 'parent-child'
       %s`, issuePred.snippet)
 
@@ -183,7 +204,7 @@ func buildDescendantsCTE(rootID string, walkWisps bool, issuePred, wispPred pred
 		fmt.Fprintf(&b, `    SELECT w.id, 'w' AS src, 'e' AS via
     FROM wisps w
     JOIN wisp_dependencies wd ON wd.issue_id = w.id
-    JOIN descendants p ON COALESCE(wd.depends_on_issue_id, wd.depends_on_wisp_id) = p.id
+    JOIN descendants p ON COALESCE(wd.depends_on_issue_id, wd.depends_on_wisp_id, wd.depends_on_external) = p.id
     WHERE wd.type = 'parent-child'
       %s`, wispPred.snippet)
 

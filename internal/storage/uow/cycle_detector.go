@@ -40,8 +40,8 @@ var _ publicops.CycleDetector = (*cycleDetector)(nil)
 // rows that were on the cycle, rather than the rows that exist by the time the
 // second query runs. The two store-backed bodies get the same property from
 // their own read transaction.
-func (c *cycleDetector) DetectCycles(ctx context.Context, _ publicops.DetectCyclesRequest) (publicops.CycleReport, error) {
+func (c *cycleDetector) DetectCycles(ctx context.Context, req publicops.DetectCyclesRequest) (publicops.CycleReport, error) {
 	return RunTxRead(ctx, c.provider, func(ctx context.Context, uw UnitOfWork) (publicops.CycleReport, error) {
-		return uw.DependencyUseCase().DetectCycleReport(ctx)
+		return uw.DependencyUseCase().DetectCycleReport(ctx, req)
 	})
 }

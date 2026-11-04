@@ -89,6 +89,12 @@
 # Checks C, D, and E compare against $BASE_SHA if set (CI passes the PR base),
 # else origin/main, else main; they are skipped with a warning when no base
 # is resolvable (e.g. shallow clone without the base commit).
+#
+# MIGRATION_HYGIENE_SCOPE splits the two halves for CI (default: all):
+#   tree   checks A and B, which read only the checked-out migrations: the
+#          hermetic half, //scripts/repochecks:migration_hygiene_test.
+#   delta  checks C, D and E, which diff against the base: pr.yml's
+#          pr-diff-checks job, the only place a PR's base is known.
 
 set -euo pipefail
 
@@ -99,6 +105,16 @@ cd "$REPO_ROOT"
 MIG_DIR="internal/storage/schema/migrations"
 ALLOWLIST="$MIG_DIR/nondeterminism-allowlist.txt"
 fail=0
+
+scope="${MIGRATION_HYGIENE_SCOPE:-all}"
+case "$scope" in
+  all|tree|delta) ;;
+  *) echo "MIGRATION_HYGIENE_SCOPE must be all, tree or delta, not '$scope'" >&2; exit 2 ;;
+esac
+
+# Checks A and B (and the allowlist audit) run unless scope is delta. Their
+# bodies are not indented under this `if`: Check B's heredoc is column-0.
+if [ "$scope" != delta ]; then
 
 # --- Check A: duplicate version numbers ------------------------------------
 # Numbering is per directory: migrations/ and migrations/ignored/ are
@@ -183,9 +199,14 @@ if [ -f "$ALLOWLIST" ]; then
   done < "$ALLOWLIST"
 fi
 
+fi # scope != delta
+
 # --- Check C: shipped migrations are frozen ----------------------------------
+# Scope tree leaves base empty, so C, D and E below skip without a warning.
 base="${BASE_SHA:-}"
-if [ -z "$base" ]; then
+if [ "$scope" = tree ]; then
+  base=""
+elif [ -z "$base" ]; then
   for candidate in origin/main main; do
     if git rev-parse --verify -q "$candidate^{commit}" >/dev/null 2>&1; then
       base="$candidate"
@@ -195,7 +216,7 @@ if [ -z "$base" ]; then
 fi
 
 if [ -z "$base" ] || ! merge_base=$(git merge-base "$base" HEAD 2>/dev/null); then
-  echo "WARN (frozen migrations) no usable base ref; skipping check C." >&2
+  [ "$scope" = tree ] || echo "WARN (frozen migrations) no usable base ref; skipping check C." >&2
 else
   # Diff merge-base against the working tree (no HEAD) so local uncommitted
   # edits are caught too; in CI the tree is clean so this equals the PR diff.
@@ -228,7 +249,7 @@ fi
 # backstop for the same invariant is
 # internal/storage/embeddeddolt/migrate_ignored_plane_shape_test.go.
 if [ -z "$base" ] || [ -z "${merge_base:-}" ]; then
-  echo "WARN (ignored twins) no usable base ref; skipping check D." >&2
+  [ "$scope" = tree ] || echo "WARN (ignored twins) no usable base ref; skipping check D." >&2
 else
   ignored_tables='wisps|wisp_[a-z_]+|repo_mtimes|local_metadata|leases|events|bd_events_journal|bd_events_seq|ignored_schema_migrations'
   ddl_re="(alter|create|rename|drop)[[:space:]]+table([[:space:]]+if[[:space:]]+(not[[:space:]]+)?exists)?[[:space:]]+[\`']?(${ignored_tables})\b"
@@ -373,7 +394,7 @@ EOF
 }
 
 if [ -z "$base" ] || [ -z "${merge_base:-}" ]; then
-  echo "WARN (prepared DML) no usable base ref; skipping check E." >&2
+  [ "$scope" = tree ] || echo "WARN (prepared DML) no usable base ref; skipping check E." >&2
 else
   # Only *.up.sql is embedded into the CLI fresh bundle (`//go:embed
   # migrations/*.up.sql`, schema.go:218), so a .down.sql can never meet the bug

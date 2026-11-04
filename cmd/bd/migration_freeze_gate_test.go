@@ -369,7 +369,7 @@ func TestInitReinitBlockedDuringMigrationFreeze(t *testing.T) {
 // TestFreezeRefusalHasNoUsageDump: the refusal is returned as an error now, so
 // cobra renders it — and on a command that sets neither SilenceErrors nor
 // SilenceUsage (duplicate, supersede, dep relate/unrelate, backup *, ado sync,
-// migrate-personal, batch) that means "Error: exit code 14" plus a full usage
+// batch) that means "Error: exit code 14" plus a full usage
 // block after the clean refusal, making it read like a syntax error. Every
 // other freeze test uses a silenced command, so nothing else catches this.
 func TestFreezeRefusalHasNoUsageDump(t *testing.T) {
@@ -743,8 +743,8 @@ func TestLabelAddBlockedDuringMigrationFreeze(t *testing.T) {
 // Plain `bd import` is stopped by the early gate in PersistentPreRunE, like
 // any other write. The `--dry-run` row is the one that pins runImport's OWN
 // call: a preview sets useReadOnly, so it skips the early gate, and runImport
-// never calls CheckReadonly — delete the check from import.go and only this
-// row goes red. It also pins the claim the PreRunE comment makes about
+// calls CheckReadonly only under strict --readonly, so its freeze check is the
+// only one left — delete that check from import.go and only this row goes red. It also pins the claim the PreRunE comment makes about
 // previews being re-blocked at the per-command chokepoint, which for import is
 // exactly that call and nothing else.
 func TestImportBlockedDuringMigrationFreeze(t *testing.T) {

@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -20,16 +19,7 @@ func TestUpdateMetadataInlineJSON(t *testing.T) {
 
 	// Create storage
 	ctx := context.Background()
-	store, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
-	if err != nil {
-		t.Skipf("skipping: Dolt server not available: %v", err)
-	}
-	defer store.Close()
-
-	// Initialize database with issue prefix
-	if err := store.SetConfig(ctx, "issue_prefix", "bd"); err != nil {
-		t.Fatalf("failed to set issue_prefix: %v", err)
-	}
+	store := newTestStoreWithPrefix(t, dbPath, "bd")
 
 	// Create an issue
 	issue := &types.Issue{

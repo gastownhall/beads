@@ -15,6 +15,7 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/domain"
+	domaingit "github.com/steveyegge/beads/internal/storage/domain/git"
 	"github.com/steveyegge/beads/internal/storage/fs"
 	"github.com/steveyegge/beads/internal/storage/git"
 	"github.com/steveyegge/beads/internal/storage/uow"
@@ -40,6 +41,7 @@ type initProxiedServerInput struct {
 	stealth                bool
 	skipHooks              bool
 	skipAgents             bool
+	keepHomeClean          bool // see guardInitInHomeDir
 	reinitLocal            bool
 	contributor            bool
 	team                   bool
@@ -64,14 +66,15 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 	// proxied-server mode (in.externalConfig == nil): external mode talks
 	// to a remote/pre-existing dolt sql-server over the network and never
 	// spawns a local dolt binary, so it has nothing to preflight here.
-	// Failing here means a missing/broken dolt produces a clean preflight
-	// error instead of a half-initialized .beads/ directory from a later
-	// failure in newManagedProxiedServerUOWProvider.
+	// Failing here means a missing/broken dolt, or one older than
+	// doltversion.RequiredMin, produces a clean preflight error instead of
+	// a half-initialized .beads/ directory from a later failure in
+	// newManagedProxiedServerUOWProvider.
 	//
 	// Shares resolveAndProbeDolt (uow_factory.go) with
 	// newManagedProxiedServerUOWProvider, which this same `bd init
 	// --proxied-server` invocation goes on to call a few lines below via
-	// newProxiedServerUOWProvider: the shared doltVersionWarnOnce means the
+	// newProxiedServerUOWProviderInitializing: the shared doltVersionWarnOnce means the
 	// version advisory prints at most once for the command, not once per
 	// call site.
 	if in.externalConfig == nil {
@@ -86,6 +89,12 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 		fmt.Fprintf(os.Stderr, "Warning: failed to initialize config: %v\n", err)
 	}
 
+	if !in.initRemoteChanged {
+		if _, err := resolveSyncRemoteChecked(); err != nil {
+			return err
+		}
+	}
+
 	if err := checkExistingBeadsData(in.prefix); err != nil {
 		return err
 	}
@@ -95,7 +104,7 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 		return fmt.Errorf("failed to get current directory: %v", err)
 	}
 
-	fsProvider := fs.NewFileSystemProvider(cwd, newBeadsDirTemplates(), newFileSystemAdapters())
+	fsProvider := fs.NewFileSystemProvider(cwd, newBeadsDirTemplates(), newInitFileSystemAdapters(cwd))
 	fsUseCase := fsProvider.BeadsDirFSUseCase()
 	gitUC := git.NewGitProvider(cwd).GitUseCase()
 
@@ -122,6 +131,7 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 	dbName, projectID := proxiedInit.DBName, proxiedInit.ProjectID
 	beadsDirIsLocal := proxiedInit.IsLocal
 	useLocalBeads := !hasExplicitBeadsDir || beadsDirIsLocal
+	in.teamServer = proxiedInitTeamServer(in.teamServer, proxiedInit.Existing)
 
 	if in.teamServer && proxiedInit.DBNameDerived {
 		return fmt.Errorf(
@@ -135,6 +145,7 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 	}
 
 	if !hasExplicitBeadsDir {
+		// Bootstrap routing is handled separately in follow-up #6460.
 		res, err := gitUC.EnsureGitRepo(ctx)
 		if err != nil {
 			return fmt.Errorf("failed to initialize git repository: %v", err)
@@ -145,6 +156,7 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 	}
 
 	metadataBody, err := composeProxiedServerMetadataJSON(proxiedMetadataInputs{
+		existing:   proxiedInit.Existing,
 		dbName:     dbName,
 		projectID:  projectID,
 		teamServer: in.teamServer,
@@ -152,7 +164,7 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 	if err != nil {
 		return fmt.Errorf("composing metadata.json: %v", err)
 	}
-	configYAMLBody := renderInitConfigYAML("", false)
+	configYAMLBody := proxiedInitConfigYAMLBody(beadsDir)
 
 	clientInfo, err := buildProxiedServerClientInfo(in.serverRootPath, in.serverConfigPath, in.serverLogPath, in.serverProxyPort, in.serverProxyIdleTimeout, in.externalConfig)
 	if err != nil {
@@ -164,7 +176,7 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 		ConfigYAMLBody:          configYAMLBody,
 		ProxiedServerClientInfo: clientInfo,
 		SetNoCOW:                true,
-		WriteProjectGitignore:   useLocalBeads && beadsDirIsLocal,
+		WriteProjectGitignore:   useLocalBeads && beadsDirIsLocal && !in.keepHomeClean,
 	}
 	if useLocalBeads {
 		fsParams.LocalVersion = Version
@@ -181,14 +193,19 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 		fmt.Fprintf(os.Stderr, "Warning: failed to initialize version tracking: %v\n", fsResult.LocalVersionErr)
 	}
 
-	initUOWProvider, err := newProxiedServerUOWProviderAdopting(ctx, beadsDir, "")
+	// Initializing, not Adopting: init is the one open allowed to create the
+	// managed-local store (every other open refuses an empty root).
+	initUOWProvider, err := newProxiedServerUOWProviderInitializing(ctx, beadsDir, "")
 	if err != nil {
 		return fmt.Errorf("failed to open uow provider: %v", err)
 	}
 	defer func() { _ = initUOWProvider.Close(ctx) }()
 
-	remoteURL := resolveProxiedInitRemoteURL(ctx, gitUC, in)
+	remoteURL := resolveProxiedInitRemoteURL(ctx, cwd, in)
 
+	// Unlike the origin lookup above, ComputeRepoID and GetCloneID still inherit
+	// Git routing: under an inherited GIT_DIR/GIT_WORK_TREE, repo_id and clone_id
+	// can describe a different repository than remoteURL, or fail to resolve.
 	var repoID, cloneID string
 	if id, err := beads.ComputeRepoID(); err == nil {
 		repoID = id
@@ -283,6 +300,7 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 	}
 
 	return runInitProxiedServerTail(cmd, ctx, in, runInitTailContext{
+		workDir:       cwd,
 		beadsDir:      beadsDir,
 		prefix:        adoptedPrefix,
 		dbName:        dbName,
@@ -314,7 +332,7 @@ func resolveInitPrefix(flagPrefix string) (string, error) {
 	return prefix, nil
 }
 
-func resolveProxiedInitRemoteURL(ctx context.Context, gitUC domain.GitUseCase, in initProxiedServerInput) string {
+func resolveProxiedInitRemoteURL(ctx context.Context, workDir string, in initProxiedServerInput) string {
 	url, source := resolveInitConfiguredSyncRemote(in.initRemote, in.initRemoteChanged, resolveSyncRemote)
 	if url != "" {
 		return url
@@ -322,7 +340,11 @@ func resolveProxiedInitRemoteURL(ctx context.Context, gitUC domain.GitUseCase, i
 	if source != initSyncRemoteNone {
 		return ""
 	}
-	if !in.stealth {
+	// Under keepHomeClean the repository around the home is not the project's,
+	// so its origin is not this workspace's remote (see guardInitInHomeDir).
+	if !in.stealth && !in.keepHomeClean {
+		// Origin belongs to the selected project, independently of Beads storage.
+		gitUC := domain.NewGitUseCase(workDir, domaingit.NewInitGitRepository(workDir))
 		if originURL, err := gitUC.OriginRemoteURL(ctx); err == nil && originURL != "" {
 			return normalizeRemoteURL(originURL)
 		}
@@ -445,25 +467,62 @@ func adoptTeamServerIdentity(ctx context.Context, verifier issueops.InitVerifier
 }
 
 type proxiedMetadataInputs struct {
+	existing   *configfile.Config // metadata.json as init found it; nil when there is none
 	dbName     string
 	projectID  string
 	teamServer bool
 }
 
+// composeProxiedServerMetadataJSON renders the metadata.json init writes,
+// starting from the workspace's existing file. It sets only what this route
+// owns (backend, mode, database name, identity, the team-server marker, and
+// `database` when it is unset or the legacy beads.db, as the direct route
+// does) and keeps the rest. metadata.json is tracked, and init is the remedy
+// every refused open names (proxiedFreshStoreRefusal), so rewriting the file
+// from defaults made that remedy commit a revert of the team's file, and it
+// dropped the dolt_data_dir or absolute database that chose the root the
+// refusal named. An absolute dolt_data_dir stays too: Config.Save drops one
+// so that bd never puts a machine path into the tracked file (GH#2251), but
+// this one is already there, and dropping it would move every clone's root.
 func composeProxiedServerMetadataJSON(in proxiedMetadataInputs) ([]byte, error) {
 	cfg := configfile.DefaultConfig()
+	if in.existing != nil {
+		existing := *in.existing
+		cfg = &existing
+	}
 	cfg.Backend = configfile.BackendDolt
-	cfg.Database = "dolt"
+	if cfg.Database == "" || cfg.Database == beads.CanonicalDatabaseName {
+		cfg.Database = "dolt"
+	}
 	cfg.DoltDatabase = in.dbName
 	cfg.DoltMode = configfile.DoltModeProxiedServer
 	cfg.ProjectID = in.projectID
 	cfg.DoltTeamServer = in.teamServer
 
-	if filepath.IsAbs(cfg.DoltDataDir) {
-		cfg.DoltDataDir = ""
-	}
-
 	return json.MarshalIndent(cfg, "", "  ")
+}
+
+// proxiedInitConfigYAMLBody is the config.yaml init writes: the template for
+// a workspace that has none, and nothing (InitializeBeadsDir then leaves the
+// file alone) for one that does. config.yaml is tracked team configuration,
+// so a re-init keeps it, as createConfigYaml keeps it on the direct route.
+func proxiedInitConfigYAMLBody(beadsDir string) []byte {
+	if _, err := os.Stat(filepath.Join(beadsDir, "config.yaml")); err == nil {
+		return nil
+	}
+	return renderInitConfigYAML("", false)
+}
+
+// proxiedInitTeamServer is the team-server posture init runs with: the
+// --team-server flag, or a workspace whose metadata.json is already
+// team-server managed. Without the flag, init on such a workspace used to
+// rewrite the file as bd-managed, so its open treated a database
+// beads-team-server owns as bd's to migrate, and init wrote bd's tracking
+// rows into it. Leaving team-server management takes an edit of
+// metadata.json, as the proxied-server mode migration already requires
+// (migrate_dolt_mode.go).
+func proxiedInitTeamServer(flag bool, existing *configfile.Config) bool {
+	return flag || (existing != nil && existing.IsTeamServerManaged())
 }
 
 func buildProxiedServerClientInfo(rootPath, configPath, logPath string, port int, idleTimeout time.Duration, external *configfile.ExternalDoltConfig) (*configfile.ProxiedServerClientInfo, error) {
@@ -507,6 +566,7 @@ func buildProxiedServerClientInfo(rootPath, configPath, logPath string, port int
 }
 
 type runInitTailContext struct {
+	workDir       string
 	beadsDir      string
 	prefix        string
 	dbName        string
@@ -517,16 +577,33 @@ type runInitTailContext struct {
 }
 
 func runInitProxiedServerTail(cmd *cobra.Command, ctx context.Context, in initProxiedServerInput, t runInitTailContext) error {
-	isRepo := t.gitUC.IsGitRepo(ctx)
+	gitUC := t.gitUC
+	if t.workDir != "" {
+		// Only the selected tail uses this scope; earlier bootstrap keeps its provider.
+		// NewInitGitRepository runs `git rev-parse --git-dir` with Dir=workDir and
+		// scrubbed routing, so dropping discovery ceilings can select a containing
+		// parent repository, matching the role adapter's scrubbed reads and writes.
+		gitUC = domain.NewGitUseCase(t.workDir, domaingit.NewInitGitRepository(t.workDir))
+	}
+	// One probe answers both the role gate and the artifact gates: gitUC is the
+	// scrubbed selected-directory repository whenever workDir is set, and the
+	// supplied use case otherwise, so a separate role probe could only repeat it.
+	// Under keepHomeClean the repository it can find encloses the home instead
+	// of holding the project, so the tail treats the home as outside every
+	// repository: no role, no fork exclude, no upstream advice and no bootstrap
+	// commit, which would stage the legacy ~/.beads and the home's agent files
+	// into it (see guardInitInHomeDir). RunE sets skipHooks for the same case,
+	// which also covers a colocated jj repository.
+	isRepo := !in.keepHomeClean && gitUC.IsGitRepo(ctx)
 
 	if isRepo {
 		role := in.roleFlag
 		if role == "" {
 			role = "maintainer"
 		}
-		_, hasRole, _ := t.gitUC.BeadsRole(ctx)
+		_, hasRole, _ := gitUC.BeadsRole(ctx)
 		if !hasRole || in.roleFlag != "" {
-			if err := t.gitUC.SetBeadsRole(ctx, role); err != nil && !in.quiet {
+			if err := gitUC.SetBeadsRole(ctx, role); err != nil && !in.quiet {
 				fmt.Fprintf(os.Stderr, "Warning: failed to set beads.role: %v\n", err)
 			}
 		}
@@ -538,7 +615,7 @@ func runInitProxiedServerTail(cmd *cobra.Command, ctx context.Context, in initPr
 			fmt.Fprintf(os.Stderr, "Warning: failed to configure git exclude: %v\n", err)
 		}
 	} else if !in.stealth && isRepo {
-		if isFork, upstreamURL, _ := t.gitUC.DetectFork(ctx); isFork {
+		if isFork, upstreamURL, _ := gitUC.DetectFork(ctx); isFork {
 			if in.nonInteractive {
 				if err := t.fsUseCase.SetupForkExclude(ctx, !in.quiet); err != nil {
 					fmt.Fprintf(os.Stderr, "Warning: failed to configure git exclude: %v\n", err)
@@ -558,33 +635,41 @@ func runInitProxiedServerTail(cmd *cobra.Command, ctx context.Context, in initPr
 		}
 	}
 
-	if !in.skipHooks && (!hooksInstalled() || hooksNeedUpdate()) {
-		if hooksInstalled() && !in.quiet {
-			fmt.Printf("  Updating hooks to version %s...\n", Version)
-		}
-		isJJ := t.gitUC.IsJujutsuRepo(ctx)
-		isColocated := t.gitUC.IsColocatedJJGit(ctx)
+	if !in.skipHooks {
+		isJJ := gitUC.IsJujutsuRepo(ctx)
+		isColocated := gitUC.IsColocatedJJGit(ctx)
 		switch {
 		case isJJ && !isColocated:
-			if !in.quiet {
+			// The install arm below took over the hook-status gate that used to
+			// wrap this whole switch. Keep it here too, or a pure-JJ repo with
+			// current hooks starts re-printing the alias hint on every init.
+			if !in.quiet && (!hooksInstalled() || hooksNeedUpdate()) {
 				printJJAliasInstructions()
 			}
-		case isColocated:
-			if err := t.fsUseCase.InstallJJHooks(ctx); err != nil && !in.quiet {
-				fmt.Fprintf(os.Stderr, "\n%s Failed to install jj hooks: %v\n", ui.RenderWarn("⚠"), err)
-			} else if !in.quiet {
-				fmt.Printf("  Hooks installed (jujutsu mode - no staging)\n")
-			}
-		default:
-			if isRepo {
-				hooksParams := domain.HooksInstallParams{
-					HookNames:  managedHookNames,
-					BeadsHooks: true,
+		case isColocated || isRepo:
+			// Resolve only an eligible Git branch, never skip/pure-JJ/nonrepo paths.
+			hookFS, hooks, err := withInitHooks(t.fsUseCase, t.workDir, t.beadsDir)
+			if err != nil {
+				if !in.quiet {
+					fmt.Fprintf(os.Stderr, "\n%s Failed to resolve git hooks: %v\n", ui.RenderWarn("⚠"), err)
 				}
-				if err := t.fsUseCase.InstallGitHooks(ctx, hooksParams); err != nil && !in.quiet {
-					fmt.Fprintf(os.Stderr, "\n%s Failed to install git hooks to .beads/hooks/: %v\n", ui.RenderWarn("⚠"), err)
-				} else if !in.quiet {
-					fmt.Printf("  Hooks installed to: .beads/hooks/\n")
+			} else if !hooks.installed() || hooks.needsUpdate() {
+				if hooks.installed() && !in.quiet {
+					fmt.Printf("  Updating hooks to version %s...\n", Version)
+				}
+				if isColocated {
+					if err := hookFS.InstallJJHooks(ctx); err != nil && !in.quiet {
+						fmt.Fprintf(os.Stderr, "\n%s Failed to install jj hooks: %v\n", ui.RenderWarn("⚠"), err)
+					} else if !in.quiet {
+						fmt.Printf("  Hooks installed (jujutsu mode - no staging)\n")
+					}
+				} else {
+					hooksParams := domain.HooksInstallParams{HookNames: managedHookNames, BeadsHooks: true}
+					if err := hookFS.InstallGitHooks(ctx, hooksParams); err != nil && !in.quiet {
+						fmt.Fprintf(os.Stderr, "\n%s Failed to install git hooks to .beads/hooks/: %v\n", ui.RenderWarn("⚠"), err)
+					} else if !in.quiet {
+						fmt.Printf("  Hooks installed to: .beads/hooks/\n")
+					}
 				}
 			}
 		}
@@ -606,7 +691,7 @@ func runInitProxiedServerTail(cmd *cobra.Command, ctx context.Context, in initPr
 		if resolvedAgentsFile == "" {
 			resolvedAgentsFile = config.SafeAgentsFile()
 		}
-		isBare := t.gitUC.IsBareGitRepo(ctx)
+		isBare := gitUC.IsBareGitRepo(ctx)
 		if isBare {
 			if !in.quiet {
 				fmt.Printf("  Skipping %s generation in bare repository\n", resolvedAgentsFile)
@@ -620,14 +705,16 @@ func runInitProxiedServerTail(cmd *cobra.Command, ctx context.Context, in initPr
 				HasRemote:    t.remoteURL != "",
 				NoPush:       config.GetBool("no-push"),
 			})
-			if err := t.fsUseCase.InstallClaudeProject(ctx, in.stealth); err != nil && !in.quiet {
+			// As in direct init: --quiet drops the installer's progress,
+			// a failure still reaches stderr.
+			if err := t.fsUseCase.InstallClaudeProject(ctx, in.stealth, in.quiet); err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: failed to setup Claude hooks: %v\n", err)
 			}
 		}
 	}
 
 	if !in.stealth && isRepo && t.useLocalBeads {
-		commitResult, err := t.gitUC.CommitInitArtifacts(ctx, domain.CommitInitArtifactsParams{
+		commitResult, err := gitUC.CommitInitArtifacts(ctx, domain.CommitInitArtifactsParams{
 			BeadsDir: ".beads/",
 			OptionalPaths: []string{
 				config.SafeAgentsFile(),
@@ -648,7 +735,7 @@ func runInitProxiedServerTail(cmd *cobra.Command, ctx context.Context, in initPr
 	}
 
 	if isRepo && !in.quiet {
-		if t.gitUC.HasAnyRemotes(ctx) && !t.gitUC.HasUpstream(ctx) {
+		if gitUC.HasAnyRemotes(ctx) && !gitUC.HasUpstream(ctx) {
 			fmt.Fprintf(os.Stderr, "\n%s Git upstream not configured\n", ui.RenderWarn("⚠"))
 			fmt.Fprintf(os.Stderr, "  For sync workflows, set your upstream with:\n")
 			fmt.Fprintf(os.Stderr, "  %s\n\n", ui.RenderAccent("git remote add upstream <repo-url>"))

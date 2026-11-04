@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation
+    url: https://beads.gascity.com/
+    about: Installation, concepts, CLI reference, and troubleshooting.
+  - name: Questions and ideas
+    url: https://github.com/gastownhall/beads/discussions
+    about: Ask usage questions or float an idea before it is ready to be an issue.
+  - name: Security vulnerability
+    url: https://github.com/gastownhall/beads/security/policy
+    about: Report security issues privately, never in a public issue.

@@ -9,7 +9,9 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/testutil"
+	"github.com/steveyegge/beads/internal/testutil/credentialcmd"
 )
 
 // testServerPort is the port of the shared test Dolt server (0 = not running).
@@ -44,10 +46,23 @@ func isHelperSubprocess() bool {
 }
 
 func TestMain(m *testing.M) {
-	os.Exit(testMainInner(m))
+	if code, ok := credentialcmd.Dispatch(); ok {
+		os.Exit(code)
+	}
+	code := testMainInner(m)
+	if err := credentialcmd.Cleanup(); err != nil {
+		fmt.Fprintf(os.Stderr, "credential command fixture cleanup: %v\n", err)
+		code = 1
+	}
+	os.Exit(code)
 }
 
 func testMainInner(m *testing.M) int {
+	// Package-wide migration consent: these tests exercise the machinery that
+	// runs BELOW the consent gate (migrate_consent.go), exactly as production
+	// does once an operator has consented. Gate-behavior tests manage the
+	// consent state themselves.
+	schema.SetLocalMigrateConsent(true)
 	os.Setenv("BEADS_TEST_MODE", "1")
 	// BEADS_TEST_PDEATHSIG=1 protects TestMultiProcessSchemaInit_DoltVerify
 	// (initschema_multiprocess_test.go), which calls doltserver.Start
@@ -132,7 +147,9 @@ func testMainInner(m *testing.M) int {
 		defer os.Unsetenv(testCircuitBreakerDirEnv)
 	}
 	if err := testutil.EnsureDoltContainerForTestMain(); err != nil {
-		fmt.Fprintf(os.Stderr, "WARN: %v, skipping Dolt tests\n", err)
+		if testutil.DoltUnavailableForTestMain(err) {
+			return 1
+		}
 	} else {
 		defer testutil.TerminateDoltContainer()
 		testServerPort = testutil.DoltContainerPortInt()

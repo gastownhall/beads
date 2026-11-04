@@ -140,13 +140,17 @@ if [ "${BEADS_TEST_SHARD_LIST_ONLY:-}" = "1" ]; then
   exit 0
 fi
 
+# 20m, as embedded-test-shard.sh: under -race, TestBatchApplyContract alone
+# takes ~10m at the 1000-item issueops.MaxApplyBatchItems cap, and the
+# heaviest shard projects to ~13m (see embedded-storage-test-shards.txt).
+# The jobs' timeout-minutes (25) leave room for setup after this fires.
 if [ -x "$STORAGE_BINARY" ]; then
-  exec "$STORAGE_BINARY" -test.v -test.count=1 -test.timeout=15m \
+  exec "$STORAGE_BINARY" -test.v -test.count=1 -test.timeout=20m \
     -test.run "$RUN_REGEX" \
     "$@"
 else
   echo "Warning: pre-built test binary not found at $STORAGE_BINARY, falling back to go test"
-  exec go test -tags=gms_pure_go -v -race -count=1 -timeout 15m \
+  exec go test -tags=gms_pure_go -v -race -count=1 -timeout 20m \
     -run "$RUN_REGEX" \
     "$@" \
     ./internal/storage/embeddeddolt/

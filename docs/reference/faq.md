@@ -46,6 +46,25 @@ Nothing specific — it's a metaphor for linked work items, like beads on a stri
 
 Beads is a 1.x product used in production for AI-assisted development. The core functionality — create, update, dependencies, ready work, Dolt-backed sync — is stable, and releases follow semantic versioning. Data stays portable: `bd export` produces human-readable JSONL, and `bd backup` pushes Dolt-native backups. As with any tracker holding work you care about, keep normal backup hygiene (a Dolt remote or a `bd backup` destination).
 
+### Does bd collect usage metrics?
+
+`bd` collects anonymous command-usage metrics. Each event is a `cli_command`
+record carrying only the command name; each batch also carries the bd version
+and OS platform, keyed by a machine-derived, HMAC-protected distinct ID. No
+email, repo path, remote URL, issue content, or user-supplied strings are
+collected. Events are written under `~/.beads/eventsData` and POSTed to
+`https://gastownhall-eventsapi.com/mp/collect`.
+
+Metrics are enabled by default (opt-out). The friendliest way to see or change
+them is `bd metrics` (`bd metrics on` / `bd metrics off` / `bd metrics example`),
+which takes effect on the next command with no restart. `BD_DISABLE_METRICS=1`
+still works as a one-off, shell-scoped override. The cross-tool
+[`DO_NOT_TRACK`](https://donottrack.sh/) standard is honored as a disable-only
+opt-out: `DO_NOT_TRACK=1` opts out, while a falsey or empty value
+(`DO_NOT_TRACK=0`, `false`, or unset-but-present) falls through to your saved
+`bd metrics` preference instead of forcing metrics back on. `BD_DISABLE_METRICS`
+is the bidirectional override and takes precedence when both are set.
+
 ## Architecture
 
 ### Why Dolt instead of plain SQLite or flat files?
@@ -323,16 +342,9 @@ See the [sync failures runbook](/recovery/sync-failures).
 
 These are two distinct integrity issues:
 
-**Logical consistency** — same ID assigned to different issues, wrong-prefix bugs, branch divergence. Hash-based IDs eliminate collisions by design, and `bd doctor --fix` repairs logical inconsistencies.
+**Logical consistency** — same ID assigned to different issues, wrong-prefix bugs, branch divergence. Hash-based IDs eliminate collisions by design. In server mode, `bd doctor --fix` repairs logical inconsistencies; embedded mode runs only `bd doctor --check=artifacts`, `--check=conventions` and `--check=pollution`.
 
-**Physical corruption** — disk failures, power loss, or multiple processes writing to an embedded database simultaneously. Start with the [database corruption runbook](/recovery/database-corruption) (`bd doctor --fix` after backing up `.beads/`). If the database is unrecoverable and you have a Dolt remote, back up `.beads/`, delete the data directory for your mode — `.beads/embeddeddolt/` in embedded mode, `.beads/dolt/` in server mode — then re-init and pull:
-
-```bash
-cp -r .beads .beads.backup
-rm -rf .beads/embeddeddolt   # or .beads/dolt in server mode
-bd init
-bd dolt pull
-```
+**Physical corruption** — disk failures, power loss, or multiple processes writing to an embedded database simultaneously. `bd doctor --fix` does not rebuild a damaged store, and deleting the data directory destroys any work your remote or backups lack. Follow [Engine won't open](/recovery/database-corruption#engine-wont-open): preserve the damaged store and its configuration first, then recover into a fresh store from a Dolt remote, a Dolt-native backup, or a JSONL export.
 
 For multi-writer scenarios, use server mode so concurrent access goes through the server instead of racing on files.
 

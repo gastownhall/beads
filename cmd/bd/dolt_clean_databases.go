@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 )
 
@@ -126,8 +127,8 @@ func dropStaleDatabases(ctx context.Context, conn versioncontrolops.DBConn, stal
 		}
 
 		dropCtx, dropCancel := context.WithTimeout(ctx, cleanDatabasesDropTimeout)
-		safeName := strings.ReplaceAll(name, "`", "``")
-		_, err := conn.ExecContext(dropCtx, fmt.Sprintf("DROP DATABASE `%s`", safeName)) //nolint:gosec // G201: identifier-escaped
+		//nolint:gosec // G201: identifier quoted+escaped via doltutil.QuoteIdentifierUnvalidated
+		_, err := conn.ExecContext(dropCtx, fmt.Sprintf("DROP DATABASE %s", doltutil.QuoteIdentifierUnvalidated(name)))
 		dropCancel()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "  FAIL: %s: %v\n", name, err)

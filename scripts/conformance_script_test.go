@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -21,6 +22,7 @@ func TestConformanceScriptUsesExplicitTimeoutBudgets(t *testing.T) {
 	want := [][]string{
 		{"test", "-tags", "gms_pure_go", "-v", "-timeout", "30m", "./internal/storage/embeddeddolt/", "-run", "TestConformance"},
 		{"test", "-tags", "gms_pure_go e2e", "-timeout", "10m", "./test/conformance/"},
+		{"test", "-tags", "gms_pure_go", "-timeout=40m", "./internal/httpclient/"},
 	}
 	if !reflect.DeepEqual(run.calls, want) {
 		t.Fatalf("go calls = %#v, want %#v", run.calls, want)
@@ -36,6 +38,7 @@ func TestConformanceScriptPropagatesGoTestFailures(t *testing.T) {
 	}{
 		{name: "tier 1", failCall: 1, exitCode: 41, wantCalls: 1},
 		{name: "tier 2", failCall: 2, exitCode: 42, wantCalls: 2},
+		{name: "tier 3", failCall: 3, exitCode: 43, wantCalls: 3},
 	}
 
 	for _, test := range tests {
@@ -62,19 +65,72 @@ func conformanceExitCode(err error) int {
 	return -1
 }
 
-func TestConformanceWorkflowHasOuterTimeoutBudget(t *testing.T) {
-	path := filepath.Join(sourceRepoRoot(t), ".github", "workflows", "conformance.yml")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
+// The conformance tiers CI runs are Bazel targets, not this script: Tier 1
+// is the embedded lane's embeddeddolt_conformance_{core,audit}_test
+// (TestBazelEmbeddedJobRunsEmbeddedTier pins their flags), Tier 2 the
+// integration lane's //test/conformance:conformance_test, pinned here to the
+// script's tier: both harness files, built under the e2e or integration tag,
+// against the injected non-race bd. Tier 3 is the embedded lane's
+// //internal/httpclient:httpclient_served_test
+// (TestConformanceServedTierRunsUnderBazel). conformance.yml, which ran the
+// script on a GitHub runner, is gone.
+func TestConformanceE2ETierRunsUnderBazel(t *testing.T) {
+	root := sourceRepoRoot(t)
+	rule := bazelRuleBlock(readPolicyFile(t, root, "test/conformance/BUILD.bazel"), "conformance_test")
+	if rule == "" {
+		t.Fatal("test/conformance/BUILD.bazel has no conformance_test")
 	}
-	text := strings.ReplaceAll(string(data), "\r\n", "\n")
-	want := "  conformance:\n" +
-		"    name: Storage backend conformance (embedded Dolt oracle)\n" +
-		"    timeout-minutes: 45\n" +
-		"    runs-on: ubuntu-latest\n"
-	if !strings.Contains(text, want) {
-		t.Fatalf("conformance job does not declare the maintained 45-minute outer budget:\n%s", text)
+	for _, want := range []string{
+		`"e2e_test.go",`,
+		`"roundtrip_test.go",`,
+		`data = ["//cmd/bd:bd_for_tests"],`,
+		`env = {"BEADS_TEST_BD_BINARY": "$(rlocationpath //cmd/bd:bd_for_tests)"},`,
+		`tags = ["integration-only"],`,
+	} {
+		if !strings.Contains(rule, want) {
+			t.Errorf("//test/conformance:conformance_test lacks %q:\n%s", want, rule)
+		}
+	}
+	for _, file := range []string{"e2e_test.go", "roundtrip_test.go"} {
+		src := readPolicyFile(t, root, "test/conformance/"+file)
+		if !strings.HasPrefix(src, "//go:build e2e || integration\n") {
+			t.Errorf("test/conformance/%s must build under e2e (scripts/conformance.sh) and integration (the Bazel lane)", file)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(root, ".github", "workflows", "conformance.yml")); err == nil {
+		t.Error(".github/workflows/conformance.yml is back; its tiers run under Bazel")
+	}
+}
+
+// Tier 3's Bazel target runs the script's Tier 3 package, the httpclient
+// go_test binary, with every BEADS_* switch the script sets for it: the one
+// that stands the served corpus up and the one that makes it required. A
+// switch the script gains that the target lacks fails here;
+// TestBazelRetiredLanesCannotBeNarrowed pins the target's args and env
+// exactly.
+func TestConformanceServedTierRunsUnderBazel(t *testing.T) {
+	root := sourceRepoRoot(t)
+	tier := regexp.MustCompile(`(?m)^((?:[A-Z_]+=\S+ )+)\\\n\s+go test -tags "\$TAGS" -timeout=40m \./internal/httpclient/$`).
+		FindStringSubmatch(readPolicyFile(t, root, "scripts/conformance.sh"))
+	if tier == nil {
+		t.Fatal("scripts/conformance.sh has no Tier 3 `... go test -tags \"$TAGS\" -timeout=40m ./internal/httpclient/` invocation")
+	}
+	switches := regexp.MustCompile(`\b(BEADS_[A-Z_]+)=(\S+)`).FindAllStringSubmatch(tier[1], -1)
+	if len(switches) < 2 {
+		t.Fatalf("parsed only %v from Tier 3's env %q", switches, tier[1])
+	}
+	rule := bazelRuleBlock(readPolicyFile(t, root, "internal/httpclient/BUILD.bazel"), "httpclient_served_test")
+	if rule == "" {
+		t.Fatal("internal/httpclient/BUILD.bazel has no httpclient_served_test")
+	}
+	want := []string{`"$(rootpath :httpclient_test)",`, `":httpclient_test",`, `tags = ["embedded"],`}
+	for _, sw := range switches {
+		want = append(want, `"`+sw[1]+`": "`+sw[2]+`",`)
+	}
+	for _, w := range want {
+		if !strings.Contains(rule, w) {
+			t.Errorf("//internal/httpclient:httpclient_served_test lacks %q:\n%s", w, rule)
+		}
 	}
 }
 
@@ -87,10 +143,7 @@ type conformanceRun struct {
 func runConformanceScript(t *testing.T, failCall, failExit int) conformanceRun {
 	t.Helper()
 
-	bash, err := exec.LookPath("bash")
-	if err != nil {
-		t.Skipf("bash is required to test conformance.sh: %v", err)
-	}
+	bash := requireHostTool(t, "bash")
 
 	bin := t.TempDir()
 	stateDir := t.TempDir()

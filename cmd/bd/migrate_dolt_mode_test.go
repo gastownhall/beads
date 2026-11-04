@@ -13,8 +13,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/server"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/util"
@@ -83,6 +85,12 @@ func migrateModeWorkspace(t *testing.T, mode string) string {
 	require.NoError(t, os.WriteFile(filepath.Join(beadsDir, "dolt", ".dolt", "repo_state.json"), []byte(`{"head":"refs/heads/main","remotes":{},"backups":{},"branches":{}}`), 0o600))
 	writeMetadataConfig(t, beadsDir, mode, "myproj")
 	t.Chdir(dir)
+	beads.ResetCaches()
+	git.ResetCaches()
+	t.Cleanup(func() {
+		beads.ResetCaches()
+		git.ResetCaches()
+	})
 	return beadsDir
 }
 
@@ -162,6 +170,51 @@ func TestMigrateToProxiedServer_InvalidRootIdentityShapesFailClosed(t *testing.T
 			beadsDir := migrateModeWorkspace(t, configfile.DoltModeServer)
 			require.NoError(t, os.WriteFile(filepath.Join(beadsDir, "dolt", ".dolt", "repo_state.json"), []byte(body), 0o600))
 			require.Error(t, runMigrateToProxiedServer(false, 0, false))
+		})
+	}
+}
+
+// TestMigrateToProxiedServer_RefusesServerBdDoesNotRun pins the host guard.
+// The migration only re-points the proxy at .beads/dolt, the data of bd's own
+// server, so it refuses a workspace whose server is on another machine or at
+// the IPv6 loopback, where bd's own server, which listens on 127.0.0.1 only,
+// never runs: named in metadata.json or BEADS_DOLT_SERVER_HOST, in either
+// IPv6 spelling. The workspace stays in server mode and nothing is written,
+// though .beads/dolt is a valid Dolt repository the migration would take.
+func TestMigrateToProxiedServer_RefusesServerBdDoesNotRun(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		host  string
+		inEnv bool
+		want  string
+	}{
+		{"remote host in metadata.json", "db.example.com", false, "is remote (db.example.com)"},
+		{"bare IPv6 loopback in metadata.json", "::1", false, "is the IPv6 loopback (::1)"},
+		{"bracketed IPv6 loopback in metadata.json", "[::1]", false, "is the IPv6 loopback ([::1])"},
+		{"bare IPv6 loopback in BEADS_DOLT_SERVER_HOST", "::1", true, "is the IPv6 loopback (::1)"},
+		{"bracketed IPv6 loopback in BEADS_DOLT_SERVER_HOST", "[::1]", true, "is the IPv6 loopback ([::1])"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			beadsDir := migrateModeWorkspace(t, configfile.DoltModeServer)
+			t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+			if tc.inEnv {
+				t.Setenv("BEADS_DOLT_SERVER_HOST", tc.host)
+			} else {
+				cfg, err := configfile.Load(beadsDir)
+				require.NoError(t, err)
+				cfg.DoltServerHost = tc.host
+				require.NoError(t, cfg.Save(beadsDir))
+			}
+			before := snapshotMigrationTree(t, beadsDir)
+
+			var err error
+			stderr := captureStderr(t, func() { err = runMigrateToProxiedServer(false, 0, false) })
+			require.Error(t, err)
+			assert.Contains(t, stderr, "the configured Dolt server host "+tc.want)
+			assert.Equal(t, before, snapshotMigrationTree(t, beadsDir))
+			cfg, loadErr := configfile.Load(beadsDir)
+			require.NoError(t, loadErr)
+			assert.True(t, cfg.IsDoltServerMode(), "a refused migration must leave dolt_mode=server")
 		})
 	}
 }
@@ -756,6 +809,84 @@ func TestMigrateToProxiedServer_ResumeReplaysRecordedIdleTimeout(t *testing.T) {
 			// The reverse migration is the documented escape hatch; it compares
 			// the same two values, so it must also accept the resumed state.
 			require.NoError(t, runMigrateFromProxiedServer(false, false))
+		})
+	}
+}
+
+// TestMigrateResume_JournalFromBeforeEffectiveIdleTimeout covers an upgrade in
+// the middle of a migration. Releases before the sidecar persisted its
+// effective idle timeout recorded a defaulted timeout as an absent key, in the
+// journal's plan and in the sidecar alike. The sidecar load now resolves that
+// to the default, so comparing it raw against the journal's zero would refuse
+// the resume in both directions over a plan that never changed (bd-mnhq6). A
+// timeout that really differs must still be refused.
+func TestMigrateResume_JournalFromBeforeEffectiveIdleTimeout(t *testing.T) {
+	// legacyShape drops idle_timeout from a sidecar, or from the sidecar a
+	// journal records, which is how those releases wrote a defaulted timeout.
+	legacyShape := func(t *testing.T, path, sidecarKey string) {
+		t.Helper()
+		var doc map[string]any
+		require.NoError(t, json.Unmarshal(mustReadFile(t, path), &doc))
+		sidecar := doc
+		if sidecarKey != "" {
+			sidecar = doc[sidecarKey].(map[string]any)
+		}
+		require.Contains(t, sidecar, "idle_timeout")
+		delete(sidecar, "idle_timeout")
+		b, err := json.Marshal(doc)
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(path, b, 0o600))
+	}
+	forward := func(t *testing.T) (string, func() error) {
+		beadsDir := migrateModeWorkspace(t, configfile.DoltModeServer)
+		return beadsDir, func() error { return runMigrateToProxiedServer(false, 0, false) }
+	}
+	reverse := func(t *testing.T) (string, func() error) {
+		beadsDir := migrateModeWorkspace(t, configfile.DoltModeProxiedServer)
+		require.NoError(t, configfile.SaveProxiedServerClientInfo(beadsDir, &configfile.ProxiedServerClientInfo{RootPath: filepath.Join(beadsDir, "dolt")}))
+		return beadsDir, func() error { return runMigrateFromProxiedServer(false, false) }
+	}
+
+	for _, tc := range []struct {
+		name    string
+		setup   func(*testing.T) (string, func() error)
+		phase   migratePhase
+		changed time.Duration // non-zero: the sidecar on disk no longer holds the default
+	}{
+		{name: "forward at target_configured", setup: forward, phase: migrateTargetConfigured},
+		{name: "reverse at prepared", setup: reverse, phase: migratePrepared},
+		{name: "reverse at target_configured", setup: reverse, phase: migrateTargetConfigured},
+		{name: "forward with a changed timeout refuses", setup: forward, phase: migrateTargetConfigured, changed: 45 * time.Second},
+		{name: "reverse with a changed timeout refuses", setup: reverse, phase: migratePrepared, changed: 45 * time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			beadsDir, migrate := tc.setup(t)
+			t.Setenv("BEADS_MIGRATION_FAIL_PHASE", string(tc.phase))
+			require.Error(t, migrate())
+			t.Setenv("BEADS_MIGRATION_FAIL_PHASE", "")
+
+			legacyShape(t, migrateJournalPath(beadsDir), "sidecar")
+			if tc.changed == 0 {
+				legacyShape(t, configfile.ProxiedServerClientInfoPath(beadsDir), "")
+			} else {
+				info, err := configfile.LoadProxiedServerClientInfo(beadsDir)
+				require.NoError(t, err)
+				require.NotNil(t, info)
+				info.IdleTimeout = tc.changed
+				require.NoError(t, configfile.SaveProxiedServerClientInfo(beadsDir, info))
+			}
+
+			var migrateErr error
+			stderr := captureStderr(t, func() { migrateErr = migrate() })
+			if tc.changed != 0 {
+				require.Error(t, migrateErr)
+				assert.Contains(t, stderr, "migration sidecar does not match prepared state")
+				return
+			}
+			require.NoError(t, migrateErr, "stderr: %s", stderr)
+			j, err := loadMigrateJournal(beadsDir)
+			require.NoError(t, err)
+			assert.Nil(t, j, "successful migration removes its journal")
 		})
 	}
 }

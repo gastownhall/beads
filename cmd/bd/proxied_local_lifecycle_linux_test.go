@@ -22,7 +22,7 @@ package main
 //	    -run '^TestManagedLocalProxied' -v
 //
 // CI additionally runs it inside a network namespace with only loopback up
-// (see .github/workflows/proxied-local-smoke.yml), proving the whole
+// (//cmd/bd:bd_managed_local_test, tools/bazel/go_test_offline.sh), proving the whole
 // lifecycle needs no outbound network once bd and dolt are installed.
 // When BEADS_TEST_PROXIED_LOCAL=1 is set, missing prerequisites or a Dolt
 // child that fails to launch FAIL the test rather than skipping.
@@ -46,12 +46,15 @@ import (
 	"fmt"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/dolthub/dolt/go/libraries/doltcore/servercfg"
+
+	"github.com/steveyegge/beads/internal/storage/dbproxy/server"
 )
 
 func TestManagedLocalProxiedLifecycleSmoke(t *testing.T) {
@@ -183,6 +186,20 @@ func assertManagedConfigLoopback(t *testing.T, p proxiedProject, backendPort int
 	}
 	if got := cfg.Host(); got != "127.0.0.1" {
 		t.Errorf("generated backend listener host: got %q, want %q", got, "127.0.0.1")
+	}
+	// When another process held the generated port at startup, the proxy
+	// child runs dolt from a runtime copy with only the port moved; the
+	// generated file keeps its own port.
+	runtimePath := filepath.Join(p.proxyRoot, server.RuntimeConfigFileName)
+	if runtimeBody, err := os.ReadFile(runtimePath); err == nil {
+		runtimeCfg, err := servercfg.NewYamlConfig(runtimeBody)
+		if err != nil {
+			t.Fatalf("parse runtime backend config %s: %v", runtimePath, err)
+		}
+		if got := runtimeCfg.Port(); got != backendPort {
+			t.Errorf("runtime backend port %d disagrees with proxy-child.pid port %d", got, backendPort)
+		}
+		return
 	}
 	if got := cfg.Port(); got != backendPort {
 		t.Errorf("generated backend port %d disagrees with proxy-child.pid port %d", got, backendPort)

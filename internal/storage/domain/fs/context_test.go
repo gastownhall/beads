@@ -258,6 +258,15 @@ func TestContextRepository_RepoContextAndRole(t *testing.T) {
 	require.NoError(t, os.MkdirAll(beadsDir, 0o750))
 	require.NoError(t, os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte("{}"), 0o600))
 
+	// Run from a second, unrelated git repo so BEADS_DIR is external to the
+	// CWD repo. Relying on the test's own CWD being inside a checkout breaks
+	// under Bazel, whose runfiles tree is not a git repository.
+	cwdRepo := t.TempDir()
+	cmd = exec.Command("git", "init")
+	cmd.Dir = cwdRepo
+	require.NoError(t, cmd.Run())
+	t.Chdir(cwdRepo)
+
 	t.Setenv("BEADS_DIR", beadsDir)
 	beads.ResetCaches()
 	git.ResetCaches()

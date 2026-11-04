@@ -1,15 +1,12 @@
 name: nix build
 
 on:
-  pull_request:
-    paths:
-      - 'go.mod'
-      - 'go.sum'
-      - 'default.nix'
-      - 'flake.nix'
-      - 'flake.lock'
-      - 'overlay.nix'
-      - 'packages.nix'
+  # No pull_request trigger: pr-risk.yml's required `test-nix` job already
+  # runs `nix run .#default` plus `nix flake check -L` on every PR, a strict
+  # superset of the `nix build .#default` this workflow exercises here. This
+  # workflow still runs on push to main (and workflow_dispatch) so the plain
+  # `nix build` path itself stays covered without duplicating a PR-blocking
+  # job that never adds coverage pr-risk.yml doesn't already have.
   push:
     branches: [main]
     paths:

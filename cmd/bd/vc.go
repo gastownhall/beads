@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
 	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -147,7 +149,8 @@ Examples:
 			for _, conflict := range conflicts {
 				fmt.Printf("  - %s\n", conflict.Field)
 			}
-			fmt.Printf("\nResolve conflicts with: bd vc merge %s --strategy [ours|theirs]\n\n", branchName)
+			branch, note := remedy.CommandArg(runtime.GOOS, branchName, "<branch>")
+			fmt.Printf("\nResolve conflicts with: bd vc merge %s --strategy [ours|theirs]%s\n\n", branch, note)
 			return nil
 		}
 
@@ -179,7 +182,10 @@ Examples:
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if usesProxiedServer() {
-			return HandleErrorRespectJSON("vc commit is not supported in proxied-server mode")
+			// There IS a commit point on this route now — `bd dolt commit`
+			// is the proxied flush point dolt.auto-commit=batch/off defers
+			// to (GH#4995) — so name it rather than leaving a dead end.
+			return HandleErrorRespectJSON("vc commit is not supported in proxied-server mode; use 'bd dolt commit' instead")
 		}
 		evt := metrics.NewCommandEvent("vc-commit")
 		defer func() {

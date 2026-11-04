@@ -10,11 +10,17 @@ import (
 	"github.com/go-sql-driver/mysql"
 
 	"github.com/steveyegge/beads/internal/storage/domain"
+	publicops "github.com/steveyegge/beads/issueops"
 )
 
 // mockUnitOfWork implements UnitOfWork for testing
 type mockUnitOfWork struct {
-	commitErr         error
+	commitErr error
+	// commitDelay, when set, is slept inside Commit before returning
+	// commitErr — lets a test simulate an attempt that takes real wall-clock
+	// time to fail (a slow commit racing a context deadline), as opposed to
+	// commitErr alone, which fails instantly.
+	commitDelay       time.Duration
 	commitCount       int
 	closed            bool
 	configUseCase     domain.ConfigUseCase
@@ -36,6 +42,9 @@ func (m *mockUnitOfWork) Close(ctx context.Context) {
 
 func (m *mockUnitOfWork) Commit(ctx context.Context, message string) error {
 	m.commitCount++
+	if m.commitDelay > 0 {
+		time.Sleep(m.commitDelay)
+	}
 	return m.commitErr
 }
 
@@ -500,6 +509,90 @@ func TestRunTx_NewUOWError(t *testing.T) {
 
 	if err == nil {
 		t.Fatal("expected error, got nil")
+	}
+}
+
+// TestRunTxResultWithin_SlowAttemptStopsBeforeADoomedRetry pins the fix for
+// the gap bee's live 1000-item run exposed: retryTxBudget / maxElapsed is a
+// BUDGET fixed once at the top of the call, and says nothing about how long
+// any one attempt actually takes. Before this fix, a slow failing attempt
+// (its commit loses Dolt's merge after running most of the remaining ctx
+// deadline) still triggered a retry whenever elapsed-so-far was under
+// maxElapsed — and that retry then got killed mid-transaction by ctx's own
+// deadline, surfacing as context.DeadlineExceeded (an internal-httpapi
+// isUnavailable() miss -> a generic 500) instead of the exhausted-write-
+// conflict outcome this loop already reports correctly when IT gives up
+// (uow.IsSerializationError -> httpapi maps that to 503 + Retry-After).
+//
+// The first attempt's commit sleeps 1.2s (over half the 2s ctx) before
+// failing with a retryable deadlock; with retryTxAttemptHeadroom (5s) added
+// on top, the ~0.8s left after that attempt can never cover another attempt
+// of similar cost, so the loop must stop WITHOUT trying uw2 at all and return
+// uw1's own serialization error.
+//
+// The look-ahead this pins is gated on publicops.HasExtendedRetryBudget, the
+// same marker retryTxBudget checks (see that gate's comment in tx.go), so
+// this ctx must carry it — an unmarked ctx would skip the new check entirely
+// and this test would regress to asserting old, unfixed behavior.
+func TestRunTxResultWithin_SlowAttemptStopsBeforeADoomedRetry(t *testing.T) {
+	uw1 := &mockUnitOfWork{commitErr: newMySQLError(1213), commitDelay: 1200 * time.Millisecond}
+	uw2 := &mockUnitOfWork{}
+	provider := &mockUnitOfWorkProvider{uows: []*mockUnitOfWork{uw1, uw2}}
+
+	ctx, cancel := context.WithTimeout(publicops.WithExtendedRetryBudget(context.Background()), 2*time.Second)
+	defer cancel()
+
+	_, err := RunTxResultWithin(ctx, provider, 10*time.Second, func(ctx context.Context, uw UnitOfWork) (struct{}, string, error) {
+		return struct{}{}, "slow attempt probe", nil
+	})
+
+	if err == nil {
+		t.Fatal("expected an error: the only attempt tried fails on commit")
+	}
+	if !IsSerializationError(err) {
+		t.Errorf("err = %v, want uw1's own serialization error (-> 503 Retry-After); a ctx-cancellation error here would be the regression (-> a generic 500)", err)
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("err = %v wraps context.DeadlineExceeded: a doomed second attempt was started and got cut off by ctx instead of being skipped", err)
+	}
+	if provider.newUOWCalls != 1 {
+		t.Errorf("NewUOW calls = %d, want exactly 1: a second attempt was started even though it could not have finished before ctx's deadline", provider.newUOWCalls)
+	}
+	if uw2.commitCount != 0 {
+		t.Errorf("uw2.commitCount = %d, want 0: uw2 must never be reached", uw2.commitCount)
+	}
+}
+
+// TestRunTxResultWithin_ShortAttemptStillRetries is
+// TestRunTxResultWithin_SlowAttemptStopsBeforeADoomedRetry's control: when the
+// failing attempt is fast relative to what's left on ctx, the new
+// look-before-you-retry check must not block the retry that would otherwise
+// succeed.
+func TestRunTxResultWithin_ShortAttemptStillRetries(t *testing.T) {
+	uw1 := &mockUnitOfWork{commitErr: newMySQLError(1213), commitDelay: 50 * time.Millisecond}
+	uw2 := &mockUnitOfWork{}
+	provider := &mockUnitOfWorkProvider{uows: []*mockUnitOfWork{uw1, uw2}}
+
+	// 8s comfortably exceeds retryTxAttemptHeadroom (5s) by more than the 50ms
+	// first attempt costs, so the real-time budget this test takes is
+	// governed by how fast the two attempts actually run (well under a
+	// second), not by this deadline. Marked for the same reason as the slow-
+	// attempt test above: the look-ahead only runs when this marker is set.
+	ctx, cancel := context.WithTimeout(publicops.WithExtendedRetryBudget(context.Background()), 8*time.Second)
+	defer cancel()
+
+	_, err := RunTxResultWithin(ctx, provider, 15*time.Second, func(ctx context.Context, uw UnitOfWork) (struct{}, string, error) {
+		return struct{}{}, "short attempt probe", nil
+	})
+
+	if err != nil {
+		t.Fatalf("expected no error after retry, got %v", err)
+	}
+	if provider.newUOWCalls < 2 {
+		t.Errorf("NewUOW calls = %d, want at least 2: a short failed attempt must still be retried", provider.newUOWCalls)
+	}
+	if uw2.commitCount != 1 {
+		t.Errorf("uw2.commitCount = %d, want 1", uw2.commitCount)
 	}
 }
 

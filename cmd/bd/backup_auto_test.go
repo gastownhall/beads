@@ -133,9 +133,9 @@ func TestIsBackupAutoEnabled(t *testing.T) {
 // status` reachable on a proxied server for the first time, where it rendered
 // the embedded-mode footnote "(auto: no git remote)". On any sql-server shape
 // the value is false because usesSQLServer() short-circuits, whether or not a
-// remote exists, so that reason was simply untrue; and on proxied specifically
-// even an explicit backup.enabled=true changes nothing, because the proxied
-// arm of PersistentPostRunE never calls runPostRunAutoBackup.
+// remote exists, so that reason was simply untrue. Since the proxied post-run
+// arm gained its auto-backup hook, an explicit opt-in on proxied is honored
+// and needs no caveat.
 //
 // Cannot be parallel: mutates the proxiedServerMode global, primeHasGitRemote
 // and env vars.
@@ -191,23 +191,25 @@ func TestBackupAutoStatusNote(t *testing.T) {
 			wantNote:     "",
 		},
 		{
-			name:        "proxied default → names the missing hook, not the remote",
+			// Proxied is server mode: the default is off whether or not a
+			// remote exists, and the note names the opt-in that now works.
+			name:        "proxied default → off, names the opt-in, not the remote",
 			envVal:      "\x00",
 			hasRemote:   true,
 			proxied:     true,
 			wantEnabled: false,
-			wantNote:    "auto-backup does not run on proxied-server; use 'bd backup sync'",
+			wantNote:    "auto: off in proxied-server mode; set backup.enabled=true to opt in",
 		},
 		{
-			// The dead opt-in: enabled=true with nothing to run it. The note
-			// must survive an explicit source here, or status reports a bare
-			// "enabled=true" and the operator believes backups are happening.
-			name:        "proxied explicit opt-in → still inert, still annotated",
+			// The proxied post-run arm runs auto-backup on managed-local (the
+			// only proxied shape status renders on), so an explicit opt-in is
+			// real there and needs no caveat.
+			name:        "proxied explicit opt-in → honored, no note",
 			envVal:      "true",
 			hasRemote:   false,
 			proxied:     true,
 			wantEnabled: true,
-			wantNote:    "auto-backup does not run on proxied-server; use 'bd backup sync'",
+			wantNote:    "",
 		},
 	}
 

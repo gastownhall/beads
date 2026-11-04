@@ -3,6 +3,7 @@ package telemetry
 import (
 	"context"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/issueops"
 )
 
@@ -11,6 +12,14 @@ import (
 // delegation would return the inner closer unspanned and untimed.
 func (s *InstrumentedStorage) BatchCloser() (issueops.BatchCloser, error) {
 	inner, err := s.Unwrap().BatchCloser()
+	if err != nil {
+		return nil, err
+	}
+	return s.WrapBatchCloser(inner), nil
+}
+
+func (s *InstrumentedStorage) BatchCloserWithPolicy(policy storage.BatchClosePolicy) (issueops.BatchCloser, error) {
+	inner, err := storage.BatchCloserWithPolicy(s.Unwrap(), policy)
 	if err != nil {
 		return nil, err
 	}

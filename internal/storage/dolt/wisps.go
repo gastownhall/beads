@@ -42,70 +42,6 @@ func scanIssueFromTable(ctx context.Context, db *sql.DB, table, id string) (*typ
 	return issue, nil
 }
 
-// generateIssueIDInTable generates a unique ID, checking for collisions
-// in the specified table. Supports counter mode for non-ephemeral issues.
-//
-//nolint:gosec // G201: table is a hardcoded constant
-func generateIssueIDInTable(ctx context.Context, tx *sql.Tx, table, prefix string, issue *types.Issue, actor string) (string, error) {
-	// Counter mode only applies to the issues table (not wisps).
-	if table == "issues" {
-		counterMode, err := isCounterModeTx(ctx, tx)
-		if err != nil {
-			return "", err
-		}
-		if counterMode {
-			return nextCounterIDTx(ctx, tx, prefix)
-		}
-	}
-
-	baseLength := getAdaptiveIDLengthFromTable(ctx, tx, table, prefix)
-
-	var err error
-	maxLength := 8
-	if baseLength > maxLength {
-		baseLength = maxLength
-	}
-
-	for length := baseLength; length <= maxLength; length++ {
-		for nonce := 0; nonce < 10; nonce++ {
-			candidate := generateHashID(prefix, issue.Title, issue.Description, actor, issue.CreatedAt, length, nonce)
-
-			var count int
-			err = tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE id = ?`, table), candidate).Scan(&count) //nolint:gosec // G201
-			if err != nil {
-				return "", fmt.Errorf("failed to check for ID collision: %w", err)
-			}
-
-			if count == 0 {
-				return candidate, nil
-			}
-		}
-	}
-
-	return "", fmt.Errorf("failed to generate unique ID after trying lengths %d-%d with 10 nonces each", baseLength, maxLength)
-}
-
-// getAdaptiveIDLengthFromTable returns the adaptive ID length based on table size.
-//
-//nolint:gosec // G201: table is a hardcoded constant
-func getAdaptiveIDLengthFromTable(ctx context.Context, tx *sql.Tx, table, prefix string) int {
-	var count int
-	if err := tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE id LIKE ?`, table), prefix+"%").Scan(&count); err != nil {
-		return 4 // Default for wisps (small tables)
-	}
-
-	switch {
-	case count < 100:
-		return 4
-	case count < 1000:
-		return 5
-	case count < 10000:
-		return 6
-	default:
-		return 7
-	}
-}
-
 // insertIssueTxIntoTable is the transaction-context version for inserting into a named table.
 // Delegates to insertIssueIntoTable to ensure all columns are written.
 func insertIssueTxIntoTable(ctx context.Context, tx *sql.Tx, table string, issue *types.Issue) error {
@@ -194,12 +130,14 @@ func (s *DoltStore) updateWisp(ctx context.Context, id string, updates map[strin
 
 	clearJournalScope := s.scopeEventsJournalTransaction(tx)
 	defer clearJournalScope()
+	clearRecheckScope := issueops.ScopeBlockedRecheckTransaction(tx)
+	defer clearRecheckScope()
 
 	if _, err := issueops.UpdateIssueInTx(ctx, tx, id, updates, actor); err != nil {
 		return err
 	}
 
-	return s.commitSQLTx(ctx, "commit update wisp", tx)
+	return s.commitSQLTxAndRecheck(ctx, "commit update wisp", tx)
 }
 
 // updateWispChecked updates a wisp with the optional atomic preconditions of
@@ -221,6 +159,8 @@ func (s *DoltStore) updateWispChecked(ctx context.Context, id string, updates ma
 
 	clearJournalScope := s.scopeEventsJournalTransaction(tx)
 	defer clearJournalScope()
+	clearRecheckScope := issueops.ScopeBlockedRecheckTransaction(tx)
+	defer clearRecheckScope()
 
 	if opts.ExpectedVersion != nil {
 		if err := issueops.CheckVersionInTx(ctx, tx, id, *opts.ExpectedVersion); err != nil {
@@ -234,7 +174,7 @@ func (s *DoltStore) updateWispChecked(ctx context.Context, id string, updates ma
 		return err
 	}
 
-	return s.commitSQLTx(ctx, "commit update wisp", tx)
+	return s.commitSQLTxAndRecheck(ctx, "commit update wisp", tx)
 }
 
 // closeWisp closes a wisp in the wisps table.
@@ -249,12 +189,14 @@ func (s *DoltStore) closeWisp(ctx context.Context, id string, reason string, act
 
 	clearJournalScope := s.scopeEventsJournalTransaction(tx)
 	defer clearJournalScope()
+	clearRecheckScope := issueops.ScopeBlockedRecheckTransaction(tx)
+	defer clearRecheckScope()
 
 	if _, err := issueops.CloseIssueInTx(ctx, tx, id, reason, actor, session); err != nil {
 		return err
 	}
 
-	return s.commitSQLTx(ctx, "commit close wisp", tx)
+	return s.commitSQLTxAndRecheck(ctx, "commit close wisp", tx)
 }
 
 // closeWispChecked closes a wisp with the is_blocked guard, mirroring closeWisp
@@ -282,50 +224,18 @@ func (s *DoltStore) closeWispChecked(ctx context.Context, id string, actor strin
 
 	clearJournalScope := s.scopeEventsJournalTransaction(tx)
 	defer clearJournalScope()
+	clearRecheckScope := issueops.ScopeBlockedRecheckTransaction(tx)
+	defer clearRecheckScope()
 
 	res, err := issueops.CloseIssueCheckedInTx(ctx, tx, id, opts.Reason, actor, opts.Session, opts.Force, opts.ExpectedVersion)
 	if err != nil {
 		return storage.CloseIssueResult{}, err
 	}
 
-	if err := s.commitSQLTx(ctx, "commit close wisp", tx); err != nil {
+	if err := s.commitSQLTxAndRecheck(ctx, "commit close wisp", tx); err != nil {
 		return storage.CloseIssueResult{}, err
 	}
 	return storage.CloseIssueResult{Unchanged: res.AlreadyClosed, OpenChildren: res.OpenChildren}, nil
-}
-
-// wispAuxCascadeTables lists the wisp auxiliary tables a wisp delete must
-// also clean up, mirroring internal/storage/schema/cli_migrations.go:300-315.
-// wisp_child_counters is keyed on parent_id (a wisp can be a parent whose
-// children hold the counter row); the other three are keyed on issue_id.
-// Some deployed stores enforce this via FK ON DELETE CASCADE and some do not
-// (be-zdqyl: the migration adding those FKs was never promoted out of
-// migrations/ignored/), so the delete paths below must not rely on the
-// database to do it for them.
-var wispAuxCascadeTables = []struct{ table, column string }{
-	{"wisp_labels", "issue_id"},
-	{"wisp_events", "issue_id"},
-	{"wisp_comments", "issue_id"},
-	{"wisp_child_counters", "parent_id"},
-}
-
-// deleteWispAuxRowsInTx removes every row the given wisp ids own across
-// wispAuxCascadeTables. Shared by deleteWisp and deleteWispBatchTx so the
-// table set cannot drift between the two paths.
-func deleteWispAuxRowsInTx(ctx context.Context, tx *sql.Tx, ids []string) error {
-	if len(ids) == 0 {
-		return nil
-	}
-	inClause, args := doltBuildSQLInClause(ids)
-	for _, aux := range wispAuxCascadeTables {
-		//nolint:gosec // G201: aux.table/aux.column come from the fixed wispAuxCascadeTables literal; inClause contains only ? markers
-		if _, err := tx.ExecContext(ctx,
-			fmt.Sprintf("DELETE FROM %s WHERE %s IN (%s)", aux.table, aux.column, inClause),
-			args...); err != nil {
-			return fmt.Errorf("delete wisp aux rows from %s: %w", aux.table, err)
-		}
-	}
-	return nil
 }
 
 // deleteWisp permanently removes a wisp and its related data.
@@ -338,6 +248,8 @@ func (s *DoltStore) deleteWisp(ctx context.Context, id string) error {
 
 	clearJournalScope := s.scopeEventsJournalTransaction(tx)
 	defer clearJournalScope()
+	clearRecheckScope := issueops.ScopeBlockedRecheckTransaction(tx)
+	defer clearRecheckScope()
 
 	affectedIssues, affectedWisps, aerr := issueops.AffectedByDeletionInTx(ctx, tx, nil, []string{id})
 	if aerr != nil {
@@ -374,15 +286,16 @@ func (s *DoltStore) deleteWisp(ctx context.Context, id string) error {
 		return err
 	}
 
-	if err := deleteWispAuxRowsInTx(ctx, tx, []string{id}); err != nil {
+	if err := issueops.DeleteWispAuxRowsInTx(ctx, tx, []string{id}); err != nil {
 		return fmt.Errorf("delete wisp aux rows for %s: %w", id, err)
 	}
 
 	if err := issueops.RecomputeIsBlockedInTx(ctx, tx, affectedIssues, affectedWisps); err != nil {
 		return fmt.Errorf("recompute is_blocked after wisp delete for %s: %w", id, err)
 	}
+	issueops.NoteDeleteBlockedRecheck(tx, []string{id}, "", affectedIssues, affectedWisps)
 
-	return s.commitSQLTx(ctx, "commit delete wisp", tx)
+	return s.commitSQLTxAndRecheck(ctx, "commit delete wisp", tx)
 }
 
 // deleteWispBatch permanently removes multiple wisps using one transaction per
@@ -420,7 +333,7 @@ func (s *DoltStore) deleteWispBatch(ctx context.Context, ids []string) (int, err
 }
 
 // deleteWispBatchTx deletes one batch of wisps inside its own transaction.
-// Keeping each transaction to ≤200 wisps (6 DELETE statements) ensures it
+// Keeping each transaction to ≤200 wisps (8 DELETE statements) ensures it
 // completes well within Dolt's 10 s write timeout.
 func (s *DoltStore) deleteWispBatchTx(ctx context.Context, ids []string) (int, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -431,6 +344,8 @@ func (s *DoltStore) deleteWispBatchTx(ctx context.Context, ids []string) (int, e
 
 	clearJournalScope := s.scopeEventsJournalTransaction(tx)
 	defer clearJournalScope()
+	clearRecheckScope := issueops.ScopeBlockedRecheckTransaction(tx)
+	defer clearRecheckScope()
 
 	affectedIssues, affectedWisps, aerr := issueops.AffectedByDeletionInTx(ctx, tx, nil, ids)
 	if aerr != nil {
@@ -475,15 +390,16 @@ func (s *DoltStore) deleteWispBatchTx(ctx context.Context, ids []string) (int, e
 		return 0, err
 	}
 
-	if err := deleteWispAuxRowsInTx(ctx, tx, ids); err != nil {
+	if err := issueops.DeleteWispAuxRowsInTx(ctx, tx, ids); err != nil {
 		return 0, fmt.Errorf("delete wisp aux rows: %w", err)
 	}
 
 	if err := issueops.RecomputeIsBlockedInTx(ctx, tx, affectedIssues, affectedWisps); err != nil {
 		return 0, fmt.Errorf("recompute is_blocked after batched wisp delete: %w", err)
 	}
+	issueops.NoteDeleteBlockedRecheck(tx, ids, "", affectedIssues, affectedWisps)
 
-	if err := s.commitSQLTx(ctx, "commit batch wisp delete", tx); err != nil {
+	if err := s.commitSQLTxAndRecheck(ctx, "commit batch wisp delete", tx); err != nil {
 		return 0, err
 	}
 

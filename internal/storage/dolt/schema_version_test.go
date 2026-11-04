@@ -46,7 +46,7 @@ func TestSchemaSkipsReinit(t *testing.T) {
 	}
 
 	// Run initSchemaOnDB again — should skip because migrations are current
-	if _, err := initSchemaOnDB(ctx, store.db); err != nil {
+	if _, err := rerunSchemaInitOnTestStore(ctx, store); err != nil {
 		t.Fatalf("initSchemaOnDB failed: %v", err)
 	}
 
@@ -78,7 +78,7 @@ func TestSchemaRunsInitWhenStale(t *testing.T) {
 	}
 
 	// Run initSchemaOnDB — should detect stale and re-apply
-	if _, err := initSchemaOnDB(ctx, store.db); err != nil {
+	if _, err := rerunSchemaInitOnTestStore(ctx, store); err != nil {
 		t.Fatalf("initSchemaOnDB failed: %v", err)
 	}
 

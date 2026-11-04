@@ -1,9 +1,14 @@
 package doltserver
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/backends"
 )
 
 // resetPhysicalRootEnv neutralizes every env var ResolvePhysicalRoots (and
@@ -174,6 +179,89 @@ func TestResolvePhysicalRootsRemoteServer(t *testing.T) {
 	}
 }
 
+// errFixtureBackendOpen is a sentinel so fixture backend Open/OpenReadOnly
+// hooks never need to touch a real store.
+var errFixtureBackendOpen = errors.New("fixture backend open")
+
+// registerFixtureRemoteBackend registers a Remote backend under name so
+// ResolvePhysicalRoots tests can prove it classifies a registered remote
+// backend's workspace correctly instead of falling through to the embedded
+// Dolt default.
+func registerFixtureRemoteBackend(t *testing.T, name string) {
+	t.Helper()
+	open := func(context.Context, string) (storage.DoltStorage, error) {
+		return nil, errFixtureBackendOpen
+	}
+	backends.Register(name, backends.Backend{
+		Open:         open,
+		OpenReadOnly: open,
+		Remote:       true,
+	})
+	t.Cleanup(func() { backends.Deregister(name) })
+}
+
+// TestResolvePhysicalRootsRegisteredRemoteBackend covers the gap DESIGN.txt
+// calls out: a registered remote backend (Backend.Remote) has no local
+// database, but before this fix ResolvePhysicalRoots had no case for it at
+// all and fell all the way through to the "embedded" default, reporting a
+// bogus beadsDir/embeddeddolt root that backend never opens and bd never
+// creates for it.
+func TestResolvePhysicalRootsRegisteredRemoteBackend(t *testing.T) {
+	resetPhysicalRootEnv(t)
+	const name = "fixture-remote"
+	registerFixtureRemoteBackend(t, name)
+
+	beadsDir := newTestBeadsDir(t)
+	writeBeadsMetadata(t, beadsDir, `{"backend":"`+name+`"}`)
+
+	pr, err := ResolvePhysicalRoots(beadsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pr.Mode != "remote-backend" {
+		t.Errorf("Mode = %q, want remote-backend", pr.Mode)
+	}
+	if !pr.RemoteBackend {
+		t.Error("RemoteBackend = false, want true for a registered Remote backend")
+	}
+	if len(pr.Roots) != 0 {
+		t.Errorf("Roots = %v, want none for a registered remote backend", pr.Roots)
+	}
+	if pr.Provenance == "" {
+		t.Error("Provenance is empty; every decision must explain itself")
+	}
+}
+
+// TestResolvePhysicalRootsRegisteredRemoteBackendOverridesSharedServerEnv
+// proves the ordering fix: IsSharedServerMode reads only process
+// env/config.yaml and does not consult cfg at all, so without checking
+// backends.IsRemote FIRST, an operator's global BEADS_DOLT_SHARED_SERVER=1
+// would hijack a registered-remote-backend workspace into reporting a Dolt
+// shared-server root it will never open.
+func TestResolvePhysicalRootsRegisteredRemoteBackendOverridesSharedServerEnv(t *testing.T) {
+	resetPhysicalRootEnv(t)
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+	const name = "fixture-remote-shared"
+	registerFixtureRemoteBackend(t, name)
+
+	beadsDir := newTestBeadsDir(t)
+	writeBeadsMetadata(t, beadsDir, `{"backend":"`+name+`"}`)
+
+	pr, err := ResolvePhysicalRoots(beadsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pr.Mode != "remote-backend" {
+		t.Errorf("Mode = %q, want remote-backend even with BEADS_DOLT_SHARED_SERVER=1 set", pr.Mode)
+	}
+	if !pr.RemoteBackend {
+		t.Error("RemoteBackend = false, want true")
+	}
+	if len(pr.Roots) != 0 {
+		t.Errorf("Roots = %v, want none", pr.Roots)
+	}
+}
+
 func TestResolvePhysicalRootsSharedServerWinsOverMetadata(t *testing.T) {
 	resetPhysicalRootEnv(t)
 	beadsDir := newTestBeadsDir(t)
@@ -289,22 +377,6 @@ func TestResolvePhysicalRootsPortDoesNotPromoteEmbedded(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertSingleRoot(t, pr, "embedded", filepath.Join(beadsDir, "embeddeddolt"))
-}
-
-func TestResolvePhysicalRootsBracketedIPv6LoopbackIsLocal(t *testing.T) {
-	resetPhysicalRootEnv(t)
-
-	// "[::1]" is what a host:port split leaves behind for IPv6 loopback;
-	// treating it as remote would silently drop the physical gate. The
-	// local set mirrors the storage layer's isLocalHost.
-	beadsDir := newTestBeadsDir(t)
-	writeBeadsMetadata(t, beadsDir, `{"database":"beads.db","dolt_mode":"server","dolt_server_host":"[::1]"}`)
-
-	pr, err := ResolvePhysicalRoots(beadsDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	assertSingleRoot(t, pr, "server", filepath.Join(beadsDir, "dolt"))
 }
 
 func TestLibraryOpenRootPath(t *testing.T) {

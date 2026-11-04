@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/testutil/bazeltest"
 )
 
 // TestGOMODCACHENotUnderTestHome guards the testMainInner fix that pins
@@ -19,6 +21,9 @@ import (
 //
 // So GOMODCACHE must be set and must NOT resolve under the current HOME.
 func TestGOMODCACHENotUnderTestHome(t *testing.T) {
+	if bazeltest.IsBazel() {
+		t.Skip("no in-test go build under bazel: bd is injected through BEADS_TEST_BD_BINARY")
+	}
 	home := os.Getenv("HOME")
 	if home == "" {
 		t.Skip("HOME not set; testMainInner did not run")

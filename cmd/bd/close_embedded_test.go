@@ -15,6 +15,7 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/issueops"
 )
 
 // ===== Close-specific test helpers =====
@@ -56,16 +57,98 @@ func bdDepAdd(t *testing.T, bd, dir string, args ...string) {
 	}
 }
 
+// closeJSONEntry is one entry of `bd close --json`, decoded as a consumer that
+// knows the molecule auto-close members does: the closed issue's own members
+// at the top level, with the members beside them.
+type closeJSONEntry struct {
+	types.Issue
+	AutoClosedMolecule       *types.Issue `json:"auto_closed_molecule"`
+	MoleculeAutoCloseRefusal *string      `json:"molecule_auto_close_refusal"`
+}
+
+// decodeCloseJSON decodes the array of closed issues `bd close --json` prints
+// on stdout, and requires one entry per id in ids, in order, each closed.
+func decodeCloseJSON(t *testing.T, stdout string, ids []string) []closeJSONEntry {
+	t.Helper()
+	start := strings.Index(stdout, "[")
+	if start < 0 {
+		t.Fatalf("no JSON array in bd close --json output:\n%s", stdout)
+	}
+	var entries []closeJSONEntry
+	if err := json.Unmarshal([]byte(stdout[start:]), &entries); err != nil {
+		t.Fatalf("parse bd close --json: %v\n%s", err, stdout[start:])
+	}
+	if len(entries) != len(ids) {
+		t.Fatalf("bd close --json has %d entries, want %d (%v):\n%s", len(entries), len(ids), ids, stdout[start:])
+	}
+	for i, entry := range entries {
+		if entry.ID != ids[i] || entry.Status != types.StatusClosed {
+			t.Fatalf("entry %d = %s (%s), want %s closed:\n%s", i, entry.ID, entry.Status, ids[i], stdout[start:])
+		}
+	}
+	return entries
+}
+
+// requireCloseJSONReportsAutoClosedMolecule asserts a `bd close --json` of
+// stepIDs, in order, whose close completed the molecule rootID: the first
+// entry carries the closed root as auto_closed_molecule, and no entry carries
+// the root again or a refusal.
+func requireCloseJSONReportsAutoClosedMolecule(t *testing.T, stdout string, stepIDs []string, rootID string) {
+	t.Helper()
+	entries := decodeCloseJSON(t, stdout, stepIDs)
+	root := entries[0].AutoClosedMolecule
+	if root == nil {
+		t.Fatalf("the close that completed molecule %s does not report it as auto_closed_molecule:\n%s", rootID, stdout)
+	}
+	if root.ID != rootID || root.Status != types.StatusClosed || root.CloseReason != "all steps complete" {
+		t.Errorf("auto_closed_molecule = %s (%s, %q), want %s closed with %q", root.ID, root.Status, root.CloseReason, rootID, "all steps complete")
+	}
+	for i, entry := range entries {
+		if i > 0 && entry.AutoClosedMolecule != nil {
+			t.Errorf("entry %d (%s) reports molecule %s again: a batch reports each root once", i, entry.ID, entry.AutoClosedMolecule.ID)
+		}
+		if entry.MoleculeAutoCloseRefusal != nil {
+			t.Errorf("entry %d (%s) reports a refusal for a root that closed: %q", i, entry.ID, *entry.MoleculeAutoCloseRefusal)
+		}
+	}
+}
+
+// requireCloseJSONReportsMoleculeRefusal asserts a `bd close --json` of
+// stepID whose close completed the molecule rootID but could not close it:
+// the entry carries no auto-closed root and reports the refusal as want, the
+// refusing guard's own sentence, on every route.
+func requireCloseJSONReportsMoleculeRefusal(t *testing.T, stdout, stepID, rootID string, want error) {
+	t.Helper()
+	entry := decodeCloseJSON(t, stdout, []string{stepID})[0]
+	if entry.AutoClosedMolecule != nil {
+		t.Errorf("a refused root is reported as auto-closed: %s", entry.AutoClosedMolecule.ID)
+	}
+	if entry.MoleculeAutoCloseRefusal == nil {
+		t.Fatalf("the close that completed molecule %s does not report why its root stayed open:\n%s", rootID, stdout)
+	}
+	if got := *entry.MoleculeAutoCloseRefusal; got != want.Error() {
+		t.Errorf("molecule_auto_close_refusal for %s:\n got %q\nwant %q", rootID, got, want.Error())
+	}
+}
+
 // ===== Close tests =====
 
-func TestEmbeddedClose(t *testing.T) {
+// The TestEmbeddedCloseBasic*, TestEmbeddedCloseGuardsAndEpics and
+// TestEmbeddedCloseAlreadyClosed* tests were split from TestEmbeddedClose
+// (originally ~404s, measured under --config=embedded) into top-level tests
+// over disjoint subtest groups, for CI shard balance (see
+// scripts/ci/embedded_cmd_test_durations.json and engdocs/TESTING.md). Every
+// original subtest is preserved exactly once, in its original order within
+// its group. Subtests that share a store stay in one test; the others each
+// init their own isolated store.
+func TestEmbeddedCloseBasicSharedStore(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
 	t.Parallel()
 
 	bd := buildEmbeddedBD(t)
-	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "tc")
+	dir, _, _ := bdInit(t, bd, "--prefix", "tc")
 
 	// ===== Basic Close Behavior =====
 
@@ -112,6 +195,179 @@ func TestEmbeddedClose(t *testing.T) {
 			t.Errorf("expected both %s and %s in JSON output, got: %s", already.ID, fresh.ID, s)
 		}
 	})
+
+	// A batch still closes the IDs it can close, but a caller must receive a
+	// nonzero exit when any sibling was refused. Otherwise an orchestrator can
+	// record the whole batch as complete while a blocked issue remains open.
+	t.Run("mixed_batch_refusal_exits_nonzero_after_closing_survivor", func(t *testing.T) {
+		blocker := bdCreate(t, bd, dir, "Mixed batch blocker", "--type", "task")
+		blocked := bdCreate(t, bd, dir, "Mixed batch blocked", "--type", "task")
+		closable := bdCreate(t, bd, dir, "Mixed batch closable", "--type", "task")
+		bdDepAdd(t, bd, dir, blocked.ID, blocker.ID)
+
+		out := bdCloseFail(t, bd, dir, closable.ID, blocked.ID)
+		if !strings.Contains(out, "1 of 2 issues failed to close") {
+			t.Errorf("expected partial-close summary, got: %s", out)
+		}
+		if got := bdShow(t, bd, dir, closable.ID); got.Status != types.StatusClosed {
+			t.Errorf("closable issue status = %s, want closed", got.Status)
+		}
+		if got := bdShow(t, bd, dir, blocked.ID); got.Status != types.StatusOpen {
+			t.Errorf("blocked issue status = %s, want open", got.Status)
+		}
+	})
+}
+
+func TestEmbeddedCloseBasicIsolatedStores(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+
+	// The direct-route twin of TestProxiedClose/
+	// close_partial_failure_json_names_the_failed_ids. Two things were asserted
+	// on the proxied route only: that exit 1 comes with a payload naming the
+	// failed ids while stdout keeps the success-shaped closed-issues array, and
+	// that failed[].error is the TYPED error rather than the decorated line
+	// stderr shows a person. This is the default route — what most scripts and
+	// the parity harness exercise — so a regression in reportCloseFailures'
+	// jsonOut branch was previously invisible to CI on the route most callers
+	// are on, and the two routes could drift on the field's contents with
+	// nothing failing.
+	t.Run("close_partial_failure_json_names_the_failed_ids", func(t *testing.T) {
+		jdir, _, _ := bdInit(t, bd, "--prefix", "jf")
+		closable := bdCreate(t, bd, jdir, "JSON closable", "--type", "task")
+		blocker := bdCreate(t, bd, jdir, "JSON blocker", "--type", "task")
+		blocked := bdCreate(t, bd, jdir, "JSON blocked", "--type", "task")
+		bdDepAdd(t, bd, jdir, blocked.ID, blocker.ID)
+
+		cmd := exec.Command(bd, "close", "--json", closable.ID, blocked.ID)
+		cmd.Dir = jdir
+		cmd.Env = bdEnv(jdir)
+		stdoutBuf, stderrBuf, err := runCommandBuffers(t, cmd)
+		stdout, stderr := stdoutBuf.String(), stderrBuf.String()
+		if err == nil {
+			t.Fatalf("expected a partial batch close to exit nonzero\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+		}
+
+		// stdout keeps the success shape: just the survivor.
+		start := strings.Index(stdout, "[")
+		if start < 0 {
+			t.Fatalf("expected the closed-issues array on stdout, got:\n%s", stdout)
+		}
+		var closed []*types.Issue
+		if jsonErr := json.Unmarshal([]byte(stdout[start:]), &closed); jsonErr != nil {
+			t.Fatalf("parse closed array: %v\nraw: %s", jsonErr, stdout[start:])
+		}
+		if len(closed) != 1 || closed[0].ID != closable.ID {
+			t.Fatalf("stdout closed array = %d issue(s), want only the survivor %s\nraw: %s", len(closed), closable.ID, stdout[start:])
+		}
+
+		// stderr's last line is the failure report.
+		line := lastJSONObjectLine(stderr)
+		if line == "" {
+			t.Fatalf("expected a compact JSON failure line on stderr, got:\n%s", stderr)
+		}
+		var report struct {
+			Error  string `json:"error"`
+			Failed []struct {
+				ID    string `json:"id"`
+				Error string `json:"error"`
+			} `json:"failed"`
+		}
+		if jsonErr := json.Unmarshal([]byte(line), &report); jsonErr != nil {
+			t.Fatalf("parse failure report: %v\nraw: %s", jsonErr, line)
+		}
+		if report.Error != "1 of 2 issues failed to close" {
+			t.Errorf("failure report error = %q, want the N of M summary", report.Error)
+		}
+		if len(report.Failed) != 1 || report.Failed[0].ID != blocked.ID {
+			t.Fatalf("failure report named %+v, want exactly the refused id %s", report.Failed, blocked.ID)
+		}
+		assertCloseFailedErrorIsTyped(t, report.Failed[0].Error, stderr)
+
+		if got := bdShow(t, bd, jdir, closable.ID); got.Status != types.StatusClosed {
+			t.Errorf("closable issue status = %s, want closed despite the refused sibling", got.Status)
+		}
+		if got := bdShow(t, bd, jdir, blocked.ID); got.Status != types.StatusOpen {
+			t.Errorf("blocked issue status = %s, want open", got.Status)
+		}
+	})
+
+	// The --claim-next × partial-failure interaction, adjudicated rather than
+	// left implicit (#6648). --claim-next rides inside the batch transaction
+	// and fires whenever something LANDED, so a mixed batch claims and then
+	// exits 1. The claim is durable — the refused sibling does not roll it back
+	// — so the contract pinned here is "the claim stands and the failure
+	// summary names it", NOT "the claim is silently suppressed": suppressing
+	// only the report would leave an issue assigned to this actor with nothing
+	// saying so, which is strictly worse than announcing it.
+	//
+	// Its own project, because the assertion depends on exactly which issue is
+	// ready at claim time: once `closable` closes, `blocker` is the only ready
+	// issue left (`blocked` still depends on it), so the claim is deterministic.
+	t.Run("mixed_batch_claim_next_names_the_claim_it_kept", func(t *testing.T) {
+		kdir, _, _ := bdInit(t, bd, "--prefix", "kn")
+		closable := bdCreate(t, bd, kdir, "Claim-next batch closable", "--type", "task")
+		blocker := bdCreate(t, bd, kdir, "Claim-next batch blocker", "--type", "task")
+		blocked := bdCreate(t, bd, kdir, "Claim-next batch blocked", "--type", "task")
+		bdDepAdd(t, bd, kdir, blocked.ID, blocker.ID)
+
+		out := bdCloseFail(t, bd, kdir, closable.ID, blocked.ID, "--claim-next")
+		if !strings.Contains(out, "1 of 2 issues failed to close") {
+			t.Errorf("expected the partial-close summary, got: %s", out)
+		}
+		if !strings.Contains(out, "already claimed "+blocker.ID) {
+			t.Errorf("expected the failure summary to name the claim it kept (%s), got: %s", blocker.ID, out)
+		}
+		if got := bdShow(t, bd, kdir, closable.ID); got.Status != types.StatusClosed {
+			t.Errorf("closable issue status = %s, want closed", got.Status)
+		}
+		if got := bdShow(t, bd, kdir, blocked.ID); got.Status != types.StatusOpen {
+			t.Errorf("blocked issue status = %s, want open", got.Status)
+		}
+		// The claim really landed: the report is not describing a claim that
+		// was rolled back with the refusal.
+		if got := bdShow(t, bd, kdir, blocker.ID); got.Assignee == "" {
+			t.Errorf("claimed issue %s assignee = %q, want it assigned: the claim commits inside the batch transaction and the refused sibling does not undo it",
+				blocker.ID, got.Assignee)
+		}
+
+		// And retrying does NOT stack a second claim, which is what makes
+		// keeping the first one safe. `closable` is already closed on the way
+		// back through, so the batch lands nothing and an empty batch earns no
+		// claim (see the already-closed re-close subtest below). `spare` is
+		// created only now, so it is the one ready issue a repeat claim could
+		// take — without it this assertion would pass vacuously, since the
+		// first run left nothing else ready.
+		spare := bdCreate(t, bd, kdir, "Claim-next batch spare", "--type", "task")
+		out = bdCloseFail(t, bd, kdir, closable.ID, blocked.ID, "--claim-next")
+		if strings.Contains(out, "already claimed "+spare.ID) {
+			t.Errorf("a retry claimed %s as well, got: %s", spare.ID, out)
+		}
+		if got := bdShow(t, bd, kdir, spare.ID); got.Assignee != "" {
+			t.Errorf("retrying the same failed batch claimed a second issue (%s assignee = %q); the leak must be bounded at the one claim the first run earned",
+				spare.ID, got.Assignee)
+		}
+	})
+
+}
+
+// TestEmbeddedCloseGuardsAndEpics was split from TestEmbeddedClose (originally
+// ~404s, measured under --config=embedded) into 3 top-level tests over
+// disjoint subtest groups, for CI shard balance (see
+// scripts/ci/embedded_cmd_test_durations.json and engdocs/TESTING.md). Every original
+// subtest is preserved exactly once.
+func TestEmbeddedCloseGuardsAndEpics(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "tc")
 
 	// Proves the S7 delegation: `bd close` on a blocked issue now surfaces the
 	// engine's atomic guard (storage.ErrCloseBlocked) rather than a duplicated
@@ -221,6 +477,17 @@ func TestEmbeddedClose(t *testing.T) {
 		}
 	})
 
+}
+
+// See TestEmbeddedCloseBasicSharedStore for the TestEmbeddedClose split.
+func TestEmbeddedCloseAlreadyClosedMultipleIDs(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+
 	// The direct route's mirror of the proxied route's
 	// single_transaction_dolt_commit oracle. N ids are ONE request, and the
 	// request is the transaction boundary, so they land as one transaction with
@@ -274,6 +541,15 @@ func TestEmbeddedClose(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestEmbeddedCloseAlreadyClosedContinue(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
 
 	t.Run("close_already_closed_continue_advances", func(t *testing.T) {
 		// Isolated store so molecule progress and the Dolt commit count are
@@ -344,6 +620,15 @@ func TestEmbeddedClose(t *testing.T) {
 				beforeCommits, afterCommits)
 		}
 	})
+}
+
+func TestEmbeddedCloseAlreadyClosedClaimNextAndMolecule(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
 
 	t.Run("close_already_closed_claim_next", func(t *testing.T) {
 		// Isolated store so the ready set is deterministic — the shared store carries
@@ -438,9 +723,55 @@ func TestEmbeddedClose(t *testing.T) {
 
 }
 
+// TestEmbeddedCloseJSONReportsMoleculeAutoClose pins what `bd close --json`
+// says about the molecule a close completed, on the direct route: the root it
+// closed, once per batch, or why the root stayed open.
+// TestProxiedServerClose2B's json_reports_* subtests are its proxied twins.
+func TestEmbeddedCloseJSONReportsMoleculeAutoClose(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+
+	t.Run("auto_closed_root_reported_once_per_batch", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "jm")
+		root := bdCreate(t, bd, dir, "JSON molecule root", "--type", "epic", "--labels", "template")
+		step1 := bdCreate(t, bd, dir, "JSON molecule step one", "--type", "task", "--parent", root.ID)
+		step2 := bdCreate(t, bd, dir, "JSON molecule step two", "--type", "task", "--parent", root.ID)
+		step3 := bdCreate(t, bd, dir, "JSON molecule step three", "--type", "task", "--parent", root.ID)
+		bdClose(t, bd, dir, step1.ID)
+
+		out := bdClose(t, bd, dir, "--json", step2.ID, step3.ID)
+		requireCloseJSONReportsAutoClosedMolecule(t, out, []string{step2.ID, step3.ID}, root.ID)
+	})
+
+	t.Run("refused_root_reported", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "jr")
+		root := bdCreate(t, bd, dir, "JSON held molecule root", "--type", "epic", "--labels", "template", "--assignee", "someone-else")
+		step := bdCreate(t, bd, dir, "JSON held molecule step", "--type", "task", "--parent", root.ID)
+
+		out := bdClose(t, bd, dir, "--actor", "json-closer", "--json", step.ID)
+		requireCloseJSONReportsMoleculeRefusal(t, out, step.ID, root.ID,
+			&issueops.CloseNotAssigneeError{IssueID: root.ID, Assignee: "someone-else", Actor: "json-closer"})
+		if got := bdShow(t, bd, dir, root.ID); got.Status != types.StatusOpen {
+			t.Errorf("a root assigned to another actor must stay open, got %s", got.Status)
+		}
+	})
+}
+
 // TestEmbeddedCloseConcurrent exercises create, close, and list operations
 // concurrently to verify EmbeddedDoltStore handles concurrent CLI invocations
 // without panics, data corruption, or deadlocks.
+//
+// issuesPerWorker was 5 (F1 review S1): under real CI-like load this
+// measured ~324s for the same reason documented on
+// TestEmbeddedUpdateConcurrent above (genuine serialized-write contention,
+// not a queueing-delay artifact). issuesPerWorker=2 preserves the same
+// invariants (duplicate-ID detection across all numWorkers concurrent
+// processes, one non-decreasing-list-count check per worker) at 40% of the
+// serialized work.
 func TestEmbeddedCloseConcurrent(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
@@ -452,7 +783,7 @@ func TestEmbeddedCloseConcurrent(t *testing.T) {
 
 	const (
 		numWorkers      = 10
-		issuesPerWorker = 5
+		issuesPerWorker = 2
 	)
 
 	type workerResult struct {

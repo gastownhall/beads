@@ -2,7 +2,6 @@ package scripts_test
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -13,7 +12,7 @@ import (
 // pinnedDoltCLIVersion is the version scripts/ci/install-dolt.sh pins.
 // TestPinnedDoltCLIMatchesContainerImage guards the pin itself; this file only
 // needs a value the fake dolt can report back so the drift guard is exercised.
-const pinnedDoltCLIVersion = "2.2.0"
+const pinnedDoltCLIVersion = "2.6.0"
 
 // TestInstallDoltPropagatesDownloadFailure is the regression net for a download
 // that never succeeds exiting 0. The script's whole purpose is keeping CI off an
@@ -71,11 +70,11 @@ func TestInstallDoltPropagatesDownloadFailure(t *testing.T) {
 			wantInstalls:    1,
 		},
 		{
-			// A substring drift guard would wave this through: "12.2.0"
-			// contains "2.2.0".
+			// A substring drift guard would wave this through: "12.6.0"
+			// contains "2.6.0".
 			name:            "installed version merely contains the pin",
 			curlFailures:    0,
-			reportedVersion: "12.2.0",
+			reportedVersion: "12.6.0",
 			wantExit:        1,
 			wantCurls:       1,
 			wantSleeps:      0,
@@ -155,10 +154,7 @@ type installDoltRun struct {
 func runInstallDolt(t *testing.T, curlFailures int, reportedVersion string) installDoltRun {
 	t.Helper()
 
-	bash, err := exec.LookPath("bash")
-	if err != nil {
-		t.Skipf("bash is required to test install-dolt.sh: %v", err)
-	}
+	bash := requireHostTool(t, "bash")
 
 	bin := t.TempDir()
 	stateDir := t.TempDir()

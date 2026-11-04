@@ -7,7 +7,8 @@
 // One declarative registry (Profiles) describes how to create and tear down an
 // isolated workspace for each backend. Adding a backend is one Profiles entry; the
 // runner and scripts/conformance.sh pick it up automatically. The suite is behind
-// the `e2e` build tag because it shells out to a freshly built bd.
+// the `e2e` (or `integration`) build tag because it shells out to a
+// freshly built bd.
 //
 // # Stability
 //

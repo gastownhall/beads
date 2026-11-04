@@ -5,7 +5,6 @@ import (
 	"go/parser"
 	"go/token"
 	"io/fs"
-	"path/filepath"
 	"reflect"
 	"runtime"
 	"sort"
@@ -14,6 +13,7 @@ import (
 
 	"github.com/steveyegge/beads/backend"
 	"github.com/steveyegge/beads/backend/conformance"
+	"github.com/steveyegge/beads/internal/testutil/bazeltest"
 )
 
 const internalPrefix = "github.com/steveyegge/beads/internal/"
@@ -77,7 +77,7 @@ func publicAliases(t *testing.T) map[string]bool {
 	if !ok {
 		t.Fatal("runtime.Caller failed")
 	}
-	dir := filepath.Dir(thisFile)
+	dir := bazeltest.CallerDir(thisFile, "backend")
 	fset := token.NewFileSet()
 	pkgs, err := parser.ParseDir(fset, dir, func(fi fs.FileInfo) bool {
 		return !strings.HasSuffix(fi.Name(), "_test.go")

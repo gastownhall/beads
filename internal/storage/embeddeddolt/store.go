@@ -14,9 +14,11 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/schema"
+	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/utils"
@@ -32,6 +34,8 @@ var _ storage.Flattener = (*EmbeddedDoltStore)(nil)
 var _ storage.Compactor = (*EmbeddedDoltStore)(nil)
 var _ storage.SchemaMigrator = (*EmbeddedDoltStore)(nil)
 var _ storage.EventsJournalConfigurer = (*EmbeddedDoltStore)(nil)
+var _ storage.VersionedHistoryConfigurer = (*EmbeddedDoltStore)(nil)
+var _ storage.VersionedHistoryDeferrer = (*EmbeddedDoltStore)(nil)
 var _ storage.ExternalRefHistoryQuerier = (*EmbeddedDoltStore)(nil)
 
 // EmbeddedDoltStore implements storage.DoltStorage backed by the embedded Dolt engine.
@@ -52,6 +56,12 @@ type EmbeddedDoltStore struct {
 	// eventsJournalEnabled activates the durable events journal for THIS store
 	// instance only (storage.EventsJournalConfigurer); never process-global.
 	eventsJournalEnabled atomic.Bool
+	// versionedHistory activates dual-write issue-version history for THIS
+	// store instance only (storage.VersionedHistoryConfigurer); never
+	// process-global. Activation usually leaves it pending
+	// (storage.VersionedHistoryDeferrer), for commitConn's first WRITE
+	// transaction to answer: a read never opens an engine to read the row.
+	versionedHistory issueops.VersionedHistorySwitch
 	// readOnly marks a store opened via OpenReadOnly or
 	// OpenForPreviewCommand: open-time mutations (CREATE DATABASE, schema
 	// migrations) were skipped and write transactions are refused
@@ -65,12 +75,42 @@ type EmbeddedDoltStore struct {
 	intent openIntent
 }
 
+// lenientSharedGateGuidance is the blunt migrate-or-adopt block shared by the
+// lenient-open warnings. Before #6660 it was appended to the mode line and its
+// first fragment continued that sentence on the same line; it now always leads
+// the warning and so starts its own line, which is why the opening sentence is
+// wrapped as a full line rather than as a continuation.
+const lenientSharedGateGuidance = "  This is a coordination decision, not an auto-fix - do NOT run a\n" +
+	"  migration unless you are the single designated migrator (only ONE\n" +
+	"  clone may migrate a shared remote, else the schema forks; #4259):\n" +
+	"    • designated migrator (only ONE machine): bd migrate --force && bd dolt push\n" +
+	"    • every other clone (another already migrated): bd bootstrap\n" +
+	"    • several machines: only ONE migrates; sync each other clone and run\n" +
+	"      bd dolt pull after the migrator pushes, before upgrading it\n"
+
+// lenientGateWarningBody preserves the generic migrate-or-adopt guidance for
+// blunt gate refusals while allowing smart-gate decisions to explain their
+// narrower recovery. A non-empty Decision means UserMessage has a shaped body;
+// data-behind is the one shaped refusal deliberately represented as a fallback.
+// The blunt arm swaps only UserMessage's body for the shared guidance and keeps
+// the gate's Notes after it, where UserMessage (and so server mode) prints
+// them: the smart gate's fallback reason is what tells an unreadable remote
+// state apart from a below-floor database or a BD_SMART_GATE=0 opt-out, and
+// each calls for a different next step (bd-1z1pc).
+func lenientGateWarningBody(gateErr *schema.RemoteMigrateGateError) string {
+	if gateErr.Decision != "" || gateErr.IsDataBehind() {
+		return "Warning: " + gateErr.UserMessage()
+	}
+	return "Warning: " + gateErr.Error() + "\n" + lenientSharedGateGuidance + gateErr.Notes()
+}
+
 // openIntent classifies why a store is being opened. openStrict fails the
 // open on any pending-migration refusal; openReadOnlyCommand and
 // openWorkingSetReconcile relax both the #4259 remote-migrate gate refusal and
 // the #4566 dirty-table refusal, each with its own warning text (see
-// initSchema); openRemoteSync relaxes exactly one gate refusal and nothing
-// else.
+// initSchema), and openWorkingSetReconcile alone also relaxes the
+// migration-consent refusal (toleratesConsentRefusal); openRemoteSync relaxes
+// exactly one gate refusal and nothing else.
 type openIntent int
 
 const (
@@ -86,7 +126,9 @@ const (
 	// commands (bd dolt commit, bd vc commit): their entire purpose is to
 	// clear the dirty working set that a migration would otherwise refuse to
 	// touch, so failing the open here would deadlock the documented recovery
-	// (#4566). Used by OpenForWorkingSetReconcile.
+	// (#4566). For the same reason it relaxes the migration-consent refusal,
+	// which fires before the dirty-table guard. Used by
+	// OpenForWorkingSetReconcile.
 	openWorkingSetReconcile
 	// openRemoteSync is the same shape of deadlock break as
 	// openWorkingSetReconcile, for the #6575 data-behind gate refusal: that
@@ -101,6 +143,98 @@ const (
 	// OpenForRemoteSync.
 	openRemoteSync
 )
+
+// lenientGateWarning renders the complete stderr warning for an open that is
+// continuing past a remote-migrate gate refusal, so the composed text is a
+// pure function of (intent, gateErr) and can be asserted directly in tests.
+// Every arm terminates with a newline: the warning is the last thing written
+// before the command's own output, and an unterminated arm glues the two
+// together (#6660 regressed exactly that when the shared guidance, which used
+// to be the terminator of the two non-data-behind arms, moved to the front).
+//
+// #6575/#6660: lenientSharedGateGuidance is the blunt migrate-or-adopt block.
+// On data-behind its bullets are measurably wrong — `bd migrate --force`
+// applies the migration this stop exists to prevent, the `bd dolt push` after
+// it is rejected non-fast-forward while the clone is still behind, and
+// `bd bootstrap` no-ops against an existing workspace. On the smart decisions
+// they are instead redundant with the shaped body — and, for the
+// `bd migrate --force` bullet, contradicted by it (fork-skew's body says
+// migrating cannot un-fork the schema). Either way gateErr's own UserMessage
+// is where the right body lives, already branched per decision and, for
+// data-behind, per fast-forward vs diverged pull. Printing %v (Error(), the
+// one-line summary) and appending the bullets dropped it: a 1.1-era upgrader's
+// first `bd list` and their `bd dolt commit` both land in the two arms below,
+// so the first thing bd said to a data-behind clone was the wedge. Server
+// mode's warnLenientOpenRefusal (dolt/store.go) has rendered UserMessage all
+// along; these arms are the ones that lagged.
+//
+// The intent framing stays: the command in hand is still SUCCEEDING against
+// the old schema, which UserMessage — written for the fatal refusal — does not
+// say. So the mode line is appended to the shaped body rather than replacing
+// it.
+func lenientGateWarning(intent openIntent, gateErr *schema.RemoteMigrateGateError) string {
+	body := lenientGateWarningBody(gateErr)
+	switch intent {
+	case openRemoteSync:
+		// This is the refusal's own prescribed remedy running. It gets
+		// the short confirmation rather than the full data-behind body:
+		// toleratesGateRefusal admits only the data-behind stop here, so
+		// the operator has necessarily just been handed that body by the
+		// command this pull is unblocking, and re-printing "pull first"
+		// at the moment they are finally doing it is noise. What it must
+		// never do is name `bd migrate --force`.
+		return fmt.Sprintf(
+			"Warning: %[1]v\n"+
+				"  Remote-sync command: continuing on schema v%[2]d without migrating, so\n"+
+				"  this pull can bring in the commits this clone is behind on. Re-run the\n"+
+				"  command you were blocked on once it completes.\n",
+			gateErr, gateErr.CurrentVersion)
+	case openWorkingSetReconcile:
+		if gateErr.IsDataBehind() {
+			return fmt.Sprintf(
+				"%[1]s"+
+					"  Working-set reconcile command: continuing on schema v%[2]d without\n"+
+					"  migrating; the commit applies to the working set at the current\n"+
+					"  schema. It does not resolve the schema — the pull above is what does.\n",
+				body, gateErr.CurrentVersion)
+		}
+		return fmt.Sprintf(
+			"%[1]s"+
+				"  Working-set reconcile command: continuing on schema v%[2]d without\n"+
+				"  migrating; the commit applies to the working set at the current\n"+
+				"  schema.\n",
+			body, gateErr.CurrentVersion)
+	default: // openReadOnlyCommand
+		if gateErr.IsDataBehind() {
+			return fmt.Sprintf(
+				"%[1]s"+
+					"  Read-only command: continuing on schema v%[2]d without migrating, so\n"+
+					"  this read succeeds against the old schema. Writes stay blocked until\n"+
+					"  this clone has pulled.\n",
+				body, gateErr.CurrentVersion)
+		}
+		return fmt.Sprintf(
+			"%[1]s"+
+				"  Read-only command: continuing on schema v%[2]d without migrating.\n"+
+				"  Writes are blocked until the schema is reconciled.\n",
+			body, gateErr.CurrentVersion)
+	}
+}
+
+// requireReadableSchema bounds a read-only command's read-through. Having
+// tolerated a migration refusal, the open goes on at the current schema, which
+// this binary's issue reads can query only while it has every column the
+// shared projection selects (schema.CheckReadableDrift). One that lacks any is
+// refused here, as server mode's read-only open refuses it
+// (dolt.Config.RequireReadableSchema), instead of opening and then failing
+// every read on an unknown column. The other intents read no issues through
+// this open and are left alone.
+func (s *EmbeddedDoltStore) requireReadableSchema(ctx context.Context, conn *sql.Conn) error {
+	if s.intent != openReadOnlyCommand {
+		return nil
+	}
+	return schema.CheckReadableDrift(ctx, conn, "issues", sqlbuild.ColumnNames(sqlbuild.IssueBaseColumns))
+}
 
 // toleratesGateRefusal reports whether this open's intent may warn and
 // continue past a remote-migrate gate refusal (#4259/#5920/#6575) instead of
@@ -132,6 +266,27 @@ func (s *EmbeddedDoltStore) toleratesGateRefusal(gateErr *schema.RemoteMigrateGa
 // re-key conflict is a different refusal with a different recovery.
 func (s *EmbeddedDoltStore) toleratesMigrationRefusal() bool {
 	return s.intent == openReadOnlyCommand || s.intent == openWorkingSetReconcile
+}
+
+// toleratesConsentRefusal reports whether this open's intent may warn and
+// continue on the current schema past the migration-consent refusal
+// (schema.MigrateConsentError) instead of failing the open.
+//
+// Only openWorkingSetReconcile may. MigrateUp checks consent before the #4566
+// dirty-table guard, so on a database that is both behind and dirty a strict
+// commit open rebuilds the #4566 deadlock one check earlier: `bd migrate
+// schema` is refused as dirty and names `bd dolt commit`, which is refused
+// for consent. The commit needs no migration, and MigrateUp refuses before
+// any write, so it runs on the current schema.
+//
+// openReadOnlyCommand stays strict on purpose. The remote-migrate gate lets
+// reads ride through because its migrate-or-adopt decision is cross-clone
+// coordination that takes a while to settle; this decision is one local
+// command either way (`bd migrate schema`, or keep the matching release), and
+// the refusal is where the operator learns it is needed. openRemoteSync stays
+// strict for the reason toleratesMigrationRefusal gives.
+func (s *EmbeddedDoltStore) toleratesConsentRefusal() bool {
+	return s.intent == openWorkingSetReconcile
 }
 
 // errClosed is returned when a method is called after Close.
@@ -226,7 +381,7 @@ func openReadOnly(ctx context.Context, beadsDir, database, branch string, checkB
 	}
 	dataDir := filepath.Join(absBeadsDir, "embeddeddolt")
 	if _, err := os.Stat(dataDir); err != nil {
-		return nil, fmt.Errorf("embeddeddolt: no embedded database at %s: %w", dataDir, err)
+		return nil, fmt.Errorf("%w at %s: %w", ErrNoEmbeddedDatabase, remedy.PrintedValue(dataDir), remedy.PrintedError(err))
 	}
 
 	s := &EmbeddedDoltStore{
@@ -261,7 +416,69 @@ func openReadOnly(ctx context.Context, beadsDir, database, branch string, checkB
 // returns regardless of outcome.
 //
 // The database must already exist (created during initSchema).
-func (s *EmbeddedDoltStore) withConn(ctx context.Context, commit bool, fn func(tx *sql.Tx) error) (err error) {
+func (s *EmbeddedDoltStore) withConn(ctx context.Context, commit bool, fn func(tx *sql.Tx) error) error {
+	pending, err := s.commitConn(ctx, commit, fn)
+	if err != nil {
+		return err
+	}
+	logBlockedRecheckFailure(pending, s.recheckBlockedAfterCommit(ctx, pending))
+	return nil
+}
+
+// logBlockedRecheckFailure reports a post-commit recheck failure instead of
+// returning it. The write it followed is committed and durable, and every
+// caller of a store write reads an error as "the mutation did not land":
+// surfacing this one would make automated callers retry and double-apply.
+// What is left behind is the stale is_blocked flag `bd doctor` and
+// `bd recompute-blocked` repair, which is the state every write had before
+// the recheck existed.
+//
+// The sentence is issueops.BlockedRecheckFailureMessage, shared with the Dolt
+// store; only the sink differs. This store has no metrics registry, so unlike
+// the Dolt store's counter this line is the whole signal.
+func logBlockedRecheckFailure(pending issueops.BlockedRecheck, err error) {
+	if err == nil {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "warning: %s\n", issueops.BlockedRecheckFailureMessage(pending, err))
+}
+
+// recheckBlockedAfterCommit recomputes the blocked state of the dependents a
+// committed unblocking write recorded, on a fresh snapshot
+// (gastownhall/beads#6716).
+//
+// Embedded transactions serialize: commitConn opens a fresh OpenSQL handle
+// per transaction, and OpenSQL (open.go) waits in a backoff with no elapsed
+// time limit for the engine, so a second handle blocks until the first has
+// been cleaned up. Two transactions therefore never run against overlapping
+// snapshots in one process, and the skew of #6716 cannot occur here; no
+// embedded reproduction exists. The recheck is kept so the embedded store
+// honors the same contract as the server store — a stale row recorded by
+// one transaction is settled after its commit — and it runs only after the
+// first handle's cleanup, so it cannot deadlock on itself. It runs no SQL
+// when nothing was recorded.
+//
+// It runs on issueops.BlockedRecheckContext: the write it follows is durable,
+// so the repair must outlive that write's cancellation, and a recheck must
+// never start another recheck. The returned failure is for the caller to log,
+// never to return — see logBlockedRecheckFailure.
+func (s *EmbeddedDoltStore) recheckBlockedAfterCommit(ctx context.Context, pending issueops.BlockedRecheck) error {
+	if pending.Empty() || issueops.InBlockedRecheck(ctx) {
+		return nil
+	}
+	ctx, cancel := issueops.BlockedRecheckContext(ctx)
+	defer cancel()
+	if _, err := s.commitConn(ctx, true, func(tx *sql.Tx) error {
+		return issueops.RecomputeIsBlockedInTx(ctx, tx, pending.IssueIDs, pending.WispIDs)
+	}); err != nil {
+		return issueops.BlockedRecheckFailed(err)
+	}
+	return nil
+}
+
+// commitConn is withConn's transaction: it hands back the dependents the
+// transaction's unblocking writes recorded once it has committed.
+func (s *EmbeddedDoltStore) commitConn(ctx context.Context, commit bool, fn func(tx *sql.Tx) error) (pending issueops.BlockedRecheck, err error) {
 	if s.closed.Load() {
 		err = errClosed
 		return
@@ -291,6 +508,21 @@ func (s *EmbeddedDoltStore) withConn(ctx context.Context, commit bool, fn func(t
 	}
 	clearJournalScope := issueops.ScopeEventsJournalTransaction(tx, s.eventsJournalEnabled.Load())
 	defer clearJournalScope()
+	// Only a transaction that commits answers a pending switch: a read rolls
+	// back whatever it does, so the row is read inside the first write and
+	// costs a read-only command nothing. A write whose read fails is rolled
+	// back before fn runs (issueops.VersionedHistorySwitch.ResolveIn).
+	versioned := s.versionedHistory.Enabled()
+	if commit {
+		if versioned, err = s.versionedHistory.ResolveIn(ctx, tx); err != nil {
+			err = errors.Join(err, tx.Rollback())
+			return
+		}
+	}
+	clearVersionScope := issueops.ScopeVersionedHistoryTransaction(tx, versioned)
+	defer clearVersionScope()
+	clearRecheckScope := issueops.ScopeBlockedRecheckTransaction(tx)
+	defer clearRecheckScope()
 
 	if fnErr := fn(tx); fnErr != nil {
 		err = errors.Join(fnErr, tx.Rollback())
@@ -307,12 +539,25 @@ func (s *EmbeddedDoltStore) withConn(ctx context.Context, commit bool, fn func(t
 		return
 	}
 	committed = true
+	pending = issueops.TakeBlockedRecheck(tx)
 	return
 }
 
 // SetEventsJournalEnabled activates the journal for this store instance only.
 func (s *EmbeddedDoltStore) SetEventsJournalEnabled(enabled bool) {
 	s.eventsJournalEnabled.Store(enabled)
+}
+
+// SetVersionedHistoryEnabled activates dual-write issue-version history for
+// this store instance only.
+func (s *EmbeddedDoltStore) SetVersionedHistoryEnabled(enabled bool) {
+	s.versionedHistory.Set(enabled)
+}
+
+// DeferVersionedHistory leaves this store's switch to resolve, read by the
+// first write transaction (storage.VersionedHistoryDeferrer).
+func (s *EmbeddedDoltStore) DeferVersionedHistory(resolve storage.VersionedHistoryResolver) {
+	s.versionedHistory.Defer(resolve)
 }
 
 // commitEmbeddedTx classifies an unconfirmed SQL commit response as
@@ -447,85 +692,12 @@ func (s *EmbeddedDoltStore) initSchema(ctx context.Context) error {
 			// working-set commit. Warn and continue on the current schema;
 			// a plain (openStrict) open still fails with the full
 			// migrate-or-adopt guidance.
-			const sharedGuidance = "  This is a\n" +
-				"  coordination decision, not an auto-fix - do NOT run a migration unless\n" +
-				"  you are the single designated migrator (only ONE clone may migrate a\n" +
-				"  shared remote, else the schema forks; #4259):\n" +
-				"    • designated migrator (only ONE machine): bd migrate --force && bd dolt push\n" +
-				"    • every other clone (another already migrated): bd bootstrap\n" +
-				"    • several machines: only ONE migrates; sync each other clone and run\n" +
-				"      bd dolt pull after the migrator pushes, before upgrading it\n"
-			// #6575: sharedGuidance is the blunt migrate-or-adopt block, and
-			// on the data-behind stop every bullet in it is measurably wrong
-			// — `bd migrate --force` applies the migration this stop exists
-			// to prevent, the `bd dolt push` after it is rejected
-			// non-fast-forward while the clone is still behind, and
-			// `bd bootstrap` no-ops against an existing workspace. The one
-			// command that moves the clone forward is `bd dolt pull`, and
-			// gateErr's own UserMessage is where that body lives, already
-			// branched for the fast-forward and diverged pulls. Printing
-			// %v (Error(), the one-line summary) and appending the bullets
-			// dropped it: a 1.1-era upgrader's first `bd list` and their
-			// `bd dolt commit` both land in the two arms below, so the first
-			// thing bd said to a data-behind clone was the wedge. Server
-			// mode's warnLenientOpenRefusal (dolt/store.go) has rendered
-			// UserMessage all along; these arms are the ones that lagged.
-			//
-			// The intent framing stays: the command in hand is still
-			// SUCCEEDING against the old schema, which UserMessage — written
-			// for the fatal refusal — does not say. So the mode line is
-			// appended to the data-behind body rather than replacing it.
-			body := "Warning: " + gateErr.Error() + "\n"
-			if gateErr.IsDataBehind() {
-				body = "Warning: " + gateErr.UserMessage()
+			// lenientGateWarning owns the rendering (and the rationale for
+			// preferring gateErr's shaped body over the blunt bullets).
+			if err := s.requireReadableSchema(ctx, conn); err != nil {
+				return err
 			}
-			switch s.intent {
-			case openRemoteSync:
-				// This is the refusal's own prescribed remedy running. It gets
-				// the short confirmation rather than the full data-behind body:
-				// toleratesGateRefusal admits only the data-behind stop here, so
-				// the operator has necessarily just been handed that body by the
-				// command this pull is unblocking, and re-printing "pull first"
-				// at the moment they are finally doing it is noise. What it must
-				// never do is name `bd migrate --force`.
-				fmt.Fprintf(os.Stderr,
-					"Warning: %[1]v\n"+
-						"  Remote-sync command: continuing on schema v%[2]d without migrating, so\n"+
-						"  this pull can bring in the commits this clone is behind on. Re-run the\n"+
-						"  command you were blocked on once it completes.\n",
-					gateErr, gateErr.CurrentVersion)
-			case openWorkingSetReconcile:
-				if gateErr.IsDataBehind() {
-					fmt.Fprintf(os.Stderr,
-						"%[1]s"+
-							"  Working-set reconcile command: continuing on schema v%[2]d without\n"+
-							"  migrating; the commit applies to the working set at the current\n"+
-							"  schema. It does not resolve the schema — the pull above is what does.\n",
-						body, gateErr.CurrentVersion)
-					break
-				}
-				fmt.Fprintf(os.Stderr,
-					"%[1]s"+
-						"  Working-set reconcile command: continuing on schema v%[2]d without\n"+
-						"  migrating; the commit applies to the working set at the current\n"+
-						"  schema."+sharedGuidance,
-					body, gateErr.CurrentVersion)
-			default: // openReadOnlyCommand
-				if gateErr.IsDataBehind() {
-					fmt.Fprintf(os.Stderr,
-						"%[1]s"+
-							"  Read-only command: continuing on schema v%[2]d without migrating, so\n"+
-							"  this read succeeds against the old schema. Writes stay blocked until\n"+
-							"  this clone has pulled.\n",
-						body, gateErr.CurrentVersion)
-					break
-				}
-				fmt.Fprintf(os.Stderr,
-					"%[1]s"+
-						"  Read-only command: continuing on schema v%[2]d without migrating.\n"+
-						"  Writes are blocked until the schema is reconciled."+sharedGuidance,
-					body, gateErr.CurrentVersion)
-			}
+			fmt.Fprint(os.Stderr, lenientGateWarning(s.intent, gateErr))
 			return nil
 		}
 		return err
@@ -534,6 +706,11 @@ func (s *EmbeddedDoltStore) initSchema(ctx context.Context) error {
 	// Embedded mode relies on the dolthub/driver/v2's local file/concurrency
 	// controls; schema.MigrateUpWithLock requires a sql-server session lock.
 	if _, err := schema.MigrateUp(ctx, conn); err != nil {
+		var consentErr *schema.MigrateConsentError
+		if s.toleratesConsentRefusal() && errors.As(err, &consentErr) {
+			fmt.Fprint(os.Stderr, consentErr.WorkingSetWarning())
+			return nil
+		}
 		var dirtyErr *schema.DirtyTablesError
 		if s.toleratesMigrationRefusal() && errors.As(err, &dirtyErr) {
 			// The guard exists to keep dirty user data from being entangled
@@ -543,18 +720,21 @@ func (s *EmbeddedDoltStore) initSchema(ctx context.Context) error {
 			// read-only command must not be bricked by dirty tables either,
 			// so both non-strict intents warn and continue on the current
 			// schema instead of failing the open.
+			if err := s.requireReadableSchema(ctx, conn); err != nil {
+				return err
+			}
 			switch s.intent {
 			case openWorkingSetReconcile:
 				fmt.Fprintf(os.Stderr,
 					"Warning: %v\n"+
 						"  Committing the working set at the current schema; when it completes,\n"+
-						"  re-run 'bd migrate'.\n",
+						"  re-run 'bd migrate schema'.\n",
 					dirtyErr)
 			default: // openReadOnlyCommand
 				fmt.Fprintf(os.Stderr,
 					"Warning: %v\n"+
 						"  Continuing without migrating. Run 'bd dolt commit' to commit the\n"+
-						"  working set at the current schema, then re-run 'bd migrate'.\n",
+						"  working set at the current schema, then re-run 'bd migrate schema'.\n",
 					dirtyErr)
 			}
 			return nil
@@ -860,7 +1040,11 @@ func (s *EmbeddedDoltStore) ListTags(ctx context.Context) ([]string, error) {
 
 // ImportJSONLData atomically checks if the database is empty and, if so,
 // imports parsed issues and config key/value pairs in a single transaction.
-// Returns the count of issues imported, or 0 if the database was not empty.
+// Returns the count of issues imported and, deduplicated in file order, the
+// ids it skipped because a retaining retention sweep retired them (an import
+// never resurrects a swept row, and they are not counted as imported), or 0
+// and nil if the database was not empty. A database holding only tombstones
+// has no issue rows, so it counts as empty.
 // Does NOT issue DOLT_COMMIT — the caller is responsible for committing
 // (e.g. via the PersistentPostRun auto-commit hook).
 func (s *EmbeddedDoltStore) ImportJSONLData(
@@ -868,8 +1052,9 @@ func (s *EmbeddedDoltStore) ImportJSONLData(
 	issues []*types.Issue,
 	configEntries map[string]string,
 	actor string,
-) (int, error) {
+) (int, []string, error) {
 	var imported int
+	var retiredIDs []string
 	err := s.withConn(ctx, true, func(tx *sql.Tx) error {
 		// Atomically check: is the database empty?
 		stats := &types.Statistics{}
@@ -902,6 +1087,7 @@ func (s *EmbeddedDoltStore) ImportJSONLData(
 		}
 
 		// Create all issues in the same transaction
+		retired := make(map[string]bool)
 		if err := issueops.CreateIssuesInTx(ctx, tx, issues, actor, storage.BatchCreateOptions{
 			SkipPrefixValidation: true,
 			// Defense-in-depth (GH#3955): the embedded fast-path is the primary
@@ -910,14 +1096,26 @@ func (s *EmbeddedDoltStore) ImportJSONLData(
 			// that check cannot clobber live rows — matching the server-mode
 			// fallback's conflict-skip behavior.
 			ConflictSkip: true,
+			// A row whose id a retaining sweep retired is skipped, never
+			// written; the callback names it so the count below leaves it out.
+			OnRetiredID: func(issueID string) { retired[issueID] = true },
 		}); err != nil {
 			return err
 		}
 
-		imported = len(issues)
+		imported, retiredIDs = 0, nil
+		listed := make(map[string]bool, len(retired))
+		for _, issue := range issues {
+			if !retired[issue.ID] {
+				imported++
+			} else if !listed[issue.ID] {
+				listed[issue.ID] = true
+				retiredIDs = append(retiredIDs, issue.ID)
+			}
+		}
 		return nil
 	})
-	return imported, err
+	return imported, retiredIDs, err
 }
 
 // Flatten squashes all Dolt commit history into a single commit.
@@ -938,7 +1136,7 @@ func (s *EmbeddedDoltStore) Flatten(ctx context.Context) error {
 
 // Compact squashes old Dolt commits while preserving recent ones.
 // Pins a single *sql.Conn for session-scoped stored procedures.
-func (s *EmbeddedDoltStore) Compact(ctx context.Context, initialHash, boundaryHash string, oldCommits int, recentHashes []string) error {
+func (s *EmbeddedDoltStore) Compact(ctx context.Context, initialHash, boundaryHash, headHash string, oldCommits int, recentHashes []string) error {
 	return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
 		// withDBConn returns *sql.DB; pin a single connection for
 		// session-scoped operations (checkout, reset, cherry-pick).
@@ -948,9 +1146,9 @@ func (s *EmbeddedDoltStore) Compact(ctx context.Context, initialHash, boundaryHa
 				return err
 			}
 			defer conn.Close()
-			return versioncontrolops.Compact(ctx, conn, initialHash, boundaryHash, oldCommits, recentHashes)
+			return versioncontrolops.Compact(ctx, conn, initialHash, boundaryHash, headHash, oldCommits, recentHashes)
 		}
-		return versioncontrolops.Compact(ctx, db, initialHash, boundaryHash, oldCommits, recentHashes)
+		return versioncontrolops.Compact(ctx, db, initialHash, boundaryHash, headHash, oldCommits, recentHashes)
 	})
 }
 
@@ -1032,6 +1230,31 @@ func (s *EmbeddedDoltStore) History(ctx context.Context, issueID string) ([]*sto
 	})
 	return result, err
 }
+
+// ListVersions implements storage.VersionLister over issue_versions.
+func (s *EmbeddedDoltStore) ListVersions(ctx context.Context, issueID string) ([]storage.IssueVersion, error) {
+	var result []storage.IssueVersion
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.ListVersionsInTx(ctx, tx, issueID)
+		return err
+	})
+	return result, err
+}
+
+// ParticipatingIssueIDs implements storage.HistoryParticipation: which of ids
+// name an issues-table row whose participation_generation is set.
+func (s *EmbeddedDoltStore) ParticipatingIssueIDs(ctx context.Context, ids []string) (map[string]struct{}, error) {
+	var participating map[string]struct{}
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		participating, err = issueops.ParticipatingIssueIDsInTx(ctx, tx, ids)
+		return err
+	})
+	return participating, err
+}
+
+var _ storage.HistoryParticipation = (*EmbeddedDoltStore)(nil)
 
 func (s *EmbeddedDoltStore) AsOf(ctx context.Context, issueID string, ref string) (*types.Issue, error) {
 	var result *types.Issue
@@ -1397,3 +1620,8 @@ func (s *EmbeddedDoltStore) GetStaleIssues(ctx context.Context, filter types.Sta
 	})
 	return result, err
 }
+
+// Compile-time proof that this leg serves versions -- see the matching
+// assertion in internal/storage/dolt/versioned.go for why it lives in the
+// leg's own package.
+var _ storage.VersionLister = (*EmbeddedDoltStore)(nil)

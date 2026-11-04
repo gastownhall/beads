@@ -45,6 +45,24 @@ func TestEmbeddedDependencyEditorSameTypeReAddIsIdempotent(t *testing.T) {
 	conformance.RunDependencyEditorSameTypeReAddIsIdempotent(t, ctx, newEmbeddedDependencyEditorFixture(t, ctx, "idem"))
 }
 
+func TestEmbeddedDependencyEditorSameTypeReAddWithChangedMetadataMintsOneVersion(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	conformance.RunDependencyEditorSameTypeReAddWithChangedMetadataMintsOneVersion(t, ctx, newEmbeddedDependencyEditorFixture(t, ctx, "idemmeta"))
+}
+
+func TestEmbeddedDependencyEditorSameTypeReAddWithIdenticalMetadataIsANoOp(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	conformance.RunDependencyEditorSameTypeReAddWithIdenticalMetadataIsANoOp(t, ctx, newEmbeddedDependencyEditorFixture(t, ctx, "idemmetasame"))
+}
+
+func TestEmbeddedDependencyEditorSameTypeReAddWithChangedThreadMintsOneVersion(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	conformance.RunDependencyEditorSameTypeReAddWithChangedThreadMintsOneVersion(t, ctx, newEmbeddedDependencyEditorFixture(t, ctx, "idemthread"))
+}
+
 func TestEmbeddedDependencyEditorRepeatsWithinOneRequestCollapse(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
 	ctx := t.Context()
@@ -243,6 +261,12 @@ func TestEmbeddedDependencyEditorAcceptsBlockingAcrossIssueTypes(t *testing.T) {
 	conformance.RunDependencyEditorAcceptsBlockingAcrossIssueTypes(t, ctx, newEmbeddedDependencyEditorFixture(t, ctx, "xtype"))
 }
 
+func TestEmbeddedDependencyEditorRefusesADottedChildGatedOnItsOwnParent(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	conformance.RunDependencyEditorRefusesADottedChildGatedOnItsOwnParent(t, ctx, newEmbeddedDependencyEditorFixture(t, ctx, "dotted"))
+}
+
 // newEmbeddedDependencyEditorFixture composes the backend's role fixture kit
 // with the accessor under test. Every hook but the accessor comes from the kit,
 // so the seeding and scalar-query plumbing stays identical to the other roles'.
@@ -255,12 +279,14 @@ func newEmbeddedDependencyEditorFixture(t *testing.T, ctx context.Context, prefi
 	}
 	kit := newEmbeddedRoleFixtureKit(te, prefix)
 	return conformance.DependencyEditorFixture{
-		IssuePrefix:   kit.IssuePrefix,
-		Editor:        editor,
-		CreateIssue:   kit.CreateIssue,
-		CreateWisp:    kit.CreateWisp,
-		AddDependency: kit.AddDependency,
-		QueryScalar:   kit.QueryScalar,
-		CountHistory:  kit.CountHistory,
+		IssuePrefix:                kit.IssuePrefix,
+		Editor:                     editor,
+		CreateIssue:                kit.CreateIssue,
+		CreateWisp:                 kit.CreateWisp,
+		AddDependency:              kit.AddDependency,
+		QueryScalar:                kit.QueryScalar,
+		CountHistory:               kit.CountHistory,
+		SetJournalEnabled:          te.store.SetEventsJournalEnabled,
+		SetVersionedHistoryEnabled: te.store.SetVersionedHistoryEnabled,
 	}
 }

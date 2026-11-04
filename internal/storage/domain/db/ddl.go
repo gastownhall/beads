@@ -77,10 +77,16 @@ func (r *ddlSQLRepository) UseDatabase(ctx context.Context, database string) err
 }
 
 // QuoteIdentifier validates name and returns it back-quoted, ready to embed in
-// a statement. It is the one place this repository's identifiers are quoted;
-// callers outside the package that must build a schema-qualified name (see
-// uow's convergence-probe database selector) go through it rather than
+// a statement. It is the one place this repository's bd-minted identifiers are
+// quoted; callers outside the package that must build a schema-qualified name
+// (see uow's convergence-probe database selector) go through it rather than
 // re-deriving the rule.
+//
+// It rejects rather than escapes, so it is the wrong helper for an identifier
+// bd does not control: a name reported by SHOW DATABASES reflects whatever
+// created the database, and refusing it would skip the candidate instead of
+// addressing it. Those callers use doltutil.QuoteIdentifierUnvalidated
+// (internal/storage/doltutil), which escapes any input.
 func QuoteIdentifier(name string) (string, error) {
 	if err := ValidateIdentifier(name); err != nil {
 		return "", err

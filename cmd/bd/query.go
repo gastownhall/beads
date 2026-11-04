@@ -63,7 +63,9 @@ Supported fields:
   mol_type          Molecule type (swarm, patrol, work)
 
 Date values:
-  Relative durations: 7d (7 days ago), 24h (24 hours ago), 2w (2 weeks ago)
+  Relative durations: 30min (30 minutes ago), 24h (24 hours ago),
+                      7d (7 days ago), 2w (2 weeks ago),
+                      6m (6 months ago), 1y (1 year ago)
   Absolute dates: 2025-01-15, 2025-01-15T10:00:00Z
   Natural language: tomorrow, "next monday", "in 3 days"
 

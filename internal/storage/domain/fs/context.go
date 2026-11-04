@@ -26,8 +26,12 @@ func (r *contextRepositoryImpl) beadsDir(ctx context.Context) string {
 	return r.fsRepo.ResolveBeadsDirPath(ctx).BeadsDir
 }
 
+// RepoContext resolves the workspace paths behind `bd context`'s proxied
+// route. It tolerates the absence of a git repository for the same reason the
+// direct route does: this provider only reads config files, and a workspace
+// outside git is a supported degraded state, not a failure (GH#4772).
 func (r *contextRepositoryImpl) RepoContext(ctx context.Context) (domain.RepoPaths, error) {
-	rc, err := beads.GetRepoContext()
+	rc, err := beads.GetRepoContextAllowingNoGit()
 	if err != nil {
 		return domain.RepoPaths{}, err
 	}
@@ -41,10 +45,15 @@ func (r *contextRepositoryImpl) RepoContext(ctx context.Context) (domain.RepoPat
 }
 
 func (r *contextRepositoryImpl) Role(ctx context.Context) (string, bool, error) {
-	rc, err := beads.GetRepoContext()
+	rc, err := beads.GetRepoContextAllowingNoGit()
 	if err != nil {
 		return "", false, err
 	}
+	// Outside a git repo rc.Role() still answers: an explicit BEADS_DIR
+	// resolves to Contributor directly, and otherwise `git config --get
+	// beads.role` reads the global and system files, which are readable with
+	// no repository. It reports "not configured" only when none of those
+	// carry a role — it does not fail the command either way.
 	role, ok := rc.Role()
 	return string(role), ok, nil
 }
@@ -66,8 +75,10 @@ func (r *contextRepositoryImpl) BackendConfig(ctx context.Context) (domain.Backe
 	}, nil
 }
 
+// ServerPort is the port the store dials (doltserver.ResolveEndpoint), the
+// legacy BEADS_DOLT_PORT included, as bd context's direct route resolves it.
 func (r *contextRepositoryImpl) ServerPort(ctx context.Context) (int, error) {
-	return doltserver.DefaultConfig(r.beadsDir(ctx)).Port, nil
+	return doltserver.ResolveEndpoint(r.beadsDir(ctx), nil).Port, nil
 }
 
 func (r *contextRepositoryImpl) ProxiedServerRoot(ctx context.Context) (string, error) {

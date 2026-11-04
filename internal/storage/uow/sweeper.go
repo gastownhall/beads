@@ -3,7 +3,9 @@ package uow
 import (
 	"context"
 	"fmt"
+	"time"
 
+	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/workapi"
@@ -74,15 +76,34 @@ func (s *sweeper) Sweep(ctx context.Context, req publicops.SweepRequest) (public
 // sweepInUOW is the whole sweep on one unit of work, shared by the preview
 // path and the committing one so the two cannot answer differently.
 func sweepInUOW(ctx context.Context, uw UnitOfWork, req publicops.SweepRequest) (publicops.SweepResult, error) {
-	result := publicops.SweepResult{DryRun: req.DryRun}
+	result := publicops.SweepResult{DryRun: req.DryRun, RetainIDs: req.RetainIDs}
 
-	page, err := uw.IssueUseCase().SearchIssues(ctx, "", workapi.BuildSweepCandidateFilter(req))
+	candidates, err := sweepCandidatesInUOW(ctx, uw, req)
 	if err != nil {
 		return publicops.SweepResult{}, fmt.Errorf("listing sweep candidates: %w", err)
 	}
 
-	kept, skips := workapi.FilterSweepCandidates(page.Items, req.IDPattern, req.ClosedBefore)
+	kept, skips := workapi.FilterSweepCandidates(candidates, req.IDPattern, req.ClosedBefore)
 	result.Skipped = skips
+
+	if !req.RetainIDs {
+		// The retained types are read on this unit of work, uncached, as the
+		// shared body reads them on its transaction; a read error fails the
+		// sweep rather than holding nothing back.
+		value, err := uw.ConfigUseCase().GetConfig(ctx, publicops.SettingKeyTypesRetained)
+		if err != nil {
+			return publicops.SweepResult{}, fmt.Errorf("reading %s for the retained-type protection: %w", publicops.SettingKeyTypesRetained, err)
+		}
+		kept, result.Skipped.RetentionRequired = workapi.PartitionSweepRetainedTypes(kept, workapi.RetainedTypesFromSetting(value))
+	}
+
+	if req.ProtectLiveDependents {
+		protected, err := sweepLiveDependentsInUOW(ctx, uw, kept)
+		if err != nil {
+			return publicops.SweepResult{}, err
+		}
+		kept, result.Skipped.LiveDependent = workapi.PartitionSweepLiveDependents(kept, protected)
+	}
 
 	if req.ProtectReferenced {
 		referenced, err := sweepReferencedInUOW(ctx, uw, kept)
@@ -94,6 +115,8 @@ func sweepInUOW(ctx context.Context, uw UnitOfWork, req publicops.SweepRequest) 
 		result.Skipped.Referenced = count
 	}
 
+	kept, result.Remaining = workapi.LimitSweepCandidates(kept, req.Limit)
+
 	if len(kept) == 0 {
 		return result, nil
 	}
@@ -102,9 +125,22 @@ func sweepInUOW(ctx context.Context, uw UnitOfWork, req publicops.SweepRequest) 
 	for i, issue := range kept {
 		ids[i] = issue.ID
 	}
+	// With RetainIDs the delete retires what it removes, in this same unit of
+	// work, each id with the closed_at the recheck above required it to carry.
+	var retire map[string]time.Time
+	if req.RetainIDs && !req.DryRun {
+		retire = make(map[string]time.Time, len(kept))
+		for _, issue := range kept {
+			if issue.ClosedAt == nil {
+				return publicops.SweepResult{}, fmt.Errorf("retain ids: sweep candidate %s has no closed_at", issue.ID)
+			}
+			retire[issue.ID] = *issue.ClosedAt
+		}
+	}
 	deleted, err := uw.IssueUseCase().DeleteIssues(ctx, domain.DeleteIssuesParams{
 		IDs:    ids,
 		DryRun: req.DryRun,
+		Retire: retire,
 	}, req.Actor)
 	if err != nil {
 		return publicops.SweepResult{}, err
@@ -114,6 +150,73 @@ func sweepInUOW(ctx context.Context, uw UnitOfWork, req publicops.SweepRequest) 
 	result.Labels = deleted.LabelsCount
 	result.Events = deleted.EventsCount
 	return result, nil
+}
+
+// sweepCandidatesInUOW reads the request's candidate rows: the wisps table
+// alone for the wisps-plane tier, a tier query across both planes otherwise.
+func sweepCandidatesInUOW(ctx context.Context, uw UnitOfWork, req publicops.SweepRequest) ([]*types.Issue, error) {
+	filter := workapi.BuildSweepCandidateFilter(req)
+	if workapi.SweepSearchesWispsPlaneOnly(req) {
+		return uw.IssueUseCase().SearchWispsPlane(ctx, "", filter)
+	}
+	page, err := uw.IssueUseCase().SearchIssues(ctx, "", filter)
+	if err != nil {
+		return nil, err
+	}
+	return page.Items, nil
+}
+
+// sweepLiveDependentsInUOW returns which of the candidates a live row depends
+// on through a protecting edge, on the unit of work the candidates came off.
+//
+// Edges are read from BOTH dependency tables: a wisp's edges live in
+// wisp_dependencies and an issue's in dependencies, and the source of an edge
+// pointing at a candidate can be either. The sources' statuses are then read
+// across both planes by SearchIssues.
+func sweepLiveDependentsInUOW(ctx context.Context, uw UnitOfWork, candidates []*types.Issue) (map[string]bool, error) {
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+	ids := make([]string, len(candidates))
+	for i, issue := range candidates {
+		ids[i] = issue.ID
+	}
+	edges := domain.DepListFilter{Types: publicops.SweepLiveDependentEdgeTypes, Direction: domain.DepDirectionIn}
+	durable, err := uw.DependencyUseCase().ListByIssueIDs(ctx, ids, edges)
+	if err != nil {
+		return nil, fmt.Errorf("reading dependents for live-dependent protection: %w", err)
+	}
+	wisp, err := uw.DependencyUseCase().ListByWispIDs(ctx, ids, edges)
+	if err != nil && !dberrors.IsTableNotExist(err) {
+		return nil, fmt.Errorf("reading wisp dependents for live-dependent protection: %w", err)
+	}
+	incoming := make(map[string][]*types.Dependency, len(durable.Incoming)+len(wisp.Incoming))
+	for target, deps := range durable.Incoming {
+		incoming[target] = append(incoming[target], deps...)
+	}
+	for target, deps := range wisp.Incoming {
+		incoming[target] = append(incoming[target], deps...)
+	}
+
+	sources := workapi.SweepLiveDependentSources(incoming)
+	if len(sources) == 0 {
+		return nil, nil
+	}
+	custom, err := uw.ConfigUseCase().GetCustomStatuses(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("reading custom statuses for live-dependent protection: %w", err)
+	}
+	page, err := uw.IssueUseCase().SearchIssues(ctx, "", workapi.BuildSweepLiveDependentScanFilter(sources, custom))
+	if err != nil {
+		return nil, fmt.Errorf("reading dependent statuses for live-dependent protection: %w", err)
+	}
+	live := make(map[string]bool, len(page.Items))
+	for _, issue := range page.Items {
+		if issue != nil {
+			live[issue.ID] = true
+		}
+	}
+	return workapi.SweepLiveDependentTargets(incoming, live), nil
 }
 
 // sweepReferencedInUOW returns which of the candidates a not-done row cites,

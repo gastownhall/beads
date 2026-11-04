@@ -1,0 +1,91 @@
+{
+  "tables": {
+    "bd_events_journal": {
+      "rows": 64,
+      "sha256": "08e33124a60461f797f6adb3879aef5856d87e8c65f4822a5bc03371a4286ca9"
+    },
+    "child_counters": {
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "comments": {
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "dependencies": {
+      "rows": 13,
+      "sha256": "2c5bc58085525b83b5c605eb0d8b7133a836e5942703ccbfa75836f0888c51d7"
+    },
+    "events": {
+      "rows": 19,
+      "sha256": "a0d5705e9caedbc0a65fae2b83dc63c54bc28db94db06720fd66900c3637b95e"
+    },
+    "events_ids": {
+      "rows": 1,
+      "sha256": "71f50822355a5053b49470722d85d15a43d49c40c68d01fc445d2dfc434b8374"
+    },
+    "issue_versions": {
+      "rows": 15,
+      "sha256": "a48e013d03587db247d9c2233588df4dd1062d0bbc1f53a3e119f5ad32ae1007"
+    },
+    "issues": {
+      "rows": 14,
+      "sha256": "f9b81b9679a6dbc0b33aae01b874f891c9cbe1edf7c6ef4045f648a86df7e0a9"
+    },
+    "issues_updated_at": {
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "labels": {
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "wisp_dependencies": {
+      "rows": 8,
+      "sha256": "888ec76705c866485ce6ffb497078f8f646cfd5c977c03bf3b39c8490754e263"
+    },
+    "wisp_events": {
+      "rows": 11,
+      "sha256": "36f1a8406a6d0ced31d4ba46450d8a667890b932f9dbfd5d94a5abcfa777de68"
+    },
+    "wisp_labels": {
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "wisps": {
+      "rows": 9,
+      "sha256": "6dd3657aa5b0df03a1c87704718de39f796fb25db53a3a46c06db3546f9a7c73"
+    }
+  },
+  "skipped": [
+    "add eq-fwc -parent-child-\u003e eq-fs : \u003cnil\u003e",
+    "add eq-fic -parent-child-\u003e eq-fws : \u003cnil\u003e",
+    "add eq-fw-i-legacy -waits-for-\u003e eq-fs {}: \u003cnil\u003e",
+    "add eq-fw-w-legacy -waits-for-\u003e eq-fws {}: \u003cnil\u003e",
+    "add eq-fx-i-legacy -waits-for-\u003e eq-fs {}: \u003cnil\u003e",
+    "add eq-fw-i-all -waits-for-\u003e eq-fs {\"gate\":\"all-children\"}: \u003cnil\u003e",
+    "add eq-fw-w-all -waits-for-\u003e eq-fws {\"gate\":\"all-children\"}: \u003cnil\u003e",
+    "add eq-fx-i-all -waits-for-\u003e eq-fs {\"gate\":\"all-children\"}: \u003cnil\u003e",
+    "add eq-fw-i-any -waits-for-\u003e eq-fs {\"gate\":\"any-children\"}: \u003cnil\u003e",
+    "add eq-fw-w-any -waits-for-\u003e eq-fws {\"gate\":\"any-children\"}: \u003cnil\u003e",
+    "add eq-fx-i-any -waits-for-\u003e eq-fs {\"gate\":\"any-children\"}: \u003cnil\u003e",
+    "add eq-fw-i-also -waits-for-\u003e eq-fs {\"also_blocks\":\"true\"}: \u003cnil\u003e",
+    "add eq-fw-w-also -waits-for-\u003e eq-fws {\"also_blocks\":\"true\"}: \u003cnil\u003e",
+    "add eq-fx-i-also -waits-for-\u003e eq-fs {\"also_blocks\":\"true\"}: \u003cnil\u003e",
+    "add eq-fw-i-anyalso -waits-for-\u003e eq-fs {\"gate\":\"any-children\",\"also_blocks\":\"true\"}: \u003cnil\u003e",
+    "add eq-fw-w-anyalso -waits-for-\u003e eq-fws {\"gate\":\"any-children\",\"also_blocks\":\"true\"}: \u003cnil\u003e",
+    "add eq-fx-i-anyalso -waits-for-\u003e eq-fs {\"gate\":\"any-children\",\"also_blocks\":\"true\"}: \u003cnil\u003e",
+    "after adds: eq-fic=open/0 eq-fs.c1=open/0 eq-fs.c2=closed/0 eq-fs=open/0 eq-fw-i-all=open/1 eq-fw-i-also=open/1 eq-fw-i-any=open/0 eq-fw-i-anyalso=open/1 eq-fw-i-legacy=open/1 eq-fw-w-all=open/1 eq-fw-w-also=open/1 eq-fw-w-any=open/0 eq-fw-w-anyalso=open/1 eq-fw-w-legacy=open/1 eq-fwc=open/0 eq-fws.c1=open/0 eq-fws.c2=closed/0 eq-fws=open/0 eq-fx-i-all=open/1 eq-fx-i-also=open/1 eq-fx-i-any=open/0 eq-fx-i-anyalso=open/1 eq-fx-i-legacy=open/1",
+    "close fs.c1: eq-fic=open/0 eq-fs.c1=closed/0 eq-fs.c2=closed/0 eq-fs=open/0 eq-fw-i-all=open/1 eq-fw-i-also=open/1 eq-fw-i-any=open/0 eq-fw-i-anyalso=open/1 eq-fw-i-legacy=open/1 eq-fw-w-all=open/1 eq-fw-w-also=open/1 eq-fw-w-any=open/0 eq-fw-w-anyalso=open/1 eq-fw-w-legacy=open/1 eq-fwc=open/0 eq-fws.c1=open/0 eq-fws.c2=closed/0 eq-fws=open/0 eq-fx-i-all=open/1 eq-fx-i-also=open/1 eq-fx-i-any=open/0 eq-fx-i-anyalso=open/1 eq-fx-i-legacy=open/1",
+    "close fwc: eq-fic=open/0 eq-fs.c1=closed/0 eq-fs.c2=closed/0 eq-fs=open/0 eq-fw-i-all=open/0 eq-fw-i-also=open/1 eq-fw-i-any=open/0 eq-fw-i-anyalso=open/1 eq-fw-i-legacy=open/0 eq-fw-w-all=open/1 eq-fw-w-also=open/1 eq-fw-w-any=open/0 eq-fw-w-anyalso=open/1 eq-fw-w-legacy=open/1 eq-fwc=closed/0 eq-fws.c1=open/0 eq-fws.c2=closed/0 eq-fws=open/0 eq-fx-i-all=open/0 eq-fx-i-also=open/1 eq-fx-i-any=open/0 eq-fx-i-anyalso=open/1 eq-fx-i-legacy=open/0",
+    "close fws.c1: eq-fic=open/0 eq-fs.c1=closed/0 eq-fs.c2=closed/0 eq-fs=open/0 eq-fw-i-all=open/0 eq-fw-i-also=open/1 eq-fw-i-any=open/0 eq-fw-i-anyalso=open/1 eq-fw-i-legacy=open/0 eq-fw-w-all=open/1 eq-fw-w-also=open/1 eq-fw-w-any=open/0 eq-fw-w-anyalso=open/1 eq-fw-w-legacy=open/1 eq-fwc=closed/0 eq-fws.c1=closed/0 eq-fws.c2=closed/0 eq-fws=open/0 eq-fx-i-all=open/0 eq-fx-i-also=open/1 eq-fx-i-any=open/0 eq-fx-i-anyalso=open/1 eq-fx-i-legacy=open/0",
+    "reopen fs.c1: eq-fic=open/0 eq-fs.c1=open/0 eq-fs.c2=closed/0 eq-fs=open/0 eq-fw-i-all=open/1 eq-fw-i-also=open/1 eq-fw-i-any=open/0 eq-fw-i-anyalso=open/1 eq-fw-i-legacy=open/1 eq-fw-w-all=open/1 eq-fw-w-also=open/1 eq-fw-w-any=open/0 eq-fw-w-anyalso=open/1 eq-fw-w-legacy=open/1 eq-fwc=closed/0 eq-fws.c1=closed/0 eq-fws.c2=closed/0 eq-fws=open/0 eq-fx-i-all=open/1 eq-fx-i-also=open/1 eq-fx-i-any=open/0 eq-fx-i-anyalso=open/1 eq-fx-i-legacy=open/1",
+    "close fic: eq-fic=closed/0 eq-fs.c1=open/0 eq-fs.c2=closed/0 eq-fs=open/0 eq-fw-i-all=open/1 eq-fw-i-also=open/1 eq-fw-i-any=open/0 eq-fw-i-anyalso=open/1 eq-fw-i-legacy=open/1 eq-fw-w-all=open/0 eq-fw-w-also=open/1 eq-fw-w-any=open/0 eq-fw-w-anyalso=open/1 eq-fw-w-legacy=open/0 eq-fwc=closed/0 eq-fws.c1=closed/0 eq-fws.c2=closed/0 eq-fws=open/0 eq-fx-i-all=open/1 eq-fx-i-also=open/1 eq-fx-i-any=open/0 eq-fx-i-anyalso=open/1 eq-fx-i-legacy=open/1",
+    "close fs (spawner): eq-fic=closed/0 eq-fs.c1=open/0 eq-fs.c2=closed/0 eq-fs=closed/0 eq-fw-i-all=open/1 eq-fw-i-also=open/1 eq-fw-i-any=open/0 eq-fw-i-anyalso=open/0 eq-fw-i-legacy=open/1 eq-fw-w-all=open/0 eq-fw-w-also=open/1 eq-fw-w-any=open/0 eq-fw-w-anyalso=open/1 eq-fw-w-legacy=open/0 eq-fwc=closed/0 eq-fws.c1=closed/0 eq-fws.c2=closed/0 eq-fws=open/0 eq-fx-i-all=open/1 eq-fx-i-also=open/1 eq-fx-i-any=open/0 eq-fx-i-anyalso=open/0 eq-fx-i-legacy=open/1",
+    "raw: reopen every child, then scoped recompute: eq-fic=open/0 eq-fs.c1=open/0 eq-fs.c2=open/0 eq-fs=closed/0 eq-fw-i-all=open/1 eq-fw-i-also=open/1 eq-fw-i-any=open/1 eq-fw-i-anyalso=open/1 eq-fw-i-legacy=open/1 eq-fw-w-all=open/1 eq-fw-w-also=open/1 eq-fw-w-any=open/1 eq-fw-w-anyalso=open/1 eq-fw-w-legacy=open/1 eq-fwc=open/0 eq-fws.c1=open/0 eq-fws.c2=open/0 eq-fws=open/0 eq-fx-i-all=open/1 eq-fx-i-also=open/1 eq-fx-i-any=open/1 eq-fx-i-anyalso=open/1 eq-fx-i-legacy=open/1",
+    "raw: close the wisp children and fs.c2, plant stale flags, full repair: eq-fic=open/0 eq-fs.c1=open/0 eq-fs.c2=closed/0 eq-fs=closed/0 eq-fw-i-all=open/1 eq-fw-i-also=open/1 eq-fw-i-any=open/0 eq-fw-i-anyalso=open/0 eq-fw-i-legacy=open/1 eq-fw-w-all=open/1 eq-fw-w-also=open/1 eq-fw-w-any=open/0 eq-fw-w-anyalso=open/1 eq-fw-w-legacy=open/1 eq-fwc=closed/0 eq-fws.c1=closed/0 eq-fws.c2=closed/0 eq-fws=open/0 eq-fx-i-all=open/1 eq-fx-i-also=open/1 eq-fx-i-any=open/0 eq-fx-i-anyalso=open/0 eq-fx-i-legacy=open/1"
+  ],
+  "stale": null,
+  "changed": null,
+  "counter": null
+}

@@ -11,14 +11,16 @@ import (
 	"github.com/steveyegge/beads/internal/procid"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/server"
+	"github.com/steveyegge/beads/internal/testutil"
 )
 
 // stopSharedServerCleanup is the cleanup every fixture in this package that
 // runs a subprocess `bd init` with BEADS_DOLT_SHARED_SERVER=1 owes.
 //
 // That init takes the shared-global branch in init.go, which calls
-// doltserver.Start(sharedDir) — and Start DAEMONIZES: cmd.Process.Release(),
-// no Wait, cmd.Dir = <sharedDir>/dolt (doltserver.go:1443-1446). The `bd`
+// doltserver.Start(sharedDir) — and Start DAEMONIZES: the server is its own
+// process group (Setpgid) with cmd.Dir = <sharedDir>/dolt, and outlives bd (bd
+// only reaps it if it exits while bd is still running). The `bd`
 // subprocess then exits and the sql-server keeps running, serving a directory
 // under the suite's temp HOME that TestMain deletes on the way out. Nothing in
 // those fixtures ever stopped it, so a full cmd/bd run finished with a live
@@ -180,4 +182,18 @@ func sharedServerStillRunning(t *testing.T, pid int, token procid.Token) bool {
 		return false
 	}
 	return same
+}
+
+// closedLoopbackPort returns a 127.0.0.1 port nothing listens on right now,
+// for tests that need a server connection to fail. A fixed "unlikely" port
+// (59999 used to be hard-coded here) is not: any process on the host may
+// hold it, and a listener that accepts and resets turns the expected
+// "connection refused" into a different error.
+func closedLoopbackPort(t *testing.T) int {
+	t.Helper()
+	port, err := testutil.FindFreePort()
+	if err != nil {
+		t.Fatalf("find free port: %v", err)
+	}
+	return port
 }

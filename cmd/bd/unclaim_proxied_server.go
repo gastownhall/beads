@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"time"
 
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
@@ -55,24 +55,24 @@ func runUnclaimProxiedServer(ctx context.Context, args []string, reason string, 
 				continue
 			}
 			if rerr != nil {
-				r.errs = append(r.errs, fmt.Sprintf("Error resolving %s: %v", id, rerr))
+				r.errs = append(r.errs, fmt.Sprintf("Error resolving %s: %s", id, remedy.PrintedMessage(rerr)))
 				continue
 			}
 			fullID := issue.ID
 
 			var uerr error
 			if expectedAssignee != "" {
-				uerr = uw.IssueUseCase().UnclaimIfAssignee(ctx, fullID, actor, expectedAssignee)
+				uerr = uw.IssueUseCase().UnclaimIfAssignee(ctx, fullID, currentActor(), expectedAssignee)
 			} else {
-				uerr = uw.IssueUseCase().Unclaim(ctx, fullID, actor, force)
+				uerr = uw.IssueUseCase().Unclaim(ctx, fullID, currentActor(), force)
 			}
 			if uerr != nil {
-				r.errs = append(r.errs, fmt.Sprintf("Error unclaiming %s: %v", fullID, uerr))
+				r.errs = append(r.errs, fmt.Sprintf("Error unclaiming %s: %s", fullID, remedy.PrintedMessage(uerr)))
 				continue
 			}
 
 			if reason != "" {
-				if _, cerr := uw.CommentUseCase().AddCommentToIssue(ctx, fullID, actor, reason); cerr != nil {
+				if _, cerr := uw.CommentUseCase().AddCommentToIssue(ctx, fullID, currentActor(), reason); cerr != nil {
 					r.errs = append(r.errs, fmt.Sprintf("Warning: failed to add reason comment on %s: %v", fullID, cerr))
 				}
 			}
@@ -121,34 +121,4 @@ func runUnclaimProxiedServer(ctx context.Context, args []string, reason string, 
 		return SilentExit()
 	}
 	return nil
-}
-
-func runReclaimProxiedServer(ctx context.Context, olderThan time.Duration, filter types.ReclaimFilter) error {
-	if uowProvider == nil {
-		return HandleError("proxied-server UOW provider not initialized")
-	}
-
-	reclaimed, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) ([]types.ReclaimedLease, string, error) {
-		out, rerr := uw.IssueUseCase().ReclaimExpiredLeases(ctx, olderThan, filter, actor)
-		if rerr != nil {
-			return nil, "", rerr
-		}
-		if len(out) == 0 {
-			return out, "", nil
-		}
-		ids := make([]string, 0, len(out))
-		for _, r := range out {
-			ids = append(ids, r.ID)
-		}
-		return out, "bd: reclaim " + strings.Join(ids, ", "), nil
-	})
-	if err != nil {
-		return HandleErrorRespectJSON("reclaim: %v", err)
-	}
-
-	if len(reclaimed) > 0 {
-		commandDidWrite.Store(true)
-	}
-
-	return renderReclaim(reclaimed, !filter.IsEmpty())
 }

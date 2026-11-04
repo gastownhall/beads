@@ -8,19 +8,35 @@ import (
 	"time"
 )
 
-const ProxiedServerClientInfoFileName = "proxied_server_client_info.json"
+const (
+	ProxiedServerClientInfoFileName = "proxied_server_client_info.json"
+	// DefaultProxyIdleTimeout is the effective proxy lifetime persisted when
+	// callers leave the internal zero-valued "use the default" sentinel.
+	DefaultProxyIdleTimeout = 30 * time.Second
+)
 
 type ProxiedServerClientInfo struct {
 	RootPath    string              `json:"root_path,omitempty"`
 	ConfigPath  string              `json:"config_path,omitempty"`
 	LogPath     string              `json:"log_path,omitempty"`
 	Port        int                 `json:"port,omitempty"`
-	IdleTimeout time.Duration       `json:"idle_timeout,omitempty"`
+	IdleTimeout time.Duration       `json:"idle_timeout"`
 	External    *ExternalDoltConfig `json:"external,omitempty"`
 }
 
 func ProxiedServerClientInfoPath(beadsDir string) string {
 	return filepath.Join(beadsDir, ProxiedServerClientInfoFileName)
+}
+
+// EffectiveProxyIdleTimeout resolves the zero "use the default" sentinel to
+// DefaultProxyIdleTimeout. Every other value is already effective and is
+// returned unchanged; a negative value means "never" and must not be swept
+// into the default.
+func EffectiveProxyIdleTimeout(d time.Duration) time.Duration {
+	if d == 0 {
+		return DefaultProxyIdleTimeout
+	}
+	return d
 }
 
 func LoadProxiedServerClientInfo(beadsDir string) (*ProxiedServerClientInfo, error) {
@@ -36,6 +52,10 @@ func LoadProxiedServerClientInfo(beadsDir string) (*ProxiedServerClientInfo, err
 	if err := json.Unmarshal(data, &info); err != nil {
 		return nil, fmt.Errorf("parsing %s: %w", ProxiedServerClientInfoFileName, err)
 	}
+	// Sidecars written before Save persisted the effective value omit the key,
+	// and nothing rewrites them. Resolve it on read too, so a pre-upgrade
+	// workspace reports the timeout bd applies rather than an absent one.
+	info.IdleTimeout = EffectiveProxyIdleTimeout(info.IdleTimeout)
 	return &info, nil
 }
 
@@ -43,6 +63,11 @@ func SaveProxiedServerClientInfo(beadsDir string, info *ProxiedServerClientInfo)
 	if info == nil {
 		info = &ProxiedServerClientInfo{}
 	}
+	// Zero is the internal "use the default" sentinel. Persist the effective
+	// value so sidecar consumers do not need bd's source code to interpret an
+	// absent key. Update the caller's plan too: migration resume compares the
+	// in-memory plan with the sidecar after this write.
+	info.IdleTimeout = EffectiveProxyIdleTimeout(info.IdleTimeout)
 	data, err := json.MarshalIndent(info, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshaling %s: %w", ProxiedServerClientInfoFileName, err)

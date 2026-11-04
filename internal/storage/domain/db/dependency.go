@@ -110,24 +110,49 @@ func (r *dependencySQLRepositoryImpl) Insert(ctx context.Context, dep *types.Dep
 	table := pickDepTable(opts.UseWispsTable)
 
 	var existingType string
+	var existingMetadataNS, existingThreadNS sql.NullString
 	err := r.runner.QueryRowContext(ctx,
 		//nolint:gosec // G201: table and depTargetExpr are hardcoded constants
-		fmt.Sprintf("SELECT type FROM %s WHERE issue_id = ? AND %s = ?", table, depTargetExpr),
+		fmt.Sprintf("SELECT type, metadata, thread_id FROM %s WHERE issue_id = ? AND %s = ?", table, depTargetExpr),
 		dep.IssueID, dep.DependsOnID,
-	).Scan(&existingType)
+	).Scan(&existingType, &existingMetadataNS, &existingThreadNS)
 	switch {
 	case err == nil:
+		existingMetadata := existingMetadataNS.String
+		if !existingMetadataNS.Valid {
+			existingMetadata = "{}"
+		}
 		if existingType == string(dep.Type) {
+			// A re-add naming a thread the row does not carry moves it; one
+			// naming none keeps the stored thread (the issueops twin's rule).
+			thread, threadChanged := issueops.ReAddedDependencyThread(existingThreadNS, dep.ThreadID)
+			if !threadChanged && issueops.DependencyMetadataEqual(existingMetadata, metadata) {
+				// Same type, same metadata, same thread: a change-free write.
+				// Nothing is written and nothing is journaled (#5898 R3).
+				return nil
+			}
 			//nolint:gosec // G201: table and depTargetExpr are hardcoded constants
 			if _, err := r.runner.ExecContext(ctx,
-				fmt.Sprintf("UPDATE %s SET metadata = ? WHERE issue_id = ? AND %s = ?", table, depTargetExpr),
-				metadata, dep.IssueID, dep.DependsOnID,
+				fmt.Sprintf("UPDATE %s SET metadata = ?, thread_id = ? WHERE issue_id = ? AND %s = ?", table, depTargetExpr),
+				metadata, thread, dep.IssueID, dep.DependsOnID,
 			); err != nil {
 				return fmt.Errorf("db: DependencySQLRepository.Insert: refresh metadata: %w", err)
 			}
-			// A same-type add refreshes edge metadata. It is an observable graph
-			// mutation, so emit the complete replacement edge for replay.
-			return issueops.RecordDepEventInTx(ctx, r.runner, issueops.EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata, actor)
+			// A same-type add refreshes the edge's metadata or thread. It is an
+			// observable graph mutation, so journal the replacement edge for
+			// replay. EventDep has no thread member, so a thread-only change
+			// journals the same payload as the original add; the source's
+			// version snapshot is what records the new thread.
+			if err := issueops.RecordDepEventInTx(ctx, r.runner, issueops.EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata, actor); err != nil {
+				return err
+			}
+			// The metadata or thread genuinely changed, so this re-add is a
+			// real durable-state mutation of the source issue (its version
+			// snapshot carries each edge's thread_id) and mints on the same
+			// terms as a new edge (#5898 leg 2: "a same-type re-add whose
+			// metadata actually changed mints EXACTLY ONE version carrying the
+			// new state").
+			return issueops.RecordVersionInTx(ctx, r.runner, dep.IssueID, actor)
 		}
 		return &domain.DependencyTypeConflictError{
 			IssueID:       dep.IssueID,
@@ -219,15 +244,25 @@ func (r *dependencySQLRepositoryImpl) Insert(ctx context.Context, dep *types.Dep
 			return fmt.Errorf("db: DependencySQLRepository.Insert: recompute is_blocked: %w", err)
 		}
 		// Snapshot only after all derived blocked-state maintenance has completed.
-		return issueops.RecordDepEventInTx(ctx, r.runner, issueops.EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata, actor)
+		if err := issueops.RecordDepEventInTx(ctx, r.runner, issueops.EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata, actor); err != nil {
+			return err
+		}
+		// A new edge is durable state of the referencing issue: version it,
+		// as issueops.AddDependencyInTx does on the store legs. The same-type
+		// refresh returned above without minting.
+		return issueops.RecordVersionInTx(ctx, r.runner, dep.IssueID, actor)
 	}
 	if err := issueops.MarkIsBlockedInTx(ctx, r.runner, affectedIssues, affectedWisps); err != nil {
 		return fmt.Errorf("db: DependencySQLRepository.Insert: mark is_blocked (affected): %w", err)
 	}
 	// Snapshot only after all derived blocked-state maintenance has completed.
 	// Never gated on opts.EmitEvent: a structurally-wired edge is as real to a
-	// replaying consumer as one added by an explicit dep verb.
-	return issueops.RecordDepEventInTx(ctx, r.runner, issueops.EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata, actor)
+	// replaying consumer as one added by an explicit dep verb — and neither is
+	// the version row minted beside it.
+	if err := issueops.RecordDepEventInTx(ctx, r.runner, issueops.EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata, actor); err != nil {
+		return err
+	}
+	return issueops.RecordVersionInTx(ctx, r.runner, dep.IssueID, actor)
 }
 
 // classifyMissingEndpoint names the endpoint behind a foreign-key refusal,
@@ -386,11 +421,18 @@ func (r *dependencySQLRepositoryImpl) Delete(ctx context.Context, issueID, depen
 	if err := issueops.RecomputeIsBlockedInTx(ctx, r.runner, affectedIssues, affectedWisps); err != nil {
 		return domain.DepDeleteResult{}, fmt.Errorf("db: DependencySQLRepository.Delete: recompute is_blocked: %w", err)
 	}
+	issueops.NoteDependencyRemovalBlockedRecheck(r.runner, issueID, dependsOnID, affectedIssues, affectedWisps)
 
 	// Snapshot only after all derived blocked-state maintenance has completed.
 	// Never gated on opts.EmitEvent — a structural removal is as real to a
 	// replaying consumer as one from an explicit dep verb.
 	if err := issueops.RecordDepEventInTx(ctx, r.runner, issueops.EventDepRemove, issueID, depType, dependsOnID, depMetadata, actor); err != nil {
+		return domain.DepDeleteResult{}, err
+	}
+	// The Found:false return above keeps this actually-deleted-only, so the
+	// referencing issue is versioned for a real change, as
+	// issueops.RemoveDependencyInTx does on the store legs.
+	if err := issueops.RecordVersionInTx(ctx, r.runner, issueID, actor); err != nil {
 		return domain.DepDeleteResult{}, err
 	}
 
@@ -564,6 +606,17 @@ func (r *dependencySQLRepositoryImpl) GetBlockingInfo(ctx context.Context, issue
 	}
 
 	return info, nil
+}
+
+// IsBlockedBatch reads the stored transitive is_blocked flag for ids from both
+// planes through the shared body (issueops.IsBlockedBatchInTx) every store
+// uses, so the unit-of-work answer cannot drift from the store's.
+func (r *dependencySQLRepositoryImpl) IsBlockedBatch(ctx context.Context, ids []string) (map[string]bool, error) {
+	out, err := issueops.IsBlockedBatchInTx(ctx, r.runner, ids)
+	if err != nil {
+		return nil, fmt.Errorf("db: DependencySQLRepository.IsBlockedBatch: %w", err)
+	}
+	return out, nil
 }
 
 func (r *dependencySQLRepositoryImpl) GetBlockingInfoAcrossIssuesAndWisps(ctx context.Context, issueIDs []string) (domain.BlockingInfo, error) {
@@ -915,8 +968,8 @@ func (r *dependencySQLRepositoryImpl) DetectCycles(ctx context.Context) ([][]*ty
 	return out, nil
 }
 
-func (r *dependencySQLRepositoryImpl) DetectCycleReport(ctx context.Context) (publicops.CycleReport, error) {
-	out, err := issueops.DetectCycleReportInTx(ctx, r.runner)
+func (r *dependencySQLRepositoryImpl) DetectCycleReport(ctx context.Context, req publicops.DetectCyclesRequest) (publicops.CycleReport, error) {
+	out, err := issueops.DetectCycleReportInTx(ctx, r.runner, req)
 	if err != nil {
 		return publicops.CycleReport{}, fmt.Errorf("db: DependencySQLRepository.DetectCycleReport: %w", err)
 	}
