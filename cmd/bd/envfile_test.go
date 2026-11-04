@@ -164,9 +164,15 @@ func TestLoadBeadsEnvFileAdmitsGTRoot(t *testing.T) {
 			}
 			t.Setenv("GT_ROOT", "")
 			os.Unsetenv("GT_ROOT")
+			t.Setenv(config.GTRootFromProjectEnvMarker, "")
+			os.Unsetenv(config.GTRootFromProjectEnvMarker)
 			warning := captureStderr(t, func() { loadBeadsEnvFile(dir) })
 			if got := os.Getenv("GT_ROOT"); got != "/city/root" {
 				t.Errorf("GT_ROOT = %q, want %q (orchestrator root must import from .beads/.env)", got, "/city/root")
+			}
+			// Provenance is recorded so formula writes stay out of it.
+			if !config.GTRootFromProjectEnv() {
+				t.Error("GTRootFromProjectEnv() = false after importing GT_ROOT from .beads/.env")
 			}
 			if strings.Contains(strings.ToUpper(warning), "IGNORING GT_ROOT") {
 				t.Errorf("GT_ROOT was warned about but should be admitted: %q", warning)
@@ -179,9 +185,14 @@ func TestLoadBeadsEnvFileAdmitsGTRoot(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Setenv("GT_ROOT", "/from/shell")
+		t.Setenv(config.GTRootFromProjectEnvMarker, "")
+		os.Unsetenv(config.GTRootFromProjectEnvMarker)
 		loadBeadsEnvFile(dir)
 		if got := os.Getenv("GT_ROOT"); got != "/from/shell" {
 			t.Errorf("GT_ROOT = %q, want the shell value %q", got, "/from/shell")
+		}
+		if config.GTRootFromProjectEnv() {
+			t.Error("GTRootFromProjectEnv() = true for a shell-exported GT_ROOT")
 		}
 	})
 }

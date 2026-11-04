@@ -608,6 +608,9 @@ func loadBeadsEnvFile(beadsDir string) {
 		if _, exists := os.LookupEnv(key); !exists {
 			if _, upperExists := os.LookupEnv(upper); !upperExists {
 				_ = os.Setenv(upper, value)
+				if upper == "GT_ROOT" {
+					config.MarkGTRootFromProjectEnv(value)
+				}
 			}
 		}
 	}

@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **A `GT_ROOT` from a committed `.beads/.env` can no longer make bd write or
+  delete formula files outside the repo.** `GT_ROOT` was admitted from
+  `.beads/.env` on the grounds that bd only reads from it, but
+  `bd formula convert --all` iterates every formula search path, including
+  `$GT_ROOT/.beads/formulas`, writing a `.formula.toml` beside each JSON
+  formula there and, with `--delete`, removing the JSON; `bd formula convert
+  <name>` and `bd mol distill` (when no earlier formula directory is writable)
+  could write there too. When `GT_ROOT` came from `.beads/.env` rather than your
+  shell, that directory is now read-only to these commands: `--all` skips it
+  with a note on stderr, converting a formula found only there by name is
+  refused (`--stdout` still prints it), and `mol distill` uses the next
+  writable directory or reports none. Formulas there are still found and used.
+  Export `GT_ROOT` in your shell to convert formulas in place; an explicit
+  path (`bd formula convert ./x.formula.json`, `bd mol distill --output`) is
+  unaffected.
+
 - **Shared workspace configuration can no longer redirect your private
   credentials to an attacker's endpoint (GH#7886, #7560).** A committed
   `.beads/config.yaml` / `.beads/config.local.yaml` / `.beads/.env`, a
@@ -1169,10 +1185,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the city root there, and the `.beads/.env` allowlist from #7879 (also in
   1.3.3) dropped it, warning `beads: ignoring GT_ROOT from .beads/.env` on
   every command and losing the city's formulas and molecules when bd ran in a
-  rig without `GT_ROOT` exported. `GT_ROOT` is now allowed: bd only reads from
-  it (`$GT_ROOT/.beads/formulas` is the last formula search path, and
+  rig without `GT_ROOT` exported. `GT_ROOT` is now allowed: bd reads from it
+  (`$GT_ROOT/.beads/formulas` is the last formula search path, and
   `$GT_ROOT/.beads/molecules.jsonl` is template data), so it names no command
-  and no credential target. Shell environment still wins over the file.
+  and no credential target, and a `GT_ROOT` taken from `.beads/.env` is never
+  a formula write target (see Security). Shell environment still wins over
+  the file.
 
 - `bd create --file` and other batch creates no longer fail with "issue
   already exists" on an id bd generated itself. The batch chose every id
