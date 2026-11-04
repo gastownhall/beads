@@ -221,6 +221,14 @@ type VersionChange struct {
 // versionChanges contains agent-actionable changes for recent versions
 var versionChanges = []VersionChange{
 	{
+		Version: "1.3.4-rc.1",
+		Date:    "2026-11-04",
+		Changes: []string{
+			"RC: first candidate for 1.3.4, 1.3.3 plus one fix (#8118). No new migration file and the embedded Dolt engine is unchanged, so upgrading from 1.3.x is a binary swap. The 1.3.3 entries below still apply, except the GT_ROOT issue fixed here.",
+			"FIX: GT_ROOT in a rig's .beads/.env is imported again (exact key only; other GT_* keys stay refused). 1.3.3 dropped it with 'beads: ignoring GT_ROOT from .beads/.env' on stderr for every bd command in a Gas City rig, which made released gc misreport failed bd commands there and made bd run in a rig without GT_ROOT exported miss the city's formulas and town molecules (#8117).",
+		},
+	},
+	{
 		Version: "1.3.3",
 		Date:    "2026-11-03",
 		Changes: []string{
