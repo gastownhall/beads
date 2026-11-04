@@ -29,14 +29,19 @@ apply, except the `GT_ROOT` issue fixed below.
       stderr is empty, so they could misreport a failed bd command in a rig
       as that notice
       ([gastownhall/gascity#8817](https://github.com/gastownhall/gascity/pull/8817)).
-    - bd run in a rig without `GT_ROOT` exported lost the city's formulas and
-      town molecules.
+    - bd run in a rig without `GT_ROOT` exported stopped searching
+      `$GT_ROOT/.beads/formulas` and stopped loading
+      `$GT_ROOT/.beads/molecules.jsonl`. gc also links the city's formulas
+      into each rig's own `.beads/formulas`, an earlier search path, so the
+      formulas gc manages still resolved; gc writes no `molecules.jsonl`.
   - **The fix:** `GT_ROOT` is now admitted, as the exact key only.
     `GT_TOWN_ROOT` and other `GT_*` keys stay refused.
-  - **Why this is safe:** bd only reads from it.
-    `$GT_ROOT/.beads/formulas` is the last formula search path, and
-    `$GT_ROOT/.beads/molecules.jsonl` is template data. It names no command
-    and no credential target.
+  - **Why this is safe:** it names no command and no credential target. bd
+    reads `$GT_ROOT/.beads/formulas` as its last formula search path and
+    `$GT_ROOT/.beads/molecules.jsonl` as template data. Commands that write
+    to formula search paths can also write there: `bd formula convert --all`
+    writes a `.formula.toml` beside each JSON formula it converts there and,
+    with `--delete`, removes the JSON.
   - Shell environment still wins over the file.
 
 ## [1.3.3] - 2026-11-03
