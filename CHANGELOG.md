@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.4] - 2026-11-04
+
+First stable release of the 1.3.4 patch line. It ships the same code as
+[1.3.4-rc.1]; the only change since that candidate is the version stamp. The
+full notes are in the [1.3.4-rc.1] section below. 1.3.4 is 1.3.3 plus one
+fix: bd reads `GT_ROOT` from a rig's `.beads/.env` again.
+
+There is **no new migration file**, and the embedded Dolt engine is
+unchanged: upgrading from 1.3.x or 1.3.4-rc.1 is a binary swap.
+
+Before promotion, 1.3.4-rc.1 passed gascity's RC Gate with bd pinned to the
+candidate, on a throwaway branch off gascity's `hotfix/1.5.1`
+([run 41791836358](https://github.com/gastownhall/gascity/actions/runs/41791836358)):
+- It ran the same 155 jobs as the 1.3.3-rc.1 gate, and every job finished
+  with the same result: 151 passing and 3 skipped.
+- The one red job is an advisory probe that builds bd from `main`. That
+  branch, like 1.3.3's, made two upstream-drift checks non-blocking.
+- No job log shows the `ignoring GT_ROOT` notice.
+
+### Upgrade notes
+
+- Coming from 1.3.2 or earlier, read the [1.3.3-rc.1] **Upgrade notes** and
+  **Known issues** before upgrading. They still apply, except the dropped
+  `GT_ROOT`, which 1.3.4 fixes.
+- The 1.3.2 upgrade note still applies: run `bd recompute-blocked` once per
+  workspace whose store crossed migration 0059 under bd 1.3.0 or later,
+  which includes any workspace first created by bd 1.2.x or earlier
+  ([#7037](https://github.com/gastownhall/beads/issues/7037)).
+- Coming from 1.3.4-rc.1, nothing changes in behaviour.
+
 ## [1.3.4-rc.1] - 2026-11-04
 
 First release candidate for 1.3.4, a one-fix patch on top of 1.3.3

@@ -221,6 +221,13 @@ type VersionChange struct {
 // versionChanges contains agent-actionable changes for recent versions
 var versionChanges = []VersionChange{
 	{
+		Version: "1.3.4",
+		Date:    "2026-11-04",
+		Changes: []string{
+			"STABLE: first stable 1.3.4 release. Same code as 1.3.4-rc.1; only the version stamp changed. No new migration file and the embedded Dolt engine is unchanged, so upgrading from 1.3.x or 1.3.4-rc.1 is a binary swap. The 1.3.4-rc.1 entry below applies (GT_ROOT from a rig's .beads/.env is imported again); coming from 1.3.2 or earlier, the 1.3.3 entries apply too.",
+		},
+	},
+	{
 		Version: "1.3.4-rc.1",
 		Date:    "2026-11-04",
 		Changes: []string{
