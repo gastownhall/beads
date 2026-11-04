@@ -36,6 +36,7 @@ type issueOperationHooks interface {
 	CompleteIssueOperationMetadata(ctx context.Context, issueID string)
 	CompleteIssueOperationRelease(ctx context.Context, issueID string)
 	CompleteIssueOperationReclaim(ctx context.Context, issueID string)
+	CompleteIssueOperationUpdateByID(ctx context.Context, issueID string)
 }
 
 var _ issueOperationHooks = (*HookFiringStore)(nil)

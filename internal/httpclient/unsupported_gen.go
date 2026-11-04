@@ -232,11 +232,6 @@ func (unsupportedDoltStorage) GetAllEventsSince(_ context.Context, _ time.Time) 
 	return
 }
 
-func (unsupportedDoltStorage) GetBlockedIssues(_ context.Context, _ types.WorkFilter) (_ []*types.BlockedIssue, err error) {
-	err = errUnsupported("GetBlockedIssues")
-	return
-}
-
 func (unsupportedDoltStorage) GetBlockingInfoForIssues(_ context.Context, _ []string) (_ map[string][]string, _ map[string][]string, _ map[string]string, err error) {
 	err = errUnsupported("GetBlockingInfoForIssues")
 	return
@@ -399,11 +394,6 @@ func (unsupportedDoltStorage) GetTier2Candidates(_ context.Context) (_ []*types.
 
 func (unsupportedDoltStorage) HasRemote(_ context.Context, _ string) (_ bool, err error) {
 	err = errUnsupported("HasRemote")
-	return
-}
-
-func (unsupportedDoltStorage) HeartbeatIssue(_ context.Context, _ string, _ string) (err error) {
-	err = errUnsupported("HeartbeatIssue")
 	return
 }
 
@@ -727,4 +717,4 @@ func (unsupportedDoltStorage) VersionReconciler() (_ issueops.VersionReconciler,
 	return
 }
 
-// NOTE: partial shell (142 of 201 methods generated; 59 left to this package's hand-written set).
+// NOTE: partial shell (140 of 205 methods generated; 65 left to this package's hand-written set).

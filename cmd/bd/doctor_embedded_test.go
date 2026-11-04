@@ -43,10 +43,10 @@ func runBDSplit(t *testing.T, bd, dir string, args ...string) (stdout, stderr st
 	return stdoutBuf.String(), stderrBuf.String(), err
 }
 
-// TestDoctorEmbeddedSupportedChecks verifies that --check=artifacts,
+// TestEmbeddedDoctorSupportedChecks verifies that --check=artifacts,
 // --check=conventions, and --check=pollution run in embedded mode rather
 // than hitting the "not yet supported" stub (GH#3597).
-func TestDoctorEmbeddedSupportedChecks(t *testing.T) {
+func TestEmbeddedDoctorSupportedChecks(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -83,11 +83,11 @@ func TestDoctorEmbeddedSupportedChecks(t *testing.T) {
 	}
 }
 
-// TestDoctorEmbeddedUnsupportedJSON verifies that variants which still require
+// TestEmbeddedDoctorUnsupportedJSON verifies that variants which still require
 // server mode (bare doctor, --check=validate) emit a structured JSON payload
 // when --json or --agent --json is set, rather than the prose stub. Tooling
 // can detect "unsupported" without text-matching (GH#3597).
-func TestDoctorEmbeddedUnsupportedJSON(t *testing.T) {
+func TestEmbeddedDoctorUnsupportedJSON(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -146,14 +146,22 @@ func TestDoctorEmbeddedUnsupportedJSON(t *testing.T) {
 			if !strings.Contains(errStr, "not yet supported in embedded mode") {
 				t.Errorf("expected error to mention embedded-mode unsupported, got %q", errStr)
 			}
+
+			hints, _ := result["hints"].([]interface{})
+			var joined []string
+			for _, h := range hints {
+				s, _ := h.(string)
+				joined = append(joined, s)
+			}
+			assertEmbeddedRecoveryHints(t, strings.Join(joined, "\n"))
 		})
 	}
 }
 
-// TestDoctorEmbeddedUnsupportedProse verifies that bare bd doctor (without
+// TestEmbeddedDoctorUnsupportedProse verifies that bare bd doctor (without
 // --json) still emits the human-readable prose stub for terminal users,
 // pointing at the supported --check=* variants (GH#3597).
-func TestDoctorEmbeddedUnsupportedProse(t *testing.T) {
+func TestEmbeddedDoctorUnsupportedProse(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -176,5 +184,20 @@ func TestDoctorEmbeddedUnsupportedProse(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("expected stub to mention %q so users know what works:\n%s", want, out)
 		}
+	}
+	assertEmbeddedRecoveryHints(t, out)
+}
+
+// assertEmbeddedRecoveryHints checks that the embedded-unsupported hints send
+// a reader whose database will not open to the preservation-first runbook,
+// not to a bare reinitialization that would build an empty store over it
+// (GH#4521).
+func assertEmbeddedRecoveryHints(t *testing.T, hints string) {
+	t.Helper()
+	if want := "docs/recovery/database-corruption.md#engine-wont-open"; !strings.Contains(hints, want) {
+		t.Errorf("expected hints to link %q:\n%s", want, hints)
+	}
+	if strings.Contains(hints, "--reinit-local") {
+		t.Errorf("hints must not offer bare reinitialization:\n%s", hints)
 	}
 }

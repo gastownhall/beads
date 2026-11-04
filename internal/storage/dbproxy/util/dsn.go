@@ -1,10 +1,11 @@
 package util
 
 import (
-	"fmt"
 	"time"
 
 	mysql "github.com/go-sql-driver/mysql"
+
+	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
 
 // maxAllowedPacketBytes is the client-side packet ceiling pinned into every
@@ -15,6 +16,7 @@ import (
 const maxAllowedPacketBytes = 1 << 30
 
 type DoltServerDSN struct {
+	Net             string
 	Socket          string
 	Host            string
 	Port            int
@@ -35,17 +37,23 @@ func (d DoltServerDSN) String() string {
 		timeout = 5 * time.Second
 	}
 
-	net := "tcp"
-	addr := fmt.Sprintf("%s:%d", d.Host, d.Port)
+	// doltutil.ServerAddr, not "%s:%d": a managed server's listener.host may
+	// be the IPv6 loopback, which the driver dials only as "[::1]:port",
+	// whether the host is written ::1 or [::1].
+	network := "tcp"
+	if d.Net != "" {
+		network = d.Net
+	}
+	addr := doltutil.ServerAddr(d.Host, d.Port)
 	if d.Socket != "" {
-		net = "unix"
+		network = "unix"
 		addr = d.Socket
 	}
 
 	cfg := mysql.Config{
 		User:            d.User,
 		Passwd:          d.Password,
-		Net:             net,
+		Net:             network,
 		Addr:            addr,
 		DBName:          d.Database,
 		ParseTime:       true,

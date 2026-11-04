@@ -49,6 +49,38 @@ func TestListGatesAsksTheQuerierTheRawQuestion(t *testing.T) {
 	}
 }
 
+// TestListGatesExcludesTemplatesInTheQuery: ExcludeTemplates (bd gate check's
+// listing) puts the template exclusion in the expression the Querier answers,
+// so the cut at Limit counts only the gates that remain. Dropping templates
+// from the returned page instead let a page of a persisted proto's gates fill
+// the limit and hide every live gate behind it. Without it the listing names
+// no template field: `bd gate list` lists templates.
+func TestListGatesExcludesTemplatesInTheQuery(t *testing.T) {
+	nonTemplate := func(all bool, limit int) issueops.QueryRequest {
+		return issueops.QueryRequest{Expression: "type=gate AND template=false", IncludeClosed: all, Limit: &limit}
+	}
+	cases := []struct {
+		name string
+		req  issueops.GateListRequest
+		want issueops.QueryRequest
+	}{
+		{"open gates, limit 1", issueops.GateListRequest{ExcludeTemplates: true, Limit: 1}, nonTemplate(false, 1)},
+		{"unlimited", issueops.GateListRequest{ExcludeTemplates: true}, nonTemplate(false, 0)},
+		{"all gates", issueops.GateListRequest{All: true, ExcludeTemplates: true, Limit: 7}, nonTemplate(true, 7)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			q := &currentQueryRecorder{responses: []currentQueryResponse{{ids: []string{"g-1"}}}}
+			if _, err := issueops.ListGates(context.Background(), q, tc.req); err != nil {
+				t.Fatalf("ListGates: %v", err)
+			}
+			if len(q.calls) != 1 || !reflect.DeepEqual(q.calls[0], tc.want) {
+				t.Fatalf("Query calls = %#v, want one %#v", q.calls, tc.want)
+			}
+		})
+	}
+}
+
 func TestListGatesNeverTakesAFailureForAnEmptyList(t *testing.T) {
 	refusal := &issueops.ErrUnsupported{Op: "Querier.Query", Backend: "http"}
 	q := &currentQueryRecorder{responses: []currentQueryResponse{{err: refusal}}}

@@ -471,7 +471,13 @@ linters:
       # `search` LEFT this list when all three of its routes moved onto
       # issueops.Reader.List with issueops.SearchListRequest (cmd/bd/search.go);
       # it builds no filter any more.
-      - path: '^cmd/bd/(close|duplicates|find_duplicates|gate|gc|graph|info|label|orphans|purge|todo|wisp|human)(_proxied_server)?\.go$'
+      #
+      # `gate` LEFT it when `bd gate check` joined `bd gate list` on
+      # issueops.ListGates over the route's Querier: cmd/bd/gate.go and
+      # cmd/bd/gate_proxied_server.go name no filter type any more.
+      # `gate_discover` keeps its own hole below, since findPendingGates still
+      # asks SearchIssues for its gates.
+      - path: '^cmd/bd/(close|duplicates|find_duplicates|gc|graph|info|label|orphans|purge|todo|wisp|human)(_proxied_server)?\.go$'
         text: 'do not write a filter here'
         linters:
           - forbidigo

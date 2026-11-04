@@ -43,7 +43,13 @@ const bulkParkBead = "ga-6lbny"
 
 func newServedSweeperFixture(t *testing.T, prefix string) conformance.SweeperFixture {
 	t.Helper()
-	env := newServedEnv(t, prefix)
+	return newServedSweeperFixtureOnEnv(t, newServedEnv(t, prefix))
+}
+
+// newServedSweeperFixtureOnEnv builds the Sweeper fixture over an existing
+// served environment, for a contract that composes more of its roles.
+func newServedSweeperFixtureOnEnv(t *testing.T, env *servedEnv) conformance.SweeperFixture {
+	t.Helper()
 	sweeper, err := env.subject.Sweeper()
 	if err != nil {
 		t.Fatalf("Sweeper(): %v", err)
@@ -205,6 +211,14 @@ func TestServedDeleterCascadeDeletesTheClosure(t *testing.T) {
 
 func TestServedDeleterCascadeFromAWispRootDeletesTheClosure(t *testing.T) {
 	conformance.RunDeleterCascadeFromAWispRootDeletesTheClosure(t, t.Context(), newServedDeleterFixture(t, "hx05"))
+}
+
+func TestServedDeleterCascadeFollowsOnlyContainment(t *testing.T) {
+	conformance.RunDeleterCascadeFollowsOnlyContainment(t, t.Context(), newServedDeleterFixture(t, "hx23"))
+}
+
+func TestServedDeleterCascadeReportsSurvivingDependents(t *testing.T) {
+	conformance.RunDeleterCascadeReportsSurvivingDependents(t, t.Context(), newServedDeleterFixture(t, "hx24"))
 }
 
 func TestServedDeleterGuardsAWispNamedWithADurableDependent(t *testing.T) {
@@ -565,6 +579,24 @@ func TestServedBatchCreateStampsEachItemsCreatedByFromTheActor(t *testing.T) {
 
 func TestServedBatchCreatorCreatesEveryItemAsOneAct(t *testing.T) {
 	conformance.RunBatchCreatorCreatesEveryItemAsOneAct(t, t.Context(), newServedBatchCreatorFixture(t, "hb00"))
+}
+
+// TestServedBatchCreatorMintsADistinctIDForEachIdenticalItem is parked with
+// the timestamp echo below: the case makes its two items identical by giving
+// both one Issue.CreatedAt, and the wire's item publishes no timestamp member,
+// so the client refuses it before the dial. Over http the server stamps each
+// item's created_at itself, so the request cannot ask for the twin.
+func TestServedBatchCreatorMintsADistinctIDForEachIdenticalItem(t *testing.T) {
+	skipKnownDivergence(t, "W-BatchCreateItem.Issue", bulkParkBead,
+		"the case seeds the same Issue.CreatedAt on both items, and the wire's item publishes no timestamp "+
+			"member — the client refuses items[0].Issue.CreatedAt before any request is sent.")
+	conformance.RunBatchCreatorMintsADistinctIDForEachIdenticalItem(t, t.Context(), newServedBatchCreatorFixture(t, "hb13"))
+}
+
+func TestServedBatchCreatorMintsPastAnIDALaterItemNames(t *testing.T) {
+	skipKnownDivergence(t, "W-BatchCreateItem.Issue", bulkParkBead,
+		"the case's second item names the id the first item's counter mint would draw. "+parkBatchExplicitID)
+	conformance.RunBatchCreatorMintsPastAnIDALaterItemNames(t, t.Context(), newServedBatchCreatorFixture(t, "hb14"))
 }
 
 func TestServedBatchCreatorRefusesEverythingWhenOneItemRefuses(t *testing.T) {

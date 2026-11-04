@@ -93,6 +93,9 @@ func (b *httpBatchApplier) ApplyBatch(ctx context.Context, req issueops.ApplyBat
 	if err != nil {
 		return issueops.ApplyBatchResult{}, err
 	}
+	if err := b.requireGateTokens(ctx, req); err != nil {
+		return issueops.ApplyBatchResult{}, err
+	}
 	var priorities []**int
 	for i := range body.Items {
 		if create := body.Items[i].Create; create != nil {
@@ -104,7 +107,7 @@ func (b *httpBatchApplier) ApplyBatch(ctx context.Context, req issueops.ApplyBat
 	}
 	resp, err := b.wire.ApplyBatch(ctx, body)
 	if err != nil {
-		return issueops.ApplyBatchResult{}, applyBatchRefusal(err)
+		return issueops.ApplyBatchResult{}, applyBatchRefusal(gateFieldRefusal(err))
 	}
 	return decodeApplyBatchResult(req, resp)
 }
@@ -142,6 +145,35 @@ func (b *httpBatchApplier) refuseUnservedDepAddLineage(ctx context.Context, req 
 		return nil
 	}
 	return b.store.unsupportedCapability("BatchApplier.ApplyBatch", wire.CapBatchApplyDepAddLineage)
+}
+
+// requireGateTokens scans the whole plan once, before the dial, for a create
+// item naming a gate member (issues.create.gates) and an update item whose
+// patch names one (issues.update.gates), and refuses the request naming the
+// first token the cached handshake lacks. The plan is all or nothing, so the
+// check is too: no item is ever sent without its gate members, and no partial
+// plan is ever sent around one.
+func (b *httpBatchApplier) requireGateTokens(ctx context.Context, req issueops.ApplyBatchRequest) error {
+	var creates, updates bool
+	for _, item := range req.Items {
+		switch {
+		case item.Kind == issueops.ItemCreate && item.Create != nil && issueCarriesGates(item.Create.Issue):
+			creates = true
+		case item.Kind == issueops.ItemUpdate && item.Update != nil && patchCarriesGates(item.Update.Patch):
+			updates = true
+		}
+	}
+	if creates {
+		if err := b.store.requireCapabilityBeforeDial(ctx, wire.OpApplyBatch, wire.CapIssuesCreateGates); err != nil {
+			return err
+		}
+	}
+	if updates {
+		if err := b.store.requireCapabilityBeforeDial(ctx, wire.OpApplyBatch, wire.CapIssuesUpdateGates); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // applyBatchBody projects the role's request onto the wire body.
@@ -252,7 +284,7 @@ func applyItemBody(item issueops.ApplyItem, actor string) (wire.ApplyItem, error
 
 // applyCreateItemBody projects one create item.
 //
-// The wire's create vocabulary here is EXACTLY createIssue's twenty — the same
+// The wire's create vocabulary here is EXACTLY createIssue's twenty-four — the same
 // members, spelled the same way — so the allowlist and the refusal sweep are
 // the single create's, shared rather than copied. What is different is the
 // ledger row the refusal cites: this is a different operation, and a reader
@@ -315,6 +347,9 @@ func applyCreateItemBody(item *issueops.CreateItem, actor string) (*apigen.Apply
 	}
 	setItemBool(&out.Ephemeral, issue.Ephemeral)
 	setItemBool(&out.NoHistory, issue.NoHistory)
+	// The gate members, sent only to a server advertising issues.create.gates:
+	// ApplyBatch has already refused the plan before the dial otherwise.
+	setGateMembers(issue, &out.AwaitType, &out.AwaitId, &out.Timeout, &out.Waiters)
 
 	if len(item.MetadataRefs) > 0 {
 		refs := make(map[string]apigen.Ref, len(item.MetadataRefs))
@@ -496,21 +531,21 @@ func applyRefBody(ref issueops.Ref) (apigen.Ref, error) {
 //	            absent here, also deliberately: moving a row between planes
 //	            mid-plan is a different act from writing its fields.
 //
-// The other three — spec_id, await_id, closed_by_session — are absent from
-// both bodies.
+// spec_id and closed_by_session are absent from both bodies. await_id and
+// waiters are carried on both, behind issues.update.gates (ApplyBatch refuses
+// the plan before the dial against a server without it).
 var applyPatchExcludedMembers = []struct {
 	member string
 	ledger string
 	set    func(issueops.IssuePatch) bool
 }{
-	// ParentID is this document's OWN exclusion and gets its own row; SpecID,
-	// AwaitID and ClosedBySession are absent from both patch bodies, so they
-	// cite the rows that already refuse them rather than minting a second
-	// reason for one fact. Persistence cites W-IssuePatch.Persistence, the row
-	// that refuses it on this operation alone.
+	// ParentID is this document's OWN exclusion and gets its own row; SpecID
+	// and ClosedBySession are absent from both patch bodies, so they cite the
+	// rows that already refuse them rather than minting a second reason for one
+	// fact. Persistence cites W-IssuePatch.Persistence, the row that refuses it
+	// on this operation alone.
 	{"ParentID", "W-ApplyPatch.ParentID", func(p issueops.IssuePatch) bool { return p.ParentID.Set }},
 	{"SpecID", "W-IssuePatch.SpecID", func(p issueops.IssuePatch) bool { return p.SpecID.Set }},
-	{"AwaitID", "W-IssuePatch.AwaitID", func(p issueops.IssuePatch) bool { return p.AwaitID.Set }},
 	{"ClosedBySession", "W-IssuePatch.ClosedBySession", func(p issueops.IssuePatch) bool { return p.ClosedBySession.Set }},
 	{"Persistence", "W-IssuePatch.Persistence", func(p issueops.IssuePatch) bool { return p.Persistence.Set }},
 }
@@ -574,6 +609,10 @@ func encodeApplyPatch(patch issueops.IssuePatch) (map[string]any, error) {
 	if labels := encodeApplyLabelPatch(patch.Labels); len(labels) > 0 {
 		out["labels"] = labels
 	}
+	// The gate members (issues.update.gates), spelled as updateIssue spells
+	// them; ApplyBatch has already refused the plan before the dial against a
+	// server without the token.
+	setGatePatch(out, patch)
 	return out, nil
 }
 
@@ -610,7 +649,7 @@ func encodeApplyLabelPatch(patch issueops.LabelPatch) map[string]any {
 // It answers the FIRST offender in declaration order, which is deterministic —
 // a caller fixing one member at a time must not see the reported member depend
 // on map iteration. It is generalized over the LEDGER ROW because two
-// operations publish the identical twenty members — createIssue and
+// operations publish the identical twenty-four members — createIssue and
 // batchApply's create item — and a caller must be sent to the row for the
 // operation they actually called. The partition itself is one partition and is
 // shared, so the two cannot disagree about what the wire carries or about what

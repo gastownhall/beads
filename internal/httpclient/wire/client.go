@@ -50,18 +50,49 @@ const (
 	DefaultMaxRetryAfter = 30 * time.Second
 	// DefaultTimeout is the per-request ceiling for a client this package built.
 	// A caller's context still wins when it is shorter, and an injected
-	// *http.Client keeps its own. Exported so a caller that must build its own
-	// *http.Client — to layer in a custom RoundTripper such as the one
-	// httpstore.TransportFor returns — can match this default rather than
-	// silently dropping it.
+	// *http.Client keeps its own, except that a large apply raises a bounded
+	// one for that request alone (Request.Timeout, LargeApplyTimeout).
+	// Exported so a caller that must build its own *http.Client — to layer in
+	// a custom RoundTripper such as the one httpstore.TransportFor returns —
+	// can match this default rather than silently dropping it.
 	DefaultTimeout = 60 * time.Second
+	// LargeApplyTimeout is the per-request ceiling for the one request shape
+	// bd serve grants MORE than DefaultTimeout: a POST issues:batchApply
+	// carrying more than LargeApplyItemThreshold items. The server runs such a
+	// request under its own extended budget — httpapi.DefaultLargeApplyCeiling
+	// (5m, `bd serve --large-apply-ceiling`), timed from the moment it takes
+	// the one-wide large-write slot — on a context DETACHED from the client's,
+	// so a client that gave up at DefaultTimeout would report a failure for an
+	// apply the server goes on to commit. Before that budget starts the server
+	// may already have spent its whole request-read timeout (30s, which spans
+	// its wait for a general slot and the body upload) and its bounded wait
+	// for the large-write slot (10s); after the commit it still has to write
+	// the answer back. This value covers all of that at the server's default
+	// ceiling, and internal/httpapi's
+	// TestTheClientLargeApplyBudgetCoversTheServer holds it to the server's
+	// constants. A caller's context still wins when it is shorter, and an
+	// injected *http.Client with no Timeout at all stays unbounded. An
+	// operator who raises --large-apply-ceiling past about 5m15s is not
+	// covered: the server does not advertise its ceiling, so the client
+	// cannot learn it.
+	LargeApplyTimeout = 6 * time.Minute
 )
+
+// LargeApplyItemThreshold mirrors httpapi's own largeApplyItemThreshold: the
+// item count a batchApply request must EXCEED to run under the server's
+// extended large-apply budget, and so to be dialed under LargeApplyTimeout
+// here. Redeclared rather than imported for ProjectIDHeader's reason; held to
+// the server's value by internal/httpapi's
+// TestTheClientLargeApplyBudgetCoversTheServer.
+const LargeApplyItemThreshold = 100
 
 // Options tunes the client. The zero value is usable: every field falls back to
 // the Default* constants above.
 type Options struct {
 	// HTTPClient is used as given except for CheckRedirect, which is always
-	// forced (see New). Nil builds one.
+	// forced (see New), and a positive Timeout, which a request the server
+	// grants longer (Request.Timeout) raises for that request alone. Nil
+	// builds one.
 	HTTPClient *http.Client
 	// UserAgent is sent on every request.
 	UserAgent string
@@ -81,10 +112,10 @@ type Options struct {
 	// arrived is never cut off by it. Such a request that hits it, or whose
 	// connection is reset, is retried once on another connection, with no
 	// header timer and only what is left of the overall Timeout, counted from
-	// when the first attempt was sent. A write is never
-	// retried and is bounded by the overall Timeout alone (bd serve answers a
-	// write after it commits). A written request whose headers do not come
-	// back in time fails with *ResponseHeaderTimeoutError.
+	// when the first attempt was sent. A write that is not Request.Idempotent
+	// is never retried and is bounded by the overall Timeout alone (bd serve
+	// answers a write after it commits). A written request whose headers do
+	// not come back in time fails with *ResponseHeaderTimeoutError.
 	ResponseHeaderTimeout time.Duration
 	// OnStallRetry, when set, is told about every such retry. The process-wide
 	// count is StallRetryCount either way.
@@ -108,6 +139,11 @@ type Client struct {
 
 	handshake handshakeCache
 	expectID  string
+
+	// memo, when EnableReadMemo turned it on, answers a repeated identical
+	// single-row or settings read from the response already received
+	// (read_memo.go). Nil is off, the default.
+	memo *readMemo
 }
 
 // New builds a client for base.
@@ -240,8 +276,16 @@ type Request struct {
 	Actor string
 	// Idempotent marks a read carried on a non-GET method (a POST batch get)
 	// as safe to replay, the way a GET is (see Replayable). Never set it on a
-	// write.
+	// write whose replay could double-apply. The one write that sets it is the
+	// lease heartbeat (heartbeatIssue): a repeat only moves the expiry later,
+	// and a replay after the lease is gone fails the holder fence.
 	Idempotent bool
+	// Timeout, when positive, RAISES the client's per-request ceiling for this
+	// one request — never lowers it, and never bounds a client whose
+	// *http.Client has no Timeout. It exists for the requests the server
+	// itself grants longer than DefaultTimeout (see LargeApplyTimeout);
+	// shortening a request is the caller's context's job.
+	Timeout time.Duration
 }
 
 // Replayable reports whether r may be sent again after an attempt that got no
@@ -284,9 +328,35 @@ func (c *Client) Do(ctx context.Context, r Request, out any) error {
 		return fmt.Errorf("%s: %w", r.Op, err)
 	}
 
-	res, err := c.roundTrip(ctx, r, u, body)
-	if err != nil {
-		return err
+	var (
+		res *response
+		// memoKey is set only for a memoable read that MISSED, whose answer is
+		// then stored under it at memoGen. A hit is never stored again: that
+		// would renew its age (read_memo.go, put).
+		memoKey string
+		memoGen uint64
+	)
+	switch {
+	case c.memo == nil:
+	case memoable(r):
+		key := u.String()
+		if res, memoGen = c.memo.lookup(key); res == nil {
+			memoKey = key
+		}
+	case r.Method != http.MethodGet:
+		// A write may change anything a memoized read answered: drop them all
+		// before it is sent, and again once it returns. Each clear starts a new
+		// generation, so a read that overlapped the write cannot store a
+		// pre-write answer behind it either.
+		c.memo.clear()
+		defer c.memo.clear()
+	}
+	if res == nil {
+		var err error
+		res, err = c.roundTrip(ctx, r, u, body)
+		if err != nil {
+			return err
+		}
 	}
 
 	// The rotation window, and the whole of it. The server re-reads its token
@@ -318,6 +388,8 @@ func (c *Client) Do(ctx context.Context, r Request, out any) error {
 		return prob
 	}
 	if out == nil {
+		// Nothing decoded the answer, so nothing vouches for it: it is not
+		// memoized (every memoable read in this package decodes its answer).
 		return nil
 	}
 	if len(bytes.TrimSpace(res.body)) == 0 {
@@ -334,6 +406,12 @@ func (c *Client) Do(ctx context.Context, r Request, out any) error {
 	}
 	if err := json.Unmarshal(decodeBody, out); err != nil {
 		return fmt.Errorf("%s: decoding the response from bd serve at %s: %w", r.Op, c.base.Redacted(), err)
+	}
+	if memoKey != "" {
+		// Only an answer that decoded is memoized. A 2xx with an empty or
+		// undecodable body is the server misbehaving once; storing it would
+		// fail every identical read for a whole TTL instead of asking again.
+		c.memo.put(memoKey, res, memoGen)
 	}
 	return nil
 }
@@ -414,8 +492,8 @@ func (c *Client) roundTrip(ctx context.Context, r Request, u *url.URL, body []by
 		return res, nil
 	}
 	var deadline time.Time
-	if c.hc.Timeout > 0 {
-		deadline = sent.Add(c.hc.Timeout)
+	if timeout := c.httpClientFor(r).Timeout; timeout > 0 {
+		deadline = sent.Add(timeout)
 	}
 	reason := stallReason(err)
 	if reason == "" || ctx.Err() != nil || (!deadline.IsZero() && !time.Now().Before(deadline)) {
@@ -437,6 +515,30 @@ func (c *Client) roundTrip(ctx context.Context, r Request, u *url.URL, body []by
 		hte.After, hte.Attempts, hte.Retried, hte.Reason = time.Since(sent), 2, true, reason
 	}
 	return res, err
+}
+
+// httpClientFor is the *http.Client one request is sent through: c.hc, or —
+// when r.Timeout raises a bounded client's ceiling — a shallow copy of it with
+// that longer Timeout. The copy shares c.hc's Transport (and so its connection
+// pool and CA scope) and its forced CheckRedirect; only the whole-request
+// deadline differs.
+func (c *Client) httpClientFor(r Request) *http.Client {
+	if r.Timeout <= 0 || c.hc.Timeout <= 0 || r.Timeout <= c.hc.Timeout {
+		return c.hc
+	}
+	hc := *c.hc
+	hc.Timeout = r.Timeout
+	return &hc
+}
+
+// largeApplyTimeout is the Request.Timeout for a batchApply request carrying n
+// items: LargeApplyTimeout once n crosses the server's large-apply threshold,
+// zero (the client's own ceiling) otherwise.
+func largeApplyTimeout(n int) time.Duration {
+	if n > LargeApplyItemThreshold {
+		return LargeApplyTimeout
+	}
+	return 0
 }
 
 // newRequest builds r's HTTP request and stamps it (see stampRequest).
@@ -476,6 +578,7 @@ func (c *Client) roundTripOnce(ctx context.Context, r Request, u *url.URL, stamp
 		attemptCtx, cancel = context.WithDeadline(ctx, deadline)
 		defer cancel()
 	}
+	started := time.Now()
 	attemptCtx, ht := startHeaderTimer(attemptCtx, headerTimeout)
 	defer ht.done()
 	req := stamped.Clone(attemptCtx)
@@ -490,7 +593,7 @@ func (c *Client) roundTripOnce(ctx context.Context, r Request, u *url.URL, stamp
 	}
 
 	//nolint:gosec // G704: the URL is the workspace's configured server, resolved from the sidecar or --server-url; dialing it IS the feature.
-	resp, err := c.hc.Do(req)
+	resp, err := c.httpClientFor(r).Do(req)
 	if ht.stop() {
 		// The header timer fired first. Headers that raced it are discarded:
 		// the attempt's context is already canceled, so its body is lost.
@@ -510,6 +613,9 @@ func (c *Client) roundTripOnce(ctx context.Context, r Request, u *url.URL, stamp
 		if wroteAt, ok := ht.written(); ok && ctx.Err() == nil && isTimeout(err) {
 			hte := &ResponseHeaderTimeoutError{Op: r.Op, Method: r.Method, Host: u.Host, After: time.Since(wroteAt), Attempts: 1, Replayable: r.Replayable(), Err: err}
 			return nil, &ConnectError{Op: r.Op, ServerURL: c.base.Redacted(), Err: hte}
+		}
+		if de := dialFailure(r.Op, u.Host, err, time.Since(started)); de != nil && ctx.Err() == nil {
+			return nil, &ConnectError{Op: r.Op, ServerURL: c.base.Redacted(), Err: de}
 		}
 		return nil, &ConnectError{Op: r.Op, ServerURL: c.base.Redacted(), Err: err}
 	}

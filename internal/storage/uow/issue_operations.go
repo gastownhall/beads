@@ -313,6 +313,9 @@ func updateSpec(request publicops.UpdateRequest) (domain.UpdateSpec, error) {
 	setField(fields, "acceptance_criteria", patch.AcceptanceCriteria)
 	setField(fields, "spec_id", patch.SpecID)
 	setField(fields, "await_id", patch.AwaitID)
+	if patch.Waiters.Set {
+		fields["waiters"] = storageissueops.PatchWaiters(patch.Waiters)
+	}
 	setField(fields, "status", patch.Status)
 	setField(fields, "priority", patch.Priority)
 	if patch.IssueType.Set {

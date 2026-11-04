@@ -14,6 +14,7 @@ go_library(
     visibility = ["//:__subpackages__"],
     deps = [
         "//internal/config",
+        "//internal/endpointtrust",
         "//internal/tracker",
         "//internal/types",
     ],
@@ -25,6 +26,7 @@ go_test(
         "client_test.go",
         "links_test.go",
         "mapping_test.go",
+        "tracker_cross_project_test.go",
         "tracker_state_test.go",
         "tracker_test.go",
         "types_test.go",

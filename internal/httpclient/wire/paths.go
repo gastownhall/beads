@@ -59,6 +59,8 @@ const (
 	OpForgetMemory            = "forgetMemory"
 	OpBatchGetIssues          = "batchGetIssues"
 	OpReclaimIssues           = "reclaimIssues"
+	OpHeartbeatIssue          = "heartbeatIssue"
+	OpListBlockedIssues       = "listBlockedIssues"
 )
 
 // The paths that carry no caller-supplied segment. A path with one is built by
@@ -68,6 +70,7 @@ const (
 	PathContext              = "/v0/beads/context"
 	PathReady                = "/v0/beads/ready"
 	PathReadyCount           = "/v0/beads/ready:count"
+	PathBlocked              = "/v0/beads/blocked"
 	PathStats                = "/v0/beads/stats"
 	PathIssues               = "/v0/beads/issues"
 	PathIssuesQuery          = "/v0/beads/issues:query"
@@ -105,6 +108,7 @@ const (
 	MethodAdvanceMolecule = ":advanceMolecule"
 	MethodRelease         = ":release"
 	MethodCASMetadata     = ":casMetadata"
+	MethodHeartbeat       = ":heartbeat"
 )
 
 // The sub-resource collections that hang off the issue-detail path. Unlike a
@@ -130,7 +134,7 @@ func IssuePath(id string) (string, error) {
 // final segment: /v0/beads/issues/{id}:claim and its two siblings.
 func IssueMethodPath(id, method string) (string, error) {
 	switch method {
-	case MethodClaim, MethodClose, MethodReopen, MethodRelease, MethodCASMetadata, MethodAdvanceMolecule:
+	case MethodClaim, MethodClose, MethodReopen, MethodRelease, MethodCASMetadata, MethodAdvanceMolecule, MethodHeartbeat:
 	default:
 		return "", fmt.Errorf("no custom method %q on the issue resource", method)
 	}

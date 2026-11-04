@@ -734,6 +734,15 @@ func startE2EServer(t *testing.T) string {
 // rather than silently replaced.
 func startE2EServerWithIdentity(t *testing.T, projectID, database string) string {
 	t.Helper()
+	addr, _ := startE2EServerWithStore(t, projectID, database)
+	return addr
+}
+
+// startE2EServerWithStore is startE2EServerWithIdentity that also hands back
+// the reference store the server serves, for a test that must plant or age
+// state no wire verb can reach (an aged lease row).
+func startE2EServerWithStore(t *testing.T, projectID, database string) (string, *embeddeddolt.EmbeddedDoltStore) {
+	t.Helper()
 	beadsDir := t.TempDir()
 	ctx := context.Background()
 	reference, err := embeddeddolt.Open(ctx, beadsDir, database, "main")
@@ -761,7 +770,7 @@ func startE2EServerWithIdentity(t *testing.T, projectID, database string) string
 			t.Error("the in-process server did not shut down")
 		}
 	})
-	return srv.Addr()
+	return srv.Addr(), reference
 }
 
 func e2eServeConfig(t *testing.T, s storage.DoltStorage, projectID, database string) httpapi.Config {
@@ -803,6 +812,10 @@ func e2eServeConfig(t *testing.T, s storage.DoltStorage, projectID, database str
 	fail("BatchGetter")
 	cfg.LeaseReclaimer, err = s.LeaseReclaimer()
 	fail("LeaseReclaimer")
+	cfg.Heartbeater, err = s.Heartbeater()
+	fail("Heartbeater")
+	cfg.BlockedLister, err = s.BlockedLister()
+	fail("BlockedLister")
 	cfg.Relations, err = s.IssueRelations()
 	fail("IssueRelations")
 	cfg.Commenter, err = s.Commenter()

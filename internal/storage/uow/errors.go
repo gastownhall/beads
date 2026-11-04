@@ -33,6 +33,21 @@ func isSerializationError(err error) bool {
 	return false
 }
 
+// isDoltAutocommitRollbackError reports whether err is Dolt rolling back a
+// statement it ran under @@autocommit because the statement's commit-time
+// merge conflicted with a concurrent writer (MySQL 1105, "Merge conflict
+// detected, @autocommit transaction rolled back"). Outside an explicit
+// transaction this, not 1213, is how such a conflict surfaces, and like a
+// serialization failure it guarantees the statement left nothing behind. It
+// mirrors the DoltStore's classifier of the same name.
+func isDoltAutocommitRollbackError(err error) bool {
+	var mysqlErr *mysql.MySQLError
+	return errors.As(err, &mysqlErr) &&
+		mysqlErr.Number == 1105 &&
+		(mysqlErr.Message == "Merge conflict detected, @autocommit transaction rolled back" ||
+			strings.HasPrefix(mysqlErr.Message, "Merge conflict detected, @autocommit transaction rolled back."))
+}
+
 // isDatabaseExistsError reports whether err is the server refusing a bare
 // CREATE DATABASE because the database already exists (MySQL 1007,
 // ER_DB_CREATE_EXISTS). The message fallback matches how the rest of the

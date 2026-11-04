@@ -707,6 +707,59 @@ func TestAReadThatSpentTheWholeTimeoutIsNotRetried(t *testing.T) {
 	}
 }
 
+// TestARaisedRequestTimeoutAlsoBoundsTheStallRetry: the retry runs on what the
+// first attempt left of the REQUEST's overall timeout, so a read that raises
+// its ceiling (Request.Timeout) keeps the raised ceiling on its retry rather
+// than falling back to the client's own. The server answers every request
+// after slowRead, and the retry is sent once the header timer fires, so under
+// the client's own ceiling (slowRead, counted from the first send) the retry
+// runs out before its answer; under the raised one it gets it.
+func TestARaisedRequestTimeoutAlsoBoundsTheStallRetry(t *testing.T) {
+	const slowRead = 2 * testHeaderTimeout
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-time.After(slowRead):
+		case <-r.Context().Done():
+			return
+		}
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	t.Cleanup(srv.Close)
+	base, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var retries int
+	c, err := New(base, nil, Options{
+		HTTPClient:            &http.Client{Transport: srv.Client().Transport, Timeout: slowRead},
+		ResponseHeaderTimeout: testHeaderTimeout,
+		OnStallRetry:          func(StallRetry) { retries++ },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	read := Request{Op: OpGetContext, Method: http.MethodGet, Path: PathContext}
+
+	// The control: the client's own ceiling ends before the retry's answer.
+	var hte *ResponseHeaderTimeoutError
+	if err := c.Do(ctx(t), read, nil); !errors.As(err, &hte) || !hte.Retried {
+		t.Fatalf("Do under the client's own %v ceiling: err = %v, want a retried *ResponseHeaderTimeoutError", slowRead, err)
+	}
+
+	read.Timeout = DefaultTimeout
+	var out map[string]any
+	if err := c.Do(ctx(t), read, &out); err != nil {
+		t.Fatalf("Do with Request.Timeout %v: %v; the retry must run on the raised ceiling, not the client's %v",
+			read.Timeout, err, slowRead)
+	}
+	if out["ok"] != true {
+		t.Fatalf("body = %v, want the retry's answer", out)
+	}
+	if retries != 2 {
+		t.Errorf("OnStallRetry fired %d times, want 2 (one per Do)", retries)
+	}
+}
+
 // countingToken is a staticToken that counts its Authorize calls.
 type countingToken struct {
 	staticToken

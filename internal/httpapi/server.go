@@ -293,6 +293,19 @@ type Config struct {
 	// claim on its holder's say-so, and this reverts MANY on a clock's.
 	// Required on the same terms as every field here.
 	LeaseReclaimer issueops.LeaseReclaimer
+	// Heartbeater is the lease refresh behind
+	// POST /v0/beads/issues/{id}:heartbeat. It is a SEPARATE field from
+	// Claimer for the reason issueops.Heartbeater's own doc gives: a claim
+	// takes ownership and never extends the lease, a heartbeat proves the
+	// holder is alive and writes only the lease row. Required on the same
+	// terms as every field here.
+	Heartbeater issueops.Heartbeater
+	// BlockedLister is the blocked listing behind GET /v0/beads/blocked:
+	// what `bd blocked` prints. It is a SEPARATE field from Reader because it
+	// is a separate role: Reader.Ready lists the unblocked front, this lists
+	// the blocked rows with the blockers bd names for each. Required on the
+	// same terms as every field here.
+	BlockedLister issueops.BlockedLister
 	// Relations is the single-anchor neighbor read behind
 	// GET /v0/beads/issues/{id}/related. It is a SEPARATE field from EdgeReader
 	// for the reason issueops.EdgeReader's own doc gives at length: that role
@@ -442,6 +455,8 @@ type Server struct {
 	issueEdgeCounter  issueops.GraphCounter
 	issueBatchGetter  issueops.BatchGetter
 	issueReclaimer    issueops.LeaseReclaimer
+	issueHeartbeater  issueops.Heartbeater
+	issueBlocked      issueops.BlockedLister
 	issueRelations    issueops.Relations
 	issueCommenter    issueops.Commenter
 	issueBlocking     issueops.BlockingAnnotator
@@ -655,6 +670,8 @@ func Listen(cfg Config) (*Server, error) {
 		issueEdgeCounter:  cfg.GraphCounter,
 		issueBatchGetter:  cfg.BatchGetter,
 		issueReclaimer:    cfg.LeaseReclaimer,
+		issueHeartbeater:  cfg.Heartbeater,
+		issueBlocked:      cfg.BlockedLister,
 		issueRelations:    cfg.Relations,
 		issueCommenter:    cfg.Commenter,
 		issueBlocking:     cfg.BlockingAnnotator,
@@ -777,12 +794,12 @@ func Listen(cfg Config) (*Server, error) {
 // "all or nothing" would turn an honest condition into a special case inside
 // three functions. It is checked once, on its own, below.
 func sourceRoles(cfg Config) []any {
-	return []any{cfg.Reader, cfg.Claimer, cfg.ReadyClaimer, cfg.Releaser, cfg.Lifecycle, cfg.BatchCloser, cfg.Settings, cfg.Stats, cfg.CycleDetector, cfg.EdgeReader, cfg.GraphCounter, cfg.BatchGetter, cfg.LeaseReclaimer, cfg.Relations, cfg.Commenter, cfg.BlockingAnnotator, cfg.TreeWalker, cfg.ReadyCounter, cfg.Counter, cfg.Querier, cfg.Sweeper, cfg.Deleter, cfg.BatchCreator, cfg.DependencyEditor, cfg.BatchApplier, cfg.Memories, cfg.MetadataCAS}
+	return []any{cfg.Reader, cfg.Claimer, cfg.ReadyClaimer, cfg.Releaser, cfg.Lifecycle, cfg.BatchCloser, cfg.Settings, cfg.Stats, cfg.CycleDetector, cfg.EdgeReader, cfg.GraphCounter, cfg.BatchGetter, cfg.LeaseReclaimer, cfg.Heartbeater, cfg.BlockedLister, cfg.Relations, cfg.Commenter, cfg.BlockingAnnotator, cfg.TreeWalker, cfg.ReadyCounter, cfg.Counter, cfg.Querier, cfg.Sweeper, cfg.Deleter, cfg.BatchCreator, cfg.DependencyEditor, cfg.BatchApplier, cfg.Memories, cfg.MetadataCAS}
 }
 
 // roleSourceNames spells sourceRoles for the refusal message, in the same
 // order, so a caller reading the error learns the whole set it must pass.
-const roleSourceNames = "Reader, Claimer, ReadyClaimer, Releaser, Lifecycle, BatchCloser, Settings, Stats, CycleDetector, EdgeReader, GraphCounter, BatchGetter, LeaseReclaimer, Relations, Commenter, BlockingAnnotator, TreeWalker, ReadyCounter, Counter, Querier, Sweeper, Deleter, BatchCreator, DependencyEditor, BatchApplier, Memories and MetadataCAS"
+const roleSourceNames = "Reader, Claimer, ReadyClaimer, Releaser, Lifecycle, BatchCloser, Settings, Stats, CycleDetector, EdgeReader, GraphCounter, BatchGetter, LeaseReclaimer, Heartbeater, BlockedLister, Relations, Commenter, BlockingAnnotator, TreeWalker, ReadyCounter, Counter, Querier, Sweeper, Deleter, BatchCreator, DependencyEditor, BatchApplier, Memories and MetadataCAS"
 
 func anyRoleSet(cfg Config) bool {
 	return slices.ContainsFunc(sourceRoles(cfg), func(r any) bool { return r != nil })
@@ -1182,6 +1199,30 @@ func (s *Server) leaseReclaimer(r *http.Request) (issueops.LeaseReclaimer, error
 	}
 	var src uow.LeaseReclaimerSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
 	return src.LeaseReclaimer()
+}
+
+// heartbeater returns the lease-refresh surface for one request, on the same
+// terms as every role above and held by INTERFACE so uow.HeartbeaterSource is
+// load-bearing rather than decorative. HeartbeatResult is a plain value, so it
+// goes out unwrapped.
+func (s *Server) heartbeater(r *http.Request) (issueops.Heartbeater, error) {
+	if s.provider == nil {
+		return s.issueHeartbeater, nil
+	}
+	var src uow.HeartbeaterSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
+	return src.Heartbeater()
+}
+
+// blockedLister returns the blocked-listing surface for one request, on the
+// same terms as every role above and held by INTERFACE so
+// uow.BlockedListerSource is load-bearing rather than decorative. It goes out
+// unwrapped: wireBlocked drops a nil element rather than dereferencing it.
+func (s *Server) blockedLister(r *http.Request) (issueops.BlockedLister, error) {
+	if s.provider == nil {
+		return s.issueBlocked, nil
+	}
+	var src uow.BlockedListerSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
+	return src.BlockedLister()
 }
 
 // relations returns the single-anchor neighbor surface for one request, built

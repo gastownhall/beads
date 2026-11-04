@@ -85,6 +85,12 @@ type shape struct {
 	// Verify are reads run on both sides after the shape and compared as json:
 	// how a write is checked for having done the same thing on both backends.
 	Verify [][]string `yaml:"verify"`
+	// Requests, when set, is exactly how many requests the served run of Args
+	// makes through the reference proxy (not its setup or verify reads). Each
+	// is a sequential round trip, so the count is the shape's latency floor
+	// over a gateway: a change that adds one fails here, and one that saves
+	// one updates the pin.
+	Requests *int `yaml:"requests"`
 	// Pending marks a known failure and names the slice that fixes it.
 	Pending *pending `yaml:"pending"`
 }
@@ -199,6 +205,9 @@ func TestCorpusFileIsWellFormed(t *testing.T) {
 			if modeOf(s) != "exit" || len(s.Verify) > 0 {
 				t.Errorf("shape %s is allowlisted, so only its exit code and stderr are checked; give it compare: exit and no verify", s.ID)
 			}
+			if s.Requests != nil {
+				t.Errorf("shape %s is allowlisted, so its request count is not checked; drop requests", s.ID)
+			}
 		}
 		switch s.Compare {
 		case "", "json", "ids", "count", "text", "exit":
@@ -210,6 +219,9 @@ func TestCorpusFileIsWellFormed(t *testing.T) {
 		}
 		if _, err := regexp.Compile(s.ExpectStderr); err != nil {
 			t.Errorf("shape %s: expect_stderr: %v", s.ID, err)
+		}
+		if s.Requests != nil && *s.Requests < 0 {
+			t.Errorf("shape %s: requests %d is negative", s.ID, *s.Requests)
 		}
 	}
 	for id, entry := range allow {
@@ -442,7 +454,10 @@ func runShape(t *testing.T, bin string, s shape, served, local *side, allow map[
 		}
 	}
 	proxy.takeRefusals()
-	sr := runBD(t, bin, served.dir, served.env, s.Stdin, expand(context.Background(), t, bin, served, s.Args)...)
+	args := expand(context.Background(), t, bin, served, s.Args)
+	before := proxy.requests.Load()
+	sr := runBD(t, bin, served.dir, served.env, s.Stdin, args...)
+	servedRequests := proxy.requests.Load() - before
 	wireRefusals := proxy.takeRefusals()
 	lr := runBD(t, bin, local.dir, local.env, s.Stdin, expand(context.Background(), t, bin, local, s.Args)...)
 	t.Logf("bd %s\nserved: %s\nembedded: exit=%d", strings.Join(s.Args, " "), sr, lr.code)
@@ -486,6 +501,9 @@ func runShape(t *testing.T, bin string, s shape, served, local *side, allow map[
 	}
 	if s.ExpectStderr != "" && !wantStderr.MatchString(sr.stderr) {
 		failf("served stderr does not match %q (embedded does): %s", s.ExpectStderr, sr)
+	}
+	if s.Requests != nil && servedRequests != int64(*s.Requests) {
+		failf("the served run made %d requests, want exactly %d (requests); a change that saves one updates the pin", servedRequests, *s.Requests)
 	}
 	if len(fails) > 0 {
 		return fails

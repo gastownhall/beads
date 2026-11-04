@@ -539,7 +539,11 @@ func (c *Client) ApplyBatch(ctx context.Context, body ApplyBatchRequest) (*apige
 	}
 
 	var out apigen.ApplyBatchResponse
-	r := Request{Op: OpApplyBatch, Method: http.MethodPost, Path: PathIssuesBatchApply, Body: body, Actor: body.Actor}
+	// A plan over the server's large-apply threshold runs under the server's
+	// extended budget, so it is dialed under the matching client ceiling
+	// rather than DefaultTimeout.
+	r := Request{Op: OpApplyBatch, Method: http.MethodPost, Path: PathIssuesBatchApply, Body: body, Actor: body.Actor,
+		Timeout: largeApplyTimeout(len(body.Items))}
 	if err := c.dispatch(ctx, r, &out); err != nil {
 		return nil, err
 	}

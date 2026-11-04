@@ -96,11 +96,18 @@ files:
         {"key": "t-ifa", "id": "e2e-t-ifa", "title": "target ifa", "type": "task", "assignee": "worker", "metadata": {"seeded": "keep"}},
         {"key": "t-death", "id": "e2e-t-death", "title": "target death", "type": "task", "assignee": "worker"},
         {"key": "t-rc", "id": "e2e-t-rc", "title": "target rc", "type": "task", "assignee": "worker"},
+        {"key": "t-hb", "id": "e2e-t-hb", "title": "target hb", "type": "task"},
+        {"key": "t-hb2", "id": "e2e-t-hb2", "title": "target hb2", "type": "task"},
+        {"key": "t-hb3", "id": "e2e-t-hb3", "title": "target hb3", "type": "task"},
         {"key": "t-boot", "id": "e2e-t-boot", "title": "target boot", "type": "task"},
         {"key": "t-ro", "id": "e2e-t-ro", "title": "target reopen", "type": "task"},
         {"key": "t-dr", "id": "e2e-t-dr", "title": "target dep remove", "type": "task", "deps": [{"target": "t-db"}]},
         {"key": "t-dc", "id": "e2e-t-dc", "title": "cascade root", "type": "epic"},
-        {"key": "t-dc.1", "id": "e2e-t-dc.1", "title": "cascade child", "type": "task", "parent_key": "t-dc"}
+        {"key": "t-dc.1", "id": "e2e-t-dc.1", "title": "cascade child", "type": "task", "parent_key": "t-dc"},
+        {"key": "t-gcr", "id": "e2e-t-gcr", "title": "target gate create", "type": "task"},
+        {"key": "t-gct", "id": "e2e-t-gct", "title": "target gate check", "type": "task"},
+        {"key": "t-gw", "id": "e2e-t-gw", "title": "target gate waiter", "type": "gate"},
+        {"key": "t-gaw", "id": "e2e-t-gaw", "title": "target gate await id", "type": "gate"}
       ]}
   - name: bulk-ready-a.json
     bulk: {id_prefix: e2e-bra, count: 60, priority: 3, metadata: {gc.routed_to: pool-a}}
@@ -144,18 +151,25 @@ seed:
 
 shapes:
   # ---------------------------------------------------------------- show
+  # requests pins each show's round trips (mc-5dkzp): resolving the id,
+  # fetching the row and reading it for output are one request per id, which
+  # the per-command read memo answers once.
   - id: gc-show-json
     source: gc bdstore.go BdStore.Get (show --json <id>); counts must not read 0
     args: [show, --json, e2e-blk]
+    requests: 1
   - id: gc-show-json-batch
     source: gc bdstore_exact_batch.go GetExactBatch
     args: [show, --json, e2e-r1, e2e-a1, e2e-blk, e2e-mol]
+    requests: 4
   - id: gc-show-json-wisp
     source: gc workquery.go blocked_by enrichment; wisps live in the ready tier
     args: [show, e2e-wisp-1, --json]
+    requests: 1
   - id: gc-show-id-flag
     source: gc cmd_bd_show_watch.go bdWatchRunner (show --json --id=<id>)
     args: [show, --json, --id=e2e-r1]
+    requests: 1
   # The worker holds eight in-progress issues; e2e-ip1 is the only P0 among
   # them, so "first in the store's default order" (priority first) names it on
   # both sides. Among equal priorities the order rests on created_at, and a
@@ -163,16 +177,21 @@ shapes:
   - id: gc-show-current
     source: gc cmd_bd_show_watch.go bdWatchRunner (show --current --json)
     args: [show, --current, --json]
+    requests: 3
   - id: gc-show-missing
     source: gc BdStore.Get not-found classification (routing fallbacks)
     args: [show, --json, e2e-nonexistent]
     expect_exit: 1
     expect_stderr: "(?i)not found"
     compare: exit
+    requests: 1
+  # Text show reads the row, then its dependents and its comments: three
+  # different URLs the memo cannot collapse.
   - id: mc-show-text
     source: mc prompts (bd show <id>, ~80)
     args: [show, e2e-r1]
     compare: text
+    requests: 3
 
   # ---------------------------------------------------------------- ready
   # e2e-wr and e2e-wisp-wr are the only open rows assigned to the worker when
@@ -289,6 +308,39 @@ shapes:
     source: mc skills/pr-review (list --all --id --json --limit)
     args: [list, --all, --id, "e2e-r1,e2e-a1", --json, --limit, "0"]
     pending: {slice: "SRV-1", reason: "S15b sends --id as listIssues id behind issues.list.ids, which the reference server does not advertise, so the client refuses before dialing (pinned passing against the current server by backend/http TestE2E_ListScopeFiltersOverHTTP); remove the mark when reference_server.json is upgraded"}
+  - id: gc-polecat-title-contains
+    source: gascity core formulas/mol-polecat-base.toml (list --title-contains --status a,b,c --json)
+    args: [list, --title-contains, "Routed", --status, "open,in_progress,blocked", --json]
+    pending: {slice: "SRV-1", reason: "--title-contains folds onto listIssues title behind issues.list.title, which the reference server does not advertise, so the client refuses before dialing (pinned passing against the current server by backend/http TestE2E_ListScopeFiltersOverHTTP); remove the mark when reference_server.json is upgraded"}
+  - id: gc-polecat-title-contains-closed-after
+    source: gascity core formulas/mol-polecat-base.toml (pre-flight 3d, list --title-contains --status closed --closed-after DATE --json)
+    args: [list, --title-contains, "closed task", --status, closed, --closed-after, "2000-01-01", --json]
+    pending: {slice: "SRV-1", reason: "needs issues.list.title (--title-contains folds onto listIssues title) and issues.list.filters (closed_after), which the reference server does not advertise, so the client refuses before dialing; remove the mark when reference_server.json is upgraded"}
+  - id: gc-polecat-closed-after
+    source: gascity core formulas/mol-polecat-base.toml:267 (list --title-contains --status closed --closed-after --json)
+    args: [list, --title-contains, "task", --status, closed, --closed-after, "2000-01-01", --json]
+    compare: ids
+    pending: {slice: "SRV-1", reason: "needs issues.list.title (--title-contains folds onto listIssues title) and issues.list.filters (closed_after), which the reference server does not advertise, so the client refuses before dialing (pinned passing against the current server by backend/http TestE2E_ListFilterParityOverHTTP); remove the mark when reference_server.json is upgraded"}
+  - id: wf-session-cleanup
+    source: an order cleanup script's closed-session sweep (list --all --include-infra --include-gates --status closed --label --closed-before --updated-before)
+    args: [list, --json, --all, --include-infra, --include-gates, --status, closed, --label, "lane:a", --closed-before, "2100-01-01T00:00:00Z", --updated-before, "2100-01-01T00:00:00Z", --limit, "0"]
+    compare: ids
+    pending: {slice: "SRV-1", reason: "needs issues.list.filters, which the reference server does not advertise, so the client refuses before dialing (pinned passing against the current server by backend/http TestE2E_ListFilterParityOverHTTP); remove the mark when reference_server.json is upgraded"}
+  - id: list-filter-priority-range
+    source: bd list --priority-min/--priority-max (listing filter parity)
+    args: [list, --json, --priority-min, "1", --priority-max, "3", --limit, "0"]
+    compare: ids
+    pending: {slice: "SRV-1", reason: "needs issues.list.filters, which the reference server does not advertise, so the client refuses before dialing (pinned passing against the current server by backend/http TestE2E_ListFilterParityOverHTTP); remove the mark when reference_server.json is upgraded"}
+  - id: list-filter-exclude-type-no-parent
+    source: bd list --exclude-type --no-parent (listing filter parity)
+    args: [list, --json, --exclude-type, epic, --no-parent, --limit, "0"]
+    compare: ids
+    pending: {slice: "SRV-1", reason: "needs issues.list.filters, which the reference server does not advertise, so the client refuses before dialing (pinned passing against the current server by backend/http TestE2E_ListFilterParityOverHTTP); remove the mark when reference_server.json is upgraded"}
+  - id: list-filter-updated-after
+    source: bd list --updated-after (listing filter parity)
+    args: [list, --json, --updated-after, "2000-01-01", --limit, "0"]
+    compare: ids
+    pending: {slice: "SRV-1", reason: "needs issues.list.filters, which the reference server does not advertise, so the client refuses before dialing (pinned passing against the current server by backend/http TestE2E_ListFilterParityOverHTTP); remove the mark when reference_server.json is upgraded"}
   - id: mc-list-assignee-status
     source: mc review summaries (list --assignee --json --limit --status)
     args: [list, --assignee, alice, --json, --limit, "10", --status, open]
@@ -352,7 +404,23 @@ shapes:
   - id: gc-blocked
     source: gc bdstore_ready_projection.go fetchReadyProjectionViaBlocked
     args: [blocked, --json]
-    pending: {slice: "S18", reason: "bd blocked hits the GetBlockedIssues stub (B3 #10)"}
+    pending: {slice: "SRV-1", reason: "bd blocked dials listBlockedIssues behind blocked.list, which the reference server does not advertise, so the client refuses at its capability preflight (pinned passing against the current server by backend/http TestE2E_BlockedOverHTTP); remove the mark when reference_server.json is upgraded"}
+  - id: gc-blocked-flags
+    source: gc bdstore_ready_projection.go readiness door (bd blocked --flags --json, ids on stdin)
+    args: [blocked, --flags, --json]
+    stdin: "e2e-mol\ne2e-mol.1\ne2e-mol.2\ne2e-no-such-row\n"
+    compare: json
+    pending: {slice: "SRV-1", reason: "bd blocked --flags reads listBlockingAnnotations is_blocked behind dependencies.blocking.isBlocked, which the reference server does not advertise, so the client refuses at its capability preflight (pinned passing against the current server by backend/http TestE2E_BlockedFlagsOverHTTP); remove the mark when reference_server.json is upgraded"}
+  - id: gc-blocked-flags-raw
+    source: gc bdstore_ready_projection.go readiness door (the stored is_blocked column, bd blocked --flags --raw --json, ids on stdin)
+    args: [blocked, --flags, --raw, --json]
+    stdin: "e2e-mol\ne2e-mol.1\ne2e-mol.2\ne2e-no-such-row\n"
+    compare: json
+    pending: {slice: "SRV-1", reason: "bd blocked --flags reads listBlockingAnnotations is_blocked behind dependencies.blocking.isBlocked, which the reference server does not advertise, so the client refuses at its capability preflight (pinned passing against the current server by backend/http TestE2E_BlockedFlagsOverHTTP); remove the mark when reference_server.json is upgraded"}
+  - id: gc-blocked-parent
+    source: bd blocked --parent (the molecule-scoped blocked listing)
+    args: [blocked, --json, --parent, e2e-mol]
+    pending: {slice: "SRV-1", reason: "bd blocked dials listBlockedIssues behind blocked.list, which the reference server does not advertise, so the client refuses at its capability preflight (pinned passing against the current server by backend/http TestE2E_BlockedOverHTTP); remove the mark when reference_server.json is upgraded"}
 
   # ---------------------------------------------------------------- molecules
   - id: mc-mol-current
@@ -429,6 +497,24 @@ shapes:
   - id: mc-gate-list-all
     source: core pack orders (gate list --all)
     args: [gate, list, --all, --json]
+  # gate check lists the open gates through the same ListGates entry. No
+  # seeded gate carries an await type (the seed graph carries no gate members;
+  # mc-gate-check-timer-resolves below creates a real timer gate), so the
+  # typed sweeps find nothing of their type and the untyped one lists the open
+  # gates and evaluates none: the listing is what these shapes prove served,
+  # and nothing resolves, escalates (no gt exec) or writes.
+  - id: mc-gate-check-timer
+    source: gc core pack gate-sweep.sh (bd gate check --type=timer --escalate)
+    args: [gate, check, --type=timer, --escalate]
+    compare: text
+  - id: mc-gate-check-gh
+    source: gc core pack gate-sweep.sh (bd gate check --type=gh --escalate)
+    args: [gate, check, --type=gh, --escalate]
+    compare: text
+  - id: gate-check-all
+    source: bd gate check (every open gate)
+    args: [gate, check]
+    compare: text
 
   - id: gc-export-all
     source: gc core pack reaper (gc bd export --all -o F)
@@ -670,6 +756,7 @@ shapes:
     args: [delete, e2e-t-dc, --cascade, --force]
     compare: exit
     verify: [[show, --json, e2e-t-dc.1]]
+    pending: {slice: "SRV-1", reason: "bd delete --cascade needs issues.delete.containmentCascade (GH#6301: an older server's cascade follows every dependency type, not just parent-child), which the reference server does not advertise, so the client refuses before dialing (pinned passing against the current server by internal/httpclient TestServedDeleterCascadeDeletesTheClosure); remove the mark when reference_server.json is upgraded"}
   - id: mc-delete-from-file
     source: mc session_cleanup.py / core reaper (delete --from-file)
     args: [delete, --from-file, "{file:delete-list.txt}", --force]
@@ -681,6 +768,35 @@ shapes:
     compare: exit
     verify: [[show, --json, e2e-t-rc]]
     pending: {slice: "SRV-1", reason: "the reference server does not advertise issues.reclaim (B3 #12), so the client refuses at its capability preflight"}
+  - id: gc-heartbeat
+    source: gc formulas/mol-do-work.toml:47 (gc bd heartbeat <id> -> bd heartbeat)
+    setup: [[update, e2e-t-hb, --claim]]
+    args: [heartbeat, e2e-t-hb, --json]
+    verify: [[show, --json, e2e-t-hb]]
+    pending: {slice: "reference-server-heartbeat", reason: "the reference server does not advertise issues.heartbeat, so the client refuses at its capability preflight; pinned passing by backend/http TestE2E_HeartbeatOverHTTP; remove the mark when reference_server.json is upgraded"}
+  - id: gc-heartbeat-non-holder
+    source: gc formulas/mol-do-work.toml:47 (a worker heartbeating a bead another actor holds)
+    setup: [[update, e2e-t-hb2, --claim, --actor, alice]]
+    args: [heartbeat, e2e-t-hb2]
+    expect_exit: 1
+    expect_stderr: "(?i)claimed by|alice"
+    compare: exit
+    pending: {slice: "reference-server-heartbeat", reason: "the reference server does not advertise issues.heartbeat, so the client refuses at its capability preflight; pinned passing by backend/http TestE2E_HeartbeatOverHTTP; remove the mark when reference_server.json is upgraded"}
+  - id: gc-heartbeat-closed
+    source: gc formulas/mol-do-work.toml:47 (a worker heartbeating a bead that was closed under it)
+    setup: [[update, e2e-t-hb3, --claim], [close, e2e-t-hb3]]
+    args: [heartbeat, e2e-t-hb3]
+    expect_exit: 1
+    expect_stderr: "(?i)status closed|is closed"
+    compare: exit
+    pending: {slice: "reference-server-heartbeat", reason: "the reference server does not advertise issues.heartbeat, so the client refuses at its capability preflight; pinned passing by backend/http TestE2E_HeartbeatOverHTTP; remove the mark when reference_server.json is upgraded"}
+  - id: gc-heartbeat-wisp
+    source: gc formulas/mol-do-work.toml:47 (a heartbeat on a wisp, which is never leased)
+    args: [heartbeat, e2e-wisp-2]
+    expect_exit: 1
+    expect_stderr: "(?i)ephemeral"
+    compare: exit
+    pending: {slice: "reference-server-heartbeat", reason: "the reference server does not advertise issues.heartbeat, so the client refuses at its capability preflight; pinned passing by backend/http TestE2E_HeartbeatOverHTTP; remove the mark when reference_server.json is upgraded"}
   - id: mc-promote
     source: mc mol-normalized-issue-pr-v1 (promote --reason)
     args: [promote, e2e-wisp-p, --reason, "keep it"]
@@ -735,3 +851,33 @@ shapes:
     expect_exit: 1
     expect_stderr: 'unknown command "meta"'
     compare: exit
+  # ---------------------------------------------------------------- gates
+  # The gate writes: create (one createIssue carrying the gate members and the
+  # blocks edge), a real timer gate resolving under gate check, add-waiter (a
+  # guarded waiters patch) and update --await-id. A --timeout=1ns timer is
+  # expired by the time gate check runs, so the resolution is deterministic.
+  - id: mc-gate-create-timer
+    source: core formulas / gate-sweep (bd gate create --type=timer --timeout --blocks)
+    args: [gate, create, --type=timer, --timeout=1ns, --blocks, e2e-t-gcr, --json]
+    ignore_fields: [id]  # each side mints its own gate id
+    pending: {slice: "SRV-1", reason: "bd gate create sends the gate members on createIssue behind issues.create.gates, which the reference server does not advertise, so the client refuses before dialing (pinned passing against the current server by backend/http TestE2E_GatesOverHTTP); remove the mark when reference_server.json is upgraded"}
+  - id: mc-gate-check-timer-resolves
+    source: core gate-sweep.sh (gate check --type=timer --escalate) over a real timer gate
+    setup: [[gate, create, --type=timer, --timeout=1ns, --blocks, e2e-t-gct]]
+    args: [gate, check, --type=timer, --escalate]
+    compare: exit
+    verify: [[ready, --json, --limit, "0"]]  # e2e-t-gct is ready on both sides
+    ignore_fields: [depends_on_id]  # its (closed) gate's id is minted per workspace
+    pending: {slice: "SRV-1", reason: "the setup bd gate create sends the gate members on createIssue behind issues.create.gates, which the reference server does not advertise, so the client refuses before dialing (pinned passing against the current server by backend/http TestE2E_GatesOverHTTP); remove the mark when reference_server.json is upgraded"}
+  - id: mc-gate-add-waiter
+    source: bd done --phase-complete (gate add-waiter)
+    args: [gate, add-waiter, e2e-t-gw, "rig/workers/a"]
+    compare: text
+    verify: [[show, --json, e2e-t-gw]]
+    pending: {slice: "SRV-1", reason: "bd gate add-waiter sends waiters on updateIssue behind issues.update.gates, which the reference server does not advertise, so the client refuses before dialing (pinned passing against the current server by backend/http TestE2E_GatesOverHTTP); remove the mark when reference_server.json is upgraded"}
+  - id: mc-update-await-id
+    source: gate discover / gate check gh:run persist (update --await-id)
+    args: [update, e2e-t-gaw, --await-id, "12345", --json]
+    compare: exit
+    verify: [[show, --json, e2e-t-gaw]]
+    pending: {slice: "SRV-1", reason: "bd update --await-id sends await_id on updateIssue behind issues.update.gates, which the reference server does not advertise, so the client refuses before dialing (pinned passing against the current server by backend/http TestE2E_GatesOverHTTP); remove the mark when reference_server.json is upgraded"}

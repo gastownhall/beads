@@ -5,10 +5,11 @@ import (
 
 	"github.com/steveyegge/beads/internal/eventsjournal"
 	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/internal/versionedhistory"
 )
 
 // openBeadMutatingStore opens a repair handler's store WITH the workspace's
-// events-journal activation applied.
+// events-journal and versioned-history activation applied.
 //
 // Most of bd doctor inspects and repairs workspace state — schema cursors,
 // metadata, remotes, fingerprints, git — and none of that belongs in a journal
@@ -17,7 +18,10 @@ import (
 // fresh-clone import paths CREATE them. Those are ordinary bead mutations, and
 // a consumer whose mirror silently diverges because someone ran
 // `bd doctor --fix` is exactly the failure the journal exists to prevent — the
-// more so because a repair is unattended and nobody is watching the diff.
+// more so because a repair is unattended and nobody is watching the diff. The
+// same repairs are also ordinary issue mutations for version history, and an
+// issue_versions trail with a silent gap where `bd doctor --fix` ran is the same
+// failure one table over.
 //
 // The read-only and workspace-state handlers deliberately keep opening the
 // store directly; they carry their exemption in the construction guard, with a
@@ -27,7 +31,7 @@ import (
 // is what a repair path legitimately does.
 func openBeadMutatingStore(ctx context.Context, beadsDir string) (*dolt.DoltStore, error) {
 	store, err := dolt.NewFromConfig(ctx, beadsDir)
-	return activated(beadsDir, store, err)
+	return activated(ctx, beadsDir, store, err)
 }
 
 // openBeadMutatingStoreCreating is openBeadMutatingStore for the fresh-clone
@@ -36,15 +40,23 @@ func openBeadMutatingStore(ctx context.Context, beadsDir string) (*dolt.DoltStor
 // guard rather than failing on an absent database.
 func openBeadMutatingStoreCreating(ctx context.Context, beadsDir string) (*dolt.DoltStore, error) {
 	store, err := dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{CreateIfMissing: true})
-	return activated(beadsDir, store, err)
+	return activated(ctx, beadsDir, store, err)
 }
 
-// activated applies the workspace's journal setting and closes the store if it
-// cannot be honored. A failed open passes straight through, so the typed-nil
-// store never reaches the activation.
-func activated(beadsDir string, store *dolt.DoltStore, err error) (*dolt.DoltStore, error) {
+// activated applies the workspace's journal setting and the store's own
+// versioned-history setting, and closes the store if the journal cannot be
+// honored. A failed open passes straight through, so the typed-nil store never
+// reaches the activation.
+//
+// Versioned history cannot fail an open (a plumbing that cannot version simply
+// records nothing), so it needs no error handling of its own; it runs after the
+// journal so a store the journal refused is never activated. It is the shared
+// internal/versionedhistory rule, not a copy: package main cannot be imported
+// from here.
+func activated(ctx context.Context, beadsDir string, store *dolt.DoltStore, err error) (*dolt.DoltStore, error) {
 	if _, err = eventsjournal.ActivateStore(beadsDir, store, err); err != nil {
 		return nil, err
 	}
+	_, _ = versionedhistory.ActivateStore(ctx, store, nil)
 	return store, nil
 }

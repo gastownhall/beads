@@ -25,6 +25,10 @@ var listScopeCases = []struct {
 		func(r *issueops.ListRequest) { r.NoAssignee = true }, []string{"true"}},
 	{"TitleSearch", "title", wire.CapListTitle,
 		func(r *issueops.ListRequest) { r.TitleSearch = "Routed open task" }, []string{"Routed open task"}},
+	// `--title-contains` compiles to the same predicate as `--title`, so it
+	// folds onto `title` behind the same token.
+	{"TitleContains", "title", wire.CapListTitle,
+		func(r *issueops.ListRequest) { r.TitleContains = "Routed" }, []string{"Routed"}},
 	{"IDFilter", "id", wire.CapListIDs,
 		// Split the way the role splits it, one `id` value per member.
 		func(r *issueops.ListRequest) { r.IDFilter = "e2e-r1, e2e-a1,e2e-r1" }, []string{"e2e-r1", "e2e-a1"}},
@@ -96,5 +100,26 @@ func TestListScopeFiltersRefuseLocallyWhenTheServerLacksTheToken(t *testing.T) {
 				t.Errorf("a listing without %s sent %s: %v", tc.name, tc.param, q)
 			}
 		})
+	}
+}
+
+// TestListTitleContainsThatDiffersFromTitleRefusesBeforeDialing: a `--title`
+// and `--title-contains` that differ cannot both ride `title`, so the leftover
+// TitleContains rides `title_contains`, behind issues.list.filters. Against a
+// server that serves the title token but not that one, the request refuses,
+// naming the token, without a round trip and without dropping either half.
+func TestListTitleContainsThatDiffersFromTitleRefusesBeforeDialing(t *testing.T) {
+	served := &apigen.ContextResponse{Capabilities: []string{"issues.list", wire.CapListTitle}}
+	w := newCountingWire(`{"items":[],"has_more":false}`)
+	req := issueops.ListRequest{TitleSearch: "Routed", TitleContains: "task"}
+	_, err := listRoleWithSnapshot(t, w, served).List(t.Context(), req)
+	if err == nil {
+		t.Fatal("List with a differing --title/--title-contains pair succeeded; one half was dropped")
+	}
+	if !strings.Contains(err.Error(), wire.CapListFilters) {
+		t.Errorf("refusal %q does not name %s", err, wire.CapListFilters)
+	}
+	if len(w.dialed) != 0 {
+		t.Errorf("dialed %d times, want 0", len(w.dialed))
 	}
 }

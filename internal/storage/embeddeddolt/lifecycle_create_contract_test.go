@@ -43,6 +43,12 @@ func TestLifecycleCreateContract(t *testing.T) {
 	t.Run("AppliesTheDefaultPriority", func(t *testing.T) {
 		conformance.RunLifecycleCreateAppliesTheDefaultPriority(t, ctx, fixture)
 	})
+	t.Run("WritesTheGateMembers", func(t *testing.T) {
+		conformance.RunLifecycleCreateWritesTheGateMembers(t, ctx, fixture)
+	})
+	t.Run("BoundsTheGateMembers", func(t *testing.T) {
+		conformance.RunLifecycleCreateBoundsTheGateMembers(t, ctx, fixture)
+	})
 }
 
 func newEmbeddedLifecycleCreateFixture(t *testing.T, te *testEnv, prefix string) conformance.LifecycleCreateFixture {

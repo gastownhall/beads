@@ -294,8 +294,9 @@ func RemoveCursor(global bool) error {
 			if err := os.Remove(cursorRulesPath); err != nil && !os.IsNotExist(err) {
 				return HandleError("failed to remove rules: %v", err)
 			}
-			// Best-effort: drop the rules dir if it is now empty.
-			_ = os.Remove(filepath.Dir(cursorRulesPath))
+			// Best-effort: drop the rules dir if that left it empty, but
+			// never a symlinked one (RemoveEmptyDir).
+			_ = RemoveEmptyDir(filepath.Dir(cursorRulesPath))
 		}
 	}
 

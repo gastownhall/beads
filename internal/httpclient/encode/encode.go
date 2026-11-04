@@ -315,7 +315,61 @@ func ListParams(req issueops.ListRequest) (url.Values, error) {
 
 	b.boolean("brief", req.Brief)
 	b.intPtr("limit", req.Limit)
+	b.listFilters(req)
 	return b.done()
+}
+
+// listFilters emits the rest of `bd list`'s filter vocabulary, the members
+// listIssues carries behind issues.list.filters, in the document's order. The
+// pre-dial gate (httpclient role_reader.go, listFiltersSet) asks the handshake
+// for that token whenever one of these is set; this emitter assumes it did.
+//
+// The bounds travel as the instants the CLI resolved (relative and date-only
+// values are read on the CLIENT's clock and zone, exactly as locally), and the
+// server compares them at whole seconds as the local store does.
+func (b *builder) listFilters(req issueops.ListRequest) {
+	b.str("title_contains", req.TitleContains)
+	b.str("desc_contains", req.DescContains)
+	b.str("notes_contains", req.NotesContains)
+	b.str("external_contains", req.ExternalContains)
+	b.str("external_ref", req.ExternalRef)
+	b.str("spec", req.SpecPrefix)
+	b.str("label_pattern", req.LabelPattern)
+	b.str("label_regex", req.LabelRegex)
+
+	b.timestamp("updated_after", req.UpdatedAfter)
+	b.timestamp("updated_before", req.UpdatedBefore)
+	b.timestamp("closed_after", req.ClosedAfter)
+	b.timestamp("closed_before", req.ClosedBefore)
+	b.timestamp("defer_after", req.DeferAfter)
+	b.timestamp("defer_before", req.DeferBefore)
+	b.timestamp("due_after", req.DueAfter)
+	b.timestamp("due_before", req.DueBefore)
+
+	b.intPtr("priority", req.Priority)
+	b.intPtr("priority_min", req.PriorityMin)
+	b.intPtr("priority_max", req.PriorityMax)
+
+	b.boolean("empty_description", req.EmptyDesc)
+	b.boolean("no_labels", req.NoLabels)
+	b.boolean("no_parent", req.NoParent)
+	b.list("exclude_type", req.ExcludeTypes)
+	b.list("exclude_status", req.ExcludeStatus)
+
+	b.boolean("pinned", req.PinnedFlag)
+	b.boolean("no_pinned", req.NoPinnedFlag)
+	b.boolean("deferred", req.DeferredFlag)
+	b.boolean("overdue", req.OverdueFlag)
+
+	// A set pointer travels even when it points at "": the role reads that
+	// as a real `= ''` predicate, and the server refuses the empty value by
+	// name rather than reading it as absent — never a silently wider listing.
+	if req.MolType != nil {
+		b.v.Set("mol_type", string(*req.MolType))
+	}
+	if req.WispType != nil {
+		b.v.Set("wisp_type", string(*req.WispType))
+	}
 }
 
 // splitIDSet reads ListRequest.IDFilter's comma-separated set the way the role

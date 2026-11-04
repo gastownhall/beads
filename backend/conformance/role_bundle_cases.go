@@ -63,6 +63,7 @@ var roleContractCases = []roleContract{
 		RunBatchApplyCloseItemsAnswerToTheCloseGuards,
 		RunBatchApplyRefusesADottedChildGatedOnItsOwnParent,
 		RunBatchApplyAppliesTheDefaultPriority,
+		RunBatchApplyCarriesTheGateMembers,
 	),
 
 	roleCases("BatchCloser", "BatchCloser()", oncePerRole,
@@ -93,6 +94,8 @@ var roleContractCases = []roleContract{
 	roleCases("BatchCreator", "BatchCreator()", oncePerRole,
 		func(b RoleContractBundle) func(t *testing.T) *BatchCreatorFixture { return b.BatchCreator },
 		RunBatchCreatorCreatesEveryItemAsOneAct,
+		RunBatchCreatorMintsADistinctIDForEachIdenticalItem,
+		RunBatchCreatorMintsPastAnIDALaterItemNames,
 		RunBatchCreatorRefusesEverythingWhenOneItemRefuses,
 		RunBatchCreatorRejectsAnUnusableRequest,
 		RunBatchCreatorRefusesACrossPlaneInBatchEdge,
@@ -242,6 +245,8 @@ var roleContractCases = []roleContract{
 		RunDeleterForceOrphansDependents,
 		RunDeleterCascadeDeletesTheClosure,
 		RunDeleterCascadeFromAWispRootDeletesTheClosure,
+		RunDeleterCascadeFollowsOnlyContainment,
+		RunDeleterCascadeReportsSurvivingDependents,
 		RunDeleterGuardsAWispNamedWithADurableDependent,
 		RunDeleterGuardsADurableNamedWithAWispDependent,
 		RunDeleterCountsCrossPlaneEdgesItRemoves,
@@ -362,6 +367,33 @@ var roleContractCases = []roleContract{
 		RunGraphCounterWritesNothing,
 	),
 
+	roleCases("IDRetention", "Sweeper(), Lifecycle(), Reader(), BatchApplier(), BatchCreator(), Importer(), WorkspaceConfig()", oncePerRole,
+		func(b RoleContractBundle) func(t *testing.T) *IDRetentionFixture { return b.IDRetention },
+		RunIDRetentionAPlainSweepLeavesTheIDReusable,
+		RunIDRetentionARetainingSweepRetiresEverySweptID,
+		RunIDRetentionRefusesARecreateThroughCreate,
+		RunIDRetentionRefusesARecreateOnTheOtherPlane,
+		RunIDRetentionRefusesThroughABatchApply,
+		RunIDRetentionRefusesThroughABatchCreate,
+		RunIDRetentionRefusesThroughTheStorageSeam,
+		RunIDRetentionRefusesARenameOntoARetiredID,
+		RunIDRetentionRefusesInsideATransaction,
+		RunIDRetentionImportSkipsAndReportsARetiredRow,
+		RunIDRetentionNeverMintsARetiredID,
+		RunIDRetentionNeverMintsARetiredChildID,
+		RunIDRetentionDryRunRetiresNothing,
+		RunIDRetentionRetiresOnlyWhatItSwept,
+		RunIDRetentionARetainingDurableSweepRecordsExactlyOneHistoryEntry,
+		RunIDRetentionARacingRecreateNeverLands,
+		RunIDRetentionARacingUpsertNeverResurrects,
+		RunIDRetentionARacingImportNeverResurrects,
+		RunIDRetentionRefusesANoHistoryRecreateThroughEveryDoor,
+		RunIDRetentionAWispsPlaneRetainingSweepRetiresItsRows,
+		RunIDRetentionAPlainSweepSkipsARetainedType,
+		RunIDRetentionARetainedTypeIsHeldBackBeforeTheProtectionsAndTheLimit,
+		RunIDRetentionARetainedTypeReadErrorFailsTheSweep,
+	),
+
 	// The accessor named here is NOT a storage.DoltStorage one, alone among
 	// these rows: Importer is served only by uow.ImporterSource, so a backend
 	// built on the store interface has nothing to fill this field with and
@@ -423,6 +455,22 @@ var roleContractCases = []roleContract{
 		RunJournalLimitCapsRowsNotHead,
 		RunJournalTruncationIsTypedAndNamesTheWindow,
 		RunJournalHeadSurvivesAFullPrune,
+		// The arrival_seq cases (journal_arrival_contract.go). They rebaseline
+		// like every case here, and one of them prunes; they run before
+		// EveryMutationKindLandsARow, which stays LAST for the reason its own
+		// doc states.
+		RunJournalArrivalStampsAWispCreateWithItsRecordSeq,
+		RunJournalArrivalOrdersABatchByItem,
+		RunJournalArrivalIsOnEveryReadPath,
+		RunJournalArrivalNeverChanges,
+		RunJournalArrivalOnlyWhileJournaling,
+		RunJournalArrivalOnlyOnTheWispPlane,
+		RunJournalArrivalRecoversCreateOrderAfterTruncation,
+		RunJournalArrivalIsNeverReused,
+		RunJournalArrivalIgnoresSuppliedValues,
+		RunJournalArrivalReimportKeepsTheStamp,
+		RunJournalArrivalFirstCreateRecordStampsAnUnstampedRow,
+		RunJournalArrivalRenameKeepsTheStamp,
 		RunJournalEveryMutationKindLandsARow,
 	),
 
@@ -463,6 +511,8 @@ var roleContractCases = []roleContract{
 		RunLifecycleCreateWritesEveryScalarField,
 		RunLifecycleCreateEchoesSubSecondTimestamps,
 		RunLifecycleCreateAppliesTheDefaultPriority,
+		RunLifecycleCreateWritesTheGateMembers,
+		RunLifecycleCreateBoundsTheGateMembers,
 	),
 
 	roleCases("LifecycleUpdate", "IssueLifecycle()", oncePerRole,
@@ -494,6 +544,8 @@ var roleContractCases = []roleContract{
 		RunLifecycleUpdateProvenanceLabelsHistory,
 		RunLifecycleUpdateRefusesATemplate,
 		RunLifecycleUpdateAllowTemplateEditsATemplate,
+		RunLifecycleUpdatePatchesTheGateMembers,
+		RunLifecycleUpdateBoundsTheGateMembers,
 	),
 
 	roleCases("Memories", "Memories()", oncePerRole,
@@ -599,6 +651,8 @@ var roleContractCases = []roleContract{
 		RunReaderListWispTypeNarrowsTheAdmittedPlaneRatherThanAdmittingIt,
 		RunReaderListBriefDropsTheFreeFormTextAndNothingElse,
 		RunReaderReadyBriefDropsTheFreeFormTextAndNothingElse,
+		RunReaderListTimeBoundsAreStrictAndWholeSecond,
+		RunReaderListFilterFamiliesNarrowToTheirRows,
 	),
 
 	roleCases("ReadyClaimer", "ReadyClaimer() and IssueReader()", oncePerRole,
@@ -755,6 +809,7 @@ var roleContractCases = []roleContract{
 		RunWorkspaceConfigRefusesTheProtectedKeyOnSet,
 		RunWorkspaceConfigUnsetDoesNotRefuseTheProtectedKey,
 		RunWorkspaceConfigRefusesAnUnparseableCustomStatus,
+		RunWorkspaceConfigBoundsTheKeyAndTheValueOnSet,
 		RunWorkspaceConfigProjectsCustomStatuses,
 		RunWorkspaceConfigProjectsCustomTypes,
 		RunWorkspaceConfigUnsetLeavesTheProjectionBehind,

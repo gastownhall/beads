@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -13,6 +15,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/workspacegate"
 )
 
@@ -93,12 +97,119 @@ func TestAcquireCommandWorkspaceGatesAbsentWorkspace(t *testing.T) {
 	t.Cleanup(releaseWorkspaceGates)
 
 	list := &cobra.Command{Use: "list"}
+	before := newGateTestWorkspace(t)
+	if err := acquireCommandWorkspaceGates(context.Background(), list, before); err != nil || workspaceGateHandle == nil {
+		t.Fatalf("initial command must hold a gate: %v", err)
+	}
 	missing := filepath.Join(t.TempDir(), "nope", ".beads")
 	if err := acquireCommandWorkspaceGates(context.Background(), list, missing); err != nil {
 		t.Fatalf("absent beadsDir must be silently ungated, got %v", err)
 	}
 	if workspaceGateHandle != nil {
 		t.Error("absent beadsDir must leave no gate handle")
+	}
+}
+
+// A process that runs more than one command (tests, embedders) must not keep
+// the previous command's SHARED hold once the next command takes its own
+// gates: otherwise the first workspace stays held, and a maintenance
+// operation there is turned away by a command that has already finished.
+func TestAcquireCommandWorkspaceGatesReleasesThePreviousCommandsHold(t *testing.T) {
+	resetGateTestEnv(t)
+	t.Cleanup(releaseWorkspaceGates)
+	list := &cobra.Command{Use: "list"}
+	ctx := context.Background()
+
+	first := newGateTestWorkspace(t)
+	if err := acquireCommandWorkspaceGates(ctx, list, first); err != nil || workspaceGateHandle == nil {
+		t.Fatalf("first command must hold a gate: %v", err)
+	}
+	second := newGateTestWorkspace(t)
+	if err := acquireCommandWorkspaceGates(ctx, list, second); err != nil || workspaceGateHandle == nil {
+		t.Fatalf("second command must hold a gate: %v", err)
+	}
+
+	gate, err := workspacegate.ForWorkspace(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	holder, err := gate.Acquire(ctx, workspacegate.Exclusive, workspacegate.Options{Reason: "test maintenance"})
+	if err != nil {
+		t.Fatalf("exclusive acquire on the first command's workspace once the second command holds its own gates: %v, want success", err)
+	}
+	_ = holder.Release()
+}
+
+// gateCloseProbeStore and gateCloseProbeProvider stand in for the store and
+// provider a previous command left open; Close runs the test's probe.
+type gateCloseProbeStore struct {
+	storage.DoltStorage
+	onClose func()
+}
+
+func (s *gateCloseProbeStore) Close() error {
+	s.onClose()
+	return nil
+}
+
+type gateCloseProbeProvider struct {
+	uow.UnitOfWorkProvider
+	onClose func()
+}
+
+func (p *gateCloseProbeProvider) Close(context.Context) error {
+	p.onClose()
+	return nil
+}
+
+// When a command's RunE fails, Cobra skips PersistentPostRunE, so the store it
+// opened is still open when the same process runs its next command. Before the
+// next chokepoint drops the previous command's gates it must close that store
+// and provider: gates outlive the store, or an exclusive maintenance operation
+// could start against storage that has not quiesced.
+func TestAcquireCommandWorkspaceGatesClosesThePreviousCommandsStoreFirst(t *testing.T) {
+	resetGateTestEnv(t)
+	t.Cleanup(releaseWorkspaceGates)
+	originalStore, originalProvider := store, uowProvider
+	t.Cleanup(func() { store, uowProvider = originalStore, originalProvider })
+	list := &cobra.Command{Use: "list"}
+	ctx := context.Background()
+
+	first := newGateTestWorkspace(t)
+	if err := acquireCommandWorkspaceGates(ctx, list, first); err != nil || workspaceGateHandle == nil {
+		t.Fatalf("first command must hold a gate: %v", err)
+	}
+	gate, err := workspacegate.ForWorkspace(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Each close records whether the first command's gate was still held.
+	var closes []string
+	probe := func(what string) func() {
+		return func() {
+			h, err := gate.Acquire(ctx, workspacegate.Exclusive, workspacegate.Options{})
+			switch {
+			case errors.Is(err, workspacegate.ErrBusy):
+				closes = append(closes, what+" closed under the gate")
+			case err == nil:
+				_ = h.Release()
+				closes = append(closes, what+" closed after the gate dropped")
+			default:
+				t.Errorf("probing the first command's gate when its %s closed: %v", what, err)
+			}
+		}
+	}
+	store = &gateCloseProbeStore{onClose: probe("store")}
+	uowProvider = &gateCloseProbeProvider{onClose: probe("provider")}
+
+	if err := acquireCommandWorkspaceGates(ctx, list, newGateTestWorkspace(t)); err != nil {
+		t.Fatalf("second command: %v", err)
+	}
+	if want := []string{"provider closed under the gate", "store closed under the gate"}; !slices.Equal(closes, want) {
+		t.Fatalf("the previous command's storage: %v, want %v", closes, want)
+	}
+	if store != nil || uowProvider != nil {
+		t.Fatal("the previous command's store and provider must not survive into the next command")
 	}
 }
 
@@ -134,11 +245,15 @@ func countGateNotices(t *testing.T) *atomic.Int32 {
 func TestAcquireCommandWorkspaceGatesBlockedByExclusiveHolder(t *testing.T) {
 	resetGateTestEnv(t)
 	t.Cleanup(releaseWorkspaceGates)
+	list := &cobra.Command{Use: "list"}
+	prior := newGateTestWorkspace(t)
+	if err := acquireCommandWorkspaceGates(context.Background(), list, prior); err != nil || workspaceGateHandle == nil {
+		t.Fatalf("initial command must hold a gate: %v", err)
+	}
 	beadsDir := newGateTestWorkspace(t)
 	t.Setenv(sharedGateWaitEnv, "300ms")
 	holdWorkspaceGateExclusive(t, beadsDir)
 
-	list := &cobra.Command{Use: "list"}
 	var err error
 	start := time.Now()
 	stderr := captureStderr(t, func() {
@@ -390,6 +505,45 @@ func TestSharedHoldAdvertisedToChildren(t *testing.T) {
 	releaseWorkspaceGates()
 	if got := os.Getenv(workspacegate.InheritedHoldEnv); got != "inherited" {
 		t.Fatalf("%s after release = %q, want the inherited value restored", workspacegate.InheritedHoldEnv, got)
+	}
+}
+
+// A strict readonly command on a never-gated workspace holds nothing, so it
+// must not advertise a shared hold: a child trusting the marker would skip the
+// writer-fairness queue for a maintenance operation this process does not
+// block. Once the gate files exist the strict readonly hold is real, and it is
+// advertised like any other.
+func TestSharedHoldAdvertisedOnlyWhenAGateIsHeld(t *testing.T) {
+	resetGateTestEnv(t)
+	advertiseSharedHoldEnabled = true
+	t.Cleanup(func() { advertiseSharedHoldEnabled = false })
+	t.Cleanup(releaseWorkspaceGates)
+	beadsDir := newGateTestWorkspace(t)
+	list := &cobra.Command{Use: "list"}
+	ctx := context.Background()
+
+	setReadonlyMode(t, true)
+	if err := acquireCommandWorkspaceGates(ctx, list, beadsDir); err != nil {
+		t.Fatal(err)
+	}
+	if got := os.Getenv(workspacegate.InheritedHoldEnv); got != "" {
+		t.Fatalf("%s while a strict readonly command holds nothing = %q, want it left empty", workspacegate.InheritedHoldEnv, got)
+	}
+	releaseWorkspaceGates()
+
+	// A normal command materializes the gate files.
+	setReadonlyMode(t, false)
+	if err := acquireCommandWorkspaceGates(ctx, list, beadsDir); err != nil {
+		t.Fatal(err)
+	}
+	releaseWorkspaceGates()
+
+	setReadonlyMode(t, true)
+	if err := acquireCommandWorkspaceGates(ctx, list, beadsDir); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := os.Getenv(workspacegate.InheritedHoldEnv), strconv.Itoa(os.Getpid()); got != want {
+		t.Fatalf("%s while a strict readonly command holds existing gates = %q, want %q", workspacegate.InheritedHoldEnv, got, want)
 	}
 }
 
@@ -804,5 +958,182 @@ func TestEnvWithoutSharedHoldMarker(t *testing.T) {
 	}
 	if !kept {
 		t.Fatal("envWithoutSharedHoldMarker dropped unrelated variables")
+	}
+}
+
+// setReadonlyMode pins strict --readonly for one test, as PersistentPreRunE
+// leaves readonlyMode by the time it acquires the gates.
+func setReadonlyMode(t *testing.T, on bool) {
+	t.Helper()
+	original := readonlyMode
+	readonlyMode = on
+	t.Cleanup(func() { readonlyMode = original })
+}
+
+// newGateTestServerWorkspace is newGateTestWorkspace for a local-server
+// workspace: its physical root is .beads/dolt, not .beads/embeddeddolt.
+func newGateTestServerWorkspace(t *testing.T) string {
+	t.Helper()
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(filepath.Join(beadsDir, "dolt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	meta := `{"backend":"dolt","database":"beads.db","dolt_mode":"server"}`
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(meta), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return beadsDir
+}
+
+// dirEntryNames lists dir's immediate entries by name, so a test can prove a
+// command left the directory exactly as it found it.
+func dirEntryNames(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	return names
+}
+
+// Strict --readonly is mutation-free (effectiveRootStorePolicy), so taking the
+// command's gates must not create any gate file: not the workspace gate beside
+// .beads, and not the physical-root gate inside it (.beads/embeddeddolt for an
+// embedded workspace, .beads/dolt for a local server one).
+func TestAcquireCommandWorkspaceGatesStrictReadonlyCreatesNoGateFiles(t *testing.T) {
+	layouts := []struct {
+		name  string
+		build func(*testing.T) string
+	}{
+		{"embedded", newGateTestWorkspace},
+		{"local server", newGateTestServerWorkspace},
+	}
+	for _, tc := range layouts {
+		t.Run(tc.name, func(t *testing.T) {
+			resetGateTestEnv(t)
+			t.Cleanup(releaseWorkspaceGates)
+			setReadonlyMode(t, true)
+			beadsDir := tc.build(t)
+			projectDir := filepath.Dir(beadsDir)
+			projectBefore, beadsBefore := dirEntryNames(t, projectDir), dirEntryNames(t, beadsDir)
+
+			list := &cobra.Command{Use: "list"}
+			if err := acquireCommandWorkspaceGates(context.Background(), list, beadsDir); err != nil {
+				t.Fatalf("strict readonly acquisition on a never-gated workspace: %v", err)
+			}
+			// SHARED fail-open also returns nil and creates nothing; it is
+			// told apart by running with no handle at all.
+			if workspaceGateHandle == nil {
+				t.Fatal("strict readonly acquisition on a never-gated workspace ran ungated, want a handle that holds nothing")
+			}
+			if !workspaceGateHandle.Empty() {
+				t.Fatal("strict readonly acquisition on a never-gated workspace locked a gate file")
+			}
+			if got := dirEntryNames(t, projectDir); !slices.Equal(got, projectBefore) {
+				t.Errorf("strict readonly changed %s\n before: %v\n after:  %v", projectDir, projectBefore, got)
+			}
+			if got := dirEntryNames(t, beadsDir); !slices.Equal(got, beadsBefore) {
+				t.Errorf("strict readonly changed %s\n before: %v\n after:  %v", beadsDir, beadsBefore, got)
+			}
+		})
+	}
+}
+
+// Not creating a gate file must not mean not honoring one. Once a workspace's
+// gate files exist (any normal bd command creates them), a strict readonly
+// command still holds them SHARED — so maintenance sees it and refuses to run
+// over it — and is still refused while maintenance holds the gate.
+func TestAcquireCommandWorkspaceGatesStrictReadonlyStillHonorsExistingGates(t *testing.T) {
+	resetGateTestEnv(t)
+	t.Cleanup(releaseWorkspaceGates)
+	beadsDir := newGateTestWorkspace(t)
+	list := &cobra.Command{Use: "list"}
+	ctx := context.Background()
+
+	// A normal command materializes the gate files.
+	setReadonlyMode(t, false)
+	if err := acquireCommandWorkspaceGates(ctx, list, beadsDir); err != nil {
+		t.Fatal(err)
+	}
+	releaseWorkspaceGates()
+
+	setReadonlyMode(t, true)
+	if err := acquireCommandWorkspaceGates(ctx, list, beadsDir); err != nil {
+		t.Fatalf("strict readonly acquisition against existing gate files: %v", err)
+	}
+	gate, err := workspacegate.ForWorkspace(beadsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gate.Acquire(ctx, workspacegate.Exclusive, workspacegate.Options{}); !errors.Is(err, workspacegate.ErrBusy) {
+		t.Fatalf("exclusive acquire while a strict readonly command is running: err = %v, want ErrBusy", err)
+	}
+	releaseWorkspaceGates()
+
+	holder, err := gate.Acquire(ctx, workspacegate.Exclusive, workspacegate.Options{Reason: "test maintenance"})
+	if err != nil {
+		t.Fatalf("exclusive acquire after the strict readonly command released: %v", err)
+	}
+	defer func() { _ = holder.Release() }()
+	// Bound the shared wait: resetGateTestEnv clears it, which means the 30s default.
+	t.Setenv(sharedGateWaitEnv, "300ms")
+	if err := acquireCommandWorkspaceGates(ctx, list, beadsDir); err == nil {
+		t.Fatal("strict readonly acquisition under a foreign exclusive holder must abort, got nil error")
+	}
+}
+
+// Only STRICT readonly skips creating the gate files. A normal command keeps
+// creating them: that is what makes it visible to a maintenance operation that
+// starts later (the exclusive acquirer locks the same file), so the first gate
+// holder on a workspace cannot go unseen.
+func TestAcquireCommandWorkspaceGatesNormalCommandStillCreatesGateFiles(t *testing.T) {
+	resetGateTestEnv(t)
+	t.Cleanup(releaseWorkspaceGates)
+	setReadonlyMode(t, false)
+	beadsDir := newGateTestWorkspace(t)
+
+	list := &cobra.Command{Use: "list"}
+	if err := acquireCommandWorkspaceGates(context.Background(), list, beadsDir); err != nil {
+		t.Fatal(err)
+	}
+	for _, gateFile := range []string{
+		filepath.Join(filepath.Dir(beadsDir), ".beads.gate.lock"),
+		filepath.Join(beadsDir, "embeddeddolt.gate.lock"),
+	} {
+		if _, err := os.Stat(gateFile); err != nil {
+			t.Errorf("a normal command must create its gate file: %v", err)
+		}
+	}
+}
+
+// End to end: the real `bd --readonly` leaves no gate file behind. The
+// in-process tests above pin acquireCommandWorkspaceGates; this one pins that
+// the command line reaches it with strict readonly already resolved.
+func TestStrictReadonlyCommandCreatesNoGateFiles(t *testing.T) {
+	bdBin := buildBDForInitTests(t)
+	beadsDir := newGateTestServerWorkspace(t)
+	projectDir := filepath.Dir(beadsDir)
+
+	cmd := exec.Command(bdBin, "--readonly", "list")
+	cmd.Dir = projectDir
+	cmd.Env = hermeticInitEnv(t.TempDir(), "BEADS_DIR="+beadsDir, "BEADS_DOLT_AUTO_START=0")
+	// No Dolt server sits behind this workspace, so the command is expected to
+	// fail when it opens the store; only what it left on disk matters here.
+	out, _ := cmd.CombinedOutput()
+
+	var gateFiles []string
+	for _, dir := range []string{projectDir, beadsDir} {
+		for _, name := range dirEntryNames(t, dir) {
+			if strings.Contains(name, ".gate.lock") {
+				gateFiles = append(gateFiles, filepath.Join(dir, name))
+			}
+		}
+	}
+	if len(gateFiles) != 0 {
+		t.Fatalf("bd --readonly created gate files %v\noutput: %s", gateFiles, out)
 	}
 }

@@ -125,7 +125,15 @@ type IssuePatch struct {
 	// AppendNotes appends to the notes and is mutually exclusive with Notes.
 	AppendNotes Field[string]
 	SpecID      Field[string]
-	AwaitID     Field[string]
+	// AwaitID replaces the gate's condition identifier; the empty string
+	// clears it. Its bounds are ValidateGateFields' (GateFieldError).
+	AwaitID Field[string]
+	// Waiters is a WHOLE-VALUE replacement of the gate's waiter list; a set
+	// nil or empty Value clears it. The role stores the list as given:
+	// duplicates are kept, as local storage always has, and deduplication is
+	// the caller's (bd gate add-waiter dedups before it writes). Its bounds
+	// are the column's (GateFieldError naming GateFieldWaiters).
+	Waiters Field[[]string]
 	// Status sets the issue's status. A status that crosses from outside the
 	// configured done category into it answers to close policy: the update
 	// refuses with CloseOpenChildrenError or ErrCloseBlocked unless
@@ -544,7 +552,10 @@ type ReopenResult struct {
 type Lifecycle interface {
 	// Create validates and commits the complete request as one atomic mutation.
 	// It is create-only across issues and wisps: an occupied ID returns
-	// ErrAlreadyExists and leaves persistent state unchanged. A refusal or
+	// ErrAlreadyExists and leaves persistent state unchanged. An id a
+	// retaining sweep retired (SweepRequest.RetainIDs) returns
+	// *IdempotencyExpiredError and leaves persistent state unchanged; it is
+	// never ErrAlreadyExists and never ErrValidation. A refusal or
 	// validation error also leaves no partial persistent state.
 	Create(context.Context, CreateRequest) (CreateResult, error)
 	// Update validates guards and commits the complete request as one atomic

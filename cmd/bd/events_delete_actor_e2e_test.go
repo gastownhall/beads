@@ -34,7 +34,7 @@ func runBDOut(t *testing.T, bd, dir string, env []string, args ...string) (strin
 	return stdout.String(), stderr.String()
 }
 
-// TestDeleteJournalsTheRequestingActor is #5985's repro, verbatim: create two
+// TestEmbeddedDeleteJournalsTheRequestingActor is #5985's repro, verbatim: create two
 // beads with an edge between them, delete the blocker with an explicit --actor,
 // and read the journal back. Both the delete record and the cascade dep_remove
 // record must name that actor.
@@ -42,7 +42,7 @@ func runBDOut(t *testing.T, bd, dir string, env []string, args ...string) (strin
 // The whole route is exercised — cobra flag to journal column — because the
 // actor is resolved, threaded through the role, and written by the storage
 // seam, and a unit test at any one of those cannot see the drop at the next.
-func TestDeleteJournalsTheRequestingActor(t *testing.T) {
+func TestEmbeddedDeleteJournalsTheRequestingActor(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -92,13 +92,13 @@ func TestDeleteJournalsTheRequestingActor(t *testing.T) {
 	}
 }
 
-// TestEventsReadNoticesADisabledJournal pins the "nothing to read and no way to
+// TestEmbeddedEventsReadNoticesADisabledJournal pins the "nothing to read and no way to
 // tell why" fix. A workspace that never enabled the journal serves an empty
 // export forever, which a consumer cannot distinguish from being caught up, so
 // the read says so on stderr — and keeps stdout clean and the exit status zero,
 // because exporting a historical ledger from a now-disabled workspace is
 // legitimate.
-func TestEventsReadNoticesADisabledJournal(t *testing.T) {
+func TestEmbeddedEventsReadNoticesADisabledJournal(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}

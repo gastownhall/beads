@@ -3,7 +3,7 @@ package doltversion
 import "errors"
 
 // Canonical error sentinels for this package. All errors returned by
-// Resolve/Probe/ProbeWithPolicy wrap one of these with %w, so callers can
+// Resolve/Probe/ProbeWithPolicy/CheckServer wrap one of these with %w, so callers can
 // use errors.Is to branch on failure category (e.g. to decide whether to
 // print an install hint vs a "check your BEADS_DOLT_BIN setting" hint)
 // without parsing message text.
@@ -39,4 +39,10 @@ var (
 	// ProbeWithPolicy demotes it to a *Warning rather than propagating it
 	// as an error — see ProbeWithPolicy's doc comment for why.
 	ErrUnparseableVersion = errors.New("dolt version output is unparseable")
+
+	// ErrBelowRequiredMin means a dolt binary or sql-server reported a
+	// version older than RequiredMin. Every error wrapping it is a
+	// *BelowMinimumError, which names the detected version, the minimum,
+	// and how to upgrade.
+	ErrBelowRequiredMin = errors.New("dolt version is below the minimum bd requires")
 )

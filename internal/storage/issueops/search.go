@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/types"
@@ -22,6 +23,30 @@ func SearchIssuesInTx(ctx context.Context, tx DBTX, query string, filter types.I
 		proj = issueLiteProjection
 	}
 	return searchInTx(ctx, tx, query, filter, proj)
+}
+
+// SearchIssuesWithConfigInTx is SearchIssuesInTx and GetConfigInTx of key on
+// one transaction, so the issues and the setting come from one snapshot: the
+// body of storage.IssuesWithConfigSearcher on both Dolt-backed stores.
+func SearchIssuesWithConfigInTx(ctx context.Context, tx DBTX, query string, filter types.IssueFilter, key string) ([]*types.Issue, string, error) {
+	issues, err := SearchIssuesInTx(ctx, tx, query, filter)
+	if err != nil {
+		return nil, "", err
+	}
+	value, err := GetConfigInTx(ctx, tx, key)
+	if err != nil {
+		return nil, "", err
+	}
+	return issues, value, nil
+}
+
+// SearchDescendantsInTx is storage.WalkDescendants with every level searched
+// by SearchIssuesInTx inside tx, so the whole --parent tree reads one snapshot
+// (GH#3415).
+func SearchDescendantsInTx(ctx context.Context, tx DBTX, rootID string, filter types.IssueFilter) ([]*types.Issue, error) {
+	return storage.WalkDescendants(ctx, rootID, filter, func(ctx context.Context, f types.IssueFilter) ([]*types.Issue, error) {
+		return SearchIssuesInTx(ctx, tx, "", f)
+	})
 }
 
 // SearchIssueIDsInTx is the narrow-projection variant of SearchIssuesInTx:

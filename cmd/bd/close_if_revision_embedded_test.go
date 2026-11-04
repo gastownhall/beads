@@ -10,7 +10,7 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// TestIfRevisionCloseReplaysMoleculeAutoClose pins mc-zndi7.75 item 1 on the
+// TestEmbeddedIfRevisionCloseReplaysMoleculeAutoClose pins mc-zndi7.75 item 1 on the
 // embedded/direct --if-revision close route: runCloseDirectIfRevision bypasses
 // `bd close`'s batch architecture entirely (A8, beads#4682 — BatchCloseItem
 // carries no per-item ExpectedVersion), so it must re-drive molecule auto-close
@@ -22,7 +22,7 @@ import (
 // state a crash between the final step's close and its root auto-close would
 // leave), then re-close the final step — this time guarded — and require the
 // stranded-open root to heal.
-func TestIfRevisionCloseReplaysMoleculeAutoClose(t *testing.T) {
+func TestEmbeddedIfRevisionCloseReplaysMoleculeAutoClose(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -60,12 +60,12 @@ func TestIfRevisionCloseReplaysMoleculeAutoClose(t *testing.T) {
 	}
 }
 
-// TestIfRevisionCloseWarnsOnForcedOpenChildren pins mc-zndi7.75 item 3: the
+// TestEmbeddedIfRevisionCloseWarnsOnForcedOpenChildren pins mc-zndi7.75 item 3: the
 // "warning: closing X with N open child issue(s) still active" line
 // (close.go:194-196) must still print on the guarded direct close route when
 // --force waives the engine's open-children refusal, exactly as it does on
 // the unguarded batch path.
-func TestIfRevisionCloseWarnsOnForcedOpenChildren(t *testing.T) {
+func TestEmbeddedIfRevisionCloseWarnsOnForcedOpenChildren(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}

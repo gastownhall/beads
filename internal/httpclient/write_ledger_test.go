@@ -162,6 +162,10 @@ func writeShapes() []writeShape {
 						"notes", "status", "priority", "issue_type", "assignee", "owner",
 						"estimated_minutes", "external_ref", "due_at", "defer_until",
 						"sender", "metadata", "labels", "ephemeral", "no_history",
+						// The gate members, behind issues.create.gates:
+						// carried to a server that
+						// advertises it, refused before the dial otherwise.
+						"await_type", "await_id", "timeout", "waiters",
 					},
 					// The members of a types.Issue this vocabulary does NOT
 					// spell — the creation stamp, the workflow and
@@ -177,6 +181,9 @@ func writeShapes() []writeShape {
 				// Issue spread drives is left out (wirePriority).
 				"DefaultPriority": absenceOf("priority"),
 			},
+			// The gate members sat in a pending set here while the wire
+			// published them and this client still refused them (the wire
+			// slice); the client slice moved them into the Issue spread above.
 		},
 		{
 			name:   "closeIssue",
@@ -324,13 +331,19 @@ func writeShapes() []writeShape {
 				// W-IssuePatch.Persistence stays a refusal there — the Owner
 				// row's arrangement, the other way round.
 				"Persistence": member("persistence"),
+				// The gate members, behind issues.update.gates.
+				// They sat in the pending set while the
+				// wire published them under the W-IssuePatch.AwaitID and
+				// W-IssuePatch.Waiters refusals; the flip moved them here and
+				// retired the refusals.
+				"AwaitID": member("await_id"),
+				"Waiters": member("waiters"),
 			},
-			// NOTHING IS PENDING, and the set is empty rather than absent for the
-			// reason the second list in accessors.go was: it held the two
-			// incremental-label members #5510 published under an existing refusal,
-			// and client wave ga-jpywb moved both into `carried` — which is what
-			// the map documents a flip as. The next member upstream publishes
-			// under a live W- row starts it again.
+			// NOTHING IS PENDING. The set held the two incremental-label
+			// members #5510 published under an existing refusal until client
+			// wave ga-jpywb, and await_id and waiters until the gate
+			// members' client slice, each moved into `carried` — which is what the map
+			// documents a flip as.
 		},
 		{
 			// The nested metadata document, and the reason it is a shape of its
@@ -417,6 +430,8 @@ func writeShapes() []writeShape {
 				"DryRun":                member("dry_run"),
 				"ProtectLiveDependents": member("protect_live_dependents"),
 				"Limit":                 member("limit"),
+				// Behind CapSweepRetainIDs, refused locally without it.
+				"RetainIDs": member("retain_ids"),
 			},
 		},
 		{
@@ -534,6 +549,8 @@ func writeShapes() []writeShape {
 						"status", "priority", "issue_type", "assignee", "owner", "estimated_minutes",
 						"external_ref", "due_at", "defer_until", "sender", "metadata", "labels",
 						"ephemeral", "no_history",
+						// The gate members, behind issues.create.gates.
+						"await_type", "await_id", "timeout", "waiters",
 					},
 					partial: "W-CreateItem.Issue",
 				},
@@ -593,6 +610,10 @@ func writeShapes() []writeShape {
 				// expressible on this document.
 				"Labels":   member("labels"),
 				"Metadata": member("metadata"),
+				// The gate members, behind issues.update.gates,
+				// spelled as on updateIssue.
+				"AwaitID": member("await_id"),
+				"Waiters": member("waiters"),
 			},
 		},
 		{

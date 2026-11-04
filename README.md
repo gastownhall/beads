@@ -116,6 +116,20 @@ or [docs/getting-started/installation.md](docs/getting-started/installation.md#u
 
 ### Security And Verification
 
+Command and credential-target settings must come from your shell environment or
+user configuration, not `.beads/.env`. `.beads/.env` only admits non-command
+`BEADS_*` and `BD_*` variables plus the two Dolt remote credential variables
+(`DOLT_REMOTE_USER`, `DOLT_REMOTE_PASSWORD`); Beads ignores credential commands,
+mail delegates, editor, pager, Dolt executable/host/credential-file/root-path
+overrides, the rest of the dolt-owned `DOLT_*` namespace (such as
+`DOLT_SSH_COMMAND` and `DOLT_PAGER`), and non-Beads process variables (such as
+`GIT_*`, `SSH_*`, `LD_*`, and `DYLD_*`) in that file and prints a warning for
+each.
+`bd config set mail.delegate "gt mail"` writes to user-global YAML rather than
+the replicated database; the workspace settings API rejects `mail.delegate`.
+Mail delegation also ignores project `.beads/config.yaml`; only shell environment
+variables and user-global YAML can select the delegate.
+
 Before trusting any downloaded binary, verify its checksum against the release `checksums.txt`.
 
 The install scripts verify release checksums before install. For manual installs, do this verification yourself before first run.
@@ -269,17 +283,46 @@ which a Windows reset (`WSAECONNRESET`) is not. A write gets no
 header timer (the server answers a write only after it commits, so a large
 one can be slow and healthy) and is never retried; if the 60s bound expires
 after it was sent but before its headers, it fails with an error naming the
-server's host, because it may or may not have been applied. A dial or TLS
-timeout stays a plain connection error, since the server never saw the
-request. `off` turns off only the header timer: a reset read is still
-retried, and a write's timeout is still reported as above.
+server's host, because it may or may not have been applied. A batch apply of
+more than 100 items (a large `bd create --graph` plan, say) gets 6 minutes
+instead of 60s, because `bd serve` gives such a request its
+`--large-apply-ceiling` (5 minutes by default) and finishes it even after the
+client has given up. A server whose ceiling is raised past about 5m15s can
+still outlast the client. A dial or TLS timeout stays a plain connection
+error, since the server never saw the request, and a connect that fails says
+so: it names the address that refused the connection (nothing listening) or
+never answered (a filtered port or a down host, after the dialer's 30s), or
+the host name that did not resolve. `off` turns off only the
+header timer: a reset read is still retried, and a write's timeout is still
+reported as above.
+
+Whether the server applies bd's external-dependency policy itself (the
+`policy.external_dependencies` capability) is remembered for 5 minutes per
+server URL and pinned project, in `beads/http-policy/` under the user cache
+directory, so `bd ready` does not fetch the server's context before every
+listing just to learn it. `BEADS_HTTP_POLICY_CACHE_TTL` sets that window (a
+duration such as `1m`, a number of seconds, or `off`); a server restarted
+with a different composition is seen once it passes. Claims and closes never
+use the cached answer: they ask the server, since a stale one could skip the
+client-side refusal of externally blocked work. A workspace connected without
+a project pin is not cached.
 
 `bd search`, `bd show --current` and `bd recompute-blocked` work over HTTP
 too, each in its own way. `bd search` asks the server's listing with its text (`q`, behind the `issues.list.search` capability) and
 refuses before dialing against a server that does not advertise it. `bd list
 --no-assignee`, `--title` and `--id` likewise ride the listing's
 `no_assignee`, `title` and repeatable `id`, each behind its own capability
-(`issues.list.noAssignee`, `issues.list.title`, `issues.list.ids`).
+(`issues.list.noAssignee`, `issues.list.title`, `issues.list.ids`), and the
+rest of `bd list`'s filters (`--updated-*`, `--closed-*`, `--defer-*`,
+`--due-*`, `--priority*`, the text and external-ref matches, `--spec`,
+`--label-pattern`/`--label-regex`, `--exclude-type`, `--no-parent`,
+`--no-labels`, `--empty-description`, `--pinned`/`--no-pinned`,
+`--deferred`, `--overdue`, `--mol-type`, `--wisp-type`) ride it behind one
+capability, `issues.list.filters`. Time bounds are resolved on the client as
+they are locally; `--overdue` compares against the server's clock. The
+default `--parent` tree view does not carry those filters yet and refuses one
+rather than drop it; `--flat` or `--json` applies them to the parent's direct
+children (not its whole subtree).
 `bd show --current` finds the actor's in-progress or hooked issue through the
 server's boolean query. `bd recompute-blocked` is a no-op that exits 0: the
 server maintains `is_blocked` on every write, and repairing a stale flag is
@@ -292,6 +335,42 @@ An embedding program that links beads as a library rather than running
 workspace with a credential scoped to one caller via
 `beads.OpenBestAvailableWith` — see that package's doc comment for the
 multi-tenant case. This surface is EXPERIMENTAL: pin an exact beads version.
+
+## 🧹 Compacting Claude Rules
+
+`bd rules audit` scans `.claude/rules/*.md` for contradictions and
+near-duplicates; `bd rules compact` merges related rules into one composite.
+
+```bash
+bd rules compact --auto           # Preview: composite, dropped lines, backups, deletes
+bd rules compact --auto --force   # Apply
+```
+
+Compact only previews unless you pass `--force`. A composite keeps only the
+`**Do:**` and `**Don't:**` lines of its sources, and the preview lists every
+other line it drops. Applying writes the composite, copies each source to
+`<name>.md.backup`, then deletes the sources; it refuses a group whose
+composite or backup path already exists. To undo a merge, delete the composite
+and rename each `<name>.md.backup` back to `<name>.md`.
+
+## 🔁 GitHub Issues Sync
+
+`bd github sync` (and `bd github pull`/`push`) syncs the one repository named
+by `github.owner` and `github.repo`, but a database can hold beads from
+several repositories. In releases after v1.3.2, sync matches, fetches and
+updates only beads whose issue URL points at the configured repository, so
+pulling issue 1313 from a second repository creates a new bead instead of
+overwriting the bead linked to the first repository's issue 1313. A
+`github:<number>` ref has no repository and is always read as the configured
+one. A repository you renamed or transferred keeps syncing whichever of its
+names the config holds: GitHub redirects a former name to the repository, and
+sync asks GitHub which repository each other name your beads link under
+belongs to now (one request per name), so beads linked under the old name and
+under the new one stay matched to their issues, and a pull relinks them to the
+current URL. If that request fails, or the old name now belongs to another
+repository, beads still linked under it count as another repository's: relink
+them (`bd update <id> --external-ref <new-url>`), or the next pull imports
+their issues again as new beads.
 
 ## 🌐 Community Tools
 
@@ -319,7 +398,8 @@ bd close bd-a1b2 "Fixed"
 
 `BEADS_DIR` tells bd where to put the `.beads/` database directory,
 bypassing git repo discovery. `--stealth` sets `no-git-ops: true` in
-config, disabling all git hook installation and git operations.
+config, disabling bd's own git hook installation and git commands. It
+does not stop Dolt network sync; set `dolt.local-only: true` for that.
 
 This is useful for:
 - **Non-git VCS** (Sapling, Jujutsu, Piper) — no `.git/` directory needed

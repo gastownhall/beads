@@ -42,6 +42,9 @@ func (r *recordingBatchApplyHooks) CompleteIssueOperationRelease(_ context.Conte
 func (r *recordingBatchApplyHooks) CompleteIssueOperationReclaim(_ context.Context, issueID string) {
 	r.completions = append(r.completions, "reclaim:"+issueID)
 }
+func (r *recordingBatchApplyHooks) CompleteIssueOperationUpdateByID(_ context.Context, issueID string) {
+	r.completions = append(r.completions, "update-by-id:"+issueID)
+}
 
 func issueIDOrNil(issue *types.Issue) string {
 	if issue == nil {
@@ -234,3 +237,4 @@ func (r *recordingBatchApplyIssues) CompleteIssueOperationComment(context.Contex
 func (r *recordingBatchApplyIssues) CompleteIssueOperationMetadata(context.Context, string)   {}
 func (r *recordingBatchApplyIssues) CompleteIssueOperationRelease(context.Context, string)    {}
 func (r *recordingBatchApplyIssues) CompleteIssueOperationReclaim(context.Context, string)    {}
+func (r *recordingBatchApplyIssues) CompleteIssueOperationUpdateByID(context.Context, string) {}

@@ -11,6 +11,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/utils"
 	"github.com/steveyegge/beads/issueops"
 )
 
@@ -125,15 +126,25 @@ func classifyIfRevisionFailure(err error, ifRevision *int64) (code, reason strin
 // and any other resolution failure is not a guard outcome; ok is false for
 // both and the caller's ordinary failure handling applies unchanged. `bd
 // delete --cascade` resolves through deleteBatch instead: its not-found error
-// keeps the storage.ErrNotFound sentinel, so the caller's
-// reportIfRevisionFailure classifies it the same way.
+// and its abbreviation refusal both keep the storage.ErrNotFound sentinel, so
+// the caller's reportIfRevisionFailure classifies them the same way.
 //
 // err is matched with isNotFoundErr, which also accepts ResolvePartialID's
-// unwrapped "no issue found matching" text, and reported as the literal
-// storage.ErrNotFound sentinel classifyIfRevisionFailure matches via
-// errors.Is.
+// unwrapped "no issue found matching" text, or as one of the resolvers' two
+// refusals, which name no row either, so each is the same gone target:
+// utils.ErrAbbreviatedIDNotAllowed (under `bd delete`'s exact resolution, an
+// id that is only the start of other ids, such as a deleted parent whose
+// child survives) and utils.ErrAmbiguousID (an id that matches several, such
+// as a deleted parent whose children survive under the other verbs'
+// abbreviating resolution, or a gone id whose hash two other prefixes hold).
+// The resolvers look the id up exactly before either refusal, so neither is
+// returned for an id a row still carries; a typed abbreviation that meets one
+// reports like a mistyped id (classifyIfRevisionFailure). Every match is
+// reported as the literal storage.ErrNotFound sentinel
+// classifyIfRevisionFailure matches via errors.Is.
 func reportIfRevisionTargetGone(action, id string, err error, ifRevision *int64) (reportedErr error, ok bool) {
-	if ifRevision == nil || !isNotFoundErr(err) {
+	gone := isNotFoundErr(err) || errors.Is(err, utils.ErrAbbreviatedIDNotAllowed) || errors.Is(err, utils.ErrAmbiguousID)
+	if ifRevision == nil || !gone {
 		return nil, false
 	}
 	return reportIfRevisionFailure(action, id, storage.ErrNotFound, ifRevision)

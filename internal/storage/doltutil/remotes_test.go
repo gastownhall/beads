@@ -6,29 +6,6 @@ import (
 	"testing"
 )
 
-func TestShellQuote(t *testing.T) {
-	tests := []struct {
-		input string
-		want  string
-	}{
-		{"simple", "'simple'"},
-		{"has space", "'has space'"},
-		{"semi;colon", "'semi;colon'"},
-		{"pipe|char", "'pipe|char'"},
-		{"$(cmd)", "'$(cmd)'"},
-		{"`cmd`", "'`cmd`'"},
-		{"it's", "'it'\\''s'"},
-		{"", "''"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			if got := ShellQuote(tt.input); got != tt.want {
-				t.Errorf("ShellQuote(%q) = %q, want %q", tt.input, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestIsSSHURL(t *testing.T) {
 	tests := []struct {
 		url  string

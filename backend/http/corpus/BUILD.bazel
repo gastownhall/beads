@@ -11,6 +11,7 @@ go_test(
     srcs = [
         "corpus_parts_test.go",
         "corpus_test.go",
+        "gate_check_served_test.go",
         "harness_test.go",
         "reference_proxy_test.go",
         "required_corpus_tier_test.go",
@@ -24,6 +25,7 @@ go_test(
         "//internal/storage/domain",
         "//internal/storage/embeddeddolt",
         "//internal/testutil/bazeltest",
+        "//internal/types",
         "@in_gopkg_yaml_v3//:yaml_v3",
     ],
 )
@@ -41,8 +43,10 @@ go_test(
 # serial, ~242s together). The shapes are now dealt round robin across
 # corpusParts = 4 parts (corpus_test.go), each a top-level test with its own
 # server and seed, and served_pinned_shards.txt pins part k to shard k; the
-# 5th shard runs the package's engine-free tests through the binary's
-# round-robin. Each part pays the setup again, though it seeds the served
+# 5th shard runs the package's other tests through the binary's
+# round-robin (the engine-free ones, plus
+# TestServedGateCheckOverAwaitTypedGates, which seeds its own small served
+# store). Each part pays the setup again, though it seeds the served
 # and embedded sides concurrently (~62-76s on the lane's executors), so a
 # part's shard is that plus ~60s of shapes: 114-146s measured. Three parts
 # ran 170-180s each; they save one setup (~75 test-seconds a run) but

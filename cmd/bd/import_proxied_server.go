@@ -167,11 +167,15 @@ func runImportRecordsProxied(ctx context.Context, issues []*types.Issue, memorie
 		for _, id := range batch.StaleRejectedIDs {
 			staleRejectedSet[id] = struct{}{}
 		}
+		retiredSet := make(map[string]struct{}, len(batch.RetiredIDs))
+		for _, id := range batch.RetiredIDs {
+			retiredSet[id] = struct{}{}
+		}
 		skippedDependencies := make([]string, 0, len(batch.SkippedDependencies))
 		for _, dep := range batch.SkippedDependencies {
 			skippedDependencies = append(skippedDependencies, fmt.Sprintf("%s -> %s: %s", dep.IssueID, dep.DependsOnID, dep.Reason))
 		}
-		applyImportOutcome(&result, assembleImportResult(issues, staleSkippedIDs, changePlan, staleRejectedSet, skippedDependencies))
+		applyImportOutcome(&result, assembleImportResult(issues, staleSkippedIDs, changePlan, staleRejectedSet, retiredSet, skippedDependencies))
 	} else {
 		result.Skipped += len(staleSkippedIDs)
 		result.StaleSkippedIDs = append(result.StaleSkippedIDs, staleSkippedIDs...)

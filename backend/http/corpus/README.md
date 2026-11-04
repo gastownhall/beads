@@ -117,6 +117,7 @@ Each shape in `corpus.yaml` has these fields:
 | `ignore_fields` | JSON keys dropped, at any depth, before a `json` comparison and before `verify` output is compared; for example comment ids, which each workspace mints itself |
 | `expect_exit`, `expect_stderr` | expected outcome on both sides (exit 0 by default). An allowlisted shape must state `expect_exit`; only its embedded run is held to these |
 | `pending` | a known failure |
+| `requests` | exactly how many requests the served run of `args` makes through the reference proxy, not counting `setup`, `verify` or `{rev:ID}` reads. Each request is a sequential round trip, so the count is the shape's latency floor over a gateway. A change that makes the shape cheaper updates the pin |
 
 `pending: {slice, reason}` marks a known failure and names the slice or
 slices that fix it, for example `S6c+S15`. A pending shape **still runs**:

@@ -5,9 +5,16 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"errors"
+	"fmt"
+	"log"
+	"slices"
+	"time"
+
+	"github.com/cenkalti/backoff/v4"
 
 	"github.com/steveyegge/beads/internal/storage/domain/db"
 	"github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/steveyegge/beads/internal/storage/schema"
 )
 
 type doltServerTx struct {
@@ -80,6 +87,156 @@ func (t *doltServerTx) Commit(ctx context.Context, message string) error {
 	return t.closeOpenTxAfterFailure(ctx, err)
 }
 
+const (
+	// scopedCommitMaxElapsed bounds the retries of CommitScoped's Dolt commit.
+	// It is short for the reason the DoltStore's postTxCommitMaxElapsed is:
+	// the failure is logged rather than returned, so a long fight for a commit
+	// the next one on the branch carries anyway buys nothing.
+	scopedCommitMaxElapsed = 5 * time.Second
+	// scopedCommitGrace pads the detached context past the retry budget. The
+	// budget only stops scheduling attempts; the deadline is what cancels one
+	// already hung in flight.
+	scopedCommitGrace = 2 * time.Second
+)
+
+// CommitScoped commits the transaction and then makes a Dolt commit of
+// exactly tables (plus the versioned-history tables when this transaction
+// could have minted) named message: DOLT_ADD per table, then
+// DOLT_COMMIT('-m') — never '-Am', so another writer's uncommitted change
+// elsewhere in the working set is neither committed nor attributed to this
+// message. With nothing staged, or under a deferred version commit
+// (dolt.auto-commit batch/off), there is no Dolt commit.
+//
+// THE DOLT COMMIT RUNS AFTER THE SQL COMMIT, never inside the transaction:
+// the ordering contract of the DoltStore funnel (runIssueOperationTxWithMessage,
+// LatentLabsSpace/NEXUS#92). DOLT_ADD stages whole tables from the session's
+// transaction root, so staging inside the open transaction builds the Dolt
+// commit from its BEGIN-time snapshot and can write rows a concurrent writer
+// committed in the meantime back to their old values. Committed first, this
+// transaction's writes go through Dolt's commit-time merge with those
+// writers, and the DOLT_ADD on the same pinned session, now outside any
+// transaction, stages the merged state.
+//
+// A serialization failure of the SQL COMMIT is returned for the caller to redo
+// the whole unit of work, as Commit's is. Once the SQL COMMIT succeeds the
+// write is durable, so the Dolt commit after it never fails CommitScoped (see
+// commitStagedTables).
+func (t *doltServerTx) CommitScoped(ctx context.Context, tables []string, message string) error {
+	if t.done {
+		return errors.New("uow: commit: already done")
+	}
+	if message == "" || len(tables) == 0 || issueops.VersionCommitDeferred(ctx) {
+		return t.Commit(ctx, "")
+	}
+	// Resolved before the commit, while the versioned-history scope is bound
+	// to the pinned session.
+	staged := append([]string(nil), tables...)
+	if issueops.VersionedHistoryEnabledFor(t.conn) {
+		for _, table := range issueops.VersionedHistoryStagedTables() {
+			if !slices.Contains(staged, table) {
+				staged = append(staged, table)
+			}
+		}
+	}
+	if _, err := t.conn.ExecContext(ctx, "COMMIT;"); err != nil {
+		if isSerializationError(err) {
+			return err
+		}
+		return t.closeOpenTxAfterFailure(ctx, err)
+	}
+	t.done = true
+	clean := t.commitStagedTables(ctx, staged, message)
+	if t.recheckBlockedAfterCommit(ctx, issueops.TakeBlockedRecheck(t.conn)) && clean {
+		t.releaseConn()
+	} else {
+		t.poisonConn()
+	}
+	return nil
+}
+
+// commitStagedTables is CommitScoped's Dolt commit, made on the pinned session
+// after the transaction committed. It runs detached from the caller's
+// cancellation on its own short budget, so a deadline landing after the SQL
+// COMMIT does not skip it, and replays only the conflicts that leave nothing
+// behind (serialization failures and Dolt's @@autocommit rollback, which is
+// how a conflict surfaces outside a transaction), so re-staging and
+// committing again is safe. That is doltAddAndCommitPostTx's retry.
+//
+// A failure is logged, never returned: the write is durable, and an error
+// would make RunTxScoped replay a committed unit of work, which for a
+// heartbeat re-arm then reports a refresh. The change rides the next Dolt
+// commit on the branch, as a failed post-transaction commit does in the
+// DoltStore funnel. Unlike the funnel, this leg counts nothing: uow records
+// no metrics, so bd.db.post_tx_commit_dropped, the funnel's counter for the
+// same drop, never sees one made here, and the log line is its only signal.
+// It reports whether the session may go back to the pool; after a failure its
+// state is unknown (a statement cut off mid-flight, or under @@autocommit=0
+// the implicit transaction a DOLT_ADD opened), so it may not.
+func (t *doltServerTx) commitStagedTables(ctx context.Context, tables []string, message string) bool {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), scopedCommitMaxElapsed+scopedCommitGrace)
+	defer cancel()
+
+	bo := backoff.NewExponentialBackOff()
+	bo.InitialInterval = txRetryInitialInterval
+	bo.MaxElapsedTime = scopedCommitMaxElapsed
+	var lastErr error
+	err := backoff.Retry(func() error {
+		err := t.stageAndCommitOnce(ctx, tables, message)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if isSerializationError(err) || isDoltAutocommitRollbackError(err) {
+			return err
+		}
+		return backoff.Permanent(err)
+	}, backoff.WithContext(bo, ctx))
+	if err != nil && lastErr != nil && !errors.Is(err, lastErr) {
+		// The deadline expiring between attempts returns the bare context
+		// error; keep the last real failure, the only diagnostic of a dropped
+		// commit.
+		err = fmt.Errorf("%w (last attempt: %w)", err, lastErr)
+	}
+	if err != nil {
+		log.Printf("warning: uow: dolt commit %q failed after its SQL commit (data already committed; change rides the next dolt commit): %v", message, err)
+		return false
+	}
+	return true
+}
+
+// stageAndCommitOnce is one attempt at commitStagedTables: stage each table,
+// then commit the staged set alone.
+func (t *doltServerTx) stageAndCommitOnce(ctx context.Context, tables []string, message string) error {
+	for _, table := range tables {
+		if err := schema.DrainCall(ctx, t.conn, "CALL DOLT_ADD(?)", table); err != nil {
+			return fmt.Errorf("dolt add %s: %w", table, err)
+		}
+	}
+	// Sessions on one branch share the working set, so a concurrent writer's
+	// Dolt commit can already have taken this transaction's rows under its
+	// own message, leaving nothing staged here: skip the empty commit Dolt
+	// would refuse. The same race between this check and the commit surfaces
+	// as "nothing to commit", which here means exactly that and not a lost
+	// write (the SQL COMMIT has landed), so it is no failure either; it is
+	// logged, as the DoltStore funnel logs it, so the missing audit line is
+	// explicable.
+	staged, err := issueops.HasStagedChanges(ctx, t.conn)
+	if err != nil {
+		return err
+	}
+	if !staged {
+		return nil
+	}
+	err = schema.DrainCall(ctx, t.conn, "CALL DOLT_COMMIT('-m', ?)", message)
+	if err != nil {
+		if !issueops.IsNothingToCommitError(err) {
+			return fmt.Errorf("dolt commit: %w", err)
+		}
+		log.Printf("uow: dolt commit %q made no dolt commit (nothing to commit): the staged change was most likely absorbed into a concurrent writer's commit (data already committed)", message)
+	}
+	return nil
+}
+
 // commitStatement picks the statement that ends the open transaction on the
 // pinned session for a commit named message.
 func (t *doltServerTx) commitStatement(ctx context.Context, message string) (string, []interface{}, error) {
@@ -95,12 +252,15 @@ func (t *doltServerTx) commitStatement(ctx context.Context, message string) (str
 	}
 	// An empty message selects the EPHEMERAL commit form (bd-aq0ql): a plain
 	// SQL COMMIT persists the transaction's writes into the working set
-	// without minting a Dolt commit or history. It has two entry points:
+	// without minting a Dolt commit or history. It has these entry points:
 	//
-	//   - uow.RunTxEphemeral, for work that touches ONLY dolt_ignored state —
-	//     today the leases table (bd-lrgn1), whose heartbeats must never create
-	//     commits. RunTx/RunTxResult treat an empty commitMsg as "nothing to
-	//     commit" and never call Commit at all, so they cannot reach it that way.
+	//   - uow.RunTxEphemeral, for work that touches ONLY dolt_ignored state.
+	//     RunTx/RunTxResult treat an empty commitMsg as "nothing to commit" and
+	//     never call Commit at all, so they cannot reach it that way.
+	//   - uow.RunTxScoped, for an attempt that names no tables — a lease
+	//     refresh (bd-lrgn1), which writes only the dolt_ignored leases table
+	//     and must never create a commit. A heartbeat that re-arms names its
+	//     tables instead and takes the scoped commit.
 	//   - RunTx/RunTxResult under a deferred-version-commit context, via the
 	//     blanking just above (GH#4995). There the writes are ordinary versioned
 	//     rows and the ONLY-dolt_ignored-state rationale does not apply: the

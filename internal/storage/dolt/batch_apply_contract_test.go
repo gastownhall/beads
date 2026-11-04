@@ -280,6 +280,11 @@ func TestBatchApplyContract(t *testing.T) {
 		defer cancel()
 		conformance.RunBatchApplyAppliesTheDefaultPriority(t, ctx, fixture)
 	})
+	t.Run("CarriesTheGateMembers", func(t *testing.T) {
+		ctx, cancel := testContext(t)
+		defer cancel()
+		conformance.RunBatchApplyCarriesTheGateMembers(t, ctx, fixture)
+	})
 }
 
 // newDoltBatchApplyFixture composes the frozen role kit with this backend's

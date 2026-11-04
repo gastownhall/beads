@@ -35,9 +35,9 @@ import (
 // slow body that keeps streaming is governed by DefaultTimeout (and the
 // caller's context) alone.
 //
-// The timer applies to replayable requests (see Request.Replayable). A write is
-// bounded by the client's overall timeout instead, because bd serve answers a
-// write only after it commits; see roundTrip.
+// The timer applies to replayable requests (see Request.Replayable). Any other
+// write is bounded by the client's overall timeout instead, because bd serve
+// answers a write only after it commits; see roundTrip.
 const DefaultResponseHeaderTimeout = 15 * time.Second
 
 // ErrResponseHeaderTimeout is the sentinel a *ResponseHeaderTimeoutError

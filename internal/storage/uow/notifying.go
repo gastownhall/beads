@@ -308,6 +308,20 @@ func (p *notifyingProvider) LeaseReclaimer() (publicops.LeaseReclaimer, error) {
 	return NewLeaseReclaimer(p)
 }
 
+// Heartbeater builds the lease refresh over THIS provider. recordingIssueUC
+// declares RenewLease: a refresh records nothing (it writes only the
+// ephemeral lease row), and a re-arm records an update, the hook
+// storage.HookFiringStore.Heartbeater fires for it on the DoltStorage chain.
+func (p *notifyingProvider) Heartbeater() (publicops.Heartbeater, error) {
+	return NewHeartbeater(p)
+}
+
+// BlockedLister builds the blocked listing over THIS provider. It is a read:
+// nothing is recorded and no hook fires.
+func (p *notifyingProvider) BlockedLister() (publicops.BlockedLister, error) {
+	return NewBlockedLister(p)
+}
+
 func (p *notifyingProvider) Memories() (memoryops.Memories, error) { return NewMemories(p) }
 
 // EventsJournalCursor builds on THIS provider, like every role above it, so a
@@ -424,6 +438,8 @@ var (
 	_ VersionReconcilerSource   = (*notifyingProvider)(nil)
 	_ MemoriesSource            = (*notifyingProvider)(nil)
 	_ LeaseReclaimerSource      = (*notifyingProvider)(nil)
+	_ HeartbeaterSource         = (*notifyingProvider)(nil)
+	_ BlockedListerSource       = (*notifyingProvider)(nil)
 	_ EventsJournalCursorSource = (*notifyingProvider)(nil)
 )
 
@@ -476,6 +492,22 @@ func (u *notifyingUOW) CommentUseCase() domain.CommentUseCase {
 // committed mutation always succeeds.
 func (u *notifyingUOW) Commit(ctx context.Context, message string) error {
 	if err := u.UnitOfWork.Commit(ctx, message); err != nil {
+		return err
+	}
+	entries := u.rec.drain()
+	if u.sinks.Hook == nil {
+		return nil
+	}
+	for _, entry := range entries {
+		u.sinks.Hook.Run(entry.event, entry.issue)
+	}
+	return nil
+}
+
+// CommitScoped is Commit for a scoped version commit (see ScopedCommitter):
+// commit through the chain beneath, then fire the buffered hooks.
+func (u *notifyingUOW) CommitScoped(ctx context.Context, tables []string, message string) error {
+	if err := commitScoped(ctx, u.UnitOfWork, tables, message); err != nil {
 		return err
 	}
 	entries := u.rec.drain()
@@ -1007,6 +1039,20 @@ func (u *recordingIssueUC) ReleaseIssue(ctx context.Context, req publicops.Relea
 	}
 	u.rec.record(opUpdate, u.snap.anyPlane(ctx, req.IssueID))
 	return result, wrote, nil
+}
+
+// RenewLease records an update for a heartbeat that re-armed a lease (a
+// mutation: row_lock, updated_at, event, journal, version) and nothing for a
+// refresh, which writes only the ephemeral lease row. It is DECLARED for
+// ReleaseIssue's reason: an inherited accessor would compile and record
+// nothing, silently dropping the re-arm's hook.
+func (u *recordingIssueUC) RenewLease(ctx context.Context, request publicops.HeartbeatRequest) (publicops.HeartbeatResult, error) {
+	result, err := u.IssueUseCase.RenewLease(ctx, request)
+	if err != nil || !result.Rearmed {
+		return result, err
+	}
+	u.rec.record(opUpdate, u.snap.issue(ctx, result.IssueID))
+	return result, nil
 }
 
 // Reclaim records an update for every lease the sweep reverted.

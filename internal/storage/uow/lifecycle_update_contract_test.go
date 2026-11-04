@@ -104,6 +104,12 @@ func TestLifecycleUpdateContract(t *testing.T) {
 	t.Run("AllowTemplateEditsATemplate", func(t *testing.T) {
 		conformance.RunLifecycleUpdateAllowTemplateEditsATemplate(t, ctx, fixture)
 	})
+	t.Run("PatchesTheGateMembers", func(t *testing.T) {
+		conformance.RunLifecycleUpdatePatchesTheGateMembers(t, ctx, fixture)
+	})
+	t.Run("BoundsTheGateMembers", func(t *testing.T) {
+		conformance.RunLifecycleUpdateBoundsTheGateMembers(t, ctx, fixture)
+	})
 }
 
 func newUOWLifecycleUpdateFixture(t *testing.T, ctx context.Context, prefix string) conformance.LifecycleUpdateFixture {

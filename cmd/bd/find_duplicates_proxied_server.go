@@ -19,5 +19,5 @@ func runFindDuplicatesProxiedServer(ctx context.Context, filter types.IssueFilte
 	}
 	issues := filterClosedIfNoStatus(page.Items, status)
 
-	return reportFindDuplicates(ctx, issues, method, threshold, limit, model)
+	return reportFindDuplicates(ctx, issues, method, threshold, limit, model, nil)
 }

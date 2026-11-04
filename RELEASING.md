@@ -145,7 +145,8 @@ Before starting a release:
 - [ ] All tests passing (`make test`, the Bazel test lane)
 - [ ] npm package tests passing (`cd npm-package && npm run test:all`)
 - [ ] **Upgrade smoke tests pass** (`make test-upgrade`) — see [Release Stability Gate](engdocs/RELEASE-STABILITY-GATE.md)
-- [ ] **Regression tests pass** (`make test-regression`)
+- [ ] **Regression tests pass**
+      (`bazel test //tests/regression:regression_test --config=doltserver-cmd`)
 - [ ] **Every release target cross-compiles** — see
       [Cross-compile before tagging](#cross-compile-before-tagging). PR CI
       builds them only with cgo off, and a target that fails at tag time
