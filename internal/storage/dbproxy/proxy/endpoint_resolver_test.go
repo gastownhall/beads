@@ -321,6 +321,76 @@ func TestEndpointResolver_WaiterReturnsByDeadlineWhileDiscoveryBlocked(t *testin
 	require.EqualValues(t, 1, calls.Load(), "the later dial reuses the published flight, not a new one")
 }
 
+// TestEndpointResolver_CloseJoinsFlightAndStopsDiscovery is AC-5: provider
+// Close succeeds while a flight is running — the flight finishes, and no
+// later dial can start another.
+func TestEndpointResolver_CloseJoinsFlightAndStopsDiscovery(t *testing.T) {
+	secret := "6464646464646464646464646464646464646464646464646464646464646464"
+	dead := Endpoint{Host: "127.0.0.1", Port: freePortOrZero(t)}
+	r := newTestResolver(t, secret, dead)
+	flightStarted := make(chan struct{}, 1)
+	released := make(chan struct{})
+	discover, calls := recordingDiscover(func(int) (Endpoint, error) {
+		select {
+		case flightStarted <- struct{}{}:
+		default:
+		}
+		<-released
+		return Endpoint{}, errors.New("discovery failed")
+	})
+	r.discover = discover
+	r.Arm()
+
+	// A dial whose flight is blocked starts the flight and waits.
+	dialDone := make(chan error, 1)
+	go func() {
+		ctx, cancel := dialCtx()
+		defer cancel()
+		_, err := r.DialContext(ctx, "bdproxy", dead.Address())
+		dialDone <- err
+	}()
+	<-flightStarted
+
+	// Close joins the flight: while the flight is still running, Close
+	// must NOT return — its success means "no flight remains".
+	closeDone := make(chan error, 1)
+	closeCtx, closeCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer closeCancel()
+	go func() { closeDone <- r.Close(closeCtx) }()
+	select {
+	case err := <-closeDone:
+		require.Fail(t, "Close returned %v while the flight was still running", err)
+	case <-time.After(500 * time.Millisecond):
+	}
+
+	// Release the flight; only NOW Close may return — proof it joined.
+	close(released)
+	select {
+	case err := <-closeDone:
+		require.NoError(t, err, "Close must join the running flight and succeed")
+	case <-time.After(5 * time.Second):
+		require.Fail(t, "Close did not return after the flight finished")
+	}
+
+	// The in-flight dial returned (woken by the disable broadcast or the
+	// flight's own completion), and no later dial starts another flight.
+	select {
+	case err := <-dialDone:
+		require.Error(t, err)
+	case <-time.After(6 * time.Second):
+		require.Fail(t, "the waiter did not return after Close")
+	}
+	ctx, cancel := dialCtx()
+	defer cancel()
+	_, err := r.DialContext(ctx, "bdproxy", dead.Address())
+	require.Error(t, err)
+	require.True(t, IsEndpointUnavailable(err), "a closed resolver reports unavailability without discovery, got: %v", err)
+	require.EqualValues(t, 1, calls.Load(), "no dial after Close may start a discovery flight")
+
+	// Close is idempotent and, with no flight, immediate.
+	require.NoError(t, r.Close(closeCtx))
+}
+
 // TestEndpointResolver_SamePortRespawnAdvancesGeneration pins the same-port
 // incarnation: publishing an endpoint whose ADDRESS did not change is still
 // a new generation. The resolver cannot compare ports to deduplicate — a

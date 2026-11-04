@@ -110,6 +110,14 @@ func (f *recoveryFixture) read(provider UnitOfWorkProvider) error {
 	f.t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
+	return f.readCtx(ctx, provider)
+}
+
+// readCtx is read on the caller's clock: a caller can bound one below a
+// proxy spawn's duration and observe the read fail while the recovery its
+// failed dial started keeps running.
+func (f *recoveryFixture) readCtx(ctx context.Context, provider UnitOfWorkProvider) error {
+	f.t.Helper()
 	reconciler, err := NewVersionReconciler(provider)
 	if err != nil {
 		return err
@@ -293,4 +301,99 @@ func TestNewDoltServerUOWProvider_ConstructionNeverRediscovers(t *testing.T) {
 	require.NoError(t, proxy.Shutdown(f.root))
 	f.waitForProxyStopped(5 * time.Second)
 	f.mustRecoverRead(provider, 60*time.Second)
+}
+
+// TestNewDoltServerUOWProvider_CloseStopsRediscovery is AC-5 at the provider
+// boundary: Close succeeds while a discovery flight is still running (and
+// the flight's spawn survives — a shared proxy is never killed for having
+// been discovered), and a provider whose proxy is already gone does not
+// spawn a replacement while closing.
+func TestNewDoltServerUOWProvider_CloseStopsRediscovery(t *testing.T) {
+	f := newRecoveryFixture(t)
+
+	// Closing with no flight in sight must neither fail nor respawn
+	// anything: the pool is closed before any dial could fail.
+	quiet := f.open(5 * time.Minute)
+	if err := f.read(quiet); err != nil {
+		t.Fatalf("read before close: %v", err)
+	}
+	require.NoError(t, proxy.Shutdown(f.root))
+	f.waitForProxyStopped(5 * time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	require.NoError(t, quiet.Close(ctx), "Close with no running flight")
+	_ = quiet.Close(ctx) // f's cleanup closes it again; both must be quiet
+	require.False(t, proxy.ReadStatus(f.root).ProxyRunning,
+		"a closed provider must not spawn a replacement proxy")
+
+	// A provider whose read is mid-recovery — a flight fetching a fresh
+	// proxy — closes cleanly, joining the flight. The flight's spawn is
+	// not killed for the provider's sake; it keeps the workspace's own
+	// idle policy.
+	armed := f.open(5 * time.Minute)
+	if err := f.read(armed); err != nil {
+		t.Fatalf("read before the shutdown: %v", err)
+	}
+	require.NoError(t, proxy.Shutdown(f.root))
+	f.waitForProxyStopped(5 * time.Second)
+
+	// Short reads in a loop until the flight's spawn is visible in the
+	// workspace records. The first fresh dial is refused and starts the
+	// discovery flight; every further short read JOINS that same running
+	// flight (no cooldown applies to an existing one) and returns on its
+	// own budget, so the loop drives both host-speed regimes: a fast
+	// spawn finishes inside one read (which then succeeds); a slow one
+	// takes a few unavailable reads before ReadStatus sees it. The first
+	// read may still burn the pool's stale connection without dialing —
+	// its "invalid connection" error is not evidence, the loop simply
+	// continues — so the loop requires an end condition it can observe,
+	// not one particular error shape.
+	var running proxy.Status
+	require.Eventually(t, func() bool {
+		boundedCtx, boundedCancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+		defer boundedCancel()
+		_ = f.readCtx(boundedCtx, armed)
+		running = proxy.ReadStatus(f.root)
+		return running.ProxyRunning
+	}, 30*time.Second, 10*time.Millisecond, "a refused dial must start a flight that spawns a replacement")
+
+	// A concurrent reader is mid-recovery — at the least it is holding the
+	// pool that Close is about to shut: Close must not deadlock against
+	// it, and the reader must be woken by the shutdown rather than left
+	// hanging on a pool nobody will serve.
+	readDone := make(chan error, 1)
+	go func() {
+		readDone <- f.read(armed)
+	}()
+	closeCtx, closeCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer closeCancel()
+	require.NoError(t, armed.Close(closeCtx), "Close must join the running discovery flight")
+
+	// The flight's spawn survives the provider's close — only discovery
+	// was stopped, the shared proxy itself is never torn down for the
+	// provider's sake — same PID, still running.
+	afterClose := proxy.ReadStatus(f.root)
+	require.True(t, afterClose.ProxyRunning, "the flight's proxy spawn must survive the provider's close")
+	require.Equal(t, running.ProxyPID, afterClose.ProxyPID,
+		"Close stops discovery, never the shared proxy: same PID before and after")
+
+	// The woken reader finishes on the closed provider instead of hanging.
+	require.Eventually(t, func() bool {
+		select {
+		case <-readDone:
+			return true
+		default:
+			return false
+		}
+	}, 20*time.Second, 100*time.Millisecond, "the mid-recovery reader must be woken by Close")
+
+	// A closed provider never resurrects: stop the shared proxy after the
+	// close and a read must fail with no respawn behind the failure —
+	// recovery is disabled first, and `quiet.Close` above proved the same
+	// for a provider whose proxy stopped before its close.
+	require.NoError(t, proxy.Shutdown(f.root))
+	f.waitForProxyStopped(5 * time.Second)
+	require.Error(t, f.read(armed), "a read on the closed provider fails")
+	require.False(t, proxy.ReadStatus(f.root).ProxyRunning,
+		"a closed provider must not respawn a replacement proxy")
 }

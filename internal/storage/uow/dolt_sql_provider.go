@@ -70,6 +70,13 @@ type doltSQLProvider struct {
 	// this provider's pool makes, armed only after construction succeeded;
 	// nil for pools this package opens without one (raw "tcp" test DSNs).
 	resolver *proxy.EndpointResolver
+	// closed marks THIS provider's Close. p.db itself is never nil-ed: a
+	// concurrent BeginTx, maintenance read or delete fence holding the
+	// provider would race that write (the race detector found exactly that
+	// against a shutdown-in-flight read). The closed pool is the closed
+	// marker — a later read fails with database/sql's own "database is
+	// closed" instead of a nil dereference.
+	closed atomic.Bool
 	// versionedHistory activates dual-write issue-version history for THIS
 	// provider instance only. See SetVersionedHistoryEnabled and
 	// DeferVersionedHistory.
@@ -225,8 +232,6 @@ func (p *doltSQLProvider) Close(ctx context.Context) error {
 	if p.db == nil {
 		return nil
 	}
-	db := p.db
-	p.db = nil
 	// Shutdown ordering for a resolving provider (gastownhall/beads#7295):
 	// disable discovery and wake its waiters FIRST, then close the pool,
 	// then join any flight still running inside ctx. Closing the pool first
@@ -238,15 +243,23 @@ func (p *doltSQLProvider) Close(ctx context.Context) error {
 	if p.resolver != nil {
 		p.resolver.StopDiscovery()
 		var errs []error
-		if err := db.Close(); err != nil {
-			errs = append(errs, err)
+		if p.closed.CompareAndSwap(false, true) {
+			if err := p.db.Close(); err != nil {
+				errs = append(errs, err)
+			}
 		}
+		// Every call joins whatever flight remains, not only the first: a
+		// Close that timed out left discovery disabled but the spawn still
+		// running, and this later Close must be able to finish the join.
 		if err := p.resolver.Close(ctx); err != nil {
 			errs = append(errs, err)
 		}
 		return errors.Join(errs...)
 	}
-	return db.Close()
+	if p.closed.CompareAndSwap(false, true) {
+		return p.db.Close()
+	}
+	return nil
 }
 
 func (p *doltSQLProvider) BeginTx(ctx context.Context) (Tx, error) {
