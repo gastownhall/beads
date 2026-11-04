@@ -234,11 +234,16 @@ func (s *DoltStore) GetCurrentCommit(ctx context.Context) (string, error) {
 // writes land in the working set and HEAD does not advance).
 // Implements storage.StateHasher.
 func (s *DoltStore) GetStateHash(ctx context.Context) (string, error) {
-	var hash string
-	if err := s.db.QueryRowContext(ctx, "SELECT DOLT_HASHOF_DB()").Scan(&hash); err == nil {
+	hash, err := versioncontrolops.StateHash(ctx, s.db)
+	if err == nil {
 		return hash, nil
 	}
-	// Older servers predate DOLT_HASHOF_DB; degrade to HEAD-based detection.
+	// The server-side legacy fallback, not a promise of the interface: this
+	// particular store targets servers that may predate DOLT_HASHOF_DB, so it
+	// degrades to HEAD-based detection rather than failing. That stops
+	// tracking uncommitted writes — the exact blindness StateHasher exists to
+	// remove — but a warning there would strand every pre-DOLT_HASHOF_DB
+	// workspace on "auto-export skipped".
 	return s.GetCurrentCommit(ctx)
 }
 

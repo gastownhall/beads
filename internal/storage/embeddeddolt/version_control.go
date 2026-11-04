@@ -294,6 +294,26 @@ func (s *EmbeddedDoltStore) CommitExists(ctx context.Context, commitHash string)
 	return exists, err
 }
 
+// GetStateHash returns a hash of the entire database including the working
+// set. Unlike GetCurrentCommit (HEAD only) it moves on uncommitted writes, so
+// auto-export's change detection notices durable creates even while a version
+// commit is deferred (dolt.auto-commit batch/off, GH#6955) — HEAD alone can
+// stand still across them. The zero-argument working-data form of
+// DOLT_HASHOF_DB is pinned by the pinned embedded engine. Errors propagate:
+// auto-export must warn and skip, not silently fall back to HEAD, or the
+// uncommitted-write blindness this fixes returns unnoticed.
+// Implements storage.StateHasher.
+func (s *EmbeddedDoltStore) GetStateHash(ctx context.Context) (string, error) {
+	var hash string
+	err := s.withDBConn(ctx, func(db versioncontrolops.DBConn) error {
+		var readErr error
+		hash, readErr = versioncontrolops.StateHash(ctx, db)
+		return readErr
+	})
+	return hash, err
+}
+
+var _ storage.StateHasher = (*EmbeddedDoltStore)(nil)
 var _ storage.HeadHasher = (*EmbeddedDoltStore)(nil)
 
 // GetHeadHashes returns the HEAD commit hash and the hash of its root value.

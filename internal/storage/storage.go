@@ -883,11 +883,15 @@ type BlockedRecomputer interface {
 	RecomputeAllBlocked(ctx context.Context) (int, error)
 }
 
-// StateHasher returns a hash covering committed history plus the working set.
-// Unlike GetCurrentCommit (HEAD only), the hash moves on uncommitted writes.
-// Change detection against a SQL server must use this when available: server
-// mode runs with dolt auto-commit off, so writes sit in the working set and
-// HEAD does not advance.
+// StateHasher returns a hash covering the working data: committed history
+// plus the working set. Unlike GetCurrentCommit (HEAD only), the hash must
+// move on any working-data change even without a commit — the hash describes
+// the working root, not accumulated commit history — and must stay stable
+// across reads and across commits that leave the working data unchanged.
+// Change detection must use this when available: server mode runs with dolt
+// auto-commit off, so writes sit in the working set and HEAD does not
+// advance, and embedded mode defers version commits under batch/off
+// auto-commit (GH#6955).
 // Callers should type-assert to this interface and fall back to
 // GetCurrentCommit when the store does not implement it.
 type StateHasher interface {

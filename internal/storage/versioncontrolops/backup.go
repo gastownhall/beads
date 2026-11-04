@@ -152,6 +152,21 @@ func CurrentCommit(ctx context.Context, db DBConn) (string, error) {
 	return hash, nil
 }
 
+// StateHash returns the hash of the entire database including the working
+// set: DOLT_HASHOF_DB()'s zero-argument (working-data) form. Unlike
+// CurrentCommit it moves on uncommitted writes even when HEAD stands still,
+// so change detection must use this hash to notice writes that have not been
+// versioned (auto-export's throttle path, GH#6955). Servers older than
+// DOLT_HASHOF_DB reject the query; the fallback is each store's own to
+// document and take.
+func StateHash(ctx context.Context, db DBConn) (string, error) {
+	var hash string
+	if err := db.QueryRowContext(ctx, "SELECT DOLT_HASHOF_DB()").Scan(&hash); err != nil {
+		return "", fmt.Errorf("failed to hash working data: %w", err)
+	}
+	return hash, nil
+}
+
 // HeadHashes returns the hash of the HEAD commit and the hash of its root
 // value, DOLT_HASHOF('HEAD') and DOLT_HASHOF_DB('HEAD'), read in one
 // statement so both describe the same HEAD.
