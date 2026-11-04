@@ -97,6 +97,7 @@ func serveSilentAuthLoopback(t *testing.T, ln net.Listener) *authLoopback {
 	t.Cleanup(func() { _ = ln.Close() })
 	return a
 }
+
 func (a *authLoopback) serve() {
 	for {
 		conn, err := a.ln.Accept()
@@ -150,6 +151,45 @@ func newTestResolver(t *testing.T, secret string, ep Endpoint) *EndpointResolver
 
 func dialCtx() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), 5*time.Second)
+}
+
+// TestEndpointResolver_HealthyDialIsExactlyOneConnection is AC-8: an armed
+// resolver on a healthy endpoint opens ONE connection, authenticates it
+// against the CURRENT workspace secret, and does no discovery, IDENT or
+// pidfile work. The pidfile assertion is what makes "no probe" observable:
+// GetCreate reads and writes records under the root, so an empty root after
+// a healthy dial proves none ran.
+func TestEndpointResolver_HealthyDialIsExactlyOneConnection(t *testing.T) {
+	secret := "6464646464646464646464646464646464646464646464646464646464646464" // 64 hex chars
+	a := startAuthLoopback(t, secret)
+	r := newTestResolver(t, secret, a.endpoint())
+	discover, calls := recordingDiscover(func(int) (Endpoint, error) {
+		t.Error("healthy dial ran discovery")
+		return Endpoint{}, nil
+	})
+	r.discover = discover
+	r.Arm()
+
+	ctx, cancel := dialCtx()
+	defer cancel()
+	conn, err := r.DialContext(ctx, "bdproxy", a.addr)
+	require.NoError(t, err)
+	defer func() { _ = conn.Close() }()
+
+	require.EqualValues(t, 1, a.accepts.Load(), "the dial must open exactly one connection")
+	require.EqualValues(t, 0, calls.Load(), "healthy dial must not discover")
+	// No pidfile, no spawn marker: nothing but the secret exists under the
+	// resolver's root.
+	entries, err := os.ReadDir(r.root)
+	require.NoError(t, err)
+	require.Len(t, entries, 1, "root should hold only the secret; a probe would have left a record")
+	require.Equal(t, identity.SecretFileName, entries[0].Name())
+
+	// A second healthy dial proves the first was not cached state.
+	_, err = r.DialContext(ctx, "bdproxy", a.addr)
+	require.NoError(t, err)
+	require.EqualValues(t, 2, a.accepts.Load())
+	require.EqualValues(t, 0, calls.Load())
 }
 
 // TestEndpointResolver_UnarmedNeverDiscovers is AC-3: a construction dial
