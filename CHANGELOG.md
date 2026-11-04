@@ -3842,6 +3842,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   consumed only on the store-requiring path, the ambient workspace is still
   what gets selected, and its source database is still preserved.
 
+- **`bd --readonly sql` now refuses set operations that write through an
+  `INTO` clause** ([#7033](https://github.com/gastownhall/beads/issues/7033)).
+  `UNION`, `INTERSECT`, and `EXCEPT` statements ending in `INTO OUTFILE`,
+  `INTO DUMPFILE`, or `INTO @var` were classified as reads, bypassing the
+  read-only check and potentially writing a file. They are now classified as
+  writes, matching ordinary `SELECT ... INTO` statements.
+
 - **An ambient `BEADS_DOLT_SERVER_PORT` now marks a workspace externally
   managed — suppressing auto-start — and no longer stops bd reaping its own
   orphaned server**
