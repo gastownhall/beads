@@ -329,7 +329,17 @@ func (p *doltSQLProvider) initSchemaAttempt(ctx context.Context, database string
 	if p.preview {
 		return p.attachPreviewDatabase(ctx, conn, database)
 	}
-	if _, err := schema.MigrateUpWithLock(ctx, conn, database,
+	// A database AHEAD of this binary must be refused, as every other open
+	// path refuses it (dolt store, embeddeddolt, team server): MigrateUp reads
+	// "cursor >= latest" as nothing to do, so without this an older bd reads
+	// and writes a newer schema with no warning. The check runs on whichever
+	// path MigrateUpWithLock takes: inside the gate on the locked path, after
+	// the shared-store check (which finds nothing pending on an ahead database
+	// and passes it), so the refusal lands before MigrateUp's first write, and
+	// after the call on the
+	// converged fast path, which writes nothing and never reaches the gate.
+	forwardDriftChecked := false
+	if _, err := migrateUpWithLock(ctx, conn, database,
 		schema.WithDatabaseSelector(selectProbeDatabase),
 		schema.WithLockedPreparation(p.serverEndpoint, preparer.prepare),
 		// This provider serves a shared database by definition — an external
@@ -342,7 +352,11 @@ func (p *doltSQLProvider) initSchemaAttempt(ctx context.Context, database string
 		// database by the time it runs, so a fresh bootstrap reads version 0
 		// and passes.
 		schema.WithMigrationGate(func(ctx context.Context, c *sql.Conn) error {
-			return schema.CheckSharedStoreMigrateGate(ctx, c, "", nil, dataBehindAdopter(p.readOnly))
+			if err := schema.CheckSharedStoreMigrateGate(ctx, c, "", nil, dataBehindAdopter(p.readOnly)); err != nil {
+				return err
+			}
+			forwardDriftChecked = true
+			return schema.CheckForwardDrift(ctx, c)
 		})); err != nil {
 		var gateErr *schema.RemoteMigrateGateError
 		if errors.As(err, &gateErr) {
@@ -364,8 +378,21 @@ func (p *doltSQLProvider) initSchemaAttempt(ctx context.Context, database string
 		}
 		return classifyInitSchemaError(err)
 	}
+	if !forwardDriftChecked {
+		if err := schema.CheckForwardDrift(ctx, conn); err != nil {
+			if isSerializationError(err) {
+				return fmt.Errorf("uow: schema check: %w", err)
+			}
+			return backoff.Permanent(err)
+		}
+	}
 	return nil
 }
+
+// migrateUpWithLock is schema.MigrateUpWithLock, declared as a var so a unit
+// test can stand in for the converged fast path, which a mocked connection
+// cannot reach without the schema package's own probe internals.
+var migrateUpWithLock = schema.MigrateUpWithLock
 
 // dataBehindAdopter injects the one ancestry fact the smart gate's #6575
 // data-behind check needs on this path. Without it localDataBehind short-
