@@ -144,6 +144,10 @@ func idBatchClauses(format string, ids []string) ([]string, []any) {
 	return clauses, args
 }
 
+// ActiveCustomStatusesSQL is the query used to resolve active custom statuses
+// for parameterization into the ready query.
+const ActiveCustomStatusesSQL = "SELECT name FROM custom_statuses WHERE category = 'active' ORDER BY name"
+
 // ReadyWorkWhereInputs carries the precomputed ID sets the ready-work WHERE
 // clause folds in. Computing them takes queries, which is execution-context
 // work each stack does its own way.
@@ -160,16 +164,40 @@ type ReadyWorkWhereInputs struct {
 	// like the sets above because an id can name a row in both tables and
 	// only one of them may be stale.
 	StaleBlockedIDs map[string][]string
+	// ActiveCustomStatuses are category='active' custom status names;
+	// when provided and filter.Status == types.StatusOpen, readyStatusClause
+	// parameterizes them directly into status = ? or status IN (?, ...).
+	// Nil leaves active names unresolved and retains the SQL subquery; a
+	// non-nil empty slice means no active custom names.
+	ActiveCustomStatuses []string
 }
 
 // readyStatusClause renders the ready-work status predicate and its args.
-func readyStatusClause(filter types.WorkFilter) (string, []any) {
+func readyStatusClause(filter types.WorkFilter, activeCustomStatuses []string) (string, []any) {
 	switch {
 	case filter.Status == types.StatusOpen:
 		// Singular StatusOpen is the `bd ready` pin and means the ready-
 		// eligible set: built-in open plus category-active custom statuses,
 		// matching the ready_issues view since migration 0025 (GH#5831).
 		// Any other singular status stays exact.
+		if activeCustomStatuses != nil {
+			if len(activeCustomStatuses) == 0 {
+				return "status = ?", []any{string(filter.Status)}
+			}
+			statuses := []string{string(filter.Status)}
+			seen := map[string]bool{string(filter.Status): true}
+			for _, s := range activeCustomStatuses {
+				if !seen[s] && s != "" {
+					seen[s] = true
+					statuses = append(statuses, s)
+				}
+			}
+			if len(statuses) == 1 {
+				return "status = ?", []any{statuses[0]}
+			}
+			ph, statusArgs := InPlaceholders(statuses)
+			return fmt.Sprintf("status IN (%s)", ph), statusArgs
+		}
 		return "(status = ? OR status IN (SELECT name FROM custom_statuses WHERE category = 'active'))", []any{string(filter.Status)}
 	case filter.Status != "":
 		return "status = ?", []any{string(filter.Status)}
@@ -205,7 +233,7 @@ func readyParentClause(parentID string, tables FilterTables, descendantIDs []str
 // aliases are out of scope. See the SearchCountsSQL doc comment for why a
 // violation fails loud.
 func BuildReadyWorkWhere(filter types.WorkFilter, tables FilterTables, in ReadyWorkWhereInputs) (string, []any, error) {
-	statusClause, args := readyStatusClause(filter)
+	statusClause, args := readyStatusClause(filter, in.ActiveCustomStatuses)
 	blockedClause, blockedArgs := readyBlockedClause(in.StaleBlockedIDs[tables.Main])
 	args = append(args, blockedArgs...)
 	whereClauses := []string{

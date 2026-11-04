@@ -644,8 +644,10 @@ func TestBuildReadyWorkWhereStatusFilter(t *testing.T) {
 	tests := []struct {
 		name            string
 		filter          types.WorkFilter
+		active          []string
 		wantClause      string
 		rejectClause    string // must NOT appear in the WHERE; "" skips the check
+		rejectArg       string
 		wantLeadingArgs []any
 	}{
 		{
@@ -681,13 +683,47 @@ func TestBuildReadyWorkWhereStatusFilter(t *testing.T) {
 			wantClause:   "status IN ('open', 'in_progress')",
 			rejectClause: "status = ?",
 		},
+		{
+			name:            "HydratedOpenWinsOverStatuses",
+			filter:          types.WorkFilter{Status: types.StatusOpen, Statuses: []types.Status{types.StatusBlocked}},
+			active:          []string{"review"},
+			wantClause:      "status IN (?,?)",
+			rejectClause:    "custom_statuses",
+			wantLeadingArgs: []any{"open", "review"},
+		},
+		{
+			name:            "HydratedNamesDoNotWidenOtherSingularStatus",
+			rejectArg:       "review",
+			filter:          types.WorkFilter{Status: types.StatusInProgress, Statuses: []types.Status{types.StatusOpen}},
+			active:          []string{"review"},
+			wantClause:      "status = ?",
+			rejectClause:    "custom_statuses",
+			wantLeadingArgs: []any{"in_progress"},
+		},
+		{
+			name:            "HydratedNamesDoNotWidenPluralStatuses",
+			rejectArg:       "review",
+			filter:          types.WorkFilter{Statuses: []types.Status{types.StatusOpen, types.StatusBlocked}},
+			active:          []string{"review"},
+			wantClause:      "status IN (?,?)",
+			rejectClause:    "custom_statuses",
+			wantLeadingArgs: []any{"open", "blocked"},
+		},
+		{
+			name:         "HydratedNamesDoNotWidenLegacyDefault",
+			rejectArg:    "review",
+			filter:       types.WorkFilter{},
+			active:       []string{"review"},
+			wantClause:   "status IN ('open', 'in_progress')",
+			rejectClause: "review",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			where, args, err := BuildReadyWorkWhere(tt.filter, IssuesFilterTables, ReadyWorkWhereInputs{})
+			where, args, err := BuildReadyWorkWhere(tt.filter, IssuesFilterTables, ReadyWorkWhereInputs{ActiveCustomStatuses: tt.active})
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -696,6 +732,13 @@ func TestBuildReadyWorkWhereStatusFilter(t *testing.T) {
 			}
 			if tt.rejectClause != "" && strings.Contains(where, tt.rejectClause) {
 				t.Errorf("unexpected status clause %q present.\n where = %s", tt.rejectClause, where)
+			}
+			if tt.rejectArg != "" {
+				for _, arg := range args {
+					if value, ok := arg.(string); ok && value == tt.rejectArg {
+						t.Errorf("ignored hydrated status %q leaked into args: %v", value, args)
+					}
+				}
 			}
 			if len(args) < len(tt.wantLeadingArgs) {
 				t.Fatalf("args = %v, want at least the %d leading status args %v", args, len(tt.wantLeadingArgs), tt.wantLeadingArgs)
@@ -706,6 +749,108 @@ func TestBuildReadyWorkWhereStatusFilter(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestBuildReadyWorkWhereActiveCustomStatuses(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name            string
+		active          []string
+		wantClause      string
+		rejectClause    string
+		wantLeadingArgs []any
+	}{
+		{
+			name:            "ResolvedEmptyActiveStatuses",
+			active:          []string{},
+			wantClause:      "status = ?",
+			rejectClause:    "custom_statuses",
+			wantLeadingArgs: []any{"open"},
+		},
+		{
+			name:            "ResolvedActiveStatusesSingle",
+			active:          []string{"phase-active"},
+			wantClause:      "status IN (?,?)",
+			rejectClause:    "custom_statuses",
+			wantLeadingArgs: []any{"open", "phase-active"},
+		},
+		{
+			name:            "ResolvedActiveStatusesMultipleDedup",
+			active:          []string{"phase-active", "open", "phase-accepted", "phase-active"},
+			wantClause:      "status IN (?,?,?)",
+			rejectClause:    "custom_statuses",
+			wantLeadingArgs: []any{"open", "phase-active", "phase-accepted"},
+		},
+		{
+			name:            "ResolvedOnlyEmptyAndOpen",
+			active:          []string{"", "open", ""},
+			wantClause:      "status = ?",
+			rejectClause:    "custom_statuses",
+			wantLeadingArgs: []any{"open"},
+		},
+		{
+			name:            "CustomStatusRemainsBoundValue",
+			active:          []string{"review' OR 1=1 --"},
+			wantClause:      "status IN (?,?)",
+			rejectClause:    "review' OR 1=1 --",
+			wantLeadingArgs: []any{"open", "review' OR 1=1 --"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			where, args, err := BuildReadyWorkWhere(
+				types.WorkFilter{Status: types.StatusOpen},
+				IssuesFilterTables,
+				ReadyWorkWhereInputs{ActiveCustomStatuses: tt.active},
+			)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !strings.HasPrefix(where, "WHERE "+tt.wantClause+" AND ") {
+				t.Errorf("status clause %q missing.\n where = %s", tt.wantClause, where)
+			}
+			if tt.rejectClause != "" && strings.Contains(where, tt.rejectClause) {
+				t.Errorf("unexpected status clause %q present.\n where = %s", tt.rejectClause, where)
+			}
+			if len(args) < len(tt.wantLeadingArgs) {
+				t.Fatalf("args = %v, want at least the %d leading status args %v", args, len(tt.wantLeadingArgs), tt.wantLeadingArgs)
+			}
+			for i, want := range tt.wantLeadingArgs {
+				if args[i] != want {
+					t.Errorf("args[%d] = %v, want %v", i, args[i], want)
+				}
+			}
+		})
+	}
+}
+
+// TestBuildReadyWorkWhereStatusArgumentComposition pins binding order across
+// status, stale-blocked, priority and type predicates.
+func TestBuildReadyWorkWhereStatusArgumentComposition(t *testing.T) {
+	t.Parallel()
+	priority := 2
+	where, args, err := BuildReadyWorkWhere(
+		types.WorkFilter{Status: types.StatusOpen, Priority: &priority, Type: "task"},
+		IssuesFilterTables,
+		ReadyWorkWhereInputs{
+			ActiveCustomStatuses: []string{"review"},
+			StaleBlockedIDs:      map[string][]string{"issues": {"stale-issue"}},
+		},
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.HasPrefix(where, "WHERE status IN (?,?) AND ") {
+		t.Fatalf("status predicate must lead: %s", where)
+	}
+	want := []any{"open", "review", "stale-issue", priority, "task"}
+	if !slices.Equal(args, want) {
+		t.Fatalf("args = %#v, want %#v", args, want)
 	}
 }
 

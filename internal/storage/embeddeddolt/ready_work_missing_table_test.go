@@ -4,12 +4,14 @@ package embeddeddolt_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/storage/domain/db"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -151,5 +153,143 @@ func TestReadyWorkWithMissingDeferredParentTables(t *testing.T) {
 		if len(ids) != 1 || ids[0] != "rww-free" {
 			t.Fatalf("ready work = %v, want [rww-free] (the deferred parent's child must still be withheld)", ids)
 		}
+	})
+}
+
+// TestReadyWorkCustomStatusFailures distinguishes required-schema errors and
+// already-canceled database calls from successful empty readiness responses.
+func TestReadyWorkCustomStatusFailures(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	te := newTestEnv(t, "cf")
+	ctx := t.Context()
+	if err := te.store.SetConfig(ctx, "status.custom", "review:active"); err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range []struct {
+		id       string
+		status   types.Status
+		priority int
+	}{{"cf-review", "review", 0}, {"cf-open", types.StatusOpen, 1}} {
+		if err := te.store.CreateIssue(ctx, &types.Issue{ID: row.id, Title: row.id, Status: row.status, Priority: row.priority, IssueType: types.TypeTask}, "tester"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	filter := types.WorkFilter{Status: types.StatusOpen, IncludeEphemeral: true, SortPolicy: types.SortPolicyPriority}
+	assertReadyActiveRead(t, te, filter, []string{"cf-review", "cf-open"}, 2, false)
+	operations := []struct {
+		name   string
+		capped bool
+		read   func(*testing.T, context.Context, issueops.DBTX, types.WorkFilter) error
+	}{
+		{"counts", true, func(t *testing.T, ctx context.Context, tx issueops.DBTX, f types.WorkFilter) error {
+			rows, err := issueops.GetReadyWorkWithCountsInTx(ctx, tx, f)
+			if len(rows) != 0 {
+				t.Fatalf("failed counts returned candidates: %v", readyIDs(rows))
+			}
+			return err
+		}},
+		{"page_total", true, func(t *testing.T, ctx context.Context, tx issueops.DBTX, f types.WorkFilter) error {
+			rows, total, err := issueops.GetReadyWorkWithCountsAndTotalInTx(ctx, tx, f)
+			if len(rows) != 0 || total != 0 {
+				t.Fatalf("failed page returned candidates/total: %v/%d", readyIDs(rows), total)
+			}
+			return err
+		}},
+		{"counter", false, func(t *testing.T, ctx context.Context, tx issueops.DBTX, f types.WorkFilter) error {
+			n, err := issueops.CountReadyWorkInTx(ctx, tx, f)
+			if n != 0 {
+				t.Fatalf("failed counter returned total %d", n)
+			}
+			return err
+		}},
+		{"domain_plain", true, func(t *testing.T, ctx context.Context, tx issueops.DBTX, f types.WorkFilter) error {
+			page, err := db.NewIssueSQLRepository(tx).GetReadyWork(ctx, f)
+			if len(page.Items) != 0 || page.HasMore {
+				t.Fatal("failed domain plain returned a successful page")
+			}
+			return err
+		}},
+		{"domain_counts", true, func(t *testing.T, ctx context.Context, tx issueops.DBTX, f types.WorkFilter) error {
+			page, err := db.NewIssueSQLRepository(tx).GetReadyWorkWithCounts(ctx, f)
+			if len(page.Items) != 0 || page.HasMore {
+				t.Fatal("failed domain counts returned a successful page")
+			}
+			return err
+		}},
+		{"claim", false, func(t *testing.T, ctx context.Context, tx issueops.DBTX, f types.WorkFilter) error {
+			winner, err := issueops.ClaimReadyIssueInTx(ctx, tx, f, "alice")
+			if winner != nil {
+				t.Fatalf("failed claim returned winner %s", winner.ID)
+			}
+			return err
+		}},
+	}
+	assertUnchanged := func(t *testing.T) {
+		t.Helper()
+		for _, row := range []struct{ id, status string }{{"cf-review", "review"}, {"cf-open", "open"}} {
+			var status, assignee string
+			var unstarted bool
+			te.queryScalar(t, t.Context(), "SELECT status, COALESCE(assignee, ''), started_at IS NULL FROM issues WHERE id = ?", []any{row.id}, &status, &assignee, &unstarted)
+			if status != row.status || assignee != "" || !unstarted {
+				t.Fatalf("failed operation changed candidate %s: %s/%s/unstarted=%v", row.id, status, assignee, unstarted)
+			}
+		}
+		var claims int
+		te.queryScalar(t, t.Context(), "SELECT COUNT(*) FROM events WHERE issue_id IN (?, ?) AND event_type = 'claimed'", []any{"cf-review", "cf-open"}, &claims)
+		if claims != 0 {
+			t.Fatalf("failed operations emitted %d claim events", claims)
+		}
+	}
+	t.Run("pre_canceled", func(t *testing.T) {
+		for _, op := range operations {
+			t.Run(op.name, func(t *testing.T) {
+				var operationErr error
+				withCountingReadTx(t, te, func(tx issueops.DBTX) error {
+					canceled, cancel := context.WithCancel(t.Context())
+					cancel()
+					operationErr = op.read(t, canceled, tx, filter)
+					return nil
+				})
+				if !errors.Is(operationErr, context.Canceled) {
+					t.Fatalf("canceled operation error = %v, want context.Canceled", operationErr)
+				}
+			})
+		}
+		assertUnchanged(t)
+	})
+	t.Run("max_rows", func(t *testing.T) {
+		for _, op := range operations {
+			if !op.capped {
+				continue
+			}
+			t.Run(op.name, func(t *testing.T) {
+				var operationErr error
+				withCountingReadTx(t, te, func(tx issueops.DBTX) error {
+					capped := filter
+					capped.MaxRows = 1
+					capped.MaxRowsSource = "area4 fixture"
+					operationErr = op.read(t, t.Context(), tx, capped)
+					return nil
+				})
+				var capErr *issueops.ErrTooManyRows
+				if !errors.As(operationErr, &capErr) || capErr.Cap != 1 {
+					t.Fatalf("cap refusal = %v, want typed cap1", operationErr)
+				}
+			})
+		}
+		assertUnchanged(t)
+	})
+	t.Run("missing_status_table", func(t *testing.T) {
+		te.exec(t, t.Context(), "RENAME TABLE custom_statuses TO custom_statuses_unavailable")
+		for _, op := range operations {
+			t.Run(op.name, func(t *testing.T) {
+				var operationErr error
+				withCountingReadTx(t, te, func(tx issueops.DBTX) error { operationErr = op.read(t, t.Context(), tx, filter); return nil })
+				if !dberrors.IsMissingTable(operationErr, "custom_statuses") {
+					t.Fatalf("required status table failure = %v", operationErr)
+				}
+			})
+		}
+		assertUnchanged(t)
 	})
 }

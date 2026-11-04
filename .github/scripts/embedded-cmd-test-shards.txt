@@ -483,6 +483,7 @@
 100 84 TestEmbeddedInitGitBootstrapRoutingDecoyInvalid
 100 84 TestEmbeddedInitSelectedExcludeRoutingStealthInvalid
 100 84 TestEmbeddedMigratePersonal_preservesComments
+100 84 TestEmbeddedReadyCustomActiveConsumer
 
 100 85 TestEmbeddedBootstrapExistingDryRunInit
 100 85 TestEmbeddedChildrenBasicAndEmpty

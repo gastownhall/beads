@@ -28,8 +28,8 @@ func buildReadyWorkOrder(policy types.SortPolicy) sqlbuild.ReadyWorkOrder {
 // stale-flagged rows), then delegates the clause text to sqlbuild so both
 // stacks share ready semantics. Unlike the classic stack, ORDER BY and LIMIT
 // are applied at the UNION outer query.
-func (r *issueSQLRepositoryImpl) buildReadyWorkPredicates(ctx context.Context, filter types.WorkFilter, tables filterTables) (*readyWorkPredicates, error) {
-	var inputs sqlbuild.ReadyWorkWhereInputs
+func (r *issueSQLRepositoryImpl) buildReadyWorkPredicates(ctx context.Context, filter types.WorkFilter, tables filterTables, activeStatuses []string) (*readyWorkPredicates, error) {
+	inputs := sqlbuild.ReadyWorkWhereInputs{ActiveCustomStatuses: activeStatuses}
 	staleIDs, err := r.staleBlockedIDs(ctx, tables)
 	if err != nil {
 		return nil, fmt.Errorf("get ready work: stale blocked flags in %s: %w", tables.Main, err)
@@ -75,6 +75,31 @@ func (r *issueSQLRepositoryImpl) staleBlockedIDs(ctx context.Context, tables fil
 		return nil, err
 	}
 	return ids, nil
+}
+
+func (r *issueSQLRepositoryImpl) getActiveCustomStatuses(ctx context.Context) ([]string, error) {
+	rows, err := r.runner.QueryContext(ctx, sqlbuild.ActiveCustomStatusesSQL)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		if name != "" {
+			out = append(out, name)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if out == nil {
+		out = []string{}
+	}
+	return out, nil
 }
 
 type deferredParentEdge struct {

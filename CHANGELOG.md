@@ -4440,6 +4440,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ACCEPTANCE CRITERIA, and comment bodies, direct and proxied alike — not
   just `bd show`'s DESCRIPTION field. An explicit `GLAMOUR_STYLE` override
   still takes priority over the detected background.
+- `bd ready` expands singular open-status reads with bound active custom
+  status names across plain, count-aware and domain readiness paths, allowing
+  direct status predicates on Dolt. Active names are resolved per operation
+  and shared across its query legs; default and plural-status selector semantics
+  are preserved (#8045).
 
 ### Added
 

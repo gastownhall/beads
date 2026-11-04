@@ -30,7 +30,7 @@ type readyWorkProbe struct {
 	// overlap count. Probed only when the caller sizes the set; conservatively
 	// true whenever it was not probed exactly.
 	idCollision bool
-	// inputs are the ID sets the ready WHERE clause is rendered from
+	// inputs are the ID sets and active status names the ready WHERE uses
 	// (children of future-deferred parents, descendants of filter.ParentID,
 	// each family's stale-flagged rows), shared by both families. A family's
 	// stale rows are read only when the probe statement saw one, so the common
@@ -59,15 +59,18 @@ const futureDeferredPredicate = "defer_until IS NOT NULL AND defer_until > UTC_T
 // caller sizing the merged ready set needs.
 func probeReadyWorkInTx(ctx context.Context, tx DBTX, filter types.WorkFilter, wantCollision bool) (*readyWorkProbe, error) {
 	p := &readyWorkProbe{}
+	// Only a successful negative presence fact can skip the names query.
+	// A failed combined probe leaves presence unknown, including its fallback.
+	readActiveStatuses := filter.Status == types.StatusOpen
 	excludeDeferred := !filter.IncludeDeferred
 
 	// Which columns this statement carries depends on the filter, so each fact
 	// records the index it landed on as it is appended rather than the reader
-	// below counting appends back. Two of these columns are conditional, so a
+	// below counting appends back. Several of these columns are conditional, so a
 	// hardcoded index is a fact read from the wrong column the first time a
 	// new one is inserted above it — and the fact being misread would be the
 	// ready predicate.
-	cols := make([]string, 0, 7) // the four unconditional facts plus the three conditional ones
+	cols := make([]string, 0, 8) // four unconditional facts plus four conditional ones
 	appendFact := func(sql string) int {
 		cols = append(cols, sql)
 		return len(cols) - 1
@@ -91,6 +94,11 @@ func probeReadyWorkInTx(ctx context.Context, tx DBTX, filter types.WorkFilter, w
 	if wantCollision {
 		iCollision = appendFact("EXISTS (SELECT 1 FROM issues JOIN wisps ON wisps.id = issues.id)")
 	}
+	iActiveStatuses := -1
+	if readActiveStatuses {
+		// Reference name even for an empty table so missing required columns remain errors.
+		iActiveStatuses = appendFact("EXISTS (SELECT name FROM custom_statuses WHERE category = 'active')")
+	}
 	flags := make([]bool, len(cols))
 	dest := make([]any, len(cols))
 	for i := range flags {
@@ -104,6 +112,9 @@ func probeReadyWorkInTx(ctx context.Context, tx DBTX, filter types.WorkFilter, w
 		p.wispsPresent = flags[iWispsPresent]
 		// The statement ran, so every table it names exists.
 		p.wispDepsExist = true
+		if iActiveStatuses >= 0 {
+			readActiveStatuses = flags[iActiveStatuses]
+		}
 		if excludeDeferred {
 			hasDeferredParent = flags[iIssuesDeferred] || flags[iWispsDeferred]
 		}
@@ -141,6 +152,16 @@ func probeReadyWorkInTx(ctx context.Context, tx DBTX, filter types.WorkFilter, w
 			return nil, fmt.Errorf("get parent descendants: %w", descErr)
 		}
 		p.inputs.ParentDescendantIDs = descendantIDs
+	}
+	if filter.Status == types.StatusOpen {
+		p.inputs.ActiveCustomStatuses = []string{}
+		if readActiveStatuses {
+			active, err := getActiveCustomStatusesInTx(ctx, tx)
+			if err != nil {
+				return nil, fmt.Errorf("ready probe: active custom statuses: %w", err)
+			}
+			p.inputs.ActiveCustomStatuses = active
+		}
 	}
 	return p, nil
 }

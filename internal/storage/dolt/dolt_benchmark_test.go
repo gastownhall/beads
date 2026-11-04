@@ -2223,3 +2223,62 @@ func BenchmarkContentHashColumnProbe(b *testing.B) {
 		}
 	})
 }
+
+// BenchmarkGetReadyWorkActiveStatuses measures the public count-aware ready
+// operation, including its defer-wake sweep, with empty and populated active
+// vocabularies. setupBenchStore requires an explicitly dedicated server port.
+func BenchmarkGetReadyWorkActiveStatuses(b *testing.B) {
+	for _, tc := range []struct {
+		name   string
+		closed int
+		custom bool
+	}{
+		{"sparse_no_custom_5000", 5000, false},
+		{"sparse_custom_5000", 5000, true},
+		{"small_custom_10", 10, true},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			store, cleanup := setupBenchStore(b)
+			defer cleanup()
+			ctx := context.Background()
+			if tc.custom {
+				if err := store.SetConfig(ctx, "status.custom", "review:active,triage:active"); err != nil {
+					b.Fatal(err)
+				}
+			}
+			closedAt := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
+			background := make([]*types.Issue, tc.closed)
+			for i := range background {
+				background[i] = &types.Issue{ID: fmt.Sprintf("bench-active-closed-%06d", i), Title: "closed background", Status: types.StatusClosed, Priority: 4, IssueType: types.TypeTask, CreatedAt: closedAt.Add(-time.Hour), ClosedAt: &closedAt}
+			}
+			createBenchIssueBatch(b, store, background)
+			for i := range 4 {
+				status := types.StatusOpen
+				if tc.custom && i < 2 {
+					status = []types.Status{"review", "triage"}[i]
+				}
+				issue := &types.Issue{ID: fmt.Sprintf("bench-active-ready-%d", i), Title: "ready front", Status: status, Priority: i, IssueType: types.TypeTask, Ephemeral: i == 1}
+				if err := store.CreateIssue(ctx, issue, "bench"); err != nil {
+					b.Fatal(err)
+				}
+			}
+			filter := types.WorkFilter{Status: types.StatusOpen, IncludeEphemeral: true, SortPolicy: types.SortPolicyPriority, Limit: 2}
+			read := func() {
+				rows, total, err := store.GetReadyWorkWithCountsAndTotal(ctx, filter)
+				if err != nil {
+					b.Fatal(err)
+				}
+				if len(rows) != 2 || total != 4 || rows[0].ID != "bench-active-ready-0" || rows[1].ID != "bench-active-ready-1" {
+					b.Fatalf("ready page = %v, total = %d; want durable/wisp prefix and literal total 4", rows, total)
+				}
+			}
+			read()
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				read()
+			}
+			b.StopTimer()
+		})
+	}
+}

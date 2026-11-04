@@ -203,6 +203,7 @@
 40 6 TestEmbeddedRelationsAnswersAWispTargetInTheOutDirection
 40 6 TestEmbeddedUpgradeFromSchema27UnderTransactionCommit_4137
 40 6 TestPromoteStillWorksWithCollisionGuard
+40 6 TestReadyWorkCustomActiveSemantics
 40 6 TestSearchWithMissingWispPlaneTables
 40 6 TestVersionedHistoryKeepsNumbersTheStoreDistinguishesApart
 
@@ -264,6 +265,7 @@
 40 11 TestEmbeddedReadyClaimerRecordsOneHistoryEntryForAWin
 40 11 TestEventsJournal_ActorMatrixOnEmbedded
 40 11 TestMemoriesContract
+40 11 TestReadyProbeRejectsMissingCustomStatusName
 40 11 TestWithPeerAuth_WarnsWhenStoredPeerSuppressesAmbientPasswordStored
 
 40 12 TestCounterExcludeStatusAcceptsAWorkspaceCustomStatusWithoutIncludeInfra
@@ -415,6 +417,7 @@
 40 22 TestLargeBatchApplyStatementCounts356_Embedded
 40 22 TestLeaseLifecycleEmbedded
 40 22 TestPolicyBlockingAnnotatorForeignOpensAreSublinear
+40 22 TestReadyWorkCustomStatusFailures
 
 40 23 TestAsOfReadContract
 40 23 TestEmbeddedBatchCloserBackendFailureReturnsNoOutcomes
@@ -497,6 +500,7 @@
 40 28 TestEmbeddedIssueOperationsUpdateRefusesATypeOutsideTheWorkspaceVocabulary
 40 28 TestEmbeddedMigrateRetryAfterFaultConverges_4470
 40 28 TestEmbeddedReaderListReadyFlagAnswersTheBlockerAwareSet
+40 28 TestReadyReaderCustomActiveConsumer
 40 28 TestRenameLabel
 40 28 TestUpdateIssueType
 40 28 TestWithPeerAuth_RestoresEnvWhenCallbackFails
@@ -612,6 +616,7 @@
 40 36 TestEmbeddedReaderListReadyFlagRefusesAFilterItCannotCarry
 40 36 TestEmbeddedRelationsRefusesAnUnusableTypeFilter
 40 36 TestGetReadyWorkMoleculeFilter
+40 36 TestReadyWorkCustomActiveRefresh
 40 36 TestReleaserContract
 40 36 TestSchemaAfterInit
 

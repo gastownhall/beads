@@ -4,8 +4,10 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -795,6 +797,96 @@ func TestEmbeddedReadyEmptyStateRealBlocker(t *testing.T) {
 		}
 		if !strings.Contains(out, noneBlocked) {
 			t.Errorf("expected %q:\n%s", noneBlocked, out)
+		}
+	})
+}
+
+// TestEmbeddedReadyCustomActiveConsumer checks the actual CLI's bare text and
+// counted JSON routes with a custom-active durable row and a custom-active wisp.
+func TestEmbeddedReadyCustomActiveConsumer(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("requires embedded Dolt")
+	}
+	bd := buildEmbeddedBD(t)
+	binary, err := os.Open(bd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.New()
+	_, hashErr := io.Copy(digest, binary)
+	closeErr := binary.Close()
+	if hashErr != nil {
+		t.Fatal(hashErr)
+	}
+	if closeErr != nil {
+		t.Fatal(closeErr)
+	}
+	t.Logf("CLI binary=%s sha256=%x", bd, digest.Sum(nil))
+	dir, _, _ := bdInit(t, bd, "--prefix", "cactive")
+	bdConfig(t, bd, dir, "set", "status.custom", "review:active,polishing:wip")
+	durable := bdCreate(t, bd, dir, "custom active durable", "--type", "task", "--status", "review", "--priority", "1", "--label", "active-consumer")
+	wisp := bdCreate(t, bd, dir, "custom active wisp", "--type", "task", "--status", "review", "--priority", "2", "--label", "active-consumer", "--ephemeral")
+	open := bdCreate(t, bd, dir, "ordinary open", "--type", "task", "--priority", "3", "--label", "active-consumer")
+	excluded := bdCreate(t, bd, dir, "wip must stay hidden", "--type", "task", "--status", "polishing", "--priority", "0", "--label", "active-consumer")
+	other := bdCreate(t, bd, dir, "other label must stay hidden", "--type", "task", "--status", "review", "--priority", "0", "--label", "other-consumer")
+	run := func(t *testing.T, envelope bool, args ...string) ([]byte, string) {
+		t.Helper()
+		cmd := exec.Command(bd, append([]string{"ready", "--sort", "priority", "--label", "active-consumer"}, args...)...)
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		if envelope {
+			cmd.Env = append(cmd.Env, "BD_JSON_ENVELOPE=1")
+		}
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("ready %v: %v stderr=%s stdout=%s", args, err, stderr.String(), out)
+		}
+		return out, stderr.String()
+	}
+	t.Run("bare_text", func(t *testing.T) {
+		out, _ := run(t, false, "--limit", "1")
+		if !strings.Contains(string(out), durable.ID) {
+			t.Fatalf("missing durable custom row: %s", out)
+		}
+		for _, id := range []string{wisp.ID, open.ID, excluded.ID, other.ID} {
+			if strings.Contains(string(out), id) {
+				t.Fatalf("unexpected row %s in text: %s", id, out)
+			}
+		}
+	})
+	t.Run("counted_json", func(t *testing.T) {
+		out, stderr := run(t, false, "--json", "--include-ephemeral", "--limit", "1")
+		var rows []types.IssueWithCounts
+		if err := json.Unmarshal(out, &rows); err != nil {
+			t.Fatal(err)
+		}
+		if len(rows) != 1 || rows[0].ID != durable.ID || !strings.Contains(stderr, "Showing 1 of 3 ready issues.") {
+			t.Fatalf("page=%s stderr=%s, want durable and literal total3", out, stderr)
+		}
+	})
+	t.Run("envelope", func(t *testing.T) {
+		out, _ := run(t, true, "--json", "--include-ephemeral", "--limit", "1")
+		var page struct {
+			Data       []types.IssueWithCounts `json:"data"`
+			Pagination *PaginationMeta         `json:"pagination"`
+		}
+		if err := json.Unmarshal(out, &page); err != nil {
+			t.Fatal(err)
+		}
+		if len(page.Data) != 1 || page.Data[0].ID != durable.ID || page.Pagination == nil || page.Pagination.Total != 3 || page.Pagination.Returned != 1 || !page.Pagination.Truncated {
+			t.Fatalf("envelope=%s, want durable returned1 total3 truncated", out)
+		}
+	})
+	t.Run("unbounded_json", func(t *testing.T) {
+		out, _ := run(t, false, "--json", "--include-ephemeral", "--limit", "0")
+		var rows []types.IssueWithCounts
+		if err := json.Unmarshal(out, &rows); err != nil {
+			t.Fatal(err)
+		}
+		if len(rows) != 3 || rows[0].ID != durable.ID || rows[1].ID != wisp.ID || rows[2].ID != open.ID {
+			t.Fatalf("all=%s, want durable,wisp,open", out)
 		}
 	})
 }

@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
+
+	"github.com/steveyegge/beads/internal/types"
 )
 
 func deferredParentProbeRegex(issueTable string) string {
@@ -118,5 +120,117 @@ func TestDeferredParentEdgesUnrelatedErrorPropagates(t *testing.T) {
 
 	if _, err := repo.getChildrenOfDeferredParents(t.Context()); !errors.Is(err, boom) {
 		t.Fatalf("a failed deferred-parent edge did not propagate: %v", err)
+	}
+}
+
+// expectReadyDomainPage allows either lookup order while requiring just one
+// names read for the composed two-family query.
+func expectReadyDomainPage(mock sqlmock.Sqlmock, counts bool, status types.Status, names []string) {
+	mock.MatchExpectationsInOrder(false)
+	if counts {
+		mock.ExpectQuery("SELECT 1 FROM wisp_dependencies LIMIT 1").WillReturnRows(sqlmock.NewRows([]string{"1"}))
+	}
+	for _, family := range []string{"issues", "wisps"} {
+		mock.ExpectQuery("SELECT t.id FROM " + family + " t WHERE").WillReturnRows(sqlmock.NewRows([]string{"id"}))
+	}
+	mock.ExpectQuery("SELECT 1 FROM wisps LIMIT 1").WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
+	if status == types.StatusOpen {
+		rows := sqlmock.NewRows([]string{"name"})
+		for _, name := range names {
+			rows.AddRow(name)
+		}
+		mock.ExpectQuery("^SELECT name FROM custom_statuses WHERE category = 'active' ORDER BY name$").WillReturnRows(rows)
+	}
+	predicate := `status = \?`
+	if len(names) > 0 {
+		predicate = `status IN \(\?,\?\)`
+	}
+	query := `SELECT id, src FROM \(SELECT id, 'i' AS src, .* FROM issues WHERE ` + predicate + ` AND.* UNION ALL SELECT id, 'w' AS src, .* FROM wisps WHERE ` + predicate + ` AND`
+	if len(names) > 0 {
+		mock.ExpectQuery(query).WithArgs(string(status), names[0], "task", string(status), names[0], "task").WillReturnRows(sqlmock.NewRows([]string{"id", "src"}))
+	} else {
+		mock.ExpectQuery(query).WithArgs(string(status), "task", string(status), "task").WillReturnRows(sqlmock.NewRows([]string{"id", "src"}))
+	}
+}
+
+func callReadyDomain(t *testing.T, repo *issueSQLRepositoryImpl, counts bool, status types.Status) error {
+	t.Helper()
+	filter := types.WorkFilter{Status: status, Type: "task", SortPolicy: types.SortPolicyOldest, IncludeDeferred: true, IncludeEphemeral: true}
+	if counts {
+		_, err := repo.GetReadyWorkWithCounts(t.Context(), filter)
+		return err
+	}
+	_, err := repo.GetReadyWork(t.Context(), filter)
+	return err
+}
+
+func TestReadyDomainHydratesStatusesOnce(t *testing.T) {
+	for _, method := range []struct {
+		name   string
+		counts bool
+	}{{"plain", false}, {"counts", true}} {
+		for _, config := range []struct {
+			name   string
+			status types.Status
+			names  []string
+		}{
+			{"populated", types.StatusOpen, []string{"review"}},
+			{"empty", types.StatusOpen, []string{}},
+			{"non_open", types.StatusInProgress, nil},
+		} {
+			t.Run(method.name+"/"+config.name, func(t *testing.T) {
+				mock, repo := newMockRepo(t)
+				expectReadyDomainPage(mock, method.counts, config.status, config.names)
+				if err := callReadyDomain(t, repo, method.counts, config.status); err != nil {
+					t.Fatalf("operation must share one names read: %v", err)
+				}
+				if err := mock.ExpectationsWereMet(); err != nil {
+					t.Fatal(err)
+				}
+			})
+		}
+	}
+}
+
+func TestReadyDomainRefreshesStatusesPerOperation(t *testing.T) {
+	mock, repo := newMockRepo(t)
+	for _, name := range []string{"review", "triage"} {
+		expectReadyDomainPage(mock, false, types.StatusOpen, []string{name})
+		if err := callReadyDomain(t, repo, false, types.StatusOpen); err != nil {
+			t.Fatalf("fresh names for %s: %v", name, err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestReadyDomainStatusReadErrors(t *testing.T) {
+	for _, method := range []struct {
+		name   string
+		counts bool
+	}{{"plain", false}, {"counts", true}} {
+		for _, kind := range []string{"query", "iteration"} {
+			t.Run(method.name+"/"+kind, func(t *testing.T) {
+				mock, repo := newMockRepo(t)
+				if method.counts {
+					mock.ExpectQuery("SELECT 1 FROM wisp_dependencies LIMIT 1").WillReturnRows(sqlmock.NewRows([]string{"1"}))
+				}
+				fault := error(missingTable("custom_statuses"))
+				query := mock.ExpectQuery("^SELECT name FROM custom_statuses WHERE category = 'active' ORDER BY name$")
+				if kind == "query" {
+					query.WillReturnError(fault)
+				} else {
+					fault = errors.New("active status iteration failed")
+					query.WillReturnRows(sqlmock.NewRows([]string{"name"}).AddRow("review").AddRow("triage").RowError(1, fault)).RowsWillBeClosed()
+				}
+				if err := callReadyDomain(t, repo, method.counts, types.StatusOpen); !errors.Is(err, fault) {
+					t.Fatalf("required status read failure not preserved: %v", err)
+				}
+				if err := mock.ExpectationsWereMet(); err != nil {
+					t.Fatal(err)
+				}
+			})
+		}
 	}
 }
