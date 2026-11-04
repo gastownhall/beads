@@ -5304,6 +5304,81 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for it, so upgrade every bd that shares the workspace, or run `bd dolt stop`
   before going back to an older one.
 
+## [1.3.4] - 2026-11-04
+
+First stable release of the 1.3.4 patch line. It ships the same code as
+[1.3.4-rc.1]; the only change since that candidate is the version stamp. The
+full notes are in the [1.3.4-rc.1] section below. 1.3.4 is 1.3.3 plus one
+fix: bd reads `GT_ROOT` from a rig's `.beads/.env` again.
+
+There is **no new migration file**, and the embedded Dolt engine is
+unchanged: upgrading from 1.3.x or 1.3.4-rc.1 is a binary swap.
+
+Before promotion, 1.3.4-rc.1 passed gascity's RC Gate with bd pinned to the
+candidate, on a throwaway branch off gascity's `hotfix/1.5.1`
+([run 41791836358](https://github.com/gastownhall/gascity/actions/runs/41791836358)):
+- It ran the same 155 jobs as the 1.3.3-rc.1 gate, and every job finished
+  with the same result: 151 passing and 3 skipped.
+- The one red job is an advisory probe that builds bd from `main`. That
+  branch, like 1.3.3's, made two upstream-drift checks non-blocking.
+- The gate does not demonstrate the fix: the 1.3.3-rc.1 gate ran bd without
+  it and got the same results, and no job log in either run mentions
+  `GT_ROOT`.
+
+### Upgrade notes
+
+- Coming from 1.3.2 or earlier, read the [1.3.3-rc.1] **Upgrade notes**
+  before upgrading. They still apply, except that `GT_ROOT` is no longer one
+  of the `.beads/.env` keys bd ignores.
+- The [1.3.3-rc.1] **Known issues** are not fixed in 1.3.4, whichever release
+  you upgrade from. 1.3.4 does not include the #7039 restore
+  ([#8047](https://github.com/gastownhall/beads/pull/8047)), so do not run
+  `bd compact` or `bd flatten` on a clone that adopted migration 0062 by
+  `bd dolt pull` or `bd bootstrap`, or was cloned after it
+  ([#7039](https://github.com/gastownhall/beads/issues/7039)).
+- The 1.3.2 upgrade note still applies: run `bd recompute-blocked` once per
+  workspace whose store crossed migration 0059 under bd 1.3.0 or later,
+  which includes any workspace first created by bd 1.2.x or earlier
+  ([#7037](https://github.com/gastownhall/beads/issues/7037)).
+- Coming from 1.3.4-rc.1, nothing changes in behaviour.
+
+## [1.3.4-rc.1] - 2026-11-04
+
+First release candidate for 1.3.4, a one-fix patch on top of 1.3.3
+([#8118](https://github.com/gastownhall/beads/pull/8118)). It adds **no new
+migration file**, and the embedded Dolt engine is unchanged, so upgrading from
+1.3.x is a binary swap. The 1.3.3 **Upgrade notes** and **Known issues** still
+apply, except the `GT_ROOT` issue fixed below.
+
+### Fixed
+
+- **bd reads `GT_ROOT` from a rig's `.beads/.env` again**
+  ([#8118](https://github.com/gastownhall/beads/pull/8118), backport of
+  [#8117](https://github.com/gastownhall/beads/pull/8117)).
+  - **The problem:** Gas City's `gc rig add` writes the city root as `GT_ROOT`
+    into each rig's `.beads/.env`. 1.3.3's `.beads/.env` allowlist
+    ([#7879](https://github.com/gastownhall/beads/pull/7879)) dropped it, so
+    every bd command in a rig printed
+    `beads: ignoring GT_ROOT from .beads/.env` on stderr. Two things followed:
+    - Released gc versions read bd's `--json` error from stdout only when
+      stderr is empty, so they could misreport a failed bd command in a rig
+      as that notice
+      ([gastownhall/gascity#8817](https://github.com/gastownhall/gascity/pull/8817)).
+    - bd run in a rig without `GT_ROOT` exported stopped searching
+      `$GT_ROOT/.beads/formulas` and stopped loading
+      `$GT_ROOT/.beads/molecules.jsonl`. gc also links the city's formulas
+      into each rig's own `.beads/formulas`, an earlier search path, so the
+      formulas gc manages still resolved; gc writes no `molecules.jsonl`.
+  - **The fix:** `GT_ROOT` is now admitted, as the exact key only.
+    `GT_TOWN_ROOT` and other `GT_*` keys stay refused.
+  - **Why this is safe:** it names no command and no credential target. bd
+    reads `$GT_ROOT/.beads/formulas` as its last formula search path and
+    `$GT_ROOT/.beads/molecules.jsonl` as template data. Commands that write
+    to formula search paths can also write there: `bd formula convert --all`
+    writes a `.formula.toml` beside each JSON formula it converts there and,
+    with `--delete`, removes the JSON.
+  - Shell environment still wins over the file.
+
 ## [1.3.3] - 2026-11-03
 
 First stable release of the 1.3.3 patch line. It ships the same code as

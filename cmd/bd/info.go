@@ -228,6 +228,21 @@ type VersionChange struct {
 // versionChanges contains agent-actionable changes for recent versions
 var versionChanges = []VersionChange{
 	{
+		Version: "1.3.4",
+		Date:    "2026-11-04",
+		Changes: []string{
+			"STABLE: first stable 1.3.4 release. Same code as 1.3.4-rc.1; only the version stamp changed. No new migration file and the embedded Dolt engine is unchanged, so upgrading from 1.3.x or 1.3.4-rc.1 is a binary swap. The 1.3.4-rc.1 entry below applies (GT_ROOT from a rig's .beads/.env is imported again). Coming from 1.3.2 or earlier, also read the 1.3.3-rc.1 SECURITY, CHANGE and UPGRADE lines. Whichever release you come from, the known issues in the 1.3.3-rc.1 entry's last UPGRADE line are not fixed in 1.3.4: the #7039 restore (#8047) is not in 1.3.4, so do not run 'bd compact' or 'bd flatten' on a clone that adopted migration 0062 by pull or bootstrap, or was cloned after it. The 1.3.2 upgrade note still applies: run 'bd recompute-blocked' once per workspace whose store crossed migration 0059 under bd 1.3.0 or later, which includes any workspace first created by bd 1.2.x or earlier (#7037).",
+		},
+	},
+	{
+		Version: "1.3.4-rc.1",
+		Date:    "2026-11-04",
+		Changes: []string{
+			"RC: first candidate for 1.3.4, 1.3.3 plus one fix (#8118). No new migration file and the embedded Dolt engine is unchanged, so upgrading from 1.3.x is a binary swap. The 1.3.3 entries below still apply, except the GT_ROOT issue fixed here.",
+			"FIX: GT_ROOT in a rig's .beads/.env is imported again (exact key only; other GT_* keys stay refused). 1.3.3 dropped it with 'beads: ignoring GT_ROOT from .beads/.env' on stderr for every bd command in a Gas City rig. Released gc could then report a failed bd command there as that notice instead of bd's --json error, and bd run in a rig without GT_ROOT exported stopped searching $GT_ROOT/.beads/formulas and loading $GT_ROOT/.beads/molecules.jsonl (#8117).",
+		},
+	},
+	{
 		Version: "1.3.3",
 		Date:    "2026-11-03",
 		Changes: []string{
