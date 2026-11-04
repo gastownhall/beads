@@ -11,7 +11,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"testing"
 	"time"
 
@@ -31,6 +30,8 @@ const (
 	modeWrongProof
 	// modeClose reads the hello and closes.
 	modeClose
+	// modeReset reads the hello and resets the connection.
+	modeReset
 	// modeSilent reads the hello and never answers.
 	modeSilent
 	// modeProveThenDenyAccess proves the secret, then answers as a MySQL
@@ -120,6 +121,13 @@ func (l *resolverTestListener) handle(conn net.Conn) {
 		case modeWrongProof:
 			_, _ = io.WriteString(conn, dataAuthPrefix+strings.Repeat("0", dataTokenHexLen)+"\n")
 		case modeClose:
+			_ = conn.Close()
+			return
+		case modeReset:
+			// Linger 0 makes the close a reset instead of an orderly FIN.
+			if tcp, ok := conn.(*net.TCPConn); ok {
+				_ = tcp.SetLinger(0)
+			}
 			_ = conn.Close()
 			return
 		}
@@ -321,7 +329,7 @@ func TestEndpointResolver_SamePortRestartAdvancesGeneration(t *testing.T) {
 	r.mu.Lock()
 	staleGeneration := r.generation
 	r.mu.Unlock()
-	conn, err := r.recoverDial(context.Background(), staleGeneration, syscall.ECONNREFUSED)
+	conn, err := r.recoverDial(context.Background(), staleGeneration, connRefused)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -331,7 +339,7 @@ func TestEndpointResolver_SamePortRestartAdvancesGeneration(t *testing.T) {
 	}
 	// A late failure from the old incarnation redials the published endpoint
 	// without discovering again.
-	conn, err = r.recoverDial(context.Background(), staleGeneration, syscall.ECONNREFUSED)
+	conn, err = r.recoverDial(context.Background(), staleGeneration, connRefused)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -355,7 +363,7 @@ func TestEndpointResolver_DiscoveryCooldown(t *testing.T) {
 		t.Fatalf("first dial: %v, want the discovery failure", err)
 	}
 	_, err := dialWithin(r, time.Second)
-	if !IsEndpointUnavailable(err) || !errors.Is(err, errDiscoveryCooldown) || !errors.Is(err, discoveryErr) || !errors.Is(err, syscall.ECONNREFUSED) {
+	if !IsEndpointUnavailable(err) || !errors.Is(err, errDiscoveryCooldown) || !errors.Is(err, discoveryErr) || !errors.Is(err, connRefused) {
 		t.Fatalf("dial within the cooldown: %v, want unavailable carrying the refusal, the cooldown and the prior discovery error", err)
 	}
 	if got := d.calls.Load(); got != 1 {
@@ -385,7 +393,7 @@ func TestEndpointResolver_UnarmedDialNeverRediscovers(t *testing.T) {
 	d.set(replacement.endpoint(), nil)
 
 	_, err := dialWithin(r, time.Second)
-	if !errors.Is(err, syscall.ECONNREFUSED) || IsEndpointUnavailable(err) {
+	if !errors.Is(err, connRefused) || IsEndpointUnavailable(err) {
 		t.Fatalf("unarmed dial: %v, want the bare refusal", err)
 	}
 	if got := d.calls.Load(); got != 0 {
@@ -445,7 +453,7 @@ func TestEndpointResolver_SharedFlightWaitersReturnByDeadline(t *testing.T) {
 	wg.Wait()
 	for i, err := range errs {
 		deadline := deadlines[i%len(deadlines)]
-		if !IsEndpointUnavailable(err) || !errors.Is(err, errDiscoveryPending) || !errors.Is(err, syscall.ECONNREFUSED) {
+		if !IsEndpointUnavailable(err) || !errors.Is(err, errDiscoveryPending) || !errors.Is(err, connRefused) {
 			t.Errorf("waiter %d: %v, want unavailable with discovery pending and the refusal as its cause", i, err)
 		}
 		if took[i] > deadline+200*time.Millisecond {
@@ -531,6 +539,149 @@ func TestEndpointResolver_CloseJoinsFlightAndPreventsAnother(t *testing.T) {
 	}
 	if got := d.calls.Load(); got != 1 {
 		t.Fatalf("discovery calls = %d, want no flight after Close", got)
+	}
+}
+
+// TestEndpointResolver_CloseWithoutFlightReturnsAtOnce: with no discovery
+// flight running, Close has nothing to wait for and succeeds even with a
+// context that has already ended, both on a resolver that never discovered
+// and on one whose flight has finished. A done context reports a flight only
+// while one is running.
+func TestEndpointResolver_CloseWithoutFlightReturnsAtOnce(t *testing.T) {
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	fresh, _, _ := newTestResolver(t, refusedEndpoint(t), newFakeDiscovery())
+	if err := fresh.Close(canceled); err != nil {
+		t.Fatalf("Close of a resolver that never discovered, with a canceled context: %v, want nil", err)
+	}
+
+	d := newFakeDiscovery()
+	discoveryErr := errors.New("no proxy here")
+	d.set(Endpoint{}, discoveryErr)
+	r, _, _ := newTestResolver(t, refusedEndpoint(t), d)
+	r.Arm()
+	// The dial waits for its flight, so the flight is over once it returns.
+	if _, err := dialWithin(r, 5*time.Second); !errors.Is(err, discoveryErr) {
+		t.Fatalf("dial: %v, want the discovery failure", err)
+	}
+	if err := r.Close(canceled); err != nil {
+		t.Fatalf("Close after the flight finished, with a canceled context: %v, want nil", err)
+	}
+}
+
+// TestEndpointResolver_CanceledDialStaysUnmarked: a caller that cancels as
+// recovery gives up gets its own context.Canceled, never the
+// endpoint-unavailable marker that HTTP answers as a 503 db_unavailable. The
+// fake dial refuses whatever its context, standing in for a cancellation that
+// lands just after the connect was refused.
+func TestEndpointResolver_CanceledDialStaysUnmarked(t *testing.T) {
+	refused := func(context.Context, string, string, int) (net.Conn, dataDialStage, error) {
+		return nil, dataDialConnect, connRefused
+	}
+	unmarked := func(err error) bool {
+		return errors.Is(err, context.Canceled) && !IsEndpointUnavailable(err)
+	}
+
+	// The waiter sees the flight's end and the cancellation together, and
+	// which it picks first is up to the scheduler, so repeat the dial: before
+	// the fix nearly every one lost the cancellation.
+	t.Run("as a failed flight completes", func(t *testing.T) {
+		for i := range 100 {
+			ctx, cancel := context.WithCancel(context.Background())
+			r := NewEndpointResolver("unused", OpenOpts{}, Endpoint{})
+			r.dial = refused
+			r.discover = func(string, OpenOpts) (Endpoint, error) {
+				cancel()
+				return Endpoint{}, errors.New("proxy startup failed")
+			}
+			r.Arm()
+			_, err := r.DialContext(ctx, DataNetwork, "")
+			cancel()
+			_ = r.Close(context.Background())
+			if !unmarked(err) {
+				t.Fatalf("dial %d: %v, want the bare cancellation", i, err)
+			}
+		}
+	})
+
+	t.Run("within the cooldown", func(t *testing.T) {
+		d := newFakeDiscovery()
+		discoveryErr := errors.New("proxy startup failed")
+		d.set(Endpoint{}, discoveryErr)
+		r, _, _ := newTestResolver(t, Endpoint{}, d)
+		r.dial = refused
+		r.Arm()
+		if _, err := dialWithin(r, 5*time.Second); !IsEndpointUnavailable(err) || !errors.Is(err, discoveryErr) {
+			t.Fatalf("first dial: %v, want unavailable with the discovery failure", err)
+		}
+		canceled, cancel := context.WithCancel(context.Background())
+		cancel()
+		if _, err := r.DialContext(canceled, DataNetwork, ""); !unmarked(err) {
+			t.Fatalf("canceled dial within the cooldown: %v, want the bare cancellation", err)
+		}
+		if got := d.calls.Load(); got != 1 {
+			t.Fatalf("discovery calls = %d, want 1 within the cooldown", got)
+		}
+	})
+
+	t.Run("on a closed resolver", func(t *testing.T) {
+		d := newFakeDiscovery()
+		r, _, _ := newTestResolver(t, Endpoint{}, d)
+		r.dial = refused
+		r.Arm()
+		if err := r.Close(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		canceled, cancel := context.WithCancel(context.Background())
+		cancel()
+		if _, err := r.DialContext(canceled, DataNetwork, ""); !unmarked(err) {
+			t.Fatalf("canceled dial after Close: %v, want the bare cancellation", err)
+		}
+		if got := d.calls.Load(); got != 0 {
+			t.Fatalf("discovery calls = %d, want 0 after Close", got)
+		}
+	})
+}
+
+// TestEndpointResolver_SocketFailuresAreRecoverable holds the classifier to
+// the errors this platform's sockets really return, which differ by OS:
+// Windows reports WSA errnos, which syscall.ECONNREFUSED and its siblings do
+// not match. A connect to a port nothing listens on, and a listener that
+// resets the connection instead of answering the hello, are failures
+// rediscovery can fix.
+func TestEndpointResolver_SocketFailuresAreRecoverable(t *testing.T) {
+	rootDir := t.TempDir()
+	if _, err := identity.WriteSecret(rootDir); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name     string
+		endpoint func(t *testing.T) Endpoint
+		stage    dataDialStage
+		cause    error
+	}{
+		{"refused connect", refusedEndpoint, dataDialConnect, connRefused},
+		{"reset during the proof", func(t *testing.T) Endpoint {
+			return newResolverTestListener(t, rootDir, modeReset).endpoint()
+		}, dataDialProof, connReset},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ep := tc.endpoint(t)
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			conn, stage, err := dialAuthenticated(ctx, rootDir, ep.Address(), ep.Port)
+			if conn != nil {
+				_ = conn.Close()
+				t.Fatal("dial succeeded")
+			}
+			if stage != tc.stage || !errors.Is(err, tc.cause) {
+				t.Fatalf("stage %d, err %v: want stage %d failing with %v", stage, err, tc.stage, tc.cause)
+			}
+			if !recoverableDialFailure(stage, err) {
+				t.Fatalf("%v at stage %d is not recoverable", err, stage)
+			}
+		})
 	}
 }
 

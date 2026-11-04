@@ -2,6 +2,7 @@ package uow
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,7 +18,7 @@ func shutdownProxyAndWait(t *testing.T, storeRootDir string) {
 	old, err := pidfile.Read(storeRootDir, proxy.PIDFileName)
 	require.NoError(t, err)
 	require.NotNil(t, old, "a proxy must be running before it is stopped")
-	require.NoError(t, proxy.Shutdown(storeRootDir))
+	verifiedShutdown(t, storeRootDir)
 	waitProxyExit(t, storeRootDir, old, 5*time.Second)
 }
 
@@ -96,9 +97,18 @@ func TestNewDoltServerUOWProvider_CloseStopsRediscovery(t *testing.T) {
 	}
 
 	// A closed provider never resurrects: stop the shared proxy after the
-	// close and a read must fail with no respawn behind the failure.
+	// close and a read must fail with no respawn behind the failure. The
+	// read fails at the closed pool before it dials anything, so dial
+	// through the provider's resolver as well: the refusal must come back
+	// because the resolver is closed. (Only that cause proves it: a
+	// resolver that ignored Close could also fail this dial for its
+	// discovery cooldown, while the flight that found the replacement is
+	// less than a second old.)
 	shutdownProxyAndWait(t, armedRoot)
 	require.Error(t, readProbe(ctx, armed, database), "a read on the closed provider fails")
+	_, dialErr := armed.resolver.DialContext(ctx, proxy.DataNetwork, "")
+	require.Truef(t, proxy.IsEndpointUnavailable(dialErr) && strings.Contains(dialErr.Error(), "the endpoint resolver is closed"),
+		"a dial through the closed provider's resolver: %v, want it refused because the resolver is closed", dialErr)
 	require.False(t, proxy.ReadStatus(armedRoot).ProxyRunning,
 		"a closed provider must not respawn a replacement proxy")
 }

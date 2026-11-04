@@ -24,6 +24,11 @@ var providerConstructors = map[string]bool{
 // the one that also asserts the daemon is gone.
 var shutdownCallers = map[string]bool{
 	"verifiedShutdownCleanup": true,
+	// verifiedShutdown is the mid-test stop (a proxy taken away the way bd
+	// dolt stop or a crash takes it): it asserts what verifiedShutdownCleanup
+	// asserts, the dolt sql-server pid gone, at the stop rather than at the
+	// end of the run.
+	"verifiedShutdown": true,
 	// shutdownOnInterrupt is the SIGINT/SIGTERM handler: it runs in a
 	// goroutine on its way to os.Exit, where no assertion could be reported
 	// and no *testing.T is still live to report it to.

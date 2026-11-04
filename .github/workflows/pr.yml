@@ -288,6 +288,12 @@ jobs:
   # loudly (dolt is not installed on the Windows runners), and the
   # unix-socket cases skip on Windows by design.
   #
+  # internal/storage/dbproxy/proxy's endpoint resolver tells a workspace
+  # proxy that has gone away (GH#7295) from the errno of a failed connect or
+  # handshake, and Windows sockets report WSA errnos that the unix names do
+  # not match (endpoint_resolver_windows.go); its TestEndpointResolver_*
+  # tests run here against real Windows sockets.
+  #
   # F7a: fold of two small, independent windows-latest jobs
   # (test-windows-doltversion, test-windows-dbproxy-server) into one. Neither
   # was in ci-gate's needs/CI_GATE_REQUIRED before the fold (promoting either
@@ -296,16 +302,16 @@ jobs:
   # Windows jobs F4 touches (test-windows-liveness, worktree-remove-windows,
   # the preflight/doc-freshness matrices, the twins).
   #
-  # Review SF-1 (2026-10-03): neither step carries continue-on-error, so a
+  # Review SF-1 (2026-10-03): no step carries continue-on-error, so a
   # failing test already fails the job on its own; `if: ${{ !cancelled() }}`
-  # on the second step only ensures it still runs after the first fails,
-  # giving both packages' results in one log instead of stopping at the
-  # first failure. No aggregator step is needed.
-  # Blacksmith Windows (blacksmith-2vcpu-windows-2025) for every PR; both steps
-  # build with CGO_ENABLED=0 (or no cgo at all for doltversion), so this job
+  # on the later steps only ensures each still runs after an earlier one
+  # fails, giving every package's results in one log instead of stopping at
+  # the first failure. No aggregator step is needed.
+  # Blacksmith Windows (blacksmith-2vcpu-windows-2025) for every PR; every step
+  # builds with CGO_ENABLED=0 (or no cgo at all for doltversion), so this job
   # carries none of test-windows-liveness's cgo-toolchain risk.
   test-windows-small:
-    name: Test (Windows) small packages (doltversion, dbproxy server)
+    name: Test (Windows) small packages (doltversion, dbproxy server, endpoint resolver)
     needs: scope
     if: ${{ needs.scope.outputs.platforms == 'true' }}
     runs-on: ${{ 'blacksmith-2vcpu-windows-2025' }}
@@ -340,6 +346,13 @@ jobs:
         env:
           CGO_ENABLED: "0"
         run: go test -tags gms_pure_go -count=1 -v ./internal/storage/dbproxy/server/
+
+      - name: Run dbproxy endpoint resolver tests on Windows
+        id: dbproxy-endpoint-resolver
+        if: ${{ !cancelled() }}
+        env:
+          CGO_ENABLED: "0"
+        run: go test -tags gms_pure_go -count=1 -v -run '^TestEndpointResolver_' ./internal/storage/dbproxy/proxy/
 
   # Destructive worktree removal depends on native Windows path identity.
   # This focused process suite requires NTFS per-directory case sensitivity

@@ -8,6 +8,8 @@ go_library(
         "data_auth.go",
         "endpoint.go",
         "endpoint_resolver.go",
+        "endpoint_resolver_unix.go",
+        "endpoint_resolver_windows.go",
         "endpoint_unix.go",
         "endpoint_windows.go",
         "force_stop.go",
@@ -71,6 +73,8 @@ go_test(
         "endpoint_mismatch_test.go",
         "endpoint_no_data_probe_test.go",
         "endpoint_resolver_test.go",
+        "endpoint_resolver_unix_test.go",
+        "endpoint_resolver_windows_test.go",
         "endpoint_security_test.go",
         "endpoint_spawn_stop_unix_test.go",
         "external_transport_lifecycle_internal_test.go",
@@ -97,6 +101,9 @@ go_test(
         ],
         "@rules_go//go/platform:linux": [
             "//internal/testutil/bazeltest",
+        ],
+        "@rules_go//go/platform:windows": [
+            "@org_golang_x_sys//windows",
         ],
         "//conditions:default": [],
     }),

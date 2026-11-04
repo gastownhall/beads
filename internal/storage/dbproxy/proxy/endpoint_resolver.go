@@ -8,7 +8,6 @@ import (
 	"net"
 	"strconv"
 	"sync"
-	"syscall"
 	"time"
 )
 
@@ -103,7 +102,6 @@ type EndpointResolver struct {
 	flight     *discoveryFlight
 	lastStart  time.Time
 	lastErr    error
-	flights    sync.WaitGroup
 }
 
 // discoveryFlight is one run of discover; done closes once endpoint and err
@@ -158,21 +156,25 @@ func (r *EndpointResolver) Disable() {
 // Close disables rediscovery and waits, within ctx, for a running flight to
 // finish. A nil return guarantees no flight remains and none can start; on
 // ctx's end it reports the flight still running, and a later Close can finish
-// the wait. A flight that finishes after Close publishes nothing.
+// the wait. With no flight running it returns nil at once, whatever ctx. A
+// flight that finishes after Close publishes nothing.
 func (r *EndpointResolver) Close(ctx context.Context) error {
 	r.Disable()
-	done := make(chan struct{})
-	go func() {
-		r.flights.Wait()
-		close(done)
-	}()
+	// Disable stops any flight from starting, and only one runs at a time,
+	// so the flight running now is the last one.
+	r.mu.Lock()
+	f := r.flight
+	r.mu.Unlock()
+	if f == nil {
+		return nil
+	}
 	select {
-	case <-done:
+	case <-f.done:
 		return nil
 	default:
 	}
 	select {
-	case <-done:
+	case <-f.done:
 		return nil
 	case <-ctx.Done():
 		return fmt.Errorf("dbproxy: close endpoint resolver: proxy rediscovery is still running: %w", ctx.Err())
@@ -180,10 +182,11 @@ func (r *EndpointResolver) Close(ctx context.Context) error {
 }
 
 // DialContext is a mysql.Config.DialFunc. network and addr are ignored: the
-// resolver dials its own current endpoint.
+// resolver dials its own current endpoint. A canceled dial is never reported
+// as ErrEndpointUnavailable.
 func (r *EndpointResolver) DialContext(ctx context.Context, _, _ string) (net.Conn, error) {
 	r.mu.Lock()
-	ep, generation, armed, closed := r.endpoint, r.generation, r.armed, r.closed
+	ep, generation, armed := r.endpoint, r.generation, r.armed
 	r.mu.Unlock()
 
 	conn, stage, err := r.dialEndpoint(ctx, ep)
@@ -193,10 +196,14 @@ func (r *EndpointResolver) DialContext(ctx context.Context, _, _ string) (net.Co
 	if !armed || !recoverableDialFailure(stage, err) {
 		return nil, err
 	}
-	if closed {
-		return nil, &EndpointUnavailableError{Dial: err, Discovery: errResolverClosed}
+	conn, err = r.recoverDial(ctx, generation, err)
+	// A cancellation that lands as recovery gives up (as a failed flight
+	// completes, within the cooldown, at Close) is still the caller's: a
+	// client that left, not a proxy that is unavailable.
+	if IsEndpointUnavailable(err) && errors.Is(ctx.Err(), context.Canceled) {
+		return nil, ctx.Err()
 	}
-	return r.recoverDial(ctx, generation, err)
+	return conn, err
 }
 
 func (r *EndpointResolver) dialEndpoint(ctx context.Context, ep Endpoint) (net.Conn, dataDialStage, error) {
@@ -227,7 +234,6 @@ func (r *EndpointResolver) recoverDial(ctx context.Context, generation uint64, d
 		f = &discoveryFlight{done: make(chan struct{})}
 		r.flight = f
 		r.lastStart = r.now()
-		r.flights.Add(1)
 		go r.run(f)
 	}
 	r.mu.Unlock()
@@ -278,7 +284,6 @@ func (r *EndpointResolver) redial(ctx context.Context, ep Endpoint, dialErr erro
 // old incarnation redial rather than starting another flight — unless the
 // resolver was closed meanwhile.
 func (r *EndpointResolver) run(f *discoveryFlight) {
-	defer r.flights.Done()
 	ep, err := r.discover(r.rootDir, r.opts)
 
 	r.mu.Lock()
@@ -303,7 +308,9 @@ func (r *EndpointResolver) run(f *discoveryFlight) {
 // help: the connect was refused, reset or aborted, or the listener there
 // failed to prove the secret — wrong proof, a close, a reset, or silence
 // until the deadline, which counts even when it surfaces as the context's
-// DeadlineExceeded because the connect had already succeeded.
+// DeadlineExceeded because the connect had already succeeded. The refusals
+// and resets are matched by their errnos on this platform (isConnectGone,
+// isConnLost).
 //
 // Everything else is the caller's: explicit cancellation, a deadline that
 // expired before the connect, an address that does not parse or resolve, and
@@ -316,15 +323,12 @@ func recoverableDialFailure(stage dataDialStage, err error) bool {
 	}
 	switch stage {
 	case dataDialConnect:
-		return errors.Is(err, syscall.ECONNREFUSED) ||
-			errors.Is(err, syscall.ECONNRESET) ||
-			errors.Is(err, syscall.ECONNABORTED)
+		return isConnectGone(err)
 	case dataDialProof:
 		if errors.Is(err, errDataAuth) ||
 			errors.Is(err, io.EOF) ||
 			errors.Is(err, io.ErrUnexpectedEOF) ||
-			errors.Is(err, syscall.ECONNRESET) ||
-			errors.Is(err, syscall.EPIPE) ||
+			isConnLost(err) ||
 			errors.Is(err, context.DeadlineExceeded) {
 			return true
 		}

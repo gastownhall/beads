@@ -470,10 +470,13 @@ func TestNewDoltServerUOWProvider_AdoptsReplacementProxy(t *testing.T) {
 
 	// The proxy goes away (bd dolt stop, a crash), and the pool's open
 	// connections with it.
-	require.NoError(t, proxy.Shutdown(storeRootDir))
+	verifiedShutdown(t, storeRootDir)
 
 	// Another opener starts the replacement, on a port the provider has
-	// never seen.
+	// never seen. It is this test's own spawn, so the test registers its
+	// cleanup too.
+	shutdownOnInterrupt(t, storeRootDir)
+	verifiedShutdownCleanup(t, storeRootDir)
 	bin, err := exec.LookPath("dolt")
 	require.NoError(t, err)
 	backendPort, err := proxy.PickFreePort()
