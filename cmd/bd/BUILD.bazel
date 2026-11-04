@@ -956,6 +956,7 @@ go_test(
         "init_stealth_test.go",
         "init_team_server_test.go",
         "init_test.go",
+        "init_transaction_commit_server_test.go",
         "init_worktree_test.go",
         "jira_max_rows_gate_test.go",
         "jira_test.go",
