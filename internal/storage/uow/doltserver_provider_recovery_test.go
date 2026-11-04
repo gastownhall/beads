@@ -196,3 +196,45 @@ func TestNewDoltServerUOWProvider_RediscoversProxyAfterIdleExit(t *testing.T) {
 
 	f.mustRecoverRead(provider, 60*time.Second)
 }
+
+// TestNewDoltServerUOWProvider_AdoptsReplacementProxy is AC-2: when another
+// opener has started a verified replacement proxy, a provider still holding
+// the previous endpoint adopts that replacement on its next read — it must
+// not spawn its own, and the replacement must survive the adoption with the
+// same PID.
+func TestNewDoltServerUOWProvider_AdoptsReplacementProxy(t *testing.T) {
+	f := newRecoveryFixture(t)
+	stale := f.open(5 * time.Minute)
+
+	if err := f.read(stale); err != nil {
+		t.Fatalf("first read through the first proxy: %v", err)
+	}
+	before := proxy.ReadStatus(f.root)
+	require.True(t, before.ProxyRunning, "first proxy must be running after construction")
+
+	// The workspace's proxy exits for some reason outside the provider's
+	// control — a stop, an idle exit, a crash; the shutdown here is only
+	// the deterministic way to arrange one.
+	require.NoError(t, proxy.Shutdown(f.root))
+	f.waitForProxyStopped(5 * time.Second)
+
+	// Another opener (any bd command on the workspace) constructs a
+	// provider, which spawns a verified replacement.
+	replacement := f.open(5 * time.Minute)
+	if err := f.read(replacement); err != nil {
+		t.Fatalf("read through the replacement proxy: %v", err)
+	}
+	afterOpen := proxy.ReadStatus(f.root)
+	require.True(t, afterOpen.ProxyRunning, "replacement proxy must be running")
+	require.NotZero(t, afterOpen.ProxyPID)
+	require.NotEqual(t, before.ProxyPID, afterOpen.ProxyPID,
+		"the replacement must be a new process, not the respawned pid of the stopped one")
+
+	// The stale provider recovers by adopting the replacement.
+	f.mustRecoverRead(stale, 60*time.Second)
+
+	afterAdopt := proxy.ReadStatus(f.root)
+	require.Equal(t, afterOpen.ProxyPID, afterAdopt.ProxyPID,
+		"recovery must adopt the running replacement, not spawn a second proxy")
+	require.True(t, afterAdopt.BackendRunning, "the supervised backend must still be running after adoption")
+}
