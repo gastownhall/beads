@@ -2,15 +2,20 @@ package proxy
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"io"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/go-sql-driver/mysql"
 
 	"github.com/steveyegge/beads/internal/storage/dbproxy/identity"
 )
@@ -28,6 +33,9 @@ const (
 	modeClose
 	// modeSilent reads the hello and never answers.
 	modeSilent
+	// modeProveThenDenyAccess proves the secret, then answers as a MySQL
+	// server refusing the login (ERR 1045) and closes.
+	modeProveThenDenyAccess
 )
 
 // resolverTestListener is a loopback data port. It counts the connections it
@@ -85,13 +93,20 @@ func (l *resolverTestListener) serve() {
 func (l *resolverTestListener) handle(conn net.Conn) {
 	port := l.endpoint().Port
 	switch l.mode {
-	case modeProve:
+	case modeProve, modeProveThenDenyAccess:
 		secret, err := identity.ReadSecret(l.rootDir)
 		if err != nil {
 			_ = conn.Close()
 			return
 		}
 		if ok, _ := newDataAuth(secret, port).accept(conn); !ok {
+			_ = conn.Close()
+			return
+		}
+		if l.mode == modeProveThenDenyAccess {
+			payload := append([]byte{0xff, 0x15, 0x04, '#'}, "28000Access denied for user 'root'"...)
+			packet := append([]byte{byte(len(payload)), 0, 0, 0}, payload...)
+			_, _ = conn.Write(packet)
 			_ = conn.Close()
 			return
 		}
@@ -517,4 +532,103 @@ func TestEndpointResolver_CloseJoinsFlightAndPreventsAnother(t *testing.T) {
 	if got := d.calls.Load(); got != 1 {
 		t.Fatalf("discovery calls = %d, want no flight after Close", got)
 	}
+}
+
+// TestEndpointResolver_IneligibleFailuresPassThrough: a failure that does not
+// say the proxy has gone away reaches the caller as it is — no
+// endpoint-unavailable marker — and runs no discovery, even on an armed
+// resolver.
+func TestEndpointResolver_IneligibleFailuresPassThrough(t *testing.T) {
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	expired, cancelExpired := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancelExpired()
+
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, r *EndpointResolver, rootDir string) (context.Context, func(error) bool)
+	}{
+		{"secret cannot be read", func(t *testing.T, r *EndpointResolver, rootDir string) (context.Context, func(error) bool) {
+			r.endpoint = newResolverTestListener(t, rootDir, modeProve).endpoint()
+			if err := os.Remove(filepath.Join(rootDir, identity.SecretFileName)); err != nil {
+				t.Fatal(err)
+			}
+			return context.Background(), func(err error) bool {
+				return errors.Is(err, os.ErrNotExist) && strings.Contains(err.Error(), "read data authentication secret")
+			}
+		}},
+		{"canceled before connect", func(t *testing.T, r *EndpointResolver, _ string) (context.Context, func(error) bool) {
+			r.endpoint = refusedEndpoint(t)
+			return canceled, func(err error) bool { return errors.Is(err, context.Canceled) }
+		}},
+		{"deadline before connect", func(t *testing.T, r *EndpointResolver, _ string) (context.Context, func(error) bool) {
+			r.endpoint = refusedEndpoint(t)
+			return expired, func(err error) bool { return errors.Is(err, context.DeadlineExceeded) }
+		}},
+		{"invalid address", func(t *testing.T, r *EndpointResolver, _ string) (context.Context, func(error) bool) {
+			r.endpoint = Endpoint{Host: "127.0.0.1", Port: -1}
+			return context.Background(), func(err error) bool {
+				var addrErr *net.AddrError
+				var opErr *net.OpError
+				return errors.As(err, &addrErr) || errors.As(err, &opErr)
+			}
+		}},
+		{"canceled during the handshake", func(t *testing.T, r *EndpointResolver, rootDir string) (context.Context, func(error) bool) {
+			r.endpoint = newResolverTestListener(t, rootDir, modeSilent).endpoint()
+			ctx, cancel := context.WithCancel(context.Background())
+			time.AfterFunc(50*time.Millisecond, cancel)
+			t.Cleanup(cancel)
+			return ctx, func(err error) bool { return errors.Is(err, context.Canceled) }
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := newFakeDiscovery()
+			d.set(Endpoint{}, errors.New("discovery must not run"))
+			r, rootDir, _ := newTestResolver(t, Endpoint{}, d)
+			ctx, isOriginal := tc.setup(t, r, rootDir)
+			r.Arm()
+
+			conn, err := r.DialContext(ctx, DataNetwork, "")
+			if conn != nil {
+				_ = conn.Close()
+				t.Fatal("dial succeeded")
+			}
+			if !isOriginal(err) || IsEndpointUnavailable(err) {
+				t.Fatalf("err = %v, want the original failure without the endpoint-unavailable marker", err)
+			}
+			if got := d.calls.Load(); got != 0 {
+				t.Fatalf("discovery calls = %d, want 0", got)
+			}
+		})
+	}
+
+	// A MySQL failure after a proven dial (here the login refused) is the
+	// driver's to report: the resolver handed over a good connection.
+	t.Run("mysql access denied", func(t *testing.T) {
+		d := newFakeDiscovery()
+		d.set(Endpoint{}, errors.New("discovery must not run"))
+		r, rootDir, _ := newTestResolver(t, Endpoint{}, d)
+		r.endpoint = newResolverTestListener(t, rootDir, modeProveThenDenyAccess).endpoint()
+		r.Arm()
+
+		cfg := mysql.NewConfig()
+		cfg.User, cfg.Net, cfg.Addr = "root", DataNetwork, r.endpoint.Address()
+		cfg.DialFunc = r.DialContext
+		connector, err := mysql.NewConnector(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		db := sql.OpenDB(connector)
+		defer func() { _ = db.Close() }()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		err = db.PingContext(ctx)
+		var mysqlErr *mysql.MySQLError
+		if !errors.As(err, &mysqlErr) || mysqlErr.Number != 1045 || IsEndpointUnavailable(err) {
+			t.Fatalf("ping: %v, want MySQL error 1045 without the endpoint-unavailable marker", err)
+		}
+		if got := d.calls.Load(); got != 0 {
+			t.Fatalf("discovery calls = %d, want 0", got)
+		}
+	})
 }
