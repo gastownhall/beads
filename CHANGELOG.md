@@ -1165,6 +1165,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **bd again reads `GT_ROOT` from a rig's `.beads/.env`**. `gc rig add` writes
+  the city root there, and the `.beads/.env` allowlist from #7879 (also in
+  1.3.3) dropped it, warning `beads: ignoring GT_ROOT from .beads/.env` on
+  every command and losing the city's formulas and molecules when bd ran in a
+  rig without `GT_ROOT` exported. `GT_ROOT` is now allowed: bd only reads from
+  it (`$GT_ROOT/.beads/formulas` is the last formula search path, and
+  `$GT_ROOT/.beads/molecules.jsonl` is template data), so it names no command
+  and no credential target. Shell environment still wins over the file.
+
 - `bd create --file` and other batch creates no longer fail with "issue
   already exists" on an id bd generated itself. The batch chose every id
   before it wrote any row, so two of its items could be handed the same short

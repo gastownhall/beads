@@ -57,11 +57,26 @@ var AllowedDoltEnvKeys = []string{
 	"DOLT_REMOTE_PASSWORD",
 }
 
+// AllowedOrchestratorEnvKeys names the non-prefixed keys a project
+// .beads/.env may import because an orchestrator writes them there. Gas City's
+// `gc rig add` records the city root as GT_ROOT in each rig's .beads/.env, so
+// bd run inside a rig finds the city's formulas and molecules. bd only reads
+// from GT_ROOT: it appends $GT_ROOT/.beads/formulas as the LAST formula search
+// path (after the repo's own .beads/formulas, the checkout and ~/.beads), reads
+// $GT_ROOT/.beads/molecules.jsonl as template data, and prints it in
+// diagnostics. It names no command and no credential target, and a repository
+// can already ship formulas in its own .beads/formulas, so admitting it gives a
+// committed .env nothing it could not do already.
+var AllowedOrchestratorEnvKeys = []string{
+	"GT_ROOT",
+}
+
 // AllowedProjectEnvKey reports whether key may be imported from a project
 // .beads/.env file. Comparison is case-insensitive so mixed-case keys on
 // Windows cannot bypass the filter. Only BEADS_* and BD_* keys outside the
 // command and credential-redirection sets, plus the explicit Dolt remote
-// credential keys in AllowedDoltEnvKeys, are admitted: the broader DOLT_*
+// credential keys in AllowedDoltEnvKeys and the orchestrator root in
+// AllowedOrchestratorEnvKeys, are admitted: the broader DOLT_*
 // namespace is deliberately excluded (see AllowedDoltEnvKeys) and non-prefixed
 // keys are refused so child git/dolt/ssh processes cannot inherit GIT_*, SSH_*,
 // LD_*, or DYLD_* hooks.
@@ -85,8 +100,13 @@ func AllowedProjectEnvKey(key string) (bool, string) {
 			return true, ""
 		}
 	}
+	for _, k := range AllowedOrchestratorEnvKeys {
+		if upper == k {
+			return true, ""
+		}
+	}
 	if !strings.HasPrefix(upper, "BEADS_") && !strings.HasPrefix(upper, "BD_") {
-		return false, "only BEADS_*, BD_*, and the Dolt remote credential variables (DOLT_REMOTE_USER, DOLT_REMOTE_PASSWORD) are allowed in .beads/.env"
+		return false, "only BEADS_*, BD_*, GT_ROOT, and the Dolt remote credential variables (DOLT_REMOTE_USER, DOLT_REMOTE_PASSWORD) are allowed in .beads/.env"
 	}
 	return true, ""
 }
