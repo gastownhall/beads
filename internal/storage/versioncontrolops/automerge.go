@@ -43,7 +43,10 @@ import (
 // A row is left for the operator when it is not modify/modify (add/add,
 // delete/modify), when a genuinely conflicting cell cannot be settled because
 // the two sides' `updated_at` values are equal or unparseable — the ambiguity
-// LWW has no answer for — or when one of those carve-outs applies.
+// LWW has no answer for — or when one of those carve-outs applies. The one
+// delete/modify shape with an answer is their delete of a row whose only local
+// change is derived state (see issuesDerivedColumn): no local edit is lost, so
+// their delete is taken.
 //
 // The companion tables merge by the semantics the ask names:
 //
@@ -82,6 +85,9 @@ type issuesRowMerge struct {
 	ourKey  any
 	columns []string
 	values  []any
+	// deleted settles a delete/modify conflict with their delete: our row is
+	// deleted and columns stay empty.
+	deleted bool
 	// lww names the cells both sides changed differently, which were settled
 	// by timestamp rather than merged. They are the only cells where one
 	// side's edit is superseded, so the resolver names them on stderr — the
@@ -288,6 +294,32 @@ var issuesNonScalarColumns = map[string]bool{
 	"metadata": true,
 }
 
+// issuesDerivedColumn is the issues column bd computes from other rows instead
+// of writing it as an edit: is_blocked is derived from the dependency graph and
+// recomputed after every merge (issueops/blocked_state.go), without touching
+// updated_at.
+const issuesDerivedColumn = "is_blocked"
+
+// onlyDerivedColumnChanged reports whether our side of the row differs from the
+// merge base in issuesDerivedColumn alone, so taking their delete of the row
+// loses no local edit. A filtered federation push leaves exactly this behind
+// (filtered_push.go): the published commit cuts a withheld issue's dependency
+// edges and recomputes is_blocked, and the kept revert restores both locally,
+// so a published issue the withheld one blocks differs from the peer's tip in
+// is_blocked alone. Without this, a peer deleting that issue would make every
+// later sync with it fail. The mirror case (our delete against their
+// derived-only change) is still left for the operator.
+func onlyDerivedColumnChanged(row rawConflictRow) bool {
+	for _, col := range row.dataColumns(issuesKeyColumn, issuesDerivedColumn) {
+		ourVal, ourHas := row.value("our", col)
+		baseVal, baseHas := row.value("base", col)
+		if !ourHas || !baseHas || !conflictCellsEqual(ourVal, baseVal) {
+			return false
+		}
+	}
+	return true
+}
+
 // cellVerdict classifies one cell against the merge base.
 type cellVerdict int
 
@@ -325,13 +357,18 @@ func classifyCell(row rawConflictRow, col string) (cellVerdict, any, bool) {
 
 // mergeIssuesConflictRow computes the field-level three-way merge of one
 // conflicted issues row. ok is false when the row must be left for the
-// operator: not modify/modify, a contested cell whose LWW tiebreak is
+// operator: not modify/modify (except their delete of a row we changed only in
+// derived columns, which is taken), a contested cell whose LWW tiebreak is
 // ambiguous (equal or unparseable updated_at), or a contested cell whose
 // contents LWW cannot merge without loss (issuesNonScalarColumns).
 //
 // It is pure, so every merge rule is unit-testable without a database.
 func mergeIssuesConflictRow(row rawConflictRow) (issuesRowMerge, bool) {
 	baseOK, ourOK, theirOK := row.sidesPresent([]string{issuesKeyColumn})
+	if baseOK && ourOK && !theirOK && onlyDerivedColumnChanged(row) {
+		ourKey, _ := row.value("our", issuesKeyColumn)
+		return issuesRowMerge{ourKey: ourKey, deleted: true}, true
+	}
 	if !baseOK || !ourOK || !theirOK {
 		// add/add (no base row) or delete/modify (one side removed it):
 		// neither has a field-level answer.
@@ -566,8 +603,12 @@ func issuesConflictsAreFieldMergeable(ctx context.Context, db DBConn) ([]issuesR
 // DOLT_CONFLICTS_RESOLVE is table-level (--ours/--theirs), which cannot express
 // a per-cell merge, so this uses dolt's manual-resolution path: write the
 // merged values over our working-set row, then DELETE the conflict row — the
-// delete is what tells dolt the row is settled, so it must come last. A row
-// whose merge equals our side needs no write at all.
+// delete is what tells dolt the row is settled, so it comes last. A row whose
+// merge equals our side needs no write at all. A delete plan is the exception:
+// the conflict's our_* side reads the working set and loses the key with the
+// row, so it clears the conflict first and then deletes our row, whose foreign
+// keys cascade its dependency edges, labels, comments and events as the
+// delete did on their side. An error after that aborts the whole merge.
 func resolveIssuesFieldMerge(ctx context.Context, db DBConn, plan []issuesRowMerge) error {
 	for _, m := range plan {
 		if len(m.lww) > 0 {
@@ -581,6 +622,19 @@ func resolveIssuesFieldMerge(ctx context.Context, db DBConn, plan []issuesRowMer
 		}
 		if m.ourKey == nil {
 			return fmt.Errorf("unexpected conflict row with no issue id (safety check bypassed)")
+		}
+		if m.deleted {
+			// The issue disappears from this clone, so say why.
+			fmt.Fprintf(os.Stderr,
+				"Notice: auto-merged issue %v; it was deleted on the other side and changed here only in %s, so the delete was taken\n",
+				m.ourKey, issuesDerivedColumn)
+			if err := clearIssueConflict(ctx, db, m.ourKey); err != nil {
+				return err
+			}
+			if _, err := db.ExecContext(ctx, "DELETE FROM `issues` WHERE `"+issuesKeyColumn+"` = ?", m.ourKey); err != nil {
+				return fmt.Errorf("apply the other side's delete of issue %v: %w", m.ourKey, err)
+			}
+			continue
 		}
 		if len(m.columns) > 0 {
 			sets := make([]string, len(m.columns))
@@ -618,14 +672,23 @@ func resolveIssuesFieldMerge(ctx context.Context, db DBConn, plan []issuesRowMer
 				}
 			}
 		}
-		res, err := db.ExecContext(ctx,
-			"DELETE FROM dolt_conflicts_issues WHERE our_"+issuesKeyColumn+" = ?", m.ourKey)
-		if err != nil {
-			return fmt.Errorf("clear conflict for issue %v: %w", m.ourKey, err)
+		if err := clearIssueConflict(ctx, db, m.ourKey); err != nil {
+			return err
 		}
-		if n, err := res.RowsAffected(); err == nil && n == 0 {
-			return fmt.Errorf("conflict for issue %v was not cleared (no conflict row deleted)", m.ourKey)
-		}
+	}
+	return nil
+}
+
+// clearIssueConflict deletes the conflict row of the issue whose working-set
+// key is key, which marks it settled.
+func clearIssueConflict(ctx context.Context, db DBConn, key any) error {
+	res, err := db.ExecContext(ctx,
+		"DELETE FROM dolt_conflicts_issues WHERE our_"+issuesKeyColumn+" = ?", key)
+	if err != nil {
+		return fmt.Errorf("clear conflict for issue %v: %w", key, err)
+	}
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		return fmt.Errorf("conflict for issue %v was not cleared (no conflict row deleted)", key)
 	}
 	return nil
 }

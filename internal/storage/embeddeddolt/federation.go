@@ -4,8 +4,6 @@ package embeddeddolt
 
 import (
 	"context"
-	"crypto/aes"
-	"crypto/cipher"
 	"crypto/rand"
 	"database/sql"
 	"errors"
@@ -18,9 +16,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/steveyegge/beads/internal/storage/peercred"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 )
 
@@ -29,6 +29,13 @@ const credentialKeyFile = ".beads-credential-key" //nolint:gosec // G101: filena
 
 // ensureCredentialKey lazily initializes the credential encryption key.
 func (s *EmbeddedDoltStore) ensureCredentialKey() error {
+	s.credMu.Lock()
+	defer s.credMu.Unlock()
+	return s.ensureCredentialKeyLocked()
+}
+
+// ensureCredentialKeyLocked is ensureCredentialKey with credMu held.
+func (s *EmbeddedDoltStore) ensureCredentialKeyLocked() error {
 	if s.credentialKey != nil {
 		return nil
 	}
@@ -50,6 +57,9 @@ func (s *EmbeddedDoltStore) ensureCredentialKey() error {
 	if _, err := io.ReadFull(rand.Reader, key); err != nil {
 		return fmt.Errorf("generate credential key: %w", err)
 	}
+	if err := peercred.GitignoreLocalFiles(keyPath); err != nil {
+		return fmt.Errorf("keep the credential key file out of git: %w", err)
+	}
 	if err := os.WriteFile(keyPath, key, 0600); err != nil {
 		return fmt.Errorf("write credential key: %w", err)
 	}
@@ -58,64 +68,106 @@ func (s *EmbeddedDoltStore) ensureCredentialKey() error {
 	return nil
 }
 
-func (s *EmbeddedDoltStore) encryptPassword(password string) ([]byte, error) {
+// ensureCredentialsMigrated upgrades this machine's legacy (unbound) peer
+// credentials to bound v2 before the first credential read, once per store.
+// The first writable credential operation establishes completion even when
+// no row holds a credential. Only a writable store migrates; a read-only one leaves legacy rows
+// unusable. The marker beside the key file is written only after the
+// migrated rows are committed, and once it is valid for the loaded key no
+// legacy credential is ever rebound again, so a legacy blob that arrives
+// later (a pull, a direct write) is refused rather than resealed.
+func (s *EmbeddedDoltStore) ensureCredentialsMigrated(ctx context.Context) error {
+	if s.readOnly || s.beadsDir == "" {
+		return nil
+	}
+	s.credMu.Lock()
+	defer s.credMu.Unlock()
+	if s.credMigrated {
+		return nil
+	}
+
+	keyPath := filepath.Join(s.beadsDir, credentialKeyFile)
+	if err := s.ensureCredentialKeyLocked(); err != nil {
+		return err
+	}
+	key := s.credentialKey
+	done, err := peercred.MarkerValid(keyPath, key)
+	if err != nil {
+		return err
+	}
+	if done {
+		s.credMigrated = true
+		return nil
+	}
+
+	var res peercred.MigrationResult
+	if err := s.withMutatingPinnedDBConn(ctx, func(db versioncontrolops.DBConn) error {
+		var err error
+		res, err = peercred.Migrate(ctx, db, key, [][]byte{key})
+		if err != nil {
+			return err
+		}
+		// Commit even when this pass resealed nothing: a previous pass may
+		// have resealed rows and then failed to commit them, and the marker
+		// must not record completion over uncommitted rows. StageAndCommit
+		// skips when nothing is pending.
+		return versioncontrolops.StageAndCommit(ctx, db, map[string]bool{"federation_peers": true},
+			"federation: bind stored peer credentials to their peers", commitAuthor)
+	}); err != nil {
+		return fmt.Errorf("upgrade stored peer credentials: %w", err)
+	}
+	for _, r := range res.Skipped {
+		fmt.Fprint(federationWarnWriter, peercred.SkipWarning(runtime.GOOS, r))
+	}
+	if err := peercred.GitignoreLocalFiles(keyPath); err != nil {
+		return err
+	}
+	if err := peercred.WriteMarker(keyPath, key); err != nil {
+		return err
+	}
+	s.credMigrated = true
+	return nil
+}
+
+// peerBinding is the identity a peer's stored password is sealed to: the
+// row's stored name, exact URL and username.
+func peerBinding(p *storage.FederationPeer) peercred.Binding {
+	return peercred.Binding{Name: p.Name, URL: p.RemoteURL, Username: p.Username}
+}
+
+func (s *EmbeddedDoltStore) encryptPassword(b peercred.Binding, password string) ([]byte, error) {
 	if password == "" {
 		return nil, nil
 	}
 	if err := s.ensureCredentialKey(); err != nil {
 		return nil, err
 	}
-	block, err := aes.NewCipher(s.credentialKey)
-	if err != nil {
-		return nil, err
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, err
-	}
-	nonce := make([]byte, gcm.NonceSize())
-	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
-		return nil, err
-	}
-	return gcm.Seal(nonce, nonce, []byte(password), nil), nil
+	return peercred.Seal(s.credentialKey, b, password)
 }
 
-func (s *EmbeddedDoltStore) decryptPassword(encrypted []byte) (string, error) {
+func (s *EmbeddedDoltStore) decryptPassword(b peercred.Binding, encrypted []byte) (string, error) {
 	if len(encrypted) == 0 {
 		return "", nil
 	}
 	if err := s.ensureCredentialKey(); err != nil {
 		return "", err
 	}
-	block, err := aes.NewCipher(s.credentialKey)
-	if err != nil {
-		return "", err
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return "", err
-	}
-	nonceSize := gcm.NonceSize()
-	if len(encrypted) < nonceSize {
-		// A blob too short to carry its nonce is the same local-corruption
-		// class as the failed GCM open below: the stored credential cannot be
-		// decrypted on this machine, and re-adding the peer is the fix.
-		// Classify it through the same sentinel so federation status reports
-		// the credential problem rather than an unreachable peer.
-		return "", storage.CredentialKeyMismatchError(filepath.Join(s.beadsDir, credentialKeyFile), fmt.Errorf("ciphertext too short"))
-	}
-	nonce, ciphertext := encrypted[:nonceSize], encrypted[nonceSize:]
-	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
-	if err != nil {
+	plaintext, err := peercred.Open(s.credentialKey, b, encrypted)
+	if errors.Is(err, peercred.ErrNotAuthenticated) || errors.Is(err, peercred.ErrLegacyFormat) {
 		// The common shape: the peer row replicated with the database but the key
 		// file did not, so machine B pulls the row, ensureCredentialKey generates
-		// a fresh key, and every decrypt fails authentication. Enrich at the
+		// a fresh key, and every decrypt fails authentication. A blob copied from
+		// another peer row, a corrupt blob and an unmigrated legacy blob fail the
+		// same way, and re-adding the peer is the fix for each. Enrich at the
 		// single decrypt funnel so every reader reports it: peer resolution for
 		// the remote verbs, GetFederationPeer, ListFederationPeers. The wording
 		// is shared with package dolt, which enriches its own two read paths.
-		return "", storage.CredentialKeyMismatchError(filepath.Join(s.beadsDir, credentialKeyFile), err)
+		if errors.Is(err, peercred.ErrLegacyFormat) && s.readOnly {
+			err = fmt.Errorf("%w; a read-only store does not upgrade it, so run bd federation status without --readonly first", err)
+		}
+		return "", storage.CredentialKeyMismatchError(filepath.Join(s.beadsDir, credentialKeyFile), b.Name, b.Username, err)
 	}
-	return string(plaintext), nil
+	return plaintext, err
 }
 
 // ---------------------------------------------------------------------------
@@ -123,7 +175,10 @@ func (s *EmbeddedDoltStore) decryptPassword(encrypted []byte) (string, error) {
 // ---------------------------------------------------------------------------
 
 func (s *EmbeddedDoltStore) AddFederationPeer(ctx context.Context, peer *storage.FederationPeer) error {
-	encryptedPwd, err := s.encryptPassword(peer.Password)
+	if err := s.ensureCredentialsMigrated(ctx); err != nil {
+		return err
+	}
+	encryptedPwd, err := s.encryptPassword(peerBinding(peer), peer.Password)
 	if err != nil {
 		return fmt.Errorf("encrypt password: %w", err)
 	}
@@ -141,6 +196,10 @@ func (s *EmbeddedDoltStore) AddFederationPeer(ctx context.Context, peer *storage
 }
 
 func (s *EmbeddedDoltStore) GetFederationPeer(ctx context.Context, name string) (*storage.FederationPeer, error) {
+	// Migrate before reading, so the row read below is the upgraded one.
+	if err := s.ensureCredentialsMigrated(ctx); err != nil {
+		return nil, err
+	}
 	var row *issueops.FederationPeerRow
 	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
 		var err error
@@ -152,9 +211,9 @@ func (s *EmbeddedDoltStore) GetFederationPeer(ctx context.Context, name string) 
 	}
 
 	if len(row.EncryptedPwd) > 0 {
-		row.Peer.Password, err = s.decryptPassword(row.EncryptedPwd)
+		row.Peer.Password, err = s.decryptPassword(peerBinding(&row.Peer), row.EncryptedPwd)
 		if err != nil {
-			return nil, fmt.Errorf("decrypt password for peer %s: %w", name, err)
+			return nil, fmt.Errorf("decrypt password for peer %s: %w", remedy.PrintedValue(name), err)
 		}
 	}
 	return &row.Peer, nil
@@ -306,6 +365,9 @@ func overrideEnv(key, value string) func() {
 }
 
 func (s *EmbeddedDoltStore) ListFederationPeers(ctx context.Context) ([]*storage.FederationPeer, error) {
+	if err := s.ensureCredentialsMigrated(ctx); err != nil {
+		return nil, err
+	}
 	var rows []*issueops.FederationPeerRow
 	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
 		var err error
@@ -319,9 +381,9 @@ func (s *EmbeddedDoltStore) ListFederationPeers(ctx context.Context) ([]*storage
 	peers := make([]*storage.FederationPeer, 0, len(rows))
 	for _, row := range rows {
 		if len(row.EncryptedPwd) > 0 {
-			pwd, err := s.decryptPassword(row.EncryptedPwd)
+			pwd, err := s.decryptPassword(peerBinding(&row.Peer), row.EncryptedPwd)
 			if err != nil {
-				return nil, fmt.Errorf("decrypt password for peer %s: %w", row.Peer.Name, err)
+				return nil, fmt.Errorf("decrypt password for peer %s: %w", remedy.PrintedValue(row.Peer.Name), err)
 			}
 			row.Peer.Password = pwd
 		}
@@ -382,15 +444,18 @@ func (s *EmbeddedDoltStore) Sync(ctx context.Context, peer string, strategy stri
 	// Step 2: Get commit before merge for change detection
 	beforeCommit, _ := s.GetCurrentCommit(ctx)
 
-	// Step 3: Merge peer's branch
+	// Step 3: Merge peer's branch on the settle path PullFrom uses. A plain
+	// DOLT_MERGE rolls back on any conflict or FK violation, so a peer's delete
+	// of a published issue linked to a withheld one (the kept filter revert
+	// makes those links local changes) would fail every later sync.
 	remoteBranch := fmt.Sprintf("%s/%s", peer, s.branch)
-	conflicts, err := s.Merge(ctx, remoteBranch)
+	conflicts, err := s.mergeFetchedPeer(ctx, remoteBranch, beforeCommit)
 	if err != nil {
 		result.Error = fmt.Errorf("merge failed: %w", err)
 		return result, result.Error
 	}
 
-	// Step 4: Handle conflicts
+	// Step 4: Handle the conflicts the auto-resolver left for the operator.
 	if len(conflicts) > 0 {
 		result.Conflicts = conflicts
 
@@ -399,32 +464,15 @@ func (s *EmbeddedDoltStore) Sync(ctx context.Context, peer string, strategy stri
 			return result, result.Error
 		}
 
-		for _, c := range conflicts {
-			if err := s.ResolveConflicts(ctx, c.Field, strategy); err != nil {
-				result.Error = fmt.Errorf("conflict resolution failed for %s: %w", c.Field, err)
-				return result, result.Error
-			}
+		// The settle path aborted the merge. MergeWithStrategy (bd vc merge
+		// --strategy) merges again, resolves every conflicted table with the
+		// strategy, repairs FK cascade violations, commits and recomputes
+		// is_blocked.
+		if _, err := s.MergeWithStrategy(ctx, remoteBranch, strategy); err != nil {
+			result.Error = fmt.Errorf("conflict resolution failed: %w", err)
+			return result, result.Error
 		}
 		result.ConflictsResolved = true
-
-		// CommitMergeResolution, not Commit: Commit's GH#3886 nothing-to-commit
-		// tolerance would swallow the --ours case (resolution dirties nothing)
-		// as a silent no-op here, leaving dolt_merge_status.is_merging true while
-		// this function reports result.Merged = true and pushes — the exact
-		// re-wedge CommitMergeResolution's doc comment describes. See the
-		// server-mode twin, dolt/federation.go's Sync.
-		if err := s.CommitMergeResolution(ctx, fmt.Sprintf("Resolve conflicts from %s using %s strategy", peer, strategy)); err != nil {
-			result.Error = fmt.Errorf("commit conflict resolution: %w", err)
-			return result, result.Error
-		}
-
-		// bd-578h9.11: the conflicted merge skipped the automatic is_blocked
-		// recompute (unresolved rows would have fed it garbage); now that the
-		// resolution is committed, cover the whole merge+resolution window.
-		if err := s.RecomputeBlockedAfterMerge(ctx, beforeCommit); err != nil {
-			result.Error = fmt.Errorf("conflicts resolved but is_blocked recompute failed: %w", err)
-			return result, result.Error
-		}
 	}
 	result.Merged = true
 
@@ -433,18 +481,109 @@ func (s *EmbeddedDoltStore) Sync(ctx context.Context, peer string, strategy stri
 		result.PulledCommits = 1
 	}
 
-	// Step 5: Push
-	if err := s.PushTo(ctx, peer); err != nil {
+	// Step 5: Push, filtering excluded types.
+	pushRes, err := s.filteredPushToPeer(ctx, peer, config.GetFederationConfig().ExcludeTypes)
+	if err != nil {
 		result.PushError = err
-	} else {
-		result.Pushed = true
 	}
+	// Pushed means a publication landed: an unchanged payload pushes nothing,
+	// and a cleanup failure after the push is reported but does not undo it.
+	result.Pushed = pushRes.Pushed
+	result.PushFiltered = pushRes.Filtered
 
 	// Record last sync time in metadata.
 	_ = s.setLastSyncTime(ctx, peer)
 
 	result.EndTime = time.Now()
 	return result, nil
+}
+
+// mergeFetchedPeer merges ref, the peer branch Fetch brought in, on the settle
+// path PullFrom uses (versioncontrolops.MergeAndSettle): safe conflict classes
+// are auto-resolved and FK cascade violations repaired, then is_blocked is
+// recomputed from preHead. Conflicts left for the operator come back with the
+// merge aborted and the working set restored.
+func (s *EmbeddedDoltStore) mergeFetchedPeer(ctx context.Context, ref, preHead string) ([]storage.Conflict, error) {
+	var conflicts []storage.Conflict
+	err := s.withMutatingPinnedDBConn(ctx, func(db versioncontrolops.DBConn) error {
+		err := versioncontrolops.MergeAndSettle(ctx, db, ref)
+		var mce *versioncontrolops.MergeConflictsError
+		if errors.As(err, &mce) {
+			conflicts = mce.Conflicts
+			return nil
+		}
+		return err
+	})
+	if err != nil || len(conflicts) > 0 {
+		return conflicts, err
+	}
+	if err := s.recomputeBlockedAfterPull(ctx, preHead); err != nil {
+		return nil, fmt.Errorf("merge succeeded but is_blocked recompute failed: %w", err)
+	}
+	return nil, nil
+}
+
+// federationStagingBranchPrefix names the temporary branches of a filtered
+// push, matching the server driver.
+const federationStagingBranchPrefix = "__federation_push_staging_"
+
+// federationKeepBranchPrefix names the temporary branch on which a filtered
+// push reverts its filter commit, matching the server driver.
+const federationKeepBranchPrefix = "__federation_push_keep_"
+
+// federationStagingCleanupTimeout bounds the cleanup of a filtered push.
+const federationStagingCleanupTimeout = 30 * time.Second
+
+// filteredPushToPeer pushes to a peer after filtering out excluded issue types
+// with versioncontrolops.RunFilteredPush. When excludeTypes is empty it
+// delegates to PushTo. The filter runs on one pinned connection, which also
+// performs the push, so no second connection is opened while it is held.
+// res.Pushed stays set when cleanup fails after the push.
+func (s *EmbeddedDoltStore) filteredPushToPeer(ctx context.Context, peer string, excludeTypes []string) (res versioncontrolops.FilteredPushResult, err error) {
+	if len(excludeTypes) == 0 {
+		err := s.PushTo(ctx, peer)
+		return versioncontrolops.FilteredPushResult{Pushed: err == nil}, err
+	}
+	var suffix [16]byte
+	if _, err := rand.Read(suffix[:]); err != nil {
+		return res, fmt.Errorf("federation filter: generate staging branch: %w", err)
+	}
+	stagingBranch := federationStagingBranchPrefix + fmt.Sprintf("%x", suffix)
+	keepBranch := federationKeepBranchPrefix + fmt.Sprintf("%x", suffix)
+	err = s.withPeerAuth(ctx, peer, func(user string) error {
+		return s.withMutatingPinnedDBConn(ctx, func(db versioncontrolops.DBConn) (retErr error) {
+			conn, ok := db.(versioncontrolops.BlockedRecomputeConn)
+			if !ok {
+				return fmt.Errorf("federation filter: pinned connection cannot open transactions")
+			}
+			// Armed before any branch is created; bounded and uncanceled so
+			// a canceled sync still removes the temporary branches.
+			defer func() {
+				cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), federationStagingCleanupTimeout)
+				defer cancel()
+				if err := versioncontrolops.CleanupFilteredPush(cleanupCtx, db, s.branch, stagingBranch, keepBranch); err != nil {
+					retErr = errors.Join(retErr, fmt.Errorf("federation filter: cleanup: %w", err))
+				}
+			}()
+			peerTip, err := versioncontrolops.RemoteBranchTip(ctx, db, peer, s.branch)
+			if err != nil {
+				return fmt.Errorf("federation filter: %w", err)
+			}
+			res, err = versioncontrolops.RunFilteredPush(ctx, conn, versioncontrolops.FilteredPushRequest{
+				Source:       s.branch,
+				Staging:      stagingBranch,
+				Keep:         keepBranch,
+				PeerTip:      peerTip,
+				ExcludeTypes: excludeTypes,
+				Author:       commitAuthor,
+				Push: func(ctx context.Context, refspec string) error {
+					return versioncontrolops.Push(ctx, db, peer, refspec, user)
+				},
+			})
+			return err
+		})
+	})
+	return res, err
 }
 
 // SyncStatus returns the synchronization status with a peer.

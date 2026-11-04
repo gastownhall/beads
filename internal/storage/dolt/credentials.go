@@ -2,8 +2,6 @@ package dolt
 
 import (
 	"context"
-	"crypto/aes"
-	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
@@ -15,12 +13,15 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 
 	"github.com/steveyegge/beads/internal/execenv"
 	"github.com/steveyegge/beads/internal/githooksenv"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/peercred"
 )
 
 // Credential storage and encryption for federation peers.
@@ -56,7 +57,7 @@ func validatePeerName(name string) error {
 // The key file is stored in .beads/ (beadsDir), NOT in .beads/dolt/ (dbPath),
 // to avoid creating ghost directories in shared-server mode (GH bd-cby).
 // Falls back to the old dbPath location for transparent migration.
-func (s *DoltStore) initCredentialKey(ctx context.Context) error {
+func (s *DoltStore) initCredentialKey(_ context.Context) error {
 	if s.beadsDir == "" {
 		return nil // No filesystem path — credential encryption unavailable
 	}
@@ -75,24 +76,25 @@ func (s *DoltStore) initCredentialKey(ctx context.Context) error {
 		oldKeyPath := filepath.Join(s.dbPath, credentialKeyFile)
 		oldKey, oldErr := os.ReadFile(oldKeyPath) //nolint:gosec // G304: oldKeyPath is derived from trusted dbPath
 		if oldErr == nil && len(oldKey) == 32 {
-			// Write to new location, then remove old file
-			if writeErr := os.WriteFile(keyPath, oldKey, 0600); writeErr == nil {
-				_ = os.Remove(oldKeyPath)
+			// Write to new location, then remove old file. Move it only
+			// once the new location is gitignored.
+			if peercred.GitignoreLocalFiles(keyPath) == nil {
+				if writeErr := os.WriteFile(keyPath, oldKey, 0600); writeErr == nil {
+					_ = os.Remove(oldKeyPath)
+				}
 			}
 			s.credentialKey = oldKey
 			return nil
 		}
 	}
 
-	// Generate new random 32-byte key (AES-256)
+	// Generate new random 32-byte key (AES-256). Credentials sealed under
+	// the old dbPath-derived key are not converted here:
+	// ensureCredentialsMigrated reseals them, under the same provenance
+	// check as other legacy credentials, after this key is on disk.
 	key = make([]byte, 32)
 	if _, err := io.ReadFull(rand.Reader, key); err != nil {
 		return fmt.Errorf("failed to generate credential encryption key: %w", err)
-	}
-
-	// Migrate existing credentials from old dbPath-derived key to new random key
-	if err := s.migrateCredentialKeys(ctx, key); err != nil {
-		return fmt.Errorf("failed to migrate credential keys: %w", err)
 	}
 
 	// Write key file with owner-only permissions (0600).
@@ -100,6 +102,9 @@ func (s *DoltStore) initCredentialKey(ctx context.Context) error {
 	// server without having run `bd init`, .beads/ may not exist yet (GH#2641).
 	if err := os.MkdirAll(s.beadsDir, 0700); err != nil {
 		return fmt.Errorf("failed to create beads directory %s: %w", s.beadsDir, err)
+	}
+	if err := peercred.GitignoreLocalFiles(keyPath); err != nil {
+		return fmt.Errorf("failed to keep the credential key file out of git: %w", err)
 	}
 	if err := os.WriteFile(keyPath, key, 0600); err != nil {
 		return fmt.Errorf("failed to write credential key file: %w", err)
@@ -136,107 +141,119 @@ func (s *DoltStore) legacyEncryptionKey() []byte {
 	return h.Sum(nil)
 }
 
-// migrateCredentialKeys re-encrypts all stored federation passwords from the
-// old dbPath-derived key to the new random key.
-func (s *DoltStore) migrateCredentialKeys(ctx context.Context, newKey []byte) error {
-	if s.db == nil {
-		return nil // No database connection — nothing to migrate
-	}
-
-	oldKey := s.legacyEncryptionKey()
-
-	rows, err := s.queryContext(ctx, `
-		SELECT name, password_encrypted FROM federation_peers
-		WHERE password_encrypted IS NOT NULL AND LENGTH(password_encrypted) > 0
-	`)
-	if err != nil {
-		// Table may not exist yet (fresh install) — not an error
+// ensureCredentialsMigrated upgrades this machine's legacy (unbound) peer
+// credentials to bound v2 before the first credential read, once per store.
+// The first writable credential operation establishes completion even when
+// no row holds a credential, so a legacy blob that arrives later is never
+// rebound. Legacy blobs sealed under this store's key or under the old
+// dbPath-derived key are both candidates until the marker records
+// completion, so a restart after the random key was persisted still
+// converts the remaining derived-key rows. Only a writable store migrates.
+// The marker beside the key file is written only after the migrated rows are
+// committed, and once it is valid for the loaded key no legacy credential is
+// rebound again, so a legacy blob that arrives later is refused rather than
+// resealed.
+func (s *DoltStore) ensureCredentialsMigrated(ctx context.Context) error {
+	if s.readOnly || s.beadsDir == "" || s.db == nil {
 		return nil
 	}
-	defer rows.Close()
-
-	type migrationEntry struct {
-		name      string
-		plaintext string
+	s.credMigrateMu.Lock()
+	migrated := s.credMigrated
+	s.credMigrateMu.Unlock()
+	if migrated {
+		return nil
 	}
 
-	var toMigrate []migrationEntry
-	for rows.Next() {
-		var name string
-		var encrypted []byte
-		if err := rows.Scan(&name, &encrypted); err != nil {
-			return fmt.Errorf("failed to scan peer for migration: %w", err)
-		}
-
-		// Decrypt with old key
-		plaintext, err := decryptWithKey(encrypted, oldKey)
-		if err != nil {
-			// Can't decrypt with old key — skip (may already use a different scheme)
-			continue
-		}
-		toMigrate = append(toMigrate, migrationEntry{name: name, plaintext: plaintext})
+	keyPath := filepath.Join(s.beadsDir, credentialKeyFile)
+	s.credMigrateMu.Lock()
+	defer s.credMigrateMu.Unlock()
+	if s.credMigrated {
+		return nil
 	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("failed to iterate peers for migration: %w", err)
+	if err := s.ensureCredentialKey(ctx); err != nil {
+		return fmt.Errorf("failed to initialize credential key: %w", err)
 	}
-
-	// Re-encrypt each password with the new key
-	for _, entry := range toMigrate {
-		encrypted, err := encryptWithKey(entry.plaintext, newKey)
-		if err != nil {
-			return fmt.Errorf("failed to re-encrypt password for peer %s: %w", entry.name, err)
-		}
-		if _, err := s.execContext(ctx, `
-			UPDATE federation_peers SET password_encrypted = ? WHERE name = ?
-		`, encrypted, entry.name); err != nil {
-			return fmt.Errorf("failed to update encrypted password for peer %s: %w", entry.name, err)
-		}
+	s.mu.RLock()
+	key := s.credentialKey
+	s.mu.RUnlock()
+	if key == nil {
+		return nil
+	}
+	done, err := peercred.MarkerValid(keyPath, key)
+	if err != nil {
+		return err
+	}
+	if done {
+		s.credMigrated = true
+		return nil
 	}
 
+	legacyKeys := [][]byte{key}
+	if s.dbPath != "" {
+		legacyKeys = append(legacyKeys, s.legacyEncryptionKey())
+	}
+	res, err := s.migrateLegacyCredentials(ctx, key, legacyKeys)
+	if err != nil {
+		return fmt.Errorf("upgrade stored peer credentials: %w", err)
+	}
+	// Commit even when this pass resealed nothing: a previous pass may have
+	// resealed rows and then failed to commit them, and the marker must not
+	// record completion over uncommitted rows. The commit stages only
+	// federation_peers and skips when nothing is staged.
+	if err := s.doltAddAndCommit(ctx, []string{"federation_peers"}, "federation: bind stored peer credentials to their peers"); err != nil {
+		return fmt.Errorf("commit upgraded peer credentials: %w", err)
+	}
+	for _, r := range res.Skipped {
+		fmt.Fprint(credentialWarnWriter, peercred.SkipWarning(runtime.GOOS, r))
+	}
+	if err := peercred.GitignoreLocalFiles(keyPath); err != nil {
+		return err
+	}
+	if err := peercred.WriteMarker(keyPath, key); err != nil {
+		return err
+	}
+	s.credMigrated = true
 	return nil
 }
 
-// encryptWithKey encrypts plaintext using AES-GCM with the given key.
-func encryptWithKey(plaintext string, key []byte) ([]byte, error) {
-	block, err := aes.NewCipher(key)
+// migrateLegacyCredentials runs peercred.Migrate on a dedicated long-timeout
+// connection pinned to the store's branch. Its history scan reads
+// dolt_history_federation_peers, which visits every commit reachable from
+// HEAD, so on a long history it can outlast the shared pool's 10s read
+// deadline (see withReadTxLongTimeout). Its rewrites land in the branch's
+// working set, which the caller then commits on the pool.
+func (s *DoltStore) migrateLegacyCredentials(ctx context.Context, key []byte, legacyKeys [][]byte) (peercred.MigrationResult, error) {
+	db, err := s.openLongTimeoutConn()
 	if err != nil {
-		return nil, err
+		return peercred.MigrationResult{}, err
 	}
-	gcm, err := cipher.NewGCM(block)
+	defer db.Close()
+	conn, err := db.Conn(ctx)
 	if err != nil {
-		return nil, err
+		return peercred.MigrationResult{}, fmt.Errorf("acquire long-timeout connection: %w", err)
 	}
-	nonce := make([]byte, gcm.NonceSize())
-	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
-		return nil, err
+	defer conn.Close()
+	// A fresh connection starts on the database's default branch; migrate
+	// the branch this store reads.
+	if err := s.pinStoreBranch(ctx, conn); err != nil {
+		return peercred.MigrationResult{}, err
 	}
-	return gcm.Seal(nonce, nonce, []byte(plaintext), nil), nil
+	return peercred.Migrate(ctx, conn, key, legacyKeys)
 }
 
-// decryptWithKey decrypts ciphertext using AES-GCM with the given key.
-func decryptWithKey(encrypted []byte, key []byte) (string, error) {
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return "", err
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return "", err
-	}
-	nonceSize := gcm.NonceSize()
-	if len(encrypted) < nonceSize {
-		return "", fmt.Errorf("ciphertext too short")
-	}
-	nonce, ciphertext := encrypted[:nonceSize], encrypted[nonceSize:]
-	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
-	if err != nil {
-		return "", err
-	}
-	return string(plaintext), nil
+// credentialWarnWriter receives the per-peer warnings for legacy credentials
+// the upgrade refused to rebind. Defaults to os.Stderr; tests replace it.
+var credentialWarnWriter io.Writer = os.Stderr
+
+// peerBinding is the identity a peer's stored password is sealed to: the
+// row's stored name, exact URL and username.
+func peerBinding(p *storage.FederationPeer) peercred.Binding {
+	return peercred.Binding{Name: p.Name, URL: p.RemoteURL, Username: p.Username}
 }
 
-// encryptPassword encrypts a password using AES-GCM with the store's credential key.
-func (s *DoltStore) encryptPassword(password string) ([]byte, error) {
+// encryptPassword seals a password for the peer binding b with the store's
+// credential key.
+func (s *DoltStore) encryptPassword(b peercred.Binding, password string) ([]byte, error) {
 	if password == "" {
 		return nil, nil
 	}
@@ -246,11 +263,12 @@ func (s *DoltStore) encryptPassword(password string) ([]byte, error) {
 	if key == nil {
 		return nil, fmt.Errorf("credential encryption key not initialized")
 	}
-	return encryptWithKey(password, key)
+	return peercred.Seal(key, b, password)
 }
 
-// decryptPassword decrypts a password using AES-GCM with the store's credential key.
-func (s *DoltStore) decryptPassword(encrypted []byte) (string, error) {
+// decryptPassword opens a password sealed for the peer binding b with the
+// store's credential key.
+func (s *DoltStore) decryptPassword(b peercred.Binding, encrypted []byte) (string, error) {
 	if len(encrypted) == 0 {
 		return "", nil
 	}
@@ -263,22 +281,27 @@ func (s *DoltStore) decryptPassword(encrypted []byte) (string, error) {
 		// the peer. Labeling it a mismatch would prescribe the wrong action.
 		return "", fmt.Errorf("credential encryption key not initialized")
 	}
-	plaintext, err := decryptWithKey(encrypted, key)
-	if err != nil {
+	plaintext, err := peercred.Open(key, b, encrypted)
+	if errors.Is(err, peercred.ErrNotAuthenticated) || errors.Is(err, peercred.ErrLegacyFormat) {
 		// federation_peers rows travel with the database, the key file does
 		// not, so a database opened on a second machine reaches here with a
-		// key that cannot read the stored password. Enrich at this single
-		// decrypt funnel, as embeddeddolt does, so every reader reports the
-		// credential problem rather than a bare cipher error. decryptWithKey
-		// stays unwrapped for the key-rotation path, which reads old keys on
-		// purpose and must not report a rotation miss as a mismatch. Name the
-		// resolved path rather than the bare filename: initCredentialKey looks
-		// this same basename up under both beadsDir and the legacy dbPath, so
-		// during the migration window two files carrying different keys can
-		// share the name and the bare one does not say which is meant.
-		return "", storage.CredentialKeyMismatchError(filepath.Join(s.beadsDir, credentialKeyFile), err)
+		// key that cannot read the stored password. A blob copied from another
+		// peer row, a corrupt blob and an unmigrated legacy blob fail the same
+		// way. Enrich at this single decrypt funnel, as embeddeddolt does, so
+		// every reader reports the credential problem rather than a bare cipher
+		// error. peercred.OpenLegacy stays unwrapped for the migration path,
+		// which reads old keys on purpose and must not report a miss as a
+		// mismatch. Name the resolved path rather than the bare filename:
+		// initCredentialKey looks this same basename up under both beadsDir and
+		// the legacy dbPath, so during the migration window two files carrying
+		// different keys can share the name and the bare one does not say
+		// which is meant.
+		if errors.Is(err, peercred.ErrLegacyFormat) && s.readOnly {
+			err = fmt.Errorf("%w; a read-only store does not upgrade it, so run bd federation status without --readonly first", err)
+		}
+		return "", storage.CredentialKeyMismatchError(filepath.Join(s.beadsDir, credentialKeyFile), b.Name, b.Username, err)
 	}
-	return plaintext, nil
+	return plaintext, err
 }
 
 // AddFederationPeer adds or updates a federation peer with credentials.
@@ -294,6 +317,9 @@ func (s *DoltStore) addFederationPeer(ctx context.Context, peer *storage.Federat
 	if err := validatePeerName(peer.Name); err != nil {
 		return fmt.Errorf("invalid peer name: %w", err)
 	}
+	if err := s.ensureCredentialsMigrated(ctx); err != nil {
+		return err
+	}
 
 	// Encrypt password before storing
 	var encryptedPwd []byte
@@ -302,7 +328,7 @@ func (s *DoltStore) addFederationPeer(ctx context.Context, peer *storage.Federat
 		if err := s.ensureCredentialKey(ctx); err != nil {
 			return fmt.Errorf("failed to initialize credential key: %w", err)
 		}
-		encryptedPwd, err = s.encryptPassword(peer.Password)
+		encryptedPwd, err = s.encryptPassword(peerBinding(peer), peer.Password)
 		if err != nil {
 			return fmt.Errorf("failed to encrypt password: %w", err)
 		}
@@ -342,6 +368,10 @@ func (s *DoltStore) addFederationPeer(ctx context.Context, peer *storage.Federat
 // GetFederationPeer retrieves a federation peer by name.
 // Returns storage.ErrNotFound (wrapped) if the peer does not exist.
 func (s *DoltStore) GetFederationPeer(ctx context.Context, name string) (*storage.FederationPeer, error) {
+	// Migrate before reading, so the row read below is the upgraded one.
+	if err := s.ensureCredentialsMigrated(ctx); err != nil {
+		return nil, err
+	}
 	var peer storage.FederationPeer
 	var encryptedPwd []byte
 	var lastSync sql.NullTime
@@ -371,11 +401,11 @@ func (s *DoltStore) GetFederationPeer(ctx context.Context, name string) (*storag
 		if err := s.ensureCredentialKey(ctx); err != nil {
 			return nil, fmt.Errorf("failed to initialize credential key: %w", err)
 		}
-		peer.Password, err = s.decryptPassword(encryptedPwd)
+		peer.Password, err = s.decryptPassword(peerBinding(&peer), encryptedPwd)
 		if err != nil {
 			// decryptPassword already classifies the local-key case; name the
 			// peer and preserve the sentinel for errors.Is/As.
-			return nil, fmt.Errorf("failed to decrypt password for peer %s: %w", name, err)
+			return nil, fmt.Errorf("failed to decrypt password for peer %s: %w", remedy.PrintedValue(name), err)
 		}
 	}
 
@@ -384,6 +414,9 @@ func (s *DoltStore) GetFederationPeer(ctx context.Context, name string) (*storag
 
 // ListFederationPeers returns all configured federation peers.
 func (s *DoltStore) ListFederationPeers(ctx context.Context) ([]*storage.FederationPeer, error) {
+	if err := s.ensureCredentialsMigrated(ctx); err != nil {
+		return nil, err
+	}
 	rows, err := s.queryContext(ctx, `
 		SELECT name, remote_url, username, password_encrypted, sovereignty, last_sync, created_at, updated_at
 		FROM federation_peers ORDER BY name
@@ -416,11 +449,11 @@ func (s *DoltStore) ListFederationPeers(ctx context.Context) ([]*storage.Federat
 			if err := s.ensureCredentialKey(ctx); err != nil {
 				return nil, fmt.Errorf("failed to initialize credential key: %w", err)
 			}
-			peer.Password, err = s.decryptPassword(encryptedPwd)
+			peer.Password, err = s.decryptPassword(peerBinding(&peer), encryptedPwd)
 			if err != nil {
 				// Same as GetFederationPeer: the funnel classified it, the
 				// caller only names which peer failed.
-				return nil, fmt.Errorf("failed to decrypt password for peer %s: %w", peer.Name, err)
+				return nil, fmt.Errorf("failed to decrypt password for peer %s: %w", remedy.PrintedValue(peer.Name), err)
 			}
 		}
 

@@ -161,6 +161,7 @@
 40 3 TestEmbeddedSQLCommitResponseLossIsIndeterminate
 40 3 TestEpochContract
 40 3 TestExpectedRevisionContract
+40 3 TestFederationReadOnlyLegacyCredentialRemedyUpgradesIt
 40 3 TestGitRefPinsMatchDolt
 40 3 TestHasRepository
 40 3 TestHelperProcess
@@ -201,6 +202,7 @@
 40 6 TestEmbeddedMergeAndSettleSkipsNonMemoryConfigConflict
 40 6 TestEmbeddedReaderListKeysetPositionNarrowsWithoutReplacingTheOtherPredicates
 40 6 TestEmbeddedRelationsAnswersAWispTargetInTheOutDirection
+40 6 TestFederationCredentialBindingRejectsCopiedCiphertext
 40 6 TestPromoteStillWorksWithCollisionGuard
 40 6 TestSearchWithMissingWispPlaneTables
 40 6 TestVersionedHistoryKeepsNumbersTheStoreDistinguishesApart
@@ -225,6 +227,7 @@
 40 8 TestEmbeddedReaderGetBriefDepsProjectsTheDependencyRows
 40 8 TestEmbeddedRelationsOrdersNeighborsFromBothPlanesTogether
 40 8 TestEmbeddedReopenIssueCategorySemantics
+40 8 TestFederationCredentialMigrationResealsLegacyBlobWithV2PrefixedNonce
 40 8 TestGetIssueCommentsPageEmbedded
 40 8 TestListWisps
 
@@ -236,6 +239,7 @@
 40 9 TestEmbeddedMigration0058AddsOnlyMissingConstraintInMixedPopulation
 40 9 TestEmbeddedReaderReadyPageWiderThanTheHydrationBatchIsStillThatPrefix
 40 9 TestEmbeddedReadyClaimerHydratesOnlyItsBlocksEdgesIntoTheCardinalities
+40 9 TestFederationLegacyCredentialMoveIsNotRebound
 40 9 TestGetReadyWorkIncludeEphemeralExcludesNonReadyWisps
 40 9 TestPristineEmbeddedDoltFixtureRelocatesPrefixes
 40 9 TestUpdateMergeOps_DoltEngine
@@ -262,6 +266,7 @@
 40 11 TestEmbeddedReaderListMaxRowsBoundaryIsLimitPlusOffset
 40 11 TestEmbeddedReadyClaimerRecordsOneHistoryEntryForAWin
 40 11 TestEventsJournal_ActorMatrixOnEmbedded
+40 11 TestFederationCredentialMigrationCommitsAnEarlierPassesRebinds
 40 11 TestMemoriesContract
 40 11 TestWithPeerAuth_WarnsWhenStoredPeerSuppressesAmbientPasswordStored
 
@@ -273,6 +278,7 @@
 40 12 TestEmbeddedIgnoredMigration0031SkipsDeletedIssues
 40 12 TestEmbeddedIssueOperationsCreateUnderAParentMintsTheNextChildID
 40 12 TestEmbeddedReadyClaimerAnswersTheQuestionReaderReadyLists
+40 12 TestFilteredFederationSyncExcludesTypes
 40 12 TestHistoryPresenceContract
 40 12 TestLifecycleUpdateContract
 40 12 TestReaderListExcludeStatusAcceptsAWorkspaceCustomStatus
@@ -287,6 +293,7 @@
 40 13 TestEmbeddedIssueOperationsUpdateFoldsMetadataIntoOneEvent
 40 13 TestEmbeddedPre0058RepairMarchesDriftedWispDependenciesToFinalShape
 40 13 TestEmbeddedRelationsDirectionSelectsTheInverseGraph
+40 13 TestFilteredFederationSyncFailureKeepsLocalData
 40 13 TestGraphWalkPlansHonorJoinHints
 
 40 14 TestArrivalSeq_EmbeddedReplayedCounterSeedClearsTheStamps
@@ -300,6 +307,7 @@
 40 14 TestEmbeddedReaderReadyDefaultTypeExclusionsYieldToAnExplicitType
 40 14 TestEmbeddedReadyClaimerClaimsTheFrontRowAndReturnsThePostClaimState
 40 14 TestEmbeddedReadyClaimerDoesNotMutateTheCallerRequest
+40 14 TestFilteredFederationSyncStrategyResolvesDeclinedConflicts
 40 14 TestHeartbeatIssueCommitsARefusalOnlyWhenItReadTheIssueEmbedded
 40 14 TestHistory_NullTextColumns
 
@@ -312,6 +320,7 @@
 40 15 TestEmbeddedMigrate0047StepCommitKeepsIssueUpdatedAt
 40 15 TestEmbeddedReaderReadyBriefDropsTheFreeFormTextAndNothingElse
 40 15 TestEmbeddedRelationsFiltersByAnOpenTypeVocabulary
+40 15 TestFilteredFederationSyncTakesPeerDeletesOfLinkedIssues
 40 15 TestGetIssue
 40 15 TestLegacyTrackedIgnoredCursorHealsOnOpen
 40 15 TestMoleculeContract
@@ -326,6 +335,7 @@
 40 16 TestEmbeddedReaderListLimitBoundaryUnderASortTheDatabaseCanExpress
 40 16 TestEmbeddedRenameKeepsDependencyIDsDeterministic
 40 16 TestExternalCapabilityBlocksEmbeddedReadyAndAppearsInTree
+40 16 TestFilteredFederationSyncKeepsLocalExcludedIssues
 40 16 TestGetReadyWorkIncludeEphemeralAppliesWispFilters
 40 16 TestMergeWithStrategy_OursKeepsLocal
 40 16 TestWithPeerAuth_DivergedRemoteURLFailsClosed
@@ -339,6 +349,7 @@
 40 17 TestEmbeddedOnlyAWriteAnswersTheSwitch
 40 17 TestEmbeddedReaderListRejectsATypeOutsideTheWorkspaceVocabulary
 40 17 TestEmbeddedReadyClaimerLeasesADurableWinButNotAnEphemeralOne
+40 17 TestFilteredPushAbortsItsConflictedKeepMerge
 40 17 TestHeartbeatMatchesActorAcrossSpellingEmbedded
 40 17 TestStatsReporterContract
 40 17 TestVersionReconcilerContract
@@ -410,6 +421,7 @@
 40 22 TestEmbeddedReaderReadyLimitBoundary
 40 22 TestEventsAutoPruneKeepsAnUnboundedJournalUnbounded
 40 22 TestEventsJournalPruneNeverSplitsASkewedPair
+40 22 TestFederationCredentialBindingCoversEachField
 40 22 TestLargeBatchApplyStatementCounts356_Embedded
 40 22 TestLeaseLifecycleEmbedded
 40 22 TestPolicyBlockingAnnotatorForeignOpensAreSublinear
@@ -436,6 +448,7 @@
 40 24 TestEmbeddedMigrateSelfHealsAfterMidPassFault_4566
 40 24 TestEmbeddedReaderListQueryMatchesTheTitleOrTheID
 40 24 TestEmbeddedReaderListWispTypeNarrowsTheAdmittedPlaneRatherThanAdmittingIt
+40 24 TestFilteredFederationSyncSettledMergeKeepsPeerChanges
 40 24 TestIgnoredCursorHealResumeRespectsOperatorOverride
 40 24 TestLargeBatchApplyStatementCountsClassic40_Embedded
 40 24 TestReopenIssue
@@ -464,6 +477,7 @@
 40 26 TestEmbeddedReadyClaimerSkipsIneligibleFrontRows
 40 26 TestEmbeddedRecomputeAllBlockedDirtyGraphIsTyped
 40 26 TestEmbeddedRelationsRefusesTheZeroDirection
+40 26 TestFilteredPushUnchangedPayloadPublishesNothing
 40 26 TestGetHeadHashesReadsHeadCommitAndRoot
 40 26 TestHookFiringStoreCreateIssuesFiresDependencyUpdatesFromEmbeddedStore
 40 26 TestReclaimAnyReplicaOverride
@@ -495,6 +509,7 @@
 40 28 TestEmbeddedIssueOperationsUpdateRefusesATypeOutsideTheWorkspaceVocabulary
 40 28 TestEmbeddedMigrateRetryAfterFaultConverges_4470
 40 28 TestEmbeddedReaderListReadyFlagAnswersTheBlockerAwareSet
+40 28 TestFederationCredentialMigrationIgnoresAnotherKeysMarker
 40 28 TestRenameLabel
 40 28 TestUpdateIssueType
 40 28 TestWithPeerAuth_RestoresEnvWhenCallbackFails
@@ -525,6 +540,7 @@
 40 30 TestEmbeddedIssueOperationsUpdateStampsStartedAtOnceOnTheFirstInProgress
 40 30 TestEmbeddedReaderReadySortPoliciesOrderTheSameRows
 40 30 TestEmbeddedTransactionStandaloneWispMutationDoesNotPublishUnrelatedDurableChanges
+40 30 TestFilteredPushConnectionFaultsKeepLocalData
 40 30 TestLegacyTrackedIgnoredCursorUnwedgesPull
 40 30 TestUpdateMergeOps_DoltEngine_TwoIssues
 
@@ -553,6 +569,7 @@
 40 32 TestEmbeddedReadyClaimerEmptyFrontIsNormal
 40 32 TestEmbeddedRecomputeAllBlockedWiring
 40 32 TestEventsJournal_EmbeddedConcurrentGaplessNoDup
+40 32 TestFederationLegacyCredentialsMigrateOnce
 40 32 TestGetNextChildID
 40 32 TestRemoteVerbPlainRemoteKeepsAmbientEnv
 40 32 TestWithPeerAuth_MissingRemoteFailsClosed
@@ -566,6 +583,7 @@
 40 33 TestEmbeddedRelationsResolvesTheAnchorIDExactly
 40 33 TestEmbeddedSyncCommitsConfigBeforeMerge
 40 33 TestEventsAutoPruneThrottleSkipsTheSecondPass
+40 33 TestFederationLegacyCredentialsRejectedAfterMigrationMarker
 40 33 TestFirstMintLeavesTheEpochTablesCommitted
 40 33 TestGetDependentRecordsEmbedded
 40 33 TestPruneEventsBatchDeletesTheLowestSeqsOnly
@@ -581,6 +599,7 @@
 40 34 TestEmbeddedIssueOperationsCreateAggregatesRelations
 40 34 TestEmbeddedReaderReadyDeferredAndEphemeralGates
 40 34 TestEmbeddedReaderReadyPageIsThePrefixOfTheUnboundedAnswerCountsIncluded
+40 34 TestFederationLegacyCredentialDuplicatedInCurrentTableIsNotRebound
 40 34 TestMergeWithStrategy_TheirsResolvesAndCommits
 40 34 TestQuerierContract
 40 34 TestReadyWorkStatementBudget
@@ -609,6 +628,7 @@
 40 36 TestEmbeddedMigration0057ConvertsTextEventsColumnsToLongtext
 40 36 TestEmbeddedReaderListReadyFlagRefusesAFilterItCannotCarry
 40 36 TestEmbeddedRelationsRefusesAnUnusableTypeFilter
+40 36 TestFederationCredentialMigrationMarkerFailureIsRetried
 40 36 TestGetReadyWorkMoleculeFilter
 40 36 TestReleaserContract
 40 36 TestSchemaAfterInit
@@ -666,3 +686,4 @@
 40 40 TestEmbeddedOpenForRemoteSync_OtherRefusalsStayFatal
 40 40 TestEmbeddedRelationsSeparatesNoNeighborsFromNoSuchIssue
 40 40 TestEmbeddedReopenCustomDoneFallsBackWhenNormalizedTableMissing
+40 40 TestFederationCredentialFilesAreGitignored

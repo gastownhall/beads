@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -52,7 +53,12 @@ type EmbeddedDoltStore struct {
 	database      string
 	branch        string
 	credentialKey []byte
-	closed        atomic.Bool
+	// credMu guards credentialKey initialization and the one-time legacy
+	// credential migration (credMigrated). It is its own lock so migration
+	// never runs under, or re-enters, any store-wide lock.
+	credMu       sync.Mutex
+	credMigrated bool
+	closed       atomic.Bool
 	// eventsJournalEnabled activates the durable events journal for THIS store
 	// instance only (storage.EventsJournalConfigurer); never process-global.
 	eventsJournalEnabled atomic.Bool

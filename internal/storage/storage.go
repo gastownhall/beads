@@ -11,8 +11,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"runtime"
 	"time"
 
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
 	"github.com/steveyegge/beads/journalops"
@@ -104,20 +106,36 @@ var ErrCredentialKeyMismatch = errors.New("stored peer credentials cannot be dec
 
 // CredentialKeyMismatchError wraps a federation password decrypt failure with
 // the ErrCredentialKeyMismatch sentinel, the machine-local nature of keyFile,
-// and the command that re-stores the password on this machine. Both backends
-// (dolt, embeddeddolt) call it with their own credentialKeyFile so the operator
-// reads one wording whichever store answered.
+// and the command that re-stores the password for this peer on this machine.
+// Both backends (dolt, embeddeddolt) call it with their own credentialKeyFile
+// so the operator reads one wording whichever store answered.
 //
 // The machine-local key is context, not an asserted cause: an AES-GCM open also
-// fails on a tampered or truncated blob and on a row still encrypted under the
-// pre-migration legacy key. Re-adding the peer is the fix in every one of those
-// cases, so the remediation holds even where the parenthetical does not.
+// fails on a tampered or truncated blob, on a blob copied from another peer
+// row, and on a row still in the unbound legacy format. Re-adding the peer is
+// the fix in every one of those cases, so the remediation holds even where the
+// parenthetical does not.
+//
+// peer and user come from a replicated federation_peers row, so each goes into
+// the command through remedy.CommandArg. The stored URL is never printed: it
+// may carry credentials, and the copied-row case is exactly a row whose URL
+// the operator must not trust, so the command takes a literal <url>.
 //
 // cause stays wrapped, so the raw cipher error remains readable and both the
 // sentinel and cause are reachable through errors.Is / errors.As.
-func CredentialKeyMismatchError(keyFile string, cause error) error {
-	return fmt.Errorf("%w (the key file %s is machine-local and does not replicate with the database); re-run 'bd federation add-peer <name> <url> --user <user>' on this machine: %w",
-		ErrCredentialKeyMismatch, keyFile, cause)
+func CredentialKeyMismatchError(keyFile, peer, user string, cause error) error {
+	peerArg, peerNote := "<name>", ""
+	if peer != "" {
+		peerArg, peerNote = remedy.CommandArg(runtime.GOOS, peer, "<name>")
+	}
+	userFlag, userNote := "", ""
+	if user != "" {
+		var userArg string
+		userArg, userNote = remedy.CommandArg(runtime.GOOS, user, "<user>")
+		userFlag = " --user " + userArg
+	}
+	return fmt.Errorf("%w (the key file %s is machine-local and does not replicate with the database); re-run bd federation add-peer %s <url>%s on this machine%s: %w",
+		ErrCredentialKeyMismatch, keyFile, peerArg, userFlag, peerNote+userNote, cause)
 }
 
 // CommentPageCursor is the resume position for a keyset page of an issue's

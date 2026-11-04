@@ -480,6 +480,7 @@
 
 100 84 TestEmbeddedDeleteCascadeFollowsOnlyParentChild
 100 84 TestEmbeddedDoltRemoteAdd_GitOriginCollision_Exits1
+100 84 TestEmbeddedFederationSyncFilteredNotice
 100 84 TestEmbeddedInitGitBootstrapRoutingDecoyInvalid
 100 84 TestEmbeddedInitSelectedExcludeRoutingStealthInvalid
 100 84 TestEmbeddedMigratePersonal_preservesComments

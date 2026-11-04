@@ -828,6 +828,7 @@ go_test(
         "external_policy_embedded_test.go",
         "external_ref_test.go",
         "federation_embedded_test.go",
+        "federation_sync_notice_test.go",
         "feedback_test.go",
         "field_mutation_proxied_integration_test.go",
         "find_duplicates_embedded_test.go",

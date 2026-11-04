@@ -2,8 +2,12 @@ package dolt
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,11 +22,13 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
+	"github.com/steveyegge/beads/internal/storage/peercred"
 	"github.com/steveyegge/beads/internal/testutil"
 )
 
-func TestEncryptDecryptWithKey(t *testing.T) {
-	// Generate a random key
+// The credential upgrade reads rows sealed in the legacy unbound format with
+// peercred.OpenLegacy; it must open what older releases wrote.
+func TestOpenLegacyReadsTheLegacyFormat(t *testing.T) {
 	key := make([]byte, 32)
 	for i := range key {
 		key[i] = byte(i)
@@ -34,13 +40,10 @@ func TestEncryptDecryptWithKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("encryptWithKey failed: %v", err)
 	}
-	if len(encrypted) == 0 {
-		t.Fatal("encrypted result is empty")
-	}
 
-	decrypted, err := decryptWithKey(encrypted, key)
+	decrypted, err := peercred.OpenLegacy(key, encrypted)
 	if err != nil {
-		t.Fatalf("decryptWithKey failed: %v", err)
+		t.Fatalf("peercred.OpenLegacy failed: %v", err)
 	}
 	if decrypted != password {
 		t.Errorf("decrypted = %q, want %q", decrypted, password)
@@ -454,7 +457,7 @@ func TestIsS3RemoteURL(t *testing.T) {
 	}
 }
 
-func TestEncryptDecryptWithWrongKey(t *testing.T) {
+func TestOpenLegacyRejectsAnotherKey(t *testing.T) {
 	key1 := make([]byte, 32)
 	key2 := make([]byte, 32)
 	for i := range key1 {
@@ -467,8 +470,7 @@ func TestEncryptDecryptWithWrongKey(t *testing.T) {
 		t.Fatalf("encryptWithKey failed: %v", err)
 	}
 
-	_, err = decryptWithKey(encrypted, key2)
-	if err == nil {
+	if _, err := peercred.OpenLegacy(key2, encrypted); err == nil {
 		t.Fatal("expected decryption with wrong key to fail")
 	}
 }
@@ -564,12 +566,13 @@ func TestEncryptDecryptRoundTrip(t *testing.T) {
 
 	password := "my-federation-password-123!"
 
-	encrypted, err := store.encryptPassword(password)
+	b := peercred.Binding{Name: "team", URL: "https://peer.example/db", Username: "peeruser"}
+	encrypted, err := store.encryptPassword(b, password)
 	if err != nil {
 		t.Fatalf("encryptPassword failed: %v", err)
 	}
 
-	decrypted, err := store.decryptPassword(encrypted)
+	decrypted, err := store.decryptPassword(b, encrypted)
 	if err != nil {
 		t.Fatalf("decryptPassword failed: %v", err)
 	}
@@ -582,7 +585,7 @@ func TestEncryptDecryptRoundTrip(t *testing.T) {
 func TestEncryptPasswordEmpty(t *testing.T) {
 	store := &DoltStore{}
 
-	encrypted, err := store.encryptPassword("")
+	encrypted, err := store.encryptPassword(peercred.Binding{}, "")
 	if err != nil {
 		t.Fatalf("encryptPassword with empty string failed: %v", err)
 	}
@@ -594,7 +597,7 @@ func TestEncryptPasswordEmpty(t *testing.T) {
 func TestDecryptPasswordEmpty(t *testing.T) {
 	store := &DoltStore{}
 
-	decrypted, err := store.decryptPassword(nil)
+	decrypted, err := store.decryptPassword(peercred.Binding{}, nil)
 	if err != nil {
 		t.Fatalf("decryptPassword with nil failed: %v", err)
 	}
@@ -606,7 +609,7 @@ func TestDecryptPasswordEmpty(t *testing.T) {
 func TestEncryptPasswordNoKey(t *testing.T) {
 	store := &DoltStore{}
 
-	_, err := store.encryptPassword("password")
+	_, err := store.encryptPassword(peercred.Binding{}, "password")
 	if err == nil {
 		t.Fatal("expected error when key is not initialized")
 	}
@@ -685,10 +688,10 @@ func TestAddFederationPeerReturnsCredentialKeyInitError(t *testing.T) {
 	}
 }
 
-func TestDecryptWithKeyShortCiphertext(t *testing.T) {
+func TestOpenLegacyShortCiphertext(t *testing.T) {
 	key := make([]byte, 32)
-	if _, err := decryptWithKey([]byte("short"), key); err == nil || err.Error() != "ciphertext too short" {
-		t.Fatalf("decryptWithKey(short) error = %v, want ciphertext too short", err)
+	if _, err := peercred.OpenLegacy(key, []byte("short")); err == nil || err.Error() != "ciphertext too short" {
+		t.Fatalf("peercred.OpenLegacy(short) error = %v, want ciphertext too short", err)
 	}
 }
 
@@ -783,6 +786,34 @@ func TestCredentialKeyNoGhostDir(t *testing.T) {
 	// dbPath directory should NOT have been created
 	if _, err := os.Stat(dbPath); err == nil {
 		t.Error("dbPath directory should not be created in shared-server mode — ghost directory bug")
+	}
+}
+
+// The credential key opens every stored password, so the .gitignore beside it
+// lists the key file and its upgrade marker by the time the key is written: a
+// .beads/.gitignore that predates either file would otherwise offer them to
+// git add.
+func TestCredentialKeyFileIsGitignored(t *testing.T) {
+	beadsDir := t.TempDir()
+	gitignorePath := filepath.Join(beadsDir, ".gitignore")
+	if err := os.WriteFile(gitignorePath, []byte("*.db\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	store := &DoltStore{dbPath: filepath.Join(beadsDir, "dolt"), beadsDir: beadsDir}
+	if err := store.initCredentialKey(t.Context()); err != nil {
+		t.Fatalf("initCredentialKey failed: %v", err)
+	}
+
+	data, err := os.ReadFile(gitignorePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(string(data), "\n")
+	for _, want := range []string{"*.db", credentialKeyFile, credentialKeyFile + ".v2-migrated"} {
+		if !slices.Contains(lines, want) {
+			t.Errorf(".gitignore does not list %q:\n%s", want, data)
+		}
 	}
 }
 
@@ -898,9 +929,11 @@ func TestFederationPeerDecryptKeyMismatchNamesTheLocalKey(t *testing.T) {
 		localKey[i] = byte(i + 1)
 	}
 
-	encrypted, err := encryptWithKey("peerpass", writerKey)
+	encrypted, err := peercred.Seal(writerKey, peercred.Binding{
+		Name: "team", URL: "https://peer.example/peerdb", Username: "peeruser",
+	}, "peerpass")
 	if err != nil {
-		t.Fatalf("encryptWithKey() error = %v", err)
+		t.Fatalf("peercred.Seal() error = %v", err)
 	}
 
 	// beadsDir is set only so the enrichment can resolve the key path it names;
@@ -909,6 +942,11 @@ func TestFederationPeerDecryptKeyMismatchNamesTheLocalKey(t *testing.T) {
 	// below vacuous, because filepath.Join("", credentialKeyFile) is the bare
 	// basename the fix replaced (GH#5214 review).
 	beadsDir := t.TempDir()
+	// A completed-migration marker for localKey, so the reads below go
+	// straight to the row instead of running the legacy credential upgrade.
+	if err := peercred.WriteMarker(filepath.Join(beadsDir, credentialKeyFile), localKey); err != nil {
+		t.Fatalf("WriteMarker: %v", err)
+	}
 	newStore := func(t *testing.T) (*DoltStore, sqlmock.Sqlmock) {
 		t.Helper()
 		db, mock, err := sqlmock.New()
@@ -938,7 +976,7 @@ func TestFederationPeerDecryptKeyMismatchNamesTheLocalKey(t *testing.T) {
 		// legacy dbPath and the bare name would not say which file is meant.
 		"stored peer credentials cannot be decrypted with this machine's credential key " +
 			"(the key file " + filepath.Join(beadsDir, credentialKeyFile) + " is machine-local and does not replicate with the database); " +
-			"re-run 'bd federation add-peer <name> <url> --user <user>' on this machine",
+			"re-run bd federation add-peer team <url> --user peeruser on this machine",
 		// The cipher error stays wrapped, so the raw cause is still readable.
 		"cipher: message authentication failed",
 	}
@@ -1335,7 +1373,7 @@ func TestFederationPeerUninitializedKeyIsNotAMismatch(t *testing.T) {
 		if !strings.Contains(err.Error(), "credential encryption key not initialized") {
 			t.Errorf("error = %v, want it to name the uninitialized key", err)
 		}
-		if strings.Contains(err.Error(), "re-run 'bd federation add-peer") {
+		if strings.Contains(err.Error(), "bd federation add-peer") {
 			t.Errorf("error = %v, must not prescribe re-adding the peer for an uninitialized key", err)
 		}
 	}
@@ -1360,9 +1398,10 @@ func TestFederationPeerUninitializedKeyIsNotAMismatch(t *testing.T) {
 	})
 }
 
-// The key-rotation reader passes an old key to decryptWithKey on purpose, so
-// that helper must stay unwrapped: a rotation miss is not a mismatch.
-func TestDecryptWithKeyStaysUnwrappedForRotation(t *testing.T) {
+// The credential upgrade tries each local key with peercred.OpenLegacy on
+// purpose, so a miss must stay a bare cipher error, not a mismatch:
+// classification belongs to decryptPassword.
+func TestOpenLegacyStaysUnwrappedForMigration(t *testing.T) {
 	key := make([]byte, 32)
 	for i := range key {
 		key[i] = byte(i)
@@ -1376,11 +1415,171 @@ func TestDecryptWithKeyStaysUnwrappedForRotation(t *testing.T) {
 		t.Fatalf("encryptWithKey() error = %v", err)
 	}
 
-	_, err = decryptWithKey(encrypted, other)
+	_, err = peercred.OpenLegacy(other, encrypted)
 	if err == nil {
-		t.Fatal("decryptWithKey with the wrong key succeeded, want an error")
+		t.Fatal("peercred.OpenLegacy with the wrong key succeeded, want an error")
 	}
 	if errors.Is(err, storage.ErrCredentialKeyMismatch) {
 		t.Errorf("error = %v, want the bare cipher error; classification belongs to decryptPassword", err)
+	}
+}
+
+// encryptWithKey seals plaintext in the legacy unbound format (nonce ||
+// AES-GCM, no associated data) that predates peercred v2, for tests that
+// build pre-upgrade rows.
+func encryptWithKey(plaintext string, key []byte) ([]byte, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return nil, err
+	}
+	return gcm.Seal(nonce, nonce, []byte(plaintext), nil), nil
+}
+
+// peerRowColumns are the columns GetFederationPeer and ListFederationPeers
+// read, for sqlmock rows.
+var peerRowColumns = []string{
+	"name", "remote_url", "username", "password_encrypted",
+	"sovereignty", "last_sync", "created_at", "updated_at",
+}
+
+// newMarkedCredentialMockStore is a sqlmock-backed store whose legacy
+// credential upgrade already completed under key, so reads go straight to the
+// row without a live server.
+func newMarkedCredentialMockStore(t *testing.T, key []byte) (*DoltStore, sqlmock.Sqlmock) {
+	t.Helper()
+	beadsDir := t.TempDir()
+	if err := peercred.WriteMarker(filepath.Join(beadsDir, credentialKeyFile), key); err != nil {
+		t.Fatalf("WriteMarker: %v", err)
+	}
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return &DoltStore{db: db, credentialKey: key, beadsDir: beadsDir}, mock
+}
+
+// Ported from PR #7891 (Wenjix): a row naming the attacker's URL that carries
+// a password sealed for another peer must not decrypt, and the peer operation
+// must never receive it. Runs without a server, so the PR lane pins it.
+func TestServerCopiedCiphertextNeverReachesPeerOperation(t *testing.T) {
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i)
+	}
+	blob, err := peercred.Seal(key, peercred.Binding{
+		Name: "good", URL: "https://good.example/beads", Username: "good-user",
+	}, "good-password")
+	if err != nil {
+		t.Fatalf("peercred.Seal: %v", err)
+	}
+	store, mock := newMarkedCredentialMockStore(t, key)
+	now := time.Now()
+	mock.ExpectQuery(regexp.QuoteMeta("FROM federation_peers WHERE name = ?")).
+		WithArgs("evil").
+		WillReturnRows(sqlmock.NewRows(peerRowColumns).
+			AddRow("evil", "https://evil.example/beads", "good-user", blob, "T2", nil, now, now))
+
+	called := false
+	err = store.withPeerCredentials(t.Context(), "evil", func(*remoteCredentials) error {
+		called = true
+		return nil
+	})
+	if err == nil {
+		t.Fatal("withPeerCredentials accepted a password copied from another peer")
+	}
+	if called {
+		t.Fatal("withPeerCredentials invoked its callback with a copied password")
+	}
+	if !errors.Is(err, storage.ErrCredentialKeyMismatch) || !errors.Is(err, peercred.ErrNotAuthenticated) {
+		t.Errorf("error = %v, want errors.Is ErrCredentialKeyMismatch and peercred.ErrNotAuthenticated", err)
+	}
+	if !strings.Contains(err.Error(), "re-run bd federation add-peer evil <url> --user good-user on this machine") {
+		t.Errorf("error = %v, want the peer-specific add-peer remedy", err)
+	}
+	if strings.Contains(err.Error(), "good-password") || strings.Contains(err.Error(), "evil.example") {
+		t.Errorf("error %q prints the password or the stored URL", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("sqlmock expectations: %v", err)
+	}
+}
+
+// Ported from PR #7891 (Wenjix): once the upgrade completed, a legacy blob
+// that arrives later (a pull, a direct write) is refused with the re-add
+// remedy rather than decrypted or resealed.
+func TestServerLegacyCredentialRejectedAfterMigrationMarker(t *testing.T) {
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i)
+	}
+	legacy, err := encryptWithKey("legacy-password", key)
+	if err != nil {
+		t.Fatalf("encryptWithKey: %v", err)
+	}
+	store, mock := newMarkedCredentialMockStore(t, key)
+	now := time.Now()
+	mock.ExpectQuery(regexp.QuoteMeta("FROM federation_peers WHERE name = ?")).
+		WithArgs("legacy").
+		WillReturnRows(sqlmock.NewRows(peerRowColumns).
+			AddRow("legacy", "https://legacy.example/beads", "legacy-user", legacy, "T2", nil, now, now))
+
+	_, err = store.GetFederationPeer(t.Context(), "legacy")
+	if !errors.Is(err, peercred.ErrLegacyFormat) || !errors.Is(err, storage.ErrCredentialKeyMismatch) {
+		t.Fatalf("GetFederationPeer error = %v, want errors.Is peercred.ErrLegacyFormat and ErrCredentialKeyMismatch", err)
+	}
+	if !strings.Contains(err.Error(), "bd federation add-peer legacy <url> --user legacy-user") {
+		t.Errorf("error = %v, want add-peer remediation", err)
+	}
+	// No UPDATE ran: the refused blob is not resealed.
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("sqlmock expectations: %v", err)
+	}
+}
+
+// The remedy's values come from a replicated row: a name or username a
+// shell would split, or carrying terminal controls, prints as a placeholder
+// with an escaped note, and the stored URL (which may embed credentials)
+// never prints.
+func TestServerRejectedCredentialRemedyEscapesRowValues(t *testing.T) {
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i)
+	}
+	blob, err := peercred.Seal(key, peercred.Binding{Name: "good", URL: "https://good.example/db", Username: "u"}, "pw")
+	if err != nil {
+		t.Fatalf("peercred.Seal: %v", err)
+	}
+	store, mock := newMarkedCredentialMockStore(t, key)
+	now := time.Now()
+	name, user := "evil\r\x1b[2Kok", "a b;rm"
+	mock.ExpectQuery(regexp.QuoteMeta("FROM federation_peers ORDER BY name")).
+		WillReturnRows(sqlmock.NewRows(peerRowColumns).
+			AddRow(name, "https://admin:hunter2@evil.example/db", user, blob, "T2", nil, now, now))
+
+	_, err = store.ListFederationPeers(t.Context())
+	if !errors.Is(err, storage.ErrCredentialKeyMismatch) {
+		t.Fatalf("ListFederationPeers error = %v, want errors.Is ErrCredentialKeyMismatch", err)
+	}
+	msg := err.Error()
+	if strings.ContainsAny(msg, "\r\x1b") {
+		t.Errorf("error %q carries raw terminal controls from the row", msg)
+	}
+	if strings.Contains(msg, "hunter2") || strings.Contains(msg, "evil.example") {
+		t.Errorf("error %q prints the stored URL", msg)
+	}
+	if !strings.Contains(msg, "bd federation add-peer <name> <url> --user ") {
+		t.Errorf("error %q does not hold the name placeholder in the remedy", msg)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("sqlmock expectations: %v", err)
 	}
 }

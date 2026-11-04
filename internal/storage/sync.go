@@ -13,6 +13,7 @@ type SyncResult struct {
 	Fetched           bool
 	Merged            bool
 	Pushed            bool
+	PushFiltered      bool // The pushed tip withholds local rows (federation.exclude_types)
 	PulledCommits     int
 	PushedCommits     int
 	Conflicts         []Conflict

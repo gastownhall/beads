@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"fmt"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 )
 
 // These tests cover the bd-6dnrw.4 hazard: migrations 0041/0042 put FOREIGN
@@ -152,8 +154,13 @@ func settleForcedMerge(ctx context.Context, t *testing.T, store *DoltStore, peer
 			t.Fatalf("%s: %v", q, err)
 		}
 	}
+	baseline, err := versioncontrolops.ReadMergeBaseline(ctx, tx)
+	if err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("read merge baseline: %v", err)
+	}
 	_, mergeErr := tx.ExecContext(ctx, "CALL DOLT_MERGE(?)", peerBranch)
-	return store.settleMergeInTx(ctx, tx, mergeErr)
+	return store.settleMergeInTx(ctx, tx, baseline, mergeErr)
 }
 
 // TestFKCascadeViolationRepairOnSQLPull drives the production settle path

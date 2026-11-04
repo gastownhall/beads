@@ -343,6 +343,8 @@ type DoltStore struct {
 	readOnly         bool         // True if opened in read-only mode
 	classifiedRead   bool         // True if readOnly came from command classification (GH#804), not strict --readonly/preview/foreign-project; still eligible for the defer-wake sweep (be-vbhpf)
 	credentialKey    []byte       // Random encryption key for federation credentials
+	credMigrateMu    sync.Mutex   // Guards the one-time legacy credential migration, apart from mu
+	credMigrated     bool         // Legacy credential migration finished for credentialKey
 
 	// localActiveDatabaseDir is the exact active database directory when this
 	// store instance has authoritative local filesystem access. It is resolved
@@ -5782,6 +5784,13 @@ func (s *DoltStore) pullWithAutoResolveUnchecked(ctx context.Context, remote str
 		_ = tx.Rollback()
 		return pullReport{}, fmt.Errorf("failed to set dolt_force_transaction_commit: %w", err)
 	}
+	// What the working set held before the merge stays out of the commit that
+	// concludes a settled one (versioncontrolops.StageMergeResult).
+	baseline, err := versioncontrolops.ReadMergeBaseline(ctx, tx)
+	if err != nil {
+		_ = tx.Rollback()
+		return pullReport{}, err
+	}
 
 	// DOLT_PULL's row is the engine's only in-band account of what the pull
 	// did: `dolt pull` on the CLI exits 0 whether it merged or was already up
@@ -5816,18 +5825,20 @@ func (s *DoltStore) pullWithAutoResolveUnchecked(ctx context.Context, remote str
 		pullErr = mergeErr
 	}
 
-	return report, s.settleMergeInTx(ctx, tx, pullErr)
+	return report, s.settleMergeInTx(ctx, tx, baseline, pullErr)
 }
 
 // settleMergeInTx finishes a pull/merge that ran in tx: it auto-resolves the
 // safe conflict classes, repairs FK cascade violations (bd-6dnrw.4), and
-// commits — or rolls back when anything needs the operator. pullErr is the
-// pull/merge statement's own error; it is surfaced whenever nothing was
-// resolved or repaired. The tx must have been opened with
-// dolt_allow_commit_conflicts and dolt_force_transaction_commit set, which is
-// why the violation gate here is mandatory: with the force flag on, committing
-// without it would persist a violated working set.
-func (s *DoltStore) settleMergeInTx(ctx context.Context, tx *sql.Tx, pullErr error) error {
+// commits the settled merge with everything it changed — or rolls back when
+// anything needs the operator. baseline is the working set tx read before the
+// merge ran (versioncontrolops.StageMergeResult). pullErr is the pull/merge
+// statement's own error; it is surfaced whenever nothing was resolved or
+// repaired. The tx must have been opened with dolt_allow_commit_conflicts and
+// dolt_force_transaction_commit set, which is why the violation gate here is
+// mandatory: with the force flag on, committing without it would persist a
+// violated working set.
+func (s *DoltStore) settleMergeInTx(ctx context.Context, tx *sql.Tx, baseline versioncontrolops.MergeBaseline, pullErr error) error {
 	// Check for merge conflicts regardless of whether DOLT_PULL errored.
 	// Some Dolt versions error on conflicts, others leave them in the working set.
 	resolved, resolveErr := s.tryAutoResolveMergeConflicts(ctx, tx)
@@ -5877,17 +5888,15 @@ func (s *DoltStore) settleMergeInTx(ctx context.Context, tx *sql.Tx, pullErr err
 		return pullErr
 	}
 
-	// Conclude the merge for resolved conflicts only now, after the FK repair:
-	// DOLT_COMMIT refuses a violated working set, so a merge carrying both
-	// classes could never settle when the resolver committed first (bd-578h9.14).
-	if resolved {
-		if err := versioncontrolops.CommitResolvedConflicts(ctx, tx); err != nil {
-			_ = tx.Rollback()
-			if pullErr != nil {
-				return pullErr
-			}
-			return err
+	// Conclude the merge only now, after the FK repair: DOLT_COMMIT refuses a
+	// violated working set, so a merge carrying both classes could never
+	// settle when the resolver committed first (bd-578h9.14).
+	if err := versioncontrolops.ConcludeSettledMerge(ctx, tx, baseline, resolved, repairedViol); err != nil {
+		_ = tx.Rollback()
+		if pullErr != nil {
+			return pullErr
 		}
+		return err
 	}
 
 	return s.commitSQLTx(ctx, "commit pull merge settlement", tx)

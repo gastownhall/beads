@@ -17,6 +17,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/peercred"
 )
 
 func newPeerAuthTestStore(t *testing.T) *EmbeddedDoltStore {
@@ -400,11 +401,13 @@ func rotateCredentialKey(t *testing.T, store *EmbeddedDoltStore) {
 //
 // It takes the store because the clause names the key file by its RESOLVED
 // path, not by basename, so this pin fails if a caller regresses to the bare
-// const (GH#5214 review).
-func wantKeyMismatchClause(store *EmbeddedDoltStore) string {
+// const (GH#5214 review). addPeer is the peer-specific command the clause
+// names: the stored peer name and username, and a literal <url>, because the
+// stored URL is never printed.
+func wantKeyMismatchClause(store *EmbeddedDoltStore, addPeer string) string {
 	return "stored peer credentials cannot be decrypted with this machine's credential key " +
 		"(the key file " + filepath.Join(store.beadsDir, credentialKeyFile) + " is machine-local and does not replicate with the database); " +
-		"re-run 'bd federation add-peer <name> <url> --user <user>' on this machine"
+		"re-run " + addPeer + " on this machine"
 }
 
 // Pins the decrypt-failure branch (GH#5085 review): a peer row whose password
@@ -425,7 +428,7 @@ func TestDecryptPassword_KeyMismatchNamesTheLocalKey(t *testing.T) {
 	wantFragments := []string{
 		// Both read paths name the peer, so the operator knows which one to re-add.
 		"for peer team",
-		wantKeyMismatchClause(store),
+		wantKeyMismatchClause(store, "bd federation add-peer team <url> --user peeruser"),
 		// The cipher error stays wrapped so the raw cause is still readable.
 		"cipher: message authentication failed",
 	}
@@ -469,14 +472,14 @@ func TestDecryptPassword_KeyMismatchNamesTheLocalKey(t *testing.T) {
 func TestDecryptPassword_ShortCiphertextClassifiesAsKeyMismatch(t *testing.T) {
 	store := newPeerAuthTestStore(t)
 
-	_, err := store.decryptPassword([]byte("short"))
+	_, err := store.decryptPassword(peercred.Binding{Name: "team"}, []byte("v2:short"))
 	if err == nil {
 		t.Fatal("decryptPassword succeeded, want short-ciphertext failure")
 	}
 	if !errors.Is(err, storage.ErrCredentialKeyMismatch) {
 		t.Errorf("error = %v, want errors.Is storage.ErrCredentialKeyMismatch", err)
 	}
-	for _, want := range []string{wantKeyMismatchClause(store), "ciphertext too short"} {
+	for _, want := range []string{wantKeyMismatchClause(store, "bd federation add-peer team <url>"), "ciphertext too short"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q does not mention %q", err, want)
 		}
@@ -519,7 +522,7 @@ func TestWithPeerAuth_KeyMismatchFailsClosed(t *testing.T) {
 	for _, want := range []string{
 		"resolve peer credentials:",
 		"decrypt password for peer team:",
-		wantKeyMismatchClause(store),
+		wantKeyMismatchClause(store, "bd federation add-peer team <url> --user peeruser"),
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q does not mention %q", err, want)

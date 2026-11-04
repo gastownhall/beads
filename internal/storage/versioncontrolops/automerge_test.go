@@ -190,6 +190,78 @@ func TestMergeIssuesConflictRow_StructuralConflictsLeftAlone(t *testing.T) {
 	})
 }
 
+// TestMergeIssuesConflictRow_TheirDeleteOverDerivedOnlyChange covers the one
+// delete/modify shape that settles: they deleted the issue and our side
+// changed only the derived is_blocked, as a filtered federation push leaves a
+// published issue that a withheld one blocks. Any other local change, and the
+// mirror case, stay with the operator.
+func TestMergeIssuesConflictRow_TheirDeleteOverDerivedOnlyChange(t *testing.T) {
+	t.Run("their delete over our is_blocked change is taken", func(t *testing.T) {
+		row := conflictRowFor(t, map[string][3]any{
+			"id":         {"bd-12", "bd-12", nil},
+			"status":     {"open", "open", nil},
+			"is_blocked": {int64(0), int64(1), nil},
+			"updated_at": {tsBase, tsBase, nil},
+		})
+		m, ok := mergeIssuesConflictRow(row)
+		if !ok || !m.deleted {
+			t.Fatalf("ok=%v deleted=%v, want their delete taken", ok, m.deleted)
+		}
+		if m.ourKey != "bd-12" || len(m.columns) != 0 || len(m.lww) != 0 {
+			t.Errorf("plan = %+v, want a keyed delete and no column writes", m)
+		}
+	})
+	t.Run("a local edit beside is_blocked stays with the operator", func(t *testing.T) {
+		row := conflictRowFor(t, map[string][3]any{
+			"id":         {"bd-13", "bd-13", nil},
+			"title":      {"old", "new", nil},
+			"is_blocked": {int64(0), int64(1), nil},
+			"updated_at": {tsBase, tsBase, nil},
+		})
+		if _, ok := mergeIssuesConflictRow(row); ok {
+			t.Error("their delete must not drop our title edit")
+		}
+	})
+	t.Run("a local updated_at bump stays with the operator", func(t *testing.T) {
+		row := conflictRowFor(t, map[string][3]any{
+			"id":         {"bd-14", "bd-14", nil},
+			"is_blocked": {int64(0), int64(1), nil},
+			"updated_at": {tsBase, tsOurs, nil},
+		})
+		if _, ok := mergeIssuesConflictRow(row); ok {
+			t.Error("a bumped updated_at marks a local edit")
+		}
+	})
+	t.Run("our delete over their is_blocked change stays with the operator", func(t *testing.T) {
+		row := conflictRowFor(t, map[string][3]any{
+			"id":         {"bd-15", nil, "bd-15"},
+			"is_blocked": {int64(0), nil, int64(1)},
+			"updated_at": {tsBase, nil, tsBase},
+		})
+		if _, ok := mergeIssuesConflictRow(row); ok {
+			t.Error("the mirror case is not settled")
+		}
+	})
+}
+
+// TestResolveIssuesFieldMerge_TakesTheirDelete pins the writes of a delete
+// plan, in order: the conflict row is cleared while our row still carries the
+// key its our_* side reads, then the row goes (its foreign keys cascade).
+func TestResolveIssuesFieldMerge_TakesTheirDelete(t *testing.T) {
+	db, mock := newMockDB(t)
+	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM dolt_conflicts_issues WHERE our_id = ?")).WithArgs("bd-1").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM `issues` WHERE `id` = ?")).WithArgs("bd-1").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	if err := resolveIssuesFieldMerge(context.Background(), db, []issuesRowMerge{{ourKey: "bd-1", deleted: true}}); err != nil {
+		t.Fatalf("resolveIssuesFieldMerge: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
 // TestMergeIssuesConflictRow_NullVsEmpty pins that SQL NULL and the empty
 // string are distinct values, so an assignee cleared to ” on one side is a
 // real edit and not mistaken for the NULL base.

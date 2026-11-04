@@ -35,7 +35,9 @@ push-state.json
 *.lock
 
 # Credential key (encryption key for federation peer auth — never commit)
+# and its machine-local credential upgrade marker
 .beads-credential-key
+.beads-credential-key.v2-migrated
 
 # Local version tracking (prevents upgrade notification spam after git ops)
 .local_version
@@ -110,6 +112,7 @@ var ProjectGitignorePatterns = []string{
 	".dolt/",
 	"*.db",
 	".beads-credential-key",
+	".beads-credential-key.v2-migrated",
 	".beads/proxieddb/",
 	// Workspace-gate artifacts (internal/workspacegate): the workspace
 	// gate file sits BESIDE .beads in the project root, so .beads/
@@ -146,6 +149,7 @@ var requiredPatterns = []string{
 	"*.lock",
 	"*.corrupt.backup/",
 	".beads-credential-key",
+	".beads-credential-key.v2-migrated",
 	"proxied_server_client_info.json",
 	"http_target.json",
 	"http_local_metadata.json",

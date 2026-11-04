@@ -50,6 +50,11 @@ Handles merge conflicts using the configured strategy:
 If no strategy is specified and conflicts occur, the sync will pause
 and report which tables have conflicts for manual resolution.
 
+With federation.exclude_types set, issues of those types that a peer does
+not already hold are withheld from the pushed tip, and a notice is printed
+on stderr. The pushed history still contains them, so this is not a privacy
+control.
+
 Examples:
   bd federation sync                      # Sync with all peers
   bd federation sync --peer town-beta     # Sync with specific peer
@@ -207,33 +212,15 @@ func runFederationSync(cmd *cobra.Command, args []string) error {
 		}
 
 		if !jsonOutput {
-			if result.Fetched {
-				fmt.Printf("  %s Fetched\n", ui.RenderPass("✓"))
-			}
-			if result.Merged {
-				fmt.Printf("  %s Merged", ui.RenderPass("✓"))
-				if result.PulledCommits > 0 {
-					fmt.Printf(" (%d commits)", result.PulledCommits)
-				}
-				fmt.Println()
-			}
-			if len(result.Conflicts) > 0 {
-				if result.ConflictsResolved {
-					fmt.Printf("  %s Resolved %d conflicts using %s strategy\n",
-						ui.RenderPass("✓"), len(result.Conflicts), federationStrategy)
-				} else {
-					fmt.Printf("  %s %d conflicts need resolution\n",
-						ui.RenderWarn("⚠"), len(result.Conflicts))
-					for _, c := range result.Conflicts {
-						fmt.Printf("    - %s\n", c.Field)
-					}
-				}
-			}
-			if result.Pushed {
-				fmt.Printf("  %s Pushed\n", ui.RenderPass("✓"))
-			} else if result.PushError != nil {
-				fmt.Printf("  %s Push skipped: %v\n", ui.RenderMuted("○"), result.PushError)
-			}
+			printFederationSyncResult(result)
+		}
+	}
+
+	// One notice per invocation, only after a publication that withheld rows.
+	for _, result := range results {
+		if result != nil && result.PushFiltered {
+			fmt.Fprintln(os.Stderr, filteredPushNotice)
+			break
 		}
 	}
 
@@ -245,6 +232,53 @@ func runFederationSync(cmd *cobra.Command, args []string) error {
 	}
 	return nil
 }
+
+// printFederationSyncResult prints the human-mode lines for one peer's
+// successful sync.
+func printFederationSyncResult(result *storage.SyncResult) {
+	if result.Fetched {
+		fmt.Printf("  %s Fetched\n", ui.RenderPass("✓"))
+	}
+	if result.Merged {
+		fmt.Printf("  %s Merged", ui.RenderPass("✓"))
+		if result.PulledCommits > 0 {
+			fmt.Printf(" (%d commits)", result.PulledCommits)
+		}
+		fmt.Println()
+	}
+	if len(result.Conflicts) > 0 {
+		if result.ConflictsResolved {
+			fmt.Printf("  %s Resolved %d conflicts using %s strategy\n",
+				ui.RenderPass("✓"), len(result.Conflicts), federationStrategy)
+		} else {
+			fmt.Printf("  %s %d conflicts need resolution\n",
+				ui.RenderWarn("⚠"), len(result.Conflicts))
+			for _, c := range result.Conflicts {
+				fmt.Printf("    - %s\n", c.Field)
+			}
+		}
+	}
+	switch {
+	case result.PushFiltered:
+		fmt.Printf("  %s Pushed (excluded issue types withheld from the tip)\n", ui.RenderPass("✓"))
+	case result.Pushed:
+		fmt.Printf("  %s Pushed\n", ui.RenderPass("✓"))
+	case result.PushError != nil:
+		fmt.Printf("  %s Push skipped: %v\n", ui.RenderMuted("○"), result.PushError)
+	}
+	// A push can land and its cleanup fail afterwards, leaving temporary
+	// __federation_push_* branches behind; report that beside the push.
+	if result.Pushed && result.PushError != nil {
+		fmt.Printf("  %s After the push: %v\n", ui.RenderWarn("⚠"), result.PushError)
+	}
+}
+
+// filteredPushNotice explains what a filtered publication does not hide. The
+// history-visibility wording follows the warning in Wenjix's PR #7891.
+const filteredPushNotice = "Warning: federation.exclude_types withheld matching issues from the pushed tip only. " +
+	"Earlier commits in the pushed history still contain them, so a peer that reads history can recover them, " +
+	"and a direct fetch of this branch or an unfiltered push (bd dolt push) is not filtered. " +
+	"See https://beads.gascity.com/multi-agent/federation"
 
 func runFederationStatus(cmd *cobra.Command, args []string) error {
 	if usesProxiedServer() {
