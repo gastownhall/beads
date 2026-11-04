@@ -60,7 +60,7 @@ const bazelDoltIntTestStepTimeout = 25
 // --gate-tier or a second --tier/--check cannot sneak past a Contains check
 // (argparse and dict() would otherwise just let the last value silently
 // win, un-gating or re-gating a tier).
-const bazelDoltIntClassifyRun = `python3 tools/bazel/classify_tier_results.py --bep "$RUNNER_TEMP/bazel-bep.json" --rc "$TEST_RC" --tier server-storage=//internal/storage/dolt:dolt_server_full_test,//internal/storage/dolt:dolt_server_conformance_test --tier cmd-dolt=//cmd/bd:bd_dolt_server_test,//tests/regression:regression_test --gate-tier server-storage --check "server-storage=$CHECK_SS_OUTCOME" --check "cmd-dolt=$CHECK_CD_OUTCOME" --github-output "$GITHUB_OUTPUT"`
+const bazelDoltIntClassifyRun = `python3 tools/bazel/classify_tier_results.py --bep "$RUNNER_TEMP/bazel-bep.json" --rc "$TEST_RC" --tier server-storage=//internal/storage/dolt:dolt_server_full_test,//internal/storage/dolt:dolt_server_conformance_test,//internal/storage/versioncontrolops:versioncontrolops_dolt_test --tier cmd-dolt=//cmd/bd:bd_dolt_server_test,//tests/regression:regression_test --gate-tier server-storage --check "server-storage=$CHECK_SS_OUTCOME" --check "cmd-dolt=$CHECK_CD_OUTCOME" --github-output "$GITHUB_OUTPUT"`
 
 // bazelDoltIntTestRun: the union's `bazel test` step body, exactly. Unlike
 // the retired tiers' (bazelTierTestRun), it captures rc as a step output (no
@@ -292,6 +292,7 @@ func TestBazelDoltIntIsGated(t *testing.T) {
 		"check-ss": {"Every target and shard ran tests (server-storage)", []string{
 			"//internal/storage/dolt:dolt_server_full_test",
 			"//internal/storage/dolt:dolt_server_conformance_test",
+			"//internal/storage/versioncontrolops:versioncontrolops_dolt_test",
 		}},
 		"check-cd": {"Every target and shard ran tests (cmd-dolt)", []string{
 			"//cmd/bd:bd_dolt_server_test",
@@ -529,9 +530,13 @@ func TestCheckTestcasesUnitTests(t *testing.T) {
 	}
 }
 
-// bazelDoltIntTestActions: the union's test actions, 17 server-storage + 46
-// cmd-dolt (aquery, item 5 A2).
-const bazelDoltIntTestActions = 63
+// bazelDoltIntTestActions: the union's test actions, 18 server-storage + 46
+// cmd-dolt (63 when item 5 A2 aquery-verified them; 64 since
+// versioncontrolops_dolt_test joined server-storage, because dolt-race had
+// no room for it). That is exactly --jobs=64, so the union has no headroom:
+// any new test action in either tier would make 65 and needs a --jobs or
+// shard-count change first.
+const bazelDoltIntTestActions = 64
 
 // TestBazelDoltIntFitsTheJobsBudget pins the one-wave rule (closed PR #7542,
 // carried from dolt-race: see TestBazelDoltRaceFitsTheJobsBudget's own

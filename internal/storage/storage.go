@@ -865,8 +865,10 @@ type SchemaMigrator interface {
 
 // Compactor squashes old Dolt commits while preserving recent ones.
 // Callers should type-assert to this interface for selective history compaction.
+// headHash is main's HEAD in the log the plan was read from; the replay is
+// verified against it (see versioncontrolops.Compact).
 type Compactor interface {
-	Compact(ctx context.Context, initialHash, boundaryHash string, oldCommits int, recentHashes []string) error
+	Compact(ctx context.Context, initialHash, boundaryHash, headHash string, oldCommits int, recentHashes []string) error
 }
 
 // BlockedRecomputer recomputes the denormalized is_blocked column for every

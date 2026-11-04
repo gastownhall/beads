@@ -149,6 +149,11 @@ Bootstrap auto-detects the right action:
 If sync.remote points at a git repository, bootstrap verifies refs/dolt/data
 before cloning. Bootstrap exits non-zero when it cannot set up a database.
 
+Values starting with - in sync.remote or sync.git-remote are refused as invalid
+remote URLs: bd init returns an error naming the key; bd bootstrap restores a
+local backup or issues.jsonl when available, otherwise reports a blocked plan
+without contacting the remote.
+
 This is the recommended command for:
   • Setting up beads on a fresh clone
   • Recovering after moving to a new machine
@@ -533,17 +538,22 @@ func detectBootstrapPlan(beadsDir string, cfg *configfile.Config) BootstrapPlan 
 	// remember why so an unverifiable remote can become fatal only after local
 	// recovery is exhausted. With no sync.remote, auto-detect Dolt data on git
 	// origin instead.
-	syncRemote := resolveSyncRemote()
+	syncRemote, syncRemoteErr := resolveSyncRemoteChecked()
 	unusableRemoteReason, unusableRemoteURL := "", ""
-	if syncRemote != "" {
+	switch {
+	case syncRemoteErr != nil:
+		unusableRemoteReason = syncRemoteErr.Error()
+	case syncRemote != "":
 		done, reason, url := planConfiguredSyncRemote(&plan, syncRemote)
 		if done {
 			return plan
 		}
 		// Cloning is off the table; purely local recovery is not.
 		unusableRemoteReason, unusableRemoteURL = reason, url
-	} else if originPlan, ok := gitOriginSyncPlan(plan); ok {
-		return originPlan
+	default:
+		if originPlan, ok := gitOriginSyncPlan(plan); ok {
+			return originPlan
+		}
 	}
 
 	// On-disk recovery sources: a non-empty backup JSONL, then a git-tracked

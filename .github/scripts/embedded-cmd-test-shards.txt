@@ -169,17 +169,21 @@
 100 40 TestEmbeddedNewDoltStoreFromConfig_HyphenatedDBName
 100 40 TestEmbeddedUpdateLifecycleClaimParentCommit
 
+100 41 TestEmbeddedCompactAbortsDivergentReplay
 100 41 TestEmbeddedDuplicateConcurrent
 100 41 TestEmbeddedVersionedHistoryFollowsTheStoreItWritesInto
 
+100 42 TestEmbeddedCompactMisdatedOldWindow
 100 42 TestEmbeddedInitAForkAutoContributor
 100 42 TestEmbeddedReadyEmptyStateMessage
 100 42 TestEmbeddedUpdateIfGuardsFlagValidation
 
+100 43 TestEmbeddedCompactRefusedDryRun
 100 43 TestEmbeddedIfRevisionMultiIDRejected
 100 43 TestEmbeddedInitExplicitBeadsDirIsAuthoritative
 100 43 TestEmbeddedReadyEmptyStateRealBlocker
 
+100 44 TestEmbeddedCompactRecentAncestorOfBoundary
 100 44 TestEmbeddedIfRevisionComposesWithIfAssigneeIfStatus
 100 44 TestEmbeddedReadyStaleBlockedFlagOnEdgelessIssue
 100 44 TestEmbeddedStaleConcurrent
@@ -486,6 +490,7 @@
 100 85 TestEmbeddedIfRevisionReopenGuardDirect
 100 85 TestEmbeddedInitArtifactRouting
 
+100 86 TestEmbeddedCompactKeepsPendingWrite
 100 86 TestEmbeddedDoltRemoteAdd_DifferentURL_ProceedsNormally
 100 86 TestEmbeddedExplicitHierarchicalParentEdges
 100 86 TestEmbeddedInitHooksRouting
