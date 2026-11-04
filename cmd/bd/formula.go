@@ -553,15 +553,15 @@ func runFormulaConvert(cmd *cobra.Command, args []string) error {
 
 	name := args[0]
 
-	var jsonPath string
-	discovered := false
+	// foundIn is the search path a name resolved under; it stays "" for a
+	// formula given as a path.
+	var jsonPath, foundIn string
 	if strings.HasSuffix(name, formula.FormulaExtJSON) {
 		jsonPath = name
 	} else if strings.HasSuffix(name, formula.FormulaExtTOML) {
 		return HandleError("%s is already a TOML file", name)
 	} else {
-		jsonPath = findFormulaJSON(name)
-		discovered = true
+		jsonPath, foundIn = findFormulaJSON(name)
 		if jsonPath == "" {
 			fmt.Fprintf(os.Stderr, "Error: JSON formula %q not found\n", name)
 			fmt.Fprintf(os.Stderr, "\nSearch paths:\n")
@@ -590,10 +590,13 @@ func runFormulaConvert(cmd *cobra.Command, args []string) error {
 
 	tomlPath := strings.TrimSuffix(jsonPath, formula.FormulaExtJSON) + formula.FormulaExtTOML
 
-	// A formula found by name (not given as a path) may live in a directory
-	// bd can read but must not write: refuse rather than write beside it.
-	if discovered {
-		if dir := readOnlyFormulaDir(); dir != "" && filepath.Dir(jsonPath) == dir {
+	// A formula found by name (not given as a path) may live under a search
+	// path bd can read but must not write: refuse rather than write beside it.
+	// Compare the search path the name resolved under, not the file's parent
+	// directory: a name with a subdirectory or ".." in it resolves to a file
+	// below or beside that search path.
+	if foundIn != "" {
+		if dir := readOnlyFormulaDir(); dir != "" && foundIn == dir {
 			return HandleErrorWithHint(fmt.Sprintf("not converting %s: %s", jsonPath, readOnlyFormulaDirReason(dir)),
 				"Use --stdout to print the TOML instead, or export GT_ROOT in your shell to convert it in place")
 		}
@@ -699,15 +702,17 @@ func hasJSONFormula(entries []os.DirEntry) bool {
 	return false
 }
 
-// findFormulaJSON searches for a JSON formula file by name.
-func findFormulaJSON(name string) string {
+// findFormulaJSON searches the formula search paths for a JSON formula file by
+// name. It returns the file and the search path it was found under, or "" for
+// both.
+func findFormulaJSON(name string) (path, searchDir string) {
 	for _, dir := range getFormulaSearchPaths() {
-		path := filepath.Join(dir, name+formula.FormulaExtJSON)
-		if _, err := os.Stat(path); err == nil {
-			return path
+		candidate := filepath.Join(dir, name+formula.FormulaExtJSON)
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate, dir
 		}
 	}
-	return ""
+	return "", ""
 }
 
 // formulaToTOML converts a Formula to TOML bytes.

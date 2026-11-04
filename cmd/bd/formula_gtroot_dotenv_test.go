@@ -243,6 +243,47 @@ func TestFormulaConvertByNameRefusesGTRootFromDotenv(t *testing.T) {
 	assertExists(t, f.cityTOML, true)
 }
 
+// TestFormulaConvertByNameRefusesNestedGTRootFromDotenv pins that the refusal
+// keys on the search path a name resolved under, not on the file's parent
+// directory: a name with a subdirectory or ".." in it still resolves through
+// $GT_ROOT/.beads/formulas, so it must not convert or delete anything there.
+func TestFormulaConvertByNameRefusesNestedGTRootFromDotenv(t *testing.T) {
+	f := newGTRootDotenvFixture(t)
+	nestedJSON := writeGTRootDotenvJSONFormula(t, filepath.Join(f.cityDir, "sub"), "nested")
+	besideJSON := writeGTRootDotenvJSONFormula(t, f.cityRoot, "beside")
+	f.loadEnv(t)
+	setFormulaConvertFlags(t, false, true, false)
+
+	cases := []struct{ name, json string }{
+		{filepath.Join("sub", "nested"), nestedJSON},
+		{filepath.Join("..", "..", "beside"), besideJSON},
+	}
+	for _, tc := range cases {
+		var runErr error
+		_, stderr := captureFormulaOutput(t, func() { runErr = runFormulaConvert(formulaConvertCmd, []string{tc.name}) })
+		if runErr == nil {
+			t.Errorf("convert %q succeeded; want refusal", tc.name)
+		}
+		assertExists(t, tc.json, true)
+		assertExists(t, strings.TrimSuffix(tc.json, ".formula.json")+".formula.toml", false)
+		if want := f.cityDir + " is under GT_ROOT from .beads/.env"; !strings.Contains(stderr, want) {
+			t.Errorf("convert %q: stderr = %q, want it to contain %q", tc.name, stderr, want)
+		}
+	}
+
+	// Exported in the shell, the same names convert in place.
+	t.Setenv(config.GTRootFromProjectEnvMarker, "")
+	setFormulaConvertFlags(t, false, false, false)
+	for _, tc := range cases {
+		var runErr error
+		captureFormulaOutput(t, func() { runErr = runFormulaConvert(formulaConvertCmd, []string{tc.name}) })
+		if runErr != nil {
+			t.Errorf("shell GT_ROOT convert %q: %v", tc.name, runErr)
+		}
+		assertExists(t, strings.TrimSuffix(tc.json, ".formula.json")+".formula.toml", true)
+	}
+}
+
 // TestFindWritableFormulaDirSkipsGTRootFromDotenv covers mol distill's
 // destination choice: with every earlier search path unwritable, it must not
 // fall through to (or probe) a .env-provided GT_ROOT; a shell-exported one is
