@@ -27,7 +27,11 @@ cd "$REPO_ROOT"
 # Candidate files: shell scripts, git hooks, and the Makefile. Workflow `run`
 # steps are checked structurally by scripts/checkworkflowtags, so they are no
 # longer scanned for bare `go` commands here.
-mapfile -t candidates < <(
+# No mapfile (bash 4): this runs under Apple's bash 3.2 on macOS too.
+candidates=()
+while IFS= read -r f; do
+    candidates+=("$f")
+done < <(
     git ls-files \
         '*.sh' \
         '.github/scripts/*' \
@@ -41,7 +45,10 @@ mapfile -t candidates < <(
 # this gate still green — and scripts/checkworkflowtags does no Bazel handling at
 # all. So workflows keep feeding the census through their own list. Kept separate
 # from `candidates` on purpose: this list must NOT re-enter the `go`-verb scan.
-mapfile -t bazel_census_only < <(
+bazel_census_only=()
+while IFS= read -r f; do
+    bazel_census_only+=("$f")
+done < <(
     git ls-files \
         '.github/workflows/*.yml' \
         '.github/workflows/*.yaml' 2>/dev/null || true
@@ -53,7 +60,7 @@ opt_out_regex='^(scripts/test-cgo\.sh|scripts/test-icu-path\.sh|scripts/check-bu
 fail=0
 bazel_users=()
 bazel_invocation_regex='(^|[^[:alnum:]_/.-])(bazel|bazelisk|\$\(BAZEL\)|\$\{?BAZEL\}?)[[:space:]]+(build|test|run|coverage|query|cquery|aquery|mod)($|[[:space:]])'
-for f in "${candidates[@]}"; do
+for f in ${candidates[@]+"${candidates[@]}"}; do
     [[ -f "$f" ]] || continue
     [[ "$f" =~ $opt_out_regex ]] && continue
 
@@ -157,7 +164,8 @@ for f in "${candidates[@]}"; do
 
         # Allow if the line references a file-defined variable that holds the tag.
         matched_var=no
-        for v in "${tag_vars[@]}"; do
+        # ${a[@]+...}: bash 3.2 treats an empty array as unset under set -u.
+        for v in ${tag_vars[@]+"${tag_vars[@]}"}; do
             if [[ "$stripped" == *"\$($v)"* || \
                   "$stripped" == *"\${$v}"* || \
                   "$stripped" == *"\$$v"* ]]; then
@@ -183,7 +191,7 @@ done
 # Workflows contribute to the Bazel census only. Deliberately a separate loop
 # rather than another arm in the one above: nothing here may reach the `go`-verb
 # scan, which scripts/checkworkflowtags now owns for these files.
-for f in "${bazel_census_only[@]}"; do
+for f in ${bazel_census_only[@]+"${bazel_census_only[@]}"}; do
     [[ -f "$f" ]] || continue
     if grep -Eq "$bazel_invocation_regex" "$f" 2>/dev/null; then
         bazel_users+=("$f")
