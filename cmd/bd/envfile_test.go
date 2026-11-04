@@ -87,6 +87,10 @@ func TestLoadBeadsEnvFileRejectsCommands(t *testing.T) {
 		{"SSH_ASKPASS", "only BEADS_*, BD_*, GT_ROOT, and the Dolt remote credential variables (DOLT_REMOTE_USER, DOLT_REMOTE_PASSWORD) are allowed in .beads/.env"},
 		{"LD_PRELOAD", "only BEADS_*, BD_*, GT_ROOT, and the Dolt remote credential variables (DOLT_REMOTE_USER, DOLT_REMOTE_PASSWORD) are allowed in .beads/.env"},
 		{"DYLD_INSERT_LIBRARIES", "only BEADS_*, BD_*, GT_ROOT, and the Dolt remote credential variables (DOLT_REMOTE_USER, DOLT_REMOTE_PASSWORD) are allowed in .beads/.env"},
+		// Only the exact orchestrator key GT_ROOT is admitted; its near
+		// misses and the rest of the GT_* namespace stay refused.
+		{"GT_TOWN_ROOT", "only BEADS_*, BD_*, GT_ROOT, and the Dolt remote credential variables (DOLT_REMOTE_USER, DOLT_REMOTE_PASSWORD) are allowed in .beads/.env"},
+		{"GT_ROOT_X", "only BEADS_*, BD_*, GT_ROOT, and the Dolt remote credential variables (DOLT_REMOTE_USER, DOLT_REMOTE_PASSWORD) are allowed in .beads/.env"},
 	} {
 		t.Run(tc.key, func(t *testing.T) {
 			dir := t.TempDir()

@@ -60,13 +60,25 @@ var AllowedDoltEnvKeys = []string{
 // AllowedOrchestratorEnvKeys names the non-prefixed keys a project
 // .beads/.env may import because an orchestrator writes them there. Gas City's
 // `gc rig add` records the city root as GT_ROOT in each rig's .beads/.env, so
-// bd run inside a rig finds the city's formulas and molecules. bd only reads
-// from GT_ROOT: it appends $GT_ROOT/.beads/formulas as the LAST formula search
-// path (after the repo's own .beads/formulas, the checkout and ~/.beads), reads
-// $GT_ROOT/.beads/molecules.jsonl as template data, and prints it in
-// diagnostics. It names no command and no credential target, and a repository
-// can already ship formulas in its own .beads/formulas, so admitting it gives a
-// committed .env nothing it could not do already.
+// bd run inside a rig finds the city's formulas and molecules.
+//
+// What a committed value can reach, and why that is acceptable:
+//   - bd itself only reads from GT_ROOT. It appends $GT_ROOT/.beads/formulas
+//     as the last formula search path, loads $GT_ROOT/.beads/molecules.jsonl
+//     as template data (the town catalog loads first, so a town template wins
+//     over a same-ID template in ~/.beads), and prints it in diagnostics. None
+//     of these runs a command or picks a credential target.
+//   - Once imported, GT_ROOT is inherited by every child process. git, dolt,
+//     ssh, gh, editors and pagers ignore it. Gas Town's gt (run by
+//     `bd gate check --escalate` or as a mail delegate) consults it only after
+//     walking up from the working directory and after GT_TOWN_ROOT, so a repo
+//     can already make itself gt's town by committing a mayor/ directory.
+//   - bd imports only the .env of the workspace it selected, so whoever writes
+//     this line also controls that .beads/ directory and its first-searched
+//     formulas.
+//
+// Only the exact key is admitted: GT_TOWN_ROOT and other GT_* keys stay
+// refused.
 var AllowedOrchestratorEnvKeys = []string{
 	"GT_ROOT",
 }
