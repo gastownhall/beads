@@ -9,26 +9,26 @@ Display the beads workflow for AI agents and developers.
 Beads is an issue tracker designed for AI-supervised coding workflows. Here's how to use it effectively:
 
 ## 1. Find Ready Work
-Use `/beads:ready` or the `ready` MCP tool to see tasks with no blockers.
+Use `/beads:ready` or run `bd ready` to see tasks with no blockers.
 
 ## 2. Claim Your Task
 Claim the issue atomically (assignee + `in_progress` in one step):
 - Via command: `/beads:update <id> --claim`
-- Via MCP tool: `claim` with `issue_id: "<id>"`
+- Via CLI: `bd update <id> --claim`
 
 ## 3. Work on It
 Implement, test, and document the feature or fix.
 
 ## 4. Discover New Work
 As you work, you'll often find bugs, TODOs, or related work:
-- Create issues: `/beads:create` or `create` MCP tool
-- Link them: Use `dep` MCP tool with `type: "discovered-from"`
+- Create issues: `/beads:create` or `bd create`
+- Link them: `bd dep add <from-id> <to-id> --type discovered-from`
 - This maintains context and work history
 
 ## 5. Complete the Task
 Close the issue when done:
 - Via command: `/beads:close <id> "Completed: <summary>"`
-- Via MCP tool: `close` with reason
+- Via CLI: `bd close <id> "Completed: <summary>"`
 
 ## 6. Check What's Unblocked
 After closing, check if other work became ready:
@@ -49,10 +49,9 @@ After closing, check if other work became ready:
 - `/beads:close` - Close issue
 - `/beads:workflow` - Show this guide (you are here!)
 
-## MCP Tools Available
-Use these via the beads MCP server:
-- `ready`, `list`, `show`, `create`, `claim`, `update`, `close`
-- `dep` (manage dependencies), `blocked`, `stats`
-- `init` (initialize bd in a project)
+## CLI Commands Available
+- `bd ready`, `bd list`, `bd show`, `bd create`, `bd update`, `bd close`
+- `bd dep` (manage dependencies), `bd blocked`, `bd stats`
+- `bd init` (initialize bd in a project)
 
 For more details, see the beads README at: https://github.com/gastownhall/beads

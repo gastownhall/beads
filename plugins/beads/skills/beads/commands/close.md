@@ -11,8 +11,8 @@ If arguments are provided:
 
 If the issue ID is missing, ask for it. Optionally ask for a reason describing what was done.
 
-Use the beads MCP `close` tool to close the issue. Show confirmation with the issue details.
+Run `bd close <id> [reason]` to close the issue. Show confirmation with the issue details.
 
 After closing, suggest checking for:
-- Dependent issues that might now be unblocked (use `ready` tool)
-- New work discovered during this task (use `create` tool with `discovered-from` link)
+- Dependent issues that might now be unblocked (run `bd ready`)
+- New work discovered during this task (run `bd create`, then link it with `discovered-from`)
