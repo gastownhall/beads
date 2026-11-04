@@ -1248,6 +1248,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd dep add` no longer tells you a child already waits for its parent
+  (#5036).** Refusing a `blocks` edge from a dotted child such as `P.1` onto
+  `P`, it said "Children inherit dependency on parent completion via
+  hierarchy", but nothing gates a child on its parent: `bd ready` lists the
+  children of an open or in-progress parent. The refusal now says why the edge
+  cannot work (`P` cannot close until its children finish, so the gate would
+  never clear) and to put the work the child waits on in a sibling issue and
+  block on that. A non-blocking edge such as `related` is refused because the
+  hierarchy already links the pair. The `cannot add dependency: P.1 is already
+  a child of P.` prefix is unchanged.
+
 - **`bd doctor` no longer flags cross-repository dependencies as orphans,
   and `bd doctor --fix` no longer deletes them** (#4647). `bd dep add` stores
   a bare target under another repository's prefix (`bd dep add bd-abc
