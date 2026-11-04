@@ -1181,11 +1181,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **bd again reads `GT_ROOT` from a rig's `.beads/.env`**. `gc rig add` writes
-  the city root there, and the `.beads/.env` allowlist from #7879 (also in
-  1.3.3) dropped it, warning `beads: ignoring GT_ROOT from .beads/.env` on
-  every command and losing the city's formulas and molecules when bd ran in a
-  rig without `GT_ROOT` exported. `GT_ROOT` is now allowed: bd reads from it
+- **bd again reads `GT_ROOT` from a rig's `.beads/.env`** (#8117; also
+  shipped in 1.3.4). `gc rig add` writes the city root there, and the
+  `.beads/.env` allowlist from #7879 (also in 1.3.3) dropped it, printing
+  `beads: ignoring GT_ROOT from .beads/.env` on every command in a rig. That
+  notice made released gc misreport failed bd commands there, and bd run in a
+  rig without `GT_ROOT` exported stopped reading `$GT_ROOT/.beads/formulas`
+  and `$GT_ROOT/.beads/molecules.jsonl`. `GT_ROOT` is now allowed: bd reads from it
   (`$GT_ROOT/.beads/formulas` is the last formula search path, and
   `$GT_ROOT/.beads/molecules.jsonl` is template data), so it names no command
   and no credential target, and a `GT_ROOT` taken from `.beads/.env` is never
@@ -1279,7 +1281,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   migration lock is held. It makes no Dolt commit, and the restored rows
   stay clone-local.
   [Upgrading](docs/getting-started/upgrading.md) gives a manual recipe for
-  v1.3.3 and earlier, and how to retry a restore that skipped history
+  v1.3.4 and earlier, and how to retry a restore that skipped history
   (#7039).
 - Upgrading an older database no longer rewrites issue and wisp `updated_at`
   values with the time of the upgrade. Schema migrations 0035, 0046, 0047 and
