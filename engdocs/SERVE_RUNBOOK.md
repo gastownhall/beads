@@ -201,6 +201,37 @@ book a healthy server as permanently not-ready. Give the readiness probe an
 `Authorization: Bearer` header, and alert on `event=auth_refused` with
 `op=listReadyWork` as the signal that you forgot.
 
+## Proxy recovery on proxied-server workspaces
+
+A proxied-server workspace runs its database behind a proxy that exits after a
+finite idle timeout (30s by default; `bd init --proxied-server
+--proxied-server-idle-timeout` changes it). A `bd serve` on such a workspace
+outlives that exit: its pool retires idle connections first, and once the last
+client goes quiet the proxy shuts down. serve used to keep dialing the exited
+proxy's port forever, answering 503 `db_unavailable` until restart
+(gastownhall/beads#7295); it now rediscovers the endpoint through the same
+adopt-or-spawn machinery a fresh `bd` command uses, so a read after the
+recovery is served by a newly started (or adopted) proxy for the same
+workspace.
+
+What that means for an operator:
+
+- **The workspace's idle policy is unchanged.** serve does not keep the
+  proxy alive artificially; recovery is per-need, on a failed dial.
+- **A cold-start read can 503 once.** Starting the proxy takes longer than a
+  single dial's budget, so the first database-backed request after a long
+  quiet period may answer 503 `db_unavailable` with `Retry-After`. This is a
+  momentary state, not an outage: retry, or let the readiness probe's own
+  threshold absorb it.
+- **`/healthz` is still liveness-only.** It stayed green through the permanent
+  503s of #7295, and it stays green through the momentary ones — that is the
+  contract, and a supervisor should keep wiring it to liveness, not readiness.
+- **Stop serve before taking the workspace's database down.** Because a
+  running serve now restarts the workspace proxy on its next read, `bd dolt
+  stop` no longer keeps a proxied-server workspace's tree down on its own.
+  Stop serve first, then stop the database, so the tree stays stopped for
+  maintenance; starting serve again brings the workspace back with it.
+
 ## Detecting a wedge
 
 The failure mode to plan for is a database that stops answering while the

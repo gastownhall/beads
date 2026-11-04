@@ -1724,6 +1724,16 @@ func ClassifyError(err error) Result {
 // codes that carry identical static detail, so a miss costs a less useful
 // `code`, never a disclosure.
 func isUnavailable(err error) bool {
+	// The resolver's unavailability claim first, BEFORE the deadline
+	// exclusion below: an eligible dial whose BDPROXY1 proof never arrived
+	// comes back as context.DeadlineExceeded, and that deadline struck after
+	// the connect — it says the endpoint is unavailable (retry in a moment),
+	// not that the request ran out of time. Every other deadline and
+	// cancellation keeps its historical generic mapping (gastownhall/beads
+	// #7295 AC-6).
+	if uow.IsEndpointUnavailable(err) {
+		return true
+	}
 	// context.DeadlineExceeded satisfies net.Error, so it must be excluded
 	// before the net.Error test below: a tripped per-request deadline is a
 	// generic 500, not a claim that the database is unreachable.

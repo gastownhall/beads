@@ -5,6 +5,8 @@ import (
 	"strings"
 
 	mysql "github.com/go-sql-driver/mysql"
+
+	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
 )
 
 // IsSerializationError reports whether err is a retryable database transaction
@@ -103,3 +105,25 @@ func isDatabaseNotFoundError(err error) bool {
 	errLower := strings.ToLower(err.Error())
 	return strings.Contains(errLower, "database not found") || strings.Contains(errLower, "unknown database")
 }
+
+// IsEndpointUnavailable reports whether err is a proxy-endpoint failure that
+// rediscovery is responsible for and could not recover within the dial's own
+// budget: the workspace's proxy exited or was replaced, and a later dial may
+// already find the published replacement. Deliberately driver-independent —
+// it delegates to the storage-boundary classifier (dbproxy/proxy) so callers
+// like the HTTP surface depend on uow alone, never on the proxy package.
+//
+// This is the ONLY unavailability claim that survives a deadline: an eligible
+// dial whose proof never arrived can come back as context.DeadlineExceeded,
+// and that deadline struck after the connect, so it says the endpoint is
+// unavailable, not that the request ran out of time (gastownhall/beads#7295
+// AC-6).
+func IsEndpointUnavailable(err error) bool {
+	return proxy.IsEndpointUnavailable(err)
+}
+
+// ErrEndpointUnavailable is the marker a wrapped-up endpoint failure carries;
+// see IsEndpointUnavailable. Re-exported through the same seam so the HTTP
+// surface (and its tests) can construct the class without importing the
+// proxy package.
+var ErrEndpointUnavailable = proxy.ErrEndpointUnavailable

@@ -380,6 +380,31 @@ on restart — the state file can persist across reboots.
 
 ## Dolt Server Issues
 
+### `bd serve` reports 503 db_unavailable on a proxied-server workspace
+
+**Symptom (proxied-server `bd serve`):** the first database-backed request
+after a long quiet period answers `503 db_unavailable` — the readiness
+endpoint keeps returning it for up to a minute, `GET /healthz` returns 200,
+and the next request answers 200.
+
+**Cause:** a proxied-server workspace's proxy exits after its idle timeout
+(30s by default) once every client goes quiet, and `bd serve`'s pool retires
+its idle connections first — so a serve that sat unused does outlive the
+proxy. serve then rediscovers the workspace's endpoint the same way a fresh
+`bd` command does, which takes longer than one request's dial budget when a
+proxy has to be started: those first reads answer the momentary 503
+(`db_unavailable`, with `Retry-After`) until the recovery lands. Before that
+recovery existed the 503 never ended without restarting serve
+(gastownhall/beads#7295); a serve that stays 503 past a minute is no longer
+that bug.
+
+**Fix:** retry — the response carries `Retry-After`, and the readiness
+probe's own failure threshold should absorb the cold start. To keep the
+workspace's database down on purpose (maintenance, a backup restore, a clean
+stop), stop serve first: a running serve restarts the workspace proxy on its
+next database-backed request, so `bd dolt stop` alone does not keep a
+proxied-server workspace's tree down while serve is up.
+
 ### Server not starting
 
 ```bash

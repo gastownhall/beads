@@ -105,7 +105,10 @@ To fix it, install 2.6.0 with the steps above (or `brew upgrade dolt`, then
 check `dolt version`) and restart any `dolt sql-server` on the new binary:
 for a server `bd` manages, `bd dolt stop` and `bd dolt start`; in a managed
 proxied-server workspace, `bd dolt stop` alone, since the proxy starts its
-server again on the next command and refuses `bd dolt start`. There is no
+server again on the next command and refuses `bd dolt start` — and a `bd
+serve` still running on such a workspace restarts the proxy (with its server)
+on its next database-backed request, so stop serve first when the goal is to
+keep the workspace's tree down. There is no
 override. A version `bd` cannot determine is not refused: a `dolt` binary
 whose `dolt version` output does not parse runs with a warning (proxied-server
 mode) and a server that does not answer `dolt_version()` with a version is

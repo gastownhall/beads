@@ -18,6 +18,7 @@ import (
 	"github.com/go-sql-driver/mysql"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/uow"
 )
 
 // dsn is the shape a driver or dial error takes in the wild: it names the
@@ -53,6 +54,31 @@ func TestProblemMapping(t *testing.T) {
 			err:        fmt.Errorf("select issue: %w", sql.ErrNoRows),
 			wantStatus: http.StatusNotFound,
 			wantCode:   CodeNotFound,
+		},
+		{
+			// gastownhall/beads#7295: a workspace proxy that idle-exited
+			// (and whose rediscovery did not land inside the dial's budget)
+			// is a momentary outage the client may retry — db_unavailable
+			// with Retry-After. The trigger here is a connection refused,
+			// the idle-exit signature.
+			name:       "proxy endpoint unavailable: refused",
+			err:        fmt.Errorf("uow: pin connection: %w", errors.Join(uow.ErrEndpointUnavailable, syscall.ECONNREFUSED)),
+			wantStatus: http.StatusServiceUnavailable,
+			wantCode:   CodeDBUnavailable,
+			retryAfter: retryAfterContention,
+		},
+		{
+			// The load-bearing row (gastownhall/beads#7295 AC-6): the
+			// triggering dial failure is a deadline — but it struck AFTER the
+			// connect, while waiting for a BDPROXY1 proof that never came, so
+			// the claim says "the proxy is gone; try again soon", not "the
+			// request ran out of time" (compare the request-deadline rows
+			// below, which stay generic 500s).
+			name:       "proxy endpoint unavailable: deadline struck after the connect",
+			err:        fmt.Errorf("uow: pin connection: %w", errors.Join(uow.ErrEndpointUnavailable, context.DeadlineExceeded)),
+			wantStatus: http.StatusServiceUnavailable,
+			wantCode:   CodeDBUnavailable,
+			retryAfter: retryAfterContention,
 		},
 		{
 			name:       "already claimed",
