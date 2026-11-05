@@ -559,8 +559,8 @@ var (
 	deferredChildIssueTables = []string{"issues", "wisps"}
 )
 
-// deferredChildrenQuery selects the children, recorded in depTable, of parents
-// in issueTable whose defer_until is still in the future.
+// deferredChildrenQuery selects the children, recorded in depTable, of
+// deferred parents in issueTable (sqlbuild.DeferredParentPredicate).
 func deferredChildrenQuery(depTable, issueTable string) string {
 	targetCol := "depends_on_issue_id"
 	if issueTable == "wisps" {
@@ -571,9 +571,8 @@ func deferredChildrenQuery(depTable, issueTable string) string {
 				FROM %s dep
 				JOIN %s parent ON parent.id = dep.%s
 				WHERE dep.type = 'parent-child'
-				  AND parent.defer_until IS NOT NULL
-				  AND parent.defer_until > UTC_TIMESTAMP()
-			`, depTable, issueTable, targetCol)
+				  AND %s
+			`, depTable, issueTable, targetCol, sqlbuild.DeferredParentPredicate("parent"))
 }
 
 // getDeferredChildrenAllTablesInTx is getChildrenOfDeferredParentsInTx's
@@ -608,24 +607,24 @@ func getDeferredChildrenAllTablesInTx(ctx context.Context, tx DBTX) ([]string, e
 	return childIDs, nil
 }
 
-// getChildrenOfDeferredParentsInTx returns IDs of issues whose parent has a
-// future defer_until. Works within an existing transaction.
+// getChildrenOfDeferredParentsInTx returns IDs of issues whose parent is
+// deferred (sqlbuild.DeferredParentPredicate): a future defer_until, or an
+// undated 'deferred' status. Works within an existing transaction.
 //
 //nolint:gosec // G201: depTable is selected from a hardcoded list below.
 func getChildrenOfDeferredParentsInTx(ctx context.Context, tx DBTX) ([]string, error) {
 	hasDeferredParent := false
 	for _, issueTable := range []string{"issues", "wisps"} {
-		//nolint:gosec // G201: issueTable is hardcoded to "issues" or "wisps"
-		var exists int
-		err := tx.QueryRowContext(ctx, fmt.Sprintf(`
-			SELECT 1 FROM %s
-			WHERE defer_until IS NOT NULL
-			  AND defer_until > UTC_TIMESTAMP()
-			LIMIT 1
-		`, issueTable)).Scan(&exists)
+		// A SELECT of an EXISTS expression always returns its one row, so
+		// the answer is the value, not whether a row came back.
+		var exists bool
+		err := tx.QueryRowContext(ctx, "SELECT "+sqlbuild.DeferredParentExistsSQL(issueTable)).Scan(&exists)
 		if err == nil {
-			hasDeferredParent = true
-			break
+			if exists {
+				hasDeferredParent = true
+				break
+			}
+			continue
 		}
 		if errors.Is(err, sql.ErrNoRows) {
 			continue
@@ -633,7 +632,7 @@ func getChildrenOfDeferredParentsInTx(ctx context.Context, tx DBTX) ([]string, e
 		if issueTable == "wisps" && isTableNotExistError(err) {
 			continue
 		}
-		return nil, fmt.Errorf("deferred parents: check future-deferred parents from %s: %w", issueTable, err)
+		return nil, fmt.Errorf("deferred parents: check deferred parents from %s: %w", issueTable, err)
 	}
 	if !hasDeferredParent {
 		return nil, nil

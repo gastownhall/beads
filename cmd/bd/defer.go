@@ -32,6 +32,8 @@ dependency keeping them from being worked. Unlike closed issues, they will
 be revisited.
 
 Deferred issues don't show in 'bd ready' but remain visible in 'bd list'.
+Deferring a parent, such as an epic, also keeps its direct children out of
+'bd ready', for as long as the parent stays deferred.
 
 A defer WITH a date is a snooze: once --until passes, the next ready-front
 read returns the issue to open automatically (same shape as 'bd undefer').

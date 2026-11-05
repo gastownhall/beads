@@ -1181,6 +1181,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An epic deferred with no date now hides its children from `bd ready`**
+  (GH#7300). `bd defer <id>` without `--until` (the indefinite icebox) and
+  `bd update <id> --status deferred` kept only the parent itself out of ready
+  work: its open children still showed and could be taken by
+  `bd ready --claim`. Now a parent that is deferred with no date keeps its
+  direct children out of `bd ready`, its counts and claims until it is
+  undeferred, as a parent deferred to a future date already did until its
+  date. `--include-deferred` still lists them.
+
 - **bd again reads `GT_ROOT` from a rig's `.beads/.env`** (#8117; also
   shipped in 1.3.4). `gc rig add` writes the city root there, and the
   `.beads/.env` allowlist from #7879 (also in 1.3.3) dropped it, printing

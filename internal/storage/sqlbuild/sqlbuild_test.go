@@ -750,3 +750,33 @@ func TestColumnNames(t *testing.T) {
 		t.Errorf("QualifyColumns = %q, want %q", got, want)
 	}
 }
+
+func TestDeferredParentPredicate(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		alias string
+		want  string
+	}{
+		{"", "((defer_until IS NOT NULL AND defer_until > UTC_TIMESTAMP()) OR (status = 'deferred' AND defer_until IS NULL))"},
+		{"parent", "((parent.defer_until IS NOT NULL AND parent.defer_until > UTC_TIMESTAMP()) OR (parent.status = 'deferred' AND parent.defer_until IS NULL))"},
+	}
+	for _, tc := range cases {
+		if got := DeferredParentPredicate(tc.alias); got != tc.want {
+			t.Errorf("DeferredParentPredicate(%q) =\n  %s\nwant\n  %s", tc.alias, got, tc.want)
+		}
+	}
+}
+
+func TestDeferredParentExistsSQL(t *testing.T) {
+	t.Parallel()
+
+	// One EXISTS per condition, both over the named table, and the whole OR
+	// parenthesized so it stays one scalar when composed into a SELECT list or
+	// a WHERE.
+	want := "(EXISTS (SELECT 1 FROM wisps WHERE defer_until IS NOT NULL AND defer_until > UTC_TIMESTAMP())" +
+		" OR EXISTS (SELECT 1 FROM wisps WHERE status = 'deferred' AND defer_until IS NULL))"
+	if got := DeferredParentExistsSQL("wisps"); got != want {
+		t.Errorf("DeferredParentExistsSQL(wisps) =\n  %s\nwant\n  %s", got, want)
+	}
+}
