@@ -1208,6 +1208,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd config get` for a config.yaml, git-config or user-global key no longer
+  opens the database just because one exists, so it answers from those files
+  while the Dolt server is down instead of failing the open (GH#5108). In
+  server mode a database is "present" from metadata.json alone, so these
+  store-free reads ran the full store path: it wrote
+  `.beads/.local_version`, could auto-migrate and auto-start a server, and
+  refused outright once the configured server was unreachable. Keys that
+  live in the database (`storage.backend`, …) still open the store, and
+  every other `config` verb keeps its routing.
 - `bd context`, and the other commands that resolve the repository context
   (such as `bd prime` and `bd worktree`), now accept a `.beads` inside the
   current non-root account's own home when that home sits under a protected
@@ -1367,6 +1376,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the default remote and reported "Push complete."; a name that differs from
   `--remote`, an empty name, or a second argument is now an error (#3720,
   reported by @bryanhirsch).
+- `bd dolt remote add` now registers a matching remote that exists only in
+  the served database's on-disk state (`.dolt/repo_state.json`) on the
+  server, instead of reporting success while SQL `dolt_remotes` stayed
+  empty. A sql-server resolves push, pull and fetch through its in-memory
+  remotes table and re-reads the state file only when it loads the
+  database, so a remote recorded only on disk was invisible to every SQL
+  operation while the add — the documented remedy — silently did nothing
+  (GH#2118). The add now writes the remote's recorded URL (the spelling a
+  server restart would load) and git ref, asks nothing when the URLs match,
+  and still asks before replacing a differing one. A remote recorded with
+  parameters an add over SQL cannot set (the dolt CLI's `aws-*` and `oss-*`
+  options) is refused instead, with the advice to restart the Dolt server,
+  because the add would erase them.
 - `bd epic close-eligible`, molecule progress and last-activity reads, and
   `bd repo remove` now report a read that fails part-way through its result
   set instead of acting on the rows read before the failure. A dropped
@@ -1462,6 +1484,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   under the literal `depends-on` or `blocked-by` type are left as they are:
   `bd dep remove` plus `bd dep add` replaces one.
 
+- `bd dep add` and `bd dep remove` now commit the `is_blocked` change a
+  blocking edge makes in the same Dolt commit as the edge, and so do `bd batch`
+  dep lines and the other dependency writes (the store's `AddDependency` /
+  `RemoveDependency`, explicit transactions, the batch applier's edges).
+  Before, with `dolt.auto-commit` on, the flag stayed in the working set: the
+  committed history (and so a push, a peer's pull or a backup) showed the bead
+  unblocked, and `bd recompute-blocked` refused with "needs a clean working
+  set" until some later write swept it up. A wisp-sourced edge that blocks or
+  unblocks a durable child now commits that child's flag too, and so does
+  closing, reopening or deleting a wisp that a durable issue depends on (a
+  delete also commits the removal of the durable edge that pointed at the
+  wisp), and creating a wisp under a durable parent that a `waits-for` edge
+  watches. An edge that changes no `is_blocked` still commits only the
+  dependency, so it cannot sweep someone else's pending issue edit (#6647).
 - `bd -C <dir>` (or `BEADS_DIR`) naming a beads project outside any git
   repository, run from inside one, no longer adopts the caller's repository
   root, role or git remote. The project is now rooted at its own directory
@@ -1880,6 +1916,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   give up after 5 seconds on a server that accepts the connection but
   never sends the MySQL greeting, such as a stopped or paused
   `sql-server`, where they waited forever.
+- **`bd doctor --fix` now untracks a committed `.beads/dolt-server-config.yaml`
+  or `.beads/dolt-server.activity`.** Both were already gitignored, but the
+  tracked-runtime-files check did not list them, so a copy committed before
+  the ignore rule stayed tracked (#6191).
+
 - `bd admin reset` now removes the `prepare-commit-msg` hook bd installs.
   Reset scanned only four of the five hooks bd manages, so a bd-installed
   `prepare-commit-msg` in the repository's git hooks directory survived
@@ -2326,6 +2367,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before, and a host is dialed without the surrounding whitespace bd
   already ignored when it decided whether the host is local.
 
+- Pouring a formula (`bd mol pour`, `bd mol wisp`, `bd mol bond`,
+  `bd mol seed`) now fails with a formula validation error when a step that
+  stays in the pour names, in its `needs` or `depends_on` or as its
+  `waits_for` spawner, a step whose `condition` leaves it out. The step used
+  to be poured with that dependency silently dropped, so it was ready before
+  the work it waited on, and a `waits_for` gate waited for no one. The error
+  names both steps and the condition (#6437). A dependency that bd adds
+  itself is not an error: the link from one loop iteration to the next and
+  `compose.branch` wiring now go around a left-out step to the steps it
+  waited for, and advice steps are left out with their target. Before, these
+  links were dropped as well, so a loop iteration could start before the one
+  before it finished, and advice was poured for a step that was not. A
+  `waits_for` gate that takes its spawner from such a link fails the pour
+  when going around the left-out step leaves the gate nothing to wait for. A
+  loop iteration whose first step is left out is still not linked to the
+  iteration before it.
 - A formula step declared `type = "gate"` with a `[steps.gate]` block no
   longer deadlocks its molecule (GH#3316). `bd mol pour` and `bd cook` used
   to create it as a `gate` bead hidden from `bd ready` and wire its companion
