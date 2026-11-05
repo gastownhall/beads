@@ -1224,11 +1224,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no-argument form uses — dropped the live database before Dolt discovered
   the source was empty, leaving the workspace without its tables; the
   refusal names the source, keeps the database untouched, and directs a
-  JSONL export at `bd import`. It covers every restore topology (embedded,
-  sql-server, proxied — which no longer quiesces its proxy and backend
-  first) and is a layout prerequisite only, not a guarantee that the backup
-  is complete or that every failed restore leaves the database unchanged
-  (#7098, reported by @jonesmabea).
+  JSONL export at `bd import`. A backup whose path holds `%`, or outside
+  Windows `#`, `?` or `\`, is refused the same way, since Dolt does not
+  take those characters literally in a `file://` URL and would restore
+  from, or create, a different directory; move or rename it first. The
+  backups bd wrote for such a path (auto-backup, `bd backup sync`) went to
+  the directory Dolt reads the path as (cut at its first `#` or `?`, with
+  `%XX` decoded and `\` read as `/`), which every path Dolt reads the same
+  way shares: when that directory holds a backup, the refusal names it,
+  and `bd backup restore --force <dir>` restores from it. The refusal
+  covers every restore topology (embedded, sql-server, proxied — which no
+  longer quiesces its proxy and backend first) and is a layout
+  prerequisite only, not a guarantee that the backup is complete or that
+  every failed restore leaves the database unchanged (#7098, reported by
+  @jonesmabea).
 - The android_arm64 release, which npm `@beads/bd` installs on Termux, is
   now built with cgo, so embedded Dolt works there: `bd init` no longer fails
   with "embedded Dolt requires a CGO build" (#3538). The binary is

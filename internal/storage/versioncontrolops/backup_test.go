@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -48,7 +49,8 @@ func TestDirToFileURLRejectsSchemes(t *testing.T) {
 // --force, because DOLT_BACKUP('restore', '--force') drops the target
 // database before it discovers the source is empty (GH#7098). A regular
 // manifest file is the layout prerequisite, not a promise about the backup's
-// contents: an empty one passes, and Dolt owns interpreting it.
+// contents: an empty one passes, and Dolt owns interpreting it. A backup
+// whose path Dolt would read as another directory is refused too.
 func TestRestoreSourceURL(t *testing.T) {
 	base := t.TempDir()
 	regularFile := filepath.Join(base, "not-a-dir")
@@ -151,8 +153,14 @@ func TestRestoreSourceURL(t *testing.T) {
 			if tc.wantText != "" && !strings.Contains(err.Error(), tc.wantText) {
 				t.Errorf("error = %v, want it to contain %q", err, tc.wantText)
 			}
-			if tc.wantText != "" && !strings.Contains(err.Error(), tc.dir) {
-				t.Errorf("error = %v, want it to name the source %q", err, tc.dir)
+			// The ErrNoBackup refusals quote the source with %q, which doubles
+			// a Windows path's backslashes; the older errors print it raw.
+			source := tc.dir
+			if tc.wantNoBackup {
+				source = strconv.Quote(tc.dir)
+			}
+			if tc.wantText != "" && !strings.Contains(err.Error(), source) {
+				t.Errorf("error = %v, want it to name the source as %s", err, source)
 			}
 			if gotNoBackup := errors.Is(err, ErrNoBackup); gotNoBackup != tc.wantNoBackup {
 				t.Errorf("errors.Is(err, ErrNoBackup) = %v, want %v (err = %v)", gotNoBackup, tc.wantNoBackup, err)
@@ -183,23 +191,120 @@ func TestRestoreSourceURL(t *testing.T) {
 		}
 	}
 
-	// Paths with characters URLs treat specially must round-trip through the
-	// same conversion DirToFileURL performs, not a reverse conversion.
-	for _, name := range []string{"a dir", "100%done", "my#dir"} {
-		special := filepath.Join(t.TempDir(), name)
-		if err := os.MkdirAll(special, 0o750); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(special, "manifest"), nil, 0o600); err != nil {
-			t.Fatal(err)
-		}
-		got, err := RestoreSourceURL(special)
-		if err != nil {
-			t.Fatalf("RestoreSourceURL(%q): %v", special, err)
-		}
-		if want, werr := DirToFileURL(special); werr != nil || got != want {
-			t.Errorf("RestoreSourceURL(%q) = %q, want %q", special, got, want)
-		}
+	// A backup whose path Dolt does not take literally in a file:// URL is
+	// refused even though it holds a manifest: Dolt would restore from, and
+	// create, another directory ('#' and '?' cut the path short, '%41'
+	// decodes to 'A', '\' becomes '/'). Dolt takes a space literally, so that
+	// path keeps the URL DirToFileURL builds. Each fixture is made under one
+	// parent directory, so the special character is in its last element only.
+	windows := runtime.GOOS == "windows"
+	parent := t.TempDir()
+	for _, tc := range []struct {
+		name    string
+		refused bool
+	}{
+		{name: "a dir"},
+		{name: "100%done", refused: true},
+		{name: "x%41y", refused: true},
+		{name: "my#dir", refused: !windows}, // a drive-letter path skips net/url
+		{name: "a?b", refused: true},
+		{name: `back\slash`, refused: !windows}, // Windows' separator
+	} {
+		t.Run("path "+tc.name, func(t *testing.T) {
+			if windows && strings.Contains(tc.name, "?") {
+				t.Skip("Windows file names cannot hold '?'")
+			}
+			special := filepath.Join(parent, tc.name)
+			if err := os.MkdirAll(special, 0o750); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(special, "manifest"), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			got, err := RestoreSourceURL(special)
+			if !tc.refused {
+				if err != nil {
+					t.Fatalf("RestoreSourceURL(%q): %v", special, err)
+				}
+				if want, werr := DirToFileURL(special); werr != nil || got != want {
+					t.Errorf("RestoreSourceURL(%q) = %q, want %q", special, got, want)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("RestoreSourceURL(%q) = %q, want a refusal: Dolt would restore from another directory", special, got)
+			}
+			if errors.Is(err, ErrNoBackup) {
+				t.Errorf("the source holds a manifest, so the refusal must not say it holds no backup: %v", err)
+			}
+			for _, want := range []string{strconv.Quote(special), "The database was not restored", "move or rename the backup"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error = %v, want it to contain %s", err, want)
+				}
+			}
+		})
+	}
+
+	// Such a path without a backup is refused as one, and when the directory
+	// Dolt reads it as holds a backup the refusal names that directory: bd's
+	// backup writers hand Dolt the same URL, so the backups bd synced to the
+	// path went there. Dolt reads a path only up to a '#' or '?', decodes
+	// '%41' to 'A' and reads '\' as '/'; it cannot parse "100%done" at all, so
+	// bd's backups to it failed and nothing is named.
+	misread := t.TempDir()
+	for _, tc := range []struct {
+		source string // the restore source, under misread
+		readAs string // the directory Dolt reads it as, which holds a backup; "" for none
+		posix  bool   // Windows takes the character literally
+	}{
+		{source: "ws#1/proj/backup", readAs: "ws", posix: true},
+		{source: "x%41y/backup", readAs: "xAy/backup"},
+		{source: "a?b/backup", readAs: "a", posix: true},
+		{source: `back\slash/backup`, readAs: "back/slash/backup", posix: true},
+		{source: "q#r/backup", posix: true}, // Dolt reads it as q, which holds no backup
+		{source: "100%done/backup"},
+	} {
+		name, _, _ := strings.Cut(tc.source, "/")
+		t.Run("misread "+name, func(t *testing.T) {
+			if windows && tc.posix {
+				t.Skip("Windows takes this character literally")
+			}
+			source := filepath.Join(misread, tc.source)
+			if err := os.MkdirAll(source, 0o750); err != nil {
+				t.Fatal(err)
+			}
+			readAs := ""
+			if tc.readAs != "" {
+				readAs = filepath.Join(misread, tc.readAs)
+				if err := os.MkdirAll(readAs, 0o750); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(readAs, "manifest"), nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got, err := RestoreSourceURL(source)
+			if err == nil {
+				t.Fatalf("RestoreSourceURL(%q) = %q, want a refusal: the source holds no backup", source, got)
+			}
+			if !errors.Is(err, ErrNoBackup) {
+				t.Errorf("errors.Is(err, ErrNoBackup) = false, want true (err = %v)", err)
+			}
+			if !strings.Contains(err.Error(), strconv.Quote(source)) {
+				t.Errorf("error = %v, want it to name the source as %s", err, strconv.Quote(source))
+			}
+			if readAs == "" {
+				if strings.Contains(err.Error(), "reads this path as") {
+					t.Errorf("error = %v, want no directory named: Dolt's reading of the path holds no backup", err)
+				}
+				return
+			}
+			for _, want := range []string{"reads this path as " + strconv.Quote(readAs) + ", which holds a Dolt backup", "bd's backups to this path went there"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error = %v, want it to contain %s", err, want)
+				}
+			}
+		})
 	}
 }
 
