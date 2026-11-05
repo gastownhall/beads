@@ -10,8 +10,10 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/config"
+	storeissueops "github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
 )
@@ -1641,5 +1643,147 @@ func TestBuildGraphApplyBatchRequestLeavesAnAbsentPriorityToTheRole(t *testing.T
 	}
 	if z := creates["z"]; z == nil || z.DefaultPriority || z.Issue.Priority != 0 {
 		t.Errorf("explicit 0 item = %+v, want P0 without DefaultPriority", z)
+	}
+}
+
+// TestGraphApplyNodeIssueStampsCreatedAtWithStatusTimestamps pins GH#7519:
+// when graphApplyNodeIssue stamps a node's status timestamp from its one
+// plan-build clock read, created_at takes the same read, so the insert's own
+// later stamp (one per row, at apply time) can never land after it. A node
+// that gets no status stamp keeps a zero created_at: the HTTP create wire
+// refuses a populated Issue.CreatedAt, and open-only graph plans over that
+// wire depend on the field staying empty (W-CreateItem.Issue).
+func TestGraphApplyNodeIssueStampsCreatedAtWithStatusTimestamps(t *testing.T) {
+	stamped := []struct {
+		name   string
+		status types.Status
+	}{
+		{"closed", types.StatusClosed},
+		{"in_progress", types.StatusInProgress},
+	}
+	for _, row := range stamped {
+		t.Run(row.name, func(t *testing.T) {
+			issue, err := graphApplyNodeIssue(
+				GraphApplyNode{Key: "n", Title: "N", Status: string(row.status)},
+				GraphApplyOptions{}, "actor", "")
+			if err != nil {
+				t.Fatalf("graphApplyNodeIssue: %v", err)
+			}
+			if issue.CreatedAt.IsZero() {
+				t.Fatalf("%s: created_at left zero for the insert to stamp", row.name)
+			}
+			if loc := issue.CreatedAt.Location(); loc != time.UTC {
+				t.Errorf("%s: created_at location = %v, want UTC", row.name, loc)
+			}
+			statusStamp := issue.ClosedAt
+			if row.status == types.StatusInProgress {
+				statusStamp = issue.StartedAt
+			}
+			if statusStamp == nil {
+				t.Fatalf("%s: status timestamp not stamped", row.name)
+			}
+			if !issue.CreatedAt.Equal(*statusStamp) {
+				t.Errorf("%s: created_at %v != %s stamp %v (one clock read must fill both)",
+					row.name, issue.CreatedAt, row.status, *statusStamp)
+			}
+		})
+	}
+
+	deferUntil := time.Now().UTC().Add(time.Hour)
+	unstamped := []struct {
+		name       string
+		node       GraphApplyNode
+		wantStatus types.Status
+	}{
+		{"default open", GraphApplyNode{Key: "n", Title: "N"}, types.StatusOpen},
+		{"explicit open", GraphApplyNode{Key: "n", Title: "N", Status: string(types.StatusOpen)}, types.StatusOpen},
+		{"blocked", GraphApplyNode{Key: "n", Title: "N", Status: string(types.StatusBlocked)}, types.StatusBlocked},
+		{"deferred by future defer_until", GraphApplyNode{Key: "n", Title: "N", DeferUntil: &deferUntil}, types.StatusDeferred},
+	}
+	for _, row := range unstamped {
+		t.Run(row.name, func(t *testing.T) {
+			issue, err := graphApplyNodeIssue(row.node, GraphApplyOptions{}, "actor", "")
+			if err != nil {
+				t.Fatalf("graphApplyNodeIssue: %v", err)
+			}
+			if issue.Status != row.wantStatus {
+				t.Fatalf("status = %q, want %q", issue.Status, row.wantStatus)
+			}
+			if !issue.CreatedAt.IsZero() {
+				t.Errorf("%s: created_at = %v, want the zero time (no status stamp was given)", row.name, issue.CreatedAt)
+			}
+			if issue.ClosedAt != nil {
+				t.Errorf("%s: closed_at = %v, want nil", row.name, *issue.ClosedAt)
+			}
+			if issue.StartedAt != nil {
+				t.Errorf("%s: started_at = %v, want nil", row.name, *issue.StartedAt)
+			}
+		})
+	}
+}
+
+// TestBuildGraphApplyBatchRequestCreationStampSurvivesCreatePreparation runs
+// each built create item through the preparation both BatchApplier legs run
+// before the insert (GH#7519). A closed or in_progress item keeps its
+// plan-time created_at, which its status timestamp equals; an open item still
+// leaves created_at for the insert to stamp.
+func TestBuildGraphApplyBatchRequestCreationStampSurvivesCreatePreparation(t *testing.T) {
+	req, err := buildGraphApplyBatchRequest(&GraphApplyPlan{Nodes: []GraphApplyNode{
+		{Key: "done", Title: "done", Status: string(types.StatusClosed)},
+		{Key: "main", Title: "main", Status: string(types.StatusInProgress)},
+		{Key: "next", Title: "next"},
+	}}, GraphApplyOptions{}, "actor", "")
+	if err != nil {
+		t.Fatalf("buildGraphApplyBatchRequest: %v", err)
+	}
+	creates := map[string]*issueops.CreateItem{}
+	for _, item := range req.Items {
+		if item.Kind == issueops.ItemCreate {
+			creates[item.Create.Key] = item.Create
+		}
+	}
+	prepare := func(item *issueops.CreateItem) *types.Issue {
+		t.Helper()
+		prepared, err := storeissueops.PreparePublicCreateRequest(issueops.CreateRequest{
+			Actor:           req.Actor,
+			Issue:           item.Issue,
+			DefaultPriority: item.DefaultPriority,
+		}, storeissueops.PublicCreateContext{})
+		if err != nil {
+			t.Fatalf("PreparePublicCreateRequest(%s): %v", item.Key, err)
+		}
+		return prepared.Issue
+	}
+
+	for _, tc := range []struct {
+		key   string
+		stamp func(*types.Issue) *time.Time
+	}{
+		{key: "done", stamp: func(issue *types.Issue) *time.Time { return issue.ClosedAt }},
+		{key: "main", stamp: func(issue *types.Issue) *time.Time { return issue.StartedAt }},
+	} {
+		item := creates[tc.key]
+		if item == nil {
+			t.Fatalf("no create item for %q", tc.key)
+		}
+		if item.Issue.CreatedAt.IsZero() {
+			t.Errorf("%s: built item's created_at is zero; the insert would stamp a later one", tc.key)
+		}
+		prepared := prepare(item)
+		if !prepared.CreatedAt.Equal(item.Issue.CreatedAt) {
+			t.Errorf("%s: prepared created_at = %v, want the plan-time %v", tc.key, prepared.CreatedAt, item.Issue.CreatedAt)
+		}
+		stamped := tc.stamp(prepared)
+		if stamped == nil || !stamped.Equal(prepared.CreatedAt) {
+			t.Errorf("%s: prepared status timestamp = %v, want it equal to created_at %v", tc.key, stamped, prepared.CreatedAt)
+		}
+	}
+
+	next := creates["next"]
+	if next == nil {
+		t.Fatal("no create item for \"next\"")
+	}
+	if !next.Issue.CreatedAt.IsZero() {
+		t.Errorf("open item's created_at = %v, want zero in the built request", next.Issue.CreatedAt)
 	}
 }

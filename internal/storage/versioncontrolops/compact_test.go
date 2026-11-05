@@ -89,8 +89,8 @@ func expectCompactReplay(mock sqlmock.Sqlmock, initial, boundary compactCommit, 
 }
 
 // expectAbandon programs the deferred cleanup of a run that refused after
-// the temp branch exists: back to main, temp branch deleted, and no
-// DOLT_RESET('--hard') onto the rebuilt chain.
+// the temp branch exists: back to main, temp branch deleted, and no reset
+// of main onto the rebuilt chain.
 func expectAbandon(mock sqlmock.Sqlmock) {
 	mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_CHECKOUT('main')")).
 		WillReturnResult(sqlmock.NewResult(0, 1))
@@ -162,6 +162,12 @@ func keptHashes(kept []compactCommit) []string {
 	return out
 }
 
+// plannedHead returns the head the plan was read from: the log's
+// highest-order commit, the newest kept commit.
+func plannedHead(kept []compactCommit) string {
+	return kept[len(kept)-1].Hash
+}
+
 // TestCompactRestoresCommitMetadata covers #7294 at the statement level:
 // Compact reads the kept commits' original metadata before creating
 // anything; each cherry-pick runs with the session's committer set to the
@@ -180,17 +186,22 @@ func TestCompactRestoresCommitMetadata(t *testing.T) {
 	initial, boundary, kept := compactTestCommits()
 	msg := expectCompactReplay(mock, initial, boundary, kept)
 
-	// Read-back verification, then the swap.
+	// Read-back verification, then the swap: the replay checked against the
+	// planned head, main soft-reset onto it, and nothing left staged.
 	mock.ExpectQuery(regexp.QuoteMeta(compactLogQuery)).
 		WillReturnRows(compactLogRows(compactRebuiltLog(initial, boundary, kept, msg)))
 	mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_CHECKOUT('main')")).
 		WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_RESET('--hard', 'compact-tmp')")).
+	mock.ExpectQuery(regexp.QuoteMeta(compactVerifySQL)).WithArgs(plannedHead(kept)).
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
+	mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_RESET('--soft', 'compact-tmp')")).
 		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM dolt_status WHERE staged = 1")).
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
 	mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_BRANCH('-D', 'compact-tmp')")).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
-	if err := Compact(context.Background(), db, initial.Hash, boundary.Hash, 2, keptHashes(kept)); err != nil {
+	if err := Compact(context.Background(), db, initial.Hash, boundary.Hash, plannedHead(kept), 2, keptHashes(kept)); err != nil {
 		t.Fatalf("Compact: %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -219,7 +230,7 @@ func TestCompactRefusesUnverifiableReplay(t *testing.T) {
 		initial, boundary, kept := compactTestCommits()
 		mock.ExpectQuery(logQuery).
 			WillReturnRows(compactLogRows([]compactCommit{kept[2], kept[0], boundary, initial})) // kept[1] unknown
-		err = Compact(context.Background(), db, initial.Hash, boundary.Hash, 2, keptHashes(kept))
+		err = Compact(context.Background(), db, initial.Hash, boundary.Hash, plannedHead(kept), 2, keptHashes(kept))
 		if err == nil || !strings.Contains(err.Error(), "commit kept0002hash is not in the log") {
 			t.Fatalf("Compact error = %v, want a refusal naming kept0002hash", err)
 		}
@@ -237,7 +248,7 @@ func TestCompactRefusesUnverifiableReplay(t *testing.T) {
 		initial, boundary, kept := compactTestCommits()
 		mock.ExpectQuery(logQuery).
 			WillReturnRows(compactLogRows(append(newestFirst(kept...), initial))) // boundary unknown
-		err = Compact(context.Background(), db, initial.Hash, boundary.Hash, 2, keptHashes(kept))
+		err = Compact(context.Background(), db, initial.Hash, boundary.Hash, plannedHead(kept), 2, keptHashes(kept))
 		if err == nil || !strings.Contains(err.Error(), "commit boundary-hash is not in the log") {
 			t.Fatalf("Compact error = %v, want a refusal naming boundary-hash", err)
 		}
@@ -266,7 +277,7 @@ func TestCompactRefusesUnverifiableReplay(t *testing.T) {
 			tc.mutate(&kept[1])
 			mock.ExpectQuery(logQuery).
 				WillReturnRows(compactLogRows(append(newestFirst(kept...), boundary, initial)))
-			err = Compact(context.Background(), db, initial.Hash, boundary.Hash, 2, keptHashes(kept))
+			err = Compact(context.Background(), db, initial.Hash, boundary.Hash, plannedHead(kept), 2, keptHashes(kept))
 			want := "commit kept0002: " + tc.want + "; compact a smaller window with --days"
 			if err == nil || !strings.Contains(err.Error(), want) {
 				t.Fatalf("Compact error = %v, want a refusal containing %q", err, want)
@@ -294,7 +305,7 @@ func TestCompactRefusesUnverifiableReplay(t *testing.T) {
 			WillReturnResult(sqlmock.NewResult(0, 0))
 		expectAbandon(mock)
 
-		err = Compact(context.Background(), db, initial.Hash, boundary.Hash, 2, keptHashes(kept))
+		err = Compact(context.Background(), db, initial.Hash, boundary.Hash, plannedHead(kept), 2, keptHashes(kept))
 		if err == nil || !strings.Contains(err.Error(), `compact step "cherry-pick kept0002"`) {
 			t.Fatalf("Compact error = %v, want the failed cherry-pick of kept0002", err)
 		}
@@ -328,7 +339,7 @@ func TestCompactRefusesUnverifiableReplay(t *testing.T) {
 		expectAbandon(mock)
 		mock.ExpectClose()
 
-		err = Compact(context.Background(), conn, initial.Hash, boundary.Hash, 2, keptHashes(kept))
+		err = Compact(context.Background(), conn, initial.Hash, boundary.Hash, plannedHead(kept), 2, keptHashes(kept))
 		if err == nil || !strings.Contains(err.Error(), `compact step "clear committer"`) {
 			t.Fatalf("Compact error = %v, want the failed committer reset", err)
 		}
@@ -379,7 +390,7 @@ func TestCompactRefusesUnverifiableReplay(t *testing.T) {
 			mock.ExpectQuery(logQuery).WillReturnRows(compactLogRows(rebuilt))
 			expectAbandon(mock)
 
-			err = Compact(context.Background(), db, initial.Hash, boundary.Hash, 2, keptHashes(kept))
+			err = Compact(context.Background(), db, initial.Hash, boundary.Hash, plannedHead(kept), 2, keptHashes(kept))
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("Compact error = %v, want a read-back refusal containing %q", err, tc.want)
 			}
