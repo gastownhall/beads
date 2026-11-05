@@ -1224,9 +1224,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unchanged, so by default that type's `bd count --by-type` bucket still
   counts only its durable rows: the bucket and `--type` now count different
   rows, and only `--include-ephemeral` makes them agree, both then counting
-  both planes. Every count route reads the workspace's `types.infra` for a
-  typed count, so a count with `--type` (any type) now fails when that
-  configuration cannot be read (#6258).
+  both planes. A typed count (any type) now loads the workspace configuration
+  on every route, as `bd list` does, so a configuration read that fails
+  `bd list --type` now fails the count too. Like `bd list`, a proxied or
+  served count fails on an unreadable `types.infra`, while a local count
+  falls back to `config.yaml` and the default infra types (#6258).
+  **Compatibility:** no capability announces the change, and an older
+  `bd serve` still counts only the durable rows for an infra `type`, so a
+  proxied `bd count --type <infra type>` against one keeps the old answer.
+  Upgrade the server first.
 - The android_arm64 release, which npm `@beads/bd` installs on Termux, is
   now built with cgo, so embedded Dolt works there: `bd init` no longer fails
   with "embedded Dolt requires a CGO build" (#3538). The binary is
