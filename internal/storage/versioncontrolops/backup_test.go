@@ -151,7 +151,12 @@ func doltRestoreError(url string) error {
 // and non-force branches: the source is named without them, and the engine's
 // error, which quotes the URL, is left out of the text whenever the URL
 // carries them. A credential-free URL keeps the engine's error, and the driver
-// error stays unwrappable either way.
+// error stays unwrappable either way. BackupRestore checks a file:// source
+// before any statement, so Dolt's error meets only a source the check passed:
+// the file:// rows name that failure through backupRestoreError, which is what
+// BackupRestore returns for it, and the last subtest runs one through
+// BackupRestore. (A file URL with userinfo never gets that far:
+// TestBackupRestoreRefusesFileURLWithUserinfo.)
 func TestBackupRestoreSanitizesURLOnError(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -216,7 +221,12 @@ func TestBackupRestoreSanitizesURLOnError(t *testing.T) {
 		for _, force := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/force=%v", tc.name, force), func(t *testing.T) {
 				conn := &restoreConn{execErr: doltRestoreError(tc.url)}
-				err := BackupRestore(context.Background(), conn, tc.url, "beads", force)
+				var err error
+				if strings.HasPrefix(tc.url, "file://") {
+					err = backupRestoreError(tc.url, conn.execErr)
+				} else {
+					err = BackupRestore(context.Background(), conn, tc.url, "beads", force)
+				}
 				if err == nil {
 					t.Fatal("BackupRestore returned nil, want an error")
 				}
@@ -241,6 +251,29 @@ func TestBackupRestoreSanitizesURLOnError(t *testing.T) {
 			})
 		}
 	}
+
+	t.Run("checked file source", func(t *testing.T) {
+		dir := t.TempDir()
+		writeManifest(t, dir)
+		url := "file://" + dir
+		doltErr := doltRestoreError(url)
+		db, mock := newMockDB(t)
+		expectEngineAnswer(mock, dir, "", 812)
+		mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_BACKUP('restore', '--force', ?, ?)")).
+			WithArgs(url, "beads").
+			WillReturnError(doltErr)
+
+		err := BackupRestore(context.Background(), db, url, "beads", true)
+		if want := "restore from backup " + url + ": " + doltErr.Error(); err == nil || err.Error() != want {
+			t.Errorf("error = %v, want %q", err, want)
+		}
+		if !errors.Is(err, errDoltRestore) {
+			t.Errorf("errors.Is(%v, errDoltRestore) = false, want the driver error wrapped", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	})
 }
 
 // TestBackupRestorePassesURLVerbatim pins that redaction is error-text only:
@@ -440,6 +473,44 @@ func TestBackupRestoreRefusesPathDoltReadsElsewhere(t *testing.T) {
 				}
 				if got := dirEntryNames(t, dir); strings.Join(got, ",") != "manifest" {
 					t.Errorf("refused restore changed the backup source %s: entries %v, want [manifest]", dir, got)
+				}
+			})
+		}
+	}
+}
+
+// TestBackupRestoreRefusesFileURLWithUserinfo pins where the source check
+// meets the restore error's redaction (#6341): a file URL with userinfo is not
+// DirToFileURL's form, and Dolt drops the userinfo and reads the rest as the
+// path, so the directory bd would check is not the one Dolt reads. It is
+// refused before any SQL (the nil connection panics on any statement), named
+// without its credentials.
+func TestBackupRestoreRefusesFileURLWithUserinfo(t *testing.T) {
+	for _, tc := range []struct {
+		name, url, want string
+		forbidden       []string
+	}{
+		{name: "user and password", url: "file://user:secret@host/path",
+			want: "file://host/path", forbidden: []string{"secret", "user:"}},
+		{name: "token before an absolute path", url: "file://token@/var/backups/x",
+			want: "file:///var/backups/x", forbidden: []string{"token"}},
+		{name: "hash in password", url: "file://KEYF:SEKF#tailF@host/path",
+			want: "file:[redacted]", forbidden: []string{"KEYF", "SEKF", "tailF"}},
+	} {
+		for _, force := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/force=%v", tc.name, force), func(t *testing.T) {
+				err := BackupRestore(context.Background(), nil, tc.url, "beads", force)
+				if !errors.Is(err, ErrBackupPathRewritten) {
+					t.Fatalf("BackupRestore(force=%v) error = %v, want ErrBackupPathRewritten", force, err)
+				}
+				msg := err.Error()
+				if !strings.HasPrefix(msg, "cannot restore from "+tc.want+": ") || !strings.Contains(msg, "the database was not changed") {
+					t.Errorf("refusal %q does not name the source as %q and say the database was not changed", msg, tc.want)
+				}
+				for _, s := range tc.forbidden {
+					if strings.Contains(msg, s) {
+						t.Errorf("refusal leaks %q: %q", s, msg)
+					}
 				}
 			})
 		}

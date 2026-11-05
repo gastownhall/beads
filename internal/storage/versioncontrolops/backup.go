@@ -268,10 +268,19 @@ func BackupRestore(ctx context.Context, db DBConn, url, dbName string, force boo
 	// DirToFileURL (the only producer of file:// URLs here) returns
 	// "file://"+abs, so cutting the scheme gives back the directory bd named.
 	// That is not always the directory Dolt reads, which parses the URL
-	// instead; CheckBackupPath refuses a path where the two differ.
+	// instead; CheckBackupPath refuses a path where the two differ. A file
+	// URL with userinfo, which DirToFileURL never builds, always differs:
+	// Dolt drops the userinfo and reads the rest as the path. It is refused
+	// as well, named without its credentials like any restore error (#6341).
 	// Non-file:// URLs cannot name a directory to check and pass through
 	// untouched.
 	if dir, ok := strings.CutPrefix(url, "file://"); ok {
+		if !isLocalFileURL(url) {
+			source, _ := backupRestoreSafeURL(url)
+			return &refusal{ErrBackupPathRewritten, fmt.Sprintf(
+				"cannot restore from %s: Dolt reads a file:// URL without its user info, so the restore would read a different directory; the database was not changed",
+				source)}
+		}
 		if err := CheckBackupPath(dir); err != nil {
 			return err
 		}
