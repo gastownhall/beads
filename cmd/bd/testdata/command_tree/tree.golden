@@ -3708,7 +3708,7 @@ bd init
   flag --agents-template type=string default="" usage="Path to custom AGENTS.md template (overrides embedded default)"
   flag --backend type=string default="" usage="Storage backend: dolt (default). Removed backends (postgres, mysql, sqlite) print migration guidance."
   flag --contributor type=bool default="false" usage="Run OSS contributor setup wizard"
-  flag --debug type=bool default="false" usage="Run the managed Dolt sql-server with --loglevel=debug and CPU profiling (--prof cpu). Persisted to config.yaml as dolt.debug. No effect on externally-managed servers."
+  flag --debug type=bool default="false" usage="Run the managed Dolt sql-server with --loglevel=debug and CPU profiling (--prof cpu). Persisted to config.local.yaml as dolt.debug. No effect on externally-managed servers."
   flag --destroy-token type=string default="" usage="Explicit confirmation token for destructive re-init in non-interactive mode (format: 'DESTROY-<prefix>')"
   flag --discard-remote type=bool default="false" usage="Authorize discarding the configured remote's Dolt history when re-initializing. Requires --destroy-token in non-interactive mode; see 'bd help init-safety'."
   flag --external type=bool default="false" usage="Server is externally managed (skip server startup); use with --shared-server or --server"
