@@ -1138,12 +1138,9 @@ func installHooksAt(hookNames []string, force, shared, chain, beadsHooks bool, s
 	}
 
 	// hooksDir is the directory Git runs; writeDir receives the hook files.
-	// They differ only for a linked worktree that tracks its own copy of a
-	// primary-checkout hooks directory (see worktreeHooksWriteDir).
-	writeDir := hooksDir
-	if selected != nil {
-		writeDir = worktreeHooksWriteDir(hooksDir, selected.paths, hooksIndexTracker(selected.env))
-	}
+	// They differ only for a linked worktree that tracks its own copy of the
+	// primary-checkout hooks directory Git already runs (see installWriteDir).
+	writeDir := installWriteDir(hooksDir, selected)
 
 	// Create hooks directory if it doesn't exist.
 	// Directories inside .beads/ use BeadsDirPerm (0700); git-managed hook
@@ -1160,6 +1157,8 @@ func installHooksAt(hookNames []string, force, shared, chain, beadsHooks bool, s
 	// hooks from the previously effective hooks directory (e.g. a global
 	// core.hooksPath or the default .git/hooks). Without this, setting a local
 	// core.hooksPath silently shadows the global one and those hooks stop running.
+	// They go into hooksDir, which Git runs from now on: writeDir differs from it
+	// only when core.hooksPath already names hooksDir, and then none are copied.
 	if beadsHooks || shared {
 		if selected == nil {
 			preservePreexistingHooks(hooksDir)
@@ -2061,10 +2060,35 @@ func worktreeJSONLDir(beadsDir, hookRoot, primaryRoot string) string {
 	return filepath.Join(hookRoot, rel)
 }
 
+// installWriteDir returns the directory installHooksAt writes hook files into
+// when Git runs hooksDir: worktreeHooksWriteDir's choice for a selected
+// context whose install leaves core.hooksPath where it is, hooksDir itself
+// otherwise. An install that moves core.hooksPath (--shared or --beads from
+// another hooks directory) makes Git run hooksDir from now on, so hooksDir
+// must hold the hooks it writes and the ones it preserves from the directory
+// Git ran before: a worktree copy would leave them out of every checkout's
+// hooks until the primary checkout took the change. Every outcome is logged,
+// as in hookJSONLDir: a decline the user expected to redirect is otherwise
+// visible only as the primary checkout's copy changing.
+func installWriteDir(hooksDir string, selected *initHooksContext) string {
+	if selected == nil {
+		return hooksDir
+	}
+	writeDir, moves := hooksDir, !utils.PathsEqual(selected.paths.HooksDir, hooksDir)
+	if !moves {
+		writeDir = worktreeHooksWriteDir(hooksDir, selected.paths, hooksIndexTracker(selected.env))
+	}
+	debug.Logf("hooks install: write dir %s (redirected=%t movesHooksPath=%t hooksDir=%s worktree=%s primary=%s)\n",
+		writeDir, writeDir != hooksDir, moves, hooksDir, selected.paths.RepoRoot, selected.paths.MainRepoRoot)
+	return writeDir
+}
+
 // worktreeHooksWriteDir returns the directory an install from paths.RepoRoot
-// writes hook files into when Git runs target (the directory core.hooksPath
-// names or will name). It returns target unless the invoking linked worktree
-// and the primary checkout both track target's path relative to the primary.
+// writes hook files into when Git runs target before and after it (an install
+// that points core.hooksPath at target writes target; see installWriteDir).
+// It returns target unless the invoking linked worktree and the primary
+// checkout both track files inside target's path relative to the primary, and
+// that path in the worktree is not reached through a symlink.
 //
 // This is the install-side twin of worktreeJSONLDir: #2414 makes
 // core.hooksPath absolute into the primary checkout so every worktree runs the
@@ -2086,36 +2110,62 @@ func worktreeHooksWriteDir(target string, paths git.HooksContext, indexTracks fu
 	if utils.PathsEqual(worktree, primary) {
 		return target
 	}
+	// Git reports the checkouts by their resolved paths, while an absolute
+	// core.hooksPath keeps the spelling it was written with (a symlinked home
+	// or /tmp, an alias of the repository). Compare the resolved target, so an
+	// alias of the primary's copy is still the primary's copy and its path
+	// relative to the primary is the one the indexes track.
+	resolved := resolveExistingPath(target)
 	// The worktree is tested first so a worktree nested under the primary
 	// keeps its own targets. The common dir holds the hooks every worktree
 	// shares (<common>/hooks), never a tracked copy.
-	if pathInsideDir(target, worktree) || !pathInsideDir(target, primary) || pathInsideDir(target, paths.CommonDir) {
+	if pathInsideDir(resolved, worktree) || pathInsideDir(resolved, paths.CommonDir) {
 		return target
 	}
-	// As in worktreeJSONLDir: a lexical Rel that disagrees with the
-	// symlink-resolving checks above declines rather than inventing a target.
-	rel, err := filepath.Rel(primary, target)
+	// A target outside the primary, or the primary itself, has no tracked
+	// path relative to it to mirror.
+	rel, err := filepath.Rel(resolveExistingPath(primary), resolved)
 	if err != nil || rel == "." || !filepath.IsLocal(rel) {
 		return target
 	}
 	if !indexTracks(primary, rel) || !indexTracks(worktree, rel) {
 		return target
 	}
-	return filepath.Join(worktree, rel)
+	// The index vouches for the path, not for what the working tree holds
+	// there: a symlink at rel or above it would send every write to its
+	// target, which can be outside the repository, while Git still runs
+	// target. The mirror must be the worktree's own directory; MkdirAll
+	// creates any missing part of it as plain directories.
+	mirror := filepath.Join(worktree, rel)
+	if resolveExistingPath(mirror) != filepath.Join(resolveExistingPath(worktree), rel) {
+		return target
+	}
+	return mirror
 }
 
-// hooksIndexTracker reports whether root's own index tracks any file under
-// rel. It runs only under env, the selected (routing-scrubbed) environment:
-// inherited routing may supply refusal evidence, never a write destination
-// (see initHooksContext). Any failure counts as untracked, the declining
-// direction.
+// hooksIndexTracker reports whether root's own index tracks a file inside
+// the directory rel. An entry for rel itself does not count: a committed
+// symlink or submodule there links to files this index does not hold. It runs
+// only under env, the selected (routing-scrubbed) environment: inherited
+// routing may supply refusal evidence, never a write destination (see
+// initHooksContext). Any failure counts as untracked, the declining direction.
 func hooksIndexTracker(env []string) func(root, rel string) bool {
 	return func(root, rel string) bool {
+		slashRel := filepath.ToSlash(rel)
 		// #nosec G204 G702 - fixed "git" command; root and rel come from the
 		// selected hooks context, each passed as its own argv element.
-		cmd := exec.Command("git", "-C", root, "--literal-pathspecs", "ls-files", "--error-unmatch", "--", filepath.ToSlash(rel))
+		cmd := exec.Command("git", "-C", root, "--literal-pathspecs", "ls-files", "-z", "--", slashRel)
 		cmd.Env = env
-		return cmd.Run() == nil
+		out, err := cmd.Output()
+		if err != nil {
+			return false
+		}
+		for _, entry := range strings.Split(string(out), "\x00") {
+			if strings.HasPrefix(entry, slashRel+"/") {
+				return true
+			}
+		}
+		return false
 	}
 }
 

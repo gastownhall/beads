@@ -319,10 +319,13 @@ func sameMigrationRoot(a, b string) bool {
 	if filepath.Clean(a) == filepath.Clean(b) {
 		return true
 	}
-	return resolveExistingMigrationPath(a) == resolveExistingMigrationPath(b)
+	return resolveExistingPath(a) == resolveExistingPath(b)
 }
 
-func resolveExistingMigrationPath(path string) string {
+// resolveExistingPath resolves symlinks through the deepest existing ancestor
+// of an absolute path and keeps the missing rest as spelled, so a directory
+// that does not exist yet still compares in its parent's resolved spelling.
+func resolveExistingPath(path string) string {
 	if path == "" || !filepath.IsAbs(path) {
 		return filepath.Clean(path)
 	}

@@ -1401,12 +1401,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   run from a linked git worktree now updates that worktree's own tracked copy
   of the hooks directory (`.beads/hooks`, or `.beads-hooks` with `--shared`)
   instead of rewriting the primary checkout's committed hook files, which
-  dirtied a branch nobody was working on and left the worktree's copy stale.
-  `core.hooksPath` still names the primary checkout's copy, so every worktree
-  runs the same hooks (#2414), and bd prints one note naming both
-  directories. This applies only when both the primary checkout and the
-  worktree track that directory; every other layout installs where it did
-  before (#7725).
+  dirtied a branch nobody was working on and left the worktree's copy stale
+  (first fixed by @randlee in #7725). `core.hooksPath` still names the
+  primary checkout's copy, so every worktree runs the same hooks (#2414),
+  and bd prints one note naming both directories. This applies only when
+  both the primary checkout and the worktree track files in that directory,
+  no symlink leads the worktree's copy elsewhere, and `core.hooksPath`
+  already names it; every other layout installs where it did before. A `--shared` or `--beads` install that moves `core.hooksPath`
+  from another hooks directory still writes the primary checkout's copy,
+  with the hooks it carries over from that directory, because Git runs that
+  copy from then on. `bd hooks list` and `bd doctor` keep reporting the copy
+  Git runs, so until the primary checkout gets the change, `bd doctor --fix`
+  run from the worktree does not clear their warning. `bd config apply`
+  still installs into the primary checkout's copy.
 - `bd migrate-personal` no longer leaves an issue in both databases when
   someone else's bead in the project database depends on it. The move's
   delete from the project database refuses such an issue, but it ran only

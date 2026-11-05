@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -65,7 +66,11 @@ func newLinkedHooksFixture(t *testing.T, rel string, track bool) linkedHooksFixt
 func newLinkedHooksFixtureWith(t *testing.T, rel string, track bool, hook func(name string) string) linkedHooksFixture {
 	t.Helper()
 	clearGitRoutingForTest(t)
-	root := t.TempDir()
+	// Git reports resolved paths, so a symlinked TMPDIR (macOS /var) would make
+	// every path below an alias; TestInstallHooksFromLinkedWorktreeThroughPrimaryAlias
+	// covers aliases on purpose.
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
 	f := linkedHooksFixture{root: root, primary: filepath.Join(root, "main"), worktree: filepath.Join(root, "wt"), hook: hook}
 	mkdirs(t, f.primary)
 	initExcludeGit(t, f.primary, "init", "-q", "-b", "main")
@@ -129,6 +134,18 @@ func requireHooksPath(t *testing.T, f linkedHooksFixture, want string) {
 		"core.hooksPath must keep naming the primary copy (#2414)")
 }
 
+// symlinkDirOrSkip creates link pointing at dir, skipping where the platform
+// cannot create directory symlinks.
+func symlinkDirOrSkip(t *testing.T, dir, link string) {
+	t.Helper()
+	if err := os.Symlink(dir, link); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("directory symlink capability unavailable: %v", err)
+		}
+		t.Fatal(err)
+	}
+}
+
 // requireSingleRedirectNote asserts stderr is exactly one note line naming
 // both the written directory and the one Git runs.
 func requireSingleRedirectNote(t *testing.T, stderr, written, runs string) {
@@ -165,6 +182,93 @@ func TestInstallSharedHooksFromLinkedWorktreeWritesTrackedCopy(t *testing.T) {
 	requireHooksPath(t, f, filepath.Join(f.primary, rel))
 	requireSingleRedirectNote(t, stderr, filepath.Join(f.worktree, rel), filepath.Join(f.primary, rel))
 	require.NotContains(t, stdout, "Note:")
+}
+
+// TestInstallHooksFromLinkedWorktreeThroughPrimaryAlias pins the redirect for
+// an absolute core.hooksPath that reaches the primary's copy through a
+// symlink: Git reports the primary resolved, and comparing the two spellings
+// lexically declined and rewrote the primary's committed hooks.
+func TestInstallHooksFromLinkedWorktreeThroughPrimaryAlias(t *testing.T) {
+	rel := filepath.Join(".beads", "hooks")
+	f := newLinkedHooksFixture(t, rel, true)
+	alias := filepath.Join(t.TempDir(), "primary alias")
+	symlinkDirOrSkip(t, f.primary, alias)
+	aliased := filepath.Join(alias, rel)
+	initExcludeGit(t, f.primary, "config", "--local", "core.hooksPath", aliased)
+	resetRepoCaches()
+
+	_, stderr, err := runHooksInstallForTest(t, "", false)
+	require.NoError(t, err)
+
+	requireHooksCurrent(t, filepath.Join(f.worktree, rel))
+	requirePrimaryUnchanged(t, f, rel)
+	requireHooksPath(t, f, aliased)
+	requireSingleRedirectNote(t, stderr, filepath.Join(f.worktree, rel), aliased)
+}
+
+// skipWithoutGitHookRun skips where git has no `git hook run` (Git 2.36+).
+// The probe names a native hook no fixture installs: newer Git refuses
+// unknown hook names.
+func skipWithoutGitHookRun(t *testing.T, repo string) {
+	t.Helper()
+	cmd := gitCommand("hook", "run", "--ignore-missing", "applypatch-msg")
+	cmd.Dir, cmd.Env = repo, gitenv.ScrubRouting(os.Environ())
+	if out, err := cmd.CombinedOutput(); err != nil {
+		if strings.Contains(string(out), "is not a git command") {
+			t.Skipf("git hook run needs Git 2.36 or later: %s", out)
+		}
+		t.Fatalf("git hook run probe: %v: %s", err, out)
+	}
+}
+
+// requireCustomPrePushRuns asserts that Git, from every checkout, runs the
+// custom pre-push hook the fixture's previous hooks directory held.
+func requireCustomPrePushRuns(t *testing.T, f linkedHooksFixture) {
+	t.Helper()
+	for _, checkout := range []string{f.primary, f.worktree} {
+		cmd := gitCommand("hook", "run", "--ignore-missing", "pre-push")
+		cmd.Dir, cmd.Env = checkout, gitenv.ScrubRouting(os.Environ())
+		out, err := cmd.CombinedOutput()
+		var exitErr *exec.ExitError
+		require.ErrorAs(t, err, &exitErr, "pre-push from %s did not fail as the custom hook does: %s", checkout, out)
+		require.Equal(t, 42, exitErr.ExitCode(), "pre-push from %s: %s", checkout, out)
+		require.Contains(t, string(out), "CUSTOM_VALIDATION", "pre-push from %s", checkout)
+	}
+}
+
+// TestInstallSharedHooksFromLinkedWorktreeSwitchKeepsCustomHookRunning pins a
+// mode switch from a worktree: --shared moves core.hooksPath off the hooks
+// directory Git ran onto the primary's copy, so the install writes that copy,
+// as from the primary checkout, and a custom hook preserved from the previous
+// directory keeps running in every checkout. Preserving it into the
+// worktree's copy left the copy Git runs without it, and the hook stopped
+// running everywhere.
+func TestInstallSharedHooksFromLinkedWorktreeSwitchKeepsCustomHookRunning(t *testing.T) {
+	rel := ".beads-hooks"
+	f := newLinkedHooksFixture(t, rel, true)
+	skipWithoutGitHookRun(t, f.primary)
+	prePush := filepath.ToSlash(filepath.Join(rel, "pre-push"))
+	for _, checkout := range []string{f.primary, f.worktree} {
+		initExcludeGit(t, checkout, "rm", "-q", "--", prePush)
+		initExcludeGit(t, checkout, "commit", "-q", "-m", "drop pre-push")
+	}
+	previous := filepath.Join(f.root, "previous-hooks")
+	mkdirs(t, previous)
+	require.NoError(t, os.WriteFile(filepath.Join(previous, "pre-push"), []byte("#!/bin/sh\necho CUSTOM_VALIDATION\nexit 42\n"), 0o755))
+	initExcludeGit(t, f.primary, "config", "--local", "core.hooksPath", previous)
+	resetRepoCaches()
+	requireCustomPrePushRuns(t, f)
+
+	stdout, stderr, err := runHooksInstallForTest(t, "shared", false)
+	require.NoError(t, err)
+
+	require.Contains(t, stdout, "Preserving existing pre-push hook")
+	requireHooksPath(t, f, filepath.Join(f.primary, rel))
+	requireCustomPrePushRuns(t, f)
+	require.Contains(t, string(readInitHooksFile(t, filepath.Join(f.primary, rel, "pre-push"))), "echo CUSTOM_VALIDATION")
+	requireHooksCurrent(t, filepath.Join(f.primary, rel))
+	require.Empty(t, stderr, "an install that moves core.hooksPath is not redirected")
+	require.Empty(t, initExcludeGit(t, f.worktree, "status", "--porcelain"), "install wrote the worktree's copy, which Git does not run")
 }
 
 func TestInstallBeadsHooksFromLinkedWorktreeWritesTrackedCopy(t *testing.T) {
@@ -259,6 +363,64 @@ func TestInstallHooksFromLinkedWorktreeIgnoresInheritedIndex(t *testing.T) {
 	require.NotContains(t, stderr, "Note:")
 }
 
+// writeExternalHooks creates dir, outside both checkouts, holding a custom
+// pre-commit: the directory a symlinked worktree copy points the install at.
+func writeExternalHooks(t *testing.T, dir string) {
+	t.Helper()
+	mkdirs(t, dir)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "pre-commit"), []byte("#!/bin/sh\necho external\n"), 0o755))
+}
+
+// TestInstallSharedHooksFromLinkedWorktreeDeclinesCommittedSymlinkCopy pins
+// the redirect's containment: a worktree that commits its hooks directory as
+// a symlink tracks the link, not hooks. Writing through it rewrote the custom
+// hook and created bd's hooks in a directory outside the repository, while Git
+// still ran the primary's copy. The install keeps the primary's copy, as it
+// did before the redirect.
+func TestInstallSharedHooksFromLinkedWorktreeDeclinesCommittedSymlinkCopy(t *testing.T) {
+	rel := ".beads-hooks"
+	f := newLinkedHooksFixture(t, rel, true)
+	external := filepath.Join(f.root, "external")
+	writeExternalHooks(t, external)
+	initExcludeGit(t, f.worktree, "rm", "-r", "-q", "--", rel)
+	symlinkDirOrSkip(t, external, filepath.Join(f.worktree, rel))
+	initExcludeGit(t, f.worktree, "add", "--", rel)
+	initExcludeGit(t, f.worktree, "commit", "-q", "-m", "link hooks")
+	require.True(t, strings.HasPrefix(initExcludeGit(t, f.worktree, "ls-files", "--stage", "--", rel), "120000 "),
+		"fixture precondition: the worktree tracks %s as a symlink", rel)
+	before := snapshotTreeForDoctorTest(t, external)
+
+	_, stderr, err := runHooksInstallForTest(t, "shared", false)
+	require.NoError(t, err)
+
+	require.Equal(t, before, snapshotTreeForDoctorTest(t, external), "install wrote outside the repository")
+	requireHooksCurrent(t, filepath.Join(f.primary, rel))
+	require.NotContains(t, stderr, "Note:")
+	require.Empty(t, initExcludeGit(t, f.worktree, "status", "--porcelain"))
+}
+
+// TestInstallHooksFromLinkedWorktreeDeclinesSymlinkedWorkingCopy pins the same
+// containment when only the working tree holds the link: the worktree's index
+// still tracks .beads/hooks, but .beads on disk is a symlink to a directory
+// outside the repository, so the tracked path no longer leads to the
+// worktree's own files.
+func TestInstallHooksFromLinkedWorktreeDeclinesSymlinkedWorkingCopy(t *testing.T) {
+	rel := filepath.Join(".beads", "hooks")
+	f := newLinkedHooksFixture(t, rel, true)
+	external := filepath.Join(f.root, "external")
+	writeExternalHooks(t, filepath.Join(external, "hooks"))
+	require.NoError(t, os.RemoveAll(filepath.Join(f.worktree, ".beads")))
+	symlinkDirOrSkip(t, external, filepath.Join(f.worktree, ".beads"))
+	before := snapshotTreeForDoctorTest(t, external)
+
+	_, stderr, err := runHooksInstallForTest(t, "", false)
+	require.NoError(t, err)
+
+	require.Equal(t, before, snapshotTreeForDoctorTest(t, external), "install wrote outside the repository")
+	requireHooksCurrent(t, filepath.Join(f.primary, rel))
+	require.NotContains(t, stderr, "Note:")
+}
+
 // TestWorktreeHooksWriteDir pins both sides of the install retarget: a linked
 // worktree writes its own mirror of a hooks directory only when it and the
 // primary checkout both track it; every other layout keeps the directory Git
@@ -326,5 +488,60 @@ func TestWorktreeHooksWriteDir(t *testing.T) {
 			})
 			require.Equal(t, tt.want, got)
 		})
+	}
+}
+
+// TestWorktreeHooksWriteDirResolvesAliases pins the gate's comparisons on the
+// resolved target: Git reports the checkouts resolved while core.hooksPath
+// keeps its spelling, so an alias of the primary's copy still redirects and
+// aliases of the worktree's copy or the common dir's hooks still decline.
+func TestWorktreeHooksWriteDirResolvesAliases(t *testing.T) {
+	root := t.TempDir()
+	primary, worktree := filepath.Join(root, "main"), filepath.Join(root, "wt")
+	common := filepath.Join(primary, ".git")
+	beadsHooks := filepath.Join(".beads", "hooks")
+	mkdirs(t, filepath.Join(primary, beadsHooks), filepath.Join(common, "hooks"), filepath.Join(worktree, beadsHooks))
+	alias := func(dir string) string {
+		link := filepath.Join(t.TempDir(), "alias")
+		symlinkDirOrSkip(t, dir, link)
+		return link
+	}
+	paths := git.HooksContext{CommonDir: common, RepoRoot: worktree, MainRepoRoot: primary}
+	tracksAll := func(string, string) bool { return true }
+
+	require.Equal(t, filepath.Join(worktree, beadsHooks),
+		worktreeHooksWriteDir(filepath.Join(alias(primary), beadsHooks), paths, tracksAll))
+	for _, target := range []string{filepath.Join(alias(worktree), beadsHooks), filepath.Join(alias(common), "hooks")} {
+		require.Equal(t, target, worktreeHooksWriteDir(target, paths, tracksAll))
+	}
+}
+
+// TestHooksIndexTrackerCountsOnlyFilesInsideTheDirectory pins the index half
+// of the redirect gate: an index entry for rel itself, such as a committed
+// symlink or a submodule, links to files this index does not hold, so it is
+// not a tracked copy of the directory.
+func TestHooksIndexTrackerCountsOnlyFilesInsideTheDirectory(t *testing.T) {
+	clearGitRoutingForTest(t)
+	repo := t.TempDir()
+	initExcludeGit(t, repo, "init", "-q")
+	hooks := filepath.Join(repo, ".beads", "hooks")
+	mkdirs(t, hooks)
+	require.NoError(t, os.WriteFile(filepath.Join(hooks, "pre-commit"), []byte("#!/bin/sh\n"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "plain"), []byte("plain\n"), 0o644))
+	initExcludeGit(t, repo, "add", "--", ".beads", "plain")
+	// Index-only entries: recording a link needs no symlink capability.
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "link-target"), []byte("../elsewhere"), 0o644))
+	blob := initExcludeGit(t, repo, "hash-object", "-w", "--", "link-target")
+	initExcludeGit(t, repo, "update-index", "--add", "--cacheinfo", "120000,"+blob+",.beads-hooks")
+	initExcludeGit(t, repo, "update-index", "--add", "--cacheinfo", "160000,"+blob+",submodule")
+
+	tracks := hooksIndexTracker(gitenv.ScrubRouting(os.Environ()))
+	for rel, want := range map[string]bool{
+		filepath.Join(".beads", "hooks"): true,
+		".beads-hooks":                   false, // a committed symlink
+		"submodule":                      false,
+		"plain":                          false,
+	} {
+		require.Equal(t, want, tracks(repo, rel), rel)
 	}
 }
