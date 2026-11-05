@@ -6,3 +6,10 @@
 
 # Tracked binary assets must never pass through text conversion or text diffs.
 *.jpg binary
+
+# CHANGELOG.md takes an entry from almost every PR at the same spot, so two
+# queued PRs conflict as soon as one lands. The built-in union driver keeps both
+# sides' lines on local merges and rebases (including the factory's main-merge
+# step). GitHub's server-side mergeability check, Update branch and merge queue
+# do not apply it, so it does not stop GitHub reporting a conflict.
+CHANGELOG.md merge=union
