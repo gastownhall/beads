@@ -700,7 +700,8 @@ func (s *DoltStore) deleteIssue(ctx context.Context, id string) error {
 }
 
 // DeleteIssues deletes multiple issues in a single transaction.
-// If cascade is true, recursively deletes dependents.
+// If cascade is true, also deletes their parent-child descendants and orphans
+// every other dependent.
 // If cascade is false but force is true, deletes issues and orphans dependents.
 // If both are false, returns an error if any issue has dependents.
 // If dryRun is true, only computes statistics without deleting.

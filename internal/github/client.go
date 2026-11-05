@@ -9,6 +9,7 @@ import (
 	"io"
 	"math/rand/v2"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -486,6 +487,35 @@ func (c *Client) ListRepositories(ctx context.Context) ([]Repository, error) {
 	}
 
 	return allRepos, nil
+}
+
+// FetchRepository retrieves the configured repository. GitHub answers a
+// renamed or transferred repository's old name with a redirect, which the
+// HTTP client follows, so FullName is the repository's current owner/repo.
+func (c *Client) FetchRepository(ctx context.Context) (*Repository, error) {
+	return c.fetchRepository(ctx, c.repoPath())
+}
+
+// fetchRepositoryNamed retrieves the repository GitHub serves as owner/repo
+// on the client's host. That may be another repository's former name, which
+// GitHub answers by redirect to the repository it belongs to now.
+func (c *Client) fetchRepositoryNamed(ctx context.Context, owner, repo string) (*Repository, error) {
+	return c.fetchRepository(ctx, "/repos/"+url.PathEscape(owner)+"/"+url.PathEscape(repo))
+}
+
+func (c *Client) fetchRepository(ctx context.Context, path string) (*Repository, error) {
+	urlStr := c.BaseURL + path
+	respBody, _, err := c.doRequest(ctx, http.MethodGet, urlStr, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch repository: %w", err)
+	}
+
+	var repo Repository
+	if err := json.Unmarshal(respBody, &repo); err != nil {
+		return nil, fmt.Errorf("failed to parse repository response: %w", err)
+	}
+
+	return &repo, nil
 }
 
 // AddLabels adds labels to an existing issue.

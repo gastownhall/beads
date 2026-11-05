@@ -621,14 +621,68 @@ func TestProxiedServerReady2(t *testing.T) {
 			t.Errorf("expected 'No open issues', got: %s", stdout)
 		}
 
-		blocked := bdProxiedCreate(t, bd, p.dir, "Blocked open issue")
-		db := openProxiedDB(t, p)
-		if _, err := db.ExecContext(context.Background(), "UPDATE issues SET is_blocked = 1 WHERE id = ?", blocked.ID); err != nil {
-			t.Fatalf("mark issue blocked: %v", err)
+		// An in-progress issue is open but not ready, and nothing is blocked:
+		// the message must not claim blocking dependencies (GH#3268).
+		wip := bdProxiedCreate(t, bd, p.dir, "In progress issue")
+		if out, err := bdProxiedRun(t, bd, p.dir, "update", wip.ID, "--status", "in_progress"); err != nil {
+			t.Fatalf("set in_progress: %v\n%s", err, out)
 		}
 		stdout, _ = bdProxiedReadyCapture(t, bd, p)
 		if !strings.Contains(stdout, "No ready work found") {
 			t.Errorf("expected 'No ready work found', got: %s", stdout)
+		}
+		if strings.Contains(stdout, "all issues have blocking dependencies") {
+			t.Errorf("no issue is blocked, but the message claims blocking dependencies: %s", stdout)
+		}
+		if !strings.Contains(stdout, "bd recompute-blocked") {
+			t.Errorf("expected the neutral message to name 'bd recompute-blocked', got: %s", stdout)
+		}
+
+		// Same honest message when a label filter matches no open issue.
+		filtered := bdProxiedCreate(t, bd, p.dir, "Open but filtered out", "--label", "rde-open")
+		stdout, _ = bdProxiedReadyCapture(t, bd, p, "--label", "rde-nomatch")
+		if !strings.Contains(stdout, "No ready work found") {
+			t.Errorf("expected 'No ready work found' for a label that matches nothing, got: %s", stdout)
+		}
+		if strings.Contains(stdout, "all issues have blocking dependencies") {
+			t.Errorf("the filter matched nothing, so the output must not claim blocking dependencies, got: %s", stdout)
+		}
+		if !strings.Contains(stdout, "bd recompute-blocked") {
+			t.Errorf("expected the empty state to name 'bd recompute-blocked', got: %s", stdout)
+		}
+		// The filtered-out issue has to stop being ready work, or later
+		// unfiltered reads are not empty and no empty state prints at all.
+		if out, err := bdProxiedRun(t, bd, p.dir, "update", filtered.ID, "--status", "in_progress"); err != nil {
+			t.Fatalf("set filtered in_progress: %v\n%s", err, out)
+		}
+
+		// A real blocker keeps the exact claim: the open issue depends on the
+		// in-progress one, so bd blocked lists it.
+		bdProxiedCreate(t, bd, p.dir, "Blocked by the in-progress issue", "--deps", "depends-on:"+wip.ID)
+		stdout, _ = bdProxiedReadyCapture(t, bd, p)
+		if !strings.Contains(stdout, "No ready work found (all issues have blocking dependencies)") {
+			t.Errorf("expected the exact blocking-claim line, got: %s", stdout)
+		}
+		if strings.Contains(stdout, "bd recompute-blocked") {
+			t.Errorf("a real blocker must not get the stale-flag hint, got: %s", stdout)
+		}
+
+		// With one ready issue, --offset 1 is a page past the last one: the
+		// blocked issue above must not make it claim blocking dependencies
+		// while the first page lists ready work.
+		bdProxiedCreate(t, bd, p.dir, "Unblocked open issue")
+		stdout, _ = bdProxiedReadyCapture(t, bd, p)
+		if !strings.Contains(stdout, "Unblocked open issue") {
+			t.Fatalf("expected the first page to list the unblocked issue, got: %s", stdout)
+		}
+		stdout, _ = bdProxiedReadyCapture(t, bd, p, "--offset", "1")
+		if !strings.Contains(stdout, "No ready work at offset 1") {
+			t.Errorf("expected the --offset empty-page line, got: %s", stdout)
+		}
+		for _, claim := range []string{"all issues have blocking dependencies", "Nothing bd ready would list is blocked"} {
+			if strings.Contains(stdout, claim) {
+				t.Errorf("a page past the last ready issue must not judge blockers (%q), got: %s", claim, stdout)
+			}
 		}
 	})
 
