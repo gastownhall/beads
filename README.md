@@ -393,7 +393,10 @@ and a later sync could overwrite those edits with no conflict. If the failure
 is temporary, run the command again. If the error names another repository
 your beads link to and GitHub refuses the token for it (a 403), give the token
 read access to it. If the name is a former name of the configured repository,
-relinking those beads to their issues' current URLs also ends the lookup.
+relinking those beads to their issues' current URLs also ends the lookup. An
+issue transferred to another repository counts as that repository's: pull,
+push and conflict detection leave it and its bead alone, with a warning, as a
+push does for any bead linked outside the configured repository.
 
 ## 🌐 Community Tools
 

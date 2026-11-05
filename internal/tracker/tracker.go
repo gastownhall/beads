@@ -53,7 +53,12 @@ type IssueTracker interface {
 
 	// ExtractIdentifier extracts the human-readable identifier from an external_ref.
 	// It returns "" when the tracker cannot resolve ref to an identifier it
-	// can address; sync then leaves the linked issue alone.
+	// can address; sync then leaves the linked issue alone. A fetched issue
+	// whose own ref yields "" left the configured target (e.g. an issue
+	// transferred to another repository): a push or conflict check that
+	// fetched it leaves it alone too, and a pull imports it only from the
+	// tracker's issue list and where no local issue would be duplicated (see
+	// Engine.pullSkipsUnaddressable).
 	ExtractIdentifier(ref string) string
 
 	// BuildExternalRef constructs an external_ref string for a tracker issue.
@@ -109,6 +114,14 @@ type MatchKeyer interface {
 type IdentityKeyer interface {
 	LocalIdentityKey(issue *types.Issue) string
 	RemoteIdentityKey(issue *TrackerIssue) string
+}
+
+// TargetDescriber is implemented by trackers whose ExtractIdentifier
+// addresses refs of one configured target only (GitHub: one repository).
+// DescribeTarget names that target, e.g. "repository acme/repo", for the
+// warnings a sync gives about refs outside it; "" means unknown.
+type TargetDescriber interface {
+	DescribeTarget() string
 }
 
 // FieldMapper handles bidirectional conversion of issue fields between
