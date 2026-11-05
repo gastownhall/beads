@@ -25,6 +25,31 @@ var CommandEnvKeys = []string{
 	"BEADS_DOLT_BIN",
 }
 
+// CommandEnvKeySuffixes mark an environment setting as executable by its name:
+// a key ending in one of them holds a command bd runs or the path of a binary
+// it executes, like BEADS_DOLT_CREDENTIAL_COMMAND and BEADS_DOLT_BIN. A project
+// .beads/.env is refused every such key, not only the ones CommandEnvKeys
+// lists, so a command setting added later, or one only a downstream build
+// reads, never depends on someone remembering to extend that list.
+var CommandEnvKeySuffixes = []string{
+	"_COMMAND",
+	"_BIN",
+	"_BINARY",
+}
+
+// CredentialEnvKeys names environment settings whose value is a credential bd
+// presents on the caller's behalf ahead of every source the caller set up.
+// BEADS_HTTP_TOKEN is the first rung of the http backend's bearer ladder,
+// above BEADS_HTTP_TOKEN_COMMAND and the credentials file, for the server the
+// workspace's http_target.json names, which a cloned repository can supply. A
+// workspace that could also supply the bearer would choose, without the
+// caller's say, whose credential every request to that server carries. The
+// per-project Dolt passwords (BEADS_DOLT_PASSWORD, DOLT_REMOTE_PASSWORD) are
+// the documented .beads/.env use case (GH#2520) and stay admitted.
+var CredentialEnvKeys = []string{
+	"BEADS_HTTP_TOKEN",
+}
+
 // CredentialRedirectEnvKeys names environment settings that redirect where a
 // user's credential command or file is sent or read from, or that redirect the
 // trust/config bd loads a server and its credentials from.
@@ -40,6 +65,33 @@ var CredentialRedirectEnvKeys = []string{
 	// .beads/.env that pointed it at a committed cert would let a
 	// network-positioned attacker present a MITM certificate bd accepts.
 	"BEADS_HTTP_CA_FILE",
+	// BEADS_HTTP_ALLOW_INSECURE lets the http backend send the caller's bearer
+	// over plain http to a non-loopback server; from .beads/.env it would make
+	// that the workspace's decision instead of the caller's
+	// (bd connect --allow-plaintext records the caller's).
+	"BEADS_HTTP_ALLOW_INSECURE",
+	// BEADS_SERVE_TOKEN_FILE names the file of bearer tokens bd serve accepts,
+	// and having one is what lets serve bind beyond loopback; a .beads/.env that
+	// pointed it at a committed file would admit tokens the file's author knows.
+	"BEADS_SERVE_TOKEN_FILE",
+}
+
+// OutputFileEnvKeys names environment settings whose value is the path of a
+// file bd creates, truncates or appends to. BEADS_MEM_PROFILE and
+// BEADS_MEM_STATS are created when a command exits (an existing file is
+// truncated), and the proxied Dolt server appends its log to
+// BEADS_PROXIED_SERVER_LOG. From a project .beads/.env, any of them would let a
+// cloned repository choose a file on the caller's machine for bd to overwrite.
+// They are diagnostics and per-machine choices, so only the caller's shell
+// sets them (for the server log, also bd init --proxied-server-log-path).
+// BEADS_MEM_PROFILE_NOGC names no path, and the directories bd keeps its own
+// state in (BEADS_DOLT_DATA_DIR, BEADS_SHARED_SERVER_DIR,
+// BEADS_PROXIED_SERVER_ROOT_PATH) hold only files of bd's naming, so they stay
+// admitted.
+var OutputFileEnvKeys = []string{
+	"BEADS_MEM_PROFILE",
+	"BEADS_MEM_STATS",
+	"BEADS_PROXIED_SERVER_LOG",
 }
 
 // AllowedDoltEnvKeys names the only bare DOLT_* variables a project
@@ -95,25 +147,37 @@ var AllowedOrchestratorEnvKeys = []string{
 // AllowedProjectEnvKey reports whether key may be imported from a project
 // .beads/.env file. Comparison is case-insensitive so mixed-case keys on
 // Windows cannot bypass the filter. Only BEADS_* and BD_* keys outside the
-// command and credential-redirection sets, plus the explicit Dolt remote
-// credential keys in AllowedDoltEnvKeys and the orchestrator root in
-// AllowedOrchestratorEnvKeys, are admitted: the broader DOLT_*
-// namespace is deliberately excluded (see AllowedDoltEnvKeys) and non-prefixed
-// keys are refused so child git/dolt/ssh processes cannot inherit GIT_*, SSH_*,
-// LD_*, or DYLD_* hooks.
+// command (CommandEnvKeys, CommandEnvKeySuffixes), credential
+// (CredentialEnvKeys), credential-redirection and output-file
+// (OutputFileEnvKeys) sets, plus the explicit Dolt remote credential keys in
+// AllowedDoltEnvKeys and the orchestrator root in AllowedOrchestratorEnvKeys,
+// are admitted: the broader DOLT_* namespace is deliberately excluded (see
+// AllowedDoltEnvKeys) and non-prefixed keys are refused so child git/dolt/ssh
+// processes cannot inherit GIT_*, SSH_*, LD_*, or DYLD_* hooks.
 func AllowedProjectEnvKey(key string) (bool, string) {
 	upper := strings.ToUpper(strings.TrimSpace(key))
 	if upper == "" {
 		return false, "empty environment variable name"
 	}
+	const commandReason = "command settings must come from your shell environment or user config"
 	for _, k := range CommandEnvKeys {
 		if upper == k {
-			return false, "command settings must come from your shell environment or user config"
+			return false, commandReason
+		}
+	}
+	for _, k := range CredentialEnvKeys {
+		if upper == k {
+			return false, "credential settings must come from your shell environment or user config"
 		}
 	}
 	for _, k := range CredentialRedirectEnvKeys {
 		if upper == k {
 			return false, "credential target settings must come from your shell environment or user config"
+		}
+	}
+	for _, k := range OutputFileEnvKeys {
+		if upper == k {
+			return false, "output file settings must come from your shell environment"
 		}
 	}
 	for _, k := range AllowedDoltEnvKeys {
@@ -128,6 +192,11 @@ func AllowedProjectEnvKey(key string) (bool, string) {
 	}
 	if !strings.HasPrefix(upper, "BEADS_") && !strings.HasPrefix(upper, "BD_") {
 		return false, "only BEADS_*, BD_*, GT_ROOT, and the Dolt remote credential variables (DOLT_REMOTE_USER, DOLT_REMOTE_PASSWORD) are allowed in .beads/.env"
+	}
+	for _, suffix := range CommandEnvKeySuffixes {
+		if strings.HasSuffix(upper, suffix) {
+			return false, commandReason
+		}
 	}
 	return true, ""
 }

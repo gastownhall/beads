@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **A committed `.beads/.env` can no longer copy your environment into bd's
+  settings, set a command or bearer token by a name the deny list missed, or
+  pick a file for bd to overwrite.**
+  bd read `.beads/.env` with `$VAR`/`${VAR}` expansion from the process
+  environment, so the file could set `DOLT_REMOTE_PASSWORD=${GITHUB_TOKEN}`, or
+  put any secret into `BEADS_ACTOR`, and bd would send it to the workspace's
+  own `sync.remote` (which the endpoint pins do not cover) or write it into
+  issues the workspace syncs. Values are now taken as written: a key whose
+  value expansion would change is ignored with `beads: ignoring <KEY> from
+  .beads/.env ($VAR references are not expanded in .beads/.env; ...)`. A
+  literal dollar sign (single-quoted, escaped, or not followed by a variable
+  name) is unaffected; a value that referred to another variable must be
+  written out or set in your shell. The key filter now also refuses, by name,
+  every `BEADS_*`/`BD_*` key ending in `_COMMAND`, `_BIN` or `_BINARY`, so a
+  command setting added later is covered without extending a list, and
+  `BEADS_HTTP_TOKEN`, the first rung of the http backend's bearer ladder,
+  which let the workspace that names the server (`http_target.json`) also
+  choose the bearer bd presents to it. The plaintext grant
+  `BEADS_HTTP_ALLOW_INSECURE` and `bd serve`'s accepted-token file
+  `BEADS_SERVE_TOKEN_FILE` are refused alongside the other credential target
+  settings. So are the files bd writes to, which a committed value could point
+  at any file you can write: the heap profile and MemStats summary bd creates
+  on exit (`BEADS_MEM_PROFILE`, `BEADS_MEM_STATS`, which truncated an existing
+  file) and the log the proxied Dolt server appends to
+  (`BEADS_PROXIED_SERVER_LOG`). Set these in your shell, user configuration or
+  the credentials file instead.
+
 - **A `GT_ROOT` from a committed `.beads/.env` can no longer make bd write or
   delete formula files outside the repo.** `GT_ROOT` was admitted from
   `.beads/.env` on the grounds that bd only reads from it, but
