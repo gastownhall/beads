@@ -5,9 +5,9 @@ description: Complete reference for bd configuration across config.yaml and data
 
 Complete configuration reference for beads.
 
-Last reviewed: 2026-09-10
+Last reviewed: 2026-10-26
 
-Freshness source: `cmd/bd/main.go`, `cmd/bd/config.go`, and `internal/configfile/`.
+Freshness source: `cmd/bd/main.go`, `cmd/bd/config.go`, `internal/config/`, `internal/configfile/`, and `internal/endpointtrust/`.
 
 beads has two complementary configuration systems:
 
@@ -39,6 +39,8 @@ For Viper-managed (YAML) keys, highest to lowest:
 4. **Built-in defaults**
 
 Project-level keys written via `bd config set` (Jira, Linear, GitHub, status maps, etc.) live in the Dolt database. They are read at command time and have no env var override.
+
+bd pins the AI, tracker (GitHub, GitLab, Azure DevOps, Jira, Linear) and remote Dolt server endpoint each workspace sends credentials to, in `~/.config/beads/trusted-endpoints.json` (`$XDG_CONFIG_HOME/beads/` when set, `%APPDATA%\beads\` on Windows). That location is resolved from your shell environment only — a committed `.beads/.env` that sets `XDG_CONFIG_HOME`, `APPDATA` or `HOME` cannot relocate the pin store. The vendor default endpoint and bd's local Dolt server pin on first use; a custom endpoint from shared configuration is refused until a private source confirms it, and the confirmation pins it. The comparison covers scheme, host, port and path. If an endpoint from shared configuration (`.beads/config.yaml`, `.beads/config.local.yaml`, `.beads/.env`, `.beads/metadata.json` or the synced database) later differs from the pin, bd refuses to send the credential. The Dolt server pin is enforced wherever `BEADS_DOLT_PASSWORD` would be sent, including the `bd dolt status` and `bd dolt clean-databases` diagnostics and the `bd doctor` checks and repairs. To confirm an intended change, set the endpoint's environment variable in your shell (not in `.beads/.env`) or the key in `~/.config/bd/config.yaml`; to reset, delete the workspace's entry from the pin file. Dolt remote credentials (`DOLT_REMOTE_USER`/`DOLT_REMOTE_PASSWORD` for `sync.remote` and federation peers) are not covered by these pins.
 
 When a config.yaml value or environment variable shadows a database key, `bd config list` prints an override warning, and `bd config show` reports the source of every effective key.
 
@@ -310,6 +312,7 @@ These are written to the Dolt database by `bd config set` and have no env var ov
 | `status.custom` | Custom statuses with optional behavior categories (see [below](#custom-statuses-and-types)) |
 | `types.custom` | Comma-separated list of custom issue types |
 | `types.infra` | Infra types routed to the wisps table instead of the versioned issues table |
+| `types.retained` | Issue types whose closed beads only `bd prune`/`bd purge --retain-ids` may delete among the retention commands: plain sweeps, `bd gc`'s decay, `bd admin cleanup` and the stale-closed-issues `bd doctor --fix` keep them. Aliases and case variants of built-in types are matched canonically. `bd mol wisp gc`, the pollution deletes, `bd migrate-personal` and the named deletes do not consult it. A bd that predates the setting ignores it, so upgrade every bd that runs these commands on the workspace (see [Wisps](/workflows/wisps#keeping-key-bearing-types-out-of-plain-sweeps)) |
 | `compact_tier1_days`, `compact_tier2_days` | Age thresholds in days for `bd admin compact` tier eligibility (defaults `30` and `90`) |
 | `issue_id_mode` | `hash` (default) \| `counter` (see [below](#sequential-counter-ids)) |
 | `min_hash_length`, `max_hash_length` | Adaptive ID bounds (defaults `3` and `8`) |
@@ -531,8 +534,8 @@ Selected commonly-used variables:
 | `BD_DEBUG` | Enable debug logging |
 | `BD_HTTP_READ_MEMO` | `0` turns off the per-command read memo on an http workspace, so each repeated row or settings read in a command goes to the server; for ruling out a stale read |
 | `BD_MIGRATION_FREEZE_FILE` | Check this exact path for the freeze marker instead of walking ancestor directories; authoritative when set (see [Migration Freeze](#migration-freeze)) |
-| `BEADS_DIR` | Force the active beads workspace directory |
-| `BEADS_CEILING_DIRECTORIES` | Directories (separated like `PATH`) that `.beads` and `config.yaml` discovery never looks at or above, like git's `GIT_CEILING_DIRECTORIES`; the starting directory is always examined. For sandboxes such as `bazel test` that must not reach the user's own `~/.beads` |
+| `BEADS_DIR` | Force the active beads workspace directory. It overrides every project's own `.beads`, so an exported `BEADS_DIR` sends every command run in that shell to its workspace. Workspace discovery never adopts `~/.beads` (the `.beads` of the account's home directory) unless the home directory itself is the repository root, so name a home-directory workspace for each command that should use it: `BEADS_DIR=~/.beads bd <command>` |
+| `BEADS_CEILING_DIRECTORIES` | Directories (separated like `PATH`) that `.beads` and `config.yaml` discovery never looks at or above, like git's `GIT_CEILING_DIRECTORIES`; the starting directory is always examined. For sandboxes such as `bazel test` that must not reach the user's own `~/.beads`. Independent of this ceiling, workspace discovery passes over the user's own `~/.beads` unless the home directory is the repository root (see `BEADS_DIR`), and does not look above the home directory unless a repository encloses it |
 | `BEADS_ACTOR` | Actor identity (preferred over `BD_ACTOR`, which is a deprecated alias) |
 | `BEADS_IDENTITY` | Sender identity for `bd mail` |
 | `BEADS_FSCK_TIMEOUT` | Runtime-only timeout for the pre-push `dolt fsck --quiet` integrity check (default `30s`) |

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -15,6 +16,8 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/workapi"
+	"github.com/steveyegge/beads/issueops"
 )
 
 // CheckStaleClosedIssues detects closed issues that could be cleaned up.
@@ -92,36 +95,87 @@ func checkStaleClosedIssuesDB(db *sql.DB, thresholdDays int) DoctorCheck {
 		}
 	}
 
-	// Find closed issues older than configured threshold, excluding pinned
+	// Find closed issues older than configured threshold, excluding pinned,
+	// counted by type so the retained types can be set apart.
 	cutoff := time.Now().AddDate(0, 0, -thresholdDays).Format(time.RFC3339)
-	var cleanable int
-	err := db.QueryRow(
-		"SELECT COUNT(*) FROM issues WHERE status = 'closed' AND closed_at < ? AND (pinned = 0 OR pinned IS NULL)",
+	queryFailed := DoctorCheck{
+		Name:     "Stale Closed Issues",
+		Status:   StatusOK,
+		Message:  "N/A (query failed)",
+		Category: CategoryMaintenance,
+	}
+	var retainedSetting string
+	err := db.QueryRow("SELECT `value` FROM config WHERE `key` = ?", issueops.SettingKeyTypesRetained).Scan(&retainedSetting)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return queryFailed
+	}
+	rows, err := db.Query(
+		"SELECT issue_type, COUNT(*) FROM issues WHERE status = 'closed' AND closed_at < ? AND (pinned = 0 OR pinned IS NULL) GROUP BY issue_type",
 		cutoff,
-	).Scan(&cleanable)
+	)
 	if err != nil {
-		return DoctorCheck{
-			Name:     "Stale Closed Issues",
-			Status:   StatusOK,
-			Message:  "N/A (query failed)",
-			Category: CategoryMaintenance,
+		return queryFailed
+	}
+	defer func() { _ = rows.Close() }()
+	byType := map[string]int{}
+	for rows.Next() {
+		var issueType string
+		var n int
+		if err := rows.Scan(&issueType, &n); err != nil {
+			return queryFailed
 		}
+		byType[issueType] += n
+	}
+	if err := rows.Err(); err != nil {
+		return queryFailed
 	}
 
+	cleanable, retained := countStaleCleanable(byType, retainedSetting)
+	return staleClosedCheckResult(cleanable, retained, thresholdDays)
+}
+
+// countStaleCleanable splits the stale closed rows, counted by issue type,
+// into the ones the fix may delete and the ones of a type the workspace
+// retains (retainedSetting is the stored value of types.retained), which the
+// fix holds back (fix.StaleClosedIssues).
+func countStaleCleanable(byType map[string]int, retainedSetting string) (cleanable, retained int) {
+	retainedTypes := workapi.RetainedTypesFromSetting(retainedSetting)
+	for issueType, n := range byType {
+		if retainedTypes[issueType] {
+			retained += n
+		} else {
+			cleanable += n
+		}
+	}
+	return cleanable, retained
+}
+
+// staleClosedCheckResult is the check's answer for cleanable rows and
+// retained ones. Only cleanable rows warn: the fix never deletes a retained
+// row, so warning about one would never clear.
+func staleClosedCheckResult(cleanable, retained, thresholdDays int) DoctorCheck {
+	retainedDetail := ""
+	if retained > 0 {
+		retainedDetail = fmt.Sprintf("%d more of a retained type (types.retained) are kept; only bd prune/purge --retain-ids deletes them", retained)
+	}
 	if cleanable == 0 {
 		return DoctorCheck{
 			Name:     "Stale Closed Issues",
 			Status:   StatusOK,
 			Message:  "No stale closed issues",
+			Detail:   retainedDetail,
 			Category: CategoryMaintenance,
 		}
 	}
-
+	detail := "These issues can be cleaned up to reduce database size"
+	if retainedDetail != "" {
+		detail += "; " + retainedDetail
+	}
 	return DoctorCheck{
 		Name:     "Stale Closed Issues",
 		Status:   StatusWarning,
 		Message:  fmt.Sprintf("%d closed issue(s) older than %d days", cleanable, thresholdDays),
-		Detail:   "These issues can be cleaned up to reduce database size",
+		Detail:   detail,
 		Fix:      "Run 'bd doctor --fix' to cleanup, or 'bd admin cleanup --force' for more options",
 		Category: CategoryMaintenance,
 	}

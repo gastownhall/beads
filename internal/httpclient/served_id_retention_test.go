@@ -44,6 +44,10 @@ func newServedIDRetentionFixture(t *testing.T, prefix string) conformance.IDRete
 	if err != nil {
 		t.Fatalf("BatchCreator(): %v", err)
 	}
+	workspaceConfig, err := env.subject.WorkspaceConfig()
+	if err != nil {
+		t.Fatalf("WorkspaceConfig(): %v", err)
+	}
 	return conformance.IDRetentionFixture{
 		IssuePrefix:  env.prefix,
 		Sweep:        sweep,
@@ -51,6 +55,10 @@ func newServedIDRetentionFixture(t *testing.T, prefix string) conformance.IDRete
 		Reader:       reader,
 		BatchApplier: applier,
 		BatchCreator: creator,
+		// types.retained is written through the wire's config surface, so
+		// the retained-type case also proves the server's sweep reads the
+		// setting a client stored.
+		WorkspaceConfig: workspaceConfig,
 		CommittedRetired: func(ctx context.Context, id string) (bool, error) {
 			var count int
 			err := env.queryScalar(ctx, "SELECT COUNT(*) FROM id_tombstones AS OF 'HEAD' WHERE id = ?", []any{id}, &count)
@@ -118,4 +126,16 @@ func TestServedIDRetentionRefusesANoHistoryRecreateThroughEveryDoor(t *testing.T
 
 func TestServedIDRetentionAWispsPlaneRetainingSweepRetiresItsRows(t *testing.T) {
 	conformance.RunIDRetentionAWispsPlaneRetainingSweepRetiresItsRows(t, t.Context(), newServedIDRetentionFixture(t, "hidrf"))
+}
+
+func TestServedIDRetentionAPlainSweepSkipsARetainedType(t *testing.T) {
+	conformance.RunIDRetentionAPlainSweepSkipsARetainedType(t, t.Context(), newServedIDRetentionFixture(t, "hidrg"))
+}
+
+func TestServedIDRetentionARetainedTypeReadErrorFailsTheSweep(t *testing.T) {
+	conformance.RunIDRetentionARetainedTypeReadErrorFailsTheSweep(t, t.Context(), newServedIDRetentionFixture(t, "hidrh"))
+}
+
+func TestServedIDRetentionARetainedTypeIsHeldBackBeforeTheProtectionsAndTheLimit(t *testing.T) {
+	conformance.RunIDRetentionARetainedTypeIsHeldBackBeforeTheProtectionsAndTheLimit(t, t.Context(), newServedIDRetentionFixture(t, "hidri"))
 }

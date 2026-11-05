@@ -400,15 +400,18 @@ func AllowSharedSchemaMigration(allow bool) {
 	schema.SetSharedMigrateConsent(allow)
 }
 
-// Open opens a Dolt-backed beads database at the given path.
-// This always opens in embedded mode. Use OpenFromConfig to respect
-// server mode settings from metadata.json.
+// Open opens a Dolt-backed beads database at the given path, connecting to
+// a Dolt sql-server. Use OpenFromConfig to respect server mode settings
+// from metadata.json.
 //
 // The workspace holding dbPath (its parent directory) is refused, before
 // anything is written there, when bd run in it would refuse it from its
 // contents (checkDiscoveredBackend): a format this build cannot open
 // (*UnsupportedWorkspaceFormatError), a historical SQLite workspace
-// (*LegacyWorkspaceError), or a removed or unknown backend.
+// (*LegacyWorkspaceError), or a removed or unknown backend. An existing
+// database whose project ID differs from the one in that workspace's
+// metadata.json is refused as well, with an untyped PROJECT IDENTITY
+// MISMATCH error (GH#5559).
 func Open(ctx context.Context, dbPath string) (Storage, error) {
 	if err := checkDiscoveredBackend(filepath.Dir(dbPath)); err != nil {
 		return nil, err

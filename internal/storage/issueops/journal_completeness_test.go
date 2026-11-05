@@ -91,6 +91,7 @@ var mutationEntryPoints = []string{
 	"DeleteIssueInTx",
 	"DeleteIssueInTxWithResult",
 	"DeleteIssuesInTx",
+	"DeleteIssuesBesideWispsInTx",
 	"DeleteResolvedSetInTx",
 	"DeleteIssuesBySourceRepoInTx",
 	"DeleteInTx",

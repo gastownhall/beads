@@ -114,7 +114,7 @@ func parseBool(raw string, present bool) (bool, bool) {
 // results:
 //
 //	func newX(...) (s storage.DoltStorage, err error) {
-//	    defer func() { s, err = eventsjournal.ActivateStore(beadsDir, s, err) }()
+//	    defer func() { s, err = eventsjournal.ActivateStore(beadsDir, writesBeads, s, err) }()
 //	    ... open and return ...
 //	}
 //
@@ -123,13 +123,14 @@ func parseBool(raw string, present bool) (bool, bool) {
 // syntactic unit — which is what lets the construction guard check the property
 // structurally instead of chasing a call graph. A failed open passes through
 // untouched; a failed activation closes the store rather than returning one
-// that would mutate unrecorded.
-func ActivateStore(beadsDir string, s storage.DoltStorage, err error) (storage.DoltStorage, error) {
+// that would mutate unrecorded. writesBeads is the open's posture, passed
+// through to Apply.
+func ActivateStore(beadsDir string, writesBeads bool, s storage.DoltStorage, err error) (storage.DoltStorage, error) {
 	if err != nil || s == nil {
 		return s, err
 	}
 	configurer, _ := storage.UnwrapStore(s).(storage.EventsJournalConfigurer)
-	if cfgErr := Apply(configurer, EnabledFor(beadsDir)); cfgErr != nil {
+	if cfgErr := Apply(configurer, EnabledFor(beadsDir), writesBeads); cfgErr != nil {
 		_ = s.Close()
 		return nil, cfgErr
 	}
@@ -146,7 +147,19 @@ func ActivateStore(beadsDir string, s storage.DoltStorage, err error) (storage.D
 // the journal is that a consumer can trust its cursor, and a plumbing that
 // records nothing while reporting success is the one outcome that breaks that
 // trust invisibly. A disabled workspace accepts any plumbing.
-func Apply(configurer storage.EventsJournalConfigurer, enabled bool) error {
+//
+// It also fails there when the configurer DOES support the journal but its
+// table's shape does not (storage.EventsJournalShapeChecker, PR A1) — but
+// only for an open that is going to write beads (writesBeads). There a
+// missing required column refuses at open rather than letting
+// SetEventsJournalEnabled succeed and every write fail afterward, the gci
+// failure mode this check replaces. An open that will not write beads (a
+// read, a preview, a working-set commit, a pull) has no bead write to
+// protect, so the shape does not refuse it: the journal stays enabled on the
+// canonical column list, exactly as before adaptive I/O, and the rare
+// journaled write such an open does make (a classified read's defer-wake
+// sweep) fails loudly on its INSERT rather than landing unrecorded.
+func Apply(configurer storage.EventsJournalConfigurer, enabled, writesBeads bool) error {
 	if configurer == nil {
 		if enabled {
 			return fmt.Errorf("storage backend does not support the events journal")
@@ -154,5 +167,13 @@ func Apply(configurer storage.EventsJournalConfigurer, enabled bool) error {
 		return nil
 	}
 	configurer.SetEventsJournalEnabled(enabled)
+	if !writesBeads {
+		return nil
+	}
+	if checker, ok := configurer.(storage.EventsJournalShapeChecker); ok {
+		if err := checker.EventsJournalActivationError(); err != nil {
+			return err
+		}
+	}
 	return nil
 }

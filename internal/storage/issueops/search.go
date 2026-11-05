@@ -25,6 +25,21 @@ func SearchIssuesInTx(ctx context.Context, tx DBTX, query string, filter types.I
 	return searchInTx(ctx, tx, query, filter, proj)
 }
 
+// SearchIssuesWithConfigInTx is SearchIssuesInTx and GetConfigInTx of key on
+// one transaction, so the issues and the setting come from one snapshot: the
+// body of storage.IssuesWithConfigSearcher on both Dolt-backed stores.
+func SearchIssuesWithConfigInTx(ctx context.Context, tx DBTX, query string, filter types.IssueFilter, key string) ([]*types.Issue, string, error) {
+	issues, err := SearchIssuesInTx(ctx, tx, query, filter)
+	if err != nil {
+		return nil, "", err
+	}
+	value, err := GetConfigInTx(ctx, tx, key)
+	if err != nil {
+		return nil, "", err
+	}
+	return issues, value, nil
+}
+
 // SearchDescendantsInTx is storage.WalkDescendants with every level searched
 // by SearchIssuesInTx inside tx, so the whole --parent tree reads one snapshot
 // (GH#3415).

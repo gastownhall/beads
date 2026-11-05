@@ -68,14 +68,19 @@ bd admin cleanup
     |
     | SAFETY:
     | - Requires --force flag to actually delete (unless --dry-run)
-    | - Supports --cascade to delete dependents
+    | - Skips pinned issues, and issues of a type the workspace's types.retained
+    |   setting names (their ids are idempotency keys; only bd prune/purge
+    |   --retain-ids deletes them); --json reports the latter as retention_required
+    | - Supports --cascade, which also deletes
+    |   parent-child descendants; other dependents survive (refused while
+    |   types.retained names a type, since a cascade could reach a retained issue)
     | - Shows preview of what will be deleted
     | - Use --json for programmatic output
     |
     | SEE ALSO:
     |   bd doctor --fix    Automatic health checks and repairs (recommended for routine maintenance)
     |   bd admin compact   Compact old closed issues to save space
-  flag --cascade type=bool default="false" usage="Recursively delete all dependent issues"
+  flag --cascade type=bool default="false" usage="Also delete parent-child descendants; other dependents survive"
   flag --dry-run type=bool default="false" usage="Preview what would be deleted without making changes"
   flag --ephemeral type=bool default="false" usage="Only delete closed wisps (transient molecules)"
   flag --force -f type=bool default="false" usage="Actually delete (without this flag, shows error)"
@@ -533,6 +538,11 @@ bd bootstrap
     | If sync.remote points at a git repository, bootstrap verifies refs/dolt/data
     | before cloning. Bootstrap exits non-zero when it cannot set up a database.
     |
+    | Values starting with - in sync.remote or sync.git-remote are refused as invalid
+    | remote URLs: bd init returns an error naming the key; bd bootstrap restores a
+    | local backup or issues.jsonl when available, otherwise reports a blocked plan
+    | without contacting the remote.
+    |
     | This is the recommended command for:
     |   • Setting up beads on a fresh clone
     |   • Recovering after moving to a new machine
@@ -722,12 +732,27 @@ bd compact
     |
     | How it works:
     |   1. Identifies commits older than --days threshold
-    |   2. Creates a squashed base commit from all old history
-    |   3. Cherry-picks recent commits on top
+    |   2. Creates a squashed base commit from all old history, dated as the
+    |      newest squashed commit
+    |   3. Cherry-picks recent commits on top, keeping their original authors,
+    |      committers and dates, so AS OF reads and dolt_history views at or
+    |      after the newest squashed commit stay valid (an earlier time resolves
+    |      to the initial commit)
     |   4. Swaps main branch to the compacted version
     |   5. Prunes remote-tracking refs (they would keep the old history alive;
     |      the next push or fetch re-creates them at the new tip)
     |   6. Runs a full Dolt GC (all storage generations) to reclaim the old history
+    |
+    | Compact refuses, and changes nothing, when commit dates are out of history
+    | order across the cutoff: a recent commit that comes at or before an old commit
+    | in history is already part of the squashed base, and replaying it again could
+    | change data. The error names both commits; --force does not override it, and
+    | --dry-run reports the refusal. Before swapping main, compact also checks that
+    | the replayed history holds the same committed data main held when compact read
+    | its history, and aborts without resetting main if it does not. A write that
+    | reaches main while compact runs is kept, not counted as a difference:
+    | uncommitted changes stay pending, and a commit that lands meanwhile is kept in
+    | one follow-up commit.
     |
     | The GC pass is a full collection: Dolt storage is generational, and a default
     | GC never revisits data an earlier GC moved to the old generation. On any store
@@ -1437,6 +1462,7 @@ bd db-proxy-child
   flag --logpath type=string default="" usage="path the backend server should write its stdout/stderr to"
   flag --port type=int default="0" annotations={cobra_annotation_bash_completion_one_required_flag=["true"]} usage="port to listen on"
   flag --root type=string default="" annotations={cobra_annotation_bash_completion_one_required_flag=["true"]} usage="root directory holding proxy.lock, proxy.pid, proxy.log"
+  flag --rotate-logpath type=bool default="false" usage="bound --logpath's size while running (set only for a log bd owns)"
   flag --stop-epoch type=string default="" usage="stop epoch the parent observed at spawn; the proxy aborts before publishing if it advances"
 
 bd defer
@@ -1496,12 +1522,13 @@ bd delete
     | Default: Fails if any issue has dependents not in deletion set
     |   bd delete bd-1 bd-2
     |
-    | Cascade: Recursively delete all dependents
+    | Cascade: Also delete parent-child descendants; other dependents survive
+    | (orphaned, as with --force). Preview first: --dry-run lists every id it deletes.
     |   bd delete bd-1 --cascade --force
     |
     | Force: Delete and orphan dependents
     |   bd delete bd-1 --force
-  flag --cascade type=bool default="false" usage="Recursively delete all dependent issues"
+  flag --cascade type=bool default="false" usage="Also delete parent-child descendants; other dependents survive"
   flag --dry-run type=bool default="false" usage="Preview what would be deleted without making changes"
   flag --force -f type=bool default="false" usage="Actually delete (without this flag, shows preview)"
   flag --from-file type=string default="" usage="Read issue IDs from file (one per line)"
@@ -1648,9 +1675,10 @@ bd dep tree
     |   bd dep tree gt-0iqq --status=open      # Only show open issues
     |   bd dep tree gt-0iqq --depth=3          # Limit to 3 levels deep
     |
-    | A node reached by two paths is shown ONCE, under the first path that got
-    | there, and a cycle simply ends the descent. --show-all-paths is a deprecated
-    | no-op; use 'bd dep cycles' to find circular dependencies.
+    | A node reached by two paths is expanded once, under the first path that got
+    | there; later paths list it as "(shown above)" (in --json, a row with
+    | "deduped": true). A cycle simply ends the descent. --show-all-paths is a
+    | deprecated no-op; use 'bd dep cycles' to find circular dependencies.
     |
     | --max-rows / BEADS_MAX_ROWS caveat: the tree walk has no query filter to
     | thread the cap through, so the full tree is always built first and the
@@ -1661,7 +1689,7 @@ bd dep tree
   flag --max-depth -d type=int default="50" usage="Maximum tree depth to display (safety limit)"
   flag --max-rows type=int default="0" usage="Hard upper bound on rows returned. Returns a non-zero exit (code 2) and an error to stderr if exceeded. 0 disables (the default). Overrides BEADS_MAX_ROWS for this invocation. Useful in CI/agent rigs that want a circuit breaker against pathological queries. Honored on both the direct and the --proxied-server route."
   flag --reverse type=bool default="false" usage="Show dependent tree (deprecated: use --direction=up)"
-  flag --show-all-paths type=bool default="false" usage="Deprecated no-op: accepted and ignored. A node reached by two paths is shown once, under the first."
+  flag --show-all-paths type=bool default="false" usage="Deprecated no-op: accepted and ignored. A node reached by two paths is expanded once, under the first; later paths list it as (shown above)."
   flag --status type=string default="" usage="Filter to only show issues with this status (open, in_progress, blocked, deferred, closed)"
 
 bd dep unrelate
@@ -1804,8 +1832,6 @@ bd doctor
     |   bd doctor --fix --yes  # Automatically fix issues (no confirmation)
     |   bd doctor --fix -i     # Confirm each fix individually
     |   bd doctor --fix --fix-child-parent  # Also fix child→parent deps (opt-in)
-    |   bd doctor --fix --force # Force repair even when database can't be opened
-    |   bd doctor --fix --source=jsonl # Rebuild database from a JSONL export
     |   bd doctor --dry-run    # Preview what --fix would do without making changes
     |   bd doctor --perf       # Performance diagnostics
     |   bd doctor --output diagnostics.json  # Export diagnostics to file
@@ -1978,7 +2004,7 @@ bd dolt killall
     | servers are preserved.
 
 bd dolt pull
-  use: "pull"
+  use: "pull [remote]"
   short: "Pull commits from Dolt remote"
   hidden: false
   runnable: true
@@ -1989,8 +2015,9 @@ bd dolt pull
     | For Hosted Dolt, set DOLT_REMOTE_USER and DOLT_REMOTE_PASSWORD environment
     | variables for authentication.
     |
-    | Use --remote to pull from a specific named remote instead of the default.
-    | The remote must already exist (see 'bd dolt remote add').
+    | Name a remote to pull from it instead of the default: 'bd dolt pull <remote>'
+    | or 'bd dolt pull --remote <remote>'. The remote must already exist (see
+    | 'bd dolt remote add').
     |
     | Use --strategy ours|theirs to resolve conflicts the auto-resolver declines
     | (e.g. both sides edited the same issue since the last sync) instead of
@@ -2001,7 +2028,7 @@ bd dolt pull
   flag --strategy type=string default="" usage="Conflict resolution strategy for conflicts the auto-resolver declines: 'ours' or 'theirs' (embedded storage only, #4992)"
 
 bd dolt push
-  use: "push"
+  use: "push [remote]"
   short: "Push commits to Dolt remote"
   hidden: false
   runnable: true
@@ -2018,8 +2045,9 @@ bd dolt push
     | Use --force to overwrite remote changes (e.g., when the remote has
     | uncommitted changes in its working set).
     |
-    | Use --remote to push to a specific named remote instead of the default.
-    | The remote must already exist (see 'bd dolt remote add').
+    | Name a remote to push to it instead of the default: 'bd dolt push <remote>'
+    | or 'bd dolt push --remote <remote>'. The remote must already exist (see
+    | 'bd dolt remote add').
   flag --force type=bool default="false" usage="Force push (overwrite remote changes)"
   flag --no-adopt type=bool default="false" usage="Never derive a Dolt remote from git origin (also BD_NO_REMOTE_ADOPT=1)"
   flag --remote type=string default="" usage="Push to a specific named remote instead of the default"
@@ -2073,10 +2101,23 @@ bd dolt remote reset-data
     | only live chunks:
     |
     |   - Git-backed remotes (issue data riding a git remote under refs/dolt/data):
-    |     deletes the Dolt data refs on the git remote, then force-pushes to
-    |     rebuild a fresh store. Code branches are untouched.
+    |     rebuilds a fresh store from local HEAD and replaces the remote's Dolt
+    |     data refs with it (through a Dolt sql-server it pushes the fresh store
+    |     to a temporary ref first, so the remote keeps its data until the new
+    |     store is complete, then restarts bd's own server, the shared server in
+    |     shared-server mode, so that it rereads the remote; like bd dolt stop,
+    |     the restart commits any uncommitted changes in every database that
+    |     server serves, and it briefly interrupts them. Any other server must be
+    |     restarted after the reset, before its next push or pull of the remote,
+    |     and so must bd's own while auto-start is off or, outside shared-server
+    |     mode, BEADS_DOLT_SERVER_MODE=1 or dolt_server_port declares it
+    |     externally managed: bd does not stop such a server, and exits non-zero
+    |     once the reset is done, so that nothing pushes or pulls through it
+    |     first). Code branches are untouched.
     |   - Native file remotes (file:// paths): clears the store directory, then
-    |     force-pushes to rebuild it.
+    |     force-pushes to rebuild it. Refused for a git repository, bare or a
+    |     checkout, where Dolt keeps the store among the repository's own files:
+    |     replace that remote as below.
     |   - Cloud/hosted remotes (aws://, gs://, dolthub://, ...): bd cannot clear
     |     the stored data safely — replace the remote with a fresh URL or prefix:
     |       bd dolt remote remove <name>
@@ -3021,7 +3062,9 @@ bd gc
     | Full lifecycle garbage collection for standalone Beads databases.
     |
     | Runs three phases in sequence:
-    |   1. DECAY   — Delete closed issues older than N days (default 90)
+    |   1. DECAY   — Delete closed issues older than N days (default 90), except
+    |                those of a type the workspace's types.retained setting names
+    |                (only bd prune/purge --retain-ids deletes those)
     |   2. COMPACT — Squash old Dolt commits into fewer commits (bd compact)
     |   3. GC      — Run Dolt garbage collection to reclaim disk space
     |
@@ -4409,10 +4452,11 @@ bd mail
     |
     | Configuration (checked in order):
     |   1. BEADS_MAIL_DELEGATE or BD_MAIL_DELEGATE environment variable
-    |   2. 'mail.delegate' config setting (bd config set mail.delegate "gt mail")
+    |   2. 'mail.delegate' in user-global config (~/.config/bd/config.yaml;
+    |      project .beads/config.yaml and workspace database settings are ignored)
     |
     | Examples:
-    |   # Configure delegation (one-time setup)
+    |   # Configure delegation (one-time setup in ~/.config/bd/config.yaml)
     |   export BEADS_MAIL_DELEGATE="gt mail"
     |   # or
     |   bd config set mail.delegate "gt mail"
@@ -5777,6 +5821,10 @@ bd prune
     | skips it. Use it when ids are idempotency keys that must never run twice.
     | Tombstones are permanent.
     |
+    | Without --retain-ids, closed beads whose type the workspace's types.retained
+    | setting names are skipped and reported (retention_required under --json):
+    | their ids are idempotency keys, so only a retaining sweep may delete them.
+    |
     | For full Dolt storage reclaim after deleting many rows, follow with `bd flatten`
     | so history can be collapsed and old chunks can be garbage-collected.
     |
@@ -5809,6 +5857,9 @@ bd purge
     | Skips: pinned beads, and closed beads a live bead still depends on through a
     | parent-child, tracks or blocks edge (a closed molecule root whose step is open,
     | a closed bead a live convoy tracks). Live means any status that is not done.
+    | Without --retain-ids it also skips beads whose type the workspace's
+    | types.retained setting names (their ids are idempotency keys); --json reports
+    | them as retention_required.
     |
     | --wisps-plane selects by storage plane instead: every closed row stored in the
     | wisps table, including --no-history beads, which the default ephemeral
@@ -6352,8 +6403,35 @@ bd rules compact
   short: "Merge related rules into composites"
   hidden: false
   runnable: true
-  flag --auto type=bool default="false" usage="Apply audit suggestions"
-  flag --dry-run type=bool default="false" usage="Preview without applying"
+  long:
+    | Merge related rules into composites.
+    |
+    | A composite keeps only the **Do:** and **Don't:** lines of its sources, plus a
+    | "Source rules:" line naming them. Any other prose is not carried over: the
+    | preview lists every dropped line by source. A rule with no **Do:** or **Don't:**
+    | lines is skipped by --auto and refused by --group.
+    |
+    | Without --force, compact only previews: it prints the composite, the dropped
+    | lines, and the files it would back up and delete, and writes nothing. --force
+    | is the consent to apply. It writes the composite, copies each source to
+    | <name>.md.backup, and only then deletes the sources. Backups are not rules,
+    | so audit ignores them.
+    |
+    | Compact refuses a group whose composite or any backup path already exists,
+    | including one of its own sources; nothing is written for that group. If a
+    | backup or delete fails, the error names what was written, backed up and
+    | deleted, and every backup is kept.
+    |
+    | To undo a merge, delete the composite, then rename each <name>.md.backup back
+    | to <name>.md (a source that was not deleted still has its original name).
+    |
+    | Examples:
+    |   bd rules compact --auto                    # Preview the audit's suggested merges
+    |   bd rules compact --auto --force            # Apply them
+    |   bd rules compact --group alpha,beta --force
+  flag --auto type=bool default="false" usage="Use audit suggestions to select merge groups"
+  flag --dry-run type=bool default="false" usage="Preview without applying (the default without --force)"
+  flag --force type=bool default="false" usage="Write the composite and delete the source files (without this flag, shows preview)"
   flag --group type=stringSlice default="[]" usage="Rule names to merge"
   flag --path type=string default=".claude/rules/" usage="Path to rules directory"
 
