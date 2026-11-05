@@ -5,10 +5,13 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/testutil/legacyworkspace"
 )
 
-// TestLegacyUpgradeGuardForInitAdmitsEmptyDoltRoot pins the one thing init's own
-// intent unlocks. `bd init --server` resolves server mode from the flag, a source
+// TestLegacyUpgradeGuardForInitAdmitsEmptyDoltRoot pins one of the two things
+// init's own intent unlocks; TestLegacyUpgradeGuardForInitAdmitsCurrentEraDoltRoot
+// pins the other. `bd init --server` resolves server mode from the flag, a source
 // the workspace does not record until init has written it. A retry over the empty
 // .beads/dolt that a failed first attempt leaves behind therefore looks like an
 // embedded workspace with a local Dolt root, and the guard refuses it. Told what
@@ -33,11 +36,40 @@ func TestLegacyUpgradeGuardForInitAdmitsEmptyDoltRoot(t *testing.T) {
 	}
 }
 
+// TestLegacyUpgradeGuardForInitAdmitsCurrentEraDoltRoot pins the second thing
+// init's own intent unlocks: a populated .beads/dolt with a current-era witness
+// and no metadata, the server root a provisioner leaves for `bd init --server
+// --external` (TestInitServerModeWritesDoltCompatibilityMarker). Every other
+// caller is refused there, because its open would go to an empty embedded
+// database and hide the root (GH#6259). Init's flag is the server selection
+// that refusal asks for, and init opens the server, not the embedded store.
+// Asked without it, in either form, the guard still refuses with that reason,
+// so the admission cannot pass vacuously.
+func TestLegacyUpgradeGuardForInitAdmitsCurrentEraDoltRoot(t *testing.T) {
+	warnings := captureLegacyUpgradeWarnings(t)
+	beadsDir := writeEmptyDoltRootServerWorkspace(t, "", "", "1.3.0")
+	if err := os.Mkdir(filepath.Join(beadsDir, "dolt", "beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := guardLegacyUpgradeWorkspaceForInit(beadsDir, true); err != nil {
+		t.Fatalf("guardLegacyUpgradeWorkspaceForInit(dir, true) = %v, want nil", err)
+	}
+	if warnings.Len() != 0 {
+		t.Fatalf("guard warned about a current witness: %q", warnings.String())
+	}
+	// A literal, so that editing the reason fails this test.
+	unowned := legacyworkspace.LegacyDoltRefusal("Dolt data root .beads/dolt without a server selection")
+	assertUnownedDoltRootRefusal(t, guardLegacyUpgradeWorkspaceForInit(beadsDir, false), unowned)
+	assertUnownedDoltRootRefusal(t, guardLegacyUpgradeWorkspace(beadsDir), unowned)
+}
+
 // TestLegacyUpgradeGuardForInitAdmissionStaysNarrow proves init's intent relaxes
-// nothing beyond an empty, witness-less .beads/dolt. With it set, anything that
-// could be legacy data still refuses, and the outcomes a broader reading of the
-// flag would move (treating it as if the workspace itself selected server mode)
-// stay where they are.
+// nothing beyond its two admissions: an empty, witness-less .beads/dolt, and a
+// populated one with a current-era witness. With it set, anything that could be
+// legacy data still refuses, and the outcomes a broader reading of the flag
+// would move (treating it as if the workspace itself selected server mode) stay
+// where they are.
 func TestLegacyUpgradeGuardForInitAdmissionStaysNarrow(t *testing.T) {
 	for _, entry := range []string{"beads", ".dolt", "stray-file", "symlink"} {
 		t.Run("root holding "+entry, func(t *testing.T) {
@@ -75,21 +107,6 @@ func TestLegacyUpgradeGuardForInitAdmissionStaysNarrow(t *testing.T) {
 			}
 		})
 	}
-
-	t.Run("current witness over a non-empty root", func(t *testing.T) {
-		captureLegacyUpgradeWarnings(t)
-		beadsDir := writeEmptyDoltRootServerWorkspace(t, "", "", "1.3.0")
-		if err := os.Mkdir(filepath.Join(beadsDir, "dolt", "beads"), 0o700); err != nil {
-			t.Fatal(err)
-		}
-
-		// A current witness settles the era, not who owns the root, and init's
-		// intent does not unlock a populated one: a retry that got as far as
-		// the witness had already persisted dolt_mode: server.
-		if err := guardLegacyUpgradeWorkspaceForInit(beadsDir, true); !isLegacyUpgradeRefusal(err) {
-			t.Fatalf("guardLegacyUpgradeWorkspaceForInit(dir, true) = %v, want migration refusal", err)
-		}
-	})
 
 	t.Run("blank witness over a non-empty root", func(t *testing.T) {
 		warnings := captureLegacyUpgradeWarnings(t)

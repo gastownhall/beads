@@ -31,17 +31,21 @@ import (
 // files) until it has refused every layout bd refuses when run inside it, and
 // it refuses with that text, except where the foreign classification admits a
 // legacy Dolt layout bd run inside refuses: the launcher's dolt.shared-server
-// fallback at guardForeignLegacyDoltWorkspace, and server intent set in a
-// layer the foreign classification does not resolve for the target
-// (user-level config, the BD_ environment, either workspace's .beads/.env; see
-// targetSelectsServerMode). An open of an existing workspace refuses a .beads
-// bd run inside finds no workspace in (openForeignStore); a create or
-// planning target is initialized there instead, unless it holds a legacy
-// config.json (a fresh clone of a SQLite-era project) or a non-empty
-// issues.jsonl (a fresh clone of a project from before bd wrote config.json),
-// which refuseUninitializableTarget refuses with the error openForeignStore
-// returns for it. foreign_workspace_census_test.go pins that the store
-// factories are reached from a foreign path only through openForeignStore.
+// fallback for an open through the store factories
+// (guardForeignLegacyDoltWorkspace), server intent set in a layer
+// the foreign classification does not resolve for the target (user-level
+// config, the BD_ environment, either workspace's .beads/.env; see
+// targetSelectsServerMode), and a current-era .beads/dolt root that nothing in
+// the target selects a server for, when the launcher's own dolt.mode sends the
+// open that follows through a server (unownedDoltRoot). An open of an
+// existing workspace refuses a .beads bd run inside finds no workspace in
+// (openForeignStore); a create or planning target is initialized there
+// instead, unless it holds a legacy config.json (a fresh clone of a SQLite-era
+// project) or a non-empty issues.jsonl (a fresh clone of a project from before
+// bd wrote config.json), which refuseUninitializableTarget refuses with the
+// error openForeignStore returns for it. foreign_workspace_census_test.go
+// pins that the store factories are reached from a foreign path only through
+// openForeignStore.
 
 // admitForeignWorkspace refuses, without writing anything, the layouts bd
 // run inside beadsDir refuses from its contents: a workspace format this build
@@ -59,7 +63,35 @@ import (
 // themselves). A caller that writes into beadsDir before any Load runs, such
 // as a create or planning target being initialized, must refuse it first, as
 // admission does (refuseUninitializableTarget runs loadAndCheckWorkspaceFormat).
+//
+// It classifies beadsDir for an open that dispatches as the store factories
+// do. A caller that initializes beadsDir with an embedded database runs
+// admitForeignWorkspaceForEmbeddedInit instead.
 func admitForeignWorkspace(beadsDir string) (*configfile.Config, error) {
+	return admitForeignWorkspaceFor(beadsDir, false)
+}
+
+// admitForeignWorkspaceForEmbeddedInit is admitForeignWorkspace for a caller
+// that next writes an embedded database into beadsDir, whatever server this
+// process's configuration selects, and a metadata.json naming the embedded
+// mode: the create and planning targets refuseUninitializableTarget guards,
+// which ensureBeadsDirForPath and adoptTargetDatabase initialize with
+// newDoltStore. Beside beadsDir's own dolt.mode and dolt.host, a server
+// selection there that refuseUninitializableTarget refuses first, only the
+// server selections the store factories honor over that metadata count here:
+// this process's BEADS_DOLT_SERVER_MODE, BEADS_DOLT_SHARED_SERVER or non-local
+// BEADS_DOLT_SERVER_HOST, and beadsDir's own dolt.shared-server. The
+// launcher's merged configuration, which an open through the store factories
+// follows (guardForeignLegacyDoltWorkspace), selects nothing here, whether it
+// selects server mode or enables dolt.shared-server: the database written
+// beside a .beads/dolt root that selection admits would hide its data.
+func admitForeignWorkspaceForEmbeddedInit(beadsDir string) (*configfile.Config, error) {
+	return admitForeignWorkspaceFor(beadsDir, true)
+}
+
+// admitForeignWorkspaceFor is admitForeignWorkspace, or with embeddedInit
+// admitForeignWorkspaceForEmbeddedInit.
+func admitForeignWorkspaceFor(beadsDir string, embeddedInit bool) (*configfile.Config, error) {
 	cfg, err := checkDiscoveredBackend(beadsDir)
 	if err != nil {
 		return nil, err
@@ -69,7 +101,7 @@ func admitForeignWorkspace(beadsDir string) (*configfile.Config, error) {
 			return nil, nil
 		}
 	}
-	if err := guardForeignLegacyDoltWorkspace(beadsDir, cfg); err != nil {
+	if err := guardForeignLegacyDoltWorkspace(beadsDir, cfg, embeddedInit); err != nil {
 		return nil, err
 	}
 	return cfg, nil
@@ -98,17 +130,41 @@ func init() {
 // otherwise it is the workspace's own only when its
 // config.yaml sets the key or its metadata names a dolt_mode; otherwise it
 // falls back to the launcher's merged dolt.shared-server, the same fallback
-// the store factories use to pick the server, so a shared-server launcher
-// admits a legacy Dolt layout that bd run inside it refuses. When the metadata
-// names a dolt_mode, the user-level and BD_DOLT_SHARED_SERVER
-// dolt.shared-server that bd run inside also reads is not consulted, so a
-// legacy Dolt layout bd run inside admits through it is refused here; nothing
-// is written.
-func guardForeignLegacyDoltWorkspace(beadsDir string, cfg *configfile.Config) error {
-	return classifyLegacyDoltWorkspace(beadsDir, cfg, legacyDoltModes{
-		serverMode:   targetSelectsServerMode(beadsDir, cfg),
-		sharedServer: sharedServerModeForWorkspace(beadsDir, cfg),
-	})
+// the store factories use to pick the server, so a shared-server launcher's
+// open through them admits a legacy Dolt layout that bd run inside it
+// refuses. When the metadata names a dolt_mode, the user-level and
+// BD_DOLT_SHARED_SERVER dolt.shared-server that bd run inside also reads is
+// not consulted, so a legacy Dolt layout bd run inside admits through it is
+// refused here; nothing is written. The refusal of a current-era root that
+// nothing selects a server for (unownedDoltRoot) also asks whether the store
+// open that follows goes through a server (openSelectsServer:
+// effectiveServerMode on the metadata as the store factories normalize it).
+// That refusal exists to stop the empty database an embedded open would
+// create beside the root, so a launcher whose merged configuration selects
+// server mode admits the root, whether through its own dolt.mode, the
+// user-level config.yaml or the BD_ environment.
+//
+// embeddedInit marks a caller that next writes an embedded database, and a
+// metadata.json naming the embedded mode (saveEmbeddedTargetMetadata), into
+// the workspace whatever that configuration selects
+// (admitForeignWorkspaceForEmbeddedInit). It resolves dolt.shared-server for
+// that metadata, as the store factories do for every open after the write,
+// which drops the launcher's fallback, and consults no openSelectsServer. So
+// the launcher's merged configuration admits nothing here, whether it
+// selects server mode or enables dolt.shared-server: neither a current-era
+// root nor a legacy Dolt root, whose data the database written beside it
+// would hide.
+func guardForeignLegacyDoltWorkspace(beadsDir string, cfg *configfile.Config, embeddedInit bool) error {
+	modes := legacyDoltModes{serverMode: targetSelectsServerMode(beadsDir, cfg)}
+	if embeddedInit {
+		// sharedServerModeForWorkspace reads only the dolt_mode of the
+		// metadata it is given.
+		modes.sharedServer = sharedServerModeForWorkspace(beadsDir, &configfile.Config{DoltMode: configfile.DoltModeEmbedded})
+	} else {
+		modes.sharedServer = sharedServerModeForWorkspace(beadsDir, cfg)
+		modes.openSelectsServer = effectiveServerMode(beadsDir, normalizeLoadedConfig(cfg))
+	}
+	return classifyLegacyDoltWorkspace(beadsDir, cfg, modes)
 }
 
 // targetSelectsServerMode reports whether bd run inside beadsDir, whose
@@ -131,10 +187,11 @@ func guardForeignLegacyDoltWorkspace(beadsDir string, cfg *configfile.Config) er
 // they can also decide whether beadsDir is refused, in both directions. When
 // server mode comes only from the user-level or BD_ layers and the metadata
 // names no dolt_mode: a .beads/dolt root that is empty
-// with no version witness, or whose witness cannot be parsed, or that holds
-// anything beside a current-era witness (refused here as a Dolt data root
-// without a server selection), is admitted by bd run inside it and refused
-// here; nothing is written. Conversely, a target
+// with no version witness, or whose witness cannot be parsed, is admitted by
+// bd run inside it and refused here; nothing is written. A root that holds
+// anything beside a current-era witness is admitted in both places: the same
+// layers send the open that follows through a server
+// (guardForeignLegacyDoltWorkspace). Conversely, a target
 // bd run inside refuses as a legacy Dolt server workspace is admitted here: a
 // .local_version naming bd 0.55-0.62 with no .beads/dolt root or beside an
 // embedded repository, or an embedded repository beside a .beads/dolt root bd

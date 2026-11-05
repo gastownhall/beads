@@ -762,14 +762,18 @@ A `.beads/dolt/` written by bd 1.0 or newer belongs to a Dolt sql-server: bd
 puts data there only for a server workspace. When nothing selects that server
 for a run, opening the workspace embedded would start an empty database in
 `.beads/embeddeddolt/` beside the root and report no issues, which is what
-v1.3.0 through v1.3.2 did. Current `bd` refuses instead, with `Dolt data root
-.beads/dolt without a server selection detected`, and changes nothing.
+v1.3.0 and later releases did until this refusal was added. Current `bd`
+refuses instead, with `Dolt data root .beads/dolt without a server selection
+detected`, and changes nothing.
 
 Pick the remedy that matches how the workspace was used:
 
 - Run with the server selection the workspace was used with:
   `BEADS_DOLT_SERVER_MODE=1`, `BEADS_DOLT_SHARED_SERVER=1`, or
-  `BEADS_DOLT_SERVER_HOST`. Check cron jobs, IDE and agent shells, which often
+  `BEADS_DOLT_SERVER_HOST` set to a remote host. `BEADS_DOLT_SERVER_HOST` set
+  to `127.0.0.1`, `localhost` or `::1`, or a `BEADS_DOLT_SERVER_PORT` alone,
+  selects nothing, so a server on this machine needs `BEADS_DOLT_SERVER_MODE=1`
+  or `dolt.mode: server`. Check cron jobs, IDE and agent shells, which often
   do not inherit them.
 - Persist the selection in `.beads/config.yaml` when `metadata.json` names no
   `dolt_mode`:
@@ -786,14 +790,15 @@ Pick the remedy that matches how the workspace was used:
 - To discard a root you have checked holds nothing you need, move
   `.beads/dolt/` out of `.beads/`.
 
-An empty `.beads/dolt/` holds nothing to hide and is not refused.
+An empty `.beads/dolt/` holds nothing to hide and is not refused. Neither is
+`bd init --server` over a populated one: the flag is a server selection.
 
-**After v1.3.0 through v1.3.2.** Those versions may already have created
-`.beads/embeddeddolt/` for such a workspace. Your data is still in
-`.beads/dolt/`. Restoring the server selection reaches it again, because an
-explicit server selection outranks a stale embedded repository. Issues written
-into the empty embedded database while the selection was missing are not on
-the server; re-create them there.
+**After v1.3.0 or a later release without this refusal.** Those releases may
+already have created `.beads/embeddeddolt/` for such a workspace. Your data is
+still in `.beads/dolt/`. Restoring the server selection reaches it again,
+because an explicit server selection outranks a stale embedded repository.
+Issues written into the empty embedded database while the selection was
+missing are not on the server; re-create them there.
 
 ### One `.beads/*.db` file: sealed SQLite bridge
 

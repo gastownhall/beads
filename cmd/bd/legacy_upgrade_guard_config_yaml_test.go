@@ -235,6 +235,18 @@ func TestCurrentVersionWitnessVetoesLegacyVerdictInEveryMode(t *testing.T) {
 		})
 	}
 
+	// Nothing validates dolt_mode, so the store opens a value it does not
+	// recognize (a typo, or the shared-server setting written as a mode)
+	// embedded, and the root beside it is unowned too.
+	for _, doltMode := range []string{"sever", "shared-server"} {
+		t.Run("unrecognized dolt_mode "+doltMode+" over an unowned root", func(t *testing.T) {
+			captureLegacyUpgradeWarnings(t)
+			beadsDir := writeDoltRootWorkspace(t, `{"backend":"dolt","dolt_mode":"`+doltMode+`"}`, "", "1.3.0")
+
+			assertUnownedDoltRootRefusal(t, guardLegacyUpgradeWorkspace(beadsDir), unowned)
+		})
+	}
+
 	// isEmptyDirectory fails closed: a root the guard cannot list may hold
 	// data, so it is refused like a populated one.
 	t.Run("unreadable root over a current witness", func(t *testing.T) {
