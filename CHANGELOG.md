@@ -1208,6 +1208,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Pull-only tracker syncs (`bd linear sync --pull`, `bd <tracker> pull`, and
+  the same flags on Jira, GitHub, GitLab, Azure DevOps and Notion) no longer
+  silently keep the local version of an issue changed on both sides since
+  the last sync. Conflict resolution only ran for bidirectional syncs, so
+  `--prefer-linear` and the newer-wins default never applied, and the remote
+  change (for example a Linear issue moved to In Progress) was dropped while
+  `last_sync` advanced past it. A pull-only sync now resolves such an issue
+  with the configured strategy, prints `Conflict on <id>: ...` and counts it
+  in the resolved conflicts. An issue edited only locally is still kept
+  ([#3702](https://github.com/gastownhall/beads/issues/3702)).
 - The android_arm64 release, which npm `@beads/bd` installs on Termux, is
   now built with cgo, so embedded Dolt works there: `bd init` no longer fails
   with "embedded Dolt requires a CGO build" (#3538). The binary is
