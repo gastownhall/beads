@@ -35,6 +35,7 @@ go_test(
         "engine_close_policy_test.go",
         "engine_create_only_test.go",
         "engine_create_warnings_test.go",
+        "engine_dry_run_unaddressable_test.go",
         "engine_external_ref_history_test.go",
         "engine_history_gate_cgo_test.go",
         "engine_match_key_test.go",
