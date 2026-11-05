@@ -11,7 +11,7 @@ If arguments are provided:
 
 If the issue ID is missing, ask for it. Optionally ask for a reason describing what was done.
 
-Run `bd close <id> [reason]` to close the issue. Show confirmation with the issue details.
+Run `bd close <id> --reason "<reason>"` to close the issue. Show confirmation with the issue details.
 
 After closing, suggest checking for:
 - Dependent issues that might now be unblocked (run `bd ready`)

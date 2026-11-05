@@ -22,13 +22,13 @@ Implement, test, and document the feature or fix.
 ## 4. Discover New Work
 As you work, you'll often find bugs, TODOs, or related work:
 - Create issues: `/beads:create` or `bd create`
-- Link them: `bd dep add <from-id> <to-id> --type discovered-from`
+- Link them: `bd dep add <new-id> <source-id> --type discovered-from`
 - This maintains context and work history
 
 ## 5. Complete the Task
 Close the issue when done:
 - Via command: `/beads:close <id> "Completed: <summary>"`
-- Via CLI: `bd close <id> "Completed: <summary>"`
+- Via CLI: `bd close <id> --reason "Completed: <summary>"`
 
 ## 6. Check What's Unblocked
 After closing, check if other work became ready:
