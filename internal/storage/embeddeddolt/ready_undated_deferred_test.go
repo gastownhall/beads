@@ -88,6 +88,19 @@ func TestReadyWorkHidesChildrenOfUndatedDeferredParent(t *testing.T) {
 			t.Fatalf("GetReadyWork = %v, want %v (the undated deferred epic and its child must both be withheld)", got, want)
 		}
 	})
+
+	t.Run("repository", func(t *testing.T) {
+		te := newTestEnv(t, "udr")
+		seedUndatedDeferredParent(t, te, "udr")
+
+		ids, err := readyWorkIDs(t, te)
+		if err != nil {
+			t.Fatalf("repository GetReadyWork: %v", err)
+		}
+		if want := []string{"udr-free"}; !slices.Equal(ids, want) {
+			t.Fatalf("repository GetReadyWork = %v, want %v (the undated deferred epic's child must be withheld)", ids, want)
+		}
+	})
 }
 
 // TestReadyWorkDeferredParentShapes pins which parents hide their direct

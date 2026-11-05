@@ -3,24 +3,28 @@ package db
 import (
 	"errors"
 	"reflect"
+	"regexp"
 	"testing"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
+
+	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 )
 
 func deferredParentProbeRegex(issueTable string) string {
-	return `SELECT 1 FROM ` + issueTable + ` WHERE defer_until IS NOT NULL AND defer_until > UTC_TIMESTAMP\(\) LIMIT 1`
+	return `^SELECT ` + regexp.QuoteMeta(sqlbuild.DeferredParentExistsSQL(issueTable)) + `$`
 }
 
 func deferredEdgeRegex(e deferredParentEdge) string {
 	return `SELECT dep\.issue_id\s+FROM ` + e.depTable + ` dep\s+JOIN ` + e.issueTable +
-		` parent ON parent\.id = dep\.` + e.targetCol
+		` parent ON parent\.id = dep\.` + e.targetCol +
+		`\s+WHERE dep\.type = 'parent-child'\s+AND ` + regexp.QuoteMeta(sqlbuild.DeferredParentPredicate("parent"))
 }
 
 func noDeferredChildren() *sqlmock.Rows { return sqlmock.NewRows([]string{"issue_id"}) }
 
 // TestDeferredParentEdgesBrokenDurablePlaneIsAnError is the domain/db twin of
-// the issueops guard on the same join. `descendantsOfFutureDeferredParents`
+// the issueops guard on the same join. `childrenOfDeferredParents`
 // walks four (dependency table, issue table) pairs, and three of the four name
 // a table every beads database must have. Its gate classified the error class
 // alone with no plane guard at all, and it continues rather than aborting, so
@@ -118,5 +122,56 @@ func TestDeferredParentEdgesUnrelatedErrorPropagates(t *testing.T) {
 
 	if _, err := repo.getChildrenOfDeferredParents(t.Context()); !errors.Is(err, boom) {
 		t.Fatalf("a failed deferred-parent edge did not propagate: %v", err)
+	}
+}
+
+// TestDeferredParentGateFalseIssuesNoChildScans: the gate is a SELECT of an
+// EXISTS expression, which always returns one row. A false value in both
+// tables must answer "no deferred parent" without walking the four edges; read
+// as "a row came back", it would scan them on every ready read.
+func TestDeferredParentGateFalseIssuesNoChildScans(t *testing.T) {
+	mock, repo := newMockRepo(t)
+	for _, table := range []string{"issues", "wisps"} {
+		mock.ExpectQuery(deferredParentProbeRegex(table)).
+			WillReturnRows(sqlmock.NewRows([]string{"deferred"}).AddRow(false))
+	}
+
+	got, err := repo.getChildrenOfDeferredParents(t.Context())
+	if err != nil {
+		t.Fatalf("getChildrenOfDeferredParents: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("children = %v, want none", got)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+// TestDeferredParentGateWispTableOpensTheGate: a deferred parent only in wisps
+// still sends out the edge walk.
+func TestDeferredParentGateWispTableOpensTheGate(t *testing.T) {
+	mock, repo := newMockRepo(t)
+	mock.ExpectQuery(deferredParentProbeRegex("issues")).
+		WillReturnRows(sqlmock.NewRows([]string{"deferred"}).AddRow(false))
+	mock.ExpectQuery(deferredParentProbeRegex("wisps")).
+		WillReturnRows(sqlmock.NewRows([]string{"deferred"}).AddRow(true))
+	for _, e := range deferredParentEdges {
+		rows := noDeferredChildren()
+		if e.depTable == "wisp_dependencies" && e.issueTable == "wisps" {
+			rows.AddRow("wisp-child")
+		}
+		mock.ExpectQuery(deferredEdgeRegex(e)).WillReturnRows(rows)
+	}
+
+	got, err := repo.getChildrenOfDeferredParents(t.Context())
+	if err != nil {
+		t.Fatalf("getChildrenOfDeferredParents: %v", err)
+	}
+	if want := []string{"wisp-child"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("children = %v, want %v", got, want)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
 	}
 }
