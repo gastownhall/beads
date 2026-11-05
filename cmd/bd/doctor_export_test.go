@@ -1,7 +1,9 @@
 package main
 
 import (
+	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -99,5 +101,21 @@ func TestComputeExportCoverageMissingFileRules(t *testing.T) {
 	}
 	if na.Missing != 0 || len(na.MissingIDs) != 0 {
 		t.Errorf("N/A result reports missing = %d, missing_ids = %v — no parity claim may hide there", na.Missing, na.MissingIDs)
+	}
+
+	// Every status emits missing_ids as an array, so `jq '.missing_ids[]'`
+	// works on each of them, not only on ok and warning.
+	for _, result := range []exportCoverageResult{warn, ok, na} {
+		data, err := json.Marshal(result)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(data, &fields); err != nil {
+			t.Fatal(err)
+		}
+		if ids := string(fields["missing_ids"]); !strings.HasPrefix(ids, "[") {
+			t.Errorf("status %q: missing_ids = %s, want a JSON array", result.Status, ids)
+		}
 	}
 }

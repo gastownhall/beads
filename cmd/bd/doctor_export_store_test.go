@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -11,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -81,5 +83,151 @@ func TestCollectExportCoverageReadsStoreAndFile(t *testing.T) {
 		if _, err := collectExportCoverage(context.Background(), beadsDir); err == nil {
 			t.Fatal("collectExportCoverage accepted a malformed export")
 		}
+	})
+}
+
+// runDoctorExportCheckInProcess runs `bd doctor --check=export --json` with
+// args through runInUserGlobalHome. It restores the maintenance opt-out the
+// check sets, which a later test calling PersistentPostRunE directly would
+// otherwise inherit.
+func runDoctorExportCheckInProcess(t *testing.T, home, dir string, env map[string]string, args ...string) (exit int, stdout, stderr string) {
+	t.Helper()
+	original := commandSkipsPostRunMaintenance.Load()
+	t.Cleanup(func() { commandSkipsPostRunMaintenance.Store(original) })
+	return runInUserGlobalHome(t, home, dir, env, append([]string{"doctor", "--check=export", "--json"}, args...)...)
+}
+
+// seedExportCheckDatabase creates the embedded database beadsDir's metadata
+// names, as bd init does: the check reads a database and refuses a
+// workspace that holds none.
+func seedExportCheckDatabase(t *testing.T, beadsDir string) {
+	t.Helper()
+	s, err := newDoltStoreFromConfig(t.Context(), beadsDir)
+	if err != nil {
+		t.Fatalf("create the database in %s: %v", beadsDir, err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("close the database in %s: %v", beadsDir, err)
+	}
+}
+
+// exportCheckScratch returns an empty directory outside any repository, with
+// its symlinks resolved so paths compare equal to what discovery returns.
+func exportCheckScratch(t *testing.T) string {
+	t.Helper()
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+// TestDoctorExportCheckTargetsTheSelectedWorkspace pins which workspace
+// `bd doctor --check=export` inspects. Without a positional path it is the
+// one bd selected, here through BEADS_DIR, including the two that
+// rediscovery from the parent directory misses: the account home's .beads
+// (GH#4402 passes over it) and a directory not named .beads. Each holds a
+// database, as the check requires. A positional path naming another
+// workspace is refused before any store opens.
+func TestDoctorExportCheckTargetsTheSelectedWorkspace(t *testing.T) {
+	wantInspected := func(t *testing.T, beadsDir string, exit int, stdout, stderr string) {
+		t.Helper()
+		if exit != 0 {
+			t.Fatalf("exit %d, want 0\nstdout:\n%s\nstderr:\n%s", exit, stdout, stderr)
+		}
+		var result exportCoverageResult
+		if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+			t.Fatalf("stdout is not the check's JSON: %v\n%s", err, stdout)
+		}
+		if want := filepath.Join(beadsDir, "issues.jsonl"); result.Check != "export" || result.Path != want {
+			t.Fatalf("result = %+v, want the export check of %s", result, want)
+		}
+	}
+
+	t.Run("BEADS_DIR is the account home's .beads", func(t *testing.T) {
+		f := newUserGlobalFixture(t)
+		seedExportCheckDatabase(t, f.beadsDir)
+		exit, stdout, stderr := runDoctorExportCheckInProcess(t, f.home, f.notes, map[string]string{"BEADS_DIR": f.beadsDir})
+		wantInspected(t, f.beadsDir, exit, stdout, stderr)
+	})
+
+	t.Run("BEADS_DIR is not named .beads", func(t *testing.T) {
+		root := exportCheckScratch(t)
+		selected := filepath.Join(root, "selected-store")
+		newFixtureWorkspace(t, selected)
+		seedExportCheckDatabase(t, selected)
+		exit, stdout, stderr := runDoctorExportCheckInProcess(t, filepath.Join(root, "home"), root, map[string]string{"BEADS_DIR": selected})
+		wantInspected(t, selected, exit, stdout, stderr)
+	})
+
+	t.Run("a positional path naming another workspace is refused", func(t *testing.T) {
+		root := exportCheckScratch(t)
+		mine, other := filepath.Join(root, "mine"), filepath.Join(root, "other")
+		newFixtureWorkspace(t, filepath.Join(mine, ".beads"))
+		newFixtureWorkspace(t, filepath.Join(other, ".beads"))
+		exit, stdout, stderr := runDoctorExportCheckInProcess(t, filepath.Join(root, "home"), mine, nil, other)
+		if exit != 1 || !strings.Contains(stdout+stderr, "refusing to compare workspaces") {
+			t.Fatalf("exit %d, want 1 and a refusal to compare workspaces\nstdout:\n%s\nstderr:\n%s", exit, stdout, stderr)
+		}
+		assertFixtureWorkspaceUntouched(t, filepath.Join(mine, ".beads"))
+		assertFixtureWorkspaceUntouched(t, filepath.Join(other, ".beads"))
+	})
+}
+
+// TestDoctorExportCheckRefusesAWorkspaceWithNoDatabase pins that the check
+// never creates the database it reads. A fresh clone carries metadata.json
+// and the committed export but no database (embeddeddolt/ is gitignored).
+// The check used to open it writable, which created an empty database,
+// reported its zero in-scope IDs all present, and left bd bootstrap taking
+// the empty database for the real one. It now refuses, names bd bootstrap,
+// and leaves the workspace without a database, whether embeddeddolt/ is
+// absent or empty.
+func TestDoctorExportCheckRefusesAWorkspaceWithNoDatabase(t *testing.T) {
+	wantRefused := func(t *testing.T, exit int, stdout, stderr string) {
+		t.Helper()
+		if exit != 1 || stdout != "" ||
+			!strings.Contains(stderr, "no embedded database at") || !strings.Contains(stderr, "Run bd bootstrap") {
+			t.Fatalf("exit %d, want 1, no result, and a refusal naming bd bootstrap\nstdout:\n%s\nstderr:\n%s", exit, stdout, stderr)
+		}
+	}
+
+	t.Run("fresh clone without embeddeddolt", func(t *testing.T) {
+		root := exportCheckScratch(t)
+		clone := filepath.Join(root, "clone")
+		beadsDir := filepath.Join(clone, ".beads")
+		if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		writeMetadataConfig(t, beadsDir, configfile.DoltModeEmbedded, "fc")
+		writeJSONLLines(t, filepath.Join(beadsDir, "issues.jsonl"), issueLines("fc-1", "fc-2")...)
+		// files maps each entry of .beads to its content ("" for a directory).
+		files := func() map[string]string {
+			entries, err := os.ReadDir(beadsDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := make(map[string]string, len(entries))
+			for _, e := range entries {
+				data, _ := os.ReadFile(filepath.Join(beadsDir, e.Name()))
+				got[e.Name()] = string(data)
+			}
+			return got
+		}
+		before := files()
+
+		exit, stdout, stderr := runDoctorExportCheckInProcess(t, filepath.Join(root, "home"), clone, nil)
+		wantRefused(t, exit, stdout, stderr)
+		if after := files(); !reflect.DeepEqual(after, before) {
+			t.Errorf("the check changed %s: it must not create a database or touch the workspace\nbefore: %v\nafter:  %v", beadsDir, before, after)
+		}
+	})
+
+	t.Run("empty embeddeddolt", func(t *testing.T) {
+		root := exportCheckScratch(t)
+		workspace := filepath.Join(root, "workspace")
+		newFixtureWorkspace(t, filepath.Join(workspace, ".beads"))
+		exit, stdout, stderr := runDoctorExportCheckInProcess(t, filepath.Join(root, "home"), workspace, nil)
+		wantRefused(t, exit, stdout, stderr)
+		assertFixtureWorkspaceUntouched(t, filepath.Join(workspace, ".beads"))
 	})
 }
