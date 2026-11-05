@@ -71,21 +71,49 @@ import (
 // TestRemedyRefusalsDoNotInterpolateRawPaths covers the functions that print
 // one. Nor is a database config row (issue_prefix) a source:
 // warnHalfIdentifiedSubstrate, which prints one beside its remedy, is pinned
-// by TestRemedyValuesEscapeLineBreaks. Nor is an issue ID read from the
-// store: the bd duplicates, bd mol current, bd mol stale and bd close
-// --continue hints that paste one into a command, and the lines around them
-// that name it, are pinned by TestStoreReadIDHintsQuoteIDs, and bd close
-// --continue's output on both routes, when its close auto-closes the
-// molecule, by TestEmbeddedRemedyPrinting_closeContinue and
-// TestProxiedServerClose2B. When the root refuses that auto-close, those
-// tests and TestStoreReadHintsNameTitlesEscaped pin only that the warning
-// bd close prints above the hint cannot redraw it: the root and blocker IDs
-// the refusal's sentence names, like the step bd close --force names in its
-// open-children warning, print as the store holds them, so a $(...) in one
-// still runs when the output is pasted. Those two warnings, and other hints
-// that paste one, such as bd find-duplicates' Compare line, bd mol ready
-// --gated's bd assign and bd close's note on a molecule it did not
-// auto-close, are not covered yet. Nor is a .beads/recipes.toml recipe:
+// by TestRemedyValuesEscapeLineBreaks. An issue ID read from the store is a
+// source of its own, tracked by TestRemedyCensusStoreIDHints (storeIDSources):
+// a field named ID or ending ID (ResolvedID), or the string a partial-ID
+// resolver or molecule lookup returns (storeIDSourceCalls: ResolvePartialID,
+// ResolvePartialIDs, ResolvePartialIDExact, resolveIDWithRouting,
+// MoleculeRoot, MoleculeRoots, ActiveMoleculeIDs, InProgressMoleculeIDs).
+// A bd command a hint pastes one into — bd duplicates, bd mol current, bd mol
+// stale, bd close --continue, bd find-duplicates, bd mol
+// ready --gated, the unserved auto-close note, the show/dep-list hints and bd
+// dep add's malformed-target refusal — routes it through remedy.CommandArg
+// (a remedy printer that leaves a $(...) as it is, such as PrintedValue, does
+// not count, called in place or stored in a variable first, and neither does
+// %q, whose double quotes leave a $(...) live), with storeIDHintAllowlist
+// excusing the sites whose ID bd mints or the user typed. The same bd-command
+// rule holds for a config, metadata or routing value (configSources), tracked
+// by TestRemedyCensusConfigHints with configHintAllowlist. Those passes read a
+// hint built by a literal format (%s, %v, %q), a + chain or fmt.Println's
+// operands; they do not see one a format with numbered arguments (%[1]s),
+// strings.Join or a strings.Builder assembles. The census does not see the lines printed beside such a
+// command that name the ID: those are spelled by printedIssueID /
+// remedy.PrintedWord and pinned behaviorally by
+// TestStoreReadIDHintsQuoteIDs, TestStoreReadCommandHintsQuoteIDs,
+// TestUnservedMoleculeAutoCloseNoteNamesIDsEscaped,
+// TestStoreReadHintsNameTitlesEscaped,
+// TestEmbeddedRemedyPrinting_closeContinue and TestProxiedServerClose2B, and
+// bd close's partial-ID notice by internal/utils'
+// TestEmitPartialResolutionNoticeSpellsResolvedID. One such line still names
+// IDs as the store holds them: when a completed molecule's root refuses its
+// auto-close, warnMoleculeAutoCloseRefusal prints the refusal's sentence
+// above bd close --continue's hint, spelled by remedy.PrintedValue because
+// the close result carries only the sentence, so a $(...) in the root or
+// blocker IDs it names still runs when the output is pasted;
+// TestStoreReadHintsNameTitlesEscaped pins only that it cannot redraw the
+// hint. A title, or bd find-duplicates' AI reason, printed beside such a
+// command is prose, spelled by remedy.PrintedValue as everywhere bd prints
+// one, so a $(...) in it is printed as it is. A remedy value wrapped in
+// literal backticks — a quoted word (shellWordSources) or a remedy printer
+// called in place that can return a backtick — is tracked by
+// TestRemedyCensusBacktickedRemedies; a value that crosses a struct field
+// into another package, such as a doctor check's Fix shown by bd doctor
+// --agent, is not, and is pinned by cmd/bd's
+// TestAgentDiagnosticCommandsKeepBackticksClosed. Nor is a
+// .beads/recipes.toml recipe:
 // TestRunRecipeNamesRecipesTomlValuesEscaped pins that no key, name,
 // description, type or path bd setup prints, nor an OS error that repeats a
 // path, can redraw or split its Run: line, that the command on that line
@@ -216,10 +244,81 @@ func (t taintInfo) merge(o taintInfo) taintInfo {
 	return t
 }
 
+// censusSources is what one census pass treats as a source of a
+// clone-controlled value. configSources is #7837's set (config, metadata and
+// routing values); storeIDSources treats an issue ID read from the store as
+// one; and shellWordSources treats the shell word a remedy quoting call
+// returns as one, to find a remedy wrapped in literal backticks.
+type censusSources struct {
+	calls, fields, keys map[string]bool
+	// storeIDs treats a field named ID, or ending ID after a lower-case
+	// letter or digit (ResolvedID, fullID), as a store-read issue ID; the
+	// pass's calls (storeIDSourceCalls) return one.
+	storeIDs bool
+	// shellWords treats remedy.CommandArg's, ShellWord's and ShellQuotedFor's
+	// word (their first result) as the value, so a census can find a remedy
+	// word a format or + chain wraps in literal backticks.
+	shellWords bool
+}
+
+// storeIDSourceCalls are the calls whose string results are issue IDs read
+// from the store: the partial-ID resolvers, which turn a typed prefix into
+// the stored ID it matches, and the molecule lookups that return a root or
+// molecule ID.
+var storeIDSourceCalls = map[string]bool{
+	"ResolvePartialID":      true, // internal/utils
+	"ResolvePartialIDs":     true, // internal/utils
+	"ResolvePartialIDExact": true, // internal/utils
+	"resolveIDWithRouting":  true, // cmd/bd dep.go
+	"MoleculeRoot":          true, // issueops
+	"MoleculeRoots":         true, // issueops
+	"ActiveMoleculeIDs":     true, // issueops
+	"InProgressMoleculeIDs": true, // issueops
+}
+
+var (
+	configSources    = censusSources{calls: censusSourceCalls, fields: censusSourceFields, keys: censusSourceKeys}
+	storeIDSources   = censusSources{storeIDs: true, calls: storeIDSourceCalls}
+	shellWordSources = censusSources{shellWords: true}
+)
+
+func (p *censusPkg) isSourceField(name string) bool {
+	if p.src.fields[name] {
+		return true
+	}
+	return p.src.storeIDs && isIDField(name)
+}
+
+// isIDField reports whether a field so named holds an ID, as Go names them:
+// ID itself, or a name ending ID after a lower-case letter or digit
+// (ResolvedID, MoleculeID, fullID), not an acronym such as PID or UUID.
+func isIDField(name string) bool {
+	if name == "ID" {
+		return true
+	}
+	base, ok := strings.CutSuffix(name, "ID")
+	if !ok || base == "" {
+		return false
+	}
+	c := base[len(base)-1]
+	return 'a' <= c && c <= 'z' || '0' <= c && c <= '9'
+}
+
+// isShellWordCall reports whether call is remedy.CommandArg, ShellWord or
+// ShellQuotedFor, whose first result is a value quoted for a shell.
+func isShellWordCall(call *ast.CallExpr) bool {
+	switch censusCallName(call) {
+	case "remedy.CommandArg", "remedy.ShellWord", "remedy.ShellQuotedFor":
+		return true
+	}
+	return false
+}
+
 // censusEnv is what the variables of one function carry, keyed by varKey.
 type censusEnv map[any]taintInfo
 
 type censusPkg struct {
+	src   censusSources
 	fset  *token.FileSet
 	files map[string]*ast.File
 	// funcs maps a function or method name to its declarations.
@@ -436,9 +535,13 @@ func (p *censusPkg) callReturns(fn *ast.FuncDecl, seeds map[string]taintInfo) ma
 // the call carries it and each later one, an error at most.
 func (p *censusPkg) multiResults(call *ast.CallExpr, n int, env censusEnv) map[int]taintInfo {
 	if isRemedyCall(call) {
+		if p.src.shellWords && isShellWordCall(call) {
+			// The word remedy quotes is the value the backtick census tracks.
+			return map[int]taintInfo{0: {kind: taintValue}}
+		}
 		return nil
 	}
-	if !censusSourceCalls[censusSelName(call)] {
+	if !p.src.calls[censusSelName(call)] {
 		if results := p.callResults(call, env); results != nil {
 			return results
 		}
@@ -491,7 +594,7 @@ func (p *censusPkg) exprInfo(expr ast.Expr, env censusEnv) taintInfo {
 			return info
 		}
 	}
-	if call, ok := expr.(*ast.CallExpr); ok && !isRemedyCall(call) && !censusSourceCalls[censusSelName(call)] {
+	if call, ok := expr.(*ast.CallExpr); ok && !isRemedyCall(call) && !p.src.calls[censusSelName(call)] {
 		if results := p.callResults(call, env); results != nil {
 			return results[0]
 		}
@@ -520,7 +623,7 @@ func (p *censusPkg) tainted(expr ast.Expr, env censusEnv) taintKind {
 			}
 			name := censusSelName(x)
 			full := censusCallName(x)
-			if censusSourceCalls[name] {
+			if p.src.calls[name] {
 				kind = taintValue
 				return false
 			}
@@ -532,7 +635,7 @@ func (p *censusPkg) tainted(expr ast.Expr, env censusEnv) taintKind {
 			if strings.HasPrefix(name, "Get") || strings.HasPrefix(name, "get") || strings.HasPrefix(name, "resolve") {
 				for _, arg := range x.Args {
 					if lit, ok := arg.(*ast.BasicLit); ok && lit.Kind == token.STRING {
-						if key, err := strconv.Unquote(lit.Value); err == nil && censusSourceKeys[key] {
+						if key, err := strconv.Unquote(lit.Value); err == nil && p.src.keys[key] {
 							kind = taintValue
 							return false
 						}
@@ -574,7 +677,7 @@ func (p *censusPkg) tainted(expr ast.Expr, env censusEnv) taintKind {
 			}
 			if sel, ok := x.Fun.(*ast.SelectorExpr); ok {
 				ast.Inspect(sel.X, func(m ast.Node) bool {
-					if s, ok := m.(*ast.SelectorExpr); ok && censusSourceFields[s.Sel.Name] {
+					if s, ok := m.(*ast.SelectorExpr); ok && p.isSourceField(s.Sel.Name) {
 						kind = taintValue
 					}
 					return kind != taintValue
@@ -582,7 +685,7 @@ func (p *censusPkg) tainted(expr ast.Expr, env censusEnv) taintKind {
 			}
 			return false
 		case *ast.SelectorExpr:
-			if censusSourceFields[x.Sel.Name] {
+			if p.isSourceField(x.Sel.Name) {
 				kind = taintValue
 				return false
 			}
@@ -596,7 +699,7 @@ func (p *censusPkg) tainted(expr ast.Expr, env censusEnv) taintKind {
 		case *ast.Ident:
 			if k := env[varKey(x)].kind; k != taintNone {
 				kind = maxKind(kind, k)
-			} else if censusSourceCalls[x.Name] {
+			} else if p.src.calls[x.Name] {
 				// A source passed as a function value.
 				kind = taintValue
 			}
@@ -808,10 +911,11 @@ func quotedArgs(call *ast.CallExpr, name string) map[int]bool {
 	return quoted
 }
 
-// censusViolations returns "path:line function" for each print call in the
-// packages under roots that formats a clone-controlled value without the
-// remedy printer.
-func censusViolations(t *testing.T, repoRoot string, roots ...string) []string {
+// parseCensusPkgs parses every production Go file under roots, grouped by
+// package directory, and fails when a root held none. The taint source a pass
+// uses (configSources, storeIDSources, shellWordSources) is set on each
+// package before it is analyzed, so one parse serves every census.
+func parseCensusPkgs(t *testing.T, repoRoot string, roots ...string) map[string]*censusPkg {
 	t.Helper()
 	pkgs := map[string]*censusPkg{}
 	for _, root := range roots {
@@ -836,7 +940,7 @@ func censusViolations(t *testing.T, repoRoot string, roots ...string) []string {
 			dir := filepath.Dir(path)
 			pkg := pkgs[dir]
 			if pkg == nil {
-				pkg = &censusPkg{fset: token.NewFileSet(), files: map[string]*ast.File{}, funcs: map[string][]*ast.FuncDecl{}, taintedParams: map[*ast.FuncDecl]map[string]taintInfo{}, declFiles: map[*ast.FuncDecl]string{}, returns: map[string]map[int]taintInfo{}}
+				pkg = &censusPkg{fset: token.NewFileSet(), files: map[string]*ast.File{}, funcs: map[string][]*ast.FuncDecl{}, declFiles: map[*ast.FuncDecl]string{}}
 				pkgs[dir] = pkg
 			}
 			file, err := parser.ParseFile(pkg.fset, path, nil, 0)
@@ -900,8 +1004,19 @@ func censusViolations(t *testing.T, repoRoot string, roots ...string) []string {
 			t.Fatalf("the census parsed no Go file under %s", root)
 		}
 	}
+	return pkgs
+}
+
+// analyze propagates src through every package of pkgs, then calls check for
+// each of its functions with that function's taint environment and a report
+// callback keyed to the node's line. The returned sites are sorted and
+// deduped.
+func analyze(pkgs map[string]*censusPkg, src censusSources, check func(pkg *censusPkg, rel string, fn *ast.FuncDecl, env censusEnv, report func(ast.Node))) []string {
 	var found []string
 	for _, pkg := range pkgs {
+		pkg.src = src
+		pkg.taintedParams = map[*ast.FuncDecl]map[string]taintInfo{}
+		pkg.returns = map[string]map[int]taintInfo{}
 		pkg.propagate()
 		for _, fn := range pkg.allFuncs() {
 			rel := pkg.declFiles[fn]
@@ -909,40 +1024,689 @@ func censusViolations(t *testing.T, repoRoot string, roots ...string) []string {
 				continue
 			}
 			env := pkg.funcTaint(fn)
-			ast.Inspect(fn.Body, func(n ast.Node) bool {
-				call, ok := n.(*ast.CallExpr)
-				if !ok || isRemedyCall(call) {
-					return true
-				}
-				name, sel := censusCallName(call), censusSelName(call)
-				errorPrinter := censusErrorPrinters[sel]
-				if !censusPrintCalls[name] && !censusPrintCalls[sel] && !errorPrinter {
-					return true
-				}
-				// An error is printed safely by bd's error printers and
-				// passed on when it is formatted into a message; it must be
-				// spelled where it goes to the terminal directly.
-				errReaches := censusTerminalCalls[name]
-				quoted := quotedArgs(call, name)
-				if errorPrinter {
-					quoted = quotedArgs(call, sel)
-				}
-				for i, arg := range call.Args {
-					if quoted[i] {
-						continue
-					}
-					k := pkg.tainted(arg, env)
-					if k == taintValue || k >= taintCallResult && errReaches {
-						found = append(found, rel+":"+strconv.Itoa(pkg.fset.Position(call.Pos()).Line)+" "+fn.Name.Name)
-						break
-					}
-				}
-				return true
+			check(pkg, rel, fn, env, func(n ast.Node) {
+				found = append(found, rel+":"+strconv.Itoa(pkg.fset.Position(n.Pos()).Line)+" "+fn.Name.Name)
 			})
 		}
 	}
 	slices.Sort(found)
-	return found
+	return slices.Compact(found)
+}
+
+// censusViolations returns "path:line function" for each print call in the
+// packages under roots that formats a clone-controlled value (configSources)
+// without the remedy printer.
+func censusViolations(t *testing.T, repoRoot string, roots ...string) []string {
+	t.Helper()
+	return analyze(parseCensusPkgs(t, repoRoot, roots...), configSources, func(pkg *censusPkg, rel string, fn *ast.FuncDecl, env censusEnv, report func(ast.Node)) {
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok || isRemedyCall(call) {
+				return true
+			}
+			name, sel := censusCallName(call), censusSelName(call)
+			errorPrinter := censusErrorPrinters[sel]
+			if !censusPrintCalls[name] && !censusPrintCalls[sel] && !errorPrinter {
+				return true
+			}
+			// An error is printed safely by bd's error printers and
+			// passed on when it is formatted into a message; it must be
+			// spelled where it goes to the terminal directly.
+			errReaches := censusTerminalCalls[name]
+			quoted := quotedArgs(call, name)
+			if errorPrinter {
+				quoted = quotedArgs(call, sel)
+			}
+			for i, arg := range call.Args {
+				if quoted[i] {
+					continue
+				}
+				k := pkg.tainted(arg, env)
+				if k == taintValue || k >= taintCallResult && errReaches {
+					report(call)
+					break
+				}
+			}
+			return true
+		})
+	})
+}
+
+// pastedText is a string a print builds that reaches the terminal: text, with
+// an argument expression recorded at each hole where a value is formatted or
+// concatenated in. holes[i] is the byte offset of the i-th hole in text, and
+// args[i] the expression there.
+type pastedText struct {
+	text  string
+	holes []int
+	args  []ast.Expr
+}
+
+// formatText is the text a call with a literal format string prints, with a
+// hole for each %s, %v or %q. %q is a hole too: it escapes every character a
+// terminal acts on, but Go's double quotes leave a $(...) and a backtick live
+// in sh, bash and zsh, so a %q value pasted into a command still runs (#7837's
+// terminal pass, censusViolations, uses quotedArgs and keeps skipping %q). It
+// is false for a format that numbers its arguments (%[1]s), which this does
+// not model.
+func formatText(call *ast.CallExpr) (pastedText, bool) {
+	for fi, a := range call.Args {
+		format, ok := stringLiteral(a)
+		if !ok || !strings.Contains(format, "%") {
+			continue
+		}
+		if strings.Contains(format, "%[") {
+			return pastedText{}, false
+		}
+		pt := pastedText{text: format}
+		arg := fi + 1
+		for i := 0; i < len(format); i++ {
+			if format[i] != '%' {
+				continue
+			}
+			start := i
+			i++
+			for i < len(format) && strings.IndexByte("+-# 0123456789.*", format[i]) >= 0 {
+				if format[i] == '*' {
+					arg++
+				}
+				i++
+			}
+			if i == len(format) {
+				break
+			}
+			if format[i] == '%' {
+				continue
+			}
+			if (format[i] == 's' || format[i] == 'v' || format[i] == 'q') && arg < len(call.Args) {
+				pt.holes = append(pt.holes, start)
+				pt.args = append(pt.args, call.Args[arg])
+			}
+			arg++
+		}
+		return pt, true
+	}
+	return pastedText{}, false
+}
+
+// printlnText is the text fmt.Println or fmt.Fprintln prints from several
+// operands, which it joins with spaces: its literal operands, with a hole for
+// each other one. It is false for any other call.
+func printlnText(call *ast.CallExpr) (pastedText, bool) {
+	args := call.Args
+	switch censusCallName(call) {
+	case "fmt.Println":
+	case "fmt.Fprintln":
+		if len(args) == 0 {
+			return pastedText{}, false
+		}
+		args = args[1:]
+	default:
+		return pastedText{}, false
+	}
+	var pt pastedText
+	for i, a := range args {
+		if i > 0 {
+			pt.text += " "
+		}
+		if lit, ok := stringLiteral(a); ok {
+			pt.text += lit
+			continue
+		}
+		pt.holes = append(pt.holes, len(pt.text))
+		pt.args = append(pt.args, a)
+	}
+	return pt, true
+}
+
+// concatText is the text of a + chain of strings: its literal parts joined,
+// with a hole for each non-literal operand.
+func concatText(expr *ast.BinaryExpr) pastedText {
+	var pt pastedText
+	var walk func(e ast.Expr)
+	walk = func(e ast.Expr) {
+		switch x := e.(type) {
+		case *ast.BinaryExpr:
+			if x.Op == token.ADD {
+				walk(x.X)
+				walk(x.Y)
+				return
+			}
+		case *ast.ParenExpr:
+			walk(x.X)
+			return
+		}
+		if lit, ok := stringLiteral(e); ok {
+			pt.text += lit
+			return
+		}
+		pt.holes = append(pt.holes, len(pt.text))
+		pt.args = append(pt.args, e)
+	}
+	walk(expr)
+	return pt
+}
+
+// pastedTexts calls visit with each format-call and each outermost + chain of
+// strings in body, so a hint built either way is checked once. A + chain's
+// operands may themselves be format calls (fmt.Sprintf inside a concat), so
+// those are visited too.
+func pastedTexts(body ast.Node, visit func(n ast.Node, pt pastedText)) {
+	ast.Inspect(body, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.CallExpr:
+			if isRemedyCall(x) {
+				return true
+			}
+			if pt, ok := formatText(x); ok && len(pt.holes) > 0 {
+				visit(x, pt)
+			} else if pt, ok := printlnText(x); ok && len(pt.holes) > 0 && strings.Contains(pt.text, "bd ") {
+				visit(x, pt)
+			}
+		case *ast.BinaryExpr:
+			if x.Op != token.ADD {
+				return true
+			}
+			if pt := concatText(x); len(pt.holes) > 0 && strings.Contains(pt.text, "bd ") {
+				visit(x, pt)
+			}
+			// Keep descending into the chain's operands for nested calls, but
+			// not back into the chain itself.
+			ast.Inspect(x, func(m ast.Node) bool {
+				if call, ok := m.(*ast.CallExpr); ok {
+					pastedTexts(call, visit)
+					return false
+				}
+				return true
+			})
+			return false
+		}
+		return true
+	})
+}
+
+// inBdCommand reports whether the hole at pos in text falls inside a "bd
+// <subcommand>" command: after a "bd " that begins a word and is followed by
+// a lower-case subcommand letter, up to the end of its line, or up to the
+// quote, backtick or parenthesis that closes one opened right before the "bd".
+// It is how the census tells a value pasted into a command (which must be one
+// shell word) from a value merely named in prose beside it.
+func inBdCommand(text string, pos int) bool {
+	lineStart := strings.LastIndexByte(text[:pos], '\n') + 1
+	line := text[lineStart:pos]
+	for i := 0; i+3 <= len(line); i++ {
+		if !strings.HasPrefix(line[i:], "bd ") {
+			continue
+		}
+		if i+3 >= len(line) || line[i+3] < 'a' || line[i+3] > 'z' {
+			continue
+		}
+		if i > 0 && !strings.ContainsRune(" \t('\"`:", rune(line[i-1])) {
+			continue
+		}
+		closer := byte(0)
+		if i > 0 {
+			switch line[i-1] {
+			case '(':
+				closer = ')'
+			case '\'', '"', '`':
+				closer = line[i-1]
+			}
+		}
+		if closer == 0 || strings.IndexByte(line[i+3:], closer) < 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// inBackticks reports whether the hole at pos in text falls between a pair of
+// literal backticks, which sh, bash and zsh run as a command substitution.
+func inBackticks(text string, pos int) bool {
+	return strings.Count(text[:pos], "`")%2 == 1
+}
+
+// storeIDHintAllowlist excuses a bd-command hint that names an issue ID the
+// store-ID census tracks but that is not a pulled ID a collaborator controls:
+// an ID bd mints in the same command (always a plain word), or the user's own
+// typed argument echoed back. Each is "file:function", with the reason.
+// bd find-duplicates, bd mol ready --gated, the unserved auto-close note, the
+// show/dep-list hints and bd dep add's malformed-target refusal are NOT here:
+// they paste an ID read from the store (on the direct route dep add's source
+// is the ID a partial argument resolved to), and route it through
+// remedy.CommandArg.
+var storeIDHintAllowlist = map[string]string{
+	"cmd/bd/gate.go:renderGateCreated":           "bd gate resolve names the gate ID lifecycle.Create minted in this command; a minted ID is a plain word",
+	"cmd/bd/wisp.go:renderWispCreateResult":      "bd close/squash/burn name the wisp root ID CreateIssue minted in this command (#7868)",
+	"cmd/bd/delete.go:renderSingleDeletePreview": "bd delete <id> --force echoes the user's argument; bd delete refuses a partial ID, so the resolved ID equals what the user typed",
+	"cmd/bd/comments.go:commentsAddCmd":          "bd show <id> names the user's typed argument in the abbreviation refusal, before resolution assigns ResolvedID",
+	"cmd/bd/show.go:showNotFoundHint":            "bd history <id> echoes the user's argument, which resolved to no issue",
+}
+
+// configHintAllowlist excuses a site the config-value bd-command census
+// flags that pastes no clone-controlled value into a bd command. Each is
+// "file:function", with the reason. inBdCommand reads any "bd <lower-case
+// word>" as a command, so prose that starts "bd <verb>" is one.
+var configHintAllowlist = map[string]string{
+	"cmd/bd/create.go:refuseUninitializableTarget":        "prose: \"so bd run there does not treat it as a workspace\" names no command; the only command, bd init --from-jsonl, is closed by its backticks before the target path the sentence names",
+	"internal/doltserver/servermode.go:Advice":            "prose: \"bd did not start one at %s\" names the endpoint in a sentence, not in a command",
+	"internal/storage/dolt/store.go:autoStartRedialError": "prose: \"Check logs: \" names the log path on its own line; the only command, bd dolt stop, takes no value",
+}
+
+// backtickRemedyAllowlist excuses a remedy word a format or + chain wraps in
+// literal backticks, for a justified exception. Empty today: #7868 and
+// its follow-up dropped the wrapper at every site, so a new one is a defect.
+var backtickRemedyAllowlist = map[string]string{}
+
+// storeIDCommandViolations returns the bd-command hints that paste an issue ID
+// read from the store without the remedy printer (bdCommandViolations with
+// storeIDSources).
+func storeIDCommandViolations(pkgs map[string]*censusPkg, allow map[string]string) []string {
+	return bdCommandViolations(pkgs, storeIDSources, allow)
+}
+
+// configCommandViolations returns the bd-command hints that paste a
+// clone-controlled config, metadata or routing value (#7837's configSources)
+// without a shell-word remedy printer (bdCommandViolations with
+// configSources).
+func configCommandViolations(pkgs map[string]*censusPkg, allow map[string]string) []string {
+	return bdCommandViolations(pkgs, configSources, allow)
+}
+
+// bdCommandViolations returns the bd-command hints that paste a value src
+// tracks without a shell-word remedy printer: a %s, %v or %q (or a Println
+// operand) inside a "bd <subcommand>" fed by a tracked value, raw, through a
+// remedy printer that leaves a $(...) as it is (PrintedValue, PrintedText and
+// the like rather than shellWordPrinters), or through a variable such a
+// printer's result was stored in, outside allow.
+func bdCommandViolations(pkgs map[string]*censusPkg, src censusSources, allow map[string]string) []string {
+	return analyze(pkgs, src, func(pkg *censusPkg, rel string, fn *ast.FuncDecl, env censusEnv, report func(ast.Node)) {
+		if allow[rel+":"+fn.Name.Name] != "" {
+			return
+		}
+		printed := printedVars(fn, func(rhs ast.Expr) bool { return pkg.printedUnquoted(rhs, env) })
+		pastedTexts(fn.Body, func(n ast.Node, pt pastedText) {
+			for i, hole := range pt.holes {
+				arg := pt.args[i]
+				if inBdCommand(pt.text, hole) && (pkg.tainted(arg, env) == taintValue || pkg.printedUnquoted(arg, env) || printed.holds(arg)) {
+					report(n)
+					return
+				}
+			}
+		})
+	})
+}
+
+// printedSet is the variables of one function that hold a remedy printer's
+// result a census pass tracks, keyed by varKey.
+type printedSet map[any]bool
+
+func (s printedSet) holds(expr ast.Expr) bool {
+	id, ok := ast.Unparen(expr).(*ast.Ident)
+	return ok && s[varKey(id)]
+}
+
+// printedVars returns the variables of fn assigned a value isPrinted accepts,
+// or copied from one that was, so a pass that checks a remedy printer's
+// result called in place also sees it stored first (id :=
+// remedy.PrintedValue(a.ID), then "bd show %s" with id).
+func printedVars(fn *ast.FuncDecl, isPrinted func(ast.Expr) bool) printedSet {
+	set := printedSet{}
+	for changed := true; changed; {
+		changed = false
+		mark := func(lhs, rhs ast.Expr) {
+			id, ok := lhs.(*ast.Ident)
+			if !ok || id.Name == "_" || set[varKey(id)] {
+				return
+			}
+			if isPrinted(rhs) || set.holds(rhs) {
+				set[varKey(id)] = true
+				changed = true
+			}
+		}
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			switch x := n.(type) {
+			case *ast.AssignStmt:
+				if len(x.Lhs) == len(x.Rhs) {
+					for i := range x.Rhs {
+						mark(x.Lhs[i], x.Rhs[i])
+					}
+				}
+			case *ast.ValueSpec:
+				if len(x.Names) == len(x.Values) {
+					for i := range x.Values {
+						mark(x.Names[i], x.Values[i])
+					}
+				}
+			}
+			return true
+		})
+	}
+	return set
+}
+
+// shellWordPrinters are the remedy calls whose result can go into a pasted
+// command: a value quoted for a shell (or a placeholder), or one escaped so
+// that no part of it is shell syntax.
+var shellWordPrinters = map[string]bool{
+	"remedy.CommandArg":     true,
+	"remedy.ShellWord":      true,
+	"remedy.ShellQuotedFor": true,
+	"remedy.PrintedWord":    true,
+	"remedy.EscapedValue":   true,
+}
+
+// printedUnquoted reports whether expr is a call to a remedy printer other
+// than shellWordPrinters (PrintedValue, PrintedText, ...) given a tracked
+// value: such a printer leaves a $(...) or a backtick as it is, so it does not
+// make the value safe to paste.
+func (p *censusPkg) printedUnquoted(expr ast.Expr, env censusEnv) bool {
+	call, ok := ast.Unparen(expr).(*ast.CallExpr)
+	if !ok || !isRemedyCall(call) || shellWordPrinters[censusCallName(call)] {
+		return false
+	}
+	for _, a := range call.Args {
+		if p.tainted(a, env) == taintValue {
+			return true
+		}
+	}
+	return false
+}
+
+// backtickedRemedyViolations returns the remedy words a format or + chain
+// wraps in literal backticks (shellWordSources), outside allow.
+func backtickedRemedyViolations(pkgs map[string]*censusPkg, allow map[string]string) []string {
+	return analyze(pkgs, shellWordSources, func(pkg *censusPkg, rel string, fn *ast.FuncDecl, env censusEnv, report func(ast.Node)) {
+		if allow[rel+":"+fn.Name.Name] != "" {
+			return
+		}
+		printed := printedVars(fn, isRemedyPrinted)
+		pastedTexts(fn.Body, func(n ast.Node, pt pastedText) {
+			for i, hole := range pt.holes {
+				arg := pt.args[i]
+				if inBackticks(pt.text, hole) && (pkg.tainted(arg, env) == taintValue || isRemedyPrinted(arg) || printed.holds(arg)) {
+					report(n)
+					return
+				}
+			}
+		})
+	})
+}
+
+// isRemedyPrinted reports whether expr is a call in place to a remedy printer
+// that can return a backtick (PrintedValue, PrintedText, CommandArg, ...):
+// only EscapedValue and PrintedWord escape one, so any other's result closes
+// a literal backtick pair it is printed between.
+func isRemedyPrinted(expr ast.Expr) bool {
+	call, ok := ast.Unparen(expr).(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	name := censusCallName(call)
+	return strings.HasPrefix(name, "remedy.") && name != "remedy.EscapedValue" && name != "remedy.PrintedWord"
+}
+
+// requireAllowlistLive fails for each entry of allow ("file:function") that
+// the pass, run with no allowlist, no longer flags: the code it excused is
+// gone or fixed, so the entry must go before it can excuse something new.
+func requireAllowlistLive(t *testing.T, name string, allow map[string]string, unfiltered []string) {
+	t.Helper()
+	hit := map[string]bool{}
+	for _, v := range unfiltered {
+		loc, fn, _ := strings.Cut(v, " ")
+		file, _, _ := strings.Cut(loc, ":")
+		hit[file+":"+fn] = true
+	}
+	for site := range allow {
+		if !hit[site] {
+			t.Errorf("%s: allowlisted site is no longer flagged; drop it from %s", site, name)
+		}
+	}
+}
+
+// TestRemedyCensusStoreIDHints is the source-keyed guard on the second remedy
+// class #7868 opened: a bd command a hint prints with an issue ID read from
+// the store, which holds a collaborator's issues after bd dolt pull. Such an
+// ID goes into the command through remedy.CommandArg (bare when it is a plain
+// word, quoted otherwise, or a placeholder named escaped after it), as bd
+// duplicates, bd mol current, bd find-duplicates, bd mol ready
+// --gated, the unserved auto-close note, the show/dep-list hints and bd dep
+// add's malformed-target refusal do. A hint that pastes one raw, or through a
+// remedy printer that leaves a $(...) as it is, fails here;
+// storeIDHintAllowlist excuses the sites whose ID bd mints or the user typed,
+// each with a reason, as dolt_host_policy_test.go does, and an entry the pass
+// no longer flags fails as stale. The behavioral half is cmd/bd's
+// TestStoreReadIDHintsQuoteIDs, TestStoreReadCommandHintsQuoteIDs and the
+// TestEmbeddedRemedyPrinting_* end-to-end tests.
+func TestRemedyCensusStoreIDHints(t *testing.T) {
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkgs := parseCensusPkgs(t, repoRoot, "cmd/bd", "internal")
+	for _, v := range storeIDCommandViolations(pkgs, storeIDHintAllowlist) {
+		t.Errorf("%s pastes a store-read issue ID into a bd command without remedy.CommandArg (internal/remedy); route it through remedy.CommandArg, or allowlist it in storeIDHintAllowlist with a reason", v)
+	}
+	// An allowlisted site the pass no longer flags has grown stale; drop it
+	// so the list cannot outlive the code it excuses.
+	requireAllowlistLive(t, "storeIDHintAllowlist", storeIDHintAllowlist, storeIDCommandViolations(pkgs, nil))
+}
+
+// TestRemedyCensusConfigHints is the bd-command guard for #7837's sources: a
+// bd command a hint prints with a clone-controlled config, metadata or
+// routing value (configSources) puts it in through a shell-word remedy
+// printer (remedy.CommandArg and shellWordPrinters). #7837's terminal pass
+// (TestRemedyCensus) accepts remedy.PrintedValue and %q, which keep a value
+// from redrawing the terminal but leave a $(...) or backtick live in a pasted
+// command; this pass does not. configHintAllowlist excuses prose sites, each
+// with a reason, and an entry the pass no longer flags fails as stale.
+func TestRemedyCensusConfigHints(t *testing.T) {
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkgs := parseCensusPkgs(t, repoRoot, "cmd/bd", "internal")
+	for _, v := range configCommandViolations(pkgs, configHintAllowlist) {
+		t.Errorf("%s pastes a config, metadata or routing value into a bd command without a shell-word remedy printer (internal/remedy); route it through remedy.CommandArg, or allowlist it in configHintAllowlist with a reason", v)
+	}
+	requireAllowlistLive(t, "configHintAllowlist", configHintAllowlist, configCommandViolations(pkgs, nil))
+}
+
+// TestRemedyCensusBacktickedRemedies is the source-keyed guard on the first
+// remedy class #7868 opened: a remedy value quoted for a shell
+// (remedy.CommandArg, ShellWord or ShellQuotedFor), or one a remedy printer
+// called in place returns with any backtick it holds (PrintedValue,
+// PrintedText), printed between literal backticks. sh, bash and zsh run a pasted `...` as a command substitution,
+// and remedy single-quotes a value holding a backtick on POSIX, so the value's
+// own backtick ends the substitution and the rest of it runs. #7868 (bd mol
+// current) and its follow-up (bd doctor routing repos, bd create --repo dolt.host,
+// migrate-personal, federation add-peer, bd ship, bd backup init, the
+// installation, dolt reset and memory remedies) dropped the wrapper; a new one
+// fails here. backtickRemedyAllowlist is empty; an entry the pass no longer
+// flags would fail as stale.
+func TestRemedyCensusBacktickedRemedies(t *testing.T) {
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkgs := parseCensusPkgs(t, repoRoot, "cmd/bd", "internal")
+	for _, v := range backtickedRemedyViolations(pkgs, backtickRemedyAllowlist) {
+		t.Errorf("%s wraps a remedy shell word in literal backticks; drop the backticks (a pasted `...` is a command substitution), or allowlist it in backtickRemedyAllowlist with a reason", v)
+	}
+	requireAllowlistLive(t, "backtickRemedyAllowlist", backtickRemedyAllowlist, backtickedRemedyViolations(pkgs, nil))
+}
+
+// TestRemedyHintCensusFlagsItsClasses pins the three hint censuses on a
+// package of their own: a store-read ID or a config value pasted into a bd
+// command raw, with %q, as a Println operand, or through remedy.PrintedValue
+// (in place or stored in a variable first), and a remedy word or a
+// PrintedValue in backticks (in place or stored), are each flagged; the same
+// value named with remedy.PrintedWord, put in a command through
+// remedy.CommandArg, or named only in prose beside the command, is not; and
+// neither is a remedy word outside backticks or an EscapedValue inside them.
+func TestRemedyHintCensusFlagsItsClasses(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	src := `package probe
+
+import (
+	"fmt"
+	"runtime"
+
+	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/remedy"
+	"github.com/steveyegge/beads/internal/utils"
+	"github.com/steveyegge/beads/issueops"
+)
+
+type issue struct{ ID, Title string }
+
+func readIssue() *issue { return &issue{} }
+
+func rawHint() {
+	a := readIssue()
+	fmt.Printf("Compare: bd show %s\n", a.ID) // storeid
+}
+
+func rawConcatHint(resolvedID string) {
+	println("run: bd dep list " + resolvedID) // not-a-field
+}
+
+func quotedHint() {
+	a := readIssue()
+	arg, note := remedy.CommandArg(runtime.GOOS, a.ID, "<id>")
+	fmt.Printf("Compare: bd show %s%s\n", arg, note)
+}
+
+func printedValueHint() {
+	a := readIssue()
+	fmt.Printf("Compare: bd show %s\n", remedy.PrintedValue(a.ID)) // printedvalue
+}
+
+func namedBesideHint() {
+	a := readIssue()
+	fmt.Printf("  %s is a duplicate\n", remedy.PrintedWord(a.ID))
+}
+
+func proseOnly() {
+	a := readIssue()
+	fmt.Printf("issue %s was closed\n", a.ID)
+}
+
+func backtickRemedy(host string) {
+	arg, note := remedy.CommandArg(runtime.GOOS, host, "<host>")
+	fmt.Printf("Run ` + "`" + `bd repo add %s` + "`" + `%s\n", arg, note) // backtick
+}
+
+func backtickPrinted(host string) {
+	fmt.Printf("Run ` + "`" + `bd repo add %s` + "`" + `\n", remedy.PrintedValue(host)) // backtick-printed
+}
+
+func backtickEscaped(host string) {
+	fmt.Printf("host ` + "`" + `%s` + "`" + `\n", remedy.EscapedValue(host))
+}
+
+func plainRemedy(host string) {
+	arg, note := remedy.CommandArg(runtime.GOOS, host, "<host>")
+	fmt.Printf("Run bd repo add %s%s\n", arg, note)
+}
+
+func quotedVerbHint() {
+	a := readIssue()
+	fmt.Printf("Compare: bd show %q\n", a.ID) // storeid-q
+}
+
+func storedPrintedHint() {
+	a := readIssue()
+	id := remedy.PrintedValue(a.ID)
+	fmt.Printf("Compare: bd show %s\n", id) // storeid-stored
+}
+
+func printlnHint() {
+	a := readIssue()
+	fmt.Println("  Compare: bd show", a.ID) // storeid-println
+}
+
+func printlnProse() {
+	a := readIssue()
+	fmt.Println("closed", a.ID)
+}
+
+func storedBacktick(host string) {
+	shown := remedy.PrintedValue(host)
+	fmt.Printf("Run ` + "`" + `bd repo add %s` + "`" + `\n", shown) // backtick-stored
+}
+
+func resolvedHint(arg string) {
+	id, _ := utils.ResolvePartialID(ctx, store, arg)
+	fmt.Printf("Run: bd show %s\n", id) // storeid-resolved
+}
+
+func resolvedRootsHint(ids []string) {
+	roots, _ := issueops.MoleculeRoots(ctx, store, ids)
+	for _, root := range roots {
+		fmt.Println("  bd mol show", root) // storeid-roots
+	}
+}
+
+func resolvedQuotedHint(arg string) {
+	id, _ := utils.ResolvePartialID(ctx, store, arg)
+	shown, note := remedy.CommandArg(runtime.GOOS, id, "<id>")
+	fmt.Printf("Run: bd show %s%s\n", shown, note)
+}
+
+func configHint() {
+	fmt.Printf("Run: bd repo add %q\n", config.GetString("routing.contributor")) // config-q
+}
+
+func configPrintedHint() {
+	repo := remedy.PrintedValue(config.GetString("routing.contributor"))
+	fmt.Printf("Run: bd repo add %s\n", repo) // config-printed
+}
+
+func configQuotedHint() {
+	arg, note := remedy.CommandArg(runtime.GOOS, config.GetString("routing.contributor"), "<repo>")
+	fmt.Printf("Run: bd repo add %s%s\n", arg, note)
+}
+`
+	dir := filepath.Join(root, "cmd", "bd")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "probe.go"), []byte(src), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pkgs := parseCensusPkgs(t, root, "cmd/bd")
+	wantLine := func(marker string) int {
+		for i, line := range strings.Split(src, "\n") {
+			if strings.HasSuffix(line, "// "+marker) {
+				return i + 1
+			}
+		}
+		t.Fatalf("no line marked %q", marker)
+		return 0
+	}
+	site := func(fn, marker string) string { return fmt.Sprintf("cmd/bd/probe.go:%d %s", wantLine(marker), fn) }
+	sorted := func(v ...string) []string { slices.Sort(v); return v }
+	if got, want := storeIDCommandViolations(pkgs, nil), sorted(
+		site("rawHint", "storeid"), site("printedValueHint", "printedvalue"),
+		site("quotedVerbHint", "storeid-q"), site("storedPrintedHint", "storeid-stored"),
+		site("printlnHint", "storeid-println"),
+		site("resolvedHint", "storeid-resolved"), site("resolvedRootsHint", "storeid-roots"),
+	); !slices.Equal(got, want) {
+		t.Errorf("storeIDCommandViolations = %q, want %q", got, want)
+	}
+	if got, want := backtickedRemedyViolations(pkgs, nil), sorted(
+		site("backtickRemedy", "backtick"), site("backtickPrinted", "backtick-printed"),
+		site("storedBacktick", "backtick-stored"),
+	); !slices.Equal(got, want) {
+		t.Errorf("backtickedRemedyViolations = %q, want %q", got, want)
+	}
+	if got, want := configCommandViolations(pkgs, nil), sorted(
+		site("configHint", "config-q"), site("configPrintedHint", "config-printed"),
+	); !slices.Equal(got, want) {
+		t.Errorf("configCommandViolations = %q, want %q", got, want)
+	}
 }
 
 // TestRemedyCensusFlagsABypass pins the census itself on a package of its

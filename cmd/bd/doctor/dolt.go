@@ -53,6 +53,14 @@ func openDoltDB(beadsDir string) (*sql.DB, *configfile.Config, error) {
 	// ~/.config/beads/credentials fail doctor checks with "Access denied" while
 	// regular CRUD commands succeed (bd-h5k7).
 	password := ep.Password()
+	if password != "" {
+		// Refuse to send BEADS_DOLT_PASSWORD to a shared-config host (metadata
+		// dolt_server_host / config.yaml dolt.host) the workspace never pinned,
+		// as the store's open does (GH#7886).
+		if err := ep.EnsureTrustedForCredential(cfg); err != nil {
+			return nil, nil, err
+		}
+	}
 
 	connStr := doltutil.ServerDSN{
 		Host:     host,
@@ -286,7 +294,7 @@ func checkSchemaWithDB(conn *doltConn) DoctorCheck {
 	ctx := context.Background()
 
 	// Check required tables
-	requiredTables := []string{"issues", "dependencies", "config", "labels", "events"}
+	requiredTables := []string{"issues", "dependencies", "config", "labels", "events", "id_tombstones"}
 	var missingTables []string
 
 	for _, table := range requiredTables {
@@ -326,6 +334,7 @@ func checkSchemaWithDB(conn *doltConn) DoctorCheck {
 	ignoredTables := []string{
 		"events", "leases", "local_metadata", "repo_mtimes",
 		"wisps", "wisp_labels", "wisp_dependencies", "wisp_events", "wisp_comments",
+		"wisp_id_tombstones",
 	}
 	var missingIgnoredTables []string
 	for _, table := range ignoredTables {

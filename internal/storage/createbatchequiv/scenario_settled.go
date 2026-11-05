@@ -23,15 +23,18 @@ import (
 // updates to pinned, back to open and to closed on both planes; edges added in
 // the same transaction just before the close; and a stale parent-child cycle.
 //
-// Two closes pin when the shortcut clears the row, which it moves out of the
-// chunk's unmark statement into a statement of its own. Each closes a blocked
-// row above a child that also hangs under a wisp hanging under it, with the
-// wisp's flag stale, so whether that cycle stays dark depends only on whether
-// the child's unmark sees the closed row still blocked. In I the child shares
-// the closed row's chunk, whose union statements saw the row's pre-pass flag,
-// so the shortcut must clear the row after them; in J a chunk of dependers
-// puts the child in the next chunk, which saw the row cleared, so the shortcut
-// must clear it before that chunk.
+// Two closes were built to pin when the shortcut clears the row, which it
+// moves out of the chunk's unmark statement into a statement of its own. Each
+// closes a blocked row above a child that also hangs under a wisp hanging
+// under it, with the wisp's flag stale: in I the child shares the closed row's
+// chunk, and in J a chunk of dependers puts the child in the next one. Whether
+// that cycle stayed dark depended only on whether the child's unmark saw the
+// closed row still blocked. Since the parent-child legs stopped reading a
+// closed or pinned parent's flag (gastownhall/beads#7626), it never does, so
+// both cycles come bright whenever the shortcut clears the row, and I and J
+// no longer pin that order. The order still matters for an edgeless row with
+// a stale flag that is neither closed nor pinned (runRecomputePassInTx),
+// which no step here drives.
 //
 // It records every row's status and is_blocked after each step, and Run
 // compares the stored outcome with the shortcut on and off (compare).

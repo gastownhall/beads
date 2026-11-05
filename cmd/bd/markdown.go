@@ -168,7 +168,9 @@ func validateMarkdownPath(path string) (string, error) {
 //	label1, label2
 //
 //	### Dependencies
-//	bd-10, bd-20
+//	bd-10, depends-on:bd-20, blocks:bd-30, discovered-from:bd-40
+//
+// Dependency entries use the bd create --deps grammar (parseMarkdownDependencies).
 //
 // markdownParseState holds state for parsing markdown files
 type markdownParseState struct {
@@ -463,35 +465,23 @@ func lintMarkdownTemplates(templates []*IssueTemplate, in createInput) error {
 	return nil
 }
 
-// parseMarkdownDependencies reads a template's `### Dependencies` section as
-// the role's edge specs. `type:target` names the type; a bare target blocks.
+// parseMarkdownDependencies reads a template's `### Dependencies` (or
+// `### Deps`) section with the --deps grammar: a bare id, depends-on:id or
+// blocked-by:id makes the new issue depend on id, blocks:id makes id depend
+// on it, another well-known type:id names that type, and a type --deps
+// refuses is refused here too (GH#7508).
 func parseMarkdownDependencies(deps []string, templateTitle string) ([]issueops.CreateDependency, error) {
-	var out []issueops.CreateDependency
 	for _, raw := range deps {
 		raw = strings.TrimSpace(raw)
-		if raw == "" {
-			continue
+		if _, target, ok := strings.Cut(raw, ":"); ok && strings.TrimSpace(target) == "" {
+			return nil, fmt.Errorf("dependency %q for issue %q has no target; write type:id with no space after the colon", raw, templateTitle)
 		}
-
-		var depType types.DependencyType
-		var target string
-		if strings.Contains(raw, ":") {
-			parts := strings.SplitN(raw, ":", 2)
-			if len(parts) != 2 {
-				return nil, fmt.Errorf("invalid dependency format %q for issue %q", raw, templateTitle)
-			}
-			depType = types.DependencyType(strings.TrimSpace(parts[0]))
-			target = strings.TrimSpace(parts[1])
-		} else {
-			depType = types.DepBlocks
-			target = raw
-		}
-		if !depType.IsValid() {
-			return nil, fmt.Errorf("invalid dependency type %q for issue %q", depType, templateTitle)
-		}
-		out = append(out, issueops.CreateDependency{Type: depType, TargetID: target})
 	}
-	return out, nil
+	specs, err := parseDepSpecs(deps)
+	if err != nil {
+		return nil, fmt.Errorf("dependencies for issue %q: %w", templateTitle, err)
+	}
+	return createDependencyRequests(specs), nil
 }
 
 // reportMarkdownBatch prints what the batch created, in the one shape both

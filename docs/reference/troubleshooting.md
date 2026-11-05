@@ -138,27 +138,21 @@ Distinguish **logical consistency issues** (ID collisions, wrong prefixes)
 from **physical database corruption** (disk failures, power loss, filesystem
 errors).
 
-For logical consistency issues — this is not corruption:
+Logical consistency issues are not corruption. In server mode, repair them
+with:
 
 ```bash
 bd doctor --fix
 ```
 
-For physical corruption, rebuild from a Dolt remote or a backup:
+Embedded mode runs only `bd doctor --check=artifacts`, `--check=conventions`
+and `--check=pollution`.
 
-```bash
-# Move the damaged data directory aside:
-mv .beads/embeddeddolt .beads/embeddeddolt.backup   # embedded mode (default)
-mv .beads/dolt .beads/dolt.backup                   # server mode
-
-bd init
-bd dolt pull    # Pull from Dolt remote if configured
-
-# Or restore from a backup:
-# bd backup restore [path] --force
-```
-
-See [Database Corruption](/recovery/database-corruption) for the full runbook.
+Physical corruption needs recovery, not repair: `bd doctor --fix` does not
+rebuild a damaged store. Follow
+[Engine won't open](/recovery/database-corruption#engine-wont-open): preserve
+the damaged store and its configuration first, then recover into a fresh store
+from a Dolt remote, a Dolt-native backup, or a JSONL export.
 
 ### Dolt journal corruption after restart
 
@@ -170,11 +164,21 @@ contains:
 possible data loss detected in journal file at offset ...: corrupted journal
 ```
 
-**Cause:** Dolt detected damaged journal blocks after an unclean shutdown.
-This is not the same as a stale PID, stale port, or stale lock file. `bd`
-will not run Dolt's data-loss repair mode automatically.
+**Symptom (embedded mode):** There is no server or server log. Every `bd`
+command fails while opening the database with the same `corrupted journal`
+error, even with no other `bd` process running. Bare `bd doctor` is not
+supported in embedded mode, so do not wait for it to diagnose this.
 
-**Safe recovery when your remote is current:**
+**Cause:** Dolt detected damaged journal blocks after an unclean shutdown or an
+interrupted write. This is not the same as a stale PID, stale port, or stale
+lock file. `bd` will not run Dolt's data-loss repair mode automatically, and
+`bd doctor --fix` does not rebuild the journal.
+
+**Safe recovery:** follow
+[Engine won't open](/recovery/database-corruption#engine-wont-open). Preserve
+the damaged store and its configuration first, then recover into a fresh store
+from a current remote (`bd bootstrap --dry-run`), a Dolt-native backup, or a
+JSONL export. For example, when your server-mode remote is current:
 
 ```bash
 # Server mode data lives at .beads/dolt; embedded mode at .beads/embeddeddolt
@@ -567,15 +571,19 @@ native Windows `timeout.exe` is not compatible. If neither a coreutils timeout
 nor Perl is available, the hook warns that it is running directly without a
 deadline.
 
-The coreutils helper sends `TERM`; on POSIX hosts, Perl's alarm applies to the
-direct `bd` process. Git for Windows Perl does not guarantee that alarm across
-`exec`, so a coreutils `timeout` (GNU or uutils) is preferred there.
-TERM-resistant work and descendant processes are not guaranteed to stop.
+Both helpers send `TERM` to `bd` and its process group, so the deadline also
+stops your chained hook. The Perl fallback runs `bd` in a process group of its
+own and sends the group `KILL` if `bd` is still running two seconds after the
+`TERM`. On Git for Windows a coreutils `timeout` (GNU or uutils) is preferred.
+A process that ignores `TERM` can outlive the hook. Both helpers run `bd`
+outside the terminal's foreground process group, so a chained hook that reads
+from the terminal is stopped until the deadline ends it.
 
 Already-installed hook sections are not refreshed automatically. After upgrading
-to a version that changed the timeout probe — the name-only check, or the uutils
-coreutils banner — run `bd hooks install` once to refresh existing canonical
-sections.
+to a version that changed the timeout probe — the name-only check, the uutils
+coreutils banner, or the Perl fallback that could not stop `bd`
+([#7753](https://github.com/gastownhall/beads/issues/7753)) — run
+`bd hooks install` once to refresh existing canonical sections.
 
 ### Permission denied on git hooks
 
@@ -715,10 +723,11 @@ below.
 
 ### Storage reclaim fails with "context canceled"
 
-`bd flatten` and the Dolt-history compaction in `bd admin compact` finish by
-hard-resetting `main` onto a temporary branch; the merge-settle path behind
-`bd dolt pull` / `bd sync` falls back to a hard reset when it abandons a
-merge. On Dolt 2.3.x a few percent of freshly created databases come up with
+`bd flatten` finishes by hard-resetting `main` onto a temporary branch, as
+does the Dolt-history compaction, `bd compact`, in v1.3.2 and earlier (builds
+with the fix listed in the CHANGELOG use a soft reset, which this does not
+affect); the merge-settle path behind `bd dolt pull` / `bd sync` falls back
+to a hard reset when it abandons a merge. On Dolt 2.3.x a few percent of freshly created databases come up with
 `CALL DOLT_RESET('--hard')` broken for the life of the server process, so on
 an affected database those commands stop with:
 

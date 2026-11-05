@@ -878,7 +878,7 @@ func runSyncCommand(cmd *cobra.Command, _ []string) error {
 		}
 		exitErr := HandleErrorRespectJSON("sync failed: %s", syncFailureText(err))
 		if !jsonOutput {
-			printSyncErrorGuidance(remote, err)
+			printSyncErrorGuidance(rootCtx, st, remote, err)
 		}
 		return exitErr
 	}
@@ -976,12 +976,14 @@ func dirtyGraphFingerprintOp(st storage.DoltStorage) func(context.Context) (stri
 // print, so a failed sync is as actionable as the hand-rolled loop it replaces.
 // The classifiers match on the message, so they still fire through the step
 // wrapping runSyncLoop adds.
-func printSyncErrorGuidance(remote string, err error) {
+func printSyncErrorGuidance(ctx context.Context, st storage.DoltStorage, remote string, err error) {
 	switch {
 	case isAncestorPKMismatchErr(err):
 		printAncestorPKMismatchGuidance(err)
 	case isDivergedHistoryErr(err):
 		printDivergedHistoryGuidance("sync")
+	case isRemoteDanglingReferenceErr(err):
+		printRemoteDanglingReferenceGuidance(ctx, st, remote)
 	case remote != "" && isRemoteNotFoundErr(err):
 		fmt.Fprintf(os.Stderr, "\nRemote %q is not configured.\n", remote)
 		fmt.Fprintln(os.Stderr, "Use 'bd dolt remote add <name> <url>' to add it.")

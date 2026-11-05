@@ -241,6 +241,18 @@ func (s *DoltStore) runDoltTransactionRecording(ctx context.Context, commitMsg s
 	}
 	clearJournalScope := issueops.ScopeEventsJournalTransaction(regularTx, journalEnabled)
 	defer clearJournalScope()
+	// Shape counterpart of the activation switch just above (PR A1):
+	// insertEventRow/readEventsRowsInTx reach this store's probed shape only
+	// through a tx-scoped value, never through the store itself, so without
+	// this call every write on this path — CreateIssue, UpdateIssue, comments,
+	// the whole doltTransaction mutator surface reached from
+	// runDoltTransactionRecording — would silently fall back to
+	// canonicalJournalShape and defeat adaptive I/O for this store's main
+	// write path. The switch does not depend on the shape: a nil shape (no
+	// probe result) writes canonically, as scopeEventsJournalTransaction
+	// explains.
+	clearJournalShape := issueops.ScopeEventsJournalShape(regularTx, s.journalShape.Load())
+	defer clearJournalShape()
 	// Versioned history binds to the SAME regular transaction the mutation runs
 	// in, for the same reason the journal does: RecordVersionInTx no-ops unless
 	// this scope is set. Without it every issues-plane mutation routed through

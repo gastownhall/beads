@@ -5,8 +5,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/testutil"
 )
 
 // setupTestRepo creates a temporary git repository for testing.
@@ -40,6 +43,30 @@ func setupTestRepo(t *testing.T) (repoPath string, cleanup func()) {
 	_, _ = cmd.CombinedOutput()
 	cleanup = func() {}
 	return repoPath, cleanup
+}
+
+// TestSetupTestRepoIgnoresInheritedGitLocation pins that the fixture stays in
+// its own t.TempDir() when a test points the git location keys at another
+// repository with t.Setenv (gastownhall/beads#7706): gitCommand has to drop
+// them per command, because a package TestMain scrub cannot see a later
+// t.Setenv.
+func TestSetupTestRepoIgnoresInheritedGitLocation(t *testing.T) {
+	decoy := newDecoyRepo(t)
+	before := snapshotDecoy(t, decoy)
+	t.Setenv("GIT_DIR", filepath.Join(decoy, ".git"))
+	t.Setenv("GIT_INDEX_FILE", filepath.Join(decoy, ".git", "index"))
+	t.Setenv("GIT_CONFIG", filepath.Join(decoy, ".git", "config"))
+
+	repoPath, _ := setupTestRepo(t)
+
+	assertDecoyUnchanged(t, decoy, before)
+	if got := decoyGit(t, repoPath, "config", "--local", "user.name"); got != "Test User" {
+		t.Errorf("fixture user.name = %q, want %q", got, "Test User")
+	}
+	files := strings.Fields(decoyGit(t, repoPath, "ls-files"))
+	if strings.Join(files, " ") != ".beads/test.jsonl other.txt" {
+		t.Errorf("fixture index lists %q, want [.beads/test.jsonl other.txt]", files)
+	}
 }
 
 // TestPinNoRepositoryUnderForTestingSurvivesResetCaches is a probe for the
@@ -618,7 +645,44 @@ func TestGetMainRepoRootFrom(t *testing.T) {
 // command line, never env config: the routing-key scrub drops env config.
 var noAutoMaintenance = []string{"-c", "maintenance.auto=false", "-c", "gc.auto=0"}
 
-// gitCommand builds a git command for a fixture with noAutoMaintenance applied.
+// gitCommand builds a git command for a fixture with noAutoMaintenance applied
+// and the git location keys dropped from its environment, so a GIT_DIR a test
+// set with t.Setenv cannot route the fixture out of its cmd.Dir
+// (gastownhall/beads#7706). A caller that assigns cmd.Env replaces this.
 func gitCommand(args ...string) *exec.Cmd {
-	return exec.Command("git", append(append([]string{}, noAutoMaintenance...), args...)...)
+	cmd := exec.Command("git", append(append([]string{}, noAutoMaintenance...), args...)...)
+	cmd.Env = testutil.WithoutGitRepoLocationEnv(os.Environ())
+	return cmd
+}
+
+// TestGitCommandScrubsRepoLocationEnv pins that gitCommand applies the
+// location scrub itself: the eight routing keys are dropped from the built
+// command's environment even after a test reintroduces them with t.Setenv,
+// while the wrapper and env-config keys the suite relies on survive.
+func TestGitCommandScrubsRepoLocationEnv(t *testing.T) {
+	for _, key := range []string{
+		"GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR", "GIT_CONFIG", "GIT_DIR",
+		"GIT_INDEX_FILE", "GIT_NAMESPACE", "GIT_OBJECT_DIRECTORY", "GIT_WORK_TREE",
+	} {
+		t.Setenv(key, "/decoy")
+	}
+	t.Setenv("GIT_CEILING_DIRECTORIES", "/ceiling")
+	t.Setenv("GIT_CONFIG_GLOBAL", "/hermetic/global")
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+
+	env := gitCommand("status").Env
+	for _, key := range []string{
+		"GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR", "GIT_CONFIG", "GIT_DIR",
+		"GIT_INDEX_FILE", "GIT_NAMESPACE", "GIT_OBJECT_DIRECTORY", "GIT_WORK_TREE",
+	} {
+		if slices.ContainsFunc(env, func(entry string) bool { return strings.HasPrefix(entry, key+"=") }) {
+			t.Errorf("gitCommand env kept location key %s", key)
+		}
+	}
+	for _, key := range []string{"GIT_CEILING_DIRECTORIES", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_COUNT"} {
+		if !slices.ContainsFunc(env, func(entry string) bool { return strings.HasPrefix(entry, key+"=") }) {
+			t.Errorf("gitCommand env dropped %s", key)
+		}
+	}
 }

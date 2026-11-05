@@ -30,12 +30,27 @@ For full history squash, use 'bd flatten'.
 
 How it works:
   1. Identifies commits older than --days threshold
-  2. Creates a squashed base commit from all old history
-  3. Cherry-picks recent commits on top
+  2. Creates a squashed base commit from all old history, dated as the
+     newest squashed commit
+  3. Cherry-picks recent commits on top, keeping their original authors,
+     committers and dates, so AS OF reads and dolt_history views at or
+     after the newest squashed commit stay valid (an earlier time resolves
+     to the initial commit)
   4. Swaps main branch to the compacted version
   5. Prunes remote-tracking refs (they would keep the old history alive;
      the next push or fetch re-creates them at the new tip)
   6. Runs a full Dolt GC (all storage generations) to reclaim the old history
+
+Compact refuses, and changes nothing, when commit dates are out of history
+order across the cutoff: a recent commit that comes at or before an old commit
+in history is already part of the squashed base, and replaying it again could
+change data. The error names both commits; --force does not override it, and
+--dry-run reports the refusal. Before swapping main, compact also checks that
+the replayed history holds the same committed data main held when compact read
+its history, and aborts without resetting main if it does not. A write that
+reaches main while compact runs is kept, not counted as a difference:
+uncommitted changes stay pending, and a commit that lands meanwhile is kept in
+one follow-up commit.
 
 The GC pass is a full collection: Dolt storage is generational, and a default
 GC never revisits data an earlier GC moved to the old generation. On any store
@@ -99,7 +114,7 @@ Examples:
 
 		if compactDoltDryRun {
 			if jsonOutput {
-				return outputJSON(map[string]interface{}{
+				result := map[string]interface{}{
 					"dry_run":        true,
 					"total_commits":  totalCommits,
 					"old_commits":    oldCommits,
@@ -108,7 +123,11 @@ Examples:
 					"cutoff_date":    cutoff.Format("2006-01-02"),
 					"initial_hash":   initialHash,
 					"boundary_hash":  boundaryHash,
-				})
+				}
+				if plan.refusal != nil {
+					result["refusal"] = plan.refusal.jsonFields()
+				}
+				return outputJSON(result)
 			}
 			fmt.Printf("DRY RUN — Compact preview\n\n")
 			fmt.Printf("  Total commits:  %d\n", totalCommits)
@@ -117,6 +136,9 @@ Examples:
 			fmt.Printf("  Cutoff date:    %s\n", cutoff.Format("2006-01-02"))
 			if oldCommits <= 1 {
 				fmt.Printf("\n  Nothing to compact (0-1 old commits).\n")
+			} else if plan.refusal != nil {
+				fmt.Printf("\n  Refused: %s\n", plan.refusal.message())
+				fmt.Printf("  Hint: %s\n", compactRefusalHint)
 			} else {
 				fmt.Printf("\n  Result: %d commits → %d commits\n", totalCommits, recentCommits+1)
 				fmt.Printf("  Run with --force to proceed.\n")
@@ -141,6 +163,11 @@ Examples:
 			return HandleError("could not find boundary commit for compaction")
 		}
 
+		// --force confirms the squash; it does not override a refusal.
+		if plan.refusal != nil {
+			return HandleErrorWithHint(plan.refusal.message(), compactRefusalHint)
+		}
+
 		if !compactDoltForce {
 			return HandleErrorWithHint(
 				fmt.Sprintf("would squash %d old commits into 1, preserving %d recent commits",
@@ -158,7 +185,7 @@ Examples:
 			return HandleError("storage backend does not support compact")
 		}
 
-		if err := compactor.Compact(ctx, initialHash, boundaryHash, oldCommits, recentHashes); err != nil {
+		if err := compactor.Compact(ctx, initialHash, boundaryHash, plan.headHash, oldCommits, recentHashes); err != nil {
 			return HandleError("compact failed: %v", err)
 		}
 

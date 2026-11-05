@@ -11,6 +11,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
@@ -172,6 +173,19 @@ func CheckLegacyCLIRemotes(path string) DoctorCheck {
 	}
 }
 
+// serverRunningOrProbeable reports whether the workspace's Dolt server is up:
+// true when the PID file names a running server (state from
+// doltserver.IsRunning), without calling probe, and otherwise probe's answer.
+// The PID file alone misses every server bd did not start (launchd, systemd,
+// a container) and bd's shared server, whose PID file lives in the shared
+// server directory, while the store still opens the endpoint probe asks about.
+func serverRunningOrProbeable(state *doltserver.State, probe func() bool) bool {
+	if state != nil && state.Running {
+		return true
+	}
+	return probe()
+}
+
 // CheckFederationRemotesAPI checks if the remotesapi port is accessible for federation.
 // This is the port used for peer-to-peer sync operations.
 func CheckFederationRemotesAPI(path string) DoctorCheck {
@@ -200,9 +214,15 @@ func CheckFederationRemotesAPI(path string) DoctorCheck {
 
 	// Check if dolt server is running using doltserver.IsRunning which
 	// correctly resolves PID file paths (in beadsDir, not doltPath)
-	// and handles orchestrator daemon PID files.
+	// and handles orchestrator daemon PID files. When the PID file names no
+	// running server, probe the endpoint the store opens below, as the Dolt
+	// Mode check does (doltModeServerReachable), so a server bd did not start
+	// is not reported as down while the remotes are read from it.
 	serverState, _ := doltserver.IsRunning(beadsDir)
-	serverRunning := serverState != nil && serverState.Running
+	cfg, _ := configfile.Load(beadsDir)
+	serverRunning := serverRunningOrProbeable(serverState, func() bool {
+		return doltModeServerReachable(beadsDir, cfg)
+	})
 
 	if !serverRunning {
 		// No server running - check if we have remotes configured
@@ -241,35 +261,63 @@ func CheckFederationRemotesAPI(path string) DoctorCheck {
 
 	// Server is running - check if any federation peers are configured before
 	// probing the remotesapi port. Without peers, remotesapi is irrelevant.
-	{
-		ctx := context.Background()
-		store, err := dolt.New(ctx, federationStoreConfig(beadsDir, doltPath))
-		if err == nil {
-			remotes, err := store.ListRemotes(ctx)
-			_ = store.Close()
-			if err == nil {
-				hasPeers := false
-				for _, r := range remotes {
-					if r.Name != "origin" {
-						hasPeers = true
-						break
-					}
-				}
-				if !hasPeers {
-					return DoctorCheck{
-						Name:     "Federation remotesapi",
-						Status:   StatusOK,
-						Message:  "N/A (no federation peers configured)",
-						Category: CategoryFederation,
-					}
-				}
-			}
+	// A server only the probe found has no PID (and an unreadable PID file
+	// leaves serverState nil). That probe counts a TCP accept, which proves
+	// neither a Dolt server, nor one that takes the workspace's user, nor its
+	// database, so when its peers cannot be read the check reports why rather
+	// than dial a remotesapi listener no peer was shown to need. A PID-tracked
+	// server's listener is checked whether or not its peers could be read.
+	pid := 0
+	if serverState != nil && serverState.Running {
+		pid = serverState.PID
+	}
+	peers, skipped, err := federationPeers(beadsDir, doltPath)
+	switch {
+	case err != nil && pid <= 0:
+		return DoctorCheck{
+			Name:     "Federation remotesapi",
+			Status:   StatusOK,
+			Message:  skipped,
+			Detail:   err.Error(),
+			Category: CategoryFederation,
+		}
+	case err == nil && !peers:
+		return DoctorCheck{
+			Name:     "Federation remotesapi",
+			Status:   StatusOK,
+			Message:  "N/A (no federation peers configured)",
+			Category: CategoryFederation,
 		}
 	}
 
 	// Server is running and peers are configured - check if remotesapi port is
 	// accessible.
-	return checkRemotesAPIListener(beadsDir, serverState.PID)
+	return checkRemotesAPIListener(beadsDir, pid)
+}
+
+// federationPeers reports whether the store the federation checks open
+// (federationStoreConfig) lists a federation peer, a remote other than
+// origin. When it cannot tell, err is the store open's or ListRemotes's error
+// and skipped the message that names the step that failed, as
+// CheckLegacyCLIRemotes reports it.
+func federationPeers(beadsDir, doltPath string) (peers bool, skipped string, err error) {
+	ctx := context.Background()
+	store, err := dolt.New(ctx, federationStoreConfig(beadsDir, doltPath))
+	if err != nil {
+		return false, "Skipped (database unavailable)", err
+	}
+	defer func() { _ = store.Close() }()
+
+	remotes, err := store.ListRemotes(ctx)
+	if err != nil {
+		return false, "Skipped (SQL remotes unavailable)", err
+	}
+	for _, r := range remotes {
+		if r.Name != "origin" {
+			return true, "", nil
+		}
+	}
+	return false, "", nil
 }
 
 // checkRemotesAPIListener probes the remotesapi listener of a running server.
@@ -278,6 +326,12 @@ func CheckFederationRemotesAPI(path string) DoctorCheck {
 // server -> the per-project configfile), not configfile alone: reading
 // configfile alone diagnoses port 8080 while a shared server launched from the
 // user-global key is listening somewhere else.
+//
+// pid is the server's PID from the PID file, or 0 for a server only the
+// endpoint probe found. A PID-tracked server is bd's own, which binds
+// 127.0.0.1, so its listener is dialed there; for pid 0 the listener is
+// dialed where the probe reached the server (probedServer), and the error
+// names that endpoint.
 //
 // The mode is classified once because it also decides the remedy. bd opens a
 // remotesapi listener only for the shared server it launches, so restarting is
@@ -300,9 +354,16 @@ func checkRemotesAPIListener(beadsDir string, pid int) DoctorCheck {
 			Category: CategoryFederation,
 		}
 	}
-	host := "127.0.0.1"
-
-	addr := net.JoinHostPort(host, fmt.Sprintf("%d", remotesAPIPort))
+	// bd's own server binds 127.0.0.1, so a PID-tracked server is dialed
+	// there. A server only the endpoint probe found is dialed where the probe
+	// reached it.
+	addr := doltutil.ServerAddr("127.0.0.1", remotesAPIPort)
+	var location string
+	if pid <= 0 {
+		var host string
+		location, host = probedServer(doltserver.ResolveEndpoint(beadsDir, nil))
+		addr = doltutil.ServerAddr(host, remotesAPIPort)
+	}
 	// Left as a bare dial+close (no doltserver.ProbeSQLServer): remotesapi
 	// speaks gRPC/HTTP, not the MySQL protocol, so there is no handshake
 	// greeting to drain here.
@@ -312,11 +373,18 @@ func checkRemotesAPIListener(beadsDir string, pid int) DoctorCheck {
 		if sharedMode {
 			fix = "Restart the shared server so it picks up the resolved remotesapi port: bd dolt stop && bd dolt start"
 		}
+		detail := fmt.Sprintf("Server running (PID %d) but remotesapi port unreachable: %v", pid, err)
+		if pid <= 0 {
+			// Only the endpoint probe found this server, so name the endpoint
+			// it reached rather than "PID 0". The dial error repeats the host
+			// it dialed.
+			detail = fmt.Sprintf("Server reachable at %s (no PID file in this workspace names it) but remotesapi port unreachable: %v", remedy.PrintedValue(location), remedy.PrintedError(err))
+		}
 		return DoctorCheck{
 			Name:     "Federation remotesapi",
 			Status:   StatusError,
 			Message:  fmt.Sprintf("remotesapi port %d not accessible", remotesAPIPort),
-			Detail:   fmt.Sprintf("Server running (PID %d) but remotesapi port unreachable: %v", pid, err),
+			Detail:   detail,
 			Fix:      fix,
 			Category: CategoryFederation,
 		}
@@ -329,6 +397,21 @@ func checkRemotesAPIListener(beadsDir string, pid int) DoctorCheck {
 		Message:  fmt.Sprintf("Port %d accessible", remotesAPIPort),
 		Category: CategoryFederation,
 	}
+}
+
+// probedServer names the server ep's probe reaches (Endpoint.Probe) and the
+// host to dial its remotesapi listener at. The probe and the store's open both
+// take the store's transport (Endpoint.Transport), a live unix socket before
+// TCP. A server reached over its socket runs on this machine, so it is named
+// by the socket and its listener dialed at 127.0.0.1; over TCP it is named
+// host:port and its listener dialed at the configured host. Endpoint.Location
+// cannot tell the two apart: it names host:port whenever a port resolved, even
+// when the socket beside it answered.
+func probedServer(ep doltserver.Endpoint) (location, remotesAPIHost string) {
+	if socket := ep.Transport(); socket != "" {
+		return "unix:" + socket, "127.0.0.1"
+	}
+	return ep.Location(), ep.Host
 }
 
 // CheckFederationPeerConnectivity checks if configured peer remotes are reachable.

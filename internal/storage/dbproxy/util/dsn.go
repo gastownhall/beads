@@ -16,6 +16,7 @@ import (
 const maxAllowedPacketBytes = 1 << 30
 
 type DoltServerDSN struct {
+	Net             string
 	Socket          string
 	Host            string
 	Port            int
@@ -40,6 +41,9 @@ func (d DoltServerDSN) String() string {
 	// be the IPv6 loopback, which the driver dials only as "[::1]:port",
 	// whether the host is written ::1 or [::1].
 	network := "tcp"
+	if d.Net != "" {
+		network = d.Net
+	}
 	addr := doltutil.ServerAddr(d.Host, d.Port)
 	if d.Socket != "" {
 		network = "unix"

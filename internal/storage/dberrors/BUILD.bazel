@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "errors.go",
         "mergerefusal.go",
+        "pushrefusal.go",
     ],
     importpath = "github.com/steveyegge/beads/internal/storage/dberrors",
     visibility = ["//:__subpackages__"],
@@ -16,6 +17,7 @@ go_test(
     srcs = [
         "errors_test.go",
         "mergerefusal_test.go",
+        "pushrefusal_test.go",
     ],
     embed = [":dberrors"],
     deps = ["@com_github_go_sql_driver_mysql//:mysql"],
