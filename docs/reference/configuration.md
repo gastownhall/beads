@@ -134,9 +134,9 @@ Any key whose name contains `api_key`, `api-key`, `secret`, `token`, or `passwor
 | `backup.size-cap-mb` | — | `BD_BACKUP_SIZE_CAP_MB` | `2048` | Pause auto-backup once the destination directory reaches this size; `0` disables the cap (see [below](#auto-backup)) |
 | `backup.size-warn-interval` | — | `BD_BACKUP_SIZE_WARN_INTERVAL` | `24h` | Minimum time between repeated "auto-backup paused" warnings |
 | `audit.enabled` | — | `BD_AUDIT_ENABLED` | `false` | Enable the optional JSONL interaction sidecar at `.beads/interactions.jsonl`, written by `bd audit record` / `bd audit label`. While disabled, `bd init` does not create the file and `bd audit record` / `bd audit label` refuse to write. Issue history is always recorded in the database either way — see `bd history <id> --events` |
-| `export.auto` | — | — | `false` | Refresh `.beads/issues.jsonl` export after every write; not cross-machine sync |
+| `export.auto` | — | — | `false` | Refresh `.beads/issues.jsonl` after eligible mutating commands; not cross-machine sync (see [passive export timing](#passive-export-timing-and-coverage)) |
 | `export.path` | — | — | `issues.jsonl` | Output filename relative to `.beads/` |
-| `export.interval` | — | — | `60s` | Minimum time between auto-exports |
+| `export.interval` | — | — | `60s` | Minimum time between auto-exports — a throttle, not a staleness deadline (see [passive export timing](#passive-export-timing-and-coverage)) |
 | `export.git-add` | — | — | `false` | Run `git add` on the export file |
 | `import.auto` | — | `BD_IMPORT_AUTO` | `true` | Master switch for automatic JSONL imports: the git-hook fallback used when no Dolt remote is configured, and the empty-database recovery import when `.beads/issues.jsonl` exists but the database is empty. `false` disables all auto-imports; explicit `bd import` always works |
 | `import.path` | — | — | `issues.jsonl` | Input filename relative to `.beads/` for implied JSONL imports (including `bd init --from-jsonl` and empty-DB auto-import); use relative paths for portability |
@@ -174,6 +174,37 @@ bd config set export.git-add true
 Use `bd dolt push` / `bd dolt pull` for sync and `bd backup` for restorable
 database backups.
 </Warning>
+
+### Passive Export Timing and Coverage
+
+`export.auto` refreshes the export after eligible mutating commands, and
+`export.interval` (default `60s`) is the *minimum* time between those
+refreshes. It is not a maximum staleness bound and not a timer: a write
+inside the window is skipped and exports only when a later mutating command
+runs. Without such a command — or an explicit export — the file can remain
+stale indefinitely.
+
+The pre-commit hook adds one more refresh opportunity, but only when the
+commit stages at least one `.beads/` path, and never when
+`.beads/issues.jsonl` itself is staged for deletion. A commit that stages no
+beads paths does not refresh the export.
+
+Detect and refresh a stale file explicitly:
+
+```bash
+bd doctor --check=export
+bd export -o .beads/issues.jsonl
+```
+
+`bd doctor --check=export` is the missing-ID staleness detector: it exits 0
+with a warning when an in-scope store issue ID is absent from the export
+file, and names `bd export -o <path>` as the refresh action. It reports ID
+coverage only — not full record content equality, and not backup validity.
+Bare `bd doctor` and `bd doctor --check=artifacts` do not perform this
+coverage check.
+
+The export file is not a database backup: for recovery, use `bd backup` and
+`bd dolt push` / `bd dolt pull` (see [Dolt History, Backup, and Push](#dolt-history-backup-and-push)).
 
 Routing note: `output.title-length` and `agents.file` are functionally tool-level settings, but `bd config set` writes them to the Dolt database. They are typically read from `config.yaml` when set there directly.
 
