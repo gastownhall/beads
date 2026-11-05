@@ -1218,6 +1218,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with the configured strategy, prints `Conflict on <id>: ...` and counts it
   in the resolved conflicts. An issue edited only locally is still kept
   ([#3702](https://github.com/gastownhall/beads/issues/3702)).
+- The android_arm64 release, which npm `@beads/bd` installs on Termux, is
+  now built with cgo, so embedded Dolt works there: `bd init` no longer fails
+  with "embedded Dolt requires a CGO build" (#3538). The binary is
+  cross-compiled with the Android NDK r30 clang at API level 21 and linked
+  against Bionic with 16 KB-aligned segments; release builds check both.
+  Building that release target (`goreleaser --id bd-android-arm64`) now needs
+  a Linux x86_64 host; see RELEASING.md.
 
 - With `export.git-add` on, the pre-commit export now lands in commits made
   with `git commit -- <paths>`, `-a`, `-i` or `-p`. It used to stage into
