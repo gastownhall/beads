@@ -175,6 +175,13 @@ func ValidateScalarUpdates(ctx context.Context, tx DBTX, updates map[string]inte
 			}
 		}
 	}
+	if rawTitle, ok := updates["title"]; ok {
+		if title, ok := rawTitle.(string); ok {
+			if err := types.ValidateIssueTitle(title); err != nil {
+				return fmt.Errorf("%w: update title: %w", storage.ErrValidation, err)
+			}
+		}
+	}
 	return nil
 }
 
