@@ -2400,6 +2400,98 @@
           "digest": "sha256:a72d71ed374955dc9f83a0f90b54bd7b6a0016709dd1676ae2e368651ed401c2"
         }
       }
+    },
+    {
+      "version": "v1.2.0",
+      "sum": "h1:ybRxPVim24oaMdC19xobwBaoFMkgt7HrYZVOGR0Sts4=",
+      "go_mod_sum": "h1:iMHTYp47/cVnXX+SXweYlG9M9dZhOopTFCBLpyOT69E=",
+      "origin": {
+        "hash": "fa3d8cc5ceda129b76f8284231f34a3b6fe30b86",
+        "ref": "refs/tags/v1.2.0"
+      },
+      "source_zip": {
+        "sha256": "ad670f9c652f7d54b381fcc79e0e76a9506750c44465fb019260a2f8de259d17",
+        "size": 11232684
+      }
+    },
+    {
+      "version": "v1.2.1",
+      "sum": "h1:23vau/bJYyjRUo3CzvZyfm63yxeV1SHalaPRpVFNIpY=",
+      "go_mod_sum": "h1:iMHTYp47/cVnXX+SXweYlG9M9dZhOopTFCBLpyOT69E=",
+      "origin": {
+        "hash": "634cbbc4bc580fa5124f63fdf65d137a46d5b4ff",
+        "ref": "refs/tags/v1.2.1"
+      },
+      "source_zip": {
+        "sha256": "c10110f0e61087f8643d78a8ef6644375524a2ef3cead384809b394fad08d2ba",
+        "size": 11235296
+      }
+    },
+    {
+      "version": "v1.2.2",
+      "sum": "h1:2K5ki3k1GGGKuYdFIuJtqHHziGQcepN+H2f/EYfE0X4=",
+      "go_mod_sum": "h1:oavjy+j75Szj3AIHLe0rv6fMyMZ8O+vGpPFh0nq+T08=",
+      "origin": {
+        "hash": "6c124203e771433a3550c348771a5b5e27fd3c21",
+        "ref": "refs/tags/v1.2.2"
+      },
+      "source_zip": {
+        "sha256": "4e26133ada66d4df2b5a225eed07e2a67d39f95d1e0f7af24a55a921552d2856",
+        "size": 7610482
+      },
+      "github_release": {
+        "html_url": "https://github.com/gastownhall/beads/releases/tag/v1.2.2",
+        "source_relation": "matches_proxy_origin",
+        "linux_amd64_asset": {
+          "size": 49107375,
+          "name": "beads_1.2.2_linux_amd64.tar.gz",
+          "digest": "sha256:8140098a51d3b81d5548d1c5e6db1a2d9930e5d141efe2a4bff7d079c4d321e8"
+        }
+      }
+    },
+    {
+      "version": "v1.3.0",
+      "sum": "h1:QPvdw+hRA6EDx31eTzBe2pl/B5Z7yXczq7bC8KHPY0Q=",
+      "go_mod_sum": "h1:bw++9IlggPhjAeyNOv6cmfOlfyV+ERA5BiRgsqDvyTc=",
+      "origin": {
+        "hash": "f45b249ce6b40ba62aecc03949e6371e8f7c79d8",
+        "ref": "refs/tags/v1.3.0"
+      },
+      "source_zip": {
+        "sha256": "09dc04bcca035e194d9c0bce3ff4e2caffbed30795d12bc757bc06cdb66757d6",
+        "size": 12150899
+      },
+      "github_release": {
+        "html_url": "https://github.com/gastownhall/beads/releases/tag/v1.3.0",
+        "source_relation": "matches_proxy_origin",
+        "linux_amd64_asset": {
+          "size": 53179375,
+          "name": "beads_1.3.0_linux_amd64.tar.gz",
+          "digest": "sha256:2f92b904ecf35b607e44dc5c39229173af69c54f1183e8d709f1773540cdcf3b"
+        }
+      }
+    },
+    {
+      "version": "v1.3.1",
+      "sum": "h1:Ec9DhMDHo/prSd8PDYts+4VF5TY9hI0PrZ46bYnxj1Y=",
+      "go_mod_sum": "h1:z7FHqG/z403/Sjr6j36QaeWdFWFpEDwQVhWZt9C3Mug=",
+      "origin": {
+        "hash": "c1c4b642ac1c08d8c828007a1c2f96e47e43ef7c",
+        "ref": "refs/tags/v1.3.1"
+      },
+      "source_zip": {
+        "sha256": "018ce9faca318c0d8c54bde035ddf62bdfc7f45980ef0c92359dc1369bea9c24",
+        "size": 12443826
+      },
+      "github_release": {
+        "html_url": "https://github.com/gastownhall/beads/releases/tag/v1.3.1",
+        "source_relation": "matches_proxy_origin",
+        "linux_amd64_asset": {
+          "size": 53304363,
+          "name": "beads_1.3.1_linux_amd64.tar.gz",
+          "digest": "sha256:3219443a9734b89b93fb16ee8d65844759fa1b3cd3cf139c606b7353cfb0715c"
+        }
+      }
     }
   ],
   "repository_tag_drift": [
@@ -2459,7 +2551,12 @@
   "exclusions": {
     "proxy_prereleases": [
       "v1.1.0-rc.1",
-      "v1.1.0-rc.2"
+      "v1.1.0-rc.2",
+      "v1.2.2-rc.1",
+      "v1.3.0-rc.1",
+      "v1.3.0-rc.2",
+      "v1.3.1-rc.1",
+      "v1.3.1-rc.2"
     ],
     "repository_only_stable_tags": [
       "v0.57.12",

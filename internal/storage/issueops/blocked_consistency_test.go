@@ -219,3 +219,47 @@ func TestGuardBlockedRecomputeWorkingSet(t *testing.T) {
 		}
 	})
 }
+
+// The parent-child legs cascade on a parent's stored bit only while the parent
+// is neither closed nor pinned: the merge clause of BlockedStateInvariant
+// admits a stale 1 on such a row (gastownhall/beads#7626). The real-engine
+// tests cover the behavior; this pins the text on the ci lane, where they skip.
+func TestShouldBeBlockedUnionParentLegsGuardStatus(t *testing.T) {
+	const guarded = "AND p.is_blocked = 1 AND p.status <> 'closed' AND p.status <> 'pinned'"
+	for _, scope := range []string{"", "AND d.issue_id IN (?)"} {
+		q := strings.Join(strings.Fields(shouldBeBlockedIDsUnionCoreSQL("dependencies", scope, "", "")), " ")
+		if got := strings.Count(q, "p.is_blocked = 1"); got != 2 {
+			t.Fatalf("scope %q: %d reads of p.is_blocked, want 2 (one per parent leg)", scope, got)
+		}
+		if got := strings.Count(q, guarded); got != 2 {
+			t.Errorf("scope %q: %d parent legs guard p.status after p.is_blocked = 1, want 2", scope, got)
+		}
+	}
+}
+
+// The close-gate walk meets a parent as blocked only while it is neither
+// closed nor pinned, as the parent-child legs do (gastownhall/beads#7626).
+func TestBlockedParentEdgesGuardStatus(t *testing.T) {
+	const guarded = "AND p.is_blocked = 1 AND p.status <> 'closed' AND p.status <> 'pinned'"
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherFunc(
+		func(_, actual string) error {
+			if !strings.Contains(strings.Join(strings.Fields(actual), " "), guarded) {
+				return errors.New("walk does not guard p.status after p.is_blocked = 1")
+			}
+			return nil
+		})))
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	// One child issue: one lookup per parent kind.
+	for range 2 {
+		mock.ExpectQuery("").WillReturnRows(sqlmock.NewRows([]string{"issue_id", "id"}))
+	}
+	if _, err := blockedParentEdgesInTx(context.Background(), db, []parentRef{{id: "c"}}); err != nil {
+		t.Fatalf("blockedParentEdgesInTx: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet sqlmock expectations: %v", err)
+	}
+}

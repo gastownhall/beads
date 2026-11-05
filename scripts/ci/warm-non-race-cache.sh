@@ -6,14 +6,10 @@
 # Dolt/test-env setup required).
 #
 # Shared by every non-race seeder so they can never drift apart (F7b spec 4.2):
-#   - main.yml's build-artifacts (ubuntu-latest / fork-PR path non-race save)
-#   - main.yml's blacksmith-go-build-cache (Blacksmith / same-repo-PR path
-#     non-race save)
 #   - main.yml's test-windows (Windows non-race save)
-#   - main.yml's test macOS leg (GitHub-hosted macOS non-race save; the
-#     fork/Dependabot path of pr.yml's macOS legs)
-#   - main.yml's blacksmith-macos-go-build-cache (Blacksmith macOS non-race
-#     save; the same-repo-PR path of pr.yml's macOS legs)
+#   - main.yml's blacksmith-macos-go-build-cache (macOS non-race save: its
+#     github leg the fork/Dependabot path of pr.yml's macOS legs, its
+#     blacksmith leg the same-repo-PR path)
 #
 # Package list mirrors exactly what pr.yml's check-doc-freshness-platforms and
 # pr-preflight-platforms legs compile on every OS:
@@ -32,3 +28,12 @@ go test -tags gms_pure_go -c -o /dev/null ./cmd/bd
 go test -tags gms_pure_go -c -o /dev/null ./scripts
 go test '-tags=integration,gms_pure_go' -c -o /dev/null ./scripts
 go test '-tags=integration,gms_pure_go' -c -o /dev/null ./scripts/gitattributespolicy
+
+# pr-preflight-platforms' Windows-only "Exercise credential command fixtures on
+# Windows" step tests these with CGO_ENABLED=0, which the Windows runner's
+# default (CGO_ENABLED=1, gcc on PATH) does not build.
+if [[ "$(go env GOOS)" == windows ]]; then
+    for pkg in ./internal/testutil/credentialcmd ./internal/creds ./internal/storage/dolt; do
+        CGO_ENABLED=0 go test -tags gms_pure_go -c -o /dev/null "$pkg"
+    done
+fi

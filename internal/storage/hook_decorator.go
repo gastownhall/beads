@@ -153,6 +153,18 @@ func RoleFiresHooks(role any) bool {
 	// hazard, on the operation that reaches it with nothing else in the way.
 	case *hookBatchCreator:
 		return true
+	// The lease reclaimer fires the update hook once per row it reverts
+	// (hook_lease_reclaimer.go), so a scheduled reaper sweep is N
+	// subprocesses per run — the same value Releaser and ReadyClaimer are
+	// refused for, and the one whose caller is a clock rather than a human
+	// or a request.
+	case *hookLeaseReclaimer:
+		return true
+	// The heartbeater fires the update hook for a RE-ARM only
+	// (hook_heartbeater.go): rare, but a write the workspace's script runs
+	// for, so a server handed an unpeeled one is refused like the others.
+	case *hookHeartbeater:
+		return true
 	}
 	return false
 }
@@ -196,7 +208,7 @@ func (h *HookFiringStore) CreateIssues(ctx context.Context, issues []*types.Issu
 			h.fireHook(p.event, p.issue)
 		}
 	}
-	if h.runner != nil {
+	if h.hookConfigured(hooks.EventUpdate) {
 		for _, p := range dependencyHookEvents(ctx, issues, h.inner.GetIssue, h.inner.GetDependencyRecords) {
 			h.fireHook(p.event, p.issue)
 		}
@@ -410,7 +422,7 @@ func (h *HookFiringStore) CompleteIssueOperationCreate(ctx context.Context, issu
 	for _, pending := range createHookEvents(issue) {
 		h.fireHook(pending.event, pending.issue)
 	}
-	if h.runner == nil || len(dependencies) == 0 {
+	if !h.hookConfigured(hooks.EventUpdate) || len(dependencies) == 0 {
 		return
 	}
 	request := &types.Issue{Dependencies: cloneDependenciesForHook(dependencies)}
@@ -466,8 +478,24 @@ func (h *HookFiringStore) CompleteIssueOperationRelease(ctx context.Context, iss
 	h.fireHookByID(ctx, hooks.EventUpdate, issueID)
 }
 
+// CompleteIssueOperationReclaim fires the update hook for one row a lease
+// sweep reverted, which is the event the generic update path fires for the
+// same write — assignee and status are exactly the fields a reclaim moves,
+// the same pair a release moves. It re-reads the row rather than taking the
+// caller's, so a script sees the unheld issue the sweep produced.
+func (h *HookFiringStore) CompleteIssueOperationReclaim(ctx context.Context, issueID string) {
+	h.fireHookByID(ctx, hooks.EventUpdate, issueID)
+}
+
+// CompleteIssueOperationUpdateByID fires on_update for a write that names
+// its row by id (a heartbeat's re-arm), reading the row back to hand it to
+// the script.
+func (h *HookFiringStore) CompleteIssueOperationUpdateByID(ctx context.Context, issueID string) {
+	h.fireHookByID(ctx, hooks.EventUpdate, issueID)
+}
+
 func (h *HookFiringStore) fireHookByID(ctx context.Context, event, id string) {
-	if h.runner == nil {
+	if !h.hookConfigured(event) {
 		return
 	}
 	issue, err := h.inner.GetIssue(ctx, id)
@@ -478,7 +506,7 @@ func (h *HookFiringStore) fireHookByID(ctx context.Context, event, id string) {
 }
 
 func (h *HookFiringStore) fireDependencyHookByID(ctx context.Context, id string) {
-	if h.runner == nil {
+	if !h.hookConfigured(hooks.EventUpdate) {
 		return
 	}
 	issue, err := dependencySnapshot(ctx, id, h.inner.GetIssue, h.inner.GetDependencyRecords)
@@ -486,6 +514,22 @@ func (h *HookFiringStore) fireDependencyHookByID(ctx context.Context, id string)
 		return
 	}
 	h.runner.Run(hooks.EventUpdate, issue)
+}
+
+// hookConfigured reports whether firing event could run anything. The by-id
+// paths re-read the issue (and its edges) to build the hook's payload, and over
+// a remote backend each of those reads is a gateway round trip a command pays
+// after its write (bts-xpw.3.14.6) — for nothing, when no executable hook for
+// the event exists and Run would skip it anyway. A runner that cannot say
+// (a test double with Run alone) is assumed to have one.
+func (h *HookFiringStore) hookConfigured(event string) bool {
+	if h.runner == nil {
+		return false
+	}
+	if probe, ok := h.runner.(interface{ HookExists(string) bool }); ok {
+		return probe.HookExists(event)
+	}
+	return true
 }
 
 // ── Hook tracking transaction ───────────────────────────────────────

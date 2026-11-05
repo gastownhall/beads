@@ -16,48 +16,38 @@ import (
 
 // Every Go test that deliberately skips itself under Bazel (a t.Skip guarded
 // by TEST_SRCDIR or bazeltest.IsBazel(), directly or through a helper it
-// calls) has a `skip` entry in tools/bazel/equivalence_allowlist.txt.
+// calls) has a `skip` entry in tools/bazel/equivalence_allowlist.txt, and no
+// test runs part of its checks under go test only.
 //
 // The PR run of the Bazel lane cannot tell a test that skips under Bazel from
 // one that runs: only nightly.yml's skip-parity check (equivalence.py
 // --go-test-json) can, after the merge, and a missing entry turns that
 // nightly red (as TestBazelGatedLanesNeverRetryFlakyTests and
-// TestCheckShardCoverageScript did on 2026-10-02). The entries are also what
-// keeps those tests running under go test where the Bazel lane replaces a
-// go test job. This check finds them before the merge, from the source.
+// TestCheckShardCoverageScript did on 2026-10-02). Bazel is where the Go
+// tests run on every PR, so a go-test-only check (a Bazel-guarded return or
+// continue, or a block guarded by TEST_SRCDIR == "" / !IsBazel()) would run
+// nowhere: declare what it reads as data instead (//:repo_files holds the
+// whole checkout, tools/bazel/go_srcs.py's partitions of it less). This check finds them before the merge, from the source.
 //
 // Only top-level tests are considered: a subtest's skip is invisible to
 // equivalence.py, which compares top-level tests.
 func TestBazelOnlySkipsAreAllowlisted(t *testing.T) {
-	if os.Getenv("TEST_SRCDIR") != "" {
-		t.Skip("walks every _test.go file in the source checkout; runs under go test")
-	}
 	root := sourceRepoRoot(t)
 	entries := readSkipAllowlist(t, filepath.Join(root, "tools", "bazel", "equivalence_allowlist.txt"))
 
-	found, err := bazelSkippingTests(root)
+	found, files, err := bazelSkippingTests(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(found) < 16 {
-		t.Fatalf("found only %d Bazel-skipping tests (%v); the scan is broken", len(found), found)
+	// Under Bazel the tree is //:repo_go_test_srcs; a scan that parsed few
+	// files is not looking at it.
+	if files < 1000 {
+		t.Fatalf("parsed only %d _test.go files; the scan is broken", files)
 	}
-	partial := 0
-	defer func() {
-		if partial < 5 {
-			t.Errorf("found only %d tests with a go-test-only part; the scan is broken", partial)
-		}
-	}()
 	for _, f := range found {
 		if f.partial {
-			// D2 step 3: under go test, only ./scripts/... still runs on every
-			// PR (pr.yml's scripts-go-checks job), so a Test that runs part
-			// of its checks under go test only must live there.
-			partial++
-			if f.pkg != "scripts" && !strings.HasPrefix(f.pkg, "scripts/") {
-				t.Errorf("%s %s runs part of its checks under go test only (%s); outside ./scripts/... nothing runs that part on every PR: move the check to ./scripts or make the test t.Skip under Bazel and allowlist it",
-					f.pkg, f.test, f.where)
-			}
+			t.Errorf("%s %s runs part of its checks under go test only (%s); nothing runs that part on every PR: declare its inputs as Bazel data (//:repo_files) and drop the guard",
+				f.pkg, f.test, f.where)
 			continue
 		}
 		if !skipAllowlisted(entries, f.pkg, f.test) {
@@ -185,7 +175,10 @@ FUNC TestScriptsPartial(t *testing.T) {
 	write("sub/go.mod", "module example.com/sub\n")
 	write("sub/s_test.go", "package s\nimport \"testing\"\nfunc TestOtherModule(t *testing.T) { if bazeltest.IsBazel() { t.Skip() } }\n")
 
-	found, err := bazelSkippingTests(dir)
+	found, files, err := bazelSkippingTests(dir)
+	if files != 2 {
+		t.Errorf("scan parsed %d files, want 2 (a/a_test.go, scripts/s_test.go)", files)
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -257,8 +250,10 @@ var bazelGuardTestFunc = regexp.MustCompile(`^Test([^a-z].*)?$`)
 
 // bazelSkippingTests parses every _test.go file of the module rooted at
 // root (not nested modules, node_modules, .git, .beads or bazel-* output
-// trees) and returns the top-level tests that skip under Bazel.
-func bazelSkippingTests(root string) ([]bazelSkip, error) {
+// trees) and returns the top-level tests that skip under Bazel and the
+// number of files it parsed.
+func bazelSkippingTests(root string) ([]bazelSkip, int, error) {
+	parsed := 0
 	byDir := map[string][]*ast.File{}
 	fset := token.NewFileSet()
 	err := filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
@@ -277,18 +272,19 @@ func bazelSkippingTests(root string) ([]bazelSkip, error) {
 			}
 			return nil
 		}
-		if !strings.HasSuffix(p, "_test.go") || d.Type()&os.ModeSymlink != 0 {
+		if !strings.HasSuffix(p, "_test.go") || !isFileOrFileLink(p, d) {
 			return nil
 		}
 		f, err := parser.ParseFile(fset, p, nil, 0)
 		if err != nil {
 			return err
 		}
+		parsed++
 		byDir[filepath.Dir(p)] = append(byDir[filepath.Dir(p)], f)
 		return nil
 	})
 	if err != nil {
-		return nil, err
+		return nil, parsed, err
 	}
 	var out []bazelSkip
 	for dir, files := range byDir {
@@ -325,7 +321,7 @@ func bazelSkippingTests(root string) ([]bazelSkip, error) {
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].pkg+" "+out[i].test < out[j].pkg+" "+out[j].test })
-	return out, nil
+	return out, parsed, nil
 }
 
 // goTestOnlyPart: the first if statement (outside closures) that ends a
@@ -368,20 +364,6 @@ func checks(body *ast.BlockStmt) bool {
 		return !found
 	})
 	return found
-}
-
-func exits(body *ast.BlockStmt) bool {
-	for _, st := range body.List {
-		switch st := st.(type) {
-		case *ast.ReturnStmt:
-			return true
-		case *ast.BranchStmt:
-			if st.Tok == token.CONTINUE {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 // goTestCond: TEST_SRCDIR == "" or !...IsBazel().

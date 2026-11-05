@@ -25,6 +25,7 @@ const (
 	OpGetIssue                = "getIssue"
 	OpClaimIssue              = "claimIssue"
 	OpCloseIssue              = "closeIssue"
+	OpAdvanceMolecule         = "advanceMolecule"
 	OpReopenIssue             = "reopenIssue"
 	OpUpdateIssue             = "updateIssue"
 	OpSweepIssues             = "sweepIssues"
@@ -57,6 +58,9 @@ const (
 	OpGetMemory               = "getMemory"
 	OpForgetMemory            = "forgetMemory"
 	OpBatchGetIssues          = "batchGetIssues"
+	OpReclaimIssues           = "reclaimIssues"
+	OpHeartbeatIssue          = "heartbeatIssue"
+	OpListBlockedIssues       = "listBlockedIssues"
 )
 
 // The paths that carry no caller-supplied segment. A path with one is built by
@@ -66,6 +70,7 @@ const (
 	PathContext              = "/v0/beads/context"
 	PathReady                = "/v0/beads/ready"
 	PathReadyCount           = "/v0/beads/ready:count"
+	PathBlocked              = "/v0/beads/blocked"
 	PathStats                = "/v0/beads/stats"
 	PathIssues               = "/v0/beads/issues"
 	PathIssuesQuery          = "/v0/beads/issues:query"
@@ -74,6 +79,8 @@ const (
 	PathIssuesDelete         = "/v0/beads/issues:delete"
 	PathIssuesBatchCreate    = "/v0/beads/issues:batchCreate"
 	PathIssuesBatchClose     = "/v0/beads/issues:batchClose"
+	PathIssuesBatchGet       = "/v0/beads/issues:batchGet"
+	PathIssuesReclaim        = "/v0/beads/issues:reclaim"
 	PathIssuesClaimNext      = "/v0/beads/issues:claimNext"
 	PathIssuesBatchApply     = "/v0/beads/issues:batchApply"
 	PathSettings             = "/v0/beads/config"
@@ -95,11 +102,13 @@ const (
 // its colon must be literal — which is the whole reason escapeSegment escapes a
 // colon inside the id itself.
 const (
-	MethodClaim       = ":claim"
-	MethodClose       = ":close"
-	MethodReopen      = ":reopen"
-	MethodRelease     = ":release"
-	MethodCASMetadata = ":casMetadata"
+	MethodClaim           = ":claim"
+	MethodClose           = ":close"
+	MethodReopen          = ":reopen"
+	MethodAdvanceMolecule = ":advanceMolecule"
+	MethodRelease         = ":release"
+	MethodCASMetadata     = ":casMetadata"
+	MethodHeartbeat       = ":heartbeat"
 )
 
 // The sub-resource collections that hang off the issue-detail path. Unlike a
@@ -125,7 +134,7 @@ func IssuePath(id string) (string, error) {
 // final segment: /v0/beads/issues/{id}:claim and its two siblings.
 func IssueMethodPath(id, method string) (string, error) {
 	switch method {
-	case MethodClaim, MethodClose, MethodReopen, MethodRelease, MethodCASMetadata:
+	case MethodClaim, MethodClose, MethodReopen, MethodRelease, MethodCASMetadata, MethodAdvanceMolecule, MethodHeartbeat:
 	default:
 		return "", fmt.Errorf("no custom method %q on the issue resource", method)
 	}

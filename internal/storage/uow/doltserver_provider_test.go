@@ -115,6 +115,69 @@ func TestNewDoltServerUOWProvider_HappyPath(t *testing.T) {
 	t.Cleanup(func() { _ = provider.Close(context.Background()) })
 }
 
+// TestNewDoltServerUOWProvider_CarriesProxiedServerMode pins the link of the
+// proxied-server marker that the data-behind gate tests cannot see: they build
+// the provider with the field already set, so they stay green if the open
+// stops copying the option into the providers it builds, the one the gate
+// runs on included. Both polarities, because the open `bd serve` makes for a
+// server-mode workspace passes no option and must keep the runnable-here
+// remedy. The two opens share one server.
+func TestNewDoltServerUOWProvider_CarriesProxiedServerMode(t *testing.T) {
+	testutil.RequireDoltBinary(t)
+	bin, err := exec.LookPath("dolt")
+	require.NoError(t, err)
+
+	bdBin := buildBDBinary(t)
+	prev := proxy.ResolveExecutable
+	proxy.ResolveExecutable = func() (string, error) { return bdBin, nil }
+	t.Cleanup(func() { proxy.ResolveExecutable = prev })
+
+	t.Setenv("HOME", t.TempDir())
+
+	port, err := proxy.PickFreePort()
+	require.NoError(t, err)
+	storeRootDir := t.TempDir()
+	shutdownOnInterrupt(t, storeRootDir)
+	verifiedShutdownCleanup(t, storeRootDir)
+	cfgPath := writeServerConfig(t, port)
+	logPath := filepath.Join(t.TempDir(), "server.log")
+
+	for _, tt := range []struct {
+		name string
+		opts []ProviderOption
+		want bool
+	}{
+		{name: "server-mode open", want: false},
+		{name: "proxied-server open", opts: []ProviderOption{WithProxiedServerMode()}, want: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			provider, err := NewDoltServerUOWProvider(
+				context.Background(),
+				storeRootDir,
+				"beads",
+				logPath,
+				cfgPath,
+				proxy.BackendLocalServer,
+				"root",
+				"",
+				bin,
+				0,
+				0,
+				false,
+				"",
+				tt.opts...,
+			)
+			require.NoError(t, err)
+			require.NotNil(t, provider)
+			t.Cleanup(func() { _ = provider.Close(context.Background()) })
+
+			sqlProvider, ok := provider.(*doltSQLProvider)
+			require.True(t, ok, "NewDoltServerUOWProvider returned %T, want *doltSQLProvider", provider)
+			assert.Equal(t, tt.want, sqlProvider.proxiedServerMode, "provider.proxiedServerMode")
+		})
+	}
+}
+
 func TestNewDoltServerUOWProvider_ConcurrentInstantiation(t *testing.T) {
 	testutil.RequireDoltBinary(t)
 	bin, err := exec.LookPath("dolt")

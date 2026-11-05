@@ -148,7 +148,7 @@ func runLabelRenameProxiedServer(ctx context.Context, oldLabel, newLabel string)
 
 	err = uow.RunTx(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (string, error) {
 		var rerr error
-		renamed, merged, _, rerr = uw.LabelUseCase().RenameLabel(ctx, oldLabel, newLabel, actor) //nolint:forbidigo // bulk rename; no role serves it, and Patch.Labels would reintroduce the per-issue add/remove event divergence this delegation replaced
+		renamed, merged, _, rerr = uw.LabelUseCase().RenameLabel(ctx, oldLabel, newLabel, currentActor()) //nolint:forbidigo // bulk rename; no role serves it, and Patch.Labels would reintroduce the per-issue add/remove event divergence this delegation replaced
 		if rerr != nil {
 			return "", fmt.Errorf("rename label '%s' -> '%s': %w", oldLabel, newLabel, rerr)
 		}
@@ -166,7 +166,7 @@ func runLabelPropagateProxiedServer(ctx context.Context, args []string) error {
 		return HandleErrorRespectJSON("label cannot be empty")
 	}
 	if strings.HasPrefix(label, "provides:") {
-		return HandleErrorRespectJSON("'provides:' labels are reserved for cross-project capabilities. Hint: use 'bd ship %s' instead", strings.TrimPrefix(label, "provides:"))
+		return HandleErrorRespectJSON("'provides:' labels are reserved for cross-project capabilities. Hint: use %s instead", shipCommand(strings.TrimPrefix(label, "provides:")))
 	}
 	if uowProvider == nil {
 		return HandleError("proxied-server UOW provider not initialized")
@@ -205,13 +205,16 @@ func runLabelPropagateProxiedServer(ctx context.Context, args []string) error {
 		// keeps both is issueops.BatchApplier.ApplyBatch with one ItemUpdate per
 		// child carrying this same label patch, and it is blocked on a cmd/bd
 		// accessor for that role. That is the follow-up this waiver names
-		// (ga-2ltro.12); it is the last one on this list that WRITES.
+		// (ga-2ltro.12); it is the last one on this list that WRITES. It also
+		// needs a template stand-down first: UpdateItem has no AllowTemplate, so
+		// an ItemUpdate refuses the template children this loop labels today
+		// (bd-jkp9v3).
 		for _, child := range children {
 			var e error
 			if child.Ephemeral {
-				e = uw.LabelUseCase().AddWispLabel(ctx, child.ID, label, actor) //nolint:forbidigo // atomic N-child fan-out; awaits a BatchApplier accessor
+				e = uw.LabelUseCase().AddWispLabel(ctx, child.ID, label, currentActor()) //nolint:forbidigo // atomic N-child fan-out; awaits a BatchApplier accessor
 			} else {
-				e = uw.LabelUseCase().AddLabel(ctx, child.ID, label, actor) //nolint:forbidigo // atomic N-child fan-out; awaits a BatchApplier accessor
+				e = uw.LabelUseCase().AddLabel(ctx, child.ID, label, currentActor()) //nolint:forbidigo // atomic N-child fan-out; awaits a BatchApplier accessor
 			}
 			if e != nil {
 				return "", fmt.Errorf("add label '%s' on %s: %w", label, child.ID, e)

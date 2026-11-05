@@ -41,8 +41,8 @@ type mockDriver struct {
 	qmu     sync.Mutex // guards queries
 	queries []string   // every query string passed to Prepare (borrow-path assertions)
 
-	// failCheckout makes Prepare of a DOLT_CHECKOUT statement fail, so borrow-path
-	// tests can force beginTxOnConn to error and fall through to the fallback.
+	// failCheckout makes Prepare of a DOLT_CHECKOUT statement fail, modelling a
+	// user who is denied DOLT_CHECKOUT (a least-privilege operator).
 	failCheckout atomic.Bool
 
 	// activeBranch is what a SELECT active_branch() query reports; empty means

@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -42,7 +43,7 @@ func showIssueChildren(ctx context.Context, args []string, jsonOut bool, shortMo
 	for _, id := range args {
 		result, err := resolveAndGetIssueWithRouting(ctx, store, id)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error resolving %s: %v\n", id, err)
+			fmt.Fprintf(os.Stderr, "Error resolving %s: %s\n", id, remedy.PrintedMessage(err))
 			continue
 		}
 		if result == nil || result.Issue == nil {
@@ -87,6 +88,7 @@ func showIssueChildren(ctx context.Context, args []string, jsonOut bool, shortMo
 // This requires a versioned storage backend (e.g., Dolt).
 func showIssueAsOf(ctx context.Context, args []string, ref string, shortMode bool) error {
 	var allIssues []*types.Issue
+	foundCount := 0
 	for idx, id := range args {
 		issue, err := store.AsOf(ctx, id, ref)
 		if err != nil {
@@ -97,6 +99,7 @@ func showIssueAsOf(ctx context.Context, args []string, ref string, shortMode boo
 			fmt.Fprintf(os.Stderr, "Issue %s did not exist at %s\n", id, ref)
 			continue
 		}
+		foundCount++
 
 		if shortMode {
 			fmt.Println(formatShortIssue(issue))
@@ -122,8 +125,24 @@ func showIssueAsOf(ctx context.Context, args []string, ref string, shortMode boo
 		fmt.Println()
 	}
 
+	if foundCount == 0 {
+		return showAsOfFoundNothing()
+	}
 	if jsonOutput && len(allIssues) > 0 {
 		return outputJSON(allIssues)
 	}
 	return nil
+}
+
+// showAsOfFoundNothing ends an --as-of read, on either route, in which no
+// lookup succeeded. Each failed lookup has already said why on stderr, so this
+// is plain show's ending for a batch that found nothing: the JSON error
+// envelope on stdout under --json, a bare exit 1 otherwise. A batch that read
+// at least one issue still exits 0, as plain show's does.
+func showAsOfFoundNothing() error {
+	if jsonOutput {
+		return HandleErrorWithHintRespectJSON("no issues found matching the provided IDs",
+			"check the --as-of ref (a branch name, or a full 32-character commit hash from 'bd history <id>') and that each issue existed at it")
+	}
+	return SilentExit()
 }

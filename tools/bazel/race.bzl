@@ -1,11 +1,11 @@
 """go_test_race_off: an existing go_test built without the race detector.
 
-The docker lane (--config=docker) sets --@rules_go//go/config:race for every
-target, because pr.yml's container jobs run `go test -race`, except the
-Contract corpus job, which does not. A go_test_variant.sh sh_test over this
-rule's output runs such a package the way that job does, without a second
-go_test rule (whose srcs gazelle would not maintain). The go_test keeps its own
-`race = "auto"` and so follows the setting this transition gives it.
+The dolt-server lane (--config=doltserver) sets --@rules_go//go/config:race
+for every target, because the container jobs it replaced ran `go test -race`,
+except the Contract corpus job, which did not. A go_test_variant.sh sh_test
+over this rule's output runs such a package the way that job did, without a
+second go_test rule (whose srcs gazelle would not maintain). The go_test keeps
+its own `race = "auto"` and so follows the setting this transition gives it.
 """
 
 _RACE = "@rules_go//go/config:race"

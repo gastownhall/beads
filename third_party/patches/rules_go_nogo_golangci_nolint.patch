@@ -1,0 +1,100 @@
+diff -ruN a/go/tools/builders/nogo_main.go b/go/tools/builders/nogo_main.go
+--- a/go/tools/builders/nogo_main.go	2026-10-06 23:54:04.475812427 +0000
++++ b/go/tools/builders/nogo_main.go	2026-10-06 23:55:14.974887313 +0000
+@@ -342,6 +342,7 @@
+ 				}
+ 			}
+ 		}
++		addGolangciNolintRanges(pkg.fset, f, actions)
+ 		// CommentMap will correctly associate comments to the largest node group
+ 		// applicable. This handles inline comments that might trail a large
+ 		// assignment and will apply the comment to the entire assignment.
+@@ -358,7 +359,7 @@
+ 						continue
+ 					}
+ 					for analyzer, act := range actions {
+-						if linters == nil || linters[analyzer.Name] {
++						if nolintCovers(linters, analyzer.Name) {
+ 							act.nolint = append(act.nolint, rng)
+ 						}
+ 					}
+@@ -379,6 +380,79 @@
+ 	to   int
+ }
+ 
++// staticcheckCheck matches the names of honnef.co/go/tools' per-check
++// analyzers (SA1019, S1016, ST1005, QF1001, ...).
++var staticcheckCheck = regexp.MustCompile(`^(SA|S|ST|QF)[0-9]+$`)
++
++// nolintCovers reports whether a directive naming linters (nil: all) covers
++// the analyzer. As in golangci-lint, `staticcheck` names every staticcheck
++// check. (gascity third_party/patches)
++func nolintCovers(linters map[string]bool, analyzer string) bool {
++	return linters == nil || linters[analyzer] || (linters["staticcheck"] && staticcheckCheck.MatchString(analyzer))
++}
++
++// addGolangciNolintRanges adds golangci-lint's nolint ranges for f, which the
++// directives in a tree linted by golangci-lint were written against, beside
++// the CommentMap ranges above: each directive covers its comment group's own
++// lines, extended over any node that starts on the next line at the group's
++// column. Without them a directive trailing `func f(a, b int) {` misses the
++// signature line, because the CommentMap attaches it to the body's first
++// statement. (gascity third_party/patches)
++func addGolangciNolintRanges(fset *token.FileSet, f *ast.File, actions map[*analysis.Analyzer]*action) {
++	type inlineRange struct {
++		from, to, col int
++		linters       map[string]bool
++	}
++	var inline []inlineRange
++	for _, group := range f.Comments {
++		for _, comm := range group.List {
++			linters, ok := parseNolint(comm.Text)
++			if !ok {
++				continue
++			}
++			start := fset.Position(group.Pos())
++			inline = append(inline, inlineRange{
++				from:    start.Line,
++				to:      fset.Position(group.End()).Line,
++				col:     start.Column,
++				linters: linters,
++			})
++		}
++	}
++	if len(inline) == 0 {
++		return
++	}
++	filename := fset.Position(f.Pos()).Filename
++	add := func(from, to int, linters map[string]bool) {
++		rng := &Range{from: token.Position{Filename: filename, Line: from}, to: to}
++		for analyzer, act := range actions {
++			if nolintCovers(linters, analyzer.Name) {
++				act.nolint = append(act.nolint, rng)
++			}
++		}
++	}
++	for _, r := range inline {
++		add(r.from, r.to, r.linters)
++	}
++	ast.Inspect(f, func(n ast.Node) bool {
++		if n == nil {
++			return true
++		}
++		start := fset.Position(n.Pos())
++		for _, r := range inline {
++			if r.to == start.Line-1 && start.Column == r.col {
++				end := fset.Position(n.End()).Line
++				if end < r.to {
++					end = r.to
++				}
++				add(r.from, end, r.linters)
++				break
++			}
++		}
++		return true
++	})
++}
++
+ // factProducers returns the set of analyzers that declare facts among the
+ // transitive closure of as.
+ func factProducers(as []*analysis.Analyzer) []*analysis.Analyzer {

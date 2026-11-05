@@ -283,6 +283,10 @@ var revisionSchemaExempt = map[string]string{
 		"#6053 and types.BatchGetIssue declares Revision a string, so every server that routes it " +
 		"answers the decimal-string shape; a pre-#6053 server never advertises issues.batchGet, so " +
 		"Preflight refuses the operation with a *CapabilityError before any body is decoded",
+	"ReclaimedLease": "ReclaimIssuesResult.reclaimed's element. issues:reclaim postdates #6053 and " +
+		"types.ReclaimedLease declares Revision a string, so every server that routes it answers the " +
+		"decimal-string shape; a pre-#6053 server never advertises issues.reclaim, so Preflight refuses " +
+		"the operation with a *CapabilityError before any body is decoded",
 }
 
 // TestRevisionBearingResponseCoversEveryWireShapeSchemaWithARevisionMember is

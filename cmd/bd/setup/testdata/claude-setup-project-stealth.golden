@@ -1,0 +1,120 @@
+# bd setup claude artifact transcript: project-stealth
+# Regenerate with BD_UPDATE_GOLDEN=1 go test ./cmd/bd/setup/ -run TestClaudeSetupArtifactsGolden
+--- seed: none
+
+=== bd setup claude --stealth
+result: ok
+--- stdout
+Installing Claude hooks for this project...
+✓ Registered SessionStart hook
+Installing Claude Code integration...
+✓ Created new CLAUDE.md with beads integration
+
+✓ Claude Code integration installed
+  File: $ROOT/project/CLAUDE.md
+No additional configuration needed!
+
+✓ Claude Code integration installed
+  Settings: $ROOT/project/.claude/settings.json
+
+Restart Claude Code for changes to take effect.
+--- stderr
+(empty)
+--- files: created $ROOT/project/.claude/settings.json
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "command": "bd prime --stealth --hook-json",
+            "type": "command"
+          }
+        ],
+        "matcher": ""
+      }
+    ]
+  }
+}
+--- files: created $ROOT/project/CLAUDE.md
+# Project Instructions for AI Agents
+
+This file provides instructions and context for AI coding agents working on this project.
+
+<!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:6ffdf896 -->
+[managed section body: byte-identical to internal/templates/agents/testdata/managed-section-minimal.md]
+<!-- END BEADS INTEGRATION -->
+
+
+## Build & Test
+
+_Add your build and test commands here_
+
+```bash
+# Example:
+# npm install
+# npm test
+```
+
+## Architecture Overview
+
+_Add a brief overview of your project architecture_
+
+## Conventions & Patterns
+
+_Add your project-specific conventions here_
+
+=== bd setup claude --check
+result: ok
+--- stdout
+✓ Project hooks installed: $ROOT/project/.claude/settings.json
+✓ Claude Code integration installed: $ROOT/project/CLAUDE.md (current)
+--- stderr
+(empty)
+--- files: unchanged
+
+=== bd setup claude --remove
+result: ok
+--- stdout
+Removing Claude hooks from project...
+✓ Removed SessionStart hook
+Removing Claude Code integration from $ROOT/project/CLAUDE.md...
+✓ Removed beads section from CLAUDE.md
+✓ Claude hooks removed
+--- stderr
+(empty)
+--- files: modified $ROOT/project/.claude/settings.json
+{
+  "hooks": {}
+}
+--- files: modified $ROOT/project/CLAUDE.md
+# Project Instructions for AI Agents
+
+This file provides instructions and context for AI coding agents working on this project.
+
+## Build & Test
+
+_Add your build and test commands here_
+
+```bash
+# Example:
+# npm install
+# npm test
+```
+
+## Architecture Overview
+
+_Add a brief overview of your project architecture_
+
+## Conventions & Patterns
+
+_Add your project-specific conventions here_
+
+=== bd setup claude --check
+result: error: claude hooks not installed
+--- stdout
+✗ No hooks installed
+  Run: bd setup claude
+--- stderr
+(empty)
+--- files: unchanged

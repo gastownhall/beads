@@ -161,8 +161,8 @@ func TestCheckDirRejectsEmptyInventory(t *testing.T) {
 	}
 }
 
-// TestCheckDirHonorsAllowBareMarker pins the file-level opt-out. This check runs
-// in the required pr-policy lane, so a workflow that legitimately needs a bare
+// TestCheckDirHonorsAllowBareMarker pins the file-level opt-out. This check is
+// required (//scripts/repochecks:workflow_tags_test), so a workflow that legitimately needs a bare
 // `go` command needs a way through, and the repository already has one:
 // scripts/check-build-tags.sh honors `# build-tags: allow-bare` within the first
 // five lines, and engdocs/ICU-POLICY.md documents that window. The same spelling

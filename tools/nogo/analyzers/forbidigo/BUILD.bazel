@@ -1,0 +1,84 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "forbidigo",
+    srcs = ["forbidigo.go"],
+    importpath = "github.com/steveyegge/beads/tools/nogo/analyzers/forbidigo",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//tools/nogo/internal/golangci",
+        "@com_github_ashanbrown_forbidigo_v2//forbidigo",
+        "@in_gopkg_yaml_v3//:yaml_v3",
+        "@org_golang_x_tools//go/analysis",
+    ],
+)
+
+go_test(
+    name = "forbidigo_test",
+    srcs = ["forbidigo_test.go"],
+    deps = [
+        ":forbidigo",
+        "//tools/nogo/internal/analyzertest",
+    ],
+)
+
+# --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "repo_doc_files",
+    srcs = glob(
+        [
+            "**/*.md",
+            "**/*.mdx",
+        ],
+        allow_empty = True,
+        exclude = ["**/node_modules/**"],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = [
+            "**/*_test.go",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
+        exclude = ["**/node_modules/**"],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_other_files",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.db",
+            "**/*.exe",
+            "**/*.go",
+            "**/*.md",
+            "**/*.mdx",
+            "**/*.out",
+            "**/*.prof",
+            "**/*.pyc",
+            "**/*.test",
+            "**/__pycache__/**",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+# --- end repo_files ---

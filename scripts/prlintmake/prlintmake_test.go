@@ -86,18 +86,20 @@ func TestPRLintWrapperDelegatesPolicyToCheckoutGoDriver(t *testing.T) {
 	if run.goArgs != "run -mod=readonly -tags=gms_pure_go ./scripts/pr-lint" {
 		t.Fatalf("go args = %q, want checkout driver invocation", run.goArgs)
 	}
+	if strings.Contains(run.output, "gofmt ran") {
+		t.Fatalf("the lint wrapper ran gofmt; //scripts/repochecks:fmt_test owns it:\n%s", run.output)
+	}
 	for _, want := range []string{
 		"CGO_ENABLED=1",
 		"BEADS_BUILD_TAGS=gms_pure_go",
 		"GOFLAGS=-mod=readonly -tags=gms_pure_go",
-		"BD_LINT_NEW_FROM_MERGE_BASE=origin/main",
 	} {
 		if !strings.Contains(run.goEnvironment, want+"\n") {
 			t.Fatalf("driver environment missing %q:\n%s", want, run.goEnvironment)
 		}
 	}
-	if !strings.Contains(run.output, "==> golangci-lint (native + windows/darwin non-CGO)") ||
-		!strings.Contains(run.output, "<== golangci-lint (native + windows/darwin non-CGO) succeeded") {
+	if !strings.Contains(run.output, "==> nogo (native + windows/darwin non-cgo)") ||
+		!strings.Contains(run.output, "<== nogo (native + windows/darwin non-cgo) succeeded") {
 		t.Fatalf("aggregate lint timing is not attributable:\n%s", run.output)
 	}
 }
@@ -127,17 +129,16 @@ func runPRLintWrapper(t *testing.T, goBody string) prLintWrapperRun {
 	if err := os.MkdirAll(shimDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	// fmt-check.sh ignores a PATH gofmt (be-gx8), so the gofmt shim goes in
-	// through GOFMT, as in runFmtCheck. Only the go shim needs to be on PATH.
+	// gofmt is //scripts/repochecks:fmt_test's, not the lint wrapper's
+	// (ga-96smfk.41): a gofmt that would fail every file must not be run.
 	gofmt := filepath.Join(testRoot, "gofmt")
-	writeShellExecutable(t, bash, gofmt, "#!/usr/bin/env bash\nset -euo pipefail\nexit 0\n")
+	writeShellExecutable(t, bash, gofmt, "#!/usr/bin/env bash\nprintf 'gofmt ran\\n' >&2\nexit 1\n")
 	writeShellExecutable(t, bash, filepath.Join(shimDir, "go"), `#!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >"$GO_ARGS_MARKER"
 printf 'CGO_ENABLED=%s\n' "${CGO_ENABLED-}" >"$GO_ENV_MARKER"
 printf 'BEADS_BUILD_TAGS=%s\n' "${BEADS_BUILD_TAGS-}" >>"$GO_ENV_MARKER"
 printf 'GOFLAGS=%s\n' "${GOFLAGS-}" >>"$GO_ENV_MARKER"
-printf 'BD_LINT_NEW_FROM_MERGE_BASE=%s\n' "${BD_LINT_NEW_FROM_MERGE_BASE-}" >>"$GO_ENV_MARKER"
 `+goBody)
 
 	argsMarker := filepath.Join(testRoot, "go-args")
@@ -155,20 +156,19 @@ printf 'BD_LINT_NEW_FROM_MERGE_BASE=%s\n' "${BD_LINT_NEW_FROM_MERGE_BASE-}" >>"$
 	)
 	cmd.Dir = sourceRepoRoot()
 	cmd.Env = environment(map[string]string{
-		"BASH_ENV":                    "",
-		"BASHOPTS":                    "",
-		"BD_LINT_NEW_FROM_MERGE_BASE": "origin/main",
-		"BEADS_BUILD_TAGS":            "stale",
-		"CGO_ENABLED":                 "",
-		"ENV":                         "",
-		"GOFLAGS":                     "-mod=readonly",
-		"GOFMT":                       shellVisiblePath(gofmt),
-		"GO_ARGS_MARKER":              shellVisiblePath(argsMarker),
-		"GO_ENV_MARKER":               shellVisiblePath(envMarker),
-		"LANG":                        "C",
-		"LC_ALL":                      "C",
-		"PATH":                        path,
-		"SHELLOPTS":                   "",
+		"BASH_ENV":         "",
+		"BASHOPTS":         "",
+		"BEADS_BUILD_TAGS": "stale",
+		"CGO_ENABLED":      "",
+		"ENV":              "",
+		"GOFLAGS":          "-mod=readonly",
+		"GOFMT":            shellVisiblePath(gofmt),
+		"GO_ARGS_MARKER":   shellVisiblePath(argsMarker),
+		"GO_ENV_MARKER":    shellVisiblePath(envMarker),
+		"LANG":             "C",
+		"LC_ALL":           "C",
+		"PATH":             path,
+		"SHELLOPTS":        "",
 	})
 	output, runErr := cmd.CombinedOutput()
 	args, argsErr := os.ReadFile(argsMarker)

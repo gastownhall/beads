@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"sort"
 	"sync"
 	"testing"
@@ -1919,10 +1920,10 @@ func RunLifecycleUpdateParentIDReplacesEveryParent(t *testing.T, ctx context.Con
 
 // RunLifecycleUpdatePersistentPreservesUnversionedClass pins the half of the
 // Persistence clause nobody else asserts: "Persistent preserves an existing
-// durable unversioned class" (issueops/issueops.go:135-136). The refusal beside
-// it — an unversioned row cannot be demoted to a wisp mode — is pinned
-// elsewhere; this clause says the legal direction is a no-op that does NOT
-// normalize the row into versioned storage.
+// durable unversioned class" (issueops/issueops.go:149). The refusal beside
+// it — an unversioned row cannot be demoted to a wisp mode — is
+// RunLifecycleUpdateWispModesRefuseAnUnversionedRow; this clause says the legal
+// direction is a no-op that does NOT normalize the row into versioned storage.
 //
 // WHAT A PERSISTENCE RESTATEMENT MUST NOT DO is where the two observations come
 // in. A persistence MOVE deletes the row from one plane and re-inserts it into
@@ -1961,6 +1962,90 @@ func RunLifecycleUpdatePersistentPreservesUnversionedClass(t *testing.T, ctx con
 		t.Errorf("%s came back {ephemeral %v, no-history %v} after a persistent restatement, want a durable-plane row", id, after.Ephemeral, after.NoHistory)
 	}
 	assertLifecycleUpdateWispAbsent(t, ctx, fixture, id, "after the persistent restatement")
+}
+
+// RunLifecycleUpdateWispModesRefuseAnUnversionedRow pins the refusal beside
+// that clause: Ephemeral and NoHistory "select wisp retention modes, never
+// durable unversioned storage" (issueops/issueops.go:150-151), so an
+// unversioned row asked for either is refused. The refusal is the request's,
+// a deterministic validation failure, so it matches ErrValidation on every
+// leg — over http that is the 400 naming the patch rather than a 500 that
+// drops the reason and alerts the operator — and it leaves the row where it
+// was: durable, still unversioned, and absent from the wisp plane.
+func RunLifecycleUpdateWispModesRefuseAnUnversionedRow(t *testing.T, ctx context.Context, fixture LifecycleUpdateFixture) {
+	t.Helper()
+
+	id := fixture.IssuePrefix + "-lup-unversioned-wisp"
+	seeded := lifecycleUpdateIssue(id)
+	seeded.StorageClass = types.StorageClassUnversioned
+	seedLifecycleUpdateIssue(t, ctx, fixture, seeded)
+
+	for _, mode := range []publicops.PersistenceMode{publicops.PersistenceModeEphemeral, publicops.PersistenceModeNoHistory} {
+		label := "after the refused " + string(mode) + " move"
+		before := lifecycleUpdateRow(t, ctx, fixture, id)
+		if _, err := fixture.Lifecycle.Update(ctx, publicops.UpdateRequest{Actor: "writer", IssueID: id, Patch: publicops.IssuePatch{
+			Persistence: publicops.Field[publicops.PersistenceMode]{Set: true, Value: mode},
+		}}); !errors.Is(err, storage.ErrValidation) {
+			t.Fatalf("move unversioned %s to %s: error = %v, want ErrValidation", id, mode, err)
+		}
+		assertLifecycleUpdateRowUnchanged(t, ctx, fixture, id, label, before)
+		after := lifecycleUpdateRow(t, ctx, fixture, id)
+		if after.Ephemeral || after.NoHistory || after.StorageClass != types.StorageClassUnversioned {
+			t.Errorf("%s %s = {ephemeral %v, no-history %v, class %q}, want the durable unversioned row it was",
+				id, label, after.Ephemeral, after.NoHistory, after.StorageClass)
+		}
+		assertLifecycleUpdateWispAbsent(t, ctx, fixture, id, label)
+	}
+}
+
+// RunLifecycleUpdatePersistentPromotesAWisp pins the move `bd promote` makes
+// (issueops.Promote): Persistence = persistent on an ephemeral wisp is a
+// MUTATION that leaves the row on the durable plane under the same id, with
+// its labels carried across and nothing left behind on the wisp plane. A
+// second identical request is the no-op the "same current mode" clause
+// promises, which is how Promote tells a lost race from a promotion.
+func RunLifecycleUpdatePersistentPromotesAWisp(t *testing.T, ctx context.Context, fixture LifecycleUpdateFixture) {
+	t.Helper()
+	if fixture.CreateWisp == nil {
+		t.Skip("fixture has no CreateWisp: this backend has no wisp plane to promote from")
+	}
+
+	id := fixture.IssuePrefix + "-lup-promote"
+	seedLifecycleUpdateWisp(t, ctx, fixture, lifecycleUpdateIssue(id, "keep-me"))
+	if got := lifecycleUpdateRow(t, ctx, fixture, id); !got.Ephemeral {
+		t.Fatalf("seeded %s is not ephemeral; the case has nothing to promote", id)
+	}
+
+	promote := publicops.UpdateRequest{Actor: "writer", IssueID: id, Patch: publicops.IssuePatch{
+		Persistence: publicops.Field[publicops.PersistenceMode]{Set: true, Value: publicops.PersistenceModePersistent},
+	}}
+	promoted, err := fixture.Lifecycle.Update(ctx, promote)
+	if err != nil {
+		t.Fatalf("promote %s: %v", id, err)
+	}
+	if !promoted.Changed {
+		t.Errorf("promoting wisp %s reported Changed = false, want a mutation", id)
+	}
+	if promoted.Issue == nil || promoted.Issue.ID != id || promoted.Issue.Ephemeral {
+		t.Errorf("promote result issue = %+v, want %s on the durable plane", promoted.Issue, id)
+	}
+
+	after := lifecycleUpdateRow(t, ctx, fixture, id)
+	if after.Ephemeral || after.NoHistory {
+		t.Errorf("%s came back {ephemeral %v, no-history %v} after the promotion, want a durable-plane row", id, after.Ephemeral, after.NoHistory)
+	}
+	if !slices.Contains(after.Labels, "keep-me") {
+		t.Errorf("%s labels after the promotion = %v, want the wisp's label carried across", id, after.Labels)
+	}
+	assertLifecycleUpdateWispAbsent(t, ctx, fixture, id, "after the promotion")
+
+	again, err := fixture.Lifecycle.Update(ctx, promote)
+	if err != nil {
+		t.Fatalf("re-promote %s: %v", id, err)
+	}
+	if again.Changed {
+		t.Errorf("re-promoting durable %s reported Changed = true, want the same-mode no-op", id)
+	}
 }
 
 // RunLifecycleUpdateProvenanceLabelsHistory pins UpdateRequest.Provenance
@@ -2518,4 +2603,135 @@ func lifecycleUpdateHasEdge(dependencies []*types.Dependency, wantTarget string)
 		}
 	}
 	return false
+}
+
+// RunLifecycleUpdateRefusesATemplate pins Lifecycle.Update's template guard:
+// templates are read-only, so EVERY update naming one refuses with
+// *TemplateReadOnlyError — a field edit, a label edit, a claim, a status
+// crossing — whatever force flags ride along, and nothing is written. It is the
+// guard `bd update` used to apply as a CLI pre-read, which left bd serve and
+// library callers editing templates bd refused.
+//
+// The refusal is asserted at the level a caller acts on — the typed error, its
+// sentinel and the sentence bd prints, read off the typed error because a
+// served refusal wraps it — and the row is read back to prove nothing moved.
+// Two controls: the same patches land on an ordinary sibling, so the guard is
+// not refusing the patch shapes; and a stale ExpectedVersion on the template
+// still reports the mismatch, so the guard runs after the compare-and-set
+// preconditions like every other update fence.
+func RunLifecycleUpdateRefusesATemplate(t *testing.T, ctx context.Context, fixture LifecycleUpdateFixture) {
+	t.Helper()
+	template := fixture.IssuePrefix + "-lut-template"
+	sibling := fixture.IssuePrefix + "-lut-sibling"
+	for _, issue := range []*types.Issue{
+		{ID: template, IsTemplate: true},
+		{ID: sibling},
+	} {
+		issue.Title, issue.Status, issue.Priority, issue.IssueType = issue.ID, types.StatusOpen, 2, types.TypeTask
+		if err := fixture.CreateIssue(ctx, issue, "seed"); err != nil {
+			t.Fatalf("seed %s: %v", issue.ID, err)
+		}
+	}
+	before, err := fixture.GetIssue(ctx, template)
+	if err != nil {
+		t.Fatalf("read seeded template %s: %v", template, err)
+	}
+
+	requests := []struct {
+		name    string
+		request publicops.UpdateRequest
+	}{
+		{name: "field edit", request: publicops.UpdateRequest{
+			Patch: publicops.IssuePatch{Title: publicops.Field[string]{Set: true, Value: "edited"}},
+		}},
+		{name: "label edit", request: publicops.UpdateRequest{
+			Patch: publicops.IssuePatch{Labels: publicops.LabelPatch{Add: []string{"lut-tag"}}},
+		}},
+		{name: "claim", request: publicops.UpdateRequest{Claim: true}},
+		{name: "forced status crossing", request: publicops.UpdateRequest{
+			Patch:            publicops.IssuePatch{Status: publicops.Field[publicops.Status]{Set: true, Value: types.StatusClosed}},
+			ForceClosePolicy: true,
+		}},
+		{name: "forced assignee transfer", request: publicops.UpdateRequest{
+			Patch:                 publicops.IssuePatch{Assignee: publicops.Field[string]{Set: true, Value: "someone"}},
+			ForceAssigneeTransfer: true,
+		}},
+	}
+	for _, tc := range requests {
+		request := tc.request
+		request.Actor, request.IssueID = "writer", template
+		_, err := fixture.Lifecycle.Update(ctx, request)
+		var refusal *publicops.TemplateReadOnlyError
+		if !errors.As(err, &refusal) {
+			t.Fatalf("%s on template %s: err = %v, want *TemplateReadOnlyError", tc.name, template, err)
+		}
+		if refusal.IssueID != template || !errors.Is(err, publicops.ErrTemplateReadOnly) {
+			t.Errorf("%s refusal = %#v (%v), want IssueID %q matching ErrTemplateReadOnly", tc.name, refusal, err, template)
+		}
+		if want := "cannot modify template " + template + ": templates are read-only; use 'bd mol pour' to create a work item"; refusal.Error() != want {
+			t.Errorf("%s refusal reads %q, want %q", tc.name, refusal.Error(), want)
+		}
+		after, err := fixture.GetIssue(ctx, template)
+		if err != nil {
+			t.Fatalf("read template %s after the %s refusal: %v", template, tc.name, err)
+		}
+		if after.RowVersion != before.RowVersion || after.Title != before.Title || after.Status != before.Status ||
+			after.Assignee != before.Assignee || len(after.Labels) != len(before.Labels) {
+			t.Errorf("template %s after the %s refusal = %+v, want it unchanged from %+v", template, tc.name, after, before)
+		}
+
+		control := tc.request
+		control.Actor, control.IssueID = "writer", sibling
+		if _, err := fixture.Lifecycle.Update(ctx, control); err != nil {
+			t.Errorf("%s on the ordinary sibling %s: %v, want it to land", tc.name, sibling, err)
+		}
+	}
+
+	stale := before.RowVersion + 1
+	_, err = fixture.Lifecycle.Update(ctx, publicops.UpdateRequest{
+		Actor: "writer", IssueID: template, ExpectedVersion: &stale,
+		Patch: publicops.IssuePatch{Title: publicops.Field[string]{Set: true, Value: "edited"}},
+	})
+	if !errors.Is(err, publicops.ErrVersionMismatch) {
+		t.Errorf("stale-guarded update of template %s: err = %v, want ErrVersionMismatch ahead of the template guard", template, err)
+	}
+}
+
+// RunLifecycleUpdateAllowTemplateEditsATemplate pins the template guard's one
+// stand-down: an update with AllowTemplate — what bd label and bd set-state
+// send, since they have always edited templates — lands on a template, and
+// only that request is waived (the same patch without it still refuses).
+func RunLifecycleUpdateAllowTemplateEditsATemplate(t *testing.T, ctx context.Context, fixture LifecycleUpdateFixture) {
+	t.Helper()
+	template := fixture.IssuePrefix + "-lua-template"
+	issue := &types.Issue{ID: template, Title: template, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, IsTemplate: true}
+	if err := fixture.CreateIssue(ctx, issue, "seed"); err != nil {
+		t.Fatalf("seed %s: %v", template, err)
+	}
+
+	result, err := fixture.Lifecycle.Update(ctx, publicops.UpdateRequest{
+		Actor: "writer", IssueID: template, AllowTemplate: true,
+		Patch: publicops.IssuePatch{Labels: publicops.LabelPatch{Add: []string{"lua-tag"}}},
+	})
+	if err != nil {
+		t.Fatalf("AllowTemplate label edit on template %s: %v, want it to land", template, err)
+	}
+	if !result.Changed || result.Issue == nil || !lifecycleUpdateHasLabel(result.Issue.Labels, "lua-tag") {
+		t.Errorf("AllowTemplate label edit on template %s = %+v, want a change carrying lua-tag", template, result)
+	}
+	after, err := fixture.GetIssue(ctx, template)
+	if err != nil {
+		t.Fatalf("read template %s: %v", template, err)
+	}
+	if !after.IsTemplate {
+		t.Errorf("template %s is no longer a template after an AllowTemplate edit", template)
+	}
+
+	_, err = fixture.Lifecycle.Update(ctx, publicops.UpdateRequest{
+		Actor: "writer", IssueID: template,
+		Patch: publicops.IssuePatch{Labels: publicops.LabelPatch{Add: []string{"lua-other"}}},
+	})
+	if !errors.Is(err, publicops.ErrTemplateReadOnly) {
+		t.Errorf("the same edit without AllowTemplate: err = %v, want ErrTemplateReadOnly", err)
+	}
 }

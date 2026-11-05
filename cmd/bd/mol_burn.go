@@ -7,6 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
@@ -190,7 +191,7 @@ func burnMultipleMolecules(ctx context.Context, moleculeIDs []string, dryRun, fo
 
 	// Batch delete all wisps in one call
 	if len(wispIDs) > 0 {
-		result, err := burnWisps(ctx, store, wispIDs, actor)
+		result, err := burnWisps(ctx, store, wispIDs, currentActor())
 		if err != nil {
 			if !jsonOutput {
 				fmt.Fprintf(os.Stderr, "Error burning wisps: %v\n", err)
@@ -206,7 +207,7 @@ func burnMultipleMolecules(ctx context.Context, moleculeIDs []string, dryRun, fo
 		subgraph, err := loadTemplateSubgraph(ctx, store, id)
 		if err != nil {
 			if !jsonOutput {
-				fmt.Fprintf(os.Stderr, "Warning: failed to load subgraph for %s: %v\n", id, err)
+				fmt.Fprintf(os.Stderr, "Warning: failed to load subgraph for %s: %s\n", id, remedy.PrintedMessage(err))
 			}
 			batchResult.FailedCount++
 			continue
@@ -296,7 +297,7 @@ func burnWispMolecule(ctx context.Context, resolvedID string, dryRun, force bool
 		}
 	}
 
-	result, err := burnWisps(ctx, store, wispIDs, actor)
+	result, err := burnWisps(ctx, store, wispIDs, currentActor())
 	if err != nil {
 		return HandleErrorRespectJSON("burning wisp: %v", err)
 	}

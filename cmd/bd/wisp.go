@@ -280,7 +280,7 @@ func runWispCreateCore(cmd *cobra.Command, args []string) error {
 
 	result, err := spawnMoleculeWithOptions(ctx, store, subgraph, CloneOptions{
 		Vars:      vars,
-		Actor:     actor,
+		Actor:     currentActor(),
 		Ephemeral: true,
 		Prefix:    types.IDPrefixWisp,
 		RootOnly:  rootOnly,
@@ -621,6 +621,12 @@ A wisp is considered abandoned if:
     are age-reclaimable. If the blocked set or the custom-status list cannot be
     read, the GC aborts rather than risk reclaiming live steps.
 
+Wisps that depend on an abandoned wisp are deleted with it, closed ones
+included even without --all, but only if they too haven't been updated in
+--age duration and are not live work. A dependent that is too young is
+spared and loses its edge to the deleted wisp: an open one is collected once
+it ages out, a closed one only by --all, --closed or 'bd purge'.
+
 Abandoned wisps are deleted without creating a digest. Use 'bd mol squash'
 if you want to preserve a summary before garbage collection.
 
@@ -810,10 +816,11 @@ func runWispGC(cmd *cobra.Command, args []string) error {
 		ids[i] = issue.ID
 	}
 	// Cascade must stay OFF here too. findAbandonedWisps has already expanded
-	// dependents and kept only the unprotected ones, so a deleteBatch cascade
-	// would re-expand from that set to ALL transitive dependents — including
-	// blocked/in-progress steps that isProtectedWisp just excluded (GH#4394's
-	// protection is only enforced in the pre-filter; cascade bypasses it).
+	// dependents and kept only the unprotected ones that meet --age, so a
+	// deleteBatch cascade would re-expand from that set to ALL transitive
+	// dependents — including blocked/in-progress steps that isProtectedWisp
+	// just excluded (GH#4394's protection is only enforced in the pre-filter;
+	// cascade bypasses it) and fresh steps the --age check just spared.
 	// Without cascade the list is deleted exactly as filtered and live
 	// dependents are orphaned (edges dropped, is_blocked recomputed).
 	if err := deleteBatch(nil, ids, true, false, false, jsonOutput, false, nil, "wisp gc"); err != nil {
@@ -821,6 +828,30 @@ func runWispGC(cmd *cobra.Command, args []string) error {
 	}
 	return nil
 }
+
+// wispIsAbandoned reports whether a wisp counts as abandoned for GC
+// purposes: it has not been updated within ageThreshold of now.
+//
+// ageThreshold <= 0 (--age 0s and below) always reports true, bypassing
+// the clock comparison entirely — this matches the GC's own documented
+// contract ("hasn't been updated in --age duration"): nothing has been
+// updated in the last zero seconds. It also matters for a reason the
+// comparison alone does not handle: Dolt's DATETIME(0) column rounds
+// fractional seconds half-up on write rather than truncating (#7236), so
+// a wisp created in the second half of a wall-clock second can read back
+// with updatedAt up to 0.5s in the future. now.Sub(updatedAt) is then
+// negative, failing a strict > comparison for a wisp that is, by
+// definition, not yet one second old — exactly what --age 0s's "every
+// wisp qualifies" contract exists to avoid depending on in the first
+// place.
+func wispIsAbandoned(now, updatedAt time.Time, ageThreshold time.Duration) bool {
+	return ageThreshold <= 0 || now.Sub(updatedAt) > ageThreshold
+}
+
+// wispGCNow is the clock seam for findAbandonedWisps' age check, swappable in
+// tests. Both gc routes read it, so a test that swaps it must not call
+// t.Parallel().
+var wispGCNow = time.Now
 
 func findAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageThreshold time.Duration, excludeTypes []types.IssueType) ([]*types.Issue, error) {
 	ephemeralFlag := true
@@ -848,7 +879,7 @@ func findAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageThre
 		return nil, err
 	}
 
-	now := time.Now()
+	now := wispGCNow()
 	var abandoned []*types.Issue
 	for _, issue := range issues {
 		if r.IsInfraTypeCtx(ctx, issue.IssueType) {
@@ -860,7 +891,7 @@ func findAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageThre
 		if isProtectedWisp(issue, blockedSet, protectedStatuses) {
 			continue
 		}
-		if now.Sub(issue.UpdatedAt) > ageThreshold {
+		if wispIsAbandoned(now, issue.UpdatedAt, ageThreshold) {
 			abandoned = append(abandoned, issue)
 		}
 	}
@@ -888,6 +919,9 @@ func findAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageThre
 			for _, issue := range abandoned {
 				abandonedSet[issue.ID] = true
 			}
+			// Dependents skip the parent scan's not-closed clause: an
+			// abandoned molecule's finished steps go with it, even without
+			// --all.
 			for _, child := range childIssues {
 				if abandonedSet[child.ID] {
 					continue
@@ -896,6 +930,12 @@ func findAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageThre
 					continue
 				}
 				if isProtectedWisp(child, blockedSet, protectedStatuses) {
+					continue
+				}
+				// Children are held to the same --age contract as parents. One
+				// spared here is detached when its parent is deleted, so a
+				// closed one is left for --all, --closed or bd purge.
+				if !wispIsAbandoned(now, child.UpdatedAt, ageThreshold) {
 					continue
 				}
 				abandoned = append(abandoned, child)

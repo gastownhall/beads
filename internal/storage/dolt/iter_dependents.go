@@ -8,12 +8,16 @@
 // GetDependentsWithMetadata, which the human-readable `bd show` uses.
 // IterDependentsWithMetadata UNION ALLs `dependencies` (permanent-source
 // edges, joined to `issues`) with `wisp_dependencies` (wisp-source edges,
-// joined to `wisps`). WispTableRouting routes every edge to exactly one table
-// by its source's wisp status, so each edge table joins cleanly to its source
-// and no row is double-counted. IterDependenciesWithMetadata delegates to the
-// slice path: a dependency's *target* may be permanent or wisp independent of
-// which table holds the edge, which a single streaming join cannot resolve,
-// and the method has no streaming caller today.
+// joined to `wisps`). WispTableRouting routes every edge to one table by its
+// source's wisp status, so each edge table joins cleanly to its source. A pull
+// can still land a durable edge whose dependent also has a `wisps` row, which
+// the join cannot read the slice path's way; IterDependentsWithMetadata
+// streams the slice path's answer then. Otherwise no dependent is in both
+// legs: one that both legs join has a durable edge and a `wisps` row.
+// IterDependenciesWithMetadata delegates to the slice path: a dependency's
+// *target* may be permanent or wisp independent of which table holds the
+// edge, which a single streaming join cannot resolve, and the method has no
+// streaming caller today.
 package dolt
 
 import (
@@ -22,6 +26,7 @@ import (
 	"fmt"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/types"
@@ -44,14 +49,38 @@ type doltDependentsIter struct {
 // issueID) with the relationship type attached. Includes both permanent
 // (`dependencies`) and wisp (`wisp_dependencies`) dependents so the stream
 // matches GetDependentsWithMetadata. See the package doc for why the join
-// target per edge table is unambiguous.
+// target per edge table is unambiguous, and for the state it streams the
+// slice path's answer in.
 func (s *DoltStore) IterDependentsWithMetadata(ctx context.Context, issueID string) (storage.Iter[types.IssueWithDependencyMetadata], error) {
-	q := fmt.Sprintf(`
+	// A durable edge whose dependent also has a wisps row (another clone's
+	// promotion of a wisp, pulled next to the local wisp copy) is one the join
+	// cannot read the slice path's way. The slice path lists that dependent
+	// once, with the durable edge's type and the wisps row, which is canonical
+	// (be-iabdi); the durable leg would stream its issues row, and the wisp leg
+	// could stream it again. So the stream is the slice there, as it always is
+	// on the embedded store, and `bd show --json --include-dependents` reads
+	// each dependent from the row text `bd show` lists it from (bd-cif6y4). bd
+	// doctor reports the state as an error, so only a database in it pays for
+	// the slice. The probe and the join are two statements: a pull landing
+	// between them can still show one call the join's answer.
+	held, err := s.durableDependentHeldAsWisp(ctx, issueID)
+	if err != nil {
+		return nil, err
+	}
+	if held {
+		deps, err := s.GetDependentsWithMetadata(ctx, issueID)
+		if err != nil {
+			return nil, err
+		}
+		return storage.NewSliceIter(deps), nil
+	}
+	durable := fmt.Sprintf(`
 		SELECT %s, d.type
 		FROM issues i
 		JOIN dependencies d ON d.issue_id = i.id
 		%s
-		WHERE %s = ?
+		WHERE %s = ?`, prefixedIssueColumns("i"), sqlbuild.LeaseJoin("i"), depTargetExprWithAlias("d"))
+	q := fmt.Sprintf(`%s
 		UNION ALL
 		SELECT %s, d.type
 		FROM wisps w
@@ -59,9 +88,43 @@ func (s *DoltStore) IterDependentsWithMetadata(ctx context.Context, issueID stri
 		%s
 		WHERE %s = ?
 		ORDER BY created_at ASC
-	`, prefixedIssueColumns("i"), sqlbuild.LeaseJoin("i"), depTargetExprWithAlias("d"),
-		prefixedIssueColumns("w"), sqlbuild.LeaseJoin("w"), depTargetExprWithAlias("d"))
-	return s.iterIssuesWithDepType(ctx, q, issueID, issueID)
+	`, durable, prefixedIssueColumns("w"), sqlbuild.LeaseJoin("w"), depTargetExprWithAlias("d"))
+	it, err := s.iterIssuesWithDepType(ctx, q, issueID, issueID)
+	// The wisp plane is dolt-ignored, so a working-set reset can drop wisps or
+	// wisp_dependencies from a server database (bd-cif6y4). Its absence means
+	// there are no wisp dependents: stream the durable leg alone, as the slice
+	// path does. Any other missing table is a broken database and stays an error.
+	if name, ok := dberrors.MissingTableName(err); ok && sqlbuild.OptionalWispTable(name) {
+		return s.iterIssuesWithDepType(ctx, durable+"\n\t\tORDER BY created_at ASC", issueID)
+	}
+	return it, err
+}
+
+// durableDependentHeldAsWisp reports whether a durable edge into issueID has a
+// dependent that also holds a wisps row. A missing wisps table holds none.
+func (s *DoltStore) durableDependentHeldAsWisp(ctx context.Context, issueID string) (bool, error) {
+	var held bool
+	err := s.queryRowContext(ctx, func(row *sql.Row) error {
+		var one int
+		switch err := row.Scan(&one); {
+		case err == nil:
+			held = true
+		case dberrors.IsNoRows(err), dberrors.IsMissingTable(err, "wisps"):
+			// No such dependent, or no wisp plane to hold one.
+		default:
+			return err
+		}
+		return nil
+	}, fmt.Sprintf(`
+		SELECT 1
+		FROM dependencies d
+		JOIN wisps w ON w.id = d.issue_id
+		WHERE %s = ?
+		LIMIT 1`, depTargetExprWithAlias("d")), issueID)
+	if err != nil {
+		return false, fmt.Errorf("iter dependents: probe for wisp copies: %w", err)
+	}
+	return held, nil
 }
 
 func depTargetExprWithAlias(alias string) string {

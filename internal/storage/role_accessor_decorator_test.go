@@ -68,11 +68,11 @@ func roleAccessorNamesOf(surface reflect.Type) (names, unclassified []string) {
 }
 
 // TestEveryStoreRoleAccessorIsClassified fails when DoltStorage hands out an
-// interface the census cannot place. Every one of the twenty-eight today is a
+// interface the census cannot place. Every one of the thirty-one today is a
 // facade role, so this costs nothing and closes the path where a role surface
 // grows a package and the census quietly stops covering it. (roleAccessorNames
 // is derived, so the count is prose and only this sentence goes stale — but it
-// does go stale, and the last three sweeps found it saying twenty-seven.)
+// does go stale, and the last four sweeps found it behind.)
 func TestEveryStoreRoleAccessorIsClassified(t *testing.T) {
 	_, unclassified := roleAccessorNamesOf(reflect.TypeOf((*DoltStorage)(nil)).Elem())
 	for _, accessor := range unclassified {
@@ -151,71 +151,77 @@ func assertRoleAccessorsAreDeclared(t *testing.T, decorator reflect.Type) {
 }
 
 // roleAccessorStore is a DoltStorage whose only real methods are the
-// twenty-eight role accessors, each answering with a distinguishable sentinel
+// thirty-one role accessors, each answering with a distinguishable sentinel
 // so a test can tell a decorated surface from a passed-through one.
 type roleAccessorStore struct {
 	DoltStorage
-	lifecycle    issueops.Lifecycle
-	reader       issueops.Reader
-	relations    issueops.Relations
-	edges        issueops.EdgeReader
-	blocking     issueops.BlockingAnnotator
-	tree         issueops.TreeWalker
-	graphCounter issueops.GraphCounter
-	batchGetter  issueops.BatchGetter
-	counter      issueops.Counter
-	settings     issueops.WorkspaceConfig
-	memories     memoryops.Memories
-	versions     issueops.VersionReconciler
-	stats        issueops.StatsReporter
-	cycles       issueops.CycleDetector
-	commenter    issueops.Commenter
-	claimer      issueops.ReadyClaimer
-	closer       issueops.BatchCloser
-	creator      issueops.BatchCreator
-	editor       issueops.DependencyEditor
-	applier      issueops.BatchApplier
-	readyCounter issueops.ReadyCounter
-	querier      issueops.Querier
-	sweeper      issueops.Sweeper
-	deleter      issueops.Deleter
-	bootstrapper issueops.Bootstrapper
-	verifier     issueops.InitVerifier
-	metadataCAS  issueops.MetadataCAS
-	releaser     issueops.Releaser
-	err          error
+	lifecycle      issueops.Lifecycle
+	reader         issueops.Reader
+	relations      issueops.Relations
+	edges          issueops.EdgeReader
+	blocking       issueops.BlockingAnnotator
+	tree           issueops.TreeWalker
+	graphCounter   issueops.GraphCounter
+	batchGetter    issueops.BatchGetter
+	counter        issueops.Counter
+	settings       issueops.WorkspaceConfig
+	memories       memoryops.Memories
+	versions       issueops.VersionReconciler
+	stats          issueops.StatsReporter
+	cycles         issueops.CycleDetector
+	commenter      issueops.Commenter
+	claimer        issueops.ReadyClaimer
+	closer         issueops.BatchCloser
+	creator        issueops.BatchCreator
+	editor         issueops.DependencyEditor
+	applier        issueops.BatchApplier
+	readyCounter   issueops.ReadyCounter
+	querier        issueops.Querier
+	sweeper        issueops.Sweeper
+	deleter        issueops.Deleter
+	bootstrapper   issueops.Bootstrapper
+	verifier       issueops.InitVerifier
+	metadataCAS    issueops.MetadataCAS
+	releaser       issueops.Releaser
+	leaseReclaimer issueops.LeaseReclaimer
+	heartbeater    issueops.Heartbeater
+	blockedLister  issueops.BlockedLister
+	err            error
 }
 
 func newRoleAccessorStore() *roleAccessorStore {
 	sentinel := &roleAccessorSentinel{}
 	return &roleAccessorStore{
-		memories:     &memoryRoleSentinel{},
-		lifecycle:    sentinel,
-		reader:       sentinel,
-		relations:    sentinel,
-		edges:        sentinel,
-		blocking:     sentinel,
-		graphCounter: sentinel,
-		batchGetter:  sentinel,
-		counter:      sentinel,
-		settings:     sentinel,
-		versions:     sentinel,
-		stats:        sentinel,
-		cycles:       sentinel,
-		commenter:    sentinel,
-		claimer:      sentinel,
-		closer:       sentinel,
-		creator:      sentinel,
-		editor:       sentinel,
-		applier:      sentinel,
-		readyCounter: sentinel,
-		querier:      sentinel,
-		sweeper:      sentinel,
-		deleter:      sentinel,
-		bootstrapper: sentinel,
-		verifier:     sentinel,
-		metadataCAS:  sentinel,
-		releaser:     sentinel,
+		memories:       &memoryRoleSentinel{},
+		lifecycle:      sentinel,
+		reader:         sentinel,
+		relations:      sentinel,
+		edges:          sentinel,
+		blocking:       sentinel,
+		graphCounter:   sentinel,
+		batchGetter:    sentinel,
+		counter:        sentinel,
+		settings:       sentinel,
+		versions:       sentinel,
+		stats:          sentinel,
+		cycles:         sentinel,
+		commenter:      sentinel,
+		claimer:        sentinel,
+		closer:         sentinel,
+		creator:        sentinel,
+		editor:         sentinel,
+		applier:        sentinel,
+		readyCounter:   sentinel,
+		querier:        sentinel,
+		sweeper:        sentinel,
+		deleter:        sentinel,
+		bootstrapper:   sentinel,
+		verifier:       sentinel,
+		metadataCAS:    sentinel,
+		releaser:       sentinel,
+		leaseReclaimer: sentinel,
+		heartbeater:    sentinel,
+		blockedLister:  sentinel,
 	}
 }
 
@@ -286,8 +292,17 @@ func (s *roleAccessorStore) BatchApplier() (issueops.BatchApplier, error) {
 func (s *roleAccessorStore) Releaser() (issueops.Releaser, error) {
 	return s.releaser, s.err
 }
+func (s *roleAccessorStore) LeaseReclaimer() (issueops.LeaseReclaimer, error) {
+	return s.leaseReclaimer, s.err
+}
+func (s *roleAccessorStore) Heartbeater() (issueops.Heartbeater, error) {
+	return s.heartbeater, s.err
+}
+func (s *roleAccessorStore) BlockedLister() (issueops.BlockedLister, error) {
+	return s.blockedLister, s.err
+}
 
-// roleAccessorSentinel implements twenty-seven of the twenty-eight roles at
+// roleAccessorSentinel implements thirty of the thirty-one roles at
 // once — every one but memoryops.Memories, whose List collides with
 // issueops.Reader.List and needs the second sentinel below.
 // Nothing calls its methods; identity is the whole point.
@@ -412,6 +427,15 @@ func (*roleAccessorSentinel) CompareAndSetKey(context.Context, issueops.CompareA
 func (*roleAccessorSentinel) Release(context.Context, issueops.ReleaseRequest) (issueops.ReleaseResult, error) {
 	return issueops.ReleaseResult{}, nil
 }
+func (*roleAccessorSentinel) Reclaim(context.Context, issueops.ReclaimRequest) (issueops.ReclaimResult, error) {
+	return issueops.ReclaimResult{}, nil
+}
+func (*roleAccessorSentinel) Heartbeat(context.Context, issueops.HeartbeatRequest) (issueops.HeartbeatResult, error) {
+	return issueops.HeartbeatResult{}, nil
+}
+func (*roleAccessorSentinel) ListBlocked(context.Context, issueops.BlockedRequest) (issueops.BlockedResult, error) {
+	return issueops.BlockedResult{}, nil
+}
 
 // memoryRoleSentinel is the memory role's sentinel, and the one role
 // memoryRoleSentinel is the remaining role's sentinel, and the one role
@@ -444,10 +468,10 @@ func (*memoryRoleSentinel) List(context.Context, memoryops.ListRequest) (memoryo
 // paragraph rather than four near-identical ones (bd-8ri3m). Reads fire no
 // completion hooks, so IssueReader, IssueRelations, Counter, StatsReporter,
 // CycleDetector, EdgeReader, BlockingAnnotator, TreeWalker, GraphCounter,
-// ReadyCounter, Querier and InitVerifier deliberately return the inner surface
+// ReadyCounter, BlockedLister, Querier and InitVerifier deliberately return the inner surface
 // unwrapped,
 // each in its own hook_*.go. The ones in that column that are NOT reads are
-// WorkspaceConfig, Memories, VersionReconciler, Bootstrapper, Sweeper and
+// WorkspaceConfig, Memories, VersionReconciler, Bootstrapper, Sweeper,
 // Deleter: a settings write changes the workspace rather than a bead, a
 // remembered insight names no bead and there is no on_remember to fire, a
 // version marker names no bead at all, a bootstrap lands on a workspace whose
@@ -474,6 +498,7 @@ func TestHookFiringStoreWrapsTheWriteRolesAndPassesTheReadsThrough(t *testing.T)
 		{"MetadataCAS", func() (any, error) { return store.MetadataCAS() }, inner.metadataCAS, true},
 		{"BatchApplier", func() (any, error) { return store.BatchApplier() }, inner.applier, true},
 		{"Releaser", func() (any, error) { return store.Releaser() }, inner.releaser, true},
+		{"LeaseReclaimer", func() (any, error) { return store.LeaseReclaimer() }, inner.leaseReclaimer, true},
 		{"IssueReader", func() (any, error) { return store.IssueReader() }, inner.reader, false},
 		{"IssueRelations", func() (any, error) { return store.IssueRelations() }, inner.relations, false},
 		{"EdgeReader", func() (any, error) { return store.EdgeReader() }, inner.edges, false},
@@ -493,6 +518,8 @@ func TestHookFiringStoreWrapsTheWriteRolesAndPassesTheReadsThrough(t *testing.T)
 		{"Deleter", func() (any, error) { return store.Deleter() }, inner.deleter, false},
 		{"Bootstrapper", func() (any, error) { return store.Bootstrapper() }, inner.bootstrapper, false},
 		{"InitVerifier", func() (any, error) { return store.InitVerifier() }, inner.verifier, false},
+		{"Heartbeater", func() (any, error) { return store.Heartbeater() }, inner.heartbeater, true},
+		{"BlockedLister", func() (any, error) { return store.BlockedLister() }, inner.blockedLister, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			surface, err := test.got()
@@ -532,6 +559,7 @@ func TestHookFiringStoreRoleAccessorsPropagateInnerErrors(t *testing.T) {
 		{"MetadataCAS", func() (any, error) { return store.MetadataCAS() }},
 		{"BatchApplier", func() (any, error) { return store.BatchApplier() }},
 		{"Releaser", func() (any, error) { return store.Releaser() }},
+		{"LeaseReclaimer", func() (any, error) { return store.LeaseReclaimer() }},
 		{"IssueReader", func() (any, error) { return store.IssueReader() }},
 		{"IssueRelations", func() (any, error) { return store.IssueRelations() }},
 		{"EdgeReader", func() (any, error) { return store.EdgeReader() }},
@@ -551,6 +579,8 @@ func TestHookFiringStoreRoleAccessorsPropagateInnerErrors(t *testing.T) {
 		{"Deleter", func() (any, error) { return store.Deleter() }},
 		{"Bootstrapper", func() (any, error) { return store.Bootstrapper() }},
 		{"InitVerifier", func() (any, error) { return store.InitVerifier() }},
+		{"Heartbeater", func() (any, error) { return store.Heartbeater() }},
+		{"BlockedLister", func() (any, error) { return store.BlockedLister() }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if _, err := test.got(); !errors.Is(err, want) {

@@ -287,6 +287,25 @@ type Config struct {
 	// rather than refusing the call. Required on the same terms as every field
 	// here.
 	BatchGetter issueops.BatchGetter
+	// LeaseReclaimer is the stale-lease sweep behind
+	// POST /v0/beads/issues:reclaim. It is a SEPARATE field from Releaser for
+	// the reason issueops.LeaseReclaimer's own doc gives: Releaser gives up ONE
+	// claim on its holder's say-so, and this reverts MANY on a clock's.
+	// Required on the same terms as every field here.
+	LeaseReclaimer issueops.LeaseReclaimer
+	// Heartbeater is the lease refresh behind
+	// POST /v0/beads/issues/{id}:heartbeat. It is a SEPARATE field from
+	// Claimer for the reason issueops.Heartbeater's own doc gives: a claim
+	// takes ownership and never extends the lease, a heartbeat proves the
+	// holder is alive and writes only the lease row. Required on the same
+	// terms as every field here.
+	Heartbeater issueops.Heartbeater
+	// BlockedLister is the blocked listing behind GET /v0/beads/blocked:
+	// what `bd blocked` prints. It is a SEPARATE field from Reader because it
+	// is a separate role: Reader.Ready lists the unblocked front, this lists
+	// the blocked rows with the blockers bd names for each. Required on the
+	// same terms as every field here.
+	BlockedLister issueops.BlockedLister
 	// Relations is the single-anchor neighbor read behind
 	// GET /v0/beads/issues/{id}/related. It is a SEPARATE field from EdgeReader
 	// for the reason issueops.EdgeReader's own doc gives at length: that role
@@ -384,6 +403,18 @@ type Config struct {
 	// a server without this flag would answer "you are caught up" to a consumer
 	// polling a workspace that will never emit a record.
 	EventsJournalEnabled bool
+	// ExternalDependencyPolicy reports that every ready, claim, claim-next,
+	// close, blocking-annotation and tree role this server answers from — the
+	// Provider's, or the individual role fields' — was composed through bd's
+	// external-dependency policy (internal/storage/externaldeps). It makes the
+	// handshake advertise CapExternalDependencies, which tells a client to
+	// pass those operations through without applying the policy itself.
+	//
+	// Set it only from the composition actually handed in (cmd/bd's serve
+	// derives it with externaldeps.Applied / externaldeps.AppliedToProvider):
+	// a server that advertises the token without enforcing the policy makes
+	// every client skip it.
+	ExternalDependencyPolicy bool
 	// Workspace is the startup snapshot GET /v0/beads/context answers from.
 	// Only the allowlisted fields are ever serialized — see contextResponse,
 	// which names the whole set and the reasons for the exclusions.
@@ -423,6 +454,9 @@ type Server struct {
 	issueEdges        issueops.EdgeReader
 	issueEdgeCounter  issueops.GraphCounter
 	issueBatchGetter  issueops.BatchGetter
+	issueReclaimer    issueops.LeaseReclaimer
+	issueHeartbeater  issueops.Heartbeater
+	issueBlocked      issueops.BlockedLister
 	issueRelations    issueops.Relations
 	issueCommenter    issueops.Commenter
 	issueBlocking     issueops.BlockingAnnotator
@@ -635,6 +669,9 @@ func Listen(cfg Config) (*Server, error) {
 		issueEdges:        cfg.EdgeReader,
 		issueEdgeCounter:  cfg.GraphCounter,
 		issueBatchGetter:  cfg.BatchGetter,
+		issueReclaimer:    cfg.LeaseReclaimer,
+		issueHeartbeater:  cfg.Heartbeater,
+		issueBlocked:      cfg.BlockedLister,
 		issueRelations:    cfg.Relations,
 		issueCommenter:    cfg.Commenter,
 		issueBlocking:     cfg.BlockingAnnotator,
@@ -663,7 +700,7 @@ func Listen(cfg Config) (*Server, error) {
 
 		log:      log.New(cfg.Stderr, "bd serve: ", log.LstdFlags|log.LUTC),
 		stdout:   cfg.Stdout,
-		ctxBody:  contextResponse(cfg.Workspace, cfg.SchemaVersion, Capabilities()),
+		ctxBody:  contextResponse(cfg.Workspace, cfg.SchemaVersion, advertisedCapabilities(cfg)),
 		hosts:    newHostPolicy(ip, cfg.AllowedHosts),
 		auth:     cfg.Auth,
 		idPrefix: prefix,
@@ -757,12 +794,12 @@ func Listen(cfg Config) (*Server, error) {
 // "all or nothing" would turn an honest condition into a special case inside
 // three functions. It is checked once, on its own, below.
 func sourceRoles(cfg Config) []any {
-	return []any{cfg.Reader, cfg.Claimer, cfg.ReadyClaimer, cfg.Releaser, cfg.Lifecycle, cfg.BatchCloser, cfg.Settings, cfg.Stats, cfg.CycleDetector, cfg.EdgeReader, cfg.GraphCounter, cfg.BatchGetter, cfg.Relations, cfg.Commenter, cfg.BlockingAnnotator, cfg.TreeWalker, cfg.ReadyCounter, cfg.Counter, cfg.Querier, cfg.Sweeper, cfg.Deleter, cfg.BatchCreator, cfg.DependencyEditor, cfg.BatchApplier, cfg.Memories, cfg.MetadataCAS}
+	return []any{cfg.Reader, cfg.Claimer, cfg.ReadyClaimer, cfg.Releaser, cfg.Lifecycle, cfg.BatchCloser, cfg.Settings, cfg.Stats, cfg.CycleDetector, cfg.EdgeReader, cfg.GraphCounter, cfg.BatchGetter, cfg.LeaseReclaimer, cfg.Heartbeater, cfg.BlockedLister, cfg.Relations, cfg.Commenter, cfg.BlockingAnnotator, cfg.TreeWalker, cfg.ReadyCounter, cfg.Counter, cfg.Querier, cfg.Sweeper, cfg.Deleter, cfg.BatchCreator, cfg.DependencyEditor, cfg.BatchApplier, cfg.Memories, cfg.MetadataCAS}
 }
 
 // roleSourceNames spells sourceRoles for the refusal message, in the same
 // order, so a caller reading the error learns the whole set it must pass.
-const roleSourceNames = "Reader, Claimer, ReadyClaimer, Releaser, Lifecycle, BatchCloser, Settings, Stats, CycleDetector, EdgeReader, GraphCounter, BatchGetter, Relations, Commenter, BlockingAnnotator, TreeWalker, ReadyCounter, Counter, Querier, Sweeper, Deleter, BatchCreator, DependencyEditor, BatchApplier, Memories and MetadataCAS"
+const roleSourceNames = "Reader, Claimer, ReadyClaimer, Releaser, Lifecycle, BatchCloser, Settings, Stats, CycleDetector, EdgeReader, GraphCounter, BatchGetter, LeaseReclaimer, Heartbeater, BlockedLister, Relations, Commenter, BlockingAnnotator, TreeWalker, ReadyCounter, Counter, Querier, Sweeper, Deleter, BatchCreator, DependencyEditor, BatchApplier, Memories and MetadataCAS"
 
 func anyRoleSet(cfg Config) bool {
 	return slices.ContainsFunc(sourceRoles(cfg), func(r any) bool { return r != nil })
@@ -1149,6 +1186,43 @@ func (s *Server) batchGetter(r *http.Request) (issueops.BatchGetter, error) {
 	}
 	var src uow.BatchGetterSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
 	return src.BatchGetter()
+}
+
+// leaseReclaimer returns the stale-lease sweep surface for one request, on the
+// same terms as every role above and held by INTERFACE so
+// uow.LeaseReclaimerSource is load-bearing rather than decorative. It goes out
+// unwrapped for the sweeper's reason: ReclaimResult is a VALUE whose slice a
+// nil-safe range walks.
+func (s *Server) leaseReclaimer(r *http.Request) (issueops.LeaseReclaimer, error) {
+	if s.provider == nil {
+		return s.issueReclaimer, nil
+	}
+	var src uow.LeaseReclaimerSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
+	return src.LeaseReclaimer()
+}
+
+// heartbeater returns the lease-refresh surface for one request, on the same
+// terms as every role above and held by INTERFACE so uow.HeartbeaterSource is
+// load-bearing rather than decorative. HeartbeatResult is a plain value, so it
+// goes out unwrapped.
+func (s *Server) heartbeater(r *http.Request) (issueops.Heartbeater, error) {
+	if s.provider == nil {
+		return s.issueHeartbeater, nil
+	}
+	var src uow.HeartbeaterSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
+	return src.Heartbeater()
+}
+
+// blockedLister returns the blocked-listing surface for one request, on the
+// same terms as every role above and held by INTERFACE so
+// uow.BlockedListerSource is load-bearing rather than decorative. It goes out
+// unwrapped: wireBlocked drops a nil element rather than dereferencing it.
+func (s *Server) blockedLister(r *http.Request) (issueops.BlockedLister, error) {
+	if s.provider == nil {
+		return s.issueBlocked, nil
+	}
+	var src uow.BlockedListerSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
+	return src.BlockedLister()
 }
 
 // relations returns the single-anchor neighbor surface for one request, built
@@ -2374,4 +2448,24 @@ func logValue(v any) string {
 
 func millis(d time.Duration) string {
 	return strconv.FormatFloat(float64(d)/float64(time.Millisecond), 'f', 3, 64)
+}
+
+// moleculeStepper returns the advance-a-molecule surface for one request.
+//
+// On the store-shaped source there is no configured field for it: the role is
+// issueops.NewMoleculeStepper composed over roles the source already carries
+// (batch getter, relations, edge reader, claimer, lifecycle), so building it
+// here from those is the same composition a store's own accessor makes. On the
+// provider it is built over the timed wrapper, the same two-step every role
+// above performs.
+func (s *Server) moleculeStepper(r *http.Request) (issueops.MoleculeStepper, error) {
+	if s.provider == nil {
+		return issueops.NewMoleculeStepper(issueops.MoleculeStepperRoles{
+			Reader:    issueops.MoleculeReader{BatchGetter: s.issueBatchGetter, Relations: s.issueRelations, EdgeReader: s.issueEdges},
+			Claimer:   checkedClaimer{inner: s.issueClaimer},
+			Lifecycle: checkedLifecycle{inner: s.issueLifecycle},
+		}), nil
+	}
+	var src uow.MoleculeStepperSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
+	return src.MoleculeStepper()
 }

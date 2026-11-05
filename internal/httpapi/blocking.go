@@ -27,6 +27,9 @@ func (s *Server) handleBlockingAnnotations(w http.ResponseWriter, r *http.Reques
 	q := newQuery(r.URL.Query())
 
 	ids := q.list("issue_id")
+	// is_blocked rides CapDependenciesBlockingIsBlocked: the role's
+	// IncludeIsBlocked, each item's stored transitive flag.
+	includeIsBlocked := q.boolean("is_blocked")
 	if !s.acceptQuery(w, r, q) {
 		return
 	}
@@ -51,7 +54,7 @@ func (s *Server) handleBlockingAnnotations(w http.ResponseWriter, r *http.Reques
 		s.failErr(w, r, err)
 		return
 	}
-	result, err := annotator.AnnotateBlocking(r.Context(), issueops.BlockingRequest{IDs: ids})
+	result, err := annotator.AnnotateBlocking(r.Context(), issueops.BlockingRequest{IDs: ids, IncludeIsBlocked: includeIsBlocked})
 	if err != nil {
 		s.failBlockingErr(w, r, err)
 		return

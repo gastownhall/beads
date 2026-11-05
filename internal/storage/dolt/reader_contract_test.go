@@ -134,6 +134,12 @@ func TestReaderListEmptyPageIsWellFormed(t *testing.T) {
 	conformance.RunReaderListEmptyPageIsWellFormed(t, ctx, fixture)
 }
 
+func TestReaderListQueryMatchesTheTitleOrTheID(t *testing.T) {
+	fixture, ctx, cleanup := newDoltReaderFixture(t, "rdr")
+	defer cleanup()
+	conformance.RunReaderListQueryMatchesTheTitleOrTheID(t, ctx, fixture)
+}
+
 func TestReaderGetResolvesTheExactIDAcrossBothPlanes(t *testing.T) {
 	fixture, ctx, cleanup := newDoltReaderFixture(t, "rdr")
 	defer cleanup()
@@ -255,6 +261,18 @@ func TestReaderListWispTypeNarrowsTheAdmittedPlaneRatherThanAdmittingIt(t *testi
 	conformance.RunReaderListWispTypeNarrowsTheAdmittedPlaneRatherThanAdmittingIt(t, ctx, fixture)
 }
 
+func TestReaderListTimeBoundsAreStrictAndWholeSecond(t *testing.T) {
+	fixture, ctx, cleanup := newDoltReaderFixture(t, "rdr")
+	defer cleanup()
+	conformance.RunReaderListTimeBoundsAreStrictAndWholeSecond(t, ctx, fixture)
+}
+
+func TestReaderListFilterFamiliesNarrowToTheirRows(t *testing.T) {
+	fixture, ctx, cleanup := newDoltReaderFixture(t, "rdr")
+	defer cleanup()
+	conformance.RunReaderListFilterFamiliesNarrowToTheirRows(t, ctx, fixture)
+}
+
 func TestReaderListBriefDropsTheFreeFormTextAndNothingElse(t *testing.T) {
 	fixture, ctx, cleanup := newDoltReaderFixture(t, "rdr")
 	defer cleanup()
@@ -297,6 +315,7 @@ func newDoltReaderFixture(t *testing.T, prefix string) (conformance.ReaderFixtur
 			_, err := store.AddIssueComment(ctx, issueID, author, text)
 			return err
 		},
+		PromoteWisp: store.PromoteFromEphemeral,
 	}
 	return fixture, ctx, func() {
 		cancel()

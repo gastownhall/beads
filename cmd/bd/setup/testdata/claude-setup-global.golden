@@ -1,0 +1,77 @@
+# bd setup claude artifact transcript: global
+# Regenerate with BD_UPDATE_GOLDEN=1 go test ./cmd/bd/setup/ -run TestClaudeSetupArtifactsGolden
+--- seed: none
+
+=== bd setup claude --global
+result: ok
+--- stdout
+Installing Claude hooks globally...
+✓ Registered SessionStart hook
+Installing Claude Code integration...
+✓ Created new CLAUDE.md with beads integration
+
+✓ Claude Code integration installed
+  File: $ROOT/home/.claude/CLAUDE.md
+No additional configuration needed!
+
+✓ Claude Code integration installed
+  Settings: $ROOT/home/.claude/settings.json
+
+Restart Claude Code for changes to take effect.
+--- stderr
+(empty)
+--- files: created $ROOT/home/.claude/CLAUDE.md
+<!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:52c58e00 -->
+[managed section body: byte-identical to internal/templates/agents/testdata/managed-section-minimal-user.md]
+<!-- END BEADS INTEGRATION -->
+--- files: created $ROOT/home/.claude/settings.json
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "command": "bd prime --hook-json",
+            "type": "command"
+          }
+        ],
+        "matcher": ""
+      }
+    ]
+  }
+}
+
+=== bd setup claude --check
+result: ok
+--- stdout
+✓ Global hooks installed: $ROOT/home/.claude/settings.json
+✓ Claude Code integration installed: $ROOT/home/.claude/CLAUDE.md (current)
+--- stderr
+(empty)
+--- files: unchanged
+
+=== bd setup claude --remove --global
+result: ok
+--- stdout
+Removing Claude hooks globally...
+✓ Removed SessionStart hook
+Removing Claude Code integration from $ROOT/home/.claude/CLAUDE.md...
+✓ Removed beads section from CLAUDE.md
+✓ Claude hooks removed
+--- stderr
+(empty)
+--- files: modified $ROOT/home/.claude/CLAUDE.md
+(empty)
+--- files: modified $ROOT/home/.claude/settings.json
+{
+  "hooks": {}
+}
+
+=== bd setup claude --check
+result: error: claude hooks not installed
+--- stdout
+✗ No hooks installed
+  Run: bd setup claude
+--- stderr
+(empty)
+--- files: unchanged

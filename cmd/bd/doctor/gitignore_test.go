@@ -3,7 +3,6 @@ package doctor
 import (
 	"bytes"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -1439,7 +1438,7 @@ func TestCheckRedirectNotTracked_FileTracked(t *testing.T) {
 	}
 
 	// Stage (track) the redirect file
-	gitAdd := exec.Command("git", "add", redirectPath)
+	gitAdd := gitCommand("add", redirectPath)
 	if err := gitAdd.Run(); err != nil {
 		t.Skipf("git add failed: %v", err)
 	}
@@ -1498,13 +1497,13 @@ func TestFixRedirectTracking(t *testing.T) {
 	}
 
 	// Stage (track) the redirect file
-	gitAdd := exec.Command("git", "add", redirectPath)
+	gitAdd := gitCommand("add", redirectPath)
 	if err := gitAdd.Run(); err != nil {
 		t.Skipf("git add failed: %v", err)
 	}
 
 	// Verify it's tracked
-	lsFiles := exec.Command("git", "ls-files", redirectPath)
+	lsFiles := gitCommand("ls-files", redirectPath)
 	output, _ := lsFiles.Output()
 	if strings.TrimSpace(string(output)) == "" {
 		t.Fatal("redirect file should be tracked before fix")
@@ -1516,7 +1515,7 @@ func TestFixRedirectTracking(t *testing.T) {
 	}
 
 	// Verify it's no longer tracked
-	lsFiles = exec.Command("git", "ls-files", redirectPath)
+	lsFiles = gitCommand("ls-files", redirectPath)
 	output, _ = lsFiles.Output()
 	if strings.TrimSpace(string(output)) != "" {
 		t.Error("redirect file should be untracked after fix")
@@ -1665,6 +1664,36 @@ func TestGitignore_ContainsDoltServerConfig(t *testing.T) {
 	}
 }
 
+// TestGitignore_ContainsHTTPTarget verifies that the http backend's activation
+// sidecar is ignored like proxied_server_client_info.json, the per-user
+// sidecar it follows. It names the server the bearer ladder authorizes
+// against, so a committed copy would point every clone at that server. It
+// must be in requiredPatterns too, so bd doctor --fix heals an existing
+// .beads/.gitignore.
+func TestGitignore_ContainsHTTPTarget(t *testing.T) {
+	// Keep this in sync with httpclient.TargetFileName; cmd/bd/doctor does not
+	// import the client for a string constant.
+	const pattern = "http_target.json"
+
+	if !containsGitignorePattern(GitignoreTemplate, pattern) {
+		t.Errorf("GitignoreTemplate should contain %q", pattern)
+	}
+	if missing := missingGitignorePatterns(GitignoreTemplate); len(missing) != 0 {
+		t.Errorf("GitignoreTemplate is missing required patterns %v", missing)
+	}
+
+	found := false
+	for _, p := range requiredPatterns {
+		if p == pattern {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("requiredPatterns should include %q", pattern)
+	}
+}
+
 // TestCheckLastTouchedNotTracked_NoFile verifies that check passes when no last-touched file exists
 func TestCheckLastTouchedNotTracked_NoFile(t *testing.T) {
 	tmpDir := t.TempDir()
@@ -1789,7 +1818,7 @@ func TestCheckLastTouchedNotTracked_FileTracked(t *testing.T) {
 	}
 
 	// Stage (track) the last-touched file
-	gitAdd := exec.Command("git", "add", lastTouchedPath)
+	gitAdd := gitCommand("add", lastTouchedPath)
 	if err := gitAdd.Run(); err != nil {
 		t.Skipf("git add failed: %v", err)
 	}
@@ -1848,7 +1877,7 @@ func TestFixLastTouchedTracking(t *testing.T) {
 	}
 
 	// Stage (track) the last-touched file
-	gitAdd := exec.Command("git", "add", lastTouchedPath)
+	gitAdd := gitCommand("add", lastTouchedPath)
 	if err := gitAdd.Run(); err != nil {
 		t.Skipf("git add failed: %v", err)
 	}
@@ -2485,7 +2514,7 @@ func setupBareParentWorktreeForGitignoreTest(t *testing.T) (string, string) {
 func runGitInDirForGitignoreTest(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 
-	cmd := exec.Command("git", args...)
+	cmd := gitCommand(args...)
 	cmd.Dir = dir
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -2946,7 +2975,7 @@ func TestCheckNoVestigialSyncWorktrees_WithRedirectNoWorktree(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	// Create a git repo so the git root detection works
-	cmd := exec.Command("git", "init", tmpDir)
+	cmd := gitCommand("init", tmpDir)
 	if err := cmd.Run(); err != nil {
 		t.Skipf("git init failed: %v", err)
 	}
@@ -2985,7 +3014,7 @@ func TestCheckNoVestigialSyncWorktrees_VestigialDetected(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	// Create a git repo
-	cmd := exec.Command("git", "init", tmpDir)
+	cmd := gitCommand("init", tmpDir)
 	if err := cmd.Run(); err != nil {
 		t.Skipf("git init failed: %v", err)
 	}

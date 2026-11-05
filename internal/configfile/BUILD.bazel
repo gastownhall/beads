@@ -9,13 +9,18 @@ go_library(
         "credentials.go",
         "credentials_unix.go",
         "credentials_windows.go",
+        "dolt_host.go",
         "external_dolt_config.go",
+        "graph_mode.go",
+        "historical_sqlite.go",
         "proxied_server_client_info.go",
+        "workspace_format.go",
     ],
     importpath = "github.com/steveyegge/beads/internal/configfile",
     visibility = ["//:__subpackages__"],
     deps = [
         "//internal/config",
+        "//internal/remedy",
         "//internal/storage/backendnames",
     ],
 )
@@ -27,8 +32,78 @@ go_test(
         "central_config_test.go",
         "configfile_test.go",
         "credentials_test.go",
+        "credentials_unix_remedy_test.go",
+        "dolt_host_test.go",
         "external_dolt_config_test.go",
+        "graph_mode_test.go",
+        "historical_sqlite_test.go",
+        "remedy_printing_test.go",
+        "workspace_format_test.go",
     ],
     embed = [":configfile"],
-    deps = ["//internal/config"],
+    deps = [
+        "//internal/config",
+        "//internal/testutil/legacyworkspace",
+    ],
 )
+
+# --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "repo_doc_files",
+    srcs = glob(
+        [
+            "**/*.md",
+            "**/*.mdx",
+        ],
+        allow_empty = True,
+        exclude = ["**/node_modules/**"],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = [
+            "**/*_test.go",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
+        exclude = ["**/node_modules/**"],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_other_files",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.db",
+            "**/*.exe",
+            "**/*.go",
+            "**/*.md",
+            "**/*.mdx",
+            "**/*.out",
+            "**/*.prof",
+            "**/*.pyc",
+            "**/*.test",
+            "**/__pycache__/**",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+# --- end repo_files ---

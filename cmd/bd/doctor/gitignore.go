@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/beads/internal/gitignore"
+	"github.com/steveyegge/beads/internal/remedy"
 )
 
 // GitignoreTemplate is the canonical .beads/.gitignore content
@@ -40,6 +41,13 @@ push-state.json
 .local_version
 
 proxied_server_client_info.json
+
+# HTTP backend activation sidecar and per-user local metadata (per-user state,
+# never tracked — the server URL and any ca_file path are machine-specific,
+# and the local metadata sidecar mirrors proxied_server_client_info.json's
+# per-user precedent). Written by bd connect.
+http_target.json
+http_local_metadata.json
 
 # Worktree redirect file (contains relative path to main repo's .beads/)
 # Must not be committed as paths would be wrong in other clones
@@ -139,6 +147,8 @@ var requiredPatterns = []string{
 	"*.corrupt.backup/",
 	".beads-credential-key",
 	"proxied_server_client_info.json",
+	"http_target.json",
+	"http_local_metadata.json",
 	".local_version",
 	"backup/",
 }
@@ -650,13 +660,16 @@ func CheckNoVestigialSyncWorktrees(repoPath string) DoctorCheck {
 		}
 	}
 
-	// Found a local .beads-sync but we have a redirect - this is vestigial
+	// Found a local .beads-sync but we have a redirect - this is vestigial.
+	// The path goes into the rm -rf command as one shell word: unquoted, a
+	// checkout path with a space in it would delete two other paths.
+	arg, note := remedy.CommandArg(runtime.GOOS, syncWorktreePath, "<path>")
 	return DoctorCheck{
 		Name:    "Vestigial Sync Worktrees",
 		Status:  StatusWarning,
 		Message: "Vestigial .beads-sync worktree found",
-		Detail:  fmt.Sprintf("This repo uses redirect but has unused worktree at: %s", syncWorktreePath),
-		Fix:     fmt.Sprintf("Remove with: rm -rf %s", syncWorktreePath),
+		Detail:  fmt.Sprintf("This repo uses redirect but has unused worktree at: %s", remedy.PrintedValue(syncWorktreePath)),
+		Fix:     fmt.Sprintf("Remove with: rm -rf %s%s", arg, note),
 	}
 }
 

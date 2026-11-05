@@ -457,19 +457,18 @@ func runTestScriptPrebuiltBinary(t *testing.T, repoRoot string, args []string) (
 	// at the mercy of whatever test size this target happens to run under;
 	// go test does not set this variable, so only Bazel needs the filter.
 	//
-	// scripts/ci/scripts-go-test.sh (the CI driver for this very package's
-	// `go test ./scripts/...` run) calls beads_test_env_enter in its own
-	// shell before invoking go test, so this process's own os.Environ() can
-	// already carry an inherited BEADS_TEST_ENV_ACTIVE=1 / BEADS_TEST_ENV_ROOT
-	// / BEADS_TEST_ENV_DISABLE / BEADS_TEST_ENV_KEEP from that outer,
-	// longer-lived shell. If left in the child env below, scripts/test.sh's
+	// A caller that runs `go test ./scripts/...` inside an entered hermetic
+	// env (scripts/ci/pr-core.sh calls beads_test_env_enter in its own shell
+	// before invoking go test) hands this process an inherited
+	// BEADS_TEST_ENV_ACTIVE=1 / BEADS_TEST_ENV_ROOT / BEADS_TEST_ENV_DISABLE /
+	// BEADS_TEST_ENV_KEEP from that outer, longer-lived shell. If left in the child env below, scripts/test.sh's
 	// own beads_test_env_enter call (scripts/test.sh:17) sees the
 	// already-active guard and no-ops: no new root, no new EXIT trap - so the
 	// directory observed by the fake binary is the outer root, which is
 	// still alive (and rightly so: it's owned by the outer process) when
 	// scripts/test.sh exits. That makes the "cleans up BEADS_TEST_ENV_ROOT"
 	// subtest below fail only when this test binary happens to run nested
-	// under scripts-go-test.sh, even though the SF-4 fix it is guarding is
+	// under such a caller, even though the SF-4 fix it is guarding is
 	// correct. Every real production caller of scripts/test.sh's prebuilt
 	// path (pr.yml's Windows liveness/worktree-remove prebuilt steps) runs it
 	// as the first command of a fresh GitHub Actions `run:` step, never

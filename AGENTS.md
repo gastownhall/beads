@@ -13,15 +13,19 @@ end lists them. `CLAUDE.md` files are symlinks to their sibling `AGENTS.md`.
 
 ## How work flows here
 
-GitHub Issues is the public tracker, and every PR links a documented issue.
-The issue carries the context reviewers and future readers need: for a bug,
-the reproduction, impact, and evidence; for a change, the motivation, impact,
-risk, and verification plan.
+GitHub Issues is the public tracker. Use an issue when it adds context
+reviewers need: a user-visible bug, a behavior or design change worth
+discussing, or work that spans several PRs. The issue carries the
+reproduction, impact, and evidence for a bug, or the motivation, impact, risk,
+and verification plan for a change. Small, self-explanatory changes (typos,
+flaky tests, refactors, CI or docs tweaks) can go straight to a PR whose body
+explains the why.
 
-1. Find or file the issue with the bug or feature form. It does not need
-   maintainer approval first; file it before or alongside the PR.
-2. Work on a branch, open a PR against `main` whose body says
-   `Closes #<issue>`, and let CI and review run.
+1. If the change warrants an issue, find or file one with the bug or feature
+   form. It does not need maintainer approval first; file it before or
+   alongside the PR.
+2. Work on a branch, open a PR against `main` (its body says
+   `Closes #<issue>` when there is one), and let CI and review run.
 3. Maintainers triage issues with `status/needs-triage`, `status/needs-info`,
    `status/needs-repro`, `status/needs-design`, and `status/accepted`
    (confirmed); see [CONTRIBUTING.md](CONTRIBUTING.md).
@@ -31,10 +35,9 @@ and not a substitute for the GitHub issue.
 
 ## Agent contribution policy
 
-- Every PR closes a documented issue. If none exists for your change, file
-  one with the bug or feature form fields, filling each from evidence and
-  answering `NOT_ENOUGH_INFO` where the evidence runs out, then link it from
-  the PR.
+- File an issue when the change warrants one (see above). When you do, use
+  the bug or feature form fields, fill each from evidence, and answer
+  `NOT_ENOUGH_INFO` where the evidence runs out.
 - A human reviews and stands behind every issue and PR an agent drafts.
   Evidence that the change works end-to-end is required; "unit tests pass"
   alone is not evidence.
@@ -87,8 +90,25 @@ orchestration layer.
 introspection, storage-specific retry or crash-recovery logic, or public SDK
 return types that leak driver internals. If the boundary is too narrow, widen
 the interface or route the issue to the driver instead of patching around it
-in beads. `bd doctor` support for embedded mode is enabled one subcommand at a
-time, each human-vetted (GH#3794): do not lift the embedded-mode gate in
+in beads. One maintainer-granted exception: `databaseLocked` in
+`internal/doltserver` takes a shared, non-blocking lock on Dolt's own
+`.dolt/noms/LOCK` and releases it at once (it never creates or writes the
+file), only to decide whether the workspace's Dolt database directory (the
+store's CLI directory: `.beads/dolt/<db>` by default, or `<db>` under a
+custom `dolt_data_dir` or under the shared server's data directory) is served
+by a live dolt process, so bd runs the dolt CLI there only for a served
+directory. A busy lock (another process holds it, as every dolt process with
+the database open does) counts as served. A probe
+that cannot open the file, or whose lock call fails for any other reason,
+counts as not served, which sends bd through the SQL server (the safe
+direction). The exception ends once the Dolt driver can report whether a
+directory is served, and covers no other lock (the test-only
+`testutil.HoldDoltDatabaseLock` is outside it). The same proof also reads
+Dolt's `.dolt/sql-server.info` for the port and PID it names, as the dolt CLI
+does, the way bd already reads the remotes in Dolt's repo state file
+(`PersistedRemoteInfos`). `bd doctor` support for
+embedded mode is enabled one subcommand at a time, each human-vetted
+(GH#3794): do not lift the embedded-mode gate in
 `cmd/bd/doctor.go` wholesale, and keep database-layer checks and fixes
 server-gated until the driver interface covers them.
 
@@ -99,33 +119,66 @@ spans layers. See
 
 ## Build, test, lint
 
+Bazel is the build and test system: CI gates on the `bazel test` lanes in
+`.github/workflows/bazel.yml`, and nogo (lint + vet), gofmt and the repository
+guards exist only as Bazel targets. Install
+[Bazelisk](https://github.com/bazelbuild/bazelisk) as `bazel`; the pre-commit
+and pre-push hooks need it.
+
 ```bash
-make install       # build and install bd to ~/.local/bin (canonical)
-make test          # unit tests with the right build tags
-make ci-pr-lint    # required zero-finding formatting + lint contract
-make check-docs    # doc flag, freshness, and docsync checks
+make test          # bazel test //... --config=ci: the CI test lane (nogo, gofmt, guards, unit tests)
+make check         # testing.Short policy + make ci-pr-lint + make test
+make ci-pr-lint    # nogo lint + vet gate, native plus windows/darwin
+make check-docs    # bazel docsync + doc freshness, then the CLI flag check
 make bazel-sync    # after adding/removing/renaming Go files or changing imports/go.mod
+make install       # build and install bd to ~/.local/bin (canonical)
 ```
 
+- Each other tier has its own lane (`--config=integration`, `doltserver`,
+  `embedded`, ...); [engdocs/TESTING.md](engdocs/TESTING.md) lists the exact
+  command per lane and is the canonical source for test selection, design,
+  and PR-readiness gates.
+- Where actions run: contributors add `--config=fork-cache` (rbe-west's
+  anonymous read-only cache; nothing is uploaded), maintainers with an rbe-west
+  certificate `--config=remote-exec`, agent hosts whose `~/.bazelrc` names the
+  executor neither. Make yours the default with a `build --config=...` line in
+  the gitignored `.bazelrc.local`, or pass `BAZEL_FLAGS=...` to make.
+- Agents run tests only with `bazel test`, also while iterating on one
+  behavior:
+
+  ```bash
+  bazel test //cmd/bd:bd_test --config=ci --test_filter='^TestName$' --test_output=all
+  ```
+
+  A target also passes when the test never ran (a filter that matches
+  nothing, a skip, a file the configuration does not compile), so count a run
+  only when its log shows `--- PASS: TestName` and no `--- SKIP` for the test
+  or a `TestName/...` subtest: Go prints `--- PASS` for a test whose every
+  subtest skipped. "Check That the Test Ran" in
+  [engdocs/TESTING.md](engdocs/TESTING.md) names the tests `--config=ci` does
+  not run (Dolt-backed, `-short`-gated, integration-tagged, `TestEmbedded*`
+  and embedded-Dolt, files `BUILD.bazel` does not list) and the way into
+  each. An unchanged target returns its cached result, which is the same
+  evidence. Finish with `make test`.
+- Agents do not run `go test` (`./scripts/test.sh`, `make test-go`): CI does
+  not enforce it, it skips nogo, gofmt and the guards, and agent hosts may
+  refuse it. It stays a convenience for humans working offline. The exception
+  is regenerating golden files (`make corpus-regen`, `make githooks-regen`,
+  `BD_UPDATE_GOLDEN=1`), which Bazel cannot do: see "Regenerating Golden
+  Files" in [engdocs/TESTING.md](engdocs/TESTING.md).
 - **Do NOT** use `go build -o bd ./cmd/bd`, `go install ./cmd/bd`, or raw
   `go run ./cmd/bd ...`: they bypass the canonical build path, leave stale
   binaries, and raw `go run` misses the `gms_pure_go` tag. Use `make install`,
   `./bd`, or `go run -tags gms_pure_go ./cmd/bd ...`.
-- All new features need tests. Choose them with
-  [engdocs/TESTING.md](engdocs/TESTING.md); it is the canonical source for
-  commands, test design, and PR-readiness gates.
+- All new features need tests.
 - **Never pollute a production database with test issues.** Use `t.TempDir()`
   in Go tests and a disposable working directory for manual `bd` experiments.
 - `make ci-pr-lint` must pass with zero issues; see
   [engdocs/LINTING.md](engdocs/LINTING.md).
-- **Optional shared Bazel cache (opt-in).** `--config=fork-cache` reads the
-  project's anonymous, read-only cache, so results CI already computed are
-  hits and nothing is uploaded. It is off by default; when setting up a dev
-  environment, ask your human before adding `build --config=fork-cache` to
-  `.bazelrc.local`.
-- Without Bazel, let CI sync BUILD files: on same-repo PRs the bazel-autofix
-  workflow pushes the fix to your branch (pull before pushing again); fork PRs
-  get a comment with an apply recipe.
+- If BUILD files are out of sync and you cannot run `make bazel-sync`, CI
+  syncs them: on same-repo PRs the bazel-autofix workflow pushes the fix to
+  your branch (pull before pushing again); fork PRs get a comment with an
+  apply recipe.
 - If you changed behavior, update the user docs (`docs/`, via the
   `beads-docs` skill) or README in the same PR.
 
@@ -148,9 +201,9 @@ make bazel-sync    # after adding/removing/renaming Go files or changing imports
 
 Do not push to `main`. Before handing off:
 
-1. Run the quality gates your change needs (`make ci-pr-lint`, the tests
-   [engdocs/TESTING.md](engdocs/TESTING.md) selects). If gates are broken on
-   `main`, report it as a P0 issue.
+1. Run the quality gates your change needs (`make test`, `make ci-pr-lint`,
+   and the other Bazel lanes [engdocs/TESTING.md](engdocs/TESTING.md)
+   selects). If gates are broken on `main`, report it as a P0 issue.
 2. Record follow-up work as GitHub issues (or ledger beads, for maintainers).
 3. Commit, push, or open a PR only when the person you are working for asked
    you to. Report changed files, validation run, and anything left open.

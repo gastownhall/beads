@@ -231,6 +231,9 @@ func (o *issueOperations) Update(ctx context.Context, request publicops.UpdateRe
 		// version and status before authorizing, so when one is stale the fence
 		// stands down and ApplyUpdate reports the mismatch instead.
 		if updatePreconditionsHold(attempt, before) {
+			if err := storageissueops.AuthorizeTemplateUpdate(before, attempt); err != nil {
+				return publicops.UpdateResult{}, "", err
+			}
 			if err := authorizeAssigneeTransfer(ctx, uw, before, attempt); err != nil {
 				return publicops.UpdateResult{}, "", err
 			}
@@ -310,6 +313,9 @@ func updateSpec(request publicops.UpdateRequest) (domain.UpdateSpec, error) {
 	setField(fields, "acceptance_criteria", patch.AcceptanceCriteria)
 	setField(fields, "spec_id", patch.SpecID)
 	setField(fields, "await_id", patch.AwaitID)
+	if patch.Waiters.Set {
+		fields["waiters"] = storageissueops.PatchWaiters(patch.Waiters)
+	}
 	setField(fields, "status", patch.Status)
 	setField(fields, "priority", patch.Priority)
 	if patch.IssueType.Set {
@@ -437,8 +443,15 @@ func (o *issueOperations) Close(ctx context.Context, request publicops.CloseRequ
 		if err != nil {
 			return publicops.CloseResult{}, "", err
 		}
-		return publicops.CloseResult{Issue: hydrated, Changed: !semanticIssueEqual(before, hydrated), OpenChildren: closed.OpenChildren},
-			"close issue", nil
+		result := publicops.CloseResult{Issue: hydrated, Changed: !semanticIssueEqual(before, hydrated), OpenChildren: closed.OpenChildren}
+		if attempt.AutoCloseMolecule {
+			auto, err := CloseCompletedMoleculeInUOW(ctx, uw, attempt.IssueID, attempt.Actor, attempt.Session)
+			if err != nil {
+				return publicops.CloseResult{}, "", err
+			}
+			result.AutoClosedMolecule, result.MoleculeAutoCloseRefusal = auto.Root, auto.Refusal
+		}
+		return result, "close issue", nil
 	})
 }
 

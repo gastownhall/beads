@@ -15,6 +15,7 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/issueops"
 )
 
 // ===== Close-specific test helpers =====
@@ -56,13 +57,91 @@ func bdDepAdd(t *testing.T, bd, dir string, args ...string) {
 	}
 }
 
+// closeJSONEntry is one entry of `bd close --json`, decoded as a consumer that
+// knows the molecule auto-close members does: the closed issue's own members
+// at the top level, with the members beside them.
+type closeJSONEntry struct {
+	types.Issue
+	AutoClosedMolecule       *types.Issue `json:"auto_closed_molecule"`
+	MoleculeAutoCloseRefusal *string      `json:"molecule_auto_close_refusal"`
+}
+
+// decodeCloseJSON decodes the array of closed issues `bd close --json` prints
+// on stdout, and requires one entry per id in ids, in order, each closed.
+func decodeCloseJSON(t *testing.T, stdout string, ids []string) []closeJSONEntry {
+	t.Helper()
+	start := strings.Index(stdout, "[")
+	if start < 0 {
+		t.Fatalf("no JSON array in bd close --json output:\n%s", stdout)
+	}
+	var entries []closeJSONEntry
+	if err := json.Unmarshal([]byte(stdout[start:]), &entries); err != nil {
+		t.Fatalf("parse bd close --json: %v\n%s", err, stdout[start:])
+	}
+	if len(entries) != len(ids) {
+		t.Fatalf("bd close --json has %d entries, want %d (%v):\n%s", len(entries), len(ids), ids, stdout[start:])
+	}
+	for i, entry := range entries {
+		if entry.ID != ids[i] || entry.Status != types.StatusClosed {
+			t.Fatalf("entry %d = %s (%s), want %s closed:\n%s", i, entry.ID, entry.Status, ids[i], stdout[start:])
+		}
+	}
+	return entries
+}
+
+// requireCloseJSONReportsAutoClosedMolecule asserts a `bd close --json` of
+// stepIDs, in order, whose close completed the molecule rootID: the first
+// entry carries the closed root as auto_closed_molecule, and no entry carries
+// the root again or a refusal.
+func requireCloseJSONReportsAutoClosedMolecule(t *testing.T, stdout string, stepIDs []string, rootID string) {
+	t.Helper()
+	entries := decodeCloseJSON(t, stdout, stepIDs)
+	root := entries[0].AutoClosedMolecule
+	if root == nil {
+		t.Fatalf("the close that completed molecule %s does not report it as auto_closed_molecule:\n%s", rootID, stdout)
+	}
+	if root.ID != rootID || root.Status != types.StatusClosed || root.CloseReason != "all steps complete" {
+		t.Errorf("auto_closed_molecule = %s (%s, %q), want %s closed with %q", root.ID, root.Status, root.CloseReason, rootID, "all steps complete")
+	}
+	for i, entry := range entries {
+		if i > 0 && entry.AutoClosedMolecule != nil {
+			t.Errorf("entry %d (%s) reports molecule %s again: a batch reports each root once", i, entry.ID, entry.AutoClosedMolecule.ID)
+		}
+		if entry.MoleculeAutoCloseRefusal != nil {
+			t.Errorf("entry %d (%s) reports a refusal for a root that closed: %q", i, entry.ID, *entry.MoleculeAutoCloseRefusal)
+		}
+	}
+}
+
+// requireCloseJSONReportsMoleculeRefusal asserts a `bd close --json` of
+// stepID whose close completed the molecule rootID but could not close it:
+// the entry carries no auto-closed root and reports the refusal as want, the
+// refusing guard's own sentence, on every route.
+func requireCloseJSONReportsMoleculeRefusal(t *testing.T, stdout, stepID, rootID string, want error) {
+	t.Helper()
+	entry := decodeCloseJSON(t, stdout, []string{stepID})[0]
+	if entry.AutoClosedMolecule != nil {
+		t.Errorf("a refused root is reported as auto-closed: %s", entry.AutoClosedMolecule.ID)
+	}
+	if entry.MoleculeAutoCloseRefusal == nil {
+		t.Fatalf("the close that completed molecule %s does not report why its root stayed open:\n%s", rootID, stdout)
+	}
+	if got := *entry.MoleculeAutoCloseRefusal; got != want.Error() {
+		t.Errorf("molecule_auto_close_refusal for %s:\n got %q\nwant %q", rootID, got, want.Error())
+	}
+}
+
 // ===== Close tests =====
 
-// TestEmbeddedCloseBasic was split from TestEmbeddedClose (originally ~404s,
-// measured under --config=embedded) into 3 top-level tests over disjoint
-// subtest groups, for CI shard balance (see scripts/ci/embedded_cmd_test_durations.json and
-// engdocs/TESTING.md). Every original subtest is preserved exactly once.
-func TestEmbeddedCloseBasic(t *testing.T) {
+// The TestEmbeddedCloseBasic*, TestEmbeddedCloseGuardsAndEpics and
+// TestEmbeddedCloseAlreadyClosed* tests were split from TestEmbeddedClose
+// (originally ~404s, measured under --config=embedded) into top-level tests
+// over disjoint subtest groups, for CI shard balance (see
+// scripts/ci/embedded_cmd_test_durations.json and engdocs/TESTING.md). Every
+// original subtest is preserved exactly once, in its original order within
+// its group. Subtests that share a store stay in one test; the others each
+// init their own isolated store.
+func TestEmbeddedCloseBasicSharedStore(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -137,6 +216,15 @@ func TestEmbeddedCloseBasic(t *testing.T) {
 			t.Errorf("blocked issue status = %s, want open", got.Status)
 		}
 	})
+}
+
+func TestEmbeddedCloseBasicIsolatedStores(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
 
 	// The direct-route twin of TestProxiedClose/
 	// close_partial_failure_json_names_the_failed_ids. Two things were asserted
@@ -391,12 +479,8 @@ func TestEmbeddedCloseGuardsAndEpics(t *testing.T) {
 
 }
 
-// TestEmbeddedCloseAlreadyClosed was split from TestEmbeddedClose (originally
-// ~404s, measured under --config=embedded) into 3 top-level tests over
-// disjoint subtest groups, for CI shard balance (see
-// scripts/ci/embedded_cmd_test_durations.json and engdocs/TESTING.md). Every original
-// subtest is preserved exactly once.
-func TestEmbeddedCloseAlreadyClosed(t *testing.T) {
+// See TestEmbeddedCloseBasicSharedStore for the TestEmbeddedClose split.
+func TestEmbeddedCloseAlreadyClosedMultipleIDs(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -457,6 +541,15 @@ func TestEmbeddedCloseAlreadyClosed(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestEmbeddedCloseAlreadyClosedContinue(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
 
 	t.Run("close_already_closed_continue_advances", func(t *testing.T) {
 		// Isolated store so molecule progress and the Dolt commit count are
@@ -527,6 +620,15 @@ func TestEmbeddedCloseAlreadyClosed(t *testing.T) {
 				beforeCommits, afterCommits)
 		}
 	})
+}
+
+func TestEmbeddedCloseAlreadyClosedClaimNextAndMolecule(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
 
 	t.Run("close_already_closed_claim_next", func(t *testing.T) {
 		// Isolated store so the ready set is deterministic — the shared store carries
@@ -619,6 +721,44 @@ func TestEmbeddedCloseAlreadyClosed(t *testing.T) {
 		}
 	})
 
+}
+
+// TestEmbeddedCloseJSONReportsMoleculeAutoClose pins what `bd close --json`
+// says about the molecule a close completed, on the direct route: the root it
+// closed, once per batch, or why the root stayed open.
+// TestProxiedServerClose2B's json_reports_* subtests are its proxied twins.
+func TestEmbeddedCloseJSONReportsMoleculeAutoClose(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+
+	t.Run("auto_closed_root_reported_once_per_batch", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "jm")
+		root := bdCreate(t, bd, dir, "JSON molecule root", "--type", "epic", "--labels", "template")
+		step1 := bdCreate(t, bd, dir, "JSON molecule step one", "--type", "task", "--parent", root.ID)
+		step2 := bdCreate(t, bd, dir, "JSON molecule step two", "--type", "task", "--parent", root.ID)
+		step3 := bdCreate(t, bd, dir, "JSON molecule step three", "--type", "task", "--parent", root.ID)
+		bdClose(t, bd, dir, step1.ID)
+
+		out := bdClose(t, bd, dir, "--json", step2.ID, step3.ID)
+		requireCloseJSONReportsAutoClosedMolecule(t, out, []string{step2.ID, step3.ID}, root.ID)
+	})
+
+	t.Run("refused_root_reported", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "jr")
+		root := bdCreate(t, bd, dir, "JSON held molecule root", "--type", "epic", "--labels", "template", "--assignee", "someone-else")
+		step := bdCreate(t, bd, dir, "JSON held molecule step", "--type", "task", "--parent", root.ID)
+
+		out := bdClose(t, bd, dir, "--actor", "json-closer", "--json", step.ID)
+		requireCloseJSONReportsMoleculeRefusal(t, out, step.ID, root.ID,
+			&issueops.CloseNotAssigneeError{IssueID: root.ID, Assignee: "someone-else", Actor: "json-closer"})
+		if got := bdShow(t, bd, dir, root.ID); got.Status != types.StatusOpen {
+			t.Errorf("a root assigned to another actor must stay open, got %s", got.Status)
+		}
+	})
 }
 
 // TestEmbeddedCloseConcurrent exercises create, close, and list operations

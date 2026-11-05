@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -17,6 +18,7 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/git"
+	"github.com/steveyegge/beads/internal/httpapi"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/backends"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
@@ -88,6 +90,15 @@ func TestServeAnswersFromARegisteredBackendStore(t *testing.T) {
 		body := getJSON(t, base+"/v0/beads/context")
 		if body["schema_version"] == nil {
 			t.Errorf("GET /v0/beads/context returned no schema_version: %v", body)
+		}
+	})
+
+	// The store arm serves roles from the storage chain, which interposes the
+	// external-dependency policy, so a client must be told not to run it again.
+	t.Run("the handshake advertises the external-dependency policy", func(t *testing.T) {
+		caps, _ := getJSON(t, base+"/v0/beads/context")["capabilities"].([]any)
+		if !slices.Contains(caps, any(httpapi.CapExternalDependencies)) {
+			t.Errorf("capabilities = %v, want %q: bd serve applies the policy on this arm", caps, httpapi.CapExternalDependencies)
 		}
 	})
 

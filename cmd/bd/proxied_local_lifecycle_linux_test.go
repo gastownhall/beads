@@ -22,7 +22,7 @@ package main
 //	    -run '^TestManagedLocalProxied' -v
 //
 // CI additionally runs it inside a network namespace with only loopback up
-// (see .github/workflows/proxied-local-smoke.yml), proving the whole
+// (//cmd/bd:bd_managed_local_test, tools/bazel/go_test_offline.sh), proving the whole
 // lifecycle needs no outbound network once bd and dolt are installed.
 // When BEADS_TEST_PROXIED_LOCAL=1 is set, missing prerequisites or a Dolt
 // child that fails to launch FAIL the test rather than skipping.

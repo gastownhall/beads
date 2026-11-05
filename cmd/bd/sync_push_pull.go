@@ -272,7 +272,7 @@ func runADOPush(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("initializing Azure DevOps tracker: %w", err)
 	}
 
-	engine := tracker.NewEngine(at, store, actor)
+	engine := tracker.NewEngine(at, store, currentActor())
 	engine.OnMessage = func(msg string) { fmt.Println("  " + msg) }
 	engine.OnWarning = func(msg string) { fmt.Fprintf(os.Stderr, "Warning: %s\n", msg) }
 
@@ -319,7 +319,7 @@ func runADOPull(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("initializing Azure DevOps tracker: %w", err)
 	}
 
-	engine := tracker.NewEngine(at, store, actor)
+	engine := tracker.NewEngine(at, store, currentActor())
 	engine.PullHooks = buildADOPullHooks(ctx, at, false, false, new(int), engine.OnWarning)
 	engine.OnMessage = func(msg string) { fmt.Println("  " + msg) }
 	engine.OnWarning = func(msg string) { fmt.Fprintf(os.Stderr, "Warning: %s\n", msg) }
@@ -369,7 +369,7 @@ func runJiraPush(cmd *cobra.Command, args []string) error {
 		return HandleError("initializing Jira tracker: %v", err)
 	}
 
-	engine := tracker.NewEngine(jt, trackerStore, actor)
+	engine := tracker.NewEngine(jt, trackerStore, currentActor())
 	engine.OnMessage = func(msg string) { fmt.Println("  " + msg) }
 	engine.OnWarning = func(msg string) { fmt.Fprintf(os.Stderr, "Warning: %s\n", msg) }
 	engine.PushHooks = buildJiraPushHooksForStore(ctx, trackerStore)
@@ -417,7 +417,7 @@ func runJiraPull(cmd *cobra.Command, args []string) error {
 		return HandleError("initializing Jira tracker: %v", err)
 	}
 
-	engine := tracker.NewEngine(jt, trackerStore, actor)
+	engine := tracker.NewEngine(jt, trackerStore, currentActor())
 	engine.OnMessage = func(msg string) { fmt.Println("  " + msg) }
 	engine.OnWarning = func(msg string) { fmt.Fprintf(os.Stderr, "Warning: %s\n", msg) }
 
@@ -487,7 +487,7 @@ func runLinearPush(cmd *cobra.Command, args []string) error {
 		return HandleError("%v", err)
 	}
 
-	engine := tracker.NewEngine(lt, trackerStore, actor)
+	engine := tracker.NewEngine(lt, trackerStore, currentActor())
 	engine.OnMessage = func(msg string) { fmt.Println("  " + msg) }
 	engine.OnWarning = func(msg string) { fmt.Fprintf(os.Stderr, "Warning: %s\n", msg) }
 	engine.PushHooks = buildLinearPushHooksForStore(ctx, trackerStore, lt, len(args) > 0)
@@ -552,12 +552,12 @@ func runLinearPull(cmd *cobra.Command, args []string) error {
 		return HandleError("initializing Linear tracker: %v", err)
 	}
 
-	engine := tracker.NewEngine(lt, trackerStore, actor)
+	engine := tracker.NewEngine(lt, trackerStore, currentActor())
 	engine.OnMessage = func(msg string) { fmt.Println("  " + msg) }
 	engine.OnWarning = func(msg string) { fmt.Fprintf(os.Stderr, "Warning: %s\n", msg) }
 	engine.PullHooks = buildLinearPullHooksForStore(ctx, trackerStore, linearPullHookOptions{
 		DryRun: dryRun,
-		Actor:  actor,
+		Actor:  currentActor(),
 	})
 
 	result, err := engine.Sync(ctx, tracker.SyncOptions{
@@ -606,7 +606,7 @@ func runGitHubPush(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("initializing GitHub tracker: %w", err)
 	}
 
-	engine := tracker.NewEngine(gt, store, actor)
+	engine := tracker.NewEngine(gt, store, currentActor())
 	engine.OnMessage = func(msg string) { fmt.Println("  " + msg) }
 	engine.OnWarning = func(msg string) { fmt.Fprintf(os.Stderr, "Warning: %s\n", msg) }
 	engine.PushHooks = buildGitHubPushHooks(gt)
@@ -668,7 +668,7 @@ func runGitHubPull(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("initializing GitHub tracker: %w", err)
 	}
 
-	engine := tracker.NewEngine(gt, store, actor)
+	engine := tracker.NewEngine(gt, store, currentActor())
 	engine.PullHooks = buildGitHubPullHooks(ctx)
 	engine.OnMessage = func(msg string) { fmt.Println("  " + msg) }
 	engine.OnWarning = func(msg string) { fmt.Fprintf(os.Stderr, "Warning: %s\n", msg) }
@@ -719,7 +719,7 @@ func runGitLabPush(cmd *cobra.Command, args []string) error {
 	}
 
 	out := cmd.OutOrStdout()
-	engine := tracker.NewEngine(gt, store, actor)
+	engine := tracker.NewEngine(gt, store, currentActor())
 	engine.OnMessage = func(msg string) {
 		if !jsonOutput {
 			fmt.Fprintln(out, "  "+msg)
@@ -821,7 +821,7 @@ func runGitLabPull(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("initializing GitLab tracker: %w", err)
 	}
 
-	engine := tracker.NewEngine(gt, store, actor)
+	engine := tracker.NewEngine(gt, store, currentActor())
 	engine.PullHooks = buildGitLabPullHooks(ctx)
 	engine.OnMessage = func(msg string) { fmt.Println("  " + msg) }
 	engine.OnWarning = func(msg string) { fmt.Fprintf(os.Stderr, "Warning: %s\n", msg) }
@@ -875,7 +875,7 @@ func runNotionPush(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("initializing Notion tracker: %w", err)
 	}
 
-	engine := tracker.NewEngine(nt, store, actor)
+	engine := tracker.NewEngine(nt, store, currentActor())
 	unsupportedStats := newNotionUnsupportedPushStats()
 	engine.PushHooks = buildNotionPushHooks(ctx, nt, unsupportedStats)
 	engine.OnMessage = func(msg string) { fmt.Println("  " + msg) }
@@ -929,7 +929,7 @@ func runNotionPull(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("initializing Notion tracker: %w", err)
 	}
 
-	engine := tracker.NewEngine(nt, store, actor)
+	engine := tracker.NewEngine(nt, store, currentActor())
 	engine.PullHooks = buildNotionPullHooks(ctx)
 	engine.OnMessage = func(msg string) { fmt.Println("  " + msg) }
 	engine.OnWarning = func(msg string) { fmt.Fprintf(os.Stderr, "Warning: %s\n", msg) }

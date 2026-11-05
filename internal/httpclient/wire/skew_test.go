@@ -31,7 +31,7 @@ import (
 //
 // The split is the design's (test-lane map, the skew rows): the deterministic,
 // in-process half runs at PR cadence here, and the released-binary composition
-// half runs in cross-version-smoke.yml. Neither substitutes for the other —
+// half runs in //tests/upgrade_smoke. Neither substitutes for the other —
 // this half owns the branches, that half owns the reality check.
 //
 // Three skew directions are covered, and they fail in different ways:
@@ -110,16 +110,20 @@ func TestAgainstAFirstSliceServerEveryPostBaselineOperationRefusesWithCaseTwoDat
 		t.Fatalf("post-baseline ops on a first-slice token = %v, want exactly [claimIssue]", compat)
 	}
 	// The dimension is pinned so the matrix cannot shrink silently: the first
-	// slice served six operations and the tip surface has forty-two, so
-	// thirty-six of them are things a first-slice server has never heard of. The
+	// slice served six operations and the tip surface has forty-six, so
+	// forty of them are things a first-slice server has never heard of. The
 	// wire wave moved this from twenty-seven to thirty — claimNext, release and
 	// count — wave 2 to thirty-two, adding the dependency-edge count and the
 	// related read, the mini-sync to thirty-five: the comment write and the two
-	// config writes, and the batch read (upstream #7248) to thirty-six. Each is
+	// config writes, the batch read (upstream #7248) to thirty-six, and the
+	// stale-lease sweep to thirty-seven. Each is
 	// an operation a first-slice server never served and this client does not
-	// yet dial, which is exactly the shape the refusal matrix is about.
-	if len(refused) != 36 {
-		t.Fatalf("the post-baseline set has %d operations a first-slice server never served, want 36", len(refused))
+	// yet dial, which is exactly the shape the refusal matrix is about. The
+	// molecule advance (S16) makes thirty-eight, and the lease refresh
+	// (issues.heartbeat) thirty-nine, and the blocked listing (blocked.list)
+	// forty.
+	if len(refused) != 40 {
+		t.Fatalf("the post-baseline set has %d operations a first-slice server never served, want 40", len(refused))
 	}
 
 	// The compat op forces the handshake yet preflights clean: issues.claim is on

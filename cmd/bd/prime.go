@@ -17,6 +17,7 @@ import (
 	"github.com/steveyegge/beads"
 	internalbeads "github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/memoryops"
 )
@@ -105,6 +106,11 @@ Config options:
   Set via: bd config set agent.profile team-maintainer
   Or per-session: BD_AGENT_PROFILE=team-maintainer (env var takes precedence).
   See docs/getting-started/ide-setup.md#policy-profiles for what each profile means.
+- prime.disabled: When true, bd prime prints nothing, as it does outside a
+  workspace (an empty envelope under --hook-json), whatever its other flags.
+  For sessions whose host briefs the agent itself but that inherit a
+  project's bd prime hook, such as an orchestrator's agent sessions.
+  Set per-session: BD_PRIME_DISABLED=true. Or: bd config set prime.disabled true
 
 	Workflow customization:
 	- Place a PRIME.md file to override the default workflow text. Checked in this
@@ -143,6 +149,15 @@ Memory injection caps:
 				c.CloseEventAndAdd(evt)
 			}
 		}()
+
+		// Before any workspace or store access: a disabled prime costs the
+		// session nothing, the same as running outside a workspace.
+		if primeDisabled() {
+			if primeHookJSONMode {
+				_ = outputHookJSON(os.Stdout, "")
+			}
+			return nil
+		}
 
 		primeMaxMemoriesSet = cmd.Flags().Changed("max-memories")
 		primeMaxMemoryCharsSet = cmd.Flags().Changed("max-memory-chars")
@@ -303,10 +318,16 @@ func primeWorkspaceDir() string {
 // failure falls back to a cwd probe instead of propagating — so this no
 // longer returns an error. If a future caller needs one, reintroduce it then.
 func primeGitCmd(ctx context.Context, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = primeGitDir()
+	return cmd
+}
+
+// primeGitDir is the directory primeGitCmd runs git in ("" for the process
+// cwd): the -C target, else the cwd repository root from the RepoContext.
+func primeGitDir() string {
 	if ws := primeWorkspaceDir(); ws != "" {
-		cmd := exec.CommandContext(ctx, "git", args...)
-		cmd.Dir = ws
-		return cmd
+		return ws
 	}
 	rc, err := internalbeads.GetRepoContext()
 	if err != nil {
@@ -317,9 +338,9 @@ func primeGitCmd(ctx context.Context, args ...string) *exec.Cmd {
 		// workspace, so probe it directly instead of giving up. The SEC-003
 		// boundary on BEADS_DIR stays enforced by the callers that consume
 		// BEADS_DIR itself; these probes only ask git about its own workspace.
-		return exec.CommandContext(ctx, "git", args...)
+		return ""
 	}
-	return rc.GitCmdCWD(ctx, args...)
+	return rc.CWDRepoRoot // GitCmdCWD's directory; "" leaves the process cwd
 }
 
 // outputHookJSON wraps content in the SessionStart hook JSON envelope shared
@@ -422,8 +443,18 @@ var primeAgentProfile = func() config.AgentProfile {
 // `git remote` in the workspace succeeds. primeGitCmd supplies that fallback,
 // which keeps the -C behavior above intact. The SEC-003 boundary on BEADS_DIR
 // remains enforced elsewhere.
+//
+// The probe runs on every command in an embedded workspace whose
+// backup.enabled is unset (isBackupAutoEnabled), so it is answered from the
+// config files when git.HasRemoteInProcess can prove the answer, and by
+// `git remote` otherwise.
 var primeHasGitRemote = func() bool {
-	cmd := primeGitCmd(context.Background(), "remote")
+	dir := primeGitDir()
+	if has, ok := git.HasRemoteInProcess(dir); ok {
+		return has
+	}
+	cmd := exec.CommandContext(context.Background(), "git", "remote")
+	cmd.Dir = dir
 	out, err := cmd.Output()
 	if err != nil {
 		return false
@@ -601,6 +632,17 @@ func renderPrimeMemoryPlane(memories map[string]string, compact bool) string {
 // primeConfigInt reads an integer config key (stubbable for tests).
 var primeConfigInt = func(key string) int {
 	return config.GetInt(key)
+}
+
+// primeConfigBool reads a boolean config key (stubbable for tests).
+var primeConfigBool = func(key string) bool {
+	return config.GetBool(key)
+}
+
+// primeDisabled reports whether prime.disabled (usually BD_PRIME_DISABLED in
+// the session's environment) turns bd prime off.
+func primeDisabled() bool {
+	return primeConfigBool("prime.disabled")
 }
 
 // primeMemoryCaps resolves the memory-injection caps. An explicitly passed

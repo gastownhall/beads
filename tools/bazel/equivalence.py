@@ -32,7 +32,7 @@ Two checks always run, a third when `go test -json` output is supplied:
 
 Job mode (--job, with --go-test-json): the go test JSON is the whole expected
 set instead of `go list ./...`. Use it to prove that a Bazel selection (one or
-more --bep runs, e.g. --config=ci plus --config=docker) replaces one specific
+more --bep runs, e.g. --config=ci plus --config=doltserver) replaces one specific
 CI job: every top-level test the job's command ran must have run under Bazel,
 Bazel must run no other test in those packages (TestEmbedded* included: job
 mode has no implicit ^TestEmbedded skip, so it can check the embedded tier), and no test the job passed may
@@ -42,6 +42,10 @@ a different way of running it and the job needs one run that does what it
 does; the default mode keeps the worst. A failure in any target still fails a
 job comparison (listed per target), and so does a missing test.xml of any
 target in the job's packages, variant or not.
+
+Packages of nested Go modules (a go.mod below the root: tools/nogo, the nogo
+analyzers' own module) are outside `go test ./...`, so their Bazel tests are
+neither expected nor reported as extra.
 
 Divergences listed in the allowlist (tools/bazel/equivalence_allowlist.txt)
 are expected; anything else fails. The allowlist format is one entry per line:
@@ -120,6 +124,13 @@ def go_expected(root, go_json_path=None):
                         names.add(t)
         expected[rel] = names
     return expected, dirs
+
+
+def in_nested_module(root, pkg):
+    """Whether pkg (a directory relative to root) belongs to a Go module
+    other than root's: a go.mod at or above it, below root."""
+    parts = pkg.split("/") if pkg else []
+    return any(os.path.exists(os.path.join(root, *parts[:i], "go.mod")) for i in range(1, len(parts) + 1))
 
 
 def go_test_statuses(path, dirs):
@@ -333,6 +344,7 @@ def main(argv=None):
             bep_tested, testlogs, bep_configured, args.job, observed,
             failures if args.job else None, no_xml if args.job else None)
         problems += bep_problems
+    observed = {pkg: seen for pkg, seen in observed.items() if not in_nested_module(root, pkg)}
     target_pkgs = None if (args.no_query or args.job) else query_go_test_pkgs(root, args.bazel)
     go_status = go_test_statuses(args.go_test_json, dirs) if args.go_test_json else None
     if args.job:

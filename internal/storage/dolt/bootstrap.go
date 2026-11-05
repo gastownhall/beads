@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/githooksenv"
 	"github.com/steveyegge/beads/internal/gittraceenv"
 	"github.com/steveyegge/beads/internal/lockfile"
@@ -77,8 +78,16 @@ func BootstrapFromRemoteWithDBRef(ctx context.Context, doltDir, remoteURL, datab
 	}
 
 	// Verify dolt CLI is available
-	if _, err := exec.LookPath("dolt"); err != nil {
+	doltBin, err := exec.LookPath("dolt")
+	if err != nil {
 		return false, fmt.Errorf("dolt CLI not found (required for remote bootstrap): %w", err)
+	}
+	// Refuse a dolt CLI older than bd's minimum before it writes the clone.
+	// bd clones with the CLI for a workspace whose server it starts on that
+	// same binary, which Start refuses (doltserver.RequireDoltBinaryVersion),
+	// so the clone would be left where no command opens it.
+	if err := doltserver.RequireDoltBinaryVersion(doltBin); err != nil {
+		return false, err
 	}
 
 	// Create the parent dolt directory

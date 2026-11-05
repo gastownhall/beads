@@ -27,12 +27,16 @@ import (
 	"github.com/steveyegge/beads/internal/ceiling"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/creds"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/hooks"
+	"github.com/steveyegge/beads/internal/httpclient"
+	"github.com/steveyegge/beads/internal/initprocs"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/migration"
 	"github.com/steveyegge/beads/internal/molecules"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/remotecache"
 	"github.com/steveyegge/beads/internal/routing"
 	"github.com/steveyegge/beads/internal/storage"
@@ -81,6 +85,33 @@ type envSnapshotValue struct {
 }
 
 var changeDirEnvSnapshot map[string]envSnapshotValue
+
+// beadsDirFromCaller is BEADS_DIR as the process INHERITED it, captured at
+// package initialization — which the language guarantees runs before main, and
+// therefore before any bd code exports a BEADS_DIR of its own.
+//
+// Reading os.Getenv("BEADS_DIR") later is a different question, and the wrong
+// one for anything that needs to know what the CALLER asked for. By the time a
+// command's RunE runs, bd has usually exported one itself:
+//
+//   - the root PersistentPreRunE resolves a beads dir for every no-DB command
+//     and exports it (selectedNoDBBeadsDir -> prepareSelectedNoDBContext ->
+//     prepareSelectedCommandContext), and that resolution bottoms out in
+//     beads.FindBeadsDir(), which accepts any ancestor .beads/ carrying so much
+//     as a config.yaml — including the legacy user-level ~/.beads/config.yaml;
+//   - `bd -C <dir>` exports one too (applyChangeDirSelection), which names a
+//     beads dir without moving the working directory.
+//
+// Neither is the caller saying "use this". Consult this snapshot, not the live
+// environment, when the answer must mean caller intent (GH#4635).
+//
+// A BEADS_DIR imported from a .beads/.env file is deliberately left out too,
+// although beadsDirProvidedAtStartup counts it as user selection for role
+// detection: the loaders read the .env of the beads dir beads.FindBeadsDir()
+// discovers from the working directory, which in a home directory is the legacy
+// ~/.beads/.env. Counting it would let the same discovered ~/.beads opt out of
+// the home-directory guard; the caller opts out by exporting BEADS_DIR.
+var beadsDirFromCaller = os.Getenv("BEADS_DIR")
 
 var (
 	noColorFlag       bool
@@ -250,6 +281,36 @@ func runsPostCommandMaintenance(cmdName string, strictReadonly bool) bool {
 	return effectiveRootStorePolicy(cmdName, strictReadonly).runMaintenance
 }
 
+// readMemoEnvVar turns the per-command http read memo off when set to "0": an
+// operator who suspects a stale read can rule the memo out without a rebuild.
+const readMemoEnvVar = "BD_HTTP_READ_MEMO"
+
+// commandMemoizesReads reports whether this invocation's http transport may
+// answer an identical row or settings read from a response it already received
+// (httpclient.WithReadMemo, bts-xpw.3.14.6). A one-shot command may: it reads,
+// writes and exits within seconds, and each write it makes drops the memo.
+//
+// A process that outlives its reads may not, and bd serve is excluded for the
+// reason runsPostCommandMaintenance excludes it — a server is not a command.
+// Over an http workspace it answers other clients, who must see what other
+// writers changed. A --watch or --follow poll exists to see exactly those
+// changes, and a memo would answer its polls from a snapshot instead.
+// BD_HTTP_READ_MEMO=0 turns the memo off for every command.
+func commandMemoizesReads(cmd *cobra.Command) bool {
+	if os.Getenv(readMemoEnvVar) == "0" {
+		return false
+	}
+	if cmd.Name() == serveCmdName {
+		return false
+	}
+	for _, name := range []string{"watch", "follow"} {
+		if f := cmd.Flags().Lookup(name); f != nil && f.Value.String() == "true" {
+			return false
+		}
+	}
+	return true
+}
+
 // resolveDoltServerConnection fills in how to reach the workspace's Dolt SQL
 // server — host, port, socket, user, password, TLS — on doltCfg.
 //
@@ -262,13 +323,24 @@ func runsPostCommandMaintenance(cmdName string, strictReadonly bool) bool {
 // It mirrors dolt.applyResolvedConfig, which this hand-built doltCfg path
 // bypasses.
 func resolveDoltServerConnection(ctx context.Context, beadsDir string, fileCfg *configfile.Config, doltCfg *dolt.Config) error {
-	doltCfg.ServerHost = fileCfg.GetDoltServerHost()
+	// An IPv6 host may be configured bracketed ("[::1]") as well as bare. The
+	// store and `bd serve` (its socket-fallback probe and its proxy's
+	// ExternalDoltServer) both dial with doltutil.ServerAddr, which accepts
+	// either, but they also key, name and compare the server by this host, so
+	// hand them the bare form.
+	doltCfg.ServerHost = configfile.UnbracketHost(fileCfg.GetDoltServerHost())
 	// Port 0 is fine here — auto-start will resolve it. Use the shared helper
 	// rather than DefaultConfig(...).Port: this hand-built doltCfg is handed
 	// straight to dolt.New, and a port arriving there without its source is
 	// read as a caller assertion (see ApplyResolvedServerPort).
 	dolt.ApplyResolvedServerPort(beadsDir, doltCfg)
 	doltCfg.ServerSocket = fileCfg.GetDoltServerSocket()
+	doltCfg.BeadsDir = beadsDir
+	if os.Getenv("BEADS_DOLT_PASSWORD") != "" {
+		if err := dolt.CheckServerEndpointTrust(beadsDir, fileCfg, doltCfg.ServerHost, doltCfg.ServerPort, doltCfg.ServerSocket); err != nil {
+			return err
+		}
+	}
 	// A configured credential command targets an authenticating gateway server:
 	// run it for a short-lived token used as the connection username. Fail closed
 	// — never fall back to the static/root user when a command was configured but
@@ -368,7 +440,8 @@ func isForcedMigrate(cmd *cobra.Command) bool {
 // schema.SharedConsentCommandForced), so retargeting the bare form would hand
 // the operator a global-scoped command that still cannot succeed. This mirrors
 // the retarget in handleRemoteMigrateGateJSON. A nil error keeps the
-// pre-existing bare-verb wording.
+// pre-existing bare-verb wording, which is also the verb the
+// migration-consent refusal prescribes, so that refusal passes nil.
 func printGlobalDatabaseConsentHint(w io.Writer, e *schema.RemoteMigrateGateError) {
 	if !globalFlag {
 		return
@@ -415,13 +488,28 @@ func renderTypedOpenError(err error) bool {
 		}
 		return true
 	}
+	// The migration-consent gate blocks silent in-place migration of
+	// ANY existing database (1.2 release remediation) and tells the
+	// operator how to consent.
+	var consentErr *schema.MigrateConsentError
+	if errors.As(err, &consentErr) {
+		if jsonOutput {
+			handleMigrateConsentJSON(consentErr)
+		} else {
+			fmt.Fprint(os.Stderr, consentErr.UserMessage())
+			printGlobalDatabaseConsentHint(os.Stderr, nil)
+		}
+		return true
+	}
 	return false
 }
 
 // isSchemaMigrateVerb reports whether cmd is `bd migrate schema` — the one
 // invocation in which the operator asked for a schema migration by name. That
 // request is the consent the shared-store gate wants for a database with no
-// remote (#5920); see schema.SetSharedMigrateConsent.
+// remote (#5920), and the consent the migration-consent gate wants for any
+// existing database; see schema.SetSharedMigrateConsent and
+// schema.SetLocalMigrateConsent.
 //
 // Deliberately just this one command, not the `bd migrate` tree. Bare
 // `bd migrate` reconciles version/repo-id/clone-id metadata and never applies
@@ -434,6 +522,17 @@ func renderTypedOpenError(err error) bool {
 // `--force` still unlocks from either migrate command.
 func isSchemaMigrateVerb(cmd *cobra.Command) bool {
 	return cmd == migrateSchemaCmd
+}
+
+// isMigrateConsentCommand reports whether invoking cmd is consent to apply
+// pending schema migrations to an existing database (migrate_consent.go).
+// That is `bd migrate schema` alone, the verb that names the migration: bare
+// `bd migrate` does not consent, for the reasons isSchemaMigrateVerb gives,
+// and --force on either migrate command consents separately, through the gate
+// override. A preview withholds the consent, as it does the shared-store one:
+// a --dry-run/--inspect must not consent to the work it only inspects.
+func isMigrateConsentCommand(cmd *cobra.Command) bool {
+	return isSchemaMigrateVerb(cmd) && !isPreviewCommand(cmd)
 }
 
 // forcedMigratePreviewFlag returns the name of a preview flag (--dry-run,
@@ -461,16 +560,26 @@ func applyNoColorFlag() {
 }
 
 // loadBeadsEnvFile loads .beads/.env into process environment for per-project
-// Dolt credentials (GH#2520). Uses gotenv.Load which is non-overriding —
+// Dolt credentials (GH#2520). Imports are non-overriding —
 // existing shell env vars always take precedence.
 // Safe to call with an empty beadsDir (no-op).
 func loadBeadsEnvFile(beadsDir string) {
 	if beadsDir == "" {
 		return
 	}
+	if !config.IsDotenvKey("BEADS_DIR") {
+		config.RecordWorkspaceBeadsDir(beadsDir)
+	}
 	envFile := filepath.Join(beadsDir, ".env")
 	if _, err := os.Stat(envFile); err != nil {
 		return
+	}
+	if pairs, err := gotenv.Read(envFile); err == nil {
+		for key, val := range pairs {
+			if os.Getenv(key) == "" && val != "" {
+				config.MarkDotenvValue(key, val)
+			}
+		}
 	}
 	// A .env-provided BEADS_DIR is user-authored selection wherever it is
 	// imported from, not only via loadBeadsSelectionEnvFile: that loader
@@ -480,7 +589,31 @@ func loadBeadsEnvFile(beadsDir string) {
 	// thing, instead of target-role or CWD-role depending on the caller's
 	// unrelated BEADS_DB export.
 	beadsDirWasSet := os.Getenv("BEADS_DIR") != ""
-	_ = gotenv.Load(envFile)
+	env, err := gotenv.Read(envFile)
+	if err != nil {
+		return
+	}
+	keys := make([]string, 0, len(env))
+	for key := range env {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	for _, key := range keys {
+		value := env[key]
+		if ok, reason := creds.AllowedProjectEnvKey(key); !ok {
+			fmt.Fprintf(os.Stderr, "beads: ignoring %s from .beads/.env (%s)\n", key, reason)
+			continue
+		}
+		upper := strings.ToUpper(strings.TrimSpace(key))
+		if _, exists := os.LookupEnv(key); !exists {
+			if _, upperExists := os.LookupEnv(upper); !upperExists {
+				_ = os.Setenv(upper, value)
+				if upper == "GT_ROOT" {
+					config.MarkGTRootFromProjectEnv(value)
+				}
+			}
+		}
+	}
 	if !beadsDirWasSet && os.Getenv("BEADS_DIR") != "" {
 		beadsDirProvidedAtStartup = true
 	}
@@ -507,6 +640,7 @@ func loadBeadsSelectionEnvFile(beadsDir string) {
 	if beadsDir == "" {
 		return
 	}
+	config.RecordWorkspaceBeadsDir(beadsDir)
 	envFile := filepath.Join(beadsDir, ".env")
 	pairs, err := gotenv.Read(envFile)
 	if err != nil {
@@ -518,6 +652,7 @@ func loadBeadsSelectionEnvFile(beadsDir string) {
 		}
 		if value, ok := pairs[key]; ok && strings.TrimSpace(value) != "" {
 			_ = os.Setenv(key, value)
+			config.MarkDotenvValue(key, value)
 			if key == "BEADS_DIR" {
 				// A .beads/.env that routes commands via BEADS_DIR is
 				// user-authored selection, same as exporting the variable
@@ -771,10 +906,11 @@ func prepareSelectedCommandContext(beadsDir string, loadEnv bool) {
 	}
 	config.CheckBeadsDirPermissions(beadsDir)
 	if err := loadServerModeFromBeadsDir(beadsDir); err != nil {
-		// Warn, don't fatal: this context also serves no-DB commands —
-		// doctor, init, bootstrap, config — which are exactly the repair
-		// paths for a corrupt metadata.json. Data commands stay protected
-		// by the hard error at store init and in the store factories.
+		// Warn, don't fatal: the commands workspace admission exempts,
+		// such as bd version and help, still run. Admission
+		// (guardLegacyUpgradeWorkspace) then refuses every other command,
+		// doctor, init and bootstrap included, and the store factories
+		// refuse too, so the repair is fixing or restoring the file by hand.
 		fmt.Fprintf(os.Stderr, "warning: %v\n", err)
 	}
 }
@@ -813,6 +949,10 @@ func refreshBoundCommandConfig(cmd *cobra.Command) {
 		readonlyMode = config.GetBool("readonly")
 	}
 	if !root.PersistentFlags().Changed("actor") {
+		// Raw write, not setActor: every caller runs in PersistentPreRunE
+		// BEFORE deferActorGitFallback, which then decides from this value
+		// whether the git user.name fallback is pending. A call after it would
+		// need setActor (and the deferral re-run) to keep that decision true.
 		actor = resolveConfiguredActor()
 	}
 	if !root.PersistentFlags().Changed("dolt-auto-commit") {
@@ -837,9 +977,27 @@ func resolveCommandBeadsDir(dbPath string) string {
 		return beadsDir
 	}
 
+	// A dbPath that is a .beads directory, or lies directly inside one, names
+	// that directory, even before it exists: the directory form of --db and
+	// BEADS_DB (GH#2548), the workspace bd import sets up where none was
+	// found, or a create --repo target with no .beads yet. Climbing past it
+	// would bind whatever .beads lies above: one discovery never reached, or
+	// the user-global ~/.beads it passes over (GH#4402). For ~/.beads itself
+	// the climb would start at the home directory and end there, binding the
+	// home directory.
+	if filepath.Base(dbPath) == ".beads" {
+		return filepath.Clean(dbPath)
+	}
+	if parent := filepath.Dir(dbPath); filepath.Base(parent) == ".beads" {
+		return parent
+	}
+
 	bound := ceiling.For(filepath.Dir(dbPath))
 	for dir := filepath.Dir(dbPath); dir != "" && dir != filepath.Dir(dir) && !bound.Excludes(dir); dir = filepath.Dir(dir) {
 		candidate := filepath.Join(dir, ".beads")
+		if climbEndsAtAccountHome(dir, candidate, dbPath) {
+			break
+		}
 		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
 			return candidate
 		}
@@ -848,6 +1006,22 @@ func resolveCommandBeadsDir(dbPath string) string {
 	// No candidate matched — fall back to parent directory of the db path.
 	// This handles bootstrap/init where no metadata.json exists yet.
 	return filepath.Dir(dbPath)
+}
+
+// climbEndsAtAccountHome reports whether resolveCommandBeadsDir's climb from
+// dbPath ends at dir instead of binding candidate, dir's .beads: dir is the
+// account home, whose .beads is the user-global directory discovery passes
+// over (GH#4402), dbPath does not lie inside that directory (one naming it,
+// or a path directly in it, never reaches the climb), and the home
+// directory is not a repository root (a dotfiles repository's .beads is its
+// own). An explicit --db, BEADS_DB or bd import target under the home
+// directory that does not exist yet then binds the directory it names, not
+// ~/.beads, and nothing above the home directory either, as bd bootstrap's
+// parent-config walk ends there.
+func climbEndsAtAccountHome(dir, candidate, dbPath string) bool {
+	return beads.IsAccountHomeDir(dir) &&
+		!strings.HasPrefix(dbPath, candidate+string(filepath.Separator)) &&
+		!isGitWorkTreeRoot(dir)
 }
 
 // resolveConfiguredActor returns the actor implied by env/config when no
@@ -866,11 +1040,74 @@ func resolveConfiguredActor() string {
 	return config.GetString("actor")
 }
 
+// actorGitFallbackPending records that PersistentPreRunE deferred the
+// getActorWithGit fallback (git config user.name, then $USER) instead of
+// resolving it eagerly. Most invocations — every read-only list/show/query a
+// tool like gascity issues by the hundred — never consult the actor, and the
+// eager lookup cost one `git config` subprocess per bd call. currentActor
+// performs the deferred resolution on first use, so the resolved value and its
+// priority order are unchanged; only the moment of the lookup moves.
+//
+// Guarded by actorMu together with the resolution it triggers. Plain writes to
+// actor elsewhere stay unguarded, exactly as before this was introduced.
+var (
+	actorMu                 sync.Mutex
+	actorGitFallbackPending bool
+)
+
+// deferActorGitFallback replaces the former eager `actor = getActorWithGit()`
+// in PersistentPreRunE. A non-empty actor (--actor, BEADS_ACTOR, BD_ACTOR or
+// config.yaml) is already the answer getActorWithGit would return, so only an
+// empty actor needs the deferred fallback.
+func deferActorGitFallback() {
+	actorMu.Lock()
+	defer actorMu.Unlock()
+	actorGitFallbackPending = actor == ""
+}
+
+// currentActor returns the actor for this invocation, resolving a fallback
+// deferred by deferActorGitFallback on first use. Command code reads the actor
+// through this instead of the raw global so that the git lookup happens only
+// when an actor is actually needed.
+func currentActor() string {
+	actorMu.Lock()
+	defer actorMu.Unlock()
+	resolvePendingActorLocked()
+	return actor
+}
+
+// resolvePendingActorLocked performs a deferred fallback. Caller holds actorMu.
+func resolvePendingActorLocked() {
+	if !actorGitFallbackPending {
+		return
+	}
+	actorGitFallbackPending = false
+	deferred := actor
+	actor = resolveActorWithGit()
+	// Keep the CommandContext copy in step, as the eager assignment did
+	// before syncCommandContext copied it.
+	if cmdCtx != nil && cmdCtx.Actor == deferred {
+		cmdCtx.Actor = actor
+	}
+}
+
 // getActorWithGit returns the actor for audit trails with git config fallback.
 // Priority: --actor flag > BEADS_ACTOR env > BD_ACTOR env (deprecated) > git config user.name > $USER > "unknown"
 // This provides a sensible default for developers: their git identity is used unless
-// explicitly overridden
+// explicitly overridden.
+//
+// After PersistentPreRunE it returns the same value as currentActor (resolving
+// a deferred fallback once, into the global, as the eager assignment did).
 func getActorWithGit() string {
+	actorMu.Lock()
+	defer actorMu.Unlock()
+	resolvePendingActorLocked()
+	return resolveActorWithGit()
+}
+
+// resolveActorWithGit is getActorWithGit's resolution order, without the
+// deferred-fallback bookkeeping. Caller holds actorMu or owns the global.
+func resolveActorWithGit() string {
 	// If actor is already set (from --actor flag), use it
 	if actor != "" {
 		return actor
@@ -1212,6 +1449,10 @@ var rootCmd = &cobra.Command{
 				WasSet bool
 			}{dbPath, true}
 		}
+		// Reads and writes the raw global on purpose: this runs before
+		// deferActorGitFallback, so no fallback is pending yet and the value
+		// is only the flag/env/config actor. currentActor() here would resolve
+		// git user.name eagerly, which is what the deferral exists to avoid.
 		if !cmd.Root().PersistentFlags().Changed("actor") && actor == "" {
 			actor = resolveConfiguredActor()
 		} else if cmd.Root().PersistentFlags().Changed("actor") {
@@ -1402,10 +1643,11 @@ var rootCmd = &cobra.Command{
 			if os.Getenv("BEADS_DIR") == "" {
 				loadEnvironment()
 				if err := loadServerModeFromConfig(); err != nil {
-					// Warn, don't fatal: skipsStoreInit commands (doctor,
-					// init, bootstrap, version, ...) never select a store,
-					// and several of them are the repair path for the very
-					// corruption being reported.
+					// Warn, don't fatal, as prepareSelectedCommandContext
+					// does: the commands admission exempts still run, and
+					// admission refuses the rest (guardLegacyNoStoreCommand
+					// below; doctor, init and bootstrap run the guard
+					// themselves).
 					fmt.Fprintf(os.Stderr, "warning: %v\n", err)
 				}
 			}
@@ -1422,6 +1664,9 @@ var rootCmd = &cobra.Command{
 				}
 			}
 			if err := guardLegacyNoStoreCommand(cmd, beadsDir); err != nil {
+				if isUnsupportedWorkspaceFormat(err) {
+					return handleWorkspaceGuardError(err)
+				}
 				isMigrationCommand := false
 				for current := cmd; current != nil; current = current.Parent() {
 					if current.Name() == "migrate" {
@@ -1481,7 +1726,7 @@ var rootCmd = &cobra.Command{
 				prepareSelectedCommandContext(bd, true)
 				refreshBoundCommandConfig(cmd)
 				if guardErr := guardLegacyUpgradeWorkspace(bd); guardErr != nil {
-					return HandleError("%v", guardErr)
+					return handleWorkspaceGuardError(guardErr)
 				}
 				cfg, cfgErr := configfile.LoadForDiscovery(bd)
 				if cfgErr != nil || cfg != nil && (cfg.IsDoltProxiedServerMode() ||
@@ -1502,11 +1747,12 @@ var rootCmd = &cobra.Command{
 					dbPath = bd
 				}
 			} else if guardErr := guardUndiscoveredLegacyWorkspace(); guardErr != nil {
-				return HandleError("%v", guardErr)
+				return handleWorkspaceGuardError(guardErr)
 			}
 		}
 
 		// Initialize database path
+		fallbackBeadsDir := "" // the workspace import/setup set up when none is found
 		if dbPath == "" {
 			// Use public API to find database (same logic as extensions)
 			if foundDB := beads.FindDatabasePath(); foundDB != "" {
@@ -1538,8 +1784,11 @@ var rootCmd = &cobra.Command{
 				// touches the local `store` global on that path (a gap left by
 				// #4615, which only handled local paths), so skip local
 				// discovery entirely instead of falling through to the "no
-				// beads database found" exit below.
-				if cmd.Name() == "create" && cmd.Flags().Changed("repo") {
+				// beads database found" exit below. Match the command path,
+				// not the leaf name: `bd gate create --repo` names a GitHub
+				// OWNER/REPO for gh:run/gh:pr checks, not a workspace, and must
+				// still need the local database like any other gate command.
+				if commandRegistryPath(cmd) == "create" && cmd.Flags().Changed("repo") {
 					if repoVal, _ := cmd.Flags().GetString("repo"); repoVal != "" {
 						if remotecache.IsRemoteURL(repoVal) {
 							return nil
@@ -1550,10 +1799,11 @@ var rootCmd = &cobra.Command{
 				}
 
 				if dbPath == "" && cmd.Name() != "import" && cmd.Name() != "setup" {
-					// No database found - provide context-aware error message
-					fmt.Fprintf(os.Stderr, "Error: no beads database found\n")
-					fmt.Fprintf(os.Stderr, "Hint: %s\n", diagHint())
-					fmt.Fprintf(os.Stderr, "      or set BEADS_DIR to point to your .beads directory\n")
+					// No database found - provide context-aware error message.
+					// GH#4402: when discovery passed over the user's own
+					// ~/.beads, the refusal names it, so a misdirected write
+					// is visible and the opt-in is one paste away.
+					printNoDatabaseRefusal()
 					return SilentExit()
 				}
 
@@ -1573,18 +1823,39 @@ var rootCmd = &cobra.Command{
 						targetBeadsDir = beads.ExplicitBeadsDir()
 					}
 					if targetBeadsDir == "" {
+						// GH#4402: the working directory's own .beads is
+						// the fallback, except where discovery passes over
+						// the user-global ~/.beads. In the home directory
+						// the fallback is that directory, so bd import
+						// would write into the global database. Outside a
+						// repository, where discovery passed over a
+						// user-level workspace (SkippedUserGlobalBeadsDir),
+						// bd import refuses with the note that names it, as
+						// every other command run there does.
+						if cwd, err := os.Getwd(); (err == nil && beads.SkipsUserGlobalBeadsAt(cwd)) ||
+							beads.SkippedUserGlobalBeadsDir() != "" {
+							printNoDatabaseRefusal()
+							return SilentExit()
+						}
 						targetBeadsDir = ".beads"
 					}
 					dbPath = utils.CanonicalizePath(filepath.Join(targetBeadsDir, beads.CanonicalDatabaseName))
+					// Bind the directory chosen here: resolveCommandBeadsDir
+					// would climb from a BEADS_DIR not named .beads to the
+					// nearest .beads above it.
+					fallbackBeadsDir = filepath.Dir(dbPath)
 				}
 			}
 		}
 
-		beadsDir := resolveCommandBeadsDir(dbPath)
+		beadsDir := fallbackBeadsDir
+		if beadsDir == "" {
+			beadsDir = resolveCommandBeadsDir(dbPath)
+		}
 		prepareSelectedCommandContext(beadsDir, true)
 		refreshBoundCommandConfig(cmd)
 		if guardErr := guardLegacyUpgradeWorkspace(beadsDir); guardErr != nil {
-			return HandleError("%v", guardErr)
+			return handleWorkspaceGuardError(guardErr)
 		}
 
 		// Workspace operation gate: every command that reaches this point
@@ -1644,11 +1915,14 @@ var rootCmd = &cobra.Command{
 			return HandleProxyCapabilityError(AssertProxyCapability(ProxyModeProxied, ProxyCapReadonly))
 		}
 
-		// Set actor for audit trail
-		actor = getActorWithGit()
-		// Attach actor to the command span now that we have it.
-		if commandSpan != nil {
-			commandSpan.SetAttributes(attribute.String("bd.actor", actor))
+		// Set actor for audit trail. The git config user.name fallback is
+		// resolved lazily by currentActor, so commands that never consult the
+		// actor (read-only queries) do not spawn a git subprocess for it.
+		deferActorGitFallback()
+		// Attach actor to the command span. Only a recording span (telemetry
+		// enabled) needs the value, so a noop span does not force the lookup.
+		if commandSpan != nil && commandSpan.IsRecording() {
+			commandSpan.SetAttributes(attribute.String("bd.actor", currentActor()))
 		}
 
 		// Check if this is a read-only command (GH#804) or an explicitly
@@ -1748,6 +2022,12 @@ var rootCmd = &cobra.Command{
 		// discipline as the --force override above.
 		schema.SetSharedMigrateConsent(isSchemaMigrateVerb(cmd) && !previewMode)
 
+		// The same verb carries migration consent on its own
+		// (migrate_consent.go): every other command refuses to apply pending
+		// schema migrations to an existing database. Same unconditional
+		// set-or-clear discipline as the gate override above.
+		schema.SetLocalMigrateConsent(isMigrateConsentCommand(cmd))
+
 		// Auto-migrate database on version bump (bd-jgxi).
 		// Runs for ALL non-preview commands (including read-only ones) because
 		// the migration opens its own store connection, writes the version
@@ -1784,6 +2064,11 @@ var rootCmd = &cobra.Command{
 			// preview: the store is genuinely writable underneath, so the
 			// lazy defer-wake sweep may still run (be-vbhpf).
 			ClassifiedRead: policy.readOnly && !readonlyMode && !previewMode,
+			// A read-only or gateway open does not migrate, so a schema too
+			// old for this binary's issue reads is refused at open instead of
+			// failing each read on an unknown column. Not for a preview,
+			// which reports an incompatibility through its own query.
+			RequireReadableSchema: !previewMode,
 		}
 
 		// Load config to get database name and server connection settings.
@@ -2017,8 +2302,20 @@ var rootCmd = &cobra.Command{
 		// swallowed the same way, which let a preview failure wave the
 		// real, mutating open through unexamined — the one thing this check
 		// exists to prevent (be-3bt2e). Those cases now refuse instead.
+		//
+		// openCtx scopes ONE http transport to the gate's preview open and the
+		// real open below (bts-xpw.3.14.6): over a gateway each dial pays its
+		// own handshake and, with a gasworks credential, its own sts.Context,
+		// so sharing it saves both on every write. A one-shot command's
+		// transport also answers its repeated row and settings reads from the
+		// response it already has (commandMemoizesReads). Other backends
+		// ignore both.
+		openCtx := httpclient.WithSharedConnections(rootCtx)
+		if commandMemoizesReads(cmd) {
+			openCtx = httpclient.WithReadMemo(openCtx)
+		}
 		if !useReadOnly && !globalFlag && os.Getenv("BEADS_SKIP_IDENTITY_CHECK") != "1" {
-			idStore, previewErr := newPreviewStoreFromConfig(rootCtx, beadsDir)
+			idStore, previewErr := newPreviewStoreFromConfig(openCtx, beadsDir)
 			switch {
 			case previewErr == nil:
 				checkErr := validateWorkspaceIdentity(rootCtx, idStore, beadsDir)
@@ -2039,7 +2336,7 @@ var rootCmd = &cobra.Command{
 		// Dolt manages these files itself; external interference is never safe.
 
 		if _, ok := backends.Lookup(cfg.GetBackend()); ok {
-			store, err = newRegisteredBackendStore(rootCtx, cfg.GetBackend(), beadsDir, useReadOnly, opensForBeadWrites(doltCfg))
+			store, err = newRegisteredBackendStore(openCtx, cfg.GetBackend(), beadsDir, useReadOnly, opensForBeadWrites(doltCfg))
 		} else {
 			store, err = newDoltStore(rootCtx, doltCfg)
 		}
@@ -2569,8 +2866,14 @@ func flushBatchCommitOnShutdown() {
 // run, not a workspace problem. It must stay narrow: any other previewErr
 // (unreachable server, bad config, ...) has to refuse rather than silently
 // wave the real, mutating open through (be-3bt2e).
+//
+// So it matches the embedded store's own no-database error, and only when the
+// cause is a missing data dir — not any ENOENT. A dial to a configured unix
+// socket whose server is down satisfies errors.Is(err, os.ErrNotExist) too,
+// as does a data dir missing an internal file, and neither is a first run
+// (bd-wlygc).
 func isBootstrapPreviewErr(err error) bool {
-	return errors.Is(err, os.ErrNotExist)
+	return errors.Is(err, embeddeddolt.ErrNoEmbeddedDatabase) && errors.Is(err, os.ErrNotExist)
 }
 
 // refuseUnverifiablePreviewOpen renders the identity gate's refusal when the
@@ -2602,7 +2905,7 @@ func isBootstrapPreviewErr(err error) bool {
 // Extracted from the gate's default arm so both halves are directly testable
 // without standing up a forward-drifted workspace; the wire itself is pinned on
 // the embedded tier by
-// TestIdentityGateRendersSchemaSkewFromForwardDriftedWorkspace.
+// TestEmbeddedIdentityGateRendersSchemaSkewFromForwardDriftedWorkspace.
 func refuseUnverifiablePreviewOpen(previewErr error) error {
 	if handleFreshCloneError(previewErr) {
 		return SilentExit()
@@ -2647,6 +2950,28 @@ func validateWorkspaceIdentity(ctx context.Context, s storage.DoltStorage, beads
 		return nil // No config, skip validation (fresh init)
 	}
 	configProjectID := cfg.ProjectID
+	if cfg.GetBackend() == httpclient.Backend {
+		// The http backend's identity pin lives in the per-user, gitignored
+		// sidecar, not in metadata.json: `bd connect` (MED-6) stopped
+		// mirroring project_id into the git-tracked config, so cfg.ProjectID
+		// here is whatever the workspace carried BEFORE connect — generally
+		// a different project's id than the server `bd connect --force`
+		// just pointed it at. Comparing that stale value against the live
+		// database's _project_id below would flag every write as drift.
+		// Read the sidecar instead, exactly as applyContextBackend
+		// (context_cmd.go) does for `bd context`. A missing sidecar
+		// (ErrNotConnected) or any other read failure falls through to the
+		// "no project_id" skip just below, the same as a pre-identity
+		// workspace — the wire handshake's own ExpectProjectID gate (design
+		// D6) is what actually refuses a mismatched server at dial time;
+		// this check only needs to avoid a FALSE mismatch once that gate has
+		// already passed.
+		target, err := httpclient.LoadTarget(beadsDir)
+		if err != nil {
+			return nil
+		}
+		configProjectID = target.ExpectProjectID
+	}
 	if configProjectID == "" {
 		return nil // No project_id in config (pre-identity era)
 	}
@@ -2676,6 +3001,7 @@ func validateWorkspaceIdentity(ctx context.Context, s storage.DoltStorage, beads
 }
 
 func main() {
+	initprocs.Done()
 	// BD_NAME overrides the binary name in help text (e.g. BD_NAME=ops makes
 	// "ops --help" show "ops" instead of "bd"). Useful for multi-instance
 	// setups where wrapper scripts set BEADS_DIR for routing.
@@ -2689,6 +3015,11 @@ func main() {
 	rootCmd.InitDefaultHelpCmd()
 	registerHelpAllFlag()
 
+	// Cobra prints a command's returned error itself ("Error: ...") unless
+	// the command silences it: that line goes through the same backstop as
+	// bd's own error printers (HandleError), since an error can repeat a value
+	// a cloned repository sets.
+	rootCmd.SetErr(remedy.TextWriter(os.Stderr))
 	executedCmd, err := rootCmd.ExecuteC()
 
 	// Let this command's fire-and-forget hooks finish, for the same
@@ -2709,7 +3040,7 @@ func main() {
 			os.Exit(code)
 		}
 		if executedCmd != nil && executedCmd.SilenceErrors {
-			fmt.Fprintf(os.Stderr, "Error: %s\n", err.Error())
+			fmt.Fprintf(os.Stderr, "Error: %s\n", remedy.PrintedText(err.Error()))
 		}
 		os.Exit(1)
 	}

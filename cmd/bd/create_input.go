@@ -26,6 +26,7 @@ type createInput struct {
 	issueType          string
 	status             string
 	priority           int
+	priorityDefault    bool // no --priority: the role's default applies
 	assignee           string
 	externalRef        string
 	specID             string
@@ -180,6 +181,7 @@ func gatherCreateInput(cmd *cobra.Command, args []string) (createInput, error) {
 		return in, HandleError("%v", err)
 	}
 	in.priority = priority
+	in.priorityDefault = !cmd.Flags().Changed("priority")
 
 	in.issueType, _ = cmd.Flags().GetString("type")
 

@@ -98,6 +98,26 @@ type Issue struct {
 	// non-zero (create stamps freshRowLock()).
 	RowVersion int64 `json:"-"`
 
+	// ArrivalSeq is the row's commit-ordered create sequence: the events-journal
+	// seq of the create record written by the insert that made the row, stamped
+	// on the row in that same transaction (issueops.RecordEventInTx). Sorting
+	// rows by it reproduces the order their creates committed in, also after
+	// those journal records are pruned. A row created while the writer did not
+	// journal is stamped by the first create record journaled for it later (a
+	// re-import or a rename), so it sorts by that record's commit, not its
+	// insert's.
+	//
+	// Only wisp-plane rows created while the writer journals carry one; 0 means
+	// none (the writer did not journal, the row is on the issues plane, it moved
+	// onto the wisp plane from the issues plane, or it predates migration 0073).
+	// The value is workspace-local, unique, not reused unless the seq counter is
+	// lost after the journal records that held it are pruned, never changed
+	// while the row stays on the wisp plane, and never client-settable: create,
+	// update and import all ignore a supplied value, and bd export never writes
+	// it. A storage create writes the stored value back onto the issue it was
+	// given (issueops.RecordCreateEventInTx).
+	ArrivalSeq int64 `json:"arrival_seq,omitempty"`
+
 	// ===== Time-Based Scheduling (GH#820) =====
 	DueAt      *time.Time `json:"due_at,omitempty"`      // When this issue should be completed
 	DeferUntil *time.Time `json:"defer_until,omitempty"` // Hide from bd ready until this time
@@ -931,6 +951,10 @@ func ValidMolTypeNames() string {
 	return joinNamesWithOr(validMolTypes)
 }
 
+// ValidMolTypes returns the accepted non-empty mol-type values, in canonical
+// order, as a copy the caller may keep.
+func ValidMolTypes() []MolType { return slices.Clone(validMolTypes) }
+
 // WispType categorizes ephemeral wisps for TTL-based compaction (gt-9br)
 type WispType string
 
@@ -969,6 +993,10 @@ func (w WispType) IsValid() bool {
 func ValidWispTypeNames() string {
 	return joinNamesWithOr(validWispTypes)
 }
+
+// ValidWispTypes returns the accepted non-empty wisp-type values, in canonical
+// order, as a copy the caller may keep.
+func ValidWispTypes() []WispType { return slices.Clone(validWispTypes) }
 
 // StorageClass is the create-selected marker for a record's history and
 // replication contract. Persistence plane transitions preserve the marker
@@ -1017,12 +1045,19 @@ func (m PersistenceMode) IsValid() bool {
 	return slices.Contains(validPersistenceModes, m)
 }
 
+// ErrUnversionedWispMove is NormalizePersistenceMode's refusal to move an
+// unversioned record to a wisp mode. The record is sound and the requested
+// move is what is refused, so callers can classify it apart from the
+// row-invariant errors the function also returns.
+var ErrUnversionedWispMove = errors.New("cannot move unversioned record")
+
 // NormalizePersistenceMode maps a requested mode from current to its exact
 // persistence fields without mutating an issue. The returned values are
 // Ephemeral, NoHistory, and StorageClass, respectively. Plane and retention
 // changes preserve the create-selected class. Promotion clears an explicit
 // ephemeral class marker to select normalized versioned storage. An
-// unversioned record may remain persistent but cannot move to a wisp mode.
+// unversioned record may remain persistent but cannot move to a wisp mode
+// (ErrUnversionedWispMove).
 func NormalizePersistenceMode(current Issue, mode PersistenceMode) (bool, bool, StorageClass, error) {
 	if !mode.IsValid() {
 		return false, false, "", fmt.Errorf("invalid persistence mode %q", mode)
@@ -1041,7 +1076,7 @@ func NormalizePersistenceMode(current Issue, mode PersistenceMode) (bool, bool, 
 		return false, false, "", fmt.Errorf("storage class ephemeral requires ephemeral or no_history")
 	}
 	if current.StorageClass == StorageClassUnversioned && mode != PersistenceModePersistent {
-		return false, false, "", fmt.Errorf("cannot move unversioned record to persistence mode %q", mode)
+		return false, false, "", fmt.Errorf("%w to persistence mode %q", ErrUnversionedWispMove, mode)
 	}
 	if persistenceMode(current) == mode {
 		return current.Ephemeral, current.NoHistory, current.StorageClass, nil
@@ -1230,7 +1265,8 @@ type IssueWithCounts struct {
 	// WHICH SURFACES SET IT, because this type is shared by more than the
 	// listing and an absent marker means different things on them. It is set
 	// by the page epilogue behind issueops.Reader.List — `bd list --json` on
-	// both routes, its --ready arm included, and GET /v0/beads/issues. It is
+	// both routes, its --ready arm included, `bd search --json` on every
+	// route, and GET /v0/beads/issues. It is
 	// NOT set by Reader.Ready (GET /v0/beads/ready) or by the claim response
 	// that returns this type, so on those an absent marker says nothing about
 	// whether a row's comments exist: read comment_count there. Extending the
@@ -1262,6 +1298,19 @@ type IssueDetails struct {
 	// "no comments" — both wrong (ga-clgh). Never set alongside a populated
 	// Comments slice or a zero count: a true empty stays plain omission.
 	CommentsOmitted *bool `json:"comments_omitted,omitempty"`
+
+	// GatedBy names the gates actively blocking this issue — the derived
+	// GATED decoration `bd show` renders in its header, as data. ADDITIVE and
+	// omitted when empty: nothing else on this view changes shape, and the
+	// stored status stays whatever it is (an open issue an open gate blocks
+	// still reads "open" here). The rule is types.GatesHolding — the gate
+	// clause of the readiness query's is_blocked column, subject half
+	// included — so a nonempty list means `bd ready` withholds the issue on a
+	// gate's account, and a closed or pinned issue carries no gated_by at all.
+	// The converse does not hold: only the issue's own edges count, so a child
+	// of a gated parent, which `bd ready` withholds through the parent-child
+	// leg, carries no gated_by.
+	GatedBy []GateRef `json:"gated_by,omitempty"`
 
 	// UnresolvableDependencies / UnresolvableDependents count the edges
 	// DependencyCount / DependentCount include that the Dependencies /
@@ -1347,11 +1396,29 @@ func RevisionToken(v int64) string {
 
 // ParseRevisionToken reads a wire revision token back to the internal int64.
 //
-// It accepts exactly what RevisionToken emits. A caller must echo the token a
-// response carried rather than compose one, so anything else is a client that
-// invented a value, and reporting that as a parse failure is more useful than
-// guessing at it.
+// It accepts exactly what RevisionToken emits — the exact inverse of
+// strconv.FormatInt — and nothing strconv.ParseInt alone would additionally
+// tolerate: no leading "+" (FormatInt never emits one), no leading zero on
+// any digit string longer than one character (FormatInt never pads "7" out
+// to "007", positive or negative), and never "-0" (FormatInt(0, 10) is "0",
+// never "-0"). A caller must echo the token a response carried rather than
+// compose one, so anything else is a client that invented a value, and
+// reporting that as a parse failure is more useful than guessing at it.
 func ParseRevisionToken(s string) (int64, error) {
+	if strings.HasPrefix(s, "+") {
+		return 0, fmt.Errorf("revision token %q: leading \"+\" is not a token RevisionToken ever emits", s)
+	}
+	digits := s
+	negative := strings.HasPrefix(s, "-")
+	if negative {
+		digits = s[1:]
+	}
+	if negative && digits == "0" {
+		return 0, fmt.Errorf("revision token %q: \"-0\" is not a token RevisionToken ever emits", s)
+	}
+	if len(digits) > 1 && digits[0] == '0' {
+		return 0, fmt.Errorf("revision token %q: a leading zero is not a token RevisionToken ever emits", s)
+	}
 	return strconv.ParseInt(s, 10, 64)
 }
 
@@ -1481,6 +1548,14 @@ func (d DependencyType) IsWellKnown() bool {
 // Only blocking types affect the ready work calculation.
 func (d DependencyType) AffectsReadyWork() bool {
 	return d == DepBlocks || d == DepParentChild || d == DepConditionalBlocks || d == DepWaitsFor
+}
+
+// ReadyAffectingDependencyTypes returns the dependency types for which
+// AffectsReadyWork is true: the only edge types that can make an issue
+// blocked. SQL that must name those types renders this list rather than a
+// hand-written copy.
+func ReadyAffectingDependencyTypes() []DependencyType {
+	return []DependencyType{DepBlocks, DepParentChild, DepConditionalBlocks, DepWaitsFor}
 }
 
 // IsBlockingEdge returns true if this dependency type represents a hard blocker.
@@ -1810,6 +1885,11 @@ const (
 	// EventLeaseReclaimed records that a stale lease was reverted to ready by
 	// bd reclaim (dead-worker recovery). old_value is the previous owner.
 	EventLeaseReclaimed EventType = "lease_reclaimed"
+	// EventLeaseRearmed records that a heartbeat re-armed a claim that held no
+	// lease row (a claim hand-doled through a generic update): the lease was
+	// granted and row_lock reminted. new_value is the holder. A plain lease
+	// refresh records no event.
+	EventLeaseRearmed EventType = "lease_rearmed"
 )
 
 // ProvenanceEvent is one entry in the append-only provenance log: a typed
@@ -1869,13 +1949,26 @@ type ReadyExplanation struct {
 }
 
 // ReadyItem explains why a specific issue is ready for work.
+//
+// The issue's blocking dependencies (blocks, conditional-blocks, waits-for)
+// are sorted by the target's status as the caller supplied it in blockerMap:
+// ResolvedBlockers holds closed targets, PinnedDependencies holds pinned ones
+// (a pinned bead never blocks, so a dependency on one never fenced this
+// issue — it is reported as what it is, not as a blocker that was resolved),
+// and OpenDependencies holds targets in any other status — a blocks edge
+// here means the ready set and the edge disagree (foreign-prefix ids, #6066);
+// a waits-for edge here is the ordinary spawner-still-open case. A target the
+// caller did not supply a status for is counted under ResolvedBlockers, the
+// ready set's own verdict being the only word available.
 type ReadyItem struct {
 	*Issue
-	Reason           string   `json:"reason"`
-	ResolvedBlockers []string `json:"resolved_blockers"`
-	DependencyCount  int      `json:"dependency_count"`
-	DependentCount   int      `json:"dependent_count"`
-	Parent           *string  `json:"parent,omitempty"`
+	Reason             string   `json:"reason"`
+	ResolvedBlockers   []string `json:"resolved_blockers"`
+	PinnedDependencies []string `json:"pinned_dependencies,omitempty"`
+	OpenDependencies   []string `json:"open_dependencies,omitempty"`
+	DependencyCount    int      `json:"dependency_count"`
+	DependentCount     int      `json:"dependent_count"`
+	Parent             *string  `json:"parent,omitempty"`
 }
 
 // BlockedItem explains why a specific issue is blocked.
@@ -1918,18 +2011,29 @@ func BuildReadyExplanation(
 			counts = &DependencyCounts{}
 		}
 
-		// Find resolved blockers (closed issues that this depended on)
-		var resolvedBlockers []string
-		reason := "no blocking dependencies"
+		// Sort the blocking dependencies by the target's status. Before this
+		// every blocking edge of a ready issue was printed as a resolved
+		// blocker, which is wrong for a pinned target: the ready query skips
+		// pinned targets exactly as it skips closed ones, so a dependency on
+		// a pinned bead never blocked anything and nothing about it was
+		// resolved. --explain is the one place a reader can see that.
+		var resolvedBlockers, pinnedDeps, openDeps []string
 		deps := allDeps[issue.ID]
 		for _, dep := range deps {
-			if dep.Type == DepBlocks || dep.Type == DepConditionalBlocks || dep.Type == DepWaitsFor {
+			if dep.Type != DepBlocks && dep.Type != DepConditionalBlocks && dep.Type != DepWaitsFor {
+				continue
+			}
+			target, known := blockerMap[dep.DependsOnID]
+			switch {
+			case !known || target == nil || target.Status == StatusClosed:
 				resolvedBlockers = append(resolvedBlockers, dep.DependsOnID)
+			case target.Status == StatusPinned:
+				pinnedDeps = append(pinnedDeps, dep.DependsOnID)
+			default:
+				openDeps = append(openDeps, dep.DependsOnID)
 			}
 		}
-		if len(resolvedBlockers) > 0 {
-			reason = fmt.Sprintf("%d blocker(s) resolved", len(resolvedBlockers))
-		}
+		reason := readyReason(len(resolvedBlockers), len(pinnedDeps), len(openDeps))
 
 		// Compute parent
 		var parent *string
@@ -1941,12 +2045,14 @@ func BuildReadyExplanation(
 		}
 
 		readyItems = append(readyItems, ReadyItem{
-			Issue:            issue,
-			Reason:           reason,
-			ResolvedBlockers: resolvedBlockers,
-			DependencyCount:  counts.DependencyCount,
-			DependentCount:   counts.DependentCount,
-			Parent:           parent,
+			Issue:              issue,
+			Reason:             reason,
+			ResolvedBlockers:   resolvedBlockers,
+			PinnedDependencies: pinnedDeps,
+			OpenDependencies:   openDeps,
+			DependencyCount:    counts.DependencyCount,
+			DependentCount:     counts.DependentCount,
+			Parent:             parent,
 		})
 	}
 
@@ -1992,6 +2098,28 @@ func BuildReadyExplanation(
 	}
 }
 
+// readyReason words a ReadyItem's Reason from the three dependency counts.
+// "no blocking dependencies" is kept verbatim for the no-edge case; a resolved
+// count keeps the historical "N blocker(s) resolved" lead so scripts that
+// match on it still do; pinned and open counts are appended as clauses rather
+// than folded into the resolved count.
+func readyReason(resolved, pinned, open int) string {
+	var parts []string
+	if resolved > 0 {
+		parts = append(parts, fmt.Sprintf("%d blocker(s) resolved", resolved))
+	}
+	if pinned > 0 {
+		parts = append(parts, fmt.Sprintf("%d pinned dependency(ies), never blocking", pinned))
+	}
+	if open > 0 {
+		parts = append(parts, fmt.Sprintf("%d open dependency(ies), not blocking", open))
+	}
+	if len(parts) == 0 {
+		return "no blocking dependencies"
+	}
+	return strings.Join(parts, "; ")
+}
+
 // TreeNode represents a node in a dependency tree
 type TreeNode struct {
 	Issue
@@ -1999,6 +2127,10 @@ type TreeNode struct {
 	ParentID       string         `json:"parent_id"`
 	EdgeFromParent DependencyType `json:"edge_from_parent,omitempty"`
 	Truncated      bool           `json:"truncated"`
+	// Deduped is true on a stub row: it records only the edge from ParentID
+	// into an issue already expanded earlier in the same list, and it has no
+	// descendants. Drop these rows to get each issue once.
+	Deduped bool `json:"deduped,omitempty"`
 }
 
 // MoleculeProgressStats provides efficient progress info for large molecules.
@@ -2301,6 +2433,13 @@ func (s SortPolicy) IsValid() bool {
 type ReclaimedLease struct {
 	ID            string `json:"id"`
 	PreviousOwner string `json:"previous_owner"`
+
+	// Revision is the fresh RevisionToken minted for this issue's row by the
+	// same UPDATE that reverted its lease — the one this package's
+	// RevisionToken/ParseRevisionToken pair encodes, the same wire shape as
+	// IssueDetails.Revision. A caller that re-fetches after a reclaim sees a
+	// different token than one that raced it.
+	Revision string `json:"revision"`
 }
 
 // ReclaimFilter scopes which stale-lease issues bd reclaim may revert. The

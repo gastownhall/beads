@@ -67,6 +67,9 @@ func (o *hookBatchCloser) CloseBatch(ctx context.Context, request issueops.Close
 		if outcome.Changed {
 			o.hooks.CompleteIssueOperationClose(outcome.Issue)
 		}
+		if outcome.AutoClosedMolecule != nil {
+			o.hooks.CompleteIssueOperationClose(outcome.AutoClosedMolecule)
+		}
 	}
 	if result.ClaimedNext != nil {
 		o.hooks.CompleteIssueOperationUpdate(result.ClaimedNext.Issue)

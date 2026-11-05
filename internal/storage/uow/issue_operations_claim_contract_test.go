@@ -289,7 +289,7 @@ func TestBatchRunUpdateIdempotentClaimAcrossSpellingReportsNoChange(t *testing.T
 
 	result, err := run.runUpdate(context.Background(), publicops.UpdateRequest{
 		Actor: "gastown.mayor", IssueID: "bd-1", Claim: true,
-	})
+	}, true)
 	if err != nil {
 		t.Fatalf("runUpdate: %v, want success (same identity, different separator spelling)", err)
 	}
@@ -307,7 +307,7 @@ func TestBatchRunUpdateClaimByGenuinelyDifferentIdentityReportsAChange(t *testin
 
 	result, err := run.runUpdate(context.Background(), publicops.UpdateRequest{
 		Actor: "gastown.dog-3", IssueID: "bd-1", Claim: true,
-	})
+	}, true)
 	if err != nil {
 		t.Fatalf("runUpdate: %v", err)
 	}

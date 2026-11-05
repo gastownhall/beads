@@ -172,7 +172,16 @@ func (q *query) boundedLimit(fallback, ceiling int) int {
 	return *v
 }
 
-// timestamp reads an optional RFC 3339 instant.
+// timestamp reads an optional RFC 3339 instant, normalized to UTC.
+//
+// The normalization is a guard, not tidiness. The columns hold UTC wall clock,
+// and a database whose timestamp column has no zone reads a literal's wall
+// clock and IGNORES its offset, so a bound reaching it spelled `...+02:00`
+// would select two hours off the instant the caller named. sqlbuild guards the
+// sink (it binds every range bound as the UTC RFC 3339 spelling of its
+// instant, at whole seconds); this is the route's own guard in front of it, so
+// the value handed to storage is already the UTC instant and an offset-bearing
+// bound selects exactly the rows its `Z` twin does.
 func (q *query) timestamp(name string) *time.Time {
 	raw := q.str(name)
 	if raw == "" {
@@ -183,6 +192,7 @@ func (q *query) timestamp(name string) *time.Time {
 		q.invalid(name, fmt.Sprintf("%q is not an RFC 3339 timestamp", raw))
 		return nil
 	}
+	t = t.UTC()
 	return &t
 }
 

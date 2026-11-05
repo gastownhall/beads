@@ -91,9 +91,14 @@ func (s *sweeper) Sweep(ctx context.Context, req issueops.SweepRequest) (issueop
 // set. BOTH PLANES ARE ASKED FOR: one call can name rows in either, and
 // ChangedTables.Add drops the ephemeral members — leaving the durable set plus
 // the sync-plane `dependencies` rows a wisp delete removes explicitly.
+//
+// The id tombstone tables are added for the retaining sweep
+// (issueops.SweepRequest.RetainIDs); Add keeps only the versioned one, which
+// must land in the same commit as the deletes it records.
 func sweptTables() storeops.ChangedTables {
 	tables := storeops.ChangedTables{}
 	tables.Add(storeops.DeleteCascadeTables(false)...)
 	tables.Add(storeops.DeleteCascadeTables(true)...)
+	tables.Add(storeops.IDTombstoneTables()...)
 	return tables
 }

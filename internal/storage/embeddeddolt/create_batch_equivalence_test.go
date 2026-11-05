@@ -4,31 +4,73 @@ package embeddeddolt_test
 
 import (
 	"database/sql"
+	"slices"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage/createbatchequiv"
 	"github.com/steveyegge/beads/internal/storage/sqlcount"
 )
 
-// TestCreateBatchFastPathsMatchPerRow_Embedded runs the batch-create
-// equivalence scenario (internal/storage/createbatchequiv) on the embedded
-// engine: the same import-shaped batch through the fast and per-row bodies
-// must store the same rows.
-func TestCreateBatchFastPathsMatchPerRow_Embedded(t *testing.T) {
+// createBatchEquivalenceParts spreads createbatchequiv.Run's scenarios over
+// the TestCreateBatchFastPathsMatchPerRow*_Embedded tests below: under -race
+// the first four took ~110s as one test, a whole CI shard on their own.
+// settled applies its run both ways, including two closes that each recompute
+// a full 200-row chunk, and takes longer than any two of the others together,
+// so it runs alone.
+// TestCreateBatchEquivalencePartsCoverEveryScenario keeps the split exact.
+var createBatchEquivalenceParts = [][]string{
+	{"small", "depadd"},
+	{"apply", "waitsfor", "retired"},
+	{"settled"},
+}
+
+// TestCreateBatchFastPathsMatchPerRowSmallDepAdd_Embedded,
+// TestCreateBatchFastPathsMatchPerRowApplyWaitsFor_Embedded and
+// TestCreateBatchFastPathsMatchPerRowSettled_Embedded run the batch-create
+// equivalence scenarios (internal/storage/createbatchequiv) on the embedded
+// engine: the same import-shaped batch, or the same run of closes and status
+// changes, through the fast and per-row bodies must store the same rows.
+func TestCreateBatchFastPathsMatchPerRowSmallDepAdd_Embedded(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
-	createbatchequiv.Run(t, openEquivalenceDB)
+	createbatchequiv.RunNamed(t, openEquivalenceDB, createBatchEquivalenceParts[0]...)
+}
+
+func TestCreateBatchFastPathsMatchPerRowApplyWaitsFor_Embedded(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	createbatchequiv.RunNamed(t, openEquivalenceDB, createBatchEquivalenceParts[1]...)
+}
+
+func TestCreateBatchFastPathsMatchPerRowSettled_Embedded(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	createbatchequiv.RunNamed(t, openEquivalenceDB, createBatchEquivalenceParts[2]...)
+}
+
+// TestCreateBatchEquivalencePartsCoverEveryScenario fails unless the parts
+// above name every createbatchequiv.Run scenario exactly once, so a scenario
+// added there cannot silently stop running on this backend.
+func TestCreateBatchEquivalencePartsCoverEveryScenario(t *testing.T) {
+	var got []string
+	for _, part := range createBatchEquivalenceParts {
+		got = append(got, part...)
+	}
+	want := createbatchequiv.ScenarioNames()
+	slices.Sort(got)
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		t.Errorf("createBatchEquivalenceParts cover %v, want each of %v exactly once", got, want)
+	}
 }
 
 // TestCreateBatchFastPathsMatchPerRowLarge_Embedded runs the 458-issue
 // equivalence scenarios. It is skipped under -race, where the in-process
 // engine's own instrumentation makes each scenario take many minutes;
-// nightly.yml's "Embedded Dolt batch-apply suite (non-race)" step runs it,
+// //internal/storage/embeddeddolt:embeddeddolt_batch_apply_nonrace_test (non-race) runs it,
 // and the server backend's full suite (non-race) runs the same scenarios on
 // every PR that takes that tier.
 func TestCreateBatchFastPathsMatchPerRowLarge_Embedded(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
 	if raceEnabled {
-		t.Skip("458-issue equivalence scenarios skipped under -race; nightly.yml's non-race embedded step runs them")
+		t.Skip("458-issue equivalence scenarios skipped under -race; embeddeddolt_batch_apply_nonrace_test runs them")
 	}
 	createbatchequiv.RunLarge(t, openEquivalenceDB)
 }

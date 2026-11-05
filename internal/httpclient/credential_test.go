@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/httpapi/apigen"
@@ -82,7 +83,7 @@ func TestCredentialLadderPrecedence(t *testing.T) {
 	t.Run("env is the top rung", func(t *testing.T) {
 		clearCredentialEnvironment(t)
 		writeCredentialsFile(t, "127.0.0.1", 8080, "from-file", 0o600)
-		t.Setenv(TokenEnv, "from-env")
+		t.Setenv(TokenEnv, "127.0.0.1=from-env")
 		if got := authorizeWith(t, NewBearerProvider(base)); got != "Bearer from-env" {
 			t.Errorf("Authorization = %q, want the env rung", got)
 		}
@@ -121,7 +122,7 @@ func TestCredentialLadderPrecedence(t *testing.T) {
 func TestCredentialLadderFailsClosed(t *testing.T) {
 	clearCredentialEnvironment(t)
 	writeCredentialsFile(t, "127.0.0.1", 8080, "lower-rung", 0o600)
-	t.Setenv(TokenCommandEnv, "exit 7")
+	t.Setenv(TokenCommandEnv, "127.0.0.1=exit 7")
 
 	p := NewBearerProvider(mustParseURL(t, "http://127.0.0.1:8080"))
 	req, err := http.NewRequest(http.MethodGet, "http://127.0.0.1:8080/v0/beads/context", nil)
@@ -137,6 +138,108 @@ func TestCredentialLadderFailsClosed(t *testing.T) {
 	}
 	if req.Header.Get("Authorization") != "" {
 		t.Error("a failed ladder still set an Authorization header")
+	}
+}
+
+// TestTokenEnvRungsAreHostScoped keeps an operator's token on the server it was
+// issued for. The server a provider authorizes against comes from the
+// workspace's http_target.json, which a cloned repo can supply, so a token
+// scoped to one server must never reach another, and a token command scoped
+// elsewhere must not even run.
+func TestTokenEnvRungsAreHostScoped(t *testing.T) {
+	base := mustParseURL(t, "http://127.0.0.1:8080")
+
+	t.Run("a token scoped to another host is not sent", func(t *testing.T) {
+		clearCredentialEnvironment(t)
+		t.Setenv(TokenEnv, "serve.example.com=not-for-you")
+		if got := authorizeWith(t, NewBearerProvider(base)); got != "" {
+			t.Errorf("Authorization = %q, want no header: the token names another server", got)
+		}
+	})
+
+	t.Run("a token scoped to another host falls through to the lower rungs", func(t *testing.T) {
+		clearCredentialEnvironment(t)
+		writeCredentialsFile(t, "127.0.0.1", 8080, "from-file", 0o600)
+		t.Setenv(TokenEnv, "serve.example.com=not-for-you")
+		if got := authorizeWith(t, NewBearerProvider(base)); got != "Bearer from-file" {
+			t.Errorf("Authorization = %q, want the credentials-file rung", got)
+		}
+	})
+
+	t.Run("a token command scoped to another host is not run", func(t *testing.T) {
+		clearCredentialEnvironment(t)
+		// Run, `exit 7` would fail the ladder closed and Authorize with it.
+		t.Setenv(TokenCommandEnv, "serve.example.com=exit 7")
+		if got := authorizeWith(t, NewBearerProvider(base)); got != "" {
+			t.Errorf("Authorization = %q, want no header", got)
+		}
+	})
+
+	t.Run("a pattern with a port names that port alone", func(t *testing.T) {
+		clearCredentialEnvironment(t)
+		t.Setenv(TokenEnv, "127.0.0.1:9999=wrong-port")
+		if got := authorizeWith(t, NewBearerProvider(base)); got != "" {
+			t.Errorf("Authorization = %q, want no header: the pattern names another port", got)
+		}
+		t.Setenv(TokenEnv, "127.0.0.1:8080=right-port")
+		if got := authorizeWith(t, NewBearerProvider(base)); got != "Bearer right-port" {
+			t.Errorf("Authorization = %q, want the port-scoped token", got)
+		}
+	})
+
+	t.Run("host case and an https default port normalize", func(t *testing.T) {
+		clearCredentialEnvironment(t)
+		t.Setenv(TokenEnv, "Beads.Example.com:443=tls-token")
+		if got := authorizeWith(t, NewBearerProvider(mustParseURL(t, "https://beads.example.com/"))); got != "Bearer tls-token" {
+			t.Errorf("Authorization = %q, want the token", got)
+		}
+	})
+
+	t.Run("the split is on the first =", func(t *testing.T) {
+		clearCredentialEnvironment(t)
+		t.Setenv(TokenEnv, "127.0.0.1=padded==")
+		if got := authorizeWith(t, NewBearerProvider(base)); got != "Bearer padded==" {
+			t.Errorf("Authorization = %q, want the token with its padding", got)
+		}
+	})
+}
+
+// TestMalformedTokenEnvIsRefusedWithoutEchoingIt: an unscoped value, the form
+// these rungs took before they were scoped, is refused rather than applied to
+// whatever server the workspace names, and so is any other value that does not
+// parse. The refusal names the variable but no part of its value, since the
+// value is the credential.
+func TestMalformedTokenEnvIsRefusedWithoutEchoingIt(t *testing.T) {
+	for _, tc := range []struct{ name, env, value string }{
+		{"a bare token", TokenEnv, "bare-s3cr3t"},
+		{"a bare token whose padding splits it", TokenEnv, "s3cr3t+b64/x=="},
+		{"a bare token command", TokenCommandEnv, "printf s3cr3t"},
+		{"nothing after the =", TokenEnv, "127.0.0.1="},
+		{"a port-less colon", TokenEnv, "127.0.0.1:=s3cr3t"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearCredentialEnvironment(t)
+			writeCredentialsFile(t, "127.0.0.1", 8080, "lower-rung", 0o600)
+			t.Setenv(tc.env, tc.value)
+
+			req, err := http.NewRequest(http.MethodGet, "http://127.0.0.1:8080/v0/beads/context", nil)
+			if err != nil {
+				t.Fatalf("new request: %v", err)
+			}
+			err = NewBearerProvider(mustParseURL(t, "http://127.0.0.1:8080")).Authorize(context.Background(), req)
+			if err == nil {
+				t.Fatal("Authorize = nil; a malformed token variable must abort the request")
+			}
+			if !strings.Contains(err.Error(), tc.env) {
+				t.Errorf("error %q does not name the variable", err)
+			}
+			if strings.Contains(err.Error(), "s3cr3t") {
+				t.Fatalf("the refusal echoed the value: %v", err)
+			}
+			if req.Header.Get("Authorization") != "" {
+				t.Error("a refused ladder still set an Authorization header")
+			}
+		})
 	}
 }
 
@@ -199,7 +302,7 @@ func TestRefreshRereadsTheCredentialSource(t *testing.T) {
 // it names the server, never the token.
 func TestPlainHTTPBearerWarnsOnceAndLeaksNothing(t *testing.T) {
 	clearCredentialEnvironment(t)
-	t.Setenv(TokenEnv, "s3cr3t-token")
+	t.Setenv(TokenEnv, "beads.example.com=s3cr3t-token")
 
 	var sink strings.Builder
 	p := NewBearerProvider(mustParseURL(t, "http://beads.example.com:8080"))
@@ -223,9 +326,30 @@ func TestPlainHTTPBearerWarnsOnceAndLeaksNothing(t *testing.T) {
 	}
 }
 
+// TestPlainHTTPWarningDropsUserinfo: the warning names the server, and a url
+// handed in with userinfo must not bring it along — the username included,
+// which url.URL.Redacted would keep and which a token sometimes rides as.
+func TestPlainHTTPWarningDropsUserinfo(t *testing.T) {
+	clearCredentialEnvironment(t)
+	t.Setenv(TokenEnv, "beads.example.com=bearer-token")
+
+	var sink strings.Builder
+	p := NewBearerProvider(mustParseURL(t, "http://tok3n:pa55@beads.example.com:8080"))
+	p.warnTo = &sink
+	authorizeWith(t, p)
+
+	warning := sink.String()
+	if !strings.Contains(warning, "http://beads.example.com:8080") {
+		t.Errorf("warning does not name the server:\n%s", warning)
+	}
+	if strings.Contains(warning, "tok3n") || strings.Contains(warning, "pa55") {
+		t.Fatalf("the warning printed the url's userinfo:\n%s", warning)
+	}
+}
+
 func TestLoopbackBearerDoesNotWarn(t *testing.T) {
 	clearCredentialEnvironment(t)
-	t.Setenv(TokenEnv, "local-token")
+	t.Setenv(TokenEnv, "127.0.0.1=local-token")
 
 	var sink strings.Builder
 	p := NewBearerProvider(mustParseURL(t, "http://127.0.0.1:8080"))
@@ -292,13 +416,19 @@ type contextServer struct {
 	// test lands the rewrite in the one place it happens in production: between
 	// the refused attempt and the client's re-read.
 	onUnauthorized func()
-	seen           []string
+	// seenMu guards seen: a burst test drives this handler from several
+	// server goroutines at once. Readers look at seen only after their
+	// requests have returned.
+	seenMu sync.Mutex
+	seen   []string
 }
 
 func (s *contextServer) start(t *testing.T) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.seenMu.Lock()
 		s.seen = append(s.seen, r.Header.Get("Authorization"))
+		s.seenMu.Unlock()
 		if s.require != "" && r.Header.Get("Authorization") != "Bearer "+s.require {
 			w.Header().Set("WWW-Authenticate", "Bearer")
 			w.Header().Set("Content-Type", "application/problem+json")

@@ -7,7 +7,10 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/httpclient"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/remedy"
+	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/storage/domain"
 )
 
@@ -135,11 +138,25 @@ Examples:
 // while each held its own copy of `Backend: configfile.BackendDolt`.
 func applyContextBackend(snapshot *domain.ContextInfo, beadsDir string, cfg *configfile.Config) error {
 	snapshot.SetBackendIdentity(cfg.GetBackend(), cfg.GetDoltMode(), cfg.GetDoltDatabase())
-	snapshot.ProjectID = cfg.ProjectID
+	if cfg.GetBackend() == httpclient.Backend {
+		// The http backend's identity lives in the per-user, gitignored
+		// sidecar (`bd connect`'s MED-6 fix stopped mirroring it into the
+		// git-tracked metadata.json), so `bd context` must read it from
+		// there too. A missing sidecar (ErrNotConnected) or any other read
+		// failure just leaves ProjectID empty rather than failing this
+		// otherwise-degraded-state-tolerant command.
+		if target, err := httpclient.LoadTarget(beadsDir); err == nil {
+			snapshot.ProjectID = target.ExpectProjectID
+		}
+	} else {
+		snapshot.ProjectID = cfg.ProjectID
+	}
 
 	if cfg.IsDoltServerMode() {
 		snapshot.ServerHost = cfg.GetDoltServerHost()
-		snapshot.ServerPort = doltserver.DefaultConfig(beadsDir).Port
+		// The port the store dials (doltserver.ResolveEndpoint), the legacy
+		// BEADS_DOLT_PORT included, as the proxied route's provider resolves it.
+		snapshot.ServerPort = doltserver.ResolveEndpoint(beadsDir, cfg).Port
 	}
 	if cfg.IsDoltProxiedServerMode() {
 		p, err := resolveProxiedServerRootPath(beadsDir)
@@ -192,29 +209,29 @@ func printContextText(info ContextInfo) {
 	// "mode:" with nothing after it reads as a failure to determine rather than
 	// as not-applicable — so omit them, like every other optional field here.
 	if info.DoltMode != "" {
-		fmt.Printf("  mode:         %s\n", info.DoltMode)
+		fmt.Printf("  mode:         %s\n", remedy.PrintedValue(info.DoltMode))
 	}
 	if info.Database != "" {
-		fmt.Printf("  database:     %s\n", info.Database)
+		fmt.Printf("  database:     %s\n", remedy.PrintedValue(info.Database))
 	}
 	if info.ServerHost != "" {
-		fmt.Printf("  server:       %s:%d\n", info.ServerHost, info.ServerPort)
+		fmt.Printf("  server:       %s\n", doltutil.PrintedServerAddr(info.ServerHost, info.ServerPort))
 	}
 	if info.ProxiedDir != "" {
-		fmt.Printf("  proxied dir:  %s\n", info.ProxiedDir)
+		fmt.Printf("  proxied dir:  %s\n", remedy.PrintedValue(info.ProxiedDir))
 	}
 	if info.DataDir != "" {
-		fmt.Printf("  data dir:     %s\n", info.DataDir)
+		fmt.Printf("  data dir:     %s\n", remedy.PrintedValue(info.DataDir))
 	}
 	if info.ProjectID != "" {
-		fmt.Printf("  project id:   %s\n", info.ProjectID)
+		fmt.Printf("  project id:   %s\n", remedy.PrintedValue(info.ProjectID))
 	}
 
 	// Sync
 	if info.SyncRemote != "" {
 		fmt.Println()
 		fmt.Println("Sync:")
-		fmt.Printf("  remote:       %s\n", info.SyncRemote)
+		fmt.Printf("  remote:       %s\n", remedy.PrintedValue(info.SyncRemote))
 	}
 }
 

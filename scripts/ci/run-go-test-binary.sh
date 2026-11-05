@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Run a standalone `go test -c` binary (typically cross-compiled on a
-# different host, e.g. scripts/ci/build-windows-test-binaries.sh on Linux)
+# different host)
 # so that it behaves like `go test` would have, from the caller's point of
 # view: same cwd convention, same flag names, same BEADS_TEST_REPO_ROOT
 # resolution.
@@ -51,8 +51,8 @@
 # short-circuit, beads_test_env_enter's unset has already run by the time
 # control reaches here, so the line below's `${BEADS_TEST_REPO_ROOT:-...}`
 # always falls through to GITHUB_WORKSPACE -- exactly the value a CI runner
-# needs. When this script instead runs standalone (the "-prebuilt" jobs'
-# direct `run-go-test-binary.sh ...` steps, with no test.sh and no
+# needs. When this script instead runs standalone (a direct
+# `run-go-test-binary.sh ...` call, with no test.sh and no
 # beads_test_env_enter in between), there is nothing to have unset it, and
 # the same GITHUB_WORKSPACE fallback applies for the same reason.
 set -euo pipefail

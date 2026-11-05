@@ -17,7 +17,7 @@ package dolt
 //
 // What the differential half proves narrowed in gastownhall/beads#6291: both
 // sides — the ground-truth producer (batched templates) and the system under
-// test (full repair) — now render from the one shouldBeBlockedIDsUnionSQL
+// test (full repair) — now render from the one shouldBeBlockedIDsUnionCoreSQL
 // builder, so write-path-vs-full-repair agreement no longer cross-checks two
 // independently written SQL forms. It validates scope-splicing (the batched
 // legs' `AND d.issue_id IN (batch)`) and the waits-for DISTINCT barrier, which

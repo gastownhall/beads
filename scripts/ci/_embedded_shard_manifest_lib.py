@@ -8,8 +8,8 @@ machinery, generalized so both embedded generators (and any future one) share
 one implementation instead of two independently-maintained copies. The
 per-suite scripts own discovery (the test-name regex/glob), the duration-file
 path and its "seconds_per_init_fallback" semantics, and the manifest header
-text; this module owns everything suite-agnostic: pack(), incremental_pack(),
-split_blocks()/write_block(), and check_coverage().
+text; this module owns everything suite-agnostic: pack(), pack_concurrent(),
+incremental_pack(), split_blocks()/write_block(), and check_coverage().
 
 See gen_proxied_shard_manifest.py's module docstring for the full rationale
 behind incremental --write (merge-conflict avoidance across unrelated PRs)
@@ -30,6 +30,35 @@ def pack(costs, total):
         shards[i].append(name)
         loads[i] += costs[name]
     return shards, loads
+
+
+def shard_wall(names, costs, serial, parallelism):
+    """Estimated wall time of one Go test process running `names`:
+    top-level tests that do not call t.Parallel (`serial`) run one after
+    another before the parallel ones, which then share `parallelism`
+    (-test.parallel) slots, so the parallel group takes at least its longest
+    test and at least its total spread over the slots."""
+    ser = sum(costs[n] for n in names if n in serial)
+    par = [costs[n] for n in names if n not in serial]
+    return ser + max(max(par, default=0.0), sum(par) / parallelism)
+
+
+def pack_concurrent(costs, total, serial, parallelism):
+    """Greedy bin-pack for a Go test process that runs tests concurrently:
+    longest first, each onto the shard whose estimated wall time
+    (shard_wall) grows least, ties to the lighter shard. Plain LPT (pack())
+    sums durations, which for a -test.parallel binary overstates a shard of
+    several parallel tests and understates one holding a serial test.
+    Returns (shards, walls)."""
+    order = sorted(costs, key=lambda k: (-costs[k], k))
+    shards = [[] for _ in range(total)]
+    walls = [0.0] * total
+    for name in order:
+        best = min(range(total), key=lambda i: (
+            shard_wall(shards[i] + [name], costs, serial, parallelism), walls[i], i))
+        shards[best].append(name)
+        walls[best] = shard_wall(shards[best], costs, serial, parallelism)
+    return shards, walls
 
 
 def split_blocks(text):

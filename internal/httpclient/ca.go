@@ -277,7 +277,7 @@ func sameCAFile(a, b string) bool {
 // apply, unchanged from today, for a target that matches no configured CA.
 func resolveCAFile(target Target) (resolvedCA, error) {
 	sidecar := strings.TrimSpace(target.CAFile)
-	raw := strings.TrimSpace(os.Getenv(CAFileEnv))
+	raw := strings.TrimSpace(getenv(CAFileEnv))
 	if raw == "" {
 		if sidecar == "" {
 			return resolvedCA{}, nil

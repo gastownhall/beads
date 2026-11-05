@@ -9,14 +9,14 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// TestProxiedIfRevisionCloseReplaysMoleculeAutoClose is
-// TestIfRevisionCloseReplaysMoleculeAutoClose's proxied-server twin, pinning
+// TestProxiedServerIfRevisionCloseReplaysMoleculeAutoClose is
+// TestEmbeddedIfRevisionCloseReplaysMoleculeAutoClose's proxied-server twin, pinning
 // mc-zndi7.75 item 1 on the route `bd serve` actually runs:
 // runCloseProxiedIfRevision bypasses the batch entirely (A8, beads#4682), so
 // it must re-drive molecule auto-close itself via its own post-close unit of
 // work, exactly as closeProxiedRunPostClose does for the unguarded batch
 // route.
-func TestProxiedIfRevisionCloseReplaysMoleculeAutoClose(t *testing.T) {
+func TestProxiedServerIfRevisionCloseReplaysMoleculeAutoClose(t *testing.T) {
 	requireSharedProxiedServer(t)
 	t.Parallel()
 	bd := buildEmbeddedBD(t)
@@ -40,9 +40,11 @@ func TestProxiedIfRevisionCloseReplaysMoleculeAutoClose(t *testing.T) {
 
 	// Re-close the already-closed final step, this time GUARDED. The
 	// idempotent guarded re-close must replay molecule auto-close and heal
-	// the stranded-open root exactly as the unguarded path does.
+	// the stranded-open root exactly as the unguarded path does, and its
+	// --json report names the root it closed.
 	rev := bdProxiedShowRevision(t, bd, p.dir, step2.ID)
-	bdProxiedClose(t, bd, p.dir, step2.ID, "--if-revision", proxiedRevStr(rev), "--reason", "retry")
+	out := bdProxiedClose(t, bd, p.dir, step2.ID, "--if-revision", proxiedRevStr(rev), "--reason", "retry", "--json")
+	requireCloseJSONReportsAutoClosedMolecule(t, out, []string{step2.ID}, root.ID)
 
 	if got := readStatus(t, db, root.ID); got != types.StatusClosed {
 		t.Errorf("expected stranded-open molecule root %s healed by a guarded proxied re-close of the final step, got %q",
@@ -50,10 +52,10 @@ func TestProxiedIfRevisionCloseReplaysMoleculeAutoClose(t *testing.T) {
 	}
 }
 
-// TestProxiedIfRevisionCloseWarnsOnForcedOpenChildren is
-// TestIfRevisionCloseWarnsOnForcedOpenChildren's proxied-server twin, pinning
+// TestProxiedServerIfRevisionCloseWarnsOnForcedOpenChildren is
+// TestEmbeddedIfRevisionCloseWarnsOnForcedOpenChildren's proxied-server twin, pinning
 // mc-zndi7.75 item 3 on the proxied route.
-func TestProxiedIfRevisionCloseWarnsOnForcedOpenChildren(t *testing.T) {
+func TestProxiedServerIfRevisionCloseWarnsOnForcedOpenChildren(t *testing.T) {
 	requireSharedProxiedServer(t)
 	t.Parallel()
 	bd := buildEmbeddedBD(t)

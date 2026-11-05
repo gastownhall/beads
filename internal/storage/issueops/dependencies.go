@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/gowebpki/jcs"
+	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/storage/depid"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/sqlbuild"
@@ -30,6 +31,19 @@ func DependencyMetadataEqual(a, b string) bool {
 		return a == b
 	}
 	return bytes.Equal(aCanon, bCanon)
+}
+
+// ReAddedDependencyThread returns the thread_id a same-type re-add leaves on an
+// existing edge and whether that differs from the stored one. A named thread
+// the row does not already carry replaces it; an empty one names no thread
+// rather than asking for none, so the stored value — NULL included — is kept.
+// Both dependency re-add idempotency checks share this, alongside
+// DependencyMetadataEqual, so they can't drift.
+func ReAddedDependencyThread(stored sql.NullString, requested string) (sql.NullString, bool) {
+	if requested == "" || requested == stored.String {
+		return stored, false
+	}
+	return sql.NullString{String: requested, Valid: true}, true
 }
 
 type DepTargetKind int
@@ -178,8 +192,9 @@ type DepTargetPrecheck struct {
 //   - Source/target existence validation
 //   - Hierarchy deadlock validation for blocking deps (GH#1495, bd-wg7ve)
 //   - Cycle detection via recursive CTE across both dependency tables
-//   - Idempotent same-type re-adds: a metadata change updates it, a
-//     change-free re-add writes and journals nothing (#5898 R3)
+//   - Idempotent same-type re-adds: a metadata or thread change updates it
+//     (an empty ThreadID keeps the stored thread), a change-free re-add
+//     writes and journals nothing (#5898 R3)
 //   - Type conflict detection
 //
 // The caller is responsible for transaction lifecycle, dolt commits, and
@@ -195,9 +210,9 @@ type DepTargetPrecheck struct {
 // state, so it mints one version row for the source — on EVERY leg that reaches
 // this helper (the dependency editor, the legacy store verbs, batch apply),
 // whether or not an audit event was requested. A same-type re-add that changes
-// metadata is the same kind of durable-state change and mints on the same
-// terms; only a genuinely change-free re-add (identical type and metadata)
-// mints nothing.
+// metadata or thread is the same kind of durable-state change and mints on the
+// same terms; only a genuinely change-free re-add (identical type and metadata,
+// no new thread) mints nothing.
 func AddDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, actor string, opts AddDependencyOpts) (bool, error) {
 	return addDependencyInTx(ctx, tx, dep, actor, opts, nil, true)
 }
@@ -295,38 +310,46 @@ func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 	// target expression defensively so stale/reclassified rows in another typed
 	// target column cannot bypass the idempotency/conflict check.
 	var existingType string
-	var existingMetadataNS sql.NullString
+	var existingMetadataNS, existingThreadNS sql.NullString
 	//nolint:gosec // G201: writeTable from WispTableRouting; depTargetEquals has no user input.
-	err := tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT type, metadata FROM %s WHERE issue_id = ? AND %s`, writeTable, depTargetEquals("")),
-		dep.IssueID, dep.DependsOnID).Scan(&existingType, &existingMetadataNS)
+	err := tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT type, metadata, thread_id FROM %s WHERE issue_id = ? AND %s`, writeTable, depTargetEquals("")),
+		dep.IssueID, dep.DependsOnID).Scan(&existingType, &existingMetadataNS, &existingThreadNS)
 	if err == nil {
 		existingMetadata := existingMetadataNS.String
 		if !existingMetadataNS.Valid {
 			existingMetadata = "{}"
 		}
 		if existingType == string(dep.Type) {
-			if DependencyMetadataEqual(existingMetadata, metadata) {
-				// Same type, same metadata: a change-free write. Nothing is
-				// written and nothing is journaled (#5898 R3).
+			// A re-add naming a thread the row does not carry moves it. One
+			// naming none keeps the stored thread rather than clearing it, so
+			// the callers that never carry a thread cannot erase one.
+			thread, threadChanged := ReAddedDependencyThread(existingThreadNS, dep.ThreadID)
+			if !threadChanged && DependencyMetadataEqual(existingMetadata, metadata) {
+				// Same type, same metadata, same thread: a change-free write.
+				// Nothing is written and nothing is journaled (#5898 R3).
 				return false, nil
 			}
-			// Same type, different metadata — idempotent; update metadata. No
-			// event is written, so the caller must not stage the events table
-			// for this re-add.
+			// Same type, different metadata or thread — idempotent; update the
+			// row in place. No event is written, so the caller must not stage
+			// the events table for this re-add.
 			//nolint:gosec // G201: writeTable from WispTableRouting; depTargetEquals has no user input.
-			if _, err := tx.ExecContext(ctx, fmt.Sprintf(`UPDATE %s SET metadata = ? WHERE issue_id = ? AND %s`, writeTable, depTargetEquals("")),
-				metadata, dep.IssueID, dep.DependsOnID); err != nil {
+			if _, err := tx.ExecContext(ctx, fmt.Sprintf(`UPDATE %s SET metadata = ?, thread_id = ? WHERE issue_id = ? AND %s`, writeTable, depTargetEquals("")),
+				metadata, thread, dep.IssueID, dep.DependsOnID); err != nil {
 				return false, fmt.Errorf("failed to update dependency metadata: %w", err)
 			}
-			// A same-type add refreshes edge metadata. It is an observable graph
-			// mutation, so emit the complete replacement edge for replay even
-			// though no audit event is written.
+			// A same-type add refreshes the edge's metadata or thread. It is an
+			// observable graph mutation, so journal the replacement edge for
+			// replay even though no audit event is written. EventDep has no
+			// thread member, so a thread-only change journals the same payload
+			// as the original add; the source's version snapshot is what
+			// records the new thread.
 			if err := RecordDepEventInTx(ctx, tx, EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata, actor); err != nil {
 				return false, err
 			}
-			// The metadata genuinely changed, so — unlike the change-free
-			// branch above — this re-add is a real durable-state mutation of
-			// the source issue and mints on the same terms as a new edge
+			// The metadata or thread genuinely changed, so — unlike the
+			// change-free branch above — this re-add is a real durable-state
+			// mutation of the source issue (its version snapshot carries each
+			// edge's thread_id) and mints on the same terms as a new edge
 			// (#5898 leg 2: "a same-type re-add whose metadata actually
 			// changed mints EXACTLY ONE version carrying the new state").
 			return false, mintDependencyVersion(ctx, tx, dep.IssueID, actor, mintVersion)
@@ -421,11 +444,11 @@ func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 }
 
 // mintDependencyVersion versions the referencing (source) issue of an edge that
-// was actually inserted, deleted, or had its metadata refreshed by a same-type
-// re-add: the version-history seam for every dependency write path, reached
-// from addDependencyInTx and removeDependencyInTx only past a real row write —
-// never from a genuinely change-free re-add or the absent-edge return, which
-// mint nothing. mint false defers to a caller that mints once for a
+// was actually inserted, deleted, or had its metadata or thread refreshed by a
+// same-type re-add: the version-history seam for every dependency write path,
+// reached from addDependencyInTx and removeDependencyInTx only past a real row
+// write — never from a genuinely change-free re-add or the absent-edge return,
+// which mint nothing. mint false defers to a caller that mints once for a
 // multi-edge mutation. A wisp source is excluded by the seam itself.
 func mintDependencyVersion(ctx context.Context, tx DBTX, issueID, actor string, mint bool) error {
 	if !mint {
@@ -593,12 +616,6 @@ func cycleReachabilityQuery(depTables []string) string {
 // The reachable set is the same as the single-member walk over the UNION:
 // UNION distinct merges what every member produces per step.
 func reachabilityQuery(cte string, depTables []string, typeFilter string) string {
-	members := make([]string, 0, len(depTables))
-	for _, t := range depTables {
-		members = append(members, fmt.Sprintf(
-			"SELECT /*+ JOIN_ORDER(r, d) LOOKUP_JOIN(r, d) */ CASE WHEN %s THEN %s END FROM %s r JOIN %s d ON d.issue_id = r.node",
-			typeFilter, depTargetExpr("d"), cte, t))
-	}
 	return fmt.Sprintf(`
 		WITH RECURSIVE %s(node) AS (
 			SELECT ?
@@ -606,7 +623,22 @@ func reachabilityQuery(cte string, depTables []string, typeFilter string) string
 			%s
 		)
 		SELECT COUNT(*) FROM %s WHERE node = ?
-	`, cte, strings.Join(members, "\n\t\t\tUNION\n\t\t\t"), cte)
+	`, cte, reachabilityMembers(cte, depTables, typeFilter), cte)
+}
+
+// reachabilityMembers is reachabilityQuery's recursive members, one per
+// dependency table and joined by UNION, for any walk over the same edges
+// (ancestorChainInTx in blocked_state.go shares them). A NULL node, which is
+// what a row of another type projects, is the caller's to filter out of a
+// walk's result.
+func reachabilityMembers(cte string, depTables []string, typeFilter string) string {
+	members := make([]string, 0, len(depTables))
+	for _, t := range depTables {
+		members = append(members, fmt.Sprintf(
+			"SELECT /*+ JOIN_ORDER(r, d) LOOKUP_JOIN(r, d) */ CASE WHEN %s THEN %s END FROM %s r JOIN %s d ON d.issue_id = r.node",
+			typeFilter, depTargetExpr("d"), cte, t))
+	}
+	return strings.Join(members, "\n\t\t\tUNION\n\t\t\t")
 }
 
 func cycleDetectionTables() []string {
@@ -1278,33 +1310,10 @@ func GetIssuesByIDsInTx(ctx context.Context, tx DBTX, ids []string, wispSet map[
 // GetDependenciesWithMetadataInTx returns issues that the given issueID depends on,
 // along with the dependency type. Works within an existing transaction.
 // Queries both dependency tables to handle cross-table dependencies.
-//
-//nolint:gosec // G201: table names come from hardcoded constants
 func GetDependenciesWithMetadataInTx(ctx context.Context, tx DBTX, issueID string) ([]*types.IssueWithDependencyMetadata, error) {
-	type depMeta struct {
-		depID, depType string
-	}
-
-	// Query both dependency tables to find all dependencies.
-	var deps []depMeta
-	for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
-		rows, err := tx.QueryContext(ctx, fmt.Sprintf(
-			`SELECT %s AS depends_on_id, type FROM %s WHERE issue_id = ?`, DepTargetExpr, depTable), issueID)
-		if err != nil {
-			return nil, fmt.Errorf("get dependencies from %s: %w", depTable, err)
-		}
-		for rows.Next() {
-			var d depMeta
-			if scanErr := rows.Scan(&d.depID, &d.depType); scanErr != nil {
-				_ = rows.Close()
-				return nil, fmt.Errorf("get dependencies: scan: %w", scanErr)
-			}
-			deps = append(deps, d)
-		}
-		_ = rows.Close()
-		if err := rows.Err(); err != nil {
-			return nil, fmt.Errorf("get dependencies: rows from %s: %w", depTable, err)
-		}
+	deps, err := anchorEdgesInTx(ctx, tx, issueID, false, true)
+	if err != nil {
+		return nil, err
 	}
 
 	if len(deps) == 0 {
@@ -1314,7 +1323,7 @@ func GetDependenciesWithMetadataInTx(ctx context.Context, tx DBTX, issueID strin
 	// Fetch all dependency target issues.
 	ids := make([]string, len(deps))
 	for i, d := range deps {
-		ids[i] = d.depID
+		ids[i] = d.farID
 	}
 	issues, err := GetIssuesByIDsInTx(ctx, tx, ids, nil)
 	if err != nil {
@@ -1327,7 +1336,7 @@ func GetDependenciesWithMetadataInTx(ctx context.Context, tx DBTX, issueID strin
 
 	var results []*types.IssueWithDependencyMetadata
 	for _, d := range deps {
-		issue, ok := issueMap[d.depID]
+		issue, ok := issueMap[d.farID]
 		if !ok {
 			continue
 		}
@@ -1339,35 +1348,83 @@ func GetDependenciesWithMetadataInTx(ctx context.Context, tx DBTX, issueID strin
 	return results, nil
 }
 
-// GetDependentsWithMetadataInTx returns issues that depend on the given issueID
-// along with the dependency type. Works within an existing transaction.
+// anchorEdge is one dependency edge seen from a fixed anchor issue: the issue
+// at the other end and the edge type (empty when the caller did not ask for it).
+type anchorEdge struct {
+	farID, depType string
+}
+
+// anchorEdgesInTx reads the anchor's edges in one direction from both
+// dependency planes, durable table first: inbound reads the rows whose target
+// is the anchor (its dependents), otherwise the rows whose source is the
+// anchor (its dependencies). withType also selects the edge type.
 //
-//nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
-func GetDependentsWithMetadataInTx(ctx context.Context, tx DBTX, issueID string) ([]*types.IssueWithDependencyMetadata, error) {
-	type depMeta struct {
-		depID, depType string
+// wisp_dependencies is dolt-ignored, so a server-mode working-set reset (a
+// `dolt push` received, a hard reset) can drop it mid-session. Its absence
+// means there are no wisp-plane edges, not that the read failed (bd-cif6y4,
+// #3445: `bd show <epic>` lost its whole CHILDREN section). Only that named
+// table is tolerated; a missing `dependencies` or any other error is returned.
+//
+// Each far end is returned once. A local AddDependency writes an edge to one
+// plane only (WispTableRouting), but the same edge can still sit in both: a
+// pull or merge lands another clone's promotion of a wisp next to the local
+// wisp copy. For a fixed anchor the far-end id is the pair depid.New hashes,
+// so it is the key; the type is not (AddDependency refuses a second type for
+// one pair) and neither is the id column, which a read-only open of an older
+// database cannot assume exists. The first row seen wins, so a durable row and
+// its type beat the wisp copy; order is durable rows, then wisp-only rows.
+//
+//nolint:gosec // G201: table names are hardcoded constants
+func anchorEdgesInTx(ctx context.Context, tx DBTX, anchor string, inbound, withType bool) ([]anchorEdge, error) {
+	farCol, where, verb := DepTargetExpr+" AS depends_on_id", "issue_id = ?", "dependencies"
+	if inbound {
+		farCol, where, verb = "issue_id", DepTargetExpr+" = ?", "dependents"
+	}
+	cols := farCol
+	if withType {
+		cols += ", type"
 	}
 
-	// Query both dependency tables to find all dependents.
-	var deps []depMeta
+	var edges []anchorEdge
+	seen := make(map[string]struct{})
 	for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
-		rows, err := tx.QueryContext(ctx, fmt.Sprintf(
-			`SELECT issue_id, type FROM %s WHERE %s = ?`, depTable, DepTargetExpr), issueID)
+		rows, err := tx.QueryContext(ctx, fmt.Sprintf(`SELECT %s FROM %s WHERE %s`, cols, depTable, where), anchor)
 		if err != nil {
-			return nil, fmt.Errorf("get dependents from %s: %w", depTable, err)
+			if optionalBlockedTable(depTable) && dberrors.IsMissingTable(err, depTable) {
+				continue
+			}
+			return nil, fmt.Errorf("get %s from %s: %w", verb, depTable, err)
 		}
 		for rows.Next() {
-			var d depMeta
-			if scanErr := rows.Scan(&d.depID, &d.depType); scanErr != nil {
-				_ = rows.Close()
-				return nil, fmt.Errorf("get dependents: scan: %w", scanErr)
+			var e anchorEdge
+			dest := []any{&e.farID}
+			if withType {
+				dest = append(dest, &e.depType)
 			}
-			deps = append(deps, d)
+			if scanErr := rows.Scan(dest...); scanErr != nil {
+				_ = rows.Close()
+				return nil, fmt.Errorf("get %s: scan: %w", verb, scanErr)
+			}
+			if _, dup := seen[e.farID]; dup {
+				continue
+			}
+			seen[e.farID] = struct{}{}
+			edges = append(edges, e)
 		}
 		_ = rows.Close()
 		if err := rows.Err(); err != nil {
-			return nil, fmt.Errorf("get dependents: rows from %s: %w", depTable, err)
+			return nil, fmt.Errorf("get %s: rows from %s: %w", verb, depTable, err)
 		}
+	}
+	return edges, nil
+}
+
+// GetDependentsWithMetadataInTx returns issues that depend on the given issueID
+// along with the dependency type. Works within an existing transaction.
+func GetDependentsWithMetadataInTx(ctx context.Context, tx DBTX, issueID string) ([]*types.IssueWithDependencyMetadata, error) {
+	deps, err := anchorEdgesInTx(ctx, tx, issueID, true, true)
+	if err != nil {
+		return nil, err
 	}
 
 	if len(deps) == 0 {
@@ -1377,7 +1434,7 @@ func GetDependentsWithMetadataInTx(ctx context.Context, tx DBTX, issueID string)
 	// Fetch all dependent issues.
 	ids := make([]string, len(deps))
 	for i, d := range deps {
-		ids[i] = d.depID
+		ids[i] = d.farID
 	}
 	issues, err := GetIssuesByIDsInTx(ctx, tx, ids, nil)
 	if err != nil {
@@ -1390,7 +1447,7 @@ func GetDependentsWithMetadataInTx(ctx context.Context, tx DBTX, issueID string)
 
 	var results []*types.IssueWithDependencyMetadata
 	for _, d := range deps {
-		issue, ok := issueMap[d.depID]
+		issue, ok := issueMap[d.farID]
 		if !ok {
 			continue
 		}
@@ -1404,66 +1461,29 @@ func GetDependentsWithMetadataInTx(ctx context.Context, tx DBTX, issueID string)
 
 // GetDependenciesInTx returns issues that the given issueID depends on.
 // Queries both dependencies and wisp_dependencies tables.
-//
-//nolint:gosec // G201: table names come from hardcoded constants
 func GetDependenciesInTx(ctx context.Context, tx *sql.Tx, issueID string) ([]*types.Issue, error) {
-	var ids []string
-	for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
-		rows, err := tx.QueryContext(ctx, fmt.Sprintf(
-			`SELECT %s AS depends_on_id FROM %s WHERE issue_id = ?`, DepTargetExpr, depTable), issueID)
-		if err != nil {
-			return nil, fmt.Errorf("get dependencies from %s: %w", depTable, err)
-		}
-		for rows.Next() {
-			var id string
-			if scanErr := rows.Scan(&id); scanErr != nil {
-				_ = rows.Close()
-				return nil, fmt.Errorf("get dependencies: scan: %w", scanErr)
-			}
-			ids = append(ids, id)
-		}
-		_ = rows.Close()
-		if err := rows.Err(); err != nil {
-			return nil, fmt.Errorf("get dependencies: rows from %s: %w", depTable, err)
-		}
-	}
-
-	if len(ids) == 0 {
-		return nil, nil
-	}
-
-	return GetIssuesByIDsInTx(ctx, tx, ids, nil)
+	return getAnchorIssuesInTx(ctx, tx, issueID, false)
 }
 
 // GetDependentsInTx returns issues that depend on the given issueID.
 // Queries both dependencies and wisp_dependencies tables.
-//
-//nolint:gosec // G201: table names come from hardcoded constants
 func GetDependentsInTx(ctx context.Context, tx *sql.Tx, issueID string) ([]*types.Issue, error) {
-	var ids []string
-	for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
-		rows, err := tx.QueryContext(ctx, fmt.Sprintf(
-			`SELECT issue_id FROM %s WHERE %s = ?`, depTable, DepTargetExpr), issueID)
-		if err != nil {
-			return nil, fmt.Errorf("get dependents from %s: %w", depTable, err)
-		}
-		for rows.Next() {
-			var id string
-			if scanErr := rows.Scan(&id); scanErr != nil {
-				_ = rows.Close()
-				return nil, fmt.Errorf("get dependents: scan: %w", scanErr)
-			}
-			ids = append(ids, id)
-		}
-		_ = rows.Close()
-		if err := rows.Err(); err != nil {
-			return nil, fmt.Errorf("get dependents: rows from %s: %w", depTable, err)
-		}
+	return getAnchorIssuesInTx(ctx, tx, issueID, true)
+}
+
+func getAnchorIssuesInTx(ctx context.Context, tx *sql.Tx, issueID string, inbound bool) ([]*types.Issue, error) {
+	edges, err := anchorEdgesInTx(ctx, tx, issueID, inbound, false)
+	if err != nil {
+		return nil, err
 	}
 
-	if len(ids) == 0 {
+	if len(edges) == 0 {
 		return nil, nil
 	}
 
+	ids := make([]string, len(edges))
+	for i, e := range edges {
+		ids[i] = e.farID
+	}
 	return GetIssuesByIDsInTx(ctx, tx, ids, nil)
 }

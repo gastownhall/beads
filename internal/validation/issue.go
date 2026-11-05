@@ -2,10 +2,13 @@ package validation
 
 import (
 	"fmt"
+	"runtime"
 	"slices"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/issueops"
 )
 
 // IssueValidator validates an issue and returns an error if validation fails.
@@ -43,7 +46,7 @@ func NotTemplate() IssueValidator {
 			return nil // Let Exists() handle nil check if needed
 		}
 		if issue.IsTemplate {
-			return fmt.Errorf("cannot modify template %s: templates are read-only; use 'bd mol pour' to create a work item", id)
+			return &issueops.TemplateReadOnlyError{IssueID: id}
 		}
 		return nil
 	}
@@ -65,7 +68,7 @@ func NotPinned(force bool) IssueValidator {
 			return nil // Let Exists() handle nil check if needed
 		}
 		if !force && (issue.Pinned || issue.Status == types.StatusPinned) {
-			return fmt.Errorf("cannot modify pinned issue %s (use --force to override)", id)
+			return &issueops.PinnedError{IssueID: id}
 		}
 		return nil
 	}
@@ -170,7 +173,7 @@ func AssigneeMatches(actor string, force bool) IssueValidator {
 		if issue.Assignee == "" || ActorMatches(issue.Assignee, actor) {
 			return nil
 		}
-		return fmt.Errorf("cannot close %s: assignee is %q, actor is %q; reclaim or use --force to override", id, issue.Assignee, actor)
+		return &issueops.CloseNotAssigneeError{IssueID: id, Assignee: issue.Assignee, Actor: actor}
 	}
 }
 
@@ -217,7 +220,11 @@ func AssigneeNotStolen(actor, newAssignee string, poolAliases func() []string, f
 		if poolAliases != nil && slices.Contains(poolAliases(), issue.Assignee) {
 			return nil
 		}
-		return fmt.Errorf("cannot reassign %s: held by %q (in_progress); coordinate with the holder (bd mail %s) — pass --force only if their claim is abandoned (crashed agent, expired lease), or use bd reclaim", id, issue.Assignee, issue.Assignee)
+		// The assignee is free text in committed issue data, which travels
+		// with bd dolt pull: it goes into the bd mail command only as one
+		// shell word, and is otherwise named beside a placeholder.
+		holder, note := remedy.CommandArg(runtime.GOOS, issue.Assignee, "<holder>")
+		return fmt.Errorf("cannot reassign %s: held by %q (in_progress); coordinate with the holder (bd mail %s%s) — pass --force only if their claim is abandoned (crashed agent, expired lease), or use bd reclaim", remedy.PrintedValue(id), issue.Assignee, holder, note)
 	}
 }
 

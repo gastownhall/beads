@@ -437,8 +437,9 @@ Upgrade checklist:
 
 1. With your current `bd`, sync remote-backed databases before installing the
    new binary:
-   `bd dolt push`
    `bd dolt pull`
+   `bd dolt commit`
+   `bd dolt push`
 2. Back up before migration:
    `bd export --all -o .beads/backup/pre-migrate-$(date +%Y%m%d).jsonl`
 3. Upgrade using the command for your install method below.
@@ -448,7 +449,7 @@ Upgrade checklist:
    `bd version`
 5. If crossing a schema migration on a remote-backed database, only the
    designated migrator runs:
-   `bd migrate`
+   `bd migrate schema`
    `bd dolt push`
 
 Other clones should install the new binary and run `bd bootstrap`, not

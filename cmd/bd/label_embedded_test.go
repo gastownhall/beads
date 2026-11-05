@@ -7,9 +7,13 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 )
 
 // bdLabel runs "bd label" with the given args and returns stdout.
@@ -99,12 +103,37 @@ func bdLabelListAllJSON(t *testing.T, bd, dir string) []map[string]interface{} {
 	return results
 }
 
-// TestEmbeddedLabelAddRemove was split from TestEmbeddedLabel (originally
-// ~360s, measured under --config=embedded) into 3 top-level tests over
-// disjoint subtest groups, for CI shard balance (see
-// scripts/ci/embedded_cmd_test_durations.json and engdocs/TESTING.md). Every original
-// subtest is preserved exactly once.
-func TestEmbeddedLabelAddRemove(t *testing.T) {
+// markIssueTemplate makes an existing issue a template (is_template = 1) with
+// raw SQL and commits it, so a test can put a template in front of the CLI
+// without cooking a formula.
+func markIssueTemplate(t *testing.T, beadsDir, database, issueID string) {
+	t.Helper()
+	db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), filepath.Join(beadsDir, "embeddeddolt"), database, "main")
+	if err != nil {
+		t.Fatalf("OpenSQL: %v", err)
+	}
+	defer cleanup()
+	res, err := db.ExecContext(t.Context(), "UPDATE issues SET is_template = 1 WHERE id = ?", issueID)
+	if err != nil {
+		t.Fatalf("mark %s a template: %v", issueID, err)
+	}
+	if n, err := res.RowsAffected(); err != nil || n != 1 {
+		t.Fatalf("mark %s a template: %d rows affected (err %v), want 1", issueID, n, err)
+	}
+	if _, err := db.ExecContext(t.Context(), "CALL DOLT_COMMIT('-Am', 'test: mark a template')"); err != nil {
+		t.Fatalf("commit the template mark: %v", err)
+	}
+}
+
+// The TestEmbeddedLabelAddRemove* and TestEmbeddedLabelEditReports* tests
+// were split from TestEmbeddedLabel (originally ~360s, measured under
+// --config=embedded) into top-level tests over disjoint subtest groups, each
+// on its own workspace, for CI shard balance (see
+// scripts/ci/embedded_cmd_test_durations.json and engdocs/TESTING.md). Every
+// original subtest is preserved exactly once, in its original order within
+// its group; the label list-all subtests still follow subtests that add
+// labels.
+func TestEmbeddedLabelAddRemoveAdd(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -163,6 +192,16 @@ func TestEmbeddedLabelAddRemove(t *testing.T) {
 			t.Errorf("expected valid JSON: %s", s)
 		}
 	})
+}
+
+func TestEmbeddedLabelAddRemoveMultiAndDuplicate(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "tl")
 
 	t.Run("label_add_comma_separated_multi", func(t *testing.T) {
 		issue := bdCreate(t, bd, dir, "Multi label add", "--type", "task")
@@ -218,6 +257,16 @@ func TestEmbeddedLabelAddRemove(t *testing.T) {
 			t.Errorf("expected exactly 1 'dup' label, got %d in %v", count, labels)
 		}
 	})
+}
+
+func TestEmbeddedLabelAddRemoveRemove(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "tl")
 
 	// ===== Label Remove =====
 
@@ -349,12 +398,8 @@ func TestEmbeddedLabelAddRemove(t *testing.T) {
 	})
 }
 
-// TestEmbeddedLabelEditReports was split from TestEmbeddedLabel (originally
-// ~360s, measured under --config=embedded) into 3 top-level tests over
-// disjoint subtest groups, for CI shard balance (see
-// scripts/ci/embedded_cmd_test_durations.json and engdocs/TESTING.md). Every original
-// subtest is preserved exactly once.
-func TestEmbeddedLabelEditReports(t *testing.T) {
+// See TestEmbeddedLabelAddRemoveAdd for the TestEmbeddedLabel split.
+func TestEmbeddedLabelEditReportsPrefix(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -450,6 +495,16 @@ func TestEmbeddedLabelEditReports(t *testing.T) {
 			t.Errorf("expected valid JSON: %s", s)
 		}
 	})
+}
+
+func TestEmbeddedLabelEditReportsNoop(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "tl")
 
 	// ===== No-op edits (GH#5988) =====
 	//
@@ -558,6 +613,16 @@ func TestEmbeddedLabelEditReports(t *testing.T) {
 			t.Errorf("add claimed an edit on the issue that already had the label: %s", out)
 		}
 	})
+}
+
+func TestEmbeddedLabelEditReportsListAndTemplate(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "tl")
 
 	// ===== Label List =====
 
@@ -612,6 +677,50 @@ func TestEmbeddedLabelEditReports(t *testing.T) {
 			if _, ok := r["count"]; !ok {
 				t.Error("expected 'count' key in list-all result")
 			}
+		}
+	})
+
+	// A template is read-only to an update — issueops.Lifecycle.Update refuses
+	// it on every route — but bd label and bd set-state edit templates by
+	// design: they set UpdateRequest.AllowTemplate. One template pins both
+	// sides end to end. The stand-down verbs are checked with t.Errorf rather
+	// than a fatal helper, so a lost AllowTemplate names every verb that lost
+	// it.
+	t.Run("template_label_edits_pass_update_and_assign_refuse", func(t *testing.T) {
+		tpl := bdCreate(t, bd, dir, "Template under edit", "--type", "task",
+			"--label", "pool:refused:reason-a")
+		markIssueTemplate(t, beadsDir, "tl", tpl.ID)
+
+		for _, args := range [][]string{
+			{"label", "add", tpl.ID, "tpl-added"},
+			{"label", "remove", tpl.ID, "--prefix", "pool:refused:"},
+			{"set-state", tpl.ID, "phase=planning"},
+		} {
+			cmd := exec.Command(bd, args...)
+			cmd.Dir = dir
+			cmd.Env = bdEnv(dir)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Errorf("bd %s on a template: %v\n%s", strings.Join(args, " "), err, out)
+			}
+		}
+		labels := bdLabelListJSON(t, bd, dir, tpl.ID)
+		slices.Sort(labels)
+		if want := []string{"phase:planning", "tpl-added"}; !slices.Equal(labels, want) {
+			t.Errorf("template labels after label add, label remove --prefix and set-state = %v, want %v", labels, want)
+		}
+
+		want := "cannot modify template " + tpl.ID + ": templates are read-only; use 'bd mol pour' to create a work item"
+		for _, args := range [][]string{
+			{"update", tpl.ID, "--title", "Edited template"},
+			{"assign", tpl.ID, "someone-else"},
+		} {
+			if out, code := bdRunFailCode(t, bd, dir, args...); code != 1 || !strings.Contains(out, want) {
+				t.Errorf("bd %s on a template: exit %d, output:\n%s\nwant exit 1 and %q", strings.Join(args, " "), code, out, want)
+			}
+		}
+		if got := bdShow(t, bd, dir, tpl.ID); got.Title != "Template under edit" || got.Assignee != "" || !got.IsTemplate {
+			t.Errorf("the refused update and assign changed the template: title=%q assignee=%q is_template=%v",
+				got.Title, got.Assignee, got.IsTemplate)
 		}
 	})
 }

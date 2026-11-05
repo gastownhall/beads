@@ -10,9 +10,10 @@ and the live state of each item is its tracking issue on GitHub.
 
 - **Priority areas get expedited review.** Issues and PRs that advance a
   priority area below are triaged and reviewed first.
-- **Every PR links a documented issue.** To propose work — inside or
-  outside a priority area — open an issue with the feature form, before or
-  alongside your PR; see
+- **Propose work with an issue when it warrants discussion.** For work
+  inside or outside a priority area that needs context or a design decision,
+  open an issue with the feature form, before or alongside your PR; small,
+  self-explanatory changes can go straight to a PR. See
   [CONTRIBUTING.md](CONTRIBUTING.md#issues-and-pull-requests).
 - **Scope.** Proposals must fit the product boundary in
   [engdocs/PROJECT_CHARTER.md](engdocs/PROJECT_CHARTER.md).
@@ -59,7 +60,8 @@ and the live state of each item is its tracking issue on GitHub.
 
 - **Goal:** a new contributor, human or agent, finds the rules for the code
   they are changing next to that code, understands its intent and
-  invariants, and lands a change with a documented issue and PR.
+  invariants, and lands a well-explained PR, backed by an issue when the
+  change warrants one.
 - **This period:** contributor-only agent instructions and documented-issue
   intake ([#7223](https://github.com/gastownhall/beads/pull/7223));
   per-package `AGENTS.md` files for the storage packages, naming their

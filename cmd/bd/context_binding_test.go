@@ -4,7 +4,6 @@ import (
 	"context"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -32,12 +31,12 @@ func initGitRepoForContextTest(t *testing.T, dir string) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("mkdir repo: %v", err)
 	}
-	cmd := exec.Command("git", "init", "--quiet")
+	cmd := gitCommand("init", "--quiet")
 	cmd.Dir = dir
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v\n%s", err, output)
 	}
-	cmd = exec.Command("git", "config", "core.hooksPath", ".git/hooks")
+	cmd = gitCommand("config", "core.hooksPath", ".git/hooks")
 	cmd.Dir = dir
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git config hooks: %v\n%s", err, output)
@@ -201,7 +200,7 @@ func TestDetectUserRoleForActiveRepoUsesSelectedBeadsDir(t *testing.T) {
 	targetBeadsDir := filepath.Join(targetDir, ".beads")
 	writeTestConfigYAML(t, targetBeadsDir, "")
 
-	cmd := exec.Command("git", "config", "beads.role", "maintainer")
+	cmd := gitCommand("config", "beads.role", "maintainer")
 	cmd.Dir = targetDir
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git config beads.role: %v\n%s", err, output)
@@ -751,6 +750,58 @@ func TestDetectUserRoleForActiveRepoWarnsWhenRolePathIsNotARepo(t *testing.T) {
 	}
 	if n := strings.Count(string(stderrOutput), "is not a git repository"); n != 1 {
 		t.Fatalf("non-repo role path warned %d times in one process, want exactly once; stderr:\n%s", n, stderrOutput)
+	}
+}
+
+// TestActiveRepoPathForRoutingHonorsChangeDirSelectionOfNonGitProject pins
+// the routing knock-on of GH#5700: `bd -C T` from git repository A, with T in
+// no repository, must read the role at T (with the one-time non-repo warning),
+// not silently at A because RepoContext was rooted at the caller's repo.
+func TestActiveRepoPathForRoutingHonorsChangeDirSelectionOfNonGitProject(t *testing.T) {
+	resetRepoContextCachesForTest(t)
+	resetRolePathWarningForTest(t)
+
+	callerDir := filepath.Join(t.TempDir(), "caller")
+	initGitRepoForContextTest(t, callerDir)
+	targetDir := t.TempDir()
+	targetBeadsDir := filepath.Join(targetDir, ".beads")
+	writeTestConfigYAML(t, targetBeadsDir, "")
+	if err := os.WriteFile(filepath.Join(targetBeadsDir, "metadata.json"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatalf("write metadata.json: %v", err)
+	}
+
+	t.Chdir(callerDir)
+	t.Setenv("BEADS_DIR", targetBeadsDir)
+	setBeadsDirStartupProvenanceForTest(t, false)
+	setChangeDirForTest(t, targetDir)
+
+	assertActiveRepoPath(t, activeRepoPathForRouting(), targetDir,
+		"bd -C <non-git project> must route by the selected project, not the caller's repo")
+
+	readStderr, writeStderr, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe stderr: %v", err)
+	}
+	oldStderr := os.Stderr
+	os.Stderr = writeStderr
+	t.Cleanup(func() {
+		os.Stderr = oldStderr
+		_ = readStderr.Close()
+		_ = writeStderr.Close()
+	})
+
+	for range 2 {
+		if _, err := detectUserRoleForActiveRepo(); err != nil {
+			t.Fatalf("detectUserRoleForActiveRepo: %v", err)
+		}
+	}
+	_ = writeStderr.Close()
+	stderrOutput, readErr := io.ReadAll(readStderr)
+	if readErr != nil {
+		t.Fatalf("read stderr: %v", readErr)
+	}
+	if n := strings.Count(string(stderrOutput), "is not a git repository"); n != 1 {
+		t.Fatalf("non-repo role path warned %d times, want exactly once; stderr:\n%s", n, stderrOutput)
 	}
 }
 

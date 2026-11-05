@@ -161,22 +161,9 @@ func runBatchOpUOW(ctx context.Context, uw uow.UnitOfWork, op batchOp) (batchOpR
 		return result, nil
 
 	case "dep.add":
-		if len(op.args) < 2 {
-			return result, fmt.Errorf("dep add requires <from-id> <to-id>")
-		}
-		from, to := op.args[0], op.args[1]
-		depType := "blocks"
-		if len(op.args) >= 3 {
-			depType = op.args[2]
-		}
-		dt := types.DependencyType(depType)
-		if !dt.IsValid() {
-			return result, fmt.Errorf("dep add: invalid dependency type %q", depType)
-		}
-		dep := &types.Dependency{
-			IssueID:     from,
-			DependsOnID: to,
-			Type:        dt,
+		dep, err := batchDepAddEdge(op.args)
+		if err != nil {
+			return result, err
 		}
 		// AddDependencies (not the single-edge AddDependency) because it lands
 		// each edge in the plane its own SOURCE lives in, which is the routing
@@ -198,7 +185,7 @@ func runBatchOpUOW(ctx context.Context, uw uow.UnitOfWork, op batchOp) (batchOpR
 		if _, err := uw.DependencyUseCase().AddDependencies(ctx, []*types.Dependency{dep}, actorName, domain.BulkAddDepsOpts{}); err != nil {
 			return result, err
 		}
-		result.Target = fmt.Sprintf("%s->%s", from, to)
+		result.Target = fmt.Sprintf("%s->%s", dep.IssueID, dep.DependsOnID)
 		return result, nil
 
 	case "dep.remove":

@@ -98,7 +98,7 @@ else
 fi
 
 # Guard against a CGO-enabled bd: it exposes the full `bd federation` subcommand tree
-# that CI never produces (scripts/ci/pr-policy.sh build_docs_binary uses env
+# that CI never produces (scripts/check-doc-flags.sh is fed a
 # CGO_ENABLED=0 go build). A CGO build therefore emits ~hundreds of lines of federation
 # help that the committed, CI-built docs stub out ("built without CGO support"), so a
 # naive regen on a machine with a C compiler produces spurious federation churn.

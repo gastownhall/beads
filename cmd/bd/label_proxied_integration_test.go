@@ -5,6 +5,9 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"os/exec"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -230,6 +233,15 @@ func TestProxiedServerLabel(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestProxiedServerLabelB holds more of TestProxiedServerLabel's cases, split
+// off so the bd_proxied_test shard manifest can place them on another shard.
+func TestProxiedServerLabelB(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
 
 	t.Run("propagate_no_children", func(t *testing.T) {
 		t.Parallel()
@@ -382,6 +394,15 @@ func TestProxiedServerLabel(t *testing.T) {
 			t.Errorf("expected both labels in text list, got:\n%s", out)
 		}
 	})
+}
+
+// TestProxiedServerLabelC holds more of TestProxiedServerLabel's cases, split
+// off so the bd_proxied_test shard manifest can place them on another shard.
+func TestProxiedServerLabelC(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
 
 	t.Run("propagate_json", func(t *testing.T) {
 		t.Parallel()
@@ -561,6 +582,55 @@ func TestProxiedServerLabel(t *testing.T) {
 		}
 		if permCount != 0 {
 			t.Errorf("labels (permanent) count = %d, want 0 — propagated wisp label must not leak into the permanent table", permCount)
+		}
+	})
+
+	// The proxied twin of TestEmbeddedLabelEditReports'
+	// template_label_edits_pass_update_and_assign_refuse, over the unit-of-work
+	// leg: bd label and bd set-state stand the template guard down
+	// (UpdateRequest.AllowTemplate), bd update and bd assign are refused with
+	// the CLI's sentence and exit 1.
+	t.Run("template_label_edits_pass_update_and_assign_refuse", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "lt")
+		tpl := bdProxiedCreate(t, bd, p.dir, "Template under edit", "--type", "task",
+			"--label", "pool:refused:reason-a")
+		res, err := openProxiedDB(t, p).Exec("UPDATE issues SET is_template = 1 WHERE id = ?", tpl.ID)
+		if err != nil {
+			t.Fatalf("mark %s a template: %v", tpl.ID, err)
+		}
+		if n, err := res.RowsAffected(); err != nil || n != 1 {
+			t.Fatalf("mark %s a template: %d rows affected (err %v), want 1", tpl.ID, n, err)
+		}
+
+		for _, args := range [][]string{
+			{"label", "add", tpl.ID, "tpl-added"},
+			{"label", "remove", tpl.ID, "--prefix", "pool:refused:"},
+			{"set-state", tpl.ID, "phase=planning"},
+		} {
+			if stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, args...); err != nil {
+				t.Errorf("bd %s on a template: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout, stderr)
+			}
+		}
+		if got, want := bdProxiedLabelListJSON(t, bd, p.dir, tpl.ID), []string{"phase:planning", "tpl-added"}; !slices.Equal(got, want) {
+			t.Errorf("template labels after label add, label remove --prefix and set-state = %v, want %v", got, want)
+		}
+
+		want := "cannot modify template " + tpl.ID + ": templates are read-only; use 'bd mol pour' to create a work item"
+		for _, args := range [][]string{
+			{"update", tpl.ID, "--title", "Edited template"},
+			{"assign", tpl.ID, "someone-else"},
+		} {
+			stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, args...)
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 || !strings.Contains(stdout+stderr, want) {
+				t.Errorf("bd %s on a template: err %v\nstdout:\n%s\nstderr:\n%s\nwant exit 1 and %q",
+					strings.Join(args, " "), err, stdout, stderr, want)
+			}
+		}
+		if got := bdProxiedShow(t, bd, p.dir, tpl.ID); got.Title != "Template under edit" || got.Assignee != "" || !got.IsTemplate {
+			t.Errorf("the refused update and assign changed the template: title=%q assignee=%q is_template=%v",
+				got.Title, got.Assignee, got.IsTemplate)
 		}
 	})
 }

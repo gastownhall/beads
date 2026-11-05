@@ -94,7 +94,8 @@ func TestBazelFarmWorkflowSecurity(t *testing.T) {
 	}
 
 	// Permissions: contents: read at the workflow and on every job, and
-	// nothing else anywhere in the file.
+	// nothing else anywhere in the file, but the farm call's grant of what
+	// bazel.yml's rrc jobs ask for (bazelCallPermissions).
 	readOnly := map[string]any{"contents": "read"}
 	if !reflect.DeepEqual(doc.Permissions, readOnly) {
 		t.Errorf("workflow permissions = %v, want %v", doc.Permissions, readOnly)
@@ -103,8 +104,12 @@ func TestBazelFarmWorkflowSecurity(t *testing.T) {
 	var jobs []string
 	for name, job := range workflow.Jobs {
 		jobs = append(jobs, name)
-		if !reflect.DeepEqual(job.Permissions, readOnly) {
-			t.Errorf("job %s permissions = %v, want %v", name, job.Permissions, readOnly)
+		want := readOnly
+		if name == "farm" {
+			want = bazelCallPermissions
+		}
+		if !reflect.DeepEqual(job.Permissions, want) {
+			t.Errorf("job %s permissions = %v, want %v", name, job.Permissions, want)
 		}
 		if len(job.Env) != 0 {
 			t.Errorf("job %s env = %v; want none", name, job.Env)
@@ -116,7 +121,8 @@ func TestBazelFarmWorkflowSecurity(t *testing.T) {
 	}
 	secretRef := regexp.MustCompile(`\bsecrets\s*(\.|\[)`)
 	walkYAML(root, "", func(path string, key bool, value string) {
-		if strings.Contains(path, "permissions") && !key && value != "read" {
+		if strings.Contains(path, "permissions") && !key && value != "read" &&
+			!(strings.HasPrefix(path, ".jobs.farm.permissions.") && bazelCallPermissions[strings.TrimPrefix(path, ".jobs.farm.permissions.")] == value) {
 			t.Errorf("%s = %q; only read permissions are allowed", path, value)
 		}
 		if key && value == "continue-on-error" {
@@ -227,6 +233,19 @@ func TestBazelFarmWorkflowSecurity(t *testing.T) {
 	}
 }
 
+// bazelCallPermissions: every bazel.yml call's token permissions (farm,
+// pr.yml, nightly.yml). A called workflow's job gets at most its caller's,
+// and GitHub checks them when the run starts, even for a job whose if:
+// skips it, so each call grants what bazel.yml's rrc jobs ask for:
+// rrc-seed's id-token: write (push to main only) and rrc-verify's issues:
+// write (schedule and dispatch only). Neither runs on pull_request,
+// merge_group or pull_request_target, and every other bazel.yml job, every
+// lane that runs PR or fork code included, keeps contents: read
+// (TestBazelWorkflowPermissionsReadOnly), so no PR-authored step ever holds
+// either; rbe-west's mint refuses any OIDC token but a main-push bazel.yml
+// one anyway.
+var bazelCallPermissions = map[string]any{"contents": "read", "id-token": "write", "issues": "write"}
+
 // bazel.yml's side of the farm: the pinned checkout, the one decision input,
 // and nothing a pull_request_target run could hand a privileged consumer.
 func TestBazelWorkflowForkFarmInputs(t *testing.T) {
@@ -246,6 +265,15 @@ func TestBazelWorkflowForkFarmInputs(t *testing.T) {
 			if actionFamily(step.Uses) != "actions/checkout" {
 				continue
 			}
+			// The rrc jobs run on push to main, schedule and dispatch only,
+			// never on pull_request_target: they check out the event's ref,
+			// with no fork opt-in.
+			if isBazelRRCJob(name) {
+				if want := map[string]string{"persist-credentials": "false"}; !reflect.DeepEqual(step.With, want) {
+					t.Errorf("%s job %s checkout with = %v, want %v", bazelWorkflowName, name, step.With, want)
+				}
+				continue
+			}
 			checkouts++
 			want := map[string]string{"ref": bazelCheckoutRef, "persist-credentials": "false", "allow-unsafe-pr-checkout": bazelAllowUnsafeCheckout}
 			// F3: package-mcp/package-npm's detect step diffs PR_BASE_SHA
@@ -255,18 +283,24 @@ func TestBazelWorkflowForkFarmInputs(t *testing.T) {
 			if bazelPackageJobs[name] {
 				want["fetch-depth"] = "0"
 			}
+			// rbe's worker-env preflight reads two paths of the same ref.
+			if name == bazelRBEJobName {
+				want["sparse-checkout"] = bazelRBESparseCheckout
+			}
 			if !reflect.DeepEqual(step.With, want) {
 				t.Errorf("%s job %s checkout with = %v, want %v", bazelWorkflowName, name, step.With, want)
 			}
 		}
 	}
-	// Every lane checks out the PR except rbe (decides the mode before any
-	// checkout) and rbe-prewarm (no checkout at all, by design: B1, security
-	// review of bdef342d5 - its dispatch logic is inlined into the job's own
-	// `run:` instead of a checked-out script file, so no step in this job
-	// ever reads repository content under the shared gascity credential).
-	if checkouts != len(workflow.Jobs)-2 {
-		t.Errorf("%d checkouts in %s, want one per lane excluding %s and %s (%d)", checkouts, bazelWorkflowName, bazelRBEJobName, bazelRBEPrewarmJobName, len(workflow.Jobs)-2)
+	// Every job checks out the PR once except rbe-prewarm (no checkout at
+	// all, by design: B1, security review of bdef342d5 - its dispatch logic
+	// is inlined into the job's own `run:` instead of a checked-out script
+	// file, so no step in this job ever reads repository content under the
+	// shared gascity credential). rbe's checkout (sparse) comes after its
+	// decide step, for the worker-env preflight
+	// (TestBazelRBEWorkerEnvPreflight).
+	if want := len(workflow.Jobs) - 1 - len(bazelRRCJobs); checkouts != want {
+		t.Errorf("%d checkouts in %s, want one per job excluding %s and the rrc jobs (%d)", checkouts, bazelWorkflowName, bazelRBEPrewarmJobName, want)
 	}
 	if got := workflow.job(t, bazelRBEJobName).Steps[0].Env["FORK_FARM"]; got != bazelForkFarmValue {
 		t.Errorf("rbe FORK_FARM = %q, want %q", got, bazelForkFarmValue)
@@ -373,12 +407,30 @@ func TestBazelFarmArtifactsHaveNoPrivilegedConsumer(t *testing.T) {
 		if err := yaml.Unmarshal([]byte(raw), &doc); err != nil {
 			t.Fatal(err)
 		}
-		if !reflect.DeepEqual(doc.On.WorkflowRun.Workflows, []string{"PR"}) {
-			t.Errorf("%s workflow_run workflows = %v, want exactly [PR]", entry.Name(), doc.On.WorkflowRun.Workflows)
+		// main-ci-alert.yml watches main's push runs (a farm run is
+		// pull_request_target, never push) and downloads no artifact
+		// (TestMainCIAlertWorkflow); every other consumer watches "PR"
+		// (the worker-env sync guard also "PR Risk", below) and acts only
+		// on pull_request runs.
+		watched, event := []string{"PR"}, "pull_request"
+		switch entry.Name() {
+		case mainCIAlertWorkflowName:
+			watched, event = mainCIAlertTracked, "push"
+		case workerEnvAutomergeWorkflow:
+			// The worker-env pin-sync guard reads the check states of the
+			// sync PR's own PR and PR Risk runs (never an artifact) and
+			// queues it once both of main's required gates pass. PR Risk,
+			// like PR, runs only on pull_request, merge_group and pushes
+			// to main, never as a farm run, and the job if: below still
+			// limits every job to pull_request runs.
+			watched = []string{"PR", "PR Risk"}
+		}
+		if !reflect.DeepEqual(doc.On.WorkflowRun.Workflows, watched) {
+			t.Errorf("%s workflow_run workflows = %v, want exactly %v", entry.Name(), doc.On.WorkflowRun.Workflows, watched)
 		}
 		for jobName, job := range readCIWorkflow(t, entry.Name()).Jobs {
-			if !strings.Contains(job.If, "github.event.workflow_run.event == 'pull_request'") {
-				t.Errorf("%s job %s if = %q; want it limited to pull_request runs (a farm run is pull_request_target)", entry.Name(), jobName, job.If)
+			if !strings.Contains(job.If, "github.event.workflow_run.event == '"+event+"'") {
+				t.Errorf("%s job %s if = %q; want it limited to %s runs (a farm run is pull_request_target)", entry.Name(), jobName, job.If, event)
 			}
 		}
 	}
@@ -611,7 +663,11 @@ func TestBazelFarmCacheModeStaysReadOnly(t *testing.T) {
 }
 
 // bazel.yml's token: exactly contents: read, at the top and on any job that
-// declares permissions (a call cannot exceed its caller's, but pin it).
+// declares permissions (a call cannot exceed its caller's, but pin it),
+// except the rrc jobs: rrc-seed's id-token: write and rrc-verify's issues:
+// write (pinned by TestBazelRRCSeedJob and TestBazelRRCVerifyJob; neither
+// runs on a pull_request, merge_group or pull_request_target event, so the
+// callers' wider grants reach no lane and no fork-authored code).
 func TestBazelWorkflowPermissionsReadOnly(t *testing.T) {
 	var doc struct {
 		Permissions any `yaml:"permissions"`
@@ -624,17 +680,22 @@ func TestBazelWorkflowPermissionsReadOnly(t *testing.T) {
 		t.Errorf("%s permissions = %v, want exactly %v", bazelWorkflowName, doc.Permissions, readOnly)
 	}
 	for name, job := range readCIWorkflow(t, bazelWorkflowName).Jobs {
+		if isBazelRRCJob(name) {
+			continue
+		}
 		if job.Permissions != nil && !reflect.DeepEqual(job.Permissions, readOnly) {
 			t.Errorf("%s job %s permissions = %v, want none or exactly %v", bazelWorkflowName, name, job.Permissions, readOnly)
 		}
 	}
 }
 
-// Nothing restored from the runner cache is executed unverified: the Bazel
-// binary is downloaded fresh into a Bazelisk home outside the cache and
-// checked against a sha256 pinned for .bazelversion, the repo contents cache
-// (unverified extracted repos) is off, and restored Go modules are checked
-// against go.sum before use.
+// Nothing restored from the runner cache is executed unverified: Bazelisk
+// and the Bazel binary are checked against a sha256 pinned for each (Bazel's
+// per .bazelversion) before anything runs them, the Bazel binary runs from a
+// fresh Bazelisk home outside the runner Bazel cache (its own entry is
+// pinned by TestSetupBazelBinariesComeFromAVerifiedCacheEntry), the repo
+// contents cache (unverified extracted repos) is off, and restored Go
+// modules are checked against go.sum before use.
 func TestBazelRestoredCachesAreVerified(t *testing.T) {
 	version := strings.TrimSpace(readPolicyFile(t, sourceRepoRoot(t), ".bazelversion"))
 	var install, wrapper ciWorkflowStep
@@ -692,5 +753,118 @@ func TestBazelRestoredCachesAreVerified(t *testing.T) {
 				t.Errorf("%s job %s restores the Go module cache without verifying it next", bazelWorkflowName, name)
 			}
 		}
+	}
+}
+
+// Bazelisk and the Bazel release come from their own runner-cache entry
+// when it holds them, so a lane normally downloads neither (on 2026-10-19,
+// 21:50-23:30Z, a GitHub release download that crawled at ~30 KB/s held
+// every gascity lane 8 minutes, then failed it). Each file is checked
+// against its pin before it is installed, and a file with other content is
+// removed and downloaded; like every actions/cache entry, the rest of the
+// archive is trusted for who writes it, which is only bazel-test's
+// push-to-main step. Bazelisk runs the checked binary from a home seeded in
+// its own layout, never a tools/bazel wrapper, and must not download (its
+// download URL cannot resolve there). Downloads give up on a transfer too
+// slow to finish in time for its file and fall back to Bazel's GitHub
+// release.
+func TestSetupBazelBinariesComeFromAVerifiedCacheEntry(t *testing.T) {
+	steps := readSetupBazelAction(t).Runs.Steps
+	index := map[string]int{}
+	for i, step := range steps {
+		index[step.Name] = i
+	}
+	restoreAt, ok := index["Restore Bazelisk and Bazel"]
+	if !ok {
+		t.Fatal("setup-bazel has no Restore Bazelisk and Bazel step")
+	}
+	if index["Install Bazelisk"] != restoreAt+1 {
+		t.Errorf("Restore Bazelisk and Bazel must come right before Install Bazelisk")
+	}
+	restore := steps[restoreAt]
+	const binPath = "${{ runner.temp }}/bazel-bin"
+	wantKey := "bazel-bin-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bazelversion', '.github/actions/setup-bazel/action.yml') }}"
+	if restore.ID != "bin-restore" || !strings.HasPrefix(restore.Uses, "actions/cache/restore@") ||
+		restore.With["path"] != binPath || restore.With["key"] != wantKey {
+		t.Errorf("Restore Bazelisk and Bazel: id %q uses %q with %v; want id bin-restore, actions/cache/restore of %s keyed %s",
+			restore.ID, restore.Uses, restore.With, binPath, wantKey)
+	}
+	if _, ok := restore.With["restore-keys"]; ok {
+		t.Errorf("Restore Bazelisk and Bazel has restore-keys; another key's binaries are other pins' and of no use")
+	}
+
+	install := steps[index["Install Bazelisk"]].Run
+	// Each restored file is checked before it is used, and a fetched one
+	// before it replaces anything.
+	for _, order := range [][2]string{
+		{`have "$bazelisk" "$sha"`, `sudo install -m 755 "$bazelisk" /usr/local/bin/bazelisk`},
+		{`have "$bin/$bazel_file" "$bazel_sha"`, `install -m 755 "$bin/$bazel_file" "$home/downloads/sha256/$bazel_sha/bin/bazel"`},
+		{`echo "$want  $file.part" | sha256sum -c --status -; then`, `mv -f "$file.part" "$file"`},
+	} {
+		first, second := strings.Index(install, order[0]), strings.Index(install, order[1])
+		if first < 0 || second < 0 || first > second {
+			t.Errorf("setup-bazel Install Bazelisk must run %q before %q", order[0], order[1])
+		}
+	}
+	for _, want := range []string{
+		`if echo "$2  $1" | sha256sum -c --status -; then`,
+		`rm -f "$1"`,
+		// A slow or stalled transfer gives up and retries, then the next
+		// source; each file's floor finishes it inside --max-time.
+		`--max-time 120 --speed-limit "$floor" --speed-time 15`,
+		`fetch "$bazelisk" "$sha" 65536 `,
+		`fetch "$bin/$bazel_file" "$bazel_sha" 786432 `,
+		`echo "BAZELISK_SKIP_WRAPPER=true"`,
+		`"https://github.com/bazelbuild/bazelisk/releases/download/${version}/bazelisk-linux-${arch}"`,
+		`"https://releases.bazel.build/${bazel_version}/release/${bazel_file}"`,
+		`"https://github.com/bazelbuild/bazel/releases/download/${bazel_version}/${bazel_file}"`,
+		// Bazelisk's own layout: the mapping names the sha256 the binary sits under.
+		`printf '%s' "$bazel_sha" > "$home/downloads/metadata/bazelbuild/$bazel_file"`,
+		`rm -rf "$home"`,
+	} {
+		if !strings.Contains(install, want) {
+			t.Errorf("setup-bazel Install Bazelisk lacks %q", want)
+		}
+	}
+
+	wrapper := steps[index["Install bazel wrapper"]].Run
+	if want := "BAZELISK_FORMAT_URL='https://setup-bazel-seeded.invalid/%v/%o/%m' /usr/local/bin/bazelisk --version"; !strings.Contains(wrapper, want) {
+		t.Errorf("setup-bazel Install bazel wrapper must run the seeded Bazel with downloads pointed at an address that cannot resolve: lacks %q", want)
+	}
+
+	for _, step := range steps {
+		if actionFamily(step.Uses) == cacheSaveActionFamily {
+			t.Errorf("setup-bazel step %q saves a cache; only %s's push-to-main steps may", step.Name, bazelJobName)
+		}
+	}
+	// The outputs the save reads: the restore's primary key (set before the
+	// lookup, so also on a miss; cache-matched-key would be empty there and
+	// the save would never fill the entry) and its exact-hit flag.
+	var action struct {
+		Outputs map[string]struct {
+			Value string `yaml:"value"`
+		} `yaml:"outputs"`
+	}
+	if err := yaml.Unmarshal([]byte(readPolicyFile(t, sourceRepoRoot(t), setupBazelActionDir+"/action.yml")), &action); err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]string{
+		"bin-cache-key": "${{ steps.bin-restore.outputs.cache-primary-key }}",
+		"bin-cache-hit": "${{ steps.bin-restore.outputs.cache-hit }}",
+	} {
+		if got := action.Outputs[name].Value; got != want {
+			t.Errorf("setup-bazel output %s = %q, want %q", name, got, want)
+		}
+	}
+	// The one writer: bazel-test's push-to-main step, under the key the
+	// restore computed (TestBazelWorkflowCacheTopology pins the runner
+	// cache's beside it).
+	save := readCIWorkflow(t, bazelWorkflowName).job(t, bazelJobName).step(t, "Save Bazelisk and Bazel")
+	if !strings.HasPrefix(save.Uses, "actions/cache/save@") || save.With["path"] != binPath ||
+		save.With["key"] != "${{ steps.bazel.outputs.bin-cache-key }}" {
+		t.Errorf("%s Save Bazelisk and Bazel uses %q with %v; want actions/cache/save of %s under setup-bazel's bin-cache-key", bazelJobName, save.Uses, save.With, binPath)
+	}
+	if want := "${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.bazel.outcome == 'success' && steps.bazel.outputs.bin-cache-hit != 'true' }}"; save.If != want {
+		t.Errorf("Save Bazelisk and Bazel if %q, want %q (only a push to main that missed writes the entry)", save.If, want)
 	}
 }
