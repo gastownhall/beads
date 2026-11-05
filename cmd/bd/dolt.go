@@ -701,8 +701,40 @@ func printDivergedHistoryGuidance(operation string) {
 	fmt.Fprintln(os.Stderr, "existing remote instead of 'bd init' to avoid divergent histories.")
 }
 
+// remoteFromArgs resolves the remote `bd dolt push|pull` targets: the
+// optional positional name, else --remote. "" means the default remote.
+// Cobra's default ArbitraryArgs used to accept `bd dolt push 1st` and RunE
+// dropped the name, so the push went to the default remote (GH#3720).
+func remoteFromArgs(cmd *cobra.Command, args []string) (string, error) {
+	flagRemote, _ := cmd.Flags().GetString("remote")
+	if len(args) == 0 {
+		return flagRemote, nil
+	}
+	remote := args[0]
+	// An empty name (`bd dolt push "$R"` with R unset) must not fall back to
+	// the default remote: that is the same silent misdirection.
+	if strings.TrimSpace(remote) == "" {
+		return "", HandleError("remote name is empty: name a remote (see 'bd dolt remote list') or omit the argument to use the default")
+	}
+	// Letting either spelling win would silently discard a selector the
+	// user typed, the bug class this resolves.
+	if flagRemote != "" && flagRemote != remote {
+		return "", HandleError("remote named twice: %q as an argument and %q with --remote; name it once", remote, flagRemote)
+	}
+	return remote, nil
+}
+
+// validateRemoteArg runs remoteFromArgs as cobra's Args validation, which
+// executes before PersistentPreRunE opens the store, so a bad remote argument
+// fails before any server start or migration (as validateCreateArgs does).
+func validateRemoteArg(cmd *cobra.Command, args []string) error {
+	_, err := remoteFromArgs(cmd, args)
+	return err
+}
+
 var doltPushCmd = &cobra.Command{
-	Use:           "push",
+	Use:           "push [remote]",
+	Args:          cobra.MatchAll(cobra.MaximumNArgs(1), validateRemoteArg),
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	Short:         "Push commits to Dolt remote",
@@ -718,8 +750,9 @@ variables for authentication.
 Use --force to overwrite remote changes (e.g., when the remote has
 uncommitted changes in its working set).
 
-Use --remote to push to a specific named remote instead of the default.
-The remote must already exist (see 'bd dolt remote add').`,
+Name a remote to push to it instead of the default: 'bd dolt push <remote>'
+or 'bd dolt push --remote <remote>'. The remote must already exist (see
+'bd dolt remote add').`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if config.GetBool("no-push") {
 			fmt.Println("skipping push: rig is local-only (no-push: true)")
@@ -743,7 +776,10 @@ The remote must already exist (see 'bd dolt remote add').`,
 			return HandleError("no store available")
 		}
 		force, _ := cmd.Flags().GetBool("force")
-		remote, _ := cmd.Flags().GetString("remote")
+		remote, err := remoteFromArgs(cmd, args)
+		if err != nil {
+			return err
+		}
 		if remote != "" {
 			fmt.Printf("Pushing to Dolt remote %q...\n", remote)
 			if err := st.PushRemote(ctx, remote, force); err != nil {
@@ -805,7 +841,8 @@ The remote must already exist (see 'bd dolt remote add').`,
 }
 
 var doltPullCmd = &cobra.Command{
-	Use:           "pull",
+	Use:           "pull [remote]",
+	Args:          cobra.MatchAll(cobra.MaximumNArgs(1), validateRemoteArg),
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	Short:         "Pull commits from Dolt remote",
@@ -815,8 +852,9 @@ Requires a Dolt remote to be configured in the database directory.
 For Hosted Dolt, set DOLT_REMOTE_USER and DOLT_REMOTE_PASSWORD environment
 variables for authentication.
 
-Use --remote to pull from a specific named remote instead of the default.
-The remote must already exist (see 'bd dolt remote add').
+Name a remote to pull from it instead of the default: 'bd dolt pull <remote>'
+or 'bd dolt pull --remote <remote>'. The remote must already exist (see
+'bd dolt remote add').
 
 Use --strategy ours|theirs to resolve conflicts the auto-resolver declines
 (e.g. both sides edited the same issue since the last sync) instead of
@@ -841,7 +879,10 @@ reports conflicts.`,
 		if st == nil {
 			return HandleError("no store available")
 		}
-		remote, _ := cmd.Flags().GetString("remote")
+		remote, err := remoteFromArgs(cmd, args)
+		if err != nil {
+			return err
+		}
 		strategy, _ := cmd.Flags().GetString("strategy")
 		if strategy != "" {
 			if err := versioncontrolops.ValidateConflictStrategy(strategy); err != nil {
@@ -889,7 +930,6 @@ reports conflicts.`,
 			return HandleError("%v", err)
 		}
 		fmt.Println("Pulling from Dolt remote...")
-		var err error
 		if strategy != "" {
 			err = puller.PullWithStrategy(ctx, strategy)
 		} else {
@@ -1595,6 +1635,19 @@ func runExternalDoltStatus(beadsDir string, cfg *configfile.Config) {
 	runExternalDoltStatusAt(doltserver.ResolveEndpoint(beadsDir, cfg), cfg)
 }
 
+// endpointTrustErrForCredential reports a workspace-pin violation when password
+// is non-empty, so a caller that builds its own authenticated DSN (rather than
+// going through the store's gated open) refuses to send BEADS_DOLT_PASSWORD or a
+// credentials-file password to a shared-config endpoint it never pinned
+// (GH#7886). It is nil when nothing authenticates (no password) and a no-op for
+// bd's own local server and the vendor default.
+func endpointTrustErrForCredential(ep doltserver.Endpoint, cfg *configfile.Config, password string) error {
+	if password == "" {
+		return nil
+	}
+	return ep.EnsureTrustedForCredential(cfg)
+}
+
 // runExternalDoltStatusAt is runExternalDoltStatus for ep, an endpoint the
 // caller already resolved for cfg's workspace (doltserver.ResolveEndpoint).
 // It names the server it dialed: the unix socket when it dialed one (Socket,
@@ -1619,6 +1672,12 @@ func runExternalDoltStatusAt(ep doltserver.Endpoint, cfg *configfile.Config) {
 		// No port resolved and no socket: nothing to dial. Give the store's
 		// advice for this server, not a dial of 127.0.0.1:0.
 		connErr = unresolved
+	} else if trustErr := endpointTrustErrForCredential(ep, cfg, password); trustErr != nil {
+		// The password would be sent to a shared-config host (metadata.json
+		// dolt_server_host / config.yaml dolt.host) the workspace never pinned:
+		// refuse the authenticated probe rather than hand BEADS_DOLT_PASSWORD to
+		// it (the store's open refuses the same change — GH#7886).
+		connErr = trustErr
 	} else {
 		// The connection the store makes, over its transport: a live unix
 		// socket first, else TCP (doltserver.Endpoint.Transport). Resolved
@@ -2836,6 +2895,13 @@ func openDoltServerConnection() (*sql.DB, func(), error) {
 	}
 	user := cfg.GetDoltServerUser()
 	password := os.Getenv("BEADS_DOLT_PASSWORD")
+	if password != "" {
+		// Refuse to send BEADS_DOLT_PASSWORD to a shared-config host the
+		// workspace never pinned, as the store's open does (GH#7886).
+		if err := doltserver.CheckEndpointTrust(beadsDir, cfg, host, port, cfg.GetDoltServerSocket()); err != nil {
+			return nil, nil, HandleError("%v", err)
+		}
+	}
 
 	connStr := doltutil.ServerDSN{
 		Host:     host,

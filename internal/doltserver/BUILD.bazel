@@ -38,6 +38,7 @@ go_library(
         "//internal/debug",
         "//internal/doltinfoenv",
         "//internal/doltversion",
+        "//internal/endpointtrust",
         "//internal/fdhygiene",
         "//internal/githooksenv",
         "//internal/gittraceenv",

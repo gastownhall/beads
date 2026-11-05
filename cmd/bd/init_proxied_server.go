@@ -74,7 +74,7 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 	// Shares resolveAndProbeDolt (uow_factory.go) with
 	// newManagedProxiedServerUOWProvider, which this same `bd init
 	// --proxied-server` invocation goes on to call a few lines below via
-	// newProxiedServerUOWProvider: the shared doltVersionWarnOnce means the
+	// newProxiedServerUOWProviderInitializing: the shared doltVersionWarnOnce means the
 	// version advisory prints at most once for the command, not once per
 	// call site.
 	if in.externalConfig == nil {
@@ -87,6 +87,12 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 
 	if err := config.Initialize(); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to initialize config: %v\n", err)
+	}
+
+	if !in.initRemoteChanged {
+		if _, err := resolveSyncRemoteChecked(); err != nil {
+			return err
+		}
 	}
 
 	if err := checkExistingBeadsData(in.prefix); err != nil {
@@ -125,6 +131,7 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 	dbName, projectID := proxiedInit.DBName, proxiedInit.ProjectID
 	beadsDirIsLocal := proxiedInit.IsLocal
 	useLocalBeads := !hasExplicitBeadsDir || beadsDirIsLocal
+	in.teamServer = proxiedInitTeamServer(in.teamServer, proxiedInit.Existing)
 
 	if in.teamServer && proxiedInit.DBNameDerived {
 		return fmt.Errorf(
@@ -149,6 +156,7 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 	}
 
 	metadataBody, err := composeProxiedServerMetadataJSON(proxiedMetadataInputs{
+		existing:   proxiedInit.Existing,
 		dbName:     dbName,
 		projectID:  projectID,
 		teamServer: in.teamServer,
@@ -156,7 +164,7 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 	if err != nil {
 		return fmt.Errorf("composing metadata.json: %v", err)
 	}
-	configYAMLBody := renderInitConfigYAML("", false)
+	configYAMLBody := proxiedInitConfigYAMLBody(beadsDir)
 
 	clientInfo, err := buildProxiedServerClientInfo(in.serverRootPath, in.serverConfigPath, in.serverLogPath, in.serverProxyPort, in.serverProxyIdleTimeout, in.externalConfig)
 	if err != nil {
@@ -185,7 +193,9 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 		fmt.Fprintf(os.Stderr, "Warning: failed to initialize version tracking: %v\n", fsResult.LocalVersionErr)
 	}
 
-	initUOWProvider, err := newProxiedServerUOWProviderAdopting(ctx, beadsDir, "")
+	// Initializing, not Adopting: init is the one open allowed to create the
+	// managed-local store (every other open refuses an empty root).
+	initUOWProvider, err := newProxiedServerUOWProviderInitializing(ctx, beadsDir, "")
 	if err != nil {
 		return fmt.Errorf("failed to open uow provider: %v", err)
 	}
@@ -457,25 +467,62 @@ func adoptTeamServerIdentity(ctx context.Context, verifier issueops.InitVerifier
 }
 
 type proxiedMetadataInputs struct {
+	existing   *configfile.Config // metadata.json as init found it; nil when there is none
 	dbName     string
 	projectID  string
 	teamServer bool
 }
 
+// composeProxiedServerMetadataJSON renders the metadata.json init writes,
+// starting from the workspace's existing file. It sets only what this route
+// owns (backend, mode, database name, identity, the team-server marker, and
+// `database` when it is unset or the legacy beads.db, as the direct route
+// does) and keeps the rest. metadata.json is tracked, and init is the remedy
+// every refused open names (proxiedFreshStoreRefusal), so rewriting the file
+// from defaults made that remedy commit a revert of the team's file, and it
+// dropped the dolt_data_dir or absolute database that chose the root the
+// refusal named. An absolute dolt_data_dir stays too: Config.Save drops one
+// so that bd never puts a machine path into the tracked file (GH#2251), but
+// this one is already there, and dropping it would move every clone's root.
 func composeProxiedServerMetadataJSON(in proxiedMetadataInputs) ([]byte, error) {
 	cfg := configfile.DefaultConfig()
+	if in.existing != nil {
+		existing := *in.existing
+		cfg = &existing
+	}
 	cfg.Backend = configfile.BackendDolt
-	cfg.Database = "dolt"
+	if cfg.Database == "" || cfg.Database == beads.CanonicalDatabaseName {
+		cfg.Database = "dolt"
+	}
 	cfg.DoltDatabase = in.dbName
 	cfg.DoltMode = configfile.DoltModeProxiedServer
 	cfg.ProjectID = in.projectID
 	cfg.DoltTeamServer = in.teamServer
 
-	if filepath.IsAbs(cfg.DoltDataDir) {
-		cfg.DoltDataDir = ""
-	}
-
 	return json.MarshalIndent(cfg, "", "  ")
+}
+
+// proxiedInitConfigYAMLBody is the config.yaml init writes: the template for
+// a workspace that has none, and nothing (InitializeBeadsDir then leaves the
+// file alone) for one that does. config.yaml is tracked team configuration,
+// so a re-init keeps it, as createConfigYaml keeps it on the direct route.
+func proxiedInitConfigYAMLBody(beadsDir string) []byte {
+	if _, err := os.Stat(filepath.Join(beadsDir, "config.yaml")); err == nil {
+		return nil
+	}
+	return renderInitConfigYAML("", false)
+}
+
+// proxiedInitTeamServer is the team-server posture init runs with: the
+// --team-server flag, or a workspace whose metadata.json is already
+// team-server managed. Without the flag, init on such a workspace used to
+// rewrite the file as bd-managed, so its open treated a database
+// beads-team-server owns as bd's to migrate, and init wrote bd's tracking
+// rows into it. Leaving team-server management takes an edit of
+// metadata.json, as the proxied-server mode migration already requires
+// (migrate_dolt_mode.go).
+func proxiedInitTeamServer(flag bool, existing *configfile.Config) bool {
+	return flag || (existing != nil && existing.IsTeamServerManaged())
 }
 
 func buildProxiedServerClientInfo(rootPath, configPath, logPath string, port int, idleTimeout time.Duration, external *configfile.ExternalDoltConfig) (*configfile.ProxiedServerClientInfo, error) {

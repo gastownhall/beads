@@ -215,6 +215,14 @@ const CapBlockingIsBlocked = "dependencies.blocking.isBlocked"
 // events_journal_disabled reports.
 const CapArrivalSeq = "issues.arrivalSeq"
 
+// CapDeleteContainmentCascade is the behavior capability announcing that
+// deleteIssues' `cascade` follows parent-child edges only (GH#6301), spelled
+// exactly as httpapi's CapIssuesDeleteContainmentCascade. An older server
+// answers the same `cascade` by deleting every transitive dependent, so
+// deleter.go refuses a cascade — a preview included — locally with a typed
+// capability error against a server that does not advertise it.
+const CapDeleteContainmentCascade = "issues.delete.containmentCascade"
+
 // CapBatchApplyLarge is the behavior capability announcing that issues.batchApply
 // accepts a batch larger than the compiled-in floor (100 items), up to the
 // raised ceiling (1000), spelled exactly as httpapi's constant of the same name
@@ -503,7 +511,7 @@ var behaviorCapabilities = []string{
 	CapCloseAutoCloseMolecule, CapListSearch,
 	CapListNoAssignee, CapListTitle, CapListIDs, CapIssuesUpdatePersistence, CapBlockingIsBlocked, CapIssuesUpdateClaim,
 	CapIssuesCreateGates, CapIssuesUpdateGates, CapListFilters,
-	CapArrivalSeq,
+	CapArrivalSeq, CapDeleteContainmentCascade,
 }
 
 // CapabilityFor reports the capability token gating op, and whether op is on
