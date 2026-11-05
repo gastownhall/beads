@@ -72,13 +72,15 @@ func labelsNamed(names ...string) []Label {
 // the engine of `bd github sync`, `push` and `pull`.
 func syncPushHooks(gt *Tracker) *tracker.PushHooks {
 	config := gt.MappingConfig()
+	pushFieldsEqual := func(local *types.Issue, remote *tracker.TrackerIssue) bool {
+		gh, ok := remote.Raw.(*Issue)
+		return ok && PushFieldsEqual(local, gh, config)
+	}
 	return &tracker.PushHooks{
-		ContentEqual: func(local *types.Issue, remote *tracker.TrackerIssue) bool {
-			gh, ok := remote.Raw.(*Issue)
-			return ok && PushFieldsEqual(local, gh, config)
-		},
-		ContentHash: func(local *types.Issue) string { return PushContentHash(local, config) },
-		TargetScope: gt.PushTargetScope,
+		ContentEqual:    pushFieldsEqual,
+		PushFieldsEqual: pushFieldsEqual,
+		ContentHash:     func(local *types.Issue) string { return PushContentHash(local, config) },
+		TargetScope:     gt.PushTargetScope,
 	}
 }
 
@@ -114,7 +116,18 @@ func TestPullMirrorsRemovedLabelsSoThePushIsANoOp(t *testing.T) {
 			srv := httptest.NewServer(server)
 			defer srv.Close()
 
-			gt := &Tracker{client: NewClient("token", "o", "r").WithBaseURL(srv.URL), config: DefaultMappingConfig()}
+			// The client keeps GitHub's base URL, so the tracker reads the
+			// github.com ref as its repository's issue (RefScope); the
+			// transport sends the requests to the double.
+			transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				req = req.Clone(req.Context())
+				req.URL.Scheme = "http"
+				req.URL.Host = srv.Listener.Addr().String()
+				req.Host = req.URL.Host
+				return http.DefaultTransport.RoundTrip(req)
+			})
+			client := NewClient("token", "o", "r").WithHTTPClient(&http.Client{Transport: transport})
+			gt := &Tracker{client: client, config: DefaultMappingConfig()}
 			store := conformance.NewStore()
 			store.Config["issue_prefix"] = "bd"
 			store.Issues["bd-1"] = &types.Issue{
@@ -134,7 +147,10 @@ func TestPullMirrorsRemovedLabelsSoThePushIsANoOp(t *testing.T) {
 			// The issue matches GitHub, so this push only records its hash.
 			run(tracker.SyncOptions{Push: true})
 
-			server.editLabels(pushed.Add(time.Hour), test.remoteLabels...)
+			// GitHub's edit comes after the push's last_sync, as a real edit
+			// does: the pull of `bd github sync` leaves a linked issue alone
+			// for a row dated before its fetch window.
+			server.editLabels(time.Now().UTC().Add(time.Hour), test.remoteLabels...)
 			if test.pullOnly {
 				run(tracker.SyncOptions{Pull: true, IssueIDs: []string{"bd-1"}})
 			} else {

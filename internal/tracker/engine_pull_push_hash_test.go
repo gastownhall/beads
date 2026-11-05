@@ -78,9 +78,14 @@ func titlePushHooks() *PushHooks {
 	}
 }
 
+// editRemote edits the remote issue and dates the edit after every last_sync
+// the test writes, as a real edit after the last sync is. An incremental pull
+// leaves a linked issue alone for a row dated before its fetch window
+// (skipOverlapRow), so an edit dated near the fixture's past time would never
+// be pulled.
 func (f *pushHashFixture) editRemote(title string) {
 	f.mock.issues[0].Title = title
-	f.mock.issues[0].UpdatedAt = f.mock.issues[0].UpdatedAt.Add(time.Hour)
+	f.mock.issues[0].UpdatedAt = time.Now().UTC().Add(time.Hour)
 }
 
 func (f *pushHashFixture) pushHashes() map[string]string {
@@ -266,6 +271,9 @@ func TestEnginePullRecordsPushHash(t *testing.T) {
 	t.Run("equal_pull_writes_only_a_changed_entry", func(t *testing.T) {
 		f := newPushHashFixture()
 		runSync(t, f.engine, SyncOptions{Push: true})
+		// A remote edit that leaves the title alone, so each pull reaches the
+		// issue and finds it equal.
+		f.editRemote("pushed")
 
 		noHash := NewEngine(f.mock, f.store, "sync")
 		for i, step := range []struct {
