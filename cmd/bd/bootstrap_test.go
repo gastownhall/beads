@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
@@ -25,44 +26,6 @@ import (
 	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/testutil"
 )
-
-// snapshotBootstrapEnv saves all BD_/BEADS_-prefixed env vars, clears them,
-// and registers a t.Cleanup to restore them. It restores via t.Cleanup
-// (rather than returning a function for the caller to defer) because
-// t.Cleanup callbacks only start running after the test function's own
-// regular defers have all completed. Tests using this helper commonly call
-// t.Setenv("BEADS_DIR", ...) / t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", ...)
-// afterward; t.Setenv captures its "restore to" value at call time, which
-// would be the already-wiped (absent) state. If this helper's own
-// restoration ran via a caller-deferred function, it would run before those
-// t.Setenv cleanups fire and its correct restoration would be clobbered by
-// them, permanently leaking the wipe forward into later tests in the same
-// binary. Registering via t.Cleanup here instead makes this the
-// first-registered (and thus, by t.Cleanup's LIFO order, last-run) cleanup,
-// so it always has the final word.
-func snapshotBootstrapEnv(t *testing.T) {
-	t.Helper()
-	saved := make(map[string]string)
-	for _, env := range os.Environ() {
-		if strings.HasPrefix(env, "BD_") || strings.HasPrefix(env, "BEADS_") {
-			parts := strings.SplitN(env, "=", 2)
-			key := parts[0]
-			saved[key] = os.Getenv(key)
-			_ = os.Unsetenv(key)
-		}
-	}
-	t.Cleanup(func() {
-		for _, env := range os.Environ() {
-			if strings.HasPrefix(env, "BD_") || strings.HasPrefix(env, "BEADS_") {
-				parts := strings.SplitN(env, "=", 2)
-				_ = os.Unsetenv(parts[0])
-			}
-		}
-		for key, val := range saved {
-			_ = os.Setenv(key, val)
-		}
-	})
-}
 
 func TestDetectBootstrapAction_NoneWhenDatabaseExists(t *testing.T) {
 	t.Setenv("BEADS_DOLT_DATA_DIR", "")
@@ -1130,6 +1093,107 @@ func TestFindParentConfigWithoutHomeKeepsSearchingAboveCwd(t *testing.T) {
 	if got := cfg.GetDoltDatabase(); got != "parent_workspace" {
 		t.Errorf("GetDoltDatabase() = %q, want %q", got, "parent_workspace")
 	}
+}
+
+// TestFindParentConfigPassesOverUserGlobalBeads pins GH#4402 for bootstrap's
+// parent-config walk. A project under the account home with no metadata.json
+// does not inherit the user-global <home>/.beads/metadata.json, whose database
+// name and server bootstrap would otherwise set up, and the walk does not
+// climb above the account home when $HOME points elsewhere. A home directory
+// that is itself a repository root keeps its .beads as that repository's own.
+func TestFindParentConfigPassesOverUserGlobalBeads(t *testing.T) {
+	writeMetadata := func(t *testing.T, beadsDir, database string) {
+		t.Helper()
+		if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"dolt_database":"`+database+`"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// <sandbox>/root/home is the account home and holds the user-global
+	// .beads; <sandbox>/root/.beads lies above it, where only a walk that
+	// climbs past the home directory would find it.
+	type fixture struct{ sandbox, home, requested string }
+	setup := func(t *testing.T) fixture {
+		t.Helper()
+		sandbox, err := filepath.EvalSymlinks(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		root := filepath.Join(sandbox, "root")
+		f := fixture{sandbox: sandbox, home: filepath.Join(root, "home")}
+		writeMetadata(t, filepath.Join(root, ".beads"), "above_home")
+		writeMetadata(t, filepath.Join(f.home, ".beads"), "user_global")
+		f.requested = filepath.Join(f.home, "proj", ".beads")
+		if err := os.MkdirAll(f.requested, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		// Keep the temp-root ceiling clear of this walk; it is not what this pins.
+		t.Setenv("TMPDIR", filepath.Join(sandbox, "tmp"))
+		t.Cleanup(beads.SetUserHomeDirForTesting(f.home))
+		return f
+	}
+	setHome := func(t *testing.T, home string) {
+		t.Helper()
+		t.Setenv("HOME", home)
+		t.Setenv("USERPROFILE", home)
+	}
+
+	t.Run("project under the home directory", func(t *testing.T) {
+		f := setup(t)
+		setHome(t, f.home)
+		cfg, err := findParentConfig(f.requested)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg != nil {
+			t.Errorf("findParentConfig() inherited database %q, want no parent config", cfg.GetDoltDatabase())
+		}
+	})
+
+	t.Run("HOME points elsewhere", func(t *testing.T) {
+		f := setup(t)
+		setHome(t, filepath.Join(f.sandbox, "elsewhere"))
+		cfg, err := findParentConfig(f.requested)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg != nil {
+			t.Errorf("findParentConfig() inherited database %q, want no parent config: the walk ends at the account home", cfg.GetDoltDatabase())
+		}
+	})
+
+	t.Run("home is a repository root", func(t *testing.T) {
+		f := setup(t)
+		setHome(t, f.home)
+		initGitRepoAt(t, f.home)
+		cfg, err := findParentConfig(f.requested)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg == nil || cfg.GetDoltDatabase() != "user_global" {
+			t.Errorf("findParentConfig() = %+v, want the home repository's own database %q", cfg, "user_global")
+		}
+	})
+
+	t.Run("home repository without metadata, HOME elsewhere", func(t *testing.T) {
+		// The home repository's .beads is examined and holds nothing, and
+		// the walk still ends at the account home.
+		f := setup(t)
+		if err := os.Remove(filepath.Join(f.home, ".beads", "metadata.json")); err != nil {
+			t.Fatal(err)
+		}
+		setHome(t, filepath.Join(f.sandbox, "elsewhere"))
+		initGitRepoAt(t, f.home)
+		cfg, err := findParentConfig(f.requested)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg != nil {
+			t.Errorf("findParentConfig() inherited database %q, want no parent config: the walk ends at the account home", cfg.GetDoltDatabase())
+		}
+	})
 }
 
 // TestDetectBootstrapAction_SharedServerEnvUsesSharedPath verifies that when
