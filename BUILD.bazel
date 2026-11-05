@@ -68,6 +68,17 @@ exports_files(
     ],
 )
 
+# //scripts:android_release_docs_test: the docs describing the android/arm64
+# cgo release build.
+exports_files(
+    [
+        "CHANGELOG.md",
+        "RELEASING.md",
+        "docs/getting-started/installation.md",
+    ],
+    visibility = ["//scripts:__pkg__"],
+)
+
 # //scripts:shell_scripts_test: scripts/test.sh's skip list.
 exports_files(
     [".test-skip"],
