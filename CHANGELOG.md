@@ -1848,6 +1848,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `bd admin reset --force`. A user-owned `prepare-commit-msg` is still left
   alone, or reported and kept when bd only injected a section into it
   (#5566).
+- `bd cook` / `bd mol pour` now point a `needs`/`depends_on` on an
+  inline-`expand`ed step at the expansion's last step, as `[[compose.expand]]`
+  does. Before, the dependency was silently dropped and the dependent was
+  ready at pour (#7637). Inside the expansion, a dependency on the expanded
+  step's ID still names the template's own step with that ID (such as
+  `id = "{target}"`), if it has one. Inline expansions that produce the same
+  step ID twice, such as a template without `{target}` in its step IDs
+  expanded on two steps, are now refused with `duplicate step IDs after
+  expansion`, as `[[compose.expand]]` already refuses them. Cook also refuses
+  a formula in which a step outside an expansion has the expanded step's ID,
+  or a template step depends on `{target}` while the template has no step
+  with that ID, rather than point those dependencies at the wrong step or
+  into a cycle.
 - The batched bulk readers no longer return an issue's rows twice when the
   same id is requested twice. Since the 200-id batching (#6444), an id that
   appeared in two batches had its comments, labels, dependency records,
