@@ -313,6 +313,20 @@ func checkDoltVersion(cfg *configfile.Config, beadsDir string) (DoctorCheck, *sq
 	// resolved runtime port is required because the port file may differ from
 	// the metadata port (bd-h5k7).
 	password := cfg.GetDoltServerPasswordForPort(port)
+	if password != "" {
+		// Refuse to send BEADS_DOLT_PASSWORD to a shared-config host the
+		// workspace never pinned, as the store's open does (GH#7886).
+		if err := doltserver.CheckEndpointTrust(beadsDir, cfg, host, port, cfg.GetDoltServerSocket()); err != nil {
+			return DoctorCheck{
+				Name:     "Dolt Version",
+				Status:   StatusError,
+				Message:  "Dolt server endpoint not trusted",
+				Detail:   err.Error(),
+				Fix:      "Confirm the endpoint via BEADS_DOLT_SERVER_HOST or ~/.config/bd/config.yaml",
+				Category: CategoryFederation,
+			}, nil
+		}
+	}
 
 	// Build DSN without database (just to test server connectivity)
 	connStr := doltutil.ServerDSN{

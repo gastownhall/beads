@@ -167,7 +167,10 @@ func resetDataGitURL(remoteURL string) string {
 func lsRemoteDoltDataRefs(ctx context.Context, gitURL string) ([]string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "ls-remote", gitURL, gitDoltDataRef, gitDoltInfoRef) // #nosec G204 -- URL from configured remote
+	if err := checkRemoteNotOption("git remote", gitURL); err != nil {
+		return nil, err
+	}
+	cmd := exec.CommandContext(ctx, "git", "ls-remote", "--", gitURL, gitDoltDataRef, gitDoltInfoRef) // #nosec G204 -- URL from configured remote, after "--"
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("git ls-remote %s failed: %s: %w", gitURL, strings.TrimSpace(string(out)), err)
@@ -187,7 +190,10 @@ func lsRemoteDoltDataRefs(ctx context.Context, gitURL string) ([]string, error) 
 // git invocations (GH#3724 class: a user's templated pre-push hook must not
 // break — or observe — bd's data-plane plumbing).
 func deleteGitDoltDataRefs(ctx context.Context, gitURL string, refs []string) error {
-	args := []string{"push", gitURL}
+	if err := checkRemoteNotOption("git remote", gitURL); err != nil {
+		return err
+	}
+	args := []string{"push", "--", gitURL}
 	for _, ref := range refs {
 		args = append(args, ":"+ref)
 	}
@@ -780,7 +786,7 @@ func deleteTempGitRef(ctx context.Context, gitURL, ref string) error {
 	if err := git(scratchGitInitArgs(oid)...); err != nil {
 		return err
 	}
-	return git("push", "-q", gitURL, ":"+ref)
+	return git("push", "-q", "--", gitURL, ":"+ref)
 }
 
 // scratchGitInitArgs returns the git init arguments for a scratch
@@ -800,9 +806,12 @@ func scratchGitInitArgs(oid string) []string {
 // lsRemoteRefOID returns the object ID ref names on the git remote at gitURL,
 // or "" when the remote has no such ref.
 func lsRemoteRefOID(ctx context.Context, gitURL, ref string) (string, error) {
+	if err := checkRemoteNotOption("git remote", gitURL); err != nil {
+		return "", err
+	}
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "git", "ls-remote", gitURL, ref).CombinedOutput() // #nosec G204 -- URL from configured remote
+	out, err := exec.CommandContext(ctx, "git", "ls-remote", "--", gitURL, ref).CombinedOutput() // #nosec G204 -- URL from configured remote, after "--"
 	if err != nil {
 		return "", fmt.Errorf("git ls-remote %s failed: %s: %w", gitURL, strings.TrimSpace(string(out)), err)
 	}
@@ -825,6 +834,9 @@ var moveDataRef = moveGitRef
 // remote supports one, else the whole commit, which the push then does not
 // send back.
 func moveGitRef(ctx context.Context, gitURL, src, srcOID, ref, before string) error {
+	if err := checkRemoteNotOption("git remote", gitURL); err != nil {
+		return err
+	}
 	dir, err := os.MkdirTemp("", "bd-reset-data-")
 	if err != nil {
 		return err
@@ -841,8 +853,8 @@ func moveGitRef(ctx context.Context, gitURL, src, srcOID, ref, before string) er
 	if err := git(scratchGitInitArgs(srcOID)...); err != nil {
 		return err
 	}
-	if err := git("fetch", "-q", "--no-tags", "--depth=1", "--filter=tree:0", gitURL, "+"+src+":refs/bd-reset-data/new"); err != nil {
+	if err := git("fetch", "-q", "--no-tags", "--depth=1", "--filter=tree:0", "--", gitURL, "+"+src+":refs/bd-reset-data/new"); err != nil {
 		return err
 	}
-	return git("push", "-q", "--force-with-lease="+ref+":"+before, gitURL, "refs/bd-reset-data/new:"+ref)
+	return git("push", "-q", "--force-with-lease="+ref+":"+before, "--", gitURL, "refs/bd-reset-data/new:"+ref)
 }

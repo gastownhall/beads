@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage"
 )
 
@@ -46,6 +47,33 @@ func TestApplyRemoteDryRun(t *testing.T) {
 	result := applyRemote(true, true)
 	if result.Status != applyStatusSkipped && result.Status != applyStatusDryRun {
 		t.Errorf("expected status %q or %q, got %q", applyStatusSkipped, applyStatusDryRun, result.Status)
+	}
+}
+
+// TestApplyRemoteRefusesOptionShapedFederationRemote pins that bd config
+// apply refuses a federation.remote whose ssh user name or host Dolt's ssh
+// transport would hand to ssh as an option, before it opens the store to add
+// it as the origin remote: a committed config.yaml can set the key, and every
+// later push, pull and auto-push dials that remote.
+func TestApplyRemoteRefusesOptionShapedFederationRemote(t *testing.T) {
+	for _, remote := range []string{
+		"ssh://-oProxyCommand=touch%20%2Ftmp%2Fpwned@host/path",
+		"ssh://-oProxyCommand=touch$IFS.pwned/path",
+		"--upload-pack=touch /tmp/pwned;false",
+	} {
+		t.Run(remote, func(t *testing.T) {
+			newForgeSyncRemoteWorkspace(t, "")
+			config.Set("federation.remote", remote)
+
+			for _, dryRun := range []bool{true, false} {
+				result := applyRemote(true, dryRun)
+				if result.Status != applyStatusError ||
+					!strings.Contains(result.Error, "federation.remote") ||
+					!strings.Contains(result.Error, "must not start with '-'") {
+					t.Errorf("applyRemote(dryRun=%v) = %+v, want the option-shaped federation.remote refused", dryRun, result)
+				}
+			}
+		})
 	}
 }
 

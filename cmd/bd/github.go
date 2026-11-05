@@ -12,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/endpointtrust"
 	"github.com/steveyegge/beads/internal/github"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
@@ -288,12 +289,15 @@ func maskGitHubToken(token string) string {
 }
 
 // getGitHubClient creates a GitHub client from the current configuration.
-func getGitHubClient(config GitHubConfig) *github.Client {
+func getGitHubClient(config GitHubConfig) (*github.Client, error) {
+	if err := endpointtrust.Check(endpointtrust.WorkspaceKey(), "github", config.URL, endpointtrust.PrivateMatch("github.url", "GITHUB_API_URL", config.URL)); err != nil {
+		return nil, err
+	}
 	client := github.NewClient(config.Token, config.Owner, config.Repo)
 	if config.URL != "" {
 		client = client.WithBaseURL(config.URL)
 	}
-	return client
+	return client, nil
 }
 
 // runGitHubStatus implements the github status command.
@@ -349,7 +353,10 @@ func runGitHubRepos(cmd *cobra.Command, args []string) error {
 	}
 
 	out := cmd.OutOrStdout()
-	client := getGitHubClient(config)
+	client, err := getGitHubClient(config)
+	if err != nil {
+		return HandleError("%v", err)
+	}
 	ctx := context.Background()
 
 	repos, err := client.ListRepositories(ctx)
@@ -725,23 +732,27 @@ func pushGitHubDependencyLinks(ctx context.Context, gt *github.Tracker, st stora
 // buildGitHubPushHooks creates PushHooks for GitHub-specific push behavior.
 // The ContentEqual hook lets the engine skip issues whose pushable fields
 // already match GitHub, so repeated `github sync --push-only` / `github push`
-// runs don't re-PATCH unchanged issues (gastownhall/beads#4214).
+// runs don't re-PATCH unchanged issues (gastownhall/beads#4214). The same
+// content comparison is PushFieldsEqual, which a pull uses to recognize an
+// echo of its own push.
 func buildGitHubPushHooks(gt *github.Tracker) *tracker.PushHooks {
 	config := gt.MappingConfig()
 	if config == nil {
 		config = github.DefaultMappingConfig()
 	}
+	pushFieldsEqual := func(local *types.Issue, remote *tracker.TrackerIssue) bool {
+		if remote == nil {
+			return false
+		}
+		gh, ok := remote.Raw.(*github.Issue)
+		if !ok || gh == nil {
+			return false
+		}
+		return github.PushFieldsEqual(local, gh, config)
+	}
 	return &tracker.PushHooks{
-		ContentEqual: func(local *types.Issue, remote *tracker.TrackerIssue) bool {
-			if remote == nil {
-				return false
-			}
-			gh, ok := remote.Raw.(*github.Issue)
-			if !ok || gh == nil {
-				return false
-			}
-			return github.PushFieldsEqual(local, gh, config)
-		},
+		ContentEqual:    pushFieldsEqual,
+		PushFieldsEqual: pushFieldsEqual,
 		// ContentHash lets the engine skip the per-issue GitHub fetch entirely
 		// when an issue is unchanged since its last push, so a no-op
 		// `github sync --push-only` makes ~zero REST calls instead of one GET
