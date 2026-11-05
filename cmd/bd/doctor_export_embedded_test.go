@@ -167,6 +167,56 @@ func TestEmbeddedDoctorExportCheckMissingFileWarns(t *testing.T) {
 	}
 }
 
+// TestEmbeddedDoctorExportCheckRefreshedFileIsClean is the green half of the
+// diagnostic's contract: an explicitly refreshed export — the refresh action
+// the warning itself names — contains every in-scope ID again, and the same
+// check that just warned now reports none missing (GH#6955).
+func TestEmbeddedDoctorExportCheckRefreshedFileIsClean(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "dxr")
+
+	// Build the reported stale shape: one exported issue, one created after
+	// the export with auto-export left off.
+	bdCreateSilent(t, bd, dir, "Exported issue", "--type", "task")
+	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+	if out, err := bdRunWithFlockRetry(t, bd, dir, "export", "-o", jsonlPath); err != nil {
+		t.Fatalf("bd export -o failed: %v\n%s", err, out)
+	}
+	idB := bdCreateSilent(t, bd, dir, "Issue created after the export", "--type", "task")
+
+	if result, _ := runDoctorExportCheck(t, bd, dir, true); result.Status != "warning" {
+		t.Fatalf("precondition broken: expected a warning while the file lags the store, got %+v", result)
+	}
+
+	// The refresh action the warning names, then the re-check the AC demands.
+	if out, err := bdRunWithFlockRetry(t, bd, dir, "export", "-o", jsonlPath); err != nil {
+		t.Fatalf("bd export -o refresh failed: %v\n%s", err, out)
+	}
+	result, stdout := runDoctorExportCheck(t, bd, dir, true)
+	if result.Status != "ok" {
+		t.Errorf("status = %q, want %q after the manual export refresh:\n%s", result.Status, "ok", stdout)
+	}
+	if result.Missing != 0 || len(result.MissingIDs) != 0 {
+		t.Errorf("missing = %d, missing_ids = %v, want none after the refresh", result.Missing, result.MissingIDs)
+	}
+	if result.InScope != 2 || result.InFile != 2 {
+		t.Errorf("in_scope = %d, in_file = %d, want 2 and 2 after the refresh", result.InScope, result.InFile)
+	}
+
+	// The human form still exits 0 and reports the clean all-covered result
+	// without naming any missing ID.
+	_, human := runDoctorExportCheck(t, bd, dir, false)
+	if !strings.Contains(human, "in-scope") {
+		t.Errorf("human output does not summarize the covered scope:\n%s", human)
+	}
+	if strings.Contains(human, idB+" missing") || strings.Contains(human, "missing:") {
+		t.Errorf("clean human output still talks about missing IDs:\n%s", human)
+	}
+}
+
 // TestEmbeddedDoctorExportCheckScopes pins the no-false-positive promises of
 // the diagnostic: legitimate export exclusions (an ephemeral wisp the writer
 // would never export) and extra JSONL IDs (a historical export or a manual
