@@ -1345,6 +1345,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   each linked issue once (one GET per issue, the same one-time cost as a fresh
   clone or Dolt server restart) and closes any issue an earlier build left
   open.
+- `bd dolt pull --strategy ours|theirs`, `bd vc merge --strategy`, and pulls
+  whose conflicts bd auto-resolves or whose foreign-key violations it repairs
+  now commit the tables that merged cleanly alongside them. Previously the
+  merge commit kept the local copy of those tables, so a push reverted the
+  other clone's change (for example its labels), and the merged copy was left
+  uncommitted (#7811).
 - `bd dep tree` no longer drops a diamond's second edge (#5282). An issue
   reached by two paths is still expanded once, under the first path, but each
   later path now lists it as `(shown above)` with its edge type, so a direct
