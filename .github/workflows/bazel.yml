@@ -1161,6 +1161,64 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
+      # Flame graphs (bes-observability-design.md §7, engdocs/TESTING.md
+      # "Flame Graphs of a CI Lane"): this lane's Bazel JSON trace profiles
+      # (--profile above), gzipped, as a 7-day artifact. Open one in
+      # https://ui.perfetto.dev (Open trace file; parsing stays in the
+      # browser), chrome://tracing, or `bazel analyze-profile`. A profile
+      # holds timings, mnemonics, target labels and the runner's output_base
+      # path; no command lines, environment or endpoints. Artifacts of this
+      # public repo are world-readable, so the scan below refuses anything
+      # secret-shaped (and fails closed if it cannot read the file), and the
+      # lane's profiles are capped at 20 MB gzipped. Reporting only:
+      # continue-on-error, 1-minute bounds, and nothing reads the result.
+      # Named bazel-profile-*, apart from every other artifact name here.
+      # bazel-dolt-int has none: its step timeouts plus margin already fill
+      # the merge queue's 60 minutes (TestBazelDoltIntJobTimeouts).
+      - name: Prepare Bazel profile artifact
+        id: profile-artifact
+        if: "!cancelled() && steps.test.outcome != 'skipped'"
+        continue-on-error: true
+        timeout-minutes: 1
+        env:
+          LANE: test
+        run: |
+          shopt -s nullglob
+          dst="$RUNNER_TEMP/profile-upload"
+          mkdir -p "$dst"
+          total=0
+          for src in "$RUNNER_TEMP"/bazel-profile*.json; do
+            [ -s "$src" ] || continue
+            out="$dst/bazel-profile-$LANE${src#"$RUNNER_TEMP"/bazel-profile}.gz"
+            rc=0
+            grep -q -E '://[^/" ]+@|-----BEGIN|(TOKEN|SECRET|PASSWORD|API_KEY)=|\.ops\.gascity\.com' "$src" || rc=$?
+            if [ "$rc" -ne 1 ]; then
+              echo "::warning title=bazel profile not uploaded::${src##*/}: secret-shaped content, or the scan failed (grep exit $rc)"
+              continue
+            fi
+            gzip -c "$src" > "$out"
+            size=$(stat -c %s "$out")
+            if [ $((total + size)) -gt 20971520 ]; then
+              echo "::warning title=bazel profile not uploaded::${src##*/}: $size bytes gzipped would take this lane's profiles over the 20 MB cap"
+              rm -f "$out"
+              continue
+            fi
+            total=$((total + size))
+          done
+
+      - name: Upload Bazel profile
+        if: "!cancelled() && steps.profile-artifact.outcome == 'success'"
+        continue-on-error: true
+        timeout-minutes: 1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          overwrite: true # a job re-run is the same run: replace, not 409
+          name: bazel-profile-test-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/profile-upload/
+          retention-days: 7
+          if-no-files-found: ignore
+          compression-level: 0
+
       # Last step: the job's result as a workflow_call output for pr.yml's
       # ci-gate. always() runs it after a failure, a timeout or a
       # cancellation too.
@@ -1382,6 +1440,52 @@ jobs:
           path: ${{ runner.temp }}/ci-analytics/ci-analytics.json
           retention-days: 7
           if-no-files-found: ignore
+
+      # This lane's profiles as flame graphs; see bazel-test's "Prepare Bazel
+      # profile artifact" comment.
+      - name: Prepare Bazel profile artifact
+        id: profile-artifact
+        if: "!cancelled()"
+        continue-on-error: true
+        timeout-minutes: 1
+        env:
+          LANE: pure
+        run: |
+          shopt -s nullglob
+          dst="$RUNNER_TEMP/profile-upload"
+          mkdir -p "$dst"
+          total=0
+          for src in "$RUNNER_TEMP"/bazel-profile*.json; do
+            [ -s "$src" ] || continue
+            out="$dst/bazel-profile-$LANE${src#"$RUNNER_TEMP"/bazel-profile}.gz"
+            rc=0
+            grep -q -E '://[^/" ]+@|-----BEGIN|(TOKEN|SECRET|PASSWORD|API_KEY)=|\.ops\.gascity\.com' "$src" || rc=$?
+            if [ "$rc" -ne 1 ]; then
+              echo "::warning title=bazel profile not uploaded::${src##*/}: secret-shaped content, or the scan failed (grep exit $rc)"
+              continue
+            fi
+            gzip -c "$src" > "$out"
+            size=$(stat -c %s "$out")
+            if [ $((total + size)) -gt 20971520 ]; then
+              echo "::warning title=bazel profile not uploaded::${src##*/}: $size bytes gzipped would take this lane's profiles over the 20 MB cap"
+              rm -f "$out"
+              continue
+            fi
+            total=$((total + size))
+          done
+
+      - name: Upload Bazel profile
+        if: "!cancelled() && steps.profile-artifact.outcome == 'success'"
+        continue-on-error: true
+        timeout-minutes: 1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          overwrite: true # a job re-run is the same run: replace, not 409
+          name: bazel-profile-pure-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/profile-upload/
+          retention-days: 7
+          if-no-files-found: ignore
+          compression-level: 0
 
       # Last step: the job's result as a workflow_call output for pr.yml's
       # ci-gate. always() runs it after a failure, a timeout or a
@@ -1658,6 +1762,52 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
+      # This lane's profiles as flame graphs; see bazel-test's "Prepare Bazel
+      # profile artifact" comment.
+      - name: Prepare Bazel profile artifact
+        id: profile-artifact
+        if: "!cancelled() && steps.test.outcome != 'skipped'"
+        continue-on-error: true
+        timeout-minutes: 1
+        env:
+          LANE: embedded
+        run: |
+          shopt -s nullglob
+          dst="$RUNNER_TEMP/profile-upload"
+          mkdir -p "$dst"
+          total=0
+          for src in "$RUNNER_TEMP"/bazel-profile*.json; do
+            [ -s "$src" ] || continue
+            out="$dst/bazel-profile-$LANE${src#"$RUNNER_TEMP"/bazel-profile}.gz"
+            rc=0
+            grep -q -E '://[^/" ]+@|-----BEGIN|(TOKEN|SECRET|PASSWORD|API_KEY)=|\.ops\.gascity\.com' "$src" || rc=$?
+            if [ "$rc" -ne 1 ]; then
+              echo "::warning title=bazel profile not uploaded::${src##*/}: secret-shaped content, or the scan failed (grep exit $rc)"
+              continue
+            fi
+            gzip -c "$src" > "$out"
+            size=$(stat -c %s "$out")
+            if [ $((total + size)) -gt 20971520 ]; then
+              echo "::warning title=bazel profile not uploaded::${src##*/}: $size bytes gzipped would take this lane's profiles over the 20 MB cap"
+              rm -f "$out"
+              continue
+            fi
+            total=$((total + size))
+          done
+
+      - name: Upload Bazel profile
+        if: "!cancelled() && steps.profile-artifact.outcome == 'success'"
+        continue-on-error: true
+        timeout-minutes: 1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          overwrite: true # a job re-run is the same run: replace, not 409
+          name: bazel-profile-embedded-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/profile-upload/
+          retention-days: 7
+          if-no-files-found: ignore
+          compression-level: 0
+
       # Last step: the job's result as a workflow_call output for pr.yml's
       # ci-gate. always() runs it after a failure, a timeout or a
       # cancellation too.
@@ -1860,6 +2010,52 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
+      # This lane's profiles as flame graphs; see bazel-test's "Prepare Bazel
+      # profile artifact" comment.
+      - name: Prepare Bazel profile artifact
+        id: profile-artifact
+        if: "!cancelled() && steps.test.outcome != 'skipped'"
+        continue-on-error: true
+        timeout-minutes: 1
+        env:
+          LANE: integration
+        run: |
+          shopt -s nullglob
+          dst="$RUNNER_TEMP/profile-upload"
+          mkdir -p "$dst"
+          total=0
+          for src in "$RUNNER_TEMP"/bazel-profile*.json; do
+            [ -s "$src" ] || continue
+            out="$dst/bazel-profile-$LANE${src#"$RUNNER_TEMP"/bazel-profile}.gz"
+            rc=0
+            grep -q -E '://[^/" ]+@|-----BEGIN|(TOKEN|SECRET|PASSWORD|API_KEY)=|\.ops\.gascity\.com' "$src" || rc=$?
+            if [ "$rc" -ne 1 ]; then
+              echo "::warning title=bazel profile not uploaded::${src##*/}: secret-shaped content, or the scan failed (grep exit $rc)"
+              continue
+            fi
+            gzip -c "$src" > "$out"
+            size=$(stat -c %s "$out")
+            if [ $((total + size)) -gt 20971520 ]; then
+              echo "::warning title=bazel profile not uploaded::${src##*/}: $size bytes gzipped would take this lane's profiles over the 20 MB cap"
+              rm -f "$out"
+              continue
+            fi
+            total=$((total + size))
+          done
+
+      - name: Upload Bazel profile
+        if: "!cancelled() && steps.profile-artifact.outcome == 'success'"
+        continue-on-error: true
+        timeout-minutes: 1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          overwrite: true # a job re-run is the same run: replace, not 409
+          name: bazel-profile-integration-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/profile-upload/
+          retention-days: 7
+          if-no-files-found: ignore
+          compression-level: 0
+
       # Last step: the job's result as a workflow_call output for pr.yml's
       # ci-gate. always() runs it after a failure, a timeout or a
       # cancellation too.
@@ -1992,6 +2188,52 @@ jobs:
           path: ${{ runner.temp }}/ci-analytics/ci-analytics.json
           retention-days: 7
           if-no-files-found: ignore
+
+      # This lane's profiles as flame graphs; see bazel-test's "Prepare Bazel
+      # profile artifact" comment.
+      - name: Prepare Bazel profile artifact
+        id: profile-artifact
+        if: "!cancelled() && steps.test.outcome != 'skipped'"
+        continue-on-error: true
+        timeout-minutes: 1
+        env:
+          LANE: doltserver
+        run: |
+          shopt -s nullglob
+          dst="$RUNNER_TEMP/profile-upload"
+          mkdir -p "$dst"
+          total=0
+          for src in "$RUNNER_TEMP"/bazel-profile*.json; do
+            [ -s "$src" ] || continue
+            out="$dst/bazel-profile-$LANE${src#"$RUNNER_TEMP"/bazel-profile}.gz"
+            rc=0
+            grep -q -E '://[^/" ]+@|-----BEGIN|(TOKEN|SECRET|PASSWORD|API_KEY)=|\.ops\.gascity\.com' "$src" || rc=$?
+            if [ "$rc" -ne 1 ]; then
+              echo "::warning title=bazel profile not uploaded::${src##*/}: secret-shaped content, or the scan failed (grep exit $rc)"
+              continue
+            fi
+            gzip -c "$src" > "$out"
+            size=$(stat -c %s "$out")
+            if [ $((total + size)) -gt 20971520 ]; then
+              echo "::warning title=bazel profile not uploaded::${src##*/}: $size bytes gzipped would take this lane's profiles over the 20 MB cap"
+              rm -f "$out"
+              continue
+            fi
+            total=$((total + size))
+          done
+
+      - name: Upload Bazel profile
+        if: "!cancelled() && steps.profile-artifact.outcome == 'success'"
+        continue-on-error: true
+        timeout-minutes: 1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          overwrite: true # a job re-run is the same run: replace, not 409
+          name: bazel-profile-doltserver-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/profile-upload/
+          retention-days: 7
+          if-no-files-found: ignore
+          compression-level: 0
 
       # Last step: the job's result as a workflow_call output for pr.yml's
       # ci-gate. always() runs it after a failure, a timeout or a
@@ -2162,6 +2404,52 @@ jobs:
           path: ${{ runner.temp }}/ci-analytics/ci-analytics.json
           retention-days: 7
           if-no-files-found: ignore
+
+      # This lane's profiles as flame graphs; see bazel-test's "Prepare Bazel
+      # profile artifact" comment.
+      - name: Prepare Bazel profile artifact
+        id: profile-artifact
+        if: "!cancelled() && steps.test.outcome != 'skipped'"
+        continue-on-error: true
+        timeout-minutes: 1
+        env:
+          LANE: proxied-server
+        run: |
+          shopt -s nullglob
+          dst="$RUNNER_TEMP/profile-upload"
+          mkdir -p "$dst"
+          total=0
+          for src in "$RUNNER_TEMP"/bazel-profile*.json; do
+            [ -s "$src" ] || continue
+            out="$dst/bazel-profile-$LANE${src#"$RUNNER_TEMP"/bazel-profile}.gz"
+            rc=0
+            grep -q -E '://[^/" ]+@|-----BEGIN|(TOKEN|SECRET|PASSWORD|API_KEY)=|\.ops\.gascity\.com' "$src" || rc=$?
+            if [ "$rc" -ne 1 ]; then
+              echo "::warning title=bazel profile not uploaded::${src##*/}: secret-shaped content, or the scan failed (grep exit $rc)"
+              continue
+            fi
+            gzip -c "$src" > "$out"
+            size=$(stat -c %s "$out")
+            if [ $((total + size)) -gt 20971520 ]; then
+              echo "::warning title=bazel profile not uploaded::${src##*/}: $size bytes gzipped would take this lane's profiles over the 20 MB cap"
+              rm -f "$out"
+              continue
+            fi
+            total=$((total + size))
+          done
+
+      - name: Upload Bazel profile
+        if: "!cancelled() && steps.profile-artifact.outcome == 'success'"
+        continue-on-error: true
+        timeout-minutes: 1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          overwrite: true # a job re-run is the same run: replace, not 409
+          name: bazel-profile-proxied-server-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/profile-upload/
+          retention-days: 7
+          if-no-files-found: ignore
+          compression-level: 0
 
       # Last step: the job's result as a workflow_call output for pr.yml's
       # ci-gate. always() runs it after a failure, a timeout or a
@@ -2338,6 +2626,52 @@ jobs:
           path: ${{ runner.temp }}/ci-analytics/ci-analytics.json
           retention-days: 7
           if-no-files-found: ignore
+
+      # This lane's profiles as flame graphs; see bazel-test's "Prepare Bazel
+      # profile artifact" comment.
+      - name: Prepare Bazel profile artifact
+        id: profile-artifact
+        if: "!cancelled() && steps.test.outcome != 'skipped'"
+        continue-on-error: true
+        timeout-minutes: 1
+        env:
+          LANE: dolt-race
+        run: |
+          shopt -s nullglob
+          dst="$RUNNER_TEMP/profile-upload"
+          mkdir -p "$dst"
+          total=0
+          for src in "$RUNNER_TEMP"/bazel-profile*.json; do
+            [ -s "$src" ] || continue
+            out="$dst/bazel-profile-$LANE${src#"$RUNNER_TEMP"/bazel-profile}.gz"
+            rc=0
+            grep -q -E '://[^/" ]+@|-----BEGIN|(TOKEN|SECRET|PASSWORD|API_KEY)=|\.ops\.gascity\.com' "$src" || rc=$?
+            if [ "$rc" -ne 1 ]; then
+              echo "::warning title=bazel profile not uploaded::${src##*/}: secret-shaped content, or the scan failed (grep exit $rc)"
+              continue
+            fi
+            gzip -c "$src" > "$out"
+            size=$(stat -c %s "$out")
+            if [ $((total + size)) -gt 20971520 ]; then
+              echo "::warning title=bazel profile not uploaded::${src##*/}: $size bytes gzipped would take this lane's profiles over the 20 MB cap"
+              rm -f "$out"
+              continue
+            fi
+            total=$((total + size))
+          done
+
+      - name: Upload Bazel profile
+        if: "!cancelled() && steps.profile-artifact.outcome == 'success'"
+        continue-on-error: true
+        timeout-minutes: 1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          overwrite: true # a job re-run is the same run: replace, not 409
+          name: bazel-profile-dolt-race-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/profile-upload/
+          retention-days: 7
+          if-no-files-found: ignore
+          compression-level: 0
 
       # Last step: the job's result as the bazel-doltserver and
       # bazel-proxied workflow_call outputs for pr.yml's ci-gate. always()
@@ -2516,6 +2850,52 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
+      # This lane's profiles as flame graphs; see bazel-test's "Prepare Bazel
+      # profile artifact" comment.
+      - name: Prepare Bazel profile artifact
+        id: profile-artifact
+        if: "!cancelled() && steps.test.outcome != 'skipped'"
+        continue-on-error: true
+        timeout-minutes: 1
+        env:
+          LANE: server-storage
+        run: |
+          shopt -s nullglob
+          dst="$RUNNER_TEMP/profile-upload"
+          mkdir -p "$dst"
+          total=0
+          for src in "$RUNNER_TEMP"/bazel-profile*.json; do
+            [ -s "$src" ] || continue
+            out="$dst/bazel-profile-$LANE${src#"$RUNNER_TEMP"/bazel-profile}.gz"
+            rc=0
+            grep -q -E '://[^/" ]+@|-----BEGIN|(TOKEN|SECRET|PASSWORD|API_KEY)=|\.ops\.gascity\.com' "$src" || rc=$?
+            if [ "$rc" -ne 1 ]; then
+              echo "::warning title=bazel profile not uploaded::${src##*/}: secret-shaped content, or the scan failed (grep exit $rc)"
+              continue
+            fi
+            gzip -c "$src" > "$out"
+            size=$(stat -c %s "$out")
+            if [ $((total + size)) -gt 20971520 ]; then
+              echo "::warning title=bazel profile not uploaded::${src##*/}: $size bytes gzipped would take this lane's profiles over the 20 MB cap"
+              rm -f "$out"
+              continue
+            fi
+            total=$((total + size))
+          done
+
+      - name: Upload Bazel profile
+        if: "!cancelled() && steps.profile-artifact.outcome == 'success'"
+        continue-on-error: true
+        timeout-minutes: 1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          overwrite: true # a job re-run is the same run: replace, not 409
+          name: bazel-profile-server-storage-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/profile-upload/
+          retention-days: 7
+          if-no-files-found: ignore
+          compression-level: 0
+
       # Last step: the job's result as a workflow_call output for pr.yml's
       # ci-gate. always() runs it after a failure, a timeout or a
       # cancellation too.
@@ -2668,6 +3048,52 @@ jobs:
           path: ${{ runner.temp }}/ci-analytics/ci-analytics.json
           retention-days: 7
           if-no-files-found: ignore
+
+      # This lane's profiles as flame graphs; see bazel-test's "Prepare Bazel
+      # profile artifact" comment.
+      - name: Prepare Bazel profile artifact
+        id: profile-artifact
+        if: "!cancelled() && steps.test.outcome != 'skipped'"
+        continue-on-error: true
+        timeout-minutes: 1
+        env:
+          LANE: cmd-dolt
+        run: |
+          shopt -s nullglob
+          dst="$RUNNER_TEMP/profile-upload"
+          mkdir -p "$dst"
+          total=0
+          for src in "$RUNNER_TEMP"/bazel-profile*.json; do
+            [ -s "$src" ] || continue
+            out="$dst/bazel-profile-$LANE${src#"$RUNNER_TEMP"/bazel-profile}.gz"
+            rc=0
+            grep -q -E '://[^/" ]+@|-----BEGIN|(TOKEN|SECRET|PASSWORD|API_KEY)=|\.ops\.gascity\.com' "$src" || rc=$?
+            if [ "$rc" -ne 1 ]; then
+              echo "::warning title=bazel profile not uploaded::${src##*/}: secret-shaped content, or the scan failed (grep exit $rc)"
+              continue
+            fi
+            gzip -c "$src" > "$out"
+            size=$(stat -c %s "$out")
+            if [ $((total + size)) -gt 20971520 ]; then
+              echo "::warning title=bazel profile not uploaded::${src##*/}: $size bytes gzipped would take this lane's profiles over the 20 MB cap"
+              rm -f "$out"
+              continue
+            fi
+            total=$((total + size))
+          done
+
+      - name: Upload Bazel profile
+        if: "!cancelled() && steps.profile-artifact.outcome == 'success'"
+        continue-on-error: true
+        timeout-minutes: 1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          overwrite: true # a job re-run is the same run: replace, not 409
+          name: bazel-profile-cmd-dolt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/profile-upload/
+          retention-days: 7
+          if-no-files-found: ignore
+          compression-level: 0
 
       # Last step: the job's result as a workflow_call output for pr.yml's
       # ci-gate. always() runs it after a failure, a timeout or a

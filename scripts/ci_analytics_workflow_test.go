@@ -1,6 +1,10 @@
 package scripts_test
 
 import (
+	"compress/gzip"
+	"io"
+	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -289,4 +293,164 @@ func TestCIAnalyticsStepsAreSafeAndBounded(t *testing.T) {
 			}
 		}
 	}
+}
+
+// The flame-graph profile steps (bes-observability-design.md §7,
+// engdocs/TESTING.md "Flame Graphs of a CI Lane").
+const (
+	bazelProfilePrepareStep = "Prepare Bazel profile artifact"
+	bazelProfileUploadStep  = "Upload Bazel profile"
+	// Both steps are reporting only; 1 minute keeps them inside
+	// bazel-dolt-race's job timeout budget (TestBazelDoltRaceJobTimeouts).
+	bazelProfileStepTimeoutMinutes = 1
+	bazelProfileUploadPath         = "${{ runner.temp }}/profile-upload/"
+)
+
+// bazelProfileExcludedLaneJobs are ciAnalyticsLaneJobs that upload no
+// profile, with the reason.
+var bazelProfileExcludedLaneJobs = map[string]string{
+	"bazel-dolt-int": "its step timeouts plus TestBazelDoltIntJobTimeouts' 5-minute margin already reach its 59-minute job timeout, which must stay under the merge queue's 60; any further timed step breaks that",
+}
+
+// TestBazelProfileArtifactStepsAreSafeAndBounded: every lane job with a CI
+// analytics summary (bar bazelProfileExcludedLaneJobs) uploads its Bazel
+// JSON trace profiles, gzipped, as a 7-day bazel-profile-<lane>-<attempt>
+// artifact, right after the CI analytics upload. The artifacts are public,
+// so both steps stay reporting only (continue-on-error, !cancelled(), a
+// 1-minute bound, after the job's own CI analytics condition), the prepare
+// script is the same in every lane and never takes a ${{ }} expression, and
+// run here it uploads clean profiles, refuses secret-shaped ones, caps the
+// lane at 20 MB gzipped and tolerates having none.
+func TestBazelProfileArtifactStepsAreSafeAndBounded(t *testing.T) {
+	workflow := readCIWorkflow(t, "bazel.yml")
+	for name := range bazelProfileExcludedLaneJobs {
+		if _, ok := ciAnalyticsLaneJobs[name]; !ok {
+			t.Errorf("bazelProfileExcludedLaneJobs lists %s, which is not in ciAnalyticsLaneJobs", name)
+		}
+	}
+	var script string
+	for jobName, lane := range ciAnalyticsLaneJobs {
+		job := workflow.job(t, jobName)
+		prepIdx := slices.IndexFunc(job.Steps, func(s ciWorkflowStep) bool { return s.Name == bazelProfilePrepareStep })
+		upIdx := slices.IndexFunc(job.Steps, func(s ciWorkflowStep) bool { return s.Name == bazelProfileUploadStep })
+		if _, excluded := bazelProfileExcludedLaneJobs[jobName]; excluded {
+			if prepIdx >= 0 || upIdx >= 0 {
+				t.Errorf("%s job has profile steps but is in bazelProfileExcludedLaneJobs", jobName)
+			}
+			continue
+		}
+		analyticsUpIdx := slices.IndexFunc(job.Steps, func(s ciWorkflowStep) bool { return s.Name == "Upload CI analytics summary" })
+		if prepIdx < 0 || prepIdx != analyticsUpIdx+1 || upIdx != prepIdx+1 {
+			t.Fatalf("%s job: want %q then %q right after Upload CI analytics summary (steps %d, %d after %d)", jobName, bazelProfilePrepareStep, bazelProfileUploadStep, prepIdx, upIdx, analyticsUpIdx)
+		}
+		summary := job.step(t, "CI analytics summary")
+		prep, up := job.Steps[prepIdx], job.Steps[upIdx]
+		if prep.ID != "profile-artifact" || prep.If != summary.If || !ciAnalyticsContinueOnError(prep.ContinueOnError) ||
+			prep.TimeoutMinutes != bazelProfileStepTimeoutMinutes || prep.Env["LANE"] != lane || len(prep.Env) != 1 {
+			t.Errorf("%s job %q: id %q if %q continue-on-error %v timeout-minutes %d env %v; want id profile-artifact, the CI analytics summary's if %q, continue-on-error, %d minute, env LANE=%s only",
+				jobName, prep.Name, prep.ID, prep.If, prep.ContinueOnError, prep.TimeoutMinutes, prep.Env, summary.If, bazelProfileStepTimeoutMinutes, lane)
+		}
+		if ciAnalyticsRunTemplateRE.MatchString(prep.Run) {
+			t.Errorf("%s job %q: run: contains a ${{ }} expression; use env: instead", jobName, prep.Name)
+		}
+		if script == "" {
+			script = prep.Run
+		} else if prep.Run != script {
+			t.Errorf("%s job %q: run differs from the other lanes'; keep one script", jobName, prep.Name)
+		}
+		//nolint:misspell // GitHub Actions spells it cancelled()
+		if up.If != "!cancelled() && steps.profile-artifact.outcome == 'success'" || !ciAnalyticsContinueOnError(up.ContinueOnError) ||
+			up.TimeoutMinutes != bazelProfileStepTimeoutMinutes || !strings.HasPrefix(up.Uses, "actions/upload-artifact@") {
+			t.Errorf("%s job %q: if %q continue-on-error %v timeout-minutes %d uses %q", jobName, up.Name, up.If, up.ContinueOnError, up.TimeoutMinutes, up.Uses)
+		}
+		want := map[string]string{
+			"overwrite":         "true",
+			"name":              "bazel-profile-" + lane + "-${{ github.run_attempt }}",
+			"path":              bazelProfileUploadPath,
+			"retention-days":    "7",
+			"if-no-files-found": "ignore",
+			"compression-level": "0",
+		}
+		if !slices.Equal(sortedKeys(up.With), sortedKeys(want)) {
+			t.Errorf("%s job %q: with keys %v, want %v", jobName, up.Name, sortedKeys(up.With), sortedKeys(want))
+		}
+		for k, v := range want {
+			if up.With[k] != v {
+				t.Errorf("%s job %q: with.%s = %q, want %q", jobName, up.Name, k, up.With[k], v)
+			}
+		}
+	}
+	if script == "" {
+		t.Fatal("no lane has a profile prepare step")
+	}
+
+	run := func(files map[string]string) (string, map[string]string) {
+		t.Helper()
+		dir := t.TempDir()
+		for name, body := range files {
+			if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		out, err := runRRCScript(t, dir, script, map[string]string{"RUNNER_TEMP": dir, "LANE": "pure"})
+		if err != nil {
+			t.Fatalf("prepare script failed: %v\n%s", err, out)
+		}
+		got := map[string]string{}
+		entries, _ := os.ReadDir(filepath.Join(dir, "profile-upload"))
+		for _, e := range entries {
+			got[e.Name()] = gunzipForTest(t, filepath.Join(dir, "profile-upload", e.Name()))
+		}
+		return out, got
+	}
+	if _, got := run(nil); len(got) != 0 {
+		t.Errorf("no profiles: uploaded %v", got)
+	}
+	clean := `{"otherData":{"bazel_version":"9.3.1"},"traceEvents":[` + "\n" + `{"name":"//cmd/bd:bd_test","cat":"action processing","ph":"X","ts":1,"dur":2}]}` + "\n"
+	files := map[string]string{
+		"bazel-profile-build-wasm.json": clean,
+		"bazel-profile-test-bd.json":    clean,
+		"bazel-profile-build-pure.json": "",
+	}
+	for i, secret := range []string{
+		`"name":"fetching: https://user:pw@example.com/x"`,
+		`"args":{"x":"-----BEGIN PRIVATE KEY-----"}`,
+		`"args":{"x":"BEADS_HOLDER_TOKEN=abc"}`,
+		`"name":"rbe-west.ops.gascity.com"`,
+	} {
+		files["bazel-profile-secret"+string(rune('a'+i))+".json"] = clean + secret + "\n"
+	}
+	out, got := run(files)
+	if want := []string{"bazel-profile-pure-build-wasm.json.gz", "bazel-profile-pure-test-bd.json.gz"}; !slices.Equal(sortedKeys(got), want) {
+		t.Errorf("uploaded %v, want %v\n%s", sortedKeys(got), want, out)
+	}
+	for name, body := range got {
+		if body != clean {
+			t.Errorf("%s is not the gzipped profile", name)
+		}
+	}
+	if n := strings.Count(out, "::warning title=bazel profile not uploaded::"); n != 4 {
+		t.Errorf("%d not-uploaded warnings, want 4 (one per secret-shaped profile):\n%s", n, out)
+	}
+	if !strings.Contains(script, "-gt 20971520") {
+		t.Errorf("prepare script has no 20 MB cap on the lane's gzipped profiles")
+	}
+}
+
+func gunzipForTest(t *testing.T, path string) string {
+	t.Helper()
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	zr, err := gzip.NewReader(f)
+	if err != nil {
+		t.Fatalf("%s: %v", path, err)
+	}
+	b, err := io.ReadAll(zr)
+	if err != nil {
+		t.Fatalf("%s: %v", path, err)
+	}
+	return string(b)
 }
