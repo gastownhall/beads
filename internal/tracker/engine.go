@@ -334,7 +334,7 @@ func (e *Engine) DetectConflicts(ctx context.Context) ([]Conflict, error) {
 		// transferred to another repository). The pull and the push both skip
 		// it, so resolving a conflict could only force the local content over
 		// it.
-		if e.unaddressable(e.Tracker.BuildExternalRef(extIssue)) {
+		if e.leftTarget(e.Tracker.BuildExternalRef(extIssue)) {
 			continue
 		}
 
@@ -486,11 +486,13 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 			}
 		}
 		// The tracker fetched this issue but cannot address its ref (GitHub:
-		// an issue transferred to another repository). Skip it where
-		// importing it could duplicate a bead.
-		if existing == nil && e.unaddressable(ref) {
+		// an issue transferred to another repository, or one of a repository
+		// renamed under a name Init did not read): unaddressablePull decides
+		// which local issue it may update, if any.
+		if e.unaddressable(ref) && (existing == nil || i >= bulkRows) {
 			outsideRefs = append(outsideRefs, ref)
-			if e.pullSkipsUnaddressable(fallback, &extIssue, i, bulkRows) {
+			var skip bool
+			if existing, skip = e.unaddressablePull(fallback, &extIssue, i, bulkRows); skip {
 				skippedOutsideRefs = append(skippedOutsideRefs, ref)
 				stats.Skipped++
 				continue
@@ -1482,7 +1484,7 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 					// another repository). A pull skips that issue, so writing
 					// over it would discard the remote edits the pull never
 					// took.
-					if movedRef := e.Tracker.BuildExternalRef(extIssue); e.unaddressable(movedRef) {
+					if movedRef := e.Tracker.BuildExternalRef(extIssue); e.leftTarget(movedRef) {
 						movedIDs = append(movedIDs, issue.ID)
 						movedRefs = append(movedRefs, movedRef)
 						stats.Skipped++

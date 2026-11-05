@@ -390,6 +390,15 @@ func (t *Tracker) DescribeTarget() string {
 	return "repository " + t.client.Owner + "/" + t.client.Repo
 }
 
+// TargetNamesKnown implements tracker.TargetNamesReporter: it reports whether
+// Init read the repository's current name, which every issue GitHub returns
+// carries (see resolveRepositoryNames). Without it an issue of a renamed
+// repository, served under the new name, looks like one transferred to
+// another repository.
+func (t *Tracker) TargetNamesKnown() bool {
+	return t.currentName != ""
+}
+
 func (t *Tracker) BuildExternalRef(issue *tracker.TrackerIssue) string {
 	if issue.URL != "" {
 		return issue.URL

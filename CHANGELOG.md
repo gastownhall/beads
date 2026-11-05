@@ -1304,8 +1304,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   alone. GitHub follows the transfer, so fetching the bead's issue returned it
   under the other repository's URL: conflict detection compared the bead with
   it, a push could write the bead over it, and a pull by bead ID imported it
-  as a new bead. Pull, push and the conflict check now skip it, with a
-  warning naming the configured repository. A push also says when it skips a
+  as a new bead or wrote it over a bead linked to its new URL. Pull, push and
+  the conflict check now skip it, with a warning naming the configured
+  repository; push and the conflict check do so once sync has read the
+  repository's current name from GitHub. A push also says when it skips a
   bead linked outside the configured repository, in one line for a bulk push
   and once per bead for a push by ID, and a pull says when an issue came back
   under a URL outside it. A ref still names the configured repository when

@@ -383,7 +383,10 @@ them (`bd update <id> --external-ref <new-url>`), or the next pull imports
 their issues again as new beads. An issue transferred to another repository
 counts as that repository's: pull, push and conflict detection leave it and
 its bead alone, with a warning, as a push does for any bead linked outside the
-configured repository.
+configured repository. Telling it from an issue of a renamed repository takes
+the repository's current name, which sync reads from GitHub first: if that
+request fails, push and conflict detection handle the issue as the configured
+repository's.
 
 ## 🌐 Community Tools
 

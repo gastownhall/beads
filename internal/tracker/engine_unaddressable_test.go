@@ -15,9 +15,9 @@ import (
 // tracker recognizes but cannot address (gastownhall/beads#7781): a pull and a
 // bulk push each warn in one line however many they skip, so a database
 // linked to several repositories is not flooded, while a push that names
-// beads by ID warns for each of them. The pull skips a fetched issue that a
-// bead links under the ref the tracker builds in its configured target,
-// listing every one, and imports the rest.
+// beads by ID warns for each of them. A bulk pull takes a listed issue into
+// the bead that links it under the ref the tracker builds in its configured
+// target and imports the rest; a pull by ID skips the issue, listing it.
 func TestEngineWarnsOnceForUnaddressableRefs(t *testing.T) {
 	ctx := context.Background()
 	bead := func(id, ref string) *types.Issue {
@@ -59,9 +59,11 @@ func TestEngineWarnsOnceForUnaddressableRefs(t *testing.T) {
 		return engine, state, mock, &warnings
 	}
 	t.Run("pull", func(t *testing.T) {
-		// bd-h3 and bd-h5 link EXT-3 and EXT-5 under the configured spelling
-		// (BuildExternalRef without a URL), so importing those would
-		// duplicate them; nothing links EXT-4.
+		// The issue list returned EXT-3, EXT-4 and EXT-5, so they are the
+		// target's own. bd-h3 and bd-h5 link EXT-3 and EXT-5 under the
+		// configured spelling (BuildExternalRef without a URL), so the pull
+		// takes those into them rather than import duplicates; nothing links
+		// EXT-4.
 		engine, state, _, warnings := bind(
 			bead("bd-h3", "https://test.test/EXT-3"),
 			bead("bd-h5", "https://test.test/EXT-5"),
@@ -70,8 +72,8 @@ func TestEngineWarnsOnceForUnaddressableRefs(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Sync() error: %v", err)
 		}
-		if result.PullStats.Created != 1 || result.PullStats.Updated != 0 || result.PullStats.Skipped != 2 {
-			t.Errorf("pull: created=%d updated=%d skipped=%d, want created=1 updated=0 skipped=2",
+		if result.PullStats.Created != 1 || result.PullStats.Updated != 2 || result.PullStats.Skipped != 0 {
+			t.Errorf("pull: created=%d updated=%d skipped=%d, want created=1 updated=2 skipped=0",
 				result.PullStats.Created, result.PullStats.Updated, result.PullStats.Skipped)
 		}
 		if imported := state.issues["bd-moved-4"]; imported == nil || derefStr(imported.ExternalRef) != "https://test.test/foreign/EXT-4" {
@@ -80,13 +82,13 @@ func TestEngineWarnsOnceForUnaddressableRefs(t *testing.T) {
 		if len(state.issues) != 3 {
 			t.Errorf("store holds %d issues, want bd-h3, bd-h5 and the EXT-4 import", len(state.issues))
 		}
-		for _, id := range []string{"bd-h3", "bd-h5"} {
-			if got := state.issues[id]; got.Title != id {
-				t.Errorf("%s was overwritten with title %q", id, got.Title)
+		for id, title := range map[string]string{"bd-h3": "Moved 3", "bd-h5": "Moved 5"} {
+			if got := state.issues[id]; got.Title != title {
+				t.Errorf("%s title = %q, want %q", id, got.Title, title)
 			}
 		}
 		want := []string{"3 test issues came back under URLs outside the configured test repository or project, " +
-			"e.g. https://test.test/foreign/EXT-3; skipped https://test.test/foreign/EXT-3, https://test.test/foreign/EXT-5"}
+			"e.g. https://test.test/foreign/EXT-3"}
 		if !reflect.DeepEqual(*warnings, want) {
 			t.Errorf("pull warnings = %q, want %q", *warnings, want)
 		}
@@ -94,19 +96,26 @@ func TestEngineWarnsOnceForUnaddressableRefs(t *testing.T) {
 
 	t.Run("pull by ID", func(t *testing.T) {
 		// An issue fetched on its own may have moved to another target, so a
-		// pull by ID skips it even when no bead links it.
-		engine, state, _, warnings := bind()
-		result, err := engine.Sync(ctx, SyncOptions{Pull: true, IssueIDs: []string{"EXT-4"}})
-		if err != nil {
-			t.Fatalf("Sync() error: %v", err)
-		}
-		if result.PullStats.Created != 0 || result.PullStats.Skipped != 1 || len(state.issues) != 0 {
-			t.Errorf("pull of EXT-4: created=%d skipped=%d issues=%d, want created=0 skipped=1 issues=0",
-				result.PullStats.Created, result.PullStats.Skipped, len(state.issues))
-		}
-		want := []string{"Skipped test issue https://test.test/foreign/EXT-4: its URL is outside the configured test repository or project"}
-		if !reflect.DeepEqual(*warnings, want) {
-			t.Errorf("pull by ID warnings = %q, want %q", *warnings, want)
+		// pull by ID skips it, whether no bead links it or one links it
+		// under the URL it came back under: that bead is linked outside the
+		// target and was not asked for.
+		for _, beads := range [][]*types.Issue{nil, {bead("bd-f4", "https://test.test/foreign/EXT-4")}} {
+			engine, state, _, warnings := bind(beads...)
+			result, err := engine.Sync(ctx, SyncOptions{Pull: true, IssueIDs: []string{"EXT-4"}})
+			if err != nil {
+				t.Fatalf("Sync() error: %v", err)
+			}
+			if result.PullStats.Created != 0 || result.PullStats.Updated != 0 || result.PullStats.Skipped != 1 || len(state.issues) != len(beads) {
+				t.Errorf("pull of EXT-4 with %d beads: created=%d updated=%d skipped=%d issues=%d, want created=0 updated=0 skipped=1 issues=%d",
+					len(beads), result.PullStats.Created, result.PullStats.Updated, result.PullStats.Skipped, len(state.issues), len(beads))
+			}
+			if got := state.issues["bd-f4"]; got != nil && got.Title != "bd-f4" {
+				t.Errorf("bd-f4 was overwritten with title %q", got.Title)
+			}
+			want := []string{"Skipped test issue https://test.test/foreign/EXT-4: its URL is outside the configured test repository or project"}
+			if !reflect.DeepEqual(*warnings, want) {
+				t.Errorf("pull by ID warnings = %q, want %q", *warnings, want)
+			}
 		}
 	})
 
@@ -159,7 +168,31 @@ func TestEngineWarnsOnceForUnaddressableRefs(t *testing.T) {
 			t.Errorf("push warnings = %q, want %q", *warnings, want)
 		}
 	})
+
+	// A tracker that could not learn its target's names cannot tell an issue
+	// that left the target from one of its own under a name it missed, so
+	// the push updates the issue of bd-h3, edited locally, as any other.
+	t.Run("push of an issue served under another name, target names unknown", func(t *testing.T) {
+		edited := bead("bd-h3", "https://test.test/EXT-3")
+		edited.UpdatedAt = time.Date(2026, 10, 3, 0, 0, 0, 0, time.UTC)
+		engine, _, mock, warnings := bind(edited)
+		engine.Tracker = namesUnknownTracker{engine.Tracker}
+		result, err := engine.Sync(ctx, SyncOptions{Push: true})
+		if err != nil {
+			t.Fatalf("Sync() error: %v", err)
+		}
+		if _, ok := mock.updated["EXT-3"]; !ok || result.PushStats.Updated != 1 || len(*warnings) != 0 {
+			t.Errorf("push: updated=%d tracker updates=%v warnings=%q, want EXT-3 updated and no warning",
+				result.PushStats.Updated, mock.updated, *warnings)
+		}
+	})
 }
+
+// namesUnknownTracker wraps a tracker that could not learn the names its
+// configured target goes by (TargetNamesReporter).
+type namesUnknownTracker struct{ IssueTracker }
+
+func (namesUnknownTracker) TargetNamesKnown() bool { return false }
 
 // TestEngineReportsUnaddressablePushSkipsOnRateLimitAbort pins that a push
 // stopped by a provider rate limit still reports the beads it had already
