@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
 
@@ -25,27 +26,47 @@ func (e *Engine) configuredTarget() string {
 	return fmt.Sprintf("the configured %s repository or project", e.Tracker.DisplayName())
 }
 
-// pullSkipsUnaddressable reports whether a pull skips extIssue, the i-th
-// issue it fetched, whose own ref the tracker cannot address and no local
-// issue holds. An issue fetched on its own, for a pull by ID or a pre-linked
-// hydration, left the configured target (GitHub: an issue transferred to
-// another repository), so the pull always skips it. One of the first
-// bulkRows issues came from the target's issue list, so it is the target's
-// own issue, served under a name the tracker does not know (GitHub: a
-// repository renamed after Init read its names, or whose names Init could
-// not read): importing it would duplicate the local issue that links it under
-// the ref the tracker builds in its configured target (GitHub:
-// github:{number}), so the pull skips it then and imports it otherwise,
-// rather than let the next pull's cursor pass it by.
-func (e *Engine) pullSkipsUnaddressable(fallback pullFallbackIndex, extIssue *TrackerIssue, i, bulkRows int) bool {
-	if i >= bulkRows {
-		return true
+// leftTarget reports whether ref, the own ref of an issue the tracker fetched
+// for its configured target, shows that the issue left that target (GitHub:
+// it was transferred to another repository): the tracker cannot address ref,
+// and it knows the names its target goes by (TargetNamesReporter), so ref is
+// not the target's own under a name the tracker missed (GitHub: the new name
+// of a renamed repository whose names Init could not read). Push and conflict
+// detection leave such an issue alone.
+func (e *Engine) leftTarget(ref string) bool {
+	if r, ok := e.Tracker.(TargetNamesReporter); ok && !r.TargetNamesKnown() {
+		return false
 	}
-	return fallback.match(extIssue, e.Tracker.BuildExternalRef(&TrackerIssue{Identifier: extIssue.Identifier})) != nil
+	return e.unaddressable(ref)
 }
 
-// warnUnaddressablePulls warns once about the fetched issues no local issue
-// holds whose own refs the tracker cannot address (outside), listing every
+// unaddressablePull decides what a pull does with extIssue, the i-th issue it
+// fetched, whose own ref the tracker cannot address, when no local issue
+// holds that ref or the pull fetched the issue on its own. It returns the
+// local issue to take extIssue into (nil: import it), or reports that the
+// pull skips it.
+//
+// An issue fetched on its own, for a pull by ID or a pre-linked hydration,
+// left the configured target (GitHub: an issue transferred to another
+// repository), so the pull skips it, even when a local issue holds its ref:
+// the pull did not ask for that local issue, which is linked outside the
+// target. One of the first bulkRows issues came from the target's issue
+// list, so it is the target's own issue, served under a name the tracker
+// does not know (GitHub: a repository renamed after Init read its names, or
+// whose names Init could not read). The pull takes it into the local issue
+// that links it under the ref the tracker builds in its configured target
+// (GitHub: github:{number}), where the conflict guard applies as for any
+// match, and imports it when there is none, so the next pull's cursor never
+// passes a remote edit by.
+func (e *Engine) unaddressablePull(fallback pullFallbackIndex, extIssue *TrackerIssue, i, bulkRows int) (*types.Issue, bool) {
+	if i >= bulkRows {
+		return nil, true
+	}
+	return fallback.match(extIssue, e.Tracker.BuildExternalRef(&TrackerIssue{Identifier: extIssue.Identifier})), false
+}
+
+// warnUnaddressablePulls warns once about the fetched issues whose own refs
+// the tracker cannot address (outside; see unaddressablePull), listing every
 // one the pull skipped (skipped, a subset). The tracker fetched them for its
 // configured target, but serves them outside it.
 func (e *Engine) warnUnaddressablePulls(outside, skipped []string) {

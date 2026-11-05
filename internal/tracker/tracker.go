@@ -55,10 +55,10 @@ type IssueTracker interface {
 	// It returns "" when the tracker cannot resolve ref to an identifier it
 	// can address; sync then leaves the linked issue alone. A fetched issue
 	// whose own ref yields "" left the configured target (e.g. an issue
-	// transferred to another repository): a push or conflict check that
-	// fetched it leaves it alone too, and a pull imports it only from the
-	// tracker's issue list and where no local issue would be duplicated (see
-	// Engine.pullSkipsUnaddressable).
+	// transferred to another repository) once the tracker knows its target's
+	// names (TargetNamesReporter): a push or conflict check that fetched it
+	// leaves it alone too. A pull takes such an issue only from the tracker's
+	// issue list (see Engine.unaddressablePull).
 	ExtractIdentifier(ref string) string
 
 	// BuildExternalRef constructs an external_ref string for a tracker issue.
@@ -122,6 +122,16 @@ type IdentityKeyer interface {
 // warnings a sync gives about refs outside it; "" means unknown.
 type TargetDescriber interface {
 	DescribeTarget() string
+}
+
+// TargetNamesReporter is implemented by trackers that learn at Init the names
+// their configured target goes by (GitHub: the repository's current name,
+// which every issue GitHub returns carries). TargetNamesKnown reports whether
+// they did. Until then an issue served under a ref ExtractIdentifier rejects
+// may be the target's own under a name the tracker does not know, so push and
+// conflict detection do not take it for an issue that left the target.
+type TargetNamesReporter interface {
+	TargetNamesKnown() bool
 }
 
 // FieldMapper handles bidirectional conversion of issue fields between

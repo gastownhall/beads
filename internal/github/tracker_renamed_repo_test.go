@@ -50,6 +50,10 @@ type renamedRepoTransport struct {
 	ghFixtureTransport
 	webHost string // host of the html_urls: github.com, or a GitHub Enterprise host
 	issues  map[int]*remoteIssue
+	// lookupStatus, when set, is the status the repository lookup (GET
+	// /repos/acme/{old,new}) answers with, so Init cannot read the
+	// repository's names while its issues stay readable.
+	lookupStatus int
 }
 
 func newRenamedRepoTransport(webHost string, issues map[int]*remoteIssue) *renamedRepoTransport {
@@ -63,6 +67,9 @@ func (t *renamedRepoTransport) RoundTrip(req *http.Request) (*http.Response, err
 	path := strings.TrimPrefix(req.URL.Path, "/api/v3") // GitHub Enterprise's REST prefix
 	for _, repo := range []string{"/repos/acme/old", "/repos/acme/new"} {
 		if path == repo && req.Method == http.MethodGet {
+			if t.lookupStatus != 0 {
+				return t.respond(t.lookupStatus, `{"message":"Not Found"}`), nil
+			}
 			return t.respond(http.StatusOK, ghRepositoryJSON(renamedRepoID, "acme/new", "https://"+t.webHost+"/acme/new")), nil
 		}
 		list := repo + "/issues"
@@ -312,24 +319,89 @@ func TestSync_RenamedRepositoryReportsConflicts(t *testing.T) {
 	}
 }
 
+// TestSync_RenamedRepositoryWithoutItsNames syncs a renamed repository whose
+// configuration still names acme/old while Init cannot read the repository's
+// names (the lookup fails, the issues stay readable), so every issue comes
+// back under acme/new, a name the tracker does not know. The sync must not
+// take them for issues transferred out of the repository: a bead edited on
+// both sides is still a conflict, the newer remote edit lands in the bead
+// linked under acme/old rather than in a duplicate, and the next sync, once
+// Init reads the names, writes nothing over that edit.
+func TestSync_RenamedRepositoryWithoutItsNames(t *testing.T) {
+	ctx := context.Background()
+	rt := newRenamedRepoTransport("github.com", map[int]*remoteIssue{
+		42: {title: "Issue 42 (remote edit)", updated: renameDay(3)},
+	})
+	rt.lookupStatus = http.StatusNotFound
+	store := newGHCrossRepoStore(linkedBead("bd-o42", "Issue 42 (local edit)", oldIssue42Ref, 2))
+	store.local["github.last_sync"] = renameDay(1).Format(time.RFC3339)
+
+	engine, _, warnings := renamedRepoEngine(rt, "", "old", store)
+	result, err := engine.Sync(ctx, tracker.SyncOptions{})
+	if err != nil {
+		t.Fatalf("Sync without the repository's names: %v", err)
+	}
+	if result.Stats.Conflicts != 1 {
+		t.Errorf("sync reported %d conflicts, want bd-o42's", result.Stats.Conflicts)
+	}
+	want := []string{"GitHub issue " + newIssue42Ref + " came back under a URL outside the configured GitHub repository acme/old"}
+	if !reflect.DeepEqual(*warnings, want) {
+		t.Errorf("warnings = %q, want %q", *warnings, want)
+	}
+	if b := store.issues["bd-o42"]; len(store.issues) != 1 || b.Title != "Issue 42 (remote edit)" || ghDerefRef(b.ExternalRef) != newIssue42Ref {
+		t.Errorf("store holds %d beads, bd-o42 = title %q external_ref %v; want bd-o42 alone with the newer remote edit, relinked to %s",
+			len(store.issues), b.Title, ghDerefRef(b.ExternalRef), newIssue42Ref)
+	}
+
+	rt.lookupStatus = 0
+	engine, _, _ = renamedRepoEngine(rt, "", "old", store)
+	// Compare content, as the bd github push hooks do, not timestamps: a
+	// bead that kept its older local edit would then be written over the
+	// issue.
+	engine.PushHooks = &tracker.PushHooks{ContentEqual: func(local *types.Issue, remote *tracker.TrackerIssue) bool {
+		return local.Title == remote.Title && local.Description == remote.Description
+	}}
+	if _, err := engine.Sync(ctx, tracker.SyncOptions{}); err != nil {
+		t.Fatalf("Sync with the repository's names: %v", err)
+	}
+	if w := rt.writes(); len(w) != 0 {
+		t.Errorf("syncs wrote %q over issue 42's newer remote edit", w)
+	}
+}
+
 // TestPush_RenamedRepository pins that a push updates the issue of a bead
 // edited locally, whichever name of the repository its ref and the
 // configuration use, even when no issue changed on GitHub since the last sync
-// and so no pull ever sees the new URLs.
+// and so no pull ever sees the new URLs. It does so too when Init could not
+// read the repository's names and the configuration names the repository the
+// bead links: the issue then comes back under a name the tracker does not
+// know, which is no sign that it was transferred out of the repository.
 func TestPush_RenamedRepository(t *testing.T) {
-	for _, configured := range []string{"old", "new"} {
-		t.Run("configured acme/"+configured, func(t *testing.T) {
+	for _, tc := range []struct {
+		configured   string
+		lookupStatus int
+	}{
+		{configured: "old"},
+		{configured: "new"},
+		{configured: "old", lookupStatus: http.StatusNotFound},
+	} {
+		name := "configured acme/" + tc.configured
+		if tc.lookupStatus != 0 {
+			name += " without the repository's names"
+		}
+		t.Run(name, func(t *testing.T) {
 			rt := newRenamedRepoTransport("github.com", map[int]*remoteIssue{
 				42: {title: "Issue 42", updated: renameDay(1)},
 			})
+			rt.lookupStatus = tc.lookupStatus
 			store := newGHCrossRepoStore(linkedBead("bd-o42", "Issue 42 (local edit)", oldIssue42Ref, 3))
 			store.local["github.last_sync"] = renameDay(2).Format(time.RFC3339)
-			engine, _, warnings := renamedRepoEngine(rt, "", configured, store)
+			engine, _, warnings := renamedRepoEngine(rt, "", tc.configured, store)
 			result, err := engine.Sync(context.Background(), tracker.SyncOptions{Push: true})
 			if err != nil {
 				t.Fatalf("Sync: %v", err)
 			}
-			want := []string{http.MethodPatch + " /repos/acme/" + configured + "/issues/42"}
+			want := []string{http.MethodPatch + " /repos/acme/" + tc.configured + "/issues/42"}
 			if result.PushStats.Updated != 1 || !reflect.DeepEqual(rt.writes(), want) {
 				t.Errorf("push: updated=%d writes=%q, want updated=1 and %q", result.PushStats.Updated, rt.writes(), want)
 			}
@@ -344,16 +416,21 @@ func TestPush_RenamedRepository(t *testing.T) {
 // out of the configured repository: GitHub follows the transfer, so fetching
 // the bead's issue returns it under its new repository's URL. The pull skips
 // it and the push and the conflict check leave it alone, with a warning, so
-// the bead's content is never written over an issue of another repository.
+// the bead's content is never written over an issue of another repository,
+// nor the issue's over a bead linked to its new URL.
 func TestSync_TransferredIssue(t *testing.T) {
 	const (
 		repoIssue42Ref     = "https://github.com/acme/repo/issues/42"
 		transferredRef     = "https://github.com/acme/other/issues/7"
 		configuredRepoName = "the configured GitHub repository acme/repo"
 	)
-	newTransport := func() *ghFixtureTransport {
+	// newTransport serves the transfer; without lookup the repository
+	// lookup answers 404, so Init cannot read the repository's names.
+	newTransport := func(lookup bool) *ghFixtureTransport {
 		rt := &ghFixtureTransport{}
-		rt.route(http.MethodGet, "/repos/acme/repo", ghRepositoryJSON(7100, "acme/repo", "https://github.com/acme/repo"))
+		if lookup {
+			rt.route(http.MethodGet, "/repos/acme/repo", ghRepositoryJSON(7100, "acme/repo", "https://github.com/acme/repo"))
+		}
 		rt.route(http.MethodGet, "/repos/acme/repo/issues", "[]")
 		rt.route(http.MethodGet, "/repos/acme/repo/issues/42", ghIssueJSON(9007, 7, "Issue 7 (remote edit)", "Moved body", transferredRef))
 		// Served, so a push that wrote the bead would show up as a request.
@@ -371,26 +448,75 @@ func TestSync_TransferredIssue(t *testing.T) {
 		}
 	}
 
-	t.Run("pull by bead ID", func(t *testing.T) {
-		rt := newTransport()
-		store := newGHCrossRepoStore(linkedBead("bd-r42", "Issue 42", repoIssue42Ref, 1))
-		engine, _, warnings := renamedRepoEngine(rt, "", "repo", store)
-		result, err := engine.Sync(context.Background(), tracker.SyncOptions{Pull: true, IssueIDs: []string{"bd-r42"}})
-		if err != nil {
-			t.Fatalf("Sync: %v", err)
-		}
-		if result.PullStats.Skipped != 1 {
-			t.Errorf("pull: skipped=%d, want the transferred issue skipped", result.PullStats.Skipped)
-		}
-		want := []string{"Skipped GitHub issue " + transferredRef + ": its URL is outside " + configuredRepoName}
-		if !reflect.DeepEqual(*warnings, want) {
-			t.Errorf("warnings = %q, want %q", *warnings, want)
-		}
-		assertUntouched(t, rt, store)
-	})
+	// Skipping writes nothing, so the pull skips the issue whether or not
+	// Init read the repository's names.
+	for _, lookup := range []bool{true, false} {
+		t.Run(fmt.Sprintf("pull by bead ID lookup=%v", lookup), func(t *testing.T) {
+			rt := newTransport(lookup)
+			store := newGHCrossRepoStore(linkedBead("bd-r42", "Issue 42", repoIssue42Ref, 1))
+			engine, _, warnings := renamedRepoEngine(rt, "", "repo", store)
+			result, err := engine.Sync(context.Background(), tracker.SyncOptions{Pull: true, IssueIDs: []string{"bd-r42"}})
+			if err != nil {
+				t.Fatalf("Sync: %v", err)
+			}
+			if result.PullStats.Skipped != 1 {
+				t.Errorf("pull: skipped=%d, want the transferred issue skipped", result.PullStats.Skipped)
+			}
+			want := []string{"Skipped GitHub issue " + transferredRef + ": its URL is outside " + configuredRepoName}
+			if !reflect.DeepEqual(*warnings, want) {
+				t.Errorf("warnings = %q, want %q", *warnings, want)
+			}
+			assertUntouched(t, rt, store)
+		})
+	}
+
+	// bd-other links the issue's new URL. The pull did not ask for it, and
+	// it is linked outside the configured repository, so a pull by bead ID
+	// leaves it alone, even on a first sync, where no last_sync guards its
+	// local edit, and so does a pull that hydrates bd-r42 while bd-other has
+	// no local edit to guard.
+	for name, tc := range map[string]struct {
+		opts      tracker.SyncOptions
+		lastSync  string
+		editedDay int // the day bd-other was last edited locally
+	}{
+		"by bead ID": {opts: tracker.SyncOptions{Pull: true, IssueIDs: []string{"bd-r42"}}, editedDay: 3},
+		"hydrating":  {opts: tracker.SyncOptions{Pull: true}, lastSync: renameDay(1).Format(time.RFC3339), editedDay: 0},
+	} {
+		t.Run("pull "+name+" with the new URL linked to another bead", func(t *testing.T) {
+			rt := newTransport(true)
+			store := newGHCrossRepoStore(
+				linkedBead("bd-r42", "Issue 42", repoIssue42Ref, 3),
+				linkedBead("bd-other", "Issue 7 (local edit)", transferredRef, tc.editedDay),
+			)
+			if tc.lastSync != "" {
+				store.local["github.last_sync"] = tc.lastSync
+			}
+			engine, _, warnings := renamedRepoEngine(rt, "", "repo", store)
+			result, err := engine.Sync(context.Background(), tc.opts)
+			if err != nil {
+				t.Fatalf("Sync: %v", err)
+			}
+			if result.PullStats.Skipped != 1 || result.PullStats.Updated != 0 || result.PullStats.Created != 0 {
+				t.Errorf("pull: created=%d updated=%d skipped=%d, want the transferred issue skipped and nothing written",
+					result.PullStats.Created, result.PullStats.Updated, result.PullStats.Skipped)
+			}
+			if b := store.issues["bd-other"]; b.Title != "Issue 7 (local edit)" || ghDerefRef(b.ExternalRef) != transferredRef {
+				t.Errorf("bd-other = title %q external_ref %v, want it untouched", b.Title, ghDerefRef(b.ExternalRef))
+			}
+			if b := store.issues["bd-r42"]; len(store.issues) != 2 || b.Title != "Issue 42" || ghDerefRef(b.ExternalRef) != repoIssue42Ref {
+				t.Errorf("store holds %d beads, bd-r42 = title %q external_ref %v; want bd-r42 and bd-other alone, untouched",
+					len(store.issues), b.Title, ghDerefRef(b.ExternalRef))
+			}
+			want := []string{"Skipped GitHub issue " + transferredRef + ": its URL is outside " + configuredRepoName}
+			if !reflect.DeepEqual(*warnings, want) {
+				t.Errorf("warnings = %q, want %q", *warnings, want)
+			}
+		})
+	}
 
 	t.Run("sync with both sides edited", func(t *testing.T) {
-		rt := newTransport()
+		rt := newTransport(true)
 		store := newGHCrossRepoStore(linkedBead("bd-r42", "Issue 42", repoIssue42Ref, 3))
 		store.local["github.last_sync"] = "2026-10-01T00:00:00Z"
 		engine, _, warnings := renamedRepoEngine(rt, "", "repo", store)
