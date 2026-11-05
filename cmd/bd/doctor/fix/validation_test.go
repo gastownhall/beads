@@ -301,6 +301,89 @@ func TestOrphanedDependencies_KeepsCrossPrefixTarget(t *testing.T) {
 	}
 }
 
+// TestOrphanedDependencies_RemovesSamePrefixExternalColumnTarget pins that
+// the storage column does not decide #4647's exemption on the fix side: a
+// same-prefix target with no row, stored in depends_on_external as migrations
+// 0041 and 0047 store it, is deleted, and an external: ref is kept.
+func TestOrphanedDependencies_RemovesSamePrefixExternalColumnTarget(t *testing.T) {
+	dir := t.TempDir()
+	store := newFixTestStore(t, dir, "bd")
+	ctx := context.Background()
+
+	issue := &types.Issue{ID: "bd-src", Title: "Source", Status: types.StatusOpen, IssueType: types.TypeTask, CreatedAt: time.Now()}
+	if err := store.CreateIssue(ctx, issue, "test"); err != nil {
+		t.Fatal(err)
+	}
+	db := store.UnderlyingDB()
+	for _, target := range []string{"bd-gone", "external:proj:cap"} {
+		if _, err := db.Exec(
+			`INSERT INTO dependencies (id, issue_id, depends_on_external, type, created_at, created_by)
+			 VALUES (UUID(), 'bd-src', ?, 'blocks', NOW(), 'test')`, target); err != nil {
+			t.Fatalf("insert bd-src -> %s: %v", target, err)
+		}
+	}
+
+	if err := OrphanedDependencies(dir, false); err != nil {
+		t.Fatalf("OrphanedDependencies failed: %v", err)
+	}
+
+	for target, want := range map[string]int{"bd-gone": 0, "external:proj:cap": 1} {
+		var count int
+		if err := db.QueryRow("SELECT COUNT(*) FROM dependencies WHERE issue_id = 'bd-src' AND depends_on_external = ?", target).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != want {
+			t.Errorf("bd-src -> %s rows after fix = %d, want %d", target, count, want)
+		}
+	}
+}
+
+// TestOrphanedDependencies_RemovesDeletedHeldPrefixTarget pins the
+// mixed-prefix case on the fix side: with zz in allowed_prefixes, bd-a -> zz-b
+// is stored in depends_on_external, and once zz-b is deleted the dangling
+// edge is removed.
+func TestOrphanedDependencies_RemovesDeletedHeldPrefixTarget(t *testing.T) {
+	dir := t.TempDir()
+	store := newFixTestStore(t, dir, "bd")
+	ctx := context.Background()
+
+	if err := store.SetConfig(ctx, "allowed_prefixes", "zz"); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"bd-a", "zz-b"} {
+		issue := &types.Issue{ID: id, Title: id, Status: types.StatusOpen, IssueType: types.TypeTask, CreatedAt: time.Now()}
+		if err := store.CreateIssue(ctx, issue, "test"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dep := &types.Dependency{IssueID: "bd-a", DependsOnID: "zz-b", Type: types.DepBlocks, CreatedAt: time.Now(), CreatedBy: "test"}
+	if err := store.AddDependency(ctx, dep, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteIssue(ctx, "zz-b"); err != nil {
+		t.Fatal(err)
+	}
+
+	db := store.UnderlyingDB()
+	count := func() int {
+		var n int
+		if err := db.QueryRow("SELECT COUNT(*) FROM dependencies WHERE issue_id = 'bd-a' AND depends_on_external = 'zz-b'").Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	if n := count(); n != 1 {
+		t.Fatalf("dangling bd-a -> zz-b rows before fix = %d, want 1", n)
+	}
+
+	if err := OrphanedDependencies(dir, false); err != nil {
+		t.Fatalf("OrphanedDependencies failed: %v", err)
+	}
+	if n := count(); n != 0 {
+		t.Errorf("dangling bd-a -> zz-b rows after fix = %d, want 0", n)
+	}
+}
+
 // TestChildParentDependencies_PreservesParentChildType verifies that legitimate
 // parent-child type dependencies are NOT removed (only blocking types are removed).
 func TestChildParentDependencies_PreservesParentChildType(t *testing.T) {
