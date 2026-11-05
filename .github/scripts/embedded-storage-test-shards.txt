@@ -228,6 +228,7 @@
 40 8 TestEmbeddedRelationsOrdersNeighborsFromBothPlanesTogether
 40 8 TestEmbeddedReopenIssueCategorySemantics
 40 8 TestGetIssueCommentsPageEmbedded
+40 8 TestJournalShapeProbeOncePerOpen
 40 8 TestListWisps
 
 40 9 TestBumpEpochCarryingNeitherCarriesNorServesARowFromAFutureEpoch
@@ -257,6 +258,7 @@
 40 10 TestWithPeerAuth_WarnsWhenStoredPeerSuppressesAmbientPasswordAmbient
 
 40 11 TestABumpUnderOneStoreIDMovesTheEpochSeenThroughEveryStoreID
+40 11 TestAdaptiveInsert_GciShape
 40 11 TestEmbeddedBatchCreateFirstVersionCarriesCreationTimeEdges
 40 11 TestEmbeddedClaimerRefusalMessagesCarryTheirFragments
 40 11 TestEmbeddedGuardedUpdateMintsOnceAfterItsPatches
@@ -590,6 +592,7 @@
 40 34 TestEmbeddedReaderReadyDeferredAndEphemeralGates
 40 34 TestEmbeddedReaderReadyPageIsThePrefixOfTheUnboundedAnswerCountsIncluded
 40 34 TestMergeWithStrategy_TheirsResolvesAndCommits
+40 34 TestMissingRequiredColumnRefusesAtOpen
 40 34 TestQuerierContract
 40 34 TestReadyWorkStatementBudget
 
@@ -607,6 +610,7 @@
 40 35 TestReadyWorkWithMissingDeferredParentTables
 40 35 TestReclaimExpiredLeaseSurvivesRestartEmbedded
 
+40 36 TestAdaptiveRead_GciShape
 40 36 TestBumpEpochCarryingFailsAndRollsBackWhenARowAlreadyExistsAtTheNewEpoch
 40 36 TestCommenterContract
 40 36 TestConcurrentOpenReturnsCached
