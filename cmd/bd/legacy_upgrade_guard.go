@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/ceiling"
 	"github.com/steveyegge/beads/internal/configfile"
@@ -337,11 +338,19 @@ const (
 // ("1.1.0"), a release candidate ("v1.2.0-rc.1"), a build carrying metadata,
 // or a Go pseudo-version ("v1.1.1-0.20260805093327-bf97b73749ac"). All of
 // those are valid semantic versions, so the era comes from a semver parse
-// rather than from counting dots.
+// rather than from counting dots. The one non-semver shape a current build
+// stamps is a Homebrew --HEAD stamp ("HEAD-f925f3f"), read as current.
 func classifyVersionWitness(version string) witnessEra {
 	version = strings.TrimSpace(version)
 	if version == "" {
 		return witnessEraUnknown
+	}
+	// Only a current-era binary built from the homebrew-core formula stamps
+	// HEAD-<shortsha>: no pre-1.0 channel had a head spec. bd rewrites the
+	// same stamp on every run, so reading it as unknown warned on every
+	// command with a remedy that writes it back (GH#5603).
+	if doctor.IsBrewHeadVersion(version) {
+		return witnessEraCurrent
 	}
 	if canonical := "v" + strings.TrimPrefix(version, "v"); semver.IsValid(canonical) {
 		if semver.Major(canonical) == "v0" {

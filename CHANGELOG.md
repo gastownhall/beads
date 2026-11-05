@@ -1181,6 +1181,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A server-mode workspace last touched by a Homebrew `--HEAD` build no longer
+  prints "unreadable version witness" on every command (GH#5603). The
+  cross-era upgrade guard now reads the `HEAD-<sha>` stamp that build writes
+  to `.beads/.local_version` as current-era, like a 1.x witness; the warning's
+  `bd doctor` remedy could not clear it, since bd writes the same stamp back
+  on every run. Stamps brew never emits still warn.
+
 - **bd again reads `GT_ROOT` from a rig's `.beads/.env`** (#8117; also
   shipped in 1.3.4). `gc rig add` writes the city root there, and the
   `.beads/.env` allowlist from #7879 (also in 1.3.3) dropped it, printing
