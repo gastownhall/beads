@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -27,6 +28,7 @@ import (
 	"github.com/steveyegge/beads/internal/ceiling"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/creds"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/hooks"
@@ -334,6 +336,12 @@ func resolveDoltServerConnection(ctx context.Context, beadsDir string, fileCfg *
 	// read as a caller assertion (see ApplyResolvedServerPort).
 	dolt.ApplyResolvedServerPort(beadsDir, doltCfg)
 	doltCfg.ServerSocket = fileCfg.GetDoltServerSocket()
+	doltCfg.BeadsDir = beadsDir
+	if os.Getenv("BEADS_DOLT_PASSWORD") != "" {
+		if err := dolt.CheckServerEndpointTrust(beadsDir, fileCfg, doltCfg.ServerHost, doltCfg.ServerPort, doltCfg.ServerSocket); err != nil {
+			return err
+		}
+	}
 	// A configured credential command targets an authenticating gateway server:
 	// run it for a short-lived token used as the connection username. Fail closed
 	// — never fall back to the static/root user when a command was configured but
@@ -552,17 +560,74 @@ func applyNoColorFlag() {
 	}
 }
 
+// expandedBeadsEnvValueReason is the notice reason for a .beads/.env value that
+// $VAR or ${VAR} expansion would have changed.
+const expandedBeadsEnvValueReason = "$VAR references are not expanded in .beads/.env; write the value literally or set it in your shell environment"
+
+// readBeadsEnvFile parses a project .beads/.env file with gotenv's syntax, but
+// takes every value exactly as the file writes it. gotenv expands $VAR and
+// ${VAR} references from the process environment (or an earlier line), which
+// would let a committed file copy anything in the caller's environment,
+// secrets included, into a setting the workspace sends elsewhere: an actor
+// name written into issues, or DOLT_REMOTE_PASSWORD sent to the workspace's
+// own sync.remote.
+//
+// The file is therefore parsed a second time with every '$' escaped. gotenv
+// reads "\$" as a literal dollar sign and never consults the environment for
+// it, so that parse depends on the file alone and yields each value as
+// written, except that an escape gotenv does not consume (inside single
+// quotes, or before an already-escaped dollar in an unquoted value) survives as
+// "\$" and is undone before comparing. A key whose value differs between the
+// two parses was changed by expansion: it is left out of values and listed,
+// sorted, in expanded. Because a value is imported only when it equals what the
+// file alone determines, a quirk of the second parse can refuse a key but never
+// let the environment into one. A file gotenv cannot parse is an error, as it
+// was for gotenv.Read.
+func readBeadsEnvFile(envFile string) (values map[string]string, expanded []string, err error) {
+	raw, err := os.ReadFile(envFile) // #nosec G304 -- the .env of the beads dir bd selected
+	if err != nil {
+		return nil, nil, err
+	}
+	parsed, err := gotenv.StrictParse(bytes.NewReader(raw))
+	if err != nil {
+		return nil, nil, err
+	}
+	asWritten, _ := gotenv.StrictParse(bytes.NewReader(bytes.ReplaceAll(raw, []byte("$"), []byte(`\$`))))
+	values = make(map[string]string, len(parsed))
+	for key, value := range parsed {
+		if literal, ok := asWritten[key]; ok && strings.ReplaceAll(literal, `\$`, "$") == value {
+			values[key] = value
+			continue
+		}
+		expanded = append(expanded, key)
+	}
+	slices.Sort(expanded)
+	return values, expanded, nil
+}
+
 // loadBeadsEnvFile loads .beads/.env into process environment for per-project
-// Dolt credentials (GH#2520). Uses gotenv.Load which is non-overriding —
+// Dolt credentials (GH#2520). Imports are non-overriding —
 // existing shell env vars always take precedence.
 // Safe to call with an empty beadsDir (no-op).
 func loadBeadsEnvFile(beadsDir string) {
 	if beadsDir == "" {
 		return
 	}
+	if !config.IsDotenvKey("BEADS_DIR") {
+		config.RecordWorkspaceBeadsDir(beadsDir)
+	}
 	envFile := filepath.Join(beadsDir, ".env")
 	if _, err := os.Stat(envFile); err != nil {
 		return
+	}
+	env, expanded, err := readBeadsEnvFile(envFile)
+	if err != nil {
+		return
+	}
+	for key, val := range env {
+		if os.Getenv(key) == "" && val != "" {
+			config.MarkDotenvValue(key, val)
+		}
 	}
 	// A .env-provided BEADS_DIR is user-authored selection wherever it is
 	// imported from, not only via loadBeadsSelectionEnvFile: that loader
@@ -572,7 +637,32 @@ func loadBeadsEnvFile(beadsDir string) {
 	// thing, instead of target-role or CWD-role depending on the caller's
 	// unrelated BEADS_DB export.
 	beadsDirWasSet := os.Getenv("BEADS_DIR") != ""
-	_ = gotenv.Load(envFile)
+	keys := make([]string, 0, len(env)+len(expanded))
+	for key := range env {
+		keys = append(keys, key)
+	}
+	keys = append(keys, expanded...)
+	slices.Sort(keys)
+	for _, key := range keys {
+		value, literal := env[key]
+		if ok, reason := creds.AllowedProjectEnvKey(key); !ok {
+			fmt.Fprintf(os.Stderr, "beads: ignoring %s from .beads/.env (%s)\n", key, reason)
+			continue
+		}
+		if !literal {
+			fmt.Fprintf(os.Stderr, "beads: ignoring %s from .beads/.env (%s)\n", key, expandedBeadsEnvValueReason)
+			continue
+		}
+		upper := strings.ToUpper(strings.TrimSpace(key))
+		if _, exists := os.LookupEnv(key); !exists {
+			if _, upperExists := os.LookupEnv(upper); !upperExists {
+				_ = os.Setenv(upper, value)
+				if upper == "GT_ROOT" {
+					config.MarkGTRootFromProjectEnv(value)
+				}
+			}
+		}
+	}
 	if !beadsDirWasSet && os.Getenv("BEADS_DIR") != "" {
 		beadsDirProvidedAtStartup = true
 	}
@@ -599,8 +689,11 @@ func loadBeadsSelectionEnvFile(beadsDir string) {
 	if beadsDir == "" {
 		return
 	}
+	config.RecordWorkspaceBeadsDir(beadsDir)
 	envFile := filepath.Join(beadsDir, ".env")
-	pairs, err := gotenv.Read(envFile)
+	// A selector whose value expansion filled in is left out here without a
+	// notice: loadBeadsEnvFile reports it when it reads the same file.
+	pairs, _, err := readBeadsEnvFile(envFile)
 	if err != nil {
 		return
 	}
@@ -610,6 +703,7 @@ func loadBeadsSelectionEnvFile(beadsDir string) {
 		}
 		if value, ok := pairs[key]; ok && strings.TrimSpace(value) != "" {
 			_ = os.Setenv(key, value)
+			config.MarkDotenvValue(key, value)
 			if key == "BEADS_DIR" {
 				// A .beads/.env that routes commands via BEADS_DIR is
 				// user-authored selection, same as exporting the variable
@@ -934,9 +1028,27 @@ func resolveCommandBeadsDir(dbPath string) string {
 		return beadsDir
 	}
 
+	// A dbPath that is a .beads directory, or lies directly inside one, names
+	// that directory, even before it exists: the directory form of --db and
+	// BEADS_DB (GH#2548), the workspace bd import sets up where none was
+	// found, or a create --repo target with no .beads yet. Climbing past it
+	// would bind whatever .beads lies above: one discovery never reached, or
+	// the user-global ~/.beads it passes over (GH#4402). For ~/.beads itself
+	// the climb would start at the home directory and end there, binding the
+	// home directory.
+	if filepath.Base(dbPath) == ".beads" {
+		return filepath.Clean(dbPath)
+	}
+	if parent := filepath.Dir(dbPath); filepath.Base(parent) == ".beads" {
+		return parent
+	}
+
 	bound := ceiling.For(filepath.Dir(dbPath))
 	for dir := filepath.Dir(dbPath); dir != "" && dir != filepath.Dir(dir) && !bound.Excludes(dir); dir = filepath.Dir(dir) {
 		candidate := filepath.Join(dir, ".beads")
+		if climbEndsAtAccountHome(dir, candidate, dbPath) {
+			break
+		}
 		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
 			return candidate
 		}
@@ -945,6 +1057,22 @@ func resolveCommandBeadsDir(dbPath string) string {
 	// No candidate matched — fall back to parent directory of the db path.
 	// This handles bootstrap/init where no metadata.json exists yet.
 	return filepath.Dir(dbPath)
+}
+
+// climbEndsAtAccountHome reports whether resolveCommandBeadsDir's climb from
+// dbPath ends at dir instead of binding candidate, dir's .beads: dir is the
+// account home, whose .beads is the user-global directory discovery passes
+// over (GH#4402), dbPath does not lie inside that directory (one naming it,
+// or a path directly in it, never reaches the climb), and the home
+// directory is not a repository root (a dotfiles repository's .beads is its
+// own). An explicit --db, BEADS_DB or bd import target under the home
+// directory that does not exist yet then binds the directory it names, not
+// ~/.beads, and nothing above the home directory either, as bd bootstrap's
+// parent-config walk ends there.
+func climbEndsAtAccountHome(dir, candidate, dbPath string) bool {
+	return beads.IsAccountHomeDir(dir) &&
+		!strings.HasPrefix(dbPath, candidate+string(filepath.Separator)) &&
+		!isGitWorkTreeRoot(dir)
 }
 
 // resolveConfiguredActor returns the actor implied by env/config when no
@@ -1675,6 +1803,7 @@ var rootCmd = &cobra.Command{
 		}
 
 		// Initialize database path
+		fallbackBeadsDir := "" // the workspace import/setup set up when none is found
 		if dbPath == "" {
 			// Use public API to find database (same logic as extensions)
 			if foundDB := beads.FindDatabasePath(); foundDB != "" {
@@ -1721,10 +1850,11 @@ var rootCmd = &cobra.Command{
 				}
 
 				if dbPath == "" && cmd.Name() != "import" && cmd.Name() != "setup" {
-					// No database found - provide context-aware error message
-					fmt.Fprintf(os.Stderr, "Error: no beads database found\n")
-					fmt.Fprintf(os.Stderr, "Hint: %s\n", diagHint())
-					fmt.Fprintf(os.Stderr, "      or set BEADS_DIR to point to your .beads directory\n")
+					// No database found - provide context-aware error message.
+					// GH#4402: when discovery passed over the user's own
+					// ~/.beads, the refusal names it, so a misdirected write
+					// is visible and the opt-in is one paste away.
+					printNoDatabaseRefusal()
 					return SilentExit()
 				}
 
@@ -1744,14 +1874,35 @@ var rootCmd = &cobra.Command{
 						targetBeadsDir = beads.ExplicitBeadsDir()
 					}
 					if targetBeadsDir == "" {
+						// GH#4402: the working directory's own .beads is
+						// the fallback, except where discovery passes over
+						// the user-global ~/.beads. In the home directory
+						// the fallback is that directory, so bd import
+						// would write into the global database. Outside a
+						// repository, where discovery passed over a
+						// user-level workspace (SkippedUserGlobalBeadsDir),
+						// bd import refuses with the note that names it, as
+						// every other command run there does.
+						if cwd, err := os.Getwd(); (err == nil && beads.SkipsUserGlobalBeadsAt(cwd)) ||
+							beads.SkippedUserGlobalBeadsDir() != "" {
+							printNoDatabaseRefusal()
+							return SilentExit()
+						}
 						targetBeadsDir = ".beads"
 					}
 					dbPath = utils.CanonicalizePath(filepath.Join(targetBeadsDir, beads.CanonicalDatabaseName))
+					// Bind the directory chosen here: resolveCommandBeadsDir
+					// would climb from a BEADS_DIR not named .beads to the
+					// nearest .beads above it.
+					fallbackBeadsDir = filepath.Dir(dbPath)
 				}
 			}
 		}
 
-		beadsDir := resolveCommandBeadsDir(dbPath)
+		beadsDir := fallbackBeadsDir
+		if beadsDir == "" {
+			beadsDir = resolveCommandBeadsDir(dbPath)
+		}
 		prepareSelectedCommandContext(beadsDir, true)
 		refreshBoundCommandConfig(cmd)
 		if guardErr := guardLegacyUpgradeWorkspace(beadsDir); guardErr != nil {
@@ -1964,6 +2115,11 @@ var rootCmd = &cobra.Command{
 			// preview: the store is genuinely writable underneath, so the
 			// lazy defer-wake sweep may still run (be-vbhpf).
 			ClassifiedRead: policy.readOnly && !readonlyMode && !previewMode,
+			// A read-only or gateway open does not migrate, so a schema too
+			// old for this binary's issue reads is refused at open instead of
+			// failing each read on an unknown column. Not for a preview,
+			// which reports an incompatibility through its own query.
+			RequireReadableSchema: !previewMode,
 		}
 
 		// Load config to get database name and server connection settings.
@@ -2099,7 +2255,7 @@ var rootCmd = &cobra.Command{
 		// mode is where that is least visible, not where it is acceptable.
 		if proxiedServerMode {
 			p, err := newProxiedServerUOWProvider(rootCtx, beadsDir, databaseOverride,
-				rootProviderOptions(previewMode, useReadOnly)...)
+				rootProviderOptions(previewMode, useReadOnly, isWorkingSetReconcileCommand(cmd))...)
 			if err != nil {
 				// Same typed rendering the store path gets below: a schema
 				// skew or a migration-gate refusal here carries a whole
@@ -2231,7 +2387,7 @@ var rootCmd = &cobra.Command{
 		// Dolt manages these files itself; external interference is never safe.
 
 		if _, ok := backends.Lookup(cfg.GetBackend()); ok {
-			store, err = newRegisteredBackendStore(openCtx, cfg.GetBackend(), beadsDir, useReadOnly)
+			store, err = newRegisteredBackendStore(openCtx, cfg.GetBackend(), beadsDir, useReadOnly, opensForBeadWrites(doltCfg))
 		} else {
 			store, err = newDoltStore(rootCtx, doltCfg)
 		}

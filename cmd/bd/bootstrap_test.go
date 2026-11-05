@@ -10,57 +10,24 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/cmd/bd/doctor"
+	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/doltversion"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/testutil"
 )
-
-// snapshotBootstrapEnv saves all BD_/BEADS_-prefixed env vars, clears them,
-// and registers a t.Cleanup to restore them. It restores via t.Cleanup
-// (rather than returning a function for the caller to defer) because
-// t.Cleanup callbacks only start running after the test function's own
-// regular defers have all completed. Tests using this helper commonly call
-// t.Setenv("BEADS_DIR", ...) / t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", ...)
-// afterward; t.Setenv captures its "restore to" value at call time, which
-// would be the already-wiped (absent) state. If this helper's own
-// restoration ran via a caller-deferred function, it would run before those
-// t.Setenv cleanups fire and its correct restoration would be clobbered by
-// them, permanently leaking the wipe forward into later tests in the same
-// binary. Registering via t.Cleanup here instead makes this the
-// first-registered (and thus, by t.Cleanup's LIFO order, last-run) cleanup,
-// so it always has the final word.
-func snapshotBootstrapEnv(t *testing.T) {
-	t.Helper()
-	saved := make(map[string]string)
-	for _, env := range os.Environ() {
-		if strings.HasPrefix(env, "BD_") || strings.HasPrefix(env, "BEADS_") {
-			parts := strings.SplitN(env, "=", 2)
-			key := parts[0]
-			saved[key] = os.Getenv(key)
-			_ = os.Unsetenv(key)
-		}
-	}
-	t.Cleanup(func() {
-		for _, env := range os.Environ() {
-			if strings.HasPrefix(env, "BD_") || strings.HasPrefix(env, "BEADS_") {
-				parts := strings.SplitN(env, "=", 2)
-				_ = os.Unsetenv(parts[0])
-			}
-		}
-		for key, val := range saved {
-			_ = os.Setenv(key, val)
-		}
-	})
-}
 
 func TestDetectBootstrapAction_NoneWhenDatabaseExists(t *testing.T) {
 	t.Setenv("BEADS_DOLT_DATA_DIR", "")
@@ -1130,6 +1097,107 @@ func TestFindParentConfigWithoutHomeKeepsSearchingAboveCwd(t *testing.T) {
 	}
 }
 
+// TestFindParentConfigPassesOverUserGlobalBeads pins GH#4402 for bootstrap's
+// parent-config walk. A project under the account home with no metadata.json
+// does not inherit the user-global <home>/.beads/metadata.json, whose database
+// name and server bootstrap would otherwise set up, and the walk does not
+// climb above the account home when $HOME points elsewhere. A home directory
+// that is itself a repository root keeps its .beads as that repository's own.
+func TestFindParentConfigPassesOverUserGlobalBeads(t *testing.T) {
+	writeMetadata := func(t *testing.T, beadsDir, database string) {
+		t.Helper()
+		if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"dolt_database":"`+database+`"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// <sandbox>/root/home is the account home and holds the user-global
+	// .beads; <sandbox>/root/.beads lies above it, where only a walk that
+	// climbs past the home directory would find it.
+	type fixture struct{ sandbox, home, requested string }
+	setup := func(t *testing.T) fixture {
+		t.Helper()
+		sandbox, err := filepath.EvalSymlinks(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		root := filepath.Join(sandbox, "root")
+		f := fixture{sandbox: sandbox, home: filepath.Join(root, "home")}
+		writeMetadata(t, filepath.Join(root, ".beads"), "above_home")
+		writeMetadata(t, filepath.Join(f.home, ".beads"), "user_global")
+		f.requested = filepath.Join(f.home, "proj", ".beads")
+		if err := os.MkdirAll(f.requested, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		// Keep the temp-root ceiling clear of this walk; it is not what this pins.
+		t.Setenv("TMPDIR", filepath.Join(sandbox, "tmp"))
+		t.Cleanup(beads.SetUserHomeDirForTesting(f.home))
+		return f
+	}
+	setHome := func(t *testing.T, home string) {
+		t.Helper()
+		t.Setenv("HOME", home)
+		t.Setenv("USERPROFILE", home)
+	}
+
+	t.Run("project under the home directory", func(t *testing.T) {
+		f := setup(t)
+		setHome(t, f.home)
+		cfg, err := findParentConfig(f.requested)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg != nil {
+			t.Errorf("findParentConfig() inherited database %q, want no parent config", cfg.GetDoltDatabase())
+		}
+	})
+
+	t.Run("HOME points elsewhere", func(t *testing.T) {
+		f := setup(t)
+		setHome(t, filepath.Join(f.sandbox, "elsewhere"))
+		cfg, err := findParentConfig(f.requested)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg != nil {
+			t.Errorf("findParentConfig() inherited database %q, want no parent config: the walk ends at the account home", cfg.GetDoltDatabase())
+		}
+	})
+
+	t.Run("home is a repository root", func(t *testing.T) {
+		f := setup(t)
+		setHome(t, f.home)
+		initGitRepoAt(t, f.home)
+		cfg, err := findParentConfig(f.requested)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg == nil || cfg.GetDoltDatabase() != "user_global" {
+			t.Errorf("findParentConfig() = %+v, want the home repository's own database %q", cfg, "user_global")
+		}
+	})
+
+	t.Run("home repository without metadata, HOME elsewhere", func(t *testing.T) {
+		// The home repository's .beads is examined and holds nothing, and
+		// the walk still ends at the account home.
+		f := setup(t)
+		if err := os.Remove(filepath.Join(f.home, ".beads", "metadata.json")); err != nil {
+			t.Fatal(err)
+		}
+		setHome(t, filepath.Join(f.sandbox, "elsewhere"))
+		initGitRepoAt(t, f.home)
+		cfg, err := findParentConfig(f.requested)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg != nil {
+			t.Errorf("findParentConfig() inherited database %q, want no parent config: the walk ends at the account home", cfg.GetDoltDatabase())
+		}
+	})
+}
+
 // TestDetectBootstrapAction_SharedServerEnvUsesSharedPath verifies that when
 // BEADS_DOLT_SHARED_SERVER=1 is set but cfg.DoltMode is the default (embedded),
 // detectBootstrapAction looks in the shared-server directory — not embeddeddolt/.
@@ -1435,6 +1503,142 @@ func TestFinalizeSyncedBootstrapWritesConfigFiles(t *testing.T) {
 		if !strings.Contains(gitignore, pattern) {
 			t.Errorf(".beads/.gitignore missing runtime pattern %q:\n%s", pattern, gitignore)
 		}
+	}
+}
+
+// TestFinalizeSyncedBootstrap_GitignorePermissionFailureWarns pins #6225
+// finding 2: a .gitignore ensure step whose 0600 tightening failed
+// (ErrGitignorePermissions — every required pattern is already in place,
+// only the chmod failed) must not abort finalizeSyncedBootstrap before
+// sync.remote is persisted; it warns instead. Any other ensure failure
+// still fails finalize.
+func TestFinalizeSyncedBootstrap_GitignorePermissionFailureWarns(t *testing.T) {
+	const dbName = "beads_hq"
+	const syncRemote = "file:///tmp/fake-origin.git"
+
+	setup := func(t *testing.T) string {
+		t.Helper()
+		t.Setenv("BEADS_DOLT_DATA_DIR", "")
+		t.Setenv("BEADS_DOLT_SERVER_DATABASE", "")
+		t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+		t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+		t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+		t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+
+		tmpDir := t.TempDir()
+		beadsDir := filepath.Join(tmpDir, ".beads")
+		if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		// Simulate a post-clone workspace: cloneFromRemote created the
+		// embeddeddolt directory but no metadata.json / config.yaml exists.
+		if err := os.MkdirAll(filepath.Join(beadsDir, "embeddeddolt"), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("BEADS_DIR", beadsDir)
+		return beadsDir
+	}
+	failEnsure := func(t *testing.T, err error) {
+		t.Helper()
+		orig := doctorEnsureGitignoreForBeadsDir
+		doctorEnsureGitignoreForBeadsDir = func(string) error { return err }
+		t.Cleanup(func() { doctorEnsureGitignoreForBeadsDir = orig })
+	}
+
+	t.Run("permission-only failure warns and persists sync.remote", func(t *testing.T) {
+		beadsDir := setup(t)
+		failEnsure(t, fmt.Errorf("%w: %w", doctor.ErrGitignorePermissions, syscall.EPERM))
+
+		var err error
+		stderr := captureStderrDuring(t, func() {
+			err = finalizeSyncedBootstrap(beadsDir, syncRemote, configfile.DefaultConfig(), dbName)
+		})
+		if err != nil {
+			t.Fatalf("finalizeSyncedBootstrap failed on a permission-only gitignore failure: %v", err)
+		}
+		if !strings.Contains(stderr, "Warning:") {
+			t.Errorf("stderr = %q, want a Warning: line", stderr)
+		}
+		if !strings.Contains(stderr, doctor.ErrGitignorePermissions.Error()) {
+			t.Errorf("stderr = %q, want it to name %q", stderr, doctor.ErrGitignorePermissions.Error())
+		}
+		if got := config.GetStringFromDir(beadsDir, "sync.remote"); got != syncRemote {
+			t.Errorf("sync.remote = %q, want %q (a tighten failure must not abort the persist)", got, syncRemote)
+		}
+	})
+
+	t.Run("any other ensure failure still fails finalize", func(t *testing.T) {
+		beadsDir := setup(t)
+		failEnsure(t, errors.New("read .beads/.gitignore: is a directory"))
+
+		err := finalizeSyncedBootstrap(beadsDir, syncRemote, configfile.DefaultConfig(), dbName)
+		if err == nil {
+			t.Fatal("finalizeSyncedBootstrap succeeded despite an ensure failure")
+		}
+		if !strings.Contains(err.Error(), "ensure .beads/.gitignore") {
+			t.Errorf("err = %v, want it wrapped as ensure .beads/.gitignore: ...", err)
+		}
+		if got := config.GetStringFromDir(beadsDir, "sync.remote"); got != "" {
+			t.Errorf("sync.remote = %q, want it unset when finalize aborts", got)
+		}
+	})
+}
+
+// TestEnsureBeadsGitignore_DowngradesOnlyPermissionFailures pins the split
+// bd connect's .gitignore step relies on (#6225 finding 2): a
+// permission-only failure prints the same warning bootstrap prints and
+// returns nil, while any other failure is returned unchanged so connect
+// still aborts with `ensuring <dir>/.gitignore: ...` before it writes
+// http_target.json.
+func TestEnsureBeadsGitignore_DowngradesOnlyPermissionFailures(t *testing.T) {
+	tests := []struct {
+		name        string
+		err         error
+		wantNil     bool
+		wantWarning bool
+	}{
+		{
+			name:        "permission-only failure warns and passes",
+			err:         fmt.Errorf("%w: %w", doctor.ErrGitignorePermissions, syscall.EPERM),
+			wantNil:     true,
+			wantWarning: true,
+		},
+		{
+			name:    "any other failure is returned unchanged",
+			err:     errors.New("read .beads/.gitignore: is a directory"),
+			wantNil: false,
+		},
+		{
+			name:    "success passes through",
+			err:     nil,
+			wantNil: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			orig := doctorEnsureGitignoreForBeadsDir
+			doctorEnsureGitignoreForBeadsDir = func(string) error { return tt.err }
+			t.Cleanup(func() { doctorEnsureGitignoreForBeadsDir = orig })
+
+			var err error
+			stderr := captureStderrDuring(t, func() {
+				err = ensureBeadsGitignore(filepath.Join(t.TempDir(), ".beads"))
+			})
+			if tt.wantNil {
+				if err != nil {
+					t.Errorf("err = %v, want nil", err)
+				}
+			} else if err != tt.err {
+				t.Errorf("err = %v, want the exact failure returned unchanged", err)
+			}
+			if tt.wantWarning {
+				if !strings.Contains(stderr, "Warning:") || !strings.Contains(stderr, doctor.ErrGitignorePermissions.Error()) {
+					t.Errorf("stderr = %q, want a Warning: line naming %q", stderr, doctor.ErrGitignorePermissions.Error())
+				}
+			} else if stderr != "" {
+				t.Errorf("stderr = %q, want no output", stderr)
+			}
+		})
 	}
 }
 
@@ -1936,15 +2140,13 @@ func TestDetectBootstrapAction_NoLocalShadowDirStillLiveChecksExisting(t *testin
 }
 
 // TestExecuteInitAction_ServerModeExistingProjectMissingDBRefuses reproduces
-// be-cy41 bug #2: executeInitAction is mode-blind — it always builds a
-// dolt.Config with CreateIfMissing:true, AutoStart:true, and no server
-// host/port/mode fields, so it silently creates an embedded-style database
-// even for a server-mode workspace. When the workspace was already
-// initialized (metadata.json has a project_id — the same signal PR #5791 uses) but
-// the configured database is missing on the server, this silently strands any
-// existing issue data behind a new, empty database of the same name.
+// be-cy41 bug #2: when a server-mode workspace was already initialized
+// (metadata.json has a project_id — the same signal PR #5791 uses) but the
+// configured database is missing on the server, creating one would strand
+// any existing issue data behind a new, empty database of the same name.
 // executeInitAction must refuse instead (the same root cause as PR #5791's
-// proposed bd init guard, which is still open).
+// bd init guard), before it opens any store: neither the workspace's server
+// (bootstrapStoreConfig) nor an embedded one.
 func TestExecuteInitAction_ServerModeExistingProjectMissingDBRefuses(t *testing.T) {
 	t.Setenv("BEADS_DOLT_DATA_DIR", "")
 	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
@@ -3395,5 +3597,279 @@ func TestCloneViaServerRefusesBelowRequiredMin(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "dolt sql-server at "+ep.serverLocation()) {
 		t.Errorf("cloneViaServer = %q, want it to name the server", err)
+	}
+}
+
+// bootstrapServerWorkspace is a workspace whose own metadata.json selects a
+// Dolt server on port (dolt_mode server, dolt_server_port), with database db
+// and no project_id, bound as the CLI binds it. It returns the .beads
+// directory and the configuration loaded from it.
+func bootstrapServerWorkspace(t *testing.T, port int, db string) (string, *configfile.Config) {
+	t.Helper()
+	snapshotBootstrapEnv(t)
+	config.ResetForTesting()
+	t.Cleanup(config.ResetForTesting)
+	root := t.TempDir()
+	beadsDir := filepath.Join(root, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	meta := map[string]any{"database": "dolt", "backend": "dolt", "dolt_database": db}
+	if port > 0 {
+		meta["dolt_mode"] = "server"
+		meta["dolt_server_port"] = port
+	}
+	data, err := json.Marshal(meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("BEADS_DIR", beadsDir)
+	t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "1")
+	t.Chdir(root)
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize: %v", err)
+	}
+	cfg, err := configfile.Load(beadsDir)
+	if err != nil || cfg == nil {
+		t.Fatalf("configfile.Load: %v", err)
+	}
+	return beadsDir, cfg
+}
+
+// TestBootstrapStoreConfigOpensTheWorkspaceStore pins the store bd
+// bootstrap's init, restore and jsonl-import actions open. In a workspace
+// whose own metadata selects no server it is exactly the embedded config
+// those actions always built. In one whose metadata selects a Dolt server it
+// is that server, at the port later commands resolve, where main built the
+// embedded config there too and imported into .beads/embeddeddolt, which no
+// later command in the workspace opens.
+func TestBootstrapStoreConfigOpensTheWorkspaceStore(t *testing.T) {
+	t.Run("embedded workspace", func(t *testing.T) {
+		beadsDir, cfg := bootstrapServerWorkspace(t, 0, "emb_db")
+		got, err := bootstrapStoreConfig(t.Context(), beadsDir, cfg)
+		if err != nil {
+			t.Fatalf("bootstrapStoreConfig: %v", err)
+		}
+		want := dolt.Config{
+			Path:            doltserver.ResolveDoltDir(beadsDir),
+			Database:        cfg.GetDoltDatabase(),
+			CreateIfMissing: true,
+			AutoStart:       true,
+			BeadsDir:        beadsDir,
+		}
+		if !reflect.DeepEqual(*got, want) {
+			t.Errorf("bootstrapStoreConfig = %+v, want main's embedded config %+v", *got, want)
+		}
+	})
+	t.Run("server-mode workspace", func(t *testing.T) {
+		beadsDir, cfg := bootstrapServerWorkspace(t, 13463, "srv_db")
+		got, err := bootstrapStoreConfig(t.Context(), beadsDir, cfg)
+		if err != nil {
+			t.Fatalf("bootstrapStoreConfig: %v", err)
+		}
+		if !got.ServerMode || got.ServerPort != 13463 || got.ServerHost != "127.0.0.1" || got.Database != "srv_db" || !got.CreateIfMissing {
+			t.Errorf("bootstrapStoreConfig = %+v, want the workspace's server at 127.0.0.1:13463, creating srv_db", *got)
+		}
+	})
+	// A workspace with no metadata.json of its own, in shared-server mode,
+	// keeps main's embedded config: no later command there opens a server
+	// database under the name bootstrap would use.
+	t.Run("metadata-less workspace in shared-server mode", func(t *testing.T) {
+		beadsDir, cfg := bootstrapServerWorkspace(t, 0, "emb_db")
+		if err := os.Remove(filepath.Join(beadsDir, "metadata.json")); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+		got, err := bootstrapStoreConfig(t.Context(), beadsDir, cfg)
+		if err != nil {
+			t.Fatalf("bootstrapStoreConfig: %v", err)
+		}
+		if got.ServerMode {
+			t.Errorf("bootstrapStoreConfig = %+v, want main's embedded config", *got)
+		}
+	})
+	// Shared-server mode named only in a config.yaml, while the workspace's
+	// own metadata.json does not select server mode, keeps main's embedded
+	// config: workspace discovery does not count that mode, so every later
+	// command finds the workspace through the .beads/embeddeddolt the action
+	// creates (and then opens the shared server's database).
+	t.Run("user-level dolt.shared-server, metadata without dolt_mode", func(t *testing.T) {
+		beadsDir, cfg := bootstrapServerWorkspace(t, 0, "shr_db")
+		userDir := filepath.Join(os.Getenv("HOME"), ".config", "bd")
+		if err := os.MkdirAll(userDir, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("XDG_CONFIG_HOME", filepath.Join(os.Getenv("HOME"), ".config"))
+		if err := os.WriteFile(filepath.Join(userDir, "config.yaml"), []byte("dolt:\n  shared-server: true\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		config.ResetForTesting()
+		if err := config.Initialize(); err != nil {
+			t.Fatalf("config.Initialize: %v", err)
+		}
+		if !effectiveServerMode(beadsDir, cfg) {
+			t.Fatal("precondition: the store factories do not take this workspace for shared-server mode")
+		}
+		got, err := bootstrapStoreConfig(t.Context(), beadsDir, cfg)
+		if err != nil {
+			t.Fatalf("bootstrapStoreConfig: %v", err)
+		}
+		if got.ServerMode {
+			t.Errorf("bootstrapStoreConfig = %+v, want main's embedded config", *got)
+		}
+	})
+	t.Run("dolt_mode embedded, workspace config.yaml dolt.shared-server", func(t *testing.T) {
+		beadsDir, _ := bootstrapServerWorkspace(t, 0, "shr_db")
+		meta := []byte(`{"database":"dolt","backend":"dolt","dolt_database":"shr_db","dolt_mode":"embedded"}`)
+		if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), meta, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("dolt:\n  shared-server: true\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := configfile.Load(beadsDir)
+		if err != nil || cfg == nil {
+			t.Fatalf("configfile.Load: %v", err)
+		}
+		if !effectiveServerMode(beadsDir, cfg) {
+			t.Fatal("precondition: the store factories do not take this workspace for shared-server mode")
+		}
+		got, err := bootstrapStoreConfig(t.Context(), beadsDir, cfg)
+		if err != nil {
+			t.Fatalf("bootstrapStoreConfig: %v", err)
+		}
+		if got.ServerMode {
+			t.Errorf("bootstrapStoreConfig = %+v, want main's embedded config", *got)
+		}
+	})
+	// A proxied-server workspace keeps main's embedded config even when the
+	// environment forces server mode: the store factories refuse a plain
+	// server store there before they consult server mode.
+	t.Run("proxied-server workspace under BEADS_DOLT_SERVER_MODE", func(t *testing.T) {
+		beadsDir, cfg := bootstrapServerWorkspace(t, 0, "prx_db")
+		meta := []byte(`{"database":"dolt","backend":"dolt","dolt_database":"prx_db","dolt_mode":"proxied-server"}`)
+		if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), meta, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("BEADS_DOLT_SERVER_MODE", "1")
+		got, err := bootstrapStoreConfig(t.Context(), beadsDir, cfg)
+		if err != nil {
+			t.Fatalf("bootstrapStoreConfig: %v", err)
+		}
+		if got.ServerMode {
+			t.Errorf("bootstrapStoreConfig = %+v, want main's embedded config", *got)
+		}
+	})
+}
+
+// TestExecuteJSONLImportAction_ServerAlreadyHoldsDatabaseWritesNothing: the
+// plan can reach jsonl-import with nothing on this machine tying the
+// server's database to the workspace (a fresh clone matched by name, or no
+// project_id). Importing the tracked issues.jsonl there would write its
+// stale rows over live ones, so the action asks the server first, as the
+// store would dial it, and writes nothing when the database is there. Main
+// imported into .beads/embeddeddolt instead, which no later command opens.
+func TestExecuteJSONLImportAction_ServerAlreadyHoldsDatabaseWritesNothing(t *testing.T) {
+	beadsDir, cfg := bootstrapServerWorkspace(t, 13464, "held_db")
+	jsonl := filepath.Join(beadsDir, "issues.jsonl")
+	if err := os.WriteFile(jsonl, []byte(`{"id":"hd-1","title":"stale","status":"open","priority":2,"issue_type":"task"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	orig := checkBootstrapServerDB
+	t.Cleanup(func() { checkBootstrapServerDB = orig })
+	var probed []string
+	checkBootstrapServerDB = func(ep bootstrapServerProbeConfig) bootstrapServerDBCheck {
+		probed = append(probed, ep.serverLocation()+"/"+ep.database)
+		return bootstrapServerDBCheck{Reachable: true, Exists: true}
+	}
+	plan := BootstrapPlan{BeadsDir: beadsDir, Database: "held_db", Action: "jsonl-import", JSONLFile: jsonl}
+	if err := executeJSONLImportAction(t.Context(), plan, cfg); err != nil {
+		t.Fatalf("executeJSONLImportAction: %v", err)
+	}
+	if len(probed) != 1 || probed[0] != "127.0.0.1:13464/held_db" {
+		t.Errorf("server probes %v, want one for held_db at 127.0.0.1:13464, the server the store opens", probed)
+	}
+	for _, dir := range []string{"embeddeddolt", "dolt"} {
+		if _, err := os.Stat(filepath.Join(beadsDir, dir)); err == nil {
+			t.Errorf("bootstrap created .beads/%s in a server-mode workspace whose server already holds the database", dir)
+		}
+	}
+}
+
+// TestExecuteRestoreAction_ServerModeRefusesBeforeCreating: the restore
+// action creates the database and then restores the backup over it without
+// --force, which Dolt refuses. On main it did so in .beads/embeddeddolt even
+// in a server-mode workspace. On a server it would leave an empty database
+// every later command takes for the real one, so it refuses before anything
+// is created, with the restore command to run, and offers the tracked
+// issues.jsonl only where there is one. When the server already holds the
+// database it says so and names no --force restore, which would replace the
+// database's current contents.
+func TestExecuteRestoreAction_ServerModeRefusesBeforeCreating(t *testing.T) {
+	for _, tc := range []struct {
+		withJSONL, held bool
+	}{{false, false}, {true, false}, {false, true}} {
+		withJSONL := tc.withJSONL
+		t.Run(fmt.Sprintf("tracked issues.jsonl %v, server holds the database %v", withJSONL, tc.held), func(t *testing.T) {
+			beadsDir, cfg := bootstrapServerWorkspace(t, 13465, "rst_db")
+			backupDir := filepath.Join(beadsDir, "backup")
+			if err := os.MkdirAll(backupDir, 0o750); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(backupDir, "issues.jsonl"), []byte("{}\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if withJSONL {
+				if err := os.WriteFile(filepath.Join(beadsDir, "issues.jsonl"), []byte("{}\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			orig := checkBootstrapServerDB
+			t.Cleanup(func() { checkBootstrapServerDB = orig })
+			var probed []string
+			checkBootstrapServerDB = func(ep bootstrapServerProbeConfig) bootstrapServerDBCheck {
+				probed = append(probed, ep.serverLocation()+"/"+ep.database)
+				return bootstrapServerDBCheck{Reachable: true, Exists: tc.held}
+			}
+			plan := BootstrapPlan{BeadsDir: beadsDir, Database: "rst_db", Action: "restore", BackupDir: backupDir}
+			err := executeRestoreAction(t.Context(), plan, cfg)
+			if err == nil {
+				t.Fatal("executeRestoreAction succeeded in a server-mode workspace, want a refusal")
+			}
+			if len(probed) != 1 || probed[0] != "127.0.0.1:13465/rst_db" {
+				t.Errorf("server probes %v, want one for rst_db at 127.0.0.1:13465, the server the store opens", probed)
+			}
+			msg := err.Error()
+			if tc.held {
+				for _, want := range []string{"rst_db", "already exists", "127.0.0.1:13465", "did not restore", "replace the database's current contents"} {
+					if !strings.Contains(msg, want) {
+						t.Errorf("refusal %q does not name %q", msg, want)
+					}
+				}
+				for _, unwanted := range []string{"once database", "bd backup restore --force " + backupDir} {
+					if strings.Contains(msg, unwanted) {
+						t.Errorf("refusal %q for a database the server holds says %q", msg, unwanted)
+					}
+				}
+			} else {
+				for _, want := range []string{"nothing was created", "127.0.0.1:13465", "bd backup restore --force " + backupDir, "rst_db", "init-missing-server-db"} {
+					if !strings.Contains(msg, want) {
+						t.Errorf("refusal %q does not name %q", msg, want)
+					}
+				}
+				if got := strings.Contains(msg, "re-run 'bd bootstrap'"); got != withJSONL {
+					t.Errorf("refusal offers the tracked issues.jsonl = %v, want %v: %q", got, withJSONL, msg)
+				}
+			}
+			for _, dir := range []string{"embeddeddolt", "dolt"} {
+				if _, err := os.Stat(filepath.Join(beadsDir, dir)); err == nil {
+					t.Errorf("the refused restore created .beads/%s", dir)
+				}
+			}
+		})
 	}
 }

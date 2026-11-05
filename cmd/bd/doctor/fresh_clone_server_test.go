@@ -518,7 +518,7 @@ func TestDoctorChecksNameConfiguredValuesEscaped(t *testing.T) {
 			}
 			issues := strings.Join(checkYAMLConfigValues(tmpDir), "\n")
 			requireDoctorTextEscaped(t, "checkYAMLConfigValues", issues)
-			if !strings.Contains(issues, "Run `bd repo add <path>`  (<path>: ") {
+			if !strings.Contains(issues, "Run bd repo add <path>  (<path>: ") {
 				t.Errorf("the bd repo add remedy pastes a value no shell passes on unchanged:\n%s", issues)
 			}
 		})

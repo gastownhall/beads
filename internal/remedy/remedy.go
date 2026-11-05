@@ -322,6 +322,19 @@ func CommandArg(goos, value, placeholder string) (arg, note string) {
 	return placeholder, "  (" + placeholder + ": " + EscapedValue(value) + ")"
 }
 
+// PrintedWord spells value as a hint names it on the lines printed around a
+// command it pastes value into, which a user can paste with the command: as
+// it is when it is a plain word (IsPlainWord), as an issue ID bd mints is,
+// and otherwise escaped (EscapedValue), so pasting those lines runs no part of
+// it and it cannot redraw the command. PrintedValue alone would leave a $(...)
+// as it is.
+func PrintedWord(value string) string {
+	if IsPlainWord(value) {
+		return value
+	}
+	return EscapedValue(value)
+}
+
 // IsPlainWord reports whether value is non-empty and holds only ASCII
 // letters, digits and _ . / : + -, characters no shell bd prints a command
 // for (sh, bash, zsh, fish, PowerShell, cmd.exe, a .cmd shim) expands, splits

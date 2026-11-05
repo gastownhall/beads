@@ -88,6 +88,7 @@ func (o *importer) ImportBatch(ctx context.Context, request publicops.ImportBatc
 				return publicops.ImportBatchResult{}, "", err
 			}
 			staleRejected := make(map[string]struct{})
+			retired := make(map[string]struct{})
 			skippedSeen := make(map[string]struct{})
 			opts := storage.BatchCreateOptions{
 				SkipPrefixValidation:           request.SkipPrefixValidation,
@@ -112,11 +113,30 @@ func (o *importer) ImportBatch(ctx context.Context, request publicops.ImportBatc
 					staleRejected[issueID] = struct{}{}
 					result.StaleRejectedIDs = append(result.StaleRejectedIDs, issueID)
 				},
+				// An import never resurrects a row a retaining sweep retired:
+				// the row is skipped and reported.
+				OnRetiredID: func(issueID string) {
+					if _, ok := retired[issueID]; ok {
+						return
+					}
+					retired[issueID] = struct{}{}
+					result.RetiredIDs = append(result.RetiredIDs, issueID)
+				},
 			}
 			if _, err := storageissueops.CreateIssuesInTxWithResult(ctx, runner, request.Issues, request.Actor, opts); err != nil {
 				return publicops.ImportBatchResult{}, "", err
 			}
-			result.Created = len(request.Issues) - len(staleRejected)
+			// A retired id is skipped on every row that carries it, so Created
+			// drops each such row, not each distinct id: a request may carry
+			// an id more than once. The set is the committed attempt's, so a
+			// replayed hook does not count twice.
+			retiredRows := 0
+			for _, issue := range request.Issues {
+				if _, ok := retired[issue.ID]; ok {
+					retiredRows++
+				}
+			}
+			result.Created = len(request.Issues) - len(staleRejected) - retiredRows
 		}
 
 		for _, memory := range request.Memories {

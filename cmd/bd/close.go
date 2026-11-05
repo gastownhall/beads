@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 	"time"
 
@@ -219,8 +220,10 @@ in the molecule for you; add --no-auto to only show it.`,
 
 			// Open children only survive to here when --force waived the
 			// engine's refusal. Say so, so orphaned children are never silent.
+			// The ID is the store's, printed ahead of --continue's hint, so it
+			// is named as the lines around that hint name it.
 			if res.OpenChildren > 0 {
-				fmt.Fprintf(os.Stderr, "warning: closing %s with %d open child issue(s) still active\n", id, res.OpenChildren)
+				fmt.Fprintf(os.Stderr, "warning: closing %s with %d open child issue(s) still active\n", printedIssueID(id), res.OpenChildren)
 			}
 
 			activeStore := results[i].Store
@@ -849,7 +852,10 @@ func noticeUnservedMoleculeAutoClose(ctx context.Context, s storage.DoltStorage,
 		root, err = issueops.CompletedMolecule(ctx, reader, stepID)
 	}
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "note: %s was closed without its molecule auto-close (the server does not advertise %s), and its molecule could not be read: %v\n", stepID, token, err)
+		// The read error can name the store's root ID (issueops wraps it into
+		// "reading the steps of <root>"), so it is spelled by
+		// remedy.PrintedError like any error that repeats a value.
+		fmt.Fprintf(os.Stderr, "note: %s was closed without its molecule auto-close (the server does not advertise %s), and its molecule could not be read: %v\n", printedIssueID(stepID), token, remedy.PrintedError(err))
 		return
 	}
 	if root == nil || noted[root.ID] {
@@ -858,7 +864,11 @@ func noticeUnservedMoleculeAutoClose(ctx context.Context, s storage.DoltStorage,
 	if noted != nil {
 		noted[root.ID] = true
 	}
-	fmt.Fprintf(os.Stderr, "note: closing %s completed molecule %s, which this close did not auto-close: the server does not advertise %s, so the molecule's auto-close is the server's to run (bd close %s closes it)\n", stepID, root.ID, token, root.ID)
+	// The step and root IDs are the store's: the root goes into the bd close
+	// command as one shell word, or as a placeholder named escaped after it
+	// (remedy.CommandArg), and both are named as printedIssueID spells them.
+	rootArg, note := remedy.CommandArg(runtime.GOOS, root.ID, "<molecule-id>")
+	fmt.Fprintf(os.Stderr, "note: closing %s completed molecule %s, which this close did not auto-close: the server does not advertise %s, so the molecule's auto-close is the server's to run (bd close %s closes it)%s\n", printedIssueID(stepID), printedIssueID(root.ID), token, rootArg, note)
 }
 
 // advanceMoleculeDirect runs `bd close --continue` on the direct route through

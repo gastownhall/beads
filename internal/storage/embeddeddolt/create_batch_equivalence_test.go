@@ -20,7 +20,7 @@ import (
 // TestCreateBatchEquivalencePartsCoverEveryScenario keeps the split exact.
 var createBatchEquivalenceParts = [][]string{
 	{"small", "depadd"},
-	{"apply", "waitsfor"},
+	{"apply", "waitsfor", "retired"},
 	{"settled"},
 }
 

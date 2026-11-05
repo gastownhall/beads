@@ -1091,9 +1091,11 @@ func runLabelList(ctx context.Context, args []string) error {
 	return nil
 }
 
-// shipCommand is the bd ship command for capability, in backticks, the
-// capability as one shell word or a placeholder named after the command.
+// shipCommand is the bd ship command for capability, the capability as one
+// shell word or a placeholder named after the command. It is not wrapped in
+// backticks: sh, bash and zsh run a pasted `...` as a command substitution,
+// which a backtick in the single-quoted capability would end.
 func shipCommand(capability string) string {
 	arg, note := remedy.CommandArg(runtime.GOOS, capability, "<capability>")
-	return "`bd ship " + arg + "`" + note
+	return "bd ship " + arg + note
 }
