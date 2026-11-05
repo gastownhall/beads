@@ -64,7 +64,7 @@ func TestStoreReadCommandHintsQuoteIDs(t *testing.T) {
 				{ID: "bd-fixed", Title: "Same bug here", Description: "one identical body of text", Status: types.StatusOpen},
 			}
 			out := captureStdout(t, func() error {
-				return reportFindDuplicates(context.Background(), issues, "mechanical", 0.1, 0, "")
+				return reportFindDuplicates(context.Background(), issues, "mechanical", 0.1, 0, "", nil)
 			})
 			return out, bdLine(t, out, "Compare:")
 		}},
