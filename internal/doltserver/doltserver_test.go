@@ -244,6 +244,164 @@ func TestIsRunningCorruptPID(t *testing.T) {
 	}
 }
 
+// writeTrackedStateForLiveProcess writes a pid file naming this test process,
+// which is alive, and a port file naming port, with no configured port.
+func writeTrackedStateForLiveProcess(t *testing.T, dir string, port int) {
+	t.Helper()
+	t.Setenv("GT_ROOT", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	if err := os.WriteFile(pidPath(dir), []byte(strconv.Itoa(os.Getpid())), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if port > 0 {
+		if err := writePortFile(dir, port); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// assertStateFilesKept fails unless both state files still hold what
+// writeTrackedStateForLiveProcess wrote.
+func assertStateFilesKept(t *testing.T, dir string, port int) {
+	t.Helper()
+	data, err := os.ReadFile(pidPath(dir))
+	if err != nil {
+		t.Errorf("pid file removed: %v", err)
+	} else if got := strings.TrimSpace(string(data)); got != strconv.Itoa(os.Getpid()) {
+		t.Errorf("pid file = %q, want %d", got, os.Getpid())
+	}
+	if got := readPortFile(dir); got != port {
+		t.Errorf("port file = %d, want %d", got, port)
+	}
+}
+
+// GH#7214: when the process list cannot be read (macOS Seatbelt refuses the
+// setuid /bin/ps), "could not list dolt processes" must not be read as "PID
+// was reused". An empty PATH makes both ps and powershell.exe fail to exec.
+func TestIsRunningKeepsStateWhenPsCannotRun(t *testing.T) {
+	dir := t.TempDir()
+	writeTrackedStateForLiveProcess(t, dir, 14567)
+	t.Setenv("PATH", t.TempDir())
+
+	state, err := IsRunning(dir)
+	if err != nil {
+		t.Fatalf("IsRunning error: %v", err)
+	}
+	if !state.Running || state.PID != os.Getpid() || state.Port != 14567 {
+		t.Errorf("IsRunning = %+v, want Running with PID %d and port 14567", state, os.Getpid())
+	}
+	assertStateFilesKept(t, dir, 14567)
+}
+
+// errProcessListUnreadable stands in for a process list that cannot be read.
+var errProcessListUnreadable = errors.New("listing processes: operation not permitted")
+
+// stubProcessList replaces the process-list reader for the test.
+func stubProcessList(t *testing.T, read func() ([]int, error)) {
+	t.Helper()
+	orig := readDoltProcesses
+	readDoltProcesses = read
+	t.Cleanup(func() { readDoltProcesses = orig })
+}
+
+func TestIsRunningKeepsStateWhenProcessListUnreadable(t *testing.T) {
+	dir := t.TempDir()
+	writeTrackedStateForLiveProcess(t, dir, 14567)
+	stubProcessList(t, func() ([]int, error) { return nil, errProcessListUnreadable })
+
+	state, err := IsRunning(dir)
+	if err != nil {
+		t.Fatalf("IsRunning error: %v", err)
+	}
+	if !state.Running || state.PID != os.Getpid() || state.Port != 14567 {
+		t.Errorf("IsRunning = %+v, want Running with PID %d and port 14567", state, os.Getpid())
+	}
+	assertStateFilesKept(t, dir, 14567)
+}
+
+func TestIsRunningRemovesStateWhenPIDIsNotDolt(t *testing.T) {
+	dir := t.TempDir()
+	writeTrackedStateForLiveProcess(t, dir, 14567)
+	stubProcessList(t, func() ([]int, error) { return nil, nil }) // read fine, no dolt processes
+
+	state, err := IsRunning(dir)
+	if err != nil {
+		t.Fatalf("IsRunning error: %v", err)
+	}
+	if state.Running {
+		t.Errorf("IsRunning = %+v, want Running=false for a PID that is not a dolt server", state)
+	}
+	for _, path := range []string{pidPath(dir), portPath(dir)} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Errorf("expected %s to be removed, stat err = %v", filepath.Base(path), err)
+		}
+	}
+}
+
+// With no port file, a port from config (BEADS_DOLT_SERVER_PORT, or the
+// shared server's) does not confirm an unverified PID either: it says where a
+// server should listen, not that this PID is one.
+func TestIsRunningDoesNotStopUnverifiedProcessWithoutPort(t *testing.T) {
+	tests := []struct {
+		name string
+		env  map[string]string
+	}{
+		{"no port configured", nil},
+		{"port from BEADS_DOLT_SERVER_PORT", map[string]string{"BEADS_DOLT_SERVER_PORT": "14568"}},
+		{"shared server mode", map[string]string{"BEADS_DOLT_SHARED_SERVER": "1"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			// The PID is this test process: the orphan-stop path would kill the test.
+			writeTrackedStateForLiveProcess(t, dir, 0)
+			t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+			t.Setenv("BEADS_SHARED_SERVER_DIR", t.TempDir())
+			for k, v := range tt.env {
+				t.Setenv(k, v)
+			}
+			if tt.env != nil && DefaultConfig(dir).Port == 0 {
+				t.Fatal("precondition: DefaultConfig resolved no port")
+			}
+			stubProcessList(t, func() ([]int, error) { return nil, errProcessListUnreadable })
+
+			state, err := IsRunning(dir)
+			if err != nil {
+				t.Fatalf("IsRunning error: %v", err)
+			}
+			if state.Running {
+				t.Errorf("IsRunning = %+v, want Running=false when neither the process nor its port can be confirmed", state)
+			}
+			if _, err := os.Stat(pidPath(dir)); err != nil {
+				t.Errorf("expected the pid file to be kept: %v", err)
+			}
+		})
+	}
+}
+
+// GH#7214: EnsureRunningDetailed must adopt a tracked server it cannot verify
+// rather than start a competing one. Auto-start is disabled so a wrong
+// "not running" read surfaces as an error instead of a start.
+func TestEnsureRunningDetailedAdoptsUnverifiedServer(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	t.Setenv("BEADS_DOLT_AUTO_START", "0")
+	config.ResetForTesting()
+	t.Cleanup(config.ResetForTesting)
+
+	dir := t.TempDir()
+	writeTrackedStateForLiveProcess(t, dir, 14567)
+	t.Setenv("PATH", t.TempDir())
+
+	port, startedByUs, err := EnsureRunningDetailed(dir)
+	if err != nil || port != 14567 || startedByUs {
+		t.Errorf("EnsureRunningDetailed = (%d, %v, %v), want (14567, false, nil)", port, startedByUs, err)
+	}
+	assertStateFilesKept(t, dir, 14567)
+}
+
 func TestIsRunningCorruptPIDRemovesPortFile(t *testing.T) {
 	dir := t.TempDir()
 
@@ -2332,14 +2490,13 @@ func TestReadyTimeout(t *testing.T) {
 }
 
 // TestBuildDoltServerArgs verifies the argv constructed for `dolt sql-server`
-// always includes a non-info --loglevel and the expected host/port. This
+// includes the platform-appropriate --loglevel and expected host/port. This
 // pins the fix for the field report where dolt-server.log ballooned to
 // hundreds of MB with `msg=NewConnection` / `msg=ConnectionClosed` spam
 // because dolt logs connection open/close at INFO by default.
 //
-// If this test fails because someone intentionally lowered verbosity back
-// to info/debug/trace, please instead pick a different mitigation (e.g.
-// dolt YAML config) and update doltServerLogLevel plus this test together.
+// Platforms that cannot verify listener ownership use info so startup can
+// require Dolt's ready line; checked platforms retain the warning floor.
 func TestBuildDoltServerArgs(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -2371,9 +2528,12 @@ func TestBuildDoltServerArgs(t *testing.T) {
 		},
 	}
 
-	// Levels that MUST NOT appear — anything at or below info re-introduces
-	// the NewConnection/ConnectionClosed noise we are trying to suppress.
-	forbiddenLevels := []string{"trace", "debug", "info"}
+	// Levels that MUST NOT appear — except info where startup needs Dolt's
+	// ready line because listener ownership cannot be checked.
+	forbiddenLevels := []string{"trace", "debug"}
+	if listenerOwnershipChecked {
+		forbiddenLevels = append(forbiddenLevels, "info")
+	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2502,6 +2662,42 @@ func TestBuildDoltServerArgs_NoDebugFlagsWhenDisabled(t *testing.T) {
 	}
 }
 
+func TestStartupProofUsesReadyLineWithoutListenerOwnership(t *testing.T) {
+	original := listenerOwnershipChecked
+	t.Cleanup(func() { listenerOwnershipChecked = original })
+
+	listenerOwnershipChecked = false
+	if got := serverLogLevel(false); got != "info" {
+		t.Fatalf("serverLogLevel(false) = %q, want info", got)
+	}
+	args := buildDoltServerArgs("127.0.0.1", 3308, 0, false, "")
+	if got, ok := findLogLevel(args); !ok || got != "info" {
+		t.Fatalf("buildDoltServerArgs log level = %q, want info (args %v)", got, args)
+	}
+	body, err := buildDoltServerYAMLConfig("127.0.0.1", 3308, 0, false, "/tmp/.doltcfg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := servercfg.NewYamlConfig(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(cfg.LogLevel()); got != "info" {
+		t.Fatalf("YAML LogLevel = %q, want info", got)
+	}
+	if !startupReadyLineLogged(false) {
+		t.Fatal("startupReadyLineLogged(false) = false without listener ownership proof")
+	}
+
+	listenerOwnershipChecked = true
+	if got := serverLogLevel(false); got != doltServerLogLevel {
+		t.Errorf("serverLogLevel(false) with listener ownership = %q, want %q", got, doltServerLogLevel)
+	}
+	if startupReadyLineLogged(false) {
+		t.Error("startupReadyLineLogged(false) = true with listener ownership proof")
+	}
+}
+
 func TestBuildDoltServerArgs_RemotesAPI(t *testing.T) {
 	args := buildDoltServerArgs("127.0.0.1", 3308, 8081, false, "")
 	idx := indexOf(args, "--remotesapi-port")
@@ -2565,8 +2761,8 @@ func TestBuildDoltServerYAMLConfig(t *testing.T) {
 		t.Errorf("RemotesapiPort = %v, want 8081", got)
 	}
 
-	if got := string(cfg.LogLevel()); got != doltServerLogLevel {
-		t.Errorf("LogLevel = %q, want %q", got, doltServerLogLevel)
+	if got := string(cfg.LogLevel()); got != serverLogLevel(false) {
+		t.Errorf("LogLevel = %q, want %q", got, serverLogLevel(false))
 	}
 	if got := cfg.CfgDir(); got != "/tmp/some/.doltcfg" {
 		t.Errorf("CfgDir = %q, want %q", got, "/tmp/some/.doltcfg")

@@ -182,6 +182,18 @@ func cliCompatibleMigrationSQL(name, sqlText string) string {
 		// series -- and never carries removed_restriction yet, so the column
 		// always needs adding on a fresh bundle.
 		return cliMigration0071AddRemovedRestriction
+	case "0073_add_arrival_seq.up.sql":
+		// Direct DDL for the same reason as 0067: the source migration's
+		// PREPARE guards (INFORMATION_SCHEMA probes) are what make the raw
+		// .up.sql idempotent when replayed onto an already-migrated store,
+		// and the 2.2.x CLI no-ops a prepared ADD COLUMN. Both planes always
+		// need the column here -- a fresh bundle runs the whole main series
+		// in order, so `issues` and `wisps` both exist and neither carries
+		// arrival_seq yet, nor wisps the unique index the source's third
+		// guarded block creates. Replays over a database that never synced
+		// the wisp tables must use the frozen source text instead -- see
+		// cliSubstituteAssumesWispTables.
+		return cliMigration0073AddArrivalSeq
 	default:
 		return sqlText
 	}
@@ -222,6 +234,10 @@ func cliSubstituteAssumesWispTables(name string) bool {
 		// cliMigration0070AddParticipationGeneration drops the source's
 		// @wisps_pg_needs_add table-exists guard and ALTERs wisps directly,
 		// the same shape 0067's override already uses for current_revision.
+		return true
+	case "0073_add_arrival_seq.up.sql":
+		// cliMigration0073AddArrivalSeq drops the source's @has_wisps
+		// table-exists guard and ALTERs and indexes wisps directly.
 		return true
 	default:
 		return false
@@ -337,6 +353,12 @@ ALTER TABLE wisps ADD COLUMN participation_generation BIGINT NULL;`
 // issue_versions is created earlier in the same series by 0067 and never
 // carries removed_restriction yet, so the column always needs adding here.
 const cliMigration0071AddRemovedRestriction = `ALTER TABLE issue_versions ADD COLUMN removed_restriction VARCHAR(30);`
+
+// cliMigration0073AddArrivalSeq is 0073 with its three guarded PREPARE blocks
+// replaced by the direct DDL they would run on a fresh database.
+const cliMigration0073AddArrivalSeq = `ALTER TABLE issues ADD COLUMN arrival_seq BIGINT;
+ALTER TABLE wisps ADD COLUMN arrival_seq BIGINT;
+CREATE UNIQUE INDEX uk_wisps_arrival_seq ON wisps (arrival_seq);`
 
 const cliMigration0041SplitDependenciesTarget = `DELETE FROM dolt_nonlocal_tables;
 CALL DOLT_COMMIT('-Am', 'disable nonlocal tables for fk migrations');

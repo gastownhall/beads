@@ -82,6 +82,10 @@ func scenarios() []scenario {
 		}, run: runDepAdd},
 		{name: "waitsfor", seed: seedWaitsFor, afterSeed: stampParticipation, run: runWaitsFor},
 		{name: "settled", seed: seedSettled, afterSeed: afterSeedSettled, run: runSettled, compare: true},
+		{name: "retired", seed: seedRetired, afterSeed: func(t *testing.T, db *sql.DB) {
+			plantTombstones(t, db)
+			stampParticipation(t, db)
+		}, batch: batchRetired},
 	}
 }
 
@@ -101,7 +105,7 @@ func largeScenarios() []scenario {
 // recorded from the code BEFORE the batch-create fast paths existed
 // (ebe3b6bcb), so the check holds the current code — fast and per-row
 // bodies alike, including changes the fast-path switch does not gate — to
-// what that code stored, apart from three deliberate behavior changes since.
+// what that code stored, apart from four deliberate behavior changes since.
 //
 // First, the create role defaults an empty created_by to the request's actor
 // (issueops.PreparePublicCreateRequest), so apply.json's issues, wisps and
@@ -115,7 +119,9 @@ func largeScenarios() []scenario {
 // mint; that is the fenced outcome they now pin. depadd and waitsfor stamp
 // their seeded rows instead (stampParticipation), so their dependency adds,
 // closes and reopens mint as they did before the fence, and their digests
-// did not move.
+// did not move. So does retired, recorded before the fence from the code
+// that added it: its batch's upsert of the live and tombstoned eq-rl mints
+// as it did then.
 //
 // Third, the issues_updated_at digests of small, depadd, import458 and
 // import458-reject-stale were re-recorded when the update-shaped version
@@ -127,6 +133,16 @@ func largeScenarios() []scenario {
 // import source's for the in-batch duplicates eq-n2 (small) and eq-b3 and
 // eq-b250 (both import458 scenarios). apply and waitsfor did not move: their
 // re-minted rows take the wall clock from their other writes anyway.
+//
+// Fourth, settled.json's issues, wisps and bd_events_journal digests and its
+// step I and J lines were re-recorded when the should-be-blocked union's
+// parent-child legs stopped reading the stored is_blocked of a closed or
+// pinned parent (gastownhall/beads#7626). Step I closes eq-zI-a above a stale
+// cross-plane cycle. The legs used to read the closed row's pre-pass flag,
+// which kept its child eq-zI-b dark and so held the cycle up; now the cycle
+// comes bright, and the I and J lines read eq-zI-b=open/0 eq-zI-c@w=open/0
+// where they read /1. That is what BlockedStateInvariant asks once nothing
+// outside the cycle blocks it. No row count moved.
 //
 // settled.json is younger than the rest: it was recorded from the code before
 // the blocked-state settled-row shortcut (fd54802bc8), on the embedded and the
@@ -502,6 +518,7 @@ func applyScenario(t *testing.T, open Open, sc scenario, perRow bool) Outcome {
 			out.Skipped = append(out.Skipped, issueID+" -> "+dependsOnID+": "+reason)
 		}
 		opts.OnStaleRejected = func(issueID string) { out.Stale = append(out.Stale, issueID) }
+		opts.OnRetiredID = func(issueID string) { out.Skipped = append(out.Skipped, "retired "+issueID) }
 		result, err := issueops.CreateIssuesInTxWithResult(ctx, tx, sc.batch(), "importer", opts)
 		if err != nil {
 			_ = tx.Rollback()

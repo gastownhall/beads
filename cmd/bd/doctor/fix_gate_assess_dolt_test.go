@@ -207,6 +207,9 @@ func TestAssessSchemaFixGate_RealDolt(t *testing.T) {
 			if gate.BinaryVersion != binary {
 				t.Errorf("BinaryVersion = %d, want %d", gate.BinaryVersion, binary)
 			}
+			if !gate.RecommendFix {
+				assertAgentAdviceHoldsNoBacktick(t, gate)
+			}
 			tc.verify(t, gate)
 		})
 	}

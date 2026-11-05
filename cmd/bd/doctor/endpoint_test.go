@@ -11,6 +11,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
@@ -370,5 +371,148 @@ func TestDoctorRepairScansReportARepairServerTheyCannotRead(t *testing.T) {
 				t.Errorf("with a database whose repair server refuses the check: %s %q (%s), want a warning naming 127.0.0.1:%s", c.Status, c.Message, c.Detail, port)
 			}
 		})
+	}
+}
+
+// TestServerRunningOrProbeable pins the Federation remotesapi check's gate: a
+// server the PID file names is running without a dial, and otherwise the
+// endpoint probe decides (an absent PID file, or an unreadable one, which
+// doltserver.IsRunning reports as a nil state).
+func TestServerRunningOrProbeable(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		state     *doltserver.State
+		probe     bool
+		want      bool
+		wantCalls int
+	}{
+		{name: "PID-tracked server, probe would fail", state: &doltserver.State{Running: true, PID: 4242}, probe: false, want: true, wantCalls: 0},
+		{name: "nil state, live endpoint", state: nil, probe: true, want: true, wantCalls: 1},
+		{name: "nil state, dead endpoint", state: nil, probe: false, want: false, wantCalls: 1},
+		{name: "no PID file, live endpoint", state: &doltserver.State{}, probe: true, want: true, wantCalls: 1},
+		{name: "no PID file, dead endpoint", state: &doltserver.State{}, probe: false, want: false, wantCalls: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			got := serverRunningOrProbeable(tc.state, func() bool {
+				calls++
+				return tc.probe
+			})
+			if got != tc.want || calls != tc.wantCalls {
+				t.Errorf("serverRunningOrProbeable = %v after %d probe call(s), want %v after %d", got, calls, tc.want, tc.wantCalls)
+			}
+		})
+	}
+}
+
+// TestFederationServerProbe pins the probe the Federation remotesapi check
+// falls back to when the PID file names no running server: the Dolt Mode
+// check's doltModeServerReachable, so the two checks in one report cannot
+// disagree, over the store's endpoint, socket first. A TCP dial of
+// doltServerConfig's host:port would answer false for the socket-only row.
+func TestFederationServerProbe(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		socket     bool
+		port       string // "live", "closed" or "" (unset)
+		env        string // the port variable; BEADS_DOLT_SERVER_PORT when ""
+		noMetadata bool
+		want       bool
+	}{
+		{name: "live BEADS_DOLT_SERVER_PORT", port: "live", want: true},
+		{name: "live legacy BEADS_DOLT_PORT only", port: "live", env: "BEADS_DOLT_PORT", want: true},
+		{name: "live socket, no port", socket: true, want: true},
+		{name: "live socket beside a closed port", socket: true, port: "closed", want: true},
+		{name: "closed port", port: "closed", want: false},
+		{name: "no port and no socket", want: false},
+		{name: "no metadata.json, live port", port: "live", noMetadata: true, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.socket && runtime.GOOS == "windows" {
+				t.Skip("unix sockets")
+			}
+			_, beadsDir := doctorEndpointWorkspace(t)
+			env := tc.env
+			if env == "" {
+				env = "BEADS_DOLT_SERVER_PORT"
+			}
+			switch tc.port {
+			case "live":
+				t.Setenv(env, strconv.Itoa(acceptingLocalPort(t)))
+			case "closed":
+				t.Setenv(env, strconv.Itoa(closedLocalPort(t)))
+			}
+			if tc.socket {
+				t.Setenv("BEADS_DOLT_SERVER_SOCKET", liveUnixSocket(t))
+			}
+			if tc.noMetadata {
+				if err := os.Remove(filepath.Join(beadsDir, "metadata.json")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cfg, _ := configfile.Load(beadsDir)
+			if got := doltModeServerReachable(beadsDir, cfg); got != tc.want {
+				t.Errorf("doltModeServerReachable = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestCheckFederationRemotesAPI_NoServerAnywhere pins that the endpoint
+// probe changes nothing when no server answers: whatever the PID file says
+// (absent, stale, or unreadable, which doltserver.IsRunning reports as a nil
+// state), the check returns its no-server result.
+func TestCheckFederationRemotesAPI_NoServerAnywhere(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		pid  func(t *testing.T, path string)
+	}{
+		{name: "no PID file", pid: func(*testing.T, string) {}},
+		{name: "stale PID file", pid: func(t *testing.T, path string) {
+			if err := os.WriteFile(path, []byte("2147483646\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "unreadable PID file", pid: func(t *testing.T, path string) {
+			if err := os.Mkdir(path, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo, beadsDir := doctorEndpointWorkspace(t)
+			t.Setenv("GT_ROOT", "")
+			t.Setenv("BEADS_DOLT_AUTO_START", "0")
+			t.Setenv("BEADS_DOLT_SERVER_PORT", strconv.Itoa(closedLocalPort(t)))
+			if err := os.MkdirAll(filepath.Join(beadsDir, "dolt"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			tc.pid(t, filepath.Join(beadsDir, "dolt-server.pid"))
+			check := CheckFederationRemotesAPI(repo)
+			if check.Status != StatusOK || check.Message != "N/A (server not running, no remotes check needed)" {
+				t.Errorf("got %s %q (%s), want ok %q", check.Status, check.Message, check.Detail, "N/A (server not running, no remotes check needed)")
+			}
+		})
+	}
+}
+
+// TestCheckFederationRemotesAPI_AcceptOnlyListener pins the check for a
+// listener that is not a Dolt server at the endpoint the store opens. The
+// endpoint probe counts its TCP accept, so the check takes the running path,
+// but the store does not open there and no peer is read: the check reports
+// the failed open, never the closed remotesapi port's error and its
+// federation-setup remedy.
+func TestCheckFederationRemotesAPI_AcceptOnlyListener(t *testing.T) {
+	repo, beadsDir := doctorEndpointWorkspace(t)
+	t.Setenv("GT_ROOT", "")
+	t.Setenv("BEADS_DOLT_AUTO_START", "0")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", strconv.Itoa(acceptingLocalPort(t)))
+	t.Setenv("BEADS_DOLT_REMOTESAPI_PORT", strconv.Itoa(closedLocalPort(t)))
+	if err := os.MkdirAll(filepath.Join(beadsDir, "dolt"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	check := CheckFederationRemotesAPI(repo)
+	if check.Status != StatusOK || check.Message != "Skipped (database unavailable)" || check.Detail == "" {
+		t.Errorf("got %s %q (%s), want ok %q with the open's error as Detail", check.Status, check.Message, check.Detail, "Skipped (database unavailable)")
 	}
 }

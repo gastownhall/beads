@@ -255,9 +255,10 @@ func (s *Store) BlockingAnnotator() (issueops.BlockingAnnotator, error) {
 // stored value equals the value sent for every key this plane accepts, because
 // the one key with a normalization step is the one key the role refuses.
 //
-// The two EDGE BOUNDS the operation adds — a key past 255 characters on the
-// write, a value past types.MaxTextBytes bytes — are the server's and are not
-// restated here (L-config-bounds).
+// The two length bounds — a key past 255 characters on the write, a value past
+// types.MaxTextBytes bytes — are the ROLE's (workapi.ValidateSettingWrite) and
+// are restated in validateSettingWrite, so an oversized write never dials. They
+// were once the operation's alone (L-config-bounds, now retired).
 func (s *Store) WorkspaceConfig() (issueops.WorkspaceConfig, error) {
 	return httpWorkspaceConfig{store: s}, nil
 }

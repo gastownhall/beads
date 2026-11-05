@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -604,6 +605,34 @@ func TestRunRecipeNamesRecipesTomlValuesEscaped(t *testing.T) {
 		}
 	})
 
+	t.Run("hostile path outside the directory", func(t *testing.T) {
+		// The refusal of a path outside the directory bd setup runs in
+		// names the key and the path as the special-handling refusal names
+		// the key and type: a path that is not a plain word is escaped.
+		path := ".." + string(filepath.Separator) + hostile
+		for _, step := range []struct {
+			name string
+			flag *bool
+		}{{"install", nil}, {"--check", &setupCheck}, {"--remove", &setupRemove}} {
+			workspace(t, "lint", "Lint", path, "file", "Lint rules")
+			resetSetupGlobals(t)
+			if step.flag != nil {
+				*step.flag = true
+			}
+			var err error
+			stdout, stderr := captureStdio(t, func() { err = runRecipe("lint") })
+			what := "bd setup lint " + step.name
+			if err == nil || stdout != "" {
+				t.Errorf("%s: err %v, stdout %q; want a refusal", what, err, stdout)
+			}
+			requireNoTerminalControl(t, what, stderr)
+			requireNamesHostileValue(t, what, stderr)
+			if want := "Error: recipe 'lint' names " + recipeRefusalWord(path) + ", which is not inside the directory bd setup runs in\n"; !strings.HasPrefix(stderr, want) {
+				t.Errorf("%s printed\n%q\nwant it to start with\n%q", what, stderr, want)
+			}
+		}
+	})
+
 	t.Run("hostile type", func(t *testing.T) {
 		workspace(t, "lint", "Lint", "tools/lint.md", hostile, "Lint rules")
 		resetSetupGlobals(t)
@@ -623,4 +652,283 @@ func TestRunRecipeNamesRecipesTomlValuesEscaped(t *testing.T) {
 			t.Errorf("the special-handling refusal for a type holding an apostrophe printed\n%q\nwant\n%q", out, want)
 		}
 	})
+}
+
+// TestRunRecipe_WorkspaceRecipePathsStayInside pins that bd setup refuses a
+// recipe of .beads/recipes.toml, which a repository can commit, when a path
+// it names is not inside the directory bd setup runs in
+// (recipes.PathInside): an absolute path, one that leaves the directory
+// through .., or one that leads out of it through a symbolic link (a linked
+// directory, a linked file, a .. after a linked directory, or a directory
+// install would create or --remove would drop), and one that runs through a
+// link bd setup cannot follow (a dangling one). The refusal comes before
+// --check reads, install writes or --remove deletes any of the recipe's
+// files or directories, a multifile recipe's inside paths included, and
+// names the key and the path. A custom recipe and one overriding a built-in are refused
+// alike. An ordinary recipe, one whose path runs through a link inside the
+// directory, and a built-in recipe run as before.
+func TestRunRecipe_WorkspaceRecipePathsStayInside(t *testing.T) {
+	// workspace makes base/ws a workspace whose recipes.toml is toml, with
+	// the links given, base/outside/victim.md beside it and ws/sub/kept.md
+	// and ws/sub/deep/ in it, and runs bd setup in ws.
+	workspace := func(t *testing.T, toml string, links map[string]string) (ws, outside string) {
+		t.Helper()
+		base := t.TempDir()
+		ws, outside = filepath.Join(base, "ws"), filepath.Join(base, "outside")
+		for _, d := range []string{filepath.Join(ws, ".beads"), filepath.Join(ws, "sub", "deep"), outside} {
+			if err := os.MkdirAll(d, 0o750); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for path, data := range map[string]string{
+			filepath.Join(ws, ".beads", "config.yaml"):  "",
+			filepath.Join(ws, ".beads", "recipes.toml"): toml,
+			filepath.Join(ws, "sub", "kept.md"):         "kept\n",
+			filepath.Join(outside, "victim.md"):         "victim\n",
+		} {
+			if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for link, target := range links {
+			if err := os.Symlink(filepath.FromSlash(target), filepath.Join(ws, filepath.FromSlash(link))); err != nil {
+				t.Skipf("symlink: %v", err)
+			}
+		}
+		t.Chdir(ws)
+		t.Setenv("BEADS_DIR", "")
+		resetSetupResolutionCaches(t)
+		return ws, outside
+	}
+	modes := []struct {
+		name string
+		flag *bool
+	}{{"install", nil}, {"--check", &setupCheck}, {"--remove", &setupRemove}}
+	// listing names every entry under dir, so a test sees one created or
+	// removed there.
+	listing := func(t *testing.T, dir string) []string {
+		t.Helper()
+		var names []string
+		if err := filepath.WalkDir(dir, func(path string, _ os.DirEntry, err error) error {
+			names = append(names, path)
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return names
+	}
+	const outsideWhy = "is not inside the directory bd setup runs in"
+
+	for _, tt := range []struct {
+		name, recipe string
+		toml         func(outside string) string
+		links        map[string]string
+		named        func(outside string) string // the path the refusal names
+		why          string                      // why it is refused; outsideWhy if empty
+		prepare      func(t *testing.T, ws, outside string)
+	}{
+		{
+			name: "custom recipe, absolute path", recipe: "lint",
+			toml: func(o string) string {
+				return "[recipes.lint]\npath = " + tomlBasicString(filepath.Join(o, "victim.md")) + "\n"
+			},
+			named: func(o string) string { return filepath.Join(o, "victim.md") },
+		},
+		{
+			name: "windsurf override, .. path", recipe: "windsurf",
+			toml: func(string) string {
+				return "[recipes.windsurf]\npath = " + tomlBasicString(filepath.Join("..", "outside", "victim.md")) + "\n"
+			},
+			named: func(string) string { return filepath.Join("..", "outside", "victim.md") },
+		},
+		{
+			name: "kiro override, linked directory", recipe: "kiro",
+			toml:  func(string) string { return "[recipes.kiro]\npath = \"up/outside/victim.md\"\n" },
+			links: map[string]string{"up": ".."},
+			named: func(string) string { return "up/outside/victim.md" },
+		},
+		{
+			// The OS takes .. after a linked directory to the parent of the
+			// link's target, not of the link: o/../outside/victim.md, which
+			// cleans to a name inside, is the outside victim.md.
+			name: "kiro override, .. after a linked directory", recipe: "kiro",
+			toml:  func(string) string { return "[recipes.kiro]\npath = \"o/../outside/victim.md\"\n" },
+			links: map[string]string{"o": "../outside"},
+			named: func(string) string { return "o/../outside/victim.md" },
+		},
+		{
+			name: "cody override, linked file", recipe: "cody",
+			toml:  func(string) string { return "[recipes.cody]\npath = \"sub/beads.md\"\n" },
+			links: map[string]string{"sub/beads.md": "../../outside/victim.md"},
+			named: func(string) string { return "sub/beads.md" },
+		},
+		{
+			// Windows cleans .. away before it follows links, so it opens
+			// x/../sub/beads.md as sub/beads.md, the linked file.
+			name: "cody override, cleaned path a linked file", recipe: "cody",
+			toml:  func(string) string { return "[recipes.cody]\npath = \"x/../sub/beads.md\"\n" },
+			links: map[string]string{"x": "sub/deep", "sub/beads.md": "../../outside/victim.md"},
+			named: func(string) string { return "x/../sub/beads.md" },
+		},
+		{
+			name: "kilocode override, dangling link", recipe: "kilocode",
+			toml:  func(string) string { return "[recipes.kilocode]\npath = \"sub/beads.md\"\n" },
+			links: map[string]string{"sub/beads.md": "../../outside/new.md"},
+			named: func(string) string { return "sub/beads.md" },
+			why:   "runs through a symbolic link bd setup cannot follow",
+		},
+		{
+			// The OS walks x/../up/outside/empty/beads.md to
+			// sub/up/outside/empty/beads.md, inside, but the directory
+			// install creates and --remove drops when empty is
+			// filepath.Dir of the path, up/outside/empty: the outside
+			// empty/ directory.
+			name: "kiro override, directory leading out", recipe: "kiro",
+			toml:  func(string) string { return "[recipes.kiro]\npath = \"x/../up/outside/empty/beads.md\"\n" },
+			links: map[string]string{"x": "sub/deep", "up": ".."},
+			named: func(string) string { return "x/../up/outside/empty/beads.md" },
+			prepare: func(t *testing.T, ws, outside string) {
+				// --remove has a file to remove inside, and an empty
+				// directory outside that removing it would leave empty.
+				for _, d := range []string{filepath.Join(ws, "sub", "up", "outside", "empty"), filepath.Join(outside, "empty")} {
+					if err := os.MkdirAll(d, 0o750); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := os.WriteFile(filepath.Join(ws, "sub", "up", "outside", "empty", "beads.md"), nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "kiro override, directory install would create outside", recipe: "kiro",
+			toml:  func(string) string { return "[recipes.kiro]\npath = \"x/../up/outside/newdir/beads.md\"\n" },
+			links: map[string]string{"x": "sub/deep", "up": ".."},
+			named: func(string) string { return "x/../up/outside/newdir/beads.md" },
+		},
+		{
+			name: "copilot override, multifile", recipe: "copilot",
+			toml: func(string) string {
+				return "[recipes.copilot]\ntype = \"multifile\"\npaths = [\"sub/kept.md\", " + tomlBasicString(filepath.Join("..", "outside", "victim.md")) + "]\n"
+			},
+			named: func(string) string { return filepath.Join("..", "outside", "victim.md") },
+		},
+	} {
+		for _, mode := range modes {
+			t.Run(tt.name+" "+mode.name, func(t *testing.T) {
+				ws, outside := workspace(t, "", tt.links)
+				if err := os.WriteFile(filepath.Join(ws, ".beads", "recipes.toml"), []byte(tt.toml(outside)), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if tt.prepare != nil {
+					tt.prepare(t, ws, outside)
+				}
+				before := listing(t, outside)
+				resetSetupGlobals(t)
+				if mode.flag != nil {
+					*mode.flag = true
+				}
+				var err error
+				stdout, stderr := captureStdio(t, func() { err = runRecipe(tt.recipe) })
+				what := "bd setup " + tt.recipe + " " + mode.name
+				if err == nil {
+					t.Errorf("%s succeeded; want a refusal", what)
+				}
+				why := tt.why
+				if why == "" {
+					why = outsideWhy
+				}
+				want := "Error: recipe '" + tt.recipe + "' names " + recipeRefusalWord(tt.named(outside)) +
+					", which " + why + "\n" +
+					"Hint: a .beads/recipes.toml recipe can only name a relative path with no '..' or symbolic link leading out of the directory bd setup runs in, and no dangling or looping link along it\n"
+				if stdout != "" || stderr != want {
+					t.Errorf("%s printed\nstdout %q\nstderr %q\nwant stderr %q", what, stdout, stderr, want)
+				}
+				for path, data := range map[string]string{
+					filepath.Join(outside, "victim.md"): "victim\n",
+					filepath.Join(ws, "sub", "kept.md"): "kept\n",
+				} {
+					if got, err := os.ReadFile(path); err != nil || string(got) != data {
+						t.Errorf("%s changed %s: %q, %v", what, path, got, err)
+					}
+				}
+				if after := listing(t, outside); !slices.Equal(after, before) {
+					t.Errorf("%s changed %s: entries %q, were %q", what, outside, after, before)
+				}
+			})
+		}
+	}
+
+	t.Run("ordinary recipes run as before", func(t *testing.T) {
+		for _, tt := range []struct {
+			name, recipe, toml, file string
+			links                    map[string]string
+		}{
+			{name: "custom recipe", recipe: "lint", toml: "[recipes.lint]\npath = \"tools/lint.md\"\n", file: "tools/lint.md"},
+			{name: "path through a link inside", recipe: "lint", toml: "[recipes.lint]\npath = \"in/lint.md\"\n", file: "sub/lint.md",
+				links: map[string]string{"in": "sub"}},
+			{name: "windsurf override", recipe: "windsurf", toml: "[recipes.windsurf]\npath = \"rules/beads.md\"\n", file: "rules/beads.md"},
+			{name: "built-in windsurf", recipe: "windsurf", file: ".windsurf/rules/beads.md"},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				ws, _ := workspace(t, tt.toml, tt.links)
+				file := filepath.Join(ws, filepath.FromSlash(tt.file))
+				for _, mode := range []struct {
+					name   string
+					flag   *bool
+					exists bool
+				}{{"install", nil, true}, {"--check", &setupCheck, true}, {"--remove", &setupRemove, false}} {
+					resetSetupGlobals(t)
+					if mode.flag != nil {
+						*mode.flag = true
+					}
+					var err error
+					_, stderr := captureStdio(t, func() { err = runRecipe(tt.recipe) })
+					if err != nil || stderr != "" {
+						t.Errorf("bd setup %s %s: %v, stderr %q", tt.recipe, mode.name, err, stderr)
+					}
+					if _, err := os.Stat(file); (err == nil) != mode.exists {
+						t.Errorf("after bd setup %s %s, %s exists = %v, want %v", tt.recipe, mode.name, tt.file, err == nil, mode.exists)
+					}
+				}
+			})
+		}
+	})
+}
+
+// TestAddRecipe_RefusesPathOutsideDir pins that bd setup --add does not save
+// a recipe whose path bd setup would refuse (recipes.PathInside), and saves
+// an ordinary one, and one with no path, as before.
+func TestAddRecipe_RefusesPathOutsideDir(t *testing.T) {
+	ws := t.TempDir()
+	beadsDir := filepath.Join(ws, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(ws)
+	t.Setenv("BEADS_DIR", "")
+	resetSetupResolutionCaches(t)
+
+	for _, path := range []string{filepath.Join("..", "victim.md"), filepath.Join(ws, "victim.md")} {
+		err := addRecipe("myeditor", path)
+		if want := "recipe path " + recipeRefusalWord(path) + " is not inside the directory bd setup runs in; " +
+			"a .beads/recipes.toml recipe can only name a relative path with no '..' or symbolic link leading out of the directory bd setup runs in, and no dangling or looping link along it"; err == nil || err.Error() != want {
+			t.Errorf("bd setup --add myeditor %q = %v; want %q", path, err, want)
+		}
+		if _, err := os.Stat(filepath.Join(beadsDir, "recipes.toml")); !os.IsNotExist(err) {
+			t.Fatalf("bd setup --add myeditor %q wrote recipes.toml: %v", path, err)
+		}
+	}
+	for _, path := range []string{".myeditor/rules.md", ""} {
+		if out := captureStdout(t, func() error { return addRecipe("myeditor", path) }); !strings.HasPrefix(out, "✓ Added recipe 'myeditor'") {
+			t.Errorf("bd setup --add myeditor %q printed %q", path, out)
+		}
+		saved, err := recipes.LoadUserRecipes(beadsDir)
+		if err != nil || saved["myeditor"].Path != path {
+			t.Errorf("bd setup --add myeditor %q saved %+v, %v", path, saved["myeditor"], err)
+		}
+	}
 }

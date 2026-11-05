@@ -98,6 +98,26 @@ type Issue struct {
 	// non-zero (create stamps freshRowLock()).
 	RowVersion int64 `json:"-"`
 
+	// ArrivalSeq is the row's commit-ordered create sequence: the events-journal
+	// seq of the create record written by the insert that made the row, stamped
+	// on the row in that same transaction (issueops.RecordEventInTx). Sorting
+	// rows by it reproduces the order their creates committed in, also after
+	// those journal records are pruned. A row created while the writer did not
+	// journal is stamped by the first create record journaled for it later (a
+	// re-import or a rename), so it sorts by that record's commit, not its
+	// insert's.
+	//
+	// Only wisp-plane rows created while the writer journals carry one; 0 means
+	// none (the writer did not journal, the row is on the issues plane, it moved
+	// onto the wisp plane from the issues plane, or it predates migration 0073).
+	// The value is workspace-local, unique, not reused unless the seq counter is
+	// lost after the journal records that held it are pruned, never changed
+	// while the row stays on the wisp plane, and never client-settable: create,
+	// update and import all ignore a supplied value, and bd export never writes
+	// it. A storage create writes the stored value back onto the issue it was
+	// given (issueops.RecordCreateEventInTx).
+	ArrivalSeq int64 `json:"arrival_seq,omitempty"`
+
 	// ===== Time-Based Scheduling (GH#820) =====
 	DueAt      *time.Time `json:"due_at,omitempty"`      // When this issue should be completed
 	DeferUntil *time.Time `json:"defer_until,omitempty"` // Hide from bd ready until this time
@@ -1530,6 +1550,14 @@ func (d DependencyType) AffectsReadyWork() bool {
 	return d == DepBlocks || d == DepParentChild || d == DepConditionalBlocks || d == DepWaitsFor
 }
 
+// ReadyAffectingDependencyTypes returns the dependency types for which
+// AffectsReadyWork is true: the only edge types that can make an issue
+// blocked. SQL that must name those types renders this list rather than a
+// hand-written copy.
+func ReadyAffectingDependencyTypes() []DependencyType {
+	return []DependencyType{DepBlocks, DepParentChild, DepConditionalBlocks, DepWaitsFor}
+}
+
 // IsBlockingEdge returns true if this dependency type represents a hard blocker.
 // Unlike AffectsReadyWork, this excludes parent-child (structural, not blocking).
 // Used by dep tree rendering to decide whether the [BLOCKED] badge applies.
@@ -2099,6 +2127,10 @@ type TreeNode struct {
 	ParentID       string         `json:"parent_id"`
 	EdgeFromParent DependencyType `json:"edge_from_parent,omitempty"`
 	Truncated      bool           `json:"truncated"`
+	// Deduped is true on a stub row: it records only the edge from ParentID
+	// into an issue already expanded earlier in the same list, and it has no
+	// descendants. Drop these rows to get each issue once.
+	Deduped bool `json:"deduped,omitempty"`
 }
 
 // MoleculeProgressStats provides efficient progress info for large molecules.

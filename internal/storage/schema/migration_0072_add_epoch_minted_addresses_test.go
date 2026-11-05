@@ -18,36 +18,15 @@ import (
 // migration including this one, by TestBundleMigrationsWithPreparedALTERAreOverriddenOrJustified
 // and TestAllMigrationsSQLUsesDirectDDLForKnownCLIIncompatibilities).
 
-// TestLatestVersionIncludesMigration0072 pins the real next free slot this
-// phase claims, superseding 0071's own version of this test
-// (migration_0071_add_removed_restriction_test.go; only one such pin lives at
-// a time, the same way 0071's superseded 0070's).
-//
-// This slice originally claimed 0069 too. It was renumbered because
-// R7.1's removed_restriction migration -- a PARALLEL SIBLING of this branch,
-// not an ancestor -- had also claimed 0069, and the two are now linearized:
-// R7.1 goes first (it is published beneath gastownhall/beads#6661), this one
-// takes the next contiguous slot. Both then moved up one more slot when
-// upstream's 0069_widen_issue_versions_datetime_precision
-// (gastownhall/beads#6675) landed first, and once more when
-// gastownhall/beads#6943's 0070_add_participation_generation (the
-// versioned-history write fence) was ordered ahead of them: migrations are
-// numbered by landing order, so R7.1 is 0071 and this is 0072.
-// Two files sharing a
-// version number panic checkNoDuplicateVersions at store open, before any
-// command's RunE, which bricks every bd invocation rather than merely
-// reddening a package -- see the same hazard on #6358 vs #6008.
-//
-// Deliberately a hardcoded literal for the same reason 0070's and 0071's
-// were: LatestVersion() drifting to 72 for the wrong reason (an unrelated
-// migration landing first) should still be caught by this test failing to
-// explain why 72 is epoch-minted-addresses-shaped.
-func TestLatestVersionIncludesMigration0072(t *testing.T) {
-	const want = 72
-	if got := LatestVersion(); got != want {
-		t.Fatalf("LatestVersion() = %d, want %d (epoch_minted_addresses migration slot claimed by gastownhall/beads#6664)", got, want)
-	}
-}
+// TestLatestVersionIncludesMigration0072 (pinning LatestVersion() == 72) is
+// superseded by TestLatestVersionIncludesMigration0073
+// (migration_0073_add_arrival_seq_test.go) now that 0073 claims the next free
+// slot -- only one such pin lives at a time, matching how this test itself
+// already superseded 0071's own version. Its history stands: this slice first
+// claimed 0069 and was renumbered past R7.1's 0071 (gastownhall/beads#6661),
+// upstream's 0069 (gastownhall/beads#6675) and 0070 (gastownhall/beads#6943),
+// because two files sharing a version number panic checkNoDuplicateVersions at
+// store open, before any command's RunE.
 
 const migration0072Up = "0072_add_epoch_minted_addresses.up.sql"
 const migration0072Down = "0072_add_epoch_minted_addresses.down.sql"

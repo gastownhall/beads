@@ -70,11 +70,18 @@ func applyInitGatewayCredential(ctx context.Context, beadsDir string, doltCfg *d
 	if fileCfg == nil {
 		fileCfg = configfile.DefaultConfig()
 	}
-	applied, err := dolt.ApplyGatewayCredential(ctx, fileCfg, doltCfg)
+	gatewayCfg := *doltCfg
+	if gatewayCfg.BeadsDir == "" {
+		gatewayCfg.BeadsDir = beadsDir
+	}
+	applied, err := dolt.ApplyGatewayCredential(ctx, fileCfg, &gatewayCfg)
 	if err != nil {
 		return err
 	}
 	if applied {
+		doltCfg.ServerUser = gatewayCfg.ServerUser
+		doltCfg.Gateway = gatewayCfg.Gateway
+		doltCfg.DisableAutoStart = gatewayCfg.DisableAutoStart
 		// ApplyGatewayCredential sets DisableAutoStart, but the hand-built init
 		// config path never runs ApplyCLIAutoStart to translate that into the
 		// AutoStart field the store's auto-start block actually consults.
@@ -1103,6 +1110,11 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			earlyRemoteSource := initSyncRemoteNone
 			earlyRemoteHasDoltData := false
 			var earlyProbeNote string
+			if !initRemoteChanged {
+				if _, err := resolveSyncRemoteChecked(); err != nil {
+					return err
+				}
+			}
 			earlySyncURL, earlyRemoteSource = resolveInitConfiguredSyncRemote(initRemote, initRemoteChanged, resolveSyncRemote)
 			if earlyRemoteSource == initSyncRemoteExplicit {
 				// An explicit --remote is intent to bootstrap or wire that URL,
@@ -2101,9 +2113,13 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			}
 
 			// In stealth mode, persist no-git-ops: true so bd prime
-			// automatically uses stealth session-close protocol (GH#2159)
+			// automatically uses stealth session-close protocol (GH#2159).
+			// Name this workspace's config.yaml (created just above) via
+			// beadsDir: SaveConfigValue would write viper's ConfigFileUsed(),
+			// which still points at the user config when no project config
+			// existed at Initialize time, leaking stealth machine-wide (#7938).
 			if stealth {
-				if err := config.SaveConfigValue("no-git-ops", true, beadsDir); err != nil {
+				if err := config.SetYamlConfigInDir(beadsDir, "no-git-ops", "true"); err != nil {
 					fmt.Fprintf(os.Stderr, "Warning: failed to set no-git-ops in config: %v\n", err)
 				}
 			}
@@ -2738,22 +2754,7 @@ func checkExistingBeadsDataAt(beadsDir string, prefix string) error {
 
 	if cfg != nil && cfg.GetBackend() == configfile.BackendDolt {
 		if cfg.IsDoltProxiedServerMode() {
-			proxiedRoot, rootErr := resolveProxiedServerRootPath(beadsDir)
-			if rootErr != nil {
-				return fmt.Errorf("resolve proxied server root: %w", rootErr)
-			}
-			if info, statErr := os.Stat(proxiedRoot); statErr == nil && info.IsDir() {
-				return alreadyInitialized(`
-⚠ Found existing Dolt database: %s
-
-This workspace is already initialized.
-
-To use the existing database:
-  Just run bd commands normally (e.g., bd list)
-
-Aborting.`, proxiedRoot)
-			}
-			return nil
+			return checkExistingProxiedServerDataAt(beadsDir)
 		}
 
 		// Embedded mode stores databases under `.beads/embeddeddolt/<db>/`.
@@ -2992,6 +2993,42 @@ Aborting.`, dbPath, prefix)
 	}
 
 	return nil // No database found, safe to init
+}
+
+// checkExistingProxiedServerDataAt is checkExistingBeadsDataAt for a
+// proxied-server workspace: re-init is refused once the resolved root holds
+// what the workspace's opens serve. For a managed-local root that is a Dolt
+// database, read with the same HasDoltDatabase that proxiedFreshStoreRefusal
+// refuses on, so the two cannot disagree. Every other open refuses a root
+// that holds none and names `bd init --proxied-server`, so init must not
+// answer "already initialized" in turn, as it did while it keyed on the
+// directory alone: a failed init leaves its config.yaml and proxy files in
+// the root, and a clone can carry an empty one. A root whose sidecar names an
+// external server holds only the proxy's own files, so there the directory is
+// still the mark of an initialized workspace, as it is when the sidecar
+// cannot be read (the open refuses that workspace anyway).
+func checkExistingProxiedServerDataAt(beadsDir string) error {
+	proxiedRoot, err := resolveProxiedServerRootPath(beadsDir)
+	if err != nil {
+		return fmt.Errorf("resolve proxied server root: %w", err)
+	}
+	if info, statErr := os.Stat(proxiedRoot); statErr != nil || !info.IsDir() {
+		return nil
+	}
+	sidecar, sidecarErr := configfile.LoadProxiedServerClientInfo(beadsDir)
+	managedLocal := sidecarErr == nil && (sidecar == nil || sidecar.External == nil)
+	if managedLocal && !doltserver.HasDoltDatabase(proxiedRoot) {
+		return nil
+	}
+	return alreadyInitialized(`
+⚠ Found existing Dolt database: %s
+
+This workspace is already initialized.
+
+To use the existing database:
+  Just run bd commands normally (e.g., bd list)
+
+Aborting.`, remedy.PrintedValue(proxiedRoot))
 }
 
 // countExistingIssues attempts to connect to the existing database and count
@@ -3492,6 +3529,13 @@ func getBeadsRole() (string, bool) {
 // setBeadsRole writes the beads.role git config value. See getBeadsRole for
 // why the pair shares the role-authority environment boundary.
 func setBeadsRole(role string) error {
+	// #nosec G702 -- no shell is involved: the binary is the literal "git"
+	// and the role value is its own argv element, so it cannot inject a
+	// command; the value is bd's own beads.role setting (see getBeadsRole),
+	// local operator state rather than request data. gosec only reaches this
+	// line because the doctorEnsureGitignoreForBeadsDir seam's opaque
+	// indirect call widens taint propagation to package function
+	// parameters (#6225).
 	cmd := exec.Command("git", "config", "beads.role", role)
 	cmd.Env = gitenv.ScrubRoutingAndSuppression(os.Environ())
 	return cmd.Run()
@@ -3725,14 +3769,18 @@ func resolveInitConfiguredSyncRemote(initRemote string, initRemoteChanged bool, 
 // Otherwise the endpoint init's store opens, resolved by endpoint
 // (initCloneEndpoint) only now so the flows above resolve nothing more than
 // main did, decides. At a host bd runs its server at, the CLI
-// clone is kept for a server bd serves there (doltserver.Endpoint.ServedByBD:
-// bd's own server for the workspace, or the shared server) and for an
-// endpoint with no address to clone through (doltserver.Endpoint.Dialable),
-// where the store's auto-start or its refusal of the unresolved port follows.
-// A server some other process runs there, on a unix socket or on a port that
+// clone is kept for an endpoint with no address to clone through
+// (doltserver.Endpoint.Dialable), where the store's auto-start or its
+// refusal of the unresolved port follows, and for a server bd serves there
+// (doltserver.Endpoint.ServedByBD: bd's own server for the workspace, or the
+// shared server) unless some other process runs the server answering on its
+// port (initCloneServerOthersRun): with nothing answering, or bd's state
+// files proving the server is bd's own, .beads/dolt is what it serves. A
+// server some other process runs there, on a unix socket, on a port that
 // declares it externally managed (BEADS_DOLT_SERVER_PORT, --server-port, the
-// legacy BEADS_DOLT_PORT, BEADS_DOLT_SERVER_MODE=1), does not serve
-// .beads/dolt, so the clone goes through it, as for any other host. A
+// legacy BEADS_DOLT_PORT, BEADS_DOLT_SERVER_MODE=1), or on a port only a
+// config.yaml dolt.port names, does not serve .beads/dolt, so the clone goes
+// through it, as for any other host. A
 // configured unix socket nothing answers on (initCloneSocketDead) is not
 // the server the store opens: its transport (doltserver.SocketTransport)
 // falls back from that socket to TCP at the endpoint's host and port when
@@ -3760,10 +3808,34 @@ func initRemoteCloneMode(initServerMode, externalServer bool, endpoint func() do
 		}
 		ep.Socket = ""
 	}
-	if ep.ServedByBD() || !ep.Dialable() {
+	if !ep.Dialable() || (ep.ServedByBD() && !initCloneServerOthersRun(ep)) {
 		return remoteCloneCLI
 	}
 	return remoteCloneExternalServer
+}
+
+// initCloneServerOthersRun reports whether the server at ep, an endpoint bd
+// counts as its own by its host and mode (doltserver.Endpoint.ServedByBD), is
+// one some other process runs: something answers on its port (initCloneProbe,
+// the store's own probe), and bd's state files for the workspace do not name
+// a live dolt sql-server on that port (doltserver.ManagesLiveServerOnPort,
+// doltserver.IsTrackedServerRunning). That is a server you run on a port only
+// a config.yaml dolt.port names (user-level, or the workspace's own): the mode
+// of such an endpoint says nothing about who runs the server. init's store
+// joins it, as initStartOwnServer and the store's auto-start start nothing
+// where a server already answers, so it does not serve .beads/dolt either.
+// When nothing answers, the store starts bd's own server over .beads/dolt
+// (doltserver.Endpoint.BDStartsServer) or reports the server down, so main's
+// CLI clone is kept, as it is for the shared server and an endpoint with no
+// port.
+func initCloneServerOthersRun(ep doltserver.Endpoint) bool {
+	if ep.SharedServer || ep.PortSharedServer || !ep.Resolved() {
+		return false
+	}
+	if initCloneProbe("tcp", ep.Addr(), initCloneSocketProbeTimeout) != nil {
+		return false
+	}
+	return !doltserver.ManagesLiveServerOnPort(ep.BeadsDir, ep.Port) || !doltserver.IsTrackedServerRunning(ep.BeadsDir)
 }
 
 // initCloneProbe is the dial probe bd init's clone makes to find the

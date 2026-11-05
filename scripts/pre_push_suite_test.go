@@ -1,6 +1,7 @@
 package scripts_test
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -155,5 +156,97 @@ func TestPrePushHookRunsSuiteOnlyForGoChanges(t *testing.T) {
 	suite := strings.Index(body, `"$repo_root/scripts/pre-push-suite.sh" </dev/null`)
 	if managed < 0 || suite < 0 || suite > managed {
 		t.Errorf(".githooks/pre-push must run the suite before the managed beads section")
+	}
+}
+
+// TestPrePushHookRunsSuiteForLargeDiffs pushes a commit whose changed-name
+// list is far larger than a pipe buffer. The hook runs under pipefail, so a
+// `git diff | grep -q .` check reads such a push as "no Go changes": grep
+// exits on the first line, git dies of SIGPIPE writing the rest, and the
+// pipeline's status is git's failure. The suite must still run.
+func TestPrePushHookRunsSuiteForLargeDiffs(t *testing.T) {
+	bash := requireHostTool(t, "bash")
+	repo := t.TempDir()
+	// A PATH without bd, so the managed beads section is a no-op.
+	bin := t.TempDir()
+	for _, tool := range []string{"bash", "cat", "git", "grep"} {
+		if err := os.Symlink(requireHostTool(t, tool), filepath.Join(bin, tool)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	env := []string{
+		"PATH=" + bin,
+		"HOME=" + repo,
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@example.com",
+		"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@example.com",
+	}
+	git := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command(filepath.Join(bin, "git"), args...)
+		cmd.Dir = repo
+		cmd.Env = env
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	git("init", "-q", "-b", "main")
+	git("commit", "-q", "--allow-empty", "-m", "base")
+	base := git("rev-parse", "HEAD")
+
+	marker := filepath.Join(t.TempDir(), "suite-ran")
+	if err := os.MkdirAll(filepath.Join(repo, "scripts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	suite := "#!/usr/bin/env bash\n: >\"" + marker + "\"\n"
+	if err := os.WriteFile(filepath.Join(repo, "scripts", "pre-push-suite.sh"), []byte(suite), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// About 300 KB of names: several times any pipe buffer.
+	pkg := filepath.Join(repo, "pkg")
+	if err := os.MkdirAll(pkg, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 3000 {
+		name := filepath.Join(pkg, fmt.Sprintf("a_long_file_name_that_inflates_the_changed_name_list_of_this_push_%04d.go", i))
+		if err := os.WriteFile(name, []byte("package pkg\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	git("add", "-A")
+	git("commit", "-q", "-m", "large")
+	head := git("rev-parse", "HEAD")
+
+	// prePush runs the hook for a push of head over the remote's base and
+	// reports whether it ran the suite.
+	prePush := func(base, head string) bool {
+		t.Helper()
+		if err := os.Remove(marker); err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		cmd := exec.Command(bash, filepath.Join(sourceRepoRoot(t), ".githooks", "pre-push"), "origin", "https://example.com/r.git")
+		cmd.Dir = repo
+		cmd.Env = env
+		cmd.Stdin = strings.NewReader("refs/heads/x " + head + " refs/heads/x " + base + "\n")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("pre-push: %v\n%s", err, out)
+		}
+		_, err := os.Stat(marker)
+		return err == nil
+	}
+	if !prePush(base, head) {
+		t.Errorf("pre-push skipped the suite for a push changing 3000 Go files")
+	}
+
+	// A docs-only push over the large commit still skips the suite.
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("docs\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git("add", "README.md")
+	git("commit", "-q", "-m", "docs")
+	if prePush(head, git("rev-parse", "HEAD")) {
+		t.Errorf("pre-push ran the suite for a docs-only push")
 	}
 }

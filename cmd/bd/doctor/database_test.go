@@ -227,3 +227,90 @@ func TestLargeDatabaseWarningRecommendsRealCommand(t *testing.T) {
 		t.Fatalf("Large Database fix should recommend 'bd prune': %q", dc.Fix)
 	}
 }
+
+// TestDatabaseOpenFailureRecoveryGuidance pins the Fix text of the local
+// "Unable to open database" diagnostic and its bd doctor --agent rendering:
+// both keep the server-configuration diagnosis but send an unopenable store
+// to the preservation-first runbook, not to a `bd doctor --fix` that does not
+// rebuild a damaged journal (GH#4521). The missing-database and remote-server
+// branches keep their own guidance.
+func TestDatabaseOpenFailureRecoveryGuidance(t *testing.T) {
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+
+	newBeadsDir := func(t *testing.T) string {
+		t.Helper()
+		beadsDir := filepath.Join(t.TempDir(), ".beads")
+		if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return beadsDir
+	}
+
+	t.Run("local store exists but did not open", func(t *testing.T) {
+		beadsDir := newBeadsDir(t)
+		if err := os.MkdirAll(getDatabasePath(beadsDir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		check := CheckDatabaseVersionWithStore(&SharedStore{beadsDir: beadsDir}, "0.1.0")
+		if check.Message != "Unable to open database" {
+			t.Fatalf("Message = %q, want %q", check.Message, "Unable to open database")
+		}
+		if !strings.Contains(check.Fix, EngineWontOpenRecoveryURL) {
+			t.Errorf("Fix must link %s:\n%s", EngineWontOpenRecoveryURL, check.Fix)
+		}
+		if !strings.Contains(check.Fix, "bd dolt status") {
+			t.Errorf("Fix must keep the server-configuration diagnosis:\n%s", check.Fix)
+		}
+		if strings.Contains(check.Fix, "bd doctor --fix") {
+			t.Errorf("Fix must not present doctor as a rebuild of an unopenable store:\n%s", check.Fix)
+		}
+
+		// bd doctor --agent renders this verdict through its own enricher,
+		// which must carry the same link instead of steering at --fix. A safe
+		// gate passes commands through unchanged, so a --fix here is the
+		// enricher's own.
+		ad := EnrichForAgent(check, safeGate())
+		if !strings.Contains(ad.Explanation, EngineWontOpenRecoveryURL) {
+			t.Errorf("--agent explanation must link %s:\n%s", EngineWontOpenRecoveryURL, ad.Explanation)
+		}
+		for _, c := range ad.Commands {
+			if strings.Contains(c, "bd doctor --fix") {
+				t.Errorf("--agent must not list 'bd doctor --fix' for a store that did not open: %q", ad.Commands)
+			}
+		}
+	})
+
+	t.Run("local store missing", func(t *testing.T) {
+		check := CheckDatabaseVersionWithStore(&SharedStore{beadsDir: newBeadsDir(t)}, "0.1.0")
+		if check.Message != "No dolt database found" {
+			t.Fatalf("Message = %q, want %q", check.Message, "No dolt database found")
+		}
+		if !strings.Contains(check.Fix, "bd bootstrap") {
+			t.Errorf("a missing database is a bootstrap case; Fix:\n%s", check.Fix)
+		}
+		if strings.Contains(check.Fix, EngineWontOpenRecoveryURL) {
+			t.Errorf("a missing database is not an unopenable one; Fix:\n%s", check.Fix)
+		}
+	})
+
+	t.Run("remote server unavailable", func(t *testing.T) {
+		beadsDir := newBeadsDir(t)
+		cfg := &configfile.Config{
+			Backend:        configfile.BackendDolt,
+			DoltMode:       configfile.DoltModeServer,
+			DoltServerHost: "127.0.0.1",
+			DoltServerPort: 1,
+		}
+		if err := cfg.Save(beadsDir); err != nil {
+			t.Fatalf("failed to save config: %v", err)
+		}
+		check := CheckDatabaseVersionWithStore(&SharedStore{beadsDir: beadsDir}, "0.1.0")
+		if check.Message != "Unable to open database" {
+			t.Fatalf("Message = %q, want %q", check.Message, "Unable to open database")
+		}
+		if !strings.Contains(check.Fix, "server availability") || strings.Contains(check.Fix, EngineWontOpenRecoveryURL) {
+			t.Errorf("remote-server Fix must stay about availability:\n%s", check.Fix)
+		}
+	})
+}

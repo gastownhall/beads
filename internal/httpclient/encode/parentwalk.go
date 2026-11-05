@@ -15,10 +15,11 @@ import (
 // D4's `bd list --parent` walk, inverted.
 //
 // THE PROBLEM. The walk hands the store `bd list`'s whole built filter with only
-// ParentID and Limit re-pointed per level (cmd/bd/list_show_filter_modes.go
-// findAllDescendants), and workapi.BuildListFilter populates ExcludeStatus,
-// Pinned, IsTemplate, ExcludeTypes, Ephemeral and SkipWisps on EVERY default
-// listing. So the "ParentID-only shape" D4 originally named can never occur, and
+// ParentID and Limit re-pointed per level (internal/storage/descendants.go
+// WalkDescendants, behind cmd/bd/list_show_filter_modes.go findAllDescendants),
+// and workapi.BuildListFilter populates ExcludeStatus, Pinned, IsTemplate,
+// ExcludeTypes, Ephemeral and SkipWisps on EVERY default listing. So the
+// "ParentID-only shape" D4 originally named can never occur, and
 // encoding those members verbatim was impossible when D4 was written: listIssues
 // published no exclude_status, no exclude_type and no is_template. It still
 // publishes no is_template. `issues.list.filters` has since published the other

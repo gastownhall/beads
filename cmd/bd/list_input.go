@@ -280,7 +280,7 @@ func gatherListInput(cmd *cobra.Command) (listInput, error) {
 	// issueops.Reader.List, whose query reads types.IssueFilter.Lite; the three
 	// below leave that query.
 	//
-	//   --watch re-queries on a ticker through loadWatchedIssues, whose --ready
+	//   --watch re-queries every poll interval through loadWatchedIssues, whose --ready
 	//   arm calls the bare GetReadyWork and whose --parent arm walks the tree;
 	//   neither reads Lite.
 	//
