@@ -365,6 +365,7 @@ go_test(
         "smart_gate_data_behind_test.go",
         "smart_remote_migrate_gate_test.go",
         "socket_fallback_test.go",
+        "state_hasher_contract_test.go",
         "stats_reporter_contract_test.go",
         "store_branch_pin_test.go",
         "store_unit_test.go",
