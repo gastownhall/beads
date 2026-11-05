@@ -13,9 +13,13 @@ go_test(
     srcs = [
         "gate_test.go",
         "readonly_wait_test.go",
+        "unsupported_test.go",
     ],
     embed = [":workspacegate"],
-    deps = ["//internal/testutil/bazeltest"],
+    deps = [
+        "//internal/lockfile",
+        "//internal/testutil/bazeltest",
+    ],
 )
 
 # --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---

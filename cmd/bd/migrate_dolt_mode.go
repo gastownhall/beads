@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -574,6 +575,12 @@ func acquireMigrateGates(beadsDir string, shared bool, reason string) (func(), e
 	// to context.Background().
 	h, err := acquireExclusiveWorkspaceGates(getRootContext(), beadsDir, reason, destRoot)
 	if err != nil {
+		if errors.Is(err, lockfile.ErrUnsupported) {
+			// No holder exists, so waiting cannot help: name the filesystem.
+			return nil, HandleErrorWithHint(
+				fmt.Sprintf("bd migrate cannot run here: %s", gateLockUnsupportedReason(beadsDir, err)),
+				gateLockUnsupportedHint)
+		}
 		return nil, HandleErrorWithHint(
 			fmt.Sprintf("cannot migrate while other bd activity holds this workspace: %v", err),
 			"wait for running bd commands to finish, then retry")

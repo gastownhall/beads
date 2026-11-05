@@ -8,11 +8,13 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/lockfile"
 	"github.com/steveyegge/beads/internal/workspacegate"
 )
 
@@ -37,7 +39,10 @@ import (
 //     not "not contended" — e.g. EACCES on another OS user's 0600 gate file
 //     beside a cross-user shared root lands here and proceeds ungated even
 //     though that user may be mid-maintenance (workspacegate documents
-//     cross-user shared roots as unsupported).
+//     cross-user shared roots as unsupported). Continuing ungated holds none
+//     of the set's gates. An unsupported filesystem (lockfile.ErrUnsupported:
+//     the lock call fails, or reports busy even on a private probe file) gets
+//     its own warning naming the filesystem, and costs no wait.
 //   - SHARED contention means an exclusive maintenance operation is live
 //     (or queued, see workspacegate's writer fairness) on this workspace:
 //     wait for it up to sharedGateWait() (BEADS_GATE_WAIT_TIMEOUT, default
@@ -47,7 +52,9 @@ import (
 //     the knob. Proceeding would race a migration/restore mid-replace, and
 //     so would treating an interrupted wait as fail-open.
 //   - EXCLUSIVE failures of any kind are hard errors: maintenance refuses
-//     rather than pretends.
+//     rather than pretends. On an unsupported filesystem every maintenance
+//     operation refuses the same way (gateLockUnsupportedRefusal), naming
+//     the filesystem rather than live bd activity.
 //   - Strict --readonly is mutation-free (effectiveRootStorePolicy), so its
 //     SHARED hold opens the gate files read-only and never creates them (see
 //     workspacegate.Options.ReadOnly). A gate file that does not exist means
@@ -397,6 +404,10 @@ func buildWorkspaceGateSet(beadsDir string, extraRoots ...string) ([]workspacega
 	return gates, nil
 }
 
+// acquireAllWorkspaceGates is workspacegate.AcquireAll; a var so tests can
+// stand in a filesystem whose locks do not work.
+var acquireAllWorkspaceGates = workspacegate.AcquireAll
+
 // acquireCommandWorkspaceGates is the chokepoint acquisition for
 // store-opening commands, called from PersistentPreRunE right after the
 // workspace is selected. It stores the handle in workspaceGateHandle on
@@ -460,7 +471,7 @@ func acquireCommandWorkspaceGates(ctx context.Context, cmd *cobra.Command, beads
 			opts.OnWait, stopNotice = delayedGateNotice()
 		}
 	}
-	h, err := workspacegate.AcquireAll(ctx, mode, opts, gates...)
+	h, err := acquireAllWorkspaceGates(ctx, mode, opts, gates...)
 	stopNotice()
 	if err != nil {
 		// Interrupted while waiting (Ctrl-C / SIGTERM cancels rootCtx):
@@ -469,6 +480,23 @@ func acquireCommandWorkspaceGates(ctx context.Context, cmd *cobra.Command, beads
 		// operation it was waiting out.
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return HandleErrorRespectJSON("interrupted while waiting for the workspace gate: %v", err)
+		}
+		// A filesystem that cannot lock (NFS without lockd, some SMB mounts,
+		// a \\wsl$ path from Windows) is not contention: no holder exists,
+		// and waiting or retrying cannot help. Ordinary commands take the
+		// documented fail-open posture at once, saying why.
+		if errors.Is(err, lockfile.ErrUnsupported) {
+			// Maintenance refuses rather than pretends, as before; only the
+			// message changes.
+			if exclusive {
+				return HandleErrorRespectJSON("%s", gateLockUnsupportedRefusal("bd backup restore", beadsDir, err))
+			}
+			// AcquireAll released every gate of the set, so the command
+			// holds none, not only the one that cannot lock.
+			if !quietFlag {
+				fmt.Fprintf(os.Stderr, "warning: %s; continuing ungated, so bd init, migrate, bootstrap and backup restore cannot be fenced here\n", gateLockUnsupportedReason(beadsDir, err))
+			}
+			return nil
 		}
 		if errors.Is(err, workspacegate.ErrBusy) {
 			// Contention is never fail-open, in either mode — but the two
@@ -511,6 +539,44 @@ func acquireCommandWorkspaceGates(ctx context.Context, cmd *cobra.Command, beads
 		advertiseSharedHold()
 	}
 	return nil
+}
+
+// gateLockUnsupportedReason describes a gate failure matching
+// lockfile.ErrUnsupported: "<dir> is on a filesystem that does not support
+// file locking (<cause>)", where dir holds the gate that failed (the error's
+// UnsupportedError.Path), which can be a physical root on another
+// filesystem than beadsDir; beadsDir when the error does not say. ENOLCK is
+// also what a kernel out of lock records answers, so it is named as a
+// failure ("file locking failed in <dir> (no locks available)") rather than
+// as a filesystem that cannot lock.
+func gateLockUnsupportedReason(beadsDir string, err error) string {
+	dir, cause := beadsDir, err.Error()
+	var unsupported *lockfile.UnsupportedError
+	if errors.As(err, &unsupported) {
+		if unsupported.Path != "" {
+			dir = filepath.Dir(unsupported.Path)
+		}
+		if unsupported.Err != nil {
+			cause = unsupported.Err.Error()
+		}
+	}
+	if errors.Is(err, syscall.ENOLCK) {
+		return fmt.Sprintf("file locking failed in %s (%s)", dir, cause)
+	}
+	return fmt.Sprintf("%s is on a filesystem that does not support file locking (%s)", dir, cause)
+}
+
+// gateLockUnsupportedHint is the remedy for gates that cannot lock: no
+// holder exists, so waiting or retrying cannot help.
+const gateLockUnsupportedHint = "use a local filesystem (for a workspace inside WSL, run bd inside WSL)"
+
+// gateLockUnsupportedRefusal is the refusal of a maintenance operation (op,
+// such as "bd init") whose exclusive gates failed with
+// lockfile.ErrUnsupported. It names the filesystem, never live bd activity,
+// and the remedy. bd init, bootstrap and backup restore refuse with it; bd
+// migrate prints the same reason with gateLockUnsupportedHint as its hint.
+func gateLockUnsupportedRefusal(op, beadsDir string, err error) string {
+	return fmt.Sprintf("%s cannot run here: %s; %s", op, gateLockUnsupportedReason(beadsDir, err), gateLockUnsupportedHint)
 }
 
 // acquireExclusiveWorkspaceGates is the maintenance-side acquisition used by
@@ -583,7 +649,7 @@ func acquireExclusiveWorkspaceGatesWithOptions(ctx context.Context, beadsDir str
 			gates = append(gates, g)
 		}
 	}
-	return workspacegate.AcquireAll(ctx, workspacegate.Exclusive, opts, gates...)
+	return acquireAllWorkspaceGates(ctx, workspacegate.Exclusive, opts, gates...)
 }
 
 // acquireInitMutationGate holds init's complete exclusive gate set while its
@@ -605,6 +671,9 @@ func acquireInitMutationGate(ctx context.Context, beadsDir, physicalRoot string,
 	h, err := acquireExclusiveWorkspaceGatesWithOptions(ctx, beadsDir, opts, physicalRoot)
 	stopNotice()
 	if err != nil {
+		if errors.Is(err, lockfile.ErrUnsupported) {
+			return nil, fmt.Errorf("%s: %w", gateLockUnsupportedRefusal("bd init", beadsDir, err), err)
+		}
 		if errors.Is(err, workspacegate.ErrBusy) {
 			return nil, fmt.Errorf("bd init refuses to run over live bd activity on this workspace (waited %s; set %s to wait longer): %w", wait, initGateTimeoutEnv, err)
 		}
