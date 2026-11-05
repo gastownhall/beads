@@ -89,6 +89,7 @@ var mutationEntryPoints = []string{
 	// delete, including the role body and the resolved-set worker
 	"DeleteIssueInTx",
 	"DeleteIssuesInTx",
+	"DeleteIssuesBesideWispsInTx",
 	"DeleteResolvedSetInTx",
 	"DeleteIssuesBySourceRepoInTx",
 	"DeleteInTx",
@@ -168,6 +169,7 @@ var beadDMLExemptions = map[string]string{
 	"InsertDerivedEvent":            "writes the events audit table (templated %s), not work-bead state",
 	"InsertDerivedEventReturningID": "writes the events audit table (templated %s), not work-bead state",
 	"GetNextChildIDTx":              "writes the child_counters allocation table (templated %s), not work-bead state",
+	"RetireIDsInTx":                 "writes the id tombstone tables (templated %s), not work-bead state; the retaining sweep's delete journals the rows it removes",
 
 	// (3) constituent sub-helpers; the calling entry point journals the whole
 	// mutation once (a create/rename/promote/delete emits a single row).

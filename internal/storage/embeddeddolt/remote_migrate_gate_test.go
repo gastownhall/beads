@@ -238,15 +238,19 @@ func TestEmbeddedOpenForReadOnlyCommand_LenientGate(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 
-	// Regress one migration and register a remote so the reopen sees a
-	// behind, remote-backed database.
+	// Regress the cursor to just below 0073 (arrival_seq) and register a
+	// remote so the reopen sees a behind, remote-backed database. Not just
+	// one migration back: the dirty-table refusal at the end needs 0073,
+	// which alters issues, among the pending migrations, and a migration
+	// recorded above it would hold the cursor past it.
+	const arrivalSeqVersion = 73
 	db, cleanup, err := embeddeddolt.OpenSQL(ctx, dataDir, "testdb", "main")
 	if err != nil {
 		store.Close()
 		t.Fatalf("OpenSQL: %v", err)
 	}
 	if _, err := db.ExecContext(ctx,
-		"DELETE FROM schema_migrations WHERE version = ?", schema.LatestVersion()); err != nil {
+		"DELETE FROM schema_migrations WHERE version >= ?", arrivalSeqVersion); err != nil {
 		t.Fatalf("regress schema_migrations: %v", err)
 	}
 	if _, err := db.ExecContext(ctx,

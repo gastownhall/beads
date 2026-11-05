@@ -211,6 +211,16 @@ const CapDependenciesBlockingIsBlocked = "dependencies.blocking.isBlocked"
 // events_journal_disabled when the journal is off.
 const CapIssuesArrivalSeq = "issues.arrivalSeq"
 
+// CapIssuesDeleteContainmentCascade is the behavior capability announcing
+// that issues:delete's `cascade` follows PARENT-CHILD edges only (GH#6301):
+// the closure is the named beads' containment tree, and a bead joined to it by
+// any other edge survives and comes back in `orphaned`. It names no new
+// request member — an older server accepts the same `cascade` and deletes
+// every transitive dependent — so the token is how a client learns which
+// meaning it will get. bd's client refuses a cascade (preview included)
+// against a server that does not advertise it (wire.CapDeleteContainmentCascade).
+const CapIssuesDeleteContainmentCascade = "issues.delete.containmentCascade"
+
 // CapIssuesSweepWispsPlane is the behavior capability that advertises the
 // `wisps-plane` value of SweepRequest.tier (sweep.go, spec SweepRequest.tier):
 // a third, wider tier that clears the whole wisps table plus any durable bead
@@ -240,6 +250,36 @@ const CapIssuesSweepLiveDependents = "issues.sweep.liveDependents"
 // invalid_argument`/`unknown_parameter`. The client MUST check this token
 // before sending the member to a server that may predate it.
 const CapIssuesSweepLimit = "issues.sweep.limit"
+
+// CapIssuesSweepRetainIDs is the behavior capability that advertises
+// SweepRequest.retain_ids and the paired SweepResult.retain_ids echo
+// (sweep.go): a sweep that retires every id it deletes with a permanent
+// tombstone (issueops.SweepRequest.RetainIDs).
+//
+// IT PROMISES MORE THAN THE MEMBER. A server advertising it also refuses a
+// create of a retired id on every create operation — `410
+// idempotency_expired` on createIssue and on an applyBatch create item — so
+// the guarantee holds on the read side of the tombstone, not just the write
+// side. An older server answers the request member with `400
+// invalid_argument`/`unknown_parameter`; a client that needs the guarantee
+// MUST check this token and refuse to sweep without it, never fall back to a
+// sweep that leaves the ids reusable.
+const CapIssuesSweepRetainIDs = "issues.sweep.retainIds"
+
+// CapIssuesSweepRetainedTypes is the behavior capability that advertises the
+// workspace's retained-type protection on issues:sweep and the paired
+// SweepSkips.retention_required response member (sweep.go): a sweep without
+// retain_ids holds back every candidate whose issue type the workspace's
+// types.retained setting names (issueops.SettingKeyTypesRetained,
+// issueops.SweepSkips.RetentionRequired). It names no request member — the
+// protection is the server's, keyed on a stored setting — so an older server
+// answers a plain sweep without complaint and deletes the retained beads
+// without retiring their ids. The token is how a client learns which it is
+// talking to: before a plain sweep, bd's client reads it and, against a
+// server without it, reads types.retained itself and refuses the sweep before
+// the dial when the setting names a type (httpclient's
+// refuseAnUnguardedPlainSweep; wire.CapSweepRetainedTypes).
+const CapIssuesSweepRetainedTypes = "issues.sweep.retainedTypes"
 
 // CapBatchApplyDepAddLineage is the behavior capability that advertises
 // ApplyDepAddItem's `has_spawner` and `thread_id` members (batch_apply.go):
@@ -1146,11 +1186,12 @@ func (r route) specPathOf() string {
 var behaviorCapabilities = []string{
 	CapProjectEnforce, CapBatchApplyLarge, CapIssuesListSort, CapIssuesCountScope,
 	CapIssuesSweepWispsPlane, CapIssuesSweepLiveDependents, CapIssuesSweepLimit,
+	CapIssuesSweepRetainIDs, CapIssuesSweepRetainedTypes,
 	CapBatchApplyDepAddLineage, CapIssuesUpdateAllowTemplate, CapIssuesCreateDefaultPriority,
 	CapIssuesCloseAutoCloseMolecule, CapIssuesListSearch,
 	CapIssuesListNoAssignee, CapIssuesListTitle, CapListIDs, CapIssuesUpdatePersistence, CapDependenciesBlockingIsBlocked, CapIssuesUpdateClaim,
 	CapIssuesCreateGates, CapIssuesUpdateGates, CapIssuesListFilters,
-	CapIssuesArrivalSeq,
+	CapIssuesArrivalSeq, CapIssuesDeleteContainmentCascade,
 }
 
 // Capabilities lists what this build advertises in ContextResponse.capabilities:

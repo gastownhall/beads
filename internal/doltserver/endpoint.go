@@ -4,14 +4,19 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/creds"
 	"github.com/steveyegge/beads/internal/debug"
+	"github.com/steveyegge/beads/internal/endpointtrust"
 	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
@@ -213,6 +218,9 @@ func (e Endpoint) WithIdentity(ctx context.Context) (Endpoint, error) {
 	if e.CredentialCommand == "" || e.Gateway {
 		return e, nil
 	}
+	if err := CheckEndpointTrust(e.BeadsDir, nil, e.Host, e.Port, e.Socket); err != nil {
+		return e, err
+	}
 	token, ok, err := GatewayIdentity(ctx, e.CredentialCommand)
 	if err != nil {
 		return e, err
@@ -221,6 +229,86 @@ func (e Endpoint) WithIdentity(ctx context.Context) (Endpoint, error) {
 		e.User, e.Gateway = token, true
 	}
 	return e, nil
+}
+
+// CheckEndpointTrust validates the Dolt socket and effective TCP endpoint against workspace pins.
+func CheckEndpointTrust(beadsDir string, fileCfg *configfile.Config, host string, port int, socket string) error {
+	if fileCfg == nil {
+		fileCfg = loadEndpointConfig(beadsDir)
+	}
+	if host == "" {
+		host = fileCfg.GetDoltServerHost()
+	}
+	if err := validateCredentialDialTarget(host, socket); err != nil {
+		return err
+	}
+	fromPrivate := config.PrivateGetenv("BEADS_DOLT_SERVER_HOST") != "" ||
+		(fileCfg.DoltServerHost == "" && !config.IsFromProjectConfig("dolt.host"))
+	if beadsDir == "" {
+		beadsDir = endpointtrust.WorkspaceKey()
+	}
+	endpoint := ""
+	if socket != "" {
+		if err := endpointtrust.Check(beadsDir, "dolt-server", "unix:"+socket, fromPrivate); err != nil {
+			return err
+		}
+	}
+	if port <= 0 {
+		port = fileCfg.GetDoltServerPort()
+	}
+	if socket != "" && port <= 0 {
+		return nil
+	}
+	endpoint = "mysql://" + net.JoinHostPort(configfile.UnbracketHost(host), strconv.Itoa(port))
+	return endpointtrust.Check(beadsDir, "dolt-server", endpoint, fromPrivate)
+}
+
+// validateCredentialDialTarget refuses a Dolt host or socket that the trust
+// check and the MySQL driver would read as two different servers. The trust
+// check classifies the host by re-parsing a synthesized mysql://host:port URL,
+// while the dial goes through go-sql-driver's DSN grammar
+// (user:pass@net(addr)/db), which FormatDSN does not escape: a committed host
+// such as "localhost#@tcp(evil.example" parses as "localhost" for the trust
+// check (bd's own server, trusted without a pin) but makes the driver dial
+// evil.example with the password. A socket path holding the DSN delimiters
+// '@', '(' or ')' redirects the driver the same way. A real host is a DNS name
+// or an IP literal, and a real socket path never needs those delimiters, so
+// anything else is refused before a credential is sent (GH#7886).
+func validateCredentialDialTarget(host, socket string) error {
+	if h := configfile.UnbracketHost(host); h != "" {
+		invalid := fmt.Errorf("dolt server host %s is not a host name or IP address; your Dolt credential was not sent", remedy.PrintedValue(host))
+		// Host-name and IP-literal characters only, zones included: netip does
+		// not validate an IPv6 zone's characters, so the charset applies to
+		// the whole host, and anything with ':' or '%' must be an IP literal.
+		for _, r := range h {
+			if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '.' || r == '-' || r == '_' || r == ':' || r == '%') {
+				return invalid
+			}
+		}
+		if strings.ContainsAny(h, ":%") {
+			if _, err := netip.ParseAddr(h); err != nil {
+				return invalid
+			}
+		}
+	}
+	if strings.ContainsAny(socket, "@()") {
+		return fmt.Errorf("dolt server socket %s contains a character ('@', '(' or ')') the connection string cannot carry; your Dolt credential was not sent", remedy.PrintedValue(socket))
+	}
+	return nil
+}
+
+// EnsureTrustedForCredential checks e's endpoint against the workspace pins
+// before a caller sends e's password (or presents a credential-command
+// identity) to it. It is a no-op for bd's own local server and the vendor
+// default; it returns a MismatchError or FirstUseError for a shared endpoint
+// (metadata.json dolt_server_host, config.yaml dolt.host) that changed or was
+// never privately confirmed, so a diagnostic or repair connection a bd command
+// makes outside the store's gated open — bd dolt status, bd dolt
+// clean-databases and the bd doctor checks — cannot harvest BEADS_DOLT_PASSWORD
+// by naming an attacker's host. fileCfg is e's metadata.json (loaded from
+// e.BeadsDir when nil).
+func (e Endpoint) EnsureTrustedForCredential(fileCfg *configfile.Config) error {
+	return CheckEndpointTrust(e.BeadsDir, fileCfg, e.Host, e.Port, e.Socket)
 }
 
 // DialDSN is the connection to e the store would make, on database ("" for

@@ -32,7 +32,12 @@ const (
 	bazelRemoteGateID = "BAZEL_REMOTE"
 	// The decision's fork-repository test: a fork repository's own CI
 	// (not a fork PR into beads) is mode local, so it never reads rbe-cache.
-	bazelForkRepoValue = "${{ github.repository_owner != 'gastownhall' }}"
+	// The owner's id, not its name: an org rename keeps upstream upstream.
+	bazelForkRepoValue = "${{ github.repository_owner_id != '" + gastownhallOwnerID + "' }}"
+	// The gastownhall org's account id (gh api orgs/gastownhall --jq .id):
+	// github.repository_owner_id, and $GITHUB_REPOSITORY_OWNER_ID, in its
+	// runs.
+	gastownhallOwnerID = "255961667"
 )
 
 // rbeFacts: what GitHub evaluates bazel.yml's rbe step's env expressions on.
@@ -289,6 +294,24 @@ func TestPRGateRequiresRemoteBazelLanes(t *testing.T) {
 		}
 		if pass, log := runPRGateStep(t, gateStep, prGateFor(t, lanesFor[c.f.event], c.f.event, out["mode"])); pass != c.pass {
 			t.Errorf("%s: pr.yml gate pass = %v, want %v\n%s", c.name, pass, c.pass, log)
+		}
+	}
+
+	// A red BAZEL_REMOTE says what to do: in a fork repository's own CI
+	// (always mode local, FORK_REPO) a re-run never helps, so the message
+	// names that case instead of asking for one; in gastownhall a local run
+	// means rbe-fork was closed or refused, and a later re-run may pass.
+	for _, c := range []struct {
+		name, repo, ownerID, want, not string
+	}{
+		{"fork repository's own PR", "someone/beads", "31337", "this is a fork repository's own CI (someone/beads)", "re-run all jobs later"},
+		{"fork PR into beads, rbe-fork closed", mergeQueueOwnRepo, gastownhallOwnerID, "re-run all jobs later", "fork repository's own CI"},
+	} {
+		sc := prGateFor(t, lanes, "pull_request", "local")
+		sc.flags = map[string]string{"GITHUB_REPOSITORY": c.repo, "GITHUB_REPOSITORY_OWNER_ID": c.ownerID}
+		pass, log := runPRGateStep(t, gateStep, sc)
+		if pass || !strings.Contains(log, c.want) || strings.Contains(log, c.not) {
+			t.Errorf("%s: gate pass %v, log lacks %q or says %q:\n%s", c.name, pass, c.want, c.not, log)
 		}
 	}
 
@@ -983,6 +1006,13 @@ func TestBazelRetiredLanesCannotBeNarrowed(t *testing.T) {
 				"BEADS_TEST_DOLT_SERVER": "local", "BEADS_TEST_ENV_RUN_DOLT": "1", "BEADS_TEST_GIT_IDENTITY": "1",
 				"BEADS_TEST_REQUIRE_DOLT_CONTAINER": "1", "BEADS_TEST_SUBPROCESS_BINARY": "$(rlocationpath :dolt_race_off)", "GOMAXPROCS": "4",
 			},
+		},
+		// No legacy job's: the server storage tier's one target that PR Risk
+		// never ran, the whole versioncontrolops_test binary on a required
+		// local dolt sql-server (its Compact tests skip everywhere else).
+		"//internal/storage/versioncontrolops:versioncontrolops_dolt_test": {
+			[]string{"$(rootpath :versioncontrolops_test)"},
+			map[string]string{"BEADS_TEST_DOLT_SERVER": "local", "BEADS_TEST_REQUIRE_DOLT_CONTAINER": "1"},
 		},
 	}
 	laneTags := regexp.MustCompile(`"(embedded|dolt-server-proxied|dolt-server-integration)"`)

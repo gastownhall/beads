@@ -611,7 +611,12 @@ func settledInChunkOrder(chunk, withEdges []string) []string {
 // after both templates so their unions see the settled rows' pre-pass
 // is_blocked, as they did when those rows were cleared by the chunk's own
 // unmark statement; on later passes it would match no row (nothing marks a
-// settled id), so it is skipped.
+// settled id), so it is skipped. Since the parent-child legs stopped reading
+// a closed or pinned parent's flag (gastownhall/beads#7626), the order shows
+// only through an edgeless settled row that is neither closed nor pinned,
+// carries a stale 1 and has a child in the same chunk. createbatchequiv's
+// settled scenario drives no such row, so none of its steps pins the order
+// any more.
 //
 // It is a function rather than a method on recomputePlan because the
 // structural write guards follow bare-identifier calls only: as a method, the

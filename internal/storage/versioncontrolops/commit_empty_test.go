@@ -2,6 +2,7 @@ package versioncontrolops
 
 import (
 	"context"
+	"errors"
 	"regexp"
 	"testing"
 
@@ -42,8 +43,8 @@ func TestStageAndCommitSkipsWhenNothingPending(t *testing.T) {
 	// dolt_status reports ZERO committable changes — the idempotent no-op case.
 	mock.ExpectQuery(matchPendingQuery.String()).
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
-	// No ExpectExec for DOLT_ADD / DOLT_COMMIT: if StageAndCommit issues either,
-	// sqlmock fails the test with "call not expected".
+	// No expectation for DOLT_ADD / DOLT_COMMIT: if StageAndCommit issues
+	// either, sqlmock fails the test with "call not expected".
 
 	err = StageAndCommit(context.Background(), db, map[string]bool{"metadata": true}, "idempotent heartbeat", "tester")
 	if err != nil {
@@ -65,16 +66,16 @@ func TestStageAndCommitCommitsWhenPending(t *testing.T) {
 	mock.ExpectQuery(matchPendingQuery.String()).
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 	// The real path must stage the dirty table...
-	mock.ExpectExec(`CALL DOLT_ADD\(\?\)`).
+	mock.ExpectQuery(`CALL DOLT_ADD\(\?\)`).
 		WithArgs("metadata").
-		WillReturnResult(sqlmock.NewResult(0, 0))
+		WillReturnRows(sqlmock.NewRows([]string{"status"}))
 	// ...confirm something is actually staged...
 	mock.ExpectQuery(matchStagedQuery.String()).
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 	// ...and commit.
-	mock.ExpectExec(`CALL DOLT_COMMIT`).
+	mock.ExpectQuery(`CALL DOLT_COMMIT`).
 		WithArgs("real change", "tester").
-		WillReturnResult(sqlmock.NewResult(0, 1))
+		WillReturnRows(sqlmock.NewRows([]string{"hash"}))
 
 	err = StageAndCommit(context.Background(), db, map[string]bool{"metadata": true}, "real change", "tester")
 	if err != nil {
@@ -106,10 +107,10 @@ func TestStageAndCommitSkipsWhenOnlyUnrelatedTableDirty(t *testing.T) {
 	mock.ExpectQuery(matchPendingQuery.String()).
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 	// We stage only the dirty-tracked table ("labels"), which is clean here.
-	mock.ExpectExec(`CALL DOLT_ADD\(\?\)`).
+	mock.ExpectQuery(`CALL DOLT_ADD\(\?\)`).
 		WithArgs("labels").
-		WillReturnResult(sqlmock.NewResult(0, 0))
-	// Staged set is EMPTY — the guard must skip the commit. No ExpectExec for
+		WillReturnRows(sqlmock.NewRows([]string{"status"}))
+	// Staged set is EMPTY — the guard must skip the commit. No expectation for
 	// DOLT_COMMIT: if StageAndCommit issues it, sqlmock fails with "not expected".
 	mock.ExpectQuery(matchStagedQuery.String()).
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
@@ -120,5 +121,40 @@ func TestStageAndCommitSkipsWhenOnlyUnrelatedTableDirty(t *testing.T) {
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Errorf("StageAndCommit issued an empty commit when only an unrelated table was dirty (the bug): %v", err)
+	}
+}
+
+// TestConcludeMergeAbsorbsNothingToCommit pins concludeMerge's tolerance for a
+// merge another session concluded first (server mode shares the working set):
+// with no merge open there is nothing to stage, and DOLT_COMMIT's "no changes
+// added to commit" refusal, impossible while a merge is active because Dolt
+// allows that empty commit, means the merge already landed. It must not fail
+// the conclusion into abortMerge's hard reset. Any other commit failure still
+// surfaces.
+func TestConcludeMergeAbsorbsNothingToCommit(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		commitErr error
+		wantErr   bool
+	}{
+		{"merge already concluded", errors.New("no changes added to commit"), false},
+		{"commit refused", errors.New("cannot commit with unresolved conflicts"), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock := newMockDB(t)
+			mock.ExpectQuery(regexp.QuoteMeta("SELECT source_commit FROM dolt_merge_status WHERE is_merging")).
+				WillReturnRows(sqlmock.NewRows([]string{"source_commit"}))
+			mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', ?)")).
+				WithArgs("conclude").
+				WillReturnError(tc.commitErr)
+
+			err := concludeMerge(t.Context(), db, "conclude", "")
+			if (err != nil) != tc.wantErr {
+				t.Errorf("concludeMerge() error = %v, want error: %v", err, tc.wantErr)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Errorf("unmet sqlmock expectations: %v", err)
+			}
+		})
 	}
 }

@@ -2490,14 +2490,13 @@ func TestReadyTimeout(t *testing.T) {
 }
 
 // TestBuildDoltServerArgs verifies the argv constructed for `dolt sql-server`
-// always includes a non-info --loglevel and the expected host/port. This
+// includes the platform-appropriate --loglevel and expected host/port. This
 // pins the fix for the field report where dolt-server.log ballooned to
 // hundreds of MB with `msg=NewConnection` / `msg=ConnectionClosed` spam
 // because dolt logs connection open/close at INFO by default.
 //
-// If this test fails because someone intentionally lowered verbosity back
-// to info/debug/trace, please instead pick a different mitigation (e.g.
-// dolt YAML config) and update doltServerLogLevel plus this test together.
+// Platforms that cannot verify listener ownership use info so startup can
+// require Dolt's ready line; checked platforms retain the warning floor.
 func TestBuildDoltServerArgs(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -2529,9 +2528,12 @@ func TestBuildDoltServerArgs(t *testing.T) {
 		},
 	}
 
-	// Levels that MUST NOT appear — anything at or below info re-introduces
-	// the NewConnection/ConnectionClosed noise we are trying to suppress.
-	forbiddenLevels := []string{"trace", "debug", "info"}
+	// Levels that MUST NOT appear — except info where startup needs Dolt's
+	// ready line because listener ownership cannot be checked.
+	forbiddenLevels := []string{"trace", "debug"}
+	if listenerOwnershipChecked {
+		forbiddenLevels = append(forbiddenLevels, "info")
+	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2660,6 +2662,42 @@ func TestBuildDoltServerArgs_NoDebugFlagsWhenDisabled(t *testing.T) {
 	}
 }
 
+func TestStartupProofUsesReadyLineWithoutListenerOwnership(t *testing.T) {
+	original := listenerOwnershipChecked
+	t.Cleanup(func() { listenerOwnershipChecked = original })
+
+	listenerOwnershipChecked = false
+	if got := serverLogLevel(false); got != "info" {
+		t.Fatalf("serverLogLevel(false) = %q, want info", got)
+	}
+	args := buildDoltServerArgs("127.0.0.1", 3308, 0, false, "")
+	if got, ok := findLogLevel(args); !ok || got != "info" {
+		t.Fatalf("buildDoltServerArgs log level = %q, want info (args %v)", got, args)
+	}
+	body, err := buildDoltServerYAMLConfig("127.0.0.1", 3308, 0, false, "/tmp/.doltcfg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := servercfg.NewYamlConfig(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(cfg.LogLevel()); got != "info" {
+		t.Fatalf("YAML LogLevel = %q, want info", got)
+	}
+	if !startupReadyLineLogged(false) {
+		t.Fatal("startupReadyLineLogged(false) = false without listener ownership proof")
+	}
+
+	listenerOwnershipChecked = true
+	if got := serverLogLevel(false); got != doltServerLogLevel {
+		t.Errorf("serverLogLevel(false) with listener ownership = %q, want %q", got, doltServerLogLevel)
+	}
+	if startupReadyLineLogged(false) {
+		t.Error("startupReadyLineLogged(false) = true with listener ownership proof")
+	}
+}
+
 func TestBuildDoltServerArgs_RemotesAPI(t *testing.T) {
 	args := buildDoltServerArgs("127.0.0.1", 3308, 8081, false, "")
 	idx := indexOf(args, "--remotesapi-port")
@@ -2723,8 +2761,8 @@ func TestBuildDoltServerYAMLConfig(t *testing.T) {
 		t.Errorf("RemotesapiPort = %v, want 8081", got)
 	}
 
-	if got := string(cfg.LogLevel()); got != doltServerLogLevel {
-		t.Errorf("LogLevel = %q, want %q", got, doltServerLogLevel)
+	if got := string(cfg.LogLevel()); got != serverLogLevel(false) {
+		t.Errorf("LogLevel = %q, want %q", got, serverLogLevel(false))
 	}
 	if got := cfg.CfgDir(); got != "/tmp/some/.doltcfg" {
 		t.Errorf("CfgDir = %q, want %q", got, "/tmp/some/.doltcfg")

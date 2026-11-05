@@ -171,3 +171,26 @@ func TestGetDependencyRecordsForIssuesOrdersByDependsOnID(t *testing.T) {
 		t.Fatalf("unmet SQL expectations: %v", err)
 	}
 }
+
+// bd-cif6y4 (#3445): wisp_dependencies is an optional table (dolt_ignore'd,
+// dropped when the server's working set is replaced). The dependents listing
+// behind `bd show` CHILDREN must treat it as empty like the bulk loaders do;
+// an error here makes show.go drop the whole CHILDREN section.
+func TestGetDependentsWithMetadataInTxToleratesMissingWispDependencyTable(t *testing.T) {
+	t.Parallel()
+
+	_, mock, tx := beginMockTx(t)
+	mock.ExpectQuery(`SELECT issue_id, type FROM dependencies WHERE`).
+		WithArgs("epic-1").
+		WillReturnRows(sqlmock.NewRows([]string{"issue_id", "type"}))
+	mock.ExpectQuery(`SELECT issue_id, type FROM wisp_dependencies WHERE`).
+		WithArgs("epic-1").
+		WillReturnError(errors.New("Error 1146: Table 'db.wisp_dependencies' doesn't exist"))
+
+	if _, err := GetDependentsWithMetadataInTx(context.Background(), tx, "epic-1"); err != nil {
+		t.Fatalf("GetDependentsWithMetadataInTx with missing wisp_dependencies: %v (want the table treated as empty)", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}
