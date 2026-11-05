@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"bufio"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -132,7 +131,7 @@ func (s *controlServer) handle(conn net.Conn) {
 	if len(parts) != 3 || parts[0] != "IDENT" {
 		return
 	}
-	if subtle.ConstantTimeCompare([]byte(parts[1]), []byte(s.secret)) != 1 {
+	if !identity.VerifyIdentRequest(s.secret, parts[2], parts[1]) {
 		return
 	}
 	reply := s.reply()

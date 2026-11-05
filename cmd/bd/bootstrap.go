@@ -149,6 +149,11 @@ Bootstrap auto-detects the right action:
 If sync.remote points at a git repository, bootstrap verifies refs/dolt/data
 before cloning. Bootstrap exits non-zero when it cannot set up a database.
 
+Values starting with - in sync.remote or sync.git-remote are refused as invalid
+remote URLs: bd init returns an error naming the key; bd bootstrap restores a
+local backup or issues.jsonl when available, otherwise reports a blocked plan
+without contacting the remote.
+
 This is the recommended command for:
   • Setting up beads on a fresh clone
   • Recovering after moving to a new machine
@@ -533,17 +538,22 @@ func detectBootstrapPlan(beadsDir string, cfg *configfile.Config) BootstrapPlan 
 	// remember why so an unverifiable remote can become fatal only after local
 	// recovery is exhausted. With no sync.remote, auto-detect Dolt data on git
 	// origin instead.
-	syncRemote := resolveSyncRemote()
+	syncRemote, syncRemoteErr := resolveSyncRemoteChecked()
 	unusableRemoteReason, unusableRemoteURL := "", ""
-	if syncRemote != "" {
+	switch {
+	case syncRemoteErr != nil:
+		unusableRemoteReason = syncRemoteErr.Error()
+	case syncRemote != "":
 		done, reason, url := planConfiguredSyncRemote(&plan, syncRemote)
 		if done {
 			return plan
 		}
 		// Cloning is off the table; purely local recovery is not.
 		unusableRemoteReason, unusableRemoteURL = reason, url
-	} else if originPlan, ok := gitOriginSyncPlan(plan); ok {
-		return originPlan
+	default:
+		if originPlan, ok := gitOriginSyncPlan(plan); ok {
+			return originPlan
+		}
 	}
 
 	// On-disk recovery sources: a non-empty backup JSONL, then a git-tracked
@@ -2096,6 +2106,14 @@ func isNonInteractiveBootstrap(flagValue bool) bool {
 // An ancestor holding the graph format marker without metadata it can read is
 // a graph workspace, refused like one whose metadata declares graph_mode,
 // rather than skipped or reported as a metadata load failure.
+//
+// The walk ends at the home directory: $HOME, or the account home
+// (beads.IsAccountHomeDir) when $HOME points elsewhere. The account home's
+// .beads is the user-global directory that workspace discovery passes over
+// (GH#4402), not an enclosing workspace, so it is not examined either, and a
+// project under the home directory does not inherit its database name or
+// server. Only when the home directory is itself a repository root (a
+// dotfiles repository) is its .beads that repository's own, and examined.
 func findParentConfig(beadsDir string) (*configfile.Config, error) {
 	// Start from the parent of beadsDir's enclosing directory.
 	// beadsDir is typically "<project>/.beads", so we start from <project>'s parent.
@@ -2111,6 +2129,12 @@ func findParentConfig(beadsDir string) (*configfile.Config, error) {
 	origin := utils.CanonicalizePath(filepath.Dir(beadsDir))
 	walk := beads.NewAncestorDirWalk(start, origin)
 	for dir, ok := walk.Next(); ok; dir, ok = walk.Next() {
+		// GH#4402: the user-global ~/.beads is no parent workspace; the walk
+		// ends without examining it.
+		atAccountHome := beads.IsAccountHomeDir(dir)
+		if atAccountHome && !isGitWorkTreeRoot(dir) {
+			break
+		}
 		candidate := filepath.Join(dir, ".beads")
 		cfg, err := configfile.LoadForDiscovery(candidate)
 		if (err != nil || cfg == nil) && hasGraphFormatMarker(candidate) {
@@ -2129,8 +2153,8 @@ func findParentConfig(beadsDir string) (*configfile.Config, error) {
 			return cfg, nil
 		}
 
-		// Don't search above $HOME
-		if homeDir != "" && dir == homeDir {
+		// Don't search above the home directory
+		if atAccountHome || (homeDir != "" && dir == homeDir) {
 			break
 		}
 

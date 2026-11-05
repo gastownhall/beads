@@ -207,7 +207,10 @@ func prepareCreateIssueInTx(ctx context.Context, tx DBTX, bc *BatchContext, issu
 	issueTable, eventTable = TableRouting(issue)
 
 	explicitID := issue.ID != ""
-	if err := assignCreateIssueIDInTx(ctx, tx, bc, issue, actor); err != nil {
+	// No claimed set. Each issue is written before the next one mints, so a
+	// mint sees every EARLIER issue's row; an explicit id a LATER issue of the
+	// same slice names is not seen, and a mint can still draw it.
+	if err := assignCreateIssueIDInTx(ctx, tx, bc, issue, actor, nil); err != nil {
 		return "", "", prepareWrite, err
 	}
 	if bc.Opts.CreateOnly {
@@ -347,7 +350,10 @@ func finishCreateIssueInTx(ctx context.Context, tx DBTX, bc *BatchContext, issue
 	return result, nil
 }
 
-func assignCreateIssueIDInTx(ctx context.Context, tx DBTX, bc *BatchContext, issue *types.Issue, actor string) error {
+// assignCreateIssueIDInTx mints issue an id when it names none, passing over
+// the ids claimed holds (GenerateIssueIDInTable), and otherwise validates the
+// prefix of the one it names.
+func assignCreateIssueIDInTx(ctx context.Context, tx DBTX, bc *BatchContext, issue *types.Issue, actor string, claimed map[string]bool) error {
 	if issue.ID == "" {
 		issueTable, _ := TableRouting(issue)
 		prefix := bc.ConfigPrefix
@@ -359,7 +365,7 @@ func assignCreateIssueIDInTx(ctx context.Context, tx DBTX, bc *BatchContext, iss
 			prefix = bc.ConfigPrefix + "-wisp"
 		}
 		var err error
-		issue.ID, err = GenerateIssueIDInTable(ctx, tx, issueTable, prefix, issue, actor)
+		issue.ID, err = GenerateIssueIDInTable(ctx, tx, issueTable, prefix, issue, actor, claimed)
 		if err != nil {
 			return fmt.Errorf("failed to generate issue ID: %w", err)
 		}

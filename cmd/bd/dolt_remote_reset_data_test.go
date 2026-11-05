@@ -1006,3 +1006,29 @@ func forEachGitObjectFormat(t *testing.T, fn func(t *testing.T, initFlags []stri
 		})
 	}
 }
+
+func TestResetDataGitCommandsRejectOptionRemote(t *testing.T) {
+	pwned := filepath.Join(t.TempDir(), "pwned")
+	gitURL := "--upload-pack=touch " + pwned + ";false"
+
+	if _, err := lsRemoteDoltDataRefs(context.Background(), gitURL); err == nil {
+		t.Error("lsRemoteDoltDataRefs accepted a remote starting with '-'")
+	}
+	if err := deleteGitDoltDataRefs(context.Background(), "--receive-pack=touch "+pwned+";false", []string{gitDoltDataRef}); err == nil {
+		t.Error("deleteGitDoltDataRefs accepted a remote starting with '-'")
+	}
+	// The server-mode reset path (resetGitBackedThroughServer) reaches the
+	// remote through these helpers instead.
+	if _, err := lsRemoteRefOID(context.Background(), gitURL, gitDoltDataRef); err == nil {
+		t.Error("lsRemoteRefOID accepted a remote starting with '-'")
+	}
+	if err := deleteTempGitRef(context.Background(), gitURL, "refs/dolt/bd-reset-data-test"); err == nil {
+		t.Error("deleteTempGitRef accepted a remote starting with '-'")
+	}
+	if err := moveGitRef(context.Background(), "--upload-pack=touch "+pwned+";false", "refs/dolt/bd-reset-data-test", strings.Repeat("0", 40), gitDoltDataRef, ""); err == nil {
+		t.Error("moveGitRef accepted a remote starting with '-'")
+	}
+	if _, err := os.Stat(pwned); err == nil {
+		t.Fatal("an injected git option ran a command")
+	}
+}

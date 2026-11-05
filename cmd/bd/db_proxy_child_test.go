@@ -69,6 +69,21 @@ func TestDbProxyChildProxyOpts_TraceConnectionsFollowsDebug(t *testing.T) {
 	assert.Equal(t, debug.Enabled(), dbProxyChildProxyOpts(nil).TraceConnections, "TraceConnections must follow debug.Enabled()")
 }
 
+// TestDbProxyChildProxyOpts_ServerLogPathFollowsRotateFlag: the child bounds
+// the server log while it runs only when the spawning bd marked it as its
+// own (--rotate-logpath); an operator's log path is never handed on.
+func TestDbProxyChildProxyOpts_ServerLogPathFollowsRotateFlag(t *testing.T) {
+	prevPath, prevRotate := dbProxyChildLogPath, dbProxyChildRotateLogPath
+	t.Cleanup(func() { dbProxyChildLogPath, dbProxyChildRotateLogPath = prevPath, prevRotate })
+
+	dbProxyChildLogPath = "/beads/dolt/server.log"
+	dbProxyChildRotateLogPath = true
+	assert.Equal(t, "/beads/dolt/server.log", dbProxyChildProxyOpts(nil).ServerLogPath)
+
+	dbProxyChildRotateLogPath = false
+	assert.Empty(t, dbProxyChildProxyOpts(nil).ServerLogPath)
+}
+
 func TestNewDatabaseServer_BackendLocalSharedServerStillStubbed(t *testing.T) {
 	_, err := newDatabaseServer(
 		proxy.BackendLocalSharedServer,
