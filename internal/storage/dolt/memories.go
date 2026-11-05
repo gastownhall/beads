@@ -33,14 +33,15 @@ var _ memoryops.Memories = (*memories)(nil)
 
 // Remember validates and derives BEFORE opening the transaction, so a refusal
 // cannot be mistaken at the call site for a write that rolled back, and then
-// probes and writes inside ONE retryable transaction.
+// probes and writes inside ONE retryable transaction. A memory is a config row
+// and records no journal event, so the transaction takes no journal writer lock.
 func (m *memories) Remember(ctx context.Context, req memoryops.RememberRequest) (memoryops.RememberResult, error) {
 	key, err := memoryapi.ResolveKey(req.Key, req.Content)
 	if err != nil {
 		return memoryops.RememberResult{}, err
 	}
 	var replaced bool
-	if err := m.store.withRetryTx(ctx, func(tx *sql.Tx) error {
+	if err := m.store.withRetryTxNoJournal(ctx, func(tx *sql.Tx) error {
 		var err error
 		replaced, err = storagememoryops.RememberInTx(ctx, tx, key, req.Content)
 		return err
@@ -70,7 +71,8 @@ func (m *memories) Recall(ctx context.Context, req memoryops.RecallRequest) (mem
 }
 
 // Forget reads the value and deletes the row in ONE transaction, so the value
-// it reports is the one it removed.
+// it reports is the one it removed. Like Remember, it takes no journal writer
+// lock.
 func (m *memories) Forget(ctx context.Context, req memoryops.ForgetRequest) (memoryops.ForgetResult, error) {
 	key, err := memoryapi.ValidateKey(req.Key)
 	if err != nil {
@@ -80,7 +82,7 @@ func (m *memories) Forget(ctx context.Context, req memoryops.ForgetRequest) (mem
 		previous string
 		found    bool
 	)
-	if err := m.store.withRetryTx(ctx, func(tx *sql.Tx) error {
+	if err := m.store.withRetryTxNoJournal(ctx, func(tx *sql.Tx) error {
 		var err error
 		previous, found, err = storagememoryops.ForgetInTx(ctx, tx, key)
 		return err

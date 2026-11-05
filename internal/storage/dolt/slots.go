@@ -51,7 +51,12 @@ func (s *DoltStore) MergeMetadata(ctx context.Context, issueID, key string, valu
 // versioning since wisps live in dolt_ignored tables. The read and write still
 // share the one transaction, so the atomic-merge property holds.
 func (s *DoltStore) mergeMetadataWisp(ctx context.Context, issueID, key string, value json.RawMessage, actor string) error {
-	tx, err := s.db.BeginTx(ctx, nil)
+	conn, release, err := s.writeTxConn(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
+	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
@@ -152,7 +157,12 @@ func (s *DoltStore) SlotClear(ctx context.Context, issueID, key, actor string) e
 // clearMetadataWisp clears a metadata key on a wisp. Mirrors mergeMetadataWisp /
 // closeWisp: no Dolt versioning since wisps live in dolt_ignored tables.
 func (s *DoltStore) clearMetadataWisp(ctx context.Context, issueID, key, actor string) error {
-	tx, err := s.db.BeginTx(ctx, nil)
+	conn, release, err := s.writeTxConn(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
+	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
