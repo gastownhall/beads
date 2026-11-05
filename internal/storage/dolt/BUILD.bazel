@@ -199,6 +199,7 @@ go_test(
         "deleter_contract_test.go",
         "demote_coordination_test.go",
         "demote_to_wisp_test.go",
+        "dep_add_stages_is_blocked_test.go",
         "dependencies_conflict_test.go",
         "dependencies_extended_test.go",
         "dependencies_merge_test.go",
