@@ -123,7 +123,8 @@ type RemoveDependencyResult struct {
 // an edge to hang off, so there is no third answer. One request may mix the
 // two; it is still one transaction, and still all-or-nothing across both.
 // Only the durable half is versioned, so a request made entirely of ephemeral
-// edges records no history entry.
+// edges records no history entry unless it changes a durable issue's blocked
+// state (below).
 //
 // A TARGET's plane is independent of its source's: either class may depend on
 // the other.
@@ -131,7 +132,10 @@ type RemoveDependencyResult struct {
 // EITHER METHOD MAINTAINS BLOCKED STATE under BlockedStateInvariant: an edge
 // that lands or is removed leaves the column settled — for the source, for
 // everything that inherits from it, and for any waiter whose gate the edge
-// changed — inside the same transaction that wrote the edge.
+// changed — inside the same transaction that wrote the edge. A durable
+// issue's blocked state that changes is versioned with the edge, whichever
+// plane the edge is on: a wisp-sourced edge can block or unblock a durable
+// child.
 //
 // EACH METHOD LEAVES A TRAIL IN THE SOURCE'S EVENT STREAM, attributed to the
 // request's Actor: a genuinely new edge records a dependency_added entry, and
@@ -140,7 +144,7 @@ type RemoveDependencyResult struct {
 // found no edge both leave the stream as they found it. The trail follows the
 // source's plane exactly as the edge does, which is what makes it readable on
 // an ephemeral edge at all: the wisp plane is not versioned, so for a
-// wisp-sourced edge this is the only record the operation leaves.
+// wisp-sourced edge this is the only record of the edge itself.
 //
 // Implementations never mutate caller-owned request values, snapshot the
 // request at method entry, and apply validation and normalization only to
@@ -192,7 +196,8 @@ type DependencyEditor interface {
 	// existed with the requested type — records NO history entry, the same way
 	// RemoveDependencyResult states it for a removal that found nothing. The
 	// one entry is recorded when at least one durable edge was genuinely
-	// written, and one is all that is recorded however many were.
+	// written or an edge changed a durable issue's blocked state, and one is
+	// all that is recorded however many were.
 	AddDependencies(ctx context.Context, req AddDependenciesRequest) (AddDependenciesResult, error)
 	// RemoveDependency removes exactly the named edge. It is idempotent: a
 	// missing edge is Removed false with a nil error, not ErrNotFound.

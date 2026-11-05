@@ -327,7 +327,9 @@ folded with `bazel-cmd-dolt` into `bazel-dolt-int`):
 proxied-server cmd/bd tier ("Test (Proxied Dolt Cmd N/15)",
 `//cmd/bd:bd_proxied_test`), and `--config=doltserver-integration` the
 server-Dolt storage tier ("Test (Server Dolt Conformance)", "Test (Server
-Dolt Full Suite N/16)", `//internal/storage/dolt:dolt_server_*_test`), which
+Dolt Full Suite N/16)", `//internal/storage/dolt:dolt_server_*_test`, plus
+the `versioncontrolops` tests on the `local` backend,
+`//internal/storage/versioncontrolops:versioncontrolops_dolt_test`), which
 builds with the integration tag like `--config=integration`. Each shard runs
 its CI job's shard script, so for `--config=doltserver-integration` Bazel
 shard k runs the tests of job k+1 (both split the manifest's 16-shard block

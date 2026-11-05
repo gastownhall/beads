@@ -607,6 +607,9 @@ var createCmd = &cobra.Command{
 			DefaultPriority:         priorityDefault,
 		})
 		if err != nil {
+			if handled, rendered := reportCreateOfRetiredID(err); handled {
+				return rendered
+			}
 			// RULING R1: an occupied --id is a refusal, not a silent full-row
 			// upsert reported as success.
 			if errors.Is(err, storage.ErrAlreadyExists) && explicitID != "" {

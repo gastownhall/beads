@@ -287,6 +287,26 @@ func (s *InstrumentedStorage) SearchIssueSummaries(ctx context.Context, query st
 	return summaries, err
 }
 
+var _ storage.DescendantSearcher = (*InstrumentedStorage)(nil)
+
+// SearchDescendants traces the `bd list --parent` tree walk
+// (storage.DescendantSearcher) as one span over the whole tree.
+// storage.SearchDescendants offers the walk to this layer before unwrapping it,
+// and this layer hands it on to the layers beneath: the embedded and Dolt
+// server stores still read the tree in one read transaction, and a store
+// without the capability (the http client) is walked node by node beneath
+// this span, which then stands for the walk's one SearchIssues call per node.
+func (s *InstrumentedStorage) SearchDescendants(ctx context.Context, rootID string, filter types.IssueFilter) ([]*types.Issue, error) {
+	attrs := []attribute.KeyValue{attribute.String("bd.issue.id", rootID)}
+	ctx, span, t := s.op(ctx, "SearchDescendants", attrs...)
+	issues, err := storage.SearchDescendants(ctx, s.inner, rootID, filter)
+	if err == nil {
+		span.SetAttributes(attribute.Int("bd.result.count", len(issues)))
+	}
+	s.done(ctx, span, t, err, attrs...)
+	return issues, err
+}
+
 // ── Dependencies ────────────────────────────────────────────────────────────
 
 func (s *InstrumentedStorage) AddDependency(ctx context.Context, dep *types.Dependency, actor string) error {

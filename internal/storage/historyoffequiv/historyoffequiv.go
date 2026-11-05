@@ -188,6 +188,26 @@ var schemaAdditions = []schemaAddition{{
 		"schema_migrations":         {"73"},
 		"ignored_schema_migrations": {"29"},
 	},
+}, {
+	By: "the id tombstone tables of retaining retention sweeps (BD-6)",
+	// Migration 0074 creates both; ignored/0030 creates the clone-local one
+	// on a fresh clone. Only a retaining sweep (SweepRequest.RetainIDs)
+	// writes them, and the scenario runs none, so both stay empty here.
+	Tables: []string{"id_tombstones", "wisp_id_tombstones"},
+	// 0074 on the main series, and ignored/0030 on the dolt_ignored series.
+	Migrations: map[string][]string{
+		"schema_migrations":         {"74"},
+		"ignored_schema_migrations": {"30"},
+	},
+}, {
+	By: "the pre-upgrade events restore marker (#7039)",
+	// Ignored/0031 adds no schema. Its pre-migration repair restores the
+	// events a clone's history holds from before 0062, and the scenario
+	// writes every event after its store has migrated, so the repair
+	// restores nothing and the marker adds only its bookkeeping row.
+	Migrations: map[string][]string{
+		"ignored_schema_migrations": {"31"},
+	},
 }}
 
 // runWindow widens the span of the run on each side to bound the wall-clock

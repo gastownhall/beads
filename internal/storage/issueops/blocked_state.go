@@ -242,30 +242,42 @@ func recomputeIsBlockedInTxWithResult(
 }
 
 func MarkIsBlockedInTx(ctx context.Context, tx DBTX, issueIDs, wispIDs []string) error {
+	_, err := MarkIsBlockedInTxWithResult(ctx, tx, issueIDs, wispIDs)
+	return err
+}
+
+// MarkIsBlockedInTxWithResult is MarkIsBlockedInTx reporting which tables had
+// rows flipped, the way RecomputeIsBlockedInTxWithResult does, so a caller
+// that stages tables for a Dolt commit can stage `issues` exactly when the
+// mark changed a durable row (GH#6647).
+func MarkIsBlockedInTxWithResult(ctx context.Context, tx DBTX, issueIDs, wispIDs []string) (RecomputeIsBlockedResult, error) {
+	var result RecomputeIsBlockedResult
 	if len(issueIDs) == 0 && len(wispIDs) == 0 {
-		return nil
+		return result, nil
 	}
 	before, err := captureBlockedJournalSnapshot(ctx, tx, issueIDs, wispIDs)
 	if err != nil {
-		return err
+		return result, err
 	}
 	for {
 		var changed int64
 
 		n, err := markIsBlockedPassForIssuesInTx(ctx, tx, issueIDs)
 		if err != nil {
-			return err
+			return result, err
 		}
 		changed += n
+		result.IssueRowsChanged = result.IssueRowsChanged || n > 0
 
 		n, err = markIsBlockedPassForWispsInTx(ctx, tx, wispIDs)
 		if err != nil {
-			return err
+			return result, err
 		}
 		changed += n
+		result.WispRowsChanged = result.WispRowsChanged || n > 0
 
 		if changed == 0 {
-			return recordBlockedJournalChanges(ctx, tx, before, issueIDs, wispIDs)
+			return result, recordBlockedJournalChanges(ctx, tx, before, issueIDs, wispIDs)
 		}
 	}
 }
@@ -611,7 +623,12 @@ func settledInChunkOrder(chunk, withEdges []string) []string {
 // after both templates so their unions see the settled rows' pre-pass
 // is_blocked, as they did when those rows were cleared by the chunk's own
 // unmark statement; on later passes it would match no row (nothing marks a
-// settled id), so it is skipped.
+// settled id), so it is skipped. Since the parent-child legs stopped reading
+// a closed or pinned parent's flag (gastownhall/beads#7626), the order shows
+// only through an edgeless settled row that is neither closed nor pinned,
+// carries a stale 1 and has a child in the same chunk. createbatchequiv's
+// settled scenario drives no such row, so none of its steps pins the order
+// any more.
 //
 // It is a function rather than a method on recomputePlan because the
 // structural write guards follow bare-identifier calls only: as a method, the

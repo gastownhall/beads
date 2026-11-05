@@ -12,19 +12,17 @@ import (
 
 // TestCreateOnlyCreateReadsEachPlaneOnce pins the existence reads of a
 // create-only create with an explicit id: the create-only guard reads both
-// planes, and neither the cross-plane collision check nor the insert re-reads
-// a plane the guard just found empty. sqlmock refuses any statement not
-// expected here, so a re-read fails the test.
+// planes (and both id tombstone tables) in its one occupancy statement, and
+// neither the cross-plane collision check nor the insert re-reads a plane the
+// guard just found empty. sqlmock refuses any statement not expected here, so
+// a re-read fails the test.
 func TestCreateOnlyCreateReadsEachPlaneOnce(t *testing.T) {
 	mock, db := newBlockedStateResultMock(t)
 	mock.ExpectExec(regexp.QuoteMeta("REPLACE INTO local_metadata")).
 		WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM issues WHERE id = ?")).
-		WithArgs("bd-wisp-1").
-		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM wisps WHERE id = ?")).
-		WithArgs("bd-wisp-1").
-		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectQuery(regexp.QuoteMeta(idOccupancySQL)).
+		WithArgs("bd-wisp-1", "bd-wisp-1", "bd-wisp-1", "bd-wisp-1").
+		WillReturnRows(sqlmock.NewRows([]string{"src", "closed_at"}))
 	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO wisps")).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
@@ -35,9 +33,9 @@ func TestCreateOnlyCreateReadsEachPlaneOnce(t *testing.T) {
 		ID: "bd-wisp-1", Title: "op", Status: types.StatusOpen, Priority: 2,
 		IssueType: types.TypeTask, NoHistory: true,
 	}
-	issueTable, _, skip, err := prepareCreateIssueInTx(ctx, db, bc, issue, "tester")
-	if err != nil || skip {
-		t.Fatalf("prepareCreateIssueInTx = skip %v, err %v; want no skip, no error", skip, err)
+	issueTable, _, outcome, err := prepareCreateIssueInTx(ctx, db, bc, issue, "tester")
+	if err != nil || outcome != prepareWrite {
+		t.Fatalf("prepareCreateIssueInTx = outcome %v, err %v; want prepareWrite, no error", outcome, err)
 	}
 	if issueTable != "wisps" {
 		t.Fatalf("issueTable = %q, want wisps", issueTable)

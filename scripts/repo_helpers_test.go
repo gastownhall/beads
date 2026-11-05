@@ -78,12 +78,11 @@ func readPolicyFile(t *testing.T, root, name string) string {
 const (
 	forkCacheEndpoint = "grpc" + "s://rbe-cache.ops.gascity.com:8443"
 	forkCacheInstance = "oss"
-	// zstd cache transfers: only the anonymous fork cache can advertise a
-	// compressor, so only fork-cache may ask for one, and only while
-	// write-bazelrc.sh's cache-zstd-probe.sh finds it advertised (a probe,
-	// not a repository variable: fork pull_request runs see no vars).
-	// Trusted remote-exec and rbe-fork never: their schedulers advertise
-	// none, and Bazel then refuses the remote.
+	// zstd cache transfers: only the anonymous fork cache advertises a
+	// compressor, so only fork-cache asks for one, in .bazelrc itself
+	// (contributors and fork CI alike). Trusted remote-exec and rbe-fork
+	// never: their schedulers advertise none, and Bazel then refuses the
+	// remote.
 	forkCacheZstdLine = "build:fork-cache --remote_cache_compression"
 )
 

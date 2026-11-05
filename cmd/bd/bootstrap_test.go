@@ -13,9 +13,12 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/cmd/bd/doctor"
+	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
@@ -25,44 +28,6 @@ import (
 	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/testutil"
 )
-
-// snapshotBootstrapEnv saves all BD_/BEADS_-prefixed env vars, clears them,
-// and registers a t.Cleanup to restore them. It restores via t.Cleanup
-// (rather than returning a function for the caller to defer) because
-// t.Cleanup callbacks only start running after the test function's own
-// regular defers have all completed. Tests using this helper commonly call
-// t.Setenv("BEADS_DIR", ...) / t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", ...)
-// afterward; t.Setenv captures its "restore to" value at call time, which
-// would be the already-wiped (absent) state. If this helper's own
-// restoration ran via a caller-deferred function, it would run before those
-// t.Setenv cleanups fire and its correct restoration would be clobbered by
-// them, permanently leaking the wipe forward into later tests in the same
-// binary. Registering via t.Cleanup here instead makes this the
-// first-registered (and thus, by t.Cleanup's LIFO order, last-run) cleanup,
-// so it always has the final word.
-func snapshotBootstrapEnv(t *testing.T) {
-	t.Helper()
-	saved := make(map[string]string)
-	for _, env := range os.Environ() {
-		if strings.HasPrefix(env, "BD_") || strings.HasPrefix(env, "BEADS_") {
-			parts := strings.SplitN(env, "=", 2)
-			key := parts[0]
-			saved[key] = os.Getenv(key)
-			_ = os.Unsetenv(key)
-		}
-	}
-	t.Cleanup(func() {
-		for _, env := range os.Environ() {
-			if strings.HasPrefix(env, "BD_") || strings.HasPrefix(env, "BEADS_") {
-				parts := strings.SplitN(env, "=", 2)
-				_ = os.Unsetenv(parts[0])
-			}
-		}
-		for key, val := range saved {
-			_ = os.Setenv(key, val)
-		}
-	})
-}
 
 func TestDetectBootstrapAction_NoneWhenDatabaseExists(t *testing.T) {
 	t.Setenv("BEADS_DOLT_DATA_DIR", "")
@@ -1132,6 +1097,107 @@ func TestFindParentConfigWithoutHomeKeepsSearchingAboveCwd(t *testing.T) {
 	}
 }
 
+// TestFindParentConfigPassesOverUserGlobalBeads pins GH#4402 for bootstrap's
+// parent-config walk. A project under the account home with no metadata.json
+// does not inherit the user-global <home>/.beads/metadata.json, whose database
+// name and server bootstrap would otherwise set up, and the walk does not
+// climb above the account home when $HOME points elsewhere. A home directory
+// that is itself a repository root keeps its .beads as that repository's own.
+func TestFindParentConfigPassesOverUserGlobalBeads(t *testing.T) {
+	writeMetadata := func(t *testing.T, beadsDir, database string) {
+		t.Helper()
+		if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"dolt_database":"`+database+`"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// <sandbox>/root/home is the account home and holds the user-global
+	// .beads; <sandbox>/root/.beads lies above it, where only a walk that
+	// climbs past the home directory would find it.
+	type fixture struct{ sandbox, home, requested string }
+	setup := func(t *testing.T) fixture {
+		t.Helper()
+		sandbox, err := filepath.EvalSymlinks(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		root := filepath.Join(sandbox, "root")
+		f := fixture{sandbox: sandbox, home: filepath.Join(root, "home")}
+		writeMetadata(t, filepath.Join(root, ".beads"), "above_home")
+		writeMetadata(t, filepath.Join(f.home, ".beads"), "user_global")
+		f.requested = filepath.Join(f.home, "proj", ".beads")
+		if err := os.MkdirAll(f.requested, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		// Keep the temp-root ceiling clear of this walk; it is not what this pins.
+		t.Setenv("TMPDIR", filepath.Join(sandbox, "tmp"))
+		t.Cleanup(beads.SetUserHomeDirForTesting(f.home))
+		return f
+	}
+	setHome := func(t *testing.T, home string) {
+		t.Helper()
+		t.Setenv("HOME", home)
+		t.Setenv("USERPROFILE", home)
+	}
+
+	t.Run("project under the home directory", func(t *testing.T) {
+		f := setup(t)
+		setHome(t, f.home)
+		cfg, err := findParentConfig(f.requested)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg != nil {
+			t.Errorf("findParentConfig() inherited database %q, want no parent config", cfg.GetDoltDatabase())
+		}
+	})
+
+	t.Run("HOME points elsewhere", func(t *testing.T) {
+		f := setup(t)
+		setHome(t, filepath.Join(f.sandbox, "elsewhere"))
+		cfg, err := findParentConfig(f.requested)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg != nil {
+			t.Errorf("findParentConfig() inherited database %q, want no parent config: the walk ends at the account home", cfg.GetDoltDatabase())
+		}
+	})
+
+	t.Run("home is a repository root", func(t *testing.T) {
+		f := setup(t)
+		setHome(t, f.home)
+		initGitRepoAt(t, f.home)
+		cfg, err := findParentConfig(f.requested)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg == nil || cfg.GetDoltDatabase() != "user_global" {
+			t.Errorf("findParentConfig() = %+v, want the home repository's own database %q", cfg, "user_global")
+		}
+	})
+
+	t.Run("home repository without metadata, HOME elsewhere", func(t *testing.T) {
+		// The home repository's .beads is examined and holds nothing, and
+		// the walk still ends at the account home.
+		f := setup(t)
+		if err := os.Remove(filepath.Join(f.home, ".beads", "metadata.json")); err != nil {
+			t.Fatal(err)
+		}
+		setHome(t, filepath.Join(f.sandbox, "elsewhere"))
+		initGitRepoAt(t, f.home)
+		cfg, err := findParentConfig(f.requested)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg != nil {
+			t.Errorf("findParentConfig() inherited database %q, want no parent config: the walk ends at the account home", cfg.GetDoltDatabase())
+		}
+	})
+}
+
 // TestDetectBootstrapAction_SharedServerEnvUsesSharedPath verifies that when
 // BEADS_DOLT_SHARED_SERVER=1 is set but cfg.DoltMode is the default (embedded),
 // detectBootstrapAction looks in the shared-server directory — not embeddeddolt/.
@@ -1437,6 +1503,142 @@ func TestFinalizeSyncedBootstrapWritesConfigFiles(t *testing.T) {
 		if !strings.Contains(gitignore, pattern) {
 			t.Errorf(".beads/.gitignore missing runtime pattern %q:\n%s", pattern, gitignore)
 		}
+	}
+}
+
+// TestFinalizeSyncedBootstrap_GitignorePermissionFailureWarns pins #6225
+// finding 2: a .gitignore ensure step whose 0600 tightening failed
+// (ErrGitignorePermissions — every required pattern is already in place,
+// only the chmod failed) must not abort finalizeSyncedBootstrap before
+// sync.remote is persisted; it warns instead. Any other ensure failure
+// still fails finalize.
+func TestFinalizeSyncedBootstrap_GitignorePermissionFailureWarns(t *testing.T) {
+	const dbName = "beads_hq"
+	const syncRemote = "file:///tmp/fake-origin.git"
+
+	setup := func(t *testing.T) string {
+		t.Helper()
+		t.Setenv("BEADS_DOLT_DATA_DIR", "")
+		t.Setenv("BEADS_DOLT_SERVER_DATABASE", "")
+		t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+		t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+		t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+		t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+
+		tmpDir := t.TempDir()
+		beadsDir := filepath.Join(tmpDir, ".beads")
+		if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		// Simulate a post-clone workspace: cloneFromRemote created the
+		// embeddeddolt directory but no metadata.json / config.yaml exists.
+		if err := os.MkdirAll(filepath.Join(beadsDir, "embeddeddolt"), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("BEADS_DIR", beadsDir)
+		return beadsDir
+	}
+	failEnsure := func(t *testing.T, err error) {
+		t.Helper()
+		orig := doctorEnsureGitignoreForBeadsDir
+		doctorEnsureGitignoreForBeadsDir = func(string) error { return err }
+		t.Cleanup(func() { doctorEnsureGitignoreForBeadsDir = orig })
+	}
+
+	t.Run("permission-only failure warns and persists sync.remote", func(t *testing.T) {
+		beadsDir := setup(t)
+		failEnsure(t, fmt.Errorf("%w: %w", doctor.ErrGitignorePermissions, syscall.EPERM))
+
+		var err error
+		stderr := captureStderrDuring(t, func() {
+			err = finalizeSyncedBootstrap(beadsDir, syncRemote, configfile.DefaultConfig(), dbName)
+		})
+		if err != nil {
+			t.Fatalf("finalizeSyncedBootstrap failed on a permission-only gitignore failure: %v", err)
+		}
+		if !strings.Contains(stderr, "Warning:") {
+			t.Errorf("stderr = %q, want a Warning: line", stderr)
+		}
+		if !strings.Contains(stderr, doctor.ErrGitignorePermissions.Error()) {
+			t.Errorf("stderr = %q, want it to name %q", stderr, doctor.ErrGitignorePermissions.Error())
+		}
+		if got := config.GetStringFromDir(beadsDir, "sync.remote"); got != syncRemote {
+			t.Errorf("sync.remote = %q, want %q (a tighten failure must not abort the persist)", got, syncRemote)
+		}
+	})
+
+	t.Run("any other ensure failure still fails finalize", func(t *testing.T) {
+		beadsDir := setup(t)
+		failEnsure(t, errors.New("read .beads/.gitignore: is a directory"))
+
+		err := finalizeSyncedBootstrap(beadsDir, syncRemote, configfile.DefaultConfig(), dbName)
+		if err == nil {
+			t.Fatal("finalizeSyncedBootstrap succeeded despite an ensure failure")
+		}
+		if !strings.Contains(err.Error(), "ensure .beads/.gitignore") {
+			t.Errorf("err = %v, want it wrapped as ensure .beads/.gitignore: ...", err)
+		}
+		if got := config.GetStringFromDir(beadsDir, "sync.remote"); got != "" {
+			t.Errorf("sync.remote = %q, want it unset when finalize aborts", got)
+		}
+	})
+}
+
+// TestEnsureBeadsGitignore_DowngradesOnlyPermissionFailures pins the split
+// bd connect's .gitignore step relies on (#6225 finding 2): a
+// permission-only failure prints the same warning bootstrap prints and
+// returns nil, while any other failure is returned unchanged so connect
+// still aborts with `ensuring <dir>/.gitignore: ...` before it writes
+// http_target.json.
+func TestEnsureBeadsGitignore_DowngradesOnlyPermissionFailures(t *testing.T) {
+	tests := []struct {
+		name        string
+		err         error
+		wantNil     bool
+		wantWarning bool
+	}{
+		{
+			name:        "permission-only failure warns and passes",
+			err:         fmt.Errorf("%w: %w", doctor.ErrGitignorePermissions, syscall.EPERM),
+			wantNil:     true,
+			wantWarning: true,
+		},
+		{
+			name:    "any other failure is returned unchanged",
+			err:     errors.New("read .beads/.gitignore: is a directory"),
+			wantNil: false,
+		},
+		{
+			name:    "success passes through",
+			err:     nil,
+			wantNil: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			orig := doctorEnsureGitignoreForBeadsDir
+			doctorEnsureGitignoreForBeadsDir = func(string) error { return tt.err }
+			t.Cleanup(func() { doctorEnsureGitignoreForBeadsDir = orig })
+
+			var err error
+			stderr := captureStderrDuring(t, func() {
+				err = ensureBeadsGitignore(filepath.Join(t.TempDir(), ".beads"))
+			})
+			if tt.wantNil {
+				if err != nil {
+					t.Errorf("err = %v, want nil", err)
+				}
+			} else if err != tt.err {
+				t.Errorf("err = %v, want the exact failure returned unchanged", err)
+			}
+			if tt.wantWarning {
+				if !strings.Contains(stderr, "Warning:") || !strings.Contains(stderr, doctor.ErrGitignorePermissions.Error()) {
+					t.Errorf("stderr = %q, want a Warning: line naming %q", stderr, doctor.ErrGitignorePermissions.Error())
+				}
+			} else if stderr != "" {
+				t.Errorf("stderr = %q, want no output", stderr)
+			}
+		})
 	}
 }
 
