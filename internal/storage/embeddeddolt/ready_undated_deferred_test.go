@@ -198,6 +198,31 @@ func TestReadyWorkHidesChildrenOfUndatedDeferredParent(t *testing.T) {
 			}
 		}
 	})
+
+	// The hold lasts only while the parent is deferred: undeferring it (what
+	// `bd undefer` writes) returns the child to ready work on both stacks.
+	t.Run("undefer_restores_child", func(t *testing.T) {
+		te := newTestEnv(t, "udu")
+		seedUndatedDeferredParent(t, te, "udu")
+		ctx := t.Context()
+
+		for stack, ids := range readyIDsByStack(t, te, types.WorkFilter{}) {
+			if want := []string{"udu-free"}; !slices.Equal(ids, want) {
+				t.Fatalf("%s: ready while deferred = %v, want %v", stack, ids, want)
+			}
+		}
+		if err := te.store.UpdateIssue(ctx, "udu-parent", map[string]interface{}{
+			"status":      string(types.StatusOpen),
+			"defer_until": nil,
+		}, "tester"); err != nil {
+			t.Fatalf("undefer parent: %v", err)
+		}
+		for stack, ids := range readyIDsByStack(t, te, types.WorkFilter{}) {
+			if !slices.Contains(ids, "udu-child") || !slices.Contains(ids, "udu-free") {
+				t.Errorf("%s: ready after undefer = %v, want it to list udu-child and udu-free", stack, ids)
+			}
+		}
+	})
 }
 
 // TestReadyWorkDeferredParentShapes pins which parents hide their direct
