@@ -4,12 +4,16 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
+	storageissueops "github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
@@ -247,16 +251,7 @@ This is useful for agents executing molecules to see which steps can run next.`,
 		maybeShowUpgradeNotification()
 
 		if len(issues) == 0 {
-			hasOpenIssues := false
-			if stats, statsErr := activeStore.GetStatistics(ctx); statsErr == nil {
-				hasOpenIssues = stats.OpenIssues > 0 || stats.InProgressIssues > 0
-			}
-			if hasOpenIssues {
-				fmt.Printf("\n%s No ready work found (all issues have blocking dependencies)\n\n",
-					ui.RenderWarn("✨"))
-			} else {
-				fmt.Printf("\n%s No open issues\n\n", ui.RenderPass("✨"))
-			}
+			printReadyEmptyState(ctx, in, activeStore)
 			maybeShowTip(store)
 			return nil
 		}
@@ -931,4 +926,168 @@ func printReadyItemDependencies(item types.ReadyItem) {
 	if len(item.OpenDependencies) > 0 {
 		fmt.Printf("    Open dependencies (not blocking): %s\n", strings.Join(item.OpenDependencies, ", "))
 	}
+}
+
+// readyEmptyStateReads are the two reads plain `bd ready`'s empty state makes,
+// from the route's own store: the direct route's storage.DoltStorage and the
+// proxied route's issue use case both provide them.
+type readyEmptyStateReads interface {
+	GetStatistics(ctx context.Context) (*types.Statistics, error)
+	GetBlockedIssues(ctx context.Context, filter types.WorkFilter) ([]*types.BlockedIssue, error)
+}
+
+// printReadyEmptyState prints plain `bd ready`'s empty state for both
+// renderers, so the two texts cannot drift. It claims blocking dependencies
+// only when bd blocked lists an issue this listing would show but for its
+// blockers (readyEmptyStateVerdict): open issues are also missing from ready
+// when they are in progress, deferred or filtered out, or when a stale
+// is_blocked flag hides them (GH#3268). It says nothing is blocked only when
+// that listing proves it, and a read that fails proves nothing either way.
+//
+// A page that --offset starts past the last ready issue (the proxied route;
+// the direct one refuses --offset) is empty whatever the ready set holds: the
+// issues before the offset may be ready work, so it says only that and reads
+// nothing.
+func printReadyEmptyState(ctx context.Context, in readyInput, reads readyEmptyStateReads) {
+	if in.filter.Offset > 0 {
+		fmt.Printf("\n%s No ready work at offset %d\n\n", ui.RenderWarn("✨"), in.filter.Offset)
+		fmt.Println("  The offset is past the last ready issue. Run 'bd ready' without --offset")
+		fmt.Println("  to list from the start.")
+		fmt.Println()
+		return
+	}
+	if stats, err := reads.GetStatistics(ctx); err == nil && stats.OpenIssues == 0 && stats.InProgressIssues == 0 {
+		fmt.Printf("\n%s No open issues\n\n", ui.RenderPass("✨"))
+		return
+	}
+	verdict := readyEmptyUnknown
+	if blocked, err := reads.GetBlockedIssues(ctx, storageissueops.BlockedFilter(readyBlockedRequest(in))); err == nil {
+		verdict = readyEmptyStateVerdict(in.filter, blocked, time.Now())
+	}
+	switch verdict {
+	case readyEmptyBlocked:
+		fmt.Printf("\n%s No ready work found (all issues have blocking dependencies)\n\n",
+			ui.RenderWarn("✨"))
+		return
+	case readyEmptyNoneBlocked:
+		fmt.Printf("\n%s No ready work found\n\n", ui.RenderWarn("✨"))
+		fmt.Println("  Nothing bd ready would list is blocked by an open dependency. Check")
+		fmt.Println("  'bd list' for in-progress, deferred or filtered-out issues, and 'bd doctor'")
+		fmt.Println("  for a stale blocked flag (repair: 'bd recompute-blocked').")
+	default:
+		fmt.Printf("\n%s No ready work found\n\n", ui.RenderWarn("✨"))
+		fmt.Println("  Check 'bd blocked' for blocked issues, 'bd list' for in-progress, deferred")
+		fmt.Println("  or filtered-out issues, and 'bd doctor' for a stale blocked flag (repair:")
+		fmt.Println("  'bd recompute-blocked').")
+	}
+	fmt.Println()
+}
+
+// readyBlockedRequest is bd blocked's request for the plain listing's scope:
+// the parent and the label sets, which are all bd blocked takes, read off the
+// request the way ReadyClaimer and ReadyCounter get them (readyRoleRequest).
+// Like every blocked request it carries no page, which matters here: a page
+// or a row cap could cut the one blocked issue the listing would show.
+func readyBlockedRequest(in readyInput) issueops.BlockedRequest {
+	req := readyRoleRequest(in)
+	return issueops.BlockedRequest{
+		ParentID:      req.ParentID,
+		Labels:        req.Labels,
+		LabelsAny:     req.LabelsAny,
+		ExcludeLabels: req.ExcludeLabels,
+	}
+}
+
+// readyEmptyVerdict is what an empty plain `bd ready` can truthfully say about
+// blocking dependencies.
+type readyEmptyVerdict int
+
+const (
+	// readyEmptyUnknown: nothing, either way.
+	readyEmptyUnknown readyEmptyVerdict = iota
+	// readyEmptyBlocked: bd blocked lists an issue the listing would show
+	// but for its blockers.
+	readyEmptyBlocked
+	// readyEmptyNoneBlocked: bd blocked lists nothing the listing could show.
+	readyEmptyNoneBlocked
+)
+
+// readyEmptyStateVerdict judges blocked, bd blocked's listing for the plain
+// listing's scope (readyBlockedRequest), against the listing's filter f. Only
+// an issue the listing would show but for its blockers counts: a blocked issue
+// that is in progress, deferred, ephemeral, of an excluded type or another
+// assignee's is no reason for this listing to be empty. bd blocked applies the
+// label sets exactly as the listing does, but its --parent is one hop plus the
+// dotted ids under the parent where ready's is transitive, so under --parent an
+// empty answer proves nothing. A blocked child of a future-deferred parent,
+// which the listing leaves out, still counts: the issue alone cannot tell.
+func readyEmptyStateVerdict(f types.WorkFilter, blocked []*types.BlockedIssue, now time.Time) readyEmptyVerdict {
+	verdict := readyEmptyNoneBlocked
+	if f.ParentID != nil {
+		verdict = readyEmptyUnknown
+	}
+	for _, b := range blocked {
+		switch {
+		case b == nil, readyListingDrops(f, &b.Issue, now):
+		case readyListingUndecided(f, &b.Issue):
+			verdict = readyEmptyUnknown
+		default:
+			return readyEmptyBlocked
+		}
+	}
+	return verdict
+}
+
+// readyListingDrops reports whether the plain listing whose filter is f leaves
+// issue out whatever its blockers, from the issue's own fields: the per-row
+// predicates sqlbuild.BuildReadyWorkWhere renders, less the blocked one. The
+// label sets and --parent are the blocked listing's own scope.
+func readyListingDrops(f types.WorkFilter, issue *types.Issue, now time.Time) bool {
+	return readyStatusDrops(f, issue.Status) || issue.Pinned ||
+		(!f.IncludeEphemeral && issue.Ephemeral) ||
+		(!f.IncludeDeferred && issue.DeferUntil != nil && issue.DeferUntil.After(now)) ||
+		readyTypeDrops(f, issue.IssueType) || readyAssigneeDrops(f, issue.Assignee) ||
+		(f.Priority != nil && issue.Priority != *f.Priority)
+}
+
+// readyStatusDrops is the listing's status predicate. The open pin also admits
+// custom statuses of the active category, which the issue does not carry, so
+// it never drops a custom status (readyListingUndecided).
+func readyStatusDrops(f types.WorkFilter, status types.Status) bool {
+	switch {
+	case f.Status == types.StatusOpen:
+		return status != types.StatusOpen && status.IsValid()
+	case f.Status != "":
+		return status != f.Status
+	case len(f.Statuses) > 0:
+		return !slices.Contains(f.Statuses, status)
+	default:
+		return status != types.StatusOpen && status != types.StatusInProgress
+	}
+}
+
+// readyTypeDrops is the listing's issue-type predicate.
+func readyTypeDrops(f types.WorkFilter, issueType types.IssueType) bool {
+	if f.Type != "" {
+		return string(issueType) != f.Type
+	}
+	return slices.Contains(sqlbuild.ReadyWorkExcludeTypes(f.ExcludeTypes), issueType)
+}
+
+// readyAssigneeDrops is the listing's assignee predicate.
+func readyAssigneeDrops(f types.WorkFilter, assignee string) bool {
+	if f.Unassigned {
+		return assignee != ""
+	}
+	return f.Assignee != nil && assignee != *f.Assignee
+}
+
+// readyListingUndecided reports whether the listing whose filter is f may leave
+// issue out for a reason its own fields do not carry: a label pattern or
+// regex, a metadata or molecule-type filter, or a custom status under the open
+// pin, whose category the issue does not carry.
+func readyListingUndecided(f types.WorkFilter, issue *types.Issue) bool {
+	return f.LabelPattern != "" || f.LabelRegex != "" || f.HasMetadataKey != "" ||
+		len(f.MetadataFields) > 0 || f.MolType != nil ||
+		(f.Status == types.StatusOpen && !issue.Status.IsValid())
 }

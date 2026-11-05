@@ -82,7 +82,7 @@ func ExecuteCreate(ctx context.Context, tx *sql.Tx, request publicops.CreateRequ
 		}
 		childCounterChanged = !parentIsWisp
 	}
-	if err := assignCreateIssueIDInTx(ctx, tx, batch, issue, attempt.Actor); err != nil {
+	if err := assignCreateIssueIDInTx(ctx, tx, batch, issue, attempt.Actor, nil); err != nil {
 		return publicops.CreateResult{}, nil, ClassifyPublicCreateError(err)
 	}
 	issue.Dependencies = storage.CreatePublicCreateDependencies(issue.ID, attempt)

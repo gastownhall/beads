@@ -42,8 +42,8 @@ func TestStageAndCommitSkipsWhenNothingPending(t *testing.T) {
 	// dolt_status reports ZERO committable changes — the idempotent no-op case.
 	mock.ExpectQuery(matchPendingQuery.String()).
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
-	// No ExpectExec for DOLT_ADD / DOLT_COMMIT: if StageAndCommit issues either,
-	// sqlmock fails the test with "call not expected".
+	// No expectation for DOLT_ADD / DOLT_COMMIT: if StageAndCommit issues
+	// either, sqlmock fails the test with "call not expected".
 
 	err = StageAndCommit(context.Background(), db, map[string]bool{"metadata": true}, "idempotent heartbeat", "tester")
 	if err != nil {
@@ -65,16 +65,16 @@ func TestStageAndCommitCommitsWhenPending(t *testing.T) {
 	mock.ExpectQuery(matchPendingQuery.String()).
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 	// The real path must stage the dirty table...
-	mock.ExpectExec(`CALL DOLT_ADD\(\?\)`).
+	mock.ExpectQuery(`CALL DOLT_ADD\(\?\)`).
 		WithArgs("metadata").
-		WillReturnResult(sqlmock.NewResult(0, 0))
+		WillReturnRows(sqlmock.NewRows([]string{"status"}))
 	// ...confirm something is actually staged...
 	mock.ExpectQuery(matchStagedQuery.String()).
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 	// ...and commit.
-	mock.ExpectExec(`CALL DOLT_COMMIT`).
+	mock.ExpectQuery(`CALL DOLT_COMMIT`).
 		WithArgs("real change", "tester").
-		WillReturnResult(sqlmock.NewResult(0, 1))
+		WillReturnRows(sqlmock.NewRows([]string{"hash"}))
 
 	err = StageAndCommit(context.Background(), db, map[string]bool{"metadata": true}, "real change", "tester")
 	if err != nil {
@@ -106,10 +106,10 @@ func TestStageAndCommitSkipsWhenOnlyUnrelatedTableDirty(t *testing.T) {
 	mock.ExpectQuery(matchPendingQuery.String()).
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 	// We stage only the dirty-tracked table ("labels"), which is clean here.
-	mock.ExpectExec(`CALL DOLT_ADD\(\?\)`).
+	mock.ExpectQuery(`CALL DOLT_ADD\(\?\)`).
 		WithArgs("labels").
-		WillReturnResult(sqlmock.NewResult(0, 0))
-	// Staged set is EMPTY — the guard must skip the commit. No ExpectExec for
+		WillReturnRows(sqlmock.NewRows([]string{"status"}))
+	// Staged set is EMPTY — the guard must skip the commit. No expectation for
 	// DOLT_COMMIT: if StageAndCommit issues it, sqlmock fails with "not expected".
 	mock.ExpectQuery(matchStagedQuery.String()).
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))

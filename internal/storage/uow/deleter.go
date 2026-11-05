@@ -169,8 +169,8 @@ func deleteInUOW(ctx context.Context, uw UnitOfWork, req publicops.DeleteRequest
 	}
 
 	// The guard runs only when the request did not already say what to do
-	// about dependents. Under Cascade there is nothing outside the set by
-	// construction.
+	// about dependents. Under Cascade the use case reports the dependents the
+	// containment-only closure leaves behind, against the whole closure.
 	if !req.Cascade {
 		idSet := make(map[string]bool, len(req.IDs))
 		for _, id := range req.IDs {
@@ -217,6 +217,10 @@ func deleteInUOW(ctx context.Context, uw UnitOfWork, req publicops.DeleteRequest
 	result.Labels = deleted.LabelsCount
 	result.Events = deleted.EventsCount
 	result.ReferencesUpdated = deleted.ReferencesUpdated
+	result.DeletedIDs = deleted.DeletedIDs
+	if req.Cascade {
+		result.Orphaned = deleted.OrphanedIssues
+	}
 	return result, nil
 }
 

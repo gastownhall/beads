@@ -242,10 +242,12 @@ database after a restart, with a healthy database on the same server as the
 control. A restart re-rolls the dice for every database, though, so the
 durable fix is to move to the pinned version.
 
-This matters because `bd flatten` and the Dolt-history compaction in
-`bd admin compact` both finish by hard-resetting `main` onto a temporary
-branch, and the merge-settle path behind `bd dolt pull` / `bd sync` falls
-back to a hard reset when it has to abandon a merge. See
+This matters because `bd flatten` finishes by hard-resetting `main` onto a
+temporary branch, and the merge-settle path behind `bd dolt pull` / `bd sync`
+falls back to a hard reset when it has to abandon a merge. The Dolt-history
+compaction, `bd compact`, also hard-resets `main` in v1.3.2 and earlier;
+builds with the fix listed in the CHANGELOG move `main` with a soft reset,
+which this breakage does not affect. See
 [Maintenance](#maintenance--bd-prune-and-bd-purge).
 
 ### New Project
@@ -297,6 +299,16 @@ standalone Beads users. The `bd` binary includes everything; just `bd init` and 
 - Data lives in `.beads/embeddeddolt/` alongside your code
 - Push to GitHub with `bd dolt push` — code and issues in one repo
 - Zero ops: no server, no ports, no PID files
+
+Each `bd` command starts the embedded engine, so a script or agent loop that
+calls `bd` hundreds of times pays that startup every time. bd batch runs a
+limited set of write commands (`close`, `update`, `create`, `dep add`,
+`dep remove`; see `bd batch --help`) in one transaction and one process. For
+sustained concurrent agents, use server or proxied-server mode, where one Dolt
+server keeps the engine running (see
+[Migrating Between Backends](#migrating-between-backends)). Neither repairs a
+damaged journal; for that, see
+[Engine won't open](/recovery/database-corruption#engine-wont-open).
 
 ### Server Mode (Multi-Writer / Orchestrator)
 
@@ -389,14 +401,30 @@ transient. For full Dolt storage reclaim after deleting many rows, follow
 with `bd flatten`.
 
 **On Dolt 2.3.x, storage-reclaim operations can fail partway.** `bd flatten`
-and the Dolt-history compaction in `bd admin compact` both build a temporary
-branch and then hard-reset `main` onto it, and the merge-settle path behind
-`bd dolt pull` / `bd sync` falls back to a hard reset when it abandons a
-merge. On an affected database that hard reset returns
-`Error 1105 (HY000): context canceled`: `bd flatten` and `bd admin compact`
-stop at that step, and an abandoned merge is left without its rollback. See
-[Which Dolt version to install](#which-dolt-version-to-install) for the check
-and the fix.
+builds a temporary branch and then hard-resets `main` onto it, as does the
+Dolt-history compaction, `bd compact`, in v1.3.2 and earlier, and the
+merge-settle path behind `bd dolt pull` / `bd sync` falls back to a hard reset
+when it abandons a merge. On an affected database that hard reset returns
+`Error 1105 (HY000): context canceled`: `bd flatten` and those `bd compact`
+releases stop at that step, and an abandoned merge is left without its
+rollback. See [Which Dolt version to install](#which-dolt-version-to-install)
+for the check and the fix.
+
+**Writes that reach `main` while `bd compact` runs.** In v1.3.2 and earlier,
+`bd compact`'s hard reset discards them: changes in `main`'s working set that
+no Dolt commit holds yet (a batch under batched or disabled auto-commit), and
+a commit that lands on `main` while the history is being rebuilt. Builds with
+the fix listed in the CHANGELOG move `main` with a soft reset and keep both.
+The check that the rebuilt history reproduces `main`'s data compares it with
+`main` as `bd compact` read it, so such a write is not mistaken for a divergent
+replay. Working-set changes stay pending, as they were. A commit that landed during
+the rebuild is kept in one follow-up commit,
+`compact: commit changes that reached main during compaction`, so it does not
+keep its own hash, message or author on `main`; changes that were already
+staged when `bd compact` started go into that commit too. If that follow-up
+commit fails, `bd compact` stops after `main` has moved and before garbage
+collection, says so, and leaves the changes staged: commit them with
+`bd dolt commit` when you are ready.
 
 ### Why a garbage collection can reclaim nothing
 
@@ -632,27 +660,25 @@ bd list                    # Re-triggers bootstrap
 
 ### Database Corruption
 
-**Symptom:** Queries fail, inconsistent data.
+**Symptom:** Queries fail, inconsistent data, or every `bd` command fails while
+opening the database.
 
-**Diagnosis:**
+**Diagnosis and logical repair (server mode):**
 ```bash
 bd doctor                  # Basic checks
 bd doctor --deep           # Full validation
-bd doctor --server         # Server mode checks (if applicable)
+bd doctor --server         # Server mode checks
+bd doctor --fix            # Repair logical inconsistencies
 ```
 
-**Recovery options:**
+Embedded mode runs only `bd doctor --check=artifacts`, `--check=conventions`
+and `--check=pollution`.
 
-1. **Repair what's fixable:**
-   ```bash
-   bd doctor --fix
-   ```
-
-2. **Rebuild from remote:**
-   ```bash
-   rm -rf .beads/dolt
-   bd list                  # Re-triggers bootstrap
-   ```
+**Recovery:** `bd doctor --fix` does not rebuild a damaged store, and deleting
+the data directory destroys any work your remote or backups lack. Follow
+[Engine won't open](/recovery/database-corruption#engine-wont-open): preserve
+the damaged store and its configuration first, then recover into a fresh store
+from a Dolt remote, a Dolt-native backup, or a JSONL export.
 
 ### Already Committed `.beads/dolt/` to Git
 
