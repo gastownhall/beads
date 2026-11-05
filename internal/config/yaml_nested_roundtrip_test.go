@@ -476,15 +476,22 @@ func TestUnsetRemovesADottedKeyInEveryShape(t *testing.T) {
 			key:  "dolt.host",
 		},
 		{
-			name: "tag alone on the line under the section",
-			seed: "dolt:\n  !!map\n    host: kill-me\n",
-			key:  "dolt.host",
+			// The mapping a tag decorates keeps a second key. With the target
+			// its only key, commenting it out leaves the tag on an empty node,
+			// which yaml.v3 reads as an empty string tagged !!map rather than
+			// as an empty section, so that unset is refused
+			// (TestUnsetRefusesShapesItCannotEdit).
+			name:      "tag alone on the line under the section",
+			seed:      "dolt:\n  !!map\n    host: kill-me\n    port: 3307\n",
+			key:       "dolt.host",
+			survivors: map[string]string{"dolt.port": "3307"},
 		},
 		{
 			// A node may carry an anchor and a tag at once.
-			name: "anchor and tag together on the line under the section",
-			seed: "dolt:\n  &a !!map\n    host: kill-me\n",
-			key:  "dolt.host",
+			name:      "anchor and tag together on the line under the section",
+			seed:      "dolt:\n  &a !!map\n    host: kill-me\n    port: 3307\n",
+			key:       "dolt.host",
+			survivors: map[string]string{"dolt.port": "3307"},
 		},
 		{
 			// A tab sets a comment off as well as a space does.
@@ -786,6 +793,13 @@ func TestUnsetRefusesShapesItCannotEdit(t *testing.T) {
 		// out, the alias below resolves to the anchor above it instead, so the
 		// file still parses, but backup.remote reads keep rather than a.
 		{name: "anchor on the key's line reusing the name of one above", seed: "x: &r keep\nsync:\n  remote: &r a\nbackup:\n  remote: *r\n", key: "sync.remote", want: "more of this file than the key"},
+		// A tag alone on its line decorates the section's mapping, and the key
+		// under it is the target (TestUnsetRemovesADottedKeyInEveryShape). As
+		// that mapping's only key, commenting it out leaves the tag on an empty
+		// node, which yaml.v3 reads as an empty string tagged !!map: dolt reads
+		// as "" where it held a mapping, and a typed read of the section fails.
+		{name: "only key under a tag alone on its line", seed: "dolt:\n  !!map\n    host: kill-me\n", key: "dolt.host", want: "more of this file than the key"},
+		{name: "only key under an anchor and a tag on their line", seed: "dolt:\n  &a !!map\n    host: kill-me\n", key: "dolt.host", want: "more of this file than the key"},
 		// A line that only looks like the key is someone else's even when the
 		// key is set too: the line matcher comments out both lines, and notes
 		// would change. TestUnsetOfAnAbsentKeyStillSucceeds has the same line
