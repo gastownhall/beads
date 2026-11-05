@@ -286,6 +286,109 @@ func (s *testSuite) TestCommit_NothingToCommitDidCommitFalse() {
 	s.True(strings.Contains(string(result.Output), "nothing to commit"))
 }
 
+func (s *testSuite) output(args ...string) string {
+	s.T().Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = s.tmpDir
+	out, err := cmd.Output()
+	s.Require().NoError(err)
+	return strings.TrimSpace(string(out))
+}
+
+func (s *testSuite) TestCommit_PathsLeavesOtherStagedChangesStaged() {
+	s.gitInit()
+	s.writeFile("work.txt", "unrelated work")
+	s.Require().NoError(s.repo.Add(s.Ctx(), "work.txt"))
+	s.Require().NoError(os.MkdirAll(filepath.Join(s.tmpDir, ".beads"), 0750))
+	s.writeFile(".beads/config.yaml", "x")
+	s.Require().NoError(s.repo.Add(s.Ctx(), ".beads/"))
+
+	result, err := s.repo.Commit(s.Ctx(), domain.GitCommitParams{Message: "init", Paths: []string{".beads/"}})
+	s.Require().NoError(err)
+	s.True(result.DidCommit)
+	s.Equal(".beads/config.yaml", s.output("show", "--name-only", "--format=", "HEAD"))
+	s.Equal("work.txt", s.output("diff", "--cached", "--name-only"))
+}
+
+func (s *testSuite) TestCommit_PathsSkipsPathWithNothingStaged() {
+	s.gitInit()
+	s.Require().NoError(os.MkdirAll(filepath.Join(s.tmpDir, ".beads"), 0750))
+	s.writeFile(".beads/config.yaml", "x")
+	// Every file under .cursor is ignored, so adding it stages nothing; a
+	// pathspec git knows no file under would refuse the whole commit.
+	s.Require().NoError(os.MkdirAll(filepath.Join(s.tmpDir, ".cursor"), 0750))
+	s.writeFile(".cursor/.gitignore", "*\n")
+	s.Require().NoError(s.repo.Add(s.Ctx(), ".beads/", ".cursor"))
+
+	result, err := s.repo.Commit(s.Ctx(), domain.GitCommitParams{Message: "init", Paths: []string{".beads/", ".cursor"}})
+	s.Require().NoError(err)
+	s.True(result.DidCommit)
+	s.Equal(".beads/config.yaml", s.output("show", "--name-only", "--format=", "HEAD"))
+}
+
+func (s *testSuite) TestCommit_PathsWithNothingStagedDidCommitFalse() {
+	s.gitInit()
+	s.writeFile("work.txt", "unrelated work")
+	s.Require().NoError(s.repo.Add(s.Ctx(), "work.txt"))
+
+	result, err := s.repo.Commit(s.Ctx(), domain.GitCommitParams{Message: "init", Paths: []string{".beads/"}})
+	s.Require().NoError(err)
+	s.False(result.DidCommit)
+	s.Equal("work.txt", s.output("diff", "--cached", "--name-only"))
+}
+
+func (s *testSuite) TestCommit_PathsCommitsStagedContentNotWorkingTree() {
+	s.gitInit()
+	s.writeFile("owned.txt", "staged content\n")
+	s.Require().NoError(s.repo.Add(s.Ctx(), "owned.txt"))
+	staged := s.output("rev-parse", ":owned.txt")
+	s.writeFile("owned.txt", "unstaged content\n")
+
+	result, err := s.repo.Commit(s.Ctx(), domain.GitCommitParams{Message: "scoped", Paths: []string{"owned.txt"}})
+	s.Require().NoError(err)
+	s.True(result.DidCommit)
+	s.Equal(staged, s.output("rev-parse", "HEAD:owned.txt"))
+	s.Equal("owned.txt", s.output("diff", "--name-only"))
+}
+
+func (s *testSuite) TestCommit_PathsCommitsStagedRemoval() {
+	s.gitInit()
+	s.writeFile("owned.txt", "tracked content\n")
+	s.writeFile("keep.txt", "kept")
+	s.writeFile("work.txt", "unrelated work")
+	s.Require().NoError(s.repo.Add(s.Ctx(), "owned.txt", "keep.txt"))
+	_, err := s.repo.Commit(s.Ctx(), domain.GitCommitParams{Message: "initial"})
+	s.Require().NoError(err)
+	s.output("rm", "--cached", "owned.txt")
+	s.Require().NoError(s.repo.Add(s.Ctx(), "work.txt"))
+
+	result, err := s.repo.Commit(s.Ctx(), domain.GitCommitParams{Message: "untrack", Paths: []string{"owned.txt"}})
+	s.Require().NoError(err)
+	s.True(result.DidCommit)
+	s.Equal("keep.txt", s.output("ls-tree", "--name-only", "HEAD"))
+	s.FileExists(filepath.Join(s.tmpDir, "owned.txt"))
+	s.Equal("work.txt", s.output("diff", "--cached", "--name-only"))
+}
+
+func (s *testSuite) TestCommitInitArtifacts_LeavesPreStagedWorkStaged() {
+	s.gitInit()
+	s.writeFile("work.txt", "unrelated work")
+	s.Require().NoError(s.repo.Add(s.Ctx(), "work.txt"))
+	s.Require().NoError(os.MkdirAll(filepath.Join(s.tmpDir, ".beads"), 0750))
+	s.writeFile(".beads/config.yaml", "x")
+	s.writeFile("AGENTS.md", "agents")
+
+	result, err := domain.NewGitUseCase(s.tmpDir, s.repo).CommitInitArtifacts(s.Ctx(), domain.CommitInitArtifactsParams{
+		BeadsDir:      ".beads/",
+		OptionalPaths: []string{"AGENTS.md", "CLAUDE.md"},
+		Message:       "init",
+	})
+	s.Require().NoError(err)
+	s.True(result.DidCommit)
+	s.Equal(".beads/config.yaml\nAGENTS.md", s.output("show", "--name-only", "--format=", "HEAD"))
+	s.Equal("work.txt", s.output("diff", "--cached", "--name-only"))
+}
+
 func (s *testSuite) TestAdd_EmptyPathsErrors() {
 	s.gitInit()
 	err := s.repo.Add(s.Ctx())
