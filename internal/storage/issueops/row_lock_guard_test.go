@@ -79,6 +79,12 @@ var sqlWriteKeywordRe = regexp.MustCompile(`(?i)\b(?:SET|VALUES|SELECT)\b`)
 //   - "SET id = ?": rename (updateIssueIDInTx/updateWispIDInTx) is the only
 //     writer of the primary key, exempted by name in the freshRowLock
 //     invariant.
+//   - "SET arrival_seq = ?": the journal's create seam stamping a wisps row
+//     with its create record's seq (stampArrivalSeqInTx). arrival_seq is a
+//     store-assigned cell orthogonal to the status/assignee races, and it MUST
+//     NOT remint row_lock: the revision a caller reads right after its create
+//     has to keep passing that caller's compare-and-set ("Touches nothing
+//     else" in docs/reference/events-journal.md).
 //   - "SELECT %s FROM": the persistence move's fully-templated aux-table copy
 //     (INSERT INTO %s (%s) SELECT %s FROM %s ...) — it copies snapshot/event
 //     side tables verbatim; the issues/wisps row itself is re-inserted through
@@ -104,6 +110,7 @@ var auxOrExemptMarkers = []string{
 	"is_blocked",          // is_blocked recompute (exempt by design)
 	"compaction_level = ", // compaction bookkeeping/restore (exempt by design)
 	"SET id = ?",          // rename: primary-key rewrite (exempt by design)
+	"SET arrival_seq = ?", // journal create seam's stamp (exempt by design)
 	"SELECT %s FROM",      // persistence move's verbatim aux-table copy
 	"issue_id",            // events / dependencies / comments / snapshots FK
 	"depends_on",          // dependency edge + retarget writes

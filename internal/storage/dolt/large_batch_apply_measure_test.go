@@ -169,10 +169,16 @@ const statementCountToleranceDolt = 2
 // per-change breakdown. The two backends now agree to within the tolerance.
 // Re-pinned for the create-only existence reads (was 6396 / 12791 / 835;
 // breakdown in pinnedEmbeddedStatementCounts).
+//
+// Re-pinned for the id-retention guard (was 6192 / 12382 / 815). The
+// create-only guard now reads a create's occupancy — both row tables and both
+// id tombstone tables — in ONE statement where it used to read the two row
+// tables in two: -1 statement per create item (356: 102 creates, -102; 712:
+// 204, -204; classic: 10, -10).
 var pinnedDoltStatementCounts = map[string]int64{
-	"356 (mol 1x)": 6192,
-	"712 (mol 2x)": 12382,
-	"40 (classic)": 815,
+	"356 (mol 1x)": 6090,
+	"712 (mol 2x)": 12178,
+	"40 (classic)": 805,
 }
 
 // BenchmarkLargeBatchApply_Dolt is gated by setupBenchStore's own

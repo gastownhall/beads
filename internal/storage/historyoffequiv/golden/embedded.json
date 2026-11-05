@@ -1,5 +1,5 @@
 {
-  "recorded_from": "4a67d0d028",
+  "recorded_from": "29472cad3 + gascity/bd-enterprise#210",
   "steps": [
     "create a",
     "create b blocked by a",
@@ -350,8 +350,8 @@
         "key",
         "value"
       ],
-      "rows": 31,
-      "sha256": "c1d1cbc41ca9968c5c7dd380609c28126c4024868dbade26575ce105b8931fb3"
+      "rows": 37,
+      "sha256": "11ab6875bdbc3b120b41dd722b1d9bb7e7889b851f85926a72c1a86d9a52b012"
     },
     "metadata": {
       "columns": [

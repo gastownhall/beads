@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
@@ -570,4 +571,18 @@ func scanDependencyRow(rows *sql.Rows) (*types.Dependency, error) {
 	}
 
 	return &dep, nil
+}
+
+// RetiredIssueIDs returns which of ids a retaining retention sweep retired,
+// with the closed_at each tombstone recorded (issueops.RetiredIDsInTx). The
+// import dry run reads it so its preview skips a retired row as the real
+// import does.
+func (s *DoltStore) RetiredIssueIDs(ctx context.Context, ids []string) (map[string]time.Time, error) {
+	var retired map[string]time.Time
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		retired, err = issueops.RetiredIDsInTx(ctx, tx, ids)
+		return err
+	})
+	return retired, err
 }

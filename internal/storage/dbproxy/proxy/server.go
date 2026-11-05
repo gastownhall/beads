@@ -53,6 +53,13 @@ type ProxyOpts struct {
 	// off by default; db-proxy-child sets this from BD_DEBUG. Lifecycle and
 	// error lines are always written.
 	TraceConnections bool
+	// ServerLogPath is the backend server log the proxy bounds while it
+	// runs, alongside proxy.log (see logSizeWatcher). Set it only for a log
+	// bd owns (OpenOpts.RotateLogFile); empty leaves the server log alone.
+	ServerLogPath string
+	// LogSizeCheckInterval is how often the running proxy checks its logs'
+	// size; zero means defaultLogSizeCheckInterval.
+	LogSizeCheckInterval time.Duration
 }
 
 type proxyServer struct {
@@ -64,6 +71,12 @@ type proxyServer struct {
 	stopEpoch   string
 
 	traceConnections bool
+	// data authenticates every data-port connection (data_auth.go); its
+	// zero value admits none.
+	data dataAuth
+
+	serverLogPath        string
+	logSizeCheckInterval time.Duration
 
 	// reportUpstreamOutage answers a connection whose upstream is not
 	// serving with a MySQL error instead of a bare close; see
@@ -117,6 +130,9 @@ func NewProxyServer(opts ProxyOpts) *proxyServer {
 		stopEpoch:   opts.StopEpoch,
 
 		traceConnections: opts.TraceConnections,
+
+		serverLogPath:        opts.ServerLogPath,
+		logSizeCheckInterval: opts.LogSizeCheckInterval,
 
 		reportUpstreamOutage: reportsUpstreamOutage(opts.Server),
 	}
@@ -266,9 +282,11 @@ func (p *proxyServer) ListenAndServe(parentCtx context.Context) error {
 		return fmt.Errorf("proxy: unexpected data listener address %T", ln.Addr())
 	}
 
-	if _, err := identity.WriteSecret(p.rootDir); err != nil {
+	secret, err := identity.WriteSecret(p.rootDir)
+	if err != nil {
 		return fmt.Errorf("write proxy secret: %w", err)
 	}
+	p.data = newDataAuth(secret, dataPort.Port)
 
 	var identMu sync.RWMutex
 	identReply := identity.IdentReply{
@@ -345,14 +363,15 @@ func (p *proxyServer) ListenAndServe(parentCtx context.Context) error {
 	}
 
 	if err := pidfile.Write(p.rootDir, PIDFileName, pidfile.PidFile{
-		Pid:         os.Getpid(),
-		Port:        dataPort.Port,
-		UpstreamID:  upstreamID,
-		Schema:      pidfile.SchemaV2,
-		Kind:        pidfile.KindProxy,
-		Birth:       string(birth),
-		RootID:      rootID,
-		ControlPort: control.Port(),
+		Pid:          os.Getpid(),
+		Port:         dataPort.Port,
+		UpstreamID:   upstreamID,
+		Schema:       pidfile.SchemaV2,
+		Kind:         pidfile.KindProxy,
+		Birth:        string(birth),
+		RootID:       rootID,
+		ControlPort:  control.Port(),
+		ControlProto: pidfile.ControlProtoIdentMAC,
 	}); err != nil {
 		p.stats.IncBackendStop()
 		_ = stopBackendBounded(p.server)
@@ -363,11 +382,13 @@ func (p *proxyServer) ListenAndServe(parentCtx context.Context) error {
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error {
 		<-gctx.Done()
+		_ = pidfile.Remove(p.rootDir, PIDFileName)
 		_ = p.listener.Close()
 		_ = control.Close()
 		return nil
 	})
 	g.Go(func() error { return p.idleWatcher(gctx) })
+	g.Go(func() error { return p.logSizeWatcher(gctx) })
 	g.Go(func() error {
 		t := time.NewTicker(backendHealthInterval)
 		defer t.Stop()
@@ -475,6 +496,16 @@ func (p *proxyServer) acceptLoop(ctx context.Context) error {
 func (p *proxyServer) handleConn(ctx context.Context, client net.Conn) error {
 	addr := client.RemoteAddr()
 	p.connTracef("handleConn(%s) start", addr)
+
+	// Authenticate before counting the connection or dialing the backend:
+	// an unauthenticated connection must neither hold the idle watcher off
+	// nor cost the backend a session.
+	if ok, err := p.data.accept(client); !ok || err != nil {
+		p.connTracef("handleConn(%s) data authentication failed", addr)
+		_ = client.Close()
+		return err
+	}
+
 	p.activeConns.Add(1)
 	defer func() {
 		p.activeConns.Add(-1)

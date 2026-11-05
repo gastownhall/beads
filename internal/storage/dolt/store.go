@@ -52,6 +52,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/kvkeys"
 	"github.com/steveyegge/beads/internal/storage/schema"
+	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -316,6 +317,7 @@ var _ storage.Compactor = (*DoltStore)(nil)
 var _ storage.SchemaMigrator = (*DoltStore)(nil)
 var _ storage.ExternalRefHistoryQuerier = (*DoltStore)(nil)
 var _ storage.EventsJournalConfigurer = (*DoltStore)(nil)
+var _ storage.EventsJournalShapeChecker = (*DoltStore)(nil)
 var _ storage.VersionedHistoryConfigurer = (*DoltStore)(nil)
 var _ storage.VersionedHistoryDeferrer = (*DoltStore)(nil)
 
@@ -329,6 +331,17 @@ type DoltStore struct {
 	// eventsJournalEnabled activates the durable events journal for THIS store
 	// instance only (storage.EventsJournalConfigurer); never process-global.
 	eventsJournalEnabled atomic.Bool
+	// journalShape caches the ONE INFORMATION_SCHEMA probe SetEventsJournalEnabled
+	// runs on activation (issueops.ProbeJournalShape, PR A1). Nil means the
+	// journal is disabled or the probe produced no shape; transactions then get
+	// the canonical column list — see journalActivationErr.
+	journalShape atomic.Pointer[issueops.JournalShape]
+	// journalActivationErr holds the probe's *issueops.JournalShapeError when
+	// SetEventsJournalEnabled(true) found a table shape the journal cannot run
+	// against (a missing required column, or a missing table). Nil otherwise,
+	// including when the probe could not run at all
+	// (issueops.JournalActivationError). See storage.EventsJournalShapeChecker.
+	journalActivationErr atomic.Pointer[error]
 	// versionedHistory activates dual-write issue-version history for THIS
 	// store instance only (storage.VersionedHistoryConfigurer); never
 	// process-global. Activation usually leaves it pending
@@ -377,6 +390,10 @@ type DoltStore struct {
 	// auto-start. Close() uses it to stop the server when the last store
 	// referencing it is closed (tracked via autoStartRefs).
 	autoStartedServerDir string
+
+	// createdDatabase reports whether this store's open created its database
+	// (serverConnFacts.created); see CreatedDatabase.
+	createdDatabase bool
 }
 
 // Config holds Dolt database configuration
@@ -402,6 +419,24 @@ type Config struct {
 	// value. That default is the guarantee — setting it true on such an open
 	// would make it eligible to sweep.
 	ClassifiedRead bool
+
+	// RequireReadableSchema makes an open that will not migrate the database
+	// (ReadOnly, or Gateway, whose server owns the schema) refuse one whose
+	// schema is behind this binary's and lacks a column the shared issue
+	// projection selects, with *schema.SchemaBehindError
+	// (schema.CheckReadableDrift). Such a database cannot answer a single
+	// issue read; without the check the open succeeds and every list, show
+	// and ready fails afterwards on an unknown column. A behind database that
+	// has every projected column still opens, so reads keep working through
+	// the upgrade window (bd-578h9.5, gastownhall/beads#5920). A migrating
+	// open needs none of this: its consent and gate refusals name a behind
+	// schema before anything reads it.
+	//
+	// Opt-in, false by default, because diagnostic opens (bd doctor, the
+	// version-bump probe) must still reach a behind database to report on it,
+	// and a preview reports an incompatibility through its own query
+	// (embeddeddolt.OpenForPreviewCommand's policy).
+	RequireReadableSchema bool
 
 	// LenientOpen opens the store leniently: a migration gate refusal (#4259),
 	// a dirty-working-set refusal (#4566) or a migration-consent refusal
@@ -1110,6 +1145,13 @@ func (s *DoltStore) withReadTx(ctx context.Context, fn func(tx *sql.Tx) error) e
 			return fmt.Errorf("begin read tx: %w", err)
 		}
 		defer func() { _ = tx.Rollback() }()
+		// ReadEventsJournal/ReadEventsJournalPage read through this helper, and
+		// the column list they SELECT depends on the probed shape, not on
+		// whether the journal is enabled for writes — scope the shape only, so
+		// readEventsRowsInTx sees this store's actual table instead of
+		// defaulting to canonicalJournalShape (PR A1).
+		clearShape := issueops.ScopeEventsJournalShape(tx, s.journalShape.Load())
+		defer clearShape()
 		return fn(tx)
 	})
 }
@@ -1448,12 +1490,56 @@ func logBlockedRecheckFailure(ctx context.Context, pending issueops.BlockedReche
 }
 
 // SetEventsJournalEnabled activates the journal for this store instance only.
+//
+// Activating probes bd_events_journal's actual shape ONCE
+// (issueops.ProbeJournalShape, PR A1), bounded by
+// issueops.JournalShapeProbeTimeout, and caches the result for this
+// instance's lifetime; EventsJournalActivationError reports whether that
+// probe found a shape the journal cannot run against. A probe that could not
+// run degrades to the canonical shape (issueops.JournalActivationError).
+// Deactivating clears both and skips the probe entirely — a disabled store
+// accepts any shape.
 func (s *DoltStore) SetEventsJournalEnabled(enabled bool) {
 	s.eventsJournalEnabled.Store(enabled)
+	if !enabled {
+		s.journalShape.Store(nil)
+		s.journalActivationErr.Store(nil)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), issueops.JournalShapeProbeTimeout)
+	defer cancel()
+	shape, err := issueops.ProbeJournalShape(ctx, s.db)
+	s.journalShape.Store(shape)
+	if activationErr := issueops.JournalActivationError(err); activationErr != nil {
+		s.journalActivationErr.Store(&activationErr)
+		return
+	}
+	s.journalActivationErr.Store(nil)
 }
 
+// EventsJournalActivationError implements storage.EventsJournalShapeChecker:
+// nil unless the last SetEventsJournalEnabled(true) call found a table shape
+// the journal cannot run against.
+func (s *DoltStore) EventsJournalActivationError() error {
+	if p := s.journalActivationErr.Load(); p != nil {
+		return *p
+	}
+	return nil
+}
+
+// scopeEventsJournalTransaction binds this store's cached activation state and
+// probed shape to tx. The activation switch deliberately does NOT depend on
+// the shape: an enabled store whose probe produced no shape writes with the
+// canonical column list, so a table the journal cannot run against fails the
+// write loudly instead of letting the mutation commit with no journal row
+// (storage.EventsJournalShapeChecker).
 func (s *DoltStore) scopeEventsJournalTransaction(tx *sql.Tx) func() {
-	return issueops.ScopeEventsJournalTransaction(tx, s.eventsJournalEnabled.Load())
+	clearActivation := issueops.ScopeEventsJournalTransaction(tx, s.eventsJournalEnabled.Load())
+	clearShape := issueops.ScopeEventsJournalShape(tx, s.journalShape.Load())
+	return func() {
+		clearShape()
+		clearActivation()
+	}
 }
 
 // SetVersionedHistoryEnabled activates dual-write issue-version history for
@@ -1881,6 +1967,24 @@ func New(ctx context.Context, cfg *Config) (*DoltStore, error) {
 			cfg.Database, remedy.PrintedValue(addr))
 	}
 
+	// Pin the server endpoint before presenting cfg.ServerPassword to it. Every
+	// store open funnels through New (NewFromConfig* end with New), so this is the
+	// one place that covers direct dolt.New callers too — bd doctor's federation,
+	// validation, maintenance and migration checks open the store this way with
+	// a password resolved from the shared-config host (doltServerConfig), which
+	// the PR's applyResolvedConfig gate does not reach. A no-op for bd's own
+	// local server and the vendor default; it refuses a shared-config host
+	// (metadata.json dolt_server_host / config.yaml dolt.host) the workspace
+	// never pinned, so a committed endpoint cannot harvest BEADS_DOLT_PASSWORD
+	// (GH#7886). The credentials-file password is already keyed to [host:port],
+	// so a swapped host finds no entry and sends nothing; this adds the check for
+	// BEADS_DOLT_PASSWORD, which is sent to whatever host is configured.
+	if cfg.ServerPassword != "" {
+		if err := doltserver.CheckEndpointTrust(cfg.BeadsDir, nil, cfg.ServerHost, cfg.ServerPort, cfg.ServerSocket); err != nil {
+			return nil, err
+		}
+	}
+
 	return newServerMode(ctx, cfg)
 }
 
@@ -2035,6 +2139,30 @@ var stopRejectedAutoStartedServer = doltserver.Stop
 // Declared as a var (matching dialProbe above) so unit tests can stub a dial
 // failure, such as a sandbox refusing the connection, without a live server.
 var dialServer = net.DialTimeout
+
+// issueProjectionColumns are the columns every issue read selects from the
+// row (sqlbuild.IssueBaseColumns, shared by both planes). checkOpenSchemaDrift
+// requires them on issues, the replicated table whose shape the schema cursor
+// describes.
+var issueProjectionColumns = sqlbuild.ColumnNames(sqlbuild.IssueBaseColumns)
+
+// checkOpenSchemaDrift is newServerMode's schema drift check. Every open
+// refuses a database ahead of this binary (schema.CheckForwardDrift). An open
+// that will not migrate and sets Config.RequireReadableSchema also refuses,
+// from the same version read, one behind it that lacks a projected column
+// (schema.CheckReadableDrift). Through a gateway that refusal names the
+// server administrator's remedy, since bd never migrates a gateway's schema.
+func checkOpenSchemaDrift(ctx context.Context, db *sql.DB, cfg *Config) error {
+	if !cfg.RequireReadableSchema || (!cfg.ReadOnly && !cfg.Gateway) {
+		return schema.CheckForwardDrift(ctx, db)
+	}
+	err := schema.CheckReadableDrift(ctx, db, "issues", issueProjectionColumns)
+	var behind *schema.SchemaBehindError
+	if cfg.Gateway && errors.As(err, &behind) {
+		behind.Gateway = true
+	}
+	return err
+}
 
 // newServerMode creates a DoltStore connected to a running dolt sql-server.
 // This path is pure Go and does not require CGO.
@@ -2329,6 +2457,7 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		readOnly:               cfg.ReadOnly,
 		classifiedRead:         cfg.ClassifiedRead,
 		autoStartedServerDir:   autoStartedDir,
+		createdDatabase:        dbFacts.created,
 	}
 
 	// Forward-drift guard runs on read-only AND writable opens. A binary older
@@ -2336,8 +2465,10 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	// when the DB is already past the binary's latest migration (atLatest uses
 	// >=), so without this guard a writable open would proceed and later queries
 	// would fail with cryptic unknown-column errors instead of a clear
-	// "upgrade bd" message (the stale-binary incident behind #4135/#4137).
-	if err := schema.CheckForwardDrift(ctx, db); err != nil {
+	// "upgrade bd" message (the stale-binary incident behind #4135/#4137). An
+	// open that will not migrate also refuses, when it asks to, a database
+	// behind the binary that its reads cannot query (checkOpenSchemaDrift).
+	if err := checkOpenSchemaDrift(ctx, db, cfg); err != nil {
 		return nil, err
 	}
 
@@ -2372,11 +2503,13 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	// server-existence check; it does not reopen the separate "foreign
 	// server, no bd database at all" gap tracked as Part B (mybd-y18b).
 	if !cfg.CreateIfMissing || dbFacts.alreadyExisted {
+		// Verify against the resolved beadsDir that credentials and CLIDir
+		// use, so a Path-only open such as beads.Open is checked too (GH#5559).
 		var verifyErr error
 		if cfg.Database == doltserver.GlobalDatabaseName {
-			verifyErr = store.verifyGlobalProjectIdentity(ctx, cfg.BeadsDir)
+			verifyErr = store.verifyGlobalProjectIdentity(ctx, beadsDir)
 		} else {
-			verifyErr = store.verifyProjectIdentity(ctx, cfg.BeadsDir, cfg.OpenedByInit)
+			verifyErr = store.verifyProjectIdentity(ctx, beadsDir, cfg.OpenedByInit)
 		}
 		if verifyErr != nil {
 			return nil, verifyErr
@@ -2745,13 +2878,22 @@ func (s *DoltStore) verifyGlobalProjectIdentity(ctx context.Context, beadsDir st
 	}
 
 	if expectedID != dbID {
-		return fmt.Errorf(
-			"GLOBAL PROJECT IDENTITY MISMATCH — refusing to connect\n\n"+
-				"  Expected global project ID (metadata.json): %s\n"+
-				"  Database project ID:                        %s\n\n"+
-				expectedID, dbID)
+		return globalProjectIdentityMismatchError(expectedID, dbID)
 	}
 	return nil
+}
+
+// globalProjectIdentityMismatchError builds verifyGlobalProjectIdentity's
+// refusal when metadata.json's global_project_id and the beads_global
+// database's _project_id disagree. Both IDs are format arguments: neither is
+// part of the format string, so each prints on its own labeled line exactly
+// as stored, even when it holds a '%'.
+func globalProjectIdentityMismatchError(expectedID, dbID string) error {
+	return fmt.Errorf(
+		"GLOBAL PROJECT IDENTITY MISMATCH — refusing to connect\n\n"+
+			"  Expected global project ID (metadata.json): %s\n"+
+			"  Database project ID:                        %s",
+		expectedID, dbID)
 }
 
 // isExternalServerHost reports whether host names a server bd does not
@@ -3688,6 +3830,19 @@ func (s *DoltStore) IsReadOnly() bool {
 	return s.readOnly
 }
 
+// CreatedDatabase reports whether opening this store created its database
+// on the server: its bare CREATE DATABASE won the server's arbitration
+// (serverConnFacts.created), so the database holds nothing bd did not just
+// put there. It is false for every open that found the database on the
+// server, by connecting to it, by SHOW DATABASES, or by losing the CREATE
+// DATABASE race to another open, and for a gateway server, on which bd never
+// creates a database. bd doctor --fix's Database repair imports issues.jsonl
+// into a database its own open created, and into one a local directory's
+// absence merely suggested was missing only when that has no issues.
+func (s *DoltStore) CreatedDatabase() bool {
+	return s.createdDatabase
+}
+
 // CLIDir returns the directory for dolt CLI operations (push/pull/remote/fetch).
 // The actual database lives in a subdirectory of Path() named after the database.
 // Use this instead of Path() when running dolt CLI commands that target the
@@ -3790,13 +3945,13 @@ func (s *DoltStore) Flatten(ctx context.Context) error {
 
 // Compact squashes old Dolt commits while preserving recent ones.
 // Pins a single connection for session-scoped stored procedures.
-func (s *DoltStore) Compact(ctx context.Context, initialHash, boundaryHash string, oldCommits int, recentHashes []string) error {
+func (s *DoltStore) Compact(ctx context.Context, initialHash, boundaryHash, headHash string, oldCommits int, recentHashes []string) error {
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
 		return fmt.Errorf("acquire connection for compact: %w", err)
 	}
 	defer conn.Close()
-	return versioncontrolops.Compact(ctx, conn, initialHash, boundaryHash, oldCommits, recentHashes)
+	return versioncontrolops.Compact(ctx, conn, initialHash, boundaryHash, headHash, oldCommits, recentHashes)
 }
 
 // UnderlyingDB returns the underlying *sql.DB connection
@@ -4546,7 +4701,7 @@ func persistedCLIRemote(cliDir, remote string) (storage.RemoteInfo, bool) {
 }
 
 // hasCLIDatabase reports whether CLIDir points at an initialized Dolt database
-// that can be the one the store's server serves (cliDirServesServer).
+// proven to be the one the store's server serves (cliDirServesServer).
 // SQL-capable routes use this as a CLI availability check and fall back to SQL
 // when an external-server client has only a placeholder local directory, or a
 // database there that is not its server's.
@@ -4559,16 +4714,34 @@ func (s *DoltStore) hasCLIDatabase() bool {
 	return err == nil && info.IsDir()
 }
 
-// cliDirServesServer reports whether CLIDir can be the database this store's
-// server serves, so that a dolt CLI subprocess run there (push, pull, fetch,
-// and the fsck before a push) moves that server's data, and the remotes its
-// .dolt/repo_state.json records are that server's (PersistedRemoteInfos).
-// That holds only for a server bd may run for the workspace, as every
-// decision that counts the workspace's Dolt root as a server's data holds
+// cliDirServesServer reports whether CLIDir is proven to be the database
+// this store's server serves, so that a dolt CLI subprocess run there (push,
+// pull, fetch, and the fsck before a push) moves that server's data, and the
+// remotes its .dolt/repo_state.json records are that server's
+// (PersistedRemoteInfos). Three things must hold.
+//
+// First, the server must be one bd may run for the workspace, as every
+// decision that counts the workspace's Dolt root as a server's data requires
 // (resolveLocalActiveDatabaseDir, sharedServerDatabase): a plain TCP server
 // at a host bd runs its server at (configfile.BdRunsServerAt), and not a
 // gateway, a TLS endpoint or a unix socket, none of which bd's own server
-// ever is. A port BEADS_DOLT_SERVER_PORT or the legacy BEADS_DOLT_PORT names
+// ever is. The dolt CLI hands a command in a served directory to its server
+// through localhost, so only such a server can take it.
+//
+// Second, a live server on the dialed port must serve CLIDir, by the dolt
+// CLI's own test: a dolt process holds the database's lock, and the first
+// sql-server.info the dolt CLI finds for it names that port and a live
+// process (doltserver.ServesDatabaseDirOnPort). Without that the dolt CLI
+// works on CLIDir's files directly, and a database there is at best a copy,
+// such as a clone bd init left in .beads/dolt (it still does for a gateway),
+// the database from when bd ran the workspace's server, or a copy of a
+// served directory that carries its server's info file, while the server bd
+// dials, a container or another data directory on 127.0.0.1, holds the real
+// data: pushing the copy would report success without the server's commits,
+// a pull into it would never reach the server, and its remotes are not the
+// server's. A store opened without a Config has no port, so no proof.
+//
+// Third, a port BEADS_DOLT_SERVER_PORT or the legacy BEADS_DOLT_PORT names
 // may be any server, such as a container or a tunnel on 127.0.0.1, so it
 // counts only with the proof sharedServerDatabase accepts (GH#6169): bd's
 // state files for the workspace's server name a live server on that very port
@@ -4578,13 +4751,7 @@ func (s *DoltStore) hasCLIDatabase() bool {
 // must also be a dolt sql-server (doltserver.IsTrackedServerRunning): a live
 // PID the recorded server left behind, now another process's, is no proof.
 // That check runs ps, so it comes last. (resolveLocalActiveDatabaseDir, which
-// grants local garbage collection, refuses such a port even then.) bd does
-// not know where any other server keeps its data, and a database in CLIDir is
-// then at best a copy, such as a clone bd init left in .beads/dolt (it still
-// does for a gateway) or the database from when bd ran the workspace's
-// server: pushing it would report success without the server's commits, a
-// pull into it would never reach the server, and its remotes are not the
-// server's. A store opened without a Config reads as bd's default host.
+// grants local garbage collection, refuses such a port even then.)
 func (s *DoltStore) cliDirServesServer() bool {
 	cfg := s.cfg
 	if cfg == nil {
@@ -4593,14 +4760,46 @@ func (s *DoltStore) cliDirServesServer() bool {
 	if cfg.Gateway || cfg.ServerTLS || cfg.ServerSocket != "" || !configfile.BdRunsServerAt(cfg.ServerHost) {
 		return false
 	}
+	if !servesDatabaseDirOnPort(s.CLIDir(), cfg.ServerPort) {
+		return false
+	}
 	if os.Getenv("BEADS_DOLT_SERVER_PORT") == "" && os.Getenv("BEADS_DOLT_PORT") == "" {
 		return true
 	}
-	if s.beadsDir == "" {
-		return false
+	_, managed := s.ManagedServerDir()
+	return managed
+}
+
+// servesDatabaseDirOnPort is doltserver.ServesDatabaseDirOnPort. Declared as
+// a var (matching ensureRunningDetailed) so that a unit test of a route that
+// goes on to run the dolt CLI in the served directory can stand in for its
+// server: under a held lock a real dolt CLI hands every command to the
+// server, which the test does not run.
+var servesDatabaseDirOnPort = doltserver.ServesDatabaseDirOnPort
+
+// ManagedServerDir returns the directory of the server bd manages for this
+// store's workspace (doltserver.ResolveServerDir), and true, when the server
+// the store dials is that very server: a plain TCP server at a host bd runs
+// its server at (configfile.BdRunsServerAt), whose state files in that
+// directory name the dialed port and a live dolt sql-server
+// (doltserver.ManagesLiveServerOnPort, doltserver.IsTrackedServerRunning).
+// It is the proof cliDirServesServer requires of a port a port variable
+// names, and what a caller that would stop or restart the server through
+// doltserver needs, since a server that proof does not cover is one bd did
+// not start. The IsTrackedServerRunning check runs ps.
+func (s *DoltStore) ManagedServerDir() (string, bool) {
+	cfg := s.cfg
+	if cfg == nil || s.beadsDir == "" {
+		return "", false
+	}
+	if cfg.Gateway || cfg.ServerTLS || cfg.ServerSocket != "" || !configfile.BdRunsServerAt(cfg.ServerHost) {
+		return "", false
 	}
 	serverDir := doltserver.ResolveServerDir(s.beadsDir)
-	return doltserver.ManagesLiveServerOnPort(serverDir, cfg.ServerPort) && doltserver.IsTrackedServerRunning(serverDir)
+	if !doltserver.ManagesLiveServerOnPort(serverDir, cfg.ServerPort) || !doltserver.IsTrackedServerRunning(serverDir) {
+		return "", false
+	}
+	return serverDir, true
 }
 
 // ensureMatchingCLIRemote materializes the local CLI remote needed before
@@ -5752,17 +5951,18 @@ func (s *DoltStore) settleMergeInTx(ctx context.Context, tx *sql.Tx, pullErr err
 		return pullErr
 	}
 
-	// Conclude the merge for resolved conflicts only now, after the FK repair:
-	// DOLT_COMMIT refuses a violated working set, so a merge carrying both
-	// classes could never settle when the resolver committed first (bd-578h9.14).
-	if resolved {
-		if err := versioncontrolops.CommitResolvedConflicts(ctx, tx); err != nil {
-			_ = tx.Rollback()
-			if pullErr != nil {
-				return pullErr
-			}
-			return err
+	// Conclude the merge only now, after the FK repair: DOLT_COMMIT refuses a
+	// violated working set, so a merge carrying both classes could never
+	// settle when the resolver committed first (bd-578h9.14). A merge the
+	// repair alone settled is concluded here too, with its full result
+	// (GH#7811): left open, it was concluded by the next commit, and a plain
+	// server-mode commit leaves config out (GH#2455).
+	if err := versioncontrolops.CommitSettledMerge(ctx, tx, resolved, repairedViol); err != nil {
+		_ = tx.Rollback()
+		if pullErr != nil {
+			return pullErr
 		}
+		return err
 	}
 
 	return s.commitSQLTx(ctx, "commit pull merge settlement", tx)
@@ -6046,14 +6246,13 @@ func (s *DoltStore) autoResolveConflictsAfterCLIPull(ctx context.Context) (bool,
 		_ = tx.Rollback()
 		return false, nil
 	}
-	// Conclude the merge for resolved conflicts only now, after the FK repair:
-	// DOLT_COMMIT refuses a violated working set, so a merge carrying both
-	// classes could never settle when the resolver committed first (bd-578h9.14).
-	if resolved {
-		if err := versioncontrolops.CommitResolvedConflicts(ctx, tx); err != nil {
-			_ = tx.Rollback()
-			return false, err
-		}
+	// Conclude the merge only now, after the FK repair: DOLT_COMMIT refuses a
+	// violated working set, so a merge carrying both classes could never
+	// settle when the resolver committed first (bd-578h9.14). A merge the
+	// repair alone settled is concluded too, as in settleMergeInTx (GH#7811).
+	if err := versioncontrolops.CommitSettledMerge(ctx, tx, resolved, repairedViol); err != nil {
+		_ = tx.Rollback()
+		return false, err
 	}
 	if err := s.commitSQLTx(ctx, "commit resolved CLI pull conflicts", tx); err != nil {
 		return false, err

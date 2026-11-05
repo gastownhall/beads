@@ -90,17 +90,22 @@ func TestSweepConfirmHintCarriesEverySelector(t *testing.T) {
 		olderThan string
 		pattern   string
 		limit     int
+		retainIDs bool
 		want      string
 	}{
-		{"the gate's command", purge, "168h", "", 1, "bd purge --force --wisps-plane --older-than 168h --limit 1"},
-		{"a larger limit", purge, "7d", "", 500, "bd purge --force --wisps-plane --older-than 7d --limit 500"},
-		{"no limit asked", purge, "168h", "", 0, "bd purge --force --wisps-plane --older-than 168h"},
-		{"pattern and limit", purge, "", "wi-*", 3, "bd purge --force --wisps-plane --pattern wi-* --limit 3"},
-		{"prune defines no limit", prune, "30d", "", 0, "bd prune --force --older-than 30d"},
+		{"the gate's command", purge, "168h", "", 1, false, "bd purge --force --wisps-plane --older-than 168h --limit 1"},
+		{"a larger limit", purge, "7d", "", 500, false, "bd purge --force --wisps-plane --older-than 7d --limit 500"},
+		{"no limit asked", purge, "168h", "", 0, false, "bd purge --force --wisps-plane --older-than 168h"},
+		{"pattern and limit", purge, "", "wi-*", 3, false, "bd purge --force --wisps-plane --pattern wi-* --limit 3"},
+		{"prune defines no limit", prune, "30d", "", 0, false, "bd prune --force --older-than 30d"},
+		// A hint that dropped --retain-ids would run a sweep that leaves every
+		// id it deletes reusable, not the retaining one the preview showed.
+		{"a retaining purge", purge, "168h", "", 1, true, "bd purge --force --wisps-plane --older-than 168h --limit 1 --retain-ids"},
+		{"a retaining prune", prune, "30d", "", 0, true, "bd prune --force --older-than 30d --retain-ids"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := sweepConfirmHint(tt.scope, tt.olderThan, tt.pattern, tt.limit); got != tt.want {
+			if got := sweepConfirmHint(tt.scope, tt.olderThan, tt.pattern, tt.limit, tt.retainIDs); got != tt.want {
 				t.Errorf("sweepConfirmHint() = %q, want %q", got, tt.want)
 			}
 		})

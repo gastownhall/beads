@@ -240,6 +240,11 @@ type ProblemError struct {
 	Floor *int64
 	Head  *int64
 
+	// ClosedAt is the tombstone's closed_at, with `idempotency_expired`: when
+	// the bead a retaining sweep retired had closed. Carried onto the typed
+	// *issueops.IdempotencyExpiredError the code maps to.
+	ClosedAt *time.Time
+
 	// Err is the canonical sentinel this code maps to. It is what Unwrap
 	// returns, so errors.Is and errors.As reach it.
 	Err error
@@ -411,6 +416,7 @@ func mapProblem(t target, status int, header http.Header, body []byte, maxRetryA
 		Since:             p.Since,
 		Floor:             p.Floor,
 		Head:              p.Head,
+		ClosedAt:          p.ClosedAt,
 		// The guard pair. All six are strings on the wire — the two versions
 		// are decimal revision tokens (types.RevisionToken) and are carried as
 		// the strings the server spelled, see the field comment — and all six
@@ -564,9 +570,20 @@ var codeSentinel = map[string]func(*ProblemError, target) error{
 	"unauthenticated":  func(*ProblemError, target) error { return ErrUnauthenticated },
 	"not_found":        func(*ProblemError, target) error { return issueops.ErrNotFound },
 	"already_exists":   func(*ProblemError, target) error { return issueops.ErrAlreadyExists },
-	"busy":             func(*ProblemError, target) error { return ErrBusy },
-	"db_unavailable":   func(*ProblemError, target) error { return ErrDBUnavailable },
-	"internal":         func(*ProblemError, target) error { return ErrServerFault },
+	// The typed refusal, rebuilt from the members the server sends: the id from
+	// the item (or the request target), and `closed_at` when present. A create
+	// whose request named the id gets it filled back in by the role, the way
+	// already_exists does (lifecycle.go).
+	"idempotency_expired": func(e *ProblemError, t target) error {
+		expired := &issueops.IdempotencyExpiredError{ID: refusedIssueID(e, t)}
+		if e.ClosedAt != nil {
+			expired.ClosedAt = e.ClosedAt.UTC()
+		}
+		return expired
+	},
+	"busy":           func(*ProblemError, target) error { return ErrBusy },
+	"db_unavailable": func(*ProblemError, target) error { return ErrDBUnavailable },
+	"internal":       func(*ProblemError, target) error { return ErrServerFault },
 
 	// The journal codes, on the table for the reason stated beside their
 	// sentinels: set-equality with the document, not with what this client

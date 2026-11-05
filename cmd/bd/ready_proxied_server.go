@@ -139,16 +139,7 @@ func runReadyProxiedList(ctx context.Context, uw uow.UnitOfWork, in readyInput) 
 	maybeShowUpgradeNotification()
 
 	if len(issues) == 0 {
-		hasOpenIssues := false
-		if stats, statsErr := uw.IssueUseCase().GetStatistics(ctx); statsErr == nil {
-			hasOpenIssues = stats.OpenIssues > 0 || stats.InProgressIssues > 0
-		}
-		if hasOpenIssues {
-			fmt.Printf("\n%s No ready work found (all issues have blocking dependencies)\n\n",
-				ui.RenderWarn("✨"))
-		} else {
-			fmt.Printf("\n%s No open issues\n\n", ui.RenderPass("✨"))
-		}
+		printReadyEmptyState(ctx, in, uw.IssueUseCase())
 		return nil
 	}
 

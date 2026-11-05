@@ -254,8 +254,8 @@ func warnStoredPeerSuppressesAmbientPassword(peer string, p *storage.FederationP
 	fmt.Fprintf(federationWarnWriter,
 		"Warning: peer %q stores a username with an empty password, "+
 			"which overrides the ambient DOLT_REMOTE_PASSWORD for this operation; "+
-			"store a password by re-running `bd federation add-peer %s <url> "+
-			"--user %s%s`%s and entering it at the prompt.\n",
+			"store a password by re-running bd federation add-peer %s <url> "+
+			"--user %s%s%s and entering it at the prompt.\n",
 		peer, peerArg, userArg, sovereignty, peerNote+userNote+tierNote)
 }
 
@@ -275,7 +275,7 @@ func (s *EmbeddedDoltStore) verifyPeerRemoteURL(ctx context.Context, peer, store
 		// The peer name is a row of the database, which travels with a
 		// pull, so it is named and pasted through the remedy printer.
 		arg, note := remedy.CommandArg(runtime.GOOS, peer, "<peer>")
-		return fmt.Errorf("federation peer %s has stored credentials but no remote named %s exists; re-run `bd federation add-peer %s <url> --user <user>`%s to restore it", remedy.PrintedValue(peer), remedy.PrintedValue(peer), arg, note)
+		return fmt.Errorf("federation peer %s has stored credentials but no remote named %s exists; re-run bd federation add-peer %s <url> --user <user>%s to restore it", remedy.PrintedValue(peer), remedy.PrintedValue(peer), arg, note)
 	}
 	if err != nil {
 		return fmt.Errorf("resolve remote URL for peer %s: %w", remedy.PrintedValue(peer), err)

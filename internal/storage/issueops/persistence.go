@@ -65,9 +65,23 @@ func moveIssuePersistenceInTx(ctx context.Context, tx DBTX, current *types.Issue
 		}
 		return PersistenceMoveResult{}, err
 	}
-	sourceWisp, err := isActiveWispForPersistenceMove(ctx, tx, current.ID)
+	// A move re-inserts the row into the other plane, so it takes the id's
+	// create coordination cell BEFORE it reads where the row lives
+	// (CoordinateIDCreatesInTx). Against a retaining sweep of the same row:
+	// a move that comes second reads after the sweep's commit and finds no
+	// row; a move that comes first makes the sweep conflict and retry.
+	// Without the cell both could delete the source row (identical deletes
+	// merge cleanly on Dolt), the move's insert would land in the other
+	// plane, and the sweep's tombstone would sit beside a live row.
+	if err := CoordinateIDCreatesInTx(ctx, tx, []string{current.ID}); err != nil {
+		return PersistenceMoveResult{}, err
+	}
+	sourceWisp, found, err := locatePersistenceMoveRow(ctx, tx, current.ID)
 	if err != nil {
 		return PersistenceMoveResult{}, err
+	}
+	if !found {
+		return PersistenceMoveResult{}, fmt.Errorf("move issue persistence: %w: %s", storage.ErrNotFound, current.ID)
 	}
 	targetWisp := ephemeral || noHistory
 	if sourceWisp == targetWisp && current.Ephemeral == ephemeral && current.NoHistory == noHistory && current.StorageClass.Normalize() == storageClass.Normalize() {
@@ -257,18 +271,21 @@ func copyPersistenceAuxiliary(ctx context.Context, tx DBTX, id string, sourceWis
 	return changed, nil
 }
 
-func isActiveWispForPersistenceMove(ctx context.Context, tx DBTX, id string) (bool, error) {
+// locatePersistenceMoveRow reports which plane holds id (wisp true for the
+// wisps table) and whether any does. A row in neither is one deleted after the
+// caller read it, which a move must not re-create.
+func locatePersistenceMoveRow(ctx context.Context, tx DBTX, id string) (wisp, found bool, err error) {
 	var wispCount, issueCount int
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM wisps WHERE id = ?`, id).Scan(&wispCount); err != nil {
-		return false, fmt.Errorf("locate issue persistence plane: %w", err)
+		return false, false, fmt.Errorf("locate issue persistence plane: %w", err)
 	}
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM issues WHERE id = ?`, id).Scan(&issueCount); err != nil {
-		return false, fmt.Errorf("locate issue persistence plane: %w", err)
+		return false, false, fmt.Errorf("locate issue persistence plane: %w", err)
 	}
 	if issueCount > 0 && wispCount > 0 {
-		return false, fmt.Errorf("locate issue persistence plane: ID %q exists in both issues and wisps", id)
+		return false, false, fmt.Errorf("locate issue persistence plane: ID %q exists in both issues and wisps", id)
 	}
-	return wispCount > 0, nil
+	return wispCount > 0, wispCount+issueCount > 0, nil
 }
 
 func persistenceAuxTables(wisp bool) []string {
