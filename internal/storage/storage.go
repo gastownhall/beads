@@ -1059,6 +1059,20 @@ type PendingChangeDetector interface {
 	HasCommittablePending(ctx context.Context) (bool, error)
 }
 
+// BackupDestination is one Dolt backup destination as dolt_backups lists it.
+type BackupDestination struct {
+	Name string `json:"name"`
+	URL  string `json:"url"`
+}
+
+// BackupLister lists every registered Dolt backup destination, whatever its
+// name: `bd backup init` registers "default" and auto-backup registers
+// "backup_export", and both can be live at once.
+// Callers that need the list should type-assert to this interface.
+type BackupLister interface {
+	BackupList(ctx context.Context) ([]BackupDestination, error)
+}
+
 // BackupStore provides Dolt backup operations (CALL DOLT_BACKUP) for
 // disaster recovery.
 // Callers that need backup functionality should type-assert to this interface.

@@ -786,6 +786,16 @@ func (s *EmbeddedDoltStore) BackupAdd(ctx context.Context, name, url string) err
 	})
 }
 
+func (s *EmbeddedDoltStore) BackupList(ctx context.Context) ([]storage.BackupDestination, error) {
+	var backups []storage.BackupDestination
+	err := s.withDBConn(ctx, func(db versioncontrolops.DBConn) error {
+		var err error
+		backups, err = versioncontrolops.BackupList(ctx, db)
+		return err
+	})
+	return backups, err
+}
+
 func (s *EmbeddedDoltStore) BackupSync(ctx context.Context, name string) error {
 	return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
 		return versioncontrolops.BackupSync(ctx, db, name)

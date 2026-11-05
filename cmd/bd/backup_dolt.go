@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -380,6 +381,52 @@ func showDoltBackupStatusJSON() map[string]interface{} {
 	}
 
 	return result
+}
+
+// doltBackupDestinations lists every Dolt backup destination registered on
+// the active database, whatever its name, so status cannot report a live
+// destination that `bd backup init` did not register as no backup (GH#5209).
+// A backend that cannot list them leaves the field out, as size does.
+func doltBackupDestinations(ctx context.Context) ([]storage.BackupDestination, bool, error) {
+	if usesProxiedServer() {
+		var destinations []storage.BackupDestination
+		err := runProxiedNonTx(ctx, func(ctx context.Context, conn *sql.Conn) error {
+			var err error
+			destinations, err = versioncontrolops.BackupList(ctx, conn)
+			return err
+		})
+		return destinations, err == nil, err
+	}
+	if store == nil {
+		return nil, false, nil
+	}
+	lister, ok := storage.UnwrapStore(store).(storage.BackupLister)
+	if !ok {
+		return nil, false, nil
+	}
+	destinations, err := lister.BackupList(ctx)
+	return destinations, err == nil, err
+}
+
+// showBackupDestinations prints every registered Dolt backup destination as
+// part of bd backup status.
+func showBackupDestinations(destinations []storage.BackupDestination) {
+	if len(destinations) == 0 {
+		return
+	}
+	fmt.Println("\nDolt backup destinations:")
+	for _, d := range destinations {
+		fmt.Printf("  %s: %s\n", d.Name, d.URL)
+	}
+}
+
+// showBackupDestinationsJSON returns the registered destinations for JSON
+// output, as an empty list rather than null when there are none.
+func showBackupDestinationsJSON(destinations []storage.BackupDestination) []storage.BackupDestination {
+	if destinations == nil {
+		return []storage.BackupDestination{}
+	}
+	return destinations
 }
 
 // doltBackupSize returns the active database size when the current store
