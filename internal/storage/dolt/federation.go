@@ -239,10 +239,18 @@ func (s *DoltStore) HasPersistedRemote() bool {
 // Callers in the GH#2118 cold-start window use this to RECOVER the invisible
 // remote rather than merely detect it: a freshly (auto-)started sql-server
 // can report an empty dolt_remotes even though the remote is persisted on
-// disk, so an empty listing is a reporting artifact, not an unconfigured rig
-// (wy-6k7f7). Read/parse failures are logged and skipped, matching the old
-// HasPersistedRemote behavior — callers only consult this after a SUCCESSFUL
-// (empty) ListRemotes, so a read failure here never masquerades as evidence.
+// disk (wy-6k7f7). That listing, not the state file, is the set of remotes
+// the server pushes and pulls with: the server reads the file only when it
+// loads the database, so a remote recorded only there stays out of every
+// SQL operation until a restart or a SQL add. `bd dolt remote add` makes
+// that add for a recorded remote whose URL matches, with its recorded URL
+// and git ref, unless the record carries parameters SQL cannot set
+// (RemoteInfo.CLIOnlyParams), and still asks before replacing a differing
+// one. Other callers, `bd config apply` among them, take the recorded
+// remote as configured without registering it. Read/parse failures are
+// logged and skipped, matching the old HasPersistedRemote behavior — callers
+// only consult this after a SUCCESSFUL (empty) ListRemotes, so a read
+// failure here never masquerades as evidence.
 //
 // Those are the server's remotes only where the workspace's Dolt root is
 // proven served by the server bd dials (cliDirServesServer). Elsewhere, as
