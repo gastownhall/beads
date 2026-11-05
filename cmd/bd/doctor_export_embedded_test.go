@@ -8,6 +8,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/steveyegge/beads/internal/testutil"
 )
 
 // doctorExportCheckResult mirrors the structured payload of
@@ -164,6 +167,100 @@ func TestEmbeddedDoctorExportCheckMissingFileWarns(t *testing.T) {
 	}
 	if result.Missing != 0 {
 		t.Errorf("N/A result still reports missing = %d", result.Missing)
+	}
+}
+
+// doctorExportWorkspaceFiles is what `bd doctor --check=export` must leave as
+// it found it: the export file, the auto-export state and the git index.
+type doctorExportWorkspaceFiles struct {
+	export, state, index string
+}
+
+func readDoctorExportWorkspaceFiles(t *testing.T, dir, beadsDir string) doctorExportWorkspaceFiles {
+	t.Helper()
+	read := func(name string) string {
+		data, err := os.ReadFile(filepath.Join(beadsDir, name))
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		return string(data)
+	}
+	ls := gitCommand("ls-files", "--stage")
+	ls.Dir = dir
+	ls.Env = testutil.WithoutGitRepoLocationEnv(os.Environ())
+	index, err := ls.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git ls-files --stage: %v\n%s", err, index)
+	}
+	return doctorExportWorkspaceFiles{export: read("issues.jsonl"), state: read(exportAutoStateFile), index: string(index)}
+}
+
+// TestEmbeddedDoctorExportCheckLeavesTheWorkspaceUntouched pins the check's
+// read-only promise against the post-command maintenance net. Auto-export is
+// on and due: the file lags the store by one issue and the throttle window has
+// passed. The check reports the gap and leaves the export file, its state and
+// the git index alone, with export.git-add on or off. Before the fix the
+// post-run auto-export refreshed the file on the check's way out (and staged
+// it under git-add), so a second identical run reported ok (GH#6955).
+func TestEmbeddedDoctorExportCheckLeavesTheWorkspaceUntouched(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	bd := buildEmbeddedBD(t)
+	for _, tc := range []struct{ gitAdd, prefix string }{
+		{"true", "dxu"},
+		{"false", "dxn"},
+	} {
+		t.Run("git-add="+tc.gitAdd, func(t *testing.T) {
+			dir, beadsDir, _ := bdInit(t, bd, "--prefix", tc.prefix)
+			for _, kv := range [][]string{
+				{"export.auto", "true"},
+				{"export.git-add", tc.gitAdd},
+				{"export.interval", "1h"},
+			} {
+				bdCommand(t, bd, dir, "config", "set", kv[0], kv[1])
+			}
+			jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+
+			// The first create auto-exports; the second lands inside the
+			// interval, so the file lags the store by exactly that issue.
+			idA := bdCreateSilent(t, bd, dir, "Exported issue", "--type", "task")
+			idB := bdCreateSilent(t, bd, dir, "Issue the throttle held back", "--type", "task")
+			if !jsonlHasIssueID(t, jsonlPath, idA) || jsonlHasIssueID(t, jsonlPath, idB) {
+				data, _ := os.ReadFile(jsonlPath)
+				t.Fatalf("fixture broken: want %s exported and %s throttled:\n%s", idA, idB, data)
+			}
+			// Make the refresh due: age the saved timestamp past the interval.
+			state := loadExportAutoState(beadsDir)
+			state.Timestamp = time.Now().Add(-2 * time.Hour)
+			saveExportAutoState(beadsDir, state)
+
+			before := readDoctorExportWorkspaceFiles(t, dir, beadsDir)
+			for _, jsonMode := range []bool{true, false, true} {
+				result, stdout := runDoctorExportCheck(t, bd, dir, jsonMode)
+				if jsonMode && (result.Status != "warning" || len(result.MissingIDs) != 1 || result.MissingIDs[0] != idB) {
+					t.Fatalf("result = %+v, want a warning naming only %s:\n%s", result, idB, stdout)
+				}
+				if !jsonMode && !strings.Contains(stdout, idB) {
+					t.Fatalf("human output does not name the missing %s:\n%s", idB, stdout)
+				}
+				if after := readDoctorExportWorkspaceFiles(t, dir, beadsDir); after != before {
+					t.Fatalf("bd doctor --check=export (json=%v) changed the workspace it inspects:\nbefore: %+v\nafter:  %+v", jsonMode, before, after)
+				}
+			}
+
+			// Control: a command that keeps the maintenance net does refresh
+			// this workspace, so the check stayed quiet because of its
+			// promise, not because nothing was due.
+			bdCreateSilent(t, bd, dir, "Issue whose create runs the refresh", "--type", "task")
+			if !jsonlHasIssueID(t, jsonlPath, idB) {
+				data, _ := os.ReadFile(jsonlPath)
+				t.Fatalf("control: the create's auto-export did not refresh %s into the file:\n%s", idB, data)
+			}
+			if after := readDoctorExportWorkspaceFiles(t, dir, beadsDir); tc.gitAdd == "true" && after.index == before.index {
+				t.Fatal("control: the refreshed export was not re-staged under export.git-add=true, so the unchanged index above proves nothing")
+			}
+		})
 	}
 }
 

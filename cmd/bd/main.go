@@ -143,6 +143,14 @@ var (
 	// an intentional empty JSONL artifact instead of treating it as ambiguous.
 	commandMayEmptyJSONLExport atomic.Bool
 
+	// commandSkipsPostRunMaintenance is set by a check that promises to leave
+	// the workspace untouched although its command is not in readOnlyCommands:
+	// `bd doctor --check=export` inspects the very file post-run auto-export
+	// rewrites and stages (GH#6955). It turns the whole post-command
+	// maintenance net off for this invocation (runsPostCommandMaintenance);
+	// the other doctor modes keep it.
+	commandSkipsPostRunMaintenance atomic.Bool
+
 	// commandDeletedIssueIDs is the in-process handoff from the delete
 	// commands to post-run auto-export: ids this command hard-deleted are
 	// PROVEN gone, so the export's orphan guard skips them instead of
@@ -274,8 +282,12 @@ func effectiveRootStorePolicy(cmdName string, strictReadonly bool) rootStorePoli
 // serve never reached this branch at all (PersistentPostRunE only closes the
 // provider there); server and shared-server mode do, so the exclusion has to be
 // stated rather than inherited.
+//
+// An invocation that promised to write nothing is excluded the same way, through
+// commandSkipsPostRunMaintenance: a read-only diagnostic must not refresh,
+// stage, back up or push anything on its way out.
 func runsPostCommandMaintenance(cmdName string, strictReadonly bool) bool {
-	if cmdName == serveCmdName {
+	if cmdName == serveCmdName || commandSkipsPostRunMaintenance.Load() {
 		return false
 	}
 	return effectiveRootStorePolicy(cmdName, strictReadonly).runMaintenance
@@ -1322,6 +1334,7 @@ var rootCmd = &cobra.Command{
 		// Reset per-command write tracking (used by Dolt auto-commit).
 		commandDidWrite.Store(false)
 		commandMayEmptyJSONLExport.Store(false)
+		commandSkipsPostRunMaintenance.Store(false)
 		commandDeletedIssueIDs.reset()
 		commandDidExplicitDoltCommit = false
 		commandDidWriteTipMetadata = false

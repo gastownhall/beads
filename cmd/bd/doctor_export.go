@@ -4,13 +4,16 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/remedy"
+	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
 )
@@ -89,6 +92,7 @@ func computeExportCoverage(result exportCoverageResult, inScope []string, inFile
 	// No file to compare against.
 	if !result.ExportAuto {
 		result.Status = statusNotApplicable
+		result.MissingIDs = []string{}
 		result.Message = "no passive export file; auto-export disabled"
 		return result
 	}
@@ -127,30 +131,42 @@ func exportCoverageSamples(ids []string) []string {
 // resolved exactly like the auto-export writer resolves it (export.path
 // config, global default, .beads/issues.jsonl) — coverage only, prosecuted
 // as a warning, never an error, so it stays composable in scripts
-// (GH#6955). Read-only even when combined with --fix/--clean; the existing
-// export overwrite protections stay authoritative for any refresh.
-func runExportCoverageCheck(absPath string) error {
-	// Same-workspace rule: never compare one workspace's store against
-	// another's JSONL. The global store binds to the workspace found from
-	// CWD (ensureDirectMode), so a positional path naming a different
-	// workspace is rejected rather than silently mis-inspected.
-	targetBeads := beads.FindBeadsDirFrom(absPath)
-	if targetBeads == "" {
-		return HandleErrorWithHint(
-			fmt.Sprintf("no beads workspace found at %s", remedy.PrintedValue(absPath)),
-			"Run bd doctor --check=export from inside the workspace to inspect",
-		)
-	}
+// (GH#6955). Read-only even when combined with --fix/--clean: the store
+// opens read-only (openExportCheckStore), and the invocation also skips the
+// post-command maintenance net, whose auto-export would otherwise refresh
+// and stage the file this check just reported on. The existing export
+// overwrite protections stay authoritative for any refresh. explicitPath
+// says absPath came from a positional argument.
+func runExportCoverageCheck(absPath string, explicitPath bool) error {
+	// The store opens the workspace bd selected for this invocation
+	// (BEADS_DIR, --db, or discovery from CWD).
 	storeBeads := beads.FindBeadsDir()
-	if storeBeads == "" || utils.CanonicalizePath(targetBeads) != utils.CanonicalizePath(storeBeads) {
-		return HandleErrorWithHint(
-			fmt.Sprintf("refusing to compare workspaces: %s belongs to %s, but the store would open the workspace at %s",
-				remedy.PrintedValue(absPath), remedy.PrintedValue(targetBeads), remedy.PrintedValue(storeBeads)),
-			"Run bd doctor --check=export from inside the named workspace",
-		)
+	// Same-workspace rule: never compare one workspace's store against
+	// another's JSONL, so a positional path naming a different workspace is
+	// rejected rather than silently mis-inspected. Without one, the target
+	// is the selected workspace itself: rediscovering it from its parent
+	// directory would miss a BEADS_DIR that is the account home's .beads
+	// (GH#4402) or is not named .beads at all.
+	if explicitPath {
+		targetBeads := beads.FindBeadsDirFrom(absPath)
+		if targetBeads == "" {
+			return HandleErrorWithHint(
+				fmt.Sprintf("no beads workspace found at %s", remedy.PrintedValue(absPath)),
+				"Run bd doctor --check=export from inside the workspace to inspect",
+			)
+		}
+		if storeBeads == "" || utils.CanonicalizePath(targetBeads) != utils.CanonicalizePath(storeBeads) {
+			return HandleErrorWithHint(
+				fmt.Sprintf("refusing to compare workspaces: %s belongs to %s, but the store would open the workspace at %s",
+					remedy.PrintedValue(absPath), remedy.PrintedValue(targetBeads), remedy.PrintedValue(storeBeads)),
+				"Run bd doctor --check=export from inside the named workspace",
+			)
+		}
 	}
-	if err := ensureDirectMode("export coverage check requires direct mode"); err != nil {
-		return HandleError("%v", err)
+	// No post-run auto-export, git add, backup or push behind this check.
+	commandSkipsPostRunMaintenance.Store(true)
+	if err := openExportCheckStore(rootCtx, storeBeads); err != nil {
+		return err
 	}
 
 	result, err := collectExportCoverage(rootCtx, storeBeads)
@@ -161,6 +177,46 @@ func runExportCoverageCheck(absPath string) error {
 		return outputJSON(result)
 	}
 	printExportCoverage(result)
+	return nil
+}
+
+// openExportCheckStore installs the store --check=export reads: beadsDir's,
+// opened by newReadOnlyStoreFromConfig. That open writes nothing (no data
+// directory, CREATE DATABASE, remote-migrate gate or schema migration), the
+// store refuses writes, and PersistentPostRunE closes it. An embedded
+// workspace that holds no database yet, a fresh clone say (embeddeddolt/ is
+// gitignored), is refused before any open, on the probe a routed write uses
+// (embeddeddolt.HasRepository, see newExistingDoltStoreFromConfig): a
+// created empty database would cover every in-scope ID, and bd bootstrap
+// would then take it for the real one. Metadata the open would refuse, or
+// cannot load, is left to the open to name. It returns the rendered error.
+func openExportCheckStore(ctx context.Context, beadsDir string) error {
+	lockStore()
+	active := isStoreActive() && getStore() != nil
+	unlockStore()
+	if active {
+		return nil
+	}
+	if beadsDir == "" {
+		return HandleError("%v.\nHint: run 'bd init' to create a database in the current directory", ErrNoBeadsDatabase)
+	}
+	if _, err := checkDiscoveredBackend(beadsDir); err == nil {
+		if cfg, err := configfile.LoadForDiscovery(beadsDir); err == nil && selectsEmbeddedStore(beadsDir, cfg) && !embeddeddolt.HasRepository(beadsDir) {
+			return HandleErrorWithHint(
+				fmt.Sprintf("no embedded database at %s; the export check reads the store and does not create one",
+					remedy.PrintedValue(filepath.Join(beadsDir, "embeddeddolt"))),
+				"Run bd bootstrap to set up this workspace's database, then rerun bd doctor --check=export",
+			)
+		}
+	}
+	s, err := newReadOnlyStoreFromConfig(ctx, beadsDir)
+	if err != nil {
+		return HandleError("%v\nHint: %s", openStoreError(backendNameForErrorFraming(beadsDir), err), diagHint())
+	}
+	lockStore()
+	setStore(s)
+	setStoreActive(true)
+	unlockStore()
 	return nil
 }
 

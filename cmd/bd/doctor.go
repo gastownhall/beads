@@ -289,7 +289,7 @@ Examples:
 				// Read-only coverage diagnostic (GH#6955): no --clean/--fix
 				// mutation is associated with it, and it works in embedded
 				// mode alongside the other individually gated checks.
-				return runExportCoverageCheck(absPath)
+				return runExportCoverageCheck(absPath, len(args) > 0)
 			case "validate":
 				if isEmbeddedMode() {
 					printEmbeddedUnsupported("doctor --check=validate")
