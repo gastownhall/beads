@@ -31,8 +31,11 @@ type readyWorkProbe struct {
 	// true whenever it was not probed exactly.
 	idCollision bool
 	// inputs are the ID sets the ready WHERE clause is rendered from
-	// (children of future-deferred parents, descendants of filter.ParentID),
-	// shared by both families.
+	// (children of future-deferred parents, descendants of filter.ParentID,
+	// each family's stale-flagged rows), shared by both families. A family's
+	// stale rows are read only when the probe statement saw one, so the common
+	// case, no stale flag, adds no statement of its own. Its EXISTS still
+	// visits every flagged row to prove that (StaleBlockedIDsSQL).
 	inputs sqlbuild.ReadyWorkWhereInputs
 }
 
@@ -64,7 +67,7 @@ func probeReadyWorkInTx(ctx context.Context, tx DBTX, filter types.WorkFilter, w
 	// hardcoded index is a fact read from the wrong column the first time a
 	// new one is inserted above it — and the fact being misread would be the
 	// ready predicate.
-	cols := make([]string, 0, 5) // the two unconditional facts plus the three conditional ones
+	cols := make([]string, 0, 7) // the four unconditional facts plus the three conditional ones
 	appendFact := func(sql string) int {
 		cols = append(cols, sql)
 		return len(cols) - 1
@@ -76,6 +79,8 @@ func probeReadyWorkInTx(ctx context.Context, tx DBTX, filter types.WorkFilter, w
 	// table still exists (optionalTableExistsInTx's contract). The value
 	// is not read, so this fact keeps no index.
 	appendFact("EXISTS (SELECT 1 FROM wisp_dependencies)")
+	iIssuesStale := appendFact("EXISTS (" + sqlbuild.StaleBlockedIDsSQL(IssuesFilterTables) + ")")
+	iWispsStale := appendFact("EXISTS (" + sqlbuild.StaleBlockedIDsSQL(WispsFilterTables) + ")")
 
 	iIssuesDeferred, iWispsDeferred := -1, -1
 	if excludeDeferred {
@@ -114,6 +119,9 @@ func probeReadyWorkInTx(ctx context.Context, tx DBTX, filter types.WorkFilter, w
 				return nil, fmt.Errorf("compute deferred parent children: %w", dcErr)
 			}
 			p.inputs.DeferredChildIDs = children
+		}
+		if err := p.readStaleBlockedInTx(ctx, tx, flags[iIssuesStale], flags[iWispsStale]); err != nil {
+			return nil, err
 		}
 	case isTableNotExistError(err):
 		if err := p.probeTableByTableInTx(ctx, tx, excludeDeferred); err != nil {
@@ -156,6 +164,34 @@ func (p *readyWorkProbe) probeTableByTableInTx(ctx context.Context, tx DBTX, exc
 			return fmt.Errorf("compute deferred parent children: %w", err)
 		}
 		p.inputs.DeferredChildIDs = children
+	}
+	// No probe answered whether a flag is stale, so read both sets; the wisp
+	// one only where the wisp family is read at all.
+	return p.readStaleBlockedInTx(ctx, tx, true, p.readsWisps())
+}
+
+// readStaleBlockedInTx reads the stale-flagged rows (sqlbuild.StaleBlockedIDsSQL)
+// of each family it is told holds one, which the ready predicate reads around
+// (GH#3268). The wisp set is read only for a ready set that reads wisps.
+func (p *readyWorkProbe) readStaleBlockedInTx(ctx context.Context, tx DBTX, issues, wisps bool) error {
+	read := func(tables FilterTables) error {
+		ids, err := queryIDs(ctx, tx, sqlbuild.StaleBlockedIDsSQL(tables))
+		if err != nil {
+			return fmt.Errorf("stale blocked flags in %s: %w", tables.Main, err)
+		}
+		if p.inputs.StaleBlockedIDs == nil {
+			p.inputs.StaleBlockedIDs = make(map[string][]string, 2)
+		}
+		p.inputs.StaleBlockedIDs[tables.Main] = ids
+		return nil
+	}
+	if issues {
+		if err := read(IssuesFilterTables); err != nil {
+			return err
+		}
+	}
+	if wisps && p.readsWisps() {
+		return read(WispsFilterTables)
 	}
 	return nil
 }

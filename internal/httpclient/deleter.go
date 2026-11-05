@@ -4,10 +4,12 @@ package httpclient
 
 import (
 	"context"
+	"slices"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/httpapi/apigen"
 	"github.com/steveyegge/beads/internal/httpclient/encode"
+	"github.com/steveyegge/beads/internal/httpclient/wire"
 	"github.com/steveyegge/beads/issueops"
 )
 
@@ -65,6 +67,11 @@ func (d *httpDeleter) Delete(ctx context.Context, req issueops.DeleteRequest) (r
 	if err := checkDeleteIDs(req.IDs); err != nil {
 		return issueops.DeleteResult{}, err
 	}
+	if req.Cascade {
+		if err := d.refuseAWideCascade(ctx); err != nil {
+			return issueops.DeleteResult{}, err
+		}
+	}
 	// The guard is sent as the caller spelled it and the ARITY rule that comes
 	// with it is left to the server. The wire refuses a guard beside more than
 	// one DISTINCT id, and distinctness there is measured after trimming and
@@ -99,7 +106,29 @@ func (d *httpDeleter) Delete(ctx context.Context, req issueops.DeleteRequest) (r
 	if res.Orphaned != nil {
 		out.Orphaned = append([]string(nil), *res.Orphaned...)
 	}
+	if res.DeletedIds != nil {
+		out.DeletedIDs = append([]string(nil), *res.DeletedIds...)
+	}
 	return out, nil
+}
+
+// refuseAWideCascade refuses a cascade before the dial against a server that
+// does not advertise issues.delete.containmentCascade (GH#6301). Such a server
+// accepts the same `cascade` member and deletes every transitive dependent,
+// not just the parent-child tree this role promises — and its preview names
+// those rows too — so sending either would act on, or show, rows the caller
+// was told survive.
+func (d *httpDeleter) refuseAWideCascade(ctx context.Context) error {
+	snap, err := d.store.snapshot(ctx)
+	if err != nil {
+		return err
+	}
+	// snap is nil when the Store has no transport and no cached handshake:
+	// nothing was advertised, so nothing is.
+	if snap == nil || !slices.Contains(snap.Capabilities, wire.CapDeleteContainmentCascade) {
+		return d.store.unsupportedCapability("Deleter.Delete", wire.CapDeleteContainmentCascade)
+	}
+	return nil
 }
 
 // checkDeleteIDs applies the request-intrinsic refusals before the dial.

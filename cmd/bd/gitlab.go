@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/endpointtrust"
 	"github.com/steveyegge/beads/internal/gitlab"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
@@ -332,12 +334,15 @@ func maskGitLabToken(token string) string {
 }
 
 // getGitLabClient creates a GitLab client from the current configuration.
-func getGitLabClient(config GitLabConfig) *gitlab.Client {
+func getGitLabClient(config GitLabConfig) (*gitlab.Client, error) {
+	if err := endpointtrust.Check(endpointtrust.WorkspaceKey(), "gitlab", config.URL, endpointtrust.PrivateMatch("gitlab.url", "GITLAB_URL", config.URL)); err != nil {
+		return nil, err
+	}
 	client := gitlab.NewClient(config.Token, config.URL, config.ProjectID)
 	if config.GroupID != "" {
 		client = client.WithGroupID(config.GroupID)
 	}
-	return client
+	return client, nil
 }
 
 // runGitLabStatus implements the gitlab status command.
@@ -421,7 +426,10 @@ func runGitLabProjects(cmd *cobra.Command, args []string) error {
 	}
 
 	out := cmd.OutOrStdout()
-	client := getGitLabClient(config)
+	client, err := getGitLabClient(config)
+	if err != nil {
+		return HandleError("%v", err)
+	}
 	ctx := context.Background()
 
 	projects, err := client.ListProjects(ctx)
@@ -910,7 +918,8 @@ func buildGitLabPullHooks(ctx context.Context) *tracker.PullHooks {
 // buildGitLabPushHooks creates PushHooks for GitLab-specific push behavior.
 func buildGitLabPushHooks() *tracker.PushHooks {
 	return &tracker.PushHooks{
-		ContentEqual: gitLabPushContentEqual,
+		ContentEqual:    gitLabPushContentEqual,
+		PushFieldsEqual: gitLabPushFieldsEqual,
 	}
 }
 
@@ -929,6 +938,39 @@ func gitLabPushContentEqual(local *types.Issue, remote *tracker.TrackerIssue) bo
 	// Preserve the engine's default skip behavior for everything this hook does
 	// not handle explicitly.
 	return !remote.UpdatedAt.Before(local.UpdatedAt)
+}
+
+// gitLabPushFieldsEqual reports whether remote holds what a GitLab push of
+// local sends: an epic's milestone title, description and state, or an
+// issue's title, description, state and labels (BeadsIssueToGitLabFields).
+// Unlike gitLabPushContentEqual it never compares timestamps, so a pull can
+// tell an echo of its own push from a remote edit.
+func gitLabPushFieldsEqual(local *types.Issue, remote *tracker.TrackerIssue) bool {
+	if local == nil || remote == nil {
+		return false
+	}
+	if local.IssueType == types.TypeEpic {
+		return gitLabMilestonePushFieldsEqual(local, remote)
+	}
+	if !gitLabComparableTextEqual(local.Title, remote.Title) ||
+		!gitLabComparableTextEqual(local.Description, remote.Description) {
+		return false
+	}
+	remoteState, _ := remote.State.(string)
+	if (local.Status == types.StatusClosed) != strings.EqualFold(strings.TrimSpace(remoteState), "closed") {
+		return false
+	}
+	pushed, _ := gitlab.BeadsIssueToGitLabFields(local, gitlab.DefaultMappingConfig())["labels"].([]string)
+	return gitLabLabelSetsEqual(pushed, remote.Labels)
+}
+
+// gitLabLabelSetsEqual reports whether a and b hold the same labels, in any
+// order.
+func gitLabLabelSetsEqual(a, b []string) bool {
+	as, bs := slices.Clone(a), slices.Clone(b)
+	slices.Sort(as)
+	slices.Sort(bs)
+	return slices.Equal(slices.Compact(as), slices.Compact(bs))
 }
 
 func gitLabMilestonePushFieldsEqual(local *types.Issue, remote *tracker.TrackerIssue) bool {
