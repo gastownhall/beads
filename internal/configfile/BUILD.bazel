@@ -9,8 +9,10 @@ go_library(
         "credentials.go",
         "credentials_unix.go",
         "credentials_windows.go",
+        "dolt_host.go",
         "external_dolt_config.go",
         "graph_mode.go",
+        "historical_sqlite.go",
         "proxied_server_client_info.go",
         "workspace_format.go",
     ],
@@ -18,6 +20,7 @@ go_library(
     visibility = ["//:__subpackages__"],
     deps = [
         "//internal/config",
+        "//internal/remedy",
         "//internal/storage/backendnames",
     ],
 )
@@ -29,12 +32,19 @@ go_test(
         "central_config_test.go",
         "configfile_test.go",
         "credentials_test.go",
+        "credentials_unix_remedy_test.go",
+        "dolt_host_test.go",
         "external_dolt_config_test.go",
         "graph_mode_test.go",
+        "historical_sqlite_test.go",
+        "remedy_printing_test.go",
         "workspace_format_test.go",
     ],
     embed = [":configfile"],
-    deps = ["//internal/config"],
+    deps = [
+        "//internal/config",
+        "//internal/testutil/legacyworkspace",
+    ],
 )
 
 # --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---

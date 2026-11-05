@@ -234,21 +234,26 @@ func contextWithReaderEOF(parent context.Context, r io.Reader) (context.Context,
 	return ctx, cancel
 }
 
-// reportEventsTruncated renders a pruned-past checkpoint as a machine-readable
-// failure. A consumer must be able to branch on this without parsing prose, so
-// JSON mode carries the code and the window it can still serve; the caller then
-// decides whether to resume from floor-1 and accept the gap or rebuild.
+// reportEventsTruncated renders a failed journal read. A pruned-past checkpoint
+// is a machine-readable failure: a consumer must be able to branch on it
+// without parsing prose, so JSON mode carries the code and the window it can
+// still serve; the caller then decides whether to resume from floor-1 and
+// accept the gap or rebuild. Any other failed read is bd's usual error.
 //
-// streaming says the failure interrupts a JSONL stream that has already emitted
-// records — the --follow poll. There the error must be ONE line of JSON on the
-// same stream, because the consumer on the other end is a line reader: a
-// pretty-printed multi-line object dropped into the middle of its input is not
-// something it can parse, and it would see a stream that simply stops with
-// garbage after the last good record. Same fields, same code, same exit status;
-// only the framing follows the stream it interrupts.
+// streaming says the failure ends a --follow JSONL stream, at either of the
+// follower's reads: its catch-up read answers the same line reader as every
+// poll after it. There the error must be ONE line of JSON on the same stream,
+// because the consumer on the other end is a line reader: a pretty-printed
+// multi-line object dropped into its input is not something it can parse, and
+// it would see a stream that simply stops with garbage after the last good
+// record. Same fields, same code, same exit status; only the framing follows
+// the stream it interrupts.
 func reportEventsTruncated(err error, streaming bool) error {
 	var trunc *storage.EventsJournalTruncatedError
 	if !errors.As(err, &trunc) {
+		if streaming && jsonOutput {
+			return endEventsStream(buildJSONError(fmt.Sprintf("reading events journal: %v", err), ""))
+		}
 		return HandleErrorRespectJSON("reading events journal: %v", err)
 	}
 	if jsonOutput {
@@ -260,10 +265,7 @@ func reportEventsTruncated(err error, streaming bool) error {
 			"head":  trunc.Head,
 		}
 		if streaming {
-			if encErr := json.NewEncoder(os.Stdout).Encode(payload); encErr != nil {
-				return encErr
-			}
-			return &exitError{Code: 1}
+			return endEventsStream(payload)
 		}
 		if encErr := outputJSON(payload); encErr != nil {
 			return encErr
@@ -272,6 +274,15 @@ func reportEventsTruncated(err error, streaming bool) error {
 	}
 	return HandleErrorWithHint(trunc.Error(),
 		fmt.Sprintf("resume with --since %d to continue from the oldest retained record (accepting the gap), or re-import from scratch", trunc.Floor-1))
+}
+
+// endEventsStream writes a follower's failure as the last line of its --json
+// stream, compact like every record before it, and fails the command.
+func endEventsStream(failure any) error {
+	if err := json.NewEncoder(os.Stdout).Encode(failure); err != nil {
+		return err
+	}
+	return &exitError{Code: 1}
 }
 
 // noticeEventsJournalDisabled warns, on stderr, that this workspace is not
@@ -298,6 +309,22 @@ func noticeEventsJournalDisabled(beadsDir string) {
 		eventsjournal.ConfigKey)
 }
 
+// stoppedMidRead reports whether a follower's failed read is only its stop
+// (Ctrl-C, or stdin EOF under --exit-on-stdin-eof) landing while the read was
+// in flight: a clean interruption, as a stop between polls is. It keys on ctx
+// rather than on err because the canceled read can surface as a joined
+// "transaction has already been committed or rolled back" or a driver-wrapped
+// error instead of context.Canceled.
+//
+// A truncation is never just the stop. A read that got far enough to find its
+// checkpoint pruned has an answer for the consumer, so it is reported even
+// when the stop landed on the same turn: exiting 0 without it would tell the
+// consumer the stream had no gap.
+func stoppedMidRead(ctx context.Context, err error) bool {
+	var trunc *storage.EventsJournalTruncatedError
+	return ctx.Err() != nil && !errors.As(err, &trunc)
+}
+
 func runEventsTail(ctx context.Context, since int64, limit int, follow bool) error {
 	noticeEventsJournalDisabled(beads.FindBeadsDir())
 	enc := json.NewEncoder(os.Stdout)
@@ -319,13 +346,10 @@ func runEventsTail(ctx context.Context, since int64, limit int, follow bool) err
 
 	last, err := emit(since)
 	if err != nil {
-		// A follower stopped while a read is in flight (Ctrl-C, or stdin EOF
-		// under --exit-on-stdin-eof) sees that read fail with the cancellation.
-		// The stop is still a clean interruption, as it is between polls.
-		if follow && ctx.Err() != nil {
+		if follow && stoppedMidRead(ctx, err) {
 			return nil
 		}
-		return reportEventsTruncated(err, false)
+		return reportEventsTruncated(err, follow)
 	}
 	if !follow {
 		return nil
@@ -341,7 +365,7 @@ func runEventsTail(ctx context.Context, since int64, limit int, follow bool) err
 			return nil
 		case <-ticker.C:
 			if last, err = emit(last); err != nil {
-				if ctx.Err() != nil {
+				if stoppedMidRead(ctx, err) {
 					return nil
 				}
 				return reportEventsTruncated(err, true)

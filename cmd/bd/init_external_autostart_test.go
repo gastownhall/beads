@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/testutil"
 )
 
 // `bd init --external` declares that the Dolt server is managed outside bd, so
@@ -416,6 +417,49 @@ func TestNamedPortServerUnreachableAdvice(t *testing.T) {
 			}
 		})
 	}
+	// `bd dolt set port N` rewrites dolt_server_port and leaves the port file
+	// an earlier command wrote, which outranks it, so bd still dials the old
+	// port. The advice names that file as where the port came from and says
+	// to remove it, not dolt_server_port, whose removal would not move the dial.
+	t.Run("bd dolt set port beside the port file an open wrote", func(t *testing.T) {
+		f := newExternalInitFixture(t)
+		port := freeLoopbackPort(t)
+		moved := freeLoopbackPort(t)
+		for moved == port {
+			moved = freeLoopbackPort(t)
+		}
+		ep := tcpEndpoint(port)
+		beadsDir := namedPortWorkspace(t, f, port)
+		if err := os.WriteFile(filepath.Join(beadsDir, "dolt-server.port"), []byte(strconv.Itoa(port)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		// Test mode takes a port-file port for a production server and dials
+		// port 1 instead; BEADS_TEST_SERVER=1 is that heuristic's opt-out.
+		f.env = append(f.env, "BEADS_TEST_SERVER=1")
+		if res := f.run("", "dolt", "set", "port", strconv.Itoa(moved)); res.failed {
+			t.Fatalf("bd dolt set port failed:\n%s", res.output)
+		}
+
+		res := f.run("", "list")
+
+		if !res.failed {
+			t.Errorf("bd list succeeded against a dead endpoint %s:\n%s", ep.addr, res.output)
+		}
+		requireNoLaunch(t, res)
+		requireExternalUnreachableMessage(t, res.output, ep.addr)
+		for _, want := range []string{
+			"metadata.json declares this workspace's Dolt server externally managed, so bd did not start one at " + ep.addr,
+			fmt.Sprintf("dolt-server.port, which records the port an earlier command reached and outranks dolt_server_port (%d). "+
+				"Start that server, or remove that file.", moved),
+		} {
+			if !strings.Contains(res.output, want) {
+				t.Errorf("output does not contain %q:\n%s", want, res.output)
+			}
+		}
+		if strings.Contains(res.output, "Removing dolt_server_port") {
+			t.Errorf("output suggests removing dolt_server_port, which does not move the dial off the port file:\n%s", res.output)
+		}
+	})
 }
 
 // TestNamedPortServerDiagnosticsAdvice covers the commands that dial the
@@ -424,8 +468,9 @@ func TestNamedPortServerUnreachableAdvice(t *testing.T) {
 // BEADS_DOLT_PORT must make them dial its port, as the store does, rather
 // than 127.0.0.1:0 when it is alone, or a port-file port left over beside it.
 // A config.yaml dolt.port outranks it for the dial, as in the store, and the
-// advice still names it when both name the same port. A remote host keeps the
-// command's own advice.
+// advice still names it when both name the same port. A remote host gets the
+// remote-host advice. A host set only in the central server config is not
+// dialed: they dial what bd list dials.
 func TestNamedPortServerDiagnosticsAdvice(t *testing.T) {
 	diagnostics := [][]string{
 		{"dolt", "test"},
@@ -447,22 +492,126 @@ func TestNamedPortServerDiagnosticsAdvice(t *testing.T) {
 			runNamedPortDiagnostic(t, "BEADS_DOLT_PORT", "config.yaml", args)
 		})
 	}
-	t.Run("remote host/doctor --perf", func(t *testing.T) {
-		f := newExternalInitFixture(t)
-		namedPortWorkspace(t, f, 0)
-		f.env = append(f.env, "BEADS_DOLT_SERVER_HOST=db.invalid",
-			"BEADS_DOLT_SERVER_PORT="+strconv.Itoa(freeLoopbackPort(t)))
+	for _, args := range diagnostics {
+		t.Run("remote host/"+strings.Join(args, " "), func(t *testing.T) {
+			runRemoteHostDiagnostic(t, args)
+		})
+		t.Run("host only in the central server config/"+strings.Join(args, " "), func(t *testing.T) {
+			runCentralConfigHostDiagnostic(t, args)
+		})
+		for _, host := range []string{"::1", "[::1]"} {
+			t.Run("IPv6 host "+host+"/"+strings.Join(args, " "), func(t *testing.T) {
+				runIPv6HostDiagnostic(t, host, args)
+			})
+		}
+	}
+}
 
-		res := f.run("", "doctor", "--perf")
+// runIPv6HostDiagnostic runs bd list and one diagnostic against a server at
+// an IPv6 host that BEADS_DOLT_SERVER_HOST names bare ("::1") or bracketed
+// ("[::1]"). The listener speaks no MySQL, so both fail, but both must reach
+// it, as they would a server at any other host: bd list with its fail-fast
+// probe and its connection, the diagnostic with its probe or connection. A
+// diagnostic that dials ::1:port or [[::1]]:port instead reports the running
+// server as not running.
+func runIPv6HostDiagnostic(t *testing.T, host string, args []string) {
+	t.Helper()
+	port, accepted := testutil.IPv6LoopbackListener(t)
+	f := newExternalInitFixture(t)
+	namedPortWorkspace(t, f, 0)
+	f.env = append(f.env, "BEADS_DOLT_SERVER_HOST="+host, "BEADS_DOLT_SERVER_PORT="+strconv.Itoa(port))
+
+	for _, cmdArgs := range [][]string{{"list"}, args} {
+		want := int64(1)
+		if cmdArgs[0] == "list" {
+			want = 2 // the fail-fast probe and the connection
+		}
+		before := accepted()
+		res := f.run("", cmdArgs...)
+
+		requireNoLaunch(t, res)
+		for deadline := time.Now().Add(2 * time.Second); accepted()-before < want && time.Now().Before(deadline); {
+			time.Sleep(10 * time.Millisecond)
+		}
+		if got := accepted() - before; got < want {
+			t.Errorf("bd %s made %d connections to the server at [::1]:%d, want at least %d:\n%s",
+				strings.Join(cmdArgs, " "), got, port, want, res.output)
+		}
+		for _, banned := range []string{"not running", "[[::1]]", "no such host", "too many colons", "missing port"} {
+			if strings.Contains(res.output, banned) {
+				t.Errorf("bd %s output contains %q:\n%s", strings.Join(cmdArgs, " "), banned, res.output)
+			}
+		}
+		if want := "Testing connection to " + net.JoinHostPort("::1", strconv.Itoa(port)); cmdArgs[0] == "dolt" &&
+			cmdArgs[1] == "test" && !strings.Contains(res.output, want) {
+			t.Errorf("bd dolt test output does not contain %q:\n%s", want, res.output)
+		}
+	}
+}
+
+// runCentralConfigHostDiagnostic runs bd list and one diagnostic against a
+// workspace whose metadata.json names a dead port and whose host only the
+// central server config (~/.config/beads/server.json) names. bd list's store
+// open never applies that file, so it dials 127.0.0.1, and the diagnostic must
+// dial the same endpoint: --perf times bd list, and the others check the
+// server it uses.
+func runCentralConfigHostDiagnostic(t *testing.T, args []string) {
+	t.Helper()
+	f := newExternalInitFixture(t)
+	port := freeLoopbackPort(t)
+	ep := tcpEndpoint(port)
+	namedPortWorkspace(t, f, port)
+	central := filepath.Join(f.home, "server.json")
+	if err := os.WriteFile(central, []byte(`{"dolt_server_host":"db.invalid"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.env = append(f.env, "BEADS_CENTRAL_CONFIG="+central)
+
+	for _, cmdArgs := range [][]string{{"list"}, args} {
+		res := f.run("", cmdArgs...)
 
 		requireNoLaunch(t, res)
 		if !res.failed {
-			t.Errorf("bd doctor --perf succeeded with no server:\n%s", res.output)
+			t.Errorf("bd %s succeeded with no server:\n%s", strings.Join(cmdArgs, " "), res.output)
 		}
-		if strings.Contains(res.output, "externally managed") {
-			t.Errorf("output gives the local externally managed advice for a remote host:\n%s", res.output)
+		if !strings.Contains(res.output, ep.addr) {
+			t.Errorf("bd %s output does not contain %q:\n%s", strings.Join(cmdArgs, " "), ep.addr, res.output)
 		}
-	})
+		if strings.Contains(res.output, "db.invalid") {
+			t.Errorf("bd %s output names the central server config's host:\n%s", strings.Join(cmdArgs, " "), res.output)
+		}
+	}
+}
+
+// runRemoteHostDiagnostic runs one diagnostic against a server on another
+// machine whose port BEADS_DOLT_SERVER_PORT names. It must dial that host, not
+// 127.0.0.1, and give the remote-host advice: not `bd dolt start`, which
+// refuses a remote host, and not the local externally managed advice.
+func runRemoteHostDiagnostic(t *testing.T, args []string) {
+	t.Helper()
+	f := newExternalInitFixture(t)
+	port := freeLoopbackPort(t)
+	namedPortWorkspace(t, f, 0)
+	f.env = append(f.env, "BEADS_DOLT_SERVER_HOST=db.invalid", "BEADS_DOLT_SERVER_PORT="+strconv.Itoa(port))
+
+	res := f.run("", args...)
+
+	requireNoLaunch(t, res)
+	if !res.failed {
+		t.Errorf("bd %s succeeded with no server:\n%s", strings.Join(args, " "), res.output)
+	}
+	for _, want := range []string{net.JoinHostPort("db.invalid", strconv.Itoa(port)), fmt.Sprintf("nc -zv db.invalid %d", port)} {
+		if !strings.Contains(res.output, want) {
+			t.Errorf("output does not contain %q:\n%s", want, res.output)
+		}
+	}
+	// The loopback endpoint, not "127.0.0.1" alone: a resolver on 127.0.0.1
+	// can appear in the failed lookup of db.invalid.
+	for _, banned := range []string{net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), "bd dolt start", "externally managed"} {
+		if strings.Contains(res.output, banned) {
+			t.Errorf("output contains %q:\n%s", banned, res.output)
+		}
+	}
 }
 
 // runNamedPortDiagnostic runs one diagnostic against a dead port named by

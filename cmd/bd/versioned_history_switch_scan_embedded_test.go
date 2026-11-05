@@ -39,8 +39,9 @@ import (
 //
 // A row participates when it was created while history was on. A row created while history was
 // off is a legacy row, and design §16.2b's write fence skips a write to it before the mint looks
-// at it, so a value it holds blocks nothing. Each offender below therefore has a legacy twin
-// holding the same value in the same status.
+// at it, so a value it holds blocks no write to it. Each offender below therefore has a legacy
+// twin holding the same value in the same status, and none of them is part of a proto, whose
+// values a pour copies (TestEmbeddedVersionedHistorySwitchChecksTheLegacyProtosAPourCopies).
 //
 // What this pins, end to end and in a database of its own:
 //   - the refusal exits non-zero and prints the count, the ids and the remedy,
@@ -597,4 +598,274 @@ func TestEmbeddedConfigSetOtherKeysSkipTheVersionedHistoryScan(t *testing.T) {
 	if !strings.Contains(out, offender) {
 		t.Fatalf("the refused switch does not name %s, so the pin above proves nothing:\n%s", offender, out)
 	}
+}
+
+// molRefusedWithHistoryOn reports whether `bd mol <args>` (a pour or a bond) is refused when the
+// process records versions because its ENVIRONMENT says so, a plane the pre-enable scan does not
+// guard. A pour, or a bond of a template, copies the proto's values into the issues it creates, and
+// each of them is versioned, so this asks the mint itself whether the proto holds a value it would
+// refuse.
+func molRefusedWithHistoryOn(t *testing.T, bd, dir string, args ...string) bool {
+	t.Helper()
+	cmd := exec.Command(bd, append([]string{"mol"}, args...)...)
+	cmd.Dir = dir
+	cmd.Env = append(bdEnv(dir), vhEnvVar+"=1")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		return false
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("bd mol %s failed without an exit code: %v\n%s", strings.Join(args, " "), err, out)
+	}
+	if !strings.Contains(string(out), "I-JSON") {
+		t.Fatalf("bd mol %s failed, but not with the mint's refusal of a number outside the I-JSON range:\n%s", strings.Join(args, " "), out)
+	}
+	return true
+}
+
+// pourJSON pours proto with history off and returns what --json reports.
+func pourJSON(t *testing.T, bd, dir, proto string) pourJSONResult {
+	t.Helper()
+	out := bdRunOK(t, bd, dir, "mol", "pour", proto, "--json")
+	var result pourJSONResult
+	if err := json.Unmarshal([]byte(out[strings.Index(out, "{"):]), &result); err != nil {
+		t.Fatalf("parse bd mol pour %s --json: %v\n%s", proto, err, out)
+	}
+	return result
+}
+
+// warnedUnder reports whether out lists id in the switch's warning as part of the proto rooted at
+// root.
+func warnedUnder(out, id, root string) bool {
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "  "+id+"  ") && strings.HasSuffix(line, "(proto "+root+")") {
+			return true
+		}
+	}
+	return false
+}
+
+// TestEmbeddedVersionedHistorySwitchChecksTheLegacyProtosAPourCopies drives the REAL
+// `bd config set versioned-history.enabled true` against a store whose protos, and molecules
+// poured from them, were written while history was off and hold values a version could not record.
+//
+// Every issue here is legacy, so the write fence skips every write to it. But `bd mol pour` and
+// `bd mol bond` copy a proto's metadata and gate timeouts into every issue they create, and with
+// history on each new issue is versioned, so every persistent pour of such a proto is refused. A
+// template (what bd cook --persist writes) cannot be fixed with bd update, the in-place fix, and the
+// pour's refusal names no fix, so the switch refuses over it and names the fixes that work (bd cook
+// --persist --force, bd delete). Any other issue of a proto -- under a template or an issue labeled
+// template, which the root of a molecule poured from a stored proto is too, since pour copies the
+// proto's labels -- can be fixed in place with history on, so the switch only warns about it, naming
+// the proto's root. A template whose label was removed is still a proto's root: pour refuses it, but
+// bd mol bond treats any template as a proto and copies everything under it.
+//
+// What this pins, end to end and in a database of its own:
+//   - it refuses over the templates bd cook --persist wrote, for a step's metadata and a gate's
+//     timeout, marks them, tells how to fix one, and writes NOTHING,
+//   - it warns of, and does not refuse over, the other legacy issues of a proto: in a proto
+//     assembled by hand, a step that inherited the template label through --parent, one created
+//     with --no-inherit-labels and one attached with a parent-child dependency; and the steps of
+//     molecules poured from the cooked proto before the switch, each under its poured root; and an
+//     issue attached under a cooked template whose template label was removed,
+//   - it names no legacy issue that is part of no proto, a gate past the range included,
+//   - the scan and the mint AGREE: with history on through the environment, a pour of each proto
+//     it named is refused, a poured molecule's root included, and so is a bond of the template
+//     without the label,
+//   - the refusal's template remedy clears the switch, although the poured molecules still hold the
+//     proto's old values: the switch turns on, still warning of them,
+//   - with history on, the cooked proto pours, the hand-assembled steps and the poured gates stay
+//     writable (bd update, and bd delete for a gate, the fixes the warning names), and once the
+//     steps are fixed with bd update the hand-assembled proto pours too, and once the issue under
+//     the template without the label is fixed, that template bonds.
+func TestEmbeddedVersionedHistorySwitchChecksTheLegacyProtosAPourCopies(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	// The protos below can only be written while nothing records versions. No t.Parallel:
+	// t.Setenv is incompatible.
+	t.Setenv(vhEnvVar, "")
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "vsq")
+
+	const timestampInNanoseconds = `{"ts":1727000000000000000}`
+
+	// The formula lives outside every formula search path, so `bd mol pour quarterly` pours the proto
+	// bd cook --persist wrote into the store, not the file.
+	formula := filepath.Join(t.TempDir(), "quarterly.formula.toml")
+	writeFormula := func(stamp, timeout string) {
+		t.Helper()
+		body := fmt.Sprintf(`formula = "quarterly"
+description = "a quarterly review"
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "prep"
+title = "Prepare"
+[steps.metadata]
+ts = %s
+
+[[steps]]
+id = "review"
+title = "Review"
+depends_on = ["prep"]
+
+[steps.gate]
+type = "timer"
+await_id = "quarter"
+timeout = %q
+`, stamp, timeout)
+		if err := os.WriteFile(formula, []byte(body), 0o600); err != nil {
+			t.Fatalf("writing the formula: %v", err)
+		}
+	}
+	writeFormula("1727000000000000000", "2600h")
+	bdRunOK(t, bd, dir, "cook", formula, "--persist")
+	const cooked, cookedStep, cookedGate = "quarterly", "quarterly.prep", "quarterly.gate-review"
+
+	// Two molecules poured from the stored proto while history is off: each carries the proto's
+	// values, and its root carries the proto's template label.
+	type pouredMolecule struct{ root, step, gate string }
+	var poured []pouredMolecule
+	for range 2 {
+		result := pourJSON(t, bd, dir, cooked)
+		m := pouredMolecule{root: result.NewEpicID, step: result.IDMapping[cookedStep], gate: result.IDMapping[cookedGate]}
+		if m.root == "" || m.step == "" || m.gate == "" {
+			t.Fatalf("bd mol pour %s --json did not map the proto's root, step and gate: %+v", cooked, result)
+		}
+		poured = append(poured, m)
+	}
+
+	// A proto assembled by hand. Its root is labeled template, and its steps reach it each way pour
+	// follows: one inherits the label through --parent, one opts out of the label, and one is attached
+	// afterwards with a parent-child dependency.
+	hand := bdCreateSilent(t, bd, dir, "hand-assembled proto", "--type", "epic", "--labels", "template")
+	labeledStep := bdCreateSilent(t, bd, dir, "inherits the template label", "--parent", hand, "--metadata", timestampInNanoseconds)
+	unlabeledStep := bdCreateSilent(t, bd, dir, "opts out of the label", "--parent", hand, "--no-inherit-labels", "--metadata", timestampInNanoseconds)
+	attached := bdCreateSilent(t, bd, dir, "attached afterwards", "--metadata", timestampInNanoseconds)
+	bdRunOK(t, bd, dir, "dep", "add", attached, hand, "--type", "parent-child")
+
+	// A cooked template whose template label was removed afterwards, with an issue attached under it.
+	// Pour refuses it ("not a proto"), but bond treats any template as a proto and copies the whole
+	// subgraph under it, the attached issue included.
+	bareFormula := filepath.Join(t.TempDir(), "bare.formula.toml")
+	if err := os.WriteFile(bareFormula, []byte(`formula = "bare"
+description = "a template that loses its label"
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "only"
+title = "Only"
+`), 0o600); err != nil {
+		t.Fatalf("writing the bare formula: %v", err)
+	}
+	bdRunOK(t, bd, dir, "cook", bareFormula, "--persist")
+	const bare = "bare"
+	underBare := bdCreateSilent(t, bd, dir, "attached under a template without the label", "--metadata", timestampInNanoseconds)
+	bdRunOK(t, bd, dir, "dep", "add", underBare, bare, "--type", "parent-child")
+	bdRunOK(t, bd, dir, "label", "remove", bare, "template")
+	bondTarget := bdCreateSilent(t, bd, dir, "a molecule to bond onto", "--type", "epic")
+
+	// Legacy issues that are part of no proto: no write to them is refused, and no write copies them.
+	legacy := bdCreateSilent(t, bd, dir, "legacy, part of no proto", "--metadata", timestampInNanoseconds)
+	legacyGate := createTimerGate(t, bd, dir, legacy, "2600h")
+
+	warned := map[string]string{
+		labeledStep:   hand,
+		unlabeledStep: hand,
+		attached:      hand,
+		underBare:     bare,
+	}
+	for _, m := range poured {
+		warned[m.step] = m.root
+		warned[m.gate] = m.root
+	}
+	checkWarning := func(out string) {
+		t.Helper()
+		for id, root := range warned {
+			if !warnedUnder(out, id, root) {
+				t.Errorf("the switch does not warn of %s under the proto rooted at %s, whose value a pour of it (or a bond, for a template root) copies:\n%s", id, root, out)
+			}
+		}
+		for _, want := range []string{fmt.Sprintf("Warning: %d legacy issues of a proto", len(warned)), "bd label remove <root> template"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("the switch's warning does not contain %q:\n%s", want, out)
+			}
+		}
+	}
+
+	out, code := bdRunFailCode(t, bd, dir, "config", "set", "versioned-history.enabled", "true")
+	if code == 0 {
+		t.Fatalf("enabling versioned history over templates a pour would copy exited 0; out=%s", out)
+	}
+	for _, want := range []string{
+		"2 issues hold",
+		"  " + cookedStep + "  (template) ",
+		"  " + cookedGate + "  (template) ",
+		"bd mol pour and bd mol bond copy its value",
+		"bd cook <formula> --persist --force",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the refusal does not contain %q, so it does not say what is wrong or how to fix it:\n%s", want, out)
+		}
+	}
+	checkWarning(out)
+	for name, id := range map[string]string{
+		"the cooked proto's root":         cooked,
+		"the hand-assembled proto's root": hand,
+		"the template without the label":  bare,
+		"the bond target":                 bondTarget,
+		"the legacy issue in no proto":    legacy,
+		"the legacy gate in no proto":     legacyGate,
+	} {
+		if strings.Contains(out, "  "+id+"  ") {
+			t.Errorf("the switch names %s (%s), which holds no such value or is part of no proto:\n%s", name, id, out)
+		}
+	}
+	if got := strings.TrimSpace(bdConfig(t, bd, dir, "get", "versioned-history.enabled")); strings.HasPrefix(got, "true") {
+		t.Fatalf("the refused `config set ... true` wrote the setting anyway: config get says %q", got)
+	}
+
+	// Ask the mint, through a process that records because its environment says so, what a pour of
+	// each proto does: it is refused, which is what the switch named the proto's issues for.
+	for _, proto := range []string{cooked, hand, poured[0].root} {
+		if !molRefusedWithHistoryOn(t, bd, dir, "pour", proto) {
+			t.Errorf("with history on, a pour of %s succeeded although the switch named its issues", proto)
+		}
+	}
+	if !molRefusedWithHistoryOn(t, bd, dir, "bond", bare, bondTarget) {
+		t.Errorf("with history on, a bond of the template %s without the label succeeded although the switch named %s under it", bare, underBare)
+	}
+
+	// The refusal's template remedy: a template is read-only, so the formula is fixed and cooked again.
+	// That alone clears the switch, although the poured molecules still hold the old values.
+	if out, _ := bdRunFailCode(t, bd, dir, "update", cookedStep, "--unset-metadata", "ts"); !strings.Contains(out, "read-only") {
+		t.Errorf("bd update of the template %s did not refuse as read-only, so the refusal's template remedy is wrong:\n%s", cookedStep, out)
+	}
+	writeFormula(`"1727000000000000000"`, "2000h")
+	bdRunOK(t, bd, dir, "cook", formula, "--persist", "--force")
+
+	out = bdRunOK(t, bd, dir, "config", "set", "versioned-history.enabled", "true")
+	if got := strings.TrimSpace(bdConfig(t, bd, dir, "get", "versioned-history.enabled")); !strings.HasPrefix(got, "true") {
+		t.Fatalf("after cooking the fixed formula again the switch did not turn on: config get says %q", got)
+	}
+	checkWarning(out)
+
+	// History is on now, through the store's own row. The cooked proto pours; the legacy issues the
+	// warning named stay writable, and a poured gate can be removed; once the hand-assembled steps are fixed
+	// with bd update, that proto pours too; and the legacy issues in no proto stay writable.
+	bdRunOK(t, bd, dir, "mol", "pour", cooked)
+	bdRunOK(t, bd, dir, "update", poured[0].gate, "--notes", "touched with history on")
+	bdRunOK(t, bd, dir, "delete", poured[1].gate, "--force")
+	for _, id := range []string{labeledStep, unlabeledStep, attached} {
+		bdRunOK(t, bd, dir, "update", id, "--unset-metadata", "ts")
+	}
+	bdRunOK(t, bd, dir, "mol", "pour", hand)
+	bdRunOK(t, bd, dir, "update", underBare, "--unset-metadata", "ts")
+	bdRunOK(t, bd, dir, "mol", "bond", bare, bondTarget)
+	bdRunOK(t, bd, dir, "update", legacy, "--notes", "touched with history on")
 }

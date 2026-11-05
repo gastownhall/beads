@@ -81,7 +81,7 @@ func TestRecordVersionInTxRefusesANumberOutsideTheRangeAndWritesNothing(t *testi
 				WillReturnRows(sqlmock.NewRows([]string{"issue_id", "depends_on_id", "type", "created_at", "created_by", "metadata", "thread_id"}))
 			mock.ExpectQuery(regexp.QuoteMeta("SELECT epoch FROM store_epoch WHERE id = 1")).
 				WillReturnRows(sqlmock.NewRows([]string{"epoch"}).AddRow(1))
-			mock.ExpectQuery(regexp.QuoteMeta("SELECT COALESCE(MAX(revision), 0) + 1 FROM issue_versions WHERE issue_id = ?")).
+			mock.ExpectQuery(regexp.QuoteMeta("SELECT COALESCE((SELECT MAX(revision) FROM issue_versions WHERE issue_id = ?), 0) + 1")).
 				WithArgs(id).
 				WillReturnRows(sqlmock.NewRows([]string{"next"}).AddRow(1))
 			mock.ExpectRollback()
@@ -237,7 +237,7 @@ func TestRecordVersionAtInTxKeepsThePlaneRuleButNotTheFence(t *testing.T) {
 			WillReturnRows(sqlmock.NewRows([]string{"issue_id", "depends_on_id", "type", "created_at", "created_by", "metadata", "thread_id"}))
 		mock.ExpectQuery(regexp.QuoteMeta("SELECT epoch FROM store_epoch WHERE id = 1")).
 			WillReturnRows(sqlmock.NewRows([]string{"epoch"}).AddRow(1))
-		mock.ExpectQuery(regexp.QuoteMeta("SELECT COALESCE(MAX(revision), 0) + 1 FROM issue_versions WHERE issue_id = ?")).
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT COALESCE((SELECT MAX(revision) FROM issue_versions WHERE issue_id = ?), 0) + 1")).
 			WithArgs(id).
 			WillReturnRows(sqlmock.NewRows([]string{"next"}).AddRow(1))
 		mock.ExpectExec(`INSERT INTO issue_versions`).

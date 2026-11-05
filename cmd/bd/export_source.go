@@ -45,7 +45,9 @@ type exportSource interface {
 	// MUST fail rather than return a partial set.
 	ExportMemories(ctx context.Context) (map[string]string, error)
 	// LoadExportRelations bulk-loads labels, dependency records, comments,
-	// comment counts, and dependency counts for the searched issues.
+	// comment counts, and dependency counts for the searched issues. Like
+	// ExportIssues, it MUST fail rather than return a relation partially or
+	// silently empty (GH#6870).
 	LoadExportRelations(ctx context.Context, issues []*types.Issue) (exportRelations, error)
 	// WispPlaneIDs reports which of ids currently live in the WISPS table.
 	// Export uses it to stamp the explicit "wisp_plane" marker on records
@@ -130,13 +132,35 @@ func (storeExportSource) LoadExportRelations(ctx context.Context, issues []*type
 		issueIDs[i] = issue.ID
 	}
 
-	// Individual bulk-load failures deliberately degrade to empty maps rather
-	// than aborting the export — unchanged from the pre-seam classic behavior.
-	labelsMap, _ := store.GetLabelsForIssues(ctx, issueIDs)
-	allDeps, _ := store.GetDependencyRecordsForIssues(ctx, issueIDs)
-	commentsMap, _ := store.GetCommentsForIssues(ctx, issueIDs)
-	commentCounts, _ := store.GetCommentCounts(ctx, issueIDs)
-	depCounts, _ := store.GetDependencyCounts(ctx, issueIDs)
+	return loadClassicExportRelations(ctx, issueIDs)
+}
+
+// loadClassicExportRelations bulk-loads the five export relations for
+// issueIDs from the classic `store` global. It is shared by `bd export` and
+// both auto-export writers, and fails on the first loader error rather than
+// exporting that relation empty (GH#6870). The wrap prefixes match
+// uowExportSource so a failure reads the same in classic and proxied mode.
+func loadClassicExportRelations(ctx context.Context, issueIDs []string) (exportRelations, error) {
+	labelsMap, err := store.GetLabelsForIssues(ctx, issueIDs)
+	if err != nil {
+		return exportRelations{}, fmt.Errorf("load labels: %w", err)
+	}
+	allDeps, err := store.GetDependencyRecordsForIssues(ctx, issueIDs)
+	if err != nil {
+		return exportRelations{}, fmt.Errorf("load dependency records: %w", err)
+	}
+	commentsMap, err := store.GetCommentsForIssues(ctx, issueIDs)
+	if err != nil {
+		return exportRelations{}, fmt.Errorf("load comments: %w", err)
+	}
+	commentCounts, err := store.GetCommentCounts(ctx, issueIDs)
+	if err != nil {
+		return exportRelations{}, fmt.Errorf("load comment counts: %w", err)
+	}
+	depCounts, err := store.GetDependencyCounts(ctx, issueIDs)
+	if err != nil {
+		return exportRelations{}, fmt.Errorf("load dependency counts: %w", err)
+	}
 
 	return exportRelations{
 		labels:        labelsMap,

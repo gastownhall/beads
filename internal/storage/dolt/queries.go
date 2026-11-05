@@ -25,6 +25,31 @@ func (s *DoltStore) SearchIssues(ctx context.Context, query string, filter types
 	return result, err
 }
 
+// SearchIssuesWithConfig is SearchIssues and GetConfig of key in one read
+// transaction (storage.IssuesWithConfigSearcher).
+func (s *DoltStore) SearchIssuesWithConfig(ctx context.Context, query string, filter types.IssueFilter, key string) ([]*types.Issue, string, error) {
+	var issues []*types.Issue
+	var value string
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		issues, value, err = issueops.SearchIssuesWithConfigInTx(ctx, tx, query, filter, key)
+		return err
+	})
+	return issues, value, err
+}
+
+// SearchDescendants walks the --parent tree under rootID in one read
+// transaction (storage.DescendantSearcher).
+func (s *DoltStore) SearchDescendants(ctx context.Context, rootID string, filter types.IssueFilter) ([]*types.Issue, error) {
+	var result []*types.Issue
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.SearchDescendantsInTx(ctx, tx, rootID, filter)
+		return err
+	})
+	return result, err
+}
+
 // SearchIssueIDs is the narrow-projection variant of SearchIssues; returns
 // only matching IDs.
 func (s *DoltStore) SearchIssueIDs(ctx context.Context, query string, filter types.IssueFilter) ([]string, error) {
@@ -371,6 +396,9 @@ func (s *DoltStore) GetMoleculeProgress(ctx context.Context, moleculeID string) 
 		childIDs = append(childIDs, id)
 	}
 	_ = depRows.Close() // Redundant close for safety (rows already iterated)
+	if err := depRows.Err(); err != nil {
+		return nil, wrapQueryError("get molecule progress: child rows", err)
+	}
 
 	// Step 2: Batch-fetch status for all children (batched IN clauses to avoid full table scans).
 	// Children of a wisp molecule are also wisps, so use the same table.
@@ -401,6 +429,9 @@ func (s *DoltStore) GetMoleculeProgress(ctx context.Context, moleculeID string) 
 				childMap[id] = childInfo{status: status}
 			}
 			_ = statusRows.Close()
+			if err := statusRows.Err(); err != nil {
+				return nil, wrapQueryError("get molecule progress: status rows", err)
+			}
 		}
 
 		for _, childID := range childIDs {

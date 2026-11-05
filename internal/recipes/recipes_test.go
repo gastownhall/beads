@@ -1,8 +1,10 @@
 package recipes
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	beadsplugin "github.com/steveyegge/beads/plugins/beads"
@@ -207,4 +209,157 @@ func containsAll(s string, substrs ...string) bool {
 		}
 	}
 	return true
+}
+
+// TestPathInside pins the rule bd setup holds a .beads/recipes.toml recipe's
+// paths to: a relative path that stays inside the directory bd setup runs in,
+// with nothing that exists along it leading out of that directory through a
+// symbolic link.
+func TestPathInside(t *testing.T) {
+	base := t.TempDir()
+	dir := filepath.Join(base, "ws")
+	outside := filepath.Join(base, "outside")
+	for _, d := range []string{filepath.Join(dir, "sub", "deep"), filepath.Join(outside, "deep")} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, f := range []string{filepath.Join(dir, "file"), filepath.Join(dir, "sub", "real.md"), filepath.Join(outside, "victim.md")} {
+		if err := os.WriteFile(f, []byte("x\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	links := map[string]string{
+		"up":           "..",                      // a directory link out of dir
+		"in":           "sub",                     // a directory link inside dir
+		"absin":        filepath.Join(dir, "sub"), // an absolute link inside dir
+		"sub/out.md":   filepath.Join("..", "..", "outside", "victim.md"),
+		"sub/in.md":    "real.md",
+		"sub/dangling": "missing.md",
+		"sub/loop":     "loop",
+		"o":            filepath.Join("..", "outside"),         // .. after it leads to base
+		"x":            filepath.Join("sub", "deep"),           // .. after it leads to sub
+		"od":           filepath.Join("..", "outside", "deep"), // .. after it leads to outside
+		// a link outside dir whose target is inside: removing it through
+		// up removes an entry outside dir
+		filepath.Join("..", "outside", "back.md"): filepath.Join(dir, "sub", "real.md"),
+	}
+	symlinks := true
+	for name, target := range links {
+		if err := os.Symlink(target, filepath.Join(dir, name)); err != nil {
+			symlinks = false
+			t.Logf("symlink: %v", err)
+			break
+		}
+	}
+	// raw joins elements without cleaning them, as a recipe spells a path.
+	raw := func(elem ...string) string { return strings.Join(elem, string(filepath.Separator)) }
+	for _, tt := range []struct {
+		path         string
+		want         bool
+		link         bool // needs the links above
+		unfollowable bool // refused as ErrPathUnfollowable, not ErrPathOutside
+	}{
+		{path: ".myeditor/rules.md", want: true},
+		{path: "sub/real.md", want: true},
+		{path: raw("a", "..", "b.md"), want: true},
+		{path: filepath.Join("file", "x.md"), want: true}, // the filesystem refuses it later, as before
+		{path: "", want: false},
+		{path: filepath.Join("..", "outside", "victim.md"), want: false},
+		{path: raw("sub", "..", "..", "outside", "victim.md"), want: false},
+		{path: filepath.Join(dir, "sub", "real.md"), want: false}, // absolute, even inside
+		{path: filepath.Join(outside, "victim.md"), want: false},
+		{path: filepath.Join("up", "outside", "victim.md"), want: false, link: true},
+		{path: filepath.Join("up", "outside", "new", "x.md"), want: false, link: true},
+		{path: filepath.Join("in", "real.md"), want: true, link: true},
+		{path: filepath.Join("absin", "new.md"), want: true, link: true},
+		{path: filepath.Join("sub", "out.md"), want: false, link: true},
+		{path: filepath.Join("sub", "in.md"), want: true, link: true},
+		{path: filepath.Join("sub", "dangling"), want: false, link: true, unfollowable: true},
+		{path: filepath.Join("sub", "loop", "x.md"), want: false, link: true, unfollowable: true},
+		{path: filepath.Join("up", "ws", "sub", "real.md"), want: true, link: true},
+		{path: filepath.Join("up", "outside", "back.md"), want: false, link: true},
+		// The OS takes .. after a link to the parent of its target.
+		{path: raw("o", "..", "outside", "victim.md"), want: false, link: true},
+		{path: raw("o", "..", "ws", "sub", "real.md"), want: true, link: true},
+		{path: raw("in", "..", "sub", "real.md"), want: true, link: true},
+		{path: raw("new", "..", "sub", "real.md"), want: true},
+		{path: raw("sub", "dangling", "..", "real.md"), want: false, link: true, unfollowable: true},
+		// The OS walks x/../up/new to sub/up/new, inside, but the directory
+		// install creates and --remove drops is filepath.Dir of the path,
+		// cleaned to up/new, which is outside.
+		{path: raw("x", "..", "up", "new", "x.md"), want: false, link: true},
+		{path: raw("x", "..", "sub", "deep", "x.md"), want: true, link: true},
+		// The other way round: the cleaned directory is dir, but the OS
+		// walks od/.. to outside, where back.md, a link to a file inside,
+		// is an entry --remove would delete.
+		{path: raw("od", "..", "back.md"), want: false, link: true},
+		// Windows cleans .. away before it follows links, so it opens
+		// x/../sub/out.md as sub/out.md, a link out: the cleaned path is
+		// checked too.
+		{path: raw("x", "..", "sub", "out.md"), want: false, link: true},
+		// Each form needs its own check: the OS walks o/../ws/sub/out.md to
+		// the linked file out, while its cleaned form, ws/sub/out.md under
+		// dir, does not exist; and x/../up/outside/back.md cleans to a link
+		// back inside whose directory, up/outside, is outside.
+		{path: raw("o", "..", "ws", "sub", "out.md"), want: false, link: true},
+		{path: raw("x", "..", "up", "outside", "back.md"), want: false, link: true},
+	} {
+		if tt.link && !symlinks {
+			continue
+		}
+		err := PathInside(dir, tt.path)
+		if got := err == nil; got != tt.want {
+			t.Errorf("PathInside(dir, %q) = %v, want inside %v", tt.path, err, tt.want)
+			continue
+		}
+		if want := ErrPathOutside; !tt.want {
+			if tt.unfollowable {
+				want = ErrPathUnfollowable
+			}
+			if !errors.Is(err, want) {
+				t.Errorf("PathInside(dir, %q) = %v, want %v", tt.path, err, want)
+			}
+		}
+	}
+}
+
+// TestPathInsideUnresolvableDir pins that a directory that cannot be resolved
+// (a deleted working directory) is reported as such, not as a path outside.
+func TestPathInsideUnresolvableDir(t *testing.T) {
+	err := PathInside(filepath.Join(t.TempDir(), "gone"), "x.md")
+	if err == nil || errors.Is(err, ErrPathOutside) || errors.Is(err, ErrPathUnfollowable) {
+		t.Fatalf("PathInside(gone, x.md) = %v, want a directory resolution error", err)
+	}
+}
+
+// TestLoadUserRecipesMarksWorkspaceRecipes pins that a recipe read from
+// .beads/recipes.toml is marked Workspace, an override of a built-in
+// included, and a built-in is not, and that SaveUserRecipe does not write the
+// mark into the file.
+func TestLoadUserRecipesMarksWorkspaceRecipes(t *testing.T) {
+	beadsDir := t.TempDir()
+	for name, path := range map[string]string{"myeditor": ".myeditor/rules.md", "windsurf": ".my-windsurf/beads.md"} {
+		if err := SaveUserRecipe(beadsDir, name, path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	data, err := os.ReadFile(filepath.Join(beadsDir, "recipes.toml"))
+	if err != nil || strings.Contains(strings.ToLower(string(data)), "workspace") {
+		t.Fatalf("recipes.toml holds the Workspace mark: %v\n%s", err, data)
+	}
+	for name, want := range map[string]bool{"myeditor": true, "windsurf": true, "kiro": false, "copilot": false} {
+		recipe, err := GetRecipe(name, beadsDir)
+		if err != nil {
+			t.Fatalf("GetRecipe(%s): %v", name, err)
+		}
+		if recipe.Workspace != want {
+			t.Errorf("GetRecipe(%s).Workspace = %v, want %v", name, recipe.Workspace, want)
+		}
+	}
+	for name, recipe := range BuiltinRecipes {
+		if recipe.Workspace {
+			t.Errorf("built-in recipe %s is marked Workspace", name)
+		}
+	}
 }

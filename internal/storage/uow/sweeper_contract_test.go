@@ -84,7 +84,13 @@ func TestSweeperContract(t *testing.T) {
 
 func newUOWSweeperFixture(t *testing.T, ctx context.Context, prefix string) conformance.SweeperFixture {
 	t.Helper()
-	provider := newUOWRoleFixtureProvider(t, ctx, prefix)
+	return newUOWSweeperFixtureOnProvider(t, newUOWRoleFixtureProvider(t, ctx, prefix), prefix)
+}
+
+// newUOWSweeperFixtureOnProvider builds the Sweeper fixture over an existing
+// provider, for a contract that composes more of its roles beside the sweeper.
+func newUOWSweeperFixtureOnProvider(t *testing.T, provider UnitOfWorkProvider, prefix string) conformance.SweeperFixture {
+	t.Helper()
 	// Through the capability accessor, not NewSweeper: a provider that stopped
 	// offering the role is the regression a constructor call would hide.
 	source, ok := provider.(SweeperSource)

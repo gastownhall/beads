@@ -1,6 +1,6 @@
 {
   "name": "beads Development Container",
-  "image": "mcr.microsoft.com/devcontainers/go:2-1.26-bookworm",
+  "image": "mcr.microsoft.com/devcontainers/go:2-1.27-bookworm",
   
   "features": {
     "ghcr.io/devcontainers/features/git:1": {

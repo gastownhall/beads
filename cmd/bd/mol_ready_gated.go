@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"sort"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/issueops"
@@ -39,6 +41,10 @@ This command discovers molecules waiting at a gate step where:
 
 This enables discovery-based resume without explicit waiter tracking.
 The patrol system uses this to find and dispatch gate-ready molecules.
+
+For a formula step declared type = "gate" with a [steps.gate] block, the
+gate bead is an exit-gate that the step's own task blocks, so the ready
+step is the one that follows the gate, not that task.
 
 Examples:
   bd mol ready --gated           # Find all gate-ready molecules
@@ -103,13 +109,20 @@ func renderGatedReadyMolecules(molecules []*GatedMolecule) error {
 	fmt.Printf("\n%s Molecules ready for gate-resume dispatch (%d):\n\n",
 		ui.RenderAccent(""), len(molecules))
 
+	// Every ID below is read from the store, which holds a collaborator's
+	// issues after bd dolt pull: it is named by remedy.PrintedWord, and the
+	// step ID the bd assign hint pastes goes through remedy.CommandArg. A
+	// title and gate type are prose, which bd prints as it is in every
+	// listing: remedy.PrintedValue keeps a line break or terminal control in
+	// one from splitting or redrawing the hint, and shell syntax in one is
+	// printed as it is. The bd assign line is the one to paste.
 	for i, mol := range molecules {
-		fmt.Printf("%d. %s: %s\n", i+1, ui.RenderID(mol.MoleculeID), mol.MoleculeTitle)
+		fmt.Printf("%d. %s: %s\n", i+1, ui.RenderID(remedy.PrintedWord(mol.MoleculeID)), remedy.PrintedValue(mol.MoleculeTitle))
 		if mol.ClosedGate != nil {
-			fmt.Printf("   Gate closed: %s (%s)\n", mol.ClosedGate.ID, mol.ClosedGate.AwaitType)
+			fmt.Printf("   Gate closed: %s (%s)\n", remedy.PrintedWord(mol.ClosedGate.ID), remedy.PrintedValue(mol.ClosedGate.AwaitType))
 		}
 		if mol.ReadyStep != nil {
-			fmt.Printf("   Ready step: %s - %s\n", mol.ReadyStep.ID, mol.ReadyStep.Title)
+			fmt.Printf("   Ready step: %s - %s\n", remedy.PrintedWord(mol.ReadyStep.ID), remedy.PrintedValue(mol.ReadyStep.Title))
 		}
 		fmt.Println()
 	}
@@ -125,7 +138,14 @@ func renderGatedReadyMolecules(molecules []*GatedMolecule) error {
 	} else {
 		fmt.Println("To dispatch a molecule, assign its ready step to an agent:")
 	}
-	fmt.Printf("  bd assign %s <agent>\n", stepID)
+	if listPos == 0 {
+		// No listed molecule has a ready step: stepID is bd's own
+		// placeholder, which prints bare, as it always has.
+		fmt.Printf("  bd assign %s <agent>\n", readyStepPlaceholder)
+		return nil
+	}
+	step, note := remedy.CommandArg(runtime.GOOS, stepID, "<step-id>")
+	fmt.Printf("  bd assign %s <agent>%s\n", step, note)
 	return nil
 }
 
@@ -141,8 +161,12 @@ func firstReadyStepID(molecules []*GatedMolecule) (string, int) {
 			return mol.ReadyStep.ID, i + 1
 		}
 	}
-	return "<ready-step-id>", 0
+	return readyStepPlaceholder, 0
 }
+
+// readyStepPlaceholder stands in for a ready step ID in the dispatch hint when
+// no listed molecule has one.
+const readyStepPlaceholder = "<ready-step-id>"
 
 // findGateReadyMolecules finds molecules where a gate has closed and work can resume.
 //

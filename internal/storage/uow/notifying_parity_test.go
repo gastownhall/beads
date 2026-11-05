@@ -147,6 +147,7 @@ func TestRecordingIssueUseCaseCoversItsSurface(t *testing.T) {
 			"GetEpicsEligibleForClosure":   reads,
 			"GetIssue":                     reads,
 			"GetIssuesByIDs":               reads,
+			"RetiredIssueIDs":              reads,
 			"GetMany":                      reads,
 			"GetNewlyUnblockedByClose":     reads,
 			"GetNewlyUnblockedByCloseWisp": reads,
@@ -310,9 +311,13 @@ func TestNotifyingProviderBuildsRolesOnItself(t *testing.T) {
 		// for both binds on the inner provider's transactions, and a retention
 		// pass writes no bead. None of these build a role, so none of them can
 		// build one "on itself".
-		"SetEventsJournalEnabled":    true,
-		"RunEventsMaintenanceTx":     true,
-		"SetVersionedHistoryEnabled": true,
+		"SetEventsJournalEnabled": true,
+		// EventsJournalActivationError (PR A1) forwards the inner provider's
+		// shape-probe result the same way SetEventsJournalEnabled forwards
+		// activation: a query, not a role constructor.
+		"EventsJournalActivationError": true,
+		"RunEventsMaintenanceTx":       true,
+		"SetVersionedHistoryEnabled":   true,
 	}
 
 	var checked int

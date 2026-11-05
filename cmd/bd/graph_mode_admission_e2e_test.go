@@ -6,6 +6,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -296,6 +298,100 @@ func TestGraphModeOutsideEntryPointsRefuseWithoutWorkspaceEffects(t *testing.T) 
 			})
 		}
 	}
+}
+
+// bd connect checks the format of the workspace it attaches before its
+// handshake, but a graph build can declare that format while the handshake is
+// in flight. connect checks again once the handshake returns. It must render
+// that refusal as every other graph refusal is rendered (the format, its hint
+// and exit 16), not as a generic failure, and refuse before it writes anything
+// there: the workspace keeps exactly what the graph build declared, with no
+// .gitignore, sidecar or metadata.json of connect's.
+func TestGraphModeConnectRefusesAFormatDeclaredDuringItsHandshake(t *testing.T) {
+	bd := buildBDUnderTest(t)
+	const handshake = `{"api_version":"v0","backend":"dolt","bd_version":"9.9.9",` +
+		`"beads_dir":"/srv/.beads","capabilities":["issues.get"],"database":"beads",` +
+		`"dolt_mode":"server","project_id":"proj-graph-fence","repo_root":"/srv",` +
+		`"schema_version":1,"wire_revision":1,"min_client_wire_revision":1}`
+	for _, fixture := range graphModeAdmissionFixtures() {
+		if fixture.embedded {
+			// A database is not what a concurrent writer adds mid-handshake.
+			continue
+		}
+		for _, flags := range [][]string{nil, {"--json"}} {
+			t.Run(fixture.name+"/connect"+strings.Join(flags, ""), func(t *testing.T) {
+				repoDir := t.TempDir()
+				initGitRepoAt(t, repoDir)
+				beadsDir := filepath.Join(repoDir, ".beads")
+				// The workspace as the graph build alone leaves it.
+				declaredDir := filepath.Join(t.TempDir(), ".beads")
+				if err := fixture.declare(declaredDir); err != nil {
+					t.Fatal(err)
+				}
+				want := legacyUpgradeTreeDigest(t, declaredDir)
+				declared := make(chan error, 1)
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.URL.Path != "/v0/beads/context" {
+						http.NotFound(w, r)
+						return
+					}
+					select {
+					case declared <- fixture.declare(beadsDir):
+					default:
+					}
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write([]byte(handshake))
+				}))
+				t.Cleanup(server.Close)
+				args := append(append([]string{"connect"}, flags...), server.URL)
+
+				output, code := runGraphModeAdmissionBD(t, bd, repoDir, args...)
+				select {
+				case err := <-declared:
+					if err != nil {
+						t.Fatalf("declaring the graph workspace during the handshake: %v", err)
+					}
+				default:
+					t.Fatalf("bd %s never reached its handshake, so the late refusal went unexercised\n%s", strings.Join(args, " "), output)
+				}
+				requireGraphModeRefusal(t, fixture, args, output, code)
+				if _, err := os.Lstat(filepath.Join(beadsDir, "http_target.json")); !os.IsNotExist(err) {
+					t.Fatalf("refused bd %s wrote the http sidecar (%v)\n%s", strings.Join(args, " "), err, output)
+				}
+				if fixture.filename != "" {
+					if got, err := os.ReadFile(filepath.Join(beadsDir, fixture.filename)); err != nil || string(got) != fixture.metadata {
+						t.Fatalf("refused bd %s rewrote %s: %q, %v", strings.Join(args, " "), fixture.filename, got, err)
+					}
+				}
+				if fixture.filename != "metadata.json" {
+					if _, err := os.Lstat(filepath.Join(beadsDir, "metadata.json")); !os.IsNotExist(err) {
+						t.Fatalf("refused bd %s wrote metadata.json (%v)", strings.Join(args, " "), err)
+					}
+				}
+				if got := legacyUpgradeTreeDigest(t, beadsDir); got != want {
+					t.Fatalf("refused bd %s changed the graph workspace\n%s", strings.Join(args, " "), output)
+				}
+			})
+		}
+	}
+}
+
+// declare lays down the fixture's metadata and marker under beadsDir, as a
+// graph build writing concurrently would, without a *testing.T: it runs on
+// a server goroutine.
+func (f graphModeAdmissionFixture) declare(beadsDir string) error {
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		return err
+	}
+	if f.filename != "" {
+		if err := os.WriteFile(filepath.Join(beadsDir, f.filename), []byte(f.metadata), 0o600); err != nil {
+			return err
+		}
+	}
+	if f.marker {
+		return os.WriteFile(filepath.Join(beadsDir, "graph-preview-format"), []byte("link-preview-v9\n"), 0o600)
+	}
+	return nil
 }
 
 // graphModeLinkedWorktree commits once in repoDir and adds a linked worktree

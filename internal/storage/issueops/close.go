@@ -392,7 +392,9 @@ func closeIssueInTx(ctx context.Context, tx DBTX, id string, reason, actor, sess
 		}
 	}
 
-	recompute, err := RecomputeIsBlockedInTxWithResult(ctx, tx, affectedIssues, affectedWisps)
+	// The UPDATE above just closed id, so the recompute settles the row itself
+	// without its union statements; the rows it unblocks are recomputed in full.
+	recompute, err := recomputeIsBlockedInTxWithResult(ctx, tx, affectedIssues, affectedWisps, settledRowRecompute(id, isWisp))
 	if err != nil {
 		return nil, fmt.Errorf("recompute is_blocked after close for %s: %w", id, err)
 	}

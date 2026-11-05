@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/endpointtrust"
 	"github.com/steveyegge/beads/internal/gitlab"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
@@ -332,12 +334,15 @@ func maskGitLabToken(token string) string {
 }
 
 // getGitLabClient creates a GitLab client from the current configuration.
-func getGitLabClient(config GitLabConfig) *gitlab.Client {
+func getGitLabClient(config GitLabConfig) (*gitlab.Client, error) {
+	if err := endpointtrust.Check(endpointtrust.WorkspaceKey(), "gitlab", config.URL, endpointtrust.PrivateMatch("gitlab.url", "GITLAB_URL", config.URL)); err != nil {
+		return nil, err
+	}
 	client := gitlab.NewClient(config.Token, config.URL, config.ProjectID)
 	if config.GroupID != "" {
 		client = client.WithGroupID(config.GroupID)
 	}
-	return client
+	return client, nil
 }
 
 // runGitLabStatus implements the gitlab status command.
@@ -421,7 +426,10 @@ func runGitLabProjects(cmd *cobra.Command, args []string) error {
 	}
 
 	out := cmd.OutOrStdout()
-	client := getGitLabClient(config)
+	client, err := getGitLabClient(config)
+	if err != nil {
+		return HandleError("%v", err)
+	}
 	ctx := context.Background()
 
 	projects, err := client.ListProjects(ctx)
@@ -650,9 +658,18 @@ func gitLabLicenseSkipMessage(n int) string {
 // --json); warnings are delivered via warn. Returns the number of links created,
 // license-skipped, and milestones updated.
 func pushGitLabDependencyLinks(ctx context.Context, gt *gitlab.Tracker, st storage.Storage, opts tracker.SyncOptions, dryRun bool, out io.Writer, warn func(string)) (linksPushed, linksLicenseSkipped, milestonesUpdated int) {
-	linkData, collectWarnings := collectGitLabLinkSyncData(ctx, st, opts)
+	scope := gt.ProjectScope()
+	linkData, collectWarnings := collectGitLabLinkSyncData(ctx, st, opts, func(issue *types.Issue) bool {
+		return scope.Contains(ctx, issue)
+	})
 	for _, warning := range collectWarnings {
 		warn(warning)
+	}
+	if err := scope.Err(); err != nil {
+		warn(fmt.Sprintf("GitLab dependency link sync could not look up the configured project: %v", err))
+	}
+	if linkData.OutsideProject > 0 {
+		warn(gitLabOutsideProjectLinkMessage(linkData.OutsideProject))
 	}
 
 	client := gt.GitLabClient()
@@ -702,12 +719,33 @@ func pushGitLabDependencyLinks(ctx context.Context, gt *gitlab.Tracker, st stora
 	return linksPushed, linksLicenseSkipped, milestonesUpdated
 }
 
-type gitlabLinkSyncData struct {
-	ScopedIssues []*types.Issue
-	DesiredLinks []gitlab.DependencyLink
+// gitLabOutsideProjectLinkMessage returns the one line that reports n
+// dependencies left out of the link push because an endpoint is not an issue
+// of the configured project, the only project the push creates links in.
+func gitLabOutsideProjectLinkMessage(n int) string {
+	noun := "dependency"
+	if n != 1 {
+		noun = "dependencies"
+	}
+	return fmt.Sprintf(
+		"GitLab dependency link sync skipped %d %s on issues outside the configured project: "+
+			"links are pushed only between issues of gitlab.project_id (gitlab.default_project_id in group mode)", n, noun)
 }
 
-func collectGitLabLinkSyncData(ctx context.Context, st storage.Storage, opts tracker.SyncOptions) (gitlabLinkSyncData, []string) {
+// gitlabLinkSyncData is the dependency-link pass's input. OutsideProject
+// counts the dependencies left out of DesiredLinks because an endpoint is not
+// an issue of the configured project.
+type gitlabLinkSyncData struct {
+	ScopedIssues   []*types.Issue
+	DesiredLinks   []gitlab.DependencyLink
+	OutsideProject int
+}
+
+// collectGitLabLinkSyncData gathers the scoped issues and the links their
+// dependencies on each other map to. A link is desired only when inProject
+// holds for both of its issues: links are pushed by IID into the configured
+// project.
+func collectGitLabLinkSyncData(ctx context.Context, st storage.Storage, opts tracker.SyncOptions, inProject func(*types.Issue) bool) (gitlabLinkSyncData, []string) {
 	if st == nil {
 		return gitlabLinkSyncData{}, []string{"GitLab dependency link sync skipped: database not available"}
 	}
@@ -729,6 +767,7 @@ func collectGitLabLinkSyncData(ctx context.Context, st storage.Storage, opts tra
 	scopedIssues := filterGitLabLinkScopedIssues(allIssues, opts, descendantSet)
 	scopedIssueIDs := gitlabScopedIssueIDSet(scopedIssues)
 	desired := make([]gitlab.DependencyLink, 0, len(scopedIssues))
+	outside := 0
 	for _, issue := range scopedIssues {
 		deps, err := st.GetDependenciesWithMetadata(ctx, issue.ID)
 		if err != nil {
@@ -740,15 +779,21 @@ func collectGitLabLinkSyncData(ctx context.Context, st storage.Storage, opts tra
 				continue
 			}
 			link, ok := gitlab.LinkFromBeadsDependency(issue, dep)
-			if ok {
-				desired = append(desired, link)
+			if !ok {
+				continue
 			}
+			if !inProject(issue) || !inProject(&dep.Issue) {
+				outside++
+				continue
+			}
+			desired = append(desired, link)
 		}
 	}
 
 	return gitlabLinkSyncData{
-		ScopedIssues: scopedIssues,
-		DesiredLinks: gitlab.DeduplicateLinks(desired),
+		ScopedIssues:   scopedIssues,
+		DesiredLinks:   gitlab.DeduplicateLinks(desired),
+		OutsideProject: outside,
 	}, warnings
 }
 
@@ -873,7 +918,8 @@ func buildGitLabPullHooks(ctx context.Context) *tracker.PullHooks {
 // buildGitLabPushHooks creates PushHooks for GitLab-specific push behavior.
 func buildGitLabPushHooks() *tracker.PushHooks {
 	return &tracker.PushHooks{
-		ContentEqual: gitLabPushContentEqual,
+		ContentEqual:    gitLabPushContentEqual,
+		PushFieldsEqual: gitLabPushFieldsEqual,
 	}
 }
 
@@ -892,6 +938,39 @@ func gitLabPushContentEqual(local *types.Issue, remote *tracker.TrackerIssue) bo
 	// Preserve the engine's default skip behavior for everything this hook does
 	// not handle explicitly.
 	return !remote.UpdatedAt.Before(local.UpdatedAt)
+}
+
+// gitLabPushFieldsEqual reports whether remote holds what a GitLab push of
+// local sends: an epic's milestone title, description and state, or an
+// issue's title, description, state and labels (BeadsIssueToGitLabFields).
+// Unlike gitLabPushContentEqual it never compares timestamps, so a pull can
+// tell an echo of its own push from a remote edit.
+func gitLabPushFieldsEqual(local *types.Issue, remote *tracker.TrackerIssue) bool {
+	if local == nil || remote == nil {
+		return false
+	}
+	if local.IssueType == types.TypeEpic {
+		return gitLabMilestonePushFieldsEqual(local, remote)
+	}
+	if !gitLabComparableTextEqual(local.Title, remote.Title) ||
+		!gitLabComparableTextEqual(local.Description, remote.Description) {
+		return false
+	}
+	remoteState, _ := remote.State.(string)
+	if (local.Status == types.StatusClosed) != strings.EqualFold(strings.TrimSpace(remoteState), "closed") {
+		return false
+	}
+	pushed, _ := gitlab.BeadsIssueToGitLabFields(local, gitlab.DefaultMappingConfig())["labels"].([]string)
+	return gitLabLabelSetsEqual(pushed, remote.Labels)
+}
+
+// gitLabLabelSetsEqual reports whether a and b hold the same labels, in any
+// order.
+func gitLabLabelSetsEqual(a, b []string) bool {
+	as, bs := slices.Clone(a), slices.Clone(b)
+	slices.Sort(as)
+	slices.Sort(bs)
+	return slices.Equal(slices.Compact(as), slices.Compact(bs))
 }
 
 func gitLabMilestonePushFieldsEqual(local *types.Issue, remote *tracker.TrackerIssue) bool {

@@ -2,11 +2,11 @@ package doctor
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"strings"
 
 	"github.com/steveyegge/beads/cmd/bd/doctor/fix"
-	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
 // CheckDependencyKeysWithStore reports dependency rows left behind by the
@@ -14,20 +14,33 @@ import (
 // deterministic depid.New(issue_id, target) — per-clone-random keys that
 // break bd dolt pull — and rows with no target at all, which the backfill
 // deliberately skips and which otherwise stay randomly keyed forever.
-func CheckDependencyKeysWithStore(ss *SharedStore) DoctorCheck {
-	store := ss.Store()
-	if store == nil {
+//
+// It reads the server its repair (fix.DependencyKeys) re-keys
+// (fix.OpenScanDB), as CheckBlockedConsistencyWithStore does, and reports a
+// database whose repair server it cannot read the same way.
+func CheckDependencyKeysWithStore(path string, ss *SharedStore) DoctorCheck {
+	db, err := fix.OpenScanDB(path)
+	if err != nil {
+		if ss.Store() == nil {
+			return DoctorCheck{
+				Name:    "Dependency Keys",
+				Status:  StatusOK,
+				Message: "No database yet",
+			}
+		}
 		return DoctorCheck{
 			Name:    "Dependency Keys",
-			Status:  StatusOK,
-			Message: "No database yet",
+			Status:  StatusWarning,
+			Message: "Unable to scan dependency keys",
+			Detail:  err.Error(),
 		}
 	}
-	return checkDependencyKeysWithStore(store)
+	defer func() { _ = db.Close() }()
+	return checkDependencyKeysDB(db)
 }
 
-func checkDependencyKeysWithStore(store *dolt.DoltStore) DoctorCheck {
-	anomalies, err := fix.ScanDependencyKeys(context.Background(), store.UnderlyingDB())
+func checkDependencyKeysDB(db *sql.DB) DoctorCheck {
+	anomalies, err := fix.ScanDependencyKeys(context.Background(), db)
 	if err != nil {
 		return DoctorCheck{
 			Name:    "Dependency Keys",

@@ -5,8 +5,11 @@ import (
 	"context"
 	"errors"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +17,8 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/storage/backendnames"
+	"github.com/steveyegge/beads/internal/testutil/legacyworkspace"
 )
 
 // TestResolveAutoStart verifies all conditions that govern the AutoStart decision.
@@ -338,6 +343,77 @@ func TestConfigConstructorsRefuseGraphFormatMarker(t *testing.T) {
 				})
 			}
 		})
+	}
+}
+
+// TestConfigConstructorsRefuseNonDoltBackendInLegacyConfig pins that every
+// metadata-driven constructor refuses a legacy config.json naming a backend it
+// cannot open as Dolt (removed, unrecognized, or another binary's registered
+// backend) before configfile.Load migrates that file into metadata.json,
+// dropping the keys Config does not know. The workspace holds a Dolt database,
+// so a removed backend's refusal offers the metadata heal; it must not have
+// rewritten the metadata first, and it names config.json, the file that holds
+// the backend, rather than a metadata.json that does not exist.
+func TestConfigConstructorsRefuseNonDoltBackendInLegacyConfig(t *testing.T) {
+	// If the refusal were missing, the open must fail fast rather than reach
+	// the suite's shared test server.
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "127.0.0.1")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "1")
+	const registered = "legacy-config-registered-fixture"
+	backendnames.Add(registered)
+	t.Cleanup(func() { backendnames.Remove(registered) })
+	for _, backend := range []string{configfile.BackendSQLite, configfile.BackendPostgres, configfile.BackendMySQL, "mystery", registered} {
+		for _, doltMode := range []string{configfile.DoltModeEmbedded, configfile.DoltModeServer} {
+			t.Run(backend+"/"+doltMode, func(t *testing.T) {
+				beadsDir := t.TempDir()
+				if err := os.MkdirAll(filepath.Join(beadsDir, "dolt", ".dolt"), 0o750); err != nil {
+					t.Fatal(err)
+				}
+				legacy := `{"backend":"` + backend + `","dolt_mode":"` + doltMode + `","dolt_database":"beads_legacy","future_binding":"keep-me"}`
+				legacyPath := filepath.Join(beadsDir, "config.json")
+				if err := os.WriteFile(legacyPath, []byte(legacy), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				constructors := map[string]func() (*DoltStore, error){
+					"default": func() (*DoltStore, error) {
+						return NewFromConfig(t.Context(), beadsDir)
+					},
+					"standard": func() (*DoltStore, error) {
+						return NewFromConfigWithOptions(t.Context(), beadsDir, &Config{DisableAutoStart: true, CreateIfMissing: true})
+					},
+					"cli": func() (*DoltStore, error) {
+						return NewFromConfigWithCLIOptions(t.Context(), beadsDir, &Config{DisableAutoStart: true, ReadOnly: true})
+					},
+				}
+				for name, construct := range constructors {
+					t.Run(name, func(t *testing.T) {
+						store, err := construct()
+						if err == nil {
+							_ = store.Close()
+							t.Fatalf("backend %q opened as Dolt", backend)
+						}
+						if !strings.Contains(err.Error(), "cannot be opened as Dolt") || !strings.Contains(err.Error(), strconv.Quote(backend)) {
+							t.Fatalf("constructor error = %v, want the refusal of backend %q", err, backend)
+						}
+						// The registered backend's refusal names no file.
+						if backend != registered && (!strings.Contains(err.Error(), "config.json") || strings.Contains(err.Error(), "metadata.json")) {
+							t.Fatalf("constructor error = %v, want it to name config.json and not metadata.json", err)
+						}
+						entries, readErr := os.ReadDir(beadsDir)
+						names := make([]string, 0, len(entries))
+						for _, entry := range entries {
+							names = append(names, entry.Name())
+						}
+						if readErr != nil || !slices.Equal(names, []string{"config.json", "dolt"}) {
+							t.Fatalf("refused open changed the workspace: %v, %v", names, readErr)
+						}
+						if got, readErr := os.ReadFile(legacyPath); readErr != nil || string(got) != legacy {
+							t.Fatalf("refused open rewrote config.json: %q, %v", got, readErr)
+						}
+					})
+				}
+			})
+		}
 	}
 }
 
@@ -709,4 +785,101 @@ func TestApplyResolvedConfig(t *testing.T) {
 			t.Fatalf("ServerPortSource = %q, want %q", cfg.ServerPortSource, doltserver.PortSourceCallerExplicit)
 		}
 	})
+}
+
+// TestConfigConstructorsRefuseHistoricalSQLiteWorkspace pins that every
+// metadata-driven constructor, and the pre-check a caller runs before writing
+// into a workspace it then opens (RequireDiscoveredDoltBackend, OpenGated's),
+// refuses a historical SQLite workspace with the refusal command admission
+// prints, before configfile.Load migrates a pre-Dolt config.json into
+// metadata.json, dropping the keys Config does not know.
+func TestConfigConstructorsRefuseHistoricalSQLiteWorkspace(t *testing.T) {
+	// If the refusal were missing, the open must fail fast rather than reach
+	// the suite's shared test server.
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "127.0.0.1")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "1")
+	opens := map[string]func(context.Context, string) error{
+		"RequireDiscoveredDoltBackend": func(_ context.Context, beadsDir string) error {
+			return RequireDiscoveredDoltBackend(beadsDir)
+		},
+		"NewFromConfig": func(ctx context.Context, beadsDir string) error {
+			return closeOnSuccess(NewFromConfig(ctx, beadsDir))
+		},
+		"NewFromConfigWithOptions": func(ctx context.Context, beadsDir string) error {
+			return closeOnSuccess(NewFromConfigWithOptions(ctx, beadsDir, &Config{DisableAutoStart: true, CreateIfMissing: true}))
+		},
+		"NewFromConfigWithCLIOptions": func(ctx context.Context, beadsDir string) error {
+			return closeOnSuccess(NewFromConfigWithCLIOptions(ctx, beadsDir, &Config{DisableAutoStart: true, ReadOnly: true}))
+		},
+	}
+	for _, layout := range legacyworkspace.HistoricalSQLiteLayouts() {
+		for name, open := range opens {
+			t.Run(layout.Name+"/"+name, func(t *testing.T) {
+				beadsDir := filepath.Join(t.TempDir(), ".beads")
+				layout.Write(t, beadsDir)
+				before := legacyworkspace.TreeDigest(t, beadsDir)
+				err := open(t.Context(), beadsDir)
+				if after := legacyworkspace.TreeDigest(t, beadsDir); !maps.Equal(after, before) {
+					t.Fatalf("%s changed the workspace: before %v, after %v", name, before, after)
+				}
+				if err == nil || err.Error() != legacyworkspace.HistoricalSQLiteRefusal {
+					t.Fatalf("%s error = %v, want admission's refusal %q", name, err, legacyworkspace.HistoricalSQLiteRefusal)
+				}
+			})
+		}
+	}
+}
+
+func closeOnSuccess(store *DoltStore, err error) error {
+	if err == nil {
+		_ = store.Close()
+	}
+	return err
+}
+
+// TestReadOnlyConstructorsLeaveLegacyConfigJSONInPlace pins that a read-only
+// open (Config.ReadOnly) through the metadata-driven constructors reads a
+// legacy config.json in place rather than migrating it into metadata.json,
+// which drops the keys Config does not know: a read-only open writes nothing
+// into the workspace it reads, often one bd was not launched in (an external
+// project, a routed read, doctor's additional repos). A writable open still
+// migrates it, as before.
+func TestReadOnlyConstructorsLeaveLegacyConfigJSONInPlace(t *testing.T) {
+	// The open must fail fast rather than reach the suite's shared server.
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "127.0.0.1")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "1")
+	t.Setenv("BEADS_DOLT_AUTO_START", "0")
+	const legacy = `{"backend":"dolt","dolt_mode":"server","dolt_database":"beads_ro","jsonl_export":"issues.jsonl"}`
+	opens := map[string]struct {
+		open     func(context.Context, string) error
+		migrates bool
+	}{
+		"NewFromConfigWithOptions read-only": {open: func(ctx context.Context, beadsDir string) error {
+			return closeOnSuccess(NewFromConfigWithOptions(ctx, beadsDir, &Config{ReadOnly: true, DisableAutoStart: true}))
+		}},
+		"NewFromConfigWithCLIOptions read-only": {open: func(ctx context.Context, beadsDir string) error {
+			return closeOnSuccess(NewFromConfigWithCLIOptions(ctx, beadsDir, &Config{ReadOnly: true, DisableAutoStart: true}))
+		}},
+		"NewFromConfigWithOptions writable": {open: func(ctx context.Context, beadsDir string) error {
+			return closeOnSuccess(NewFromConfigWithOptions(ctx, beadsDir, &Config{DisableAutoStart: true}))
+		}, migrates: true},
+	}
+	for name, tc := range opens {
+		t.Run(name, func(t *testing.T) {
+			beadsDir := filepath.Join(t.TempDir(), ".beads")
+			legacyworkspace.Layout{Files: map[string]string{"config.json": legacy}}.Write(t, beadsDir)
+			before := legacyworkspace.TreeDigest(t, beadsDir)
+			_ = tc.open(t.Context(), beadsDir)
+			after := legacyworkspace.TreeDigest(t, beadsDir)
+			if tc.migrates {
+				if _, ok := after["metadata.json"]; !ok {
+					t.Fatalf("%s did not migrate the legacy config.json: %v", name, slices.Sorted(maps.Keys(after)))
+				}
+				return
+			}
+			if !maps.Equal(after, before) {
+				t.Fatalf("%s changed the workspace: before %v, after %v", name, slices.Sorted(maps.Keys(before)), slices.Sorted(maps.Keys(after)))
+			}
+		})
+	}
 }

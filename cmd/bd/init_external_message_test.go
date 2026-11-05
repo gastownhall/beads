@@ -6,6 +6,8 @@ import (
 	"net"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
 // TestExternalServerUnreachableMessage pins which failures get the --external
@@ -89,9 +91,25 @@ func TestExternalServerUnreachableMessage(t *testing.T) {
 		if got == "" {
 			t.Fatal("message = none, want the --external wording for a failed dial")
 		}
-		requireDeclaredExternal(t, got)
+		requireDeclaredExternal(t, got, "--server-port")
 		if strings.Contains(strings.ReplaceAll(got, noPort.Error(), ""), ":0") {
 			t.Errorf("message offers port 0 as the endpoint:\n%s", got)
+		}
+	})
+
+	// An init that names no port does not dial at all: the store fails the
+	// open with an error wrapping dolt.ErrUnresolvedServerPort (its own tests
+	// pin that the real error does). Its advice is for a workspace whose
+	// managed server lost its port file, so init asks for the port instead.
+	t.Run("store reports no port resolved", func(t *testing.T) {
+		unresolved := fmt.Errorf("%w for .beads\n\nWhatever manages the server must publish its port again (normally by writing .beads/dolt-server.port)", dolt.ErrUnresolvedServerPort)
+		got := externalServerUnreachableMessage(unresolved)
+		if got == "" {
+			t.Fatal("message = none, want the --external wording for an init that named no port")
+		}
+		requireDeclaredExternal(t, got, "no port was named", "--server-port", "BEADS_DOLT_SERVER_PORT")
+		if strings.Contains(got, "publish its port") {
+			t.Errorf("message repeats the store's advice for a managed server that lost its port:\n%s", got)
 		}
 	})
 }

@@ -147,8 +147,11 @@ the loop — every scenario uses embedded Dolt in its own tempdir.
   in `harness/src/differential.rs`) pins that roll so the highest-priority eligible
   tip always wins: its text, the step it prints on, and its frequency gate are
   compared like any other output, but a tip's probability value is not gated.
-  Whether the `claude_setup` tip is eligible depends on the host `HOME`
-  (`~/.claude` present, no beads plugin enabled, no `bd prime` hook). Both binaries
+  Whether the `claude_setup` tip is eligible depends on the host (`~/.claude`
+  present, and no beads plugin enabled or `bd prime` hook in the settings
+  Claude Code loads in the scenario directory: the host's managed settings,
+  `~/.claude/settings.json`, and the `.claude/` files of the directory and of
+  its repository root). Both binaries
   run on the same host, so this is symmetric, but on a host where no tip is
   eligible (a CI runner, or a beads developer with the plugin installed) none
   prints and tip changes go unobserved, including a tip leaking into `--json`.

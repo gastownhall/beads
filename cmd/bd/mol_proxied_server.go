@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/formula"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
@@ -447,7 +448,7 @@ func runMolBurnProxiedServer(ctx context.Context, args []string, dryRun, force b
 		resolvedID, err := utils.ResolvePartialID(ctx, r, moleculeID)
 		if err != nil {
 			if !jsonOutput {
-				fmt.Fprintf(os.Stderr, "Warning: failed to resolve %s: %v\n", moleculeID, err)
+				fmt.Fprintf(os.Stderr, "Warning: failed to resolve %s: %s\n", moleculeID, remedy.PrintedMessage(err))
 			}
 			failedResolve = append(failedResolve, moleculeID)
 			continue
@@ -455,7 +456,7 @@ func runMolBurnProxiedServer(ctx context.Context, args []string, dryRun, force b
 		issue, err := r.GetIssue(ctx, resolvedID)
 		if err != nil {
 			if !jsonOutput {
-				fmt.Fprintf(os.Stderr, "Warning: failed to load %s: %v\n", resolvedID, err)
+				fmt.Fprintf(os.Stderr, "Warning: failed to load %s: %s\n", resolvedID, remedy.PrintedMessage(err))
 			}
 			failedResolve = append(failedResolve, moleculeID)
 			continue
@@ -464,7 +465,7 @@ func runMolBurnProxiedServer(ctx context.Context, args []string, dryRun, force b
 			subgraph, err := loadTemplateSubgraph(ctx, r, resolvedID)
 			if err != nil {
 				if !jsonOutput {
-					fmt.Fprintf(os.Stderr, "Warning: failed to load wisp subgraph for %s: %v\n", resolvedID, err)
+					fmt.Fprintf(os.Stderr, "Warning: failed to load wisp subgraph for %s: %s\n", resolvedID, remedy.PrintedMessage(err))
 				}
 				failedResolve = append(failedResolve, moleculeID)
 				continue

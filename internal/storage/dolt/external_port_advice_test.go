@@ -3,12 +3,14 @@ package dolt
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
@@ -148,12 +150,26 @@ func TestNewServerModeExternallyManagedPortAdvice(t *testing.T) {
 				if tc.otherPort {
 					declared = tc.setting + " declares this workspace's Dolt server externally managed, so bd did not start one at " + addr
 				}
-				for _, want := range []string{declared, "did not start"} {
+				wants := []string{declared, "did not start"}
+				absent := []string{"bd dolt start", "auto-start failed", "auto-start is disabled"}
+				switch {
+				case tc.otherPort && tc.source == doltserver.PortSourcePortFile:
+					// The port file outranks dolt_server_port: it is what to
+					// remove, and removing dolt_server_port would not change
+					// the port bd dials.
+					wants = append(wants, fmt.Sprintf("bd took that port from %s, which records the port an earlier command reached and outranks dolt_server_port (%d)",
+						filepath.Join(beadsDir, doltserver.PortFileName), metadataPort))
+					absent = append(absent, "Removing dolt_server_port")
+				case tc.otherPort:
+					// Nothing else declares the server externally managed.
+					wants = append(wants, "Removing dolt_server_port lets bd manage the server.")
+				}
+				for _, want := range wants {
 					if !strings.Contains(msg, want) {
 						t.Errorf("error does not contain %q:\n%s", want, msg)
 					}
 				}
-				for _, banned := range []string{"bd dolt start", "auto-start failed", "auto-start is disabled"} {
+				for _, banned := range absent {
 					if strings.Contains(msg, banned) {
 						t.Errorf("error contains %q:\n%s", banned, msg)
 					}
@@ -335,5 +351,78 @@ func TestDialConfigDialsTheStorePort(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// TestRemoteHostStoreDialsTheAuthoritativePort pins the store's dial of a
+// server on another machine to #5835's rule for a local one: metadata.json's
+// dolt_server_port outranks the legacy BEADS_DOLT_PORT, valid or padded, and
+// DialConfig, which the diagnostics dial, reports the same port.
+func TestRemoteHostStoreDialsTheAuthoritativePort(t *testing.T) {
+	const metadataPort = 15555
+	for _, legacy := range []string{"13307", " 13307\n"} {
+		t.Run(strconv.Quote(legacy), func(t *testing.T) {
+			externalPortAdviceEnv(t)
+			// Test mode rewrites an unset or production port to 1.
+			t.Setenv("BEADS_TEST_MODE", "")
+			t.Setenv("BEADS_DOLT_SERVER_HOST", "db.example.com")
+			t.Setenv("BEADS_DOLT_PORT", legacy)
+			beadsDir := externalPortAdviceWorkspace(t, metadataPort)
+
+			store := &Config{BeadsDir: beadsDir, Database: "advice"}
+			ApplyResolvedServerPort(beadsDir, store)
+			applyConfigDefaults(store)
+			if store.ServerHost != "db.example.com" || store.ServerPort != metadataPort || store.ServerPortSource != doltserver.PortSourceMetadataJSON {
+				t.Errorf("store dials %s:%d from %s, want db.example.com:%d from %s",
+					store.ServerHost, store.ServerPort, store.ServerPortSource, metadataPort, doltserver.PortSourceMetadataJSON)
+			}
+			if dial := doltserver.DialConfig(beadsDir); dial.Port != store.ServerPort || dial.PortSource != store.ServerPortSource {
+				t.Errorf("DialConfig = port %d from %s, store dials port %d from %s",
+					dial.Port, dial.PortSource, store.ServerPort, store.ServerPortSource)
+			}
+		})
+	}
+}
+
+// TestNewDialsAnIPv6HostInEitherSpelling pins the address the store dials for
+// an IPv6 server host, configured bare ("::1") or bracketed ("[::1]"), on the
+// caller's config or in BEADS_DOLT_SERVER_HOST: the fail-fast probe and the
+// connection both reach the server at [::1]:port. The listener speaks no
+// MySQL, so the open fails, but only after both dials arrived.
+func TestNewDialsAnIPv6HostInEitherSpelling(t *testing.T) {
+	for _, tc := range []struct{ name, host, env string }{
+		{"bare", "::1", ""},
+		{"bracketed", "[::1]", ""},
+		{"bracketed BEADS_DOLT_SERVER_HOST", "", "[::1]"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			externalPortAdviceEnv(t)
+			t.Setenv("BEADS_DOLT_SERVER_HOST", tc.env)
+			port, accepted := testutil.IPv6LoopbackListener(t)
+			beadsDir := t.TempDir()
+			cfg := &Config{
+				Path:       filepath.Join(beadsDir, "dolt"),
+				BeadsDir:   beadsDir,
+				Database:   "ipv6_host",
+				ServerHost: tc.host,
+				ServerPort: port,
+			}
+
+			_, err := New(context.Background(), cfg)
+			if err == nil {
+				t.Fatal("open of a listener that speaks no MySQL succeeded")
+			}
+			for deadline := time.Now().Add(2 * time.Second); accepted() < 2 && time.Now().Before(deadline); {
+				time.Sleep(10 * time.Millisecond)
+			}
+			if n := accepted(); n < 2 {
+				t.Errorf("the server at [::1]:%d took %d connections, want the fail-fast probe's and the connection's: %v", port, n, err)
+			}
+			for _, banned := range []string{"unreachable", "no such host", "too many colons", "missing port"} {
+				if strings.Contains(err.Error(), banned) {
+					t.Errorf("error contains %q:\n%v", banned, err)
+				}
+			}
+		})
 	}
 }

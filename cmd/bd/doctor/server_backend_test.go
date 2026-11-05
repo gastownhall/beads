@@ -103,6 +103,69 @@ func TestRunServerHealthChecksVersionCheckDialsLegacyPortEnv(t *testing.T) {
 	}
 }
 
+// TestRunServerHealthChecksUnresolvedPortAtServerBdDoesNotRun pins `bd doctor
+// --server` with no port resolved for a server bd does not run: at the IPv6
+// loopback in either spelling, where the port file bd's own 127.0.0.1 server
+// leaves names no port, or on another machine. No bd command starts that
+// server, so the check fails with the store's advice to pin the port rather
+// than say to auto-start one.
+func TestRunServerHealthChecksUnresolvedPortAtServerBdDoesNotRun(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		host     string
+		portFile bool
+	}{
+		{"bare IPv6 loopback", "::1", false},
+		{"bracketed IPv6 loopback beside a port file", "[::1]", true},
+		{"remote host", "db.invalid", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := serverModeWorkspace(t, tc.host)
+			if tc.portFile {
+				if err := os.WriteFile(filepath.Join(root, ".beads", "dolt-server.port"), []byte("13307"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			result := RunServerHealthChecks(root)
+			if result.OverallOK || len(result.Checks) != 1 {
+				t.Fatalf("server-health result = %#v, want one failed check", result)
+			}
+			check := result.Checks[0]
+			want := "bd does not manage the Dolt server at " + tc.host + "; pin its port with BEADS_DOLT_SERVER_PORT or dolt.port"
+			if check.Name != "Server port" || check.Status != StatusError || !strings.Contains(check.Fix, want) {
+				t.Errorf("server-port check = %#v, want an error whose fix contains %q", check, want)
+			}
+			if strings.Contains(check.Message+check.Fix, "auto-start") {
+				t.Errorf("server-port check = %#v, advises an auto-start no bd command performs", check)
+			}
+		})
+	}
+}
+
+// serverModeWorkspace makes a Dolt server-mode workspace whose metadata.json
+// names host and no port, with no Dolt server variable set, and returns its
+// root.
+func serverModeWorkspace(t *testing.T, host string) string {
+	t.Helper()
+	for _, name := range []string{"BEADS_DOLT_SHARED_SERVER", "BEADS_DOLT_SERVER_MODE", "BEADS_DOLT_SERVER_PORT",
+		"BEADS_DOLT_PORT", "BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_SOCKET"} {
+		t.Setenv(name, "")
+	}
+	config.ResetForTesting()
+
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &configfile.Config{Backend: configfile.BackendDolt, DoltMode: configfile.DoltModeServer, DoltServerHost: host}
+	if err := cfg.Save(beadsDir); err != nil {
+		t.Fatalf("save Dolt server config: %v", err)
+	}
+	return tmpDir
+}
+
 // legacyPortServerWorkspace makes a Dolt server-mode workspace whose only port
 // setting is the legacy BEADS_DOLT_PORT, set to port, and returns its root.
 func legacyPortServerWorkspace(t *testing.T, port int) string {

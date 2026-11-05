@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -13,7 +14,7 @@ import (
 )
 
 // DoltDockerImage is the Docker image used for Dolt test containers.
-const DoltDockerImage = "dolthub/dolt-sql-server:2.2.0"
+const DoltDockerImage = "dolthub/dolt-sql-server:2.6.0"
 
 // EnvRequireDoltContainer, set to "1", turns an unavailable Dolt test server
 // (either backend, see BEADS_TEST_DOLT_SERVER) into a failure instead of a
@@ -99,6 +100,32 @@ func FindFreePort() (int, error) {
 	port := l.Addr().(*net.TCPAddr).Port
 	_ = l.Close()
 	return port, nil
+}
+
+// IPv6LoopbackListener listens on an ephemeral port of the IPv6 loopback
+// address, [::1], and accepts and closes every connection until the test
+// ends. It skips t when this host has no IPv6 loopback. It returns the port and
+// a count of the connections accepted so far, which tells an address that was
+// dialed from one that failed before the dial.
+func IPv6LoopbackListener(t testing.TB) (port int, accepted func() int64) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "[::1]:0")
+	if err != nil {
+		t.Skipf("IPv6 loopback not available: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	var n atomic.Int64
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			n.Add(1)
+			_ = conn.Close()
+		}
+	}()
+	return ln.Addr().(*net.TCPAddr).Port, n.Load
 }
 
 // WaitForServer polls until the server accepts TCP connections on the given port.

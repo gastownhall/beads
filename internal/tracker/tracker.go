@@ -2,6 +2,7 @@ package tracker
 
 import (
 	"context"
+	"time"
 
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -51,6 +52,8 @@ type IssueTracker interface {
 	IsExternalRef(ref string) bool
 
 	// ExtractIdentifier extracts the human-readable identifier from an external_ref.
+	// It returns "" when the tracker cannot resolve ref to an identifier it
+	// can address; sync then leaves the linked issue alone.
 	ExtractIdentifier(ref string) string
 
 	// BuildExternalRef constructs an external_ref string for a tracker issue.
@@ -73,6 +76,39 @@ type BatchPushDryRunner interface {
 // raw fetch counts separately from incremental pull candidates.
 type PullStatsProvider interface {
 	LastPullStats() (queried int, candidates int)
+}
+
+// SinceGranularityProvider is implemented by trackers whose incremental
+// FetchIssues returns every issue updated at or after FetchOptions.Since
+// truncated (in UTC) to SinceGranularity, not only those updated at or after
+// Since itself: Jira's JQL and Notion's minute-precision page times match to
+// the minute, Azure DevOps' date-only WIQL to the day. The engine uses it to
+// tell the rows a fetch from the stored last_sync already returned from those
+// only its widened overlap window returns.
+type SinceGranularityProvider interface {
+	SinceGranularity() time.Duration
+}
+
+// MatchKeyer is implemented by trackers whose ExtractIdentifier values are
+// not unique across the namespace a single pull can span (e.g. GitLab IIDs
+// are project-scoped). MatchKey returns the fallback-dedup key for an
+// external ref; "" means the ref takes no fallback match.
+type MatchKeyer interface {
+	MatchKey(ref string) string
+}
+
+// IdentityKeyer is implemented by trackers that record a rename-stable
+// identity on the issues a pull imports (GitLab: project ID and IID, which a
+// project rename or transfer does not change, unlike the URL MatchKey reads).
+// When the exact external_ref lookup misses, a pulled issue is matched to the
+// local issue with the same identity key; a local issue that has one takes no
+// MatchKey fallback. "" means no identity. A key that two local issues hold
+// matches neither. The engine asks for local keys after fetching the pull's
+// issues, so LocalIdentityKey may judge a recorded identity stale by what
+// they showed (GitLab: the ref's project path belongs to another project).
+type IdentityKeyer interface {
+	LocalIdentityKey(issue *types.Issue) string
+	RemoteIdentityKey(issue *TrackerIssue) string
 }
 
 // FieldMapper handles bidirectional conversion of issue fields between

@@ -74,6 +74,11 @@ func Lookup(env []string, key string) (string, bool) {
 	return lookupForWindows(env, key, hostOS == "windows")
 }
 
+// LookupForOS is Lookup with explicit goos environment-key semantics.
+func LookupForOS(env []string, key, goos string) (string, bool) {
+	return lookupForWindows(env, key, goos == "windows")
+}
+
 func lookupForWindows(env []string, key string, windows bool) (string, bool) {
 	wanted := keyIdentityForWindows(key, windows)
 	var value string

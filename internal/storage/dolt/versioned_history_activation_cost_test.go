@@ -10,6 +10,7 @@ import (
 	"slices"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 
@@ -207,54 +208,160 @@ func TestDeferredSwitchReadErrorIsRetriedByTheWritesOwnRetry(t *testing.T) {
 	}
 }
 
+// vhDoltTransaction runs one runDoltTransaction operation and fails the test if
+// it does not return. The operation closes the connections it holds on its way
+// out, and closing a connection waits for any transaction still open on it, so
+// an arm that left one open would otherwise hang the package until go test's
+// own timeout.
+func vhDoltTransaction(t *testing.T, store *DoltStore, fn func(storage.Transaction) error) error {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- store.runDoltTransaction(ctx, "vh probe", fn) }()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(10 * time.Second):
+	}
+	// Canceling rolls back the transaction left open, so the close waiting on
+	// it returns.
+	cancel()
+	<-done
+	t.Fatal("runDoltTransaction did not return: it closed a connection whose transaction was still open")
+	return nil
+}
+
 // TestDeferredSwitchReadErrorFailsADoltTransaction: runDoltTransaction's
 // regular transaction answers the switch the same way. A failed read rolls it
 // back before the callback runs, and the next operation reads the row again.
+//
+// With the journal off, the default, the operation also holds the ignored
+// tables' transaction on a second connection. The failed read has to roll that
+// one back too: its cleanup closes the connection, and the close would wait on
+// the open transaction for good.
 func TestDeferredSwitchReadErrorFailsADoltTransaction(t *testing.T) {
-	store, mock, _ := vhCountedStore(t)
-	// The journal pins both planes to the regular transaction, so the operation
-	// borrows no connection for the ignored tables; the switch is answered on
-	// the regular transaction either way.
-	store.SetEventsJournalEnabled(true)
-	if _, err := versionedhistory.ActivateStore(context.Background(), store, nil); err != nil {
-		t.Fatal(err)
-	}
-	expectOperation := func() {
-		mock.ExpectQuery(regexp.QuoteMeta("SELECT active_branch()")).
-			WillReturnRows(sqlmock.NewRows([]string{"active_branch()"}).AddRow("main"))
-		mock.ExpectBegin()
-	}
+	for _, tc := range []struct {
+		name    string
+		journal bool
+	}{
+		// The journal pins both planes to the regular transaction, so the
+		// operation borrows no connection for the ignored tables; the switch is
+		// answered on the regular transaction either way.
+		{name: "journal on", journal: true},
+		{name: "journal off"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, mock, _ := vhCountedStore(t)
+			store.SetEventsJournalEnabled(tc.journal)
+			if _, err := versionedhistory.ActivateStore(context.Background(), store, nil); err != nil {
+				t.Fatal(err)
+			}
+			onMain := func() *sqlmock.Rows {
+				return sqlmock.NewRows([]string{"active_branch()"}).AddRow("main")
+			}
+			// Journal off, the operation also borrows a second connection,
+			// checks that it is on the regular transaction's branch, and begins
+			// the ignored tables' transaction there, which it rolls back after
+			// the regular one.
+			expectOperation := func() {
+				mock.ExpectQuery(regexp.QuoteMeta("SELECT active_branch()")).WillReturnRows(onMain())
+				mock.ExpectBegin()
+				if !tc.journal {
+					mock.ExpectQuery(regexp.QuoteMeta("SELECT active_branch()")).WillReturnRows(onMain())
+					mock.ExpectBegin()
+				}
+			}
+			expectRollback := func() {
+				mock.ExpectRollback()
+				if !tc.journal {
+					mock.ExpectRollback()
+				}
+			}
 
-	expectOperation()
-	mock.ExpectQuery(vhConfigRead).WithArgs(versionedhistory.ConfigKey).WillReturnError(errVHReadLost)
-	mock.ExpectRollback()
-	err := store.runDoltTransaction(context.Background(), "vh probe", func(storage.Transaction) error {
-		t.Error("the callback of an operation whose switch read failed ran")
-		return nil
-	})
-	if !errors.Is(err, errVHReadLost) {
-		t.Fatalf("runDoltTransaction = %v, want the switch read's error", err)
-	}
+			expectOperation()
+			mock.ExpectQuery(vhConfigRead).WithArgs(versionedhistory.ConfigKey).WillReturnError(errVHReadLost)
+			expectRollback()
+			err := vhDoltTransaction(t, store, func(storage.Transaction) error {
+				t.Error("the callback of an operation whose switch read failed ran")
+				return nil
+			})
+			if !errors.Is(err, errVHReadLost) {
+				t.Fatalf("runDoltTransaction = %v, want the switch read's error", err)
+			}
 
-	// The callback's own error rolls the second operation back, so its scope is
-	// all it shows.
-	expectOperation()
-	mock.ExpectQuery(vhConfigRead).WithArgs(versionedhistory.ConfigKey).WillReturnRows(vhRow("true", true))
-	mock.ExpectRollback()
-	errProbe := errors.New("probe done")
-	var scoped bool
-	err = store.runDoltTransaction(context.Background(), "vh probe", func(tx storage.Transaction) error {
-		scoped = issueops.VersionedHistoryEnabledFor(tx.(*doltTransaction).regularTx)
-		return errProbe
-	})
-	if !errors.Is(err, errProbe) {
-		t.Fatalf("runDoltTransaction = %v, want the callback's error", err)
+			// The callback's own error rolls the second operation back, so its
+			// scope is all it shows.
+			expectOperation()
+			mock.ExpectQuery(vhConfigRead).WithArgs(versionedhistory.ConfigKey).WillReturnRows(vhRow("true", true))
+			expectRollback()
+			errProbe := errors.New("probe done")
+			var scoped bool
+			err = vhDoltTransaction(t, store, func(tx storage.Transaction) error {
+				scoped = issueops.VersionedHistoryEnabledFor(tx.(*doltTransaction).regularTx)
+				return errProbe
+			})
+			if !errors.Is(err, errProbe) {
+				t.Fatalf("runDoltTransaction = %v, want the callback's error", err)
+			}
+			if !scoped {
+				t.Error("the operation after a failed switch read did not read the row again")
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
-	if !scoped {
-		t.Error("the operation after a failed switch read did not read the row again")
-	}
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Fatal(err)
+}
+
+// errVHReadRefused is a switch read the server refused, which no write funnel
+// retries.
+var errVHReadRefused = errors.New("switch read refused")
+
+// TestDeferredSwitchReadErrorFailsRemoveDependency: RemoveDependencyWithOptions
+// begins a transaction of its own on each of its two arms, the wisp arm and the
+// issues-plane arm, and answers the switch in it. A failed read rolls that
+// transaction back before RemoveDependencyInTx runs and goes back to the
+// caller, and the caller's next write reads the row again. The read is refused,
+// not lost: no retry replays a refused read, so the test holds each arm to
+// failing closed whether or not its transaction runs under a retry.
+func TestDeferredSwitchReadErrorFailsRemoveDependency(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		wisp bool
+	}{
+		{name: "issues-plane arm"},
+		{name: "wisp arm", wisp: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, mock, _ := vhCountedStore(t)
+			if _, err := versionedhistory.ActivateStore(context.Background(), store, nil); err != nil {
+				t.Fatal(err)
+			}
+			// The arm is picked by whether the source is a wisp.
+			wispRow := sqlmock.NewRows([]string{"1"})
+			if tc.wisp {
+				wispRow.AddRow(1)
+			}
+			mock.ExpectQuery(regexp.QuoteMeta("SELECT 1 FROM wisps WHERE id = ? LIMIT 1")).WithArgs("vh-a").WillReturnRows(wispRow)
+			mock.ExpectBegin()
+			mock.ExpectQuery(vhConfigRead).WithArgs(versionedhistory.ConfigKey).WillReturnError(errVHReadRefused)
+			mock.ExpectRollback()
+			// No statement of the removal itself is expected: a body that ran
+			// would fail with sqlmock's error instead of the read's.
+			if err := store.RemoveDependency(context.Background(), "vh-a", "vh-b", "tester"); !errors.Is(err, errVHReadRefused) {
+				t.Fatalf("RemoveDependency = %v, want the switch read's error", err)
+			}
+			if store.versionedHistory.Enabled() {
+				t.Fatal("a failed switch read answered the switch")
+			}
+			if !vhWrite(t, store, mock, vhRow("true", true)) {
+				t.Error("the write after a failed switch read did not read the row again")
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 

@@ -10,6 +10,14 @@ import (
 
 //nolint:gosec // G201: table names are hardcoded constants
 func PromoteFromEphemeralInTx(ctx context.Context, tx DBTX, id string, actor string) error {
+	// Promotion re-inserts the wisp into the issues plane, so it takes the
+	// id's create coordination cell before it reads the wisp, for the reason
+	// moveIssuePersistenceInTx gives: a retaining sweep of the same wisp
+	// either commits first, and the read below finds no wisp, or conflicts
+	// and retries.
+	if err := CoordinateIDCreatesInTx(ctx, tx, []string{id}); err != nil {
+		return err
+	}
 	if !IsActiveWispInTx(ctx, tx, id) {
 		return fmt.Errorf("wisp %s not found", id)
 	}

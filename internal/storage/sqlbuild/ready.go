@@ -68,6 +68,82 @@ func BuildReadyWorkOrder(policy types.SortPolicy, createdCol, priorityCol string
 	}
 }
 
+// readyAffectingTypesSQL renders types.ReadyAffectingDependencyTypes as a
+// list of SQL literals. The types are built-in constants, rendered as literals
+// like the builder's other 'parent-child' clauses.
+func readyAffectingTypesSQL() string {
+	depTypes := types.ReadyAffectingDependencyTypes()
+	quoted := make([]string, len(depTypes))
+	for i, d := range depTypes {
+		quoted[i] = "'" + string(d) + "'"
+	}
+	return strings.Join(quoted, ", ")
+}
+
+// OwnReadyAffectingEdgeSQL is the correlated test that the row aliased alias
+// is the issue_id of a ready-affecting row in its family's own dependency
+// table. Only such a row can be marked by the blocked recompute: every leg of
+// its should-be-blocked union selects d.issue_id from that table for one of
+// these types. A set is_blocked flag on a row that fails the test is stale (an
+// outside merge, a failed post-pull recompute) and must not hide the issue
+// from ready work (GH#3268). The flag is only read around, never rewritten;
+// bd recompute-blocked repairs it.
+//
+// The alias is explicit on both sides: inside FROM <dependencies> d a bare id
+// would bind to the dependency row's own id column.
+func OwnReadyAffectingEdgeSQL(tables FilterTables, alias string) string {
+	return fmt.Sprintf("EXISTS (SELECT 1 FROM %s d WHERE d.issue_id = %s.id AND d.type IN (%s))",
+		tables.Dependencies, alias, readyAffectingTypesSQL())
+}
+
+// StaleBlockedIDsSQL selects the ids of one table family whose is_blocked flag
+// is stale: set on a row OwnReadyAffectingEdgeSQL rejects. Each stack resolves
+// it once per ready read and hands the ids to BuildReadyWorkWhere in
+// ReadyWorkWhereInputs.StaleBlockedIDs, so the ready WHERE keeps the bare,
+// indexed is_blocked = 0 whenever no flag is stale.
+//
+// It reads only the flagged rows and probes each one's own dependency rows by
+// issue_id, so its cost follows the flagged rows rather than the dependency
+// table: dolt plans it as a range over idx_issues_is_blocked (wisps:
+// idx_wisps_is_blocked) and a lookup join on the dependency table's issue_id
+// keys. It visits every flagged row even when none is stale, the common case:
+// on dolt 2.6 with 50k issues and 200k dependencies it took 30-50 ms at 666
+// flagged rows and about 430 ms at 15,000. Folding the same test into the
+// ready WHERE instead put a scan of every ready-affecting edge behind each
+// ready statement and cost the page query 2-4x once any row was flagged.
+func StaleBlockedIDsSQL(tables FilterTables) string {
+	return fmt.Sprintf("SELECT t.id FROM %s t WHERE t.is_blocked = 1 AND NOT %s",
+		tables.Main, OwnReadyAffectingEdgeSQL(tables, "t"))
+}
+
+// readyBlockedClause renders the ready-work blocked exclusion: the indexed
+// is_blocked projection decides, except for the rows whose flag is stale
+// (StaleBlockedIDsSQL), which it lists by id.
+func readyBlockedClause(staleIDs []string) (string, []any) {
+	if len(staleIDs) == 0 {
+		return "is_blocked = 0", nil
+	}
+	staleClauses, args := idBatchClauses("id IN (%s)", staleIDs)
+	return "(is_blocked = 0 OR " + strings.Join(staleClauses, " OR ") + ")", args
+}
+
+// idBatchClauses renders ids as one format clause per QueryBatchSize batch
+// (format's one verb takes the batch's placeholders), with the batches' args
+// in clause order, so no IN list grows past QueryBatchSize. Every batch lands
+// in the same statement, so this does not bound the statement's placeholder
+// count.
+func idBatchClauses(format string, ids []string) ([]string, []any) {
+	var clauses []string
+	var args []any
+	for start := 0; start < len(ids); start += QueryBatchSize {
+		end := min(start+QueryBatchSize, len(ids))
+		placeholders, batchArgs := InPlaceholders(ids[start:end])
+		clauses = append(clauses, fmt.Sprintf(format, placeholders))
+		args = append(args, batchArgs...)
+	}
+	return clauses, args
+}
+
 // ReadyWorkWhereInputs carries the precomputed ID sets the ready-work WHERE
 // clause folds in. Computing them takes queries, which is execution-context
 // work each stack does its own way.
@@ -78,6 +154,44 @@ type ReadyWorkWhereInputs struct {
 	// ParentDescendantIDs are the transitive descendants of *filter.ParentID;
 	// consulted only when filter.ParentID != nil.
 	ParentDescendantIDs []string
+	// StaleBlockedIDs holds each family's rows whose is_blocked flag is stale
+	// (StaleBlockedIDsSQL over that family's tables), keyed by the family's
+	// main table; the flag does not hide them. It is keyed rather than shared
+	// like the sets above because an id can name a row in both tables and
+	// only one of them may be stale.
+	StaleBlockedIDs map[string][]string
+}
+
+// readyStatusClause renders the ready-work status predicate and its args.
+func readyStatusClause(filter types.WorkFilter) (string, []any) {
+	switch {
+	case filter.Status == types.StatusOpen:
+		// Singular StatusOpen is the `bd ready` pin and means the ready-
+		// eligible set: built-in open plus category-active custom statuses,
+		// matching the ready_issues view since migration 0025 (GH#5831).
+		// Any other singular status stays exact.
+		return "(status = ? OR status IN (SELECT name FROM custom_statuses WHERE category = 'active'))", []any{string(filter.Status)}
+	case filter.Status != "":
+		return "status = ?", []any{string(filter.Status)}
+	case len(filter.Statuses) > 0:
+		ph, statusArgs := InPlaceholders(filter.Statuses)
+		return fmt.Sprintf("status IN (%s)", ph), statusArgs
+	default:
+		return "status IN ('open', 'in_progress')", nil
+	}
+}
+
+// readyParentClause renders the --parent predicate: every transitive
+// descendant of parentID. GH#3396: a one-hop subquery silently dropped
+// grandchildren despite the help text and WorkFilter.ParentID godoc both
+// promising recursion.
+func readyParentClause(parentID string, tables FilterTables, descendantIDs []string) (string, []any) {
+	parentClauses := []string{fmt.Sprintf("(id LIKE CONCAT(?, '.%%') AND id NOT IN (SELECT issue_id FROM %s WHERE type = 'parent-child'))", tables.Dependencies)}
+	args := []any{parentID}
+	descendantClauses, descendantArgs := idBatchClauses("id IN (%s)", descendantIDs)
+	parentClauses = append(parentClauses, descendantClauses...)
+	args = append(args, descendantArgs...)
+	return "(" + strings.Join(parentClauses, " OR ") + ")", args
 }
 
 // BuildReadyWorkWhere renders the full ready-work WHERE clause for one table
@@ -91,31 +205,13 @@ type ReadyWorkWhereInputs struct {
 // aliases are out of scope. See the SearchCountsSQL doc comment for why a
 // violation fails loud.
 func BuildReadyWorkWhere(filter types.WorkFilter, tables FilterTables, in ReadyWorkWhereInputs) (string, []any, error) {
-	var statusClause string
-	var args []any
-	switch {
-	case filter.Status != "":
-		// Singular StatusOpen is the `bd ready` pin and means the ready-
-		// eligible set: built-in open plus category-active custom statuses,
-		// matching the ready_issues view since migration 0025 (GH#5831).
-		// Any other singular status stays exact.
-		if filter.Status == types.StatusOpen {
-			statusClause = "(status = ? OR status IN (SELECT name FROM custom_statuses WHERE category = 'active'))"
-		} else {
-			statusClause = "status = ?"
-		}
-		args = append(args, string(filter.Status))
-	case len(filter.Statuses) > 0:
-		ph, statusArgs := InPlaceholders(filter.Statuses)
-		statusClause = fmt.Sprintf("status IN (%s)", ph)
-		args = append(args, statusArgs...)
-	default:
-		statusClause = "status IN ('open', 'in_progress')"
-	}
+	statusClause, args := readyStatusClause(filter)
+	blockedClause, blockedArgs := readyBlockedClause(in.StaleBlockedIDs[tables.Main])
+	args = append(args, blockedArgs...)
 	whereClauses := []string{
 		statusClause,
 		"(pinned = 0 OR pinned IS NULL)",
-		"is_blocked = 0",
+		blockedClause,
 	}
 	if !filter.IncludeEphemeral {
 		whereClauses = append(whereClauses, "(ephemeral = 0 OR ephemeral IS NULL)")
@@ -142,53 +238,23 @@ func BuildReadyWorkWhere(filter types.WorkFilter, tables FilterTables, in ReadyW
 
 	if !filter.IncludeDeferred {
 		whereClauses = append(whereClauses, "(defer_until IS NULL OR defer_until <= UTC_TIMESTAMP())")
-		for start := 0; start < len(in.DeferredChildIDs); start += QueryBatchSize {
-			end := start + QueryBatchSize
-			if end > len(in.DeferredChildIDs) {
-				end = len(in.DeferredChildIDs)
-			}
-			placeholders, batchArgs := InPlaceholders(in.DeferredChildIDs[start:end])
-			args = append(args, batchArgs...)
-			whereClauses = append(whereClauses, fmt.Sprintf("id NOT IN (%s)", placeholders))
-		}
+		deferredClauses, deferredArgs := idBatchClauses("id NOT IN (%s)", in.DeferredChildIDs)
+		whereClauses = append(whereClauses, deferredClauses...)
+		args = append(args, deferredArgs...)
 	}
-	for start := 0; start < len(filter.ExcludeIDs); start += QueryBatchSize {
-		end := start + QueryBatchSize
-		if end > len(filter.ExcludeIDs) {
-			end = len(filter.ExcludeIDs)
-		}
-		placeholders, batchArgs := InPlaceholders(filter.ExcludeIDs[start:end])
-		args = append(args, batchArgs...)
-		whereClauses = append(whereClauses, fmt.Sprintf("id NOT IN (%s)", placeholders))
-	}
+	excludedClauses, excludedArgs := idBatchClauses("id NOT IN (%s)", filter.ExcludeIDs)
+	whereClauses = append(whereClauses, excludedClauses...)
+	args = append(args, excludedArgs...)
 
-	if len(filter.Labels) > 0 {
-		for _, label := range filter.Labels {
-			whereClauses = append(whereClauses, fmt.Sprintf("id IN (SELECT issue_id FROM %s WHERE label = ?)", tables.Labels))
-			args = append(args, label)
-		}
-	}
 	// LabelsAny is an OR-set: an issue qualifies if it carries AT LEAST ONE of
 	// the labels. Previously this clause was absent entirely, so --label-any was
 	// silently dropped on the ready/claim path (with or without --parent) — a
 	// worker believed it was fenced when it was not. It AND-combines with Labels
-	// (the flag help promises "Can combine with --label").
-	if len(filter.LabelsAny) > 0 {
-		placeholders := make([]string, len(filter.LabelsAny))
-		for i, label := range filter.LabelsAny {
-			placeholders[i] = "?"
-			args = append(args, label)
-		}
-		whereClauses = append(whereClauses, fmt.Sprintf("id IN (SELECT issue_id FROM %s WHERE label IN (%s))", tables.Labels, strings.Join(placeholders, ", ")))
-	}
-	if len(filter.ExcludeLabels) > 0 {
-		placeholders := make([]string, len(filter.ExcludeLabels))
-		for i, label := range filter.ExcludeLabels {
-			placeholders[i] = "?"
-			args = append(args, label)
-		}
-		whereClauses = append(whereClauses, fmt.Sprintf("id NOT IN (SELECT issue_id FROM %s WHERE label IN (%s))", tables.Labels, strings.Join(placeholders, ", ")))
-	}
+	// (the flag help promises "Can combine with --label"). LabelSetClauses
+	// renders the three label sets exactly as bd blocked's scan does.
+	labelClauses, labelArgs := LabelSetClauses("id", tables, filter.Labels, filter.LabelsAny, filter.ExcludeLabels)
+	whereClauses = append(whereClauses, labelClauses...)
+	args = append(args, labelArgs...)
 	if filter.LabelPattern != "" {
 		whereClauses = append(whereClauses, fmt.Sprintf("id IN (SELECT issue_id FROM %s WHERE label LIKE ? ESCAPE '|')", tables.Labels))
 		args = append(args, globToLikePattern(filter.LabelPattern))
@@ -198,23 +264,10 @@ func BuildReadyWorkWhere(filter types.WorkFilter, tables FilterTables, in ReadyW
 		args = append(args, filter.LabelRegex)
 	}
 
-	// Parent filtering: return all transitive descendants of parentID.
-	// GH#3396: a one-hop subquery silently dropped grandchildren despite the
-	// help text and WorkFilter.ParentID godoc both promising recursion.
 	if filter.ParentID != nil {
-		parentID := *filter.ParentID
-		parentClauses := []string{fmt.Sprintf("(id LIKE CONCAT(?, '.%%') AND id NOT IN (SELECT issue_id FROM %s WHERE type = 'parent-child'))", tables.Dependencies)}
-		args = append(args, parentID)
-		for start := 0; start < len(in.ParentDescendantIDs); start += QueryBatchSize {
-			end := start + QueryBatchSize
-			if end > len(in.ParentDescendantIDs) {
-				end = len(in.ParentDescendantIDs)
-			}
-			placeholders, batchArgs := InPlaceholders(in.ParentDescendantIDs[start:end])
-			parentClauses = append(parentClauses, fmt.Sprintf("id IN (%s)", placeholders))
-			args = append(args, batchArgs...)
-		}
-		whereClauses = append(whereClauses, "("+strings.Join(parentClauses, " OR ")+")")
+		parentClause, parentArgs := readyParentClause(*filter.ParentID, tables, in.ParentDescendantIDs)
+		whereClauses = append(whereClauses, parentClause)
+		args = append(args, parentArgs...)
 	}
 
 	if filter.MoleculeID != "" {
