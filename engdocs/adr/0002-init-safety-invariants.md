@@ -117,15 +117,24 @@ uses for `ExitGuardMismatch` and `ExitMigrationFrozen`.
 
 `bd init --reinit-local` with a `--database`, `--server-host` or
 `--server-port` that names a database other than the recorded one is a
-repoint (GH#6172). Invariant 2's local-data confirmation, and ADR-0004's
-missing-database guard, are about the database the workspace is configured
-for, at its configured endpoint, resolved once before the flags are promoted
-into the environment: never the target, and never an exported
-`BEADS_DOLT_SERVER_*` value. A populated configured database takes the same
+repoint (GH#6172). Invariant 2's local-data confirmation, plain init's
+existing-data guard and ADR-0004's missing-database guard are about the
+database the workspace is configured for, resolved once before the flags are
+promoted into the environment, never the target: its recorded name (an
+exported `BEADS_DOLT_SERVER_DATABASE` is ignored, as init's open and metadata
+write ignore it), at the endpoint this environment's commands dial (an
+exported `BEADS_DOLT_SERVER_HOST`/`_PORT` counts; init's own `--server-host`/
+`--server-port` count only when they restate it), asked with that endpoint's
+credentials. A populated configured database takes the same
 11/12 confirmation; a configured database that exists but cannot be read
 refuses the repoint with an ordinary error that no token or
 `--recreate-missing` lifts, so 10/11/12 keep their frozen meanings. A
-proceeding repoint prints one notice naming both databases.
+proceeding repoint prints one notice naming both databases. A repoint to
+another server, away from the workspace's own bd-managed server (its port is
+bd's port file, or unknown while it is stopped), stops that server under the
+gate before anything is written, since its port file outranks the port init
+records; a server that cannot be stopped refuses the repoint with an
+ordinary error.
 
 ### Deprecation cycle
 

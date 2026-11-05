@@ -131,7 +131,7 @@ var constructionExemptions = map[string]string{
 
 	// bd init's count of the database a reinit or repoint leaves behind: a
 	// ReadOnly server open, only ever asked for GetStatistics.
-	"init_identity.go:countConfiguredIssues":       "read-only open of the configured database to count its issues before a reinit or repoint; no bead mutation",
+	"init_identity.go:countServerConfiguredIssues": "read-only open of the configured database to count its issues before a reinit or repoint; no bead mutation",
 	"init_identity_cgo.go:countEmbeddedInitIssues": "preview open of the configured embedded database to count its issues before a reinit or repoint; no bead mutation",
 
 	// Store-open-time reconciliation, which runs BEFORE the command's own store

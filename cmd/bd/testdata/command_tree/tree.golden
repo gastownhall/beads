@@ -3816,12 +3816,13 @@ bd init-safety
     |       --database <name>         database (or --server-host/--server-port
     |                                 naming another server). The destroy
     |                                 confirmation counts the issues in the
-    |                                 database the workspace is configured for,
-    |                                 not the target or an exported
-    |                                 BEADS_DOLT_SERVER_* value. A configured
-    |                                 database that exists but cannot be read
-    |                                 refuses the repoint outright. See
-    |                                 init-repoint in
+    |                                 database the workspace is configured for:
+    |                                 its recorded name, not the target or an
+    |                                 exported BEADS_DOLT_SERVER_DATABASE, at
+    |                                 the endpoint its commands dial. A
+    |                                 configured database that exists but
+    |                                 cannot be read refuses the repoint
+    |                                 outright. See init-repoint in
     |                                 docs/recovery/init-safety.md.
     |
     |   bd init --from-jsonl          Import from configured import.path. If
