@@ -2221,6 +2221,13 @@
     },
     {
       "schema": "DeleteIssuesResult",
+      "member": "deleted_ids",
+      "type": "array",
+      "required": false,
+      "item_type": "string"
+    },
+    {
+      "schema": "DeleteIssuesResult",
       "member": "dependencies",
       "type": "integer",
       "required": true
@@ -5160,6 +5167,12 @@
     },
     {
       "schema": "TreeNode",
+      "member": "deduped",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "TreeNode",
       "member": "defer_until",
       "type": "string",
       "format": "date-time",
@@ -7199,6 +7212,7 @@
     "DeleteIssuesRequest": "request",
     "DeleteIssuesRequest.ids[]": "request",
     "DeleteIssuesResult": "response",
+    "DeleteIssuesResult.deleted_ids[]": "response",
     "DeleteIssuesResult.orphaned[]": "response",
     "Dependency": "response",
     "DependencyEdge": "both",

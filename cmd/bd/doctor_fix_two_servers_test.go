@@ -118,7 +118,7 @@ func TestDoctorFixDatabaseRepairLeavesLiveServerRowsUnchanged(t *testing.T) {
 		}},
 		{name: "the check could not open the database", check: func(string) doctorCheck {
 			return doctorCheck{Name: "Database", Status: statusError, Message: "Unable to open database",
-				Fix: "Run 'bd doctor --fix' to attempt repair. Check 'bd dolt status' for server configuration issues"}
+				Fix: "Check 'bd dolt status' for server configuration issues. If the store itself will not open, preserve it before any recovery: " + doctor.EngineWontOpenRecoveryURL}
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

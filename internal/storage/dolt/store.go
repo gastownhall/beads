@@ -1904,6 +1904,24 @@ func New(ctx context.Context, cfg *Config) (*DoltStore, error) {
 			cfg.Database, remedy.PrintedValue(addr))
 	}
 
+	// Pin the server endpoint before presenting cfg.ServerPassword to it. Every
+	// store open funnels through New (NewFromConfig* end with New), so this is the
+	// one place that covers direct dolt.New callers too — bd doctor's federation,
+	// validation, maintenance and migration checks open the store this way with
+	// a password resolved from the shared-config host (doltServerConfig), which
+	// the PR's applyResolvedConfig gate does not reach. A no-op for bd's own
+	// local server and the vendor default; it refuses a shared-config host
+	// (metadata.json dolt_server_host / config.yaml dolt.host) the workspace
+	// never pinned, so a committed endpoint cannot harvest BEADS_DOLT_PASSWORD
+	// (GH#7886). The credentials-file password is already keyed to [host:port],
+	// so a swapped host finds no entry and sends nothing; this adds the check for
+	// BEADS_DOLT_PASSWORD, which is sent to whatever host is configured.
+	if cfg.ServerPassword != "" {
+		if err := doltserver.CheckEndpointTrust(cfg.BeadsDir, nil, cfg.ServerHost, cfg.ServerPort, cfg.ServerSocket); err != nil {
+			return nil, err
+		}
+	}
+
 	return newServerMode(ctx, cfg)
 }
 
@@ -3853,13 +3871,13 @@ func (s *DoltStore) Flatten(ctx context.Context) error {
 
 // Compact squashes old Dolt commits while preserving recent ones.
 // Pins a single connection for session-scoped stored procedures.
-func (s *DoltStore) Compact(ctx context.Context, initialHash, boundaryHash string, oldCommits int, recentHashes []string) error {
+func (s *DoltStore) Compact(ctx context.Context, initialHash, boundaryHash, headHash string, oldCommits int, recentHashes []string) error {
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
 		return fmt.Errorf("acquire connection for compact: %w", err)
 	}
 	defer conn.Close()
-	return versioncontrolops.Compact(ctx, conn, initialHash, boundaryHash, oldCommits, recentHashes)
+	return versioncontrolops.Compact(ctx, conn, initialHash, boundaryHash, headHash, oldCommits, recentHashes)
 }
 
 // UnderlyingDB returns the underlying *sql.DB connection

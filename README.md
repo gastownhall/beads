@@ -116,6 +116,20 @@ or [docs/getting-started/installation.md](docs/getting-started/installation.md#u
 
 ### Security And Verification
 
+Command and credential-target settings must come from your shell environment or
+user configuration, not `.beads/.env`. `.beads/.env` only admits non-command
+`BEADS_*` and `BD_*` variables plus the two Dolt remote credential variables
+(`DOLT_REMOTE_USER`, `DOLT_REMOTE_PASSWORD`); Beads ignores credential commands,
+mail delegates, editor, pager, Dolt executable/host/credential-file/root-path
+overrides, the rest of the dolt-owned `DOLT_*` namespace (such as
+`DOLT_SSH_COMMAND` and `DOLT_PAGER`), and non-Beads process variables (such as
+`GIT_*`, `SSH_*`, `LD_*`, and `DYLD_*`) in that file and prints a warning for
+each.
+`bd config set mail.delegate "gt mail"` writes to user-global YAML rather than
+the replicated database; the workspace settings API rejects `mail.delegate`.
+Mail delegation also ignores project `.beads/config.yaml`; only shell environment
+variables and user-global YAML can select the delegate.
+
 Before trusting any downloaded binary, verify its checksum against the release `checksums.txt`.
 
 The install scripts verify release checksums before install. For manual installs, do this verification yourself before first run.
@@ -321,6 +335,42 @@ An embedding program that links beads as a library rather than running
 workspace with a credential scoped to one caller via
 `beads.OpenBestAvailableWith` — see that package's doc comment for the
 multi-tenant case. This surface is EXPERIMENTAL: pin an exact beads version.
+
+## 🧹 Compacting Claude Rules
+
+`bd rules audit` scans `.claude/rules/*.md` for contradictions and
+near-duplicates; `bd rules compact` merges related rules into one composite.
+
+```bash
+bd rules compact --auto           # Preview: composite, dropped lines, backups, deletes
+bd rules compact --auto --force   # Apply
+```
+
+Compact only previews unless you pass `--force`. A composite keeps only the
+`**Do:**` and `**Don't:**` lines of its sources, and the preview lists every
+other line it drops. Applying writes the composite, copies each source to
+`<name>.md.backup`, then deletes the sources; it refuses a group whose
+composite or backup path already exists. To undo a merge, delete the composite
+and rename each `<name>.md.backup` back to `<name>.md`.
+
+## 🔁 GitHub Issues Sync
+
+`bd github sync` (and `bd github pull`/`push`) syncs the one repository named
+by `github.owner` and `github.repo`, but a database can hold beads from
+several repositories. In releases after v1.3.2, sync matches, fetches and
+updates only beads whose issue URL points at the configured repository, so
+pulling issue 1313 from a second repository creates a new bead instead of
+overwriting the bead linked to the first repository's issue 1313. A
+`github:<number>` ref has no repository and is always read as the configured
+one. A repository you renamed or transferred keeps syncing whichever of its
+names the config holds: GitHub redirects a former name to the repository, and
+sync asks GitHub which repository each other name your beads link under
+belongs to now (one request per name), so beads linked under the old name and
+under the new one stay matched to their issues, and a pull relinks them to the
+current URL. If that request fails, or the old name now belongs to another
+repository, beads still linked under it count as another repository's: relink
+them (`bd update <id> --external-ref <new-url>`), or the next pull imports
+their issues again as new beads.
 
 ## 🌐 Community Tools
 
