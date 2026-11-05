@@ -18,6 +18,68 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
+type endpointTestStore struct {
+	tracker.Store
+	endpoint string
+}
+
+func (s endpointTestStore) GetConfig(_ context.Context, key string) (string, error) {
+	if key == "github.url" {
+		return s.endpoint, nil
+	}
+	return "", nil
+}
+
+func TestInitRejectsChangedEndpointBeforeRequest(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("GITHUB_API_URL", "")
+	t.Setenv("GITHUB_TOKEN", "tracker-secret")
+	t.Setenv("GITHUB_OWNER", "owner")
+	t.Setenv("GITHUB_REPO", "repo")
+	t.Setenv("BEADS_DIR", "")
+	work := t.TempDir()
+	beadsDir := filepath.Join(work, ".beads")
+	if err := os.MkdirAll(beadsDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("{}\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(work)
+	config.ResetForTesting()
+	t.Cleanup(config.ResetForTesting)
+	if err := config.Initialize(); err != nil {
+		t.Fatal(err)
+	}
+
+	var secondRequests int
+	serverA := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer serverA.Close()
+	serverB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		secondRequests++
+		if r.Header.Get("Authorization") != "" {
+			t.Errorf("changed endpoint received Authorization header")
+		}
+	}))
+	defer serverB.Close()
+	// The store-config github.url is shared; private confirmation comes from
+	// the environment. The second Init's store endpoint does not match the
+	// env, so it reaches the gate as an unconfirmed change.
+	t.Setenv("GITHUB_API_URL", serverA.URL)
+	if err := (&Tracker{}).Init(context.Background(), endpointTestStore{endpoint: serverA.URL}); err != nil {
+		t.Fatal(err)
+	}
+	err := (&Tracker{}).Init(context.Background(), endpointTestStore{endpoint: serverB.URL})
+	if err == nil || !strings.Contains(err.Error(), "credential was not sent") {
+		t.Fatalf("changed endpoint Init error = %v", err)
+	}
+	if secondRequests != 0 {
+		t.Fatalf("changed endpoint received %d requests", secondRequests)
+	}
+}
+
 func TestRegistered(t *testing.T) {
 	factory := tracker.Get("github")
 	if factory == nil {
@@ -112,6 +174,69 @@ func TestExtractIdentifier(t *testing.T) {
 			t.Errorf("ExtractIdentifier(%q) = %q, want %q", tt.ref, got, tt.want)
 		}
 	}
+}
+
+// A pull whose exact external_ref lookup misses falls back to
+// ExtractIdentifier; an initialized tracker must not hand back the number of
+// an issue in another repository, or it matches (and overwrites) a bead
+// linked to that other repository's issue with the same number (GH#7781).
+func TestExtractIdentifierScopedToRepository(t *testing.T) {
+	tr := &Tracker{client: NewClient("token", "acme", "repo-b")}
+	tests := []struct {
+		ref  string
+		want string
+	}{
+		{"https://github.com/acme/repo-b/issues/42", "42"},
+		{"https://github.com/ACME/Repo-B/issues/42", "42"},
+		{"github:42", "42"},
+		{"https://github.com/acme/repo-a/issues/42", ""},
+		{"https://github.com/other/repo-b/issues/42", ""},
+		// Other spellings RefScope accepts for the configured repository.
+		{"https://api.github.com/repos/acme/repo-b/issues/42", "42"},
+		{"https://GitHub.com/acme/repo-b/issues/42", "42"},
+		// Foreign hosts and malformed paths.
+		{"https://ghe.example.com/acme/repo-b/issues/42", ""},
+		{"https://gitlab.com/acme/repo-b/-/issues/42", ""},
+		{"https://github.com/acme/repo-b/issues/42/comments", ""},
+		{"https://github.com/acme/repo-b/issues/abc", ""},
+		{"https://github.com/acme/repo-b/pull/42", ""},
+		{"https://github.com/acme/repo-b/issues/0", ""},
+		{"not-a-url", ""},
+		{"", ""},
+		// The shorthand arm is unchanged (leading zeros are rejected by the
+		// shorthand pattern itself, as before).
+		{"github:681509", "681509"},
+		{"github:0", ""},
+		{"github:01313", ""},
+	}
+	for _, tt := range tests {
+		if got := tr.ExtractIdentifier(tt.ref); got != tt.want {
+			t.Errorf("ExtractIdentifier(%q) = %q, want %q", tt.ref, got, tt.want)
+		}
+	}
+
+	// A GitHub Enterprise client's API and HTML URLs share one host;
+	// github.com is the host of another installation.
+	t.Run("enterprise", func(t *testing.T) {
+		ghes := &Tracker{client: &Client{BaseURL: "https://ghe.example.com/api/v3", Owner: "acme", Repo: "repo-b"}}
+		tests := []struct {
+			ref  string
+			want string
+		}{
+			{"https://ghe.example.com/acme/repo-b/issues/42", "42"},
+			{"https://ghe.example.com/api/v3/repos/acme/repo-b/issues/42", "42"},
+			{"https://GHE.example.com/ACME/repo-b/issues/42", "42"},
+			{"https://github.com/acme/repo-b/issues/42", ""},
+			{"https://ghe.example.com/acme/other/issues/42", ""},
+			{"https://ghe2.example.com/acme/repo-b/issues/42", ""},
+			{"github:42", "42"},
+		}
+		for _, tt := range tests {
+			if got := ghes.ExtractIdentifier(tt.ref); got != tt.want {
+				t.Errorf("ExtractIdentifier(%q) = %q, want %q", tt.ref, got, tt.want)
+			}
+		}
+	})
 }
 
 func TestBuildExternalRef(t *testing.T) {

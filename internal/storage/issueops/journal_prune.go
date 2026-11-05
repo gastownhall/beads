@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
@@ -251,10 +252,30 @@ func readEventsHeadInTx(ctx context.Context, tx DBTX) (int64, error) {
 	return head, nil
 }
 
+// readEventsRowsInTx's column list is shape-adaptive (journal_shape.go, PR
+// A1): seq, ts, op and issue_id are always selected, and each optional column
+// is selected only when journalShapeFor(tx) says this store's table actually
+// has it. A column the probe did not find is simply never requested, so the
+// corresponding field on storage.EventsJournalRow reads as "" — never a scan
+// error — for a consumer on an old-lineage table.
 func readEventsRowsInTx(ctx context.Context, tx DBTX, since int64, limit int) ([]storage.EventsJournalRow, error) {
+	shape := journalShapeFor(tx)
 	// CAST(ts AS CHAR) normalizes the DATETIME to a stable string across drivers.
-	q := `SELECT seq, CAST(ts AS CHAR), op, issue_id, actor, issue_json, dep_json, comment_json
-	      FROM bd_events_journal WHERE seq > ? ORDER BY seq ASC`
+	columns := []string{"seq", "CAST(ts AS CHAR)", "op", "issue_id"}
+	if shape.HasActor {
+		columns = append(columns, "actor")
+	}
+	if shape.HasIssueJSON {
+		columns = append(columns, "issue_json")
+	}
+	if shape.HasDepJSON {
+		columns = append(columns, "dep_json")
+	}
+	if shape.HasCommentJSON {
+		columns = append(columns, "comment_json")
+	}
+	//nolint:gosec // columns is built entirely from the fixed name literals above, never from caller input.
+	q := "SELECT " + strings.Join(columns, ", ") + " FROM bd_events_journal WHERE seq > ? ORDER BY seq ASC"
 	if limit > 0 {
 		q += " LIMIT " + strconv.Itoa(limit)
 	}
@@ -268,14 +289,29 @@ func readEventsRowsInTx(ctx context.Context, tx DBTX, since int64, limit int) ([
 	for rows.Next() {
 		var (
 			r         storage.EventsJournalRow
+			actor     sql.NullString
 			issueJS   sql.NullString
 			depJS     sql.NullString
 			commentJS sql.NullString
 		)
-		if err := rows.Scan(&r.Seq, &r.TS, &r.Op, &r.IssueID, &r.Actor, &issueJS, &depJS, &commentJS); err != nil {
+		dest := []any{&r.Seq, &r.TS, &r.Op, &r.IssueID}
+		if shape.HasActor {
+			dest = append(dest, &actor)
+		}
+		if shape.HasIssueJSON {
+			dest = append(dest, &issueJS)
+		}
+		if shape.HasDepJSON {
+			dest = append(dest, &depJS)
+		}
+		if shape.HasCommentJSON {
+			dest = append(dest, &commentJS)
+		}
+		if err := rows.Scan(dest...); err != nil {
 			return nil, fmt.Errorf("journal: scan row: %w", err)
 		}
 		r.TS = normalizeEventsTimestamp(r.TS)
+		r.Actor = actor.String
 		r.IssueJSON = issueJS.String
 		r.DepJSON = depJS.String
 		r.CommentJSON = commentJS.String

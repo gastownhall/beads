@@ -2354,7 +2354,10 @@ jobs:
   # and "Test (Server Dolt Full Suite N/16)", as --config=doltserver-integration:
   # the conformance and 16-shard full-suite variants of
   # //internal/storage/dolt over a non-race dolt_test build, each shard
-  # running the job's own shard script. --config=doltserver-integration has
+  # running the job's own shard script, plus
+  # //internal/storage/versioncontrolops:versioncontrolops_dolt_test (that
+  # package's Compact tests, which no PR Risk job ran; its BUILD comment says
+  # why it is here). --config=doltserver-integration has
   # exactly --config=integration's build flags, so it compiles nothing
   # bazel-integration does not (shared through the remote cache). This is a
   # PR-time tier, unlike main.yml's integration jobs, and pr.yml's gate
@@ -2685,7 +2688,7 @@ jobs:
   # every other mode (there a single client does both tiers' work without
   # in-flight deduplication, so a union would cost the sum of the two tiers
   # rather than the max). One client waits on rbe-west for both tiers' shards
-  # at once (17 + 46 = 63 test actions, under the remote-exec config's 64
+  # at once (18 + 46 = 64 test actions, exactly the remote-exec config's 64
   # jobs), so the job ends with the slower tier and the other tier's runner
   # is saved. cmd-dolt's Go-level -test.timeout=19m arg and its
   # BEADS_TEST_REQUIRE_EXCLUDE_PERMISSION env moved from --config=doltserver-cmd
@@ -2804,8 +2807,8 @@ jobs:
             exit 1
           fi
 
-      # Both tiers' shards at once: 17 server-storage + 46 cmd-dolt test
-      # actions, under the remote-exec config's 64 jobs. No --config=sole-run:
+      # Both tiers' shards at once: 18 server-storage + 46 cmd-dolt test
+      # actions, exactly the remote-exec config's 64 jobs. No --config=sole-run:
       # its one line (no retry on a remote cache eviction) is already in the
       # union. The step timeout is >= the union's eternal-size test_timeout
       # cap (1200s, shared by bd_dolt_server_test and regression_test) + about
@@ -2856,6 +2859,7 @@ jobs:
           --bep "$RUNNER_TEMP/bazel-bep.json"
           --label //internal/storage/dolt:dolt_server_full_test
           --label //internal/storage/dolt:dolt_server_conformance_test
+          --label //internal/storage/versioncontrolops:versioncontrolops_dolt_test
 
       - name: Every target and shard ran tests (cmd-dolt)
         id: check-cd
@@ -2964,7 +2968,7 @@ jobs:
           python3 tools/bazel/classify_tier_results.py
           --bep "$RUNNER_TEMP/bazel-bep.json"
           --rc "$TEST_RC"
-          --tier server-storage=//internal/storage/dolt:dolt_server_full_test,//internal/storage/dolt:dolt_server_conformance_test
+          --tier server-storage=//internal/storage/dolt:dolt_server_full_test,//internal/storage/dolt:dolt_server_conformance_test,//internal/storage/versioncontrolops:versioncontrolops_dolt_test
           --tier cmd-dolt=//cmd/bd:bd_dolt_server_test,//tests/regression:regression_test
           --gate-tier server-storage
           --check "server-storage=$CHECK_SS_OUTCOME"
