@@ -67,10 +67,12 @@ func (t *doltTransaction) CreateIssueImport(ctx context.Context, issue *types.Is
 
 // RunInTransaction executes a function within a database transaction. Its
 // callback is invoked at most once per call; callers retry explicitly after a
-// callback has started when their operation is safe to repeat. The commitMsg is
-// used for the DOLT_COMMIT that makes regular writes visible in Dolt history.
-// Wisp routing is handled by individual transaction methods based on
-// ID/Ephemeral.
+// callback has started when their operation is safe to repeat. A failure that
+// proves the server rolled the whole transaction back after losing a write
+// conflict is marked storage.ErrTransactionConflict so such a caller can tell
+// (storage.RunReplayableTransaction). The commitMsg is used for the
+// DOLT_COMMIT that makes regular writes visible in Dolt history. Wisp routing
+// is handled by individual transaction methods based on ID/Ephemeral.
 func (s *DoltStore) RunInTransaction(ctx context.Context, commitMsg string, fn func(tx storage.Transaction) error) error {
 	return s.runInTransaction(ctx, commitMsg, fn, s.runDoltTransaction)
 }
@@ -98,10 +100,35 @@ func (s *DoltStore) runInTransaction(
 			if callbackErr == nil && errors.Is(err, ErrCommitIndeterminate) {
 				return err
 			}
-			return backoff.Permanent(err)
+			return backoff.Permanent(markTransactionConflict(err))
 		}
 		return err
 	})
+}
+
+// markTransactionConflict tags a failure that proves the server rolled the
+// whole transaction back after losing a write conflict as
+// storage.ErrTransactionConflict, leaving its message unchanged. Nothing such a
+// transaction wrote is durable, so a caller whose callback is safe to repeat
+// may run it again.
+//
+//   - 1213 (serialization failure or deadlock) is what Dolt's commit-time merge
+//     raises when a concurrent writer committed a conflicting change first;
+//     the remedy is exactly a replay.
+//   - 1205 (lock-wait timeout) is tagged for engines that raise it. The engine
+//     may roll back only the statement, but the failed transaction is always
+//     rolled back whole here before any replay.
+//
+// Dolt's 1105 "@autocommit transaction rolled back" is not tagged: it reports
+// merge conflicts already in the working set, which a replay meets again. A
+// failure after the SQL commit landed carries ErrCommitIndeterminate and is
+// never tagged: its rows may be durable, and replaying them could apply them
+// twice.
+func markTransactionConflict(err error) error {
+	if err == nil || errors.Is(err, ErrCommitIndeterminate) || !isSerializationError(err) {
+		return err
+	}
+	return storage.MarkTransactionConflict(err)
 }
 
 // RunInIssueLifecycleTransaction runs a lifecycle transition and its durable
@@ -140,7 +167,7 @@ func (s *DoltStore) runInIssueLifecycleTransaction(
 			if callbackErr == nil && errors.Is(err, ErrCommitIndeterminate) {
 				return err
 			}
-			return backoff.Permanent(err)
+			return backoff.Permanent(markTransactionConflict(err))
 		}
 		return err
 	})

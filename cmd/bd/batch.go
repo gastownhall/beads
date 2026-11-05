@@ -174,17 +174,7 @@ normal 'bd' subcommands for interactive/read operations.`,
 		if proxied {
 			results, err = runBatchProxiedServer(ctx, ops, commitMsg)
 		} else {
-			results = make([]batchOpResult, 0, len(ops))
-			err = transact(ctx, store, commitMsg, func(tx storage.Transaction) error {
-				for _, op := range ops {
-					res, rerr := runBatchOp(ctx, tx, op)
-					if rerr != nil {
-						return fmt.Errorf("line %d (%s): %w", op.line, op.raw, rerr)
-					}
-					results = append(results, res)
-				}
-				return nil
-			})
+			results, err = runBatchTransaction(ctx, store, commitMsg, ops)
 		}
 		if err != nil {
 			if jsonOutput {
@@ -220,6 +210,25 @@ func init() {
 	batchCmd.Flags().Bool("dry-run", false, "Parse input and echo commands without executing")
 	batchCmd.Flags().StringP("message", "m", "", "DOLT_COMMIT message (default: 'bd: batch N ops by <actor>')")
 	rootCmd.AddCommand(batchCmd)
+}
+
+// runBatchTransaction runs ops in one transaction and reports each op's
+// result. transact replays the transaction after a lost concurrent-write
+// conflict, so each attempt starts with no results.
+func runBatchTransaction(ctx context.Context, s storage.DoltStorage, commitMsg string, ops []batchOp) ([]batchOpResult, error) {
+	var results []batchOpResult
+	err := transact(ctx, s, commitMsg, func(tx storage.Transaction) error {
+		results = make([]batchOpResult, 0, len(ops))
+		for _, op := range ops {
+			res, err := runBatchOp(ctx, tx, op)
+			if err != nil {
+				return fmt.Errorf("line %d (%s): %w", op.line, op.raw, err)
+			}
+			results = append(results, res)
+		}
+		return nil
+	})
+	return results, err
 }
 
 // batchOp is one parsed command line.
