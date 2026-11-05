@@ -1626,11 +1626,13 @@ func TestApplyInlineExpansionsDuplicateIDs(t *testing.T) {
 
 // TestApplyInlineExpansionsReusedExpandedID: dependents of an inline-expanded
 // step are pointed at its expansion's last step after the walk, over the
-// whole tree. A step left after expansion with the expanded step's ID would
-// have its own dependents retargeted the same way: silently wrong ordering, a
-// cycle, or a self-edge that pour refuses. Such an expansion is refused,
-// except when the reused ID is the last step of that step's own expansion,
-// where the rewrite changes nothing.
+// whole tree but the expansion's own steps, where a dependency on the
+// expanded step's ID names the expansion's step that kept it. A step outside
+// the expansion with that ID would have its own dependents retargeted the
+// same way, into silently wrong ordering or a cycle. A step of an expansion
+// that keeps no such step but depends on the expanded step would wait for
+// its own expansion's last step, a cycle or a self-edge that pour refuses.
+// Both are refused.
 func TestApplyInlineExpansionsReusedExpandedID(t *testing.T) {
 	tmpDir := t.TempDir()
 
@@ -1653,6 +1655,10 @@ func TestApplyInlineExpansionsReusedExpandedID(t *testing.T) {
 			{"id": "{target}", "title": "{target.title}"},
 			{"id": "{target}.verify", "title": "Verify", "needs": ["{target}"]}
 		]`,
+		"keep-first-depends-on": `[
+			{"id": "{target}", "title": "{target.title}"},
+			{"id": "{target}.verify", "title": "Verify", "depends_on": ["{target}"]}
+		]`,
 		"code-ship": `[
 			{"id": "code", "title": "Code"},
 			{"id": "ship", "title": "Ship", "needs": ["code"]}
@@ -1660,6 +1666,10 @@ func TestApplyInlineExpansionsReusedExpandedID(t *testing.T) {
 		"keep-last": `[
 			{"id": "{target}.prep", "title": "Prepare"},
 			{"id": "{target}", "title": "{target.title}", "needs": ["{target}.prep"]}
+		]`,
+		"self-ref": `[
+			{"id": "{target}.a", "title": "A", "needs": ["{target}"]},
+			{"id": "{target}.b", "title": "B", "needs": ["{target}.a"]}
 		]`,
 	}
 	for name, template := range templates {
@@ -1685,7 +1695,7 @@ func TestApplyInlineExpansionsReusedExpandedID(t *testing.T) {
 				{ID: "round1", Title: "Round 1", Expand: "round"},
 				{ID: "land", Title: "Land", Needs: []string{"round1"}},
 			},
-			want: `inline expand on step "implement": another step reuses its ID`,
+			want: `inline expand on step "implement": step "implement" [from: round@template[0]] outside the expansion has the same ID; dependencies on it would point at "implement.b"`,
 		},
 		{
 			// The same shape under a parent step: step IDs are checked at
@@ -1698,25 +1708,7 @@ func TestApplyInlineExpansionsReusedExpandedID(t *testing.T) {
 				}},
 				{ID: "land", Title: "Land", Needs: []string{"round1"}},
 			},
-			want: `inline expand on step "implement": another step reuses its ID`,
-		},
-		{
-			// Rewriting implement's dependents would make verify need
-			// itself.
-			name: "the expansion has a step with its own target's ID",
-			steps: []*Step{
-				{ID: "implement", Title: "Implement", Expand: "self-named"},
-				{ID: "land", Title: "Land", Needs: []string{"implement"}},
-			},
-			want: `inline expand on step "implement": another step reuses its ID`,
-		},
-		{
-			name: "the expansion keeps its target's ID on a step that is not its last",
-			steps: []*Step{
-				{ID: "implement", Title: "Implement", Expand: "keep-first"},
-				{ID: "land", Title: "Land", Needs: []string{"implement"}},
-			},
-			want: `inline expand on step "implement": another step reuses its ID`,
+			want: `inline expand on step "implement": step "implement" [from: round@template[0]] outside the expansion has the same ID`,
 		},
 		{
 			// done's needs on work become ship, the last step of work's
@@ -1729,7 +1721,18 @@ func TestApplyInlineExpansionsReusedExpandedID(t *testing.T) {
 				{ID: "ship", Title: "Ship", Needs: []string{"work"}, Expand: "round"},
 				{ID: "done", Title: "Done", Needs: []string{"work"}},
 			},
-			want: `inline expand on step "ship": another step reuses its ID`,
+			want: `inline expand on step "ship": step "ship" [from: code-ship@template[1]] outside the expansion has the same ID; dependencies on it would point at "triage"`,
+		},
+		{
+			// Rewriting work.a's needs on work would make work.a and work.b
+			// need each other, and leaving it would drop it at cook.
+			name: "a step of the expansion depends on the step it replaces",
+			steps: []*Step{
+				{ID: "brief", Title: "Brief"},
+				{ID: "work", Title: "Work", Needs: []string{"brief"}, Expand: "self-ref"},
+				{ID: "land", Title: "Land", Needs: []string{"work"}},
+			},
+			want: `inline expand on step "work": step "work.a" of its expansion depends on "work", the step the expansion replaces`,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1746,37 +1749,138 @@ func TestApplyInlineExpansionsReusedExpandedID(t *testing.T) {
 		})
 	}
 
-	t.Run("the expansion's last step keeps its target's ID", func(t *testing.T) {
-		steps := []*Step{
-			{ID: "brief", Title: "Brief"},
-			{ID: "implement", Title: "Implement", Needs: []string{"brief"}, Expand: "keep-last"},
-			{ID: "land", Title: "Land", Needs: []string{"implement"}},
-		}
-
-		result, err := ApplyInlineExpansions(steps, parser)
-		if err != nil {
-			t.Fatalf("ApplyInlineExpansions failed: %v", err)
-		}
-
-		want := []struct {
-			id    string
-			needs []string
-		}{
-			{"brief", nil},
-			{"implement.prep", []string{"brief"}},
-			{"implement", []string{"implement.prep"}},
-			{"land", []string{"implement"}},
-		}
-		if len(result) != len(want) {
-			t.Fatalf("expected %d steps, got %d", len(want), len(result))
-		}
-		for i, w := range want {
-			if result[i].ID != w.id {
-				t.Errorf("result[%d].ID = %q, want %q", i, result[i].ID, w.id)
+	// An expansion that keeps its target's ID on one of its steps: the
+	// template's own dependencies on that ID stay on that step, and only the
+	// steps outside the expansion are pointed at its last step. With nothing
+	// outside depending on the step, the formula cooks as it did before
+	// dependents were rewritten.
+	type stepDeps struct {
+		id        string
+		needs     []string
+		dependsOn []string
+	}
+	for _, tc := range []struct {
+		name  string
+		steps []*Step
+		want  []stepDeps
+	}{
+		{
+			// The issue #7637 template on a step named like its first step.
+			name: "a template step has the expanded step's ID",
+			steps: []*Step{
+				{ID: "brief", Title: "Brief"},
+				{ID: "implement", Title: "Implement", Needs: []string{"brief"}, Expand: "round"},
+			},
+			want: []stepDeps{
+				{id: "brief"},
+				{id: "implement", needs: []string{"brief"}},
+				{id: "triage", needs: []string{"implement"}},
+			},
+		},
+		{
+			name: "a template step has the expanded step's ID, and a step depends on it",
+			steps: []*Step{
+				{ID: "brief", Title: "Brief"},
+				{ID: "implement", Title: "Implement", Needs: []string{"brief"}, Expand: "round"},
+				{ID: "land", Title: "Land", Needs: []string{"implement"}},
+			},
+			want: []stepDeps{
+				{id: "brief"},
+				{id: "implement", needs: []string{"brief"}},
+				{id: "triage", needs: []string{"implement"}},
+				{id: "land", needs: []string{"triage"}},
+			},
+		},
+		{
+			name: "the expansion's first step keeps its target's ID",
+			steps: []*Step{
+				{ID: "brief", Title: "Brief"},
+				{ID: "implement", Title: "Implement", Needs: []string{"brief"}, Expand: "keep-first"},
+			},
+			want: []stepDeps{
+				{id: "brief"},
+				{id: "implement", needs: []string{"brief"}},
+				{id: "implement.verify", needs: []string{"implement"}},
+			},
+		},
+		{
+			name: "the expansion's first step keeps its target's ID, and a step depends on it",
+			steps: []*Step{
+				{ID: "brief", Title: "Brief"},
+				{ID: "implement", Title: "Implement", Needs: []string{"brief"}, Expand: "keep-first"},
+				{ID: "land", Title: "Land", Needs: []string{"implement"}},
+			},
+			want: []stepDeps{
+				{id: "brief"},
+				{id: "implement", needs: []string{"brief"}},
+				{id: "implement.verify", needs: []string{"implement"}},
+				{id: "land", needs: []string{"implement.verify"}},
+			},
+		},
+		{
+			name: "the same with depends_on",
+			steps: []*Step{
+				{ID: "brief", Title: "Brief"},
+				{ID: "implement", Title: "Implement", DependsOn: []string{"brief"}, Expand: "keep-first-depends-on"},
+				{ID: "land", Title: "Land", DependsOn: []string{"implement"}},
+			},
+			want: []stepDeps{
+				{id: "brief"},
+				{id: "implement", dependsOn: []string{"brief"}},
+				{id: "implement.verify", dependsOn: []string{"implement"}},
+				{id: "land", dependsOn: []string{"implement.verify"}},
+			},
+		},
+		{
+			name: "a middle step of the expansion has the expanded step's ID",
+			steps: []*Step{
+				{ID: "brief", Title: "Brief"},
+				{ID: "implement", Title: "Implement", Needs: []string{"brief"}, Expand: "self-named"},
+				{ID: "land", Title: "Land", Needs: []string{"implement"}},
+			},
+			want: []stepDeps{
+				{id: "brief"},
+				{id: "design", needs: []string{"brief"}},
+				{id: "implement", needs: []string{"design"}},
+				{id: "verify", needs: []string{"implement"}},
+				{id: "land", needs: []string{"verify"}},
+			},
+		},
+		{
+			name: "the expansion's last step keeps its target's ID",
+			steps: []*Step{
+				{ID: "brief", Title: "Brief"},
+				{ID: "implement", Title: "Implement", Needs: []string{"brief"}, Expand: "keep-last"},
+				{ID: "land", Title: "Land", Needs: []string{"implement"}},
+			},
+			want: []stepDeps{
+				{id: "brief"},
+				{id: "implement.prep", needs: []string{"brief"}},
+				{id: "implement", needs: []string{"implement.prep"}},
+				{id: "land", needs: []string{"implement"}},
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := ApplyInlineExpansions(tc.steps, parser)
+			if err != nil {
+				t.Fatalf("ApplyInlineExpansions failed: %v", err)
 			}
-			if fmt.Sprint(result[i].Needs) != fmt.Sprint(w.needs) {
-				t.Errorf("%s.Needs = %v, want %v", w.id, result[i].Needs, w.needs)
+
+			if len(result) != len(tc.want) {
+				t.Fatalf("expected %d steps, got %d", len(tc.want), len(result))
 			}
-		}
-	})
+			for i, w := range tc.want {
+				if result[i].ID != w.id {
+					t.Errorf("result[%d].ID = %q, want %q", i, result[i].ID, w.id)
+				}
+				if fmt.Sprint(result[i].Needs) != fmt.Sprint(w.needs) {
+					t.Errorf("%s.Needs = %v, want %v", w.id, result[i].Needs, w.needs)
+				}
+				if fmt.Sprint(result[i].DependsOn) != fmt.Sprint(w.dependsOn) {
+					t.Errorf("%s.DependsOn = %v, want %v", w.id, result[i].DependsOn, w.dependsOn)
+				}
+			}
+		})
+	}
 }

@@ -504,9 +504,12 @@ func ExpansionVarRefs(f *Formula, targetID string) []string {
 // The original steps slice is not modified.
 //
 // Steps that depended on an expanded step depend on the last step of its
-// expansion, as with compose.expand. It is an error for step IDs to repeat
-// after expansion, or for an expanded step's ID to remain on any step but the
-// last step of its own expansion; both errors wrap ErrValidation.
+// expansion, as with compose.expand. Inside the expansion, a dependency on the
+// expanded step's ID names the expansion's own step with that ID ({target}),
+// if it has one. It is an error for step IDs to repeat after expansion, for a
+// step outside an expansion to have the expanded step's ID, or for a step of
+// an expansion without such a step to depend on the expanded step; these
+// errors wrap ErrValidation.
 func ApplyInlineExpansions(steps []*Step, parser *Parser) ([]*Step, error) {
 	if parser == nil {
 		return steps, nil
@@ -532,17 +535,16 @@ func ApplyInlineExpansions(steps []*Step, parser *Parser) ([]*Step, error) {
 	}
 
 	// The rewrite below points every needs/depends_on naming an expanded
-	// step at the last step of its expansion, anywhere in the tree. A step
-	// that still has that ID after expansion would have its dependents
-	// retargeted as well, onto the wrong step, into a cycle or onto itself,
-	// so it is refused. The exception is the expansion's own last step
-	// keeping the ID ({target}): the rewrite then changes nothing.
-	counts := make(map[string]int)
-	countStepIDs(result, counts)
+	// step at the last step of its expansion, on every step outside that
+	// expansion. A step outside it that still has the expanded step's ID
+	// would have its dependents retargeted as well, onto the wrong step, so
+	// it is refused. Step IDs are unique here, so an expansion that keeps
+	// its target's ID cannot meet one.
+	stepMap := buildStepMap(result)
 	for _, r := range replaced {
-		if counts[r.targetID] > 0 && r.lastStepID != r.targetID {
-			return nil, fmt.Errorf("%w: inline expand on step %q: another step reuses its ID after expansion, but dependencies on %q point at %q, the last step of its expansion",
-				ErrValidation, r.targetID, r.targetID, r.lastStepID)
+		if other, ok := stepMap[r.targetID]; ok && !r.stepIDs[r.targetID] {
+			return nil, fmt.Errorf("%w: inline expand on step %q: step %q%s outside the expansion has the same ID; dependencies on it would point at %q, the expansion's last step",
+				ErrValidation, r.targetID, other.ID, stepSource(other), r.lastStepID)
 		}
 	}
 
@@ -552,18 +554,72 @@ func ApplyInlineExpansions(steps []*Step, parser *Parser) ([]*Step, error) {
 	// expanded step, sit at another nesting level, or be inline-expanded
 	// itself (propagateTargetDeps copied the raw ID onto its roots).
 	for _, r := range replaced {
-		result = UpdateDependenciesForExpansion(result, r.targetID, r.lastStepID)
+		retargetInlineDependents(result, r)
 	}
 
 	return result, nil
 }
 
-// inlineExpansion records one inline expansion applied during the walk: the
-// expanded step's ID and the ID of the last step of the expansion that
-// replaced it.
+// inlineExpansion records one inline expansion applied during the walk.
 type inlineExpansion struct {
-	targetID   string
+	// targetID is the expanded step's ID.
+	targetID string
+	// lastStepID is the ID of the expansion's last step, which the expanded
+	// step's dependents are pointed at.
 	lastStepID string
+	// stepIDs holds the IDs of the expansion's steps, children included.
+	stepIDs map[string]bool
+}
+
+// recordInlineExpansion appends to replaced the record of target's
+// replacement by expanded, so ApplyInlineExpansions can point target's
+// dependents at the expansion's last step afterwards. A step of the expansion
+// that depends on target.ID names the expansion's own step with that ID
+// ({target}), and the rewrite leaves it alone. Without such a step it names
+// the replaced step: the rewrite would make it wait for the expansion's own
+// last step, a cycle or a self-edge, and dropping it would be silent, so it is
+// refused.
+func recordInlineExpansion(replaced *[]inlineExpansion, target *Step, expanded []*Step) error {
+	if len(expanded) == 0 {
+		return nil
+	}
+	ids := collectStepIDs(expanded)
+	if !ids[target.ID] {
+		if ref := findStepNaming(expanded, target.ID); ref != "" {
+			return fmt.Errorf("%w: inline expand on step %q: step %q of its expansion depends on %q, the step the expansion replaces",
+				ErrValidation, target.ID, ref, target.ID)
+		}
+	}
+	*replaced = append(*replaced, inlineExpansion{
+		targetID:   target.ID,
+		lastStepID: expanded[len(expanded)-1].ID,
+		stepIDs:    ids,
+	})
+	return nil
+}
+
+// retargetInlineDependents points every Needs and DependsOn entry naming r's
+// expanded step at the last step of its expansion, in place, except on the
+// expansion's own steps, where that ID names the expansion's step that kept
+// it. steps is the walk's own copy of the tree, so the caller's steps are
+// untouched.
+func retargetInlineDependents(steps []*Step, r inlineExpansion) {
+	for _, s := range steps {
+		if !r.stepIDs[s.ID] {
+			replaceDep(s.Needs, r.targetID, r.lastStepID)
+			replaceDep(s.DependsOn, r.targetID, r.lastStepID)
+		}
+		retargetInlineDependents(s.Children, r)
+	}
+}
+
+// stepSource returns " [from: formula@location]" for a step whose source is
+// known, as bd cook --dry-run prints it, and "" otherwise.
+func stepSource(s *Step) string {
+	if s.SourceFormula == "" && s.SourceLocation == "" {
+		return ""
+	}
+	return fmt.Sprintf(" [from: %s@%s]", s.SourceFormula, s.SourceLocation)
 }
 
 // applyInlineExpansionsRecursive handles inline expansions for a slice of steps.
@@ -617,11 +673,8 @@ func applyInlineExpansionsRecursive(steps []*Step, parser *Parser, depth int, re
 			// at the expansion's last step afterwards. Taken from the
 			// processed steps so the record stays correct if that last step
 			// is itself inline-expanded.
-			if len(processedSteps) > 0 {
-				*replaced = append(*replaced, inlineExpansion{
-					targetID:   step.ID,
-					lastStepID: processedSteps[len(processedSteps)-1].ID,
-				})
+			if err := recordInlineExpansion(replaced, step, processedSteps); err != nil {
+				return nil, err
 			}
 
 			result = append(result, processedSteps...)

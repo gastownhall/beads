@@ -1789,13 +1789,16 @@ expand = "round"
 	}
 }
 
-// An inline-expanded step's ID must not survive on another step after
-// expansion. The expanded step's dependents are pointed at its expansion's
-// last step, and that rewrite would retarget the other step's dependents too.
-// Each formula below cooked without an error into a wrong graph: round's
-// implement no longer blocked its triage, verify blocked on itself (pour
-// refuses that edge), or done waited on triage while implement and triage
-// blocked on each other. The cook must refuse them.
+// An inline-expanded step's ID must not survive on a step outside its
+// expansion, and a step of an expansion that keeps no step with that ID must
+// not depend on it. The expanded step's dependents are pointed at its
+// expansion's last step, and that rewrite would retarget the other step's
+// dependents too, or make the expansion wait for its own last step. With the
+// rewrite and no refusal, each formula below cooked without an error into a
+// wrong graph: round's implement no longer blocked its triage, done waited on
+// triage while implement and triage blocked on each other, or work.a and
+// work.b blocked on each other (pour refuses that cycle). The cook must
+// refuse them.
 func TestResolveAndCookFormula_InlineExpandReusingExpandedIDFails(t *testing.T) {
 	expansions := map[string]string{
 		"split": `[[template]]
@@ -1807,19 +1810,15 @@ id = "{target}.b"
 title = "B"
 needs = ["{target}.a"]
 `,
-		"self-named": `[[template]]
-id = "design"
-title = "Design"
+		"self-ref": `[[template]]
+id = "{target}.a"
+title = "A"
+needs = ["{target}"]
 
 [[template]]
-id = "implement"
-title = "Implement"
-needs = ["design"]
-
-[[template]]
-id = "verify"
-title = "Verify"
-needs = ["implement"]
+id = "{target}.b"
+title = "B"
+needs = ["{target}.a"]
 `,
 		"code-ship": `[[template]]
 id = "code"
@@ -1858,25 +1857,7 @@ id = "land"
 title = "Land"
 needs = ["round1"]
 `,
-			want: `inline expand on step "implement": another step reuses its ID`,
-		},
-		{
-			name: "the expansion has a step with its own target's ID",
-			formula: `formula = "inline"
-version = 1
-type = "workflow"
-
-[[steps]]
-id = "implement"
-title = "Implement"
-expand = "self-named"
-
-[[steps]]
-id = "land"
-title = "Land"
-needs = ["implement"]
-`,
-			want: `inline expand on step "implement": another step reuses its ID`,
+			want: `inline expand on step "implement": step "implement" [from: round@template[0]] outside the expansion has the same ID`,
 		},
 		{
 			name: "an expansion's last step has another expanded step's ID",
@@ -1900,7 +1881,30 @@ id = "done"
 title = "Done"
 needs = ["work"]
 `,
-			want: `inline expand on step "ship": another step reuses its ID`,
+			want: `inline expand on step "ship": step "ship" [from: code-ship@template[1]] outside the expansion has the same ID`,
+		},
+		{
+			name: "a step of the expansion depends on the step it replaces",
+			formula: `formula = "inline"
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "brief"
+title = "Brief"
+
+[[steps]]
+id = "work"
+title = "Work"
+needs = ["brief"]
+expand = "self-ref"
+
+[[steps]]
+id = "land"
+title = "Land"
+needs = ["work"]
+`,
+			want: `inline expand on step "work": step "work.a" of its expansion depends on "work", the step the expansion replaces`,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1980,6 +1984,162 @@ needs = ["{target}.prep"]
 	} {
 		if !hasBlocksEdge(edge[0], edge[1]) {
 			t.Errorf("missing blocks edge %s -> %s", edge[0], edge[1])
+		}
+	}
+}
+
+// A template step with the inline-expanded step's ID keeps the template's own
+// dependencies on that ID: the issue #7637 template expanded on a step named
+// like its first step, or a template that keeps {target} on its first step.
+// Only steps outside the expansion are pointed at its last step, so with
+// nothing outside depending on the step the formula cooks as it did before
+// dependents were rewritten.
+func TestResolveAndCookFormula_InlineExpandKeepingTargetID(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		expand string
+		land   bool
+		want   map[string][]string
+	}{
+		{
+			name:   "round template, nothing depends on the step",
+			expand: "round",
+			want: map[string][]string{
+				"inline.implement": {"inline.brief"},
+				"inline.triage":    {"inline.implement"},
+			},
+		},
+		{
+			name:   "round template, land depends on the step",
+			expand: "round",
+			land:   true,
+			want: map[string][]string{
+				"inline.implement": {"inline.brief"},
+				"inline.triage":    {"inline.implement"},
+				"inline.land":      {"inline.triage"},
+			},
+		},
+		{
+			name:   "first step keeps {target}, nothing depends on the step",
+			expand: "keep-first",
+			want: map[string][]string{
+				"inline.implement":        {"inline.brief"},
+				"inline.implement.verify": {"inline.implement"},
+			},
+		},
+		{
+			name:   "first step keeps {target}, land depends on the step",
+			expand: "keep-first",
+			land:   true,
+			want: map[string][]string{
+				"inline.implement":        {"inline.brief"},
+				"inline.implement.verify": {"inline.implement"},
+				"inline.land":             {"inline.implement.verify"},
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src := `formula = "inline"
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "brief"
+title = "Brief"
+
+[[steps]]
+id = "implement"
+title = "Implement"
+needs = ["brief"]
+expand = "` + tc.expand + `"
+`
+			if tc.land {
+				src += `
+[[steps]]
+id = "land"
+title = "Land"
+needs = ["implement"]
+`
+			}
+			dir := writePipelineFormula(t, "inline", src)
+			writeRoundExpansion(t, dir)
+			writeExpansionFormula(t, dir, "keep-first", `[[template]]
+id = "{target}"
+title = "{target.title}"
+
+[[template]]
+id = "{target}.verify"
+title = "Verify"
+needs = ["{target}"]
+`)
+
+			subgraph, err := resolveAndCookFormula("inline", []string{dir})
+			if err != nil {
+				t.Fatalf("cook: %v", err)
+			}
+			for issue, want := range tc.want {
+				if got := blocksEdgesFrom(subgraph, issue); !slices.Equal(got, want) {
+					t.Errorf("%s blocks edges = %v, want %v", issue, got, want)
+				}
+			}
+		})
+	}
+}
+
+// ApplyLoops runs before inline expansions and copies a body step's expand
+// onto each iteration's step, so iteration chaining and a step that needs the
+// loop name steps the inline expansion replaces. They are pointed at the last
+// step of each iteration's expansion, like any other dependent.
+func TestResolveAndCookFormula_InlineExpandInLoopBody(t *testing.T) {
+	dir := writePipelineFormula(t, "inline", `formula = "inline"
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "brief"
+title = "Brief"
+
+[[steps]]
+id = "round"
+title = "Round"
+needs = ["brief"]
+[steps.loop]
+count = 2
+[[steps.loop.body]]
+id = "work"
+title = "Work"
+expand = "split"
+
+[[steps]]
+id = "land"
+title = "Land"
+needs = ["round"]
+`)
+	writeExpansionFormula(t, dir, "split", `[[template]]
+id = "{target}.a"
+title = "A"
+
+[[template]]
+id = "{target}.b"
+title = "B"
+needs = ["{target}.a"]
+`)
+
+	subgraph, err := resolveAndCookFormula("inline", []string{dir})
+	if err != nil {
+		t.Fatalf("cook: %v", err)
+	}
+	for issue, want := range map[string][]string{
+		"inline.round.iter1.work.a": {"inline.brief"},
+		"inline.round.iter1.work.b": {"inline.round.iter1.work.a"},
+		// Iteration 2 starts after the last step of iteration 1's expansion.
+		"inline.round.iter2.work.a": {"inline.round.iter1.work.b"},
+		"inline.round.iter2.work.b": {"inline.round.iter2.work.a"},
+		// land waits for the last step of the last iteration's expansion.
+		"inline.land": {"inline.round.iter2.work.b"},
+	} {
+		if got := blocksEdgesFrom(subgraph, issue); !slices.Equal(got, want) {
+			t.Errorf("%s blocks edges = %v, want %v", issue, got, want)
 		}
 	}
 }
