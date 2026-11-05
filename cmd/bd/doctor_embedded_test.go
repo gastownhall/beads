@@ -63,6 +63,8 @@ func TestEmbeddedDoctorSupportedChecks(t *testing.T) {
 		{"artifacts_json", []string{"doctor", "--check=artifacts", "--json"}},
 		{"conventions", []string{"doctor", "--check=conventions"}},
 		{"conventions_json", []string{"doctor", "--check=conventions", "--json"}},
+		{"export", []string{"doctor", "--check=export"}},
+		{"export_json", []string{"doctor", "--check=export", "--json"}},
 		{"pollution", []string{"doctor", "--check=pollution"}},
 		{"pollution_json", []string{"doctor", "--check=pollution", "--json"}},
 	}

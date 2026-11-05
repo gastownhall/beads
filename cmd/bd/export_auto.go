@@ -116,15 +116,7 @@ func maybeAutoExport(ctx context.Context, allowEmptyOverwrite bool) error {
 
 	// Resolve the export path before throttle/check detection so all decisions
 	// refer to the path that would actually be written.
-	exportPath := config.GetString("export.path")
-	if exportPath == "" {
-		if globalFlag {
-			exportPath = "global-issues.jsonl"
-		} else {
-			exportPath = "issues.jsonl"
-		}
-	}
-	fullPath := filepath.Join(beadsDir, exportPath)
+	fullPath := autoExportJSONLPath(beadsDir)
 
 	// Load state + interval.
 	state := loadExportAutoState(beadsDir)
@@ -681,6 +673,23 @@ func sampleStrings(values []string, limit int) []string {
 func autoExportFilter(ctx context.Context) types.IssueFilter {
 	filter, _ := buildAutoExportFilter(ctx)
 	return filter
+}
+
+// autoExportJSONLPath resolves the passive export path inside the given
+// .beads directory: the export.path config (relative to .beads/), else the
+// global default under --global, else issues.jsonl. maybeAutoExport and
+// `bd doctor --check=export` share it so both read and write the same file
+// (GH#6955).
+func autoExportJSONLPath(beadsDir string) string {
+	exportPath := config.GetString("export.path")
+	if exportPath == "" {
+		if globalFlag {
+			exportPath = "global-issues.jsonl"
+		} else {
+			exportPath = "issues.jsonl"
+		}
+	}
+	return filepath.Join(beadsDir, exportPath)
 }
 
 func buildAutoExportFilter(ctx context.Context) (types.IssueFilter, map[string]bool) {

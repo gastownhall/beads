@@ -1746,8 +1746,9 @@ bd doctor
     | Storage Availability:
     |   Full diagnostics, --perf, --deep, --server, --migration, and
     |   --check=validate currently require Dolt server mode. Embedded Dolt
-    |   supports --check=artifacts, --check=conventions, and
-    |   --check=pollution. --check-health has a limited hook-health fallback.
+    |   supports --check=artifacts, --check=conventions,
+    |   --check=export, and --check=pollution. --check-health has a limited
+    |   hook-health fallback.
     |   Unsupported combinations return a notice without changing storage.
     |
     | Performance Mode (--perf):
@@ -1764,9 +1765,14 @@ bd doctor
     | Specific Check Mode (--check):
     |   Run a specific check in detail. Available checks:
     |   - artifacts: Detect and optionally clean beads classic artifacts
-    |     (stale JSONL, SQLite files, cruft .beads dirs). Use with --clean.
+    |     (SQLite files, cruft .beads dirs). Use with --clean. Does not
+    |     check export coverage - see the export check.
     |   - conventions: Check for convention drift (lint warnings, stale
     |     issues, orphaned issues). Advisory only - warns, never blocks.
+    |   - export: Compare in-scope store issue IDs against the passive export
+    |     file's IDs (coverage only, not content equality). Reports missing
+    |     IDs as a warning; read-only even with --fix/--clean. Refresh
+    |     manually with: bd export -o <resolved-path>
     |   - pollution: Detect and optionally clean test issues from database
     |   - validate: Run focused data-integrity checks (duplicates, orphaned
     |     deps, test pollution, git conflicts). Use with --fix to auto-repair.
@@ -1834,6 +1840,7 @@ bd doctor
     |   bd doctor --check=artifacts           # Show classic artifacts (JSONL, SQLite, cruft dirs)
     |   bd doctor --check=artifacts --clean  # Delete safe-to-delete artifacts (with confirmation)
     |   bd doctor --check=conventions        # Convention drift check (lint, stale, orphans)
+    |   bd doctor --check=export             # Warn when the export file is missing store IDs
     |   bd doctor --check=pollution          # Show potential test issues
     |   bd doctor --check=pollution --clean  # Delete test issues (with confirmation)
     |   bd doctor --check=validate         # Data-integrity checks only
