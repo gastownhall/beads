@@ -1,12 +1,17 @@
 package main
 
 import (
+	"context"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/httpclient"
+	"github.com/steveyegge/beads/internal/testutil/credentialcmd"
 )
 
 func TestFindMailDelegateUsesYaml(t *testing.T) {
@@ -68,10 +73,31 @@ func TestLoadBeadsEnvFileRejectsCommands(t *testing.T) {
 		{"BD_PAGER", "command settings must come from your shell environment or user config"},
 		{"PAGER", "command settings must come from your shell environment or user config"},
 		{"BEADS_DOLT_BIN", "command settings must come from your shell environment or user config"},
+		// A key whose name marks it as executable is refused by suffix, so a
+		// command setting added later needs no entry in CommandEnvKeys.
+		{"BEADS_DOLT_PASSWORD_COMMAND", "command settings must come from your shell environment or user config"},
+		{"BD_EXAMPLE_HELPER_COMMAND", "command settings must come from your shell environment or user config"},
+		{"beads_example_command", "command settings must come from your shell environment or user config"},
+		{"BEADS_EXAMPLE_BIN", "command settings must come from your shell environment or user config"},
+		{"BD_EXAMPLE_BINARY", "command settings must come from your shell environment or user config"},
+		// The http backend's bearer outranks every credential source the
+		// caller configured, for the server the workspace names.
+		{"BEADS_HTTP_TOKEN", "credential settings must come from your shell environment or user config"},
+		{"beads_http_token", "credential settings must come from your shell environment or user config"},
+		// The plaintext grant would send a bearer over http in the clear, and
+		// the serve token file decides which bearers bd serve accepts.
+		{"BEADS_HTTP_ALLOW_INSECURE", "credential target settings must come from your shell environment or user config"},
+		{"BEADS_SERVE_TOKEN_FILE", "credential target settings must come from your shell environment or user config"},
 		{"BEADS_DOLT_SERVER_HOST", "credential target settings must come from your shell environment or user config"},
 		{"BEADS_CREDENTIALS_FILE", "credential target settings must come from your shell environment or user config"},
 		{"BEADS_CENTRAL_CONFIG", "credential target settings must come from your shell environment or user config"},
 		{"BEADS_HTTP_CA_FILE", "credential target settings must come from your shell environment or user config"},
+		// A path bd creates, truncates or appends to: a committed value would
+		// choose a file on the caller's machine for bd to overwrite.
+		{"BEADS_MEM_PROFILE", "output file settings must come from your shell environment"},
+		{"beads_mem_profile", "output file settings must come from your shell environment"},
+		{"BEADS_MEM_STATS", "output file settings must come from your shell environment"},
+		{"BEADS_PROXIED_SERVER_LOG", "output file settings must come from your shell environment"},
 		// The DOLT_* namespace is owned by the dolt binary and carries
 		// command-/path-valued members bd cannot control, so the prefix is NOT
 		// admitted: DOLT_SSH_COMMAND runs a command in dolt's ssh transport,
@@ -285,4 +311,212 @@ func TestLoadBeadsEnvFile(t *testing.T) {
 			t.Fatal("an internal BEADS_DIR rebind must not be promoted to user selection")
 		}
 	})
+}
+
+// TestLoadBeadsEnvFileRefusesVariableExpansion pins that .beads/.env values are
+// taken as written. A value that a $VAR or ${VAR} reference fills in -- from
+// the caller's environment or from an earlier line -- is refused with a
+// notice, so a committed file cannot copy a secret out of the caller's
+// environment into a setting the workspace routes elsewhere: an actor name
+// written into issues, or DOLT_REMOTE_PASSWORD sent to the workspace's own
+// sync.remote, which no endpoint pin covers. A dollar sign the file writes
+// literally (single-quoted, escaped, or not followed by a variable name)
+// still imports unchanged.
+func TestLoadBeadsEnvFileRefusesVariableExpansion(t *testing.T) {
+	const secret = "s3cr3t-from-the-caller-environment"
+	const reason = "$VAR references are not expanded in .beads/.env; write the value literally or set it in your shell environment"
+	t.Setenv("BEADS_TEST_CALLER_SECRET", secret)
+
+	refused := []string{
+		"BEADS_TEST_EXPAND_BRACED",
+		"BEADS_TEST_EXPAND_BARE",
+		"BEADS_TEST_EXPAND_QUOTED",
+		"BEADS_TEST_EXPAND_EMBEDDED",
+		"BEADS_TEST_EXPAND_UNSET",
+		"BEADS_TEST_EXPAND_SIBLING",
+		"DOLT_REMOTE_PASSWORD",
+	}
+	literal := map[string]string{
+		"BEADS_TEST_SIBLING":         "sibling",
+		"BEADS_TEST_LITERAL_SINGLE":  "pa$$word ${HOME}",
+		"BEADS_TEST_LITERAL_ESCAPED": "a${HOME}b",
+		"BEADS_TEST_LITERAL_DOLLARS": "pa$$word",
+		"BEADS_TEST_LITERAL_LOWER":   "cost$lower",
+	}
+	for _, key := range refused {
+		t.Setenv(key, "")
+		os.Unsetenv(key)
+	}
+	for key := range literal {
+		t.Setenv(key, "")
+		os.Unsetenv(key)
+	}
+
+	dir := t.TempDir()
+	content := strings.Join([]string{
+		"BEADS_TEST_EXPAND_BRACED=${BEADS_TEST_CALLER_SECRET}",
+		"BEADS_TEST_EXPAND_BARE=$BEADS_TEST_CALLER_SECRET",
+		`BEADS_TEST_EXPAND_QUOTED="prefix-${BEADS_TEST_CALLER_SECRET}"`,
+		"BEADS_TEST_EXPAND_EMBEDDED=a${BEADS_TEST_CALLER_SECRET}b",
+		"BEADS_TEST_EXPAND_UNSET=${BEADS_TEST_NOT_SET_ANYWHERE}",
+		"BEADS_TEST_SIBLING=sibling",
+		"BEADS_TEST_EXPAND_SIBLING=${BEADS_TEST_SIBLING}",
+		"DOLT_REMOTE_PASSWORD=${BEADS_TEST_CALLER_SECRET}",
+		`BEADS_TEST_LITERAL_SINGLE='pa$$word ${HOME}'`,
+		`BEADS_TEST_LITERAL_ESCAPED="a\${HOME}b"`,
+		"BEADS_TEST_LITERAL_DOLLARS=pa$$word",
+		"BEADS_TEST_LITERAL_LOWER=cost$lower",
+	}, "\n") + "\n"
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	warning := captureStderr(t, func() { loadBeadsEnvFile(dir) })
+
+	for _, kv := range os.Environ() {
+		if strings.Contains(kv, secret) && !strings.HasPrefix(kv, "BEADS_TEST_CALLER_SECRET=") {
+			t.Errorf(".beads/.env copied the caller's secret into the environment: %q", kv)
+		}
+	}
+	for _, key := range refused {
+		if value, ok := os.LookupEnv(key); ok {
+			t.Errorf("%s = %q was imported; a value filled in by expansion must be refused", key, value)
+		}
+		want := "beads: ignoring " + key + " from .beads/.env (" + reason + ")\n"
+		if !strings.Contains(warning, want) {
+			t.Errorf("warning = %q, want it to contain %q", warning, want)
+		}
+	}
+	for key, want := range literal {
+		if got := os.Getenv(key); got != want {
+			t.Errorf("%s = %q, want the literal %q", key, got, want)
+		}
+		if strings.Contains(warning, "ignoring "+key+" ") {
+			t.Errorf("%s was refused but its value is literal: %q", key, warning)
+		}
+	}
+}
+
+// TestLoadBeadsSelectionEnvFileRefusesVariableExpansion pins the same rule on
+// the early selector loader: a BEADS_DIR whose value expansion fills in is not
+// imported (and records no selection provenance), while a literal sibling
+// selector still is. The broad loader reports the refusal, so this one stays
+// quiet.
+func TestLoadBeadsSelectionEnvFileRefusesVariableExpansion(t *testing.T) {
+	t.Setenv("BEADS_TEST_SELECTION_TARGET", filepath.Join(t.TempDir(), ".beads"))
+	for _, key := range []string{"BEADS_DIR", "BEADS_DB", "BD_DB"} {
+		t.Setenv(key, "")
+		os.Unsetenv(key)
+	}
+	setBeadsDirStartupProvenanceForTest(t, false)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("BEADS_DIR=${BEADS_TEST_SELECTION_TARGET}\nBEADS_DB=/literal/.beads/dolt\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	warning := captureStderr(t, func() { loadBeadsSelectionEnvFile(dir) })
+
+	if value, ok := os.LookupEnv("BEADS_DIR"); ok {
+		t.Errorf("BEADS_DIR = %q was imported from an expanded value", value)
+	}
+	if beadsDirProvidedAtStartup {
+		t.Error("a refused BEADS_DIR must not record selection provenance")
+	}
+	if got := os.Getenv("BEADS_DB"); got != "/literal/.beads/dolt" {
+		t.Errorf("BEADS_DB = %q, want the literal selector imported", got)
+	}
+	if warning != "" {
+		t.Errorf("selector loader printed %q; the broad loader owns the notice", warning)
+	}
+}
+
+// TestPlantedEnvFileCannotRunCredentialCommand reproduces, end to end, the
+// attack the .beads/.env filter exists for: a cloned repository commits a
+// .beads/.env whose bearer-token command is scoped to the server its own
+// http_target.json would name. Loading the file and resolving the http
+// backend's bearer for that server must not run the command.
+func TestPlantedEnvFileCannotRunCredentialCommand(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "credential-command-ran")
+	command := credentialcmd.Marker(t, marker)
+	for _, key := range []string{httpclient.TokenEnv, httpclient.TokenCommandEnv} {
+		t.Setenv(key, "")
+		os.Unsetenv(key)
+	}
+	dir := t.TempDir()
+	planted := httpclient.TokenCommandEnv + "='127.0.0.1=" + command + "'\n"
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte(planted), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	warning := captureStderr(t, func() { loadBeadsEnvFile(dir) })
+
+	if value, ok := os.LookupEnv(httpclient.TokenCommandEnv); ok {
+		t.Errorf("%s = %q was imported from a planted .beads/.env", httpclient.TokenCommandEnv, value)
+	}
+	if !strings.Contains(warning, "beads: ignoring "+httpclient.TokenCommandEnv+" from .beads/.env (") {
+		t.Errorf("warning = %q, want the refusal notice", warning)
+	}
+	server, err := url.Parse("http://127.0.0.1:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, server.String(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := httpclient.NewBearerProvider(server).Authorize(context.Background(), req); err != nil {
+		t.Fatalf("Authorize: %v", err)
+	}
+	credentialcmd.AssertMarkerAbsent(t, marker)
+	if got := req.Header.Get("Authorization"); got != "" {
+		t.Errorf("Authorization = %q, want no credential from a planted .beads/.env", got)
+	}
+}
+
+// TestPlantedEnvFileCannotChooseDiagnosticsOutputFiles reproduces a committed
+// .beads/.env that names a file of the caller's as bd's heap profile and
+// MemStats destinations. bd creates both files when a command exits, which
+// truncates whatever was there, so importing either line would let a cloned
+// repository overwrite any file the caller can write. Loading the file and
+// writing the diagnostics must leave the caller's files untouched.
+func TestPlantedEnvFileCannotChooseDiagnosticsOutputFiles(t *testing.T) {
+	const notes = "the caller's own notes\n"
+	victims := t.TempDir()
+	profileVictim := filepath.Join(victims, "notes.txt")
+	statsVictim := filepath.Join(victims, "todo.txt")
+	for _, victim := range []string{profileVictim, statsVictim} {
+		if err := os.WriteFile(victim, []byte(notes), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, key := range []string{"BEADS_MEM_PROFILE", "BEADS_MEM_STATS", "BD_IS_FLUSHER"} {
+		t.Setenv(key, "")
+		os.Unsetenv(key)
+	}
+	dir := t.TempDir()
+	planted := "BEADS_MEM_PROFILE=" + profileVictim + "\nBEADS_MEM_STATS=" + statsVictim + "\n"
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte(planted), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	warning := captureStderr(t, func() { loadBeadsEnvFile(dir) })
+	writeMemDiagnostics("")
+
+	for _, key := range []string{"BEADS_MEM_PROFILE", "BEADS_MEM_STATS"} {
+		if value, ok := os.LookupEnv(key); ok {
+			t.Errorf("%s = %q was imported from a planted .beads/.env", key, value)
+		}
+		if want := "beads: ignoring " + key + " from .beads/.env (output file settings must come from your shell environment)\n"; !strings.Contains(warning, want) {
+			t.Errorf("warning = %q, want it to contain %q", warning, want)
+		}
+	}
+	for _, victim := range []string{profileVictim, statsVictim} {
+		got, err := os.ReadFile(victim)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != notes {
+			t.Errorf("%s was overwritten through a planted .beads/.env: %q", victim, got)
+		}
+	}
 }

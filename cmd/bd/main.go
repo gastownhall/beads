@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -559,6 +560,51 @@ func applyNoColorFlag() {
 	}
 }
 
+// expandedBeadsEnvValueReason is the notice reason for a .beads/.env value that
+// $VAR or ${VAR} expansion would have changed.
+const expandedBeadsEnvValueReason = "$VAR references are not expanded in .beads/.env; write the value literally or set it in your shell environment"
+
+// readBeadsEnvFile parses a project .beads/.env file with gotenv's syntax, but
+// takes every value exactly as the file writes it. gotenv expands $VAR and
+// ${VAR} references from the process environment (or an earlier line), which
+// would let a committed file copy anything in the caller's environment,
+// secrets included, into a setting the workspace sends elsewhere: an actor
+// name written into issues, or DOLT_REMOTE_PASSWORD sent to the workspace's
+// own sync.remote.
+//
+// The file is therefore parsed a second time with every '$' escaped. gotenv
+// reads "\$" as a literal dollar sign and never consults the environment for
+// it, so that parse depends on the file alone and yields each value as
+// written, except that an escape gotenv does not consume (inside single
+// quotes, or before an already-escaped dollar in an unquoted value) survives as
+// "\$" and is undone before comparing. A key whose value differs between the
+// two parses was changed by expansion: it is left out of values and listed,
+// sorted, in expanded. Because a value is imported only when it equals what the
+// file alone determines, a quirk of the second parse can refuse a key but never
+// let the environment into one. A file gotenv cannot parse is an error, as it
+// was for gotenv.Read.
+func readBeadsEnvFile(envFile string) (values map[string]string, expanded []string, err error) {
+	raw, err := os.ReadFile(envFile) // #nosec G304 -- the .env of the beads dir bd selected
+	if err != nil {
+		return nil, nil, err
+	}
+	parsed, err := gotenv.StrictParse(bytes.NewReader(raw))
+	if err != nil {
+		return nil, nil, err
+	}
+	asWritten, _ := gotenv.StrictParse(bytes.NewReader(bytes.ReplaceAll(raw, []byte("$"), []byte(`\$`))))
+	values = make(map[string]string, len(parsed))
+	for key, value := range parsed {
+		if literal, ok := asWritten[key]; ok && strings.ReplaceAll(literal, `\$`, "$") == value {
+			values[key] = value
+			continue
+		}
+		expanded = append(expanded, key)
+	}
+	slices.Sort(expanded)
+	return values, expanded, nil
+}
+
 // loadBeadsEnvFile loads .beads/.env into process environment for per-project
 // Dolt credentials (GH#2520). Imports are non-overriding —
 // existing shell env vars always take precedence.
@@ -574,11 +620,13 @@ func loadBeadsEnvFile(beadsDir string) {
 	if _, err := os.Stat(envFile); err != nil {
 		return
 	}
-	if pairs, err := gotenv.Read(envFile); err == nil {
-		for key, val := range pairs {
-			if os.Getenv(key) == "" && val != "" {
-				config.MarkDotenvValue(key, val)
-			}
+	env, expanded, err := readBeadsEnvFile(envFile)
+	if err != nil {
+		return
+	}
+	for key, val := range env {
+		if os.Getenv(key) == "" && val != "" {
+			config.MarkDotenvValue(key, val)
 		}
 	}
 	// A .env-provided BEADS_DIR is user-authored selection wherever it is
@@ -589,19 +637,20 @@ func loadBeadsEnvFile(beadsDir string) {
 	// thing, instead of target-role or CWD-role depending on the caller's
 	// unrelated BEADS_DB export.
 	beadsDirWasSet := os.Getenv("BEADS_DIR") != ""
-	env, err := gotenv.Read(envFile)
-	if err != nil {
-		return
-	}
-	keys := make([]string, 0, len(env))
+	keys := make([]string, 0, len(env)+len(expanded))
 	for key := range env {
 		keys = append(keys, key)
 	}
+	keys = append(keys, expanded...)
 	slices.Sort(keys)
 	for _, key := range keys {
-		value := env[key]
+		value, literal := env[key]
 		if ok, reason := creds.AllowedProjectEnvKey(key); !ok {
 			fmt.Fprintf(os.Stderr, "beads: ignoring %s from .beads/.env (%s)\n", key, reason)
+			continue
+		}
+		if !literal {
+			fmt.Fprintf(os.Stderr, "beads: ignoring %s from .beads/.env (%s)\n", key, expandedBeadsEnvValueReason)
 			continue
 		}
 		upper := strings.ToUpper(strings.TrimSpace(key))
@@ -642,7 +691,9 @@ func loadBeadsSelectionEnvFile(beadsDir string) {
 	}
 	config.RecordWorkspaceBeadsDir(beadsDir)
 	envFile := filepath.Join(beadsDir, ".env")
-	pairs, err := gotenv.Read(envFile)
+	// A selector whose value expansion filled in is left out here without a
+	// notice: loadBeadsEnvFile reports it when it reads the same file.
+	pairs, _, err := readBeadsEnvFile(envFile)
 	if err != nil {
 		return
 	}
@@ -2204,7 +2255,7 @@ var rootCmd = &cobra.Command{
 		// mode is where that is least visible, not where it is acceptable.
 		if proxiedServerMode {
 			p, err := newProxiedServerUOWProvider(rootCtx, beadsDir, databaseOverride,
-				rootProviderOptions(previewMode, useReadOnly)...)
+				rootProviderOptions(previewMode, useReadOnly, isWorkingSetReconcileCommand(cmd))...)
 			if err != nil {
 				// Same typed rendering the store path gets below: a schema
 				// skew or a migration-gate refusal here carries a whole
@@ -2336,7 +2387,7 @@ var rootCmd = &cobra.Command{
 		// Dolt manages these files itself; external interference is never safe.
 
 		if _, ok := backends.Lookup(cfg.GetBackend()); ok {
-			store, err = newRegisteredBackendStore(openCtx, cfg.GetBackend(), beadsDir, useReadOnly)
+			store, err = newRegisteredBackendStore(openCtx, cfg.GetBackend(), beadsDir, useReadOnly, opensForBeadWrites(doltCfg))
 		} else {
 			store, err = newDoltStore(rootCtx, doltCfg)
 		}
