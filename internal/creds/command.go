@@ -76,6 +76,24 @@ var CredentialRedirectEnvKeys = []string{
 	"BEADS_SERVE_TOKEN_FILE",
 }
 
+// OutputFileEnvKeys names environment settings whose value is the path of a
+// file bd creates, truncates or appends to. BEADS_MEM_PROFILE and
+// BEADS_MEM_STATS are created when a command exits (an existing file is
+// truncated), and the proxied Dolt server appends its log to
+// BEADS_PROXIED_SERVER_LOG. From a project .beads/.env, any of them would let a
+// cloned repository choose a file on the caller's machine for bd to overwrite.
+// They are diagnostics and per-machine choices, so only the caller's shell
+// sets them (for the server log, also bd init --proxied-server-log-path).
+// BEADS_MEM_PROFILE_NOGC names no path, and the directories bd keeps its own
+// state in (BEADS_DOLT_DATA_DIR, BEADS_SHARED_SERVER_DIR,
+// BEADS_PROXIED_SERVER_ROOT_PATH) hold only files of bd's naming, so they stay
+// admitted.
+var OutputFileEnvKeys = []string{
+	"BEADS_MEM_PROFILE",
+	"BEADS_MEM_STATS",
+	"BEADS_PROXIED_SERVER_LOG",
+}
+
 // AllowedDoltEnvKeys names the only bare DOLT_* variables a project
 // .beads/.env may import: the Dolt remote credential pair, the documented
 // per-project credential use case (GH#2520). The DOLT_* namespace as a whole
@@ -130,12 +148,12 @@ var AllowedOrchestratorEnvKeys = []string{
 // .beads/.env file. Comparison is case-insensitive so mixed-case keys on
 // Windows cannot bypass the filter. Only BEADS_* and BD_* keys outside the
 // command (CommandEnvKeys, CommandEnvKeySuffixes), credential
-// (CredentialEnvKeys) and credential-redirection sets, plus the explicit Dolt
-// remote credential keys in AllowedDoltEnvKeys and the orchestrator root in
-// AllowedOrchestratorEnvKeys, are admitted: the broader DOLT_*
-// namespace is deliberately excluded (see AllowedDoltEnvKeys) and non-prefixed
-// keys are refused so child git/dolt/ssh processes cannot inherit GIT_*, SSH_*,
-// LD_*, or DYLD_* hooks.
+// (CredentialEnvKeys), credential-redirection and output-file
+// (OutputFileEnvKeys) sets, plus the explicit Dolt remote credential keys in
+// AllowedDoltEnvKeys and the orchestrator root in AllowedOrchestratorEnvKeys,
+// are admitted: the broader DOLT_* namespace is deliberately excluded (see
+// AllowedDoltEnvKeys) and non-prefixed keys are refused so child git/dolt/ssh
+// processes cannot inherit GIT_*, SSH_*, LD_*, or DYLD_* hooks.
 func AllowedProjectEnvKey(key string) (bool, string) {
 	upper := strings.ToUpper(strings.TrimSpace(key))
 	if upper == "" {
@@ -155,6 +173,11 @@ func AllowedProjectEnvKey(key string) (bool, string) {
 	for _, k := range CredentialRedirectEnvKeys {
 		if upper == k {
 			return false, "credential target settings must come from your shell environment or user config"
+		}
+	}
+	for _, k := range OutputFileEnvKeys {
+		if upper == k {
+			return false, "output file settings must come from your shell environment"
 		}
 	}
 	for _, k := range AllowedDoltEnvKeys {

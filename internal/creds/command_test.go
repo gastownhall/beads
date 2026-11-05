@@ -220,3 +220,36 @@ func TestAllowedProjectEnvKeyRefusesExecutableAndBearerSettings(t *testing.T) {
 		})
 	}
 }
+
+// TestAllowedProjectEnvKeyRefusesOutputFileSettings pins that a project
+// .beads/.env cannot name a file bd creates, truncates or appends to: the heap
+// profile and MemStats destinations bd writes on exit, and the log the proxied
+// Dolt server appends to. A committed value would choose a file on the
+// caller's machine for bd to overwrite. The profiling switch that names no
+// path, and the directories bd keeps state of its own naming in, stay
+// admitted.
+func TestAllowedProjectEnvKeyRefusesOutputFileSettings(t *testing.T) {
+	const outputReason = "output file settings must come from your shell environment"
+	for _, tc := range []struct {
+		key    string
+		ok     bool
+		reason string
+	}{
+		{key: "BEADS_MEM_PROFILE", reason: outputReason},
+		{key: "beads_mem_profile", reason: outputReason},
+		{key: " Beads_Mem_Stats ", reason: outputReason},
+		{key: "BEADS_MEM_STATS", reason: outputReason},
+		{key: "BEADS_PROXIED_SERVER_LOG", reason: outputReason},
+		{key: "BEADS_MEM_PROFILE_NOGC", ok: true},
+		{key: "BEADS_DOLT_DATA_DIR", ok: true},
+		{key: "BEADS_SHARED_SERVER_DIR", ok: true},
+		{key: "BEADS_PROXIED_SERVER_ROOT_PATH", ok: true},
+	} {
+		t.Run(tc.key, func(t *testing.T) {
+			ok, reason := AllowedProjectEnvKey(tc.key)
+			if ok != tc.ok || reason != tc.reason {
+				t.Errorf("AllowedProjectEnvKey(%q) = (%v, %q), want (%v, %q)", tc.key, ok, reason, tc.ok, tc.reason)
+			}
+		})
+	}
+}

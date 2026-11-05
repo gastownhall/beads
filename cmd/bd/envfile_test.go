@@ -92,6 +92,12 @@ func TestLoadBeadsEnvFileRejectsCommands(t *testing.T) {
 		{"BEADS_CREDENTIALS_FILE", "credential target settings must come from your shell environment or user config"},
 		{"BEADS_CENTRAL_CONFIG", "credential target settings must come from your shell environment or user config"},
 		{"BEADS_HTTP_CA_FILE", "credential target settings must come from your shell environment or user config"},
+		// A path bd creates, truncates or appends to: a committed value would
+		// choose a file on the caller's machine for bd to overwrite.
+		{"BEADS_MEM_PROFILE", "output file settings must come from your shell environment"},
+		{"beads_mem_profile", "output file settings must come from your shell environment"},
+		{"BEADS_MEM_STATS", "output file settings must come from your shell environment"},
+		{"BEADS_PROXIED_SERVER_LOG", "output file settings must come from your shell environment"},
 		// The DOLT_* namespace is owned by the dolt binary and carries
 		// command-/path-valued members bd cannot control, so the prefix is NOT
 		// admitted: DOLT_SSH_COMMAND runs a command in dolt's ssh transport,
@@ -464,5 +470,53 @@ func TestPlantedEnvFileCannotRunCredentialCommand(t *testing.T) {
 	credentialcmd.AssertMarkerAbsent(t, marker)
 	if got := req.Header.Get("Authorization"); got != "" {
 		t.Errorf("Authorization = %q, want no credential from a planted .beads/.env", got)
+	}
+}
+
+// TestPlantedEnvFileCannotChooseDiagnosticsOutputFiles reproduces a committed
+// .beads/.env that names a file of the caller's as bd's heap profile and
+// MemStats destinations. bd creates both files when a command exits, which
+// truncates whatever was there, so importing either line would let a cloned
+// repository overwrite any file the caller can write. Loading the file and
+// writing the diagnostics must leave the caller's files untouched.
+func TestPlantedEnvFileCannotChooseDiagnosticsOutputFiles(t *testing.T) {
+	const notes = "the caller's own notes\n"
+	victims := t.TempDir()
+	profileVictim := filepath.Join(victims, "notes.txt")
+	statsVictim := filepath.Join(victims, "todo.txt")
+	for _, victim := range []string{profileVictim, statsVictim} {
+		if err := os.WriteFile(victim, []byte(notes), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, key := range []string{"BEADS_MEM_PROFILE", "BEADS_MEM_STATS", "BD_IS_FLUSHER"} {
+		t.Setenv(key, "")
+		os.Unsetenv(key)
+	}
+	dir := t.TempDir()
+	planted := "BEADS_MEM_PROFILE=" + profileVictim + "\nBEADS_MEM_STATS=" + statsVictim + "\n"
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte(planted), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	warning := captureStderr(t, func() { loadBeadsEnvFile(dir) })
+	writeMemDiagnostics("")
+
+	for _, key := range []string{"BEADS_MEM_PROFILE", "BEADS_MEM_STATS"} {
+		if value, ok := os.LookupEnv(key); ok {
+			t.Errorf("%s = %q was imported from a planted .beads/.env", key, value)
+		}
+		if want := "beads: ignoring " + key + " from .beads/.env (output file settings must come from your shell environment)\n"; !strings.Contains(warning, want) {
+			t.Errorf("warning = %q, want it to contain %q", warning, want)
+		}
+	}
+	for _, victim := range []string{profileVictim, statsVictim} {
+		got, err := os.ReadFile(victim)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != notes {
+			t.Errorf("%s was overwritten through a planted .beads/.env: %q", victim, got)
+		}
 	}
 }
