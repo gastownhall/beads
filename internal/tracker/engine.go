@@ -329,6 +329,14 @@ func (e *Engine) DetectConflicts(ctx context.Context) ([]Conflict, error) {
 		if err != nil || extIssue == nil {
 			continue
 		}
+		// The tracker answered with an issue it serves under a ref it cannot
+		// address, so the issue left the configured target (GitHub: it was
+		// transferred to another repository). The pull and the push both skip
+		// it, so resolving a conflict could only force the local content over
+		// it.
+		if e.unaddressable(e.Tracker.BuildExternalRef(extIssue)) {
+			continue
+		}
 
 		if extIssue.UpdatedAt.After(lastSync) {
 			conflicts = append(conflicts, Conflict{
@@ -449,6 +457,7 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 	mapper := e.Tracker.FieldMapper()
 	var pendingDeps []DependencyInfo
 	var dryRunIssues []*types.Issue
+	var outsideRefs, skippedOutsideRefs []string
 
 	for i, extIssue := range extIssues {
 		// ShouldImport hook: filter before conversion
@@ -474,6 +483,17 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 		if existing == nil {
 			if localID := strings.TrimSpace(conv.Issue.ID); localID != "" {
 				existing = localByID[localID]
+			}
+		}
+		// The tracker fetched this issue but cannot address its ref (GitHub:
+		// an issue transferred to another repository). Skip it where
+		// importing it could duplicate a bead.
+		if existing == nil && e.unaddressable(ref) {
+			outsideRefs = append(outsideRefs, ref)
+			if e.pullSkipsUnaddressable(fallback, &extIssue, i, bulkRows) {
+				skippedOutsideRefs = append(skippedOutsideRefs, ref)
+				stats.Skipped++
+				continue
 			}
 		}
 
@@ -602,6 +622,7 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 			}
 		}
 	}
+	e.warnUnaddressablePulls(outsideRefs, skippedOutsideRefs)
 
 	// Create dependencies after all issues are imported
 	depErrors := 0
@@ -1325,6 +1346,12 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 		}
 	}
 
+	var unaddressableIDs, movedIDs, movedRefs []string
+	// Report the skipped beads however the push ends, a rate-limit abort too.
+	defer func() {
+		e.warnUnaddressablePushes(opts, unaddressableIDs)
+		e.warnMovedPushes(movedIDs, movedRefs)
+	}()
 	for _, issue := range issues {
 		// Limit to parent and its descendants if requested.
 		if descendantSet != nil && !descendantSet[issue.ID] {
@@ -1366,6 +1393,7 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 				// A real run skips a linked issue whose ref the tracker
 				// cannot address (e.g. another repository's issue), so the
 				// preview must skip it too (gastownhall/beads#7781).
+				unaddressableIDs = append(unaddressableIDs, issue.ID)
 				stats.Skipped++
 			} else if !forceIDs[issue.ID] && e.storedPushHashMatches(ctx, issue, extRef) {
 				// Content unchanged since last push: a real run would skip this
@@ -1428,6 +1456,7 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 			// Update existing external issue
 			extID := e.Tracker.ExtractIdentifier(extRef)
 			if extID == "" {
+				unaddressableIDs = append(unaddressableIDs, issue.ID)
 				stats.Skipped++
 				continue
 			}
@@ -1448,6 +1477,17 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 					return stats, fmt.Errorf("sync aborted: %w", err)
 				}
 				if err == nil && extIssue != nil {
+					// The tracker answered with an issue it serves under a ref
+					// it cannot address (GitHub: an issue transferred to
+					// another repository). A pull skips that issue, so writing
+					// over it would discard the remote edits the pull never
+					// took.
+					if movedRef := e.Tracker.BuildExternalRef(extIssue); e.unaddressable(movedRef) {
+						movedIDs = append(movedIDs, issue.ID)
+						movedRefs = append(movedRefs, movedRef)
+						stats.Skipped++
+						continue
+					}
 					// ContentEqual hook: content-hash dedup to skip unnecessary API calls
 					if e.PushHooks != nil && e.PushHooks.ContentEqual != nil {
 						if e.PushHooks.ContentEqual(issue, extIssue) {

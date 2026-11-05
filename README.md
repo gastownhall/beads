@@ -380,7 +380,10 @@ under the new one stay matched to their issues, and a pull relinks them to the
 current URL. If that request fails, or the old name now belongs to another
 repository, beads still linked under it count as another repository's: relink
 them (`bd update <id> --external-ref <new-url>`), or the next pull imports
-their issues again as new beads.
+their issues again as new beads. An issue transferred to another repository
+counts as that repository's: pull, push and conflict detection leave it and
+its bead alone, with a warning, as a push does for any bead linked outside the
+configured repository.
 
 ## 🌐 Community Tools
 

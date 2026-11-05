@@ -370,6 +370,8 @@ func TestPull_SameRepoRespellingUpdatesExistingBead(t *testing.T) {
 			{"owner and repo case", "https://github.com/OWNER-B/Repo-B/issues/1313"},
 			{"REST URL", "https://api.github.com/repos/owner-b/repo-b/issues/1313"},
 			{"shorthand", "github:1313"},
+			{"www host", "https://www.github.com/owner-b/repo-b/issues/1313"},
+			{"no scheme", "github.com/owner-b/repo-b/issues/1313"},
 		} {
 			t.Run(mode.name+"/"+tc.name, func(t *testing.T) {
 				stub, tr := newGitHubAPIStub(t)
