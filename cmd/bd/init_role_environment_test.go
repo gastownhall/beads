@@ -662,3 +662,31 @@ func TestInitArtifactGitRouting(t *testing.T) {
 		})
 	}
 }
+
+// A change the caller staged before bd init stays staged and out of the init
+// commit, which takes only the artifacts init itself added (GH#5654).
+func TestInitArtifactCommitLeavesPreStagedWork(t *testing.T) {
+	target, _, _ := newInitRoleFixture(t)
+	initRoleFixtureGit(t, target, "config", "user.name", "Artifact Fixture")
+	initRoleFixtureGit(t, target, "config", "user.email", "artifact-fixture")
+	initRoleFixtureGit(t, target, "config", "commit.gpgSign", "false")
+	for _, path := range []string{"work.txt", ".beads/fixture", "AGENTS.md"} {
+		full := filepath.Join(target, path)
+		if err := os.MkdirAll(filepath.Dir(full), 0750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(path+"\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	initRoleFixtureGit(t, target, "add", "work.txt")
+
+	commitEmbeddedInitArtifacts(target, true)
+
+	if got := initRoleFixtureGit(t, target, "show", "--name-only", "--format=", "HEAD"); got != ".beads/fixture\nAGENTS.md" {
+		t.Errorf("init commit holds %q, want only the init artifacts", got)
+	}
+	if got := initRoleFixtureGit(t, target, "diff", "--cached", "--name-only"); got != "work.txt" {
+		t.Errorf("pre-staged work after init = %q, want it still staged", got)
+	}
+}

@@ -247,6 +247,76 @@ func (r *gitRepositoryImpl) Add(ctx context.Context, paths ...string) error {
 	return nil
 }
 
+// stagedIndexInfo returns the staged changes under paths, relative to the
+// repository top, as `git update-index --index-info` input: the staged mode
+// and object for an added or modified entry, mode 0 for a removed one.
+func (r *gitRepositoryImpl) stagedIndexInfo(ctx context.Context, paths []string) ([]byte, error) {
+	args := append([]string{"diff", "--cached", "--raw", "-z", "--no-renames", "--no-abbrev", "--"}, paths...)
+	out, err := r.gitCmd(ctx, args...).Output()
+	if err != nil {
+		return nil, fmt.Errorf("git: Commit: list staged changes: %w", err)
+	}
+	fields := strings.Split(strings.TrimSuffix(string(out), "\x00"), "\x00")
+	var info bytes.Buffer
+	for i := 0; i+1 < len(fields); i += 2 {
+		// ":<old mode> <new mode> <old object> <new object> <status>"
+		meta := strings.Fields(strings.TrimPrefix(fields[i], ":"))
+		if len(meta) != 5 {
+			return nil, fmt.Errorf("git: Commit: unexpected diff record %q", fields[i])
+		}
+		switch meta[4] {
+		case "D":
+			fmt.Fprintf(&info, "0 %s\t%s\x00", meta[2], fields[i+1])
+		case "U":
+			return nil, fmt.Errorf("git: Commit: %s is unmerged", fields[i+1])
+		default:
+			fmt.Fprintf(&info, "%s %s\t%s\x00", meta[1], meta[3], fields[i+1])
+		}
+	}
+	return info.Bytes(), nil
+}
+
+// commitStaged commits only the staged changes under paths. It builds a
+// temporary index from HEAD plus exactly those staged entries and commits
+// that, so the staged content is what lands (not the working tree's), a
+// staged removal is committed, and the rest of the index stays staged.
+func (r *gitRepositoryImpl) commitStaged(ctx context.Context, args, paths []string) ([]byte, bool, error) {
+	info, err := r.stagedIndexInfo(ctx, paths)
+	if err != nil || len(info) == 0 {
+		return nil, false, err
+	}
+	tmp, err := os.MkdirTemp("", "bd-commit-index-")
+	if err != nil {
+		return nil, false, fmt.Errorf("git: Commit: temporary index: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(tmp) }()
+	env := r.env
+	if env == nil {
+		env = os.Environ()
+	}
+	env = append(append([]string{}, env...), "GIT_INDEX_FILE="+filepath.Join(tmp, "index"))
+	run := func(stdin []byte, args ...string) ([]byte, error) {
+		cmd := r.gitCmd(ctx, args...)
+		cmd.Env = env
+		if stdin != nil {
+			cmd.Stdin = bytes.NewReader(stdin)
+		}
+		return cmd.CombinedOutput()
+	}
+	base := []string{"read-tree", "--empty"}
+	if r.gitCmd(ctx, "rev-parse", "--verify", "--quiet", "HEAD").Run() == nil {
+		base = []string{"read-tree", "HEAD"}
+	}
+	if out, err := run(nil, base...); err != nil {
+		return nil, false, fmt.Errorf("git: Commit: read HEAD into temporary index: %w: %s", err, bytes.TrimSpace(out))
+	}
+	if out, err := run(info, "update-index", "-z", "--index-info"); err != nil {
+		return nil, false, fmt.Errorf("git: Commit: stage into temporary index: %w: %s", err, bytes.TrimSpace(out))
+	}
+	out, err := run(nil, args...)
+	return out, true, err
+}
+
 func (r *gitRepositoryImpl) Commit(ctx context.Context, params domain.GitCommitParams) (domain.GitCommitResult, error) {
 	if params.Message == "" {
 		return domain.GitCommitResult{}, fmt.Errorf("git: Commit: Message must not be empty")
@@ -260,7 +330,17 @@ func (r *gitRepositoryImpl) Commit(ctx context.Context, params domain.GitCommitP
 		args = append(args, "--no-verify")
 	}
 	args = append(args, "-m", params.Message)
-	out, err := r.gitCmd(ctx, args...).CombinedOutput()
+	var out []byte
+	var err error
+	if len(params.Paths) > 0 {
+		var staged bool
+		out, staged, err = r.commitStaged(ctx, args, params.Paths)
+		if !staged {
+			return domain.GitCommitResult{DidCommit: false}, err
+		}
+	} else {
+		out, err = r.gitCmd(ctx, args...).CombinedOutput()
+	}
 	if err != nil {
 		if bytes.Contains(out, []byte("nothing to commit")) || bytes.Contains(out, []byte("no changes added to commit")) {
 			return domain.GitCommitResult{DidCommit: false, Output: out}, nil
