@@ -257,6 +257,20 @@ func primeCheckCommand(repoPath string, args ...string) (*exec.Cmd, error) {
 	return cmd, nil
 }
 
+// primeCheckFailure describes a prime check subprocess that could not be
+// built (cmd is nil) or failed. The advice points at the binary running doctor
+// and the diagnosed workspace: PATH and installation are not what failed, and
+// "CLI Availability" reports on them separately.
+func primeCheckFailure(repoPath string, cmd *exec.Cmd, err error) (detail, fixHint string) {
+	if cmd == nil {
+		return "Could not prepare the bd subprocess: " + err.Error(),
+			"Check that the bd binary running doctor and the workspace " + repoPath + " are accessible"
+	}
+	command := strings.Join(cmd.Args, " ")
+	return fmt.Sprintf("%s failed in %s: %v", command, cmd.Dir, err),
+		fmt.Sprintf("Run '%s' in %s to see the full error", command, cmd.Dir)
+}
+
 // VerifyPrimeOutput checks if bd prime command works and adapts correctly.
 // repoPath is the project root directory.
 func VerifyPrimeOutput(repoPath string) DoctorCheck {
@@ -275,11 +289,13 @@ func VerifyPrimeOutput(repoPath string) DoctorCheck {
 	}
 
 	if err != nil {
+		detail, fixHint := primeCheckFailure(repoPath, cmd, err)
 		return DoctorCheck{
 			Name:    "bd prime Command",
 			Status:  "error",
 			Message: "Command failed to execute",
-			Fix:     "Ensure bd is installed and in PATH",
+			Detail:  detail,
+			Fix:     fixHint,
 		}
 	}
 
@@ -385,15 +401,13 @@ func CheckDocumentationBdPrimeReference(repoPath string) DoctorCheck {
 		err = cmd.Run()
 	}
 	if err != nil {
+		detail, fixHint := primeCheckFailure(repoPath, cmd, err)
 		return DoctorCheck{
 			Name:    "Prime Documentation",
 			Status:  "warning",
-			Message: "Documentation references 'bd prime' but command not found",
-			Detail:  "Files: " + strings.Join(filesWithBdPrime, ", "),
-			Fix: "Upgrade bd to get the 'bd prime' command:\n" +
-				"  • Homebrew: brew upgrade beads\n" +
-				"  • Script: " + installScriptCommand + "\n" +
-				"  Or remove 'bd prime' references from documentation if using older version",
+			Message: "Documentation references 'bd prime' but the command failed",
+			Detail:  "Files: " + strings.Join(filesWithBdPrime, ", ") + "\n" + detail,
+			Fix:     fixHint,
 		}
 	}
 
