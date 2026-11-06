@@ -18,6 +18,17 @@ import (
 // changes. Ignored 0032 trusts only the copy committed at HEAD: a working-set
 // key is not yet part of any history a peer can see, and the commit that
 // carries the repaired flags must also be the one that removes it.
+//
+// Journal decision: a documented migration-repair exemption at this call
+// site. Both hooks run on the pinned migration session with journal
+// activation absent, so neither the owed full repair nor the key-free
+// wisp-only pass writes a journal row or moves the seq: historical
+// schema-repair passes are not operational mutations and create no replay
+// event for the derived flags they correct. Consumers that read readiness
+// only from the journal must refresh their snapshot after this upgrade (see
+// internal/storage/issueops/journal.go and the upgrade notes). The recompute
+// APIs keep their journaling wherever a real transaction activates it; do
+// not activate it here without a transactional design of its own.
 
 // isBlockedRepairOwedKey is the metadata key main 0075 records when the store
 // holds issues whose flags a full recompute must check.
@@ -86,12 +97,21 @@ func isBlockedRepairOwedAtHead(ctx context.Context, db DBConn) (bool, error) {
 // repairIsBlockedFlags is the pre-ignored-0032 repair. With the owed key
 // committed it recomputes both planes, removes the key, and commits the
 // tracked tables together, returning only after that commit succeeded.
+// Without the key the tracked half is already repaired (or was never owed),
+// so it recomputes only this clone's wisps, which are never committed.
 func repairIsBlockedFlags(ctx context.Context, db DBConn) error {
 	owed, err := isBlockedRepairOwedAtHead(ctx, db)
 	if err != nil {
 		return err
 	}
 	if !owed {
+		corrected, err := issueops.RecomputeAllWispIsBlockedInTx(ctx, db)
+		if err != nil {
+			return fmt.Errorf("recomputing wisp is_blocked: %w", err)
+		}
+		if corrected > 0 {
+			fmt.Fprintf(stderr, "Recomputed is_blocked for local wisps (gastownhall/beads#7037): flipped %d flag(s)\n", corrected)
+		}
 		return nil
 	}
 	fmt.Fprintln(stderr, "Recomputing is_blocked for every issue and wisp (gastownhall/beads#7037)…")

@@ -6,10 +6,13 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/storage/depid"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/types"
@@ -252,4 +255,194 @@ func TestEmbeddedMigration0075HealsHistoricalBlockedFlags(t *testing.T) {
 		}
 	}
 	requireFullRecomputeCorrectsNothing(t, ctx, conn)
+}
+
+// insertCanonicalEdges seeds edges keyed by depid.New, the id the dependency
+// rekey converges every edge to, so the migration pass has no rekey of its own
+// to commit and anything it commits is the repair's.
+func insertCanonicalEdges(t *testing.T, ctx context.Context, conn *sql.Conn, table, targetColumn string, edges [][3]string) {
+	t.Helper()
+	for _, e := range edges {
+		//nolint:gosec // G202: table and column are test constants.
+		mustExecOn(t, ctx, conn,
+			"INSERT INTO "+table+" (id, issue_id, "+targetColumn+", type, created_at, created_by, metadata) VALUES (?, ?, ?, ?, NOW(), 'fixture', JSON_OBJECT())",
+			depid.New(e[0], e[1]), e[0], e[1], e[2])
+	}
+}
+
+// staleFlags returns rows with wantBlocked set to the seeded (stale) flag, for
+// asserting a plane the repair must not touch.
+func staleFlags(rows []repairRow) []repairRow {
+	out := make([]repairRow, len(rows))
+	for i, r := range rows {
+		out[i] = r
+		out[i].wantBlocked = r.stale
+	}
+	return out
+}
+
+// TestEmbeddedMigration0075WispOnlyRepairWithoutKey is AC-2: a clone that
+// adopted main 75 by pull (no owed key at HEAD) still runs ignored 0032, which
+// repairs its clone-local wisps and writes nothing tracked: issue flags,
+// dependencies, metadata and HEAD stay as they were, and no journal row is
+// written for the wisp flips.
+func TestEmbeddedMigration0075WispOnlyRepairWithoutKey(t *testing.T) {
+	requireEmbedded(t)
+
+	t.Run("key-free store at main 75", func(t *testing.T) {
+		ctx := t.Context()
+		_, conn, closeConn := seedRewoundStore(t, ctx, 75, 31)
+		defer closeConn()
+		insertRepairRows(t, ctx, conn, "issues", repairGraph)
+		insertCanonicalEdges(t, ctx, conn, "dependencies", "depends_on_issue_id", repairEdges)
+		insertRepairRows(t, ctx, conn, "wisps", wispRepairGraph)
+		insertCanonicalEdges(t, ctx, conn, "wisp_dependencies", "depends_on_wisp_id", wispRepairEdges)
+		seedJournal(t, ctx, conn)
+		commitFixture(t, ctx, conn, "test: pull-adopted v75 clone with stale local wisps")
+		if n := repairKeyCount(t, ctx, conn, " AS OF 'HEAD'"); n != 0 {
+			t.Fatalf("fixture: repair key committed at HEAD (%d row(s)); want a key-free clone", n)
+		}
+		headBefore := scalarString(t, ctx, conn, "SELECT HASHOF('HEAD')")
+		journalBefore := journalDump(t, ctx, conn)
+
+		if _, err := schema.MigrateUp(ctx, conn); err != nil {
+			t.Fatalf("MigrateUp: %v", err)
+		}
+
+		requireFlags(t, ctx, conn, "wisps", wispRepairGraph)
+		requireStamps(t, ctx, conn, "wisps", wispRepairGraph)
+		requireFlags(t, ctx, conn, "issues", staleFlags(repairGraph))
+		requireStamps(t, ctx, conn, "issues", repairGraph)
+		if got := scalarString(t, ctx, conn, "SELECT HASHOF('HEAD')"); got != headBefore {
+			t.Errorf("HEAD moved from %s to %s; the key-free repair must not commit", headBefore, got)
+		}
+		for _, table := range dirtyTableNames(t, ctx, conn) {
+			if table == "issues" || table == "metadata" || table == "dependencies" {
+				t.Errorf("%s dirty after the key-free repair; want it untouched", table)
+			}
+		}
+		if n := repairKeyCount(t, ctx, conn, ""); n != 0 {
+			t.Errorf("key-free repair wrote the repair key (%d row(s))", n)
+		}
+		if got := journalDump(t, ctx, conn); got != journalBefore {
+			t.Errorf("journal changed during the wisp-only repair:\n got %s\nwant %s", got, journalBefore)
+		}
+		if got := scalarInt(t, ctx, conn, "SELECT MAX(version) FROM ignored_schema_migrations"); got != schema.LatestIgnoredVersion() {
+			t.Errorf("ignored cursor = %d, want %d", got, schema.LatestIgnoredVersion())
+		}
+	})
+
+	t.Run("pull-adopted clone", func(t *testing.T) {
+		requirePullAdoptedCloneRepairsOnlyWisps(t, t.Context())
+	})
+}
+
+// requirePullAdoptedCloneRepairsOnlyWisps drives a real adoption over a
+// file:// remote. The origin publishes the 0059-era over-set at main 74 and
+// the adopter clones it; the origin then migrates (recording and consuming
+// the owed key in its repair commit) and pushes. The adopter pulls that
+// repaired history while clean, so it holds main 75 with no key at HEAD, then
+// plants stale clone-local wisps (one waiting on an issue across planes) and
+// rewinds its ignored cursor to 31. Its open runs only the key-free 0032 pass.
+func requirePullAdoptedCloneRepairsOnlyWisps(t *testing.T, ctx context.Context) {
+	t.Helper()
+	originData := seedMainSchemaAt(t, ctx, 74)
+	remoteDir := filepath.Join(t.TempDir(), "remote")
+	if err := os.MkdirAll(remoteDir, 0o700); err != nil {
+		t.Fatalf("create remote dir: %v", err)
+	}
+	remoteURL := "file://" + remoteDir
+
+	withRawConn(t, originData, preflipDatabase, func(conn *sql.Conn) {
+		insertStampedIssues(t, ctx, conn, "issues", []stampedIssue{
+			{id: "wd-blocker", status: "open", stamp: historicalStamp(1)},
+			{id: "wd-blocked", status: "open", stamp: historicalStamp(2), wantBlocked: true},
+			{id: "wd-related", status: "open", stamp: historicalStamp(3), wantBlocked: true},
+		}, true)
+		insertIssueEdges(t, ctx, conn, [][3]string{
+			{"wd-blocked", "wd-blocker", "blocks"},
+			{"wd-related", "wd-blocked", "relates-to"},
+		})
+		commitFixture(t, ctx, conn, "test: v74 store crossed 0059 on an engine with dolt#11886")
+		mustExecOn(t, ctx, conn, "CALL DOLT_REMOTE('add', 'origin', ?)", remoteURL)
+		mustExecOn(t, ctx, conn, "CALL DOLT_PUSH('origin', 'main')")
+	})
+
+	_, cloneData := cloneLineage(t, ctx, remoteURL)
+
+	withRawConn(t, originData, preflipDatabase, func(conn *sql.Conn) {
+		if _, err := schema.MigrateUp(ctx, conn); err != nil {
+			t.Fatalf("MigrateUp (origin): %v", err)
+		}
+		if n := repairCommitCount(t, ctx, conn); n != 1 {
+			t.Fatalf("origin repair commits = %d, want 1", n)
+		}
+		mustExecOn(t, ctx, conn, "CALL DOLT_PUSH('origin', 'main')")
+	})
+
+	withRawConn(t, cloneData, preflipDatabase, func(conn *sql.Conn) {
+		mustExecOn(t, ctx, conn, "CALL DOLT_PULL('origin')")
+		if got := scalarInt(t, ctx, conn, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations"); got != 75 {
+			t.Fatalf("clone main cursor = %d after pull, want 75", got)
+		}
+		if readIsBlocked(t, ctx, conn, "issues", "wd-related") {
+			t.Fatal("pull delivered an uncorrected flag: wd-related still blocked at origin HEAD")
+		}
+		if n := repairKeyCount(t, ctx, conn, " AS OF 'HEAD'"); n != 0 {
+			t.Fatalf("pulled history still owes the repair (%d key row(s)); want a key-free clone", n)
+		}
+		// The clone's first open builds its clone-local plane.
+		if _, err := schema.MigrateUp(ctx, conn); err != nil {
+			t.Fatalf("MigrateUp (clone's first open): %v", err)
+		}
+		// w-free has no edges but carries a 0059-era over-set; w-waited waits
+		// on the genuinely blocked issue wd-blocked and carries a stale clear.
+		mustExecOn(t, ctx, conn,
+			"INSERT INTO wisps (id, title, status, is_blocked, updated_at) VALUES ('w-free', 'no edges', 'open', 1, ?), ('w-waited', 'waits on wd-blocked', 'open', 0, ?)",
+			historicalStamp(4), historicalStamp(5))
+		mustExecOn(t, ctx, conn,
+			"INSERT INTO wisp_dependencies (id, issue_id, depends_on_issue_id, type, created_at, created_by, metadata) VALUES (?, 'w-waited', 'wd-blocked', 'blocks', NOW(), 'fixture', JSON_OBJECT())",
+			depid.New("w-waited", "wd-blocked"))
+		mustExecOn(t, ctx, conn, "DELETE FROM ignored_schema_migrations WHERE version > 31")
+		headBefore := scalarString(t, ctx, conn, "SELECT HASHOF('HEAD')")
+		journalBefore := journalDump(t, ctx, conn)
+
+		if _, err := schema.MigrateUp(ctx, conn); err != nil {
+			t.Fatalf("MigrateUp (clone): %v", err)
+		}
+
+		if readIsBlocked(t, ctx, conn, "wisps", "w-free") {
+			t.Error("wisps w-free: is_blocked = true after the key-free repair, want false")
+		}
+		if !readIsBlocked(t, ctx, conn, "wisps", "w-waited") {
+			t.Error("wisps w-waited: is_blocked = false after the key-free repair, want true")
+		}
+		requireStamp(t, ctx, conn, "wisps", "w-free", historicalStamp(4))
+		requireStamp(t, ctx, conn, "wisps", "w-waited", historicalStamp(5))
+		requireStamp(t, ctx, conn, "issues", "wd-related", historicalStamp(3))
+		if got := scalarString(t, ctx, conn, "SELECT HASHOF('HEAD')"); got != headBefore {
+			t.Errorf("HEAD moved from %s to %s; the key-free repair must not commit", headBefore, got)
+		}
+		for _, table := range dirtyTableNames(t, ctx, conn) {
+			if table == "issues" || table == "metadata" || table == "dependencies" {
+				t.Errorf("%s dirty after the key-free repair; want it untouched", table)
+			}
+		}
+		if n := repairKeyCount(t, ctx, conn, ""); n != 0 {
+			t.Errorf("key-free repair wrote the repair key (%d row(s))", n)
+		}
+		if got := journalDump(t, ctx, conn); got != journalBefore {
+			t.Errorf("journal changed during the wisp-only repair:\n got %s\nwant %s", got, journalBefore)
+		}
+		if !ignoredCursorHas(t, ctx, conn, 32) {
+			t.Error("ignored cursor does not record 0032 after the key-free pass")
+		}
+		requireFullRecomputeCorrectsNothing(t, ctx, conn)
+	})
+}
+
+func repairCommitCount(t *testing.T, ctx context.Context, conn *sql.Conn) int {
+	t.Helper()
+	return scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM dolt_log WHERE message = ?",
+		"schema: repair is_blocked flags left by 0059 (gastownhall/beads#7037)")
 }

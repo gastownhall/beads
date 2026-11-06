@@ -259,6 +259,21 @@ func RecomputeAllIsBlockedInTx(ctx context.Context, tx DBTX) (int64, error) {
 	return recomputeIsBlockedCounting(ctx, tx, issueIDs, wispIDs)
 }
 
+// RecomputeAllWispIsBlockedInTx is RecomputeAllIsBlockedInTx for the wisp
+// plane only: it recomputes every wisp's is_blocked against the current graph
+// (wisp edges may still point at issues) and never writes an issue row. A
+// missing wisps table has nothing to repair and returns 0.
+func RecomputeAllWispIsBlockedInTx(ctx context.Context, tx DBTX) (int64, error) {
+	wispIDs, err := allIDs(ctx, tx, "wisps")
+	if err != nil {
+		if isTableNotExistError(err) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("recompute all wisp is_blocked: list wisps: %w", err)
+	}
+	return recomputeIsBlockedCounting(ctx, tx, nil, wispIDs)
+}
+
 // recomputeIsBlockedCounting is RecomputeIsBlockedInTx with a corrected-row
 // count: it sums the rows flipped across every fixpoint pass. A parent flip in
 // one pass can cascade to its children in the next, and each correction counts.

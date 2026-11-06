@@ -52,6 +52,14 @@ import (
 // human-facing `events` audit table: emission here is unconditional and is never
 // gated by EmitEvent, so suppressing audit noise cannot silently punch a hole in
 // a consumer's cursor. Both rows land in the same transaction.
+//
+// One call-site exemption: the schema repair of main 0075 / ignored 0032
+// (gastownhall/beads#7037) corrects historical is_blocked flags on the pinned
+// migration session, which is not a real SQL transaction, so it runs the
+// recompute without journal activation and writes no journal or seq rows. A
+// consumer that reads readiness only from the journal must refresh its
+// snapshot after that upgrade. The recompute functions themselves are not
+// exempt: called in an activated transaction they journal as usual.
 
 // EventOp names the kind of mutation a journal row records.
 type EventOp string
