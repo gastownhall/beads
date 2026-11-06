@@ -1208,6 +1208,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A workspace that auto-exported before v1.0.5 no longer loses its JSONL
+  refresh silently.** `export.auto` became opt-in in v1.0.5, and a workspace
+  that auto-exported under the old default has no `export.auto` key, so after
+  upgrading, every command returned without refreshing `.beads/issues.jsonl`
+  and without a word of explanation (GH#4887). When `export.auto` is unset, no
+  explicit value is recorded in the workspace, and `.beads/export-state.json`
+  plus the export JSONL are both still there — the fingerprints of a workspace
+  that used to auto-export — eligible commands now print a one-line stderr
+  note naming the stale file and both ways to settle the choice: `bd config
+  set export.auto true` to re-enable, `bd config set export.auto false` to
+  keep it off and silence the note. Quiet, JSON and hook contexts never see
+  the note, and it changes nothing on disk.
 - `bd config get` for a config.yaml, git-config or user-global key no longer
   opens the database just because one exists, so it answers from those files
   while the Dolt server is down instead of failing the open (GH#5108). In

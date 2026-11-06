@@ -171,6 +171,16 @@ bd config set export.auto true
 bd config set export.git-add true
 ```
 
+Upgrading from before v1.0.5, when auto-export was on by default? A workspace
+that auto-exported then has no `export.auto` key, so after the upgrade its
+JSONL stops refreshing. Until you record a choice, commands in such a
+workspace print a one-line note naming the file that is no longer refreshed:
+
+```bash
+bd config set export.auto true   # re-enable auto-export
+bd config set export.auto false  # keep it off and silence the note
+```
+
 Use `bd dolt push` / `bd dolt pull` for sync and `bd backup` for restorable
 database backups.
 </Warning>

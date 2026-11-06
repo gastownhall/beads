@@ -99,13 +99,20 @@ func maybeAutoExport(ctx context.Context, allowEmptyOverwrite bool) error {
 		return nil
 	}
 
-	if !config.GetBool("export.auto") {
-		return nil
-	}
 	if store == nil {
 		return nil
 	}
 	if lm, ok := storage.UnwrapStore(store).(storage.LifecycleManager); ok && lm.IsClosed() {
+		return nil
+	}
+
+	if !config.GetBool("export.auto") {
+		// GH#4887: export.auto is opt-in since #4063 (v1.0.5). A workspace
+		// that auto-exported under the old default has no key, so after the
+		// upgrade its JSONL silently stops refreshing. When the artifacts say
+		// this workspace used to auto-export, explain the default change
+		// instead of returning wordlessly.
+		noteAutoExportDefaultOff()
 		return nil
 	}
 
@@ -116,15 +123,7 @@ func maybeAutoExport(ctx context.Context, allowEmptyOverwrite bool) error {
 
 	// Resolve the export path before throttle/check detection so all decisions
 	// refer to the path that would actually be written.
-	exportPath := config.GetString("export.path")
-	if exportPath == "" {
-		if globalFlag {
-			exportPath = "global-issues.jsonl"
-		} else {
-			exportPath = "issues.jsonl"
-		}
-	}
-	fullPath := filepath.Join(beadsDir, exportPath)
+	fullPath := filepath.Join(beadsDir, resolveExportJSONLPath())
 
 	// Load state + interval.
 	state := loadExportAutoState(beadsDir)
@@ -285,6 +284,82 @@ func maybeAutoExport(ctx context.Context, allowEmptyOverwrite bool) error {
 	}
 	saveExportAutoState(beadsDir, &newState)
 	return nil
+}
+
+// resolveExportJSONLPath returns the auto-export JSONL's path relative to the
+// beads dir: the configured export.path, or — when it is configured empty —
+// the global-issues.jsonl / issues.jsonl fallback. noteAutoExportDefaultOff
+// shares it so the file the notice names is exactly the file an export would
+// write.
+func resolveExportJSONLPath() string {
+	exportPath := config.GetString("export.path")
+	if exportPath == "" {
+		if globalFlag {
+			return "global-issues.jsonl"
+		}
+		return "issues.jsonl"
+	}
+	return exportPath
+}
+
+// noteAutoExportDefaultOff prints the GH#4887 upgrade advisory: bd v1.0.5
+// (#4063) made export.auto opt-in, and a workspace that auto-exported under
+// the earlier default has no key — so its JSONL stops refreshing with no
+// explanation. Purely advisory: nothing is written, no export is started, and
+// any failure to establish eligibility stays silent (an advisory must never
+// break or noise up a command). The notice repeats on every eligible
+// invocation until the user records either explicit value; suppression state
+// would mean writes while export is off, which the GH#4887 design rejects.
+func noteAutoExportDefaultOff() {
+	// Only when nothing explicit chose a value: an env var, a config-file
+	// entry, or a runtime Set already answers the question this note asks.
+	if config.GetValueSource("export.auto") != config.SourceDefault {
+		return
+	}
+	// Human output only: JSON consumers, --quiet runs, and the prime
+	// hook-JSON protocol must not find advisory text in their streams.
+	if isQuiet() || jsonOutput || primeHookJSONMode {
+		return
+	}
+	beadsDir := beads.FindBeadsDir()
+	if beadsDir == "" {
+		return
+	}
+	// The in-memory source can lag a write made earlier in this same
+	// invocation: `bd config set export.auto …` writes workspace YAML
+	// without refreshing viper. Re-read the YAML the way bd's merged reader
+	// answers the same question, and stay quiet once either value is
+	// recorded there — including a set-many through the same write path.
+	if _, present, err := config.WorkspaceYamlSettingWithLocal(beadsDir, "export.auto"); err != nil || present {
+		if err != nil {
+			debug.Logf("auto-export default-off note: suppressed — workspace config unreadable (%v)\n", err)
+		}
+		return
+	}
+	// Prior auto-export artifacts, from metadata alone: every auto-export
+	// writes export-state.json, and the export leaves the JSONL. Never
+	// parse, validate, repair or save state here — while export is off this
+	// path must not touch a single byte on disk.
+	if !regularFileExists(filepath.Join(beadsDir, exportAutoStateFile)) {
+		return
+	}
+	fullPath := filepath.Join(beadsDir, resolveExportJSONLPath())
+	if !regularFileExists(fullPath) {
+		return
+	}
+	fmt.Fprintf(os.Stderr,
+		"Info: auto-export is off by default since bd v1.0.5; %s is no longer refreshed automatically. "+
+			"Re-enable with: bd config set export.auto true "+
+			"(keep it off and silence this note: bd config set export.auto false)\n",
+		fullPath)
+}
+
+// regularFileExists reports whether path resolves to an existing regular
+// file. Metadata only: callers use it as evidence a file is present, never
+// reading or repairing it.
+func regularFileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.Mode().IsRegular()
 }
 
 // storeStateHash returns the hash used for auto-export change detection.
