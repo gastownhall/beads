@@ -343,3 +343,35 @@ func TestEmbeddedMigrate0075ReceivedKeyCompletesOnOrdinaryOpen(t *testing.T) {
 		}
 	})
 }
+
+// TestEmbeddedMigrate0075ReceivedKeyNeedsNoFreshConsent pins the
+// consent-continuation half of the contract (migrate_consent.go): the
+// obligation key main 0075 commits is part of the upgrade the operator
+// already consented to, so finishing it on an ordinary open — reads
+// included, no fresh prompt, even with both cursors already current — is
+// continuation, not a new migration decision. The crossing half (pending
+// main + no consent refuses before the key is minted) is pinned by
+// TestEmbeddedMigrate0075ConsentRefusalPrecedesRepairWrites.
+func TestEmbeddedMigrate0075ReceivedKeyNeedsNoFreshConsent(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+	dataDir := seedReceivedKeyStore(t)
+
+	// Package-wide consent is on (TestMain); this test must see the gate.
+	schema.SetLocalMigrateConsent(false)
+	t.Cleanup(func() { schema.SetLocalMigrateConsent(true) })
+	t.Setenv(schema.AllowMigrateEnv, "")
+
+	withRawConn(t, dataDir, preflipDatabase, func(conn *sql.Conn) {
+		if _, err := schema.MigrateUp(ctx, conn); err != nil {
+			t.Fatalf("MigrateUp without consent = %v, want the received-key repair to run as continuation of the consented upgrade", err)
+		}
+		if got := readIsBlocked(t, ctx, conn, "issues", "rf-related"); got {
+			t.Errorf("rf-related still blocked after the repair")
+		}
+		requireKeyConsumedAtHead(t, ctx, conn)
+		if !ignoredCursorHas(t, ctx, conn, 32) {
+			t.Errorf("ignored cursor row 32 missing after the repair")
+		}
+	})
+}

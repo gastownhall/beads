@@ -1208,6 +1208,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Issues marked blocked by migration 0059 on a Dolt engine older than 2.4.0
+  (dropping them from `bd ready` with no error, GH#7037) are now repaired
+  automatically. Migration 0075 records a one-time repair obligation in the
+  database, and the open that crosses it — or, on a clone that received the
+  migrated history by pull, that clone's next ordinary open, reads included —
+  recomputes `is_blocked` from the dependency graph and publishes the
+  corrected flags in one commit. An interrupted repair either still owes the
+  whole repair or has already published it durably; uncommitted changes to
+  `issues`, `dependencies` or `metadata` refuse the open typed with recovery
+  instructions (`bd dolt commit`, then reopen). Each clone also recomputes its
+  own clone-local wisp flags on open (wisps never replicate). The repair emits
+  no journal rows, so journal-driven consumers must refresh their readiness
+  snapshot after upgrading; the `corrected N flag flip(s)` line counts
+  fixpoint flips, not distinct rows. `bd recompute-blocked` remains available
+  for on-demand recomputation.
+
 - `bd config get` for a config.yaml, git-config or user-global key no longer
   opens the database just because one exists, so it answers from those files
   while the Dolt server is down instead of failing the open (GH#5108). In

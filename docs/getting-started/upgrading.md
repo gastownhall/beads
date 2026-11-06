@@ -208,16 +208,44 @@ out of `bd ready` without any error
 Dolt server older than 2.4.0, and the embedded engine of `bd` releases that
 link Dolt older than 2.4.0 (every release through v1.3.x) is likely affected
 too.
-Once a database has migrated, run this once for that database on every clone:
 
-```bash
-bd recompute-blocked --json
-```
+This release repairs it automatically. Migration 0075 records a one-time
+repair obligation in the database itself, and the open that crosses it — or,
+on a clone that received the migrated history by pull, that clone's next
+ordinary open, reads included — finishes the job: the flag is recomputed from
+the dependency graph and the corrected flags publish in one commit
+(`schema: repair is_blocked flags over-set by migration 0059`). There is
+nothing to run, and no new consent prompt: the obligation is part of the
+upgrade that was already consented to, so finishing it is continuation, not a
+new migration decision. A later migration still asks for consent as usual.
 
-It recomputes the flag from the dependency graph, so it is safe on any
-database, and `"rows_corrected"` greater than zero means the database was hit.
-It works in embedded, server and proxied-server mode, so run it even where
-`bd doctor` cannot check blocked state.
+An interrupted repair is safe to retry. It either still owes the whole repair
+or has already published it durably; if uncommitted changes to `issues`,
+`dependencies` or `metadata` are in the way, the open refuses with
+instructions — commit them (`bd dolt commit`) and reopen, and the repair
+finishes then.
+
+Two limits to know:
+
+- Wisp (clone-local) flags never replicate, so each clone recomputes its own
+  wisps when it opens; adopting history by pull does not carry a correction
+  for them, and none is needed.
+- The repair emits no journal rows — historical schema repairs are not
+  operational mutations. A consumer that drives off the journal alone (a
+  readiness snapshot, a sync filter) must be refreshed after this upgrade;
+  it will not see these corrections announced.
+
+The `corrected N flag flip(s)` line the repair prints counts fixpoint flips,
+not distinct rows — a cascade through a parent flip counts each row it passes
+through — so it is not proof this database was hit by 0059.
+
+Databases that already migrated on an older release are covered the same
+way: their first open under this release records and finishes the repair.
+`bd recompute-blocked --json` also remains safe on any database for
+on-demand recomputation — it works in embedded, server and proxied-server
+mode, so it can be used even where `bd doctor` cannot check blocked state —
+and `"rows_corrected"` greater than zero means stale flags were found and
+fixed.
 
 #### Upgrade every client that shares a store, together
 

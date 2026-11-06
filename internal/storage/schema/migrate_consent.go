@@ -36,7 +36,21 @@ import (
 // existence (`bd init --remote`, `bd bootstrap` sync) — those paths record the
 // consent explicitly, and the #4259 remote-migrate gate still applies to them
 // unchanged. Databases already at this binary's latest version never consult
-// the gate. The ignored (clone-local, dolt_ignored) migration sequence is
+// the gate.
+//
+// Finishing the #7037 is_blocked repair (gastownhall/beads#7037) is
+// continuation of consent, never a fresh migration decision: main migration
+// 0075 commits a one-time obligation key to metadata as part of the consented
+// upgrade itself, so the pass that consumes it — on the same open that crossed
+// 0075, or on a later ordinary open of a clone that received the migrated
+// history by pull, reads included — runs with no fresh prompt even though
+// both migration cursors may already be current. This gate stays exactly as
+// strict as before in every other respect: while the main sequence is pending
+// the refusal fires first and no key is minted; an obligation key that exists
+// only in the working set grants nothing (isBlockedRepairOwedAtHead reads
+// AS OF 'HEAD'); and the key never waives consent for any later migration.
+//
+// The ignored (clone-local, dolt_ignored) migration sequence is
 // deliberately NOT gated on its own: it only materializes per-clone
 // bookkeeping tables, refills the clone-local events table from the clone's
 // own pre-upgrade history (ignored 0031, gastownhall/beads#7039; no commit, no
