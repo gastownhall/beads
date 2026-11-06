@@ -90,6 +90,22 @@ func TestPathToFileURL(t *testing.T) {
 	}
 }
 
+// TestPathToFileURLPOSIXUnchanged pins that a POSIX absolute path keeps the
+// spelling it had before the drive rule: "file://" and the path, byte for
+// byte, even where it holds a backslash or a "c:" component.
+func TestPathToFileURLPOSIXUnchanged(t *testing.T) {
+	for _, abs := range []string{
+		"/home/me/.beads/backup",
+		`/tmp/a\b`,
+		"/srv/c:/x",
+		"/",
+	} {
+		if got, want := PathToFileURL(abs), "file://"+abs; got != want {
+			t.Errorf("PathToFileURL(%q) = %q, want %q", abs, got, want)
+		}
+	}
+}
+
 func TestExtractAddressConflictName(t *testing.T) {
 	tests := []struct {
 		name string
