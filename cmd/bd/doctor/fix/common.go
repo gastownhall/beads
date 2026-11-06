@@ -56,6 +56,14 @@ func getBdBinary() (string, error) {
 	return bdPath, nil
 }
 
+// BdBinary returns the bd executable that doctor checks should run: the running
+// binary with symlinks resolved, never whichever bd comes first on PATH. It
+// returns ErrTestBinary under a test binary. Only when os.Executable itself
+// fails does it fall back to looking up "bd" on PATH.
+func BdBinary() (string, error) {
+	return getBdBinary()
+}
+
 // isTestBinary reports whether exe is a Go test binary. testing.Testing() is
 // the authoritative signal: both `go test` and rules_go link test binaries with
 // it set, whatever the file is called (Bazel names them <target>_test, not
