@@ -820,19 +820,15 @@ func (e *RemoteMigrateGateError) Options() []GateOption {
 		return []GateOption{adopt}
 	case gateDecisionAdoptFastForward:
 		// Remote is confirmed ahead AND this clone is a strict ancestor with a
-		// clean working set: adopting is loss-free, unlike the plain-adopt case.
-		// "Risk: none" is a statement about LOCAL data, and it stays true —
-		// but on a shared store it is not the whole risk, and an agent reading
-		// only this field would treat the adopt as free.
-		ffRisk := "none — this clone's local history is a strict ancestor of the remote's, so nothing local is discarded"
-		if e.Shared {
-			ffRisk = "nothing local is discarded (this clone's history is a strict ancestor of the remote's), but on this shared server the adopted schema is promoted for every co-resident client, and clients still on an older bd will refuse the database until upgraded"
-		}
+		// clean working set: a fast-forward loses no local commit, but adopting
+		// still means a re-clone, which omits clone-local data. The Risk never
+		// reads "none": an agent reading only this field would treat the adopt
+		// as free.
 		return []GateOption{{
 			ID:       "adopt-fast-forward",
-			When:     "the remote is already migrated and this clone can fast-forward to it losslessly (no unpushed commits, clean working set); " + adoptPrereq,
+			When:     "the remote is already migrated and this clone's Dolt history is a strict ancestor of the remote's with a clean working set (a fast-forward would lose no local commit); " + adoptPrereq,
 			Commands: adoptCommands,
-			Risk:     ffRisk + "; " + adoptNoOp,
+			Risk:     "a fast-forward would lose no local commit, but the re-clone brings only what the remote has, so clone-local data such as wisps survives only in the moved-aside copy (keep it; restore an old-release export with bd import <backup-file> if one exists); " + adoptNoOp + sharedRisk,
 		}}
 	case gateDecisionForkSkew:
 		// Already forked: neither migrate nor a plain adopt is unconditionally

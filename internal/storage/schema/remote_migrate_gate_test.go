@@ -527,6 +527,16 @@ func TestRemoteMigrateGateAdoptOptionsRecipe(t *testing.T) {
 					if !strings.Contains(opt.Risk, "never replaces an existing database") {
 						t.Errorf("option %q risk does not explain the bootstrap no-op: %q", opt.ID, opt.Risk)
 					}
+					if opt.ID == "adopt-fast-forward" {
+						// Only the fast-forward is loss-free: the re-clone still
+						// omits clone-local data, which the risk must name.
+						if strings.HasPrefix(opt.Risk, "none") || !strings.Contains(opt.Risk, "clone-local data") || strings.Contains(opt.Risk, "nothing local is discarded") {
+							t.Errorf("adopt-fast-forward risk must name the clone-local data a re-clone omits: %q", opt.Risk)
+						}
+						if strings.Contains(opt.When, "losslessly") {
+							t.Errorf("adopt-fast-forward when still calls the adopt lossless: %q", opt.When)
+						}
+					}
 					if !layout.server {
 						if !slices.Equal(opt.Commands, EmbeddedAdoptCommands()) {
 							t.Errorf("embedded option %q commands = %q, want the ordered recipe %q", opt.ID, opt.Commands, EmbeddedAdoptCommands())
