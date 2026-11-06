@@ -2,7 +2,9 @@ package versioncontrolops
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"time"
 
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/schema"
@@ -23,6 +25,12 @@ const flattenPreserveMsg = "flatten: commit changes that reached main during fla
 //  7. Commit what the reset staged, if anything
 //  8. Delete temp branch
 //
+// A leftover flatten-tmp from an earlier interrupted run is refused up front
+// rather than deleted: this run only ever removes the branch it created.
+// Failures after that branch exists trigger a bounded cleanup (back to main,
+// branch deleted) on a context detached from the caller's, so an interrupted
+// flatten does not block the next one.
+//
 // The final reset of main is soft, never hard: DOLT_RESET('--hard') swaps the
 // tracked tables' backing objects and silently drops every foreign key on
 // every dolt_ignored ("clone-local") table — events and the wisp_* aux
@@ -39,7 +47,7 @@ const flattenPreserveMsg = "flatten: commit changes that reached main during fla
 //
 // conn must be a single database connection (not a pooled *sql.DB) since the
 // stored procedures rely on session-scoped state (current branch, working set).
-func Flatten(ctx context.Context, conn DBConn) error {
+func Flatten(ctx context.Context, conn DBConn) (retErr error) {
 	// Find the initial commit hash (oldest ancestor).
 	var initialHash string
 	if err := conn.QueryRowContext(ctx,
@@ -59,6 +67,19 @@ func Flatten(ctx context.Context, conn DBConn) error {
 		return nil // already flat
 	}
 
+	// A leftover flatten-tmp blocks the whole recipe (the branch create
+	// fails), and this run must only ever delete a branch it created:
+	// refuse, and let a human look at what is there.
+	var leftover int
+	if err := conn.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM dolt_branches WHERE name = 'flatten-tmp'",
+	).Scan(&leftover); err != nil {
+		return fmt.Errorf("flatten step %q: %w", "check for leftover flatten-tmp", err)
+	}
+	if leftover > 0 {
+		return fmt.Errorf("flatten refused: branch flatten-tmp already exists; inspect it and delete it with the dolt CLI (dolt branch -D flatten-tmp) before flattening")
+	}
+
 	execSQL := func(name, query string, args ...interface{}) error {
 		if _, err := conn.ExecContext(ctx, query, args...); err != nil {
 			return fmt.Errorf("flatten step %q: %w", name, err)
@@ -66,12 +87,28 @@ func Flatten(ctx context.Context, conn DBConn) error {
 		return nil
 	}
 
+	if err := execSQL("create temp branch", "CALL DOLT_BRANCH('flatten-tmp')"); err != nil {
+		return err
+	}
+
+	// flatten-tmp now exists and belongs to this invocation: whatever fails
+	// from here on, cleanup tries to remove it so the next flatten is not
+	// blocked. Disarmed only by the successful delete that ends a clean run,
+	// so a failed final delete is retried under the cleanup's own context.
+	defer func() {
+		if retErr == nil {
+			return
+		}
+		if err := flattenCleanup(ctx, conn); err != nil {
+			retErr = errors.Join(retErr, err)
+		}
+	}()
+
 	steps := []struct {
 		name  string
 		query string
 		args  []interface{}
 	}{
-		{"create temp branch", "CALL DOLT_BRANCH('flatten-tmp')", nil},
 		{"checkout temp branch", "CALL DOLT_CHECKOUT('flatten-tmp')", nil},
 		{"soft reset to initial", "CALL DOLT_RESET('--soft', ?)", []interface{}{initialHash}},
 		{"commit flattened snapshot", "CALL DOLT_COMMIT('-Am', 'flatten: squash all history into single commit')", nil},
@@ -116,6 +153,27 @@ func Flatten(ctx context.Context, conn DBConn) error {
 		return err
 	}
 
+	return nil
+}
+
+// flattenCleanup is Flatten's best-effort cleanup once a step fails after
+// flatten-tmp exists: back to main, then the temp branch deleted, so a later
+// flatten is not blocked. It runs on a context detached from the caller's —
+// the primary failure is often the caller's own cancellation, and the
+// cleanup must still reach the server — bounded at 30s. A failed checkout
+// keeps the branch: the plain checkout never forces conflicting changes off
+// flatten-tmp, and a branch this run did not create is never deleted. A
+// successful cleanup does not erase the primary failure; Flatten joins the
+// two, so the caller still sees what went wrong.
+func flattenCleanup(ctx context.Context, conn DBConn) error {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	if _, err := conn.ExecContext(cleanupCtx, "CALL DOLT_CHECKOUT('main')"); err != nil {
+		return fmt.Errorf("flatten cleanup: checkout main failed, branch flatten-tmp left in place: %w", err)
+	}
+	if _, err := conn.ExecContext(cleanupCtx, "CALL DOLT_BRANCH('-D', 'flatten-tmp')"); err != nil {
+		return fmt.Errorf("flatten cleanup: delete flatten-tmp failed, branch left in place: %w", err)
+	}
 	return nil
 }
 

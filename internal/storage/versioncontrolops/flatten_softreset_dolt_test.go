@@ -3,6 +3,7 @@ package versioncontrolops
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"sync/atomic"
@@ -223,8 +224,8 @@ func TestFlattenLeavesPreSeveredFKs(t *testing.T) {
 	// The doctor's scan predicate (fix.scanSeveredCloneLocalFKs) reports the
 	// constraint missing with the orphan count, so doctor still detects the
 	// damage for explicit repair.
-	if n := f.count("SELECT COUNT(*) FROM wisp_dependencies t "+
-		"WHERE t.depends_on_wisp_id IS NOT NULL "+
+	if n := f.count("SELECT COUNT(*) FROM wisp_dependencies t " +
+		"WHERE t.depends_on_wisp_id IS NOT NULL " +
 		"AND NOT EXISTS (SELECT 1 FROM wisps r WHERE r.id = t.depends_on_wisp_id)"); n != 1 {
 		f.t.Errorf("orphaned wisp_dependencies rows after flatten = %d, want 1 (NULL references are not orphans)", n)
 	}
@@ -468,7 +469,7 @@ func TestFlattenKeepsCommitLandingBeforeMainMoves(t *testing.T) {
 		writer := f.conn()
 
 		hook := &flattenHookConn{
-			beforeExec:   onceBeforeFlattenFinalReset(func() { _ = f.landRow(writer) }),
+			beforeExec: onceBeforeFlattenFinalReset(func() { _ = f.landRow(writer) }),
 			beforeFollowUp: func() {
 				f.exec(writer, "CALL DOLT_COMMIT('-m', 'writer took staging')")
 			},
@@ -551,5 +552,163 @@ func TestFlattenQuietRunAddsNoCommit(t *testing.T) {
 			t.Fatalf("ignored scratch_x row on main: present=false, want present=true")
 		}
 		f.wantNoTempBranch()
+	})
+}
+
+// compactFixtureLog is the compact fixture's history before any flatten,
+// newest first.
+var compactFixtureLog = []string{"u 1", "t 2", "t 1", "schema", "Initialize data repository"}
+
+// AC-4: a failure or cancellation after this invocation created flatten-tmp
+// triggers a safe cleanup on a context detached from the caller's — back to
+// main, branch deleted — with the primary error preserved (joined with any
+// cleanup failure and the branch it left), a preexisting branch never
+// removed, and the next flatten unblocked.
+func TestFlattenCleanup(t *testing.T) {
+	port := startCompactTestServer(t)
+
+	// Failures injected at each step after the temp branch exists.
+	// mainMoved: whether main has already been reset onto the flattened
+	// history when the step fails (only the final delete runs after it).
+	for _, tc := range []struct {
+		name      string
+		mainMoved bool
+		match     func(f *compactFixture, query string, args []any) bool
+	}{
+		{"checkout temp branch", false, func(_ *compactFixture, q string, _ []any) bool {
+			return strings.Contains(q, "DOLT_CHECKOUT('flatten-tmp')")
+		}},
+		{"soft reset to initial", false, func(f *compactFixture, q string, args []any) bool {
+			return strings.Contains(q, "DOLT_RESET") && len(args) == 1 && args[0] == f.initial
+		}},
+		{"commit flattened snapshot", false, func(_ *compactFixture, q string, _ []any) bool {
+			return strings.Contains(q, "DOLT_COMMIT('-Am'")
+		}},
+		{"checkout main", false, func(_ *compactFixture, q string, _ []any) bool {
+			return strings.Contains(q, "DOLT_CHECKOUT('main')")
+		}},
+		{"reset main to flattened", false, func(_ *compactFixture, q string, args []any) bool {
+			return isFlattenFinalReset(q) && len(args) == 0
+		}},
+		{"delete temp branch", true, func(_ *compactFixture, q string, _ []any) bool {
+			return strings.Contains(q, "DOLT_BRANCH('-D'")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newCompactFixture(t, port)
+			injected := errors.New("injected " + tc.name + " failure")
+
+			// The failure fires once: the cleanup's own retry of a failed
+			// statement must be allowed to succeed.
+			var fired bool
+			hook := &flattenHookConn{failExec: func(query string, args []any) error {
+				if !fired && tc.match(f, query, args) {
+					fired = true
+					return injected
+				}
+				return nil
+			}}
+			err := f.flatten(hook)
+			if !errors.Is(err, injected) {
+				t.Fatalf("Flatten error = %v, want it to wrap the injected failure", err)
+			}
+			// The cleanup removed the temp branch and left main's history
+			// as far as it had got, so a rerun works.
+			f.wantNoTempBranch()
+			if tc.mainMoved {
+				f.wantLog(flattenedLog)
+			} else {
+				f.wantLog(compactFixtureLog)
+			}
+			if err := f.flatten(&flattenHookConn{}); err != nil {
+				t.Fatalf("rerun Flatten after cleanup: %v", err)
+			}
+			f.wantLog(flattenedLog)
+		})
+	}
+
+	// Cancellation arriving exactly at the final branch delete: the delete
+	// fails as cancelled, the cleanup still runs — on a context that is live
+	// and bounded at 30s — and the returned error preserves the
+	// cancellation. The flatten itself had already completed.
+	t.Run("cancellation at the final delete", func(t *testing.T) {
+		f := newCompactFixture(t, port)
+		flattenCtx, cancel := context.WithCancel(f.ctx)
+
+		hook := &flattenHookConn{cancelBeforeDelete: cancel}
+		if hook.Conn == nil {
+			hook.Conn = f.conn()
+		}
+		err := Flatten(flattenCtx, hook)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Flatten error = %v, want it to preserve the cancellation", err)
+		}
+		f.wantNoTempBranch()
+		f.wantLog(flattenedLog)
+		f.wantHeadTree(f.head)
+
+		after := hook.afterFirstFailure()
+		if len(after) < 2 {
+			t.Fatalf("cleanup records after the cancelled delete = %d, want the checkout and the delete", len(after))
+		}
+		for _, r := range after {
+			if r.ctxErr != nil {
+				t.Errorf("cleanup statement %q ran under %v, want the live detached context", r.query, r.ctxErr)
+			}
+			if !r.hasDeadline {
+				t.Errorf("cleanup statement %q ran without a deadline, want the 30s bound", r.query)
+				continue
+			}
+			if until := time.Until(r.deadline); until <= 0 || until > 31*time.Second {
+				t.Errorf("cleanup statement %q deadline = %v away, want the 30s bound", r.query, until)
+			}
+		}
+	})
+
+	// A cleanup whose checkout also fails keeps the branch (the delete must
+	// not run) and joins both failures into the returned error.
+	t.Run("cleanup failure joins and keeps the branch", func(t *testing.T) {
+		f := newCompactFixture(t, port)
+		primary := errors.New("injected snapshot failure")
+		cleanupErr := errors.New("injected cleanup checkout failure")
+		var failed bool
+
+		hook := &flattenHookConn{failExec: func(query string, _ []any) error {
+			if !failed && strings.Contains(query, "DOLT_COMMIT('-Am'") {
+				failed = true
+				return primary
+			}
+			if failed && strings.Contains(query, "DOLT_CHECKOUT('main')") {
+				return cleanupErr
+			}
+			return nil
+		}}
+		err := f.flatten(hook)
+		if !errors.Is(err, primary) || !errors.Is(err, cleanupErr) {
+			t.Fatalf("Flatten error = %v, want the primary and cleanup failures joined", err)
+		}
+		if !strings.Contains(err.Error(), "flatten-tmp") {
+			t.Fatalf("Flatten error = %v, want it to name the branch left behind", err)
+		}
+		if n := f.count("SELECT COUNT(*) FROM dolt_branches WHERE name = 'flatten-tmp'"); n != 1 {
+			t.Fatalf("flatten-tmp after the failed cleanup = %d branch(es), want it kept", n)
+		}
+		f.wantLog(compactFixtureLog)
+	})
+
+	// A flatten-tmp this invocation did not create is refused before
+	// anything runs, and never deleted by the cleanup.
+	t.Run("preexisting flatten-tmp is refused, not deleted", func(t *testing.T) {
+		f := newCompactFixture(t, port)
+		f.exec(f.db, "CALL DOLT_BRANCH('flatten-tmp')")
+
+		err := f.flatten(&flattenHookConn{})
+		if err == nil || !strings.Contains(err.Error(), "flatten refused") {
+			t.Fatalf("Flatten error = %v, want the preexisting branch refused", err)
+		}
+		if n := f.count("SELECT COUNT(*) FROM dolt_branches WHERE name = 'flatten-tmp'"); n != 1 {
+			t.Fatalf("preexisting flatten-tmp after the refusal = %d, want it kept", n)
+		}
+		f.wantLog(compactFixtureLog)
 	})
 }
