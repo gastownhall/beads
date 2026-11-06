@@ -549,6 +549,155 @@ func testHookProcessRealPerlStatuses(t *testing.T) {
 	}
 }
 
+// runHookProcessSidecar execs a freshly generated hook (executed, not
+// sourced, so the section's $0-based sidecar lookup works) with a real bd
+// stand-in and helper binaries on PATH. The hook's directory optionally
+// holds a <hookName>.old sidecar with the given body.
+func runHookProcessSidecar(t *testing.T, hookName, sidecarBody, pathTail string, fixtures []hookProcessFixture, extraEnv ...string) hookProcessResult {
+	t.Helper()
+
+	binDir := t.TempDir()
+	writeHookProcessFixture(t, binDir, "bd", hookProcessLongRunningBDStub)
+	for _, fixture := range fixtures {
+		writeHookProcessFixture(t, binDir, fixture.name, fixture.body)
+	}
+	hooksDir := t.TempDir()
+	writeHookProcessFixture(t, hooksDir, hookName, "#!/bin/sh\n"+generateHookSection(hookName))
+	if sidecarBody != "" {
+		writeHookProcessFixture(t, hooksDir, hookName+".old", sidecarBody)
+	}
+
+	env := hookProcessGitEnv(hooksDir)
+	filtered := env[:0]
+	for _, entry := range env {
+		switch {
+		case strings.HasPrefix(entry, "PATH="),
+			strings.HasPrefix(entry, "BEADS_HOOK_TIMEOUT="),
+			strings.HasPrefix(entry, "HOOK_TEST_SLEEP="),
+			strings.HasPrefix(entry, "BD_HOOK_CHAIN_ACTIVE="):
+		default:
+			filtered = append(filtered, entry)
+		}
+	}
+	env = append(filtered,
+		"PATH="+binDir+string(os.PathListSeparator)+pathTail,
+		"BEADS_HOOK_TIMEOUT=1",
+		"HOOK_TEST_SLEEP="+findHookProcessSleep(t),
+	)
+	env = append(env, extraEnv...)
+
+	hookPath := filepath.Join(hooksDir, hookName)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	t.Cleanup(cancel)
+	cmd := exec.CommandContext(ctx, hookProcessShell(t), hookProcessShellPath(t, hookPath))
+	cmd.Dir = hooksDir
+	cmd.WaitDelay = time.Second
+	cmd.Env = env
+	started := time.Now()
+	output, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("generated hook exceeded process-test deadline: %v\n%s", ctx.Err(), string(output))
+	}
+	exitCode := 0
+	if err != nil {
+		exitErr, ok := err.(*exec.ExitError)
+		if !ok {
+			t.Fatalf("run generated hook: %v\n%s", err, string(output))
+		}
+		exitCode = exitErr.ExitCode()
+	}
+	return hookProcessResult{output: string(output), exitCode: exitCode, elapsed: time.Since(started)}
+}
+
+// TestGeneratedHookGateTimeoutRefusesWithChainedGate pins GH#6751: bd runs
+// the chained <hook>.old itself, so a gate hook whose bd is killed by the
+// deadline leaves the sidecar's verdict unknown — the section must refuse
+// (exit 1) naming the sidecar instead of continuing without beads, which
+// would fail the gate open. With no eligible sidecar (none, or a bd-owned
+// one, or a re-entered invocation) and for non-gate hooks, the deadline
+// keeps its continue-without-beads outcome.
+func TestGeneratedHookGateTimeoutRefusesWithChainedGate(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("exec'd hook fixtures with a real timeout helper are POSIX-specific here")
+	}
+	_, gnuDir := findHookProcessCoreutilsTimeout(t)
+	perlFixtures := []hookProcessFixture{
+		{name: "timeout", body: hookProcessIncompatibleTimeoutStub},
+		{name: "gtimeout", body: hookProcessIncompatibleGtimeoutStub},
+	}
+	perlDir := findHookProcessPerl(t)
+	eligible := "#!/bin/sh\nprintf 'sidecar-ran\\n'\nexit 7\n"
+	bdOwned := "#!/bin/sh\n" + generateHookSection("pre-push")
+
+	for _, tc := range []struct {
+		name        string
+		hookName    string
+		sidecar     string
+		pathTail    string
+		fixtures    []hookProcessFixture
+		extraEnv    []string
+		wantExit    int
+		wantRefusal bool
+	}{
+		{
+			name:        "coreutils deadline refuses gate with eligible sidecar",
+			hookName:    "pre-push",
+			sidecar:     eligible,
+			pathTail:    gnuDir,
+			wantExit:    1,
+			wantRefusal: true,
+		},
+		{
+			name:        "Perl supervisor deadline refuses gate with eligible sidecar",
+			hookName:    "pre-push",
+			sidecar:     eligible,
+			pathTail:    perlDir,
+			fixtures:    perlFixtures,
+			wantExit:    1,
+			wantRefusal: true,
+		},
+		{
+			name:     "bd-owned sidecar keeps continue-without-beads",
+			hookName: "pre-push",
+			sidecar:  bdOwned,
+			pathTail: gnuDir,
+		},
+		{
+			name:     "re-entered invocation keeps continue-without-beads",
+			hookName: "pre-push",
+			sidecar:  eligible,
+			pathTail: gnuDir,
+			extraEnv: []string{"BD_HOOK_CHAIN_ACTIVE=pre-push"},
+		},
+		{
+			name:     "non-gate hook keeps continue-without-beads",
+			hookName: "post-checkout",
+			sidecar:  eligible,
+			pathTail: gnuDir,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result := runHookProcessSidecar(t, tc.hookName, tc.sidecar, tc.pathTail, tc.fixtures, tc.extraEnv...)
+			if result.exitCode != tc.wantExit {
+				t.Fatalf("generated hook exit = %d, want %d\n%s", result.exitCode, tc.wantExit, result.output)
+			}
+			if got := strings.Contains(result.output, "unknown, refusing"); got != tc.wantRefusal {
+				t.Fatalf("refusal diagnostic presence = %v, want %v\n%s", got, tc.wantRefusal, result.output)
+			}
+			if tc.wantRefusal {
+				if !strings.Contains(result.output, tc.hookName+".old") {
+					t.Errorf("refusal diagnostic must name %s.old\n%s", tc.hookName, result.output)
+				}
+				if strings.Contains(result.output, "sidecar-ran") {
+					t.Errorf("the section must not run the sidecar itself while bd owns the chain\n%s", result.output)
+				}
+			} else if !strings.Contains(result.output, "continuing without beads") {
+				t.Errorf("deadline must still continue without beads here\n%s", result.output)
+			}
+		})
+	}
+}
+
 func testHookProcessWindowsSystemTimeoutCheckout(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("the System32 timeout boundary is Windows-specific")

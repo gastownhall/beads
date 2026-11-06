@@ -72,6 +72,14 @@ const hookTimeoutSeconds = 300
 // to its process group.
 const hookTimeoutKillAfterSeconds = 2
 
+// isGateHook reports whether the hook's nonzero verdict stops a git
+// operation (a commit, a push). Only those hooks refuse when a deadline
+// leaves a chained sidecar's verdict unknown; the other managed hooks were
+// never blocking, so they keep continuing without beads (GH#6751).
+func isGateHook(hookName string) bool {
+	return hookName == "pre-commit" || hookName == "pre-push"
+}
+
 // generateHookSection returns the marked section content for a given hook name.
 // The section is self-contained: it checks for bd availability, runs the hook
 // via 'bd hooks run', and propagates exit codes — without preventing any user
@@ -109,6 +117,10 @@ const hookTimeoutKillAfterSeconds = 2
 //     falling through to trailing user content on success. A bd-owned or
 //     bd-delegating sidecar is recognized and skipped, mirroring
 //     runChainedHook's recursion exclusions (GH#6751).
+//   - A gate hook (see isGateHook) whose bd is stopped by the deadline with
+//     an eligible chained sidecar refuses instead of continuing: bd was
+//     killed mid-run, so whether the sidecar passed is unknown, and
+//     continuing would fail the gate open (GH#6751).
 func generateHookSection(hookName string) string {
 	// bdChainClassifyArm is the one case arm the section uses to decide
 	// whether <hook>.old is a foreign sidecar it may run without bd. Each
@@ -139,6 +151,23 @@ func generateHookSection(hookName string) string {
 		"|bd[[:space:]]hooks[[:space:]]run[!A-Za-z0-9_]*" +
 		"|*[!A-Za-z0-9_]bd[[:space:]]hooks[[:space:]]run" +
 		"|*[!A-Za-z0-9_]bd[[:space:]]hooks[[:space:]]run[!A-Za-z0-9_]*"
+
+	// timeoutNormalizeArm is the deadline outcome: nothing is pending, so
+	// the hook continues without beads. Gate hooks prepend the refusal — an
+	// eligible chained sidecar's verdict died with bd (bd runs the chain
+	// itself), so continuing would fail the gate open (GH#6751). The
+	// BD_HOOK_CHAIN_ACTIVE guard already folded into _bd_chain_exists keeps
+	// a re-entered invocation on the continue path, refusing there could
+	// wedge a sidecar that re-enters git.
+	timeoutNormalizeArm := "    echo >&2 \"beads: hook '" + hookName + "' timed out after ${_bd_timeout}s — continuing without beads\"\n" +
+		"    _bd_exit=0\n"
+	if isGateHook(hookName) {
+		timeoutNormalizeArm = "    if [ \"$_bd_chain_exists\" -eq 1 ]; then\n" +
+			"      echo >&2 \"beads: hook '" + hookName + "' timed out after ${_bd_timeout}s — outcome of chained " + hookName + ".old is unknown, refusing\"\n" +
+			"      exit 1\n" +
+			"    fi\n" +
+			timeoutNormalizeArm
+	}
 
 	return hookSectionBeginLine() + "\n" +
 		"# This section is managed by beads. Do not remove these markers.\n" +
@@ -231,8 +260,7 @@ func generateHookSection(hookName string) string {
 		"    fi\n" +
 		"  fi\n" +
 		"  if { [ \"$_bd_timeout_backend\" = coreutils ] && [ \"$_bd_exit\" -eq 124 ]; } || { [ \"$_bd_timeout_backend\" = perl ] && [ \"$_bd_exit\" -eq 142 ]; }; then\n" +
-		"    echo >&2 \"beads: hook '" + hookName + "' timed out after ${_bd_timeout}s — continuing without beads\"\n" +
-		"    _bd_exit=0\n" +
+		timeoutNormalizeArm +
 		"  fi\n" +
 		"  if [ \"$_bd_exit\" -ne 0 ]; then exit \"$_bd_exit\"; fi\n" +
 		"elif [ \"$_bd_chain_exists\" -eq 1 ]; then\n" +

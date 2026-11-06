@@ -103,6 +103,10 @@ if command -v bd >/dev/null 2>&1; then
     fi
   fi
   if { [ "$_bd_timeout_backend" = coreutils ] && [ "$_bd_exit" -eq 124 ]; } || { [ "$_bd_timeout_backend" = perl ] && [ "$_bd_exit" -eq 142 ]; }; then
+    if [ "$_bd_chain_exists" -eq 1 ]; then
+      echo >&2 "beads: hook 'pre-commit' timed out after ${_bd_timeout}s — outcome of chained pre-commit.old is unknown, refusing"
+      exit 1
+    fi
     echo >&2 "beads: hook 'pre-commit' timed out after ${_bd_timeout}s — continuing without beads"
     _bd_exit=0
   fi
