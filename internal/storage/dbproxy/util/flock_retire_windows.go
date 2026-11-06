@@ -5,6 +5,8 @@ package util
 import (
 	"errors"
 	"os"
+	"path/filepath"
+	"strings"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -17,7 +19,7 @@ import (
 // contention rather than an open-time sharing violation. The handle is not
 // inheritable and an existing file is not truncated.
 func openRetirableLockFile(lockPath string) (*os.File, error) {
-	name, err := windows.UTF16PtrFromString(lockPath)
+	name, err := createFileName(lockPath)
 	if err != nil {
 		return nil, &os.PathError{Op: "open", Path: lockPath, Err: err}
 	}
@@ -40,7 +42,7 @@ func openRetirableLockFile(lockPath string) (*os.File, error) {
 // second handle, using classic disposition: the name disappears when the
 // last handle (the lease) closes, and new opens fail until then.
 func retireLockFile(f *os.File) error {
-	name, err := windows.UTF16PtrFromString(f.Name())
+	name, err := createFileName(f.Name())
 	if err != nil {
 		return &os.PathError{Op: "retire", Path: f.Name(), Err: err}
 	}
@@ -70,4 +72,22 @@ func retireLockFile(f *os.File) error {
 		return &os.PathError{Op: "retire", Path: f.Name(), Err: err}
 	}
 	return nil
+}
+
+// createFileName converts path for a direct CreateFile call. Like os.OpenFile,
+// it gives a path too long for the legacy MAX_PATH limit its absolute \\?\
+// form; shorter paths and paths already in device form pass through.
+func createFileName(path string) (*uint16, error) {
+	if len(path) >= windows.MAX_PATH-12 && !strings.HasPrefix(path, `\\?\`) && !strings.HasPrefix(path, `\\.\`) {
+		abs, err := filepath.Abs(path)
+		if err != nil {
+			return nil, err
+		}
+		if strings.HasPrefix(abs, `\\`) {
+			path = `\\?\UNC\` + abs[2:]
+		} else {
+			path = `\\?\` + abs
+		}
+	}
+	return windows.UTF16PtrFromString(path)
 }
