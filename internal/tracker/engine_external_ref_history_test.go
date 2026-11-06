@@ -12,6 +12,9 @@ package tracker
 import (
 	"context"
 	"errors"
+	"reflect"
+	"slices"
+	"sort"
 	"testing"
 	"time"
 
@@ -414,4 +417,240 @@ func TestFetchPrelinkedIssuesMakesOneBatchCall(t *testing.T) {
 	if hydratedLocalIDs["bd-0"] {
 		t.Error("bd-0's ref is unchanged since last_sync; it must not be hydrated")
 	}
+}
+
+// recordingTracker records every FetchIssue identifier in call order, so a
+// parity run can compare the batch and per-issue paths' single-issue fetches.
+type recordingTracker struct {
+	*mockTracker
+	fetchedIDs []string
+}
+
+func (m *recordingTracker) FetchIssue(ctx context.Context, identifier string) (*TrackerIssue, error) {
+	m.fetchedIDs = append(m.fetchedIDs, identifier)
+	return m.mockTracker.FetchIssue(ctx, identifier)
+}
+
+// prelinkedOutcome is what one fetchPrelinkedIssues run produced, reduced to
+// the observable surface the batch and per-issue paths must agree on.
+type prelinkedOutcome struct {
+	hydratedIDs []string
+	localIDs    map[string]bool
+	fetchedIDs  []string
+	err         error
+}
+
+// runPrelinkedPull executes fetchPrelinkedIssues once over a fresh copy of
+// the scenario, either through a batch-capable store or a per-issue-only one.
+func runPrelinkedPull(t *testing.T, batched bool, build func() ([]*types.Issue, map[string]string, []TrackerIssue, []TrackerIssue, error)) (prelinkedOutcome, *recordingTracker, *batchOverlapStore) {
+	t.Helper()
+	locals, previous, fetched, remotes, fetchErr := build()
+	base := newOverlapStore(nil)
+	base.issues = locals
+	base.previousRefs = previous
+	store := &batchOverlapStore{overlapStore: base}
+	var engine *Engine
+	if batched {
+		engine = NewEngine(store.newRecording(t, remotes, fetchErr), store, "sync")
+	} else {
+		// Without the batch method the store is exactly the legacy
+		// per-issue capability overlapStore always was.
+		engine = NewEngine(store.newRecording(t, remotes, fetchErr), base, "sync")
+	}
+	tracker := engine.Tracker.(*recordingTracker)
+	hydrated, localIDs, err := engine.fetchPrelinkedIssues(context.Background(), fetched, locals, &overlapLastSync)
+	outcome := prelinkedOutcome{localIDs: localIDs, err: err}
+	for _, issue := range hydrated {
+		outcome.hydratedIDs = append(outcome.hydratedIDs, issue.Identifier)
+	}
+	outcome.fetchedIDs = tracker.fetchedIDs
+	return outcome, tracker, store
+}
+
+func (s *batchOverlapStore) newRecording(t *testing.T, remotes []TrackerIssue, fetchErr error) *recordingTracker {
+	t.Helper()
+	mock := newMockTracker("test")
+	mock.issues = remotes
+	mock.fetchIssueErr = fetchErr
+	return &recordingTracker{mockTracker: mock}
+}
+
+func parityLocals(refs map[string]string) []*types.Issue {
+	ids := make([]string, 0, len(refs))
+	for id := range refs {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	locals := make([]*types.Issue, 0, len(ids))
+	for _, id := range ids {
+		locals = append(locals, newBatchOverlapLocal(id, refs[id]))
+	}
+	return locals
+}
+
+// TestFetchPrelinkedIssuesBatchMatchesPerIssue pins the batch path's parity
+// contract (AC-2): given identical locals, history, bulk rows and remotes,
+// a batch-capable store and a per-issue-only store hydrate the same issues,
+// mark the same hydratedLocalIDs, and make the same FetchIssue calls in the
+// same order — across the decision shapes the pull actually meets.
+func TestFetchPrelinkedIssuesBatchMatchesPerIssue(t *testing.T) {
+	remote := func(identifier string, updated time.Duration) TrackerIssue {
+		return TrackerIssue{ID: identifier, Identifier: identifier, Title: "remote " + identifier, UpdatedAt: overlapLastSync.Add(updated)}
+	}
+	for _, test := range []struct {
+		name string
+		// wantBatch is 1 when the scenario has at least one eligible linked
+		// local, so the pull must make its one batch history read.
+		wantBatch int
+		// build returns locals, their previous refs (nil value = no history
+		// entry), the pull's bulk rows, the tracker's remotes, and a
+		// FetchIssue error.
+		build func() ([]*types.Issue, map[string]string, []TrackerIssue, []TrackerIssue, error)
+	}{
+		{
+			name: "unchanged ref is not hydrated", wantBatch: 1,
+			build: func() ([]*types.Issue, map[string]string, []TrackerIssue, []TrackerIssue, error) {
+				return parityLocals(map[string]string{"bd-0": "https://test.test/EXT-0"}),
+					map[string]string{"bd-0": "https://test.test/EXT-0"}, nil, nil, nil
+			},
+		},
+		{
+			name: "relinked ref is hydrated", wantBatch: 1,
+			build: func() ([]*types.Issue, map[string]string, []TrackerIssue, []TrackerIssue, error) {
+				return parityLocals(map[string]string{"bd-1": "https://test.test/EXT-1"}),
+					map[string]string{"bd-1": "https://test.test/EXT-OLD"},
+					nil, []TrackerIssue{remote("EXT-1", -time.Minute)}, nil
+			},
+		},
+		{
+			name: "missing history is hydrated", wantBatch: 1,
+			build: func() ([]*types.Issue, map[string]string, []TrackerIssue, []TrackerIssue, error) {
+				return parityLocals(map[string]string{"bd-2": "https://test.test/EXT-2"}),
+					map[string]string{}, nil, []TrackerIssue{remote("EXT-2", -time.Minute)}, nil
+			},
+		},
+		{
+			name: "null historical ref is hydrated", wantBatch: 1,
+			build: func() ([]*types.Issue, map[string]string, []TrackerIssue, []TrackerIssue, error) {
+				return parityLocals(map[string]string{"bd-3": "https://test.test/EXT-3"}),
+					map[string]string{"bd-3": ""}, nil, []TrackerIssue{remote("EXT-3", -time.Minute)}, nil
+			},
+		},
+		{
+			name: "whitespace-only ref difference is not a change", wantBatch: 1,
+			build: func() ([]*types.Issue, map[string]string, []TrackerIssue, []TrackerIssue, error) {
+				return parityLocals(map[string]string{"bd-4": "https://test.test/EXT-4"}),
+					map[string]string{"bd-4": "  https://test.test/EXT-4\t"}, nil, nil, nil
+			},
+		},
+		{
+			name: "identifier already in the bulk fetch is not re-fetched", wantBatch: 1,
+			build: func() ([]*types.Issue, map[string]string, []TrackerIssue, []TrackerIssue, error) {
+				return parityLocals(map[string]string{"bd-5": "https://test.test/EXT-5"}),
+					map[string]string{"bd-5": "https://test.test/EXT-OLD"},
+					[]TrackerIssue{remote("EXT-5", 10*time.Second)}, nil, nil
+			},
+		},
+		{
+			name: "overlap-only bulk row marks the local without a fetch", wantBatch: 1,
+			build: func() ([]*types.Issue, map[string]string, []TrackerIssue, []TrackerIssue, error) {
+				return parityLocals(map[string]string{"bd-6": "https://test.test/EXT-6"}),
+					map[string]string{"bd-6": "https://test.test/EXT-OLD"},
+					[]TrackerIssue{remote("EXT-6", -3*time.Minute)}, nil, nil
+			},
+		},
+		{
+			name: "duplicate identifiers hydrate once", wantBatch: 1,
+			build: func() ([]*types.Issue, map[string]string, []TrackerIssue, []TrackerIssue, error) {
+				return parityLocals(map[string]string{
+					"bd-7": "https://test.test/EXT-7",
+					"bd-8": "https://test.test/EXT-7",
+				}), map[string]string{
+					"bd-7": "https://test.test/EXT-OLD",
+					"bd-8": "https://test.test/EXT-OLD",
+				}, nil, []TrackerIssue{remote("EXT-7", -time.Minute)}, nil
+			},
+		},
+		{
+			name: "remote that no longer exists is skipped", wantBatch: 1,
+			build: func() ([]*types.Issue, map[string]string, []TrackerIssue, []TrackerIssue, error) {
+				return parityLocals(map[string]string{"bd-9": "https://test.test/EXT-9"}),
+					map[string]string{"bd-9": "https://test.test/EXT-OLD"}, nil, nil, nil
+			},
+		},
+		{
+			name: "fetch error aborts the pull", wantBatch: 1,
+			build: func() ([]*types.Issue, map[string]string, []TrackerIssue, []TrackerIssue, error) {
+				return parityLocals(map[string]string{"bd-10": "https://test.test/EXT-10"}),
+					map[string]string{"bd-10": "https://test.test/EXT-OLD"},
+					nil, []TrackerIssue{remote("EXT-10", -time.Minute)}, errors.New("tracker down")
+			},
+		},
+		{
+			name: "no linked locals make no history calls",
+			build: func() ([]*types.Issue, map[string]string, []TrackerIssue, []TrackerIssue, error) {
+				return nil, map[string]string{}, nil, nil, nil
+			},
+		},
+		{
+			name: "nil and blank refs are not candidates",
+			build: func() ([]*types.Issue, map[string]string, []TrackerIssue, []TrackerIssue, error) {
+				noRef := &types.Issue{ID: "bd-nil", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+				return []*types.Issue{noRef, newBatchOverlapLocal("bd-blank", " ")},
+					map[string]string{}, nil, nil, nil
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			batchOut, _, batchStore := runPrelinkedPull(t, true, test.build)
+			legacyOut, _, _ := runPrelinkedPull(t, false, test.build)
+
+			if (batchOut.err == nil) != (legacyOut.err == nil) {
+				t.Fatalf("error mismatch: batch = %v, per-issue = %v", batchOut.err, legacyOut.err)
+			}
+			if batchOut.err != nil {
+				if batchOut.err.Error() != legacyOut.err.Error() {
+					t.Fatalf("error text mismatch: batch = %q, per-issue = %q", batchOut.err, legacyOut.err)
+				}
+				return
+			}
+			if !slices.Equal(batchOut.hydratedIDs, legacyOut.hydratedIDs) {
+				t.Fatalf("hydrated identifiers: batch = %v, per-issue = %v", batchOut.hydratedIDs, legacyOut.hydratedIDs)
+			}
+			if !reflect.DeepEqual(batchOut.localIDs, legacyOut.localIDs) {
+				t.Fatalf("hydratedLocalIDs: batch = %v, per-issue = %v", batchOut.localIDs, legacyOut.localIDs)
+			}
+			if !slices.Equal(batchOut.fetchedIDs, legacyOut.fetchedIDs) {
+				t.Fatalf("FetchIssue calls: batch = %v, per-issue = %v", batchOut.fetchedIDs, legacyOut.fetchedIDs)
+			}
+			// The parity above only says something if the batched run was
+			// actually served by the batch path: exactly one batch call when
+			// there are candidates, deciding every one of them without a
+			// single per-issue read.
+			if batchStore.batchCalls != test.wantBatch {
+				t.Fatalf("PreviousExternalRefs calls = %d, want %d", batchStore.batchCalls, test.wantBatch)
+			}
+			if test.wantBatch == 1 && batchStore.singleCalls != 0 {
+				t.Fatalf("PreviousExternalRef calls = %d on the batch path, want 0", batchStore.singleCalls)
+			}
+		})
+	}
+
+	t.Run("nil lastSync reads no history at all", func(t *testing.T) {
+		locals := parityLocals(map[string]string{"bd-1": "https://test.test/EXT-1"})
+		base := newOverlapStore(nil)
+		base.issues = locals
+		base.previousRefs = map[string]string{"bd-1": "https://test.test/EXT-OLD"}
+		store := &batchOverlapStore{overlapStore: base}
+		engine := NewEngine(store.newRecording(t, []TrackerIssue{remote("EXT-1", -time.Minute)}, nil), store, "sync")
+
+		hydrated, localIDs, err := engine.fetchPrelinkedIssues(context.Background(), nil, locals, nil)
+		if err != nil {
+			t.Fatalf("fetchPrelinkedIssues(nil lastSync): %v", err)
+		}
+		if len(hydrated) != 0 || len(localIDs) != 0 || store.batchCalls != 0 || store.singleCalls != 0 {
+			t.Fatalf("nil lastSync must read no history: hydrated=%d localIDs=%v batch=%d single=%d",
+				len(hydrated), localIDs, store.batchCalls, store.singleCalls)
+		}
+	})
 }
