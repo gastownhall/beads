@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/storage/schema"
 )
@@ -537,6 +538,122 @@ func TestVersionBump_DirtyTablesKeepsMarkerAndRetries(t *testing.T) {
 	runVersionBumpInvocation(t, beadsDir)
 	if versionBumpTailAttempts != 3 {
 		t.Fatalf("maintenance attempts after a settled bump = %d, want 3: a settled marker must not re-attempt maintenance", versionBumpTailAttempts)
+	}
+}
+
+// TestVersionBump_PerformedPreV56RecoveryConsumesOneShot pins the #2137
+// legacy exception to #6929's retry semantics: the pre-0.56 recovery DELETES
+// .dolt and rebuilds it, and the compatibility marker it leaves is
+// best-effort — a retained pre-0.56 witness could route the next command
+// into the same destructive work again. A performed recovery therefore
+// consumes the one-shot bump even when the reconciliation that follows
+// fails.
+func TestVersionBump_PerformedPreV56RecoveryConsumesOneShot(t *testing.T) {
+	beadsDir, markerPath := newVersionBumpWorkspace(t, "0.55.4", "1.3.0")
+
+	// The pre-v56 shape recovery destroys: a .dolt with no .bd-dolt-ok
+	// marker. The sentinel's disappearance is the proof the recovery ran.
+	sentinel := filepath.Join(beadsDir, "dolt", ".dolt", "sentinel.txt")
+	if err := os.MkdirAll(filepath.Dir(sentinel), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sentinel, []byte("live workspace data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	stubVersionBumpTail(t, func(int) (bool, error) {
+		return false, fmt.Errorf("open: %w", &schema.DirtyTablesError{Tables: []string{"issues"}})
+	})
+
+	_ = captureNoticeStderr(t, func() { runVersionBumpInvocation(t, beadsDir) })
+
+	if _, err := os.Stat(sentinel); !os.IsNotExist(err) {
+		t.Fatalf("the pre-v56 recovery did not run: %s survived", sentinel)
+	}
+	if got := readLocalVersion(markerPath); got != "1.3.0" {
+		t.Fatalf(".local_version = %q after a performed pre-v56 recovery, want %q — destructive recovery consumes the one-shot even when the tail fails",
+			got, "1.3.0")
+	}
+}
+
+// TestVersionBump_NotApplicablePathsSettleWithoutReconciliation pins that the
+// not-applicable paths — where version-bump maintenance has nothing to do —
+// settle the bump without opening a store, and the deferred marker advances.
+func TestVersionBump_NotApplicablePathsSettleWithoutReconciliation(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		setUp func(t *testing.T, beadsDir string)
+	}{
+		{name: "non-dolt backend", setUp: func(t *testing.T, beadsDir string) {
+			overwriteVersionBumpMetadata(t, beadsDir, &configfile.Config{Backend: configfile.BackendPostgres})
+		}},
+		{name: "proxied-server mode", setUp: func(t *testing.T, beadsDir string) {
+			overwriteVersionBumpMetadata(t, beadsDir, &configfile.Config{DoltMode: configfile.DoltModeProxiedServer})
+		}},
+		{name: "missing database", setUp: func(t *testing.T, beadsDir string) {
+			if err := os.RemoveAll(filepath.Join(beadsDir, "dolt")); err != nil {
+				t.Fatalf("remove database dir: %v", err)
+			}
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			beadsDir, markerPath := newVersionBumpWorkspace(t, "1.1.0", "1.3.0")
+			tt.setUp(t, beadsDir)
+			// Any tail call fails the test: these paths must settle without
+			// opening a store.
+			stubVersionBumpTail(t, func(int) (bool, error) {
+				t.Error("the probe/open/reconcile tail must not run on a not-applicable path")
+				return false, nil
+			})
+
+			runVersionBumpInvocation(t, beadsDir)
+
+			if got := readLocalVersion(markerPath); got != "1.3.0" {
+				t.Fatalf(".local_version = %q after a not-applicable invocation, want %q", got, "1.3.0")
+			}
+		})
+	}
+}
+
+// overwriteVersionBumpMetadata replaces the workspace's metadata.json for the
+// not-applicable rows.
+func overwriteVersionBumpMetadata(t *testing.T, beadsDir string, cfg *configfile.Config) {
+	t.Helper()
+	if err := cfg.Save(beadsDir); err != nil {
+		t.Fatalf("save metadata.json: %v", err)
+	}
+}
+
+// TestVersionBump_ReconcileOutcomeSettles pins the writable-maintenance half
+// of AC-4: a completed reconciliation — migrated, already-current, or a
+// refused downgrade, each the tail's own settled outcome — advances the
+// deferred marker through the production sequence.
+func TestVersionBump_ReconcileOutcomeSettles(t *testing.T) {
+	beadsDir, markerPath := newVersionBumpWorkspace(t, "1.1.0", "1.3.0")
+	stubVersionBumpTail(t, func(int) (bool, error) { return true, nil })
+
+	runVersionBumpInvocation(t, beadsDir)
+
+	if got := readLocalVersion(markerPath); got != "1.3.0" {
+		t.Fatalf(".local_version = %q after a completed reconciliation, want %q", got, "1.3.0")
+	}
+}
+
+// TestTrackBdVersionPreview_NeverYieldsAPendingWrite pins the preview half of
+// AC-4: preview policy excludes the maintenance, so it must also exclude the
+// marker write entirely — no immediate write and no pending write a later
+// step could persist. Readonly and freeze policy exclude both calls the same
+// way before this point (see TestAutoMigrateSkippedDuringMigrationFreeze).
+func TestTrackBdVersionPreview_NeverYieldsAPendingWrite(t *testing.T) {
+	localVersionPath := newTrackingWorkspace(t, "1.1.0", "1.3.0")
+
+	trackBdVersionPreview()
+
+	if !versionUpgradeDetected {
+		t.Fatal("a preview must still detect the upgrade (the session notification reads it)")
+	}
+	if got := readLocalVersion(localVersionPath); got != "1.1.0" {
+		t.Fatalf(".local_version = %q after a preview, want the stale %q", got, "1.1.0")
 	}
 }
 

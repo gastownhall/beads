@@ -287,7 +287,7 @@ func autoMigrateOnVersionBump(beadsDir string) bool {
 		return true
 	}
 
-	recoverPreV56IfNeeded(previousVersion, dbPath)
+	recovered := recoverPreV56IfNeeded(previousVersion, dbPath)
 
 	// Open database using factory (respects backend config from metadata.json)
 	// Use rootCtx if available and not canceled, otherwise use Background
@@ -304,6 +304,16 @@ func autoMigrateOnVersionBump(beadsDir string) bool {
 		settled = defersVersionBumpMaintenance(openErr)
 		noticeSharedMigrateRefusal(openErr)
 		noticeDirtyTablesRefusal(openErr, beadsDir)
+	}
+	// The pre-0.56 recovery (#2137) deleted and rebuilt .dolt before the tail
+	// ran, and the compatibility marker it leaves is best-effort: retaining a
+	// pre-0.56 witness could route the NEXT command into the same destructive
+	// work again. A performed recovery therefore consumes the one-shot bump
+	// even when the reconciliation that follows fails. RecoverPreV56DoltDir
+	// can report a performed recovery together with an initialization error;
+	// the boolean is the authority either way.
+	if recovered {
+		return true
 	}
 	return settled
 }
@@ -425,12 +435,16 @@ func runDoctorVersionMaintenance(beadsDir string) {
 // recovers. The .bd-dolt-ok marker RecoverPreV56DoltDir checks is the last
 // gate, but only bd 0.58.0 and later write it: a database that only 0.56.x or
 // 0.57.x has served has none, so for it these refusals are the only gate.
-func recoverPreV56IfNeeded(previousVersion, dbPath string) {
+//
+// Returns whether the destructive recovery was performed: that outcome
+// consumes the one-shot version-bump signal regardless of what the
+// reconciliation after it does (see autoMigrateOnVersionBump).
+func recoverPreV56IfNeeded(previousVersion, dbPath string) bool {
 	if !doctor.IsValidSemver(previousVersion) || isGoPseudoVersion(previousVersion) {
-		return
+		return false
 	}
 	if doctor.CompareVersions(previousVersion, "0.56.0") >= 0 {
-		return
+		return false
 	}
 
 	recovered, recErr := doltserver.RecoverPreV56DoltDir(dbPath)
@@ -440,6 +454,7 @@ func recoverPreV56IfNeeded(previousVersion, dbPath string) {
 	if recovered {
 		debug.Logf("auto-migrate: rebuilt pre-v56 dolt database at %s", dbPath)
 	}
+	return recovered
 }
 
 // isGoPseudoVersion reports whether a version stamp is a Go pseudo-version,
