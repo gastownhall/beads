@@ -236,17 +236,18 @@ func lenientGateWarning(intent openIntent, gateErr *schema.RemoteMigrateGateErro
 
 // requireReadableSchema bounds a read-only command's read-through. Having
 // tolerated a migration refusal, the open goes on at the current schema, which
-// this binary's issue reads can query only while it has every column the
-// shared projection selects (schema.CheckReadableDrift). One that lacks any is
-// refused here, as server mode's read-only open refuses it
+// this binary's issue reads can query only while it has every table and
+// column the shared hydration selects, the clone-local leases overlay
+// included (sqlbuild.IssueReadRelations, schema.CheckReadableDrift). One that
+// lacks any is refused here, as server mode's read-only open refuses it
 // (dolt.Config.RequireReadableSchema), instead of opening and then failing
-// every read on an unknown column. The other intents read no issues through
-// this open and are left alone.
+// every read on an unknown column or table (gastownhall/beads#6572). The
+// other intents read no issues through this open and are left alone.
 func (s *EmbeddedDoltStore) requireReadableSchema(ctx context.Context, conn *sql.Conn) error {
 	if s.intent != openReadOnlyCommand {
 		return nil
 	}
-	return schema.CheckReadableDrift(ctx, conn, "issues", sqlbuild.ColumnNames(sqlbuild.IssueBaseColumns))
+	return schema.CheckReadableDrift(ctx, conn, sqlbuild.IssueReadRelations())
 }
 
 // toleratesGateRefusal reports whether this open's intent may warn and
@@ -761,8 +762,16 @@ func (s *EmbeddedDoltStore) initSchema(ctx context.Context) error {
 			// migrate-or-adopt guidance.
 			// lenientGateWarning owns the rendering (and the rationale for
 			// preferring gateErr's shaped body over the blunt bullets).
-			if err := s.requireReadableSchema(ctx, conn); err != nil {
-				return err
+			if readErr := s.requireReadableSchema(ctx, conn); readErr != nil {
+				// The read-through is refused too. Keep the gate's decision
+				// and remedy, which a bare schema-behind error would replace
+				// with a local `bd migrate schema` this refusal forbids.
+				var behind *schema.SchemaBehindError
+				if errors.As(readErr, &behind) {
+					gateErr.ReadsRefused = behind
+					return err
+				}
+				return readErr
 			}
 			fmt.Fprint(os.Stderr, lenientGateWarning(s.intent, gateErr))
 			return nil
