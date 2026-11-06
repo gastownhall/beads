@@ -141,6 +141,10 @@ func parseNaturalLanguage(s string, now time.Time) (time.Time, error) {
 // dateOnlyRe matches date-only format YYYY-MM-DD to avoid NLP misinterpretation.
 var dateOnlyRe = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
 
+// isoDatePrefixRe matches input that starts with a YYYY-MM-DD date. It is not
+// end-anchored: any such input is meant as an absolute time.
+var isoDatePrefixRe = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}`)
+
 // ParseRelativeTime parses a time expression using the layered architecture (ADR-001).
 //
 // Parsing order:
@@ -150,8 +154,11 @@ var dateOnlyRe = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
 //     YYYY-MM-DD[T| ]HH:MM[:SS] (2025-01-15 10:00, 2025-01-15T10:00:00)
 //  3. Natural language (tomorrow, next monday)
 //
-// Timezone-less inputs are interpreted in now's location. Returns the parsed
-// time in UTC or an error if no layer could parse the input.
+// Timezone-less inputs are interpreted in now's location. Input that starts
+// with a YYYY-MM-DD date but matches no absolute format (an invalid date, a
+// 12-hour or zoned minute suffix, trailing text) is rejected rather than
+// passed to natural language parsing. Returns the parsed time in UTC or an
+// error if no layer could parse the input.
 func ParseRelativeTime(s string, now time.Time) (time.Time, error) {
 	location := now.Location()
 
@@ -193,6 +200,13 @@ func ParseRelativeTime(s string, now time.Time) (time.Time, error) {
 	// Try datetime with space, without seconds (2025-01-15 10:00)
 	if t, err := time.ParseInLocation("2006-01-02 15:04", s, location); err == nil {
 		return t.UTC(), nil
+	}
+
+	// A leading ISO date that no absolute layout accepted is a typo or an
+	// unsupported form. NLP does not read the ISO date: it would pick up a
+	// clock-like fragment of it ("11-07" as 11:07) and drop the date.
+	if isoDatePrefixRe.MatchString(s) {
+		return time.Time{}, fmt.Errorf("cannot parse time expression: %q (absolute forms: 2025-01-15, 2025-01-15 10:00, 2025-01-15T10:00, 2025-01-15T10:00:00Z)", s)
 	}
 
 	// Layer 3: Natural language (after absolute formats to avoid misinterpretation)

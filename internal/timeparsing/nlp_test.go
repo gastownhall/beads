@@ -1,6 +1,8 @@
 package timeparsing
 
 import (
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -360,5 +362,48 @@ func TestParseRelativeTimeDatetimeWithoutSeconds(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// TestParseRelativeTimeRejectsMalformedDatePrefix pins that input starting
+// with a YYYY-MM-DD date which no absolute layout accepts is an error, never
+// handed to the NLP layer, which would keep a clock-like fragment of it and
+// drop the date (GH#8167).
+func TestParseRelativeTimeRejectsMalformedDatePrefix(t *testing.T) {
+	now := time.Date(2026, 11, 6, 18, 0, 0, 0, time.UTC)
+
+	inputs := []string{
+		// Invalid calendar dates.
+		"2026-02-30",
+		"2026-11-31",
+		"2026-13-01",
+		// Invalid or unsupported time suffixes.
+		"2026-11-07 24:00",
+		"2026-11-07 08:60",
+		"2026-11-07 8.30",
+		"2026-11-07 08:30 PM",
+		"2026-11-07 at 9am",
+		"2026-11-07 08:30Z",
+		// T separator and trailing junk.
+		"2026-11-07T24:00",
+		"2026-11-07T08:30 PM",
+		"2026-11-07T08:30:00 tomorrow",
+		"2026-11-07 08:30xyz",
+		"2026-11-07x",
+	}
+
+	for _, input := range inputs {
+		t.Run(input, func(t *testing.T) {
+			got, err := ParseRelativeTime(input, now)
+			if err == nil {
+				t.Fatalf("ParseRelativeTime(%q) = %v, want an error", input, got)
+			}
+			if !got.IsZero() {
+				t.Errorf("ParseRelativeTime(%q) time = %v, want zero", input, got)
+			}
+			if want := "cannot parse time expression: " + strconv.Quote(input); !strings.Contains(err.Error(), want) {
+				t.Errorf("ParseRelativeTime(%q) error = %q, want it to contain %q", input, err, want)
+			}
+		})
 	}
 }
