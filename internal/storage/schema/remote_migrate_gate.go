@@ -448,8 +448,53 @@ func (e *RemoteMigrateGateError) dataBehindBody() string {
 	return body
 }
 
-// userBody returns the decision-specific guidance block. The default (blunt
-// #4515) body is byte-identical to before the smart gate existed.
+// EmbeddedAdoptCommands is the ordered recipe that adopts a remote's migrated
+// database on a clone whose default embedded database already exists
+// (bd-bt60zz, #6687). `bd bootstrap` never replaces an existing database: run
+// against one it plans Action "none", prints "Nothing to do." and leaves the
+// clone on the old schema, which the gate then refuses again. Moving the local
+// database aside first is what lets bootstrap re-clone. It is the single source
+// for every surface that prints the recipe (the gate's bodies and options,
+// embeddeddolt's lenient-open warning), so they cannot drift apart. Paths are
+// relative to the directory containing .beads.
+func EmbeddedAdoptCommands() []string {
+	return []string{
+		"mkdir -p .beads/backup",
+		"mv -f .beads/embeddeddolt .beads/backup/embeddeddolt.pre-adopt",
+		"bd bootstrap",
+	}
+}
+
+// adoptRecipe renders the adopt steps for userBody, each prose line prefixed
+// with indent and each command at the body's usual command indent.
+func (e *RemoteMigrateGateError) adoptRecipe(indent string) string {
+	body := indent + "`bd bootstrap` alone does NOT adopt it: bootstrap never replaces an existing\n" +
+		indent + "database, so run against this clone it prints \"Nothing to do.\" and leaves\n" +
+		indent + "it on the old schema. Move the local database aside first, from the\n" +
+		indent + "directory that contains .beads, with every bd process on it stopped:\n"
+	for _, c := range EmbeddedAdoptCommands() {
+		body += "        " + c + "\n"
+	}
+	return body +
+		indent + "If .beads/backup/embeddeddolt.pre-adopt already exists, pick another unused\n" +
+		indent + "name; if this workspace configures its own database path, move that one.\n" +
+		indent + "Keep the moved-aside copy until you have checked the result.\n"
+}
+
+// adoptPreservationNote says where a plain adopt's unpushed work survives. The
+// gate cannot know whether an old-release export exists, so the import is
+// conditional; this binary's own export can fail while migrations are pending
+// and the push is refused, so neither is prescribed as a prerequisite.
+func adoptPreservationNote(indent string) string {
+	return indent + "The re-clone brings only what the remote has: local issues you never pushed\n" +
+		indent + "stay in the moved-aside copy, which a compatible older bd can still open.\n" +
+		indent + "If you exported them with the OLD bd before upgrading, restore them\n" +
+		indent + "afterwards with `bd import <backup-file>`.\n"
+}
+
+// userBody returns the decision-specific guidance block. The blunt #4515
+// body's designated-migrator branch and closing note are unchanged since the
+// smart gate existed; its adopt branch carries the move-aside recipe.
 func (e *RemoteMigrateGateError) userBody() string {
 	// The #6575 stop is a blunt stop (empty Decision) with a remedy the blunt
 	// body contradicts, so it is keyed on the fallback reason instead.
@@ -460,19 +505,16 @@ func (e *RemoteMigrateGateError) userBody() string {
 	case gateDecisionAdopt:
 		return "\n" +
 			"  The remote has already been migrated by another clone. Do NOT migrate here —\n" +
-			"  adopt the remote's migrated database instead:\n" +
-			"        bd bootstrap\n" +
-			"  Re-cloning replaces your local database: any local issues you have not pushed\n" +
-			"  are LOST. Push first (`bd dolt push`) or save a copy\n" +
-			"  (`bd export --all -o backup.jsonl`) before re-cloning.\n"
+			"  adopt the remote's migrated database instead.\n" +
+			e.adoptRecipe("  ") + adoptPreservationNote("  ")
 	case gateDecisionAdoptFastForward:
 		return "\n" +
 			"  The remote has already been migrated by another clone, and this clone's local\n" +
 			"  history is a strict ancestor of the remote's with a clean working set — nothing\n" +
-			"  local would be lost by adopting it (unlike a typical adopt):\n" +
-			"        bd bootstrap\n" +
-			"  Unlike the usual re-clone, this clone has no unpushed commits and no\n" +
-			"  uncommitted local changes to discard.\n"
+			"  local would be lost by adopting it (unlike a typical adopt): this clone has\n" +
+			"  no unpushed commits and no uncommitted local changes to discard, so the\n" +
+			"  adopt below is loss-free.\n" +
+			e.adoptRecipe("  ")
 	case gateDecisionSharedNoRemote:
 		return "\n" +
 			"  This database is served to multiple clients (dolt sql-server /\n" +
@@ -501,10 +543,11 @@ func (e *RemoteMigrateGateError) userBody() string {
 			FormatMigrationVersions(e.SkewVersions) + ".\n" +
 			"  The schema has forked (#4259); `bd dolt pull` can no longer merge. Migrating\n" +
 			"  cannot un-fork it. This is a data-loss decision, not an auto-fix:\n" +
-			"    • Pick ONE clone as canonical, then re-bootstrap every other clone from it —\n" +
-			"      unpushed work on the discarded clones is LOST. Export it first\n" +
-			"      (`bd export --all -o backup.jsonl`) if you need it.\n" +
-			"        bd bootstrap\n"
+			"    • Pick ONE clone as canonical, and make sure the remote holds ITS database\n" +
+			"      before any other clone adopts. Then, on every OTHER clone, adopt the\n" +
+			"      remote's database; work those clones never pushed survives only in\n" +
+			"      their moved-aside copies.\n" +
+			e.adoptRecipe("      ")
 	default:
 		return "\n" +
 			"  This database syncs with a remote. Applying schema migrations on more than\n" +
@@ -519,11 +562,8 @@ func (e *RemoteMigrateGateError) userBody() string {
 			"        bd dolt push\n" +
 			"    • Another machine has already migrated: adopt its database instead of\n" +
 			"      migrating here — re-clone from the remote so you receive the migrated\n" +
-			"      schema:\n" +
-			"        bd bootstrap\n" +
-			"      Re-cloning replaces your local database: any local issues you have not\n" +
-			"      pushed are LOST. Push first (`bd dolt push`) or save a copy\n" +
-			"      (`bd export --all -o backup.jsonl`) before re-cloning.\n" +
+			"      schema.\n" +
+			e.adoptRecipe("      ") + adoptPreservationNote("      ") +
 			"\n" +
 			"  Several machines on one remote? Only ONE migrates. Get every other clone\n" +
 			"  fully in sync on its current binary, then after the migrator pushes run\n" +

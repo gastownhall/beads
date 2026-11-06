@@ -368,3 +368,79 @@ func TestRemoteMigrateGateAdoptFastForward(t *testing.T) {
 		t.Errorf("UserMessage should explain the fast-forward is loss-free:\n%s", msg)
 	}
 }
+
+// adoptRecoveryCases are the four refusals whose guidance tells this clone to
+// adopt the remote's database (bd-bt60zz, #6687): the three smart decisions
+// and the blunt fallback stop, whose adopt bullet sits beside the
+// designated-migrator one.
+func adoptRecoveryCases() []struct {
+	name string
+	err  *RemoteMigrateGateError
+} {
+	return []struct {
+		name string
+		err  *RemoteMigrateGateError
+	}{
+		{"adopt", &RemoteMigrateGateError{CurrentVersion: 53, LatestVersion: 67, Pending: 14, Decision: gateDecisionAdopt}},
+		{"adopt-ff", &RemoteMigrateGateError{CurrentVersion: 53, LatestVersion: 67, Pending: 14, Decision: gateDecisionAdoptFastForward}},
+		{"fork-skew", &RemoteMigrateGateError{CurrentVersion: 53, LatestVersion: 67, Pending: 14, Decision: gateDecisionForkSkew, SkewVersions: []int{60}}},
+		{"blunt", &RemoteMigrateGateError{CurrentVersion: 53, LatestVersion: 67, Pending: 14, FallbackReason: fallbackReasonOptedOut}},
+	}
+}
+
+// TestRemoteMigrateGateAdoptRecoveryGuidance pins the embedded adopt recipe in
+// every adopting refusal's user message (bd-bt60zz, #6687). `bd bootstrap`
+// never replaces an existing database — on this clone it prints "Nothing to
+// do." and leaves it on the old schema — so the message has to say so and move
+// the database aside, in order, before it names bootstrap.
+func TestRemoteMigrateGateAdoptRecoveryGuidance(t *testing.T) {
+	for _, tc := range adoptRecoveryCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			msg := tc.err.UserMessage()
+			for _, want := range []string{
+				"Nothing to do.",
+				"never replaces an existing",
+				"unused",
+				"Keep the moved-aside copy",
+			} {
+				if !strings.Contains(msg, want) {
+					t.Errorf("message is missing %q:\n%s", want, msg)
+				}
+			}
+			for _, banned := range []string{"Re-cloning replaces", "replaces your local database", "re-clones and replaces"} {
+				if strings.Contains(msg, banned) {
+					t.Errorf("message still claims bootstrap replaces the database (%q):\n%s", banned, msg)
+				}
+			}
+			mkdir := strings.Index(msg, "        mkdir -p .beads/backup\n")
+			mv := strings.Index(msg, "        mv -f .beads/embeddeddolt .beads/backup/embeddeddolt.pre-adopt\n")
+			if mkdir < 0 || mv < 0 || mkdir > mv {
+				t.Fatalf("message lacks the ordered mkdir/move recipe (mkdir@%d, mv@%d):\n%s", mkdir, mv, msg)
+			}
+			if !strings.Contains(msg[mv:], "        bd bootstrap\n") {
+				t.Errorf("bd bootstrap does not follow the move:\n%s", msg)
+			}
+			if strings.Contains(msg[:mkdir], "        bd bootstrap\n") {
+				t.Errorf("a bare bd bootstrap command precedes the move:\n%s", msg)
+			}
+			switch tc.name {
+			case "adopt", "blunt":
+				// A plain adopt can lose unpushed work: say where it survives
+				// and how an old-release export comes back, conditionally.
+				for _, want := range []string{"bd import <backup-file>", "OLD bd"} {
+					if !strings.Contains(msg, want) {
+						t.Errorf("message is missing the preservation note %q:\n%s", want, msg)
+					}
+				}
+			case "adopt-ff":
+				if !strings.Contains(msg, "loss-free") && !strings.Contains(msg, "losslessly") {
+					t.Errorf("adopt-ff message lost its loss-free explanation:\n%s", msg)
+				}
+			case "fork-skew":
+				if !strings.Contains(msg, "canonical") || !strings.Contains(msg, "every OTHER clone") {
+					t.Errorf("fork-skew message must keep the choose-a-canonical-clone condition:\n%s", msg)
+				}
+			}
+		})
+	}
+}
