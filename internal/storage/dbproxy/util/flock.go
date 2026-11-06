@@ -65,11 +65,14 @@ func openLockFile(lockPath string) (*os.File, error) {
 }
 
 // Retire removes the lock file of a lease acquired with TryRetirableLock
-// while the lease stays held, so no other holder can slip in between
-// retirement and release. On Windows the pathname stays unavailable to new
-// opens until Unlock closes the lease; elsewhere it is removed immediately.
-// A pathname that is already gone counts as retired. Retire is idempotent
-// and refuses ordinary or released leases.
+// while the lease stays held. On Windows the pathname stays unavailable to
+// new opens until Unlock closes the lease, so no other holder can slip in
+// between retirement and release, and Retire fails, leaving the file alone,
+// once the pathname names another file. Elsewhere the pathname is unlinked
+// at once, whatever file it names by then, and a new holder can create and
+// lock a fresh file there before Unlock. A pathname that is already gone
+// counts as retired. Retire is idempotent and refuses ordinary or released
+// leases.
 func (l *Lock) Retire() error {
 	if l == nil || l.f == nil || l.f.Fd() == ^uintptr(0) {
 		return errors.New("util: retire: lease is not held")
