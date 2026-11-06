@@ -10,11 +10,12 @@ import (
 // TestIsBlockedRepairIsDocumented pins the upgrade notes for #7037, the
 // is_blocked repair of migrations 0075 and ignored 0032: the upgrading guide's
 // one section on it must tell apart the automatic repair, its continuation on
-// an ordinary open, the manual remedy on older releases, the clone-local wisp
-// limitation, the journal exemption, and what the printed count means, and the
-// guide must no longer present the manual remedy as the only one or read a
-// nonzero count as proof 0059 hit the database; the changelog must carry a
-// Fixed entry.
+// an ordinary open (one that migrates, which a server-mode read does not), the
+// `bd dolt commit` a pass killed during the recompute needs first, the manual
+// remedy on older releases, the clone-local wisp limitation, the journal
+// exemption, and what the printed count means, and the guide must no longer
+// present the manual remedy as the only one or read a nonzero count as proof
+// 0059 hit the database; the changelog must carry a Fixed entry.
 func TestIsBlockedRepairIsDocumented(t *testing.T) {
 	read := func(rel string) string {
 		t.Helper()
@@ -44,6 +45,8 @@ func TestIsBlockedRepairIsDocumented(t *testing.T) {
 		"repair them automatically",              // the consented migration
 		"including a read",                       // continuation on an ordinary open
 		"without a prompt or `BD_ALLOW_MIGRATE`", // ...with no fresh consent
+		"in server mode a read does not migrate", // ...which a server-mode read never runs
+		"killed during the recompute",            // its own uncommitted flags need one bd dolt commit
 		"v1.3.4 or earlier",                      // the older-release remedy
 		"bd recompute-blocked",
 		"Wisps are clone-local", // the local-wisp limitation

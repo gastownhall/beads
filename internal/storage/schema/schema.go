@@ -1160,7 +1160,8 @@ func migrateUpAfterReconcile(ctx context.Context, db DBConn, seedChanged bool) (
 
 	// gastownhall/beads#7037: an owed repair committed at HEAD re-arms ignored
 	// 0032 even when this clone's cursor already records it.
-	if err := rearmOwedIsBlockedRepair(ctx, db); err != nil {
+	repairOwed, err := rearmOwedIsBlockedRepair(ctx, db)
+	if err != nil {
 		return applied, err
 	}
 
@@ -1183,6 +1184,9 @@ func migrateUpAfterReconcile(ctx context.Context, db DBConn, seedChanged bool) (
 	}
 
 	appliedIgnored, ignoredColumnAdded, err := ignoredSource.migrate(ctx, db, 0)
+	// The owed repair commits inside the ignored pass, so every return from
+	// here on reports it, a failed one included.
+	applied += committedIsBlockedRepair(ctx, db, repairOwed)
 	if err != nil {
 		return applied, fmt.Errorf("ignored migrations: %w", err)
 	}

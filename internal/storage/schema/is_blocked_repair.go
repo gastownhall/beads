@@ -147,13 +147,34 @@ func rearmIgnoredIsBlockedRepair(ctx context.Context, db DBConn) error {
 // cursor already records: a key pulled from a peer whose main 0075 step
 // landed without its repair commit, or a cursor recorded on another branch.
 // It runs inside the guarded pass, before the ignored runner selects its
-// pending steps; with the key absent it changes nothing.
-func rearmOwedIsBlockedRepair(ctx context.Context, db DBConn) error {
+// pending steps; with the key absent it changes nothing. It reports whether
+// the key was owed, for committedIsBlockedRepair.
+func rearmOwedIsBlockedRepair(ctx context.Context, db DBConn) (bool, error) {
 	owed, err := isBlockedRepairOwedAtHead(ctx, db)
 	if err != nil || !owed {
-		return err
+		return false, err
 	}
-	return rearmIgnoredIsBlockedRepair(ctx, db)
+	return true, rearmIgnoredIsBlockedRepair(ctx, db)
+}
+
+// committedIsBlockedRepair is what the owed repair adds to the pass's reported
+// total, read once the ignored runner has returned, failed or not: 1 when the
+// key the pass found owed at HEAD has left HEAD, so the repair commit moved it,
+// and 0 when nothing was owed or the key is still committed. The repair applies
+// no numbered main step, but like the #4356 heal (migrateUpConsented) it
+// answers the question every caller asks of the total: did this pass change
+// the database? Server mode rebuilds the pool it pinned before the pass only on
+// a yes (be-itm5), and `bd migrate` reports a write only on one. A failed probe
+// counts the repair: a needless rebuild costs one dial, a missed one serves
+// pre-repair reads.
+func committedIsBlockedRepair(ctx context.Context, db DBConn, owed bool) int {
+	if !owed {
+		return 0
+	}
+	if stillOwed, err := isBlockedRepairOwedAtHead(ctx, db); err == nil && stillOwed {
+		return 0
+	}
+	return 1
 }
 
 // isBlockedRepairOwedAtHead reports whether the owed key is committed at HEAD.

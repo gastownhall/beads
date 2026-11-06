@@ -1215,10 +1215,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   records the repair and the clone-local step after it recomputes every flag
   and commits issues, dependencies and metadata together; a repair left
   unfinished, or pulled from a peer before its repair commit, finishes on
-  the next open, read commands included, with no new consent. Each clone
-  recomputes its own wisps once. The repair writes no mutation journal
-  rows, so journal consumers must refresh their readiness snapshot, and
-  its count is flag flips, not rows 0059 broke.
+  the next open that migrates (in embedded mode a read command too) with
+  no new consent, after one `bd dolt commit` when the pass was killed
+  during its recompute. Each clone recomputes its own wisps once. The
+  repair writes no mutation journal rows, so journal consumers must
+  refresh their readiness snapshot, and its count is flag flips, not rows
+  0059 broke.
   [Upgrading](docs/getting-started/upgrading.md) covers the clone-local wisp
   limitation and the `bd recompute-blocked` remedy for v1.3.4 and earlier
   (#7037).

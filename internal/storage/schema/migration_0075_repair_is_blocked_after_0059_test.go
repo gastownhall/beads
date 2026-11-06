@@ -2,6 +2,7 @@ package schema
 
 import (
 	"context"
+	"errors"
 	"regexp"
 	"strings"
 	"testing"
@@ -111,5 +112,46 @@ func TestRearmIgnoredIsBlockedRepairDeletesTheCursorSuffix(t *testing.T) {
 			t.Errorf("cursor table present=%v: %v", exists, err)
 		}
 		_ = db.Close()
+	}
+}
+
+// TestCommittedIsBlockedRepairCountsARepairThatLeftHEAD pins what the owed
+// repair adds to MigrateUp's total once the ignored runner has returned:
+// nothing, and no probe, when the pass found nothing owed; 1 once the key has
+// left HEAD, which only the repair commit does; 0 while the key is still
+// committed (a pass stopped short of that commit); and 1 when the probe fails,
+// the direction in which a server-mode open rebuilds the pool it pinned before
+// the pass instead of serving pre-repair reads (be-itm5).
+func TestCommittedIsBlockedRepairCountsARepairThatLeftHEAD(t *testing.T) {
+	headProbe := regexp.QuoteMeta("SHOW TABLES AS OF 'HEAD' LIKE 'metadata'")
+	for _, tc := range []struct {
+		name   string
+		owed   bool
+		expect func(sqlmock.Sqlmock)
+		want   int
+	}{
+		{name: "nothing owed", expect: func(sqlmock.Sqlmock) {}, want: 0},
+		{name: "key left HEAD", owed: true, expect: expectIsBlockedRepairNotOwed, want: 1},
+		{name: "key still at HEAD", owed: true, expect: func(mock sqlmock.Sqlmock) {
+			mock.ExpectQuery(headProbe).
+				WillReturnRows(sqlmock.NewRows([]string{"Tables_in_beads"}).AddRow("metadata"))
+			mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM metadata AS OF 'HEAD' WHERE `key` = ?")).
+				WithArgs(isBlockedRepairOwedKey).
+				WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+		}, want: 0},
+		{name: "probe fails", owed: true, expect: func(mock sqlmock.Sqlmock) {
+			mock.ExpectQuery(headProbe).WillReturnError(errors.New("connection lost"))
+		}, want: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock := newMockDB(t)
+			tc.expect(mock)
+			if got := committedIsBlockedRepair(context.Background(), db, tc.owed); got != tc.want {
+				t.Errorf("committedIsBlockedRepair(owed=%v) = %d, want %d", tc.owed, got, tc.want)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Errorf("unmet SQL expectations: %v", err)
+			}
+		})
 	}
 }

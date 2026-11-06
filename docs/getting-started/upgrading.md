@@ -225,15 +225,21 @@ Recomputing is_blocked for every issue and wisp (gastownhall/beads#7037)…
   flipped 3 is_blocked flag(s)
 ```
 
-- **Unfinished repairs finish on the next open, including a read.** When
+- **Unfinished repairs finish on the next open, with no new consent.** When
   the owed repair is committed but its repair commit is not (a pass killed
   partway, or a pull of a peer's migration step without its repair commit),
-  the next `bd` command finishes it without a prompt or `BD_ALLOW_MIGRATE`:
-  it completes an upgrade someone already consented to and changes no
-  schema. A database still missing a schema migration needs consent as
-  usual, and an open with nothing owed does not repeat the repair. If
-  issues, dependencies or metadata hold uncommitted changes, bd refuses
-  before it writes; commit them with `bd dolt commit` and rerun.
+  the next `bd` command that migrates finishes it without a prompt or
+  `BD_ALLOW_MIGRATE`: it completes an upgrade someone already consented to
+  and changes no schema. In embedded mode that is the next command,
+  including a read; in server mode a read does not migrate, so the next
+  command that writes finishes it. A database still missing a schema
+  migration needs consent as usual, and an open with nothing owed does not
+  repeat the repair. If issues, dependencies or metadata hold uncommitted
+  changes, bd refuses before it writes; commit them with `bd dolt commit`
+  and rerun. A pass killed during the recompute leaves such changes of its
+  own, the flags it had already corrected: until one `bd dolt commit`,
+  commands that write refuse and embedded reads warn and skip the repair,
+  and the open after that commit finishes it.
 - **One clone repairs; the others pull it.** The repair commit replicates.
   A clone that pulls it does not recompute its issues again.
 - **Wisps are clone-local.** Wisps are never committed, so each clone

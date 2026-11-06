@@ -1241,6 +1241,17 @@ func requireIdleReopen(t *testing.T, dataDir string) {
 	})
 }
 
+// requireRepairReported asserts that a pass at a current main cursor which
+// committed the owed repair reported it: it applies no numbered main step, but
+// its repair commit moves HEAD, and callers key the server-mode pool rebuild
+// (be-itm5) and `bd migrate`'s write reporting on MigrateUp's count.
+func requireRepairReported(t *testing.T, reported int) {
+	t.Helper()
+	if reported != 1 {
+		t.Errorf("MigrateUp = %d after committing the owed repair, want 1: callers key pool rebuilds and write reporting on this", reported)
+	}
+}
+
 // recordAppliedSteps records the version of every step the passes apply for
 // the rest of t.
 func recordAppliedSteps(t *testing.T) *[]int {
@@ -1314,9 +1325,11 @@ func TestEmbeddedMigration0075ResumesOwedRepair(t *testing.T) {
 		withoutMigrateConsent(t)
 		applied := recordAppliedSteps(t)
 
-		if _, err := schema.MigrateUp(ctx, conn); err != nil {
+		reported, err := schema.MigrateUp(ctx, conn)
+		if err != nil {
 			t.Fatalf("MigrateUp over received debt (no consent, read open): %v", err)
 		}
+		requireRepairReported(t, reported)
 		if !slices.Equal(*applied, []int{32}) {
 			t.Errorf("pass applied steps %v, want [32] (the re-armed suffix)", *applied)
 		}
@@ -1360,9 +1373,11 @@ func TestEmbeddedMigration0075ResumesOwedRepair(t *testing.T) {
 		withoutMigrateConsent(t)
 		applied := recordAppliedSteps(t)
 
-		if _, err := schema.MigrateUp(ctx, conn); err != nil {
+		reported, err := schema.MigrateUp(ctx, conn)
+		if err != nil {
 			t.Fatalf("MigrateUp over received debt with a later ignored step: %v", err)
 		}
+		requireRepairReported(t, reported)
 		if !slices.Equal(*applied, []int{32, 33}) {
 			t.Errorf("pass applied steps %v, want [32 33]", *applied)
 		}
@@ -1404,9 +1419,11 @@ func TestEmbeddedMigration0075ResumesOwedRepair(t *testing.T) {
 		commitTrackedIgnoredTables(t, ctx, conn)
 		withoutMigrateConsent(t)
 
-		if _, err := schema.MigrateUp(ctx, conn); err != nil {
+		reported, err := schema.MigrateUp(ctx, conn)
+		if err != nil {
 			t.Fatalf("MigrateUp: %v", err)
 		}
+		requireRepairReported(t, reported)
 		requireIgnoredCursorContiguous(t, ctx, conn)
 		if n := repairCommitCount(t, ctx, conn); n != 1 {
 			t.Errorf("repair commits = %d, want 1", n)
@@ -1424,9 +1441,11 @@ func TestEmbeddedMigration0075ResumesOwedRepair(t *testing.T) {
 		insertWispEdges(t, ctx, conn, wispRepairEdges)
 		applied := recordAppliedSteps(t)
 
-		if _, err := schema.MigrateUp(ctx, conn); err != nil {
+		reported, err := schema.MigrateUp(ctx, conn)
+		if err != nil {
 			t.Fatalf("MigrateUp: %v", err)
 		}
+		requireRepairReported(t, reported)
 		want := make([]int, 0, 18)
 		for v := 15; v <= 32; v++ {
 			want = append(want, v)
@@ -1585,18 +1604,24 @@ func requireInterruptedRepairConverges(t *testing.T, window string) {
 
 	if !committed {
 		withRawConn(t, dataDir, preflipDatabase, func(conn *sql.Conn) {
-			if _, err := schema.MigrateUp(ctx, conn); err != nil {
+			reported, err := schema.MigrateUp(ctx, conn)
+			if err != nil {
 				t.Fatalf("MigrateUp after the reconciliation: %v", err)
 			}
 			// The key survived a crash after the recompute, so the retry
 			// owes, recomputes nothing new and commits the key's removal; a
-			// crash after the key deletion left nothing owed.
+			// crash after the key deletion left nothing owed. Either way the
+			// retry applies no numbered step, so it reports exactly the
+			// repair commit it made.
 			want := 0
 			if window == "after-recompute" {
 				want = 1
 			}
 			if n := repairCommitCount(t, ctx, conn); n != want {
 				t.Errorf("repair commits = %d after the retry, want %d", n, want)
+			}
+			if reported != want {
+				t.Errorf("retry MigrateUp = %d, want %d (the repair commits it made)", reported, want)
 			}
 		})
 	}
