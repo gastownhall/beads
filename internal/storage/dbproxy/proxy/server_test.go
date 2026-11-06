@@ -636,6 +636,47 @@ func TestProxy_IdleTimeout_BlockedByShortLivedConns(t *testing.T) {
 	assertNoPidFile(t, root)
 }
 
+// #7191: the end of an authenticated connection is activity too. A
+// connection held open longer than the timeout must not leave the proxy to
+// expire on the next tick after it closes.
+func TestProxy_IdleTimeout_RestartsWhenLongConnCloses(t *testing.T) {
+	t.Parallel()
+
+	ts := server.New()
+	ts.Handler = server.DiscardHandler
+	stats := &proxy.Stats{}
+	port := freeTCPPort(t)
+	root := t.TempDir()
+
+	const idle = 2 * time.Second
+	h := runProxy(t, proxy.ProxyOpts{
+		RootDir: root, Port: port,
+		IdleTimeout: idle,
+		Server:      ts, Stats: stats,
+	})
+	waitListening(t, root, listenWait)
+
+	conn := dialProxy(t, port)
+	require.NoError(t, conn.SetDeadline(time.Time{}))
+	select {
+	case <-h.exited:
+		t.Fatalf("proxy exited while a connection was held (idle timeouts=%d)", stats.Snapshot().IdleTimeouts)
+	case <-time.After(idle + idle/2):
+	}
+
+	// The handler finishes after the client closes, so measuring from here
+	// is conservative.
+	closed := time.Now()
+	require.NoError(t, conn.Close())
+	requireStaysUpFor(t, h, stats, closed, idle)
+
+	require.NoError(t, h.waitErr(t, 3*idle))
+	s := stats.Snapshot()
+	assert.Equal(t, int64(1), s.IdleTimeouts)
+	assert.Equal(t, int64(1), s.BackendStopCalls)
+	assertNoPidFile(t, root)
+}
+
 func TestProxy_ConcurrentConnections(t *testing.T) {
 	t.Parallel()
 
