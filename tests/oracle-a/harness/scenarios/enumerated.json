@@ -3943,7 +3943,7 @@
  },
  {
   "name": "create_title_max_length_boundary",
-  "purpose": "A title over 500 characters is rejected by issue validation.",
+  "purpose": "A title over 500 bytes is rejected by issue validation.",
   "prefix": "tc",
   "steps": [
    [
@@ -3955,7 +3955,7 @@
     "--json"
    ]
   ],
-  "pins": "Error 'validation failed for issue tc-110: title must be 500 characters or less (got 501)' to STDERR; exit 1. (Title fixture is 501 chars.)",
+  "pins": "Error 'validation failed for issue tc-110: title must be 500 bytes or less (got 501)' to STDERR; exit 1. (Title fixture is 501 bytes.)",
   "deterministic": true
  },
  {

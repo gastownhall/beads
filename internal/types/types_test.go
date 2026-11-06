@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // TestNormalizeOptionalTimestampsToUTCCoversEveryPointerTimestamp is the drift
@@ -102,13 +103,13 @@ func TestIssueValidation(t *testing.T) {
 			name: "title too long",
 			issue: Issue{
 				ID:        "test-1",
-				Title:     string(make([]byte, 501)), // 501 characters
+				Title:     string(make([]byte, 501)), // 501 bytes
 				Status:    StatusOpen,
 				Priority:  2,
 				IssueType: TypeFeature,
 			},
 			wantErr: true,
-			errMsg:  "title must be 500 characters or less",
+			errMsg:  "title must be 500 bytes or less",
 		},
 		{
 			name: "invalid priority too low",
@@ -291,6 +292,63 @@ func TestIssueValidation(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestValidateIssueTitleByteLimit pins the title rule's unit and boundary:
+// the limit counts UTF-8 bytes (Go's len), not characters, and the error says
+// bytes. The reporter's GH#8150 fixture is 499 characters but 514 bytes and
+// must be refused with its byte count, so a user counting characters can see
+// why it failed. Both store admission paths — ValidateWithCustom (create and
+// import) and ValidateForImport — surface the same message.
+func TestValidateIssueTitleByteLimit(t *testing.T) {
+	reporter := strings.Repeat("a", 489) + "—––·····′′"
+	if runes := utf8.RuneCountInString(reporter); runes != 499 {
+		t.Fatalf("reporter fixture is %d runes, want 499", runes)
+	}
+	if size := len(reporter); size != 514 {
+		t.Fatalf("reporter fixture is %d bytes, want 514", size)
+	}
+
+	for name, title := range map[string]string{
+		"exactly 500 ASCII bytes":     strings.Repeat("a", 500),
+		"exactly 500 multibyte bytes": strings.Repeat("é", 250),
+		"short title":                 "ok",
+	} {
+		if err := ValidateIssueTitle(title); err != nil {
+			t.Errorf("%s: ValidateIssueTitle() = %v, want nil", name, err)
+		}
+	}
+
+	for _, tc := range []struct {
+		name  string
+		title string
+		want  string
+	}{
+		{"empty title", "", "title is required"},
+		{"reporter fixture, 499 characters 514 bytes", reporter, "title must be 500 bytes or less (got 514)"},
+		{"501 ASCII bytes", strings.Repeat("a", 501), "title must be 500 bytes or less (got 501)"},
+		{"502 multibyte bytes, 251 × é", strings.Repeat("é", 251), "title must be 500 bytes or less (got 502)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateIssueTitle(tc.title)
+			if err == nil {
+				t.Fatalf("ValidateIssueTitle() = nil, want %q", tc.want)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("ValidateIssueTitle() = %q, want it to contain %q", err.Error(), tc.want)
+			}
+		})
+	}
+
+	baseIssue := func(title string) *Issue {
+		return &Issue{ID: "bd-title-bytes", Title: title, Status: StatusOpen, Priority: 2, IssueType: TypeTask}
+	}
+	if err := baseIssue(reporter).ValidateWithCustom(nil, nil); err == nil || !strings.Contains(err.Error(), "title must be 500 bytes or less (got 514)") {
+		t.Errorf("ValidateWithCustom() = %v, want the byte-count title error", err)
+	}
+	if err := baseIssue(reporter).ValidateForImport(nil); err == nil || !strings.Contains(err.Error(), "title must be 500 bytes or less (got 514)") {
+		t.Errorf("ValidateForImport() = %v, want the byte-count title error", err)
 	}
 }
 

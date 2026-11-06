@@ -407,7 +407,7 @@ func ValidateIssueTitle(title string) error {
 		return fmt.Errorf("title is required")
 	}
 	if len(title) > 500 {
-		return fmt.Errorf("title must be 500 characters or less (got %d)", len(title))
+		return fmt.Errorf("title must be 500 bytes or less (got %d)", len(title))
 	}
 	return nil
 }
