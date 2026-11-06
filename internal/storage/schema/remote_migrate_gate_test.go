@@ -3,6 +3,8 @@ package schema
 import (
 	"context"
 	"errors"
+	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -442,5 +444,96 @@ func TestRemoteMigrateGateAdoptRecoveryGuidance(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// bd-bt60zz (#6687): on a clone that already has a local database, a bare
+// `bd bootstrap` prints "Nothing to do." and leaves the clone on the old
+// schema, so the gate must not hand that clone bare bootstrap as the adopt
+// step while promising it replaces the local database.
+func TestRemoteMigrateGateAdoptGuidanceIsNotBareBootstrap(t *testing.T) {
+	bareThenReplace := regexp.MustCompile(`(?m)^\s*bd bootstrap\n.*replaces your local database`)
+	for _, decision := range []string{"", gateDecisionAdopt} {
+		e := &RemoteMigrateGateError{CurrentVersion: 53, LatestVersion: 67, Pending: 14, Decision: decision}
+		if msg := e.UserMessage(); bareThenReplace.MatchString(msg) {
+			t.Errorf("decision %q: refusal tells an existing clone that bare `bd bootstrap` replaces its database:\n%s", decision, msg)
+		}
+		for _, opt := range e.Options() {
+			if opt.ID == "adopt" && len(opt.Commands) == 1 && opt.Commands[0] == "bd bootstrap" {
+				t.Errorf("decision %q: adopt option is bare `bd bootstrap` (a no-op on an existing database), risk %q", decision, opt.Risk)
+			}
+		}
+	}
+}
+
+// adoptOptionIDs are the Options() ids whose commands adopt the remote.
+var adoptOptionIDs = []string{"adopt", "adopt-fast-forward", "reconcile-fork"}
+
+// TestRemoteMigrateGateAdoptOptionsRecipe pins the machine-readable adopt
+// paths (bd-bt60zz, #6687): an embedded clone gets the ordered move-aside
+// recipe as its commands; server storage, whose database is not a directory in
+// this workspace, gets bootstrap gated on explicit host/stop/move/restart
+// prerequisites instead of an embedded move. No layout gets an unconditional
+// new-binary export or a claim that bootstrap itself replaces data.
+func TestRemoteMigrateGateAdoptOptionsRecipe(t *testing.T) {
+	layouts := []struct {
+		name   string
+		set    func(*RemoteMigrateGateError)
+		server bool
+	}{
+		{"embedded", func(*RemoteMigrateGateError) {}, false},
+		{"shared", func(e *RemoteMigrateGateError) { e.Shared = true }, true},
+		{"proxied", func(e *RemoteMigrateGateError) { e.Shared, e.Proxied = true, true }, true},
+	}
+	for _, tc := range adoptRecoveryCases() {
+		for _, layout := range layouts {
+			t.Run(tc.name+"/"+layout.name, func(t *testing.T) {
+				e := *tc.err
+				layout.set(&e)
+				found := 0
+				for _, opt := range e.Options() {
+					for _, c := range opt.Commands {
+						if strings.Contains(c, "bd export") {
+							t.Errorf("option %q prescribes a new-binary export %q (it can fail while migrations are pending)", opt.ID, c)
+						}
+					}
+					if !slices.Contains(adoptOptionIDs, opt.ID) {
+						continue
+					}
+					found++
+					for _, banned := range []string{"replaces the local database", "re-clones and replaces"} {
+						if strings.Contains(opt.Risk, banned) || strings.Contains(opt.When, banned) {
+							t.Errorf("option %q still claims bootstrap replaces data: when %q risk %q", opt.ID, opt.When, opt.Risk)
+						}
+					}
+					if !strings.Contains(opt.Risk, "never replaces an existing database") {
+						t.Errorf("option %q risk does not explain the bootstrap no-op: %q", opt.ID, opt.Risk)
+					}
+					if !layout.server {
+						if !slices.Equal(opt.Commands, EmbeddedAdoptCommands()) {
+							t.Errorf("embedded option %q commands = %q, want the ordered recipe %q", opt.ID, opt.Commands, EmbeddedAdoptCommands())
+						}
+						if !strings.Contains(opt.When, "unused") {
+							t.Errorf("embedded option %q when does not require an unused destination: %q", opt.ID, opt.When)
+						}
+						continue
+					}
+					if !slices.Equal(opt.Commands, []string{"bd bootstrap"}) {
+						t.Errorf("server option %q commands = %q, want only bd bootstrap behind its prerequisites", opt.ID, opt.Commands)
+					}
+					for _, want := range []string{"host", "stopped", "data_dir", "restarted", "downtime"} {
+						if !strings.Contains(opt.When, want) {
+							t.Errorf("server option %q when is missing prerequisite %q: %q", opt.ID, want, opt.When)
+						}
+					}
+					if strings.Contains(opt.When, ".beads/embeddeddolt") {
+						t.Errorf("server option %q prescribes an embedded move: %q", opt.ID, opt.When)
+					}
+				}
+				if found != 1 {
+					t.Errorf("found %d adopt options, want exactly 1", found)
+				}
+			})
+		}
 	}
 }
