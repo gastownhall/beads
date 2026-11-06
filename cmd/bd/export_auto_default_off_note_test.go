@@ -10,18 +10,21 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/migration"
 	"github.com/steveyegge/beads/internal/storage"
 )
 
 // defaultOffNoteStore is an open store for the export.auto=false path. That
-// path must not touch storage, so every method but IsClosed and GetStateHash
-// panics through the nil embedded interface. GetStateHash lets an explicit
-// export.auto=true run the real enabled flow as far as its no-changes return
-// when stateHash matches the fixture's last_dolt_commit.
+// path must not touch storage, so every method but IsClosed, GetStateHash and
+// Close panics through the nil embedded interface. GetStateHash lets an
+// explicit export.auto=true run the real enabled flow as far as its
+// no-changes return when stateHash matches the fixture's last_dolt_commit;
+// Close lets PersistentPostRunE end the command as it does in a bd process.
 type defaultOffNoteStore struct {
 	storage.DoltStorage
 	closed    bool
@@ -29,6 +32,8 @@ type defaultOffNoteStore struct {
 }
 
 func (s *defaultOffNoteStore) IsClosed() bool { return s.closed }
+
+func (s *defaultOffNoteStore) Close() error { return nil }
 
 func (s *defaultOffNoteStore) GetStateHash(context.Context) (string, error) {
 	return s.stateHash, nil
@@ -461,6 +466,87 @@ func TestMaybeAutoExportDefaultOffNoteStaysQuietOutsideHumanOutput(t *testing.T)
 			}
 		})
 	}
+}
+
+// The commands that never show the metrics first-run notice do not get the
+// note either. `bd prime` is the one that reaches it: it opens the store for
+// memories and is not read-only, so its post-run maintenance runs auto-export,
+// and the Codex and Cursor session hooks run it and put its stderr in the
+// agent's context. Each command here ends through PersistentPostRunE, as in a
+// bd process, and only the ordinary write command prints the note. The nested
+// `bd hooks install` row pins that the check uses the top-level command.
+func TestPersistentPostRunDefaultOffNoteSkipsHookBridges(t *testing.T) {
+	cases := []struct {
+		args     []string
+		wantNote bool
+	}{
+		{args: []string{"create"}, wantNote: true},
+		{args: []string{"prime"}},
+		{args: []string{"codex-hook"}},
+		{args: []string{"hooks", "install"}},
+	}
+	for _, tc := range cases {
+		t.Run(strings.Join(tc.args, " "), func(t *testing.T) {
+			cmd, _, err := rootCmd.Find(tc.args)
+			if err != nil || cmd.Name() != tc.args[len(tc.args)-1] {
+				t.Fatalf("bd %s is not in the command tree: %v", strings.Join(tc.args, " "), err)
+			}
+			defaultOffNoteWorkspace(t)
+			initConfigForTest(t)
+			isolateDefaultOffNotePostRun(t)
+			want := ""
+			if tc.wantNote {
+				want = wantDefaultOffNote(filepath.Join(beads.FindBeadsDir(), "issues.jsonl"))
+			}
+
+			stdout, stderr := captureDefaultOffNoteOutput(t, func() error {
+				return rootCmd.PersistentPostRunE(cmd, nil)
+			})
+			if stderr != want {
+				t.Fatalf("stderr:\nwant %q\ngot  %q", want, stderr)
+			}
+			if stdout != "" {
+				t.Fatalf("stdout must stay empty, got %q", stdout)
+			}
+			if autoExportCommand != "" {
+				t.Fatalf("autoExportCommand = %q after the command, want it cleared", autoExportCommand)
+			}
+		})
+	}
+}
+
+// isolateDefaultOffNotePostRun readies PersistentPostRunE's globals for a
+// direct-mode command that wrote nothing, so auto-export is the only
+// maintenance step left that can print: auto-backup and auto-push are stubbed
+// out and the events journal, whose auto-prune runs next, is off. Every
+// global it changes is restored afterwards.
+func isolateDefaultOffNotePostRun(t *testing.T) {
+	t.Helper()
+	t.Setenv("BD_EVENTS_JOURNAL", "0")
+	oldProvider := uowProvider
+	oldReadonly, oldProxied := readonlyMode, proxiedServerMode
+	oldRootCtx, oldRootCancel := rootCtx, rootCancel
+	oldSpan, oldProfile, oldTrace := commandSpan, profileFile, traceFile
+	oldBackup, oldPush := runPostRunAutoBackup, runPostRunAutoPush
+	oldDidWrite, oldTipMetadata, oldFreeze := commandDidWrite.Load(), commandDidWriteTipMetadata, commandFreeze
+	t.Cleanup(func() {
+		uowProvider = oldProvider
+		readonlyMode, proxiedServerMode = oldReadonly, oldProxied
+		rootCtx, rootCancel = oldRootCtx, oldRootCancel
+		commandSpan, profileFile, traceFile = oldSpan, oldProfile, oldTrace
+		runPostRunAutoBackup, runPostRunAutoPush = oldBackup, oldPush
+		commandDidWrite.Store(oldDidWrite)
+		commandDidWriteTipMetadata, commandFreeze = oldTipMetadata, oldFreeze
+	})
+
+	uowProvider = nil
+	readonlyMode, proxiedServerMode = false, false
+	rootCtx, rootCancel = context.Background(), nil
+	commandSpan, profileFile, traceFile = nil, nil, nil
+	runPostRunAutoBackup = func(context.Context) {}
+	runPostRunAutoPush = func(context.Context) {}
+	commandDidWrite.Store(false)
+	commandDidWriteTipMetadata, commandFreeze = false, migration.Result{}
 }
 
 // `bd config set export.auto ...` writes YAML without refreshing the loaded

@@ -182,7 +182,10 @@ bd config set export.auto true    # resume auto-export
 bd config set export.auto false   # keep it off
 ```
 
-The note is not shown with `--quiet` or `--json`.
+The old default also ran `git add` on the JSONL after each export. To get that
+back as well, run `bd config set export.git-add true`.
+
+The note is not shown with `--quiet` or `--json`, or in `bd prime` output.
 
 Use `bd dolt push` / `bd dolt pull` for sync and `bd backup` for restorable
 database backups.

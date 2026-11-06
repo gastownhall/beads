@@ -324,7 +324,8 @@ func topLevelCommandName(cmd *cobra.Command) string {
 // machine-facing or hook/protocol bridges, so the friendly first-run metrics
 // notice must never write to their stderr (it could corrupt a hook envelope or
 // surprise a non-interactive caller). Matched by top-level name so nested
-// subcommands like `bd hooks run` are covered too.
+// subcommands like `bd hooks run` are covered too. The default-off auto-export
+// note (noteAutoExportDefaultOff) stays out of them as well.
 var firstRunNoticeSuppressedCommands = map[string]bool{
 	metrics.SendMetricsSubcommand: true,
 	"prime":                       true,

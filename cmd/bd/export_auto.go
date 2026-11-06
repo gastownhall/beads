@@ -20,6 +20,7 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/execenv"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
@@ -98,6 +99,11 @@ func autoExportPath(beadsDir string) string {
 	return filepath.Join(beadsDir, exportPath)
 }
 
+// autoExportCommand is the top-level command (topLevelCommandName) whose
+// post-run maintenance is running auto-export. PersistentPostRunE sets it
+// for that call only, so a direct call of maybeAutoExport reads "".
+var autoExportCommand string
+
 // noteAutoExportDefaultOff explains, on stderr, why a workspace that
 // auto-exported before v1.0.5 no longer refreshes its JSONL: #4063 made
 // export.auto opt-in, and a workspace that never set the key went silent
@@ -107,9 +113,13 @@ func autoExportPath(beadsDir string) string {
 // value is a choice already made) and both export-state.json, which every
 // auto-export saves, and the JSONL exist: together they show this workspace
 // has a JSONL that auto-export used to refresh. Quiet, JSON and hook-JSON
-// output keep it silent, as they do the other advisory notices.
+// output keep it silent, as they do the other advisory notices, and so do
+// the commands that never show the metrics first-run notice
+// (firstRunNoticeSuppressedCommands). `bd prime` is one of them: it opens
+// the store for memories, and the Codex and Cursor session hooks run it and
+// put its stderr in the agent's context.
 func noteAutoExportDefaultOff() {
-	if isQuiet() || jsonOutput || primeHookJSONMode {
+	if isQuiet() || jsonOutput || primeHookJSONMode || firstRunNoticeSuppressedCommands[autoExportCommand] {
 		return
 	}
 	if config.GetValueSource("export.auto") != config.SourceDefault {
@@ -135,11 +145,13 @@ func noteAutoExportDefaultOff() {
 			return
 		}
 	}
+	// export.path comes from the clone's config.yaml, and the note prints it
+	// beside two paste-ready commands.
 	fmt.Fprintf(os.Stderr,
 		"Info: auto-export is off by default since bd v1.0.5; %s is no longer refreshed automatically. "+
 			"Re-enable with: bd config set export.auto true "+
 			"(keep it off and silence this note: bd config set export.auto false)\n",
-		fullPath)
+		remedy.PrintedValue(fullPath))
 }
 
 // maybeAutoExport writes a git-tracked JSONL file if enabled and due.
