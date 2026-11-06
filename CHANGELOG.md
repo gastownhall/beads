@@ -685,6 +685,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **bd no longer reads the native user config directory when
+  `~/.config/bd/config.yaml` exists, and no longer merges the two files.**
+  Every launch used to check `os.UserConfigDir()/bd/config.yaml` too
+  (`~/Library/Application Support/bd/config.yaml` on macOS,
+  `%APPDATA%\bd\config.yaml` on Windows, `$XDG_CONFIG_HOME/bd/config.yaml` on
+  Linux when it differs from `~/.config`), and on macOS 26 that check was
+  reported to raise a "would like to access data from other apps" prompt on
+  every run (GH#8113). The native file is now only a fallback, read when
+  `~/.config/bd/config.yaml` is absent. If you keep both files, settings
+  that exist only in the native file stop applying: copy the ones you want
+  into `~/.config/bd/config.yaml`. The legacy `~/.beads/config.yaml` still
+  merges beneath it as before.
 - **`bd rules compact` previews by default and applies only with `--force`.**
   It used to apply merges by default, writing the composite and deleting the
   source rules. Scripts using `--auto` or `--group` to apply merges must add

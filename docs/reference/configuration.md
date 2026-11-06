@@ -5,7 +5,7 @@ description: Complete reference for bd configuration across config.yaml and data
 
 Complete configuration reference for beads.
 
-Last reviewed: 2026-10-26
+Last reviewed: 2026-11-06
 
 Freshness source: `cmd/bd/main.go`, `cmd/bd/config.go`, `internal/config/`, `internal/configfile/`, and `internal/endpointtrust/`.
 
@@ -23,7 +23,7 @@ Dolt is the only storage backend. Embedded mode (the default) stores data at `.b
 `config.yaml` is searched in this order, with later files overriding earlier ones:
 
 1. `~/.beads/config.yaml` (legacy user-level, lowest priority)
-2. `~/.config/bd/config.yaml` (user-level; this exact path is checked even on platforms whose native user-config directory differs)
+2. `~/.config/bd/config.yaml` (user-level; this exact path is checked even on platforms whose native user-config directory differs). When it does not exist, bd falls back to the platform's native user-config file: `~/Library/Application Support/bd/config.yaml` on macOS, `%APPDATA%\bd\config.yaml` on Windows, or `$XDG_CONFIG_HOME/bd/config.yaml` on Linux when `XDG_CONFIG_HOME` is set to somewhere other than `~/.config`. Only one of the two is read; they are never merged, and bd does not look at the native file at all while `~/.config/bd/config.yaml` exists. If you have settings only in the native file, copy the ones you want into `~/.config/bd/config.yaml`.
 3. `<repo>/.beads/config.yaml` (project-level, walked up from the current directory)
 4. `$BEADS_DIR/config.yaml` (highest priority, when `BEADS_DIR` points at a different workspace)
 
