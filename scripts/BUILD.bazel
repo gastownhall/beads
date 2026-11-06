@@ -276,6 +276,7 @@ go_test(
         "repo_helpers_test.go",
     ],
     data = [
+        "changelog-merge-driver.sh",
         "check-build-tags.sh",
         "check-doc-freshness.sh",
         "check-go-install-guidance.sh",
@@ -388,6 +389,13 @@ filegroup(
 exports_files(
     ["upgrade-smoke-test.sh"],
     visibility = ["//tests/upgrade_smoke:__pkg__"],
+)
+
+# The CHANGELOG.md merge driver .gitattributes names: the fixture merges of
+# //scripts/gitattributespolicy run it as the configured driver.
+exports_files(
+    ["changelog-merge-driver.sh"],
+    visibility = ["//scripts/gitattributespolicy:__pkg__"],
 )
 
 exports_files(
