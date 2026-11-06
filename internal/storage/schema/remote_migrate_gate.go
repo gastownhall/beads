@@ -141,6 +141,16 @@ type RemoteMigrateGateError struct {
 	// plumbed into the gate: the topology is the caller's fact, and every
 	// other injection site would have to pass a constant false.
 	Proxied bool
+
+	// ServerMode marks a refusal raised against a dolt sql-server's storage
+	// when neither Shared nor Proxied already says so — the owned server a
+	// workspace drives itself (internal/storage/dolt annotates it after the
+	// gate returns). Presentation-only (gastownhall/beads#6687): it selects
+	// server-shaped adoption guidance — the recovery is a move on the serving
+	// host, out of the server's data_dir, not this workspace's embedded
+	// directory — and gates nothing. Shared and Proxied imply the same
+	// rendering through serverStorage().
+	ServerMode bool
 }
 
 const (
@@ -216,14 +226,15 @@ func (e *RemoteMigrateGateError) IsDataBehind() bool {
 }
 
 // serverStorage reports whether this refusal was raised against a dolt
-// sql-server's storage — the shared store (#5920) or a proxied server — rather
-// than this workspace's embedded database (#6687). It decides how adoption
-// guidance renders: embedded adoption is a local move-aside the workspace can
-// run itself, while every server topology needs the serving process stopped and
-// the database moved out of the server's data_dir on the host, which no command
-// list issued from HERE can express.
+// sql-server's storage — the shared store (#5920), a proxied server, or the
+// workspace's own owned server (ServerMode) — rather than this workspace's
+// embedded database (#6687). It decides how adoption guidance renders: embedded
+// adoption is a local move-aside the workspace can run itself, while every
+// server topology needs the serving process stopped and the database moved out
+// of the server's data_dir on the host, which no command list issued from HERE
+// can express.
 func (e *RemoteMigrateGateError) serverStorage() bool {
-	return e.Shared || e.Proxied
+	return e.ServerMode || e.Shared || e.Proxied
 }
 
 // serverAdoptPrerequisites is what adopting requires on server storage: the
@@ -539,6 +550,33 @@ func adoptRecipeConditions(indent string) string {
 		indent + adoptAsideDest + " already exists.\n"
 }
 
+// adoptServerRecovery renders the server-storage adoption steps (#6687),
+// indented for its arm. On a database a dolt sql-server serves, the
+// move-aside is a move on the HOST, out of the server's actual data_dir —
+// the server loads every directory under its data_dir as a database, so an
+// `mv` of the workspace's embedded path is meaningless there — and it needs
+// the serving process stopped. The refusal cannot name the configured
+// data_dir (only the server's config can), so the steps say so instead of
+// fabricating a path.
+func (e *RemoteMigrateGateError) adoptServerRecovery(indent string) string {
+	p := indent + "1. Stop every bd client of this database, and stop the serving process\n" +
+		indent + "   on its host.\n" +
+		indent + "2. Move this database's directory OUT of the server's actual data_dir —\n" +
+		indent + "   the server loads every directory under its data_dir as a database,\n" +
+		indent + "   and `.beads/dolt/` is only the owned-server default; shared and\n" +
+		indent + "   custom data_dir locations differ, and this refusal cannot name the\n" +
+		indent + "   configured path (the server's config does).\n" +
+		indent + "3. Restart the server, then run `bd bootstrap` from a workspace with\n" +
+		indent + "   direct access to it. `bd bootstrap` never replaces an existing\n" +
+		indent + "   database: against one it reports \"Nothing to do.\" and leaves the\n" +
+		indent + "   old schema in place (#6687) — which is why the move comes first.\n"
+	if e.Proxied {
+		p += indent + "This workspace is in proxied-server mode: the recovery runs on the\n" +
+			indent + "server host, not from here.\n"
+	}
+	return p
+}
+
 // userBody returns the decision-specific guidance block. The default (blunt
 // #4515) body kept its pre-smart-gate wording until #6687, which corrected
 // its adopt arm — and the tailored adopt arms — from a bare `bd bootstrap`
@@ -552,6 +590,22 @@ func (e *RemoteMigrateGateError) userBody() string {
 	}
 	switch e.Decision {
 	case gateDecisionAdopt:
+		if e.serverStorage() {
+			return "\n" +
+				"  The remote has already been migrated by another clone. Do NOT migrate here —\n" +
+				"  adopt the remote's migrated database instead. This database is served by\n" +
+				"  a dolt sql-server, so adopting it is coordinated downtime, not a local\n" +
+				"  file move:\n" +
+				e.adoptServerRecovery("    ") +
+				"\n" +
+				"  The moved-aside directory is the safety net, not lost work: it keeps\n" +
+				"  every local issue, including ones never pushed — neither `bd dolt\n" +
+				"  push` (refused in this state) nor this binary's export can be required\n" +
+				"  to save them first. A re-clone brings only what the remote has. Keep\n" +
+				"  it, never delete it, until the re-cloned database is verified; to\n" +
+				"  recover local-only work, open it with an older bd release or import\n" +
+				"  a backup exported by one (`bd import <backup.jsonl>`).\n"
+		}
 		return "\n" +
 			"  The remote has already been migrated by another clone. Do NOT migrate here —\n" +
 			"  adopt the remote's migrated database instead. `bd bootstrap` never replaces\n" +
@@ -570,6 +624,19 @@ func (e *RemoteMigrateGateError) userBody() string {
 			"  open the aside with an older bd release or import a backup exported by\n" +
 			"  one (`bd import <backup.jsonl>`).\n"
 	case gateDecisionAdoptFastForward:
+		if e.serverStorage() {
+			return "\n" +
+				"  The remote has already been migrated by another clone, and this clone's local\n" +
+				"  history is a strict ancestor of the remote's with a clean working set — nothing\n" +
+				"  local would be lost by adopting it (unlike a typical adopt). But this\n" +
+				"  database is served by a dolt sql-server, so adopting it is coordinated\n" +
+				"  downtime, not a local file move:\n" +
+				e.adoptServerRecovery("    ") +
+				"\n" +
+				"  This clone has no unpushed commits and no uncommitted local changes, so\n" +
+				"  nothing needs recovering from the moved-aside directory — keep it\n" +
+				"  anyway, and never delete it while it is your only copy.\n"
+		}
 		return "\n" +
 			"  The remote has already been migrated by another clone, and this clone's local\n" +
 			"  history is a strict ancestor of the remote's with a clean working set — nothing\n" +
@@ -607,15 +674,7 @@ func (e *RemoteMigrateGateError) userBody() string {
 			"  committed first — see the recovery the dirty-table error names; do not\n" +
 			"  re-run this command in a loop.\n"
 	case gateDecisionForkSkew:
-		return "\n" +
-			"  This clone and the remote already applied DIFFERENT content for migration(s) " +
-			FormatMigrationVersions(e.SkewVersions) + ".\n" +
-			"  The schema has forked (#4259); `bd dolt pull` can no longer merge. Migrating\n" +
-			"  cannot un-fork it. This is a data-loss decision, not an auto-fix:\n" +
-			"    • Choose ONE clone as canonical, migrate it to this binary's schema if it\n" +
-			"      is not there yet, and publish it (`bd dolt push`) — the other clones\n" +
-			"      can only adopt the database the remote holds.\n" +
-			"    • Every OTHER clone then re-bootstraps from the canonical database.\n" +
+		adoptBullet := "    • Every OTHER clone then re-bootstraps from the canonical database.\n" +
 			"      `bd bootstrap` never replaces an existing database: it reports\n" +
 			"      \"Nothing to do.\" and leaves the forked schema in place (#6687), so\n" +
 			"      move the local database aside first — from the directory that\n" +
@@ -626,19 +685,27 @@ func (e *RemoteMigrateGateError) userBody() string {
 			"      it, never delete it. To read that work later, open the aside with an\n" +
 			"      older bd release or import a backup exported by one\n" +
 			"      (`bd import <backup.jsonl>`).\n"
-	default:
+		if e.serverStorage() {
+			adoptBullet = "    • Every OTHER clone then re-bootstraps from the canonical database.\n" +
+				"      A database served by a dolt sql-server is adopted as coordinated\n" +
+				"      downtime, not a local file move:\n" +
+				e.adoptServerRecovery("      ") +
+				"      The moved-aside directory is what preserves the discarded clone's\n" +
+				"      unpushed work: keep it, never delete it. To read that work later,\n" +
+				"      open it with an older bd release or import a backup exported by\n" +
+				"      one (`bd import <backup.jsonl>`).\n"
+		}
 		return "\n" +
-			"  This database syncs with a remote. Applying schema migrations on more than\n" +
-			"  one clone independently forks the schema so `bd dolt pull` can no longer\n" +
-			"  merge — the break is silent and unrecoverable.\n" +
-			"\n" +
-			"  Choose one:\n" +
-			"    • You are the designated migrator (only ONE machine should be): migrate,\n" +
-			"      then publish the migrated database to the remote:\n" +
-			"        bd migrate --force\n" +
-			"        (or " + AllowRemoteMigrateEnv + "=1 bd migrate in scripted/CI use)\n" +
-			"        bd dolt push\n" +
-			"    • Another machine has already migrated: adopt its database instead of\n" +
+			"  This clone and the remote already applied DIFFERENT content for migration(s) " +
+			FormatMigrationVersions(e.SkewVersions) + ".\n" +
+			"  The schema has forked (#4259); `bd dolt pull` can no longer merge. Migrating\n" +
+			"  cannot un-fork it. This is a data-loss decision, not an auto-fix:\n" +
+			"    • Choose ONE clone as canonical, migrate it to this binary's schema if it\n" +
+			"      is not there yet, and publish it (`bd dolt push`) — the other clones\n" +
+			"      can only adopt the database the remote holds.\n" +
+			adoptBullet
+	default:
+		adoptBullet := "    • Another machine has already migrated: adopt its database instead of\n" +
 			"      migrating here, by re-cloning it from the remote. `bd bootstrap` never\n" +
 			"      replaces an existing database: it reports \"Nothing to do.\" and leaves\n" +
 			"      the old schema in place (#6687), so move the local database aside\n" +
@@ -650,7 +717,31 @@ func (e *RemoteMigrateGateError) userBody() string {
 			"      re-clone brings only what the remote has. Keep the aside, never delete\n" +
 			"      it, until the re-cloned database is verified — to recover local-only\n" +
 			"      work, open it with an older bd release or import a backup exported by\n" +
-			"      one (`bd import <backup.jsonl>`).\n" +
+			"      one (`bd import <backup.jsonl>`).\n"
+		if e.serverStorage() {
+			adoptBullet = "    • Another machine has already migrated: adopt its database instead of\n" +
+				"      migrating here, by re-cloning it from the remote. A database served\n" +
+				"      by a dolt sql-server is adopted as coordinated downtime, not a\n" +
+				"      local file move:\n" +
+				e.adoptServerRecovery("      ") +
+				"      The moved-aside directory keeps every local issue, including ones\n" +
+				"      never pushed; a re-clone brings only what the remote has. Keep it,\n" +
+				"      never delete it, until the re-cloned database is verified — to\n" +
+				"      recover local-only work, open it with an older bd release or\n" +
+				"      import a backup exported by one (`bd import <backup.jsonl>`).\n"
+		}
+		return "\n" +
+			"  This database syncs with a remote. Applying schema migrations on more than\n" +
+			"  one clone independently forks the schema so `bd dolt pull` can no longer\n" +
+			"  merge — the break is silent and unrecoverable.\n" +
+			"\n" +
+			"  Choose one:\n" +
+			"    • You are the designated migrator (only ONE machine should be): migrate,\n" +
+			"      then publish the migrated database to the remote:\n" +
+			"        bd migrate --force\n" +
+			"        (or " + AllowRemoteMigrateEnv + "=1 bd migrate in scripted/CI use)\n" +
+			"        bd dolt push\n" +
+			adoptBullet +
 			"\n" +
 			"  Several machines on one remote? Only ONE migrates. Get every other clone\n" +
 			"  fully in sync on its current binary, then after the migrator pushes run\n" +

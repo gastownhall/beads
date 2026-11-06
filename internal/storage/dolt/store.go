@@ -3703,11 +3703,24 @@ func (s *DoltStore) initSchema(ctx context.Context, bootstrapHeal *schema.FreshB
 	// the pre-existing contract stands and the open migrates (see
 	// sharedServerDatabase).
 	gate := func(ctx context.Context, db *sql.DB) error {
+		var err error
 		if !sharedServerDatabase(s.cfg) {
-			return schema.CheckRemoteMigrateGateForRemoteWithRemoteCheckAndAdopt(
+			err = schema.CheckRemoteMigrateGateForRemoteWithRemoteCheckAndAdopt(
 				ctx, db, s.remote, s.hasPersistedCLIRemote, adopt)
+		} else {
+			err = schema.CheckSharedStoreMigrateGate(ctx, db, s.remote, s.hasPersistedCLIRemote, adopt)
 		}
-		return schema.CheckSharedStoreMigrateGate(ctx, db, s.remote, s.hasPersistedCLIRemote, adopt)
+		// #6687: every refusal this store raises came from server storage —
+		// the database lives under a dolt sql-server's data_dir, not at the
+		// embedded .beads/embeddeddolt — so its adoption guidance must render
+		// the host's coordinated-downtime steps, never the embedded
+		// move-aside recipe. Presentation-only; the gate cannot know the
+		// topology, so the caller annotates (as with Proxied).
+		var gateErr *schema.RemoteMigrateGateError
+		if errors.As(err, &gateErr) {
+			gateErr.ServerMode = true
+		}
+		return err
 	}
 	applied, err := initSchemaOnDBWithRetryAndGateBootstrapHeal(ctx, migDB, gate, bootstrapHeal, s.serverEndpoint)
 	return applied, err

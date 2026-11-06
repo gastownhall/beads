@@ -577,3 +577,68 @@ func TestRemoteMigrateGateAdoptOptionsCarryRecovery(t *testing.T) {
 		}
 	})
 }
+
+// TestRemoteMigrateGateServerModeAdoptionGuidance pins the #6687 fix at the
+// storage-mode layer. The gate fires from embedded AND server storage, but
+// the move-aside recipe is an embedded move: on a database a dolt sql-server
+// serves, the directory has to be moved on the host, out of the server's
+// actual data_dir — an `mv -f .beads/embeddeddolt` printed there prescribes a
+// command that cannot work. Every adopt path must therefore render the
+// coordinated-downtime steps when ANY server marker is set: ServerMode (the
+// workspace's own owned server), Shared (#5920), or Proxied.
+func TestRemoteMigrateGateServerModeAdoptionGuidance(t *testing.T) {
+	modes := []struct {
+		name string
+		set  func(*RemoteMigrateGateError)
+	}{
+		{name: "owned server (ServerMode)", set: func(e *RemoteMigrateGateError) { e.ServerMode = true }},
+		{name: "shared (Shared)", set: func(e *RemoteMigrateGateError) { e.Shared = true }},
+		{name: "proxied (Proxied)", set: func(e *RemoteMigrateGateError) { e.Proxied = true }},
+	}
+	cases := []struct {
+		name     string
+		e        *RemoteMigrateGateError
+		optionID string
+	}{
+		{name: "adopt", e: &RemoteMigrateGateError{CurrentVersion: 53, LatestVersion: 67, Pending: 14, Decision: gateDecisionAdopt}},
+		{name: "adopt-ff", e: &RemoteMigrateGateError{CurrentVersion: 53, LatestVersion: 67, Pending: 14, Decision: gateDecisionAdoptFastForward}},
+		{name: "fork-skew", e: &RemoteMigrateGateError{CurrentVersion: 53, LatestVersion: 67, Pending: 14, Decision: gateDecisionForkSkew, SkewVersions: []int{54}}},
+		{name: "blunt", e: &RemoteMigrateGateError{CurrentVersion: 53, LatestVersion: 67, Pending: 14}},
+	}
+	for _, mode := range modes {
+		for _, tc := range cases {
+			t.Run(mode.name+"/"+tc.name, func(t *testing.T) {
+				e := *tc.e
+				mode.set(&e)
+				msg := e.UserMessage()
+
+				// Lowercased scan: the numbered steps capitalize their
+				// verbs ("Restart the server"), the option prose does not.
+				lowered := strings.ToLower(msg)
+				for _, want := range []string{"server", "data_dir", "stop", "restart", "nothing to do."} {
+					if !strings.Contains(lowered, want) {
+						t.Errorf("server adoption guidance is missing %q:\n%s", want, msg)
+					}
+				}
+				// The embedded recipe must not print on server storage: its
+				// source path is meaningless there, and a fabricated shared
+				// location is worse (the refusal cannot know the server's
+				// data_dir layout).
+				for _, unwanted := range []string{"embeddeddolt", "mv -f", "mkdir -p"} {
+					if strings.Contains(msg, unwanted) {
+						t.Errorf("server adoption guidance carries the embedded move %q:\n%s", unwanted, msg)
+					}
+				}
+			})
+		}
+	}
+
+	t.Run("embedded stays embedded", func(t *testing.T) {
+		// The same decisions with no server marker keep the local recipe —
+		// this is what an embedded-mode clone (the default) sees.
+		e := &RemoteMigrateGateError{CurrentVersion: 53, LatestVersion: 67, Pending: 14, Decision: gateDecisionAdopt}
+		if !strings.Contains(e.UserMessage(), "mv -f .beads/embeddeddolt") {
+			t.Errorf("embedded adoption guidance lost its local move-aside recipe:\n%s", e.UserMessage())
+		}
+	})
+}
