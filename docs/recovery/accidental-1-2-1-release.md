@@ -245,6 +245,30 @@ Newer bd releases recreate a missing `events` table on their own. Do not
 run one briefly to fix a clone and then go back to v1.2.2: it migrates the
 database again.
 
+### If you already ran the old re-track command
+
+Earlier versions of this guide ended with an optional step that re-tracked
+`events` with `CALL DOLT_ADD('-f', 'events')` but never staged the removal
+of the ignore rule. A database pushed after it carries `events` in history
+together with the rule that ignores it, so bd's own commits skip the table
+and every write leaves a pending `events` change behind that blocks the next
+pull. Finish the re-track from the database directory, on the machine that
+ran it first and then on each clone, before any of them pulls:
+
+```sh
+dolt sql -q "DELETE FROM dolt_ignore WHERE pattern = 'events'; CALL DOLT_ADD('dolt_ignore'); CALL DOLT_ADD('-f', 'events'); CALL DOLT_COMMIT('--skip-empty', '-m', 'recovery: finish re-tracking events', '--author', 'bd recovery <recovery@beads.invalid>')"
+```
+
+Then push from the first machine and pull everywhere else. Step 5 refuses
+these databases (`events_history_found`) because they already have a
+versioned `events` table.
+
+The old command re-tracked the table v1.2.1 recreated, not the original one,
+so a pull between such a machine and one that still has the original table
+can fail with `different primary keys`. This guide has no automatic repair
+for that: keep the backup and the failing workspace, and
+[open an issue](https://github.com/gastownhall/beads/issues).
+
 ## Stopgap: keep working before you recover
 
 If you need `bd` this minute, the skew guard has an escape hatch:

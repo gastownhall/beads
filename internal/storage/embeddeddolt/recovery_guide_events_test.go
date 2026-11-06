@@ -37,14 +37,19 @@ const accidentalReleaseGuide = "docs/recovery/accidental-1-2-1-release.md"
 // next heading of any level, so the numbered procedure under
 // guideRequiredSection does not pick up a subsection's commands.
 const (
-	guideRequiredSection = "## Recommended fix: roll the schema cursor back"
-	guideMissingSection  = "### If `events` is missing or empty"
+	guideRequiredSection   = "## Recommended fix: roll the schema cursor back"
+	guideMissingSection    = "### If `events` is missing or empty"
+	guideOldRetrackSection = "### If you already ran the old re-track command"
 )
 
 // guideCursorRollback is the guide's step 4, which is all an earlier version
 // of the guide required: a database recovered with it alone keeps events
 // out of versioned history.
 const guideCursorRollback = "DELETE FROM schema_migrations WHERE version > 53; CALL DOLT_ADD('schema_migrations'); CALL DOLT_COMMIT('-m', 'recovery: roll schema cursor back to v53 (accidental v1.2.1)', '--author', 'bd recovery <recovery@beads.invalid>')"
+
+// guideOldRetrack is the optional step an earlier version of the guide ended
+// with. It never stages the dolt_ignore change.
+const guideOldRetrack = "DELETE FROM dolt_ignore WHERE pattern = 'events'; CALL DOLT_ADD('-f', 'events'); CALL DOLT_COMMIT('-m', 'recovery: re-track events table', '--author', 'bd recovery <recovery@beads.invalid>')"
 
 func readAccidentalReleaseGuide(t *testing.T) string {
 	t.Helper()
@@ -550,5 +555,60 @@ CREATE TABLE events (
 			requireEventTags(t, ctx, conn, "HEAD", "pre-keep")
 			requireWritableLikeOldLine(t, ctx, conn, "clone-1", "clone-create")
 		})
+	})
+}
+
+// TestEmbeddedAccidentalReleaseFinishOldRetrack is AC-5: a source and a
+// clone left tracked-but-ignored by the earlier guide's optional command run
+// the documented finish command and synchronize; afterwards writes leave
+// nothing pending and merges complete in both directions.
+func TestEmbeddedAccidentalReleaseFinishOldRetrack(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+	guide := readAccidentalReleaseGuide(t)
+
+	source := seedMigratedMachine(t, ctx)
+	mustOK(t, "cursor rollback", runGuideBatch(t, source, guideCursorRollback))
+	mustOK(t, "the old re-track command", runGuideBatch(t, source, guideOldRetrack))
+	remoteURL := publishToNewRemote(t, ctx, source)
+	_, clone := cloneLineage(t, ctx, remoteURL)
+
+	withRawConn(t, clone, preflipDatabase, func(conn *sql.Conn) {
+		mustOK(t, "clone write", oldLineCreate(ctx, conn, "clone-1", "clone-before"))
+		mustOK(t, "clone commit", oldLineCommit(ctx, conn))
+		pending, err := statusTables(ctx, conn)
+		mustOK(t, "read dolt_status", err)
+		if !slices.Contains(pending, "events") {
+			t.Fatalf("pending %v after a clone write, want events: the tracked-but-ignored shape is not reproduced", pending)
+		}
+	})
+
+	finish := guideSQLBatches(t, guide, guideOldRetrackSection)
+	if len(finish) != 1 {
+		t.Fatalf("%q has %d dolt sql commands, want the one finish command", guideOldRetrackSection, len(finish))
+	}
+	mustOK(t, "source: finish command", runGuideBatch(t, source, finish[0]))
+	mustOK(t, "clone: finish command", runGuideBatch(t, clone, finish[0]))
+
+	withRawConn(t, source, preflipDatabase, func(conn *sql.Conn) {
+		mustExecOn(t, ctx, conn, "CALL DOLT_PUSH('origin', 'main')")
+	})
+	withRawConn(t, clone, preflipDatabase, func(conn *sql.Conn) {
+		mustOK(t, "clone: pull", oldLinePull(ctx, conn))
+		requireCleanMerge(t, ctx, conn)
+		if eventsIgnoreRuleAtHead(t, ctx, conn) {
+			t.Fatal("the events ignore rule is still in the clone's HEAD")
+		}
+		requireWritableLikeOldLine(t, ctx, conn, "clone-2", "clone-after")
+		mustExecOn(t, ctx, conn, "CALL DOLT_PUSH('origin', 'main')")
+	})
+	withRawConn(t, source, preflipDatabase, func(conn *sql.Conn) {
+		if eventsIgnoreRuleAtHead(t, ctx, conn) {
+			t.Fatal("the events ignore rule is still in the source's HEAD")
+		}
+		requireWritableLikeOldLine(t, ctx, conn, "source-1", "source-after")
+		mustOK(t, "source: pull", oldLinePull(ctx, conn))
+		requireCleanMerge(t, ctx, conn)
+		requireEventTags(t, ctx, conn, "HEAD", "clone-after", "clone-before", "post-keep", "pre-keep", "source-after")
 	})
 }
