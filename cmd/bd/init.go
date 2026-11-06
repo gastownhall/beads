@@ -2182,6 +2182,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// under keepHomeClean that repository encloses the home instead of
 		// holding the project (see guardInitInHomeDir).
 		projectRoleRepo := func() bool { return !keepHomeClean && isInitRoleGitRepo(ctx) }
+		roleRead := &initRoleReadFailure{quiet: quiet}
 
 		// Prompt for contributor mode if:
 		// - In a git repo (needed to set beads.role config)
@@ -2189,7 +2190,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// - No explicit --contributor or --team flag provided
 		// - No explicit --role flag provided
 		if projectRoleRepo() && !contributor && !team && roleFlag == "" && !nonInteractive && shouldPromptForRole() {
-			promptedContributor, err := promptContributorMode()
+			promptedContributor, err := promptContributorMode(roleRead)
 			if err != nil {
 				if isCanceled(err) {
 					fmt.Fprintln(os.Stderr, "Setup canceled.")
@@ -2204,23 +2205,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				contributor = true // Triggers contributor wizard below
 			}
 		} else if projectRoleRepo() && !contributor && !team {
-			// If prompt was skipped (non-interactive or CI environment),
-			// ensure beads.role is set to avoid "not configured" warning
-			// during diagnostics. Use --role flag if provided, otherwise default.
-			role := roleFlag
-			if role == "" {
-				role = "maintainer"
-			}
-			if _, hasRole := getBeadsRole(); !hasRole {
-				if err := setBeadsRole(role); err != nil && !quiet {
-					fmt.Fprintf(os.Stderr, "Warning: failed to set default beads.role: %v\n", err)
-				}
-			} else if roleFlag != "" {
-				// Explicit --role flag overrides existing role
-				if err := setBeadsRole(role); err != nil && !quiet {
-					fmt.Fprintf(os.Stderr, "Warning: failed to set beads.role: %v\n", err)
-				}
-			}
+			applyInitRoleWithoutPrompt(roleFlag, quiet, roleRead)
 		}
 
 		// Run contributor wizard if --contributor flag is set or user chose contributor
@@ -2273,15 +2258,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// instead is what used to make this safety net write the role into a
 		// redirected repository.
 		if projectRoleRepo() {
-			if _, hasRole := getBeadsRole(); !hasRole {
-				fallbackRole := "maintainer"
-				if roleFlag != "" {
-					fallbackRole = roleFlag
-				}
-				if err := setBeadsRole(fallbackRole); err != nil && !quiet {
-					fmt.Fprintf(os.Stderr, "Warning: failed to set beads.role=%s: %v\n", fallbackRole, err)
-				}
-			}
+			ensureInitRole(roleFlag, quiet, roleRead)
 		}
 
 		// Auto-configure contributor routing for fork repos (bd-umbf Child 1).
@@ -3485,8 +3462,82 @@ func isInitRoleGitRepo(ctx context.Context) bool {
 	return cmd.Run() == nil
 }
 
+// initRoleReadFailure reports, once per init, a beads.role read that git
+// failed after init's repository gate passed (a malformed or unreadable config
+// file). Without an explicit --role, init then neither writes a default role
+// nor prompts: it cannot tell an unset role from one it failed to read, and a
+// write would plant a local value over whatever git could not read. The
+// failure does not fail init.
+type initRoleReadFailure struct {
+	quiet    bool
+	reported bool
+}
+
+func (f *initRoleReadFailure) report(err error) {
+	if f.reported {
+		return
+	}
+	f.reported = true
+	if !f.quiet {
+		warnInitRoleReadFailure(err)
+	}
+}
+
+// warnInitRoleReadFailure is the stderr report shared by the direct and the
+// proxied init paths.
+func warnInitRoleReadFailure(err error) {
+	fmt.Fprintf(os.Stderr, "Warning: could not read beads.role, so init left the role unchanged: %v\n", err)
+	fmt.Fprintln(os.Stderr, "  Fix the git config file named above, then run: bd config set beads.role <maintainer|contributor>")
+}
+
+// applyInitRoleWithoutPrompt sets beads.role when the role prompt was skipped
+// (non-interactive or CI environment), so diagnostics do not warn "not
+// configured": an explicit --role always, otherwise "maintainer" when no role
+// is set. A read failure leaves an implicit role unwritten.
+func applyInitRoleWithoutPrompt(roleFlag string, quiet bool, roleRead *initRoleReadFailure) {
+	role := roleFlag
+	if role == "" {
+		role = "maintainer"
+	}
+	_, hasRole, readErr := getBeadsRole()
+	switch {
+	case readErr != nil && roleFlag == "":
+		roleRead.report(readErr)
+	case readErr == nil && !hasRole:
+		if err := setBeadsRole(role); err != nil && !quiet {
+			fmt.Fprintf(os.Stderr, "Warning: failed to set default beads.role: %v\n", err)
+		}
+	case roleFlag != "":
+		// Explicit --role flag overrides existing role
+		if err := setBeadsRole(role); err != nil && !quiet {
+			fmt.Fprintf(os.Stderr, "Warning: failed to set beads.role: %v\n", err)
+		}
+	}
+}
+
+// ensureInitRole is init's GH#2950 safety net: it sets beads.role when no role
+// is set, to --role or "maintainer". A read failure leaves an implicit role
+// unwritten.
+func ensureInitRole(roleFlag string, quiet bool, roleRead *initRoleReadFailure) {
+	_, hasRole, readErr := getBeadsRole()
+	if readErr != nil && roleFlag == "" {
+		roleRead.report(readErr)
+		return
+	}
+	if !hasRole {
+		fallbackRole := "maintainer"
+		if roleFlag != "" {
+			fallbackRole = roleFlag
+		}
+		if err := setBeadsRole(fallbackRole); err != nil && !quiet {
+			fmt.Fprintf(os.Stderr, "Warning: failed to set beads.role=%s: %v\n", fallbackRole, err)
+		}
+	}
+}
+
 // getBeadsRole reads the beads.role git config value.
-// Returns the role and true if configured, or empty string and false if not set.
+// Returns the role and true if configured, empty string and false if not set,
+// and an error when git fails the read (see internal/git.ClassifyConfigGet).
 //
 // Both halves of the pair run on the same authority boundary as every role
 // reader so init cannot report a role it wrote into a different repository:
@@ -3512,18 +3563,17 @@ func isInitRoleGitRepo(ctx context.Context) bool {
 // through the pair would close that one, but it is a behavior change rather
 // than a boundary fix. clearWorktreeGitRoutingEnv discloses the same widening
 // for the bd worktree commands.
-func getBeadsRole() (string, bool) {
+func getBeadsRole() (string, bool, error) {
 	cmd := exec.Command("git", "config", "--get", "beads.role")
 	cmd.Env = gitenv.ScrubRoutingAndSuppression(os.Environ())
-	output, err := cmd.Output()
+	role, present, err := git.ClassifyConfigGet(cmd.Output())
 	if err != nil {
-		return "", false
+		return "", false, fmt.Errorf("read beads.role: %w", err)
 	}
-	role := strings.TrimSpace(string(output))
-	if role == "" {
-		return "", false
+	if !present || role == "" {
+		return "", false, nil
 	}
-	return role, true
+	return role, true, nil
 }
 
 // setBeadsRole writes the beads.role git config value. See getBeadsRole for
@@ -3548,12 +3598,18 @@ func setBeadsRole(role string) error {
 // - If beads.role is already set: shows current role, offers to change
 // - If not set: prompts "Contributing to someone else's repo? [y/N]"
 // - Sets git config beads.role based on answer
-func promptContributorMode() (isContributor bool, err error) {
+// - If beads.role cannot be read: reports it through roleRead and returns
+//   false without prompting
+func promptContributorMode(roleRead *initRoleReadFailure) (isContributor bool, err error) {
 	ctx := getRootContext()
 	reader := bufio.NewReader(os.Stdin)
 
 	// Check if role is already configured
-	existingRole, hasRole := getBeadsRole()
+	existingRole, hasRole, readErr := getBeadsRole()
+	if readErr != nil {
+		roleRead.report(readErr)
+		return false, nil
+	}
 	if hasRole {
 		fmt.Printf("\n%s Already configured as: %s\n", ui.RenderAccent("▶"), ui.RenderBold(existingRole))
 		fmt.Print("Change role? [y/N]: ")
