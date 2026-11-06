@@ -258,6 +258,12 @@ type goreleaserBuild struct {
 	GOOS   []string `yaml:"goos"`
 	GOARCH []string `yaml:"goarch"`
 	Env    []string `yaml:"env"`
+	Tags   []string `yaml:"tags"`
+	// Hooks decodes the string form, the only one .goreleaser.yml uses: a
+	// switch to the object form fails the parse instead of reading as no hooks.
+	Hooks struct {
+		Post []string `yaml:"post"`
+	} `yaml:"hooks"`
 }
 
 func readGoreleaserBuilds(t *testing.T) []goreleaserBuild {
@@ -279,6 +285,102 @@ func readGoreleaserBuilds(t *testing.T) []goreleaserBuild {
 		t.Fatalf("%s declares no builds", path)
 	}
 	return config.Builds
+}
+
+// TestGoreleaserAndroidArm64BuildsWithNDKCGO pins issue #3538: the shipped
+// android/arm64 release (also what npm @beads/bd downloads on Termux) must be
+// a cgo build linked against Android's Bionic libc, otherwise embedded Dolt
+// is unavailable and `bd init` fails with "embedded Dolt requires a CGO
+// build". The NDK clang comes from the in-tree wrappers, by absolute path
+// because Go runs CC from each cgo package's directory, and the post hooks
+// prove the artifact is a cgo, Bionic, 16 KB-aligned ELF. Env entries are
+// compared exactly: a substring check would accept a relative CC path, or a
+// wrapper that reads ANDROID_NDK_HOME (the runner image's older NDK).
+func TestGoreleaserAndroidArm64BuildsWithNDKCGO(t *testing.T) {
+	const (
+		wantCC  = `CC={{ abs "." }}/scripts/ci/android-arm64-cc`
+		wantCXX = `CXX={{ abs "." }}/scripts/ci/android-arm64-cxx`
+	)
+	wantHooks := []string{
+		`./scripts/verify-cgo.sh "{{ .Path }}"`,
+		`./scripts/verify-android-elf.sh "{{ .Path }}"`,
+	}
+
+	var android []goreleaserBuild
+	for _, build := range readGoreleaserBuilds(t) {
+		if contains(build.GOOS, "android") {
+			android = append(android, build)
+		}
+	}
+	if len(android) != 1 {
+		t.Fatalf(".goreleaser.yml has %d android builds, want exactly one (bd-android-arm64)", len(android))
+	}
+	build := android[0]
+	if build.ID != "bd-android-arm64" || !reflect.DeepEqual(build.GOARCH, []string{"arm64"}) {
+		t.Fatalf(".goreleaser.yml android build is %s for %q, want bd-android-arm64 for [arm64]", build.ID, build.GOARCH)
+	}
+
+	if !contains(build.Env, "CGO_ENABLED=1") || contains(build.Env, "CGO_ENABLED=0") {
+		t.Errorf("%s env = %q, want CGO_ENABLED=1 and no CGO_ENABLED=0 so embedded Dolt is compiled in", build.ID, build.Env)
+	}
+	var cc, cxx []string
+	for _, entry := range build.Env {
+		switch {
+		case strings.HasPrefix(entry, "CC="):
+			cc = append(cc, entry)
+		case strings.HasPrefix(entry, "CXX="):
+			cxx = append(cxx, entry)
+		}
+	}
+	if !reflect.DeepEqual(cc, []string{wantCC}) {
+		t.Errorf("%s CC entries = %q, want exactly [%s]", build.ID, cc, wantCC)
+	}
+	if !reflect.DeepEqual(cxx, []string{wantCXX}) {
+		t.Errorf("%s CXX entries = %q, want exactly [%s]", build.ID, cxx, wantCXX)
+	}
+	// netgo would drop the cgo resolver Go needs on Android (golang/go#10714).
+	if !reflect.DeepEqual(build.Tags, []string{"gms_pure_go"}) {
+		t.Errorf("%s tags = %q, want exactly [gms_pure_go]", build.ID, build.Tags)
+	}
+	if !reflect.DeepEqual(build.Hooks.Post, wantHooks) {
+		t.Errorf("%s post hooks = %q, want %q", build.ID, build.Hooks.Post, wantHooks)
+	}
+}
+
+// TestGoreleaserReadsOnlyEnvTheReleaseStepSets: release.yml runs goreleaser
+// through goreleaser-action, which starts it without a shell, so a variable
+// only a shell sets (PWD, the first #3538 CC path) is unset there. goreleaser
+// templates fail on a missing key, so one such .Env read aborts the tagged
+// release for every platform, while RELEASING.md's shell-run snapshot passes.
+// Every .Env read must name a variable the workflow, the job or the step
+// sets, or one the runner sets for every step. YAML comments are not read.
+func TestGoreleaserReadsOnlyEnvTheReleaseStepSets(t *testing.T) {
+	workflow := readCIWorkflow(t, "release.yml")
+	job := workflow.job(t, "goreleaser")
+	step := job.step(t, "Run GoReleaser")
+	if !strings.HasPrefix(step.Uses, "goreleaser/goreleaser-action@") {
+		t.Fatalf("release.yml step %q uses %q, want goreleaser/goreleaser-action; update this test", step.Name, step.Uses)
+	}
+	set := map[string]bool{"CI": true}
+	for _, env := range []map[string]string{workflow.Env, job.Env, step.Env} {
+		for name := range env {
+			set[name] = true
+		}
+	}
+
+	envRead := regexp.MustCompile(`\.Env\.(\w+)`)
+	walkYAML(readYAMLNode(t, ".goreleaser.yml"), "", func(path string, key bool, value string) {
+		if key {
+			return
+		}
+		for _, match := range envRead.FindAllStringSubmatch(value, -1) {
+			name := match[1]
+			if set[name] || strings.HasPrefix(name, "GITHUB_") || strings.HasPrefix(name, "RUNNER_") {
+				continue
+			}
+			t.Errorf(".goreleaser.yml: %s reads .Env.%s, which release.yml's %q step does not set; set it in that step's env, or use a template function such as abs \".\"", path, name, step.Name)
+		}
+	})
 }
 
 // Exclude read-permission coverage is required, not best effort: Bazel's
@@ -1691,6 +1793,30 @@ func ciAnalyticsContinueOnErrorPaths(t *testing.T) map[string]bool {
 			switch {
 			case step.Name == "CI analytics summary" && strings.Contains(step.Run, "ci_analytics_extract.py"):
 			case step.Name == "Upload CI analytics summary" && strings.HasPrefix(step.With["name"], "ci-analytics-"):
+			default:
+				continue
+			}
+			paths[fmt.Sprintf(".jobs.%s.steps[%d].continue-on-error", name, i)] = true
+		}
+	}
+	return paths
+}
+
+// bazelProfileContinueOnErrorPaths returns the walkYAML paths of the
+// continue-on-error keys of every lane's "Prepare Bazel profile artifact"
+// and "Upload Bazel profile" steps: flame-graph reporting only
+// (TestBazelProfileArtifactStepsAreSafeAndBounded), read by nothing in CI.
+func bazelProfileContinueOnErrorPaths(t *testing.T) map[string]bool {
+	t.Helper()
+	paths := map[string]bool{}
+	for name, job := range readCIWorkflow(t, bazelWorkflowName).Jobs {
+		if _, ok := ciAnalyticsLaneJobs[name]; !ok {
+			continue
+		}
+		for i, step := range job.Steps {
+			switch {
+			case step.Name == bazelProfilePrepareStep && step.ID == "profile-artifact":
+			case step.Name == bazelProfileUploadStep && strings.HasPrefix(step.With["name"], "bazel-profile-"):
 			default:
 				continue
 			}
@@ -4407,12 +4533,13 @@ func TestBazelDoltServerTiers(t *testing.T) {
 		// +2 over the earlier counts: the CI analytics summary/upload steps
 		// (S3; see bazel-test's "CI analytics summary" comment), added to
 		// every lane job ahead of the result recorder. +1: the remote repo
-		// contents cache reader (TestBazelRRCReadSteps).
-		{bazelProxiedJobName, "doltserver-proxied", "bazel-proxied-testlogs", 11},
+		// contents cache reader (TestBazelRRCReadSteps). +2: the Bazel
+		// profile prepare/upload steps (TestBazelProfileArtifactStepsAreSafeAndBounded).
+		{bazelProxiedJobName, "doltserver-proxied", "bazel-proxied-testlogs", 13},
 		// One more than bazel-proxied: a "Shard balance" step (rbe-ci-cost-
 		// latency-study.md recommendation 4), since this is the tier whose
 		// last shard has trailed the rest by 4.3-4.5 min in 2 of 8 runs.
-		{bazelServerJobName, "doltserver-integration", "bazel-server-storage-testlogs", 12},
+		{bazelServerJobName, "doltserver-integration", "bazel-server-storage-testlogs", 14},
 	} {
 		job := workflow.job(t, c.job)
 		if job.TimeoutMinutes == 0 || job.TimeoutMinutes > 30 {
@@ -4420,7 +4547,7 @@ func TestBazelDoltServerTiers(t *testing.T) {
 		}
 		assertBazelTierStep(t, job, c.job, c.config)
 		if n := len(job.Steps); n != c.wantSteps {
-			t.Errorf("%s has %d steps, want %d (checkout, the rrc reader, setup-bazel, the flaky query, the tier, check_testcases.py, check_shard_coverage.py, [shard_budget.py,] log upload, CI analytics summary, CI analytics upload, result recorder)", c.job, n, c.wantSteps)
+			t.Errorf("%s has %d steps, want %d (checkout, the rrc reader, setup-bazel, the flaky query, the tier, check_testcases.py, check_shard_coverage.py, [shard_budget.py,] log upload, CI analytics summary, CI analytics upload, profile prepare, profile upload, result recorder)", c.job, n, c.wantSteps)
 		}
 		logs := job.step(t, "Upload test logs")
 		if logs.If != "${{ failure() && steps.test.outcome != 'skipped' }}" || logs.With["name"] != c.logs || !strings.HasPrefix(logs.Uses, "actions/upload-artifact@") {
@@ -4945,6 +5072,7 @@ func TestBazelWorkflowSecretsAndFailureSurface(t *testing.T) {
 		}
 	}
 	ciAnalyticsPaths := ciAnalyticsContinueOnErrorPaths(t)
+	profilePaths := bazelProfileContinueOnErrorPaths(t)
 	doltIntTestPath := bazelDoltIntTestContinueOnErrorPath(t)
 	doltIntCheckPaths := bazelDoltIntCheckContinueOnErrorPaths(t)
 	servedTimingsPath := bazelServedTimingsContinueOnErrorPath(t)
@@ -4961,7 +5089,9 @@ func TestBazelWorkflowSecretsAndFailureSurface(t *testing.T) {
 			// two CI analytics steps in every lane job
 			// (bazelCIAnalyticsStepNames): reporting only, never a `needs`
 			// of anything and never read back by this workflow or its
-			// callers. So are three steps in bazel-dolt-int's own job: its
+			// callers. So are the two Bazel profile steps
+			// (bazelProfileContinueOnErrorPaths), for the same reason. So
+			// are three steps in bazel-dolt-int's own job: its
 			// `bazel test` step (bazelDoltIntTestContinueOnErrorPath) and its
 			// two per-tier "Every target and shard ran tests" steps,
 			// check-ss and check-cd (bazelDoltIntCheckContinueOnErrorPaths,
@@ -4976,7 +5106,7 @@ func TestBazelWorkflowSecretsAndFailureSurface(t *testing.T) {
 			// nothing in CI.
 			jobName := strings.TrimSuffix(strings.TrimPrefix(path, ".jobs."), ".continue-on-error")
 			_, flagGated := bazelFlagGatedLanes[jobName]
-			if path != bazelRBEPrewarmContinueOnErrorPath && path != doltIntTestPath && path != servedTimingsPath && !doltIntCheckPaths[path] && !flagGated && !ciAnalyticsPaths[path] && !bazelUnionHasFlagGatedMember(jobName) {
+			if path != bazelRBEPrewarmContinueOnErrorPath && path != doltIntTestPath && path != servedTimingsPath && !doltIntCheckPaths[path] && !flagGated && !ciAnalyticsPaths[path] && !profilePaths[path] && !bazelUnionHasFlagGatedMember(jobName) {
 				t.Errorf("%s: %s hides failures from pr.yml's ci-gate", bazelWorkflowName, path)
 			}
 		}

@@ -9,6 +9,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **A committed `.beads/.env` can no longer copy your environment into bd's
+  settings, set a command or bearer token by a name the deny list missed, or
+  pick a file for bd to overwrite.**
+  bd read `.beads/.env` with `$VAR`/`${VAR}` expansion from the process
+  environment, so the file could set `DOLT_REMOTE_PASSWORD=${GITHUB_TOKEN}`, or
+  put any secret into `BEADS_ACTOR`, and bd would send it to the workspace's
+  own `sync.remote` (which the endpoint pins do not cover) or write it into
+  issues the workspace syncs. Values are now taken as written: a key whose
+  value expansion would change is ignored with `beads: ignoring <KEY> from
+  .beads/.env ($VAR references are not expanded in .beads/.env; ...)`. A
+  literal dollar sign (single-quoted, escaped, or not followed by a variable
+  name) is unaffected; a value that referred to another variable must be
+  written out or set in your shell. The key filter now also refuses, by name,
+  every `BEADS_*`/`BD_*` key ending in `_COMMAND`, `_BIN` or `_BINARY`, so a
+  command setting added later is covered without extending a list, and
+  `BEADS_HTTP_TOKEN`, the first rung of the http backend's bearer ladder,
+  which let the workspace that names the server (`http_target.json`) also
+  choose the bearer bd presents to it. The plaintext grant
+  `BEADS_HTTP_ALLOW_INSECURE` and `bd serve`'s accepted-token file
+  `BEADS_SERVE_TOKEN_FILE` are refused alongside the other credential target
+  settings. So are the files bd writes to, which a committed value could point
+  at any file you can write: the heap profile and MemStats summary bd creates
+  on exit (`BEADS_MEM_PROFILE`, `BEADS_MEM_STATS`, which truncated an existing
+  file) and the log the proxied Dolt server appends to
+  (`BEADS_PROXIED_SERVER_LOG`). Set these in your shell, user configuration or
+  the credentials file instead.
+
+- **A `GT_ROOT` from a committed `.beads/.env` can no longer make bd write or
+  delete formula files outside the repo.** `GT_ROOT` was admitted from
+  `.beads/.env` on the grounds that bd only reads from it, but
+  `bd formula convert --all` iterates every formula search path, including
+  `$GT_ROOT/.beads/formulas`, writing a `.formula.toml` beside each JSON
+  formula there and, with `--delete`, removing the JSON; `bd formula convert
+  <name>` and `bd mol distill` (when no earlier formula directory is writable)
+  could write there too. When `GT_ROOT` came from `.beads/.env` rather than your
+  shell, that directory is now read-only to these commands: `--all` skips it
+  with a note on stderr, converting a formula found only there by name is
+  refused (`--stdout` still prints it), and `mol distill` uses the next
+  writable directory or reports none. Formulas there are still found and used.
+  Export `GT_ROOT` in your shell to convert formulas in place; an explicit
+  path (`bd formula convert ./x.formula.json`, `bd mol distill --output`) is
+  unaffected.
+
 - **Shared workspace configuration can no longer redirect your private
   credentials to an attacker's endpoint (GH#7886, #7560).** A committed
   `.beads/config.yaml` / `.beads/config.local.yaml` / `.beads/.env`, a
@@ -1165,14 +1208,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **bd again reads `GT_ROOT` from a rig's `.beads/.env`**. `gc rig add` writes
-  the city root there, and the `.beads/.env` allowlist from #7879 (also in
-  1.3.3) dropped it, warning `beads: ignoring GT_ROOT from .beads/.env` on
-  every command and losing the city's formulas and molecules when bd ran in a
-  rig without `GT_ROOT` exported. `GT_ROOT` is now allowed: bd only reads from
-  it (`$GT_ROOT/.beads/formulas` is the last formula search path, and
+- `bd config get` for a config.yaml, git-config or user-global key no longer
+  opens the database just because one exists, so it answers from those files
+  while the Dolt server is down instead of failing the open (GH#5108). In
+  server mode a database is "present" from metadata.json alone, so these
+  store-free reads ran the full store path: it wrote
+  `.beads/.local_version`, could auto-migrate and auto-start a server, and
+  refused outright once the configured server was unreachable. Keys that
+  live in the database (`storage.backend`, …) still open the store, and
+  every other `config` verb keeps its routing.
+- The android_arm64 release, which npm `@beads/bd` installs on Termux, is
+  now built with cgo, so embedded Dolt works there: `bd init` no longer fails
+  with "embedded Dolt requires a CGO build" (#3538). The binary is
+  cross-compiled with the Android NDK r30 clang at API level 21 and linked
+  against Bionic with 16 KB-aligned segments; release builds check both.
+  Building that release target (`goreleaser --id bd-android-arm64`) now needs
+  a Linux x86_64 host; see RELEASING.md.
+
+- With `export.git-add` on, the pre-commit export now lands in commits made
+  with `git commit -- <paths>`, `-a`, `-i` or `-p`. It used to stage into
+  `.git/index`, whose lock the commit holds, so it was skipped with
+  "git index is locked". The hook now stages into the index git hands it in
+  `GIT_INDEX_FILE` when that names an index of the same repository, and for
+  `git commit -- <paths>` also into the index git keeps after the commit, so
+  the export is not left staged at its old content. It also decides whether
+  the commit touches `.beads` from that index, and in a linked worktree no
+  longer re-stages an export you removed with `git rm` (#4080).
+- **bd again reads `GT_ROOT` from a rig's `.beads/.env`** (#8117; also
+  shipped in 1.3.4). `gc rig add` writes the city root there, and the
+  `.beads/.env` allowlist from #7879 (also in 1.3.3) dropped it, printing
+  `beads: ignoring GT_ROOT from .beads/.env` on every command in a rig. That
+  notice made released gc misreport failed bd commands there, and bd run in a
+  rig without `GT_ROOT` exported stopped reading `$GT_ROOT/.beads/formulas`
+  and `$GT_ROOT/.beads/molecules.jsonl`. `GT_ROOT` is now allowed: bd reads from it
+  (`$GT_ROOT/.beads/formulas` is the last formula search path, and
   `$GT_ROOT/.beads/molecules.jsonl` is template data), so it names no command
-  and no credential target. Shell environment still wins over the file.
+  and no credential target, and a `GT_ROOT` taken from `.beads/.env` is never
+  a formula write target (see Security). Shell environment still wins over
+  the file.
 
 - On Windows, a backup directory on a drive spelled with a lower-case letter
   (`c:\Users\...`, as PowerShell keeps it) no longer fails every backup
@@ -1267,7 +1340,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   migration lock is held. It makes no Dolt commit, and the restored rows
   stay clone-local.
   [Upgrading](docs/getting-started/upgrading.md) gives a manual recipe for
-  v1.3.3 and earlier, and how to retry a restore that skipped history
+  v1.3.4 and earlier, and how to retry a restore that skipped history
   (#7039).
 - Upgrading an older database no longer rewrites issue and wisp `updated_at`
   values with the time of the upgrade. Schema migrations 0035, 0046, 0047 and
@@ -1298,6 +1371,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the default remote and reported "Push complete."; a name that differs from
   `--remote`, an empty name, or a second argument is now an error (#3720,
   reported by @bryanhirsch).
+- `bd dolt remote add` now registers a matching remote that exists only in
+  the served database's on-disk state (`.dolt/repo_state.json`) on the
+  server, instead of reporting success while SQL `dolt_remotes` stayed
+  empty. A sql-server resolves push, pull and fetch through its in-memory
+  remotes table and re-reads the state file only when it loads the
+  database, so a remote recorded only on disk was invisible to every SQL
+  operation while the add — the documented remedy — silently did nothing
+  (GH#2118). The add now writes the remote's recorded URL (the spelling a
+  server restart would load) and git ref, asks nothing when the URLs match,
+  and still asks before replacing a differing one. A remote recorded with
+  parameters an add over SQL cannot set (the dolt CLI's `aws-*` and `oss-*`
+  options) is refused instead, with the advice to restart the Dolt server,
+  because the add would erase them.
 - `bd epic close-eligible`, molecule progress and last-activity reads, and
   `bd repo remove` now report a read that fails part-way through its result
   set instead of acting on the rows read before the failure. A dropped
@@ -1305,6 +1391,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   close, undercount molecule progress, or make `bd repo remove` report
   success while deleting nothing.
 
+- `bd compact` no longer rewrites the preserved window's history with the
+  replay's timestamps. The cherry-pick replay stamped each preserved commit
+  with the time of the replay and the SQL session's identity, so after a
+  compaction every timestamp recorded before it (a tracker's last_sync, an
+  AS OF read) resolved to the wrong commit, and dolt_log showed the session
+  user as the committer of every preserved change. The replay now keeps
+  each preserved commit's original committer, author and dates, dates the
+  squashed base as the newest squashed commit, and checks the rebuilt
+  history before main moves onto it. A timestamp at or after the newest
+  squashed commit resolves as it did before the compaction; an earlier one
+  still resolves to the initial commit, as the history it named is gone
+  (#7294).
 - `bd migrate-personal` no longer leaves an issue in both databases when
   someone else's bead in the project database depends on it. The move's
   delete from the project database refuses such an issue, but it ran only
@@ -1319,6 +1417,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before it checks the rest for dependents, and a dry run, which deletes
   nothing, counted those children as dependents left outside the request
   and refused. The embedded store was already right.
+- A server-mode open from a `dolt.Config` that sets only `Path` (no
+  `BeadsDir`), such as the public `beads.Open`, now runs the project-identity
+  check against the `.beads` directory above `Path`, and refuses a database
+  whose `_project_id` differs from that workspace's `metadata.json` (#5559).
+  It used to skip the check and connect to a foreign project's database.
+- The GLOBAL PROJECT IDENTITY MISMATCH refusal of a `beads_global` open now
+  prints the `metadata.json` and database project IDs each on its own
+  labeled line. It used to print the database's ID as the `metadata.json`
+  one, `%!s(MISSING)` for the database, and the `metadata.json` ID unlabeled
+  at the end.
 - `bd github sync --push-only` and `bd github push` now create a locally
   closed bead as a CLOSED GitHub issue (Fixes #5486). GitHub's create-issue
   endpoint cannot set state, so a closed bead pushed for the first time landed
@@ -1331,6 +1439,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   each linked issue once (one GET per issue, the same one-time cost as a fresh
   clone or Dolt server restart) and closes any issue an earlier build left
   open.
+- A tracker push (`bd github push`, `bd github sync --push-only`) no longer
+  skips an issue that was changed back to the content of its last push after a
+  pull imported a remote edit of it, or found the issue already equal to the
+  remote. The pull left the stored push hash describing the last push, so the
+  push treated the revert as already sent and the remote kept the pulled edit.
+  A pull now records the pulled content's hash for each issue it updates,
+  creates or finds equal. After a GitHub pull (`bd github pull`,
+  `bd github sync`), the next push of an unchanged pulled issue makes no
+  GitHub call, so bd no longer re-sends normalized fields over remote content
+  it cannot represent: it no longer adds `type::task` or `priority::medium`
+  labels, and no longer replaces an unmapped `priority::urgent`.
+- A GitHub pull (`bd github pull`, `bd github sync`) now removes the plain
+  labels of a local issue when the GitHub issue has none left. It used to keep
+  them, so a later push of the issue put them back on GitHub. As for an issue
+  that still has plain labels on GitHub, a pull that fetches the issue now
+  replaces its local plain labels with GitHub's, so a label added locally
+  since the last push is dropped instead of pushed.
+- `bd dolt pull --strategy ours|theirs`, `bd vc merge --strategy`, and pulls
+  whose conflicts bd auto-resolves or whose foreign-key violations it repairs
+  now commit the tables that merged cleanly alongside them. Previously the
+  merge commit kept the local copy of those tables, so a push reverted the
+  other clone's change (for example its labels), and the merged copy was left
+  uncommitted (#7811).
 - `bd dep tree` no longer drops a diamond's second edge (#5282). An issue
   reached by two paths is still expanded once, under the first path, but each
   later path now lists it as `(shown above)` with its edge type, so a direct
@@ -1365,6 +1496,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   under the literal `depends-on` or `blocked-by` type are left as they are:
   `bd dep remove` plus `bd dep add` replaces one.
 
+- `bd dep add` and `bd dep remove` now commit the `is_blocked` change a
+  blocking edge makes in the same Dolt commit as the edge, and so do `bd batch`
+  dep lines and the other dependency writes (the store's `AddDependency` /
+  `RemoveDependency`, explicit transactions, the batch applier's edges).
+  Before, with `dolt.auto-commit` on, the flag stayed in the working set: the
+  committed history (and so a push, a peer's pull or a backup) showed the bead
+  unblocked, and `bd recompute-blocked` refused with "needs a clean working
+  set" until some later write swept it up. A wisp-sourced edge that blocks or
+  unblocks a durable child now commits that child's flag too, and so does
+  closing, reopening or deleting a wisp that a durable issue depends on (a
+  delete also commits the removal of the durable edge that pointed at the
+  wisp), and creating a wisp under a durable parent that a `waits-for` edge
+  watches. An edge that changes no `is_blocked` still commits only the
+  dependency, so it cannot sweep someone else's pending issue edit (#6647).
 - `bd -C <dir>` (or `BEADS_DIR`) naming a beads project outside any git
   repository, run from inside one, no longer adopts the caller's repository
   root, role or git remote. The project is now rooted at its own directory
@@ -1606,6 +1751,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `metadata.json` of their own, and shared-server mode named only by
   `dolt.shared-server` in a config.yaml are unchanged.
 
+- `bd doctor` no longer treats a `.beads/.gitignore` stricter than 0600
+  (e.g. 0400) as having loose permissions: only group/other access warns,
+  and the fix no longer adds owner-write to such a file. When the 0600
+  tightening itself fails (chmod-hostile mount, file owned by another
+  user), `bd bootstrap` and `bd connect` print a warning and continue
+  instead of failing — every required pattern is in place by then
+  (#6225).
 - **A nested `bd init --server` no longer creates its database on the
   enclosing workspace's Dolt server.** In a directory nested in a workspace
   whose `.beads/config.yaml` names `dolt.port`, `bd init --server` with no
@@ -1776,6 +1928,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   give up after 5 seconds on a server that accepts the connection but
   never sends the MySQL greeting, such as a stopped or paused
   `sql-server`, where they waited forever.
+- **`bd doctor --fix` now untracks a committed `.beads/dolt-server-config.yaml`
+  or `.beads/dolt-server.activity`.** Both were already gitignored, but the
+  tracked-runtime-files check did not list them, so a copy committed before
+  the ignore rule stayed tracked (#6191).
+
 - `bd admin reset` now removes the `prepare-commit-msg` hook bd installs.
   Reset scanned only four of the five hooks bd manages, so a bd-installed
   `prepare-commit-msg` in the repository's git hooks directory survived
@@ -2222,6 +2379,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before, and a host is dialed without the surrounding whitespace bd
   already ignored when it decided whether the host is local.
 
+- Pouring a formula (`bd mol pour`, `bd mol wisp`, `bd mol bond`,
+  `bd mol seed`) now fails with a formula validation error when a step that
+  stays in the pour names, in its `needs` or `depends_on` or as its
+  `waits_for` spawner, a step whose `condition` leaves it out. The step used
+  to be poured with that dependency silently dropped, so it was ready before
+  the work it waited on, and a `waits_for` gate waited for no one. The error
+  names both steps and the condition (#6437). A dependency that bd adds
+  itself is not an error: the link from one loop iteration to the next and
+  `compose.branch` wiring now go around a left-out step to the steps it
+  waited for, and advice steps are left out with their target. Before, these
+  links were dropped as well, so a loop iteration could start before the one
+  before it finished, and advice was poured for a step that was not. A
+  `waits_for` gate that takes its spawner from such a link fails the pour
+  when going around the left-out step leaves the gate nothing to wait for. A
+  loop iteration whose first step is left out is still not linked to the
+  iteration before it.
 - A formula step declared `type = "gate"` with a `[steps.gate]` block no
   longer deadlocks its molecule (GH#3316). `bd mol pour` and `bd cook` used
   to create it as a `gate` bead hidden from `bd ready` and wire its companion
@@ -3828,6 +4001,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   consumed only on the store-requiring path, the ambient workspace is still
   what gets selected, and its source database is still preserved.
 
+- **`bd --readonly sql` now refuses set operations that write through an
+  `INTO` clause** ([#7033](https://github.com/gastownhall/beads/issues/7033)).
+  `UNION`, `INTERSECT`, and `EXCEPT` statements ending in `INTO OUTFILE`,
+  `INTO DUMPFILE`, or `INTO @var` were classified as reads, bypassing the
+  read-only check and potentially writing a file. They are now classified as
+  writes, matching ordinary `SELECT ... INTO` statements.
+
 - **An ambient `BEADS_DOLT_SERVER_PORT` now marks a workspace externally
   managed — suppressing auto-start — and no longer stops bd reaping its own
   orphaned server**
@@ -5309,6 +5489,81 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its own; an older bd cannot use that proxy and fails with a timeout waiting
   for it, so upgrade every bd that shares the workspace, or run `bd dolt stop`
   before going back to an older one.
+
+## [1.3.4] - 2026-11-04
+
+First stable release of the 1.3.4 patch line. It ships the same code as
+[1.3.4-rc.1]; the only change since that candidate is the version stamp. The
+full notes are in the [1.3.4-rc.1] section below. 1.3.4 is 1.3.3 plus one
+fix: bd reads `GT_ROOT` from a rig's `.beads/.env` again.
+
+There is **no new migration file**, and the embedded Dolt engine is
+unchanged: upgrading from 1.3.x or 1.3.4-rc.1 is a binary swap.
+
+Before promotion, 1.3.4-rc.1 passed gascity's RC Gate with bd pinned to the
+candidate, on a throwaway branch off gascity's `hotfix/1.5.1`
+([run 41791836358](https://github.com/gastownhall/gascity/actions/runs/41791836358)):
+- It ran the same 155 jobs as the 1.3.3-rc.1 gate, and every job finished
+  with the same result: 151 passing and 3 skipped.
+- The one red job is an advisory probe that builds bd from `main`. That
+  branch, like 1.3.3's, made two upstream-drift checks non-blocking.
+- The gate does not demonstrate the fix: the 1.3.3-rc.1 gate ran bd without
+  it and got the same results, and no job log in either run mentions
+  `GT_ROOT`.
+
+### Upgrade notes
+
+- Coming from 1.3.2 or earlier, read the [1.3.3-rc.1] **Upgrade notes**
+  before upgrading. They still apply, except that `GT_ROOT` is no longer one
+  of the `.beads/.env` keys bd ignores.
+- The [1.3.3-rc.1] **Known issues** are not fixed in 1.3.4, whichever release
+  you upgrade from. 1.3.4 does not include the #7039 restore
+  ([#8047](https://github.com/gastownhall/beads/pull/8047)), so do not run
+  `bd compact` or `bd flatten` on a clone that adopted migration 0062 by
+  `bd dolt pull` or `bd bootstrap`, or was cloned after it
+  ([#7039](https://github.com/gastownhall/beads/issues/7039)).
+- The 1.3.2 upgrade note still applies: run `bd recompute-blocked` once per
+  workspace whose store crossed migration 0059 under bd 1.3.0 or later,
+  which includes any workspace first created by bd 1.2.x or earlier
+  ([#7037](https://github.com/gastownhall/beads/issues/7037)).
+- Coming from 1.3.4-rc.1, nothing changes in behaviour.
+
+## [1.3.4-rc.1] - 2026-11-04
+
+First release candidate for 1.3.4, a one-fix patch on top of 1.3.3
+([#8118](https://github.com/gastownhall/beads/pull/8118)). It adds **no new
+migration file**, and the embedded Dolt engine is unchanged, so upgrading from
+1.3.x is a binary swap. The 1.3.3 **Upgrade notes** and **Known issues** still
+apply, except the `GT_ROOT` issue fixed below.
+
+### Fixed
+
+- **bd reads `GT_ROOT` from a rig's `.beads/.env` again**
+  ([#8118](https://github.com/gastownhall/beads/pull/8118), backport of
+  [#8117](https://github.com/gastownhall/beads/pull/8117)).
+  - **The problem:** Gas City's `gc rig add` writes the city root as `GT_ROOT`
+    into each rig's `.beads/.env`. 1.3.3's `.beads/.env` allowlist
+    ([#7879](https://github.com/gastownhall/beads/pull/7879)) dropped it, so
+    every bd command in a rig printed
+    `beads: ignoring GT_ROOT from .beads/.env` on stderr. Two things followed:
+    - Released gc versions read bd's `--json` error from stdout only when
+      stderr is empty, so they could misreport a failed bd command in a rig
+      as that notice
+      ([gastownhall/gascity#8817](https://github.com/gastownhall/gascity/pull/8817)).
+    - bd run in a rig without `GT_ROOT` exported stopped searching
+      `$GT_ROOT/.beads/formulas` and stopped loading
+      `$GT_ROOT/.beads/molecules.jsonl`. gc also links the city's formulas
+      into each rig's own `.beads/formulas`, an earlier search path, so the
+      formulas gc manages still resolved; gc writes no `molecules.jsonl`.
+  - **The fix:** `GT_ROOT` is now admitted, as the exact key only.
+    `GT_TOWN_ROOT` and other `GT_*` keys stay refused.
+  - **Why this is safe:** it names no command and no credential target. bd
+    reads `$GT_ROOT/.beads/formulas` as its last formula search path and
+    `$GT_ROOT/.beads/molecules.jsonl` as template data. Commands that write
+    to formula search paths can also write there: `bd formula convert --all`
+    writes a `.formula.toml` beside each JSON formula it converts there and,
+    with `--delete`, removes the JSON.
+  - Shell environment still wins over the file.
 
 ## [1.3.3] - 2026-11-03
 

@@ -47,6 +47,7 @@
 100 11 TestEmbeddedKVConcurrent
 
 100 12 TestEmbeddedAutoImportFallback_ConflictSkip_SkipsRetiredRows
+100 12 TestEmbeddedConfigGetYamlKeyWithServerDown
 100 12 TestEmbeddedGatedRendering
 100 12 TestEmbeddedMigratePersonal_refusesDependentsLeftInTheProject
 
@@ -76,6 +77,7 @@
 100 20 TestEmbeddedMigrateSchema_IdentityMismatchRefusesBeforeApplying
 
 100 21 TestEmbeddedArrivalSeqOnEveryJSONRead
+100 21 TestEmbeddedConfigGetIsReadOnly
 100 21 TestEmbeddedMaxRowsReady
 100 21 TestEmbeddedMigratePersonal_movesIssues
 
@@ -178,11 +180,13 @@
 100 42 TestEmbeddedReadyEmptyStateMessage
 100 42 TestEmbeddedUpdateIfGuardsFlagValidation
 
+100 43 TestEmbeddedCompactKeepsReplayedCommitDates
 100 43 TestEmbeddedCompactRefusedDryRun
 100 43 TestEmbeddedIfRevisionMultiIDRejected
 100 43 TestEmbeddedInitExplicitBeadsDirIsAuthoritative
 100 43 TestEmbeddedReadyEmptyStateRealBlocker
 
+100 44 TestEmbeddedCompactKeepsCommitDates
 100 44 TestEmbeddedCompactRecentAncestorOfBoundary
 100 44 TestEmbeddedIfRevisionComposesWithIfAssigneeIfStatus
 100 44 TestEmbeddedReadyStaleBlockedFlagOnEdgelessIssue

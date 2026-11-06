@@ -204,3 +204,83 @@ func TestEmbeddedMigrateRetryAfterFaultConverges_4470(t *testing.T) {
 		t.Fatalf("@@dolt_transaction_commit after retry = %d, want the original 1", got)
 	}
 }
+
+// openSchema27TransactionCommitConn returns a pinned connection, with the
+// session's @@dolt_transaction_commit set to 1, to a store seeded at main
+// schema 27: GH#4137's starting point, a database created before 0028 that a
+// later bd upgrades on a transaction-commit server.
+func openSchema27TransactionCommitConn(t *testing.T, ctx context.Context) *sql.Conn {
+	t.Helper()
+	conn, closeConn := openPinnedConn(t, ctx, seedMainSchemaAt(t, ctx, 27))
+	t.Cleanup(closeConn)
+	if _, err := conn.ExecContext(ctx, "SET @@SESSION.dolt_transaction_commit = 1"); err != nil {
+		t.Fatalf("enable dolt_transaction_commit: %v", err)
+	}
+	return conn
+}
+
+// TestEmbeddedUpgradeFromSchema27UnderTransactionCommit_4137: the upgrade
+// counterpart of the fresh-database case. A store at schema 27 migrated on a
+// dolt_transaction_commit=1 session records 0028 once, reaches the latest
+// main and ignored versions through 0040's and 0041's in-body commits, leaves
+// a clean working set, and gets the session's original setting back.
+func TestEmbeddedUpgradeFromSchema27UnderTransactionCommit_4137(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+	conn := openSchema27TransactionCommitConn(t, ctx)
+
+	if _, err := schema.MigrateUp(ctx, conn); err != nil {
+		t.Fatalf("MigrateUp from schema 27 under dolt_transaction_commit=1: %v", err)
+	}
+	if n := scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM schema_migrations WHERE version = 28"); n != 1 {
+		t.Fatalf("schema_migrations version 28 rows = %d, want 1", n)
+	}
+	if got, want := currentMainVersion(t, ctx, conn), schema.LatestVersion(); got != want {
+		t.Fatalf("main schema version = %d, want %d", got, want)
+	}
+	if got, want := scalarInt(t, ctx, conn, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations"), schema.LatestIgnoredVersion(); got != want {
+		t.Fatalf("ignored schema version = %d, want %d", got, want)
+	}
+	if dirty := dirtyTableNames(t, ctx, conn); len(dirty) != 0 {
+		t.Fatalf("working set after the upgrade is dirty: %v, want clean", dirty)
+	}
+	if got := sessionTransactionCommit(t, ctx, conn); got != 1 {
+		t.Fatalf("@@dolt_transaction_commit after the upgrade = %d, want the original 1", got)
+	}
+}
+
+// TestEmbeddedUpgradeFromSchema27FaultRestoresTransactionCommit_4137: an
+// upgrade pass from schema 27 that fails after migration 0040 ran with the
+// setting suspended, surfaces the original error, and still restores the
+// session setting.
+func TestEmbeddedUpgradeFromSchema27FaultRestoresTransactionCommit_4137(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+	conn := openSchema27TransactionCommitConn(t, ctx)
+
+	errInjected := errors.New("injected fault after migration 40")
+	inPass := -1
+	restoreHook := schema.SetMigrateStepFaultHookForTest(func(ctx context.Context, db schema.DBConn, version int) error {
+		if version != 40 {
+			return nil
+		}
+		var v int
+		if err := db.QueryRowContext(ctx, "SELECT @@SESSION.dolt_transaction_commit").Scan(&v); err != nil {
+			return err
+		}
+		inPass = v
+		return errInjected
+	})
+	t.Cleanup(restoreHook)
+
+	_, err := schema.MigrateUp(ctx, conn)
+	if !errors.Is(err, errInjected) {
+		t.Fatalf("MigrateUp error = %v, want the injected fault", err)
+	}
+	if inPass != 0 {
+		t.Fatalf("@@dolt_transaction_commit inside the pass = %d, want 0 (suspended)", inPass)
+	}
+	if got := sessionTransactionCommit(t, ctx, conn); got != 1 {
+		t.Fatalf("@@dolt_transaction_commit after the failed upgrade pass = %d, want the original 1", got)
+	}
+}

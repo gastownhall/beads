@@ -317,6 +317,7 @@ var _ storage.Compactor = (*DoltStore)(nil)
 var _ storage.SchemaMigrator = (*DoltStore)(nil)
 var _ storage.ExternalRefHistoryQuerier = (*DoltStore)(nil)
 var _ storage.EventsJournalConfigurer = (*DoltStore)(nil)
+var _ storage.EventsJournalShapeChecker = (*DoltStore)(nil)
 var _ storage.VersionedHistoryConfigurer = (*DoltStore)(nil)
 var _ storage.VersionedHistoryDeferrer = (*DoltStore)(nil)
 
@@ -330,6 +331,17 @@ type DoltStore struct {
 	// eventsJournalEnabled activates the durable events journal for THIS store
 	// instance only (storage.EventsJournalConfigurer); never process-global.
 	eventsJournalEnabled atomic.Bool
+	// journalShape caches the ONE INFORMATION_SCHEMA probe SetEventsJournalEnabled
+	// runs on activation (issueops.ProbeJournalShape, PR A1). Nil means the
+	// journal is disabled or the probe produced no shape; transactions then get
+	// the canonical column list — see journalActivationErr.
+	journalShape atomic.Pointer[issueops.JournalShape]
+	// journalActivationErr holds the probe's *issueops.JournalShapeError when
+	// SetEventsJournalEnabled(true) found a table shape the journal cannot run
+	// against (a missing required column, or a missing table). Nil otherwise,
+	// including when the probe could not run at all
+	// (issueops.JournalActivationError). See storage.EventsJournalShapeChecker.
+	journalActivationErr atomic.Pointer[error]
 	// versionedHistory activates dual-write issue-version history for THIS
 	// store instance only (storage.VersionedHistoryConfigurer); never
 	// process-global. Activation usually leaves it pending
@@ -1133,6 +1145,13 @@ func (s *DoltStore) withReadTx(ctx context.Context, fn func(tx *sql.Tx) error) e
 			return fmt.Errorf("begin read tx: %w", err)
 		}
 		defer func() { _ = tx.Rollback() }()
+		// ReadEventsJournal/ReadEventsJournalPage read through this helper, and
+		// the column list they SELECT depends on the probed shape, not on
+		// whether the journal is enabled for writes — scope the shape only, so
+		// readEventsRowsInTx sees this store's actual table instead of
+		// defaulting to canonicalJournalShape (PR A1).
+		clearShape := issueops.ScopeEventsJournalShape(tx, s.journalShape.Load())
+		defer clearShape()
 		return fn(tx)
 	})
 }
@@ -1471,12 +1490,56 @@ func logBlockedRecheckFailure(ctx context.Context, pending issueops.BlockedReche
 }
 
 // SetEventsJournalEnabled activates the journal for this store instance only.
+//
+// Activating probes bd_events_journal's actual shape ONCE
+// (issueops.ProbeJournalShape, PR A1), bounded by
+// issueops.JournalShapeProbeTimeout, and caches the result for this
+// instance's lifetime; EventsJournalActivationError reports whether that
+// probe found a shape the journal cannot run against. A probe that could not
+// run degrades to the canonical shape (issueops.JournalActivationError).
+// Deactivating clears both and skips the probe entirely — a disabled store
+// accepts any shape.
 func (s *DoltStore) SetEventsJournalEnabled(enabled bool) {
 	s.eventsJournalEnabled.Store(enabled)
+	if !enabled {
+		s.journalShape.Store(nil)
+		s.journalActivationErr.Store(nil)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), issueops.JournalShapeProbeTimeout)
+	defer cancel()
+	shape, err := issueops.ProbeJournalShape(ctx, s.db)
+	s.journalShape.Store(shape)
+	if activationErr := issueops.JournalActivationError(err); activationErr != nil {
+		s.journalActivationErr.Store(&activationErr)
+		return
+	}
+	s.journalActivationErr.Store(nil)
 }
 
+// EventsJournalActivationError implements storage.EventsJournalShapeChecker:
+// nil unless the last SetEventsJournalEnabled(true) call found a table shape
+// the journal cannot run against.
+func (s *DoltStore) EventsJournalActivationError() error {
+	if p := s.journalActivationErr.Load(); p != nil {
+		return *p
+	}
+	return nil
+}
+
+// scopeEventsJournalTransaction binds this store's cached activation state and
+// probed shape to tx. The activation switch deliberately does NOT depend on
+// the shape: an enabled store whose probe produced no shape writes with the
+// canonical column list, so a table the journal cannot run against fails the
+// write loudly instead of letting the mutation commit with no journal row
+// (storage.EventsJournalShapeChecker).
 func (s *DoltStore) scopeEventsJournalTransaction(tx *sql.Tx) func() {
-	return issueops.ScopeEventsJournalTransaction(tx, s.eventsJournalEnabled.Load())
+	clearActivation := issueops.ScopeEventsJournalTransaction(tx, s.eventsJournalEnabled.Load())
+	clearShape := issueops.ScopeEventsJournalShape(tx, s.journalShape.Load())
+	return func() {
+		clearShape()
+		clearActivation()
+	}
 }
 
 // SetVersionedHistoryEnabled activates dual-write issue-version history for
@@ -2440,11 +2503,13 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	// server-existence check; it does not reopen the separate "foreign
 	// server, no bd database at all" gap tracked as Part B (mybd-y18b).
 	if !cfg.CreateIfMissing || dbFacts.alreadyExisted {
+		// Verify against the resolved beadsDir that credentials and CLIDir
+		// use, so a Path-only open such as beads.Open is checked too (GH#5559).
 		var verifyErr error
 		if cfg.Database == doltserver.GlobalDatabaseName {
-			verifyErr = store.verifyGlobalProjectIdentity(ctx, cfg.BeadsDir)
+			verifyErr = store.verifyGlobalProjectIdentity(ctx, beadsDir)
 		} else {
-			verifyErr = store.verifyProjectIdentity(ctx, cfg.BeadsDir, cfg.OpenedByInit)
+			verifyErr = store.verifyProjectIdentity(ctx, beadsDir, cfg.OpenedByInit)
 		}
 		if verifyErr != nil {
 			return nil, verifyErr
@@ -2813,13 +2878,22 @@ func (s *DoltStore) verifyGlobalProjectIdentity(ctx context.Context, beadsDir st
 	}
 
 	if expectedID != dbID {
-		return fmt.Errorf(
-			"GLOBAL PROJECT IDENTITY MISMATCH — refusing to connect\n\n"+
-				"  Expected global project ID (metadata.json): %s\n"+
-				"  Database project ID:                        %s\n\n"+
-				expectedID, dbID)
+		return globalProjectIdentityMismatchError(expectedID, dbID)
 	}
 	return nil
+}
+
+// globalProjectIdentityMismatchError builds verifyGlobalProjectIdentity's
+// refusal when metadata.json's global_project_id and the beads_global
+// database's _project_id disagree. Both IDs are format arguments: neither is
+// part of the format string, so each prints on its own labeled line exactly
+// as stored, even when it holds a '%'.
+func globalProjectIdentityMismatchError(expectedID, dbID string) error {
+	return fmt.Errorf(
+		"GLOBAL PROJECT IDENTITY MISMATCH — refusing to connect\n\n"+
+			"  Expected global project ID (metadata.json): %s\n"+
+			"  Database project ID:                        %s",
+		expectedID, dbID)
 }
 
 // isExternalServerHost reports whether host names a server bd does not
@@ -4866,9 +4940,8 @@ func (s *DoltStore) prepareCLIRouteForGitProtocol(ctx context.Context, remote st
 			// the served directory: a client-local state file proves nothing
 			// about an external server. The remedy names the procedure the
 			// server accepts (the proxied CLI in its directory would refuse
-			// the same --ref, and bd's own remote add finds the persisted
-			// remote and returns without a SQL add). The remote, URL and ref
-			// are named escaped (remedy.EscapedValue), as the statement that
+			// the same --ref). The remote, URL and ref are named escaped
+			// (remedy.EscapedValue), as the statement that
 			// re-adds them is when one of them holds a character a shell
 			// acts on: a $( ) or a backtick in a persisted URL is not live on
 			// the line a user copies the remedy from.
@@ -5877,17 +5950,18 @@ func (s *DoltStore) settleMergeInTx(ctx context.Context, tx *sql.Tx, pullErr err
 		return pullErr
 	}
 
-	// Conclude the merge for resolved conflicts only now, after the FK repair:
-	// DOLT_COMMIT refuses a violated working set, so a merge carrying both
-	// classes could never settle when the resolver committed first (bd-578h9.14).
-	if resolved {
-		if err := versioncontrolops.CommitResolvedConflicts(ctx, tx); err != nil {
-			_ = tx.Rollback()
-			if pullErr != nil {
-				return pullErr
-			}
-			return err
+	// Conclude the merge only now, after the FK repair: DOLT_COMMIT refuses a
+	// violated working set, so a merge carrying both classes could never
+	// settle when the resolver committed first (bd-578h9.14). A merge the
+	// repair alone settled is concluded here too, with its full result
+	// (GH#7811): left open, it was concluded by the next commit, and a plain
+	// server-mode commit leaves config out (GH#2455).
+	if err := versioncontrolops.CommitSettledMerge(ctx, tx, resolved, repairedViol); err != nil {
+		_ = tx.Rollback()
+		if pullErr != nil {
+			return pullErr
 		}
+		return err
 	}
 
 	return s.commitSQLTx(ctx, "commit pull merge settlement", tx)
@@ -6171,14 +6245,13 @@ func (s *DoltStore) autoResolveConflictsAfterCLIPull(ctx context.Context) (bool,
 		_ = tx.Rollback()
 		return false, nil
 	}
-	// Conclude the merge for resolved conflicts only now, after the FK repair:
-	// DOLT_COMMIT refuses a violated working set, so a merge carrying both
-	// classes could never settle when the resolver committed first (bd-578h9.14).
-	if resolved {
-		if err := versioncontrolops.CommitResolvedConflicts(ctx, tx); err != nil {
-			_ = tx.Rollback()
-			return false, err
-		}
+	// Conclude the merge only now, after the FK repair: DOLT_COMMIT refuses a
+	// violated working set, so a merge carrying both classes could never
+	// settle when the resolver committed first (bd-578h9.14). A merge the
+	// repair alone settled is concluded too, as in settleMergeInTx (GH#7811).
+	if err := versioncontrolops.CommitSettledMerge(ctx, tx, resolved, repairedViol); err != nil {
+		_ = tx.Rollback()
+		return false, err
 	}
 	if err := s.commitSQLTx(ctx, "commit resolved CLI pull conflicts", tx); err != nil {
 		return false, err

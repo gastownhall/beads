@@ -129,7 +129,10 @@ func newCompactFixture(t *testing.T, port string) *compactFixture {
 		t.Fatalf("create database: %v", err)
 	}
 
-	db, err := sql.Open("mysql", fmt.Sprintf("root@tcp(127.0.0.1:%s)/%s", port, name))
+	// parseTime, as every bd DSN sets it (doltutil.ServerDSN,
+	// dbproxy/util.DoltServerDSN): Compact reads dolt_log's dates as
+	// time.Time.
+	db, err := sql.Open("mysql", fmt.Sprintf("root@tcp(127.0.0.1:%s)/%s?parseTime=true", port, name))
 	if err != nil {
 		t.Fatalf("open database: %v", err)
 	}
