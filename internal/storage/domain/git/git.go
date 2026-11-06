@@ -276,11 +276,25 @@ func (r *gitRepositoryImpl) stagedIndexInfo(ctx context.Context, paths []string)
 	return info.Bytes(), nil
 }
 
+// inProgressRefs are the refs git keeps while a merge, cherry-pick or revert
+// waits to be concluded. A git commit concludes it: it removes the ref (and
+// for MERGE_HEAD records it as a second parent), so the operation can no
+// longer be aborted.
+var inProgressRefs = []string{"MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD"}
+
 // commitStaged commits only the staged changes under paths. It builds a
 // temporary index from HEAD plus exactly those staged entries and commits
 // that, so the staged content is what lands (not the working tree's), a
 // staged removal is committed, and the rest of the index stays staged.
+//
+// It refuses while a merge, cherry-pick or revert is in progress: a commit of
+// the temporary index would conclude that operation without its changes.
 func (r *gitRepositoryImpl) commitStaged(ctx context.Context, args, paths []string) ([]byte, bool, error) {
+	for _, ref := range inProgressRefs {
+		if r.gitCmd(ctx, "rev-parse", "-q", "--verify", ref).Run() == nil {
+			return nil, false, fmt.Errorf("git: Commit: %s exists: conclude or abort the merge, cherry-pick or revert in progress first", ref)
+		}
+	}
 	info, err := r.stagedIndexInfo(ctx, paths)
 	if err != nil || len(info) == 0 {
 		return nil, false, err
