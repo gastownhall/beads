@@ -504,13 +504,21 @@ func readThroughRefusedMigration(ctx context.Context, conn *sql.Conn, database s
 		return backoff.Permanent(gateErr)
 	}
 	// Reading on at the current schema works only while this binary's issue
-	// reads can query it. A schema that lacks a column the shared projection
-	// selects would answer every one of them with an unknown-column error, so
-	// it is refused here as server mode's read-only open refuses it
-	// (dolt.Config.RequireReadableSchema).
-	if err := schema.CheckReadableDrift(ctx, conn, []sqlbuild.ReadRelation{{Table: "issues", Columns: sqlbuild.ColumnNames(sqlbuild.IssueBaseColumns)}}); err != nil {
+	// reads can query it. A schema that lacks a relation or column the shared
+	// hydration reads (the issues and wisps projection, the leases overlay)
+	// would answer every one of them with an unknown-table or unknown-column
+	// error, so it is refused here as server mode's read-only open refuses it
+	// (dolt.Config.RequireReadableSchema). The refusal stays the gate's, so
+	// its decision-specific remedy survives, and carries the schema-behind
+	// cause as ReadsRefused.
+	if err := schema.CheckReadableDrift(ctx, conn, sqlbuild.IssueReadRelations()); err != nil {
 		if isSerializationError(err) {
 			return err
+		}
+		var behind *schema.SchemaBehindError
+		if errors.As(err, &behind) {
+			gateErr.ReadsRefused = behind
+			return backoff.Permanent(gateErr)
 		}
 		return backoff.Permanent(err)
 	}
