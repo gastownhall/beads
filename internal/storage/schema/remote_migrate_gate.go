@@ -222,6 +222,10 @@ const (
 // precedent for `bd dolt commit` is the same shape).
 const DataBehindRemedyCommand = "bd dolt pull"
 
+// AdoptionGuideURL is the upgrade guide's procedure for adopting a remote that
+// another clone already migrated (gastownhall/beads#6687).
+const AdoptionGuideURL = "https://github.com/gastownhall/beads/blob/main/docs/getting-started/upgrading.md#remote-backed-databases-and-multiple-clones"
+
 // IsDataBehind reports whether this refusal is the #6575 data-behind stop:
 // the clone is level with the cached remote ref on schema but missing commits
 // the ref has, so the pending migration must not be applied until it pulls.

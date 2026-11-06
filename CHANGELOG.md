@@ -1208,6 +1208,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A read-only command on a database the migration gate refused to migrate
+  now stops at open when the schema lacks a table or column this bd's issue
+  reads select, instead of announcing that it continues on the current schema
+  and then failing every read (#6572). The check used to look at the `issues`
+  columns only, so a schema without `leases` (or a lease or `wisps` column)
+  slipped through; embedded, proxied-server and server-mode read-only opens
+  now check the `leases` overlay and `wisps` too. The refusal keeps the gate's
+  own remedy and says that reads are refused and what is missing (under
+  `--json`, in the existing `error` and `hint` fields). The upgrade notice and
+  the shared-server upgrade guide no longer promise that reads keep working,
+  and the notice's adopt remedy links the adoption steps instead of bare
+  `bd bootstrap`, which does nothing on an existing database (#6687).
 - `bd config get` for a config.yaml, git-config or user-global key no longer
   opens the database just because one exists, so it answers from those files
   while the Dolt server is down instead of failing the open (GH#5108). In

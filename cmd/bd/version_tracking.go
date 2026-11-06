@@ -357,6 +357,13 @@ func isGoPseudoVersion(version string) bool {
 	return module.IsPseudoVersion("v" + strings.TrimPrefix(strings.TrimSpace(version), "v"))
 }
 
+// readThroughCaveat is what noticeSharedMigrateRefusal says about reads while
+// the migration waits: a read-only command reads on at the current schema only
+// when that schema has everything this binary's issue reads select, and is
+// refused otherwise (gastownhall/beads#6572), so the notice must not promise
+// that reads keep working.
+const readThroughCaveat = "Read commands continue on the current schema only while it has every table and column this bd's reads select; otherwise they are refused too."
+
 // noticeSharedMigrateRefusal turns the one failure autoMigrateOnVersionBump
 // must not swallow into a one-line stderr notice.
 //
@@ -391,14 +398,25 @@ func noticeSharedMigrateRefusal(err error) {
 	if globalFlag {
 		consent = schema.SharedConsentCommandGlobal
 	}
+	// A gate error that already carries a read refusal states it instead of
+	// the caveat. It names what is missing, not a command: the remedy line
+	// owns that, and on the adopt arms migrating here is exactly what not
+	// to do.
+	reads := readThroughCaveat
+	if gateErr.ReadsRefused != nil {
+		reads = fmt.Sprintf("Read commands are refused too: schema v%d lacks %s, which this bd's reads select.",
+			gateErr.CurrentVersion, gateErr.ReadsRefused.MissingSummary())
+	}
 	var remedy string
 	switch gateErr.Decision {
 	case "shared-no-remote":
-		remedy = fmt.Sprintf("Run '%s' once every client of this server is upgraded; reads keep working meanwhile.", consent)
+		remedy = fmt.Sprintf("Run '%s' once every client of this server is upgraded.\n%s", consent, reads)
 	case "adopt", "adopt-ff":
 		// The remote is already migrated: migrating here would fork it, and
-		// the verb consent deliberately does not unlock this arm.
-		remedy = "Another clone has already migrated this database — adopt it with 'bd bootstrap' rather than migrating here; reads keep working meanwhile."
+		// the verb consent deliberately does not unlock this arm. Bare
+		// `bd bootstrap` is no adoption either: on an existing database it
+		// reports "Nothing to do." (#6687).
+		remedy = "Another clone has already migrated this database — adopt it rather than migrating here: bare 'bd bootstrap' reports \"Nothing to do.\" on an existing database, so follow the adoption steps at " + schema.AdoptionGuideURL + " (they move the database aside with no other bd process using it, re-clone, and restore unpushed work from a previous-version export; in server mode, the guide's server section applies).\n" + reads
 	case "fork-skew":
 		remedy = "This database and its remote already applied different content for the same migration (#4259) — run 'bd doctor' and follow its migration-content-skew guidance; do not migrate."
 	default:
@@ -406,7 +424,7 @@ func noticeSharedMigrateRefusal(err error) {
 		// first-mover suppression. Its full block names the designated-
 		// migrator and adopt paths with their preconditions, and picking one
 		// here would be guessing.
-		remedy = "This database has a remote — run 'bd migrate' to see the migrate-or-adopt options before choosing; reads keep working meanwhile."
+		remedy = "This database has a remote — run 'bd migrate' to see the migrate-or-adopt options before choosing.\n" + reads
 	}
 	fmt.Fprintf(os.Stderr,
 		"bd upgraded to %s: %d schema migration(s) pending on this database — not auto-applying (#5920).\n%s\n",
