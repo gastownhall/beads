@@ -131,3 +131,29 @@ func TestClassify(t *testing.T) {
 		})
 	}
 }
+
+// TestClassifySetOpExportIsWrite pins GH#7033: a set operation that exports
+// its rows with INTO OUTFILE/DUMPFILE or assigns them with INTO @var writes,
+// so it must reach the read-only gate as a Write, like SELECT ... INTO. A
+// Write here also proves the parser accepted the form: a parse error is Mixed.
+func TestClassifySetOpExportIsWrite(t *testing.T) {
+	for _, query := range []string{
+		"(SELECT id FROM issues) UNION ALL (SELECT id FROM issues) INTO OUTFILE '/tmp/bd-7033.txt'",
+		"(SELECT 1) UNION (SELECT 2) INTO DUMPFILE '/tmp/bd-7033.bin'",
+		"WITH t AS (SELECT 1 AS n) (SELECT n FROM t) UNION (SELECT 2) INTO OUTFILE '/tmp/bd-7033.txt'",
+		"SELECT 1 UNION (SELECT 2) INTO OUTFILE '/tmp/bd-7033.txt'",
+		"SELECT 1 UNION SELECT id FROM issues INTO OUTFILE '/tmp/bd-7033.txt'",
+		"SELECT 1 UNION DISTINCT SELECT id FROM issues INTO DUMPFILE '/tmp/bd-7033.bin'",
+		"SELECT 1 UNION SELECT 2 LIMIT 1 INTO @x",
+		"SELECT 1 INTERSECT (SELECT 2) INTO OUTFILE '/tmp/bd-7033.txt'",
+		"SELECT 1 EXCEPT (SELECT 2) INTO OUTFILE '/tmp/bd-7033.txt'",
+		"WITH t AS (SELECT 1 AS n) SELECT n FROM t UNION (SELECT 2) INTO OUTFILE '/tmp/bd-7033.txt'",
+		"SELECT 1 UNION SELECT 2 UNION (SELECT 3) ORDER BY 1 LIMIT 1 INTO OUTFILE '/tmp/bd-7033.txt'",
+		// INTO decides before the Dolt-function check, as for SELECT ... INTO.
+		"SELECT 1 UNION SELECT DOLT_COMMIT('-Am','x') FROM dual INTO OUTFILE '/tmp/bd-7033.txt'",
+	} {
+		if got := Classify(query); got != Write {
+			t.Errorf("Classify(%q) = %v, want %v", query, got, Write)
+		}
+	}
+}
