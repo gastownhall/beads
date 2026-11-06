@@ -871,8 +871,24 @@ directory sync always failed there. bd now skips only that unsupported
 directory sync on Windows; the journal file's own sync, close, rename, and
 removal errors, and directory open/close errors, are still reported on every
 platform, and Linux and macOS still sync the directory. This makes no
-stronger crash-durability claim for Windows. Upgrade to a release carrying
-the fix ([GH#6882](https://github.com/gastownhall/beads/issues/6882)).
+stronger crash-durability claim for Windows
+([GH#6882](https://github.com/gastownhall/beads/issues/6882)).
+
+<Warning>
+Skipping that sync does not make these migrations work on native Windows.
+They get past the journal, then fail at a later step after they have already
+switched `dolt_mode` in the committed `.beads/metadata.json` (and, for the
+shared-server variants, `dolt.shared-server`):
+`from-server-to-proxied-server` and `from-shared-server-to-proxied-server`
+fail writing `proxied_server_client_info.json`
+([GH#6858](https://github.com/gastownhall/beads/issues/6858)), and
+`from-proxied-server-to-server` and `from-proxied-server-to-shared-server`
+fail removing `proxy.lock`
+([GH#6884](https://github.com/gastownhall/beads/issues/6884)). The migration
+journal such a run leaves behind can be neither resumed nor reversed. Do not
+run these migrations on native Windows until a release carries the fixes for
+GH#6858 and GH#6884 as well.
+</Warning>
 
 ### Windows: `ENOENT` when a Node program spawns `bd`
 

@@ -165,12 +165,9 @@ func saveMigrateJournal(beadsDir string, j *migrateJournal) error {
 	if err != nil {
 		return fmt.Errorf("syncing %s directory: %w", migrateJournalFileName, err)
 	}
-	// Windows cannot sync a directory handle opened by os.Open.
-	if runtime.GOOS != "windows" {
-		if err = d.Sync(); err != nil {
-			_ = d.Close()
-			return fmt.Errorf("syncing %s directory: %w", migrateJournalFileName, err)
-		}
+	if err = syncMigrateJournalDir(runtime.GOOS, d); err != nil {
+		_ = d.Close()
+		return fmt.Errorf("syncing %s directory: %w", migrateJournalFileName, err)
 	}
 	if err = d.Close(); err != nil {
 		return fmt.Errorf("closing %s directory: %w", migrateJournalFileName, err)
@@ -186,17 +183,26 @@ func removeMigrateJournal(beadsDir string) error {
 	if err != nil {
 		return fmt.Errorf("opening migration directory: %w", err)
 	}
-	// Windows cannot sync a directory handle opened by os.Open.
-	if runtime.GOOS != "windows" {
-		if err = d.Sync(); err != nil {
-			_ = d.Close()
-			return fmt.Errorf("syncing migration directory: %w", err)
-		}
+	if err = syncMigrateJournalDir(runtime.GOOS, d); err != nil {
+		_ = d.Close()
+		return fmt.Errorf("syncing migration directory: %w", err)
 	}
 	if err = d.Close(); err != nil {
 		return fmt.Errorf("closing migration directory: %w", err)
 	}
 	return nil
+}
+
+// syncMigrateJournalDir flushes the journal directory d after a journal rename
+// or removal. Windows cannot sync a directory handle opened by os.Open, so on
+// goos "windows" only that flush is skipped; every other host syncs and
+// reports the error. goos is a parameter so tests can pin both branches on any
+// host.
+func syncMigrateJournalDir(goos string, d *os.File) error {
+	if goos == "windows" {
+		return nil
+	}
+	return d.Sync()
 }
 
 func migrateFault(phase migratePhase) error {

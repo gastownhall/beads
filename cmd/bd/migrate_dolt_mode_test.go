@@ -965,6 +965,18 @@ func TestMigrateJournal_FilesystemErrors(t *testing.T) {
 	})
 }
 
+func TestMigrateJournal_DirSyncSkipsOnlyWindows(t *testing.T) {
+	// Sync on a closed handle fails with os.ErrClosed on every host, so a nil
+	// result shows the flush was skipped, not that it succeeded.
+	d, err := os.Open(t.TempDir())
+	require.NoError(t, err)
+	require.NoError(t, d.Close())
+	require.NoError(t, syncMigrateJournalDir("windows", d))
+	for _, goos := range []string{"linux", "darwin", "freebsd"} {
+		require.ErrorIs(t, syncMigrateJournalDir(goos, d), os.ErrClosed, goos)
+	}
+}
+
 func TestMigrateJournal_UnknownPhaseFailsClosed(t *testing.T) {
 	beadsDir := migrateModeWorkspace(t, configfile.DoltModeServer)
 	path := migrateJournalPath(beadsDir)
