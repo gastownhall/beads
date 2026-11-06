@@ -2585,9 +2585,12 @@ func newWispsAbsentDB(t *testing.T) *wispsAbsentDB {
 	// The {ignored_schema_migrations, 32} repair (is_blocked, #7037) reads its
 	// obligation key only from committed history: tableTrackedAtHead's listing
 	// finds no metadata table at HEAD, so the hook takes its debt-free branch
-	// and changes nothing.
+	// and repairs the wisp plane alone. wisps is absent here too, so allIDs'
+	// listing fails with 1146 and the wisp pass is a no-op.
 	mock.ExpectQuery(`SHOW TABLES AS OF 'HEAD' LIKE 'metadata'`).
 		WillReturnRows(sqlmock.NewRows([]string{"Tables_in_test"}))
+	mock.ExpectQuery(`SELECT id FROM wisps`).
+		WillReturnError(errors.New("Error 1146: Table 'beads.wisps' doesn't exist"))
 	t.Cleanup(func() {
 		if err := mock.ExpectationsWereMet(); err != nil {
 			t.Errorf("wispsAbsentDB: unmet sql expectations: %v", err)

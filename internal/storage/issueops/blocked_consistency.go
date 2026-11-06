@@ -259,6 +259,26 @@ func RecomputeAllIsBlockedInTx(ctx context.Context, tx DBTX) (int64, error) {
 	return recomputeIsBlockedCounting(ctx, tx, issueIDs, wispIDs)
 }
 
+// RecomputeAllWispIsBlockedInTx recomputes the denormalized is_blocked column
+// for every wisp alone, leaving the issue plane untouched, and returns the
+// number of rows it corrected. It is the debt-free half of the 0059 over-set
+// repair (gastownhall/beads#7037): a clone that received the corrected issue
+// plane by pull still holds clone-local wisp rows the tracked repair never
+// touched — wisps never replicate — so migration ignored/0032's hook repairs
+// the wisp plane alone against the graph the clone holds. Idempotent, like
+// RecomputeAllIsBlockedInTx.
+func RecomputeAllWispIsBlockedInTx(ctx context.Context, tx DBTX) (int64, error) {
+	wispIDs, err := allIDs(ctx, tx, "wisps")
+	if err != nil {
+		if isTableNotExistError(err) {
+			wispIDs = nil
+		} else {
+			return 0, fmt.Errorf("recompute all wisp is_blocked: list wisps: %w", err)
+		}
+	}
+	return recomputeIsBlockedCounting(ctx, tx, nil, wispIDs)
+}
+
 // recomputeIsBlockedCounting is RecomputeIsBlockedInTx with a corrected-row
 // count: it sums the rows flipped across every fixpoint pass. A parent flip in
 // one pass can cascade to its children in the next, and each correction counts.

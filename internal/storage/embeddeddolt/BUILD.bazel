@@ -204,6 +204,7 @@ go_test(
         "merge_strategy_test.go",
         "metadata_cas_contract_test.go",
         "metadata_number_fidelity_test.go",
+        "migrate_0032_debt_free_wisp_repair_test.go",
         "migrate_0059_overset_repair_test.go",
         "migrate_consent_gate_test.go",
         "migrate_dep_rekey_dedup_test.go",

@@ -108,9 +108,18 @@ func repairMixedIsBlockedFlags0032(ctx context.Context, db DBConn) error {
 	if !owed {
 		// A debt-free clone owes nothing on the tracked plane: whichever
 		// history it received already carries the repair. Its clone-local
-		// wisp rows are repaired against the graph it holds by the thin
-		// wisp-plane pass in this hook's debt-free branch (added with the
-		// wisp-recompute seam in issueops).
+		// wisp rows still hold whatever the 0059-era engine left behind,
+		// and wisps never replicate — no pull will ever deliver their
+		// correction. The wisp-only pass recomputes them against the graph
+		// the clone holds and leaves the output in the working set, the way
+		// every other wisp mutation flows; it mints no commit and touches
+		// no tracked-plane table.
+		fmt.Fprintf(stderr, "Repairing clone-local wisp is_blocked flags (dolthub/dolt#11886)…\n")
+		corrected, err := issueops.RecomputeAllWispIsBlockedInTx(ctx, db)
+		if err != nil {
+			return fmt.Errorf("recomputing wisp is_blocked (gastownhall/beads#7037): %w", err)
+		}
+		fmt.Fprintf(stderr, "  corrected %d wisp flag flip(s)\n", corrected)
 		return nil
 	}
 
