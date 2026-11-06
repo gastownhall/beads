@@ -467,6 +467,54 @@ func TestRunChainedHookSkipsDelegatingOldHook(t *testing.T) {
 	}
 }
 
+// TestRunChainedHookRemapsReservedStatuses pins GH#6751: a chained hook's
+// exit 3, 124 or 142 would read as a skip or a timeout to the generated
+// section around bd hooks run (an installed older section even turns 3 into
+// success), so bd reports it as 1 and names the original status. Every other
+// status passes through unchanged.
+func TestRunChainedHookRemapsReservedStatuses(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chained .old fixtures are POSIX shell scripts")
+	}
+	for _, tc := range []struct {
+		exit     string
+		want     int
+		reserved bool
+	}{
+		{exit: "0", want: 0},
+		{exit: "1", want: 1},
+		{exit: "7", want: 7},
+		{exit: "3", want: 1, reserved: true},
+		{exit: "124", want: 1, reserved: true},
+		{exit: "142", want: 1, reserved: true},
+	} {
+		t.Run("exit "+tc.exit, func(t *testing.T) {
+			repoDir := setupGuardTestRepo(t)
+			hooksDir := filepath.Join(repoDir, ".git", "hooks")
+			if err := os.MkdirAll(hooksDir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			script := "#!/bin/sh\necho sidecar-diagnostic >&2\nexit " + tc.exit + "\n"
+			if err := os.WriteFile(filepath.Join(hooksDir, "pre-commit.old"), []byte(script), 0755); err != nil {
+				t.Fatal(err)
+			}
+
+			var code int
+			stderr := captureStderr(t, func() { code = runChainedHook("pre-commit", nil) })
+			if code != tc.want {
+				t.Errorf("runChainedHook() = %d, want %d\n%s", code, tc.want, stderr)
+			}
+			if !strings.Contains(stderr, "sidecar-diagnostic") {
+				t.Errorf("chained hook's own stderr was lost\n%s", stderr)
+			}
+			remapped := strings.Contains(stderr, "pre-commit.old exited "+tc.exit)
+			if remapped != tc.reserved {
+				t.Errorf("remap diagnostic present = %v, want %v\n%s", remapped, tc.reserved, stderr)
+			}
+		})
+	}
+}
+
 // Shared installs (.beads-hooks/) are deliberately committed, so the
 // tracked-file guard must not fire for them.
 func TestGuardHookWritePathAllowsTrackedWhenShared(t *testing.T) {

@@ -1213,6 +1213,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with git's arguments and standard input, so a failing pre-commit or
   pre-push check stops the commit or push instead of being skipped
   (GH#6751, building on #6840 by vishnujayvel).
+  A chained hook that exits 3, 124 or 142, statuses the section reserves
+  for skips and timeouts, fails with exit 1 and a warning naming its status.
   Run `bd hooks install` once to refresh installed hook sections.
 - `bd config get` for a config.yaml, git-config or user-global key no longer
   opens the database just because one exists, so it answers from those files
