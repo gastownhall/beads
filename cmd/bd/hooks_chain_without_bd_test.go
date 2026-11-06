@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -293,5 +294,146 @@ func TestGeneratedHookChainClassifierEdges(t *testing.T) {
 				t.Fatalf("hook should succeed when the sidecar is skipped, got: %v\n%s", err, out)
 			}
 		})
+	}
+}
+
+// hookChainMinimalPathEnv returns a git-friendly environment whose PATH
+// deliberately excludes bd, plus one extra entry appended verbatim.
+func hookChainMinimalPathEnv(t *testing.T, home string, extra ...string) []string {
+	t.Helper()
+	for _, dir := range []string{"/usr/bin", "/bin"} {
+		if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+			t.Skipf("%s is required for the minimal-PATH repro but is unavailable", dir)
+		}
+	}
+	env := hookProcessGitEnv(home)
+	for i, entry := range env {
+		if strings.HasPrefix(entry, "PATH=") {
+			env[i] = "PATH=/usr/bin:/bin"
+		}
+	}
+	return append(env, extra...)
+}
+
+// TestGeneratedHookPrePushForwardsArgsAndStdinWithoutBD covers GH#6751's
+// pre-push case: without bd on PATH the section runs the foreign sidecar
+// itself, so the sidecar must receive the push arguments git passed to the
+// hook and the ref lines git fed on stdin — and its verdict must refuse the
+// push.
+func TestGeneratedHookPrePushForwardsArgsAndStdinWithoutBD(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("PATH=/usr/bin:/bin is POSIX-specific")
+	}
+	gitPath, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git not found")
+	}
+
+	base := t.TempDir()
+	repoDir := filepath.Join(base, "repo")
+	remoteDir := filepath.Join(base, "remote.git")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	recordPath := filepath.Join(base, "record")
+	env := hookChainMinimalPathEnv(t, t.TempDir(), "HOOK_RECORD="+recordPath, "HOOK_RUNS="+filepath.Join(base, "runs"))
+
+	run := func(args ...string) ([]byte, error) {
+		cmd := exec.Command(gitPath, args...)
+		cmd.Dir = repoDir
+		cmd.Env = env
+		out, err := cmd.CombinedOutput()
+		return out, err
+	}
+	must := func(args ...string) {
+		t.Helper()
+		if out, err := run(args...); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+
+	must("init", "--initial-branch=main", ".")
+	if out, err := run("init", "--bare", remoteDir); err != nil {
+		t.Fatalf("git init --bare: %v\n%s", err, out)
+	}
+	must("config", "core.hooksPath", ".git/hooks")
+	must("config", "user.name", "Hook Test")
+	must("config", "user.email", "hook-test@example.invalid")
+	must("remote", "add", "origin", remoteDir)
+
+	hooksDir := filepath.Join(repoDir, ".git", "hooks")
+	prePush := "#!/bin/sh\n" + generateHookSection("pre-push")
+	if err := os.WriteFile(filepath.Join(hooksDir, "pre-push"), []byte(prePush), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sidecar := "#!/bin/sh\n" +
+		"printf 'run\\n' >> \"$HOOK_RUNS\"\n" +
+		"printf 'sidechain refused push\\n' >&2\n" +
+		"{\n" +
+		"  printf 'argc=%s\\n' \"$#\"\n" +
+		"  _bd_test_index=0\n" +
+		"  for _bd_test_arg in \"$@\"; do\n" +
+		"    printf 'arg-%s=<%s>\\n' \"$_bd_test_index\" \"$_bd_test_arg\"\n" +
+		"    _bd_test_index=$((_bd_test_index + 1))\n" +
+		"  done\n" +
+		"  while IFS= read -r _bd_test_line || [ -n \"$_bd_test_line\" ]; do\n" +
+		"    printf 'stdin=<%s>\\n' \"$_bd_test_line\"\n" +
+		"  done\n" +
+		"} > \"$HOOK_RECORD\"\n" +
+		"exit 7\n"
+	if err := os.WriteFile(filepath.Join(hooksDir, "pre-push.old"), []byte(sidecar), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(repoDir, "f"), []byte("x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	must("add", "f")
+	must("commit", "-m", "with a chained pre-push gate")
+	commitSHA := strings.TrimSpace(func() string {
+		out, err := run("rev-parse", "HEAD")
+		if err != nil {
+			t.Fatalf("git rev-parse HEAD: %v\n%s", err, out)
+		}
+		return string(out)
+	}())
+
+	pushOut, pushErr := run("push", "origin", "HEAD:refs/heads/main")
+	if pushErr == nil {
+		t.Fatalf("push succeeded; the chained pre-push gate was skipped or ignored:\n%s", pushOut)
+	}
+	if !strings.Contains(string(pushOut), "sidechain refused push") {
+		t.Errorf("push output missing the sidecar's own diagnostic, so it may not have run:\n%s", pushOut)
+	}
+
+	record, err := os.ReadFile(recordPath)
+	if err != nil {
+		t.Fatalf("sidecar never wrote its record; it did not run:\n%s", pushOut)
+	}
+	want := []string{
+		"argc=2\n",
+		"arg-0=<origin>\n",
+		"arg-1=<" + remoteDir + ">\n",
+		"stdin=<HEAD " + commitSHA + " refs/heads/main 0000000000000000000000000000000000000000>\n",
+	}
+	for _, fragment := range want {
+		if !strings.Contains(string(record), fragment) {
+			t.Errorf("sidecar record missing %q\nrecord:\n%s", fragment, record)
+		}
+	}
+
+	runs, err := os.ReadFile(filepath.Join(base, "runs"))
+	if err != nil {
+		t.Fatalf("sidecar run counter missing: %v", err)
+	}
+	if got := strings.Count(string(runs), "run\n"); got != 1 {
+		t.Errorf("sidecar ran %d times, want exactly 1\nruns:\n%s", got, runs)
+	}
+
+	// The gate's verdict must actually stop the push, not just be printed.
+	check := exec.Command(gitPath, "--git-dir", remoteDir, "rev-parse", "--verify", "refs/heads/main")
+	check.Env = env
+	if out, err := check.CombinedOutput(); err == nil {
+		t.Errorf("push reached the remote despite the chained gate refusing:\n%s", out)
 	}
 }
