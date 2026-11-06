@@ -617,3 +617,39 @@ func TestServerVersionBumpDirtyTablesRecoveryConverges(t *testing.T) {
 		t.Errorf("bd list after recovery still reports a version-bump failure:\n%s", stderr)
 	}
 }
+
+// TestDoctorVersionBumpDirtyRefusalKeepsTargetWitness runs #6929 through
+// `bd doctor <path>`, which replicates the version-bump pre-run for its
+// target. Launched from another workspace with no readonly or freeze gate, it
+// must report the refusal and keep the TARGET's witness for the retry, and
+// leave the caller workspace's witness alone.
+func TestDoctorVersionBumpDirtyRefusalKeepsTargetWitness(t *testing.T) {
+	w := newDirtyUpgradeWorkspace(t)
+
+	caller := t.TempDir()
+	callerBeads := filepath.Join(caller, ".beads")
+	if err := os.MkdirAll(callerBeads, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	// The caller is another server-mode clone of the same shared database:
+	// doctor's embedded-mode gate reads the caller's workspace, not the target.
+	meta, err := os.ReadFile(filepath.Join(w.beadsDir, "metadata.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(callerBeads, "metadata.json"), meta, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	const callerWitness = "0.9.0"
+	callerWitnessPath := filepath.Join(callerBeads, localVersionFile)
+	if err := os.WriteFile(callerWitnessPath, []byte(callerWitness+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, stderr, _ := w.run(t, caller, callerBeads, "doctor", w.repo)
+	assertDirtyUpgradeNotice(t, "bd doctor", stderr)
+	w.assertRefusedAndRetained(t, "bd doctor")
+	if got := readLocalVersion(callerWitnessPath); got != callerWitness {
+		t.Errorf("caller %s = %q after bd doctor <target>, want it untouched (%q)", localVersionFile, got, callerWitness)
+	}
+}
