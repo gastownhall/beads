@@ -87,6 +87,12 @@ type proxyServer struct {
 	listener    net.Listener
 	activeConns atomic.Int64
 	conns       errgroup.Group
+
+	// lastActivity is the latest authenticated connection start or end, as
+	// nanoseconds since activityBase. Measuring from a fixed base keeps the
+	// idle clock monotonic. idleWatcher seeds it when it starts.
+	activityBase time.Time
+	lastActivity atomic.Int64
 }
 
 const (
@@ -135,7 +141,27 @@ func NewProxyServer(opts ProxyOpts) *proxyServer {
 		logSizeCheckInterval: opts.LogSizeCheckInterval,
 
 		reportUpstreamOutage: reportsUpstreamOutage(opts.Server),
+
+		activityBase: time.Now(),
 	}
+}
+
+// markActivity records now as the latest connection activity. A goroutine
+// delayed between reading the clock and publishing must not move the stamp
+// back past a newer one, so it only ever advances.
+func (p *proxyServer) markActivity() {
+	now := int64(time.Since(p.activityBase))
+	for {
+		last := p.lastActivity.Load()
+		if now <= last || p.lastActivity.CompareAndSwap(last, now) {
+			return
+		}
+	}
+}
+
+// sinceActivity is how long ago the activity stamp last was.
+func (p *proxyServer) sinceActivity(last int64) time.Duration {
+	return time.Since(p.activityBase) - time.Duration(last)
 }
 
 func (p *proxyServer) tracef(format string, args ...any) {
@@ -434,32 +460,54 @@ func (p *proxyServer) idleWatcher(ctx context.Context) error {
 		interval = idleWatcherMinInterval
 	}
 	p.tracef("idleWatcher start (timeout=%s, tick=%s)", p.idleTimeout, interval)
+	// The idle clock starts here, not at construction or backend start.
+	p.markActivity()
 	tick := time.NewTicker(interval)
 	defer tick.Stop()
-	var idleSince time.Time
+	// Sampling activeConns alone misses a connection that starts and ends
+	// between two ticks, so expiry is measured from the activity stamp.
+	// armed and seen only drive the diagnostics: a tick that sees a live
+	// connection or a new stamp clears armed, an unchanged stamp arms it.
+	armed := false
+	seen := p.lastActivity.Load()
 	for {
 		select {
 		case <-ctx.Done():
 			p.tracef("idleWatcher exit (ctx done)")
 			return nil
 		case <-tick.C:
-			if n := p.activeConns.Load(); n > 0 {
-				if !idleSince.IsZero() {
+			// Load the count before the stamp: handleConn stamps before it
+			// changes the count, so a zero count read here comes with the
+			// stamp of the connection that brought it to zero.
+			n := p.activeConns.Load()
+			last := p.lastActivity.Load()
+			if n > 0 || last != seen {
+				if armed {
 					p.tracef("idleWatcher cleared (active=%d)", n)
-					idleSince = time.Time{}
+					armed = false
 				}
-				continue
+				seen = last
+				// A delayed tick can find new activity already a full
+				// timeout old, so a new stamp alone does not defer expiry.
+				if n > 0 || p.sinceActivity(last) < p.idleTimeout {
+					continue
+				}
 			}
-			if idleSince.IsZero() {
+			if !armed {
 				p.tracef("idleWatcher armed")
-				idleSince = time.Now()
+				armed = true
+			}
+			if p.sinceActivity(last) < p.idleTimeout {
 				continue
 			}
-			if time.Since(idleSince) >= p.idleTimeout {
-				p.tracef("idleWatcher expired after %s, shutting down", p.idleTimeout)
-				p.stats.IncIdleTimeout()
-				return errIdleTimeout
+			// Best effort, not an admission lock: a connection that arrived
+			// while this tick decided defers expiry to a later tick.
+			if p.activeConns.Load() > 0 || p.lastActivity.Load() != last {
+				continue
 			}
+			p.tracef("idleWatcher expired after %s, shutting down", p.idleTimeout)
+			p.stats.IncIdleTimeout()
+			return errIdleTimeout
 		}
 	}
 }
@@ -506,6 +554,9 @@ func (p *proxyServer) handleConn(ctx context.Context, client net.Conn) error {
 		return err
 	}
 
+	// Stamp before counting, so the watcher never sees the count without
+	// the stamp of the connection that changed it.
+	p.markActivity()
 	p.activeConns.Add(1)
 	defer func() {
 		p.activeConns.Add(-1)

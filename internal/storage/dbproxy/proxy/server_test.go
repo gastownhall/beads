@@ -567,6 +567,75 @@ func TestProxy_IdleTimeout_Never(t *testing.T) {
 	assertNoPidFile(t, root)
 }
 
+// requireStaysUpFor fails the test if the proxy exits before d has passed
+// since from.
+func requireStaysUpFor(t *testing.T, h *proxyHandle, stats *proxy.Stats, from time.Time, d time.Duration) {
+	t.Helper()
+	timer := time.NewTimer(time.Until(from.Add(d)))
+	defer timer.Stop()
+	select {
+	case <-h.exited:
+		t.Fatalf("proxy exited %s after the last activity, before its %s idle timeout (idle timeouts=%d)",
+			time.Since(from).Round(time.Millisecond), d, stats.Snapshot().IdleTimeouts)
+	case <-timer.C:
+	}
+}
+
+// #7191: a steady stream of authenticated short-lived connections, each
+// opened and closed between two watcher ticks, is activity. The proxy must
+// not expire while it lasts, and must still expire once it stops.
+func TestProxy_IdleTimeout_BlockedByShortLivedConns(t *testing.T) {
+	t.Parallel()
+
+	ts := server.New()
+	ts.Handler = server.DiscardHandler
+	stats := &proxy.Stats{}
+	port := freeTCPPort(t)
+	root := t.TempDir()
+
+	const idle = 2 * time.Second
+	h := runProxy(t, proxy.ProxyOpts{
+		RootDir: root, Port: port,
+		IdleTimeout: idle,
+		Server:      ts, Stats: stats,
+	})
+	waitListening(t, root, listenWait)
+
+	// Dial and close every 200ms for 5s (> 2*idle): never an idle-long gap
+	// without a connection, and no connection is open across a tick for long.
+	var lastClose time.Time
+	dials := 0
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		select {
+		case <-h.exited:
+			t.Fatalf("proxy exited under short-lived connection traffic after %d dials (idle timeouts=%d)",
+				dials, stats.Snapshot().IdleTimeouts)
+		default:
+		}
+		conn := dialProxy(t, port)
+		_, err := conn.Write([]byte("x"))
+		require.NoError(t, err)
+		lastClose = time.Now()
+		require.NoError(t, conn.Close())
+		dials++
+		time.Sleep(200 * time.Millisecond)
+	}
+	assert.Equal(t, int64(0), stats.Snapshot().IdleTimeouts)
+	pf, err := pidfile.Read(root, proxy.PIDFileName)
+	require.NoError(t, err)
+	require.NotNil(t, pf, "proxy.pid must stay published under traffic")
+
+	// Traffic stopped: the proxy stays up a full timeout after the last
+	// connection, then expires on its own, exactly once.
+	requireStaysUpFor(t, h, stats, lastClose, idle)
+	require.NoError(t, h.waitErr(t, 3*idle))
+	s := stats.Snapshot()
+	assert.Equal(t, int64(1), s.IdleTimeouts)
+	assert.Equal(t, int64(1), s.BackendStopCalls)
+	assertNoPidFile(t, root)
+}
+
 func TestProxy_ConcurrentConnections(t *testing.T) {
 	t.Parallel()
 
