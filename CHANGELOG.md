@@ -1208,6 +1208,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A database that crossed migration 0059 on a Dolt engine with
+  dolthub/dolt#11886 (dolt before 2.4.0, or bd's embedded engine before the
+  same fix) no longer keeps the wrong `is_blocked` flags it left, which hid
+  unblocked issues from `bd ready` or showed blocked ones. Migration 0075
+  records the repair and the clone-local step after it recomputes every flag
+  and commits issues, dependencies and metadata together; a repair left
+  unfinished, or pulled from a peer before its repair commit, finishes on
+  the next open, read commands included, with no new consent. Each clone
+  recomputes its own wisps once. The repair writes no mutation journal
+  rows, so journal consumers must refresh their readiness snapshot, and
+  its count is flag flips, not rows 0059 broke.
+  [Upgrading](docs/getting-started/upgrading.md) covers the clone-local wisp
+  limitation and the `bd recompute-blocked` remedy for v1.3.4 and earlier
+  (#7037).
 - `bd config get` for a config.yaml, git-config or user-global key no longer
   opens the database just because one exists, so it answers from those files
   while the Dolt server is down instead of failing the open (GH#5108). In

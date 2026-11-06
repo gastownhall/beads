@@ -51,7 +51,11 @@ import (
 // commit, or an earlier pass died before it), an ordinary open runs ignored
 // 0032, which recomputes is_blocked and commits issues, dependencies and
 // metadata. It finishes an upgrade someone already consented to and changes
-// no schema, so it is not gated here.
+// no schema, so it is not gated here. The gate is otherwise exactly as
+// strict: while the main sequence is pending the refusal fires first and no
+// key is recorded; a key only in the working set grants nothing
+// (isBlockedRepairOwedAtHead reads AS OF 'HEAD'); and the key never waives
+// consent for any later migration.
 //
 // A refusal fails the open, except for the working-set-reconcile commands
 // (bd dolt commit, bd vc commit), which commit at the current schema without

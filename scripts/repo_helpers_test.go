@@ -187,3 +187,18 @@ func exits(body *ast.BlockStmt) bool {
 }
 
 const doltSQLServerImage = "dolthub/dolt-sql-server:2.6.0"
+
+// changelogFixedMentions reports whether a ### Fixed section of any release in
+// changelog mentions ref.
+func changelogFixedMentions(changelog, ref string) bool {
+	inFixed := false
+	for _, line := range strings.Split(changelog, "\n") {
+		switch {
+		case strings.HasPrefix(line, "## ") || strings.HasPrefix(line, "### "):
+			inFixed = strings.TrimSpace(line) == "### Fixed"
+		case inFixed && strings.Contains(line, ref):
+			return true
+		}
+	}
+	return false
+}

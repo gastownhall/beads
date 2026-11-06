@@ -69,12 +69,14 @@ exports_files(
 )
 
 # //scripts:android_release_docs_test: the docs describing the android/arm64
-# cgo release build.
+# cgo release build; //scripts:is_blocked_repair_docs_test: the upgrade notes
+# for the is_blocked repair (#7037).
 exports_files(
     [
         "CHANGELOG.md",
         "RELEASING.md",
         "docs/getting-started/installation.md",
+        "docs/getting-started/upgrading.md",
     ],
     visibility = ["//scripts:__pkg__"],
 )
