@@ -2055,11 +2055,17 @@ var rootCmd = &cobra.Command{
 		// A preview detects the change but must not consume it: .local_version
 		// is the one-shot signal autoMigrateOnVersionBump reads, and a preview
 		// skips that reconciliation (see below). See trackBdVersionPreview.
+		//
+		// A detected upgrade is not written yet: the marker comes back pending
+		// and is persisted only once autoMigrateOnVersionBump below settles, so
+		// a failed reconciliation is retried by the next command (#6929).
+		var pendingVersion *pendingVersionMarker
 		if policy.runMaintenance && !frozenForMaintenance {
-			// Detect now, but consume the one-shot marker only after the
-			// migration outcome below is known (#6929). Preview mode never
-			// reaches the finishing step, so it remains non-consuming.
-			trackBdVersionPreview()
+			if previewMode {
+				trackBdVersionPreview()
+			} else {
+				pendingVersion = trackBdVersion()
+			}
 		}
 
 		// If the operator passed --force on `bd migrate` or `bd migrate schema`,
@@ -2103,7 +2109,7 @@ var rootCmd = &cobra.Command{
 		// dry-run plan. frozenForMaintenance excludes it for the same reason
 		// as the trackBdVersion call above — see that comment.
 		if policy.runMaintenance && !previewMode && !frozenForMaintenance {
-			finishBdVersionTracking(beadsDir, autoMigrateOnVersionBump(beadsDir))
+			runVersionBumpMaintenance(pendingVersion, beadsDir)
 		}
 
 		// Initialize direct storage access

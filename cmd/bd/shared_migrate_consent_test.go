@@ -94,7 +94,7 @@ func TestNoticeSharedMigrateRefusalPerDecision(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			out := captureNoticeStderr(t, func() {
-				noticeAutoMigrateRefusal(&schema.RemoteMigrateGateError{
+				noticeSharedMigrateRefusal(&schema.RemoteMigrateGateError{
 					CurrentVersion: 65, LatestVersion: 66, Pending: 1,
 					Decision: tt.decision,
 				})
@@ -114,7 +114,7 @@ func TestNoticeSharedMigrateRefusalPerDecision(t *testing.T) {
 	t.Run("suppressed in json mode", func(t *testing.T) {
 		pinJSONOutput(t, true)
 		out := captureNoticeStderr(t, func() {
-			noticeAutoMigrateRefusal(&schema.RemoteMigrateGateError{
+			noticeSharedMigrateRefusal(&schema.RemoteMigrateGateError{
 				CurrentVersion: 65, LatestVersion: 66, Pending: 1,
 				Decision: "shared-no-remote",
 			})
@@ -129,7 +129,7 @@ func TestNoticeSharedMigrateRefusalPerDecision(t *testing.T) {
 		globalFlag = true
 		defer func() { globalFlag = orig }()
 		out := captureNoticeStderr(t, func() {
-			noticeAutoMigrateRefusal(&schema.RemoteMigrateGateError{
+			noticeSharedMigrateRefusal(&schema.RemoteMigrateGateError{
 				CurrentVersion: 65, LatestVersion: 66, Pending: 1,
 				Decision: "shared-no-remote",
 			})
@@ -140,18 +140,20 @@ func TestNoticeSharedMigrateRefusalPerDecision(t *testing.T) {
 	})
 
 	t.Run("an untyped error prints nothing", func(t *testing.T) {
-		out := captureNoticeStderr(t, func() { noticeAutoMigrateRefusal(io.EOF) })
+		out := captureNoticeStderr(t, func() { noticeSharedMigrateRefusal(io.EOF) })
 		if out != "" {
 			t.Errorf("only a gate refusal should produce a notice, got:\n%s", out)
 		}
 	})
 
+	// From the contributor's #6949 regression: the dirty-table refusal has its
+	// own notice, naming the tables and the commit-then-migrate recovery.
 	t.Run("dirty tables name the commit and migration recovery", func(t *testing.T) {
 		pinJSONOutput(t, false)
 		out := captureNoticeStderr(t, func() {
-			noticeAutoMigrateRefusal(&schema.DirtyTablesError{Tables: []string{"issues"}})
+			noticeDirtyTablesRefusal(&schema.DirtyTablesError{Tables: []string{"issues"}}, "/ws/.beads")
 		})
-		for _, want := range []string{"schema migration was not applied", "issues", "bd dolt commit", "re-run the migration"} {
+		for _, want := range []string{"issues", "bd dolt commit", "bd migrate schema"} {
 			if !strings.Contains(out, want) {
 				t.Errorf("dirty-table notice missing %q:\n%s", want, out)
 			}

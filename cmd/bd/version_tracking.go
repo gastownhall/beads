@@ -28,8 +28,17 @@ const localVersionFile = ".local_version"
 // trackBdVersion checks if bd version has changed since last run and updates the local version file.
 // This function is best-effort - failures are silent to avoid disrupting commands.
 // Sets global variables versionUpgradeDetected and previousVersion if upgrade detected.
-func trackBdVersion() {
-	trackBdVersionFile(true)
+//
+// An upgrade is not written here. .local_version is the one-shot signal the
+// version-bump maintenance reads, so rewriting it before that maintenance
+// knows its outcome consumed the retry of every failed upgrade
+// (gastownhall/beads#6929): a dirty-table refusal left later commands with a
+// matching marker, no reconciliation, and raw missing-table errors. The write
+// comes back as a pending marker instead, and runVersionBumpMaintenance
+// persists it once the maintenance has settled. Every other change (first
+// run, a downgrade, an unordered stamp) is written immediately, as before.
+func trackBdVersion() *pendingVersionMarker {
+	return trackBdVersionFile(true)
 }
 
 // trackBdVersionPreview does the same detection but leaves .local_version
@@ -47,15 +56,34 @@ func trackBdVersion() {
 // Not writing is safe in the other direction too: the marker is advisory and
 // the very next non-preview command writes it.
 func trackBdVersionPreview() {
-	trackBdVersionFile(false)
+	_ = trackBdVersionFile(false) // persist=false never yields a pending write
 }
 
-func trackBdVersionFile(persist bool) {
+// pendingVersionMarker is a .local_version write held back until the
+// version-bump maintenance it would consume has settled (see trackBdVersion).
+// It records the resolved marker path at detection, so a caller that scopes
+// detection to another workspace (bd doctor <path>) persists into that
+// workspace, not whichever one BEADS_DIR names by then.
+type pendingVersionMarker struct {
+	path    string
+	version string
+}
+
+// persist writes the held-back marker. A nil marker (nothing pending) is a
+// no-op, so callers need not check.
+func (p *pendingVersionMarker) persist() {
+	if p == nil {
+		return
+	}
+	_ = writeLocalVersion(p.path, p.version) // Best effort: version tracking is advisory
+}
+
+func trackBdVersionFile(persist bool) *pendingVersionMarker {
 	// Find the beads directory
 	beadsDir := beads.FindBeadsDir()
 	if beadsDir == "" {
 		// No .beads directory found - this is fine (e.g., bd init, bd version, etc.)
-		return
+		return nil
 	}
 
 	// Read last version from local (gitignored) file
@@ -74,10 +102,16 @@ func trackBdVersionFile(persist bool) {
 	// predecessor, and the workspace's own version markers still refuse a
 	// genuine downgrade. (Those markers cannot arbitrate direction here: they
 	// compare with the same dotted scan and read HEAD stamps as 0.0.0 too.)
+	//
+	// The decision below reads this call's own detection, not the sticky
+	// global: a caller that already detected an upgrade elsewhere in the
+	// process must not turn this workspace's write into a pending one.
+	detected := false
 	if lastVersion != "" && lastVersion != Version {
 		if doctor.CompareVersions(Version, lastVersion) > 0 ||
 			doctor.IsBrewHeadVersion(Version) || doctor.IsBrewHeadVersion(lastVersion) {
 			// Version upgrade detected!
+			detected = true
 			versionUpgradeDetected = true
 			previousVersion = lastVersion
 		}
@@ -85,10 +119,14 @@ func trackBdVersionFile(persist bool) {
 
 	// Update local version file (best effort)
 	// Only write if version actually changed to minimize I/O
-	if persist && lastVersion != Version {
-		_ = writeLocalVersion(localVersionPath, Version) // Best effort: version tracking is advisory
+	if !persist || lastVersion == Version {
+		return nil
 	}
-
+	if detected {
+		return &pendingVersionMarker{path: localVersionPath, version: Version}
+	}
+	_ = writeLocalVersion(localVersionPath, Version) // Best effort: version tracking is advisory
+	return nil
 }
 
 // readLocalVersion reads the last bd version from the local version file.
@@ -194,6 +232,17 @@ func maybeShowUpgradeNotification() {
 	fmt.Println()
 }
 
+// runVersionBumpMaintenance runs the version-bump maintenance for beadsDir
+// and persists the marker trackBdVersion held back only once that maintenance
+// has settled. A failure that should be retried leaves the old marker in
+// place, so the next command detects the same upgrade and tries again
+// (gastownhall/beads#6929).
+func runVersionBumpMaintenance(pending *pendingVersionMarker, beadsDir string) {
+	if autoMigrateOnVersionBump(beadsDir) {
+		pending.persist()
+	}
+}
+
 // autoMigrateOnVersionBump automatically migrates the database when CLI version changes.
 // This function is best-effort - failures are silent to avoid disrupting commands.
 // Called from PersistentPreRun before opening DB for main operation.
@@ -201,6 +250,12 @@ func maybeShowUpgradeNotification() {
 // IMPORTANT: This must be called BEFORE opening the database to avoid opening DB twice.
 //
 // beadsDir is the path to the .beads directory.
+//
+// It reports whether the version bump has settled: there was nothing to do
+// here, or the reconciliation ran. A false return (the config could not be
+// read, or the database could not be opened or reconciled) means the upgrade
+// is still pending and the caller must keep the old .local_version, so the
+// next command retries it.
 func autoMigrateOnVersionBump(beadsDir string) bool {
 	// Only migrate if version upgrade was detected
 	if !versionUpgradeDetected {
@@ -240,7 +295,7 @@ func autoMigrateOnVersionBump(beadsDir string) bool {
 		return true
 	}
 
-	recoverPreV56IfNeeded(previousVersion, dbPath)
+	recovered := recoverPreV56IfNeeded(previousVersion, dbPath)
 
 	// Open database using factory (respects backend config from metadata.json)
 	// Use rootCtx if available and not canceled, otherwise use Background
@@ -250,6 +305,46 @@ func autoMigrateOnVersionBump(beadsDir string) bool {
 		ctx = context.Background()
 	}
 
+	err = reconcileVersionBump(ctx, beadsDir)
+	if err != nil {
+		debug.Logf("auto-migrate: %v", err)
+		noticeSharedMigrateRefusal(err)
+		noticeDirtyTablesRefusal(err, beadsDir)
+	}
+	// A performed pre-0.56 recovery settles the bump whatever followed it:
+	// it deleted .dolt, and the compatibility witness that would stop it
+	// happening again is best-effort, so retrying could repeat the deletion.
+	if recovered && !versionBumpSettled(err) {
+		debug.Logf("auto-migrate: pre-v56 recovery ran; not retrying the version bump")
+	}
+	return recovered || versionBumpSettled(err)
+}
+
+// versionBumpSettled classifies the outcome of reconcileVersionBump: nil (the
+// reconciliation ran, or there was nothing to reconcile) settles the bump, and
+// so does a writable open the migrate gate or the consent check refused. Those
+// are deliberate deferrals: the operator decides when to migrate or adopt, the
+// commands that do it open the store themselves, and retrying the open on
+// every command would only repeat the notice. Any other error leaves the bump
+// pending for the next command.
+func versionBumpSettled(err error) bool {
+	if err == nil {
+		return true
+	}
+	var gateErr *schema.RemoteMigrateGateError
+	var consentErr *schema.MigrateConsentError
+	return errors.As(err, &gateErr) || errors.As(err, &consentErr)
+}
+
+// reconcileVersionBump is the store-touching tail of autoMigrateOnVersionBump,
+// a variable so tests can stand in for the database without a server.
+var reconcileVersionBump = reconcileVersionBumpStore
+
+// reconcileVersionBumpStore probes, opens and reconciles the workspace
+// database. It returns nil when the database is already current or the role
+// reconciled it (including a refused downgrade, which is the role's answer,
+// not a failure), and the wrapped open, role or reconcile error otherwise.
+func reconcileVersionBumpStore(ctx context.Context, beadsDir string) error {
 	// Read-only probe: if the DB is already at the current version, skip the
 	// writeable open. On current main the writeable-open gate reads remotes
 	// via doltutil.PersistedRemotes, a fast on-disk repo_state.json probe —
@@ -264,16 +359,13 @@ func autoMigrateOnVersionBump(beadsDir string) bool {
 		_ = roStore.Close()
 		if probeErr == nil && recorded == Version {
 			debug.Logf("auto-migrate: database already at version %s (ro probe)", Version)
-			return true
+			return nil
 		}
 	}
 
 	store, err := dolt.NewFromConfig(ctx, beadsDir)
 	if err != nil {
-		// Failed to open database - skip migration
-		debug.Logf("auto-migrate: failed to open database: %v", err)
-		noticeAutoMigrateRefusal(err)
-		return autoMigrateFailureConsumesVersion(err)
+		return fmt.Errorf("failed to open database: %w", err)
 	}
 	defer func() {
 		if err := store.Close(); err != nil {
@@ -289,13 +381,11 @@ func autoMigrateOnVersionBump(beadsDir string) bool {
 	// persists in the working set for the lifetime of the server session.
 	reconciler, err := store.VersionReconciler()
 	if err != nil {
-		debug.Logf("auto-migrate: version markers unavailable: %v", err)
-		return false
+		return fmt.Errorf("version markers unavailable: %w", err)
 	}
 	result, err := reconciler.ReconcileVersion(ctx, issueops.VersionReconcileRequest{CLIVersion: Version})
 	if err != nil {
-		debug.Logf("auto-migrate: failed to reconcile database version: %v", err)
-		return false
+		return fmt.Errorf("failed to reconcile database version: %w", err)
 	}
 
 	switch {
@@ -306,30 +396,7 @@ func autoMigrateOnVersionBump(beadsDir string) bool {
 	default:
 		debug.Logf("auto-migrate: database already at version %s", Version)
 	}
-	return true
-}
-
-// autoMigrateFailureConsumesVersion reports whether a failed automatic
-// migration deliberately consumes the one-shot .local_version signal. The
-// remote-migration consent gate is an intentional deferral: repeating it on
-// every read would only repeat the same notice until the operator chooses a
-// migration path. Every other failure remains retryable on the next command.
-func autoMigrateFailureConsumesVersion(err error) bool {
-	var gateErr *schema.RemoteMigrateGateError
-	return errors.As(err, &gateErr)
-}
-
-// finishBdVersionTracking advances .local_version only after version-bump
-// reconciliation succeeded or was deliberately deferred. trackBdVersionPreview
-// has already populated the notification globals without consuming the marker.
-func finishBdVersionTracking(beadsDir string, consume bool) {
-	if !consume || beadsDir == "" {
-		return
-	}
-	localVersionPath := filepath.Join(beadsDir, localVersionFile)
-	if readLocalVersion(localVersionPath) != Version {
-		_ = writeLocalVersion(localVersionPath, Version)
-	}
+	return nil
 }
 
 // recoverPreV56IfNeeded rebuilds a Dolt database left behind by the pre-0.56
@@ -356,12 +423,16 @@ func finishBdVersionTracking(beadsDir string, consume bool) {
 // recovers. The .bd-dolt-ok marker RecoverPreV56DoltDir checks is the last
 // gate, but only bd 0.58.0 and later write it: a database that only 0.56.x or
 // 0.57.x has served has none, so for it these refusals are the only gate.
-func recoverPreV56IfNeeded(previousVersion, dbPath string) {
+//
+// It reports whether the recovery was performed — .dolt was removed — even
+// when the re-initialization after it failed; autoMigrateOnVersionBump settles
+// the bump on it.
+func recoverPreV56IfNeeded(previousVersion, dbPath string) bool {
 	if !doctor.IsValidSemver(previousVersion) || isGoPseudoVersion(previousVersion) {
-		return
+		return false
 	}
 	if doctor.CompareVersions(previousVersion, "0.56.0") >= 0 {
-		return
+		return false
 	}
 
 	recovered, recErr := doltserver.RecoverPreV56DoltDir(dbPath)
@@ -371,6 +442,7 @@ func recoverPreV56IfNeeded(previousVersion, dbPath string) {
 	if recovered {
 		debug.Logf("auto-migrate: rebuilt pre-v56 dolt database at %s", dbPath)
 	}
+	return recovered
 }
 
 // isGoPseudoVersion reports whether a version stamp is a Go pseudo-version,
@@ -381,36 +453,24 @@ func isGoPseudoVersion(version string) bool {
 	return module.IsPseudoVersion("v" + strings.TrimPrefix(strings.TrimSpace(version), "v"))
 }
 
-// noticeAutoMigrateRefusal turns migration refusals that a read command would
-// otherwise obscure into a one-line stderr notice.
+// noticeSharedMigrateRefusal turns the one failure autoMigrateOnVersionBump
+// must not swallow into a one-line stderr notice.
 //
-// A dirty-table refusal and the remote-migration consent gate are different
-// from ordinary best-effort failures: a read command's own store open may not
-// explain either one. The gate refusal is
+// Every other failure here is genuinely best-effort — the command's own store
+// open will report anything that matters. A gate refusal is different: it is
 // the whole point of the version bump (there ARE pending migrations), it will
 // not be reported by a read command's own open (read-only opens never touch
 // the schema), and it is the moment gastownhall/beads#5920 used to silently
 // promote the cursor for every co-resident client. Now nothing is promoted, so
 // say what happened and what to do about it.
 //
-// It fires once per version bump, because .local_version is consumed in the
-// same pre-run — which is exactly why the remedy it names has to be right for
-// THIS refusal. The gate returns one error type for several very different
+// It fires once per version bump, because a gate refusal settles the bump and
+// .local_version is consumed in the same pre-run (versionBumpSettled) — which
+// is exactly why the remedy it names has to be right for THIS refusal. The gate returns one error type for several very different
 // decisions, and the remote-backed ones are not unlocked by the migrate verb
 // at all (a clone whose remote is already migrated must adopt, not migrate),
 // so the line is chosen per decision rather than printed unconditionally.
-func noticeAutoMigrateRefusal(err error) {
-	var dirtyErr *schema.DirtyTablesError
-	if errors.As(err, &dirtyErr) {
-		if jsonOutput {
-			return
-		}
-		fmt.Fprintf(os.Stderr,
-			"bd upgraded to %s, but schema migration was not applied: %v.\n",
-			displayVersion(Version), dirtyErr)
-		return
-	}
-
+func noticeSharedMigrateRefusal(err error) {
 	var gateErr *schema.RemoteMigrateGateError
 	if !errors.As(err, &gateErr) {
 		return
@@ -447,6 +507,33 @@ func noticeAutoMigrateRefusal(err error) {
 	fmt.Fprintf(os.Stderr,
 		"bd upgraded to %s: %d schema migration(s) pending on this database — not auto-applying (#5920).\n%s\n",
 		displayVersion(Version), gateErr.Pending, remedy)
+}
+
+// noticeDirtyTablesRefusal reports a version-bump migration refused by the
+// dirty-table guard (schema.DirtyTablesError) as a short stderr notice. It
+// used to reach only BD_DEBUG, and a read command's own open never migrates,
+// so nothing else says why the upgrade did not apply (gastownhall/beads#6929).
+//
+// The remedy names the workspace the maintenance opened. That is beadsDir's
+// own database — the pre-run opens it with NewFromConfig(beadsDir) before any
+// --global override of the command's store, and doctor runs it against its
+// target — so the notice prescribes the commit and the migration there rather
+// than guessing at the command's later selection. It does not promise that
+// some next command applies the migration: that needs consent, which
+// 'bd migrate schema' carries and an ordinary command does not.
+//
+// Under --json it writes nothing: the command's own output (or its own
+// refusal) is the machine-readable result on these streams, and the marker
+// stays pending, so `bd upgrade status --json` still shows the bump.
+func noticeDirtyTablesRefusal(err error, beadsDir string) {
+	var dirtyErr *schema.DirtyTablesError
+	if !errors.As(err, &dirtyErr) || jsonOutput {
+		return
+	}
+	fmt.Fprintf(os.Stderr,
+		"bd upgraded to %s: schema migration of %s refused — uncommitted changes in table(s) %s (#4566).\n"+
+			"Commit them, then migrate that workspace: run 'bd dolt commit', then 'bd migrate schema' (with BEADS_DIR=%s). The upgrade stays pending until then.\n",
+		displayVersion(Version), beadsDir, strings.Join(dirtyErr.Tables, ", "), beadsDir)
 }
 
 // recordedWorkspaceVersion reads the marker through the role's accessor on a

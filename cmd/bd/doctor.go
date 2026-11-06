@@ -615,17 +615,7 @@ func runDiagnostics(path string) doctorResult {
 	// absPath: these writes land in the doctor target, so a freeze on that tree
 	// must stop them even when bd was launched somewhere unfrozen.
 	if !readonlyMode && !migrationFreezeActiveFor(beadsDir) {
-		// Scope version tracking to the doctor target. Without this, `bd doctor <path>`
-		// can accidentally touch the caller's current repo .beads state.
-		origBeadsDir, hadBeadsDir := os.LookupEnv("BEADS_DIR")
-		_ = os.Setenv("BEADS_DIR", beadsDir)
-		trackBdVersionPreview()
-		finishBdVersionTracking(beadsDir, autoMigrateOnVersionBump(beadsDir))
-		if hadBeadsDir {
-			_ = os.Setenv("BEADS_DIR", origBeadsDir)
-		} else {
-			_ = os.Unsetenv("BEADS_DIR")
-		}
+		_ = runDoctorVersionMaintenance(beadsDir)
 	}
 
 	// Check 1b: Dolt format compatibility (GH#2137)
@@ -1628,4 +1618,31 @@ func runMigrationValidation(path string, phase string) error {
 	}
 	fmt.Printf("%s\n", ui.RenderFail("✗ Migration validation failed"))
 	return SilentExit()
+}
+
+// runDoctorVersionMaintenance is doctor's copy of the pre-run version
+// sequence, scoped to the doctor target beadsDir: detection, then the
+// version-bump maintenance against that workspace, persisting the target's
+// marker only once the bump settles (gastownhall/beads#6929). It reports
+// whether the bump settled.
+func runDoctorVersionMaintenance(beadsDir string) bool {
+	// Scope version tracking to the doctor target. Without this, `bd doctor <path>`
+	// can accidentally touch the caller's current repo .beads state.
+	//
+	// The pending marker carries the path detection resolved, so persisting
+	// it after BEADS_DIR is restored still writes the target's marker.
+	origBeadsDir, hadBeadsDir := os.LookupEnv("BEADS_DIR")
+	_ = os.Setenv("BEADS_DIR", beadsDir)
+	pendingVersion := trackBdVersion()
+	if hadBeadsDir {
+		_ = os.Setenv("BEADS_DIR", origBeadsDir)
+	} else {
+		_ = os.Unsetenv("BEADS_DIR")
+	}
+
+	settled := autoMigrateOnVersionBump(beadsDir)
+	if settled {
+		pendingVersion.persist()
+	}
+	return settled
 }
