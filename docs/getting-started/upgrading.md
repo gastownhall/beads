@@ -616,10 +616,9 @@ Between steps 1 and 2, an upgraded client reads normally and its writes are
 refused with the gate's guidance. Nothing is silently promoted, so there is no
 deadline — but the window is a degraded one, so keep it short.
 
-If the server's schema is too old for this release's reads (v53 or older:
-1.1.x, or 1.2.2, the re-release of the 1.1 line, which has no `leases`
-table), reads are refused too until step 2: `bd list` stops with
-`schema version mismatch` and names `bd migrate schema`
+If the server's schema is v53 or older (1.1.x, or 1.2.2, the re-release of
+the 1.1 line), reads can fail too until step 2: `bd list` stops with
+`table not found: leases`
 ([#6929](https://github.com/gastownhall/beads/issues/6929)). Run step 2 as
 soon as the clients are upgraded.
 
@@ -837,7 +836,7 @@ then migrate:
 
 ```bash
 bd dolt commit
-bd migrate schema   # add --global for the shared global database
+bd migrate schema
 ```
 
 Until the upgrade goes through, every command (other than a preview or a

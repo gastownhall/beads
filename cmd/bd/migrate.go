@@ -627,30 +627,7 @@ func handleSchemaMigrate() error {
 
 	applied, err := migrator.ApplySchemaMigrations(rootCtx)
 	if err != nil {
-		if jsonOutput {
-			if jerr := outputJSON(map[string]interface{}{
-				"error":   "schema_migration_failed",
-				"message": err.Error(),
-			}); jerr != nil {
-				return jerr
-			}
-			return SilentExit()
-		}
-		var dirtyErr *schema.DirtyTablesError
-		if errors.As(err, &dirtyErr) {
-			// `bd dolt commit` opens leniently (dolt.Config.LenientOpen): the
-			// dirty, consent and migrate-gate refusals do not stop it, so the
-			// plain sequence terminates in every mode — the same one the
-			// version-bump notice names (gastownhall/beads#6929).
-			commit := "bd dolt commit"
-			if globalFlag {
-				commit += " --global"
-			}
-			return HandleErrorWithHint(
-				fmt.Sprintf("schema migration failed: %v", err),
-				fmt.Sprintf("commit the working set with `%s`, then re-run this command", commit))
-		}
-		return HandleError("schema migration failed: %v", err)
+		return schemaMigrateFailed(err)
 	}
 
 	latest := schema.LatestVersion()
@@ -682,6 +659,37 @@ func handleSchemaMigrate() error {
 	}
 	fmt.Printf("%s\n", ui.RenderPass(fmt.Sprintf("✓ Applied %d schema migration(s); schema now at v%d", applied, latest)))
 	return nil
+}
+
+// schemaMigrateFailed reports a migration `bd migrate schema` could not apply
+// and returns the command's exit error.
+func schemaMigrateFailed(err error) error {
+	if jsonOutput {
+		if jerr := outputJSON(map[string]interface{}{
+			"error":   "schema_migration_failed",
+			"message": err.Error(),
+		}); jerr != nil {
+			return jerr
+		}
+		return SilentExit()
+	}
+	var dirtyErr *schema.DirtyTablesError
+	if errors.As(err, &dirtyErr) {
+		// `bd dolt commit` opens leniently (dolt.Config.LenientOpen): the
+		// dirty, consent and migrate-gate refusals do not stop it, so the
+		// plain sequence terminates in every mode — the same one the
+		// version-bump notice names (gastownhall/beads#6929). Unlike that
+		// notice, this hint follows --global: the store this command tried to
+		// migrate is the one --global selected.
+		commit := "bd dolt commit"
+		if globalFlag {
+			commit += " --global"
+		}
+		return HandleErrorWithHint(
+			fmt.Sprintf("schema migration failed: %v", err),
+			fmt.Sprintf("commit the working set with `%s`, then re-run this command", commit))
+	}
+	return HandleError("schema migration failed: %v", err)
 }
 
 // stampWorkspaceVersionAfterMigrate records this binary's version through the

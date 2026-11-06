@@ -845,15 +845,15 @@ func TestAutoMigrateOnVersionBump_Outcomes(t *testing.T) {
 	t.Cleanup(func() { versionUpgradeDetected, versionBumpFailedThisRun = origUpgradeDetected, origFailed })
 
 	versionUpgradeDetected = false
-	if got := autoMigrateOnVersionBump(t.TempDir()); got != versionBumpSkipped {
+	if got := reconcileVersionBump(t.TempDir()); got != versionBumpSkipped {
 		t.Errorf("no upgrade: outcome = %v, want skipped", got)
 	}
 
 	versionUpgradeDetected = true
-	if got := autoMigrateOnVersionBump(""); got != versionBumpSkipped {
+	if got := reconcileVersionBump(""); got != versionBumpSkipped {
 		t.Errorf("no beads directory: outcome = %v, want skipped", got)
 	}
-	if got := autoMigrateOnVersionBump(t.TempDir()); got != versionBumpSkipped {
+	if got := reconcileVersionBump(t.TempDir()); got != versionBumpSkipped {
 		t.Errorf("no database: outcome = %v, want skipped", got)
 	}
 
@@ -861,7 +861,7 @@ func TestAutoMigrateOnVersionBump_Outcomes(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(broken, "metadata.json"), []byte("{not json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if got := autoMigrateOnVersionBump(broken); got != versionBumpFailed {
+	if got := reconcileVersionBump(broken); got != versionBumpFailed {
 		t.Errorf("unreadable config: outcome = %v, want failed", got)
 	}
 }
@@ -882,7 +882,7 @@ func TestAutoMigrateOnVersionBump_FailureIsReportedAndRetried(t *testing.T) {
 		t.Fatal(err)
 	}
 	notice := captureNoticeStderr(t, func() {
-		settleBdVersionStamp(autoMigrateOnVersionBump(beadsDir))
+		autoMigrateOnVersionBump(beadsDir)
 	})
 	for _, want := range []string{"bd upgraded to v1.3.0", "loading config", "next eligible non-preview command retries", "bd doctor"} {
 		if !strings.Contains(notice, want) {
@@ -908,7 +908,7 @@ func TestAutoMigrateOnVersionBump_FailureIsReportedAndRetried(t *testing.T) {
 		t.Fatal("the failed upgrade was not detected again on the next invocation")
 	}
 	notice = captureNoticeStderr(t, func() {
-		settleBdVersionStamp(autoMigrateOnVersionBump(beadsDir))
+		autoMigrateOnVersionBump(beadsDir)
 	})
 	if notice != "" {
 		t.Errorf("a skipped upgrade printed a notice:\n%s", notice)
@@ -1056,7 +1056,7 @@ func TestAutoMigrateOnVersionBump_FailureUnderJSON(t *testing.T) {
 	}
 	var outcome versionBumpOutcome
 	out := captureNoticeStderr(t, func() {
-		outcome = autoMigrateOnVersionBump(beadsDir)
+		outcome = reconcileVersionBump(beadsDir)
 		settleBdVersionStamp(outcome)
 	})
 	if outcome != versionBumpFailed {
@@ -1071,8 +1071,10 @@ func TestAutoMigrateOnVersionBump_FailureUnderJSON(t *testing.T) {
 }
 
 // TestNoticeVersionBumpFailure_DirtyTables pins the dirty-table notice: the
-// tables, and the commit-then-migrate sequence in that order, carrying
-// --global into both commands when the invocation did.
+// tables, and the commit-then-migrate sequence in that order. Neither command
+// takes --global when the invocation did: the version-bump attempt opened the
+// workspace's own database, and the global commands would commit and migrate
+// beads_global instead.
 func TestNoticeVersionBumpFailure_DirtyTables(t *testing.T) {
 	pinJSONOutput(t, false)
 	dirty := fmt.Errorf("failed to initialize schema: %w", &schema.DirtyTablesError{Tables: []string{"issues", "wisps"}})
@@ -1083,16 +1085,15 @@ func TestNoticeVersionBumpFailure_DirtyTables(t *testing.T) {
 			t.Cleanup(func() { globalFlag = orig })
 
 			out := captureNoticeStderr(t, func() { noticeVersionBumpFailure(dirty) })
-			wantCommit, wantMigrate := "'bd dolt commit'", "'bd migrate schema'"
-			if global {
-				wantCommit, wantMigrate = "'bd dolt commit --global'", "'bd migrate schema --global'"
-			}
 			if !strings.Contains(out, "issues, wisps") {
 				t.Errorf("notice does not name the dirty tables:\n%s", out)
 			}
-			commit, migrate := strings.Index(out, wantCommit), strings.Index(out, wantMigrate)
+			commit, migrate := strings.Index(out, "'bd dolt commit'"), strings.Index(out, "'bd migrate schema'")
 			if commit < 0 || migrate < 0 || commit > migrate {
-				t.Errorf("notice does not give %s then %s:\n%s", wantCommit, wantMigrate, out)
+				t.Errorf("notice does not give 'bd dolt commit' then 'bd migrate schema':\n%s", out)
+			}
+			if strings.Contains(out, "--global") {
+				t.Errorf("notice aims a remedy at beads_global, but the refused open was the workspace's own database:\n%s", out)
 			}
 			if !strings.Contains(out, "next eligible non-preview command retries") {
 				t.Errorf("notice does not say the next eligible non-preview command retries:\n%s", out)

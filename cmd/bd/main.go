@@ -2055,8 +2055,8 @@ var rootCmd = &cobra.Command{
 		// A preview detects the change but must not consume it: .local_version
 		// is the one-shot signal autoMigrateOnVersionBump reads, and a preview
 		// skips that reconciliation (see below). See trackBdVersionPreview.
-		// A non-preview upgrade is held, not written: settleBdVersionStamp
-		// below writes it once that reconciliation has an outcome, and leaves
+		// A non-preview upgrade is held, not written: autoMigrateOnVersionBump
+		// below writes it once its reconciliation has an outcome, and leaves
 		// it for the next command to retry when it failed (#6929). Any return
 		// in between keeps the old witness, so the upgrade is not lost.
 		if policy.runMaintenance && !frozenForMaintenance {
@@ -2108,7 +2108,7 @@ var rootCmd = &cobra.Command{
 		// dry-run plan. frozenForMaintenance excludes it for the same reason
 		// as the trackBdVersion call above — see that comment.
 		if policy.runMaintenance && !previewMode && !frozenForMaintenance {
-			settleBdVersionStamp(autoMigrateOnVersionBump(beadsDir))
+			autoMigrateOnVersionBump(beadsDir)
 		}
 
 		// Initialize direct storage access

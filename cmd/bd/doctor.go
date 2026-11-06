@@ -626,7 +626,7 @@ func runDiagnostics(path string) doctorResult {
 			_ = os.Unsetenv("BEADS_DIR")
 		}
 
-		settleBdVersionStamp(autoMigrateOnVersionBump(beadsDir))
+		autoMigrateOnVersionBump(beadsDir)
 	}
 
 	// Check 1b: Dolt format compatibility (GH#2137)

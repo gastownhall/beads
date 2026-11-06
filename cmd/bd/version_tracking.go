@@ -25,7 +25,7 @@ import (
 // reset the tracked metadata.json file.
 const localVersionFile = ".local_version"
 
-// versionBumpOutcome is what autoMigrateOnVersionBump made of a detected
+// versionBumpOutcome is what reconcileVersionBump made of a detected
 // upgrade, and decides whether settleBdVersionStamp consumes the one-shot
 // .local_version signal (gastownhall/beads#6929).
 type versionBumpOutcome int
@@ -262,14 +262,22 @@ func maybeShowUpgradeNotification() {
 
 // autoMigrateOnVersionBump automatically migrates the database when CLI version changes.
 // It never fails the command: the command's own store open reports anything
-// that matters to it. The outcome it returns decides, through
-// settleBdVersionStamp, whether the upgrade signal is consumed.
+// that matters to it. It then settles the upgrade witness by the outcome
+// (settleBdVersionStamp), so detecting an upgrade and consuming its signal
+// stay paired at every caller.
 // Called from PersistentPreRun before opening DB for main operation.
 //
 // IMPORTANT: This must be called BEFORE opening the database to avoid opening DB twice.
 //
 // beadsDir is the path to the .beads directory.
-func autoMigrateOnVersionBump(beadsDir string) versionBumpOutcome {
+func autoMigrateOnVersionBump(beadsDir string) {
+	settleBdVersionStamp(reconcileVersionBump(beadsDir))
+}
+
+// reconcileVersionBump does autoMigrateOnVersionBump's migration and reports
+// what it made of the upgrade. The outcome decides, through
+// settleBdVersionStamp, whether the upgrade signal is consumed.
+func reconcileVersionBump(beadsDir string) versionBumpOutcome {
 	// Only migrate if version upgrade was detected
 	if !versionUpgradeDetected {
 		return versionBumpSkipped
@@ -481,14 +489,15 @@ func noticeSharedMigrateRefusal(err error) {
 		return
 	}
 
-	consent := schema.SharedConsentCommand
-	if globalFlag {
-		consent = schema.SharedConsentCommandGlobal
-	}
+	// The consent verb never takes --global here. The version-bump attempt
+	// opens the workspace's own database (dolt.NewFromConfig on beadsDir);
+	// --global retargets only the command's own open, whose refusal
+	// printGlobalDatabaseConsentHint answers. The global verb would migrate
+	// beads_global and leave this refusal in place.
 	var remedy string
 	switch gateErr.Decision {
 	case "shared-no-remote":
-		remedy = fmt.Sprintf("Run '%s' once every client of this server is upgraded; reads keep working meanwhile.", consent)
+		remedy = fmt.Sprintf("Run '%s' once every client of this server is upgraded; reads keep working meanwhile.", schema.SharedConsentCommand)
 	case "adopt", "adopt-ff":
 		// The remote is already migrated: migrating here would fork it, and
 		// the verb consent deliberately does not unlock this arm.
@@ -507,7 +516,7 @@ func noticeSharedMigrateRefusal(err error) {
 		displayVersion(Version), gateErr.Pending, remedy)
 }
 
-// failVersionBump is every failed terminal path of autoMigrateOnVersionBump:
+// failVersionBump is every failed terminal path of reconcileVersionBump:
 // it reports the failure and marks this invocation's upgrade as unfinished.
 func failVersionBump(err error) versionBumpOutcome {
 	versionBumpFailedThisRun = true
@@ -536,15 +545,12 @@ func noticeVersionBumpFailure(err error) {
 		// no command, and the consent may already have printed "applying".
 		// Committing is not gated (the working-set reconcile open passes the
 		// dirty, consent and migrate gates), so the plain sequence converges.
-		commit, migrate := "bd dolt commit", schema.SharedConsentCommand
-		if globalFlag {
-			commit, migrate = commit+" --global", schema.SharedConsentCommandGlobal
-		}
+		// No --global, even under it: see noticeSharedMigrateRefusal.
 		fmt.Fprintf(os.Stderr,
 			"bd upgraded to %s, but its pending schema migrations were not applied: they alter tables with uncommitted changes (%s).\n"+
-				"Run '%s' to commit the working set, then '%s'.\n"+
+				"Run 'bd dolt commit' to commit the working set, then '%s'.\n"+
 				"The next eligible non-preview command retries the migration.\n",
-			displayVersion(Version), strings.Join(dirtyErr.Tables, ", "), commit, migrate)
+			displayVersion(Version), strings.Join(dirtyErr.Tables, ", "), schema.SharedConsentCommand)
 		return
 	}
 	fmt.Fprintf(os.Stderr,
