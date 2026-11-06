@@ -165,6 +165,36 @@ func TestTryRetirableLockRefusesReparsePoint(t *testing.T) {
 	})
 }
 
+// TestRetireRefusesReplacedPath checks retirement's identity verification:
+// when the lease's pathname has been replaced by a different file, Retire
+// must refuse rather than delete the replacement.
+func TestRetireRefusesReplacedPath(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "replaced.lock")
+
+	lease, err := TryRetirableLock(path)
+	require.NoError(t, err)
+
+	// Move the leased file aside and put a replacement at its name; the
+	// lease's handle still refers to the original file.
+	moved := filepath.Join(dir, "moved.lock")
+	require.NoError(t, os.Rename(path, moved), "a delete-shared lease's file can be moved aside")
+	replacement := filepath.Join(dir, "replacement.lock")
+	require.NoError(t, os.WriteFile(replacement, []byte("replacement"), 0o600))
+	require.NoError(t, os.Rename(replacement, path))
+
+	require.Error(t, lease.Retire(), "retirement must refuse a replaced path")
+
+	content, readErr := os.ReadFile(path)
+	require.NoError(t, readErr)
+	assert.Equal(t, "replacement", string(content), "the replacement file must survive a refused retirement")
+
+	lease.Unlock()
+	content, readErr = os.ReadFile(path)
+	require.NoError(t, readErr)
+	assert.Equal(t, "replacement", string(content), "the replacement must still be there after the lease is released")
+}
+
 // makeJunction creates a directory junction at link pointing at target, the
 // way mklink /J does: a REPARSE_DATA_BUFFER with the mount-point tag set
 // through FSCTL_SET_REPARSE_POINT.

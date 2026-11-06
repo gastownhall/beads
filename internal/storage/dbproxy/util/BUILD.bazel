@@ -34,6 +34,7 @@ go_test(
         "@com_github_go_sql_driver_mysql//:mysql",
     ] + select({
         "@rules_go//go/platform:windows": [
+            "//internal/lockfile",
             "@com_github_stretchr_testify//assert",
             "@com_github_stretchr_testify//require",
             "@org_golang_x_sys//windows",

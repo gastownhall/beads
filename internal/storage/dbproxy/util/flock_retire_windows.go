@@ -65,10 +65,33 @@ func openRetirable(lockPath string) (*os.File, error) {
 // to it closes.
 type fileDispositionInfo struct{ deleteFile uint8 }
 
+// fileIdentity is what GetFileInformationByHandle identifies a file by:
+// two open handles refer to the same file exactly when these match.
+type fileIdentity struct {
+	volume    uint32
+	indexLow  uint32
+	indexHigh uint32
+}
+
+// handleIdentity reports the identity of the file a handle refers to.
+func handleIdentity(h windows.Handle) (fileIdentity, error) {
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(h, &info); err != nil {
+		return fileIdentity{}, err
+	}
+	return fileIdentity{
+		volume:    info.VolumeSerialNumber,
+		indexLow:  info.FileIndexLow,
+		indexHigh: info.FileIndexHigh,
+	}, nil
+}
+
 // retireFile removes the lease's pathname through a short-lived deletion
 // handle: the name becomes unavailable to new openers immediately, while
 // the file object lives until the lease's own handle closes in Unlock. The
-// deletion handle is closed before the lease is released.
+// deletion handle is closed before the lease is released. Because the
+// pathname could have been replaced since acquisition, the two handles are
+// compared by file identity first; a replacement is never deleted through.
 func (l *Lock) retireFile() error {
 	h, err := openLockHandle(l.f.Name(), windows.DELETE|windows.FILE_READ_ATTRIBUTES, windows.OPEN_EXISTING)
 	if err != nil {
@@ -78,6 +101,18 @@ func (l *Lock) retireFile() error {
 		return fmt.Errorf("util: opening lock file for retirement: %w", err)
 	}
 	defer func() { _ = windows.CloseHandle(h) }()
+
+	heldID, err := handleIdentity(windows.Handle(l.f.Fd()))
+	if err != nil {
+		return fmt.Errorf("util: inspecting the held lock file: %w", err)
+	}
+	pathID, err := handleIdentity(h)
+	if err != nil {
+		return fmt.Errorf("util: inspecting the lock path for retirement: %w", err)
+	}
+	if heldID != pathID {
+		return errors.New("util: lock path no longer refers to the held lock file")
+	}
 
 	disp := fileDispositionInfo{deleteFile: 1}
 	// nolint:gosec // G103: unsafe.Pointer required for the SetFileInformationByHandle buffer
