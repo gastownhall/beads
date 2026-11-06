@@ -1214,8 +1214,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   working directory, so `bd doctor <path>` checked the wrong workspace, a
   missing PATH `bd` was reported as a broken `bd prime`, and a different
   installed bd version could open, and migrate, the database being diagnosed.
-  The child now runs in `<path>` with `BEADS_DIR` set to doctor's resolution of
-  that workspace. Whether `bd` is on PATH is still reported by
+  The child now runs as `bd -C <path> prime --no-memories`: it uses the
+  workspace bd resolves from `<path>`, a linked git worktree included, and
+  opens no database, so it cannot migrate one past `--readonly` or a migration
+  freeze. A failed check shows the end of the child's output and the exact
+  command to rerun. Whether `bd` is on PATH is still reported by
   "CLI Availability".
 
 - `bd config get` for a config.yaml, git-config or user-global key no longer

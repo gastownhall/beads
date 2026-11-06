@@ -2,15 +2,20 @@ package doctor
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/steveyegge/beads/cmd/bd/doctor/fix"
 	"github.com/steveyegge/beads/cmd/bd/setup"
+	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/testutil/bazeltest"
 )
 
 func TestCheckBdInPath(t *testing.T) {
@@ -1046,13 +1051,13 @@ func isolatePrimeCheckHome(t *testing.T) {
 }
 
 // writeRecordingBd writes an executable shell script named name into dir. Each
-// run appends its argv, physical cwd and BEADS_DIR to the file named by the
-// environment variable logEnv, then prints CLI-mode prime output. It uses only
-// an absolute shebang and shell builtins, so it runs with an empty PATH.
+// run appends its argv and physical cwd to the file named by the environment
+// variable logEnv, then prints CLI-mode prime output. It uses only an absolute
+// shebang and shell builtins, so it runs with an empty PATH.
 func writeRecordingBd(t *testing.T, dir, name, logEnv string) string {
 	t.Helper()
 	script := "#!/bin/sh\n" +
-		"{ echo \"argv=$*\"; echo \"cwd=$(pwd -P)\"; echo \"beads_dir=${BEADS_DIR-<unset>}\"; echo ---; } >> \"$" + logEnv + "\"\n" +
+		"{ echo \"argv=$*\"; echo \"cwd=$(pwd -P)\"; echo ---; } >> \"$" + logEnv + "\"\n" +
 		"echo 'Run bd ready to find work'\n"
 	path := filepath.Join(dir, name)
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
@@ -1142,9 +1147,9 @@ func TestPrimeChecksDoNotExecPathBd(t *testing.T) {
 
 // TestPrimeChecksRunResolvedBinaryInDiagnosedWorkspace runs both prime checks
 // against a real recording child selected by the resolver, with a decoy bd on
-// PATH and with an empty PATH: the resolved binary runs with each check's
-// arguments in the diagnosed workspace, the decoy never runs, and the result
-// does not depend on PATH or the caller's cwd and BEADS_DIR.
+// PATH and with an empty PATH: the resolved binary runs in the diagnosed
+// workspace and selects it with -C, the decoy never runs, and the result does
+// not depend on PATH or the caller's cwd and BEADS_DIR.
 func TestPrimeChecksRunResolvedBinaryInDiagnosedWorkspace(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("recording bd is a shell script")
@@ -1182,7 +1187,6 @@ func TestPrimeChecksRunResolvedBinaryInDiagnosedWorkspace(t *testing.T) {
 				}
 			}
 			repo := writePrimeReferencingRepo(t)
-			mustMkdir(t, filepath.Join(repo, ".beads"))
 			t.Chdir(t.TempDir())
 
 			prime := VerifyPrimeOutput(repo)
@@ -1198,18 +1202,15 @@ func TestPrimeChecksRunResolvedBinaryInDiagnosedWorkspace(t *testing.T) {
 			if len(records) != 2 {
 				t.Fatalf("resolved binary ran %d time(s), want 2: %v", len(records), records)
 			}
-			if got := records[0]["argv"]; got != "prime" {
-				t.Errorf("VerifyPrimeOutput argv = %q, want %q", got, "prime")
+			if got, want := records[0]["argv"], "-C "+repo+" prime --no-memories"; got != want {
+				t.Errorf("VerifyPrimeOutput argv = %q, want %q", got, want)
 			}
-			if got := records[1]["argv"]; got != "prime --help" {
-				t.Errorf("CheckDocumentationBdPrimeReference argv = %q, want %q", got, "prime --help")
+			if got, want := records[1]["argv"], "-C "+repo+" prime --no-memories --help"; got != want {
+				t.Errorf("CheckDocumentationBdPrimeReference argv = %q, want %q", got, want)
 			}
 			for _, rec := range records {
 				if rec["cwd"] != resolve(t, repo) {
 					t.Errorf("%q ran in %q, want the diagnosed repo %q", rec["argv"], rec["cwd"], resolve(t, repo))
-				}
-				if want := filepath.Join(repo, ".beads"); rec["beads_dir"] == "<unset>" || resolve(t, rec["beads_dir"]) != resolve(t, want) {
-					t.Errorf("%q saw BEADS_DIR=%q, want %q", rec["argv"], rec["beads_dir"], want)
 				}
 			}
 			if decoy := readPrimeRecords(t, decoyLog); len(decoy) != 0 {
@@ -1224,43 +1225,42 @@ func TestPrimeChecksRunResolvedBinaryInDiagnosedWorkspace(t *testing.T) {
 	}
 }
 
-// effectiveEnv returns the value the child sees for key: the last entry wins.
-func effectiveEnv(env []string, key string) (string, bool) {
-	value, found := "", false
-	for _, kv := range env {
-		if k, v, ok := strings.Cut(kv, "="); ok && k == key {
-			value, found = v, true
-		}
-	}
-	return value, found
-}
-
 // TestPrimeCheckCommandPinsWorkspace pins GH#8130's workspace half: the child
-// runs in the absolute diagnosed repo path with BEADS_DIR set to doctor's
-// resolution for it, whatever the caller's cwd and BEADS_DIR are.
+// is `bd -C <abs repo> prime --no-memories`, run in the absolute diagnosed repo
+// path, whatever the caller's cwd and BEADS_DIR are. -C overrides an inherited
+// BEADS_DIR and resolves through beads.FindBeadsDirFrom, so each case also pins
+// where that lands. A linked worktree's .beads that holds only files git
+// checked out must resolve to the main checkout's database: pinning BEADS_DIR
+// to it would make the child create an empty database there.
 func TestPrimeCheckCommandPinsWorkspace(t *testing.T) {
 	exe := filepath.Join(t.TempDir(), "bd-sentinel")
 	stubPrimeCheckBinary(t, func() (string, error) { return exe, nil })
-	callerBeadsDir := filepath.Join(t.TempDir(), ".beads")
+	callerBeadsDir := writeBeadsWorkspace(t, t.TempDir())
 
 	type fixture struct {
 		repoArg   string // the repoPath passed to the check
 		repoDir   string // the directory it names
-		beadsDir  string // where the workspace's .beads really lives
+		beadsDir  string // the .beads bd resolves for it
 		beadsEnv  string // the caller's BEADS_DIR ("" = unset)
 		chdirInto string // the caller's cwd
+	}
+	// The main checkout's .beads holds the database, which is gitignored and
+	// so never checked out into the worktree.
+	worktreeOfMainWithDatabase := func(t *testing.T) (string, string) {
+		mainRepo, worktree := setupWorktreeRepo(t)
+		mainBeads := writeBeadsWorkspace(t, mainRepo)
+		mustMkdir(t, filepath.Join(mainBeads, "dolt"))
+		return mainBeads, worktree
 	}
 	cases := map[string]func(t *testing.T) fixture{
 		"absolute path, BEADS_DIR unset": func(t *testing.T) fixture {
 			repo := t.TempDir()
-			mustMkdir(t, filepath.Join(repo, ".beads"))
-			return fixture{repoArg: repo, repoDir: repo, beadsDir: filepath.Join(repo, ".beads"), chdirInto: t.TempDir()}
+			return fixture{repoArg: repo, repoDir: repo, beadsDir: writeBeadsWorkspace(t, repo), chdirInto: t.TempDir()}
 		},
 		"relative path, BEADS_DIR elsewhere": func(t *testing.T) fixture {
 			parent := t.TempDir()
 			repo := filepath.Join(parent, "ws")
-			mustMkdir(t, filepath.Join(repo, ".beads"))
-			return fixture{repoArg: "ws", repoDir: repo, beadsDir: filepath.Join(repo, ".beads"), beadsEnv: callerBeadsDir, chdirInto: parent}
+			return fixture{repoArg: "ws", repoDir: repo, beadsDir: writeBeadsWorkspace(t, repo), beadsEnv: callerBeadsDir, chdirInto: parent}
 		},
 		"redirected .beads": func(t *testing.T) fixture {
 			repo := t.TempDir()
@@ -1276,17 +1276,27 @@ func TestPrimeCheckCommandPinsWorkspace(t *testing.T) {
 			}
 			return fixture{repoArg: repo, repoDir: repo, beadsDir: target, beadsEnv: callerBeadsDir, chdirInto: t.TempDir()}
 		},
-		"worktree shares the main repo's .beads": func(t *testing.T) fixture {
-			mainRepo, worktree := setupWorktreeRepo(t)
-			mustMkdir(t, filepath.Join(mainRepo, ".beads"))
-			return fixture{repoArg: worktree, repoDir: worktree, beadsDir: filepath.Join(mainRepo, ".beads"), beadsEnv: callerBeadsDir, chdirInto: t.TempDir()}
+		"worktree without .beads uses the main checkout's": func(t *testing.T) fixture {
+			mainBeads, worktree := worktreeOfMainWithDatabase(t)
+			return fixture{repoArg: worktree, repoDir: worktree, beadsDir: mainBeads, beadsEnv: callerBeadsDir, chdirInto: t.TempDir()}
+		},
+		"worktree with tracked .beads files uses the main checkout's database": func(t *testing.T) fixture {
+			mainBeads, worktree := worktreeOfMainWithDatabase(t)
+			writeBeadsWorkspace(t, worktree)
+			return fixture{repoArg: worktree, repoDir: worktree, beadsDir: mainBeads, beadsEnv: callerBeadsDir, chdirInto: t.TempDir()}
+		},
+		"worktree tracking only .beads/formulas uses the main checkout's": func(t *testing.T) fixture {
+			mainBeads, worktree := worktreeOfMainWithDatabase(t)
+			writeFile(t, filepath.Join(worktree, ".beads"), filepath.Join("formulas", "release.formula.json"), "{}\n")
+			return fixture{repoArg: worktree, repoDir: worktree, beadsDir: mainBeads, chdirInto: t.TempDir()}
 		},
 	}
-	argLists := [][]string{{"prime"}, {"prime", "--help"}}
+	extraArgs := [][]string{nil, {"--help"}}
 
 	for name, setup := range cases {
-		for _, args := range argLists {
-			t.Run(name+"/"+strings.Join(args, " "), func(t *testing.T) {
+		for _, extra := range extraArgs {
+			wantTail := append([]string{"prime", "--no-memories"}, extra...)
+			t.Run(name+"/"+strings.Join(append([]string{"prime"}, extra...), " "), func(t *testing.T) {
 				fx := setup(t)
 				if fx.beadsEnv == "" {
 					t.Setenv("BEADS_DIR", "")
@@ -1298,31 +1308,44 @@ func TestPrimeCheckCommandPinsWorkspace(t *testing.T) {
 				}
 				t.Chdir(fx.chdirInto)
 
-				cmd, err := primeCheckCommand(fx.repoArg, args...)
+				cmd, err := primeCheckCommand(fx.repoArg, extra...)
 				if err != nil {
 					t.Fatalf("primeCheckCommand: %v", err)
 				}
 				if cmd.Path != exe {
 					t.Errorf("Path = %q, want %q", cmd.Path, exe)
 				}
-				if got, want := strings.Join(cmd.Args[1:], " "), strings.Join(args, " "); got != want {
-					t.Errorf("Args = %q, want %q", got, want)
+				if len(cmd.Args) < 3 || cmd.Args[1] != "-C" {
+					t.Fatalf("Args = %q, want the workspace selected with -C", cmd.Args)
 				}
-				if !filepath.IsAbs(cmd.Dir) {
-					t.Errorf("Dir = %q, want an absolute path", cmd.Dir)
-				} else if resolve(t, cmd.Dir) != resolve(t, fx.repoDir) {
-					t.Errorf("Dir = %q, want the diagnosed repo %q", cmd.Dir, fx.repoDir)
+				if got, want := strings.Join(cmd.Args[3:], " "), strings.Join(wantTail, " "); got != want {
+					t.Errorf("Args after -C <dir> = %q, want %q", got, want)
 				}
-				got, ok := effectiveEnv(cmd.Env, "BEADS_DIR")
-				if !ok {
-					t.Fatalf("child env has no BEADS_DIR; want %q", fx.beadsDir)
+				for label, dir := range map[string]string{"-C": cmd.Args[2], "Dir": cmd.Dir} {
+					if !filepath.IsAbs(dir) {
+						t.Errorf("%s = %q, want an absolute path", label, dir)
+					} else if resolve(t, dir) != resolve(t, fx.repoDir) {
+						t.Errorf("%s = %q, want the diagnosed repo %q", label, dir, fx.repoDir)
+					}
 				}
-				if resolve(t, got) != resolve(t, fx.beadsDir) {
-					t.Errorf("effective BEADS_DIR = %q, want %q", got, fx.beadsDir)
+				if got := beads.FindBeadsDirFrom(cmd.Args[2]); got == "" || resolve(t, got) != resolve(t, fx.beadsDir) {
+					t.Errorf("bd -C %s resolves %q, want %q", cmd.Args[2], got, fx.beadsDir)
 				}
 			})
 		}
 	}
+}
+
+// writeBeadsWorkspace makes dir/.beads a beads workspace, with the config.yaml
+// a checkout carries, and returns the .beads path.
+func writeBeadsWorkspace(t *testing.T, dir string) string {
+	t.Helper()
+	beadsDir := filepath.Join(dir, ".beads")
+	mustMkdir(t, beadsDir)
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("# beads workspace\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return beadsDir
 }
 
 func mustMkdir(t *testing.T, dir string) {
@@ -1393,8 +1416,16 @@ func TestPrimeChecksReportResolvedBinaryFailure(t *testing.T) {
 		stubPrimeCheckBinary(t, func() (string, error) { return exe, nil })
 		repo := writePrimeReferencingRepo(t)
 		assertFailure(t, repo, "exit status 3")
-		if prime := VerifyPrimeOutput(repo); !strings.Contains(prime.Detail, exe) {
-			t.Errorf("VerifyPrimeOutput Detail = %q, want the resolved binary %q", prime.Detail, exe)
+		// Detail carries what the child printed, and the advice reruns the
+		// exact child, so a caller's BEADS_DIR cannot pick another workspace.
+		wantRerun := exe + " -C " + repo + " prime --no-memories"
+		for _, check := range []DoctorCheck{VerifyPrimeOutput(repo), CheckDocumentationBdPrimeReference(repo)} {
+			if !strings.Contains(check.Detail, "prime exploded") {
+				t.Errorf("%s: Detail = %q, want the child's output %q", check.Name, check.Detail, "prime exploded")
+			}
+			if !strings.Contains(check.Fix, wantRerun) {
+				t.Errorf("%s: Fix = %q, want the exact child %q", check.Name, check.Fix, wantRerun)
+			}
 		}
 	})
 
@@ -1412,4 +1443,128 @@ func TestPrimeChecksReportResolvedBinaryFailure(t *testing.T) {
 			t.Errorf("VerifyPrimeOutput = %+v, want error No output produced", prime)
 		}
 	})
+}
+
+// TestPrimeCheckOutputTail pins the child output a failed prime check reports:
+// short output whole and trimmed, long output cut to its last detailMaxBytes at
+// a rune boundary and marked as cut.
+func TestPrimeCheckOutputTail(t *testing.T) {
+	if got := primeCheckOutputTail(nil); got != "" {
+		t.Errorf("no output = %q, want empty", got)
+	}
+	if got := primeCheckOutputTail([]byte("\n  Error: boom\n")); got != "Error: boom" {
+		t.Errorf("short output = %q, want %q", got, "Error: boom")
+	}
+	// Two-byte runes and a 21-byte last line put the cut inside a rune.
+	const lastLine = "Error: the last line."
+	got := primeCheckOutputTail([]byte(strings.Repeat("é", detailMaxBytes) + lastLine))
+	if !strings.HasPrefix(got, "...") || !strings.HasSuffix(got, lastLine) {
+		t.Errorf("long output = %q, want \"...\" and the last line", got)
+	}
+	if !utf8.ValidString(got) {
+		t.Errorf("long output = %q, which splits a rune", got)
+	}
+	if kept := len(strings.TrimPrefix(got, "...")); kept > detailMaxBytes {
+		t.Errorf("long output keeps %d bytes, want at most %d", kept, detailMaxBytes)
+	}
+}
+
+// TestPrimeChecksRealBdOpenNoStore runs both prime checks with the real bd as
+// the child, because the shell stubs above never open a store and so cannot
+// catch a child that creates or migrates one. The diagnosed path is a linked
+// worktree whose .beads holds only files git checked out, and the caller's
+// BEADS_DIR names another workspace. The child must prime the workspace bd
+// resolves from the worktree and change no .beads. A child pinned to the
+// worktree's own .beads would create an empty embedded database there through
+// its memories read, which every later bd command in the worktree would then
+// use, and in a worktree that tracks only formulas it would prime nothing.
+func TestPrimeChecksRealBdOpenNoStore(t *testing.T) {
+	bd, err := bazeltest.PrebuiltBD()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bd == "" {
+		t.Skip("needs a prebuilt bd: Bazel provides one, or set " + bazeltest.BDBinaryEnv)
+	}
+	stubPrimeCheckBinary(t, func() (string, error) { return bd, nil })
+	isolateBdChildEnv(t)
+
+	for _, tc := range []struct {
+		name       string
+		checkedOut string // the file git checked out into the worktree's .beads
+	}{
+		{name: "tracked config", checkedOut: "config.yaml"},
+		{name: "tracked formulas only", checkedOut: filepath.Join("formulas", "release.formula.json")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mainRepo, worktree := setupWorktreeRepo(t)
+			mainBeads := writeBeadsWorkspace(t, mainRepo)
+			mustMkdir(t, filepath.Join(mainBeads, "embeddeddolt"))
+			worktreeBeads := filepath.Join(worktree, ".beads")
+			mustMkdir(t, worktreeBeads)
+			writeFile(t, worktreeBeads, tc.checkedOut, "# checked out\n")
+			writeFile(t, worktree, "CLAUDE.md", "Run `bd prime` at session start.\n")
+
+			// The caller's workspace. A child that primed it would print this
+			// PRIME.md, which has no "bd ready".
+			callerBeads := writeBeadsWorkspace(t, t.TempDir())
+			writeFile(t, callerBeads, "PRIME.md", "# Caller workspace\n")
+			t.Setenv("BEADS_DIR", callerBeads)
+
+			trees := []string{mainBeads, worktreeBeads, callerBeads}
+			before := listTrees(t, trees)
+
+			if prime := VerifyPrimeOutput(worktree); prime.Status != "ok" || prime.Message != "CLI mode detected" {
+				t.Errorf("VerifyPrimeOutput = %+v, want ok CLI mode detected", prime)
+			}
+			if doc := CheckDocumentationBdPrimeReference(worktree); doc.Status != "ok" {
+				t.Errorf("CheckDocumentationBdPrimeReference = %+v, want ok", doc)
+			}
+			if after := listTrees(t, trees); !slices.Equal(after, before) {
+				t.Errorf("the prime checks changed a .beads:\nbefore %q\nafter  %q", before, after)
+			}
+		})
+	}
+}
+
+// isolateBdChildEnv gives a real bd child a private home and none of the
+// caller's bd settings: an agent shell, or this suite's TestMain, exports
+// BEADS_* and BD_* selectors and server settings that would aim the child at
+// another store. As in cmd/bd's bdEnv, metrics, server auto-start and the
+// daemon are off.
+func isolateBdChildEnv(t *testing.T) {
+	t.Helper()
+	isolatePrimeCheckHome(t)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(os.Getenv("HOME"), ".config"))
+	t.Setenv("APPDATA", filepath.Join(os.Getenv("HOME"), "AppData"))
+	for _, kv := range os.Environ() {
+		key, _, _ := strings.Cut(kv, "=")
+		if strings.HasPrefix(key, "BEADS_") || strings.HasPrefix(key, "BD_") {
+			t.Setenv(key, "")
+			if err := os.Unsetenv(key); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	t.Setenv("BEADS_DOLT_AUTO_START", "0")
+	t.Setenv("BEADS_NO_DAEMON", "1")
+	t.Setenv("BD_DISABLE_METRICS", "1")
+	t.Setenv("BD_DISABLE_EVENT_FLUSH", "1")
+}
+
+// listTrees returns every path under dirs, so a test can tell whether a child
+// process created or removed anything there.
+func listTrees(t *testing.T, dirs []string) []string {
+	t.Helper()
+	var paths []string
+	for _, dir := range dirs {
+		err := filepath.WalkDir(dir, func(path string, _ fs.DirEntry, err error) error {
+			paths = append(paths, path)
+			return err
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	return paths
 }

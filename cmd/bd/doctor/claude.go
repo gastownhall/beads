@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/steveyegge/beads/cmd/bd/doctor/fix"
 	"github.com/steveyegge/beads/cmd/bd/setup"
@@ -237,11 +238,19 @@ var primeCheckBinary = fix.BdBinary
 // running inside a test binary, which must not be executed as bd.
 const primeCheckTestBinaryMessage = "N/A (running as a test binary)"
 
-// primeCheckCommand builds the bd subprocess for a prime check. It runs the
+// primeCheckCommand builds the bd subprocess for a prime check,
+// `bd -C <repoPath> prime --no-memories <args>`, run in repoPath. It runs the
 // binary that is running doctor, not whichever bd comes first on PATH: a
-// different version could open, and migrate, the store being diagnosed. The
-// child runs in repoPath with BEADS_DIR pinned to doctor's resolution for it,
-// because an inherited BEADS_DIR would otherwise override the working directory.
+// different version could open, and migrate, the store being diagnosed.
+//
+// -C selects the workspace the way bd does from that directory, overriding an
+// inherited BEADS_DIR. Its resolution is worktree-aware: a linked worktree
+// whose .beads holds only tracked files uses the main checkout's database.
+// Pinning BEADS_DIR to the worktree's own .beads instead would make the child
+// create an empty database there, which every later bd command in that
+// worktree would then use. --no-memories keeps the child from opening the
+// store at all: the checks read only the workflow text, and the memories read
+// opens the store writable, past doctor's --readonly and the migration freeze.
 func primeCheckCommand(repoPath string, args ...string) (*exec.Cmd, error) {
 	exe, err := primeCheckBinary()
 	if err != nil {
@@ -251,31 +260,50 @@ func primeCheckCommand(repoPath string, args ...string) (*exec.Cmd, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolve workspace path %q: %w", repoPath, err)
 	}
-	cmd := exec.Command(exe, args...) // #nosec G204 -- exe is the running binary, args are literals
+	argv := append([]string{"-C", absRepoPath, "prime", "--no-memories"}, args...)
+	cmd := exec.Command(exe, argv...) // #nosec G204 -- exe is the running binary; the args are literals and an absolute path
 	cmd.Dir = absRepoPath
-	cmd.Env = append(cmd.Environ(), "BEADS_DIR="+ResolveBeadsDirForRepo(absRepoPath))
 	return cmd, nil
 }
 
 // primeCheckFailure describes a prime check subprocess that could not be
-// built (cmd is nil) or failed. The advice points at the binary running doctor
-// and the diagnosed workspace: PATH and installation are not what failed, and
-// "CLI Availability" reports on them separately.
-func primeCheckFailure(repoPath string, cmd *exec.Cmd, err error) (detail, fixHint string) {
+// built (cmd is nil) or failed, with the end of what it printed. The advice
+// reruns the exact child, binary and -C selector included: PATH and
+// installation are not what failed, and "CLI Availability" reports on them
+// separately.
+func primeCheckFailure(repoPath string, cmd *exec.Cmd, output []byte, err error) (detail, fixHint string) {
 	if cmd == nil {
 		return "Could not prepare the bd subprocess: " + err.Error(),
 			"Check that the bd binary running doctor and the workspace " + repoPath + " are accessible"
 	}
 	command := strings.Join(cmd.Args, " ")
-	return fmt.Sprintf("%s failed in %s: %v", command, cmd.Dir, err),
-		fmt.Sprintf("Run '%s' in %s to see the full error", command, cmd.Dir)
+	detail = fmt.Sprintf("%s failed in %s: %v", command, cmd.Dir, err)
+	if tail := primeCheckOutputTail(output); tail != "" {
+		detail += "\n" + tail
+	}
+	return detail, fmt.Sprintf("Run '%s' in %s to see the full error", command, cmd.Dir)
+}
+
+// primeCheckOutputTail returns the end of a failed child's output, at most
+// detailMaxBytes of it: a failing bd prints its error last. Like
+// truncateDetail, it cuts at a rune boundary.
+func primeCheckOutputTail(output []byte) string {
+	tail := strings.TrimSpace(string(output))
+	if len(tail) <= detailMaxBytes {
+		return tail
+	}
+	cut := len(tail) - detailMaxBytes
+	for cut < len(tail) && !utf8.RuneStart(tail[cut]) {
+		cut++
+	}
+	return "..." + tail[cut:]
 }
 
 // VerifyPrimeOutput checks if bd prime command works and adapts correctly.
 // repoPath is the project root directory.
 func VerifyPrimeOutput(repoPath string) DoctorCheck {
 	var output []byte
-	cmd, err := primeCheckCommand(repoPath, "prime")
+	cmd, err := primeCheckCommand(repoPath)
 	if errors.Is(err, fix.ErrTestBinary) {
 		// Re-executing a test binary as bd would recurse into the tests.
 		return DoctorCheck{
@@ -289,7 +317,7 @@ func VerifyPrimeOutput(repoPath string) DoctorCheck {
 	}
 
 	if err != nil {
-		detail, fixHint := primeCheckFailure(repoPath, cmd, err)
+		detail, fixHint := primeCheckFailure(repoPath, cmd, output, err)
 		return DoctorCheck{
 			Name:    "bd prime Command",
 			Status:  "error",
@@ -388,7 +416,7 @@ func CheckDocumentationBdPrimeReference(repoPath string) DoctorCheck {
 	}
 
 	// Docs reference bd prime - verify the command works
-	cmd, err := primeCheckCommand(repoPath, "prime", "--help")
+	cmd, err := primeCheckCommand(repoPath, "--help")
 	if errors.Is(err, fix.ErrTestBinary) {
 		return DoctorCheck{
 			Name:    "Prime Documentation",
@@ -397,11 +425,12 @@ func CheckDocumentationBdPrimeReference(repoPath string) DoctorCheck {
 			Detail:  "Files: " + strings.Join(filesWithBdPrime, ", "),
 		}
 	}
+	var output []byte
 	if err == nil {
-		err = cmd.Run()
+		output, err = cmd.CombinedOutput()
 	}
 	if err != nil {
-		detail, fixHint := primeCheckFailure(repoPath, cmd, err)
+		detail, fixHint := primeCheckFailure(repoPath, cmd, output, err)
 		return DoctorCheck{
 			Name:    "Prime Documentation",
 			Status:  "warning",
