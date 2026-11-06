@@ -3,12 +3,16 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage"
 )
 
@@ -261,4 +265,107 @@ func TestMaybeAutoExportNotesDefaultOffForPriorExporter(t *testing.T) {
 		!strings.Contains(noteAutoExportDefaultOffText("/x/issues.jsonl"), "bd config set export.auto false") {
 		t.Fatal("notice wording must retain both complete configuration commands")
 	}
+}
+
+// noteTestDirEntries lists the sorted entry names of dir.
+func noteTestDirEntries(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	sort.Strings(names)
+	return names
+}
+
+// TestMaybeAutoExportDefaultOffNoteLeavesStateUntouched pins AC-2: repeated
+// eligible invocations each print the notice while every byte on disk —
+// export-state.json, the JSONL, the config, the .beads directory entries —
+// stays identical, and export.auto keeps resolving false from SourceDefault.
+// This is also the proof the notice carries no hidden one-shot or throttle
+// state: a persisted marker would have to appear somewhere under .beads, and
+// no entry may appear or change.
+func TestMaybeAutoExportDefaultOffNoteLeavesStateUntouched(t *testing.T) {
+	// The notice only stats the state file, so odd contents must be preserved
+	// verbatim: a legacy pre-versioning state file, one carrying unknown
+	// fields from a newer binary, and unparseable bytes.
+	stateVariants := map[string]string{
+		"legacy state":     `{"last_dolt_commit":"abc123","timestamp":"2025-06-01T00:00:00Z","issues":2}`,
+		"unknown fields":   `{"v":99,"last_dolt_commit":"abc","future_field":{"a":[1,2]},"issues":2}`,
+		"malformed state":  `{"last_dolt_commit":"abc123", not json`,
+	}
+	for name, stateJSON := range stateVariants {
+		t.Run(name, func(t *testing.T) {
+			f := newDefaultOffNoteFixture(t)
+			statePath := filepath.Join(f.beadsDir, exportAutoStateFile)
+			if err := os.WriteFile(statePath, []byte(stateJSON), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			jsonlPath := filepath.Join(f.beadsDir, "issues.jsonl")
+			configPath := filepath.Join(f.beadsDir, "config.yaml")
+
+			before := map[string]string{
+				"state":  noteTestFileHash(t, statePath),
+				"jsonl":  noteTestFileHash(t, jsonlPath),
+				"config": noteTestFileHash(t, configPath),
+			}
+			beforeEntries := noteTestDirEntries(t, f.beadsDir)
+
+			wantNote := noteAutoExportDefaultOffText(jsonlPath)
+			for i := 1; i <= 2; i++ {
+				var runErr error
+				stdout, stderr := captureNoteOutput(t, func() {
+					runErr = maybeAutoExport(context.Background(), false)
+				})
+				if runErr != nil {
+					t.Fatalf("invocation %d: maybeAutoExport error = %v, want nil", i, runErr)
+				}
+				if stderr != wantNote {
+					t.Fatalf("invocation %d: stderr = %q, want the notice again (repeats until an explicit choice is recorded): %q", i, stderr, wantNote)
+				}
+				if stdout != "" {
+					t.Fatalf("invocation %d: stdout = %q, want empty", i, stdout)
+				}
+			}
+
+			for path, want := range before {
+				var got string
+				switch path {
+				case "state":
+					got = noteTestFileHash(t, statePath)
+				case "jsonl":
+					got = noteTestFileHash(t, jsonlPath)
+				case "config":
+					got = noteTestFileHash(t, configPath)
+				}
+				if got != want {
+					t.Fatalf("%s changed: sha256 before %s after %s — the notice must not write while export is off", path, want, got)
+				}
+			}
+			if after := noteTestDirEntries(t, f.beadsDir); !slicesEqual(after, beforeEntries) {
+				t.Fatalf(".beads entries changed: before %v after %v — no suppression marker may be persisted", beforeEntries, after)
+			}
+			if config.GetBool("export.auto") {
+				t.Fatal("export.auto resolved true; want the default false")
+			}
+			if src := config.GetValueSource("export.auto"); src != config.SourceDefault {
+				t.Fatalf("export.auto source = %v, want SourceDefault after the notices", src)
+			}
+		})
+	}
+}
+
+// noteTestFileHash returns the sha256 of the file at path, hex-encoded.
+func noteTestFileHash(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
 }
