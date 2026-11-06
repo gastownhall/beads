@@ -3,6 +3,9 @@ package versioncontrolops
 import (
 	"context"
 	"fmt"
+
+	"github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/steveyegge/beads/internal/storage/schema"
 )
 
 // Flatten squashes all Dolt commit history into a single commit using
@@ -13,7 +16,9 @@ import (
 //  4. Stage all + commit as a single snapshot
 //  5. Checkout main
 //  6. Soft-reset main to the flattened branch (keeps main's working set)
-//  7. Delete temp branch
+//  7. Commit main's staged set, if any: a commit that reached main while
+//     the snapshot was built, or rows already staged
+//  8. Delete temp branch
 //
 // Callers should run PruneRemoteRefs and then DoltGC afterward to reclaim disk
 // space from orphaned history — remote-tracking refs still anchor the
@@ -63,7 +68,6 @@ func Flatten(ctx context.Context, conn DBConn) error {
 		// dropped every foreign key on the dolt_ignored (clone-local) tables
 		// that live only there (bd-7bpkd).
 		{"reset main to flattened", "CALL DOLT_RESET('--soft', 'flatten-tmp')", nil},
-		{"delete temp branch", "CALL DOLT_BRANCH('-D', 'flatten-tmp')", nil},
 	}
 
 	for _, s := range steps {
@@ -72,7 +76,26 @@ func Flatten(ctx context.Context, conn DBConn) error {
 		}
 	}
 
-	return nil
+	// A commit that reached main after flatten-tmp was built, and rows that
+	// were already staged, are now staged on main, outside HEAD. Commit the
+	// staged set only: rows that are just in the working set stay pending, as
+	// they were. The landed commit does not keep its own hash or message:
+	// flattening rewrites that history anyway.
+	staged, err := issueops.HasStagedChanges(ctx, conn)
+	if err != nil {
+		return fmt.Errorf("flatten step %q: %w", "check main for staged changes", err)
+	}
+	if staged {
+		err = schema.DrainCall(ctx, conn, "CALL DOLT_COMMIT('-m', ?)",
+			"flatten: commit changes that reached main during flatten")
+		// Another writer committing main's staged set first leaves nothing
+		// to commit, which is the outcome this step wants.
+		if err != nil && !issueops.IsNothingToCommitError(err) {
+			return fmt.Errorf("flatten step %q: %w", "commit changes that reached main", err)
+		}
+	}
+
+	return execSQL("delete temp branch", "CALL DOLT_BRANCH('-D', 'flatten-tmp')")
 }
 
 // FlattenDryRun returns the commit count and initial hash without modifying anything.
