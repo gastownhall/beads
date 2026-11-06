@@ -1208,6 +1208,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A managed git hook now fails when its chained `<hook>.old` exits 3, as it
+  does for every other status. The hook section read a 3 from `bd hooks run`
+  as "database not initialized" and let the git operation through, but
+  `bd hooks run` never opens the database, so that 3 was always the chained
+  hook's own refusal. Run `bd hooks install` to update installed hooks.
 - `bd config get` for a config.yaml, git-config or user-global key no longer
   opens the database just because one exists, so it answers from those files
   while the Dolt server is down instead of failing the open (GH#5108). In
