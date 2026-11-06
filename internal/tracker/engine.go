@@ -944,18 +944,44 @@ func (e *Engine) fetchPrelinkedIssues(ctx context.Context, fetched []TrackerIssu
 		}
 	}
 
+	// A store that can read many issues' external_ref history at once
+	// answers every eligible local in one call; otherwise each local is read
+	// on its own below.
+	var previousRefs map[string]string
+	batched := false
+	if querier, ok := externalRefHistoryBatchQuerier(e.Store); ok {
+		var candidates []string
+		for _, local := range localIssues {
+			if _, ok := e.prelinkedRef(local); ok {
+				candidates = append(candidates, local.ID)
+			}
+		}
+		if len(candidates) > 0 {
+			refs, err := querier.PreviousExternalRefs(ctx, candidates, *lastSync)
+			if err != nil {
+				return nil, hydratedLocalIDs, fmt.Errorf("checking pre-linked local issues: %w", err)
+			}
+			previousRefs, batched = refs, true
+		}
+	}
+
 	var hydrated []TrackerIssue
 	for _, local := range localIssues {
-		if local == nil || local.ExternalRef == nil {
+		ref, ok := e.prelinkedRef(local)
+		if !ok {
 			continue
 		}
-		ref := strings.TrimSpace(*local.ExternalRef)
-		if ref == "" || !e.Tracker.IsExternalRef(ref) {
-			continue
-		}
-		changedAfterLastSync, err := e.externalRefChangedAfter(ctx, local, ref, *lastSync)
-		if err != nil {
-			return hydrated, hydratedLocalIDs, fmt.Errorf("checking pre-linked local issue %s: %w", local.ID, err)
+		var changedAfterLastSync bool
+		if batched {
+			// The same decision externalRefChangedAfter makes per issue.
+			previousRef, found := previousRefs[local.ID]
+			changedAfterLastSync = !found || strings.TrimSpace(previousRef) != ref
+		} else {
+			changed, err := e.externalRefChangedAfter(ctx, local, ref, *lastSync)
+			if err != nil {
+				return hydrated, hydratedLocalIDs, fmt.Errorf("checking pre-linked local issue %s: %w", local.ID, err)
+			}
+			changedAfterLastSync = changed
 		}
 		if !changedAfterLastSync {
 			continue
@@ -996,6 +1022,19 @@ func (e *Engine) fetchPrelinkedIssues(ctx context.Context, fetched []TrackerIssu
 		seen[strings.ToLower(identifier)] = struct{}{}
 	}
 	return hydrated, hydratedLocalIDs, nil
+}
+
+// prelinkedRef returns local's trimmed external_ref when it names an issue
+// in this tracker, the locals fetchPrelinkedIssues checks.
+func (e *Engine) prelinkedRef(local *types.Issue) (string, bool) {
+	if local == nil || local.ExternalRef == nil {
+		return "", false
+	}
+	ref := strings.TrimSpace(*local.ExternalRef)
+	if ref == "" || !e.Tracker.IsExternalRef(ref) {
+		return "", false
+	}
+	return ref, true
 }
 
 // externalRefChangedAfter reports whether local's external_ref differed

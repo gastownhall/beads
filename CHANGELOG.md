@@ -685,6 +685,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Tracker pulls read pre-linked issues' external_ref history in batches.**
+  `bd linear sync`, `bd jira sync` and the other tracker pulls used to run
+  one Dolt history query per pre-linked local issue; they now read up to 16
+  issues per query, so an incremental pull of a database with many linked
+  issues makes far fewer history reads.
 - **`bd rules compact` previews by default and applies only with `--force`.**
   It used to apply merges by default, writing the composite and deleting the
   source rules. Scripts using `--auto` or `--group` to apply merges must add

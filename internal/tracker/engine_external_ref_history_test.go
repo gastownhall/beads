@@ -12,6 +12,9 @@ package tracker
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -315,5 +318,225 @@ func TestEngineExternalRefChangedAfter_DecoratedDoltServerStoreUnchanged(t *test
 	}
 	if inner.calls != 1 {
 		t.Fatalf("expected inner Dolt-server store to be queried once via unwrap, got %d calls", inner.calls)
+	}
+}
+
+// prelinkedHistoryStore answers the per-issue external_ref history read for
+// fetchPrelinkedIssues tests from a fixed map: an id absent from previous has
+// no history at the cutoff.
+type prelinkedHistoryStore struct {
+	storage.Storage
+
+	previous    map[string]string
+	singleErr   map[string]error
+	singleCalls []string
+}
+
+func (s *prelinkedHistoryStore) PreviousExternalRef(_ context.Context, id string, _ time.Time) (string, bool, error) {
+	s.singleCalls = append(s.singleCalls, id)
+	if err := s.singleErr[id]; err != nil {
+		return "", false, err
+	}
+	ref, ok := s.previous[id]
+	return ref, ok, nil
+}
+
+// prelinkedBatchHistoryStore adds the batch read over the same map. The
+// method is declared here without naming the engine's batch interface, so
+// the fake describes a store's shape rather than the engine's expectations.
+type prelinkedBatchHistoryStore struct {
+	*prelinkedHistoryStore
+
+	batchCalls   [][]string
+	batchErr     error
+	batchPartial map[string]string // returned alongside batchErr
+	onBatch      func()
+}
+
+func (s *prelinkedBatchHistoryStore) PreviousExternalRefs(_ context.Context, ids []string, _ time.Time) (map[string]string, error) {
+	s.batchCalls = append(s.batchCalls, append([]string(nil), ids...))
+	if s.onBatch != nil {
+		s.onBatch()
+	}
+	if s.batchErr != nil {
+		return s.batchPartial, s.batchErr
+	}
+	refs := make(map[string]string)
+	for _, id := range ids {
+		if ref, ok := s.previous[id]; ok {
+			refs[id] = ref
+		}
+	}
+	return refs, nil
+}
+
+// prelinkTracker records every FetchIssue identifier in call order.
+type prelinkTracker struct {
+	*mockExternalRefTracker
+	fetched   []string
+	failFetch map[string]error
+}
+
+func (p *prelinkTracker) FetchIssue(ctx context.Context, identifier string) (*TrackerIssue, error) {
+	p.fetched = append(p.fetched, identifier)
+	if err := p.failFetch[identifier]; err != nil {
+		return nil, err
+	}
+	return p.mockExternalRefTracker.FetchIssue(ctx, identifier)
+}
+
+var prelinkLastSync = time.Date(2026, time.February, 3, 4, 5, 6, 0, time.UTC)
+
+const prelinkRefPrefix = "https://prelink.test/"
+
+func prelinkRef(identifier string) string { return prelinkRefPrefix + identifier }
+
+func newPrelinkTracker(remote ...string) *prelinkTracker {
+	mock := newMockTracker("prelink")
+	for _, identifier := range remote {
+		mock.issues = append(mock.issues, TrackerIssue{ID: identifier, Identifier: identifier, Title: identifier})
+	}
+	return &prelinkTracker{mockExternalRefTracker: &mockExternalRefTracker{
+		mockTracker: mock,
+		isRef:       func(ref string) bool { return strings.HasPrefix(ref, prelinkRefPrefix) },
+	}}
+}
+
+func prelinkLocal(id string, ref *string) *types.Issue {
+	return &types.Issue{ID: id, ExternalRef: ref, CreatedAt: prelinkLastSync.Add(-time.Hour), UpdatedAt: prelinkLastSync.Add(-time.Hour)}
+}
+
+// prelinkScenario is one pull's pre-linked locals, the stored history at
+// last_sync and the rows the bulk fetch returned, covering every way
+// fetchPrelinkedIssues can decide a local.
+type prelinkScenario struct {
+	locals   []*types.Issue
+	previous map[string]string
+	fetched  []TrackerIssue
+	remote   []string
+	eligible []string // the locals whose history the pull must read, in order
+}
+
+func newPrelinkScenario() prelinkScenario {
+	return prelinkScenario{
+		locals: []*types.Issue{
+			nil,
+			prelinkLocal("bd-noref", nil),
+			prelinkLocal("bd-emptyref", strPtr("")),
+			prelinkLocal("bd-blank", strPtr("   ")),
+			prelinkLocal("bd-foreign", strPtr("https://other.test/EXT-FOREIGN")),
+			prelinkLocal("bd-same", strPtr(prelinkRef("EXT-SAME"))),
+			prelinkLocal("bd-trim", strPtr(" "+prelinkRef("EXT-TRIM")+" ")),
+			prelinkLocal("bd-changed", strPtr(prelinkRef("EXT-CHANGED"))),
+			prelinkLocal("bd-missing", strPtr(prelinkRef("EXT-MISSING"))),
+			prelinkLocal("bd-null", strPtr(prelinkRef("EXT-NULL"))),
+			prelinkLocal("bd-seen", strPtr(prelinkRef("EXT-SEEN"))),
+			prelinkLocal("bd-overlap", strPtr(prelinkRef("EXT-OVERLAP"))),
+			prelinkLocal("bd-dup-a", strPtr(prelinkRef("EXT-DUP"))),
+			prelinkLocal("bd-dup-b", strPtr(prelinkRef("ext-dup"))),
+			prelinkLocal("bd-gone", strPtr(prelinkRef("EXT-GONE"))),
+			prelinkLocal("bd-noident", strPtr(prelinkRefPrefix)),
+		},
+		previous: map[string]string{
+			"bd-same":    prelinkRef("EXT-SAME"),
+			"bd-trim":    prelinkRef("EXT-TRIM") + "  ",
+			"bd-changed": prelinkRef("EXT-OLD"),
+			"bd-null":    "",
+		},
+		fetched: []TrackerIssue{
+			{ID: "EXT-SEEN", Identifier: "EXT-SEEN", UpdatedAt: prelinkLastSync.Add(time.Minute)},
+			{ID: "EXT-OVERLAP", Identifier: "EXT-OVERLAP", UpdatedAt: prelinkLastSync.Add(-time.Minute)},
+		},
+		remote: []string{"EXT-SAME", "EXT-TRIM", "EXT-CHANGED", "EXT-MISSING", "EXT-NULL", "EXT-SEEN", "EXT-OVERLAP", "EXT-DUP"},
+		eligible: []string{
+			"bd-same", "bd-trim", "bd-changed", "bd-missing", "bd-null", "bd-seen",
+			"bd-overlap", "bd-dup-a", "bd-dup-b", "bd-gone", "bd-noident",
+		},
+	}
+}
+
+// prelinkOutcome is everything fetchPrelinkedIssues decided for one pull.
+type prelinkOutcome struct {
+	hydrated []string
+	localIDs []string
+	fetched  []string
+	err      error
+	warnings []string
+}
+
+func runPrelinked(ctx context.Context, sc prelinkScenario, store Store, tracker *prelinkTracker, lastSync *time.Time) prelinkOutcome {
+	e := &Engine{Tracker: tracker, Store: store}
+	hydrated, localIDs, err := e.fetchPrelinkedIssues(ctx, sc.fetched, sc.locals, lastSync)
+	out := prelinkOutcome{fetched: tracker.fetched, err: err, warnings: e.warnings}
+	for _, issue := range hydrated {
+		out.hydrated = append(out.hydrated, issue.Identifier)
+	}
+	for id := range localIDs {
+		out.localIDs = append(out.localIDs, id)
+	}
+	sort.Strings(out.localIDs)
+	return out
+}
+
+func (sc prelinkScenario) stores() (*prelinkedHistoryStore, *prelinkedBatchHistoryStore) {
+	legacy := &prelinkedHistoryStore{previous: sc.previous}
+	batch := &prelinkedBatchHistoryStore{prelinkedHistoryStore: &prelinkedHistoryStore{previous: sc.previous}}
+	return legacy, batch
+}
+
+// TestFetchPrelinkedIssuesMakesOneBatchCall covers AC-1: a store that can
+// read many issues' history at once gets one call per pull, naming every
+// eligible local, and the per-issue read is never used.
+func TestFetchPrelinkedIssuesMakesOneBatchCall(t *testing.T) {
+	ctx := context.Background()
+	lastSync := prelinkLastSync
+	sc := prelinkScenario{
+		locals: []*types.Issue{
+			prelinkLocal("bd-1", strPtr(prelinkRef("EXT-1"))),
+			prelinkLocal("bd-2", strPtr(prelinkRef("EXT-2"))),
+			prelinkLocal("bd-3", strPtr(prelinkRef("EXT-3"))),
+		},
+		previous: map[string]string{"bd-1": prelinkRef("EXT-1")},
+		remote:   []string{"EXT-2", "EXT-3"},
+	}
+	_, store := sc.stores()
+	tracker := newPrelinkTracker(sc.remote...)
+
+	got := runPrelinked(ctx, sc, store, tracker, &lastSync)
+	if got.err != nil {
+		t.Fatalf("fetchPrelinkedIssues: %v", got.err)
+	}
+	if len(store.batchCalls) != 1 || fmt.Sprint(store.batchCalls[0]) != fmt.Sprint([]string{"bd-1", "bd-2", "bd-3"}) {
+		t.Fatalf("PreviousExternalRefs calls = %q, want one call with [bd-1 bd-2 bd-3]", store.batchCalls)
+	}
+	if len(store.singleCalls) != 0 {
+		t.Fatalf("PreviousExternalRef calls = %q, want none once the batch answered", store.singleCalls)
+	}
+	if fmt.Sprint(got.hydrated) != "[EXT-2 EXT-3]" {
+		t.Fatalf("hydrated = %v, want [EXT-2 EXT-3]", got.hydrated)
+	}
+}
+
+// TestFetchPrelinkedIssuesSkipsBatchWithNothingToCheck: no cursor or no
+// eligible local means no history read at all.
+func TestFetchPrelinkedIssuesSkipsBatchWithNothingToCheck(t *testing.T) {
+	ctx := context.Background()
+	lastSync := prelinkLastSync
+	for _, test := range []struct {
+		name     string
+		locals   []*types.Issue
+		lastSync *time.Time
+	}{
+		{"nil last_sync", newPrelinkScenario().locals, nil},
+		{"no eligible locals", []*types.Issue{nil, prelinkLocal("bd-noref", nil), prelinkLocal("bd-foreign", strPtr("https://other.test/X"))}, &lastSync},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			sc := prelinkScenario{locals: test.locals}
+			_, store := sc.stores()
+			got := runPrelinked(ctx, sc, store, newPrelinkTracker(), test.lastSync)
+			if got.err != nil || len(store.batchCalls) != 0 || len(store.singleCalls) != 0 {
+				t.Fatalf("err = %v, batch calls = %q, single calls = %q; want no history read", got.err, store.batchCalls, store.singleCalls)
+			}
+		})
 	}
 }
