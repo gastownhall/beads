@@ -511,6 +511,13 @@ func testHookProcessDeadlineWithChainedGate(t *testing.T) {
 	direct := perl[:2]
 	foreign := hookProcessChainRecorderBody
 	callback := "#!/bin/sh\n# bd-shim v1\n" + hookProcessChainRecorderBody
+	// The non-executable chain has mode 0644 and no #! line: on Windows
+	// os.Chmod cannot clear an execute bit, and Git Bash's [ -x ] reads a
+	// regular file that starts with #! as executable.
+	nonExecutable := strings.TrimPrefix(foreign, "#!/bin/sh\n")
+	if strings.HasPrefix(nonExecutable, "#!") {
+		t.Fatalf("non-executable chain fixture starts with #!, which Git Bash runs:\n%s", nonExecutable)
+	}
 	tests := []struct {
 		name      string
 		hookName  string
@@ -527,7 +534,7 @@ func testHookProcessDeadlineWithChainedGate(t *testing.T) {
 		{name: "Perl pre-push refuses", hookName: "pre-push", fixtures: perl, bdExit: 142, chainBody: foreign, wantExit: 142, wantRefus: true},
 		{name: "Perl pre-commit refuses", hookName: "pre-commit", fixtures: perl, bdExit: 142, chainBody: foreign, wantExit: 142, wantRefus: true},
 		{name: "no chain continues", hookName: "pre-commit", fixtures: gnu, bdExit: 124, wantWarn: true},
-		{name: "non-executable chain continues", hookName: "pre-commit", fixtures: gnu, bdExit: 124, chainBody: foreign, chainMode: 0o644, wantWarn: true},
+		{name: "non-executable chain continues", hookName: "pre-commit", fixtures: gnu, bdExit: 124, chainBody: nonExecutable, chainMode: 0o644, wantWarn: true},
 		{name: "beads callback chain continues", hookName: "pre-push", fixtures: perl, bdExit: 142, chainBody: callback, wantWarn: true},
 		{name: "post-merge continues", hookName: "post-merge", fixtures: gnu, bdExit: 124, chainBody: foreign, wantWarn: true},
 		{name: "post-checkout continues", hookName: "post-checkout", fixtures: perl, bdExit: 142, chainBody: foreign, wantWarn: true},
