@@ -3,6 +3,7 @@ package dolt
 import (
 	"errors"
 	"testing"
+	"time"
 
 	mysql "github.com/go-sql-driver/mysql"
 	"github.com/steveyegge/beads/internal/storage"
@@ -94,6 +95,70 @@ func TestHistory_UsesDedicatedLongTimeoutConnection(t *testing.T) {
 			"pool (store.db) instead of a fresh connection via " +
 			"openLongTimeoutConn/withReadTxLongTimeout, which is what lets " +
 			"the pool's 10s ReadTimeout keep biting long dolt_history_issues scans")
+	}
+}
+
+// TestPreviousExternalRefs_UsesDedicatedLongTimeoutConnection mirrors
+// TestHistory_UsesDedicatedLongTimeoutConnection for the batch form (GH#6605):
+// PreviousExternalRefs runs the same dolt_history_issues scan History does,
+// across as many chunk queries as the requested ids need, so it must ride
+// the same withReadTxLongTimeout/openLongTimeoutConn routing (ga-ahnxx) —
+// one history-read transaction for the whole batch, never the shared pool
+// whose 10s ReadTimeout a mature history scan outruns.
+func TestPreviousExternalRefs_UsesDedicatedLongTimeoutConnection(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	issue := &types.Issue{
+		ID:        "batch-refs-timeout-test",
+		Title:     "v1",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+		t.Fatalf("failed to create issue: %v", err)
+	}
+	if err := store.UpdateIssue(ctx, issue.ID, map[string]interface{}{
+		"external_ref": "batch-ref",
+	}, "tester"); err != nil {
+		t.Fatalf("failed to set external_ref: %v", err)
+	}
+	if err := store.Commit(ctx, "set external_ref"); err != nil {
+		t.Fatalf("failed to commit: %v", err)
+	}
+
+	// Sanity check before breaking anything, for the same reason the History
+	// test above needs one: setupTestStore checks out an isolated test branch
+	// behind Store's back, so an empty answer here would mean the batch read
+	// is consulting the wrong branch, which a nil-error check alone cannot
+	// tell from a correct empty result.
+	refs, err := store.PreviousExternalRefs(ctx, []string{issue.ID, "never-existed"}, time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatalf("PreviousExternalRefs failed before connStr corruption: %v", err)
+	}
+	if ref, ok := refs[issue.ID]; !ok || ref != "batch-ref" {
+		t.Fatalf("PreviousExternalRefs = %v, want %s -> batch-ref", refs, issue.ID)
+	}
+	if _, ok := refs["never-existed"]; ok {
+		t.Fatalf("PreviousExternalRefs = %v, want never-existed absent", refs)
+	}
+
+	cfg, err := mysql.ParseDSN(store.connStr)
+	if err != nil {
+		t.Fatalf("failed to parse store.connStr: %v", err)
+	}
+	cfg.Addr = "ga-ahnxx-test.invalid:3306"
+	store.connStr = cfg.FormatDSN()
+
+	if _, err := store.PreviousExternalRefs(ctx, []string{issue.ID}, time.Now().Add(time.Hour)); err == nil {
+		t.Fatal("expected PreviousExternalRefs to fail after store.connStr was broken; " +
+			"if it still succeeds, the batch read is going through the shared " +
+			"pool (store.db) instead of the dedicated long-timeout connection " +
+			"the history scan needs (ga-ahnxx)")
 	}
 }
 

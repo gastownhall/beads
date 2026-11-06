@@ -131,6 +131,15 @@ func PreviousExternalRefInTx(ctx context.Context, tx *sql.Tx, issueID string, as
 	return previousRef.String, true, nil
 }
 
+// externalRefHistoryChunk is one PreviousExternalRefsInTx query's id count.
+// Both IN lists of the chunk query grow linearly in the id count, and with a
+// whole pull's linked locals in one query the planner cost of evaluating
+// those lists starts to rival the scan itself. 16 keeps each query small
+// while a pull still asks only ceil(N/16) of them, all inside the caller's
+// single transaction. HistoricalIssueIDsInTx chunks the same table for the
+// same reason.
+const externalRefHistoryChunk = 16
+
 // PreviousExternalRefsInTx answers PreviousExternalRefInTx's question for
 // many issue ids in one pass: the returned map holds, for every requested id
 // that has a history entry at or before asOf, the external_ref recorded as
@@ -138,6 +147,11 @@ func PreviousExternalRefInTx(ctx context.Context, tx *sql.Tx, issueID string, as
 // no such entry (the single-id call's found=false); a present empty string
 // is a NULL or empty historical ref. Duplicate and empty ids are ignored,
 // and empty input returns an empty map without querying.
+//
+// The deduplicated ids are read in chunks of externalRefHistoryChunk —
+// ceil(N/chunk) queries in all, each carrying at most chunk ids in either
+// IN list — on the caller's one transaction; the chunk size bounds a single
+// query's shape without reopening per-chunk work for the caller.
 //
 // Each id is resolved through the same latest-qualifying-commit-date rows
 // the single-id helper reads. When an id's greatest qualifying date is tied
@@ -168,19 +182,26 @@ func PreviousExternalRefsInTx(ctx context.Context, tx *sql.Tx, issueIDs []string
 	if len(unique) == 0 {
 		return refs, nil
 	}
-	if err := previousExternalRefsForIDsInTx(ctx, tx, unique, asOf, refs); err != nil {
-		return nil, err
+	for start := 0; start < len(unique); start += externalRefHistoryChunk {
+		end := start + externalRefHistoryChunk
+		if end > len(unique) {
+			end = len(unique)
+		}
+		if err := previousExternalRefsForIDsInTx(ctx, tx, unique[start:end], asOf, refs); err != nil {
+			return nil, err
+		}
 	}
 	return refs, nil
 }
 
-// previousExternalRefsForIDsInTx resolves ids — already deduplicated and
-// non-empty — into refs through one derived-table MAX(commit_date) join: the
-// inner subquery finds each id's greatest qualifying commit_date, and the
-// outer side returns the rows holding those dates. Both sides restrict to
-// the requested ids and the cutoff, and ids and the cutoff are bound as
-// parameters, never inlined. The subquery wrappers avoid Dolt's max1Row
-// optimization on PK lookups, as HistoryInTx does.
+// previousExternalRefsForIDsInTx resolves one chunk of ids — already
+// deduplicated and non-empty — into refs through one derived-table
+// MAX(commit_date) join: the inner subquery finds each id's greatest
+// qualifying commit_date, and the outer side returns the rows holding those
+// dates. Both sides restrict to the requested ids and the cutoff, and ids
+// and the cutoff are bound as parameters, never inlined. The subquery
+// wrappers avoid Dolt's max1Row optimization on PK lookups, as HistoryInTx
+// does.
 func previousExternalRefsForIDsInTx(ctx context.Context, tx *sql.Tx, ids []string, asOf time.Time, refs map[string]string) error {
 	args := make([]any, 0, 2*len(ids)+2)
 	for _, id := range ids {
