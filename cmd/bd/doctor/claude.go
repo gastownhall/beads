@@ -249,6 +249,11 @@ func primeCheckCommand(repoPath string, args ...string) (*exec.Cmd, error) {
 	}
 	cmd := exec.Command(exe, args...)
 	cmd.Dir = absRepoPath
+	// Pin the workspace selector too: an inherited BEADS_DIR takes precedence
+	// over cwd discovery, so Dir alone would let the child resolve a
+	// different workspace than the one doctor diagnosed. Environ after
+	// setting Dir also gives the child a consistent PWD.
+	cmd.Env = append(cmd.Environ(), "BEADS_DIR="+ResolveBeadsDirForRepo(absRepoPath))
 	return cmd, nil
 }
 

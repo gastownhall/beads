@@ -4,11 +4,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/cmd/bd/setup"
+	"github.com/steveyegge/beads/internal/utils"
 )
 
 func TestCheckBdInPath(t *testing.T) {
@@ -1078,7 +1080,8 @@ func TestPrimeChecksDoNotExecPathBd(t *testing.T) {
 
 		fakeDir := t.TempDir()
 		logPath := filepath.Join(t.TempDir(), "path-bd.log")
-		if err := os.WriteFile(filepath.Join(fakeDir, "bd"), []byte(fakeBdRecorderScript(logPath)), 0o755); err != nil {
+		t.Setenv("PRIME_CHECK_LOG", logPath)
+		if err := os.WriteFile(filepath.Join(fakeDir, "bd"), []byte(fakeBdRecorderScript()), 0o755); err != nil {
 			t.Fatal(err)
 		}
 		if decoyOnPath {
@@ -1123,8 +1126,239 @@ func TestPrimeChecksDoNotExecPathBd(t *testing.T) {
 }
 
 // fakeBdRecorderScript returns a shell script that records how it was called
-// (argv, physical cwd, effective BEADS_DIR) into logPath and prints the
-// output VerifyPrimeOutput classifies as CLI mode.
-func fakeBdRecorderScript(logPath string) string {
-	return "#!/bin/sh\n{ echo \"argv: $*\"; echo \"cwd: $(pwd -P)\"; echo \"beads_dir: ${BEADS_DIR:-}\"; } >> " + logPath + "\necho 'bd ready'\n"
+// (argv, physical cwd, effective BEADS_DIR) into the file named by
+// PRIME_CHECK_LOG and prints the output VerifyPrimeOutput classifies as CLI
+// mode. Routing the log through the environment lets every subtest get its
+// own log file from one script.
+func fakeBdRecorderScript() string {
+	return "#!/bin/sh\n{ echo \"argv: $*\"; echo \"cwd: $(pwd -P)\"; echo \"beads_dir: ${BEADS_DIR:-}\"; } >> \"$PRIME_CHECK_LOG\"\necho 'bd ready'\n"
+}
+
+// stubPrimeCheckBinary points the prime checks' executable resolver at fn for
+// the duration of the test and restores it afterwards. Tests using it must
+// not run in parallel.
+func stubPrimeCheckBinary(t *testing.T, fn func() (string, error)) {
+	t.Helper()
+	orig := primeCheckBinary
+	primeCheckBinary = fn
+	t.Cleanup(func() { primeCheckBinary = orig })
+}
+
+// effectiveEnvValue returns the value the child would see for key: os/exec
+// dedups environment entries in favor of later values, so the last matching
+// entry wins.
+func effectiveEnvValue(t *testing.T, env []string, key string) string {
+	t.Helper()
+	value := ""
+	prefix := key + "="
+	for _, entry := range env {
+		if strings.HasPrefix(entry, prefix) {
+			value = strings.TrimPrefix(entry, prefix)
+		}
+	}
+	return value
+}
+
+// TestPrimeCheckCommandPinsWorkspace pins the GH#8130 workspace contract of
+// the prime-check command builder: whatever the caller's cwd and BEADS_DIR
+// are, the child runs with cwd pinned to the absolute diagnosed repo path
+// and BEADS_DIR pinned to doctor's resolution for that path.
+func TestPrimeCheckCommandPinsWorkspace(t *testing.T) {
+	// A sentinel standing in for the resolved running binary.
+	sentinel := filepath.Join(t.TempDir(), "sentinel-bd")
+	if err := os.WriteFile(sentinel, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stubPrimeCheckBinary(t, func() (string, error) { return sentinel, nil })
+
+	tests := []struct {
+		name      string
+		setBEADSDIR bool
+		prep      func(t *testing.T) (repoPath, wantDir, wantBeadsDir string)
+	}{
+		{
+			name: "absolute repo path",
+			prep: func(t *testing.T) (string, string, string) {
+				repo := t.TempDir()
+				if err := os.MkdirAll(filepath.Join(repo, ".beads"), 0o750); err != nil {
+					t.Fatal(err)
+				}
+				return repo, repo, utils.CanonicalizePath(filepath.Join(repo, ".beads"))
+			},
+		},
+		{
+			name: "relative repo path",
+			prep: func(t *testing.T) (string, string, string) {
+				parent := t.TempDir()
+				repo := filepath.Join(parent, "ws")
+				if err := os.MkdirAll(filepath.Join(repo, ".beads"), 0o750); err != nil {
+					t.Fatal(err)
+				}
+				t.Chdir(parent)
+				return "ws", repo, utils.CanonicalizePath(filepath.Join(repo, ".beads"))
+			},
+		},
+		{
+			name:        "conflicting BEADS_DIR in environment",
+			setBEADSDIR: true,
+			prep: func(t *testing.T) (string, string, string) {
+				repo := t.TempDir()
+				if err := os.MkdirAll(filepath.Join(repo, ".beads"), 0o750); err != nil {
+					t.Fatal(err)
+				}
+				return repo, repo, utils.CanonicalizePath(filepath.Join(repo, ".beads"))
+			},
+		},
+		{
+			name: "redirected .beads directory",
+			prep: func(t *testing.T) (string, string, string) {
+				repo := t.TempDir()
+				if err := os.MkdirAll(filepath.Join(repo, ".beads"), 0o750); err != nil {
+					t.Fatal(err)
+				}
+				target := t.TempDir()
+				// A bare metadata.json makes the redirect target a valid
+				// beads directory for FollowRedirect.
+				if err := os.WriteFile(filepath.Join(target, "metadata.json"), []byte("{}\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(repo, ".beads", "redirect"), []byte(target+"\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				return repo, repo, utils.CanonicalizePath(target)
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repoPath, wantDir, wantBeadsDir := tt.prep(t)
+			if tt.setBEADSDIR {
+				t.Setenv("BEADS_DIR", filepath.Join(t.TempDir(), "caller-workspace"))
+			}
+
+			for _, args := range [][]string{{"prime"}, {"prime", "--help"}} {
+				cmd, err := primeCheckCommand(repoPath, args...)
+				if err != nil {
+					t.Fatalf("primeCheckCommand(%q, %v): %v", repoPath, args, err)
+				}
+				if cmd.Path != sentinel {
+					t.Errorf("args %v: child Path = %q, want the resolved executable %q", args, cmd.Path, sentinel)
+				}
+				wantArgs := append([]string{sentinel}, args...)
+				if !reflect.DeepEqual(cmd.Args, wantArgs) {
+					t.Errorf("args %v: child Args = %q, want %q", args, cmd.Args, wantArgs)
+				}
+				if cmd.Dir != wantDir {
+					t.Errorf("args %v: child Dir = %q, want the absolute diagnosed repo path %q", args, cmd.Dir, wantDir)
+				}
+				if got := effectiveEnvValue(t, cmd.Env, "BEADS_DIR"); got != wantBeadsDir {
+					t.Errorf("args %v: child BEADS_DIR = %q, want doctor's resolution for the repo %q", args, got, wantBeadsDir)
+				}
+			}
+		})
+	}
+}
+
+// TestPrimeChecksRunResolvedBinaryInDiagnosedWorkspace runs both prime checks
+// against a recording executable resolved by the stub (standing in for the
+// running binary), with a decoy `bd` first on PATH and with an empty PATH:
+// the checks must execute the resolved binary in the diagnosed workspace and
+// report its result, never the decoy's.
+func TestPrimeChecksRunResolvedBinaryInDiagnosedWorkspace(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("recording executables are shell scripts")
+	}
+
+	repoPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoPath, ".beads"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repoPath, "CLAUDE.md"), []byte("Run `bd prime` for workflow context.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wantBeadsDir := utils.CanonicalizePath(filepath.Join(repoPath, ".beads"))
+
+	// The recording "running binary", kept off PATH.
+	exeDir := t.TempDir()
+	exe := filepath.Join(exeDir, "bd")
+	if err := os.WriteFile(exe, []byte(fakeBdRecorderScript()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stubPrimeCheckBinary(t, func() (string, error) { return exe, nil })
+
+	// A decoy that must never run.
+	decoyLog := filepath.Join(t.TempDir(), "path-bd.log")
+	decoyDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(decoyDir, "bd"), []byte(fakeBdRecorderScript()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name    string
+		pathEnv string
+	}{
+		{"decoy bd first on PATH", decoyDir + string(os.PathListSeparator) + os.Getenv("PATH")},
+		{"empty PATH", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			childLog := filepath.Join(t.TempDir(), "child-bd.log")
+			t.Setenv("PRIME_CHECK_LOG", childLog)
+			t.Setenv("PATH", tc.pathEnv)
+			t.Setenv("HOME", t.TempDir())
+			t.Setenv("USERPROFILE", t.TempDir())
+			t.Setenv("BEADS_DIR", filepath.Join(t.TempDir(), "caller-workspace"))
+			t.Chdir(t.TempDir()) // caller's cwd is a different workspace
+
+			prime := VerifyPrimeOutput(repoPath)
+			docs := CheckDocumentationBdPrimeReference(repoPath)
+
+			if data, err := os.ReadFile(decoyLog); err == nil {
+				t.Fatalf("prime checks executed the PATH bd instead of the running binary:\n%s", data)
+			}
+
+			data, err := os.ReadFile(childLog)
+			if err != nil {
+				t.Fatalf("the resolved binary was not executed: %v", err)
+			}
+			wantCwd := utils.CanonicalizePath(repoPath)
+			for _, wantArgv := range []string{"prime", "prime --help"} {
+				if !strings.Contains(string(data), "argv: "+wantArgv+"\n") {
+					t.Errorf("resolved binary was not called with %q; log:\n%s", wantArgv, data)
+				}
+			}
+			if cwds := grepLines(string(data), "cwd: "); len(cwds) != 2 || cwds[0] != wantCwd || cwds[1] != wantCwd {
+				t.Errorf("child cwd = %q, want the diagnosed workspace %q for both calls", cwds, wantCwd)
+			}
+			if dirs := grepLines(string(data), "beads_dir: "); len(dirs) != 2 || dirs[0] != wantBeadsDir || dirs[1] != wantBeadsDir {
+				t.Errorf("child BEADS_DIR = %q, want doctor's resolution %q for both calls", dirs, wantBeadsDir)
+			}
+
+			if prime.Status != "ok" || prime.Message != "CLI mode detected" {
+				t.Errorf("VerifyPrimeOutput = %q/%q, want ok/\"CLI mode detected\"", prime.Status, prime.Message)
+			}
+			if docs.Status != "ok" || !strings.Contains(docs.Detail, "CLAUDE.md") {
+				t.Errorf("CheckDocumentationBdPrimeReference = %q/%q, want ok with the referencing file in Detail", docs.Status, docs.Detail)
+			}
+		})
+	}
+
+	// With no bd on PATH at all, the separate availability check still warns;
+	// the prime checks above must not depend on it.
+	t.Run("availability check warns on empty PATH", func(t *testing.T) {
+		t.Setenv("PATH", "")
+		if check := CheckBdInPath(); check.Status != "warning" {
+			t.Errorf("CheckBdInPath = %q/%q, want warning when no bd is on PATH", check.Status, check.Message)
+		}
+	})
+}
+
+// grepLines returns the remainder of every line in log starting with prefix.
+func grepLines(log, prefix string) []string {
+	var out []string
+	for _, line := range strings.Split(log, "\n") {
+		if strings.HasPrefix(line, prefix) {
+			out = append(out, strings.TrimPrefix(line, prefix))
+		}
+	}
+	return out
 }
