@@ -3,11 +3,15 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/git"
+	"github.com/steveyegge/beads/internal/storage/schema"
 )
 
 func TestGetVersionsSince(t *testing.T) {
@@ -261,7 +265,7 @@ func TestTrackBdVersion_UpgradeDetection(t *testing.T) {
 	previousVersion = ""
 
 	// trackBdVersion should detect upgrade
-	trackBdVersion()
+	pending := trackBdVersion()
 
 	// Should detect upgrade
 	if !versionUpgradeDetected {
@@ -272,9 +276,13 @@ func TestTrackBdVersion_UpgradeDetection(t *testing.T) {
 		t.Errorf("previousVersion = %q, want %q", previousVersion, "0.22.0")
 	}
 
-	// Should have updated .local_version to current version
-	localVersion := readLocalVersion(localVersionPath)
-	if localVersion != Version {
+	// The upgrade is held back until its maintenance settles (#6929)...
+	if localVersion := readLocalVersion(localVersionPath); localVersion != "0.22.0" {
+		t.Errorf(".local_version = %q before the upgrade settled, want %q", localVersion, "0.22.0")
+	}
+	// ...and persisting it records the current version.
+	pending.persist()
+	if localVersion := readLocalVersion(localVersionPath); localVersion != Version {
 		t.Errorf(".local_version = %q, want %q", localVersion, Version)
 	}
 }
@@ -395,7 +403,7 @@ func TestTrackBdVersion_HeadStampChangeDetectedAsUpgrade(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			localVersionPath := newTrackingWorkspace(t, tt.lastVersion, tt.binVersion)
 
-			trackBdVersion()
+			pending := trackBdVersion()
 
 			if versionUpgradeDetected != tt.wantDetected {
 				t.Errorf("versionUpgradeDetected = %v, want %v", versionUpgradeDetected, tt.wantDetected)
@@ -407,6 +415,16 @@ func TestTrackBdVersion_HeadStampChangeDetectedAsUpgrade(t *testing.T) {
 			if previousVersion != wantPrevious {
 				t.Errorf("previousVersion = %q, want %q", previousVersion, wantPrevious)
 			}
+			// A detected upgrade stays pending until its maintenance settles.
+			if (pending != nil) != tt.wantDetected {
+				t.Errorf("pending marker = %v, want one only for a detected upgrade", pending)
+			}
+			if tt.wantDetected {
+				if got := readLocalVersion(localVersionPath); got != tt.lastVersion {
+					t.Errorf(".local_version = %q before the upgrade settled, want %q", got, tt.lastVersion)
+				}
+			}
+			pending.persist()
 			if got := readLocalVersion(localVersionPath); got != tt.binVersion {
 				t.Errorf(".local_version = %q, want %q", got, tt.binVersion)
 			}
@@ -644,3 +662,130 @@ func TestAutoMigrateOnVersionBump_NoDatabase(t *testing.T) {
 // persistence testing through autoMigrateOnVersionBump -> dolt.NewFromConfig.
 // Automatic schema migration is exercised here through the Dolt backend.
 // Dolt-based migration testing is covered by TestInitDoltMetadata in init_test.go.
+
+// TestTrackBdVersion_UpgradeDefersMarkerPersist pins the first half of
+// gastownhall/beads#6929: detecting an upgrade must not rewrite .local_version.
+// The marker is the one-shot signal the version-bump maintenance reads, and
+// writing it at detection consumed the retry of every failed upgrade.
+func TestTrackBdVersion_UpgradeDefersMarkerPersist(t *testing.T) {
+	localVersionPath := newTrackingWorkspace(t, "1.1.0", "1.3.0")
+
+	trackBdVersion()
+
+	if !versionUpgradeDetected || previousVersion != "1.1.0" {
+		t.Fatalf("detection = (%v, %q), want (true, %q)", versionUpgradeDetected, previousVersion, "1.1.0")
+	}
+	if got := readLocalVersion(localVersionPath); got != "1.1.0" {
+		t.Errorf(".local_version = %q right after detection, want the old %q kept until maintenance settles", got, "1.1.0")
+	}
+}
+
+// newVersionBumpWorkspace is newTrackingWorkspace plus the local Dolt data
+// directory autoMigrateOnVersionBump stats before it reaches the store, so a
+// version bump in it runs the store-touching tail. It returns the .beads
+// directory and the .local_version path.
+func newVersionBumpWorkspace(t *testing.T, lastVersion, binVersion string) (beadsDir, localVersionPath string) {
+	t.Helper()
+	localVersionPath = newTrackingWorkspace(t, lastVersion, binVersion)
+	beadsDir = filepath.Dir(localVersionPath)
+	if err := os.MkdirAll(filepath.Join(beadsDir, "dolt"), 0o755); err != nil {
+		t.Fatalf("create local dolt data dir: %v", err)
+	}
+	return beadsDir, localVersionPath
+}
+
+// stubReconcileVersionBump replaces the store-touching tail of the version-bump
+// maintenance with outcomes[i] for the i-th attempt (the last outcome repeats)
+// and returns the attempt counter. The override is restored on cleanup.
+func stubReconcileVersionBump(t *testing.T, outcomes ...error) *int {
+	t.Helper()
+	attempts := 0
+	orig := reconcileVersionBump
+	reconcileVersionBump = func(context.Context, string) error {
+		i := attempts
+		attempts++
+		if i >= len(outcomes) {
+			i = len(outcomes) - 1
+		}
+		return outcomes[i]
+	}
+	t.Cleanup(func() { reconcileVersionBump = orig })
+	return &attempts
+}
+
+// invokeVersionBump runs the pre-run's version sequence the way one bd
+// invocation does: fresh detection state, detection, then the maintenance
+// that settles (or keeps pending) the marker.
+func invokeVersionBump(beadsDir string) {
+	versionUpgradeDetected, previousVersion = false, ""
+	pending := trackBdVersion()
+	runVersionBumpMaintenance(pending, beadsDir)
+}
+
+// TestVersionBump_DirtyTablesKeepsMarkerAndRetries is gastownhall/beads#6929
+// across invocations: a maintenance failure that is not a deliberate deferral
+// keeps the old marker, so the next invocation detects the same upgrade and
+// tries again; once an attempt succeeds the marker advances and the
+// maintenance stops.
+func TestVersionBump_DirtyTablesKeepsMarkerAndRetries(t *testing.T) {
+	pinJSONOutput(t, true) // keep any notice off the test's stderr
+	for _, tt := range []struct {
+		name string
+		err  error
+	}{
+		{name: "dirty tables", err: fmt.Errorf("failed to open database: %w", &schema.DirtyTablesError{Tables: []string{"issues"}})},
+		{name: "generic open failure", err: fmt.Errorf("failed to open database: %w", errors.New("connection refused"))},
+		{name: "version markers unavailable", err: fmt.Errorf("version markers unavailable: %w", errors.New("no role"))},
+		{name: "reconcile failure", err: fmt.Errorf("failed to reconcile database version: %w", errors.New("write failed"))},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			beadsDir, localVersionPath := newVersionBumpWorkspace(t, "1.1.0", "1.3.0")
+			attempts := stubReconcileVersionBump(t, tt.err, tt.err, nil)
+
+			for i := 1; i <= 2; i++ {
+				invokeVersionBump(beadsDir)
+				if got := readLocalVersion(localVersionPath); got != "1.1.0" {
+					t.Fatalf("invocation %d: .local_version = %q after a failed maintenance, want the old %q kept", i, got, "1.1.0")
+				}
+				if *attempts != i {
+					t.Fatalf("invocation %d: %d maintenance attempts, want %d (each invocation retries)", i, *attempts, i)
+				}
+			}
+
+			invokeVersionBump(beadsDir)
+			if got := readLocalVersion(localVersionPath); got != "1.3.0" {
+				t.Fatalf(".local_version = %q after a successful retry, want %q", got, "1.3.0")
+			}
+
+			invokeVersionBump(beadsDir)
+			if *attempts != 3 {
+				t.Errorf("%d maintenance attempts after the upgrade settled, want 3 (no further retries)", *attempts)
+			}
+		})
+	}
+
+	t.Run("malformed metadata", func(t *testing.T) {
+		beadsDir, localVersionPath := newVersionBumpWorkspace(t, "1.1.0", "1.3.0")
+		attempts := stubReconcileVersionBump(t, nil)
+		metadataPath := filepath.Join(beadsDir, "metadata.json")
+		if err := os.WriteFile(metadataPath, []byte("{not json"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		invokeVersionBump(beadsDir)
+		if got := readLocalVersion(localVersionPath); got != "1.1.0" {
+			t.Fatalf(".local_version = %q after an unreadable config, want the old %q kept", got, "1.1.0")
+		}
+
+		if err := os.WriteFile(metadataPath, []byte(`{"database":"beads.db"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		invokeVersionBump(beadsDir)
+		if got := readLocalVersion(localVersionPath); got != "1.3.0" {
+			t.Fatalf(".local_version = %q after the config was repaired, want %q", got, "1.3.0")
+		}
+		if *attempts != 1 {
+			t.Errorf("%d maintenance attempts, want 1 (the unreadable config never reached the store)", *attempts)
+		}
+	})
+}
