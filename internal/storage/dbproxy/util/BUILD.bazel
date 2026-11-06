@@ -27,16 +27,17 @@ go_test(
     name = "util_test",
     srcs = [
         "dsn_test.go",
+        "flock_retire_test.go",
         "flock_retire_windows_test.go",
     ],
     embed = [":util"],
     deps = [
         "@com_github_go_sql_driver_mysql//:mysql",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
     ] + select({
         "@rules_go//go/platform:windows": [
             "//internal/lockfile",
-            "@com_github_stretchr_testify//assert",
-            "@com_github_stretchr_testify//require",
             "@org_golang_x_sys//windows",
         ],
         "//conditions:default": [],
