@@ -574,3 +574,120 @@ func TestGeneratedGateHookRefusesTimedOutChain(t *testing.T) {
 		}
 	})
 }
+
+// TestGeneratedHookWithoutEligibleChainKeepsSkip pins the existing skip when
+// there is no foreign gate to protect: without bd, or past the deadline, the
+// hook still succeeds when no eligible <hook>.old exists.
+func TestGeneratedHookWithoutEligibleChainKeepsSkip(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fixtures are POSIX shell scripts")
+	}
+	witnessBody := func(extra string) string {
+		return "#!/bin/sh\n" + extra + "\nprintf 'ran\\n' >> \"$HOOK_TEST_WITNESS\"\nexit 1\n"
+	}
+	ineligible := []struct {
+		name  string
+		files []hookProcessFixture
+		env   []string
+	}{
+		{name: "no sidecar"},
+		{name: "non-executable sidecar"},
+		{name: "directory sidecar"},
+		{name: "managed section copy", files: []hookProcessFixture{{name: "pre-push.old", body: witnessBody(generateHookSection("pre-push"))}}},
+		{name: "thin shim", files: []hookProcessFixture{{name: "pre-push.old", body: witnessBody("# bd-shim v2")}}},
+		{name: "legacy version marker", files: []hookProcessFixture{{name: "pre-push.old", body: witnessBody("# bd-hooks-version: 0.40.0")}}},
+		{name: "inline marker", files: []hookProcessFixture{{name: "pre-push.old", body: witnessBody("# bd (beads)")}}},
+		{name: "delegation", files: []hookProcessFixture{{name: "pre-push.old", body: witnessBody(`exec bd hooks run pre-push "$@"`)}}},
+		{name: "delegation with tabs and spaces", files: []hookProcessFixture{{name: "pre-push.old", body: witnessBody("  /usr/local/bin/bd\thooks   \trun pre-push")}}},
+		{name: "parent already chaining this hook", files: []hookProcessFixture{{name: "pre-push.old", body: witnessBody("")}}, env: []string{"BD_HOOK_CHAIN_ACTIVE=pre-commit:pre-push"}},
+	}
+	for _, shell := range []struct {
+		name   string
+		option string
+		posix  bool
+	}{
+		{name: "POSIX sh", posix: true},
+		{name: "bash set -eu", option: "eu"},
+	} {
+		for _, tc := range ineligible {
+			t.Run("bd missing/"+shell.name+"/"+tc.name, func(t *testing.T) {
+				witness := filepath.Join(t.TempDir(), "witness")
+				hookCase := hookProcessCase{
+					noBD:         true,
+					shellOption:  shell.option,
+					usePOSIXSh:   shell.posix,
+					hookDirFiles: tc.files,
+					extraEnv:     append([]string{"HOOK_TEST_WITNESS=" + witness}, tc.env...),
+					trailer:      "printf 'trailing user content ran\\n'\n",
+				}
+				result := runGeneratedHookProcessWithSetup(t, hookCase, func(hookDir string) {
+					old := filepath.Join(hookDir, "pre-push.old")
+					switch tc.name {
+					case "non-executable sidecar":
+						if err := os.WriteFile(old, []byte(witnessBody("")), 0o644); err != nil {
+							t.Fatal(err)
+						}
+						if err := os.Chmod(old, 0o644); err != nil {
+							t.Fatal(err)
+						}
+					case "directory sidecar":
+						if err := os.Mkdir(old, 0o755); err != nil {
+							t.Fatal(err)
+						}
+					}
+				})
+				if result.exitCode != 0 {
+					t.Errorf("hook exit = %d, want the existing skip\n%s", result.exitCode, result.output)
+				}
+				if runs := hookChainWitnessRuns(t, witness); runs != 0 {
+					t.Errorf("ineligible sidecar ran %d times, want 0\n%s", runs, result.output)
+				}
+				if !strings.Contains(result.output, "trailing user content ran") {
+					t.Errorf("content after the managed section did not run\n%s", result.output)
+				}
+				if strings.Contains(result.output, "beads:") {
+					t.Errorf("bd-less skip without a chain should stay silent\n%s", result.output)
+				}
+			})
+		}
+	}
+
+	for _, backend := range []struct {
+		name     string
+		fixtures []hookProcessFixture
+		bdExit   int
+	}{
+		{name: "coreutils 124", fixtures: []hookProcessFixture{{name: "timeout", body: hookProcessGNUTimeoutStub}}, bdExit: 124},
+		{name: "perl 142", fixtures: []hookProcessFixture{
+			{name: "timeout", body: hookProcessIncompatibleTimeoutStub},
+			{name: "gtimeout", body: hookProcessIncompatibleGtimeoutStub},
+			{name: "perl", body: hookProcessPerlStub},
+		}, bdExit: 142},
+	} {
+		for _, hookName := range []string{"pre-commit", "pre-push"} {
+			for _, sidecar := range []struct {
+				name  string
+				files []hookProcessFixture
+			}{
+				{name: "no sidecar"},
+				{name: "bd-owned sidecar", files: []hookProcessFixture{{name: hookName + ".old", body: witnessBody("# bd-shim v2")}}},
+			} {
+				t.Run("deadline/"+backend.name+"/"+hookName+"/"+sidecar.name, func(t *testing.T) {
+					result := runGeneratedHookProcess(t, hookProcessCase{
+						hookName:     hookName,
+						fixtures:     backend.fixtures,
+						bdExit:       backend.bdExit,
+						hookDirFiles: sidecar.files,
+						extraEnv:     []string{"HOOK_TEST_WITNESS=" + filepath.Join(t.TempDir(), "witness")},
+					})
+					if result.exitCode != 0 {
+						t.Errorf("hook exit = %d, want the timeout skip\n%s", result.exitCode, result.output)
+					}
+					if !strings.Contains(result.output, "continuing without beads") {
+						t.Errorf("hook output is missing the timeout skip warning\n%s", result.output)
+					}
+				})
+			}
+		}
+	}
+}
