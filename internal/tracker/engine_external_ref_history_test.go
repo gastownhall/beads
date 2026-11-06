@@ -602,3 +602,60 @@ func TestFetchPrelinkedIssuesBatchMatchesPerIssue(t *testing.T) {
 			legacy.hydrated, legacy.localIDs, legacy.fetched, batch.hydrated, batch.localIDs, batch.fetched)
 	}
 }
+
+// TestFetchPrelinkedIssuesBatchErrorFallsBackPerIssue covers AC-3: a batch
+// read that fails while the pull's context is live costs one warning and
+// the per-issue reads; any partial map it returned is ignored, and a
+// per-issue error afterwards still aborts with the per-issue path's error.
+func TestFetchPrelinkedIssuesBatchErrorFallsBackPerIssue(t *testing.T) {
+	ctx := context.Background()
+	lastSync := prelinkLastSync
+	sc := newPrelinkScenario()
+	legacyStore, batchStore := sc.stores()
+	batchStore.batchErr = errors.New("history read timed out")
+	// Wrong answers beside the error: trusting them would skip bd-changed
+	// and hydrate bd-same.
+	batchStore.batchPartial = map[string]string{"bd-changed": prelinkRef("EXT-CHANGED"), "bd-same": prelinkRef("EXT-OTHER")}
+
+	legacy := runPrelinked(ctx, sc, legacyStore, newPrelinkTracker(sc.remote...), &lastSync)
+	batch := runPrelinked(ctx, sc, batchStore, newPrelinkTracker(sc.remote...), &lastSync)
+	if batch.err != nil {
+		t.Fatalf("fetchPrelinkedIssues after a batch error: %v", batch.err)
+	}
+	if len(batchStore.batchCalls) != 1 {
+		t.Fatalf("batch calls = %d, want 1", len(batchStore.batchCalls))
+	}
+	if fmt.Sprint(batchStore.singleCalls) != fmt.Sprint(sc.eligible) {
+		t.Fatalf("fallback single calls = %q, want every eligible local %q", batchStore.singleCalls, sc.eligible)
+	}
+	if fmt.Sprint(batch.hydrated, batch.localIDs, batch.fetched) != fmt.Sprint(legacy.hydrated, legacy.localIDs, legacy.fetched) {
+		t.Errorf("fallback result %v %v %v, want the per-issue result %v %v %v",
+			batch.hydrated, batch.localIDs, batch.fetched, legacy.hydrated, legacy.localIDs, legacy.fetched)
+	}
+	if len(batch.warnings) != 1 || !strings.Contains(batch.warnings[0], "history read timed out") {
+		t.Fatalf("warnings = %q, want exactly one naming the batch error", batch.warnings)
+	}
+
+	// A per-issue error in the fallback aborts the pull exactly as it does
+	// without the batch capability.
+	boom := errors.New("per-issue boom")
+	legacyStore, batchStore = sc.stores()
+	legacyStore.singleErr = map[string]error{"bd-null": boom}
+	batchStore.singleErr = map[string]error{"bd-null": boom}
+	batchStore.batchErr = errors.New("history read timed out")
+	legacy = runPrelinked(ctx, sc, legacyStore, newPrelinkTracker(sc.remote...), &lastSync)
+	batch = runPrelinked(ctx, sc, batchStore, newPrelinkTracker(sc.remote...), &lastSync)
+	if !errors.Is(batch.err, boom) || legacy.err == nil || batch.err.Error() != legacy.err.Error() {
+		t.Fatalf("fallback per-issue error = %v, want the per-issue path's %v", batch.err, legacy.err)
+	}
+	if !strings.HasPrefix(batch.err.Error(), "checking pre-linked local issue bd-null: ") {
+		t.Fatalf("fallback per-issue error = %q, want it to name bd-null", batch.err)
+	}
+	if fmt.Sprint(batch.hydrated, batch.localIDs, batch.fetched) != fmt.Sprint(legacy.hydrated, legacy.localIDs, legacy.fetched) {
+		t.Errorf("fallback partial result %v %v %v, want the per-issue one %v %v %v",
+			batch.hydrated, batch.localIDs, batch.fetched, legacy.hydrated, legacy.localIDs, legacy.fetched)
+	}
+	if len(batch.warnings) != 1 {
+		t.Fatalf("warnings = %q, want exactly one", batch.warnings)
+	}
+}
