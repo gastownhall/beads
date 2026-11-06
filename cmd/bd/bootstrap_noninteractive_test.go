@@ -140,6 +140,44 @@ func TestPrintBootstrapRemoteBehindGuidance(t *testing.T) {
 	}
 }
 
+// bd-bt60zz (#6687): the clone the warmup refused keeps the database it just
+// cloned, so once the migrator pushes, re-running bare `bd bootstrap` prints
+// "Nothing to do." — the guidance must name the move-aside prerequisite on
+// both branches, keep the designated-migrator choice, and keep warning that a
+// retry before the remote changes cannot help.
+func TestPrintBootstrapRemoteBehindGuidance_AdoptNeedsMoveAside(t *testing.T) {
+	for _, rerun := range []string{"bd bootstrap", "bd init"} {
+		var buf bytes.Buffer
+		printBootstrapRemoteBehindGuidance(&buf, &schema.RemoteMigrateGateError{
+			CurrentVersion: 49,
+			LatestVersion:  50,
+			Pending:        1,
+		}, "https://doltremoteapi.example.com/org/beads", rerun)
+		out := buf.String()
+		for _, banned := range []string{
+			"then other machines re-run `bd bootstrap` to adopt",
+			"wait for it to push, then\n      re-run `bd bootstrap`",
+		} {
+			if strings.Contains(out, banned) {
+				t.Errorf("%s: guidance presents bare bd bootstrap as the adopt (%q):\n%s", rerun, banned, out)
+			}
+		}
+		for _, want := range []string{
+			"Re-running `" + rerun + "` will NOT fix this",
+			"designated migrator",
+			"bd migrate --force",
+			"move it aside first",
+			"alone changes nothing",
+			"a fresh clone",
+			"run `bd migrate`",
+		} {
+			if !strings.Contains(out, want) {
+				t.Errorf("%s: guidance missing %q in:\n%s", rerun, want, out)
+			}
+		}
+	}
+}
+
 // bd-4mpy7: bd init's bootstrap path reuses the same guidance but must name
 // the command the operator actually ran in the don't-bother-retrying line.
 func TestPrintBootstrapRemoteBehindGuidance_InitWording(t *testing.T) {

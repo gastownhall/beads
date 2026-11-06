@@ -81,10 +81,15 @@ func TestNoticeSharedMigrateRefusalPerDecision(t *testing.T) {
 		decision string
 		want     string
 		absent   string
+		// wantAll are further required substrings. bd-bt60zz (#6687): an
+		// adopt notice must not present bare bd bootstrap as sufficient on an
+		// existing database; it names the move-aside prerequisite and points
+		// at the full refusal for the steps.
+		wantAll []string
 	}{
 		{decision: "shared-no-remote", want: "bd migrate schema"},
-		{decision: "adopt", want: "bd bootstrap", absent: "bd migrate schema"},
-		{decision: "adopt-ff", want: "bd bootstrap", absent: "bd migrate schema"},
+		{decision: "adopt", want: "bd bootstrap", absent: "bd migrate schema", wantAll: []string{"alone changes nothing", "moved aside first", "run 'bd migrate'"}},
+		{decision: "adopt-ff", want: "bd bootstrap", absent: "bd migrate schema", wantAll: []string{"alone changes nothing", "moved aside first", "run 'bd migrate'"}},
 		{decision: "fork-skew", want: "bd doctor", absent: "bd migrate schema"},
 		{decision: "", want: "bd migrate", absent: "bd migrate schema"},
 	} {
@@ -99,8 +104,13 @@ func TestNoticeSharedMigrateRefusalPerDecision(t *testing.T) {
 					Decision: tt.decision,
 				})
 			})
-			if !strings.Contains(out, tt.want) {
-				t.Errorf("notice for %q missing %q:\n%s", tt.decision, tt.want, out)
+			for _, want := range append([]string{tt.want}, tt.wantAll...) {
+				if !strings.Contains(out, want) {
+					t.Errorf("notice for %q missing %q:\n%s", tt.decision, want, out)
+				}
+			}
+			if strings.Contains(out, "adopt it with 'bd bootstrap'") {
+				t.Errorf("notice for %q presents bare bd bootstrap as the adopt:\n%s", tt.decision, out)
 			}
 			if tt.absent != "" && strings.Contains(out, tt.absent) {
 				t.Errorf("notice for %q must not prescribe %q (the verb does not unlock this arm):\n%s",

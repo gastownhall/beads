@@ -93,13 +93,32 @@ type EmbeddedDoltStore struct {
 // first fragment continued that sentence on the same line; it now always leads
 // the warning and so starts its own line, which is why the opening sentence is
 // wrapped as a full line rather than as a continuation.
-const lenientSharedGateGuidance = "  This is a coordination decision, not an auto-fix - do NOT run a\n" +
+//
+// The adopt bullet carries the gate's own embedded move-aside recipe
+// (schema.EmbeddedAdoptCommands): `bd bootstrap` alone never replaces the
+// existing database this warning is printed for (bd-bt60zz, #6687).
+var lenientSharedGateGuidance = "  This is a coordination decision, not an auto-fix - do NOT run a\n" +
 	"  migration unless you are the single designated migrator (only ONE\n" +
 	"  clone may migrate a shared remote, else the schema forks; #4259):\n" +
 	"    • designated migrator (only ONE machine): bd migrate --force && bd dolt push\n" +
-	"    • every other clone (another already migrated): bd bootstrap\n" +
+	"    • every other clone (another already migrated): adopt the remote's database.\n" +
+	"      bd bootstrap alone changes nothing on an existing database, so move it\n" +
+	"      aside first, from the directory containing .beads with bd stopped:\n" +
+	lenientAdoptCommandLines() +
+	"      (pick another unused destination if that one exists; keep the moved\n" +
+	"      copy until you have checked the result - bd migrate shows the full steps)\n" +
 	"    • several machines: only ONE migrates; sync each other clone and run\n" +
 	"      bd dolt pull after the migrator pushes, before upgrading it\n"
+
+// lenientAdoptCommandLines renders schema.EmbeddedAdoptCommands at the
+// warning's command indent.
+func lenientAdoptCommandLines() string {
+	var b strings.Builder
+	for _, c := range schema.EmbeddedAdoptCommands() {
+		b.WriteString("        " + c + "\n")
+	}
+	return b.String()
+}
 
 // lenientGateWarningBody preserves the generic migrate-or-adopt guidance for
 // blunt gate refusals while allowing smart-gate decisions to explain their
