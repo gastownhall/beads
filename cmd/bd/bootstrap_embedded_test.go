@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/storage/schema"
 )
 
 // bdBootstrap runs "bd bootstrap" with the given args and returns stdout.
@@ -253,6 +255,129 @@ func TestEmbeddedBootstrapJSONLAndGitOrigin(t *testing.T) {
 			t.Fatalf("bootstrap should persist sync.remote; config.yaml:\n%s", configYAML)
 		}
 	})
+}
+
+// TestEmbeddedAdoptRecipeRunsOnAGatedClone runs the gate's adopt recipe on a
+// clone the gate refuses with its adopt decision (bd-bt60zz, #6687 review):
+// the remote holds this binary's schema, the clone's recorded cursor is one
+// migration behind, and sync.remote is unset, so the remote is recorded only
+// in the database the recipe moves aside, the case its remote check exists
+// for. The schema package's tests pin the recipe's text and cannot see
+// whether a step runs on such a clone: an earlier recipe set sync.remote with
+// `bd config set`, which the gate refuses like any write. Here each step
+// before the move exits 0 and takes effect, the move and bootstrap run as
+// schema.EmbeddedAdoptCommands lists them, and the clone ends on the remote's
+// schema and data with the moved-aside copy kept.
+func TestEmbeddedAdoptRecipeRunsOnAGatedClone(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "adp")
+	run := func(args ...string) (string, error) {
+		t.Helper()
+		cmd := exec.Command(bd, args...)
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		out, err := cmd.CombinedOutput()
+		return string(out), err
+	}
+
+	// The remote gets this binary's schema and an issue. `bd dolt remote add
+	// origin` also records the remote in sync.remote; the unset leaves it
+	// recorded only in the database.
+	pushed := bdCreate(t, bd, dir, "Pushed before the adopt", "--type", "task")
+	remoteURL := "file://" + filepath.ToSlash(t.TempDir())
+	bdDolt(t, bd, dir, "remote", "add", "origin", remoteURL)
+	bdDolt(t, bd, dir, "push")
+	if out, err := run("config", "unset", "sync.remote"); err != nil {
+		t.Fatalf("bd config unset sync.remote: %v\n%s", err, out)
+	}
+	regressEmbeddedSchemaCursor(t, beadsDir, "adp")
+
+	// A write is refused with the adopt decision, and the refusal names the
+	// steps this test runs.
+	refusal, err := run("create", "Refused on the gated clone")
+	if err == nil || !strings.Contains(refusal, "the remote is already migrated") {
+		t.Fatalf("bd create on the gated clone = %v, want the adopt refusal:\n%s", err, refusal)
+	}
+	text := strings.Join(strings.Fields(refusal), " ")
+	for _, want := range []string{
+		"check that `bd config get sync.remote` prints the remote to adopt (`bd dolt remote list` shows this clone's remotes)",
+		"set `remote: <url>` under `sync:` in the config.yaml of the .beads that `bd where` reports, by hand: `bd config set` is refused while this database has pending migrations",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("the adopt refusal lacks %q:\n%s", want, refusal)
+		}
+	}
+
+	// The check runs on the gated clone: `bd config get` of a config.yaml key
+	// skips the store open, and `bd dolt remote list` opens it leniently.
+	if out, err := run("config", "get", "sync.remote"); err != nil || strings.Contains(out, remoteURL) {
+		t.Fatalf("bd config get sync.remote = %v, want exit 0 and no remote set:\n%s", err, out)
+	}
+	if out, err := run("dolt", "remote", "list"); err != nil || !strings.Contains(out, remoteURL) {
+		t.Fatalf("bd dolt remote list = %v, want exit 0 and %s listed:\n%s", err, remoteURL, out)
+	}
+
+	// `bd config set` is refused and writes nothing, so the recipe has the
+	// operator edit config.yaml: remote: under sync:, where the unset above
+	// left the remote commented out.
+	configPath := filepath.Join(beadsDir, "config.yaml")
+	before, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out, err := run("config", "set", "sync.remote", remoteURL); err == nil || !strings.Contains(out, "the remote is already migrated") {
+		t.Fatalf("bd config set sync.remote on the gated clone = %v, want the adopt refusal:\n%s", err, out)
+	}
+	if after, err := os.ReadFile(configPath); err != nil || string(after) != string(before) {
+		t.Fatalf("the refused bd config set changed config.yaml (err %v):\n%s", err, after)
+	}
+	edited := strings.Replace(string(before), "\nsync:\n", "\nsync:\n  remote: \""+remoteURL+"\"\n", 1)
+	if edited == string(before) {
+		t.Fatalf("config.yaml has no sync: section to set remote: under:\n%s", before)
+	}
+	if err := os.WriteFile(configPath, []byte(edited), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := run("config", "get", "sync.remote"); err != nil || !strings.Contains(out, remoteURL) {
+		t.Fatalf("bd config get sync.remote after the edit = %v, want %s:\n%s", err, remoteURL, out)
+	}
+
+	// The move and bootstrap as the gate lists them, with the plan checked
+	// before bootstrap acts: only a clone from that remote is the adopt.
+	for _, step := range schema.EmbeddedAdoptCommands() {
+		args := strings.Fields(step)
+		if args[0] == "bd" {
+			plan, err := run("bootstrap", "--dry-run")
+			if err != nil || !strings.Contains(plan, "Bootstrap plan: clone from remote") || !strings.Contains(plan, "Remote: "+remoteURL) {
+				t.Fatalf("bd bootstrap --dry-run after the move = %v, want a clone from %s:\n%s", err, remoteURL, plan)
+			}
+			args[0] = bd
+		}
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("recipe step %q: %v\n%s", step, err, out)
+		}
+	}
+
+	if _, err := os.Stat(filepath.Join(beadsDir, "backup", "embeddeddolt.pre-adopt")); err != nil {
+		t.Errorf("the moved-aside copy is gone after the adopt: %v", err)
+	}
+	if got := readEmbeddedStoreSnapshot(t, beadsDir, "adp").schemaVersion; got != schema.LatestVersion() {
+		t.Errorf("schema version after the adopt = %d, want the remote's %d", got, schema.LatestVersion())
+	}
+	if out, err := run("show", pushed.ID); err != nil {
+		t.Errorf("bd show %s (the pushed issue) after the adopt: %v\n%s", pushed.ID, err, out)
+	}
+	if out, err := run("create", "Written after the adopt"); err != nil {
+		t.Errorf("bd create after the adopt: %v\n%s", err, out)
+	}
 }
 
 // TestEmbeddedBootstrapConcurrent exercises bootstrap --dry-run concurrently.

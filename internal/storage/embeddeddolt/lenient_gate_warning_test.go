@@ -103,7 +103,12 @@ func TestLenientGateWarningBody_BluntRefusalKeepsSharedGuidance(t *testing.T) {
 // TestLenientGateWarningBody_BluntAdoptBulletMovesAside pins the adopt bullet
 // of the blunt lenient warning (bd-bt60zz, #6687): `bd bootstrap` alone never
 // replaces an existing embedded database, so the bullet must say so and give
-// the gate's own move-aside recipe, in order, ending in bootstrap.
+// the gate's own move-aside recipe, in order, ending in bootstrap. Bootstrap
+// also cannot read the remote from the moved database, so the bullet checks
+// sync.remote before the recipe and accepts only a clone plan after it. And a
+// bd prime (agent hooks) or a bd in another git worktree creates a fresh
+// database while the old one is moved, so the bullet names them among the bd
+// to stop and runs the recipe from the .beads `bd where` reports.
 func TestLenientGateWarningBody_BluntAdoptBulletMovesAside(t *testing.T) {
 	warning := lenientGateWarningBody(&schema.RemoteMigrateGateError{CurrentVersion: 53, LatestVersion: 67, Pending: 14})
 	if strings.Contains(warning, "another already migrated): bd bootstrap") {
@@ -114,13 +119,31 @@ func TestLenientGateWarningBody_BluntAdoptBulletMovesAside(t *testing.T) {
 			t.Errorf("adopt bullet is missing %q:\n%s", want, warning)
 		}
 	}
+	first := -1
 	at := 0
 	for _, c := range schema.EmbeddedAdoptCommands() {
 		i := strings.Index(warning[at:], "        "+c+"\n")
 		if i < 0 {
 			t.Fatalf("adopt bullet lacks %q after offset %d (recipe out of order or missing):\n%s", c, at, warning)
 		}
+		if first < 0 {
+			first = at + i
+		}
 		at += i + len(c)
+	}
+	before := strings.Join(strings.Fields(warning[:first]), " ")
+	for _, want := range []string{
+		"clones from sync.remote (or Dolt data on git origin), not from the database you move",
+		"once bd config get sync.remote prints the remote to adopt",
+		"stop every bd that uses this database (agent hooks running bd prime, bd in other git worktrees)",
+		"from the directory that contains the .beads that bd where reports",
+	} {
+		if !strings.Contains(before, want) {
+			t.Errorf("adopt bullet lacks %q before the recipe:\n%s", want, warning)
+		}
+	}
+	if !strings.Contains(warning[at:], "go ahead only on a \"clone from remote\" plan") {
+		t.Errorf("adopt bullet lacks the clone-plan check after the recipe:\n%s", warning)
 	}
 }
 

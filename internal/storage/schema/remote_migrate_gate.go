@@ -465,7 +465,9 @@ func (e *RemoteMigrateGateError) dataBehindBody() string {
 // database aside first is what lets bootstrap re-clone. It is the single source
 // for every surface that prints the recipe (the gate's bodies and options,
 // embeddeddolt's lenient-open warning), so they cannot drift apart. Paths are
-// relative to the directory containing .beads.
+// relative to the directory that contains the .beads `bd where` reports: the
+// embedded database is always that .beads's embeddeddolt/, and in a git
+// worktree or a BEADS_DIR session it is not under the current directory.
 func EmbeddedAdoptCommands() []string {
 	return []string{
 		"mkdir -p .beads/backup",
@@ -476,21 +478,72 @@ func EmbeddedAdoptCommands() []string {
 
 // adoptRecipe renders the adopt steps for userBody, each prose line prefixed
 // with indent and each command at the body's usual command indent.
+//
+// Bootstrap finds the remote only through sync.remote or, when that is unset,
+// Dolt data on git origin; it never reads the remotes recorded in the database
+// the recipe moves aside. The gate fires on any Dolt remote, so the recipe
+// checks sync.remote before the move and accepts only a clone plan after it:
+// without that, a remote recorded only in the database leaves bootstrap to
+// restore, import or create a fresh database instead (#6687 review). Only
+// `bd config get` of a config.yaml key skips the store open (GH#5108):
+// `bd config set` opens it like any write, and this gate refuses it on this
+// very database, so the recipe has the operator set sync.remote by hand in the
+// config.yaml of the .beads that `bd where` reports, the one bootstrap reads.
+//
+// Between the move and the clone the workspace has no database, and a bd that
+// opens lazily (`bd prime`, which agent session hooks run) creates a fresh one
+// there; run in another git worktree, it creates one in that worktree's own
+// .beads, which then keeps it rather than the shared database. So the recipe
+// names those processes among the ones to stop, says what bootstrap's report
+// of an existing database means after the move, and ends with a per-worktree
+// `bd where` check.
 func (e *RemoteMigrateGateError) adoptRecipe(indent string) string {
 	if e.serverStorage() {
 		return serverAdoptRecipe(indent)
 	}
 	body := indent + "`bd bootstrap` alone does NOT adopt it: bootstrap never replaces an existing\n" +
 		indent + "database, so run against this clone it prints \"Nothing to do.\" and leaves\n" +
-		indent + "it on the old schema. Move the local database aside first, from the\n" +
-		indent + "directory that contains .beads, with every bd process on it stopped:\n"
+		indent + "it on the old schema. Nor does it read the remote from the database you\n" +
+		indent + "move aside: it clones from sync.remote (or, if that is unset, from Dolt\n" +
+		indent + "data on git origin). So first check that `bd config get sync.remote`\n" +
+		indent + "prints the remote to adopt (`bd dolt remote list` shows this clone's\n" +
+		indent + "remotes). If it does not, set `remote: <url>` under `sync:` in the\n" +
+		indent + "config.yaml of the .beads that `bd where` reports, by hand: `bd config set`\n" +
+		indent + "is refused while this database has pending migrations. Then stop every bd\n" +
+		indent + "process that uses this database, and start none until bootstrap has\n" +
+		indent + "finished, including agent sessions whose hooks run `bd prime` and bd in\n" +
+		indent + "this repository's other git worktrees: `bd prime` creates a fresh database\n" +
+		indent + "where it finds none. Move the database aside from the directory that\n" +
+		indent + "contains the .beads that `bd where` reports:\n"
 	for _, c := range EmbeddedAdoptCommands() {
 		body += "        " + c + "\n"
 	}
-	return body +
+	return body + adoptPlanCheck(indent) +
+		indent + "If it reports instead that the database already exists, a bd process\n" +
+		indent + "created a new one after the move: stop it, move that one aside too (to\n" +
+		indent + "another unused name) and run bootstrap again.\n" +
 		indent + "If .beads/backup/embeddeddolt.pre-adopt already exists, pick another unused\n" +
-		indent + "name; if this workspace configures its own database path, move that one.\n" +
-		indent + "Keep the moved-aside copy until you have checked the result.\n"
+		indent + "name. Keep the moved-aside copy until you have checked the result.\n" +
+		indent + "Afterwards, run `bd where` in each of the repository's other git worktrees:\n" +
+		indent + "each must report this .beads unless it had a database of its own before the\n" +
+		indent + "move. A worktree that reports its own .beads instead gained a database during\n" +
+		indent + "the move: move that worktree's .beads/embeddeddolt aside the same way.\n"
+}
+
+// adoptPlanCheck is the check both recipes end with: bootstrap prints its plan
+// before it acts, and only a clone from the remote just checked is the adopt.
+// Bootstrap prints a git-forge sync.remote in the git+ form it clones from,
+// without credentials, so the check names the remote rather than the string
+// `bd config get sync.remote` printed. Bootstrap asks before acting only on a
+// terminal with no --yes, BD_NON_INTERACTIVE or CI (cmd/bd's
+// isNonInteractiveBootstrap).
+func adoptPlanCheck(indent string) string {
+	return indent + "Let bootstrap go ahead only if its plan is \"clone from remote\" for that\n" +
+		indent + "remote (it shows a git URL in its git+https:// or git+ssh:// form, without\n" +
+		indent + "credentials). It asks first only in a terminal without --yes,\n" +
+		indent + "BD_NON_INTERACTIVE or CI set; otherwise run `bd bootstrap --dry-run`\n" +
+		indent + "before it. Any other plan (restore, import, a fresh database) means it\n" +
+		indent + "did not find the remote: decline it, fix sync.remote and run it again.\n"
 }
 
 // serverAdoptRecipe is adoptRecipe for server storage: the database lives
@@ -501,15 +554,22 @@ func serverAdoptRecipe(indent string) string {
 		indent + "database, so run against this one it reports that the database already exists\n" +
 		indent + "and leaves it on the old schema. This database is on server storage (a dolt\n" +
 		indent + "sql-server), so adopting is done on the host that serves it:\n" +
-		indent + "  1. Coordinate downtime with every client of the server, then stop the\n" +
+		indent + "  1. In the workspace that will run bootstrap (step 4), check that\n" +
+		indent + "     `bd config get sync.remote` prints the remote to adopt. If it does not,\n" +
+		indent + "     set `remote: <url>` under `sync:` in the config.yaml of that workspace's\n" +
+		indent + "     .beads, by hand (`bd config set` is refused while this database has\n" +
+		indent + "     pending migrations): bootstrap clones from sync.remote (or, if that is\n" +
+		indent + "     unset, from Dolt data on git origin), never from the database you move.\n" +
+		indent + "  2. Coordinate downtime with every client of the server, then stop the\n" +
 		indent + "     process serving this database.\n" +
-		indent + "  2. On that host, move ONLY this database's directory out of the server's\n" +
+		indent + "  3. On that host, move ONLY this database's directory out of the server's\n" +
 		indent + "     actual data_dir (.beads/dolt/ only for a server bd runs for this workspace;\n" +
 		indent + "     a shared or custom server's data_dir is wherever it is configured — see\n" +
 		indent + "     re-clone gotchas in docs/recovery/init-safety.md). Keep the moved copy.\n" +
-		indent + "  3. Restart the server as required, then run, from a workspace connected\n" +
+		indent + "  4. Restart the server as required, then run, from a workspace connected\n" +
 		indent + "     directly to it (not through a proxy):\n" +
-		"        bd bootstrap\n"
+		"        bd bootstrap\n" +
+		adoptPlanCheck(indent+"     ")
 }
 
 // adoptPreservationNote says where a plain adopt's unpushed work survives. The
@@ -706,11 +766,18 @@ func (e *RemoteMigrateGateError) adoptDirectivePrereq() string {
 	if e.serverStorage() {
 		return "bd bootstrap never replaces an existing database (it reports that the database already exists and " +
 			"changes nothing), so the database has to be moved aside first — on the serving host, out of the server's " +
-			"data_dir, with the server stopped and its clients' downtime coordinated."
+			"data_dir, with the server stopped and its clients' downtime coordinated. " + adoptDirectiveRemote
 	}
 	return "bd bootstrap never replaces an existing database (it reports Nothing to do and changes nothing), so the " +
-		"local database has to be moved aside first, in the order remote_migrate_gate.options lists."
+		"local database has to be moved aside first, in the order remote_migrate_gate.options lists. " + adoptDirectiveRemote
 }
+
+// adoptDirectiveRemote is the directives' form of the recipes' remote check
+// (see adoptRecipe).
+const adoptDirectiveRemote = "Bootstrap clones from sync.remote (or, when that is unset, Dolt data on git origin), " +
+	"never from the database moved aside, so before the move bd config get sync.remote must print the remote to adopt, " +
+	"and only a bootstrap plan that clones from it may be accepted (bootstrap shows a git URL in its git+https:// or " +
+	"git+ssh:// form, without credentials)."
 
 // GateOption is one conditional remediation path for the remote-migrate gate
 // (and the migration-consent gate, MigrateConsentError.Options).
@@ -864,21 +931,42 @@ func (e *RemoteMigrateGateError) Options() []GateOption {
 
 // The adopt options' shared preconditions and no-op risk, per storage layout
 // (bd-bt60zz, #6687). The server form names no path: a shared or custom
-// server's data_dir is its own configuration, which the gate cannot see.
+// server's data_dir is its own configuration, which the gate cannot see. Both
+// carry the recipes' remote check before the move and plan check after it,
+// and the embedded form the processes to stop and the checks for a database
+// one of them created during the move (see adoptRecipe).
 const (
-	embeddedAdoptPrereq = "run from the directory containing .beads with every bd process on this workspace stopped; " +
-		"choose an unused destination if .beads/backup/embeddeddolt.pre-adopt already exists, and move the configured " +
-		"database path instead if this workspace sets one"
+	adoptRemotePrereq = "bd config get sync.remote prints the remote to adopt (else first set remote: <url> under sync: " +
+		"in the workspace's .beads/config.yaml by hand, since bd config set is refused while this database has pending " +
+		"migrations; bd dolt remote list shows the database's remotes): bootstrap clones from sync.remote, or from Dolt " +
+		"data on git origin when that is unset, never from the database moved aside"
+	adoptPlanRisk = "let bootstrap go ahead only if its plan is clone from remote for that remote (it shows a git URL " +
+		"in its git+https:// or git+ssh:// form, without credentials; it asks first only in a terminal without --yes, " +
+		"BD_NON_INTERACTIVE or CI set, so otherwise run bd bootstrap --dry-run first): a restore, import or " +
+		"fresh-database plan means it did not find the remote"
+	embeddedAdoptPrereq = adoptRemotePrereq + "; run from the directory that contains the .beads that bd where " +
+		"reports, with every bd process that uses this database stopped and none started until bootstrap has finished, " +
+		"including agent sessions whose hooks run bd prime and bd in the repository's other git worktrees (bd prime " +
+		"creates a fresh database where it finds none); choose an unused destination if " +
+		".beads/backup/embeddeddolt.pre-adopt already exists"
 	embeddedAdoptNoOpRisk = "bd bootstrap alone never replaces an existing database (it reports Nothing to do and changes " +
-		"nothing), so the local database is moved aside first; never delete the moved-aside copy"
-	serverAdoptPrereq = "ONLY after, on the host serving this database: downtime coordinated with every client of the " +
-		"server, the serving process stopped, ONLY this database's directory moved out of the server's actual data_dir " +
-		"(.beads/dolt/ only for a server bd runs for this workspace; a shared or custom server's data_dir is wherever it " +
-		"is configured — see docs/recovery/init-safety.md#re-clone-gotchas), and the server restarted as required; then " +
-		"run from a workspace connected directly to that server, not through a proxy"
+		"nothing), so the local database is moved aside first; " + adoptPlanRisk + "; if it reports instead that the " +
+		"database already exists, a bd process created a new one after the move: stop it, move that one aside too " +
+		"and run bootstrap again; afterwards bd where in each of the repository's other git worktrees must report " +
+		"this .beads unless it had a database of its own before the move (a worktree that reports its own .beads " +
+		"instead gained a database during the move: move that worktree's .beads/embeddeddolt aside the same way); " +
+		"keep the moved-aside copy until you have checked the result (it counts toward backup.size-cap-mb while " +
+		"auto-backup writes to .beads/backup, the default)"
+	serverAdoptPrereq = "ONLY after, in the workspace that will run bootstrap, " + adoptRemotePrereq + "; and after, " +
+		"on the host serving this database: downtime coordinated with every client of the server, the serving process " +
+		"stopped, ONLY this database's directory moved out of the server's actual data_dir (.beads/dolt/ only for a " +
+		"server bd runs for this workspace; a shared or custom server's data_dir is wherever it is configured — see " +
+		"docs/recovery/init-safety.md#re-clone-gotchas), and the server restarted as required; then run from a " +
+		"workspace connected directly to that server, not through a proxy"
 	serverAdoptNoOpRisk = "bd bootstrap alone never replaces an existing database (it reports that the database already " +
 		"exists and changes nothing), so the database is moved out of the server's data_dir first; every client of the " +
-		"server loses access during the downtime; never delete the moved copy"
+		"server loses access during the downtime; " + adoptPlanRisk + "; keep the moved copy until you have checked " +
+		"the result"
 )
 
 // serverStorage reports whether this refusal came from a database a dolt

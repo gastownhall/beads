@@ -13,8 +13,15 @@ import (
 // recipe for a clone already on the new binary (bd-bt60zz, #6687) to the
 // gate's own: the same embedded commands in the same order (so the backup
 // parent exists before the move), an unused destination, the moved-aside store
-// kept, and the old-release import stated as conditional rather than as a
-// step bootstrap needs. The changelog must credit the report.
+// kept, the old-release import stated as conditional rather than as a step
+// bootstrap needs, and, as in the gate, sync.remote checked before the move
+// (and set in config.yaml itself, since the gate refuses `bd config set`)
+// and only a clone plan accepted after it. Also as in the gate, the steps run
+// from the .beads `bd where` reports with every bd stopped, agent hooks that
+// run bd prime and other git worktrees included (a bd prime during the move
+// creates a fresh database), and end with a per-worktree `bd where` check.
+// The server-storage paragraph gives the gate's host-side steps and names no
+// fixed data path. The changelog must credit the report.
 func TestUpgradingAdoptRecipeMovesAsideSafely(t *testing.T) {
 	read := func(rel string) string {
 		t.Helper()
@@ -55,11 +62,67 @@ func TestUpgradingAdoptRecipeMovesAsideSafely(t *testing.T) {
 	for _, want := range []string{
 		"unused",
 		"Keep the moved-aside directory",
+		"backup.size-cap-mb",
 		"Only if you exported",
 		"bd import .beads/backup/pre-migrate.jsonl",
+		// #6687 review: only a clone plan is the adopt, and bootstrap shows
+		// a git-forge remote in its git+ form, without credentials.
+		"Let bootstrap go ahead only if its plan reads `Bootstrap plan: clone from remote` with that remote as its `Remote:`",
+		"Bootstrap shows a git URL in its `git+https://` or `git+ssh://` form, without credentials",
+		"only when none of `--yes`, `BD_NON_INTERACTIVE` or `CI` is set",
+		"`bd bootstrap --dry-run`",
+		"did not find the remote",
+		// #6687 review: a bd process can recreate the database during the
+		// move, here or in another git worktree.
+		"If bootstrap reports `Database already exists` instead, a `bd` process created a new database after the move",
+		"run `bd where` in each of the repository's other git worktrees",
+		"move that worktree's `.beads/embeddeddolt` aside",
+		// The server-storage steps, as the gate prints them there.
+		"in the numbered steps the refusal prints on server storage",
+		"Coordinate downtime with every client of the server",
+		"actual `data_dir`",
+		"not through a proxy",
 	} {
 		if !strings.Contains(prose, want) {
 			t.Errorf("adopt recipe's notes lack %q:\n%s", want, prose)
+		}
+	}
+	for _, banned := range []string{"with that URL", "configures its own database path"} {
+		if strings.Contains(prose, banned) {
+			t.Errorf("adopt recipe's notes still say %q:\n%s", banned, prose)
+		}
+	}
+	// .beads/dolt/ is only the default data_dir of a server bd runs for its
+	// workspace; a shared or custom server keeps it elsewhere, so the guide
+	// must not state it as where server storage lives (as the gate does not,
+	// TestRemoteMigrateGateServerAdoptGuidance).
+	if strings.Contains(section, ".beads/dolt/") {
+		t.Errorf("the adopt section names .beads/dolt/ as the server database's location:\n%s", section)
+	}
+
+	// #6687 review: bootstrap cannot read the remote from the database the
+	// recipe moves aside, so the guide checks sync.remote before the move.
+	// The gate refuses `bd config set` on that database like any write, so
+	// the fix is an edit of config.yaml.
+	before := strings.Join(strings.Fields(section[:open]), " ")
+	if !strings.Contains(section[:open], "```yaml\nsync:\n  remote: <url>\n```\n") {
+		t.Errorf("adopt paragraph lacks the config.yaml sync.remote block before the recipe:\n%s", section[:open])
+	}
+	if strings.Contains(section, "bd config set sync.remote") {
+		t.Errorf("the adopt section prescribes `bd config set sync.remote`, which the gate refuses:\n%s", section)
+	}
+	for _, want := range []string{
+		"Bootstrap does not read the remote from the database you move aside",
+		"`bd config get sync.remote` prints the remote to adopt",
+		"If it does not, set it by hand in the `config.yaml` of the `.beads` that `bd where` reports: `bd config set` is refused while the database has pending migrations",
+		// #6687 review: the move window and the anchor.
+		"stop every `bd` process that uses this database, and start none until bootstrap has finished",
+		"agent sessions whose hooks run `bd prime`",
+		"`bd` in the repository's other git worktrees",
+		"from the directory that contains the `.beads` that `bd where` reports",
+	} {
+		if !strings.Contains(before, want) {
+			t.Errorf("adopt paragraph lacks %q before the recipe:\n%s", want, before)
 		}
 	}
 

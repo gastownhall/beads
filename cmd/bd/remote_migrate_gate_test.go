@@ -197,6 +197,22 @@ func TestHandleRemoteMigrateGateJSON_AdoptionDecisions(t *testing.T) {
 				if risk, _ := o["risk"].(string); strings.HasPrefix(risk, "none") || !strings.Contains(risk, "moved-aside copy") {
 					t.Errorf("option risk must say what survives only in the moved-aside copy; got %q", risk)
 				}
+				// #6687 review: bootstrap cannot read the remote from the
+				// moved database, so the option checks sync.remote first and
+				// accepts only a clone plan.
+				if when, _ := o["when"].(string); !strings.Contains(when, "bd config get sync.remote prints the remote to adopt") {
+					t.Errorf("option when must check sync.remote before the move; got %q", when)
+				}
+				if risk, _ := o["risk"].(string); !strings.Contains(risk, "its plan is clone from remote for that remote") {
+					t.Errorf("option risk must accept only a clone-from-remote plan; got %q", risk)
+				}
+				// #6687 review: on embedded storage a bd prime (agent hooks)
+				// or a bd in another git worktree creates a fresh database
+				// while the old one is moved, so the option names them.
+				if when, _ := o["when"].(string); !shared && (!strings.Contains(when, "agent sessions whose hooks run bd prime") ||
+					!strings.Contains(when, "bd in the repository's other git worktrees")) {
+					t.Errorf("embedded option when must name the bd processes to stop during the move; got %q", when)
+				}
 
 				observed, _ := obj["observed"].(string)
 				expected, _ := obj["expected"].(string)

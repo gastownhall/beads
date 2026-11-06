@@ -426,6 +426,9 @@ func TestRemoteMigrateGateAdoptRecoveryGuidance(t *testing.T) {
 			if strings.Contains(msg[:mkdir], "        bd bootstrap\n") {
 				t.Errorf("a bare bd bootstrap command precedes the move:\n%s", msg)
 			}
+			bootstrapAt := mv + strings.Index(msg[mv:], "        bd bootstrap\n")
+			assertAdoptRemoteChecks(t, msg, mkdir, bootstrapAt)
+			assertAdoptMoveWindowChecks(t, msg, mkdir, bootstrapAt)
 			switch tc.name {
 			case "adopt", "blunt":
 				// A plain adopt can lose unpushed work: say where it survives
@@ -462,6 +465,94 @@ func TestRemoteMigrateGateAdoptRecoveryGuidance(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// assertAdoptRemoteChecks pins the remote half of an adopt recipe (#6687
+// review): bootstrap finds the remote only through sync.remote or git origin,
+// never through the database the recipe moves aside, so msg must check
+// sync.remote before the move (at moveAt) and accept only a clone plan after
+// the bootstrap command (at bootstrapAt). The remedy for a wrong sync.remote
+// is an edit of config.yaml: this gate refuses `bd config set` on the same
+// database, so a recipe that prescribes it loops on the refusal.
+func assertAdoptRemoteChecks(t *testing.T, msg string, moveAt, bootstrapAt int) {
+	t.Helper()
+	if moveAt < 0 || bootstrapAt < moveAt {
+		t.Fatalf("message lacks the move (@%d) or the bootstrap after it (@%d):\n%s", moveAt, bootstrapAt, msg)
+	}
+	before := strings.Join(strings.Fields(msg[:moveAt]), " ")
+	for _, want := range []string{
+		"`bd config get sync.remote` prints the remote to adopt",
+		"set `remote: <url>` under `sync:` in the config.yaml of",
+		"by hand",
+		"`bd config set` is refused while this database has pending migrations",
+		"clones from sync.remote (or, if that is unset, from Dolt data on git origin)",
+		"the database you move",
+	} {
+		if !strings.Contains(before, want) {
+			t.Errorf("the remote check %q is missing or comes after the move:\n%s", want, msg)
+		}
+	}
+	if strings.Contains(msg, "bd config set sync.remote") {
+		t.Errorf("the recipe prescribes `bd config set sync.remote`, which this gate refuses:\n%s", msg)
+	}
+	after := strings.Join(strings.Fields(msg[bootstrapAt:]), " ")
+	for _, want := range []string{
+		"its plan is \"clone from remote\" for that remote",
+		// Bootstrap prints a git-forge remote in its routed git+ form with
+		// the credentials stripped, never as `bd config get sync.remote`
+		// prints it, so a literal comparison would decline the right plan.
+		"it shows a git URL in its git+https:// or git+ssh:// form, without credentials",
+		// It skips the prompt under --yes, BD_NON_INTERACTIVE or CI.
+		"It asks first only in a terminal without --yes, BD_NON_INTERACTIVE or CI set",
+		"`bd bootstrap --dry-run`",
+		"did not find the remote",
+	} {
+		if !strings.Contains(after, want) {
+			t.Errorf("the plan check %q does not follow bd bootstrap:\n%s", want, msg)
+		}
+	}
+	if strings.Contains(after, "from that URL") {
+		t.Errorf("the plan check still compares against the configured URL literally:\n%s", msg)
+	}
+}
+
+// assertAdoptMoveWindowChecks pins the embedded recipe's guard on the window
+// between the move (at moveAt) and the clone (#6687 review): with no database
+// in place, `bd prime` (agent session hooks run it) creates a fresh one, and
+// in another git worktree that worktree then keeps its own. So msg must name
+// those processes among the ones to stop and anchor the commands to `bd where`
+// before the move, and after bootstrap (at bootstrapAt) say what a report of
+// an existing database means and check each worktree with `bd where`.
+func assertAdoptMoveWindowChecks(t *testing.T, msg string, moveAt, bootstrapAt int) {
+	t.Helper()
+	before := strings.Join(strings.Fields(msg[:moveAt]), " ")
+	for _, want := range []string{
+		"stop every bd process that uses this database, and start none until bootstrap has finished",
+		"agent sessions whose hooks run `bd prime`",
+		"bd in this repository's other git worktrees",
+		"`bd prime` creates a fresh database where it finds none",
+		"from the directory that contains the .beads that `bd where` reports",
+	} {
+		if !strings.Contains(before, want) {
+			t.Errorf("the move-window guard %q is missing or comes after the move:\n%s", want, msg)
+		}
+	}
+	after := strings.Join(strings.Fields(msg[bootstrapAt:]), " ")
+	for _, want := range []string{
+		"If it reports instead that the database already exists, a bd process created a new one after the move",
+		"move that one aside too",
+		"run `bd where` in each of the repository's other git worktrees: each must report this .beads",
+		"A worktree that reports its own .beads instead gained a database during the move: move that worktree's .beads/embeddeddolt aside",
+	} {
+		if !strings.Contains(after, want) {
+			t.Errorf("the post-move check %q does not follow bd bootstrap:\n%s", want, msg)
+		}
+	}
+	// The embedded database is always the active .beads's embeddeddolt/, so
+	// there is no other database path to move.
+	if strings.Contains(msg, "configures its own database path") {
+		t.Errorf("the recipe still points at a configurable embedded database path:\n%s", msg)
 	}
 }
 
@@ -527,6 +618,41 @@ func TestRemoteMigrateGateAdoptOptionsRecipe(t *testing.T) {
 					if !strings.Contains(opt.Risk, "never replaces an existing database") {
 						t.Errorf("option %q risk does not explain the bootstrap no-op: %q", opt.ID, opt.Risk)
 					}
+					// #6687 review: bootstrap cannot read the remote from the
+					// moved database, so every adopt path checks sync.remote
+					// first (fixed in config.yaml: the gate refuses bd config
+					// set) and accepts only a clone plan; and the keep note
+					// matches the text's "until checked" (no "never delete").
+					for _, want := range []string{
+						"bd config get sync.remote prints the remote to adopt",
+						"else first set remote: <url> under sync: in the workspace's .beads/config.yaml by hand",
+						"bd config set is refused while this database has pending migrations",
+						"never from the database moved aside",
+					} {
+						if !strings.Contains(opt.When, want) {
+							t.Errorf("option %q when is missing the remote check %q: %q", opt.ID, want, opt.When)
+						}
+					}
+					if strings.Contains(opt.When, "bd config set sync.remote") || strings.Contains(opt.Risk, "bd config set sync.remote") {
+						t.Errorf("option %q prescribes bd config set sync.remote, which the gate refuses: when %q risk %q", opt.ID, opt.When, opt.Risk)
+					}
+					for _, want := range []string{
+						"its plan is clone from remote for that remote",
+						"it shows a git URL in its git+https:// or git+ssh:// form, without credentials",
+						"it asks first only in a terminal without --yes, BD_NON_INTERACTIVE or CI set",
+						"bd bootstrap --dry-run",
+						"until you have checked the result",
+					} {
+						if !strings.Contains(opt.Risk, want) {
+							t.Errorf("option %q risk is missing %q: %q", opt.ID, want, opt.Risk)
+						}
+					}
+					if strings.Contains(opt.Risk, "from that URL") {
+						t.Errorf("option %q risk still compares against the configured URL literally: %q", opt.ID, opt.Risk)
+					}
+					if strings.Contains(opt.Risk, "never delete") {
+						t.Errorf("option %q risk still says never delete the moved copy: %q", opt.ID, opt.Risk)
+					}
 					if opt.ID == "adopt-fast-forward" {
 						// Only the fast-forward is loss-free: the re-clone still
 						// omits clone-local data, which the risk must name.
@@ -544,7 +670,39 @@ func TestRemoteMigrateGateAdoptOptionsRecipe(t *testing.T) {
 						if !strings.Contains(opt.When, "unused") {
 							t.Errorf("embedded option %q when does not require an unused destination: %q", opt.ID, opt.When)
 						}
+						if !strings.Contains(opt.Risk, "backup.size-cap-mb") {
+							t.Errorf("embedded option %q risk does not say the copy under .beads/backup counts toward the backup cap: %q", opt.ID, opt.Risk)
+						}
+						// #6687 review: the move window. A bd that opens lazily
+						// (bd prime, run by agent hooks) creates a fresh
+						// database while the old one is moved, in this
+						// workspace or in another git worktree's own .beads.
+						for _, want := range []string{
+							"run from the directory that contains the .beads that bd where reports",
+							"every bd process that uses this database stopped and none started until bootstrap has finished",
+							"agent sessions whose hooks run bd prime",
+							"bd in the repository's other git worktrees",
+						} {
+							if !strings.Contains(opt.When, want) {
+								t.Errorf("embedded option %q when is missing %q: %q", opt.ID, want, opt.When)
+							}
+						}
+						for _, want := range []string{
+							"if it reports instead that the database already exists, a bd process created a new one after the move",
+							"afterwards bd where in each of the repository's other git worktrees must report this .beads",
+							"move that worktree's .beads/embeddeddolt aside",
+						} {
+							if !strings.Contains(opt.Risk, want) {
+								t.Errorf("embedded option %q risk is missing %q: %q", opt.ID, want, opt.Risk)
+							}
+						}
+						if strings.Contains(opt.When, "configured database path") {
+							t.Errorf("embedded option %q when still points at a configurable database path: %q", opt.ID, opt.When)
+						}
 						continue
+					}
+					if strings.Contains(opt.Risk, "embeddeddolt") || strings.Contains(opt.Risk, "bd where") {
+						t.Errorf("server option %q risk carries the embedded move-window checks: %q", opt.ID, opt.Risk)
 					}
 					if !slices.Equal(opt.Commands, []string{"bd bootstrap"}) {
 						t.Errorf("server option %q commands = %q, want only bd bootstrap behind its prerequisites", opt.ID, opt.Commands)
@@ -553,6 +711,9 @@ func TestRemoteMigrateGateAdoptOptionsRecipe(t *testing.T) {
 						if !strings.Contains(opt.When, want) {
 							t.Errorf("server option %q when is missing prerequisite %q: %q", opt.ID, want, opt.When)
 						}
+					}
+					if check, move := strings.Index(opt.When, "bd config get sync.remote"), strings.Index(opt.When, "data_dir"); check < 0 || check > move {
+						t.Errorf("server option %q when does not check sync.remote before the data_dir move: %q", opt.ID, opt.When)
 					}
 					if strings.Contains(opt.When, ".beads/embeddeddolt") {
 						t.Errorf("server option %q prescribes an embedded move: %q", opt.ID, opt.When)
@@ -608,8 +769,9 @@ func TestRemoteMigrateGateServerAdoptGuidance(t *testing.T) {
 				}
 				idx := strings.Index(msg, "data_dir")
 				if idx < 0 || !strings.Contains(msg[idx:], "        bd bootstrap\n") {
-					t.Errorf("bd bootstrap must follow the data_dir move:\n%s", msg)
+					t.Fatalf("bd bootstrap must follow the data_dir move:\n%s", msg)
 				}
+				assertAdoptRemoteChecks(t, msg, idx, idx+strings.Index(msg[idx:], "        bd bootstrap\n"))
 				if !slices.Equal(e.Options()[len(e.Options())-1].Commands, []string{"bd bootstrap"}) {
 					t.Errorf("server adopt option commands = %q, want bd bootstrap behind prerequisites", e.Options()[len(e.Options())-1].Commands)
 				}
@@ -638,7 +800,12 @@ func TestRemoteMigrateGateAdoptAgentDirective(t *testing.T) {
 				e := *tc.err
 				e.ServerMode = server
 				d := e.AgentDirective()
-				for _, want := range []string{"never replaces an existing database", "moved aside first", "remote_migrate_gate.options", "operator", "do NOT auto-run"} {
+				for _, want := range []string{"never replaces an existing database", "moved aside first", "remote_migrate_gate.options", "operator", "do NOT auto-run",
+					// #6687 review: the remote check before the move and the
+					// plan check after it, as in the options, with the form
+					// bootstrap prints a git-forge remote in.
+					"before the move bd config get sync.remote must print the remote to adopt", "only a bootstrap plan that clones from it",
+					"git+https:// or git+ssh:// form, without credentials"} {
 					if !strings.Contains(d, want) {
 						t.Errorf("directive is missing %q: %s", want, d)
 					}

@@ -96,17 +96,28 @@ type EmbeddedDoltStore struct {
 //
 // The adopt bullet carries the gate's own embedded move-aside recipe
 // (schema.EmbeddedAdoptCommands): `bd bootstrap` alone never replaces the
-// existing database this warning is printed for (bd-bt60zz, #6687).
+// existing database this warning is printed for (bd-bt60zz, #6687), and it
+// finds the remote only through sync.remote or git origin, never through the
+// database moved aside, so the bullet keeps the gate's remote check before the
+// move and its plan check after it. It also names, as the gate does, the bd
+// processes that would create a fresh database while this one is moved (agent
+// hooks running bd prime, bd in other git worktrees) and anchors the commands
+// to the .beads `bd where` reports.
 var lenientSharedGateGuidance = "  This is a coordination decision, not an auto-fix - do NOT run a\n" +
 	"  migration unless you are the single designated migrator (only ONE\n" +
 	"  clone may migrate a shared remote, else the schema forks; #4259):\n" +
 	"    • designated migrator (only ONE machine): bd migrate --force && bd dolt push\n" +
 	"    • every other clone (another already migrated): adopt the remote's database.\n" +
-	"      bd bootstrap alone changes nothing on an existing database, so move it\n" +
-	"      aside first, from the directory containing .beads with bd stopped:\n" +
+	"      bd bootstrap alone changes nothing on an existing database, and it\n" +
+	"      clones from sync.remote (or Dolt data on git origin), not from the\n" +
+	"      database you move: once bd config get sync.remote prints the remote to\n" +
+	"      adopt, stop every bd that uses this database (agent hooks running\n" +
+	"      bd prime, bd in other git worktrees) and move the database aside, from\n" +
+	"      the directory that contains the .beads that bd where reports:\n" +
 	lenientAdoptCommandLines() +
-	"      (pick another unused destination if that one exists; keep the moved\n" +
-	"      copy until you have checked the result - bd migrate shows the full steps)\n" +
+	"      (go ahead only on a \"clone from remote\" plan; pick another unused\n" +
+	"      destination if that one exists; keep the moved copy until you have\n" +
+	"      checked the result - bd migrate shows the full steps)\n" +
 	"    • several machines: only ONE migrates; sync each other clone and run\n" +
 	"      bd dolt pull after the migrator pushes, before upgrading it\n"
 
