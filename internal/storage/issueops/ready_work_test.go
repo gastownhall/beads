@@ -375,3 +375,37 @@ func TestReadyWorkWispIssueFilterPropagatesStatuses(t *testing.T) {
 		t.Fatalf("wisp filter Statuses = %v, want %v", filter.Statuses, want)
 	}
 }
+
+// TestProbeReadyWorkInTx_UndatedDeferredParentOpensTheChildScan: the
+// one-statement probe that the counts readers and the in-band total take
+// carries its own deferred-parent facts. They must be the shared EXISTS
+// expressions, so an undated deferred parent turns the fact true and sends the
+// child scan out as one UNION ALL statement whose IDs become the exclusions.
+// Adapted from @drakeo338's #7304.
+func TestProbeReadyWorkInTx_UndatedDeferredParentOpensTheChildScan(t *testing.T) {
+	t.Parallel()
+
+	_, mock, tx := beginMockTx(t)
+	mock.ExpectQuery(readyProbeSQL + `.*, ` + regexp.QuoteMeta(sqlbuild.DeferredParentExistsSQL("issues")) +
+		`, ` + regexp.QuoteMeta(sqlbuild.DeferredParentExistsSQL("wisps")) + `$`).
+		WillReturnRows(readyProbeRows(true, true, false, false, true, false))
+	var legs []string
+	for _, depTable := range deferredChildDepTables {
+		for _, issueTable := range deferredChildIssueTables {
+			legs = append(legs, deferredChildrenQueryRegex(depTable, issueTable))
+		}
+	}
+	mock.ExpectQuery(strings.Join(legs, `\s+UNION ALL\s+`)).
+		WillReturnRows(sqlmock.NewRows([]string{"issue_id"}).AddRow("child-of-undated-deferred"))
+
+	p, err := probeReadyWorkInTx(context.Background(), tx, types.WorkFilter{}, false)
+	if err != nil {
+		t.Fatalf("probeReadyWorkInTx: %v", err)
+	}
+	if want := []string{"child-of-undated-deferred"}; !reflect.DeepEqual(p.inputs.DeferredChildIDs, want) {
+		t.Fatalf("DeferredChildIDs = %v, want %v", p.inputs.DeferredChildIDs, want)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}

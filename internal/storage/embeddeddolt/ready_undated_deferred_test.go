@@ -129,6 +129,58 @@ func TestReadyWorkHidesChildrenOfUndatedDeferredParent(t *testing.T) {
 			t.Fatalf("repository GetReadyWork = %v, want %v (the undated deferred epic's child must be withheld)", ids, want)
 		}
 	})
+
+	// The counts readers and the in-band total resolve the deferred parents in
+	// their own one-statement probe, not through the classic gate.
+	t.Run("counts_and_total", func(t *testing.T) {
+		te := newTestEnv(t, "udt")
+		seedUndatedDeferredParent(t, te, "udt")
+		ctx := t.Context()
+		create := func(id string, ephemeral bool) {
+			t.Helper()
+			if err := te.store.CreateIssue(ctx, &types.Issue{
+				ID: id, Title: id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, Ephemeral: ephemeral,
+			}, "tester"); err != nil {
+				t.Fatalf("CreateIssue %s: %v", id, err)
+			}
+		}
+		dep := func(child, parent string) {
+			t.Helper()
+			if err := te.store.AddDependency(ctx, &types.Dependency{
+				IssueID: child, DependsOnID: parent, Type: types.DepParentChild,
+			}, "tester"); err != nil {
+				t.Fatalf("AddDependency %s -> %s: %v", child, parent, err)
+			}
+		}
+		// An ephemeral child of the durable parent, and an undated deferred
+		// wisp parent with an ephemeral child of its own: both dependency
+		// planes and both parent tables.
+		create("udt-wchild", true)
+		dep("udt-wchild", "udt-parent")
+		create("udt-wparent", true)
+		create("udt-wpchild", true)
+		dep("udt-wpchild", "udt-wparent")
+		create("udt-wfree", true)
+		deferUndated(t, te, "udt-wparent")
+
+		filter := types.WorkFilter{IncludeEphemeral: true}
+		want := []string{"udt-free", "udt-wfree"}
+
+		listed, total, err := te.store.GetReadyWorkWithCountsAndTotal(ctx, filter)
+		if err != nil {
+			t.Fatalf("GetReadyWorkWithCountsAndTotal: %v", err)
+		}
+		if got := sortedIDs(readyIDs(listed)); !slices.Equal(got, want) || total != len(want) {
+			t.Fatalf("GetReadyWorkWithCountsAndTotal = %v (total %d), want %v (total %d)", got, total, want, len(want))
+		}
+		n, err := te.store.CountReadyWork(ctx, filter)
+		if err != nil {
+			t.Fatalf("CountReadyWork: %v", err)
+		}
+		if n != len(want) {
+			t.Fatalf("CountReadyWork = %d, want %d", n, len(want))
+		}
+	})
 }
 
 // TestReadyWorkDeferredParentShapes pins which parents hide their direct
