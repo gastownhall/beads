@@ -187,6 +187,7 @@ type hookProcessCase struct {
 	hookName    string      // default pre-push
 	chainBody   string      // <hook>.old beside the hook; empty for none
 	chainMode   os.FileMode // chain file mode when not 0o755
+	trailing    bool        // content after the section prints trailing-ran
 }
 
 type hookProcessResult struct {
@@ -211,6 +212,76 @@ func TestGeneratedHookTimeoutProcessBoundary(t *testing.T) {
 	t.Run("real Perl supervisor forwards signals to bd's process group", testHookProcessRealPerlForwardsSignals)
 	t.Run("real Perl supervisor preserves argv and status", testHookProcessRealPerlStatuses)
 	t.Run("Windows checkout rejects System32 timeout", testHookProcessWindowsSystemTimeoutCheckout)
+}
+
+// TestGeneratedHookBdPresentLeavesChainToBd is the bd-present control: with
+// no deadline expiry the section hands the hook to bd with its arguments,
+// never runs the <hook>.old beside it itself (bd hooks run owns the chain),
+// returns bd's failure and falls through to later content on success.
+func TestGeneratedHookBdPresentLeavesChainToBd(t *testing.T) {
+	type shellMode struct {
+		name        string
+		shellOption string
+		usePOSIXSh  bool
+	}
+	shells := []shellMode{
+		{name: "bash"}, {name: "bash set -e", shellOption: "e"}, {name: "bash set -u", shellOption: "u"},
+		{name: "bash set -eu", shellOption: "eu"}, {name: "sh", usePOSIXSh: true}, {name: "sh set -eu", shellOption: "eu", usePOSIXSh: true},
+	}
+	backends := []struct {
+		name     string
+		fixtures []hookProcessFixture
+	}{
+		{name: "coreutils", fixtures: []hookProcessFixture{{name: "timeout", body: hookProcessGNUTimeoutStub}}},
+		{name: "direct", fixtures: []hookProcessFixture{
+			{name: "timeout", body: hookProcessIncompatibleTimeoutStub},
+			{name: "gtimeout", body: hookProcessIncompatibleGtimeoutStub},
+		}},
+	}
+	args := []string{"remote with space", "https://example.invalid/repo"}
+	for _, backend := range backends {
+		for _, shell := range shells {
+			for _, bdExit := range []int{0, 1, 37} {
+				t.Run(fmt.Sprintf("%s/%s/bd exits %d", backend.name, shell.name, bdExit), func(t *testing.T) {
+					result := runGeneratedHookProcess(t, hookProcessCase{
+						fixtures:    backend.fixtures,
+						bdExit:      bdExit,
+						shellOption: shell.shellOption,
+						usePOSIXSh:  shell.usePOSIXSh,
+						args:        args,
+						chainBody:   hookProcessChainRecorderBody,
+						trailing:    true,
+					})
+					assertHookProcessBDInvocation(t, result.output, "pre-push", args...)
+					if result.chainRuns != 0 {
+						t.Errorf("section ran the chain %d times itself, want 0\n%s", result.chainRuns, result.output)
+					}
+					if result.exitCode != bdExit {
+						t.Errorf("generated hook exit = %d, want bd's status %d\n%s", result.exitCode, bdExit, result.output)
+					}
+					if got := strings.Contains(result.output, "trailing-ran"); got != (bdExit == 0) {
+						t.Errorf("trailing content ran = %v, want %v\n%s", got, bdExit == 0, result.output)
+					}
+				})
+			}
+		}
+	}
+	for _, hookName := range managedHookNames {
+		t.Run("hook "+hookName, func(t *testing.T) {
+			result := runGeneratedHookProcess(t, hookProcessCase{
+				fixtures:    []hookProcessFixture{{name: "timeout", body: hookProcessGNUTimeoutStub}},
+				shellOption: "eu",
+				args:        []string{"arg one"},
+				hookName:    hookName,
+				chainBody:   hookProcessChainRecorderBody,
+				trailing:    true,
+			})
+			assertHookProcessBDInvocation(t, result.output, hookName, "arg one")
+			if result.exitCode != 0 || result.chainRuns != 0 || !strings.Contains(result.output, "trailing-ran") {
+				t.Errorf("exit %d, chain runs %d; want 0, 0 and trailing content\n%s", result.exitCode, result.chainRuns, result.output)
+			}
+		})
+	}
 }
 
 func testHookProcessBackendSelection(t *testing.T) {
@@ -793,7 +864,11 @@ func runGeneratedHookProcess(t *testing.T, tc hookProcessCase) hookProcessResult
 		hookName = "pre-push"
 	}
 	hookPath := filepath.Join(t.TempDir(), hookName)
-	writeHookProcessFixture(t, filepath.Dir(hookPath), filepath.Base(hookPath), "#!/bin/sh\n"+generateHookSection(hookName))
+	hookBody := "#!/bin/sh\n" + generateHookSection(hookName)
+	if tc.trailing {
+		hookBody += "printf 'trailing-ran\\n'\n"
+	}
+	writeHookProcessFixture(t, filepath.Dir(hookPath), filepath.Base(hookPath), hookBody)
 	if tc.chainBody != "" {
 		writeHookProcessFixture(t, filepath.Dir(hookPath), hookName+".old", tc.chainBody)
 		if tc.chainMode != 0 {
