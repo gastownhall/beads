@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/gitenv"
 	"github.com/steveyegge/beads/internal/utils"
@@ -380,5 +381,49 @@ func TestResetRolePreservesSelectedGitContext(t *testing.T) {
 				t.Error("reset changed inherited environment")
 			}
 		})
+	}
+}
+
+// TestResetConfigReportsDiagnosticExitOneRoleRead pins bd-a2qnf4 (GH#6765)
+// for the uninstall role probe: git's exit 1 means "absent" only when it is
+// silent. An exit 1 carrying a diagnostic on stderr is a refused read, and
+// a clean uninstall must not be reported over it.
+func TestResetConfigReportsDiagnosticExitOneRoleRead(t *testing.T) {
+	home := t.TempDir()
+	for _, key := range []string{"HOME", "USERPROFILE", "XDG_CONFIG_HOME"} {
+		t.Setenv(key, home)
+	}
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	repo := newGitRepo(t)
+
+	// A git shim on PATH poisons exactly the beads.role presence query —
+	// exit 1 WITH a diagnostic, the shape the probe used to read as
+	// absence — and delegates everything else to the real git. exec.Command
+	// resolves the binary through the PROCESS PATH, so the shim has to
+	// poison that, not just the env handed to the child.
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	shimDir := t.TempDir()
+	script := "#!/bin/sh\n" +
+		"if [ \"$3\" = config ] && [ \"$5\" = --get ] && [ \"$6\" = beads.role ]; then\n" +
+		"echo 'error: injected read failure' >&2\n" +
+		"exit 1\n" +
+		"fi\n" +
+		"exec '" + realGit + "' \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(shimDir, "git"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	err = resetHooksPathAt(repo, filepath.Join(repo, ".git"), doctor.BeadsManagedStorageHooksDir(), gitenv.ScrubRouting(os.Environ()))
+	if err == nil {
+		t.Fatal("resetHooksPathAt = nil, want the diagnostic exit-1 read reported as a failure")
+	}
+	for _, fragment := range []string{"read beads.role", "injected read failure"} {
+		if !strings.Contains(err.Error(), fragment) {
+			t.Errorf("reset error = %v, want %q", err, fragment)
+		}
 	}
 }

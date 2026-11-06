@@ -1752,18 +1752,27 @@ func resetHooksPathAt(repoRoot, commonDir, storageHooksDir string, configEnv []s
 	// ScrubRouting keeps: beads.role is an authority value whose absence reads
 	// as maintainer, so a suppressed config file would report a clean uninstall
 	// while leaving the key set here.
+	//
+	// The read classifies with every other beads.role reader
+	// (internal/git.ClassifyConfigGet, GH#6765): a SILENT exit 1 is absence,
+	// while an exit 1 that carries a diagnostic on stderr is a refused read —
+	// and neither a refused read nor any other failure may be reported as a
+	// clean uninstall.
 	getRoleCmd := exec.Command("git", "--git-dir", commonDir, "config", "--local", "--get", "beads.role")
 	getRoleCmd.Dir = repoRoot
 	getRoleCmd.Env = roleConfigEnv
-	if out, err := getRoleCmd.CombinedOutput(); err == nil {
+	out, err := getRoleCmd.Output()
+	_, present, readErr := git.ClassifyConfigGet(out, err)
+	switch {
+	case readErr != nil:
+		failures = append(failures, fmt.Sprintf("read beads.role: %v", readErr))
+	case present:
 		roleCmd := exec.Command("git", "--git-dir", commonDir, "config", "--local", "--unset", "beads.role")
 		roleCmd.Dir = repoRoot
 		roleCmd.Env = roleConfigEnv
 		if output, err := roleCmd.CombinedOutput(); err != nil {
 			failures = append(failures, fmt.Sprintf("beads.role: %v (output: %s)", err, strings.TrimSpace(string(output))))
 		}
-	} else if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != 1 {
-		failures = append(failures, fmt.Sprintf("read beads.role: %v (output: %s)", err, strings.TrimSpace(string(out))))
 	}
 
 	if len(failures) > 0 {
