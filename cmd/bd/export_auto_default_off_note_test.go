@@ -296,9 +296,9 @@ func TestMaybeAutoExportDefaultOffNoteLeavesStateUntouched(t *testing.T) {
 	// verbatim: a legacy pre-versioning state file, one carrying unknown
 	// fields from a newer binary, and unparseable bytes.
 	stateVariants := map[string]string{
-		"legacy state":     `{"last_dolt_commit":"abc123","timestamp":"2025-06-01T00:00:00Z","issues":2}`,
-		"unknown fields":   `{"v":99,"last_dolt_commit":"abc","future_field":{"a":[1,2]},"issues":2}`,
-		"malformed state":  `{"last_dolt_commit":"abc123", not json`,
+		"legacy state":    `{"last_dolt_commit":"abc123","timestamp":"2025-06-01T00:00:00Z","issues":2}`,
+		"unknown fields":  `{"v":99,"last_dolt_commit":"abc","future_field":{"a":[1,2]},"issues":2}`,
+		"malformed state": `{"last_dolt_commit":"abc123", not json`,
 	}
 	for name, stateJSON := range stateVariants {
 		t.Run(name, func(t *testing.T) {
@@ -604,6 +604,48 @@ func TestMaybeAutoExportDefaultOffNoteStaysQuiet(t *testing.T) {
 				return f
 			},
 		},
+		{
+			// The invocation that records the choice must not be told to make
+			// it: `bd config set export.auto …` writes workspace YAML without
+			// refreshing viper, so the notice re-reads the YAML on disk. Both
+			// values, written through the same writer `bd config set` uses,
+			// silence the same invocation's post-command check — while the
+			// in-memory source still says default, as asserted before the run.
+			name: "export.auto=true written to workspace YAML this invocation",
+			setup: func(t *testing.T) *defaultOffNoteFixture {
+				f := newDefaultOffNoteFixture(t)
+				if err := config.SetYamlConfigInDir(f.beadsDir, "export.auto", "true"); err != nil {
+					t.Fatalf("SetYamlConfigInDir: %v", err)
+				}
+				noteTestAssertInMemoryStillDefault(t)
+				return f
+			},
+		},
+		{
+			name: "export.auto=false written to workspace YAML this invocation",
+			setup: func(t *testing.T) *defaultOffNoteFixture {
+				f := newDefaultOffNoteFixture(t)
+				if err := config.SetYamlConfigInDir(f.beadsDir, "export.auto", "false"); err != nil {
+					t.Fatalf("SetYamlConfigInDir: %v", err)
+				}
+				noteTestAssertInMemoryStillDefault(t)
+				return f
+			},
+		},
+		{
+			// A workspace config that cannot be read (corrupted after this
+			// process loaded it) suppresses the advisory rather than failing
+			// or firing: an unreadable explicit-choice store is not evidence
+			// of the default.
+			name: "malformed workspace YAML after config load",
+			setup: func(t *testing.T) *defaultOffNoteFixture {
+				f := newDefaultOffNoteFixture(t)
+				if err := os.WriteFile(filepath.Join(f.beadsDir, "config.yaml"), []byte("export:\n  auto: [broken"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return f
+			},
+		},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
@@ -617,6 +659,20 @@ func noteTestRemove(t *testing.T, path string) {
 	t.Helper()
 	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// noteTestAssertInMemoryStillDefault pins the premise of the same-invocation
+// rows: a YAML write made after config initialization leaves the in-memory
+// value and source untouched, so only the notice's own on-disk re-read can
+// see the recorded choice.
+func noteTestAssertInMemoryStillDefault(t *testing.T) {
+	t.Helper()
+	if config.GetBool("export.auto") {
+		t.Fatal("premise: in-memory export.auto already true; the row no longer tests the on-disk re-read")
+	}
+	if src := config.GetValueSource("export.auto"); src != config.SourceDefault {
+		t.Fatalf("premise: in-memory export.auto source = %v, want SourceDefault", src)
 	}
 }
 
