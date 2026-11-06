@@ -19,9 +19,12 @@ binary speaks schema v53, so on such a database it stops with:
 schema version mismatch: database is at v65, binary knows up to v53 (12 migrations ahead)
 ```
 
-This guide fixes that. The v1.2.x schema changes are strictly additive —
-nothing the 1.1 line reads or writes was dropped, renamed, or narrowed — so
-recovery is a two-minute metadata fix, not a data migration.
+This guide fixes that. Your issues are all still there, but the migration
+did take one table out of Dolt's versioned history: the `events` audit table,
+which every `bd create`, `bd update` and `bd import` writes to. Recovery
+rolls the schema cursor back and puts `events` back under version control.
+Both steps are required; the second is what lets clones of the database
+take writes again.
 
 ## Am I affected?
 
@@ -278,10 +281,11 @@ BD_IGNORE_SCHEMA_SKEW=1 bd <command>
 ```
 
 This has been verified against the exact v53-binary/v65-database
-combination: reads are identical and writes work, because the v1.2.x
-schema additions are invisible to the 1.1 line. Audit-event versioning is
-paused (see above) until you do the cursor rollback, so treat this as a
-stopgap, not a destination.
+combination: on this machine reads are identical and writes work, because
+the v1.2.x schema additions are invisible to the 1.1 line. It does not
+restore `events` versioning, so the database is not fit to be pushed and
+cloned yet, and reads or `bd kv set` working is no sign that it is. Treat
+it as a stopgap, not a destination, and do the full recovery above.
 
 ## What recovery leaves behind
 
