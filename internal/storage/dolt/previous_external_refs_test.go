@@ -58,6 +58,6 @@ func TestPreviousExternalRefsUsesDedicatedLongTimeoutConnection(t *testing.T) {
 	store.connStr = cfg.FormatDSN()
 
 	if _, err := store.PreviousExternalRefs(ctx, []string{"perh-1"}, time.Now()); err == nil {
-		t.Fatal("PreviousExternalRefs succeeded with store.connStr broken: it read through the shared pool instead of withReadTxLongTimeout")
+		t.Fatal("PreviousExternalRefs succeeded with store.connStr broken: it read through the shared pool instead of its dedicated long-timeout connection")
 	}
 }

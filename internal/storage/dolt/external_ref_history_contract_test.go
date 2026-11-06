@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"fmt"
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -24,6 +25,37 @@ func TestExternalRefHistoryBatchContract(t *testing.T) {
 	storagecontract.RunExternalRefHistoryBatchContract(t, ctx, externalRefHistoryFixture(t, store))
 }
 
+// TestPreviousExternalRefsRefusedDialLeavesFallbackAdmitted is ak2k's test
+// from PR #7272: while fresh dials of the server are refused but the store's
+// pool still works, a failed batch read must leave the circuit breaker
+// admitting the per-issue PreviousExternalRef the tracker pull falls back to.
+func TestPreviousExternalRefsRefusedDialLeavesFallbackAdmitted(t *testing.T) {
+	store, cleanup := setupConcurrentTestStore(t)
+	t.Cleanup(cleanup)
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	refused := ln.Addr().String()
+	_ = ln.Close()
+	cfg, err := mysql.ParseDSN(store.connStr)
+	if err != nil {
+		t.Fatalf("parse DSN: %v", err)
+	}
+	cfg.Addr = refused
+	store.connStr = cfg.FormatDSN()
+	t.Setenv("BEADS_TEST_MODE", "")
+	store.breaker = newTestCircuitBreaker(t)
+
+	_, _ = store.PreviousExternalRefs(ctx, []string{"test-1"}, time.Now())
+	if _, _, err := store.PreviousExternalRef(ctx, "test-1", time.Now()); err != nil {
+		t.Fatalf("PreviousExternalRef after a batch with dials refused: %v (breaker %s)", err, store.breaker.State())
+	}
+}
+
 // TestPreviousExternalRefsChunksServerHistoryReads runs the batch on a real
 // server through a connector that records both IN-lists of every history
 // query: 40 ids whose latest rows are unambiguous cost ceil(40/16) = 3
@@ -32,7 +64,7 @@ func TestExternalRefHistoryBatchContract(t *testing.T) {
 // dials its connection from connStr (see
 // TestPreviousExternalRefsUsesDedicatedLongTimeoutConnection), so the test
 // opens the same one-connection handle through the recorder, pins the
-// store's branch as withReadTxLongTimeout does, and hands its transaction
+// store's branch as readTxOnLongTimeoutConn does, and hands its transaction
 // to issueops.PreviousExternalRefsInTx.
 func TestPreviousExternalRefsChunksServerHistoryReads(t *testing.T) {
 	store, cleanup := setupTestStore(t)

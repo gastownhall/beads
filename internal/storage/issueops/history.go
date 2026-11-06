@@ -132,10 +132,11 @@ func PreviousExternalRefInTx(ctx context.Context, tx *sql.Tx, issueID string, as
 }
 
 // previousExternalRefsChunk caps how many ids one PreviousExternalRefsInTx
-// history query binds. The dolt_history_issues scan underneath fans out a row
-// per commit per id, and its cost grows with the id count faster than
-// linearly on large histories, so a pull's ids are read in small chunks
-// rather than one wide IN-list.
+// history query binds, which bounds how long one statement scans
+// dolt_history_issues on a long history. It bounds each statement, not the
+// total: #7272 measured a wider IN-list as cheaper per id (a 16-id history
+// read at 1.8 times one per-issue read, a 200-id read at 11 times, on a
+// 19.6k-commit store).
 const previousExternalRefsChunk = 16
 
 // PreviousExternalRefsInTx is the batch form of PreviousExternalRefInTx: for
