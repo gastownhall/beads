@@ -457,7 +457,13 @@ func TestMigrateToServer_RefusesWhenLifecycleLockHeld(t *testing.T) {
 			held, err := util.TryLock(tc.rel(beadsDir))
 			require.NoError(t, err)
 
-			require.Error(t, runMigrateFromProxiedServer(false, false), "must refuse while %s is held", tc.name)
+			var migrateErr error
+			stderr := captureStderr(t, func() {
+				migrateErr = runMigrateFromProxiedServer(false, false)
+			})
+			require.Error(t, migrateErr, "must refuse while %s is held", tc.name)
+			assert.Contains(t, stderr, "still running", "refusal must keep the stop-it diagnostic")
+			assert.NoFileExists(t, migrateJournalPath(beadsDir), "refusal must not write a migration journal")
 
 			cfg, err := configfile.Load(beadsDir)
 			require.NoError(t, err)

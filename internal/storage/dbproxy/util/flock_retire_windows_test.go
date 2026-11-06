@@ -10,6 +10,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/windows"
+
+	"github.com/steveyegge/beads/internal/lockfile"
 )
 
 // TestRetirableLockRetireWhileHeld covers the retirement contract that makes
@@ -60,4 +62,38 @@ func openForRetire(path string) (windows.Handle, error) {
 		windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT,
 		0,
 	)
+}
+
+// TestRetirableLockKeepsLockViolationForOthers pins contention
+// classification: whoever holds a lifecycle lease, a competing ordinary or
+// retirable acquisition fails as lockfile.IsLocked contention, never as an
+// open error, and the holder still releases cleanly.
+func TestRetirableLockKeepsLockViolationForOthers(t *testing.T) {
+	type acquisition func(path string) (*Lock, error)
+	cases := []struct {
+		name   string
+		holder acquisition
+		rival  acquisition
+	}{
+		{name: "ordinary holder, retirable rival", holder: TryLock, rival: TryRetirableLock},
+		{name: "retirable holder, ordinary rival", holder: TryRetirableLock, rival: TryLock},
+		{name: "retirable holder, retirable rival", holder: TryRetirableLock, rival: TryRetirableLock},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "contended.lock")
+
+			held, err := tc.holder(path)
+			require.NoError(t, err)
+
+			_, err = tc.rival(path)
+			require.Error(t, err, "a held lease must refuse rivals")
+			assert.True(t, lockfile.IsLocked(err), "contention must stay classified as a held lock, got %v", err)
+
+			held.Unlock()
+			free, err := TryLock(path)
+			require.NoError(t, err, "holder must release cleanly after a refused rival")
+			free.Unlock()
+		})
+	}
 }
