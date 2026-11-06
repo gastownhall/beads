@@ -141,6 +141,12 @@ func parseNaturalLanguage(s string, now time.Time) (time.Time, error) {
 // dateOnlyRe matches date-only format YYYY-MM-DD to avoid NLP misinterpretation.
 var dateOnlyRe = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
 
+// isoDatePrefixRe matches input that begins with a full YYYY-MM-DD date. The
+// prefix is deliberately not end-anchored: a date-led input the absolute
+// layouts reject must not reach NLP, which can accept a clock fragment read
+// from the date while dropping the date itself (GH#8167).
+var isoDatePrefixRe = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}`)
+
 // ParseRelativeTime parses a time expression using the layered architecture (ADR-001).
 //
 // Parsing order:
@@ -151,7 +157,10 @@ var dateOnlyRe = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
 //  3. Natural language (tomorrow, next monday)
 //
 // Timezone-less inputs are interpreted in now's location. Returns the parsed
-// time in UTC or an error if no layer could parse the input.
+// time in UTC or an error if no layer could parse the input. Input that
+// begins with a YYYY-MM-DD date but matches no absolute format is rejected
+// outright: NLP could accept a clock fragment from it while dropping the
+// date (GH#8167), so the error names the absolute forms instead.
 func ParseRelativeTime(s string, now time.Time) (time.Time, error) {
 	location := now.Location()
 
@@ -193,6 +202,14 @@ func ParseRelativeTime(s string, now time.Time) (time.Time, error) {
 	// Try datetime with space and no seconds (2025-01-15 10:00)
 	if t, err := time.ParseInLocation("2006-01-02 15:04", s, location); err == nil {
 		return t.UTC(), nil
+	}
+
+	// A date-prefixed input no absolute layout matched must not reach NLP:
+	// NLP does not interpret the ISO date and can return a clock fragment it
+	// read from the string while dropping the date (GH#8167), turning a typo
+	// into a different time. Reject it with the supported absolute forms.
+	if isoDatePrefixRe.MatchString(s) {
+		return time.Time{}, fmt.Errorf("cannot parse time expression: %q (absolute forms: 2025-01-15, 2025-01-15 10:00, 2025-01-15T10:00, 2025-01-15T10:00:00Z)", s)
 	}
 
 	// Layer 3: Natural language (after absolute formats to avoid misinterpretation)
