@@ -86,10 +86,16 @@ func TestNoticeSharedMigrateRefusalPerDecision(t *testing.T) {
 		// existing database; it names the move-aside prerequisite and points
 		// at the full refusal for the steps.
 		wantAll []string
+		// stale are phrases the notice must no longer carry. bd-bt60zz
+		// (#6687): the adopt notice makes no promise about reads, which can
+		// fail on the old schema, and prints no filesystem commands.
+		stale []string
 	}{
 		{decision: "shared-no-remote", want: "bd migrate schema"},
-		{decision: "adopt", want: "bd bootstrap", absent: "bd migrate schema", wantAll: []string{"alone changes nothing", "moved aside first", "run 'bd migrate'"}},
-		{decision: "adopt-ff", want: "bd bootstrap", absent: "bd migrate schema", wantAll: []string{"alone changes nothing", "moved aside first", "run 'bd migrate'"}},
+		{decision: "adopt", want: "bd bootstrap", absent: "bd migrate schema", wantAll: []string{"alone changes nothing", "moved aside first", "run 'bd migrate'"},
+			stale: []string{"adopt it with 'bd bootstrap'", "reads keep working", "mv .beads"}},
+		{decision: "adopt-ff", want: "bd bootstrap", absent: "bd migrate schema", wantAll: []string{"alone changes nothing", "moved aside first", "run 'bd migrate'"},
+			stale: []string{"adopt it with 'bd bootstrap'", "reads keep working", "mv .beads"}},
 		{decision: "fork-skew", want: "bd doctor", absent: "bd migrate schema"},
 		{decision: "", want: "bd migrate", absent: "bd migrate schema"},
 	} {
@@ -115,6 +121,11 @@ func TestNoticeSharedMigrateRefusalPerDecision(t *testing.T) {
 			if tt.absent != "" && strings.Contains(out, tt.absent) {
 				t.Errorf("notice for %q must not prescribe %q (the verb does not unlock this arm):\n%s",
 					tt.decision, tt.absent, out)
+			}
+			for _, stale := range tt.stale {
+				if strings.Contains(out, stale) {
+					t.Errorf("notice for %q still says %q:\n%s", tt.decision, stale, out)
+				}
 			}
 		})
 	}

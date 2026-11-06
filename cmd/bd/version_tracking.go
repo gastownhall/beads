@@ -400,8 +400,9 @@ func noticeSharedMigrateRefusal(err error) {
 		// the verb consent deliberately does not unlock this arm. Bootstrap
 		// alone never replaces the existing database this notice is printed
 		// for (bd-bt60zz, #6687), and the move it needs depends on the storage
-		// mode, so the steps are left to the full refusal.
-		remedy = "Another clone has already migrated this database — adopt it rather than migrating here. 'bd bootstrap' alone changes nothing on an existing database: it has to be moved aside first — run 'bd migrate' for the full refusal and the adopt steps; reads keep working meanwhile."
+		// mode, so the steps are left to the full refusal. It promises nothing
+		// about reads: they can fail on the old schema (#6572).
+		remedy = "Another clone has already migrated this database — adopt it rather than migrating here. 'bd bootstrap' alone changes nothing on an existing database: it has to be moved aside first — run 'bd migrate' for the full refusal and the adopt steps."
 	case "fork-skew":
 		remedy = "This database and its remote already applied different content for the same migration (#4259) — run 'bd doctor' and follow its migration-content-skew guidance; do not migrate."
 	default:
