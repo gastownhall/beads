@@ -636,6 +636,14 @@ func isPathInSafeBoundary(path string) bool {
 		return resolvedPathWithinRoot(absPath, "/var/tmp")
 	}
 
+	// Allow a service account's own home below /var/lib (GH#6323): accounts
+	// such as /var/lib/<service> keep their workspace there, which the /var
+	// entry below would otherwise reject. Only the current account's home
+	// qualifies; anything that does not falls through to the blocklist.
+	if home, euid := serviceHomeAccount(); inOwnServiceHome(absPath, serviceHomeRoot, home, euid) {
+		return true
+	}
+
 	for _, prefix := range unsafePrefixes {
 		if strings.HasPrefix(absPath, prefix+"/") || absPath == prefix {
 			return false
@@ -677,6 +685,41 @@ func isPathInSafeBoundary(path string) bool {
 		}
 	}
 	return true
+}
+
+// serviceHomeRoot is the blocked directory under which isPathInSafeBoundary
+// admits the current account's own home (inOwnServiceHome). A package var only
+// so tests can point it at a temporary fixture.
+var serviceHomeRoot = "/var/lib"
+
+// serviceHomeAccount reports the current account's home directory and
+// effective uid for the service-home exception. A package var only so tests
+// can inject a fixture account.
+var serviceHomeAccount = func() (home string, euid int) {
+	return userHomeDir(), os.Geteuid()
+}
+
+// inOwnServiceHome reports whether path lies inside home, an account home
+// strictly below root (production: /var/lib), for a non-root euid. Both home and path are compared
+// after symlink resolution, so a link out of the home or the root never
+// qualifies, while a path that does not exist yet still can.
+func inOwnServiceHome(path, root, home string, euid int) bool {
+	if euid <= 0 {
+		// Root never qualifies, and a negative uid means none is known.
+		return false
+	}
+	physRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return false
+	}
+	physHome, err := filepath.EvalSymlinks(home)
+	if err != nil {
+		return false
+	}
+	if !strings.HasPrefix(physHome, physRoot+string(filepath.Separator)) {
+		return false
+	}
+	return resolvedPathWithinRoot(path, physHome)
 }
 
 // resolveLongestExistingAncestor canonicalizes path by resolving symlinks on its

@@ -1790,3 +1790,142 @@ func TestGetRepoContext_RefusesRepositoryGitDoesNotOpen(t *testing.T) {
 		}
 	})
 }
+
+// serviceHomeFixture is a temporary stand-in for a service account homed below
+// /var/lib (GH#6323): root plays /var/lib, home is the account's home under it,
+// and uid is the effective uid that owns home.
+type serviceHomeFixture struct {
+	root string
+	home string
+	uid  int
+}
+
+// newServiceHomeFixture builds root/flow-estate with an existing
+// releases/r1/.beads and returns it. On a root runner the home is chowned to
+// nobody (65534), whose uid the fixture then reports, because uid 0 never
+// qualifies.
+func newServiceHomeFixture(t *testing.T, base string) serviceHomeFixture {
+	t.Helper()
+	root := filepath.Join(base, "varlib")
+	home := filepath.Join(root, "flow-estate")
+	if err := os.MkdirAll(filepath.Join(home, "releases", "r1", ".beads"), 0o755); err != nil {
+		t.Fatalf("mkdir service home: %v", err)
+	}
+	uid := os.Geteuid()
+	if uid == 0 {
+		uid = 65534
+		if err := os.Chown(home, uid, uid); err != nil {
+			t.Fatalf("chown %s to %d: %v", home, uid, err)
+		}
+	}
+	return serviceHomeFixture{root: root, home: home, uid: uid}
+}
+
+// useServiceHomeFixture runs isPathInSafeBoundary against a fixture service
+// root: it moves TMPDIR to a disjoint directory so the temp-dir carve-out does
+// not cover the fixture, blocks the fixture base the way /var blocks /var/lib,
+// and points the service-home seams at the fixture account. account, when
+// non-nil, replaces the fixture account lookup.
+func useServiceHomeFixture(t *testing.T, account func() (string, int)) serviceHomeFixture {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("the service-home exception needs a Unix owner uid")
+	}
+	base := t.TempDir()
+	t.Setenv("TMPDIR", t.TempDir())
+	for _, carved := range []string{os.TempDir(), "/var/tmp", "/var/home"} {
+		if base == carved || strings.HasPrefix(base, carved+"/") {
+			t.Skipf("fixture base %s lies under the %s carve-out, which would admit it first", base, carved)
+		}
+	}
+	f := newServiceHomeFixture(t, base)
+
+	savedPrefixes, savedRoot, savedAccount := unsafePrefixes, serviceHomeRoot, serviceHomeAccount
+	unsafePrefixes = append(append([]string(nil), savedPrefixes...), base)
+	serviceHomeRoot = f.root
+	serviceHomeAccount = func() (string, int) { return f.home, f.uid }
+	if account != nil {
+		serviceHomeAccount = account
+	}
+	t.Cleanup(func() {
+		unsafePrefixes, serviceHomeRoot, serviceHomeAccount = savedPrefixes, savedRoot, savedAccount
+	})
+	return f
+}
+
+// TestIsPathInSafeBoundary_OwnServiceHome drives the real boundary check with a
+// blocked fixture root standing in for /var/lib: the current account's home
+// below it, and paths inside that home, are admitted (GH#6323).
+func TestIsPathInSafeBoundary_OwnServiceHome(t *testing.T) {
+	f := useServiceHomeFixture(t, nil)
+
+	for name, path := range map[string]string{
+		"home":                    f.home,
+		"existing release":        filepath.Join(f.home, "releases", "r1", ".beads"),
+		"not-yet-created release": filepath.Join(f.home, "releases", "r2", ".beads"),
+	} {
+		if !isPathInSafeBoundary(path) {
+			t.Errorf("%s: isPathInSafeBoundary(%q) = false, want true (inside the account's service home)", name, path)
+		}
+	}
+}
+
+// TestInOwnServiceHome table-tests the service-home exception helper against
+// real temporary directories and symlinks.
+func TestInOwnServiceHome(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the service-home exception needs a Unix owner uid")
+	}
+	base := t.TempDir()
+	f := newServiceHomeFixture(t, base)
+	root, home, uid := f.root, f.home, f.uid
+	physRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%s): %v", root, err)
+	}
+	physHome := filepath.Join(physRoot, "flow-estate")
+
+	// rootLink is a symlinked spelling of the service root, as /var/lib is
+	// /private/var/lib's on macOS.
+	rootLink := filepath.Join(base, "rootlink")
+	mustSymlink(t, root, rootLink)
+	// homeLink names the home through an alias the account database might
+	// report.
+	homeLink := filepath.Join(base, "homelink")
+	mustSymlink(t, home, homeLink)
+	// aliasIntoHome is a link inside the root that resolves into the home.
+	aliasIntoHome := filepath.Join(root, "alias")
+	mustSymlink(t, filepath.Join(home, "releases"), aliasIntoHome)
+
+	tests := []struct {
+		name string
+		path string
+		root string
+		home string
+		euid int
+		want bool
+	}{
+		{"home itself", home, root, home, uid, true},
+		{"existing descendant", filepath.Join(home, "releases", "r1", ".beads"), root, home, uid, true},
+		{"missing descendant", filepath.Join(home, "releases", "r9", ".beads"), root, home, uid, true},
+		{"physical spelling of request", filepath.Join(physHome, "releases", "r1"), root, home, uid, true},
+		{"home alias", filepath.Join(home, "releases"), root, homeLink, uid, true},
+		{"alias inside root into home", filepath.Join(aliasIntoHome, "r1"), root, home, uid, true},
+		{"symlinked root, lexical request", filepath.Join(rootLink, "flow-estate", ".beads"), rootLink, filepath.Join(rootLink, "flow-estate"), uid, true},
+		{"symlinked root, physical request", filepath.Join(physHome, ".beads"), rootLink, filepath.Join(rootLink, "flow-estate"), uid, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := inOwnServiceHome(tt.path, tt.root, tt.home, tt.euid); got != tt.want {
+				t.Errorf("inOwnServiceHome(%q, %q, %q, %d) = %v, want %v", tt.path, tt.root, tt.home, tt.euid, got, tt.want)
+			}
+		})
+	}
+}
+
+func mustSymlink(t *testing.T, target, link string) {
+	t.Helper()
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("symlink %s -> %s: %v", link, target, err)
+	}
+}
