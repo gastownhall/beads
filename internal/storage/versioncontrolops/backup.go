@@ -224,6 +224,23 @@ func DirToFileURL(dir string) (string, error) {
 	return "file://" + abs, nil
 }
 
+// PathToFileURL returns the file:// URL Dolt reads as the absolute path abs.
+// Callers resolve abs first; it is neither checked nor made absolute here.
+//
+// A Windows drive path, matched by shape so the rule holds on every host, is
+// spelled file:///C:/... with the drive letter upper-cased and backslashes
+// turned into forward slashes. Dolt's earl.Parse recognizes a drive only by an
+// upper-case letter: "file://c:\work" goes to net/url, which reads "c:" as a
+// host with an invalid port (GH#6019), and "file:///c:/work" is read as the
+// path "/c:/work". The rest of the path is left unescaped, as earl's drive
+// branch reads it literally. Any other path is prefixed with "file://" as is.
+func PathToFileURL(abs string) string {
+	if len(abs) >= 2 && abs[1] == ':' && ('a' <= abs[0] && abs[0] <= 'z' || 'A' <= abs[0] && abs[0] <= 'Z') {
+		return "file:///" + strings.ToUpper(abs[:1]) + strings.ReplaceAll(abs[1:], `\`, "/")
+	}
+	return "file://" + abs
+}
+
 // ExtractAddressConflictName parses the conflicting remote name from a Dolt
 // "address conflict with a remote" error.
 //

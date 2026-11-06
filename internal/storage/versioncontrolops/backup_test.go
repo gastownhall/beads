@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/dolthub/dolt/go/libraries/utils/earl"
 )
 
 // TestDirToFileURLRejectsSchemes pins the guard that stops a URL being turned
@@ -37,6 +39,54 @@ func TestDirToFileURLRejectsSchemes(t *testing.T) {
 	}
 	if !strings.HasPrefix(got, "file://") || strings.Contains(got, "://backups") {
 		t.Fatalf("DirToFileURL(%q) = %q", "backups/nightly", got)
+	}
+}
+
+// TestPathToFileURL pins the URL spelling Dolt's earl.Parse reads as a drive
+// path (bd-chc1w3, GH#6019). PowerShell keeps a lower-case drive, and
+// "file://c:\work" makes net/url read "c:" as a host with an invalid port;
+// "file:///c:/work" is read as the path "/c:/work". Only an upper-case letter
+// behind "file:///" with forward slashes names the drive. The input is matched
+// by shape, so this runs on every OS.
+func TestPathToFileURL(t *testing.T) {
+	for _, tc := range []struct {
+		abs, want, path string // path: what earl.Parse must read back
+	}{
+		{`c:\work\.beads\backup`, "file:///C:/work/.beads/backup", "C:/work/.beads/backup"},
+		{`C:\work\.beads\backup`, "file:///C:/work/.beads/backup", "C:/work/.beads/backup"},
+		{`c:/work/.beads/backup`, "file:///C:/work/.beads/backup", "C:/work/.beads/backup"},
+		{`C:/work/.beads/backup`, "file:///C:/work/.beads/backup", "C:/work/.beads/backup"},
+		{`z:\`, "file:///Z:/", "Z:/"},
+		{`c:\Users\John Doe\100%\a#b`, "file:///C:/Users/John Doe/100%/a#b", "C:/Users/John Doe/100%/a#b"},
+	} {
+		got := PathToFileURL(tc.abs)
+		if got != tc.want {
+			t.Errorf("PathToFileURL(%q) = %q, want %q", tc.abs, got, tc.want)
+			continue
+		}
+		u, err := earl.Parse(got)
+		if err != nil {
+			t.Errorf("earl.Parse(%q): %v", got, err)
+			continue
+		}
+		if u.Host != "" || u.Path != tc.path {
+			t.Errorf("earl.Parse(%q) = host %q path %q, want host \"\" path %q", got, u.Host, u.Path, tc.path)
+		}
+	}
+
+	// A backup registered before the fix, with an upper-case drive, names the
+	// same directory as the new spelling, so it needs no migration.
+	legacy, err := earl.Parse(`file://C:\work\.beads\backup`)
+	if err != nil {
+		t.Fatalf("earl.Parse(legacy): %v", err)
+	}
+	current, err := earl.Parse(PathToFileURL(`C:\work\.beads\backup`))
+	if err != nil {
+		t.Fatalf("earl.Parse(current): %v", err)
+	}
+	if legacy.Host != current.Host || legacy.Path != current.Path {
+		t.Errorf("legacy URL reads as host %q path %q, new one as host %q path %q",
+			legacy.Host, legacy.Path, current.Host, current.Path)
 	}
 }
 
