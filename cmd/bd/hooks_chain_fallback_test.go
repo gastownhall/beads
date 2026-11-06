@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/cmd/bd/doctor"
+	"github.com/steveyegge/beads/internal/git"
 )
 
 // The tests in this file cover GH#6751: the generated hook section must not
@@ -898,13 +899,46 @@ func TestGeneratedHookSectionKeepsMarkerScannersCompatible(t *testing.T) {
 			if reinjected != content {
 				t.Errorf("reinstalling the same section changed the hook\n got: %s\nwant: %s", reinjected, content)
 			}
+			onceEach := func(t *testing.T, label, content string) {
+				t.Helper()
+				for _, line := range []string{"if command -v bd >/dev/null 2>&1; then", "echo user-before\n", "echo user-after\n"} {
+					if got := strings.Count(content, line); got != 1 {
+						t.Errorf("%s holds %q %d times, want 1\n%s", label, line, got, content)
+					}
+				}
+			}
+			onceEach(t, "reinstall", reinjected)
 
 			for label, broken := range map[string]string{
 				"END dropped":   removeMarkerLine(content, strings.Index(content, hookSectionEndPrefix), hookSectionEndPrefix),
 				"BEGIN dropped": removeMarkerLine(content, strings.Index(content, hookSectionBeginPrefix), hookSectionBeginPrefix),
 			} {
+				// Doctor must flag the dropped marker for repair rather than
+				// reading the classifier's fragments as the missing one.
+				repoDir, hooksDir := setupHookMigrationRepo(t)
+				writeHookMigrationFile(t, filepath.Join(hooksDir, hookName), broken)
+				plan, err := doctor.PlanHookMigration(repoDir)
+				if err != nil {
+					t.Fatalf("PlanHookMigration after %s: %v", label, err)
+				}
+				flagged := false
+				for _, hook := range plan.Hooks {
+					if hook.Name == hookName {
+						flagged = hook.MarkerState == "broken" && hook.NeedsMigration
+					}
+				}
+				if !flagged || plan.BrokenMarkerCount != 1 {
+					t.Errorf("plan after %s: hook flagged broken = %v, broken count %d; want flagged and 1\n%+v", label, flagged, plan.BrokenMarkerCount, plan.Hooks)
+				}
+
 				repaired := injectHookSection(broken, section)
 				keepsUser(t, "repair after "+label, repaired)
+				// Without its BEGIN line the old body cannot be told from user
+				// text, so injectHookSection keeps it; only the markers are
+				// counted there.
+				if label == "END dropped" {
+					onceEach(t, "repair after "+label, repaired)
+				}
 				syntaxOK(t, "repair after "+label, repaired)
 				if b, e := strings.Count(repaired, hookSectionBeginPrefix), strings.Count(repaired, hookSectionEndPrefix); b != 1 || e != 1 {
 					t.Errorf("repair after %s has %d BEGIN and %d END markers, want 1 each\n%s", label, b, e, repaired)
@@ -917,6 +951,47 @@ func TestGeneratedHookSectionKeepsMarkerScannersCompatible(t *testing.T) {
 			}
 		})
 	}
+
+	// bd hooks install rewrites a section whose version marker already
+	// matches, so a section generated before GH#6751 at the same version is
+	// refreshed in place, keeping the user's content around it.
+	t.Run("same-version reinstall refreshes old section text", func(t *testing.T) {
+		oldSection := hookSectionBeginLine() + "\n" +
+			"# This section is managed by beads. Do not remove these markers.\n" +
+			"if command -v bd >/dev/null 2>&1; then\n" +
+			"  export BD_GIT_HOOK=1\n" +
+			"  bd hooks run pre-commit \"$@\"\n" +
+			"fi\n" +
+			hookSectionEndLine() + "\n"
+		tmpDir := newGitRepo(t)
+		runInDir(t, tmpDir, func() {
+			gitDirPath, err := git.GetGitDir()
+			if err != nil {
+				t.Fatalf("git.GetGitDir() failed: %v", err)
+			}
+			hooksDir := filepath.Join(gitDirPath, "hooks")
+			if err := os.MkdirAll(hooksDir, 0o750); err != nil {
+				t.Fatal(err)
+			}
+			hookPath := filepath.Join(hooksDir, "pre-commit")
+			old := "#!/bin/sh\necho user-before\n\n" + oldSection + "\necho user-after\n"
+			if err := os.WriteFile(hookPath, []byte(old), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := installHooksWithOptions([]string{"pre-commit"}, false, false, false, false); err != nil {
+				t.Fatalf("installHooksWithOptions() failed: %v", err)
+			}
+			got, err := os.ReadFile(hookPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := "#!/bin/sh\necho user-before\n\n" + generateHookSection("pre-commit") + "\necho user-after\n"
+			if string(got) != want {
+				t.Errorf("reinstall did not refresh the old section in place\n got: %s\nwant: %s", got, want)
+			}
+			syntaxOK(t, "refreshed hook", string(got))
+		})
+	})
 
 	t.Run("migration plan", func(t *testing.T) {
 		repoDir, hooksDir := setupHookMigrationRepo(t)

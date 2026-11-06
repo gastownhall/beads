@@ -589,8 +589,14 @@ from the terminal is stopped until the deadline ends it.
 Already-installed hook sections are not refreshed automatically. After upgrading
 to a version that changed the timeout probe — the name-only check, the uutils
 coreutils banner, or the Perl fallback that could not stop `bd`
-([#7753](https://github.com/gastownhall/beads/issues/7753)) — run
-`bd hooks install` once to refresh existing canonical sections.
+([#7753](https://github.com/gastownhall/beads/issues/7753)) — or the
+chained-hook handling from
+[#6751](https://github.com/gastownhall/beads/issues/6751), run
+`bd hooks install` once to refresh existing canonical sections. The refresh
+rewrites a section even when its version marker already matches, and keeps
+content outside the markers. For shared hooks, run `bd hooks install --shared`
+and commit the refreshed `.beads-hooks/` files with your normal commit
+workflow.
 
 ### Permission denied on git hooks
 

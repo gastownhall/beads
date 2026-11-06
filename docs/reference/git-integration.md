@@ -181,7 +181,9 @@ the hook itself returns.
 Already-installed hook sections are not refreshed automatically. After upgrading
 to a release that changed the generated timeout probe — the name-only check,
 the uutils coreutils banner, or the Perl fallback that could not stop `bd`
-([#7753](https://github.com/gastownhall/beads/issues/7753)) — run
+([#7753](https://github.com/gastownhall/beads/issues/7753)) — or the
+chained-hook handling from
+[#6751](https://github.com/gastownhall/beads/issues/6751), run
 `bd hooks install` once to refresh
 already-installed canonical hook sections. Automatic generated-policy adoption is
 tracked separately.
