@@ -141,9 +141,12 @@ func parseNaturalLanguage(s string, now time.Time) (time.Time, error) {
 // dateOnlyRe matches date-only format YYYY-MM-DD to avoid NLP misinterpretation.
 var dateOnlyRe = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
 
-// isoDatePrefixRe matches input that starts with a YYYY-MM-DD date. It is not
-// end-anchored: any such input is meant as an absolute time.
-var isoDatePrefixRe = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}`)
+// datePrefixRe matches input that starts like a dashed date: digits, a dash,
+// digits, a dash and a digit, after optional leading whitespace. Besides
+// YYYY-MM-DD that covers a missing or extra digit (2025-1-5, 2025-011-05,
+// 20255-01-05) and other field orders (05-01-2025). It is not end-anchored:
+// any such input is meant as an absolute time.
+var datePrefixRe = regexp.MustCompile(`^\s*\d+-\d+-\d`)
 
 // ParseRelativeTime parses a time expression using the layered architecture (ADR-001).
 //
@@ -155,10 +158,11 @@ var isoDatePrefixRe = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}`)
 //  3. Natural language (tomorrow, next monday)
 //
 // Timezone-less inputs are interpreted in now's location. Input that starts
-// with a YYYY-MM-DD date but matches no absolute format (an invalid date, a
-// 12-hour or zoned minute suffix, trailing text) is rejected rather than
-// passed to natural language parsing. Returns the parsed time in UTC or an
-// error if no layer could parse the input.
+// like a dashed date but matches no absolute format (an invalid date, a
+// missing or extra digit, another field order, leading whitespace, a 12-hour
+// or zoned minute suffix, trailing text) is rejected rather than passed to
+// natural language parsing. Returns the parsed time in UTC or an error if no
+// layer could parse the input.
 func ParseRelativeTime(s string, now time.Time) (time.Time, error) {
 	location := now.Location()
 
@@ -202,11 +206,11 @@ func ParseRelativeTime(s string, now time.Time) (time.Time, error) {
 		return t.UTC(), nil
 	}
 
-	// A leading ISO date that no absolute layout accepted is a typo or an
-	// unsupported form. NLP does not read the ISO date: it would pick up a
-	// clock-like fragment of it ("11-07" as 11:07) and drop the date.
-	if isoDatePrefixRe.MatchString(s) {
-		return time.Time{}, fmt.Errorf("cannot parse time expression: %q (absolute forms: 2025-01-15, 2025-01-15 10:00, 2025-01-15T10:00, 2025-01-15T10:00:00Z)", s)
+	// A leading dashed date that no absolute layout accepted is a typo or an
+	// unsupported form. NLP has no rule for dashed dates: it would pick up a
+	// clock-like fragment of one ("11-07" as 11:07) and drop the date.
+	if datePrefixRe.MatchString(s) {
+		return time.Time{}, fmt.Errorf("cannot parse time expression: %q (absolute forms: YYYY-MM-DD, YYYY-MM-DD[T| ]HH:MM, YYYY-MM-DD[T| ]HH:MM:SS[.fff], RFC3339 such as 2025-01-15T10:00:00Z or 2025-01-15T10:00:00-05:00)", s)
 	}
 
 	// Layer 3: Natural language (after absolute formats to avoid misinterpretation)

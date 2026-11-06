@@ -366,9 +366,10 @@ func TestParseRelativeTimeDatetimeWithoutSeconds(t *testing.T) {
 }
 
 // TestParseRelativeTimeRejectsMalformedDatePrefix pins that input starting
-// with a YYYY-MM-DD date which no absolute layout accepts is an error, never
+// like a dashed date which no absolute layout accepts is an error, never
 // handed to the NLP layer, which would keep a clock-like fragment of it and
-// drop the date (GH#8167).
+// drop the date (GH#8167). The error must be the leading-date guard's, which
+// lists the absolute forms: an NLP miss would also say it cannot parse.
 func TestParseRelativeTimeRejectsMalformedDatePrefix(t *testing.T) {
 	now := time.Date(2026, 11, 6, 18, 0, 0, 0, time.UTC)
 
@@ -377,6 +378,24 @@ func TestParseRelativeTimeRejectsMalformedDatePrefix(t *testing.T) {
 		"2026-02-30",
 		"2026-11-31",
 		"2026-13-01",
+		// Unpadded month or day, and leading whitespace, which NLP also reads
+		// as a time today ("2026-1-15" as 01:15, " 2026-11-07" as 11:07).
+		"2026-1-15",
+		"2026-1-15 08:30",
+		"2026-11-7 08:30",
+		"2026-01-7 08:30",
+		"2026-12-1 09:00",
+		" 2026-11-07 08:30",
+		"\t2026-11-07",
+		// An extra or missing digit in the year or month, and other field
+		// orders, which NLP also reads as a time today ("2026-011-07 20:30"
+		// as 20:30, "11-07-2026 08:30" as 11:07).
+		"2026-011-07 20:30",
+		"2026-111-07 08:30",
+		"20266-11-07 20:30",
+		"206-11-07 08:30",
+		"07-11-2026",
+		"11-07-2026 08:30",
 		// Invalid or unsupported time suffixes.
 		"2026-11-07 24:00",
 		"2026-11-07 08:60",
@@ -401,7 +420,7 @@ func TestParseRelativeTimeRejectsMalformedDatePrefix(t *testing.T) {
 			if !got.IsZero() {
 				t.Errorf("ParseRelativeTime(%q) time = %v, want zero", input, got)
 			}
-			if want := "cannot parse time expression: " + strconv.Quote(input); !strings.Contains(err.Error(), want) {
+			if want := "cannot parse time expression: " + strconv.Quote(input) + " (absolute forms:"; !strings.Contains(err.Error(), want) {
 				t.Errorf("ParseRelativeTime(%q) error = %q, want it to contain %q", input, err, want)
 			}
 		})
