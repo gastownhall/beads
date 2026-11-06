@@ -300,6 +300,11 @@ func TestParseRelativeTimeNormalizesToUTC(t *testing.T) {
 		{input: "2026-08-01 09:00:00", want: time.Date(2026, 8, 1, 15, 0, 0, 0, time.UTC)},
 		{input: "2026-08-01T09:00:00-06:00", want: time.Date(2026, 8, 1, 15, 0, 0, 0, time.UTC)},
 		{input: "tomorrow at 9am", want: time.Date(2026, 8, 1, 15, 0, 0, 0, time.UTC)},
+		// GH#8167: zone-less datetimes without seconds, both separators.
+		{input: "2026-08-01 09:00", want: time.Date(2026, 8, 1, 15, 0, 0, 0, time.UTC)},
+		{input: "2026-08-01T09:00", want: time.Date(2026, 8, 1, 15, 0, 0, 0, time.UTC)},
+		{input: "2026-08-01 9:00", want: time.Date(2026, 8, 1, 15, 0, 0, 0, time.UTC)},
+		{input: "2026-08-01T9:00", want: time.Date(2026, 8, 1, 15, 0, 0, 0, time.UTC)},
 	}
 
 	for _, tt := range tests {
@@ -315,5 +320,45 @@ func TestParseRelativeTimeNormalizesToUTC(t *testing.T) {
 				t.Errorf("ParseRelativeTime(%q) location = %v, want UTC", tt.input, got.Location())
 			}
 		})
+	}
+}
+
+// TestParseRelativeTimeDatetimeWithoutSeconds covers GH#8167: a datetime
+// without seconds must parse as that date and time in now's location, for
+// both the space and the T separator, never fall through to the NLP layer.
+func TestParseRelativeTimeDatetimeWithoutSeconds(t *testing.T) {
+	cases := []struct {
+		name string
+		now  time.Time
+		want time.Time
+	}{
+		{
+			name: "UTC-5",
+			now:  time.Date(2026, 11, 6, 6, 7, 0, 0, time.FixedZone("UTC-5", -5*60*60)),
+			want: time.Date(2026, 11, 7, 13, 30, 0, 0, time.UTC),
+		},
+		{
+			// The reported case: host in UTC, the day before the target date.
+			name: "UTC",
+			now:  time.Date(2026, 11, 6, 18, 0, 0, 0, time.UTC),
+			want: time.Date(2026, 11, 7, 8, 30, 0, 0, time.UTC),
+		},
+	}
+
+	for _, tc := range cases {
+		for _, input := range []string{"2026-11-07 08:30", "2026-11-07T08:30"} {
+			t.Run(tc.name+"/"+input, func(t *testing.T) {
+				got, err := ParseRelativeTime(input, tc.now)
+				if err != nil {
+					t.Fatalf("ParseRelativeTime(%q) failed: %v", input, err)
+				}
+				if !got.Equal(tc.want) {
+					t.Errorf("ParseRelativeTime(%q) = %v, want %v", input, got, tc.want)
+				}
+				if got.Location() != time.UTC {
+					t.Errorf("ParseRelativeTime(%q) location = %v, want UTC", input, got.Location())
+				}
+			})
+		}
 	}
 }
