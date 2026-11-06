@@ -661,19 +661,22 @@ func (e *RemoteMigrateGateError) AgentDirective() string {
 	switch e.Decision {
 	case gateDecisionAdopt:
 		return "Adopt, do NOT migrate: the remote is already migrated, so migrating here would fork it (#4259). " +
-			"Adoption re-clones and replaces the local database (unpushed local work is lost), so it is a destructive " +
-			"operator decision — surface remote_migrate_gate.options to the operator, do NOT auto-run bd bootstrap."
+			e.adoptDirectivePrereq() + " The re-clone brings only what the remote has, so unpushed local work " +
+			"survives only in the moved-aside copy: a destructive operator decision — surface " +
+			"remote_migrate_gate.options to the operator, do NOT auto-run the move or bd bootstrap."
 	case gateDecisionAdoptFastForward:
 		return "Adopt, do NOT migrate: the remote is already migrated, and this clone's local history is a strict " +
 			"ancestor of the remote's with a clean working set, so adopting is loss-free (no unpushed commits, no " +
-			"uncommitted changes discarded) — unlike a typical adopt. Still surface remote_migrate_gate.options to " +
-			"the operator rather than auto-running bd bootstrap; the current adopt mechanism is unchanged until an " +
-			"automatic fast-forward lands (#4259 follow-up)."
+			"uncommitted changes discarded) — unlike a typical adopt. The gate did not fast-forward this open itself, " +
+			"so adoption here is operator-directed: " + e.adoptDirectivePrereq() + " Surface " +
+			"remote_migrate_gate.options to the operator; do NOT auto-run the move or bd bootstrap."
 	case gateDecisionForkSkew:
 		return "Do NOT migrate: this clone and the remote already applied different content for migration(s) " +
 			FormatMigrationVersions(e.SkewVersions) + " — the schema has forked (#4259) and migrating cannot un-fork it. " +
-			"Resolving requires picking a canonical clone and re-bootstrapping the others, discarding their unpushed " +
-			"work — a data-loss decision. Surface remote_migrate_gate.options to the operator; do NOT auto-run anything."
+			"Resolving requires picking a canonical clone, making sure the remote holds its database, and adopting it " +
+			"on every other clone, whose unpushed work then survives only in its moved-aside copy — a data-loss " +
+			"decision. " + e.adoptDirectivePrereq() + " Surface remote_migrate_gate.options to the operator; do NOT " +
+			"auto-run anything."
 	case gateDecisionSharedNoRemote:
 		return "Coordination decision required: this database is shared with co-resident bd clients, and migrating " +
 			"promotes the schema for all of them at once — every client still on an older bd refuses the database " +
@@ -685,6 +688,18 @@ func (e *RemoteMigrateGateError) AgentDirective() string {
 			"a second clone migrating independently forks the schema unrecoverably (#4259). " +
 			"Do NOT auto-run a migration — surface remote_migrate_gate.options to the operator and let them choose."
 	}
+}
+
+// adoptDirectivePrereq is the move-aside prerequisite the adopting directives
+// share (bd-bt60zz, #6687), worded for where the database lives.
+func (e *RemoteMigrateGateError) adoptDirectivePrereq() string {
+	if e.serverStorage() {
+		return "bd bootstrap never replaces an existing database (it reports that the database already exists and " +
+			"changes nothing), so the database has to be moved aside first — on the serving host, out of the server's " +
+			"data_dir, with the server stopped and its clients' downtime coordinated."
+	}
+	return "bd bootstrap never replaces an existing database (it reports Nothing to do and changes nothing), so the " +
+		"local database has to be moved aside first, in the order remote_migrate_gate.options lists."
 }
 
 // GateOption is one conditional remediation path for the remote-migrate gate
