@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1316,4 +1317,86 @@ func mustMkdir(t *testing.T, dir string) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// TestPrimeChecksReportResolvedBinaryFailure pins how the prime checks report
+// a binary that cannot be resolved or fails: the command check stays an error,
+// the documentation check stays a warning with its file list, both say what
+// failed, and neither tells the user to install, upgrade or PATH-fix bd (the
+// binary that failed is the one running doctor, not PATH's).
+func TestPrimeChecksReportResolvedBinaryFailure(t *testing.T) {
+	isolatePrimeCheckHome(t)
+	assertAdvice := func(t *testing.T, check DoctorCheck) {
+		t.Helper()
+		if check.Fix == "" {
+			t.Errorf("%s: no Fix advice", check.Name)
+		}
+		lower := strings.ToLower(check.Fix)
+		for _, banned := range []string{"install", "upgrade", "remove"} {
+			if strings.Contains(lower, banned) {
+				t.Errorf("%s: Fix %q mentions %q", check.Name, check.Fix, banned)
+			}
+		}
+		if strings.Contains(check.Fix, "PATH") {
+			t.Errorf("%s: Fix %q mentions PATH", check.Name, check.Fix)
+		}
+	}
+	assertFailure := func(t *testing.T, repo, wantContext string) {
+		t.Helper()
+		prime := VerifyPrimeOutput(repo)
+		if prime.Status != "error" {
+			t.Errorf("VerifyPrimeOutput status = %q, want error (%+v)", prime.Status, prime)
+		}
+		if !strings.Contains(prime.Detail, wantContext) {
+			t.Errorf("VerifyPrimeOutput Detail = %q, want it to contain %q", prime.Detail, wantContext)
+		}
+		assertAdvice(t, prime)
+
+		doc := CheckDocumentationBdPrimeReference(repo)
+		if doc.Status != "warning" {
+			t.Errorf("CheckDocumentationBdPrimeReference status = %q, want warning (%+v)", doc.Status, doc)
+		}
+		if !strings.Contains(doc.Detail, "Files: CLAUDE.md") || !strings.Contains(doc.Detail, wantContext) {
+			t.Errorf("CheckDocumentationBdPrimeReference Detail = %q, want Files: CLAUDE.md and %q", doc.Detail, wantContext)
+		}
+		assertAdvice(t, doc)
+	}
+
+	t.Run("resolver fails", func(t *testing.T) {
+		stubPrimeCheckBinary(t, func() (string, error) {
+			return "", errors.New("os.Executable: no such file")
+		})
+		assertFailure(t, writePrimeReferencingRepo(t), "os.Executable: no such file")
+	})
+
+	t.Run("resolved binary exits nonzero", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("failing bd is a shell script")
+		}
+		exe := filepath.Join(t.TempDir(), "bd-failing")
+		if err := os.WriteFile(exe, []byte("#!/bin/sh\necho 'prime exploded' >&2\nexit 3\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		stubPrimeCheckBinary(t, func() (string, error) { return exe, nil })
+		repo := writePrimeReferencingRepo(t)
+		assertFailure(t, repo, "exit status 3")
+		if prime := VerifyPrimeOutput(repo); !strings.Contains(prime.Detail, exe) {
+			t.Errorf("VerifyPrimeOutput Detail = %q, want the resolved binary %q", prime.Detail, exe)
+		}
+	})
+
+	t.Run("resolved binary prints nothing", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("silent bd is a shell script")
+		}
+		exe := filepath.Join(t.TempDir(), "bd-silent")
+		if err := os.WriteFile(exe, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		stubPrimeCheckBinary(t, func() (string, error) { return exe, nil })
+		prime := VerifyPrimeOutput(writePrimeReferencingRepo(t))
+		if prime.Status != "error" || prime.Message != "No output produced" {
+			t.Errorf("VerifyPrimeOutput = %+v, want error No output produced", prime)
+		}
+	})
 }
