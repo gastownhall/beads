@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"sort"
 	"strings"
 
@@ -11,8 +10,9 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
-	"github.com/steveyegge/beads/internal/gitenv"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/storage/domain"
+	domaingit "github.com/steveyegge/beads/internal/storage/domain/git"
 	"github.com/steveyegge/beads/internal/workapi"
 )
 
@@ -329,19 +329,22 @@ func databaseConfigEntries(dbConfig map[string]string) []configEntry {
 	return entries
 }
 
-// collectGitConfigEntries reads beads-related values from git config.
+// collectGitConfigEntries reads beads-related values from git config. A read
+// that genuinely fails warns and omits the entry rather than ending the
+// report: `config show` is a provenance view across many sources, and one
+// unreadable source must not hide the rest.
 func collectGitConfigEntries() []configEntry {
 	var entries []configEntry
 
 	// beads.role is the only git config key currently
-	cmd := exec.Command("git", "config", "--get", "beads.role")
-	cmd.Env = gitenv.ScrubRoutingAndSuppression(os.Environ())
-	output, err := cmd.Output()
-	if err == nil {
-		value := strings.TrimSpace(string(output))
-		if value != "" {
-			entries = append(entries, configEntry{Key: "beads.role", Value: value, Source: "git"})
-		}
+	roleUC := domain.NewGitUseCase("", domaingit.NewInitGitRepository(""))
+	value, hasRole, err := roleUC.BeadsRole(getRootContext())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not read beads.role from git config (%v); omitting it from this report\n", err) //nolint:gosec // G705: stderr, not a browser context
+		return entries
+	}
+	if hasRole && value != "" {
+		entries = append(entries, configEntry{Key: "beads.role", Value: value, Source: "git"})
 	}
 
 	return entries

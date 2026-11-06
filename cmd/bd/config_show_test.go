@@ -515,3 +515,73 @@ func TestCollectGitConfigEntriesIgnoresInheritedRouting(t *testing.T) {
 		})
 	}
 }
+
+// TestConfigShowOmitsRoleOnReadFailure pins bd-a2qnf4 (GH#6765): when the
+// beads.role read fails, `bd config show` warns on stderr, omits the role
+// entry, and still prints the remaining configuration successfully. A present
+// role keeps its git-source entry (TestConfigShowGitEntriesWhenConfigured
+// covers the healthy path through the same collector).
+func TestConfigShowOmitsRoleOnReadFailure(t *testing.T) {
+	for _, entry := range os.Environ() {
+		key := gitenv.EntryKey(entry)
+		if gitenv.IsRoutingKeyForOS(key, runtime.GOOS) {
+			t.Setenv(key, "")
+			if err := os.Unsetenv(key); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	home := t.TempDir()
+	for _, key := range []string{"HOME", "USERPROFILE", "XDG_CONFIG_HOME"} {
+		t.Setenv(key, home)
+	}
+	target := t.TempDir()
+	init := gitCommand("init", "--quiet")
+	init.Dir = target
+	if out, err := init.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	if err := os.WriteFile(filepath.Join(target, ".git", "config"), []byte("[beads\n\trole = maintainer\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A metadata entry gives the report a non-role entry to keep printing:
+	// it is collected from the workspace on disk at call time, unlike the
+	// viper keys, which direct RunE invocations never load.
+	if err := os.MkdirAll(filepath.Join(target, ".beads"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(target, ".beads", "metadata.json"), []byte(`{"project_id":"config-show-role-read"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(target)
+	pinJSONOutput(t, false)
+
+	// captureStdout and captureStderr serialize on stdioMutex, so the two
+	// captures need two runs rather than one nested capture.
+	var err error
+	stdout := captureStdout(t, func() error {
+		err = configShowCmd.RunE(configShowCmd, nil)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("config show must not fail solely for the role read: %v", err)
+	}
+	if strings.Contains(stdout, "beads.role") {
+		t.Errorf("stdout %q must omit the failed role entry", stdout)
+	}
+	if !strings.Contains(stdout, "project_id") {
+		t.Errorf("stdout %q must still report the remaining configuration", stdout)
+	}
+	stderr := captureStderr(t, func() {
+		err = configShowCmd.RunE(configShowCmd, nil)
+	})
+	if err != nil {
+		t.Fatalf("second run failed: %v", err)
+	}
+	if !strings.Contains(stderr, "could not read beads.role") {
+		t.Errorf("stderr %q lacks the read-failure warning", stderr)
+	}
+	if !strings.Contains(stderr, "bad config") {
+		t.Errorf("stderr %q lacks git's diagnostic", stderr)
+	}
+}
