@@ -2,6 +2,7 @@ package tracker
 
 import (
 	"context"
+	"errors"
 	"maps"
 	"slices"
 	"strings"
@@ -128,6 +129,27 @@ func TestFetchPrelinkedIssuesBatchMatchesPerIssueContributor(t *testing.T) {
 	sameOutcome(t, runPrelinkedContributor(t, batch), want)
 	if batch.batchCalls != 1 || batch.singleCalls != 0 || len(batch.batchIDs) != prelinkedCount {
 		t.Fatalf("batch run: %d PreviousExternalRefs calls for %d ids, %d PreviousExternalRef calls; want 1 call for %d ids, 0", batch.batchCalls, len(batch.batchIDs), batch.singleCalls, prelinkedCount)
+	}
+}
+
+func TestFetchPrelinkedIssuesBatchErrorFallsBackPerIssueContributor(t *testing.T) {
+	want := runPrelinkedContributor(t, &refsHistoryStore{refs: prelinkedRefs()})
+
+	batch := &refsBatchStore{refsHistoryStore: &refsHistoryStore{refs: prelinkedRefs()}, batchErr: errors.New("i/o timeout")}
+	got := runPrelinkedContributor(t, batch)
+	sameOutcome(t, got, want)
+	if batch.batchCalls != 1 || batch.singleCalls != prelinkedCount {
+		t.Fatalf("%d PreviousExternalRefs and %d PreviousExternalRef calls, want 1 and %d", batch.batchCalls, batch.singleCalls, prelinkedCount)
+	}
+	if want.warnings != 0 || got.warnings != 1 {
+		t.Fatalf("warnings: per-issue run %d, fallback run %d; want 0 and 1", want.warnings, got.warnings)
+	}
+
+	perIssueErr := errors.New("boom")
+	batch = &refsBatchStore{refsHistoryStore: &refsHistoryStore{singleErr: perIssueErr}, batchErr: errors.New("i/o timeout")}
+	got = runPrelinkedContributor(t, batch)
+	if !errors.Is(got.err, perIssueErr) || !strings.Contains(got.err.Error(), "checking pre-linked local issue bd-same") {
+		t.Fatalf("err = %v, want the per-issue error for bd-same", got.err)
 	}
 }
 
