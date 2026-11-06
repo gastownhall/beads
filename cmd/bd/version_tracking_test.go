@@ -272,7 +272,8 @@ func TestTrackBdVersion_UpgradeDetection(t *testing.T) {
 		t.Errorf("previousVersion = %q, want %q", previousVersion, "0.22.0")
 	}
 
-	// Should have updated .local_version to current version
+	// The upgrade is written once its reconciliation settles (#6929).
+	settleBdVersionStamp(versionBumpSettled)
 	localVersion := readLocalVersion(localVersionPath)
 	if localVersion != Version {
 		t.Errorf(".local_version = %q, want %q", localVersion, Version)
@@ -363,12 +364,15 @@ func newTrackingWorkspace(t *testing.T, lastVersion, binVersion string) string {
 	}
 
 	origVersion, origDetected, origPrevious := Version, versionUpgradeDetected, previousVersion
+	origPending := pendingVersionStampPath
 	t.Cleanup(func() {
 		Version, versionUpgradeDetected, previousVersion = origVersion, origDetected, origPrevious
+		pendingVersionStampPath = origPending
 	})
 	Version = binVersion
 	versionUpgradeDetected = false
 	previousVersion = ""
+	pendingVersionStampPath = ""
 
 	return localVersionPath
 }
@@ -407,6 +411,7 @@ func TestTrackBdVersion_HeadStampChangeDetectedAsUpgrade(t *testing.T) {
 			if previousVersion != wantPrevious {
 				t.Errorf("previousVersion = %q, want %q", previousVersion, wantPrevious)
 			}
+			settleBdVersionStamp(versionBumpSettled)
 			if got := readLocalVersion(localVersionPath); got != tt.binVersion {
 				t.Errorf(".local_version = %q, want %q", got, tt.binVersion)
 			}
@@ -644,3 +649,157 @@ func TestAutoMigrateOnVersionBump_NoDatabase(t *testing.T) {
 // persistence testing through autoMigrateOnVersionBump -> dolt.NewFromConfig.
 // Automatic schema migration is exercised here through the Dolt backend.
 // Dolt-based migration testing is covered by TestInitDoltMetadata in init_test.go.
+
+// TestTrackBdVersion_UpgradeDefersStamp pins the witness lifecycle of
+// gastownhall/beads#6929: detecting an upgrade no longer writes .local_version.
+// settleBdVersionStamp writes it once the reconciliation the upgrade triggers
+// is skipped, settles or is deliberately deferred, and leaves the previous
+// version when it failed, so the next invocation detects the upgrade again.
+func TestTrackBdVersion_UpgradeDefersStamp(t *testing.T) {
+	tests := []struct {
+		name      string
+		outcome   versionBumpOutcome
+		wantStamp bool
+	}{
+		{name: "skipped", outcome: versionBumpSkipped, wantStamp: true},
+		{name: "settled", outcome: versionBumpSettled, wantStamp: true},
+		{name: "deferred", outcome: versionBumpDeferred, wantStamp: true},
+		{name: "failed", outcome: versionBumpFailed, wantStamp: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			localVersionPath := newTrackingWorkspace(t, "1.1.0", "1.3.0")
+
+			trackBdVersion()
+			if !versionUpgradeDetected {
+				t.Fatal("1.1.0 -> 1.3.0 was not detected as an upgrade")
+			}
+			if got := readLocalVersion(localVersionPath); got != "1.1.0" {
+				t.Fatalf(".local_version = %q right after detection, want the old %q: the upgrade signal was consumed before its reconciliation ran", got, "1.1.0")
+			}
+
+			settleBdVersionStamp(tt.outcome)
+			want := "1.1.0"
+			if tt.wantStamp {
+				want = "1.3.0"
+			}
+			if got := readLocalVersion(localVersionPath); got != want {
+				t.Fatalf(".local_version = %q after a %s settlement, want %q", got, tt.name, want)
+			}
+
+			// The next invocation: a failed upgrade is detected again, a
+			// stamped one is not.
+			versionUpgradeDetected, previousVersion = false, ""
+			trackBdVersion()
+			if versionUpgradeDetected == tt.wantStamp {
+				t.Errorf("next invocation versionUpgradeDetected = %v after a %s settlement, want %v",
+					versionUpgradeDetected, tt.name, !tt.wantStamp)
+			}
+		})
+	}
+}
+
+// TestSettleBdVersionStamp_WritesTheDetectedPath covers doctor's target
+// scoping: detection runs with BEADS_DIR pointed at the doctor target and the
+// override is restored before the reconciliation settles. The stamp must land
+// on the witness detection read, never on whatever BEADS_DIR names by then.
+func TestSettleBdVersionStamp_WritesTheDetectedPath(t *testing.T) {
+	targetWitness := newTrackingWorkspace(t, "1.1.0", "1.3.0")
+	trackBdVersion()
+
+	callerDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(callerDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	callerWitness := filepath.Join(callerDir, localVersionFile)
+	if err := writeLocalVersion(callerWitness, "1.0.0"); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_DIR", callerDir)
+
+	settleBdVersionStamp(versionBumpSettled)
+	if got := readLocalVersion(targetWitness); got != "1.3.0" {
+		t.Errorf("target .local_version = %q, want %q", got, "1.3.0")
+	}
+	if got := readLocalVersion(callerWitness); got != "1.0.0" {
+		t.Errorf("caller .local_version = %q, want it untouched at %q", got, "1.0.0")
+	}
+
+	// Settlement consumes the pending write: a second one writes nothing.
+	if err := writeLocalVersion(targetWitness, "1.1.0"); err != nil {
+		t.Fatal(err)
+	}
+	settleBdVersionStamp(versionBumpSettled)
+	if got := readLocalVersion(targetWitness); got != "1.1.0" {
+		t.Errorf("a second settlement rewrote .local_version to %q", got)
+	}
+}
+
+// TestSettleBdVersionStamp_NothingPending covers the paths that must not leave
+// a write for settlement: a preview, which detects without consuming, and a
+// later detection in the same process that found no upgrade, which clears an
+// earlier pending one rather than letting it be settled on its behalf.
+func TestSettleBdVersionStamp_NothingPending(t *testing.T) {
+	t.Run("preview", func(t *testing.T) {
+		localVersionPath := newTrackingWorkspace(t, "1.1.0", "1.3.0")
+		trackBdVersionPreview()
+		if !versionUpgradeDetected {
+			t.Fatal("preview did not detect the upgrade")
+		}
+		settleBdVersionStamp(versionBumpSettled)
+		if got := readLocalVersion(localVersionPath); got != "1.1.0" {
+			t.Errorf(".local_version = %q after a preview, want it unconsumed at %q", got, "1.1.0")
+		}
+	})
+	t.Run("repeated detection", func(t *testing.T) {
+		firstWitness := newTrackingWorkspace(t, "1.1.0", "1.3.0")
+		trackBdVersion()
+
+		secondDir := filepath.Join(t.TempDir(), ".beads")
+		if err := os.MkdirAll(secondDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(secondDir, "metadata.json"), []byte(`{"database":"beads.db"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := writeLocalVersion(filepath.Join(secondDir, localVersionFile), "1.3.0"); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("BEADS_DIR", secondDir)
+		trackBdVersion()
+
+		settleBdVersionStamp(versionBumpSettled)
+		if got := readLocalVersion(firstWitness); got != "1.1.0" {
+			t.Errorf("first .local_version = %q, want %q: a stale pending write survived a later detection", got, "1.1.0")
+		}
+	})
+}
+
+// TestAutoMigrateOnVersionBump_Outcomes covers the early returns that need no
+// database: those that are skipped under the existing rules, and a config
+// that cannot be loaded, which fails and keeps the upgrade for a retry.
+func TestAutoMigrateOnVersionBump_Outcomes(t *testing.T) {
+	origUpgradeDetected := versionUpgradeDetected
+	t.Cleanup(func() { versionUpgradeDetected = origUpgradeDetected })
+
+	versionUpgradeDetected = false
+	if got := autoMigrateOnVersionBump(t.TempDir()); got != versionBumpSkipped {
+		t.Errorf("no upgrade: outcome = %v, want skipped", got)
+	}
+
+	versionUpgradeDetected = true
+	if got := autoMigrateOnVersionBump(""); got != versionBumpSkipped {
+		t.Errorf("no beads directory: outcome = %v, want skipped", got)
+	}
+	if got := autoMigrateOnVersionBump(t.TempDir()); got != versionBumpSkipped {
+		t.Errorf("no database: outcome = %v, want skipped", got)
+	}
+
+	broken := t.TempDir()
+	if err := os.WriteFile(filepath.Join(broken, "metadata.json"), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := autoMigrateOnVersionBump(broken); got != versionBumpFailed {
+		t.Errorf("unreadable config: outcome = %v, want failed", got)
+	}
+}
