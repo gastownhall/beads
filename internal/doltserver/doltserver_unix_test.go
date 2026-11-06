@@ -786,3 +786,46 @@ func assertStateFilesRemoved(t *testing.T, dir string) {
 		}
 	}
 }
+
+// GH#6614: explicit Stop keeps its authority over a confirmed dolt server
+// whose port is unknown. With no port there is nothing to flush through, so
+// it warns instead of dialing port 0, stops the server, cleans its files and
+// succeeds.
+func TestStopStopsUnknownPortServer(t *testing.T) {
+	isolateLifecycleConfig(t)
+	dir := t.TempDir()
+	exited, _ := startUnknownPortServer(t, dir)
+
+	var err error
+	stderr := captureStderr(t, func() { err = Stop(dir) })
+	if err != nil {
+		t.Errorf("Stop = %v, want nil", err)
+	}
+	expectStopped(t, exited)
+	assertStateFilesRemoved(t, dir)
+	if !strings.Contains(stderr, "port is unknown") || !strings.Contains(stderr, "not flushing") {
+		t.Errorf("stderr lacks the unknown-port flush warning:\n%s", stderr)
+	}
+	if strings.Contains(stderr, "could not flush working set") {
+		t.Errorf("Stop dialed the SQL port to flush:\n%s", stderr)
+	}
+}
+
+// Stop's fallback for a lifecycle lock it cannot take stops only a server
+// that is not running; the unknown-port server is running, so it is refused,
+// not terminated.
+func TestStopWithoutLifecycleLockLeavesUnknownPortServer(t *testing.T) {
+	isolateLifecycleConfig(t)
+	dir := t.TempDir()
+	exited, pid := startUnknownPortServer(t, dir)
+	// A directory where the lock file belongs: opening it fails (EISDIR).
+	if err := os.Mkdir(lockPath(dir), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Stop(dir); err == nil || !strings.Contains(err.Error(), "lifecycle lock") {
+		t.Errorf("Stop = %v, want the lifecycle lock error", err)
+	}
+	expectNotSignaled(t, exited)
+	assertUnknownPortTrackingKept(t, dir, pid)
+}

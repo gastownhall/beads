@@ -401,7 +401,7 @@ bd dolt start
 `"running": true` with `"port": 0`.
 
 **Cause:** `.beads/dolt-server.pid` names a live dolt sql-server, but
-`.beads/dolt-server.port` is missing or unreadable and no setting names a
+`.beads/dolt-server.port` is missing or malformed and no setting names a
 port. bd cannot connect to a server without its port, and it does not guess:
 status reports what it found and leaves the server running.
 
