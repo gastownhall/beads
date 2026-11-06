@@ -158,8 +158,14 @@ type RemoteMigrateGateError struct {
 // Unwrap keeps a gate error that carries a read refusal discoverable as both
 // classifications: IsRemoteMigrateGateError for the decision-specific
 // rendering, IsSchemaBehindError for the schema verdict and its Missing
-// evidence.
+// evidence. The nil guard is load-bearing: returning a nil *SchemaBehindError
+// as the error interface would make every gate error — reads refused or not —
+// claim to wrap something, and errors.As(err, &behind) would then return true
+// with a nil behind error for refusals whose reads were never checked.
 func (e *RemoteMigrateGateError) Unwrap() error {
+	if e.ReadsRefused == nil {
+		return nil
+	}
 	return e.ReadsRefused
 }
 
@@ -288,6 +294,20 @@ func (e *RemoteMigrateGateError) Notes() string {
 		msg += "\n" +
 			"  Note: " + AllowRemoteMigrateEnv + "=" + e.UnrecognizedEnv + " is set but was not recognized —\n" +
 			"  use " + AllowRemoteMigrateEnv + "=1 to unlock.\n"
+	}
+	// #6572: correct the read contract this type's guidance historically
+	// promised. The note is arm-neutral on purpose — it names WHAT the reads
+	// cannot find, never a command: the per-decision body above already owns
+	// the remedy, and `bd migrate schema` is the shared-no-remote remedy only,
+	// not something to prescribe on the remote-backed arms this error also
+	// reaches. No escape hatch either: pointing a blocked read at
+	// BD_IGNORE_SCHEMA_SKEW=1 would trade the refusal for query-time
+	// unknown-column failures, which is the state this note exists to name.
+	if e.ReadsRefused != nil {
+		msg += "\n" +
+			"  Note: reads are refused too, not only writes (#6572): this schema is\n" +
+			"  missing " + strings.Join(e.ReadsRefused.Missing, ", ") + ", which bd's read commands\n" +
+			"  require, so they cannot run against the current schema either.\n"
 	}
 	return msg
 }
@@ -494,6 +514,22 @@ func (e *RemoteMigrateGateError) userBody() string {
 			"  Unlike the usual re-clone, this clone has no unpushed commits and no\n" +
 			"  uncommitted local changes to discard.\n"
 	case gateDecisionSharedNoRemote:
+		// #6572: the read-continuation promise is keyed on ReadsRefused. A
+		// nil there means reads were never checked (strict opens, write
+		// paths) — the promise holds, but only while the schema can answer
+		// this binary's reads, so it stays qualified. Non-nil means the open
+		// that tolerated this refusal then found the schema cannot answer
+		// them, and the unconditional promise would send the operator to a
+		// read command that fails on the missing relation.
+		reads := "  Read commands keep working against the current schema in the\n" +
+			"  meantime, as long as it can answer this binary's reads — a schema\n" +
+			"  that cannot is refused naming what it lacks. Writes stay refused\n" +
+			"  until the schema is migrated.\n"
+		if e.ReadsRefused != nil {
+			reads = "  Reads are refused too, not just writes: this schema cannot answer\n" +
+				"  bd's reads either — the note below names what it lacks (#6572).\n" +
+				"  Writes stay refused until the schema is migrated.\n"
+		}
 		return "\n" +
 			"  This database is served to multiple clients (dolt sql-server /\n" +
 			"  proxied-server mode). Applying schema migrations promotes the schema\n" +
@@ -509,8 +545,7 @@ func (e *RemoteMigrateGateError) userBody() string {
 			"        (" + SharedConsentCommandGlobal + " for the shared global database;\n" +
 			"        " + AllowRemoteMigrateEnv + "=1 bd <cmd> in scripted/CI use)\n" +
 			"\n" +
-			"  Read commands keep working against the current schema in the meantime;\n" +
-			"  writes stay refused until the schema is migrated.\n" +
+			reads +
 			"\n" +
 			"  If the migration then reports dirty tables, that working set has to be\n" +
 			"  committed first — see the recovery the dirty-table error names; do not\n" +
@@ -623,11 +658,23 @@ func (e *RemoteMigrateGateError) AgentDirective() string {
 			"Resolving requires picking a canonical clone and re-bootstrapping the others, discarding their unpushed " +
 			"work — a data-loss decision. Surface remote_migrate_gate.options to the operator; do NOT auto-run anything."
 	case gateDecisionSharedNoRemote:
-		return "Coordination decision required: this database is shared with co-resident bd clients, and migrating " +
+		d := "Coordination decision required: this database is shared with co-resident bd clients, and migrating " +
 			"promotes the schema for all of them at once — every client still on an older bd refuses the database " +
 			"until it is upgraded (#5920). Other clients' binary versions are not observable from this process, so " +
 			"do NOT auto-run the migration: surface remote_migrate_gate.options to the operator and let them confirm " +
-			"the fleet is upgraded first. Reads keep working on the current schema meanwhile."
+			"the fleet is upgraded first."
+		// Keyed on ReadsRefused like the shared-no-remote body's read clause
+		// (#6572): nil means reads were never checked and the promise holds
+		// only while the schema can answer them; non-nil means this binary's
+		// reads fail on the named relations, so an agent told they "keep
+		// working" would retry into the exact failure this carries.
+		if e.ReadsRefused != nil {
+			d += " Reads are refused too until the schema is migrated: it is missing " +
+				strings.Join(e.ReadsRefused.Missing, ", ") + ", which this binary's reads require (#6572)."
+		} else {
+			d += " Reads keep working on the current schema meanwhile, as long as it can answer this binary's reads."
+		}
+		return d
 	default:
 		return "Coordination decision required: only ONE clone may migrate a shared remote; " +
 			"a second clone migrating independently forks the schema unrecoverably (#4259). " +

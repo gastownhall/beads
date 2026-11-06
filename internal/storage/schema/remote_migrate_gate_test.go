@@ -368,3 +368,121 @@ func TestRemoteMigrateGateAdoptFastForward(t *testing.T) {
 		t.Errorf("UserMessage should explain the fast-forward is loss-free:\n%s", msg)
 	}
 }
+
+// TestRemoteMigrateGateError_ReadsRefused locks the #6572 rendering contract:
+// a gate error carrying a read refusal must stop promising that reads keep
+// working — in the human body and the agent directive — name the missing
+// relations from the attached SchemaBehindError, and stay reachable as both
+// classifications. A gate error whose reads were never checked (nil
+// ReadsRefused: strict opens, write paths) keeps the promise, qualified to
+// what nil means: not verified, merely not yet refused.
+func TestRemoteMigrateGateError_ReadsRefused(t *testing.T) {
+	newSharedGate := func(reads *SchemaBehindError) *RemoteMigrateGateError {
+		return &RemoteMigrateGateError{
+			CurrentVersion: 73, LatestVersion: LatestVersion(), Pending: 1,
+			Decision: gateDecisionSharedNoRemote, Shared: true,
+			ReadsRefused: reads,
+		}
+	}
+
+	t.Run("Unwrap keeps both classifications reachable", func(t *testing.T) {
+		plain := newSharedGate(nil)
+		if err := plain.Unwrap(); err != nil {
+			t.Errorf("Unwrap() = %v, want nil when ReadsRefused is nil", err)
+		}
+
+		behind := &SchemaBehindError{DBVersion: 73, BinaryVersion: LatestVersion(),
+			Missing: []string{"leases", "leases.granted_node"}}
+		carrying := newSharedGate(behind)
+		if err := carrying.Unwrap(); err != behind {
+			t.Errorf("Unwrap() = %v, want the carried behind error", err)
+		}
+		var behindOut *SchemaBehindError
+		if !errors.As(error(carrying), &behindOut) || behindOut != behind {
+			t.Errorf("errors.As(*SchemaBehindError) = %v, want the carried behind error through the gate", behindOut)
+		}
+		if behindOut.DBVersion != 73 || strings.Join(behindOut.Missing, ",") != "leases,leases.granted_node" {
+			t.Errorf("behind evidence lost in the chain: %+v", behindOut)
+		}
+		var gateOut *RemoteMigrateGateError
+		if !errors.As(error(carrying), &gateOut) || gateOut != carrying {
+			t.Errorf("errors.As(*RemoteMigrateGateError) lost the gate through its own Unwrap")
+		}
+	})
+
+	t.Run("unchecked reads keep a qualified continuation promise", func(t *testing.T) {
+		e := newSharedGate(nil)
+		msg := e.UserMessage()
+		for _, want := range []string{
+			"Read commands keep working",
+			"as long as it can answer this binary's reads",
+		} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("UserMessage missing %q:\n%s", want, msg)
+			}
+		}
+		if d := e.AgentDirective(); !strings.Contains(d, "Reads keep working on the current schema meanwhile") {
+			t.Errorf("AgentDirective dropped the continuation promise for unchecked reads: %q", d)
+		}
+	})
+
+	t.Run("a carried refusal replaces the promise and names what is missing", func(t *testing.T) {
+		e := newSharedGate(&SchemaBehindError{DBVersion: 73, BinaryVersion: LatestVersion(),
+			Missing: []string{"leases", "leases.granted_node"}})
+		msg := e.UserMessage()
+		if strings.Contains(msg, "Read commands keep working") {
+			t.Errorf("UserMessage still promises reads continue against a schema they cannot query:\n%s", msg)
+		}
+		for _, want := range []string{
+			"Reads are refused too, not just writes",
+			"reads are refused too, not only writes",
+			"leases, leases.granted_node",
+			// The per-decision remedy survives: the refusal corrects the read
+			// contract, it does not replace the shared-no-remote guidance.
+			"co-resident",
+			SharedConsentCommand,
+		} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("UserMessage missing %q:\n%s", want, msg)
+			}
+		}
+		// The note must not hand the operator a new instruction: no escape
+		// hatch (it would trade the refusal for query-time unknown-column
+		// failures) and no generic local migration beyond the body's own.
+		for _, absent := range []string{"BD_IGNORE_SCHEMA_SKEW", "BD_IGNORE_SCHEMA_SKEW=1"} {
+			if strings.Contains(e.Notes(), absent) {
+				t.Errorf("Notes() must not recommend the skew escape hatch:\n%s", e.Notes())
+			}
+		}
+		d := e.AgentDirective()
+		if strings.Contains(d, "Reads keep working") {
+			t.Errorf("AgentDirective still promises reads continue: %q", d)
+		}
+		for _, want := range []string{"Reads are refused too", "leases, leases.granted_node"} {
+			if !strings.Contains(d, want) {
+				t.Errorf("AgentDirective missing %q: %q", want, d)
+			}
+		}
+	})
+
+	t.Run("the note is arm-neutral on remote-backed decisions", func(t *testing.T) {
+		// ReadsRefused is attached by lenient opens whatever the decision was,
+		// so the note must not leak the shared-no-remote remedy into a
+		// remote-backed arm's guidance.
+		e := &RemoteMigrateGateError{
+			CurrentVersion: 73, LatestVersion: LatestVersion(), Pending: 1,
+			Decision: gateDecisionAdopt,
+			ReadsRefused: &SchemaBehindError{DBVersion: 73, BinaryVersion: LatestVersion(),
+				Missing: []string{"wisps.storage_class"}},
+		}
+		msg := e.UserMessage()
+		for _, want := range []string{"reads are refused too, not only writes", "wisps.storage_class"} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("UserMessage missing %q:\n%s", want, msg)
+			}
+		}
+		if strings.Contains(msg, SharedConsentCommand) {
+			t.Errorf("the reads-refused note prescribed the shared-no-remote consent verb on a remote-backed arm:\n%s", msg)
+		}
+	})
+}

@@ -239,6 +239,61 @@ func TestHandleRemoteMigrateGateJSON_SharedNoRemote(t *testing.T) {
 	}
 }
 
+// TestHandleRemoteMigrateGateJSON_SharedNoRemoteReadsRefused covers the
+// shared-store refusal's agent-facing block when the open that carried it also
+// found the schema cannot answer this binary's reads (#6572). The top-level
+// hint is the AgentDirective, so it must stop promising reads keep working and
+// name the missing relations instead — while the expected/option guidance
+// keeps pointing at the consent verb, which is still the one remedy.
+func TestHandleRemoteMigrateGateJSON_SharedNoRemoteReadsRefused(t *testing.T) {
+	gate := &schema.RemoteMigrateGateError{
+		CurrentVersion: 53, LatestVersion: 66, Pending: 13,
+		Decision: "shared-no-remote",
+		ReadsRefused: &schema.SchemaBehindError{
+			DBVersion: 53, BinaryVersion: 66,
+			Missing: []string{"leases"},
+		},
+	}
+
+	origStderr := os.Stderr
+	r, w, pipeErr := os.Pipe()
+	if pipeErr != nil {
+		t.Fatal(pipeErr)
+	}
+	os.Stderr = w
+	defer func() { os.Stderr = origStderr }()
+	handleRemoteMigrateGateJSON(gate)
+	_ = w.Close()
+
+	var buf bytes.Buffer
+	if _, err := io.Copy(&buf, r); err != nil {
+		t.Fatal(err)
+	}
+	_ = r.Close()
+
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(buf.Bytes(), &parsed); err != nil {
+		t.Fatalf("json.Unmarshal stderr: %v\nstderr was: %s", err, buf.String())
+	}
+	hint, _ := parsed["hint"].(string)
+	if strings.Contains(hint, "Reads keep working") {
+		t.Errorf("hint still promises reads continue: %q", hint)
+	}
+	for _, want := range []string{"Reads are refused too", "leases"} {
+		if !strings.Contains(hint, want) {
+			t.Errorf("hint missing %q: %q", want, hint)
+		}
+	}
+
+	obj, ok := parsed["remote_migrate_gate"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("remote_migrate_gate key missing or wrong type: %T", parsed["remote_migrate_gate"])
+	}
+	if got, _ := obj["expected"].(string); !strings.Contains(got, "bd migrate schema") {
+		t.Errorf("expected = %q, want the consent verb still carried", got)
+	}
+}
+
 // TestHandleRemoteMigrateGateJSON_SharedNoRemoteGlobal covers the shared-store
 // refusal's agent-facing block when the refused open targeted the global
 // database (--global). The consent verb is target-scoped: the project-scoped
@@ -348,6 +403,36 @@ func TestRenderTypedOpenError(t *testing.T) {
 			t.Errorf("rendered output is not the full UserMessage:\n%s", out)
 		}
 		for _, want := range []string{"co-resident", "bd migrate schema", "Read commands keep working"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("output missing %q:\n%s", want, out)
+			}
+		}
+	})
+
+	t.Run("a refusal carrying a read refusal drops the read promise (#6572)", func(t *testing.T) {
+		gate := &schema.RemoteMigrateGateError{
+			CurrentVersion: 53, LatestVersion: 66, Pending: 13,
+			Decision: "shared-no-remote",
+			ReadsRefused: &schema.SchemaBehindError{
+				DBVersion: 53, BinaryVersion: 66,
+				Missing: []string{"leases", "leases.granted_node"},
+			},
+		}
+		out, handled := capture(func() bool {
+			return renderTypedOpenError(fmt.Errorf("uow: init schema: %w", gate))
+		})
+		if !handled {
+			t.Fatal("renderTypedOpenError = false, want true for a wrapped gate refusal")
+		}
+		if strings.Contains(out, "Read commands keep working") {
+			t.Errorf("output still promises reads continue against a schema they cannot query:\n%s", out)
+		}
+		for _, want := range []string{
+			"Reads are refused too, not just writes",
+			"leases, leases.granted_node",
+			// The per-decision remedy survives the corrected read contract.
+			"bd migrate schema",
+		} {
 			if !strings.Contains(out, want) {
 				t.Errorf("output missing %q:\n%s", want, out)
 			}
