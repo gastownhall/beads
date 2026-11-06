@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -354,6 +355,34 @@ func TestRenderTypedOpenError(t *testing.T) {
 		}
 	})
 
+	t.Run("a refused read-through renders that reads are refused", func(t *testing.T) {
+		// gastownhall/beads#6572: the refusal also classifies as
+		// *schema.SchemaBehindError, but it is still the gate's block that
+		// renders, with its own remedy, and no longer promises reads.
+		gate := &schema.RemoteMigrateGateError{
+			CurrentVersion: 53, LatestVersion: 66, Pending: 13,
+			Decision:     "shared-no-remote",
+			ReadsRefused: &schema.SchemaBehindError{DBVersion: 53, BinaryVersion: 66, Missing: []string{"leases.granted_node"}},
+		}
+		out, handled := capture(func() bool {
+			return renderTypedOpenError(fmt.Errorf("uow: init schema: %w", gate))
+		})
+		if !handled {
+			t.Fatal("renderTypedOpenError = false, want true for a wrapped gate refusal")
+		}
+		if out != gate.UserMessage() {
+			t.Errorf("rendered output is not the full UserMessage:\n%s", out)
+		}
+		for _, want := range []string{"co-resident", "bd migrate schema", "read commands are refused too", "leases.granted_node"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("output missing %q:\n%s", want, out)
+			}
+		}
+		if strings.Contains(out, "Read commands keep working") {
+			t.Errorf("output still promises reads keep working:\n%s", out)
+		}
+	})
+
 	t.Run("an ordinary error is left to the caller", func(t *testing.T) {
 		out, handled := capture(func() bool {
 			return renderTypedOpenError(errors.New("connection refused"))
@@ -365,4 +394,78 @@ func TestRenderTypedOpenError(t *testing.T) {
 			t.Errorf("nothing should be printed for an untyped error, got:\n%s", out)
 		}
 	})
+}
+
+// TestHandleRemoteMigrateGateJSON_ReadsRefused covers the agent-facing block
+// of a refused read-through (gastownhall/beads#6572): reads_refused names the
+// schema version and what it lacks, observed says reads are refused too, the
+// hint drops any promise that reads continue, and the decision's options are
+// exactly what they are without the refusal.
+func TestHandleRemoteMigrateGateJSON_ReadsRefused(t *testing.T) {
+	captureJSON := func(gate *schema.RemoteMigrateGateError) map[string]interface{} {
+		t.Helper()
+		origStderr := os.Stderr
+		r, w, pipeErr := os.Pipe()
+		if pipeErr != nil {
+			t.Fatal(pipeErr)
+		}
+		os.Stderr = w
+		handleRemoteMigrateGateJSON(gate)
+		_ = w.Close()
+		os.Stderr = origStderr
+		var buf bytes.Buffer
+		if _, err := io.Copy(&buf, r); err != nil {
+			t.Fatal(err)
+		}
+		_ = r.Close()
+		var parsed map[string]interface{}
+		if err := json.Unmarshal(buf.Bytes(), &parsed); err != nil {
+			t.Fatalf("json.Unmarshal stderr: %v\nstderr was: %s", err, buf.String())
+		}
+		return parsed
+	}
+	for _, plain := range []*schema.RemoteMigrateGateError{
+		{CurrentVersion: 53, LatestVersion: 66, Pending: 13, Decision: "shared-no-remote"},
+		{CurrentVersion: 53, LatestVersion: 66, Pending: 13, Decision: "adopt"},
+		{CurrentVersion: 53, LatestVersion: 66, Pending: 13},
+	} {
+		t.Run("decision="+plain.Decision, func(t *testing.T) {
+			refused := *plain
+			refused.ReadsRefused = &schema.SchemaBehindError{DBVersion: 53, BinaryVersion: 66, Missing: []string{"leases.granted_node"}}
+			before, after := captureJSON(plain), captureJSON(&refused)
+
+			if got, _ := after["error"].(string); got != refused.Error() {
+				t.Errorf("error = %q, want %q", got, refused.Error())
+			}
+			hint, _ := after["hint"].(string)
+			if hint != refused.AgentDirective() || !strings.Contains(hint, "Reads are refused too") || strings.Contains(hint, "Reads keep working") {
+				t.Errorf("hint = %q, want the directive saying reads are refused and not that they keep working", hint)
+			}
+			gate, _ := after["remote_migrate_gate"].(map[string]interface{})
+			beforeGate, _ := before["remote_migrate_gate"].(map[string]interface{})
+			reads, ok := gate["reads_refused"].(map[string]interface{})
+			if !ok {
+				t.Fatalf("reads_refused = %v, want an object", gate["reads_refused"])
+			}
+			if v, _ := reads["schema_version"].(float64); int(v) != 53 {
+				t.Errorf("reads_refused.schema_version = %v, want 53", reads["schema_version"])
+			}
+			if missing, _ := reads["missing"].([]interface{}); len(missing) != 1 || missing[0] != "leases.granted_node" {
+				t.Errorf("reads_refused.missing = %v, want [leases.granted_node]", reads["missing"])
+			}
+			if _, ok := beforeGate["reads_refused"]; ok {
+				t.Errorf("a gate without ReadsRefused carries reads_refused: %v", beforeGate["reads_refused"])
+			}
+			observed, _ := gate["observed"].(string)
+			if want, _ := beforeGate["observed"].(string); !strings.HasPrefix(observed, want) ||
+				!strings.Contains(observed, "reads are refused too") || !strings.Contains(observed, "leases.granted_node") {
+				t.Errorf("observed = %q, want %q followed by the reads refusal", observed, want)
+			}
+			for _, key := range []string{"expected", "options", "decision", "docs"} {
+				if !reflect.DeepEqual(gate[key], beforeGate[key]) {
+					t.Errorf("%s = %v, want the decision's own %v", key, gate[key], beforeGate[key])
+				}
+			}
+		})
+	}
 }

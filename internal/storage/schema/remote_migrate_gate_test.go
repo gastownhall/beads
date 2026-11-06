@@ -3,6 +3,7 @@ package schema
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -433,5 +434,63 @@ func TestRemoteMigrateGateError_ReadsRefused(t *testing.T) {
 	var nilGate *RemoteMigrateGateError
 	if u := nilGate.Unwrap(); u != nil {
 		t.Errorf("nil gate Unwrap() = %v, want nil", u)
+	}
+}
+
+// TestRemoteMigrateGateError_ReadsRefusedRendering pins what a refused
+// read-through tells the operator and the agent (gastownhall/beads#6572):
+// that reads are refused too and what the schema lacks, beside the unchanged
+// decision-specific remedy and options. It must not keep promising that reads
+// continue, and must not add a migration instruction the decision did not
+// already give (the generic `bd migrate schema` remedy of a plain
+// SchemaBehindError would contradict adopt, fork-skew and data-behind).
+func TestRemoteMigrateGateError_ReadsRefusedRendering(t *testing.T) {
+	const promise = " Reads keep working on the current schema meanwhile."
+	for name, gateErr := range readsRefusedGateCases() {
+		t.Run(name, func(t *testing.T) {
+			plainMsg, plainDirective, plainOptions := gateErr.UserMessage(), gateErr.AgentDirective(), gateErr.Options()
+			refused := *gateErr
+			refused.ReadsRefused = &SchemaBehindError{DBVersion: 59, BinaryVersion: 66, Missing: []string{"leases.granted_node"}}
+
+			msg := refused.UserMessage()
+			for _, want := range []string{"read commands are refused too", "leases.granted_node"} {
+				if !strings.Contains(msg, want) {
+					t.Errorf("UserMessage() missing %q:\n%s", want, msg)
+				}
+			}
+			if strings.Contains(strings.ToLower(msg), "keep working") {
+				t.Errorf("UserMessage() still promises reads keep working:\n%s", msg)
+			}
+			for _, line := range strings.Split(plainMsg, "\n") {
+				if strings.Contains(line, "keep working") || strings.Contains(line, "writes stay refused until") {
+					continue
+				}
+				if !strings.Contains(msg, line) {
+					t.Errorf("UserMessage() dropped the decision's line %q:\n%s", line, msg)
+				}
+			}
+			if got, want := strings.Count(msg, "bd migrate"), strings.Count(plainMsg, "bd migrate"); got != want {
+				t.Errorf("UserMessage() names `bd migrate` %d times, want the decision's own %d:\n%s", got, want, msg)
+			}
+
+			directive := refused.AgentDirective()
+			if !strings.HasPrefix(directive, strings.TrimSuffix(plainDirective, promise)) {
+				t.Errorf("AgentDirective() = %q, want it to keep the decision's directive %q", directive, plainDirective)
+			}
+			for _, want := range []string{"Reads are refused too", "leases.granted_node"} {
+				if !strings.Contains(directive, want) {
+					t.Errorf("AgentDirective() = %q, want it to contain %q", directive, want)
+				}
+			}
+			if strings.Contains(directive, "Reads keep working") {
+				t.Errorf("AgentDirective() still promises reads keep working: %q", directive)
+			}
+			if got, want := strings.Count(directive, "bd migrate"), strings.Count(plainDirective, "bd migrate"); got != want {
+				t.Errorf("AgentDirective() names `bd migrate` %d times, want the decision's own %d: %q", got, want, directive)
+			}
+			if got := refused.Options(); !reflect.DeepEqual(got, plainOptions) {
+				t.Errorf("Options() = %+v, want the decision's own %+v", got, plainOptions)
+			}
+		})
 	}
 }

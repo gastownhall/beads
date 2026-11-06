@@ -244,11 +244,16 @@ func (e *RemoteMigrateGateError) Error() string {
 
 // readsRefusedFact says what ReadsRefused found missing.
 func (e *RemoteMigrateGateError) readsRefusedFact() string {
-	missing := e.ReadsRefused.MissingSummary()
-	if missing == "" {
-		missing = "schema"
+	return fmt.Sprintf("schema v%d lacks %s, which this binary's issue reads select", e.CurrentVersion, e.missingForReads())
+}
+
+// missingForReads names what ReadsRefused found missing, or the schema as a
+// whole when it did not say.
+func (e *RemoteMigrateGateError) missingForReads() string {
+	if missing := e.ReadsRefused.MissingSummary(); missing != "" {
+		return missing
 	}
-	return fmt.Sprintf("schema v%d lacks %s, which this binary's issue reads select", e.CurrentVersion, missing)
+	return "schema"
 }
 
 // refusal is Error's one-line statement of the refusal itself.
@@ -295,8 +300,8 @@ func (e *RemoteMigrateGateError) UserMessage() string {
 
 // Notes returns what UserMessage appends after its guidance body: the smart
 // gate's reason for falling back to this stop (fallbackReasonNote) and a
-// set-but-unrecognized AllowRemoteMigrateEnv value. Empty when neither
-// applies. A renderer that pairs Error() with guidance of its own instead of
+// set-but-unrecognized AllowRemoteMigrateEnv value, and that reads are
+// refused too when ReadsRefused is set. Empty when none applies. A renderer that pairs Error() with guidance of its own instead of
 // userBody (embeddeddolt's lenient-open warning) appends it, so swapping the
 // body does not drop these diagnostics with it (bd-1z1pc).
 func (e *RemoteMigrateGateError) Notes() string {
@@ -305,6 +310,14 @@ func (e *RemoteMigrateGateError) Notes() string {
 		msg += "\n" +
 			"  Note: " + AllowRemoteMigrateEnv + "=" + e.UnrecognizedEnv + " is set but was not recognized —\n" +
 			"  use " + AllowRemoteMigrateEnv + "=1 to unlock.\n"
+	}
+	if e.ReadsRefused != nil {
+		msg += "\n" +
+			fmt.Sprintf("  Note: read commands are refused too; they cannot continue on schema v%d,\n", e.CurrentVersion) +
+			"  which lacks what this binary's issue reads select:\n" +
+			"    " + e.missingForReads() + "\n" +
+			"  Complete the steps above first, or read with a bd release that matches\n" +
+			fmt.Sprintf("  schema v%d.\n", e.CurrentVersion)
 	}
 	return msg
 }
@@ -511,6 +524,12 @@ func (e *RemoteMigrateGateError) userBody() string {
 			"  Unlike the usual re-clone, this clone has no unpushed commits and no\n" +
 			"  uncommitted local changes to discard.\n"
 	case gateDecisionSharedNoRemote:
+		meantime := "  Read commands keep working against the current schema in the meantime;\n" +
+			"  writes stay refused until the schema is migrated.\n"
+		if e.ReadsRefused != nil {
+			meantime = "  Read commands are refused too in the meantime (see the note below), as\n" +
+				"  are writes, until the schema is migrated.\n"
+		}
 		return "\n" +
 			"  This database is served to multiple clients (dolt sql-server /\n" +
 			"  proxied-server mode). Applying schema migrations promotes the schema\n" +
@@ -526,8 +545,7 @@ func (e *RemoteMigrateGateError) userBody() string {
 			"        (" + SharedConsentCommandGlobal + " for the shared global database;\n" +
 			"        " + AllowRemoteMigrateEnv + "=1 bd <cmd> in scripted/CI use)\n" +
 			"\n" +
-			"  Read commands keep working against the current schema in the meantime;\n" +
-			"  writes stay refused until the schema is migrated.\n" +
+			meantime +
 			"\n" +
 			"  If the migration then reports dirty tables, that working set has to be\n" +
 			"  committed first — see the recovery the dirty-table error names; do not\n" +
@@ -587,6 +605,16 @@ func (e *RemoteMigrateGateError) EscapeHint() string {
 // to the operator and let them choose, per the AgentDiagnostic contract ("Go
 // observes and reports, the agent decides and acts").
 func (e *RemoteMigrateGateError) AgentDirective() string {
+	d := e.agentDirective()
+	if e.ReadsRefused != nil {
+		d += " Reads are refused too: " + e.readsRefusedFact() + ", so read commands fail until the " +
+			"remedy above is done — do NOT retry them, and do NOT auto-run a migration to restore reads."
+	}
+	return d
+}
+
+// agentDirective is AgentDirective's decision-specific instruction.
+func (e *RemoteMigrateGateError) agentDirective() string {
 	// #6575: the data-behind stop is the one refusal in this type with a
 	// single, safe, non-destructive, auto-runnable remedy — pulling commits
 	// this clone is already behind on takes nothing away and needs no
@@ -640,11 +668,15 @@ func (e *RemoteMigrateGateError) AgentDirective() string {
 			"Resolving requires picking a canonical clone and re-bootstrapping the others, discarding their unpushed " +
 			"work — a data-loss decision. Surface remote_migrate_gate.options to the operator; do NOT auto-run anything."
 	case gateDecisionSharedNoRemote:
-		return "Coordination decision required: this database is shared with co-resident bd clients, and migrating " +
+		d := "Coordination decision required: this database is shared with co-resident bd clients, and migrating " +
 			"promotes the schema for all of them at once — every client still on an older bd refuses the database " +
 			"until it is upgraded (#5920). Other clients' binary versions are not observable from this process, so " +
 			"do NOT auto-run the migration: surface remote_migrate_gate.options to the operator and let them confirm " +
-			"the fleet is upgraded first. Reads keep working on the current schema meanwhile."
+			"the fleet is upgraded first."
+		if e.ReadsRefused == nil {
+			d += " Reads keep working on the current schema meanwhile."
+		}
+		return d
 	default:
 		return "Coordination decision required: only ONE clone may migrate a shared remote; " +
 			"a second clone migrating independently forks the schema unrecoverably (#4259). " +

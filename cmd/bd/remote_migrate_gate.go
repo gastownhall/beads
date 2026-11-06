@@ -234,6 +234,18 @@ func handleRemoteMigrateGateJSON(e *schema.RemoteMigrateGateError) {
 				gate["docs"] = dataBehindDocsURL
 			}
 		}
+		// gastownhall/beads#6572: a read-only command that would otherwise
+		// read on past this refusal cannot, because the schema lacks what this
+		// binary's issue reads select. Say so beside the decision, whose
+		// options stay the remedy, so an agent does not retry the read.
+		if e.ReadsRefused != nil {
+			gate["reads_refused"] = map[string]interface{}{
+				"schema_version": e.CurrentVersion,
+				"missing":        e.ReadsRefused.Missing,
+			}
+			gate["observed"] = fmt.Sprintf("%v; reads are refused too: schema v%d lacks %s, which this binary's issue reads select",
+				gate["observed"], e.CurrentVersion, e.ReadsRefused.MissingSummary())
+		}
 		m["remote_migrate_gate"] = gate
 	}
 	encoder := json.NewEncoder(os.Stderr)
