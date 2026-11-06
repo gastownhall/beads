@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/gitenv"
@@ -234,4 +235,90 @@ func TestCheckBeadsRoleIgnoresInheritedRouting(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestCheckBeadsRole_MalformedGitConfigIsReported pins bd-a2qnf4 (GH#6765):
+// a repository whose local Git config cannot be parsed must surface the read
+// failure, not be reported as an unconfigured role or as "not a git
+// repository". Absence stays benign (TestCheckBeadsRole_NotConfigured).
+func TestCheckBeadsRole_MalformedGitConfigIsReported(t *testing.T) {
+	isolateGlobalGitConfig(t)
+	tmpDir := newGitRepo(t)
+
+	gitDir := filepath.Join(tmpDir, ".git")
+	cfg, err := os.ReadFile(filepath.Join(gitDir, "config"))
+	if err != nil {
+		t.Fatalf("read git config: %v", err)
+	}
+	cfg = append(cfg, []byte("\n[beads\n\trole = maintainer\n")...)
+	if err := os.WriteFile(filepath.Join(gitDir, "config"), cfg, 0o644); err != nil {
+		t.Fatalf("write malformed git config: %v", err)
+	}
+
+	check := CheckBeadsRole(tmpDir)
+
+	if check.Status == StatusOK {
+		t.Errorf("malformed git config reported as OK: status=%s message=%q", check.Status, check.Message)
+	}
+	if check.Message == "N/A (not a git repository)" || check.Message == "beads.role not configured" {
+		t.Errorf("malformed git config folded into absence: status=%s message=%q", check.Status, check.Message)
+	}
+}
+
+// TestCheckBeadsRoleReadFailureWarnsWithDiagnostic extends the repro above to
+// both entry points: a failed read is a warning that carries git's diagnostic
+// and points at the config files, and it is decided before the database
+// fallback or the config-sensitive repository probe can answer. A supplied
+// path that does not exist is still N/A, as before.
+func TestCheckBeadsRoleReadFailureWarnsWithDiagnostic(t *testing.T) {
+	apis := []struct {
+		name string
+		run  func(string) DoctorCheck
+	}{
+		{"standalone", CheckBeadsRole},
+		{"nil shared store", func(path string) DoctorCheck { return CheckBeadsRoleWithStore(path, nil) }},
+		{"empty shared store", func(path string) DoctorCheck { return CheckBeadsRoleWithStore(path, &SharedStore{}) }},
+	}
+
+	t.Run("malformed config", func(t *testing.T) {
+		isolateGlobalGitConfig(t)
+		repo := newGitRepo(t)
+		configPath := filepath.Join(repo, ".git", "config")
+		cfg, err := os.ReadFile(configPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(configPath, append(cfg, "\n[beads\n"...), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		// The database fallback would answer here if it were consulted.
+		if err := os.MkdirAll(filepath.Join(repo, ".beads"), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		for _, api := range apis {
+			check := api.run(repo)
+			if check.Status != StatusWarning || check.Name != "Role Configuration" || check.Category != CategoryData {
+				t.Errorf("%s: got %+v, want a Role Configuration warning", api.name, check)
+			}
+			if !strings.Contains(check.Message, "could not be read") {
+				t.Errorf("%s: message %q does not report a read failure", api.name, check.Message)
+			}
+			if !strings.Contains(check.Detail, "bad config") {
+				t.Errorf("%s: detail %q does not carry git's diagnostic", api.name, check.Detail)
+			}
+			if check.Fix != "git config --list --show-origin" {
+				t.Errorf("%s: fix %q, want the config inspection command", api.name, check.Fix)
+			}
+		}
+	})
+
+	t.Run("nonexistent path", func(t *testing.T) {
+		isolateGlobalGitConfig(t)
+		missing := filepath.Join(t.TempDir(), "missing")
+		for _, api := range apis {
+			if check := api.run(missing); check.Status != StatusOK || check.Message != "N/A (not a git repository)" {
+				t.Errorf("%s: got %+v, want N/A for a path that does not exist", api.name, check)
+			}
+		}
+	})
 }
