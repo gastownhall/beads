@@ -166,7 +166,7 @@ func TestCustomConfigCacheRereadsAfterFailedRead(t *testing.T) {
 			// YAML vocabulary distinct from the database's, so a fallback
 			// answer is recognizable as one.
 			withCustomVocabYAML(t, "yamlstat", "yamltype")
-			store, mock, _ := countedMockStore(t)
+			store, mock, counts := countedMockStore(t)
 			mode.arm(mock)
 
 			detailed, err := store.GetCustomStatusesDetailed(mode.ctx(t))
@@ -225,9 +225,186 @@ func TestCustomConfigCacheRereadsAfterFailedRead(t *testing.T) {
 			if !statusCached || !typeCached {
 				t.Fatalf("cache flags after recovery = (%v, %v), want (true, true)", statusCached, typeCached)
 			}
+
+			// Cache hit: after a successful read, repeated getters must not
+			// touch the driver at all — counted at the connector, since an
+			// unexpected driver error swallowed by the fallback would not
+			// show up as unmet expectations.
+			prior := counts.Snapshot()
+			_, err = store.GetCustomStatuses(context.Background())
+			if err != nil {
+				t.Fatalf("GetCustomStatuses cached repeat: %v", err)
+			}
+			_, err = store.GetCustomStatusesDetailed(context.Background())
+			if err != nil {
+				t.Fatalf("GetCustomStatusesDetailed cached repeat: %v", err)
+			}
+			_, err = store.GetCustomTypes(context.Background())
+			if err != nil {
+				t.Fatalf("GetCustomTypes cached repeat: %v", err)
+			}
+			if delta := counts.Snapshot().Sub(prior); delta != (sqlcount.Snapshot{}) {
+				t.Errorf("repeated getters drove %+v of database traffic, want none: a successful read is cached", delta)
+			}
 			if err := mock.ExpectationsWereMet(); err != nil {
 				t.Fatalf("unmet SQL expectations: %v", err)
 			}
 		})
+	}
+}
+
+// TestCustomConfigCacheCachesEmptyVocabulary pins the other side of the
+// contract: a successful read of an empty vocabulary — both normalized
+// tables present and empty, legacy config rows absent, no config.yaml
+// fallback — is cached exactly like a populated one, so repeated getters
+// answer from the cache without another database read.
+func TestCustomConfigCacheCachesEmptyVocabulary(t *testing.T) {
+	withCustomVocabYAML(t, "", "")
+	store, mock, counts := countedMockStore(t)
+	expectCustomVocabRead(mock, nil, nil)
+
+	statuses, err := store.GetCustomStatuses(context.Background())
+	if err != nil {
+		t.Fatalf("GetCustomStatuses: %v", err)
+	}
+	if len(statuses) != 0 {
+		t.Errorf("GetCustomStatuses on an empty vocabulary = %v, want empty", statuses)
+	}
+	customTypes, err := store.GetCustomTypes(context.Background())
+	if err != nil {
+		t.Fatalf("GetCustomTypes: %v", err)
+	}
+	if len(customTypes) != 0 {
+		t.Errorf("GetCustomTypes on an empty vocabulary = %v, want empty", customTypes)
+	}
+
+	store.cacheMu.Lock()
+	statusCached, typeCached := store.customStatusCached, store.customTypeCached
+	store.cacheMu.Unlock()
+	if !statusCached || !typeCached {
+		t.Fatalf("cache flags after an empty read = (%v, %v), want (true, true): a successful empty read is cached", statusCached, typeCached)
+	}
+
+	prior := counts.Snapshot()
+	_, _ = store.GetCustomStatuses(context.Background())
+	_, _ = store.GetCustomStatusesDetailed(context.Background())
+	_, _ = store.GetCustomTypes(context.Background())
+	if delta := counts.Snapshot().Sub(prior); delta != (sqlcount.Snapshot{}) {
+		t.Errorf("repeated getters drove %+v of database traffic, want none", delta)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}
+
+// TestCustomConfigCachePartialInvalidationKeepsValidHalf pins the !cached
+// guards around partial invalidation: when one half of the vocabulary is
+// invalidated and the reload fails, the still-valid half keeps both its
+// value and its loaded flag, the failed half answers from config.yaml
+// without being certified loaded, and the next successful read refreshes
+// only the invalidated half.
+func TestCustomConfigCachePartialInvalidationKeepsValidHalf(t *testing.T) {
+	withCustomVocabYAML(t, "yamlstat", "yamltype")
+	store, mock, _ := countedMockStore(t)
+	expectCustomVocabRead(mock, []types.CustomStatus{{Name: "review", Category: types.CategoryWIP}}, []string{"molecule"})
+	if _, err := store.GetCustomStatuses(context.Background()); err != nil {
+		t.Fatalf("warm GetCustomStatuses: %v", err)
+	}
+
+	// Invalidate only the type half; the reload fails.
+	store.invalidateConfigCaches("types.custom")
+	mock.ExpectBegin().WillReturnError(errCustomVocabRead)
+	if _, err := store.GetCustomTypes(context.Background()); err != nil {
+		t.Fatalf("GetCustomTypes during failed reload: %v", err)
+	}
+	store.cacheMu.Lock()
+	statuses, customTypes := store.customStatusCache, store.customTypeCache
+	statusCached, typeCached := store.customStatusCached, store.customTypeCached
+	store.cacheMu.Unlock()
+	if len(statuses) != 1 || statuses[0] != "review" || !statusCached {
+		t.Errorf("status half after failed type reload = (%v, %v), want ([review], true) untouched", statuses, statusCached)
+	}
+	if len(customTypes) != 1 || customTypes[0] != "yamltype" || typeCached {
+		t.Errorf("type half after failed reload = (%v, %v), want ([yamltype] served from fallback, false)", customTypes, typeCached)
+	}
+
+	// The next successful read refreshes only the invalidated half.
+	expectCustomVocabRead(mock, []types.CustomStatus{{Name: "review", Category: types.CategoryWIP}}, []string{"molecule"})
+	customTypes, err := store.GetCustomTypes(context.Background())
+	if err != nil {
+		t.Fatalf("GetCustomTypes after recovery: %v", err)
+	}
+	if len(customTypes) != 2 || customTypes[0] != "molecule" || customTypes[1] != "yamltype" {
+		t.Errorf("GetCustomTypes after type recovery = %v, want [molecule yamltype]", customTypes)
+	}
+	store.cacheMu.Lock()
+	statuses = store.customStatusCache
+	statusCached, typeCached = store.customStatusCached, store.customTypeCached
+	store.cacheMu.Unlock()
+	if len(statuses) != 1 || statuses[0] != "review" {
+		t.Errorf("status half after type recovery = %v, want [review] still guarded", statuses)
+	}
+	if !statusCached || !typeCached {
+		t.Errorf("cache flags after type recovery = (%v, %v), want (true, true)", statusCached, typeCached)
+	}
+
+	// Mirror: invalidate only the status half; the reload fails and the type
+	// half stays intact.
+	store.invalidateConfigCaches("status.custom")
+	mock.ExpectBegin().WillReturnError(errCustomVocabRead)
+	if _, err := store.GetCustomStatuses(context.Background()); err != nil {
+		t.Fatalf("GetCustomStatuses during failed reload: %v", err)
+	}
+	store.cacheMu.Lock()
+	statuses, customTypes = store.customStatusCache, store.customTypeCache
+	statusCached, typeCached = store.customStatusCached, store.customTypeCached
+	store.cacheMu.Unlock()
+	if len(customTypes) != 2 || customTypes[0] != "molecule" || !typeCached {
+		t.Errorf("type half after failed status reload = (%v, %v), want ([molecule yamltype], true) untouched", customTypes, typeCached)
+	}
+	if len(statuses) != 1 || statuses[0] != "yamlstat" || statusCached {
+		t.Errorf("status half after failed reload = (%v, %v), want ([yamlstat] served from fallback, false)", statuses, statusCached)
+	}
+
+	expectCustomVocabRead(mock, []types.CustomStatus{{Name: "review", Category: types.CategoryWIP}}, []string{"molecule"})
+	statuses, err = store.GetCustomStatuses(context.Background())
+	if err != nil {
+		t.Fatalf("GetCustomStatuses after recovery: %v", err)
+	}
+	if len(statuses) != 1 || statuses[0] != "review" {
+		t.Errorf("GetCustomStatuses after status recovery = %v, want [review]", statuses)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}
+
+// TestCustomConfigCacheRecoversRetryableErrorWithinCall pins that a
+// retryable SELECT failure flows through the existing read wrapper's retry
+// unchanged: one failed attempt followed by a successful transaction answers
+// the same getter call, with no new retry policy involved.
+func TestCustomConfigCacheRecoversRetryableErrorWithinCall(t *testing.T) {
+	withCustomVocabYAML(t, "yamlstat", "yamltype")
+	store, mock, _ := countedMockStore(t)
+	mock.ExpectBegin()
+	mock.ExpectQuery(customStatusesQuery).WillReturnError(errors.New("connection reset by peer"))
+	mock.ExpectRollback()
+	expectCustomVocabRead(mock, []types.CustomStatus{{Name: "review", Category: types.CategoryWIP}}, []string{"molecule"})
+
+	statuses, err := store.GetCustomStatuses(context.Background())
+	if err != nil {
+		t.Fatalf("GetCustomStatuses: %v", err)
+	}
+	if len(statuses) != 1 || statuses[0] != "review" {
+		t.Errorf("GetCustomStatuses = %v, want [review] recovered within the call", statuses)
+	}
+	store.cacheMu.Lock()
+	statusCached, typeCached := store.customStatusCached, store.customTypeCached
+	store.cacheMu.Unlock()
+	if !statusCached || !typeCached {
+		t.Errorf("cache flags = (%v, %v), want (true, true) after in-call recovery", statusCached, typeCached)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
 	}
 }
