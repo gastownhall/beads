@@ -1933,7 +1933,16 @@ func startLocked(beadsDir string) (*State, error) {
 		if IsAutoStartDisabled() {
 			return nil, errors.New(unknownPortRefusal(beadsDir, state, autoStartDisabledReason))
 		}
-		return verifyRemotesAPIState(cfg, state)
+		// bd manages this server and may start one: replace it. Holding the
+		// lifecycle lock, no other bd is mid-start here, and the re-check
+		// above adopts a port its starter published while we waited. Any
+		// stop or cleanup error ends the start, a joined ErrServerNotRunning
+		// included: a launch beside a server we failed to stop would compete
+		// for its data directory.
+		fmt.Fprintf(os.Stderr, "Dolt server (PID %d) is running but its port is unknown; stopping it to start a replacement\n", state.PID)
+		if err := stopLocked(beadsDir); err != nil {
+			return nil, fmt.Errorf("stopping Dolt server (PID %d) whose port is unknown: %w", state.PID, err)
+		}
 	}
 
 	// Clean up orphaned dolt sql-server processes INSIDE the lock.
