@@ -1208,6 +1208,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The remote-migrate gate's adopt guidance no longer presents a bare
+  `bd bootstrap` as the fix on a clone that already has a database
+  ([#6687](https://github.com/gastownhall/beads/issues/6687), reported by
+  @postoso). Bootstrap never replaces an existing database, so it printed
+  `Nothing to do.` and left the clone on the old schema. The adopt,
+  fast-forward, fork and blunt refusals, `bd migrate`'s options and agent
+  directive, the read-only warning, the upgrade notice and bootstrap's own
+  behind-remote hint now give the move-aside steps first
+  (`mkdir -p .beads/backup`, an unused destination, the old store kept), and
+  refusals on server storage direct the move to the server's own data
+  directory instead. A bootstrap that finds an existing database now says it
+  left it unchanged, and the upgrading guide's adopt recipe matches the gate,
+  with the old-release backup import marked as conditional.
 - `bd config get` for a config.yaml, git-config or user-global key no longer
   opens the database just because one exists, so it answers from those files
   while the Dolt server is down instead of failing the open (GH#5108). In
