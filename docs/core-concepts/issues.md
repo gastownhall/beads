@@ -27,6 +27,19 @@ bd show bd-42 --json
 }
 ```
 
+### Titles
+
+A title is required and holds at most 500 bytes of UTF-8, not 500
+characters: accented letters and punctuation such as `—` or `·` take two or
+three bytes each, so a title can be refused below 500 characters. The error
+reports the byte count, for example `title must be 500 bytes or less (got 514)`.
+
+Every command that writes a title applies the same limit: `bd create`,
+`bd import`, `bd update`, `bd edit`, `bd batch` and `bd rename`. This keeps
+every stored title importable from an export. It does not shorten titles
+already stored over the limit by an older bd; an export holding one fails
+`bd import` until you shorten that title with `bd update <id> --title`.
+
 ## Issue Types
 
 | Type | Use Case |
