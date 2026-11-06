@@ -653,3 +653,153 @@ func TestDoctorVersionBumpDirtyRefusalKeepsTargetWitness(t *testing.T) {
 		t.Errorf("caller %s = %q after bd doctor <target>, want it untouched (%q)", localVersionFile, got, callerWitness)
 	}
 }
+
+// TestServerModeReadRefusesAMissingLeaseOverlay is the lease half of the
+// readable-schema check above. Every full issue read also selects the
+// ephemeral leases overlay (sqlbuild.LeaseSelectColumns through LeaseJoin), so
+// a behind database that has every issue column but no leases table opened
+// fine and then failed each read on the raw missing table (#6929). It must
+// refuse at open with the schema-version gap and its remedy instead, the
+// remedy must restore the table, and a behind database with both projections
+// complete must keep serving reads.
+func TestServerModeReadRefusesAMissingLeaseOverlay(t *testing.T) {
+	if testDoltServerPort == 0 {
+		t.Skip("Dolt test server not available, skipping")
+	}
+
+	repo := t.TempDir()
+	beadsDir := filepath.Join(repo, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("create .beads: %v", err)
+	}
+	database := uniqueTestDBName(t)
+	if err := (&configfile.Config{
+		Backend:        configfile.BackendDolt,
+		DoltMode:       configfile.DoltModeServer,
+		DoltServerHost: "127.0.0.1",
+		DoltServerPort: testDoltServerPort,
+		DoltDatabase:   database,
+	}).Save(beadsDir); err != nil {
+		t.Fatalf("save metadata: %v", err)
+	}
+
+	ctx := context.Background()
+	store, err := dolt.New(ctx, &dolt.Config{
+		Path:            filepath.Join(beadsDir, "dolt"),
+		BeadsDir:        beadsDir,
+		ServerHost:      "127.0.0.1",
+		ServerPort:      testDoltServerPort,
+		Database:        database,
+		CreateIfMissing: true,
+	})
+	if err != nil {
+		t.Fatalf("create test store: %v", err)
+	}
+	if err := store.SetConfig(ctx, "issue_prefix", "lsd"); err != nil {
+		t.Fatalf("set issue_prefix: %v", err)
+	}
+	now := time.Now()
+	if err := store.CreateIssue(ctx, &types.Issue{
+		ID:        "lsd-1",
+		Title:     "Readable with its lease overlay",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}, "test-user"); err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close setup store: %v", err)
+	}
+	t.Cleanup(func() { dropTestDatabase(database, testDoltServerPort) })
+
+	admin, err := sql.Open("mysql", doltutil.ServerDSN{
+		Host: "127.0.0.1", Port: testDoltServerPort, User: "root", Database: database,
+	}.String())
+	if err != nil {
+		t.Fatalf("connect to test dolt server: %v", err)
+	}
+	t.Cleanup(func() { admin.Close() })
+
+	// Behind by one migration (0074, the id tombstone tables, which no issue
+	// read touches), with every issue column in place.
+	if schema.LatestVersion() != 74 {
+		t.Fatalf("this fixture regresses the cursor past 0074 (the id tombstone tables); LatestVersion() = %d, retarget it", schema.LatestVersion())
+	}
+	for _, stmt := range []string{
+		"DROP TABLE id_tombstones",
+		"DROP TABLE wisp_id_tombstones",
+		"DELETE FROM schema_migrations WHERE version >= 74",
+		"CALL DOLT_COMMIT('-Am', 'test: one migration behind')",
+	} {
+		if _, err := admin.ExecContext(ctx, stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	// A current witness keeps the version-bump pre-run out of it: only the
+	// read path is under test.
+	if err := os.WriteFile(filepath.Join(beadsDir, localVersionFile), []byte(Version+"\n"), 0o600); err != nil {
+		t.Fatalf("write %s: %v", localVersionFile, err)
+	}
+
+	bd := buildBDForInitTests(t)
+	run := func(args ...string) (string, string, int) {
+		t.Helper()
+		cmd := exec.Command(bd, args...)
+		cmd.Dir = repo
+		cmd.Env = append(filteredEnvForContextBinding("BEADS_DIR", "BEADS_DB", "BD_DB",
+			"BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_SERVER_DATABASE", schema.AllowRemoteMigrateEnv,
+			schema.AllowMigrateEnv, "BD_IGNORE_SCHEMA_SKEW"),
+			"HOME="+t.TempDir(),
+			"XDG_CONFIG_HOME="+t.TempDir(),
+			"BEADS_TEST_MODE=1",
+			"BEADS_TEST_SERVER=1",
+			"BEADS_DIR="+beadsDir,
+			schema.AllowRemoteMigrateEnv+"=0",
+		)
+		var stdout, stderr strings.Builder
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		code := 0
+		if err := cmd.Run(); err != nil {
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) {
+				t.Fatalf("running bd %v: %v", args, err)
+			}
+			code = exitErr.ExitCode()
+		}
+		return stdout.String(), stderr.String(), code
+	}
+
+	// Positive control: both projections complete, so the behind database
+	// keeps serving reads.
+	if stdout, stderr, code := run("list"); code != 0 || !strings.Contains(stdout, "lsd-1") {
+		t.Fatalf("bd list on a behind database with complete projections: exit %d, want lsd-1 listed\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+
+	// leases is dolt_ignored (clone-local), so dropping it leaves history alone.
+	if _, err := admin.ExecContext(ctx, "DROP TABLE leases"); err != nil {
+		t.Fatalf("drop leases: %v", err)
+	}
+	stdout, stderr, code := run("list")
+	if code == 0 {
+		t.Fatalf("bd list succeeded without the lease overlay\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+	}
+	if !strings.Contains(stderr, "schema version mismatch: database is at v73, binary expects v74") ||
+		!strings.Contains(stderr, "bd migrate schema") {
+		t.Errorf("bd list refusal does not name the behind schema and its remedy:\n%s", stderr)
+	}
+	if strings.Contains(stderr, "table not found") || strings.Contains(stderr, "1146") {
+		t.Errorf("bd list reached a query and failed on the missing leases table instead of refusing at open:\n%s", stderr)
+	}
+
+	if stdout, stderr, code := run("migrate", "schema"); code != 0 {
+		t.Fatalf("bd migrate schema exit = %d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	stdout, stderr, code = run("list")
+	if code != 0 || !strings.Contains(stdout, "lsd-1") {
+		t.Fatalf("bd list after bd migrate schema: exit %d, want the issue listed\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+}
