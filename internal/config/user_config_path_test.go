@@ -432,3 +432,119 @@ func TestInitializeDoesNotProbeNativeUserConfigWhenDocumentedExists(t *testing.T
 	}
 }
 
+// GH#8113, AC-2: with both files present, the documented file is the only
+// modern user config merged: its actor wins, a native-only key no longer
+// reaches the effective config or counts as a private source, and the legacy
+// layer still merges.
+func TestInitializeIgnoresNativeUserConfigWhenDocumentedExists(t *testing.T) {
+	candidates := isolateUserConfigEnvironment(t)
+	writeUserConfigFile(t, candidates.legacy, "git:\n  no-gpg-sign: true\n")
+	writeUserConfigFile(t, candidates.native, "actor: native\ngit:\n  author: native-only\n")
+	writeUserConfigFile(t, candidates.documented, "actor: documented\n")
+
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+	if got := GetString("actor"); got != "documented" {
+		t.Errorf("actor = %q, want the documented file's actor", got)
+	}
+	if got := GetString("git.author"); got != "" {
+		t.Errorf("git.author = %q, want empty: a native-only key must not reach the effective config", got)
+	}
+	if got := PrivateConfigValue("git.author"); got != "" {
+		t.Errorf("PrivateConfigValue(git.author) = %q, want empty: the native file must not stay a private source", got)
+	}
+	if !GetBool("git.no-gpg-sign") {
+		t.Error("git.no-gpg-sign = false, want true from the legacy layer")
+	}
+}
+
+// GH#8113 edge cases: a malformed or empty documented file still shadows the
+// native candidate — no fallback on parse failure — while a malformed native
+// file is neither read nor fatal when the documented file is valid.
+func TestInitializeIgnoresInvalidNativeWhenDocumentedExists(t *testing.T) {
+	t.Run("malformed native is ignored while documented is valid", func(t *testing.T) {
+		candidates := isolateUserConfigEnvironment(t)
+		writeUserConfigFile(t, candidates.native, "actor: [unclosed\n")
+		writeUserConfigFile(t, candidates.documented, "actor: documented\n")
+
+		if err := Initialize(); err != nil {
+			t.Fatalf("Initialize: %v (the malformed native file must not be read)", err)
+		}
+		if got := GetString("actor"); got != "documented" {
+			t.Errorf("actor = %q, want the documented file's actor", got)
+		}
+	})
+
+	t.Run("malformed documented still fails without native fallback", func(t *testing.T) {
+		candidates := isolateUserConfigEnvironment(t)
+		writeUserConfigFile(t, candidates.native, "actor: native\n")
+		writeUserConfigFile(t, candidates.documented, "actor: [unclosed\n")
+
+		if err := Initialize(); err == nil {
+			t.Fatal("Initialize succeeded with a malformed documented file; want a read error, not a native fallback")
+		}
+	})
+
+	t.Run("empty documented still shadows native", func(t *testing.T) {
+		candidates := isolateUserConfigEnvironment(t)
+		writeUserConfigFile(t, candidates.native, "actor: native\n")
+		writeUserConfigFile(t, candidates.documented, "")
+
+		if err := Initialize(); err != nil {
+			t.Fatalf("Initialize: %v", err)
+		}
+		if got := GetString("actor"); got != "" {
+			t.Errorf("actor = %q, want empty: the empty documented file must still shadow the native file", got)
+		}
+	})
+}
+
+// GH#8113: when the documented <home>/.config/bd/config.yaml exists,
+// Initialize must not probe the native os.UserConfigDir()/bd/config.yaml (on
+// macOS that stat raises an app-data privacy prompt on every launch). A native
+// file is read only after that stat finds it, so a native-only key reaching
+// the merged config proves the probe happened.
+func TestInitializeSkipsNativeUserConfigWhenDocumentedExists(t *testing.T) {
+	ResetForTesting()
+	t.Cleanup(ResetForTesting)
+	restore := envSnapshot(t)
+	defer restore()
+
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	nativeRoot := filepath.Join(root, "native-config")
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("APPDATA", nativeRoot)
+	t.Setenv("XDG_CONFIG_HOME", nativeRoot)
+	t.Setenv("BEADS_DIR", "")
+	t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "")
+	t.Chdir(root)
+
+	candidates := currentUserConfigYamlCandidates()
+	if candidates.native == "" || candidates.documented == "" || candidates.native == candidates.documented {
+		t.Fatalf("test requires distinct native and documented paths: %#v", candidates)
+	}
+	for path, body := range map[string]string{
+		candidates.documented: "mail.delegate: documented\n",
+		candidates.native:     "git.author: native-only\n",
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", filepath.Dir(path), err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+	}
+
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+	if got := GetString("mail.delegate"); got != "documented" {
+		t.Fatalf("mail.delegate = %q, want the documented file's value", got)
+	}
+	if got := GetString("git.author"); got != "" {
+		t.Fatalf("git.author = %q: Initialize probed and read native %s although documented %s exists", got, candidates.native, candidates.documented)
+	}
+}
