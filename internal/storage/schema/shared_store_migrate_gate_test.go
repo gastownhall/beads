@@ -69,7 +69,11 @@ func TestSharedStoreGateNoRemote(t *testing.T) {
 		for _, want := range []string{
 			"lock out every co-resident bd client",
 			"bd migrate schema",
+			// #6572: reads were never checked on this arm, so the promise
+			// stays — qualified to what nil ReadsRefused means (not verified,
+			// merely not yet refused).
 			"Read commands keep working",
+			"as long as it can answer this binary's reads",
 			AllowRemoteMigrateEnv + "=1",
 		} {
 			if !strings.Contains(msg, want) {
