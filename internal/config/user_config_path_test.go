@@ -550,3 +550,29 @@ func TestInitializeIgnoresNativeUserConfigWhenDocumentedExists(t *testing.T) {
 		t.Fatalf("git.no-gpg-sign = false, want the legacy %s value to still merge", candidates.legacy)
 	}
 }
+
+// Without the documented file, native is still the modern user config: it
+// overrides legacy, a project config overrides it, its values stay private,
+// and the public resolver names it.
+func TestInitializeReadsNativeUserConfigWhenDocumentedAbsent(t *testing.T) {
+	candidates, root := isolateUserConfigRoots(t)
+	writeConfigBody(t, candidates.legacy, "actor: legacy\n")
+	writeConfigBody(t, candidates.native, "actor: native\ngit.author: native-only\n")
+	probed := recordUserConfigStats(t)
+
+	assertInitializedActor(t, "native")
+	if countProbes(*probed, candidates.native) == 0 {
+		t.Fatalf("Initialize never probed native %s while documented is absent; probes: %q", candidates.native, *probed)
+	}
+	if got := PrivateConfigValue("git.author"); got != "native-only" {
+		t.Fatalf("PrivateConfigValue(git.author) = %q, want the native value", got)
+	}
+	if got, err := UserConfigYamlPath(); err != nil || got != candidates.native {
+		t.Fatalf("UserConfigYamlPath() = %q, %v; want native %q", got, err, candidates.native)
+	}
+
+	projectRoot := filepath.Join(root, "project")
+	writeConfigActor(t, filepath.Join(projectRoot, ".beads", "config.yaml"), "project")
+	t.Chdir(projectRoot)
+	assertInitializedActor(t, "project")
+}
