@@ -579,6 +579,11 @@ func TestRemoteMigrateGateServerAdoptGuidance(t *testing.T) {
 		{"owned", func(e *RemoteMigrateGateError) { e.ServerMode = true }},
 		{"shared", func(e *RemoteMigrateGateError) { e.ServerMode, e.Shared = true, true }},
 		{"proxied", func(e *RemoteMigrateGateError) { e.Shared, e.Proxied = true, true }},
+		// Each marker alone is enough: the Dolt store sets ServerMode, the
+		// shared gate sets Shared, and the uow provider sets Proxied, and no
+		// caller is required to set the others.
+		{"shared alone", func(e *RemoteMigrateGateError) { e.Shared = true }},
+		{"proxied alone", func(e *RemoteMigrateGateError) { e.Proxied = true }},
 	}
 	for _, tc := range adoptRecoveryCases() {
 		for _, layout := range layouts {
@@ -591,7 +596,7 @@ func TestRemoteMigrateGateServerAdoptGuidance(t *testing.T) {
 						t.Errorf("server adopt message is missing %q:\n%s", want, msg)
 					}
 				}
-				for _, banned := range []string{".beads/embeddeddolt", "mkdir -p .beads/backup"} {
+				for _, banned := range []string{".beads/embeddeddolt", "embeddeddolt", "mv -f", "mkdir -p"} {
 					if strings.Contains(msg, banned) {
 						t.Errorf("server adopt message prescribes the embedded move (%q):\n%s", banned, msg)
 					}

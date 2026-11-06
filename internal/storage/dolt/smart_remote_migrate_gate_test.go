@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage/doltutil"
@@ -103,17 +104,29 @@ func TestDoltNew_SmartRemoteMigrateGate_RealDolt(t *testing.T) {
 		if gateErr.Decision != "adopt" {
 			t.Errorf("adopt case: Decision = %q, want %q", gateErr.Decision, "adopt")
 		}
+	}
 
-		// bd-bt60zz (#6687): the store's own gate, the one initSchema runs,
-		// must mark its refusal as server storage, so the adopt guidance
-		// directs the move to the serving host instead of an embedded path.
-		err = store.remoteMigrateGate(nil)(ctx, db)
-		gateErr = nil
+	// --- adopt through the store's own gate: the caller annotates server mode (#6687). ---
+	// The gate itself cannot know the storage topology, so the store that
+	// raises it marks every refusal ServerMode. Without that, this store —
+	// whose database lives under a dolt sql-server's data_dir, not at
+	// .beads/embeddeddolt — would print the embedded move-aside recipe, an
+	// `mv` against a path that does not exist here. Probe through the real
+	// caller (initSchema, the writable-open path) rather than the raw gate.
+	{
+		_, err := store.initSchema(ctx, nil)
+		var gateErr *schema.RemoteMigrateGateError
 		if !errors.As(err, &gateErr) {
-			t.Fatalf("adopt case via the store gate: expected gate error, got %v", err)
+			t.Fatalf("store gate: expected gate error, got %v", err)
 		}
-		if gateErr.Decision != "adopt" || !gateErr.ServerMode {
-			t.Errorf("adopt case via the store gate: Decision = %q, ServerMode = %v; want adopt, true", gateErr.Decision, gateErr.ServerMode)
+		if gateErr.Decision != "adopt" {
+			t.Errorf("store gate: Decision = %q, want %q", gateErr.Decision, "adopt")
+		}
+		if !gateErr.ServerMode {
+			t.Error("store gate: ServerMode not annotated on the refusal it returns (#6687)")
+		}
+		if msg := gateErr.UserMessage(); !strings.Contains(msg, "data_dir") || strings.Contains(msg, "mv -f") {
+			t.Errorf("store gate: annotated refusal must render the server steps, not the embedded recipe:\n%s", msg)
 		}
 	}
 
