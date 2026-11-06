@@ -944,3 +944,31 @@ func TestVersionBumpOpenFailed(t *testing.T) {
 		})
 	}
 }
+
+// TestAutoMigrateOnVersionBump_FailureUnderJSON: --json keeps the failure
+// notice off stderr, where the command's own machine-readable error may follow,
+// while the witness still stays for a retry.
+func TestAutoMigrateOnVersionBump_FailureUnderJSON(t *testing.T) {
+	pinJSONOutput(t, true)
+	localVersionPath := newTrackingWorkspace(t, "1.1.0", "1.3.0")
+	beadsDir := filepath.Dir(localVersionPath)
+
+	trackBdVersion()
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var outcome versionBumpOutcome
+	out := captureNoticeStderr(t, func() {
+		outcome = autoMigrateOnVersionBump(beadsDir)
+		settleBdVersionStamp(outcome)
+	})
+	if outcome != versionBumpFailed {
+		t.Fatalf("outcome = %v, want failed", outcome)
+	}
+	if out != "" {
+		t.Errorf("failure notice printed under --json:\n%s", out)
+	}
+	if got := readLocalVersion(localVersionPath); got != "1.1.0" {
+		t.Errorf(".local_version = %q after a failed upgrade under --json, want the previous %q", got, "1.1.0")
+	}
+}
