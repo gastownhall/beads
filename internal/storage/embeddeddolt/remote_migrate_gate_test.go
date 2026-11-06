@@ -625,6 +625,106 @@ func TestEmbeddedOpenForReadOnlyCommand_LenientGateReadsIntactOverlay(t *testing
 	}
 }
 
+// TestEmbeddedOpenForReadOnlyCommand_SkewEscapeHatchReadsAnyway pins the
+// operator's way out of the #6572 refusal: BD_IGNORE_SCHEMA_SKEW=1 keeps the
+// lenient read-only open open on an unreadable hydration overlay, warning
+// that some queries may fail — and they then fail at query time, naming the
+// missing relation, exactly as the warning says. The hatch trades a clear
+// open-time refusal for a limping read; this test is what keeps that trade
+// honest (the warning's "some queries may fail" is a promise about the very
+// reads this fixture then makes). Passes at its parent by design: the guard
+// AC-1 added refuses by default, and the hatch path it sits behind is
+// unchanged.
+func TestEmbeddedOpenForReadOnlyCommand_SkewEscapeHatchReadsAnyway(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt tests")
+	}
+	t.Setenv(schema.AllowRemoteMigrateEnv, "0")
+	t.Setenv(schema.SmartGateEnv, "0")
+	t.Setenv("BD_IGNORE_SCHEMA_SKEW", "1")
+
+	ctx := t.Context()
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	dataDir := filepath.Join(beadsDir, "embeddeddolt")
+
+	store, err := embeddeddolt.Open(ctx, beadsDir, "testdb", "main")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := store.SetConfig(ctx, "issue_prefix", "lgh"); err != nil {
+		store.Close()
+		t.Fatalf("SetConfig: %v", err)
+	}
+	if err := store.CreateIssue(ctx, &types.Issue{
+		ID: "probe1", Title: "probe", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
+	}, "tester"); err != nil {
+		store.Close()
+		t.Fatalf("CreateIssue: %v", err)
+	}
+	store.Close()
+
+	db, cleanup, err := embeddeddolt.OpenSQL(ctx, dataDir, "testdb", "main")
+	if err != nil {
+		t.Fatalf("OpenSQL: %v", err)
+	}
+	for _, stmt := range []string{
+		fmt.Sprintf("DELETE FROM schema_migrations WHERE version = %d", schema.LatestVersion()),
+		fmt.Sprintf("CALL DOLT_REMOTE('add', 'origin', 'file://%s')", filepath.Join(t.TempDir(), "remote")),
+		"DROP TABLE leases",
+	} {
+		if _, err := db.ExecContext(ctx, stmt); err != nil {
+			_ = cleanup()
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	_ = cleanup()
+
+	var ro *embeddeddolt.EmbeddedDoltStore
+	var openErr error
+	stderr := captureEmbeddedStderr(t, func() {
+		ro, openErr = embeddeddolt.OpenForReadOnlyCommand(ctx, beadsDir, "testdb", "main")
+	})
+	if openErr != nil {
+		t.Fatalf("OpenForReadOnlyCommand = %v, want the hatch to open a database the refusal would stop", openErr)
+	}
+	defer ro.Close()
+	for _, want := range []string{"schema skew ignored", "some queries may fail"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("hatch warning missing %q:\n%s", want, stderr)
+		}
+	}
+
+	// The warning's promise, made concrete: a hydrated read joins the missing
+	// overlay and fails at query time naming it, instead of failing every
+	// read silently after an unconditional continuation promise.
+	if _, err := ro.GetIssue(ctx, "probe1"); err == nil || !strings.Contains(err.Error(), "leases") {
+		t.Fatalf("GetIssue(probe1) = %v, want a query-time failure naming the missing leases overlay", err)
+	}
+
+	// The hatch reads; it never heals. Cursor stays behind, overlay stays gone.
+	db2, cleanup2, err := embeddeddolt.OpenSQL(ctx, dataDir, "testdb", "main")
+	if err != nil {
+		t.Fatalf("OpenSQL (verify): %v", err)
+	}
+	defer func() { _ = cleanup2() }()
+	var applied int
+	if err := db2.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM schema_migrations WHERE version = ?", schema.LatestVersion()).Scan(&applied); err != nil {
+		t.Fatalf("read schema_migrations: %v", err)
+	}
+	if applied != 0 {
+		t.Fatalf("the hatched open applied migration %d; a read-only command must not migrate", schema.LatestVersion())
+	}
+	var leases int
+	if err := db2.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'leases'").Scan(&leases); err != nil {
+		t.Fatalf("probe leases: %v", err)
+	}
+	if leases != 0 {
+		t.Fatal("the hatched open re-created the leases table; a read-only command must not write schema")
+	}
+}
+
 // firstID returns the first issue's id, or "" for an empty slice, for
 // failure messages that stay readable.
 func firstID(issues []*types.Issue) string {
