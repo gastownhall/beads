@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/cmd/bd/doctor/fix"
 	"github.com/steveyegge/beads/cmd/bd/setup"
 	"github.com/steveyegge/beads/internal/utils"
 )
@@ -1361,4 +1363,55 @@ func grepLines(log, prefix string) []string {
 		}
 	}
 	return out
+}
+
+// TestPrimeChecksTestBinaryNA pins the guard that keeps the prime checks from
+// re-executing a Go or Bazel test binary: when the executable resolver
+// reports a test binary, both checks start no subprocess and report ok with
+// an explicit N/A message, and the documentation check keeps naming the
+// referencing files.
+func TestPrimeChecksTestBinaryNA(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake bd is a shell script")
+	}
+
+	// The exported wrapper must preserve Bazel test detection.
+	if _, err := fix.BdBinary(); !errors.Is(err, fix.ErrTestBinary) {
+		t.Errorf("fix.BdBinary() under a test binary = %v, want ErrTestBinary", err)
+	}
+
+	repoPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repoPath, "CLAUDE.md"), []byte("Run `bd prime` for workflow context.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	fakeDir := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "path-bd.log")
+	t.Setenv("PRIME_CHECK_LOG", logPath)
+	if err := os.WriteFile(filepath.Join(fakeDir, "bd"), []byte(fakeBdRecorderScript()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USERPROFILE", t.TempDir())
+	t.Chdir(t.TempDir()) // caller's cwd differs from the diagnosed workspace
+
+	prime := VerifyPrimeOutput(repoPath)
+	if prime.Status != "ok" || prime.Message != "N/A (running as a test binary)" {
+		t.Errorf("VerifyPrimeOutput under a test binary = %q/%q, want ok/%q",
+			prime.Status, prime.Message, "N/A (running as a test binary)")
+	}
+
+	docs := CheckDocumentationBdPrimeReference(repoPath)
+	if docs.Status != "ok" || docs.Message != "N/A (running as a test binary)" {
+		t.Errorf("CheckDocumentationBdPrimeReference under a test binary = %q/%q, want ok/%q",
+			docs.Status, docs.Message, "N/A (running as a test binary)")
+	}
+	if !strings.Contains(docs.Detail, "CLAUDE.md") {
+		t.Errorf("documentation check lost its referencing filenames: Detail = %q", docs.Detail)
+	}
+
+	if data, err := os.ReadFile(logPath); err == nil {
+		t.Fatalf("prime checks started a subprocess under a test binary:\n%s", data)
+	}
 }

@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -262,6 +263,13 @@ func primeCheckCommand(repoPath string, args ...string) (*exec.Cmd, error) {
 func VerifyPrimeOutput(repoPath string) DoctorCheck {
 	cmd, err := primeCheckCommand(repoPath, "prime")
 	if err != nil {
+		if errors.Is(err, fix.ErrTestBinary) {
+			return DoctorCheck{
+				Name:    "bd prime Output",
+				Status:  "ok",
+				Message: "N/A (running as a test binary)",
+			}
+		}
 		return DoctorCheck{
 			Name:    "bd prime Command",
 			Status:  "error",
@@ -371,6 +379,14 @@ func CheckDocumentationBdPrimeReference(repoPath string) DoctorCheck {
 	// Docs reference bd prime - verify the command works
 	cmd, err := primeCheckCommand(repoPath, "prime", "--help")
 	if err != nil {
+		if errors.Is(err, fix.ErrTestBinary) {
+			return DoctorCheck{
+				Name:    "Prime Documentation",
+				Status:  "ok",
+				Message: "N/A (running as a test binary)",
+				Detail:  "Files: " + strings.Join(filesWithBdPrime, ", "),
+			}
+		}
 		return DoctorCheck{
 			Name:    "Prime Documentation",
 			Status:  "warning",
