@@ -505,6 +505,60 @@ last commit whose `events` table still has rows with `dolt log` and
 `SELECT COUNT(*) FROM events AS OF '<commit>'`, and use that commit as
 `<parent>`.
 
+### Stale `is_blocked` flags from migration 0059
+
+Migration 0059 recomputed each issue's `is_blocked` flag, the flag `bd ready`
+trusts, with a recursive query that Dolt engines before 2.4.0 (and bd's
+embedded engine before the same fix) evaluated wrongly
+([dolthub/dolt#11886](https://github.com/dolthub/dolt/issues/11886)). A
+database that crossed 0059 on such an engine can mark issues blocked that
+are not (they vanish from `bd ready`) or leave a blocked issue ready
+([#7037](https://github.com/gastownhall/beads/issues/7037)). Upgrading bd
+does not fix these rows by itself, because 0059 never runs again.
+
+**Releases after v1.3.4** repair them automatically. The schema migration
+(migration 0075, applied with your consent like any other) records that a
+repair is owed, and the clone-local step that follows recomputes every flag
+from the dependency graph and commits issues, dependencies and metadata in
+one commit labeled `schema: repair is_blocked flags left by 0059
+(gastownhall/beads#7037)`. bd prints:
+
+```
+Recomputing is_blocked for every issue and wisp (gastownhall/beads#7037)…
+  flipped 3 is_blocked flag(s)
+```
+
+- **Unfinished repairs finish on the next open, including a read.** When
+  the owed repair is committed but its repair commit is not (a pass killed
+  partway, or a pull of a peer's migration step without its repair commit),
+  the next `bd` command finishes it without a prompt or `BD_ALLOW_MIGRATE`:
+  it completes an upgrade someone already consented to and changes no
+  schema. A database still missing a schema migration needs consent as
+  usual. If issues, dependencies or metadata hold uncommitted changes, bd
+  refuses before it writes; commit them with `bd dolt commit` and rerun.
+- **One clone repairs; the others pull it.** The repair commit replicates.
+  A clone that pulls it does not recompute its issues again.
+- **Wisps are clone-local.** Wisps are never committed, so each clone
+  recomputes its own wisps once (`Recomputed is_blocked for local wisps
+  (gastownhall/beads#7037): flipped N flag(s)`) against the issues it has.
+  A wisp that blocks an issue, or an issue blocked only through this
+  clone's wisps, may still be stale on a clone that pulled the repair
+  instead of making it: run `bd recompute-blocked` there.
+- **The repair does not write to the mutation journal.** It writes no
+  journal rows and advances no journal sequence, so a consumer that follows
+  only the journal does not see the corrected flags. Such consumers must
+  refresh their readiness snapshot (for example, rerun `bd ready`) after
+  this upgrade. `bd recompute-blocked` still journals its flips.
+- **The count is flag flips, not a count of rows 0059 broke.** It sums
+  the flips of every pass of the recompute, so a row whose correction
+  cascades can count more than once, and a flag left stale by any other
+  cause (a skipped post-pull recompute, a conflict resolved by hand) is
+  corrected and counted too.
+
+**With v1.3.4 or earlier**, run `bd recompute-blocked` in each database,
+and in each clone that has wisps. It recomputes every flag and commits the
+result, and changes nothing on a database whose flags already agree.
+
 ### Clone behind the remote
 
 This is the one pending-migration stop whose remedy is a `bd dolt pull`, and
