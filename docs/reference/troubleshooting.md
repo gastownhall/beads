@@ -559,7 +559,8 @@ Hooks without a gate to protect (`post-merge`, `post-checkout`,
 **Cause:** The beads hook shim wraps `bd hooks run` with an OS-level timeout.
 Since `bd hooks run` chains to your original hook internally, the timeout
 covers both beads' own work and your entire hook pipeline. When the deadline
-stops a chained `pre-commit` or `pre-push` hook, its verdict is unknown, so the
+expires on a `pre-commit` or `pre-push` hook with a chained hook, the chained
+hook's result is unknown (it may already have passed before beads hung), so the
 hook exits with the timeout helper's status (124 or 142) rather than letting an
 unchecked commit or push through.
 

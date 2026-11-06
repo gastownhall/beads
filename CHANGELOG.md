@@ -1209,9 +1209,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - A `pre-commit` or `pre-push` hook that hits `BEADS_HOOK_TIMEOUT` now
-  refuses when a chained `<hook>.old` gate sits beside it. The deadline stops
-  the chained hook along with `bd`, so its verdict is unknown, yet the hook
-  warned and let the commit or push through. It now exits with the timeout
+  refuses when a chained `<hook>.old` gate sits beside it. `bd` runs that
+  chain and was stopped mid-wait, so the chain's result is unknown (it may
+  already have passed before beads hung), yet the hook warned and let the
+  commit or push through. It now exits with the timeout
   helper's status (124 or 142) and says the chained hook is not known to have
   passed; raise `BEADS_HOOK_TIMEOUT` or use `--no-verify`. Other hooks, and
   gate hooks with no chained hook, still warn and continue. Run

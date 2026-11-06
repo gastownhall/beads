@@ -568,26 +568,26 @@ func testHookProcessDeadlineWithChainedGate(t *testing.T) {
 }
 
 // testHookProcessRealTimeoutChainedGate is testHookProcessRealTimeoutExpiry
-// with a foreign pre-push.old beside the hook: the real coreutils deadline now
-// refuses with 124 instead of continuing.
+// with a foreign <hook>.old beside each gate hook: the real coreutils deadline
+// now refuses with 124 instead of continuing.
 func testHookProcessRealTimeoutChainedGate(t *testing.T) {
 	_, helperDir := findHookProcessCoreutilsTimeout(t)
-	timeout := "1"
-	result := runGeneratedHookProcess(t, hookProcessCase{
-		bdBody:    hookProcessLongRunningBDStub,
-		timeout:   &timeout,
-		pathTail:  helperDir,
-		sleepPath: findHookProcessSleep(t),
-		chainBody: hookProcessChainRecorderBody,
-	})
-	if result.exitCode != 124 {
-		t.Fatalf("generated hook exit = %d, want the coreutils deadline status 124\n%s", result.exitCode, result.output)
-	}
-	if !strings.Contains(result.output, "timed out after 1s") || !strings.Contains(result.output, hookProcessChainRefusal) {
-		t.Fatalf("coreutils deadline with a chained gate did not refuse\n%s", result.output)
-	}
-	if result.chainRuns != 0 {
-		t.Errorf("the section ran the chain %d times after the deadline\n%s", result.chainRuns, result.output)
+	for _, hookName := range []string{"pre-push", "pre-commit"} {
+		t.Run(hookName, func(t *testing.T) {
+			timeout := "1"
+			result := runGeneratedHookProcess(t, hookProcessCase{
+				bdBody:    hookProcessLongRunningBDStub,
+				timeout:   &timeout,
+				pathTail:  helperDir,
+				sleepPath: findHookProcessSleep(t),
+				hookName:  hookName,
+				chainBody: hookProcessChainRecorderBody,
+			})
+			if result.exitCode != 124 {
+				t.Fatalf("generated hook exit = %d, want the coreutils deadline status 124\n%s", result.exitCode, result.output)
+			}
+			assertHookProcessChainedGateRefusal(t, hookName, result)
+		})
 	}
 }
 
@@ -597,29 +597,43 @@ func testHookProcessRealPerlChainedGate(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip(hookProcessPerlSignalSkip)
 	}
-	timeout := "1"
-	result := runGeneratedHookProcess(t, hookProcessCase{
-		fixtures: []hookProcessFixture{
-			{name: "timeout", body: hookProcessIncompatibleTimeoutStub},
-			{name: "gtimeout", body: hookProcessIncompatibleGtimeoutStub},
-		},
-		bdBody:    hookProcessLongRunningBDStub,
-		timeout:   &timeout,
-		pathTail:  findHookProcessPerl(t),
-		sleepPath: findHookProcessSleep(t),
-		hookName:  "pre-commit",
-		chainBody: hookProcessChainRecorderBody,
-	})
-	if result.exitCode != 142 {
-		t.Fatalf("generated hook exit = %d, want the Perl supervisor's deadline status 142\n%s", result.exitCode, result.output)
+	for _, hookName := range []string{"pre-commit", "pre-push"} {
+		t.Run(hookName, func(t *testing.T) {
+			timeout := "1"
+			result := runGeneratedHookProcess(t, hookProcessCase{
+				fixtures: []hookProcessFixture{
+					{name: "timeout", body: hookProcessIncompatibleTimeoutStub},
+					{name: "gtimeout", body: hookProcessIncompatibleGtimeoutStub},
+				},
+				bdBody:    hookProcessLongRunningBDStub,
+				timeout:   &timeout,
+				pathTail:  findHookProcessPerl(t),
+				sleepPath: findHookProcessSleep(t),
+				hookName:  hookName,
+				chainBody: hookProcessChainRecorderBody,
+			})
+			if result.exitCode != 142 {
+				t.Fatalf("generated hook exit = %d, want the Perl supervisor's deadline status 142\n%s", result.exitCode, result.output)
+			}
+			assertHookProcessChainedGateRefusal(t, hookName, result)
+			assertHookProcessChildStopped(t, result.output)
+		})
 	}
-	if !strings.Contains(result.output, "timed out after 1s") || !strings.Contains(result.output, hookProcessChainRefusal) {
-		t.Fatalf("Perl deadline with a chained gate did not refuse\n%s", result.output)
+}
+
+// assertHookProcessChainedGateRefusal checks a real deadline's refusal: it
+// names the hook, its timeout and the chain, says the chain's result is
+// unknown, points at the ways out, and never reruns the chain.
+func assertHookProcessChainedGateRefusal(t *testing.T, hookName string, result hookProcessResult) {
+	t.Helper()
+	for _, want := range []string{"hook '" + hookName + "' timed out after 1s", hookName + ".old", hookProcessChainRefusal, "BEADS_HOOK_TIMEOUT", "--no-verify"} {
+		if !strings.Contains(result.output, want) {
+			t.Errorf("deadline refusal missing %q\n%s", want, result.output)
+		}
 	}
 	if result.chainRuns != 0 {
 		t.Errorf("the section ran the chain %d times after the deadline\n%s", result.chainRuns, result.output)
 	}
-	assertHookProcessChildStopped(t, result.output)
 }
 
 func testHookProcessRealTimeoutExpiry(t *testing.T) {
