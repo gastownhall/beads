@@ -977,3 +977,107 @@ func runHookProcessGit(t *testing.T, gitPath, dir string, env []string, args ...
 func hookProcessString(value string) *string {
 	return &value
 }
+
+// TestGeneratedHookChainsOldHookWhenBDMissing pins GH#6751: when bd is not on
+// PATH, a refusing <hook>.old gate must still refuse the git operation.
+func TestGeneratedHookChainsOldHookWhenBDMissing(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell process test")
+	}
+	shellPath := hookProcessPOSIXShell(t)
+	hooksDir := t.TempDir()
+	writeHookProcessFixture(t, hooksDir, "pre-commit", "#!/bin/sh\n"+generateHookSection("pre-commit"))
+	writeHookProcessFixture(t, hooksDir, "pre-commit.old", "#!/bin/sh\necho 'chained gate refused' >&2\nexit 1\n")
+
+	cmd := exec.Command(shellPath, filepath.Join(hooksDir, "pre-commit"))
+	cmd.Env = append(hookProcessEnv(), "PATH="+t.TempDir())
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("hook exited 0 with bd missing from PATH; chained pre-commit.old (exit 1) never ran\n%s", output)
+	}
+	if !strings.Contains(string(output), "chained gate refused") {
+		t.Fatalf("hook failed without running pre-commit.old: %v\n%s", err, output)
+	}
+}
+
+// TestGeneratedHookChainWhenBdMissingRealGit reproduces GH#6751 through git
+// itself: a GUI client, cron or a minimal shell runs the hook with a PATH that
+// has no bd, and the chained pre-commit.old gate must still decide the commit.
+// The hook pins PATH to an empty directory, so the chain runs on shell builtins
+// alone under an absolute /bin/sh shebang.
+func TestGeneratedHookChainWhenBdMissingRealGit(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell process test")
+	}
+	gitPath, err := exec.LookPath("git")
+	if err != nil {
+		t.Skipf("git is required: %v", err)
+	}
+	setup := func(t *testing.T, chainBody string, sentinelDir string) (string, []string, string) {
+		t.Helper()
+		repoDir := filepath.Join(t.TempDir(), "repo")
+		if err := os.MkdirAll(repoDir, 0o755); err != nil {
+			t.Fatalf("create temporary repository: %v", err)
+		}
+		gitEnv := hookProcessGitEnv(t.TempDir())
+		runHookProcessGit(t, gitPath, repoDir, gitEnv, "init", "--initial-branch=main", ".")
+		runHookProcessGit(t, gitPath, repoDir, gitEnv, "config", "core.hooksPath", ".git/hooks")
+		runHookProcessGit(t, gitPath, repoDir, gitEnv, "config", "user.name", "Hook Test")
+		runHookProcessGit(t, gitPath, repoDir, gitEnv, "config", "user.email", "hook-test@example.invalid")
+		if err := os.WriteFile(filepath.Join(repoDir, "tracked.txt"), []byte("initial\n"), 0o600); err != nil {
+			t.Fatalf("write tracked fixture: %v", err)
+		}
+		runHookProcessGit(t, gitPath, repoDir, gitEnv, "add", "--", "tracked.txt")
+		runHookProcessGit(t, gitPath, repoDir, gitEnv, "commit", "--no-verify", "-m", "initial")
+		baseline := strings.TrimSpace(runHookProcessGit(t, gitPath, repoDir, gitEnv, "rev-parse", "HEAD"))
+		if err := os.WriteFile(filepath.Join(repoDir, "tracked.txt"), []byte("changed\n"), 0o600); err != nil {
+			t.Fatalf("change tracked fixture: %v", err)
+		}
+		runHookProcessGit(t, gitPath, repoDir, gitEnv, "add", "--", "tracked.txt")
+
+		hooksDir := filepath.Join(repoDir, ".git", "hooks")
+		hookBody := "#!/bin/sh\nPATH=" + hookProcessShellQuote(t.TempDir()) + "\nexport PATH\n" +
+			generateHookSection("pre-commit") +
+			"printf 'trailing ran\\n' > " + hookProcessShellQuote(filepath.Join(sentinelDir, "trailing")) + "\n"
+		writeHookProcessFixture(t, hooksDir, "pre-commit", hookBody)
+		writeHookProcessFixture(t, hooksDir, "pre-commit.old", chainBody)
+		return repoDir, gitEnv, baseline
+	}
+
+	t.Run("refusing chain blocks the commit", func(t *testing.T) {
+		sentinelDir := t.TempDir()
+		repoDir, gitEnv, baseline := setup(t, "#!/bin/sh\necho 'chained gate refused' >&2\nexit 1\n", sentinelDir)
+		commit := exec.Command(gitPath, "commit", "-m", "gated")
+		commit.Dir = repoDir
+		commit.Env = gitEnv
+		output, err := commit.CombinedOutput()
+		if err == nil {
+			t.Fatalf("git commit succeeded with bd missing; the refusing pre-commit.old never ran\n%s", output)
+		}
+		if !strings.Contains(string(output), "chained gate refused") {
+			t.Errorf("commit output missing the chained gate's message\n%s", output)
+		}
+		if head := strings.TrimSpace(runHookProcessGit(t, gitPath, repoDir, gitEnv, "rev-parse", "HEAD")); head != baseline {
+			t.Errorf("HEAD = %s after the refused commit, want unchanged %s", head, baseline)
+		}
+		if _, err := os.Stat(filepath.Join(sentinelDir, "trailing")); err == nil {
+			t.Errorf("trailing hook content ran after the chained gate refused")
+		}
+	})
+
+	t.Run("passing chain lets the commit and trailing content run", func(t *testing.T) {
+		sentinelDir := t.TempDir()
+		chainSentinel := filepath.Join(sentinelDir, "chain")
+		repoDir, gitEnv, baseline := setup(t, "#!/bin/sh\nprintf 'chain ran\\n' > "+hookProcessShellQuote(chainSentinel)+"\n", sentinelDir)
+		runHookProcessGit(t, gitPath, repoDir, gitEnv, "commit", "-m", "gated")
+		if _, err := os.Stat(chainSentinel); err != nil {
+			t.Errorf("pre-commit.old never ran with bd missing: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(sentinelDir, "trailing")); err != nil {
+			t.Errorf("trailing hook content did not run after the chained gate passed: %v", err)
+		}
+		if head := strings.TrimSpace(runHookProcessGit(t, gitPath, repoDir, gitEnv, "rev-parse", "HEAD")); head == baseline {
+			t.Errorf("HEAD did not advance after the passing commit")
+		}
+	})
+}

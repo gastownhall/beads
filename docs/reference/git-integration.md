@@ -65,6 +65,13 @@ bd hooks install --shared   # Install to .beads-hooks/ (versioned, shareable wit
 bd hooks install --chain    # Run existing hooks before bd hooks
 ```
 
+When `bd` is not on the hook's `PATH` (a GUI git client, cron, or a minimal
+shell), the hook section still runs the chained `<hook-name>.old` next to the
+hook, which `bd hooks run` would otherwise have run, and fails the git
+operation only when that chained hook fails. Hook sections installed before
+this behavior skip the chained hook when `bd` is missing; run
+`bd hooks install` once to refresh them.
+
 Hook installation is worktree-aware: `bd` resolves the shared git directory,
 so installing from a linked worktree works.
 
