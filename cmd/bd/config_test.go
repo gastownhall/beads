@@ -1185,3 +1185,85 @@ func TestBeadsRoleWriteErrorsRetainGitDiagnostics(t *testing.T) {
 		}
 	}
 }
+
+// captureStdoutAndStderr runs fn with both streams redirected to files, so a
+// test can assert what a failing command printed on each.
+func captureStdoutAndStderr(t *testing.T, fn func() error) (stdout, stderr string, err error) {
+	t.Helper()
+	outFile, createErr := os.CreateTemp(t.TempDir(), "stdout-*")
+	if createErr != nil {
+		t.Fatal(createErr)
+	}
+	errFile, createErr := os.CreateTemp(t.TempDir(), "stderr-*")
+	if createErr != nil {
+		t.Fatal(createErr)
+	}
+	stdioMutex.Lock()
+	oldOut, oldErr := os.Stdout, os.Stderr
+	os.Stdout, os.Stderr = outFile, errFile
+	err = fn()
+	os.Stdout, os.Stderr = oldOut, oldErr
+	stdioMutex.Unlock()
+	_ = outFile.Close()
+	_ = errFile.Close()
+	outData, readErr := os.ReadFile(outFile.Name())
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	errData, readErr := os.ReadFile(errFile.Name())
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	return string(outData), string(errData), err
+}
+
+// malformedRoleRepoForConfigTest returns a repository (the new working
+// directory) whose local config git cannot parse, with the global config moved
+// to an empty home so nothing else can answer the beads.role read.
+func malformedRoleRepoForConfigTest(t *testing.T) string {
+	t.Helper()
+	for _, entry := range os.Environ() {
+		key := gitenv.EntryKey(entry)
+		if gitenv.IsRoutingKeyForOS(key, runtime.GOOS) {
+			t.Setenv(key, "")
+			require.NoError(t, os.Unsetenv(key))
+		}
+	}
+	home := t.TempDir()
+	for _, key := range []string{"HOME", "USERPROFILE", "XDG_CONFIG_HOME"} {
+		t.Setenv(key, home)
+	}
+	repo := filepath.Join(t.TempDir(), "repo")
+	initGitRepoForContextTest(t, repo)
+	malformGitConfigForTest(t, repo)
+	t.Chdir(repo)
+	return repo
+}
+
+// TestConfigGetBeadsRoleReportsReadFailure pins bd-a2qnf4 (GH#6765): when git
+// cannot read beads.role, `bd config get beads.role` fails with git's
+// diagnostic in both output modes rather than answering "not set". Absence
+// keeps its existing answer (TestBeadsRoleCommandsIgnoreInheritedGitRouting).
+func TestConfigGetBeadsRoleReportsReadFailure(t *testing.T) {
+	malformedRoleRepoForConfigTest(t)
+	for _, mode := range []struct {
+		name string
+		json bool
+	}{{"text", false}, {"json", true}} {
+		t.Run(mode.name, func(t *testing.T) {
+			pinJSONOutput(t, mode.json)
+			stdout, stderr, err := captureStdoutAndStderr(t, func() error {
+				return configGetCmd.RunE(configGetCmd, []string{"beads.role"})
+			})
+			if code, ok := exitCodeFromError(err); !ok || code != 1 {
+				t.Errorf("config get beads.role = %v, want exit 1", err)
+			}
+			if !strings.Contains(stderr, "bad config") {
+				t.Errorf("stderr %q does not carry git's diagnostic", stderr)
+			}
+			if strings.Contains(stdout, "not set") || strings.Contains(stdout, `"value"`) {
+				t.Errorf("failed read answered as a value on stdout: %q", stdout)
+			}
+		})
+	}
+}
