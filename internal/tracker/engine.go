@@ -962,7 +962,12 @@ func (e *Engine) fetchPrelinkedIssues(ctx context.Context, fetched []TrackerIssu
 		}
 		if len(ids) > 0 {
 			refs, err := batch.PreviousExternalRefs(ctx, ids, *lastSync)
-			if err == nil && refs != nil {
+			if err != nil {
+				// A failed batch read costs time, not correctness: warn once
+				// and let the loop below decide every issue through the
+				// per-issue history path, as pulls without the capability do.
+				e.warn("Reading pre-linked issues' external_ref history in one batch failed; checking them individually: %v", err)
+			} else if refs != nil {
 				previousRefs = refs
 			}
 		}

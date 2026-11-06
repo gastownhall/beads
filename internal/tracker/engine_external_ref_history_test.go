@@ -451,11 +451,11 @@ func runPrelinkedPull(t *testing.T, batched bool, build func() ([]*types.Issue, 
 	store := &batchOverlapStore{overlapStore: base}
 	var engine *Engine
 	if batched {
-		engine = NewEngine(store.newRecording(t, remotes, fetchErr), store, "sync")
+		engine = NewEngine(newRecordingTracker(t, remotes, fetchErr), store, "sync")
 	} else {
 		// Without the batch method the store is exactly the legacy
 		// per-issue capability overlapStore always was.
-		engine = NewEngine(store.newRecording(t, remotes, fetchErr), base, "sync")
+		engine = NewEngine(newRecordingTracker(t, remotes, fetchErr), base, "sync")
 	}
 	tracker := engine.Tracker.(*recordingTracker)
 	hydrated, localIDs, err := engine.fetchPrelinkedIssues(context.Background(), fetched, locals, &overlapLastSync)
@@ -467,7 +467,7 @@ func runPrelinkedPull(t *testing.T, batched bool, build func() ([]*types.Issue, 
 	return outcome, tracker, store
 }
 
-func (s *batchOverlapStore) newRecording(t *testing.T, remotes []TrackerIssue, fetchErr error) *recordingTracker {
+func newRecordingTracker(t *testing.T, remotes []TrackerIssue, fetchErr error) *recordingTracker {
 	t.Helper()
 	mock := newMockTracker("test")
 	mock.issues = remotes
@@ -642,7 +642,7 @@ func TestFetchPrelinkedIssuesBatchMatchesPerIssue(t *testing.T) {
 		base.issues = locals
 		base.previousRefs = map[string]string{"bd-1": "https://test.test/EXT-OLD"}
 		store := &batchOverlapStore{overlapStore: base}
-		engine := NewEngine(store.newRecording(t, []TrackerIssue{remote("EXT-1", -time.Minute)}, nil), store, "sync")
+		engine := NewEngine(newRecordingTracker(t, []TrackerIssue{remote("EXT-1", -time.Minute)}, nil), store, "sync")
 
 		hydrated, localIDs, err := engine.fetchPrelinkedIssues(context.Background(), nil, locals, nil)
 		if err != nil {
@@ -651,6 +651,106 @@ func TestFetchPrelinkedIssuesBatchMatchesPerIssue(t *testing.T) {
 		if len(hydrated) != 0 || len(localIDs) != 0 || store.batchCalls != 0 || store.singleCalls != 0 {
 			t.Fatalf("nil lastSync must read no history: hydrated=%d localIDs=%v batch=%d single=%d",
 				len(hydrated), localIDs, store.batchCalls, store.singleCalls)
+		}
+	})
+}
+
+// failingBatchStore is batch-capable but can fail its batch read and, for the
+// fallback-error case, its per-issue reads too.
+type failingBatchStore struct {
+	*overlapStore
+	batchErr    error
+	perIssueErr error
+	batchCalls  int
+	singleCalls int
+}
+
+func (s *failingBatchStore) PreviousExternalRef(ctx context.Context, id string, asOf time.Time) (string, bool, error) {
+	s.singleCalls++
+	if s.perIssueErr != nil {
+		return "", false, s.perIssueErr
+	}
+	return s.overlapStore.PreviousExternalRef(ctx, id, asOf)
+}
+
+func (s *failingBatchStore) PreviousExternalRefs(_ context.Context, issueIDs []string, _ time.Time) (map[string]string, error) {
+	s.batchCalls++
+	if s.batchErr != nil {
+		return nil, s.batchErr
+	}
+	refs := make(map[string]string, len(issueIDs))
+	for _, id := range issueIDs {
+		if ref, ok := s.previousRefs[id]; ok {
+			refs[id] = ref
+		}
+	}
+	return refs, nil
+}
+
+// TestFetchPrelinkedIssuesBatchErrorFallsBackPerIssue pins the batch path's
+// failure contract on a live context (AC-3): a failed batch read costs a
+// single warning and the pull continues on the per-issue path, producing the
+// same result it always produced — and a per-issue error after the fallback
+// still aborts the pull with the existing error.
+func TestFetchPrelinkedIssuesBatchErrorFallsBackPerIssue(t *testing.T) {
+	remote := func(identifier string) TrackerIssue {
+		return TrackerIssue{ID: identifier, Identifier: identifier, Title: "remote " + identifier, UpdatedAt: overlapLastSync.Add(-time.Minute)}
+	}
+	newScenario := func() ([]*types.Issue, map[string]string, []TrackerIssue) {
+		locals := parityLocals(map[string]string{
+			"bd-0": "https://test.test/EXT-0",
+			"bd-1": "https://test.test/EXT-1",
+		})
+		return locals, map[string]string{
+			"bd-0": "https://test.test/EXT-0", // unchanged
+			"bd-1": "https://test.test/EXT-OLD", // relinked: hydrated
+		}, []TrackerIssue{remote("EXT-1")}
+	}
+
+	t.Run("warns once and returns the per-issue result", func(t *testing.T) {
+		locals, previous, remotes := newScenario()
+		base := newOverlapStore(nil)
+		base.issues = locals
+		base.previousRefs = previous
+		store := &failingBatchStore{overlapStore: base, batchErr: errors.New("history read blew up")}
+		engine := NewEngine(newRecordingTracker(t, remotes, nil), store, "sync")
+
+		hydrated, localIDs, err := engine.fetchPrelinkedIssues(context.Background(), nil, locals, &overlapLastSync)
+		if err != nil {
+			t.Fatalf("fetchPrelinkedIssues after batch failure: %v", err)
+		}
+		if len(engine.warnings) != 1 {
+			t.Fatalf("warnings = %d (%v), want exactly 1 for the failed batch read", len(engine.warnings), engine.warnings)
+		}
+		if store.batchCalls != 1 || store.singleCalls != 2 {
+			t.Fatalf("batch calls = %d, per-issue calls = %d, want 1 batch attempt then the per-issue loop over both locals", store.batchCalls, store.singleCalls)
+		}
+		if len(hydrated) != 1 || hydrated[0].Identifier != "EXT-1" || !localIDs["bd-1"] || localIDs["bd-0"] {
+			t.Fatalf("hydrated = %+v, localIDs = %v, want only the relinked bd-1 hydrated, as the per-issue path would", hydrated, localIDs)
+		}
+	})
+
+	t.Run("per-issue error after the fallback still aborts the pull", func(t *testing.T) {
+		locals, previous, remotes := newScenario()
+		base := newOverlapStore(nil)
+		base.issues = locals
+		base.previousRefs = previous
+		store := &failingBatchStore{
+			overlapStore: base,
+			batchErr:     errors.New("history read blew up"),
+			perIssueErr:  errors.New("per-issue boom"),
+		}
+		engine := NewEngine(newRecordingTracker(t, remotes, nil), store, "sync")
+
+		_, _, err := engine.fetchPrelinkedIssues(context.Background(), nil, locals, &overlapLastSync)
+		if err == nil {
+			t.Fatal("expected the per-issue error to abort the pull after the batch fallback")
+		}
+		if err.Error() != "checking pre-linked local issue bd-0: per-issue boom" {
+			t.Fatalf("error = %q, want the existing per-issue error for bd-0", err)
+		}
+		if len(engine.warnings) != 1 {
+			t.Fatalf("warnings = %d, want the single batch-failure warning before the abort", len(engine.warnings))
 		}
 	})
 }
