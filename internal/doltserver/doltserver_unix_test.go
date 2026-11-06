@@ -10,6 +10,8 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -485,6 +487,202 @@ func TestUnknownPortRecoveryRefusesUnmanagedServer(t *testing.T) {
 				expectNotSignaled(t, exited)
 				assertUnknownPortTrackingKept(t, dir, pid)
 			})
+		}
+	}
+}
+
+// observeFastPath re-stubs the process list (still confirming pid) so the
+// returned channel closes on the first read: EnsureRunningDetailed's
+// lock-free IsRunning has then observed the unknown-port server.
+func observeFastPath(t *testing.T, pid int) <-chan struct{} {
+	t.Helper()
+	observed := make(chan struct{})
+	var once sync.Once
+	stubProcessList(t, func() ([]int, error) {
+		once.Do(func() { close(observed) })
+		return []int{pid}, nil
+	})
+	return observed
+}
+
+// ensureUnderHeldLock starts EnsureRunningDetailed while the test holds the
+// lifecycle lock and returns once its fast path has observed the server.
+func ensureUnderHeldLock(t *testing.T, dir string, observed <-chan struct{}) (*os.File, chan ensureResult) {
+	t.Helper()
+	lockF, err := acquireLifecycleLock(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { releaseLifecycleLock(lockF) })
+	done := make(chan ensureResult, 1)
+	go func() {
+		port, startedByUs, err := EnsureRunningDetailed(dir)
+		done <- ensureResult{port, startedByUs, err}
+	}()
+	select {
+	case <-observed:
+	case r := <-done:
+		t.Fatalf("EnsureRunningDetailed returned before taking the lock: %+v", r)
+	case <-time.After(10 * time.Second):
+		t.Fatal("EnsureRunningDetailed never read the process list")
+	}
+	return lockF, done
+}
+
+type ensureResult struct {
+	port        int
+	startedByUs bool
+	err         error
+}
+
+func awaitEnsure(t *testing.T, done chan ensureResult) ensureResult {
+	t.Helper()
+	select {
+	case r := <-done:
+		return r
+	case <-time.After(30 * time.Second):
+		t.Fatal("EnsureRunningDetailed did not return after the lock was released")
+		return ensureResult{}
+	}
+}
+
+// GH#6614: with auto-start enabled in an owned workspace, a live server whose
+// port is unknown is replaced, but only under the lifecycle lock: the
+// lock-free fast path leaves it running, and the locked start path stops it
+// before going on to launch a replacement (here, failing for want of a dolt
+// binary).
+func TestUnknownPortRecoveryReplacesUnderLock(t *testing.T) {
+	t.Run("EnsureRunningDetailed", func(t *testing.T) {
+		isolateLifecycleConfig(t)
+		dir := t.TempDir()
+		exited, pid := startUnknownPortServer(t, dir)
+		observed := observeFastPath(t, pid)
+		t.Setenv("PATH", t.TempDir()) // no dolt binary: the launch fails
+
+		lockF, done := ensureUnderHeldLock(t, dir, observed)
+		expectNotSignaled(t, exited)
+		assertUnknownPortTrackingKept(t, dir, pid)
+		select {
+		case r := <-done:
+			t.Fatalf("EnsureRunningDetailed returned while the lock was held: %+v", r)
+		default:
+		}
+		releaseLifecycleLock(lockF)
+
+		r := awaitEnsure(t, done)
+		if r.err == nil || !strings.Contains(r.err.Error(), "not installed") {
+			t.Errorf("EnsureRunningDetailed = %+v, want the launch's missing-binary error", r)
+		}
+		expectStopped(t, exited)
+		assertStateFilesRemoved(t, dir)
+	})
+
+	t.Run("Start", func(t *testing.T) {
+		isolateLifecycleConfig(t)
+		dir := t.TempDir()
+		exited, _ := startUnknownPortServer(t, dir)
+		t.Setenv("PATH", t.TempDir()) // no dolt binary: the launch fails
+
+		if _, err := Start(dir); err == nil || !strings.Contains(err.Error(), "not installed") {
+			t.Errorf("Start = %v, want the launch's missing-binary error", err)
+		}
+		expectStopped(t, exited)
+		assertStateFilesRemoved(t, dir)
+	})
+}
+
+// A port published while EnsureRunningDetailed waits for the lock (the
+// starting process wrote the pid file, then the port file) is adopted: the
+// server is not stopped and bd does not count it as started by this call.
+func TestUnknownPortRecoveryAdoptsPublishedPort(t *testing.T) {
+	isolateLifecycleConfig(t)
+	t.Setenv("BEADS_DOLT_REMOTESAPI_PORT", "")
+	dir := t.TempDir()
+	exited, pid := startUnknownPortServer(t, dir)
+	observed := observeFastPath(t, pid)
+	t.Setenv("PATH", t.TempDir()) // no dolt binary: a launch would fail
+
+	lockF, done := ensureUnderHeldLock(t, dir, observed)
+	if err := writePortFile(dir, 14602); err != nil {
+		t.Fatal(err)
+	}
+	releaseLifecycleLock(lockF)
+
+	r := awaitEnsure(t, done)
+	if r.err != nil || r.port != 14602 || r.startedByUs {
+		t.Errorf("EnsureRunningDetailed = %+v, want port 14602 adopted, not started by us", r)
+	}
+	expectNotSignaled(t, exited)
+	if got := readPortFile(dir); got != 14602 {
+		t.Errorf("port file = %d, want 14602", got)
+	}
+}
+
+// When stopping the unknown-port server fails, the start path stops there: it
+// neither adopts port 0 nor launches a replacement, and it does not discard a
+// stop error that is joined with ErrServerNotRunning.
+func TestUnknownPortRecoveryAbortsOnStopError(t *testing.T) {
+	// Start reads the process list in startLocked's IsRunning (1), then in
+	// stopLocked's IsRunning (2) and stopLocked's own verification (3).
+	for _, tc := range []struct {
+		name       string
+		failFrom   int64
+		wantErr    string
+		wantPIDRef bool
+	}{
+		// stopLocked cannot confirm the PID is dolt, so it refuses to signal it.
+		{name: "verification fails", failFrom: 3, wantErr: "not stopping PID", wantPIDRef: true},
+		// stopLocked's IsRunning no longer sees a running server: it cleans up
+		// and returns ErrServerNotRunning.
+		{name: "server no longer seen", failFrom: 2, wantErr: ErrServerNotRunning.Error()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateLifecycleConfig(t)
+			dir := t.TempDir()
+			exited, pid := startUnknownPortServer(t, dir)
+			var reads atomic.Int64
+			stubProcessList(t, func() ([]int, error) {
+				if reads.Add(1) >= tc.failFrom {
+					return nil, errProcessListUnreadable
+				}
+				return []int{pid}, nil
+			})
+			t.Setenv("PATH", t.TempDir()) // no dolt binary: a launch would fail
+
+			state, err := Start(dir)
+			if err == nil {
+				t.Fatalf("Start = %+v, want the stop error", state)
+			}
+			if strings.Contains(err.Error(), "not installed") {
+				t.Fatalf("Start went on to launch after the stop failed: %v", err)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("Start = %v, want an error containing %q", err, tc.wantErr)
+			}
+			expectNotSignaled(t, exited)
+			if tc.wantPIDRef {
+				assertUnknownPortTrackingKept(t, dir, pid)
+			}
+		})
+	}
+}
+
+// expectStopped waits for the child to exit after being signaled.
+func expectStopped(t *testing.T, exited chan error) {
+	t.Helper()
+	select {
+	case err := <-exited:
+		exited <- err // let the cleanup finish
+	case <-time.After(10 * time.Second):
+		t.Error("the server was not stopped")
+	}
+}
+
+func assertStateFilesRemoved(t *testing.T, dir string) {
+	t.Helper()
+	for _, path := range []string{pidPath(dir), portPath(dir)} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Errorf("expected %s to be removed, stat err = %v", filepath.Base(path), err)
 		}
 	}
 }
