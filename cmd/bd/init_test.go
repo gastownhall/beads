@@ -805,7 +805,10 @@ func TestInitPromptRoleConfig(t *testing.T) {
 		tmpDir := newGitRepo(t)
 		t.Chdir(tmpDir)
 
-		role, hasRole := getBeadsRole()
+		role, hasRole, err := getBeadsRole()
+		if err != nil {
+			t.Fatalf("getBeadsRole: %v", err)
+		}
 		if hasRole {
 			t.Errorf("Expected hasRole=false when not configured, got true with role=%q", role)
 		}
@@ -823,7 +826,10 @@ func TestInitPromptRoleConfig(t *testing.T) {
 			t.Fatalf("Failed to set beads.role: %v", err)
 		}
 
-		role, hasRole := getBeadsRole()
+		role, hasRole, err := getBeadsRole()
+		if err != nil {
+			t.Fatalf("getBeadsRole: %v", err)
+		}
 		if !hasRole {
 			t.Error("Expected hasRole=true after setting role")
 		}
@@ -836,7 +842,10 @@ func TestInitPromptRoleConfig(t *testing.T) {
 			t.Fatalf("Failed to set beads.role: %v", err)
 		}
 
-		role, hasRole = getBeadsRole()
+		role, hasRole, err = getBeadsRole()
+		if err != nil {
+			t.Fatalf("getBeadsRole: %v", err)
+		}
 		if !hasRole {
 			t.Error("Expected hasRole=true after setting role")
 		}
@@ -870,7 +879,10 @@ func TestInitPromptSkippedWithFlags(t *testing.T) {
 		t.Chdir(tmpDir)
 
 		// Verify no role is set initially
-		role, hasRole := getBeadsRole()
+		role, hasRole, err := getBeadsRole()
+		if err != nil {
+			t.Fatalf("getBeadsRole: %v", err)
+		}
 		if hasRole {
 			t.Fatalf("Expected no role initially, got %q", role)
 		}
@@ -906,7 +918,10 @@ func TestInitPromptSkippedWithFlags(t *testing.T) {
 		t.Chdir(tmpDir)
 
 		// Verify no role is set initially
-		role, hasRole := getBeadsRole()
+		role, hasRole, err := getBeadsRole()
+		if err != nil {
+			t.Fatalf("getBeadsRole: %v", err)
+		}
 		if hasRole {
 			t.Fatalf("Expected no role initially, got %q", role)
 		}
@@ -1016,7 +1031,10 @@ func TestInitPromptExistingRole(t *testing.T) {
 		}
 
 		// Verify role is still set
-		role, hasRole := getBeadsRole()
+		role, hasRole, err := getBeadsRole()
+		if err != nil {
+			t.Fatalf("getBeadsRole: %v", err)
+		}
 		if !hasRole {
 			t.Error("Expected beads.role to still be set after init")
 		}
@@ -1034,7 +1052,10 @@ func TestInitPromptExistingRole(t *testing.T) {
 		}
 
 		// Verify role is still set (not cleared by reinit)
-		role, hasRole = getBeadsRole()
+		role, hasRole, err = getBeadsRole()
+		if err != nil {
+			t.Fatalf("getBeadsRole after reinit: %v", err)
+		}
 		if !hasRole {
 			t.Error("Expected beads.role to still be set after reinit")
 		}
@@ -1122,7 +1143,10 @@ func TestInitContributorSetsBeadsRoleContributor(t *testing.T) {
 		t.Fatalf("init --contributor failed: %v", err)
 	}
 
-	role, hasRole := getBeadsRole()
+	role, hasRole, err := getBeadsRole()
+	if err != nil {
+		t.Fatalf("getBeadsRole: %v", err)
+	}
 	if !hasRole {
 		t.Fatal("expected beads.role to be configured")
 	}
@@ -1164,7 +1188,10 @@ func TestInitNonInteractiveAlwaysSetsRole(t *testing.T) {
 		t.Fatalf("init --non-interactive failed: %v", err)
 	}
 
-	role, hasRole := getBeadsRole()
+	role, hasRole, err := getBeadsRole()
+	if err != nil {
+		t.Fatalf("getBeadsRole: %v", err)
+	}
 	if !hasRole {
 		t.Fatal("expected beads.role to be configured after non-interactive init (GH#2950)")
 	}

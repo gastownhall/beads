@@ -601,8 +601,19 @@ func runInitProxiedServerTail(cmd *cobra.Command, ctx context.Context, in initPr
 		if role == "" {
 			role = "maintainer"
 		}
-		_, hasRole, _ := gitUC.BeadsRole(ctx)
-		if !hasRole || in.roleFlag != "" {
+		_, hasRole, readErr := gitUC.BeadsRole(ctx)
+		switch {
+		case readErr != nil:
+			// A config git cannot read is not an absent role: warn and keep
+			// whatever is there, except for an explicit --role whose user
+			// intent outranks the failed probe (GH#6765).
+			warnInitRoleReadFailure(in.quiet, readErr)
+			if in.roleFlag != "" {
+				if err := gitUC.SetBeadsRole(ctx, role); err != nil && !in.quiet {
+					fmt.Fprintf(os.Stderr, "Warning: failed to set beads.role: %v\n", err)
+				}
+			}
+		case !hasRole || in.roleFlag != "":
 			if err := gitUC.SetBeadsRole(ctx, role); err != nil && !in.quiet {
 				fmt.Fprintf(os.Stderr, "Warning: failed to set beads.role: %v\n", err)
 			}

@@ -105,7 +105,11 @@ func TestInitRoleIgnoresInheritedGitRouting(t *testing.T) {
 					t.Setenv("GIT_CONFIG_VALUE_0", "injected-role")
 				}
 				preserveInitRoleInputs(t, filepath.Join(decoy, ".git", "config"), filepath.Join(home, ".gitconfig"))
-				if got, ok := getBeadsRole(); got != tc.want || ok != (tc.want != "") {
+				got, ok, err := getBeadsRole()
+				if err != nil {
+					t.Fatalf("getBeadsRole: %v", err)
+				}
+				if got != tc.want || ok != (tc.want != "") {
 					t.Errorf("getBeadsRole = %q, %v; want %q, %v", got, ok, tc.want, tc.want != "")
 				}
 				const literal = "custom role = exact"
@@ -115,7 +119,9 @@ func TestInitRoleIgnoresInheritedGitRouting(t *testing.T) {
 				if got := initRoleFixtureGit(t, target, "config", "--local", "--get", "beads.role"); got != literal {
 					t.Errorf("target role = %q, want %q", got, literal)
 				}
-				if got, ok := getBeadsRole(); got != literal || !ok {
+				if got, ok, err := getBeadsRole(); err != nil {
+					t.Fatalf("getBeadsRole after set: %v", err)
+				} else if got != literal || !ok {
 					t.Errorf("live role after set = %q, %v", got, ok)
 				}
 			})
@@ -134,8 +140,10 @@ func TestInitRoleIgnoresInheritedGitRouting(t *testing.T) {
 		if err := setBeadsRole("contributor"); err == nil {
 			t.Error("role write in an unusable repository must fail")
 		}
-		if got, ok := getBeadsRole(); got != "" || ok {
-			t.Errorf("role read in an unusable repository = %q, %v", got, ok)
+		// An unusable repository is a read failure, not a silent absence
+		// (GH#6765): the probe cannot answer, so it must say so.
+		if _, _, err := getBeadsRole(); err == nil {
+			t.Error("role read in an unusable repository must fail, not answer absence")
 		}
 	})
 }
