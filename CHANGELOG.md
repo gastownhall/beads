@@ -1208,6 +1208,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A read command no longer promises "reads keep working" on a schema its
+  reads cannot query, then fails every one of them. On the degraded
+  shared-server upgrade window, a database whose clone-local hydration
+  relations are missing (the `leases` overlay absent on fresh clones until
+  the ignored migration series replays, or one of its columns, e.g.
+  `leases.granted_node`) used to sail past the readable-schema guard — it
+  checked only the shared `issues` projection — so the lenient gate warned
+  "continuing on schema vNN" and `bd list` stopped on
+  `table not found: leases`. The guard now covers every relation bd's reads
+  touch (`issues`, the `wisps` fallback, the `leases` overlay), the refusal
+  is the gate's own guidance carrying the schema verdict and naming what is
+  missing, and every read-continuation promise (gate body, agent directive,
+  version-bump notice, JSON hint) is qualified or replaced accordingly.
+  `BD_IGNORE_SCHEMA_SKEW=1` still reads anyway, warning that some queries
+  may fail (#6572, with #6929 the earlier `bd list` report).
 - `bd config get` for a config.yaml, git-config or user-global key no longer
   opens the database just because one exists, so it answers from those files
   while the Dolt server is down instead of failing the open (GH#5108). In

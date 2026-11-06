@@ -81,12 +81,18 @@ func TestNoticeSharedMigrateRefusalPerDecision(t *testing.T) {
 		decision string
 		want     string
 		absent   string
+		// promise marks the arms whose remedy ends in a read-continuation
+		// clause. #6572: the notice's probe never verifies readability, so
+		// the clause must be qualified, never the bare "reads keep working
+		// meanwhile." fork-skew promises nothing (both remedies are broken
+		// states), so it must carry no read promise at all.
+		promise bool
 	}{
-		{decision: "shared-no-remote", want: "bd migrate schema"},
-		{decision: "adopt", want: "bd bootstrap", absent: "bd migrate schema"},
-		{decision: "adopt-ff", want: "bd bootstrap", absent: "bd migrate schema"},
+		{decision: "shared-no-remote", want: "bd migrate schema", promise: true},
+		{decision: "adopt", want: "bd bootstrap", absent: "bd migrate schema", promise: true},
+		{decision: "adopt-ff", want: "bd bootstrap", absent: "bd migrate schema", promise: true},
 		{decision: "fork-skew", want: "bd doctor", absent: "bd migrate schema"},
-		{decision: "", want: "bd migrate", absent: "bd migrate schema"},
+		{decision: "", want: "bd migrate", absent: "bd migrate schema", promise: true},
 	} {
 		name := tt.decision
 		if name == "" {
@@ -106,8 +112,42 @@ func TestNoticeSharedMigrateRefusalPerDecision(t *testing.T) {
 				t.Errorf("notice for %q must not prescribe %q (the verb does not unlock this arm):\n%s",
 					tt.decision, tt.absent, out)
 			}
+			if tt.promise {
+				if !strings.Contains(out, "reads keep working meanwhile, where the current schema can still answer them") {
+					t.Errorf("notice for %q must qualify the read promise (#6572):\n%s", tt.decision, out)
+				}
+				if strings.Contains(out, "reads keep working meanwhile.") {
+					t.Errorf("notice for %q promised reads unconditionally (#6572):\n%s", tt.decision, out)
+				}
+			} else if strings.Contains(out, "reads keep working") {
+				t.Errorf("notice for %q must not promise reads at all:\n%s", tt.decision, out)
+			}
 		})
 	}
+
+	// #6572: a gate error already carrying a read refusal (a probe that
+	// checked readability) must not be answered with any continuation
+	// promise; the notice states the refusal and names what is missing.
+	t.Run("a carried read refusal replaces the promise", func(t *testing.T) {
+		out := captureNoticeStderr(t, func() {
+			noticeSharedMigrateRefusal(&schema.RemoteMigrateGateError{
+				CurrentVersion: 65, LatestVersion: 66, Pending: 1,
+				Decision: "shared-no-remote",
+				ReadsRefused: &schema.SchemaBehindError{
+					DBVersion: 65, BinaryVersion: 66,
+					Missing: []string{"leases", "leases.granted_node"},
+				},
+			})
+		})
+		if strings.Contains(out, "reads keep working") {
+			t.Errorf("notice promised reads continue against a schema they cannot query:\n%s", out)
+		}
+		for _, want := range []string{"reads are refused too", "leases, leases.granted_node", "#6572"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("notice missing %q:\n%s", want, out)
+			}
+		}
+	})
 
 	// --json puts a machine-readable gate block on this same stream a moment
 	// later; prose prepended to it makes the documented contract unparseable.
