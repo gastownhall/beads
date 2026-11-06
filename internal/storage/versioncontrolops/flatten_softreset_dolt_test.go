@@ -183,6 +183,60 @@ func TestFlattenKeepsCloneLocalFKs(t *testing.T) {
 	}
 }
 
+// AC-3: a clone-local FK that was already severed, with historical orphan
+// rows, is Flatten's to keep, not repair: it stays missing, its orphans stay
+// put, only the FKs that were present survive, and the doctor's scan
+// predicate still reports the damage for explicit repair.
+func TestFlattenLeavesPreSeveredFKs(t *testing.T) {
+	port := startCompactTestServer(t)
+	f := newFlattenFKFixture(t, port)
+
+	// Sever one of wisp_dependencies' three FKs and give it a historical
+	// orphan (missing wisp 999) plus a row whose reference is NULL, which is
+	// not an orphan.
+	f.exec(f.db,
+		"ALTER TABLE wisp_dependencies DROP FOREIGN KEY fk_wisp_dep_wisp_target",
+		"INSERT INTO wisp_dependencies (id, issue_id, depends_on_wisp_id, depends_on_issue_id) "+
+			"VALUES (300, 10, 999, NULL), (301, 10, NULL, NULL)",
+	)
+	if got := f.count(countCloneLocalFKs); got != 7 {
+		f.t.Fatalf("clone-local FKs after the severing = %d, want 7", got)
+	}
+
+	if err := Flatten(f.ctx, f.conn()); err != nil {
+		f.t.Fatalf("Flatten: %v", err)
+	}
+
+	// The severed FK is still severed; nothing repaired it.
+	if got := f.count(countCloneLocalFKs); got != 7 {
+		f.t.Errorf("clone-local FKs after flatten = %d, want 7 (the pre-severed one must stay missing)", got)
+	}
+	if n := f.count(`SELECT COUNT(*) FROM information_schema.TABLE_CONSTRAINTS
+		WHERE TABLE_SCHEMA = DATABASE() AND CONSTRAINT_NAME = 'fk_wisp_dep_wisp_target'`); n != 0 {
+		f.t.Errorf("fk_wisp_dep_wisp_target reappeared after flatten, want it left alone")
+	}
+	// The historical rows are untouched, NULL references included, and the
+	// orphan count is unchanged: a routine flatten must not spring a purge.
+	if n := f.count("SELECT COUNT(*) FROM wisp_dependencies WHERE id IN (300, 301)"); n != 2 {
+		f.t.Errorf("wisp_dependencies rows 300, 301 after flatten = %d, want both kept", n)
+	}
+	// The doctor's scan predicate (fix.scanSeveredCloneLocalFKs) reports the
+	// constraint missing with the orphan count, so doctor still detects the
+	// damage for explicit repair.
+	if n := f.count("SELECT COUNT(*) FROM wisp_dependencies t "+
+		"WHERE t.depends_on_wisp_id IS NOT NULL "+
+		"AND NOT EXISTS (SELECT 1 FROM wisps r WHERE r.id = t.depends_on_wisp_id)"); n != 1 {
+		f.t.Errorf("orphaned wisp_dependencies rows after flatten = %d, want 1 (NULL references are not orphans)", n)
+	}
+	// The seven FKs that were present still enforce.
+	if _, err := f.db.ExecContext(f.ctx,
+		"INSERT INTO wisp_dependencies (id, issue_id, depends_on_wisp_id, depends_on_issue_id) "+
+			"VALUES (302, 777, NULL, NULL)"); err == nil ||
+		!strings.Contains(strings.ToLower(err.Error()), "foreign key") {
+		f.t.Errorf("insert of a wisp_dependencies row for a missing wisp = %v, want a foreign key violation", err)
+	}
+}
+
 // flattenHookConn is the DBConn Flatten runs on. It forwards every statement
 // to its pinned connection, after letting a test act at a chosen point, fail
 // a chosen statement without forwarding it, or cancel just before the
