@@ -46,8 +46,11 @@ type compactHookConn struct {
 // reset leaves anything staged on main.
 const compactFollowupMsg = "compact: commit changes that reached main during compaction"
 
+// isFinalReset reports whether query moves main onto Compact's or Flatten's
+// temp branch.
 func isFinalReset(query string) bool {
-	return strings.Contains(query, "DOLT_RESET(") && strings.Contains(query, "compact-tmp")
+	return strings.Contains(query, "DOLT_RESET(") &&
+		(strings.Contains(query, "compact-tmp") || strings.Contains(query, "flatten-tmp"))
 }
 
 func (c *compactHookConn) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
