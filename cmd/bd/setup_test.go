@@ -1119,4 +1119,24 @@ func TestRunRecipe_CopilotKeepsExistingInstructions(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("AC-4 remove leaves the user's text", func(t *testing.T) {
+		user := "# Team rules\n\nKeep these rules.\n"
+		workspace(t, &user)
+		if _, err := run(t, nil); err != nil {
+			t.Fatalf("bd setup copilot: %v", err)
+		}
+		if _, err := run(t, &setupRemove); err != nil {
+			t.Fatalf("bd setup copilot --remove: %v", err)
+		}
+		if got := read(t, instructionsPath); got != user {
+			t.Errorf("--remove left\n%q\nwant\n%q", got, user)
+		}
+		if _, err := os.Stat(manifestPath); !os.IsNotExist(err) {
+			t.Errorf("--remove kept the plugin manifest, stat err = %v", err)
+		}
+		if info, err := os.Stat(".github"); err != nil || !info.IsDir() {
+			t.Errorf("--remove should keep .github, stat err = %v", err)
+		}
+	})
 }

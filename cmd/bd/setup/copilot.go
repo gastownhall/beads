@@ -192,3 +192,79 @@ func checkCopilot(env copilotEnv) error {
 	_, _ = fmt.Fprintf(env.stdout, "  File: %s\n", env.manifestPath)
 	return nil
 }
+
+// RemoveCopilot removes the Copilot CLI plugin manifest and the beads section
+// of .github/copilot-instructions.md, keeping the rest of that file. A file
+// that held only the section, as install creates, is deleted. A symlink, a
+// file without the section and one whose markers are malformed are left as
+// they are.
+func RemoveCopilot() error {
+	return removeCopilot(defaultCopilotEnv(""))
+}
+
+func removeCopilot(env copilotEnv) error {
+	// Refuse malformed markers before removing anything.
+	if err := validateCopilotInstructions(env); err != nil {
+		return err
+	}
+
+	removed := false
+	if err := os.Remove(env.manifestPath); err == nil {
+		removed = true
+		_ = RemoveEmptyDir(filepath.Dir(env.manifestPath))
+	} else if !os.IsNotExist(err) {
+		_, _ = fmt.Fprintf(env.stderr, "Error: remove %s: %v\n", env.manifestPath, err)
+		return err
+	}
+
+	section, err := copilotInstructionsHaveSection(env)
+	if err != nil {
+		return err
+	}
+	if section {
+		if err := removeAgents(env.instructionsEnv(), copilotAgentsIntegration); err != nil {
+			return err
+		}
+		removed = true
+		// Install created a missing file with the section alone, so a file
+		// the section was all of goes with it.
+		if data, err := os.ReadFile(env.instructionsPath); err == nil && len(data) == 0 { // #nosec G304 -- bd's own setup destination
+			if err := os.Remove(env.instructionsPath); err != nil {
+				_, _ = fmt.Fprintf(env.stderr, "Error: remove %s: %v\n", env.instructionsPath, err)
+				return err
+			}
+			_ = RemoveEmptyDir(filepath.Dir(env.instructionsPath))
+		}
+	}
+
+	if !removed {
+		_, _ = fmt.Fprintln(env.stdout, "No integration files found")
+		return nil
+	}
+	_, _ = fmt.Fprintf(env.stdout, "✓ Removed %s integration\n", copilotAgentsIntegration.name)
+	return nil
+}
+
+// copilotInstructionsHaveSection reports whether the instructions file is a
+// regular file holding a beads section. It says so when it leaves a symlink
+// alone.
+func copilotInstructionsHaveSection(env copilotEnv) (bool, error) {
+	info, err := os.Lstat(env.instructionsPath)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		_, _ = fmt.Fprintf(env.stderr, "Error: failed to inspect %s: %v\n", env.instructionsPath, err)
+		return false, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		_, _ = fmt.Fprintf(env.stdout, "Leaving %s alone: it is a symlink\n", env.instructionsPath)
+		return false, nil
+	}
+	data, err := os.ReadFile(env.instructionsPath) // #nosec G304 -- bd's own setup destination
+	if err != nil {
+		_, _ = fmt.Fprintf(env.stderr, "Error: failed to read %s: %v\n", env.instructionsPath, err)
+		return false, err
+	}
+	return containsBeadsMarker(string(data)), nil
+}
