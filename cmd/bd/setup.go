@@ -292,6 +292,16 @@ func runRecipe(name string) error {
 		return HandleError("recipe %s has type %s which requires special handling", recipeRefusalWord(name), recipeRefusalWord(string(recipe.Type)))
 	}
 
+	// The built-in copilot recipe's second file, .github/copilot-instructions.md,
+	// is the standard home of a repository's own Copilot instructions, so the
+	// built-in install manages a marked section in it instead of overwriting
+	// it (GH#7431). Only the resolved built-in is dispatched: a workspace
+	// [recipes.copilot] override keeps the generic path below, its
+	// confinement checks included.
+	if normalized := strings.ToLower(strings.Trim(name, "-")); normalized == "copilot" && !recipe.Workspace && !setupCheck && !setupRemove {
+		return runCopilotRecipe()
+	}
+
 	paths := recipe.Paths
 	if recipe.Type == recipes.TypeFile {
 		paths = []string{recipe.Path}
@@ -397,6 +407,14 @@ func translateSetupError(err error) error {
 		return nil
 	}
 	return SilentExit()
+}
+
+// runCopilotRecipe runs the dedicated handler for the built-in copilot
+// recipe, which manages a marked section in the shared
+// .github/copilot-instructions.md (setup.InstallCopilot) instead of
+// overwriting the file.
+func runCopilotRecipe() error {
+	return translateSetupError(setup.InstallCopilot())
 }
 
 func runCursorRecipe() error {

@@ -932,3 +932,141 @@ func TestAddRecipe_RefusesPathOutsideDir(t *testing.T) {
 		}
 	}
 }
+
+// bd setup copilot must not discard a hand-written
+// .github/copilot-instructions.md: that file is the standard home for a
+// repository's Copilot instructions, so install has to keep what the user
+// wrote there (GH#7431).
+func TestRunRecipe_CopilotPreservesExistingInstructions(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	t.Chdir(tmpDir)
+	t.Setenv("BEADS_DIR", "")
+	resetSetupResolutionCaches(t)
+	resetSetupGlobals(t)
+
+	const userContent = "# Project conventions\n\nAlways run make lint before committing.\n"
+	instructions := filepath.Join(tmpDir, ".github", "copilot-instructions.md")
+	if err := os.MkdirAll(filepath.Dir(instructions), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(instructions, []byte(userContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_ = captureStdout(t, func() error {
+		runRecipe("copilot")
+		return nil
+	})
+
+	got, err := os.ReadFile(instructions)
+	if err != nil {
+		t.Fatalf("read copilot instructions: %v", err)
+	}
+	if !strings.Contains(string(got), userContent) {
+		t.Fatalf("bd setup copilot discarded the existing instructions; file is now:\n%s", got)
+	}
+}
+
+// TestRunRecipe_CopilotManagedSection pins the built-in copilot recipe's
+// handling of the shared .github/copilot-instructions.md (GH#7431): install
+// keeps the user's bytes and manages one marked section, --check tells an
+// unmarked file from an installed one, and --remove takes only the section.
+func TestRunRecipe_CopilotManagedSection(t *testing.T) {
+	const userContent = "# Team rules\n\nKeep these rules.\n"
+
+	chdirFresh := func(t *testing.T) string {
+		t.Helper()
+		tmpDir := t.TempDir()
+		t.Chdir(tmpDir)
+		t.Setenv("BEADS_DIR", "")
+		resetSetupResolutionCaches(t)
+		resetSetupGlobals(t)
+		return tmpDir
+	}
+	run := func(t *testing.T) (string, string, error) {
+		t.Helper()
+		var err error
+		stdout, stderr := captureStdio(t, func() { err = runRecipe("copilot") })
+		return stdout, stderr, err
+	}
+	writeInstructions := func(t *testing.T, tmpDir, content string) {
+		t.Helper()
+		instructions := filepath.Join(tmpDir, ".github", "copilot-instructions.md")
+		if err := os.MkdirAll(filepath.Dir(instructions), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(instructions, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("install keeps existing instructions and adds one section", func(t *testing.T) {
+		tmpDir := chdirFresh(t)
+		writeInstructions(t, tmpDir, userContent)
+
+		if _, _, err := run(t); err != nil {
+			t.Fatalf("bd setup copilot: %v", err)
+		}
+
+		got, err := os.ReadFile(filepath.Join(tmpDir, ".github", "copilot-instructions.md"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.HasPrefix(string(got), userContent) {
+			t.Fatalf("install changed the user's instructions; file is now:\n%s", got)
+		}
+		if n := strings.Count(string(got), "<!-- BEGIN BEADS INTEGRATION"); n != 1 {
+			t.Fatalf("install left %d beads sections, want 1:\n%s", n, got)
+		}
+		if !strings.Contains(string(got), "profile:minimal") {
+			t.Fatalf("managed section is not the minimal profile:\n%s", got)
+		}
+		if _, err := os.Stat(filepath.Join(tmpDir, ".copilot-plugin", "plugin.json")); err != nil {
+			t.Fatalf("plugin manifest not installed: %v", err)
+		}
+	})
+}
+
+// TestRunRecipe_CopilotWorkspaceOverrideUsesGenericPath pins that a workspace
+// [recipes.copilot] override keeps the generic recipe path: the dedicated
+// handler is dispatched only for the built-in recipe, so an override's own
+// paths are installed and bd's built-in files are not written.
+func TestRunRecipe_CopilotWorkspaceOverrideUsesGenericPath(t *testing.T) {
+	ws := t.TempDir()
+	beadsDir := filepath.Join(ws, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "recipes.toml"), []byte("[recipes.copilot]\npath = \"copilot-notes.md\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Chdir(ws)
+	t.Setenv("BEADS_DIR", "")
+	resetSetupResolutionCaches(t)
+	resetSetupGlobals(t)
+
+	out := captureStdout(t, func() error {
+		return runRecipe("copilot")
+	})
+
+	if !strings.Contains(out, "copilot integration installed") {
+		t.Fatalf("expected override install output, got:\n%s", out)
+	}
+	data, err := os.ReadFile(filepath.Join(ws, "copilot-notes.md"))
+	if err != nil {
+		t.Fatalf("override file not installed: %v", err)
+	}
+	if string(data) != recipes.Template {
+		t.Fatalf("override file content does not match the generic template")
+	}
+	for _, path := range []string{".copilot-plugin/plugin.json", ".github/copilot-instructions.md"} {
+		if _, err := os.Stat(filepath.Join(ws, filepath.FromSlash(path))); !os.IsNotExist(err) {
+			t.Fatalf("override install wrote the built-in %s", path)
+		}
+	}
+}
