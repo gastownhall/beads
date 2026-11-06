@@ -101,6 +101,10 @@ const hookTimeoutKillAfterSeconds = 2
 //     longer holds bd.
 //   - If the beads database is not initialized (exit code 3), the hook exits
 //     successfully with a warning so that git operations are not blocked.
+//   - When bd cannot be resolved at all (a GUI git client, cron, or a minimal
+//     PATH — GH#6751), the section runs the chained <hookName>.old gate itself
+//     with shell builtins, so a foreign gate still blocks the git operation.
+//     A chain that is itself a beads hook is left alone (GH#843, GH#1120).
 func generateHookSection(hookName string) string {
 	return hookSectionBeginLine() + "\n" +
 		"# This section is managed by beads. Do not remove these markers.\n" +
@@ -171,6 +175,23 @@ func generateHookSection(hookName string) string {
 		"    _bd_exit=0\n" +
 		"  fi\n" +
 		"  if [ \"$_bd_exit\" -ne 0 ]; then exit \"$_bd_exit\"; fi\n" +
+		"else\n" +
+		"  # bd is missing from PATH (GH#6751): run the chained gate ourselves so\n" +
+		"  # a foreign " + hookName + ".old still decides the git operation. The sibling\n" +
+		"  # path comes from $0 (no PATH lookup), and a chain that is missing or not\n" +
+		"  # executable stays a silent no-op, like the Go-side chain runner.\n" +
+		"  case \"$0\" in\n" +
+		"    */*) _bd_chain=\"${0%/*}/" + hookName + ".old\" ;;\n" +
+		"    *) _bd_chain=\"./" + hookName + ".old\" ;;\n" +
+		"  esac\n" +
+		"  if [ -f \"$_bd_chain\" ] && [ -x \"$_bd_chain\" ]; then\n" +
+		"    if \"$_bd_chain\" \"$@\"; then\n" +
+		"      :\n" +
+		"    else\n" +
+		"      _bd_exit=$?\n" +
+		"      exit \"$_bd_exit\"\n" +
+		"    fi\n" +
+		"  fi\n" +
 		"fi\n" +
 		hookSectionEndLine() + "\n"
 }

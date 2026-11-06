@@ -95,5 +95,22 @@ if command -v bd >/dev/null 2>&1; then
     _bd_exit=0
   fi
   if [ "$_bd_exit" -ne 0 ]; then exit "$_bd_exit"; fi
+else
+  # bd is missing from PATH (GH#6751): run the chained gate ourselves so
+  # a foreign pre-commit.old still decides the git operation. The sibling
+  # path comes from $0 (no PATH lookup), and a chain that is missing or not
+  # executable stays a silent no-op, like the Go-side chain runner.
+  case "$0" in
+    */*) _bd_chain="${0%/*}/pre-commit.old" ;;
+    *) _bd_chain="./pre-commit.old" ;;
+  esac
+  if [ -f "$_bd_chain" ] && [ -x "$_bd_chain" ]; then
+    if "$_bd_chain" "$@"; then
+      :
+    else
+      _bd_exit=$?
+      exit "$_bd_exit"
+    fi
+  fi
 fi
 # --- END BEADS INTEGRATION v1.3.4 ---
