@@ -490,3 +490,94 @@ func TestRemoveEmptyDir(t *testing.T) {
 		})
 	}
 }
+
+// TestRemoveEmptyDirNonDirectoryPath witnesses removeEmptyDir's own boundary
+// (GH#6972 site 3): cleanup leaves an ordinary file, an absent path, and a
+// populated directory as they are, and removes an empty directory exactly
+// once, all through the injected removal. No production change belongs to
+// this site: its Lstat guard already distinguishes a non-directory from an
+// absent path, so this passes before and after the other sites' fixes.
+func TestRemoveEmptyDirNonDirectoryPath(t *testing.T) {
+	const payload = "kept payload"
+	for _, tt := range []struct {
+		name  string
+		make  func(t *testing.T, path string)
+		check func(t *testing.T, path string, removals []string)
+	}{
+		{
+			name: "ordinary file",
+			make: func(t *testing.T, path string) {
+				if err := os.WriteFile(path, []byte(payload), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+			check: func(t *testing.T, path string, removals []string) {
+				if got, err := os.ReadFile(path); err != nil || string(got) != payload {
+					t.Fatalf("remove should keep the file and its bytes; read err = %v, bytes = %q", err, got)
+				}
+				if len(removals) != 0 {
+					t.Fatalf("remove should not be called for a file; calls = %v", removals)
+				}
+			},
+		},
+		{
+			name: "absent path",
+			check: func(t *testing.T, path string, removals []string) {
+				requireGone(t, path)
+				if len(removals) != 0 {
+					t.Fatalf("remove should not be called for an absent path; calls = %v", removals)
+				}
+			},
+		},
+		{
+			name: "empty directory",
+			make: func(t *testing.T, path string) {
+				if err := os.Mkdir(path, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			},
+			check: func(t *testing.T, path string, removals []string) {
+				requireGone(t, path)
+				if len(removals) != 1 || removals[0] != path {
+					t.Fatalf("remove should be called exactly once for %s; calls = %v", path, removals)
+				}
+			},
+		},
+		{
+			name: "populated directory",
+			make: func(t *testing.T, path string) {
+				if err := os.Mkdir(path, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(path, "child"), []byte(payload), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+			check: func(t *testing.T, path string, removals []string) {
+				requireDirKept(t, path)
+				if got, err := os.ReadFile(filepath.Join(path, "child")); err != nil || string(got) != payload {
+					t.Fatalf("remove should keep the directory's contents; read err = %v, bytes = %q", err, got)
+				}
+				if len(removals) != 0 {
+					t.Fatalf("remove should not be called for a populated directory; calls = %v", removals)
+				}
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "target")
+			if tt.make != nil {
+				tt.make(t, path)
+			}
+			var removals []string
+			err := removeEmptyDir(path, func(p string) error {
+				removals = append(removals, p)
+				return os.Remove(p)
+			})
+			if err != nil {
+				t.Fatalf("removeEmptyDir: %v", err)
+			}
+			tt.check(t, path, removals)
+		})
+	}
+}
