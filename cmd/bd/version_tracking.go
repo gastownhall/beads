@@ -300,6 +300,7 @@ func autoMigrateOnVersionBump(beadsDir string) bool {
 	settled, openErr := runVersionBumpReconciliation(ctx, beadsDir)
 	if openErr != nil {
 		noticeSharedMigrateRefusal(openErr)
+		noticeDirtyTablesRefusal(openErr, beadsDir)
 	}
 	return settled
 }
@@ -444,6 +445,43 @@ func recoverPreV56IfNeeded(previousVersion, dbPath string) {
 // optional "v") and then given one.
 func isGoPseudoVersion(version string) bool {
 	return module.IsPseudoVersion("v" + strings.TrimPrefix(strings.TrimSpace(version), "v"))
+}
+
+// noticeDirtyTablesRefusal reports the other failure autoMigrateOnVersionBump
+// must not swallow: a dirty-table stop (#4566's guard) of the version-bump
+// reconciliation. The marker now stays stale (#6929), so the next command
+// retries — but a read command's own open never explains the dirty state, and
+// without this line the only trace was BD_DEBUG. Name the tables, the
+// workspace whose working set must be committed, and the commit-then-migrate
+// remedy, so the retry loop is not a mystery the operator has to diagnose.
+//
+// The remedy names no consent escape hatch and no next-command migration
+// promise: `bd migrate schema` grants the local consent this automatic path
+// does not have, while remote migration/adoption gates still apply to it
+// unchanged. The workspace is named explicitly — `bd doctor <path>` runs this
+// maintenance against a workspace that is not the caller's cwd — and the
+// migrate verb is never suffixed with --global for this refusal: this pre-run
+// opened the maintenance workspace's own configuration, not the command's
+// later --global database selection, so a --global rewrite could repair a
+// database this refusal did not name.
+//
+// --json keeps the same discipline as noticeSharedMigrateRefusal: this notice
+// writes nothing on either stream (it only ever writes stderr), leaving the
+// machine-readable contract to the command's own error.
+func noticeDirtyTablesRefusal(err error, beadsDir string) {
+	var dirtyErr *schema.DirtyTablesError
+	if !errors.As(err, &dirtyErr) {
+		return
+	}
+	if jsonOutput {
+		return
+	}
+
+	//nolint:gosec // G705: stderr, not a browser context
+	fmt.Fprintf(os.Stderr,
+		"bd upgraded to %s: pending schema migrations alter tables with uncommitted changes (%s) in %s — not auto-applied.\n"+
+			"Commit the working set at the current schema with 'bd dolt commit' in that workspace, then run 'bd migrate schema' there; until then every bd command retries this migration.\n",
+		displayVersion(Version), strings.Join(dirtyErr.Tables, ", "), beadsDir)
 }
 
 // noticeSharedMigrateRefusal turns the one failure autoMigrateOnVersionBump

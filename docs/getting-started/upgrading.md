@@ -146,6 +146,39 @@ bd migrate schema
 bd migrate --yes
 ```
 
+### When the automatic upgrade migration does not finish
+
+The first command after an upgrade reconciles the database schema
+automatically. If that reconciliation fails — the store cannot be opened, or
+the migration itself fails — bd keeps the upgrade signal and every following
+command retries the reconciliation instead of skipping it. You will see the
+upgrade notice repeat until one attempt finishes.
+
+One failure has a recovery path of its own. If pending migrations would alter
+tables that already have uncommitted changes, bd refuses to entangle the two
+and reports on stderr:
+
+```text
+bd upgraded to vX.Y.Z: pending schema migrations alter tables with uncommitted
+changes (issues, wisps) in /path/to/repo/.beads — not auto-applied.
+Commit the working set at the current schema with 'bd dolt commit' in that
+workspace, then run 'bd migrate schema' there; until then every bd command
+retries this migration.
+```
+
+Commit first, then migrate, in the workspace the message names (relevant when
+`bd doctor <path>` reported it):
+
+```bash
+bd dolt commit
+bd migrate schema
+```
+
+`bd migrate schema` is the explicit consent that the automatic path does not
+have; on a remote-backed or shared database the migration gates from
+[Remote-backed databases and multiple clones](#remote-backed-databases-and-multiple-clones)
+still apply to it.
+
 ### Upgrading to 1.3.0
 
 A 1.2.2 or 1.1.x database sits at schema v53, and 1.3.0 knows v66. That is more

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/git"
@@ -513,10 +514,16 @@ func TestVersionBump_DirtyTablesKeepsMarkerAndRetries(t *testing.T) {
 		return true, nil
 	})
 
-	runVersionBumpInvocation(t, beadsDir)
-	runVersionBumpInvocation(t, beadsDir)
+	// The refused invocations report the commit-then-migrate remedy on stderr
+	// (captured here both to assert it and to keep the refusal's notice out of
+	// the test's own output).
+	refused := captureNoticeStderr(t, func() { runVersionBumpInvocation(t, beadsDir) })
+	refused += captureNoticeStderr(t, func() { runVersionBumpInvocation(t, beadsDir) })
 	if got := readLocalVersion(markerPath); got != "1.1.0" {
 		t.Fatalf("after two refused invocations: .local_version = %q, want the stale %q so each command retries", got, "1.1.0")
+	}
+	if !strings.Contains(refused, "bd dolt commit") {
+		t.Errorf("the refused version-bump maintenance did not report its recovery path on stderr:\n%s", refused)
 	}
 	if versionBumpTailAttempts != 2 {
 		t.Fatalf("maintenance attempts after two commands = %d, want 2 (one retry per command)", versionBumpTailAttempts)
@@ -531,6 +538,62 @@ func TestVersionBump_DirtyTablesKeepsMarkerAndRetries(t *testing.T) {
 	if versionBumpTailAttempts != 3 {
 		t.Fatalf("maintenance attempts after a settled bump = %d, want 3: a settled marker must not re-attempt maintenance", versionBumpTailAttempts)
 	}
+}
+
+// TestNoticeDirtyTablesRefusal covers the human recovery path for a
+// dirty-table stop of the version-bump reconciliation (#6929): name the dirty
+// tables, the workspace whose working set must be committed, and the
+// commit-then-migrate remedy — and stay silent under --json, where prose on
+// stderr would sit in front of the command's machine-readable error.
+func TestNoticeDirtyTablesRefusal(t *testing.T) {
+	// The notice self-suppresses under --json; pin the mode like the gate
+	// notice's test does, so a leak from an earlier test cannot read as
+	// silence here.
+	pinJSONOutput(t, false)
+
+	wrapped := fmt.Errorf("open %s: %w", "/ws/.beads",
+		&schema.DirtyTablesError{Tables: []string{"issues", "wisps"}})
+
+	t.Run("human output names tables, workspace and remedy", func(t *testing.T) {
+		out := captureNoticeStderr(t, func() { noticeDirtyTablesRefusal(wrapped, "/ws/.beads") })
+		for _, want := range []string{"issues", "wisps", "/ws/.beads", "bd dolt commit", "bd migrate schema"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("notice missing %q:\n%s", want, out)
+			}
+		}
+	})
+
+	t.Run("silent in json mode", func(t *testing.T) {
+		pinJSONOutput(t, true)
+		out := captureNoticeStderr(t, func() { noticeDirtyTablesRefusal(wrapped, "/ws/.beads") })
+		if out != "" {
+			t.Errorf("notice must be silent in --json mode, got:\n%s", out)
+		}
+	})
+
+	t.Run("untyped error prints nothing", func(t *testing.T) {
+		out := captureNoticeStderr(t, func() { noticeDirtyTablesRefusal(errors.New("connection refused"), "/ws/.beads") })
+		if out != "" {
+			t.Errorf("only a dirty-table refusal should produce a notice, got:\n%s", out)
+		}
+	})
+
+	// The refusal targets the maintenance workspace's own open, which predates
+	// the command's --global database selection; the remedy must not be
+	// rewritten with --global (it could repair a database this refusal did
+	// not name) and must keep naming the workspace instead.
+	t.Run("no global rewrite under the global flag", func(t *testing.T) {
+		orig := globalFlag
+		globalFlag = true
+		defer func() { globalFlag = orig }()
+		out := captureNoticeStderr(t, func() { noticeDirtyTablesRefusal(wrapped, "/ws/.beads") })
+		if strings.Contains(out, "--global") {
+			t.Errorf("notice must not append --global from the command flag:\n%s", out)
+		}
+		if !strings.Contains(out, "/ws/.beads") {
+			t.Errorf("notice must name the maintenance workspace:\n%s", out)
+		}
+	})
 }
 
 // TestVersionBump_OrdinaryFailuresRetry pins that every ordinary failure —
