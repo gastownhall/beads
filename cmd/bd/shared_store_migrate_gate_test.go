@@ -681,3 +681,24 @@ func TestServerVersionBumpDirtyRefusalRetriedThenRecovered(t *testing.T) {
 // notice's --json contract, the one it shares with the gate notice: under
 // --json a failing version-bump migration prints no prose on stderr, and the
 // witness is retained exactly as in the human-output case.
+func TestServerVersionBumpFailureNoticeSuppressedUnderJSON(t *testing.T) {
+	repo, beadsDir, _, localVersionPath := dirtyServerBumpFixture(t, "jsn")
+	run := bdRunnerFor(t, repo, beadsDir)
+
+	stdout, stderr, code := run("count", "--json")
+	if code != 0 {
+		t.Fatalf("bd count --json: exit %d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	if strings.Contains(stderr, "bd dolt commit") || strings.Contains(stderr, "were NOT applied") {
+		t.Errorf("--json run printed the version-bump failure prose on stderr:\n%s", stderr)
+	}
+	if got := readLocalVersion(localVersionPath); got == Version {
+		t.Errorf("%s was stamped %s under --json although the reconciliation failed; --json may not change the witness decision",
+			localVersionFile, got)
+	}
+}
+
+// TestDoctorReportsDirtyVersionBumpRefusalInTarget covers doctor's replicated
+// version-bump calls: a doctor target whose upgrade is refused on dirty
+// tables reports the failure, retains the TARGET's witness, and leaves the
+// caller workspace's witness untouched.
