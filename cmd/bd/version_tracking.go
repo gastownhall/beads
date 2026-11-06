@@ -228,11 +228,25 @@ func displayVersion(version string) string {
 	return "v" + version
 }
 
+// versionBumpFailed records that this invocation's version-bump
+// reconciliation failed (autoMigrateOnVersionBump). It suppresses the upgrade
+// banner in maybeShowUpgradeNotification: "bd upgraded" would contradict the
+// failure notice the operator just read, and acknowledging the banner now
+// would keep it from appearing on the next, successful command.
+var versionBumpFailed bool
+
 // maybeShowUpgradeNotification displays a one-time upgrade notification if version changed.
 // This is called by commands like 'bd ready' and 'bd list' to inform users of upgrades.
 func maybeShowUpgradeNotification() {
 	// Only show if upgrade detected and not yet acknowledged
 	if !versionUpgradeDetected || upgradeAcknowledged {
+		return
+	}
+	// The upgrade's own reconciliation failed this invocation (#6929): the
+	// database is still behind and the failure notice just said so. Show the
+	// banner on a later command instead — without acknowledging here — by
+	// which point the retry has either settled or the operator intervened.
+	if versionBumpFailed {
 		return
 	}
 
@@ -289,6 +303,15 @@ const (
 //
 // beadsDir is the path to the .beads directory.
 func autoMigrateOnVersionBump(beadsDir string) versionBumpOutcome {
+	outcome := runVersionBumpMigration(beadsDir)
+	versionBumpFailed = outcome == bumpFailed
+	return outcome
+}
+
+// runVersionBumpMigration is autoMigrateOnVersionBump's body; the wrapper
+// records the outcome so maybeShowUpgradeNotification can react to a failed
+// bump without every call site changing.
+func runVersionBumpMigration(beadsDir string) versionBumpOutcome {
 	// Only migrate if version upgrade was detected
 	if !versionUpgradeDetected {
 		return bumpSkipped
@@ -458,7 +481,16 @@ func noticeVersionBumpFailure(err error) {
 				"Run '%s' to commit the working set at the current schema, then '%s'.\n"+
 				"The next eligible non-preview command retries the migration.\n",
 			displayVersion(Version), strings.Join(dirtyErr.Tables, ", "), commit, migrate)
+		return
 	}
+	// Any other failure the reconciliation could not talk the operator out
+	// of: name the underlying error and where to look, and keep the retry
+	// promise — the witness was not consumed, so the next eligible command
+	// tries again (and prints this again).
+	fmt.Fprintf(os.Stderr,
+		"bd upgraded to %s: the schema migration could not be applied — %v.\n"+
+			"The next eligible non-preview command retries the migration; if it keeps failing, run 'bd doctor'.\n",
+		displayVersion(Version), err)
 }
 
 // recoverPreV56IfNeeded rebuilds a Dolt database left behind by the pre-0.56

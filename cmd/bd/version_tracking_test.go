@@ -3,11 +3,16 @@
 package main
 
 import (
+	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/git"
+	"github.com/steveyegge/beads/internal/storage/schema"
 )
 
 func TestGetVersionsSince(t *testing.T) {
@@ -661,3 +666,206 @@ func TestAutoMigrateOnVersionBump_NoDatabase(t *testing.T) {
 // persistence testing through autoMigrateOnVersionBump -> dolt.NewFromConfig.
 // Automatic schema migration is exercised here through the Dolt backend.
 // Dolt-based migration testing is covered by TestInitDoltMetadata in init_test.go.
+
+// captureVersionBumpStderr swaps os.Stderr for a pipe around fn and returns
+// what fn wrote. The notice under test prints to os.Stderr directly.
+func captureVersionBumpStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	oldStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stderr = w
+	defer func() { os.Stderr = oldStderr }()
+	fn()
+	if err := w.Close(); err != nil {
+		t.Fatalf("close pipe writer: %v", err)
+	}
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read pipe: %v", err)
+	}
+	return string(out)
+}
+
+// TestVersionBumpOutcomeForOpenError pins the classification the settlement
+// contract rests on (gastownhall/beads#6929): the two consent decisions defer
+// — the operator declined, the upgrade signal settles — while anything else
+// failed and must leave the witness for the next eligible command.
+func TestVersionBumpOutcomeForOpenError(t *testing.T) {
+	outcomeNames := map[versionBumpOutcome]string{
+		bumpSkipped: "skipped", bumpSettled: "settled", bumpDeferred: "deferred", bumpFailed: "failed",
+	}
+	cases := []struct {
+		name string
+		err  error
+		want versionBumpOutcome
+	}{
+		{"remote migrate gate is a deferral",
+			&schema.RemoteMigrateGateError{CurrentVersion: 72, LatestVersion: 74, Pending: 2}, bumpDeferred},
+		{"migration consent refusal is a deferral",
+			&schema.MigrateConsentError{CurrentVersion: 72, LatestVersion: 74, Pending: 2}, bumpDeferred},
+		{"wrapped gate stays a deferral",
+			fmt.Errorf("open database: %w", &schema.RemoteMigrateGateError{CurrentVersion: 72, LatestVersion: 74, Pending: 2}), bumpDeferred},
+		{"dirty tables wanted to migrate and could not",
+			&schema.DirtyTablesError{Tables: []string{"issues"}}, bumpFailed},
+		{"anything else failed",
+			errors.New("dial tcp: connection refused"), bumpFailed},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := classifyVersionBumpError(tc.err); got != tc.want {
+				t.Errorf("classifyVersionBumpError(%v) = %s, want %s", tc.err, outcomeNames[got], outcomeNames[tc.want])
+			}
+		})
+	}
+}
+
+// TestNoticeVersionBumpFailure pins the failure notice's contract: dirty
+// tables get the commit-then-migrate remedy in that order, the shared global
+// database gets the --global verbs, other failures name the underlying error
+// and where to look, consent refusals route to the gate notice instead, and
+// --json prints nothing on this stream.
+func TestNoticeVersionBumpFailure(t *testing.T) {
+	t.Run("dirty tables name tables, commit-then-migrate, and the retry", func(t *testing.T) {
+		out := captureVersionBumpStderr(t, func() {
+			noticeVersionBumpFailure(&schema.DirtyTablesError{Tables: []string{"issues", "deps"}})
+		})
+		for _, want := range []string{
+			"were NOT applied",
+			"issues, deps",
+			"bd dolt commit",
+			schema.SharedConsentCommand,
+			"retries the migration",
+		} {
+			if !strings.Contains(out, want) {
+				t.Errorf("notice missing %q; got:\n%s", want, out)
+			}
+		}
+		if commit, migrate := strings.Index(out, "bd dolt commit"), strings.Index(out, schema.SharedConsentCommand); commit > migrate {
+			t.Errorf("remedy order wrong: commit must come before migrate; got:\n%s", out)
+		}
+	})
+
+	t.Run("shared global database names the --global verbs", func(t *testing.T) {
+		oldGlobal := globalFlag
+		globalFlag = true
+		defer func() { globalFlag = oldGlobal }()
+		out := captureVersionBumpStderr(t, func() {
+			noticeVersionBumpFailure(&schema.DirtyTablesError{Tables: []string{"issues"}})
+		})
+		if !strings.Contains(out, "bd dolt commit --global") {
+			t.Errorf("notice missing the --global commit remedy; got:\n%s", out)
+		}
+		if !strings.Contains(out, schema.SharedConsentCommandGlobal) {
+			t.Errorf("notice missing the --global migrate remedy; got:\n%s", out)
+		}
+	})
+
+	t.Run("other failures name the error, the retry, and bd doctor", func(t *testing.T) {
+		out := captureVersionBumpStderr(t, func() {
+			noticeVersionBumpFailure(errors.New("dial tcp: connection refused"))
+		})
+		for _, want := range []string{
+			"connection refused",
+			"retries",
+			"bd doctor",
+		} {
+			if !strings.Contains(out, want) {
+				t.Errorf("generic failure notice missing %q; got:\n%s", want, out)
+			}
+		}
+	})
+
+	t.Run("consent refusals route to the gate notice, not the failure notice", func(t *testing.T) {
+		out := captureVersionBumpStderr(t, func() {
+			reportVersionBumpRefusal(&schema.MigrateConsentError{CurrentVersion: 72, LatestVersion: 74, Pending: 2})
+		})
+		if out != "" {
+			t.Errorf("plain consent refusal keeps its existing silence; got:\n%s", out)
+		}
+	})
+
+	t.Run("gate refusals keep the gate's own notice", func(t *testing.T) {
+		out := captureVersionBumpStderr(t, func() {
+			reportVersionBumpRefusal(&schema.RemoteMigrateGateError{CurrentVersion: 72, LatestVersion: 74, Pending: 2})
+		})
+		if strings.Contains(out, "were NOT applied") {
+			t.Errorf("gate refusal must not print the failure notice; got:\n%s", out)
+		}
+	})
+
+	t.Run("--json prints nothing on stderr", func(t *testing.T) {
+		oldJSON := jsonOutput
+		jsonOutput = true
+		defer func() { jsonOutput = oldJSON }()
+		out := captureVersionBumpStderr(t, func() {
+			noticeVersionBumpFailure(&schema.DirtyTablesError{Tables: []string{"issues"}})
+			noticeVersionBumpFailure(errors.New("dial tcp: connection refused"))
+		})
+		if out != "" {
+			t.Errorf("--json must keep stderr silent; got:\n%s", out)
+		}
+	})
+}
+
+// TestUpgradeBannerSuppressedAfterFailedBump pins the banner half of
+// gastownhall/beads#6929: an upgrade whose migration reconciliation failed
+// this invocation must not print the "bd upgraded" banner — it would
+// contradict the failure notice — and must not acknowledge it either, so a
+// later successful command still shows the banner.
+func TestUpgradeBannerSuppressedAfterFailedBump(t *testing.T) {
+	oldDetected, oldPrev, oldAck, oldFailed := versionUpgradeDetected, previousVersion, upgradeAcknowledged, versionBumpFailed
+	defer func() {
+		versionUpgradeDetected, previousVersion, upgradeAcknowledged, versionBumpFailed = oldDetected, oldPrev, oldAck, oldFailed
+	}()
+	versionUpgradeDetected = true
+	previousVersion = "1.3.3"
+
+	t.Run("prints and acknowledges once the bump settles", func(t *testing.T) {
+		versionBumpFailed = false
+		upgradeAcknowledged = false
+		out := captureVersionBumpStdout(t, maybeShowUpgradeNotification)
+		if !strings.Contains(out, "bd upgraded") {
+			t.Errorf("banner should print for a settled upgrade; got:\n%s", out)
+		}
+		if !upgradeAcknowledged {
+			t.Error("banner should acknowledge itself once shown")
+		}
+	})
+
+	t.Run("silent after a failed bump, without acknowledging", func(t *testing.T) {
+		versionBumpFailed = true
+		upgradeAcknowledged = false
+		out := captureVersionBumpStdout(t, maybeShowUpgradeNotification)
+		if out != "" {
+			t.Errorf("banner must stay silent after a failed bump; got:\n%s", out)
+		}
+		if upgradeAcknowledged {
+			t.Error("banner must not acknowledge itself while suppressed, or the next successful command stays silent too")
+		}
+	})
+}
+
+// captureVersionBumpStdout is captureVersionBumpStderr's stdout sibling; the
+// upgrade banner prints via fmt.Printf.
+func captureVersionBumpStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	oldStdout := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stdout = w
+	defer func() { os.Stdout = oldStdout }()
+	fn()
+	if err := w.Close(); err != nil {
+		t.Fatalf("close pipe writer: %v", err)
+	}
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read pipe: %v", err)
+	}
+	return string(out)
+}
