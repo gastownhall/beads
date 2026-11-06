@@ -92,6 +92,14 @@ exports_files(
     visibility = ["//scripts:__pkg__"],
 )
 
+# //internal/storage/embeddeddolt:recovery_guide_events_test executes the
+# recovery guide's fenced dolt sql blocks against real stores, so the
+# markdown it runs is that test's data.
+exports_files(
+    ["docs/recovery/accidental-1-2-1-release.md"],
+    visibility = ["//internal/storage/embeddeddolt:__pkg__"],
+)
+
 # The nested Go modules' go.mod files, which mark where the root module ends:
 # //scripts:go_test_sources_test's scan of every _test.go file skips their
 # trees, as `go test ./...` does. (go.mod is in no Go partition below: it is

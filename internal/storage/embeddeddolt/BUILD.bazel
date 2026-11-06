@@ -237,6 +237,7 @@ go_test(
         "ready_counter_contract_test.go",
         "ready_total_test.go",
         "ready_work_missing_table_test.go",
+        "recovery_guide_events_test.go",
         "reject_stale_upsert_test.go",
         "relations_contract_test.go",
         "releaser_contract_test.go",
@@ -269,6 +270,11 @@ go_test(
         "workspace_config_contract_test.go",
     ],
     embed = [":embeddeddolt"],
+    # recovery_guide_events_test.go executes the guide's fenced command
+    # blocks against real stores, so the markdown is test data.
+    data = [
+        "//:docs/recovery/accidental-1-2-1-release.md",
+    ],
     shard_count = 9,
     deps = [
         "//:beads",
