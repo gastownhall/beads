@@ -141,6 +141,16 @@ type RemoteMigrateGateError struct {
 	// plumbed into the gate: the topology is the caller's fact, and every
 	// other injection site would have to pass a constant false.
 	Proxied bool
+
+	// ServerMode marks a refusal raised on a dolt sql-server store
+	// (internal/storage/dolt), owned by this workspace or not (bd-bt60zz,
+	// #6687). Presentation only, like Proxied, and set by that store after the
+	// gate returns for the same reason: the adopt recipe moves the database
+	// aside first, and on a server the database is a directory under the
+	// serving host's data_dir, not .beads/embeddeddolt — but an owned server
+	// is not Shared, so neither of those flags tells the renderer which move
+	// to print.
+	ServerMode bool
 }
 
 const (
@@ -468,6 +478,9 @@ func EmbeddedAdoptCommands() []string {
 // adoptRecipe renders the adopt steps for userBody, each prose line prefixed
 // with indent and each command at the body's usual command indent.
 func (e *RemoteMigrateGateError) adoptRecipe(indent string) string {
+	if e.serverStorage() {
+		return serverAdoptRecipe(indent)
+	}
 	body := indent + "`bd bootstrap` alone does NOT adopt it: bootstrap never replaces an existing\n" +
 		indent + "database, so run against this clone it prints \"Nothing to do.\" and leaves\n" +
 		indent + "it on the old schema. Move the local database aside first, from the\n" +
@@ -479,6 +492,25 @@ func (e *RemoteMigrateGateError) adoptRecipe(indent string) string {
 		indent + "If .beads/backup/embeddeddolt.pre-adopt already exists, pick another unused\n" +
 		indent + "name; if this workspace configures its own database path, move that one.\n" +
 		indent + "Keep the moved-aside copy until you have checked the result.\n"
+}
+
+// serverAdoptRecipe is adoptRecipe for server storage: the database lives
+// under the serving host's data_dir, which the gate cannot see, so the move is
+// stated as host-side steps rather than commands with a fabricated path.
+func serverAdoptRecipe(indent string) string {
+	return indent + "`bd bootstrap` alone does NOT adopt it: bootstrap never replaces an existing\n" +
+		indent + "database, so run against this one it reports that the database already exists\n" +
+		indent + "and leaves it on the old schema. This database is on server storage (a dolt\n" +
+		indent + "sql-server), so adopting is done on the host that serves it:\n" +
+		indent + "  1. Coordinate downtime with every client of the server, then stop the\n" +
+		indent + "     process serving this database.\n" +
+		indent + "  2. On that host, move ONLY this database's directory out of the server's\n" +
+		indent + "     actual data_dir (.beads/dolt/ only for a server bd runs for this workspace;\n" +
+		indent + "     a shared or custom server's data_dir is wherever it is configured — see\n" +
+		indent + "     re-clone gotchas in docs/recovery/init-safety.md). Keep the moved copy.\n" +
+		indent + "  3. Restart the server as required, then run, from a workspace connected\n" +
+		indent + "     directly to it (not through a proxy):\n" +
+		"        bd bootstrap\n"
 }
 
 // adoptPreservationNote says where a plain adopt's unpushed work survives. The
@@ -832,7 +864,7 @@ const (
 // sql-server serves rather than this workspace's embedded directory, which
 // decides what an adopt has to move and where.
 func (e *RemoteMigrateGateError) serverStorage() bool {
-	return e.Shared || e.Proxied
+	return e.ServerMode || e.Shared || e.Proxied
 }
 
 // IsRemoteMigrateGateError reports whether err (or any error it wraps) is a

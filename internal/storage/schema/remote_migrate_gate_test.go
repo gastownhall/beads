@@ -537,3 +537,50 @@ func TestRemoteMigrateGateAdoptOptionsRecipe(t *testing.T) {
 		}
 	}
 }
+
+// TestRemoteMigrateGateServerAdoptGuidance pins the server-storage adopt body
+// (bd-bt60zz, #6687) for an owned server (ServerMode, set by the Dolt store),
+// a shared one, and a proxied client: the database is not a directory in this
+// workspace, so the message names server storage and the serving host's
+// data_dir, and never prescribes the embedded move or a fixed shared path.
+func TestRemoteMigrateGateServerAdoptGuidance(t *testing.T) {
+	layouts := []struct {
+		name string
+		set  func(*RemoteMigrateGateError)
+	}{
+		{"owned", func(e *RemoteMigrateGateError) { e.ServerMode = true }},
+		{"shared", func(e *RemoteMigrateGateError) { e.ServerMode, e.Shared = true, true }},
+		{"proxied", func(e *RemoteMigrateGateError) { e.Shared, e.Proxied = true, true }},
+	}
+	for _, tc := range adoptRecoveryCases() {
+		for _, layout := range layouts {
+			t.Run(tc.name+"/"+layout.name, func(t *testing.T) {
+				e := *tc.err
+				layout.set(&e)
+				msg := e.UserMessage()
+				for _, want := range []string{"server storage", "data_dir", "stop the", "Restart the server", "re-clone gotchas", "never replaces an existing"} {
+					if !strings.Contains(msg, want) {
+						t.Errorf("server adopt message is missing %q:\n%s", want, msg)
+					}
+				}
+				for _, banned := range []string{".beads/embeddeddolt", "mkdir -p .beads/backup"} {
+					if strings.Contains(msg, banned) {
+						t.Errorf("server adopt message prescribes the embedded move (%q):\n%s", banned, msg)
+					}
+				}
+				// .beads/dolt/ is only the default of a server bd runs for this
+				// workspace; it must never be stated as where a server keeps it.
+				if strings.Contains(msg, ".beads/dolt/") && !strings.Contains(msg, ".beads/dolt/ only for a server bd runs for this workspace") {
+					t.Errorf("server adopt message names .beads/dolt/ as a fixed location:\n%s", msg)
+				}
+				idx := strings.Index(msg, "data_dir")
+				if idx < 0 || !strings.Contains(msg[idx:], "        bd bootstrap\n") {
+					t.Errorf("bd bootstrap must follow the data_dir move:\n%s", msg)
+				}
+				if !slices.Equal(e.Options()[len(e.Options())-1].Commands, []string{"bd bootstrap"}) {
+					t.Errorf("server adopt option commands = %q, want bd bootstrap behind prerequisites", e.Options()[len(e.Options())-1].Commands)
+				}
+			})
+		}
+	}
+}
