@@ -1412,21 +1412,21 @@ func TestServedReaderDoesNotMutateTheCallerRequestOverTheWire(t *testing.T) {
 	build := func() (issueops.ReadyRequest, issueops.ListRequest, issueops.GetRequest) {
 		limit := 5
 		return issueops.ReadyRequest{
-				Labels:         []string{"Beta", "alpha"},
-				LabelsAny:      []string{"gamma", " delta "},
-				ExcludeLabels:  []string{"omega"},
-				ExcludeTypes:   []string{"chore,epic", " feat "},
-				MetadataFields: map[string]string{"kind": "probe"},
-				Sort:           "priority",
-				Limit:          &limit,
-			}, issueops.ListRequest{
-				Labels:         []string{"Beta", "alpha"},
-				LabelsAny:      []string{"gamma", " delta "},
-				ExcludeLabels:  []string{"omega"},
-				MetadataFields: map[string]string{"kind": "probe"},
-				SortBy:         "id",
-				Limit:          &limit,
-			}, issueops.GetRequest{ID: listID("nomut", "absent")}
+			Labels:         []string{"Beta", "alpha"},
+			LabelsAny:      []string{"gamma", " delta "},
+			ExcludeLabels:  []string{"omega"},
+			ExcludeTypes:   []string{"chore,epic", " feat "},
+			MetadataFields: map[string]string{"kind": "probe"},
+			Sort:           "priority",
+			Limit:          &limit,
+		}, issueops.ListRequest{
+			Labels:         []string{"Beta", "alpha"},
+			LabelsAny:      []string{"gamma", " delta "},
+			ExcludeLabels:  []string{"omega"},
+			MetadataFields: map[string]string{"kind": "probe"},
+			SortBy:         "id",
+			Limit:          &limit,
+		}, issueops.GetRequest{ID: listID("nomut", "absent")}
 	}
 	ready, list, get := build()
 	wantReady, wantList, wantGet := build()
@@ -1465,21 +1465,20 @@ func TestServedReaderDoesNotMutateTheCallerRequestOverTheWire(t *testing.T) {
 func TestServedReaderRefusesTheFiltersTheWireCannotCarry(t *testing.T) {
 	ctx := t.Context()
 	_, reader := servedReader(t)
-	cutoff := time.Now().UTC().Add(-time.Hour)
-	priority := 1
 
+	// The filter members that stood here (SpecPrefix, PinnedFlag, PriorityMax,
+	// UpdatedAfter, a TitleContains that differs from TitleSearch,
+	// ExcludeTypes) ride listIssues behind issues.list.filters now; their
+	// served answers are the Reader contract's filter cases, and their refusal
+	// against a server without the token is list_filters_test.go's. What is
+	// left is the vocabulary the wire still cannot put.
 	for _, test := range []struct {
 		field string
 		req   issueops.ListRequest
 	}{
-		{"SpecPrefix", issueops.ListRequest{SpecPrefix: "docs/"}},
 		{"ReadyFlag", issueops.ListRequest{ReadyFlag: true}},
 		{"Offset", issueops.ListRequest{Offset: 1}},
-		{"PinnedFlag", issueops.ListRequest{PinnedFlag: true}},
-		{"PriorityMax", issueops.ListRequest{PriorityMax: &priority}},
-		{"UpdatedAfter", issueops.ListRequest{UpdatedAfter: &cutoff}},
-		{"TitleContains", issueops.ListRequest{TitleContains: "anything"}},
-		{"ExcludeTypes", issueops.ListRequest{ExcludeTypes: []string{"chore"}}},
+		{"IncludeComments", issueops.ListRequest{IncludeComments: true}},
 	} {
 		page, err := reader.List(ctx, test.req)
 		if err == nil {
@@ -1494,6 +1493,43 @@ func TestServedReaderRefusesTheFiltersTheWireCannotCarry(t *testing.T) {
 		t.Error("Ready with an Offset answered instead of refusing")
 	} else {
 		assertServedRefusal(t, "Ready with an Offset", err, "Offset")
+	}
+}
+
+// TestServedListTitleContainsAnswersWhatTitleAnswers: `bd list
+// --title-contains X` folds onto listIssues `title`, and the store compiles
+// both to the same case-insensitive substring predicate, so over the wire the
+// two flags answer the same rows, as do both flags set to one value, in the
+// same or a different letter case.
+func TestServedListTitleContainsAnswersWhatTitleAnswers(t *testing.T) {
+	ctx := t.Context()
+	c, reader := servedReader(t)
+	const scope = "title-contains"
+	for _, id := range []string{listID("tcmatch", "a"), listID("tcmatch", "b"), listID("other", "c")} {
+		seedListIssue(t, ctx, c, id, scope, time.Time{}, 2)
+	}
+	limit := 0
+	answer := func(req issueops.ListRequest) []string {
+		t.Helper()
+		req.Labels, req.Limit = []string{scope}, &limit
+		page, err := reader.List(ctx, req)
+		if err != nil {
+			t.Fatalf("List(%+v): %v", req, err)
+		}
+		ids := pageIDs(page)
+		slices.Sort(ids)
+		return ids
+	}
+	want := []string{listID("tcmatch", "a"), listID("tcmatch", "b")}
+	for name, req := range map[string]issueops.ListRequest{
+		"title":                        {TitleSearch: "LSTCMATCH"},
+		"title-contains":               {TitleContains: "LSTCMATCH"},
+		"both, the same value":         {TitleSearch: "lstcmatch", TitleContains: "lstcmatch"},
+		"both, differing only in case": {TitleSearch: "LSTCMATCH", TitleContains: "lstcmatch"},
+	} {
+		if got := answer(req); !slices.Equal(got, want) {
+			t.Errorf("%s: ids %v, want %v", name, got, want)
+		}
 	}
 }
 

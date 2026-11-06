@@ -18,6 +18,7 @@ import (
 	"github.com/steveyegge/beads/internal/atomicfile"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/debug"
+	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/fdhygiene"
 	"github.com/steveyegge/beads/internal/lockfile"
 	"github.com/steveyegge/beads/internal/procid"
@@ -67,6 +68,14 @@ type OpenOpts struct {
 	Database       string
 	Port           int
 	External       configfile.ExternalDoltConfig
+
+	// RotateLogFile lets the proxy start rotate an oversized LogFilePath
+	// (internal/doltserver.MaybeRotateLogFile), and the running proxy bound
+	// it (ProxyOpts.ServerLogPath, via db-proxy-child --rotate-logpath). Set
+	// it only for a log bd owns: proxy.lock guards rootDir, not an
+	// operator's log elsewhere, which another workspace's live proxy may
+	// still be writing. rootDir/proxy.log is always rotated.
+	RotateLogFile bool
 }
 
 const (
@@ -89,6 +98,7 @@ var (
 	verifyProcessIdentity = procid.Verify
 	resolveRootIdentity   = identity.RootID
 	readControlSecret     = identity.ReadSecret
+	removeSpawnMarkerFile = os.Remove
 )
 
 // ErrUnverifiableProcess marks lifecycle operations that refuse to signal a
@@ -229,7 +239,11 @@ func GetCreateDatabaseProxyServerEndpoint(rootDir string, opts OpenOpts) (Endpoi
 		discovery := readAndDial(rootDir)
 		switch discovery.status {
 		case adoptionAdopted:
-			return adoptedEndpoint(rootDir, want, discovery)
+			ep, err := adoptedEndpoint(rootDir, want, discovery)
+			if err == nil {
+				registerDataAddress(rootDir, ep)
+			}
+			return ep, err
 		case adoptionIOErr:
 			return Endpoint{}, fmt.Errorf("discover proxy from %s: %w", pidfile.Path(rootDir, PIDFileName), discovery.err)
 		}
@@ -242,7 +256,11 @@ func GetCreateDatabaseProxyServerEndpoint(rootDir string, opts OpenOpts) (Endpoi
 			discovery = readAndDial(rootDir)
 			if discovery.status == adoptionAdopted {
 				lock.Unlock()
-				return adoptedEndpoint(rootDir, want, discovery)
+				ep, err := adoptedEndpoint(rootDir, want, discovery)
+				if err == nil {
+					registerDataAddress(rootDir, ep)
+				}
+				return ep, err
 			}
 			if discovery.status == adoptionIOErr {
 				lock.Unlock()
@@ -265,6 +283,7 @@ func GetCreateDatabaseProxyServerEndpoint(rootDir string, opts OpenOpts) (Endpoi
 			var ep Endpoint
 			ep, lastSpawnErr = spawnAndHandoff(rootDir, opts, deadline, stopEpoch, lock, discovery)
 			if lastSpawnErr == nil {
+				registerDataAddress(rootDir, ep)
 				return ep, nil
 			}
 			if errors.Is(lastSpawnErr, errStartInterrupted) {
@@ -281,6 +300,10 @@ func GetCreateDatabaseProxyServerEndpoint(rootDir string, opts OpenOpts) (Endpoi
 				recordPath,
 				recordPath,
 			)
+		case isPreMACIdentRefusal(discovery):
+			if stopErr := stopVerifiedPreMACProxy(rootDir, discovery.pidfile); stopErr != nil {
+				return Endpoint{}, stopErr
+			}
 		}
 
 		select {
@@ -294,6 +317,20 @@ func GetCreateDatabaseProxyServerEndpoint(rootDir string, opts OpenOpts) (Endpoi
 	}
 }
 
+// isPreMACIdentRefusal reports whether a silent IDENT refusal comes from a
+// pre-upgrade proxy that cannot answer the request-MAC handshake: its
+// pidfile predates the ControlProto marker MAC-capable proxies publish. A
+// current proxy can also close a probe silently — its control handler
+// drops requests once the ident slots are full or the read deadline trips
+// — so refusal alone is never evidence enough to send a kill; a marked
+// record falls back to the normal bounded poll instead.
+func isPreMACIdentRefusal(discovery adoptionResult) bool {
+	return discovery.status == adoptionIdentityMismatch &&
+		errors.Is(discovery.err, identity.ErrIdentRefused) &&
+		discovery.pidfile != nil &&
+		discovery.pidfile.ControlProto < pidfile.ControlProtoIdentMAC
+}
+
 func adoptedEndpoint(rootDir, want string, discovery adoptionResult) (Endpoint, error) {
 	if want != "" && discovery.pidfile.UpstreamID != "" && discovery.pidfile.UpstreamID != want {
 		return Endpoint{}, &ErrUpstreamMismatch{
@@ -303,6 +340,26 @@ func adoptedEndpoint(rootDir, want string, discovery adoptionResult) (Endpoint, 
 		}
 	}
 	return discovery.endpoint, nil
+}
+
+func stopVerifiedPreMACProxy(rootDir string, pf *pidfile.PidFile) error {
+	if pf == nil {
+		return nil
+	}
+	if err := validateKillRecord(rootDir, pf, pidfile.KindProxy, killRecordChecks{VerifyRoot: true}); err != nil {
+		return nil
+	}
+	handle, dead, err := openRecordedProcess(pf)
+	if err != nil || dead {
+		return err
+	}
+	if err := handle.Kill(); err != nil {
+		_ = handle.Close()
+		return fmt.Errorf("stop pre-upgrade proxy pid %d: %w", pf.Pid, err)
+	}
+	_ = handle.Close()
+	_ = waitForRecordedProcessExit(pf, shutdownPostKillMinimum)
+	return nil
 }
 
 func spawnAndHandoff(
@@ -456,6 +513,10 @@ func forkExecChild(rootDir string, opts OpenOpts, port int, stopEpoch string, lo
 	}
 	if opts.LogFilePath != "" {
 		args = append(args, "--logpath", opts.LogFilePath)
+		if opts.RotateLogFile {
+			// The child bounds a log bd owns while it runs, too.
+			args = append(args, "--rotate-logpath")
+		}
 	}
 	if opts.DoltBinPath != "" {
 		args = append(args, "--dolt-bin", opts.DoltBinPath)
@@ -478,6 +539,17 @@ func forkExecChild(rootDir string, opts OpenOpts, port int, stopEpoch string, lo
 			args = append(args, "--external-keep-alive", ext.KeepAlivePeriod.String())
 		}
 	}
+
+	// Startup-only rotation (internal/doltserver/logrotate.go) of both logs.
+	// proxy.lock is held, so the previous proxy has exited and nothing has
+	// either file open; this must stay before the OpenFile below, or the
+	// child's stdout would follow the renamed inode to <log>.1. The lock
+	// says nothing about a server log bd does not own, so that one is
+	// rotated only on RotateLogFile.
+	if opts.RotateLogFile {
+		doltserver.MaybeRotateLogFile(opts.LogFilePath)
+	}
+	doltserver.MaybeRotateLogFile(filepath.Join(rootDir, LogFileName))
 
 	logFile, err := os.OpenFile(opts.LogFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600) //nolint:gosec // G304: logFilePath is caller-derived (workspace path), not user-request input
 	if err != nil {
@@ -1028,7 +1100,7 @@ func inspectSpawnMarkerLocked(rootDir string) (bool, error) {
 	if marker == nil {
 		return false, nil
 	}
-	matched, err := procid.Verify(marker.PID, procid.Token(marker.Birth))
+	matched, err := verifyProcessIdentity(marker.PID, procid.Token(marker.Birth))
 	if err != nil {
 		return false, fmt.Errorf("verify proxy spawn owner pid %d: %w", marker.PID, err)
 	}
@@ -1041,15 +1113,41 @@ func inspectSpawnMarkerLocked(rootDir string) (bool, error) {
 	return false, nil
 }
 
+// spawnMarkerLive reports, without proxy.lock, whether rootDir's spawn marker
+// names a live owner: a start which has released proxy.lock and not yet
+// resolved. Waiting on a live start must not take proxy.lock, because that
+// start needs the lock to clear its own marker (clearOwnSpawnMarker), and a
+// waiter re-taking it on the same cadence can win every round until the
+// clear gives up and leaves the marker behind (#7158). A missing, dead,
+// unreadable or unverifiable marker reports false so the caller takes the
+// lock and lets inspectSpawnMarkerLocked handle it.
+func spawnMarkerLive(rootDir string) bool {
+	marker, err := readSpawnMarker(rootDir)
+	if err != nil || marker == nil {
+		return false
+	}
+	live, err := verifyProcessIdentity(marker.PID, procid.Token(marker.Birth))
+	return err == nil && live
+}
+
 func clearSpawnMarkerAfterLock(rootDir string) error {
-	err := os.Remove(filepath.Join(rootDir, spawnMarkerFileName))
+	err := removeSpawnMarkerFile(filepath.Join(rootDir, spawnMarkerFileName))
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
 	return nil
 }
 
-func clearOwnSpawnMarker(rootDir string, own spawnMarker) error {
+// clearOwnSpawnMarker removes this start's spawn marker under proxy.lock,
+// unless it is already gone or no longer this start's. Its callers cannot
+// act on a failure, so it logs one: a marker it leaves behind holds up proxy
+// starts and stops for rootDir while this process lives.
+func clearOwnSpawnMarker(rootDir string, own spawnMarker) (err error) {
+	defer func() {
+		if err != nil {
+			log.Printf("dbproxy: could not clear this process's spawn marker in %s: %v", rootDir, err)
+		}
+	}()
 	deadline := time.Now().Add(shutdownConfirmDeadline)
 	for {
 		marker, err := readSpawnMarker(rootDir)
@@ -1067,13 +1165,18 @@ func clearOwnSpawnMarker(rootDir string, own spawnMarker) error {
 				readErr = clearSpawnMarkerAfterLock(rootDir)
 			}
 			lock.Unlock()
-			return readErr
-		}
-		if !lockfile.IsLocked(err) {
+			if readErr == nil {
+				return nil
+			}
+			// Retry rather than leave a live-owner marker behind: on Windows
+			// a waiter's lock-free read (spawnMarkerLive) briefly holds the
+			// file open without FILE_SHARE_DELETE, failing the delete.
+			err = readErr
+		} else if !lockfile.IsLocked(err) {
 			return err
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("timeout clearing spawn marker %s", filepath.Join(rootDir, spawnMarkerFileName))
+			return fmt.Errorf("timeout clearing spawn marker %s: %w", filepath.Join(rootDir, spawnMarkerFileName), err)
 		}
 		time.Sleep(shutdownConfirmPoll)
 	}

@@ -6,11 +6,14 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/doltversion"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
+	"github.com/steveyegge/beads/internal/testutil"
 )
 
 // TestShouldPurgeDroppedDatabasesGatesOnFlagAlone pins the --purge-dropped
@@ -210,5 +213,55 @@ func mustExec(t *testing.T, ctx context.Context, db *sql.DB, query string) {
 	defer cancel()
 	if _, err := db.ExecContext(execCtx, query); err != nil {
 		t.Fatalf("exec %q: %v", query, err)
+	}
+}
+
+// TestOpenDoltServerConnectionRefusesBelowRequiredMin pins the floor on the
+// connection bd dolt clean-databases drops and purges through in server
+// mode: with doltversion.RequiredMin raised above the test server's version,
+// openDoltServerConnection refuses the server with the floor's error and
+// returns no connection, so nothing can be dropped on it. At the real
+// minimum the same workspace connects.
+func TestOpenDoltServerConnectionRefusesBelowRequiredMin(t *testing.T) {
+	if testDoltServerPort == 0 {
+		t.Skip("no test Dolt server running")
+	}
+	if testutil.DoltContainerCrashed() {
+		t.Skipf("Dolt test server crashed: %v", testutil.DoltContainerCrashError())
+	}
+	repoDir := t.TempDir()
+	beadsDir := writeServerRepo(t, repoDir, "clean_floor_test_db", "127.0.0.1", "clean-floor-test-origin", testDoltServerPort)
+	t.Chdir(repoDir)
+	t.Setenv("BEADS_DIR", beadsDir)
+	t.Setenv("BEADS_DOLT_SERVER_PORT", strconv.Itoa(testDoltServerPort))
+
+	db, cleanup, err := openDoltServerConnection()
+	if err != nil {
+		t.Fatalf("openDoltServerConnection at the real minimum = %v, want a connection", err)
+	}
+	if db == nil {
+		t.Fatal("openDoltServerConnection returned no connection and no error")
+	}
+	cleanup()
+
+	raiseRequiredMinForTest(t)
+	stderr := captureStderr(t, func() {
+		db, cleanup, err = openDoltServerConnection()
+	})
+	if err == nil {
+		cleanup()
+		t.Fatalf("openDoltServerConnection = nil error with RequiredMin %s, want the floor's refusal", doltversion.RequiredMin)
+	}
+	if db != nil {
+		t.Error("openDoltServerConnection returned a connection alongside the refusal")
+	}
+	for _, want := range []string{
+		"dolt sql-server at 127.0.0.1:" + strconv.Itoa(testDoltServerPort) + " is version",
+		"requires dolt " + doltversion.RequiredMin.String(),
+		"restart the server on it",
+	} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr = %q, want it to contain %q", stderr, want)
+		}
 	}
 }

@@ -121,13 +121,18 @@ func gitOriginHasDoltDataRefStatus() (bool, error) {
 func gitRemoteHasDoltDataRefStatus(remote string) (bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), gitDoltDataProbeTimeout)
 	defer cancel()
-	// #nosec G702 -- no shell is involved: the binary is the literal "git" and
-	// the remote URL is its own argv element, so it cannot inject a command.
+	// #nosec G702 -- no shell is involved: the binary is the literal "git", the
+	// remote URL is its own argv element after "--", and a leading "-" is
+	// refused above, so it cannot be read as an option.
 	// The value is this repo's configured sync remote, local operator state
 	// rather than request data; gosec only reaches it because this PR routed
 	// config discovery through env-derived paths (see testSSHConnectivity in
 	// dolt.go for the same taint path).
-	cmd := exec.CommandContext(ctx, "git", "ls-remote", gitRemoteURLForLsRemote(remote), "refs/dolt/data")
+	url := gitRemoteURLForLsRemote(remote)
+	if err := checkRemoteNotOption("git remote", url); err != nil {
+		return false, err
+	}
+	cmd := exec.CommandContext(ctx, "git", "ls-remote", "--", url, "refs/dolt/data")
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	output, err := cmd.Output()
 	if err != nil {

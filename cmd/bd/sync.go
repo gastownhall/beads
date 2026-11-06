@@ -793,6 +793,11 @@ func runSyncCommand(cmd *cobra.Command, _ []string) error {
 		syncYes, _ := cmd.Flags().GetBool("yes")
 		syncNoAdopt, _ := cmd.Flags().GetBool("no-adopt")
 		adopted, adoptErr := syncAdoptGitOrigin(rootCtx, st, currentAdoptPolicy(syncYes, syncNoAdopt, stdinIsTerminal(), jsonOutput), syncAdoptOptIn)
+		var leftover *remoteOnlyInLeftoverDatabaseError
+		if errors.As(adoptErr, &leftover) {
+			// Refused before any adoption: the remote is set up, but not on the server.
+			return HandleErrorRespectJSON("sync failed: %v", adoptErr)
+		}
 		if adoptErr != nil {
 			return HandleErrorRespectJSON("sync failed: adopting git origin as Dolt remote: %v", adoptErr)
 		}
@@ -873,7 +878,7 @@ func runSyncCommand(cmd *cobra.Command, _ []string) error {
 		}
 		exitErr := HandleErrorRespectJSON("sync failed: %s", syncFailureText(err))
 		if !jsonOutput {
-			printSyncErrorGuidance(remote, err)
+			printSyncErrorGuidance(rootCtx, st, remote, err)
 		}
 		return exitErr
 	}
@@ -915,9 +920,26 @@ func syncFailureText(err error) string {
 		return ""
 	}
 	if line := sshDialTimeoutLine.FindString(err.Error()); line != "" {
-		return "SSH remote could not be reached (dial timed out): " + scrubURLCredentials(strings.TrimSpace(line))
+		return syncFailureStep(err, line) + "SSH remote could not be reached (dial timed out): " + scrubURLCredentials(strings.TrimSpace(line))
 	}
 	return err.Error()
+}
+
+// syncFailureStep returns err's outermost wrap segment for the dial-timeout
+// rewrite to keep: runSyncLoop's "pull: " or "push: " step, which is how an
+// operator tells whether local work already reached the remote. A segment
+// that contains the dial line is git output folded into the wrap
+// (cliTransferError), auth hints and all, so it yields "" instead.
+func syncFailureStep(err error, line string) string {
+	inner := errors.Unwrap(err)
+	if inner == nil {
+		return ""
+	}
+	prefix, ok := strings.CutSuffix(err.Error(), inner.Error())
+	if !ok || strings.Contains(prefix, line) {
+		return ""
+	}
+	return scrubURLCredentials(prefix)
 }
 
 // mergeBlockersOp builds the loop's positive constraint-violation hook, or nil
@@ -954,12 +976,14 @@ func dirtyGraphFingerprintOp(st storage.DoltStorage) func(context.Context) (stri
 // print, so a failed sync is as actionable as the hand-rolled loop it replaces.
 // The classifiers match on the message, so they still fire through the step
 // wrapping runSyncLoop adds.
-func printSyncErrorGuidance(remote string, err error) {
+func printSyncErrorGuidance(ctx context.Context, st storage.DoltStorage, remote string, err error) {
 	switch {
 	case isAncestorPKMismatchErr(err):
 		printAncestorPKMismatchGuidance(err)
 	case isDivergedHistoryErr(err):
 		printDivergedHistoryGuidance("sync")
+	case isRemoteDanglingReferenceErr(err):
+		printRemoteDanglingReferenceGuidance(ctx, st, remote)
 	case remote != "" && isRemoteNotFoundErr(err):
 		fmt.Fprintf(os.Stderr, "\nRemote %q is not configured.\n", remote)
 		fmt.Fprintln(os.Stderr, "Use 'bd dolt remote add <name> <url>' to add it.")

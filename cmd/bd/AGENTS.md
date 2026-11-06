@@ -38,6 +38,10 @@ Which tier a test belongs in, and which command runs it, is decided by
 6. Regenerate the CLI reference with `scripts/generate-cli-docs.sh`;
    `scripts/check-cli-docs-drift.sh` fails a PR whose command-surface change
    leaves the generated docs stale.
+7. Regenerate the command-surface goldens and review the testdata diff:
+   `BD_UPDATE_GOLDEN=1 CGO_ENABLED=1 go test -tags gms_pure_go ./cmd/bd -run '^TestCommand(Tree|Help)Golden$'`.
+   `TestCommandTreeGolden` fails on any added, removed or reworded command or
+   flag until you do.
 
 Prefer a flag on an existing command over a new command, and route
 recovery/repair operations to `bd doctor --fix`; see the CLI design principles
@@ -85,6 +89,9 @@ no linter enforces it).
   or serialize the call under `stdioMutex`.
 - `TestCorpusGolden` (`protocol/`) — no unreviewed change to the `--json`
   wire shapes.
+- `TestCommandTreeGolden` and `TestCommandHelpGolden` — no unreviewed change
+  to the command tree (every command and flag, hidden ones included) or to
+  the pinned `--help` output in `testdata/command_tree/`.
 
 Fresh-workspace command fixtures call `isolateBeadsDirForTest(t)` before
 setup or dispatch and must not use `t.Parallel()`.

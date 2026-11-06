@@ -14,6 +14,7 @@ import (
 	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/ui"
 )
 
@@ -31,6 +32,16 @@ type doctorCheck struct {
 	Detail   string `json:"detail,omitempty"` // Additional detail like storage type
 	Fix      string `json:"fix,omitempty"`
 	Category string `json:"category,omitempty"` // category for grouping in output
+}
+
+// printed returns c as every text printer of checks shows it, each text
+// field spelled by remedy.PrintedText (doctor.DoctorCheck.Printed).
+func (c doctorCheck) printed() doctorCheck {
+	c.Name = remedy.PrintedText(c.Name)
+	c.Message = remedy.PrintedText(c.Message)
+	c.Detail = remedy.PrintedText(c.Detail)
+	c.Fix = remedy.PrintedText(c.Fix)
+	return c
 }
 
 type doctorResult struct {
@@ -131,7 +142,7 @@ Deep Validation Mode (--deep):
 Server Mode (--server):
   Run health checks for Dolt server mode connections (bd-dolt.2.3):
   - Server reachable: Can connect to configured host:port?
-  - Dolt version: Is it a Dolt server (not vanilla MySQL)?
+  - Dolt version: Is it a Dolt server (not vanilla MySQL) at 2.6.0 or newer?
   - Database exists: Does the 'beads' database exist?
   - Schema compatible: Can query beads tables?
   - Connection pool: Pool health metrics
@@ -174,8 +185,6 @@ Examples:
   bd doctor --fix --yes  # Automatically fix issues (no confirmation)
   bd doctor --fix -i     # Confirm each fix individually
   bd doctor --fix --fix-child-parent  # Also fix child→parent deps (opt-in)
-  bd doctor --fix --force # Force repair even when database can't be opened
-  bd doctor --fix --source=jsonl # Rebuild database from a JSONL export
   bd doctor --dry-run    # Preview what --fix would do without making changes
   bd doctor --perf       # Performance diagnostics
   bd doctor --output diagnostics.json  # Export diagnostics to file
@@ -220,7 +229,7 @@ Examples:
 		if err := validateDoctorWorkspaceBackend(absPath); isLegacyUpgradeRefusal(err) {
 			return printLegacyUpgradeDiagnostic(err)
 		} else if err != nil {
-			return HandleError("%v", err)
+			return handleWorkspaceGuardError(err)
 		}
 
 		if doctorFix && isOrchestratorRoot(absPath) {
@@ -467,7 +476,7 @@ func printEmbeddedUnsupported(commandLabel string) {
 	hints := []string{
 		"Verify database exists:  ls -la .beads/embeddeddolt/",
 		"Check bd version:        bd version",
-		"Reinitialize if needed:  bd init --reinit-local",
+		"If it will not open:     preserve it first, then recover: " + doctor.EngineWontOpenRecoveryURL,
 		"Switch to server mode:   bd init --server",
 	}
 	supported := []string{"artifacts", "conventions", "pollution"}
@@ -797,7 +806,7 @@ func runDiagnostics(path string) doctorResult {
 
 	// Check 10b: Rekey-backfill leftovers — randomly-keyed or targetless
 	// dependency rows that survive the #4259 migration backfill (bd-6dnrw.17).
-	depKeyCheck := convertWithCategory(doctor.CheckDependencyKeysWithStore(sharedStore), doctor.CategoryMetadata)
+	depKeyCheck := convertWithCategory(doctor.CheckDependencyKeysWithStore(path, sharedStore), doctor.CategoryMetadata)
 	result.Checks = append(result.Checks, depKeyCheck)
 	if depKeyCheck.Status == statusError || depKeyCheck.Status == statusWarning {
 		result.OverallOK = false
@@ -810,7 +819,7 @@ func runDiagnostics(path string) doctorResult {
 	// patch, and is_blocked is self-healing via 'bd doctor --fix' / the next
 	// pull's recompute — surface it as actionable without turning doctor red
 	// across the fleet if an unforeseen dependency shape trips the predicate.
-	blockedConsistencyCheck := convertWithCategory(doctor.CheckBlockedConsistencyWithStore(sharedStore), doctor.CategoryData)
+	blockedConsistencyCheck := convertWithCategory(doctor.CheckBlockedConsistencyWithStore(path, sharedStore), doctor.CategoryData)
 	result.Checks = append(result.Checks, blockedConsistencyCheck)
 
 	// Check 10d: label whitespace damage (#5812) — labels written by a bd that
@@ -969,7 +978,7 @@ func runDiagnostics(path string) doctorResult {
 	// Don't fail overall check for untracked files, just warn
 
 	// Check 21: Orphaned dependencies (from bd repair-deps, bd validate)
-	orphanedDepsCheck := convertDoctorCheck(doctor.CheckOrphanedDependencies(path))
+	orphanedDepsCheck := convertDoctorCheck(doctor.CheckOrphanedDependencies(path, sharedStore))
 	result.Checks = append(result.Checks, orphanedDepsCheck)
 	// Don't fail overall check for orphaned deps, just warn
 
@@ -979,7 +988,7 @@ func runDiagnostics(path string) doctorResult {
 	// Don't fail overall check for severed clone-local FKs, just warn
 
 	// Check 22a: Child→parent dependencies (anti-pattern)
-	childParentDepsCheck := convertDoctorCheck(doctor.CheckChildParentDependencies(path))
+	childParentDepsCheck := convertDoctorCheck(doctor.CheckChildParentDependencies(path, sharedStore))
 	result.Checks = append(result.Checks, childParentDepsCheck)
 	// Don't fail overall check for child→parent deps, just warn
 
@@ -1302,6 +1311,7 @@ func printDiagnostics(result doctorResult, gate doctor.FixGate) {
 	hasIssues := false
 
 	for _, check := range result.Checks {
+		check = check.printed()
 		cat := check.Category
 		if cat == "" {
 			cat = "Other"
@@ -1549,7 +1559,9 @@ func runMigrationValidation(path string, phase string) error {
 		return nil
 	}
 
-	// Human-readable output
+	// Human-readable output, every check field and message spelled as the
+	// other check printers spell them (remedy.PrintedText).
+	check = check.printed()
 	fmt.Printf("\nbd doctor --migration=%s v%s\n\n", phase, Version)
 
 	// Print main status
@@ -1591,7 +1603,7 @@ func runMigrationValidation(path string, phase string) error {
 		fmt.Println()
 		fmt.Println(ui.RenderCategory("Warnings"))
 		for _, warn := range result.Warnings {
-			fmt.Printf("  %s  %s\n", ui.RenderWarnIcon(), warn)
+			fmt.Printf("  %s  %s\n", ui.RenderWarnIcon(), remedy.PrintedText(warn))
 		}
 	}
 
@@ -1600,7 +1612,7 @@ func runMigrationValidation(path string, phase string) error {
 		fmt.Println()
 		fmt.Println(ui.RenderCategory("Errors"))
 		for _, err := range result.Errors {
-			fmt.Printf("  %s  %s\n", ui.RenderFailIcon(), err)
+			fmt.Printf("  %s  %s\n", ui.RenderFailIcon(), remedy.PrintedText(err))
 		}
 	}
 

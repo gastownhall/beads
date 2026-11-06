@@ -578,6 +578,7 @@ func (c *Client) roundTripOnce(ctx context.Context, r Request, u *url.URL, stamp
 		attemptCtx, cancel = context.WithDeadline(ctx, deadline)
 		defer cancel()
 	}
+	started := time.Now()
 	attemptCtx, ht := startHeaderTimer(attemptCtx, headerTimeout)
 	defer ht.done()
 	req := stamped.Clone(attemptCtx)
@@ -612,6 +613,9 @@ func (c *Client) roundTripOnce(ctx context.Context, r Request, u *url.URL, stamp
 		if wroteAt, ok := ht.written(); ok && ctx.Err() == nil && isTimeout(err) {
 			hte := &ResponseHeaderTimeoutError{Op: r.Op, Method: r.Method, Host: u.Host, After: time.Since(wroteAt), Attempts: 1, Replayable: r.Replayable(), Err: err}
 			return nil, &ConnectError{Op: r.Op, ServerURL: c.base.Redacted(), Err: hte}
+		}
+		if de := dialFailure(r.Op, u.Host, err, time.Since(started)); de != nil && ctx.Err() == nil {
+			return nil, &ConnectError{Op: r.Op, ServerURL: c.base.Redacted(), Err: de}
 		}
 		return nil, &ConnectError{Op: r.Op, ServerURL: c.base.Redacted(), Err: err}
 	}

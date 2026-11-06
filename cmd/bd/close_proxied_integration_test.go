@@ -899,6 +899,44 @@ func TestProxiedServerClose2B(t *testing.T) {
 		}
 	})
 
+	// TestEmbeddedRemedyPrinting_closeContinue's proxied twin: the lines bd
+	// close prints above the bd mol squash hint name each ID escaped.
+	t.Run("continue_names_ids_escaped", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "rpc")
+		for _, root := range closeContinueRoots {
+			bdProxiedCreate(t, bd, p.dir, "Mol", "-t", "epic", "--labels", "template", "--id", root.id)
+			step := bdProxiedCreate(t, bd, p.dir, "Step", "--parent", root.id)
+			bdProxiedCreate(t, bd, p.dir, "Dependent", "--id", root.id+"-dep", "--deps", "depends-on:"+step.ID)
+			got := bdProxiedClose(t, bd, p.dir, step.ID, "--continue", "--suggest-next")
+			if want := closeContinueOutput(root.id, root.shown, root.quoted, true); got != want {
+				t.Errorf("bd close --continue --suggest-next of %q prints\n%q\nwant\n%q", root.id, got, want)
+			}
+			requireNoTerminalControl(t, "bd close --continue", got)
+		}
+	})
+
+	// The same molecules with each root assigned to alice: bob's close of the
+	// last step completes the molecule but its root refuses the auto-close,
+	// and the warning bd close prints above the hint cannot redraw it.
+	t.Run("continue_refused_auto_close_warns_escaped", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "rpc")
+		for _, root := range closeContinueRoots {
+			bdProxiedCreate(t, bd, p.dir, "Mol", "-t", "epic", "--labels", "template", "--id", root.id, "--assignee", "alice")
+			step := bdProxiedCreate(t, bd, p.dir, "Step", "--parent", root.id)
+			stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "close", step.ID, "--continue", "--actor", "bob")
+			if err != nil {
+				t.Fatalf("bd close %s --continue failed: %v\nstdout:\n%s\nstderr:\n%s", step.ID, err, stdout, stderr)
+			}
+			wantStdout, wantStderr := closeContinueRefusal(root.id, root.shown, root.quoted)
+			if stdout != wantStdout || stderr != wantStderr {
+				t.Errorf("bd close --continue of %q with a refused auto-close prints\n%q\non stdout and\n%q\non stderr, want\n%q\nand\n%q", root.id, stdout, stderr, wantStdout, wantStderr)
+			}
+			requireNoTerminalControl(t, "bd close --continue with a refused auto-close", stderr+stdout)
+		}
+	})
+
 	t.Run("auto_close_completed_molecule", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "accm")

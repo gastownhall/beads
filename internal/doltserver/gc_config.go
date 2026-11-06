@@ -1,11 +1,16 @@
 package doltserver
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
+
+	"github.com/steveyegge/beads/internal/doltversion"
 )
 
 // MinDoltVersionForArchiveLevelConfig is the earliest Dolt release known to
@@ -21,17 +26,27 @@ import (
 // start. See gastownhall/beads#4986.
 const MinDoltVersionForArchiveLevelConfig = "1.52.1"
 
-// archiveLevelSupportCache memoizes SupportsArchiveLevelConfig, keyed by
-// archiveLevelCacheKey (path + size + mtime, not path alone) for the
-// lifetime of the process. `dolt version` does not change between two
+// archiveLevelSupportCache memoizes the `dolt version` output that
+// SupportsArchiveLevelConfig and RequireDoltBinaryVersion both judge,
+// keyed by archiveLevelCacheKey (path + size + mtime, not path alone) for
+// the lifetime of the process. `dolt version` does not change between two
 // probes of the SAME on-disk binary, and Start()/the UOW provider can be
 // invoked repeatedly against the same resolved binary (retries, multiple
 // projects sharing one dolt, tests), so this avoids forking a
-// `dolt version` subprocess on every call. Keying by file identity (not
-// just the path string) lets an in-place dolt upgrade/downgrade at that
-// same path invalidate the cache naturally on its next probe, rather than
-// keeping a stale verdict for the rest of the process's lifetime.
-var archiveLevelSupportCache sync.Map // map[archiveLevelCacheKey]bool
+// `dolt version` subprocess on every call — including a second fork for the
+// version floor right after the archive-level probe. Keying by file
+// identity (not just the path string) lets an in-place dolt
+// upgrade/downgrade at that same path invalidate the cache naturally on its
+// next probe, rather than keeping a stale verdict for the rest of the
+// process's lifetime.
+var archiveLevelSupportCache sync.Map // map[archiveLevelCacheKey]doltVersionOutput
+
+// doltVersionOutput is one memoized `dolt version` run: its stdout, and
+// whether it ran successfully.
+type doltVersionOutput struct {
+	out string
+	ok  bool
+}
 
 // archiveLevelCacheKey identifies a specific on-disk binary, not just a
 // path: two different binaries can share a path over time (a package
@@ -57,20 +72,70 @@ type archiveLevelCacheKey struct {
 // force-clear the cache in a test that cannot otherwise change a stub's
 // file identity between subtests.
 func SupportsArchiveLevelConfig(doltBin string) bool {
+	out, ok := probeDoltVersionOutput(doltBin)
+	return ok && doltVersionAtLeast(out, MinDoltVersionForArchiveLevelConfig)
+}
+
+// RequireDoltBinaryVersion refuses doltBin when its `dolt version` reports a
+// version below doltversion.RequiredMin, so Start does not launch a
+// sql-server bd would then refuse to use. The error names the binary, its
+// version, the minimum and how to upgrade.
+//
+// A version it cannot determine (`dolt version` fails or prints something
+// that is not a version) is not refused, matching doltversion's policy: the
+// floor acts on a dolt shown to be too old. Start launches such a binary as
+// before, and the server-mode open checks the running server's
+// dolt_version() itself.
+func RequireDoltBinaryVersion(doltBin string) error {
+	out, ok := probeDoltVersionOutput(doltBin)
+	if !ok {
+		return nil
+	}
+	v, err := doltversion.ParseVersion(out)
+	if err != nil {
+		return nil
+	}
+	return doltversion.CheckRequired(v, fmt.Sprintf("dolt binary %q", doltBin), false)
+}
+
+// doltVersionProbeTimeout bounds probeDoltVersionOutput's `dolt version`,
+// as doltversion.Probe bounds its own: the probe gates Start and every CLI
+// clone and transfer, so a wedged binary or wrapper script must fail it
+// (and so go unrefused, the command itself then reporting the binary)
+// rather than hang the command past BEADS_CLI_TRANSFER_TIMEOUT, which only
+// starts after it. doltVersionProbeWaitDelay is the cleanup slop after the
+// kill. The timeout is a variable only so a test can shorten it.
+var doltVersionProbeTimeout = 10 * time.Second
+
+const doltVersionProbeWaitDelay = 2 * time.Second
+
+// probeDoltVersionOutput runs `doltBin version`, memoized per
+// archiveLevelCacheKey (see archiveLevelSupportCache), within
+// doltVersionProbeTimeout. If os.Stat(doltBin) fails the probe runs
+// uncached: there is no stable identity to key on. A timed-out probe is
+// cached as failed, like any other failed probe.
+func probeDoltVersionOutput(doltBin string) (string, bool) {
 	key, hasKey := archiveLevelCacheKeyFor(doltBin)
 	if hasKey {
-		if cached, ok := archiveLevelSupportCache.Load(key); ok {
-			return cached.(bool)
+		if cached, found := archiveLevelSupportCache.Load(key); found {
+			c := cached.(doltVersionOutput)
+			return c.out, c.ok
 		}
 	}
 
-	out, err := exec.Command(doltBin, "version").Output() //nolint:gosec // G204: doltBin is caller-resolved (PATH lookup or config), not user-request input
-	supported := err == nil && doltVersionAtLeast(string(out), MinDoltVersionForArchiveLevelConfig)
+	ctx, cancel := context.WithTimeout(context.Background(), doltVersionProbeTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, doltBin, "version") //nolint:gosec // G204: doltBin is caller-resolved (PATH lookup or config), not user-request input
+	// WaitDelay keeps a grandchild holding the stdout pipe from blocking
+	// Output past the timeout after the kill.
+	cmd.WaitDelay = doltVersionProbeWaitDelay
+	out, err := cmd.Output()
+	res := doltVersionOutput{out: string(out), ok: err == nil}
 
 	if hasKey {
-		archiveLevelSupportCache.Store(key, supported)
+		archiveLevelSupportCache.Store(key, res)
 	}
-	return supported
+	return res.out, res.ok
 }
 
 // archiveLevelCacheKeyFor stats doltBin and returns its cache key. The

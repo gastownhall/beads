@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "client.go",
         "credential.go",
+        "dial_error.go",
         "doc.go",
         "handshake.go",
         "paths.go",
@@ -30,6 +31,7 @@ go_test(
         "client_test.go",
         "credential_source_test.go",
         "credential_test.go",
+        "dial_error_test.go",
         "handshake_test.go",
         "handshake_wire_revision_test.go",
         "helpers_test.go",

@@ -814,6 +814,8 @@ func e2eServeConfig(t *testing.T, s storage.DoltStorage, projectID, database str
 	fail("LeaseReclaimer")
 	cfg.Heartbeater, err = s.Heartbeater()
 	fail("Heartbeater")
+	cfg.BlockedLister, err = s.BlockedLister()
+	fail("BlockedLister")
 	cfg.Relations, err = s.IssueRelations()
 	fail("IssueRelations")
 	cfg.Commenter, err = s.Commenter()

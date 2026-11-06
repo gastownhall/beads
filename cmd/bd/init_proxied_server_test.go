@@ -150,6 +150,59 @@ func TestProxiedInitRemoteURLUsesSelectedProject(t *testing.T) {
 	}
 }
 
+func TestRunInitProxiedServerRejectsOptionSyncRemoteBeforeWrites(t *testing.T) {
+	for _, remote := range []string{
+		"--upload-pack=touch /tmp/pwned;false #.git",
+		"git+--upload-pack=touch /tmp/pwned;false",
+		"-utouch /tmp/pwned;false",
+		"ssh://-oProxyCommand=touch%20%2Ftmp%2Fpwned@host/path",
+	} {
+		t.Run(remote, func(t *testing.T) {
+			beadsDir := newForgeSyncRemoteWorkspace(t, remote)
+			cwd, err := os.Getwd()
+			require.NoError(t, err)
+
+			err = runInitProxiedServer(&cobra.Command{}, t.Context(), initProxiedServerInput{
+				externalConfig: &configfile.ExternalDoltConfig{Host: "127.0.0.1", Port: 3306},
+			})
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "sync.remote")
+
+			_, err = os.Stat(filepath.Join(cwd, ".git"))
+			require.ErrorIs(t, err, os.ErrNotExist, "rejected sync.remote must not initialize a git repository")
+			_, err = os.Stat(filepath.Join(beadsDir, "metadata.json"))
+			require.ErrorIs(t, err, os.ErrNotExist, "rejected sync.remote must not write .beads metadata")
+		})
+	}
+}
+
+func TestInitCommandRejectsOptionSyncRemoteBeforeWrites(t *testing.T) {
+	for _, remote := range []string{
+		"--upload-pack=touch /tmp/pwned;false #.git",
+		"git+--upload-pack=touch /tmp/pwned;false",
+		"-utouch /tmp/pwned;false",
+		// git refuses to probe this URL, so bd init would treat it as holding
+		// Dolt history and clone it through Dolt's ssh:// transport, which
+		// hands -oProxyCommand=<command>@host to ssh as an option.
+		"ssh://-oProxyCommand=touch%20%2Ftmp%2Fpwned@host/path",
+		"ssh://-oProxyCommand=touch$IFS.pwned/path",
+	} {
+		t.Run(remote, func(t *testing.T) {
+			beadsDir := newForgeSyncRemoteWorkspace(t, remote)
+			t.Setenv("BD_NON_INTERACTIVE", "1")
+			setInitFlag(t, "quiet", "true")
+
+			err := initCmd.RunE(initCmd, nil)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "sync.remote")
+			require.Contains(t, err.Error(), "must not start with '-'")
+
+			_, statErr := os.Stat(filepath.Join(beadsDir, "metadata.json"))
+			require.ErrorIs(t, statErr, os.ErrNotExist, "rejected sync.remote must not write .beads metadata")
+		})
+	}
+}
+
 func TestBuildProxiedServerClientInfo(t *testing.T) {
 	t.Run("all empty returns nil", func(t *testing.T) {
 		info, err := buildProxiedServerClientInfo("", "", "", 0, 0, nil)
@@ -351,6 +404,107 @@ func TestComposeProxiedServerMetadataJSON_TeamServer(t *testing.T) {
 		require.NoError(t, json.Unmarshal(body, &cfg))
 		assert.False(t, cfg.IsTeamServerManaged())
 	})
+}
+
+// metadata.json is tracked, and `bd init --proxied-server` is the remedy every
+// refused open names, so init writes the file back from the one it found and
+// changes only the fields it owns. Composing it from defaults reverted the
+// team's file and moved the store off the root that dolt_data_dir or an
+// absolute database chose.
+func TestComposeProxiedServerMetadataJSON_KeepsExistingMetadata(t *testing.T) {
+	compose := func(t *testing.T, in proxiedMetadataInputs) configfile.Config {
+		t.Helper()
+		body, err := composeProxiedServerMetadataJSON(in)
+		require.NoError(t, err)
+		var got configfile.Config
+		require.NoError(t, json.Unmarshal(body, &got))
+		return got
+	}
+
+	t.Run("a re-init writes back the file it found", func(t *testing.T) {
+		existing := &configfile.Config{
+			Database:               "dolt",
+			Backend:                configfile.BackendDolt,
+			DoltMode:               configfile.DoltModeProxiedServer,
+			DoltDatabase:           "team_db",
+			DoltDataDir:            "data",
+			ProjectID:              "proj-team",
+			DeletionsRetentionDays: 7,
+			StaleClosedIssuesDays:  30,
+		}
+		before := *existing
+		got := compose(t, proxiedMetadataInputs{existing: existing, dbName: "team_db", projectID: "proj-team"})
+		assert.Equal(t, before, got)
+		assert.Equal(t, before, *existing, "compose must not modify the config it was handed")
+	})
+
+	t.Run("roots chosen by the file stay chosen", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_DATA_DIR", "") // DatabasePath would answer with it on both sides
+		for _, existing := range []configfile.Config{
+			{Database: "dolt", DoltDataDir: "data"},
+			{Database: "dolt", DoltDataDir: "/mnt/fast/beads"},
+			{Database: "/srv/beads/legacy-root"},
+		} {
+			got := compose(t, proxiedMetadataInputs{existing: &existing, dbName: "team_db", projectID: "proj-team"})
+			assert.Equal(t, existing.DatabasePath("/repo/.beads"), got.DatabasePath("/repo/.beads"),
+				"init must create the store where %+v points", existing)
+		}
+	})
+
+	t.Run("the fields init owns are set", func(t *testing.T) {
+		existing := &configfile.Config{
+			Database:               "beads.db",
+			DoltMode:               configfile.DoltModeEmbedded,
+			DoltDatabase:           "old_db",
+			ProjectID:              "proj-old",
+			DeletionsRetentionDays: 7,
+		}
+		got := compose(t, proxiedMetadataInputs{existing: existing, dbName: "new_db", projectID: "proj-new", teamServer: true})
+		assert.Equal(t, configfile.BackendDolt, got.Backend)
+		assert.Equal(t, "dolt", got.Database, "the legacy beads.db name is replaced, as the direct route replaces it")
+		assert.Equal(t, configfile.DoltModeProxiedServer, got.DoltMode)
+		assert.Equal(t, "new_db", got.DoltDatabase)
+		assert.Equal(t, "proj-new", got.ProjectID)
+		assert.True(t, got.DoltTeamServer)
+		assert.Equal(t, 7, got.DeletionsRetentionDays)
+	})
+
+	t.Run("a new workspace starts from the defaults", func(t *testing.T) {
+		got := compose(t, proxiedMetadataInputs{dbName: "new_db", projectID: "proj-new"})
+		assert.Equal(t, configfile.Config{
+			Database:     "dolt",
+			Backend:      configfile.BackendDolt,
+			DoltMode:     configfile.DoltModeProxiedServer,
+			DoltDatabase: "new_db",
+			ProjectID:    "proj-new",
+		}, got)
+	})
+}
+
+// config.yaml is tracked team configuration: init writes the template only
+// where there is none, as createConfigYaml does on the direct route.
+func TestProxiedInitConfigYAMLBody(t *testing.T) {
+	beadsDir := t.TempDir()
+	assert.Equal(t, renderInitConfigYAML("", false), proxiedInitConfigYAMLBody(beadsDir))
+
+	require.NoError(t, os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("output:\n  title-length: 40\n"), 0o644))
+	assert.Nil(t, proxiedInitConfigYAMLBody(beadsDir), "an existing config.yaml must not be overwritten")
+}
+
+// A workspace whose metadata.json is team-server managed keeps that posture
+// through an init that does not repeat --team-server: its database belongs to
+// beads-team-server, which bd must neither migrate nor write rows into.
+func TestProxiedInitTeamServer(t *testing.T) {
+	teamServer := &configfile.Config{Backend: configfile.BackendDolt, DoltMode: configfile.DoltModeProxiedServer, DoltTeamServer: true}
+	bdManaged := &configfile.Config{Backend: configfile.BackendDolt, DoltMode: configfile.DoltModeProxiedServer}
+	inert := &configfile.Config{Backend: configfile.BackendDolt, DoltMode: configfile.DoltModeServer, DoltTeamServer: true}
+
+	assert.True(t, proxiedInitTeamServer(false, teamServer), "the tracked marker keeps team-server management")
+	assert.True(t, proxiedInitTeamServer(true, nil), "the flag makes a new workspace team-server managed")
+	assert.True(t, proxiedInitTeamServer(true, bdManaged))
+	assert.False(t, proxiedInitTeamServer(false, nil))
+	assert.False(t, proxiedInitTeamServer(false, bdManaged))
+	assert.False(t, proxiedInitTeamServer(false, inert), "the marker means nothing outside proxied-server mode")
 }
 
 func TestIsTeamServerManaged_RequiresProxiedServerMode(t *testing.T) {

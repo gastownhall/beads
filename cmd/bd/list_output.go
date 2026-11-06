@@ -2,9 +2,11 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strings"
 	"text/template"
 
@@ -38,7 +40,27 @@ func composeTruncationHint(render func(string) string, text string) string {
 	return "\n" + rendered + "\n"
 }
 
+// outputDotFormat renders the listed issues, and the dependency edges between
+// them, as a Graphviz digraph.
+//
+// The bytes depend on the graph alone: nodes are declared in byte order of id,
+// and each node's edges in byte order of target id, then type (the order
+// issueops.EdgeReader pins). The page arrives in display order, by default
+// priority, then created_at DESC at one-second precision, then id, so two
+// equal-priority issues swapped places depending on whether they were created
+// in the same second; and the proxied route's edge query orders by source
+// only. Declaration order means nothing in the graph but steers Graphviz's
+// layout and shows in every diff, so it is pinned here, as bd graph --dot pins
+// its layers. --sort and --limit still choose which issues are listed.
+//
+// Byte order, not the utils.NaturalCompareIDs order --sort id uses: that
+// comparator is not a total order (x-9 < x-10 < x-1a < x-9; bd-01 ties bd-1),
+// so a sort under it could still depend on the order the page arrived in.
+// Both sorts work on copies; the caller's slices keep their order.
 func outputDotFormat(out io.Writer, issues []*types.Issue, depsByIssueID map[string][]*types.Dependency) error {
+	issues = slices.Clone(issues)
+	slices.SortFunc(issues, func(a, b *types.Issue) int { return cmp.Compare(a.ID, b.ID) })
+
 	w := &graphExportWriter{out: out}
 	w.println("digraph dependencies {")
 	w.println("  rankdir=TB;")
@@ -82,7 +104,11 @@ func outputDotFormat(out io.Writer, issues []*types.Issue, depsByIssueID map[str
 
 	// Output edges with labels for dependency type
 	for _, issue := range issues {
-		for _, dep := range depsByIssueID[issue.ID] {
+		deps := slices.Clone(depsByIssueID[issue.ID])
+		slices.SortFunc(deps, func(a, b *types.Dependency) int {
+			return cmp.Or(cmp.Compare(a.DependsOnID, b.DependsOnID), cmp.Compare(a.Type, b.Type))
+		})
+		for _, dep := range deps {
 			// Only output edges where both nodes are in the filtered list
 			if issueMap[dep.DependsOnID] != nil {
 				// Color code by dependency type

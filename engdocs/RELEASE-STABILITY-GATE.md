@@ -49,7 +49,7 @@ requires:
 - [ ] Upgrade smoke tests pass (`make test-upgrade`)
 - [ ] Breaking changes documented in CHANGELOG.md with migration steps
 - [ ] If config/schema migration is involved: recovery steps documented
-- [ ] Regression tests pass (`make test-regression`)
+- [ ] Regression tests pass (`bazel test //tests/regression:regression_test --config=doltserver-cmd`)
 
 ## Sign-off
 

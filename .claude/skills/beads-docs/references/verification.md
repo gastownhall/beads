@@ -8,7 +8,7 @@ Run these before considering docs work complete. Ordered cheapest-first.
 # 1. Docs sync: docs.json nav <-> file consistency, link conventions
 #    (root-relative extensionless in docs/, exact paths in engdocs/ and
 #    curated root files), orphan detection (only CLI_REFERENCE.md is exempt).
-go test ./test/docsync
+bazel test //test/docsync:docsync_test --config=ci
 
 # 2. Generated CLI docs freshness: regenerates from the live command tree
 #    and diffs docs/CLI_REFERENCE.md, docs/cli-reference/, and the CLI

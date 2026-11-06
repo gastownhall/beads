@@ -10,7 +10,10 @@ go_library(
 
 go_test(
     name = "workspacegate_test",
-    srcs = ["gate_test.go"],
+    srcs = [
+        "gate_test.go",
+        "readonly_wait_test.go",
+    ],
     embed = [":workspacegate"],
     deps = ["//internal/testutil/bazeltest"],
 )

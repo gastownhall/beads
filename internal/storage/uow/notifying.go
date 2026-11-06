@@ -316,6 +316,12 @@ func (p *notifyingProvider) Heartbeater() (publicops.Heartbeater, error) {
 	return NewHeartbeater(p)
 }
 
+// BlockedLister builds the blocked listing over THIS provider. It is a read:
+// nothing is recorded and no hook fires.
+func (p *notifyingProvider) BlockedLister() (publicops.BlockedLister, error) {
+	return NewBlockedLister(p)
+}
+
 func (p *notifyingProvider) Memories() (memoryops.Memories, error) { return NewMemories(p) }
 
 // EventsJournalCursor builds on THIS provider, like every role above it, so a
@@ -361,6 +367,18 @@ func (p *notifyingProvider) SetEventsJournalEnabled(enabled bool) {
 	if configurer, ok := p.inner.(storage.EventsJournalConfigurer); ok {
 		configurer.SetEventsJournalEnabled(enabled)
 	}
+}
+
+// EventsJournalActivationError forwards the inner provider's shape-probe
+// result (storage.EventsJournalShapeChecker, PR A1), for the same reason
+// SetEventsJournalEnabled forwards activation itself: the wrapper holds no
+// journal state of its own, and eventsjournal.Apply must see the inner
+// provider's real probe result through whichever wrapper sits on top of it.
+func (p *notifyingProvider) EventsJournalActivationError() error {
+	if checker, ok := p.inner.(storage.EventsJournalShapeChecker); ok {
+		return checker.EventsJournalActivationError()
+	}
+	return nil
 }
 
 // SetVersionedHistoryEnabled forwards dual-write issue-version history
@@ -433,6 +451,7 @@ var (
 	_ MemoriesSource            = (*notifyingProvider)(nil)
 	_ LeaseReclaimerSource      = (*notifyingProvider)(nil)
 	_ HeartbeaterSource         = (*notifyingProvider)(nil)
+	_ BlockedListerSource       = (*notifyingProvider)(nil)
 	_ EventsJournalCursorSource = (*notifyingProvider)(nil)
 )
 

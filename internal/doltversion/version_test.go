@@ -57,6 +57,24 @@ func TestParseVersion(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			// RequiredMin is a hard floor: a line that merely ends in an
+			// integer must not read as a huge version that passes it.
+			name:    "single bare integer is not a version",
+			input:   "dolt build 2023\n",
+			wantErr: true,
+		},
+		{
+			// A server or binary supplies the suffix, and refusals print it.
+			name:    "control character in prerelease is not a version",
+			input:   "dolt version 2.5.1-\x1b[2Jdev\n",
+			wantErr: true,
+		},
+		{
+			name:    "bare server answer",
+			input:   "2.6.0",
+			wantSeg: []int{2, 6, 0},
+		},
+		{
 			name:    "trailing dash with nothing after",
 			input:   "dolt version 1.2.3-\n",
 			wantSeg: []int{1, 2, 3},

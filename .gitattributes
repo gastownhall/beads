@@ -6,3 +6,20 @@
 
 # Tracked binary assets must never pass through text conversion or text diffs.
 *.jpg binary
+
+# CHANGELOG.md takes an entry from almost every PR at the same spot, so two
+# queued PRs conflict as soon as one lands. The changelog merge driver
+# (scripts/changelog-merge-driver.sh) resolves a merge, rebase, cherry-pick or
+# revert of the file only when every conflict is two insertions at the same
+# place and keeping both leaves every line under the headings it had; a
+# conflict that rewords or removes a line, or would move an entry into another
+# section, merges as text, with the usual markers. Git runs the driver only
+# where a clone configures it:
+#   git config merge.changelog.driver 'sh scripts/changelog-merge-driver.sh %O %A %B %L'
+# That command runs the copy in the work tree, so a rebase of a branch that
+# changes the script runs the branch's version of it: to rebase branches you do
+# not trust, point the driver at a copy outside the work tree. Everywhere else
+# CHANGELOG.md merges as text, including GitHub's mergeability check, Update
+# branch and merge queue. git merge reads this rule from the checked-out
+# branch, so a branch cut before it merges as text until it has it.
+CHANGELOG.md merge=changelog

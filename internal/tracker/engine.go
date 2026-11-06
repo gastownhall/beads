@@ -23,6 +23,16 @@ import (
 // syncTracer is the OTel tracer for tracker sync spans.
 var syncTracer = otel.Tracer("github.com/steveyegge/beads/tracker")
 
+// pullFetchOverlap widens an incremental pull's fetch window to start before
+// the stored last_sync. That cursor is the end-of-sync wall time, but tracker
+// list endpoints lag behind writes, clocks drift, and a remote write can land
+// during a sync's post-fetch phases, so an issue updated just before the
+// cursor would otherwise never be fetched again (#6806). Only the fetch moves:
+// the conflict guard, DetectConflicts and pre-linked hydration keep the exact
+// stored cursor, and a row a fetch from that cursor returns keeps the
+// treatment it had before (pullOverlapOnly).
+const pullFetchOverlap = 5 * time.Minute
+
 // rateLimitExhaustedError is implemented by tracker errors (e.g.
 // linear.ErrRateLimitExhausted) that signal the API quota floor has been
 // hit and the sync loop should abort immediately rather than cascade the
@@ -75,16 +85,32 @@ type PushHooks struct {
 	// Returns true if content is identical (skip update). If nil, uses timestamp comparison.
 	ContentEqual func(local *types.Issue, remote *TrackerIssue) bool
 
+	// PushFieldsEqual reports whether remote already holds every field a push
+	// of local sends, comparing content only and never timestamps (unlike
+	// ContentEqual, which may keep a timestamp skip). A pull uses it to tell a
+	// re-fetched echo of an earlier push from a remote edit among the rows
+	// only its overlap window returned (#6806). A remote edit of a field the
+	// push does not send (the assignee, which GitHub, GitLab and Linear do
+	// not push) counts as an echo there. If nil, no overlap row counts as an
+	// echo.
+	PushFieldsEqual func(local *types.Issue, remote *TrackerIssue) bool
+
 	// ContentHash, if set, returns a stable fingerprint of the issue's pushable
 	// fields. When present, the engine binds the hash to the issue's external_ref
 	// and TargetScope (when provided), and persists that fingerprint in local_metadata
-	// after each successful create/update (and whenever ContentEqual reports a
-	// match). It consults the fingerprint BEFORE fetching the remote issue: if the
+	// after each fully successful create (one with no Warnings) or update (and
+	// whenever ContentEqual reports a match). It consults the fingerprint BEFORE fetching the remote issue: if the
 	// stored content and target still match, the remote fetch and update are
 	// skipped entirely. This avoids the per-issue GET that ContentEqual alone
 	// still incurs, so a no-op `--push-only` run does not drain the API rate limit
 	// (gastownhall/beads#4214). Returning "" disables the short-circuit for that
 	// issue (the engine falls back to the fetch + ContentEqual path).
+	//
+	// A pull that writes an issue, or finds it equal to the remote, refreshes
+	// its fingerprint to the pulled content, which is what the remote then
+	// holds. A pull by an engine without ContentHash (or one that returns "" for
+	// the pulled content) clears a stored fingerprint instead, so a later push
+	// never trusts the last push.
 	ContentHash func(local *types.Issue) string
 
 	// TargetScope returns the canonical remote namespace in which external issue
@@ -341,7 +367,8 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 	key := e.Tracker.ConfigPrefix() + ".last_sync"
 	if lastSyncStr, err := e.Store.GetLocalMetadata(ctx, key); err == nil && lastSyncStr != "" {
 		if t, err := parseSyncTime(lastSyncStr); err == nil {
-			fetchOpts.Since = &t
+			fetchSince := t.Add(-pullFetchOverlap)
+			fetchOpts.Since = &fetchSince
 			lastSync = &t
 			stats.Incremental = true
 			stats.SyncedSince = lastSyncStr
@@ -352,7 +379,6 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 	if err != nil {
 		return nil, fmt.Errorf("searching local issues: %w", err)
 	}
-	localByExternalIdentifier := make(map[string]*types.Issue, len(localIssues))
 	localByID := make(map[string]*types.Issue, len(localIssues))
 	for _, localIssue := range localIssues {
 		if localIssue == nil {
@@ -361,36 +387,22 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 		if localID := strings.TrimSpace(localIssue.ID); localID != "" {
 			localByID[localID] = localIssue
 		}
-		if localIssue == nil || localIssue.ExternalRef == nil {
-			continue
-		}
-		localRef := strings.TrimSpace(*localIssue.ExternalRef)
-		if localRef == "" || !e.Tracker.IsExternalRef(localRef) {
-			continue
-		}
-		identifier := e.Tracker.ExtractIdentifier(localRef)
-		if identifier == "" {
-			continue
-		}
-		localByExternalIdentifier[identifier] = localIssue
 	}
 
 	prelinkedHydrateIDs := make(map[string]bool)
 
-	// Fetch issues from external tracker
+	// Fetch issues from external tracker. The first bulkRows rows come from
+	// the bulk FetchIssues call; only those can be overlap-only.
 	var extIssues []TrackerIssue
+	bulkRows := 0
 	if len(opts.IssueIDs) > 0 {
 		// Selective pull: fetch only requested issues via FetchIssue()
 		prefix, _ := e.Store.GetConfig(ctx, "issue_prefix")
 		for _, id := range opts.IssueIDs {
 			var identifier string
 			if isBeadID(id, prefix) {
-				// Look up the local issue to find its external ref
-				if local, ok := localByID[id]; ok && local.ExternalRef != nil {
-					identifier = e.Tracker.ExtractIdentifier(*local.ExternalRef)
-				}
-				if identifier == "" {
-					e.warn("No external ref found for local issue %s, skipping pull", id)
+				var ok bool
+				if identifier, ok = e.selectivePullIdentifier(id, localByID[id]); !ok {
 					stats.Skipped++
 					continue
 				}
@@ -418,6 +430,7 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 			return nil, fmt.Errorf("fetching issues: %w", err)
 		}
 		stats.Candidates = len(extIssues)
+		bulkRows = len(extIssues)
 		if provider, ok := e.Tracker.(PullStatsProvider); ok {
 			stats.Queried, stats.Candidates = provider.LastPullStats()
 		}
@@ -432,11 +445,12 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 		}
 	}
 
+	fallback := e.newPullFallbackIndex(localIssues, extIssues)
 	mapper := e.Tracker.FieldMapper()
 	var pendingDeps []DependencyInfo
 	var dryRunIssues []*types.Issue
 
-	for _, extIssue := range extIssues {
+	for i, extIssue := range extIssues {
 		// ShouldImport hook: filter before conversion
 		if e.PullHooks != nil && e.PullHooks.ShouldImport != nil {
 			if !e.PullHooks.ShouldImport(&extIssue) {
@@ -450,10 +464,7 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 		ref := e.Tracker.BuildExternalRef(&extIssue)
 		existing, _ := e.Store.GetIssueByExternalRef(ctx, ref)
 		if existing == nil && ref != "" {
-			identifier := e.Tracker.ExtractIdentifier(ref)
-			if identifier != "" {
-				existing = localByExternalIdentifier[identifier]
-			}
+			existing = fallback.match(&extIssue, ref)
 		}
 		conv := mapper.IssueToBeads(&extIssue)
 		if conv == nil || conv.Issue == nil {
@@ -490,6 +501,14 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 				stats.Skipped++
 				continue
 			}
+			// A row only the overlap window returned must not rewrite a
+			// linked issue the old exact-cursor fetch would have left alone:
+			// skip it when it is an echo of our own push, or older than the
+			// local issue (an edit a later sync never pushed).
+			if i < bulkRows && !allowOverwriteIDs[existing.ID] && !prelinkedHydrateIDs[existing.ID] && e.skipOverlapRow(existing, &extIssue, lastSync) {
+				stats.Skipped++
+				continue
+			}
 		}
 
 		if e.PullHooks != nil && e.PullHooks.AfterConvert != nil {
@@ -506,10 +525,20 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 			if strings.TrimSpace(ref) != "" {
 				dryRunIssue.ExternalRef = strPtr(ref)
 			}
+			// The pull writes a matched issue to the local issue it matched,
+			// so a preview endpoint naming the new ref resolves to that one.
+			if existing != nil {
+				dryRunIssue.ID = existing.ID
+			}
 			dryRunIssues = append(dryRunIssues, &dryRunIssue)
 		}
 
 		if existing != nil && pullIssueEqual(existing, conv.Issue, ref) {
+			if !opts.DryRun {
+				// Both sides can reach this content without a push, which
+				// leaves the hash of the last push stale.
+				e.refreshPushHashAfterPull(ctx, existing, conv.Issue, ref)
+			}
 			stats.Skipped++
 			continue
 		}
@@ -529,6 +558,8 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 			updates := buildPullIssueUpdates(existing, conv.Issue, ref)
 			if raw, ok := marshalTrackerMetadata(extIssue.Metadata); ok {
 				updates["metadata"] = raw
+				// The push hash below fingerprints the row this update writes.
+				conv.Issue.Metadata = raw
 			}
 
 			markPullIssueFields(updates)
@@ -550,6 +581,7 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 			if pulledIDs != nil {
 				pulledIDs[existing.ID] = true
 			}
+			e.refreshPushHashAfterPull(ctx, existing, conv.Issue, ref)
 		} else {
 			// Create new issue
 			conv.Issue.ExternalRef = strPtr(ref)
@@ -563,6 +595,10 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 			stats.Created++
 			if pulledIDs != nil {
 				pulledIDs[conv.Issue.ID] = true
+			}
+			// A new row has no stale entry to clear, so only record.
+			if conv.Issue.ID != "" {
+				e.recordPushHash(ctx, conv.Issue, ref)
 			}
 		}
 	}
@@ -582,6 +618,73 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 		attribute.Int("sync.skipped", stats.Skipped),
 	)
 	return stats, nil
+}
+
+// selectivePullIdentifier returns the tracker identifier that local's external
+// ref addresses, for a pull that selects the bead by ID. When there is none it
+// warns why and reports false: the bead has no ref, or the tracker cannot
+// address the one it has (gastownhall/beads#7781: another repository's issue).
+func (e *Engine) selectivePullIdentifier(id string, local *types.Issue) (string, bool) {
+	extRef := ""
+	if local != nil {
+		extRef = derefStr(local.ExternalRef)
+	}
+	if strings.TrimSpace(extRef) == "" {
+		e.warn("No external ref found for local issue %s, skipping pull", id)
+		return "", false
+	}
+	identifier := e.Tracker.ExtractIdentifier(extRef)
+	if identifier == "" {
+		e.warn("External ref %q of local issue %s is not an issue %s can address with its current configuration (another repository?), skipping pull",
+			extRef, id, e.Tracker.DisplayName())
+		return "", false
+	}
+	return identifier, true
+}
+
+// pullOverlapOnly reports whether a bulk incremental fetch row is one only
+// the pullFetchOverlap window returned: it was updated before the earliest
+// time a fetch from the stored last_sync returns (fetchFloor). A tracker that
+// matches Since coarsely returned the rest of the cursor's minute or day
+// before the window was widened, and those rows keep that treatment.
+func (e *Engine) pullOverlapOnly(issue *TrackerIssue, lastSync *time.Time) bool {
+	return lastSync != nil && !issue.UpdatedAt.IsZero() && issue.UpdatedAt.Before(e.fetchFloor(*lastSync))
+}
+
+// fetchFloor returns the earliest update time FetchIssues returns for since:
+// since itself, or since truncated to the tracker's SinceGranularity.
+func (e *Engine) fetchFloor(since time.Time) time.Time {
+	if coarse, ok := e.Tracker.(SinceGranularityProvider); ok {
+		if granularity := coarse.SinceGranularity(); granularity > 0 {
+			return since.UTC().Truncate(granularity)
+		}
+	}
+	return since
+}
+
+// skipOverlapRow reports whether extIssue is a row only the overlap window
+// returned that must leave existing untouched: existing is linked to this
+// tracker and the row predates the window itself, holds what a push of
+// existing sends (PushHooks.PushFieldsEqual), or is older than existing. A
+// tracker that matches Since coarsely returns rows before the window when the
+// widened Since falls in the previous minute or day: Azure DevOps returns the
+// whole previous UTC day for a last_sync in a day's first five minutes.
+// ContentEqual never decides it: a push-side hook may skip by timestamp
+// (GitLab's does), which would drop every remote edit in the window.
+func (e *Engine) skipOverlapRow(existing *types.Issue, extIssue *TrackerIssue, lastSync *time.Time) bool {
+	if !e.pullOverlapOnly(extIssue, lastSync) {
+		return false
+	}
+	if _, linked := e.trackerRef(existing); !linked {
+		return false
+	}
+	if extIssue.UpdatedAt.Before(lastSync.Add(-pullFetchOverlap)) {
+		return true
+	}
+	if e.PushHooks != nil && e.PushHooks.PushFieldsEqual != nil && e.PushHooks.PushFieldsEqual(existing, extIssue) {
+		return true
+	}
+	return extIssue.UpdatedAt.Before(existing.UpdatedAt)
 }
 
 func applyPullIssueFields(ctx context.Context, tx storage.IssueLifecycleTransaction, id string, updates map[string]interface{}, actor string) error {
@@ -676,21 +779,167 @@ func appendFilteredDependencies(dst []DependencyInfo, deps []DependencyInfo, all
 	return dst
 }
 
+// matchKey returns the key under which a pull matches ref to a local issue
+// when the exact external_ref lookup misses. Trackers whose identifiers are
+// not unique across a pull's namespace supply it via MatchKeyer; the rest
+// match by ExtractIdentifier.
+func (e *Engine) matchKey(ref string) string {
+	if mk, ok := e.Tracker.(MatchKeyer); ok {
+		return mk.MatchKey(ref)
+	}
+	return e.Tracker.ExtractIdentifier(ref)
+}
+
+// pullFallbackIndex holds the local issues a pull falls back to when the exact
+// external_ref lookup misses: by identity key (IdentityKeyer) and, for local
+// issues that have none, by match key.
+type pullFallbackIndex struct {
+	identities IdentityKeyer // nil when the tracker records no identity
+	matchKey   func(ref string) string
+	byIdentity map[string]*types.Issue
+	byMatchKey map[string]*types.Issue
+	// exactRef maps the ID of each local issue whose external_ref is the ref
+	// of an issue in this pull to that ref. The exact lookup gives the local
+	// issue to that remote issue, so no other remote issue falls back to it,
+	// whichever of the two the pull processes first: a pull never writes two
+	// remote issues to one local issue.
+	exactRef map[string]string
+}
+
+// newPullFallbackIndex indexes localIssues for a pull of extIssues. It runs
+// after the fetch, since LocalIdentityKey may use what the fetch showed.
+func (e *Engine) newPullFallbackIndex(localIssues []*types.Issue, extIssues []TrackerIssue) pullFallbackIndex {
+	identities, _ := e.Tracker.(IdentityKeyer)
+	idx := pullFallbackIndex{
+		identities: identities,
+		matchKey:   e.matchKey,
+		byIdentity: e.identityIndex(localIssues),
+		byMatchKey: make(map[string]*types.Issue, len(localIssues)),
+		exactRef:   e.exactPullRefs(localIssues, extIssues),
+	}
+	for _, localIssue := range localIssues {
+		localRef, ok := e.trackerRef(localIssue)
+		if !ok {
+			continue
+		}
+		if identities != nil && idx.byIdentity[identities.LocalIdentityKey(localIssue)] == localIssue {
+			continue
+		}
+		if key := e.matchKey(localRef); key != "" {
+			idx.byMatchKey[key] = localIssue
+		}
+	}
+	return idx
+}
+
+// trackerRef returns issue's trimmed external_ref and whether it is one of the
+// tracker's refs.
+func (e *Engine) trackerRef(issue *types.Issue) (string, bool) {
+	if issue == nil || issue.ExternalRef == nil {
+		return "", false
+	}
+	ref := strings.TrimSpace(*issue.ExternalRef)
+	return ref, ref != "" && e.Tracker.IsExternalRef(ref)
+}
+
+// identityIndex maps each identity key (IdentityKeyer) that exactly one of
+// issues holds to that issue. A key two issues hold maps to neither: a pull
+// never rewrites a recorded identity, so a bead an older pull relinked to
+// another issue keeps the identity of the issue it was created for, which
+// that issue's own bead holds too.
+func (e *Engine) identityIndex(issues []*types.Issue) map[string]*types.Issue {
+	byIdentity := make(map[string]*types.Issue)
+	identities, ok := e.Tracker.(IdentityKeyer)
+	if !ok {
+		return byIdentity
+	}
+	shared := make(map[string]bool)
+	for _, issue := range issues {
+		if _, ok := e.trackerRef(issue); !ok {
+			continue
+		}
+		key := identities.LocalIdentityKey(issue)
+		if key == "" || shared[key] {
+			continue
+		}
+		if _, held := byIdentity[key]; held {
+			delete(byIdentity, key)
+			shared[key] = true
+			continue
+		}
+		byIdentity[key] = issue
+	}
+	return byIdentity
+}
+
+// exactPullRefs maps the ID of each local issue whose external_ref is the ref
+// of one of extIssues to that ref: the exact lookup gives it to that issue.
+func (e *Engine) exactPullRefs(localIssues []*types.Issue, extIssues []TrackerIssue) map[string]string {
+	pulled := make(map[string]bool, len(extIssues))
+	for i := range extIssues {
+		pulled[e.Tracker.BuildExternalRef(&extIssues[i])] = true
+	}
+	exact := make(map[string]string)
+	for _, localIssue := range localIssues {
+		if localIssue == nil || localIssue.ExternalRef == nil || *localIssue.ExternalRef == "" {
+			continue
+		}
+		if pulled[*localIssue.ExternalRef] {
+			exact[localIssue.ID] = *localIssue.ExternalRef
+		}
+	}
+	return exact
+}
+
+// match returns the local issue that the pulled issue extIssue, whose external
+// ref is ref, falls back to, or nil. It skips a local issue whose external_ref
+// is another pulled issue's ref.
+func (idx pullFallbackIndex) match(extIssue *TrackerIssue, ref string) *types.Issue {
+	if idx.identities != nil {
+		if local := idx.byIdentity[idx.identities.RemoteIdentityKey(extIssue)]; idx.free(local, ref) {
+			return local
+		}
+	}
+	if local := idx.byMatchKey[idx.matchKey(ref)]; idx.free(local, ref) {
+		return local
+	}
+	return nil
+}
+
+// free reports whether local may be the fallback match of the remote issue
+// whose ref is ref: no other issue of this pull takes it by its exact ref.
+func (idx pullFallbackIndex) free(local *types.Issue, ref string) bool {
+	if local == nil {
+		return false
+	}
+	exact, ok := idx.exactRef[local.ID]
+	return !ok || exact == ref
+}
+
 func (e *Engine) fetchPrelinkedIssues(ctx context.Context, fetched []TrackerIssue, localIssues []*types.Issue, lastSync *time.Time) ([]TrackerIssue, map[string]bool, error) {
 	hydratedLocalIDs := make(map[string]bool)
 	if lastSync == nil {
 		return nil, hydratedLocalIDs, nil
 	}
 
+	// seen holds the remotes a fetch from lastSync itself returns, which a
+	// pull treats as changed after it. A row only the overlap window returned
+	// (pullOverlapOnly) predates that fetch, so a pre-linked local matching it
+	// is still hydrated, from that row instead of a FetchIssue.
 	seen := make(map[string]struct{}, len(fetched))
+	overlapOnly := make(map[string]struct{})
 	for _, issue := range fetched {
+		into := seen
+		if e.pullOverlapOnly(&issue, lastSync) {
+			into = overlapOnly
+		}
 		for _, id := range []string{
 			strings.TrimSpace(issue.Identifier),
 			strings.TrimSpace(e.Tracker.ExtractIdentifier(e.Tracker.BuildExternalRef(&issue))),
 		} {
 			if id != "" {
-				seen[id] = struct{}{}
-				seen[strings.ToLower(id)] = struct{}{}
+				into[id] = struct{}{}
+				into[strings.ToLower(id)] = struct{}{}
 			}
 		}
 	}
@@ -719,6 +968,18 @@ func (e *Engine) fetchPrelinkedIssues(ctx context.Context, fetched []TrackerIssu
 			continue
 		}
 		if _, ok := seen[strings.ToLower(identifier)]; ok {
+			continue
+		}
+		_, inOverlap := overlapOnly[identifier]
+		if _, ok := overlapOnly[strings.ToLower(identifier)]; ok {
+			inOverlap = true
+		}
+		if inOverlap {
+			// The bulk row is already in the pull; marking the local lets the
+			// conflict guard apply it instead of skipping the stub.
+			hydratedLocalIDs[local.ID] = true
+			seen[identifier] = struct{}{}
+			seen[strings.ToLower(identifier)] = struct{}{}
 			continue
 		}
 
@@ -932,6 +1193,35 @@ func (e *Engine) recordPushHash(ctx context.Context, issue *types.Issue, externa
 	}
 }
 
+// refreshPushHashAfterPull keeps the stored push hash of a pulled issue in
+// step with the remote. After a pull the remote holds the pulled content, not
+// the content of the last push. The hash fingerprints row, the local issue the
+// pull wrote or found equal, as the pull leaves it: the pulled content under
+// row's ID (a GenerateID hook may have given pulled a fresh ID), with row's own
+// labels when pulled.Labels is nil, because ApplyIssueUpdate leaves the labels
+// alone for a nil set. Without a fingerprint, a stored hash is cleared so the
+// next push fetches and compares instead of trusting the last push. The entry
+// is written only when it changes, so a pull of unchanged issues writes none.
+func (e *Engine) refreshPushHashAfterPull(ctx context.Context, row, pulled *types.Issue, ref string) {
+	if row == nil || row.ID == "" || pulled == nil {
+		return
+	}
+	hashed := *pulled
+	hashed.ID = row.ID
+	hashed.ExternalRef = strPtr(ref)
+	if hashed.Labels == nil {
+		hashed.Labels = row.Labels
+	}
+	key := e.pushHashKey(row.ID)
+	value := e.pushCacheValue(&hashed, ref)
+	if stored, err := e.Store.GetLocalMetadata(ctx, key); err == nil && stored == value {
+		return
+	}
+	if err := e.Store.SetLocalMetadata(ctx, key, value); err != nil {
+		e.warn("Failed to refresh push hash for %s: %v", row.ID, err)
+	}
+}
+
 func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs map[string]bool) (*PushStats, error) {
 	ctx, span := syncTracer.Start(ctx, "tracker.push",
 		trace.WithAttributes(
@@ -1072,6 +1362,11 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 				// A real --create-only run leaves linked issues alone, so the
 				// preview must skip them too (gastownhall/beads#6337).
 				stats.Skipped++
+			} else if e.Tracker.ExtractIdentifier(extRef) == "" {
+				// A real run skips a linked issue whose ref the tracker
+				// cannot address (e.g. another repository's issue), so the
+				// preview must skip it too (gastownhall/beads#7781).
+				stats.Skipped++
 			} else if !forceIDs[issue.ID] && e.storedPushHashMatches(ctx, issue, extRef) {
 				// Content unchanged since last push: a real run would skip this
 				// issue, so the preview must say so too (gastownhall/beads#4214).
@@ -1123,7 +1418,11 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 				e.warn("%s (%s)", w, issue.ID)
 			}
 			// Remember what we just pushed so the next sync can skip the fetch.
-			e.recordPushHash(ctx, issue, ref)
+			// A create with warnings left the remote short of the local content,
+			// so leave it uncached: the next push fetches, compares and repairs it.
+			if len(created.Warnings) == 0 {
+				e.recordPushHash(ctx, issue, ref)
+			}
 			stats.Created++
 		} else if !opts.CreateOnly || forceIDs[issue.ID] {
 			// Update existing external issue
@@ -1370,13 +1669,13 @@ func (e *Engine) createDependencies(ctx context.Context, deps []DependencyInfo) 
 
 	errCount := 0
 	for _, dep := range deps {
-		fromIssue, err := resolveIssue(ctx, dep.FromExternalID)
+		fromIssue, err := resolveIssue(ctx, dep.FromExternalID, dep.FromIdentityKey)
 		if err != nil {
 			e.warn("Failed to resolve dependency source %s: %v", dep.FromExternalID, err)
 			errCount++
 			continue
 		}
-		toIssue, err := resolveIssue(ctx, dep.ToExternalID)
+		toIssue, err := resolveIssue(ctx, dep.ToExternalID, dep.ToIdentityKey)
 		if err != nil {
 			e.warn("Failed to resolve dependency target %s: %v", dep.ToExternalID, err)
 			errCount++
@@ -1417,12 +1716,12 @@ func (e *Engine) previewDependencies(ctx context.Context, deps []DependencyInfo,
 	wouldCreate := 0
 	pending := make(map[string]struct{}, len(deps))
 	for _, dep := range deps {
-		fromIssue, err := resolveIssue(ctx, dep.FromExternalID)
+		fromIssue, err := resolveIssue(ctx, dep.FromExternalID, dep.FromIdentityKey)
 		if err != nil {
 			e.warn("Failed to resolve dependency source %s: %v", dep.FromExternalID, err)
 			continue
 		}
-		toIssue, err := resolveIssue(ctx, dep.ToExternalID)
+		toIssue, err := resolveIssue(ctx, dep.ToExternalID, dep.ToIdentityKey)
 		if err != nil {
 			e.warn("Failed to resolve dependency target %s: %v", dep.ToExternalID, err)
 			continue
@@ -1457,11 +1756,19 @@ func pendingDependencyPreviewKey(fromID, toID, depType string) string {
 	}, "\x00")
 }
 
-func (e *Engine) dependencyIssueResolver(ctx context.Context, extraIssues []*types.Issue) (func(context.Context, string) (*types.Issue, error), error) {
+// dependencyIssueResolver returns a function that resolves a dependency
+// endpoint, named by its external ref and identity key, to a local issue: by
+// the exact ref, then by the identity key (IdentityKeyer), then by match key.
+// That is the order a pull matches issues in, so an endpoint resolves to the
+// issue the pull wrote for it.
+func (e *Engine) dependencyIssueResolver(ctx context.Context, extraIssues []*types.Issue) (func(ctx context.Context, externalID, identityKey string) (*types.Issue, error), error) {
 	issues, searchErr := e.Store.SearchIssues(ctx, "", types.IssueFilter{})
 	if searchErr != nil {
 		return nil, searchErr
 	}
+	// Dry-run issues carry the refs a pull would write, so the stored issues
+	// alone hold the identities a moved endpoint can still be found by.
+	byIdentity := e.identityIndex(issues)
 	issues = append(issues, extraIssues...)
 
 	byExternal := make(map[string]*types.Issue, len(issues)*2)
@@ -1479,7 +1786,7 @@ func (e *Engine) dependencyIssueResolver(ctx context.Context, extraIssues []*typ
 		if !e.Tracker.IsExternalRef(ref) {
 			continue
 		}
-		identifier := strings.TrimSpace(e.Tracker.ExtractIdentifier(ref))
+		identifier := strings.TrimSpace(e.matchKey(ref))
 		if identifier != "" {
 			if _, exists := byExternal[identifier]; !exists {
 				byExternal[identifier] = candidate
@@ -1491,7 +1798,7 @@ func (e *Engine) dependencyIssueResolver(ctx context.Context, extraIssues []*typ
 		}
 	}
 
-	return func(ctx context.Context, externalID string) (*types.Issue, error) {
+	return func(ctx context.Context, externalID, identityKey string) (*types.Issue, error) {
 		externalID = strings.TrimSpace(externalID)
 		if externalID == "" {
 			return nil, nil
@@ -1502,11 +1809,15 @@ func (e *Engine) dependencyIssueResolver(ctx context.Context, extraIssues []*typ
 		if issue := byExternal[strings.ToLower(externalID)]; issue != nil {
 			return issue, nil
 		}
+		if issue := byIdentity[identityKey]; issue != nil {
+			return issue, nil
+		}
 		// Tracker refs come in URL variants (e.g. Linear URLs with and
-		// without the title slug); match on the extracted identifier the
-		// same way the index above was built.
+		// without the title slug); match on the same key the index above
+		// was built with, which a MatchKeyer qualifies (GitLab IIDs repeat
+		// across projects).
 		if e.Tracker.IsExternalRef(externalID) {
-			if identifier := strings.TrimSpace(e.Tracker.ExtractIdentifier(externalID)); identifier != "" {
+			if identifier := strings.TrimSpace(e.matchKey(externalID)); identifier != "" {
 				if issue := byExternal[identifier]; issue != nil {
 					return issue, nil
 				}
@@ -1516,7 +1827,13 @@ func (e *Engine) dependencyIssueResolver(ctx context.Context, extraIssues []*typ
 			}
 		}
 		if strings.Contains(externalID, "://") {
-			return e.Store.GetIssueByExternalRef(ctx, externalID)
+			issue, err := e.Store.GetIssueByExternalRef(ctx, externalID)
+			if errors.Is(err, storage.ErrNotFound) {
+				// An endpoint no local issue names is one the pull did not
+				// import, which callers skip without an error.
+				return nil, nil
+			}
+			return issue, err
 		}
 		return nil, nil
 	}, nil

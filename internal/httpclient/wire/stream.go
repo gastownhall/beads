@@ -188,10 +188,14 @@ func (c *Client) dialStream(ctx context.Context, hc *http.Client, u *url.URL) (*
 		return nil, err
 	}
 
+	started := time.Now()
 	//nolint:gosec // G704: the URL is the workspace's configured server; dialing it IS the feature.
 	resp, err := hc.Do(req)
 	if err != nil {
 		cancel()
+		if de := dialFailure(OpWatchEvents, u.Host, err, time.Since(started)); de != nil && ctx.Err() == nil {
+			return nil, &ConnectError{Op: OpWatchEvents, ServerURL: c.base.Redacted(), Err: de}
+		}
 		return nil, &ConnectError{Op: OpWatchEvents, ServerURL: c.base.Redacted(), Err: err}
 	}
 

@@ -19,13 +19,30 @@ const deleteBatchSize = 50
 // discovered during recursive dependent traversal.
 const maxRecursiveResults = 10000
 
+// DeleteIssueResult holds the result of a DeleteIssueInTxWithResult call.
+type DeleteIssueResult struct {
+	// IssueRowsChanged reports whether this delete changed a durable issues
+	// row: the deleted row itself, or a dependent whose is_blocked the delete
+	// recomputed. A wisp delete changes one only through the recompute.
+	IssueRowsChanged bool
+}
+
 // DeleteIssueInTx removes one row and everything that hangs off it, journaling
 // the delete and its edge removals to actor. Callers with a request behind them
 // pass its actor; the actorless system surfaces (storage.DeleteIssue,
 // Tx.DeleteIssue) pass "" — see the 0066 contract in journal.go.
+func DeleteIssueInTx(ctx context.Context, tx *sql.Tx, id string, actor string) error {
+	_, err := DeleteIssueInTxWithResult(ctx, tx, id, actor)
+	return err
+}
+
+// DeleteIssueInTxWithResult is DeleteIssueInTx reporting whether the delete
+// changed a durable issues row, so a caller that stages tables for a Dolt
+// commit can stage `issues` when deleting a wisp unblocked a durable dependent
+// (GH#6647).
 //
 //nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
-func DeleteIssueInTx(ctx context.Context, tx *sql.Tx, id string, actor string) error {
+func DeleteIssueInTxWithResult(ctx context.Context, tx *sql.Tx, id string, actor string) (DeleteIssueResult, error) {
 	isWisp := IsActiveWispInTx(ctx, tx, id)
 
 	var deletedIssues, deletedWisps []string
@@ -36,24 +53,25 @@ func DeleteIssueInTx(ctx context.Context, tx *sql.Tx, id string, actor string) e
 	}
 	affectedIssues, affectedWisps, aerr := AffectedByDeletionInTx(ctx, tx, deletedIssues, deletedWisps)
 	if aerr != nil {
-		return fmt.Errorf("affected by delete for %s: %w", id, aerr)
+		return DeleteIssueResult{}, fmt.Errorf("affected by delete for %s: %w", id, aerr)
 	}
 
 	// Edges are journaled before the rows go, while their source snapshots can
 	// still be read.
 	if err := RecordDependencyRemovalsForIssuesInTx(ctx, tx, []string{id}, actor); err != nil {
-		return fmt.Errorf("journal dependency removals for %s: %w", id, err)
+		return DeleteIssueResult{}, fmt.Errorf("journal dependency removals for %s: %w", id, err)
 	}
 	if err := deleteIssueRowInTx(ctx, tx, id, isWisp, actor); err != nil {
-		return err
+		return DeleteIssueResult{}, err
 	}
 
-	if err := RecomputeIsBlockedInTx(ctx, tx, affectedIssues, affectedWisps); err != nil {
-		return fmt.Errorf("recompute is_blocked after delete for %s: %w", id, err)
+	recompute, err := RecomputeIsBlockedInTxWithResult(ctx, tx, affectedIssues, affectedWisps)
+	if err != nil {
+		return DeleteIssueResult{}, fmt.Errorf("recompute is_blocked after delete for %s: %w", id, err)
 	}
 	NoteDeleteBlockedRecheck(tx, []string{id}, "", affectedIssues, affectedWisps)
 
-	return nil
+	return DeleteIssueResult{IssueRowsChanged: !isWisp || recompute.IssueRowsChanged}, nil
 }
 
 //nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
@@ -82,7 +100,10 @@ func deleteIssueRowInTx(ctx context.Context, tx *sql.Tx, id string, isWisp bool,
 		return err
 	}
 	if isWisp {
-		if err := DeleteWispFromDependenciesInTx(ctx, tx, id); err != nil {
+		// The callers that stage tables stage dependencies for any wisp
+		// delete (DeleteCascadeTables, the deleter's swept tables), so
+		// whether a durable edge went is not needed here.
+		if _, err := DeleteWispFromDependenciesInTx(ctx, tx, id); err != nil {
 			return err
 		}
 		if err := DeleteWispAuxRowsInTx(ctx, tx, []string{id}); err != nil {
@@ -149,8 +170,8 @@ type DeletionSet struct {
 }
 
 // ResolveDeletionSetInTx decides WHICH rows a delete removes: the named ids,
-// plus — under cascade — the transitive closure of everything that depends on
-// them, in BOTH planes.
+// plus — under cascade — their parent-child descendants, transitively, in
+// BOTH planes (see FindCascadeClosureInTx).
 //
 // THE CASCADE IS ROOTED AT EVERY NAMED ID, WISPS INCLUDED. Rooting it at the
 // durable half is what made `bd wisp gc` (which hardcodes cascade) silently
@@ -160,7 +181,7 @@ type DeletionSet struct {
 func ResolveDeletionSetInTx(ctx context.Context, tx DBTX, ids []string, cascade bool) (DeletionSet, error) {
 	all := append([]string(nil), ids...)
 	if cascade {
-		closure, err := FindAllDependentsInTx(ctx, tx, ids)
+		closure, err := FindCascadeClosureInTx(ctx, tx, ids)
 		if err != nil {
 			return DeletionSet{}, fmt.Errorf("expand cascade: %w", err)
 		}
@@ -177,6 +198,20 @@ func ResolveDeletionSetInTx(ctx context.Context, tx DBTX, ids []string, cascade 
 }
 
 func DeleteIssuesInTx(ctx context.Context, tx *sql.Tx, ids []string, cascade bool, force bool, dryRun bool, actor string) (*types.DeleteIssuesResult, error) {
+	return DeleteIssuesBesideWispsInTx(ctx, tx, ids, nil, cascade, force, dryRun, actor)
+}
+
+// DeleteIssuesBesideWispsInTx is DeleteIssuesInTx for the server-backed store,
+// which peels a request's wisps off and deletes them itself, in batches of
+// their own, before it calls this with the rest (dolt/issues.go deleteIssues).
+// peeledWisps are those wisps. They are still part of the request, so the
+// dependents guard does not count one of them as a dependent left behind, as
+// on the embedded store, which passes every id in ids. A real delete has
+// already removed them and their dependency rows, so there they change
+// nothing. A dry run has removed nothing: without them, its guard would refuse
+// a request whose own wisps depend on one of its issues, which the real
+// delete takes.
+func DeleteIssuesBesideWispsInTx(ctx context.Context, tx *sql.Tx, ids, peeledWisps []string, cascade bool, force bool, dryRun bool, actor string) (*types.DeleteIssuesResult, error) {
 	if len(ids) == 0 {
 		return &types.DeleteIssuesResult{}, nil
 	}
@@ -193,8 +228,11 @@ func DeleteIssuesInTx(ctx context.Context, tx *sql.Tx, ids []string, cascade boo
 		// function (dolt/issues.go DeleteIssues), so widening it would make the
 		// embedded store refuse where the server-backed one cannot. The ROLE's
 		// guard, which does cover both planes, is in DeleteInTx.
-		idSet := make(map[string]bool, len(ids))
+		idSet := make(map[string]bool, len(ids)+len(peeledWisps))
 		for _, id := range ids {
+			idSet[id] = true
+		}
+		for _, id := range peeledWisps {
 			idSet[id] = true
 		}
 		// One scan of the dependency planes answers both modes: the guard needs
@@ -212,14 +250,25 @@ func DeleteIssuesInTx(ctx context.Context, tx *sql.Tx, ids []string, cascade boo
 				}
 			}
 		} else {
-			orphans := make(map[string]bool)
-			for _, deps := range external {
-				for _, id := range deps {
-					orphans[id] = true
-				}
-			}
-			orphaned = workapi.SortedDeleteIDs(orphans)
+			orphaned = orphanedIDs(external)
 		}
+	} else {
+		// A containment-only cascade (GH#6301) leaves the rows joined to the
+		// tree by any other edge behind, and reports them as DeleteInTx does:
+		// against the whole deletion set, so a dependent of a cascade-deleted
+		// descendant is named too.
+		idSet := make(map[string]bool, len(set.All)+len(peeledWisps))
+		for _, id := range set.All {
+			idSet[id] = true
+		}
+		for _, id := range peeledWisps {
+			idSet[id] = true
+		}
+		external, err := ExternalDependentsBySourceInTx(ctx, tx, set.All, idSet)
+		if err != nil {
+			return nil, fmt.Errorf("get dependents: %w", err)
+		}
+		orphaned = orphanedIDs(external)
 	}
 
 	result, err := DeleteResolvedSetInTx(ctx, tx, set, dryRun, actor)
@@ -446,12 +495,21 @@ func ExistingIssueIDsInTableInTx(ctx context.Context, tx DBTX, table string, ids
 	return actual, nil
 }
 
-// findAllDependentsRecursiveInTx finds all issues that depend on the given
-// issues, recursively. Uses batched IN-clause queries. Traversal is capped
-// at maxRecursiveResults total discovered IDs.
+// FindCascadeClosureInTx finds what a cascade adds to the given roots: their
+// parent-child descendants, recursively, in both planes. Uses batched
+// IN-clause queries. Traversal is capped at maxRecursiveResults total
+// discovered IDs.
+//
+// IT FOLLOWS CONTAINMENT ONLY. A child row's parent-child edge points at its
+// parent, so the walk reads incoming parent-child edges and nothing else. A
+// blocks, related or discovered-from edge says two rows are associated, not
+// that one is part of the other: following it let `bd delete <epic> --cascade`
+// reach an unrelated epic through one discovered-from edge and take that epic
+// and its children too (GH#6301). Rows joined by such an edge survive the
+// delete and lose the edge; the caller reports them as orphaned.
 //
 //nolint:gosec // G201: inClause contains only ? placeholders
-func FindAllDependentsInTx(ctx context.Context, tx DBTX, ids []string) (map[string]bool, error) {
+func FindCascadeClosureInTx(ctx context.Context, tx DBTX, ids []string) (map[string]bool, error) {
 	result := make(map[string]bool)
 	for _, id := range ids {
 		result[id] = true
@@ -472,9 +530,10 @@ func FindAllDependentsInTx(ctx context.Context, tx DBTX, ids []string) (map[stri
 		toProcess = toProcess[batchEnd:]
 
 		inClause, args := buildSQLInClause(batch)
+		args = append([]interface{}{string(types.DepParentChild)}, args...)
 		for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
 			rows, err := tx.QueryContext(ctx,
-				fmt.Sprintf(`SELECT issue_id FROM %s WHERE %s`, depTable, depTargetIn("", inClause)),
+				fmt.Sprintf(`SELECT issue_id FROM %s WHERE type = ? AND %s`, depTable, depTargetIn("", inClause)),
 				args...)
 			if err != nil {
 				if optionalBlockedTable(depTable) && isTableNotExistError(err) {

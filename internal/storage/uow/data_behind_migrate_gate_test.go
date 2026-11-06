@@ -18,6 +18,15 @@ import (
 // pending — the only arm where the #6575 ancestry check runs.
 const dataBehindCurrent = 65
 
+// expectHeadContentHashProbes mocks the shape probes ReadMigrationContentHashes
+// issues before its HEAD read when the cursor is fully present: the be-bv7x
+// cursor-existence probe, then the content_hash column.
+func expectHeadContentHashProbes(mock sqlmock.Sqlmock) {
+	expectCursorProbe(mock, "schema_migrations", true)
+	mock.ExpectQuery(regexp.QuoteMeta("SHOW COLUMNS FROM schema_migrations LIKE 'content_hash'")).
+		WillReturnRows(sqlmock.NewRows([]string{"Field"}).AddRow("content_hash"))
+}
+
 // expectSmartGateDataBehindRoute mocks the smart router's reads for a clone
 // that is LEVEL with the cached remote ref on schema and BEHIND it in data:
 // the local hashes, the active branch, the remote ref's hashes (identical, so
@@ -35,6 +44,8 @@ func expectSmartGateDataBehindRoute(mock sqlmock.Sqlmock, ahead, behind int) {
 	}
 	ref := "remotes/origin/main"
 
+	// The local cursor's shape probes (be-bv7x) precede the HEAD read.
+	expectHeadContentHashProbes(mock)
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT version, content_hash FROM schema_migrations")).
 		WillReturnRows(hashes())
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT active_branch()")).
@@ -220,8 +231,8 @@ func TestInitSchemaProxiedDataBehind(t *testing.T) {
 	})
 
 	t.Run("read-only open prints the pull-first block, not the consent template", func(t *testing.T) {
-		// readThroughRefusedMigration's template names the shared consent verb
-		// for every refusal. For this stop that verb is doubly wrong: the
+		// readThroughRefusedMigration's blunt-fallback template names the
+		// shared consent verb. For this stop that verb is doubly wrong: the
 		// remedy is the pull, and a remote-backed shared store never reads the
 		// bare verb's consent at all (schema.SharedConsentCommandForced).
 		p, mock := newProxiedProvider(t)
@@ -233,6 +244,7 @@ func TestInitSchemaProxiedDataBehind(t *testing.T) {
 		expectLockRelease(mock, lockName)
 		mock.ExpectExec(regexp.QuoteMeta("USE `beads`")).
 			WillReturnResult(sqlmock.NewResult(0, 0))
+		expectIssuesProjection(mock, dataBehindCurrent, "")
 
 		var initErr error
 		stderr := captureStderr(t, func() {

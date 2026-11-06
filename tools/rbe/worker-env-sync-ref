@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# worker-env-sync-ref: print the gastownhall/gascity commit a REF names.
+#
+#   tools/rbe/worker-env-sync-ref [REF]
+#
+# raw.githubusercontent.com serves a branch URL from its CDN with
+# cache-control: max-age=300, so for up to 5 minutes after gascity's main
+# moves (a re-pin such as gascity#8165), .../gascity/main/... can still serve
+# the old manifest. A commit URL never changes content, so worker-env-sync
+# and worker-env-sync-copy read gascity's files at the commit this prints.
+# A branch is resolved with git ls-remote against
+# github.com's git endpoint, which neither the CDN caches nor the REST API
+# rate-limits; REF (default main) names the branch exactly, since ls-remote's
+# pattern also matches a ref whose trailing path components spell it
+# (refs/heads/x/refs/heads/main). A 40-hex REF is a commit already and is
+# printed as is, with no lookup. Prints the 40-hex commit alone on stdout,
+# or nothing, exiting non-zero, when gascity has no such branch or cannot be
+# reached in time.
+#
+# Env: tests only: WORKER_ENV_SYNC_GIT_URL, gascity's git URL (default
+# https://github.com/gastownhall/gascity), and WORKER_ENV_SYNC_GIT_TIMEOUT,
+# the lookup's bound in seconds (default 30).
+set -euo pipefail
+
+ref=${1:-main}
+if [[ $ref =~ ^[0-9a-f]{40}$ ]]; then
+	echo "$ref"
+	exit 0
+fi
+url=${WORKER_ENV_SYNC_GIT_URL:-https://github.com/gastownhall/gascity}
+# Bound the lookup as a whole: http.lowSpeedLimit and lowSpeedTime cut off
+# only a transfer that stalls, and git has no connect timeout (libcurl's
+# default is 300 seconds), so a hung connect would hold the calling job
+# (bazel.yml's rbe job has 5 minutes) until its own timeout. timeout(1) is
+# coreutils', on every runner that calls this; a host without it (macOS)
+# looks up unbounded.
+lookup=(git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=20 ls-remote --refs "$url" "refs/heads/$ref")
+if command -v timeout >/dev/null; then
+	lookup=(timeout "${WORKER_ENV_SYNC_GIT_TIMEOUT:-30}" "${lookup[@]}")
+fi
+refs=$(GIT_TERMINAL_PROMPT=0 "${lookup[@]}")
+sha=$(awk -v want="refs/heads/$ref" '$2 == want { print $1 }' <<<"$refs")
+if ! [[ $sha =~ ^[0-9a-f]{40}$ ]]; then
+	echo "worker-env-sync-ref: gascity ($url) has no branch $ref" >&2
+	exit 1
+fi
+echo "$sha"
