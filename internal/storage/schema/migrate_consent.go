@@ -44,6 +44,15 @@ import (
 // sequence is pending and unconsented, MigrateUp refuses before ANY write,
 // ignored sequence and dolt_ignore seeding included.
 //
+// One continuation commits tracked tables without fresh consent: the
+// is_blocked repair (gastownhall/beads#7037). Main 0075 records an owed-repair
+// key in metadata under consent; when that key is committed at HEAD and the
+// main sequence is current (a peer's 0075 step was pulled before its repair
+// commit, or an earlier pass died before it), an ordinary open runs ignored
+// 0032, which recomputes is_blocked and commits issues, dependencies and
+// metadata. It finishes an upgrade someone already consented to and changes
+// no schema, so it is not gated here.
+//
 // A refusal fails the open, except for the working-set-reconcile commands
 // (bd dolt commit, bd vc commit), which commit at the current schema without
 // migrating: the refusal comes before the #4566 dirty-table guard, whose
@@ -177,7 +186,9 @@ func IsMigrateConsentError(err error) bool {
 // checkMigrateConsent refuses an unconsented migration of an existing
 // database. Called at the top of MigrateUp, before any write (dolt_ignore
 // seeding included). Returns nil for a fresh database (version 0), a database
-// with no pending main-sequence migrations, or when consent was given.
+// with no pending main-sequence migrations, or when consent was given. A
+// database with no pending main-sequence migrations may still carry an owed
+// is_blocked repair; finishing it is the continuation described above.
 func checkMigrateConsent(ctx context.Context, db DBConn) error {
 	if localMigrateConsent || forceAllowRemoteMigrate {
 		return nil // programmatic consent — skip the version reads entirely

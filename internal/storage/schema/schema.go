@@ -1155,6 +1155,12 @@ func migrateUpAfterReconcile(ctx context.Context, db DBConn, seedChanged bool) (
 	}
 	backfilled = backfilled || auxRekeyed
 
+	// gastownhall/beads#7037: an owed repair committed at HEAD re-arms ignored
+	// 0032 even when this clone's cursor already records it.
+	if err := rearmOwedIsBlockedRepair(ctx, db); err != nil {
+		return applied, err
+	}
+
 	touchedIgnoredDirtyTables, err := ignoredSource.pendingMigrationDirtyTables(ctx, db, dirtyBeforeAll)
 	if err != nil {
 		return applied, fmt.Errorf("checking dirty tables against pending ignored migrations: %w", err)
@@ -1240,7 +1246,14 @@ func migrationWorkNeeded(ctx context.Context, db DBConn) (bool, error) {
 	if !hasIgnoredHash {
 		return true, nil
 	}
-	return needsBackfilledCustomStatusesCustomTypes(ctx, db)
+	backfillNeeded, err := needsBackfilledCustomStatusesCustomTypes(ctx, db)
+	if err != nil || backfillNeeded {
+		return backfillNeeded, err
+	}
+	// gastownhall/beads#7037: an owed is_blocked repair committed at HEAD
+	// (pulled from a peer, or left on this branch by an interrupted pass)
+	// still needs the ignored 0032 pass at current cursors.
+	return isBlockedRepairOwedAtHead(ctx, db)
 }
 
 func committableDirtyTables(ctx context.Context, db DBConn) (map[string]dirtyTableState, error) {

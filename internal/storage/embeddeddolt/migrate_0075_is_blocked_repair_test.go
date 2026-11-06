@@ -706,3 +706,142 @@ func TestEmbeddedMigration0075RepairRunsAfterItsPrerequisites(t *testing.T) {
 		requireFullRecomputeCorrectsNothing(t, ctx, conn)
 	})
 }
+
+// withoutMigrateConsent clears every consent source for the rest of t, the
+// state of an ordinary (read) open.
+func withoutMigrateConsent(t *testing.T) {
+	t.Helper()
+	schema.SetLocalMigrateConsent(false)
+	schema.SetForceAllowRemoteMigrate(false)
+	t.Cleanup(func() { schema.SetLocalMigrateConsent(true) })
+	t.Setenv(schema.AllowMigrateEnv, "")
+	t.Setenv(schema.AllowRemoteMigrateEnv, "")
+}
+
+// requireRepairedAndSettled asserts the issue plane is repaired, the key is
+// gone at HEAD, the ignored cursor is back at latest, and a reopen commits
+// nothing.
+func requireRepairedAndSettled(t *testing.T, ctx context.Context, conn *sql.Conn) {
+	t.Helper()
+	requireFlags(t, ctx, conn, "issues", repairGraph)
+	requireStamps(t, ctx, conn, "issues", repairGraph)
+	if n := repairKeyCount(t, ctx, conn, " AS OF 'HEAD'"); n != 0 {
+		t.Errorf("repair key still committed at HEAD (%d row(s))", n)
+	}
+	if n := scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM ignored_schema_migrations WHERE version = 32"); n != 1 {
+		t.Errorf("ignored 0032 recorded %d time(s), want 1", n)
+	}
+	if got := scalarInt(t, ctx, conn, "SELECT MAX(version) FROM ignored_schema_migrations"); got != schema.LatestIgnoredVersion() {
+		t.Errorf("ignored cursor = %d, want %d", got, schema.LatestIgnoredVersion())
+	}
+	headBefore := scalarString(t, ctx, conn, "SELECT HASHOF('HEAD')")
+	if _, err := schema.MigrateUp(ctx, conn); err != nil {
+		t.Fatalf("reopen MigrateUp: %v", err)
+	}
+	if got := scalarString(t, ctx, conn, "SELECT HASHOF('HEAD')"); got != headBefore {
+		t.Errorf("reopen moved HEAD from %s to %s; want no tracked repair", headBefore, got)
+	}
+	requireFullRecomputeCorrectsNothing(t, ctx, conn)
+}
+
+// TestEmbeddedMigration0075ResumesOwedRepair is AC-7: an owed repair that did
+// not finish where it was recorded finishes on a later open. A key received
+// with both cursors current resumes without fresh consent (it continues an
+// already-consented upgrade) and re-arms ignored 0032; a pass interrupted
+// after its recompute refuses until the operator commits the working set and
+// then records 0032 without a second tracked repair; a branch rewound below
+// main 75 re-arms 0032 through main 0075 itself.
+func TestEmbeddedMigration0075ResumesOwedRepair(t *testing.T) {
+	requireEmbedded(t)
+
+	t.Run("received key with current cursors", func(t *testing.T) {
+		ctx := t.Context()
+		_, conn, closeConn := seedRewoundStore(t, ctx, 75, 32)
+		defer closeConn()
+		insertRepairRows(t, ctx, conn, "issues", repairGraph)
+		insertCanonicalEdges(t, ctx, conn, "dependencies", "depends_on_issue_id", repairEdges)
+		mustExecOn(t, ctx, conn, "INSERT INTO metadata (`key`, value) VALUES (?, 'full')", isBlockedRepairOwedKey)
+		commitFixture(t, ctx, conn, "test: peer's main 0075 step, pulled before its repair commit")
+		withoutMigrateConsent(t)
+
+		if _, err := schema.MigrateUp(ctx, conn); err != nil {
+			t.Fatalf("MigrateUp over received debt (no consent, read open): %v", err)
+		}
+		if n := repairCommitCount(t, ctx, conn); n != 1 {
+			t.Errorf("repair commits = %d, want 1", n)
+		}
+		requireRepairedAndSettled(t, ctx, conn)
+	})
+
+	t.Run("working-set key is not owed", func(t *testing.T) {
+		ctx := t.Context()
+		_, conn, closeConn := seedRewoundStore(t, ctx, 75, 32)
+		defer closeConn()
+		insertRepairRows(t, ctx, conn, "issues", repairGraph)
+		insertCanonicalEdges(t, ctx, conn, "dependencies", "depends_on_issue_id", repairEdges)
+		commitFixture(t, ctx, conn, "test: converged v75 store")
+		mustExecOn(t, ctx, conn, "INSERT INTO metadata (`key`, value) VALUES (?, 'full')", isBlockedRepairOwedKey)
+		headBefore := scalarString(t, ctx, conn, "SELECT HASHOF('HEAD')")
+
+		if _, err := schema.MigrateUp(ctx, conn); err != nil {
+			t.Fatalf("MigrateUp: %v", err)
+		}
+		if got := scalarString(t, ctx, conn, "SELECT HASHOF('HEAD')"); got != headBefore {
+			t.Errorf("an uncommitted key moved HEAD from %s to %s", headBefore, got)
+		}
+		requireFlags(t, ctx, conn, "issues", staleFlags(repairGraph))
+	})
+
+	t.Run("interrupted after the recompute", func(t *testing.T) {
+		ctx := t.Context()
+		// Main 0075's step committed the key; the 0032 hook recomputed and
+		// deleted the key, then died before its commit.
+		_, conn, closeConn := seedRewoundStore(t, ctx, 75, 31)
+		defer closeConn()
+		insertRepairRows(t, ctx, conn, "issues", repairGraph)
+		insertCanonicalEdges(t, ctx, conn, "dependencies", "depends_on_issue_id", repairEdges)
+		mustExecOn(t, ctx, conn, "INSERT INTO metadata (`key`, value) VALUES (?, 'full')", isBlockedRepairOwedKey)
+		commitFixture(t, ctx, conn, "test: main 0075 step")
+		if _, err := issueops.RecomputeAllIsBlockedInTx(ctx, conn); err != nil {
+			t.Fatalf("partial recompute: %v", err)
+		}
+		mustExecOn(t, ctx, conn, "DELETE FROM metadata WHERE `key` = ?", isBlockedRepairOwedKey)
+
+		_, err := schema.MigrateUp(ctx, conn)
+		var dirtyErr *schema.DirtyTablesError
+		if !errors.As(err, &dirtyErr) {
+			t.Fatalf("MigrateUp over the interrupted repair: err = %v, want *schema.DirtyTablesError", err)
+		}
+		if n := scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM ignored_schema_migrations WHERE version = 32"); n != 0 {
+			t.Fatalf("ignored 0032 recorded over an unreconciled repair")
+		}
+		// The operator's documented recovery: `bd dolt commit`.
+		commitFixture(t, ctx, conn, "test: bd dolt commit")
+		if _, err := schema.MigrateUp(ctx, conn); err != nil {
+			t.Fatalf("MigrateUp after reconciliation: %v", err)
+		}
+		if n := repairCommitCount(t, ctx, conn); n != 0 {
+			t.Errorf("repair commits = %d, want 0 (the reconciliation already carried it)", n)
+		}
+		requireRepairedAndSettled(t, ctx, conn)
+	})
+
+	t.Run("rewound branch", func(t *testing.T) {
+		ctx := t.Context()
+		// The clone-local ignored cursor already records 0032 from another
+		// branch; this branch's main cursor is still at 74.
+		_, conn, closeConn := seedRewoundStore(t, ctx, 74, 32)
+		defer closeConn()
+		insertRepairRows(t, ctx, conn, "issues", repairGraph)
+		insertCanonicalEdges(t, ctx, conn, "dependencies", "depends_on_issue_id", repairEdges)
+		commitFixture(t, ctx, conn, "test: branch still at v74")
+
+		if _, err := schema.MigrateUp(ctx, conn); err != nil {
+			t.Fatalf("MigrateUp: %v", err)
+		}
+		if n := repairCommitCount(t, ctx, conn); n != 1 {
+			t.Errorf("repair commits = %d, want 1", n)
+		}
+		requireRepairedAndSettled(t, ctx, conn)
+	})
+}

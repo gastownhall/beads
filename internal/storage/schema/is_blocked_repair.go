@@ -105,6 +105,20 @@ func rearmIgnoredIsBlockedRepair(ctx context.Context, db DBConn) error {
 	return nil
 }
 
+// rearmOwedIsBlockedRepair re-arms ignored 0032 when the owed key is committed
+// at HEAD, so the ignored pass about to run finishes a repair this clone's
+// cursor already records: a key pulled from a peer whose main 0075 step
+// landed without its repair commit, or a cursor recorded on another branch.
+// It runs inside the guarded pass, before the ignored runner selects its
+// pending steps; with the key absent it changes nothing.
+func rearmOwedIsBlockedRepair(ctx context.Context, db DBConn) error {
+	owed, err := isBlockedRepairOwedAtHead(ctx, db)
+	if err != nil || !owed {
+		return err
+	}
+	return rearmIgnoredIsBlockedRepair(ctx, db)
+}
+
 // isBlockedRepairOwedAtHead reports whether the owed key is committed at HEAD.
 // It lists HEAD before selecting from it so the probe cannot fail on a store
 // whose HEAD predates the metadata table (be-bv7x, see tableTrackedAtHead).
