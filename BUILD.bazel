@@ -265,6 +265,14 @@ exports_files(
     visibility = ["//internal/httpclient/encode:__pkg__"],
 )
 
+# //internal/storage/schema:schema_test checks the upgrade guide's adopt recipe
+# against the gate's own (TestUpgradingGuideAdoptRecipeMatchesGate), so the doc
+# must be readable as data under `bazel test` (GH#6687).
+exports_files(
+    ["docs/getting-started/upgrading.md"],
+    visibility = ["//internal/storage/schema:__pkg__"],
+)
+
 # --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
 
 filegroup(

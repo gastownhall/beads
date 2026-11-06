@@ -380,19 +380,22 @@ database — run against one, it prints `Database already exists` and
 database aside first, then re-apply the step 1 backup:
 
 ```bash
-mv .beads/embeddeddolt .beads/backup/embeddeddolt.pre-adopt   # embedded mode (the default)
+mkdir -p .beads/backup                        # the destination parent must exist before the move
+mv .beads/embeddeddolt .beads/backup/embeddeddolt.pre-adopt   # embedded mode (the default); the destination must be unused — pick another name if it exists
 bd bootstrap                                 # clones the migrated database from the remote
-bd import .beads/backup/pre-migrate.jsonl    # restores what a re-clone cannot bring
+bd import .beads/backup/pre-migrate.jsonl    # only if a step 1 backup exists: restores what a re-clone cannot bring
 ```
 
 The re-clone brings only what the remote has, so the import restores this
 clone's clone-local beads (wisps, for example) and anything step 1 did not
 push; rows the remote already holds in a newer version are skipped as stale.
 The backup has to come from the old binary, as in step 1: on a clone with
-pending migrations the new binary's `bd export` fails. Keep the moved-aside
-directory until you have checked the result — the old binary can still open
-it. In server mode the database lives under `.beads/dolt/` instead; stop the
-server and move the database outside `.beads/dolt/` (see
+pending migrations the new binary's `bd export` fails. A clone with no such
+backup skips the import — the moved-aside directory is itself the recovery
+copy. Keep the moved-aside directory until you have checked the result — the
+old binary can still open it. In server mode the database lives under
+`.beads/dolt/` instead; stop the server and move the database outside
+`.beads/dolt/` (see
 [re-clone-gotchas](/recovery/init-safety#re-clone-gotchas)).
 
 A clone that adopts the migrated database this way, by the pull in step 3 or

@@ -184,7 +184,13 @@ go_test(
         "smart_remote_migrate_gate_test.go",
         "transaction_commit_test.go",
     ],
-    data = [":migrations"],
+    data = [
+        ":migrations",
+        # TestUpgradingGuideAdoptRecipeMatchesGate reads the upgrade guide's
+        # adopt recipe as data (GH#6687), like the divergence-ledger precedent
+        # in //internal/httpclient/encode.
+        "//:docs/getting-started/upgrading.md",
+    ],
     embed = [":schema"],
     deps = [
         "//internal/debug",

@@ -3,6 +3,8 @@ package schema
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -774,4 +776,51 @@ func TestRemoteMigrateGateUnchangedRemedies(t *testing.T) {
 			t.Errorf("migrate option lost its single-migrator precondition:\n%s", opts[0].When)
 		}
 	})
+}
+
+// TestUpgradingGuideAdoptRecipeMatchesGate pins the #6687 alignment between
+// the gate's adopt recipe and the upgrade guide's copy. The guide is the doc
+// an operator follows by hand while the gate is the thing refusing their
+// commands; if they disagree — the guide's move misses the destination parent
+// the gate creates, names a different destination, or presents the post-clone
+// import as unconditional when the gate calls it conditional — the operator
+// is back to a recipe that fails or loops. The guide is read as test data,
+// like the divergence-ledger doc precedent.
+func TestUpgradingGuideAdoptRecipeMatchesGate(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "docs", "getting-started", "upgrading.md"))
+	if err != nil {
+		t.Fatalf("read upgrading.md (wired as test data; see the package BUILD): %v", err)
+	}
+	guide := string(raw)
+
+	// The same move, to the same destination, with the parent created first —
+	// in order, as in AdoptMoveAsideCommands.
+	mkdirAt := strings.Index(guide, "mkdir -p "+adoptAsideParent)
+	mvAt := strings.Index(guide, "mv .beads/embeddeddolt "+adoptAsideDest)
+	if mkdirAt < 0 || mvAt < 0 {
+		t.Fatalf("guide's adopt recipe does not match the gate's paths (mkdir at %d, mv at %d):\n%s", mkdirAt, mvAt, guide)
+	}
+	if mvAt < mkdirAt {
+		t.Errorf("guide moves the database before creating the destination parent; the gate creates it first (AdoptMoveAsideCommands)")
+	}
+	// The recipe's conditions travel with it: an unused destination, and the
+	// preservation of the aside as the recovery copy.
+	if !strings.Contains(guide, "unused") || !strings.Contains(guide, "another name") {
+		t.Errorf("guide does not demand an unused destination for the move-aside")
+	}
+	if !strings.Contains(guide, "Keep the moved-aside") {
+		t.Errorf("guide dropped the preservation note for the moved-aside directory")
+	}
+	// The post-clone import is conditional, the same way the gate treats
+	// export: only sound for work the old binary produced.
+	importAt := strings.Index(guide, "bd import .beads/backup/pre-migrate.jsonl")
+	if importAt < 0 {
+		t.Fatalf("guide lost the post-clone import step:\n%s", guide)
+	}
+	if !strings.Contains(guide[importAt:], "only if") && !strings.Contains(guide[:importAt], "only if") {
+		t.Errorf("guide presents the import as unconditional; the backup can only come from the old binary")
+	}
+	if !strings.Contains(guide, "skips the import") {
+		t.Errorf("guide does not say a clone without an old-binary backup skips the import")
+	}
 }

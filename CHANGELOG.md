@@ -1208,6 +1208,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The remote-migrate gate and every surface that copies its adopt remedy no
+  longer tell a clone that already has a database to adopt with a bare
+  `bd bootstrap`, which prints `Nothing to do.` and changes nothing, looping
+  the refusal it was supposed to resolve (GH#6687, reported by @postoso).
+  The adopt decisions (adopt, adopt-ff, fork-skew, the blunt arm's adopt
+  bullet, the agent options and directives, embedded's lenient warning, the
+  version-bump notice and bootstrap's behind-remote guidance) now prescribe
+  the ordered move-aside recipe — create the backup parent, move the existing
+  database aside, then bootstrap — with its conditions (a configured
+  `dolt_data_dir` puts the database elsewhere; the destination must be
+  unused) and the preservation note that the aside is the recovery copy for
+  never-pushed work. On server storage (shared, proxied, or the workspace's
+  own server) the guidance instead describes the coordinated-downtime steps
+  on the serving host — stop clients and the server, move the database out of
+  the server's actual data_dir, restart, then bootstrap from a workspace with
+  direct access — because the embedded `mv` cannot run there. `bd bootstrap`
+  itself now says, on its existing-database no-op, that the database was left
+  unchanged, and the upgrade guide's adopt recipe creates the destination
+  parent first and marks the post-clone import conditional on having a
+  backup from the old binary.
 - `bd config get` for a config.yaml, git-config or user-global key no longer
   opens the database just because one exists, so it answers from those files
   while the Dolt server is down instead of failing the open (GH#5108). In
