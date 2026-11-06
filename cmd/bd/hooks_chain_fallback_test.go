@@ -347,3 +347,120 @@ exit 1
 		t.Errorf("remote received refs/heads/main although the gate refused: %s", out)
 	}
 }
+
+// TestGeneratedHookChainFallsThroughToUserContent pins that a successful
+// chained hook runs exactly once and then lets the content after the managed
+// section run, without bd, and that with bd present the shell never runs the
+// chain itself: bd hooks run owns it there.
+func TestGeneratedHookChainFallsThroughToUserContent(t *testing.T) {
+	trailer := "printf 'trailing user content ran\\n'\nprintf 'trailer\\n' >> \"$HOOK_TEST_WITNESS.trailer\"\n"
+
+	t.Run("git commit without bd", func(t *testing.T) {
+		r := newHookChainRepo(t, "repo")
+		writeHookProcessFixture(t, r.hooksDir, "pre-commit", "#!/bin/sh\n"+generateHookSection("pre-commit")+trailer)
+		writeHookProcessFixture(t, r.hooksDir, "pre-commit.old", hookChainWitnessSidecar("0"))
+		output, ok := r.commit(t, r.dir)
+		if !ok {
+			t.Fatalf("commit failed although the chained gate passed\n%s", output)
+		}
+		if runs := hookChainWitnessRuns(t, r.witness); runs != 1 {
+			t.Errorf("chained gate ran %d times, want 1\n%s", runs, output)
+		}
+		if !strings.Contains(output, "trailing user content ran") {
+			t.Errorf("content after the managed section did not run\n%s", output)
+		}
+	})
+
+	if runtime.GOOS == "windows" {
+		return
+	}
+	for _, shell := range []struct {
+		name   string
+		option string
+		posix  bool
+	}{
+		{name: "POSIX sh", posix: true},
+		{name: "POSIX sh set -eu", option: "eu", posix: true},
+		{name: "bash set -eu", option: "eu"},
+		{name: "bash set -e", option: "e"},
+	} {
+		t.Run(shell.name+" without bd", func(t *testing.T) {
+			witness := filepath.Join(t.TempDir(), "witness")
+			result := runGeneratedHookProcess(t, hookProcessCase{
+				noBD:         true,
+				shellOption:  shell.option,
+				usePOSIXSh:   shell.posix,
+				trailer:      trailer,
+				hookDirFiles: []hookProcessFixture{{name: "pre-push.old", body: hookChainWitnessSidecar("0")}},
+				extraEnv:     []string{"HOOK_TEST_WITNESS=" + witness},
+				args:         []string{"origin", "url with space"},
+			})
+			if result.exitCode != 0 {
+				t.Fatalf("hook exit = %d, want 0\n%s", result.exitCode, result.output)
+			}
+			if runs := hookChainWitnessRuns(t, witness); runs != 1 {
+				t.Errorf("chained hook ran %d times, want 1\n%s", runs, result.output)
+			}
+			if trailer, err := os.ReadFile(witness + ".trailer"); err != nil || string(trailer) != "trailer\n" {
+				t.Errorf("trailing content ran %q (err %v), want once\n%s", trailer, err, result.output)
+			}
+		})
+	}
+
+	// A chained hook that re-enters its parent hook must not be chained a
+	// second time: the parent marks the hook it is chaining.
+	t.Run("parent re-entry from the chained hook runs it once", func(t *testing.T) {
+		witness := filepath.Join(t.TempDir(), "witness")
+		result := runGeneratedHookProcess(t, hookProcessCase{
+			noBD:     true,
+			trailer:  trailer,
+			extraEnv: []string{"HOOK_TEST_WITNESS=" + witness},
+			hookDirFiles: []hookProcessFixture{{name: "pre-push.old", body: `#!/bin/sh
+printf 'ran\n' >> "$HOOK_TEST_WITNESS"
+exec ./pre-push "$@"
+`}},
+		})
+		if result.exitCode != 0 {
+			t.Fatalf("hook exit = %d, want 0\n%s", result.exitCode, result.output)
+		}
+		if runs := hookChainWitnessRuns(t, witness); runs != 1 {
+			t.Errorf("chained hook ran %d times, want 1\n%s", runs, result.output)
+		}
+	})
+
+	t.Run("another hook's chain marker does not suppress this chain", func(t *testing.T) {
+		witness := filepath.Join(t.TempDir(), "witness")
+		result := runGeneratedHookProcess(t, hookProcessCase{
+			noBD:         true,
+			shellOption:  "u",
+			hookDirFiles: []hookProcessFixture{{name: "pre-push.old", body: hookChainWitnessSidecar("0")}},
+			extraEnv:     []string{"HOOK_TEST_WITNESS=" + witness, "BD_HOOK_CHAIN_ACTIVE=pre-commit:pre-push-x"},
+		})
+		if result.exitCode != 0 {
+			t.Fatalf("hook exit = %d, want 0\n%s", result.exitCode, result.output)
+		}
+		if runs := hookChainWitnessRuns(t, witness); runs != 1 {
+			t.Errorf("chained hook ran %d times, want 1\n%s", runs, result.output)
+		}
+	})
+
+	t.Run("bd present leaves the chain to bd hooks run", func(t *testing.T) {
+		witness := filepath.Join(t.TempDir(), "witness")
+		result := runGeneratedHookProcess(t, hookProcessCase{
+			fixtures:     []hookProcessFixture{{name: "timeout", body: hookProcessGNUTimeoutStub}},
+			trailer:      trailer,
+			hookDirFiles: []hookProcessFixture{{name: "pre-push.old", body: hookChainWitnessSidecar("0")}},
+			extraEnv:     []string{"HOOK_TEST_WITNESS=" + witness},
+		})
+		if result.exitCode != 0 {
+			t.Fatalf("hook exit = %d, want 0\n%s", result.exitCode, result.output)
+		}
+		assertHookProcessBDInvocation(t, result.output, "pre-push")
+		if runs := hookChainWitnessRuns(t, witness); runs != 0 {
+			t.Errorf("the shell ran the chained hook %d times beside bd hooks run, want 0\n%s", runs, result.output)
+		}
+		if !strings.Contains(result.output, "trailing user content ran") {
+			t.Errorf("content after the managed section did not run\n%s", result.output)
+		}
+	})
+}
