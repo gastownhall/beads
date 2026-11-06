@@ -348,12 +348,16 @@ func TestTrackedManagedHookSectionsMatchGenerator(t *testing.T) {
 // hooks run fails the hook like any other status. bd hooks run never opens a
 // store (hooks is in noDbCommands), so a 3 there is the chained hook's own
 // status, which runChainedHook passes through verbatim; the section once
-// rewrote it into success with a "database not initialized" warning (GH#2449).
+// rewrote it into success with a "database not initialized" warning (GH#2449),
+// the same fail-open class as a skipped chain (GH#6751).
 func TestGenerateHookSection_PropagatesExitThree(t *testing.T) {
 	for _, hookName := range managedHookNames {
 		section := generateHookSection(hookName)
-		if strings.Contains(section, `"$_bd_exit" -eq 3`) || strings.Contains(section, "database not initialized") {
-			t.Errorf("%s section still special-cases exit 3:\n%s", hookName, section)
+		if strings.Contains(section, `"$_bd_exit" -eq 3`) {
+			t.Errorf("%s: section still special-cases exit code 3; a chained hook's real exit(3) must propagate, not be swallowed as a DB-not-initialized warning", hookName)
+		}
+		if strings.Contains(section, "database not initialized") {
+			t.Errorf("%s: section still contains the stale DB-not-initialized warning", hookName)
 		}
 	}
 	result := runGeneratedHookProcess(t, hookProcessCase{
