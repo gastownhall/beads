@@ -14,6 +14,8 @@ func TestClassify(t *testing.T) {
 		{"parenthesized union", "(SELECT 1) UNION (SELECT 2)", Read},
 		{"intersect", "SELECT 1 INTERSECT SELECT 2", Read},
 		{"except", "SELECT 1 EXCEPT SELECT 2", Read},
+		{"union distinct", "SELECT 1 UNION DISTINCT SELECT 2", Read},
+		{"union order limit", "SELECT 1 UNION SELECT 2 ORDER BY 1 LIMIT 1", Read},
 		{"show", "SHOW TABLES", Read},
 		{"describe", "DESCRIBE issues", Read},
 		{"explain select", "EXPLAIN SELECT * FROM issues", Read},
