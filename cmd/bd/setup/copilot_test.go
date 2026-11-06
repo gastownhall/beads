@@ -187,3 +187,105 @@ func TestInstallCopilotRefusesMalformedMarkers(t *testing.T) {
 		})
 	}
 }
+
+// --check names each state of the integration, and passes only for the
+// manifest beside a current beads section.
+func TestCheckCopilotStates(t *testing.T) {
+	stale := "# Rules\n\n" + agentsBeginMarker + "\nold\n" + agentsEndMarker + "\n"
+	for _, tt := range []struct {
+		name         string
+		manifest     bool
+		instructions *string
+		want         string
+		pass         bool
+	}{
+		{name: "nothing installed", want: filepath.FromSlash(CopilotManifestPath) + "\n"},
+		{name: "missing manifest", instructions: &copilotMinimalSection, want: filepath.FromSlash(CopilotManifestPath) + "\n"},
+		{name: "missing instructions", manifest: true, want: filepath.FromSlash(CopilotInstructionsPath) + "\n"},
+		{name: "unmarked instructions", manifest: true, instructions: copilotText("# Rules\n"), want: "exists but no beads section found"},
+		{name: "stale section", manifest: true, instructions: &stale, want: "installed but stale"},
+		{name: "current section", manifest: true, instructions: &copilotMinimalSection, want: "(current)", pass: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			env, stdout, _ := newCopilotTestEnv(t)
+			if tt.manifest {
+				if err := os.MkdirAll(filepath.Dir(env.manifestPath), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(env.manifestPath, []byte(testCopilotManifest), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tt.instructions != nil {
+				writeCopilotInstructions(t, env, *tt.instructions, 0o644)
+			}
+			err := checkCopilot(env)
+			if (err == nil) != tt.pass {
+				t.Errorf("checkCopilot = %v, want pass %v", err, tt.pass)
+			}
+			out := stdout.String()
+			if !strings.Contains(out, tt.want) {
+				t.Errorf("--check output does not say %q:\n%s", tt.want, out)
+			}
+			if !tt.manifest && !strings.Contains(out, "integration not installed") {
+				t.Errorf("--check output does not say the integration is not installed:\n%s", out)
+			}
+			if tt.pass && !strings.Contains(out, env.manifestPath) {
+				t.Errorf("--check output does not name %s:\n%s", env.manifestPath, out)
+			}
+			if !tt.manifest || tt.pass {
+				return
+			}
+			// Install makes the integration current.
+			if err := installCopilot(env); err != nil {
+				t.Fatalf("installCopilot: %v", err)
+			}
+			stdout.Reset()
+			if err := checkCopilot(env); err != nil {
+				t.Errorf("checkCopilot after install = %v:\n%s", err, stdout)
+			}
+		})
+	}
+}
+
+// --check fails, naming the file, for a symlinked instructions file, which
+// install skips, and for markers that bound no section, and follows neither.
+func TestCheckCopilotRefusesUnusableInstructions(t *testing.T) {
+	t.Run("symlink", func(t *testing.T) {
+		env, stdout, _ := newCopilotTestEnv(t)
+		if err := os.MkdirAll(filepath.Dir(env.instructionsPath), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		target := filepath.Join(filepath.Dir(env.instructionsPath), "real.md")
+		if err := os.WriteFile(target, []byte(copilotMinimalSection), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, env.instructionsPath); err != nil {
+			t.Skipf("symlink: %v", err)
+		}
+		if err := checkCopilot(env); err == nil {
+			t.Errorf("checkCopilot passed a symlinked instructions file:\n%s", stdout)
+		}
+		if out := stdout.String(); !strings.Contains(out, env.instructionsPath+" is a symlink") || !strings.Contains(out, "bd setup copilot") {
+			t.Errorf("--check output does not name the symlink and the remedy:\n%s", out)
+		}
+	})
+	t.Run("malformed markers", func(t *testing.T) {
+		env, _, stderr := newCopilotTestEnv(t)
+		if err := os.MkdirAll(filepath.Dir(env.manifestPath), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(env.manifestPath, []byte(testCopilotManifest), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		writeCopilotInstructions(t, env, "# Rules\n\n"+agentsBeginMarker+"\nbody\n", 0o644)
+		if err := checkCopilot(env); err == nil {
+			t.Errorf("checkCopilot passed malformed markers")
+		}
+		if !strings.Contains(stderr.String(), env.instructionsPath) || !strings.Contains(stderr.String(), "malformed beads section markers") {
+			t.Errorf("--check does not name the file and its malformed markers:\n%s", stderr)
+		}
+	})
+}
+
+func copilotText(s string) *string { return &s }
