@@ -1052,4 +1052,35 @@ func TestRunRecipe_CopilotKeepsExistingInstructions(t *testing.T) {
 		managedSection(t, rest)
 		manifest(t)
 	})
+
+	t.Run("AC-2 install updates a stale section in place and then leaves it alone", func(t *testing.T) {
+		const (
+			before = "# Before\n\nKeep me.\n\n"
+			stale  = beginMarker + " v:1 profile:minimal hash:00000000 -->\nAn old body.\n" + endMarker + "\n"
+			after  = "\n## After\n\nKeep me too.\n"
+		)
+		user := before + stale + after
+		workspace(t, &user)
+		if _, err := run(t, nil); err != nil {
+			t.Fatalf("bd setup copilot: %v", err)
+		}
+		first := read(t, instructionsPath)
+		middle, ok := strings.CutPrefix(first, before)
+		if ok {
+			middle, ok = strings.CutSuffix(middle, after)
+		}
+		if !ok {
+			t.Fatalf("install changed the text around the section; file is:\n%s", first)
+		}
+		managedSection(t, middle)
+		if middle == stale {
+			t.Fatalf("install left the stale section as it was")
+		}
+		if _, err := run(t, nil); err != nil {
+			t.Fatalf("second bd setup copilot: %v", err)
+		}
+		if second := read(t, instructionsPath); second != first {
+			t.Errorf("second install changed a current file:\n%s\nwas\n%s", second, first)
+		}
+	})
 }
