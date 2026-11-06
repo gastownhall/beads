@@ -1208,6 +1208,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd setup copilot` no longer overwrites an existing
+  `.github/copilot-instructions.md` (#7431). The install wrote its static
+  template over the file with no merge or backup, silently discarding a
+  repository's own Copilot instructions, and `--check` could not warn
+  because it only tested file existence. The built-in recipe now manages a
+  minimal beads section in the file — the same marked-section scheme
+  `AGENTS.md` integrations use — keeping every byte outside the markers,
+  including guidance an older bd wrote there without markers;
+  `.copilot-plugin/plugin.json` stays a file bd owns and overwrites.
+  `--check` now reports an instructions file with no beads section
+  distinctly, and refuses to call a file through a symbolic link or with
+  incomplete markers installed; `--remove` takes only the section out,
+  deleting the file only when the section was its whole content.
+
 - `bd config get` for a config.yaml, git-config or user-global key no longer
   opens the database just because one exists, so it answers from those files
   while the Dolt server is down instead of failing the open (GH#5108). In

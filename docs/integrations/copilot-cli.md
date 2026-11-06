@@ -34,9 +34,9 @@ For **VS Code + MCP**, see [GitHub Copilot](/integrations/github-copilot).
    - The hook behavior and the human-readable guidance stay separate
 
 3. **Lower maintenance burden**
-   - No Copilot-specific install/check/remove implementation in core
+   - Hooks stay in the tool's native format; no custom hook-running Go code
    - No Copilot-specific doctor checks
-   - The recipe just writes the native plugin file and the instruction file
+   - The instructions file is managed by the same marked-section machinery `bd setup` uses for `AGENTS.md`
 
 ## Why Copilot CLI Over MCP for Terminal Work?
 
@@ -70,14 +70,17 @@ bd setup copilot --remove
   - `SessionStart` hook: Runs `bd prime` when Copilot CLI starts a session
   - `PreCompact` hook: Runs `bd prime` before context compaction
 - `.github/copilot-instructions.md`
-  - Repository workflow guidance for Copilot CLI
+  - A minimal beads section, wrapped in `BEGIN/END BEADS INTEGRATION` markers
+
+**Your existing instructions are preserved.** `.github/copilot-instructions.md` is the standard home for a repository's own Copilot instructions, so `bd setup copilot` does not overwrite it. On install, a marked beads section is appended (or updated, if one is already there); every byte outside the markers is left untouched, including older guidance written by a previous bd version. If the file does not exist, it is created holding only the managed section. `--check` reports a file that exists but has no beads section instead of calling any existing file installed, and `--remove` deletes only the marked section — the file itself is removed only when the section was its entire content. See [IDE Setup: Managed Sections](/getting-started/ide-setup).
 
 ## Related Files
 
 - `plugins/beads/.copilot-plugin/plugin.json` - Source plugin manifest for the shared plugin package
 - `plugins/beads/copilot_manifest.go` - Embedded manifest source used by `bd setup copilot`
+- `cmd/bd/setup/copilot.go` - Install/check/remove for the recipe's two files
 - `internal/recipes/recipes.go` - Lightweight `copilot` recipe definition
-- `internal/recipes/template.go` - Static Copilot instructions template used by `bd setup`
+- `internal/recipes/template.go` - Static Copilot instructions template kept for compatibility; the built-in handler renders a managed section instead
 - [GitHub Copilot integration](/integrations/github-copilot) - VS Code MCP integration
 
 ## References

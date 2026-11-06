@@ -1134,6 +1134,39 @@ func TestRunRecipe_CopilotManagedSection(t *testing.T) {
 			t.Fatalf("the .github directory was removed: %v", err)
 		}
 	})
+
+	t.Run("fresh install creates a section-only file and remove deletes it", func(t *testing.T) {
+		tmpDir := chdirFresh(t)
+		if _, _, err := run(t); err != nil {
+			t.Fatalf("bd setup copilot: %v", err)
+		}
+
+		got, err := os.ReadFile(filepath.Join(tmpDir, ".github", "copilot-instructions.md"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.HasPrefix(string(got), "<!-- BEGIN BEADS INTEGRATION") {
+			t.Fatalf("fresh install did not create a section-only file:\n%s", got)
+		}
+		if strings.Contains(string(got), "Project Instructions for AI Agents") {
+			t.Fatalf("fresh install added AGENTS.md scaffolding:\n%s", got)
+		}
+		if _, err := os.Stat(filepath.Join(tmpDir, "AGENTS.md")); !os.IsNotExist(err) {
+			t.Fatalf("fresh install created AGENTS.md: %v", err)
+		}
+
+		resetSetupGlobals(t)
+		setupRemove = true
+		if _, _, err := run(t); err != nil {
+			t.Fatalf("bd setup copilot --remove: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(tmpDir, ".github", "copilot-instructions.md")); !os.IsNotExist(err) {
+			t.Fatalf("section-only instructions file still present: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(tmpDir, ".copilot-plugin", "plugin.json")); !os.IsNotExist(err) {
+			t.Fatalf("plugin manifest still present: %v", err)
+		}
+	})
 }
 
 // TestRunRecipe_CopilotWorkspaceOverrideUsesGenericPath pins that a workspace
