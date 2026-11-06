@@ -378,14 +378,13 @@ func testHookProcessReservedStatuses(t *testing.T) {
 	}
 	direct := perl[:2]
 	tests := []struct {
-		name          string
-		fixtures      []hookProcessFixture
-		bdExit        int
-		wantExit      int
-		wantWarning   bool
-		wantDBWarning bool
+		name        string
+		fixtures    []hookProcessFixture
+		bdExit      int
+		wantExit    int
+		wantWarning bool
 	}{
-		{name: "database-not-initialized is skipped", fixtures: gnu, bdExit: 3, wantDBWarning: true},
+		{name: "database-not-initialized 3 propagates", fixtures: gnu, bdExit: 3, wantExit: 3},
 		{name: "GNU owns 124", fixtures: gnu, bdExit: 124, wantWarning: true},
 		{name: "GNU preserves 137", fixtures: gnu, bdExit: 137, wantExit: 137},
 		{name: "GNU preserves 142", fixtures: gnu, bdExit: 142, wantExit: 142},
@@ -404,9 +403,6 @@ func testHookProcessReservedStatuses(t *testing.T) {
 			}
 			if got := strings.Contains(result.output, "timed out after"); got != tt.wantWarning {
 				t.Errorf("timeout warning presence = %v, want %v\n%s", got, tt.wantWarning, result.output)
-			}
-			if got := strings.Contains(result.output, "database not initialized"); got != tt.wantDBWarning {
-				t.Errorf("database warning presence = %v, want %v\n%s", got, tt.wantDBWarning, result.output)
 			}
 		})
 	}
@@ -514,15 +510,14 @@ func testHookProcessRealPerlStatuses(t *testing.T) {
 	perlDir := findHookProcessPerl(t)
 	args := []string{"argument with space", "second-argument"}
 	tests := []struct {
-		name          string
-		bdBody        string
-		bdExit        int
-		wantExit      int
-		wantWarning   bool
-		wantDBWarning bool
+		name        string
+		bdBody      string
+		bdExit      int
+		wantExit    int
+		wantWarning bool
 	}{
 		{name: "success continues", bdExit: 0},
-		{name: "database-not-initialized is skipped", bdExit: 3, wantDBWarning: true},
+		{name: "database-not-initialized 3 propagates", bdExit: 3, wantExit: 3},
 		{name: "other status is preserved", bdExit: 37, wantExit: 37},
 		{name: "124 is preserved", bdExit: 124, wantExit: 124},
 		{name: "142 is reported as a timeout", bdExit: 142, wantWarning: true},
@@ -548,9 +543,6 @@ func testHookProcessRealPerlStatuses(t *testing.T) {
 			}
 			if got := strings.Contains(result.output, "timed out after"); got != tt.wantWarning {
 				t.Errorf("timeout warning presence = %v, want %v\n%s", got, tt.wantWarning, result.output)
-			}
-			if got := strings.Contains(result.output, "database not initialized"); got != tt.wantDBWarning {
-				t.Errorf("database warning presence = %v, want %v\n%s", got, tt.wantDBWarning, result.output)
 			}
 			assertHookProcessBDInvocation(t, result.output, "pre-push", args...)
 		})

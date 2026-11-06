@@ -99,8 +99,9 @@ const hookTimeoutKillAfterSeconds = 2
 //     status. SIGHUP, SIGINT and SIGTERM that reach the supervisor are passed
 //     on to the group: a Ctrl-C signals the terminal's process group, which no
 //     longer holds bd.
-//   - If the beads database is not initialized (exit code 3), the hook exits
-//     successfully with a warning so that git operations are not blocked.
+//   - bd exiting 3 (database not initialized) is not special-cased: it
+//     propagates to git, so an uninitialized workspace fails visibly instead
+//     of silently passing gate hooks (GH#6751).
 //   - A chained `<hook>.old` (the gate `bd hooks run` executes first via
 //     runChainedHook) must not be skipped just because bd itself is
 //     unavailable: when `command -v bd` fails, the section runs the sidecar
@@ -231,10 +232,6 @@ func generateHookSection(hookName string) string {
 		"  fi\n" +
 		"  if { [ \"$_bd_timeout_backend\" = coreutils ] && [ \"$_bd_exit\" -eq 124 ]; } || { [ \"$_bd_timeout_backend\" = perl ] && [ \"$_bd_exit\" -eq 142 ]; }; then\n" +
 		"    echo >&2 \"beads: hook '" + hookName + "' timed out after ${_bd_timeout}s — continuing without beads\"\n" +
-		"    _bd_exit=0\n" +
-		"  fi\n" +
-		"  if [ \"$_bd_exit\" -eq 3 ]; then\n" +
-		"    echo >&2 \"beads: database not initialized — skipping hook '" + hookName + "'\"\n" +
 		"    _bd_exit=0\n" +
 		"  fi\n" +
 		"  if [ \"$_bd_exit\" -ne 0 ]; then exit \"$_bd_exit\"; fi\n" +

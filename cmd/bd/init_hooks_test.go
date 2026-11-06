@@ -344,22 +344,18 @@ func TestTrackedManagedHookSectionsMatchGenerator(t *testing.T) {
 	}
 }
 
-// TestGenerateHookSection_DBNotInitialized verifies exit code 3 handling (GH#2449).
-func TestGenerateHookSection_DBNotInitialized(t *testing.T) {
+// TestGenerateHookSection_NoExitCodeThreeSpecialCase pins GH#6751's
+// fail-visible stance: bd exiting 3 (database not initialized) must
+// propagate to git instead of being swallowed as a skip, so an
+// uninitialized workspace is visible rather than silently passing gates.
+func TestGenerateHookSection_NoExitCodeThreeSpecialCase(t *testing.T) {
 	section := generateHookSection("pre-commit")
 
-	// Exit code 3 = beads database not initialized; hook must continue gracefully
-	if !strings.Contains(section, `"$_bd_exit" -eq 3`) {
-		t.Error("section missing exit code 3 (DB not initialized) handling")
+	if strings.Contains(section, `"$_bd_exit" -eq 3`) {
+		t.Error("section still special-cases exit code 3 (DB not initialized); it must propagate")
 	}
-	if !strings.Contains(section, "database not initialized") {
-		t.Error("section missing DB-not-initialized warning message")
-	}
-
-	// After handling exit code 3, the effective exit must be 0 (success)
-	// Verify the pattern: set _bd_exit=0 after detecting code 3
-	if !strings.Contains(section, `if [ "$_bd_exit" -eq 3 ]; then`) {
-		t.Error("section missing exit code 3 conditional")
+	if strings.Contains(section, "database not initialized") {
+		t.Error("section still emits a DB-not-initialized skip warning")
 	}
 }
 
