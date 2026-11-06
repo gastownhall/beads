@@ -26,12 +26,22 @@ func runContextProxiedServer(cmd *cobra.Command, ctx context.Context) error {
 		return contextProxiedError("cannot resolve context: %v", err)
 	}
 
+	warnContextRoleReadFailure(info.RoleErr)
 	view := contextInfoView(info)
 	if jsonOutput {
 		return outputJSON(view)
 	}
 	printContextText(view)
 	return nil
+}
+
+// warnContextRoleReadFailure reports, on stderr for both routes and both
+// output modes, a beads.role read git failed. bd context still answers: the
+// snapshot omits the role rather than calling it unset.
+func warnContextRoleReadFailure(err error) {
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: role omitted, could not read it from git config: %v\n", err)
+	}
 }
 
 func contextProxiedError(format string, args ...any) error {
