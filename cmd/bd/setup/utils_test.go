@@ -490,3 +490,92 @@ func TestRemoveEmptyDir(t *testing.T) {
 		})
 	}
 }
+
+// TestRemoveEmptyDirNonDirectoryPath pins removeEmptyDir's boundary for the
+// Windows ReadDir ambiguity: it Lstats before reading, so an ordinary file,
+// like a missing path or a populated directory, is left as it is, and only an
+// empty directory is removed, exactly once.
+func TestRemoveEmptyDirNonDirectoryPath(t *testing.T) {
+	const fileBytes = "not a directory\n"
+	for _, tt := range []struct {
+		name       string
+		make       func(t *testing.T, path string)
+		wantRemove bool
+		check      func(t *testing.T, path string)
+	}{
+		{
+			name: "ordinary file",
+			make: func(t *testing.T, path string) {
+				if err := os.WriteFile(path, []byte(fileBytes), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+			check: func(t *testing.T, path string) {
+				if got, err := os.ReadFile(path); err != nil || string(got) != fileBytes {
+					t.Fatalf("file %s changed: %q, %v", path, got, err)
+				}
+			},
+		},
+		{
+			name: "absent path",
+			check: func(t *testing.T, path string) {
+				if _, err := os.Lstat(path); !os.IsNotExist(err) {
+					t.Fatalf("absent path %s should stay absent, lstat err = %v", path, err)
+				}
+			},
+		},
+		{
+			name: "empty directory",
+			make: func(t *testing.T, path string) {
+				if err := os.Mkdir(path, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantRemove: true,
+			check: func(t *testing.T, path string) {
+				if _, err := os.Lstat(path); !os.IsNotExist(err) {
+					t.Fatalf("empty directory %s should be removed, lstat err = %v", path, err)
+				}
+			},
+		},
+		{
+			name: "populated directory",
+			make: func(t *testing.T, path string) {
+				if err := os.Mkdir(path, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(path, "keep"), []byte(fileBytes), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+			check: func(t *testing.T, path string) {
+				if got, err := os.ReadFile(filepath.Join(path, "keep")); err != nil || string(got) != fileBytes {
+					t.Fatalf("child of %s changed: %q, %v", path, got, err)
+				}
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "dir")
+			if tt.make != nil {
+				tt.make(t, path)
+			}
+			var removed []string
+			remove := func(p string) error {
+				removed = append(removed, p)
+				return os.Remove(p)
+			}
+			if err := removeEmptyDir(path, remove); err != nil {
+				t.Fatalf("removeEmptyDir: %v", err)
+			}
+			if tt.wantRemove {
+				if len(removed) != 1 || removed[0] != path {
+					t.Fatalf("removals = %q, want exactly [%q]", removed, path)
+				}
+			} else if len(removed) != 0 {
+				t.Fatalf("removals = %q, want none", removed)
+			}
+			tt.check(t, path)
+		})
+	}
+}
