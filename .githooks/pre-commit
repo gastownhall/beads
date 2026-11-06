@@ -105,12 +105,34 @@ else
     *) _bd_chain="./pre-commit.old" ;;
   esac
   if [ -f "$_bd_chain" ] && [ -x "$_bd_chain" ]; then
-    export BD_GIT_HOOK=1
-    if "$_bd_chain" "$@"; then
-      :
-    else
-      _bd_exit=$?
-      exit "$_bd_exit"
+    # A chain that is itself a beads hook would call us back (GH#843,
+    # GH#1120), so classify readable chains the way the Go-side guard
+    # does and leave those alone. The marker literals are built from
+    # adjacent quoted strings so this section never embeds them intact;
+    # an unreadable executable is attempted rather than assumed ours.
+    _bd_chain_foreign=1
+    if [ -r "$_bd_chain" ]; then
+      _bd_p_begin='# --- BEGIN BEADS'' INTEGRATION'
+      _bd_p_inline='# bd ''(beads)'
+      _bd_p_shim='# bd''-shim'
+      _bd_p_version='# bd-hooks''-version: '
+      _bd_p_run='bd hooks'' run'
+      _bd_w='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_'
+      while IFS= read -r _bd_line || [ -n "$_bd_line" ]; do
+        case "$_bd_line" in
+          *"$_bd_p_begin"*|*"$_bd_p_shim"*|*"$_bd_p_inline"*|"$_bd_p_version"*) _bd_chain_foreign=0; break ;;
+          "$_bd_p_run"|"$_bd_p_run"[!$_bd_w]*|*[!$_bd_w]"$_bd_p_run"|*[!$_bd_w]"$_bd_p_run"[!$_bd_w]*) _bd_chain_foreign=0; break ;;
+        esac
+      done < "$_bd_chain"
+    fi
+    if [ "$_bd_chain_foreign" -eq 1 ]; then
+      export BD_GIT_HOOK=1
+      if "$_bd_chain" "$@"; then
+        :
+      else
+        _bd_exit=$?
+        exit "$_bd_exit"
+      fi
     fi
   fi
 fi

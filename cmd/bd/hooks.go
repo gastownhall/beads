@@ -185,12 +185,34 @@ func generateHookSection(hookName string) string {
 		"    *) _bd_chain=\"./" + hookName + ".old\" ;;\n" +
 		"  esac\n" +
 		"  if [ -f \"$_bd_chain\" ] && [ -x \"$_bd_chain\" ]; then\n" +
-		"    export BD_GIT_HOOK=1\n" +
-		"    if \"$_bd_chain\" \"$@\"; then\n" +
-		"      :\n" +
-		"    else\n" +
-		"      _bd_exit=$?\n" +
-		"      exit \"$_bd_exit\"\n" +
+		"    # A chain that is itself a beads hook would call us back (GH#843,\n" +
+		"    # GH#1120), so classify readable chains the way the Go-side guard\n" +
+		"    # does and leave those alone. The marker literals are built from\n" +
+		"    # adjacent quoted strings so this section never embeds them intact;\n" +
+		"    # an unreadable executable is attempted rather than assumed ours.\n" +
+		"    _bd_chain_foreign=1\n" +
+		"    if [ -r \"$_bd_chain\" ]; then\n" +
+		"      _bd_p_begin='# --- BEGIN BEADS'' INTEGRATION'\n" +
+		"      _bd_p_inline='# bd ''(beads)'\n" +
+		"      _bd_p_shim='# bd''-shim'\n" +
+		"      _bd_p_version='# bd-hooks''-version: '\n" +
+		"      _bd_p_run='bd hooks'' run'\n" +
+		"      _bd_w='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_'\n" +
+		"      while IFS= read -r _bd_line || [ -n \"$_bd_line\" ]; do\n" +
+		"        case \"$_bd_line\" in\n" +
+		"          *\"$_bd_p_begin\"*|*\"$_bd_p_shim\"*|*\"$_bd_p_inline\"*|\"$_bd_p_version\"*) _bd_chain_foreign=0; break ;;\n" +
+		"          \"$_bd_p_run\"|\"$_bd_p_run\"[!$_bd_w]*|*[!$_bd_w]\"$_bd_p_run\"|*[!$_bd_w]\"$_bd_p_run\"[!$_bd_w]*) _bd_chain_foreign=0; break ;;\n" +
+		"        esac\n" +
+		"      done < \"$_bd_chain\"\n" +
+		"    fi\n" +
+		"    if [ \"$_bd_chain_foreign\" -eq 1 ]; then\n" +
+		"      export BD_GIT_HOOK=1\n" +
+		"      if \"$_bd_chain\" \"$@\"; then\n" +
+		"        :\n" +
+		"      else\n" +
+		"        _bd_exit=$?\n" +
+		"        exit \"$_bd_exit\"\n" +
+		"      fi\n" +
 		"    fi\n" +
 		"  fi\n" +
 		"fi\n" +

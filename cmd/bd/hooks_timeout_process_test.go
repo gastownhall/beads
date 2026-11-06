@@ -1399,3 +1399,142 @@ func TestGeneratedHookChainFallbackProcess(t *testing.T) {
 		}
 	})
 }
+
+// hookChainClassificationFixtures are chained-hook bodies for the bd-missing
+// fallback's classifier. The shell decision must agree with getHookVersion's
+// recursion predicate (IsBdHook or IsExternalIntegration) on every supported
+// fixture: a chain that would call beads back is skipped, everything else runs.
+func TestGeneratedHookChainClassification(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell process test")
+	}
+	fixtures := []struct {
+		name    string
+		body    string
+		wantRun bool
+		pinGo   bool   // compare against getHookVersion's predicate
+		goNote  string // divergence note when pinGo is false
+	}{
+		{
+			name:    "generated beads section",
+			body:    generateHookSection("pre-commit"),
+			wantRun: false,
+			pinGo:   true,
+		},
+		{
+			name:    "thin shim",
+			body:    "#!/usr/bin/env sh\n# bd-shim v2\nexec bd hooks run pre-commit \"$@\"\n",
+			wantRun: false,
+			pinGo:   true,
+		},
+		{
+			name:    "legacy versioned hook",
+			body:    "#!/bin/sh\n# bd-hooks-version: 0.40.0\nbd sync --flush-only\n",
+			wantRun: false,
+			pinGo:   true,
+		},
+		{
+			name:    "legacy inline hook",
+			body:    "#!/bin/sh\n# bd (beads) pre-commit hook\nbd sync --flush-only\n",
+			wantRun: false,
+			pinGo:   true,
+		},
+		{
+			name:    "ordinary delegator",
+			body:    "#!/bin/sh\nbd hooks run pre-commit \"$@\"\n",
+			wantRun: false,
+			pinGo:   true,
+		},
+		{
+			name:    "commented delegator",
+			body:    "#!/bin/sh\n# delegate: bd hooks run pre-commit \"$@\"\n",
+			wantRun: false,
+			pinGo:   true,
+		},
+		{
+			name:    "delegator on unterminated final line",
+			body:    "#!/bin/sh\n# delegate: bd hooks run pre-commit \"$@\"",
+			wantRun: false,
+			pinGo:   true,
+		},
+		{
+			// The shebang must stay LF (a CRLF shebang cannot exec on Linux);
+			// the classifier sees the CRLF on the body lines it scans.
+			name:    "CRLF delegator",
+			body:    "#!/bin/sh\n# delegate: bd hooks run pre-commit \"$@\"\r\n",
+			wantRun: false,
+			pinGo:   true,
+		},
+		{
+			name:    "plain foreign hook",
+			body:    "#!/bin/sh\n# run the formatter first\n",
+			wantRun: true,
+			pinGo:   true,
+		},
+		{
+			name:    "comment mentioning the marker words",
+			body:    "#!/bin/sh\n# --- NOTE: not a BEADS INTEGRATION marker\n",
+			wantRun: true,
+			pinGo:   true,
+		},
+		{
+			name:    "marker words inserted mid phrase",
+			body:    "#!/bin/sh\n# --- BEGIN foo BEADS INTEGRATION\n",
+			wantRun: true,
+			pinGo:   true,
+		},
+		{
+			name:    "version marker mid line",
+			body:    "#!/bin/sh\necho run tests # bd-hooks-version: 1.0\n",
+			wantRun: true,
+			pinGo:   true,
+		},
+		{
+			name:    "delegator embedded in a word",
+			body:    "#!/bin/sh\n# wraps mybd hooks runner for me\n",
+			wantRun: true,
+			pinGo:   true,
+		},
+		{
+			name:    "CRLF foreign hook",
+			body:    "#!/bin/sh\n# run the formatter first\r\n",
+			wantRun: true,
+			pinGo:   true,
+		},
+		{
+			name:    "whitespace delegator runs conservatively",
+			body:    "#!/bin/sh\n# bd\thooks\t run pre-commit\n",
+			wantRun: true,
+			pinGo:   false,
+			goNote:  "Go's \\s+ regex matches tab separators and would skip it; the shell classifier matches single spaces only, so it runs the chain rather than skipping a hook it does not recognize",
+		},
+	}
+	for _, fixture := range fixtures {
+		t.Run(fixture.name, func(t *testing.T) {
+			// Every chain reports execution through the log, whatever else it does.
+			chain := fixture.body
+			if !strings.HasSuffix(chain, "\n") {
+				chain += "\n"
+			}
+			chain += "printf 'chain-ran\\n' >> \"$CHAIN_LOG\"\nexit 0\n"
+
+			result := runGeneratedHookChainFallback(t, hookChainFallbackCase{
+				usePOSIXSh: true,
+				setEu:      true,
+				chainBody:  chain,
+				chainMode:  0o755,
+			})
+			ran := strings.Contains(result.logs.chain, "chain-ran\n")
+			if ran != fixture.wantRun {
+				t.Fatalf("chain ran = %v, want %v\n%s", ran, fixture.wantRun, result.output)
+			}
+			if fixture.pinGo {
+				info, err := getHookVersion(result.logs.chainPath)
+				goSkips := err == nil && (info.IsBdHook || info.IsExternalIntegration)
+				if goSkips == ran {
+					t.Fatalf("shell classifier ran=%v but getHookVersion classifies IsBdHook=%v IsExternalIntegration=%v (%+v); the fallback must agree with the Go-side recursion guard", ran, info.IsBdHook, info.IsExternalIntegration, info)
+				}
+			}
+		})
+	}
+}
