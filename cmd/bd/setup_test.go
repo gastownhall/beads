@@ -932,3 +932,151 @@ func TestAddRecipe_RefusesPathOutsideDir(t *testing.T) {
 		}
 	}
 }
+
+// bd setup copilot must not discard a hand-written
+// .github/copilot-instructions.md: that file is the standard home for a
+// repository's Copilot instructions, so install has to keep what the user
+// wrote there (GH#7431).
+func TestRunRecipe_CopilotPreservesExistingInstructions(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	t.Chdir(tmpDir)
+	t.Setenv("BEADS_DIR", "")
+	resetSetupResolutionCaches(t)
+	resetSetupGlobals(t)
+
+	const userContent = "# Project conventions\n\nAlways run make lint before committing.\n"
+	instructions := filepath.Join(tmpDir, ".github", "copilot-instructions.md")
+	if err := os.MkdirAll(filepath.Dir(instructions), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(instructions, []byte(userContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := captureStdoutWithError(t, func() error { return runRecipe("copilot") })
+	if err != nil {
+		t.Fatalf("bd setup copilot: %v", err)
+	}
+
+	got, err := os.ReadFile(instructions)
+	if err != nil {
+		t.Fatalf("read copilot instructions: %v", err)
+	}
+	if !strings.Contains(string(got), userContent) {
+		t.Fatalf("bd setup copilot discarded the existing instructions; file is now:\n%s", got)
+	}
+	if !strings.Contains(string(got), "BEGIN BEADS INTEGRATION") || !strings.Contains(string(got), "bd prime") {
+		t.Fatalf("beads section missing after install, got:\n%s", got)
+	}
+	if strings.Count(string(got), "BEGIN BEADS INTEGRATION") != 1 {
+		t.Fatalf("expected exactly one beads section, got:\n%s", got)
+	}
+	if !strings.Contains(out, "Added beads section") {
+		t.Fatalf("expected the install to report an added section, got:\n%s", out)
+	}
+
+	// The manifest is beads-owned, so it is still written as a whole file.
+	if _, err := os.Stat(filepath.Join(tmpDir, ".copilot-plugin", "plugin.json")); err != nil {
+		t.Fatalf("expected copilot plugin manifest: %v", err)
+	}
+
+	// Re-running replaces the section in place instead of appending a second one.
+	resetSetupGlobals(t)
+	if _, err := captureStdoutWithError(t, func() error { return runRecipe("copilot") }); err != nil {
+		t.Fatalf("bd setup copilot (re-run): %v", err)
+	}
+	again, err := os.ReadFile(instructions)
+	if err != nil {
+		t.Fatalf("re-read instructions: %v", err)
+	}
+	if string(again) != string(got) {
+		t.Fatalf("re-running setup was not idempotent:\nfirst:\n%s\nsecond:\n%s", got, again)
+	}
+}
+
+// The built-in copilot recipe keeps a managed Beads section in
+// .github/copilot-instructions.md, a file the repository owns, instead of
+// writing the whole file: install keeps the user's text, --check tells a file
+// without the section from an installed one, and --remove takes out only the
+// section (GH#7431).
+func TestRunRecipe_CopilotKeepsExistingInstructions(t *testing.T) {
+	const (
+		manifestPath     = ".copilot-plugin/plugin.json"
+		instructionsPath = ".github/copilot-instructions.md"
+		beginMarker      = "<!-- BEGIN BEADS INTEGRATION"
+		endMarker        = "<!-- END BEADS INTEGRATION -->"
+	)
+	// workspace runs the test in an empty directory outside any beads
+	// workspace, holding the given instructions when they are not nil.
+	workspace := func(t *testing.T, instructions *string) {
+		t.Helper()
+		tmpDir := t.TempDir()
+		t.Chdir(tmpDir)
+		t.Setenv("BEADS_DIR", "")
+		resetSetupResolutionCaches(t)
+		resetSetupGlobals(t)
+		if instructions == nil {
+			return
+		}
+		if err := os.MkdirAll(".github", 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(instructionsPath, []byte(*instructions), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// run runs bd setup copilot with the given mode flag set, if any.
+	run := func(t *testing.T, flag *bool) (string, error) {
+		t.Helper()
+		resetSetupGlobals(t)
+		if flag != nil {
+			*flag = true
+		}
+		return captureStdoutWithError(t, func() error { return runRecipe("copilot") })
+	}
+	read := func(t *testing.T, path string) string {
+		t.Helper()
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		return string(data)
+	}
+	// managedSection checks that s is exactly one minimal Beads section.
+	managedSection := func(t *testing.T, s string) {
+		t.Helper()
+		if !strings.HasPrefix(s, beginMarker+" ") || !strings.HasSuffix(s, endMarker+"\n") ||
+			strings.Count(s, beginMarker) != 1 || strings.Count(s, endMarker) != 1 {
+			t.Fatalf("want exactly one managed Beads section, got:\n%s", s)
+		}
+		if marker, _, _ := strings.Cut(s, "\n"); !strings.Contains(marker, "profile:minimal") {
+			t.Errorf("want a minimal profile section, marker is %q", marker)
+		}
+	}
+	manifest := func(t *testing.T) {
+		t.Helper()
+		want, err := recipes.ContentForPath(recipes.BuiltinRecipes["copilot"], manifestPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := read(t, manifestPath); got != want {
+			t.Errorf("plugin manifest is\n%s\nwant\n%s", got, want)
+		}
+	}
+
+	t.Run("AC-1 install appends a section after the user's text", func(t *testing.T) {
+		user := "# Project conventions\n\nAlways run make lint before committing.\n"
+		workspace(t, &user)
+		if _, err := run(t, nil); err != nil {
+			t.Fatalf("bd setup copilot: %v", err)
+		}
+		got := read(t, instructionsPath)
+		rest, ok := strings.CutPrefix(got, user+"\n")
+		if !ok {
+			t.Fatalf("install did not keep the user's text as the file's prefix, set off by a blank line; file is:\n%s", got)
+		}
+		managedSection(t, rest)
+		manifest(t)
+	})
+}
