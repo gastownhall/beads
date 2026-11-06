@@ -1,0 +1,26 @@
+-- Migration 0075: mark a full is_blocked recompute owed after 0059
+-- (gastownhall/beads#7037).
+--
+-- Migration 0059 (and its clone-local twin, ignored 0015) recomputed is_blocked
+-- with a recursive join whose parent-child filter dolthub/dolt#11886 dropped on
+-- engines before go-mysql-server#3899 (dolt < 2.4.0). A store that crossed it
+-- there holds is_blocked = 1 on issues nothing blocks, which then vanish from
+-- bd ready, and can hold the reverse. 0059's bytes are frozen, so the store is
+-- repaired forward.
+--
+-- The work happens in code, not here (precedent: ignored 0031).
+-- recordIsBlockedRepairOwed (internal/storage/schema/is_blocked_repair.go) is
+-- registered in preMigrationRepairs for this version. When the store holds
+-- issues it runs INSERT INTO metadata for the key
+-- is_blocked_repair_owed_0075, which this step commits with its cursor row,
+-- and re-arms ignored 0032 on this clone. Ignored 0032's repair then runs the
+-- full mark/unmark fixpoint on both planes (each UPDATE issues assigns
+-- updated_at = updated_at, so no last-modified time moves), deletes the key,
+-- and commits the issues, dependencies and metadata tables together. A pass
+-- interrupted in between leaves the key committed, and the next open finishes
+-- the repair. The INSERT INTO metadata and UPDATE issues above are stated in
+-- this header on purpose: MigrateUp's pending-migration dirty-table guard scans
+-- the raw text of pending files, and this marker must be seen as touching both.
+--
+-- The marker itself changes nothing.
+SELECT 1;

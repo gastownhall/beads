@@ -2582,6 +2582,10 @@ func newWispsAbsentDB(t *testing.T) *wispsAbsentDB {
 	mock.ExpectQuery(`SELECT commit_hash FROM dolt_log WHERE message = \?`).
 		WithArgs(eventsFlipDropCommitMessage).
 		WillReturnRows(sqlmock.NewRows([]string{"commit_hash"}))
+	// The {ignored_schema_migrations, 32} repair's owed-key probe: no metadata
+	// table at HEAD, so no repair is owed.
+	mock.ExpectQuery(`SHOW TABLES AS OF 'HEAD' LIKE 'metadata'`).
+		WillReturnRows(sqlmock.NewRows([]string{"Tables_in_beads"}))
 	t.Cleanup(func() {
 		if err := mock.ExpectationsWereMet(); err != nil {
 			t.Errorf("wispsAbsentDB: unmet sql expectations: %v", err)
@@ -2676,8 +2680,8 @@ func TestRunMigrationsUsesProvidedSource(t *testing.T) {
 	// fail this test's own regression check for an unrelated reason.
 	// wispsAbsentDB answers both the {ignored_schema_migrations, 7} and
 	// {..., 15} repairs' probes (ensureWispIsBlockedForRecompute dispatches
-	// at both) and the {..., 31} repair's drop-commit lookup instead of
-	// dodging them.
+	// at both), the {..., 31} repair's drop-commit lookup and the {..., 32}
+	// repair's owed-key probe instead of dodging them.
 	ignored, err := runMigrations(context.Background(), newWispsAbsentDB(t), ignoredSource, 0, 39, false)
 	if err != nil {
 		t.Fatalf("runMigrations(ignoredSource): %v", err)
