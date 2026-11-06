@@ -657,6 +657,102 @@ func TestTrackBdVersionPreview_NeverYieldsAPendingWrite(t *testing.T) {
 	}
 }
 
+// newSecondaryTrackingWorkspace builds a bare .beads workspace (metadata,
+// database dir, marker) without touching BEADS_DIR, the cwd or the pinned
+// version globals — for tests that need a second workspace beside the one
+// newTrackingWorkspace prepared.
+func newSecondaryTrackingWorkspace(t *testing.T, lastVersion string) (beadsDir, markerPath string) {
+	t.Helper()
+	tmpDir := t.TempDir()
+	beadsDir = filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+		t.Fatalf("create .beads: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"database":"beads.db"}`), 0o600); err != nil {
+		t.Fatalf("write metadata.json: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(beadsDir, "dolt"), 0o750); err != nil {
+		t.Fatalf("create database dir: %v", err)
+	}
+	markerPath = filepath.Join(beadsDir, localVersionFile)
+	if err := writeLocalVersion(markerPath, lastVersion); err != nil {
+		t.Fatalf("write %s: %v", localVersionFile, err)
+	}
+	return beadsDir, markerPath
+}
+
+// TestDoctorVersionMaintenance_TargetsOnlyTheDoctorWorkspace walks AC-5:
+// `bd doctor <path>` detects, reconciles and persists against the TARGET
+// workspace only. Its pending marker captures the path resolved while
+// BEADS_DIR pointed at the target, so restoring the caller's environment
+// cannot redirect the write; the caller's own (equally stale) marker must
+// not move, and BEADS_DIR must come back exactly as it was — set or unset.
+func TestDoctorVersionMaintenance_TargetsOnlyTheDoctorWorkspace(t *testing.T) {
+	for _, tt := range []struct {
+		name             string
+		settle           bool
+		refusal          error
+		wantTargetMarker string
+	}{
+		{
+			name:             "ordinary failure retains the target marker",
+			settle:           false,
+			refusal:          fmt.Errorf("open: %w", &schema.DirtyTablesError{Tables: []string{"issues"}}),
+			wantTargetMarker: "1.1.0",
+		},
+		{
+			name:             "settlement advances the target marker",
+			settle:           true,
+			wantTargetMarker: "1.3.0",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, initial := range []struct {
+				name string
+				set  bool
+			}{
+				{name: "beads_dir initially set to the caller", set: true},
+				{name: "beads_dir initially unset", set: false},
+			} {
+				t.Run(initial.name, func(t *testing.T) {
+					// The doctor target: prepared through the standard helper
+					// so the pinned version globals and BEADS_DIR match its
+					// stale marker.
+					targetBeadsDir, targetMarker := newVersionBumpWorkspace(t, "1.1.0", "1.3.0")
+					// The caller's own workspace, with a stale marker of its
+					// own: any leak of tracking or persistence to the caller
+					// would rewrite it.
+					callerBeadsDir, callerMarker := newSecondaryTrackingWorkspace(t, "1.0.0")
+					if initial.set {
+						t.Setenv("BEADS_DIR", callerBeadsDir)
+					} else {
+						os.Unsetenv("BEADS_DIR")
+					}
+
+					stubVersionBumpTail(t, func(int) (bool, error) { return tt.settle, tt.refusal })
+
+					_ = captureNoticeStderr(t, func() { runDoctorVersionMaintenance(targetBeadsDir) })
+
+					if got := readLocalVersion(targetMarker); got != tt.wantTargetMarker {
+						t.Errorf("target .local_version = %q, want %q", got, tt.wantTargetMarker)
+					}
+					if got := readLocalVersion(callerMarker); got != "1.0.0" {
+						t.Errorf("caller .local_version = %q, want its stale %q untouched — doctor's maintenance leaked to the caller's workspace",
+							got, "1.0.0")
+					}
+					if versionBumpTailAttempts != 1 {
+						t.Fatalf("maintenance attempts = %d, want exactly one for the target", versionBumpTailAttempts)
+					}
+					if got, had := os.LookupEnv("BEADS_DIR"); initial.set != had || (had && got != callerBeadsDir) {
+						t.Errorf("BEADS_DIR after doctor maintenance = (%q, %t), want the caller's (%q, true)",
+							got, had, callerBeadsDir)
+					}
+				})
+			}
+		})
+	}
+}
+
 // TestVersionBump_DeferralsSettle pins that a writable-open refusal which IS
 // the operator's decision — the remote-migrate gate or the migration-consent
 // refusal — settles the one-shot bump instead of retrying: the remedy
