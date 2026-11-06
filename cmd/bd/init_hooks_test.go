@@ -379,6 +379,64 @@ func TestGenerateHookSection_HookNameInMessages(t *testing.T) {
 	}
 }
 
+// TestGenerateHookSectionHasNoForeignMarkers pins the marker invariants the
+// chain classifier must keep: it splits every marker literal it matches on,
+// so each section still holds exactly one BEGIN and one END marker for the
+// injection, removal and doctor scanners, and none of the legacy markers
+// that make a hook look like a shim. Custom content around the section must
+// survive re-injection and removal.
+func TestGenerateHookSectionHasNoForeignMarkers(t *testing.T) {
+	for _, hookName := range managedHookNames {
+		t.Run(hookName, func(t *testing.T) {
+			section := generateHookSection(hookName)
+			// The first two are doctor's detectHookMarkerState tags.
+			for _, marker := range []string{"BEGIN BEADS INTEGRATION", "END BEADS INTEGRATION", hookSectionBeginPrefix, hookSectionEndPrefix} {
+				if got := strings.Count(section, marker); got != 1 {
+					t.Errorf("section holds %q %d times, want once", marker, got)
+				}
+			}
+			if strings.Index(section, hookSectionBeginPrefix) > strings.Index(section, hookSectionEndPrefix) {
+				t.Errorf("END marker precedes BEGIN marker")
+			}
+			for _, marker := range []string{"# bd-shim", "bd-hooks-version:", "# bd (beads)"} {
+				if strings.Contains(section, marker) {
+					t.Errorf("section holds legacy marker %q", marker)
+				}
+			}
+
+			hookPath := filepath.Join(t.TempDir(), hookName)
+			before := "#!/bin/sh\necho custom-before\n\n"
+			after := "echo custom-after\n"
+			hook := before + section + after
+			if err := os.WriteFile(hookPath, []byte(hook), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			info, err := getHookVersion(hookPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !info.IsBdHook || info.Version != Version {
+				t.Errorf("getHookVersion = %+v, want a bd hook at version %s", info, Version)
+			}
+
+			if got := injectHookSection(hook, section); got != hook {
+				t.Errorf("re-injecting the section changed the hook:\n%s", got)
+			}
+			removed, found := removeHookSection(hook)
+			if !found {
+				t.Fatalf("removeHookSection did not find the section")
+			}
+			if removed != "#!/bin/sh\necho custom-before\n"+after {
+				t.Errorf("removing the section left:\n%s", removed)
+			}
+			reinjected := injectHookSection(removed, section)
+			if strings.Count(reinjected, section) != 1 || !strings.Contains(reinjected, "echo custom-before\n") || !strings.Contains(reinjected, after) {
+				t.Errorf("re-injecting after removal lost content:\n%s", reinjected)
+			}
+		})
+	}
+}
+
 func TestInjectHookSection(t *testing.T) {
 	section := generateHookSection("pre-commit")
 
