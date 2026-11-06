@@ -1214,9 +1214,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and then failing every read (#6572). The check used to look at the `issues`
   columns only, so a schema without `leases` (or a lease or `wisps` column)
   slipped through; embedded, proxied-server and server-mode read-only opens
-  now check the `leases` overlay and `wisps` too. The refusal keeps the gate's
-  own remedy and says that reads are refused and what is missing (under
-  `--json`, in the existing `error` and `hint` fields). The upgrade notice and
+  now check the `leases` overlay and `wisps` too. On embedded and
+  proxied-server opens the refusal keeps the gate's own remedy and says that
+  reads are refused and what is missing (under `--json`, in the existing
+  `error` and `hint` fields); a server-mode read-only open, which never
+  consults the gate, refuses with the schema version mismatch error, which
+  names what is missing and `bd migrate schema` (through a gateway, the
+  server administrator's remedy). The upgrade notice and
   the shared-server upgrade guide no longer promise that reads keep working,
   and the notice's adopt remedy links the adoption steps instead of bare
   `bd bootstrap`, which does nothing on an existing database (#6687).

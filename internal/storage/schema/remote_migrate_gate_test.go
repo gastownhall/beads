@@ -443,9 +443,10 @@ func TestRemoteMigrateGateError_ReadsRefused(t *testing.T) {
 // decision-specific remedy and options. It must not keep promising that reads
 // continue, and must not add a migration instruction the decision did not
 // already give (the generic `bd migrate schema` remedy of a plain
-// SchemaBehindError would contradict adopt, fork-skew and data-behind), nor
-// promise that the decision's remedy alone restores reads: those need the
-// clone-local tables reconciled too, which a data-behind pull does not do.
+// SchemaBehindError would contradict adopt, fork-skew and data-behind). On
+// the data-behind stop it must say that the pull alone does not restore
+// reads, since those need the clone-local tables reconciled too, and must
+// not forbid the re-run the decision prescribes after the pull.
 func TestRemoteMigrateGateError_ReadsRefusedRendering(t *testing.T) {
 	const promise = " Reads keep working on the current schema meanwhile, as long as it can answer this binary's reads."
 	const nothingElse = "; nothing else is needed."
@@ -509,6 +510,20 @@ func TestRemoteMigrateGateError_ReadsRefusedRendering(t *testing.T) {
 			}
 			if gateErr.IsDataBehind() && !strings.Contains(directive, "tracked history only") {
 				t.Errorf("AgentDirective() = %q, want it to say the pull does not rebuild the clone-local tables", directive)
+			}
+			// No directive may both prescribe a re-run and forbid one: the
+			// non-shared data-behind stop says re-running the original
+			// command migrates on its own, and an agent handed that beside
+			// an outright retry ban stalls. Every retry ban is scoped to the
+			// remedy instead.
+			for _, ban := range strings.Split(directive, "do NOT retry")[1:] {
+				if clause, _, _ := strings.Cut(ban, "."); !strings.Contains(clause, " before ") {
+					t.Errorf("AgentDirective() forbids retrying outright (%q): %q", "do NOT retry"+clause, directive)
+				}
+			}
+			if strings.Contains(directive, "re-running the original command") &&
+				strings.Contains(strings.ToLower(directive), "do not auto-run a migration") {
+				t.Errorf("AgentDirective() prescribes the re-run that migrates and forbids auto-running a migration: %q", directive)
 			}
 			if got, want := strings.Count(directive, "bd migrate"), strings.Count(plainDirective, "bd migrate"); got != want {
 				t.Errorf("AgentDirective() names `bd migrate` %d times, want the decision's own %d: %q", got, want, directive)

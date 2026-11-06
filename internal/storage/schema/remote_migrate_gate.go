@@ -325,11 +325,11 @@ func (e *RemoteMigrateGateError) Notes() string {
 			"    " + e.missingForReads() + "\n" +
 			"  which this binary's issue reads select. Reads need both the schema and\n" +
 			"  the clone-local tables they read (leases, wisps) reconciled with this\n" +
-			"  binary; the steps above do not by themselves guarantee that.\n"
+			"  binary.\n"
 		if e.IsDataBehind() {
 			msg += "" +
-				"  A pull reconciles tracked history only; it does not rebuild those\n" +
-				"  clone-local tables.\n"
+				"  A pull reconciles tracked history only, so it does not restore reads\n" +
+				"  by itself; the migration that follows it does.\n"
 		}
 	}
 	return msg
@@ -636,15 +636,19 @@ func (e *RemoteMigrateGateError) EscapeHint() string {
 // observes and reports, the agent decides and acts").
 func (e *RemoteMigrateGateError) AgentDirective() string {
 	d := e.agentDirective()
-	if e.ReadsRefused != nil {
-		d += " Reads are refused too: " + e.readsRefusedFact() + ", so read commands fail until both the " +
-			"schema and the clone-local tables they read (leases, wisps) are reconciled with this binary"
-		if e.IsDataBehind() {
-			d += "; the pull reconciles tracked history only and does not by itself rebuild those clone-local tables"
-		}
-		d += " — do NOT retry them, and do NOT auto-run a migration to restore reads."
+	if e.ReadsRefused == nil {
+		return d
 	}
-	return d
+	d += " Reads are refused too: " + e.readsRefusedFact() + ", so read commands fail until both the " +
+		"schema and the clone-local tables they read (leases, wisps) are reconciled with this binary"
+	if e.IsDataBehind() {
+		// The decision above prescribes what follows the pull (a re-run that
+		// migrates, or the operator's consent), so the wait is scoped to the
+		// pull: an outright retry ban would contradict that re-run.
+		return d + "; the pull reconciles tracked history only and does not by itself rebuild those clone-local " +
+			"tables, the migration that follows it does — do NOT retry a read command before the pull has completed."
+	}
+	return d + " — do NOT retry them before the remedy above has run, and do NOT auto-run a migration to restore reads."
 }
 
 // agentDirective is AgentDirective's decision-specific instruction.

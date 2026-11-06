@@ -620,8 +620,11 @@ deadline — but the window is a degraded one, so keep it short.
 If the server's schema lacks a table or column the upgraded client's reads
 select, reads are refused too until step 2. A schema at v53 or older (1.1.x,
 or 1.2.2, the re-release of the 1.1 line) has no `leases` table, for example:
-`bd list` then stops when it opens the database, with the gate's guidance
-saying that reads are refused and that the schema lacks `leases`
+`bd list` then stops when it opens the database, with a schema version
+mismatch error that names `leases` as missing and `bd migrate schema` (step 2)
+as the way to migrate. In proxied-server mode it stops with the gate's
+guidance instead, saying that reads are refused too and that the schema lacks
+`leases`
 ([#6929](https://github.com/gastownhall/beads/issues/6929),
 [#6572](https://github.com/gastownhall/beads/issues/6572)). Run step 2 as
 soon as the clients are upgraded.
@@ -654,7 +657,9 @@ The same rules apply in **proxied-server mode**, which is a shared server
 reached through a local proxy. Three differences worth knowing:
 
 - read commands print a warning and keep serving the current schema, rather
-  than the read simply not touching it;
+  than the read simply not touching it, but only while that schema has every
+  table and column their reads select; otherwise they are refused with the
+  gate's guidance;
 - `bd serve` refuses to start against a database with pending migrations,
   because a daemon has no operator to consent for it. Reconcile the schema
   first with step 2, then start the daemon — or, for an unattended service,
