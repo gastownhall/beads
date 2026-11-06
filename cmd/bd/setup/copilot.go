@@ -72,7 +72,7 @@ func InstallCopilot(manifest string) error {
 func installCopilot(env copilotEnv) error {
 	// Refuse markers the section cannot be found by before writing anything:
 	// an END marker alone would otherwise get a section appended after it.
-	if _, err := readCopilotInstructions(env); err != nil {
+	if err := validateCopilotInstructions(env); err != nil {
 		return err
 	}
 
@@ -102,30 +102,29 @@ func installCopilot(env copilotEnv) error {
 	return nil
 }
 
-// readCopilotInstructions returns the instructions file's content, or ""
-// when it is missing or a symlink, which bd neither reads nor writes through.
-// It fails, saying so, when the file's beads markers are malformed.
-func readCopilotInstructions(env copilotEnv) (string, error) {
+// validateCopilotInstructions fails, saying so, when the instructions file's
+// beads markers are malformed. A missing file passes, and so does a symlink,
+// which bd neither reads nor writes through.
+func validateCopilotInstructions(env copilotEnv) error {
 	info, err := os.Lstat(env.instructionsPath)
 	if os.IsNotExist(err) || (err == nil && info.Mode()&os.ModeSymlink != 0) {
-		return "", nil
+		return nil
 	}
 	if err != nil {
 		_, _ = fmt.Fprintf(env.stderr, "Error: failed to inspect %s: %v\n", env.instructionsPath, err)
-		return "", err
+		return err
 	}
 	data, err := os.ReadFile(env.instructionsPath) // #nosec G304 -- bd's own setup destination
 	if err != nil {
 		_, _ = fmt.Fprintf(env.stderr, "Error: failed to read %s: %v\n", env.instructionsPath, err)
-		return "", err
+		return err
 	}
-	content := string(data)
-	if err := validateCopilotSection(content); err != nil {
+	if err := validateCopilotSection(string(data)); err != nil {
 		_, _ = fmt.Fprintf(env.stderr, "Error: %s: %v\n", env.instructionsPath, err)
 		_, _ = fmt.Fprintf(env.stderr, "  Fix or delete the beads markers by hand, then run: %s\n", copilotAgentsIntegration.setupCommand)
-		return "", err
+		return err
 	}
-	return content, nil
+	return nil
 }
 
 // validateCopilotSection reports a beads section bd cannot tell the extent
@@ -144,5 +143,56 @@ func validateCopilotSection(content string) error {
 	case end < start:
 		return fmt.Errorf("%w: END marker before the BEGIN marker", errCopilotMalformedSection)
 	}
+	return nil
+}
+
+var (
+	errCopilotNotInstalled       = errors.New("copilot integration not installed")
+	errCopilotInstructionsLinked = errors.New("copilot instructions are a symlink")
+)
+
+// CheckCopilot reports whether the Copilot CLI integration is installed: the
+// plugin manifest exists and .github/copilot-instructions.md holds a current
+// beads section. A file without the section, whatever else it holds, is not
+// installed.
+func CheckCopilot() error {
+	return checkCopilot(defaultCopilotEnv(""))
+}
+
+func checkCopilot(env copilotEnv) error {
+	setupCommand := copilotAgentsIntegration.setupCommand
+	if info, err := os.Lstat(env.instructionsPath); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		_, _ = fmt.Fprintf(env.stdout, "✗ %s is a symlink; bd keeps its beads section only in a regular file\n", env.instructionsPath)
+		_, _ = fmt.Fprintf(env.stdout, "  Replace the symlink with a regular file, then run: %s\n", setupCommand)
+		return errCopilotInstructionsLinked
+	}
+
+	var missing []string
+	if _, err := os.Stat(env.manifestPath); os.IsNotExist(err) {
+		missing = append(missing, env.manifestPath)
+	} else if err != nil {
+		// A manifest bd cannot stat is not one it can report installed.
+		_, _ = fmt.Fprintf(env.stderr, "Error: failed to inspect %s: %v\n", env.manifestPath, err)
+		return err
+	}
+	if _, err := os.Lstat(env.instructionsPath); os.IsNotExist(err) {
+		missing = append(missing, env.instructionsPath)
+	}
+	if len(missing) > 0 {
+		_, _ = fmt.Fprintf(env.stdout, "✗ %s integration not installed\n", copilotAgentsIntegration.name)
+		_, _ = fmt.Fprintf(env.stdout, "  Run: %s\n", setupCommand)
+		for _, path := range missing {
+			_, _ = fmt.Fprintf(env.stdout, "  Missing: %s\n", path)
+		}
+		return errCopilotNotInstalled
+	}
+
+	if err := validateCopilotInstructions(env); err != nil {
+		return err
+	}
+	if err := checkAgents(env.instructionsEnv(), copilotAgentsIntegration); err != nil {
+		return err
+	}
+	_, _ = fmt.Fprintf(env.stdout, "  File: %s\n", env.manifestPath)
 	return nil
 }
