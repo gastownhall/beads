@@ -9,7 +9,15 @@ import (
 )
 
 func deferredParentProbeRegex(issueTable string) string {
-	return `SELECT 1 FROM ` + issueTable + ` WHERE defer_until IS NOT NULL AND defer_until > UTC_TIMESTAMP\(\) LIMIT 1`
+	return `SELECT \(EXISTS \(SELECT 1 FROM ` + issueTable + ` WHERE defer_until IS NOT NULL AND defer_until > UTC_TIMESTAMP\(\)\)` +
+		` OR EXISTS \(SELECT 1 FROM ` + issueTable + ` WHERE defer_until IS NULL AND status = 'deferred'\)\)`
+}
+
+// deferredParentGateRow builds the one boolean row the scan answers: the
+// SELECT of the EXISTS pair always returns a row, and the value — not the
+// presence of one — is the gate's answer.
+func deferredParentGateRow(yes bool) *sqlmock.Rows {
+	return sqlmock.NewRows([]string{"gate"}).AddRow(yes)
 }
 
 func deferredEdgeRegex(e deferredParentEdge) string {
@@ -20,7 +28,7 @@ func deferredEdgeRegex(e deferredParentEdge) string {
 func noDeferredChildren() *sqlmock.Rows { return sqlmock.NewRows([]string{"issue_id"}) }
 
 // TestDeferredParentEdgesBrokenDurablePlaneIsAnError is the domain/db twin of
-// the issueops guard on the same join. `descendantsOfFutureDeferredParents`
+// the issueops guard on the same join. `descendantsOfDeferredParents`
 // walks four (dependency table, issue table) pairs, and three of the four name
 // a table every beads database must have. Its gate classified the error class
 // alone with no plane guard at all, and it continues rather than aborting, so
@@ -47,7 +55,7 @@ func TestDeferredParentEdgesBrokenDurablePlaneIsAnError(t *testing.T) {
 			mock, repo := newMockRepo(t)
 			gone := missingTable(missing)
 			mock.ExpectQuery(deferredParentProbeRegex("issues")).
-				WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
+				WillReturnRows(deferredParentGateRow(true))
 			for _, e := range deferredParentEdges {
 				if e.depTable == missing || e.issueTable == missing {
 					mock.ExpectQuery(deferredEdgeRegex(e)).WillReturnError(gone)
@@ -77,7 +85,7 @@ func TestDeferredParentEdgesMissingWispPlaneIsNotAnError(t *testing.T) {
 		t.Run(missing, func(t *testing.T) {
 			mock, repo := newMockRepo(t)
 			mock.ExpectQuery(deferredParentProbeRegex("issues")).
-				WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
+				WillReturnRows(deferredParentGateRow(true))
 			for _, e := range deferredParentEdges {
 				if e.depTable == missing || e.issueTable == missing {
 					mock.ExpectQuery(deferredEdgeRegex(e)).WillReturnError(missingTable(missing))
@@ -113,10 +121,32 @@ func TestDeferredParentEdgesUnrelatedErrorPropagates(t *testing.T) {
 	mock, repo := newMockRepo(t)
 	boom := errors.New("connection refused")
 	mock.ExpectQuery(deferredParentProbeRegex("issues")).
-		WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
+		WillReturnRows(deferredParentGateRow(true))
 	mock.ExpectQuery(deferredEdgeRegex(deferredParentEdges[0])).WillReturnError(boom)
 
 	if _, err := repo.getChildrenOfDeferredParents(t.Context()); !errors.Is(err, boom) {
 		t.Fatalf("a failed deferred-parent edge did not propagate: %v", err)
+	}
+}
+
+// TestDeferredParentWalkSkippedWhenGateAnswersFalse pins the gate contract the
+// scalar probe introduced for GH#7300: `SELECT (EXISTS ... OR EXISTS ...)`
+// always answers a row, so a false value — not only the absence of one — must
+// stop the walk before any child scan runs. sqlmock fails on any unscripted
+// query, so the missing edge expectations are the assertion: none may run.
+func TestDeferredParentWalkSkippedWhenGateAnswersFalse(t *testing.T) {
+	mock, repo := newMockRepo(t)
+	mock.ExpectQuery(deferredParentProbeRegex("issues")).WillReturnRows(deferredParentGateRow(false))
+	mock.ExpectQuery(deferredParentProbeRegex("wisps")).WillReturnRows(deferredParentGateRow(false))
+
+	got, err := repo.getChildrenOfDeferredParents(t.Context())
+	if err != nil {
+		t.Fatalf("a false gate must not error: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("children = %v, want none (no edge may have been walked)", got)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
 	}
 }

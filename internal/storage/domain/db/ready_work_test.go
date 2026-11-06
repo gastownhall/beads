@@ -27,6 +27,8 @@ func (s *testSuite) TestIssueGetReadyWork() {
 	s.Run("Unassigned", s.readyUnassigned)
 	s.Run("ExcludesDeferred", s.readyExcludesDeferred)
 	s.Run("IncludeDeferred", s.readyIncludeDeferred)
+	s.Run("ExcludesChildrenOfUndatedDeferredParent", s.readyExcludesChildrenOfUndatedDeferredParent)
+	s.Run("ExpiredDatedDeferredParentLeavesChildReadyBeforeWake", s.readyExpiredDatedDeferredParentLeavesChildReadyBeforeWake)
 	s.Run("LabelFilter", s.readyLabelFilter)
 	s.Run("LimitRespected", s.readyLimitRespected)
 	s.Run("SortByPriority", s.readySortByPriority)
@@ -296,6 +298,61 @@ func (s *testSuite) readyIncludeDeferred() {
 	out, err := r.GetReadyWork(s.Ctx(), types.WorkFilter{IncludeDeferred: true})
 	s.Require().NoError(err)
 	s.Contains(issueIDsFrom(out), "bd-rdy-idf-1")
+}
+
+// readyExcludesChildrenOfUndatedDeferredParent pins GH#7300 on this stack: a
+// parent with status 'deferred' and no defer_until must hide its direct
+// children. No row in the database has a future defer_until, so only the
+// status can trip the deferred-parent gate.
+func (s *testSuite) readyExcludesChildrenOfUndatedDeferredParent() {
+	r := s.issueRepo()
+	parent := newTestIssue("bd-rdy-udp-parent", "undated deferred parent")
+	parent.IssueType = types.TypeEpic
+	parent.Status = types.StatusDeferred
+	s.Require().NoError(r.Insert(s.Ctx(), parent, "tester", domain.InsertIssueOpts{}))
+	child := newTestIssue("bd-rdy-udp-child", "child of undated deferred parent")
+	s.Require().NoError(r.Insert(s.Ctx(), child, "tester", domain.InsertIssueOpts{}))
+	s.Require().NoError(s.depRepo().Insert(s.Ctx(),
+		newDep(child.ID, parent.ID, types.DepParentChild), "tester", domain.DepInsertOpts{}))
+	free := newTestIssue("bd-rdy-udp-free", "unrelated free issue")
+	s.Require().NoError(r.Insert(s.Ctx(), free, "tester", domain.InsertIssueOpts{}))
+
+	out, err := r.GetReadyWork(s.Ctx(), types.WorkFilter{})
+	s.Require().NoError(err)
+	// The suite resets once per method, so sibling subtests' rows are in this
+	// read too: the pin is membership, not the whole set.
+	got := issueIDsFrom(out)
+	s.Contains(got, free.ID, "the unrelated issue stays ready")
+	s.NotContains(got, parent.ID, "the deferred parent is not ready")
+	s.NotContains(got, child.ID, "child of an undated deferred parent must be withheld")
+}
+
+// readyExpiredDatedDeferredParentLeavesChildReadyBeforeWake guards the other
+// edge of the deferred-parent rule: a snooze whose date has passed keeps its
+// child ready until the (advisory) wake sweep opens it. This stack's predicate
+// matches a deferred parent only through a future date or a NULL date; the
+// past-date row still reads 'deferred' and must not hide anything.
+func (s *testSuite) readyExpiredDatedDeferredParentLeavesChildReadyBeforeWake() {
+	r := s.issueRepo()
+	parent := newTestIssue("bd-rdy-xdf-parent", "expired snooze parent")
+	parent.IssueType = types.TypeEpic
+	s.Require().NoError(r.Insert(s.Ctx(), parent, "tester", domain.InsertIssueOpts{}))
+	child := newTestIssue("bd-rdy-xdf-child", "child of expired snooze parent")
+	s.Require().NoError(r.Insert(s.Ctx(), child, "tester", domain.InsertIssueOpts{}))
+	s.Require().NoError(s.depRepo().Insert(s.Ctx(),
+		newDep(child.ID, parent.ID, types.DepParentChild), "tester", domain.DepInsertOpts{}))
+	free := newTestIssue("bd-rdy-xdf-free", "unrelated free issue")
+	s.Require().NoError(r.Insert(s.Ctx(), free, "tester", domain.InsertIssueOpts{}))
+	past := time.Now().UTC().Add(-48 * time.Hour)
+	_, err := s.Runner().ExecContext(s.Ctx(),
+		"UPDATE issues SET status = 'deferred', defer_until = ? WHERE id = ?", past, parent.ID)
+	s.Require().NoError(err)
+
+	out, err := r.GetReadyWork(s.Ctx(), types.WorkFilter{})
+	s.Require().NoError(err)
+	got := issueIDsFrom(out)
+	s.Contains(got, child.ID, "an expired snooze must leave its child ready before the wake opens it")
+	s.Contains(got, free.ID)
 }
 
 func (s *testSuite) readyLabelFilter() {
