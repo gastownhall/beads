@@ -520,8 +520,9 @@ func failVersionBump(err error) versionBumpOutcome {
 // purpose (gastownhall/beads#6929). Both used to end at debug.Logf, so an
 // upgrade that applied nothing looked like one that had worked — and with the
 // one-shot .local_version consumed, nothing ever said otherwise. The witness
-// is now kept (settleBdVersionStamp), so the line says the next command
-// retries, and names the way to look further.
+// is now kept (settleBdVersionStamp), so the line says the next eligible
+// non-preview command retries (a preview leaves the attempt alone), and names
+// the way to look further.
 func noticeVersionBumpFailure(err error) {
 	// Same stderr contract as noticeSharedMigrateRefusal: under --json this
 	// stream may carry the command's own machine-readable error a moment
@@ -548,7 +549,7 @@ func noticeVersionBumpFailure(err error) {
 	}
 	fmt.Fprintf(os.Stderr,
 		"bd upgraded to %s, but finishing the upgrade failed: %v\n"+
-			"The next bd command will retry it; run 'bd doctor' to diagnose.\n",
+			"The next eligible non-preview command retries the migration; run 'bd doctor' to diagnose.\n",
 		displayVersion(Version), err)
 }
 

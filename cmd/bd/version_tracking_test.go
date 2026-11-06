@@ -785,8 +785,10 @@ func TestSettleBdVersionStamp_NothingPending(t *testing.T) {
 // database: those that are skipped under the existing rules, and a config
 // that cannot be loaded, which fails and keeps the upgrade for a retry.
 func TestAutoMigrateOnVersionBump_Outcomes(t *testing.T) {
-	origUpgradeDetected := versionUpgradeDetected
-	t.Cleanup(func() { versionUpgradeDetected = origUpgradeDetected })
+	// The unreadable-config row fails the bump, which records it for the
+	// banner: restore that too, or a later banner test inherits it.
+	origUpgradeDetected, origFailed := versionUpgradeDetected, versionBumpFailedThisRun
+	t.Cleanup(func() { versionUpgradeDetected, versionBumpFailedThisRun = origUpgradeDetected, origFailed })
 
 	versionUpgradeDetected = false
 	if got := autoMigrateOnVersionBump(t.TempDir()); got != versionBumpSkipped {
@@ -866,6 +868,40 @@ func TestAutoMigrateOnVersionBump_FailureIsReportedAndRetried(t *testing.T) {
 	}
 }
 
+// TestUpgradeBannerSuppressedAfterFailedBump pins the banner half of #6929 on
+// its own: after a failed bump the "bd upgraded" banner prints nothing on
+// stdout and does not acknowledge itself, so a later invocation whose bump
+// goes through still shows it.
+func TestUpgradeBannerSuppressedAfterFailedBump(t *testing.T) {
+	origDetected, origPrevious, origAck, origFailed := versionUpgradeDetected, previousVersion, upgradeAcknowledged, versionBumpFailedThisRun
+	t.Cleanup(func() {
+		versionUpgradeDetected, previousVersion, upgradeAcknowledged, versionBumpFailedThisRun = origDetected, origPrevious, origAck, origFailed
+	})
+	versionUpgradeDetected, previousVersion = true, "1.3.3"
+
+	t.Run("silent after a failed bump, without acknowledging", func(t *testing.T) {
+		versionBumpFailedThisRun, upgradeAcknowledged = true, false
+		out := captureStdout(t, func() error { maybeShowUpgradeNotification(); return nil })
+		if out != "" {
+			t.Errorf("banner must stay silent after a failed bump; got:\n%s", out)
+		}
+		if upgradeAcknowledged {
+			t.Error("banner must not acknowledge itself while suppressed, or the next successful command stays silent too")
+		}
+	})
+
+	t.Run("prints and acknowledges once the bump settles", func(t *testing.T) {
+		versionBumpFailedThisRun, upgradeAcknowledged = false, false
+		out := captureStdout(t, func() error { maybeShowUpgradeNotification(); return nil })
+		if !strings.Contains(out, "bd upgraded") {
+			t.Errorf("banner should print for a settled upgrade; got:\n%s", out)
+		}
+		if !upgradeAcknowledged {
+			t.Error("banner should acknowledge itself once shown")
+		}
+	})
+}
+
 // TestNoticeVersionBumpFailure pins the generic failure notice: the underlying
 // error, the retry behavior and the diagnostic to run.
 func TestNoticeVersionBumpFailure(t *testing.T) {
@@ -873,7 +909,7 @@ func TestNoticeVersionBumpFailure(t *testing.T) {
 	out := captureNoticeStderr(t, func() {
 		noticeVersionBumpFailure(errors.New("dial tcp 127.0.0.1:1: connection refused"))
 	})
-	for _, want := range []string{"connection refused", "will retry", "bd doctor"} {
+	for _, want := range []string{"connection refused", "next eligible non-preview command retries", "bd doctor"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("notice is missing %q:\n%s", want, out)
 		}
