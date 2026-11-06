@@ -1013,3 +1013,71 @@ func TestVersionBump_SettledOutcomesAdvanceMarker(t *testing.T) {
 		}
 	})
 }
+
+// TestDoctorVersionMaintenance_ScopesMarkerToTarget covers `bd doctor <path>`
+// on a workspace other than the caller's: its version maintenance runs against
+// the target, keeps or advances only the target's marker by the same rules as
+// the pre-run, restores BEADS_DIR (set or unset) and never writes the
+// caller's marker.
+func TestDoctorVersionMaintenance_ScopesMarkerToTarget(t *testing.T) {
+	pinJSONOutput(t, true)
+	failed := fmt.Errorf("failed to open database: %w", errors.New("connection refused"))
+
+	for _, tt := range []struct {
+		name          string
+		callerEnvSet  bool
+		tailErr       error
+		wantTargetVer string
+	}{
+		{name: "failure, BEADS_DIR set", callerEnvSet: true, tailErr: failed, wantTargetVer: "1.1.0"},
+		{name: "failure, BEADS_DIR unset", tailErr: failed, wantTargetVer: "1.1.0"},
+		{name: "settled, BEADS_DIR set", callerEnvSet: true, wantTargetVer: "1.3.0"},
+		{name: "settled, BEADS_DIR unset", wantTargetVer: "1.3.0"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			callerBeadsDir, callerMarker := newVersionBumpWorkspace(t, "1.1.0", "1.3.0")
+			if !tt.callerEnvSet {
+				if err := os.Unsetenv("BEADS_DIR"); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			targetBeadsDir := filepath.Join(t.TempDir(), ".beads")
+			if err := os.MkdirAll(filepath.Join(targetBeadsDir, "dolt"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(targetBeadsDir, "metadata.json"), []byte(`{"database":"beads.db"}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			targetMarker := filepath.Join(targetBeadsDir, localVersionFile)
+			if err := writeLocalVersion(targetMarker, "1.1.0"); err != nil {
+				t.Fatal(err)
+			}
+
+			var opened []string
+			orig := reconcileVersionBump
+			reconcileVersionBump = func(_ context.Context, beadsDir string) error {
+				opened = append(opened, beadsDir)
+				return tt.tailErr
+			}
+			t.Cleanup(func() { reconcileVersionBump = orig })
+
+			runDoctorVersionMaintenance(targetBeadsDir)
+
+			if len(opened) != 1 || opened[0] != targetBeadsDir {
+				t.Errorf("maintenance opened %v, want only the target %s", opened, targetBeadsDir)
+			}
+			if got := readLocalVersion(targetMarker); got != tt.wantTargetVer {
+				t.Errorf("target .local_version = %q, want %q", got, tt.wantTargetVer)
+			}
+			if got := readLocalVersion(callerMarker); got != "1.1.0" {
+				t.Errorf("caller .local_version = %q, want it untouched at %q", got, "1.1.0")
+			}
+			got, set := os.LookupEnv("BEADS_DIR")
+			if set != tt.callerEnvSet || (set && got != callerBeadsDir) {
+				t.Errorf("BEADS_DIR after doctor maintenance = (%q, set=%v), want (%q, set=%v)",
+					got, set, callerBeadsDir, tt.callerEnvSet)
+			}
+		})
+	}
+}
