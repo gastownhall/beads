@@ -46,6 +46,16 @@ func TestResolveDoltBackupURL(t *testing.T) {
 			wantExact: "file:///tmp/backup",
 		},
 		{
+			name:      "windows drive file:// URL passes through",
+			input:     "file:///C:/backups/beads",
+			wantExact: "file:///C:/backups/beads",
+		},
+		{
+			name:      "lower-case drive file:// URL passes through unrepaired",
+			input:     `file://c:\backups\beads`,
+			wantExact: `file://c:\backups\beads`,
+		},
+		{
 			name:      "aws:// URL passes through",
 			input:     "aws://[key:secret@]bucket/path",
 			wantExact: "aws://[key:secret@]bucket/path",
