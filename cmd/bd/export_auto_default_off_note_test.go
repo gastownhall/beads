@@ -397,3 +397,60 @@ func TestMaybeAutoExportDefaultOffNoteStaysQuietOutsideHumanOutput(t *testing.T)
 		})
 	}
 }
+
+// `bd config set export.auto ...` writes YAML without refreshing the loaded
+// config, so in that same invocation export.auto still reads as the default.
+// The note re-reads the workspace YAML and must already treat the new value
+// as the user's choice. A YAML null stays unset, as bd's config reader has it.
+func TestMaybeAutoExportDefaultOffNoteHonorsSameInvocationConfigWrite(t *testing.T) {
+	cases := []struct {
+		name     string
+		write    func(t *testing.T, fx defaultOffNoteFixture)
+		wantNote bool
+	}{
+		{name: "config set export.auto true", write: func(t *testing.T, _ defaultOffNoteFixture) {
+			if err := config.SetYamlConfig("export.auto", "true"); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "config set export.auto false", write: func(t *testing.T, _ defaultOffNoteFixture) {
+			if err := config.SetYamlConfig("export.auto", "false"); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "config.local.yaml written false", write: func(t *testing.T, fx defaultOffNoteFixture) {
+			writeDefaultOffNoteFile(t, filepath.Join(fx.beadsDir, "config.local.yaml"), "export:\n  auto: false\n")
+		}},
+		{name: "config.yaml now unparseable", write: func(t *testing.T, fx defaultOffNoteFixture) {
+			writeDefaultOffNoteFile(t, filepath.Join(fx.beadsDir, "config.yaml"), "export: [unclosed\n")
+		}},
+		{name: "null export section stays unset", wantNote: true, write: func(t *testing.T, fx defaultOffNoteFixture) {
+			writeDefaultOffNoteFile(t, filepath.Join(fx.beadsDir, "config.yaml"), "issue-prefix: test\nexport:\n  # auto: true\n")
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := defaultOffNoteWorkspace(t)
+			initConfigForTest(t)
+			tc.write(t, fx)
+			if config.GetBool("export.auto") {
+				t.Fatal("precondition: export.auto must still read false in memory")
+			}
+			if src := config.GetValueSource("export.auto"); src != config.SourceDefault {
+				t.Fatalf("precondition: export.auto source = %q, want %q", src, config.SourceDefault)
+			}
+
+			stdout, stderr := runDefaultOffNoteCheck(t)
+			want := ""
+			if tc.wantNote {
+				want = wantDefaultOffNote(filepath.Join(beads.FindBeadsDir(), "issues.jsonl"))
+			}
+			if stderr != want {
+				t.Fatalf("stderr:\nwant %q\ngot  %q", want, stderr)
+			}
+			if stdout != "" {
+				t.Fatalf("stdout must stay empty, got %q", stdout)
+			}
+		})
+	}
+}

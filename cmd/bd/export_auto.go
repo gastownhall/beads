@@ -119,6 +119,15 @@ func noteAutoExportDefaultOff() {
 	if beadsDir == "" {
 		return
 	}
+	// `bd config set` writes YAML without updating the loaded config, so the
+	// invocation that records a choice still reads the default above. Ask the
+	// workspace files themselves; one that cannot be read gets no advice.
+	if _, present, err := config.WorkspaceYamlSettingWithLocal(beadsDir, "export.auto"); err != nil || present {
+		if err != nil {
+			debug.Logf("auto-export: default-off note skipped: %v\n", err)
+		}
+		return
+	}
 	fullPath := autoExportPath(beadsDir)
 	for _, path := range []string{filepath.Join(beadsDir, exportAutoStateFile), fullPath} {
 		info, err := os.Stat(path)

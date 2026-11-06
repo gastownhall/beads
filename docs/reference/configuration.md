@@ -171,6 +171,19 @@ bd config set export.auto true
 bd config set export.git-add true
 ```
 
+Upgrading from before v1.0.5: a workspace that auto-exported under the old
+default and never set `export.auto` stops refreshing its JSONL. While the key
+is unset and both `.beads/export-state.json` and the export JSONL exist, each
+command that would otherwise auto-export prints an `Info:` note on stderr
+naming the JSONL. Setting the key either way records your choice and silences the note:
+
+```bash
+bd config set export.auto true    # resume auto-export
+bd config set export.auto false   # keep it off
+```
+
+The note is not shown with `--quiet` or `--json`.
+
 Use `bd dolt push` / `bd dolt pull` for sync and `bd backup` for restorable
 database backups.
 </Warning>
