@@ -1208,6 +1208,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A chained `<hook>.old` gate now runs when `bd` is not on the hook's `PATH`
+  (GH#6751). The managed hook section ran everything, the chain included,
+  only when `bd` was found, so a commit from a GUI client, cron or a minimal
+  shell skipped a refusing pre-commit or pre-push gate and went through. The
+  section now runs the `.old` beside the hook itself in that case and fails
+  only when it fails. Run `bd hooks install` to update installed hooks.
 - A managed git hook now fails when its chained `<hook>.old` exits 3, as it
   does for every other status. The hook section read a 3 from `bd hooks run`
   as "database not initialized" and let the git operation through, but

@@ -77,6 +77,12 @@ const hookTimeoutKillAfterSeconds = 2
 // via 'bd hooks run', and propagates exit codes — without preventing any user
 // content after the section from executing on success.
 //
+// Missing bd (GH#6751): bd hooks run is what runs the chained <hook>.old
+// (runChainedHook), so with bd off PATH (a GUI client, cron, a minimal shell)
+// the section runs that chain itself, found beside the hook through $0, and
+// fails only when the chain fails. It uses shell builtins alone and no shell
+// function, since zsh rebinds $0 inside one.
+//
 // Resilience (GH#2453, GH#2449):
 //   - A compatible timeout helper applies a best-effort soft deadline.
 //   - BEADS_HOOK_TIMEOUT accepts positive whole seconds only.
@@ -106,6 +112,8 @@ const hookTimeoutKillAfterSeconds = 2
 func generateHookSection(hookName string) string {
 	return hookSectionBeginLine() + "\n" +
 		"# This section is managed by beads. Do not remove these markers.\n" +
+		"_bd_exit=0\n" +
+		"_bd_missing=0\n" +
 		"if command -v bd >/dev/null 2>&1; then\n" +
 		"  export BD_GIT_HOOK=1\n" +
 		"  _bd_timeout=${BEADS_HOOK_TIMEOUT:-" + fmt.Sprintf("%d", hookTimeoutSeconds) + "}\n" +
@@ -168,8 +176,23 @@ func generateHookSection(hookName string) string {
 		"    echo >&2 \"beads: hook '" + hookName + "' timed out after ${_bd_timeout}s — continuing without beads\"\n" +
 		"    _bd_exit=0\n" +
 		"  fi\n" +
-		"  if [ \"$_bd_exit\" -ne 0 ]; then exit \"$_bd_exit\"; fi\n" +
+		"else\n" +
+		"  _bd_missing=1\n" +
 		"fi\n" +
+		"if [ \"$_bd_missing\" -eq 1 ]; then\n" +
+		"  case \"$0\" in\n" +
+		"    */*) _bd_chain=\"${0%/*}/" + hookName + ".old\" ;;\n" +
+		"    *) _bd_chain=\"./" + hookName + ".old\" ;;\n" +
+		"  esac\n" +
+		"  if [ -x \"$_bd_chain\" ]; then\n" +
+		"    if \"$_bd_chain\" \"$@\"; then\n" +
+		"      _bd_exit=0\n" +
+		"    else\n" +
+		"      _bd_exit=$?\n" +
+		"    fi\n" +
+		"  fi\n" +
+		"fi\n" +
+		"if [ \"$_bd_exit\" -ne 0 ]; then exit \"$_bd_exit\"; fi\n" +
 		hookSectionEndLine() + "\n"
 }
 
