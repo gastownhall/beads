@@ -168,10 +168,11 @@ func TestIsRunningKeepsStateForProcessItMayNotSignal(t *testing.T) {
 	assertStateFilesKept(t, dir, 14567)
 }
 
-// With no port recorded or configured, IsRunning stops a listed dolt
-// sql-server for a restart, but not one this user may not signal (EPERM): no
-// signal would reach it. It reports the server not running and keeps the pid
-// file, which a start replaces.
+// With no port recorded or configured, IsRunning reports a listed dolt
+// sql-server as running with an unresolved port — except one this user may
+// not signal (EPERM): no signal would reach it, and no caller could stop it
+// either, so it is reported not running and its pid file kept for a start to
+// replace.
 func TestIsRunningDoesNotStopProcessItMayNotSignalWithoutPort(t *testing.T) {
 	dir := t.TempDir()
 	exited := startStaleServerFiles(t, dir)
@@ -307,4 +308,105 @@ func TestParseDoltProcessPIDs(t *testing.T) {
 			}
 		})
 	}
+}
+
+// startUnknownPortServer tracks a live child as a confirmed dolt sql-server
+// whose port no source resolves: no port file, no configured port, no shared
+// server. It returns the child's exit channel and PID.
+func startUnknownPortServer(t *testing.T, dir string) (chan error, int) {
+	t.Helper()
+	exited := startStaleServerFiles(t, dir)
+	if err := os.Remove(portPath(dir)); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	t.Setenv("BEADS_SHARED_SERVER_DIR", t.TempDir())
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	t.Setenv("BEADS_DOLT_AUTO_START", "")
+	if got := DefaultConfig(dir).Port; got != 0 {
+		t.Fatalf("precondition: DefaultConfig resolved port %d, want 0", got)
+	}
+	data, err := os.ReadFile(pidPath(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The process list confirms the tracked PID is a dolt sql-server.
+	stubProcessList(t, func() ([]int, error) { return []int{pid}, nil })
+	return exited, pid
+}
+
+// assertUnknownPortTrackingKept checks that the pid file still names pid and
+// that no port file was written.
+func assertUnknownPortTrackingKept(t *testing.T, dir string, pid int) {
+	t.Helper()
+	data, err := os.ReadFile(pidPath(dir))
+	if err != nil {
+		t.Errorf("expected the pid file to be kept: %v", err)
+	} else if got := strings.TrimSpace(string(data)); got != strconv.Itoa(pid) {
+		t.Errorf("pid file = %q, want %d", got, pid)
+	}
+	if _, err := os.Stat(portPath(dir)); !os.IsNotExist(err) {
+		t.Errorf("expected no port file, stat err = %v", err)
+	}
+}
+
+// GH#6614: IsRunning backs `bd dolt status`. A confirmed dolt sql-server whose
+// port cannot be resolved is uncertain tracking, not proof the server is safe
+// to stop: observing it reports the live PID with port zero, and neither
+// signals the process nor deletes its pid file.
+func TestIsRunningReportsUnknownPortServerWithoutSignaling(t *testing.T) {
+	t.Run("no port file", func(t *testing.T) {
+		dir := t.TempDir()
+		exited, pid := startUnknownPortServer(t, dir)
+
+		state, err := IsRunning(dir)
+		if err != nil {
+			t.Fatalf("IsRunning error: %v", err)
+		}
+		if !state.Running || state.PID != pid || state.Port != 0 {
+			t.Errorf("IsRunning = %+v, want Running with PID %d and port 0", state, pid)
+		}
+		expectNotSignaled(t, exited)
+		assertUnknownPortTrackingKept(t, dir, pid)
+	})
+
+	t.Run("malformed port file", func(t *testing.T) {
+		dir := t.TempDir()
+		exited, pid := startUnknownPortServer(t, dir)
+		if err := os.WriteFile(portPath(dir), []byte("not-a-port"), 0600); err != nil {
+			t.Fatal(err)
+		}
+
+		state, err := IsRunning(dir)
+		if err != nil {
+			t.Fatalf("IsRunning error: %v", err)
+		}
+		if !state.Running || state.PID != pid || state.Port != 0 {
+			t.Errorf("IsRunning = %+v, want Running with PID %d and port 0", state, pid)
+		}
+		expectNotSignaled(t, exited)
+		if data, err := os.ReadFile(portPath(dir)); err != nil || string(data) != "not-a-port" {
+			t.Errorf("port file = %q, %v; want it kept unchanged", data, err)
+		}
+	})
+
+	t.Run("configured port resolves", func(t *testing.T) {
+		dir := t.TempDir()
+		exited, pid := startUnknownPortServer(t, dir)
+		t.Setenv("BEADS_DOLT_SERVER_PORT", "14601")
+
+		state, err := IsRunning(dir)
+		if err != nil {
+			t.Fatalf("IsRunning error: %v", err)
+		}
+		if !state.Running || state.PID != pid || state.Port != 14601 {
+			t.Errorf("IsRunning = %+v, want Running with PID %d and port 14601", state, pid)
+		}
+		expectNotSignaled(t, exited)
+		assertUnknownPortTrackingKept(t, dir, pid)
+	})
 }
