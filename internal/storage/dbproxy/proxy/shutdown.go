@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"time"
 
 	"github.com/steveyegge/beads/internal/lockfile"
@@ -158,9 +159,51 @@ func ControlFilePaths(rootDir string) []string {
 	return paths
 }
 
-func PurgeControlFiles(rootDir string) []error {
+// PurgeControlFiles removes the proxy control files under rootDir. Lock
+// files whose current lease is passed in held are retired through that
+// lease, so they disappear even while the lease is still held — the reverse
+// migration holds both lifecycle leases while purging (#6884). Every other
+// path is removed directly, tolerating ones that never existed. Supplied
+// leases are validated before anything is deleted: a nil lease, a lease
+// that is not a control file of rootDir, and two leases for the same path
+// are all rejected without removing anything. A failed retirement is
+// reported, never silently replaced by removing the path.
+func PurgeControlFiles(rootDir string, held ...*util.Lock) []error {
+	controls := ControlFilePaths(rootDir)
+	cleaned := make([]string, len(controls))
+	for i, path := range controls {
+		cleaned[i] = filepath.Clean(path)
+	}
+
+	retire := make(map[string]*util.Lock, len(held))
 	var errs []error
-	for _, path := range ControlFilePaths(rootDir) {
+	for _, lease := range held {
+		if lease == nil || lease.File() == nil {
+			errs = append(errs, errors.New("proxy: purge supplied an unusable lease"))
+			continue
+		}
+		path := filepath.Clean(lease.File().Name())
+		if !slices.Contains(cleaned, path) {
+			errs = append(errs, fmt.Errorf("proxy: purge lease for %s is not a control file of %s", path, rootDir))
+			continue
+		}
+		if _, duplicate := retire[path]; duplicate {
+			errs = append(errs, fmt.Errorf("proxy: purge supplied more than one lease for %s", path))
+			continue
+		}
+		retire[path] = lease
+	}
+	if len(errs) > 0 {
+		return errs
+	}
+
+	for i, path := range controls {
+		if lease, isHeld := retire[cleaned[i]]; isHeld {
+			if err := lease.Retire(); err != nil && !os.IsNotExist(err) {
+				errs = append(errs, err)
+			}
+			continue
+		}
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			errs = append(errs, err)
 		}

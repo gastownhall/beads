@@ -17,6 +17,14 @@ type Unlocker interface {
 // Lock holds an exclusive flock on a file.
 type Lock struct {
 	f *os.File
+	// retirable marks leases acquired through TryRetirableLock: their file
+	// was opened so its pathname can be retired while the lease stays held.
+	// Ordinary TryLock leases never are.
+	retirable bool
+	// retired records a successful Retire, making a second Retire a no-op.
+	retired bool
+	// released records that Unlock has run; a released lease is unusable.
+	released bool
 }
 
 // TryLock attempts to acquire a non-blocking exclusive flock on lockPath.
@@ -55,6 +63,7 @@ func (l *Lock) File() *os.File {
 // which would silently drop the child's lock too. In that case use
 // l.File().Close() to drop only the parent's fd reference.
 func (l *Lock) Unlock() {
+	l.released = true
 	if err := lockfile.FlockUnlock(l.f); err != nil {
 		panic(fmt.Sprintf("util: failed to release lock: %v", err))
 	}
