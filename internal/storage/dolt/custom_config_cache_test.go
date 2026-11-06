@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sync/atomic"
 	"testing"
 
@@ -21,6 +22,12 @@ import (
 // message must not match any isRetryableError pattern, so a failing read ends
 // the call at once instead of retrying inside it.
 var errCustomVocabRead = errors.New("custom vocabulary read failed")
+
+var (
+	customStatusesQuery = regexp.QuoteMeta("SELECT name, category FROM custom_statuses ORDER BY name")
+	customTypesQuery    = regexp.QuoteMeta("SELECT name FROM custom_types ORDER BY name")
+	legacyConfigQuery   = regexp.QuoteMeta("SELECT `key`, value FROM config WHERE `key` IN (?,?)")
+)
 
 var customVocabMockSeq atomic.Int64
 
@@ -78,6 +85,29 @@ func withCustomVocabYAML(t *testing.T, statusCSV, typesCSV string) {
 	t.Cleanup(config.ResetForTesting)
 }
 
+// expectCustomVocabRead arms one successful loadCustomConfigCache read: a
+// transaction reading both normalized vocabulary tables — and the legacy
+// config rows when either table answers empty — rolled back like every store
+// read.
+func expectCustomVocabRead(mock sqlmock.Sqlmock, statuses []types.CustomStatus, customTypes []string) {
+	mock.ExpectBegin()
+	statusRows := sqlmock.NewRows([]string{"name", "category"})
+	for _, s := range statuses {
+		statusRows.AddRow(s.Name, string(s.Category))
+	}
+	mock.ExpectQuery(customStatusesQuery).WillReturnRows(statusRows)
+	typeRows := sqlmock.NewRows([]string{"name"})
+	for _, name := range customTypes {
+		typeRows.AddRow(name)
+	}
+	mock.ExpectQuery(customTypesQuery).WillReturnRows(typeRows)
+	if len(statuses) == 0 || len(customTypes) == 0 {
+		mock.ExpectQuery(legacyConfigQuery).WithArgs("status.custom", "types.custom").
+			WillReturnRows(sqlmock.NewRows([]string{"key", "value"}))
+	}
+	mock.ExpectRollback()
+}
+
 // TestCustomConfigCacheRereadsAfterFailedRead pins GH#5581: a custom
 // status/type read that ultimately fails must answer that one call from the
 // config.yaml fallback with a nil error while leaving both caches unloaded,
@@ -102,6 +132,33 @@ func TestCustomConfigCacheRereadsAfterFailedRead(t *testing.T) {
 				cancel()
 				return ctx
 			},
+		},
+		{
+			name: "statuses select error",
+			arm: func(mock sqlmock.Sqlmock) {
+				mock.ExpectBegin()
+				mock.ExpectQuery(customStatusesQuery).WillReturnError(errCustomVocabRead)
+				mock.ExpectRollback()
+			},
+			ctx: func(t *testing.T) context.Context { return context.Background() },
+		},
+		{
+			// A partial normalized-table success followed by a failed legacy
+			// config read used to return the partial database result as a
+			// successful vocabulary — and pin it. The resolver now fails the
+			// whole read, so the fallback answers and the caches stay
+			// unloaded for the next call.
+			name: "legacy config select error after partial success",
+			arm: func(mock sqlmock.Sqlmock) {
+				mock.ExpectBegin()
+				mock.ExpectQuery(customStatusesQuery).
+					WillReturnRows(sqlmock.NewRows([]string{"name", "category"}).AddRow("review", "wip"))
+				mock.ExpectQuery(customTypesQuery).WillReturnRows(sqlmock.NewRows([]string{"name"}))
+				mock.ExpectQuery(legacyConfigQuery).WithArgs("status.custom", "types.custom").
+					WillReturnError(errCustomVocabRead)
+				mock.ExpectRollback()
+			},
+			ctx: func(t *testing.T) context.Context { return context.Background() },
 		},
 	}
 	for _, mode := range failureModes {
@@ -133,6 +190,40 @@ func TestCustomConfigCacheRereadsAfterFailedRead(t *testing.T) {
 			}
 			if statusCached || typeCached {
 				t.Fatalf("cache flags after failed read = (%v, %v), want (false, false): a failed read must not pin the fallback as loaded", statusCached, typeCached)
+			}
+
+			// Recovery: without recreating the store or writing config, the
+			// next read returns the database vocabulary — replacing the
+			// status fallback and unioning the database types with the YAML
+			// types, as a successful read always composed them.
+			expectCustomVocabRead(mock, []types.CustomStatus{{Name: "review", Category: types.CategoryWIP}}, []string{"molecule"})
+			statuses, err = store.GetCustomStatuses(context.Background())
+			if err != nil {
+				t.Fatalf("GetCustomStatuses after recovery: %v", err)
+			}
+			if len(statuses) != 1 || statuses[0] != "review" {
+				t.Errorf("GetCustomStatuses after recovery = %v, want [review] from the database", statuses)
+			}
+			detailed, err = store.GetCustomStatusesDetailed(context.Background())
+			if err != nil {
+				t.Fatalf("GetCustomStatusesDetailed after recovery: %v", err)
+			}
+			if len(detailed) != 1 || detailed[0].Name != "review" || detailed[0].Category != types.CategoryWIP {
+				t.Errorf("GetCustomStatusesDetailed after recovery = %v, want [review/wip] from the database", detailed)
+			}
+			customTypes, err = store.GetCustomTypes(context.Background())
+			if err != nil {
+				t.Fatalf("GetCustomTypes after recovery: %v", err)
+			}
+			if len(customTypes) != 2 || customTypes[0] != "molecule" || customTypes[1] != "yamltype" {
+				t.Errorf("GetCustomTypes after recovery = %v, want [molecule yamltype] (database type unioned with config.yaml)", customTypes)
+			}
+
+			store.cacheMu.Lock()
+			statusCached, typeCached = store.customStatusCached, store.customTypeCached
+			store.cacheMu.Unlock()
+			if !statusCached || !typeCached {
+				t.Fatalf("cache flags after recovery = (%v, %v), want (true, true)", statusCached, typeCached)
 			}
 			if err := mock.ExpectationsWereMet(); err != nil {
 				t.Fatalf("unmet SQL expectations: %v", err)
