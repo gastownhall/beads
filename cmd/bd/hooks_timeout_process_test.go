@@ -1274,7 +1274,9 @@ func TestGeneratedHookChainWhenBdMissingRealGit(t *testing.T) {
 			generateHookSection("pre-commit") +
 			"printf 'trailing ran\\n' > " + hookProcessShellQuote(filepath.Join(sentinelDir, "trailing")) + "\n"
 		writeHookProcessFixture(t, hooksDir, "pre-commit", hookBody)
-		writeHookProcessFixture(t, hooksDir, "pre-commit.old", chainBody)
+		if chainBody != "" {
+			writeHookProcessFixture(t, hooksDir, "pre-commit.old", chainBody)
+		}
 		return repoDir, gitEnv, baseline
 	}
 
@@ -1314,6 +1316,67 @@ func TestGeneratedHookChainWhenBdMissingRealGit(t *testing.T) {
 			t.Errorf("HEAD did not advance after the passing commit")
 		}
 	})
+
+	t.Run("no chain lets the commit proceed", func(t *testing.T) {
+		sentinelDir := t.TempDir()
+		repoDir, gitEnv, baseline := setup(t, "", sentinelDir)
+		runHookProcessGit(t, gitPath, repoDir, gitEnv, "commit", "-m", "no-chain")
+		if _, err := os.Stat(filepath.Join(sentinelDir, "trailing")); err != nil {
+			t.Errorf("trailing hook content did not run with no chain: %v", err)
+		}
+		if head := strings.TrimSpace(runHookProcessGit(t, gitPath, repoDir, gitEnv, "rev-parse", "HEAD")); head == baseline {
+			t.Errorf("HEAD did not advance with no chain")
+		}
+	})
+
+	// Scenarios from PR #6840: a foreign hook that only looks like a beads
+	// marker must still gate the commit, and a legacy inline bd hook
+	// (GH#1120: only the "# bd (beads)" comment) must never be chained into.
+	for _, tc := range []struct {
+		name    string
+		marker  string
+		foreign bool
+	}{
+		{name: "foreign hook merely mentioning BEADS INTEGRATION still chains", marker: "# unrelated hook, see BEADS INTEGRATION docs for context", foreign: true},
+		{name: "foreign hook starting with '# --- ' but not the BEGIN marker still chains", marker: "# --- NOTE: not a BEADS INTEGRATION marker", foreign: true},
+		{name: "foreign begin-marker-shaped line with extra words still chains", marker: "# --- BEGIN foo BEADS INTEGRATION", foreign: true},
+		{name: "legacy inline bd hook is not re-chained", marker: "# bd (beads)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sentinelDir := t.TempDir()
+			chainSentinel := filepath.Join(sentinelDir, "chain")
+			chainBody := "#!/bin/sh\n" + tc.marker + "\nprintf 'chain ran\\n' > " + hookProcessShellQuote(chainSentinel) +
+				"\necho 'chained gate refused' >&2\nexit 9\n"
+			repoDir, gitEnv, baseline := setup(t, chainBody, sentinelDir)
+			commit := exec.Command(gitPath, "commit", "-m", "gated")
+			commit.Dir = repoDir
+			commit.Env = gitEnv
+			output, err := commit.CombinedOutput()
+			head := strings.TrimSpace(runHookProcessGit(t, gitPath, repoDir, gitEnv, "rev-parse", "HEAD"))
+			_, chainErr := os.Stat(chainSentinel)
+			if tc.foreign {
+				if err == nil {
+					t.Fatalf("git commit succeeded; the foreign pre-commit.old was misclassified as bd-owned and skipped\n%s", output)
+				}
+				if chainErr != nil || !strings.Contains(string(output), "chained gate refused") {
+					t.Errorf("the foreign pre-commit.old did not run\n%s", output)
+				}
+				if head != baseline {
+					t.Errorf("HEAD = %s after the refused commit, want unchanged %s", head, baseline)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("git commit failed; the legacy inline bd hook was chained into\n%s", output)
+			}
+			if chainErr == nil {
+				t.Errorf("the legacy inline bd hook ran as a chain\n%s", output)
+			}
+			if head == baseline {
+				t.Errorf("HEAD did not advance after skipping the bd-owned chain")
+			}
+		})
+	}
 }
 
 // hookProcessChainRecorderBody is a builtin-only <hook>.old that reports what
