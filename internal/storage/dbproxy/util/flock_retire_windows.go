@@ -50,7 +50,9 @@ var errReparsePoint = errors.New("lock file is a reparse point (symlink or junct
 
 // retireLockFile marks the held lock file for deletion through a short-lived
 // second handle, using classic disposition: the name disappears when the
-// last handle (the lease) closes, and new opens fail until then.
+// last handle (the lease) closes, and new opens fail until then. The second
+// handle must name the same file as the lease (volume serial and file
+// index); a pathname that now names a replacement is left alone.
 func retireLockFile(f *os.File) error {
 	name, err := windows.UTF16PtrFromString(f.Name())
 	if err != nil {
@@ -71,6 +73,10 @@ func retireLockFile(f *os.File) error {
 	if err != nil {
 		return &os.PathError{Op: "retire", Path: f.Name(), Err: err}
 	}
+	if err := sameFile(windows.Handle(f.Fd()), h); err != nil {
+		_ = windows.CloseHandle(h)
+		return &os.PathError{Op: "retire", Path: f.Name(), Err: err}
+	}
 	disposition := struct{ DeleteFile bool }{DeleteFile: true}
 	//nolint:gosec // G103: FILE_DISPOSITION_INFO is passed by pointer, as SetFileInformationByHandle requires.
 	err = windows.SetFileInformationByHandle(h, windows.FileDispositionInfo,
@@ -80,6 +86,22 @@ func retireLockFile(f *os.File) error {
 	}
 	if err != nil {
 		return &os.PathError{Op: "retire", Path: f.Name(), Err: err}
+	}
+	return nil
+}
+
+func sameFile(held, opened windows.Handle) error {
+	var want, got windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(held, &want); err != nil {
+		return err
+	}
+	if err := windows.GetFileInformationByHandle(opened, &got); err != nil {
+		return err
+	}
+	if want.VolumeSerialNumber != got.VolumeSerialNumber ||
+		want.FileIndexHigh != got.FileIndexHigh ||
+		want.FileIndexLow != got.FileIndexLow {
+		return errors.New("pathname no longer names the held lock file")
 	}
 	return nil
 }
