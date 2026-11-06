@@ -340,11 +340,7 @@ func autoMigrateOnVersionBump(beadsDir string) versionBumpOutcome {
 	store, err := dolt.NewFromConfig(ctx, beadsDir)
 	if err != nil {
 		debug.Logf("auto-migrate: failed to open database: %v", err)
-		if versionBumpOutcomeForOpenError(err) == versionBumpDeferred {
-			noticeSharedMigrateRefusal(err)
-			return versionBumpDeferred
-		}
-		return failVersionBump(err)
+		return versionBumpOpenFailed(err)
 	}
 	defer func() {
 		if err := store.Close(); err != nil {
@@ -380,14 +376,30 @@ func autoMigrateOnVersionBump(beadsDir string) versionBumpOutcome {
 	return versionBumpSettled
 }
 
-// versionBumpOutcomeForOpenError classifies the writable open's failure: a
-// consent gate's deliberate refusal defers the upgrade, anything else fails it.
+// versionBumpOutcomeForOpenError classifies the writable open's failure. A
+// consent refusal — the remote/shared-store gate (#4259, #5920) or the
+// ordinary migration consent — is a deliberate deferral that has its own
+// remedy, and retrying it on every command would only repeat it. Anything
+// else fails the upgrade.
 func versionBumpOutcomeForOpenError(err error) versionBumpOutcome {
 	var gateErr *schema.RemoteMigrateGateError
-	if errors.As(err, &gateErr) {
+	var consentErr *schema.MigrateConsentError
+	if errors.As(err, &gateErr) || errors.As(err, &consentErr) {
 		return versionBumpDeferred
 	}
 	return versionBumpFailed
+}
+
+// versionBumpOpenFailed reports the writable open's failure the way its class
+// asks: a deferral keeps its existing per-decision notice (a gate refusal
+// gets noticeSharedMigrateRefusal's line, an ordinary consent refusal none),
+// a failure gets noticeVersionBumpFailure's.
+func versionBumpOpenFailed(err error) versionBumpOutcome {
+	if versionBumpOutcomeForOpenError(err) == versionBumpDeferred {
+		noticeSharedMigrateRefusal(err)
+		return versionBumpDeferred
+	}
+	return failVersionBump(err)
 }
 
 // recoverPreV56IfNeeded rebuilds a Dolt database left behind by the pre-0.56
