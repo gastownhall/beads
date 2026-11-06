@@ -667,6 +667,7 @@ go_test(
         "context_embedded_test.go",
         "context_identity_test.go",
         "context_proxied_integration_test.go",
+        "context_role_read_failure_test.go",
         "context_test.go",
         "context_text_test.go",
         "contributor_embedded_test.go",

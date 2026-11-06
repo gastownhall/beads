@@ -26,6 +26,10 @@ func runContextProxiedServer(cmd *cobra.Command, ctx context.Context) error {
 		return contextProxiedError("cannot resolve context: %v", err)
 	}
 
+	// The role read failure is recorded on the snapshot rather than failing
+	// it (GH#6765); both `bd context` routes warn about it the same way.
+	warnContextRoleReadFailure(info.RoleErr)
+
 	view := contextInfoView(info)
 	if jsonOutput {
 		return outputJSON(view)

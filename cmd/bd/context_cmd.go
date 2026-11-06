@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
@@ -95,7 +96,9 @@ Examples:
 		snapshot.IsRedirected = rc.IsRedirected
 		snapshot.IsWorktree = rc.IsWorktree
 
-		if role, ok := rc.Role(); ok {
+		if role, ok, err := rc.Role(); err != nil {
+			warnContextRoleReadFailure(err)
+		} else if ok {
 			snapshot.Role = string(role)
 		}
 
@@ -120,6 +123,22 @@ Examples:
 		printContextText(info)
 		return nil
 	},
+}
+
+var contextRoleReadFailureWarned bool
+
+// warnContextRoleReadFailure reports a beads.role read failure once per `bd
+// context` invocation, for both routes. `bd context` is the diagnostic an
+// operator runs precisely in degraded states, so an unreadable role config
+// must not fail or hide the rest of the identity: warn on stderr, with git's
+// own diagnostic attached, and keep printing (GH#6765). Absence stays absent —
+// no warning, no role line.
+func warnContextRoleReadFailure(err error) {
+	if err == nil || contextRoleReadFailureWarned {
+		return
+	}
+	contextRoleReadFailureWarned = true
+	fmt.Fprintf(os.Stderr, "Warning: could not read beads.role from git config: %v\n", err) //nolint:gosec // G705: stderr, not a browser context
 }
 
 // applyContextBackend records the backend half of the direct route's snapshot,

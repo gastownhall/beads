@@ -53,9 +53,11 @@ func (r *contextRepositoryImpl) Role(ctx context.Context) (string, bool, error) 
 	// resolves to Contributor directly, and otherwise `git config --get
 	// beads.role` reads the global and system files, which are readable with
 	// no repository. It reports "not configured" only when none of those
-	// carry a role — it does not fail the command either way.
-	role, ok := rc.Role()
-	return string(role), ok, nil
+	// carry a role. A config git cannot read at all is the exception
+	// (GH#6765): the failure propagates so the use case can record it and
+	// the caller can warn, rather than reporting a confident absence.
+	role, ok, err := rc.Role()
+	return string(role), ok, err
 }
 
 func (r *contextRepositoryImpl) BackendConfig(ctx context.Context) (domain.BackendConfig, error) {

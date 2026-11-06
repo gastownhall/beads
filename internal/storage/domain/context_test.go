@@ -267,7 +267,6 @@ func TestContextUseCase_ErrorPropagation(t *testing.T) {
 
 	cases := map[string]*fakeContextRepo{
 		"repo_context": {pathsErr: sentinel},
-		"role":         {roleErr: sentinel},
 		"backend":      {backendErr: sentinel},
 		"server_port":  {backend: BackendConfig{IsServerMode: true}, portErr: sentinel},
 		"proxied_root": {backend: BackendConfig{IsProxiedServerMode: true}, proxiedErr: sentinel},
@@ -281,5 +280,33 @@ func TestContextUseCase_ErrorPropagation(t *testing.T) {
 				t.Fatalf("expected sentinel error, got %v", err)
 			}
 		})
+	}
+}
+
+// TestContextUseCase_RoleReadFailureIsRecorded pins GH#6765 (bd-a2qnf4):
+// a beads.role read failure no longer aborts the workspace snapshot. The
+// role is one member of the identity `bd context` exists to report — and the
+// command exists precisely for degraded states — so the failure is recorded
+// for the CLI route to warn about and the rest of the workspace still
+// answers.
+func TestContextUseCase_RoleReadFailureIsRecorded(t *testing.T) {
+	roleErr := errors.New("boom")
+	repo := &fakeContextRepo{roleErr: roleErr}
+
+	info, err := NewContextUseCase(repo, "v0").GetContextInfo(context.Background())
+	if err != nil {
+		t.Fatalf("GetContextInfo aborted on the role read: %v", err)
+	}
+	if info.Role != "" {
+		t.Errorf("Role = %q, want empty when the read failed", info.Role)
+	}
+	if !errors.Is(info.RoleErr, roleErr) {
+		t.Errorf("RoleErr = %v, want the read failure recorded", info.RoleErr)
+	}
+	// The failure stays off every published surface: the shared projection
+	// cannot carry it, structurally.
+	published := PublishedContext(info)
+	if published.BdVersion == "" {
+		t.Error("published snapshot lost the version over the role failure")
 	}
 }

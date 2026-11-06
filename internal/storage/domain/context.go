@@ -56,6 +56,12 @@ type ContextInfo struct {
 	SyncRemote   string
 	Role         string
 	BdVersion    string
+	// RoleErr records a beads.role read failure (GH#6765). The snapshot is
+	// assembled anyway — `bd context` exists to describe degraded states —
+	// and the CLI route warns from this field. It never reaches any wire or
+	// published projection: the tag keeps it out of accidental marshaling,
+	// and PublishedContextFields structurally cannot carry it.
+	RoleErr error `json:"-"`
 }
 
 // PublishedContextFields is the workspace identity every context surface
@@ -163,10 +169,12 @@ func (u *contextUseCaseImpl) GetContextInfo(ctx context.Context) (ContextInfo, e
 		return ContextInfo{}, err
 	}
 
-	role, hasRole, err := u.repo.Role(ctx)
-	if err != nil {
-		return ContextInfo{}, err
-	}
+	// A role read failure does not abort the snapshot: the role is one
+	// member of a workspace identity this use case exists to report, and the
+	// command reading it is a diagnostic for degraded states. The failure is
+	// recorded (info.RoleErr) for the CLI route to warn with; absence keeps
+	// its old meaning and leaves Role empty (GH#6765).
+	role, hasRole, roleErr := u.repo.Role(ctx)
 
 	backend, err := u.repo.BackendConfig(ctx)
 	if err != nil {
@@ -185,7 +193,9 @@ func (u *contextUseCaseImpl) GetContextInfo(ctx context.Context) (ContextInfo, e
 	}
 	info.SetBackendIdentity(backend.Backend, backend.DoltMode, backend.Database)
 
-	if hasRole {
+	if roleErr != nil {
+		info.RoleErr = roleErr
+	} else if hasRole {
 		info.Role = role
 	}
 

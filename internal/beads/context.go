@@ -856,47 +856,66 @@ func (rc *RepoContext) GitOutput(ctx context.Context, args ...string) (string, e
 // If BEADS_DIR is set (IsRedirected), returns Contributor implicitly
 // because external repo mode always indicates a contributor workflow.
 //
-// Returns ("", false) if role is not configured and not redirected.
-// The bool return indicates whether a role was determined.
-func (rc *RepoContext) Role() (UserRole, bool) {
+// Returns ("", false, nil) if role is not configured and not redirected,
+// and (role, true, nil) when determined — including an explicitly empty
+// value, which git reports as present. A config git cannot read at all is
+// the third outcome (GH#6765): ("", false, err) with git's own diagnostic,
+// never a silent absence.
+func (rc *RepoContext) Role() (UserRole, bool, error) {
 	// BEADS_DIR implies contributor (external repo mode)
 	if rc.IsRedirected {
-		return Contributor, true
+		return Contributor, true, nil
 	}
 
 	cmd := rc.gitCmdWithEnv(context.Background(), gitenv.ScrubRoutingAndSuppression(os.Environ()), "config", "--get", "beads.role")
 	output, err := cmd.Output()
-	if err != nil {
-		return "", false // Not configured
+	value, present, readErr := git.ClassifyConfigGet(output, err)
+	if readErr != nil {
+		return "", false, fmt.Errorf("git config --get beads.role: %w", readErr)
 	}
-	return UserRole(strings.TrimSpace(string(output))), true
+	if !present {
+		return "", false, nil
+	}
+	return UserRole(value), true, nil
 }
 
 // IsContributor returns true if user is configured as contributor.
 //
 // This includes both explicit configuration (git config beads.role contributor)
 // and implicit detection (BEADS_DIR redirect active).
+//
+// It is an optional predicate: over a config git cannot read it returns
+// false rather than failing — callers that must distinguish the two call
+// Role and handle the error (GH#6765).
 func (rc *RepoContext) IsContributor() bool {
-	role, ok := rc.Role()
-	return ok && role == Contributor
+	role, ok, err := rc.Role()
+	return err == nil && ok && role == Contributor
 }
 
 // IsMaintainer returns true if user is configured as maintainer.
 //
 // Only returns true for explicit configuration (git config beads.role maintainer).
 // BEADS_DIR redirect always implies contributor, never maintainer.
+//
+// As with IsContributor, a read failure answers false rather than failing.
 func (rc *RepoContext) IsMaintainer() bool {
-	role, ok := rc.Role()
-	return ok && role == Maintainer
+	role, ok, err := rc.Role()
+	return err == nil && ok && role == Maintainer
 }
 
 // RequireRole returns error if role not configured (forces init prompt).
 //
 // Use this at command entry points that need role-aware behavior.
 // If BEADS_DIR is set, role is implicitly determined (contributor),
-// so this will not return an error.
+// so this will not return an error. A failure to read the config at all
+// is returned as itself (GH#6765): the fix is repairing git's config, not
+// re-running init.
 func (rc *RepoContext) RequireRole() error {
-	if _, ok := rc.Role(); !ok {
+	_, ok, err := rc.Role()
+	if err != nil {
+		return fmt.Errorf("reading beads.role: %w", err)
+	}
+	if !ok {
 		return ErrRoleNotConfigured
 	}
 	return nil
