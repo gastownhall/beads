@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -462,6 +463,58 @@ func TestRunChainedHookSkipsDelegatingOldHook(t *testing.T) {
 			_, statErr := os.Stat(marker)
 			if ran := statErr == nil; ran != tc.wantRun {
 				t.Fatalf("chained .old ran = %v, want %v", ran, tc.wantRun)
+			}
+		})
+	}
+}
+
+// GH#6751: the generated hook section treats 3 (database-not-initialized),
+// 124 and 142 (the coreutils and Perl timeout statuses) as its own reserved
+// outcomes, so a chained .old exiting with one of them would be misread by
+// the wrapper as "continue without beads". runChainedHook must remap those
+// to a plain failure with a diagnostic naming the original status, and pass
+// every other status through untouched.
+func TestRunChainedHookRemapsReservedStatuses(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chained .old fixtures are POSIX shell scripts")
+	}
+	for _, tc := range []struct {
+		name          string
+		exit          int
+		wantExit      int
+		wantRemapNote bool
+	}{
+		{name: "database-not-initialized 3 remapped to 1", exit: 3, wantExit: 1, wantRemapNote: true},
+		{name: "coreutils timeout 124 remapped to 1", exit: 124, wantExit: 1, wantRemapNote: true},
+		{name: "perl supervisor timeout 142 remapped to 1", exit: 142, wantExit: 1, wantRemapNote: true},
+		{name: "ordinary failure 7 passes through", exit: 7, wantExit: 7},
+		{name: "success 0 passes through", exit: 0, wantExit: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repoDir := setupGuardTestRepo(t)
+
+			hooksDir := filepath.Join(repoDir, ".git", "hooks")
+			if err := os.MkdirAll(hooksDir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			script := fmt.Sprintf("#!/bin/sh\nexit %d\n", tc.exit)
+			if err := os.WriteFile(filepath.Join(hooksDir, "pre-commit.old"), []byte(script), 0755); err != nil {
+				t.Fatal(err)
+			}
+
+			var code int
+			stderr := captureStderr(t, func() {
+				code = runChainedHook("pre-commit", nil)
+			})
+			if code != tc.wantExit {
+				t.Fatalf("runChainedHook() = %d, want %d\nstderr:\n%s", code, tc.wantExit, stderr)
+			}
+			if tc.wantRemapNote {
+				if !strings.Contains(stderr, "pre-commit.old") || !strings.Contains(stderr, fmt.Sprintf("exited %d", tc.exit)) {
+					t.Fatalf("remap diagnostic must name pre-commit.old and status %d, got:\n%s", tc.exit, stderr)
+				}
+			} else if strings.Contains(stderr, "reserved") {
+				t.Fatalf("no remap diagnostic expected for status %d, got:\n%s", tc.exit, stderr)
 			}
 		})
 	}

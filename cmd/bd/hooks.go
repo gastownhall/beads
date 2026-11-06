@@ -1902,7 +1902,17 @@ func runChainedHook(hookName string, args []string) int {
 
 	if err := cmd.Run(); err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
-			return exitErr.ExitCode()
+			code := exitErr.ExitCode()
+			// GH#6751: the hook wrapper reserves 3 (database not
+			// initialized), 124 and 142 (timeout supervisors) for its own
+			// outcomes, so a chained hook exiting with one of them would be
+			// misread as "continue without beads". Fail plainly instead,
+			// naming the original status.
+			if code == 3 || code == 124 || code == 142 {
+				fmt.Fprintf(os.Stderr, "beads: chained hook %s.old exited %d — a status reserved by the hook wrapper; failing with exit 1\n", hookName, code)
+				return 1
+			}
+			return code
 		}
 		// Other error - treat as failure
 		fmt.Fprintf(os.Stderr, "Warning: chained hook %s failed: %v\n", hookName, err)
