@@ -215,6 +215,34 @@ func (e *RemoteMigrateGateError) IsDataBehind() bool {
 	return e != nil && e.Decision == "" && e.FallbackReason == fallbackReasonDataBehind
 }
 
+// serverStorage reports whether this refusal was raised against a dolt
+// sql-server's storage — the shared store (#5920) or a proxied server — rather
+// than this workspace's embedded database (#6687). It decides how adoption
+// guidance renders: embedded adoption is a local move-aside the workspace can
+// run itself, while every server topology needs the serving process stopped and
+// the database moved out of the server's data_dir on the host, which no command
+// list issued from HERE can express.
+func (e *RemoteMigrateGateError) serverStorage() bool {
+	return e.Shared || e.Proxied
+}
+
+// serverAdoptPrerequisites is what adopting requires on server storage: the
+// server loads every directory under its data_dir as a database, so the
+// move-aside has to happen on the host with the serving process stopped — and
+// the refusal cannot name the configured data_dir, only the operator's server
+// config can (embedded's .beads/embeddeddolt is meaningless there).
+func (e *RemoteMigrateGateError) serverAdoptPrerequisites() string {
+	p := "server storage, so the recovery is coordinated downtime on the serving host, not a local file move: " +
+		"stop every bd client of this database and the serving process, move the database's directory out of " +
+		"the server's actual data_dir (.beads/dolt/ is only the owned-server default; shared and custom " +
+		"data_dir locations differ — the refusal cannot name the configured path), restart the server, then " +
+		"run `bd bootstrap` from a workspace with direct access to it"
+	if e.Proxied {
+		p += "; this workspace is in proxied-server mode, so the recovery runs on the server host, not from here"
+	}
+	return p
+}
+
 func (e *RemoteMigrateGateError) Error() string {
 	unit := "migrations"
 	if e.Pending == 1 {
@@ -729,7 +757,9 @@ type GateOption struct {
 // single designated migrator) or adopt (re-clone the already-migrated DB) — each
 // gated on its precondition and annotated with its risk. The migrate command is
 // present but reachable only through its "single designated migrator" condition,
-// never as a top-level hint.
+// never as a top-level hint. Since #6687 the adopt paths carry the move-aside
+// recipe (or, on server storage, its host prerequisites) rather than a bare
+// `bd bootstrap`, which no-ops against exactly the database that fired the gate.
 func (e *RemoteMigrateGateError) Options() []GateOption {
 	// On a shared store every remedy below lands on the database the whole
 	// server is serving, so each one's risk gains a consequence that has
@@ -740,11 +770,25 @@ func (e *RemoteMigrateGateError) Options() []GateOption {
 	if e.Shared {
 		sharedRisk = "; on this shared server it also promotes the schema for every co-resident client, and clients still on an older bd will refuse the database until upgraded"
 	}
-	adopt := GateOption{
-		ID:       "adopt",
-		When:     "another machine has already migrated and pushed",
-		Commands: []string{"bd bootstrap"},
-		Risk:     "re-clones and replaces the local database; push or export unpushed work first or it is lost" + sharedRisk,
+	// #6687: `bd bootstrap` never replaces an existing database — against one
+	// it reports "Nothing to do." and changes nothing — so the adopt option's
+	// commands are the move-aside recipe that makes the bootstrap land, not a
+	// bare bootstrap that dead-ends on the very clone this refusal came from.
+	// The confirmed-ahead decision knows the remote is ahead; the blunt arm
+	// only suspects it.
+	adoptPrefix := "another machine has already migrated and pushed"
+	if e.Decision == gateDecisionAdopt {
+		adoptPrefix = "the remote is already migrated (confirmed by the gate)"
+	}
+	adopt := GateOption{ID: "adopt"}
+	if e.serverStorage() {
+		adopt.When = adoptPrefix + " — " + e.serverAdoptPrerequisites()
+		adopt.Commands = []string{"bd bootstrap"}
+		adopt.Risk = "the re-cloned database brings only what the remote has, so never-pushed work on the moved-aside database is absent until recovered — keep that directory, never delete it, and read it back with the matching older bd release" + sharedRisk
+	} else {
+		adopt.When = adoptPrefix + " — the commands move this workspace's existing database aside first, because `bd bootstrap` alone reports \"Nothing to do.\" against one and changes nothing (#6687); run them from the directory containing .beads, and if the database is not at .beads/embeddeddolt (a configured dolt_data_dir) move that directory instead, to a destination nothing occupies"
+		adopt.Commands = AdoptMoveAsideCommands()
+		adopt.Risk = "nothing is deleted: the moved-aside directory keeps the existing database — every local issue, including ones never pushed — as the recovery copy the re-cloned database lacks (an older bd release can open the aside; `bd import <backup.jsonl>` restores an old-release export); keep the aside, never delete it" + sharedRisk
 	}
 	// #6575: exactly ONE option, and it is the pull. The blunt pair below is
 	// actively wrong in this state — `bd migrate --force` is the bug, its
@@ -811,7 +855,6 @@ func (e *RemoteMigrateGateError) Options() []GateOption {
 	switch e.Decision {
 	case gateDecisionAdopt:
 		// Remote is confirmed ahead: migrate is not a valid path, only adopt.
-		adopt.When = "the remote is already migrated (confirmed by the gate) — adopt it"
 		return []GateOption{adopt}
 	case gateDecisionAdoptFastForward:
 		// Remote is confirmed ahead AND this clone is a strict ancestor with a
@@ -823,20 +866,35 @@ func (e *RemoteMigrateGateError) Options() []GateOption {
 		if e.Shared {
 			ffRisk = "nothing local is discarded (this clone's history is a strict ancestor of the remote's), but on this shared server the adopted schema is promoted for every co-resident client, and clients still on an older bd will refuse the database until upgraded"
 		}
+		ffWhen := "the remote is already migrated and this clone can fast-forward to it losslessly (no unpushed commits, clean working set) — the commands move the existing database aside first: `bd bootstrap` alone reports \"Nothing to do.\" against one (#6687); if the database is not at .beads/embeddeddolt (a configured dolt_data_dir), move that directory instead, to a destination nothing occupies"
+		ffCommands := AdoptMoveAsideCommands()
+		if e.serverStorage() {
+			ffWhen = "the remote is already migrated and this clone can fast-forward to it losslessly (no unpushed commits, clean working set) — " + e.serverAdoptPrerequisites()
+			ffCommands = []string{"bd bootstrap"}
+		}
 		return []GateOption{{
 			ID:       "adopt-fast-forward",
-			When:     "the remote is already migrated and this clone can fast-forward to it losslessly (no unpushed commits, clean working set)",
-			Commands: []string{"bd bootstrap"},
+			When:     ffWhen,
+			Commands: ffCommands,
 			Risk:     ffRisk,
 		}}
 	case gateDecisionForkSkew:
 		// Already forked: neither migrate nor a plain adopt is unconditionally
-		// safe; the operator must choose a canonical clone first.
+		// safe; the operator must choose a canonical clone first. Exporting
+		// local-only work stays CONDITIONAL guidance in the risk — running it
+		// with this binary is only sound for work the old schema can still
+		// read — so it is not a step (#6687).
+		skewWhen := "the schema has already forked (different content for migration(s) " + FormatMigrationVersions(e.SkewVersions) + "); choose ONE clone as canonical and publish it (`bd dolt push`) — only then may the other clones adopt, each after moving its existing database aside (`bd bootstrap` alone reports \"Nothing to do.\" against one, #6687; if the database is not at .beads/embeddeddolt, a configured dolt_data_dir, move that directory instead, to a destination nothing occupies)"
+		skewCommands := AdoptMoveAsideCommands()
+		if e.serverStorage() {
+			skewWhen = "the schema has already forked (different content for migration(s) " + FormatMigrationVersions(e.SkewVersions) + "); choose ONE clone as canonical and publish it (`bd dolt push`) — only then may the other clones adopt: " + e.serverAdoptPrerequisites()
+			skewCommands = []string{"bd bootstrap"}
+		}
 		return []GateOption{{
 			ID:       "reconcile-fork",
-			When:     "the schema has already forked (different content for migration(s) " + FormatMigrationVersions(e.SkewVersions) + "); choose ONE clone as canonical",
-			Commands: []string{"bd export --all -o backup.jsonl", "bd bootstrap"},
-			Risk:     "re-bootstrapping the non-canonical clones discards their unpushed work; export it first",
+			When:     skewWhen,
+			Commands: skewCommands,
+			Risk:     "the non-canonical clones' forked history is absent from the re-cloned database: their never-pushed work survives only in each moved-aside database, so keep it (an older bd release can read it back, or `bd import <backup.jsonl>` restores an old-release export)",
 		}}
 	case gateDecisionSharedNoRemote:
 		// No remote means no adopt path — the database is the single copy every

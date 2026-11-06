@@ -3,6 +3,7 @@ package schema
 import (
 	"context"
 	"errors"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -435,4 +436,144 @@ func TestRemoteMigrateGateAdoptRecoveryGuidance(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestRemoteMigrateGateAdoptGuidanceIsNotBareBootstrap is the #6687 repro:
+// on a clone that already has a local database, a bare `bd bootstrap` prints
+// "Nothing to do." and leaves the clone on the old schema, so the gate must
+// not hand that clone bare bootstrap as the adopt step while promising it
+// replaces the local database.
+func TestRemoteMigrateGateAdoptGuidanceIsNotBareBootstrap(t *testing.T) {
+	bareThenReplace := regexp.MustCompile(`(?m)^\s*bd bootstrap\n.*replaces your local database`)
+	for _, decision := range []string{"", gateDecisionAdopt} {
+		e := &RemoteMigrateGateError{CurrentVersion: 53, LatestVersion: 67, Pending: 14, Decision: decision}
+		if msg := e.UserMessage(); bareThenReplace.MatchString(msg) {
+			t.Errorf("decision %q: refusal tells an existing clone that bare `bd bootstrap` replaces its database:\n%s", decision, msg)
+		}
+		for _, opt := range e.Options() {
+			if opt.ID == "adopt" && len(opt.Commands) == 1 && opt.Commands[0] == "bd bootstrap" {
+				t.Errorf("decision %q: adopt option is bare `bd bootstrap` (a no-op on an existing database), risk %q", decision, opt.Risk)
+			}
+		}
+	}
+}
+
+// TestRemoteMigrateGateAdoptOptionsCarryRecovery pins the #6687 fix at the
+// options layer. An option whose whole command list is `bd bootstrap` is a
+// dead end on the very clone this refusal came from — the database that made
+// the gate fire is still there, and bootstrap refuses to replace it — so the
+// embedded adopt paths must carry the ordered move-aside recipe (directory
+// creation, move, bootstrap), must not demand an unconditional export, and
+// must not sell the adopt as "replaces the local database". Server storage
+// (shared #5920, proxied) cannot express its recovery as commands run from
+// HERE at all: the move happens on the serving host, out of the server's
+// actual data_dir, with the server stopped — so those options carry the
+// prerequisites in When and keep the bootstrap alone, conditional behind
+// them, instead of handing an agent an embedded `mv` that cannot work there.
+func TestRemoteMigrateGateAdoptOptionsCarryRecovery(t *testing.T) {
+	findOption := func(t *testing.T, opts []GateOption, id string) GateOption {
+		t.Helper()
+		for _, opt := range opts {
+			if opt.ID == id {
+				return opt
+			}
+		}
+		t.Fatalf("no %q option among %v", id, opts)
+		return GateOption{}
+	}
+
+	t.Run("embedded carries the ordered move-aside recipe", func(t *testing.T) {
+		cases := []struct {
+			name     string
+			e        *RemoteMigrateGateError
+			optionID string
+		}{
+			{name: "blunt adopt", e: &RemoteMigrateGateError{CurrentVersion: 53, LatestVersion: 67, Pending: 14}, optionID: "adopt"},
+			{name: "adopt", e: &RemoteMigrateGateError{CurrentVersion: 53, LatestVersion: 67, Pending: 14, Decision: gateDecisionAdopt}, optionID: "adopt"},
+			{name: "adopt-ff", e: &RemoteMigrateGateError{CurrentVersion: 53, LatestVersion: 67, Pending: 14, Decision: gateDecisionAdoptFastForward}, optionID: "adopt-fast-forward"},
+			{name: "fork-skew", e: &RemoteMigrateGateError{CurrentVersion: 53, LatestVersion: 67, Pending: 14, Decision: gateDecisionForkSkew, SkewVersions: []int{54}}, optionID: "reconcile-fork"},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				opt := findOption(t, tc.e.Options(), tc.optionID)
+
+				mkdirAt := -1
+				mvAt := -1
+				bootAt := -1
+				for i, cmd := range opt.Commands {
+					switch {
+					case cmd == "mkdir -p .beads/backup":
+						mkdirAt = i
+					case cmd == "mv -f .beads/embeddeddolt .beads/backup/embeddeddolt.pre-adopt":
+						mvAt = i
+					case cmd == "bd bootstrap":
+						bootAt = i
+					case strings.HasPrefix(cmd, "bd export"):
+						t.Errorf("option demands an unconditional export command %q; exporting with the NEW binary is conditional guidance, not a step (#6687)", cmd)
+					}
+				}
+				if mkdirAt < 0 || mvAt < 0 || bootAt < 0 {
+					t.Fatalf("option commands are not the move-aside recipe (mkdir %d, mv %d, bootstrap %d): %v", mkdirAt, mvAt, bootAt, opt.Commands)
+				}
+				if !(mkdirAt < mvAt && mvAt < bootAt) {
+					t.Errorf("move-aside recipe is out of order: %v", opt.Commands)
+				}
+				// The When must name why the recipe exists: bootstrap alone
+				// no-ops against the existing database.
+				if !strings.Contains(opt.When, "Nothing to do.") {
+					t.Errorf("option When does not name the existing-database no-op:\n%s", opt.When)
+				}
+				// And its conditions travel with it.
+				if !strings.Contains(opt.When, "dolt_data_dir") || !strings.Contains(opt.When, "nothing occupies") {
+					t.Errorf("option When lacks the recipe conditions (configured path, unused destination):\n%s", opt.When)
+				}
+				if strings.Contains(opt.Risk, "replaces the local database") {
+					t.Errorf("option Risk still claims bootstrap replaces the local database:\n%s", opt.Risk)
+				}
+			})
+		}
+	})
+
+	t.Run("server storage carries host prerequisites, not embedded moves", func(t *testing.T) {
+		base := func(mod func(*RemoteMigrateGateError)) *RemoteMigrateGateError {
+			e := &RemoteMigrateGateError{CurrentVersion: 53, LatestVersion: 67, Pending: 14, Decision: gateDecisionAdopt}
+			mod(e)
+			return e
+		}
+		cases := []struct {
+			name     string
+			e        *RemoteMigrateGateError
+			optionID string
+		}{
+			{name: "shared adopt", e: base(func(e *RemoteMigrateGateError) { e.Shared = true }), optionID: "adopt"},
+			{name: "proxied adopt", e: base(func(e *RemoteMigrateGateError) { e.Proxied = true }), optionID: "adopt"},
+			{name: "shared adopt-ff", e: base(func(e *RemoteMigrateGateError) { e.Shared = true; e.Decision = gateDecisionAdoptFastForward }), optionID: "adopt-fast-forward"},
+			{name: "proxied fork-skew", e: base(func(e *RemoteMigrateGateError) { e.Proxied = true; e.Decision = gateDecisionForkSkew; e.SkewVersions = []int{54} }), optionID: "reconcile-fork"},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				opt := findOption(t, tc.e.Options(), tc.optionID)
+
+				// The prerequisites are in When: stop, host, move, restart,
+				// and the data_dir that only the server's config can name.
+				for _, want := range []string{"stop", "host", "move", "restart", "data_dir"} {
+					if !strings.Contains(opt.When, want) {
+						t.Errorf("option When lacks the server prerequisite %q:\n%s", want, opt.When)
+					}
+				}
+				// The bootstrap is the only command, conditional on the
+				// prerequisites above — no embedded `mv` can run from here.
+				if len(opt.Commands) != 1 || opt.Commands[0] != "bd bootstrap" {
+					t.Errorf("server option commands = %v; want just the conditional `bd bootstrap` (the move happens on the host)", opt.Commands)
+				}
+				// No embedded path, and no fabricated shared-server location:
+				// the refusal cannot know the server's data_dir layout.
+				for _, unwanted := range []string{"embeddeddolt", "shared-server/dolt"} {
+					if strings.Contains(opt.When, unwanted) || strings.Contains(opt.Risk, unwanted) {
+						t.Errorf("server option names %q, which is not knowable from this refusal; When:\n%s\nRisk:\n%s", unwanted, opt.When, opt.Risk)
+					}
+				}
+			})
+		}
+	})
 }
