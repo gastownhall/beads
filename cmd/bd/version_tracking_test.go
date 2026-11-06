@@ -880,3 +880,42 @@ func TestVersionBump_DirtyTablesNotice(t *testing.T) {
 		})
 	}
 }
+
+// TestVersionBump_DeferralSettlesMarker covers the deliberate deferrals: a
+// writable open refused by the remote/shared migrate gate or by missing
+// migration consent is an operator decision, not a failure to retry. The bump
+// settles, the next invocation does not repeat the maintenance, and the
+// pre-run's gate diagnostic is the one noticeSharedMigrateRefusal already
+// prints for that decision.
+func TestVersionBump_DeferralSettlesMarker(t *testing.T) {
+	pinJSONOutput(t, false)
+	for _, tt := range []struct {
+		name string
+		err  error
+	}{
+		{name: "shared store without remote", err: &schema.RemoteMigrateGateError{CurrentVersion: 72, LatestVersion: 74, Pending: 2, Decision: "shared-no-remote"}},
+		{name: "remote-backed stop", err: &schema.RemoteMigrateGateError{CurrentVersion: 72, LatestVersion: 74, Pending: 2}},
+		{name: "adopt", err: &schema.RemoteMigrateGateError{CurrentVersion: 72, LatestVersion: 74, Pending: 2, Decision: "adopt"}},
+		{name: "migration consent", err: &schema.MigrateConsentError{CurrentVersion: 72, LatestVersion: 74, Pending: 2}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			beadsDir, localVersionPath := newVersionBumpWorkspace(t, "1.1.0", "1.3.0")
+			attempts := stubReconcileVersionBump(t, fmt.Errorf("failed to open database: %w", tt.err), nil)
+			_, wantNotice := captureVersionBumpOutput(t, func() { noticeSharedMigrateRefusal(tt.err) })
+
+			_, stderr := captureVersionBumpOutput(t, func() { invokeVersionBump(beadsDir) })
+
+			if got := readLocalVersion(localVersionPath); got != "1.3.0" {
+				t.Fatalf(".local_version = %q after a deliberate deferral, want %q (the deferral settles the bump)", got, "1.3.0")
+			}
+			if stderr != wantNotice {
+				t.Errorf("pre-run diagnostic changed:\ngot:\n%s\nwant:\n%s", stderr, wantNotice)
+			}
+
+			invokeVersionBump(beadsDir)
+			if *attempts != 1 {
+				t.Errorf("%d maintenance attempts, want 1 (a settled deferral is not retried)", *attempts)
+			}
+		})
+	}
+}

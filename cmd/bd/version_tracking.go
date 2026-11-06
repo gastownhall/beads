@@ -315,10 +315,19 @@ func autoMigrateOnVersionBump(beadsDir string) bool {
 }
 
 // versionBumpSettled classifies the outcome of reconcileVersionBump: nil (the
-// reconciliation ran, or there was nothing to reconcile) settles the bump;
-// any error leaves it pending for the next command.
+// reconciliation ran, or there was nothing to reconcile) settles the bump, and
+// so does a writable open the migrate gate or the consent check refused. Those
+// are deliberate deferrals: the operator decides when to migrate or adopt, the
+// commands that do it open the store themselves, and retrying the open on
+// every command would only repeat the notice. Any other error leaves the bump
+// pending for the next command.
 func versionBumpSettled(err error) bool {
-	return err == nil
+	if err == nil {
+		return true
+	}
+	var gateErr *schema.RemoteMigrateGateError
+	var consentErr *schema.MigrateConsentError
+	return errors.As(err, &gateErr) || errors.As(err, &consentErr)
 }
 
 // reconcileVersionBump is the store-touching tail of autoMigrateOnVersionBump,
@@ -444,9 +453,9 @@ func isGoPseudoVersion(version string) bool {
 // promote the cursor for every co-resident client. Now nothing is promoted, so
 // say what happened and what to do about it.
 //
-// It fires once per version bump, because .local_version is consumed in the
-// same pre-run — which is exactly why the remedy it names has to be right for
-// THIS refusal. The gate returns one error type for several very different
+// It fires once per version bump, because a gate refusal settles the bump and
+// .local_version is consumed in the same pre-run (versionBumpSettled) — which
+// is exactly why the remedy it names has to be right for THIS refusal. The gate returns one error type for several very different
 // decisions, and the remote-backed ones are not unlocked by the migrate verb
 // at all (a clone whose remote is already migrated must adopt, not migrate),
 // so the line is chosen per decision rather than printed unconditionally.
