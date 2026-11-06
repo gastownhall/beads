@@ -43,6 +43,46 @@ func TestEnrichFreshClone_WithSyncRemoteMentionsBootstrapAndFallback(t *testing.
 // 'bd cleanup', which is not a root-level command in this build (cleanup
 // lives under 'bd admin cleanup'). 'bd prune --older-than 90d' previews by
 // default, matching the "optional and destructive" framing.
+// TestEnrichCloneLocalFKsDirectsRepairWithoutCurrentSquashAttribution:
+// flatten and compact soft-reset main since bd-7bpkd's fix, so the agent
+// explanation must not blame a flatten or compact that just ran for severed
+// clone-local FKs. It keeps the historical cause (a hard reset dropped the
+// FKs) and directs the explicit repair.
+func TestEnrichCloneLocalFKsDirectsRepairWithoutCurrentSquashAttribution(t *testing.T) {
+	enrichment := enrichCloneLocalFKs(DoctorCheck{
+		Message: "1 severed FK(s) on clone-local tables: events.fk_events_issue (2 orphan(s))",
+	})
+
+	if !strings.Contains(enrichment.explanation, "bd doctor --fix") {
+		t.Fatalf("expected explicit repair guidance, got: %s", enrichment.explanation)
+	}
+	if !strings.Contains(enrichment.explanation, "soft reset") {
+		t.Fatalf("expected the explanation to say flatten/compact now soft-reset, got: %s", enrichment.explanation)
+	}
+	if strings.Contains(enrichment.explanation, "flatten/compact squash") {
+		t.Fatalf("explanation attributes the severing to a current flatten/compact squash: %s", enrichment.explanation)
+	}
+	if len(enrichment.commands) == 0 || enrichment.commands[0] != "bd doctor --fix" {
+		t.Fatalf("expected 'bd doctor --fix' first, got %#v", enrichment.commands)
+	}
+}
+
+// TestCloneLocalFKDetailKeepsHistoryWithoutBlamingCurrentSquash pins the
+// check's Detail line to the same rule: the historical cause kept, current
+// flatten and compact not blamed.
+func TestCloneLocalFKDetailKeepsHistoryWithoutBlamingCurrentSquash(t *testing.T) {
+	detail := cloneLocalFKDetail(2)
+	if !strings.Contains(detail, "hard reset") {
+		t.Fatalf("expected the historical cause kept, got: %s", detail)
+	}
+	if !strings.Contains(detail, "soft-reset") {
+		t.Fatalf("expected the detail to say flatten/compact soft-reset now, got: %s", detail)
+	}
+	if strings.Contains(detail, "(squash, merge abort)") {
+		t.Fatalf("detail attributes the severing to a squash: %s", detail)
+	}
+}
+
 func TestPruneEnrichmentsRecommendRealCommand(t *testing.T) {
 	enrichments := map[string]agentEnrichment{
 		"Large Database":      enrichLargeDatabase(DoctorCheck{Message: "6000 closed issues (threshold: 5000)"}),

@@ -45,7 +45,15 @@ func CheckCloneLocalFKs(path string) DoctorCheck {
 		Name:    "Clone-Local FKs",
 		Status:  StatusWarning,
 		Message: fmt.Sprintf("%d severed FK(s) on clone-local tables: %s", len(severed), strings.Join(parts, ", ")),
-		Detail:  fmt.Sprintf("A hard reset (squash, merge abort) drops FKs from dolt_ignored tables; %d orphaned row(s) accumulated while enforcement was off", orphans),
+		Detail:  cloneLocalFKDetail(orphans),
 		Fix:     "Run 'bd doctor --fix' to remove orphaned rows and re-link the constraint(s) in place",
 	}
+}
+
+// cloneLocalFKDetail explains a severing without blaming a flatten or
+// compact that just ran: those soft-reset main now (bd-7bpkd's fix), so a
+// severing found today predates the fix or came from another hard-reset
+// path — merge abort recovery, the migration-lock error path.
+func cloneLocalFKDetail(orphans int) string {
+	return fmt.Sprintf("A past hard reset dropped FKs from dolt_ignored tables (bd-7bpkd); %d orphaned row(s) accumulated while enforcement was off. Flatten and compact soft-reset now, so the severing predates that fix or came from merge abort or migration error recovery", orphans)
 }
