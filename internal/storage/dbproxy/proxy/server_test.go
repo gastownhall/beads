@@ -1213,6 +1213,62 @@ func TestProxy_IdleTimeout_RestartsWhenLongConnCloses(t *testing.T) {
 	assertNoPidFile(t, root)
 }
 
+// Only authenticated connections are activity: raw TCP connections to the
+// data port that never complete the BDPROXY1 handshake arrive more often
+// than the idle timeout yet must neither postpone idle expiry nor cost the
+// backend a session.
+func TestProxy_IdleTimeout_IgnoresUnauthenticatedConns(t *testing.T) {
+	t.Parallel()
+
+	ts := server.New()
+	stats := &proxy.Stats{}
+	port := freeTCPPort(t)
+	root := t.TempDir()
+
+	const idle = 2 * time.Second
+	h := runProxy(t, proxy.ProxyOpts{
+		RootDir: root, Port: port,
+		IdleTimeout: idle,
+		Server:      ts, Stats: stats,
+	})
+	waitListening(t, root, listenWait)
+
+	// Dial raw and hang up, never authenticating, until the proxy exits. A
+	// refused dial is expected only once the proxy has shut down; during the
+	// exit itself the listener closes before the exit is observed, so allow
+	// a bounded grace for the exit to land before treating it as a failure.
+	dialRawUntilExit := func() (exited bool) {
+		c, err := net.DialTimeout("tcp", proxyAddr(port), ioTimeout)
+		if err != nil {
+			exitDeadline := time.Now().Add(time.Second)
+			for time.Now().Before(exitDeadline) {
+				select {
+				case <-h.exited:
+					return true
+				default:
+					time.Sleep(10 * time.Millisecond)
+				}
+			}
+			t.Fatalf("raw dial failed before the proxy exited: %v", err)
+		}
+		_ = c.Close()
+		return false
+	}
+	deadline := time.Now().Add(3 * idle)
+	for time.Now().Before(deadline) && !dialRawUntilExit() {
+		time.Sleep(idle / 4)
+	}
+
+	require.NoError(t, h.waitErr(t, idle))
+	s := stats.Snapshot()
+	assert.Equal(t, int64(1), s.IdleTimeouts)
+	assert.Equal(t, int64(0), s.BackendDialAttempts)
+	assert.Greater(t, s.AcceptCalls, int64(0), "raw dials must still be accepted")
+	// The readiness dial is the only backend session the proxy ever makes.
+	assert.Equal(t, int64(1), ts.Snapshot().AcceptedConns)
+	assertNoPidFile(t, root)
+}
+
 func waitForRotation(t *testing.T, path, marker string) {
 	t.Helper()
 	deadline := time.Now().Add(listenWait)
