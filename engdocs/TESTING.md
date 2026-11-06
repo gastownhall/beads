@@ -100,19 +100,26 @@ gh run download <run-id> -R gastownhall/beads -p 'bazel-profile-*' -D /tmp/prof
 Open a `.json.gz` in <https://ui.perfetto.dev> ("Open trace file"; it reads
 gzip directly and parses in the browser, nothing is uploaded) or in
 `chrome://tracing` ("Load"). For text, run
-`python3 tools/bazel/critpath.py <(zcat /tmp/prof/*/bazel-profile-test.json.gz)`
-or `bazel analyze-profile`. Locally, Bazel already keeps the last five
+`python3 tools/bazel/critpath.py <(zcat /tmp/prof/bazel-profile-test-1/bazel-profile-test.json.gz)`
+(one file: the `test` lane's attempt 1; critpath.py reads one profile) or
+`bazel analyze-profile`. Locally, Bazel already keeps the last five
 profiles of each output base as `$(bazel info output_base)/command-<id>.profile.gz`.
 
 These artifacts are public, like every artifact of this repo. A profile
-holds timings, mnemonics, target labels and the runner's output base path;
-it carries no command line, environment value or endpoint. The prepare step
-still refuses a profile with anything secret-shaped (credentials in a URL, a
-PEM block, `token=`/`secret=`/`password=`/`api_key=` in any case, a GitHub
+holds timings, mnemonics, target labels and the runner's output base path,
+and also external fetch URLs and the command line of each repository rule's
+command, with any environment a rule passes on it
+(`tools/bazel/go_repository_tools.bzl` runs go as `env -i KEY=value … go …`,
+`PATH` and `GOPROXY` among the keys). So the prepare step's scan, not the
+profile format, keeps secrets out: it refuses a profile with anything
+secret-shaped (credentials in a URL, a PEM block,
+`token=`/`secret=`/`password=`/`api_key=` in any case, a GitHub
 (`ghs_`/`ghp_`/`gho_`/`ghu_`/`ghr_`/`github_pat_`), AWS (`AKIA…`) or Slack
-(`xox[abp]-`) token, a JWT, an `ops.gascity.com` host) and caps a lane at
-20 MB gzipped, with a warning. The upload never fails or holds up a lane (`continue-on-error`, 1-minute bounds);
-`TestBazelProfileArtifactStepsAreSafeAndBounded` pins that.
+(`xox[abp]-`) token, a JWT, an `ops.gascity.com` host). Keep credentials off
+repository rules' command lines: the scan is the only check between them and
+a public artifact. The step also caps a lane at 20 MB gzipped, with a
+warning. The upload never fails or holds up a lane (`continue-on-error`,
+1-minute bounds); `TestBazelProfileArtifactStepsAreSafeAndBounded` pins that.
 
 ## Choose the Smallest Useful Test
 

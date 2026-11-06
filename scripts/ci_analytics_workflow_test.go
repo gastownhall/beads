@@ -3,6 +3,7 @@ package scripts_test
 import (
 	"compress/gzip"
 	"io"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -384,7 +385,7 @@ func TestBazelProfileArtifactStepsAreSafeAndBounded(t *testing.T) {
 		t.Fatal("no lane has a profile prepare step")
 	}
 
-	run := func(files map[string]string) (string, map[string]string) {
+	run := func(prepare string, files map[string]string) (string, map[string]string) {
 		t.Helper()
 		dir := t.TempDir()
 		for name, body := range files {
@@ -392,7 +393,7 @@ func TestBazelProfileArtifactStepsAreSafeAndBounded(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		out, err := runRRCScript(t, dir, script, map[string]string{"RUNNER_TEMP": dir, "LANE": "pure"})
+		out, err := runRRCScript(t, dir, prepare, map[string]string{"RUNNER_TEMP": dir, "LANE": "pure"})
 		if err != nil {
 			t.Fatalf("prepare script failed: %v\n%s", err, out)
 		}
@@ -403,7 +404,7 @@ func TestBazelProfileArtifactStepsAreSafeAndBounded(t *testing.T) {
 		}
 		return out, got
 	}
-	if _, got := run(nil); len(got) != 0 {
+	if _, got := run(script, nil); len(got) != 0 {
 		t.Errorf("no profiles: uploaded %v", got)
 	}
 	clean := `{"otherData":{"bazel_version":"9.3.1"},"traceEvents":[` + "\n" + `{"name":"//cmd/bd:bd_test","cat":"action processing","ph":"X","ts":1,"dur":2}]}` + "\n"
@@ -412,17 +413,35 @@ func TestBazelProfileArtifactStepsAreSafeAndBounded(t *testing.T) {
 		"bazel-profile-test-bd.json":    clean,
 		"bazel-profile-build-pure.json": "",
 	}
-	for i, secret := range []string{
+	// One sample per alternative of the scan's pattern, and per prefix of
+	// its (ghs|ghp|...) and xox[abp] groups, each matching only that
+	// alternative, so a typo in any of them uploads its sample. Each
+	// keyword has a lower- or mixed-case sample, for -i.
+	secrets := []string{
 		`"name":"fetching: https://user:pw@example.com/x"`,
 		`"args":{"x":"-----BEGIN PRIVATE KEY-----"}`,
 		`"args":{"x":"BEADS_HOLDER_TOKEN=abc"}`,
-		`"name":"rbe-west.ops.gascity.com"`,
 		`"args":{"x":"https://example.com/x?token=abc"}`,
+		`"args":{"x":"Client_Secret=abc"}`,
+		`"cat":"Starlark repository function call","name":"local: /usr/bin/curl --password=abc https://example.com/x"`,
+		`"args":{"x":"api_key=abc"}`,
 		`"args":{"x":"ghs_0123456789abcdefghijABCDEFGHIJ"}`,
-	} {
+		`"args":{"x":"ghp_0123456789abcdefghijABCDEFGHIJ"}`,
+		`"args":{"x":"gho_0123456789abcdefghijABCDEFGHIJ"}`,
+		`"args":{"x":"ghu_0123456789abcdefghijABCDEFGHIJ"}`,
+		`"args":{"x":"ghr_0123456789abcdefghijABCDEFGHIJ"}`,
+		`"args":{"x":"github_pat_11ABCDEFG0123456789_abcdefghij"}`,
+		`"args":{"x":"AKIAIOSFODNN7EXAMPLE"}`,
+		`"args":{"x":"xoxa-0123"}`,
+		`"args":{"x":"xoxb-0123"}`,
+		`"args":{"x":"xoxp-0123"}`,
+		`"args":{"x":"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2ln"}`,
+		`"name":"rbe-west.ops.gascity.com"`,
+	}
+	for i, secret := range secrets {
 		files["bazel-profile-secret"+string(rune('a'+i))+".json"] = clean + secret + "\n"
 	}
-	out, got := run(files)
+	out, got := run(script, files)
 	if want := []string{"bazel-profile-pure-build-wasm.json.gz", "bazel-profile-pure-test-bd.json.gz"}; !slices.Equal(sortedKeys(got), want) {
 		t.Errorf("uploaded %v, want %v\n%s", sortedKeys(got), want, out)
 	}
@@ -431,11 +450,47 @@ func TestBazelProfileArtifactStepsAreSafeAndBounded(t *testing.T) {
 			t.Errorf("%s is not the gzipped profile", name)
 		}
 	}
-	if n := strings.Count(out, "::warning title=bazel profile not uploaded::"); n != 6 {
-		t.Errorf("%d not-uploaded warnings, want 6 (one per secret-shaped profile):\n%s", n, out)
+	if n := strings.Count(out, "::warning title=bazel profile not uploaded::"); n != len(secrets) {
+		t.Errorf("%d not-uploaded warnings, want %d (one per secret-shaped profile):\n%s", n, len(secrets), out)
 	}
-	if !strings.Contains(script, "-gt 20971520") {
-		t.Errorf("prepare script has no 20 MB cap on the lane's gzipped profiles")
+
+	// The cap holds the lane's running total. Lowered to 3000 bytes for
+	// this run (the real 20971520 is pinned here), it uploads cap1 (about
+	// 2100 bytes gzipped), drops cap2 (as big: the two would total about
+	// 4200) with one warning, and still uploads cap3 (about 160) after it.
+	// The pad is 60 letters and digits, so gzip keeps about three quarters
+	// of it, and it has none of the characters a scan alternative needs
+	// (':', '-', '=', '_', '.', and 'a' in either case).
+	if n := strings.Count(script, "-gt 20971520"); n != 1 {
+		t.Fatalf("prepare script has %d 20 MB caps (-gt 20971520) on the lane's gzipped profiles, want 1", n)
+	}
+	capped := strings.Replace(script, "-gt 20971520", "-gt 3000", 1)
+	const padChars = "bcdefghijklmnopqrstuvwxyzBCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	rng := rand.New(rand.NewSource(1))
+	pad := func(n int) string {
+		b := make([]byte, n)
+		for i := range b {
+			b[i] = padChars[rng.Intn(len(padChars))]
+		}
+		return string(b) + "\n"
+	}
+	capFiles := map[string]string{
+		"bazel-profile-cap1.json": clean + pad(2600),
+		"bazel-profile-cap2.json": clean + pad(2600),
+		"bazel-profile-cap3.json": clean,
+	}
+	out, got = run(capped, capFiles)
+	if want := []string{"bazel-profile-pure-cap1.json.gz", "bazel-profile-pure-cap3.json.gz"}; !slices.Equal(sortedKeys(got), want) {
+		t.Errorf("capped run uploaded %v, want %v\n%s", sortedKeys(got), want, out)
+	}
+	for name, body := range got {
+		if src := "bazel-profile-" + strings.TrimSuffix(strings.TrimPrefix(name, "bazel-profile-pure-"), ".gz"); body != capFiles[src] {
+			t.Errorf("%s is not the gzipped %s", name, src)
+		}
+	}
+	if n := strings.Count(out, "::warning title=bazel profile not uploaded::"); n != 1 ||
+		!strings.Contains(out, "::warning title=bazel profile not uploaded::bazel-profile-cap2.json: ") || !strings.Contains(out, "over the 20 MB cap") {
+		t.Errorf("capped run: want one over-the-cap warning, for bazel-profile-cap2.json:\n%s", out)
 	}
 }
 

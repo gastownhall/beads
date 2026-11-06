@@ -1167,11 +1167,17 @@ jobs:
       # https://ui.perfetto.dev (Open trace file; parsing stays in the
       # browser), chrome://tracing, or `bazel analyze-profile`. A profile
       # holds timings, mnemonics, target labels and the runner's output_base
-      # path; no command lines, environment or endpoints. Artifacts of this
-      # public repo are world-readable, so the scan below refuses anything
-      # secret-shaped (and fails closed if it cannot read the file), and the
-      # lane's profiles are capped at 20 MB gzipped. Reporting only:
-      # continue-on-error, 1-minute bounds, and nothing reads the result.
+      # path, and also external fetch URLs and the command line of each
+      # repository rule's command, with any environment a rule passes on
+      # it (go_repository_tools.bzl runs go as `env -i KEY=value ... go`,
+      # PATH and GOPROXY among the keys). Artifacts of this public repo are
+      # world-readable, so the scan below, not the profile format, keeps
+      # secrets out: it refuses anything secret-shaped (and fails closed if
+      # it cannot read the file). The lane's profiles are capped at 20 MB
+      # gzipped, sized with POSIX `wc -c` (not GNU `stat -c`):
+      # TestBazelProfileArtifactStepsAreSafeAndBounded runs this script on
+      # macOS too. Reporting only: continue-on-error, 1-minute bounds, and
+      # nothing reads the result.
       # Named bazel-profile-*, apart from every other artifact name here.
       # bazel-dolt-int has none: its step timeouts plus margin already fill
       # the merge queue's 60 minutes (TestBazelDoltIntJobTimeouts).
@@ -1197,7 +1203,7 @@ jobs:
               continue
             fi
             gzip -c "$src" > "$out"
-            size=$(stat -c %s "$out")
+            size=$(wc -c < "$out")
             if [ $((total + size)) -gt 20971520 ]; then
               echo "::warning title=bazel profile not uploaded::${src##*/}: $size bytes gzipped would take this lane's profiles over the 20 MB cap"
               rm -f "$out"
@@ -1465,7 +1471,7 @@ jobs:
               continue
             fi
             gzip -c "$src" > "$out"
-            size=$(stat -c %s "$out")
+            size=$(wc -c < "$out")
             if [ $((total + size)) -gt 20971520 ]; then
               echo "::warning title=bazel profile not uploaded::${src##*/}: $size bytes gzipped would take this lane's profiles over the 20 MB cap"
               rm -f "$out"
@@ -1786,7 +1792,7 @@ jobs:
               continue
             fi
             gzip -c "$src" > "$out"
-            size=$(stat -c %s "$out")
+            size=$(wc -c < "$out")
             if [ $((total + size)) -gt 20971520 ]; then
               echo "::warning title=bazel profile not uploaded::${src##*/}: $size bytes gzipped would take this lane's profiles over the 20 MB cap"
               rm -f "$out"
@@ -2034,7 +2040,7 @@ jobs:
               continue
             fi
             gzip -c "$src" > "$out"
-            size=$(stat -c %s "$out")
+            size=$(wc -c < "$out")
             if [ $((total + size)) -gt 20971520 ]; then
               echo "::warning title=bazel profile not uploaded::${src##*/}: $size bytes gzipped would take this lane's profiles over the 20 MB cap"
               rm -f "$out"
@@ -2213,7 +2219,7 @@ jobs:
               continue
             fi
             gzip -c "$src" > "$out"
-            size=$(stat -c %s "$out")
+            size=$(wc -c < "$out")
             if [ $((total + size)) -gt 20971520 ]; then
               echo "::warning title=bazel profile not uploaded::${src##*/}: $size bytes gzipped would take this lane's profiles over the 20 MB cap"
               rm -f "$out"
@@ -2429,7 +2435,7 @@ jobs:
               continue
             fi
             gzip -c "$src" > "$out"
-            size=$(stat -c %s "$out")
+            size=$(wc -c < "$out")
             if [ $((total + size)) -gt 20971520 ]; then
               echo "::warning title=bazel profile not uploaded::${src##*/}: $size bytes gzipped would take this lane's profiles over the 20 MB cap"
               rm -f "$out"
@@ -2651,7 +2657,7 @@ jobs:
               continue
             fi
             gzip -c "$src" > "$out"
-            size=$(stat -c %s "$out")
+            size=$(wc -c < "$out")
             if [ $((total + size)) -gt 20971520 ]; then
               echo "::warning title=bazel profile not uploaded::${src##*/}: $size bytes gzipped would take this lane's profiles over the 20 MB cap"
               rm -f "$out"
@@ -2874,7 +2880,7 @@ jobs:
               continue
             fi
             gzip -c "$src" > "$out"
-            size=$(stat -c %s "$out")
+            size=$(wc -c < "$out")
             if [ $((total + size)) -gt 20971520 ]; then
               echo "::warning title=bazel profile not uploaded::${src##*/}: $size bytes gzipped would take this lane's profiles over the 20 MB cap"
               rm -f "$out"
@@ -3073,7 +3079,7 @@ jobs:
               continue
             fi
             gzip -c "$src" > "$out"
-            size=$(stat -c %s "$out")
+            size=$(wc -c < "$out")
             if [ $((total + size)) -gt 20971520 ]; then
               echo "::warning title=bazel profile not uploaded::${src##*/}: $size bytes gzipped would take this lane's profiles over the 20 MB cap"
               rm -f "$out"
