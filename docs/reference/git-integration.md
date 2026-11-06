@@ -181,7 +181,14 @@ already-installed canonical hook sections. Automatic generated-policy adoption i
 tracked separately.
 
 When the timeout is reached, beads prints a warning and lets the git
-operation proceed — the commit or push is not blocked.
+operation proceed, unless the deadline may have cut short a chained gate. For
+`pre-commit` and `pre-push`, when an executable `<hook-name>.old` that is not
+itself a beads hook sits next to the hook, the deadline also stopped that
+chained hook before it reported a result, so the hook refuses: it exits with
+the timeout helper's status (124 for coreutils, 142 for Perl) and says the
+chained hook is not known to have passed. Raise `BEADS_HOOK_TIMEOUT`, or use
+`--no-verify` to skip hooks on purpose. The other hooks, and gate hooks with
+no chained hook, keep warning and continuing.
 
 ## Conflict Resolution
 

@@ -184,12 +184,16 @@ type hookProcessCase struct {
 	pathTail    string
 	sleepPath   string
 	args        []string
+	hookName    string      // default pre-push
+	chainBody   string      // <hook>.old beside the hook; empty for none
+	chainMode   os.FileMode // chain file mode when not 0o755
 }
 
 type hookProcessResult struct {
-	output   string
-	exitCode int
-	elapsed  time.Duration
+	output    string
+	exitCode  int
+	elapsed   time.Duration
+	chainRuns int // runs hookProcessChainRecorderBody counted
 }
 
 func TestGeneratedHookTimeoutProcessBoundary(t *testing.T) {
@@ -198,6 +202,9 @@ func TestGeneratedHookTimeoutProcessBoundary(t *testing.T) {
 	t.Run("shell options preserve argv and status", testHookProcessShellOptions)
 	t.Run("POSIX sh preserves argv and status", testHookProcessPOSIXShell)
 	t.Run("reserved statuses are backend scoped", testHookProcessReservedStatuses)
+	t.Run("deadline with a chained gate refuses", testHookProcessDeadlineWithChainedGate)
+	t.Run("real coreutils timeout refuses with a chained gate", testHookProcessRealTimeoutChainedGate)
+	t.Run("real Perl supervisor refuses with a chained gate", testHookProcessRealPerlChainedGate)
 	t.Run("real coreutils timeout stops bd and the child it waits on", testHookProcessRealTimeoutExpiry)
 	t.Run("real Perl supervisor stops bd and the child it waits on", testHookProcessRealPerlExpiry)
 	t.Run("real Perl supervisor kills a bd that survives TERM", testHookProcessRealPerlKillAfter)
@@ -410,6 +417,138 @@ func testHookProcessReservedStatuses(t *testing.T) {
 			}
 		})
 	}
+}
+
+// hookProcessChainRefusal is the start of the refusal a gate hook prints when
+// its deadline expires with a chained gate it cannot vouch for.
+const hookProcessChainRefusal = "is not known to have passed"
+
+// testHookProcessDeadlineWithChainedGate drives a backend deadline (the
+// helper's own 124, or the Perl supervisor's 142) on each hook with a chain
+// beside it. pre-commit and pre-push are gates: bd was stopped while the chain
+// it runs may still have been deciding, so the hook refuses with the backend's
+// status rather than report success, and does not run the chain again. Without
+// a runnable foreign chain, and on the other hooks, the deadline keeps its
+// warn-and-continue behavior.
+func testHookProcessDeadlineWithChainedGate(t *testing.T) {
+	gnu := []hookProcessFixture{{name: "timeout", body: hookProcessGNUTimeoutStub}}
+	perl := []hookProcessFixture{
+		{name: "timeout", body: hookProcessIncompatibleTimeoutStub},
+		{name: "gtimeout", body: hookProcessIncompatibleGtimeoutStub},
+		{name: "perl", body: hookProcessPerlStub},
+	}
+	direct := perl[:2]
+	foreign := hookProcessChainRecorderBody
+	callback := "#!/bin/sh\n# bd-shim v1\n" + hookProcessChainRecorderBody
+	tests := []struct {
+		name      string
+		hookName  string
+		fixtures  []hookProcessFixture
+		bdExit    int
+		chainBody string
+		chainMode os.FileMode
+		wantExit  int
+		wantRefus bool
+		wantWarn  bool
+	}{
+		{name: "GNU pre-push refuses", hookName: "pre-push", fixtures: gnu, bdExit: 124, chainBody: foreign, wantExit: 124, wantRefus: true},
+		{name: "GNU pre-commit refuses", hookName: "pre-commit", fixtures: gnu, bdExit: 124, chainBody: foreign, wantExit: 124, wantRefus: true},
+		{name: "Perl pre-push refuses", hookName: "pre-push", fixtures: perl, bdExit: 142, chainBody: foreign, wantExit: 142, wantRefus: true},
+		{name: "Perl pre-commit refuses", hookName: "pre-commit", fixtures: perl, bdExit: 142, chainBody: foreign, wantExit: 142, wantRefus: true},
+		{name: "no chain continues", hookName: "pre-commit", fixtures: gnu, bdExit: 124, wantWarn: true},
+		{name: "non-executable chain continues", hookName: "pre-commit", fixtures: gnu, bdExit: 124, chainBody: foreign, chainMode: 0o644, wantWarn: true},
+		{name: "beads callback chain continues", hookName: "pre-push", fixtures: perl, bdExit: 142, chainBody: callback, wantWarn: true},
+		{name: "post-merge continues", hookName: "post-merge", fixtures: gnu, bdExit: 124, chainBody: foreign, wantWarn: true},
+		{name: "post-checkout continues", hookName: "post-checkout", fixtures: perl, bdExit: 142, chainBody: foreign, wantWarn: true},
+		{name: "prepare-commit-msg continues", hookName: "prepare-commit-msg", fixtures: gnu, bdExit: 124, chainBody: foreign, wantWarn: true},
+		{name: "direct natural 124 stays a failure", hookName: "pre-push", fixtures: direct, bdExit: 124, chainBody: foreign, wantExit: 124},
+		{name: "direct natural 142 stays a failure", hookName: "pre-commit", fixtures: direct, bdExit: 142, chainBody: foreign, wantExit: 142},
+		{name: "GNU natural 142 stays a failure", hookName: "pre-push", fixtures: gnu, bdExit: 142, chainBody: foreign, wantExit: 142},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := runGeneratedHookProcess(t, hookProcessCase{
+				fixtures:  tt.fixtures,
+				bdExit:    tt.bdExit,
+				hookName:  tt.hookName,
+				chainBody: tt.chainBody,
+				chainMode: tt.chainMode,
+			})
+			if result.exitCode != tt.wantExit {
+				t.Errorf("generated hook exit = %d, want %d\n%s", result.exitCode, tt.wantExit, result.output)
+			}
+			if got := strings.Contains(result.output, hookProcessChainRefusal); got != tt.wantRefus {
+				t.Errorf("chained-gate refusal presence = %v, want %v\n%s", got, tt.wantRefus, result.output)
+			}
+			if got := strings.Contains(result.output, "continuing without beads"); got != tt.wantWarn {
+				t.Errorf("continue warning presence = %v, want %v\n%s", got, tt.wantWarn, result.output)
+			}
+			if tt.wantRefus && !strings.Contains(result.output, "hook '"+tt.hookName+"' timed out after 300s") {
+				t.Errorf("refusal does not name the hook and its timeout\n%s", result.output)
+			}
+			if tt.wantRefus && !strings.Contains(result.output, tt.hookName+".old") {
+				t.Errorf("refusal does not name the chained hook\n%s", result.output)
+			}
+			if result.chainRuns != 0 {
+				t.Errorf("the section ran the chain %d times after bd returned; it must not rerun it\n%s", result.chainRuns, result.output)
+			}
+		})
+	}
+}
+
+// testHookProcessRealTimeoutChainedGate is testHookProcessRealTimeoutExpiry
+// with a foreign pre-push.old beside the hook: the real coreutils deadline now
+// refuses with 124 instead of continuing.
+func testHookProcessRealTimeoutChainedGate(t *testing.T) {
+	_, helperDir := findHookProcessCoreutilsTimeout(t)
+	timeout := "1"
+	result := runGeneratedHookProcess(t, hookProcessCase{
+		bdBody:    hookProcessLongRunningBDStub,
+		timeout:   &timeout,
+		pathTail:  helperDir,
+		sleepPath: findHookProcessSleep(t),
+		chainBody: hookProcessChainRecorderBody,
+	})
+	if result.exitCode != 124 {
+		t.Fatalf("generated hook exit = %d, want the coreutils deadline status 124\n%s", result.exitCode, result.output)
+	}
+	if !strings.Contains(result.output, "timed out after 1s") || !strings.Contains(result.output, hookProcessChainRefusal) {
+		t.Fatalf("coreutils deadline with a chained gate did not refuse\n%s", result.output)
+	}
+	if result.chainRuns != 0 {
+		t.Errorf("the section ran the chain %d times after the deadline\n%s", result.chainRuns, result.output)
+	}
+}
+
+// testHookProcessRealPerlChainedGate is the same for the real Perl
+// supervisor's 142.
+func testHookProcessRealPerlChainedGate(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip(hookProcessPerlSignalSkip)
+	}
+	timeout := "1"
+	result := runGeneratedHookProcess(t, hookProcessCase{
+		fixtures: []hookProcessFixture{
+			{name: "timeout", body: hookProcessIncompatibleTimeoutStub},
+			{name: "gtimeout", body: hookProcessIncompatibleGtimeoutStub},
+		},
+		bdBody:    hookProcessLongRunningBDStub,
+		timeout:   &timeout,
+		pathTail:  findHookProcessPerl(t),
+		sleepPath: findHookProcessSleep(t),
+		hookName:  "pre-commit",
+		chainBody: hookProcessChainRecorderBody,
+	})
+	if result.exitCode != 142 {
+		t.Fatalf("generated hook exit = %d, want the Perl supervisor's deadline status 142\n%s", result.exitCode, result.output)
+	}
+	if !strings.Contains(result.output, "timed out after 1s") || !strings.Contains(result.output, hookProcessChainRefusal) {
+		t.Fatalf("Perl deadline with a chained gate did not refuse\n%s", result.output)
+	}
+	if result.chainRuns != 0 {
+		t.Errorf("the section ran the chain %d times after the deadline\n%s", result.chainRuns, result.output)
+	}
+	assertHookProcessChildStopped(t, result.output)
 }
 
 func testHookProcessRealTimeoutExpiry(t *testing.T) {
@@ -649,8 +788,21 @@ func runGeneratedHookProcess(t *testing.T, tc hookProcessCase) hookProcessResult
 		writeHookProcessFixture(t, binDir, fixture.name, fixture.body)
 	}
 
-	hookPath := filepath.Join(t.TempDir(), "pre-push")
-	writeHookProcessFixture(t, filepath.Dir(hookPath), filepath.Base(hookPath), "#!/bin/sh\n"+generateHookSection("pre-push"))
+	hookName := tc.hookName
+	if hookName == "" {
+		hookName = "pre-push"
+	}
+	hookPath := filepath.Join(t.TempDir(), hookName)
+	writeHookProcessFixture(t, filepath.Dir(hookPath), filepath.Base(hookPath), "#!/bin/sh\n"+generateHookSection(hookName))
+	if tc.chainBody != "" {
+		writeHookProcessFixture(t, filepath.Dir(hookPath), hookName+".old", tc.chainBody)
+		if tc.chainMode != 0 {
+			if err := os.Chmod(hookPath+".old", tc.chainMode); err != nil {
+				t.Fatalf("chmod chain: %v", err)
+			}
+		}
+	}
+	countPath := filepath.Join(t.TempDir(), "chain-count")
 	controlledPath := hookProcessShellPath(t, binDir)
 	if tc.pathTail != "" {
 		controlledPath += ":" + tc.pathTail
@@ -671,18 +823,21 @@ _bd_test_hook=$1
 shift
 . "$_bd_test_hook"
 `
+	// $0 is the hook's own path, as when git runs it: the section finds
+	// <hook>.old beside the hook through $0.
+	shellHookPath := hookProcessShellPath(t, hookPath)
 	shellPath := hookProcessShell(t)
-	commandArgs := []string{"--noprofile", "--norc", "-c", controlScript, "generated-hook-test", controlledPath, tc.shellOption, hookProcessShellPath(t, hookPath)}
+	commandArgs := []string{"--noprofile", "--norc", "-c", controlScript, shellHookPath, controlledPath, tc.shellOption, shellHookPath}
 	if tc.usePOSIXSh {
 		shellPath = hookProcessPOSIXShell(t)
-		commandArgs = []string{"-c", controlScript, "generated-hook-test", controlledPath, tc.shellOption, hookProcessShellPath(t, hookPath)}
+		commandArgs = []string{"-c", controlScript, shellHookPath, controlledPath, tc.shellOption, shellHookPath}
 	}
 	commandArgs = append(commandArgs, tc.args...)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	t.Cleanup(cancel)
 	cmd := exec.CommandContext(ctx, shellPath, commandArgs...)
 	cmd.WaitDelay = time.Second
-	cmd.Env = append(hookProcessEnv(), "HOOK_TEST_BD_EXIT="+strconv.Itoa(tc.bdExit))
+	cmd.Env = append(hookProcessEnv(), "HOOK_TEST_BD_EXIT="+strconv.Itoa(tc.bdExit), "HOOK_TEST_CHAIN_COUNT="+countPath)
 	if tc.timeout != nil {
 		cmd.Env = append(cmd.Env, "BEADS_HOOK_TIMEOUT="+*tc.timeout)
 	}
@@ -703,7 +858,11 @@ shift
 		}
 		exitCode = exitErr.ExitCode()
 	}
-	return hookProcessResult{output: string(output), exitCode: exitCode, elapsed: elapsed}
+	runs := 0
+	if counted, err := os.ReadFile(countPath); err == nil {
+		runs = strings.Count(string(counted), "run\n")
+	}
+	return hookProcessResult{output: string(output), exitCode: exitCode, elapsed: elapsed, chainRuns: runs}
 }
 
 // runHookProcessRealPerl runs the generated hook with bdBody standing in for

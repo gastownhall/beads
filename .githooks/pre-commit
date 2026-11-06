@@ -30,6 +30,8 @@ fi
 # This section is managed by beads. Do not remove these markers.
 _bd_exit=0
 _bd_missing=0
+_bd_timed_out=0
+_bd_chain=
 if command -v bd >/dev/null 2>&1; then
   export BD_GIT_HOOK=1
   _bd_timeout=${BEADS_HOOK_TIMEOUT:-300}
@@ -89,13 +91,12 @@ if command -v bd >/dev/null 2>&1; then
     fi
   fi
   if { [ "$_bd_timeout_backend" = coreutils ] && [ "$_bd_exit" -eq 124 ]; } || { [ "$_bd_timeout_backend" = perl ] && [ "$_bd_exit" -eq 142 ]; }; then
-    echo >&2 "beads: hook 'pre-commit' timed out after ${_bd_timeout}s — continuing without beads"
-    _bd_exit=0
+    _bd_timed_out=1
   fi
 else
   _bd_missing=1
 fi
-if [ "$_bd_missing" -eq 1 ]; then
+if [ "$_bd_missing" -eq 1 ] || [ "$_bd_timed_out" -eq 1 ]; then
   case "$0" in
     */*) _bd_chain="${0%/*}/pre-commit.old" ;;
     *) _bd_chain="./pre-commit.old" ;;
@@ -118,13 +119,22 @@ if [ "$_bd_missing" -eq 1 ]; then
   else
     _bd_chain=
   fi
-  if [ -n "$_bd_chain" ]; then
+  if [ "$_bd_missing" -eq 1 ] && [ -n "$_bd_chain" ]; then
     export BD_GIT_HOOK=1
     if "$_bd_chain" "$@"; then
       _bd_exit=0
     else
       _bd_exit=$?
     fi
+  fi
+fi
+if [ "$_bd_timed_out" -eq 1 ]; then
+  if [ -n "$_bd_chain" ]; then
+    echo >&2 "beads: hook 'pre-commit' timed out after ${_bd_timeout}s; chained hook $_bd_chain is not known to have passed, so the hook refuses"
+    echo >&2 "beads: raise BEADS_HOOK_TIMEOUT, or use --no-verify to skip hooks on purpose"
+  else
+    echo >&2 "beads: hook 'pre-commit' timed out after ${_bd_timeout}s — continuing without beads"
+    _bd_exit=0
   fi
 fi
 if [ "$_bd_exit" -ne 0 ]; then exit "$_bd_exit"; fi
