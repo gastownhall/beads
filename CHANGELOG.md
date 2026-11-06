@@ -1208,6 +1208,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Generated git hooks run a chained `<hook>.old` (the hook
+  `bd hooks install --chain` keeps) themselves when `bd` is not on `PATH`,
+  with git's arguments and standard input, so a failing pre-commit or
+  pre-push check stops the commit or push instead of being skipped
+  (GH#6751, building on #6840 by vishnujayvel).
+  Run `bd hooks install` once to refresh installed hook sections.
 - `bd config get` for a config.yaml, git-config or user-global key no longer
   opens the database just because one exists, so it answers from those files
   while the Dolt server is down instead of failing the open (GH#5108). In

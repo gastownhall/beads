@@ -68,6 +68,15 @@ bd hooks install --chain    # Run existing hooks before bd hooks
 Hook installation is worktree-aware: `bd` resolves the shared git directory,
 so installing from a linked worktree works.
 
+`--chain` keeps an existing hook as `<hook>.old` beside the beads hook, and
+`bd hooks run` runs it first. If `bd` is not on `PATH` when the hook fires,
+the hook runs `<hook>.old` itself with git's arguments and standard input, so
+a pre-commit or pre-push check that fails still stops the commit or push
+instead of being skipped. A `<hook>.old` that is itself a beads hook (it
+carries beads markers or calls `bd hooks run`) is not run this way. Hooks
+installed before this change skip `<hook>.old` when `bd` is missing; run
+`bd hooks install` (add `--shared` for shared hooks) once to refresh them.
+
 ### Status
 
 ```bash

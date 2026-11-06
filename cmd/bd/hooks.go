@@ -101,9 +101,71 @@ const hookTimeoutKillAfterSeconds = 2
 //     longer holds bd.
 //   - If the beads database is not initialized (exit code 3), the hook exits
 //     successfully with a warning so that git operations are not blocked.
+//
+// Chained hooks (GH#6751, building on PR #6840 by vishnujayvel): bd hooks run
+// runs <hookName>.old, a foreign tool's hook, before its own work, so the
+// section must not let a skipped bd skip that gate too.
+//   - The section classifies <hookName>.old as runChainedHook does: an
+//     executable regular file is chained unless a script line marks it as bd's
+//     own (section, shim, version or inline marker, or bd hooks run
+//     delegation), which would chain back into bd. Only a script, a file
+//     whose first line starts with #!, is scanned, so a binary stays eligible
+//     without a whole-file read, and a file the shell cannot read is chained.
+//     The classifier uses shell builtins only (minimal PATHs are the case it
+//     exists for) and reads the file on its own descriptor, leaving the hook's
+//     stdin to the chained hook. Its marker patterns are split into adjacent
+//     quoted fragments so the generated text holds no marker literal that a
+//     Go marker scanner would read as a second section or a legacy hook.
+//   - Without bd on PATH, the section runs an eligible chained hook itself
+//     with the hook's argv and stdin, exits with its nonzero status, and
+//     falls through to the content after the section on success. The run
+//     sets BD_HOOK_CHAIN_ACTIVE to the hook name, so a chained hook that
+//     re-enters its parent hook is not chained again.
 func generateHookSection(hookName string) string {
 	return hookSectionBeginLine() + "\n" +
 		"# This section is managed by beads. Do not remove these markers.\n" +
+		"case \"$0\" in\n" +
+		"  */*) _bd_hook_dir=${0%/*} ;;\n" +
+		"  *) _bd_hook_dir=. ;;\n" +
+		"esac\n" +
+		"_bd_chain_hook=\"$_bd_hook_dir/" + hookName + ".old\"\n" +
+		"_bd_chain=0\n" +
+		"case \":${BD_HOOK_CHAIN_ACTIVE:-}:\" in\n" +
+		"  *\":" + hookName + ":\"*) ;;\n" +
+		"  *)\n" +
+		"    if [ -f \"$_bd_chain_hook\" ] && [ -x \"$_bd_chain_hook\" ]; then\n" +
+		"      _bd_chain=1\n" +
+		"      if [ -r \"$_bd_chain_hook\" ]; then\n" +
+		"        _bd_chain_first=1\n" +
+		"        while IFS= read -r _bd_chain_line || [ -n \"$_bd_chain_line\" ]; do\n" +
+		"          if [ \"$_bd_chain_first\" -eq 1 ]; then\n" +
+		"            _bd_chain_first=0\n" +
+		"            case \"$_bd_chain_line\" in\n" +
+		"              \"#!\"*) ;;\n" +
+		"              *) break ;;\n" +
+		"            esac\n" +
+		"          fi\n" +
+		"          case \"$_bd_chain_line\" in\n" +
+		"            *\"# --- BEGIN BEADS \"\"INTEGRATION\"*|*\"# bd-\"\"shim\"*|\"# bd-hooks-\"\"version: \"*|*\"# bd (\"\"beads)\"*) _bd_chain=0; break ;;\n" +
+		"            *bd*hooks*run*)\n" +
+		"              _bd_chain_words=\" $_bd_chain_line \"\n" +
+		"              while :; do\n" +
+		"                case \"$_bd_chain_words\" in\n" +
+		"                  *\"\t\"*) _bd_chain_words=\"${_bd_chain_words%%\"\t\"*} ${_bd_chain_words#*\"\t\"}\" ;;\n" +
+		"                  *\"  \"*) _bd_chain_words=\"${_bd_chain_words%%\"  \"*} ${_bd_chain_words#*\"  \"}\" ;;\n" +
+		"                  *) break ;;\n" +
+		"                esac\n" +
+		"              done\n" +
+		"              case \"$_bd_chain_words\" in\n" +
+		"                *[![:alnum:]_]\"bd hooks run\"[![:alnum:]_]*) _bd_chain=0; break ;;\n" +
+		"              esac\n" +
+		"              ;;\n" +
+		"          esac\n" +
+		"        done < \"$_bd_chain_hook\" 2>/dev/null\n" +
+		"      fi\n" +
+		"    fi\n" +
+		"    ;;\n" +
+		"esac\n" +
 		"if command -v bd >/dev/null 2>&1; then\n" +
 		"  export BD_GIT_HOOK=1\n" +
 		"  _bd_timeout=${BEADS_HOOK_TIMEOUT:-" + fmt.Sprintf("%d", hookTimeoutSeconds) + "}\n" +
@@ -169,6 +231,13 @@ func generateHookSection(hookName string) string {
 		"  if [ \"$_bd_exit\" -eq 3 ]; then\n" +
 		"    echo >&2 \"beads: database not initialized — skipping hook '" + hookName + "'\"\n" +
 		"    _bd_exit=0\n" +
+		"  fi\n" +
+		"  if [ \"$_bd_exit\" -ne 0 ]; then exit \"$_bd_exit\"; fi\n" +
+		"elif [ \"$_bd_chain\" -eq 1 ]; then\n" +
+		"  if BD_HOOK_CHAIN_ACTIVE=\"${BD_HOOK_CHAIN_ACTIVE:+$BD_HOOK_CHAIN_ACTIVE:}" + hookName + "\" \"$_bd_chain_hook\" \"$@\"; then\n" +
+		"    _bd_exit=0\n" +
+		"  else\n" +
+		"    _bd_exit=$?\n" +
 		"  fi\n" +
 		"  if [ \"$_bd_exit\" -ne 0 ]; then exit \"$_bd_exit\"; fi\n" +
 		"fi\n" +
