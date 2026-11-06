@@ -78,7 +78,7 @@ BD_AGENT_PROFILE=team-maintainer bd prime
 
 ### Managed Sections
 
-`bd setup factory`, `bd setup mux`, and `bd setup opencode` append a beads section to `AGENTS.md`, wrapped in `BEGIN/END BEADS INTEGRATION` HTML-comment markers. The begin marker carries version, profile, and hash metadata (e.g. `<!-- BEGIN BEADS INTEGRATION v:1 profile:full hash:19cc25d9 -->`) so `--check` can report `missing`, `stale`, or `current`; legacy markers without metadata are auto-upgraded on the next install or update. Re-running setup updates the existing section in place (idempotent), and `--remove` deletes only the managed section and the blank lines that set it off — the rest of your `AGENTS.md` is untouched. Running setup again after `--remove` appends the section to the end of the file after one blank line, so removing and re-adding it toggles between the same two files. The section `bd setup claude` and `bd setup gemini` manage in `CLAUDE.md` and `GEMINI.md` behaves the same way, except that in `~/.gemini/GEMINI.md` it goes ahead of the `## Gemini Added Memories` section older Gemini CLI releases keep there, so memories they save stay outside it.
+`bd setup factory`, `bd setup mux`, and `bd setup opencode` append a beads section to `AGENTS.md`, wrapped in `BEGIN/END BEADS INTEGRATION` HTML-comment markers. The begin marker carries version, profile, and hash metadata (e.g. `<!-- BEGIN BEADS INTEGRATION v:1 profile:full hash:19cc25d9 -->`) so `--check` can report `missing`, `stale`, or `current`; legacy markers without metadata are auto-upgraded on the next install or update. Re-running setup updates the existing section in place (idempotent), and `--remove` deletes only the managed section and the blank lines that set it off — the rest of your `AGENTS.md` is untouched. Running setup again after `--remove` appends the section to the end of the file after one blank line, so removing and re-adding it toggles between the same two files. The section `bd setup claude`, `bd setup gemini` and `bd setup copilot` manage in `CLAUDE.md`, `GEMINI.md` and `.github/copilot-instructions.md` behaves the same way, except that in `~/.gemini/GEMINI.md` it goes ahead of the `## Gemini Added Memories` section older Gemini CLI releases keep there, so memories they save stay outside it.
 
 `bd setup codex` uses its own marker pair (`BEGIN/END BEADS CODEX SETUP`). Running it alongside `bd setup factory` or `bd setup mux` against the same `AGENTS.md` leaves two managed sections side by side; each recipe's `--check` inspects only its own section, and each `--remove` removes only its own section.
 
@@ -231,7 +231,7 @@ Details: [Factory.ai Droid](/integrations/factory), [Mux](/integrations/mux), [O
 bd setup copilot
 ```
 
-This installs a native Copilot CLI plugin manifest (`.copilot-plugin/plugin.json`, which registers `bd prime` hooks) and repository instructions (`.github/copilot-instructions.md`). See [Copilot CLI](/integrations/copilot-cli).
+This installs a native Copilot CLI plugin manifest (`.copilot-plugin/plugin.json`, which registers `bd prime` hooks) and a managed beads section in the repository instructions (`.github/copilot-instructions.md`; see Managed Sections above). An existing instructions file keeps its contents, and `--remove` takes out only the section. See [Copilot CLI](/integrations/copilot-cli).
 
 **For VS Code with GitHub Copilot**, use the MCP server:
 

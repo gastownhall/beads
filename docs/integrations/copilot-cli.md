@@ -34,9 +34,9 @@ For **VS Code + MCP**, see [GitHub Copilot](/integrations/github-copilot).
    - The hook behavior and the human-readable guidance stay separate
 
 3. **Lower maintenance burden**
-   - No Copilot-specific install/check/remove implementation in core
+   - The plugin manifest is bd's own file, written as-is
+   - The instructions file is shared, so bd manages only a marked section in it, with the same code as the `AGENTS.md`, `CLAUDE.md` and `GEMINI.md` integrations
    - No Copilot-specific doctor checks
-   - The recipe just writes the native plugin file and the instruction file
 
 ## Why Copilot CLI Over MCP for Terminal Work?
 
@@ -70,14 +70,27 @@ bd setup copilot --remove
   - `SessionStart` hook: Runs `bd prime` when Copilot CLI starts a session
   - `PreCompact` hook: Runs `bd prime` before context compaction
 - `.github/copilot-instructions.md`
-  - Repository workflow guidance for Copilot CLI
+  - A managed beads section (minimal profile) between `<!-- BEGIN BEADS INTEGRATION ... -->` and `<!-- END BEADS INTEGRATION -->` markers, pointing Copilot CLI to `bd prime`
+
+**Your own instructions are kept** (unreleased; before this fix `bd setup copilot` replaced the whole file):
+- If `.github/copilot-instructions.md` already exists, `bd setup copilot` leaves its contents as they are and appends the beads section after a blank line. Re-running it updates only that section, and does nothing when it is current.
+- If the file does not exist, it is created holding only the section.
+- Text without the markers, including the static instructions an older `bd setup copilot` wrote, is treated as yours: bd never edits or removes it. Delete it by hand if you no longer want it.
+- If the file is a symlink, bd leaves it and its target alone and says so; edit the target directly or replace the link with a regular file.
+- If the markers are incomplete or out of order, install, `--check` and `--remove` stop with an error and change nothing; fix the markers by hand.
+
+**`--check`** passes only when the plugin manifest exists and the instructions file holds a current beads section. It reports missing files, an existing file with no beads section, a stale section, a symlink, or malformed markers, and exits nonzero for each.
+
+**`--remove`** deletes the plugin manifest and removes only the beads section, with the blank lines that set it off; the rest of the file stays. A file that held nothing but the section is deleted.
+
+A `[recipes.copilot]` entry in `.beads/recipes.toml` replaces the built-in recipe and is installed as a plain file recipe.
 
 ## Related Files
 
 - `plugins/beads/.copilot-plugin/plugin.json` - Source plugin manifest for the shared plugin package
 - `plugins/beads/copilot_manifest.go` - Embedded manifest source used by `bd setup copilot`
 - `internal/recipes/recipes.go` - Lightweight `copilot` recipe definition
-- `internal/recipes/template.go` - Static Copilot instructions template used by `bd setup`
+- `cmd/bd/setup/copilot.go` - Install, check and remove for the plugin manifest and the managed instructions section
 - [GitHub Copilot integration](/integrations/github-copilot) - VS Code MCP integration
 
 ## References

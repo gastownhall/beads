@@ -64,8 +64,10 @@ For detailed docs: see AGENTS.md, the beads quickstart
 (https://github.com/gastownhall/beads/blob/main/docs/getting-started/quickstart.md), or run ` + "`bd --help`" + `
 `
 
-// CopilotInstructionsTemplate is the repository instructions file used by the
-// lightweight Copilot CLI plugin recipe.
+// CopilotInstructionsTemplate is the copilot recipe's content for
+// .github/copilot-instructions.md. bd setup copilot no longer writes it: the
+// built-in recipe keeps a managed minimal beads section in that file instead
+// (GH#7431), leaving the repository's own instructions in place.
 const CopilotInstructionsTemplate = `# GitHub Copilot Instructions
 
 This repository uses **Beads (bd)** for issue tracking.
