@@ -1,6 +1,11 @@
 #!/usr/bin/env sh
 # --- BEGIN BEADS INTEGRATION v1.3.4 ---
 # This section is managed by beads. Do not remove these markers.
+_bd_exit=0
+_bd_missing=0
+_bd_deadline=0
+_bd_chain=
+_bd_chain_foreign=0
 if command -v bd >/dev/null 2>&1; then
   export BD_GIT_HOOK=1
   _bd_timeout=${BEADS_HOOK_TIMEOUT:-300}
@@ -60,15 +65,16 @@ if command -v bd >/dev/null 2>&1; then
     fi
   fi
   if { [ "$_bd_timeout_backend" = coreutils ] && [ "$_bd_exit" -eq 124 ]; } || { [ "$_bd_timeout_backend" = perl ] && [ "$_bd_exit" -eq 142 ]; }; then
-    echo >&2 "beads: hook 'post-checkout' timed out after ${_bd_timeout}s — continuing without beads"
-    _bd_exit=0
+    _bd_deadline=1
   fi
-  if [ "$_bd_exit" -ne 0 ]; then exit "$_bd_exit"; fi
 else
-  # bd is missing from PATH (GH#6751): run the chained gate ourselves so
-  # a foreign post-checkout.old still decides the git operation. The sibling
-  # path comes from $0 (no PATH lookup), and a chain that is missing or not
-  # executable stays a silent no-op, like the Go-side chain runner.
+  _bd_missing=1
+fi
+if [ "$_bd_missing" -eq 1 ]; then
+  # The chained sibling gate, resolved from $0 (no PATH lookup), still
+  # decides the git operation when bd is missing (GH#6751). A chain that
+  # is missing or not executable stays a silent no-op, like the Go-side
+  # chain runner.
   case "$0" in
     */*) _bd_chain="${0%/*}/post-checkout.old" ;;
     *) _bd_chain="./post-checkout.old" ;;
@@ -94,15 +100,20 @@ else
         esac
       done < "$_bd_chain"
     fi
-    if [ "$_bd_chain_foreign" -eq 1 ]; then
-      export BD_GIT_HOOK=1
-      if "$_bd_chain" "$@"; then
-        :
-      else
-        _bd_exit=$?
-        exit "$_bd_exit"
-      fi
-    fi
   fi
 fi
+if [ "$_bd_deadline" -eq 1 ]; then
+  echo >&2 "beads: hook 'post-checkout' timed out after ${_bd_timeout}s — continuing without beads"
+  _bd_exit=0
+elif [ "$_bd_missing" -eq 1 ] && [ "$_bd_chain_foreign" -eq 1 ]; then
+  # bd is missing from PATH (GH#6751): run the chained gate ourselves
+  # so a foreign post-checkout.old still decides the git operation.
+  export BD_GIT_HOOK=1
+  if "$_bd_chain" "$@"; then
+    :
+  else
+    _bd_exit=$?
+  fi
+fi
+if [ "$_bd_exit" -ne 0 ]; then exit "$_bd_exit"; fi
 # --- END BEADS INTEGRATION v1.3.4 ---

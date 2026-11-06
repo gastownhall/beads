@@ -108,9 +108,45 @@ const hookTimeoutKillAfterSeconds = 2
 //     PATH — GH#6751), the section runs the chained <hookName>.old gate itself
 //     with shell builtins, so a foreign gate still blocks the git operation.
 //     A chain that is itself a beads hook is left alone (GH#843, GH#1120).
+//   - A recognized deadline (coreutils exit 124, Perl supervisor exit 142) no
+//     longer means "continue" unconditionally. On the gate hooks (pre-commit,
+//     pre-push) a foreign chained gate makes the chained gate's result
+//     unknown — bd was killed mid-wait — so the section refuses with the
+//     backend status and names the chain rather than let the operation
+//     through on an assumed pass. With no such gate, and on the observe-only
+//     hooks, the deadline stays a warning and the git operation proceeds.
 func generateHookSection(hookName string) string {
+	// The gate hooks decide whether the git operation may proceed, so an
+	// unknown chained-gate result after a deadline refuses the operation; the
+	// other hooks only observe it.
+	gate := hookName == "pre-commit" || hookName == "pre-push"
+	chainInspectCondition := "if [ \"$_bd_missing\" -eq 1 ]; then\n"
+	chainInspectComment := "  # The chained sibling gate, resolved from $0 (no PATH lookup), still\n" +
+		"  # decides the git operation when bd is missing (GH#6751). A chain that\n" +
+		"  # is missing or not executable stays a silent no-op, like the Go-side\n" +
+		"  # chain runner.\n"
+	if gate {
+		chainInspectCondition = "if [ \"$_bd_missing\" -eq 1 ] || [ \"$_bd_deadline\" -eq 1 ]; then\n"
+		chainInspectComment = "  # The chained sibling gate, resolved from $0 (no PATH lookup), still\n" +
+			"  # decides the git operation when bd is missing (GH#6751), and after a\n" +
+			"  # recognized deadline its unknown result must not be assumed. A\n" +
+			"  # chain that is missing or not executable stays a silent no-op,\n" +
+			"  # like the Go-side chain runner.\n"
+	}
+	deadlineRefusalArm := ""
+	if gate {
+		deadlineRefusalArm = "  if [ \"$_bd_chain_foreign\" -eq 1 ]; then\n" +
+			"    echo >&2 \"beads: hook '" + hookName + "' timed out after ${_bd_timeout}s with chained gate '" + hookName + ".old' present; its result is not known — refusing. Raise BEADS_HOOK_TIMEOUT or use --no-verify to skip this gate.\"\n" +
+			"    exit \"$_bd_exit\"\n" +
+			"  fi\n"
+	}
 	return hookSectionBeginLine() + "\n" +
 		"# This section is managed by beads. Do not remove these markers.\n" +
+		"_bd_exit=0\n" +
+		"_bd_missing=0\n" +
+		"_bd_deadline=0\n" +
+		"_bd_chain=\n" +
+		"_bd_chain_foreign=0\n" +
 		"if command -v bd >/dev/null 2>&1; then\n" +
 		"  export BD_GIT_HOOK=1\n" +
 		"  _bd_timeout=${BEADS_HOOK_TIMEOUT:-" + fmt.Sprintf("%d", hookTimeoutSeconds) + "}\n" +
@@ -170,15 +206,13 @@ func generateHookSection(hookName string) string {
 		"    fi\n" +
 		"  fi\n" +
 		"  if { [ \"$_bd_timeout_backend\" = coreutils ] && [ \"$_bd_exit\" -eq 124 ]; } || { [ \"$_bd_timeout_backend\" = perl ] && [ \"$_bd_exit\" -eq 142 ]; }; then\n" +
-		"    echo >&2 \"beads: hook '" + hookName + "' timed out after ${_bd_timeout}s — continuing without beads\"\n" +
-		"    _bd_exit=0\n" +
+		"    _bd_deadline=1\n" +
 		"  fi\n" +
-		"  if [ \"$_bd_exit\" -ne 0 ]; then exit \"$_bd_exit\"; fi\n" +
 		"else\n" +
-		"  # bd is missing from PATH (GH#6751): run the chained gate ourselves so\n" +
-		"  # a foreign " + hookName + ".old still decides the git operation. The sibling\n" +
-		"  # path comes from $0 (no PATH lookup), and a chain that is missing or not\n" +
-		"  # executable stays a silent no-op, like the Go-side chain runner.\n" +
+		"  _bd_missing=1\n" +
+		"fi\n" +
+		chainInspectCondition +
+		chainInspectComment +
 		"  case \"$0\" in\n" +
 		"    */*) _bd_chain=\"${0%/*}/" + hookName + ".old\" ;;\n" +
 		"    *) _bd_chain=\"./" + hookName + ".old\" ;;\n" +
@@ -204,17 +238,23 @@ func generateHookSection(hookName string) string {
 		"        esac\n" +
 		"      done < \"$_bd_chain\"\n" +
 		"    fi\n" +
-		"    if [ \"$_bd_chain_foreign\" -eq 1 ]; then\n" +
-		"      export BD_GIT_HOOK=1\n" +
-		"      if \"$_bd_chain\" \"$@\"; then\n" +
-		"        :\n" +
-		"      else\n" +
-		"        _bd_exit=$?\n" +
-		"        exit \"$_bd_exit\"\n" +
-		"      fi\n" +
-		"    fi\n" +
 		"  fi\n" +
 		"fi\n" +
+		"if [ \"$_bd_deadline\" -eq 1 ]; then\n" +
+		deadlineRefusalArm +
+		"  echo >&2 \"beads: hook '" + hookName + "' timed out after ${_bd_timeout}s — continuing without beads\"\n" +
+		"  _bd_exit=0\n" +
+		"elif [ \"$_bd_missing\" -eq 1 ] && [ \"$_bd_chain_foreign\" -eq 1 ]; then\n" +
+		"  # bd is missing from PATH (GH#6751): run the chained gate ourselves\n" +
+		"  # so a foreign " + hookName + ".old still decides the git operation.\n" +
+		"  export BD_GIT_HOOK=1\n" +
+		"  if \"$_bd_chain\" \"$@\"; then\n" +
+		"    :\n" +
+		"  else\n" +
+		"    _bd_exit=$?\n" +
+		"  fi\n" +
+		"fi\n" +
+		"if [ \"$_bd_exit\" -ne 0 ]; then exit \"$_bd_exit\"; fi\n" +
 		hookSectionEndLine() + "\n"
 }
 

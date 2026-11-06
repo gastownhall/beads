@@ -203,6 +203,7 @@ func TestGeneratedHookTimeoutProcessBoundary(t *testing.T) {
 	t.Run("real Perl supervisor kills a bd that survives TERM", testHookProcessRealPerlKillAfter)
 	t.Run("real Perl supervisor forwards signals to bd's process group", testHookProcessRealPerlForwardsSignals)
 	t.Run("real Perl supervisor preserves argv and status", testHookProcessRealPerlStatuses)
+	t.Run("deadline with a foreign gate refuses; without one it continues", testHookProcessDeadlineRefusal)
 	t.Run("Windows checkout rejects System32 timeout", testHookProcessWindowsSystemTimeoutCheckout)
 }
 
@@ -1534,6 +1535,160 @@ func TestGeneratedHookChainClassification(t *testing.T) {
 				if goSkips == ran {
 					t.Fatalf("shell classifier ran=%v but getHookVersion classifies IsBdHook=%v IsExternalIntegration=%v (%+v); the fallback must agree with the Go-side recursion guard", ran, info.IsBdHook, info.IsExternalIntegration, info)
 				}
+			}
+		})
+	}
+}
+
+// hookDeadlineCase drives the generated section as a real hook script (so $0
+// is the hook path and the sibling .old resolves) with bd present but stuck,
+// a real deadline backend, and BEADS_HOOK_TIMEOUT=1: the recognized-deadline
+// path with and without an executable foreign chain.
+type hookDeadlineCase struct {
+	hookName  string
+	chainBody string
+	chainMode os.FileMode
+	coreutils bool // real coreutils timeout; otherwise the real Perl supervisor
+}
+
+func runGeneratedHookDeadlineProcess(t *testing.T, tc hookDeadlineCase) hookChainResult {
+	t.Helper()
+	if tc.hookName == "" {
+		tc.hookName = "pre-commit"
+	}
+	binDir := t.TempDir()
+	writeHookProcessFixture(t, binDir, "bd", hookProcessLongRunningBDStub)
+	pathTail := findHookProcessPerl(t)
+	if tc.coreutils {
+		_, helperDir := findHookProcessCoreutilsTimeout(t)
+		pathTail = helperDir
+	} else {
+		writeHookProcessFixture(t, binDir, "timeout", hookProcessIncompatibleTimeoutStub)
+		writeHookProcessFixture(t, binDir, "gtimeout", hookProcessIncompatibleGtimeoutStub)
+	}
+
+	hooksDir := filepath.Join(t.TempDir(), "hooks")
+	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+		t.Fatalf("create hooks directory: %v", err)
+	}
+	hookPath := filepath.Join(hooksDir, tc.hookName)
+	writeHookProcessFixture(t, hooksDir, tc.hookName, "#!/bin/sh\n"+generateHookSection(tc.hookName))
+	if tc.chainMode != 0 {
+		chainPath := hookPath + ".old"
+		if err := os.WriteFile(chainPath, []byte(tc.chainBody), tc.chainMode); err != nil {
+			t.Fatalf("write chained hook fixture: %v", err)
+		}
+	}
+
+	chainLog := filepath.Join(t.TempDir(), "chain.log")
+	if err := os.WriteFile(chainLog, nil, 0o644); err != nil {
+		t.Fatalf("create chain log: %v", err)
+	}
+	timeout := "1"
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	t.Cleanup(cancel)
+	cmd := exec.CommandContext(ctx, hookProcessShellPath(t, hookPath))
+	cmd.Env = append(hookProcessEnv(),
+		"PATH="+hookProcessShellPath(t, binDir)+":"+pathTail,
+		"BEADS_HOOK_TIMEOUT="+timeout,
+		"HOOK_TEST_SLEEP="+findHookProcessSleep(t),
+		"CHAIN_LOG="+chainLog)
+	cmd.WaitDelay = time.Second
+	started := time.Now()
+	output, err := cmd.CombinedOutput()
+	elapsed := time.Since(started)
+	if ctx.Err() != nil {
+		t.Fatalf("generated hook exceeded process-test deadline: %v\n%s", ctx.Err(), string(output))
+	}
+	exitCode := 0
+	if err != nil {
+		exitErr, ok := err.(*exec.ExitError)
+		if !ok {
+			t.Fatalf("run generated hook: %v\n%s", err, string(output))
+		}
+		exitCode = exitErr.ExitCode()
+	}
+	chain := ""
+	if content, readErr := os.ReadFile(chainLog); readErr == nil {
+		chain = string(content)
+	}
+	return hookChainResult{
+		hookProcessResult: hookProcessResult{output: string(output) + chain, exitCode: exitCode, elapsed: elapsed},
+		logs:              hookChainLogs{chain: chain, chainPath: hookPath + ".old"},
+	}
+}
+
+// testHookProcessDeadlineRefusal pins the deadline policy on the gate hooks:
+// a recognized backend deadline with an executable foreign chain must refuse
+// with the backend's status and an unknown-result diagnostic — the chain is
+// not re-run — while the same deadline without such a gate keeps the
+// warn-and-continue behavior (GH#2449/GH#2453's stance, now scoped).
+func testHookProcessDeadlineRefusal(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip(hookProcessPerlSignalSkip)
+	}
+	foreignChain := "#!/bin/sh\nprintf 'chain-ran\\n' >> \"$CHAIN_LOG\"\nexit 1\n"
+
+	t.Run("coreutils deadline with foreign chain refuses pre-commit", func(t *testing.T) {
+		result := runGeneratedHookDeadlineProcess(t, hookDeadlineCase{coreutils: true, chainBody: foreignChain, chainMode: 0o755})
+		if result.exitCode != 124 {
+			t.Fatalf("generated hook exit = %d, want refusal with the coreutils deadline status 124\n%s", result.exitCode, result.output)
+		}
+		for _, want := range []string{"long-running-bd-started", "timed out after 1s", "pre-commit.old", "not known", "--no-verify"} {
+			if !strings.Contains(result.output, want) {
+				t.Errorf("refusal output missing %q\n%s", want, result.output)
+			}
+		}
+		if strings.Contains(result.output, "continuing without beads") {
+			t.Errorf("deadline with a foreign gate continued without beads\n%s", result.output)
+		}
+		if result.logs.chain != "" {
+			t.Errorf("the wrapper re-ran the chained gate after the deadline\n%s", result.logs.chain)
+		}
+	})
+
+	t.Run("Perl deadline with foreign chain refuses pre-push", func(t *testing.T) {
+		result := runGeneratedHookDeadlineProcess(t, hookDeadlineCase{hookName: "pre-push", chainBody: foreignChain, chainMode: 0o755})
+		if result.exitCode != 142 {
+			t.Fatalf("generated hook exit = %d, want refusal with the Perl supervisor status 142\n%s", result.exitCode, result.output)
+		}
+		for _, want := range []string{"long-running-bd-started", "timed out after 1s", "pre-push.old", "not known", "--no-verify"} {
+			if !strings.Contains(result.output, want) {
+				t.Errorf("refusal output missing %q\n%s", want, result.output)
+			}
+		}
+		if result.logs.chain != "" {
+			t.Errorf("the wrapper re-ran the chained gate after the deadline\n%s", result.logs.chain)
+		}
+	})
+
+	continueControls := []struct {
+		name      string
+		hookName  string
+		chainBody string
+		chainMode os.FileMode
+	}{
+		{name: "no chain", hookName: "pre-commit"},
+		{name: "non-executable chain", hookName: "pre-push", chainBody: foreignChain, chainMode: 0o644},
+		{name: "bd-owned chain", hookName: "pre-commit", chainBody: generateHookSection("pre-commit"), chainMode: 0o755},
+		{name: "foreign chain on post-merge", hookName: "post-merge", chainBody: foreignChain, chainMode: 0o755},
+	}
+	for _, control := range continueControls {
+		t.Run("deadline with "+control.name+" continues", func(t *testing.T) {
+			result := runGeneratedHookDeadlineProcess(t, hookDeadlineCase{
+				hookName:  control.hookName,
+				chainBody: control.chainBody,
+				chainMode: control.chainMode,
+				coreutils: true,
+			})
+			if result.exitCode != 0 {
+				t.Fatalf("generated hook exit = %d, want the warn-and-continue timeout behavior\n%s", result.exitCode, result.output)
+			}
+			if !strings.Contains(result.output, "timed out after 1s") || !strings.Contains(result.output, "continuing without beads") {
+				t.Fatalf("output missing the continuing-without-beads timeout warning\n%s", result.output)
+			}
+			if result.logs.chain != "" {
+				t.Errorf("the wrapper ran the chained gate itself\n%s", result.logs.chain)
 			}
 		})
 	}
