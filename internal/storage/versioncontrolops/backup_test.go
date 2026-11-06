@@ -50,6 +50,10 @@ func TestDirToFileURLRejectsSchemes(t *testing.T) {
 // Drive rows are round-tripped through the pinned Dolt parser itself, so the
 // defect and its fix are exercised on every host, not only on Windows.
 func TestPathToFileURL(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, tc := range []struct {
 		name     string
 		abs      string
@@ -68,6 +72,14 @@ func TestPathToFileURL(t *testing.T) {
 			abs: `z:\`, want: "file:///Z:/", wantPath: "Z:/"},
 		{name: "spaces, percent and hash stay literal",
 			abs: `c:\Users\John Doe\100%\a#b`, want: "file:///C:/Users/John Doe/100%/a#b", wantPath: "C:/Users/John Doe/100%/a#b"},
+		// POSIX paths keep their bytes after the prefix: no drive letter to
+		// upper-case, no separator to rewrite, no percent-encoding.
+		{name: "home path stays byte-for-byte",
+			abs: filepath.Join(home, ".beads", "backup"), want: "file://" + filepath.Join(home, ".beads", "backup")},
+		{name: "backslash inside a POSIX path stays",
+			abs: `/tmp/a\b`, want: `file:///tmp/a\b`},
+		{name: "drive-shaped component after a POSIX root stays",
+			abs: `/srv/c:/x`, want: "file:///srv/c:/x"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := PathToFileURL(tc.abs)
