@@ -289,3 +289,69 @@ func TestMapUpdateTitleValidation(t *testing.T) {
 		}
 	})
 }
+
+// TestMapUpdateTitleBoundary pins the exact admission edge on the map-update
+// path: a changed title of exactly 500 bytes — ASCII or multibyte — is stored
+// byte-identically and satisfies the same validation create and import apply,
+// while one byte more is refused.
+func TestMapUpdateTitleBoundary(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	for _, tc := range []struct {
+		name  string
+		title string
+	}{
+		{"exactly 500 ASCII bytes", strings.Repeat("a", 500)},
+		{"exactly 500 multibyte bytes, 250 × é", strings.Repeat("é", 250)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			iss := titleTestIssue("tl-boundary")
+			if err := store.CreateIssue(ctx, iss, "tester"); err != nil {
+				t.Fatalf("CreateIssue: %v", err)
+			}
+			if err := store.UpdateIssue(ctx, iss.ID, map[string]interface{}{"title": tc.title}, "tester"); err != nil {
+				t.Fatalf("UpdateIssue with a 500-byte title: %v", err)
+			}
+			got, err := store.GetIssue(ctx, iss.ID)
+			if err != nil {
+				t.Fatalf("GetIssue: %v", err)
+			}
+			if got == nil || got.Title != tc.title {
+				t.Fatalf("stored title is not byte-identical, got %+v", got)
+			}
+			// The stored row must satisfy the canonical rule the create and
+			// import paths apply to the same value.
+			if err := got.ValidateWithCustom(nil, nil); err != nil {
+				t.Errorf("stored issue fails canonical validation: %v", err)
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		name  string
+		title string
+	}{
+		{"501 ASCII bytes", strings.Repeat("a", 501)},
+		{"502 multibyte bytes, 251 × é", strings.Repeat("é", 251)},
+	} {
+		t.Run(tc.name+" is refused", func(t *testing.T) {
+			iss := titleTestIssue("tl-over")
+			if err := store.CreateIssue(ctx, iss, "tester"); err != nil {
+				t.Fatalf("CreateIssue: %v", err)
+			}
+			if err := store.UpdateIssue(ctx, iss.ID, map[string]interface{}{"title": tc.title}, "tester"); !errors.Is(err, storage.ErrValidation) {
+				t.Fatalf("UpdateIssue with an over-limit title: err = %v, want ErrValidation", err)
+			}
+			got, err := store.GetIssue(ctx, iss.ID)
+			if err != nil {
+				t.Fatalf("GetIssue: %v", err)
+			}
+			if got == nil || got.Title != iss.Title {
+				t.Errorf("title changed after a refused update, got %+v", got)
+			}
+		})
+	}
+}
