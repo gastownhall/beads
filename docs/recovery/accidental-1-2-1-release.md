@@ -151,6 +151,15 @@ will work normally afterwards.
 This also works for databases **created** by v1.2.1 (not just upgraded
 ones): the v65 schema is a superset of everything the 1.1 line needs.
 
+Do not stop after step 4. The recovered machine works either way: it keeps
+writing audit rows to its own, unversioned `events` table. But that table
+never reaches the remote, and v1.2.2 has no way to recreate it, so every
+clone of a database pushed in that state can read but not write issues:
+`bd status`, `bd list`, `bd show` and even `bd kv set` succeed, while the
+first `bd create` or `bd import` fails with `table not found: events`. A
+smoke test of reads or `bd kv set` does not show that recovery is complete;
+step 6 does.
+
 If you push/pull issue data with teammates, note that the migrated cursor
 replicates: either recover every clone, or recover one and push, then have
 the others pull.
