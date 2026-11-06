@@ -1061,6 +1061,28 @@ func externalRefHistoryQuerier(store Store) (ExternalRefHistoryStore, bool) {
 	return nil, false
 }
 
+// externalRefHistoryBatchQuerier finds the batch external_ref history
+// capability the way externalRefHistoryQuerier finds the per-issue one: on
+// the store itself, on the classic store inside the NewStore adapter, and
+// beneath storage decorators, which promote only storage.DoltStorage.
+func externalRefHistoryBatchQuerier(store Store) (ExternalRefHistoryBatchStore, bool) {
+	if q, ok := store.(ExternalRefHistoryBatchStore); ok {
+		return q, true
+	}
+	var inner interface{} = store
+	if direct, ok := store.(*directStore); ok {
+		if q, ok := direct.Storage.(ExternalRefHistoryBatchStore); ok {
+			return q, true
+		}
+		inner = direct.Storage
+	}
+	if dolt, ok := inner.(storage.DoltStorage); ok {
+		q, ok := storage.UnwrapStore(dolt).(ExternalRefHistoryBatchStore)
+		return q, ok
+	}
+	return nil, false
+}
+
 func syncIssueLabels(ctx context.Context, tx storage.Transaction, issueID string, desired []string, actor string) error {
 	current, err := tx.GetLabels(ctx, issueID)
 	if err != nil {

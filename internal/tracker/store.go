@@ -37,6 +37,14 @@ type ExternalRefHistoryStore interface {
 	PreviousExternalRef(context.Context, string, time.Time) (string, bool, error)
 }
 
+// ExternalRefHistoryBatchStore is the optional batch form of
+// ExternalRefHistoryStore (storage.ExternalRefHistoryBatchQuerier): one call
+// answers PreviousExternalRef for every id, with map presence as found.
+type ExternalRefHistoryBatchStore interface {
+	ExternalRefHistoryStore
+	PreviousExternalRefs(context.Context, []string, time.Time) (map[string]string, error)
+}
+
 // NewStore adapts a classic storage.Storage to the tracker contract. Values
 // already implementing Store are returned unchanged, so NewStore is idempotent
 // and safe to call on a value that a caller has already adapted.
