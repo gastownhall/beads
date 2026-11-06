@@ -129,6 +129,28 @@ func (s *DoltStore) PreviousExternalRef(ctx context.Context, issueID string, asO
 	return ref, found, err
 }
 
+// PreviousExternalRefs returns, for each id in issueIDs, the external_ref
+// value recorded as of the most recent commit at or before asOf — the batch
+// form of PreviousExternalRef (GH#6605).
+//
+// Uses withReadTxLongTimeout rather than withReadTx, for the same reason
+// History does: the dolt_history_issues scan PreviousExternalRefsInTx runs
+// covers every requested id's whole revision list, which exceeds the shared
+// pool's 10s ReadTimeout on a mature repository (ga-ahnxx).
+// Implements storage.ExternalRefHistoryBatchQuerier.
+func (s *DoltStore) PreviousExternalRefs(ctx context.Context, issueIDs []string, asOf time.Time) (map[string]string, error) {
+	var refs map[string]string
+	err := s.withReadTxLongTimeout(ctx, func(tx *sql.Tx) error {
+		var err error
+		refs, err = issueops.PreviousExternalRefsInTx(ctx, tx, issueIDs, asOf)
+		if err != nil {
+			return wrapQueryError("get previous external refs", err)
+		}
+		return nil
+	})
+	return refs, err
+}
+
 // ChangedIssueIDs returns the set of issue IDs whose data differs between
 // fromCommit and toCommit, derived from dolt_diff over the issues, labels,
 // dependencies, and comments tables. An issue is reported under Removed

@@ -381,7 +381,7 @@ func TestFetchPrelinkedIssuesMakesOneBatchCall(t *testing.T) {
 
 	base := newOverlapStore(nil)
 	base.issues = locals
-	base.previousRefs[unchanged.ID] = "https://test.test/EXT-0" // same ref at last_sync: unchanged
+	base.previousRefs[unchanged.ID] = "https://test.test/EXT-0"  // same ref at last_sync: unchanged
 	base.previousRefs[relinked.ID] = "https://test.test/EXT-OLD" // different ref at last_sync: changed
 	// bd-2 has no history entry at or before last_sync: changed, per the
 	// PreviousExternalRef contract.
@@ -703,7 +703,7 @@ func TestFetchPrelinkedIssuesBatchErrorFallsBackPerIssue(t *testing.T) {
 			"bd-1": "https://test.test/EXT-1",
 		})
 		return locals, map[string]string{
-			"bd-0": "https://test.test/EXT-0", // unchanged
+			"bd-0": "https://test.test/EXT-0",   // unchanged
 			"bd-1": "https://test.test/EXT-OLD", // relinked: hydrated
 		}, []TrackerIssue{remote("EXT-1")}
 	}
@@ -807,5 +807,69 @@ func TestFetchPrelinkedIssuesBatchCancelledContext(t *testing.T) {
 				t.Fatalf("batch calls = %d, per-issue calls = %d, want 1 batch attempt and no per-issue fallback", store.batchCalls, store.singleCalls)
 			}
 		})
+	}
+}
+
+// decoratedBatchStore stands in for what sits beneath a decorator in
+// production: a full storage.DoltStorage (from the nil embed, the same trick
+// doltLikeStore uses — the pull path below never calls those methods) that
+// also answers both history forms. The history methods live on the type
+// itself, not on an embed, so the batch capability is what the inner store
+// genuinely provides; behavior and call counting delegate to the wrapped
+// *batchOverlapStore.
+type decoratedBatchStore struct {
+	storage.DoltStorage
+	fake *batchOverlapStore
+}
+
+var _ storage.DoltStorage = (*decoratedBatchStore)(nil)
+
+func (d *decoratedBatchStore) PreviousExternalRef(ctx context.Context, id string, asOf time.Time) (string, bool, error) {
+	return d.fake.PreviousExternalRef(ctx, id, asOf)
+}
+
+func (d *decoratedBatchStore) PreviousExternalRefs(ctx context.Context, issueIDs []string, asOf time.Time) (map[string]string, error) {
+	return d.fake.PreviousExternalRefs(ctx, issueIDs, asOf)
+}
+
+// TestFetchPrelinkedIssuesBatchThroughDecorator pins the decorator leg of the
+// batch discovery on a full pull (GH#6605): the engine holds its store
+// through NewStore over a decorator that only promotes DoltStorage and
+// unwraps — the storage.HookFiringStore shape — and the pull must still make
+// exactly one batch history call, zero single-id calls, and decide every
+// issue from the batch answer.
+func TestFetchPrelinkedIssuesBatchThroughDecorator(t *testing.T) {
+	ctx := context.Background()
+	unchanged := newBatchOverlapLocal("bd-0", "https://test.test/EXT-0")
+	relinked := newBatchOverlapLocal("bd-1", "https://test.test/EXT-1")
+	locals := []*types.Issue{unchanged, relinked}
+
+	base := newOverlapStore(nil)
+	base.issues = locals
+	base.previousRefs[unchanged.ID] = "https://test.test/EXT-0"  // same ref at last_sync: unchanged
+	base.previousRefs[relinked.ID] = "https://test.test/EXT-OLD" // different ref at last_sync: changed
+	inner := &batchOverlapStore{overlapStore: base}
+	decorated := &fakeStoreDecorator{inner: &decoratedBatchStore{fake: inner}}
+
+	mock, _ := newOverlapTracker(
+		TrackerIssue{ID: "EXT-1", Identifier: "EXT-1", Title: "remote one", UpdatedAt: overlapLastSync.Add(-time.Minute)},
+	)
+	engine := NewEngine(mock, NewStore(decorated), "sync")
+
+	hydrated, hydratedLocalIDs, err := engine.fetchPrelinkedIssues(ctx, nil, locals, &overlapLastSync)
+	if err != nil {
+		t.Fatalf("fetchPrelinkedIssues: %v", err)
+	}
+	if inner.batchCalls != 1 {
+		t.Fatalf("PreviousExternalRefs calls = %d, want exactly 1 for the whole pull through the decorator", inner.batchCalls)
+	}
+	if inner.singleCalls != 0 {
+		t.Fatalf("PreviousExternalRef calls = %d, want 0: the batch result must decide every candidate", inner.singleCalls)
+	}
+	if len(hydrated) != 1 || hydratedLocalIDs["bd-1"] != true {
+		t.Fatalf("hydrated = %+v, hydratedLocalIDs = %v, want only bd-1 (relinked) hydrated", hydrated, hydratedLocalIDs)
+	}
+	if hydratedLocalIDs["bd-0"] {
+		t.Error("bd-0's ref is unchanged since last_sync; it must not be hydrated")
 	}
 }
