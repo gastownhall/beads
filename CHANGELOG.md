@@ -1208,6 +1208,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `--defer "2026-11-07 08:30"` (no seconds) is now stored as 08:30 on
+  2026-11-07 instead of 11:07 today (#8167). Date flags (`--defer`, `--due`,
+  `bd defer --until`) and query date filters accept `YYYY-MM-DD HH:MM` and
+  `YYYY-MM-DDTHH:MM`, read in local time like the forms with seconds. Input
+  that starts with a `YYYY-MM-DD` date but is not a supported form (an
+  invalid date such as `2026-02-30`, `08:30 PM`, a zone suffix on a minute
+  form, trailing text) is now an error instead of being read as a time
+  today.
 - `bd config get` for a config.yaml, git-config or user-global key no longer
   opens the database just because one exists, so it answers from those files
   while the Dolt server is down instead of failing the open (GH#5108). In
