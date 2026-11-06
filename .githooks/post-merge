@@ -23,7 +23,7 @@ case ":${BD_HOOK_CHAIN_ACTIVE:-}:" in
             esac
           fi
           case "$_bd_chain_line" in
-            *"# --- BEGIN BEADS ""INTEGRATION"*|*"# bd-""shim"*|"# bd-hooks-""version: "*|*"# bd (""beads)"*) _bd_chain=0; break ;;
+            "# --- BEGIN BEADS ""INTEGRATION"*|"# bd-""shim "*|"# bd-hooks-""version: "*|*"# bd (""beads)"*) _bd_chain=0; break ;;
             *bd*hooks*run*)
               _bd_chain_words=" $_bd_chain_line "
               while :; do

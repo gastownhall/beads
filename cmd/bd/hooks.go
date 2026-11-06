@@ -105,8 +105,9 @@ const hookTimeoutKillAfterSeconds = 2
 // section must not let a skipped bd skip that gate too.
 //   - The section classifies <hookName>.old as runChainedHook does: an
 //     executable regular file is chained unless a script line marks it as bd's
-//     own (section, shim, version or inline marker, or bd hooks run
-//     delegation), which would chain back into bd. Only a script, a file
+//     own, which would chain back into bd: a line starting with the section,
+//     shim or version marker (getHookVersion's prefix checks), an inline
+//     marker anywhere, or bd hooks run delegation. Only a script, a file
 //     whose first line starts with #!, is scanned, so a binary stays eligible
 //     without a whole-file read, and a file the shell cannot read is chained.
 //     The classifier uses shell builtins only (minimal PATHs are the case it
@@ -162,7 +163,7 @@ func generateHookSection(hookName string) string {
 		"            esac\n" +
 		"          fi\n" +
 		"          case \"$_bd_chain_line\" in\n" +
-		"            *\"# --- BEGIN BEADS \"\"INTEGRATION\"*|*\"# bd-\"\"shim\"*|\"# bd-hooks-\"\"version: \"*|*\"# bd (\"\"beads)\"*) _bd_chain=0; break ;;\n" +
+		"            \"# --- BEGIN BEADS \"\"INTEGRATION\"*|\"# bd-\"\"shim \"*|\"# bd-hooks-\"\"version: \"*|*\"# bd (\"\"beads)\"*) _bd_chain=0; break ;;\n" +
 		"            *bd*hooks*run*)\n" +
 		"              _bd_chain_words=\" $_bd_chain_line \"\n" +
 		"              while :; do\n" +

@@ -205,6 +205,9 @@ func TestGeneratedHookChainsWhenBDUnavailable(t *testing.T) {
 		{name: "foreign hook starting with '# --- ' but not the BEGIN marker", line: "# --- NOTE: not a BEADS INTEGRATION marker"},
 		{name: "foreign hook begin-marker-shaped line with extra words", line: "# --- BEGIN foo BEADS INTEGRATION"},
 		{name: "foreign hook naming bd hooks without delegating", line: "# see: bd hooks list; xbd hooks run is not bd; bd hooks runner"},
+		{name: "foreign comment quoting the BEGIN marker mid-line", line: "# keep this above the \"# --- BEGIN BEADS INTEGRATION\" line"},
+		{name: "foreign comment quoting the shim marker mid-line", line: "# installed next to a # bd-shim v1 hook"},
+		{name: "foreign comment with a bd-shim-like word", line: "# bd-shimmer: unrelated tool"},
 	} {
 		t.Run("bd missing, "+tc.name+", still chains", func(t *testing.T) {
 			r := newHookChainRepo(t, "repo")
@@ -240,6 +243,50 @@ func TestGeneratedHookChainsWhenBDUnavailable(t *testing.T) {
 		output, ok := r.commit(t, r.dir)
 		if ok {
 			t.Fatalf("commit succeeded; an unreadable chained gate was skipped\n%s", output)
+		}
+	})
+
+	// The shell cannot read the script to classify it, so it is chained, and
+	// the interpreter cannot read it either: the gate refuses rather than
+	// being skipped.
+	t.Run("bd missing, unreadable script sidecar", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root reads files regardless of mode bits")
+		}
+		r := newHookChainRepo(t, "repo")
+		seed(t, r)
+		install(t, r, hookChainWitnessSidecar("0"))
+		if err := os.Chmod(filepath.Join(r.hooksDir, "pre-commit.old"), 0o100); err != nil {
+			t.Fatalf("chmod sidecar: %v", err)
+		}
+		head := strings.TrimSpace(r.git(t, "rev-parse", "HEAD"))
+		output, ok := r.commit(t, r.dir)
+		if ok {
+			t.Fatalf("commit succeeded; an unreadable chained gate was skipped\n%s", output)
+		}
+		if after := strings.TrimSpace(r.git(t, "rev-parse", "HEAD")); after != head {
+			t.Errorf("HEAD moved from %s to %s although the gate could not run", head, after)
+		}
+	})
+
+	// A $0 without a slash (the hook run by name from its own directory)
+	// resolves the sidecar in the working directory.
+	t.Run("bd missing, hook invoked without a slash in $0", func(t *testing.T) {
+		r := newHookChainRepo(t, "repo")
+		install(t, r, hookChainWitnessSidecar("1"))
+		cmd := exec.Command("/bin/sh", "pre-commit")
+		cmd.Dir = r.hooksDir
+		cmd.Env = r.env
+		output, err := cmd.CombinedOutput()
+		exitErr, ok := err.(*exec.ExitError)
+		if !ok || exitErr.ExitCode() != 1 {
+			t.Fatalf("hook exit = %v, want 1 from the chained gate\n%s", err, output)
+		}
+		if !strings.Contains(string(output), "foreign gate says 1") {
+			t.Errorf("hook output is missing the chained gate's diagnostic\n%s", output)
+		}
+		if runs := hookChainWitnessRuns(t, r.witness); runs != 1 {
+			t.Errorf("chained gate ran %d times, want 1", runs)
 		}
 	})
 
