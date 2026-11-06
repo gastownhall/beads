@@ -86,12 +86,11 @@ type RemoteMigrateGateError struct {
 
 	// Decision records why the smart gate (#4516) stopped, when it is enabled.
 	// Empty is the default blunt #4515 stop (also used for the smart gate's
-	// "undetermined"/"below-floor" fallbacks); the messaging below is then
-	// byte-identical to #4515. "adopt", "adopt-ff", and "fork-skew" tailor
-	// the guidance. "adopt-ff" (mybd-ae1i piece 2) is a strict refinement of
-	// "adopt": the remote is ahead with no skew AND this clone's local
-	// history is a strict ancestor of the remote's with a clean working set,
-	// so adopting is provably loss-free (unlike a plain "adopt").
+	// "undetermined"/"below-floor" fallbacks). "adopt", "adopt-ff", and
+	// "fork-skew" tailor the guidance. "adopt-ff" (mybd-ae1i piece 2) is a
+	// strict refinement of "adopt": the remote is ahead with no skew AND this
+	// clone's local history is a strict ancestor of the remote's with a clean
+	// working set, so a fast-forward to it is provably loss-free.
 	Decision string
 	// SkewVersions lists the migration versions whose content diverged between
 	// this clone and the remote (Decision == "fork-skew").
@@ -158,7 +157,7 @@ const (
 	// gateDecisionAdoptFastForward (mybd-ae1i piece 2): a strict refinement of
 	// gateDecisionAdopt. Set only when the smart router additionally proved
 	// local HEAD a strict ancestor of the cached remote ref with a clean
-	// working set — adopting is loss-free, unlike a plain adopt.
+	// working set — a fast-forward to it is loss-free, unlike a plain adopt.
 	gateDecisionAdoptFastForward = "adopt-ff"
 	gateDecisionForkSkew         = "fork-skew"
 	// gateDecisionSharedNoRemote (gastownhall/beads#5920): the database is
@@ -524,6 +523,16 @@ func adoptPreservationNote(indent string) string {
 		indent + "afterwards with `bd import <backup-file>`.\n"
 }
 
+// adoptFastForwardPreservationNote is adoptPreservationNote for adopt-ff: no
+// local commit is lost, but the re-clone still omits clone-local data such as
+// wisps, which survives only in the moved-aside copy.
+func adoptFastForwardPreservationNote(indent string) string {
+	return indent + "The re-clone brings only what the remote has: clone-local data such as wisps\n" +
+		indent + "stays in the moved-aside copy, which a compatible older bd can still open.\n" +
+		indent + "If you exported it with the OLD bd before upgrading, restore it afterwards\n" +
+		indent + "with `bd import <backup-file>`.\n"
+}
+
 // userBody returns the decision-specific guidance block. The blunt #4515
 // body's designated-migrator branch and closing note are unchanged since the
 // smart gate existed; its adopt branch carries the move-aside recipe.
@@ -541,12 +550,12 @@ func (e *RemoteMigrateGateError) userBody() string {
 			e.adoptRecipe("  ") + adoptPreservationNote("  ")
 	case gateDecisionAdoptFastForward:
 		return "\n" +
-			"  The remote has already been migrated by another clone, and this clone's local\n" +
-			"  history is a strict ancestor of the remote's with a clean working set — nothing\n" +
-			"  local would be lost by adopting it (unlike a typical adopt): this clone has\n" +
-			"  no unpushed commits and no uncommitted local changes to discard, so the\n" +
-			"  adopt below is loss-free.\n" +
-			e.adoptRecipe("  ")
+			"  The remote has already been migrated by another clone, and this clone's Dolt\n" +
+			"  history is a strict ancestor of the remote's with a clean working set, so\n" +
+			"  no local commit would be lost by fast-forwarding to it. That fast-forward\n" +
+			"  did not run on this open, and a re-clone still omits clone-local data such\n" +
+			"  as wisps. Do NOT migrate here — adopt the remote's database instead.\n" +
+			e.adoptRecipe("  ") + adoptFastForwardPreservationNote("  ")
 	case gateDecisionSharedNoRemote:
 		return "\n" +
 			"  This database is served to multiple clients (dolt sql-server /\n" +
@@ -579,7 +588,7 @@ func (e *RemoteMigrateGateError) userBody() string {
 			"      before any other clone adopts. Then, on every OTHER clone, adopt the\n" +
 			"      remote's database; work those clones never pushed survives only in\n" +
 			"      their moved-aside copies.\n" +
-			e.adoptRecipe("      ")
+			e.adoptRecipe("      ") + adoptPreservationNote("      ")
 	default:
 		return "\n" +
 			"  This database syncs with a remote. Applying schema migrations on more than\n" +
@@ -1090,9 +1099,9 @@ func checkRemoteMigrateGate(ctx context.Context, db DBConn, remoteName string, e
 			// FastForward callback wired, or the fast-forward would not
 			// land exactly at latest — but routeSmartGate already proved
 			// this clone a strict ancestor of ref with a clean working set,
-			// so adopting is still loss-free. Give the operator the
-			// accurate adopt-ff directive instead of the generic
-			// destructive-adopt text.
+			// so fast-forwarding that Dolt history still loses no local
+			// commit. Give the operator the accurate adopt-ff directive
+			// instead of the generic destructive-adopt text.
 			return &RemoteMigrateGateError{
 				CurrentVersion:  current,
 				LatestVersion:   latest,

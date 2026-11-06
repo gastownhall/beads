@@ -365,9 +365,10 @@ func TestRemoteMigrateGateAdoptFastForward(t *testing.T) {
 		}
 	}
 
-	msg := e.UserMessage()
-	if !strings.Contains(msg, "losslessly") && !strings.Contains(msg, "loss-free") {
-		t.Errorf("UserMessage should explain the fast-forward is loss-free:\n%s", msg)
+	// The Error() prefix says "losslessly" on its own, so check the body: it
+	// must scope that guarantee to the Dolt history, not to a re-clone.
+	if body := e.userBody(); !strings.Contains(body, "no local commit would be lost") {
+		t.Errorf("userBody should explain the fast-forward loses no local commit:\n%s", body)
 	}
 }
 
@@ -435,12 +436,29 @@ func TestRemoteMigrateGateAdoptRecoveryGuidance(t *testing.T) {
 					}
 				}
 			case "adopt-ff":
-				if !strings.Contains(msg, "loss-free") && !strings.Contains(msg, "losslessly") {
-					t.Errorf("adopt-ff message lost its loss-free explanation:\n%s", msg)
+				// Only the Dolt-history fast-forward is loss-free; adopting by
+				// re-clone still omits clone-local data, kept in the aside.
+				// Check the body: the Error() heading says "losslessly" on its
+				// own and would mask a wrong body.
+				body := strings.Join(strings.Fields(tc.err.userBody()), " ")
+				for _, want := range []string{"no local commit would be lost", "did not run on this open", "clone-local data such as wisps", "moved-aside copy", "bd import <backup-file>", "OLD bd"} {
+					if !strings.Contains(body, want) {
+						t.Errorf("adopt-ff body is missing %q:\n%s", want, body)
+					}
+				}
+				for _, banned := range []string{"nothing local would be lost by adopting", "adopt below is loss-free"} {
+					if strings.Contains(body, banned) {
+						t.Errorf("adopt-ff body still says adopting by re-clone loses nothing (%q):\n%s", banned, body)
+					}
 				}
 			case "fork-skew":
 				if !strings.Contains(msg, "canonical") || !strings.Contains(msg, "every OTHER clone") {
 					t.Errorf("fork-skew message must keep the choose-a-canonical-clone condition:\n%s", msg)
+				}
+				for _, want := range []string{"bd import <backup-file>", "OLD bd"} {
+					if !strings.Contains(msg, want) {
+						t.Errorf("fork-skew message is missing the preservation note %q:\n%s", want, msg)
+					}
 				}
 			}
 		})
