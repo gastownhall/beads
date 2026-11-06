@@ -144,7 +144,8 @@ Bootstrap auto-detects the right action:
   • If no database exists: creates a fresh one — unless the workspace was already
     initialized (metadata.json has a project_id) and its server-mode database is
     missing, in which case bootstrap refuses rather than strand the existing data
-  • If database already exists: validates and reports status
+  • If database already exists: validates and reports status, and
+    leaves it unchanged (never replaced or re-cloned)
 
 If sync.remote points at a git repository, bootstrap verifies refs/dolt/data
 before cloning. Bootstrap exits non-zero when it cannot set up a database.
@@ -985,6 +986,10 @@ func printBootstrapPlan(plan BootstrapPlan) {
 		} else {
 			fmt.Printf("  Nothing to do. Use 'bd doctor' to check health.\n")
 		}
+		// bd-bt60zz (#6687): exit 0 here is the non-destructive contract, but
+		// on a clone a remote-migrate gate just told to adopt it reads as if
+		// the adopt happened. Say outright that it did not.
+		fmt.Printf("  The existing database was left unchanged: bootstrap never replaces or re-clones it.\n")
 	case "sync":
 		fmt.Printf("Bootstrap plan: clone from remote\n")
 		fmt.Printf("  Remote: %s\n", remedy.PrintedValue(redactRemoteURL(plan.SyncRemote)))
