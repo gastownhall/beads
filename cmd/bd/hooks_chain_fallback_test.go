@@ -344,7 +344,7 @@ func TestGeneratedHookChainsWhenBDUnavailable(t *testing.T) {
 
 // TestGeneratedPrePushChainsWhenBDUnavailable pushes through a generated
 // pre-push section with no bd on PATH: the foreign pre-push.old receives git's
-// remote arguments and ref lines, and its refusal stops the push.
+// remote arguments and ref lines exactly once, and its refusal stops the push.
 func TestGeneratedPrePushChainsWhenBDUnavailable(t *testing.T) {
 	r := newHookChainRepo(t, "repo")
 	if output, ok := r.commit(t, r.dir); !ok {
@@ -356,6 +356,7 @@ func TestGeneratedPrePushChainsWhenBDUnavailable(t *testing.T) {
 
 	writeHookProcessFixture(t, r.hooksDir, "pre-push", "#!/bin/sh\n"+generateHookSection("pre-push"))
 	writeHookProcessFixture(t, r.hooksDir, "pre-push.old", `#!/bin/sh
+printf 'ran\n' >> "$HOOK_TEST_WITNESS"
 for _test_arg; do printf '<%s>\n' "$_test_arg"; done > "$HOOK_TEST_WITNESS.argv"
 while IFS= read -r _test_line; do printf '%s\n' "$_test_line"; done > "$HOOK_TEST_WITNESS.stdin"
 printf 'foreign push gate refused\n' >&2
@@ -371,6 +372,10 @@ exit 1
 	}
 	if !strings.Contains(string(output), "foreign push gate refused") {
 		t.Errorf("push output is missing the chained gate's diagnostic\n%s", output)
+	}
+
+	if runs := hookChainWitnessRuns(t, r.witness); runs != 1 {
+		t.Errorf("chained pre-push.old ran %d times, want 1", runs)
 	}
 
 	argv, err := os.ReadFile(r.witness + ".argv")
