@@ -1208,6 +1208,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd dolt status` no longer stops a live Dolt server whose port it cannot
+  resolve (no port file, no configured port) and deletes its PID file
+  (GH#6614). It reports the server as running with its PID and
+  `Port: unknown`, plus how to name the port or replace the server; `--json`
+  keeps its shape, with `"port": 0` meaning unresolved.
 - `bd config get` for a config.yaml, git-config or user-global key no longer
   opens the database just because one exists, so it answers from those files
   while the Dolt server is down instead of failing the open (GH#5108). In

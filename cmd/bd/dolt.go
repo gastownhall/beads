@@ -1553,7 +1553,13 @@ func renderLocalDoltStatus(state *doltserver.State, serverDir string) {
 	}
 	fmt.Println("Dolt server: running")
 	fmt.Printf("  PID:  %d\n", state.PID)
-	fmt.Printf("  Port: %d\n", state.Port)
+	if state.Port > 0 {
+		fmt.Printf("  Port: %d\n", state.Port)
+	} else {
+		// A live dolt server whose port no source resolves (GH#6614). The
+		// JSON form reports it as port 0.
+		fmt.Println("  Port: unknown (no resolved port)")
+	}
 	fmt.Printf("  Data: %s\n", state.DataDir)
 	fmt.Printf("  Logs: %s\n", doltserver.LogPath(serverDir))
 	if doltserver.IsSharedServerMode() {
@@ -1565,6 +1571,11 @@ func renderLocalDoltStatus(state *doltserver.State, serverDir string) {
 	}
 	if isDoltLocalOnly() {
 		fmt.Println("  Remote sync: disabled (dolt.local-only=true)")
+	}
+	if state.Port <= 0 {
+		fmt.Printf("\n  bd cannot reach PID %d without its port. If you know it, set\n", state.PID)
+		fmt.Println("  BEADS_DOLT_SERVER_PORT (or dolt.port in config.yaml); otherwise run")
+		fmt.Println("  'bd dolt stop && bd dolt start' to replace the server.")
 	}
 }
 
