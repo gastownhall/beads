@@ -674,11 +674,12 @@ func (e *RemoteMigrateGateError) AgentDirective() string {
 			"survives only in the moved-aside copy: a destructive operator decision — surface " +
 			"remote_migrate_gate.options to the operator, do NOT auto-run the move or bd bootstrap."
 	case gateDecisionAdoptFastForward:
-		return "Adopt, do NOT migrate: the remote is already migrated, and this clone's local history is a strict " +
-			"ancestor of the remote's with a clean working set, so adopting is loss-free (no unpushed commits, no " +
-			"uncommitted changes discarded) — unlike a typical adopt. The gate did not fast-forward this open itself, " +
-			"so adoption here is operator-directed: " + e.adoptDirectivePrereq() + " Surface " +
-			"remote_migrate_gate.options to the operator; do NOT auto-run the move or bd bootstrap."
+		return "Adopt, do NOT migrate: the remote is already migrated, and this clone's Dolt history is a strict " +
+			"ancestor of the remote's with a clean working set, so no local commit would be lost by fast-forwarding " +
+			"to it. That fast-forward did not run on this open, and a re-clone still omits clone-local data such as " +
+			"wisps, which then survives only in the moved-aside copy, so adoption here is operator-directed: " +
+			e.adoptDirectivePrereq() + " Surface remote_migrate_gate.options to the operator; do NOT auto-run the " +
+			"move or bd bootstrap."
 	case gateDecisionForkSkew:
 		return "Do NOT migrate: this clone and the remote already applied different content for migration(s) " +
 			FormatMigrationVersions(e.SkewVersions) + " — the schema has forked (#4259) and migrating cannot un-fork it. " +

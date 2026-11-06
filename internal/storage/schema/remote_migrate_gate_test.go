@@ -648,6 +648,18 @@ func TestRemoteMigrateGateAdoptAgentDirective(t *testing.T) {
 						t.Errorf("directive still says %q: %s", banned, d)
 					}
 				}
+				if tc.name == "adopt-ff" {
+					// Only the Dolt-history fast-forward is loss-free; the
+					// re-clone an operator-directed adopt runs is not.
+					for _, want := range []string{"no local commit would be lost", "did not run on this open", "clone-local data such as wisps"} {
+						if !strings.Contains(d, want) {
+							t.Errorf("adopt-ff directive is missing %q: %s", want, d)
+						}
+					}
+					if strings.Contains(d, "adopting is loss-free") {
+						t.Errorf("adopt-ff directive still says adopting by re-clone is loss-free: %s", d)
+					}
+				}
 				if server && !strings.Contains(d, "serving host") {
 					t.Errorf("server directive does not place the move on the serving host: %s", d)
 				}
