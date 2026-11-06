@@ -214,6 +214,63 @@ func TestClassifyResetDataRemoteNonDirectoryTarget(t *testing.T) {
 	})
 }
 
+// TestClassifyResetDataRemoteMissingAndDirectoryTargets pins the
+// classifier's missing-path and directory results around the
+// non-directory fix (GH#6972): a truly absent target and an empty
+// directory still classify as absent, a manifest directory as a file
+// store, and an unrecognized populated directory is still refused —
+// including under an injected not-exist read error for a path that really
+// is absent.
+func TestClassifyResetDataRemoteMissingAndDirectoryTargets(t *testing.T) {
+	t.Run("absent path", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "nope")
+		kind, err := classifyResetDataRemote(path)
+		if err != nil || kind != resetDataFileAbsent {
+			t.Fatalf("classifyResetDataRemote(absent) = (%v, %v), want (resetDataFileAbsent, nil)", kind, err)
+		}
+	})
+	t.Run("empty directory", func(t *testing.T) {
+		kind, err := classifyResetDataRemote(t.TempDir())
+		if err != nil || kind != resetDataFileAbsent {
+			t.Fatalf("classifyResetDataRemote(empty dir) = (%v, %v), want (resetDataFileAbsent, nil)", kind, err)
+		}
+	})
+	t.Run("dolt file store", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "manifest"), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		kind, err := classifyResetDataRemote(dir)
+		if err != nil || kind != resetDataFileStore {
+			t.Fatalf("classifyResetDataRemote(store) = (%v, %v), want (resetDataFileStore, nil)", kind, err)
+		}
+	})
+	t.Run("unrecognized populated directory", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		kind, err := classifyResetDataRemote(dir)
+		if err == nil {
+			t.Fatalf("classifyResetDataRemote(unrecognized) = (%v, nil), want the refusal error", kind)
+		}
+		if !strings.Contains(err.Error(), "refusing to clear it") {
+			t.Errorf("error = %q, want the refusal error", err)
+		}
+	})
+	t.Run("injected not-exist read error with the path absent", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "nope")
+		injected := &fs.PathError{Op: "open", Path: path, Err: fs.ErrNotExist}
+		prev := readResetDataTarget
+		readResetDataTarget = func(string) ([]os.DirEntry, error) { return nil, injected }
+		t.Cleanup(func() { readResetDataTarget = prev })
+		kind, err := classifyResetDataRemote(path)
+		if err != nil || kind != resetDataFileAbsent {
+			t.Fatalf("classifyResetDataRemote(absent, injected) = (%v, %v), want the absent result preserved", kind, err)
+		}
+	})
+}
+
 // TestResetDataGitURL pins the URL reset-data gives git for a remote as Dolt
 // stored it. Dolt stores an scp-style remote (git@github.com:org/repo.git)
 // as git+ssh://git@github.com/./org/repo.git, and git takes the ssh:// form

@@ -623,6 +623,69 @@ func TestRulesRunAudit_NonDirectoryPath(t *testing.T) {
 	})
 }
 
+// TestRulesRunAudit_MissingAndDirectoryPaths pins RunAudit's missing-path
+// and directory results around the non-directory fix (GH#6972): a truly
+// absent path still audits as an empty success with nil slices, an empty
+// directory still reports zero rules over non-nil empty report slices,
+// rules still load, and an injected not-exist read error for a path that
+// really is absent still returns the empty success.
+func TestRulesRunAudit_MissingAndDirectoryPaths(t *testing.T) {
+	t.Run("absent path", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "nope")
+		result, err := RunAudit(path, 0.6)
+		if err != nil {
+			t.Fatalf("RunAudit(absent): %v", err)
+		}
+		if result == nil {
+			t.Fatal("RunAudit(absent) = nil result, want the empty success")
+		}
+		if result.TotalRules != 0 || result.Contradictions != nil || result.MergeCandidates != nil {
+			t.Errorf("absent path result = %+v, want zero rules and nil slices", result)
+		}
+	})
+	t.Run("empty directory", func(t *testing.T) {
+		result, err := RunAudit(t.TempDir(), 0.6)
+		if err != nil {
+			t.Fatalf("RunAudit(empty dir): %v", err)
+		}
+		if result.TotalRules != 0 {
+			t.Errorf("total rules = %d, want 0", result.TotalRules)
+		}
+		if result.Contradictions == nil || len(result.Contradictions) != 0 {
+			t.Errorf("contradictions = %+v, want non-nil and empty", result.Contradictions)
+		}
+		if result.MergeCandidates == nil || len(result.MergeCandidates) != 0 {
+			t.Errorf("merge candidates = %+v, want non-nil and empty", result.MergeCandidates)
+		}
+	})
+	t.Run("two rules", func(t *testing.T) {
+		dir := tempRulesDir(t)
+		writeRule(t, dir, "rule-a", "# Rule Alpha\n**Do:** Check breadcrumbs first.\n**Don't:** Search immediately.\n")
+		writeRule(t, dir, "rule-beta", "# Rule Beta\n**Do:** Use existing tools.\n**Don't:** Work manually.\n")
+		result, err := RunAudit(dir, 0.6)
+		if err != nil {
+			t.Fatalf("RunAudit(two rules): %v", err)
+		}
+		if result.TotalRules != 2 {
+			t.Errorf("total rules = %d, want 2", result.TotalRules)
+		}
+	})
+	t.Run("injected not-exist read error with the path absent", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "nope")
+		injected := &fs.PathError{Op: "open", Path: path, Err: fs.ErrNotExist}
+		prev := readRulesDir
+		readRulesDir = func(string) ([]os.DirEntry, error) { return nil, injected }
+		t.Cleanup(func() { readRulesDir = prev })
+		result, err := RunAudit(path, 0.6)
+		if err != nil {
+			t.Fatalf("RunAudit(absent, injected): %v", err)
+		}
+		if result == nil || result.TotalRules != 0 {
+			t.Fatalf("RunAudit(absent, injected) = (%+v, nil), want the empty success preserved", result)
+		}
+	})
+}
+
 func TestRulesRunAudit_NonexistentDir(t *testing.T) {
 	result, err := RunAudit("/tmp/nonexistent-rules-dir-xyz", 0.6)
 	if err != nil {
