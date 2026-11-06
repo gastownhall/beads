@@ -1477,11 +1477,13 @@ func EnsureRunningDetailed(beadsDir string) (port int, startedByUs bool, err err
 	// printed. Racing a concurrent start is safe: the slow path below
 	// re-checks under the lock and startLocked re-checks again, so the worst
 	// case for a stale "not running" read is one wasted acquire.
+	// A live server whose port is unresolved (Port 0) has no endpoint to
+	// adopt: take the slow path, which decides under the lock (GH#6614).
 	state, err := IsRunning(serverDir)
 	if err != nil {
 		return 0, false, err
 	}
-	if state.Running {
+	if state.Running && state.Port > 0 {
 		return adoptRunningServer(serverDir, state), false, nil
 	}
 
@@ -1502,7 +1504,7 @@ func EnsureRunningDetailed(beadsDir string) (port int, startedByUs bool, err err
 	if err != nil {
 		return 0, false, err
 	}
-	if state.Running {
+	if state.Running && state.Port > 0 {
 		// Release before adopting. adoptRunningServer dials the remotesapi
 		// listener, and a per-waiter 500ms probe inside the exclusive region
 		// is precisely the serialization the fast path above exists to avoid.
@@ -1516,6 +1518,10 @@ func EnsureRunningDetailed(beadsDir string) (port int, startedByUs bool, err err
 	// it would conflict with the external one.
 	mode := ResolveServerMode(beadsDir)
 	if mode == ServerModeExternal {
+		if state.Running {
+			return 0, false, &externallyManagedError{unknownPortRefusal(serverDir, state,
+				"the server is externally managed")}
+		}
 		cfg := DialConfig(beadsDir)
 		if host, ok := externalNonLocalhostHost(beadsDir); ok {
 			// Configured for a non-localhost external server:
@@ -1545,6 +1551,9 @@ func EnsureRunningDetailed(beadsDir string) (port int, startedByUs bool, err err
 	// config.yaml or env, never spawn a server even if the caller
 	// somehow reached this point (e.g. stale AutoStart=true in config).
 	if IsAutoStartDisabled() {
+		if state.Running {
+			return 0, false, errors.New(unknownPortRefusal(serverDir, state, autoStartDisabledReason))
+		}
 		cfg := DefaultConfig(beadsDir)
 		if host, ok := externalNonLocalhostHost(beadsDir); ok {
 			return 0, false, fmt.Errorf("Configured Dolt server at %s is unreachable, and auto-start "+
@@ -1851,6 +1860,23 @@ func validateDistinctServerPorts(sqlPort, remotesAPIPort int) error {
 	return nil
 }
 
+// autoStartDisabledReason is unknownPortRefusal's reason under
+// dolt.auto-start: false.
+const autoStartDisabledReason = "auto-start is disabled (dolt.auto-start: false in config.yaml or BEADS_DOLT_AUTO_START=0)"
+
+// unknownPortRefusal explains why bd neither adopts nor replaces a live dolt
+// server whose port no source resolves (GH#6614), and how to recover.
+func unknownPortRefusal(serverDir string, state *State, reason string) string {
+	return fmt.Sprintf("Dolt server (PID %d) is running but its port is unknown: %s is missing "+
+		"or unreadable and no setting names a port.\n"+
+		"bd will not replace it because %s.\n\n"+
+		"If you know the port it listens on, point bd at it:\n"+
+		"  export BEADS_DOLT_SERVER_PORT=<port>   # or dolt.port in config.yaml, or write it to %s\n"+
+		"Otherwise replace the server explicitly:\n"+
+		"  bd dolt stop && bd dolt start",
+		state.PID, portPath(serverDir), reason, portPath(serverDir))
+}
+
 func verifyRemotesAPIState(cfg *Config, state *State) (*State, error) {
 	state.RemotesAPIPort = cfg.RemotesAPIPort
 	if err := validateDistinctServerPorts(state.Port, cfg.RemotesAPIPort); err != nil {
@@ -1883,7 +1909,24 @@ func startLocked(beadsDir string) (*State, error) {
 
 	// Re-check after acquiring the lifecycle lock. A tracked process is only a
 	// successful start when every configured listener is ready.
-	if state, _ := IsRunning(beadsDir); state != nil && state.Running {
+	state, err := IsRunning(beadsDir)
+	if err != nil {
+		return nil, err
+	}
+	if state.Running && state.Port > 0 {
+		return verifyRemotesAPIState(cfg, state)
+	}
+	if state.Running {
+		// A live dolt server whose port no source resolves (GH#6614). Where
+		// bd does not manage the server's lifecycle, replacing it is not
+		// bd's call: refuse without signaling it or touching its files.
+		if ResolveServerMode(beadsDir) == ServerModeExternal {
+			return nil, &externallyManagedError{unknownPortRefusal(beadsDir, state,
+				"the server is externally managed")}
+		}
+		if IsAutoStartDisabled() {
+			return nil, errors.New(unknownPortRefusal(beadsDir, state, autoStartDisabledReason))
+		}
 		return verifyRemotesAPIState(cfg, state)
 	}
 

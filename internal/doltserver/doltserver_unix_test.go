@@ -13,6 +13,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/beads/internal/config"
 )
 
 // startStaleServerFiles writes a pid file naming an unrelated process (a
@@ -408,4 +410,81 @@ func TestIsRunningReportsUnknownPortServerWithoutSignaling(t *testing.T) {
 		expectNotSignaled(t, exited)
 		assertUnknownPortTrackingKept(t, dir, pid)
 	})
+}
+
+// isolateLifecycleConfig gives the test its own HOME and a fresh config, so
+// dolt.auto-start and BEADS_DOLT_SERVER_MODE come only from the test.
+func isolateLifecycleConfig(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("BEADS_DOLT_AUTO_START", "")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	config.ResetForTesting()
+	t.Cleanup(config.ResetForTesting)
+	t.Chdir(t.TempDir())
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize: %v", err)
+	}
+}
+
+// GH#6614: where bd does not manage the server's lifecycle (auto-start off,
+// or the server declared external), a live dolt server with no resolvable
+// port is neither adopted at port 0 nor replaced: Start and EnsureRunning
+// refuse, naming the PID and the missing port, and leave the process and its
+// files alone.
+func TestUnknownPortRecoveryRefusesUnmanagedServer(t *testing.T) {
+	policies := []struct {
+		name  string
+		apply func(t *testing.T)
+	}{
+		{"env auto-start off", func(t *testing.T) { t.Setenv("BEADS_DOLT_AUTO_START", "0") }},
+		{"config auto-start off", func(t *testing.T) {
+			config.Set("dolt.auto-start", "false")
+			t.Cleanup(func() { config.Set("dolt.auto-start", "") })
+		}},
+		{"external server mode", func(t *testing.T) { t.Setenv("BEADS_DOLT_SERVER_MODE", "1") }},
+	}
+	entries := []struct {
+		name string
+		call func(dir string) error
+	}{
+		{"Start", func(dir string) error { _, err := Start(dir); return err }},
+		{"EnsureRunningDetailed", func(dir string) error { _, _, err := EnsureRunningDetailed(dir); return err }},
+	}
+	for _, policy := range policies {
+		for _, entry := range entries {
+			t.Run(policy.name+"/"+entry.name, func(t *testing.T) {
+				isolateLifecycleConfig(t)
+				dir := t.TempDir()
+				exited, pid := startUnknownPortServer(t, dir)
+				policy.apply(t)
+				if policy.name == "external server mode" {
+					if mode := ResolveServerMode(dir); mode != ServerModeExternal {
+						t.Fatalf("precondition: server mode %v, want external", mode)
+					}
+				} else if !IsAutoStartDisabled() {
+					t.Fatal("precondition: auto-start is not disabled")
+				}
+				t.Setenv("PATH", t.TempDir()) // no dolt binary: a launch would fail
+
+				err := entry.call(dir)
+				if err == nil {
+					t.Fatal("succeeded against a server whose port is unknown")
+				}
+				msg := err.Error()
+				if strings.Contains(msg, "not installed") {
+					t.Fatalf("reached the launch instead of refusing: %v", err)
+				}
+				for _, want := range []string{"PID " + strconv.Itoa(pid), "port is unknown"} {
+					if !strings.Contains(msg, want) {
+						t.Errorf("error does not mention %q: %v", want, err)
+					}
+				}
+				expectNotSignaled(t, exited)
+				assertUnknownPortTrackingKept(t, dir, pid)
+			})
+		}
+	}
 }
