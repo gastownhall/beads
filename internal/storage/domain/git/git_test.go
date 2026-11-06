@@ -2,6 +2,7 @@ package git
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -284,6 +285,237 @@ func (s *testSuite) TestCommit_NothingToCommitDidCommitFalse() {
 	s.Require().NoError(err)
 	s.False(result.DidCommit)
 	s.True(strings.Contains(string(result.Output), "nothing to commit"))
+}
+
+func (s *testSuite) output(args ...string) string {
+	s.T().Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = s.tmpDir
+	out, err := cmd.Output()
+	s.Require().NoError(err)
+	return strings.TrimSpace(string(out))
+}
+
+func (s *testSuite) TestCommit_PathsLeavesOtherStagedChangesStaged() {
+	s.gitInit()
+	s.writeFile("work.txt", "unrelated work")
+	s.Require().NoError(s.repo.Add(s.Ctx(), "work.txt"))
+	s.Require().NoError(os.MkdirAll(filepath.Join(s.tmpDir, ".beads"), 0750))
+	s.writeFile(".beads/config.yaml", "x")
+	s.Require().NoError(s.repo.Add(s.Ctx(), ".beads/"))
+
+	result, err := s.repo.Commit(s.Ctx(), domain.GitCommitParams{Message: "init", Paths: []string{".beads/"}})
+	s.Require().NoError(err)
+	s.True(result.DidCommit)
+	s.Equal(".beads/config.yaml", s.output("show", "--name-only", "--format=", "HEAD"))
+	s.Equal("work.txt", s.output("diff", "--cached", "--name-only"))
+}
+
+func (s *testSuite) TestCommit_PathsSkipsPathWithNothingStaged() {
+	s.gitInit()
+	s.Require().NoError(os.MkdirAll(filepath.Join(s.tmpDir, ".beads"), 0750))
+	s.writeFile(".beads/config.yaml", "x")
+	// Every file under .cursor is ignored, so adding it stages nothing; a
+	// pathspec git knows no file under would refuse the whole commit.
+	s.Require().NoError(os.MkdirAll(filepath.Join(s.tmpDir, ".cursor"), 0750))
+	s.writeFile(".cursor/.gitignore", "*\n")
+	s.Require().NoError(s.repo.Add(s.Ctx(), ".beads/", ".cursor"))
+
+	result, err := s.repo.Commit(s.Ctx(), domain.GitCommitParams{Message: "init", Paths: []string{".beads/", ".cursor"}})
+	s.Require().NoError(err)
+	s.True(result.DidCommit)
+	s.Equal(".beads/config.yaml", s.output("show", "--name-only", "--format=", "HEAD"))
+}
+
+func (s *testSuite) TestCommit_PathsWithNothingStagedDidCommitFalse() {
+	s.gitInit()
+	s.writeFile("work.txt", "unrelated work")
+	s.Require().NoError(s.repo.Add(s.Ctx(), "work.txt"))
+
+	result, err := s.repo.Commit(s.Ctx(), domain.GitCommitParams{Message: "init", Paths: []string{".beads/"}})
+	s.Require().NoError(err)
+	s.False(result.DidCommit)
+	s.Equal("work.txt", s.output("diff", "--cached", "--name-only"))
+}
+
+func (s *testSuite) TestCommit_PathsCommitsStagedContentNotWorkingTree() {
+	s.gitInit()
+	s.writeFile("owned.txt", "staged content\n")
+	s.Require().NoError(s.repo.Add(s.Ctx(), "owned.txt"))
+	staged := s.output("rev-parse", ":owned.txt")
+	s.writeFile("owned.txt", "unstaged content\n")
+
+	result, err := s.repo.Commit(s.Ctx(), domain.GitCommitParams{Message: "scoped", Paths: []string{"owned.txt"}})
+	s.Require().NoError(err)
+	s.True(result.DidCommit)
+	s.Equal(staged, s.output("rev-parse", "HEAD:owned.txt"))
+	s.Equal("owned.txt", s.output("diff", "--name-only"))
+}
+
+func (s *testSuite) TestCommit_PathsCommitsStagedRemoval() {
+	s.gitInit()
+	s.writeFile("owned.txt", "tracked content\n")
+	s.writeFile("keep.txt", "kept")
+	s.writeFile("work.txt", "unrelated work")
+	s.Require().NoError(s.repo.Add(s.Ctx(), "owned.txt", "keep.txt"))
+	_, err := s.repo.Commit(s.Ctx(), domain.GitCommitParams{Message: "initial"})
+	s.Require().NoError(err)
+	s.output("rm", "--cached", "owned.txt")
+	s.Require().NoError(s.repo.Add(s.Ctx(), "work.txt"))
+
+	result, err := s.repo.Commit(s.Ctx(), domain.GitCommitParams{Message: "untrack", Paths: []string{"owned.txt"}})
+	s.Require().NoError(err)
+	s.True(result.DidCommit)
+	s.Equal("keep.txt", s.output("ls-tree", "--name-only", "HEAD"))
+	s.FileExists(filepath.Join(s.tmpDir, "owned.txt"))
+	s.Equal("work.txt", s.output("diff", "--cached", "--name-only"))
+}
+
+func (s *testSuite) TestCommitInitArtifacts_LeavesPreStagedWorkStaged() {
+	s.gitInit()
+	s.writeFile("work.txt", "unrelated work")
+	s.Require().NoError(s.repo.Add(s.Ctx(), "work.txt"))
+	s.Require().NoError(os.MkdirAll(filepath.Join(s.tmpDir, ".beads"), 0750))
+	s.writeFile(".beads/config.yaml", "x")
+	s.writeFile("AGENTS.md", "agents")
+
+	result, err := domain.NewGitUseCase(s.tmpDir, s.repo).CommitInitArtifacts(s.Ctx(), domain.CommitInitArtifactsParams{
+		BeadsDir:      ".beads/",
+		OptionalPaths: []string{"AGENTS.md", "CLAUDE.md"},
+		Message:       "init",
+	})
+	s.Require().NoError(err)
+	s.True(result.DidCommit)
+	s.Equal(".beads/config.yaml\nAGENTS.md", s.output("show", "--name-only", "--format=", "HEAD"))
+	s.Equal("work.txt", s.output("diff", "--cached", "--name-only"))
+}
+
+// runFails runs a git command that is expected to exit nonzero, such as a
+// merge that stops on a conflict.
+func (s *testSuite) runFails(args ...string) {
+	s.T().Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = s.tmpDir
+	s.Require().Error(cmd.Run())
+}
+
+// commitBaseAndSide commits a.txt and a side branch that changes it and adds
+// side.txt, then returns to the starting branch. With conflict, the starting
+// branch also changes a.txt, so bringing side's commit in stops on a.txt.
+func (s *testSuite) commitBaseAndSide(conflict bool) {
+	s.T().Helper()
+	s.gitInit()
+	s.writeFile("a.txt", "base\n")
+	s.run("git", "add", "a.txt")
+	s.run("git", "commit", "-q", "-m", "base")
+	s.run("git", "checkout", "-q", "-b", "side")
+	s.writeFile("a.txt", "side\n")
+	s.writeFile("side.txt", "side\n")
+	s.run("git", "add", "a.txt", "side.txt")
+	s.run("git", "commit", "-q", "-m", "side")
+	s.run("git", "checkout", "-q", "-")
+	changed := "ours.txt"
+	if conflict {
+		changed = "a.txt"
+	}
+	s.writeFile(changed, "ours\n")
+	s.run("git", "add", changed)
+	s.run("git", "commit", "-q", "-m", "ours")
+}
+
+// requireScopedCommitRefused requires a Paths commit to refuse, while the
+// operation that wrote ref is in progress, first with nothing staged under
+// Paths and then with .beads/config.yaml staged, each time without moving
+// HEAD, changing the index or removing ref.
+func (s *testSuite) requireScopedCommitRefused(ref string) {
+	s.T().Helper()
+	head := s.output("rev-parse", "HEAD")
+	inProgress := s.output("rev-parse", "--verify", ref)
+	for _, staged := range []bool{false, true} {
+		if staged {
+			s.Require().NoError(os.MkdirAll(filepath.Join(s.tmpDir, ".beads"), 0750))
+			s.writeFile(".beads/config.yaml", "x")
+			s.Require().NoError(s.repo.Add(s.Ctx(), ".beads/"))
+		}
+		index := s.output("ls-files", "--stage")
+
+		result, err := s.repo.Commit(s.Ctx(), domain.GitCommitParams{Message: "init", Paths: []string{".beads/"}})
+		s.Require().Error(err)
+		s.Contains(err.Error(), ref)
+		s.False(result.DidCommit)
+		s.Equal(head, s.output("rev-parse", "HEAD"))
+		s.Equal(inProgress, s.output("rev-parse", "--verify", ref))
+		s.Equal(index, s.output("ls-files", "--stage"))
+	}
+}
+
+func (s *testSuite) TestCommit_PathsRefusesDuringConflictedMerge() {
+	s.commitBaseAndSide(true)
+	s.runFails("merge", "side")
+	s.Equal("UU a.txt", s.output("status", "--porcelain", "--", "a.txt"))
+
+	s.requireScopedCommitRefused("MERGE_HEAD")
+	s.run("git", "merge", "--abort")
+	s.runFails("rev-parse", "-q", "--verify", "MERGE_HEAD")
+}
+
+func (s *testSuite) TestCommit_PathsRefusesDuringMergeNoCommit() {
+	s.commitBaseAndSide(false)
+	s.run("git", "merge", "--no-commit", "--no-ff", "side")
+
+	s.requireScopedCommitRefused("MERGE_HEAD")
+	s.run("git", "merge", "--abort")
+}
+
+func (s *testSuite) TestCommit_PathsRefusesDuringCherryPick() {
+	s.commitBaseAndSide(true)
+	s.runFails("cherry-pick", "side")
+
+	s.requireScopedCommitRefused("CHERRY_PICK_HEAD")
+	s.run("git", "cherry-pick", "--abort")
+}
+
+func (s *testSuite) TestCommit_PathsRefusesDuringRevert() {
+	s.commitBaseAndSide(true)
+	s.runFails("revert", "--no-edit", "HEAD~1")
+
+	s.requireScopedCommitRefused("REVERT_HEAD")
+	s.run("git", "revert", "--abort")
+}
+
+// An unmerged entry under Paths is refused even with no merge, cherry-pick
+// or revert in progress (as after a conflicted git stash pop). Read as a
+// removal instead, it would commit the path's deletion.
+func (s *testSuite) TestCommit_PathsRefusesUnmergedPath() {
+	s.gitInit()
+	s.Require().NoError(os.MkdirAll(filepath.Join(s.tmpDir, ".beads"), 0750))
+	s.writeFile(".beads/config.yaml", "base\n")
+	s.run("git", "add", ".beads/config.yaml")
+	s.run("git", "commit", "-q", "-m", "base")
+	var stages strings.Builder
+	stages.WriteString("0 0000000000000000000000000000000000000000\t.beads/config.yaml\n")
+	for stage, body := range []string{"base\n", "ours\n", "theirs\n"} {
+		s.writeFile("stage.txt", body)
+		blob := s.output("hash-object", "-w", "stage.txt")
+		fmt.Fprintf(&stages, "100644 %s %d\t.beads/config.yaml\n", blob, stage+1)
+	}
+	s.Require().NoError(os.Remove(filepath.Join(s.tmpDir, "stage.txt")))
+	cmd := exec.Command("git", "update-index", "--index-info")
+	cmd.Dir, cmd.Stdin = s.tmpDir, strings.NewReader(stages.String())
+	s.Require().NoError(cmd.Run())
+	s.Equal("UU .beads/config.yaml", s.output("status", "--porcelain"))
+	for _, ref := range []string{"MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD"} {
+		s.runFails("rev-parse", "-q", "--verify", ref)
+	}
+	head := s.output("rev-parse", "HEAD")
+	index := s.output("ls-files", "--stage")
+
+	result, err := s.repo.Commit(s.Ctx(), domain.GitCommitParams{Message: "init", Paths: []string{".beads/"}})
+	s.Require().Error(err)
+	s.Contains(err.Error(), ".beads/config.yaml is unmerged")
+	s.False(result.DidCommit)
+	s.Equal(head, s.output("rev-parse", "HEAD"))
+	s.Equal(index, s.output("ls-files", "--stage"))
 }
 
 func (s *testSuite) TestAdd_EmptyPathsErrors() {
