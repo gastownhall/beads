@@ -677,6 +677,54 @@ func TestProxy_IdleTimeout_RestartsWhenLongConnCloses(t *testing.T) {
 	assertNoPidFile(t, root)
 }
 
+// #7191: only authenticated connections are activity. A stream of
+// connections that never complete the BDPROXY1 exchange must neither hold
+// idle exit off nor reach the backend.
+func TestProxy_IdleTimeout_IgnoresUnauthenticatedConns(t *testing.T) {
+	t.Parallel()
+
+	ts := server.New()
+	stats := &proxy.Stats{}
+	port := freeTCPPort(t)
+	root := t.TempDir()
+
+	const idle = 2 * time.Second
+	h := runProxy(t, proxy.ProxyOpts{
+		RootDir: root, Port: port,
+		IdleTimeout: idle,
+		Server:      ts, Stats: stats,
+	})
+	waitListening(t, root, listenWait)
+
+	deadline := time.Now().Add(3 * idle)
+dialing:
+	for time.Now().Before(deadline) {
+		select {
+		case <-h.exited:
+			break dialing
+		default:
+		}
+		c, err := net.DialTimeout("tcp", proxyAddr(port), ioTimeout)
+		if err != nil {
+			// The proxy removes proxy.pid before it closes the listener, so
+			// a refused dial is only acceptable once it is shutting down.
+			assertNoPidFile(t, root)
+			break
+		}
+		require.NoError(t, c.Close())
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	require.NoError(t, h.waitErr(t, max(time.Until(deadline), 0)+time.Second))
+	s := stats.Snapshot()
+	assert.Positive(t, s.AcceptCalls)
+	assert.Equal(t, int64(1), s.IdleTimeouts)
+	assert.Equal(t, int64(0), s.BackendDialAttempts)
+	// The readiness dial is the only backend session the proxy ever makes.
+	assert.Equal(t, int64(1), ts.Snapshot().AcceptedConns)
+	assertNoPidFile(t, root)
+}
+
 func TestProxy_ConcurrentConnections(t *testing.T) {
 	t.Parallel()
 

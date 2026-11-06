@@ -245,24 +245,27 @@ Three qualifications worth carrying:
 
 ## 4. Open connections, idle exit, and `bd dolt stop`
 
-**Any accepted connection defers idle exit.** `proxyServer.idleWatcher`
+**Any authenticated connection defers idle exit.** `proxyServer.idleWatcher`
 (`internal/storage/dbproxy/proxy/server.go`) returns immediately into a wait
 when `idleTimeout <= 0` — that is the "never" case. Otherwise it ticks every
-`idleTimeout/4`, with a 1s floor. A tick that sees `activeConns > 0` clears the
-armed state; the first tick that sees zero *arms* a timestamp; a later tick then
-exits once `timeout` has elapsed since arming. `activeConns` is incremented in
-`handleConn`, so an accepted TCP connection counts even if it never sends a
-byte.
+`idleTimeout/4`, with a 1s floor, and exits on a tick that sees no open
+authenticated connection when `timeout` has elapsed since the last activity.
+`handleConn` records activity when a connection completes the BDPROXY1
+exchange and again when it ends, so a connection that opens and closes between
+two ticks still restarts the idle clock, and one held open keeps the proxy up.
+A connection that never authenticates does not count, even while it is open.
+The idle clock starts when the watcher starts.
 
 Two consequences an embedder should plan for:
 
-- Holding one idle connection open keeps the proxy and its backend alive
-  indefinitely. That falls out of how the watcher counts, so it is as much an
-  easy way to pin the tree up by accident as a deliberate one — and it is a
-  property of the watcher, not an offer.
-- Exit is not punctual. Arming costs a tick, so the observed lifetime after the
-  last connection closes is longer than the configured timeout — up to roughly
-  two ticks longer.
+- Holding one idle (authenticated) connection open keeps the proxy and its
+  backend alive indefinitely. That falls out of how the watcher counts, so it
+  is as much an easy way to pin the tree up by accident as a deliberate one —
+  and it is a property of the watcher, not an offer.
+- Exit is not punctual. The proxy exits on the first tick after `timeout` has
+  passed since the last connection ended, so the observed lifetime after that is
+  up to about one tick longer than the configured timeout, and longer if the
+  watcher is scheduled late.
 
 **`bd dolt stop` does not wait for clients.** On a proxied workspace (`cmd/bd/dolt.go`)
 the command calls `proxy.Shutdown(rootDir)`, which:
