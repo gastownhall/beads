@@ -1314,9 +1314,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   compares it with `main` as `bd compact` read it, so a write that lands
   meanwhile is kept, not refused as a divergent replay. If the follow-up
   commit fails, `bd compact` stops before garbage collection with the changes
-  staged on `main`, for `bd dolt commit`. `bd flatten` and the merge-settle
-  path are unchanged. See
+  staged on `main`, for `bd dolt commit`. The merge-settle path is unchanged.
+  See
   [Writes that reach `main` while `bd compact` runs](docs/architecture/dolt.md#maintenance--bd-prune-and-bd-purge).
+- `bd flatten` no longer discards writes that reach `main` while it runs, or
+  drops the foreign keys of the clone-local (`dolt_ignored`) tables, `events`
+  and the `wisp_*` tables (reported and first fixed by @ckumar1 in #6772). It
+  finished by hard-resetting `main` onto the flattened branch. That replaced
+  `main`'s working set, the only place those foreign keys live, along with
+  any changes no Dolt commit held yet, and dropped any commit that landed on
+  `main` during the flatten. It now moves `main` with a soft reset: the
+  foreign keys stay, working-set changes stay pending, and a commit that
+  landed during the flatten, with any changes already staged, is kept in one
+  follow-up commit (`flatten: commit changes that reached main during flatten`),
+  without its own hash or message. If checking for or making that commit
+  fails, `bd flatten` stops before pruning and garbage collection, says that
+  `main` already moved, and leaves the changes staged, for `bd dolt commit`.
+  A failed or interrupted `bd flatten` now tries, within 30 seconds, to delete
+  its temporary `flatten-tmp` branch so the next run is not blocked; if that
+  cleanup fails, the error names the branch, and the next run's error says
+  how to delete it. A foreign key an older release already dropped stays
+  dropped; in server mode, `bd doctor --fix` re-adds it. See
+  [Writes that reach `main` while `bd flatten` runs](docs/architecture/dolt.md#maintenance--bd-prune-and-bd-purge).
 - A clone that adopts the 1.3.0 `events` flip (migration 0062) by
   `bd dolt pull` or `bd bootstrap`, or clones after it, no longer starts with
   an empty `events` audit table. Only the migrating clone kept its rows. The

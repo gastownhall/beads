@@ -279,6 +279,7 @@ func TestFlattenCleanupFailureIsReported(t *testing.T) {
 
 // AC-4: a flatten-tmp that existed before Flatten ran is not this
 // invocation's to remove: creating the branch fails and nothing is cleaned up.
+// The error says how to delete a branch an unfinished flatten left.
 func TestFlattenLeavesPreexistingTempBranch(t *testing.T) {
 	db, mock := newFlattenMock(t)
 	exists := errors.New("fatal: A branch named 'flatten-tmp' already exists.")
@@ -289,8 +290,30 @@ func TestFlattenLeavesPreexistingTempBranch(t *testing.T) {
 	if !errors.Is(err, exists) {
 		t.Fatalf("Flatten error = %v, want the branch-exists failure", err)
 	}
+	if !strings.Contains(err.Error(), "CALL DOLT_BRANCH('-D', 'flatten-tmp')") {
+		t.Errorf("Flatten error %q does not say how to delete the leftover flatten-tmp", err)
+	}
 	if len(conn.execs) != 1 {
 		t.Fatalf("Flatten issued %d statements, want only the failed branch create", len(conn.execs))
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("statements: %v", err)
+	}
+}
+
+// A branch create that fails for any other reason gets no advice to delete
+// flatten-tmp.
+func TestFlattenOtherCreateFailureHasNoDeleteAdvice(t *testing.T) {
+	db, mock := newFlattenMock(t)
+	injected := errors.New("injected create temp branch failure")
+	expectFlattenThrough(mock, flattenSteps(false), "create temp branch", injected)
+
+	err := Flatten(context.Background(), &ctxRecordingConn{DBConn: db})
+	if !errors.Is(err, injected) {
+		t.Fatalf("Flatten error = %v, want the injected create failure", err)
+	}
+	if strings.Contains(err.Error(), "DOLT_BRANCH('-D'") {
+		t.Errorf("Flatten error %q advises deleting a flatten-tmp that does not exist", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("statements: %v", err)

@@ -379,6 +379,10 @@ func TestFlattenCleanup(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "create temp branch") {
 			t.Fatalf("Flatten error = %v, want the branch create to fail", err)
 		}
+		// The advice keys on the server's own branch-exists text.
+		if !strings.Contains(err.Error(), "CALL DOLT_BRANCH('-D', 'flatten-tmp')") {
+			t.Errorf("Flatten error = %v, want it to say how to delete the leftover branch", err)
+		}
 		if n := f.count("SELECT COUNT(*) FROM dolt_branches WHERE name = 'flatten-tmp'"); n != 1 {
 			t.Fatalf("preexisting flatten-tmp after the failed create = %d, want it kept", n)
 		}

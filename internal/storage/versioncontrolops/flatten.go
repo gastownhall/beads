@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage/issueops"
@@ -27,8 +28,10 @@ import (
 // pre-flatten chain, and GC alone reclaims nothing while they exist (bd-agctw).
 //
 // If a step fails, or ctx is canceled, after Flatten created flatten-tmp,
-// it returns to main and deletes the branch (abandonFlatten), so the next
-// flatten is not blocked by it.
+// it tries to return to main and delete the branch (abandonFlatten), so the
+// next flatten is not blocked by it. A cleanup that cannot finish keeps the
+// branch and names it in the error, and the next flatten's branch create
+// then says how to delete it.
 //
 // conn must be a single database connection (not a pooled *sql.DB) since the
 // stored procedures rely on session-scoped state (current branch, working set).
@@ -60,8 +63,14 @@ func Flatten(ctx context.Context, conn DBConn) (retErr error) {
 	}
 
 	// A flatten-tmp that already exists is not this invocation's: creating
-	// it fails here, before cleanup is armed, so it is never removed.
+	// it fails here, before cleanup is armed, so it is never removed. It may
+	// be left by a flatten whose cleanup could not run, so the error says how
+	// to delete it.
 	if err := execSQL("create temp branch", "CALL DOLT_BRANCH('flatten-tmp')"); err != nil {
+		if strings.Contains(err.Error(), "already exists") {
+			return fmt.Errorf("%w; if no flatten is running, an earlier one that did not finish left it: "+
+				"delete it from main with CALL DOLT_BRANCH('-D', 'flatten-tmp'), then flatten again", err)
+		}
 		return err
 	}
 	// Armed until the final branch delete succeeds, so a failure or
@@ -134,10 +143,13 @@ const flattenCleanupTimeout = 30 * time.Second
 // abandonFlatten is Flatten's cleanup once a step fails after flatten-tmp
 // exists: back to main, then the branch deleted. It runs on a context the
 // caller's cancellation does not reach, bounded by flattenCleanupTimeout,
-// so a canceled flatten still removes the branch that would block the next
-// one. The checkout is not forced: if the session cannot return to main,
-// flatten-tmp is kept, since it may still be the session's branch. It
-// returns cause, joined with any cleanup failure.
+// so a flatten canceled between statements still removes the branch that
+// would block the next one. It needs conn's session, though: a cancellation
+// that interrupts a statement can make the driver close the connection
+// (go-sql-driver/mysql does, on a dolt sql-server), and then the cleanup
+// fails and the branch stays. The checkout is not forced: if the session
+// cannot return to main, flatten-tmp is kept, since it may still be the
+// session's branch. It returns cause, joined with any cleanup failure.
 func abandonFlatten(ctx context.Context, conn DBConn, cause error) error {
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), flattenCleanupTimeout)
 	defer cancel()

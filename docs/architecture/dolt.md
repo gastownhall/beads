@@ -441,8 +441,10 @@ ready. If `bd flatten` fails or is interrupted after creating its temporary
 branch, it tries, within 30 seconds, to return to `main` and delete that
 branch so the next `bd flatten` can run; if that cleanup fails, the error
 keeps the original failure and names the branch left behind. A foreign key
-an older release already dropped stays dropped after a flatten: `bd doctor`
-reports it, and `bd doctor --fix` deletes the rows it orphaned and re-adds it.
+an older release already dropped stays dropped after a flatten. In server
+mode, `bd doctor` reports it, and `bd doctor --fix` deletes the rows it
+orphaned and re-adds it. Embedded mode has no check or repair for it yet:
+`bd doctor` and `bd doctor --fix` do not run there.
 
 ### Why a garbage collection can reclaim nothing
 
