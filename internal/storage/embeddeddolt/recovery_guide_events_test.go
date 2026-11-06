@@ -230,6 +230,21 @@ func seedMigratedMachine(t *testing.T, ctx context.Context) string {
 	return dataDir
 }
 
+// publishToNewRemote adds a fresh file:// remote as origin and pushes main.
+func publishToNewRemote(t *testing.T, ctx context.Context, dataDir string) string {
+	t.Helper()
+	remoteDir := filepath.Join(t.TempDir(), "remote")
+	if err := os.MkdirAll(remoteDir, 0o700); err != nil {
+		t.Fatalf("create remote dir: %v", err)
+	}
+	remoteURL := "file://" + remoteDir
+	withRawConn(t, dataDir, preflipDatabase, func(conn *sql.Conn) {
+		mustExecOn(t, ctx, conn, "CALL DOLT_REMOTE('add', 'origin', ?)", remoteURL)
+		mustExecOn(t, ctx, conn, "CALL DOLT_PUSH('origin', 'main')")
+	})
+	return remoteURL
+}
+
 // eventTags returns the sorted event tags in the working set (asOf "") or
 // at a revision (asOf "HEAD").
 func eventTags(t *testing.T, ctx context.Context, conn *sql.Conn, asOf string) []string {
@@ -278,6 +293,19 @@ func requireNothingPending(t *testing.T, ctx context.Context, conn *sql.Conn) {
 func eventsIgnoreRuleAtHead(t *testing.T, ctx context.Context, conn *sql.Conn) bool {
 	t.Helper()
 	return scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM dolt_ignore AS OF 'HEAD' WHERE pattern = 'events'") > 0
+}
+
+// requireWritableLikeOldLine performs an issue-plus-event write and the 1.1
+// line's commit, and asserts the write landed in HEAD with nothing left
+// pending.
+func requireWritableLikeOldLine(t *testing.T, ctx context.Context, conn *sql.Conn, issueID, tag string) {
+	t.Helper()
+	mustOK(t, "issue write "+issueID, oldLineCreate(ctx, conn, issueID, tag))
+	mustOK(t, "commit "+issueID, oldLineCommit(ctx, conn))
+	requireNothingPending(t, ctx, conn)
+	if !slices.Contains(eventTags(t, ctx, conn, "HEAD"), tag) {
+		t.Fatalf("event %q is not in HEAD after the commit", tag)
+	}
 }
 
 // TestEmbeddedAccidentalReleaseRecoveryRestoresEvents is AC-1: the guide's
@@ -336,5 +364,24 @@ WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'events' AND COLUMN_NAME = 'id'
 			}
 			requireNothingPending(t, ctx, conn)
 		})
+	})
+}
+
+// TestEmbeddedAccidentalReleaseRecoveredCloneWrites is AC-2, the reported
+// bug: a fresh clone of a database recovered by the guide takes an
+// issue-plus-event write and the 1.1 line's commit, with no migrator run.
+func TestEmbeddedAccidentalReleaseRecoveredCloneWrites(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+	guide := readAccidentalReleaseGuide(t)
+
+	source := seedMigratedMachine(t, ctx)
+	mustOK(t, "the guide's required steps", runGuideSection(t, source, guide, guideRequiredSection))
+	remoteURL := publishToNewRemote(t, ctx, source)
+	_, clone := cloneLineage(t, ctx, remoteURL)
+
+	withRawConn(t, clone, preflipDatabase, func(conn *sql.Conn) {
+		requireWritableLikeOldLine(t, ctx, conn, "clone-1", "clone-create")
+		requireEventTags(t, ctx, conn, "HEAD", "clone-create", "post-keep", "pre-keep")
 	})
 }
