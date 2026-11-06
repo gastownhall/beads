@@ -100,6 +100,31 @@ func TestLenientGateWarningBody_BluntRefusalKeepsSharedGuidance(t *testing.T) {
 	}
 }
 
+// TestLenientSharedGateGuidanceAdoptBulletCarriesRecipe pins the #6687 fix in
+// the lenient warning's blunt block. This warning IS the whole user-facing
+// contract for bd list / bd ready on a bluntly-refused clone, and its adopt
+// bullet used to be a bare `bd bootstrap` — a no-op against exactly the
+// database that triggered the warning, looping the refusal. It must state the
+// no-replace note and carry the ordered move-aside recipe, sourced from the
+// schema package's exports so it cannot drift from the gate's own guidance.
+func TestLenientSharedGateGuidanceAdoptBulletCarriesRecipe(t *testing.T) {
+	if !strings.Contains(lenientSharedGateGuidance, "every other clone (another already migrated)") {
+		t.Fatalf("blunt guidance lost its adopt bullet:\n%s", lenientSharedGateGuidance)
+	}
+	if !strings.Contains(lenientSharedGateGuidance, schema.AdoptBootstrapNoReplaceNote) {
+		t.Errorf("adopt bullet does not state the bootstrap no-replace note:\n%s", lenientSharedGateGuidance)
+	}
+	mkdirAt := strings.Index(lenientSharedGateGuidance, "mkdir -p .beads/backup")
+	mvAt := strings.Index(lenientSharedGateGuidance, "mv -f .beads/embeddeddolt .beads/backup/embeddeddolt.pre-adopt")
+	bootAt := strings.LastIndex(lenientSharedGateGuidance, "bd bootstrap")
+	if mkdirAt < 0 || mvAt < 0 || bootAt < 0 {
+		t.Fatalf("adopt bullet lacks the ordered recipe (mkdir %d, mv %d, bootstrap %d):\n%s", mkdirAt, mvAt, bootAt, lenientSharedGateGuidance)
+	}
+	if !(mkdirAt < mvAt && mvAt < bootAt) {
+		t.Errorf("adopt bullet recipe is out of order:\n%s", lenientSharedGateGuidance)
+	}
+}
+
 // TestLenientGateWarning_ComposedOutput pins the COMPOSED warning — body plus
 // mode line — for every intent that can reach it, against each gate shape.
 //

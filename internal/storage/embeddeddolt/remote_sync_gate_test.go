@@ -368,7 +368,11 @@ func TestEmbeddedLenientOpenWarning_OtherRefusalsKeepBluntGuidance(t *testing.T)
 
 	for _, want := range []string{
 		"designated migrator (only ONE machine): bd migrate --force && bd dolt push",
-		"every other clone (another already migrated): bd bootstrap",
+		// #6687: the adopt bullet must no longer be a bare `bd bootstrap`
+		// (a no-op on the existing database that triggered this warning) —
+		// it names the no-replace fact and the move-aside recipe.
+		"every other clone (another already migrated): bd bootstrap never replaces",
+		"mv -f .beads/embeddeddolt .beads/backup/embeddeddolt.pre-adopt",
 		"Read-only command: continuing on schema v",
 	} {
 		if !strings.Contains(warning, want) {

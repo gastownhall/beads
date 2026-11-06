@@ -155,3 +155,47 @@ func TestPrintBootstrapRemoteBehindGuidance_InitWording(t *testing.T) {
 		t.Errorf("guidance missing init-specific retry line in:\n%s", out)
 	}
 }
+
+// TestPrintBootstrapRemoteBehindGuidanceAdoptStepsIsFreshAware is the #6687
+// half of the bootstrap behind-remote guidance. Both of its adopt steps used
+// to read as "re-run `bd bootstrap`", but every machine they address already
+// has a database — this clone was just created, the other machines cloned
+// theirs earlier — and against an existing database bootstrap prints
+// "Nothing to do." and changes nothing. The guidance must distinguish a
+// FRESH workspace (bootstrap clones) from an existing database (pull, or
+// move aside first) in both bullets.
+func TestPrintBootstrapRemoteBehindGuidanceAdoptStepsIsFreshAware(t *testing.T) {
+	var buf bytes.Buffer
+	printBootstrapRemoteBehindGuidance(&buf, &schema.RemoteMigrateGateError{
+		CurrentVersion: 49,
+		LatestVersion:  50,
+		Pending:        1,
+	}, "https://doltremoteapi.example.com/org/beads", "bd bootstrap")
+
+	out := buf.String()
+	// The existing-database no-op is named wherever an adopt is prescribed.
+	if got := strings.Count(out, "Nothing to do."); got < 2 {
+		t.Errorf("guidance names the bootstrap no-op %d times, want one per adopt bullet:\n%s", got, out)
+	}
+	// This clone's own way onto the migrated database is the pull, not a
+	// re-clone that cannot replace what is already here.
+	if !strings.Contains(out, "bd dolt pull") {
+		t.Errorf("guidance does not name the pull for this fresh clone after the migrator pushes:\n%s", out)
+	}
+	// And machines that already have a database are pointed at the move-aside
+	// steps rather than a bare bootstrap.
+	for _, want := range []string{"move", "aside", "bd migrate"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("guidance missing %q for existing-database machines:\n%s", want, out)
+		}
+	}
+	// The bare-bootstrap adopt prescriptions are gone.
+	for _, stale := range []string{
+		"other machines re-run `bd bootstrap` to adopt",
+		"then\n      re-run `bd bootstrap`",
+	} {
+		if strings.Contains(out, stale) {
+			t.Errorf("guidance still prescribes a bare re-run (%q):\n%s", stale, out)
+		}
+	}
+}

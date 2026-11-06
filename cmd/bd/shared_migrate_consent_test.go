@@ -364,3 +364,35 @@ func TestDataBehindSharedConsentCommandUnlocks(t *testing.T) {
 		}
 	})
 }
+
+// TestNoticeSharedMigrateRefusalAdoptNamesNoOp is the #6687 half of the
+// one-shot version-bump notice. The notice fires once per upgrade, so the
+// remedy it names is the only one many operators will ever see — and for the
+// adopt decisions it used to read "adopt it with 'bd bootstrap'", which on a
+// clone that already has a database (this notice's whole audience) prints
+// "Nothing to do." and changes nothing, looping the refusal the notice was
+// supposed to resolve. It must say that bootstrap alone does nothing and point
+// at the full move-aside steps.
+func TestNoticeSharedMigrateRefusalAdoptNamesNoOp(t *testing.T) {
+	pinJSONOutput(t, false)
+	for _, decision := range []string{"adopt", "adopt-ff"} {
+		t.Run(decision, func(t *testing.T) {
+			out := captureNoticeStderr(t, func() {
+				noticeSharedMigrateRefusal(&schema.RemoteMigrateGateError{
+					CurrentVersion: 65, LatestVersion: 66, Pending: 1,
+					Decision: decision,
+				})
+			})
+			for _, want := range []string{"bd bootstrap", "Nothing to do.", "move-aside"} {
+				if !strings.Contains(out, want) {
+					t.Errorf("notice for %q missing %q:\n%s", decision, want, out)
+				}
+			}
+			// The two-word consent path is the shared-no-remote remedy; naming
+			// it here would hand this arm a command that does not apply.
+			if strings.Contains(out, "bd migrate schema") {
+				t.Errorf("notice for %q must not prescribe the shared-no-remote consent path:\n%s", decision, out)
+			}
+		})
+	}
+}

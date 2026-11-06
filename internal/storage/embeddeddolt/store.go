@@ -93,13 +93,30 @@ type EmbeddedDoltStore struct {
 // first fragment continued that sentence on the same line; it now always leads
 // the warning and so starts its own line, which is why the opening sentence is
 // wrapped as a full line rather than as a continuation.
-const lenientSharedGateGuidance = "  This is a coordination decision, not an auto-fix - do NOT run a\n" +
+//
+// Since #6687 the adopt bullet is composed from the schema package's exports
+// instead of restating a bare `bd bootstrap`, which no-ops against exactly the
+// existing database that triggered the warning: the note names that fact and
+// the recipe lines are the ordered move-aside, single-sourced so this copy
+// cannot drift from the gate's own guidance.
+var lenientSharedGateGuidance = "  This is a coordination decision, not an auto-fix - do NOT run a\n" +
 	"  migration unless you are the single designated migrator (only ONE\n" +
 	"  clone may migrate a shared remote, else the schema forks; #4259):\n" +
 	"    • designated migrator (only ONE machine): bd migrate --force && bd dolt push\n" +
-	"    • every other clone (another already migrated): bd bootstrap\n" +
+	"    • every other clone (another already migrated): " + schema.AdoptBootstrapNoReplaceNote + ":\n" +
+	adoptRecipeLines(schema.AdoptMoveAsideCommands()) +
 	"    • several machines: only ONE migrates; sync each other clone and run\n" +
 	"      bd dolt pull after the migrator pushes, before upgrading it\n"
+
+// adoptRecipeLines renders the schema adopt recipe as the warning's indented
+// command lines.
+func adoptRecipeLines(cmds []string) string {
+	var b strings.Builder
+	for _, c := range cmds {
+		b.WriteString("        " + c + "\n")
+	}
+	return b.String()
+}
 
 // lenientGateWarningBody preserves the generic migrate-or-adopt guidance for
 // blunt gate refusals while allowing smart-gate decisions to explain their

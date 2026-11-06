@@ -1625,9 +1625,16 @@ func printBootstrapRemoteBehindGuidance(w io.Writer, e *schema.RemoteMigrateGate
 			"    • This machine is the designated migrator (exactly ONE machine should be):\n"+
 			"        bd migrate --force\n"+
 			"        bd dolt push\n"+
-			"      then other machines re-run `bd bootstrap` to adopt the migrated database.\n"+
+			"      then other machines adopt the migrated database: a fresh workspace\n"+
+			"      gets it with `bd bootstrap`; a machine that already has the database\n"+
+			"      gets \"Nothing to do.\" from that alone, so it moves the database aside\n"+
+			"      first (`bd migrate` prints the full move-aside steps).\n"+
 			"    • Another machine is the designated migrator: wait for it to push, then\n"+
-			"      re-run `bd bootstrap`, or keep using a bd version that matches the remote.\n\n")
+			"      run `bd dolt pull` here — this clone has nothing of its own, so it\n"+
+			"      fast-forwards onto the migrated database. (A workspace whose database\n"+
+			"      cannot fast-forward must move it aside before re-cloning: `bd bootstrap`\n"+
+			"      alone prints \"Nothing to do.\" against one; `bd migrate` prints the\n"+
+			"      full steps.) Or keep using a bd version that matches the remote.\n\n")
 }
 
 // doctorEnsureGitignoreForBeadsDir is the seam tests use to make the
