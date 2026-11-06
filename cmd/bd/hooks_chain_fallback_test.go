@@ -292,3 +292,58 @@ func TestGeneratedHookChainsWhenBDUnavailable(t *testing.T) {
 		}
 	})
 }
+
+// TestGeneratedPrePushChainsWhenBDUnavailable pushes through a generated
+// pre-push section with no bd on PATH: the foreign pre-push.old receives git's
+// remote arguments and ref lines, and its refusal stops the push.
+func TestGeneratedPrePushChainsWhenBDUnavailable(t *testing.T) {
+	r := newHookChainRepo(t, "repo")
+	if output, ok := r.commit(t, r.dir); !ok {
+		t.Fatalf("seed commit failed\n%s", output)
+	}
+	remote := filepath.Join(t.TempDir(), "remote.git")
+	runHookProcessGit(t, r.gitPath, filepath.Dir(remote), r.env, "init", "-q", "--bare", "--template=", remote)
+	r.git(t, "remote", "add", "origin", remote)
+
+	writeHookProcessFixture(t, r.hooksDir, "pre-push", "#!/bin/sh\n"+generateHookSection("pre-push"))
+	writeHookProcessFixture(t, r.hooksDir, "pre-push.old", `#!/bin/sh
+for _test_arg; do printf '<%s>\n' "$_test_arg"; done > "$HOOK_TEST_WITNESS.argv"
+while IFS= read -r _test_line; do printf '%s\n' "$_test_line"; done > "$HOOK_TEST_WITNESS.stdin"
+printf 'foreign push gate refused\n' >&2
+exit 1
+`)
+
+	push := exec.Command(r.gitPath, "push", "origin", "main")
+	push.Dir = r.dir
+	push.Env = r.env
+	output, err := push.CombinedOutput()
+	if err == nil {
+		t.Fatalf("push succeeded without bd on PATH; the chained pre-push.old gate was skipped\n%s", output)
+	}
+	if !strings.Contains(string(output), "foreign push gate refused") {
+		t.Errorf("push output is missing the chained gate's diagnostic\n%s", output)
+	}
+
+	argv, err := os.ReadFile(r.witness + ".argv")
+	if err != nil {
+		t.Fatalf("chained pre-push.old did not record its argv: %v\n%s", err, output)
+	}
+	if want := "<origin>\n<" + remote + ">\n"; string(argv) != want {
+		t.Errorf("chained pre-push.old argv = %q, want %q", argv, want)
+	}
+	head := strings.TrimSpace(r.git(t, "rev-parse", "HEAD"))
+	stdin, err := os.ReadFile(r.witness + ".stdin")
+	if err != nil {
+		t.Fatalf("chained pre-push.old did not record its stdin: %v", err)
+	}
+	zero := strings.Repeat("0", len(head))
+	if want := "refs/heads/main " + head + " refs/heads/main " + zero + "\n"; string(stdin) != want {
+		t.Errorf("chained pre-push.old stdin = %q, want %q", stdin, want)
+	}
+
+	verify := exec.Command(r.gitPath, "--git-dir", remote, "rev-parse", "-q", "--verify", "refs/heads/main")
+	verify.Env = r.env
+	if out, err := verify.CombinedOutput(); err == nil {
+		t.Errorf("remote received refs/heads/main although the gate refused: %s", out)
+	}
+}
