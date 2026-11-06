@@ -64,6 +64,9 @@ func previousRefsIDs(n int) []string {
 // unambiguous latest rows cost ceil(N/16) history queries, each binding at
 // most 16 ids into both IN-lists, and no other SQL.
 func TestPreviousExternalRefsChunksHistoryQueries(t *testing.T) {
+	// The chunk sizes each request must produce, written out rather than
+	// derived from previousExternalRefsChunk.
+	wantChunks := map[int][]int{1: {1}, 16: {16}, 17: {16, 1}, 33: {16, 16, 1}}
 	for _, n := range []int{1, 16, 17, 33} {
 		t.Run(fmt.Sprintf("%d ids", n), func(t *testing.T) {
 			ids := previousRefsIDs(n)
@@ -73,10 +76,11 @@ func TestPreviousExternalRefsChunksHistoryQueries(t *testing.T) {
 
 			tx, mock := newPreviousRefsTx(t)
 			want := make(map[string]string, n)
-			queries := 0
+			var chunks []int
 			for start := 0; start < n; start += previousExternalRefsChunk {
 				end := min(start+previousExternalRefsChunk, n)
 				chunk := ids[start:end]
+				chunks = append(chunks, len(chunk))
 				rows := sqlmock.NewRows([]string{"id", "external_ref"})
 				for i, id := range chunk {
 					if i%5 == 4 {
@@ -97,10 +101,9 @@ func TestPreviousExternalRefsChunksHistoryQueries(t *testing.T) {
 				mock.ExpectQuery(`(?s)m\.id IN \(` + inList + `\) AND m\.commit_date <= \?.*h\.id IN \(` + inList + `\) AND h\.commit_date <= \?`).
 					WithArgs(previousRefsChunkArgs(chunk, previousRefsCutoff)...).
 					WillReturnRows(rows)
-				queries++
 			}
-			if wantQueries := (n + 15) / 16; queries != wantQueries {
-				t.Fatalf("test setup: %d expected queries, want %d", queries, wantQueries)
+			if fmt.Sprint(chunks) != fmt.Sprint(wantChunks[n]) || len(chunks) != (n+15)/16 {
+				t.Fatalf("test setup: expected chunk sizes %v, want %v (ceil(%d/16) queries)", chunks, wantChunks[n], n)
 			}
 
 			got, err := PreviousExternalRefsInTx(context.Background(), tx, request, previousRefsCutoff)
@@ -154,21 +157,22 @@ func TestPreviousExternalRefsDiscardsPartialResultsOnError(t *testing.T) {
 		return rows
 	}
 	for _, test := range []struct {
-		name   string
-		second func(*sqlmock.ExpectedQuery)
+		name    string
+		second  func(*sqlmock.ExpectedQuery)
+		wantErr string
 	}{
-		{"query", func(q *sqlmock.ExpectedQuery) { q.WillReturnError(fmt.Errorf("boom")) }},
+		{"query", func(q *sqlmock.ExpectedQuery) { q.WillReturnError(fmt.Errorf("boom")) }, "boom"},
 		{"scan", func(q *sqlmock.ExpectedQuery) {
 			q.WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(second[0]))
-		}},
+		}, "failed to scan previous external_ref"},
 		{"iteration", func(q *sqlmock.ExpectedQuery) {
 			q.WillReturnRows(sqlmock.NewRows([]string{"id", "external_ref"}).
 				AddRow(second[0], "ref").RowError(0, fmt.Errorf("row boom")))
-		}},
+		}, "row boom"},
 		{"close", func(q *sqlmock.ExpectedQuery) {
 			q.WillReturnRows(sqlmock.NewRows([]string{"id", "external_ref"}).
 				AddRow(second[0], "ref").CloseError(fmt.Errorf("close boom")))
-		}},
+		}, "close boom"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			tx, mock := newPreviousRefsTx(t)
@@ -184,6 +188,15 @@ func TestPreviousExternalRefsDiscardsPartialResultsOnError(t *testing.T) {
 			}
 			if got != nil {
 				t.Fatalf("PreviousExternalRefsInTx returned partial map %v with error %v", got, err)
+			}
+			// Both chunk queries must have matched their expectations, so the
+			// error is the injected one rather than sqlmock refusing a query
+			// it did not expect.
+			if unmet := mock.ExpectationsWereMet(); unmet != nil {
+				t.Fatalf("chunk queries: %v (PreviousExternalRefsInTx error %v)", unmet, err)
+			}
+			if !strings.Contains(err.Error(), test.wantErr) {
+				t.Fatalf("PreviousExternalRefsInTx error = %v, want the injected %q failure", err, test.wantErr)
 			}
 		})
 	}
