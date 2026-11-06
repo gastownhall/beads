@@ -3,6 +3,7 @@ package issueops
 import (
 	"context"
 	"errors"
+	"reflect"
 	"regexp"
 	"testing"
 
@@ -465,6 +466,92 @@ func TestResolveCustomConfigInTxReturnsReadErrors(t *testing.T) {
 			}
 			if err := mock.ExpectationsWereMet(); err != nil {
 				t.Fatalf("unmet SQL expectations: %v", err)
+			}
+		})
+	}
+}
+
+// TestResolveCustomConfigInTxFallsBackOnMissingTables pins the pre-migration
+// compatibility that bd-dpn4op keeps: a missing normalized table (1146) is not
+// a read error, so the legacy config rows supply the vocabulary, still
+// unioned with config.yaml custom types. Per-row scan leniency is unchanged.
+func TestResolveCustomConfigInTxFallsBackOnMissingTables(t *testing.T) {
+	statusQuery := regexp.QuoteMeta("SELECT name, category FROM custom_statuses ORDER BY name")
+	typeQuery := regexp.QuoteMeta("SELECT name FROM custom_types ORDER BY name")
+	configQuery := regexp.QuoteMeta("SELECT `key`, value FROM config WHERE `key` IN (?,?)")
+	missing := func(table string) error {
+		return errors.New("Error 1146 (42S02): Table 'beads." + table + "' doesn't exist")
+	}
+	legacyRows := func() *sqlmock.Rows {
+		return sqlmock.NewRows([]string{"key", "value"}).
+			AddRow("status.custom", "review:wip").
+			AddRow("types.custom", "molecule")
+	}
+	review := []types.CustomStatus{{Name: "review", Category: types.CategoryWIP}}
+
+	cases := []struct {
+		name         string
+		yaml         string
+		arm          func(mock sqlmock.Sqlmock)
+		wantStatuses []types.CustomStatus
+		wantTypes    []string
+	}{
+		{"both tables missing", "", func(mock sqlmock.Sqlmock) {
+			mock.ExpectQuery(statusQuery).WillReturnError(missing("custom_statuses"))
+			mock.ExpectQuery(typeQuery).WillReturnError(missing("custom_types"))
+			mock.ExpectQuery(configQuery).WithArgs("status.custom", "types.custom").WillReturnRows(legacyRows())
+		}, review, []string{"molecule"}},
+		{"both tables missing with yaml types", "gizmo,molecule", func(mock sqlmock.Sqlmock) {
+			mock.ExpectQuery(statusQuery).WillReturnError(missing("custom_statuses"))
+			mock.ExpectQuery(typeQuery).WillReturnError(missing("custom_types"))
+			mock.ExpectQuery(configQuery).WithArgs("status.custom", "types.custom").WillReturnRows(legacyRows())
+		}, review, []string{"molecule", "gizmo"}},
+		{"statuses table missing, types table populated", "", func(mock sqlmock.Sqlmock) {
+			mock.ExpectQuery(statusQuery).WillReturnError(missing("custom_statuses"))
+			mock.ExpectQuery(typeQuery).WillReturnRows(sqlmock.NewRows([]string{"name"}).AddRow("convoy"))
+			mock.ExpectQuery(configQuery).WithArgs("status.custom", "types.custom").WillReturnRows(legacyRows())
+		}, review, []string{"convoy"}},
+		{"types table missing, statuses table populated", "", func(mock sqlmock.Sqlmock) {
+			mock.ExpectQuery(statusQuery).WillReturnRows(sqlmock.NewRows([]string{"name", "category"}).AddRow("triage", "active"))
+			mock.ExpectQuery(typeQuery).WillReturnError(missing("custom_types"))
+			mock.ExpectQuery(configQuery).WithArgs("status.custom", "types.custom").WillReturnRows(legacyRows())
+		}, []types.CustomStatus{{Name: "triage", Category: types.CategoryActive}}, []string{"molecule"}},
+		{"both tables empty", "", func(mock sqlmock.Sqlmock) {
+			mock.ExpectQuery(statusQuery).WillReturnRows(sqlmock.NewRows([]string{"name", "category"}))
+			mock.ExpectQuery(typeQuery).WillReturnRows(sqlmock.NewRows([]string{"name"}))
+			mock.ExpectQuery(configQuery).WithArgs("status.custom", "types.custom").WillReturnRows(legacyRows())
+		}, review, []string{"molecule"}},
+		// A bad row is still skipped, not a read error: the statuses table
+		// reads as empty and the legacy row supplies the status.
+		{"unscannable status row falls back leniently", "", func(mock sqlmock.Sqlmock) {
+			mock.ExpectQuery(statusQuery).WillReturnRows(sqlmock.NewRows([]string{"name", "category"}).AddRow("triage", nil))
+			mock.ExpectQuery(typeQuery).WillReturnRows(sqlmock.NewRows([]string{"name"}).AddRow("convoy"))
+			mock.ExpectQuery(configQuery).WithArgs("status.custom", "types.custom").WillReturnRows(legacyRows())
+		}, review, []string{"convoy"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			withYAMLCustomTypes(t, tc.yaml)
+			db, mock, tx := beginMockTx(t)
+			defer db.Close()
+			tc.arm(mock)
+			mock.ExpectRollback()
+
+			statuses, customTypes, err := ResolveCustomConfigInTx(context.Background(), tx)
+			if err != nil {
+				t.Fatalf("ResolveCustomConfigInTx: %v", err)
+			}
+			if !reflect.DeepEqual(statuses, tc.wantStatuses) {
+				t.Errorf("statuses = %#v, want %#v", statuses, tc.wantStatuses)
+			}
+			if !reflect.DeepEqual(customTypes, tc.wantTypes) {
+				t.Errorf("custom types = %#v, want %#v", customTypes, tc.wantTypes)
+			}
+			if err := tx.Rollback(); err != nil {
+				t.Fatalf("rollback: %v", err)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Errorf("unmet SQL expectations: %v", err)
 			}
 		})
 	}
