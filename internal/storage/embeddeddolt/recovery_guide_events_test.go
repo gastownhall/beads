@@ -506,3 +506,31 @@ func firstField(cols []string) string {
 	}
 	return strings.SplitN(cols[0], "|", 2)[0]
 }
+
+// TestRecoveryGuideRecoveredStorePublishesWritableClones is AC-2: a fresh
+// clone of a guide-recovered store, opened without any migrator, performs
+// an issue-plus-event write and the older line's ordinary commit
+// operation; the write succeeds and leaves no pending events change.
+func TestRecoveryGuideRecoveredStorePublishesWritableClones(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+
+	s := rgSeedPreFlip(t)
+	rgFlip(t, s, rgEvtLocal)
+	rgRunGuide(t, s)
+	remote := rgRemoteDir(t)
+	s.rgAddOriginPush(t, remote)
+
+	clone := rgClone(t, remote)
+	clone.withConn(t, func(conn *sql.Conn) {
+		if !trackedAtHead(t, ctx, conn, "events") {
+			t.Fatal("the clone did not receive the restored events table; the recovery was not publishable")
+		}
+		rgRequireCursor(t, ctx, conn, 53)
+	})
+	rgIssueWrite(t, clone, "rg-clone-1", "rg-evt-clone")
+	clone.withConn(t, func(conn *sql.Conn) {
+		rgRequireCleanStatus(t, ctx, conn)
+		rgRequireEventIDs(t, ctx, conn, "events AS OF 'HEAD'", rgEvtDoomedA, rgEvtDoomedB, "rg-evt-clone", rgEvtKept, rgEvtLocal)
+	})
+}
