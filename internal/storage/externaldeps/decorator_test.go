@@ -31,6 +31,9 @@ type fakeStore struct {
 	batch       *fakeBatchCloser
 	enforced    bool
 	enforcedErr error
+	// liveProbes records storage.LivePolicyProbe for every policy probe, in
+	// order.
+	liveProbes []bool
 
 	excludeIDsUnsupported bool
 	// defaultPage, when positive, is how many rows a zero-Limit ready listing
@@ -53,7 +56,8 @@ func (f *fakeStore) IssueLifecycle() (publicops.Lifecycle, error) { return f.lif
 // every existing test's raw store on today's client-side-enforcement path
 // unchanged; enforced:true is set explicitly only by the test below that
 // pins loadBlockingState's skip branch.
-func (f *fakeStore) ServerEnforcesExternalDependencyPolicy(_ context.Context) (bool, error) {
+func (f *fakeStore) ServerEnforcesExternalDependencyPolicy(ctx context.Context) (bool, error) {
+	f.liveProbes = append(f.liveProbes, storage.LivePolicyProbe(ctx))
 	return f.enforced, f.enforcedErr
 }
 
@@ -1105,6 +1109,55 @@ func TestGetDependencyTreeAddsResolvedExternalLeaf(t *testing.T) {
 	}
 	if tree[1].Status != types.StatusClosed {
 		t.Fatalf("shipped external status = %s, want closed", tree[1].Status)
+	}
+}
+
+// TestGetDependencyTreeKeepsEverySharedExternalEdge pins the external leaf's
+// diamond rule, the same one the walk follows: two parents sharing one
+// external ref each keep their edge, the second as a Deduped stub, and a stub
+// parent (which has no descendants) gets no leaves of its own.
+func TestGetDependencyTreeKeepsEverySharedExternalEdge(t *testing.T) {
+	root, p1, p2 := issue("be-root"), issue("be-p1"), issue("be-p2")
+	ref := "external:remote:payments"
+	raw := &fakeStore{
+		tree: []*types.TreeNode{
+			{Issue: *root},
+			{Issue: *p1, Depth: 1, ParentID: root.ID, EdgeFromParent: types.DepBlocks},
+			{Issue: *p2, Depth: 1, ParentID: root.ID, EdgeFromParent: types.DepBlocks},
+			{Issue: *p1, Depth: 2, ParentID: p2.ID, EdgeFromParent: types.DepBlocks, Deduped: true},
+		},
+		deps: map[string][]*types.Dependency{
+			p1.ID: {externalDep(p1.ID, ref, types.DepBlocks)},
+			p2.ID: {externalDep(p2.ID, ref, types.DepBlocks)},
+		},
+	}
+	store := testStore(raw, &fakeStore{labels: make(map[string][]*types.Issue)}, true)
+
+	tree, err := store.GetDependencyTree(t.Context(), root.ID, 10, false, false)
+	if err != nil {
+		t.Fatalf("GetDependencyTree: %v", err)
+	}
+	if len(tree) != 6 {
+		t.Fatalf("tree length = %d, want 6 (4 walked rows, the leaf and its stub)", len(tree))
+	}
+	leaf, stub := tree[4], tree[5]
+	if leaf.ID != ref || leaf.ParentID != p1.ID || leaf.Depth != 2 || leaf.Deduped {
+		t.Fatalf("external leaf = id %q parent %q depth %d deduped %v, want %s/%s/2/false", leaf.ID, leaf.ParentID, leaf.Depth, leaf.Deduped, ref, p1.ID)
+	}
+	if stub.ID != ref || stub.ParentID != p2.ID || stub.Depth != 2 || !stub.Deduped || stub.EdgeFromParent != types.DepBlocks {
+		t.Fatalf("external stub = id %q parent %q depth %d deduped %v edge %q, want %s/%s/2/true/blocks",
+			stub.ID, stub.ParentID, stub.Depth, stub.Deduped, stub.EdgeFromParent, ref, p2.ID)
+	}
+
+	// A tree that already holds both edges (a server that hung the leaves
+	// itself) gets nothing added twice.
+	raw.tree = tree
+	again, err := store.GetDependencyTree(t.Context(), root.ID, 10, false, false)
+	if err != nil {
+		t.Fatalf("GetDependencyTree over a decorated tree: %v", err)
+	}
+	if len(again) != 6 {
+		t.Fatalf("re-decorated tree length = %d, want 6", len(again))
 	}
 }
 

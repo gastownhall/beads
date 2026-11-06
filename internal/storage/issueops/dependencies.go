@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/gowebpki/jcs"
+	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/storage/depid"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/sqlbuild"
@@ -216,6 +217,28 @@ func AddDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 	return addDependencyInTx(ctx, tx, dep, actor, opts, nil, true)
 }
 
+// DependencyWriteResult is what a dependency write reports to a caller that
+// stages tables for a Dolt commit: whether an audit event row was recorded,
+// and which blocked-state tables had rows flipped. A blocking edge flips the
+// source's (or a descendant's) is_blocked in the same transaction, so a
+// caller that commits selectively stages `issues` when
+// Blocked.IssueRowsChanged — and only then, so a write that changed no
+// issues row cannot sweep unrelated pending issues edits into its commit
+// (GH#6647, GH#2455).
+type DependencyWriteResult struct {
+	EventWritten bool
+	Blocked      RecomputeIsBlockedResult
+}
+
+// AddDependencyInTxWithResult is AddDependencyInTx reporting the blocked-state
+// tables the add changed alongside the event verdict.
+func AddDependencyInTxWithResult(ctx context.Context, tx *sql.Tx, dep *types.Dependency, actor string, opts AddDependencyOpts) (DependencyWriteResult, error) {
+	var result DependencyWriteResult
+	eventWritten, err := addDependencyInTx(ctx, tx, dep, actor, opts, &result.Blocked, true)
+	result.EventWritten = eventWritten
+	return result, err
+}
+
 // addDependencyInTx is the body of AddDependencyInTx. mintVersion controls
 // whether a new edge mints the source's version row here: the exported entry
 // point always does, while a parent patch (applyParentPatch) rewires several
@@ -410,8 +433,14 @@ func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 		return false, fmt.Errorf("affected by add dependency %s -> %s: %w", dep.IssueID, dep.DependsOnID, aerr)
 	}
 	if dep.Type == types.DepBlocks || dep.Type == types.DepConditionalBlocks {
-		if err := markDirectBlockingDependencySourceInTx(ctx, tx, dep.IssueID, srcIsWisp, dep.DependsOnID, kind, opts.PrecheckedTarget); err != nil {
+		marked, err := markDirectBlockingDependencySourceInTx(ctx, tx, dep.IssueID, srcIsWisp, dep.DependsOnID, kind, opts.PrecheckedTarget)
+		if err != nil {
 			return false, fmt.Errorf("mark direct is_blocked after add dependency %s -> %s: %w", dep.IssueID, dep.DependsOnID, err)
+		}
+		if srcIsWisp {
+			mergeRecomputeIsBlockedResult(recomputeResult, RecomputeIsBlockedResult{WispRowsChanged: marked})
+		} else {
+			mergeRecomputeIsBlockedResult(recomputeResult, RecomputeIsBlockedResult{IssueRowsChanged: marked})
 		}
 		affectedIssues, affectedWisps = RemoveSourceFromAffected(dep.IssueID, srcIsWisp, affectedIssues, affectedWisps)
 	}
@@ -429,9 +458,11 @@ func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 		}
 		return eventWritten, mintDependencyVersion(ctx, tx, dep.IssueID, actor, mintVersion)
 	}
-	if err := MarkIsBlockedInTx(ctx, tx, affectedIssues, affectedWisps); err != nil {
+	marked, err := MarkIsBlockedInTxWithResult(ctx, tx, affectedIssues, affectedWisps)
+	if err != nil {
 		return false, fmt.Errorf("mark is_blocked after add dependency %s -> %s: %w", dep.IssueID, dep.DependsOnID, err)
 	}
+	mergeRecomputeIsBlockedResult(recomputeResult, marked)
 	// Snapshot only after all derived blocked-state maintenance has completed.
 	// The journal is never gated on opts.EmitEvent: a structurally-wired edge is
 	// as real to a replaying consumer as one added by an explicit dep verb —
@@ -479,8 +510,13 @@ func removeID(ids []string, remove string) []string {
 	return out
 }
 
+// markDirectBlockingDependencySourceInTx marks the source of a new blocking
+// edge blocked when its target is open, and reports whether it flipped the
+// row. The `is_blocked = 0` predicate makes a matched row a changed row, so
+// RowsAffected is the verdict whatever the driver's found-rows mode.
+//
 //nolint:gosec // G201: table names are selected from fixed issue/wisp tables.
-func markDirectBlockingDependencySourceInTx(ctx context.Context, tx *sql.Tx, source string, srcIsWisp bool, target string, targetKind DepTargetKind, precheckedTarget *DepTargetPrecheck) error {
+func markDirectBlockingDependencySourceInTx(ctx context.Context, tx *sql.Tx, source string, srcIsWisp bool, target string, targetKind DepTargetKind, precheckedTarget *DepTargetPrecheck) (bool, error) {
 	sourceTable := "issues"
 	if srcIsWisp {
 		sourceTable = "wisps"
@@ -492,7 +528,7 @@ func markDirectBlockingDependencySourceInTx(ctx context.Context, tx *sql.Tx, sou
 	case DepTargetWisp:
 		targetTable = "wisps"
 	default:
-		return nil
+		return false, nil
 	}
 
 	if precheckedTarget != nil {
@@ -500,15 +536,15 @@ func markDirectBlockingDependencySourceInTx(ctx context.Context, tx *sql.Tx, sou
 		// would miss it there. Its openness is already known, so gate in Go
 		// and mark the source (whose table always matches tx) directly.
 		if types.Status(precheckedTarget.Status) == types.StatusClosed || types.Status(precheckedTarget.Status) == types.StatusPinned {
-			return nil
+			return false, nil
 		}
-		_, err := tx.ExecContext(ctx, fmt.Sprintf(`
+		res, err := tx.ExecContext(ctx, fmt.Sprintf(`
 			UPDATE %s s SET s.is_blocked = 1, s.updated_at = s.updated_at
 			WHERE s.id = ?
 			  AND s.is_blocked = 0
 			  AND s.status <> 'closed' AND s.status <> 'pinned'
 		`, sourceTable), source)
-		return err
+		return rowsChanged(res, err)
 	}
 
 	// MySQL 8.0+ rejects UPDATE <T> ... WHERE EXISTS (SELECT FROM <T> ...)
@@ -517,7 +553,7 @@ func markDirectBlockingDependencySourceInTx(ctx context.Context, tx *sql.Tx, sou
 	// targetTable. Wrapping the inner SELECT in a derived table makes MySQL
 	// treat it as an independent rowset, satisfying the restriction. Dolt
 	// accepts both forms, so this is a no-op there.
-	_, err := tx.ExecContext(ctx, fmt.Sprintf(`
+	res, err := tx.ExecContext(ctx, fmt.Sprintf(`
 		UPDATE %s s SET s.is_blocked = 1, s.updated_at = s.updated_at
 		WHERE s.id = ?
 		  AND s.is_blocked = 0
@@ -529,7 +565,19 @@ func markDirectBlockingDependencySourceInTx(ctx context.Context, tx *sql.Tx, sou
 		    WHERE t.status <> 'closed' AND t.status <> 'pinned'
 		  )
 	`, sourceTable, targetTable), source, target)
-	return err
+	return rowsChanged(res, err)
+}
+
+// rowsChanged turns an UPDATE's result into "did it change a row".
+func rowsChanged(res sql.Result, err error) (bool, error) {
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
 
 // CheckDependencyCycleInTx rejects self-dependencies and cycles across the
@@ -691,10 +739,20 @@ func isAncestorInTx(ctx context.Context, tx DBTX, node, candidate string, depTab
 	return n > 0, nil
 }
 
-func DeleteWispFromDependenciesInTx(ctx context.Context, tx *sql.Tx, wispID string) error {
-	if _, err := tx.ExecContext(ctx,
-		"DELETE FROM dependencies WHERE depends_on_wisp_id = ?", wispID); err != nil {
-		return fmt.Errorf("delete wisp %s from dependencies: %w", wispID, err)
+// DeleteWispFromDependenciesInTx removes every edge of the wisp being deleted
+// and reports whether that removed durable dependencies rows: edges from
+// durable issues that point at the wisp. The wisp_dependencies rows commit
+// with the SQL transaction like the rest of the wisp tables, but those durable
+// rows also need a Dolt commit (GH#6647).
+func DeleteWispFromDependenciesInTx(ctx context.Context, tx *sql.Tx, wispID string) (bool, error) {
+	res, err := tx.ExecContext(ctx,
+		"DELETE FROM dependencies WHERE depends_on_wisp_id = ?", wispID)
+	if err != nil {
+		return false, fmt.Errorf("delete wisp %s from dependencies: %w", wispID, err)
+	}
+	durableRows, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("delete wisp %s from dependencies: rows affected: %w", wispID, err)
 	}
 	// wisp_dependencies is part of the wisp deletion set (DeleteCascadeTables),
 	// but no delete path cleaned it: every wisp deletion orphaned its
@@ -704,25 +762,33 @@ func DeleteWispFromDependenciesInTx(ctx context.Context, tx *sql.Tx, wispID stri
 	// DELETEs, not one OR query, so each hits its own index (ff-tqm).
 	if _, err := tx.ExecContext(ctx,
 		"DELETE FROM wisp_dependencies WHERE issue_id = ?", wispID); err != nil {
-		return fmt.Errorf("delete wisp %s child rows from wisp_dependencies: %w", wispID, err)
+		return false, fmt.Errorf("delete wisp %s child rows from wisp_dependencies: %w", wispID, err)
 	}
 	if _, err := tx.ExecContext(ctx,
 		"DELETE FROM wisp_dependencies WHERE depends_on_wisp_id = ?", wispID); err != nil {
-		return fmt.Errorf("delete wisp %s parent rows from wisp_dependencies: %w", wispID, err)
+		return false, fmt.Errorf("delete wisp %s parent rows from wisp_dependencies: %w", wispID, err)
 	}
-	return nil
+	return durableRows > 0, nil
 }
 
+// DeleteWispsFromDependenciesInTx is DeleteWispFromDependenciesInTx for a
+// batch of wisps.
+//
 //nolint:gosec // G201: inClause contains only ? placeholders
-func DeleteWispsFromDependenciesInTx(ctx context.Context, tx *sql.Tx, wispIDs []string) error {
+func DeleteWispsFromDependenciesInTx(ctx context.Context, tx *sql.Tx, wispIDs []string) (bool, error) {
 	if len(wispIDs) == 0 {
-		return nil
+		return false, nil
 	}
 	inClause, args := buildSQLInClause(wispIDs)
-	if _, err := tx.ExecContext(ctx,
+	res, err := tx.ExecContext(ctx,
 		fmt.Sprintf("DELETE FROM dependencies WHERE depends_on_wisp_id IN (%s)", inClause),
-		args...); err != nil {
-		return fmt.Errorf("delete wisps from dependencies: %w", err)
+		args...)
+	if err != nil {
+		return false, fmt.Errorf("delete wisps from dependencies: %w", err)
+	}
+	durableRows, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("delete wisps from dependencies: rows affected: %w", err)
 	}
 	// See DeleteWispFromDependenciesInTx: wisp_dependencies rows must go with
 	// the wisps, on both the child and parent side. Two targeted DELETEs, not
@@ -730,14 +796,14 @@ func DeleteWispsFromDependenciesInTx(ctx context.Context, tx *sql.Tx, wispIDs []
 	if _, err := tx.ExecContext(ctx,
 		fmt.Sprintf("DELETE FROM wisp_dependencies WHERE issue_id IN (%s)", inClause),
 		args...); err != nil {
-		return fmt.Errorf("delete wisps child rows from wisp_dependencies: %w", err)
+		return false, fmt.Errorf("delete wisps child rows from wisp_dependencies: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx,
 		fmt.Sprintf("DELETE FROM wisp_dependencies WHERE depends_on_wisp_id IN (%s)", inClause),
 		args...); err != nil {
-		return fmt.Errorf("delete wisps parent rows from wisp_dependencies: %w", err)
+		return false, fmt.Errorf("delete wisps parent rows from wisp_dependencies: %w", err)
 	}
-	return nil
+	return durableRows > 0, nil
 }
 
 // Dependency target rewrites reinsert matching rows because Dolt can leave the
@@ -1126,6 +1192,16 @@ func RemoveDependencyInTx(ctx context.Context, tx *sql.Tx, issueID, dependsOnID,
 	return removeDependencyInTx(ctx, tx, issueID, dependsOnID, actor, emitEvent, nil, true)
 }
 
+// RemoveDependencyInTxWithResult is RemoveDependencyInTx reporting the
+// blocked-state tables the removal's recompute changed alongside the event
+// verdict (see DependencyWriteResult).
+func RemoveDependencyInTxWithResult(ctx context.Context, tx *sql.Tx, issueID, dependsOnID, actor string, emitEvent bool) (DependencyWriteResult, error) {
+	var result DependencyWriteResult
+	eventWritten, err := removeDependencyInTx(ctx, tx, issueID, dependsOnID, actor, emitEvent, &result.Blocked, true)
+	result.EventWritten = eventWritten
+	return result, err
+}
+
 // removeDependencyInTx is the body of RemoveDependencyInTx. A deleted edge is a
 // change to the source issue's durable state and mints one version row for it,
 // whether or not an audit event was requested; an absent edge returns before
@@ -1309,33 +1385,10 @@ func GetIssuesByIDsInTx(ctx context.Context, tx DBTX, ids []string, wispSet map[
 // GetDependenciesWithMetadataInTx returns issues that the given issueID depends on,
 // along with the dependency type. Works within an existing transaction.
 // Queries both dependency tables to handle cross-table dependencies.
-//
-//nolint:gosec // G201: table names come from hardcoded constants
 func GetDependenciesWithMetadataInTx(ctx context.Context, tx DBTX, issueID string) ([]*types.IssueWithDependencyMetadata, error) {
-	type depMeta struct {
-		depID, depType string
-	}
-
-	// Query both dependency tables to find all dependencies.
-	var deps []depMeta
-	for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
-		rows, err := tx.QueryContext(ctx, fmt.Sprintf(
-			`SELECT %s AS depends_on_id, type FROM %s WHERE issue_id = ?`, DepTargetExpr, depTable), issueID)
-		if err != nil {
-			return nil, fmt.Errorf("get dependencies from %s: %w", depTable, err)
-		}
-		for rows.Next() {
-			var d depMeta
-			if scanErr := rows.Scan(&d.depID, &d.depType); scanErr != nil {
-				_ = rows.Close()
-				return nil, fmt.Errorf("get dependencies: scan: %w", scanErr)
-			}
-			deps = append(deps, d)
-		}
-		_ = rows.Close()
-		if err := rows.Err(); err != nil {
-			return nil, fmt.Errorf("get dependencies: rows from %s: %w", depTable, err)
-		}
+	deps, err := anchorEdgesInTx(ctx, tx, issueID, false, true)
+	if err != nil {
+		return nil, err
 	}
 
 	if len(deps) == 0 {
@@ -1345,7 +1398,7 @@ func GetDependenciesWithMetadataInTx(ctx context.Context, tx DBTX, issueID strin
 	// Fetch all dependency target issues.
 	ids := make([]string, len(deps))
 	for i, d := range deps {
-		ids[i] = d.depID
+		ids[i] = d.farID
 	}
 	issues, err := GetIssuesByIDsInTx(ctx, tx, ids, nil)
 	if err != nil {
@@ -1358,7 +1411,7 @@ func GetDependenciesWithMetadataInTx(ctx context.Context, tx DBTX, issueID strin
 
 	var results []*types.IssueWithDependencyMetadata
 	for _, d := range deps {
-		issue, ok := issueMap[d.depID]
+		issue, ok := issueMap[d.farID]
 		if !ok {
 			continue
 		}
@@ -1370,35 +1423,83 @@ func GetDependenciesWithMetadataInTx(ctx context.Context, tx DBTX, issueID strin
 	return results, nil
 }
 
-// GetDependentsWithMetadataInTx returns issues that depend on the given issueID
-// along with the dependency type. Works within an existing transaction.
+// anchorEdge is one dependency edge seen from a fixed anchor issue: the issue
+// at the other end and the edge type (empty when the caller did not ask for it).
+type anchorEdge struct {
+	farID, depType string
+}
+
+// anchorEdgesInTx reads the anchor's edges in one direction from both
+// dependency planes, durable table first: inbound reads the rows whose target
+// is the anchor (its dependents), otherwise the rows whose source is the
+// anchor (its dependencies). withType also selects the edge type.
 //
-//nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
-func GetDependentsWithMetadataInTx(ctx context.Context, tx DBTX, issueID string) ([]*types.IssueWithDependencyMetadata, error) {
-	type depMeta struct {
-		depID, depType string
+// wisp_dependencies is dolt-ignored, so a server-mode working-set reset (a
+// `dolt push` received, a hard reset) can drop it mid-session. Its absence
+// means there are no wisp-plane edges, not that the read failed (bd-cif6y4,
+// #3445: `bd show <epic>` lost its whole CHILDREN section). Only that named
+// table is tolerated; a missing `dependencies` or any other error is returned.
+//
+// Each far end is returned once. A local AddDependency writes an edge to one
+// plane only (WispTableRouting), but the same edge can still sit in both: a
+// pull or merge lands another clone's promotion of a wisp next to the local
+// wisp copy. For a fixed anchor the far-end id is the pair depid.New hashes,
+// so it is the key; the type is not (AddDependency refuses a second type for
+// one pair) and neither is the id column, which a read-only open of an older
+// database cannot assume exists. The first row seen wins, so a durable row and
+// its type beat the wisp copy; order is durable rows, then wisp-only rows.
+//
+//nolint:gosec // G201: table names are hardcoded constants
+func anchorEdgesInTx(ctx context.Context, tx DBTX, anchor string, inbound, withType bool) ([]anchorEdge, error) {
+	farCol, where, verb := DepTargetExpr+" AS depends_on_id", "issue_id = ?", "dependencies"
+	if inbound {
+		farCol, where, verb = "issue_id", DepTargetExpr+" = ?", "dependents"
+	}
+	cols := farCol
+	if withType {
+		cols += ", type"
 	}
 
-	// Query both dependency tables to find all dependents.
-	var deps []depMeta
+	var edges []anchorEdge
+	seen := make(map[string]struct{})
 	for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
-		rows, err := tx.QueryContext(ctx, fmt.Sprintf(
-			`SELECT issue_id, type FROM %s WHERE %s = ?`, depTable, DepTargetExpr), issueID)
+		rows, err := tx.QueryContext(ctx, fmt.Sprintf(`SELECT %s FROM %s WHERE %s`, cols, depTable, where), anchor)
 		if err != nil {
-			return nil, fmt.Errorf("get dependents from %s: %w", depTable, err)
+			if optionalBlockedTable(depTable) && dberrors.IsMissingTable(err, depTable) {
+				continue
+			}
+			return nil, fmt.Errorf("get %s from %s: %w", verb, depTable, err)
 		}
 		for rows.Next() {
-			var d depMeta
-			if scanErr := rows.Scan(&d.depID, &d.depType); scanErr != nil {
-				_ = rows.Close()
-				return nil, fmt.Errorf("get dependents: scan: %w", scanErr)
+			var e anchorEdge
+			dest := []any{&e.farID}
+			if withType {
+				dest = append(dest, &e.depType)
 			}
-			deps = append(deps, d)
+			if scanErr := rows.Scan(dest...); scanErr != nil {
+				_ = rows.Close()
+				return nil, fmt.Errorf("get %s: scan: %w", verb, scanErr)
+			}
+			if _, dup := seen[e.farID]; dup {
+				continue
+			}
+			seen[e.farID] = struct{}{}
+			edges = append(edges, e)
 		}
 		_ = rows.Close()
 		if err := rows.Err(); err != nil {
-			return nil, fmt.Errorf("get dependents: rows from %s: %w", depTable, err)
+			return nil, fmt.Errorf("get %s: rows from %s: %w", verb, depTable, err)
 		}
+	}
+	return edges, nil
+}
+
+// GetDependentsWithMetadataInTx returns issues that depend on the given issueID
+// along with the dependency type. Works within an existing transaction.
+func GetDependentsWithMetadataInTx(ctx context.Context, tx DBTX, issueID string) ([]*types.IssueWithDependencyMetadata, error) {
+	deps, err := anchorEdgesInTx(ctx, tx, issueID, true, true)
+	if err != nil {
+		return nil, err
 	}
 
 	if len(deps) == 0 {
@@ -1408,7 +1509,7 @@ func GetDependentsWithMetadataInTx(ctx context.Context, tx DBTX, issueID string)
 	// Fetch all dependent issues.
 	ids := make([]string, len(deps))
 	for i, d := range deps {
-		ids[i] = d.depID
+		ids[i] = d.farID
 	}
 	issues, err := GetIssuesByIDsInTx(ctx, tx, ids, nil)
 	if err != nil {
@@ -1421,7 +1522,7 @@ func GetDependentsWithMetadataInTx(ctx context.Context, tx DBTX, issueID string)
 
 	var results []*types.IssueWithDependencyMetadata
 	for _, d := range deps {
-		issue, ok := issueMap[d.depID]
+		issue, ok := issueMap[d.farID]
 		if !ok {
 			continue
 		}
@@ -1435,66 +1536,29 @@ func GetDependentsWithMetadataInTx(ctx context.Context, tx DBTX, issueID string)
 
 // GetDependenciesInTx returns issues that the given issueID depends on.
 // Queries both dependencies and wisp_dependencies tables.
-//
-//nolint:gosec // G201: table names come from hardcoded constants
 func GetDependenciesInTx(ctx context.Context, tx *sql.Tx, issueID string) ([]*types.Issue, error) {
-	var ids []string
-	for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
-		rows, err := tx.QueryContext(ctx, fmt.Sprintf(
-			`SELECT %s AS depends_on_id FROM %s WHERE issue_id = ?`, DepTargetExpr, depTable), issueID)
-		if err != nil {
-			return nil, fmt.Errorf("get dependencies from %s: %w", depTable, err)
-		}
-		for rows.Next() {
-			var id string
-			if scanErr := rows.Scan(&id); scanErr != nil {
-				_ = rows.Close()
-				return nil, fmt.Errorf("get dependencies: scan: %w", scanErr)
-			}
-			ids = append(ids, id)
-		}
-		_ = rows.Close()
-		if err := rows.Err(); err != nil {
-			return nil, fmt.Errorf("get dependencies: rows from %s: %w", depTable, err)
-		}
-	}
-
-	if len(ids) == 0 {
-		return nil, nil
-	}
-
-	return GetIssuesByIDsInTx(ctx, tx, ids, nil)
+	return getAnchorIssuesInTx(ctx, tx, issueID, false)
 }
 
 // GetDependentsInTx returns issues that depend on the given issueID.
 // Queries both dependencies and wisp_dependencies tables.
-//
-//nolint:gosec // G201: table names come from hardcoded constants
 func GetDependentsInTx(ctx context.Context, tx *sql.Tx, issueID string) ([]*types.Issue, error) {
-	var ids []string
-	for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
-		rows, err := tx.QueryContext(ctx, fmt.Sprintf(
-			`SELECT issue_id FROM %s WHERE %s = ?`, depTable, DepTargetExpr), issueID)
-		if err != nil {
-			return nil, fmt.Errorf("get dependents from %s: %w", depTable, err)
-		}
-		for rows.Next() {
-			var id string
-			if scanErr := rows.Scan(&id); scanErr != nil {
-				_ = rows.Close()
-				return nil, fmt.Errorf("get dependents: scan: %w", scanErr)
-			}
-			ids = append(ids, id)
-		}
-		_ = rows.Close()
-		if err := rows.Err(); err != nil {
-			return nil, fmt.Errorf("get dependents: rows from %s: %w", depTable, err)
-		}
+	return getAnchorIssuesInTx(ctx, tx, issueID, true)
+}
+
+func getAnchorIssuesInTx(ctx context.Context, tx *sql.Tx, issueID string, inbound bool) ([]*types.Issue, error) {
+	edges, err := anchorEdgesInTx(ctx, tx, issueID, inbound, false)
+	if err != nil {
+		return nil, err
 	}
 
-	if len(ids) == 0 {
+	if len(edges) == 0 {
 		return nil, nil
 	}
 
+	ids := make([]string, len(edges))
+	for i, e := range edges {
+		ids[i] = e.farID
+	}
 	return GetIssuesByIDsInTx(ctx, tx, ids, nil)
 }

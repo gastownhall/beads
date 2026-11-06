@@ -353,6 +353,7 @@ var (
 	_ uow.BatchGetterSource         = timedProvider{}
 	_ uow.LeaseReclaimerSource      = timedProvider{}
 	_ uow.HeartbeaterSource         = timedProvider{}
+	_ uow.BlockedListerSource       = timedProvider{}
 	_ uow.RelationsSource           = timedProvider{}
 	_ uow.CommenterSource           = timedProvider{}
 	_ uow.BlockingAnnotatorSource   = timedProvider{}
@@ -487,6 +488,12 @@ func (p timedProvider) LeaseReclaimer() (issueops.LeaseReclaimer, error) {
 // and with the same hazard as IssueReader.
 func (p timedProvider) Heartbeater() (issueops.Heartbeater, error) {
 	return uow.NewHeartbeater(p)
+}
+
+// BlockedLister builds the blocked listing OVER THIS WRAPPER, for
+// IssueReader's reason: its unit of work lands in this request's uow_ms.
+func (p timedProvider) BlockedLister() (issueops.BlockedLister, error) {
+	return uow.NewBlockedLister(p)
 }
 
 // MoleculeStepper builds the advance-a-molecule role OVER THIS WRAPPER, so

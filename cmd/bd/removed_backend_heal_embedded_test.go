@@ -107,13 +107,13 @@ func runBDExpectingRejection(t *testing.T, bd, dir string, args ...string) strin
 	return string(out)
 }
 
-// TestRemovedBackendHealRoundTrip is the headline D-8 test: a workspace whose
+// TestEmbeddedRemovedBackendHealRoundTrip is the headline D-8 test: a workspace whose
 // metadata.json picked up a stale legacy "backend" value still holds its Dolt
 // database, so the rejection must name the exact edit that heals it — and
 // following that edit verbatim must make the workspace open again with its
 // issues intact. Before D-8 the message sent this user to export the data with
 // an old bd release and reinitialize, destroying a live database.
-func TestRemovedBackendHealRoundTrip(t *testing.T) {
+func TestEmbeddedRemovedBackendHealRoundTrip(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -185,10 +185,10 @@ func TestRemovedBackendHealRoundTrip(t *testing.T) {
 	}
 }
 
-// TestRemovedBackendHealRejectionPerBackend proves every removed-backend
+// TestEmbeddedRemovedBackendHealRejectionPerBackend proves every removed-backend
 // tombstone — not just sqlite — reaches the heal message when Dolt data is
 // present. Only sqlite runs the full round-trip above; here we pin the rejection.
-func TestRemovedBackendHealRejectionPerBackend(t *testing.T) {
+func TestEmbeddedRemovedBackendHealRejectionPerBackend(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}

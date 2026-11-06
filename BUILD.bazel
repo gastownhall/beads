@@ -68,9 +68,27 @@ exports_files(
     ],
 )
 
+# //scripts:android_release_docs_test: the docs describing the android/arm64
+# cgo release build.
+exports_files(
+    [
+        "CHANGELOG.md",
+        "RELEASING.md",
+        "docs/getting-started/installation.md",
+    ],
+    visibility = ["//scripts:__pkg__"],
+)
+
 # //scripts:shell_scripts_test: scripts/test.sh's skip list.
 exports_files(
     [".test-skip"],
+    visibility = ["//scripts:__pkg__"],
+)
+
+# //scripts:shell_scripts_test: Oracle A's runner, whose EXIT-trap removal of
+# its reference worktree oracle_a_script_test.go checks in a fixture repository.
+exports_files(
+    ["tests/oracle-a/run-oracle-a.sh"],
     visibility = ["//scripts:__pkg__"],
 )
 
@@ -231,6 +249,7 @@ go_test(
         "//internal/storage/embeddeddolt",
         "//internal/telemetry",
         "//internal/testutil",
+        "//internal/testutil/legacyworkspace",
         "//internal/types",
         "//internal/workspacegate",
         "//issueops",
@@ -245,6 +264,20 @@ exports_files(
     ["engdocs/design/http-divergence-ledger.md"],
     visibility = ["//internal/httpclient/encode:__pkg__"],
 )
+
+# --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["bazel-*/**"],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+# --- end go_srcs ---
 
 # --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
 
@@ -321,6 +354,7 @@ filegroup(
         "//internal/doltremote:repo_doc_files",
         "//internal/doltserver:repo_doc_files",
         "//internal/doltversion:repo_doc_files",
+        "//internal/endpointtrust:repo_doc_files",
         "//internal/eventsjournal:repo_doc_files",
         "//internal/execenv:repo_doc_files",
         "//internal/fdhygiene:repo_doc_files",
@@ -344,6 +378,7 @@ filegroup(
         "//internal/httpclient/encode:repo_doc_files",
         "//internal/httpclient/wire:repo_doc_files",
         "//internal/idgen:repo_doc_files",
+        "//internal/initprocs:repo_doc_files",
         "//internal/jira:repo_doc_files",
         "//internal/linear:repo_doc_files",
         "//internal/lockfile:repo_doc_files",
@@ -356,6 +391,7 @@ filegroup(
         "//internal/procid:repo_doc_files",
         "//internal/query:repo_doc_files",
         "//internal/recipes:repo_doc_files",
+        "//internal/remedy:repo_doc_files",
         "//internal/remotecache:repo_doc_files",
         "//internal/routing:repo_doc_files",
         "//internal/storage:repo_doc_files",
@@ -383,6 +419,7 @@ filegroup(
         "//internal/storage/externaldeps:repo_doc_files",
         "//internal/storage/fs:repo_doc_files",
         "//internal/storage/git:repo_doc_files",
+        "//internal/storage/historyoffequiv:repo_doc_files",
         "//internal/storage/issueops:repo_doc_files",
         "//internal/storage/journalscan:repo_doc_files",
         "//internal/storage/kvkeys:repo_doc_files",
@@ -404,6 +441,7 @@ filegroup(
         "//internal/testutil/credentialcmd:repo_doc_files",
         "//internal/testutil/fixtures:repo_doc_files",
         "//internal/testutil/integration:repo_doc_files",
+        "//internal/testutil/legacyworkspace:repo_doc_files",
         "//internal/timeparsing:repo_doc_files",
         "//internal/tracker:repo_doc_files",
         "//internal/tracker/conformance:repo_doc_files",
@@ -413,6 +451,7 @@ filegroup(
         "//internal/utils:repo_doc_files",
         "//internal/validation:repo_doc_files",
         "//internal/versioncheck:repo_doc_files",
+        "//internal/versionedhistory:repo_doc_files",
         "//internal/workapi:repo_doc_files",
         "//internal/workapi/storecounter:repo_doc_files",
         "//internal/workapi/storequerier:repo_doc_files",
@@ -555,6 +594,7 @@ filegroup(
         "//internal/doltremote:repo_go_srcs",
         "//internal/doltserver:repo_go_srcs",
         "//internal/doltversion:repo_go_srcs",
+        "//internal/endpointtrust:repo_go_srcs",
         "//internal/eventsjournal:repo_go_srcs",
         "//internal/execenv:repo_go_srcs",
         "//internal/fdhygiene:repo_go_srcs",
@@ -578,6 +618,7 @@ filegroup(
         "//internal/httpclient/encode:repo_go_srcs",
         "//internal/httpclient/wire:repo_go_srcs",
         "//internal/idgen:repo_go_srcs",
+        "//internal/initprocs:repo_go_srcs",
         "//internal/jira:repo_go_srcs",
         "//internal/linear:repo_go_srcs",
         "//internal/lockfile:repo_go_srcs",
@@ -590,6 +631,7 @@ filegroup(
         "//internal/procid:repo_go_srcs",
         "//internal/query:repo_go_srcs",
         "//internal/recipes:repo_go_srcs",
+        "//internal/remedy:repo_go_srcs",
         "//internal/remotecache:repo_go_srcs",
         "//internal/routing:repo_go_srcs",
         "//internal/storage:repo_go_srcs",
@@ -617,6 +659,7 @@ filegroup(
         "//internal/storage/externaldeps:repo_go_srcs",
         "//internal/storage/fs:repo_go_srcs",
         "//internal/storage/git:repo_go_srcs",
+        "//internal/storage/historyoffequiv:repo_go_srcs",
         "//internal/storage/issueops:repo_go_srcs",
         "//internal/storage/journalscan:repo_go_srcs",
         "//internal/storage/kvkeys:repo_go_srcs",
@@ -638,6 +681,7 @@ filegroup(
         "//internal/testutil/credentialcmd:repo_go_srcs",
         "//internal/testutil/fixtures:repo_go_srcs",
         "//internal/testutil/integration:repo_go_srcs",
+        "//internal/testutil/legacyworkspace:repo_go_srcs",
         "//internal/timeparsing:repo_go_srcs",
         "//internal/tracker:repo_go_srcs",
         "//internal/tracker/conformance:repo_go_srcs",
@@ -647,6 +691,7 @@ filegroup(
         "//internal/utils:repo_go_srcs",
         "//internal/validation:repo_go_srcs",
         "//internal/versioncheck:repo_go_srcs",
+        "//internal/versionedhistory:repo_go_srcs",
         "//internal/workapi:repo_go_srcs",
         "//internal/workapi/storecounter:repo_go_srcs",
         "//internal/workapi/storequerier:repo_go_srcs",
@@ -774,6 +819,7 @@ filegroup(
         "//internal/doltremote:repo_go_test_srcs",
         "//internal/doltserver:repo_go_test_srcs",
         "//internal/doltversion:repo_go_test_srcs",
+        "//internal/endpointtrust:repo_go_test_srcs",
         "//internal/eventsjournal:repo_go_test_srcs",
         "//internal/execenv:repo_go_test_srcs",
         "//internal/fdhygiene:repo_go_test_srcs",
@@ -797,6 +843,7 @@ filegroup(
         "//internal/httpclient/encode:repo_go_test_srcs",
         "//internal/httpclient/wire:repo_go_test_srcs",
         "//internal/idgen:repo_go_test_srcs",
+        "//internal/initprocs:repo_go_test_srcs",
         "//internal/jira:repo_go_test_srcs",
         "//internal/linear:repo_go_test_srcs",
         "//internal/lockfile:repo_go_test_srcs",
@@ -809,6 +856,7 @@ filegroup(
         "//internal/procid:repo_go_test_srcs",
         "//internal/query:repo_go_test_srcs",
         "//internal/recipes:repo_go_test_srcs",
+        "//internal/remedy:repo_go_test_srcs",
         "//internal/remotecache:repo_go_test_srcs",
         "//internal/routing:repo_go_test_srcs",
         "//internal/storage:repo_go_test_srcs",
@@ -836,6 +884,7 @@ filegroup(
         "//internal/storage/externaldeps:repo_go_test_srcs",
         "//internal/storage/fs:repo_go_test_srcs",
         "//internal/storage/git:repo_go_test_srcs",
+        "//internal/storage/historyoffequiv:repo_go_test_srcs",
         "//internal/storage/issueops:repo_go_test_srcs",
         "//internal/storage/journalscan:repo_go_test_srcs",
         "//internal/storage/kvkeys:repo_go_test_srcs",
@@ -857,6 +906,7 @@ filegroup(
         "//internal/testutil/credentialcmd:repo_go_test_srcs",
         "//internal/testutil/fixtures:repo_go_test_srcs",
         "//internal/testutil/integration:repo_go_test_srcs",
+        "//internal/testutil/legacyworkspace:repo_go_test_srcs",
         "//internal/timeparsing:repo_go_test_srcs",
         "//internal/tracker:repo_go_test_srcs",
         "//internal/tracker/conformance:repo_go_test_srcs",
@@ -866,6 +916,7 @@ filegroup(
         "//internal/utils:repo_go_test_srcs",
         "//internal/validation:repo_go_test_srcs",
         "//internal/versioncheck:repo_go_test_srcs",
+        "//internal/versionedhistory:repo_go_test_srcs",
         "//internal/workapi:repo_go_test_srcs",
         "//internal/workapi/storecounter:repo_go_test_srcs",
         "//internal/workapi/storequerier:repo_go_test_srcs",
@@ -1002,6 +1053,7 @@ filegroup(
         "//internal/doltremote:repo_other_files",
         "//internal/doltserver:repo_other_files",
         "//internal/doltversion:repo_other_files",
+        "//internal/endpointtrust:repo_other_files",
         "//internal/eventsjournal:repo_other_files",
         "//internal/execenv:repo_other_files",
         "//internal/fdhygiene:repo_other_files",
@@ -1025,6 +1077,7 @@ filegroup(
         "//internal/httpclient/encode:repo_other_files",
         "//internal/httpclient/wire:repo_other_files",
         "//internal/idgen:repo_other_files",
+        "//internal/initprocs:repo_other_files",
         "//internal/jira:repo_other_files",
         "//internal/linear:repo_other_files",
         "//internal/lockfile:repo_other_files",
@@ -1037,6 +1090,7 @@ filegroup(
         "//internal/procid:repo_other_files",
         "//internal/query:repo_other_files",
         "//internal/recipes:repo_other_files",
+        "//internal/remedy:repo_other_files",
         "//internal/remotecache:repo_other_files",
         "//internal/routing:repo_other_files",
         "//internal/storage:repo_other_files",
@@ -1064,6 +1118,7 @@ filegroup(
         "//internal/storage/externaldeps:repo_other_files",
         "//internal/storage/fs:repo_other_files",
         "//internal/storage/git:repo_other_files",
+        "//internal/storage/historyoffequiv:repo_other_files",
         "//internal/storage/issueops:repo_other_files",
         "//internal/storage/journalscan:repo_other_files",
         "//internal/storage/kvkeys:repo_other_files",
@@ -1085,6 +1140,7 @@ filegroup(
         "//internal/testutil/credentialcmd:repo_other_files",
         "//internal/testutil/fixtures:repo_other_files",
         "//internal/testutil/integration:repo_other_files",
+        "//internal/testutil/legacyworkspace:repo_other_files",
         "//internal/timeparsing:repo_other_files",
         "//internal/tracker:repo_other_files",
         "//internal/tracker/conformance:repo_other_files",
@@ -1094,6 +1150,7 @@ filegroup(
         "//internal/utils:repo_other_files",
         "//internal/validation:repo_other_files",
         "//internal/versioncheck:repo_other_files",
+        "//internal/versionedhistory:repo_other_files",
         "//internal/workapi:repo_other_files",
         "//internal/workapi/storecounter:repo_other_files",
         "//internal/workapi/storequerier:repo_other_files",

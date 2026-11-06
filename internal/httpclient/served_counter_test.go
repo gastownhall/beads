@@ -37,15 +37,14 @@ func servedCounterFixture(t *testing.T, e *servedEnv, prefix string) conformance
 		CountHistory:  e.countHistory,
 		AddDependency: e.addDependency,
 		// List is deliberately left nil (unlike the dolt leg's wiring in
-		// internal/storage/dolt/counter_contract_test.go). This client's OWN
-		// ListRequest encoder table (encode/table.go's listTable) has
-		// pre-existing, permanent refusals for NoParent and ExcludeTypes
-		// (E-ListRequest.NoParent, E-ListRequest.ExcludeTypes) — a divergence
-		// on the LISTING operation unrelated to S8 — so wiring List here would
-		// make RunCounterNoParentMatchesListCardinality and
-		// RunCounterExcludeTypesMatchesListCardinality FAIL rather than the
-		// requireCounterList skip this fixture's own documented design
-		// intends for a leg that cannot express the comparison.
+		// internal/storage/dolt/counter_contract_test.go). NoParent and
+		// ExcludeTypes now ride the listing behind issues.list.filters, but the
+		// cardinality cases list with IncludeAllTypes, which this client's
+		// ListRequest encoder still refuses (E-ListRequest.IncludeAllTypes), so
+		// wiring List here would make RunCounter*MatchesListCardinality FAIL
+		// rather than take the requireCounterList skip this fixture's own
+		// documented design intends for a leg that cannot express the
+		// comparison.
 	}
 }
 

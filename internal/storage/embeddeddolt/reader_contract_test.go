@@ -247,6 +247,18 @@ func TestEmbeddedReaderListWispTypeNarrowsTheAdmittedPlaneRatherThanAdmittingIt(
 	conformance.RunReaderListWispTypeNarrowsTheAdmittedPlaneRatherThanAdmittingIt(t, ctx, newEmbeddedReaderFixture(t, "rdr"))
 }
 
+func TestEmbeddedReaderListTimeBoundsAreStrictAndWholeSecond(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	conformance.RunReaderListTimeBoundsAreStrictAndWholeSecond(t, ctx, newEmbeddedReaderFixture(t, "rdr"))
+}
+
+func TestEmbeddedReaderListFilterFamiliesNarrowToTheirRows(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	conformance.RunReaderListFilterFamiliesNarrowToTheirRows(t, ctx, newEmbeddedReaderFixture(t, "rdr"))
+}
+
 func TestEmbeddedReaderListBriefDropsTheFreeFormTextAndNothingElse(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
 	ctx := t.Context()

@@ -4,12 +4,16 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
+	storageissueops "github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
@@ -179,6 +183,9 @@ This is useful for agents executing molecules to see which steps can run next.`,
 			return nil
 		}
 
+		if jsonOutput && readyJSONPrintsNoTotal(activeStore) {
+			return runReadyJSONWithoutTotal(ctx, activeStore, filter)
+		}
 		if jsonOutput {
 			// The page and the size of the whole ready set come back from ONE
 			// read transaction: the total rides the page's own ID query, so a
@@ -244,16 +251,7 @@ This is useful for agents executing molecules to see which steps can run next.`,
 		maybeShowUpgradeNotification()
 
 		if len(issues) == 0 {
-			hasOpenIssues := false
-			if stats, statsErr := activeStore.GetStatistics(ctx); statsErr == nil {
-				hasOpenIssues = stats.OpenIssues > 0 || stats.InProgressIssues > 0
-			}
-			if hasOpenIssues {
-				fmt.Printf("\n%s No ready work found (all issues have blocking dependencies)\n\n",
-					ui.RenderWarn("✨"))
-			} else {
-				fmt.Printf("\n%s No open issues\n\n", ui.RenderPass("✨"))
-			}
+			printReadyEmptyState(ctx, in, activeStore)
 			maybeShowTip(store)
 			return nil
 		}
@@ -332,29 +330,44 @@ func rejectReadyMaxRowsUnderProxiedServer(cmd *cobra.Command) error {
 	return rejectMaxRowsUnderProxiedServer(cmd)
 }
 
-// blockedFilterFromFlags builds the blocked-issue filter from blockedCmd's
-// flags. Both the direct and the proxied-server path call it, so the two
-// cannot drift as filtering flags are added.
-func blockedFilterFromFlags(cmd *cobra.Command) types.WorkFilter {
-	var filter types.WorkFilter
-	if parentID, _ := cmd.Flags().GetString("parent"); parentID != "" {
-		filter.ParentID = &parentID
-	}
-	// Normalize as every other label filter does (list_input.go:293-295,
-	// search.go:106, orphans.go:56, workapi/ready.go:56-58). These clauses
-	// match a label EXACTLY, so an untrimmed value silently under-reports:
-	// pflag's CSV split leaves the leading space in the everyday
-	// `--label 'a, b'` form, and `--label 'a,,b'` would AND in a `label = ''`
-	// clause that matches nothing at all. Without this, `--label` would not
-	// mean the same thing here as on the commands next to it -- which is the
-	// promise LabelSetClauses is documented to keep.
+// blockedRequestFromFlags builds the blocked listing's request from
+// blockedCmd's flags. Every route calls it, so the routes cannot drift as
+// filtering flags are added.
+//
+// The labels go to the role as written: the role normalizes them, as every
+// other label filter is normalized (list_input.go, search.go, orphans.go,
+// workapi/ready.go). These clauses match a label EXACTLY, so an untrimmed
+// value would silently under-report: pflag's CSV split leaves the leading
+// space in the everyday `--label 'a, b'` form, and `--label 'a,,b'` would AND
+// in an empty-label clause that matches nothing at all. Normalizing in the
+// role rather than here is what makes a served listing normalize the same way
+// for every client.
+func blockedRequestFromFlags(cmd *cobra.Command) issueops.BlockedRequest {
+	parentID, _ := cmd.Flags().GetString("parent")
 	labels, _ := cmd.Flags().GetStringSlice("label")
 	labelsAny, _ := cmd.Flags().GetStringSlice("label-any")
 	excludeLabels, _ := cmd.Flags().GetStringSlice("exclude-label")
-	filter.Labels = utils.NormalizeLabels(labels)
-	filter.LabelsAny = utils.NormalizeLabels(labelsAny)
-	filter.ExcludeLabels = utils.NormalizeLabels(excludeLabels)
-	return filter
+	return issueops.BlockedRequest{
+		ParentID:      parentID,
+		Labels:        labels,
+		LabelsAny:     labelsAny,
+		ExcludeLabels: excludeLabels,
+	}
+}
+
+// blockedLister is the blocked-listing role for the route this invocation
+// runs: the store's own BlockedLister accessor on the direct routes (dolt,
+// embedded dolt, and a registered HTTP backend, where it dials blocked.list
+// and an older server is refused before the dial naming the token), and the
+// proxied-server provider's on the proxied one.
+func blockedLister() (issueops.BlockedLister, error) {
+	if usesProxiedServer() {
+		return proxiedBlockedLister()
+	}
+	if store == nil {
+		return nil, fmt.Errorf("no storage available")
+	}
+	return store.BlockedLister()
 }
 
 var blockedCmd = &cobra.Command{
@@ -370,17 +383,24 @@ var blockedCmd = &cobra.Command{
 			}
 		}()
 
-		if usesProxiedServer() {
-			return runBlockedProxiedServer(cmd, rootCtx)
-		}
-		// Use global jsonOutput set by PersistentPreRun (respects config.yaml + env vars)
-		// Use factory to respect backend configuration (bd-m2jr: SQLite fallback fix)
+		// One role on every route (blockedLister). Use global jsonOutput set
+		// by PersistentPreRun (respects config.yaml + env vars).
 		ctx := rootCtx
-		blockedFilter := blockedFilterFromFlags(cmd)
-		blocked, err := store.GetBlockedIssues(ctx, blockedFilter)
+		if flagsMode, _ := cmd.Flags().GetBool("flags"); flagsMode {
+			return runBlockedFlags(cmd, ctx, cmd.InOrStdin())
+		}
+		if cmd.Flags().Changed("raw") {
+			return HandleErrorRespectJSON("--raw qualifies --flags (the stored blocked column per id); it has no meaning for the listing")
+		}
+		lister, err := blockedLister()
 		if err != nil {
 			return HandleErrorRespectJSON("%v", err)
 		}
+		result, err := lister.ListBlocked(ctx, blockedRequestFromFlags(cmd))
+		if err != nil {
+			return HandleErrorRespectJSON("%v", err)
+		}
+		blocked := result.Items
 		if jsonOutput {
 			if blocked == nil {
 				blocked = []*types.BlockedIssue{}
@@ -406,6 +426,65 @@ var blockedCmd = &cobra.Command{
 		}
 		return nil
 	},
+}
+
+// readyJSONPrintsNoTotal reports whether `bd ready --json` should skip sizing
+// the whole ready set. Without BD_JSON_ENVELOPE the total only decorates the
+// stderr hint. A local store takes it in the page's own transaction, so the
+// hint keeps it there; a remote backend pays a second request
+// (countReadyWork) for it, so the hint goes without.
+func readyJSONPrintsNoTotal(activeStore storage.DoltStorage) bool {
+	return !jsonEnvelopeEnabled() && storeIsRemoteBackend(activeStore)
+}
+
+// runReadyJSONWithoutTotal lists one row past the limit, which says whether
+// the limit hid anything: all the hint needs. A cap at or below the limit
+// would count that extra row against it, so such a listing keeps the counted
+// path and its refusal exactly as before.
+func runReadyJSONWithoutTotal(ctx context.Context, activeStore storage.DoltStorage, filter types.WorkFilter) error {
+	limit := filter.Limit
+	var results []*types.IssueWithCounts
+	var total int
+	var err error
+	if limit > 0 && filter.MaxRows > 0 && filter.MaxRows <= limit {
+		results, total, err = activeStore.GetReadyWorkWithCountsAndTotal(ctx, filter)
+	} else {
+		if limit > 0 {
+			filter.Limit = limit + 1
+		}
+		results, err = activeStore.GetReadyWorkWithCounts(ctx, filter)
+		total = len(results)
+	}
+	if err != nil {
+		if capErr := handleMaxRowsError(err); capErr != nil {
+			return capErr
+		}
+		return HandleErrorRespectJSON("%v", err)
+	}
+	truncated := limit > 0 && len(results) >= limit && total > limit
+	if len(results) > limit && limit > 0 {
+		results = results[:limit]
+	}
+	if results == nil {
+		results = []*types.IssueWithCounts{}
+	}
+	if err := outputJSON(results); err != nil {
+		return err
+	}
+	if truncated {
+		fmt.Fprintf(os.Stderr, "%s Use --limit 0 for all, or --limit N to raise the cap.\n", readyHiddenHint(len(results)))
+	}
+	return nil
+}
+
+// readyHiddenHint is the truncation hint for a page whose total is unknown:
+// how many rows are shown, and that the limit hid more.
+func readyHiddenHint(shown int) string {
+	noun := "issues"
+	if shown == 1 {
+		noun = "issue"
+	}
+	return fmt.Sprintf("Showing %d ready %s; more matched but were hidden by --limit.", shown, noun)
 }
 
 // readyTotal sizes the whole ready set for the request `bd ready` just listed
@@ -799,6 +878,8 @@ func init() {
 	blockedCmd.Flags().StringSliceP("label", "l", []string{}, "Filter by labels (AND: must have ALL). Can combine with --label-any")
 	blockedCmd.Flags().StringSlice("label-any", []string{}, "Filter by labels (OR: must have AT LEAST ONE). Can combine with --label")
 	blockedCmd.Flags().StringSlice("exclude-label", []string{}, "Exclude issues that have ANY of these labels")
+	blockedCmd.Flags().Bool("raw", false, "With --flags: the stored blocked column itself, without the external-dependency policy (an unsatisfied external: blocker does not set it)")
+	blockedCmd.Flags().Bool("flags", false, "Print the blocked flag for each id read from stdin (one per line) instead of the listing; with --json, [{\"id\",\"is_blocked\"}]")
 	rootCmd.AddCommand(blockedCmd)
 }
 
@@ -845,4 +926,168 @@ func printReadyItemDependencies(item types.ReadyItem) {
 	if len(item.OpenDependencies) > 0 {
 		fmt.Printf("    Open dependencies (not blocking): %s\n", strings.Join(item.OpenDependencies, ", "))
 	}
+}
+
+// readyEmptyStateReads are the two reads plain `bd ready`'s empty state makes,
+// from the route's own store: the direct route's storage.DoltStorage and the
+// proxied route's issue use case both provide them.
+type readyEmptyStateReads interface {
+	GetStatistics(ctx context.Context) (*types.Statistics, error)
+	GetBlockedIssues(ctx context.Context, filter types.WorkFilter) ([]*types.BlockedIssue, error)
+}
+
+// printReadyEmptyState prints plain `bd ready`'s empty state for both
+// renderers, so the two texts cannot drift. It claims blocking dependencies
+// only when bd blocked lists an issue this listing would show but for its
+// blockers (readyEmptyStateVerdict): open issues are also missing from ready
+// when they are in progress, deferred or filtered out, or when a stale
+// is_blocked flag hides them (GH#3268). It says nothing is blocked only when
+// that listing proves it, and a read that fails proves nothing either way.
+//
+// A page that --offset starts past the last ready issue (the proxied route;
+// the direct one refuses --offset) is empty whatever the ready set holds: the
+// issues before the offset may be ready work, so it says only that and reads
+// nothing.
+func printReadyEmptyState(ctx context.Context, in readyInput, reads readyEmptyStateReads) {
+	if in.filter.Offset > 0 {
+		fmt.Printf("\n%s No ready work at offset %d\n\n", ui.RenderWarn("✨"), in.filter.Offset)
+		fmt.Println("  The offset is past the last ready issue. Run 'bd ready' without --offset")
+		fmt.Println("  to list from the start.")
+		fmt.Println()
+		return
+	}
+	if stats, err := reads.GetStatistics(ctx); err == nil && stats.OpenIssues == 0 && stats.InProgressIssues == 0 {
+		fmt.Printf("\n%s No open issues\n\n", ui.RenderPass("✨"))
+		return
+	}
+	verdict := readyEmptyUnknown
+	if blocked, err := reads.GetBlockedIssues(ctx, storageissueops.BlockedFilter(readyBlockedRequest(in))); err == nil {
+		verdict = readyEmptyStateVerdict(in.filter, blocked, time.Now())
+	}
+	switch verdict {
+	case readyEmptyBlocked:
+		fmt.Printf("\n%s No ready work found (all issues have blocking dependencies)\n\n",
+			ui.RenderWarn("✨"))
+		return
+	case readyEmptyNoneBlocked:
+		fmt.Printf("\n%s No ready work found\n\n", ui.RenderWarn("✨"))
+		fmt.Println("  Nothing bd ready would list is blocked by an open dependency. Check")
+		fmt.Println("  'bd list' for in-progress, deferred or filtered-out issues, and 'bd doctor'")
+		fmt.Println("  for a stale blocked flag (repair: 'bd recompute-blocked').")
+	default:
+		fmt.Printf("\n%s No ready work found\n\n", ui.RenderWarn("✨"))
+		fmt.Println("  Check 'bd blocked' for blocked issues, 'bd list' for in-progress, deferred")
+		fmt.Println("  or filtered-out issues, and 'bd doctor' for a stale blocked flag (repair:")
+		fmt.Println("  'bd recompute-blocked').")
+	}
+	fmt.Println()
+}
+
+// readyBlockedRequest is bd blocked's request for the plain listing's scope:
+// the parent and the label sets, which are all bd blocked takes, read off the
+// request the way ReadyClaimer and ReadyCounter get them (readyRoleRequest).
+// Like every blocked request it carries no page, which matters here: a page
+// or a row cap could cut the one blocked issue the listing would show.
+func readyBlockedRequest(in readyInput) issueops.BlockedRequest {
+	req := readyRoleRequest(in)
+	return issueops.BlockedRequest{
+		ParentID:      req.ParentID,
+		Labels:        req.Labels,
+		LabelsAny:     req.LabelsAny,
+		ExcludeLabels: req.ExcludeLabels,
+	}
+}
+
+// readyEmptyVerdict is what an empty plain `bd ready` can truthfully say about
+// blocking dependencies.
+type readyEmptyVerdict int
+
+const (
+	// readyEmptyUnknown: nothing, either way.
+	readyEmptyUnknown readyEmptyVerdict = iota
+	// readyEmptyBlocked: bd blocked lists an issue the listing would show
+	// but for its blockers.
+	readyEmptyBlocked
+	// readyEmptyNoneBlocked: bd blocked lists nothing the listing could show.
+	readyEmptyNoneBlocked
+)
+
+// readyEmptyStateVerdict judges blocked, bd blocked's listing for the plain
+// listing's scope (readyBlockedRequest), against the listing's filter f. Only
+// an issue the listing would show but for its blockers counts: a blocked issue
+// that is in progress, deferred, ephemeral, of an excluded type or another
+// assignee's is no reason for this listing to be empty. bd blocked applies the
+// label sets exactly as the listing does, but its --parent is one hop plus the
+// dotted ids under the parent where ready's is transitive, so under --parent an
+// empty answer proves nothing. A blocked child of a future-deferred parent,
+// which the listing leaves out, still counts: the issue alone cannot tell.
+func readyEmptyStateVerdict(f types.WorkFilter, blocked []*types.BlockedIssue, now time.Time) readyEmptyVerdict {
+	verdict := readyEmptyNoneBlocked
+	if f.ParentID != nil {
+		verdict = readyEmptyUnknown
+	}
+	for _, b := range blocked {
+		switch {
+		case b == nil, readyListingDrops(f, &b.Issue, now):
+		case readyListingUndecided(f, &b.Issue):
+			verdict = readyEmptyUnknown
+		default:
+			return readyEmptyBlocked
+		}
+	}
+	return verdict
+}
+
+// readyListingDrops reports whether the plain listing whose filter is f leaves
+// issue out whatever its blockers, from the issue's own fields: the per-row
+// predicates sqlbuild.BuildReadyWorkWhere renders, less the blocked one. The
+// label sets and --parent are the blocked listing's own scope.
+func readyListingDrops(f types.WorkFilter, issue *types.Issue, now time.Time) bool {
+	return readyStatusDrops(f, issue.Status) || issue.Pinned ||
+		(!f.IncludeEphemeral && issue.Ephemeral) ||
+		(!f.IncludeDeferred && issue.DeferUntil != nil && issue.DeferUntil.After(now)) ||
+		readyTypeDrops(f, issue.IssueType) || readyAssigneeDrops(f, issue.Assignee) ||
+		(f.Priority != nil && issue.Priority != *f.Priority)
+}
+
+// readyStatusDrops is the listing's status predicate. The open pin also admits
+// custom statuses of the active category, which the issue does not carry, so
+// it never drops a custom status (readyListingUndecided).
+func readyStatusDrops(f types.WorkFilter, status types.Status) bool {
+	switch {
+	case f.Status == types.StatusOpen:
+		return status != types.StatusOpen && status.IsValid()
+	case f.Status != "":
+		return status != f.Status
+	case len(f.Statuses) > 0:
+		return !slices.Contains(f.Statuses, status)
+	default:
+		return status != types.StatusOpen && status != types.StatusInProgress
+	}
+}
+
+// readyTypeDrops is the listing's issue-type predicate.
+func readyTypeDrops(f types.WorkFilter, issueType types.IssueType) bool {
+	if f.Type != "" {
+		return string(issueType) != f.Type
+	}
+	return slices.Contains(sqlbuild.ReadyWorkExcludeTypes(f.ExcludeTypes), issueType)
+}
+
+// readyAssigneeDrops is the listing's assignee predicate.
+func readyAssigneeDrops(f types.WorkFilter, assignee string) bool {
+	if f.Unassigned {
+		return assignee != ""
+	}
+	return f.Assignee != nil && assignee != *f.Assignee
+}
+
+// readyListingUndecided reports whether the listing whose filter is f may leave
+// issue out for a reason its own fields do not carry: a label pattern or
+// regex, a metadata or molecule-type filter, or a custom status under the open
+// pin, whose category the issue does not carry.
+func readyListingUndecided(f types.WorkFilter, issue *types.Issue) bool {
+	return f.LabelPattern != "" || f.LabelRegex != "" || f.HasMetadataKey != "" ||
+		len(f.MetadataFields) > 0 || f.MolType != nil ||
+		(f.Status == types.StatusOpen && !issue.Status.IsValid())
 }

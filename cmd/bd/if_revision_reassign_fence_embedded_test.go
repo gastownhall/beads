@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-// TestIfRevisionOutranksReassignFenceCLI pins mc-zndi7.74 on the direct
+// TestEmbeddedIfRevisionOutranksReassignFenceCLI pins mc-zndi7.74 on the direct
 // (embedded) route: a stale --if-revision guard on an assignee edit must
 // report precondition_failed/ExitGuardMismatch, never fall through to the
 // bd-98s5c live-claim reassign fence's "already claimed" policy refusal --
@@ -22,7 +22,7 @@ import (
 // the now-live foreign claim and reports the plain policy refusal (exit 1)
 // before the guarded write underneath ever gets a chance to report the
 // correctly-ordered precondition failure (exit 13).
-func TestIfRevisionOutranksReassignFenceCLI(t *testing.T) {
+func TestEmbeddedIfRevisionOutranksReassignFenceCLI(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}

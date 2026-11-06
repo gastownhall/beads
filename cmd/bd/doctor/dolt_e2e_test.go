@@ -57,6 +57,14 @@ func TestMain(m *testing.M) {
 }
 
 func testMainInner(m *testing.M) int {
+	// A GIT_DIR/GIT_WORK_TREE leaked in from the invoking shell or a git hook
+	// would route the fixture `git init`/`git config` writes in this suite
+	// into that repository: the host checkout in the r880 clobber (wy-qlvlmf).
+	if err := testutil.UnsetGitRepoLocationEnv(); err != nil {
+		fmt.Fprintf(os.Stderr, "FATAL: %v\n", err)
+		return 1
+	}
+
 	os.Setenv("BEADS_TEST_MODE", "1")
 	// AD-01 (be-c5p): doctor e2e tests connect to a per-package test server.
 	// The dolt.New database-name firewall requires this opt-in to allow

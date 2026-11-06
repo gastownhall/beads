@@ -15,6 +15,7 @@ go_library(
     deps = [
         "//beadserrors",
         "//internal/debug",
+        "//internal/remedy",
         "//internal/types",
     ] + select({
         "@rules_go//go/platform:darwin": [

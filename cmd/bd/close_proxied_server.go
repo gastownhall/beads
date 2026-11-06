@@ -175,7 +175,7 @@ func runCloseProxiedServer(cmd *cobra.Command, ctx context.Context, args []strin
 			audit.LogFieldChange(o.id, "status", o.auditOld, "closed", currentActor(), o.auditReason)
 		}
 		if !in.jsonOut {
-			fmt.Printf("%s Closed %s: %s\n", ui.RenderPass("✓"), formatFeedbackID(o.after.ID, o.after.Title), closeReasons[i])
+			fmt.Printf("%s Closed %s: %s\n", ui.RenderPass("✓"), printedFeedbackID(o.after.ID, o.after.Title), closeReasons[i])
 		}
 	}
 
@@ -186,21 +186,18 @@ func runCloseProxiedServer(cmd *cobra.Command, ctx context.Context, args []strin
 
 	for _, o := range outcomes {
 		if o.autoCloseRefusal != "" {
-			fmt.Fprintf(os.Stderr, "Warning: could not auto-close completed molecule: %s\n", o.autoCloseRefusal)
+			warnMoleculeAutoCloseRefusal(o.autoCloseRefusal)
 		}
 	}
 
 	if !in.jsonOut {
 		for _, o := range outcomes {
 			if o.autoClosedMol != nil {
-				fmt.Printf("%s Auto-closed completed molecule %s\n", ui.RenderPass("✓"), formatFeedbackID(o.autoClosedMol.ID, o.autoClosedMol.Title))
+				fmt.Printf("%s Auto-closed completed molecule %s\n", ui.RenderPass("✓"), printedFeedbackID(o.autoClosedMol.ID, o.autoClosedMol.Title))
 			}
 		}
 		if len(post.unblocked) > 0 {
-			fmt.Printf("\nNewly unblocked:\n")
-			for _, issue := range post.unblocked {
-				fmt.Printf("  • %s (P%d)\n", formatFeedbackID(issue.ID, issue.Title), issue.Priority)
-			}
+			printNewlyUnblocked(post.unblocked)
 		}
 		if post.continueResult != nil {
 			PrintContinueResult(post.continueResult)

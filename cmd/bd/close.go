@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -218,8 +220,10 @@ in the molecule for you; add --no-auto to only show it.`,
 
 			// Open children only survive to here when --force waived the
 			// engine's refusal. Say so, so orphaned children are never silent.
+			// The ID is the store's, printed ahead of --continue's hint, so it
+			// is named as the lines around that hint name it.
 			if res.OpenChildren > 0 {
-				fmt.Fprintf(os.Stderr, "warning: closing %s with %d open child issue(s) still active\n", id, res.OpenChildren)
+				fmt.Fprintf(os.Stderr, "warning: closing %s with %d open child issue(s) still active\n", printedIssueID(id), res.OpenChildren)
 			}
 
 			activeStore := results[i].Store
@@ -289,7 +293,7 @@ in the molecule for you; add --no-auto to only show it.`,
 					closedIssues = append(closedIssues, newClosedIssueJSON(closedIssue, res.AutoClosedMolecule, res.MoleculeAutoCloseRefusal))
 				}
 			} else {
-				debug.PrintNormal("%s Closed %s: %s\n", ui.RenderPass("✓"), formatFeedbackID(id, issueTitleOrEmpty(issue)), reason)
+				debug.PrintNormal("%s Closed %s: %s\n", ui.RenderPass("✓"), printedFeedbackID(id, issueTitleOrEmpty(issue)), reason)
 			}
 		}
 
@@ -324,10 +328,7 @@ in the molecule for you; add --no-auto to only show it.`,
 						"unblocked": unblocked,
 					})
 				}
-				fmt.Printf("\nNewly unblocked:\n")
-				for _, issue := range unblocked {
-					fmt.Printf("  • %s (P%d)\n", formatFeedbackID(issue.ID, issue.Title), issue.Priority)
-				}
+				printNewlyUnblocked(unblocked)
 			}
 		}
 
@@ -468,25 +469,28 @@ func closeClaimedID(claimed *types.Issue) string {
 // denominator, because only it knows what it attempted — the direct route
 // counts resolved ids, the proxied one counts arguments.
 //
-// The summary is suppressed for a single-id batch deliberately: one inline
-// refusal is already unambiguous about which id failed, and suppressing it
-// keeps single-id stderr byte-identical to what it was before close learned to
-// fail a partial batch.
+// The text summary is suppressed for a single-id batch deliberately: one
+// inline refusal is already unambiguous about which id failed, and suppressing
+// it keeps single-id stderr byte-identical to what it was before close learned
+// to fail a partial batch.
 //
 // In --json mode the summary is one compact JSON line on stderr — the shape
 // reportUpdateFailures established — so a consumer that sees exit 1 can read
 // WHICH ids failed instead of scraping English prose, while stdout keeps the
-// plain closed-issues array a successful close emits. claimedNextID names the
-// issue --claim-next claimed on this run, if any: that claim is committed
-// inside the batch's own transaction and a sibling's refusal does not roll it
-// back, so the report names it rather than pretending it did not happen.
+// plain closed-issues array a successful close emits. It is emitted for a
+// single id too, as reportUpdateFailures' is: a consumer closing one id at a
+// time needs a parseable reason as much as one closing a batch. claimedNextID
+// names the issue --claim-next claimed on this run, if any: that claim is
+// committed inside the batch's own transaction and a sibling's refusal does
+// not roll it back, so the report names it rather than pretending it did not
+// happen.
 func reportCloseFailures(failures []closeIDFailure, total int, claimedNextID string, jsonOut bool) error {
-	if total <= 1 {
-		return SilentExit()
-	}
 	msg := fmt.Sprintf("%d of %d issues failed to close", len(failures), total)
 
 	if !jsonOut {
+		if total <= 1 {
+			return SilentExit()
+		}
 		fmt.Fprintf(os.Stderr, "Error: %s\n", msg)
 		if claimedNextID != "" {
 			fmt.Fprintf(os.Stderr, "Note: --claim-next already claimed %s; it stays assigned to you.\n", claimedNextID)
@@ -729,12 +733,12 @@ func checkGateSatisfaction(issue *types.Issue, gateStore storage.DoltStorage) er
 		if resolved {
 			return nil
 		}
-		return fmt.Errorf("gate condition not satisfied: %s (use --force to override)", reason)
+		return fmt.Errorf("gate condition not satisfied: %s (use --force to override)", remedy.PrintedText(reason))
 	}
 
 	if err != nil {
 		// If we can't check the condition, allow close with a warning
-		fmt.Fprintf(os.Stderr, "Warning: could not evaluate gate condition: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Warning: could not evaluate gate condition: %s\n", remedy.PrintedMessage(err))
 		return nil
 	}
 
@@ -743,10 +747,10 @@ func checkGateSatisfaction(issue *types.Issue, gateStore storage.DoltStorage) er
 	}
 
 	if escalated {
-		return fmt.Errorf("gate condition not satisfied: %s (use --force to override)", reason)
+		return fmt.Errorf("gate condition not satisfied: %s (use --force to override)", remedy.PrintedText(reason))
 	}
 
-	return fmt.Errorf("gate condition not satisfied: %s (use --force to override)", reason)
+	return fmt.Errorf("gate condition not satisfied: %s (use --force to override)", remedy.PrintedText(reason))
 }
 
 // closeBeadGateGetter picks the bead-gate lookup the current route can serve.
@@ -767,15 +771,39 @@ func closeBeadGateGetter(gateStore storage.DoltStorage) issueGetter {
 // or why a completed root stayed open. It returns the closed root's id, or "".
 func reportMoleculeAutoClose(root *types.Issue, refusal string) string {
 	if refusal != "" {
-		fmt.Fprintf(os.Stderr, "Warning: could not auto-close completed molecule: %s\n", refusal)
+		warnMoleculeAutoCloseRefusal(refusal)
 	}
 	if root == nil {
 		return ""
 	}
 	if !jsonOutput {
-		debug.PrintNormal("%s Auto-closed completed molecule %s\n", ui.RenderPass("✓"), formatFeedbackID(root.ID, root.Title))
+		debug.PrintNormal("%s Auto-closed completed molecule %s\n", ui.RenderPass("✓"), printedFeedbackID(root.ID, root.Title))
 	}
 	return root.ID
+}
+
+// warnMoleculeAutoCloseRefusal warns, on both routes, that a completed
+// molecule's root refused its auto-close. The refusal is the sentence the
+// refusing guard wrote (issueops.RefusedMoleculeAutoClose). It names the
+// root, and for a blocked root its blockers, as the store holds them, and
+// bd close --continue prints its hint after it. So the sentence is spelled
+// by remedy.PrintedValue: a carriage return, terminal escape or line feed in
+// an ID cannot redraw or split the hint, and an ordinary refusal prints as
+// before. A $(...) in an ID is still printed as it is, because the close
+// result carries only the sentence, not the IDs it names, so they cannot be
+// spelled one by one as printedIssueID spells an ID.
+func warnMoleculeAutoCloseRefusal(refusal string) {
+	fmt.Fprintf(os.Stderr, "Warning: could not auto-close completed molecule: %s\n", remedy.PrintedValue(refusal)) //nolint:gosec // G705: stderr, not a browser context
+}
+
+// printNewlyUnblocked prints bd close --suggest-next's list of the issues the
+// close unblocked, on both routes. The --continue hint follows it, so each
+// issue is named by printedFeedbackID.
+func printNewlyUnblocked(unblocked []*types.Issue) {
+	fmt.Printf("\nNewly unblocked:\n")
+	for _, issue := range unblocked {
+		fmt.Printf("  • %s (P%d)\n", printedFeedbackID(issue.ID, issue.Title), issue.Priority)
+	}
 }
 
 // closedIssueJSON is one entry of `bd close --json`'s list of closed issues:
@@ -824,7 +852,10 @@ func noticeUnservedMoleculeAutoClose(ctx context.Context, s storage.DoltStorage,
 		root, err = issueops.CompletedMolecule(ctx, reader, stepID)
 	}
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "note: %s was closed without its molecule auto-close (the server does not advertise %s), and its molecule could not be read: %v\n", stepID, token, err)
+		// The read error can name the store's root ID (issueops wraps it into
+		// "reading the steps of <root>"), so it is spelled by
+		// remedy.PrintedError like any error that repeats a value.
+		fmt.Fprintf(os.Stderr, "note: %s was closed without its molecule auto-close (the server does not advertise %s), and its molecule could not be read: %v\n", printedIssueID(stepID), token, remedy.PrintedError(err))
 		return
 	}
 	if root == nil || noted[root.ID] {
@@ -833,7 +864,11 @@ func noticeUnservedMoleculeAutoClose(ctx context.Context, s storage.DoltStorage,
 	if noted != nil {
 		noted[root.ID] = true
 	}
-	fmt.Fprintf(os.Stderr, "note: closing %s completed molecule %s, which this close did not auto-close: the server does not advertise %s, so the molecule's auto-close is the server's to run (bd close %s closes it)\n", stepID, root.ID, token, root.ID)
+	// The step and root IDs are the store's: the root goes into the bd close
+	// command as one shell word, or as a placeholder named escaped after it
+	// (remedy.CommandArg), and both are named as printedIssueID spells them.
+	rootArg, note := remedy.CommandArg(runtime.GOOS, root.ID, "<molecule-id>")
+	fmt.Fprintf(os.Stderr, "note: closing %s completed molecule %s, which this close did not auto-close: the server does not advertise %s, so the molecule's auto-close is the server's to run (bd close %s closes it)%s\n", printedIssueID(stepID), printedIssueID(root.ID), token, rootArg, note)
 }
 
 // advanceMoleculeDirect runs `bd close --continue` on the direct route through
@@ -915,18 +950,28 @@ func resolveCloseTarget(ctx context.Context, localStore storage.DoltStorage, sha
 	if !isNotFoundErr(err) {
 		return nil, fmt.Errorf("resolving ID %s: %w", id, err)
 	}
+	// The first routed tier that refuses the id answers instead of the
+	// not-found below (isRoutedResolutionRefusal). The refusal is checked
+	// before isRoutingFailure, which it would also satisfy, so the shared
+	// auto-routed store still gets its chance.
+	var refusal error
 	// Write-intent: a prefix-routed target opens writable so the close
 	// commits on the target head (#4141).
 	r, err = resolveViaPrefixRoutingWithAccess(ctx, id, true, false)
 	if err == nil {
 		return r, nil
 	}
-	if isRoutingFailure(err) {
+	if isRoutedResolutionRefusal(err) {
+		refusal = err
+	} else if isRoutingFailure(err) {
 		return nil, fmt.Errorf("resolving ID %s: %w", id, err)
 	}
 	r, err = shared.resolve(ctx, id)
 	if err == nil {
 		return r, nil
+	}
+	if refusal != nil {
+		return nil, fmt.Errorf("resolving ID %s: %w", id, refusal)
 	}
 	if isRoutingFailure(err) {
 		return nil, fmt.Errorf("resolving ID %s: %w", id, err)

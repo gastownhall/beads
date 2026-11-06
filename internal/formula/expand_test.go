@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -421,6 +422,30 @@ func TestUpdateDependenciesForExpansion(t *testing.T) {
 	}
 	if result[2].DependsOn[1] != "test" {
 		t.Errorf("deploy step DependsOn[1] = %q, want %q", result[2].DependsOn[1], "test")
+	}
+}
+
+// TestUpdateDependenciesForExpansionKeepsGeneratedNeedsGenerated: an edge a
+// transform added onto the expanded step is still a generated edge once it
+// names the expansion's last step, so FilterStepsByCondition routes it rather
+// than reporting it as a reference the formula wrote.
+func TestUpdateDependenciesForExpansionKeepsGeneratedNeedsGenerated(t *testing.T) {
+	join := &Step{ID: "deploy", Title: "Deploy", Needs: []string{"design"}}
+	addGeneratedNeed(join, "implement")
+
+	result := UpdateDependenciesForExpansion([]*Step{join}, "implement", "implement.refine")
+
+	if got, want := result[0].Needs, []string{"design", "implement.refine"}; !slices.Equal(got, want) {
+		t.Fatalf("deploy Needs = %v, want %v", got, want)
+	}
+	if !isGeneratedNeed(result[0], "implement.refine") {
+		t.Errorf("deploy's need on implement.refine is no longer generated")
+	}
+	if isGeneratedNeed(result[0], "design") {
+		t.Errorf("deploy's written need on design became generated")
+	}
+	if !isGeneratedNeed(join, "implement") {
+		t.Errorf("input step modified: its generated need on implement was renamed")
 	}
 }
 
@@ -957,6 +982,38 @@ func TestApplyInlineExpansionsCrossExpansionDeps(t *testing.T) {
 		workSecond := result[2]
 		if len(workSecond.Needs) != 1 || workSecond.Needs[0] != "work.first" {
 			t.Errorf("work.second.Needs = %v, want [work.first]", workSecond.Needs)
+		}
+	})
+
+	// compose.branch makes work need prepare. The inline expansion moves that
+	// need to work.first, where it is still compose.branch's edge and not the
+	// formula's: when prepare's condition drops it, work.first is routed to
+	// what prepare needed, and the pour does not fail.
+	t.Run("a generated need moves to the root steps as generated", func(t *testing.T) {
+		steps, err := ApplyControlFlow([]*Step{
+			{ID: "setup", Title: "Setup"},
+			{ID: "prepare", Title: "Prepare", Needs: []string{"setup"}, Condition: "{{on}}"},
+			{ID: "work", Title: "Work", Expand: "inline-exp"},
+			{ID: "deploy", Title: "Deploy"},
+		}, &ComposeRules{Branch: []*BranchRule{{From: "prepare", Steps: []string{"work"}, Join: "deploy"}}})
+		if err != nil {
+			t.Fatalf("ApplyControlFlow failed: %v", err)
+		}
+		steps, err = ApplyInlineExpansions(steps, parser)
+		if err != nil {
+			t.Fatalf("ApplyInlineExpansions failed: %v", err)
+		}
+
+		result, err := FilterStepsByCondition(steps, map[string]string{"on": "false"})
+		if err != nil {
+			t.Fatalf("FilterStepsByCondition failed: %v", err)
+		}
+		workFirst := buildStepMap(result)["work.first"]
+		if workFirst == nil {
+			t.Fatalf("work.first missing after the filter")
+		}
+		if got, want := workFirst.Needs, []string{"setup"}; !slices.Equal(got, want) {
+			t.Errorf("work.first.Needs = %v, want %v", got, want)
 		}
 	})
 }

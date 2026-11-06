@@ -111,9 +111,11 @@ func (c ExternalDoltConfig) TLSClientConfig() (*tls.Config, error) {
 	if c.TLSSkipVerify {
 		cfg.InsecureSkipVerify = true //nolint:gosec // G402: opt-in insecure transport via the TLSSkipVerify testing flag
 	} else {
+		// A host configured bracketed ("[2001:db8::1]") is named bare, the IP
+		// it is: the form every other consumer of the host takes.
 		name := c.TLSServerName
 		if name == "" {
-			name = c.Host
+			name = UnbracketHost(c.Host)
 		}
 		cfg.ServerName = name
 	}

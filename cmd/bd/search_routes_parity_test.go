@@ -97,7 +97,7 @@ var searchRouteQueries = []searchRouteQuery{
 	{"sort priority reverse", []string{"routed", "--sort", "priority", "--reverse"}, true, true, []string{srDone, srGamma, srBeta, srAlpha}},
 	{"query flag", []string{"--query", "gamma"}, false, true, []string{srGamma}},
 	{"no match", []string{"nothing-matches-this"}, false, true, nil},
-	{"priority-max", []string{"routed", "--priority-max", "1"}, false, false, []string{srAlpha, srBeta}},
+	{"priority-max", []string{"routed", "--priority-max", "1"}, false, true, []string{srAlpha, srBeta}},
 	// --type is expanded as `bd list` expands it before the Reader validates it.
 	{"type alias", []string{"routed", "--type", "feat"}, false, true, []string{srGamma}},
 	// Every kind of row comes back under no flag and under its own --type. An
@@ -193,8 +193,11 @@ func searchRouteComparable(rows []searchRouteRow, ordered bool) []string {
 // checkSearchRoute runs every query on one route and holds each answer to its
 // want. A query listIssues cannot carry (wireCan false) must refuse on a
 // remote route rather than answer without the flag, and every refusal must
-// refuse on every route. It returns the decoded answers by query name, for a
-// route that is compared row for row with another one over the same database.
+// refuse on every route. No query sets wireCan false today: issues.list.filters
+// put the last flag search had to refuse, --priority-max, on the wire. The
+// branch stays for the next flag listIssues cannot carry. It returns the
+// decoded answers by query name, for a route that is compared row for row with
+// another one over the same database.
 func checkSearchRoute(t *testing.T, route, bd, dir string, env []string, remote bool) map[string][]searchRouteRow {
 	t.Helper()
 	answers := map[string][]searchRouteRow{}

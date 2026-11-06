@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/utils"
 	"github.com/steveyegge/beads/issueops"
 )
 
@@ -168,6 +169,85 @@ func FilterSweepCandidates(issues []*types.Issue, pattern string, cutoff *time.T
 		}
 	}
 	return kept, skips
+}
+
+// RetainedTypesFromSetting parses the workspace's types.retained setting
+// (issueops.SettingKeyTypesRetained) into the set of issue types it protects,
+// through ParseTypeList — the parse types.custom takes. An unset value retains
+// nothing. It is THE ONE READ of the setting: every door that honors it
+// matches rows against this set, never against the stored spelling.
+//
+// THE READ CANONICALIZES, so a stored name protects the type its writer meant
+// whatever route wrote it (an older server, an older client, `bd sql`). For
+// each name the set holds the name itself (a custom type matches verbatim),
+// its canonical form under both alias tables (types.IssueType.Normalize, which
+// bd create applies, and utils.NormalizeIssueType, which bd update --type
+// applies), and its lower-case form when that is a built-in type. So `feat`
+// protects `feature`, `mol` protects `molecule` and `Chore` protects `chore`.
+// Matching can only over-protect, never protect nothing in silence.
+//
+// THE READ ALSO SPLITS A NAME THE WRITE CHECK WOULD REFUSE. A route that skips
+// ValidateRetainedTypesValue (an older bd, `bd sql`, a Dolt pull) can store
+// `[op]`, `"op"` or `op fact`, which ParseTypeList reads as names no row
+// carries. So each name also protects every fragment of it between the
+// characters no type name holds (typeNameForbiddenRunes), each read the same
+// way: such a value protects op, rather than nothing. A name the check accepts
+// has no such character, so the split adds nothing to it.
+//
+// Names are not checked against the registered types: an unknown name matches
+// no row, which is what lets an orchestrator name a type before it registers
+// it.
+func RetainedTypesFromSetting(value string) map[string]bool {
+	names := ParseTypeList(value)
+	if len(names) == 0 {
+		return nil
+	}
+	retained := make(map[string]bool, len(names))
+	for _, name := range names {
+		retainTypeName(retained, name)
+		for _, fragment := range strings.FieldsFunc(name, isTypeNameForbiddenRune) {
+			retainTypeName(retained, fragment)
+		}
+	}
+	return retained
+}
+
+// retainTypeName adds name to retained with the forms RetainedTypesFromSetting
+// matches it by: its canonical form under both alias tables and, when that is
+// a built-in type, its lower-case form.
+func retainTypeName(retained map[string]bool, name string) {
+	retained[name] = true
+	retained[string(types.IssueType(name).Normalize())] = true
+	retained[utils.NormalizeIssueType(name)] = true
+	if lower := types.IssueType(strings.ToLower(name)); lower.IsBuiltIn() {
+		retained[string(lower)] = true
+	}
+}
+
+// PartitionSweepRetainedTypes is the retained-type protection
+// (issueops.SweepSkips.RetentionRequired): a candidate whose issue type the
+// workspace retains is held back and counted. Candidate order is preserved and
+// the input slice is not modified.
+//
+// A retaining sweep does not call it: the sweep bodies read the setting only
+// when RetainIDs is unset, because a retaining sweep deletes the row AND
+// retires its id, which is the one way such a row may leave. The other
+// retention doors, which cannot retire an id — `bd gc`'s decay, `bd admin
+// cleanup` and the stale-closed-issues doctor fix — call it on their own
+// selection. The scope is stated on issueops.SweepRequest.RetainIDs.
+func PartitionSweepRetainedTypes(candidates []*types.Issue, retained map[string]bool) (kept []*types.Issue, retentionRequired int) {
+	if len(retained) == 0 {
+		return candidates, 0
+	}
+	kept = make([]*types.Issue, 0, len(candidates))
+	for _, issue := range candidates {
+		if retained[string(issue.IssueType)] {
+			retentionRequired++
+			continue
+		}
+		kept = append(kept, issue)
+	}
+	return kept, retentionRequired
 }
 
 // SweepDefenseSkips is how many candidates the recheck rejected as

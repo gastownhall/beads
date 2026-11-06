@@ -147,14 +147,20 @@ func bulkLoadPoolReadTimeout(cmd *cobra.Command) time.Duration {
 }
 
 func runImport(cmd *cobra.Command, args []string) error {
-	// Explicit call, not inherited from CheckReadonly: runImport doesn't call
-	// CheckReadonly at all (a separate, pre-existing gap — readonlyMode
-	// doesn't gate bd import either), so it can't pick up the freeze check
-	// folded into CheckReadonly the way create/update/close/remember do.
-	// The path that makes this call load-bearing rather than redundant is
-	// `bd import --dry-run`: a preview sets useReadOnly, so it skips the early
-	// gate in PersistentPreRunE, and runImport is the only chokepoint left.
-	// Plain `bd import` is already stopped by that early gate.
+	// Strict --readonly refuses import, a --dry-run preview included (it
+	// refuses create --dry-run too). Guarded, unlike the write commands'
+	// unconditional call, because CheckReadonly also answers a migration freeze
+	// and does it by exiting the process. The freeze is answered below instead,
+	// by returning the error, so that cleanup still runs.
+	if readonlyMode {
+		CheckReadonly("import")
+	}
+
+	// The freeze check, not inherited from CheckReadonly for the reason above.
+	// It is load-bearing rather than redundant on `bd import --dry-run`: a
+	// preview sets useReadOnly, so it skips the early gate in
+	// PersistentPreRunE, and runImport is the only chokepoint left. Plain
+	// `bd import` is already stopped by that early gate.
 	if err := migrationFreezeGateFor(cmd, "import"); err != nil {
 		return err
 	}
@@ -247,6 +253,7 @@ type importResultJSON struct {
 	UpdatedIssues       []ImportChange `json:"updated_issues,omitempty"`
 	TieKeptLocalIDs     []string       `json:"tie_kept_local_ids,omitempty"`
 	StaleSkippedIDs     []string       `json:"stale_skipped_ids,omitempty"`
+	RetiredIDs          []string       `json:"retired_ids,omitempty"`
 	SkippedDependencies []string       `json:"skipped_dependencies,omitempty"`
 	DryRun              bool           `json:"dry_run,omitempty"`
 }
@@ -497,6 +504,7 @@ func applyImportDryRunClassification(result *importResultJSON, classification *I
 	result.StaleSkippedIDs = classification.StaleSkippedIDs
 	result.UpdatedIssues = classification.UpdatedIssues
 	result.TieKeptLocalIDs = classification.TieKeptLocalIDs
+	result.RetiredIDs = classification.RetiredIDs
 }
 
 // applyImportOutcome folds a real import's outcome into the command's JSON
@@ -511,6 +519,7 @@ func applyImportOutcome(result *importResultJSON, importResult *ImportResult) {
 	result.UpdatedIssues = append(result.UpdatedIssues, importResult.UpdatedIssues...)
 	result.TieKeptLocalIDs = append(result.TieKeptLocalIDs, importResult.TieKeptLocalIDs...)
 	result.StaleSkippedIDs = append(result.StaleSkippedIDs, importResult.StaleSkippedIDs...)
+	result.RetiredIDs = append(result.RetiredIDs, importResult.RetiredIDs...)
 }
 
 // renderImportDryRun reports a dry run (JSON or stderr), identically in both
@@ -532,6 +541,9 @@ func renderImportDryRun(result importResultJSON, memoriesCount int, source strin
 	}
 	if len(result.StaleSkippedIDs) > 0 {
 		fmt.Fprintf(os.Stderr, " (%d stale skipped)", len(result.StaleSkippedIDs))
+	}
+	if len(result.RetiredIDs) > 0 {
+		fmt.Fprintf(os.Stderr, " (%d retired by a retention sweep, would not be re-created)", len(result.RetiredIDs)) //nolint:gosec // G705: stderr, not a browser context
 	}
 	fmt.Fprintln(os.Stderr)
 	return nil
@@ -557,6 +569,9 @@ func renderImportOutcome(result importResultJSON, source string, dedupHits int) 
 	}
 	if result.Unchanged > 0 {
 		fmt.Fprintf(os.Stderr, " (%d already present, unchanged)", result.Unchanged) //nolint:gosec // G705: stderr, not a browser context
+	}
+	if len(result.RetiredIDs) > 0 {
+		fmt.Fprintf(os.Stderr, " (%d retired by a retention sweep, not re-created)", len(result.RetiredIDs)) //nolint:gosec // G705: stderr, not a browser context
 	}
 	fmt.Fprintln(os.Stderr)
 	if len(result.UpdatedIssues) > 0 {

@@ -756,6 +756,36 @@ func TestReadyCounterExposesTypedUnsupportedError(t *testing.T) {
 	}
 }
 
+// TestBlockedListerKeepsTelemetryOutermost is the READ answer again: listing
+// the blocked set fires no completion hooks, so the hook decorator adds no
+// layer.
+func TestBlockedListerKeepsTelemetryOutermost(t *testing.T) {
+	t.Setenv("BD_OTEL_STDOUT", "true")
+	instrumented, ok := telemetry.WrapStorage(&dolt.DoltStore{}).(*telemetry.InstrumentedStorage)
+	if !ok {
+		t.Fatal("WrapStorage() did not create InstrumentedStorage")
+	}
+
+	lister, err := storage.NewHookFiringStore(instrumented, nil).BlockedLister()
+	if err != nil {
+		t.Fatalf("BlockedLister() error = %v", err)
+	}
+	if got := reflect.TypeOf(lister).String(); got != "*telemetry.instrumentedBlockedLister" {
+		t.Fatalf("outer layer = %s, want the telemetry wrapper unwrapped by the hook decorator", got)
+	}
+}
+
+func TestBlockedListerExposesTypedUnsupportedError(t *testing.T) {
+	lister, err := (*dolt.DoltStore)(nil).BlockedLister()
+	if lister != nil {
+		t.Fatalf("BlockedLister() lister = %T, want nil", lister)
+	}
+	var unsupported *beads.ErrUnsupported
+	if !errors.As(err, &unsupported) {
+		t.Fatalf("BlockedLister() error = %v, want *beads.ErrUnsupported", err)
+	}
+}
+
 // TestQuerierKeepsTelemetryOutermost is the READ answer again: a query fires no
 // completion hooks, so the hook decorator adds no layer.
 func TestQuerierKeepsTelemetryOutermost(t *testing.T) {

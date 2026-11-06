@@ -217,3 +217,78 @@ func TestEmbeddedBackupConcurrent(t *testing.T) {
 		t.Error("backup destination should exist after concurrent syncs")
 	}
 }
+
+// TestEmbeddedBackupRestoreStrictReadonly pins the refusal of a strict
+// --readonly restore. A restore replaces the store, so CheckReadonly must stop
+// it with the standard message before the command takes the exclusive workspace
+// gate. Embedded mode used to be stopped only by the storage layer
+// ("embeddeddolt: store is read-only"), after the gate had already left its
+// holder files in the workspace. The control proves the fixture really does
+// restore when --readonly is not asked for, so "the store is unchanged" below
+// cannot be vacuous.
+func TestEmbeddedBackupRestoreStrictReadonly(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt backup tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+
+	// newWorkspace returns a workspace whose live store holds one issue its
+	// backup does not (three against two), so a restore that really ran shows up
+	// as a changed issue count. Each case gets its own: a restore that runs
+	// replaces the store and would hide a leak from the next.
+	newWorkspace := func(t *testing.T, prefix string) (dir, backupDir string) {
+		t.Helper()
+		dir, _, _ = bdInit(t, bd, "--prefix", prefix)
+		bdCreateSilent(t, bd, dir, "issue in the backup A")
+		bdCreateSilent(t, bd, dir, "issue in the backup B")
+
+		backupDir = filepath.Join(t.TempDir(), "dolt-backup")
+		if err := os.MkdirAll(backupDir, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		bdBackup(t, bd, dir, "init", "file://"+backupDir)
+		bdBackup(t, bd, dir, "sync")
+
+		bdCreateSilent(t, bd, dir, "issue created after the backup")
+		return dir, backupDir
+	}
+
+	t.Run("control_restore_without_readonly", func(t *testing.T) {
+		dir, backupDir := newWorkspace(t, "rrctl")
+		stdout, stderr, code := runBDMigrationFreeze(t, bd, dir, "backup", "restore", "--force", backupDir)
+		if code != 0 {
+			t.Fatalf("restore without --readonly exited %d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+		}
+		if !strings.Contains(stdout, "Restore complete") {
+			t.Errorf("stdout is missing %q:\n%s", "Restore complete", stdout)
+		}
+		if got := len(bdListJSON(t, bd, dir)); got != 2 {
+			t.Errorf("issue count after a real restore = %d, want 2: the backup holds two issues and the live store held three", got)
+		}
+	})
+
+	for _, tc := range []struct {
+		name   string
+		prefix string
+		flags  []string
+	}{
+		{"readonly", "rrro", []string{"--readonly"}},
+		{"readonly_sandbox", "rrrosb", []string{"--readonly", "--sandbox"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, backupDir := newWorkspace(t, tc.prefix)
+			before := snapshotWorkspace(t, dir)
+
+			args := append(append([]string{}, tc.flags...), "backup", "restore", "--force", backupDir)
+			stdout, stderr, code := runBDMigrationFreeze(t, bd, dir, args...)
+
+			assertStrictReadonlyRestoreRefused(t, stdout, stderr, code)
+			assertWorkspaceUnchanged(t, dir, before)
+			if got := len(bdListJSON(t, bd, dir)); got != 3 {
+				t.Errorf("issue count after the refused restore = %d, want 3: the restore replaced the store", got)
+			}
+		})
+	}
+}

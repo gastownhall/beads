@@ -148,7 +148,14 @@ func (p *uowProvider) LeaseReclaimer() (publicops.LeaseReclaimer, error) {
 // Heartbeater passes through: the external-dependency policy governs what a
 // write may point at, and a heartbeat on an existing claim points at nothing.
 func (p *uowProvider) Heartbeater() (publicops.Heartbeater, error) { return uow.NewHeartbeater(p) }
-func (p *uowProvider) Memories() (memoryops.Memories, error)       { return uow.NewMemories(p) }
+
+// BlockedLister is built over THIS provider, so its unit of work's
+// GetBlockedIssues is the decorated one above: unsatisfied external blockers
+// are named, exactly as the store decorator names them.
+func (p *uowProvider) BlockedLister() (publicops.BlockedLister, error) {
+	return uow.NewBlockedLister(p)
+}
+func (p *uowProvider) Memories() (memoryops.Memories, error) { return uow.NewMemories(p) }
 func (p *uowProvider) EventsJournalCursor() (storage.EventsJournalCursor, error) {
 	return uow.NewEventsJournalCursor(p)
 }
@@ -163,6 +170,20 @@ func (p *uowProvider) SetEventsJournalEnabled(enabled bool) {
 	if configurer, ok := p.UnitOfWorkProvider.(storage.EventsJournalConfigurer); ok {
 		configurer.SetEventsJournalEnabled(enabled)
 	}
+}
+
+// EventsJournalActivationError forwards the inner provider's shape-probe
+// result (storage.EventsJournalShapeChecker, PR A1). This wrapper is the
+// OUTERMOST provider on both real chains (see SetVersionedHistoryEnabled), so
+// without this forwarder eventsjournal.Apply's type assertion for the checker
+// would fail here even when the inner provider's own probe found an
+// unsupported table shape — the open would then succeed against a shape it
+// cannot journal, the gci failure mode this interface exists to avoid.
+func (p *uowProvider) EventsJournalActivationError() error {
+	if checker, ok := p.UnitOfWorkProvider.(storage.EventsJournalShapeChecker); ok {
+		return checker.EventsJournalActivationError()
+	}
+	return nil
 }
 
 // SetVersionedHistoryEnabled forwards dual-write issue-version activation
@@ -193,6 +214,7 @@ func (p *uowProvider) RunEventsMaintenanceTx(ctx context.Context, fn func(contex
 var (
 	_ uow.PoolTuner                      = (*uowProvider)(nil)
 	_ storage.EventsJournalConfigurer    = (*uowProvider)(nil)
+	_ storage.EventsJournalShapeChecker  = (*uowProvider)(nil)
 	_ storage.VersionedHistoryConfigurer = (*uowProvider)(nil)
 	_ issueops.EventsMaintenanceRunner   = (*uowProvider)(nil)
 	_ uow.IssueLifecycleSource           = (*uowProvider)(nil)
@@ -227,6 +249,7 @@ var (
 	_ uow.ReleaserSource                 = (*uowProvider)(nil)
 	_ uow.LeaseReclaimerSource           = (*uowProvider)(nil)
 	_ uow.HeartbeaterSource              = (*uowProvider)(nil)
+	_ uow.BlockedListerSource            = (*uowProvider)(nil)
 	_ uow.MemoriesSource                 = (*uowProvider)(nil)
 	_ uow.EventsJournalCursorSource      = (*uowProvider)(nil)
 )
@@ -350,20 +373,18 @@ func (u *issueUseCase) GetBlockedIssues(ctx context.Context, filter types.WorkFi
 			parentDeps[id] = append(parentDeps[id], deps...)
 		}
 	}
-	issues, err := u.IssueUseCase.GetIssuesByIDs(ctx, missing)
+	// GetMany reads both planes with labels hydrated, as the store decorator's
+	// reads do; GetIssuesByIDs here would leave Labels empty, so the label
+	// filter below could not judge these rows and they would print unlabelled.
+	issues, err := getManyChunked(ctx, u.IssueUseCase, missing)
 	if err != nil {
 		return nil, fmt.Errorf("external dependencies: load blocked sources: %w", err)
 	}
-	wisps, err := u.IssueUseCase.GetWispsByIDs(ctx, missing)
-	if err != nil {
-		return nil, fmt.Errorf("external dependencies: load blocked wisp sources: %w", err)
-	}
-	issues = append(issues, wisps...)
 	for _, issue := range issues {
 		if issue == nil || issue.Status == types.StatusClosed || issue.Status == types.StatusPinned {
 			continue
 		}
-		if !matchesParentFilter(issue.ID, filter.ParentID, parentDeps) {
+		if !matchesParentFilter(issue.ID, filter.ParentID, parentDeps) || !matchesLabelFilter(issue.Labels, filter) {
 			continue
 		}
 		refs := slices.Clone(state.refsByIssue[issue.ID])
@@ -506,5 +527,5 @@ func (u *dependencyUseCase) GetDependencyTree(ctx context.Context, rootID string
 	if err != nil {
 		return nil, fmt.Errorf("external dependencies: load tree edges: %w", err)
 	}
-	return u.policy.appendTreeExternalReferences(ctx, tree, deps, opts.MaxDepth, opts.ShowAllPaths)
+	return u.policy.appendTreeExternalReferences(ctx, tree, deps, opts.MaxDepth)
 }

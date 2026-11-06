@@ -50,6 +50,127 @@ func TestInitialize(t *testing.T) {
 	}
 }
 
+func TestIsFromProjectConfigTracksPrivateOverrides(t *testing.T) {
+	restore := envSnapshot(t)
+	defer restore()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("BEADS_DIR", "")
+
+	work := t.TempDir()
+	beadsDir := filepath.Join(work, ".beads")
+	if err := os.MkdirAll(beadsDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	projectPath := filepath.Join(beadsDir, "config.yaml")
+	if err := os.WriteFile(projectPath, []byte("ai:\n  base_url: https://project.example\ngithub:\n  url: https://project.example\nidentity: project\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(work)
+	t.Setenv("BD_AI_BASE_URL", "")
+	t.Setenv("BEADS_IDENTITY", "")
+	ResetForTesting()
+	t.Cleanup(ResetForTesting)
+
+	if err := Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	if !IsFromProjectConfig("AI.BASE_URL") || !IsFromProjectConfig("github.url") {
+		t.Fatal("project config keys were not classified")
+	}
+
+	// .beads/config.local.yaml lives inside the repo tree and can be committed,
+	// so it must still be classified as project-controlled rather than private.
+	// jira.url is defined only here, so a regression that drops
+	// config.local.yaml from the project paths loses this key's classification.
+	localPath := filepath.Join(beadsDir, LocalConfigFileName)
+	if err := os.WriteFile(localPath, []byte("github:\n  url: https://local.example\njira:\n  url: https://jira.local.example\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	if !IsFromProjectConfig("github.url") || PrivateConfigValue("github.url") != "" {
+		t.Fatal("local config override in .beads/config.local.yaml was treated as private")
+	}
+	if !IsFromProjectConfig("jira.url") || PrivateConfigValue("jira.url") != "" {
+		t.Fatal("key defined only in .beads/config.local.yaml was not classified as project-controlled")
+	}
+
+	// User-level global config (~/.config/bd/config.yaml) is private when it
+	// confirms the effective value.
+	userConfigDir := filepath.Join(home, ".config", "bd")
+	if err := os.MkdirAll(userConfigDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(userConfigDir, "config.yaml"), []byte("github:\n  url: https://local.example\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	if IsFromProjectConfig("github.url") || PrivateConfigValue("github.url") != "https://local.example" {
+		t.Fatal("matching user global config override was classified as project-controlled")
+	}
+
+	// A .beads/.env variable is project-controlled, not a private environment override.
+	t.Setenv("BD_AI_BASE_URL", "https://dotenv.example")
+	MarkDotenvValue("BD_AI_BASE_URL", "https://dotenv.example")
+	if !IsFromProjectConfig("ai.base_url") || PrivateConfigValue("ai.base_url") != "" {
+		t.Fatal("dotenv BD_ variable was treated as private")
+	}
+
+	// A real caller environment variable overrides dotenv and project config.
+	t.Setenv("BD_AI_BASE_URL", "https://private.example")
+	if err := Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	if IsFromProjectConfig("ai.base_url") || PrivateConfigValue("ai.base_url") != "https://private.example" {
+		t.Fatal("BD_ environment override was classified as project-controlled")
+	}
+
+	t.Setenv("BEADS_IDENTITY", "private")
+	if err := Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	if IsFromProjectConfig("identity") || PrivateConfigValue("identity") != "private" {
+		t.Fatal("explicit BindEnv override was classified as project-controlled")
+	}
+}
+
+// TestIsFromProjectConfigWorkspaceDoublingAsUserConfig pins the role rule for
+// a workspace .beads directory that is itself a user config location —
+// ~/.beads/config.yaml is the legacy user path: its keys are project
+// configuration and never privately confirm themselves.
+func TestIsFromProjectConfigWorkspaceDoublingAsUserConfig(t *testing.T) {
+	restore := envSnapshot(t)
+	defer restore()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	beadsDir := filepath.Join(home, ".beads")
+	if err := os.MkdirAll(beadsDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("github:\n  url: https://project.example\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_DIR", beadsDir)
+	ResetForTesting()
+	t.Cleanup(ResetForTesting)
+
+	if err := Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	if !IsFromProjectConfig("github.url") {
+		t.Fatal("workspace ~/.beads config.yaml key was not classified as project-controlled")
+	}
+	if got := PrivateConfigValue("github.url"); got != "" {
+		t.Fatalf("PrivateConfigValue(github.url) = %q: the workspace config confirmed itself", got)
+	}
+}
+
 func TestDefaults(t *testing.T) {
 	// Isolate from environment variables
 	restore := envSnapshot(t)
@@ -1564,6 +1685,32 @@ types:
 	}
 }
 
+// TestRetainedTypesYAMLWarning pins the warning for a types.retained key in
+// config.yaml (or BD_TYPES_RETAINED). The setting is read from the workspace
+// database only, so such a key protects nothing; the commands that honor the
+// setting say so rather than letting an operator believe a type is retained.
+func TestRetainedTypesYAMLWarning(t *testing.T) {
+	restore := envSnapshot(t)
+	defer restore()
+	t.Chdir(t.TempDir())
+	ResetForTesting()
+	t.Cleanup(ResetForTesting)
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize() returned error: %v", err)
+	}
+
+	if msg := RetainedTypesYAMLWarning(); msg != "" {
+		t.Errorf("warning with no yaml key = %q, want none", msg)
+	}
+	Set("types.retained", "op,fact")
+	msg := RetainedTypesYAMLWarning()
+	for _, want := range []string{"config.yaml", "ignored", "bd config set types.retained op,fact"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("warning = %q, want it to contain %q", msg, want)
+		}
+	}
+}
+
 // TestGetCustomTypesFromYAML_ListForm verifies that the YAML sequence form
 // (e.g. `types: { custom: [step, wisp] }`) is honored equivalently to the
 // legacy comma-separated string form. Before the fix, viper.GetString on a
@@ -1963,6 +2110,74 @@ func TestInitialize_ExternalBEADSDirDoesNotMergeCallerProjectConfig(t *testing.T
 	}
 	if got := GetBool("json"); got {
 		t.Fatalf("GetBool(json) = %v, want false", got)
+	}
+}
+
+// TestWithBeadsDirLoadsTheBoundWorkspacesConfig covers a command about to
+// create a workspace inside another one (bd bootstrap for a fresh rig): the
+// process loaded the enclosing workspace's config.yaml, and fn must see what a
+// command bound to the new workspace loads, its own config.yaml once it has
+// one over the user config files, never the enclosing file. The loaded
+// configuration, a runtime Set included, comes back afterwards, and BEADS_DIR
+// is never touched.
+func TestWithBeadsDirLoadsTheBoundWorkspacesConfig(t *testing.T) {
+	restore := envSnapshot(t)
+	defer restore()
+	ResetForTesting()
+	t.Cleanup(ResetForTesting)
+
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("APPDATA", filepath.Join(root, "appdata"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "xdg-config"))
+	writeConfigActor(t, filepath.Join(home, ".beads", "config.yaml"), "legacy")
+	town := filepath.Join(root, "town")
+	writeConfigActor(t, filepath.Join(town, ".beads", "config.yaml"), "town")
+	rig := filepath.Join(town, "rig")
+	if err := os.MkdirAll(rig, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rigBeadsDir := filepath.Join(rig, ".beads")
+	t.Chdir(rig)
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+	Set("json", true)
+	if got := GetString("actor"); got != "town" {
+		t.Fatalf("precondition: actor = %q, want the enclosing workspace's %q", got, "town")
+	}
+
+	for _, step := range []struct{ name, want string }{
+		{name: "no config.yaml of its own", want: "legacy"},
+		{name: "its own config.yaml", want: "rig"},
+	} {
+		if step.want == "rig" {
+			writeConfigActor(t, filepath.Join(rigBeadsDir, "config.yaml"), "rig")
+		}
+		var actor string
+		var jsonSet bool
+		if err := WithBeadsDir(rigBeadsDir, func() {
+			actor, jsonSet = GetString("actor"), GetBool("json")
+		}); err != nil {
+			t.Fatalf("%s: WithBeadsDir: %v", step.name, err)
+		}
+		if actor != step.want {
+			t.Errorf("%s: actor inside = %q, want %q", step.name, actor, step.want)
+		}
+		if jsonSet {
+			t.Errorf("%s: a Set on the loaded configuration leaked into fn", step.name)
+		}
+		if got := GetString("actor"); got != "town" {
+			t.Errorf("%s: actor after = %q, want the loaded %q back", step.name, got, "town")
+		}
+		if !GetBool("json") {
+			t.Errorf("%s: the loaded configuration's Set was not restored", step.name)
+		}
+		if got, ok := os.LookupEnv("BEADS_DIR"); ok {
+			t.Errorf("%s: BEADS_DIR = %q, want it left unset", step.name, got)
+		}
 	}
 }
 

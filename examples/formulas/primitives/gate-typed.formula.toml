@@ -1,0 +1,32 @@
+# Step.Gate on a step declared type = "gate" — an exit-gate.
+#
+# The step is the preparation work a human (or condition) needs before
+# the gate can be decided, so cook splits it into:
+#  * a `task` issue for the step itself (dispatchable via bd ready)
+#  * a sibling `gate`-typed companion (await_type=human) that the task blocks
+# Later steps that reference the step id wait for both the task and the
+# companion, so `ship` runs once the prep is done and the gate is resolved.
+# The smoke harness asserts the task type, the task-blocks-gate edge, and
+# that `ship` blocks on both the task and the companion.
+formula = "gate-typed"
+description = "Step.Gate on a type = \"gate\" step: prep task blocks a human gate that later steps wait on."
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "prep"
+title = "Gather evidence"
+
+[[steps]]
+id = "approve"
+title = "Prepare the decision for human approval"
+type = "gate"
+depends_on = ["prep"]
+
+[steps.gate]
+type = "human"
+
+[[steps]]
+id = "ship"
+title = "Ship after approval"
+depends_on = ["approve"]

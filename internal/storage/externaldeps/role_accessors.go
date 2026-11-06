@@ -50,6 +50,7 @@ type issueClaimer struct {
 }
 
 func (c *issueClaimer) Claim(ctx context.Context, req issueops.ClaimRequest) (issueops.ClaimResult, error) {
+	ctx = storage.WithLivePolicyProbe(ctx)
 	blocked, blockers, err := c.policy.IsBlocked(ctx, req.IssueID)
 	if err != nil {
 		return issueops.ClaimResult{}, err
@@ -76,6 +77,7 @@ func (s *Store) ReadyClaimer() (issueops.ReadyClaimer, error) {
 type readyClaimer struct{ policy *Store }
 
 func (c *readyClaimer) ClaimNext(ctx context.Context, req issueops.ClaimNextRequest) (issueops.ClaimNextResult, error) {
+	ctx = storage.WithLivePolicyProbe(ctx)
 	if err := storageissueops.ValidateClaimNextRequest(req); err != nil {
 		return issueops.ClaimNextResult{}, err
 	}

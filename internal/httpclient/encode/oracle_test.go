@@ -73,6 +73,7 @@ func startOracle(t *testing.T) *oracle {
 		BatchGetter:       stubBatchGetter{},
 		LeaseReclaimer:    stubLeaseReclaimer{},
 		Heartbeater:       stubHeartbeater{},
+		BlockedLister:     stubBlockedLister{},
 		Relations:         stubRelations{},
 		Commenter:         stubCommenter{},
 		BlockingAnnotator: stubBlocking{},
@@ -274,6 +275,7 @@ type (
 	stubBatchGetter      struct{ issueops.BatchGetter }
 	stubLeaseReclaimer   struct{ issueops.LeaseReclaimer }
 	stubHeartbeater      struct{ issueops.Heartbeater }
+	stubBlockedLister    struct{ issueops.BlockedLister }
 	stubRelations        struct{ issueops.Relations }
 	stubCommenter        struct{ issueops.Commenter }
 	stubBlocking         struct{ issueops.BlockingAnnotator }

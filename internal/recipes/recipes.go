@@ -3,6 +3,7 @@
 package recipes
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -38,6 +39,11 @@ type Recipe struct {
 	ProjectPath string            `toml:"project_path"` // Project settings path (for hooks)
 	Paths       []string          `toml:"paths"`        // Multiple paths (for multifile)
 	Contents    map[string]string `toml:"-"`            // Optional static contents for TypeMultiFile
+	// Workspace marks a recipe read from a workspace's .beads/recipes.toml
+	// (LoadUserRecipes), which a repository can commit, so bd setup confines
+	// the files it names to the directory it runs in (PathInside). A
+	// built-in recipe's paths are bd's own, and leave it false.
+	Workspace bool `toml:"-"`
 }
 
 // BuiltinRecipes contains the default recipe definitions.
@@ -167,6 +173,7 @@ func LoadUserRecipes(beadsDir string) (map[string]Recipe, error) {
 		if recipe.Name == "" {
 			recipe.Name = name
 		}
+		recipe.Workspace = true
 		userRecipes.Recipes[name] = recipe
 	}
 
@@ -281,6 +288,109 @@ func ListRecipeNames(beadsDir string) ([]string, error) {
 	}
 
 	return names, nil
+}
+
+// ErrPathOutside and ErrPathUnfollowable are the reasons PathInside gives for
+// a path that does not stay inside the directory.
+var (
+	// ErrPathOutside: the path is absolute, leaves the directory through
+	// .., or leads out of it through a symbolic link.
+	ErrPathOutside = errors.New("path is not inside the directory")
+	// ErrPathUnfollowable: the path runs through a symbolic link that
+	// cannot be followed (a dangling one, a loop), so where it leads
+	// cannot be told.
+	ErrPathUnfollowable = errors.New("path runs through a symbolic link that cannot be followed")
+)
+
+// PathInside reports, by a nil error, that path, a file a recipe names,
+// stays inside dir, the directory bd setup runs in and resolves the path
+// against: path is local to dir (filepath.IsLocal: relative, not empty, and
+// not leaving dir through ..), and neither the directory that holds its
+// file, nor the file, nor the directory filepath.Dir(path) names (which
+// install creates and --remove drops when empty), as far as each exists,
+// leads out of dir through a symbolic link. The path is checked both as
+// Linux and macOS walk it, where a .. goes to the parent of what the name
+// before it resolves to, so a .. after a linked directory is not cleaned
+// away, and in its cleaned form (filepath.Clean), which is what Windows
+// opens, since it cleans .. away before it follows links. The file is
+// followed when it is a link, since writing it writes the link's target.
+// Otherwise it returns ErrPathOutside, or ErrPathUnfollowable for a link
+// that cannot be followed (a dangling one, a loop), since where a write
+// through it lands cannot be told, or the error that dir could not be
+// resolved (a deleted working directory).
+func PathInside(dir, path string) error {
+	if !filepath.IsLocal(path) {
+		return ErrPathOutside
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return fmt.Errorf("resolve the directory: %w", err)
+	}
+	root, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return fmt.Errorf("resolve the directory: %w", err)
+	}
+	full := abs
+	for _, elem := range strings.FieldsFunc(path, isPathSeparator) {
+		switch elem {
+		case ".":
+		case "..":
+			resolved, ok := resolveExisting(full)
+			if !ok {
+				return ErrPathUnfollowable
+			}
+			full = filepath.Dir(resolved)
+		default:
+			full = filepath.Join(full, elem)
+		}
+	}
+	for _, p := range []string{filepath.Dir(full), full, filepath.Join(abs, filepath.Dir(path)), filepath.Join(abs, path)} {
+		if err := resolvesInside(root, p); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// isPathSeparator reports whether r separates the elements of a path.
+func isPathSeparator(r rune) bool {
+	return r < 0x80 && os.IsPathSeparator(uint8(r))
+}
+
+// resolvesInside reports, by a nil error, that path's longest existing
+// part, a link at its end included, resolves to root or a path inside it.
+func resolvesInside(root, path string) error {
+	resolved, ok := resolveExisting(path)
+	if !ok {
+		return ErrPathUnfollowable
+	}
+	if rel, err := filepath.Rel(root, resolved); err != nil || (rel != "." && !filepath.IsLocal(rel)) {
+		return ErrPathOutside
+	}
+	return nil
+}
+
+// resolveExisting resolves the symbolic links in path's longest existing
+// part, a link at its end included, and joins the rest of path to it. It
+// fails when that part cannot be resolved (a dangling link, a loop).
+func resolveExisting(path string) (string, bool) {
+	existing, rest := path, ""
+	for {
+		if _, err := os.Lstat(existing); err == nil {
+			break
+		}
+		parent := filepath.Dir(existing)
+		if parent == existing {
+			return "", false
+		}
+		rest = filepath.Join(filepath.Base(existing), rest)
+		existing = parent
+	}
+	resolved, err := filepath.EvalSymlinks(existing)
+	if err != nil {
+		return "", false
+	}
+	return filepath.Join(resolved, rest), true
 }
 
 // IsBuiltin returns true if the recipe is a built-in (not user-defined).

@@ -391,15 +391,6 @@ func batchReportOps(stdout string) []string {
 	return ops
 }
 
-func firstLineWithPrefix(s, prefix string) string {
-	for _, line := range strings.Split(s, "\n") {
-		if strings.HasPrefix(strings.TrimSpace(line), prefix) {
-			return strings.TrimSpace(line)
-		}
-	}
-	return ""
-}
-
 func lastNonEmptyLine(s string) string {
 	lines := strings.Split(s, "\n")
 	for i := len(lines) - 1; i >= 0; i-- {
