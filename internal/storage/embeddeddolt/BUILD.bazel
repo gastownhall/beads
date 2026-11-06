@@ -206,6 +206,7 @@ go_test(
         "metadata_number_fidelity_test.go",
         "migrate_0032_debt_free_wisp_repair_test.go",
         "migrate_0059_overset_repair_test.go",
+        "migrate_0075_healthy_noop_test.go",
         "migrate_consent_gate_test.go",
         "migrate_dep_rekey_dedup_test.go",
         "migrate_events_flip_test.go",
