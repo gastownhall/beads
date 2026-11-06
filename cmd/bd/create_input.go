@@ -128,7 +128,7 @@ func gatherCreateInput(cmd *cobra.Command, args []string) (createInput, error) {
 	}
 
 	titleFlag, _ := cmd.Flags().GetString("title")
-	title, err := resolveTitle(args, titleFlag, in.markdownFile, in.graphFile)
+	title, err := resolveTitle(args, titleFlag, in.markdownFile, in.graphFile, createTypeFlag(cmd))
 	if err != nil {
 		return in, err
 	}
@@ -351,7 +351,10 @@ func rejectSingleIssueFlagsForGraph(cmd *cobra.Command) error {
 	return nil
 }
 
-func resolveTitle(args []string, titleFlag, markdownFile, graphFile string) (string, error) {
+// resolveTitle returns the single-issue title. typeFlag is the --type value
+// when the flag was passed (createTypeFlag), "" otherwise; it only shapes the
+// missing-title error.
+func resolveTitle(args []string, titleFlag, markdownFile, graphFile, typeFlag string) (string, error) {
 	if markdownFile != "" || graphFile != "" {
 		return "", nil
 	}
@@ -371,11 +374,34 @@ func resolveTitle(args []string, titleFlag, markdownFile, graphFile string) (str
 	case titleFlag != "":
 		title = titleFlag
 	default:
-		return "", HandleError("title required (or use --file to create from markdown)")
+		return "", HandleError("title required (or use --file to create from markdown)%s", missingTitleTypeHint(typeFlag))
 	}
 
 	if strings.TrimSpace(title) == "" {
 		return "", HandleError("title cannot be empty or whitespace-only")
 	}
 	return title, nil
+}
+
+// createTypeFlag returns the --type value when the flag was passed, "" when
+// the default applies.
+func createTypeFlag(cmd *cobra.Command) string {
+	if !cmd.Flags().Changed("type") {
+		return ""
+	}
+	issueType, _ := cmd.Flags().GetString("type")
+	return issueType
+}
+
+// missingTitleTypeHint names the likely cause of a missing title: -t is the
+// short flag for --type, so `bd create --type=bug -t "fix the login page"`
+// stores the title text as the type and leaves the title unset (GH#5787).
+// The title check runs as cobra Args validation, before the store opens, so
+// custom types are not known here: the hint names any type that is not
+// built in and leaves the type check to the create.
+func missingTitleTypeHint(typeFlag string) string {
+	if typeFlag == "" || types.IssueType(typeFlag).Normalize().IsBuiltIn() {
+		return ""
+	}
+	return fmt.Sprintf("\n  --type is %q: -t is the short flag for --type, not --title; pass the title with --title or as the first argument", typeFlag)
 }

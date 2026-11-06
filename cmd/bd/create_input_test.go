@@ -272,3 +272,42 @@ func TestIsAmbiguousRepoTarget(t *testing.T) {
 		})
 	}
 }
+
+// TestCreateTitleHintGH5787 pins the hint on
+// the missing-title error. -t is the short flag for --type, so
+// `bd create --type=bug -t "a long human title"` reaches this check with the
+// title text in --type and no title at all.
+func TestCreateTitleHintGH5787(t *testing.T) {
+	const hint = "-t is the short flag for --type"
+	tests := []struct {
+		name     string
+		args     []string
+		wantHint bool
+	}{
+		{name: "title text in --type", args: []string{"--type", "a long human title"}, wantHint: true},
+		{name: "built-in --type", args: []string{"--type", "bug"}},
+		{name: "built-in alias --type", args: []string{"--type", "feat"}},
+		{name: "no --type", args: nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := newCreateFlagsCommand(t, tt.args...)
+			var err error
+			stderr := captureStderr(t, func() {
+				err = validateCreateArgs(cmd, nil)
+			})
+			if err == nil {
+				t.Fatal("expected a missing title to be refused")
+			}
+			if !strings.Contains(stderr, "title required") {
+				t.Fatalf("stderr = %q, want the title-required error", stderr)
+			}
+			if got := strings.Contains(stderr, hint); got != tt.wantHint {
+				t.Fatalf("hint shown = %v, want %v; stderr = %q", got, tt.wantHint, stderr)
+			}
+			if tt.wantHint && !strings.Contains(stderr, `--type is "a long human title"`) {
+				t.Fatalf("stderr = %q, want the --type value named", stderr)
+			}
+		})
+	}
+}
