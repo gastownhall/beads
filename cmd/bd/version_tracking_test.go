@@ -3,8 +3,10 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/git"
@@ -364,15 +366,17 @@ func newTrackingWorkspace(t *testing.T, lastVersion, binVersion string) string {
 	}
 
 	origVersion, origDetected, origPrevious := Version, versionUpgradeDetected, previousVersion
-	origPending := pendingVersionStampPath
+	origPending, origFailed, origAck := pendingVersionStampPath, versionBumpFailedThisRun, upgradeAcknowledged
 	t.Cleanup(func() {
 		Version, versionUpgradeDetected, previousVersion = origVersion, origDetected, origPrevious
-		pendingVersionStampPath = origPending
+		pendingVersionStampPath, versionBumpFailedThisRun, upgradeAcknowledged = origPending, origFailed, origAck
 	})
 	Version = binVersion
 	versionUpgradeDetected = false
 	previousVersion = ""
 	pendingVersionStampPath = ""
+	versionBumpFailedThisRun = false
+	upgradeAcknowledged = false
 
 	return localVersionPath
 }
@@ -801,5 +805,75 @@ func TestAutoMigrateOnVersionBump_Outcomes(t *testing.T) {
 	}
 	if got := autoMigrateOnVersionBump(broken); got != versionBumpFailed {
 		t.Errorf("unreadable config: outcome = %v, want failed", got)
+	}
+}
+
+// TestAutoMigrateOnVersionBump_FailureIsReportedAndRetried drives a failed
+// terminal path end to end through the pre-run's own calls: the failure
+// reaches stderr with its retry behavior, the previous witness stays, and the
+// "bd upgraded" banner is held back for the failed invocation. The next
+// invocation, whose upgrade goes through, shows it (gastownhall/beads#6929).
+func TestAutoMigrateOnVersionBump_FailureIsReportedAndRetried(t *testing.T) {
+	pinJSONOutput(t, false)
+	localVersionPath := newTrackingWorkspace(t, "1.1.0", "1.3.0")
+	beadsDir := filepath.Dir(localVersionPath)
+	metadataPath := filepath.Join(beadsDir, "metadata.json")
+
+	trackBdVersion()
+	if err := os.WriteFile(metadataPath, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	notice := captureNoticeStderr(t, func() {
+		settleBdVersionStamp(autoMigrateOnVersionBump(beadsDir))
+	})
+	for _, want := range []string{"bd upgraded to v1.3.0", "loading config", "retry", "bd doctor"} {
+		if !strings.Contains(notice, want) {
+			t.Errorf("failure notice is missing %q:\n%s", want, notice)
+		}
+	}
+	if got := readLocalVersion(localVersionPath); got != "1.1.0" {
+		t.Errorf(".local_version = %q after a failed upgrade, want the previous %q", got, "1.1.0")
+	}
+	banner := captureStdout(t, func() error { maybeShowUpgradeNotification(); return nil })
+	if banner != "" || upgradeAcknowledged {
+		t.Errorf("upgrade banner shown (acknowledged=%v) for an invocation whose upgrade failed:\n%s", upgradeAcknowledged, banner)
+	}
+
+	// The next invocation: the config is readable again and there is no
+	// database, so the upgrade is skipped, stamped and announced.
+	if err := os.WriteFile(metadataPath, []byte(`{"database":"beads.db"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	versionUpgradeDetected, previousVersion = false, ""
+	trackBdVersion()
+	if !versionUpgradeDetected {
+		t.Fatal("the failed upgrade was not detected again on the next invocation")
+	}
+	notice = captureNoticeStderr(t, func() {
+		settleBdVersionStamp(autoMigrateOnVersionBump(beadsDir))
+	})
+	if notice != "" {
+		t.Errorf("a skipped upgrade printed a notice:\n%s", notice)
+	}
+	if got := readLocalVersion(localVersionPath); got != "1.3.0" {
+		t.Errorf(".local_version = %q after the upgrade went through, want %q", got, "1.3.0")
+	}
+	banner = captureStdout(t, func() error { maybeShowUpgradeNotification(); return nil })
+	if !strings.Contains(banner, "bd upgraded from v1.1.0 to v1.3.0") {
+		t.Errorf("upgrade banner missing once the upgrade went through:\n%s", banner)
+	}
+}
+
+// TestNoticeVersionBumpFailure pins the generic failure notice: the underlying
+// error, the retry behavior and the diagnostic to run.
+func TestNoticeVersionBumpFailure(t *testing.T) {
+	pinJSONOutput(t, false)
+	out := captureNoticeStderr(t, func() {
+		noticeVersionBumpFailure(errors.New("dial tcp 127.0.0.1:1: connection refused"))
+	})
+	for _, want := range []string{"connection refused", "will retry", "bd doctor"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("notice is missing %q:\n%s", want, out)
+		}
 	}
 }

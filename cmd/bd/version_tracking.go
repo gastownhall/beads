@@ -54,6 +54,12 @@ const (
 // is restored before the migration runs.
 var pendingVersionStampPath string
 
+// versionBumpFailedThisRun records that this invocation's version-bump
+// reconciliation failed. maybeShowUpgradeNotification then holds back its
+// "bd upgraded" banner: the failure notice has already explained the upgrade,
+// and the banner belongs to the first invocation whose upgrade goes through.
+var versionBumpFailedThisRun bool
+
 // trackBdVersion checks if bd version has changed since last run and updates the local version file.
 // This function is best-effort - failures are silent to avoid disrupting commands.
 // Sets global variables versionUpgradeDetected and previousVersion if upgrade detected.
@@ -86,6 +92,7 @@ func trackBdVersionPreview() {
 
 func trackBdVersionFile(persist bool) {
 	pendingVersionStampPath = ""
+	versionBumpFailedThisRun = false
 
 	// Find the beads directory
 	beadsDir := beads.FindBeadsDir()
@@ -234,8 +241,9 @@ func displayVersion(version string) string {
 // maybeShowUpgradeNotification displays a one-time upgrade notification if version changed.
 // This is called by commands like 'bd ready' and 'bd list' to inform users of upgrades.
 func maybeShowUpgradeNotification() {
-	// Only show if upgrade detected and not yet acknowledged
-	if !versionUpgradeDetected || upgradeAcknowledged {
+	// Only show if upgrade detected and not yet acknowledged, and not while
+	// the upgrade's own reconciliation has just failed (#6929).
+	if !versionUpgradeDetected || upgradeAcknowledged || versionBumpFailedThisRun {
 		return
 	}
 
@@ -277,7 +285,7 @@ func autoMigrateOnVersionBump(beadsDir string) versionBumpOutcome {
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil {
 		debug.Logf("auto-migrate: failed to load config: %v", err)
-		return versionBumpFailed
+		return failVersionBump(fmt.Errorf("loading config: %w", err))
 	}
 	if cfg == nil {
 		cfg = configfile.DefaultConfig()
@@ -332,11 +340,11 @@ func autoMigrateOnVersionBump(beadsDir string) versionBumpOutcome {
 	store, err := dolt.NewFromConfig(ctx, beadsDir)
 	if err != nil {
 		debug.Logf("auto-migrate: failed to open database: %v", err)
-		outcome := versionBumpOutcomeForOpenError(err)
-		if outcome == versionBumpDeferred {
+		if versionBumpOutcomeForOpenError(err) == versionBumpDeferred {
 			noticeSharedMigrateRefusal(err)
+			return versionBumpDeferred
 		}
-		return outcome
+		return failVersionBump(err)
 	}
 	defer func() {
 		if err := store.Close(); err != nil {
@@ -353,12 +361,12 @@ func autoMigrateOnVersionBump(beadsDir string) versionBumpOutcome {
 	reconciler, err := store.VersionReconciler()
 	if err != nil {
 		debug.Logf("auto-migrate: version markers unavailable: %v", err)
-		return versionBumpFailed
+		return failVersionBump(fmt.Errorf("version markers unavailable: %w", err))
 	}
 	result, err := reconciler.ReconcileVersion(ctx, issueops.VersionReconcileRequest{CLIVersion: Version})
 	if err != nil {
 		debug.Logf("auto-migrate: failed to reconcile database version: %v", err)
-		return versionBumpFailed
+		return failVersionBump(fmt.Errorf("recording the database version: %w", err))
 	}
 
 	switch {
@@ -485,6 +493,28 @@ func noticeSharedMigrateRefusal(err error) {
 	fmt.Fprintf(os.Stderr,
 		"bd upgraded to %s: %d schema migration(s) pending on this database — not auto-applying (#5920).\n%s\n",
 		displayVersion(Version), gateErr.Pending, remedy)
+}
+
+// failVersionBump is every failed terminal path of autoMigrateOnVersionBump:
+// it reports the failure and marks this invocation's upgrade as unfinished.
+func failVersionBump(err error) versionBumpOutcome {
+	versionBumpFailedThisRun = true
+	noticeVersionBumpFailure(err)
+	return versionBumpFailed
+}
+
+// noticeVersionBumpFailure is noticeSharedMigrateRefusal's sibling for a
+// version-bump reconciliation that failed rather than being refused on
+// purpose (gastownhall/beads#6929). Both used to end at debug.Logf, so an
+// upgrade that applied nothing looked like one that had worked — and with the
+// one-shot .local_version consumed, nothing ever said otherwise. The witness
+// is now kept (settleBdVersionStamp), so the line says the next command
+// retries, and names the way to look further.
+func noticeVersionBumpFailure(err error) {
+	fmt.Fprintf(os.Stderr,
+		"bd upgraded to %s, but finishing the upgrade failed: %v\n"+
+			"The next bd command will retry it; run 'bd doctor' to diagnose.\n",
+		displayVersion(Version), err)
 }
 
 // recordedWorkspaceVersion reads the marker through the role's accessor on a
