@@ -495,6 +495,36 @@ func TestSQLReadonlyRefusesDoltWriteFunction(t *testing.T) {
 	}
 }
 
+// TestSQLReadonlyRefusesSetOperationExport is the readonly gate for the other
+// SELECT look-alike that writes: a set operation exporting its rows with INTO
+// OUTFILE classifies as a write (#7033), so --readonly must refuse it before
+// the query reaches the server and writes the file, while an ordinary set
+// operation still runs and returns its rows.
+func TestSQLReadonlyRefusesSetOperationExport(t *testing.T) {
+	w := newServerReadonlyGateWorkspace(t)
+	exportPath := filepath.Join(t.TempDir(), "issues.tsv")
+
+	stdout, stderr, code := w.run(t, "sql", "--readonly",
+		"(SELECT id FROM issues) UNION ALL (SELECT id FROM issues) INTO OUTFILE '"+exportPath+"'")
+	if code != 1 || !strings.Contains(stderr, "operation 'sql' is not allowed in read-only mode") {
+		t.Errorf("set-operation export under --readonly should be refused (exit %d, want 1):\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	if _, err := os.Stat(exportPath); err == nil {
+		t.Errorf("the refused export still wrote %s", exportPath)
+	} else if !os.IsNotExist(err) {
+		t.Errorf("statting %s: %v", exportPath, err)
+	}
+
+	stdout, stderr, code = w.run(t, "sql", "--readonly",
+		"SELECT id, title FROM issues UNION SELECT id, title FROM issues")
+	if code != 0 || strings.Contains(stderr, "not allowed in read-only mode") {
+		t.Errorf("an ordinary UNION under --readonly should run (exit %d):\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	if !strings.Contains(stdout, "seed issue") {
+		t.Errorf("the ordinary UNION should return the seeded issue:\nstdout:\n%s", stdout)
+	}
+}
+
 // TestDoctorMaintenanceSkippedInReadonlyMode is the readonly twin of
 // TestDoctorMaintenanceSkippedDuringMigrationFreeze — see that test for why
 // plain `bd doctor` had hidden writes at all, and for the shared-server setup.
