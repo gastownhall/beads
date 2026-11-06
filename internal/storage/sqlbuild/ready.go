@@ -144,12 +144,62 @@ func idBatchClauses(format string, ids []string) ([]string, []any) {
 	return clauses, args
 }
 
+// deferredParentDatedCondition renders the dated-snooze leg of the
+// deferred-parent rule: a defer_until still in the future holds the subtree
+// back regardless of status (GH#1190/#1740 — an open parent carrying a future
+// date is already on ice). prefix is the dotted column prefix ("parent." or
+// "" for a single-table WHERE).
+func deferredParentDatedCondition(prefix string) string {
+	return fmt.Sprintf("%sdefer_until IS NOT NULL AND %sdefer_until > UTC_TIMESTAMP()", prefix, prefix)
+}
+
+// deferredParentIceboxCondition renders the undated leg: status 'deferred'
+// with no defer_until is `bd defer`'s indefinite icebox (GH#7300). The NULL
+// guard is what leaves an expired dated snooze alone: its row still has
+// status 'deferred' with a past date, and until the (advisory) wake sweep
+// opens it its children stay eligible exactly as before this rule existed.
+func deferredParentIceboxCondition(prefix string) string {
+	return fmt.Sprintf("%sdefer_until IS NULL AND %sstatus = 'deferred'", prefix, prefix)
+}
+
+// DeferredParentPredicate renders the condition that makes a row a deferred
+// parent whose direct children ready work must hide: a dated snooze still in
+// the future, or an undated deferred row (the "indefinite icebox"). alias
+// prefixes each column of the joined parent row ("parent"); "" renders
+// unqualified columns. Each leg is parenthesized on its own and the whole OR
+// is enclosed, so an AND never binds into a leg and callers can AND the rule
+// into larger predicates. Every child scan and every existence gate renders
+// the rule through this or DeferredParentExistsSQL so the two cannot drift
+// apart.
+func DeferredParentPredicate(alias string) string {
+	prefix := ""
+	if alias != "" {
+		prefix = alias + "."
+	}
+	return "(" + parenthesize(deferredParentDatedCondition(prefix)) +
+		" OR " + parenthesize(deferredParentIceboxCondition(prefix)) + ")"
+}
+
+// parenthesize wraps s in one pair of parentheses.
+func parenthesize(s string) string { return "(" + s + ")" }
+
+// DeferredParentExistsSQL renders the same rule as one scalar expression
+// probing table with two EXISTS legs — a date leg and a status leg — so each
+// side stays its own index access instead of one mixed OR scan. A SELECT of
+// this expression always answers a row: the boolean value is the answer, not
+// the presence of a row.
+func DeferredParentExistsSQL(table string) string {
+	return fmt.Sprintf("(EXISTS (SELECT 1 FROM %s WHERE %s) OR EXISTS (SELECT 1 FROM %s WHERE %s))",
+		table, deferredParentDatedCondition(""), table, deferredParentIceboxCondition(""))
+}
+
 // ReadyWorkWhereInputs carries the precomputed ID sets the ready-work WHERE
 // clause folds in. Computing them takes queries, which is execution-context
 // work each stack does its own way.
 type ReadyWorkWhereInputs struct {
-	// DeferredChildIDs are children of future-deferred parents; consulted
-	// only when !filter.IncludeDeferred.
+	// DeferredChildIDs are direct children of deferred parents (dated
+	// snoozes and undated iceboxes alike); consulted only when
+	// !filter.IncludeDeferred.
 	DeferredChildIDs []string
 	// ParentDescendantIDs are the transitive descendants of *filter.ParentID;
 	// consulted only when filter.ParentID != nil.

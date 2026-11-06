@@ -1481,6 +1481,10 @@ bd defer
     | A defer WITHOUT a date is the indefinite icebox: it stays deferred until
     | someone runs 'bd undefer'.
     |
+    | Either kind of defer also holds the issue's direct children out of 'bd
+    | ready': a snooze hides them until its date passes, an icebox until 'bd
+    | undefer'. 'bd ready --include-deferred' lists them anyway.
+    |
     | Examples:
     |   bd defer bd-abc                  # Icebox indefinitely (until bd undefer)
     |   bd defer bd-abc --until=tomorrow # Snooze: auto-wakes once the date passes
@@ -6033,7 +6037,7 @@ bd ready
   flag --flat type=bool default="false" usage="Alias for --plain, spelled the way bd list spells it"
   flag --gated type=bool default="false" usage="Find molecules ready for gate-resume dispatch"
   flag --has-metadata-key type=string default="" usage="Filter issues that have this metadata key set"
-  flag --include-deferred type=bool default="false" usage="Include issues with future defer_until timestamps"
+  flag --include-deferred type=bool default="false" usage="Include issues with future defer_until timestamps and children of deferred parents (dated snoozes and undated iceboxes)"
   flag --include-ephemeral type=bool default="false" usage="Include ephemeral issues (wisps) in results"
   flag --label -l type=stringSlice default="[]" usage="Filter by labels (AND: must have ALL). Can combine with --label-any"
   flag --label-any type=stringSlice default="[]" usage="Filter by labels (OR: must have AT LEAST ONE). Can combine with --label"

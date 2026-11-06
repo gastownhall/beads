@@ -1419,6 +1419,64 @@ func TestGetReadyWork_FutureDeferredIssueExcluded(t *testing.T) {
 	}
 }
 
+// TestGetReadyWork_UndatedDeferredParentHidesChildren verifies that a child
+// of a parent deferred with no defer_until (bd defer's "indefinite icebox")
+// is hidden from ready work, like a child of a parent with a future
+// defer_until (GH#7300).
+func TestGetReadyWork_UndatedDeferredParentHidesChildren(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	issues := []*types.Issue{
+		{ID: "rw-undated-epic", Title: "Undated epic", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeEpic},
+		{ID: "rw-undated-child", Title: "Child of undated epic", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+		{ID: "rw-dated-epic", Title: "Dated epic", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeEpic},
+		{ID: "rw-dated-child", Title: "Child of dated epic", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+	}
+	for _, issue := range issues {
+		if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+			t.Fatalf("create %s: %v", issue.ID, err)
+		}
+	}
+	for _, dep := range []*types.Dependency{
+		{IssueID: "rw-undated-child", DependsOnID: "rw-undated-epic", Type: types.DepParentChild},
+		{IssueID: "rw-dated-child", DependsOnID: "rw-dated-epic", Type: types.DepParentChild},
+	} {
+		if err := store.AddDependency(ctx, dep, "tester"); err != nil {
+			t.Fatalf("add dependency %s -> %s: %v", dep.IssueID, dep.DependsOnID, err)
+		}
+	}
+	// bd defer <id> (no --until): status deferred, defer_until unset.
+	if err := store.UpdateIssue(ctx, "rw-undated-epic", map[string]interface{}{
+		"status": string(types.StatusDeferred),
+	}, "tester"); err != nil {
+		t.Fatalf("defer undated epic: %v", err)
+	}
+	// bd defer <id> --until <future>.
+	if err := store.UpdateIssue(ctx, "rw-dated-epic", map[string]interface{}{
+		"status":      string(types.StatusDeferred),
+		"defer_until": time.Now().UTC().Add(24 * time.Hour),
+	}, "tester"); err != nil {
+		t.Fatalf("defer dated epic: %v", err)
+	}
+
+	work, err := store.GetReadyWork(ctx, types.WorkFilter{})
+	if err != nil {
+		t.Fatalf("GetReadyWork: %v", err)
+	}
+	ids := issueIDs(work)
+	for _, hidden := range []string{"rw-dated-child", "rw-undated-child"} {
+		for _, id := range ids {
+			if id == hidden {
+				t.Errorf("%s is ready, but its parent is deferred; ready = %v", hidden, ids)
+			}
+		}
+	}
+}
+
 // =============================================================================
 // GetBlockedIssues tests
 // =============================================================================

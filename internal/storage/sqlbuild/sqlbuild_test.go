@@ -750,3 +750,53 @@ func TestColumnNames(t *testing.T) {
 		t.Errorf("QualifyColumns = %q, want %q", got, want)
 	}
 }
+
+// TestDeferredParentPredicate pins the shared rule every deferred-parent child
+// scan ANDs into its WHERE: dated snoozes and undated iceboxes, each leg
+// parenthesized, the whole OR enclosed, and an expired dated snooze (the wake
+// sweep is advisory) matching neither leg (GH#7300).
+func TestDeferredParentPredicate(t *testing.T) {
+	t.Parallel()
+
+	dated := "(parent.defer_until IS NOT NULL AND parent.defer_until > UTC_TIMESTAMP())"
+	icebox := "(parent.defer_until IS NULL AND parent.status = 'deferred')"
+	wantAliased := "(" + dated + " OR " + icebox + ")"
+	if got := DeferredParentPredicate("parent"); got != wantAliased {
+		t.Errorf("DeferredParentPredicate(parent) =\n  %s\nwant\n  %s", got, wantAliased)
+	}
+	wantBare := strings.ReplaceAll(wantAliased, "parent.", "")
+	if got := DeferredParentPredicate(""); got != wantBare {
+		t.Errorf("DeferredParentPredicate(\"\") =\n  %s\nwant\n  %s", got, wantBare)
+	}
+
+	// The undated icebox leg must require BOTH a NULL date and status
+	// 'deferred': the NULL guard is what keeps an expired dated snooze (status
+	// still 'deferred', date now past, wake sweep advisory) from hiding its
+	// children, and the status guard keeps an open undated row eligible.
+	if iceboxLeg := `defer_until IS NULL AND parent.status = 'deferred'`; !strings.Contains(wantAliased, iceboxLeg) {
+		t.Errorf("icebox leg = %q, want defer_until IS NULL AND status joined by AND", iceboxLeg)
+	}
+	// No un-prefixed column may appear in an aliased render: a bare column
+	// would bind to the wrong table in a join.
+	if got := DeferredParentPredicate("parent"); strings.Contains(got, " defer_until") || strings.Contains(got, " status") {
+		t.Errorf("aliased render %q lost the alias prefix on a column", got)
+	}
+}
+
+// TestDeferredParentExistsSQL pins the existence-gate render: the same two
+// legs as DeferredParentPredicate, each behind its own EXISTS, the whole
+// expression parenthesized and always answering a row.
+func TestDeferredParentExistsSQL(t *testing.T) {
+	t.Parallel()
+
+	const dated = "(EXISTS (SELECT 1 FROM issues WHERE defer_until IS NOT NULL AND defer_until > UTC_TIMESTAMP())"
+	const orIcebox = " OR EXISTS (SELECT 1 FROM issues WHERE defer_until IS NULL AND status = 'deferred'))"
+	if got := DeferredParentExistsSQL("issues"); got != dated+orIcebox {
+		t.Errorf("DeferredParentExistsSQL(issues) =\n  %s\nwant\n  %s", got, dated+orIcebox)
+	}
+	if got, want := DeferredParentExistsSQL("wisps"),
+		"(EXISTS (SELECT 1 FROM wisps WHERE defer_until IS NOT NULL AND defer_until > UTC_TIMESTAMP())"+
+			" OR EXISTS (SELECT 1 FROM wisps WHERE defer_until IS NULL AND status = 'deferred'))"; got != want {
+		t.Errorf("DeferredParentExistsSQL(wisps) =\n  %s\nwant\n  %s", got, want)
+	}
+}

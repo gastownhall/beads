@@ -1181,6 +1181,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An undated `bd defer` now hides the deferred issue's direct children
+  from `bd ready` (GH#7300).** Only a deferral with a future `--until` held
+  its children back; with no date — the "indefinite icebox" — the parent
+  vanished from `bd ready` while its open children stayed listed and
+  claimable. All ready-read paths (server-mode and embedded, including the
+  `--explain` counts pages) now treat a parent whose `status` is `deferred`
+  with no `defer_until` like a parent with a future date: direct children
+  stay out of `bd ready` until the defer ends, `bd ready --include-deferred`
+  lists them anyway, and a dated snooze whose date has passed keeps waking
+  its children exactly as before. Reported by @seniorquico; tests adapted
+  from @drakeo338's #7304.
+
 - **bd again reads `GT_ROOT` from a rig's `.beads/.env`** (#8117; also
   shipped in 1.3.4). `gc rig add` writes the city root there, and the
   `.beads/.env` allowlist from #7879 (also in 1.3.3) dropped it, printing

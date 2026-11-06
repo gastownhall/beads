@@ -12,8 +12,17 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
+// deferredParentProbeRegex matches the per-table deferred-parent gate: one
+// scalar SELECT of two EXISTS legs (a dated leg and an undated status leg)
+// that always answers a row — the boolean value is the gate's answer.
 func deferredParentProbeRegex(issueTable string) string {
-	return `SELECT 1 FROM ` + issueTable + `\s+WHERE defer_until IS NOT NULL\s+AND defer_until > UTC_TIMESTAMP\(\)\s+LIMIT 1`
+	return `SELECT \(EXISTS \(SELECT 1 FROM ` + issueTable + ` WHERE defer_until IS NOT NULL AND defer_until > UTC_TIMESTAMP\(\)\)` +
+		` OR EXISTS \(SELECT 1 FROM ` + issueTable + ` WHERE defer_until IS NULL AND status = 'deferred'\)\)`
+}
+
+// deferredParentGateRow builds the one boolean row the gate scans.
+func deferredParentGateRow(yes bool) *sqlmock.Rows {
+	return sqlmock.NewRows([]string{"gate"}).AddRow(yes)
 }
 
 // staleBlockedQueryRegex matches sqlbuild.StaleBlockedIDsSQL for one table
@@ -27,7 +36,9 @@ func deferredChildrenQueryRegex(depTable, issueTable string) string {
 	if issueTable == "wisps" {
 		targetCol = "depends_on_wisp_id"
 	}
-	return `SELECT dep\.issue_id\s+FROM ` + depTable + ` dep\s+JOIN ` + issueTable + ` parent ON parent\.id = dep\.` + targetCol + `\s+WHERE dep\.type = 'parent-child'\s+AND parent\.defer_until IS NOT NULL\s+AND parent\.defer_until > UTC_TIMESTAMP\(\)`
+	return `SELECT dep\.issue_id\s+FROM ` + depTable + ` dep\s+JOIN ` + issueTable + ` parent ON parent\.id = dep\.` + targetCol +
+		`\s+WHERE dep\.type = 'parent-child'\s+AND \(\(parent\.defer_until IS NOT NULL AND parent\.defer_until > UTC_TIMESTAMP\(\)\)` +
+		` OR \(parent\.defer_until IS NULL AND parent\.status = 'deferred'\)\)`
 }
 
 func beginMockTx(t *testing.T) (*sql.DB, sqlmock.Sqlmock, *sql.Tx) {

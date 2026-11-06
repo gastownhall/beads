@@ -560,7 +560,10 @@ var (
 )
 
 // deferredChildrenQuery selects the children, recorded in depTable, of parents
-// in issueTable whose defer_until is still in the future.
+// in issueTable that are deferred: a dated snooze still in the future, or an
+// undated row with status 'deferred' (`bd defer`'s indefinite icebox, GH#7300).
+// The rule itself renders only through sqlbuild.DeferredParentPredicate so
+// this scan and the existence gates above cannot drift apart.
 func deferredChildrenQuery(depTable, issueTable string) string {
 	targetCol := "depends_on_issue_id"
 	if issueTable == "wisps" {
@@ -571,9 +574,8 @@ func deferredChildrenQuery(depTable, issueTable string) string {
 				FROM %s dep
 				JOIN %s parent ON parent.id = dep.%s
 				WHERE dep.type = 'parent-child'
-				  AND parent.defer_until IS NOT NULL
-				  AND parent.defer_until > UTC_TIMESTAMP()
-			`, depTable, issueTable, targetCol)
+				  AND %s
+			`, depTable, issueTable, targetCol, sqlbuild.DeferredParentPredicate("parent"))
 }
 
 // getDeferredChildrenAllTablesInTx is getChildrenOfDeferredParentsInTx's
@@ -608,32 +610,36 @@ func getDeferredChildrenAllTablesInTx(ctx context.Context, tx DBTX) ([]string, e
 	return childIDs, nil
 }
 
-// getChildrenOfDeferredParentsInTx returns IDs of issues whose parent has a
-// future defer_until. Works within an existing transaction.
+// getChildrenOfDeferredParentsInTx returns IDs of issues whose parent is
+// deferred: a dated snooze still in the future, or an undated deferred row
+// (GH#7300's indefinite icebox). Works within an existing transaction. The
+// per-table gate renders the same rule through
+// sqlbuild.DeferredParentExistsSQL, whose scalar SELECT always answers a row:
+// the boolean value says whether any deferred parent exists, so nothing
+// between the two is inferred from the absence of a row.
 //
 //nolint:gosec // G201: depTable is selected from a hardcoded list below.
 func getChildrenOfDeferredParentsInTx(ctx context.Context, tx DBTX) ([]string, error) {
 	hasDeferredParent := false
 	for _, issueTable := range []string{"issues", "wisps"} {
 		//nolint:gosec // G201: issueTable is hardcoded to "issues" or "wisps"
-		var exists int
-		err := tx.QueryRowContext(ctx, fmt.Sprintf(`
-			SELECT 1 FROM %s
-			WHERE defer_until IS NOT NULL
-			  AND defer_until > UTC_TIMESTAMP()
-			LIMIT 1
-		`, issueTable)).Scan(&exists)
-		if err == nil {
+		var gate bool
+		err := tx.QueryRowContext(ctx, "SELECT "+sqlbuild.DeferredParentExistsSQL(issueTable)).Scan(&gate)
+		switch {
+		case err == nil && gate:
 			hasDeferredParent = true
+		case err == nil, errors.Is(err, sql.ErrNoRows):
+			// No deferred parent in this table. The scalar SELECT cannot
+			// answer no rows, but ErrNoRows has always meant false here, so
+			// keep reading it that way rather than failing a driver quirk.
+		case issueTable == "wisps" && isTableNotExistError(err):
+			// A pre-migration database legitimately has no wisp plane.
+		default:
+			return nil, fmt.Errorf("deferred parents: check deferred parents from %s: %w", issueTable, err)
+		}
+		if hasDeferredParent {
 			break
 		}
-		if errors.Is(err, sql.ErrNoRows) {
-			continue
-		}
-		if issueTable == "wisps" && isTableNotExistError(err) {
-			continue
-		}
-		return nil, fmt.Errorf("deferred parents: check future-deferred parents from %s: %w", issueTable, err)
 	}
 	if !hasDeferredParent {
 		return nil, nil

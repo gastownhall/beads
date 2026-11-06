@@ -146,3 +146,28 @@ func TestGetChildrenOfDeferredParentsInTx_UnrelatedErrorPropagates(t *testing.T)
 		t.Fatalf("a failed deferred-parent join did not propagate: %v", err)
 	}
 }
+
+// TestGetChildrenOfDeferredParentsInTx_GateFalseSkipsChildScans pins the gate
+// contract the scalar probe introduced for GH#7300: `SELECT (EXISTS ... OR
+// EXISTS ...)` always answers a row, so a false value — not only the absence of
+// one — must stop the walk before any child scan runs. sqlmock fails on any
+// unscripted query, so the missing child-scan expectations are the assertion:
+// none may run.
+func TestGetChildrenOfDeferredParentsInTx_GateFalseSkipsChildScans(t *testing.T) {
+	t.Parallel()
+
+	_, mock, tx := beginMockTx(t)
+	mock.ExpectQuery(deferredParentProbeRegex("issues")).WillReturnRows(deferredParentGateRow(false))
+	mock.ExpectQuery(deferredParentProbeRegex("wisps")).WillReturnRows(deferredParentGateRow(false))
+
+	got, err := getChildrenOfDeferredParentsInTx(context.Background(), tx)
+	if err != nil {
+		t.Fatalf("a false gate must not error: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("children = %v, want none (no child scan may have run)", got)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}
