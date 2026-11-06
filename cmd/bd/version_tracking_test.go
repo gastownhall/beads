@@ -869,3 +869,37 @@ func captureVersionBumpStdout(t *testing.T, fn func()) string {
 	}
 	return string(out)
 }
+
+// TestSettleBdVersionStampOutcomeTable pins the settlement matrix
+// (gastownhall/beads#6929): every outcome except bumpFailed consumes the
+// one-shot upgrade witness — skipped and settled trivially, deferred because
+// an operator decision is not a failure — while a failure keeps the stale
+// witness so the next eligible command retries. The deferred row goes through
+// classifyVersionBumpError exactly as reportVersionBumpRefusal does.
+func TestSettleBdVersionStampOutcomeTable(t *testing.T) {
+	cases := []struct {
+		name    string
+		outcome func() versionBumpOutcome
+		want    string
+	}{
+		{"skipped settles", func() versionBumpOutcome { return bumpSkipped }, "9.9.9"},
+		{"settled settles", func() versionBumpOutcome { return bumpSettled }, "9.9.9"},
+		{"gate deferral settles via classification", func() versionBumpOutcome {
+			return classifyVersionBumpError(&schema.RemoteMigrateGateError{CurrentVersion: 72, LatestVersion: 74, Pending: 2})
+		}, "9.9.9"},
+		{"consent deferral settles via classification", func() versionBumpOutcome {
+			return classifyVersionBumpError(&schema.MigrateConsentError{CurrentVersion: 72, LatestVersion: 74, Pending: 2})
+		}, "9.9.9"},
+		{"failure keeps the stale witness for the retry", func() versionBumpOutcome { return bumpFailed }, "0.22.0"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			localVersionPath := newTrackingWorkspace(t, "0.22.0", "9.9.9")
+			trackBdVersion()
+			settleBdVersionStamp(tc.outcome())
+			if got := readLocalVersion(localVersionPath); got != tc.want {
+				t.Errorf("witness = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
