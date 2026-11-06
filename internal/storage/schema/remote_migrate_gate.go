@@ -760,6 +760,21 @@ func (e *RemoteMigrateGateError) EscapeHint() string {
 	return "bd migrate --force"
 }
 
+// adoptDirectiveServerAddendum extends an adopt-shaped directive for server
+// storage (#6687): the move-aside happens on the serving host, out of the
+// server's data_dir, so an agent reading only the embedded recipe would
+// attempt an `mv` of a path that does not exist there. Appended by each
+// adopt-shaped directive arm.
+func (e *RemoteMigrateGateError) adoptDirectiveServerAddendum() string {
+	if !e.serverStorage() {
+		return ""
+	}
+	return " This database is served by a dolt sql-server, so the move-aside runs on the server host — stop the " +
+		"serving process, move the database's directory out of the server's actual data_dir, restart, then " +
+		"`bd bootstrap` from a workspace with direct access — not as commands from this workspace; surface the " +
+		"steps to the operator rather than attempting them here."
+}
+
 // AgentDirective is the non-runnable instruction surfaced to agents in place of
 // a ready-to-run migrate command. Migrating a shared remote is a coordination
 // decision — only ONE clone may migrate, and a second clone migrating
@@ -807,19 +822,26 @@ func (e *RemoteMigrateGateError) AgentDirective() string {
 	switch e.Decision {
 	case gateDecisionAdopt:
 		return "Adopt, do NOT migrate: the remote is already migrated, so migrating here would fork it (#4259). " +
-			"Adoption re-clones and replaces the local database (unpushed local work is lost), so it is a destructive " +
-			"operator decision — surface remote_migrate_gate.options to the operator, do NOT auto-run bd bootstrap."
+			"`bd bootstrap` never replaces an existing database — against one it reports \"Nothing to do.\" and " +
+			"changes nothing — so adoption starts by moving the existing database aside (remote_migrate_gate.options " +
+			"carries the ordered commands); the aside is what keeps unpushed local work recoverable. Still an " +
+			"operator decision: surface remote_migrate_gate.options, do NOT auto-run the commands." +
+			e.adoptDirectiveServerAddendum()
 	case gateDecisionAdoptFastForward:
 		return "Adopt, do NOT migrate: the remote is already migrated, and this clone's local history is a strict " +
 			"ancestor of the remote's with a clean working set, so adopting is loss-free (no unpushed commits, no " +
-			"uncommitted changes discarded) — unlike a typical adopt. Still surface remote_migrate_gate.options to " +
-			"the operator rather than auto-running bd bootstrap; the current adopt mechanism is unchanged until an " +
-			"automatic fast-forward lands (#4259 follow-up)."
+			"uncommitted changes discarded) — unlike a typical adopt. `bd bootstrap` still never replaces an " +
+			"existing database (\"Nothing to do.\"), so even this loss-free adopt starts by moving the existing " +
+			"database aside; surface remote_migrate_gate.options to the operator, do NOT auto-run the commands." +
+			e.adoptDirectiveServerAddendum()
 	case gateDecisionForkSkew:
 		return "Do NOT migrate: this clone and the remote already applied different content for migration(s) " +
 			FormatMigrationVersions(e.SkewVersions) + " — the schema has forked (#4259) and migrating cannot un-fork it. " +
-			"Resolving requires picking a canonical clone and re-bootstrapping the others, discarding their unpushed " +
-			"work — a data-loss decision. Surface remote_migrate_gate.options to the operator; do NOT auto-run anything."
+			"Resolving requires picking a canonical clone and re-bootstrapping the others; `bd bootstrap` never " +
+			"replaces an existing database (\"Nothing to do.\"), so each re-bootstrap starts by moving that clone's " +
+			"database aside — which is also what preserves its unpushed work. A data-loss decision: surface " +
+			"remote_migrate_gate.options to the operator; do NOT auto-run anything." +
+			e.adoptDirectiveServerAddendum()
 	case gateDecisionSharedNoRemote:
 		return "Coordination decision required: this database is shared with co-resident bd clients, and migrating " +
 			"promotes the schema for all of them at once — every client still on an older bd refuses the database " +

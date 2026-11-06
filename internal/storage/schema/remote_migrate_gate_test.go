@@ -642,3 +642,65 @@ func TestRemoteMigrateGateServerModeAdoptionGuidance(t *testing.T) {
 		}
 	})
 }
+
+// TestRemoteMigrateGateAdoptDirectiveNamesMoveAside pins the #6687 fix at the
+// agent-directive layer. The directive is what an agent reads INSTEAD of the
+// options, so it must carry the same fact the options now do: a bare
+// `bd bootstrap` no-ops against the existing database, adoption starts by
+// moving it aside, and on server storage the move happens on the host. It
+// must also stay what it always was — a non-runnable instruction to surface
+// the choice to the operator, including for the loss-free fast-forward case,
+// whose directive used to promise an automatic fast-forward "until (#4259
+// follow-up) lands" that has since landed without changing this contract.
+func TestRemoteMigrateGateAdoptDirectiveNamesMoveAside(t *testing.T) {
+	cases := []struct {
+		name     string
+		e        *RemoteMigrateGateError
+		lossFree bool
+	}{
+		{name: "adopt", e: &RemoteMigrateGateError{CurrentVersion: 53, LatestVersion: 67, Pending: 14, Decision: gateDecisionAdopt}},
+		{name: "adopt-ff", e: &RemoteMigrateGateError{CurrentVersion: 53, LatestVersion: 67, Pending: 14, Decision: gateDecisionAdoptFastForward}, lossFree: true},
+		{name: "fork-skew", e: &RemoteMigrateGateError{CurrentVersion: 53, LatestVersion: 67, Pending: 14, Decision: gateDecisionForkSkew, SkewVersions: []int{54}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			d := tc.e.AgentDirective()
+
+			// The move-aside prerequisite is named, not implied: an agent
+			// told only "adopt" will run the bare bootstrap, which no-ops.
+			if !strings.Contains(d, "aside") {
+				t.Errorf("directive does not name the move-aside prerequisite:\n%s", d)
+			}
+			if !strings.Contains(d, "Nothing to do.") {
+				t.Errorf("directive does not explain why a bare bootstrap no-ops:\n%s", d)
+			}
+			// The directive stays a surfaced choice, never an auto-run.
+			if !strings.Contains(d, "do NOT auto-run") {
+				t.Errorf("directive lost its do-NOT-auto-run instruction:\n%s", d)
+			}
+			// And stays non-runnable.
+			if strings.Contains(d, "bd migrate --force") || strings.Contains(d, AllowRemoteMigrateEnv+"=1 bd migrate") {
+				t.Errorf("directive embeds a runnable escape command:\n%s", d)
+			}
+			if tc.lossFree && strings.Contains(d, "automatic fast-forward lands") {
+				t.Errorf("directive still promises an automatic fast-forward that has landed (#4259 follow-up):\n%s", d)
+			}
+		})
+
+		t.Run(tc.name+"+server", func(t *testing.T) {
+			e := *tc.e
+			e.ServerMode = true
+			d := e.AgentDirective()
+
+			// Server storage: the move is on the host, out of the server's
+			// data_dir — the directive must say so rather than let an agent
+			// attempt an embedded move.
+			if !strings.Contains(d, "server host") || !strings.Contains(d, "data_dir") {
+				t.Errorf("server directive lacks the host/data_dir addendum:\n%s", d)
+			}
+			if strings.Contains(d, "embeddeddolt") {
+				t.Errorf("server directive names the embedded path:\n%s", d)
+			}
+		})
+	}
+}
