@@ -356,3 +356,29 @@ func TestCustomConfigCacheHitSkipsDatabase(t *testing.T) {
 		})
 	}
 }
+
+// TestCustomConfigCacheDiscardsPartialReadOnConfigFailure: when the
+// normalized statuses read but the legacy config read fails, the loader serves
+// config.yaml alone for this call and keeps nothing from the partial database
+// read, then reads again on the next call.
+func TestCustomConfigCacheDiscardsPartialReadOnConfigFailure(t *testing.T) {
+	withCustomVocabularyYAML(t, "triage:wip", "gizmo")
+	store, mock, _ := vhCountedStore(t)
+	mock.ExpectBegin()
+	mock.ExpectQuery(ccStatusesQuery).WillReturnRows(sqlmock.NewRows([]string{"name", "category"}).AddRow("review", "wip"))
+	mock.ExpectQuery(ccTypesQuery).WillReturnRows(sqlmock.NewRows([]string{"name"}))
+	mock.ExpectQuery(ccConfigQuery).WithArgs("status.custom", "types.custom").WillReturnError(errCustomConfigInjected)
+	mock.ExpectRollback()
+
+	ccAssertVocabulary(t, store, map[string][]string{
+		"GetCustomStatuses":         {"triage"},
+		"GetCustomStatusesDetailed": {"triage:wip"},
+		"GetCustomTypes":            {"gizmo"},
+	})
+	if statusLoaded, typeLoaded := ccFlags(store); statusLoaded || typeLoaded {
+		t.Errorf("cache flags after a partial read = (status %v, type %v), want both false", statusLoaded, typeLoaded)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet SQL expectations: %v", err)
+	}
+}

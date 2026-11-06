@@ -388,3 +388,56 @@ func TestCustomTypesYAMLFallback(t *testing.T) {
 type errSentinel string
 
 func (e errSentinel) Error() string { return string(e) }
+
+// TestResolveCustomConfigInTxReturnsReadErrors pins bd-dpn4op (GH#5581): a
+// failed vocabulary query is an error, not an empty successful resolution the
+// store would then cache. Partial normalized data read before the failure is
+// discarded rather than returned beside the error.
+func TestResolveCustomConfigInTxReturnsReadErrors(t *testing.T) {
+	injected := errors.New("injected select failure")
+	statusQuery := regexp.QuoteMeta("SELECT name, category FROM custom_statuses ORDER BY name")
+	typeQuery := regexp.QuoteMeta("SELECT name FROM custom_types ORDER BY name")
+	configQuery := regexp.QuoteMeta("SELECT `key`, value FROM config WHERE `key` IN (?,?)")
+
+	cases := []struct {
+		name string
+		arm  func(mock sqlmock.Sqlmock)
+	}{
+		{"custom_statuses select", func(mock sqlmock.Sqlmock) {
+			mock.ExpectQuery(statusQuery).WillReturnError(injected)
+		}},
+		{"custom_types select after statuses", func(mock sqlmock.Sqlmock) {
+			mock.ExpectQuery(statusQuery).WillReturnRows(sqlmock.NewRows([]string{"name", "category"}).AddRow("review", "wip"))
+			mock.ExpectQuery(typeQuery).WillReturnError(injected)
+		}},
+		{"config select after empty tables", func(mock sqlmock.Sqlmock) {
+			mock.ExpectQuery(statusQuery).WillReturnRows(sqlmock.NewRows([]string{"name", "category"}))
+			mock.ExpectQuery(typeQuery).WillReturnRows(sqlmock.NewRows([]string{"name"}))
+			mock.ExpectQuery(configQuery).WithArgs("status.custom", "types.custom").WillReturnError(injected)
+		}},
+		{"config select after populated statuses and empty types", func(mock sqlmock.Sqlmock) {
+			mock.ExpectQuery(statusQuery).WillReturnRows(sqlmock.NewRows([]string{"name", "category"}).AddRow("review", "wip"))
+			mock.ExpectQuery(typeQuery).WillReturnRows(sqlmock.NewRows([]string{"name"}))
+			mock.ExpectQuery(configQuery).WithArgs("status.custom", "types.custom").WillReturnError(injected)
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			withYAMLCustomTypes(t, "gizmo")
+			db, mock, tx := beginMockTx(t)
+			defer db.Close()
+			tc.arm(mock)
+
+			statuses, customTypes, err := ResolveCustomConfigInTx(context.Background(), tx)
+			if !errors.Is(err, injected) {
+				t.Fatalf("ResolveCustomConfigInTx error = %v, want one wrapping %v", err, injected)
+			}
+			if statuses != nil || customTypes != nil {
+				t.Errorf("ResolveCustomConfigInTx results beside an error = (%#v, %#v), want (nil, nil)", statuses, customTypes)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Errorf("unmet SQL expectations: %v", err)
+			}
+		})
+	}
+}

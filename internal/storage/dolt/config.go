@@ -196,8 +196,9 @@ func (s *DoltStore) GetCustomStatusesDetailed(ctx context.Context) ([]types.Cust
 // GetCustomTypes returns custom issue type values from config.
 // If the database doesn't have custom types configured, falls back to config.yaml.
 // Returns an empty slice if no custom types are configured.
-// Results are cached per DoltStore lifetime and invalidated when SetConfig
-// updates the "types.custom" key.
+// A successful read is cached per DoltStore lifetime and invalidated when
+// SetConfig updates the "types.custom" key; a failed read answers from
+// config.yaml without caching, so the next call reads the database again.
 func (s *DoltStore) GetCustomTypes(ctx context.Context) ([]string, error) {
 	s.loadCustomConfigCache(ctx)
 	s.cacheMu.Lock()
