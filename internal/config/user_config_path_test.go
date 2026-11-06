@@ -500,6 +500,52 @@ func TestInitializeIgnoresInvalidNativeWhenDocumentedExists(t *testing.T) {
 	})
 }
 
+// GH#8113, AC-3: when the documented file is absent, the native file is
+// still the modern user config: it overrides legacy, project config
+// overrides it, its private values remain available, the public resolver
+// names it, and the loader still probes it.
+func TestInitializeReadsNativeUserConfigWhenDocumentedAbsent(t *testing.T) {
+	candidates := isolateUserConfigEnvironment(t)
+	writeUserConfigFile(t, candidates.legacy, "actor: legacy\n")
+	writeUserConfigFile(t, candidates.native, "actor: native\n")
+
+	probed := probeUserConfigStats(t, Initialize)
+	if got := GetString("actor"); got != "native" {
+		t.Errorf("actor = %q, want the native file's actor over legacy", got)
+	}
+	if got := PrivateConfigValue("actor"); got != "native" {
+		t.Errorf("PrivateConfigValue(actor) = %q, want the native value as a private source", got)
+	}
+	nativeProbe := false
+	for _, path := range probed {
+		if path == candidates.native {
+			nativeProbe = true
+		}
+	}
+	if !nativeProbe {
+		t.Errorf("loader never probed native candidate %s; probed %v", candidates.native, probed)
+	}
+
+	projectRoot := t.TempDir()
+	writeUserConfigFile(t, filepath.Join(projectRoot, ".beads", "config.yaml"), "actor: project\n")
+	t.Chdir(projectRoot)
+	ResetForTesting()
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+	if got := GetString("actor"); got != "project" {
+		t.Errorf("actor = %q, want the project config's actor over native and legacy", got)
+	}
+
+	path, err := UserConfigYamlPath()
+	if err != nil {
+		t.Fatalf("UserConfigYamlPath: %v", err)
+	}
+	if path != candidates.native {
+		t.Errorf("UserConfigYamlPath() = %q, want the native file %q", path, candidates.native)
+	}
+}
+
 // GH#8113: when the documented <home>/.config/bd/config.yaml exists,
 // Initialize must not probe the native os.UserConfigDir()/bd/config.yaml (on
 // macOS that stat raises an app-data privacy prompt on every launch). A native
