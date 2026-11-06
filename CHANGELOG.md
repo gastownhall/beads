@@ -1208,14 +1208,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Generated git hooks run a chained `<hook>.old` (the hook
-  `bd hooks install --chain` keeps) themselves when `bd` is not on `PATH`,
-  with git's arguments and standard input, so a failing pre-commit or
-  pre-push check stops the commit or push instead of being skipped
-  (GH#6751, building on #6840 by vishnujayvel).
-  A chained hook that exits 3, 124 or 142, statuses the section reserves
-  for skips and timeouts, makes `bd hooks run` fail with exit 1 and a
-  warning naming its status.
+- Generated git hooks run a chained `<hook>.old` themselves when `bd` is not
+  on `PATH`, with git's arguments and standard input, so a failing
+  pre-commit or pre-push check stops the commit or push instead of being
+  skipped (GH#6751, building on #6840 by vishnujayvel).
+  With or without `bd`, a `<hook>.old` is skipped only when it is itself a
+  beads hook: one beads wrote, or one that calls `bd hooks run`.
+  `bd hooks run` no longer skips a chained hook that merely mentions a beads
+  marker, such as a check that greps for the beads section.
+  A chained hook that exits 124 or 142, which the hook section reads as its
+  own timeout, or 3, which sections installed earlier read as a skip, makes
+  `bd hooks run` fail with exit 1 and a warning naming its status.
   A status 3 from `bd hooks run` now fails the hook instead of printing
   `database not initialized` and continuing; `bd hooks run` never opens the
   database, so that 3 was the chained hook's verdict.

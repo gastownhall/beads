@@ -68,21 +68,23 @@ bd hooks install --chain    # Run existing hooks before bd hooks
 Hook installation is worktree-aware: `bd` resolves the shared git directory,
 so installing from a linked worktree works.
 
-`--chain` keeps an existing hook as `<hook>.old` beside the beads hook, and
-`bd hooks run` runs it first. If `bd` is not on `PATH` when the hook fires,
-the hook runs `<hook>.old` itself with git's arguments and standard input, so
-a pre-commit or pre-push check that fails still stops the commit or push
-instead of being skipped. A `<hook>.old` that is itself a beads hook (it
-carries beads markers or calls `bd hooks run`) is not run this way. Hooks
-installed before this change skip `<hook>.old` when `bd` is missing; run
-`bd hooks install` (add `--shared` for shared hooks) once to refresh them.
+A hook kept beside the beads hook as `<hook>.old` (for example, one you moved
+there by hand) is chained: `bd hooks run` runs it first. If `bd` is not on
+`PATH` when the hook fires, the hook runs `<hook>.old` itself with git's
+arguments and standard input, so a pre-commit or pre-push check that fails
+still stops the commit or push instead of being skipped. A `<hook>.old` that
+is itself a beads hook (one beads wrote, or one that calls `bd hooks run`) is
+skipped either way, while a check that merely mentions a beads marker, such
+as one that greps for the beads section, runs. Hooks installed before this
+change skip `<hook>.old` when `bd` is missing; run `bd hooks install` (add
+`--shared` for shared hooks) once to refresh them.
 
-The hook passes on the chained hook's exit status. Statuses 3, 124 and 142
-are reserved for the hook's own skip and timeout handling, so when
-`bd hooks run` runs a chained hook that exits with one of them, it fails with
-exit 1 and a warning naming the original status. When the hook runs
-`<hook>.old` itself because `bd` is missing, every status passes through
-unchanged.
+The hook passes on the chained hook's exit status. The hook reads 124 and 142
+from `bd hooks run` as its own timeout, and hooks installed before this change
+also read 3 as a skip, so when `bd hooks run` runs a chained hook that exits
+3, 124 or 142, it fails with exit 1 and a warning naming the original status.
+When the hook runs `<hook>.old` itself because `bd` is missing, every status
+passes through unchanged.
 
 ### Status
 

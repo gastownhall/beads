@@ -199,8 +199,10 @@ func TestGeneratedHookChainsWhenBDUnavailable(t *testing.T) {
 		}
 	})
 
-	// The classifier must match the marker lines runChainedHook's recursion
-	// guard keys on, not any line that mentions BEADS INTEGRATION.
+	// A foreign gate that only mentions a beads marker, or names bd hooks
+	// without calling it, is still chained: it is not a beads hook, and
+	// runChainedHook decides the same with bd on PATH
+	// (TestChainedHookClassifiersAgree).
 	for _, tc := range []struct{ name, line string }{
 		{name: "foreign hook merely mentioning BEADS INTEGRATION", line: "# unrelated hook, see BEADS INTEGRATION docs for context"},
 		{name: "foreign hook starting with '# --- ' but not the BEGIN marker", line: "# --- NOTE: not a BEADS INTEGRATION marker"},
@@ -817,6 +819,117 @@ func TestGeneratedHookWithoutEligibleChainKeepsSkip(t *testing.T) {
 				})
 			}
 		}
+	}
+}
+
+// TestChainedHookClassifiersAgree pins that a chained <hook>.old is run or
+// skipped alike with or without bd on PATH (GH#6751). runChainedHook's
+// recursion guard decides when bd hooks run runs the hook; the generated
+// section's classifier decides when bd is missing, and also whether the
+// section refuses when the deadline ends a gate hook. Every sidecar here exits
+// 1 when it runs.
+func TestChainedHookClassifiersAgree(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chained .old fixtures are POSIX shell scripts")
+	}
+	script := func(body string) func(*testing.T, string) {
+		return func(t *testing.T, dir string) {
+			writeHookProcessFixture(t, dir, "pre-commit.old", body)
+		}
+	}
+	gate := func(line string) func(*testing.T, string) {
+		return script(strings.Replace(hookChainWitnessSidecar("1"), "\n", "\n"+line+"\n", 1))
+	}
+	for _, tc := range []struct {
+		name    string
+		write   func(t *testing.T, dir string)
+		wantRun bool
+		// compiled sidecars cannot count their runs in the witness.
+		compiled bool
+	}{
+		{name: "plain foreign gate", write: script(hookChainWitnessSidecar("1")), wantRun: true},
+		{name: "comment quoting the BEGIN marker mid-line", write: gate(`# keep this above the "# --- BEGIN BEADS INTEGRATION" line`), wantRun: true},
+		{name: "comment quoting the shim marker mid-line", write: gate("# installed next to a # bd-shim v1 hook"), wantRun: true},
+		{name: "bd-shim-like word", write: gate("# bd-shimmer: unrelated tool"), wantRun: true},
+		{name: "gate grepping for the BEGIN marker", write: gate(`grep -q '# --- BEGIN BEADS INTEGRATION' "$0" 2>/dev/null || :`), wantRun: true},
+		{name: "mention of BEADS INTEGRATION", write: gate("# unrelated hook, see BEADS INTEGRATION docs for context"), wantRun: true},
+		{name: "'# --- ' line that is not the BEGIN marker", write: gate("# --- NOTE: not a BEADS INTEGRATION marker"), wantRun: true},
+		{name: "BEGIN-marker-shaped line with extra words", write: gate("# --- BEGIN foo BEADS INTEGRATION"), wantRun: true},
+		{name: "bd hooks named without a call", write: gate("# see: bd hooks list; xbd hooks run is not bd; bd hooks runner"), wantRun: true},
+		{name: "bd and hooks run on separate lines", write: gate(": bd\nhooks run 2>/dev/null || :"), wantRun: true},
+		{name: "compiled sidecar", write: func(t *testing.T, dir string) {
+			copyHookChainBinary(t, filepath.Join(dir, "pre-commit.old"), 0o755)
+		}, wantRun: true, compiled: true},
+		{name: "managed section", write: gate(generateHookSection("pre-commit"))},
+		{name: "thin shim", write: gate("# bd-shim v2")},
+		{name: "legacy version marker", write: gate("# bd-hooks-version: 0.40.0")},
+		{name: "inline marker mid-line", write: gate(": checked # bd (beads)")},
+		{name: "shim marker on a last line without a newline", write: script(hookChainWitnessSidecar("1") + "# bd-shim v2")},
+		{name: "bd hooks run call", write: gate(`: exec bd hooks run pre-commit "$@"`)},
+		{name: "bd hooks run call with tabs and spaces", write: gate(": /usr/local/bin/bd\thooks   \trun pre-commit")},
+		{name: "commented-out bd hooks run call", write: gate(`# bd hooks run pre-commit "$@"`)},
+		{name: "non-executable sidecar", write: func(t *testing.T, dir string) {
+			path := filepath.Join(dir, "pre-commit.old")
+			if err := os.WriteFile(path, []byte(hookChainWitnessSidecar("1")), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(path, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "directory sidecar", write: func(t *testing.T, dir string) {
+			if err := os.Mkdir(filepath.Join(dir, "pre-commit.old"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			wantExit, wantRuns := 0, 0
+			if tc.wantRun {
+				wantExit = 1
+				if !tc.compiled {
+					wantRuns = 1
+				}
+			}
+
+			// bd on PATH: bd hooks run decides, through runChainedHook.
+			repoDir := setupGuardTestRepo(t)
+			hooksDir := filepath.Join(repoDir, ".git", "hooks")
+			if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			tc.write(t, hooksDir)
+			witness := filepath.Join(t.TempDir(), "witness")
+			t.Setenv("HOOK_TEST_WITNESS", witness)
+			var code int
+			stderr := captureStderr(t, func() { code = runChainedHook("pre-commit", nil) })
+			if runs := hookChainWitnessRuns(t, witness); code != wantExit || runs != wantRuns {
+				t.Errorf("with bd: runChainedHook = %d after %d sidecar runs, want %d after %d\n%s", code, runs, wantExit, wantRuns, stderr)
+			}
+
+			// bd missing: the section decides, and runs the sidecar itself.
+			witness = filepath.Join(t.TempDir(), "witness")
+			result := runGeneratedHookProcessWithSetup(t, hookProcessCase{
+				hookName: "pre-commit",
+				noBD:     true,
+				extraEnv: []string{"HOOK_TEST_WITNESS=" + witness},
+			}, func(hookDir string) { tc.write(t, hookDir) })
+			if runs := hookChainWitnessRuns(t, witness); result.exitCode != wantExit || runs != wantRuns {
+				t.Errorf("without bd: hook exit = %d after %d sidecar runs, want %d after %d\n%s", result.exitCode, runs, wantExit, wantRuns, result.output)
+			}
+
+			// The deadline ends bd hooks run: the section refuses only for a
+			// sidecar that bd hooks run would have run.
+			result = runGeneratedHookProcessWithSetup(t, hookProcessCase{
+				hookName: "pre-commit",
+				fixtures: []hookProcessFixture{{name: "timeout", body: hookProcessGNUTimeoutStub}},
+				bdExit:   124,
+				extraEnv: []string{"HOOK_TEST_WITNESS=" + filepath.Join(t.TempDir(), "witness")},
+			}, func(hookDir string) { tc.write(t, hookDir) })
+			if refused := strings.Contains(result.output, "gate outcome is unknown"); result.exitCode != wantExit || refused != tc.wantRun {
+				t.Errorf("at the deadline: hook exit = %d, refused = %v; want %d, %v\n%s", result.exitCode, refused, wantExit, tc.wantRun, result.output)
+			}
+		})
 	}
 }
 

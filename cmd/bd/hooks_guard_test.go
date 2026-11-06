@@ -411,10 +411,10 @@ func TestUninstallHooksPreservesExternalIntegrationHook(t *testing.T) {
 // guard must skip it even though it is not IsBdHook, and must still run a plain
 // .old.
 //
-// The delegating fixture comments its "bd hooks run" line out. The classifier
-// matches the call anywhere in the file, so it still classifies as an external
-// integration, but if the guard stops firing it only leaves the marker behind
-// instead of recursing.
+// The delegating fixture comments its "bd hooks run" line out. The guard
+// matches the call anywhere in a line, so it still counts as delegation, but if
+// the guard stops firing it only leaves the marker behind instead of
+// recursing.
 func TestRunChainedHookSkipsDelegatingOldHook(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("chained .old fixtures are POSIX shell scripts")
@@ -446,14 +446,14 @@ func TestRunChainedHookSkipsDelegatingOldHook(t *testing.T) {
 			}
 
 			// Pin the classification the guard keys on, so a fixture that
-			// stopped looking like an integration cannot pass for the wrong
+			// stopped looking like delegation cannot pass for the wrong
 			// reason.
 			info, err := getHookVersion(oldHook)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if info.IsBdHook || info.IsExternalIntegration != tc.delegates {
-				t.Fatalf("fixture classified as %+v, want IsExternalIntegration=%v and IsBdHook=false", info, tc.delegates)
+			if beads := isBeadsChainedHook(script); info.IsBdHook || beads != tc.delegates {
+				t.Fatalf("fixture classified as %+v with isBeadsChainedHook=%v, want IsBdHook=false and isBeadsChainedHook=%v", info, beads, tc.delegates)
 			}
 
 			if code := runChainedHook("pre-commit", nil); code != 0 {

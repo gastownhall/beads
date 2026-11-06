@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 
@@ -103,13 +104,18 @@ const hookTimeoutKillAfterSeconds = 2
 // Chained hooks (GH#6751, building on PR #6840 by vishnujayvel): bd hooks run
 // runs <hookName>.old, a foreign tool's hook, before its own work, so the
 // section must not let a skipped bd skip that gate too.
-//   - The section classifies <hookName>.old as runChainedHook does: an
-//     executable regular file is chained unless a script line marks it as bd's
-//     own, which would chain back into bd: a line starting with the section,
-//     shim or version marker (getHookVersion's prefix checks), an inline
-//     marker anywhere, or bd hooks run delegation. Only a script, a file
-//     whose first line starts with #!, is scanned, so a binary stays eligible
-//     without a whole-file read, and a file the shell cannot read is chained.
+//   - The section classifies <hookName>.old by runChainedHook's rules
+//     (isBeadsChainedHook): an executable regular file is chained unless it
+//     is a beads hook, which would chain back into bd: a line starting with
+//     the section, shim or version marker, the inline marker anywhere in a
+//     line, or a line calling bd hooks run (spaces or tabs between the
+//     words). A marker quoted later in a line does not count, so a foreign
+//     gate that mentions one runs with or without bd on PATH. Only a script,
+//     a file whose first line starts with #!, is scanned, so a binary stays
+//     eligible without a whole-file read, and a file the shell cannot read is
+//     chained. runChainedHook reads any file, so the two differ for a file
+//     that is not a script but holds one of those lines.
+//     TestChainedHookClassifiersAgree runs both over the same sidecars.
 //     The classifier uses shell builtins only (minimal PATHs are the case it
 //     exists for) and reads the file on its own descriptor, leaving the hook's
 //     stdin to the chained hook. Its marker patterns are split into adjacent
@@ -1858,6 +1864,38 @@ func resetHooksPathAt(repoRoot, commonDir, storageHooksDir string, configEnv []s
 // Hook Implementation Functions (called by thin shims via 'bd hooks run')
 // =============================================================================
 
+// bdHooksRunCallPattern matches a bd hooks run call on one line of a hook,
+// its words separated by spaces or tabs as the shell separates them. doctor's
+// pattern, which also matches across a line break, decides only how a hook is
+// reported.
+var bdHooksRunCallPattern = regexp.MustCompile(`\bbd[ \t]+hooks[ \t]+run\b`)
+
+// isBeadsChainedHook reports whether a chained <hook>.old with this content is
+// a beads hook, which runChainedHook must not run: running it would redo bd's
+// hook work, or call bd hooks run, which chains to the same .old again without
+// bound (GH#843, GH#1120). That is a line starting with the section, shim or
+// version marker, the inline marker anywhere in a line, or a line calling bd
+// hooks run, the shape beads prescribes for external managers (GH#946).
+//
+// A marker quoted later in a line does none of that, so such a hook runs,
+// although getHookVersion reports it as an external integration: it may be a
+// foreign gate (GH#6751). This is a recursion question, not ownership. The
+// generated section applies the same rules to a script when bd is not on PATH
+// (see generateHookSection), so a gate runs or is skipped alike with or
+// without bd.
+func isBeadsChainedHook(content string) bool {
+	for _, line := range strings.Split(content, "\n") {
+		if strings.HasPrefix(line, hookSectionBeginPrefix) ||
+			strings.HasPrefix(line, shimVersionPrefix) ||
+			strings.HasPrefix(line, hookVersionPrefix) ||
+			strings.Contains(line, inlineHookMarker) ||
+			bdHooksRunCallPattern.MatchString(line) {
+			return true
+		}
+	}
+	return false
+}
+
 // runChainedHook runs a .old hook if it exists. Returns the exit code.
 // If the hook doesn't exist, returns 0 (success).
 func runChainedHook(hookName string, args []string) int {
@@ -1869,26 +1907,23 @@ func runChainedHook(hookName string, args []string) int {
 
 	oldHookPath := filepath.Join(hooksDir, hookName+".old")
 
-	// Check if the .old hook exists and is executable
+	// Check if the .old hook is an executable regular file, as the generated
+	// section does before it runs one without bd
 	info, err := os.Stat(oldHookPath)
 	if err != nil {
 		return 0 // No chained hook
 	}
-	if info.Mode().Perm()&0111 == 0 {
-		return 0 // Not executable
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0111 == 0 {
+		return 0 // Not an executable file
 	}
 
-	// Check if .old is itself a bd hook (shim or inline) - skip to prevent infinite recursion
-	// This can happen if user runs `bd hooks install --chain` multiple times,
-	// renaming an existing bd hook to .old. See: GH#843, GH#1120
-	//
-	// IsExternalIntegration counts here too: a .old that delegates via
-	// "bd hooks run" re-enters bd, which chains to the same .old again. This is a
-	// recursion question ("would running this call us back?"), not an ownership
-	// question, so it takes the wider predicate — unlike the write sites, which
-	// stay on IsBdHook alone.
-	versionInfo, err := getHookVersion(oldHookPath)
-	if err == nil && (versionInfo.IsBdHook || versionInfo.IsExternalIntegration) {
+	// Skip a .old that is itself a beads hook (see isBeadsChainedHook). This
+	// can happen if a user ran `bd hooks install --chain` multiple times,
+	// renaming an existing bd hook to .old (GH#843, GH#1120), or if .old
+	// delegates via "bd hooks run" like an external manager's hook. A .old
+	// that cannot be read is run, as the section runs one it cannot read.
+	content, err := os.ReadFile(oldHookPath) // #nosec G304 -- path is the chained hook in the git hooks directory
+	if err == nil && isBeadsChainedHook(string(content)) {
 		// Skip execution - .old would call us again
 		return 0
 	}
