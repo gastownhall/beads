@@ -891,6 +891,28 @@ func TestMigrateResume_JournalFromBeforeEffectiveIdleTimeout(t *testing.T) {
 	}
 }
 
+func TestMigrateJournal_SaveRoundTrip(t *testing.T) {
+	beadsDir := t.TempDir()
+	root := filepath.Join(beadsDir, "dolt")
+	j := &migrateJournal{
+		Version: 1, SourceMode: configfile.DoltModeServer, TargetMode: configfile.DoltModeProxiedServer,
+		RootPath: root, Sidecar: &configfile.ProxiedServerClientInfo{RootPath: root},
+		Ownership: "managed-local", Attempt: 1,
+	}
+	for _, phase := range []migratePhase{migratePrepared, migrateTargetConfigured} {
+		j.Phase = phase
+		require.NoError(t, saveMigrateJournal(beadsDir, j))
+		loaded, err := loadMigrateJournal(beadsDir)
+		require.NoError(t, err)
+		require.Equal(t, j, loaded)
+	}
+	entries, err := os.ReadDir(beadsDir)
+	require.NoError(t, err)
+	require.Len(t, entries, 1, "save must not leave temporary files")
+	require.Equal(t, migrateJournalFileName, entries[0].Name())
+	require.False(t, entries[0].IsDir())
+}
+
 func TestMigrateJournal_UnknownPhaseFailsClosed(t *testing.T) {
 	beadsDir := migrateModeWorkspace(t, configfile.DoltModeServer)
 	path := migrateJournalPath(beadsDir)
