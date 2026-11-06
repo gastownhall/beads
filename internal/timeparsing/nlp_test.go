@@ -336,6 +336,11 @@ func TestParseRelativeTimeNormalizesToUTC(t *testing.T) {
 		run(t, utcNow, []testCase{
 			{input: "2026-11-07 08:30", want: time.Date(2026, 11, 7, 8, 30, 0, 0, time.UTC)},
 			{input: "2026-11-07T08:30", want: time.Date(2026, 11, 7, 8, 30, 0, 0, time.UTC)},
+			// Fractional seconds were accepted by the seconds-bearing
+			// layouts before the minute layouts and date-prefix guard
+			// landed, and must stay accepted with the exact fraction.
+			{input: "2026-11-07 08:30:00.5", want: time.Date(2026, 11, 7, 8, 30, 0, 500000000, time.UTC)},
+			{input: "2026-11-07T08:30:00.5", want: time.Date(2026, 11, 7, 8, 30, 0, 500000000, time.UTC)},
 		})
 	})
 }

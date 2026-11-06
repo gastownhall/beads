@@ -1208,6 +1208,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Date/time flags and query time bounds now accept a zone-less datetime
+  without seconds, with either separator: `bd update <id> --defer
+  "2026-11-07 08:30"` stores 08:30 that day instead of 11:07 today, and the
+  `T` form no longer errors while the space form half-parsed (#8167). Such
+  inputs matched no absolute format and fell through to natural-language
+  parsing, which read the date fragment as a clock time and dropped the
+  year. Input that begins with a `YYYY-MM-DD` date but matches no absolute
+  form (`2026-11-07 08:30 PM`, `2026-11-07 08:30Z`) is now rejected with an
+  error naming the accepted forms instead of silently becoming a different
+  time.
 - `bd config get` for a config.yaml, git-config or user-global key no longer
   opens the database just because one exists, so it answers from those files
   while the Dolt server is down instead of failing the open (GH#5108). In
