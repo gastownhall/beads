@@ -540,3 +540,65 @@ func TestFetchPrelinkedIssuesSkipsBatchWithNothingToCheck(t *testing.T) {
 		})
 	}
 }
+
+// TestFetchPrelinkedIssuesBatchMatchesPerIssue covers AC-2: over the same
+// locals and history, the batch path and the per-issue path hydrate the
+// same issues in the same order, mark the same locals, and make the same
+// FetchIssue calls.
+func TestFetchPrelinkedIssuesBatchMatchesPerIssue(t *testing.T) {
+	ctx := context.Background()
+	lastSync := prelinkLastSync
+	sc := newPrelinkScenario()
+	legacyStore, batchStore := sc.stores()
+
+	legacy := runPrelinked(ctx, sc, legacyStore, newPrelinkTracker(sc.remote...), &lastSync)
+	batch := runPrelinked(ctx, sc, batchStore, newPrelinkTracker(sc.remote...), &lastSync)
+
+	if len(batchStore.batchCalls) != 1 || len(batchStore.singleCalls) != 0 {
+		t.Fatalf("batch store: %d batch calls, %d single calls; want 1 and 0", len(batchStore.batchCalls), len(batchStore.singleCalls))
+	}
+	if fmt.Sprint(batchStore.batchCalls[0]) != fmt.Sprint(sc.eligible) {
+		t.Fatalf("batch ids = %q, want the eligible locals %q", batchStore.batchCalls[0], sc.eligible)
+	}
+	if fmt.Sprint(legacyStore.singleCalls) != fmt.Sprint(sc.eligible) {
+		t.Fatalf("legacy single calls = %q, want the eligible locals %q", legacyStore.singleCalls, sc.eligible)
+	}
+
+	// The legacy answer is pinned too, so agreement cannot hide a scenario
+	// that exercises nothing.
+	want := prelinkOutcome{
+		hydrated: []string{"EXT-CHANGED", "EXT-MISSING", "EXT-NULL", "EXT-DUP"},
+		localIDs: []string{"bd-changed", "bd-dup-a", "bd-missing", "bd-null", "bd-overlap"},
+		fetched:  []string{"EXT-CHANGED", "EXT-MISSING", "EXT-NULL", "EXT-DUP", "EXT-GONE"},
+	}
+	for name, got := range map[string]prelinkOutcome{"legacy": legacy, "batch": batch} {
+		if got.err != nil {
+			t.Fatalf("%s: fetchPrelinkedIssues: %v", name, got.err)
+		}
+		if fmt.Sprint(got.hydrated, got.localIDs, got.fetched) != fmt.Sprint(want.hydrated, want.localIDs, want.fetched) {
+			t.Errorf("%s: hydrated %v, local ids %v, FetchIssue %v; want %v, %v, %v",
+				name, got.hydrated, got.localIDs, got.fetched, want.hydrated, want.localIDs, want.fetched)
+		}
+		if len(got.warnings) != 0 {
+			t.Errorf("%s: warnings %q, want none", name, got.warnings)
+		}
+	}
+
+	// A FetchIssue error aborts both paths at the same issue with the same
+	// partial result.
+	failing := func() *prelinkTracker {
+		tracker := newPrelinkTracker(sc.remote...)
+		tracker.failFetch = map[string]error{"EXT-NULL": errors.New("tracker down")}
+		return tracker
+	}
+	legacyStore, batchStore = sc.stores()
+	legacy = runPrelinked(ctx, sc, legacyStore, failing(), &lastSync)
+	batch = runPrelinked(ctx, sc, batchStore, failing(), &lastSync)
+	if legacy.err == nil || batch.err == nil || legacy.err.Error() != batch.err.Error() {
+		t.Fatalf("FetchIssue failure: legacy err %v, batch err %v; want the same error", legacy.err, batch.err)
+	}
+	if fmt.Sprint(legacy.hydrated, legacy.localIDs, legacy.fetched) != fmt.Sprint(batch.hydrated, batch.localIDs, batch.fetched) {
+		t.Errorf("FetchIssue failure: legacy %v %v %v, batch %v %v %v",
+			legacy.hydrated, legacy.localIDs, legacy.fetched, batch.hydrated, batch.localIDs, batch.fetched)
+	}
+}
