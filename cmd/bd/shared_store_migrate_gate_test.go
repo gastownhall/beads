@@ -341,3 +341,234 @@ func TestServerModeReadRefusesASchemaItsReadsCannotQuery(t *testing.T) {
 		t.Fatalf("bd list after bd migrate schema: exit %d, want the issue listed\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
 	}
 }
+
+// dirtyUpgradeWorkspace is the server-mode workspace of gastownhall/beads#6929:
+// a database whose cursor is one migration-pass behind this binary (0073
+// alters `issues`), an uncommitted user edit to `issues` in the working set,
+// and a .local_version from an older bd, so the next command's version-bump
+// reconciliation runs the pending migrations and the dirty-table guard
+// refuses them. The schema change itself stays applied, so reads keep working
+// and only the reconciliation is at stake.
+type dirtyUpgradeWorkspace struct {
+	repo     string
+	beadsDir string
+	witness  string
+	admin    *sql.DB
+	bd       string
+}
+
+const dirtyUpgradeOldWitness = "1.0.0"
+
+func newDirtyUpgradeWorkspace(t *testing.T) *dirtyUpgradeWorkspace {
+	t.Helper()
+	if testDoltServerPort == 0 {
+		t.Skip("Dolt test server not available, skipping")
+	}
+
+	repo := t.TempDir()
+	beadsDir := filepath.Join(repo, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("create .beads: %v", err)
+	}
+	database := uniqueTestDBName(t)
+	if err := (&configfile.Config{
+		Backend:        configfile.BackendDolt,
+		DoltMode:       configfile.DoltModeServer,
+		DoltServerHost: "127.0.0.1",
+		DoltServerPort: testDoltServerPort,
+		DoltDatabase:   database,
+	}).Save(beadsDir); err != nil {
+		t.Fatalf("save metadata: %v", err)
+	}
+
+	ctx := context.Background()
+	store, err := dolt.New(ctx, &dolt.Config{
+		Path:            filepath.Join(beadsDir, "dolt"),
+		BeadsDir:        beadsDir,
+		ServerHost:      "127.0.0.1",
+		ServerPort:      testDoltServerPort,
+		Database:        database,
+		CreateIfMissing: true,
+	})
+	if err != nil {
+		t.Fatalf("create test store: %v", err)
+	}
+	if err := store.SetConfig(ctx, "issue_prefix", "drt"); err != nil {
+		t.Fatalf("set issue_prefix: %v", err)
+	}
+	now := time.Now()
+	if err := store.CreateIssue(ctx, &types.Issue{
+		ID:        "drt-1",
+		Title:     "one",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}, "test-user"); err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close setup store: %v", err)
+	}
+	// autoMigrateOnVersionBump skips a workspace with no local database
+	// directory.
+	if err := os.MkdirAll(filepath.Join(beadsDir, "dolt"), 0o755); err != nil {
+		t.Fatalf("create local dolt data dir: %v", err)
+	}
+	t.Cleanup(func() { dropTestDatabase(database, testDoltServerPort) })
+
+	admin, err := sql.Open("mysql", doltutil.ServerDSN{
+		Host: "127.0.0.1", Port: testDoltServerPort, User: "root", Database: database,
+	}.String())
+	if err != nil {
+		t.Fatalf("connect to test dolt server: %v", err)
+	}
+	t.Cleanup(func() { admin.Close() })
+
+	// Commit the fixture so the only dirt is the user edit below.
+	if _, err := admin.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'fixture')"); err != nil &&
+		!strings.Contains(err.Error(), "nothing to commit") {
+		t.Fatalf("commit fixture: %v", err)
+	}
+	if schema.LatestVersion() != 74 {
+		t.Fatalf("this fixture regresses the cursor to before 0073 (which alters issues); LatestVersion() = %d, retarget it", schema.LatestVersion())
+	}
+	if _, err := admin.ExecContext(ctx, "DELETE FROM schema_migrations WHERE version >= 73"); err != nil {
+		t.Fatalf("regress schema_migrations: %v", err)
+	}
+	if _, err := admin.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'regress cursor')"); err != nil {
+		t.Fatalf("commit regressed cursor: %v", err)
+	}
+	// The recorded bd_version must not let the read-only probe report the
+	// database as already current and skip the writable attempt under test.
+	// local_metadata is dolt-ignored, so this leaves the working set clean.
+	if _, err := admin.ExecContext(ctx, "DELETE FROM local_metadata WHERE `key` = 'bd_version'"); err != nil &&
+		!strings.Contains(err.Error(), "not found") {
+		t.Fatalf("clear recorded bd_version: %v", err)
+	}
+	// The user edit that leaves `issues` dirty in the working set.
+	if _, err := admin.ExecContext(ctx, "UPDATE issues SET title = 'edited' WHERE id = 'drt-1'"); err != nil {
+		t.Fatalf("dirty issues: %v", err)
+	}
+
+	witness := filepath.Join(beadsDir, localVersionFile)
+	if err := os.WriteFile(witness, []byte(dirtyUpgradeOldWitness+"\n"), 0o600); err != nil {
+		t.Fatalf("write stale %s: %v", localVersionFile, err)
+	}
+
+	return &dirtyUpgradeWorkspace{
+		repo:     repo,
+		beadsDir: beadsDir,
+		witness:  witness,
+		admin:    admin,
+		bd:       buildBDForInitTests(t),
+	}
+}
+
+// run runs bd from dir (the workspace root when empty) with BEADS_DIR naming
+// beadsDir (the workspace's when empty) and migration consent given, as the
+// #5920 notice tells scripted use to give it.
+func (w *dirtyUpgradeWorkspace) run(t *testing.T, dir, beadsDir string, args ...string) (string, string, int) {
+	t.Helper()
+	if dir == "" {
+		dir = w.repo
+	}
+	if beadsDir == "" {
+		beadsDir = w.beadsDir
+	}
+	cmd := exec.Command(w.bd, args...)
+	cmd.Dir = dir
+	cmd.Env = append(filteredEnvForContextBinding("BEADS_DIR", "BEADS_DB", "BD_DB",
+		"BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_SERVER_DATABASE", schema.AllowRemoteMigrateEnv,
+		schema.AllowMigrateEnv, "BD_IGNORE_SCHEMA_SKEW", "BD_DEBUG"),
+		"HOME="+t.TempDir(),
+		"XDG_CONFIG_HOME="+t.TempDir(),
+		"BEADS_TEST_MODE=1",
+		"BEADS_TEST_SERVER=1",
+		"BEADS_DIR="+beadsDir,
+		schema.AllowRemoteMigrateEnv+"=1",
+	)
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	code := 0
+	if err := cmd.Run(); err != nil {
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) {
+			t.Fatalf("running bd %v: %v", args, err)
+		}
+		code = exitErr.ExitCode()
+	}
+	t.Logf("bd %v: exit %d\nstdout:\n%s\nstderr:\n%s", args, code, stdout.String(), stderr.String())
+	return stdout.String(), stderr.String(), code
+}
+
+func (w *dirtyUpgradeWorkspace) cursor(t *testing.T) int {
+	t.Helper()
+	var cursor int
+	if err := w.admin.QueryRowContext(context.Background(),
+		"SELECT COALESCE(MAX(version), 0) FROM schema_migrations").Scan(&cursor); err != nil {
+		t.Fatalf("read schema cursor: %v", err)
+	}
+	return cursor
+}
+
+// assertRefusedAndRetained checks the state a refused version-bump leaves:
+// nothing migrated, the user's uncommitted edit intact, and the old witness
+// kept so the next command retries.
+func (w *dirtyUpgradeWorkspace) assertRefusedAndRetained(t *testing.T, after string) {
+	t.Helper()
+	if got := w.cursor(t); got != 72 {
+		t.Errorf("after %s: schema cursor = %d, want it unchanged at 72", after, got)
+	}
+	var title string
+	if err := w.admin.QueryRowContext(context.Background(),
+		"SELECT title FROM issues WHERE id = 'drt-1'").Scan(&title); err != nil {
+		t.Fatalf("read drt-1 title: %v", err)
+	}
+	if title != "edited" {
+		t.Errorf("after %s: the uncommitted user edit is gone (title %q)", after, title)
+	}
+	if got := readLocalVersion(w.witness); got != dirtyUpgradeOldWitness {
+		t.Errorf("after %s: %s = %q, want the previous %q kept so the next command retries the upgrade",
+			after, localVersionFile, got, dirtyUpgradeOldWitness)
+	}
+}
+
+// assertDirtyUpgradeNotice checks the dirty-table failure notice: it names the
+// dirty table, gives the commit-then-migrate remedy in that order, and comes
+// after the consent's "applying" line, which it corrects.
+func assertDirtyUpgradeNotice(t *testing.T, cmd, stderr string) {
+	t.Helper()
+	notice := strings.Index(stderr, "pending schema migrations were not applied")
+	if notice < 0 {
+		t.Fatalf("%s: stderr does not report the refused version-bump migration:\n%s", cmd, stderr)
+	}
+	rest := stderr[notice:]
+	if !strings.Contains(rest, "issues") {
+		t.Errorf("%s: the notice does not name the dirty table:\n%s", cmd, rest)
+	}
+	commit, migrate := strings.Index(rest, "'bd dolt commit'"), strings.Index(rest, "'bd migrate schema'")
+	if commit < 0 || migrate < 0 || commit > migrate {
+		t.Errorf("%s: the notice does not give 'bd dolt commit' then 'bd migrate schema':\n%s", cmd, rest)
+	}
+	if applying := strings.Index(strings.ToLower(stderr), "applying"); applying < 0 || applying > notice {
+		t.Errorf("%s: want the consent's applying line, then the notice correcting it:\n%s", cmd, stderr)
+	}
+}
+
+// TestServerVersionBumpDirtyTablesRefusalIsReportedAndRetried reproduces
+// gastownhall/beads#6929 end to end. The operator has consented to migrate
+// (BD_ALLOW_REMOTE_MIGRATE=1), so the version-bump reconciliation's writable
+// open runs the pending migrations and is refused with
+// schema.DirtyTablesError. That refusal used to reach only debug logging, and
+// .local_version was already rewritten, so no later command retried it or
+// said why `bd list` later failed.
+func TestServerVersionBumpDirtyTablesRefusalIsReportedAndRetried(t *testing.T) {
+	w := newDirtyUpgradeWorkspace(t)
+
+	_, stderr, _ := w.run(t, "", "", "count")
+	assertDirtyUpgradeNotice(t, "bd count", stderr)
+	w.assertRefusedAndRetained(t, "bd count")
+}
