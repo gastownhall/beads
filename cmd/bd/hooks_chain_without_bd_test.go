@@ -438,6 +438,80 @@ func TestGeneratedHookPrePushForwardsArgsAndStdinWithoutBD(t *testing.T) {
 	}
 }
 
+// TestGeneratedHookSkipBehaviorWithoutEligibleSidecar pins the baseline
+// GH#6751's fail-open fix builds on: with no eligible chained sidecar the
+// section adds no failure modes of its own. bd absent means silent success
+// with trailing user content still running (a non-executable sidecar is
+// skipped just as git itself would skip it), and a deadline that stops bd
+// only warns and continues. These pin existing behavior, not new outcomes.
+func TestGeneratedHookSkipBehaviorWithoutEligibleSidecar(t *testing.T) {
+	runBdAbsent := func(t *testing.T, sidecarBody string, sidecarMode os.FileMode) string {
+		t.Helper()
+		hooksDir := t.TempDir()
+		emptyPath := t.TempDir() // no bd here
+		if sidecarBody != "" {
+			if err := os.WriteFile(filepath.Join(hooksDir, "pre-commit.old"), []byte(sidecarBody), sidecarMode); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(filepath.Join(hooksDir, "pre-commit.old"), sidecarMode); err != nil {
+				t.Fatal(err)
+			}
+		}
+		hook := "#!/bin/sh\n" + generateHookSection("pre-commit") + "echo TRAILING_USER_CONTENT\n"
+		if err := os.WriteFile(filepath.Join(hooksDir, "pre-commit"), []byte(hook), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command("/bin/sh", filepath.Join(hooksDir, "pre-commit"))
+		cmd.Dir = hooksDir
+		cmd.Env = []string{"PATH=" + emptyPath, "HOME=" + hooksDir}
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("hook should succeed without bd and without an eligible sidecar: %v\n%s", err, out)
+		}
+		return string(out)
+	}
+
+	t.Run("bd absent, no sidecar: silent success, trailing content runs", func(t *testing.T) {
+		out := runBdAbsent(t, "", 0)
+		if !strings.Contains(out, "TRAILING_USER_CONTENT") {
+			t.Errorf("trailing user content must still run:\n%s", out)
+		}
+		if strings.Contains(out, "beads:") {
+			t.Errorf("with bd absent and nothing to chain, the section must be silent:\n%s", out)
+		}
+	})
+
+	t.Run("bd absent, non-executable sidecar: skipped as git would skip it", func(t *testing.T) {
+		out := runBdAbsent(t, "#!/bin/sh\necho SIDECHAIN_RAN\nexit 7\n", 0o644)
+		if strings.Contains(out, "SIDECHAIN_RAN") {
+			t.Errorf("a non-executable sidecar must not run:\n%s", out)
+		}
+		if !strings.Contains(out, "TRAILING_USER_CONTENT") {
+			t.Errorf("trailing user content must still run:\n%s", out)
+		}
+		if strings.Contains(out, "beads:") {
+			t.Errorf("skipping an ineligible sidecar must be silent:\n%s", out)
+		}
+	})
+
+	t.Run("bd present, deadline expires, no sidecar: warn and continue", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("the real-timeout fixture is POSIX-specific here")
+		}
+		_, gnuDir := findHookProcessCoreutilsTimeout(t)
+		result := runHookProcessSidecar(t, "pre-push", "", gnuDir, nil)
+		if result.exitCode != 0 {
+			t.Fatalf("deadline without a sidecar must continue with exit 0, got %d\n%s", result.exitCode, result.output)
+		}
+		if !strings.Contains(result.output, "continuing without beads") {
+			t.Errorf("deadline without a sidecar must keep the continue-without-beads warning\n%s", result.output)
+		}
+		if strings.Contains(result.output, "refusing") {
+			t.Errorf("no refusal is warranted without a chained sidecar\n%s", result.output)
+		}
+	})
+}
+
 // TestGeneratedHookChainRunsOnceAndFallsThrough covers GH#6751's success
 // path: without bd on PATH a successful foreign sidecar runs exactly once,
 // the section then falls through to user content placed after the END
