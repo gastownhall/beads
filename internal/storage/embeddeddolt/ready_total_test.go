@@ -76,7 +76,12 @@ func readyIDs(items []*types.IssueWithCounts) []string {
 type readyTotalWorld struct {
 	wisps          bool
 	deferredParent bool
-	collision      bool
+	// undatedDeferredParent seeds GH#7300's icebox: a parent whose status is
+	// 'deferred' with no defer_until. Those two worlds are kept apart because
+	// they trip different legs of the deferred-parent rule — the date leg and
+	// the status leg — and the budget must hold for both.
+	undatedDeferredParent bool
+	collision             bool
 }
 
 // seedReadyTotalWorld builds a ready front with every shape the total has to
@@ -124,6 +129,22 @@ func seedReadyTotalWorld(t *testing.T, te *testEnv, prefix string, w readyTotalW
 		if w.deferredParent {
 			create(&types.Issue{ID: prefix + "-wdchild", Title: "wisp child of deferred", Priority: 0, Ephemeral: true})
 			dep(prefix+"-wdchild", prefix+"-dparent", types.DepParentChild)
+		}
+	}
+	if w.undatedDeferredParent {
+		create(&types.Issue{ID: prefix + "-uparent", Title: "undated deferred parent", IssueType: types.TypeEpic})
+		create(&types.Issue{ID: prefix + "-uchild", Title: "child of undated deferred", Priority: 0})
+		dep(prefix+"-uchild", prefix+"-uparent", types.DepParentChild)
+		if w.wisps {
+			create(&types.Issue{ID: prefix + "-uwdchild", Title: "wisp child of undated deferred", Priority: 0, Ephemeral: true})
+			dep(prefix+"-uwdchild", prefix+"-uparent", types.DepParentChild)
+		}
+		// The bare status write that both `bd defer` with no --until and
+		// `bd update --status deferred` make: defer_until stays NULL.
+		if err := te.store.UpdateIssue(ctx, prefix+"-uparent", map[string]interface{}{
+			"status": string(types.StatusDeferred),
+		}, "tester"); err != nil {
+			t.Fatalf("defer %s-uparent with no date: %v", prefix, err)
 		}
 	}
 	if w.collision {
@@ -261,6 +282,11 @@ func TestReadyWorkStatementBudget(t *testing.T) {
 		// + one statement for every deferred-parent child leg
 		{"wisps_deferred_parent/limit0", readyTotalWorld{wisps: true, deferredParent: true}, 0, 4},
 		{"wisps_deferred_parent/limit1", readyTotalWorld{wisps: true, deferredParent: true}, 1, 6},
+		// GH#7300's icebox trips the status leg instead of the date leg, but
+		// the probe still answers in the one combined statement, so the
+		// ceilings hold: the undated parent adds no round trip of its own.
+		{"wisps_undated_deferred_parent/limit0", readyTotalWorld{wisps: true, undatedDeferredParent: true}, 0, 4},
+		{"wisps_undated_deferred_parent/limit1", readyTotalWorld{wisps: true, undatedDeferredParent: true}, 1, 6},
 		// + the overlap count, only because an ID sits in both tables
 		{"wisps_collision/limit1", readyTotalWorld{wisps: true, collision: true}, 1, 6},
 	}

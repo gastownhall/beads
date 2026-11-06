@@ -456,6 +456,7 @@
 40 25 TestIsBlockedBatchEmbedded
 40 25 TestReadyWorkHidesChildrenOfUndatedDeferredParent
 40 25 TestReadyWorkPageTotal
+40 25 TestReadyWorkUndatedDeferredParentCountsAndTotal
 40 25 TestReadyWorkUndatedDeferredPredicateVariants
 40 25 TestWithPeerAuth_RestoresAbsentEnv
 
