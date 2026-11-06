@@ -238,6 +238,7 @@ go_test(
         "ready_undated_deferred_counts_test.go",
         "ready_undated_deferred_include_test.go",
         "ready_undated_deferred_test.go",
+        "ready_undated_deferred_undefer_test.go",
         "ready_work_missing_table_test.go",
         "reject_stale_upsert_test.go",
         "relations_contract_test.go",
