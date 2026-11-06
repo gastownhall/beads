@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"sort"
 	"strings"
 
@@ -11,8 +10,8 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
-	"github.com/steveyegge/beads/internal/gitenv"
 	"github.com/steveyegge/beads/internal/metrics"
+	storagegit "github.com/steveyegge/beads/internal/storage/git"
 	"github.com/steveyegge/beads/internal/workapi"
 )
 
@@ -329,19 +328,21 @@ func databaseConfigEntries(dbConfig map[string]string) []configEntry {
 	return entries
 }
 
-// collectGitConfigEntries reads beads-related values from git config.
+// collectGitConfigEntries reads beads-related values from git config. A read
+// git fails (a malformed or unreadable config file) is warned about on stderr
+// and its entry left out, so the rest of the view still prints.
 func collectGitConfigEntries() []configEntry {
 	var entries []configEntry
 
-	// beads.role is the only git config key currently
-	cmd := exec.Command("git", "config", "--get", "beads.role")
-	cmd.Env = gitenv.ScrubRoutingAndSuppression(os.Environ())
-	output, err := cmd.Output()
-	if err == nil {
-		value := strings.TrimSpace(string(output))
-		if value != "" {
-			entries = append(entries, configEntry{Key: "beads.role", Value: value, Source: "git"})
-		}
+	// beads.role is the only git config key currently. The domain adapter reads
+	// it with routing and config suppression scrubbed, like `bd config get`.
+	value, hasRole, err := storagegit.NewGitProvider("").GitUseCase().BeadsRole(getRootContext())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: beads.role omitted, git could not read it: %v\n", err)
+		return entries
+	}
+	if hasRole {
+		entries = append(entries, configEntry{Key: "beads.role", Value: value, Source: "git"})
 	}
 
 	return entries
