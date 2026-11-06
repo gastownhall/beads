@@ -136,16 +136,22 @@ func Flatten(ctx context.Context, conn DBConn) (retErr error) {
 	// already staged when Flatten ran join this commit too. The landed commit
 	// does not keep its own hash or message on main: flatten rewrites that
 	// history anyway.
+	//
+	// Main has already moved onto the flattened history, so a failure from
+	// here on is a partial outcome, not something to roll back: the error
+	// names that outcome and how to finish by hand.
+	const afterHeadMove = "main already points at the flattened history; inspect its pending changes " +
+		"with dolt_status and commit them with `bd dolt commit` when ready"
 	staged, err := issueops.HasStagedChanges(ctx, conn)
 	if err != nil {
-		return fmt.Errorf("flatten step %q: %w", "check main for staged changes", err)
+		return fmt.Errorf("flatten step %q failed (%s): %w", "check main for staged changes", afterHeadMove, err)
 	}
 	if staged {
 		err = schema.DrainCall(ctx, conn, "CALL DOLT_COMMIT('-m', ?)", flattenPreserveMsg)
 		// Another writer committing main's staged set first leaves nothing
 		// to commit, which is the outcome this step wants.
 		if err != nil && !issueops.IsNothingToCommitError(err) {
-			return fmt.Errorf("flatten step %q: %w", "commit changes that reached main", err)
+			return fmt.Errorf("flatten step %q failed (%s): %w", "commit changes that reached main", afterHeadMove, err)
 		}
 	}
 

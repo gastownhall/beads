@@ -35,6 +35,15 @@ that has been GC'd before (bd gc, or a previous flatten or compact), only a
 full collection reclaims the squashed history. A full GC can take minutes on
 multi-gigabyte stores.
 
+Uncommitted changes and changes that reach main mid-flatten survive: they are
+kept and committed as one preservation commit on the flattened history.
+
+A failed run is safe to retry. Before main moves, the temp branch is cleaned
+up and nothing else changes. After main has moved, bd flatten stops without
+rolling back: main keeps the flattened history, pending changes stay in the
+working set, and the error names how to finish by hand (dolt_status, then
+bd dolt commit).
+
 This is irreversible — all commit history is lost. The resulting database
 has exactly one commit containing all current data.
 

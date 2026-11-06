@@ -555,6 +555,79 @@ func TestFlattenQuietRunAddsNoCommit(t *testing.T) {
 	})
 }
 
+// AC-5: once main has moved onto the flattened history, a failed staged
+// check or preservation commit must not roll anything back. The error names
+// the partial outcome and the recovery (dolt_status, bd dolt commit), the
+// landed row stays staged and out of HEAD, the working-set changes stay
+// pending, and the temp branch is still cleaned up.
+func TestFlattenAfterHeadMoveErrors(t *testing.T) {
+	port := startCompactTestServer(t)
+
+	// assertPartial pins the state both subtests leave behind: history
+	// already flattened, the landed row staged for manual recovery, the
+	// pending working set intact, no temp branch.
+	assertPartial := func(t *testing.T, f *compactFixture, err error, wantStep string) {
+		t.Helper()
+		if err == nil {
+			t.Fatalf("Flatten = nil, want the partial-outcome error")
+		}
+		for _, want := range []string{
+			wantStep,
+			"main already points at the flattened history",
+			"dolt_status",
+			"bd dolt commit",
+		} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("Flatten error = %v, want it to contain %q", err, want)
+			}
+		}
+		if n := f.count("SELECT COUNT(*) FROM t WHERE id = 600"); n != 1 {
+			t.Fatalf("landed t row 600 on main: present=false, want present=true")
+		}
+		if n := f.count("SELECT COUNT(*) FROM t AS OF 'HEAD' WHERE id = 600"); n != 0 {
+			t.Fatalf("landed t row 600 is in main's HEAD, want it left staged for manual recovery")
+		}
+		f.wantStatus("config:false", "t:true", "u:false")
+		f.wantLog(flattenedLog)
+		f.wantNoTempBranch()
+	}
+
+	t.Run("preservation commit fails", func(t *testing.T) {
+		f := newCompactFixture(t, port)
+		f.writePending(f.db)
+		writer := f.conn()
+
+		injected := errors.New("injected preservation failure")
+		hook := &flattenHookConn{
+			beforeExec:         onceBeforeFlattenFinalReset(func() { _ = f.landRow(writer) }),
+			failFollowupCommit: injected,
+		}
+		err := f.flatten(hook)
+		assertPartial(t, f, err, `flatten step "commit changes that reached main" failed`)
+		if !errors.Is(err, injected) {
+			t.Fatalf("Flatten error = %v, want it to wrap the injected failure", err)
+		}
+		f.wantPendingKept()
+	})
+
+	t.Run("staged check fails", func(t *testing.T) {
+		f := newCompactFixture(t, port)
+		f.writePending(f.db)
+		writer := f.conn()
+
+		hook := &flattenHookConn{
+			beforeExec:      onceBeforeFlattenFinalReset(func() { _ = f.landRow(writer) }),
+			failStagedCheck: true,
+		}
+		err := f.flatten(hook)
+		assertPartial(t, f, err, `flatten step "check main for staged changes" failed`)
+		if !strings.Contains(err.Error(), "flatten_injected_missing_table") {
+			t.Fatalf("Flatten error = %v, want it to surface the failed read's cause", err)
+		}
+		f.wantPendingKept()
+	})
+}
+
 // compactFixtureLog is the compact fixture's history before any flatten,
 // newest first.
 var compactFixtureLog = []string{"u 1", "t 2", "t 1", "schema", "Initialize data repository"}

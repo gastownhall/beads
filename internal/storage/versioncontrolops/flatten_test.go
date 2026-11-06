@@ -251,6 +251,79 @@ func TestFlattenCleanupFailureKeepsBranchAndJoins(t *testing.T) {
 	}
 }
 
+// AC-5: once the final reset has moved main onto the flattened history, a
+// failed staged check or preservation commit reports the partial outcome and
+// the recovery instead of rolling anything back: main keeps the flattened
+// history, and its staged set waits for a manual `bd dolt commit`.
+func TestFlattenStagedCheckFailureReportsPartialOutcome(t *testing.T) {
+	injected := errors.New("injected staged-check failure")
+	db, mock := newMockDB(t)
+	expectFlattenReads(mock, 3)
+	expectFlattenThroughReset(mock)
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM dolt_status WHERE staged = 1")).
+		WillReturnError(injected)
+	expectFlattenCleanup(mock)
+	err := Flatten(t.Context(), db)
+	if !errors.Is(err, injected) {
+		t.Fatalf("Flatten error = %v, want it to wrap the injected failure", err)
+	}
+	assertFlattenPartialOutcome(t, err, `flatten step "check main for staged changes" failed`)
+	if merr := mock.ExpectationsWereMet(); merr != nil {
+		t.Errorf("unmet expectations: %v", merr)
+	}
+}
+
+// TestFlattenPreservationFailureReportsPartialOutcome: the same partial
+// outcome when the preservation commit itself fails.
+func TestFlattenPreservationFailureReportsPartialOutcome(t *testing.T) {
+	injected := errors.New("injected preservation failure")
+	db, mock := newMockDB(t)
+	expectFlattenReads(mock, 3)
+	expectFlattenThroughReset(mock)
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM dolt_status WHERE staged = 1")).
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
+	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', ?)")).
+		WithArgs(flattenPreserveMsg).WillReturnError(injected)
+	expectFlattenCleanup(mock)
+	err := Flatten(t.Context(), db)
+	if !errors.Is(err, injected) {
+		t.Fatalf("Flatten error = %v, want it to wrap the injected failure", err)
+	}
+	assertFlattenPartialOutcome(t, err, `flatten step "commit changes that reached main" failed`)
+	if merr := mock.ExpectationsWereMet(); merr != nil {
+		t.Errorf("unmet expectations: %v", merr)
+	}
+}
+
+// assertFlattenPartialOutcome checks the error names the failed step, the
+// partial outcome (main already on the flattened history) and the recovery.
+func assertFlattenPartialOutcome(t *testing.T, err error, wantStep string) {
+	t.Helper()
+	for _, want := range []string{
+		wantStep,
+		"main already points at the flattened history",
+		"dolt_status",
+		"bd dolt commit",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("Flatten error = %v, want it to contain %q", err, want)
+		}
+	}
+}
+
+// TestFlattenAlreadyFlatIsNoOp: a one-commit store has nothing to squash;
+// Flatten returns nil without creating a branch or touching anything.
+func TestFlattenAlreadyFlatIsNoOp(t *testing.T) {
+	db, mock := newMockDB(t)
+	expectFlattenReads(mock, 1)
+	if err := Flatten(t.Context(), db); err != nil {
+		t.Fatalf("Flatten: %v", err)
+	}
+	if merr := mock.ExpectationsWereMet(); merr != nil {
+		t.Errorf("unmet expectations (a no-op flatten must issue nothing): %v", merr)
+	}
+}
+
 // TestFlattenCleanupRunsOnLiveDetachedContext: the cleanup must run even
 // when the primary failure is the caller's cancellation, so its statements
 // run on a context that is not the cancelled one. The cancelled delete never
