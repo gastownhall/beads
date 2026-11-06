@@ -65,7 +65,8 @@ func expectLockRelease(mock sqlmock.Sqlmock, lockName string) {
 // expectIssuesProjection mocks the read-through's schema.CheckReadableDrift on
 // a database at version, behind the binary: the cursor read, then the listing
 // of issues, which carries every column the shared projection selects except
-// omit (none when omit is empty).
+// omit (none when omit is empty). A complete issues listing is followed by the
+// complete leases overlay's; an incomplete one is refused before it.
 func expectIssuesProjection(mock sqlmock.Sqlmock, version int, omit string) {
 	expectVersionQuery(mock, version)
 	expectCursorProbe(mock, "issues", true)
@@ -76,6 +77,15 @@ func expectIssuesProjection(mock sqlmock.Sqlmock, version int, omit string) {
 		}
 	}
 	mock.ExpectQuery(`^SHOW COLUMNS FROM issues$`).WillReturnRows(rows)
+	if omit != "" {
+		return
+	}
+	expectCursorProbe(mock, "leases", true)
+	leases := sqlmock.NewRows([]string{"Field", "Type", "Null", "Key", "Default", "Extra"})
+	for _, column := range sqlbuild.LeaseOverlayColumns() {
+		leases.AddRow(column, "text", "YES", "", nil, "")
+	}
+	mock.ExpectQuery(`^SHOW COLUMNS FROM leases$`).WillReturnRows(leases)
 }
 
 // TestInitSchemaSharedStoreGate covers the proxied/`bd serve` open path's half

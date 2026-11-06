@@ -326,8 +326,14 @@ func TestCheckBehindDrift_FreshDB_ReturnsSchemaBehindError(t *testing.T) {
 
 // -- CheckReadableDrift unit tests (mock DB) --
 
-// readableColumns stands in for the projection a caller passes.
-var readableColumns = []string{"id", "arrival_seq"}
+// readableRequirements stand in for the projections a caller passes: issue
+// columns, then the lease overlay those reads join.
+var readableRequirements = []ReadableRequirement{
+	{Table: "issues", Columns: []string{"id", "arrival_seq"}},
+	{Table: "leases", Columns: readableLeaseColumns},
+}
+
+var readableLeaseColumns = []string{"issue_id", "lease_expires_at", "heartbeat_at", "granted_node"}
 
 func expectMainCursor(mock sqlmock.Sqlmock, version int) {
 	expectCursorProbe(mock, "schema_migrations", true)
@@ -338,12 +344,28 @@ func expectMainCursor(mock sqlmock.Sqlmock, version int) {
 // expectIssuesColumns mocks missingColumns' read of issues: the table probe,
 // then the SHOW COLUMNS listing with these names in its Field column.
 func expectIssuesColumns(mock sqlmock.Sqlmock, columns ...string) {
-	expectCursorProbe(mock, "issues", true)
+	expectTableColumns(mock, "issues", columns...)
+}
+
+// expectTableColumns is expectIssuesColumns for any table.
+func expectTableColumns(mock sqlmock.Sqlmock, table string, columns ...string) {
+	expectCursorProbe(mock, table, true)
 	rows := sqlmock.NewRows([]string{"Field", "Type", "Null", "Key", "Default", "Extra"})
 	for _, column := range columns {
 		rows.AddRow(column, "bigint", "YES", "", nil, "")
 	}
-	mock.ExpectQuery(`^SHOW COLUMNS FROM issues$`).WillReturnRows(rows)
+	mock.ExpectQuery(`^SHOW COLUMNS FROM ` + table + `$`).WillReturnRows(rows)
+}
+
+// without returns columns less omit.
+func without(columns []string, omit string) []string {
+	var kept []string
+	for _, column := range columns {
+		if column != omit {
+			kept = append(kept, column)
+		}
+	}
+	return kept
 }
 
 func TestCheckReadableDrift(t *testing.T) {
@@ -378,14 +400,28 @@ func TestCheckReadableDrift(t *testing.T) {
 			expect: func(mock sqlmock.Sqlmock) {
 				expectMainCursor(mock, behind)
 				expectIssuesColumns(mock, "id", "title", "ARRIVAL_SEQ")
+				expectTableColumns(mock, "leases", append([]string{"holder"}, readableLeaseColumns...)...)
 			},
 			check: requireNoDriftError,
 		},
 		{
+			// The first incomplete requirement refuses; the later ones are
+			// never probed.
 			name: "behind and missing a column is refused",
 			expect: func(mock sqlmock.Sqlmock) {
 				expectMainCursor(mock, behind)
 				expectIssuesColumns(mock, "id", "title")
+			},
+			check: requireBehindError(behind),
+		},
+		{
+			// #6929: every issue column present, but the leases overlay the
+			// reads join is gone, so each read would fail on the table.
+			name: "behind without a leases table is refused",
+			expect: func(mock sqlmock.Sqlmock) {
+				expectMainCursor(mock, behind)
+				expectIssuesColumns(mock, "id", "arrival_seq")
+				expectCursorProbe(mock, "leases", false)
 			},
 			check: requireBehindError(behind),
 		},
@@ -411,7 +447,29 @@ func TestCheckReadableDrift(t *testing.T) {
 			}
 			defer db.Close()
 			tc.expect(mock)
-			tc.check(t, CheckReadableDrift(context.Background(), db, "issues", readableColumns))
+			tc.check(t, CheckReadableDrift(context.Background(), db, readableRequirements...))
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("unmet sql expectations: %v", err)
+			}
+		})
+	}
+}
+
+// TestCheckReadableDrift_EachLeaseColumnIsRequired refuses a behind database
+// whose leases table lacks any one of the overlay's columns.
+func TestCheckReadableDrift_EachLeaseColumnIsRequired(t *testing.T) {
+	behind := LatestVersion() - 1
+	for _, omit := range readableLeaseColumns {
+		t.Run(omit, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("sqlmock.New: %v", err)
+			}
+			defer db.Close()
+			expectMainCursor(mock, behind)
+			expectIssuesColumns(mock, "id", "arrival_seq")
+			expectTableColumns(mock, "leases", without(readableLeaseColumns, omit)...)
+			requireBehindError(behind)(t, CheckReadableDrift(context.Background(), db, readableRequirements...))
 			if err := mock.ExpectationsWereMet(); err != nil {
 				t.Fatalf("unmet sql expectations: %v", err)
 			}
@@ -436,7 +494,7 @@ func TestCheckReadableDrift_EscapeHatchReadsAnyway(t *testing.T) {
 		t.Fatal(pipeErr)
 	}
 	os.Stderr = w
-	gotErr := CheckReadableDrift(context.Background(), db, "issues", readableColumns)
+	gotErr := CheckReadableDrift(context.Background(), db, readableRequirements...)
 	_ = w.Close()
 	os.Stderr = origStderr
 	var buf bytes.Buffer
