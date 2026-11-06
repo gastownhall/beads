@@ -1191,7 +1191,7 @@ jobs:
             [ -s "$src" ] || continue
             out="$dst/bazel-profile-$LANE${src#"$RUNNER_TEMP"/bazel-profile}.gz"
             rc=0
-            grep -q -E '://[^/" ]+@|-----BEGIN|(TOKEN|SECRET|PASSWORD|API_KEY)=|\.ops\.gascity\.com' "$src" || rc=$?
+            grep -q -i -E '://[^/" ]+@|-----BEGIN|(TOKEN|SECRET|PASSWORD|API_KEY)=|(ghs|ghp|gho|ghu|ghr)_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|xox[abp]-|eyJ[A-Za-z0-9_-]{8,}\.eyJ|\.ops\.gascity\.com' "$src" || rc=$?
             if [ "$rc" -ne 1 ]; then
               echo "::warning title=bazel profile not uploaded::${src##*/}: secret-shaped content, or the scan failed (grep exit $rc)"
               continue
@@ -1459,7 +1459,7 @@ jobs:
             [ -s "$src" ] || continue
             out="$dst/bazel-profile-$LANE${src#"$RUNNER_TEMP"/bazel-profile}.gz"
             rc=0
-            grep -q -E '://[^/" ]+@|-----BEGIN|(TOKEN|SECRET|PASSWORD|API_KEY)=|\.ops\.gascity\.com' "$src" || rc=$?
+            grep -q -i -E '://[^/" ]+@|-----BEGIN|(TOKEN|SECRET|PASSWORD|API_KEY)=|(ghs|ghp|gho|ghu|ghr)_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|xox[abp]-|eyJ[A-Za-z0-9_-]{8,}\.eyJ|\.ops\.gascity\.com' "$src" || rc=$?
             if [ "$rc" -ne 1 ]; then
               echo "::warning title=bazel profile not uploaded::${src##*/}: secret-shaped content, or the scan failed (grep exit $rc)"
               continue
@@ -1780,7 +1780,7 @@ jobs:
             [ -s "$src" ] || continue
             out="$dst/bazel-profile-$LANE${src#"$RUNNER_TEMP"/bazel-profile}.gz"
             rc=0
-            grep -q -E '://[^/" ]+@|-----BEGIN|(TOKEN|SECRET|PASSWORD|API_KEY)=|\.ops\.gascity\.com' "$src" || rc=$?
+            grep -q -i -E '://[^/" ]+@|-----BEGIN|(TOKEN|SECRET|PASSWORD|API_KEY)=|(ghs|ghp|gho|ghu|ghr)_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|xox[abp]-|eyJ[A-Za-z0-9_-]{8,}\.eyJ|\.ops\.gascity\.com' "$src" || rc=$?
             if [ "$rc" -ne 1 ]; then
               echo "::warning title=bazel profile not uploaded::${src##*/}: secret-shaped content, or the scan failed (grep exit $rc)"
               continue
@@ -2028,7 +2028,7 @@ jobs:
             [ -s "$src" ] || continue
             out="$dst/bazel-profile-$LANE${src#"$RUNNER_TEMP"/bazel-profile}.gz"
             rc=0
-            grep -q -E '://[^/" ]+@|-----BEGIN|(TOKEN|SECRET|PASSWORD|API_KEY)=|\.ops\.gascity\.com' "$src" || rc=$?
+            grep -q -i -E '://[^/" ]+@|-----BEGIN|(TOKEN|SECRET|PASSWORD|API_KEY)=|(ghs|ghp|gho|ghu|ghr)_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|xox[abp]-|eyJ[A-Za-z0-9_-]{8,}\.eyJ|\.ops\.gascity\.com' "$src" || rc=$?
             if [ "$rc" -ne 1 ]; then
               echo "::warning title=bazel profile not uploaded::${src##*/}: secret-shaped content, or the scan failed (grep exit $rc)"
               continue
@@ -2207,7 +2207,7 @@ jobs:
             [ -s "$src" ] || continue
             out="$dst/bazel-profile-$LANE${src#"$RUNNER_TEMP"/bazel-profile}.gz"
             rc=0
-            grep -q -E '://[^/" ]+@|-----BEGIN|(TOKEN|SECRET|PASSWORD|API_KEY)=|\.ops\.gascity\.com' "$src" || rc=$?
+            grep -q -i -E '://[^/" ]+@|-----BEGIN|(TOKEN|SECRET|PASSWORD|API_KEY)=|(ghs|ghp|gho|ghu|ghr)_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|xox[abp]-|eyJ[A-Za-z0-9_-]{8,}\.eyJ|\.ops\.gascity\.com' "$src" || rc=$?
             if [ "$rc" -ne 1 ]; then
               echo "::warning title=bazel profile not uploaded::${src##*/}: secret-shaped content, or the scan failed (grep exit $rc)"
               continue
@@ -2423,7 +2423,7 @@ jobs:
             [ -s "$src" ] || continue
             out="$dst/bazel-profile-$LANE${src#"$RUNNER_TEMP"/bazel-profile}.gz"
             rc=0
-            grep -q -E '://[^/" ]+@|-----BEGIN|(TOKEN|SECRET|PASSWORD|API_KEY)=|\.ops\.gascity\.com' "$src" || rc=$?
+            grep -q -i -E '://[^/" ]+@|-----BEGIN|(TOKEN|SECRET|PASSWORD|API_KEY)=|(ghs|ghp|gho|ghu|ghr)_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|xox[abp]-|eyJ[A-Za-z0-9_-]{8,}\.eyJ|\.ops\.gascity\.com' "$src" || rc=$?
             if [ "$rc" -ne 1 ]; then
               echo "::warning title=bazel profile not uploaded::${src##*/}: secret-shaped content, or the scan failed (grep exit $rc)"
               continue
@@ -2645,7 +2645,7 @@ jobs:
             [ -s "$src" ] || continue
             out="$dst/bazel-profile-$LANE${src#"$RUNNER_TEMP"/bazel-profile}.gz"
             rc=0
-            grep -q -E '://[^/" ]+@|-----BEGIN|(TOKEN|SECRET|PASSWORD|API_KEY)=|\.ops\.gascity\.com' "$src" || rc=$?
+            grep -q -i -E '://[^/" ]+@|-----BEGIN|(TOKEN|SECRET|PASSWORD|API_KEY)=|(ghs|ghp|gho|ghu|ghr)_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|xox[abp]-|eyJ[A-Za-z0-9_-]{8,}\.eyJ|\.ops\.gascity\.com' "$src" || rc=$?
             if [ "$rc" -ne 1 ]; then
               echo "::warning title=bazel profile not uploaded::${src##*/}: secret-shaped content, or the scan failed (grep exit $rc)"
               continue
@@ -2868,7 +2868,7 @@ jobs:
             [ -s "$src" ] || continue
             out="$dst/bazel-profile-$LANE${src#"$RUNNER_TEMP"/bazel-profile}.gz"
             rc=0
-            grep -q -E '://[^/" ]+@|-----BEGIN|(TOKEN|SECRET|PASSWORD|API_KEY)=|\.ops\.gascity\.com' "$src" || rc=$?
+            grep -q -i -E '://[^/" ]+@|-----BEGIN|(TOKEN|SECRET|PASSWORD|API_KEY)=|(ghs|ghp|gho|ghu|ghr)_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|xox[abp]-|eyJ[A-Za-z0-9_-]{8,}\.eyJ|\.ops\.gascity\.com' "$src" || rc=$?
             if [ "$rc" -ne 1 ]; then
               echo "::warning title=bazel profile not uploaded::${src##*/}: secret-shaped content, or the scan failed (grep exit $rc)"
               continue
@@ -3067,7 +3067,7 @@ jobs:
             [ -s "$src" ] || continue
             out="$dst/bazel-profile-$LANE${src#"$RUNNER_TEMP"/bazel-profile}.gz"
             rc=0
-            grep -q -E '://[^/" ]+@|-----BEGIN|(TOKEN|SECRET|PASSWORD|API_KEY)=|\.ops\.gascity\.com' "$src" || rc=$?
+            grep -q -i -E '://[^/" ]+@|-----BEGIN|(TOKEN|SECRET|PASSWORD|API_KEY)=|(ghs|ghp|gho|ghu|ghr)_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|xox[abp]-|eyJ[A-Za-z0-9_-]{8,}\.eyJ|\.ops\.gascity\.com' "$src" || rc=$?
             if [ "$rc" -ne 1 ]; then
               echo "::warning title=bazel profile not uploaded::${src##*/}: secret-shaped content, or the scan failed (grep exit $rc)"
               continue

@@ -417,6 +417,8 @@ func TestBazelProfileArtifactStepsAreSafeAndBounded(t *testing.T) {
 		`"args":{"x":"-----BEGIN PRIVATE KEY-----"}`,
 		`"args":{"x":"BEADS_HOLDER_TOKEN=abc"}`,
 		`"name":"rbe-west.ops.gascity.com"`,
+		`"args":{"x":"https://example.com/x?token=abc"}`,
+		`"args":{"x":"ghs_0123456789abcdefghijABCDEFGHIJ"}`,
 	} {
 		files["bazel-profile-secret"+string(rune('a'+i))+".json"] = clean + secret + "\n"
 	}
@@ -429,8 +431,8 @@ func TestBazelProfileArtifactStepsAreSafeAndBounded(t *testing.T) {
 			t.Errorf("%s is not the gzipped profile", name)
 		}
 	}
-	if n := strings.Count(out, "::warning title=bazel profile not uploaded::"); n != 4 {
-		t.Errorf("%d not-uploaded warnings, want 4 (one per secret-shaped profile):\n%s", n, out)
+	if n := strings.Count(out, "::warning title=bazel profile not uploaded::"); n != 6 {
+		t.Errorf("%d not-uploaded warnings, want 6 (one per secret-shaped profile):\n%s", n, out)
 	}
 	if !strings.Contains(script, "-gt 20971520") {
 		t.Errorf("prepare script has no 20 MB cap on the lane's gzipped profiles")

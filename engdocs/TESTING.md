@@ -108,9 +108,10 @@ These artifacts are public, like every artifact of this repo. A profile
 holds timings, mnemonics, target labels and the runner's output base path;
 it carries no command line, environment value or endpoint. The prepare step
 still refuses a profile with anything secret-shaped (credentials in a URL, a
-PEM block, `TOKEN=`/`SECRET=`/`PASSWORD=`/`API_KEY=`, an `ops.gascity.com`
-host) and caps a lane at 20 MB gzipped, with a warning. The upload never
-fails or holds up a lane (`continue-on-error`, 1-minute bounds);
+PEM block, `token=`/`secret=`/`password=`/`api_key=` in any case, a GitHub
+(`ghs_`/`ghp_`/`gho_`/`ghu_`/`ghr_`/`github_pat_`), AWS (`AKIA…`) or Slack
+(`xox[abp]-`) token, a JWT, an `ops.gascity.com` host) and caps a lane at
+20 MB gzipped, with a warning. The upload never fails or holds up a lane (`continue-on-error`, 1-minute bounds);
 `TestBazelProfileArtifactStepsAreSafeAndBounded` pins that.
 
 ## Choose the Smallest Useful Test
