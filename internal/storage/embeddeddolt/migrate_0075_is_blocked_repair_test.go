@@ -5,6 +5,7 @@ package embeddeddolt_test
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -441,8 +442,116 @@ func requirePullAdoptedCloneRepairsOnlyWisps(t *testing.T, ctx context.Context) 
 	})
 }
 
+// healthyFlags returns rows seeded with the flags their graph implies.
+func healthyFlags(rows []repairRow) []repairRow {
+	out := make([]repairRow, len(rows))
+	for i, r := range rows {
+		out[i] = r
+		out[i].stale = r.wantBlocked
+	}
+	return out
+}
+
 func repairCommitCount(t *testing.T, ctx context.Context, conn *sql.Conn) int {
 	t.Helper()
 	return scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM dolt_log WHERE message = ?",
 		"schema: repair is_blocked flags left by 0059 (gastownhall/beads#7037)")
+}
+
+// TestEmbeddedMigration0075HealthyStoreIsUnchanged is AC-3: upgrading a 74/31
+// store whose flags already match its graph changes no flag, timestamp or
+// journal row on either plane, consumes the owed key in exactly one repair
+// commit, and a reopen on a fresh engine handle finds nothing owed and
+// commits nothing.
+//
+// The journal baseline includes a real journal-activated mutation (a project
+// with journaling on), so an exemption that only held while journaling was
+// off would show up as a new row or a moved seq.
+func TestEmbeddedMigration0075HealthyStoreIsUnchanged(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+	dataDir, conn, closeConn := seedRewoundStore(t, ctx, 74, 31)
+	closed := false
+	defer func() {
+		if !closed {
+			closeConn()
+		}
+	}()
+	issues, wisps := healthyFlags(repairGraph), healthyFlags(wispRepairGraph)
+	insertRepairRows(t, ctx, conn, "issues", issues)
+	insertCanonicalEdges(t, ctx, conn, "dependencies", "depends_on_issue_id", repairEdges)
+	insertRepairRows(t, ctx, conn, "wisps", wisps)
+	insertCanonicalEdges(t, ctx, conn, "wisp_dependencies", "depends_on_wisp_id", wispRepairEdges)
+	seedJournal(t, ctx, conn)
+	insertStampedIssues(t, ctx, conn, "issues", []stampedIssue{{id: "rp-watched", status: "open", stamp: historicalStamp(9)}}, true)
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("BeginTx: %v", err)
+	}
+	unscope := issueops.ScopeEventsJournalTransaction(tx, true)
+	if err := issueops.MergeMetadataInTx(ctx, tx, "rp-watched", "watched-by", json.RawMessage(`"consumer-cursor"`), "fixture"); err != nil {
+		unscope()
+		_ = tx.Rollback()
+		t.Fatalf("journaled MergeMetadataInTx: %v", err)
+	}
+	unscope()
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit journaled mutation: %v", err)
+	}
+	commitFixture(t, ctx, conn, "test: healthy v74 store")
+	journalBefore := journalDump(t, ctx, conn)
+	if !strings.Contains(journalBefore, "rp-watched") {
+		t.Fatalf("fixture: journaled mutation wrote no journal row:\n%s", journalBefore)
+	}
+	// The journaled mutation re-stamped rp-watched; that stamp is the baseline.
+	watchedStamp := readUpdatedAt(t, ctx, conn, "issues", "rp-watched")
+
+	if _, err := schema.MigrateUp(ctx, conn); err != nil {
+		t.Fatalf("MigrateUp: %v", err)
+	}
+	requireFlags(t, ctx, conn, "issues", issues)
+	requireFlags(t, ctx, conn, "wisps", wisps)
+	requireStamps(t, ctx, conn, "issues", issues)
+	requireStamps(t, ctx, conn, "wisps", wisps)
+	requireStamp(t, ctx, conn, "issues", "rp-watched", watchedStamp)
+	if got := journalDump(t, ctx, conn); got != journalBefore {
+		t.Errorf("journal changed on a healthy store:\n got %s\nwant %s", got, journalBefore)
+	}
+	if n := repairKeyCount(t, ctx, conn, ""); n != 0 {
+		t.Errorf("repair key present after the upgrade (%d row(s))", n)
+	}
+	if n := repairKeyCount(t, ctx, conn, " AS OF 'HEAD'"); n != 0 {
+		t.Errorf("repair key committed at HEAD after the upgrade (%d row(s))", n)
+	}
+	if n := repairCommitCount(t, ctx, conn); n != 1 {
+		t.Fatalf("repair commits after the upgrade = %d, want 1 (the one that consumes the owed key)", n)
+	}
+	headBefore := scalarString(t, ctx, conn, "SELECT HASHOF('HEAD')")
+	closeConn()
+	closed = true
+
+	// Reopen on a fresh engine handle: everything it sees is what the first
+	// pass published.
+	withRawConn(t, dataDir, preflipDatabase, func(conn *sql.Conn) {
+		if _, err := schema.MigrateUp(ctx, conn); err != nil {
+			t.Fatalf("reopen MigrateUp: %v", err)
+		}
+		if got := scalarString(t, ctx, conn, "SELECT HASHOF('HEAD')"); got != headBefore {
+			t.Errorf("reopen moved HEAD from %s to %s; want no commit", headBefore, got)
+		}
+		if n := repairCommitCount(t, ctx, conn); n != 1 {
+			t.Errorf("repair commits after reopen = %d, want 1", n)
+		}
+		requireFlags(t, ctx, conn, "issues", issues)
+		requireFlags(t, ctx, conn, "wisps", wisps)
+		requireStamps(t, ctx, conn, "issues", issues)
+		requireStamps(t, ctx, conn, "wisps", wisps)
+		requireStamp(t, ctx, conn, "issues", "rp-watched", watchedStamp)
+		if got := journalDump(t, ctx, conn); got != journalBefore {
+			t.Errorf("journal changed on reopen:\n got %s\nwant %s", got, journalBefore)
+		}
+		if n := repairKeyCount(t, ctx, conn, " AS OF 'HEAD'"); n != 0 {
+			t.Errorf("repair key committed at HEAD after reopen (%d row(s))", n)
+		}
+	})
 }
