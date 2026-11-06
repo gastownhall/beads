@@ -857,6 +857,23 @@ protection → Ransomware protection → Controlled folder access → "Allow an
 app through Controlled folder access" → browse to `bd.exe` (typically
 `%USERPROFILE%\go\bin\bd.exe`). Then retry `bd init`.
 
+### Windows: `bd migrate` fails syncing the migration journal
+
+**Symptom:** An experimental dolt-mode migration (such as `bd migrate
+from-server-to-proxied-server` or `from-proxied-server-to-server`) aborts
+with `syncing dolt-mode-migration.json directory: ... Access is denied`
+(or `syncing migration directory: ...`) after the journal file itself was
+already written or removed.
+
+**Explanation:** On Windows, Go's `os.Open` returns a read-only directory
+handle, and Windows cannot sync a read-only handle, so the journal's
+directory sync always failed there. bd now skips only that unsupported
+directory sync on Windows; the journal file's own sync, close, rename, and
+removal errors, and directory open/close errors, are still reported on every
+platform, and Linux and macOS still sync the directory. This makes no
+stronger crash-durability claim for Windows. Upgrade to a release carrying
+the fix ([GH#6882](https://github.com/gastownhall/beads/issues/6882)).
+
 ### Windows: `ENOENT` when a Node program spawns `bd`
 
 **Symptom:** An editor extension, MCP server, or script that shells out to
