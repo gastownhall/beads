@@ -1,6 +1,9 @@
 package versioncontrolops
 
 import (
+	"context"
+	"errors"
+	"strings"
 	"testing"
 )
 
@@ -158,4 +161,33 @@ func TestFlattenKeepsCommitLandingBeforeMainMoves(t *testing.T) {
 		}
 		f.wantStatus("u:false")
 	})
+}
+
+// AC-4: a caller cancelling just as Flatten deletes flatten-tmp still gets
+// the branch removed, so the next flatten runs.
+func TestFlattenCanceledAtFinalDeleteLetsTheNextFlattenRun(t *testing.T) {
+	port := startCompactTestServer(t)
+	f := newCompactFixture(t, port)
+
+	ctx, cancel := context.WithCancel(f.ctx)
+	defer cancel()
+	var canceled bool
+	hook := &compactHookConn{Conn: f.conn(), beforeExec: func(query string) {
+		if !canceled && strings.Contains(query, "DOLT_BRANCH('-D', 'flatten-tmp')") {
+			canceled = true
+			cancel()
+		}
+	}}
+	if err := Flatten(ctx, hook); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Flatten error = %v, want the cancellation reported", err)
+	}
+	f.wantNoFlattenBranch()
+	f.wantLog(flattenedLog)
+
+	f.exec(f.db, "INSERT INTO t VALUES (900, 'after')", "CALL DOLT_COMMIT('-Am', 't 900')")
+	if err := f.flatten(&compactHookConn{}); err != nil {
+		t.Fatalf("next Flatten: %v", err)
+	}
+	f.wantLog(flattenedLog)
+	f.wantNoFlattenBranch()
 }
