@@ -2156,7 +2156,7 @@ func checkOpenSchemaDrift(ctx context.Context, db *sql.DB, cfg *Config) error {
 	if !cfg.RequireReadableSchema || (!cfg.ReadOnly && !cfg.Gateway) {
 		return schema.CheckForwardDrift(ctx, db)
 	}
-	err := schema.CheckReadableDrift(ctx, db, "issues", issueProjectionColumns)
+	err := schema.CheckReadableDrift(ctx, db, []sqlbuild.ReadRelation{{Table: "issues", Columns: issueProjectionColumns}})
 	var behind *schema.SchemaBehindError
 	if cfg.Gateway && errors.As(err, &behind) {
 		behind.Gateway = true

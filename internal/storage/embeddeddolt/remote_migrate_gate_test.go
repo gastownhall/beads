@@ -3,13 +3,17 @@
 package embeddeddolt_test
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 	"github.com/steveyegge/beads/internal/storage/schema"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 // TestEmbeddedRemoteMigrateGate_BlocksReopen verifies that the #4259
@@ -330,5 +334,161 @@ func TestEmbeddedOpenForReadOnlyCommand_LenientGate(t *testing.T) {
 		t.Fatal("OpenForReadOnlyCommand past a dirty-table refusal of a schema without arrival_seq = nil error, want *schema.SchemaBehindError")
 	} else if !schema.IsSchemaBehindError(err) {
 		t.Fatalf("OpenForReadOnlyCommand past a dirty-table refusal: error = %T (%v), want *schema.SchemaBehindError", err, err)
+	}
+}
+
+// lenientGateFixture builds the gastownhall/beads#6572 shape: a remote-backed
+// embedded database one migration behind the binary, so the remote-migrate
+// gate refuses to migrate it and a read-only command reads on at the current
+// schema, holding one seeded issue, with stmts applied to its schema after.
+// It pins the gate env so the refusal is the blunt one, and returns the
+// .beads and data directories and the seeded issue's id.
+func lenientGateFixture(t *testing.T, stmts ...string) (string, string, string) {
+	t.Helper()
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt tests")
+	}
+	t.Setenv(schema.AllowRemoteMigrateEnv, "0")
+	t.Setenv(schema.SmartGateEnv, "0")
+	t.Setenv("BD_IGNORE_SCHEMA_SKEW", "")
+
+	ctx := t.Context()
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	dataDir := filepath.Join(beadsDir, "embeddeddolt")
+	store, err := embeddeddolt.Open(ctx, beadsDir, "testdb", "main")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := store.SetConfig(ctx, "issue_prefix", "fx"); err != nil {
+		store.Close()
+		t.Fatalf("SetConfig: %v", err)
+	}
+	const id = "fx-probe"
+	issue := &types.Issue{ID: id, Title: "probe", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask}
+	if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+		store.Close()
+		t.Fatalf("CreateIssue: %v", err)
+	}
+	store.Close()
+
+	db, cleanup, err := embeddeddolt.OpenSQL(ctx, dataDir, "testdb", "main")
+	if err != nil {
+		t.Fatalf("OpenSQL: %v", err)
+	}
+	defer func() { _ = cleanup() }()
+	for _, stmt := range append([]string{
+		"DELETE FROM schema_migrations WHERE version = " + strconv.Itoa(schema.LatestVersion()),
+		"CALL DOLT_REMOTE('add', 'origin', 'file://" + filepath.ToSlash(filepath.Join(t.TempDir(), "remote")) + "')",
+	}, stmts...) {
+		if _, err := db.ExecContext(ctx, stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	return beadsDir, dataDir, id
+}
+
+// fixtureSchemaState reports the fixture's main schema cursor and whether
+// table (and, when column is set, that column of it) exists, read on a raw
+// connection after the open under test has closed.
+func fixtureSchemaState(t *testing.T, dataDir, table, column string) (int, bool) {
+	t.Helper()
+	ctx := t.Context()
+	db, cleanup, err := embeddeddolt.OpenSQL(ctx, dataDir, "testdb", "main")
+	if err != nil {
+		t.Fatalf("OpenSQL: %v", err)
+	}
+	defer func() { _ = cleanup() }()
+	var cursor int
+	if err := db.QueryRowContext(ctx, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations").Scan(&cursor); err != nil {
+		t.Fatalf("read schema_migrations: %v", err)
+	}
+	query, args := "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?", []any{table}
+	if column != "" {
+		query, args = "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?", []any{table, column}
+	}
+	var n int
+	if err := db.QueryRowContext(ctx, query, args...).Scan(&n); err != nil {
+		t.Fatalf("probe %s.%s: %v", table, column, err)
+	}
+	return cursor, n > 0
+}
+
+// TestEmbeddedOpenForReadOnlyCommand_LenientGateRefusesUnreadableOverlay is
+// gastownhall/beads#6572's remaining read-through gap. The issues row can be
+// intact while what every hydrated read also touches is not: the clone-local
+// leases overlay it joins, and the wisps table it falls back to. A refused
+// migration leaves those as they are, and the issues-only readability check
+// let such a database open behind a "continuing on schema" warning whose
+// first list, show or ready then failed. The open must refuse instead,
+// before that warning, as a gate refusal that also classifies as
+// *schema.SchemaBehindError naming what is missing, and must leave the
+// schema exactly as it found it.
+func TestEmbeddedOpenForReadOnlyCommand_LenientGateRefusesUnreadableOverlay(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		stmts         []string
+		table, column string
+		missing       string
+	}{
+		{
+			name:    "leases table absent",
+			stmts:   []string{"DROP TABLE leases"},
+			table:   "leases",
+			missing: "leases",
+		},
+		{
+			name:    "lease overlay column absent",
+			stmts:   []string{"ALTER TABLE leases DROP COLUMN granted_node"},
+			table:   "leases",
+			column:  "granted_node",
+			missing: "leases.granted_node",
+		},
+		{
+			name:    "present wisps table lacks a projected column",
+			stmts:   []string{"ALTER TABLE wisps DROP COLUMN storage_class"},
+			table:   "wisps",
+			column:  "storage_class",
+			missing: "wisps.storage_class",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			beadsDir, dataDir, _ := lenientGateFixture(t, tc.stmts...)
+
+			var openErr error
+			stderr := captureStderr(t, func() {
+				var store *embeddeddolt.EmbeddedDoltStore
+				store, openErr = embeddeddolt.OpenForReadOnlyCommand(t.Context(), beadsDir, "testdb", "main")
+				if openErr == nil {
+					store.Close()
+				}
+			})
+			if openErr == nil {
+				t.Fatalf("OpenForReadOnlyCommand without %s = nil error, want the read-through refused", tc.missing)
+			}
+			if !schema.IsRemoteMigrateGateError(openErr) {
+				t.Errorf("error = %T (%v), want it to remain the remote-migrate gate refusal", openErr, openErr)
+			}
+			var behind *schema.SchemaBehindError
+			if !errors.As(openErr, &behind) {
+				t.Fatalf("error = %T (%v), want it to classify as *schema.SchemaBehindError", openErr, openErr)
+			}
+			if !slices.Contains(behind.Missing, tc.missing) {
+				t.Errorf("SchemaBehindError.Missing = %v, want it to name %s", behind.Missing, tc.missing)
+			}
+			if !strings.Contains(openErr.Error(), tc.missing) {
+				t.Errorf("error %q does not name %s", openErr, tc.missing)
+			}
+			if strings.Contains(stderr, "continuing on schema") {
+				t.Errorf("the refused open still announced the read-through:\n%s", stderr)
+			}
+
+			cursor, present := fixtureSchemaState(t, dataDir, tc.table, tc.column)
+			if cursor >= schema.LatestVersion() {
+				t.Errorf("schema cursor = v%d after the refused open, want it left behind v%d", cursor, schema.LatestVersion())
+			}
+			if present {
+				t.Errorf("the refused open recreated %s", tc.missing)
+			}
+		})
 	}
 }

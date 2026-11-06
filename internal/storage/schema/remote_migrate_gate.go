@@ -141,6 +141,25 @@ type RemoteMigrateGateError struct {
 	// plumbed into the gate: the topology is the caller's fact, and every
 	// other injection site would have to pass a constant false.
 	Proxied bool
+
+	// ReadsRefused is set when a read-only command, which may otherwise read
+	// on at the current schema past this refusal, cannot: the database lacks
+	// a relation or column this binary's issue reads select
+	// (schema.CheckReadableDrift, gastownhall/beads#6572). Like Proxied it
+	// is the caller's fact, attached after the gate returns. The open then
+	// fails with this error, which unwraps to the cause, so it classifies as
+	// both a gate refusal and a *SchemaBehindError while still carrying this
+	// decision's own remedy rather than the generic `bd migrate schema` one.
+	ReadsRefused *SchemaBehindError
+}
+
+// Unwrap exposes ReadsRefused, so errors.As finds the *SchemaBehindError a
+// refused read-through attached. Nil when there is none.
+func (e *RemoteMigrateGateError) Unwrap() error {
+	if e == nil || e.ReadsRefused == nil {
+		return nil
+	}
+	return e.ReadsRefused
 }
 
 const (
@@ -216,6 +235,24 @@ func (e *RemoteMigrateGateError) IsDataBehind() bool {
 }
 
 func (e *RemoteMigrateGateError) Error() string {
+	msg := e.refusal()
+	if e.ReadsRefused != nil {
+		msg += "; reads are refused too: " + e.readsRefusedFact()
+	}
+	return msg
+}
+
+// readsRefusedFact says what ReadsRefused found missing.
+func (e *RemoteMigrateGateError) readsRefusedFact() string {
+	missing := e.ReadsRefused.MissingSummary()
+	if missing == "" {
+		missing = "schema"
+	}
+	return fmt.Sprintf("schema v%d lacks %s, which this binary's issue reads select", e.CurrentVersion, missing)
+}
+
+// refusal is Error's one-line statement of the refusal itself.
+func (e *RemoteMigrateGateError) refusal() string {
 	unit := "migrations"
 	if e.Pending == 1 {
 		unit = "migration"

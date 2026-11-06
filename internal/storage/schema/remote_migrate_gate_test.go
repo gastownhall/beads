@@ -368,3 +368,70 @@ func TestRemoteMigrateGateAdoptFastForward(t *testing.T) {
 		t.Errorf("UserMessage should explain the fast-forward is loss-free:\n%s", msg)
 	}
 }
+
+// readsRefusedGateCases is one refusal per decision the gate can return,
+// for the gastownhall/beads#6572 read-refusal tests.
+func readsRefusedGateCases() map[string]*RemoteMigrateGateError {
+	base := func(e RemoteMigrateGateError) *RemoteMigrateGateError {
+		e.CurrentVersion, e.LatestVersion, e.Pending = 59, 66, 7
+		return &e
+	}
+	return map[string]*RemoteMigrateGateError{
+		"blunt":            base(RemoteMigrateGateError{}),
+		"adopt":            base(RemoteMigrateGateError{Decision: gateDecisionAdopt}),
+		"adopt-ff":         base(RemoteMigrateGateError{Decision: gateDecisionAdoptFastForward}),
+		"fork-skew":        base(RemoteMigrateGateError{Decision: gateDecisionForkSkew, SkewVersions: []int{60}}),
+		"shared-no-remote": base(RemoteMigrateGateError{Decision: gateDecisionSharedNoRemote, Shared: true}),
+		"data-behind":      base(RemoteMigrateGateError{FallbackReason: fallbackReasonDataBehind}),
+		"data-behind proxied shared": base(RemoteMigrateGateError{
+			FallbackReason: fallbackReasonDataBehind, Shared: true, Proxied: true,
+		}),
+	}
+}
+
+// TestRemoteMigrateGateError_ReadsRefused pins the classification a refused
+// read-through relies on (gastownhall/beads#6572): with ReadsRefused attached
+// the error is still the gate's, with its decision, and is also the
+// *SchemaBehindError naming what is missing; without it nothing unwraps and
+// the one-line refusal is unchanged.
+func TestRemoteMigrateGateError_ReadsRefused(t *testing.T) {
+	for name, gateErr := range readsRefusedGateCases() {
+		t.Run(name, func(t *testing.T) {
+			plain := gateErr.Error()
+			if u := gateErr.Unwrap(); u != nil {
+				t.Fatalf("Unwrap() without ReadsRefused = %v, want nil", u)
+			}
+			if IsSchemaBehindError(gateErr) {
+				t.Fatal("a gate refusal without ReadsRefused classifies as *SchemaBehindError")
+			}
+			if strings.Contains(plain, "reads are refused") {
+				t.Fatalf("Error() without ReadsRefused claims reads are refused: %q", plain)
+			}
+
+			refused := *gateErr
+			refused.ReadsRefused = &SchemaBehindError{DBVersion: 59, BinaryVersion: 66, Missing: []string{"leases", "wisps.storage_class"}}
+			var err error = &refused
+			var gotGate *RemoteMigrateGateError
+			if !errors.As(err, &gotGate) || gotGate.Decision != gateErr.Decision {
+				t.Fatalf("errors.As(gate) = %v, want the gate refusal with Decision %q", gotGate, gateErr.Decision)
+			}
+			var behind *SchemaBehindError
+			if !errors.As(err, &behind) || behind != refused.ReadsRefused {
+				t.Fatalf("errors.As(behind) did not find the attached *SchemaBehindError in %v", err)
+			}
+			msg := err.Error()
+			if !strings.HasPrefix(msg, plain) {
+				t.Errorf("Error() = %q, want it to keep the refusal %q first", msg, plain)
+			}
+			for _, want := range []string{"reads are refused too", "schema v59 lacks leases, wisps.storage_class"} {
+				if !strings.Contains(msg, want) {
+					t.Errorf("Error() = %q, want it to contain %q", msg, want)
+				}
+			}
+		})
+	}
+	var nilGate *RemoteMigrateGateError
+	if u := nilGate.Unwrap(); u != nil {
+		t.Errorf("nil gate Unwrap() = %v, want nil", u)
+	}
+}
