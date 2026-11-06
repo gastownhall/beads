@@ -186,6 +186,30 @@ func detectUserRoleForRouting(cfg *routing.RoutingConfig) routing.UserRole {
 	userRole, err := detectUserRoleForActiveRepo()
 	if err != nil {
 		debug.Logf("Warning: failed to detect user role: %v\n", err)
+		warnRoleReadFailedForRouting(err)
+		// A failed read is not a role: DetectUserRole returns "" with it, and
+		// routing.DetermineTargetRepoWithRule answers "" with routing.default
+		// (or "."), never a role-specific repository.
+		return ""
 	}
 	return userRole
+}
+
+// roleReadFailedWarned limits warnRoleReadFailedForRouting to one warning per
+// process, for the same reason as rolePathNotARepoWarned: role detection
+// re-runs once per auto-routed ID lookup.
+var roleReadFailedWarned bool
+
+// warnRoleReadFailedForRouting reports a beads.role read that git failed (a
+// malformed or unreadable config, for example). The command still runs on the
+// default route; without this the failure was visible only under debug
+// logging, and the route silently stopped depending on the role.
+func warnRoleReadFailedForRouting(err error) {
+	if roleReadFailedWarned {
+		return
+	}
+	roleReadFailedWarned = true
+	fmt.Fprintf(os.Stderr, "warning: could not read beads.role, so role-based routing was skipped: %v\n", err) //nolint:gosec // G705: stderr, not a browser context
+	fmt.Fprintln(os.Stderr, "  Using the default route (routing.default, or this repository).")
+	fmt.Fprintln(os.Stderr, "  Inspect: git config --list --show-origin")
 }

@@ -753,6 +753,84 @@ func TestDetectUserRoleForActiveRepoWarnsWhenRolePathIsNotARepo(t *testing.T) {
 	}
 }
 
+// malformGitConfigForTest appends an unterminated section header to repo's
+// local config, so every `git config --get` there fails with git's "bad config
+// line" diagnostic (exit 128) rather than reporting the key absent.
+func malformGitConfigForTest(t *testing.T, repo string) string {
+	t.Helper()
+	path := filepath.Join(repo, ".git", "config")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read git config: %v", err)
+	}
+	data = append(data, "\n[beads\n\trole = maintainer\n"...)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write malformed git config: %v", err)
+	}
+	return path
+}
+
+// resetRoleReadFailureWarningForTest re-arms the once-per-process routing
+// warning for a failed beads.role read.
+func resetRoleReadFailureWarningForTest(t *testing.T) {
+	t.Helper()
+	old := roleReadFailedWarned
+	roleReadFailedWarned = false
+	t.Cleanup(func() { roleReadFailedWarned = old })
+}
+
+// TestDetectUserRoleForRoutingReportsRoleReadFailureOnce pins the CLI half of
+// bd-a2qnf4 (GH#6765): when git fails the beads.role read, role-dependent
+// routing warns once per invocation and takes the default route, instead of
+// logging the failure only under debug and routing by a guessed role.
+func TestDetectUserRoleForRoutingReportsRoleReadFailureOnce(t *testing.T) {
+	resetRepoContextCachesForTest(t)
+	resetRolePathWarningForTest(t)
+	resetRoleReadFailureWarningForTest(t)
+
+	repo := filepath.Join(t.TempDir(), "repo")
+	initGitRepoForContextTest(t, repo)
+	beadsDir := filepath.Join(repo, ".beads")
+	writeTestConfigYAML(t, beadsDir, "")
+	malformGitConfigForTest(t, repo)
+
+	t.Chdir(repo)
+	t.Setenv("BEADS_DIR", beadsDir)
+	setBeadsDirStartupProvenanceForTest(t, false)
+	setChangeDirForTest(t, "")
+
+	cfg := &routing.RoutingConfig{
+		Mode:            "auto",
+		DefaultRepo:     "/default-repo",
+		MaintainerRepo:  "/maintainer-repo",
+		ContributorRepo: "/contributor-repo",
+	}
+	if !cfg.UsesUserRole() {
+		t.Fatal("fixture routing config must depend on the role")
+	}
+	stderr := captureStderr(t, func() {
+		// An ID lookup re-runs role detection once per missing ID.
+		for range 3 {
+			role := detectUserRoleForRouting(cfg)
+			if role != "" {
+				t.Errorf("detectUserRoleForRouting = %q, want empty after a failed read", role)
+			}
+			if got := routing.DetermineTargetRepo(cfg, role, "."); got != cfg.DefaultRepo {
+				t.Errorf("route = %q, want the default route %q", got, cfg.DefaultRepo)
+			}
+		}
+	})
+	if n := strings.Count(stderr, "could not read beads.role"); n != 1 {
+		t.Errorf("role read failure reported %d times, want once; stderr:\n%s", n, stderr)
+	}
+	if !strings.Contains(stderr, "bad config") {
+		t.Errorf("warning does not carry git's diagnostic; stderr:\n%s", stderr)
+	}
+	if strings.Contains(stderr, "not configured") {
+		t.Errorf("failed read reported as a missing role; stderr:\n%s", stderr)
+	}
+}
+
 // TestActiveRepoPathForRoutingHonorsChangeDirSelectionOfNonGitProject pins
 // the routing knock-on of GH#5700: `bd -C T` from git repository A, with T in
 // no repository, must read the role at T (with the one-time non-repo warning),
