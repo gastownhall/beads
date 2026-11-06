@@ -234,20 +234,29 @@ var primeCheckBinary = fix.BdBinary
 
 // primeCheckCommand builds the bd subprocess for a prime check. It runs the
 // binary that is running doctor, not whichever bd comes first on PATH: a
-// different version could open, and migrate, the store being diagnosed.
-func primeCheckCommand(args ...string) (*exec.Cmd, error) {
+// different version could open, and migrate, the store being diagnosed. The
+// child runs in repoPath with BEADS_DIR pinned to doctor's resolution for it,
+// because an inherited BEADS_DIR would otherwise override the working directory.
+func primeCheckCommand(repoPath string, args ...string) (*exec.Cmd, error) {
 	exe, err := primeCheckBinary()
 	if err != nil {
 		return nil, err
 	}
-	return exec.Command(exe, args...), nil // #nosec G204 -- exe is the running binary, args are literals
+	absRepoPath, err := filepath.Abs(repoPath)
+	if err != nil {
+		return nil, fmt.Errorf("resolve workspace path %q: %w", repoPath, err)
+	}
+	cmd := exec.Command(exe, args...) // #nosec G204 -- exe is the running binary, args are literals
+	cmd.Dir = absRepoPath
+	cmd.Env = append(cmd.Environ(), "BEADS_DIR="+ResolveBeadsDirForRepo(absRepoPath))
+	return cmd, nil
 }
 
 // VerifyPrimeOutput checks if bd prime command works and adapts correctly.
 // repoPath is the project root directory.
 func VerifyPrimeOutput(repoPath string) DoctorCheck {
 	var output []byte
-	cmd, err := primeCheckCommand("prime")
+	cmd, err := primeCheckCommand(repoPath, "prime")
 	if err == nil {
 		output, err = cmd.CombinedOutput()
 	}
@@ -350,7 +359,7 @@ func CheckDocumentationBdPrimeReference(repoPath string) DoctorCheck {
 	}
 
 	// Docs reference bd prime - verify the command works
-	cmd, err := primeCheckCommand("prime", "--help")
+	cmd, err := primeCheckCommand(repoPath, "prime", "--help")
 	if err == nil {
 		err = cmd.Run()
 	}
