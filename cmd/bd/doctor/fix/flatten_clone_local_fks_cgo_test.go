@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -162,4 +163,49 @@ func TestFlattenKeepsCloneLocalFKs_Server(t *testing.T) {
 	if n := f.count("SELECT COUNT(*) FROM wisp_labels WHERE issue_id = 'fl-wisp'"); n != 0 {
 		t.Errorf("wisp_labels rows of a deleted wisp = %d, want the cascade to remove them", n)
 	}
+}
+
+// TestFlattenLeavesPreSeveredCloneLocalFKs: an FK that was already missing
+// before Flatten stays missing, its historical orphan rows stay, and the
+// doctor still reports both for explicit `bd doctor --fix` repair. Flatten
+// neither repairs nor purges; the FKs that were present stay enforcing,
+// including the other FKs of a table that lost one.
+func TestFlattenLeavesPreSeveredCloneLocalFKs(t *testing.T) {
+	f := newFlattenFKFixture(t)
+
+	f.exec("ALTER TABLE wisp_labels DROP FOREIGN KEY fk_wisp_labels_issue")
+	f.exec("ALTER TABLE wisp_dependencies DROP FOREIGN KEY fk_wisp_dep_wisp_target")
+	f.exec("INSERT INTO wisp_labels (issue_id, label) VALUES ('fl-gone', 'orphan')")
+	// An orphan on the dropped FK whose other target is NULL, and a row whose
+	// wisp and issue targets are both NULL: only the first is an orphan.
+	f.exec(`INSERT INTO wisp_dependencies (id, issue_id, depends_on_wisp_id, depends_on_issue_id, depends_on_external)
+		VALUES ('33333333-3333-3333-3333-333333333333', 'fl-wisp', 'fl-gone', NULL, NULL),
+		       ('44444444-4444-4444-4444-444444444444', 'fl-wisp', NULL, NULL, 'external:x')`)
+	want := "wisp_dependencies.fk_wisp_dep_wisp_target(1),wisp_labels.fk_wisp_labels_issue(1)"
+	severedNames := func() string {
+		var parts []string
+		for _, fk := range f.scan() {
+			parts = append(parts, fmt.Sprintf("%s.%s(%d)", fk.Table, fk.Constraint, fk.Orphans))
+		}
+		sort.Strings(parts)
+		return strings.Join(parts, ",")
+	}
+	if got := severedNames(); got != want {
+		t.Fatalf("doctor scan before flatten = %s, want %s", got, want)
+	}
+
+	f.flatten()
+
+	if got := severedNames(); got != want {
+		t.Errorf("doctor scan after flatten = %s, want the same pre-severed FKs and orphans %s", got, want)
+	}
+	if n := f.count("SELECT COUNT(*) FROM wisp_labels WHERE issue_id = 'fl-gone'"); n != 1 {
+		t.Errorf("historical wisp_labels orphan rows after flatten = %d, want 1 left for explicit repair", n)
+	}
+	if n := f.count("SELECT COUNT(*) FROM wisp_dependencies WHERE issue_id = 'fl-wisp'"); n != 2 {
+		t.Errorf("wisp_dependencies rows after flatten = %d, want both kept", n)
+	}
+	f.wantRefused("INSERT INTO events (id, issue_id, event_type, actor) VALUES ('11111111-1111-1111-1111-111111111111', 'fl-no-such-issue', 'created', 'test')")
+	f.wantRefused(`INSERT INTO wisp_dependencies (id, issue_id, depends_on_issue_id)
+		VALUES ('55555555-5555-5555-5555-555555555555', 'fl-wisp', 'fl-no-such-issue')`)
 }
