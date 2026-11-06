@@ -246,4 +246,24 @@ func TestMapUpdateTitleValidation(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("500-byte multibyte title is stored byte-identically", func(t *testing.T) {
+		atLimit := strings.Repeat("é", 250) // 250 runes, exactly 500 bytes
+		create(t, "tl-at-limit", false)
+		if err := store.UpdateIssue(ctx, "tl-at-limit", map[string]interface{}{"title": atLimit}, "tester"); err != nil {
+			t.Fatalf("UpdateIssue with a 500-byte title: %v", err)
+		}
+		got, err := store.GetIssue(ctx, "tl-at-limit")
+		if err != nil || got == nil {
+			t.Fatalf("GetIssue: %v", err)
+		}
+		if got.Title != atLimit {
+			t.Fatalf("stored title is %d bytes, want the 500-byte title byte-identical", len(got.Title))
+		}
+		// The stored row must pass the validation create and import run, so
+		// an export of it imports back.
+		if err := got.ValidateWithCustom(nil, nil); err != nil {
+			t.Fatalf("stored issue fails create/import validation: %v", err)
+		}
+	})
 }
