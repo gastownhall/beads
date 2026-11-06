@@ -597,6 +597,28 @@ func TestServerVersionBumpDirtyTablesRefusalIsReportedAndRetried(t *testing.T) {
 	w.assertRefusedAndRetained(t, "bd count")
 }
 
+// TestServerVersionBumpFailureNoticeSuppressedUnderJSON pins the failure
+// notice's --json contract on a real server refusal, the one it shares with
+// the gate notice: under --json the refused dirty-tables migration prints no
+// prose on stderr, and the witness is retained exactly as in the human-output
+// case.
+func TestServerVersionBumpFailureNoticeSuppressedUnderJSON(t *testing.T) {
+	w := newDirtyUpgradeWorkspace(t)
+
+	stdout, stderr, code := w.run(t, "", "", "count", "--json")
+	if code != 0 {
+		t.Fatalf("bd count --json: exit %d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	for _, prose := range []string{
+		"were not applied", "finishing the upgrade failed", "bd dolt commit", "retries the migration",
+	} {
+		if strings.Contains(stderr, prose) {
+			t.Errorf("--json run printed the version-bump failure prose %q on stderr:\n%s", prose, stderr)
+		}
+	}
+	w.assertRefusedAndRetained(t, "bd count --json")
+}
+
 // TestServerVersionBumpDirtyTablesRecoveryConverges is the rest of #6929's
 // story: the retained witness makes the next command report the refusal
 // again, the remedy the notice names converges, and once it has, the upgrade
