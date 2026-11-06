@@ -2199,6 +2199,79 @@ func TestRenderLocalDoltStatus(t *testing.T) {
 			t.Errorf("did not expect mode=external on bd-managed path, got:\n%s", out)
 		}
 	})
+
+	// GH#6614: a live server whose port no source resolves is Running with
+	// port 0. Status shows the PID, says the port is unknown and how to
+	// recover, and never prints "Port: 0" as if it were an endpoint.
+	t.Run("Running:true with unresolved port prints unknown port and advice", func(t *testing.T) {
+		orig := jsonOutput
+		defer func() { jsonOutput = orig }()
+		jsonOutput = false
+
+		serverDir := t.TempDir()
+		state := &doltserver.State{
+			Running: true,
+			PID:     4242,
+			Port:    0,
+			DataDir: "/tmp/data",
+		}
+		out := captureStdout(t, func() error {
+			renderLocalDoltStatus(state, serverDir)
+			return nil
+		})
+
+		for _, want := range []string{
+			"Dolt server: running",
+			"PID:  4242",
+			"Port: unknown (no resolved port)",
+			"Data: /tmp/data",
+			"dolt-server.log",
+			"BEADS_DOLT_SERVER_PORT",
+			"bd dolt stop && bd dolt start",
+		} {
+			if !strings.Contains(out, want) {
+				t.Errorf("expected output to contain %q, got:\n%s", want, out)
+			}
+		}
+		if strings.Contains(out, "Port: 0") {
+			t.Errorf("unresolved port rendered as a number, got:\n%s", out)
+		}
+	})
+
+	t.Run("json output with unresolved port keeps the State shape", func(t *testing.T) {
+		orig := jsonOutput
+		defer func() { jsonOutput = orig }()
+		jsonOutput = true
+
+		serverDir := t.TempDir()
+		state := &doltserver.State{
+			Running: true,
+			PID:     4242,
+			Port:    0,
+			DataDir: "/var/data",
+		}
+		out := captureStdout(t, func() error {
+			renderLocalDoltStatus(state, serverDir)
+			return nil
+		})
+
+		var result map[string]any
+		if err := json.Unmarshal([]byte(out), &result); err != nil {
+			t.Fatalf("expected valid JSON, got error %v, raw: %s", err, out)
+		}
+		// No new keys: the envelope's schema_version plus the existing State
+		// fields, with port 0 standing for an unresolved port.
+		delete(result, "schema_version")
+		want := map[string]any{"running": true, "pid": float64(4242), "port": float64(0), "data_dir": "/var/data"}
+		if len(result) != len(want) {
+			t.Errorf("json keys = %v, want exactly %v", result, want)
+		}
+		for key, value := range want {
+			if result[key] != value {
+				t.Errorf("%s = %v, want %v", key, result[key], value)
+			}
+		}
+	})
 }
 
 // minimalPullStore implements storage.DoltStorage by embedding the interface
