@@ -1070,6 +1070,42 @@ func TestRunRecipe_CopilotManagedSection(t *testing.T) {
 			t.Fatalf("rerun changed the instructions:\nbefore: %q\nafter:  %q", got, again)
 		}
 	})
+
+	t.Run("check distinguishes an unmarked instructions file", func(t *testing.T) {
+		tmpDir := chdirFresh(t)
+		writeInstructions(t, tmpDir, userContent)
+		if err := os.MkdirAll(filepath.Join(tmpDir, ".copilot-plugin"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(tmpDir, ".copilot-plugin", "plugin.json"), []byte("{}"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		setupCheck = true
+		out, _, err := run(t)
+		if err == nil {
+			t.Fatalf("--check passed on an instructions file with no beads section:\n%s", out)
+		}
+		if !strings.Contains(out, "copilot-instructions.md") || !strings.Contains(out, "no beads section") {
+			t.Fatalf("--check did not identify the missing beads section:\n%s", out)
+		}
+
+		resetSetupGlobals(t)
+		if _, _, err := run(t); err != nil {
+			t.Fatalf("bd setup copilot: %v", err)
+		}
+		resetSetupGlobals(t)
+		setupCheck = true
+		out, _, err = run(t)
+		if err != nil {
+			t.Fatalf("--check after install: %v\n%s", err, out)
+		}
+		for _, path := range []string{".copilot-plugin/plugin.json", ".github/copilot-instructions.md"} {
+			if !strings.Contains(out, path) {
+				t.Fatalf("--check after install does not name %s:\n%s", path, out)
+			}
+		}
+	})
 }
 
 // TestRunRecipe_CopilotWorkspaceOverrideUsesGenericPath pins that a workspace

@@ -1,10 +1,12 @@
 package setup
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/steveyegge/beads/internal/recipes"
 	"github.com/steveyegge/beads/internal/templates/agents"
@@ -21,7 +23,13 @@ const (
 	copilotInstructionsPath = ".github/copilot-instructions.md"
 )
 
-var copilotEnvProvider = defaultCopilotEnv
+var (
+	copilotEnvProvider = defaultCopilotEnv
+
+	errCopilotManifestMissing    = errors.New("copilot plugin manifest not installed")
+	errCopilotInstructionsLink   = errors.New("copilot instructions file is a symbolic link")
+	errCopilotMarkersMalformed   = errors.New("copilot beads section markers are malformed")
+)
 
 // copilotIntegration describes the managed section installAgents keeps in
 // .github/copilot-instructions.md. The plugin's hooks run bd prime at session
@@ -119,4 +127,78 @@ func installCopilot(env copilotEnv) error {
 		return err
 	}
 	return installAgents(env.agentsEnv(), copilotIntegration)
+}
+
+func CheckCopilot() error {
+	return checkCopilot(copilotEnvProvider())
+}
+
+// checkCopilot reports the recipe's two files separately: the manifest bd
+// owns is present or missing, and the shared instructions file holds a
+// current beads section (checkAgents: missing, no section, stale, current).
+// A file the section check would misread — a destination symlink, or markers
+// that are incomplete or reversed — is refused with its remedy instead of
+// being reported installed.
+func checkCopilot(env copilotEnv) error {
+	if _, err := os.Stat(env.manifestPath); err != nil {
+		if !os.IsNotExist(err) {
+			_, _ = fmt.Fprintf(env.stderr, "Error: failed to inspect %s: %v\n", env.manifestPath, err)
+			return err
+		}
+		_, _ = fmt.Fprintf(env.stdout, "✗ %s integration not installed\n", copilotIntegration.name)
+		_, _ = fmt.Fprintf(env.stdout, "  Run: %s\n", copilotIntegration.setupCommand)
+		_, _ = fmt.Fprintf(env.stdout, "  Missing: %s\n", env.manifestPath)
+		return errCopilotManifestMissing
+	}
+	_, _ = fmt.Fprintf(env.stdout, "✓ Plugin manifest installed\n  File: %s\n", env.manifestPath)
+
+	if err := copilotPrecheckInstructions(env); err != nil {
+		return err
+	}
+	return checkAgents(env.agentsEnv(), copilotIntegration)
+}
+
+// copilotPrecheckInstructions refuses the states checkAgents cannot report
+// honestly: a .github/copilot-instructions.md that is a symbolic link (the
+// check would read the link's target and judge it the integration's file),
+// and one whose beads markers are incomplete or reversed (a section that
+// looks current but cannot be used or updated). Each refusal names the path
+// and the remedy; nothing is modified.
+func copilotPrecheckInstructions(env copilotEnv) error {
+	path := env.instructionsPath
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return nil // checkAgents reports the missing file
+	}
+	if err != nil {
+		_, _ = fmt.Fprintf(env.stderr, "Error: failed to inspect %s: %v\n", path, err)
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		_, _ = fmt.Fprintf(env.stdout, "✗ %s is a symbolic link\n", path)
+		_, _ = fmt.Fprintf(env.stdout, "  Replace the link with a regular file and re-run '%s'.\n", copilotIntegration.setupCommand)
+		return errCopilotInstructionsLink
+	}
+	data, err := env.readFile(path)
+	if err != nil {
+		_, _ = fmt.Fprintf(env.stderr, "Error: failed to read %s: %v\n", path, err)
+		return err
+	}
+	if content := string(data); copilotMarkersMalformed(content) {
+		_, _ = fmt.Fprintf(env.stdout, "⚠ %s has malformed beads section markers\n", path)
+		_, _ = fmt.Fprintf(env.stdout, "  Fix or remove the BEGIN/END BEADS INTEGRATION markers, then re-run '%s'.\n", copilotIntegration.setupCommand)
+		return errCopilotMarkersMalformed
+	}
+	return nil
+}
+
+// copilotMarkersMalformed reports whether content holds a BEGIN BEADS
+// INTEGRATION marker whose END marker is missing or comes before it.
+func copilotMarkersMalformed(content string) bool {
+	begin := findBeginMarker(content)
+	if begin == -1 {
+		return false
+	}
+	end := strings.Index(content, agentsEndMarker)
+	return end == -1 || end < begin
 }

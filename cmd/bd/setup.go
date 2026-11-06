@@ -298,7 +298,7 @@ func runRecipe(name string) error {
 	// it (GH#7431). Only the resolved built-in is dispatched: a workspace
 	// [recipes.copilot] override keeps the generic path below, its
 	// confinement checks included.
-	if normalized := strings.ToLower(strings.Trim(name, "-")); normalized == "copilot" && !recipe.Workspace && !setupCheck && !setupRemove {
+	if normalized := strings.ToLower(strings.Trim(name, "-")); normalized == "copilot" && !recipe.Workspace && !setupRemove {
 		return runCopilotRecipe()
 	}
 
@@ -414,7 +414,12 @@ func translateSetupError(err error) error {
 // .github/copilot-instructions.md (setup.InstallCopilot) instead of
 // overwriting the file.
 func runCopilotRecipe() error {
-	return translateSetupError(setup.InstallCopilot())
+	switch {
+	case setupCheck:
+		return translateSetupError(setup.CheckCopilot())
+	default:
+		return translateSetupError(setup.InstallCopilot())
+	}
 }
 
 func runCursorRecipe() error {
