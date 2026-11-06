@@ -4,6 +4,10 @@
 
 **Platforms:** macOS, Linux, Windows, FreeBSD
 
+Windows workspace locks resolve directory-mounted volumes (including Dev Drives)
+and junction ancestors to the same physical parent. A `.beads` directory that is
+itself a symlink remains unsupported.
+
 [![License](https://img.shields.io/github/license/gastownhall/beads)](LICENSE)
 [![Go Report Card](https://goreportcard.com/badge/github.com/steveyegge/beads)](https://goreportcard.com/report/github.com/steveyegge/beads)
 [![Release](https://img.shields.io/github/v/release/gastownhall/beads)](https://github.com/gastownhall/beads/releases)

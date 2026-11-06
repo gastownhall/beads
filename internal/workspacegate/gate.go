@@ -195,7 +195,7 @@ func forDir(dir string) (Gate, error) {
 	case "", ".", "..":
 		return Gate{}, fmt.Errorf("workspacegate: cannot gate %q: the guarded path must be a named directory", dir)
 	}
-	canonParent, err := filepath.EvalSymlinks(filepath.Clean(parent))
+	canonParent, err := canonicalParent(filepath.Clean(parent))
 	if err != nil {
 		return Gate{}, fmt.Errorf("workspacegate: gate parent %s must exist: %w", parent, err)
 	}
