@@ -195,6 +195,26 @@ func TestRetireRefusesReplacedPath(t *testing.T) {
 	assert.Equal(t, "replacement", string(content), "the replacement must still be there after the lease is released")
 }
 
+// TestTryLockPathRemoveStillFailsWhileHeld guards the retirement machinery
+// from loosening ordinary leases: a TryLock file opens without delete
+// sharing, so removing its path mid-flight keeps failing with a sharing
+// violation — the behavior #6884 routes around for the migration's own
+// leases, never removes. The assertion holds on the base and after every
+// commit; as a guard it has no red run by design.
+func TestTryLockPathRemoveStillFailsWhileHeld(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ordinary.lock")
+
+	held, err := TryLock(path)
+	require.NoError(t, err)
+
+	require.Error(t, os.Remove(path), "an ordinary lease's path must stay unremovable while held")
+	assert.FileExists(t, path)
+
+	held.Unlock()
+	assert.FileExists(t, path, "unlock closes the handle without removing the file")
+	require.NoError(t, os.Remove(path), "a released ordinary path removes normally")
+}
+
 // makeJunction creates a directory junction at link pointing at target, the
 // way mklink /J does: a REPARSE_DATA_BUFFER with the mount-point tag set
 // through FSCTL_SET_REPARSE_POINT.
