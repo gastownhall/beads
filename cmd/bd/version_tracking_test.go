@@ -903,3 +903,139 @@ func TestSettleBdVersionStampOutcomeTable(t *testing.T) {
 		})
 	}
 }
+
+// TestTrackBdVersion_UpgradeDefersStamp is the #6929 core: detection must not
+// consume the one-shot witness. Base-red recorded at 8c3eb30f30f7 as
+// TestTrackBdVersionDefersStampUntilSettled_core — base stamped the witness
+// immediately, so a failed reconciliation could never be retried.
+func TestTrackBdVersion_UpgradeDefersStamp(t *testing.T) {
+	localVersionPath := newTrackingWorkspace(t, "0.22.0", "9.9.9")
+
+	trackBdVersion()
+
+	if !versionUpgradeDetected {
+		t.Fatal("expected upgrade detection")
+	}
+	if pendingVersionStampPath != localVersionPath {
+		t.Errorf("pending stamp path = %q, want the witness %q", pendingVersionStampPath, localVersionPath)
+	}
+	if got := readLocalVersion(localVersionPath); got != "0.22.0" {
+		t.Errorf("witness = %q immediately after detection, want stale 0.22.0 until settlement", got)
+	}
+
+	settleBdVersionStamp(bumpSettled)
+	if got := readLocalVersion(localVersionPath); got != "9.9.9" {
+		t.Errorf("witness = %q after settlement, want 9.9.9", got)
+	}
+}
+
+// TestTrackBdVersion_DeferralRepeatsAfterFailedSettlement keeps the retry
+// loop honest within one process: a failed settlement clears the pending
+// path, and a later detection — doctor's second pass, any re-entry — re-arms
+// it rather than assuming the first detection still owns the write.
+func TestTrackBdVersion_DeferralRepeatsAfterFailedSettlement(t *testing.T) {
+	localVersionPath := newTrackingWorkspace(t, "0.22.0", "9.9.9")
+
+	trackBdVersion()
+	settleBdVersionStamp(bumpFailed)
+
+	if got := readLocalVersion(localVersionPath); got != "0.22.0" {
+		t.Errorf("witness = %q after a failed settlement, want stale 0.22.0", got)
+	}
+	if pendingVersionStampPath != "" {
+		t.Errorf("pending stamp path = %q after settlement, want cleared", pendingVersionStampPath)
+	}
+
+	trackBdVersion()
+	if pendingVersionStampPath != localVersionPath {
+		t.Errorf("re-detection must re-arm the deferred write; pending = %q", pendingVersionStampPath)
+	}
+	settleBdVersionStamp(bumpSettled)
+	if got := readLocalVersion(localVersionPath); got != "9.9.9" {
+		t.Errorf("witness = %q after the retry settles, want 9.9.9", got)
+	}
+}
+
+// TestTrackBdVersionPreviewLeavesNoPendingStamp: a preview command must not
+// arm a deferred witness write either — settlement with nothing pending is a
+// no-op, or the preview would consume the one-shot signal by proxy.
+func TestTrackBdVersionPreviewLeavesNoPendingStamp(t *testing.T) {
+	localVersionPath := newTrackingWorkspace(t, "0.22.0", "9.9.9")
+
+	trackBdVersionPreview()
+
+	if !versionUpgradeDetected {
+		t.Fatal("preview still detects the upgrade")
+	}
+	if pendingVersionStampPath != "" {
+		t.Errorf("preview armed a deferred write: pending = %q", pendingVersionStampPath)
+	}
+	settleBdVersionStamp(bumpSettled)
+	if got := readLocalVersion(localVersionPath); got != "0.22.0" {
+		t.Errorf("settlement without a pending write stamped the witness to %q; preview must leave it alone", got)
+	}
+}
+
+// TestSettleStampsTheCapturedPathNotTheCurrentOne pins the scoping that keeps
+// `bd doctor <path>` honest: detection ran with BEADS_DIR pointing at the
+// target, so settlement must stamp the target's witness even if the caller
+// restored its own BEADS_DIR in between.
+func TestSettleStampsTheCapturedPathNotTheCurrentOne(t *testing.T) {
+	targetWitness := newTrackingWorkspace(t, "0.22.0", "9.9.9")
+	trackBdVersion()
+
+	callerBeads := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(callerBeads, 0o755); err != nil {
+		t.Fatalf("create caller .beads: %v", err)
+	}
+	callerWitness := filepath.Join(callerBeads, localVersionFile)
+	if err := writeLocalVersion(callerWitness, "0.22.0"); err != nil {
+		t.Fatalf("write caller witness: %v", err)
+	}
+	t.Setenv("BEADS_DIR", callerBeads)
+
+	settleBdVersionStamp(bumpSettled)
+
+	if got := readLocalVersion(targetWitness); got != "9.9.9" {
+		t.Errorf("target witness = %q, want 9.9.9 — settlement must use the captured path", got)
+	}
+	if got := readLocalVersion(callerWitness); got != "0.22.0" {
+		t.Errorf("caller witness = %q, want 0.22.0 — settlement must not follow the restored BEADS_DIR", got)
+	}
+}
+
+// TestTrackBdVersionNoBeadsDirLeavesNothingPending: with no workspace to
+// resolve, detection arms nothing — a later settlement is a no-op.
+func TestTrackBdVersionNoBeadsDirLeavesNothingPending(t *testing.T) {
+	ensureCleanGlobalState(t)
+	t.Chdir(t.TempDir())
+	t.Setenv("BEADS_DIR", filepath.Join(t.TempDir(), "no-such-.beads"))
+	pendingVersionStampPath = "/stale/from/an/earlier/test"
+	t.Cleanup(func() { pendingVersionStampPath = "" })
+
+	trackBdVersion()
+
+	if pendingVersionStampPath != "" {
+		t.Errorf("pending stamp path = %q with no resolvable workspace, want empty", pendingVersionStampPath)
+	}
+}
+
+// TestSettleBestEffortOnWriteFailure: settlement must never panic or fail the
+// command when the witness cannot be written — the write was best effort at
+// detection time and stays best effort here.
+func TestSettleBestEffortOnWriteFailure(t *testing.T) {
+	localVersionPath := newTrackingWorkspace(t, "0.22.0", "9.9.9")
+	trackBdVersion()
+	if err := os.Remove(localVersionPath); err != nil {
+		t.Fatalf("remove witness: %v", err)
+	}
+	if err := os.Mkdir(localVersionPath, 0o755); err != nil { // a directory where the file must go
+		t.Fatalf("block witness path: %v", err)
+	}
+
+	settleBdVersionStamp(bumpSettled) // must not panic
+
+	if pendingVersionStampPath != "" {
+		t.Errorf("pending stamp path = %q after settlement, want cleared even on write failure", pendingVersionStampPath)
+	}
+}
