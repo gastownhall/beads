@@ -97,6 +97,7 @@ go_test(
         "parity_direct_test.go",
         "ready_helpers_test.go",
         "ready_helpers_usecase_test.go",
+        "ready_undated_deferred_include_test.go",
         "ready_work_counts_test.go",
         "ready_work_missing_table_test.go",
         "ready_work_test.go",
