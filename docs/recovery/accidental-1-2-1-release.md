@@ -40,7 +40,8 @@ will work normally afterwards.
    binary that touches the database will silently re-migrate it.
 2. Stop anything using the database: close running `bd` processes; in
    server mode also run `bd dolt stop`.
-3. Take a backup copy of the workspace database:
+3. Take a backup copy of the workspace database, and keep it until every
+   step below has succeeded:
 
    ```sh
    cp -a .beads .beads.backup-pre-recovery
@@ -60,7 +61,91 @@ will work normally afterwards.
    (If this reports there is nothing to commit, the step was already
    done — safe to continue.)
 
-5. Run any `bd` command from the workspace. It should work with no
+5. **Restore the versioned `events` table.** v1.2.1 committed the removal
+   of `events` from versioned history and kept the table only on this
+   machine, which v1.2.2 cannot do for a clone. From the same database
+   directory, run this batch; it puts back the table v1.2.1 removed, with
+   its original schema, and fills it with this machine's audit rows:
+
+   ```sh
+   dolt sql <<'SQL'
+   -- The commit in which v1.2.1 removed events from versioned history.
+   SET @flip = (SELECT commit_hash FROM dolt_log
+     WHERE message = 'schema: drop versioned events table for ignored-plane flip (bd-red8u)'
+       AND EXISTS (SELECT 1 FROM dolt_ignore WHERE pattern = 'events')
+       AND NOT EXISTS (SELECT 1 FROM dolt_log WHERE message = 'recovery: re-track events table')
+     ORDER BY date LIMIT 1);
+   SET @preflip = CONCAT(@flip, '~1');
+   -- Checks. Each one stops the batch before anything changes.
+   CREATE TEMPORARY TABLE recovery_check_history (events_history_found VARCHAR(64) NOT NULL);
+   INSERT INTO recovery_check_history VALUES (@flip);
+   CREATE TEMPORARY TABLE recovery_check_staged (nothing_else_staged INT NOT NULL);
+   INSERT INTO recovery_check_staged SELECT IF(COUNT(*) = 0, 1, NULL) FROM dolt_status WHERE staged = 1;
+   CREATE TEMPORARY TABLE recovery_check_empty (local_events_not_empty INT NOT NULL);
+   INSERT INTO recovery_check_empty SELECT IF(COUNT(*) = 0 AND (SELECT COUNT(*) FROM events AS OF @preflip) > 0, NULL, 1) FROM events;
+   CREATE TEMPORARY TABLE recovery_check_carried (local_events_carry_history INT NOT NULL);
+   INSERT INTO recovery_check_carried SELECT IF(COUNT(*) = 0, 1, NULL) FROM events AS OF @preflip AS h
+     WHERE h.issue_id IN (SELECT id FROM issues) AND h.id NOT IN (SELECT id FROM events);
+   -- Restore: keep this machine's rows, put the historical table back.
+   CREATE TABLE events_recovery_local AS
+     SELECT issue_id, event_type, actor, old_value, new_value, comment, created_at, id FROM events;
+   DROP TABLE events;
+   DELETE FROM dolt_ignore WHERE pattern = 'events';
+   CALL DOLT_ADD('dolt_ignore');
+   CALL DOLT_CHECKOUT(@preflip, '--', 'events');
+   DELETE FROM events WHERE id NOT IN (SELECT id FROM events_recovery_local);
+   INSERT IGNORE INTO events (issue_id, event_type, actor, old_value, new_value, comment, created_at, id)
+     SELECT issue_id, event_type, actor, old_value, new_value, comment, created_at, id FROM events_recovery_local;
+   DROP TABLE events_recovery_local;
+   CALL DOLT_ADD('events');
+   CALL DOLT_COMMIT('-m', 'recovery: restore versioned events table', '--author', 'bd recovery <recovery@beads.invalid>');
+   SQL
+   ```
+
+   Afterwards `events` holds exactly this machine's audit rows. Historical
+   rows this machine no longer has, the events of issues deleted since the
+   upgrade, are deleted, not recovered.
+
+   If a check fails, the batch stops with an error naming it, before any
+   change:
+
+   - `events_history_found`: there is no v1.2.1 removal to undo here. Either
+     this step already succeeded (step 6 confirms it), the database never ran
+     the v1.2.1 migration, its history no longer reaches that commit, or the
+     old re-track command from an earlier version of this guide already ran
+     ([finish that instead](#if-you-already-ran-the-old-re-track-command)).
+     Do not continue to step 7 until step 6 passes.
+   - `nothing_else_staged`: something else is staged and the commit would
+     sweep it in. Commit or unstage it first.
+   - `local_events_not_empty` or `table not found: events`: this machine
+     has no audit rows to keep. See
+     [If `events` is missing or empty](#if-events-is-missing-or-empty).
+   - `local_events_carry_history`: this machine's `events` table lacks
+     audit rows that the history still has for existing issues, so it was not
+     carried over by the migration (for example, it was recreated by hand).
+     The batch cannot tell which rows were meant to go, so it stops rather
+     than delete them. Keep the backup and
+     [open an issue](https://github.com/gastownhall/beads/issues).
+
+   The batch is not a transaction. An error after the checks (a crash, a
+   full disk, a Dolt error from the restore itself) can leave the database
+   half-changed: restore the untouched backup from step 3 before you try
+   again.
+
+6. Verify. Every line must succeed; a check that fails names itself:
+
+   ```sh
+   dolt sql <<'SQL'
+   SELECT COUNT(*) AS events_rows_in_head FROM events AS OF 'HEAD';
+   CREATE TEMPORARY TABLE recovery_verify (cursor_at_53 INT NOT NULL, no_events_ignore_rule_in_head INT NOT NULL, nothing_pending INT NOT NULL);
+   INSERT INTO recovery_verify VALUES (
+     IF((SELECT MAX(version) FROM schema_migrations) = 53, 1, NULL),
+     IF((SELECT COUNT(*) FROM dolt_ignore AS OF 'HEAD' WHERE pattern = 'events') = 0, 1, NULL),
+     IF((SELECT COUNT(*) FROM dolt_status WHERE table_name IN ('events', 'dolt_ignore', 'schema_migrations')) = 0, 1, NULL));
+   SQL
+   ```
+
+7. Run any `bd` command from the workspace. It should work with no
    warnings and no `BD_IGNORE_SCHEMA_SKEW` needed.
 
 This also works for databases **created** by v1.2.1 (not just upgraded
@@ -69,18 +154,6 @@ ones): the v65 schema is a superset of everything the 1.1 line needs.
 If you push/pull issue data with teammates, note that the migrated cursor
 replicates: either recover every clone, or recover one and push, then have
 the others pull.
-
-### Optional: restore audit-event versioning
-
-One v1.2.x migration moved the `events` audit table off Dolt's versioned
-plane, and after the cursor rollback the 1.1 line keeps writing audit
-events without versioning or syncing them (everything else syncs
-normally). If you rely on the versioned audit trail, re-track the table
-from the same database directory:
-
-```sh
-dolt sql -q "DELETE FROM dolt_ignore WHERE pattern = 'events'; CALL DOLT_ADD('-f', 'events'); CALL DOLT_COMMIT('-m', 'recovery: re-track events table', '--author', 'bd recovery <recovery@beads.invalid>')"
-```
 
 ## Stopgap: keep working before you recover
 
