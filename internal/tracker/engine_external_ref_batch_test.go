@@ -153,6 +153,20 @@ func TestFetchPrelinkedIssuesBatchErrorFallsBackPerIssueContributor(t *testing.T
 	}
 }
 
+func TestFetchPrelinkedIssuesBatchThroughDecorator(t *testing.T) {
+	want := runPrelinkedContributor(t, &refsHistoryStore{refs: prelinkedRefs()})
+
+	inner := &refsBatchStore{refsHistoryStore: &refsHistoryStore{refs: prelinkedRefs()}}
+	store := NewStore(&fakeStoreDecorator{DoltStorage: inner, inner: inner})
+	if _, ok := externalRefHistoryBatchQuerier(store); !ok {
+		t.Fatalf("expected %T over a decorator to resolve the batch external_ref history capability", store)
+	}
+	sameOutcome(t, runPrelinkedContributor(t, store), want)
+	if inner.batchCalls != 1 || inner.singleCalls != 0 {
+		t.Fatalf("%d PreviousExternalRefs and %d PreviousExternalRef calls, want 1 and 0", inner.batchCalls, inner.singleCalls)
+	}
+}
+
 func TestFetchPrelinkedIssuesWithoutLastSyncSkipsBatch(t *testing.T) {
 	batch := &refsBatchStore{refsHistoryStore: &refsHistoryStore{refs: prelinkedRefs()}}
 	e := &Engine{Tracker: newMockTracker("test"), Store: batch}
