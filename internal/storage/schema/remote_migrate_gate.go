@@ -448,8 +448,74 @@ func (e *RemoteMigrateGateError) dataBehindBody() string {
 	return body
 }
 
+// The adopt-recovery recipe (gastownhall/beads#6687): `bd bootstrap` is
+// non-destructive by contract — against an existing database it validates,
+// prints "Nothing to do." and exits 0 — so a clone this gate has just
+// refused cannot adopt with a bare bootstrap: nothing changes, and the next
+// command lands on this refusal again. Every adoption prescription in this
+// file (and the copies in embeddeddolt's lenient warning and bootstrap's
+// behind-remote guidance) therefore starts by moving the existing database
+// aside, which also keeps it as the recovery copy for work a re-clone
+// cannot bring back. The gate cannot see the workspace, so the recipe names
+// the default locations and says when to substitute a configured one.
+const (
+	// adoptAsideSource is the default embedded database directory the
+	// recipe moves aside.
+	adoptAsideSource = ".beads/embeddeddolt"
+	// adoptAsideParent is the destination parent the recipe creates first:
+	// a move into a missing directory fails, and an adopting clone may
+	// never have made a backup directory.
+	adoptAsideParent = ".beads/backup"
+	// adoptAsideDest is the recipe's destination. It must not already
+	// exist — a move onto an occupied destination refuses or nests — so
+	// the prose around the recipe says to pick another name when it does.
+	adoptAsideDest = adoptAsideParent + "/embeddeddolt.pre-adopt"
+)
+
+// AdoptBootstrapNoReplaceNote is the #6687 fact every terse surface that
+// names adoption must carry: a bare `bd bootstrap` cannot adopt on a clone
+// that already has a database. Exported for the copies — the version-bump
+// notice and embedded's lenient warning — so they state it identically.
+const AdoptBootstrapNoReplaceNote = "bd bootstrap never replaces an existing database — against one it reports \"Nothing to do.\" and changes nothing, so the existing database must be moved aside first"
+
+// AdoptMoveAsideCommands is the ordered embedded adopt recipe: create the
+// destination parent, move the existing database aside, then bootstrap the
+// migrated database from the remote. The single source for the gate's user
+// body and options and for the guidance copies, so no surface can drift
+// back to prescribing a bare `bd bootstrap` (#6687).
+func AdoptMoveAsideCommands() []string {
+	return []string{
+		"mkdir -p " + adoptAsideParent,
+		"mv -f " + adoptAsideSource + " " + adoptAsideDest,
+		"bd bootstrap",
+	}
+}
+
+// adoptRecipeBlock renders AdoptMoveAsideCommands as the 8-space indented
+// command block the user bodies print, matching the other command blocks.
+func adoptRecipeBlock() string {
+	var b strings.Builder
+	for _, c := range AdoptMoveAsideCommands() {
+		b.WriteString("        " + c + "\n")
+	}
+	return b.String()
+}
+
+// adoptRecipeConditions are the two conditions the recipe's fixed paths
+// carry on every surface that prints it: substitute a configured location,
+// and demand an unused destination.
+func adoptRecipeConditions(indent string) string {
+	return indent + "If your database is not at " + adoptAsideSource + " (a configured\n" +
+		indent + "dolt_data_dir puts it elsewhere), move that directory instead — and\n" +
+		indent + "only to a destination nothing occupies: pick another name if\n" +
+		indent + adoptAsideDest + " already exists.\n"
+}
+
 // userBody returns the decision-specific guidance block. The default (blunt
-// #4515) body is byte-identical to before the smart gate existed.
+// #4515) body kept its pre-smart-gate wording until #6687, which corrected
+// its adopt arm — and the tailored adopt arms — from a bare `bd bootstrap`
+// (a no-op against the existing database this refusal was raised on) to the
+// move-aside recipe above.
 func (e *RemoteMigrateGateError) userBody() string {
 	// The #6575 stop is a blunt stop (empty Decision) with a remedy the blunt
 	// body contradicts, so it is keyed on the fallback reason instead.
@@ -460,19 +526,36 @@ func (e *RemoteMigrateGateError) userBody() string {
 	case gateDecisionAdopt:
 		return "\n" +
 			"  The remote has already been migrated by another clone. Do NOT migrate here —\n" +
-			"  adopt the remote's migrated database instead:\n" +
-			"        bd bootstrap\n" +
-			"  Re-cloning replaces your local database: any local issues you have not pushed\n" +
-			"  are LOST. Push first (`bd dolt push`) or save a copy\n" +
-			"  (`bd export --all -o backup.jsonl`) before re-cloning.\n"
+			"  adopt the remote's migrated database instead. `bd bootstrap` never replaces\n" +
+			"  an existing database: against one it reports \"Nothing to do.\" and leaves\n" +
+			"  the old schema in place, so a bare bootstrap just lands you back on this\n" +
+			"  refusal (#6687). Move the local database aside first — run these from the\n" +
+			"  directory that contains .beads, with no bd command running:\n" +
+			adoptRecipeBlock() +
+			adoptRecipeConditions("  ") +
+			"\n" +
+			"  The move-aside is the safety net, not lost work: it keeps every local\n" +
+			"  issue, including ones never pushed — neither `bd dolt push` (refused in\n" +
+			"  this state) nor this binary's export can be required to save them first.\n" +
+			"  A re-clone brings only what the remote has. Keep the aside, never delete\n" +
+			"  it, until the re-cloned database is verified; to recover local-only work,\n" +
+			"  open the aside with an older bd release or import a backup exported by\n" +
+			"  one (`bd import <backup.jsonl>`).\n"
 	case gateDecisionAdoptFastForward:
 		return "\n" +
 			"  The remote has already been migrated by another clone, and this clone's local\n" +
 			"  history is a strict ancestor of the remote's with a clean working set — nothing\n" +
-			"  local would be lost by adopting it (unlike a typical adopt):\n" +
-			"        bd bootstrap\n" +
-			"  Unlike the usual re-clone, this clone has no unpushed commits and no\n" +
-			"  uncommitted local changes to discard.\n"
+			"  local would be lost by adopting it (unlike a typical adopt). `bd bootstrap`\n" +
+			"  still never replaces an existing database: against one it reports\n" +
+			"  \"Nothing to do.\" and leaves the old schema in place (#6687), so move the\n" +
+			"  local database aside first — from the directory that contains .beads, with\n" +
+			"  no bd command running:\n" +
+			adoptRecipeBlock() +
+			adoptRecipeConditions("  ") +
+			"\n" +
+			"  Unlike the usual adopt, this clone has no unpushed commits and no\n" +
+			"  uncommitted local changes, so nothing needs recovering from the aside —\n" +
+			"  keep it anyway, and never delete it while it is your only copy.\n"
 	case gateDecisionSharedNoRemote:
 		return "\n" +
 			"  This database is served to multiple clients (dolt sql-server /\n" +
@@ -501,10 +584,20 @@ func (e *RemoteMigrateGateError) userBody() string {
 			FormatMigrationVersions(e.SkewVersions) + ".\n" +
 			"  The schema has forked (#4259); `bd dolt pull` can no longer merge. Migrating\n" +
 			"  cannot un-fork it. This is a data-loss decision, not an auto-fix:\n" +
-			"    • Pick ONE clone as canonical, then re-bootstrap every other clone from it —\n" +
-			"      unpushed work on the discarded clones is LOST. Export it first\n" +
-			"      (`bd export --all -o backup.jsonl`) if you need it.\n" +
-			"        bd bootstrap\n"
+			"    • Choose ONE clone as canonical, migrate it to this binary's schema if it\n" +
+			"      is not there yet, and publish it (`bd dolt push`) — the other clones\n" +
+			"      can only adopt the database the remote holds.\n" +
+			"    • Every OTHER clone then re-bootstraps from the canonical database.\n" +
+			"      `bd bootstrap` never replaces an existing database: it reports\n" +
+			"      \"Nothing to do.\" and leaves the forked schema in place (#6687), so\n" +
+			"      move the local database aside first — from the directory that\n" +
+			"      contains .beads, with no bd command running:\n" +
+			adoptRecipeBlock() +
+			adoptRecipeConditions("      ") +
+			"      The aside is what preserves the discarded clone's unpushed work: keep\n" +
+			"      it, never delete it. To read that work later, open the aside with an\n" +
+			"      older bd release or import a backup exported by one\n" +
+			"      (`bd import <backup.jsonl>`).\n"
 	default:
 		return "\n" +
 			"  This database syncs with a remote. Applying schema migrations on more than\n" +
@@ -518,12 +611,18 @@ func (e *RemoteMigrateGateError) userBody() string {
 			"        (or " + AllowRemoteMigrateEnv + "=1 bd migrate in scripted/CI use)\n" +
 			"        bd dolt push\n" +
 			"    • Another machine has already migrated: adopt its database instead of\n" +
-			"      migrating here — re-clone from the remote so you receive the migrated\n" +
-			"      schema:\n" +
-			"        bd bootstrap\n" +
-			"      Re-cloning replaces your local database: any local issues you have not\n" +
-			"      pushed are LOST. Push first (`bd dolt push`) or save a copy\n" +
-			"      (`bd export --all -o backup.jsonl`) before re-cloning.\n" +
+			"      migrating here, by re-cloning it from the remote. `bd bootstrap` never\n" +
+			"      replaces an existing database: it reports \"Nothing to do.\" and leaves\n" +
+			"      the old schema in place (#6687), so move the local database aside\n" +
+			"      first — from the directory that contains .beads, with no bd command\n" +
+			"      running:\n" +
+			adoptRecipeBlock() +
+			adoptRecipeConditions("      ") +
+			"      The aside keeps every local issue, including ones never pushed; a\n" +
+			"      re-clone brings only what the remote has. Keep the aside, never delete\n" +
+			"      it, until the re-cloned database is verified — to recover local-only\n" +
+			"      work, open it with an older bd release or import a backup exported by\n" +
+			"      one (`bd import <backup.jsonl>`).\n" +
 			"\n" +
 			"  Several machines on one remote? Only ONE migrates. Get every other clone\n" +
 			"  fully in sync on its current binary, then after the migrator pushes run\n" +

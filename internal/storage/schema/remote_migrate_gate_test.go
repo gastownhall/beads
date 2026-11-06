@@ -368,3 +368,71 @@ func TestRemoteMigrateGateAdoptFastForward(t *testing.T) {
 		t.Errorf("UserMessage should explain the fast-forward is loss-free:\n%s", msg)
 	}
 }
+
+// TestRemoteMigrateGateAdoptRecoveryGuidance pins the #6687 fix at the body
+// layer: every embedded adoption path — adopt, adopt-ff, fork-skew, and the
+// blunt arm's adopt bullet — must name the existing-database no-op, present
+// directory creation and the move-aside BEFORE bootstrap, and carry its
+// preservation conditions, instead of prescribing a bare `bd bootstrap`
+// that reports "Nothing to do." and loops the refusal.
+func TestRemoteMigrateGateAdoptRecoveryGuidance(t *testing.T) {
+	cases := []struct {
+		name string
+		e    *RemoteMigrateGateError
+		// canonicalWant: the arm must name its extra precondition.
+		canonicalWant string
+	}{
+		{name: "adopt", e: &RemoteMigrateGateError{CurrentVersion: 53, LatestVersion: 67, Pending: 14, Decision: gateDecisionAdopt}},
+		{name: "adopt-ff", e: &RemoteMigrateGateError{CurrentVersion: 53, LatestVersion: 67, Pending: 14, Decision: gateDecisionAdoptFastForward}},
+		{name: "fork-skew", e: &RemoteMigrateGateError{CurrentVersion: 53, LatestVersion: 67, Pending: 14, Decision: gateDecisionForkSkew, SkewVersions: []int{54}}, canonicalWant: "canonical"},
+		{name: "blunt adopt bullet", e: &RemoteMigrateGateError{CurrentVersion: 53, LatestVersion: 67, Pending: 14}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			msg := tc.e.UserMessage()
+
+			// The existing-database no-op is explained, not just implied.
+			if !strings.Contains(msg, "Nothing to do.") {
+				t.Errorf("adoption path does not explain the existing-database no-op:\n%s", msg)
+			}
+			// The recipe is present and ordered: create the destination
+			// parent, move the database aside, THEN bootstrap.
+			mkdirAt := strings.Index(msg, "mkdir -p .beads/backup")
+			mvAt := strings.Index(msg, "mv -f .beads/embeddeddolt .beads/backup/embeddeddolt.pre-adopt")
+			if mkdirAt < 0 || mvAt < 0 {
+				t.Fatalf("adoption path lacks the move-aside recipe (mkdir at %d, mv at %d):\n%s", mkdirAt, mvAt, msg)
+			}
+			if mvAt < mkdirAt {
+				t.Errorf("destination creation must precede the move-aside:\n%s", msg)
+			}
+			if next := strings.Index(msg[mvAt:], "bd bootstrap"); next < 0 {
+				t.Errorf("no bootstrap step after the move-aside:\n%s", msg)
+			}
+			// Preservation: the aside is kept, never deleted, and holds the
+			// local work a re-clone cannot bring back.
+			if !strings.Contains(msg, "never delete") {
+				t.Errorf("adoption path does not say to preserve the aside:\n%s", msg)
+			}
+			// Conditions: unused destination and substitute-configured-path
+			// notes travel with the recipe.
+			if !strings.Contains(msg, "dolt_data_dir") || !strings.Contains(msg, "already exists") {
+				t.Errorf("recipe conditions (configured path, unused destination) missing:\n%s", msg)
+			}
+			if tc.canonicalWant != "" && !strings.Contains(msg, tc.canonicalWant) {
+				t.Errorf("adoption path missing its %q condition:\n%s", tc.canonicalWant, msg)
+			}
+			// The false claims are gone: bootstrap is never described as
+			// replacing the database, and gated push/export are not required
+			// as recovery prerequisites.
+			for _, stale := range []string{
+				"Re-cloning replaces",
+				"replaces your local database",
+				"Push first (`bd dolt push`) or save a copy",
+			} {
+				if strings.Contains(msg, stale) {
+					t.Errorf("adoption path still carries the stale claim %q:\n%s", stale, msg)
+				}
+			}
+		})
+	}
+}
