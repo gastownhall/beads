@@ -163,15 +163,18 @@ func (s *DoltStore) loadCustomConfigCache(ctx context.Context) {
 		}
 	}
 
+	// A failed read still answers this call from the fallback above, but the
+	// caches stay unloaded so the next getter reads the database again
+	// instead of serving the fallback for the store's lifetime (GH#5581).
 	s.cacheMu.Lock()
 	if !s.customStatusCached {
 		s.customStatusDetailedCache = statuses
 		s.customStatusCache = types.CustomStatusNames(statuses)
-		s.customStatusCached = true
+		s.customStatusCached = err == nil
 	}
 	if !s.customTypeCached {
 		s.customTypeCache = customTypes
-		s.customTypeCached = true
+		s.customTypeCached = err == nil
 	}
 	s.cacheMu.Unlock()
 }
