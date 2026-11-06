@@ -31,6 +31,7 @@ go_test(
     ],
     embed = [":util"],
     deps = [
+        "//internal/lockfile",
         "@com_github_go_sql_driver_mysql//:mysql",
         "@com_github_stretchr_testify//require",
     ] + select({
