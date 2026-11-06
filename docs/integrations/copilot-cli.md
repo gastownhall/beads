@@ -77,9 +77,10 @@ bd setup copilot --remove
 - If the file does not exist, it is created holding only the section.
 - Text without the markers, including the static instructions an older `bd setup copilot` wrote, is treated as yours: bd never edits or removes it. Delete it by hand if you no longer want it.
 - If the file is a symlink, bd leaves it and its target alone and says so; edit the target directly or replace the link with a regular file.
-- If the markers are incomplete or out of order, install, `--check` and `--remove` stop with an error and change nothing; fix the markers by hand.
+- bd takes the section to be what lies between exactly one BEGIN and one END marker, in that order, each a comment alone on its line and outside code blocks and other HTML blocks, as Markdown (CommonMark) reads the file. If the markers are incomplete, out of order or repeated, share a line with other text or sit in a code block or another HTML block (as when your own text mentions one), install, `--check` and `--remove` stop with an error and change nothing; fix or remove the markers by hand.
+- If a file without the markers ends inside an unclosed code block or HTML comment, where the section would be appended, install stops with an error naming the block and changes nothing; close the block first.
 
-**`--check`** passes only when the plugin manifest exists and the instructions file holds a current beads section. It reports missing files, an existing file with no beads section, a stale section, a symlink, or malformed markers, and exits nonzero for each.
+**`--check`** passes only when the plugin manifest exists and the instructions file holds a current beads section; for a symlink, the file it links to, which Copilot reads, must hold one. It reports missing files, an existing file with no beads section, a stale section, or malformed markers, and exits nonzero for each.
 
 **`--remove`** deletes the plugin manifest and removes only the beads section, with the blank lines that set it off; the rest of the file stays. A file that held nothing but the section is deleted.
 

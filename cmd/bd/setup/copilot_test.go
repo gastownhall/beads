@@ -2,6 +2,7 @@ package setup
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -163,15 +164,127 @@ func TestInstallCopilotSkipsSymlinkedInstructions(t *testing.T) {
 	}
 }
 
+// copilotAcceptedText is user text that ends outside every Markdown block, so
+// a section after it is bd's, though a fence count line by line would find
+// a code block open: fences end only on a fence of their own character at
+// least as long, a line that opens with three backticks and holds another is
+// a code span, a fence-like line indented four spaces is code, and the end
+// of a list item closes the fence it opened.
+var copilotAcceptedText = map[string]string{
+	"nested fences":                   "# Rules\n\n````markdown\n```sh\nmake\n```\n````\n\n~~~~\n~~~\n~~~~\n",
+	"code span opening a line":        "# Rules\n\n```bd ready``` lists ready work.\n",
+	"closer with text after it":       "# Rules\n\n```\n``` is how a fence starts\n```\n",
+	"indented code holding a fence":   "# Rules\n\n    ```\n",
+	"list item fence the list closes": "# Rules\n\n- Build with:\n  ```sh\n  make\n",
+	"HTML comment":                    "# Rules\n\n<!--\nKEEP-ME-1 note\n-->\n",
+}
+
+// The markers bd writes pass, wherever its section stands in the file: each
+// profile in each rendering, the legacy marker, CRLF line endings, no final
+// line break, trailing spaces after the BEGIN marker, and the user's own
+// fenced code, HTML and Markdown that ends outside every block ahead of the
+// section.
+func TestValidateCopilotSectionAcceptsSectionsBdWrites(t *testing.T) {
+	sections := []string{agentsBeginMarker + "\nlegacy body\n" + agentsEndMarker + "\n"}
+	for _, profile := range []agents.Profile{agents.ProfileMinimal, agents.ProfileFull} {
+		for _, opts := range []agents.RenderOpts{agents.DefaultRenderOpts(), {}, {HasRemote: true, NoPush: true}, agents.UserLevelRenderOpts()} {
+			sections = append(sections, agents.RenderSectionWithOpts(profile, opts))
+		}
+	}
+	for i, section := range sections {
+		contents := map[string]string{
+			"alone":                         section,
+			"after text":                    "# Rules\n\nBe kind.\n\n" + section,
+			"between text":                  "# Rules\n\n" + section + "\n## After\n",
+			"right after a paragraph":       "# Rules\nBe kind.\n" + section + "Be brief.\n",
+			"CRLF":                          strings.ReplaceAll("# Rules\n\n"+section, "\n", "\r\n"),
+			"no final newline":              "# Rules\n\n" + strings.TrimSuffix(section, "\n"),
+			"BEGIN line with trailing tabs": strings.Replace(section, "-->\n", "--> \t\n", 1),
+			"after fenced code":             "# Rules\n\n```sh\nmake\n```\n\n~~~\n```\n~~~\n\n" + section,
+		}
+		for name, text := range copilotAcceptedText {
+			contents["after "+name] = text + "\n" + section
+		}
+		for name, content := range contents {
+			if err := validateCopilotSection(content); err != nil {
+				t.Errorf("section %d, %s: %v", i, name, err)
+			}
+		}
+	}
+}
+
+// Markers other than the one pair bd writes are refused, saying what is
+// wrong with them.
+func TestValidateCopilotSectionRefusesOtherMarkers(t *testing.T) {
+	section := agentsBeginMarker + "\nbody\n" + agentsEndMarker + "\n"
+	for _, tt := range []struct{ name, content, problem string }{
+		{"END without BEGIN", "# Rules\n\n" + agentsEndMarker + "\n", "END marker without a BEGIN marker"},
+		{"BEGIN without END", "# Rules\n\n" + agentsBeginMarker + "\nbody\n", "BEGIN marker without an END marker"},
+		{"END before BEGIN", agentsEndMarker + "\n" + agentsBeginMarker + "\n", "END marker before the BEGIN marker"},
+		{"BEGIN mentioned before the section", "See " + agentsBeginMarker + ".\n\n" + section, "2 BEGIN markers, not one"},
+		{"BEGIN mentioned in the section", agentsBeginMarker + "\nSee " + agentsBeginMarker + ".\n" + agentsEndMarker + "\n", "2 BEGIN markers, not one"},
+		{"END mentioned after the section", section + "\nSee " + agentsEndMarker + ".\n", "2 END markers, not one"},
+		{"inline BEGIN and END", "Between " + agentsBeginMarker + " and " + agentsEndMarker + ".\n", "BEGIN marker not on a line of its own"},
+		{"BEGIN line with more text", agentsBeginMarker + " notes\nbody\n" + agentsEndMarker + "\n", "BEGIN marker not on a line of its own"},
+		{"BEGIN line with text and a comment", agentsBeginMarker + " KEEP-ME <!-- note -->\nbody\n" + agentsEndMarker + "\n", "BEGIN marker not on a line of its own"},
+		{"BEGIN line with a comment", agentsBeginMarker + "<!-- note -->\nbody\n" + agentsEndMarker + "\n", "BEGIN marker not on a line of its own"},
+		{"BEGIN comment over two lines", "<!-- BEGIN BEADS INTEGRATION\nKEEP-ME -->\nbody\n" + agentsEndMarker + "\n", "BEGIN marker not on a line of its own"},
+		{"indented BEGIN", "  " + section, "BEGIN marker not on a line of its own"},
+		{"END line with more text", agentsBeginMarker + "\nbody\n" + agentsEndMarker + " notes\n", "END marker not on a line of its own"},
+		{"fenced example", "```markdown\n" + section + "```\n", "BEGIN marker inside the fenced code block that starts at line 1"},
+		{"tilde-fenced example", "~~~\n" + section + "~~~\n", "BEGIN marker inside the fenced code block that starts at line 1"},
+		{"END in a fence", agentsBeginMarker + "\nbody\n```\n" + agentsEndMarker + "\n```\n", "END marker inside the fenced code block that starts at line 3"},
+		{"example in a longer fence", "# Rules\n\n````markdown\n```text\n" + section + "```\n````\n", "BEGIN marker inside the fenced code block that starts at line 3"},
+		{"example in a longer tilde fence", "~~~~\n~~~\n" + section + "~~~\n~~~~\n", "BEGIN marker inside the fenced code block that starts at line 1"},
+		{"fence line with text after it", "```\n``` not a closing fence\n" + section + "```\n", "BEGIN marker inside the fenced code block that starts at line 1"},
+		{"fence line indented four spaces", "```\n    ```\n" + section + "```\n", "BEGIN marker inside the fenced code block that starts at line 1"},
+		{"fence after indented code", "    ```\n```\n" + section + "```\n", "BEGIN marker inside the fenced code block that starts at line 2"},
+		{"fence after a list item's fence", "- item\n  ```\n```\n" + section + "```\n", "BEGIN marker inside the fenced code block that starts at line 3"},
+		{"unclosed fence", "# Rules\n\n```\n" + section, "BEGIN marker inside the fenced code block that starts at line 3"},
+		{"commented-out example", "<!--\n" + section + "-->\n", "BEGIN marker inside the HTML comment that starts at line 1"},
+		{"example in a pre block", "<pre>\n" + section + "</pre>\n", "BEGIN marker inside the HTML block that starts at line 1"},
+		{"END in an HTML block", agentsBeginMarker + "\n<div>\n" + agentsEndMarker + "\n</div>\n", "END marker inside the HTML block that starts at line 2"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateCopilotSection(tt.content)
+			if !errors.Is(err, errCopilotMalformedSection) || !strings.Contains(err.Error(), tt.problem) {
+				t.Errorf("validateCopilotSection = %v, want %v naming %q", err, errCopilotMalformedSection, tt.problem)
+			}
+		})
+	}
+}
+
+// copilotAmbiguousMarkers are instructions whose first BEGIN marker comes
+// before their first END marker, where the section helpers would find a
+// section, though the markers are not the one pair bd writes: the text also
+// mentions one, holds them inline or in an example, or puts other text on
+// the BEGIN marker's line. Install, --check and --remove refuse each, and
+// change nothing.
+var copilotAmbiguousMarkers = map[string]string{
+	"stray BEGIN before a section":       "# My rules\n\nNote: bd manages the block that starts with " + agentsBeginMarker + " below.\n\nKEEP-ME-1 user paragraph.\n\n" + copilotMinimalSection,
+	"END mention after a section":        copilotMinimalSection + "\nThe section ends at " + agentsEndMarker + ".\n\nKEEP-ME-1 user paragraph.\n",
+	"inline BEGIN and END":               "# Rules\n\nThe block between " + agentsBeginMarker + " and " + agentsEndMarker + " is bd's.\n\nKEEP-ME-1 user paragraph.\n",
+	"BEGIN line with text and a comment": "# Rules\n\n" + agentsBeginMarker + " KEEP-ME inline user text <!-- note -->\nbody\n" + agentsEndMarker + "\n",
+	"fenced example":                     "# Rules\n\n```markdown\n" + agentsBeginMarker + "\nEXAMPLE-BODY\n" + agentsEndMarker + "\n```\n\nKEEP-ME-1 user paragraph.\n",
+	"fenced example before a section":    "# Rules\n\n```markdown\n" + agentsBeginMarker + "\nEXAMPLE-BODY\n" + agentsEndMarker + "\n```\n\nKEEP-ME-1 user paragraph.\n\n" + copilotMinimalSection,
+	"example in a longer fence":          "# Rules\n\n````markdown\n```text\n" + agentsBeginMarker + "\nKEEP-ME example instructions\n" + agentsEndMarker + "\n```\n````\n",
+	"example in a longer tilde fence":    "# Rules\n\n~~~~markdown\n~~~text\n" + agentsBeginMarker + "\nKEEP-ME example instructions\n" + agentsEndMarker + "\n~~~\n~~~~\n",
+	"commented-out example":              "# Rules\n\n<!--\n" + agentsBeginMarker + "\nKEEP-ME example instructions\n" + agentsEndMarker + "\n-->\n",
+}
+
 // Install refuses a file whose beads markers do not bound a section, and
 // writes nothing.
 func TestInstallCopilotRefusesMalformedMarkers(t *testing.T) {
-	for name, content := range map[string]string{
+	cases := map[string]string{
 		"BEGIN without END":  "# Rules\n\n" + agentsBeginMarker + "\nbody\n",
 		"END without BEGIN":  "# Rules\n\n" + agentsEndMarker + "\n",
 		"END before BEGIN":   agentsEndMarker + "\n" + agentsBeginMarker + "\n",
 		"stray inline BEGIN": "# My rules\n\nSee " + agentsBeginMarker + " for the old note.\n\nKEEP-ME-1 user paragraph.\n",
-	} {
+	}
+	for name, content := range copilotAmbiguousMarkers {
+		cases[name] = content
+	}
+	for name, content := range cases {
 		t.Run(name, func(t *testing.T) {
 			env, _, stderr := newCopilotTestEnv(t)
 			writeCopilotInstructions(t, env, content, 0o644)
@@ -188,6 +301,104 @@ func TestInstallCopilotRefusesMalformedMarkers(t *testing.T) {
 				t.Errorf("stderr does not name the malformed markers:\n%s", stderr)
 			}
 		})
+	}
+}
+
+// Install refuses a file without beads markers that ends inside a block a
+// blank line does not close, where the section it appends would land, and
+// writes nothing: --check and --remove would take that section's markers
+// for an example and refuse them.
+func TestInstallCopilotRefusesFileEndingInOpenBlock(t *testing.T) {
+	for _, tt := range []struct{ name, content, block string }{
+		{"unclosed fence", "# Rules\n\n```sh\nmake\n", "the fenced code block that starts at line 3"},
+		{"unclosed tilde fence", "# Rules\n\n~~~\nmake\n", "the fenced code block that starts at line 3"},
+		{"shorter fence in a longer one", "# Rules\n\n````markdown\n```sh\nmake\n```\n", "the fenced code block that starts at line 3"},
+		{"no final newline", "# Rules\n\n```", "the fenced code block that starts at line 3"},
+		{"unclosed HTML comment", "# Rules\n\n<!-- TODO\n", "the HTML comment that starts at line 3"},
+		{"unclosed pre block", "# Rules\n\n<pre>\nmake\n", "the HTML block that starts at line 3"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			env, _, stderr := newCopilotTestEnv(t)
+			writeCopilotInstructions(t, env, tt.content, 0o644)
+			if err := installCopilot(env); !errors.Is(err, errCopilotOpenBlock) {
+				t.Fatalf("installCopilot = %v, want %v", err, errCopilotOpenBlock)
+			}
+			if got := readCopilotFile(t, env.instructionsPath); got != tt.content {
+				t.Errorf("install changed the instructions to\n%q", got)
+			}
+			if _, err := os.Stat(env.manifestPath); !os.IsNotExist(err) {
+				t.Errorf("install wrote the manifest, stat err = %v", err)
+			}
+			if want := env.instructionsPath + " ends inside " + tt.block; !strings.Contains(stderr.String(), want) {
+				t.Errorf("stderr does not say %q:\n%s", want, stderr)
+			}
+		})
+	}
+}
+
+// Install appends the section to text that ends outside every Markdown
+// block, however a line-by-line fence count would read it, and --check,
+// install and --remove then take the section for bd's: install never writes
+// a section they refuse. --remove gives the text back.
+func TestInstallCopilotAppendsAfterClosedBlocks(t *testing.T) {
+	for name, content := range copilotAcceptedText {
+		t.Run(name, func(t *testing.T) {
+			env, stdout, _ := newCopilotTestEnv(t)
+			writeCopilotInstructions(t, env, content, 0o644)
+			if err := installCopilot(env); err != nil {
+				t.Fatalf("installCopilot: %v", err)
+			}
+			if got, want := readCopilotFile(t, env.instructionsPath), content+"\n"+copilotMinimalSection; got != want {
+				t.Fatalf("instructions are\n%q\nwant\n%q", got, want)
+			}
+			stdout.Reset()
+			if err := checkCopilot(env); err != nil {
+				t.Errorf("checkCopilot after install = %v:\n%s", err, stdout)
+			}
+			if err := installCopilot(env); err != nil {
+				t.Errorf("installCopilot over its own section = %v", err)
+			}
+			if err := removeCopilot(env); err != nil {
+				t.Fatalf("removeCopilot: %v", err)
+			}
+			if got := readCopilotFile(t, env.instructionsPath); got != content {
+				t.Errorf("--remove left\n%q\nwant\n%q", got, content)
+			}
+		})
+	}
+}
+
+// Install refuses to write the plugin manifest through a symlink, which a
+// cloned repository could point at any file the user can write, and then
+// leaves the link, its target and the instructions as they were.
+func TestInstallCopilotRefusesSymlinkedManifest(t *testing.T) {
+	env, _, stderr := newCopilotTestEnv(t)
+	const targetContent = "not bd's\n"
+	target := filepath.Join(t.TempDir(), "elsewhere.json")
+	if err := os.WriteFile(target, []byte(targetContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(env.manifestPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, env.manifestPath); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	writeCopilotInstructions(t, env, "# Rules\n", 0o644)
+	if err := installCopilot(env); err == nil {
+		t.Fatalf("installCopilot wrote the manifest through a symlink")
+	}
+	if got := readCopilotFile(t, target); got != targetContent {
+		t.Errorf("install changed the manifest link's target to %q", got)
+	}
+	if got, err := os.Readlink(env.manifestPath); err != nil || got != target {
+		t.Errorf("manifest link is %q, %v; want it kept, to %q", got, err, target)
+	}
+	if got := readCopilotFile(t, env.instructionsPath); got != "# Rules\n" {
+		t.Errorf("install changed the instructions to %q", got)
+	}
+	if !strings.Contains(stderr.String(), env.manifestPath) || !strings.Contains(stderr.String(), "symlink") {
+		t.Errorf("stderr does not name the symlinked manifest:\n%s", stderr)
 	}
 }
 
@@ -251,58 +462,19 @@ func TestCheckCopilotStates(t *testing.T) {
 	}
 }
 
-// --check fails, naming the file, for a symlinked instructions file, which
-// install skips, and for markers that bound no section, and follows neither.
-func TestCheckCopilotRefusesUnusableInstructions(t *testing.T) {
-	t.Run("symlink", func(t *testing.T) {
-		env, stdout, _ := newCopilotTestEnv(t)
-		if err := os.MkdirAll(filepath.Dir(env.instructionsPath), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		target := filepath.Join(filepath.Dir(env.instructionsPath), "real.md")
-		if err := os.WriteFile(target, []byte(copilotMinimalSection), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Symlink(target, env.instructionsPath); err != nil {
-			t.Skipf("symlink: %v", err)
-		}
-		if err := checkCopilot(env); err == nil {
-			t.Errorf("checkCopilot passed a symlinked instructions file:\n%s", stdout)
-		}
-		if out := stdout.String(); !strings.Contains(out, env.instructionsPath+" is a symlink") || !strings.Contains(out, "bd setup copilot") {
-			t.Errorf("--check output does not name the symlink and the remedy:\n%s", out)
-		}
-	})
-	t.Run("dangling symlink", func(t *testing.T) {
-		env, stdout, _ := newCopilotTestEnv(t)
-		writeCopilotManifest(t, env)
-		if err := os.MkdirAll(filepath.Dir(env.instructionsPath), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		target := filepath.Join(filepath.Dir(env.instructionsPath), "nowhere.md")
-		if err := os.Symlink(target, env.instructionsPath); err != nil {
-			t.Skipf("symlink: %v", err)
-		}
-		if err := checkCopilot(env); err == nil {
-			t.Errorf("checkCopilot passed a dangling instructions symlink:\n%s", stdout)
-		}
-		out := stdout.String()
-		if !strings.Contains(out, env.instructionsPath+" is a symlink") || !strings.Contains(out, "bd setup copilot") {
-			t.Errorf("--check output does not name the symlink and the remedy:\n%s", out)
-		}
-		if strings.Contains(out, "(current)") || strings.Contains(out, "Missing:") {
-			t.Errorf("--check misreports a dangling symlink:\n%s", out)
-		}
-		if _, err := os.Lstat(target); !os.IsNotExist(err) {
-			t.Errorf("--check created the dangling link's target, lstat err = %v", err)
-		}
-	})
-	for name, content := range map[string]string{
+// --check fails, naming the file, for markers that are not the one pair bd
+// writes around its section, and changes nothing.
+func TestCheckCopilotRefusesMalformedMarkers(t *testing.T) {
+	cases := map[string]string{
 		"BEGIN without END": "# Rules\n\n" + agentsBeginMarker + "\nbody\n",
 		"END without BEGIN": "# Rules\n\n" + agentsEndMarker + "\n",
 		"END before BEGIN":  agentsEndMarker + "\n" + agentsBeginMarker + "\nbody\n" + agentsEndMarker + "\n",
-	} {
-		t.Run("malformed markers/"+name, func(t *testing.T) {
+	}
+	for name, content := range copilotAmbiguousMarkers {
+		cases[name] = content
+	}
+	for name, content := range cases {
+		t.Run(name, func(t *testing.T) {
 			env, stdout, stderr := newCopilotTestEnv(t)
 			writeCopilotManifest(t, env)
 			writeCopilotInstructions(t, env, content, 0o644)
@@ -317,6 +489,89 @@ func TestCheckCopilotRefusesUnusableInstructions(t *testing.T) {
 			}
 			if got := readCopilotFile(t, env.instructionsPath); got != content {
 				t.Errorf("--check changed the instructions to\n%q", got)
+			}
+		})
+	}
+}
+
+// --check judges a symlinked instructions file, which install and --remove
+// leave alone, by the beads section in its target, which Copilot reads
+// through the link. For a target without a current section it names the
+// link, the target and both remedies. It names a relative link's target as
+// the link resolves it, not as the link spells it, which from where bd runs
+// would be a file outside the repository. It writes through the link to
+// nothing.
+func TestCheckCopilotJudgesSymlinkByTarget(t *testing.T) {
+	full := "# Shared\n\n" + agents.RenderSectionWithOpts(agents.ProfileFull, agents.DefaultRenderOpts())
+	stale := "# Shared\n\n" + agentsBeginMarker + "\nold\n" + agentsEndMarker + "\n"
+	type linkCase struct {
+		name     string
+		target   *string // the target's content; nil leaves the link dangling
+		want     string
+		pass     bool
+		relative bool
+	}
+	var cases []linkCase
+	for _, tt := range []linkCase{
+		{name: "current minimal section", target: &copilotMinimalSection, want: "(current)", pass: true},
+		{name: "current full section", target: &full, want: "(current)", pass: true},
+		{name: "no section", target: copilotText("# Shared\n"), want: "which has no beads section"},
+		{name: "stale section", target: &stale, want: "whose beads section is stale"},
+		{name: "dangling link", want: "which does not exist"},
+	} {
+		cases = append(cases, tt)
+		tt.name, tt.relative = tt.name+", relative link", true
+		cases = append(cases, tt)
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			env, stdout, _ := newCopilotTestEnv(t)
+			writeCopilotManifest(t, env)
+			if err := os.MkdirAll(filepath.Dir(env.instructionsPath), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			target := filepath.Join(filepath.Dir(filepath.Dir(env.instructionsPath)), "AGENTS.md")
+			if tt.target != nil {
+				if err := os.WriteFile(target, []byte(*tt.target), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			link := target
+			if tt.relative {
+				link = filepath.Join("..", "AGENTS.md")
+			}
+			if err := os.Symlink(link, env.instructionsPath); err != nil {
+				t.Skipf("symlink: %v", err)
+			}
+			err := checkCopilot(env)
+			if (err == nil) != tt.pass {
+				t.Errorf("checkCopilot = %v, want pass %v", err, tt.pass)
+			}
+			out := stdout.String()
+			if !strings.Contains(out, tt.want) || !strings.Contains(out, target) {
+				t.Errorf("--check output does not say %q of %s:\n%s", tt.want, target, out)
+			}
+			if tt.relative && strings.Contains(out, link) {
+				t.Errorf("--check output names the target as the link spells it, %s:\n%s", link, out)
+			}
+			if tt.pass && !strings.Contains(out, env.manifestPath) {
+				t.Errorf("--check output does not name %s:\n%s", env.manifestPath, out)
+			}
+			if !tt.pass && (!strings.Contains(out, env.instructionsPath+" is a symlink") || !strings.Contains(out, "replace the link with a regular file and run: bd setup copilot")) {
+				t.Errorf("--check output does not name the symlink and the remedies:\n%s", out)
+			}
+			if !tt.pass && (strings.Contains(out, "(current)") || strings.Contains(out, "Missing:")) {
+				t.Errorf("--check misreports the symlink:\n%s", out)
+			}
+			if got, err := os.Readlink(env.instructionsPath); err != nil || got != link {
+				t.Errorf("instructions link is %q, %v; want it kept, to %q", got, err, link)
+			}
+			data, err := os.ReadFile(target)
+			switch {
+			case tt.target == nil && !os.IsNotExist(err):
+				t.Errorf("--check created the dangling link's target: %q, %v", data, err)
+			case tt.target != nil && string(data) != *tt.target:
+				t.Errorf("--check changed the link's target to %q, %v", data, err)
 			}
 		})
 	}
@@ -397,17 +652,22 @@ func TestRemoveCopilotKeepsUserText(t *testing.T) {
 // its target, and a file whose markers are malformed, which it refuses
 // before removing anything.
 func TestRemoveCopilotLeavesFilesWithoutASection(t *testing.T) {
-	for _, tt := range []struct {
+	type removeCase struct {
 		name, content string
 		fails         bool
-	}{
+	}
+	cases := []removeCase{
 		{name: "unmarked", content: "# Rules\n"},
 		{name: "empty", content: ""},
 		{name: "blank", content: "\n"},
 		{name: "BEGIN without END", content: "# Rules\n\n" + agentsBeginMarker + "\nbody\n", fails: true},
 		{name: "END before BEGIN", content: agentsEndMarker + "\n" + agentsBeginMarker + "\n", fails: true},
 		{name: "stray inline BEGIN", content: "# My rules\n\nSee " + agentsBeginMarker + " for the old note.\n\nKEEP-ME-1 user paragraph.\n", fails: true},
-	} {
+	}
+	for name, content := range copilotAmbiguousMarkers {
+		cases = append(cases, removeCase{name: name, content: content, fails: true})
+	}
+	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
 			env, _, _ := newCopilotTestEnv(t)
 			writeCopilotInstructions(t, env, tt.content, 0o644)

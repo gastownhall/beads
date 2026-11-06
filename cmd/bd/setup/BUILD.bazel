@@ -28,9 +28,13 @@ go_library(
         "//internal/config",
         "//internal/git",
         "//internal/recipes",
+        "//internal/remedy",
         "//internal/templates",
         "//internal/templates/agents",
         "//internal/utils",
+        "@com_github_yuin_goldmark//:goldmark",
+        "@com_github_yuin_goldmark//ast",
+        "@com_github_yuin_goldmark//text",
     ],
 )
 
