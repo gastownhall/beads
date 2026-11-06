@@ -100,9 +100,16 @@ func Flatten(ctx context.Context, conn DBConn) (retErr error) {
 	// staged set only: rows that are just in the working set stay pending, as
 	// they were. The landed commit does not keep its own hash or message:
 	// flattening rewrites that history anyway.
+	//
+	// main has already moved when either step below fails, so the error says
+	// so and what to do with what main kept. The move is not rolled back: a
+	// hard reset here would discard the writes the soft reset kept. The
+	// caller stops before pruning and garbage collection.
+	const afterHeadMove = "main already points at the flattened history; inspect its pending changes " +
+		"with dolt_status and commit them with `bd dolt commit` when ready"
 	staged, err := issueops.HasStagedChanges(ctx, conn)
 	if err != nil {
-		return fmt.Errorf("flatten step %q: %w", "check main for staged changes", err)
+		return fmt.Errorf("flatten step %q failed (%s): %w", "check main for staged changes", afterHeadMove, err)
 	}
 	if staged {
 		err = schema.DrainCall(ctx, conn, "CALL DOLT_COMMIT('-m', ?)",
@@ -110,7 +117,7 @@ func Flatten(ctx context.Context, conn DBConn) (retErr error) {
 		// Another writer committing main's staged set first leaves nothing
 		// to commit, which is the outcome this step wants.
 		if err != nil && !issueops.IsNothingToCommitError(err) {
-			return fmt.Errorf("flatten step %q: %w", "commit changes that reached main", err)
+			return fmt.Errorf("flatten step %q failed (%s): %w", "commit changes that reached main", afterHeadMove, err)
 		}
 	}
 

@@ -2,6 +2,7 @@ package versioncontrolops
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"strings"
 	"testing"
@@ -190,4 +191,85 @@ func TestFlattenCanceledAtFinalDeleteLetsTheNextFlattenRun(t *testing.T) {
 	}
 	f.wantLog(flattenedLog)
 	f.wantNoFlattenBranch()
+}
+
+// AC-5: when checking or committing main's staged set fails after main moved
+// onto the flattened history, Flatten says so and how to recover, and main
+// keeps the landed rows staged and the pending rows in its working set: no
+// hard reset rolls the move back.
+func TestFlattenAfterHeadMoveErrorsKeepChangesStaged(t *testing.T) {
+	port := startCompactTestServer(t)
+
+	for _, tc := range []struct {
+		name       string
+		hook       func(f *compactFixture, writer *sql.Conn, injected error) *compactHookConn
+		step       string
+		followUps  int
+		wantInjErr bool
+	}{
+		{
+			name: "preservation commit fails",
+			hook: func(f *compactFixture, writer *sql.Conn, injected error) *compactHookConn {
+				return &compactHookConn{
+					beforeExec:         onceBeforeFinalReset(func() { f.landRow(writer) }),
+					failFollowupCommit: injected,
+				}
+			},
+			step:       "commit changes that reached main",
+			followUps:  1,
+			wantInjErr: true,
+		},
+		{
+			name: "staged check fails",
+			hook: func(f *compactFixture, writer *sql.Conn, _ error) *compactHookConn {
+				return &compactHookConn{
+					beforeExec:      onceBeforeFinalReset(func() { f.landRow(writer) }),
+					failStagedCheck: true,
+				}
+			},
+			step: "check main for staged changes",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newCompactFixture(t, port)
+			f.writePending(f.db)
+			injected := errors.New("injected " + tc.name)
+			var hardResets int
+			hook := tc.hook(f, f.conn(), injected)
+			landFirst := hook.beforeExec
+			hook.beforeExec = func(query string) {
+				if strings.Contains(query, "--hard") {
+					hardResets++
+				}
+				landFirst(query)
+			}
+
+			err := f.flatten(hook)
+			if err == nil {
+				t.Fatalf("Flatten succeeded, want the %s failure", tc.step)
+			}
+			if tc.wantInjErr && !errors.Is(err, injected) {
+				t.Fatalf("Flatten error = %v, want it to wrap %v", err, injected)
+			}
+			if hook.followUps != tc.followUps {
+				t.Fatalf("Flatten attempted %d preservation commits, want %d", hook.followUps, tc.followUps)
+			}
+			for _, want := range []string{tc.step, "main already points at the flattened history", "dolt_status", "bd dolt commit"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("Flatten error = %q, want it to mention %q", err, want)
+				}
+			}
+			if hardResets != 0 {
+				t.Fatalf("Flatten issued %d hard resets, want none", hardResets)
+			}
+
+			f.wantLog(flattenedLog)
+			f.wantStatus("config:false", "t:true", "u:false")
+			if n := f.count("SELECT COUNT(*) FROM t WHERE id = 600"); n != 1 {
+				t.Fatalf("landed t row 600 on main: present=false, want present=true")
+			}
+			f.wantPendingKept()
+			f.wantNoFlattenBranch()
+		})
+	}
 }

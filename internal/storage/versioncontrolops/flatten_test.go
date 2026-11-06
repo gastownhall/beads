@@ -296,3 +296,85 @@ func TestFlattenLeavesPreexistingTempBranch(t *testing.T) {
 		t.Fatalf("statements: %v", err)
 	}
 }
+
+// AC-5: once main points at the flattened history, a failure checking or
+// committing its staged set names the failed step, says main already moved
+// and how to commit what it kept, and never hard-resets main back.
+func TestFlattenAfterHeadMoveErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		staged bool
+		failAt string
+	}{
+		{name: "staged check fails", failAt: "check main for staged changes"},
+		{name: "preservation commit fails", staged: true, failAt: "commit changes that reached main"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock := newFlattenMock(t)
+			injected := errors.New("injected " + tc.name)
+			expectFlattenThrough(mock, flattenSteps(tc.staged), tc.failAt, injected)
+			expectFlattenCleanup(mock, nil, nil)
+			conn := &ctxRecordingConn{DBConn: db}
+
+			err := Flatten(context.Background(), conn)
+			if !errors.Is(err, injected) {
+				t.Fatalf("Flatten error = %v, want it to wrap %v", err, injected)
+			}
+			for _, want := range []string{tc.failAt, "main already points at the flattened history", "dolt_status", "bd dolt commit"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("Flatten error = %q, want it to mention %q", err, want)
+				}
+			}
+			for _, e := range conn.execs {
+				if strings.Contains(e.query, "--hard") {
+					t.Errorf("Flatten issued %q after main moved, want no hard reset", e.query)
+				}
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("statements: %v", err)
+			}
+		})
+	}
+
+	// The step's benign outcomes are not partial: nothing staged commits
+	// nothing, and a writer committing the staged set first is success.
+	t.Run("nothing staged", func(t *testing.T) {
+		db, mock := newFlattenMock(t)
+		expectFlattenThrough(mock, flattenSteps(false), "", nil)
+		if err := Flatten(context.Background(), db); err != nil {
+			t.Fatalf("Flatten: %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("statements: %v", err)
+		}
+	})
+
+	t.Run("nothing to commit", func(t *testing.T) {
+		db, mock := newFlattenMock(t)
+		steps := flattenSteps(true)
+		expectFlattenThrough(mock, steps[:len(steps)-2], "", nil)
+		mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', ?)")).
+			WillReturnError(errors.New("nothing to commit"))
+		expectFlattenThrough(mock, steps[len(steps)-1:], "", nil)
+		if err := Flatten(context.Background(), db); err != nil {
+			t.Fatalf("Flatten: %v (another writer committing first is success)", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("statements: %v", err)
+		}
+	})
+
+	t.Run("already flat", func(t *testing.T) {
+		db, mock := newFlattenMock(t)
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT commit_hash FROM dolt_log ORDER BY date ASC LIMIT 1")).
+			WillReturnRows(sqlmock.NewRows([]string{"commit_hash"}).AddRow(flattenInitialHash))
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM dolt_log")).
+			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+		if err := Flatten(context.Background(), db); err != nil {
+			t.Fatalf("Flatten: %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("statements: %v", err)
+		}
+	})
+}
