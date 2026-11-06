@@ -2199,6 +2199,81 @@ func TestRenderLocalDoltStatus(t *testing.T) {
 			t.Errorf("did not expect mode=external on bd-managed path, got:\n%s", out)
 		}
 	})
+
+	// GH#6614: IsRunning reports a confirmed live server whose port cannot
+	// be resolved as Running with Port=0. The text output must not present
+	// that as a listening port; it names the unknown port and says how to
+	// recover, while the JSON payload keeps its existing shape with port 0.
+	t.Run("Running:true with unresolved port renders unknown port and advice", func(t *testing.T) {
+		orig := jsonOutput
+		defer func() { jsonOutput = orig }()
+		jsonOutput = false
+
+		serverDir := t.TempDir()
+		state := &doltserver.State{
+			Running: true,
+			PID:     4242,
+			Port:    0,
+			DataDir: "/tmp/data",
+		}
+		out := captureStdout(t, func() error {
+			renderLocalDoltStatus(state, serverDir)
+			return nil
+		})
+
+		for _, want := range []string{
+			"Dolt server: running",
+			"PID:  4242",
+			"Port: unknown (no resolved port)",
+			"Data: /tmp/data",
+			"BEADS_DOLT_SERVER_PORT",
+			"bd dolt stop && bd dolt start",
+		} {
+			if !strings.Contains(out, want) {
+				t.Errorf("expected output to contain %q, got:\n%s", want, out)
+			}
+		}
+		if strings.Contains(out, "Port: 0") {
+			t.Errorf("an unresolved port must not render as a listening port 0, got:\n%s", out)
+		}
+	})
+
+	t.Run("json output with unresolved port keeps the State shape", func(t *testing.T) {
+		orig := jsonOutput
+		defer func() { jsonOutput = orig }()
+		jsonOutput = true
+
+		serverDir := t.TempDir()
+		state := &doltserver.State{
+			Running: true,
+			PID:     4242,
+			Port:    0,
+			DataDir: "/var/data",
+		}
+		out := captureStdout(t, func() error {
+			renderLocalDoltStatus(state, serverDir)
+			return nil
+		})
+
+		var result map[string]any
+		if err := json.Unmarshal([]byte(out), &result); err != nil {
+			t.Fatalf("expected valid JSON, got error %v, raw: %s", err, out)
+		}
+		if result["running"] != true {
+			t.Errorf("running = %v, want true", result["running"])
+		}
+		if v, _ := result["pid"].(float64); int(v) != 4242 {
+			t.Errorf("pid = %v, want 4242", result["pid"])
+		}
+		// Port 0 is the unresolved-port marker (GH#6614): the JSON keys and
+		// their meaning do not change.
+		if v, _ := result["port"].(float64); int(v) != 0 {
+			t.Errorf("port = %v, want 0 (unresolved)", result["port"])
+		}
+		if result["data_dir"] != "/var/data" {
+			t.Errorf("data_dir = %v, want /var/data", result["data_dir"])
+		}
+	})
 }
 
 // minimalPullStore implements storage.DoltStorage by embedding the interface

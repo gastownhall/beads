@@ -1553,9 +1553,22 @@ func renderLocalDoltStatus(state *doltserver.State, serverDir string) {
 	}
 	fmt.Println("Dolt server: running")
 	fmt.Printf("  PID:  %d\n", state.PID)
-	fmt.Printf("  Port: %d\n", state.Port)
+	if state.Port > 0 {
+		fmt.Printf("  Port: %d\n", state.Port)
+	} else {
+		// Port 0 means unresolved (GH#6614): the port file is missing or
+		// unreadable and no port is configured. It is not a listening port.
+		fmt.Println("  Port: unknown (no resolved port)")
+	}
 	fmt.Printf("  Data: %s\n", state.DataDir)
 	fmt.Printf("  Logs: %s\n", doltserver.LogPath(serverDir))
+	if state.Port == 0 {
+		fmt.Printf("  Tracking for PID %d names no port: %s is missing or unreadable\n",
+			state.PID, doltserver.PortFileName)
+		fmt.Println("  and no port is configured, so bd cannot dial this server. Record its")
+		fmt.Println("  actual port (BEADS_DOLT_SERVER_PORT, dolt.port, or that port file), or")
+		fmt.Println("  replace the server explicitly: bd dolt stop && bd dolt start")
+	}
 	if doltserver.IsSharedServerMode() {
 		fmt.Println("  Mode: shared server")
 	}

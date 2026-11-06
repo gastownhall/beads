@@ -1208,6 +1208,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd dolt status` no longer stops a live Dolt server whose port it cannot
+  resolve (GH#6614). The local status check used to stop a confirmed dolt
+  sql-server — with a kill fallback — and delete its PID file whenever the
+  port file was missing and no port was configured: destructive lifecycle
+  work from an observation command, before any auto-start opt-out was
+  considered. Such a server is now reported as running with
+  `Port: unknown (no resolved port)` (JSON: `port: 0`) together with
+  recovery advice. The same non-terminating observation now feeds every
+  caller: auto-start and `bd dolt start` refuse to replace the live server
+  unless the workspace is bd-owned with auto-start enabled, in which case
+  the replacement stops it under the dolt lifecycle lock, and an explicit
+  `bd dolt stop` stops it directly, skipping the working-set flush it
+  cannot do without a port.
 - `bd config get` for a config.yaml, git-config or user-global key no longer
   opens the database just because one exists, so it answers from those files
   while the Dolt server is down instead of failing the open (GH#5108). In

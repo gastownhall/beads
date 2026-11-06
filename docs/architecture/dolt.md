@@ -642,6 +642,31 @@ gt dolt start        # Orchestrator command
 gt dolt status       # Check if running
 ```
 
+### Server Running With an Unknown Port
+
+**Symptom:** `bd dolt status` reports the server running with
+`Port: unknown (no resolved port)` (JSON: `"port": 0`).
+
+The PID file names a live Dolt server, but the port file
+(`.beads/dolt-server.port`) is missing or unreadable and no port is
+configured, so bd cannot show or dial the server's endpoint. Insufficient
+tracking is uncertainty, not proof the server is safe to stop: bd no longer
+stops such a server from a status check (GH#6614).
+
+**Fix:** record the server's actual port — `BEADS_DOLT_SERVER_PORT`,
+`dolt.port`, or the port file beside the PID file — or replace the server
+explicitly:
+
+```bash
+bd dolt stop && bd dolt start
+```
+
+`bd dolt stop` works directly: it skips the working-set flush it cannot do
+without a port, stops the confirmed server and cleans the state files.
+Auto-start does not replace the server on its own unless the workspace is
+bd-owned with auto-start enabled; other configurations refuse, naming the
+live PID.
+
 ### Bootstrap Not Running
 
 **Symptom:** `bd list` shows nothing on fresh clone.
