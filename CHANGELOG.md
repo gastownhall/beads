@@ -1208,6 +1208,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- On Windows, `bd backup init`, `bd backup restore` and the auto-backup no
+  longer fail with `invalid port` when the path has a lower-case drive letter,
+  as PowerShell passes it (GH#6019). bd built `file://c:\Users\...`, which
+  Dolt reads as the host `c:`; a drive path is now spelled
+  `file:///C:/Users/...`. Backups already registered with an upper-case drive
+  name the same directory and need no change.
 - `bd config get` for a config.yaml, git-config or user-global key no longer
   opens the database just because one exists, so it answers from those files
   while the Dolt server is down instead of failing the open (GH#5108). In

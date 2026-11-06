@@ -8,6 +8,7 @@ import (
 	neturl "net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -39,6 +40,33 @@ func TestDirToFileURLRejectsSchemes(t *testing.T) {
 	}
 	if !strings.HasPrefix(got, "file://") || strings.Contains(got, "://backups") {
 		t.Fatalf("DirToFileURL(%q) = %q", "backups/nightly", got)
+	}
+
+	dir := t.TempDir()
+	got, err = DirToFileURL(dir)
+	if err != nil {
+		t.Fatalf("DirToFileURL on an absolute dir: %v", err)
+	}
+	if want := PathToFileURL(dir); got != want {
+		t.Fatalf("DirToFileURL(%q) = %q, want %q", dir, got, want)
+	}
+}
+
+// TestDirToFileURLWindowsDrivePath pins the URL spelling Dolt's earl.Parse
+// reads as a drive path (bd-chc1w3, GH#6019). PowerShell keeps a lower-case
+// drive, and "file://c:\work" makes net/url read "c:" as a host with an
+// invalid port; "file:///c:/work" is read as the path "/c:/work". Only an
+// upper-case letter behind "file:///" with forward slashes survives.
+func TestDirToFileURLWindowsDrivePath(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("filepath.Abs yields a drive path only on Windows")
+	}
+	got, err := DirToFileURL(`c:\work\.beads\backup`)
+	if err != nil {
+		t.Fatalf("DirToFileURL: %v", err)
+	}
+	if want := "file:///C:/work/.beads/backup"; got != want {
+		t.Fatalf("DirToFileURL(%q) = %q, want %q", `c:\work\.beads\backup`, got, want)
 	}
 }
 
@@ -270,6 +298,8 @@ func TestBackupRestoreSanitizesURLOnError(t *testing.T) {
 			want: "file:///var/backups/x"},
 		{name: "windows file URL", url: `file://C:\Users\me\backup`,
 			want: `file://C:\Users\me\backup`},
+		{name: "windows drive file URL", url: "file:///C:/Users/John Doe/backup",
+			want: "file:///C:/Users/John Doe/backup"},
 		{name: "percent in file path", url: "file:///var/backups/100%done",
 			want: "file:///var/backups/100%done"},
 		{name: "hash in file path", url: "file:///var/backups/my#dir",
