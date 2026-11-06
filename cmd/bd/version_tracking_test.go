@@ -798,6 +798,43 @@ func TestSettleBdVersionStamp_NothingPending(t *testing.T) {
 	})
 }
 
+// TestTrackBdVersionNoBeadsDirLeavesNothingPending: with no workspace to
+// resolve, detection arms nothing — a later settlement is a no-op.
+func TestTrackBdVersionNoBeadsDirLeavesNothingPending(t *testing.T) {
+	ensureCleanGlobalState(t)
+	t.Chdir(t.TempDir())
+	t.Setenv("BEADS_DIR", filepath.Join(t.TempDir(), "no-such-.beads"))
+	origPending := pendingVersionStampPath
+	t.Cleanup(func() { pendingVersionStampPath = origPending })
+	pendingVersionStampPath = "/stale/from/an/earlier/test"
+
+	trackBdVersion()
+
+	if pendingVersionStampPath != "" {
+		t.Errorf("pending stamp path = %q with no resolvable workspace, want empty", pendingVersionStampPath)
+	}
+}
+
+// TestSettleBestEffortOnWriteFailure: settlement must never panic or fail the
+// command when the witness cannot be written — the write was best effort at
+// detection time and stays best effort here.
+func TestSettleBestEffortOnWriteFailure(t *testing.T) {
+	localVersionPath := newTrackingWorkspace(t, "0.22.0", "9.9.9")
+	trackBdVersion()
+	if err := os.Remove(localVersionPath); err != nil {
+		t.Fatalf("remove witness: %v", err)
+	}
+	if err := os.Mkdir(localVersionPath, 0o755); err != nil { // a directory where the file must go
+		t.Fatalf("block witness path: %v", err)
+	}
+
+	settleBdVersionStamp(versionBumpSettled) // must not panic
+
+	if pendingVersionStampPath != "" {
+		t.Errorf("pending stamp path = %q after settlement, want cleared even on write failure", pendingVersionStampPath)
+	}
+}
+
 // TestAutoMigrateOnVersionBump_Outcomes covers the early returns that need no
 // database: those that are skipped under the existing rules, and a config
 // that cannot be loaded, which fails and keeps the upgrade for a retry.
