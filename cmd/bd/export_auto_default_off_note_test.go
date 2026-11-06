@@ -99,8 +99,17 @@ func wantDefaultOffNote(fullPath string) string {
 }
 
 // runDefaultOffNoteCheck runs the post-command export check and returns what
-// it wrote to stdout and stderr, both captured under one stdioMutex hold.
+// it wrote to stdout and stderr.
 func runDefaultOffNoteCheck(t *testing.T) (stdout, stderr string) {
+	t.Helper()
+	return captureDefaultOffNoteOutput(t, func() error {
+		return maybeAutoExport(context.Background(), false)
+	})
+}
+
+// captureDefaultOffNoteOutput runs fn with stdout and stderr both captured
+// under one stdioMutex hold, and fails the test if fn returns an error.
+func captureDefaultOffNoteOutput(t *testing.T, fn func() error) (stdout, stderr string) {
 	t.Helper()
 	stdioMutex.Lock()
 	defer stdioMutex.Unlock()
@@ -125,7 +134,7 @@ func runDefaultOffNoteCheck(t *testing.T) (stdout, stderr string) {
 	outDone, errDone := read(outR), read(errR)
 	oldStdout, oldStderr := os.Stdout, os.Stderr
 	os.Stdout, os.Stderr = outW, errW
-	runErr := maybeAutoExport(context.Background(), false)
+	runErr := fn()
 	os.Stdout, os.Stderr = oldStdout, oldStderr
 	_ = outW.Close()
 	_ = errW.Close()
@@ -133,7 +142,7 @@ func runDefaultOffNoteCheck(t *testing.T) (stdout, stderr string) {
 	_ = outR.Close()
 	_ = errR.Close()
 	if runErr != nil {
-		t.Fatalf("maybeAutoExport: %v", runErr)
+		t.Fatalf("export check: %v", runErr)
 	}
 	return stdout, stderr
 }
@@ -249,4 +258,109 @@ func snapshotDefaultOffNoteTree(t *testing.T, root string) map[string]string {
 		t.Fatal(err)
 	}
 	return snap
+}
+
+// An explicit export.auto in any layer is a choice already made, and a
+// workspace without both export artifacts has no JSONL going stale: neither
+// gets the note.
+func TestMaybeAutoExportDefaultOffNoteStaysQuiet(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, fx defaultOffNoteFixture)
+		// afterInit runs once config is loaded; it must not change the
+		// on-disk config.
+		afterInit func(t *testing.T)
+	}{
+		{name: "project config.yaml false", setup: func(t *testing.T, fx defaultOffNoteFixture) {
+			writeDefaultOffNoteFile(t, filepath.Join(fx.beadsDir, "config.yaml"), "issue-prefix: test\nexport:\n  auto: false\n")
+		}},
+		{name: "config.local.yaml false", setup: func(t *testing.T, fx defaultOffNoteFixture) {
+			writeDefaultOffNoteFile(t, filepath.Join(fx.beadsDir, "config.local.yaml"), "export:\n  auto: false\n")
+		}},
+		{name: "user config false", setup: func(t *testing.T, fx defaultOffNoteFixture) {
+			writeDefaultOffNoteFile(t, filepath.Join(fx.dir, "home", ".config", "bd", "config.yaml"), "export:\n  auto: false\n")
+		}},
+		{name: "runtime Set false", afterInit: func(t *testing.T) {
+			config.Set("export.auto", false)
+		}},
+		{name: "BD_EXPORT_AUTO=false", setup: func(t *testing.T, _ defaultOffNoteFixture) {
+			t.Setenv("BD_EXPORT_AUTO", "false")
+		}},
+		{name: "BEADS_EXPORT_AUTO=false", setup: func(t *testing.T, _ defaultOffNoteFixture) {
+			t.Setenv("BEADS_EXPORT_AUTO", "false")
+		}},
+		{name: "BD_EXPORT_AUTO set empty", setup: func(t *testing.T, _ defaultOffNoteFixture) {
+			t.Setenv("BD_EXPORT_AUTO", "")
+		}},
+		{name: "BEADS_EXPORT_AUTO set empty", setup: func(t *testing.T, _ defaultOffNoteFixture) {
+			t.Setenv("BEADS_EXPORT_AUTO", "")
+		}},
+		{name: "no export-state.json", setup: func(t *testing.T, fx defaultOffNoteFixture) {
+			removeDefaultOffNotePath(t, fx.statePath)
+		}},
+		{name: "no JSONL", setup: func(t *testing.T, fx defaultOffNoteFixture) {
+			removeDefaultOffNotePath(t, fx.jsonlPath)
+		}},
+		{name: "export-state.json is a directory", setup: func(t *testing.T, fx defaultOffNoteFixture) {
+			removeDefaultOffNotePath(t, fx.statePath)
+			if err := os.Mkdir(fx.statePath, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "JSONL is a directory", setup: func(t *testing.T, fx defaultOffNoteFixture) {
+			removeDefaultOffNotePath(t, fx.jsonlPath)
+			if err := os.Mkdir(fx.jsonlPath, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := defaultOffNoteWorkspace(t)
+			if tc.setup != nil {
+				tc.setup(t, fx)
+			}
+			initConfigForTest(t)
+			if tc.afterInit != nil {
+				tc.afterInit(t)
+			}
+			if config.GetBool("export.auto") {
+				t.Fatal("precondition: export.auto must read false so the check takes the disabled path")
+			}
+
+			before := snapshotDefaultOffNoteTree(t, fx.dir)
+			stdout, stderr := runDefaultOffNoteCheck(t)
+			if stderr != "" || stdout != "" {
+				t.Fatalf("want no output, got stdout %q stderr %q", stdout, stderr)
+			}
+			if after := snapshotDefaultOffNoteTree(t, fx.dir); !reflect.DeepEqual(after, before) {
+				t.Fatalf("the check changed the workspace:\nbefore %v\nafter  %v", before, after)
+			}
+		})
+	}
+
+	// An explicit true never reaches the disabled branch in maybeAutoExport;
+	// the note itself must still treat it as a recorded choice.
+	t.Run("explicit export.auto=true", func(t *testing.T) {
+		fx := defaultOffNoteWorkspace(t)
+		writeDefaultOffNoteFile(t, filepath.Join(fx.beadsDir, "config.yaml"), "issue-prefix: test\nexport:\n  auto: true\n")
+		initConfigForTest(t)
+		if !config.GetBool("export.auto") {
+			t.Fatal("precondition: export.auto must read true")
+		}
+		stdout, stderr := captureDefaultOffNoteOutput(t, func() error {
+			noteAutoExportDefaultOff()
+			return nil
+		})
+		if stderr != "" || stdout != "" {
+			t.Fatalf("want no output, got stdout %q stderr %q", stdout, stderr)
+		}
+	})
+}
+
+func removeDefaultOffNotePath(t *testing.T, path string) {
+	t.Helper()
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
 }

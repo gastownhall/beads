@@ -102,16 +102,31 @@ func autoExportPath(beadsDir string) string {
 // auto-exported before v1.0.5 no longer refreshes its JSONL: #4063 made
 // export.auto opt-in, and a workspace that never set the key went silent
 // (GH#4887). It only reads; it never writes state, config or the JSONL.
+//
+// It speaks only while export.auto comes from the default (any explicit
+// value is a choice already made) and both export-state.json, which every
+// auto-export saves, and the JSONL exist: together they show this workspace
+// has a JSONL that auto-export used to refresh.
 func noteAutoExportDefaultOff() {
+	if config.GetValueSource("export.auto") != config.SourceDefault {
+		return
+	}
 	beadsDir := beads.FindBeadsDir()
 	if beadsDir == "" {
 		return
+	}
+	fullPath := autoExportPath(beadsDir)
+	for _, path := range []string{filepath.Join(beadsDir, exportAutoStateFile), fullPath} {
+		info, err := os.Stat(path)
+		if err != nil || !info.Mode().IsRegular() {
+			return
+		}
 	}
 	fmt.Fprintf(os.Stderr,
 		"Info: auto-export is off by default since bd v1.0.5; %s is no longer refreshed automatically.\n"+
 			"      Re-enable: bd config set export.auto true\n"+
 			"      Keep off:  bd config set export.auto false  (silences this note)\n",
-		autoExportPath(beadsDir))
+		fullPath)
 }
 
 // maybeAutoExport writes a git-tracked JSONL file if enabled and due.
