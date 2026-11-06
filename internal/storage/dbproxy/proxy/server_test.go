@@ -1129,6 +1129,44 @@ func TestProxy_LeavesUnownedServerLogWhileRunning(t *testing.T) {
 
 // waitForRotation waits until path's .1 generation holds marker and path
 // itself no longer does.
+// A steady stream of short-lived connections, each opened and closed between
+// two watcher ticks, is activity: the proxy must not expire while it lasts,
+// and must still expire once the stream stops.
+func TestProxy_IdleTimeout_BlockedByShortLivedConns(t *testing.T) {
+	t.Parallel()
+
+	ts := server.New()
+	stats := &proxy.Stats{}
+	port := freeTCPPort(t)
+	root := t.TempDir()
+
+	h := runProxy(t, proxy.ProxyOpts{
+		RootDir: root, Port: port,
+		IdleTimeout: 2 * time.Second,
+		Server:      ts, Stats: stats,
+	})
+	waitListening(t, root, listenWait)
+
+	// Dial and close every 200ms for 5s: never a 2s gap without a connection.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		select {
+		case <-h.exited:
+			t.Fatalf("proxy exited under short-lived connection traffic (idle timeouts=%d, accepts=%d)",
+				stats.Snapshot().IdleTimeouts, stats.Snapshot().AcceptCalls)
+		default:
+		}
+		require.NoError(t, dialProxy(t, port).Close())
+		time.Sleep(200 * time.Millisecond)
+	}
+	assert.Equal(t, int64(0), stats.Snapshot().IdleTimeouts)
+
+	// Traffic stopped: the proxy must still expire on its own.
+	require.NoError(t, h.waitErr(t, 6*time.Second))
+	assert.Equal(t, int64(1), stats.Snapshot().IdleTimeouts)
+	assertNoPidFile(t, root)
+}
+
 func waitForRotation(t *testing.T, path, marker string) {
 	t.Helper()
 	deadline := time.Now().Add(listenWait)

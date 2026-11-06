@@ -87,6 +87,17 @@ type proxyServer struct {
 	listener    net.Listener
 	activeConns atomic.Int64
 	conns       errgroup.Group
+
+	// activityBase is the origin of the idle watcher's activity stamps:
+	// lastActivity holds elapsed time since it, so stamping and measuring both
+	// use the monotonic clock and a wall-clock step can neither fake nor lose
+	// activity. handleConn publishes a stamp at each authenticated connection
+	// start (and completion); the watcher expires only when no connection is
+	// active and a full idleTimeout has passed since the latest stamp. The
+	// count is published before the stamp and loaded before it, so a watcher
+	// that observes a count also observes the stamp written before it.
+	activityBase time.Time
+	lastActivity atomic.Int64
 }
 
 const (
@@ -135,6 +146,25 @@ func NewProxyServer(opts ProxyOpts) *proxyServer {
 		logSizeCheckInterval: opts.LogSizeCheckInterval,
 
 		reportUpstreamOutage: reportsUpstreamOutage(opts.Server),
+
+		activityBase: time.Now(),
+	}
+}
+
+// markActivity publishes a fresh activity stamp: an authenticated connection
+// just started (or completed). It publishes the maximum of the stored stamp
+// and the new elapsed time via compare-and-swap, so a delayed goroutine cannot
+// overwrite a newer stamp with an older sample.
+func (p *proxyServer) markActivity() {
+	now := int64(time.Since(p.activityBase))
+	for {
+		old := p.lastActivity.Load()
+		if old >= now {
+			return
+		}
+		if p.lastActivity.CompareAndSwap(old, now) {
+			return
+		}
 	}
 }
 
@@ -434,32 +464,67 @@ func (p *proxyServer) idleWatcher(ctx context.Context) error {
 		interval = idleWatcherMinInterval
 	}
 	p.tracef("idleWatcher start (timeout=%s, tick=%s)", p.idleTimeout, interval)
+	// Seed activity here so backend startup and construction delays do not
+	// count toward the first idle expiry: a proxy that never sees a connection
+	// still expires one idleTimeout after the watcher starts.
+	p.markActivity()
 	tick := time.NewTicker(interval)
 	defer tick.Stop()
-	var idleSince time.Time
+	// armed and lastObserved drive the armed/cleared diagnostics only; they
+	// never start a second timeout clock. Expiry is decided per tick from the
+	// age of the latest activity stamp.
+	armed := false
+	lastObserved := p.lastActivity.Load()
 	for {
 		select {
 		case <-ctx.Done():
 			p.tracef("idleWatcher exit (ctx done)")
 			return nil
 		case <-tick.C:
-			if n := p.activeConns.Load(); n > 0 {
-				if !idleSince.IsZero() {
+			// Load the count before the stamp. A completion stamps activity
+			// before decrementing the count, so a tick that observes the
+			// decrement also observes the preceding stamp: this order makes
+			// the zero-count observation conservative, never premature.
+			n := p.activeConns.Load()
+			stamp := p.lastActivity.Load()
+			if n > 0 {
+				// A live connection is activity regardless of stamp age.
+				if armed {
 					p.tracef("idleWatcher cleared (active=%d)", n)
-					idleSince = time.Time{}
+					armed = false
 				}
+				lastObserved = stamp
 				continue
 			}
-			if idleSince.IsZero() {
+			if stamp != lastObserved {
+				// A connection started and finished wholly between ticks:
+				// activity the old count sampling never saw. It restarts the
+				// idle clock but does not by itself defer expiry — after a
+				// delayed tick that activity may already be a full timeout
+				// old, so the age check below still runs.
+				if armed {
+					p.tracef("idleWatcher cleared (activity since last tick)")
+					armed = false
+				}
+				lastObserved = stamp
+			}
+			if !armed {
 				p.tracef("idleWatcher armed")
-				idleSince = time.Now()
+				armed = true
+			}
+			if idleFor := time.Since(p.activityBase) - time.Duration(stamp); idleFor < p.idleTimeout {
 				continue
 			}
-			if time.Since(idleSince) >= p.idleTimeout {
-				p.tracef("idleWatcher expired after %s, shutting down", p.idleTimeout)
-				p.stats.IncIdleTimeout()
-				return errIdleTimeout
+			// Best-effort recheck before committing to expiry: a connection
+			// may have arrived (or arrived and finished) while this tick
+			// evaluated. Defer to the next tick rather than expire through
+			// it; this narrows, but does not close, the admit-vs-expire race.
+			if p.activeConns.Load() > 0 || p.lastActivity.Load() != stamp {
+				continue
 			}
+			p.tracef("idleWatcher expired after %s, shutting down", p.idleTimeout)
+			p.stats.IncIdleTimeout()
+			return errIdleTimeout
 		}
 	}
 }
@@ -506,6 +571,9 @@ func (p *proxyServer) handleConn(ctx context.Context, client net.Conn) error {
 		return err
 	}
 
+	// An authenticated connection is activity. Stamp before publishing the
+	// count so a watcher that later observes the count sees this stamp too.
+	p.markActivity()
 	p.activeConns.Add(1)
 	defer func() {
 		p.activeConns.Add(-1)
