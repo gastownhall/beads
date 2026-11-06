@@ -422,15 +422,16 @@ type Config struct {
 
 	// RequireReadableSchema makes an open that will not migrate the database
 	// (ReadOnly, or Gateway, whose server owns the schema) refuse one whose
-	// schema is behind this binary's and lacks a column the shared issue
-	// projection selects, with *schema.SchemaBehindError
-	// (schema.CheckReadableDrift). Such a database cannot answer a single
-	// issue read; without the check the open succeeds and every list, show
-	// and ready fails afterwards on an unknown column. A behind database that
-	// has every projected column still opens, so reads keep working through
-	// the upgrade window (bd-578h9.5, gastownhall/beads#5920). A migrating
-	// open needs none of this: its consent and gate refusals name a behind
-	// schema before anything reads it.
+	// schema is behind this binary's and lacks a relation or column issue
+	// hydration reads (the issues and wisps projection, the leases overlay),
+	// with *schema.SchemaBehindError (schema.CheckReadableDrift). Such a
+	// database cannot answer a single issue read; without the check the open
+	// succeeds and every list, show and ready fails afterwards on an unknown
+	// table or column. A behind database that has every one still opens, so
+	// reads keep working through the upgrade window (bd-578h9.5,
+	// gastownhall/beads#5920). A migrating open needs none of this: its
+	// consent and gate refusals name a behind schema before anything reads
+	// it.
 	//
 	// Opt-in, false by default, because diagnostic opens (bd doctor, the
 	// version-bump probe) must still reach a behind database to report on it,
@@ -2140,23 +2141,19 @@ var stopRejectedAutoStartedServer = doltserver.Stop
 // failure, such as a sandbox refusing the connection, without a live server.
 var dialServer = net.DialTimeout
 
-// issueProjectionColumns are the columns every issue read selects from the
-// row (sqlbuild.IssueBaseColumns, shared by both planes). checkOpenSchemaDrift
-// requires them on issues, the replicated table whose shape the schema cursor
-// describes.
-var issueProjectionColumns = sqlbuild.ColumnNames(sqlbuild.IssueBaseColumns)
-
 // checkOpenSchemaDrift is newServerMode's schema drift check. Every open
 // refuses a database ahead of this binary (schema.CheckForwardDrift). An open
 // that will not migrate and sets Config.RequireReadableSchema also refuses,
-// from the same version read, one behind it that lacks a projected column
-// (schema.CheckReadableDrift). Through a gateway that refusal names the
-// server administrator's remedy, since bd never migrates a gateway's schema.
+// from the same version read, one behind it that lacks a relation or column
+// issue hydration reads (schema.CheckReadableDrift over
+// sqlbuild.IssueReadRelations: the issues and wisps projection and the leases
+// overlay). Through a gateway that refusal names the server administrator's
+// remedy, since bd never migrates a gateway's schema.
 func checkOpenSchemaDrift(ctx context.Context, db *sql.DB, cfg *Config) error {
 	if !cfg.RequireReadableSchema || (!cfg.ReadOnly && !cfg.Gateway) {
 		return schema.CheckForwardDrift(ctx, db)
 	}
-	err := schema.CheckReadableDrift(ctx, db, []sqlbuild.ReadRelation{{Table: "issues", Columns: issueProjectionColumns}})
+	err := schema.CheckReadableDrift(ctx, db, sqlbuild.IssueReadRelations())
 	var behind *schema.SchemaBehindError
 	if cfg.Gateway && errors.As(err, &behind) {
 		behind.Gateway = true
