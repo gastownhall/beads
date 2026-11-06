@@ -78,9 +78,11 @@ installed before this change skip `<hook>.old` when `bd` is missing; run
 `bd hooks install` (add `--shared` for shared hooks) once to refresh them.
 
 The hook passes on the chained hook's exit status. Statuses 3, 124 and 142
-are reserved for the hook's own skip and timeout handling, so a chained hook
-that exits with one of them fails with exit 1 and a warning naming the
-original status.
+are reserved for the hook's own skip and timeout handling, so when
+`bd hooks run` runs a chained hook that exits with one of them, it fails with
+exit 1 and a warning naming the original status. When the hook runs
+`<hook>.old` itself because `bd` is missing, every status passes through
+unchanged.
 
 ### Status
 

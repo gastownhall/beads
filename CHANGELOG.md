@@ -1214,7 +1214,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pre-push check stops the commit or push instead of being skipped
   (GH#6751, building on #6840 by vishnujayvel).
   A chained hook that exits 3, 124 or 142, statuses the section reserves
-  for skips and timeouts, fails with exit 1 and a warning naming its status.
+  for skips and timeouts, makes `bd hooks run` fail with exit 1 and a
+  warning naming its status.
   A status 3 from `bd hooks run` now fails the hook instead of printing
   `database not initialized` and continuing; `bd hooks run` never opens the
   database, so that 3 was the chained hook's verdict.
