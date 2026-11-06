@@ -144,7 +144,8 @@ Bootstrap auto-detects the right action:
   • If no database exists: creates a fresh one — unless the workspace was already
     initialized (metadata.json has a project_id) and its server-mode database is
     missing, in which case bootstrap refuses rather than strand the existing data
-  • If database already exists: validates and reports status
+  • If database already exists: validates and reports status, leaving the database
+    unchanged (bootstrap never replaces one)
 
 If sync.remote points at a git repository, bootstrap verifies refs/dolt/data
 before cloning. Bootstrap exits non-zero when it cannot set up a database.
@@ -980,11 +981,16 @@ func printBootstrapPlan(plan BootstrapPlan) {
 			return
 		}
 		fmt.Printf("✓ Database already exists: %s\n", plan.BeadsDir)
+		// #6687: this no-op is the sentence every adopt surface now names —
+		// "bd bootstrap never replaces an existing database" — so the
+		// command's own output must say it too, or the guidance reads as
+		// describing some other bootstrap.
 		if !usesSQLServer() {
 			fmt.Printf("  Nothing to do.\n")
 		} else {
 			fmt.Printf("  Nothing to do. Use 'bd doctor' to check health.\n")
 		}
+		fmt.Printf("  The existing database was left unchanged (bootstrap never replaces one).\n")
 	case "sync":
 		fmt.Printf("Bootstrap plan: clone from remote\n")
 		fmt.Printf("  Remote: %s\n", remedy.PrintedValue(redactRemoteURL(plan.SyncRemote)))

@@ -882,3 +882,50 @@ func TestDetectBootstrapAction_OptionSyncRemoteStillRestoresBackup(t *testing.T)
 		t.Errorf("SyncRemote=%q, want empty: a rejected remote must not be wired", plan.SyncRemote)
 	}
 }
+
+// TestPrintBootstrapPlan_NoneNamesNoReplace pins the #6687 clarification on
+// bootstrap's own no-op output. Every gate surface now tells an
+// existing-database clone that `bd bootstrap` reports "Nothing to do." and
+// changes nothing — and this command's own output is where that sentence is
+// either confirmed or contradicted. Both storage modes must say the database
+// was left unchanged, without touching the ✓ line, the "Nothing to do."
+// line, or the exit-0 contract (a plan print, not an error).
+func TestPrintBootstrapPlan_NoneNamesNoReplace(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		server bool
+	}{
+		{name: "embedded", server: false},
+		{name: "server", server: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pinStorageMode(t, tc.server)
+			plan := BootstrapPlan{
+				Action:      "none",
+				HasExisting: true,
+				BeadsDir:    "/workspace/.beads",
+				Reason:      "Database already exists at /workspace/.beads/embeddeddolt",
+			}
+
+			out := captureStdout(t, func() error { printBootstrapPlan(plan); return nil })
+
+			for _, want := range []string{
+				"✓ Database already exists: /workspace/.beads",
+				"Nothing to do",
+				"left unchanged (bootstrap never replaces one)",
+			} {
+				if !strings.Contains(out, want) {
+					t.Errorf("no-op output missing %q:\n%s", want, out)
+				}
+			}
+			// The unchanged line follows the "Nothing to do." line it
+			// explains, and the plan stays a success print on stdout (exit 0
+			// is the caller's contract for action "none").
+			nothingAt := strings.Index(out, "Nothing to do")
+			unchangedAt := strings.Index(out, "left unchanged")
+			if nothingAt < 0 || unchangedAt < nothingAt {
+				t.Errorf("the unchanged note must follow the Nothing-to-do line it explains:\n%s", out)
+			}
+		})
+	}
+}
