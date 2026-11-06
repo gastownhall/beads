@@ -2,6 +2,7 @@ package config
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -282,10 +283,15 @@ func userConfigTestRoots(t *testing.T) (string, string) {
 
 func writeUserConfigPath(t *testing.T, path string) {
 	t.Helper()
+	writeUserConfigFile(t, path, "actor: test\n")
+}
+
+func writeUserConfigFile(t *testing.T, path, body string) {
+	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatalf("mkdir %s: %v", filepath.Dir(path), err)
 	}
-	if err := os.WriteFile(path, []byte("actor: test\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatalf("write %s: %v", path, err)
 	}
 }
@@ -317,3 +323,112 @@ func assertInitializedActor(t *testing.T, want string) {
 		t.Fatalf("actor = %q, want %q", got, want)
 	}
 }
+
+// isolateUserConfigEnvironment resets package state, clears BD_/BEADS_
+// overrides, and points HOME and the native user-config directory at fresh
+// temp directories so the native and documented candidates are distinct,
+// with the CWD outside any beads workspace. It returns the resolved
+// candidates for the test to populate.
+func isolateUserConfigEnvironment(t *testing.T) userConfigYamlCandidates {
+	t.Helper()
+	ResetForTesting()
+	t.Cleanup(ResetForTesting)
+	restore := envSnapshot(t)
+	t.Cleanup(restore)
+
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	nativeRoot := filepath.Join(root, "native-config")
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("APPDATA", nativeRoot)
+	t.Setenv("XDG_CONFIG_HOME", nativeRoot)
+	t.Setenv("BD_ACTOR", "")
+	t.Setenv("BEADS_ACTOR", "")
+	t.Setenv("BEADS_DIR", "")
+	t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "")
+	t.Chdir(root)
+
+	candidates := currentUserConfigYamlCandidates()
+	if candidates.legacy == "" || candidates.native == "" || candidates.documented == "" {
+		t.Fatalf("test environment did not resolve all user config candidates: %#v", candidates)
+	}
+	if candidates.native == candidates.documented {
+		t.Fatalf("test requires distinct native and documented paths, both were %q", candidates.native)
+	}
+	return candidates
+}
+
+// probeUserConfigStats swaps the user-config stat seam for a recorder while
+// load runs, returning every candidate path the loader probed. Tests that
+// change the seam must not run in parallel.
+func probeUserConfigStats(t *testing.T, load func() error) []string {
+	t.Helper()
+	var probed []string
+	saved := userConfigStat
+	userConfigStat = func(name string) (fs.FileInfo, error) {
+		probed = append(probed, name)
+		return saved(name)
+	}
+	defer func() { userConfigStat = saved }()
+	if err := load(); err != nil {
+		t.Fatalf("load configuration: %v", err)
+	}
+	return probed
+}
+
+// assertNoNativeProbe checks one loader's recorded probes: no probe of the
+// native candidate, at least one probe of the documented candidate, and
+// absolute paths only.
+func assertNoNativeProbe(t *testing.T, probed []string, candidates userConfigYamlCandidates) {
+	t.Helper()
+	documentedProbe := false
+	for _, path := range probed {
+		if !filepath.IsAbs(path) {
+			t.Errorf("loader probed non-absolute user config path %q", path)
+		}
+		switch path {
+		case candidates.native:
+			t.Errorf("loader probed native candidate %s although documented %s exists", candidates.native, candidates.documented)
+		case candidates.documented:
+			documentedProbe = true
+		}
+	}
+	if !documentedProbe {
+		t.Errorf("loader never probed documented candidate %s; probed %v", candidates.documented, probed)
+	}
+}
+
+// GH#8113, AC-1: with the documented <home>/.config/bd/config.yaml present,
+// loading configuration must make zero existence probes of the native
+// os.UserConfigDir()/bd/config.yaml candidate — on macOS 26 that stat raises
+// the app-data privacy prompt on every launch — whether or not a file sits
+// at the native path, and for both Initialize and WithBeadsDir.
+func TestInitializeDoesNotProbeNativeUserConfigWhenDocumentedExists(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		nativeFile bool
+	}{
+		{name: "native file present", nativeFile: true},
+		{name: "native file absent", nativeFile: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			candidates := isolateUserConfigEnvironment(t)
+			writeUserConfigFile(t, candidates.documented, "mail.delegate: documented\n")
+			if tc.nativeFile {
+				writeUserConfigFile(t, candidates.native, "git.author: native-only\n")
+			}
+
+			assertNoNativeProbe(t, probeUserConfigStats(t, Initialize), candidates)
+
+			root, err := os.Getwd()
+			if err != nil {
+				t.Fatalf("getwd: %v", err)
+			}
+			assertNoNativeProbe(t, probeUserConfigStats(t, func() error {
+				return WithBeadsDir(filepath.Join(root, "beads"), func() {})
+			}), candidates)
+		})
+	}
+}
+

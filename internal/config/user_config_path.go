@@ -89,11 +89,8 @@ func UserConfigYamlPath() (string, error) {
 }
 
 func selectUserConfigYamlPath(candidates userConfigYamlCandidates) (string, error) {
-	if userConfigPathExists(candidates.documented) {
-		return candidates.documented, nil
-	}
-	if candidates.native != candidates.documented && userConfigPathExists(candidates.native) {
-		return candidates.native, nil
+	if path := existingUserConfigYamlPath(candidates); path != "" {
+		return path, nil
 	}
 	if candidates.documented != "" {
 		return candidates.documented, nil
@@ -107,6 +104,25 @@ func selectUserConfigYamlPath(candidates userConfigYamlCandidates) (string, erro
 		err = errors.New("no absolute native user directory is available")
 	}
 	return "", fmt.Errorf("resolve user config.yaml: %w", err)
+}
+
+// existingUserConfigYamlPath returns the existing modern user config.yaml —
+// the documented file when it exists, otherwise the native one — or "" when
+// neither exists. The documented file shadows the native location instead of
+// merging with it, and the native candidate is probed only when the
+// documented file is absent: statting os.UserConfigDir()/bd/config.yaml on
+// every launch raises the macOS 26 app-data privacy prompt even for users
+// whose documented config exists (GH#8113). Callers that need a creation
+// target rather than an existing file use selectUserConfigYamlPath, which
+// adds the documented (or native) preference on top of this.
+func existingUserConfigYamlPath(candidates userConfigYamlCandidates) string {
+	if userConfigPathExists(candidates.documented) {
+		return candidates.documented
+	}
+	if candidates.native != candidates.documented && userConfigPathExists(candidates.native) {
+		return candidates.native
+	}
+	return ""
 }
 
 // UserConfigYamlDisplayPath returns a human-readable location for command
@@ -123,10 +139,15 @@ func userConfigYamlDisplayPath(candidates userConfigYamlCandidates) string {
 	return userConfigYamlDisplayFallback
 }
 
+// userConfigStat is the stat call behind every user-config existence check.
+// It is a variable only so tests can observe which candidate paths the
+// loader probes; production always stats the real filesystem.
+var userConfigStat = os.Stat
+
 func userConfigPathExists(path string) bool {
 	if path == "" {
 		return false
 	}
-	_, err := os.Stat(path)
+	_, err := userConfigStat(path)
 	return err == nil
 }

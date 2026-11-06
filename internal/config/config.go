@@ -131,9 +131,10 @@ func initialize(beadsDirSetting string) error {
 	// subsequent file so higher-priority values overwrite lower-priority ones.
 	//
 	// Precedence (highest to lowest):
-	//   BEADS_DIR/config.yaml > project .beads/config.yaml > documented
-	//   <home>/.config/bd/config.yaml > native os.UserConfigDir()/bd/config.yaml
-	//   > legacy <home>/.beads/config.yaml
+	//   BEADS_DIR/config.yaml > project .beads/config.yaml > one modern user
+	//   file — documented <home>/.config/bd/config.yaml, or the native
+	//   os.UserConfigDir()/bd/config.yaml only when the documented file is
+	//   absent — > legacy <home>/.beads/config.yaml
 	//
 	// Previously, only ONE config file was loaded (the highest-priority match),
 	// which meant user-level config was silently ignored when project-level
@@ -147,10 +148,7 @@ func initialize(beadsDirSetting string) error {
 	// here because Initialize is an implicit read path: absent user config is a
 	// supported state, while a relative root must never reach os.Stat.
 	userConfigPaths := currentUserConfigYamlCandidates()
-	appendExistingUserConfig := func(path string) {
-		if !userConfigPathExists(path) {
-			return
-		}
+	appendUserConfig := func(path string) {
 		for _, existing := range configPaths {
 			if filepath.Clean(existing) == path {
 				return
@@ -159,10 +157,19 @@ func initialize(beadsDirSetting string) error {
 		configPaths = append(configPaths, path)
 	}
 
-	// Lowest to highest user-level precedence: legacy, native, documented.
-	appendExistingUserConfig(userConfigPaths.legacy)
-	appendExistingUserConfig(userConfigPaths.native)
-	appendExistingUserConfig(userConfigPaths.documented)
+	// Lowest to highest user-level precedence: legacy, then exactly one
+	// modern user file. The documented file shadows the native location
+	// rather than merging with it — the same choice selectUserConfigYamlPath
+	// makes for direct reads and writes — so the native candidate is never
+	// probed while the documented file exists: that per-launch stat is what
+	// raised the macOS 26 app-data privacy prompt (GH#8113). Legacy stays a
+	// separate, merged layer.
+	if userConfigPathExists(userConfigPaths.legacy) {
+		appendUserConfig(userConfigPaths.legacy)
+	}
+	if modern := existingUserConfigYamlPath(userConfigPaths); modern != "" {
+		appendUserConfig(modern)
+	}
 	userConfigPathCount := len(configPaths)
 
 	// 1. Project: walk up from CWD to find .beads/config.yaml
