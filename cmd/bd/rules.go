@@ -581,12 +581,21 @@ func CompactRules(rules []RuleFile, groupLabel string) (string, error) {
 	return sb.String(), nil
 }
 
+// readRulesDir reads the rules directory; tests replace it to return a read
+// error.
+var readRulesDir = os.ReadDir
+
 // RunAudit is the top-level orchestrator for `bd rules audit`.
 func RunAudit(rulesDir string, threshold float64) (*AuditResult, error) {
-	entries, err := os.ReadDir(rulesDir)
+	entries, err := readRulesDir(rulesDir)
 	if err != nil {
+		// On Windows, reading an ordinary file as a directory can fail with
+		// an error os.IsNotExist accepts; only a path Stat cannot find is
+		// missing, and anything else keeps the read error.
 		if os.IsNotExist(err) {
-			return &AuditResult{}, nil
+			if _, statErr := os.Stat(rulesDir); os.IsNotExist(statErr) {
+				return &AuditResult{}, nil
+			}
 		}
 		return nil, fmt.Errorf("read rules directory: %w", err)
 	}

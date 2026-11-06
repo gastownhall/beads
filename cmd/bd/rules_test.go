@@ -2,7 +2,9 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -563,6 +565,73 @@ func TestRulesRunAudit_NonexistentDir(t *testing.T) {
 	if result.TotalRules != 0 {
 		t.Errorf("total rules = %d, want 0", result.TotalRules)
 	}
+}
+
+// TestRulesRunAudit_NonDirectoryPath pins that an ordinary file at the rules
+// path is an error, never an empty audit: on Windows reading a file as a
+// directory can fail with an error os.IsNotExist accepts, so RunAudit
+// confirms absence with Stat before returning an empty result. Seam subtests
+// replace readRulesDir, so none of these runs in parallel.
+func TestRulesRunAudit_NonDirectoryPath(t *testing.T) {
+	const fileBytes = "not a directory\n"
+	ownedFile := func(t *testing.T) string {
+		path := filepath.Join(t.TempDir(), "rules")
+		if err := os.WriteFile(path, []byte(fileBytes), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	requireFileKept := func(t *testing.T, path string) {
+		t.Helper()
+		got, err := os.ReadFile(path)
+		if err != nil || string(got) != fileBytes {
+			t.Fatalf("rules file %s changed: %q, %v", path, got, err)
+		}
+	}
+	requireReadError := func(t *testing.T, result *AuditResult, err error) {
+		t.Helper()
+		if err == nil || result != nil {
+			t.Fatalf("RunAudit = %+v, %v; want a nil result and an error", result, err)
+		}
+		if !strings.HasPrefix(err.Error(), "read rules directory:") {
+			t.Fatalf("RunAudit error = %q, want prefix %q", err, "read rules directory:")
+		}
+	}
+	stubRead := func(t *testing.T, readErr error) {
+		t.Helper()
+		orig := readRulesDir
+		readRulesDir = func(string) ([]os.DirEntry, error) { return nil, readErr }
+		t.Cleanup(func() { readRulesDir = orig })
+	}
+
+	t.Run("ordinary file", func(t *testing.T) {
+		path := ownedFile(t)
+		result, err := RunAudit(path, 0.6)
+		requireReadError(t, result, err)
+		requireFileKept(t, path)
+	})
+	t.Run("not-exist read error for a present file", func(t *testing.T) {
+		path := ownedFile(t)
+		readErr := &fs.PathError{Op: "open", Path: path, Err: fs.ErrNotExist}
+		stubRead(t, readErr)
+		result, err := RunAudit(path, 0.6)
+		requireReadError(t, result, err)
+		if !errors.Is(err, readErr) {
+			t.Fatalf("RunAudit error = %v, want it to wrap the read error", err)
+		}
+		requireFileKept(t, path)
+	})
+	t.Run("other read error for a present file", func(t *testing.T) {
+		path := ownedFile(t)
+		readErr := &fs.PathError{Op: "open", Path: path, Err: fs.ErrPermission}
+		stubRead(t, readErr)
+		result, err := RunAudit(path, 0.6)
+		requireReadError(t, result, err)
+		if !errors.Is(err, readErr) {
+			t.Fatalf("RunAudit error = %v, want it to wrap the read error", err)
+		}
+		requireFileKept(t, path)
+	})
 }
 
 func TestRulesRunAudit_SkipsNonMarkdown(t *testing.T) {
