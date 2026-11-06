@@ -253,6 +253,139 @@ func TestReadyWorkHidesChildrenOfUndatedDeferredParent(t *testing.T) {
 			}
 		}
 	})
+
+	// The gate asks each dependency table for an undated parent's child (a
+	// wisp child's edge lives in wisp_dependencies) in each issue table, so
+	// each pair below has one gate leg that alone can see it. Every read path
+	// must still withhold the child: the classic gate and child scan, the
+	// one-statement probe, and the repository.
+	t.Run("each_edge_plane", func(t *testing.T) {
+		for _, tc := range []struct {
+			name                            string
+			parentEphemeral, childEphemeral bool
+		}{
+			{"issue_parent_issue_child", false, false},
+			{"issue_parent_wisp_child", false, true},
+			{"wisp_parent_issue_child", true, false},
+			{"wisp_parent_wisp_child", true, true},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				const prefix = "ude"
+				te := newTestEnv(t, prefix)
+				ctx := t.Context()
+				for _, iss := range []*types.Issue{
+					{ID: prefix + "-parent", Ephemeral: tc.parentEphemeral},
+					{ID: prefix + "-child", Ephemeral: tc.childEphemeral},
+					{ID: prefix + "-free"},
+				} {
+					iss.Title, iss.Status, iss.Priority, iss.IssueType = iss.ID, types.StatusOpen, 2, types.TypeTask
+					if err := te.store.CreateIssue(ctx, iss, "tester"); err != nil {
+						t.Fatalf("CreateIssue %s: %v", iss.ID, err)
+					}
+				}
+				if err := te.store.AddDependency(ctx, &types.Dependency{
+					IssueID: prefix + "-child", DependsOnID: prefix + "-parent", Type: types.DepParentChild,
+				}, "tester"); err != nil {
+					t.Fatalf("AddDependency: %v", err)
+				}
+				deferUndated(t, te, prefix+"-parent")
+
+				filter := types.WorkFilter{IncludeEphemeral: true}
+				ids := map[string][]string{}
+				withCountingReadTx(t, te, func(tx issueops.DBTX) error {
+					classic, err := issueops.GetReadyWorkInTx(ctx, tx, filter)
+					if err != nil {
+						return err
+					}
+					ids["classic"] = issueIDsOf(classic)
+					probed, err := issueops.GetReadyWorkWithCountsInTx(ctx, tx, filter)
+					if err != nil {
+						return err
+					}
+					ids["probe"] = readyIDs(probed)
+					page, err := db.NewIssueSQLRepository(tx).GetReadyWork(ctx, filter)
+					ids["repository"] = issueIDsOf(page.Items)
+					return err
+				})
+				for path, got := range ids {
+					if want := []string{prefix + "-free"}; !slices.Equal(got, want) {
+						t.Errorf("%s: ready = %v, want %v (the undated deferred parent's child withheld)", path, got, want)
+					}
+				}
+			})
+		}
+	})
+
+	// A childless issue iced with no date, the default `bd defer <id>` of a
+	// leaf, is no deferred parent. Each stack's read issues exactly the
+	// statements it issued before the issue was iced, so neither gate sent out
+	// its child scan. Giving the iced issue a child is the control: the scan
+	// goes out, so the count grows, and the child is withheld.
+	t.Run("childless_icebox_opens_no_child_scan", func(t *testing.T) {
+		const prefix = "udn"
+		te := newTestEnv(t, prefix)
+		ctx := t.Context()
+		create := func(id string) {
+			t.Helper()
+			if err := te.store.CreateIssue(ctx, &types.Issue{
+				ID: id, Title: id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
+			}, "tester"); err != nil {
+				t.Fatalf("CreateIssue %s: %v", id, err)
+			}
+		}
+		type read struct {
+			ids   []string
+			stmts int
+		}
+		readByStack := func() map[string]read {
+			t.Helper()
+			var ids []string
+			classic := withCountingReadTx(t, te, func(tx issueops.DBTX) error {
+				issues, err := issueops.GetReadyWorkInTx(ctx, tx, types.WorkFilter{})
+				ids = issueIDsOf(issues)
+				return err
+			})
+			out := map[string]read{"classic": {ids, len(classic)}}
+			repository := withCountingReadTx(t, te, func(tx issueops.DBTX) error {
+				page, err := db.NewIssueSQLRepository(tx).GetReadyWork(ctx, types.WorkFilter{})
+				ids = issueIDsOf(page.Items)
+				return err
+			})
+			out["repository"] = read{ids, len(repository)}
+			return out
+		}
+
+		create(prefix + "-iced")
+		create(prefix + "-free")
+		before := readByStack()
+		deferUndated(t, te, prefix+"-iced")
+		iced := readByStack()
+		create(prefix + "-child")
+		if err := te.store.AddDependency(ctx, &types.Dependency{
+			IssueID: prefix + "-child", DependsOnID: prefix + "-iced", Type: types.DepParentChild,
+		}, "tester"); err != nil {
+			t.Fatalf("AddDependency: %v", err)
+		}
+		parented := readByStack()
+
+		want := []string{prefix + "-free"}
+		for stack := range before {
+			if got := iced[stack].ids; !slices.Equal(got, want) {
+				t.Errorf("%s: ready while iced = %v, want %v", stack, got, want)
+			}
+			if iced[stack].stmts != before[stack].stmts {
+				t.Errorf("%s: icing a childless issue took the read from %d statements to %d: its gate sent out the child scan",
+					stack, before[stack].stmts, iced[stack].stmts)
+			}
+			if got := parented[stack].ids; !slices.Equal(got, want) {
+				t.Errorf("%s: ready once the iced issue has a child = %v, want %v (the child withheld)", stack, got, want)
+			}
+			if parented[stack].stmts <= iced[stack].stmts {
+				t.Errorf("%s: with a child the read issued %d statements, without one %d: the control never saw the child scan",
+					stack, parented[stack].stmts, iced[stack].stmts)
+			}
+		}
+	})
 }
 
 // TestReadyWorkDeferredParentShapes pins which parents hide their direct

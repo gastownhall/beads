@@ -310,12 +310,38 @@ func DeferredParentPredicate(alias string) string {
 }
 
 // DeferredParentExistsSQL renders a scalar boolean expression that is true
-// when table holds a deferred parent (deferredParentConds). Each condition is
-// its own EXISTS, so the dated leg can use the defer_until index and the
-// undated one the status index; one WHERE ORing columns indexed separately
-// may not get index access for either. table must be an internal constant.
-func DeferredParentExistsSQL(table string) string {
-	dated, undated := deferredParentConds("")
-	return "(EXISTS (SELECT 1 FROM " + table + " WHERE " + dated + ")" +
-		" OR EXISTS (SELECT 1 FROM " + table + " WHERE " + undated + "))"
+// when table holds a deferred parent (deferredParentConds) whose children ready
+// work has to look up: any dated one, or an undated one that some parent-child
+// edge in depTables names as its parent. Each leg is its own EXISTS, so the
+// dated leg can use the defer_until index and each undated leg the status
+// index, probing the edge table's (type, target) index per deferred row; one
+// WHERE ORing columns indexed separately may not get index access for either.
+//
+// Only the undated legs ask for a child. `bd defer <id>` with no date ices any
+// issue, leaf or parent, until `bd undefer`; gated on the status alone, one
+// iced leaf would send every ready read through the whole child scan, for
+// nothing, for as long as it stays iced. A dated snooze ends by itself and
+// keeps the gate it always had.
+//
+// depTables must exist in the database. table and depTables must be internal
+// constants.
+func DeferredParentExistsSQL(table string, depTables []string) string {
+	dated, _ := deferredParentConds("")
+	_, undated := deferredParentConds("p.")
+	legs := []string{"EXISTS (SELECT 1 FROM " + table + " WHERE " + dated + ")"}
+	for _, depTable := range depTables {
+		legs = append(legs, "EXISTS (SELECT 1 FROM "+table+" p WHERE "+undated+
+			" AND EXISTS (SELECT 1 FROM "+depTable+" d WHERE d.type = 'parent-child' AND d."+
+			deferredParentTargetCol(table)+" = p.id))")
+	}
+	return "(" + strings.Join(legs, " OR ") + ")"
+}
+
+// deferredParentTargetCol is the dependency column that names a parent row of
+// table.
+func deferredParentTargetCol(table string) string {
+	if table == WispsFilterTables.Main {
+		return "depends_on_wisp_id"
+	}
+	return "depends_on_issue_id"
 }

@@ -82,8 +82,10 @@ func probeReadyWorkInTx(ctx context.Context, tx DBTX, filter types.WorkFilter, w
 
 	iIssuesDeferred, iWispsDeferred := -1, -1
 	if excludeDeferred {
-		iIssuesDeferred = appendFact(sqlbuild.DeferredParentExistsSQL("issues"))
-		iWispsDeferred = appendFact(sqlbuild.DeferredParentExistsSQL("wisps"))
+		// This statement names wisp_dependencies already, so the undated legs
+		// may ask both dependency planes for a child.
+		iIssuesDeferred = appendFact(sqlbuild.DeferredParentExistsSQL("issues", deferredChildDepTables))
+		iWispsDeferred = appendFact(sqlbuild.DeferredParentExistsSQL("wisps", deferredChildDepTables))
 	}
 	iCollision := -1
 	if wantCollision {

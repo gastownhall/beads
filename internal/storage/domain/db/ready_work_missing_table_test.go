@@ -11,8 +11,18 @@ import (
 	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 )
 
+// deferredParentProbeRegex matches the deferred-parent gate for issueTable as
+// it first goes out, asking both dependency tables for a child.
 func deferredParentProbeRegex(issueTable string) string {
-	return `^SELECT ` + regexp.QuoteMeta(sqlbuild.DeferredParentExistsSQL(issueTable)) + `$`
+	return deferredParentGateRegex(issueTable, deferredParentDepTables)
+}
+
+func deferredParentGateRegex(issueTable string, depTables []string) string {
+	return `^SELECT ` + regexp.QuoteMeta(sqlbuild.DeferredParentExistsSQL(issueTable, depTables)) + `$`
+}
+
+func deferredParentRows(found bool) *sqlmock.Rows {
+	return sqlmock.NewRows([]string{"deferred"}).AddRow(found)
 }
 
 func deferredEdgeRegex(e deferredParentEdge) string {
@@ -173,5 +183,77 @@ func TestDeferredParentGateWispTableOpensTheGate(t *testing.T) {
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+// TestDeferredParentGateMissingWispDependenciesAsksDependenciesAlone is the
+// domain/db twin of the issueops guard: the gate's undated legs name both
+// dependency tables, so on a database without wisp_dependencies the gate must
+// ask again over dependencies alone. Read as "no deferred parent", the failure
+// would list a deferred parent's children as ready.
+func TestDeferredParentGateMissingWispDependenciesAsksDependenciesAlone(t *testing.T) {
+	mock, repo := newMockRepo(t)
+	durableOnly := []string{"dependencies"}
+	mock.ExpectQuery(deferredParentProbeRegex("issues")).WillReturnError(missingTable("wisp_dependencies"))
+	mock.ExpectQuery(deferredParentGateRegex("issues", durableOnly)).WillReturnRows(deferredParentRows(false))
+	mock.ExpectQuery(deferredParentGateRegex("wisps", durableOnly)).WillReturnRows(deferredParentRows(true))
+
+	got, err := repo.anyDeferredParent(t.Context())
+	if err != nil {
+		t.Fatalf("anyDeferredParent on a database with no wisp_dependencies: %v", err)
+	}
+	if !got {
+		t.Fatal("anyDeferredParent = false, want true: the wisps table holds a deferred parent")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+// TestDeferredParentGateNoWispPlaneIsNoDeferredParent is the control for a
+// database with neither wisp table.
+func TestDeferredParentGateNoWispPlaneIsNoDeferredParent(t *testing.T) {
+	mock, repo := newMockRepo(t)
+	durableOnly := []string{"dependencies"}
+	mock.ExpectQuery(deferredParentProbeRegex("issues")).WillReturnError(missingTable("wisp_dependencies"))
+	mock.ExpectQuery(deferredParentGateRegex("issues", durableOnly)).WillReturnRows(deferredParentRows(false))
+	mock.ExpectQuery(deferredParentGateRegex("wisps", durableOnly)).WillReturnError(missingTable("wisps"))
+
+	got, err := repo.anyDeferredParent(t.Context())
+	if err != nil {
+		t.Fatalf("anyDeferredParent on a database with no wisp plane: %v", err)
+	}
+	if got {
+		t.Fatal("anyDeferredParent = true, want false")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+// TestDeferredParentGateMissingDurableTableIsAnError: the gate used to excuse
+// any missing table in either issue table's statement, which was safe only
+// while that statement named the issue table alone. It now names
+// dependencies too, so an excused missing dependencies (or issues) would skip
+// the edge walk and list a deferred parent's children as ready.
+func TestDeferredParentGateMissingDurableTableIsAnError(t *testing.T) {
+	for _, tc := range []struct{ gate, missing string }{
+		{"issues", "issues"},
+		{"issues", "dependencies"},
+		{"wisps", "dependencies"},
+	} {
+		t.Run(tc.gate+"/"+tc.missing, func(t *testing.T) {
+			mock, repo := newMockRepo(t)
+			gone := missingTable(tc.missing)
+			if tc.gate == "wisps" {
+				mock.ExpectQuery(deferredParentProbeRegex("issues")).WillReturnRows(deferredParentRows(false))
+			}
+			mock.ExpectQuery(deferredParentProbeRegex(tc.gate)).WillReturnError(gone)
+
+			got, err := repo.anyDeferredParent(t.Context())
+			if !errors.Is(err, gone) {
+				t.Fatalf("anyDeferredParent = %v, %v; want the missing-%s failure", got, err, tc.missing)
+			}
+		})
 	}
 }

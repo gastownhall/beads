@@ -78,7 +78,10 @@ type readyTotalWorld struct {
 	deferredParent bool
 	// undated defers the deferred parent the way an undated `bd defer` does
 	// (status 'deferred', no defer_until) instead of to a future date.
-	undated   bool
+	undated bool
+	// icebox adds a childless issue deferred that way: the default
+	// `bd defer <id>` of a leaf, which is no deferred parent.
+	icebox    bool
 	collision bool
 }
 
@@ -126,6 +129,10 @@ func seedReadyTotalWorld(t *testing.T, te *testEnv, prefix string, w readyTotalW
 		if w.undated {
 			deferUndated(t, te, prefix+"-dparent")
 		}
+	}
+	if w.icebox {
+		create(&types.Issue{ID: prefix + "-iced", Title: "iced leaf"})
+		deferUndated(t, te, prefix+"-iced")
 	}
 	if w.wisps {
 		for i := 0; i < 3; i++ {
@@ -175,6 +182,8 @@ func TestReadyWorkPageTotal(t *testing.T) {
 		// wisp child are hidden all the same.
 		{"issues_undated_deferred_parent", readyTotalWorld{deferredParent: true, undated: true}, map[bool][]string{false: plain, true: plain}},
 		{"wisps_undated_deferred_parent", readyTotalWorld{wisps: true, deferredParent: true, undated: true}, map[bool][]string{false: plain, true: withWisps}},
+		// The iced leaf itself is hidden by its status; it hides nothing else.
+		{"wisps_childless_icebox", readyTotalWorld{wisps: true, icebox: true}, map[bool][]string{false: plain, true: withWisps}},
 		// r0 sits in both tables; it is listed (and counted) exactly once.
 		{"wisps_collision", readyTotalWorld{wisps: true, collision: true}, map[bool][]string{false: plain, true: withWisps}},
 	}
@@ -279,6 +288,10 @@ func TestReadyWorkStatementBudget(t *testing.T) {
 		// the probe statement and its children in the same child scan.
 		{"wisps_undated_deferred_parent/limit0", readyTotalWorld{wisps: true, deferredParent: true, undated: true}, 0, 4},
 		{"wisps_undated_deferred_parent/limit1", readyTotalWorld{wisps: true, deferredParent: true, undated: true}, 1, 6},
+		// A childless iced leaf is no deferred parent: the gate stays shut
+		// and the read costs what it costs with no deferred row at all.
+		{"wisps_childless_icebox/limit0", readyTotalWorld{wisps: true, icebox: true}, 0, 3},
+		{"wisps_childless_icebox/limit1", readyTotalWorld{wisps: true, icebox: true}, 1, 5},
 		// + the overlap count, only because an ID sits in both tables
 		{"wisps_collision/limit1", readyTotalWorld{wisps: true, collision: true}, 1, 6},
 	}

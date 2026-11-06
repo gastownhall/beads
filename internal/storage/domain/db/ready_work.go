@@ -99,24 +99,46 @@ func (r *issueSQLRepositoryImpl) getChildrenOfDeferredParents(ctx context.Contex
 	return r.childrenOfDeferredParents(ctx)
 }
 
+// deferredParentDepTables are the dependency tables a deferred parent's
+// children hang off; wisp_dependencies is the one a database may lack.
+var deferredParentDepTables = []string{"dependencies", "wisp_dependencies"}
+
+// anyDeferredParent is getChildrenOfDeferredParents' gate: whether either
+// issue table holds a deferred parent whose children the edge walk has to read
+// (sqlbuild.DeferredParentExistsSQL). Like the classic gate, it drops
+// wisp_dependencies from the undated legs only after a statement fails for
+// lack of it, rather than spending a statement on every read to ask first.
 func (r *issueSQLRepositoryImpl) anyDeferredParent(ctx context.Context) (bool, error) {
+	depTables := deferredParentDepTables
 	for _, table := range []string{"issues", "wisps"} {
-		// A SELECT of an EXISTS expression always returns its one row, so
-		// the answer is the value, not whether a row came back.
-		var found bool
-		err := r.runner.QueryRowContext(ctx, "SELECT "+sqlbuild.DeferredParentExistsSQL(table)).Scan(&found)
+		found, err := r.deferredParentExists(ctx, table, depTables)
+		if dberrors.IsMissingTable(err, "wisp_dependencies") {
+			depTables = []string{"dependencies"}
+			found, err = r.deferredParentExists(ctx, table, depTables)
+		}
 		switch {
 		case err == nil:
 			if found {
 				return true, nil
 			}
-		case errors.Is(err, sql.ErrNoRows), dberrors.IsTableNotExist(err):
+		// The statement names dependency tables too, so only the table the
+		// driver reports missing tells an absent wisp plane from a broken
+		// database.
+		case errors.Is(err, sql.ErrNoRows), table == "wisps" && dberrors.IsMissingTable(err, table):
 			continue
 		default:
 			return false, fmt.Errorf("deferred parents: check %s: %w", table, err)
 		}
 	}
 	return false, nil
+}
+
+func (r *issueSQLRepositoryImpl) deferredParentExists(ctx context.Context, table string, depTables []string) (bool, error) {
+	// A SELECT of an EXISTS expression always returns its one row, so the
+	// answer is the value, not whether a row came back.
+	var found bool
+	err := r.runner.QueryRowContext(ctx, "SELECT "+sqlbuild.DeferredParentExistsSQL(table, depTables)).Scan(&found)
+	return found, err
 }
 
 func (r *issueSQLRepositoryImpl) childrenOfDeferredParents(ctx context.Context) ([]string, error) {

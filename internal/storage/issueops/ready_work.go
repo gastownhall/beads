@@ -613,29 +613,9 @@ func getDeferredChildrenAllTablesInTx(ctx context.Context, tx DBTX) ([]string, e
 //
 //nolint:gosec // G201: depTable is selected from a hardcoded list below.
 func getChildrenOfDeferredParentsInTx(ctx context.Context, tx DBTX) ([]string, error) {
-	hasDeferredParent := false
-	for _, issueTable := range []string{"issues", "wisps"} {
-		// A SELECT of an EXISTS expression always returns its one row, so
-		// the answer is the value, not whether a row came back.
-		var exists bool
-		err := tx.QueryRowContext(ctx, "SELECT "+sqlbuild.DeferredParentExistsSQL(issueTable)).Scan(&exists)
-		if err == nil {
-			if exists {
-				hasDeferredParent = true
-				break
-			}
-			continue
-		}
-		if errors.Is(err, sql.ErrNoRows) {
-			continue
-		}
-		if issueTable == "wisps" && isTableNotExistError(err) {
-			continue
-		}
-		return nil, fmt.Errorf("deferred parents: check deferred parents from %s: %w", issueTable, err)
-	}
-	if !hasDeferredParent {
-		return nil, nil
+	hasDeferredParent, err := anyDeferredParentInTx(ctx, tx)
+	if err != nil || !hasDeferredParent {
+		return nil, err
 	}
 
 	var childIDs []string
@@ -671,6 +651,48 @@ func getChildrenOfDeferredParentsInTx(ctx context.Context, tx DBTX) ([]string, e
 		}
 	}
 	return childIDs, nil
+}
+
+// anyDeferredParentInTx is getChildrenOfDeferredParentsInTx's gate: whether
+// either issue table holds a deferred parent whose children the child scan
+// has to read (sqlbuild.DeferredParentExistsSQL).
+//
+// The undated legs name both dependency tables, and a database that predates
+// the wisp plane has no wisp_dependencies. Asking whether it exists before
+// every gate would add a statement to every ready read, so the gate drops it
+// only after a statement fails for lack of it: no edge can live in a table
+// the database does not have.
+func anyDeferredParentInTx(ctx context.Context, tx DBTX) (bool, error) {
+	depTables := deferredChildDepTables
+	for _, issueTable := range deferredChildIssueTables {
+		exists, err := deferredParentExistsInTx(ctx, tx, issueTable, depTables)
+		if dberrors.IsMissingTable(err, "wisp_dependencies") {
+			depTables = []string{"dependencies"}
+			exists, err = deferredParentExistsInTx(ctx, tx, issueTable, depTables)
+		}
+		switch {
+		case err == nil:
+			if exists {
+				return true, nil
+			}
+		// The statement names dependency tables too, so, as in the child scan
+		// above, only the table the driver reports missing tells an absent
+		// wisp plane from a broken database.
+		case errors.Is(err, sql.ErrNoRows), optionalBlockedTable(issueTable) && dberrors.IsMissingTable(err, issueTable):
+			continue
+		default:
+			return false, fmt.Errorf("deferred parents: check deferred parents from %s: %w", issueTable, err)
+		}
+	}
+	return false, nil
+}
+
+func deferredParentExistsInTx(ctx context.Context, tx DBTX, issueTable string, depTables []string) (bool, error) {
+	// A SELECT of an EXISTS expression always returns its one row, so the
+	// answer is the value, not whether a row came back.
+	var exists bool
+	err := tx.QueryRowContext(ctx, "SELECT "+sqlbuild.DeferredParentExistsSQL(issueTable, depTables)).Scan(&exists)
+	return exists, err
 }
 
 //nolint:gosec // G201: depTable is hardcoded to "dependencies" or "wisp_dependencies"

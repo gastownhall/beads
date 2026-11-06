@@ -14,8 +14,14 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
+// deferredParentProbeRegex matches the classic deferred-parent gate for
+// issueTable as it first goes out, asking both dependency tables for a child.
 func deferredParentProbeRegex(issueTable string) string {
-	return `^SELECT ` + regexp.QuoteMeta(sqlbuild.DeferredParentExistsSQL(issueTable)) + `$`
+	return deferredParentGateRegex(issueTable, deferredChildDepTables)
+}
+
+func deferredParentGateRegex(issueTable string, depTables []string) string {
+	return `^SELECT ` + regexp.QuoteMeta(sqlbuild.DeferredParentExistsSQL(issueTable, depTables)) + `$`
 }
 
 // staleBlockedQueryRegex matches sqlbuild.StaleBlockedIDsSQL for one table
@@ -386,8 +392,8 @@ func TestProbeReadyWorkInTx_UndatedDeferredParentOpensTheChildScan(t *testing.T)
 	t.Parallel()
 
 	_, mock, tx := beginMockTx(t)
-	mock.ExpectQuery(readyProbeSQL + `.*, ` + regexp.QuoteMeta(sqlbuild.DeferredParentExistsSQL("issues")) +
-		`, ` + regexp.QuoteMeta(sqlbuild.DeferredParentExistsSQL("wisps")) + `$`).
+	mock.ExpectQuery(readyProbeSQL + `.*, ` + regexp.QuoteMeta(sqlbuild.DeferredParentExistsSQL("issues", deferredChildDepTables)) +
+		`, ` + regexp.QuoteMeta(sqlbuild.DeferredParentExistsSQL("wisps", deferredChildDepTables)) + `$`).
 		WillReturnRows(readyProbeRows(true, true, false, false, true, false))
 	var legs []string
 	for _, depTable := range deferredChildDepTables {
