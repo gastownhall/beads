@@ -659,3 +659,46 @@ func TestFetchPrelinkedIssuesBatchErrorFallsBackPerIssue(t *testing.T) {
 		t.Fatalf("warnings = %q, want exactly one", batch.warnings)
 	}
 }
+
+// TestFetchPrelinkedIssuesBatchFailureAfterCancellation covers AC-4: when
+// the pull's context has ended by the time a batch read fails, the pull
+// stops with the context's error, whatever error the store reported, and
+// reads nothing per issue.
+func TestFetchPrelinkedIssuesBatchFailureAfterCancellation(t *testing.T) {
+	lastSync := prelinkLastSync
+	for _, test := range []struct {
+		name string
+		ctx  func() (context.Context, context.CancelFunc)
+	}{
+		{"canceled during the read", func() (context.Context, context.CancelFunc) {
+			return context.WithCancel(context.Background())
+		}},
+		{"deadline passed", func() (context.Context, context.CancelFunc) {
+			return context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, cancel := test.ctx()
+			defer cancel()
+			sc := newPrelinkScenario()
+			_, store := sc.stores()
+			store.onBatch = cancel
+			store.batchErr = errors.New("driver: bad connection")
+			tracker := newPrelinkTracker(sc.remote...)
+
+			got := runPrelinked(ctx, sc, store, tracker, &lastSync)
+			if got.err == nil {
+				t.Fatal("fetchPrelinkedIssues succeeded after the pull's context ended")
+			}
+			if !errors.Is(got.err, ctx.Err()) {
+				t.Fatalf("error %v does not match the context's %v", got.err, ctx.Err())
+			}
+			if want := "checking pre-linked local issues: " + ctx.Err().Error(); got.err.Error() != want {
+				t.Fatalf("error = %q, want %q", got.err, want)
+			}
+			if len(store.singleCalls) != 0 || len(got.fetched) != 0 || len(got.warnings) != 0 {
+				t.Fatalf("single calls %q, FetchIssue %q, warnings %q; want none after cancellation", store.singleCalls, got.fetched, got.warnings)
+			}
+		})
+	}
+}

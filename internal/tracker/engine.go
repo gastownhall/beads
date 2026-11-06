@@ -959,6 +959,11 @@ func (e *Engine) fetchPrelinkedIssues(ctx context.Context, fetched []TrackerIssu
 		if len(candidates) > 0 {
 			refs, err := querier.PreviousExternalRefs(ctx, candidates, *lastSync)
 			if err != nil {
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					// The pull is over; per-issue reads would only fail the
+					// same way, once per issue.
+					return nil, hydratedLocalIDs, fmt.Errorf("checking pre-linked local issues: %w", ctxErr)
+				}
 				// The per-issue reads below still answer exactly; a map
 				// returned beside the error is not trusted.
 				e.warn("Batch external_ref history read failed, checking %d pre-linked issues one by one: %v", len(candidates), err)
