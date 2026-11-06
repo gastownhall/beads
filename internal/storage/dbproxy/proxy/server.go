@@ -559,6 +559,10 @@ func (p *proxyServer) handleConn(ctx context.Context, client net.Conn) error {
 	p.markActivity()
 	p.activeConns.Add(1)
 	defer func() {
+		// A connection's end restarts the idle clock: stamped before the
+		// decrement, or a watcher reading zero could pair it with the start
+		// stamp of a connection held longer than the timeout.
+		p.markActivity()
 		p.activeConns.Add(-1)
 		p.connTracef("handleConn(%s) end (active=%d)", addr, p.activeConns.Load())
 	}()
