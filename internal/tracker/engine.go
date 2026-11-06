@@ -963,9 +963,18 @@ func (e *Engine) fetchPrelinkedIssues(ctx context.Context, fetched []TrackerIssu
 		if len(ids) > 0 {
 			refs, err := batch.PreviousExternalRefs(ctx, ids, *lastSync)
 			if err != nil {
-				// A failed batch read costs time, not correctness: warn once
-				// and let the loop below decide every issue through the
-				// per-issue history path, as pulls without the capability do.
+				// A canceled or expired caller context means the pull is
+				// over: there is nothing to fall back to, and the error must
+				// carry the caller's own context error even when the store
+				// reported something else, so errors.Is(err, ctx.Err())
+				// holds for the caller that raced the deadline.
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					return hydrated, hydratedLocalIDs, fmt.Errorf("checking pre-linked local issues: %w", ctxErr)
+				}
+				// Any other failed batch read costs time, not correctness:
+				// warn once and let the loop below decide every issue through
+				// the per-issue history path, as pulls without the capability
+				// do.
 				e.warn("Reading pre-linked issues' external_ref history in one batch failed; checking them individually: %v", err)
 			} else if refs != nil {
 				previousRefs = refs

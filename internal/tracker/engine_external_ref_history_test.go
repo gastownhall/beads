@@ -15,6 +15,7 @@ import (
 	"reflect"
 	"slices"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -753,4 +754,58 @@ func TestFetchPrelinkedIssuesBatchErrorFallsBackPerIssue(t *testing.T) {
 			t.Fatalf("warnings = %d, want the single batch-failure warning before the abort", len(engine.warnings))
 		}
 	})
+}
+
+// TestFetchPrelinkedIssuesBatchCancelledContext pins the batch path's
+// cancellation contract (AC-4): when the caller's context is done, a failed
+// batch read aborts the pull with an error that wraps the caller's own
+// context error — even when the store reported a different failure — and no
+// per-issue fallback runs.
+func TestFetchPrelinkedIssuesBatchCancelledContext(t *testing.T) {
+	locals := parityLocals(map[string]string{"bd-1": "https://test.test/EXT-1"})
+	storageErr := errors.New("i/o timeout")
+	for _, test := range []struct {
+		name    string
+		ctxDone func(t *testing.T) context.Context
+	}{
+		{
+			name: "cancelled context, store error differs",
+			ctxDone: func(t *testing.T) context.Context {
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				return ctx
+			},
+		},
+		{
+			name: "deadline exceeded, store error differs",
+			ctxDone: func(t *testing.T) context.Context {
+				ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+				defer cancel()
+				return ctx
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			base := newOverlapStore(nil)
+			base.issues = locals
+			base.previousRefs = map[string]string{"bd-1": "https://test.test/EXT-OLD"}
+			store := &failingBatchStore{overlapStore: base, batchErr: storageErr}
+			engine := NewEngine(newRecordingTracker(t, nil, nil), store, "sync")
+			ctx := test.ctxDone(t)
+
+			_, _, err := engine.fetchPrelinkedIssues(ctx, nil, locals, &overlapLastSync)
+			if err == nil {
+				t.Fatal("expected the failed batch read on a done context to abort the pull")
+			}
+			if !strings.HasPrefix(err.Error(), "checking pre-linked local issues: ") {
+				t.Fatalf("error = %q, want the checking pre-linked local issues prefix", err)
+			}
+			if !errors.Is(err, ctx.Err()) {
+				t.Fatalf("error = %v, want errors.Is(err, ctx.Err()) with ctx.Err() = %v", err, ctx.Err())
+			}
+			if store.batchCalls != 1 || store.singleCalls != 0 {
+				t.Fatalf("batch calls = %d, per-issue calls = %d, want 1 batch attempt and no per-issue fallback", store.batchCalls, store.singleCalls)
+			}
+		})
+	}
 }
