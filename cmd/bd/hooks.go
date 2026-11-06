@@ -119,10 +119,25 @@ const hookTimeoutKillAfterSeconds = 2
 //     falls through to the content after the section on success. The run
 //     sets BD_HOOK_CHAIN_ACTIVE to the hook name, so a chained hook that
 //     re-enters its parent hook is not chained again.
+//   - When the deadline ends bd hooks run for pre-commit or pre-push with an
+//     eligible chained hook, the gate's verdict is unknown, so the section
+//     refuses rather than continuing. The gate is never rerun.
 //   - bd's exit 3 is returned as is. bd hooks run never opens a database
 //     (hooks is a no-database command), so the old "database not initialized"
 //     skip only ever swallowed a chained hook's own exit 3.
 func generateHookSection(hookName string) string {
+	continueOnTimeout := "echo >&2 \"beads: hook '" + hookName + "' timed out after ${_bd_timeout}s — continuing without beads\"\n"
+	timeoutHandling := "    " + continueOnTimeout +
+		"    _bd_exit=0\n"
+	if hookName == "pre-commit" || hookName == "pre-push" {
+		timeoutHandling = "    if [ \"$_bd_chain\" -eq 1 ]; then\n" +
+			"      echo >&2 \"beads: hook '" + hookName + "' timed out after ${_bd_timeout}s while chained hook '" + hookName + ".old' may still have been running; the gate outcome is unknown, refusing (raise BEADS_HOOK_TIMEOUT to give it more time)\"\n" +
+			"      _bd_exit=1\n" +
+			"    else\n" +
+			"      " + continueOnTimeout +
+			"      _bd_exit=0\n" +
+			"    fi\n"
+	}
 	return hookSectionBeginLine() + "\n" +
 		"# This section is managed by beads. Do not remove these markers.\n" +
 		"case \"$0\" in\n" +
@@ -226,8 +241,7 @@ func generateHookSection(hookName string) string {
 		"    fi\n" +
 		"  fi\n" +
 		"  if { [ \"$_bd_timeout_backend\" = coreutils ] && [ \"$_bd_exit\" -eq 124 ]; } || { [ \"$_bd_timeout_backend\" = perl ] && [ \"$_bd_exit\" -eq 142 ]; }; then\n" +
-		"    echo >&2 \"beads: hook '" + hookName + "' timed out after ${_bd_timeout}s — continuing without beads\"\n" +
-		"    _bd_exit=0\n" +
+		timeoutHandling +
 		"  fi\n" +
 		"  if [ \"$_bd_exit\" -ne 0 ]; then exit \"$_bd_exit\"; fi\n" +
 		"elif [ \"$_bd_chain\" -eq 1 ]; then\n" +

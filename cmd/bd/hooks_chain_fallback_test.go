@@ -499,3 +499,78 @@ func TestGeneratedHookSectionPropagatesBDExitThree(t *testing.T) {
 		}
 	}
 }
+
+// TestGeneratedGateHookRefusesTimedOutChain pins that pre-commit and pre-push
+// refuse when the deadline ends bd hooks run while a foreign chained gate is
+// installed: the gate may not have finished, so its verdict is unknown. The
+// shell never reruns the gate. Other hooks keep continuing on timeout.
+func TestGeneratedGateHookRefusesTimedOutChain(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fixtures are POSIX shell scripts")
+	}
+	backends := []struct {
+		name     string
+		fixtures []hookProcessFixture
+		bdExit   int
+	}{
+		{name: "coreutils 124", fixtures: []hookProcessFixture{{name: "timeout", body: hookProcessGNUTimeoutStub}}, bdExit: 124},
+		{name: "perl 142", fixtures: []hookProcessFixture{
+			{name: "timeout", body: hookProcessIncompatibleTimeoutStub},
+			{name: "gtimeout", body: hookProcessIncompatibleGtimeoutStub},
+			{name: "perl", body: hookProcessPerlStub},
+		}, bdExit: 142},
+	}
+	for _, backend := range backends {
+		for _, hookName := range []string{"pre-commit", "pre-push"} {
+			t.Run(backend.name+"/"+hookName, func(t *testing.T) {
+				witness := filepath.Join(t.TempDir(), "witness")
+				result := runGeneratedHookProcess(t, hookProcessCase{
+					hookName:     hookName,
+					fixtures:     backend.fixtures,
+					bdExit:       backend.bdExit,
+					hookDirFiles: []hookProcessFixture{{name: hookName + ".old", body: hookChainWitnessSidecar("0")}},
+					extraEnv:     []string{"HOOK_TEST_WITNESS=" + witness},
+				})
+				if result.exitCode != 1 {
+					t.Errorf("hook exit = %d, want 1 (refuse)\n%s", result.exitCode, result.output)
+				}
+				if !strings.Contains(result.output, "gate outcome is unknown") {
+					t.Errorf("hook output is missing the unknown-gate-outcome diagnostic\n%s", result.output)
+				}
+				if runs := hookChainWitnessRuns(t, witness); runs != 0 {
+					t.Errorf("the shell reran the timed-out gate %d times, want 0", runs)
+				}
+			})
+		}
+		for _, hookName := range []string{"post-checkout", "prepare-commit-msg", "post-merge"} {
+			t.Run(backend.name+"/"+hookName+" keeps continuing", func(t *testing.T) {
+				result := runGeneratedHookProcess(t, hookProcessCase{
+					hookName:     hookName,
+					fixtures:     backend.fixtures,
+					bdExit:       backend.bdExit,
+					hookDirFiles: []hookProcessFixture{{name: hookName + ".old", body: hookChainWitnessSidecar("0")}},
+					extraEnv:     []string{"HOOK_TEST_WITNESS=" + filepath.Join(t.TempDir(), "witness")},
+				})
+				if result.exitCode != 0 || !strings.Contains(result.output, "continuing without beads") {
+					t.Errorf("hook exit = %d, want the timeout skip\n%s", result.exitCode, result.output)
+				}
+			})
+		}
+	}
+
+	t.Run("real coreutils timeout ends a gate still running", func(t *testing.T) {
+		_, helperDir := findHookProcessCoreutilsTimeout(t)
+		timeout := "1"
+		result := runGeneratedHookProcess(t, hookProcessCase{
+			bdBody:       hookProcessLongRunningBDStub,
+			timeout:      &timeout,
+			pathTail:     helperDir,
+			sleepPath:    findHookProcessSleep(t),
+			hookDirFiles: []hookProcessFixture{{name: "pre-push.old", body: hookChainWitnessSidecar("0")}},
+			extraEnv:     []string{"HOOK_TEST_WITNESS=" + filepath.Join(t.TempDir(), "witness")},
+		})
+		if result.exitCode != 1 || !strings.Contains(result.output, "gate outcome is unknown") {
+			t.Fatalf("hook exit = %d, want the unknown-gate-outcome refusal\n%s", result.exitCode, result.output)
+		}
+	})
+}
