@@ -2456,9 +2456,16 @@ func stopLocked(beadsDir string) error {
 
 	// Flush uncommitted working set changes before stopping the server.
 	// This prevents data loss when changes have been written but not yet committed.
+	// A server whose port cannot be resolved (GH#6614) has no endpoint to
+	// flush through: skip the dial and say so, while the stop proceeds —
+	// explicit Stop keeps lifecycle authority over uncertain tracking.
 	cfg := DefaultConfig(beadsDir)
-	if flushErr := FlushWorkingSet(cfg.Host, state.Port); flushErr != nil {
-		fmt.Fprintf(os.Stderr, "Warning: could not flush working set before stop: %v\n", flushErr)
+	if state.Port > 0 {
+		if flushErr := FlushWorkingSet(cfg.Host, state.Port); flushErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not flush working set before stop: %v\n", flushErr)
+		}
+	} else {
+		fmt.Fprintf(os.Stderr, "Warning: the SQL port of PID %d is unknown; cannot flush the working set before stop\n", state.PID)
 	}
 
 	if err := gracefulStop(state.PID, 5*time.Second); err != nil {

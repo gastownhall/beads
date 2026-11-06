@@ -348,3 +348,50 @@ func TestIsRunningDoesNotStopConfirmedServerWithUnknownPort(t *testing.T) {
 		t.Errorf("expected the pid file to be kept: %v", err)
 	}
 }
+
+// GH#6614: explicit Stop keeps lifecycle authority over a live server whose
+// port cannot be resolved: it stops the confirmed process, cleans tracking
+// and succeeds, rather than returning ErrServerNotRunning after IsRunning
+// killed the server. The working-set flush is skipped with a warning — there
+// is no port to dial.
+func TestStopStopsUnknownPortServer(t *testing.T) {
+	dir := t.TempDir()
+	exited := startStaleServerFiles(t, dir)
+	if err := os.Remove(portPath(dir)); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	t.Setenv("BEADS_SHARED_SERVER_DIR", t.TempDir())
+	if got := DefaultConfig(dir).Port; got != 0 {
+		t.Fatalf("precondition: DefaultConfig resolved port %d, want 0", got)
+	}
+	data, err := os.ReadFile(pidPath(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stubProcessList(t, func() ([]int, error) { return []int{pid}, nil })
+
+	var stopErr error
+	stderr := captureStderr(t, func() { stopErr = Stop(dir) })
+	if stopErr != nil {
+		t.Fatalf("Stop = %v, want nil for a live server with an unknown port", stopErr)
+	}
+	if !strings.Contains(stderr, "flush") || !strings.Contains(stderr, "unknown") {
+		t.Errorf("expected a warning that the flush is unavailable for an unknown port, stderr:\n%s", stderr)
+	}
+	select {
+	case err := <-exited:
+		exited <- err // let the cleanup finish
+	case <-time.After(5 * time.Second):
+		t.Fatal("the tracked server did not exit after Stop")
+	}
+	for _, path := range []string{pidPath(dir), portPath(dir)} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Errorf("expected %s to be removed, stat err = %v", filepath.Base(path), err)
+		}
+	}
+}
