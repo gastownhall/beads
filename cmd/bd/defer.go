@@ -38,6 +38,10 @@ read returns the issue to open automatically (same shape as 'bd undefer').
 A defer WITHOUT a date is the indefinite icebox: it stays deferred until
 someone runs 'bd undefer'.
 
+Either kind of defer also holds the issue's direct children out of 'bd
+ready': a snooze hides them until its date passes, an icebox until 'bd
+undefer'. 'bd ready --include-deferred' lists them anyway.
+
 Examples:
   bd defer bd-abc                  # Icebox indefinitely (until bd undefer)
   bd defer bd-abc --until=tomorrow # Snooze: auto-wakes once the date passes
