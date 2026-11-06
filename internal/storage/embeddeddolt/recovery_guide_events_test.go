@@ -534,3 +534,92 @@ func TestRecoveryGuideRecoveredStorePublishesWritableClones(t *testing.T) {
 		rgRequireEventIDs(t, ctx, conn, "events AS OF 'HEAD'", rgEvtDoomedA, rgEvtDoomedB, "rg-evt-clone", rgEvtKept, rgEvtLocal)
 	})
 }
+
+// TestRecoveryGuideDivergentPeersSyncAfterRestoration is AC-3: two peers
+// diverged before the flip each follow the guide's recovery-and-sync order
+// (the machine with post-flip rows recovers and pushes first; the other
+// completes its own recovery before pulling), and a never-migrated peer
+// pulls normally. Both merges settle with no row or schema conflicts and
+// no open merge, holding exactly the surviving common events plus each
+// peer's new events, excluding the deleted issue's events.
+func TestRecoveryGuideDivergentPeersSyncAfterRestoration(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+
+	origin := rgSeedPreFlip(t)
+	remote := rgRemoteDir(t)
+	origin.rgAddOriginPush(t, remote)
+
+	// All three machines clone the same pre-flip base before any of them
+	// recovers, so their histories diverge before the flip.
+	peerA := rgClone(t, remote)
+	peerB := rgClone(t, remote)
+	peerC := rgClone(t, remote)
+
+	// Peer A (recovers and publishes first): deletes rg-1 — its events
+	// cascade away with it — and commits its own pre-flip work.
+	peerA.withConn(t, func(conn *sql.Conn) {
+		execFrozenGuard(t, ctx, conn, `
+DELETE FROM issues WHERE id = '`+rgIssueDoomed+`';
+INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type)
+VALUES ('rg-a2', 'peer A work', '', '', '', '', 'open', 2, 'task');
+`+rgEventsInsertPrefix+`
+VALUES ('rg-a2', 'created', 'peer-a', '2026-07-30 00:00:03', 'rg-evt-a2');
+`)
+		mustDrain(t, ctx, conn, "CALL DOLT_ADD('-A')")
+		mustDrain(t, ctx, conn, "CALL DOLT_COMMIT('-m', 'test: peer A pre-flip work')")
+	})
+	rgFlip(t, peerA, "rg-evt-a2-local")
+	rgRunGuide(t, peerA)
+	peerA.rgAddOriginPush(t, remote)
+
+	// Peer B: its own pre-flip work, the flip, its own local rows, the
+	// guide — all BEFORE its first pull, as the guide's order requires.
+	peerB.withConn(t, func(conn *sql.Conn) {
+		execFrozenGuard(t, ctx, conn, `
+INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type)
+VALUES ('rg-b3', 'peer B work', '', '', '', '', 'open', 2, 'task');
+`+rgEventsInsertPrefix+`
+VALUES ('rg-b3', 'created', 'peer-b', '2026-07-30 00:00:04', 'rg-evt-b3');
+`)
+		mustDrain(t, ctx, conn, "CALL DOLT_ADD('-A')")
+		mustDrain(t, ctx, conn, "CALL DOLT_COMMIT('-m', 'test: peer B pre-flip work')")
+	})
+	rgFlip(t, peerB, "rg-evt-b3-local")
+	rgRunGuide(t, peerB)
+	peerB.withConn(t, func(conn *sql.Conn) {
+		if err := versioncontrolops.Pull(ctx, conn, "origin", "main", ""); err != nil {
+			t.Fatalf("peer B pull after its own recovery: %v", err)
+		}
+		rgRequireNoOpenMerge(t, ctx, conn)
+		rgRequireCleanStatus(t, ctx, conn)
+	})
+	peerB.rgAddOriginPush(t, remote)
+
+	// Peer C never migrated: ordinary pre-flip work, then a normal pull.
+	peerC.withConn(t, func(conn *sql.Conn) {
+		execFrozenGuard(t, ctx, conn, `
+INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type)
+VALUES ('rg-c4', 'peer C work', '', '', '', '', 'open', 2, 'task');
+`+rgEventsInsertPrefix+`
+VALUES ('rg-c4', 'created', 'peer-c', '2026-07-30 00:00:05', 'rg-evt-c4');
+`)
+		mustDrain(t, ctx, conn, "CALL DOLT_ADD('-A')")
+		mustDrain(t, ctx, conn, "CALL DOLT_COMMIT('-m', 'test: peer C work')")
+		if err := versioncontrolops.Pull(ctx, conn, "origin", "main", ""); err != nil {
+			t.Fatalf("never-migrated peer C pull: %v", err)
+		}
+		rgRequireNoOpenMerge(t, ctx, conn)
+		rgRequireCleanStatus(t, ctx, conn)
+		// The merged audit trail: the surviving common row (rg-evt-keep),
+		// each peer's new rows, and NOT the deleted issue's events.
+		rgRequireEventIDs(t, ctx, conn, "events AS OF 'HEAD'",
+			"rg-evt-a2", "rg-evt-a2-local", "rg-evt-b3", "rg-evt-b3-local", "rg-evt-c4", rgEvtKept)
+		rgRequireEventIDs(t, ctx, conn, "events",
+			"rg-evt-a2", "rg-evt-a2-local", "rg-evt-b3", "rg-evt-b3-local", "rg-evt-c4", rgEvtKept)
+		var n int
+		if err := conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM issues WHERE id = ?", rgIssueDoomed).Scan(&n); err != nil || n != 0 {
+			t.Fatalf("deleted issue rows after the merges = %d (err %v), want 0", n, err)
+		}
+	})
+}
