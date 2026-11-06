@@ -419,7 +419,13 @@ var upMigrations embed.FS
 var upIgnoredMigrations embed.FS
 
 type migrationSource struct {
-	files       embed.FS
+	// files is fs.FS rather than embed.FS so tests can drive the runner with
+	// a synthetic source (fstest.MapFS): the #7037 re-arm replay contract
+	// covers not just ignored 0032 but every later ignored migration that
+	// will ever exist, which only a synthetic suffix can exercise. The
+	// production sources are the embedded bundles above; embed.FS satisfies
+	// fs.FS and nothing in this struct uses anything richer.
+	files       fs.FS
 	dir         string
 	cursorTable string
 	// sentinelTables are tables this series is responsible for creating. A
@@ -852,7 +858,7 @@ func AllMigrationsSQL() string {
 	b.WriteString(mainSource.bootstrapSQL())
 	b.WriteString(";\n")
 	for _, f := range mainSource.list() {
-		data, err := mainSource.files.ReadFile(mainSource.dir + "/" + f.name)
+		data, err := fs.ReadFile(mainSource.files, mainSource.dir + "/" + f.name)
 		if err != nil {
 			continue
 		}
@@ -877,7 +883,7 @@ func AllMigrationsSQL() string {
 // Read-only; callers cannot use it to mutate or bypass the frozen-file
 // hygiene guard (scripts/check-migration-hygiene.sh).
 func MigrationSQL(name string) (string, error) {
-	data, err := mainSource.files.ReadFile(mainSource.dir + "/" + name)
+	data, err := fs.ReadFile(mainSource.files, mainSource.dir + "/" + name)
 	if err != nil {
 		return "", err
 	}
@@ -888,7 +894,7 @@ func MigrationSQL(name string) (string, error) {
 // bytes of an ignored-source migration file (e.g. "0019_create_events.up.sql"),
 // for engine-based frozen-guard tests of clone-local DDL.
 func IgnoredMigrationSQL(name string) (string, error) {
-	data, err := ignoredSource.files.ReadFile(ignoredSource.dir + "/" + name)
+	data, err := fs.ReadFile(ignoredSource.files, ignoredSource.dir + "/" + name)
 	if err != nil {
 		return "", err
 	}
@@ -2045,7 +2051,7 @@ func (m migrationSource) pendingMigrationDirtyTables(ctx context.Context, db DBC
 		if mf.version <= current {
 			continue
 		}
-		data, err := m.files.ReadFile(m.dir + "/" + mf.name)
+		data, err := fs.ReadFile(m.files, m.dir + "/" + mf.name)
 		if err != nil {
 			return nil, fmt.Errorf("reading migration %s: %w", mf.name, err)
 		}
@@ -2359,7 +2365,7 @@ func runMigrations(ctx context.Context, db DBConn, src migrationSource, minVersi
 		if mf.version <= minVersion || mf.version > upTo {
 			continue
 		}
-		data, err := src.files.ReadFile(src.dir + "/" + mf.name)
+		data, err := fs.ReadFile(src.files, src.dir + "/" + mf.name)
 		if err != nil {
 			return count, fmt.Errorf("reading migration %s: %w", mf.name, err)
 		}

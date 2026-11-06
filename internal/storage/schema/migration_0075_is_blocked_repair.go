@@ -48,6 +48,35 @@ const (
 	isBlockedRepairOwedFull = "full"
 )
 
+// isBlockedRepairFaultForTest, when non-nil, is invoked at the named windows
+// inside repairMixedIsBlockedFlags0032's owed branch; a returned error aborts
+// the hook exactly there, letting tests interrupt the repair at its durability
+// boundaries (gastownhall/beads#7037's interruption contract). It is nil in
+// production and set only through SetIsBlockedRepairFaultHookForTest, which
+// exists for that. The windows are the contract's edges: "after-recompute"
+// (flag flips in the working set, key still at HEAD), "after-key-deletion"
+// (flips and deletion uncommitted, HEAD still owes the whole repair), and
+// "after-commit" (the scoped repair commit is durable, the version-32 cursor
+// row not yet recorded).
+var isBlockedRepairFaultForTest func(window string) error
+
+// SetIsBlockedRepairFaultHookForTest installs fn as the is_blocked repair's
+// fault hook; a nil fn removes it. Tests only.
+func SetIsBlockedRepairFaultHookForTest(fn func(window string) error) {
+	isBlockedRepairFaultForTest = fn
+}
+
+// fireIsBlockedRepairFault dispatches to the test fault hook, if armed.
+func fireIsBlockedRepairFault(window string) error {
+	if isBlockedRepairFaultForTest == nil {
+		return nil
+	}
+	if err := isBlockedRepairFaultForTest(window); err != nil {
+		return fmt.Errorf("is_blocked repair interrupted at %s: %w", window, err)
+	}
+	return nil
+}
+
 // recordIsBlockedRepairOwed0075 is the pre-migration repair for main 0075: it
 // records the durable obligation when the store has any issue row and re-arms
 // the ignored-series repair. Both writes land in 0075's normal per-step
@@ -144,14 +173,23 @@ func repairMixedIsBlockedFlags0032(ctx context.Context, db DBConn) error {
 	if err != nil {
 		return fmt.Errorf("recomputing is_blocked (gastownhall/beads#7037): %w", err)
 	}
+	if err := fireIsBlockedRepairFault("after-recompute"); err != nil {
+		return err
+	}
 	if _, err := db.ExecContext(ctx,
 		"DELETE FROM metadata WHERE `key` = ?", isBlockedRepairOwedKey); err != nil {
 		return fmt.Errorf("clearing %s: %w", isBlockedRepairOwedKey, err)
+	}
+	if err := fireIsBlockedRepairFault("after-key-deletion"); err != nil {
+		return err
 	}
 	if err := stageAndCommitScopedTables(ctx, db,
 		"schema: repair is_blocked flags over-set by migration 0059 (gastownhall/beads#7037)",
 		"issues", "metadata", "dependencies"); err != nil {
 		return fmt.Errorf("committing the is_blocked repair: %w", err)
+	}
+	if err := fireIsBlockedRepairFault("after-commit"); err != nil {
+		return err
 	}
 	// The count is fixpoint flips, not distinct rows and not proof of 0059
 	// causation (a parent flip cascades through later passes); the upgrade

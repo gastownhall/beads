@@ -208,6 +208,7 @@ go_test(
         "migrate_0059_overset_repair_test.go",
         "migrate_0075_frozen_prereqs_test.go",
         "migrate_0075_healthy_noop_test.go",
+        "migrate_0075_interruption_test.go",
         "migrate_0075_repair_commit_test.go",
         "migrate_0075_typed_refusals_test.go",
         "migrate_consent_gate_test.go",

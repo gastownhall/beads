@@ -3,6 +3,7 @@ package schema
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"maps"
 	"regexp"
 	"slices"
@@ -41,7 +42,7 @@ func shippedCensusSeries(t *testing.T) []censusSeries {
 	for _, src := range []migrationSource{mainSource, ignoredSource} {
 		s := censusSeries{cursorTable: src.cursorTable}
 		for _, mf := range src.list() {
-			data, err := src.files.ReadFile(src.dir + "/" + mf.name)
+			data, err := fs.ReadFile(src.files, src.dir + "/" + mf.name)
 			if err != nil {
 				t.Fatalf("reading %s/%s: %v", src.dir, mf.name, err)
 			}

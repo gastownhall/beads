@@ -164,6 +164,7 @@ go_test(
         "ignored_cursor_untrack_test.go",
         "lock_test.go",
         "lost_table_notice_test.go",
+        "migrate_0075_rearm_replay_test.go",
         "migrate_consent_test.go",
         "migration_0067_versioned_beads_test.go",
         "migration_0068_add_attribution_status_test.go",

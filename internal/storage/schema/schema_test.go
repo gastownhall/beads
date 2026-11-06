@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1224,7 +1225,7 @@ DROP TABLE IF EXISTS wisp_labels;
 DROP TABLE IF EXISTS wisps;
 DELETE FROM schema_migrations WHERE version = %d;
 `, LatestVersion())
-	migrationSQL, err := mainSource.files.ReadFile("migrations/0053_repair_rig_wisps.up.sql")
+	migrationSQL, err := fs.ReadFile(mainSource.files, "migrations/0053_repair_rig_wisps.up.sql")
 	if err != nil {
 		t.Fatalf("read 0053 migration: %v", err)
 	}
@@ -1257,7 +1258,7 @@ func TestMigration0056NoopsWithoutWispCommentsThroughDoltCLI(t *testing.T) {
 DROP TABLE IF EXISTS wisp_comments;
 DELETE FROM schema_migrations WHERE version = %d;
 `, LatestVersion())
-	migrationSQL, err := mainSource.files.ReadFile("migrations/0056_add_comments_keyset_index.up.sql")
+	migrationSQL, err := fs.ReadFile(mainSource.files, "migrations/0056_add_comments_keyset_index.up.sql")
 	if err != nil {
 		t.Fatalf("read 0056 migration: %v", err)
 	}
@@ -1294,7 +1295,7 @@ func TestMigration0065NoopsWithoutWispCommentsThroughDoltCLI(t *testing.T) {
 DROP TABLE IF EXISTS wisp_comments;
 DELETE FROM schema_migrations WHERE version = %d;
 `, LatestVersion())
-	migrationSQL, err := mainSource.files.ReadFile("migrations/0065_widen_wisp_comments_text.up.sql")
+	migrationSQL, err := fs.ReadFile(mainSource.files, "migrations/0065_widen_wisp_comments_text.up.sql")
 	if err != nil {
 		t.Fatalf("read 0065 migration: %v", err)
 	}
@@ -1355,7 +1356,7 @@ INSERT INTO wisp_child_counters (parent_id, last_child) VALUES (%s, 7);
 		doltSQLString(rigID), doltSQLString(targetID), doltSQLString(depid.New(sourceID, rigID)),
 		doltSQLString(sourceID), doltSQLString(rigID), doltSQLString(rigID),
 		doltSQLString(rigID), doltSQLString(rigID))
-	migrationSQL, err := mainSource.files.ReadFile("migrations/0053_repair_rig_wisps.up.sql")
+	migrationSQL, err := fs.ReadFile(mainSource.files, "migrations/0053_repair_rig_wisps.up.sql")
 	if err != nil {
 		t.Fatalf("read 0053 migration: %v", err)
 	}
@@ -1411,7 +1412,7 @@ VALUES (%s, %s, %s, 'blocks', NOW(), 'tester', JSON_OBJECT());
 		doltSQLString(blockerID), doltSQLString(blockedID),
 		doltSQLString(depid.New(blockedID, blockerID)), doltSQLString(blockedID), doltSQLString(blockerID))
 
-	migrationSQL, err := mainSource.files.ReadFile("migrations/0047_recompute_mixed_is_blocked.up.sql")
+	migrationSQL, err := fs.ReadFile(mainSource.files, "migrations/0047_recompute_mixed_is_blocked.up.sql")
 	if err != nil {
 		t.Fatalf("read 0047 migration: %v", err)
 	}
@@ -1519,7 +1520,7 @@ DELETE FROM schema_migrations WHERE version = 53;
 	repairID := depid.New(sourceID, targetID)
 	runDoltSQL(t, dir, dependenciesIDRepairSQLForTest(t, dir, sourceID, targetID, repairID))
 
-	migrationSQL, err := mainSource.files.ReadFile("migrations/0053_repair_rig_wisps.up.sql")
+	migrationSQL, err := fs.ReadFile(mainSource.files, "migrations/0053_repair_rig_wisps.up.sql")
 	if err != nil {
 		t.Fatalf("read 0053 migration: %v", err)
 	}
@@ -1543,7 +1544,7 @@ func TestMigration0057IsIdempotentOnAlreadyLongtextEventsThroughDoltCLI(t *testi
 	runDoltCommand(t, dir, "init", "--name", "test", "--email", "test@example.com")
 	runDoltSQL(t, dir, AllMigrationsSQL())
 
-	migrationSQL, err := mainSource.files.ReadFile("migrations/0057_events_value_columns_idempotent_longtext.up.sql")
+	migrationSQL, err := fs.ReadFile(mainSource.files, "migrations/0057_events_value_columns_idempotent_longtext.up.sql")
 	if err != nil {
 		t.Fatalf("read 0057 migration: %v", err)
 	}
@@ -1658,7 +1659,7 @@ func TestFullChainFromPreWispsAndMissingDependenciesIDConvergesThroughDoltCLI(t 
 		if f.version > seedCursor {
 			continue
 		}
-		data, err := mainSource.files.ReadFile(mainSource.dir + "/" + f.name)
+		data, err := fs.ReadFile(mainSource.files, mainSource.dir + "/" + f.name)
 		if err != nil {
 			t.Fatalf("read %s: %v", f.name, err)
 		}
@@ -1725,7 +1726,7 @@ ALTER TABLE dependencies DROP COLUMN id;
 				b.WriteString(dependenciesIDRepairSQLForTest(t, dir, blockedID, blockerID, depID))
 				b.WriteString("\n")
 			}
-			data, err := mainSource.files.ReadFile(mainSource.dir + "/" + f.name)
+			data, err := fs.ReadFile(mainSource.files, mainSource.dir + "/" + f.name)
 			if err != nil {
 				t.Fatalf("read %s: %v", f.name, err)
 			}
@@ -1772,7 +1773,7 @@ ALTER TABLE dependencies DROP COLUMN id;
 				b.WriteString(wispArrivalSeqSQLForTest(t, dir))
 				b.WriteString("\n")
 			}
-			data, err := ignoredSource.files.ReadFile(ignoredSource.dir + "/" + f.name)
+			data, err := fs.ReadFile(ignoredSource.files, ignoredSource.dir + "/" + f.name)
 			if err != nil {
 				t.Fatalf("read ignored %s: %v", f.name, err)
 			}
@@ -1854,7 +1855,7 @@ ALTER TABLE dependencies DROP COLUMN id;
 		"0053_repair_rig_wisps.up.sql",
 		"0057_events_value_columns_idempotent_longtext.up.sql",
 	} {
-		data, err := mainSource.files.ReadFile(mainSource.dir + "/" + name)
+		data, err := fs.ReadFile(mainSource.files, mainSource.dir + "/" + name)
 		if err != nil {
 			t.Fatalf("read %s: %v", name, err)
 		}
@@ -2753,7 +2754,7 @@ func TestIgnoredMigration0017AddsWispsDeferUntilIndexThroughDoltCLI(t *testing.T
 	runDoltCommand(t, dir, "init", "--name", "test", "--email", "test@example.com")
 	runDoltSQL(t, dir, AllMigrationsSQL())
 
-	migrationSQL, err := ignoredSource.files.ReadFile("migrations/ignored/0017_add_wisps_defer_until_index.up.sql")
+	migrationSQL, err := fs.ReadFile(ignoredSource.files, "migrations/ignored/0017_add_wisps_defer_until_index.up.sql")
 	if err != nil {
 		t.Fatalf("read ignored 0017 up migration: %v", err)
 	}
@@ -2785,7 +2786,7 @@ DROP TABLE IF EXISTS wisp_labels;
 DROP TABLE IF EXISTS wisps;
 `)
 
-	migrationSQL, err := ignoredSource.files.ReadFile("migrations/ignored/0017_add_wisps_defer_until_index.up.sql")
+	migrationSQL, err := fs.ReadFile(ignoredSource.files, "migrations/ignored/0017_add_wisps_defer_until_index.up.sql")
 	if err != nil {
 		t.Fatalf("read ignored 0017 up migration: %v", err)
 	}

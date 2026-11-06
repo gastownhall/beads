@@ -1,6 +1,7 @@
 package schema
 
 import (
+	"io/fs"
 	"strings"
 	"testing"
 )
@@ -43,7 +44,7 @@ func TestProcedureCallReClassifiesStatements(t *testing.T) {
 func TestMigrationsWithProcedureCallsTakeDrainPath(t *testing.T) {
 	for _, src := range []migrationSource{mainSource, ignoredSource} {
 		for _, mf := range src.list() {
-			data, err := src.files.ReadFile(src.dir + "/" + mf.name)
+			data, err := fs.ReadFile(src.files, src.dir + "/" + mf.name)
 			if err != nil {
 				t.Fatalf("reading migration %s: %v", mf.name, err)
 			}
@@ -82,7 +83,7 @@ func TestMigrationsWithProcedureCallsTakeDrainPath(t *testing.T) {
 func TestFrozenNonIdempotentMigrationsHaveRepairs(t *testing.T) {
 	for _, src := range []migrationSource{mainSource, ignoredSource} {
 		for _, mf := range src.list() {
-			data, err := src.files.ReadFile(src.dir + "/" + mf.name)
+			data, err := fs.ReadFile(src.files, src.dir + "/" + mf.name)
 			if err != nil {
 				t.Fatalf("reading migration %s: %v", mf.name, err)
 			}

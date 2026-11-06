@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"io/fs"
 	"regexp"
 	"slices"
 	"strings"
@@ -474,13 +475,13 @@ func TestMainSourceIsNotProbed(t *testing.T) {
 // it, so the cursor would be rejected on every single open — turning a silent
 // wrong answer into a permanent re-migration loop.
 func TestSentinelTablesAreCreatedByTheSeries(t *testing.T) {
-	entries, err := ignoredSource.files.ReadDir(ignoredSource.dir)
+	entries, err := fs.ReadDir(ignoredSource.files, ignoredSource.dir)
 	if err != nil {
 		t.Fatalf("read %s: %v", ignoredSource.dir, err)
 	}
 	var all strings.Builder
 	for _, e := range entries {
-		blob, err := ignoredSource.files.ReadFile(ignoredSource.dir + "/" + e.Name())
+		blob, err := fs.ReadFile(ignoredSource.files, ignoredSource.dir + "/" + e.Name())
 		if err != nil {
 			t.Fatalf("read %s: %v", e.Name(), err)
 		}
@@ -521,7 +522,7 @@ func TestSentinelColumnsAreCreatedByTheSeries(t *testing.T) {
 
 	bodies := make(map[int]string)
 	for _, mf := range ignoredSource.list() {
-		blob, err := ignoredSource.files.ReadFile(ignoredSource.dir + "/" + mf.name)
+		blob, err := fs.ReadFile(ignoredSource.files, ignoredSource.dir + "/" + mf.name)
 		if err != nil {
 			t.Fatalf("read %s: %v", mf.name, err)
 		}
@@ -612,7 +613,7 @@ func TestSentinelFlooredTablesAreCreatedByTheSeries(t *testing.T) {
 
 	bodies := make(map[int]string)
 	for _, mf := range ignoredSource.list() {
-		blob, err := ignoredSource.files.ReadFile(ignoredSource.dir + "/" + mf.name)
+		blob, err := fs.ReadFile(ignoredSource.files, ignoredSource.dir + "/" + mf.name)
 		if err != nil {
 			t.Fatalf("read %s: %v", mf.name, err)
 		}
