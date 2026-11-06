@@ -1324,3 +1324,108 @@ func TestGeneratedHookChainFallbackProcess(t *testing.T) {
 		}
 	})
 }
+
+// TestGeneratedHookChainFallbackClassification pins which <hook>.old files the
+// bd-missing fallback runs. A beads callback is skipped: it would re-enter bd,
+// which is what runChainedHook's getHookVersion check refuses (GH#843,
+// GH#1120). A foreign hook that only resembles one runs. Each fixture records
+// a run and exits 1, so a skipped chain leaves the hook at 0 with no run, and
+// each decision is checked against getHookVersion as well.
+func TestGeneratedHookChainFallbackClassification(t *testing.T) {
+	const record = "printf 'run\\n' >> \"$HOOK_TEST_CHAIN_COUNT\"\nexit 1\n"
+	tests := []struct {
+		name     string
+		body     string
+		wantSkip bool
+		// goSkip is getHookVersion's decision when it differs from the shell's
+		// on purpose; nil means the two agree.
+		goSkip *bool
+	}{
+		{name: "section marker", body: "#!/bin/sh\n# --- BEGIN BEADS INTEGRATION v0.40.0 ---\n# --- END BEADS INTEGRATION v0.40.0 ---\n" + record, wantSkip: true},
+		{name: "section marker mid-line", body: "#!/bin/sh\necho '# --- BEGIN BEADS INTEGRATION v0.40.0 ---'\n" + record, wantSkip: true},
+		{name: "thin shim", body: "#!/bin/sh\n# bd-shim v1\n" + record, wantSkip: true},
+		{name: "indented shim marker", body: "#!/bin/sh\n  # bd-shim v2\n" + record, wantSkip: true},
+		{name: "legacy version marker", body: "#!/bin/sh\n# bd-hooks-version: 0.55.0\n" + record, wantSkip: true},
+		{name: "inline hook marker", body: "#!/bin/sh\n# bd (beads) pre-push hook\n" + record, wantSkip: true},
+		{name: "delegator", body: "#!/bin/sh\nbd hooks run pre-push \"$@\"\n" + record, wantSkip: true},
+		{name: "exec delegator", body: "#!/bin/sh\nexec bd hooks run pre-push \"$@\"\n" + record, wantSkip: true},
+		{name: "commented delegator", body: "#!/bin/sh\n# bd hooks run pre-push\n" + record, wantSkip: true},
+		{name: "substituted delegator", body: "#!/bin/sh\n_out=\"$(bd hooks run pre-push)\"\n" + record, wantSkip: true},
+		{name: "bare delegator at end of file", body: "#!/bin/sh\n" + record + "bd hooks run", wantSkip: true},
+		{name: "CRLF shim", body: "#!/bin/sh\r\n# bd-shim v1\r\n" + record, wantSkip: true},
+		{name: "CRLF delegator", body: "#!/bin/sh\r\nbd hooks run\r\n" + record, wantSkip: true},
+		{name: "marker on a last line without newline", body: "#!/bin/sh\n" + record + "# bd-shim v1", wantSkip: true},
+
+		{name: "foreign NOTE comment", body: "#!/bin/sh\n# --- NOTE: not a BEADS INTEGRATION marker\n" + record},
+		{name: "foreign BEGIN with a word between", body: "#!/bin/sh\n# --- BEGIN foo BEADS INTEGRATION\n" + record},
+		{name: "foreign BEGIN with doubled space", body: "#!/bin/sh\n# --- BEGIN BEADS  INTEGRATION\n" + record},
+		{name: "mid-line legacy version text", body: "#!/bin/sh\necho '# bd-hooks-version: 1'\n" + record},
+		{name: "inline marker without space", body: "#!/bin/sh\n# bd(beads)\n" + record},
+		{name: "longer command name", body: "#!/bin/sh\n# mybd hooks run\n" + record},
+		{name: "longer subcommand", body: "#!/bin/sh\n# bd hooks runner\n" + record},
+		{name: "plain foreign gate", body: "#!/bin/sh\n" + record},
+		// Go's \s+ also accepts runs of whitespace; the shell matches single
+		// spaces only and runs the rest, which cannot recurse with bd missing.
+		{name: "whitespace-run delegator", body: "#!/bin/sh\n# bd  hooks\trun\n" + record, goSkip: hookProcessBool(true)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := runGeneratedHookChainProcess(t, hookChainProcessCase{chainBody: tt.body, usePOSIXSh: true, shellOption: "eu"})
+			if tt.wantSkip {
+				if result.exitCode != 0 || result.chainRuns != 0 || !result.trailingRan {
+					t.Errorf("beads callback was not skipped: exit %d, %d chain runs, trailing ran %v\n%s", result.exitCode, result.chainRuns, result.trailingRan, result.output)
+				}
+			} else if result.exitCode != 1 || result.chainRuns != 1 || result.trailingRan {
+				t.Errorf("foreign gate did not decide the hook: exit %d, %d chain runs, trailing ran %v\n%s", result.exitCode, result.chainRuns, result.trailingRan, result.output)
+			}
+
+			goWant := tt.wantSkip
+			if tt.goSkip != nil {
+				goWant = *tt.goSkip
+			}
+			path := filepath.Join(t.TempDir(), "pre-push.old")
+			if err := os.WriteFile(path, []byte(tt.body), 0o600); err != nil {
+				t.Fatalf("write fixture: %v", err)
+			}
+			info, err := getHookVersion(path)
+			if err != nil {
+				t.Fatalf("getHookVersion: %v", err)
+			}
+			if got := info.IsBdHook || info.IsExternalIntegration; got != goWant {
+				t.Errorf("getHookVersion skip = %v, want %v (%+v)", got, goWant, info)
+			}
+		})
+	}
+
+	t.Run("absent chain falls through", func(t *testing.T) {
+		result := runGeneratedHookChainProcess(t, hookChainProcessCase{usePOSIXSh: true, shellOption: "eu"})
+		if result.exitCode != 0 || !result.trailingRan || strings.TrimSpace(strings.ReplaceAll(result.output, "trailing-ran", "")) != "" {
+			t.Errorf("want a silent fall-through, got exit %d\n%s", result.exitCode, result.output)
+		}
+	})
+	t.Run("non-executable chain falls through", func(t *testing.T) {
+		result := runGeneratedHookChainProcess(t, hookChainProcessCase{chainBody: "#!/bin/sh\n" + record, chainMode: 0o644, usePOSIXSh: true, shellOption: "eu"})
+		if result.exitCode != 0 || result.chainRuns != 0 || !result.trailingRan {
+			t.Errorf("want a silent fall-through, got exit %d with %d runs\n%s", result.exitCode, result.chainRuns, result.output)
+		}
+	})
+	t.Run("directory chain falls through", func(t *testing.T) {
+		result := runGeneratedHookChainProcess(t, hookChainProcessCase{chainIsDir: true, usePOSIXSh: true, shellOption: "eu"})
+		if result.exitCode != 0 || !result.trailingRan {
+			t.Errorf("want a silent fall-through, got exit %d\n%s", result.exitCode, result.output)
+		}
+	})
+	t.Run("unreadable executable chain is attempted", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root reads a mode 0111 file")
+		}
+		result := runGeneratedHookChainProcess(t, hookChainProcessCase{chainBody: "#!/bin/sh\n" + record, chainMode: 0o111, usePOSIXSh: true, shellOption: "eu"})
+		if result.exitCode == 0 || result.trailingRan {
+			t.Errorf("an unreadable executable chain was treated as a beads callback: exit %d\n%s", result.exitCode, result.output)
+		}
+	})
+}
+
+func hookProcessBool(value bool) *bool {
+	return &value
+}

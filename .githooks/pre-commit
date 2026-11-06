@@ -100,7 +100,25 @@ if [ "$_bd_missing" -eq 1 ]; then
     */*) _bd_chain="${0%/*}/pre-commit.old" ;;
     *) _bd_chain="./pre-commit.old" ;;
   esac
-  if [ -x "$_bd_chain" ]; then
+  if [ -f "$_bd_chain" ] && [ -x "$_bd_chain" ]; then
+    if [ -r "$_bd_chain" ]; then
+      _bd_p_begin='# --- BEGIN BEADS'' INTEGRATION'
+      _bd_p_shim='# bd''-shim'
+      _bd_p_version='# bd-hooks''-version: '
+      _bd_p_inline='# bd ''(beads)'
+      _bd_p_run='bd hooks'' run'
+      _bd_line=
+      while IFS= read -r _bd_line || [ -n "$_bd_line" ]; do
+        case "$_bd_line" in
+          "$_bd_p_version"*|*"$_bd_p_begin"*|*"$_bd_p_shim"*|*"$_bd_p_inline"*) _bd_chain=; break ;;
+          "$_bd_p_run"|"$_bd_p_run"[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_]*|*[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_]"$_bd_p_run"|*[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_]"$_bd_p_run"[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_]*) _bd_chain=; break ;;
+        esac
+      done < "$_bd_chain"
+    fi
+  else
+    _bd_chain=
+  fi
+  if [ -n "$_bd_chain" ]; then
     export BD_GIT_HOOK=1
     if "$_bd_chain" "$@"; then
       _bd_exit=0

@@ -68,7 +68,10 @@ bd hooks install --chain    # Run existing hooks before bd hooks
 When `bd` is not on the hook's `PATH` (a GUI git client, cron, or a minimal
 shell), the hook section still runs the chained `<hook-name>.old` next to the
 hook, which `bd hooks run` would otherwise have run, and fails the git
-operation only when that chained hook fails. Hook sections installed before
+operation only when that chained hook fails. As in `bd hooks run`, a
+`<hook-name>.old` that is itself a beads hook (a managed section, a shim, an
+inline hook, or a hook that calls `bd hooks run`) is skipped, as is one that
+is missing or not an executable file. Hook sections installed before
 this behavior skip the chained hook when `bd` is missing; run
 `bd hooks install` once to refresh them.
 
