@@ -1802,6 +1802,30 @@ func ciAnalyticsContinueOnErrorPaths(t *testing.T) map[string]bool {
 	return paths
 }
 
+// bazelProfileContinueOnErrorPaths returns the walkYAML paths of the
+// continue-on-error keys of every lane's "Prepare Bazel profile artifact"
+// and "Upload Bazel profile" steps: flame-graph reporting only
+// (TestBazelProfileArtifactStepsAreSafeAndBounded), read by nothing in CI.
+func bazelProfileContinueOnErrorPaths(t *testing.T) map[string]bool {
+	t.Helper()
+	paths := map[string]bool{}
+	for name, job := range readCIWorkflow(t, bazelWorkflowName).Jobs {
+		if _, ok := ciAnalyticsLaneJobs[name]; !ok {
+			continue
+		}
+		for i, step := range job.Steps {
+			switch {
+			case step.Name == bazelProfilePrepareStep && step.ID == "profile-artifact":
+			case step.Name == bazelProfileUploadStep && strings.HasPrefix(step.With["name"], "bazel-profile-"):
+			default:
+				continue
+			}
+			paths[fmt.Sprintf(".jobs.%s.steps[%d].continue-on-error", name, i)] = true
+		}
+	}
+	return paths
+}
+
 // bazelServedTimingsStepName is bazel-embedded's per-run upload of the served
 // targets' test.xml (bazel-embedded-served-testxml), which their pinned
 // shard manifests are sized from (backend/http/BUILD.bazel). Telemetry like
@@ -4509,12 +4533,13 @@ func TestBazelDoltServerTiers(t *testing.T) {
 		// +2 over the earlier counts: the CI analytics summary/upload steps
 		// (S3; see bazel-test's "CI analytics summary" comment), added to
 		// every lane job ahead of the result recorder. +1: the remote repo
-		// contents cache reader (TestBazelRRCReadSteps).
-		{bazelProxiedJobName, "doltserver-proxied", "bazel-proxied-testlogs", 11},
+		// contents cache reader (TestBazelRRCReadSteps). +2: the Bazel
+		// profile prepare/upload steps (TestBazelProfileArtifactStepsAreSafeAndBounded).
+		{bazelProxiedJobName, "doltserver-proxied", "bazel-proxied-testlogs", 13},
 		// One more than bazel-proxied: a "Shard balance" step (rbe-ci-cost-
 		// latency-study.md recommendation 4), since this is the tier whose
 		// last shard has trailed the rest by 4.3-4.5 min in 2 of 8 runs.
-		{bazelServerJobName, "doltserver-integration", "bazel-server-storage-testlogs", 12},
+		{bazelServerJobName, "doltserver-integration", "bazel-server-storage-testlogs", 14},
 	} {
 		job := workflow.job(t, c.job)
 		if job.TimeoutMinutes == 0 || job.TimeoutMinutes > 30 {
@@ -4522,7 +4547,7 @@ func TestBazelDoltServerTiers(t *testing.T) {
 		}
 		assertBazelTierStep(t, job, c.job, c.config)
 		if n := len(job.Steps); n != c.wantSteps {
-			t.Errorf("%s has %d steps, want %d (checkout, the rrc reader, setup-bazel, the flaky query, the tier, check_testcases.py, check_shard_coverage.py, [shard_budget.py,] log upload, CI analytics summary, CI analytics upload, result recorder)", c.job, n, c.wantSteps)
+			t.Errorf("%s has %d steps, want %d (checkout, the rrc reader, setup-bazel, the flaky query, the tier, check_testcases.py, check_shard_coverage.py, [shard_budget.py,] log upload, CI analytics summary, CI analytics upload, profile prepare, profile upload, result recorder)", c.job, n, c.wantSteps)
 		}
 		logs := job.step(t, "Upload test logs")
 		if logs.If != "${{ failure() && steps.test.outcome != 'skipped' }}" || logs.With["name"] != c.logs || !strings.HasPrefix(logs.Uses, "actions/upload-artifact@") {
@@ -5047,6 +5072,7 @@ func TestBazelWorkflowSecretsAndFailureSurface(t *testing.T) {
 		}
 	}
 	ciAnalyticsPaths := ciAnalyticsContinueOnErrorPaths(t)
+	profilePaths := bazelProfileContinueOnErrorPaths(t)
 	doltIntTestPath := bazelDoltIntTestContinueOnErrorPath(t)
 	doltIntCheckPaths := bazelDoltIntCheckContinueOnErrorPaths(t)
 	servedTimingsPath := bazelServedTimingsContinueOnErrorPath(t)
@@ -5063,7 +5089,9 @@ func TestBazelWorkflowSecretsAndFailureSurface(t *testing.T) {
 			// two CI analytics steps in every lane job
 			// (bazelCIAnalyticsStepNames): reporting only, never a `needs`
 			// of anything and never read back by this workflow or its
-			// callers. So are three steps in bazel-dolt-int's own job: its
+			// callers. So are the two Bazel profile steps
+			// (bazelProfileContinueOnErrorPaths), for the same reason. So
+			// are three steps in bazel-dolt-int's own job: its
 			// `bazel test` step (bazelDoltIntTestContinueOnErrorPath) and its
 			// two per-tier "Every target and shard ran tests" steps,
 			// check-ss and check-cd (bazelDoltIntCheckContinueOnErrorPaths,
@@ -5078,7 +5106,7 @@ func TestBazelWorkflowSecretsAndFailureSurface(t *testing.T) {
 			// nothing in CI.
 			jobName := strings.TrimSuffix(strings.TrimPrefix(path, ".jobs."), ".continue-on-error")
 			_, flagGated := bazelFlagGatedLanes[jobName]
-			if path != bazelRBEPrewarmContinueOnErrorPath && path != doltIntTestPath && path != servedTimingsPath && !doltIntCheckPaths[path] && !flagGated && !ciAnalyticsPaths[path] && !bazelUnionHasFlagGatedMember(jobName) {
+			if path != bazelRBEPrewarmContinueOnErrorPath && path != doltIntTestPath && path != servedTimingsPath && !doltIntCheckPaths[path] && !flagGated && !ciAnalyticsPaths[path] && !profilePaths[path] && !bazelUnionHasFlagGatedMember(jobName) {
 				t.Errorf("%s: %s hides failures from pr.yml's ci-gate", bazelWorkflowName, path)
 			}
 		}
