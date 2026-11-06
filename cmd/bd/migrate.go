@@ -638,16 +638,17 @@ func handleSchemaMigrate() error {
 		}
 		var dirtyErr *schema.DirtyTablesError
 		if errors.As(err, &dirtyErr) {
-			// The dirty guard's own remedy is `bd dolt commit`, which on a
-			// shared server opens writably, hits the migrate gate, and is told
-			// to run this command — the two messages point at each other and
-			// the operator loops (gastownhall/beads#5920 review). Name the
-			// sequence that actually terminates.
+			// `bd dolt commit` opens leniently (dolt.Config.LenientOpen): the
+			// dirty, consent and migrate-gate refusals do not stop it, so the
+			// plain sequence terminates in every mode — the same one the
+			// version-bump notice names (gastownhall/beads#6929).
+			commit := "bd dolt commit"
+			if globalFlag {
+				commit += " --global"
+			}
 			return HandleErrorWithHint(
 				fmt.Sprintf("schema migration failed: %v", err),
-				"in server mode `bd dolt commit` is itself gated, so commit the working set on the server first "+
-					"(`CALL DOLT_COMMIT('-Am', 'pre-migration working set')` over the sql-server, or "+
-					schema.AllowRemoteMigrateEnv+"=1 bd dolt commit), then re-run this command")
+				fmt.Sprintf("commit the working set with `%s`, then re-run this command", commit))
 		}
 		return HandleError("schema migration failed: %v", err)
 	}

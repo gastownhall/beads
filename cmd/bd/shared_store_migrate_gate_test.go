@@ -572,3 +572,48 @@ func TestServerVersionBumpDirtyTablesRefusalIsReportedAndRetried(t *testing.T) {
 	assertDirtyUpgradeNotice(t, "bd count", stderr)
 	w.assertRefusedAndRetained(t, "bd count")
 }
+
+// TestServerVersionBumpDirtyTablesRecoveryConverges is the rest of #6929's
+// story: the retained witness makes the next command report the refusal
+// again, the remedy the notice names converges, and once it has, the upgrade
+// is settled and stays quiet.
+func TestServerVersionBumpDirtyTablesRecoveryConverges(t *testing.T) {
+	w := newDirtyUpgradeWorkspace(t)
+
+	for _, args := range [][]string{{"count"}, {"count"}} {
+		_, stderr, _ := w.run(t, "", "", args...)
+		assertDirtyUpgradeNotice(t, "bd "+strings.Join(args, " "), stderr)
+		w.assertRefusedAndRetained(t, "bd "+strings.Join(args, " "))
+	}
+
+	// Migrating first is the natural mistake; its refusal must name the same
+	// plain commit, not a raw-SQL recipe or an env override.
+	_, stderr, code := w.run(t, "", "", "migrate", "schema")
+	if code == 0 {
+		t.Fatalf("bd migrate schema succeeded over a dirty issues table")
+	}
+	if !strings.Contains(stderr, "bd dolt commit") || strings.Contains(stderr, "DOLT_COMMIT(") {
+		t.Errorf("bd migrate schema over dirty tables does not point at a plain 'bd dolt commit':\n%s", stderr)
+	}
+
+	if stdout, stderr, code := w.run(t, "", "", "dolt", "commit", "-m", "pre-migration working set"); code != 0 {
+		t.Fatalf("bd dolt commit: exit %d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	if stdout, stderr, code := w.run(t, "", "", "migrate", "schema"); code != 0 {
+		t.Fatalf("bd migrate schema after the commit: exit %d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	if got := w.cursor(t); got != schema.LatestVersion() {
+		t.Errorf("schema cursor = %d after recovery, want %d", got, schema.LatestVersion())
+	}
+	if got := readLocalVersion(w.witness); got != Version {
+		t.Errorf("%s = %q after recovery, want %q", localVersionFile, got, Version)
+	}
+
+	stdout, stderr, code := w.run(t, "", "", "list")
+	if code != 0 || !strings.Contains(stdout, "drt-1") {
+		t.Fatalf("bd list after recovery: exit %d, want drt-1 listed\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	if strings.Contains(stderr, "were not applied") || strings.Contains(stderr, "finishing the upgrade failed") {
+		t.Errorf("bd list after recovery still reports a version-bump failure:\n%s", stderr)
+	}
+}
