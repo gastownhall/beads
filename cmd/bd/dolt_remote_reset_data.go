@@ -63,6 +63,10 @@ const (
 	resetDataFileInGitRepo
 )
 
+// readResetDataTarget is the directory read at the classifier's boundary,
+// os.ReadDir; tests replace it to inject a read error there.
+var readResetDataTarget = os.ReadDir
+
 // classifyResetDataRemote decides which reset-data mechanism applies to url,
 // the remote's URL as Dolt stored it. Dolt tells a git remote by that URL
 // alone, never by what is on disk: adding a remote stores a file:// URL or
@@ -73,8 +77,9 @@ const (
 // clear: a git repository, bare or a checkout, is refused
 // (resetDataFileInGitRepo) whatever else it holds, a directory with an nbs
 // manifest is a file store, and a missing or empty target has nothing to
-// reset. Any other non-empty target is an error — reset-data must not clear
-// a directory it cannot identify.
+// reset. A target that is present but not a directory — which Windows
+// reports to directory reads as not-exist — is an error, not an absent
+// target, as is any other non-empty target reset-data cannot identify.
 func classifyResetDataRemote(url string) (resetDataKind, error) {
 	if doltutil.IsGitProtocolURL(url) {
 		return resetDataGitBacked, nil
@@ -83,9 +88,14 @@ func classifyResetDataRemote(url string) (resetDataKind, error) {
 	if !isFile {
 		return resetDataUnsupported, nil
 	}
-	entries, err := os.ReadDir(path)
+	entries, err := readResetDataTarget(path)
 	if os.IsNotExist(err) {
-		return resetDataFileAbsent, nil
+		// Windows classifies a ReadDir of an ordinary file as not-exist, so
+		// only a Stat that misses the target too means absent; otherwise the
+		// read error below reports the target reset-data could not read.
+		if _, statErr := os.Stat(path); os.IsNotExist(statErr) {
+			return resetDataFileAbsent, nil
+		}
 	}
 	if err != nil {
 		return 0, fmt.Errorf("inspecting remote target %s: %w", path, err)

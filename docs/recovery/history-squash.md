@@ -133,6 +133,11 @@ remote it clears the store directory and pushes again. It refuses a cloud
 or hosted remote (`aws://`, `gs://`, `dolthub://`, ...): replace that one as
 above.
 
+A `file://` target that is present but is not a directory — an ordinary
+file, which on Windows reads to directory listings as missing — is refused
+with an `inspecting remote target` error rather than treated as a missing
+target to rebuild; only a target that is truly absent or empty is reset.
+
 <Warning>
 A `file://` remote whose URL does not end in `.git` (`bd dolt remote list`
 shows `file://`, not `git+file://`) and whose directory is a git repository, a

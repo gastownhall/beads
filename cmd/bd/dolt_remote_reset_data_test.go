@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -145,6 +146,72 @@ func TestClassifyResetDataRemote(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestClassifyResetDataRemoteNonDirectoryTarget pins the classifier's
+// behavior for a remote target that is present but is not a directory
+// (GH#6972 site 1). Windows classifies a ReadDir of an ordinary file as
+// not-exist, so the native subtest is the Windows falsifier: on Windows it
+// fails without the Stat confirmation — the target read as absent — and
+// passes with it. On Linux, where ReadDir of a file is ENOTDIR, the
+// injected not-exist subtest carries that red/green pair.
+func TestClassifyResetDataRemoteNonDirectoryTarget(t *testing.T) {
+	const payload = "reset target payload"
+	writeTargetFile := func(t *testing.T) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "target")
+		if err := os.WriteFile(path, []byte(payload), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	// requireOperationalError fails unless err is the classifier's
+	// inspecting error for path, wrapping want when want is not nil, and the
+	// file still holds its bytes.
+	requireOperationalError := func(t *testing.T, path string, kind resetDataKind, err error, want error) {
+		t.Helper()
+		if err == nil {
+			t.Fatalf("classifyResetDataRemote(%q) = (%v, nil), want the inspecting error", path, kind)
+		}
+		if kind != 0 {
+			t.Errorf("kind = %v, want 0: a present file must not classify as anything", kind)
+		}
+		if !strings.Contains(err.Error(), "inspecting remote target "+path+":") {
+			t.Errorf("error = %q, want it to name the target: inspecting remote target %s:", err, path)
+		}
+		if want != nil && !errors.Is(err, want) {
+			t.Errorf("error = %v, want it to wrap the read error %v", err, want)
+		}
+		if got, readErr := os.ReadFile(path); readErr != nil || string(got) != payload {
+			t.Errorf("classification must not touch the file: read err = %v, bytes = %q", readErr, got)
+		}
+	}
+	injectRead := func(t *testing.T, path string, err error) {
+		t.Helper()
+		prev := readResetDataTarget
+		readResetDataTarget = func(string) ([]os.DirEntry, error) { return nil, err }
+		t.Cleanup(func() { readResetDataTarget = prev })
+	}
+
+	t.Run("ordinary file", func(t *testing.T) {
+		path := writeTargetFile(t)
+		kind, err := classifyResetDataRemote(path)
+		requireOperationalError(t, path, kind, err, nil)
+	})
+	t.Run("injected not-exist read error with the file present", func(t *testing.T) {
+		path := writeTargetFile(t)
+		injected := &fs.PathError{Op: "open", Path: path, Err: fs.ErrNotExist}
+		injectRead(t, path, injected)
+		kind, err := classifyResetDataRemote(path)
+		requireOperationalError(t, path, kind, err, injected)
+	})
+	t.Run("injected other read error still propagates", func(t *testing.T) {
+		path := writeTargetFile(t)
+		injected := &fs.PathError{Op: "open", Path: path, Err: fs.ErrPermission}
+		injectRead(t, path, injected)
+		kind, err := classifyResetDataRemote(path)
+		requireOperationalError(t, path, kind, err, injected)
+	})
 }
 
 // TestResetDataGitURL pins the URL reset-data gives git for a remote as Dolt
