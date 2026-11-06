@@ -147,6 +147,42 @@ func TestNoticeSharedMigrateRefusalPerDecision(t *testing.T) {
 	})
 }
 
+// TestNoticeSharedMigrateRefusalReadsAreConditional pins what the notice says
+// about reads (gastownhall/beads#6572): a read-only command reads on at the
+// current schema only while this binary's issue reads can query it, so no
+// decision may promise that reads keep working, and every decision that used
+// to says when they do not.
+func TestNoticeSharedMigrateRefusalReadsAreConditional(t *testing.T) {
+	pinJSONOutput(t, false)
+	for _, tt := range []struct {
+		decision string
+		caveat   bool
+	}{
+		{decision: "shared-no-remote", caveat: true},
+		{decision: "adopt", caveat: true},
+		{decision: "adopt-ff", caveat: true},
+		{decision: "fork-skew"},
+		{decision: "", caveat: true},
+	} {
+		t.Run("decision="+tt.decision, func(t *testing.T) {
+			out := captureNoticeStderr(t, func() {
+				noticeSharedMigrateRefusal(&schema.RemoteMigrateGateError{
+					CurrentVersion: 65, LatestVersion: 66, Pending: 1,
+					Decision: tt.decision,
+				})
+			})
+			if strings.Contains(strings.ToLower(out), "keep working") {
+				t.Errorf("notice promises reads keep working:\n%s", out)
+			}
+			for _, want := range []string{"only while it has every table and column", "otherwise they are refused"} {
+				if got := strings.Contains(out, want); got != tt.caveat {
+					t.Errorf("notice contains %q = %v, want %v:\n%s", want, got, tt.caveat, out)
+				}
+			}
+		})
+	}
+}
+
 // TestSharedRefusalPrescribesAWorkingVerb closes the loop the review flagged:
 // the shared-store refusal names a command, and that command must actually run
 // wherever the refusal can appear. In proxied-server mode `bd migrate schema`

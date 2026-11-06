@@ -374,6 +374,13 @@ func isGoPseudoVersion(version string) bool {
 // decisions, and the remote-backed ones are not unlocked by the migrate verb
 // at all (a clone whose remote is already migrated must adopt, not migrate),
 // so the line is chosen per decision rather than printed unconditionally.
+// readThroughCaveat is what noticeSharedMigrateRefusal says about reads while
+// the migration waits: a read-only command reads on at the current schema only
+// when that schema has everything this binary's issue reads select, and is
+// refused otherwise (gastownhall/beads#6572), so the notice must not promise
+// that reads keep working.
+const readThroughCaveat = "Read commands continue on the current schema only while it has every table and column this bd's reads select; otherwise they are refused too."
+
 func noticeSharedMigrateRefusal(err error) {
 	var gateErr *schema.RemoteMigrateGateError
 	if !errors.As(err, &gateErr) {
@@ -394,11 +401,11 @@ func noticeSharedMigrateRefusal(err error) {
 	var remedy string
 	switch gateErr.Decision {
 	case "shared-no-remote":
-		remedy = fmt.Sprintf("Run '%s' once every client of this server is upgraded; reads keep working meanwhile.", consent)
+		remedy = fmt.Sprintf("Run '%s' once every client of this server is upgraded.\n%s", consent, readThroughCaveat)
 	case "adopt", "adopt-ff":
 		// The remote is already migrated: migrating here would fork it, and
 		// the verb consent deliberately does not unlock this arm.
-		remedy = "Another clone has already migrated this database — adopt it with 'bd bootstrap' rather than migrating here; reads keep working meanwhile."
+		remedy = "Another clone has already migrated this database — adopt it with 'bd bootstrap' rather than migrating here.\n" + readThroughCaveat
 	case "fork-skew":
 		remedy = "This database and its remote already applied different content for the same migration (#4259) — run 'bd doctor' and follow its migration-content-skew guidance; do not migrate."
 	default:
@@ -406,7 +413,7 @@ func noticeSharedMigrateRefusal(err error) {
 		// first-mover suppression. Its full block names the designated-
 		// migrator and adopt paths with their preconditions, and picking one
 		// here would be guessing.
-		remedy = "This database has a remote — run 'bd migrate' to see the migrate-or-adopt options before choosing; reads keep working meanwhile."
+		remedy = "This database has a remote — run 'bd migrate' to see the migrate-or-adopt options before choosing.\n" + readThroughCaveat
 	}
 	fmt.Fprintf(os.Stderr,
 		"bd upgraded to %s: %d schema migration(s) pending on this database — not auto-applying (#5920).\n%s\n",
