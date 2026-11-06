@@ -291,6 +291,8 @@ func TestBackupRestoreSanitizesURLOnError(t *testing.T) {
 			want: "file:///var/backups/x"},
 		{name: "windows file URL", url: `file://C:\Users\me\backup`,
 			want: `file://C:\Users\me\backup`},
+		{name: "canonical windows drive file URL", url: "file:///C:/Users/John Doe/backup",
+			want: "file:///C:/Users/John Doe/backup"},
 		{name: "percent in file path", url: "file:///var/backups/100%done",
 			want: "file:///var/backups/100%done"},
 		{name: "hash in file path", url: "file:///var/backups/my#dir",
