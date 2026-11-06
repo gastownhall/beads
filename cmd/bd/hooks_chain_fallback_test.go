@@ -612,21 +612,94 @@ func TestGeneratedGateHookRefusesTimedOutChain(t *testing.T) {
 		}
 	}
 
-	t.Run("real coreutils timeout ends a gate still running", func(t *testing.T) {
-		_, helperDir := findHookProcessCoreutilsTimeout(t)
-		timeout := "1"
-		result := runGeneratedHookProcess(t, hookProcessCase{
-			bdBody:       hookProcessLongRunningBDStub,
-			timeout:      &timeout,
-			pathTail:     helperDir,
-			sleepPath:    findHookProcessSleep(t),
-			hookDirFiles: []hookProcessFixture{{name: "pre-push.old", body: hookChainWitnessSidecar("0")}},
-			extraEnv:     []string{"HOOK_TEST_WITNESS=" + filepath.Join(t.TempDir(), "witness")},
+	// Real deadlines on both backends: a bd stand-in runs the chained gate
+	// the way runChainedHook does, and the gate is still sleeping when the
+	// deadline ends the process group. The section refuses without rerunning
+	// it. A bd-owned sidecar or a re-entered invocation has no foreign verdict
+	// to lose, so the deadline still continues there.
+	const chainingBD = `#!/bin/sh
+_test_hook=$3
+shift 3
+"./$_test_hook.old" "$@"
+exit $?
+`
+	const sleepingGate = `#!/bin/sh
+printf 'ran\n' >> "$HOOK_TEST_WITNESS"
+"${HOOK_TEST_SLEEP:?}" 10 </dev/null >/dev/null 2>&1
+printf 'finished\n' >> "$HOOK_TEST_WITNESS"
+exit 0
+`
+	realBackends := []struct {
+		name     string
+		fixtures []hookProcessFixture
+		pathTail func(t *testing.T) string
+	}{
+		{name: "real coreutils", pathTail: func(t *testing.T) string {
+			_, dir := findHookProcessCoreutilsTimeout(t)
+			return dir
+		}},
+		{name: "real Perl", fixtures: []hookProcessFixture{
+			{name: "timeout", body: hookProcessIncompatibleTimeoutStub},
+			{name: "gtimeout", body: hookProcessIncompatibleGtimeoutStub},
+		}, pathTail: findHookProcessPerl},
+	}
+	for _, backend := range realBackends {
+		t.Run(backend.name+" deadline ends a chained gate still running", func(t *testing.T) {
+			pathTail := backend.pathTail(t)
+			timeout := "1"
+			witness := filepath.Join(t.TempDir(), "witness")
+			result := runGeneratedHookProcess(t, hookProcessCase{
+				fixtures:     backend.fixtures,
+				bdBody:       chainingBD,
+				timeout:      &timeout,
+				pathTail:     pathTail,
+				sleepPath:    findHookProcessSleep(t),
+				hookDirFiles: []hookProcessFixture{{name: "pre-push.old", body: sleepingGate}},
+				extraEnv:     []string{"HOOK_TEST_WITNESS=" + witness},
+			})
+			if result.exitCode != 1 || !strings.Contains(result.output, "gate outcome is unknown") {
+				t.Fatalf("hook exit = %d, want the unknown-gate-outcome refusal\n%s", result.exitCode, result.output)
+			}
+			if !strings.Contains(result.output, "pre-push.old") {
+				t.Errorf("refusal does not name the chained hook\n%s", result.output)
+			}
+			content, err := os.ReadFile(witness)
+			if err != nil {
+				t.Fatalf("the chained gate never started: %v\n%s", err, result.output)
+			}
+			if string(content) != "ran\n" {
+				t.Errorf("chained gate witness = %q, want one unfinished run (no rerun)", content)
+			}
 		})
-		if result.exitCode != 1 || !strings.Contains(result.output, "gate outcome is unknown") {
-			t.Fatalf("hook exit = %d, want the unknown-gate-outcome refusal\n%s", result.exitCode, result.output)
+		for _, contrast := range []struct {
+			name    string
+			sidecar string
+			env     []string
+		}{
+			{name: "bd-owned sidecar", sidecar: "#!/bin/sh\n" + generateHookSection("pre-push")},
+			{name: "re-entered invocation", sidecar: hookChainWitnessSidecar("0"), env: []string{"BD_HOOK_CHAIN_ACTIVE=pre-push"}},
+		} {
+			t.Run(backend.name+" deadline with "+contrast.name+" keeps continuing", func(t *testing.T) {
+				pathTail := backend.pathTail(t)
+				timeout := "1"
+				result := runGeneratedHookProcess(t, hookProcessCase{
+					fixtures:     backend.fixtures,
+					bdBody:       hookProcessLongRunningBDStub,
+					timeout:      &timeout,
+					pathTail:     pathTail,
+					sleepPath:    findHookProcessSleep(t),
+					hookDirFiles: []hookProcessFixture{{name: "pre-push.old", body: contrast.sidecar}},
+					extraEnv:     append([]string{"HOOK_TEST_WITNESS=" + filepath.Join(t.TempDir(), "witness")}, contrast.env...),
+				})
+				if result.exitCode != 0 || !strings.Contains(result.output, "continuing without beads") {
+					t.Errorf("hook exit = %d, want the timeout skip\n%s", result.exitCode, result.output)
+				}
+				if strings.Contains(result.output, "gate outcome is unknown") {
+					t.Errorf("hook refused without an eligible chained gate\n%s", result.output)
+				}
+			})
 		}
-	})
+	}
 }
 
 // TestGeneratedHookWithoutEligibleChainKeepsSkip pins the existing skip when

@@ -190,7 +190,10 @@ When the timeout is reached, beads prints a warning and lets the git
 operation proceed, with one exception: if a `pre-commit` or `pre-push` hook
 has a chained `<hook>.old`, the deadline may have stopped that check before it
 decided, so beads refuses the commit or push and says the outcome is unknown.
-Raise `BEADS_HOOK_TIMEOUT` to give the chained hook more time.
+The chained hook is never rerun. Beads cannot tell whether the chained hook had
+already passed and its own later work (such as the pre-commit export) hit the
+deadline, so it refuses in that case too. Raise `BEADS_HOOK_TIMEOUT` to give
+the hook more time.
 
 ## Conflict Resolution
 
