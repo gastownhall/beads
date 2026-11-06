@@ -69,12 +69,14 @@ exports_files(
 )
 
 # //scripts:android_release_docs_test: the docs describing the android/arm64
-# cgo release build.
+# cgo release build. //scripts:upgrading_adopt_docs_test: the upgrading
+# guide's adopt recipe and its changelog entry.
 exports_files(
     [
         "CHANGELOG.md",
         "RELEASING.md",
         "docs/getting-started/installation.md",
+        "docs/getting-started/upgrading.md",
     ],
     visibility = ["//scripts:__pkg__"],
 )

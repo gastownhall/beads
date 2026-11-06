@@ -266,11 +266,11 @@ The gate is **state-aware by default**
   `bd dolt push` afterwards. This applies to embedded mode only: a shared
   server always stops for consent, because migrating it changes the schema
   every connected client sees (see [Shared servers](#shared-servers) below).
-- **stops and directs you to adopt** (`bd bootstrap`) when the remote has
-  already been migrated by another clone. On a clone that already has a local
-  database, `bd bootstrap` by itself reports `Nothing to do.` and changes
-  nothing; adopt with the steps under *Multiple clones sharing one remote*
-  below.
+- **stops and directs you to adopt** the remote's database when the remote
+  has already been migrated by another clone. On a clone that already has a
+  local database, `bd bootstrap` by itself reports `Nothing to do.` and
+  changes nothing: move the local database aside first, with the steps under
+  *Multiple clones sharing one remote* below.
 - **stops for a human decision** when this clone and the remote applied
   different content for the same migration (a genuine fork), or when the
   remote's schema state cannot be read from the cached ref.
@@ -377,21 +377,35 @@ gate refuses `bd dolt pull` while the clone has pending migrations. Adopt the
 migrated database by re-cloning it. `bd bootstrap` never replaces an existing
 database — run against one, it prints `Database already exists` and
 `Nothing to do.` and leaves the clone on the old schema — so move the local
-database aside first, then re-apply the step 1 backup:
+database aside first. From the directory that contains `.beads`, with every
+`bd` process on this clone stopped (embedded mode, the default):
 
 ```bash
-mv .beads/embeddeddolt .beads/backup/embeddeddolt.pre-adopt   # embedded mode (the default)
-bd bootstrap                                 # clones the migrated database from the remote
-bd import .beads/backup/pre-migrate.jsonl    # restores what a re-clone cannot bring
+mkdir -p .beads/backup                                          # the backup parent
+mv -f .beads/embeddeddolt .beads/backup/embeddeddolt.pre-adopt  # set the old store aside
+bd bootstrap                                                    # clones the migrated database from the remote
 ```
 
-The re-clone brings only what the remote has, so the import restores this
-clone's clone-local beads (wisps, for example) and anything step 1 did not
-push; rows the remote already holds in a newer version are skipped as stale.
-The backup has to come from the old binary, as in step 1: on a clone with
-pending migrations the new binary's `bd export` fails. Keep the moved-aside
-directory until you have checked the result — the old binary can still open
-it. In server mode the database lives under `.beads/dolt/` instead; stop the
+The destination must be unused: if `.beads/backup/embeddeddolt.pre-adopt`
+already exists (from an earlier adopt), pick another unused name, since `mv`
+would otherwise move the database inside it. If this workspace configures its
+own database path, move that directory instead. Keep the moved-aside directory
+until you have checked the result — the old binary can still open it, and it
+holds anything this clone never pushed.
+
+`bd bootstrap` is the whole adopt. The re-clone brings only what the remote
+has, so this clone's clone-local beads (wisps, for example) and anything step
+1 did not push are not in it. Only if you exported them with the old binary
+before upgrading (step 1's backup) can you restore them afterwards:
+
+```bash
+bd import .beads/backup/pre-migrate.jsonl    # only if step 1's old-release backup exists
+```
+
+Rows the remote already holds in a newer version are skipped as stale. The
+backup has to come from the old binary, as in step 1: on a clone with
+pending migrations the new binary's `bd export` fails, so without that backup
+the moved-aside directory is the only copy of the unpushed work. In server mode the database lives under `.beads/dolt/` instead; stop the
 server and move the database outside `.beads/dolt/` (see
 [re-clone-gotchas](/recovery/init-safety#re-clone-gotchas)).
 
