@@ -622,6 +622,24 @@ the 1.1 line), reads can fail too until step 2: `bd list` stops with
 ([#6929](https://github.com/gastownhall/beads/issues/6929)). Run step 2 as
 soon as the clients are upgraded.
 
+**If a version-bump migration is refused, it retries by itself.** The first
+upgraded command that finds the shared database behind attempts the migration
+for you; when it is refused — dirty working tables on a database with a
+remote, or the shared-server consent stop — the command still runs, the
+notice names the uncommitted table(s) and the remedy, and the upgrade signal
+is kept rather than consumed. Every later eligible command retries the
+migration the same way, so nothing is lost by ignoring the notice; to settle
+it, commit the working set at the current schema and migrate:
+
+```bash
+bd dolt commit                 # or: review with `bd dolt status` first
+bd migrate schema              # add --global for the shared global database
+```
+
+Until then, each command prints the same notice, and the workspace's
+`.local_version` witness stays at the old version so `bd doctor` keeps
+reporting the pending migration.
+
 **If the shared server also has a Dolt remote**, step 2 is not enough. Two
 hazards now apply at once — the co-resident lockout above and the cross-clone
 fork of [Remote-backed databases](#remote-backed-databases-and-multiple-clones)

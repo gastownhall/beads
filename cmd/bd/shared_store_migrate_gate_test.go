@@ -475,3 +475,188 @@ func TestServerVersionBumpDirtyTablesRefusalIsReportedAndRetried(t *testing.T) {
 			localVersionFile, got)
 	}
 }
+
+// dirtyServerBumpFixture builds gastownhall/beads#6929's server-mode shape: a
+// database this binary migrated to latest, its schema_migrations cursor
+// regressed to v72 (the DDL itself stays applied, so reads keep working), one
+// uncommitted `issues` edit, and a stale 1.x .local_version witness. The next
+// eligible command's version-bump reconciliation is refused with
+// schema.DirtyTablesError.
+func dirtyServerBumpFixture(t *testing.T, prefix string) (repo, beadsDir string, admin *sql.DB, localVersionPath string) {
+	t.Helper()
+	if testDoltServerPort == 0 {
+		t.Skip("Dolt test server not available, skipping")
+	}
+	if schema.LatestVersion() != 74 {
+		t.Fatalf("this fixture regresses the cursor past 0073_add_arrival_seq, which alters `issues`; LatestVersion() = %d, retarget it", schema.LatestVersion())
+	}
+
+	repo = t.TempDir()
+	beadsDir = filepath.Join(repo, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("create .beads: %v", err)
+	}
+	database := uniqueTestDBName(t)
+	if err := (&configfile.Config{
+		Backend:        configfile.BackendDolt,
+		DoltMode:       configfile.DoltModeServer,
+		DoltServerHost: "127.0.0.1",
+		DoltServerPort: testDoltServerPort,
+		DoltDatabase:   database,
+	}).Save(beadsDir); err != nil {
+		t.Fatalf("save metadata: %v", err)
+	}
+
+	ctx := context.Background()
+	store, err := dolt.New(ctx, &dolt.Config{
+		Path:            filepath.Join(beadsDir, "dolt"),
+		BeadsDir:        beadsDir,
+		ServerHost:      "127.0.0.1",
+		ServerPort:      testDoltServerPort,
+		Database:        database,
+		CreateIfMissing: true,
+	})
+	if err != nil {
+		t.Fatalf("create test store: %v", err)
+	}
+	if err := store.SetConfig(ctx, "issue_prefix", prefix); err != nil {
+		t.Fatalf("set issue_prefix: %v", err)
+	}
+	now := time.Now()
+	if err := store.CreateIssue(ctx, &types.Issue{
+		ID:        prefix + "-1",
+		Title:     "one",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}, "test-user"); err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close setup store: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(beadsDir, "dolt"), 0o755); err != nil {
+		t.Fatalf("create local dolt data dir: %v", err)
+	}
+	t.Cleanup(func() { dropTestDatabase(database, testDoltServerPort) })
+
+	admin, err = sql.Open("mysql", doltutil.ServerDSN{
+		Host: "127.0.0.1", Port: testDoltServerPort, User: "root", Database: database,
+	}.String())
+	if err != nil {
+		t.Fatalf("connect to test dolt server: %v", err)
+	}
+	t.Cleanup(func() { admin.Close() })
+
+	if _, err := admin.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'fixture')"); err != nil &&
+		!strings.Contains(err.Error(), "nothing to commit") {
+		t.Fatalf("commit fixture: %v", err)
+	}
+	if _, err := admin.ExecContext(ctx, "DELETE FROM schema_migrations WHERE version >= 73"); err != nil {
+		t.Fatalf("regress schema_migrations: %v", err)
+	}
+	if _, err := admin.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'regress cursor')"); err != nil {
+		t.Fatalf("commit regressed cursor: %v", err)
+	}
+	if _, err := admin.ExecContext(ctx, "UPDATE issues SET title = 'edited' WHERE id = ?", prefix+"-1"); err != nil {
+		t.Fatalf("dirty issues: %v", err)
+	}
+
+	localVersionPath = filepath.Join(beadsDir, localVersionFile)
+	if err := os.WriteFile(localVersionPath, []byte("1.0.0\n"), 0o600); err != nil {
+		t.Fatalf("write stale %s: %v", localVersionFile, err)
+	}
+	return repo, beadsDir, admin, localVersionPath
+}
+
+// bdRunnerFor builds the bd binary and returns a runner pinned to repo with
+// the fixture's env shape; extra pairs append after the standard set.
+func bdRunnerFor(t *testing.T, repo, beadsDir string, extra ...string) func(args ...string) (string, string, int) {
+	t.Helper()
+	bd := buildBDForInitTests(t)
+	return func(args ...string) (string, string, int) {
+		t.Helper()
+		cmd := exec.Command(bd, args...)
+		cmd.Dir = repo
+		cmd.Env = append(filteredEnvForContextBinding("BEADS_DIR", "BEADS_DB", "BD_DB",
+			"BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_SERVER_DATABASE", schema.AllowRemoteMigrateEnv),
+			append([]string{
+				"HOME=" + t.TempDir(),
+				"XDG_CONFIG_HOME=" + t.TempDir(),
+				"BEADS_TEST_MODE=1",
+				"BEADS_TEST_SERVER=1",
+				"BEADS_DIR=" + beadsDir,
+				schema.AllowRemoteMigrateEnv + "=1",
+			}, extra...)...)
+		var stdout, stderr strings.Builder
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		code := 0
+		if err := cmd.Run(); err != nil {
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) {
+				t.Fatalf("running bd %v: %v", args, err)
+			}
+			code = exitErr.ExitCode()
+		}
+		return stdout.String(), stderr.String(), code
+	}
+}
+
+// TestServerVersionBumpDirtyRefusalRetriedThenRecovered completes #6929's
+// recovery story: the refusal retains the one-shot .local_version witness, so
+// every later eligible command retries the refused reconciliation and reports
+// the failure again — until the operator runs the two remedies the notice
+// names. After `bd dolt commit` and `bd migrate schema`, a following command
+// observes the current witness and runs with no version-bump failure notice.
+func TestServerVersionBumpDirtyRefusalRetriedThenRecovered(t *testing.T) {
+	repo, beadsDir, admin, localVersionPath := dirtyServerBumpFixture(t, "drr")
+	run := bdRunnerFor(t, repo, beadsDir)
+
+	for attempt := 1; attempt <= 2; attempt++ {
+		stdout, stderr, code := run("count")
+		if code != 0 {
+			t.Fatalf("bd count attempt %d: exit %d\nstdout:\n%s\nstderr:\n%s", attempt, code, stdout, stderr)
+		}
+		if !strings.Contains(stderr, "were NOT applied") || !strings.Contains(stderr, "bd dolt commit") {
+			t.Errorf("attempt %d: the retained witness did not retry-and-report the refusal:\n%s", attempt, stderr)
+		}
+		if got := readLocalVersion(localVersionPath); got != "1.0.0" {
+			t.Errorf("attempt %d: %s = %q, want the retained 1.0.0 witness", attempt, localVersionFile, got)
+		}
+	}
+
+	if _, stderr, code := run("dolt", "commit"); code != 0 {
+		t.Fatalf("bd dolt commit: exit %d\nstderr:\n%s", code, stderr)
+	}
+	_, stderr, code := run("migrate", "schema")
+	if code != 0 {
+		t.Fatalf("bd migrate schema: exit %d\nstderr:\n%s", code, stderr)
+	}
+	var cursor int
+	if err := admin.QueryRowContext(context.Background(),
+		"SELECT COALESCE(MAX(version), 0) FROM schema_migrations").Scan(&cursor); err != nil {
+		t.Fatalf("read schema cursor: %v", err)
+	}
+	if cursor != schema.LatestVersion() {
+		t.Fatalf("cursor = %d after recovery, want %d", cursor, schema.LatestVersion())
+	}
+
+	stdout, stderr, code := run("count")
+	if code != 0 {
+		t.Fatalf("bd count after recovery: exit %d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	if got := readLocalVersion(localVersionPath); got != Version {
+		t.Errorf("%s = %q after recovery, want the current %q", localVersionFile, got, Version)
+	}
+	if strings.Contains(stderr, "were NOT applied") || strings.Contains(stderr, "not auto-applying") {
+		t.Errorf("post-recovery command still reports the upgrade refusal:\n%s", stderr)
+	}
+}
+
+// TestServerVersionBumpFailureNoticeSuppressedUnderJSON pins the failure
+// notice's --json contract, the one it shares with the gate notice: under
+// --json a failing version-bump migration prints no prose on stderr, and the
+// witness is retained exactly as in the human-output case.
