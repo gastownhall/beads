@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/gitenv"
@@ -233,5 +234,67 @@ func TestCheckBeadsRoleIgnoresInheritedRouting(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestCheckBeadsRole_MalformedGitConfigIsReported pins bd-a2qnf4 (GH#6765):
+// a repository whose local Git config cannot be parsed must surface the read
+// failure, not be reported as an unconfigured role or as "not a git
+// repository". Absence stays benign (TestCheckBeadsRole_NotConfigured).
+func TestCheckBeadsRole_MalformedGitConfigIsReported(t *testing.T) {
+	isolateGlobalGitConfig(t)
+	tmpDir := newGitRepo(t)
+
+	gitDir := filepath.Join(tmpDir, ".git")
+	cfg, err := os.ReadFile(filepath.Join(gitDir, "config"))
+	if err != nil {
+		t.Fatalf("read git config: %v", err)
+	}
+	cfg = append(cfg, []byte("\n[beads\n\trole = maintainer\n")...)
+	if err := os.WriteFile(filepath.Join(gitDir, "config"), cfg, 0o644); err != nil {
+		t.Fatalf("write malformed git config: %v", err)
+	}
+
+	check := CheckBeadsRole(tmpDir)
+
+	if check.Status == StatusOK {
+		t.Errorf("malformed git config reported as OK: status=%s message=%q", check.Status, check.Message)
+	}
+	if check.Message == "N/A (not a git repository)" || check.Message == "beads.role not configured" {
+		t.Errorf("malformed git config folded into absence: status=%s message=%q", check.Status, check.Message)
+	}
+	if !strings.Contains(check.Message, "bad config") {
+		t.Errorf("check message %q does not carry git's read diagnostic", check.Message)
+	}
+}
+
+// TestCheckBeadsRoleWithStore_MalformedGitConfigIsReported holds the shared
+// store entry point to the same contract: the read failure is reported before
+// the database fallback is consulted, so even a store holding a role cannot
+// turn an unreadable git config into a configured one.
+func TestCheckBeadsRoleWithStore_MalformedGitConfigIsReported(t *testing.T) {
+	isolateGlobalGitConfig(t)
+	tmpDir := newGitRepo(t)
+
+	gitDir := filepath.Join(tmpDir, ".git")
+	cfg, err := os.ReadFile(filepath.Join(gitDir, "config"))
+	if err != nil {
+		t.Fatalf("read git config: %v", err)
+	}
+	cfg = append(cfg, []byte("\n[beads\n\trole = maintainer\n")...)
+	if err := os.WriteFile(filepath.Join(gitDir, "config"), cfg, 0o644); err != nil {
+		t.Fatalf("write malformed git config: %v", err)
+	}
+
+	check := CheckBeadsRoleWithStore(tmpDir, &SharedStore{})
+
+	if check.Status != StatusWarning {
+		t.Errorf("expected status %s, got %s (message=%q)", StatusWarning, check.Status, check.Message)
+	}
+	if !strings.Contains(check.Message, "bad config") {
+		t.Errorf("check message %q does not carry git's read diagnostic", check.Message)
+	}
+	if !strings.Contains(check.Detail, "git config --list --show-origin") {
+		t.Errorf("check detail %q should point at inspecting the config origin, not at init", check.Detail)
 	}
 }

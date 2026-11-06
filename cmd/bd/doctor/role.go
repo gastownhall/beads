@@ -2,11 +2,13 @@ package doctor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/gitenv"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 )
@@ -18,16 +20,16 @@ import (
 // before GH#1531 moved storage to git config.
 // Opens its own store; prefer CheckBeadsRoleWithStore when a shared store is available.
 func CheckBeadsRole(path string) DoctorCheck {
-	// Read beads.role from git config (canonical location)
-	cmd := exec.Command("git", "config", "--get", "beads.role")
-	cmd.Env = gitenv.ScrubRoutingAndSuppression(os.Environ())
-	if path != "" {
-		cmd.Dir = path
+	if suppliedPathMissing(path) {
+		return notAGitRepoNA()
 	}
-	output, err := cmd.Output()
 
-	if err == nil {
-		role := strings.TrimSpace(string(output))
+	// Read beads.role from git config (canonical location)
+	role, present, readErr := readBeadsRoleFromGit(path)
+	if readErr != nil {
+		return roleReadFailureCheck(readErr)
+	}
+	if present {
 		return validateRole(role)
 	}
 
@@ -43,16 +45,16 @@ func CheckBeadsRole(path string) DoctorCheck {
 
 // CheckBeadsRoleWithStore verifies beads.role using a shared store (GH#2636).
 func CheckBeadsRoleWithStore(path string, ss *SharedStore) DoctorCheck {
-	// Read beads.role from git config (canonical location)
-	cmd := exec.Command("git", "config", "--get", "beads.role")
-	cmd.Env = gitenv.ScrubRoutingAndSuppression(os.Environ())
-	if path != "" {
-		cmd.Dir = path
+	if suppliedPathMissing(path) {
+		return notAGitRepoNA()
 	}
-	output, err := cmd.Output()
 
-	if err == nil {
-		role := strings.TrimSpace(string(output))
+	// Read beads.role from git config (canonical location)
+	role, present, readErr := readBeadsRoleFromGit(path)
+	if readErr != nil {
+		return roleReadFailureCheck(readErr)
+	}
+	if present {
 		return validateRole(role)
 	}
 
@@ -64,17 +66,69 @@ func CheckBeadsRoleWithStore(path string, ss *SharedStore) DoctorCheck {
 	return checkBeadsRoleNotInGit(path)
 }
 
+// readBeadsRoleFromGit is the one local beads.role read both entry points
+// share, on the boundary they already shared: the supplied path (or the
+// process directory) and the routing-and-suppression-scrubbed environment.
+// Classification is the shared rule every beads.role reader uses
+// (internal/git.ClassifyConfigGet), so a config git cannot parse is a read
+// failure here, not an unconfigured role. Doctor validates a present empty
+// value as invalid (validateRole), which the domain adapter's
+// absence-collapsing semantics cannot express — hence the classifier rather
+// than the use case.
+func readBeadsRoleFromGit(path string) (string, bool, error) {
+	cmd := exec.Command("git", "config", "--get", "beads.role")
+	cmd.Env = gitenv.ScrubRoutingAndSuppression(os.Environ())
+	if path != "" {
+		cmd.Dir = path
+	}
+	out, err := cmd.Output()
+	return git.ClassifyConfigGet(out, err)
+}
+
+// suppliedPathMissing reports whether an explicitly supplied path does not
+// exist. The check is deliberately narrow: only os.ErrNotExist keeps the
+// existing N/A answer for a path that names nothing. A permission error, or
+// an existing directory whose config-sensitive rev-parse fails, is a real
+// condition to report, not this exception.
+func suppliedPathMissing(path string) bool {
+	if path == "" {
+		return false
+	}
+	_, err := os.Stat(path)
+	return errors.Is(err, os.ErrNotExist)
+}
+
+// roleReadFailureCheck reports a failed beads.role read as a warning naming
+// git's diagnostic, before the database fallback or the repository probe:
+// with a malformed config neither can answer (rev-parse fails on the same
+// parse error, which is what used to turn this into "N/A (not a git
+// repository)"). Init cannot repair a config git cannot parse, so the
+// guidance points at inspecting the config's origin instead.
+func roleReadFailureCheck(readErr error) DoctorCheck {
+	return DoctorCheck{
+		Name:     "Role Configuration",
+		Status:   StatusWarning,
+		Message:  fmt.Sprintf("Failed to read beads.role from git config: %v", readErr),
+		Detail:   "Git could not read its configuration. Inspect it with 'git config --list --show-origin' and repair the file it names.",
+		Category: CategoryData,
+	}
+}
+
+func notAGitRepoNA() DoctorCheck {
+	return DoctorCheck{
+		Name:     "Role Configuration",
+		Status:   StatusOK,
+		Message:  "N/A (not a git repository)",
+		Category: CategoryData,
+	}
+}
+
 func checkBeadsRoleNotInGit(path string) DoctorCheck {
 	// Check if we're even in a git repository. If not, skip the check rather
 	// than warn about missing config that may be correctly set in a worktree
 	// (e.g., rig roots use .repo.git instead of .git).
 	if !isGitRepo(path) {
-		return DoctorCheck{
-			Name:     "Role Configuration",
-			Status:   StatusOK,
-			Message:  "N/A (not a git repository)",
-			Category: CategoryData,
-		}
+		return notAGitRepoNA()
 	}
 
 	// Neither git config nor database has the role configured
