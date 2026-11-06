@@ -202,6 +202,35 @@ func BackupToDir(ctx context.Context, register, sync DBConn, dir string) error {
 	return nil
 }
 
+// PathToFileURL returns the file:// URL Dolt's parser reads back as abs.
+// Callers resolve the path first; this helper only spells it and does not
+// validate, because the result follows Dolt's file-URL convention (see
+// earl.Parse), not generic percent-encoded URL serialization.
+//
+// A drive-shaped path is spelled "file:///C:/work": Dolt recognizes a drive
+// only as an upper-case letter behind "file:///" (its
+// osutil.StartsWithWindowsVolume), reads the legacy "file://c:\work" as the
+// host "c" with an invalid port and "file:///c:/work" as the path "/c:/work",
+// and its own FileUrlFromPath builds the upper-case three-slash form. The
+// drive letter is upper-cased, backslashes become forward slashes, and
+// nothing is percent-encoded, because the drive branch of Dolt's parser
+// takes the rest literally. Any other path is prefixed byte-for-byte, as
+// this package has always done; the shape is matched on every host, and a
+// POSIX absolute path begins with "/", so it never matches.
+func PathToFileURL(abs string) string {
+	if !driveShaped(abs) {
+		return "file://" + abs
+	}
+	return "file:///" + strings.ToUpper(abs[:1]) + strings.ReplaceAll(abs[1:], `\`, "/")
+}
+
+// driveShaped reports whether abs begins with an ASCII drive letter and
+// colon, "C:" or "c:" — the shape of a resolved absolute Windows path.
+func driveShaped(abs string) bool {
+	return len(abs) >= 2 && abs[1] == ':' &&
+		((abs[0] >= 'a' && abs[0] <= 'z') || (abs[0] >= 'A' && abs[0] <= 'Z'))
+}
+
 // DirToFileURL resolves dir to an absolute path and returns a file:// URL.
 //
 // An input that already carries a scheme is rejected rather than prefixed.

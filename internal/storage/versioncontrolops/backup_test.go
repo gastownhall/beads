@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/dolthub/dolt/go/libraries/utils/earl"
 )
 
 // TestDirToFileURLRejectsSchemes pins the guard that stops a URL being turned
@@ -37,6 +39,67 @@ func TestDirToFileURLRejectsSchemes(t *testing.T) {
 	}
 	if !strings.HasPrefix(got, "file://") || strings.Contains(got, "://backups") {
 		t.Fatalf("DirToFileURL(%q) = %q", "backups/nightly", got)
+	}
+}
+
+// TestPathToFileURL pins the file:// URL spelling Dolt's parser reads back as
+// the path it names (GH#6019). Dolt recognizes a Windows drive only as an
+// upper-case letter behind "file:///", so the legacy "file://" + abs
+// concatenation turns a lower-case drive into the host "c" with an invalid
+// port, and a lower-case drive behind three slashes into the path "/c:/...".
+// Drive rows are round-tripped through the pinned Dolt parser itself, so the
+// defect and its fix are exercised on every host, not only on Windows.
+func TestPathToFileURL(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		abs      string
+		want     string // the expected URL, written out, not built by the helper
+		wantPath string // the path earl.Parse must recover; "" skips the round trip
+	}{
+		{name: "lower-case drive with backslashes",
+			abs: `c:\work\.beads\backup`, want: "file:///C:/work/.beads/backup", wantPath: "C:/work/.beads/backup"},
+		{name: "upper-case drive with backslashes",
+			abs: `C:\work\.beads\backup`, want: "file:///C:/work/.beads/backup", wantPath: "C:/work/.beads/backup"},
+		{name: "lower-case drive with forward slashes",
+			abs: `c:/work/.beads/backup`, want: "file:///C:/work/.beads/backup", wantPath: "C:/work/.beads/backup"},
+		{name: "upper-case drive with forward slashes",
+			abs: `C:/work/.beads/backup`, want: "file:///C:/work/.beads/backup", wantPath: "C:/work/.beads/backup"},
+		{name: "another drive's root",
+			abs: `z:\`, want: "file:///Z:/", wantPath: "Z:/"},
+		{name: "spaces, percent and hash stay literal",
+			abs: `c:\Users\John Doe\100%\a#b`, want: "file:///C:/Users/John Doe/100%/a#b", wantPath: "C:/Users/John Doe/100%/a#b"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := PathToFileURL(tc.abs)
+			if got != tc.want {
+				t.Fatalf("PathToFileURL(%q) = %q, want %q", tc.abs, got, tc.want)
+			}
+			if tc.wantPath == "" {
+				return
+			}
+			u, err := earl.Parse(got)
+			if err != nil {
+				t.Fatalf("earl.Parse(%q): %v", got, err)
+			}
+			if u.Host != "" || u.Path != tc.wantPath {
+				t.Fatalf("earl.Parse(%q) = host %q, path %q, want host \"\", path %q",
+					got, u.Host, u.Path, tc.wantPath)
+			}
+		})
+	}
+
+	// Registrations written by earlier releases spelled the drive form
+	// "file://C:\work\..."; earl reads that legacy spelling and the canonical
+	// one as the same host-free drive path, so stored backup addresses need
+	// no migration.
+	legacy, legacyErr := earl.Parse(`file://C:\work\.beads\backup`)
+	canonical, canonicalErr := earl.Parse("file:///C:/work/.beads/backup")
+	if legacyErr != nil || canonicalErr != nil {
+		t.Fatalf("earl.Parse: legacy %v, canonical %v", legacyErr, canonicalErr)
+	}
+	if legacy.Host != canonical.Host || legacy.Path != canonical.Path {
+		t.Fatalf("legacy spelling parses as host %q path %q; canonical as host %q path %q",
+			legacy.Host, legacy.Path, canonical.Host, canonical.Path)
 	}
 }
 
