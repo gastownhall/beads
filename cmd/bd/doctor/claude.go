@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -232,6 +233,10 @@ func hasBeadsHooks(settingsPath string) bool {
 // primeCheckBinary resolves the executable the prime checks run; tests stub it.
 var primeCheckBinary = fix.BdBinary
 
+// primeCheckTestBinaryMessage reports a prime check skipped because doctor is
+// running inside a test binary, which must not be executed as bd.
+const primeCheckTestBinaryMessage = "N/A (running as a test binary)"
+
 // primeCheckCommand builds the bd subprocess for a prime check. It runs the
 // binary that is running doctor, not whichever bd comes first on PATH: a
 // different version could open, and migrate, the store being diagnosed. The
@@ -257,6 +262,14 @@ func primeCheckCommand(repoPath string, args ...string) (*exec.Cmd, error) {
 func VerifyPrimeOutput(repoPath string) DoctorCheck {
 	var output []byte
 	cmd, err := primeCheckCommand(repoPath, "prime")
+	if errors.Is(err, fix.ErrTestBinary) {
+		// Re-executing a test binary as bd would recurse into the tests.
+		return DoctorCheck{
+			Name:    "bd prime Command",
+			Status:  "ok",
+			Message: primeCheckTestBinaryMessage,
+		}
+	}
 	if err == nil {
 		output, err = cmd.CombinedOutput()
 	}
@@ -360,6 +373,14 @@ func CheckDocumentationBdPrimeReference(repoPath string) DoctorCheck {
 
 	// Docs reference bd prime - verify the command works
 	cmd, err := primeCheckCommand(repoPath, "prime", "--help")
+	if errors.Is(err, fix.ErrTestBinary) {
+		return DoctorCheck{
+			Name:    "Prime Documentation",
+			Status:  "ok",
+			Message: primeCheckTestBinaryMessage,
+			Detail:  "Files: " + strings.Join(filesWithBdPrime, ", "),
+		}
+	}
 	if err == nil {
 		err = cmd.Run()
 	}
