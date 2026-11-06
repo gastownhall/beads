@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/cmd/bd/doctor/fix"
 	"github.com/steveyegge/beads/cmd/bd/setup"
 )
 
@@ -1119,11 +1120,23 @@ func TestPrimeChecksDoNotExecPathBd(t *testing.T) {
 	repo := writePrimeReferencingRepo(t)
 	t.Chdir(t.TempDir()) // the caller's cwd differs from the diagnosed workspace
 
-	_ = VerifyPrimeOutput(repo)
-	_ = CheckDocumentationBdPrimeReference(repo)
+	// The exported wrapper must preserve Go and Bazel test detection.
+	if _, err := fix.BdBinary(); !errors.Is(err, fix.ErrTestBinary) {
+		t.Errorf("fix.BdBinary() under a test binary = %v, want ErrTestBinary", err)
+	}
+
+	prime := VerifyPrimeOutput(repo)
+	doc := CheckDocumentationBdPrimeReference(repo)
 
 	if records := readPrimeRecords(t, decoyLog); len(records) != 0 {
 		t.Fatalf("prime checks executed the PATH bd %d time(s): %v", len(records), records)
+	}
+	const na = "N/A (running as a test binary)"
+	if prime.Status != "ok" || prime.Message != na {
+		t.Errorf("VerifyPrimeOutput = %+v, want ok %q", prime, na)
+	}
+	if doc.Status != "ok" || doc.Message != na || doc.Detail != "Files: CLAUDE.md" {
+		t.Errorf("CheckDocumentationBdPrimeReference = %+v, want ok %q with Files: CLAUDE.md", doc, na)
 	}
 }
 
