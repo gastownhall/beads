@@ -1033,3 +1033,159 @@ func TestCheckClaude_ClaudeCodeWithoutClaude(t *testing.T) {
 		t.Errorf("Expected message %q, got %q", "CLI-only mode", check.Message)
 	}
 }
+
+// isolatePrimeCheckHome points HOME at an empty directory so a developer's
+// Claude MCP settings cannot change how the prime output is classified.
+func isolatePrimeCheckHome(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+}
+
+// writeRecordingBd writes an executable shell script named name into dir. Each
+// run appends its argv, physical cwd and BEADS_DIR to the file named by the
+// environment variable logEnv, then prints CLI-mode prime output. It uses only
+// an absolute shebang and shell builtins, so it runs with an empty PATH.
+func writeRecordingBd(t *testing.T, dir, name, logEnv string) string {
+	t.Helper()
+	script := "#!/bin/sh\n" +
+		"{ echo \"argv=$*\"; echo \"cwd=$(pwd -P)\"; echo \"beads_dir=${BEADS_DIR-<unset>}\"; echo ---; } >> \"$" + logEnv + "\"\n" +
+		"echo 'Run bd ready to find work'\n"
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// readPrimeRecords parses the invocations a recording bd appended to logPath.
+func readPrimeRecords(t *testing.T, logPath string) []map[string]string {
+	t.Helper()
+	data, err := os.ReadFile(logPath)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	var records []map[string]string
+	rec := map[string]string{}
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if line == "---" {
+			records = append(records, rec)
+			rec = map[string]string{}
+			continue
+		}
+		if key, value, ok := strings.Cut(line, "="); ok {
+			rec[key] = value
+		}
+	}
+	return records
+}
+
+// writePrimeReferencingRepo creates a workspace whose CLAUDE.md mentions bd prime.
+func writePrimeReferencingRepo(t *testing.T) string {
+	t.Helper()
+	repo := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repo, "CLAUDE.md"), []byte("Run `bd prime` at session start.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return repo
+}
+
+func stubPrimeCheckBinary(t *testing.T, resolve func() (string, error)) {
+	t.Helper()
+	orig := primeCheckBinary
+	primeCheckBinary = resolve
+	t.Cleanup(func() { primeCheckBinary = orig })
+}
+
+// TestPrimeChecksDoNotExecPathBd pins GH#8130: the prime checks must never run
+// whichever `bd` comes first on PATH (a different version could open and
+// migrate the diagnosed store). Under a test binary they run nothing at all.
+func TestPrimeChecksDoNotExecPathBd(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("decoy bd is a shell script")
+	}
+	isolatePrimeCheckHome(t)
+	decoyDir := t.TempDir()
+	decoyLog := filepath.Join(t.TempDir(), "decoy.log")
+	writeRecordingBd(t, decoyDir, "bd", "PRIME_DECOY_LOG")
+	t.Setenv("PRIME_DECOY_LOG", decoyLog)
+	t.Setenv("PATH", decoyDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	repo := writePrimeReferencingRepo(t)
+	t.Chdir(t.TempDir()) // the caller's cwd differs from the diagnosed workspace
+
+	_ = VerifyPrimeOutput(repo)
+	_ = CheckDocumentationBdPrimeReference(repo)
+
+	if records := readPrimeRecords(t, decoyLog); len(records) != 0 {
+		t.Fatalf("prime checks executed the PATH bd %d time(s): %v", len(records), records)
+	}
+}
+
+// TestPrimeChecksRunResolvedBinaryInDiagnosedWorkspace runs both prime checks
+// against a real recording child selected by the resolver, with a decoy bd on
+// PATH and with an empty PATH: the resolved binary runs with each check's
+// arguments, the decoy never runs, and the result does not depend on PATH.
+func TestPrimeChecksRunResolvedBinaryInDiagnosedWorkspace(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("recording bd is a shell script")
+	}
+	isolatePrimeCheckHome(t)
+	childLog := filepath.Join(t.TempDir(), "child.log")
+	decoyLog := filepath.Join(t.TempDir(), "decoy.log")
+	t.Setenv("PRIME_CHILD_LOG", childLog)
+	t.Setenv("PRIME_DECOY_LOG", decoyLog)
+	exe := writeRecordingBd(t, t.TempDir(), "bd-under-test", "PRIME_CHILD_LOG")
+	stubPrimeCheckBinary(t, func() (string, error) { return exe, nil })
+	decoyDir := t.TempDir()
+	writeRecordingBd(t, decoyDir, "bd", "PRIME_DECOY_LOG")
+
+	for _, tc := range []struct {
+		name string
+		path string
+	}{
+		{name: "decoy bd on PATH", path: decoyDir},
+		{name: "empty PATH", path: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.RemoveAll(childLog); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", tc.path)
+			repo := writePrimeReferencingRepo(t)
+			t.Chdir(t.TempDir())
+
+			prime := VerifyPrimeOutput(repo)
+			if prime.Status != "ok" || prime.Message != "CLI mode detected" {
+				t.Errorf("VerifyPrimeOutput = %+v, want ok CLI mode detected", prime)
+			}
+			doc := CheckDocumentationBdPrimeReference(repo)
+			if doc.Status != "ok" || doc.Detail != "Files: CLAUDE.md" {
+				t.Errorf("CheckDocumentationBdPrimeReference = %+v, want ok with Files: CLAUDE.md", doc)
+			}
+
+			records := readPrimeRecords(t, childLog)
+			if len(records) != 2 {
+				t.Fatalf("resolved binary ran %d time(s), want 2: %v", len(records), records)
+			}
+			if got := records[0]["argv"]; got != "prime" {
+				t.Errorf("VerifyPrimeOutput argv = %q, want %q", got, "prime")
+			}
+			if got := records[1]["argv"]; got != "prime --help" {
+				t.Errorf("CheckDocumentationBdPrimeReference argv = %q, want %q", got, "prime --help")
+			}
+			if decoy := readPrimeRecords(t, decoyLog); len(decoy) != 0 {
+				t.Errorf("PATH decoy ran: %v", decoy)
+			}
+			if tc.path == "" {
+				if avail := CheckBdInPath(); avail.Status != "warning" {
+					t.Errorf("CheckBdInPath with empty PATH = %+v, want warning", avail)
+				}
+			}
+		})
+	}
+}

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/beads/cmd/bd/doctor/fix"
 	"github.com/steveyegge/beads/cmd/bd/setup"
 )
 
@@ -228,11 +229,28 @@ func hasBeadsHooks(settingsPath string) bool {
 	return false
 }
 
+// primeCheckBinary resolves the executable the prime checks run; tests stub it.
+var primeCheckBinary = fix.BdBinary
+
+// primeCheckCommand builds the bd subprocess for a prime check. It runs the
+// binary that is running doctor, not whichever bd comes first on PATH: a
+// different version could open, and migrate, the store being diagnosed.
+func primeCheckCommand(args ...string) (*exec.Cmd, error) {
+	exe, err := primeCheckBinary()
+	if err != nil {
+		return nil, err
+	}
+	return exec.Command(exe, args...), nil // #nosec G204 -- exe is the running binary, args are literals
+}
+
 // VerifyPrimeOutput checks if bd prime command works and adapts correctly.
 // repoPath is the project root directory.
 func VerifyPrimeOutput(repoPath string) DoctorCheck {
-	cmd := exec.Command("bd", "prime")
-	output, err := cmd.CombinedOutput()
+	var output []byte
+	cmd, err := primeCheckCommand("prime")
+	if err == nil {
+		output, err = cmd.CombinedOutput()
+	}
 
 	if err != nil {
 		return DoctorCheck{
@@ -332,8 +350,11 @@ func CheckDocumentationBdPrimeReference(repoPath string) DoctorCheck {
 	}
 
 	// Docs reference bd prime - verify the command works
-	cmd := exec.Command("bd", "prime", "--help")
-	if err := cmd.Run(); err != nil {
+	cmd, err := primeCheckCommand("prime", "--help")
+	if err == nil {
+		err = cmd.Run()
+	}
+	if err != nil {
 		return DoctorCheck{
 			Name:    "Prime Documentation",
 			Status:  "warning",
