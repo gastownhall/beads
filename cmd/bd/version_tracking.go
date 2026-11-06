@@ -541,7 +541,8 @@ func noticeVersionBumpFailure(err error) {
 		}
 		fmt.Fprintf(os.Stderr,
 			"bd upgraded to %s, but its pending schema migrations were not applied: they alter tables with uncommitted changes (%s).\n"+
-				"Run '%s' to commit the working set, then '%s'. Until then the next bd command will retry the upgrade.\n",
+				"Run '%s' to commit the working set, then '%s'.\n"+
+				"The next eligible non-preview command retries the migration.\n",
 			displayVersion(Version), strings.Join(dirtyErr.Tables, ", "), commit, migrate)
 		return
 	}

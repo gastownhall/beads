@@ -553,6 +553,9 @@ func assertDirtyUpgradeNotice(t *testing.T, cmd, stderr string) {
 	if commit < 0 || migrate < 0 || commit > migrate {
 		t.Errorf("%s: the notice does not give 'bd dolt commit' then 'bd migrate schema':\n%s", cmd, rest)
 	}
+	if !strings.Contains(rest, "next eligible non-preview command retries") {
+		t.Errorf("%s: the notice does not say which command retries the upgrade:\n%s", cmd, rest)
+	}
 	if applying := strings.Index(strings.ToLower(stderr), "applying"); applying < 0 || applying > notice {
 		t.Errorf("%s: want the consent's applying line, then the notice correcting it:\n%s", cmd, stderr)
 	}

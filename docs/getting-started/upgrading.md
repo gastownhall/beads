@@ -828,7 +828,8 @@ table those migrations alter, it stops instead, and says so:
 
 ```
 bd upgraded to v1.3.0, but its pending schema migrations were not applied: they alter tables with uncommitted changes (issues).
-Run 'bd dolt commit' to commit the working set, then 'bd migrate schema'. Until then the next bd command will retry the upgrade.
+Run 'bd dolt commit' to commit the working set, then 'bd migrate schema'.
+The next eligible non-preview command retries the migration.
 ```
 
 Nothing was migrated and your uncommitted changes are untouched. Commit them,
