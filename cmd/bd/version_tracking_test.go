@@ -6,8 +6,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/git"
@@ -788,4 +790,93 @@ func TestVersionBump_DirtyTablesKeepsMarkerAndRetries(t *testing.T) {
 			t.Errorf("%d maintenance attempts, want 1 (the unreadable config never reached the store)", *attempts)
 		}
 	})
+}
+
+// captureVersionBumpOutput runs fn with stdout and stderr redirected and
+// returns what each received. The notices it is used for are a few lines, well
+// under a pipe's buffer, so reading after fn returns cannot block.
+func captureVersionBumpOutput(t *testing.T, fn func()) (stdout, stderr string) {
+	t.Helper()
+	stdioMutex.Lock()
+	defer stdioMutex.Unlock()
+
+	origOut, origErr := os.Stdout, os.Stderr
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	errR, errW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout, os.Stderr = outW, errW
+	fn()
+	os.Stdout, os.Stderr = origOut, origErr
+	_ = outW.Close()
+	_ = errW.Close()
+
+	read := func(r *os.File) string {
+		defer r.Close()
+		data, err := io.ReadAll(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(data)
+	}
+	return read(outR), read(errR)
+}
+
+// TestVersionBump_DirtyTablesNotice covers the human recovery path for a
+// dirty-table refusal during version-bump maintenance (gastownhall/beads#6929):
+// it used to reach only BD_DEBUG. The notice names the tables and the
+// workspace the maintenance opened, and prescribes committing before
+// migrating. Under --json it writes nothing on either stream.
+func TestVersionBump_DirtyTablesNotice(t *testing.T) {
+	dirty := fmt.Errorf("failed to open database: %w", &schema.DirtyTablesError{Tables: []string{"issues", "wisps"}})
+
+	for _, tt := range []struct {
+		name   string
+		json   bool
+		global bool
+	}{
+		{name: "human"},
+		{name: "human with globalFlag set", global: true},
+		{name: "json", json: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			pinJSONOutput(t, tt.json)
+			origGlobal := globalFlag
+			globalFlag = tt.global
+			t.Cleanup(func() { globalFlag = origGlobal })
+
+			beadsDir, _ := newVersionBumpWorkspace(t, "1.1.0", "1.3.0")
+			stubReconcileVersionBump(t, dirty)
+
+			stdout, stderr := captureVersionBumpOutput(t, func() { invokeVersionBump(beadsDir) })
+
+			if stdout != "" {
+				t.Errorf("the notice wrote to stdout:\n%s", stdout)
+			}
+			if tt.json {
+				if stderr != "" {
+					t.Errorf("under --json the notice must write nothing, got stderr:\n%s", stderr)
+				}
+				return
+			}
+			for _, want := range []string{"issues, wisps", beadsDir, "bd dolt commit", "bd migrate schema"} {
+				if !strings.Contains(stderr, want) {
+					t.Errorf("notice missing %q:\n%s", want, stderr)
+				}
+			}
+			if strings.Index(stderr, "bd dolt commit") > strings.Index(stderr, "bd migrate schema") {
+				t.Errorf("notice must prescribe the commit before the migration:\n%s", stderr)
+			}
+			// The maintenance opened beadsDir's own database, not the one a
+			// later --global override selects, so its remedy must not
+			// redirect the operator to the global store.
+			if strings.Contains(stderr, "--global") {
+				t.Errorf("notice redirects the remedy to --global, which is not the workspace the maintenance opened:\n%s", stderr)
+			}
+		})
+	}
 }

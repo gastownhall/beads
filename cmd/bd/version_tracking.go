@@ -309,6 +309,7 @@ func autoMigrateOnVersionBump(beadsDir string) bool {
 	if err != nil {
 		debug.Logf("auto-migrate: %v", err)
 		noticeSharedMigrateRefusal(err)
+		noticeDirtyTablesRefusal(err, beadsDir)
 	}
 	return versionBumpSettled(err)
 }
@@ -486,6 +487,33 @@ func noticeSharedMigrateRefusal(err error) {
 	fmt.Fprintf(os.Stderr,
 		"bd upgraded to %s: %d schema migration(s) pending on this database — not auto-applying (#5920).\n%s\n",
 		displayVersion(Version), gateErr.Pending, remedy)
+}
+
+// noticeDirtyTablesRefusal reports a version-bump migration refused by the
+// dirty-table guard (schema.DirtyTablesError) as a short stderr notice. It
+// used to reach only BD_DEBUG, and a read command's own open never migrates,
+// so nothing else says why the upgrade did not apply (gastownhall/beads#6929).
+//
+// The remedy names the workspace the maintenance opened. That is beadsDir's
+// own database — the pre-run opens it with NewFromConfig(beadsDir) before any
+// --global override of the command's store, and doctor runs it against its
+// target — so the notice prescribes the commit and the migration there rather
+// than guessing at the command's later selection. It does not promise that
+// some next command applies the migration: that needs consent, which
+// 'bd migrate schema' carries and an ordinary command does not.
+//
+// Under --json it writes nothing: the command's own output (or its own
+// refusal) is the machine-readable result on these streams, and the marker
+// stays pending, so `bd upgrade status --json` still shows the bump.
+func noticeDirtyTablesRefusal(err error, beadsDir string) {
+	var dirtyErr *schema.DirtyTablesError
+	if !errors.As(err, &dirtyErr) || jsonOutput {
+		return
+	}
+	fmt.Fprintf(os.Stderr,
+		"bd upgraded to %s: schema migration of %s refused — uncommitted changes in table(s) %s (#4566).\n"+
+			"Commit them, then migrate that workspace: run 'bd dolt commit', then 'bd migrate schema' (with BEADS_DIR=%s). The upgrade stays pending until then.\n",
+		displayVersion(Version), beadsDir, strings.Join(dirtyErr.Tables, ", "), beadsDir)
 }
 
 // recordedWorkspaceVersion reads the marker through the role's accessor on a

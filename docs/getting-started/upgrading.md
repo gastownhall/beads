@@ -818,6 +818,32 @@ bd migrate --dry-run
 bd migrate schema
 ```
 
+### Migration refused: uncommitted changes
+
+The first commands after an upgrade reconcile the database with the new bd.
+If that maintenance fails (the database is unreachable, or a migration is
+refused), bd keeps the old version in `.beads/.local_version`, so the next
+command tries again instead of skipping the upgrade.
+
+When the refusal is because a pending migration alters a table with
+uncommitted changes, bd prints which tables and which workspace:
+
+```text
+bd upgraded to v1.3.0: schema migration of /path/to/.beads refused — uncommitted changes in table(s) issues (#4566).
+```
+
+Commit the working set at the current schema, then migrate, in that
+workspace:
+
+```bash
+bd dolt commit
+bd migrate schema
+```
+
+Remote-backed and shared databases still follow the migrator and adopt rules
+in [Database Migrations](#database-migrations). Under `--json` this notice is
+not printed; `bd upgrade status --json` shows the pending upgrade.
+
 ### Recovery after upgrade
 
 If you need to restore from a backup:
