@@ -1197,6 +1197,7 @@ go_test(
         "routing_notice_test.go",
         "routing_read_remote_test.go",
         "routing_read_test.go",
+        "routing_role_test.go",
         "rules_test.go",
         "sandbox_test.go",
         "schema_skew_test.go",

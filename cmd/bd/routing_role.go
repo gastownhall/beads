@@ -170,6 +170,25 @@ func detectUserRoleForActiveRepo() (routing.UserRole, error) {
 	return routing.DetectUserRole(repoPath)
 }
 
+// roleReadFailureWarned limits the role-read-failure warning to one per
+// process, mirroring rolePathNotARepoWarned: an ID lookup re-runs role
+// detection once per fallback (resolveViaAutoRoutingWithAccess), and every
+// re-run fails the same way.
+var roleReadFailureWarned bool
+
+// warnRoleReadFailureOnce reports a failed beads.role read on stderr, once
+// per invocation, with git's diagnostic. A failed read is not an absent one:
+// without this warning the command would route by the default with no signal
+// that the role authority could not be read at all.
+func warnRoleReadFailureOnce(err error) {
+	if roleReadFailureWarned {
+		return
+	}
+	roleReadFailureWarned = true
+	fmt.Fprintf(os.Stderr, "warning: could not read beads.role (%v);\n", err) //nolint:gosec // G705: stderr, not a browser context
+	fmt.Fprintln(os.Stderr, "  role-based routing skipped; using the default route.")
+}
+
 // detectUserRoleForRouting returns the user role for the routing decision cfg
 // describes, but detects it only when that decision can depend on it
 // (cfg.UsesUserRole), so cfg must already be fully resolved, legacy
@@ -179,13 +198,20 @@ func detectUserRoleForActiveRepo() (routing.UserRole, error) {
 // the role, which is every command while routing is off (the default). This is
 // also what makes `routing.mode explicit` disable role detection entirely, as
 // docs/multi-agent/routing.md promises.
+//
+// A failed read warns once and yields an empty role rather than aborting the
+// command: routing is an optional consumer of the role, so the failure
+// degrades the command visibly instead of failing it. An empty role keeps the
+// decision on DetermineTargetRepoWithRule's default (or the current repo) and
+// can never select a role-specific one.
 func detectUserRoleForRouting(cfg *routing.RoutingConfig) routing.UserRole {
 	if !cfg.UsesUserRole() {
 		return ""
 	}
 	userRole, err := detectUserRoleForActiveRepo()
 	if err != nil {
-		debug.Logf("Warning: failed to detect user role: %v\n", err)
+		warnRoleReadFailureOnce(err)
+		return ""
 	}
 	return userRole
 }
