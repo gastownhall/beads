@@ -64,16 +64,20 @@ func CheckBeadsRoleWithStore(path string, ss *SharedStore) DoctorCheck {
 // rather than letting the database fallback answer for it.
 //
 // A read that git fails (a malformed or unreadable config file, for example)
-// is returned as an error. The exception is a supplied path that does not
-// exist: git never ran there, and the check has always answered N/A for it.
+// is returned as an error. The exceptions are reads git never ran, which go on
+// to the database fallback and then N/A, as they always have: no git
+// executable (git-free usage), or a supplied path that does not exist.
 func readGitBeadsRole(path string) (role string, present bool, err error) {
 	cmd := exec.Command("git", "config", "--get", "beads.role")
-	cmd.Env = gitenv.ScrubRoutingAndSuppression(os.Environ())
+	cmd.Env = gitenv.ScrubRoleRead(os.Environ())
 	if path != "" {
 		cmd.Dir = path
 	}
 	output, runErr := cmd.Output()
 	role, present, err = git.ClassifyConfigGet(output, runErr)
+	if git.IsExecutableNotFound(err) {
+		return "", false, nil
+	}
 	if err != nil && path != "" {
 		if _, statErr := os.Stat(path); errors.Is(statErr, fs.ErrNotExist) {
 			return "", false, nil
@@ -81,6 +85,11 @@ func readGitBeadsRole(path string) (role string, present bool, err error) {
 	}
 	return role, present, err
 }
+
+// beadsRoleReadFailedMessage is the Message of checkBeadsRoleReadFailed. The
+// agent enricher keys on it, so a read failure gets its own remediation
+// rather than the role write that suits an unset role.
+const beadsRoleReadFailedMessage = "beads.role could not be read from git config"
 
 // checkBeadsRoleReadFailed reports a beads.role read git could not complete.
 // It is decided before the database fallback and the repository probe: both
@@ -91,7 +100,7 @@ func checkBeadsRoleReadFailed(err error) DoctorCheck {
 	return DoctorCheck{
 		Name:     "Role Configuration",
 		Status:   StatusWarning,
-		Message:  "beads.role could not be read from git config",
+		Message:  beadsRoleReadFailedMessage,
 		Detail:   fmt.Sprintf("%v. Routing cannot use the role until git can read its config files.", err),
 		Fix:      "git config --list --show-origin",
 		Category: CategoryData,

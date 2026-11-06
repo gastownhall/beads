@@ -410,3 +410,35 @@ func TestResetRoleProbeExitOneWithDiagnosticIsAFailure(t *testing.T) {
 		t.Errorf("reset changed config after a failed role read:\n%s", after)
 	}
 }
+
+// TestResetRoleProbeUnderStderrTracing is the benign-noise control for the
+// test above (GH#6763): git traces even an unset key's lookup to stderr, so
+// with tracing inherited the probe must still take an unset role as a clean
+// reset, and still unset a role that is there.
+func TestResetRoleProbeUnderStderrTracing(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		roleSet bool
+	}{{"unset role", false}, {"set role", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			configPath := roleReadFailureRepoForTest(t)
+			repo := filepath.Dir(filepath.Dir(configPath))
+			if tc.roleSet {
+				cmd := gitCommand("config", "--local", "beads.role", "maintainer")
+				cmd.Dir, cmd.Env = repo, gitenv.ScrubRouting(os.Environ())
+				if out, err := cmd.CombinedOutput(); err != nil {
+					t.Fatalf("fixture git config: %v: %s", err, out)
+				}
+			}
+			t.Setenv("GIT_TRACE", "1")
+
+			err := resetHooksPathAt(repo, filepath.Join(repo, ".git"), filepath.Join(repo, ".beads", "hooks"), gitenv.ScrubRouting(os.Environ()))
+			if err != nil {
+				t.Errorf("reset = %v; want a clean reset", err)
+			}
+			if after := readFileForTest(t, configPath); strings.Contains(after, "role") {
+				t.Errorf("reset left beads.role set:\n%s", after)
+			}
+		})
+	}
+}

@@ -392,6 +392,19 @@ func enrichConfigValues(dc DoctorCheck) agentEnrichment {
 }
 
 func enrichBeadsRole(dc DoctorCheck) agentEnrichment {
+	if dc.Message == beadsRoleReadFailedMessage {
+		// Writing a role is no repair here: the role may well be set, git
+		// refuses the write while the file stays malformed, and bd must not
+		// assert a role over a read it could not complete.
+		return agentEnrichment{
+			severity:    "degraded",
+			explanation: "Beads role configuration: git could not read beads.role, usually because a git config file that applies here is malformed or unreadable; git's diagnostic, under observed, names the problem. bd does not guess a role over a failed read: role-based routing is skipped and commands take the default route (routing.default, or this repository) until git can read its config. Fix what the diagnostic names; setting beads.role does not repair it.",
+			observed:    dc.Message + "\n" + dc.Detail,
+			expected:    "git can read every config file that applies to this repository",
+			commands:    []string{"git config --list --show-origin"},
+			sourceFiles: []string{"cmd/bd/doctor/role.go:readGitBeadsRole"},
+		}
+	}
 	return agentEnrichment{
 		severity:    "advisory",
 		explanation: fmt.Sprintf("Beads role configuration: %s. The beads.role config determines how beads behaves (e.g. 'maintainer' vs 'contributor'). Missing role config falls back to URL heuristic detection.", dc.Message),

@@ -866,7 +866,7 @@ func (rc *RepoContext) Role() (UserRole, bool, error) {
 		return Contributor, true, nil
 	}
 
-	cmd := rc.gitCmdWithEnv(context.Background(), gitenv.ScrubRoutingAndSuppression(os.Environ()), "config", "--get", "beads.role")
+	cmd := rc.gitCmdWithEnv(context.Background(), gitenv.ScrubRoleRead(os.Environ()), "config", "--get", "beads.role")
 	role, present, err := git.ClassifyConfigGet(cmd.Output())
 	if err != nil {
 		return "", false, fmt.Errorf("read beads.role: %w", err)

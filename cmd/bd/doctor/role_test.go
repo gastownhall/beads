@@ -321,4 +321,31 @@ func TestCheckBeadsRoleReadFailureWarnsWithDiagnostic(t *testing.T) {
 			}
 		}
 	})
+
+	// Git-free usage: with no git executable the read never ran, so the check
+	// answers as it always has (N/A here), not with a read failure.
+	t.Run("no git executable", func(t *testing.T) {
+		isolateGlobalGitConfig(t)
+		repo := newGitRepo(t)
+		t.Setenv("PATH", t.TempDir())
+		for _, api := range apis {
+			if check := api.run(repo); check.Status != StatusOK || check.Message != "N/A (not a git repository)" {
+				t.Errorf("%s: got %+v, want N/A without a git executable", api.name, check)
+			}
+		}
+	})
+
+	// The benign-noise control (GH#6763): git traces even an unset key's
+	// lookup to stderr, so with tracing inherited an unset role must still be
+	// reported as not configured, not as a read failure.
+	t.Run("stderr tracing over an unset role", func(t *testing.T) {
+		isolateGlobalGitConfig(t)
+		repo := newGitRepo(t)
+		t.Setenv("GIT_TRACE", "1")
+		for _, api := range apis {
+			if check := api.run(repo); check.Status != StatusWarning || check.Message != "beads.role not configured" {
+				t.Errorf("%s: got %+v, want the not-configured warning", api.name, check)
+			}
+		}
+	})
 }

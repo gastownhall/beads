@@ -20,7 +20,10 @@ import (
 //     The returned error wraps err and carries the stderr diagnostic.
 //
 // It classifies process results only: it does not run git, select a
-// repository, or decide whether a failure is fatal to the caller.
+// repository, or decide whether a failure is fatal to the caller. Run the read
+// without stderr-directed git tracing (gitenv.ScrubRoleRead for beads.role,
+// gittraceenv.ScrubEnv otherwise): git traces even an unset key's lookup to
+// stderr, which this rule would report as a failure.
 func ClassifyConfigGet(out []byte, err error) (value string, present bool, readErr error) {
 	if err == nil {
 		return strings.TrimSpace(string(out)), true, nil
@@ -36,4 +39,13 @@ func ClassifyConfigGet(out []byte, err error) (value string, present bool, readE
 		}
 	}
 	return "", false, err
+}
+
+// IsExecutableNotFound reports whether err means git never ran because no git
+// executable was found, as opposed to git running and failing. It is the one
+// read failure a surface that only reports what git config says may take as
+// absence: beads works without git (README "Git-Free Usage"), and without git
+// there is no git config to read. A strict reader still reports it.
+func IsExecutableNotFound(err error) bool {
+	return errors.Is(err, exec.ErrNotFound)
 }

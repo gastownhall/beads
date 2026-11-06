@@ -5,7 +5,10 @@ go_library(
     srcs = ["routing.go"],
     importpath = "github.com/steveyegge/beads/internal/gitenv",
     visibility = ["//:__subpackages__"],
-    deps = ["//internal/execenv"],
+    deps = [
+        "//internal/execenv",
+        "//internal/gittraceenv",
+    ],
 )
 
 go_test(

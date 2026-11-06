@@ -1704,12 +1704,14 @@ func resetHooksPathIfBeadsManaged() error {
 
 func resetHooksPathAt(repoRoot, commonDir, storageHooksDir string, configEnv []string) error {
 	// beads.role is an authority value, unlike core.hooksPath, so its own
-	// commands drop inherited suppression too (see the role pair below).
-	// Scrubbing suppression from configEnv rather than os.Environ() leaves a
-	// caller's captured environment otherwise intact. Suppression controls are
-	// themselves routing keys, so for a configEnv that ScrubRouting already
-	// produced the two spellings drop exactly the same entries.
-	roleConfigEnv := gitenv.ScrubRoutingAndSuppression(configEnv)
+	// commands drop inherited suppression too (see the role pair below), and
+	// stderr-directed tracing, which the presence query would take for a
+	// diagnostic (gitenv.ScrubRoleRead). Scrubbing configEnv rather than
+	// os.Environ() leaves a caller's captured environment otherwise intact.
+	// Suppression controls are themselves routing keys, so for a configEnv that
+	// ScrubRouting already produced the two spellings drop exactly the same
+	// entries.
+	roleConfigEnv := gitenv.ScrubRoleRead(configEnv)
 	var failures []string
 
 	cmd := exec.Command("git", "--git-dir", commonDir, "config", "--local", "--get", "core.hooksPath")

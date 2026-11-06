@@ -9,6 +9,7 @@ go_library(
     deps = [
         "//internal/git",
         "//internal/gitenv",
+        "//internal/gittraceenv",
         "//internal/storage/domain",
     ],
 )
@@ -22,6 +23,7 @@ go_test(
     embed = [":git"],
     deps = [
         "//internal/gitenv",
+        "//internal/gittraceenv",
         "//internal/storage/domain",
         "@com_github_stretchr_testify//require",
         "@com_github_stretchr_testify//suite",

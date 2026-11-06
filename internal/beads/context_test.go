@@ -1804,23 +1804,7 @@ func TestGetRepoContext_RefusesRepositoryGitDoesNotOpen(t *testing.T) {
 // beads.role read git fails is an error from Role and RequireRole, not "not
 // configured", and the optional predicates answer false.
 func TestRepoContextRoleReadFailureIsAnError(t *testing.T) {
-	for _, entry := range os.Environ() {
-		key := gitenv.EntryKey(entry)
-		if gitenv.IsRoutingKeyForOS(key, runtime.GOOS) {
-			t.Setenv(key, "")
-			if err := os.Unsetenv(key); err != nil {
-				t.Fatal(err)
-			}
-		}
-	}
-	home := t.TempDir()
-	for _, key := range []string{"HOME", "USERPROFILE", "XDG_CONFIG_HOME"} {
-		t.Setenv(key, home)
-	}
-	repo := t.TempDir()
-	if out, err := exec.Command("git", "-C", repo, "init", "--quiet").CombinedOutput(); err != nil {
-		t.Fatalf("git init: %v: %s", err, out)
-	}
+	repo := isolatedRoleRepoForTest(t)
 	configPath := filepath.Join(repo, ".git", "config")
 	data, err := os.ReadFile(configPath)
 	if err != nil {
@@ -1845,4 +1829,45 @@ func TestRepoContextRoleReadFailureIsAnError(t *testing.T) {
 	if role, ok, err := redirected.Role(); err != nil || !ok || role != Contributor {
 		t.Errorf("redirected Role() = %q, %v, %v; want contributor without reading git", role, ok, err)
 	}
+}
+
+// TestRepoContextRoleUnderStderrTracingIsUnset is the benign-noise control for
+// the test above (GH#6763): git traces even an unset key's lookup to stderr,
+// so with tracing inherited an unset role must still be "not configured"
+// rather than a read error.
+func TestRepoContextRoleUnderStderrTracingIsUnset(t *testing.T) {
+	rc := &RepoContext{RepoRoot: isolatedRoleRepoForTest(t)}
+	t.Setenv("GIT_TRACE", "1")
+
+	if role, ok, err := rc.Role(); err != nil || ok || role != "" {
+		t.Errorf("Role() = %q, %v, %v; want an unset role", role, ok, err)
+	}
+	if err := rc.RequireRole(); !errors.Is(err, ErrRoleNotConfigured) {
+		t.Errorf("RequireRole() = %v; want ErrRoleNotConfigured", err)
+	}
+}
+
+// isolatedRoleRepoForTest returns a fresh repository with no role, with
+// inherited routing removed and HOME pointed at an empty directory so no other
+// config answers first.
+func isolatedRoleRepoForTest(t *testing.T) string {
+	t.Helper()
+	for _, entry := range os.Environ() {
+		key := gitenv.EntryKey(entry)
+		if gitenv.IsRoutingKeyForOS(key, runtime.GOOS) {
+			t.Setenv(key, "")
+			if err := os.Unsetenv(key); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	home := t.TempDir()
+	for _, key := range []string{"HOME", "USERPROFILE", "XDG_CONFIG_HOME"} {
+		t.Setenv(key, home)
+	}
+	repo := t.TempDir()
+	if out, err := exec.Command("git", "-C", repo, "init", "--quiet").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	return repo
 }

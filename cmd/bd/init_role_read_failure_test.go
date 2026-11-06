@@ -203,6 +203,45 @@ func TestInitRoleReadFailureExplicitRole(t *testing.T) {
 	})
 }
 
+// TestInitRoleUnderStderrTracingWritesTheDefault is the benign-noise control
+// for the read-failure tests (GH#6763): git traces even an unset key's lookup
+// to stderr, so with tracing inherited an unset role must still read as unset.
+// The no-prompt branch, the GH#2950 safety net and the proxied tail then write
+// the default role, and none of them reports a read failure.
+func TestInitRoleUnderStderrTracingWritesTheDefault(t *testing.T) {
+	for name, run := range map[string]func(t *testing.T) error{
+		"no-prompt branch": func(*testing.T) error {
+			applyInitRoleWithoutPrompt("", false, &initRoleReadFailure{})
+			return nil
+		},
+		"safety net": func(*testing.T) error {
+			ensureInitRole("", false, &initRoleReadFailure{})
+			return nil
+		},
+		"proxied tail": func(t *testing.T) error {
+			cmd := &cobra.Command{}
+			cmd.Flags().Bool("setup-exclude", false, "")
+			in := initProxiedServerInput{stealth: true, skipHooks: true, skipAgents: true}
+			return runInitProxiedServerTail(cmd, t.Context(), in, runInitTailContext{gitUC: storagegit.NewGitProvider(".").GitUseCase()})
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			configPath := roleReadFailureRepoForTest(t)
+			t.Setenv("GIT_TRACE", "1")
+			_, stderr, err := captureStdoutAndStderr(t, func() error { return run(t) })
+			if err != nil {
+				t.Fatal(err)
+			}
+			if after := readFileForTest(t, configPath); !strings.Contains(after, "role = maintainer") {
+				t.Errorf("init did not write the default role over an unset one:\n%s", after)
+			}
+			if strings.Contains(stderr, "could not read beads.role") {
+				t.Errorf("init reported an unset role as a read failure: %q", stderr)
+			}
+		})
+	}
+}
+
 // roleReadFailingUseCase answers BeadsRole with a read failure and records
 // role writes, over a real repository for everything else.
 type roleReadFailingUseCase struct {

@@ -12,6 +12,7 @@ import (
 
 	internalgit "github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/gitenv"
+	"github.com/steveyegge/beads/internal/gittraceenv"
 	"github.com/steveyegge/beads/internal/storage/domain"
 )
 
@@ -37,6 +38,10 @@ var _ domain.GitRepository = (*gitRepositoryImpl)(nil)
 func (r *gitRepositoryImpl) gitCmd(ctx context.Context, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir, cmd.Env = r.workDir, r.env
+	// Every command here captures or discards git's stderr, and GetConfig
+	// tells an absent key from a failed read by it, so stderr-directed tracing
+	// can only corrupt a result (GH#6763). A file target is kept.
+	cmd.Env = gittraceenv.ScrubEnv(cmd.Environ())
 	return cmd
 }
 
@@ -116,12 +121,16 @@ func (r *gitRepositoryImpl) Init(ctx context.Context) error {
 // and loses only the suppression entries. Testing r.env for nil instead would
 // leave the arm dead on the one production role path, which always arrives
 // through NewInitGitRepository and therefore always carries a captured env.
+//
+// This environment replaces gitCmd's, so it drops stderr-directed tracing
+// itself (gitenv.ScrubRoleRead); otherwise GetConfig would read an unset role
+// as a failed read whenever tracing is inherited.
 func (r *gitRepositoryImpl) roleAuthorityEnv() []string {
 	env := r.env
 	if env == nil {
 		env = os.Environ()
 	}
-	return gitenv.ScrubRoutingAndSuppression(env)
+	return gitenv.ScrubRoleRead(env)
 }
 
 func (r *gitRepositoryImpl) GetConfig(ctx context.Context, key string) (string, bool, error) {

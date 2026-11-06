@@ -609,3 +609,26 @@ func TestConfigShowOmitsUnreadableBeadsRole(t *testing.T) {
 		})
 	}
 }
+
+// TestConfigShowWithoutGitOmitsBeadsRoleQuietly pins git-free usage for
+// `bd config show`: with no git executable there is no git config to show,
+// so the role is left out without a warning on every run, and the rest of the
+// view still prints.
+func TestConfigShowWithoutGitOmitsBeadsRoleQuietly(t *testing.T) {
+	roleReadFailureRepoForTest(t)
+	t.Setenv("BEADS_MAX_ROWS", "500")
+	t.Setenv("PATH", t.TempDir())
+	pinJSONOutput(t, false)
+	stdout, stderr, err := captureStdoutAndStderr(t, func() error {
+		return configShowCmd.RunE(configShowCmd, nil)
+	})
+	if err != nil {
+		t.Fatalf("config show = %v, want success", err)
+	}
+	if strings.Contains(stderr, "beads.role") {
+		t.Errorf("stderr %q warns about a role there is no git to read", stderr)
+	}
+	if strings.TrimSpace(stdout) != "BEADS_MAX_ROWS = 500  (env: BEADS_MAX_ROWS)" {
+		t.Errorf("text output = %q, want the remaining entry", stdout)
+	}
+}

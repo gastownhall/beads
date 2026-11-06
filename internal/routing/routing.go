@@ -18,9 +18,11 @@ import (
 // Role detection is an authority lookup, so it also discards inherited config
 // suppression: detectFromURL below answers a missed read with Maintainer, which
 // would let a caller escalate by blinding the lookup rather than forging it.
+// It drops stderr-directed git tracing too, so an unset role still reads as
+// unset rather than as a failed read (see gitenv.ScrubRoleRead).
 var gitCommandRunner = func(repoPath string, args ...string) ([]byte, error) {
 	cmd := exec.Command("git", args...)
-	cmd.Env = gitenv.ScrubRoutingAndSuppression(os.Environ())
+	cmd.Env = gitenv.ScrubRoleRead(os.Environ())
 	if repoPath != "" {
 		cmd.Dir = repoPath
 	}
@@ -122,7 +124,7 @@ func roleProbeUnavailable(repoPath string, err error) bool {
 	if errors.As(err, &exitErr) {
 		return false
 	}
-	if errors.Is(err, exec.ErrNotFound) {
+	if git.IsExecutableNotFound(err) {
 		return true
 	}
 	if repoPath == "" {

@@ -3,6 +3,7 @@ package git
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -71,5 +72,34 @@ func TestClassifyConfigGet(t *testing.T) {
 	notFound := &exec.Error{Name: "git", Err: exec.ErrNotFound}
 	if _, present, err = ClassifyConfigGet(nil, notFound); !errors.Is(err, exec.ErrNotFound) || present {
 		t.Errorf("missing executable = (present %v, %v), want the exec error", present, err)
+	}
+}
+
+// TestIsExecutableNotFound tells a git that never ran because it is not
+// installed apart from git running and failing: only the former is git-free
+// usage that a reporting surface may take as absence.
+func TestIsExecutableNotFound(t *testing.T) {
+	empty := filepath.Join(t.TempDir(), "empty.gitconfig")
+	if err := os.WriteFile(empty, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, failed := exec.Command("git", "config", "--file", empty, "--get", "nosection").Output()
+	t.Setenv("PATH", t.TempDir())
+	_, missing := exec.Command("git", "config", "--get", "beads.role").Output()
+
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"git missing from PATH", missing, true},
+		{"wrapped", fmt.Errorf("read beads.role: %w", missing), true},
+		{"git ran and failed", failed, false},
+		{"canceled", context.Canceled, false},
+		{"no error", nil, false},
+	} {
+		if got := IsExecutableNotFound(tc.err); got != tc.want {
+			t.Errorf("%s: IsExecutableNotFound(%v) = %v, want %v", tc.name, tc.err, got, tc.want)
+		}
 	}
 }

@@ -7,6 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/storage/contextinfo"
 	"github.com/steveyegge/beads/internal/storage/domain"
 )
@@ -37,9 +38,11 @@ func runContextProxiedServer(cmd *cobra.Command, ctx context.Context) error {
 
 // warnContextRoleReadFailure reports, on stderr for both routes and both
 // output modes, a beads.role read git failed. bd context still answers: the
-// snapshot omits the role rather than calling it unset.
+// snapshot omits the role rather than calling it unset. A missing git
+// executable is not reported: beads works without git, and with no git there
+// is no role to read (routing takes it as unset as well).
 func warnContextRoleReadFailure(err error) {
-	if err != nil {
+	if err != nil && !git.IsExecutableNotFound(err) {
 		fmt.Fprintf(os.Stderr, "warning: role omitted, could not read it from git config: %v\n", err)
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/metrics"
 	storagegit "github.com/steveyegge/beads/internal/storage/git"
 	"github.com/steveyegge/beads/internal/workapi"
@@ -330,7 +331,9 @@ func databaseConfigEntries(dbConfig map[string]string) []configEntry {
 
 // collectGitConfigEntries reads beads-related values from git config. A read
 // git fails (a malformed or unreadable config file) is warned about on stderr
-// and its entry left out, so the rest of the view still prints.
+// and its entry left out, so the rest of the view still prints. Without a git
+// executable there is no git config to show (git-free usage), so the entry is
+// left out without a warning.
 func collectGitConfigEntries() []configEntry {
 	var entries []configEntry
 
@@ -338,7 +341,9 @@ func collectGitConfigEntries() []configEntry {
 	// it with routing and config suppression scrubbed, like `bd config get`.
 	value, hasRole, err := storagegit.NewGitProvider("").GitUseCase().BeadsRole(getRootContext())
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: beads.role omitted, git could not read it: %v\n", err)
+		if !git.IsExecutableNotFound(err) {
+			fmt.Fprintf(os.Stderr, "warning: beads.role omitted, git could not read it: %v\n", err)
+		}
 		return entries
 	}
 	if hasRole {

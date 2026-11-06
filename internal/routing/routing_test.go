@@ -668,6 +668,23 @@ func roleAbsentErr(t *testing.T) error {
 // with HOME pointed at an empty directory so no other config answers first.
 func malformedRoleRepo(t *testing.T) string {
 	t.Helper()
+	repo := isolatedRoleRepo(t)
+	config := filepath.Join(repo, ".git", "config")
+	data, err := os.ReadFile(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(config, append(data, "\n[beads\n\trole = maintainer\n"...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return repo
+}
+
+// isolatedRoleRepo returns a fresh repository with no role and no remote, with
+// inherited routing removed and HOME pointed at an empty directory so no other
+// config answers first.
+func isolatedRoleRepo(t *testing.T) string {
+	t.Helper()
 	for _, entry := range os.Environ() {
 		key := gitenv.EntryKey(entry)
 		if gitenv.IsRoutingKeyForOS(key, runtime.GOOS) {
@@ -684,14 +701,6 @@ func malformedRoleRepo(t *testing.T) string {
 	repo := t.TempDir()
 	if out, err := exec.Command("git", "init", "--quiet", repo).CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v: %s", err, out)
-	}
-	config := filepath.Join(repo, ".git", "config")
-	data, err := os.ReadFile(config)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(config, append(data, "\n[beads\n\trole = maintainer\n"...), 0o600); err != nil {
-		t.Fatal(err)
 	}
 	return repo
 }
@@ -781,6 +790,44 @@ func TestDetectUserRole_MalformedConfigIsAReadFailure(t *testing.T) {
 	})
 }
 
+// TestDetectUserRole_StderrTracingIsNotAReadFailure is the benign-noise
+// control for the test above (GH#6763). Git traces even an unset key's lookup
+// to stderr, and stderr is how the read tells absence from failure, so with
+// tracing inherited an unset role must still read as unset and reach the
+// fallback rather than come back as a read failure.
+func TestDetectUserRole_StderrTracingIsNotAReadFailure(t *testing.T) {
+	for _, trace := range []struct{ key, value string }{
+		{"GIT_TRACE", "1"},
+		{"GIT_TRACE_SETUP", "true"},
+		{"GIT_TRACE2_EVENT", "1"},
+		{"GIT_TRACE", "relative.trace"}, // git warns on stderr that it is not absolute
+	} {
+		t.Run(trace.key+"="+trace.value, func(t *testing.T) {
+			repo := isolatedRoleRepo(t)
+			t.Setenv(trace.key, trace.value)
+			// Fixture guard: the setting must put noise on an unset key's
+			// read, or this test would pass without exercising anything.
+			probe := exec.Command("git", "config", "--get", "beads.role")
+			probe.Dir = repo
+			_, probeErr := probe.Output()
+			var exitErr *exec.ExitError
+			if !errors.As(probeErr, &exitErr) || exitErr.ExitCode() != 1 || len(exitErr.Stderr) == 0 {
+				t.Fatalf("fixture: unset-key read = %v, want exit 1 with stderr", probeErr)
+			}
+
+			var role UserRole
+			var err error
+			stderr := captureStderr(t, func() { role, err = DetectUserRole(repo) })
+			if err != nil || role != Maintainer {
+				t.Errorf("DetectUserRole = %q, %v; want %q (no-remote fallback), nil", role, err, Maintainer)
+			}
+			if !strings.Contains(stderr, "not configured") {
+				t.Errorf("unset role lost its missing-role notice:\n%s", stderr)
+			}
+		})
+	}
+}
+
 // harvestRoleReadError runs the real `git config --get beads.role` probe in a
 // fixture repository whose local config is configContent, with the global and
 // system scopes closed off, and returns the error the probe produced. Tests
@@ -849,5 +896,23 @@ func TestDetectUserRole_AbsenceKeepsFallback(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "not configured") {
 		t.Errorf("absent key lost its missing-role notice:\n%s", stderr)
+	}
+}
+
+// TestDetectUserRole_MissingGitKeepsFallback pins the unavailable-probe arm of
+// the same boundary: with no git executable the read never ran, which is
+// git-free usage rather than a read failure, so detection keeps its fallback.
+func TestDetectUserRole_MissingGitKeepsFallback(t *testing.T) {
+	repo := t.TempDir()
+	t.Setenv("PATH", t.TempDir())
+
+	var role UserRole
+	var err error
+	stderr := captureStderr(t, func() { role, err = DetectUserRole(repo) })
+	if err != nil || role != Maintainer {
+		t.Errorf("DetectUserRole = %q, %v; want %q (no-remote fallback), nil", role, err, Maintainer)
+	}
+	if !strings.Contains(stderr, "not configured") {
+		t.Errorf("missing git lost the missing-role notice:\n%s", stderr)
 	}
 }
