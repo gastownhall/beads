@@ -1252,4 +1252,81 @@ func TestRunRecipe_CopilotKeepsExistingInstructions(t *testing.T) {
 			t.Errorf("--remove should keep .github, stat err = %v", err)
 		}
 	})
+
+	t.Run("AC-5 install creates a section-only file that remove deletes", func(t *testing.T) {
+		workspace(t, nil)
+		if _, err := run(t, nil); err != nil {
+			t.Fatalf("bd setup copilot: %v", err)
+		}
+		got := read(t, instructionsPath)
+		managedSection(t, got)
+		if strings.Contains(got, "# Project Instructions for AI Agents") {
+			t.Errorf("install added AGENTS.md scaffolding:\n%s", got)
+		}
+		if _, err := os.Stat("AGENTS.md"); !os.IsNotExist(err) {
+			t.Errorf("install created AGENTS.md, stat err = %v", err)
+		}
+		manifest(t)
+
+		if _, err := run(t, &setupRemove); err != nil {
+			t.Fatalf("bd setup copilot --remove: %v", err)
+		}
+		for _, path := range []string{instructionsPath, manifestPath} {
+			if _, err := os.Lstat(path); !os.IsNotExist(err) {
+				t.Errorf("--remove kept %s, lstat err = %v", path, err)
+			}
+		}
+	})
+}
+
+// In a workspace, the built-in copilot recipe still manages a section, but a
+// [recipes.copilot] of .beads/recipes.toml replaces it and runs as any other
+// file recipe, writing its own file and neither of the built-in's.
+func TestRunRecipe_CopilotWorkspaceOverride(t *testing.T) {
+	for _, tt := range []struct {
+		name, toml string
+		file       string // the file install writes
+		section    bool   // it holds a managed beads section
+	}{
+		{name: "built-in", file: ".github/copilot-instructions.md", section: true},
+		{name: "override", toml: "[recipes.copilot]\npath = \"rules/copilot.md\"\n", file: "rules/copilot.md"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o750); err != nil {
+				t.Fatal(err)
+			}
+			for name, data := range map[string]string{"config.yaml": "", "recipes.toml": tt.toml} {
+				if err := os.WriteFile(filepath.Join(dir, ".beads", name), []byte(data), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Chdir(dir)
+			t.Setenv("BEADS_DIR", "")
+			resetSetupResolutionCaches(t)
+			resetSetupGlobals(t)
+
+			if _, err := captureStdoutWithError(t, func() error { return runRecipe("copilot") }); err != nil {
+				t.Fatalf("bd setup copilot: %v", err)
+			}
+			data, err := os.ReadFile(filepath.FromSlash(tt.file))
+			if err != nil {
+				t.Fatalf("install did not write %s: %v", tt.file, err)
+			}
+			if got := strings.Contains(string(data), "<!-- BEGIN BEADS INTEGRATION"); got != tt.section {
+				t.Errorf("%s holds a beads section = %v, want %v:\n%s", tt.file, got, tt.section, data)
+			}
+			if tt.section {
+				return
+			}
+			if string(data) != recipes.Template {
+				t.Errorf("%s is not the file recipe template:\n%s", tt.file, data)
+			}
+			for _, path := range []string{".github", ".copilot-plugin"} {
+				if _, err := os.Stat(path); !os.IsNotExist(err) {
+					t.Errorf("the override wrote the built-in's %s, stat err = %v", path, err)
+				}
+			}
+		})
+	}
 }
