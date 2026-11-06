@@ -1185,3 +1185,69 @@ func TestBeadsRoleWriteErrorsRetainGitDiagnostics(t *testing.T) {
 		}
 	}
 }
+
+// TestConfigGetBeadsRoleReportsReadFailure pins bd-a2qnf4 (GH#6765): a git
+// config git cannot parse is an error for `bd config get beads.role`, in text
+// and JSON mode, never a success-shaped "not set" answer. Absence keeps the
+// existing benign response (TestBeadsRoleCommandsHitSelectedRepo's absent-role
+// case).
+func TestConfigGetBeadsRoleReportsReadFailure(t *testing.T) {
+	for _, entry := range os.Environ() {
+		key := gitenv.EntryKey(entry)
+		if gitenv.IsRoutingKeyForOS(key, runtime.GOOS) {
+			t.Setenv(key, "")
+			if err := os.Unsetenv(key); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	home := t.TempDir()
+	for _, key := range []string{"HOME", "USERPROFILE", "XDG_CONFIG_HOME"} {
+		t.Setenv(key, home)
+	}
+	target := t.TempDir()
+	init := gitCommand("init", "--quiet")
+	init.Dir = target
+	if out, err := init.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	if err := os.WriteFile(filepath.Join(target, ".git", "config"), []byte("[beads\n\trole = maintainer\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(target)
+
+	for _, tc := range []struct {
+		name string
+		json bool
+	}{
+		{"text", false},
+		{"json", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pinJSONOutput(t, tc.json)
+			// captureStdout and captureStderr serialize on stdioMutex, so the
+			// two captures need two runs rather than one nested capture.
+			var err error
+			stdout := captureStdout(t, func() error {
+				err = configGetCmd.RunE(configGetCmd, []string{"beads.role"})
+				return nil
+			})
+			if code, ok := exitCodeFromError(err); !ok || code != 1 {
+				t.Errorf("run error = %v, want exit code 1", err)
+			}
+			if strings.Contains(stdout, "not set") || strings.Contains(stdout, `"value"`) {
+				t.Errorf("stdout %q must not carry a success-shaped answer", stdout)
+			}
+			var err2 error
+			stderr := captureStderr(t, func() {
+				err2 = configGetCmd.RunE(configGetCmd, []string{"beads.role"})
+			})
+			if code, ok := exitCodeFromError(err2); !ok || code != 1 {
+				t.Errorf("second run error = %v, want exit code 1", err2)
+			}
+			if !strings.Contains(stderr, "bad config") {
+				t.Errorf("stderr %q does not carry git's diagnostic", stderr)
+			}
+		})
+	}
+}

@@ -21,6 +21,8 @@ import (
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/remotecache"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/domain"
+	domaingit "github.com/steveyegge/beads/internal/storage/domain/git"
 	"github.com/steveyegge/beads/internal/tracker"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/workapi"
@@ -628,13 +630,14 @@ var configGetCmd = &cobra.Command{
 		}
 
 		if key == "beads.role" {
-			// Same role-authority boundary as `bd config set` above.
-			cmd := exec.Command("git", "config", "--get", "beads.role")
-			cmd.Env = gitenv.ScrubRoutingAndSuppression(os.Environ())
-			output, err := cmd.Output()
-			value := strings.TrimSpace(string(output))
+			// Same role-authority boundary as `bd config set` above, through
+			// the domain use case so a read that genuinely fails is an error
+			// rather than an empty value: "not set" must mean git answered,
+			// not that git could not be asked.
+			roleUC := domain.NewGitUseCase("", domaingit.NewInitGitRepository(""))
+			value, _, err := roleUC.BeadsRole(getRootContext())
 			if err != nil {
-				value = ""
+				return HandleError("reading %s from git config: %v", key, err)
 			}
 			if jsonOutput {
 				return outputJSON(map[string]interface{}{
