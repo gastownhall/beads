@@ -2,10 +2,16 @@ load("@rules_go//go:def.bzl", "go_library")
 
 go_library(
     name = "storagecontract",
-    srcs = ["history_presence.go"],
+    srcs = [
+        "external_ref_history_batch.go",
+        "history_presence.go",
+    ],
     importpath = "github.com/steveyegge/beads/internal/storage/storagecontract",
     visibility = ["//:__subpackages__"],
-    deps = ["//internal/storage"],
+    deps = [
+        "//internal/storage",
+        "//internal/storage/issueops",
+    ],
 )
 
 # --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
