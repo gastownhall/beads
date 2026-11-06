@@ -523,6 +523,12 @@ func failVersionBump(err error) versionBumpOutcome {
 // is now kept (settleBdVersionStamp), so the line says the next command
 // retries, and names the way to look further.
 func noticeVersionBumpFailure(err error) {
+	// Same stderr contract as noticeSharedMigrateRefusal: under --json this
+	// stream may carry the command's own machine-readable error a moment
+	// later, and prose in front of it makes that unparseable.
+	if jsonOutput {
+		return
+	}
 	fmt.Fprintf(os.Stderr,
 		"bd upgraded to %s, but finishing the upgrade failed: %v\n"+
 			"The next bd command will retry it; run 'bd doctor' to diagnose.\n",
