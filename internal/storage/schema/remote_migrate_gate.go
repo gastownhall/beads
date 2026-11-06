@@ -681,11 +681,19 @@ func (e *RemoteMigrateGateError) Options() []GateOption {
 	if e.Shared {
 		sharedRisk = "; on this shared server it also promotes the schema for every co-resident client, and clients still on an older bd will refuse the database until upgraded"
 	}
+	// bd-bt60zz (#6687): bootstrap never replaces an existing database, so
+	// every adopt path below carries what has to happen before it. On server
+	// storage the database is not a directory in this workspace: the move is a
+	// host operation the commands cannot express, so it is a precondition.
+	adoptCommands, adoptPrereq, adoptNoOp := EmbeddedAdoptCommands(), embeddedAdoptPrereq, embeddedAdoptNoOpRisk
+	if e.serverStorage() {
+		adoptCommands, adoptPrereq, adoptNoOp = []string{"bd bootstrap"}, serverAdoptPrereq, serverAdoptNoOpRisk
+	}
 	adopt := GateOption{
 		ID:       "adopt",
-		When:     "another machine has already migrated and pushed",
-		Commands: []string{"bd bootstrap"},
-		Risk:     "re-clones and replaces the local database; push or export unpushed work first or it is lost" + sharedRisk,
+		When:     "another machine has already migrated and pushed; " + adoptPrereq,
+		Commands: adoptCommands,
+		Risk:     adoptNoOp + "; the re-clone brings only what the remote has, so unpushed local work survives only in the moved-aside copy (keep it; restore an old-release export with bd import <backup-file> if one exists)" + sharedRisk,
 	}
 	// #6575: exactly ONE option, and it is the pull. The blunt pair below is
 	// actively wrong in this state — `bd migrate --force` is the bug, its
@@ -752,7 +760,7 @@ func (e *RemoteMigrateGateError) Options() []GateOption {
 	switch e.Decision {
 	case gateDecisionAdopt:
 		// Remote is confirmed ahead: migrate is not a valid path, only adopt.
-		adopt.When = "the remote is already migrated (confirmed by the gate) — adopt it"
+		adopt.When = "the remote is already migrated (confirmed by the gate) — adopt it; " + adoptPrereq
 		return []GateOption{adopt}
 	case gateDecisionAdoptFastForward:
 		// Remote is confirmed ahead AND this clone is a strict ancestor with a
@@ -766,18 +774,18 @@ func (e *RemoteMigrateGateError) Options() []GateOption {
 		}
 		return []GateOption{{
 			ID:       "adopt-fast-forward",
-			When:     "the remote is already migrated and this clone can fast-forward to it losslessly (no unpushed commits, clean working set)",
-			Commands: []string{"bd bootstrap"},
-			Risk:     ffRisk,
+			When:     "the remote is already migrated and this clone can fast-forward to it losslessly (no unpushed commits, clean working set); " + adoptPrereq,
+			Commands: adoptCommands,
+			Risk:     ffRisk + "; " + adoptNoOp,
 		}}
 	case gateDecisionForkSkew:
 		// Already forked: neither migrate nor a plain adopt is unconditionally
 		// safe; the operator must choose a canonical clone first.
 		return []GateOption{{
 			ID:       "reconcile-fork",
-			When:     "the schema has already forked (different content for migration(s) " + FormatMigrationVersions(e.SkewVersions) + "); choose ONE clone as canonical",
-			Commands: []string{"bd export --all -o backup.jsonl", "bd bootstrap"},
-			Risk:     "re-bootstrapping the non-canonical clones discards their unpushed work; export it first",
+			When:     "the schema has already forked (different content for migration(s) " + FormatMigrationVersions(e.SkewVersions) + "); choose ONE clone as canonical, make sure the remote holds its database, then on each OTHER clone: " + adoptPrereq,
+			Commands: adoptCommands,
+			Risk:     "re-adopting a non-canonical clone takes its unpushed work out of the live database: it survives only in that clone's moved-aside copy (export it with a compatible older bd first if you need it as JSONL; this binary's export can fail while migrations are pending); " + adoptNoOp + sharedRisk,
 		}}
 	case gateDecisionSharedNoRemote:
 		// No remote means no adopt path — the database is the single copy every
@@ -799,6 +807,32 @@ func (e *RemoteMigrateGateError) Options() []GateOption {
 			adopt,
 		}
 	}
+}
+
+// The adopt options' shared preconditions and no-op risk, per storage layout
+// (bd-bt60zz, #6687). The server form names no path: a shared or custom
+// server's data_dir is its own configuration, which the gate cannot see.
+const (
+	embeddedAdoptPrereq = "run from the directory containing .beads with every bd process on this workspace stopped; " +
+		"choose an unused destination if .beads/backup/embeddeddolt.pre-adopt already exists, and move the configured " +
+		"database path instead if this workspace sets one"
+	embeddedAdoptNoOpRisk = "bd bootstrap alone never replaces an existing database (it reports Nothing to do and changes " +
+		"nothing), so the local database is moved aside first; never delete the moved-aside copy"
+	serverAdoptPrereq = "ONLY after, on the host serving this database: downtime coordinated with every client of the " +
+		"server, the serving process stopped, ONLY this database's directory moved out of the server's actual data_dir " +
+		"(.beads/dolt/ only for a server bd runs for this workspace; a shared or custom server's data_dir is wherever it " +
+		"is configured — see docs/recovery/init-safety.md#re-clone-gotchas), and the server restarted as required; then " +
+		"run from a workspace connected directly to that server, not through a proxy"
+	serverAdoptNoOpRisk = "bd bootstrap alone never replaces an existing database (it reports that the database already " +
+		"exists and changes nothing), so the database is moved out of the server's data_dir first; every client of the " +
+		"server loses access during the downtime; never delete the moved copy"
+)
+
+// serverStorage reports whether this refusal came from a database a dolt
+// sql-server serves rather than this workspace's embedded directory, which
+// decides what an adopt has to move and where.
+func (e *RemoteMigrateGateError) serverStorage() bool {
+	return e.Shared || e.Proxied
 }
 
 // IsRemoteMigrateGateError reports whether err (or any error it wraps) is a
