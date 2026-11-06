@@ -704,3 +704,74 @@ func TestRemoteMigrateGateAdoptDirectiveNamesMoveAside(t *testing.T) {
 		})
 	}
 }
+
+// TestRemoteMigrateGateUnchangedRemedies pins the remedies #6687 did NOT
+// touch. The fix reshaped only the adopt paths (their bodies, options and
+// directives); the data-behind stop, the shared-no-remote consent path and
+// the blunt designated-migrator path must keep their exact commands and
+// contracts, because each is already correct for its state — a pull for a
+// clone behind on data, a consent verb for a shared server with no remote,
+// and the single-designated-migrator migrate for the undecided stop. If one
+// of these assertions fails, the adopt rework overreached.
+func TestRemoteMigrateGateUnchangedRemedies(t *testing.T) {
+	t.Run("data-behind keeps its single pull option", func(t *testing.T) {
+		e := &RemoteMigrateGateError{CurrentVersion: 53, LatestVersion: 53, Pending: 14, FallbackReason: "data-behind"}
+		if !e.IsDataBehind() {
+			t.Fatal("fixture does not build the data-behind stop")
+		}
+		if msg := e.UserMessage(); !strings.Contains(msg, "Pull first — that is the whole remedy") {
+			t.Errorf("data-behind body lost its pull-first framing:\n%s", msg)
+		}
+		opts := e.Options()
+		if len(opts) != 1 || opts[0].ID != "pull-first" {
+			t.Fatalf("data-behind options = %+v; want the single pull-first option", opts)
+		}
+		if len(opts[0].Commands) != 1 || opts[0].Commands[0] != DataBehindRemedyCommand {
+			t.Errorf("pull-first commands = %v; want [%s]", opts[0].Commands, DataBehindRemedyCommand)
+		}
+	})
+
+	t.Run("shared-no-remote keeps its consent option", func(t *testing.T) {
+		e := &RemoteMigrateGateError{CurrentVersion: 53, LatestVersion: 67, Pending: 14, Decision: gateDecisionSharedNoRemote, Shared: true}
+		if msg := e.UserMessage(); !strings.Contains(msg, "Read commands keep working") {
+			t.Errorf("shared-no-remote body lost its reads-keep-working promise:\n%s", msg)
+		}
+		opts := e.Options()
+		if len(opts) != 1 || opts[0].ID != "migrate-shared" {
+			t.Fatalf("shared-no-remote options = %+v; want the single migrate-shared option", opts)
+		}
+		if len(opts[0].Commands) != 1 || opts[0].Commands[0] != SharedConsentCommand {
+			t.Errorf("migrate-shared commands = %v; want [%s]", opts[0].Commands, SharedConsentCommand)
+		}
+		if e.EscapeHint() != SharedConsentCommand {
+			t.Errorf("shared-no-remote escape hint = %q; want %s", e.EscapeHint(), SharedConsentCommand)
+		}
+	})
+
+	t.Run("blunt keeps the designated-migrator path", func(t *testing.T) {
+		e := &RemoteMigrateGateError{CurrentVersion: 53, LatestVersion: 67, Pending: 14}
+
+		for _, want := range []string{
+			"You are the designated migrator (only ONE machine should be)",
+			"Several machines on one remote? Only ONE migrates",
+		} {
+			if msg := e.UserMessage(); !strings.Contains(msg, want) {
+				t.Errorf("blunt body lost %q:\n%s", want, msg)
+			}
+		}
+		if e.EscapeHint() != "bd migrate --force" {
+			t.Errorf("blunt escape hint = %q; want bd migrate --force", e.EscapeHint())
+		}
+		opts := e.Options()
+		if len(opts) != 2 || opts[0].ID != "migrate" || opts[1].ID != "adopt" {
+			t.Fatalf("blunt options = %+v; want migrate then adopt", opts)
+		}
+		wantMigrate := []string{"bd migrate --force", "bd dolt push"}
+		if len(opts[0].Commands) != 2 || opts[0].Commands[0] != wantMigrate[0] || opts[0].Commands[1] != wantMigrate[1] {
+			t.Errorf("migrate option commands = %v; want %v", opts[0].Commands, wantMigrate)
+		}
+		if !strings.Contains(opts[0].When, "single designated migrator") {
+			t.Errorf("migrate option lost its single-migrator precondition:\n%s", opts[0].When)
+		}
+	})
+}
