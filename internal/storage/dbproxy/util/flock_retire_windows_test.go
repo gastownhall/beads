@@ -71,3 +71,108 @@ func TestRetirableLockRetireWhileHeld(t *testing.T) {
 	require.NoError(t, err, "fresh acquisition after the retired lease is released")
 	fresh.Unlock()
 }
+
+// createJunction makes link a directory junction (a mount-point reparse
+// point) to target, which needs no privilege on native Windows.
+func createJunction(link, target string) error {
+	if err := os.Mkdir(link, 0o700); err != nil {
+		return err
+	}
+	substitute, err := windows.UTF16FromString(`\??\` + target)
+	if err != nil {
+		return err
+	}
+	printName, err := windows.UTF16FromString(target)
+	if err != nil {
+		return err
+	}
+	// REPARSE_DATA_BUFFER, MountPointReparseBuffer variant.
+	pathBuf := append(append([]uint16{}, substitute...), printName...)
+	buf := make([]byte, 16+2*len(pathBuf))
+	le := func(off int, v uint32, size int) {
+		for i := 0; i < size; i++ {
+			buf[off+i] = byte(v >> (8 * i))
+		}
+	}
+	le(0, windows.IO_REPARSE_TAG_MOUNT_POINT, 4)
+	le(4, uint32(8+2*len(pathBuf)), 2)       // ReparseDataLength
+	le(8, 0, 2)                              // SubstituteNameOffset
+	le(10, uint32(2*(len(substitute)-1)), 2) // SubstituteNameLength
+	le(12, uint32(2*len(substitute)), 2)     // PrintNameOffset
+	le(14, uint32(2*(len(printName)-1)), 2)  // PrintNameLength
+	for i, c := range pathBuf {
+		le(16+2*i, uint32(c), 2)
+	}
+	name, err := windows.UTF16PtrFromString(link)
+	if err != nil {
+		return err
+	}
+	h, err := windows.CreateFile(name, windows.GENERIC_WRITE, 0, nil, windows.OPEN_EXISTING,
+		windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if err != nil {
+		return err
+	}
+	defer windows.CloseHandle(h)
+	var returned uint32
+	return windows.DeviceIoControl(h, windows.FSCTL_SET_REPARSE_POINT, &buf[0], uint32(len(buf)), nil, 0, &returned, nil)
+}
+
+// TestTryRetirableLockRefusesReparsePoint pins that a retirable lease never
+// lands on whatever a final symlink or junction points at: acquisition
+// fails, and the link and its target are left as they were.
+func TestTryRetirableLockRefusesReparsePoint(t *testing.T) {
+	t.Run("symlink", func(t *testing.T) {
+		dir := t.TempDir()
+		target := filepath.Join(dir, "target")
+		require.NoError(t, os.WriteFile(target, []byte("target"), 0o600))
+		link := filepath.Join(dir, "life.lock")
+		if err := os.Symlink(target, link); err != nil {
+			t.Skipf("creating a file symlink needs privilege or developer mode: %v", err)
+		}
+		if info, err := os.Lstat(link); err != nil || info.Mode()&os.ModeSymlink == 0 {
+			if underWine() {
+				t.Skipf("Wine's CreateSymbolicLinkW reports success without creating a link: %v", err)
+			}
+			t.Fatalf("os.Symlink did not create a symlink: %v", err)
+		}
+
+		lease, err := TryRetirableLock(link)
+		if err == nil {
+			lease.Unlock()
+			t.Fatal("retirable acquisition followed a final symlink")
+		}
+		info, err := os.Lstat(link)
+		require.NoError(t, err, "the link must survive the refusal")
+		require.NotZero(t, info.Mode()&os.ModeSymlink, "the link must still be a link")
+		got, err := os.ReadFile(target)
+		require.NoError(t, err)
+		require.Equal(t, "target", string(got), "the target must be unchanged")
+		free, err := TryLock(target)
+		require.NoError(t, err, "the target must not be left locked")
+		free.Unlock()
+	})
+	t.Run("junction", func(t *testing.T) {
+		dir := t.TempDir()
+		target := filepath.Join(dir, "target")
+		require.NoError(t, os.Mkdir(target, 0o700))
+		require.NoError(t, os.WriteFile(filepath.Join(target, "keep"), []byte("keep"), 0o600))
+		link := filepath.Join(dir, "life.lock")
+		if err := createJunction(link, target); err != nil {
+			if underWine() {
+				t.Skipf("Wine does not support FSCTL_SET_REPARSE_POINT: %v", err)
+			}
+			require.NoError(t, err)
+		}
+
+		lease, err := TryRetirableLock(link)
+		if err == nil {
+			lease.Unlock()
+			t.Fatal("retirable acquisition opened a final junction")
+		}
+		_, err = os.Lstat(link)
+		require.NoError(t, err, "the junction must survive the refusal")
+		got, err := os.ReadFile(filepath.Join(target, "keep"))
+		require.NoError(t, err)
+		require.Equal(t, "keep", string(got), "the target must be unchanged")
+	})
+}
