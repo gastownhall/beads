@@ -372,6 +372,71 @@ func TestGenerateHookSection_HookNameInMessages(t *testing.T) {
 	}
 }
 
+// TestGenerateHookSectionHasNoForeignMarkers pins the marker invariants every
+// marker-scanning consumer relies on. doctor's detectHookMarkerState counts
+// unanchored BEGIN/END BEADS INTEGRATION substrings, so each may appear only
+// as the section's own marker line; the shell classifier the section itself
+// emits must never match its own chain-inspection literals, so the legacy
+// markers ("# bd (beads)", "# bd-shim", "# bd-hooks-version: ") must never
+// appear intact — the classifier builds them from adjacent quoted strings.
+// The chained sibling must still be resolved and named (GH#6751).
+func TestGenerateHookSectionHasNoForeignMarkers(t *testing.T) {
+	for _, hookName := range managedHookNames {
+		section := generateHookSection(hookName)
+		for _, marker := range []struct{ name, marker string }{
+			{"begin prefix", hookSectionBeginPrefix},
+			{"end prefix", hookSectionEndPrefix},
+			{"unanchored begin", "BEGIN BEADS INTEGRATION"},
+			{"unanchored end", "END BEADS INTEGRATION"},
+		} {
+			if got := strings.Count(section, marker.marker); got != 1 {
+				t.Errorf("%s: %s appears %d times in the section, want exactly 1", hookName, marker.name, got)
+			}
+		}
+		for _, legacy := range []string{inlineHookMarker, "# bd-shim", "# bd-hooks-version: "} {
+			if strings.Contains(section, legacy) {
+				t.Errorf("%s: section embeds intact legacy marker %q; the classifier literals must stay split", hookName, legacy)
+			}
+		}
+		if !strings.Contains(section, `case "$0" in`) {
+			t.Errorf("%s: section no longer resolves the chained sibling from $0 (GH#6751)", hookName)
+		}
+		if !strings.Contains(section, hookName+".old") {
+			t.Errorf("%s: section no longer names its chained sibling %s.old (GH#6751)", hookName, hookName)
+		}
+	}
+}
+
+// TestInjectRemoveHookSectionRoundTrip pins user-content survival across the
+// inject → re-inject → remove cycle on composed content: injecting the
+// current section over user content keeps the user content, a second
+// injection over content that already carries the current section is a
+// byte-identical no-op, and removing the section restores the original user
+// content exactly.
+func TestInjectRemoveHookSectionRoundTrip(t *testing.T) {
+	for _, hookName := range managedHookNames {
+		hookName := hookName
+		t.Run(hookName, func(t *testing.T) {
+			section := generateHookSection(hookName)
+			original := "#!/bin/sh\n# team lint gate\n./run-linters.sh \"$@\"\n"
+			composed := injectHookSection(original, section)
+			if !strings.Contains(composed, "./run-linters.sh \"$@\"") {
+				t.Fatalf("composed hook lost user content:\n%s", composed)
+			}
+			if again := injectHookSection(composed, section); again != composed {
+				t.Errorf("re-injecting the current section is not a no-op")
+			}
+			content, found := removeHookSection(composed)
+			if !found {
+				t.Fatalf("removeHookSection did not find the section:\n%s", composed)
+			}
+			if content != original {
+				t.Errorf("remove did not restore the original user content:\ngot:\n%s\nwant:\n%s", content, original)
+			}
+		})
+	}
+}
+
 func TestInjectHookSection(t *testing.T) {
 	section := generateHookSection("pre-commit")
 

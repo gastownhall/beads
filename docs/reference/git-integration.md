@@ -163,15 +163,34 @@ warns and runs directly without a deadline; that last-resort path can hang until
 the hook itself returns.
 
 Already-installed hook sections are not refreshed automatically. After upgrading
-to a release that changed the generated timeout probe — the name-only check,
-the uutils coreutils banner, or the Perl fallback that could not stop `bd`
-([#7753](https://github.com/gastownhall/beads/issues/7753)) — run
-`bd hooks install` once to refresh
-already-installed canonical hook sections. Automatic generated-policy adoption is
-tracked separately.
+to a release that changed the generated policy — the timeout probe fixes
+([#7753](https://github.com/gastownhall/beads/issues/7753)), or the missing-`bd`
+chained-gate fallback and deadline refusal below
+([#6751](https://github.com/gastownhall/beads/issues/6751)) — run
+`bd hooks install` once to refresh already-installed canonical hook sections.
+Automatic generated-policy adoption is tracked separately.
 
-When the timeout is reached, beads prints a warning and lets the git
-operation proceed — the commit or push is not blocked.
+When the timeout is reached, the shim looks for a chained gate. On
+`pre-commit` and `pre-push` with a foreign chained `<hook>.old` present, the
+chained gate's result is not known — `bd` was stopped mid-wait — so the shim
+refuses the git operation with the timeout status (124 from a coreutils
+`timeout`, 142 from the Perl supervisor) and names the hook and chain;
+raise `BEADS_HOOK_TIMEOUT` or use `--no-verify` to skip the gate. Without a
+chained gate, and on the observe-only hooks (`post-checkout`, `post-merge`,
+`prepare-commit-msg`), a timeout prints a warning and lets the git operation
+proceed.
+
+### When bd is missing from PATH
+
+The generated section is shell policy, not a bare delegation: when `bd`
+cannot be resolved at all — a GUI git client, cron, or a minimal `PATH` — the
+section runs the chained `<hook>.old` hook itself with shell builtins, with
+`BD_GIT_HOOK=1` exported and the hook's original arguments and stdin, so a
+foreign chained gate still decides the git operation
+([#6751](https://github.com/gastownhall/beads/issues/6751)). A chain that is
+itself a beads hook is left alone (it would call back), and a chain that is
+missing or not executable is a silent no-op — the same behavior `bd hooks
+run` has when it is available.
 
 ## Conflict Resolution
 

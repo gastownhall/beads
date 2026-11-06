@@ -228,6 +228,40 @@ func TestApplyHookMigrationExecution_Idempotent(t *testing.T) {
 	}
 }
 
+// TestPlanHookMigration_CurrentSectionNeedsNone guards the generator against
+// its own marker consumers: a hook file that already carries the current
+// generated section — composed with user content, as `bd hooks install`
+// writes it — must classify as marker_managed and need no migration. An
+// intact legacy marker embedded in the section, or an unbalanced marker the
+// classifier literals leaked, would turn this into a migration instead.
+func TestPlanHookMigration_CurrentSectionNeedsNone(t *testing.T) {
+	repoDir, hooksDir := setupHookMigrationRepo(t)
+	preCommitPath := filepath.Join(hooksDir, "pre-commit")
+
+	writeHookMigrationFile(t, preCommitPath, "#!/bin/sh\n# team lint gate\n./run-linters.sh \"$@\"\n"+generateHookSection("pre-commit"))
+
+	plan, err := doctor.PlanHookMigration(repoDir)
+	if err != nil {
+		t.Fatalf("PlanHookMigration failed: %v", err)
+	}
+	for _, hook := range plan.Hooks {
+		if hook.Name != "pre-commit" {
+			continue
+		}
+		if !hook.Exists {
+			t.Fatalf("plan did not see the hook file")
+		}
+		if hook.MarkerState != "valid" || hook.State != "marker_managed" {
+			t.Fatalf("current generated section not recognized as managed: marker_state=%q state=%q", hook.MarkerState, hook.State)
+		}
+		if hook.NeedsMigration {
+			t.Fatalf("current generated section must not need migration: %+v", hook)
+		}
+		return
+	}
+	t.Fatal("plan did not include pre-commit")
+}
+
 func TestApplyHookMigrationExecution_RetireCollisionFailsBeforeWrites(t *testing.T) {
 	repoDir, hooksDir := setupHookMigrationRepo(t)
 	preCommitPath := filepath.Join(hooksDir, "pre-commit")

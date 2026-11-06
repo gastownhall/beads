@@ -1208,6 +1208,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The generated git-hook section no longer silently skips the chained
+  `<hook>.old` gate when `bd` is missing from PATH (GH#6751). The section ran
+  only inside `if command -v bd`, so under a GUI git client, cron, or a
+  minimal PATH a foreign chained gate — the user's own lint or test gate —
+  was bypassed without a trace. The section now resolves the chained sibling
+  from `$0` with shell builtins, classifies readable chains the way the
+  Go-side recursion guard does (a chain that is itself a beads hook is left
+  alone; missing or non-executable chains stay silent no-ops), and runs a
+  foreign chain itself with `BD_GIT_HOOK=1` and the hook's original
+  arguments, so the chain still decides the git operation. The section also
+  stopped swallowing exit status 3 with a "database not initialized" warning
+  — `bd hooks run` never opens a store, so a 3 could only be a chained
+  hook's own status. And a recognized hook timeout (coreutils 124, Perl
+  supervisor 142) on `pre-commit` or `pre-push` with a foreign chained gate
+  now refuses the operation with the backend status — the chained gate's
+  result is not known after `bd` was stopped mid-wait — instead of letting
+  the commit or push through; without such a gate, and on the observe-only
+  hooks, a timeout still only warns. Run `bd hooks install` once to refresh
+  already-installed sections.
 - `bd config get` for a config.yaml, git-config or user-global key no longer
   opens the database just because one exists, so it answers from those files
   while the Dolt server is down instead of failing the open (GH#5108). In
