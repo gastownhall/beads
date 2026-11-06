@@ -283,7 +283,7 @@ func runRecipe(name string) error {
 	// so bd manages a section in it rather than the whole file (GH#7431). A
 	// [recipes.copilot] of .beads/recipes.toml replaces the built-in and
 	// runs as any other file recipe below.
-	if !recipe.Workspace && strings.ToLower(strings.Trim(name, "-")) == "copilot" && !setupRemove {
+	if !recipe.Workspace && strings.ToLower(strings.Trim(name, "-")) == "copilot" {
 		return runCopilotRecipe(*recipe)
 	}
 
@@ -410,8 +410,11 @@ func translateSetupError(err error) error {
 // runCopilotRecipe runs the built-in copilot recipe, whose plugin manifest
 // comes from recipe.
 func runCopilotRecipe(recipe recipes.Recipe) error {
-	if setupCheck {
+	switch {
+	case setupCheck:
 		return translateSetupError(setup.CheckCopilot())
+	case setupRemove:
+		return translateSetupError(setup.RemoveCopilot())
 	}
 	manifest, err := recipes.ContentForPath(recipe, setup.CopilotManifestPath)
 	if err != nil {

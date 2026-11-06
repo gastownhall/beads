@@ -360,3 +360,167 @@ func writeCopilotManifest(t *testing.T, env copilotEnv) {
 }
 
 func copilotText(s string) *string { return &s }
+
+// --remove takes the section out of a file install appended it to, giving
+// back the user's text up to removeBeadsSection's normalization of the line
+// breaks next to the section, and keeps unmarked text such as an older bd's
+// static template.
+func TestRemoveCopilotKeepsUserText(t *testing.T) {
+	for _, tt := range []struct{ name, content, want string }{
+		{name: "final newline", content: "# Rules\n\nBe kind.\n", want: "# Rules\n\nBe kind.\n"},
+		{name: "no final newline", content: "# Rules\n\nBe kind.", want: "# Rules\n\nBe kind.\n"},
+		{name: "extra final blank lines", content: "# Rules\n\n\n", want: "# Rules\n"},
+		{name: "CRLF", content: "# Rules\r\n\r\nBe kind.\r\n", want: "# Rules\r\n\r\nBe kind.\r\n"},
+		{name: "legacy static template", content: recipes.CopilotInstructionsTemplate, want: recipes.CopilotInstructionsTemplate},
+		{name: "legacy template with user notes", content: recipes.CopilotInstructionsTemplate + "\n## Team additions\n\nOur own rule.\n", want: recipes.CopilotInstructionsTemplate + "\n## Team additions\n\nOur own rule.\n"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			env, _, _ := newCopilotTestEnv(t)
+			writeCopilotInstructions(t, env, tt.content, 0o644)
+			if err := installCopilot(env); err != nil {
+				t.Fatalf("installCopilot: %v", err)
+			}
+			if err := removeCopilot(env); err != nil {
+				t.Fatalf("removeCopilot: %v", err)
+			}
+			if got := readCopilotFile(t, env.instructionsPath); got != tt.want {
+				t.Errorf("instructions are %q, want %q", got, tt.want)
+			}
+			if _, err := os.Stat(env.manifestPath); !os.IsNotExist(err) {
+				t.Errorf("--remove kept the manifest, stat err = %v", err)
+			}
+		})
+	}
+}
+
+// --remove leaves a file it holds no section in, however empty, a symlink and
+// its target, and a file whose markers are malformed, which it refuses
+// before removing anything.
+func TestRemoveCopilotLeavesFilesWithoutASection(t *testing.T) {
+	for _, tt := range []struct {
+		name, content string
+		fails         bool
+	}{
+		{name: "unmarked", content: "# Rules\n"},
+		{name: "empty", content: ""},
+		{name: "blank", content: "\n"},
+		{name: "BEGIN without END", content: "# Rules\n\n" + agentsBeginMarker + "\nbody\n", fails: true},
+		{name: "END before BEGIN", content: agentsEndMarker + "\n" + agentsBeginMarker + "\n", fails: true},
+		{name: "stray inline BEGIN", content: "# My rules\n\nSee " + agentsBeginMarker + " for the old note.\n\nKEEP-ME-1 user paragraph.\n", fails: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			env, _, _ := newCopilotTestEnv(t)
+			writeCopilotInstructions(t, env, tt.content, 0o644)
+			if err := os.MkdirAll(filepath.Dir(env.manifestPath), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(env.manifestPath, []byte(testCopilotManifest), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			err := removeCopilot(env)
+			if (err != nil) != tt.fails {
+				t.Errorf("removeCopilot = %v, want failure %v", err, tt.fails)
+			}
+			if got := readCopilotFile(t, env.instructionsPath); got != tt.content {
+				t.Errorf("--remove changed the instructions to %q", got)
+			}
+			if _, err := os.Stat(env.manifestPath); (err == nil) != tt.fails {
+				t.Errorf("manifest stat err = %v; want it kept only when --remove fails", err)
+			}
+		})
+	}
+
+	t.Run("symlink", func(t *testing.T) {
+		env, _, _ := newCopilotTestEnv(t)
+		if err := os.MkdirAll(filepath.Dir(env.instructionsPath), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		target := filepath.Join(filepath.Dir(env.instructionsPath), "real.md")
+		if err := os.WriteFile(target, []byte(copilotMinimalSection), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, env.instructionsPath); err != nil {
+			t.Skipf("symlink: %v", err)
+		}
+		writeCopilotManifest(t, env)
+		if err := removeCopilot(env); err != nil {
+			t.Fatalf("removeCopilot: %v", err)
+		}
+		if got, err := os.Readlink(env.instructionsPath); err != nil || got != target {
+			t.Errorf("instructions link is %q, %v; want it kept, to %q", got, err, target)
+		}
+		if got := readCopilotFile(t, target); got != copilotMinimalSection {
+			t.Errorf("--remove changed the link's target to %q", got)
+		}
+		if _, err := os.Stat(env.manifestPath); !os.IsNotExist(err) {
+			t.Errorf("--remove kept the manifest beside a symlink, stat err = %v", err)
+		}
+	})
+
+	t.Run("missing instructions", func(t *testing.T) {
+		env, _, _ := newCopilotTestEnv(t)
+		writeCopilotManifest(t, env)
+		if err := removeCopilot(env); err != nil {
+			t.Fatalf("removeCopilot: %v", err)
+		}
+		if _, err := os.Lstat(env.instructionsPath); !os.IsNotExist(err) {
+			t.Errorf("--remove created %s, lstat err = %v", env.instructionsPath, err)
+		}
+		if _, err := os.Stat(env.manifestPath); !os.IsNotExist(err) {
+			t.Errorf("--remove kept the manifest, stat err = %v", err)
+		}
+	})
+}
+
+// --remove with nothing installed says so and succeeds.
+func TestRemoveCopilotNothingInstalled(t *testing.T) {
+	env, stdout, _ := newCopilotTestEnv(t)
+	if err := removeCopilot(env); err != nil {
+		t.Fatalf("removeCopilot: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "No integration files found") {
+		t.Errorf("--remove with nothing installed does not say so:\n%s", stdout)
+	}
+}
+
+// A file install created with the section alone goes with the section, and
+// so does its directory when that leaves it empty, but not one holding
+// workflows.
+func TestRemoveCopilotDeletesSectionOnlyFile(t *testing.T) {
+	for _, workflows := range []bool{false, true} {
+		name := "empty .github"
+		if workflows {
+			name = ".github holding workflows"
+		}
+		t.Run(name, func(t *testing.T) {
+			env, _, _ := newCopilotTestEnv(t)
+			github := filepath.Dir(env.instructionsPath)
+			if workflows {
+				if err := os.MkdirAll(filepath.Join(github, "workflows"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := installCopilot(env); err != nil {
+				t.Fatalf("installCopilot: %v", err)
+			}
+			if got := readCopilotFile(t, env.instructionsPath); got != copilotMinimalSection {
+				t.Fatalf("install created %q, want the section alone", got)
+			}
+			if err := removeCopilot(env); err != nil {
+				t.Fatalf("removeCopilot: %v", err)
+			}
+			if _, err := os.Lstat(env.instructionsPath); !os.IsNotExist(err) {
+				t.Errorf("--remove kept the section-only file, lstat err = %v", err)
+			}
+			if _, err := os.Stat(github); (err == nil) != workflows {
+				t.Errorf(".github stat err = %v; want it kept only when it holds workflows", err)
+			}
+			if _, err := os.Stat(env.manifestPath); !os.IsNotExist(err) {
+				t.Errorf("--remove kept the manifest, stat err = %v", err)
+			}
+			if _, err := os.Stat(filepath.Dir(env.manifestPath)); !os.IsNotExist(err) {
+				t.Errorf("--remove kept the emptied manifest directory, stat err = %v", err)
+			}
+		})
+	}
+}

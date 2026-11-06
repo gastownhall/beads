@@ -1034,6 +1034,47 @@ func TestRunRecipe_CopilotCheckReportsMissingSection(t *testing.T) {
 	}
 }
 
+// --remove takes the Beads section and the plugin manifest but gives back
+// the user's own instructions exactly (GH#7431, from #7433).
+func TestRunRecipe_CopilotRemoveKeepsUserInstructions(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	instructions := filepath.Join(tmpDir, ".github", "copilot-instructions.md")
+	if err := os.MkdirAll(filepath.Dir(instructions), 0o755); err != nil {
+		t.Fatalf("mkdir .github: %v", err)
+	}
+	const userContent = "# Project conventions\n\nAlways run make check.\n"
+	if err := os.WriteFile(instructions, []byte(userContent), 0o644); err != nil {
+		t.Fatalf("seed instructions: %v", err)
+	}
+
+	t.Chdir(tmpDir)
+	t.Setenv("BEADS_DIR", "")
+	resetSetupResolutionCaches(t)
+	resetSetupGlobals(t)
+
+	if _, err := captureStdoutWithError(t, func() error { return runRecipe("copilot") }); err != nil {
+		t.Fatalf("bd setup copilot: %v", err)
+	}
+
+	resetSetupGlobals(t)
+	setupRemove = true
+	if _, err := captureStdoutWithError(t, func() error { return runRecipe("copilot") }); err != nil {
+		t.Fatalf("bd setup copilot --remove: %v", err)
+	}
+
+	data, err := os.ReadFile(instructions)
+	if err != nil {
+		t.Fatalf("instructions should survive --remove: %v", err)
+	}
+	if string(data) != userContent {
+		t.Fatalf("--remove left\n%q\nwant the user's instructions\n%q", data, userContent)
+	}
+	if _, err := os.Stat(filepath.Join(tmpDir, ".copilot-plugin", "plugin.json")); !os.IsNotExist(err) {
+		t.Fatalf("expected the beads-owned manifest to be removed, got err=%v", err)
+	}
+}
+
 // The built-in copilot recipe keeps a managed Beads section in
 // .github/copilot-instructions.md, a file the repository owns, instead of
 // writing the whole file: install keeps the user's text, --check tells a file
@@ -1189,6 +1230,26 @@ func TestRunRecipe_CopilotKeepsExistingInstructions(t *testing.T) {
 			if !strings.Contains(out, path) {
 				t.Errorf("--check did not name %s; output:\n%s", path, out)
 			}
+		}
+	})
+
+	t.Run("AC-4 remove leaves the user's text", func(t *testing.T) {
+		user := "# Team rules\n\nKeep these rules.\n"
+		workspace(t, &user)
+		if _, err := run(t, nil); err != nil {
+			t.Fatalf("bd setup copilot: %v", err)
+		}
+		if _, err := run(t, &setupRemove); err != nil {
+			t.Fatalf("bd setup copilot --remove: %v", err)
+		}
+		if got := read(t, instructionsPath); got != user {
+			t.Errorf("--remove left\n%q\nwant\n%q", got, user)
+		}
+		if _, err := os.Stat(manifestPath); !os.IsNotExist(err) {
+			t.Errorf("--remove kept the plugin manifest, stat err = %v", err)
+		}
+		if info, err := os.Stat(".github"); err != nil || !info.IsDir() {
+			t.Errorf("--remove should keep .github, stat err = %v", err)
 		}
 	})
 }
