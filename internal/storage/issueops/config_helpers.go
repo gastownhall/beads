@@ -35,6 +35,17 @@ func ParseCommaSeparatedList(value string) []string {
 	return workapi.ParseCommaSeparatedList(value)
 }
 
+// ResolveCustomConfigInTx resolves the custom status and type vocabulary one
+// read needs, table-first with pre-migration compatibility: a missing
+// normalized table (MySQL/Dolt 1146) falls through to the legacy config
+// rows, while every other read error is returned, so a failed query cannot
+// masquerade as a successful empty vocabulary and pin the caller's fallback
+// (GH#5581). Per-row scan errors are still skipped leniently; rows.Err()
+// failures are returned. When either normalized table answered empty the
+// legacy config rows are read even if the other table was populated, and if
+// that legacy read fails after a partial table success the partial result is
+// discarded along with the error, so an incomplete resolution is never
+// certified as a loaded vocabulary.
 func ResolveCustomConfigInTx(ctx context.Context, tx DBTX) (statuses []types.CustomStatus, customTypes []string, err error) {
 	statuses, statusesFromTable, err := resolveCustomStatusesFromTableInTx(ctx, tx)
 	if err != nil {
@@ -50,13 +61,7 @@ func ResolveCustomConfigInTx(ctx context.Context, tx DBTX) (statuses []types.Cus
 
 	cfg, err := getConfigKeysInTx(ctx, tx, "status.custom", "types.custom")
 	if err != nil {
-		if !statusesFromTable {
-			if yamlStatuses := config.GetCustomStatusesFromYAML(); len(yamlStatuses) > 0 {
-				statuses = ParseStatusFallback(yamlStatuses)
-			}
-		}
-		// The types.custom row is unreadable; the remaining layers still compose.
-		return statuses, ComposeCustomTypes(customTypes, "", config.GetCustomTypesFromYAML()), nil
+		return nil, nil, err
 	}
 
 	if !statusesFromTable {
@@ -74,7 +79,12 @@ func ResolveCustomConfigInTx(ctx context.Context, tx DBTX) (statuses []types.Cus
 func resolveCustomStatusesFromTableInTx(ctx context.Context, tx DBTX) ([]types.CustomStatus, bool, error) {
 	rows, err := tx.QueryContext(ctx, "SELECT name, category FROM custom_statuses ORDER BY name")
 	if err != nil {
-		return nil, false, nil
+		if isTableNotExistError(err) {
+			// Pre-migration database: the normalized table is not there yet,
+			// so the legacy config-string fallback composes the answer.
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("query custom_statuses: %w", err)
 	}
 	defer rows.Close()
 	var result []types.CustomStatus
@@ -97,7 +107,12 @@ func resolveCustomStatusesFromTableInTx(ctx context.Context, tx DBTX) ([]types.C
 func resolveCustomTypesFromTableInTx(ctx context.Context, tx DBTX) ([]string, bool, error) {
 	rows, err := tx.QueryContext(ctx, "SELECT name FROM custom_types ORDER BY name")
 	if err != nil {
-		return nil, false, nil
+		if isTableNotExistError(err) {
+			// Pre-migration database: the normalized table is not there yet,
+			// so the legacy config-string fallback composes the answer.
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("query custom_types: %w", err)
 	}
 	defer rows.Close()
 	var result []string
