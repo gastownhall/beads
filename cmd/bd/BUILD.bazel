@@ -888,6 +888,7 @@ go_test(
         "history_remote_frontdoor_matrix_test.go",
         "hook_env_test.go",
         "hook_index_env_test.go",
+        "hooks_chain_without_bd_test.go",
         "hooks_embedded_test.go",
         "hooks_exec_composition_test.go",
         "hooks_export_staged_deletion_test.go",

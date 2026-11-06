@@ -101,9 +101,76 @@ const hookTimeoutKillAfterSeconds = 2
 //     longer holds bd.
 //   - If the beads database is not initialized (exit code 3), the hook exits
 //     successfully with a warning so that git operations are not blocked.
+//   - A chained `<hook>.old` (the gate `bd hooks run` executes first via
+//     runChainedHook) must not be skipped just because bd itself is
+//     unavailable: when `command -v bd` fails, the section runs the sidecar
+//     directly with shell builtins only, propagating a nonzero verdict and
+//     falling through to trailing user content on success. A bd-owned or
+//     bd-delegating sidecar is recognized and skipped, mirroring
+//     runChainedHook's recursion exclusions (GH#6751).
 func generateHookSection(hookName string) string {
+	// bdChainClassifyArm is the one case arm the section uses to decide
+	// whether <hook>.old is a foreign sidecar it may run without bd. Each
+	// marker is written as two adjacent quoted fragments ("a""b"): the shell
+	// concatenates them into the contiguous prefix, while the generated text
+	// never spells the whole marker — every marker scanner in the tree
+	// (doctor's detectHookMarkerState, getHookVersion's Contains fallbacks,
+	// shouldPreserveHookContent, isLegacyBDHook) counts raw substrings and
+	// must keep seeing exactly one marker line (GH#6751).
+	//
+	// The arms mirror getHookVersion's bd-recognition rules, which is what
+	// runChainedHook keys its recursion exclusions on:
+	//   - line-prefix markers: the section begin prefix, "# bd-shim " and
+	//     "# bd-hooks-version: " (getHookVersion's HasPrefix checks);
+	//   - the inline "# bd (beads)" tag anywhere in a line (GH#1120);
+	//   - a "bd hooks run" delegation with token boundaries around bd and
+	//     run and single whitespace between the words, approximating
+	//     doctor.IsBdHookContent's `\bbd\s+hooks\s+run\b` (GH#946). The
+	//     boundary classes stop "xbd hooks run" and "bd hooks running" from
+	//     matching, and [[:space:]] covers tab-separated delegation. Only
+	//     multi-space runs between words fall through to execution, which
+	//     fails closed once the sidecar's own `bd` lookup fails.
+	bdChainClassifyArm := `"# --- BEGIN BEADS ""INTEGRATION"*` +
+		`|"# bd-""shim "*` +
+		`|"# bd-hooks-""version: "*` +
+		`|*"# bd ""(beads)"*` +
+		"|bd[[:space:]]hooks[[:space:]]run" +
+		"|bd[[:space:]]hooks[[:space:]]run[!A-Za-z0-9_]*" +
+		"|*[!A-Za-z0-9_]bd[[:space:]]hooks[[:space:]]run" +
+		"|*[!A-Za-z0-9_]bd[[:space:]]hooks[[:space:]]run[!A-Za-z0-9_]*"
+
 	return hookSectionBeginLine() + "\n" +
 		"# This section is managed by beads. Do not remove these markers.\n" +
+		// Resolve the sidecar next to the hook itself with parameter
+		// expansion only: the environments that need this fallback (GUI git
+		// clients, cron, minimal-PATH shells — GH#6751) cannot be assumed to
+		// carry dirname or grep, and a failing external command would abort
+		// the rescue under a caller's `set -e`. git invokes hooks with $0
+		// holding the path it resolved, so the invocation directory also
+		// covers core.hooksPath and linked-worktree common hooks dirs.
+		"case \"$0\" in\n" +
+		"  */*) _bd_hook_dir=${0%/*} ;;\n" +
+		"  *) _bd_hook_dir=. ;;\n" +
+		"esac\n" +
+		"_bd_old_hook=\"$_bd_hook_dir/" + hookName + ".old\"\n" +
+		// Eligibility: a regular executable file, not a re-entrant
+		// invocation (the parent that is already running this sidecar set
+		// BD_HOOK_CHAIN_ACTIVE), and no bd-recognition marker in its text.
+		// The scan defaults to eligible and only ever disqualifies, so an
+		// unreadable sidecar still runs: unreadability must not skip a
+		// foreign gate. The read loop's redirection keeps the hook's own
+		// stdin (pre-push ref lines) untouched.
+		"_bd_chain_exists=0\n" +
+		"if [ -f \"$_bd_old_hook\" ] && [ -x \"$_bd_old_hook\" ] && [ \"${BD_HOOK_CHAIN_ACTIVE:-}\" != \"" + hookName + "\" ]; then\n" +
+		"  _bd_chain_exists=1\n" +
+		"  if [ -r \"$_bd_old_hook\" ]; then\n" +
+		"    while IFS= read -r _bd_old_line || [ -n \"$_bd_old_line\" ]; do\n" +
+		"      case \"$_bd_old_line\" in\n" +
+		"        " + bdChainClassifyArm + ") _bd_chain_exists=0; break ;;\n" +
+		"      esac\n" +
+		"    done < \"$_bd_old_hook\"\n" +
+		"  fi\n" +
+		"fi\n" +
 		"if command -v bd >/dev/null 2>&1; then\n" +
 		"  export BD_GIT_HOOK=1\n" +
 		"  _bd_timeout=${BEADS_HOOK_TIMEOUT:-" + fmt.Sprintf("%d", hookTimeoutSeconds) + "}\n" +
@@ -171,6 +238,20 @@ func generateHookSection(hookName string) string {
 		"    _bd_exit=0\n" +
 		"  fi\n" +
 		"  if [ \"$_bd_exit\" -ne 0 ]; then exit \"$_bd_exit\"; fi\n" +
+		"elif [ \"$_bd_chain_exists\" -eq 1 ]; then\n" +
+		// bd is unavailable, so Go cannot own the chain: run the foreign
+		// sidecar here, with the original argv and inherited stdio, and honor
+		// its verdict. A success must fall through to any user content after
+		// this section (the documented contract above), so only a nonzero
+		// exit propagates. Capturing the status inside an `if` keeps it
+		// exempt from a caller's `set -e`, and BD_HOOK_CHAIN_ACTIVE stops a
+		// sidecar that re-enters git from running this gate again (GH#6751).
+		"  if BD_HOOK_CHAIN_ACTIVE=" + hookName + " \"$_bd_old_hook\" \"$@\"; then\n" +
+		"    _bd_old_exit=0\n" +
+		"  else\n" +
+		"    _bd_old_exit=$?\n" +
+		"  fi\n" +
+		"  if [ \"$_bd_old_exit\" -ne 0 ]; then exit \"$_bd_old_exit\"; fi\n" +
 		"fi\n" +
 		hookSectionEndLine() + "\n"
 }
