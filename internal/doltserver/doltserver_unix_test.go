@@ -417,6 +417,8 @@ func startUnknownPortServer(t *testing.T) *unknownPortServer {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("BEADS_DIR", "")
 	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
 	t.Setenv("BEADS_SHARED_SERVER_DIR", t.TempDir())
 	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
@@ -562,6 +564,66 @@ func TestUnknownPortRecoveryAdoptsPublishedPort(t *testing.T) {
 	}
 	if got := readPortFile(srv.dir); got != 14599 {
 		t.Errorf("port file = %d, want 14599", got)
+	}
+}
+
+// GH#6614: with workspace policy withholding recovery — auto-start disabled,
+// in env or config, or an external server mode — the start paths refuse to
+// replace a live unknown-port server, naming the tracked PID, instead of
+// stopping it (the base behavior, which acted before any policy gate) or
+// launching beside it.
+func TestUnknownPortRecoveryRefusesUnmanagedServer(t *testing.T) {
+	envAutoStartOff := func(t *testing.T) { t.Setenv("BEADS_DOLT_AUTO_START", "0") }
+	configAutoStartOff := func(t *testing.T) {
+		// The fixture's ResetForTesting left viper uninitialized (config.Set
+		// is a no-op then); initialize against the isolated HOME first.
+		if err := config.Initialize(); err != nil {
+			t.Fatalf("config.Initialize: %v", err)
+		}
+		config.Set("dolt.auto-start", "false")
+		t.Cleanup(func() { config.Set("dolt.auto-start", "") })
+	}
+	externalMode := func(t *testing.T) { t.Setenv("BEADS_DOLT_SERVER_MODE", "1") }
+	tests := []struct {
+		name     string
+		viaStart bool
+		policy   func(t *testing.T)
+	}{
+		{"Start, auto-start off in env", true, envAutoStartOff},
+		{"Start, auto-start off in config", true, configAutoStartOff},
+		{"Start, external server mode", true, externalMode},
+		{"Ensure, auto-start off in env", false, envAutoStartOff},
+		{"Ensure, auto-start off in config", false, configAutoStartOff},
+		{"Ensure, external server mode", false, externalMode},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := startUnknownPortServer(t)
+			tt.policy(t)
+			stubProcessList(t, func() ([]int, error) { return []int{srv.pid}, nil })
+
+			var err error
+			if tt.viaStart {
+				_, err = Start(srv.dir)
+			} else {
+				_, _, err = EnsureRunningDetailed(srv.dir)
+			}
+			if err == nil {
+				t.Fatal("expected a refusal error")
+			}
+			for _, want := range []string{strconv.Itoa(srv.pid), "port"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("refusal does not name %q: %v", want, err)
+				}
+			}
+			if strings.Contains(err.Error(), "dolt is not installed") {
+				t.Errorf("the refusal reached a launch instead of stopping at policy: %v", err)
+			}
+			expectServerAlive(t, srv)
+			if _, err := os.Stat(pidPath(srv.dir)); err != nil {
+				t.Errorf("expected the pid file to be kept: %v", err)
+			}
+		})
 	}
 }
 

@@ -397,8 +397,8 @@ type Config struct {
 
 // State holds runtime information about a managed server.
 type State struct {
-	Running        bool   `json:"running"`
-	PID            int    `json:"pid"`
+	Running bool `json:"running"`
+	PID     int  `json:"pid"`
 	// Port is the port the tracked server listens on, or 0 when unresolved:
 	// the port file is missing or unreadable and no port is configured
 	// (GH#6614). Running reports process presence, not endpoint availability,
@@ -1528,6 +1528,17 @@ func EnsureRunningDetailed(beadsDir string) (port int, startedByUs bool, err err
 		return adoptRunningServer(serverDir, state), false, nil
 	}
 
+	// A live tracked server whose port cannot be resolved (Port 0, GH#6614)
+	// is not authorization to replace the process. External server mode and
+	// disabled auto-start withhold recovery: refuse here, naming the tracked
+	// PID, rather than falling into the unreachable-server messages below,
+	// which assume no server exists. An owned workspace with auto-start
+	// enabled proceeds to startLocked, which stops the tracked server under
+	// this lock before starting a replacement.
+	if state.Running && (ResolveServerMode(beadsDir) == ServerModeExternal || IsAutoStartDisabled()) {
+		return 0, false, refuseReplacingUnknownPortServer(serverDir, state.PID)
+	}
+
 	// If the server mode is External (explicit port in metadata.json,
 	// shared server mode, etc.), do not start a per-project server —
 	// it would conflict with the external one.
@@ -1894,6 +1905,22 @@ func Start(beadsDir string) (*State, error) {
 	return startLocked(beadsDir)
 }
 
+// refuseReplacingUnknownPortServer explains why bd will not replace a live
+// dolt sql-server whose port cannot be resolved, and what an operator can do
+// (GH#6614). The start paths return it where workspace policy — external
+// server mode or disabled auto-start — withholds the recovery authority the
+// locked replacement requires.
+func refuseReplacingUnknownPortServer(serverDir string, pid int) error {
+	return fmt.Errorf(
+		"a dolt sql-server this workspace tracks is running (PID %d), but its port cannot be resolved:\n"+
+			"the port file %s is missing or unreadable and no port is configured.\n"+
+			"bd will not stop or replace a live server it cannot reach.\n"+
+			"Record the server's actual port (BEADS_DOLT_SERVER_PORT, dolt.port, or that port file),\n"+
+			"or stop it yourself and start a fresh one:\n"+
+			"  bd dolt stop && bd dolt start",
+		pid, portPath(serverDir))
+}
+
 func startLocked(beadsDir string) (*State, error) {
 	cfg := DefaultConfig(beadsDir)
 	doltDir := ResolveDoltDir(beadsDir)
@@ -1901,15 +1928,29 @@ func startLocked(beadsDir string) (*State, error) {
 	// Re-check after acquiring the lifecycle lock. A tracked process is only a
 	// successful start when every configured listener is ready. One whose port
 	// cannot be resolved (Port 0, GH#6614) is not adopted — there is no
-	// endpoint to serve on — but replaced: stop it under this lock, then
-	// launch. Any stop or cleanup failure aborts the replacement, including
-	// an error joined with ErrServerNotRunning (the server disappeared while
-	// we held the lock): never launch beside a server that may still run, and
-	// never discard a cleanup failure.
-	if state, _ := IsRunning(beadsDir); state != nil && state.Running {
+	// endpoint to serve on: workspace policy decides between refusing the
+	// replacement and performing it under this lock.
+	state, stateErr := IsRunning(beadsDir)
+	if stateErr != nil {
+		return nil, stateErr
+	}
+	if state != nil && state.Running {
 		if state.Port > 0 {
 			return verifyRemotesAPIState(cfg, state)
 		}
+		// Direct Start reaches here without EnsureRunningDetailed's workspace
+		// gates, so the policy refusal lives here too: replacing a live
+		// unknown-port server is recovery bd performs only where auto-start is
+		// enabled and the workspace owns its server. No signal, no tracking
+		// removal, no launch.
+		if IsAutoStartDisabled() || ResolveServerMode(beadsDir) == ServerModeExternal {
+			return nil, refuseReplacingUnknownPortServer(beadsDir, state.PID)
+		}
+		// Permitted recovery: stop the tracked server under this lock, then
+		// launch. Any stop or cleanup failure aborts the replacement,
+		// including an error joined with ErrServerNotRunning (the server
+		// disappeared while we held the lock): never launch beside a server
+		// that may still run, and never discard a cleanup failure.
 		if err := stopLocked(beadsDir); err != nil {
 			return nil, fmt.Errorf("stopping the tracked dolt sql-server (PID %d) with an unknown port for replacement: %w", state.PID, err)
 		}
