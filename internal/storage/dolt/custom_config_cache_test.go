@@ -400,3 +400,41 @@ func TestCustomConfigCachePartialInvalidationKeepsValidHalf(t *testing.T) {
 		t.Errorf("unmet SQL expectations: %v", err)
 	}
 }
+
+// TestCustomConfigCacheHitSkipsDatabase pins AC-3: a successful read, empty
+// included, stays cached, so repeated getters make no driver call. The calls
+// are counted at the driver because an unexpected sqlmock statement would
+// fail quietly into the public fallback.
+func TestCustomConfigCacheHitSkipsDatabase(t *testing.T) {
+	cases := []struct {
+		name     string
+		statuses []ccStatusRow
+		types    []string
+		want     map[string][]string
+	}{
+		{"populated", []ccStatusRow{{"review", "wip"}}, []string{"molecule"}, ccDatabaseVocabulary},
+		{"empty", nil, nil, map[string][]string{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			withCustomVocabularyYAML(t, "", "")
+			store, mock, counts := vhCountedStore(t)
+			expectVocabularyRead(mock, tc.statuses, tc.types)
+			ccAssertVocabulary(t, store, tc.want)
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("unmet SQL expectations: %v", err)
+			}
+			if statusLoaded, typeLoaded := ccFlags(store); !statusLoaded || !typeLoaded {
+				t.Fatalf("cache flags after a successful read = (status %v, type %v), want both true", statusLoaded, typeLoaded)
+			}
+
+			before := counts.Snapshot()
+			for range 3 {
+				ccAssertVocabulary(t, store, tc.want)
+			}
+			if delta := counts.Snapshot().Sub(before); delta.Total() != 0 {
+				t.Errorf("cached getters reached the database: %+v", delta)
+			}
+		})
+	}
+}
