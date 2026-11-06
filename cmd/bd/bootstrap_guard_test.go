@@ -572,6 +572,17 @@ func TestPrintBootstrapPlan_NoneWithoutDB_NoSuccessTick(t *testing.T) {
 		if !strings.Contains(out, "Nothing to do") {
 			t.Errorf("existing database lost its 'Nothing to do' line:\n%s", out)
 		}
+		// bd-bt60zz (#6687): exit 0 and "Nothing to do." on a clone the gate
+		// just refused read as success; say outright that nothing was replaced.
+		if !strings.Contains(out, "  The existing database was left unchanged: bootstrap never replaces or re-clones it.\n") {
+			t.Errorf("existing database no-op does not say the database was left unchanged:\n%s", out)
+		}
+	})
+
+	t.Run("help says an existing database is left unchanged", func(t *testing.T) {
+		if !strings.Contains(bootstrapCmd.Long, "If database already exists: validates and reports status, and\n    leaves it unchanged (never replaced or re-cloned)") {
+			t.Errorf("bootstrap help does not say an existing database is left unchanged:\n%s", bootstrapCmd.Long)
+		}
 	})
 
 	t.Run("sync plan does not print credentials", func(t *testing.T) {
