@@ -13,6 +13,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/beads/internal/config"
 )
 
 // startStaleServerFiles writes a pid file naming an unrelated process (a
@@ -394,4 +396,238 @@ func TestStopStopsUnknownPortServer(t *testing.T) {
 			t.Errorf("expected %s to be removed, stat err = %v", filepath.Base(path), err)
 		}
 	}
+}
+
+// unknownPortServer is the GH#6614 state: tracking names a live, signalable
+// process the (stubbed) process list confirms as a dolt sql-server, but no
+// port can be resolved for it. The disposable child stands in for the server.
+type unknownPortServer struct {
+	dir    string
+	pid    int
+	exited chan error
+}
+
+// startUnknownPortServer isolates config and env so DefaultConfig resolves no
+// port, writes the tracked state, and removes the port file. The caller
+// installs its own process-list stub; the PATH is emptied after the child is
+// started so no launch can succeed and a refusal is distinguishable from a
+// missing-binary failure.
+func startUnknownPortServer(t *testing.T) *unknownPortServer {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	t.Setenv("BEADS_SHARED_SERVER_DIR", t.TempDir())
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	t.Setenv("BEADS_DOLT_AUTO_START", "")
+	t.Setenv("BEADS_DOLT_REMOTESAPI_PORT", "0")
+	config.ResetForTesting()
+	t.Cleanup(config.ResetForTesting)
+
+	dir := t.TempDir()
+	exited := startStaleServerFiles(t, dir)
+	if err := os.Remove(portPath(dir)); err != nil {
+		t.Fatal(err)
+	}
+	if got := DefaultConfig(dir).Port; got != 0 {
+		t.Fatalf("precondition: DefaultConfig resolved port %d, want 0", got)
+	}
+	data, err := os.ReadFile(pidPath(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", t.TempDir()) // no dolt binary: any launch fails
+	return &unknownPortServer{dir: dir, pid: pid, exited: exited}
+}
+
+// expectServerAlive fails when the tracked child has exited, without
+// consuming the exit value the cleanup needs.
+func expectServerAlive(t *testing.T, srv *unknownPortServer) {
+	t.Helper()
+	select {
+	case err := <-srv.exited:
+		srv.exited <- err // let the cleanup finish
+		t.Errorf("the tracked server was signaled: %v", err)
+	default:
+	}
+}
+
+// GH#6614: with auto-start permitted on an owned workspace, recovery of a
+// live unknown-port server happens under the lifecycle lock. While the lock is
+// held the tracked server is untouchable (Ensure's lock-free fast path observes
+// it and waits); after release the replacement stops it before the launch is
+// attempted, which the isolated PATH turns into the missing-dolt failure.
+func TestUnknownPortRecoveryReplacesUnderLock(t *testing.T) {
+	srv := startUnknownPortServer(t)
+	observed := make(chan struct{}, 1)
+	calls := 0
+	stubProcessList(t, func() ([]int, error) {
+		calls++
+		if calls == 1 {
+			observed <- struct{}{}
+		}
+		return []int{srv.pid}, nil
+	})
+
+	lockF, err := acquireLifecycleLock(srv.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := EnsureRunningDetailed(srv.dir)
+		done <- err
+	}()
+	<-observed // Ensure's fast path has observed the live unknown-port server
+	expectServerAlive(t, srv)
+	if _, err := os.Stat(pidPath(srv.dir)); err != nil {
+		t.Errorf("expected the pid file to be kept while the lock is held: %v", err)
+	}
+	releaseLifecycleLock(lockF)
+
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "dolt is not installed") {
+			t.Errorf("EnsureRunningDetailed = %v, want the missing-dolt failure reached after the replacement stop", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("EnsureRunningDetailed did not finish after lock release")
+	}
+	// The tracked server was stopped before the launch was attempted, and
+	// its tracking went with it.
+	select {
+	case err := <-srv.exited:
+		srv.exited <- err // let the cleanup finish
+	default:
+		t.Error("the tracked server was still alive after the replacement attempt")
+	}
+	for _, path := range []string{pidPath(srv.dir), portPath(srv.dir)} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Errorf("expected %s to be removed, stat err = %v", filepath.Base(path), err)
+		}
+	}
+}
+
+// GH#6614: a port published while Ensure waits for the lifecycle lock — the
+// second half of another start's PID-then-port publication — is adopted once
+// the lock is released: the server stays alive, no replacement is attempted.
+func TestUnknownPortRecoveryAdoptsPublishedPort(t *testing.T) {
+	srv := startUnknownPortServer(t)
+	observed := make(chan struct{}, 1)
+	calls := 0
+	stubProcessList(t, func() ([]int, error) {
+		calls++
+		if calls == 1 {
+			observed <- struct{}{}
+		}
+		return []int{srv.pid}, nil
+	})
+
+	lockF, err := acquireLifecycleLock(srv.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	var port int
+	var startedByUs bool
+	go func() {
+		port, startedByUs, err = EnsureRunningDetailed(srv.dir)
+		done <- err
+	}()
+	<-observed
+	if err := writePortFile(srv.dir, 14599); err != nil {
+		t.Fatal(err)
+	}
+	releaseLifecycleLock(lockF)
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("EnsureRunningDetailed error: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("EnsureRunningDetailed did not finish after lock release")
+	}
+	if port != 14599 || startedByUs {
+		t.Errorf("EnsureRunningDetailed = (%d, %v), want (14599, false)", port, startedByUs)
+	}
+	expectServerAlive(t, srv)
+	if _, err := os.Stat(pidPath(srv.dir)); err != nil {
+		t.Errorf("expected the pid file to be kept: %v", err)
+	}
+	if got := readPortFile(srv.dir); got != 14599 {
+		t.Errorf("port file = %d, want 14599", got)
+	}
+}
+
+// GH#6614: a permitted replacement still aborts when the stop fails — the
+// tracked server is never left beside a launched competitor, and a stop or
+// cleanup error is propagated, not swallowed.
+func TestUnknownPortRecoveryAbortsOnStopError(t *testing.T) {
+	t.Run("stop refused, no launch", func(t *testing.T) {
+		srv := startUnknownPortServer(t)
+		// Reads 1-4 (Ensure's fast path, the locked re-check, startLocked's
+		// and stopLocked's IsRunning) confirm the dolt server; read 5 is
+		// stopLocked's identity re-check, which refuses when the list cannot
+		// be read.
+		calls := 0
+		stubProcessList(t, func() ([]int, error) {
+			calls++
+			if calls >= 5 {
+				return nil, errProcessListUnreadable
+			}
+			return []int{srv.pid}, nil
+		})
+
+		_, _, err := EnsureRunningDetailed(srv.dir)
+		if err == nil {
+			t.Fatal("EnsureRunningDetailed succeeded despite the refused stop")
+		}
+		if !strings.Contains(err.Error(), "not stopping PID") || strings.Contains(err.Error(), "dolt is not installed") {
+			t.Errorf("EnsureRunningDetailed = %v, want the stop refusal propagated without a launch", err)
+		}
+		expectServerAlive(t, srv)
+		if _, err := os.Stat(pidPath(srv.dir)); err != nil {
+			t.Errorf("expected the pid file to be kept: %v", err)
+		}
+	})
+
+	t.Run("cleanup error propagates, no launch", func(t *testing.T) {
+		srv := startUnknownPortServer(t)
+		stubProcessList(t, func() ([]int, error) { return []int{srv.pid}, nil })
+		// The lock file must exist before the directory becomes unwritable.
+		lockF, err := acquireLifecycleLock(srv.dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		releaseLifecycleLock(lockF)
+		if err := os.Chmod(srv.dir, 0o555); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(srv.dir, 0o755) })
+
+		_, _, err = EnsureRunningDetailed(srv.dir)
+		if err == nil {
+			t.Fatal("EnsureRunningDetailed succeeded despite the cleanup failure")
+		}
+		if !strings.Contains(err.Error(), "permission denied") || strings.Contains(err.Error(), "dolt is not installed") {
+			t.Errorf("EnsureRunningDetailed = %v, want the cleanup failure propagated without a launch", err)
+		}
+		// The stop itself succeeded (the server exited) but its cleanup could
+		// not remove the tracking, and the failure was not discarded.
+		select {
+		case err := <-srv.exited:
+			srv.exited <- err // let the cleanup finish
+		case <-time.After(5 * time.Second):
+			t.Fatal("the tracked server did not exit during the replacement stop")
+		}
+		if _, err := os.Stat(pidPath(srv.dir)); err != nil {
+			t.Errorf("expected the unremovable pid file to remain: %v", err)
+		}
+	})
 }

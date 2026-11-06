@@ -1486,11 +1486,16 @@ func EnsureRunningDetailed(beadsDir string) (port int, startedByUs bool, err err
 	// printed. Racing a concurrent start is safe: the slow path below
 	// re-checks under the lock and startLocked re-checks again, so the worst
 	// case for a stale "not running" read is one wasted acquire.
+	//
+	// Only a resolved port is adoptable: a live server whose port cannot be
+	// resolved (Port 0, GH#6614) has no endpoint to serve on, so it falls to
+	// the locked slow path rather than being adopted — or, at base, stopped
+	// right here.
 	state, err := IsRunning(serverDir)
 	if err != nil {
 		return 0, false, err
 	}
-	if state.Running {
+	if state.Running && state.Port > 0 {
 		return adoptRunningServer(serverDir, state), false, nil
 	}
 
@@ -1506,12 +1511,15 @@ func EnsureRunningDetailed(beadsDir string) (port int, startedByUs bool, err err
 	}()
 
 	// Re-check under the lock: another bd process may have started the server
-	// while we were waiting to acquire.
+	// while we were waiting to acquire. A port published in that window —
+	// including the second half of another start's PID-then-port publication —
+	// is adopted; a still-unresolved live server (Port 0, GH#6614) is not:
+	// the gates below and startLocked decide its replacement under this lock.
 	state, err = IsRunning(serverDir)
 	if err != nil {
 		return 0, false, err
 	}
-	if state.Running {
+	if state.Running && state.Port > 0 {
 		// Release before adopting. adoptRunningServer dials the remotesapi
 		// listener, and a per-waiter 500ms probe inside the exclusive region
 		// is precisely the serialization the fast path above exists to avoid.
@@ -1891,9 +1899,20 @@ func startLocked(beadsDir string) (*State, error) {
 	doltDir := ResolveDoltDir(beadsDir)
 
 	// Re-check after acquiring the lifecycle lock. A tracked process is only a
-	// successful start when every configured listener is ready.
+	// successful start when every configured listener is ready. One whose port
+	// cannot be resolved (Port 0, GH#6614) is not adopted — there is no
+	// endpoint to serve on — but replaced: stop it under this lock, then
+	// launch. Any stop or cleanup failure aborts the replacement, including
+	// an error joined with ErrServerNotRunning (the server disappeared while
+	// we held the lock): never launch beside a server that may still run, and
+	// never discard a cleanup failure.
 	if state, _ := IsRunning(beadsDir); state != nil && state.Running {
-		return verifyRemotesAPIState(cfg, state)
+		if state.Port > 0 {
+			return verifyRemotesAPIState(cfg, state)
+		}
+		if err := stopLocked(beadsDir); err != nil {
+			return nil, fmt.Errorf("stopping the tracked dolt sql-server (PID %d) with an unknown port for replacement: %w", state.PID, err)
+		}
 	}
 
 	// Clean up orphaned dolt sql-server processes INSIDE the lock.
