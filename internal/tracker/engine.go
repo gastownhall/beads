@@ -945,6 +945,29 @@ func (e *Engine) fetchPrelinkedIssues(ctx context.Context, fetched []TrackerIssu
 	}
 
 	var hydrated []TrackerIssue
+
+	// One batch history read serves the whole pull when the store supports
+	// it (GH#6605): on a mature Dolt history each per-issue query costs
+	// seconds, which is what made large incremental pulls take hours. A nil
+	// previousRefs leaves every decision to the per-issue path below — no
+	// capability, no candidates, or a failed batch read.
+	var previousRefs map[string]string
+	if batch, ok := externalRefHistoryBatchQuerier(e.Store); ok {
+		ids := make([]string, 0, len(localIssues))
+		for _, local := range localIssues {
+			if !prelinkedHistoryCandidate(e.Tracker, local) {
+				continue
+			}
+			ids = append(ids, local.ID)
+		}
+		if len(ids) > 0 {
+			refs, err := batch.PreviousExternalRefs(ctx, ids, *lastSync)
+			if err == nil && refs != nil {
+				previousRefs = refs
+			}
+		}
+	}
+
 	for _, local := range localIssues {
 		if local == nil || local.ExternalRef == nil {
 			continue
@@ -953,9 +976,16 @@ func (e *Engine) fetchPrelinkedIssues(ctx context.Context, fetched []TrackerIssu
 		if ref == "" || !e.Tracker.IsExternalRef(ref) {
 			continue
 		}
-		changedAfterLastSync, err := e.externalRefChangedAfter(ctx, local, ref, *lastSync)
-		if err != nil {
-			return hydrated, hydratedLocalIDs, fmt.Errorf("checking pre-linked local issue %s: %w", local.ID, err)
+		var changedAfterLastSync bool
+		if previousRefs != nil {
+			previousRef, found := previousRefs[local.ID]
+			changedAfterLastSync = !found || externalRefChanged(previousRef, ref)
+		} else {
+			var err error
+			changedAfterLastSync, err = e.externalRefChangedAfter(ctx, local, ref, *lastSync)
+			if err != nil {
+				return hydrated, hydratedLocalIDs, fmt.Errorf("checking pre-linked local issue %s: %w", local.ID, err)
+			}
 		}
 		if !changedAfterLastSync {
 			continue
@@ -998,6 +1028,26 @@ func (e *Engine) fetchPrelinkedIssues(ctx context.Context, fetched []TrackerIssu
 	return hydrated, hydratedLocalIDs, nil
 }
 
+// prelinkedHistoryCandidate reports whether local is a local issue whose
+// external_ref history the pull must consult: linked to this tracker by a
+// non-empty ref. It is the shared filter of fetchPrelinkedIssues's candidate
+// collection and its hydration loop, so the batch read asks about exactly the
+// ids the loop will decide.
+func prelinkedHistoryCandidate(tracker IssueTracker, local *types.Issue) bool {
+	if local == nil || local.ExternalRef == nil {
+		return false
+	}
+	ref := strings.TrimSpace(*local.ExternalRef)
+	return ref != "" && tracker.IsExternalRef(ref)
+}
+
+// externalRefChanged compares a historical external_ref against the local
+// issue's current ref the way every history path does: trimmed, since refs
+// are stored and compared trimmed elsewhere in the pull.
+func externalRefChanged(previousRef, currentRef string) bool {
+	return strings.TrimSpace(previousRef) != strings.TrimSpace(currentRef)
+}
+
 // externalRefChangedAfter reports whether local's external_ref differed
 // from currentRef as of lastSync. When the backing store can answer this
 // precisely (storage.ExternalRefHistoryQuerier — Dolt-shaped stores that
@@ -1026,7 +1076,7 @@ func (e *Engine) externalRefChangedAfter(ctx context.Context, local *types.Issue
 	if !found {
 		return true, nil
 	}
-	return strings.TrimSpace(previousRef) != strings.TrimSpace(currentRef), nil
+	return externalRefChanged(previousRef, currentRef), nil
 }
 
 // externalRefHistoryQuerier type-asserts store to storage.ExternalRefHistoryQuerier,
@@ -1056,6 +1106,36 @@ func externalRefHistoryQuerier(store Store) (ExternalRefHistoryStore, bool) {
 	}
 	if dolt, ok := store.(storage.DoltStorage); ok {
 		q, ok := storage.UnwrapStore(dolt).(storage.ExternalRefHistoryQuerier)
+		return q, ok
+	}
+	return nil, false
+}
+
+// externalRefHistoryBatchQuerier type-asserts store to the batch external_ref
+// history capability, unwrapping storage decorators first if needed, for the
+// same reason externalRefHistoryQuerier does: decorators promote only the
+// base storage.DoltStorage methods, so the optional batch method hides
+// beneath UnwrapStore even when the concrete store implements it.
+func externalRefHistoryBatchQuerier(store Store) (ExternalRefHistoryBatchStore, bool) {
+	if q, ok := store.(ExternalRefHistoryBatchStore); ok {
+		return q, true
+	}
+	if direct, ok := store.(*directStore); ok {
+		if q, ok := direct.Storage.(ExternalRefHistoryBatchStore); ok {
+			return q, true
+		}
+		if dolt, ok := direct.Storage.(storage.DoltStorage); ok {
+			if q, ok := storage.UnwrapStore(dolt).(ExternalRefHistoryBatchStore); ok {
+				return q, true
+			}
+		}
+		return nil, false
+	}
+	if q, ok := store.(storage.ExternalRefHistoryBatchQuerier); ok {
+		return q, true
+	}
+	if dolt, ok := store.(storage.DoltStorage); ok {
+		q, ok := storage.UnwrapStore(dolt).(storage.ExternalRefHistoryBatchQuerier)
 		return q, ok
 	}
 	return nil, false

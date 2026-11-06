@@ -2,6 +2,7 @@ package tracker
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -487,5 +488,66 @@ func TestEnginePullOverlapDayTrackerAddsOnlyTheWindow(t *testing.T) {
 				t.Fatalf("PullStats = %+v, local title = %q, want %d update(s) and %q", result.PullStats, local.Title, test.wantUpdated, wantTitle)
 			}
 		})
+	}
+}
+
+// countingOverlapStore counts the per-issue external_ref history reads.
+type countingOverlapStore struct {
+	*overlapStore
+	previousRefCalls int
+}
+
+func (s *countingOverlapStore) PreviousExternalRef(ctx context.Context, id string, asOf time.Time) (string, bool, error) {
+	s.previousRefCalls++
+	return s.overlapStore.PreviousExternalRef(ctx, id, asOf)
+}
+
+// PreviousExternalRefs answers the pull's whole history request from the same
+// map the per-issue method reads, so this store is batch-capable and the
+// engine's batch path — not the per-issue fallback — serves it.
+func (s *countingOverlapStore) PreviousExternalRefs(_ context.Context, issueIDs []string, _ time.Time) (map[string]string, error) {
+	refs := make(map[string]string, len(issueIDs))
+	for _, id := range issueIDs {
+		if ref, ok := s.previousRefs[id]; ok {
+			refs[id] = ref
+		}
+	}
+	return refs, nil
+}
+
+// TestFetchPrelinkedIssuesReadsHistoryOncePerPull pins bd-84vbqq (#6605): an
+// incremental pull must not run one external_ref history query per linked
+// local issue; on a large Dolt history each query takes seconds, so a pull
+// over thousands of linked issues takes over an hour.
+func TestFetchPrelinkedIssuesReadsHistoryOncePerPull(t *testing.T) {
+	ctx := context.Background()
+	const linked = 20
+	var locals []*types.Issue
+	for i := 0; i < linked; i++ {
+		ref := fmt.Sprintf("https://test.test/EXT-%d", i)
+		locals = append(locals, &types.Issue{
+			ID:          fmt.Sprintf("bd-%d", i),
+			Title:       "linked",
+			Status:      types.StatusOpen,
+			Priority:    2,
+			IssueType:   types.TypeTask,
+			ExternalRef: &ref,
+			CreatedAt:   overlapLastSync.Add(-time.Hour),
+			UpdatedAt:   overlapLastSync.Add(-time.Hour),
+		})
+	}
+	base := newOverlapStore(nil)
+	base.issues = locals
+	for _, local := range locals {
+		base.previousRefs[local.ID] = *local.ExternalRef
+	}
+	store := &countingOverlapStore{overlapStore: base}
+	mock, _ := newOverlapTracker()
+
+	if _, err := NewEngine(mock, store, "sync").Sync(ctx, SyncOptions{Pull: true, DryRun: true}); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if store.previousRefCalls > 1 {
+		t.Fatalf("PreviousExternalRef calls = %d for %d linked issues, want at most 1 history read per pull", store.previousRefCalls, linked)
 	}
 }

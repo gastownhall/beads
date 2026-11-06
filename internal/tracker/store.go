@@ -37,6 +37,17 @@ type ExternalRefHistoryStore interface {
 	PreviousExternalRef(context.Context, string, time.Time) (string, bool, error)
 }
 
+// ExternalRefHistoryBatchStore is the optional batch form of
+// ExternalRefHistoryStore: one call answers the previous external_ref of many
+// issues, so an incremental pull reads history once per pull instead of once
+// per linked local issue (GH#6605). Map presence carries the single-id call's
+// found; a present empty string is a NULL/empty historical ref. A store that
+// answers batch queries can always answer single-id ones, hence the embedding.
+type ExternalRefHistoryBatchStore interface {
+	ExternalRefHistoryStore
+	PreviousExternalRefs(context.Context, []string, time.Time) (map[string]string, error)
+}
+
 // NewStore adapts a classic storage.Storage to the tracker contract. Values
 // already implementing Store are returned unchanged, so NewStore is idempotent
 // and safe to call on a value that a caller has already adapted.

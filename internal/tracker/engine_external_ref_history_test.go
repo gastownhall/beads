@@ -317,3 +317,101 @@ func TestEngineExternalRefChangedAfter_DecoratedDoltServerStoreUnchanged(t *test
 		t.Fatalf("expected inner Dolt-server store to be queried once via unwrap, got %d calls", inner.calls)
 	}
 }
+
+// batchOverlapStore is an overlapStore that additionally answers the whole
+// pull's external_ref history in one PreviousExternalRefs call, the way the
+// Dolt stores do through issueops.PreviousExternalRefsInTx. singleCalls counts
+// the per-issue fallback reads so a test can prove the batch path decided
+// every candidate on its own.
+type batchOverlapStore struct {
+	*overlapStore
+	batchCalls  int
+	batchIDs    [][]string
+	singleCalls int
+}
+
+func (s *batchOverlapStore) PreviousExternalRef(ctx context.Context, id string, asOf time.Time) (string, bool, error) {
+	s.singleCalls++
+	return s.overlapStore.PreviousExternalRef(ctx, id, asOf)
+}
+
+func (s *batchOverlapStore) PreviousExternalRefs(_ context.Context, issueIDs []string, _ time.Time) (map[string]string, error) {
+	s.batchCalls++
+	s.batchIDs = append(s.batchIDs, issueIDs)
+	refs := make(map[string]string, len(issueIDs))
+	for _, id := range issueIDs {
+		if ref, ok := s.previousRefs[id]; ok {
+			refs[id] = ref
+		}
+	}
+	return refs, nil
+}
+
+func newBatchOverlapLocal(id, ref string) *types.Issue {
+	linked := ref
+	return &types.Issue{
+		ID:          id,
+		Title:       "linked " + id,
+		Status:      types.StatusOpen,
+		Priority:    2,
+		IssueType:   types.TypeTask,
+		ExternalRef: &linked,
+		CreatedAt:   overlapLastSync.Add(-time.Hour),
+		UpdatedAt:   overlapLastSync.Add(-time.Hour),
+	}
+}
+
+// TestFetchPrelinkedIssuesMakesOneBatchCall pins #6605's engine half: when the
+// store can answer external_ref history for many issues in one call, an
+// incremental pull reads that history once per pull — not once per pre-linked
+// local issue — and still decides every issue exactly as the per-issue path
+// would (AC-1).
+func TestFetchPrelinkedIssuesMakesOneBatchCall(t *testing.T) {
+	ctx := context.Background()
+	unchanged := newBatchOverlapLocal("bd-0", "https://test.test/EXT-0")
+	relinked := newBatchOverlapLocal("bd-1", "https://test.test/EXT-1")
+	unproven := newBatchOverlapLocal("bd-2", "https://test.test/EXT-2")
+	noRef := &types.Issue{ID: "bd-3", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	emptyRef := newBatchOverlapLocal("bd-4", " ")
+	locals := []*types.Issue{unchanged, relinked, unproven, noRef, emptyRef}
+
+	base := newOverlapStore(nil)
+	base.issues = locals
+	base.previousRefs[unchanged.ID] = "https://test.test/EXT-0" // same ref at last_sync: unchanged
+	base.previousRefs[relinked.ID] = "https://test.test/EXT-OLD" // different ref at last_sync: changed
+	// bd-2 has no history entry at or before last_sync: changed, per the
+	// PreviousExternalRef contract.
+	store := &batchOverlapStore{overlapStore: base}
+
+	mock, _ := newOverlapTracker(
+		TrackerIssue{ID: "EXT-1", Identifier: "EXT-1", Title: "remote one", UpdatedAt: overlapLastSync.Add(-time.Minute)},
+		TrackerIssue{ID: "EXT-2", Identifier: "EXT-2", Title: "remote two", UpdatedAt: overlapLastSync.Add(-time.Minute)},
+	)
+	engine := NewEngine(mock, store, "sync")
+
+	hydrated, hydratedLocalIDs, err := engine.fetchPrelinkedIssues(ctx, nil, locals, &overlapLastSync)
+	if err != nil {
+		t.Fatalf("fetchPrelinkedIssues: %v", err)
+	}
+	if store.batchCalls != 1 {
+		t.Fatalf("PreviousExternalRefs calls = %d, want exactly 1 for the whole pull", store.batchCalls)
+	}
+	if store.singleCalls != 0 {
+		t.Fatalf("PreviousExternalRef calls = %d, want 0: the batch result must decide every candidate", store.singleCalls)
+	}
+	if len(store.batchIDs) != 1 || len(store.batchIDs[0]) != 3 {
+		t.Fatalf("batch request ids = %v, want the 3 eligible locals (nil/blank refs are not candidates)", store.batchIDs)
+	}
+	wantIDs := []string{"bd-0", "bd-1", "bd-2"}
+	for i, id := range wantIDs {
+		if store.batchIDs[0][i] != id {
+			t.Fatalf("batch request ids = %v, want %v in local order", store.batchIDs[0], wantIDs)
+		}
+	}
+	if len(hydrated) != 2 || hydratedLocalIDs["bd-1"] != true || hydratedLocalIDs["bd-2"] != true {
+		t.Fatalf("hydrated = %+v, hydratedLocalIDs = %v, want only bd-1 (relinked) and bd-2 (no history) hydrated", hydrated, hydratedLocalIDs)
+	}
+	if hydratedLocalIDs["bd-0"] {
+		t.Error("bd-0's ref is unchanged since last_sync; it must not be hydrated")
+	}
+}
