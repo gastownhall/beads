@@ -87,12 +87,12 @@ func (e *restoreErrorWithheld) Unwrap() error { return e.err }
 // username alone, and so does a query or fragment, which sanitizeURL drops.
 //
 // A file URL without userinfo, the form DirToFileURL builds, names a local
-// directory and comes back as is, even where net/url rejects it (Windows'
-// file://C:\..., a '%' in a directory name). Any other URL is named without
-// its userinfo, query and fragment, unless net/url cannot parse it (a base64
-// secret holding '/', a password holding '#' or '?'), leaves an '@' outside
-// the userinfo (the same secrets where the part before the '/', '?' or '#'
-// parses as a host or port), or reads it as opaque with credentials
+// directory and comes back as is, even where net/url rejects it (a Windows
+// file://C:\... typed by hand, a '%' in a directory name). Any other URL is
+// named without its userinfo, query and fragment, unless net/url cannot parse
+// it (a base64 secret holding '/', a password holding '#' or '?'), leaves an
+// '@' outside the userinfo (the same secrets where the part before the '/',
+// '?' or '#' parses as a host or port), or reads it as opaque with credentials
 // (scheme:KEY:SECRET@host). Then it is reduced to its scheme: sanitizeURL
 // would print it raw, or print part of the secret as the host, port or path.
 func backupRestoreSafeURL(raw string) (source string, clean bool) {
@@ -202,7 +202,8 @@ func BackupToDir(ctx context.Context, register, sync DBConn, dir string) error {
 	return nil
 }
 
-// DirToFileURL resolves dir to an absolute path and returns a file:// URL.
+// DirToFileURL resolves dir to an absolute path and returns its file:// URL,
+// spelled by PathToFileURL.
 //
 // An input that already carries a scheme is rejected rather than prefixed.
 // filepath.Abs would happily turn "https://doltremoteapi.dolthub.com/u/r" into
@@ -224,23 +225,21 @@ func DirToFileURL(dir string) (string, error) {
 	return PathToFileURL(abs), nil
 }
 
-// PathToFileURL returns the file:// URL for the absolute path abs, in the
-// form Dolt reads back as that path.
+// PathToFileURL returns the file:// URL Dolt reads as the absolute path abs.
+// Callers resolve abs first; it is neither checked nor made absolute here.
 //
-// A POSIX path is passed through: "file://" + abs. A Windows drive path
-// (C:\x or c:/x, matched by shape on every OS) becomes file:///C:/x, the form
-// Dolt's own earl.FileUrlFromPath builds. Dolt's URL parser recognizes a
-// drive only by an upper-case letter right after file:// or file:///; any
-// other spelling goes to net/url, which reads file://c:\x as host "c" with
-// the invalid port ":\x" and refuses it, so on a lower-case drive (PowerShell
-// keeps the case it was given) every backup remote registration failed
-// (#6019).
+// A Windows drive path, matched by shape so the rule holds on every host, is
+// spelled file:///C:/... with the drive letter upper-cased and backslashes
+// turned into forward slashes. Dolt's earl.Parse recognizes a drive only by an
+// upper-case letter: "file://c:\work" goes to net/url, which reads "c:" as a
+// host with an invalid port (GH#6019), and "file:///c:/work" is read as the
+// path "/c:/work". The rest of the path is left unescaped, as earl's drive
+// branch reads it literally. Any other path is prefixed with "file://" as is.
 func PathToFileURL(abs string) string {
-	if len(abs) < 3 || abs[1] != ':' || (abs[2] != '\\' && abs[2] != '/') ||
-		!(('a' <= abs[0] && abs[0] <= 'z') || ('A' <= abs[0] && abs[0] <= 'Z')) {
-		return "file://" + abs
+	if len(abs) >= 2 && abs[1] == ':' && ('a' <= abs[0] && abs[0] <= 'z' || 'A' <= abs[0] && abs[0] <= 'Z') {
+		return "file:///" + strings.ToUpper(abs[:1]) + strings.ReplaceAll(abs[1:], `\`, "/")
 	}
-	return "file:///" + strings.ToUpper(abs[:1]) + strings.ReplaceAll(abs[1:], `\`, "/")
+	return "file://" + abs
 }
 
 // ExtractAddressConflictName parses the conflicting remote name from a Dolt

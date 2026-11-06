@@ -1208,6 +1208,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- On Windows, a backup directory on a drive spelled with a lower-case letter
+  (`c:\Users\...`, as PowerShell keeps it) no longer fails every backup
+  remote registration with `invalid port` (auto-backup warned on every
+  command). bd now builds `file:///C:/...` for a drive path, the form Dolt
+  reads as a drive, for auto-backup, `bd backup init` and `bd backup restore`
+  (#6019, reported by @lexWooooo).
 - `bd config get` for a config.yaml, git-config or user-global key no longer
   opens the database just because one exists, so it answers from those files
   while the Dolt server is down instead of failing the open (GH#5108). In
@@ -1247,12 +1253,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a formula write target (see Security). Shell environment still wins over
   the file.
 
-- On Windows, a backup directory on a drive spelled with a lower-case letter
-  (`c:\Users\...`, as PowerShell keeps it) no longer fails every backup
-  remote registration with `invalid port` (auto-backup warned on every
-  command). bd now builds `file:///C:/...` for a drive path, the form Dolt
-  reads as a drive, for auto-backup, `bd backup init` and `bd backup restore`
-  (#6019, reported by @lexWooooo).
 - `bd create --file` and other batch creates no longer fail with "issue
   already exists" on an id bd generated itself. The batch chose every id
   before it wrote any row, so two of its items could be handed the same short

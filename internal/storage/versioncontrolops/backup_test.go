@@ -8,8 +8,11 @@ import (
 	neturl "net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/dolthub/dolt/go/libraries/utils/earl"
 )
 
 // TestDirToFileURLRejectsSchemes pins the guard that stops a URL being turned
@@ -23,6 +26,8 @@ func TestDirToFileURLRejectsSchemes(t *testing.T) {
 	for _, dir := range []string{
 		"https://doltremoteapi.dolthub.com/user/repo",
 		"file:///already/a/url",
+		"file:///C:/already/a/url",
+		`file://c:\already\a\url`,
 		"aws://bucket/key",
 		"gs://bucket/key",
 	} {
@@ -38,33 +43,111 @@ func TestDirToFileURLRejectsSchemes(t *testing.T) {
 	if !strings.HasPrefix(got, "file://") || strings.Contains(got, "://backups") {
 		t.Fatalf("DirToFileURL(%q) = %q", "backups/nightly", got)
 	}
+
+	// The resolved absolute path goes through the shared spelling, so on
+	// Windows, where t.TempDir() is a drive path, the URL is the
+	// file:///C:/... form instead of the concatenation POSIX would take.
+	dir := t.TempDir()
+	absURL, err := DirToFileURL(dir)
+	if err != nil {
+		t.Fatalf("DirToFileURL on an absolute dir: %v", err)
+	}
+	if want := PathToFileURL(dir); absURL != want {
+		t.Fatalf("DirToFileURL(%q) = %q, want %q", dir, absURL, want)
+	}
 }
 
-// TestPathToFileURL pins the file:// URL built for a backup directory. A
-// Windows drive path must come out as file:///C:/...: Dolt recognizes a drive
-// only by an upper-case letter, and hands file://c:\work\... to net/url,
-// which refuses it with "invalid port" (#6019). Drive paths are matched by
-// shape, so these cases run on every OS.
-func TestPathToFileURL(t *testing.T) {
-	tests := []struct {
-		abs, want string
-	}{
-		{`c:\work\repo\.beads\backup`, "file:///C:/work/repo/.beads/backup"},
-		{`C:\work\repo\.beads\backup`, "file:///C:/work/repo/.beads/backup"},
-		{`d:/data/backup`, "file:///D:/data/backup"},
-		{"/var/backups/beads", "file:///var/backups/beads"},
+// TestDirToFileURLWindowsDrivePathCanonical pins the URL spelling Dolt's
+// earl.Parse reads as a drive path (bd-chc1w3, GH#6019). PowerShell keeps a
+// lower-case drive, and "file://c:\work" makes net/url read "c:" as a host
+// with an invalid port; "file:///c:/work" is read as the path "/c:/work".
+// Only an upper-case letter behind "file:///" with forward slashes survives.
+func TestDirToFileURLWindowsDrivePathCanonical(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("filepath.Abs yields a drive path only on Windows")
 	}
-	for _, tt := range tests {
-		got := PathToFileURL(tt.abs)
-		if got != tt.want {
-			t.Errorf("PathToFileURL(%q) = %q, want %q", tt.abs, got, tt.want)
-			continue
-		}
-		u, err := neturl.Parse(got)
-		if err != nil {
-			t.Errorf("PathToFileURL(%q) = %q, which net/url refuses: %v", tt.abs, got, err)
-		} else if u.Host != "" {
-			t.Errorf("PathToFileURL(%q) = %q, which names host %q", tt.abs, got, u.Host)
+	got, err := DirToFileURL(`c:\work\.beads\backup`)
+	if err != nil {
+		t.Fatalf("DirToFileURL: %v", err)
+	}
+	if want := "file:///C:/work/.beads/backup"; got != want {
+		t.Fatalf("DirToFileURL(%q) = %q, want %q", `c:\work\.beads\backup`, got, want)
+	}
+}
+
+// TestPathToFileURL pins the file:// URL spelling Dolt's parser reads back as
+// the path it names (GH#6019). Dolt recognizes a Windows drive only as an
+// upper-case letter behind "file:///", so the legacy "file://" + abs
+// concatenation turns a lower-case drive into the host "c" with an invalid
+// port, and a lower-case drive behind three slashes into the path "/c:/...".
+// Drive rows are round-tripped through the pinned Dolt parser itself, so the
+// defect and its fix are exercised on every host, not only on Windows.
+func TestPathToFileURL(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		abs      string
+		want     string // the expected URL, written out, not built by the helper
+		wantPath string // the path earl.Parse must recover; "" skips the round trip
+	}{
+		{name: "lower-case drive with backslashes",
+			abs: `c:\work\.beads\backup`, want: "file:///C:/work/.beads/backup", wantPath: "C:/work/.beads/backup"},
+		{name: "upper-case drive with backslashes",
+			abs: `C:\work\.beads\backup`, want: "file:///C:/work/.beads/backup", wantPath: "C:/work/.beads/backup"},
+		{name: "lower-case drive with forward slashes",
+			abs: `c:/work/.beads/backup`, want: "file:///C:/work/.beads/backup", wantPath: "C:/work/.beads/backup"},
+		{name: "upper-case drive with forward slashes",
+			abs: `C:/work/.beads/backup`, want: "file:///C:/work/.beads/backup", wantPath: "C:/work/.beads/backup"},
+		{name: "another drive's root",
+			abs: `z:\`, want: "file:///Z:/", wantPath: "Z:/"},
+		{name: "spaces, percent and hash stay literal",
+			abs: `c:\Users\John Doe\100%\a#b`, want: "file:///C:/Users/John Doe/100%/a#b", wantPath: "C:/Users/John Doe/100%/a#b"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := PathToFileURL(tc.abs)
+			if got != tc.want {
+				t.Fatalf("PathToFileURL(%q) = %q, want %q", tc.abs, got, tc.want)
+			}
+			if tc.wantPath == "" {
+				return
+			}
+			u, err := earl.Parse(got)
+			if err != nil {
+				t.Fatalf("earl.Parse(%q): %v", got, err)
+			}
+			if u.Host != "" || u.Path != tc.wantPath {
+				t.Fatalf("earl.Parse(%q) = host %q, path %q, want host \"\", path %q",
+					got, u.Host, u.Path, tc.wantPath)
+			}
+		})
+	}
+
+	// Registrations written by earlier releases spelled the drive form
+	// "file://C:\work\..."; earl reads that legacy spelling and the canonical
+	// one as the same host-free drive path, so stored backup addresses need
+	// no migration.
+	legacy, legacyErr := earl.Parse(`file://C:\work\.beads\backup`)
+	canonical, canonicalErr := earl.Parse("file:///C:/work/.beads/backup")
+	if legacyErr != nil || canonicalErr != nil {
+		t.Fatalf("earl.Parse: legacy %v, canonical %v", legacyErr, canonicalErr)
+	}
+	if legacy.Host != canonical.Host || legacy.Path != canonical.Path {
+		t.Fatalf("legacy spelling parses as host %q path %q; canonical as host %q path %q",
+			legacy.Host, legacy.Path, canonical.Host, canonical.Path)
+	}
+}
+
+// TestPathToFileURLPOSIXUnchanged pins that a POSIX absolute path keeps the
+// spelling it had before the drive rule: "file://" and the path, byte for
+// byte, even where it holds a backslash or a "c:" component.
+func TestPathToFileURLPOSIXUnchanged(t *testing.T) {
+	for _, abs := range []string{
+		"/home/me/.beads/backup",
+		`/tmp/a\b`,
+		"/srv/c:/x",
+		"/",
+	} {
+		if got, want := PathToFileURL(abs), "file://"+abs; got != want {
+			t.Errorf("PathToFileURL(%q) = %q, want %q", abs, got, want)
 		}
 	}
 }
@@ -233,6 +316,8 @@ func TestBackupRestoreSanitizesURLOnError(t *testing.T) {
 			want: "file:///var/backups/x"},
 		{name: "windows file URL", url: `file://C:\Users\me\backup`,
 			want: `file://C:\Users\me\backup`},
+		{name: "windows drive file URL", url: "file:///C:/Users/John Doe/backup",
+			want: "file:///C:/Users/John Doe/backup"},
 		{name: "percent in file path", url: "file:///var/backups/100%done",
 			want: "file:///var/backups/100%done"},
 		{name: "hash in file path", url: "file:///var/backups/my#dir",
