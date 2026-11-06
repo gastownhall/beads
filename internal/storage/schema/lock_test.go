@@ -253,6 +253,7 @@ func TestMigrateUpSeedsIgnorePatternsWhenNoWorkNeeded(t *testing.T) {
 	expectIgnoredSentinelProbes(mock, true)
 	expectContentHashColumnExists(mock)
 	expectContentHashColumnExists(mock)
+	expectNoBlockedRepairOwed(mock)
 	expectScalar(mock, "SELECT COUNT(*) FROM custom_types", "count", 1)
 	expectScalar(mock, "SELECT COUNT(*) FROM custom_statuses", "count", 1)
 	// The seed inserted rows and no migration pass follows to commit them, so
@@ -299,6 +300,7 @@ func TestMigrateUpSkipsSeedCommitWhenNothingChanged(t *testing.T) {
 	expectIgnoredSentinelProbes(mock, true)
 	expectContentHashColumnExists(mock)
 	expectContentHashColumnExists(mock)
+	expectNoBlockedRepairOwed(mock)
 	expectScalar(mock, "SELECT COUNT(*) FROM custom_types", "count", 1)
 	expectScalar(mock, "SELECT COUNT(*) FROM custom_statuses", "count", 1)
 

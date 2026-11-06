@@ -1099,6 +1099,50 @@ func migrateUpAfterReconcile(ctx context.Context, db DBConn, seedChanged bool) (
 	if len(touchedDirtyTables) > 0 {
 		return 0, &DirtyTablesError{Tables: touchedDirtyTables}
 	}
+
+	// The is_blocked repair's own typed guard (gastownhall/beads#7037). The
+	// pass ahead either mints the repair obligation (mainVersionBefore < 75:
+	// main 0075 is pending, and its hook records the key) or finishes one
+	// already committed at HEAD (received by pull, or left by an interrupted
+	// pass after 0075 committed). Either way ignored 0032's hook recomputes
+	// flags from the graph and publishes them, the consumed key and this
+	// pass's dependency rekey output in ONE scoped commit, so pre-existing
+	// committable edits to issues, dependencies or metadata must be refused
+	// here — typed, and before any repair write or marker advance. The
+	// raw-text guard above covers issues and metadata only on the crossing
+	// pass (0075's marker declares exactly those writes) and covers nothing
+	// on the received-key pass, where no main migration is pending;
+	// dependencies rides the repair commit by design, so user dirt in any of
+	// the three is exactly the entanglement this refusal exists to prevent.
+	isBlockedRepairPending := mainVersionBefore < isBlockedRepairMigrationVersion
+	if !isBlockedRepairPending {
+		isBlockedRepairPending, err = isBlockedRepairOwedAtHead(ctx, db)
+		if err != nil {
+			return 0, fmt.Errorf("checking the is_blocked repair obligation: %w", err)
+		}
+	}
+	if isBlockedRepairPending {
+		var repairDirtyTables []string
+		for _, table := range []string{"dependencies", "issues", "metadata"} {
+			if _, dirty := dirtyBefore[table]; dirty {
+				repairDirtyTables = append(repairDirtyTables, table)
+			}
+		}
+		if len(repairDirtyTables) > 0 {
+			return 0, &DirtyTablesError{Tables: repairDirtyTables}
+		}
+		// An obligation that arrived with both cursors current — received by
+		// pull, or this clone's own interrupted pass after 0075 committed
+		// while 0032 had already recorded — has nothing pending to run it.
+		// Re-arm 0032 here, inside the guarded pass and before the ignored
+		// runner selects its pending steps; on the crossing pass the 0075
+		// hook performs the same operation while minting the key.
+		if mainVersionBefore >= isBlockedRepairMigrationVersion {
+			if err := rearmIgnoredIsBlockedRepair(ctx, db); err != nil {
+				return 0, err
+			}
+		}
+	}
 	dirtyBeforeSignatures, err := dirtyTableSignatures(ctx, db, dirtyBefore)
 	if err != nil {
 		return 0, fmt.Errorf("reading pre-migration dirty table diffs: %w", err)
@@ -1246,6 +1290,23 @@ func migrationWorkNeeded(ctx context.Context, db DBConn) (bool, error) {
 		return false, err
 	}
 	if !hasIgnoredHash {
+		return true, nil
+	}
+	// gastownhall/beads#7037: a committed is_blocked repair obligation at
+	// HEAD means work even when both cursors are current. The received-key
+	// shape — a clone that pulled a history whose origin crashed after main
+	// 0075 committed but before ignored 0032 repaired, while the clone's own
+	// ignored plane had already crossed 0032 debt-free — has nothing pending
+	// by cursor, and without this check the obligation would sit forever,
+	// waiting for some future ignored migration to make a pass run. The
+	// lookup is bounded — one tracked-at-HEAD probe plus one metadata read,
+	// never a graph scan — and reads HEAD, never WORKING: a working-set-only
+	// key grants nothing (see isBlockedRepairOwedAtHead).
+	owed, err := isBlockedRepairOwedAtHead(ctx, db)
+	if err != nil {
+		return false, err
+	}
+	if owed {
 		return true, nil
 	}
 	return needsBackfilledCustomStatusesCustomTypes(ctx, db)

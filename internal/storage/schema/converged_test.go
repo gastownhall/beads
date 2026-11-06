@@ -98,8 +98,21 @@ func expectNoMigrationWorkNeededAtVersion(mock sqlmock.Sqlmock, mainVersion int)
 	expectIgnoredSentinelProbes(mock, true)
 	expectContentHashColumnExists(mock)
 	expectContentHashColumnExists(mock)
+	expectNoBlockedRepairOwed(mock)
 	expectScalar(mock, "SELECT COUNT(*) FROM custom_types", "count", 1)
 	expectScalar(mock, "SELECT COUNT(*) FROM custom_statuses", "count", 1)
+}
+
+// expectNoBlockedRepairOwed mocks migrationWorkNeeded's #7037 term: metadata
+// is tracked at HEAD and the is_blocked repair obligation key sits nowhere in
+// committed history, so nothing is owed even though both cursors are current.
+// An empty result set — not a returned error — is the shape a store that owes
+// nothing produces, and QueryRow turns it into sql.ErrNoRows on Scan.
+func expectNoBlockedRepairOwed(mock sqlmock.Sqlmock) {
+	expectHeadTableProbe(mock, "", "metadata", true)
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT value FROM metadata AS OF 'HEAD' WHERE `key` = ?")).
+		WithArgs(isBlockedRepairOwedKey).
+		WillReturnRows(sqlmock.NewRows([]string{"value"}))
 }
 
 // expectDoltIgnoreRead mocks the read-only dolt_ignore probe, returning
