@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/types"
@@ -490,5 +491,55 @@ func TestEmbeddedOpenForReadOnlyCommand_LenientGateRefusesUnreadableOverlay(t *t
 				t.Errorf("the refused open recreated %s", tc.missing)
 			}
 		})
+	}
+}
+
+// TestEmbeddedOpenForReadOnlyCommand_LenientGateReadsIntactSchema is the
+// control for the refusal above: the same behind, remote-backed database with
+// every relation issue hydration reads still opens for a read-only command,
+// announces the read-through, serves the reads that LEFT JOIN leases and fall
+// back to wisps, and leaves the pending migration unapplied.
+func TestEmbeddedOpenForReadOnlyCommand_LenientGateReadsIntactSchema(t *testing.T) {
+	beadsDir, dataDir, id := lenientGateFixture(t)
+	ctx := t.Context()
+
+	var (
+		store   *embeddeddolt.EmbeddedDoltStore
+		openErr error
+	)
+	stderr := captureStderr(t, func() {
+		store, openErr = embeddeddolt.OpenForReadOnlyCommand(ctx, beadsDir, "testdb", "main")
+	})
+	if openErr != nil {
+		t.Fatalf("OpenForReadOnlyCommand with the hydration schema intact: %v", openErr)
+	}
+	if !strings.Contains(stderr, "continuing on schema") {
+		t.Errorf("the read-through was not announced; stderr:\n%s", stderr)
+	}
+
+	got, err := store.GetIssue(ctx, id)
+	if err != nil {
+		store.Close()
+		t.Fatalf("GetIssue(%s): %v", id, err)
+	}
+	if got.Title != "probe" {
+		t.Errorf("GetIssue(%s).Title = %q, want %q", id, got.Title, "probe")
+	}
+	if _, err := store.GetIssue(ctx, "fx-absent"); !errors.Is(err, storage.ErrNotFound) {
+		t.Errorf("GetIssue of an absent id through the wisps fallback = %v, want storage.ErrNotFound", err)
+	}
+	if found, err := store.SearchIssues(ctx, "", types.IssueFilter{}); err != nil || len(found) != 1 || found[0].ID != id {
+		t.Errorf("SearchIssues = %d issues, %v; want only %s", len(found), err, id)
+	}
+	if n, err := store.CountIssues(ctx, "", types.IssueFilter{}); err != nil || n != 1 {
+		t.Errorf("CountIssues = %d, %v; want 1", n, err)
+	}
+	if ready, err := store.GetReadyWork(ctx, types.WorkFilter{}); err != nil || len(ready) != 1 || ready[0].ID != id {
+		t.Errorf("GetReadyWork = %d issues, %v; want only %s", len(ready), err, id)
+	}
+	store.Close()
+
+	if cursor, present := fixtureSchemaState(t, dataDir, "leases", "granted_node"); cursor >= schema.LatestVersion() || !present {
+		t.Errorf("after the read-through: schema cursor v%d (want behind v%d), leases.granted_node present = %v", cursor, schema.LatestVersion(), present)
 	}
 }
