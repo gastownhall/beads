@@ -364,3 +364,36 @@ func removeDefaultOffNotePath(t *testing.T, path string) {
 		t.Fatal(err)
 	}
 }
+
+// The note is human-mode advice from a command that opened a store: quiet,
+// JSON and hook-JSON output, a git hook, and a missing or closed store all
+// keep it silent in an otherwise affected workspace.
+func TestMaybeAutoExportDefaultOffNoteStaysQuietOutsideHumanOutput(t *testing.T) {
+	cases := []struct {
+		name  string
+		apply func(t *testing.T)
+	}{
+		{name: "quiet", apply: func(t *testing.T) { quietFlag = true }},
+		{name: "json", apply: func(t *testing.T) { jsonOutput = true }},
+		{name: "prime hook-json", apply: func(t *testing.T) { primeHookJSONMode = true }},
+		{name: "git hook", apply: func(t *testing.T) { t.Setenv("BD_GIT_HOOK", "1") }},
+		{name: "no store", apply: func(t *testing.T) { store = nil }},
+		{name: "closed store", apply: func(t *testing.T) { store = &defaultOffNoteStore{closed: true} }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := defaultOffNoteWorkspace(t)
+			initConfigForTest(t)
+			tc.apply(t)
+
+			before := snapshotDefaultOffNoteTree(t, fx.dir)
+			stdout, stderr := runDefaultOffNoteCheck(t)
+			if stderr != "" || stdout != "" {
+				t.Fatalf("want no output, got stdout %q stderr %q", stdout, stderr)
+			}
+			if after := snapshotDefaultOffNoteTree(t, fx.dir); !reflect.DeepEqual(after, before) {
+				t.Fatalf("the check changed the workspace:\nbefore %v\nafter  %v", before, after)
+			}
+		})
+	}
+}

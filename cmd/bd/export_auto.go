@@ -106,8 +106,12 @@ func autoExportPath(beadsDir string) string {
 // It speaks only while export.auto comes from the default (any explicit
 // value is a choice already made) and both export-state.json, which every
 // auto-export saves, and the JSONL exist: together they show this workspace
-// has a JSONL that auto-export used to refresh.
+// has a JSONL that auto-export used to refresh. Quiet, JSON and hook-JSON
+// output keep it silent, as they do the other advisory notices.
 func noteAutoExportDefaultOff() {
+	if isQuiet() || jsonOutput || primeHookJSONMode {
+		return
+	}
 	if config.GetValueSource("export.auto") != config.SourceDefault {
 		return
 	}
