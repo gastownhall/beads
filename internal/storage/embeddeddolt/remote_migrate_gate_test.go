@@ -494,6 +494,47 @@ func TestEmbeddedOpenForReadOnlyCommand_LenientGateRefusesUnreadableOverlay(t *t
 	}
 }
 
+// TestEmbeddedOpenForReadOnlyCommand_SkewEscapeHatchReadsAnyway pins the
+// operator's way past the refusal above: with BD_IGNORE_SCHEMA_SKEW=1 the
+// read-only open of a behind database without the leases overlay goes ahead,
+// warning that it lacks leases and that some queries may fail, and a hydrated
+// read then does fail at query time naming leases. The hatch reads; it never
+// heals: the migration stays pending and the overlay stays absent.
+func TestEmbeddedOpenForReadOnlyCommand_SkewEscapeHatchReadsAnyway(t *testing.T) {
+	beadsDir, dataDir, id := lenientGateFixture(t, "DROP TABLE leases")
+	// After the fixture, which clears the hatch for the refusal tests.
+	t.Setenv("BD_IGNORE_SCHEMA_SKEW", "1")
+	ctx := t.Context()
+
+	var (
+		store   *embeddeddolt.EmbeddedDoltStore
+		openErr error
+	)
+	stderr := captureStderr(t, func() {
+		store, openErr = embeddeddolt.OpenForReadOnlyCommand(ctx, beadsDir, "testdb", "main")
+	})
+	if openErr != nil {
+		t.Fatalf("OpenForReadOnlyCommand with BD_IGNORE_SCHEMA_SKEW=1 = %v, want the hatch to open a database the refusal would stop", openErr)
+	}
+	for _, want := range []string{"schema skew ignored", "lacks leases", "some queries may fail"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("hatch warning missing %q:\n%s", want, stderr)
+		}
+	}
+	if _, err := store.GetIssue(ctx, id); err == nil || !strings.Contains(err.Error(), "leases") {
+		t.Errorf("GetIssue(%s) = %v, want a query-time failure naming the missing leases overlay", id, err)
+	}
+	store.Close()
+
+	cursor, present := fixtureSchemaState(t, dataDir, "leases", "")
+	if cursor >= schema.LatestVersion() {
+		t.Errorf("schema cursor = v%d after the hatched open, want it left behind v%d", cursor, schema.LatestVersion())
+	}
+	if present {
+		t.Error("the hatched open recreated the leases table; a read-only command must not write schema")
+	}
+}
+
 // TestEmbeddedOpenForReadOnlyCommand_LenientGateReadsIntactSchema is the
 // control for the refusal above: the same behind, remote-backed database with
 // every relation issue hydration reads still opens for a read-only command,

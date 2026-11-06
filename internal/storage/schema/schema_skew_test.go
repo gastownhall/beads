@@ -583,6 +583,45 @@ func TestCheckReadableDrift_EscapeHatchReadsAnyway(t *testing.T) {
 	}
 }
 
+// TestCheckReadableDrift_EscapeHatchWarnsWhatReadsLack pins the escape hatch
+// on a schema whose issues projection is intact but which lacks the leases
+// overlay every issue read joins (gastownhall/beads#6572): the open goes
+// ahead, and the warning says what is missing and that queries may fail
+// rather than reading on silently.
+func TestCheckReadableDrift_EscapeHatchWarnsWhatReadsLack(t *testing.T) {
+	t.Setenv("BD_IGNORE_SCHEMA_SKEW", "1")
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+	behind := LatestVersion() - 1
+	expectMainCursor(mock, behind)
+	expectTableColumns(mock, "issues", "id", "storage_class")
+	expectTableColumns(mock, "wisps", "id", "storage_class")
+	expectCursorProbe(mock, "leases", false)
+
+	var gotErr error
+	stderr := captureStderr(t, func() {
+		gotErr = CheckReadableDrift(context.Background(), db, overlayRelations)
+	})
+	if gotErr != nil {
+		t.Fatalf("CheckReadableDrift = %v, want nil when BD_IGNORE_SCHEMA_SKEW=1", gotErr)
+	}
+	for _, want := range []string{
+		fmt.Sprintf("database (v%d) is behind binary (v%d)", behind, LatestVersion()),
+		"lacks leases",
+		"some queries may fail",
+	} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr = %q, want a skew warning containing %q", stderr, want)
+		}
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
 // TestSchemaBehindError_GatewayRemedy pins that a gateway's refusal does not
 // send its reader to `bd migrate schema`, which bd never runs against a
 // schema the gateway server owns.
