@@ -1,10 +1,12 @@
 package issueops
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/steveyegge/beads/internal/storage"
 	publicops "github.com/steveyegge/beads/issueops"
@@ -65,6 +67,65 @@ func TestValidateUpdateRequestRejectsInvalidNotesRequestShapes(t *testing.T) {
 			err := ValidateUpdateRequest(tc.request)
 			if !errors.Is(err, storage.ErrValidation) {
 				t.Fatalf("ValidateUpdateRequest() error = %v, want ErrValidation", err)
+			}
+		})
+	}
+}
+
+// TestValidateScalarUpdatesTitle covers the title branch of the map-update
+// gate (GH#8150): bd edit, bd batch and bd rename submit raw update maps, and
+// before this branch the map path stored titles that create and import refuse
+// — a row the store's own export/import cannot take back. The guarded
+// UpdateRequest path already applied the same types.ValidateIssueTitle rule,
+// so this table mirrors its cases at the map layer. Message assertions use
+// unit-agnostic fragments ("title must be 500", "(got 514)"); the
+// characters-vs-bytes wording of the canonical error is pinned by the types
+// package's own tests.
+func TestValidateScalarUpdatesTitle(t *testing.T) {
+	// The reporter's fixture: 499 characters, 514 bytes — one em dash, two en
+	// dashes, five middle dots, two primes. Under 500 characters, so it fits
+	// the issues.title VARCHAR(500) column; only bytes-based validation
+	// refuses it.
+	reporter := strings.Repeat("a", 489) + "—––·····′′"
+	if runes := utf8.RuneCountInString(reporter); runes != 499 {
+		t.Fatalf("reporter fixture is %d runes, want 499", runes)
+	}
+	if size := len(reporter); size != 514 {
+		t.Fatalf("reporter fixture is %d bytes, want 514", size)
+	}
+
+	for _, tc := range []struct {
+		name    string
+		updates map[string]interface{}
+		wantErr bool
+		wantMsg string
+	}{
+		{"empty title", map[string]interface{}{"title": ""}, true, "title is required"},
+		{"501 ASCII bytes", map[string]interface{}{"title": strings.Repeat("a", 501)}, true, "title must be 500"},
+		{"reporter fixture, 499 characters 514 bytes", map[string]interface{}{"title": reporter}, true, "(got 514)"},
+		{"251 × é, 502 bytes", map[string]interface{}{"title": strings.Repeat("é", 251)}, true, "(got 502)"},
+		{"non-string title (int)", map[string]interface{}{"title": 7}, true, "update title"},
+		{"non-string title (nil)", map[string]interface{}{"title": nil}, true, "update title"},
+		{"no title key", map[string]interface{}{"description": "x"}, false, ""},
+		{"short title", map[string]interface{}{"title": "ok"}, false, ""},
+		{"exactly 500 ASCII bytes", map[string]interface{}{"title": strings.Repeat("a", 500)}, false, ""},
+		{"250 × é, exactly 500 bytes", map[string]interface{}{"title": strings.Repeat("é", 250)}, false, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// No issue_type key, so the config-dependent branch never runs and
+			// nil tx proves the title check needs neither config nor database.
+			err := ValidateScalarUpdates(context.Background(), nil, tc.updates)
+			if !tc.wantErr {
+				if err != nil {
+					t.Fatalf("ValidateScalarUpdates() = %v, want nil", err)
+				}
+				return
+			}
+			if !errors.Is(err, storage.ErrValidation) {
+				t.Fatalf("ValidateScalarUpdates() = %v, want ErrValidation", err)
+			}
+			if tc.wantMsg != "" && !strings.Contains(err.Error(), tc.wantMsg) {
+				t.Errorf("ValidateScalarUpdates() = %v, want error containing %q", err, tc.wantMsg)
 			}
 		})
 	}

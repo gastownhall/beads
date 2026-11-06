@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -172,6 +173,119 @@ func TestFieldLengthValidation(t *testing.T) {
 		}
 		if got == nil || got.Assignee != atLimit {
 			t.Errorf("expected the 255-char assignee stored intact, got %+v", got)
+		}
+	})
+}
+
+// reporterTitle is the GH#8150 fixture: 499 characters, 514 bytes — one em
+// dash, two en dashes, five middle dots and two primes. It is under 500
+// characters, so it fits the issues.title VARCHAR(500) column (which counts
+// characters) and only beads' own byte-based validation can refuse it.
+func reporterTitle() string {
+	return strings.Repeat("t", 489) + "—––·····′′"
+}
+
+func titleTestIssue(id string) *types.Issue {
+	return &types.Issue{
+		ID:        id,
+		Title:     "short title " + id,
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+}
+
+// TestMapUpdateTitleValidation drives the canonical title rules through the
+// map-based UpdateIssue path that bd edit, bd batch and bd rename take
+// (GH#8150). Create and import refuse an empty or over-500-byte title, so the
+// update path must refuse the same values or the store holds a row its own
+// export/import later rejects. A refused update aborts whole: the companion
+// description edit and the row version must be untouched too.
+func TestMapUpdateTitleValidation(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	t.Run("over-length multibyte title with a companion edit is refused whole", func(t *testing.T) {
+		iss := titleTestIssue("tl-refuse")
+		iss.Description = "original description"
+		if err := store.CreateIssue(ctx, iss, "tester"); err != nil {
+			t.Fatalf("CreateIssue: %v", err)
+		}
+		before, err := store.GetIssue(ctx, iss.ID)
+		if err != nil {
+			t.Fatalf("GetIssue: %v", err)
+		}
+
+		err = store.UpdateIssue(ctx, iss.ID, map[string]interface{}{
+			"title":       reporterTitle(),
+			"description": "changed description",
+		}, "tester")
+		if !errors.Is(err, storage.ErrValidation) {
+			t.Fatalf("UpdateIssue with a 514-byte title: err = %v, want ErrValidation", err)
+		}
+
+		got, err := store.GetIssue(ctx, iss.ID)
+		if err != nil {
+			t.Fatalf("GetIssue after refusal: %v", err)
+		}
+		if got.Title != before.Title {
+			t.Errorf("title changed after a refused update: %q -> %q", before.Title, got.Title)
+		}
+		if got.Description != before.Description {
+			t.Errorf("companion description changed after a refused update: %q -> %q", before.Description, got.Description)
+		}
+		if got.RowVersion != before.RowVersion {
+			t.Errorf("RowVersion advanced after a refused update: %d -> %d", before.RowVersion, got.RowVersion)
+		}
+	})
+
+	t.Run("empty title is refused", func(t *testing.T) {
+		iss := titleTestIssue("tl-empty")
+		if err := store.CreateIssue(ctx, iss, "tester"); err != nil {
+			t.Fatalf("CreateIssue: %v", err)
+		}
+		if err := store.UpdateIssue(ctx, iss.ID, map[string]interface{}{"title": ""}, "tester"); !errors.Is(err, storage.ErrValidation) {
+			t.Fatalf("UpdateIssue with an empty title: err = %v, want ErrValidation", err)
+		}
+		got, err := store.GetIssue(ctx, iss.ID)
+		if err != nil {
+			t.Fatalf("GetIssue: %v", err)
+		}
+		if got == nil || got.Title != iss.Title {
+			t.Errorf("title changed after a refused empty-title update, got %+v", got)
+		}
+	})
+
+	t.Run("non-string title is refused", func(t *testing.T) {
+		iss := titleTestIssue("tl-nonstring")
+		if err := store.CreateIssue(ctx, iss, "tester"); err != nil {
+			t.Fatalf("CreateIssue: %v", err)
+		}
+		if err := store.UpdateIssue(ctx, iss.ID, map[string]interface{}{"title": 7}, "tester"); !errors.Is(err, storage.ErrValidation) {
+			t.Fatalf("UpdateIssue with an int title: err = %v, want ErrValidation", err)
+		}
+	})
+
+	t.Run("wisp refuses the same invalid title", func(t *testing.T) {
+		iss := titleTestIssue("tl-wisp")
+		if err := store.CreateIssue(ctx, iss, "tester"); err != nil {
+			t.Fatalf("CreateIssue: %v", err)
+		}
+		if err := store.UpdateIssue(ctx, iss.ID, map[string]interface{}{"wisp": true}, "tester"); err != nil {
+			t.Fatalf("demote to wisp: %v", err)
+		}
+		err := store.UpdateIssue(ctx, iss.ID, map[string]interface{}{"title": reporterTitle()}, "tester")
+		if !errors.Is(err, storage.ErrValidation) {
+			t.Fatalf("UpdateIssue with a 514-byte title on a wisp: err = %v, want ErrValidation", err)
+		}
+		got, err := store.GetIssue(ctx, iss.ID)
+		if err != nil {
+			t.Fatalf("GetIssue: %v", err)
+		}
+		if got == nil || got.Title != iss.Title {
+			t.Errorf("wisp title changed after a refused update, got %+v", got)
 		}
 	})
 }

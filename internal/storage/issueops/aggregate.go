@@ -148,6 +148,21 @@ func ValidateMetadataPatch(patch publicops.MetadataPatch) error {
 
 // ValidateScalarUpdates checks typed scalar values before they reach SQL.
 func ValidateScalarUpdates(ctx context.Context, tx DBTX, updates map[string]interface{}) error {
+	// The title check is deliberately ahead of the config-dependent
+	// issue_type branch so it needs neither custom types nor a database read.
+	// The map path (bd edit, bd batch, bd rename) used to skip this entirely
+	// and stored titles that create and import refuse (GH#8150) — rows the
+	// store's own export/import cannot take back. The guarded UpdateRequest
+	// path applies the same rule via ValidateUpdateRequest.
+	if raw, ok := updates["title"]; ok {
+		value, ok := raw.(string)
+		if !ok {
+			return fmt.Errorf("%w: update title: expected string, got %T", storage.ErrValidation, raw)
+		}
+		if err := types.ValidateIssueTitle(value); err != nil {
+			return fmt.Errorf("%w: update title: %w", storage.ErrValidation, err)
+		}
+	}
 	if rawType, ok := updates["issue_type"]; ok {
 		var issueType types.IssueType
 		switch value := rawType.(type) {

@@ -27,6 +27,14 @@ bd show bd-42 --json
 }
 ```
 
+The title is required and limited to 500 UTF-8 bytes. Every path that stores a
+title — `bd create`, `bd import`, `bd update`, `bd edit`, `bd batch` and
+`bd rename` — applies the same limit, so an accepted title always survives an
+export/import round trip. This prevents new incompatible rows; it does not
+repair titles written before the limit was enforced on updates. Those rows
+keep their stored title (other fields stay editable, and restating the
+existing title verbatim is allowed) until a valid replacement is written.
+
 ## Issue Types
 
 | Type | Use Case |
