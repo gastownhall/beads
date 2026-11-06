@@ -1129,7 +1129,8 @@ func TestPrimeChecksDoNotExecPathBd(t *testing.T) {
 // TestPrimeChecksRunResolvedBinaryInDiagnosedWorkspace runs both prime checks
 // against a real recording child selected by the resolver, with a decoy bd on
 // PATH and with an empty PATH: the resolved binary runs with each check's
-// arguments, the decoy never runs, and the result does not depend on PATH.
+// arguments in the diagnosed workspace, the decoy never runs, and the result
+// does not depend on PATH or the caller's cwd and BEADS_DIR.
 func TestPrimeChecksRunResolvedBinaryInDiagnosedWorkspace(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("recording bd is a shell script")
@@ -1144,11 +1145,15 @@ func TestPrimeChecksRunResolvedBinaryInDiagnosedWorkspace(t *testing.T) {
 	decoyDir := t.TempDir()
 	writeRecordingBd(t, decoyDir, "bd", "PRIME_DECOY_LOG")
 
+	callerBeadsDir := filepath.Join(t.TempDir(), ".beads")
+	mustMkdir(t, callerBeadsDir)
+
 	for _, tc := range []struct {
-		name string
-		path string
+		name     string
+		path     string
+		beadsEnv string // the caller's BEADS_DIR ("" = unset)
 	}{
-		{name: "decoy bd on PATH", path: decoyDir},
+		{name: "decoy bd on PATH", path: decoyDir, beadsEnv: callerBeadsDir},
 		{name: "empty PATH", path: ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1156,7 +1161,14 @@ func TestPrimeChecksRunResolvedBinaryInDiagnosedWorkspace(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Setenv("PATH", tc.path)
+			t.Setenv("BEADS_DIR", tc.beadsEnv)
+			if tc.beadsEnv == "" {
+				if err := os.Unsetenv("BEADS_DIR"); err != nil {
+					t.Fatal(err)
+				}
+			}
 			repo := writePrimeReferencingRepo(t)
+			mustMkdir(t, filepath.Join(repo, ".beads"))
 			t.Chdir(t.TempDir())
 
 			prime := VerifyPrimeOutput(repo)
@@ -1178,6 +1190,14 @@ func TestPrimeChecksRunResolvedBinaryInDiagnosedWorkspace(t *testing.T) {
 			if got := records[1]["argv"]; got != "prime --help" {
 				t.Errorf("CheckDocumentationBdPrimeReference argv = %q, want %q", got, "prime --help")
 			}
+			for _, rec := range records {
+				if rec["cwd"] != resolve(t, repo) {
+					t.Errorf("%q ran in %q, want the diagnosed repo %q", rec["argv"], rec["cwd"], resolve(t, repo))
+				}
+				if want := filepath.Join(repo, ".beads"); rec["beads_dir"] == "<unset>" || resolve(t, rec["beads_dir"]) != resolve(t, want) {
+					t.Errorf("%q saw BEADS_DIR=%q, want %q", rec["argv"], rec["beads_dir"], want)
+				}
+			}
 			if decoy := readPrimeRecords(t, decoyLog); len(decoy) != 0 {
 				t.Errorf("PATH decoy ran: %v", decoy)
 			}
@@ -1187,5 +1207,113 @@ func TestPrimeChecksRunResolvedBinaryInDiagnosedWorkspace(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// effectiveEnv returns the value the child sees for key: the last entry wins.
+func effectiveEnv(env []string, key string) (string, bool) {
+	value, found := "", false
+	for _, kv := range env {
+		if k, v, ok := strings.Cut(kv, "="); ok && k == key {
+			value, found = v, true
+		}
+	}
+	return value, found
+}
+
+// TestPrimeCheckCommandPinsWorkspace pins GH#8130's workspace half: the child
+// runs in the absolute diagnosed repo path with BEADS_DIR set to doctor's
+// resolution for it, whatever the caller's cwd and BEADS_DIR are.
+func TestPrimeCheckCommandPinsWorkspace(t *testing.T) {
+	exe := filepath.Join(t.TempDir(), "bd-sentinel")
+	stubPrimeCheckBinary(t, func() (string, error) { return exe, nil })
+	callerBeadsDir := filepath.Join(t.TempDir(), ".beads")
+
+	type fixture struct {
+		repoArg   string // the repoPath passed to the check
+		repoDir   string // the directory it names
+		beadsDir  string // where the workspace's .beads really lives
+		beadsEnv  string // the caller's BEADS_DIR ("" = unset)
+		chdirInto string // the caller's cwd
+	}
+	cases := map[string]func(t *testing.T) fixture{
+		"absolute path, BEADS_DIR unset": func(t *testing.T) fixture {
+			repo := t.TempDir()
+			mustMkdir(t, filepath.Join(repo, ".beads"))
+			return fixture{repoArg: repo, repoDir: repo, beadsDir: filepath.Join(repo, ".beads"), chdirInto: t.TempDir()}
+		},
+		"relative path, BEADS_DIR elsewhere": func(t *testing.T) fixture {
+			parent := t.TempDir()
+			repo := filepath.Join(parent, "ws")
+			mustMkdir(t, filepath.Join(repo, ".beads"))
+			return fixture{repoArg: "ws", repoDir: repo, beadsDir: filepath.Join(repo, ".beads"), beadsEnv: callerBeadsDir, chdirInto: parent}
+		},
+		"redirected .beads": func(t *testing.T) fixture {
+			repo := t.TempDir()
+			target := filepath.Join(t.TempDir(), ".beads")
+			mustMkdir(t, target)
+			// A redirect is followed only to a directory holding a database.
+			if err := os.WriteFile(filepath.Join(target, "metadata.json"), []byte("{}\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			mustMkdir(t, filepath.Join(repo, ".beads"))
+			if err := os.WriteFile(filepath.Join(repo, ".beads", "redirect"), []byte(target+"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			return fixture{repoArg: repo, repoDir: repo, beadsDir: target, beadsEnv: callerBeadsDir, chdirInto: t.TempDir()}
+		},
+		"worktree shares the main repo's .beads": func(t *testing.T) fixture {
+			mainRepo, worktree := setupWorktreeRepo(t)
+			mustMkdir(t, filepath.Join(mainRepo, ".beads"))
+			return fixture{repoArg: worktree, repoDir: worktree, beadsDir: filepath.Join(mainRepo, ".beads"), beadsEnv: callerBeadsDir, chdirInto: t.TempDir()}
+		},
+	}
+	argLists := [][]string{{"prime"}, {"prime", "--help"}}
+
+	for name, setup := range cases {
+		for _, args := range argLists {
+			t.Run(name+"/"+strings.Join(args, " "), func(t *testing.T) {
+				fx := setup(t)
+				if fx.beadsEnv == "" {
+					t.Setenv("BEADS_DIR", "")
+					if err := os.Unsetenv("BEADS_DIR"); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					t.Setenv("BEADS_DIR", fx.beadsEnv)
+				}
+				t.Chdir(fx.chdirInto)
+
+				cmd, err := primeCheckCommand(fx.repoArg, args...)
+				if err != nil {
+					t.Fatalf("primeCheckCommand: %v", err)
+				}
+				if cmd.Path != exe {
+					t.Errorf("Path = %q, want %q", cmd.Path, exe)
+				}
+				if got, want := strings.Join(cmd.Args[1:], " "), strings.Join(args, " "); got != want {
+					t.Errorf("Args = %q, want %q", got, want)
+				}
+				if !filepath.IsAbs(cmd.Dir) {
+					t.Errorf("Dir = %q, want an absolute path", cmd.Dir)
+				} else if resolve(t, cmd.Dir) != resolve(t, fx.repoDir) {
+					t.Errorf("Dir = %q, want the diagnosed repo %q", cmd.Dir, fx.repoDir)
+				}
+				got, ok := effectiveEnv(cmd.Env, "BEADS_DIR")
+				if !ok {
+					t.Fatalf("child env has no BEADS_DIR; want %q", fx.beadsDir)
+				}
+				if resolve(t, got) != resolve(t, fx.beadsDir) {
+					t.Errorf("effective BEADS_DIR = %q, want %q", got, fx.beadsDir)
+				}
+			})
+		}
+	}
+}
+
+func mustMkdir(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
 	}
 }
