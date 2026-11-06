@@ -1026,6 +1026,50 @@ func TestRunRecipe_CopilotManagedSection(t *testing.T) {
 			t.Fatalf("plugin manifest not installed: %v", err)
 		}
 	})
+
+	t.Run("install updates a stale section in place and is idempotent", func(t *testing.T) {
+		tmpDir := chdirFresh(t)
+		const (
+			before = "# Before\n\nUser text before the section.\n"
+			after  = "# After\n\nUser text after the section.\n"
+		)
+		stale := "<!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:00000000 -->\nOld beads guidance.\n<!-- END BEADS INTEGRATION -->\n"
+		writeInstructions(t, tmpDir, before+"\n"+stale+"\n"+after)
+
+		if _, _, err := run(t); err != nil {
+			t.Fatalf("bd setup copilot: %v", err)
+		}
+		got, err := os.ReadFile(filepath.Join(tmpDir, ".github", "copilot-instructions.md"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.HasPrefix(string(got), before+"\n") {
+			t.Fatalf("install changed the text before the section; file is now:\n%s", got)
+		}
+		if !strings.HasSuffix(string(got), after) {
+			t.Fatalf("install changed the text after the section; file is now:\n%s", got)
+		}
+		if n := strings.Count(string(got), "<!-- BEGIN BEADS INTEGRATION"); n != 1 {
+			t.Fatalf("install left %d beads sections, want 1:\n%s", n, got)
+		}
+		if strings.Contains(string(got), "Old beads guidance.") {
+			t.Fatalf("stale section body was not updated:\n%s", got)
+		}
+		if strings.Contains(string(got), "hash:00000000") {
+			t.Fatalf("stale marker metadata was not updated:\n%s", got)
+		}
+
+		if _, _, err := run(t); err != nil {
+			t.Fatalf("bd setup copilot (rerun): %v", err)
+		}
+		again, err := os.ReadFile(filepath.Join(tmpDir, ".github", "copilot-instructions.md"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(again) != string(got) {
+			t.Fatalf("rerun changed the instructions:\nbefore: %q\nafter:  %q", got, again)
+		}
+	})
 }
 
 // TestRunRecipe_CopilotWorkspaceOverrideUsesGenericPath pins that a workspace
