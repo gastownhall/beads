@@ -252,3 +252,32 @@ func TestTryRetirableLockRefusesReparsePoint(t *testing.T) {
 		require.Equal(t, "keep", string(got), "the target must be unchanged")
 	})
 }
+
+// TestRetireRefusesReplacedPath pins that retirement only deletes the file
+// the lease holds: once its pathname names a replacement, Retire fails and
+// leaves the replacement alone.
+func TestRetireRefusesReplacedPath(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "life.lock")
+	lease, err := TryRetirableLock(path)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		if lease != nil {
+			lease.Unlock()
+		}
+	})
+
+	require.NoError(t, os.Rename(path, filepath.Join(dir, "moved.lock")), "delete sharing allows renaming the held file away")
+	require.NoError(t, os.WriteFile(path, []byte("replacement"), 0o600))
+
+	require.Error(t, lease.Retire(), "retiring a pathname that now names another file")
+	got, err := os.ReadFile(path)
+	require.NoError(t, err, "the replacement must survive")
+	require.Equal(t, "replacement", string(got))
+
+	lease.Unlock()
+	lease = nil
+	got, err = os.ReadFile(path)
+	require.NoError(t, err, "the replacement must survive the lease's release")
+	require.Equal(t, "replacement", string(got), "releasing the lease must not delete the replacement")
+}
