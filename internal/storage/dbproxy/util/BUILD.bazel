@@ -10,6 +10,7 @@ go_library(
     visibility = ["//:__subpackages__"],
     deps = [
         "//internal/lockfile",
+        "//internal/storage/doltutil",
         "@com_github_go_sql_driver_mysql//:mysql",
     ],
 )

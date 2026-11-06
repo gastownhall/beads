@@ -3,7 +3,9 @@ package externaldeps
 import (
 	"context"
 	"errors"
+	"maps"
 	"slices"
+	"strconv"
 	"testing"
 	"time"
 
@@ -12,6 +14,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
+	publicops "github.com/steveyegge/beads/issueops"
 )
 
 type fakeUOWProvider struct {
@@ -30,6 +33,10 @@ type fakeUOW struct {
 func (u *fakeUOW) IssueUseCase() domain.IssueUseCase           { return u.issues }
 func (u *fakeUOW) DependencyUseCase() domain.DependencyUseCase { return u.deps }
 
+// Close lets a role run over the fake: RunTxRead closes each unit of work it
+// opens.
+func (u *fakeUOW) Close(context.Context) {}
+
 type fakeIssueUseCase struct {
 	domain.IssueUseCase
 	ready   []*types.Issue
@@ -47,18 +54,6 @@ func (u *fakeIssueUseCase) GetIssue(_ context.Context, id string) (*types.Issue,
 	return nil, nil
 }
 
-func (u *fakeIssueUseCase) GetIssuesByIDs(ctx context.Context, ids []string) ([]*types.Issue, error) {
-	result := make([]*types.Issue, 0, len(ids))
-	for _, id := range ids {
-		if issue, err := u.GetIssue(ctx, id); err != nil {
-			return nil, err
-		} else if issue != nil {
-			result = append(result, issue)
-		}
-	}
-	return result, nil
-}
-
 func (u *fakeIssueUseCase) GetWisp(_ context.Context, id string) (*types.Issue, error) {
 	for _, issue := range u.wisps {
 		if issue.ID == id {
@@ -68,16 +63,23 @@ func (u *fakeIssueUseCase) GetWisp(_ context.Context, id string) (*types.Issue, 
 	return nil, nil
 }
 
-func (u *fakeIssueUseCase) GetWispsByIDs(ctx context.Context, ids []string) ([]*types.Issue, error) {
-	result := make([]*types.Issue, 0, len(ids))
-	for _, id := range ids {
-		issue, err := u.GetWisp(ctx, id)
+// GetMany answers both planes, as ExecuteGetMany does, each row with the
+// labels it was seeded with (GetMany's one hydration).
+func (u *fakeIssueUseCase) GetMany(ctx context.Context, request publicops.GetManyRequest) (publicops.GetManyResult, error) {
+	result := publicops.GetManyResult{Issues: []*publicops.Issue{}, Missing: []string{}}
+	for _, id := range request.IDs {
+		issue, err := u.GetIssue(ctx, id)
+		if err == nil && issue == nil {
+			issue, err = u.GetWisp(ctx, id)
+		}
 		if err != nil {
-			return nil, err
+			return publicops.GetManyResult{}, err
 		}
-		if issue != nil {
-			result = append(result, issue)
+		if issue == nil {
+			result.Missing = append(result.Missing, id)
+			continue
 		}
+		result.Issues = append(result.Issues, issue)
 	}
 	return result, nil
 }
@@ -117,6 +119,23 @@ type fakeDependencyUseCase struct {
 	external map[string][]*types.Dependency
 	records  map[string][]*types.Dependency
 	wispDeps map[string][]*types.Dependency
+	// isBlocked is the stored is_blocked column, per row; an id it does not
+	// name has no row.
+	isBlocked map[string]bool
+}
+
+func (u *fakeDependencyUseCase) GetBlockingInfo(context.Context, []string) (domain.BlockingInfo, error) {
+	return domain.BlockingInfo{}, nil
+}
+
+func (u *fakeDependencyUseCase) IsBlockedBatch(_ context.Context, ids []string) (map[string]bool, error) {
+	result := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		if blocked, ok := u.isBlocked[id]; ok {
+			result[id] = blocked
+		}
+	}
+	return result, nil
 }
 
 func (u *fakeDependencyUseCase) GetExternalBlockingDependencyRecords(context.Context) (map[string][]*types.Dependency, error) {
@@ -161,6 +180,149 @@ func TestWrapUOWProviderFiltersProxiedReadyWork(t *testing.T) {
 	if ids := issueIDs(got.Items); !slices.Equal(ids, []string{ready.ID}) {
 		t.Fatalf("proxied ready IDs = %v, want [%s]", ids, ready.ID)
 	}
+}
+
+// TestWrapUOWProviderBlockedFlagAgreesWithReadyWork: the stored is_blocked
+// column has no external term, so a row whose only blocker is an unsatisfied
+// external ref reads false there. bd serve answers the served flag on this
+// arm, so the flag must call that row blocked, as GetReadyWork does, without
+// naming a row the column did not answer: neither an orphan edge's source nor
+// an unasked row.
+func TestWrapUOWProviderBlockedFlagAgreesWithReadyWork(t *testing.T) {
+	blocked, free, elsewhere := issue("be-blocked"), issue("be-free"), issue("be-elsewhere")
+	const ghost = "be-ghost"
+	inner := &fakeUOW{
+		issues: &fakeIssueUseCase{ready: []*types.Issue{blocked, free, elsewhere}},
+		deps: &fakeDependencyUseCase{
+			external: map[string][]*types.Dependency{
+				blocked.ID:   {externalDep(blocked.ID, "external:remote:payments", types.DepBlocks)},
+				elsewhere.ID: {externalDep(elsewhere.ID, "external:remote:payments", types.DepBlocks)},
+				ghost:        {externalDep(ghost, "external:remote:payments", types.DepBlocks)},
+			},
+			isBlocked: map[string]bool{blocked.ID: false, free.ID: false, elsewhere.ID: false},
+		},
+	}
+	provider := WrapUOWProvider(&fakeUOWProvider{uw: inner}, func(ProjectName) (string, bool) {
+		return "", false
+	}, nil)
+	uw, err := provider.NewUOW(t.Context())
+	if err != nil {
+		t.Fatalf("NewUOW: %v", err)
+	}
+	ready, err := uw.IssueUseCase().GetReadyWork(t.Context(), types.WorkFilter{})
+	if err != nil {
+		t.Fatalf("GetReadyWork: %v", err)
+	}
+	if ids := issueIDs(ready.Items); !slices.Equal(ids, []string{free.ID}) {
+		t.Fatalf("proxied ready IDs = %v, want [%s]", ids, free.ID)
+	}
+
+	asked := []string{blocked.ID, free.ID, ghost}
+	flags, err := uw.DependencyUseCase().IsBlockedBatch(t.Context(), asked)
+	if err != nil {
+		t.Fatalf("IsBlockedBatch: %v", err)
+	}
+	if want := map[string]bool{blocked.ID: true, free.ID: false}; !maps.Equal(flags, want) {
+		t.Errorf("IsBlockedBatch = %v, want %v", flags, want)
+	}
+
+	annotator, err := provider.(uow.BlockingAnnotatorSource).BlockingAnnotator()
+	if err != nil {
+		t.Fatalf("BlockingAnnotator: %v", err)
+	}
+	result, err := annotator.AnnotateBlocking(t.Context(), publicops.BlockingRequest{IDs: asked, IncludeIsBlocked: true})
+	if err != nil {
+		t.Fatalf("AnnotateBlocking: %v", err)
+	}
+	if got, want := blockedFlags(result), map[string]string{blocked.ID: "true", free.ID: "false", ghost: "absent"}; !maps.Equal(got, want) {
+		t.Errorf("AnnotateBlocking is_blocked = %v, want %v", got, want)
+	}
+}
+
+// TestWrapUOWProviderBlockedFlagResolvesOnlyTheAskedRefs: a client asks for
+// the served flag in chunks, so unlike Ready, which must resolve every
+// external ref in the workspace, IsBlockedBatch opens only the foreign
+// projects its asked rows name, neither an unasked row's nor an orphan
+// edge's.
+func TestWrapUOWProviderBlockedFlagResolvesOnlyTheAskedRefs(t *testing.T) {
+	blocked, free, elsewhere := issue("be-blocked"), issue("be-free"), issue("be-elsewhere")
+	// shipped's external blocker is SATISFIED: the foreign project's labelled
+	// index carries a closed provider of the capability. Its record is answered
+	// and resolved, and it must still read unblocked — the half of the
+	// predicate a "raise every answered external record" body would break.
+	shipped := issue("be-shipped")
+	const ghost = "be-ghost"
+	inner := &fakeUOW{deps: &fakeDependencyUseCase{
+		external: map[string][]*types.Dependency{
+			blocked.ID:   {externalDep(blocked.ID, "external:remote:invoices", types.DepBlocks)},
+			shipped.ID:   {externalDep(shipped.ID, "external:remote:payments", types.DepBlocks)},
+			elsewhere.ID: {externalDep(elsewhere.ID, "external:other:billing", types.DepBlocks)},
+			ghost:        {externalDep(ghost, "external:orphan:audit", types.DepBlocks)},
+		},
+		isBlocked: map[string]bool{blocked.ID: false, free.ID: false, elsewhere.ID: false, shipped.ID: false},
+	}}
+	opens := make(map[string]int)
+	provider := WrapUOWProvider(&fakeUOWProvider{uw: inner},
+		func(project ProjectName) (string, bool) { return "/projects/" + string(project), true },
+		func(_ context.Context, path string) (storage.DoltStorage, error) {
+			opens[path]++
+			return &fakeStore{labels: map[string][]*types.Issue{
+				"provides:payments": {{ID: "remote-done", Status: types.StatusClosed}},
+			}}, nil
+		},
+	)
+	uw, err := provider.NewUOW(t.Context())
+	if err != nil {
+		t.Fatalf("NewUOW: %v", err)
+	}
+
+	for _, tc := range []struct {
+		asked     []string
+		want      map[string]bool
+		wantOpens map[string]int
+	}{
+		{asked: []string{free.ID, ghost}, want: map[string]bool{free.ID: false}, wantOpens: map[string]int{}},
+		{
+			asked:     []string{blocked.ID, free.ID},
+			want:      map[string]bool{blocked.ID: true, free.ID: false},
+			wantOpens: map[string]int{"/projects/remote": 1},
+		},
+		{
+			asked:     []string{shipped.ID, free.ID},
+			want:      map[string]bool{shipped.ID: false, free.ID: false},
+			wantOpens: map[string]int{"/projects/remote": 1},
+		},
+		{
+			asked:     []string{blocked.ID, shipped.ID},
+			want:      map[string]bool{blocked.ID: true, shipped.ID: false},
+			wantOpens: map[string]int{"/projects/remote": 1},
+		},
+	} {
+		clear(opens)
+		flags, err := uw.DependencyUseCase().IsBlockedBatch(t.Context(), tc.asked)
+		if err != nil {
+			t.Fatalf("IsBlockedBatch(%v): %v", tc.asked, err)
+		}
+		if !maps.Equal(flags, tc.want) {
+			t.Errorf("IsBlockedBatch(%v) = %v, want %v", tc.asked, flags, tc.want)
+		}
+		if !maps.Equal(opens, tc.wantOpens) {
+			t.Errorf("IsBlockedBatch(%v) opened %v, want %v", tc.asked, opens, tc.wantOpens)
+		}
+	}
+}
+
+// blockedFlags renders each annotated row's is_blocked flag, "absent" where
+// the row carries none.
+func blockedFlags(result publicops.BlockingResult) map[string]string {
+	flags := make(map[string]string, len(result.Items))
+	for _, item := range result.Items {
+		flags[item.ID] = "absent"
+		if item.IsBlocked != nil {
+			flags[item.ID] = strconv.FormatBool(*item.IsBlocked)
+		}
+	}
+	return flags
 }
 
 func TestWrapUOWProviderKeepsUnitOfWorkUnwrappable(t *testing.T) {

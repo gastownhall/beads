@@ -1,6 +1,7 @@
 // Package doltversion owns discovery, hardened probing, and version parsing
 // for the external `dolt` CLI executable that managed proxied-server mode
-// spawns. It exists as a stdlib-only leaf package (no dependency on
+// spawns, and the minimum dolt version bd requires of that binary and of any
+// dolt sql-server it connects to (RequiredMin). It exists as a stdlib-only leaf package (no dependency on
 // internal/doltserver or internal/config) so it can be imported early — from
 // preflight checks that must run before any beads state is written — without
 // dragging in the rest of the storage stack.
@@ -23,8 +24,8 @@ import (
 // e.g. "1.52.3" or "2.0.0-beta1". Segments holds the dotted numeric
 // components in order (major, minor, patch, ...); Prerelease holds any
 // suffix after a '-' (e.g. "beta1" or "dev"), preserved verbatim but ignored
-// by AtLeast — a prerelease build of dolt 2.0.0 should still satisfy a >=
-// 2.0.0 recommendation, since prerelease/dev builds are usually *newer* than
+// by AtLeast — a prerelease build of dolt 2.6.0 should still satisfy a >=
+// 2.6.0 floor, since prerelease/dev builds are usually *newer* than
 // the tagged version they're built from, not older. Raw retains the original
 // input for error messages and display.
 type Version struct {
@@ -47,13 +48,10 @@ type Version struct {
 // extract a usable, comparable version from whatever dolt prints rather than
 // to validate that dolt's own output is well-formed semver.
 //
-// A consequence worth naming: any first line whose last field parses as a
-// dotted integer sequence passes — "dolt build 2023" yields version "2023",
-// which sails over RecommendedMin. Acceptable while the consumer is
-// warn-only policy; if a later change makes this the parser behind a hard
-// enforcement floor (the part-2 revalidation contract), tighten it to
-// require at least two dotted segments or an explicit "version" marker
-// before the token, so a stray trailing integer cannot satisfy a gate.
+// The token must have at least two dotted segments: RequiredMin is a hard
+// floor, and a first line that merely ends in an integer ("dolt build
+// 2023") must not pass it as version 2023. Such output is unparseable, which
+// ProbeWithPolicy reports as a warning rather than a refusal.
 func ParseVersion(output string) (Version, error) {
 	firstLine := output
 	if idx := strings.IndexByte(output, '\n'); idx >= 0 {
@@ -65,7 +63,14 @@ func ParseVersion(output string) (Version, error) {
 	if len(fields) == 0 {
 		return Version{}, fmt.Errorf("%w: empty version output", ErrUnparseableVersion)
 	}
-	return parseToken(fields[len(fields)-1])
+	v, err := parseToken(fields[len(fields)-1])
+	if err != nil {
+		return Version{}, err
+	}
+	if len(v.Segments) < 2 {
+		return Version{}, fmt.Errorf("%w: %q has no minor version", ErrUnparseableVersion, v.Raw)
+	}
+	return v, nil
 }
 
 // parseToken parses a single version token (e.g. "1.52.3" or
@@ -95,12 +100,27 @@ func parseToken(token string) (Version, error) {
 		segments = append(segments, n)
 	}
 
+	// The prerelease is printed in refusals and doctor output, and a server
+	// or binary supplies it, so it is limited to the characters a version
+	// suffix uses (semver's, plus "_" and "+"). Anything else makes the
+	// version unparseable, which the policy reports rather than prints.
+	for _, r := range prerelease {
+		if !isPrereleaseRune(r) {
+			return Version{}, fmt.Errorf("%w: %q", ErrUnparseableVersion, token)
+		}
+	}
+
 	return Version{Segments: segments, Prerelease: prerelease, Raw: token}, nil
+}
+
+func isPrereleaseRune(r rune) bool {
+	return r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' ||
+		r == '.' || r == '-' || r == '_' || r == '+'
 }
 
 // MustParse parses s (a bare version token, e.g. "2.0.0" — not full `dolt
 // version` command output) and panics on error. It exists for declaring
-// policy constants (see RecommendedMin) where the input is a hardcoded
+// policy constants (see RequiredMin) where the input is a hardcoded
 // literal and a parse failure would be a programming error caught
 // immediately by any test or use of the package, not a runtime condition
 // to handle gracefully. It calls parseToken directly rather than
@@ -119,7 +139,7 @@ func MustParse(s string) Version {
 // Segments numerically position by position (a missing trailing segment is
 // treated as 0, so "1.52" >= "1.52.0"). Prerelease/build suffixes are
 // ignored for this comparison: policy floors in this package (see
-// RecommendedMin) are about the underlying storage-format-relevant release,
+// RequiredMin) are about the underlying storage-format-relevant release,
 // and a "-dev" or "-beta1" build of that release or later should not be
 // treated as failing the floor just because it isn't a clean tagged release.
 func (v Version) AtLeast(other Version) bool {

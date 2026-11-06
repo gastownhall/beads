@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/issueops"
 )
 
 func bdProxiedClose(t *testing.T, bd, dir string, args ...string) string {
@@ -358,14 +359,14 @@ func TestProxiedServerCloseB(t *testing.T) {
 	})
 }
 
-// TestProxiedServerClose3 was split off TestProxiedServerClose (as
-// TestProxiedServerClose2 was before it) so that no single top-level suite
-// carries 23 bd-init subtests: that one parent alone cost ~2060
-// slot-seconds under -test.parallel=4 and pushed its 15-shard legacy shard
-// past go test's 15m timeout on every run (gastownhall/beads#7151). Those
-// 23 now sit in TestProxiedServerClose, TestProxiedServerCloseB,
-// TestProxiedServerClose3 and TestProxiedServerClose4. Its own second half
-// is TestProxiedServerClose4.
+// TestProxiedServerClose3 was split off TestProxiedServerClose in
+// gastownhall/beads#7173 (as TestProxiedServerClose2 was before it) so that
+// no single top-level suite carries 23 bd-init subtests: that one parent
+// alone cost ~2060 slot-seconds under -test.parallel=4 and pushed its shard
+// of the since-retired 15-shard legacy jobs past go test's 15m timeout on
+// every run. Those 23 now sit in TestProxiedServerClose,
+// TestProxiedServerCloseB, TestProxiedServerClose3 and
+// TestProxiedServerClose4. Its own second half is TestProxiedServerClose4.
 func TestProxiedServerClose3(t *testing.T) {
 	requireSharedProxiedServer(t)
 	t.Parallel()
@@ -511,7 +512,7 @@ func TestProxiedServerClose3(t *testing.T) {
 // all 12 of its bd-init subtests in one parent, whichever 15-shard legacy
 // shard hosted Close3 timed out in turn (6, then 1) while shard 5 dropped to
 // 5m, so the remaining weight is carried as two parents of six on two shards
-// (gastownhall/beads#7151).
+// (gastownhall/beads#7173).
 func TestProxiedServerClose4(t *testing.T) {
 	requireSharedProxiedServer(t)
 	t.Parallel()
@@ -898,6 +899,44 @@ func TestProxiedServerClose2B(t *testing.T) {
 		}
 	})
 
+	// TestEmbeddedRemedyPrinting_closeContinue's proxied twin: the lines bd
+	// close prints above the bd mol squash hint name each ID escaped.
+	t.Run("continue_names_ids_escaped", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "rpc")
+		for _, root := range closeContinueRoots {
+			bdProxiedCreate(t, bd, p.dir, "Mol", "-t", "epic", "--labels", "template", "--id", root.id)
+			step := bdProxiedCreate(t, bd, p.dir, "Step", "--parent", root.id)
+			bdProxiedCreate(t, bd, p.dir, "Dependent", "--id", root.id+"-dep", "--deps", "depends-on:"+step.ID)
+			got := bdProxiedClose(t, bd, p.dir, step.ID, "--continue", "--suggest-next")
+			if want := closeContinueOutput(root.id, root.shown, root.quoted, true); got != want {
+				t.Errorf("bd close --continue --suggest-next of %q prints\n%q\nwant\n%q", root.id, got, want)
+			}
+			requireNoTerminalControl(t, "bd close --continue", got)
+		}
+	})
+
+	// The same molecules with each root assigned to alice: bob's close of the
+	// last step completes the molecule but its root refuses the auto-close,
+	// and the warning bd close prints above the hint cannot redraw it.
+	t.Run("continue_refused_auto_close_warns_escaped", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "rpc")
+		for _, root := range closeContinueRoots {
+			bdProxiedCreate(t, bd, p.dir, "Mol", "-t", "epic", "--labels", "template", "--id", root.id, "--assignee", "alice")
+			step := bdProxiedCreate(t, bd, p.dir, "Step", "--parent", root.id)
+			stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "close", step.ID, "--continue", "--actor", "bob")
+			if err != nil {
+				t.Fatalf("bd close %s --continue failed: %v\nstdout:\n%s\nstderr:\n%s", step.ID, err, stdout, stderr)
+			}
+			wantStdout, wantStderr := closeContinueRefusal(root.id, root.shown, root.quoted)
+			if stdout != wantStdout || stderr != wantStderr {
+				t.Errorf("bd close --continue of %q with a refused auto-close prints\n%q\non stdout and\n%q\non stderr, want\n%q\nand\n%q", root.id, stdout, stderr, wantStdout, wantStderr)
+			}
+			requireNoTerminalControl(t, "bd close --continue with a refused auto-close", stderr+stdout)
+		}
+	})
+
 	t.Run("auto_close_completed_molecule", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "accm")
@@ -911,6 +950,31 @@ func TestProxiedServerClose2B(t *testing.T) {
 		}
 		if got := readCloseReason(t, db, root.ID); got != "all steps complete" {
 			t.Errorf("auto-close reason: got %q, want %q", got, "all steps complete")
+		}
+	})
+
+	t.Run("json_reports_auto_closed_molecule", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "jacm")
+		root := bdProxiedCreate(t, bd, p.dir, "Molecule root", "-t", "epic", "--labels", "template")
+		s1 := bdProxiedCreate(t, bd, p.dir, "Step 1", "--parent", root.ID)
+		s2 := bdProxiedCreate(t, bd, p.dir, "Step 2", "--parent", root.ID)
+		s3 := bdProxiedCreate(t, bd, p.dir, "Step 3", "--parent", root.ID)
+		bdProxiedClose(t, bd, p.dir, s1.ID)
+		out := bdProxiedClose(t, bd, p.dir, "--json", s2.ID, s3.ID)
+		requireCloseJSONReportsAutoClosedMolecule(t, out, []string{s2.ID, s3.ID}, root.ID)
+	})
+
+	t.Run("json_reports_molecule_auto_close_refusal", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "jmar")
+		root := bdProxiedCreate(t, bd, p.dir, "Molecule root", "-t", "epic", "--labels", "template", "--assignee", "someone-else")
+		s1 := bdProxiedCreate(t, bd, p.dir, "Step 1", "--parent", root.ID)
+		out := bdProxiedClose(t, bd, p.dir, "--actor", "json-closer", "--json", s1.ID)
+		requireCloseJSONReportsMoleculeRefusal(t, out, s1.ID, root.ID,
+			&issueops.CloseNotAssigneeError{IssueID: root.ID, Assignee: "someone-else", Actor: "json-closer"})
+		if got := readStatus(t, openProxiedDB(t, p), root.ID); got != types.StatusOpen {
+			t.Errorf("a root assigned to another actor must stay open, got %q", got)
 		}
 	})
 

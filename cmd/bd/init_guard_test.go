@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -433,6 +434,21 @@ func TestInitGuardServerMessage_IncludesTargetIdentity(t *testing.T) {
 	for _, want := range []string{"custom_db", "10.0.0.5", "3309"} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("message must include target identity %q, got:\n%s", want, msg)
+		}
+	}
+
+	// An IPv6 host, configured bare or bracketed, is named as [host]:port, the
+	// address bd dials, not ::1:3309 or [[::1]]:3309.
+	for _, host := range []string{"::1", "[::1]"} {
+		for name, msg := range map[string]string{
+			"initGuardServerMessage":          initGuardServerMessage("custom_db", host, 3309, "custom", "").Error(),
+			"initGuardMissingServerDBMessage": initGuardMissingServerDBMessage("custom_db", host, 3309, "", true).Error(),
+			"bootstrapMissingServerDBRefusal": bootstrapMissingServerDBRefusal("custom_db", bootstrapServerProbeConfig{host: host, port: 3309}.serverLocation(), nil).Error(),
+			"bootstrapMissingServerDBSummary": bootstrapMissingServerDBSummary("custom_db", serverDBProbe{Host: host, Port: 3309}.serverLocation(), errors.New("probe failed")),
+		} {
+			if !strings.Contains(msg, "[::1]:3309") || strings.Contains(msg, "[[::1]]") || strings.Contains(msg, " ::1:3309") {
+				t.Errorf("%s(host %q) must name the server as [::1]:3309, got:\n%s", name, host, msg)
+			}
 		}
 	}
 }

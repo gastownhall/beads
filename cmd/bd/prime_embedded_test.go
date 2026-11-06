@@ -101,6 +101,55 @@ func TestEmbeddedPrime(t *testing.T) {
 			t.Errorf("expected --memories-only to omit full command guide: %s", out)
 		}
 	})
+
+	// ===== prime.disabled =====
+
+	// A session that sets BD_PRIME_DISABLED gets nothing from the hook line it
+	// inherits, whatever that line's flags, while the workspace (and its
+	// memories) stays as it is.
+	t.Run("prime_disabled_env", func(t *testing.T) {
+		for _, args := range [][]string{nil, {"--full"}, {"--memories-only"}, {"--hook-json"}} {
+			cmd := exec.Command(bd, append([]string{"prime"}, args...)...)
+			cmd.Dir = dir
+			cmd.Env = append(bdEnv(dir), "BD_PRIME_DISABLED=true")
+			stdout, stderr, err := runCommandBuffers(t, cmd)
+			if err != nil {
+				t.Fatalf("bd prime %v failed: %v\nstderr:\n%s", args, err, stderr.String())
+			}
+			out := stdout.String()
+			if len(args) == 1 && args[0] == "--hook-json" {
+				if !strings.Contains(out, `"additionalContext":""`) {
+					t.Errorf("disabled bd prime --hook-json should send an empty envelope, got %s", out)
+				}
+				continue
+			}
+			if out != "" {
+				t.Errorf("disabled bd prime %v printed %q", args, out[:min(200, len(out))])
+			}
+		}
+		if out := bdPrime(t, bd, dir, "--memories-only"); !strings.Contains(out, "prime-test-mem") {
+			t.Errorf("without BD_PRIME_DISABLED the memories come back: %s", out)
+		}
+	})
+
+	t.Run("prime_disabled_config", func(t *testing.T) {
+		set := func(value string) {
+			cmd := exec.Command(bd, "config", "set", "prime.disabled", value)
+			cmd.Dir = dir
+			cmd.Env = bdEnv(dir)
+			if _, stderr, err := runCommandBuffers(t, cmd); err != nil {
+				t.Fatalf("bd config set prime.disabled %s: %v\n%s", value, err, stderr.String())
+			}
+		}
+		set("true")
+		if out := bdPrime(t, bd, dir); out != "" {
+			t.Errorf("prime.disabled=true in config, bd prime printed %q", out[:min(200, len(out))])
+		}
+		set("false")
+		if out := bdPrime(t, bd, dir); !strings.Contains(out, "prime-test-mem") {
+			t.Errorf("prime.disabled=false must restore the briefing: %s", out[:min(200, len(out))])
+		}
+	})
 }
 
 // TestEmbeddedPrimeConcurrent exercises prime operations concurrently.
@@ -232,12 +281,12 @@ func primeFirstDiff(got, want string) string {
 // subprocess parity tests. The TestEmbedded prefix is deliberate and
 // load-bearing in both directions: the fast `./...` lanes run
 // -skip '^TestEmbedded' (pr.yml, main.yml), and .github/scripts/embedded-test-shard.sh
-// discovers shard members by grepping ^func TestEmbedded in *_embedded_test.go.
+// discovers shard members by grepping ^func TestEmbedded in cmd/bd/*_test.go.
 // So they run in the full embedded tier, which ci-embedded-tier.sh enables
 // unconditionally for merge_group and pushes to main — i.e. in the merge queue
 // before this can land, not on every PR push. Renaming them out of the prefix
-// moves ~30s of subprocess work into every short lane; renaming the file out of
-// *_embedded_test.go drops them from the shard runner entirely.
+// moves ~30s of subprocess work into every short lane and drops them from the
+// shard runner entirely.
 //
 // TestEmbeddedPrimeChangeDirPrimesTarget is the issue's repro end to end
 // (#5509): from repo-a, `bd -C repo-b prime` must emit repo-b's PRIME.md,

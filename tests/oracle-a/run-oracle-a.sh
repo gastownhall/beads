@@ -5,9 +5,9 @@
 #   REFERENCE  bd  — built from the merge base of HEAD and origin/main (the "before")
 #   CANDIDATE  bd  — built from the current working tree      (the "after")
 # and diffs each step (exit code, stderr, JSON-aware stdout) with volatile
-# normalization (<TS>/<UUID>/<ACTOR>/<EMAIL>). ZERO in-scope divergences is the
-# gate: any in-scope FAIL means the change altered a user-visible bd behavior on
-# the covered contract surface.
+# normalization (<TS>/<UUID>/<ACTOR>/<EMAIL>/<REV>/<WORKSPACE>/<REPO_ID>/
+# <CLONE_ID>). ZERO in-scope divergences is the gate: any in-scope FAIL means
+# the change altered a user-visible bd behavior on the covered contract surface.
 #
 # The differential is driven by the Rust conformance harness under harness/
 # (see harness/PROVENANCE.md); the harness is pointed at two Go bd binaries and
@@ -93,9 +93,14 @@ restore_if_build_churned() {
 # --- cleanup: always remove the reference worktree; drop scratch unless asked to keep -
 cleanup() {
   local rc=$?
-  if git -C "$REPO_ROOT" worktree list --porcelain 2>/dev/null | grep -qF "$REF_SRC"; then
-    git -C "$REPO_ROOT" worktree remove --force "$REF_SRC" 2>/dev/null || true
-  fi
+  # Unconditional, which also makes it idempotent: `git worktree remove`
+  # resolves $REF_SRC itself and fails harmlessly when nothing is registered
+  # there (never added, or already removed). Do not gate it on
+  # `git worktree list --porcelain | grep -q`: grep -q exits on the first match
+  # and SIGPIPEs git, so under pipefail a large listing reads as "not
+  # registered"; and git lists the resolved path, which a $TMPDIR with a
+  # trailing slash or a symlink (both macOS defaults) never matches.
+  git -C "$REPO_ROOT" worktree remove --force "$REF_SRC" 2>/dev/null || true
   # Undo build churn to go.mod/go.sum WITHOUT destroying pre-existing user edits:
   # restore the pre-run snapshot bytes, and only when the build changed the file.
   restore_if_build_churned "$GOMOD_SNAP" "$REPO_ROOT/go.mod"
@@ -204,7 +209,11 @@ log "golden floor OK — reference produced $total_ok successful create step(s).
 # --- 5. score the candidate against the reference goldens ----------------------------
 log "scoring CANDIDATE bd against reference goldens ..."
 SCORE_OUT="$SCRATCH/scoreboard.out"
-ORACLE_CANDIDATE="$CAND_BIN" "$SCOREBOARD" | tee "$SCORE_OUT"
+# Every in-scope divergence goes to ORACLE_FAILURES_FILE, inside THIS run's
+# scratch dir. The scoreboard's default is a fixed /tmp path that all runs on the
+# host share, where a concurrent run could overwrite or swap this run's detail.
+FAIL_DETAIL="$SCRATCH/oracle-a-failures.txt"
+ORACLE_CANDIDATE="$CAND_BIN" ORACLE_FAILURES_FILE="$FAIL_DETAIL" "$SCOREBOARD" | tee "$SCORE_OUT"
 
 # --- 6. verdict from the IN-SCOPE line ------------------------------------------------
 # scoreboard prints:  "  PASS: <n>   FAIL: <m>   (<p>%)"  under the IN-SCOPE header.
@@ -221,11 +230,6 @@ elif [ "$IN_FAIL" -eq 0 ]; then
 else
   warn "RESULT: IN-SCOPE FAIL — $IN_FAIL divergence(s) vs $REF_REF (ref $REF_SHA; pass: $IN_PASS)."
   warn "Per-divergence detail:"
-  # The harness writes failures to a fixed /tmp path that concurrent runs on a
-  # shared host would clobber; copy it into this run's scratch before printing so
-  # each run owns its artifact.
-  FAIL_DETAIL="$SCRATCH/oracle-a-failures.txt"
-  cp /tmp/oracle-a-failures.txt "$FAIL_DETAIL" 2>/dev/null || FAIL_DETAIL=/tmp/oracle-a-failures.txt
   sed 's/^/  /' "$FAIL_DETAIL" >&2 2>/dev/null || true
   exit 1
 fi

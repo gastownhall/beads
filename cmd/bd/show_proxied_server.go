@@ -100,13 +100,14 @@ func runShowProxiedServer(cmd *cobra.Command, ctx context.Context, args []string
 		return err
 	}
 
-	uw, err := proxiedOpenReadUOW(ctx)
-	if err != nil {
+	// Resolved BEFORE the unit of work opens: --current reads through the
+	// provider's Querier role, which runs its own read.
+	if err := resolveShowProxiedIDs(ctx, in); err != nil {
 		return err
 	}
 
-	if err := resolveShowProxiedIDs(ctx, uw, in); err != nil {
-		uw.Close(ctx)
+	uw, err := proxiedOpenReadUOW(ctx)
+	if err != nil {
 		return err
 	}
 
@@ -125,7 +126,7 @@ func runShowProxiedServer(cmd *cobra.Command, ctx context.Context, args []string
 
 	switch {
 	case in.asOfRef != "":
-		runShowProxiedAsOf(ctx, uw, in)
+		return runShowProxiedAsOf(ctx, uw, in)
 	case in.thread:
 		return runShowProxiedThread(ctx, uw, in)
 	case in.refs:
@@ -140,12 +141,15 @@ func runShowProxiedServer(cmd *cobra.Command, ctx context.Context, args []string
 
 // resolveShowProxiedIDs turns --current into an explicit id and rejects an
 // empty id list, the same checks the direct route makes before dispatching.
-func resolveShowProxiedIDs(ctx context.Context, uw uow.UnitOfWork, in *showProxiedInput) error {
+func resolveShowProxiedIDs(ctx context.Context, in *showProxiedInput) error {
 	if in.currentMode {
 		if len(in.ids) > 0 {
 			return HandleErrorRespectJSON("--current cannot be combined with explicit issue IDs")
 		}
-		currentID := resolveCurrentIssueIDProxied(ctx, uw)
+		currentID, err := resolveCurrentIssueID(ctx)
+		if err != nil {
+			return HandleErrorRespectJSON("%v", err)
+		}
 		if currentID == "" {
 			return HandleErrorRespectJSON("no current issue found (no in-progress, hooked, or recently touched issues)")
 		}
@@ -214,8 +218,9 @@ func reportIssueLookupFailure(verb, id string, err error) {
 	fmt.Fprintf(os.Stderr, "Error %s %s: %v\n", verb, id, err)
 }
 
-func runShowProxiedAsOf(ctx context.Context, uw uow.UnitOfWork, in *showProxiedInput) {
+func runShowProxiedAsOf(ctx context.Context, uw uow.UnitOfWork, in *showProxiedInput) error {
 	var jsonIssues []*types.Issue
+	foundCount := 0
 	for idx, id := range in.ids {
 		issue, err := uw.IssueUseCase().AsOf(ctx, id, in.asOfRef)
 		if err != nil {
@@ -226,6 +231,7 @@ func runShowProxiedAsOf(ctx context.Context, uw uow.UnitOfWork, in *showProxiedI
 			fmt.Fprintf(os.Stderr, "Issue %s did not exist at %s\n", id, in.asOfRef)
 			continue
 		}
+		foundCount++
 
 		if in.shortMode {
 			fmt.Println(formatShortIssue(issue))
@@ -246,9 +252,13 @@ func runShowProxiedAsOf(ctx context.Context, uw uow.UnitOfWork, in *showProxiedI
 		}
 		fmt.Println()
 	}
-	if jsonOutput && len(jsonIssues) > 0 {
-		_ = outputJSON(jsonIssues)
+	if foundCount == 0 {
+		return showAsOfFoundNothing()
 	}
+	if jsonOutput && len(jsonIssues) > 0 {
+		return outputJSON(jsonIssues)
+	}
+	return nil
 }
 
 func runShowProxiedRefs(ctx context.Context, uw uow.UnitOfWork, in *showProxiedInput) {

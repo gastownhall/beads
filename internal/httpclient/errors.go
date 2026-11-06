@@ -39,6 +39,13 @@ func (e *ErrHTTPUnsupported) Error() string {
 	if e.ServerURL == "" {
 		return e.Unsup.Error()
 	}
+	// A capability refusal names its token, as the portable sentinel does:
+	// "Reader.List" alone cannot tell a caller which of a listing's tokened
+	// filters the server lacks.
+	if e.Unsup.Capability != "" {
+		return fmt.Sprintf("operation %q not supported by the http backend (capability %q not advertised by bd serve at %s)",
+			e.Unsup.Op, e.Unsup.Capability, e.ServerURL)
+	}
 	return fmt.Sprintf("operation %q not supported by the http backend (bd serve at %s)",
 		e.Unsup.Op, e.ServerURL)
 }

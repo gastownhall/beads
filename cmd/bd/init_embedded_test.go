@@ -107,10 +107,21 @@ func buildEmbeddedBD(t *testing.T) string {
 	return embeddedBD
 }
 
+// bdEnv builds a hermetic subprocess environment for the embedded bd binary.
+//
+// BOTH prefixes are stripped, not just BEADS_: an inherited BD_* var (say
+// BD_JSON_ENVELOPE=1, which nests the payload under `data`) reshapes output
+// the tests then assert on, so a developer's shell could turn a green suite
+// red — or, worse, green for the wrong reason. The two BD_ vars this suite
+// actually wants are re-added below with fixed values, and they are also the
+// only two CI sets, so the strip is a no-op there and a leak guard locally.
 func bdEnv(dir string) []string {
 	var env []string
 	for _, e := range os.Environ() {
-		if strings.HasPrefix(e, "BEADS_") {
+		// Viper reads BD_<KEY> above config.yaml, and agent hosts export
+		// BD_ROUTING_MODE, which overrides the routing.mode a test's
+		// workspace holds.
+		if strings.HasPrefix(e, "BEADS_") || strings.HasPrefix(e, "BD_") {
 			continue
 		}
 		env = append(env, e)
@@ -150,14 +161,6 @@ func isEmbeddedLockOutput(out string) bool {
 		strings.Contains(out, "database is locked") ||
 		strings.Contains(out, "locked by another dolt process") ||
 		strings.Contains(out, "workspace gate busy")
-}
-
-func runCommandBuffers(t *testing.T, cmd *exec.Cmd) (stdout, stderr bytes.Buffer, err error) {
-	t.Helper()
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	err = cmd.Run()
-	return stdout, stderr, err
 }
 
 // bdRunWithFlockRetry runs a bd command with retry on flock contention.
@@ -479,6 +482,39 @@ func TestEmbeddedInitABasic(t *testing.T) {
 			t.Errorf("issue_prefix: got %q, want %q", val, "alpha")
 		}
 	})
+
+	// The project's .claude/settings.json still carries the bare `bd prime`
+	// SessionStart and PreCompact hooks an older bd registered. init's Claude
+	// install migrates them, and --quiet drops the migration's "Removed
+	// <event> hook" lines like the rest of the installers' progress.
+	t.Run("quiet_legacy_claude_hooks", func(t *testing.T) {
+		dir := t.TempDir()
+		initGitRepoAt(t, dir)
+		settingsPath := filepath.Join(dir, ".claude", "settings.json")
+		if err := os.MkdirAll(filepath.Dir(settingsPath), 0o755); err != nil {
+			t.Fatalf("mkdir .claude: %v", err)
+		}
+		legacyHook := `[{"matcher": "", "hooks": [{"type": "command", "command": "bd prime"}]}]`
+		legacy := `{"hooks": {"SessionStart": ` + legacyHook + `, "PreCompact": ` + legacyHook + `}}`
+		if err := os.WriteFile(settingsPath, []byte(legacy), 0o644); err != nil {
+			t.Fatalf("seed settings.json: %v", err)
+		}
+		args := []string{"--prefix", "legacyhooks"}
+		if database, seeded := seededInitDatabase(args); seeded {
+			seedEmbeddedSchema(t, dir, database)
+		}
+
+		if out := runBDInit(t, bd, dir, args...); out != "" {
+			t.Errorf("bd init --quiet should print nothing, got:\n%s", out)
+		}
+		data, err := os.ReadFile(settingsPath)
+		if err != nil {
+			t.Fatalf("read settings.json: %v", err)
+		}
+		if got := string(data); !strings.Contains(got, `"bd prime --hook-json"`) || strings.Contains(got, `"bd prime"`) || strings.Contains(got, "PreCompact") {
+			t.Errorf("legacy hooks not migrated to the SessionStart --hook-json hook:\n%s", got)
+		}
+	})
 }
 
 func TestEmbeddedInitAForkAutoContributor(t *testing.T) {
@@ -534,8 +570,8 @@ func TestEmbeddedInitAForkAutoContributor(t *testing.T) {
 		}
 
 		// Regression: autoConfigureForkContributor must initialize the planning
-		// Dolt schema, not just create the .beads directory. An uninitialized
-		// store causes "Dolt server unreachable" on first use (e.g. bd migrate-personal).
+		// Dolt schema, not just create the .beads directory. (bd migrate-personal
+		// adopts this database as the planning repo's own.)
 		planningEmbeddedDir := filepath.Join(planningDir, ".beads", "embeddeddolt")
 		if _, err := os.Stat(planningEmbeddedDir); err != nil {
 			t.Errorf("planning embeddeddolt dir missing (planning store not pre-initialized): %v", err)
@@ -963,6 +999,53 @@ func TestEmbeddedInitBStealthAndForceReinit(t *testing.T) {
 	t.Parallel()
 
 	bd := buildEmbeddedBD(t)
+
+	// Regression (#7938): with no project config at startup, viper's ConfigFileUsed() is the
+	// user config, so persisting no-git-ops through it leaked stealth into every repository.
+	t.Run("stealth_no_git_ops_stays_out_of_user_config", func(t *testing.T) {
+		// bdEnv hard-codes HOME=dir, so this subtest drives exec.Command itself.
+		// A separate home keeps the legacy <home>/.beads/config.yaml candidate
+		// away from the project, XDG_CONFIG_HOME under it keeps the native user
+		// config out of directories shared with other tests, and the ceiling
+		// keeps the subprocess config walk inside the sandbox (bdEnv strips
+		// every BEADS_* variable, including the ceiling the test env exports).
+		home := t.TempDir()
+		userConfig := filepath.Join(home, ".config", "bd", "config.yaml")
+		if err := os.MkdirAll(filepath.Dir(userConfig), 0o755); err != nil {
+			t.Fatalf("mkdir user config dir: %v", err)
+		}
+		const seeded = "# user config\nactor: someone\n"
+		if err := os.WriteFile(userConfig, []byte(seeded), 0o644); err != nil {
+			t.Fatalf("seed user config: %v", err)
+		}
+
+		dir := t.TempDir()
+		initGitRepoAt(t, dir)
+		cmd := exec.Command(bd, "init", "--quiet", "--prefix", "sug", "--stealth")
+		cmd.Dir = dir
+		cmd.Env = append(envWithout(envWithout(bdEnv(dir), "HOME"), "XDG_CONFIG_HOME"),
+			"HOME="+home,
+			"XDG_CONFIG_HOME="+filepath.Join(home, ".config"),
+			"BEADS_CEILING_DIRECTORIES="+filepath.Dir(dir))
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("bd init --stealth failed: %v\n%s", err, out)
+		}
+
+		got, err := os.ReadFile(userConfig)
+		if err != nil {
+			t.Fatalf("read user config: %v", err)
+		}
+		if string(got) != seeded {
+			t.Errorf("stealth init modified the user config:\ngot:  %q\nwant: %q", got, seeded)
+		}
+		// The flag must land in the project config, read back the way
+		// isStealthRepo / bd doctor do (GH#2159).
+		beadsDir := filepath.Join(dir, ".beads")
+		projectConfig, _ := os.ReadFile(filepath.Join(beadsDir, "config.yaml"))
+		if config.GetStringFromDir(beadsDir, "no-git-ops") != "true" {
+			t.Errorf("stealth init did not persist no-git-ops in the project config; config.yaml:\n%s", projectConfig)
+		}
+	})
 
 	// Regression: bd init --stealth must not touch any git-visible files. Previously it
 	// created/modified the tracked project-root .gitignore via doctor.EnsureProjectGitignore, which

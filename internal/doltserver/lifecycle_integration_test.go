@@ -764,3 +764,59 @@ func TestLifecycle_RestartRemotesAPIFailureLeavesCleanStoppedState(t *testing.T)
 		t.Fatalf("SQL port after failed restart = %d, want preserved %d for retry", got, sqlPort)
 	}
 }
+
+// TestLifecycle_ServesDatabaseDirOnPort runs the served-directory proof the
+// CLI routes take against a dolt sql-server bd started. A database the
+// server created holds the server's lock beside the server's info file, so
+// it counts as served on the server's port and on no other. A copy of the
+// data directory taken while the server runs carries the info file but no
+// held lock, so it does not count, and neither does the database once the
+// server has stopped.
+func TestLifecycle_ServesDatabaseDirOnPort(t *testing.T) {
+	beadsDir := setupLifecycleTestDir(t)
+	reg := integration.NewProcessRegistry(t)
+	diag := integration.NewDiagnostics(t, beadsDir)
+	diag.CaptureOnFailure()
+
+	state, err := doltserver.Start(beadsDir)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if p, err := os.FindProcess(state.PID); err == nil {
+		reg.Register(p)
+	}
+	db := connectMySQL(t, state.Port)
+	if _, err := db.Exec("CREATE DATABASE served"); err != nil {
+		t.Fatalf("CREATE DATABASE: %v", err)
+	}
+	_ = db.Close()
+
+	dataDir := doltserver.ResolveDoltDir(beadsDir)
+	served := filepath.Join(dataDir, "served")
+	if !doltserver.ServesDatabaseDirOnPort(served, state.Port) {
+		t.Errorf("ServesDatabaseDirOnPort(%s, %d) = false for the database the running server created", served, state.Port)
+	}
+	if doltserver.ServesDatabaseDirOnPort(served, state.Port+1) {
+		t.Errorf("ServesDatabaseDirOnPort(%s, %d) = true for a port the server does not listen on", served, state.Port+1)
+	}
+
+	copied := filepath.Join(t.TempDir(), "dolt")
+	if err := os.CopyFS(copied, os.DirFS(dataDir)); err != nil {
+		t.Fatalf("copy %s: %v", dataDir, err)
+	}
+	if _, err := os.Stat(filepath.Join(copied, ".dolt", doltserver.ServerInfoFileName)); err != nil {
+		t.Fatalf("the copy lacks the server's info file, so it tests nothing: %v", err)
+	}
+	if doltserver.ServesDatabaseDirOnPort(filepath.Join(copied, "served"), state.Port) {
+		t.Error("a copy of the served data directory counts as served: its info file names the running server, but nothing holds its lock")
+	}
+
+	if err := doltserver.Stop(beadsDir); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	reg.Deregister(state.PID)
+	waitForPortClosed(t, state.Port, 5*time.Second)
+	if doltserver.ServesDatabaseDirOnPort(served, state.Port) {
+		t.Errorf("ServesDatabaseDirOnPort(%s, %d) = true after the server stopped", served, state.Port)
+	}
+}

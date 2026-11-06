@@ -1,10 +1,14 @@
 package doltutil
 
 import (
-	"fmt"
+	"net"
+	"strconv"
 	"time"
 
 	mysql "github.com/go-sql-driver/mysql"
+
+	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/remedy"
 )
 
 // maxAllowedPacketBytes is the client-side packet ceiling pinned into every
@@ -29,11 +33,30 @@ import (
 // lowered setting is no longer honored anywhere on the statement path.
 const maxAllowedPacketBytes = 1 << 30
 
+// ServerAddr is the TCP address of the Dolt server at host and port, as
+// net.JoinHostPort joins them. An IPv6 literal host may be configured bare
+// ("::1") or bracketed ("[::1]"): both name the server at "[::1]:port". Join a
+// configured Dolt server host with this, not net.JoinHostPort or "%s:%d": each
+// of those dials only one of the two spellings.
+func ServerAddr(host string, port int) string {
+	return net.JoinHostPort(configfile.UnbracketHost(host), strconv.Itoa(port))
+}
+
+// PrintedServerAddr is ServerAddr(host, port) as a message names it: through
+// the remedy printer (remedy.PrintedValue). host is the workspace's dolt.host
+// or metadata.json dolt_server_host, which a cloned repository commits, so
+// every message that names the Dolt server's address names it this way, and
+// a host holding a carriage return or terminal escape cannot redraw the
+// advice printed with it. Dial ServerAddr; print PrintedServerAddr.
+func PrintedServerAddr(host string, port int) string {
+	return remedy.PrintedValue(ServerAddr(host, port))
+}
+
 // ServerDSN holds connection parameters for building a MySQL DSN to a Dolt server.
 // All DSNs built with this struct set parseTime=true and multiStatements=true.
 type ServerDSN struct {
 	Socket   string // Unix domain socket path; when set, Net="unix" and Host/Port are ignored
-	Host     string
+	Host     string // an IPv6 literal bare or bracketed; see ServerAddr
 	Port     int
 	User     string
 	Password string        //nolint:gosec // G117: MySQL DSN password field; required by the connection-string builder, not serialized as JSON
@@ -50,17 +73,17 @@ func (d ServerDSN) String() string {
 		timeout = 5 * time.Second
 	}
 
-	net := "tcp"
-	addr := fmt.Sprintf("%s:%d", d.Host, d.Port)
+	network := "tcp"
+	addr := ServerAddr(d.Host, d.Port)
 	if d.Socket != "" {
-		net = "unix"
+		network = "unix"
 		addr = d.Socket
 	}
 
 	cfg := mysql.Config{
 		User:            d.User,
 		Passwd:          d.Password,
-		Net:             net,
+		Net:             network,
 		Addr:            addr,
 		DBName:          d.Database,
 		ParseTime:       true,

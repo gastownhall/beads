@@ -23,7 +23,30 @@ set -euo pipefail
 # releases/latest moved to 2.3.x, and it also puts bd dolt compact/flatten
 # and the #4566 fresh-bootstrap heal at risk on 2.3.x. Raise this pin only
 # once a Dolt release is confirmed clean by that same measurement.
-readonly version="2.2.0"
+#
+# 2.6.0 is that release. Measured 2026-10-24: 0/500 on one server and 0/1000
+# across 50 fresh servers of 20 databases each, and the embedded engine
+# (go.mod's dolthub/dolt/go at the v2.6.0 release) 0/100, 0/400 across 20
+# fresh opens. The regression hits databases created soon after a server
+# starts, so measure across fresh servers: that day 2.3.1, the positive
+# control, measured 0/300 on one server but 31/600 across 30 fresh servers.
+# Earlier, on one server: 2026-10-21 2.3.1 4/300, 2.4.2 0/250, 2.5.0 0/500,
+# 2.5.1 0/500, embedded 2.5.1 0/100; 2026-10-10 2.4.1 0/250. The pin tracks
+# that embedded engine, so the CLI, the container and embedded mode run the
+# same Dolt, and doltversion.RequiredMin (2.6.0), the oldest dolt bd runs
+# against outside embedded mode, must stay at or below this pin
+# (TestPinnedDoltCLIAtLeastRequiredMin). Older releases also have known
+# defects: 2.4.0 through 2.4.2
+# return no row for an ungrouped MAX/MIN over an unmatched primary-key prefix
+# (dolthub/dolt#12093); releases before 2.4.0 drop a join condition when an
+# ON clause has an OR over indexed columns (dolthub/dolt#11886); releases
+# before 2.3.3 cannot write to a database holding a descending index column,
+# which every database bd creates in embedded mode and any database whose
+# schema a dolt sql-server 2.3.3 or newer created holds (an UPDATE or DELETE
+# on issues fails on fk_comp_snap_issue, other writes with "table has unknown
+# fields"). docs/architecture/dolt.md, "Which Dolt version to install", has
+# the dated measurements.
+readonly version="2.6.0"
 readonly max_attempts=3
 readonly retry_delay_seconds=5
 
@@ -71,8 +94,8 @@ sudo install -m 0755 "$workdir/dolt-${os}-${arch}/bin/dolt" /usr/local/bin/dolt
 # Fail loudly if PATH resolves to some other dolt: a stale runner-image copy
 # earlier on PATH would silently put the suite back on an unpinned binary.
 # No `| head` here: pipefail turns dolt's SIGPIPE into a failed install.
-# Compare the version token exactly rather than as a substring: `*"2.2.0"*`
-# also matches 12.2.0 and 2.2.0-rc1, so a substring test would wave through
+# Compare the version token exactly rather than as a substring: `*"2.6.0"*`
+# also matches 12.6.0 and 2.6.0-rc1, so a substring test would wave through
 # releases the pin exists to keep out.
 installed="$(dolt version)"
 installed="${installed%%$'\n'*}"

@@ -82,6 +82,14 @@ jobs:
       - name: Update vendorHash
         run: ./scripts/update-nix-vendorhash.sh
 
+      - name: Verify the build independently of the script's exit status
+        # update-nix-vendorhash.sh's own verification build (its step 5) is
+        # internal to the script; this step re-derives the same signal from
+        # a source the workflow doesn't have to trust: a plain `nix build`
+        # that this job step fails on if it fails, regardless of what the
+        # script itself reported.
+        run: nix build .#default
+
       - name: Detect whether hash changed
         id: changed
         run: |

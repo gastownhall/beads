@@ -2,6 +2,7 @@ package issueops
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -51,5 +52,26 @@ func TestCheckClosable(t *testing.T) {
 	if err := CheckClosable("bd-1", &types.Issue{Assignee: "bob"}, "alice", false); !errors.As(err, &held) ||
 		held.IssueID != "bd-1" || held.Assignee != "bob" || held.Actor != "alice" {
 		t.Fatalf("held refusal = %#v", err)
+	}
+}
+
+// TestRefusedMoleculeAutoCloseReportsTheRefusalsOwnSentence pins
+// RefusedMoleculeAutoClose: whatever the layers between a root's refused close
+// and the auto-close wrapped around it (the unit of work's use case and
+// repository), Refusal is the sentence the refusing guard or policy wrote.
+func TestRefusedMoleculeAutoCloseReportsTheRefusalsOwnSentence(t *testing.T) {
+	for _, refusal := range []error{
+		publicops.NewCloseBlockedError("bd-1", []string{"bd-2"}),
+		&publicops.CloseOpenChildrenError{IssueID: "bd-1", OpenChildren: 2},
+		&publicops.TemplateReadOnlyError{IssueID: "bd-1"},
+		&publicops.PinnedError{IssueID: "bd-1"},
+		&publicops.CloseNotAssigneeError{IssueID: "bd-1", Assignee: "bob", Actor: "alice"},
+	} {
+		wrapped := fmt.Errorf("close bd-1: %w", fmt.Errorf("db: IssueSQLRepository.CloseChecked bd-1: %w", refusal))
+		for _, err := range []error{refusal, wrapped} {
+			if got := RefusedMoleculeAutoClose(err).Refusal; got != refusal.Error() {
+				t.Errorf("RefusedMoleculeAutoClose(%q).Refusal = %q, want %q", err, got, refusal.Error())
+			}
+		}
 	}
 }

@@ -163,6 +163,14 @@ is refused on both list operations with 400 `invalid_argument` /
 `reason: "invalid_value"`, whether or not a token is configured. Clients must
 page.
 
+The blocked listing (`GET /v0/beads/blocked`, behind `blocked.list`) is the
+exception, on every bind: like `bd blocked`, it takes no `limit` and no cursor,
+so it answers the whole blocked set in one body. That set, not the whole active
+one, is what it buffers, and the client bounds what it will read (bd's HTTP
+client refuses a body over 32 MiB). The operation answers `has_more` so a
+later server can bound it; a client must refuse `has_more: true` rather than
+treat it as the whole listing.
+
 ## Probes
 
 | Probe | Route | What green means |
@@ -336,6 +344,15 @@ own grace period expires cuts the process off regardless of what the drain was
 waiting for, which can still sever an in-flight large apply the drain would
 otherwise have waited out. Size the grace period to the ceiling plus those 5
 seconds, not to the ordinary 20s drain.
+
+**Raising `--large-apply-ceiling` past about 5m15s also outruns bd's own HTTP
+client.** It waits 6 minutes for a batch apply over 100 items: the default
+ceiling plus what the server may spend around it (the 30s request read, the
+10s wait for the large-apply slot, 5s to write the answer back). The server
+does not advertise its ceiling, so a client cannot wait longer for a server
+that grants more, and an apply that runs past the client's 6 minutes is
+reported to the caller as a timeout with an unknown outcome while the server
+goes on to commit it.
 
 Journal streams are the exception, and they have to be: a held-open response
 would otherwise sit through the whole budget and then be killed anyway. They get

@@ -168,7 +168,35 @@ func (r httpEdgeReader) ReadEdges(ctx context.Context, req issueops.EdgeReadRequ
 	if len(ids) == 0 {
 		return issueops.EdgeReadResult{Anchors: []issueops.AnchorEdges{}}, nil
 	}
+	// The ROLE has no anchor cap; the OPERATION refuses more than
+	// maxEdgeReadAnchors per request. Splitting is therefore this transport's
+	// job, never the caller's: each chunk is one round trip and the answers
+	// concatenate in request order. A read loses nothing by being split — the
+	// one property it gives up is the single snapshot across chunks, which
+	// per-anchor answers do not rely on.
+	if len(ids) > maxEdgeReadAnchors {
+		anchors := make([]issueops.AnchorEdges, 0, len(ids))
+		for start := 0; start < len(ids); start += maxEdgeReadAnchors {
+			end := min(start+maxEdgeReadAnchors, len(ids))
+			part, err := r.readEdgeChunk(ctx, ids[start:end], req.Types)
+			if err != nil {
+				return issueops.EdgeReadResult{}, err
+			}
+			anchors = append(anchors, part.Anchors...)
+		}
+		return issueops.EdgeReadResult{Anchors: anchors}, nil
+	}
+	return r.readEdgeChunk(ctx, ids, req.Types)
+}
 
+// maxEdgeReadAnchors is the listDependencies operation's cap on `issue_id`
+// values (maxDependencyAnchors in internal/httpapi), redeclared because a
+// client does not import the server.
+const maxEdgeReadAnchors = 100
+
+// readEdgeChunk answers at most maxEdgeReadAnchors distinct ids in one call.
+func (r httpEdgeReader) readEdgeChunk(ctx context.Context, ids []string, edgeTypes []types.DependencyType) (issueops.EdgeReadResult, error) {
+	req := issueops.EdgeReadRequest{IDs: ids, Types: edgeTypes}
 	q := url.Values{}
 	for _, id := range ids {
 		q.Add("issue_id", id)
@@ -511,6 +539,19 @@ func (a httpBlockingAnnotator) AnnotateBlocking(ctx context.Context, req issueop
 	q := url.Values{}
 	for _, id := range ids {
 		q.Add("issue_id", id)
+	}
+	if req.IncludeIsBlocked {
+		// Refused before the dial against a server that does not advertise
+		// the parameter: it would answer unknown_parameter, and an answer
+		// without the flag must never pass for "nothing is blocked".
+		served, err := a.store.servesCapability(ctx, wire.CapBlockingIsBlocked)
+		if err != nil {
+			return issueops.BlockingResult{}, err
+		}
+		if !served {
+			return issueops.BlockingResult{}, a.store.unsupportedCapability("BlockingAnnotator.AnnotateBlocking", wire.CapBlockingIsBlocked)
+		}
+		q.Set("is_blocked", "true")
 	}
 
 	var body apigen.BlockingAnnotations

@@ -6,6 +6,7 @@ import (
 	"database/sql/driver"
 	"errors"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -369,6 +370,17 @@ func expectIgnorePatternSeedNoop(mock sqlmock.Sqlmock, mainVersion int) {
 
 func expectOnePendingMigration(t *testing.T, mock sqlmock.Sqlmock) {
 	t.Helper()
+	expectOnePendingMigrationAtSetting(t, mock, 0, nil)
+}
+
+// expectOnePendingMigrationAtSetting is expectOnePendingMigration with an
+// explicit session dolt_transaction_commit value for the pass (see
+// expectTransactionCommitSuspend): a non-zero value additionally expects the
+// pass's SET on entry and the deferred restoration on exit. restoreErr, when
+// non-nil, is the error the restoration itself fails with (MigrateUp must
+// report it).
+func expectOnePendingMigrationAtSetting(t *testing.T, mock sqlmock.Sqlmock, transactionCommit int, restoreErr error) {
+	t.Helper()
 
 	latest := LatestVersion()
 	latestIgnored := LatestIgnoredVersion()
@@ -380,6 +392,7 @@ func expectOnePendingMigration(t *testing.T, mock sqlmock.Sqlmock) {
 	expectIgnoredCursorHealNoop(mock)
 	expectCursorProbe(mock, "schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", latest-1)
+	expectTransactionCommitSuspend(mock, transactionCommit)
 	expectDoltStatusRows(mock)
 	// The seed changed rows (expectIgnorePatternSeed reports RowsAffected=1),
 	// so MigrateUp commits it scoped+labeled before the pass runs (#4566: the
@@ -484,6 +497,33 @@ func expectOnePendingMigration(t *testing.T, mock sqlmock.Sqlmock) {
 		WillReturnRows(sqlmock.NewRows([]string{"status"}))
 	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', 'schema: apply migrations')")).
 		WillReturnRows(sqlmock.NewRows([]string{"hash"}))
+	if transactionCommit != 0 {
+		// The deferred restoration is the pass's last statement (#4470).
+		expectTransactionCommitRestore(mock, transactionCommit, restoreErr)
+	}
+}
+
+// expectTransactionCommitSuspend mocks the session-setting read at the top of
+// a needed migration pass (#4470), plus — when the setting is enabled — the
+// SET that suspends it for the pass.
+func expectTransactionCommitSuspend(mock sqlmock.Sqlmock, value int) {
+	expectTransactionCommitRead(mock, value)
+	if value != 0 {
+		expectSetTransactionCommit(mock, "0").WillReturnResult(sqlmock.NewResult(0, 0))
+	}
+}
+
+// expectTransactionCommitRestore mocks the deferred restoration a pass with a
+// suspended setting performs as it exits: it must be the last statement of
+// the mocked flow. restoreErr, when non-nil, is what the restoration fails
+// with.
+func expectTransactionCommitRestore(mock sqlmock.Sqlmock, value int, restoreErr error) {
+	exec := expectSetTransactionCommit(mock, strconv.Itoa(value))
+	if restoreErr != nil {
+		exec.WillReturnError(restoreErr)
+		return
+	}
+	exec.WillReturnResult(sqlmock.NewResult(0, 0))
 }
 
 // expectColumnExists mocks the INFORMATION_SCHEMA.COLUMNS probe still used by
@@ -511,18 +551,15 @@ func expectScalar(mock sqlmock.Sqlmock, query, column string, value any) {
 		WillReturnRows(sqlmock.NewRows([]string{column}).AddRow(value))
 }
 
-// expectCursorProbe mocks the information_schema existence probe that
-// migrationSource.currentVersion issues before it ever reads the cursor
-// table. The probe was added by be-bv7x so a not-yet-created cursor table
-// never poisons the pooled Dolt session with a failing statement.
+// expectCursorProbe mocks the existence probe that migrationSource.currentVersion
+// issues before it ever reads the cursor table: the schemata read proving the
+// session has a usable current database, then the SHOW TABLES listing. The
+// probe was added by be-bv7x so a not-yet-created cursor table never poisons
+// the pooled Dolt session with a failing statement.
 func expectCursorProbe(mock sqlmock.Sqlmock, table string, exists bool) {
-	present := 0
-	if exists {
-		present = 1
-	}
-	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM information_schema\.tables`).
-		WithArgs(table).
-		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(present))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = DATABASE()")).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	expectShowTable(mock, table, exists)
 }
 
 func expectDoltStatusRows(mock sqlmock.Sqlmock) {
@@ -548,6 +585,16 @@ const eventsFlipVersion = 62
 
 func expectDirtyGuardRefusal(t *testing.T, mock sqlmock.Sqlmock) {
 	t.Helper()
+	expectDirtyGuardRefusalAtSetting(t, mock, 0, nil)
+}
+
+// expectDirtyGuardRefusalAtSetting is expectDirtyGuardRefusal with an explicit
+// session dolt_transaction_commit value (see expectTransactionCommitSuspend):
+// a non-zero value additionally expects the pass's entry SET and exit
+// restoration straddling the refusal. restoreErr, when non-nil, is the error
+// the restoration itself fails with.
+func expectDirtyGuardRefusalAtSetting(t *testing.T, mock sqlmock.Sqlmock, transactionCommit int, restoreErr error) {
+	t.Helper()
 
 	cursor := eventsFlipVersion - 1
 
@@ -559,6 +606,7 @@ func expectDirtyGuardRefusal(t *testing.T, mock sqlmock.Sqlmock) {
 	// migrationWorkNeeded: main cursor behind -> work needed (short-circuits).
 	expectCursorProbe(mock, "schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", cursor)
+	expectTransactionCommitSuspend(mock, transactionCommit)
 	// dirtyBeforeAll: `events` dirty (working set only, not staged).
 	expectDoltStatusDirtyEvents(mock)
 	// Nothing staged -> no unstage exec; seed was a no-op -> no seed commit.
@@ -582,6 +630,11 @@ func expectDirtyGuardRefusal(t *testing.T, mock sqlmock.Sqlmock) {
 	// touches `events` -> DirtyTablesError.
 	expectCursorProbe(mock, "schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", cursor)
+	if transactionCommit != 0 {
+		// The deferred restoration runs as the pass unwinds from the
+		// refusal (#4470): it is the mocked flow's last statement.
+		expectTransactionCommitRestore(mock, transactionCommit, restoreErr)
+	}
 }
 
 func expectDoltStatusDirtyEvents(mock sqlmock.Sqlmock) {
@@ -805,29 +858,38 @@ func TestMigrateUpWithLockFreshBootstrapHealResetFailureStaysFatal(t *testing.T)
 	}
 }
 
-// expectIgnoredSentinelProbes mocks the INFORMATION_SCHEMA lookups
-// currentVersion issues to confirm a non-zero ignored cursor against the
-// schema it claims (gh 5033). They fire only for a non-zero cursor, in
-// ignoredSource's table then floored-table then column sentinel order.
+// expectIgnoredSentinelProbes mocks the schema lookups currentVersion issues
+// to confirm a non-zero ignored cursor against the schema it claims (gh 5033):
+// a SHOW TABLES probe per sentinel and floored table (showTableExists), then
+// per sentinel column its carrier table's existence and a SHOW COLUMNS read
+// (expectSentinelColumnProbe). None of them uses INFORMATION_SCHEMA, whose
+// predicates Dolt does not push down, because all of them run on every store
+// open. They fire only for a non-zero cursor, in ignoredSource's table then
+// floored-table then column sentinel order.
 func expectIgnoredSentinelProbes(mock sqlmock.Sqlmock, present bool) {
-	count := 0
-	if present {
-		count = 1
-	}
-	for range ignoredSource.sentinelTables {
-		mock.ExpectQuery(regexp.QuoteMeta("FROM INFORMATION_SCHEMA.TABLES")).
-			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(count))
+	for _, table := range ignoredSource.sentinelTables {
+		expectShowTable(mock, table, present)
 	}
 	if present {
-		for range ignoredSource.sentinelFlooredTables {
-			mock.ExpectQuery(regexp.QuoteMeta("FROM INFORMATION_SCHEMA.TABLES")).
-				WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+		for _, st := range ignoredSource.sentinelFlooredTables {
+			expectShowTable(mock, st.table, true)
 		}
-		for range ignoredSource.sentinelColumns {
-			mock.ExpectQuery(regexp.QuoteMeta("FROM INFORMATION_SCHEMA.COLUMNS")).
-				WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+		for _, sc := range ignoredSource.sentinelColumns {
+			expectSentinelColumnProbe(mock, sc, true, true)
 		}
 	}
+}
+
+// expectShowTable mocks one showTableExists probe: the database's unfiltered
+// SHOW TABLES listing, which holds table only when it exists. An absent table
+// is a listing without it, never a zero count. The listing always carries an
+// unrelated table, so a probe that took any row as presence fails.
+func expectShowTable(mock sqlmock.Sqlmock, table string, exists bool) {
+	rows := sqlmock.NewRows([]string{"Tables_in_testdb"}).AddRow("issues")
+	if exists {
+		rows.AddRow(table)
+	}
+	mock.ExpectQuery("^SHOW TABLES$").WillReturnRows(rows)
 }
 
 func TestMigrateUpWithLockFreshBootstrapHealProbeFailuresStayFatal(t *testing.T) {
@@ -978,6 +1040,7 @@ func TestMigrateUpWithLockFreshBootstrapHealCapabilityIsOneShot(t *testing.T) {
 	expectIgnoredCursorHealNoop(mock)
 	expectCursorProbe(mock, "schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", LatestVersion()-2)
+	expectTransactionCommitRead(mock, 0)
 	mock.ExpectQuery("(?s)SELECT s\\.table_name, s\\.staged\\s+FROM dolt_status s").
 		WillReturnError(errors.New("connection reset"))
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT RELEASE_LOCK(?)")).

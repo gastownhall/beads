@@ -15,7 +15,7 @@ self: final: prev: {
   #   }
   beads-unwrapped = final.callPackage ./default.nix {
     inherit self;
-    buildGoModule = final.buildGo126Module;
+    buildGoModule = final.buildGo127Module;
   };
 
   # Wrap the unwrapped binary with shell completions and a `beads` alias.

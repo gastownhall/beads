@@ -4,6 +4,7 @@ package httpclient
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 
@@ -66,6 +67,15 @@ func (g *httpBatchGetter) GetMany(ctx context.Context, req issueops.GetManyReque
 		return issueops.GetManyResult{Issues: []*issueops.Issue{}, Missing: []string{}}, nil
 	}
 
+	token, _ := wire.CapabilityFor(wire.OpBatchGetIssues)
+	served, err := g.store.servesCapability(ctx, token)
+	if err != nil {
+		return issueops.GetManyResult{}, err
+	}
+	if !served {
+		return g.getOneAtATime(ctx, req.IDs)
+	}
+
 	var body apigen.BatchGetIssuesResult
 	if err := g.store.dispatch(ctx, wire.Request{
 		Op:     wire.OpBatchGetIssues,
@@ -74,6 +84,8 @@ func (g *httpBatchGetter) GetMany(ctx context.Context, req issueops.GetManyReque
 		Body: apigen.BatchGetIssuesRequest{
 			Ids: append([]string(nil), req.IDs...),
 		},
+		// A read on POST: safe to replay after a stall or a 503, as a GET is.
+		Idempotent: true,
 	}, &body); err != nil {
 		return issueops.GetManyResult{}, err
 	}
@@ -127,4 +139,40 @@ func checkGetManyIDs(ids []string) error {
 		}
 	}
 	return nil
+}
+
+// getOneAtATime answers a GetMany against a server that does not advertise
+// issues.batchGet with one getIssue per distinct id, in first-mention order —
+// the same rows and the same Missing a batch would answer, without its single
+// snapshot. It is a transport fallback for a capability, kept here so no
+// caller of the role has to know which servers publish the batch.
+func (g *httpBatchGetter) getOneAtATime(ctx context.Context, ids []string) (issueops.GetManyResult, error) {
+	reader, err := g.store.IssueReader()
+	if err != nil {
+		return issueops.GetManyResult{}, err
+	}
+	out := issueops.GetManyResult{Issues: []*issueops.Issue{}, Missing: []string{}}
+	seen := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		details, err := reader.Get(ctx, issueops.GetRequest{ID: id})
+		if errors.Is(err, issueops.ErrNotFound) {
+			out.Missing = append(out.Missing, id)
+			continue
+		}
+		if err != nil {
+			return issueops.GetManyResult{}, err
+		}
+		issue := details.Issue
+		if len(issue.Labels) == 0 && len(details.Labels) > 0 {
+			issue.Labels = append([]string(nil), details.Labels...)
+		}
+		// Hydration is labels only, as the batch's is.
+		issue.Dependencies, issue.Comments = nil, nil
+		out.Issues = append(out.Issues, &issue)
+	}
+	return out, nil
 }

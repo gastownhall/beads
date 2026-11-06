@@ -3,6 +3,7 @@
 package embeddeddolt_test
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/steveyegge/beads/backend/conformance"
@@ -182,5 +183,56 @@ func TestCounterExcludeStatusAcceptsAWorkspaceCustomStatusWithoutIncludeInfra(t 
 	}
 	if result.Total != 1 {
 		t.Fatalf("Count(exclude-status=review).Total = %d, want 1", result.Total)
+	}
+}
+
+// TestReaderListExcludeStatusAcceptsAWorkspaceCustomStatus is the listing's
+// twin of the test above: ListRequest.ExcludeStatus shares the count's
+// validation (workapi.ParseExcludeStatus) and must see the workspace's own
+// custom statuses, so a custom status is accepted and narrows the listing,
+// and a name in no vocabulary is refused. A leg-level test for the same
+// reason: ReaderFixture cannot configure a workspace custom status.
+func TestReaderListExcludeStatusAcceptsAWorkspaceCustomStatus(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	te := newTestEnv(t, "lstcs")
+	ctx := t.Context()
+
+	if err := te.store.SetConfig(ctx, "status.custom", "review,qa"); err != nil {
+		t.Fatalf("SetConfig(status.custom): %v", err)
+	}
+	const openID, reviewID = "lstcs-open", "lstcs-review"
+	for _, id := range []string{openID, reviewID} {
+		if err := te.store.CreateIssue(ctx, &types.Issue{
+			ID: id, Title: id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
+		}, "tester"); err != nil {
+			t.Fatalf("CreateIssue(%s): %v", id, err)
+		}
+	}
+	if err := te.store.UpdateIssue(ctx, reviewID, map[string]interface{}{
+		"status": types.Status("review"),
+	}, "tester"); err != nil {
+		t.Fatalf("UpdateIssue(%s) to review: %v", reviewID, err)
+	}
+	reader, err := te.store.IssueReader()
+	if err != nil {
+		t.Fatalf("IssueReader(): %v", err)
+	}
+
+	scope := publicops.ListRequest{IDFilter: openID + "," + reviewID, ExcludeStatus: []string{"review"}}
+	page, err := reader.List(ctx, scope)
+	if err != nil {
+		t.Fatalf("List(ExcludeStatus=review): %v, want the custom status accepted", err)
+	}
+	if len(page.Items) != 1 || page.Items[0].ID != openID {
+		ids := make([]string, 0, len(page.Items))
+		for _, it := range page.Items {
+			ids = append(ids, it.ID)
+		}
+		t.Fatalf("List(ExcludeStatus=review) = %v, want [%s]", ids, openID)
+	}
+
+	scope.ExcludeStatus = []string{"reveiw"}
+	if _, err := reader.List(ctx, scope); !errors.Is(err, publicops.ErrValidation) {
+		t.Fatalf("List(ExcludeStatus=reveiw) = %v, want ErrValidation", err)
 	}
 }

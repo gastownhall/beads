@@ -220,6 +220,29 @@ items, plus:
   `bd ready` also withholds because a blocked parent blocks its children,
   carries no `gated_by`
 
+### bd close --json
+
+Returns a top-level JSON array with one entry per closed issue, in the order
+the IDs were given; an issue that was already closed is reported too. Each
+entry is the closed issue (`status` is `closed`, with `closed_at` and
+`close_reason`) without its `dependencies`, plus two optional members present
+only when that close completed a molecule (see
+[Molecules](/workflows/molecules)):
+- `auto_closed_molecule` (object, optional): The molecule root the close also
+  closed, as an issue object whose `close_reason` is `all steps complete`
+- `molecule_auto_close_refusal` (string, optional): Why the molecule root
+  stayed open — for example an open blocker on the root, or a root assigned
+  to someone else. Human-readable prose; the step's close itself succeeded
+
+When one command closes several steps of the same molecule, only the first
+of their entries carries these members.
+
+With `--suggest-next`, `--continue`, or `--claim-next`, the output is an
+object instead: the array moves under `closed`, beside `unblocked` (issue
+array), `continue` (`closed_step`, `next_step`, `auto_advanced`,
+`molecule_complete`, `molecule_id`), or `claimed` (issue) respectively. When
+the flag has nothing to report, the plain array is returned.
+
 ### `import --json`
 
 Returns a summary object when `--json` is active:

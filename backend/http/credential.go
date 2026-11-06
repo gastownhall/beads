@@ -12,6 +12,12 @@ import (
 // persist a secret, and must FAIL CLOSED: a configured source that errors
 // aborts the request rather than silently downgrading to an unauthenticated
 // one.
+//
+// Authorize is called once per request, not once per attempt: a read whose
+// first attempt stalls or has its connection reset is resent once with the
+// same headers, up to the client's overall timeout later. A provider whose
+// credentials are single-use or short-lived should expect that resend to draw
+// a 401, which reaches Refresh like any other.
 type CredentialProvider = httpclient.CredentialProvider
 
 const (

@@ -496,8 +496,10 @@ func validateFullGraphPlan(plan *GraphApplyPlan, cfg graphPlanConfig, opts Graph
 // duplicate ID (matching `bd create --id`), which for an atomic graph create
 // would silently rewrite the existing issue while reporting creation — a plan
 // must fail fast instead. Deliberately not overridable by --force: that flag
-// vouches for a foreign prefix, not for destroying existing data. Best-effort
-// by transport: exists is nil where the calling context has no store access.
+// vouches for a foreign prefix, not for destroying existing data. The probe is
+// exact on every backend, http included (its GetIssue answers a miss with
+// storage.ErrNotFound like the local stores); exists is nil only where the
+// command opened no store.
 func validateGraphApplyExplicitIDCollisions(plan *GraphApplyPlan, exists func(id string) (bool, error)) error {
 	if exists == nil {
 		return nil
@@ -858,12 +860,22 @@ func graphApplyNodeIssue(node GraphApplyNode, opts GraphApplyOptions, createdBy,
 	})
 	// Backfill status-coupled timestamps: the proxied domain insert does no
 	// backfill, and neither path stamps started_at for issues born in_progress.
+	// created_at takes the same clock read, so a status stamp never predates
+	// it once the batch applies (GH#7519). A node with no status stamp keeps
+	// a zero created_at: the HTTP wire withholds the creation stamp and
+	// refuses a populated Issue.CreatedAt (W-CreateItem.Issue).
 	now := time.Now().UTC()
+	stamped := false
 	if issue.Status == types.StatusClosed && issue.ClosedAt == nil {
 		issue.ClosedAt = &now
+		stamped = true
 	}
 	if issue.Status == types.StatusInProgress && issue.StartedAt == nil {
 		issue.StartedAt = &now
+		stamped = true
+	}
+	if stamped && issue.CreatedAt.IsZero() {
+		issue.CreatedAt = now
 	}
 	issue.Pinned = node.Pinned
 	return issue, nil

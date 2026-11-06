@@ -1,6 +1,9 @@
 package workapi
 
 import (
+	"errors"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -159,5 +162,74 @@ func TestStatusAllCannotBeCombined(t *testing.T) {
 	want := `status "all" cannot be combined with other statuses`
 	if err.Error() != want {
 		t.Errorf("error = %q, want %q", err, want)
+	}
+}
+
+// TestPinnedPairIsRefusedByTheBuilder pins the library half of the pinned
+// pair's refusal. The CLI refuses `--pinned --no-pinned` at flag parse, but the
+// builder is the one point every route passes through — a served listing
+// carries both members since issues.list.filters — and it used to let
+// PinnedFlag win silently. Each member alone still builds.
+func TestPinnedPairIsRefusedByTheBuilder(t *testing.T) {
+	var cfg ListConfig
+	for _, status := range []string{"", "all", "open"} {
+		_, err := BuildListFilter(issueops.ListRequest{Status: status, PinnedFlag: true, NoPinnedFlag: true}, cfg)
+		if !errors.Is(err, issueops.ErrValidation) {
+			t.Errorf("--status=%q --pinned --no-pinned: err = %v, want ErrValidation", status, err)
+		}
+	}
+	for _, in := range []issueops.ListRequest{{PinnedFlag: true}, {NoPinnedFlag: true}} {
+		if _, err := BuildListFilter(in, cfg); err != nil {
+			t.Errorf("BuildListFilter(%+v) = %v, want no error for one member alone", in, err)
+		}
+	}
+}
+
+// TestParentPairIsRefusedByTheBuilder is the parent pair's twin of the pinned
+// test above: the CLI refuses `--parent X --no-parent` at flag parse, a served
+// listing carries both members since issues.list.filters, and the builder used
+// to AND them. The sentence is the one the http handler maps to a 400 on
+// no_parent, and the one BuildCountFilter refuses the same pair with.
+func TestParentPairIsRefusedByTheBuilder(t *testing.T) {
+	var cfg ListConfig
+	_, err := BuildListFilter(issueops.ListRequest{ParentID: "bd-1", NoParent: true}, cfg)
+	if !errors.Is(err, issueops.ErrValidation) {
+		t.Fatalf("--parent bd-1 --no-parent: err = %v, want ErrValidation", err)
+	}
+	if want := "--parent and --no-parent are mutually exclusive"; err.Error() != want {
+		t.Errorf("--parent bd-1 --no-parent: err = %q, want %q", err, want)
+	}
+	for _, in := range []issueops.ListRequest{{ParentID: "bd-1"}, {NoParent: true}} {
+		if _, err := BuildListFilter(in, cfg); err != nil {
+			t.Errorf("BuildListFilter(%+v) = %v, want no error for one member alone", in, err)
+		}
+	}
+}
+
+// TestListExcludeStatusAppendsAndValidates pins ListRequest.ExcludeStatus in
+// the builder: it is appended to the default exclusions (never in their place),
+// stands alone under AllFlag, splits commas, and an unknown name is
+// ErrValidation with the count's own sentence, which the http handler maps to
+// a 400 on exclude_status.
+func TestListExcludeStatusAppendsAndValidates(t *testing.T) {
+	var cfg ListConfig
+	f, err := BuildListFilter(issueops.ListRequest{ExcludeStatus: []string{"blocked, in_progress"}}, cfg)
+	if err != nil {
+		t.Fatalf("BuildListFilter: %v", err)
+	}
+	want := []types.Status{types.StatusClosed, types.StatusPinned, types.StatusBlocked, types.StatusInProgress}
+	if !slices.Equal(f.ExcludeStatus, want) {
+		t.Errorf("default listing ExcludeStatus = %v, want %v", f.ExcludeStatus, want)
+	}
+	f, err = BuildListFilter(issueops.ListRequest{AllFlag: true, ExcludeStatus: []string{"closed"}}, cfg)
+	if err != nil {
+		t.Fatalf("BuildListFilter: %v", err)
+	}
+	if want := []types.Status{types.StatusClosed}; !slices.Equal(f.ExcludeStatus, want) {
+		t.Errorf("AllFlag ExcludeStatus = %v, want %v", f.ExcludeStatus, want)
+	}
+	_, err = BuildListFilter(issueops.ListRequest{ExcludeStatus: []string{"clsoed"}}, cfg)
+	if !errors.Is(err, issueops.ErrValidation) || !strings.HasPrefix(err.Error(), "invalid exclude-status ") {
+		t.Errorf("unknown exclude status: err = %v, want ErrValidation starting \"invalid exclude-status \"", err)
 	}
 }

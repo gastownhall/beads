@@ -38,8 +38,10 @@ go_test(
 # Tags:
 #   dolt-server-cmd: starts a hermetic dolt sql-server and needs the
 #     integration build tag; selected by --config=doltserver-cmd (bazel.yml's
-#     bazel-cmd-dolt lane) and excluded from every other lane, whose
-#     configurations either drop both test files or set BEADS_TEST_SKIP=dolt.
+#     bazel-cmd-dolt lane) and, in mode remote, by --config=dolt-int
+#     (bazel-dolt-int, item 5 A2's union of that lane and bazel-server-storage)
+#     and excluded from every other lane, whose configurations either drop
+#     both test files or set BEADS_TEST_SKIP=dolt.
 sh_test(
     name = "regression_test",
     size = "large",
@@ -50,6 +52,10 @@ sh_test(
     args = [
         "$(rootpath :pinned_shards.txt)",
         "$(rootpath :regression_suite)",
+        # Item 5 A2: moved from --config=doltserver-cmd's --test_arg (see
+        # cmd/bd:bd_dolt_server_test's comment); keeps --config=dolt-int's
+        # other member (server-storage, a 15m Go timeout) unaffected.
+        "-test.timeout=19m",
     ],
     data = [
         "BASELINE_VERSION",
@@ -62,6 +68,8 @@ sh_test(
         "BD_REGRESSION_BASELINE_BIN": "$(rlocationpath @bd_releases//:v0.49.6)",
         "BEADS_TEST_BD_BINARY": "$(rlocationpath //cmd/bd:bd_for_tests)",
         "BEADS_TEST_DOLT_SERVER": "local",
+        # Item 5 A2: moved from --config=doltserver-cmd's --test_env.
+        "BEADS_TEST_REQUIRE_EXCLUDE_PERMISSION": "1",
         "BEADS_TEST_REQUIRE_DOLT_CONTAINER": "1",
     },
     shard_count = 14,

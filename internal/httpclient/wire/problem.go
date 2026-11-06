@@ -240,6 +240,11 @@ type ProblemError struct {
 	Floor *int64
 	Head  *int64
 
+	// ClosedAt is the tombstone's closed_at, with `idempotency_expired`: when
+	// the bead a retaining sweep retired had closed. Carried onto the typed
+	// *issueops.IdempotencyExpiredError the code maps to.
+	ClosedAt *time.Time
+
 	// Err is the canonical sentinel this code maps to. It is what Unwrap
 	// returns, so errors.Is and errors.As reach it.
 	Err error
@@ -298,6 +303,11 @@ const ReasonProjectMismatch = "project_mismatch"
 // it rides the generic invalid_argument code, so reason is the only thing that
 // tells this refusal apart from an ordinary malformed argument.
 const ReasonWireRevisionUnsupported = "wire_revision_unsupported"
+
+// ReasonEphemeral is the Problem `reason` that qualifies a lease_not_held: the
+// id names a wisp, which is never leased. Spelled exactly as the server's
+// httpapi.ReasonEphemeral (held to it by the vocabulary test).
+const ReasonEphemeral = "ephemeral"
 
 // ErrWireRevisionUnsupported reports that bd serve refused this client's
 // declared Bd-Wire-Revision header as older than the revision it now
@@ -406,6 +416,7 @@ func mapProblem(t target, status int, header http.Header, body []byte, maxRetryA
 		Since:             p.Since,
 		Floor:             p.Floor,
 		Head:              p.Head,
+		ClosedAt:          p.ClosedAt,
 		// The guard pair. All six are strings on the wire — the two versions
 		// are decimal revision tokens (types.RevisionToken) and are carried as
 		// the strings the server spelled, see the field comment — and all six
@@ -559,9 +570,20 @@ var codeSentinel = map[string]func(*ProblemError, target) error{
 	"unauthenticated":  func(*ProblemError, target) error { return ErrUnauthenticated },
 	"not_found":        func(*ProblemError, target) error { return issueops.ErrNotFound },
 	"already_exists":   func(*ProblemError, target) error { return issueops.ErrAlreadyExists },
-	"busy":             func(*ProblemError, target) error { return ErrBusy },
-	"db_unavailable":   func(*ProblemError, target) error { return ErrDBUnavailable },
-	"internal":         func(*ProblemError, target) error { return ErrServerFault },
+	// The typed refusal, rebuilt from the members the server sends: the id from
+	// the item (or the request target), and `closed_at` when present. A create
+	// whose request named the id gets it filled back in by the role, the way
+	// already_exists does (lifecycle.go).
+	"idempotency_expired": func(e *ProblemError, t target) error {
+		expired := &issueops.IdempotencyExpiredError{ID: refusedIssueID(e, t)}
+		if e.ClosedAt != nil {
+			expired.ClosedAt = e.ClosedAt.UTC()
+		}
+		return expired
+	},
+	"busy":           func(*ProblemError, target) error { return ErrBusy },
+	"db_unavailable": func(*ProblemError, target) error { return ErrDBUnavailable },
+	"internal":       func(*ProblemError, target) error { return ErrServerFault },
 
 	// The journal codes, on the table for the reason stated beside their
 	// sentinels: set-equality with the document, not with what this client
@@ -632,6 +654,31 @@ var codeSentinel = map[string]func(*ProblemError, target) error{
 	// them apart, so this maps to the STATUS sentinel — the wider of the two,
 	// and the one whose message does not assert a fact the wire never sent.
 	"not_releasable": func(*ProblemError, target) error { return issueops.ErrNotReleasable },
+
+	// lease_not_held is the HEARTBEAT's refusal: the actor holds no live claim
+	// (open, closed, released, reclaimed, moved off in_progress, or a wisp).
+	// httpclient's Heartbeater reaches it (heartbeater.go). The typed error is
+	// rebuilt whole from `issue_status` and `reason: ephemeral` (a wisp), and
+	// it wraps ErrLeaseNotHeld, which also matches ErrNotClaimable, in the
+	// native heartbeat's own words ("<id> status <status>", "<id> is
+	// ephemeral").
+	"lease_not_held": func(e *ProblemError, t target) error {
+		id := refusedIssueID(e, t)
+		status := deref(e.IssueStatus)
+		conflict := &issueops.LeaseConflictError{
+			IssueID:   id,
+			Status:    issueops.Status(status),
+			Ephemeral: e.Reason == ReasonEphemeral,
+			Err:       issueops.ErrLeaseNotHeld,
+		}
+		switch {
+		case conflict.Ephemeral:
+			conflict.Err = fmt.Errorf("%w: %s is ephemeral", issueops.ErrLeaseNotHeld, id)
+		case status != "":
+			conflict.Err = fmt.Errorf("%w: %s status %s", issueops.ErrLeaseNotHeld, id, status)
+		}
+		return conflict
+	},
 
 	// [Added: OSS publishes notes_overwrite_refused (internal/httpapi/problem.go
 	// CodeNotesOverwrite, status 409) for an update whose Patch.Notes would

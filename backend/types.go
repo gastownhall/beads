@@ -118,6 +118,7 @@ const (
 	EventLabelAdded        = types.EventLabelAdded
 	EventLabelRemoved      = types.EventLabelRemoved
 	EventLeaseReclaimed    = types.EventLeaseReclaimed
+	EventLeaseRearmed      = types.EventLeaseRearmed
 	EventCompacted         = types.EventCompacted
 )
 
