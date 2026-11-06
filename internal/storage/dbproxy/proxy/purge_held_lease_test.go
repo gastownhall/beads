@@ -56,3 +56,46 @@ func TestPurgeControlFilesRetiresHeldLeases(t *testing.T) {
 		require.True(t, os.IsNotExist(statErr), "%s still present after purge: %v", path, statErr)
 	}
 }
+
+func TestPurgeControlFilesRefusesMisusedLeases(t *testing.T) {
+	root := t.TempDir()
+	prepareControlFiles(t, root)
+	lease, err := util.TryRetirableLock(filepath.Join(root, proxy.LockFileName))
+	require.NoError(t, err)
+	defer lease.Unlock()
+	outside, err := util.TryRetirableLock(filepath.Join(t.TempDir(), proxy.LockFileName))
+	require.NoError(t, err)
+	defer outside.Unlock()
+
+	for name, held := range map[string][]*util.Lock{
+		"nil":         {nil},
+		"duplicate":   {lease, lease},
+		"not control": {outside},
+	} {
+		require.Len(t, proxy.PurgeControlFiles(root, held...), 1, "%s lease must be refused", name)
+		for _, path := range proxy.ControlFilePaths(root) {
+			require.FileExists(t, path, "%s: nothing is removed before the leases are vetted", name)
+		}
+	}
+}
+
+// TestPurgeControlFilesReportsFailedRetirement pins that a held control is
+// never removed by pathname when its lease cannot retire it, while the rest
+// of the controls are still purged.
+func TestPurgeControlFilesReportsFailedRetirement(t *testing.T) {
+	root := t.TempDir()
+	prepareControlFiles(t, root)
+	lockPath := filepath.Join(root, proxy.LockFileName)
+	ordinary, err := util.TryLock(lockPath)
+	require.NoError(t, err)
+	defer ordinary.Unlock()
+
+	errs := proxy.PurgeControlFiles(root, ordinary)
+	require.Len(t, errs, 1, "the ordinary lease's retirement failure is reported")
+	require.FileExists(t, lockPath, "no fallback to pathname removal")
+	for _, path := range proxy.ControlFilePaths(root) {
+		if path != lockPath {
+			require.NoFileExists(t, path)
+		}
+	}
+}

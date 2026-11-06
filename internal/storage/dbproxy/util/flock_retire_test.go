@@ -1,6 +1,7 @@
 package util
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -58,5 +59,24 @@ func TestRetireRefusesOrdinaryLease(t *testing.T) {
 	defer lease.Unlock()
 
 	require.Error(t, lease.Retire(), "an ordinary lease is not retirable")
+	require.FileExists(t, path)
+}
+
+func TestRetireToleratesMissingPathAndRefusesReleasedLease(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "life.lock")
+	lease, err := TryRetirableLock(path)
+	require.NoError(t, err)
+	moved := filepath.Join(dir, "moved.lock")
+	require.NoError(t, os.Rename(path, moved))
+
+	require.NoError(t, lease.Retire(), "a pathname that is already gone counts as retired")
+	require.FileExists(t, moved, "retirement deletes by pathname, never the renamed file")
+	lease.Unlock()
+
+	released, err := TryRetirableLock(path)
+	require.NoError(t, err)
+	released.Unlock()
+	require.Error(t, released.Retire(), "a released lease cannot be retired")
 	require.FileExists(t, path)
 }

@@ -309,3 +309,54 @@ func TestTryLockPathRemoveStillFailsWhileHeld(t *testing.T) {
 	require.FileExists(t, path, "Unlock closes the handle without removing the file")
 	require.NoError(t, os.Remove(path), "a released ordinary path removes normally")
 }
+
+// TestRetireWindowsRemovalError pins that a retirement the filesystem refuses
+// is reported, not swallowed: a reader that does not share delete makes
+// Retire fail with the sharing violation, and once that reader closes the
+// still-held lease retires normally.
+func TestRetireWindowsRemovalError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "lock")
+	held, err := TryRetirableLock(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Unlock()
+	reader, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reader.Close() })
+	if err := held.Retire(); !errors.Is(err, windows.ERROR_SHARING_VIOLATION) {
+		t.Fatalf("non-sharing reader retirement error = %v", err)
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := held.Retire(); err != nil {
+		t.Fatalf("retire after releasing reader, lifecycle lock still held: %v", err)
+	}
+}
+
+// TestTryRetirableLockWindowsOpenError pins that an unusable lock target
+// (a directory, or a path under a regular file) fails with a PathError and
+// leaves the blocking file untouched.
+func TestTryRetirableLockWindowsOpenError(t *testing.T) {
+	root := t.TempDir()
+	blocker := filepath.Join(root, "file")
+	if err := os.WriteFile(blocker, []byte("retain"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{root, filepath.Join(blocker, "lock")} {
+		held, err := TryRetirableLock(path)
+		if held != nil {
+			held.Unlock()
+		}
+		var pathErr *os.PathError
+		if !errors.As(err, &pathErr) {
+			t.Fatalf("invalid lock target %q error = %v, want PathError", path, err)
+		}
+	}
+	if content, err := os.ReadFile(blocker); err != nil || string(content) != "retain" {
+		t.Fatalf("failed open changed blocker: %q, %v", content, err)
+	}
+}
