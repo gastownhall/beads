@@ -188,3 +188,34 @@ func TestPreviousExternalRefsDiscardsPartialResultsOnError(t *testing.T) {
 		})
 	}
 }
+
+// TestPreviousExternalRefsResolvesTiesThroughPerIssueLookup covers AC-5's
+// tie rule: when an id has more than one row at its latest qualifying date,
+// the batch takes neither row but asks the unchanged PreviousExternalRefInTx,
+// after the chunk's rows are consumed, so a tie resolves exactly as the
+// per-issue lookup resolves it.
+func TestPreviousExternalRefsResolvesTiesThroughPerIssueLookup(t *testing.T) {
+	ids := []string{"bd-tied", "bd-plain"}
+	tx, mock := newPreviousRefsTx(t)
+	mock.ExpectQuery(`(?s)MAX\(m\.commit_date\)`).
+		WithArgs(previousRefsChunkArgs(ids, previousRefsCutoff)...).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "external_ref"}).
+			AddRow("bd-tied", "ref-a").
+			AddRow("bd-plain", "ref-plain").
+			AddRow("bd-tied", "ref-b"))
+	mock.ExpectQuery(`(?s)WHERE h\.id = \? AND h\.commit_date <= \?\s+ORDER BY h\.commit_date DESC\s+LIMIT 1`).
+		WithArgs("bd-tied", previousRefsCutoff.UTC()).
+		WillReturnRows(sqlmock.NewRows([]string{"external_ref"}).AddRow("ref-b"))
+
+	got, err := PreviousExternalRefsInTx(context.Background(), tx, ids, previousRefsCutoff)
+	if err != nil {
+		t.Fatalf("PreviousExternalRefsInTx: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("tie lookup: %v", err)
+	}
+	want := map[string]string{"bd-tied": "ref-b", "bd-plain": "ref-plain"}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("PreviousExternalRefsInTx = %v, want %v", got, want)
+	}
+}

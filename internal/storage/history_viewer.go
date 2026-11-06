@@ -39,3 +39,17 @@ type ExternalRefHistoryQuerier interface {
 	// column was NULL.
 	PreviousExternalRef(ctx context.Context, issueID string, asOf time.Time) (ref string, found bool, err error)
 }
+
+// ExternalRefHistoryBatchQuerier is the batch form of
+// ExternalRefHistoryQuerier, for a caller that needs the previous
+// external_ref of many issues at one cutoff (a tracker pull checking every
+// pre-linked issue) and would otherwise pay one history scan per issue.
+type ExternalRefHistoryBatchQuerier interface {
+	ExternalRefHistoryQuerier
+
+	// PreviousExternalRefs answers PreviousExternalRef for each of issueIDs
+	// at asOf. An id is present in the map exactly when PreviousExternalRef
+	// would report found, with the same ref (the empty string for a NULL
+	// historical external_ref). Empty and repeated ids are ignored.
+	PreviousExternalRefs(ctx context.Context, issueIDs []string, asOf time.Time) (map[string]string, error)
+}

@@ -316,6 +316,7 @@ go_test(
         "portsource_propagation_test.go",
         "post_migration_pool_heal_integration_test.go",
         "pr4107_corruption_test.go",
+        "previous_external_refs_test.go",
         "prune_remote_refs_test.go",
         "public_write_circuit_test.go",
         "pull_branch_tracking_integration_test.go",
