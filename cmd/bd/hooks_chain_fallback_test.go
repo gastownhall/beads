@@ -7,6 +7,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/cmd/bd/doctor"
 )
 
 // The tests in this file cover GH#6751: the generated hook section must not
@@ -690,4 +692,125 @@ func TestGeneratedHookWithoutEligibleChainKeepsSkip(t *testing.T) {
 			}
 		}
 	}
+}
+
+// TestGeneratedHookSectionKeepsMarkerScannersCompatible pins that the
+// section's own classifier literals do not confuse the Go code that scans hook
+// files for markers: preservation, migration planning, version detection and
+// marker repair must still see one intact, marker-managed section, keep the
+// user's content, and write valid shell.
+func TestGeneratedHookSectionKeepsMarkerScannersCompatible(t *testing.T) {
+	shPath, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("sh not found")
+	}
+	syntaxOK := func(t *testing.T, label, content string) {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "hook")
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if out, err := exec.Command(shPath, "-n", path).CombinedOutput(); err != nil {
+			t.Errorf("%s is not valid shell: %v\n%s\n%s", label, err, out, content)
+		}
+	}
+	keepsUser := func(t *testing.T, label, content string) {
+		t.Helper()
+		for _, line := range []string{"echo user-before", "echo user-after"} {
+			if !strings.Contains(content, line) {
+				t.Errorf("%s lost user line %q\n%s", label, line, content)
+			}
+		}
+	}
+
+	for _, hookName := range managedHookNames {
+		t.Run(hookName, func(t *testing.T) {
+			section := generateHookSection(hookName)
+			if got := strings.Count(section, hookSectionBeginPrefix); got != 1 {
+				t.Errorf("section contains the BEGIN marker text %d times, want 1", got)
+			}
+			if got := strings.Count(section, hookSectionEndPrefix); got != 1 {
+				t.Errorf("section contains the END marker text %d times, want 1", got)
+			}
+			for _, legacy := range []string{inlineHookMarker, "# bd-shim", "bd-hooks-version:"} {
+				if strings.Contains(section, legacy) {
+					t.Errorf("section contains legacy marker literal %q", legacy)
+				}
+			}
+
+			content := "#!/bin/sh\necho user-before\n\n" + section + "\necho user-after\n"
+			syntaxOK(t, "hook with user content", content)
+
+			preserved, ok := shouldPreserveHookContent(content, false)
+			if !ok {
+				t.Fatalf("preservation dropped a hook that has user content")
+			}
+			keepsUser(t, "preservation", preserved)
+			if strings.Contains(preserved, hookSectionBeginPrefix) || strings.Contains(preserved, "bd hooks run") {
+				t.Errorf("preservation kept part of the managed section\n%s", preserved)
+			}
+
+			hookFile := filepath.Join(t.TempDir(), hookName)
+			if err := os.WriteFile(hookFile, []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			info, err := getHookVersion(hookFile)
+			if err != nil || !info.IsBdHook || info.Version != Version {
+				t.Errorf("getHookVersion = %+v, %v; want a bd hook at version %s", info, err, Version)
+			}
+
+			removed, found := removeHookSection(content)
+			if !found {
+				t.Fatalf("removeHookSection did not find the section")
+			}
+			keepsUser(t, "removal", removed)
+			syntaxOK(t, "removal", removed)
+			if strings.Contains(removed, "BEADS") || strings.Contains(removed, "_bd_") {
+				t.Errorf("removal left part of the managed section\n%s", removed)
+			}
+
+			reinjected := injectHookSection(content, section)
+			if reinjected != content {
+				t.Errorf("reinstalling the same section changed the hook\n got: %s\nwant: %s", reinjected, content)
+			}
+
+			for label, broken := range map[string]string{
+				"END dropped":   removeMarkerLine(content, strings.Index(content, hookSectionEndPrefix), hookSectionEndPrefix),
+				"BEGIN dropped": removeMarkerLine(content, strings.Index(content, hookSectionBeginPrefix), hookSectionBeginPrefix),
+			} {
+				repaired := injectHookSection(broken, section)
+				keepsUser(t, "repair after "+label, repaired)
+				syntaxOK(t, "repair after "+label, repaired)
+				if b, e := strings.Count(repaired, hookSectionBeginPrefix), strings.Count(repaired, hookSectionEndPrefix); b != 1 || e != 1 {
+					t.Errorf("repair after %s has %d BEGIN and %d END markers, want 1 each\n%s", label, b, e, repaired)
+				}
+				stripped, _ := removeHookSection(broken)
+				syntaxOK(t, "removal after "+label, stripped)
+				if strings.Contains(stripped, hookSectionBeginPrefix) || strings.Contains(stripped, hookSectionEndPrefix) {
+					t.Errorf("removal after %s left a marker\n%s", label, stripped)
+				}
+			}
+		})
+	}
+
+	t.Run("migration plan", func(t *testing.T) {
+		repoDir, hooksDir := setupHookMigrationRepo(t)
+		for _, hookName := range managedHookNames {
+			content := "#!/bin/sh\necho user-before\n\n" + generateHookSection(hookName) + "\necho user-after\n"
+			writeHookMigrationFile(t, filepath.Join(hooksDir, hookName), content)
+			writeHookMigrationFile(t, filepath.Join(hooksDir, hookName+".old"), "#!/bin/sh\necho foreign gate\n")
+		}
+		plan, err := doctor.PlanHookMigration(repoDir)
+		if err != nil {
+			t.Fatalf("PlanHookMigration: %v", err)
+		}
+		if plan.NeedsMigrationCount != 0 || plan.BrokenMarkerCount != 0 {
+			t.Errorf("plan wants %d migrations and sees %d broken markers, want none", plan.NeedsMigrationCount, plan.BrokenMarkerCount)
+		}
+		for _, hook := range plan.Hooks {
+			if hook.State != "marker_managed" || hook.LegacyBDHook {
+				t.Errorf("%s planned as state %q legacy=%v, want marker_managed and not legacy", hook.Name, hook.State, hook.LegacyBDHook)
+			}
+		}
+	})
 }
