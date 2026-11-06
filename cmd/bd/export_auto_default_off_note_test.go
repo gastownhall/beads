@@ -32,13 +32,15 @@ import (
 // Every DoltStorage method is the nil embedded interface, so any accidental
 // database call on this path panics and fails the test. GetStateHash lets the
 // explicitly-true row run the real enabled flow as far as its change-detection
-// early return without any other store work.
+// early return without any other store work. closed flips IsClosed for the
+// closed-store quiet rows.
 type noteCheckStore struct {
 	storage.DoltStorage
 	stateHash string
+	closed    bool
 }
 
-func (noteCheckStore) IsClosed() bool { return false }
+func (s noteCheckStore) IsClosed() bool { return s.closed }
 
 func (s noteCheckStore) GetStateHash(context.Context) (string, error) {
 	return s.stateHash, nil
@@ -536,6 +538,69 @@ func TestMaybeAutoExportDefaultOffNoteStaysQuiet(t *testing.T) {
 				p := filepath.Join(f.beadsDir, "issues.jsonl")
 				noteTestRemove(t, p)
 				noteTestMkdir(t, p)
+				return f
+			},
+		},
+		{
+			// Machine and suppressed-output contexts never see advisories.
+			name: "quiet output",
+			setup: func(t *testing.T) *defaultOffNoteFixture {
+				f := newDefaultOffNoteFixture(t)
+				quietFlag = true
+				return f
+			},
+		},
+		{
+			name: "JSON output",
+			setup: func(t *testing.T) *defaultOffNoteFixture {
+				f := newDefaultOffNoteFixture(t)
+				jsonOutput = true
+				return f
+			},
+		},
+		{
+			name: "prime hook-JSON mode",
+			setup: func(t *testing.T) *defaultOffNoteFixture {
+				f := newDefaultOffNoteFixture(t)
+				primeHookJSONMode = true
+				return f
+			},
+		},
+		{
+			name: "git hook context",
+			setup: func(t *testing.T) *defaultOffNoteFixture {
+				f := newDefaultOffNoteFixture(t)
+				t.Setenv("BD_GIT_HOOK", "1")
+				return f
+			},
+		},
+		{
+			// Store-less command paths (completion, store-less early exits)
+			// are not the notice's audience.
+			name: "no open store",
+			setup: func(t *testing.T) *defaultOffNoteFixture {
+				f := newDefaultOffNoteFixture(t)
+				store = nil
+				return f
+			},
+		},
+		{
+			name: "closed store",
+			setup: func(t *testing.T) *defaultOffNoteFixture {
+				f := newDefaultOffNoteFixture(t)
+				store = noteCheckStore{stateHash: "note-check-hash", closed: true}
+				return f
+			},
+		},
+		{
+			// An unresolvable workspace (BEADS_DIR names nothing that exists)
+			// has no export history to explain.
+			name: "no resolvable workspace",
+			setup: func(t *testing.T) *defaultOffNoteFixture {
+				f := newDefaultOffNoteFixture(t)
+				away := t.TempDir()
+				t.Chdir(away)
+				t.Setenv("BEADS_DIR", filepath.Join(away, ".beads"))
 				return f
 			},
 		},
