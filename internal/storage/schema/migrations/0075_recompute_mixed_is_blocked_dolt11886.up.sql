@@ -1,0 +1,37 @@
+-- Record the durable is_blocked repair obligation (gastownhall/beads#7037).
+--
+-- On engines before dolt 2.4.0 (go-mysql-server#3899, dolthub/dolt#11886),
+-- migration 0059's recursive blocked-propagation join dropped its
+-- d.type = 'parent-child' conjunct, so stores that crossed 0059 hold
+-- is_blocked = 1 on issues that are not blocked and vanish from bd ready.
+-- 0059's bytes are frozen, so this migration marks every non-empty store that
+-- upgrades past it as owing one full recompute, which the clone-local repair
+-- keyed to ignored migration 0032 then performs.
+--
+-- The work happens in code, not here: recordIsBlockedRepairOwed0075
+-- (internal/storage/schema/migration_0075_is_blocked_repair.go) is registered
+-- in preMigrationRepairs for this version and runs immediately before this
+-- marker is recorded. When the issues table holds any row it runs
+-- INSERT INTO metadata (`key`, value) VALUES ('is_blocked_repair_owed_0075',
+-- 'full'), and it deletes ignored_schema_migrations rows with
+-- version >= 32 when that clone-local table exists, so the ignored-series
+-- repair is armed on every clone that crosses this step. The key and this
+-- step's cursor row land in the same atomic per-step commit: a history that
+-- claims 0075 always carries the obligation with it, including histories a
+-- clone receives by pull. An empty initialization records no key — there is
+-- nothing to repair — and ignored 0032 then runs its debt-free wisp-only
+-- pass instead.
+--
+-- The writes are stated in this header on purpose (the ignored/0031 marker
+-- shape): MigrateUp's pending-migration dirty-table guard scans the raw text
+-- of pending files, so this marker must be seen as touching metadata and
+-- issues. The repair's UPDATE issues SET is_blocked = 0 | 1, updated_at =
+-- updated_at is timestamp-preserving exactly as written: every row keeps the
+-- last-modified time history gave it. A store with uncommitted edits to
+-- either table is refused, typed, before any repair write, with the
+-- working-set reconcile recovery (#4566); the pass-level guard in
+-- migrateUpAfterReconcile protects dependencies the same way as repair
+-- input.
+--
+-- The marker itself changes nothing.
+SELECT 1;

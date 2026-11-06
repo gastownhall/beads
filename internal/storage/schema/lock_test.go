@@ -440,9 +440,21 @@ func expectOnePendingMigrationAtSetting(t *testing.T, mock sqlmock.Sqlmock, tran
 	// Per-step commit (#4566) snapshots the working set before the migration
 	// runs so it can force-stage only the tables this step newly dirties.
 	expectDoltStatusRows(mock)
-	// The pending (latest) migration is 0063_create_provenance_events, a
-	// plain CREATE TABLE body with no bare CALL — execMigrationBody routes
-	// such bodies through ExecContext, not DrainCall.
+	if latest == 75 {
+		// The v75 pre-repair probes the issues table and records the is_blocked
+		// repair obligation only when it holds a row; this mocked world has no
+		// issues table, so the hook stops at the probe. The ignored-series
+		// re-arm behind it lists tables and finds no ignored cursor table
+		// either, so its DELETE never runs.
+		mock.ExpectQuery(`SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.TABLES`).
+			WithArgs("issues").
+			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+		mock.ExpectQuery("SHOW TABLES").
+			WillReturnRows(sqlmock.NewRows([]string{"Tables_in_test"}))
+	}
+	// The pending (latest) migration is 0075's marker, a plain SELECT 1 body
+	// with no bare CALL — execMigrationBody routes such bodies through
+	// ExecContext, not DrainCall.
 	mock.ExpectExec("(?s).*").
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(regexp.QuoteMeta("INSERT IGNORE INTO schema_migrations (version, content_hash) VALUES (?, ?)")).

@@ -915,6 +915,19 @@ func MigrateUpTo(ctx context.Context, db DBConn, maxVersion int) (int, error) {
 	return applied, err
 }
 
+// MigrateIgnoredUpTo applies ignored-source migrations up to and including
+// maxVersion, the clone-local companion of MigrateUpTo. It exists so tests can
+// reconstruct the ignored plane a real store holds at a given main cursor (a
+// store's two planes advance together in production, but MigrateUpTo-seeded
+// fixtures hold none at all, and issueops read paths assume the full local
+// shape — lease columns, wisp split targets — the ignored series builds).
+// Production code must use MigrateUp: the ignored series is not meaningfully
+// bounded on its own.
+func MigrateIgnoredUpTo(ctx context.Context, db DBConn, maxVersion int) (int, error) {
+	applied, _, err := ignoredSource.migrate(ctx, db, maxVersion)
+	return applied, err
+}
+
 // MigrateUp brings both migration sources (main and dolt-ignored) to the
 // binary's latest versions, with all open-time reconciles, guards, backfills
 // and rekeys. db must be a single session held for the whole call — pin a

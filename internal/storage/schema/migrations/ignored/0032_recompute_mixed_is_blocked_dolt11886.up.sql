@@ -1,0 +1,31 @@
+-- Ignored migration 0032: clone-local marker for the is_blocked repair owed
+-- by main migration 0075 (gastownhall/beads#7037, dolthub/dolt#11886).
+--
+-- Stores that crossed main 0059 on an engine that dropped the parent-child
+-- type filter hold over-set blocked flags. Main 0075 records the durable
+-- obligation key, and this marker's Go hook performs the repair once every
+-- prerequisite this clone needs has completed: the whole main pass (schema
+-- and index shape), the dependency id rekey, and every older ignored step.
+--
+-- The work happens in code, not here: repairMixedIsBlockedFlags0032
+-- (internal/storage/schema/migration_0075_is_blocked_repair.go) is registered
+-- in preMigrationRepairs for this version, so it runs immediately before
+-- this marker is recorded. When the obligation key is committed at HEAD it
+-- runs the maintained full recompute, then clears the key and publishes the
+-- corrected flags together with this pass's dependency-graph changes in one
+-- scoped repair commit BEFORE the cursor row below records this version —
+-- so an interrupted pass always either still owes the whole repair or has
+-- already published it durably. Without a key (a debt-free clone) it runs
+-- the thin wisp-plane recompute only, with no tracked write: clone-local
+-- rows are repaired against the graph the clone already holds.
+--
+-- This header deliberately does NOT name any table next to a write verb.
+-- MigrateUp's pending-migration dirty-table guard scans the raw text of
+-- pending ignored files against the working set, and this repair must stay
+-- runnable on clones whose clone-local planes carry permanent working-set
+-- rows. The pass-level typed guard in migrateUpAfterReconcile protects the
+-- tracked tables this repair publishes instead, and refuses their
+-- pre-existing edits before any repair write.
+--
+-- The marker itself changes nothing.
+SELECT 1;

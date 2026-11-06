@@ -52,6 +52,19 @@ import (
 // human-facing `events` audit table: emission here is unconditional and is never
 // gated by EmitEvent, so suppressing audit noise cannot silently punch a hole in
 // a consumer's cursor. Both rows land in the same transaction.
+//
+// One documented exemption: schema migration repairs (see
+// internal/storage/schema/migration_repairs.go). A repair such as 0075's
+// is_blocked recompute (gastownhall/beads#7037) runs on the pinned migration
+// session, which never activates the journal, so its corrected flags commit
+// with no journal row and without moving the seq. Correcting derived state a
+// historical migration got wrong is not a bead mutation, and replaying the
+// correction would itself corrupt a consumer that had already advanced past
+// the bad values. The exemption is call-site, not API: these *InTx functions
+// journal wherever the caller's transaction has the journal active, so any
+// future non-migration caller of the recompute still journals. Consumers
+// relying on the journal alone must refresh their readiness snapshot after
+// the upgrade that ships the repair (see docs/upgrading.md).
 
 // EventOp names the kind of mutation a journal row records.
 type EventOp string

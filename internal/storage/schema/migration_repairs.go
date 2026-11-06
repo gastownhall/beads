@@ -36,9 +36,11 @@ var preMigrationRepairs = map[repairKey]func(context.Context, DBConn) error{
 	{"schema_migrations", 47}:         ensureWispTablesForMixedBlockedRecompute,
 	{"schema_migrations", 53}:         repairV53RigAndSplitTargets,
 	{"schema_migrations", 58}:         repairWispDependenciesForwardShape,
+	{"schema_migrations", 75}:         recordIsBlockedRepairOwed0075,
 	{"ignored_schema_migrations", 7}:  ensureWispIsBlockedForRecompute,
 	{"ignored_schema_migrations", 15}: ensureWispIsBlockedForRecompute,
 	{"ignored_schema_migrations", 31}: seedEventsFromPreflipHistory,
+	{"ignored_schema_migrations", 32}: repairMixedIsBlockedFlags0032,
 }
 
 // preMigrationRepair dispatches any repair registered for (source, version).
@@ -128,6 +130,25 @@ func commitScopedIgnoredTableChange(ctx context.Context, db DBConn, table, messa
 func stageAndCommitScoped(ctx context.Context, db DBConn, stageSQL, table, message string) error {
 	if err := DrainCall(ctx, db, stageSQL, table); err != nil {
 		return fmt.Errorf("staging %s: %w", table, err)
+	}
+	return DrainCall(ctx, db, "CALL DOLT_COMMIT('-m', ?, '--skip-empty')", message)
+}
+
+// stageAndCommitScopedTables is the multi-table sibling of the helpers above:
+// it stages each named table and commits them together, so a repair whose
+// correctness spans several tables publishes them as one atomic unit.
+// #7037's is_blocked repair uses it to publish corrected issue flags, the
+// obligation key's deletion and this pass's dependency rekey output in a
+// single commit, BEFORE the marker migration's cursor row records — an
+// interrupted pass either still owes the whole repair or published all of it.
+// The same scoping caveats hold: unforced staging silently skips a table whose
+// name matches a dolt_ignore pattern (none of these three do), and --skip-empty
+// keeps a replay whose tables all came up clean a no-op instead of a failure.
+func stageAndCommitScopedTables(ctx context.Context, db DBConn, message string, tables ...string) error {
+	for _, table := range tables {
+		if err := DrainCall(ctx, db, "CALL DOLT_ADD(?)", table); err != nil {
+			return fmt.Errorf("staging %s: %w", table, err)
+		}
 	}
 	return DrainCall(ctx, db, "CALL DOLT_COMMIT('-m', ?, '--skip-empty')", message)
 }

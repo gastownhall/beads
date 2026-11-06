@@ -2582,6 +2582,12 @@ func newWispsAbsentDB(t *testing.T) *wispsAbsentDB {
 	mock.ExpectQuery(`SELECT commit_hash FROM dolt_log WHERE message = \?`).
 		WithArgs(eventsFlipDropCommitMessage).
 		WillReturnRows(sqlmock.NewRows([]string{"commit_hash"}))
+	// The {ignored_schema_migrations, 32} repair (is_blocked, #7037) reads its
+	// obligation key only from committed history: tableTrackedAtHead's listing
+	// finds no metadata table at HEAD, so the hook takes its debt-free branch
+	// and changes nothing.
+	mock.ExpectQuery(`SHOW TABLES AS OF 'HEAD' LIKE 'metadata'`).
+		WillReturnRows(sqlmock.NewRows([]string{"Tables_in_test"}))
 	t.Cleanup(func() {
 		if err := mock.ExpectationsWereMet(); err != nil {
 			t.Errorf("wispsAbsentDB: unmet sql expectations: %v", err)
