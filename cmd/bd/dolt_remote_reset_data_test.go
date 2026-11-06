@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -145,6 +146,74 @@ func TestClassifyResetDataRemote(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestClassifyResetDataRemoteNonDirectoryTarget pins that an ordinary file at
+// a file remote's target is an error, never a missing target: on Windows
+// reading a file as a directory can fail with an error os.IsNotExist
+// accepts, so the classifier confirms absence with Stat before reporting
+// resetDataFileAbsent. Seam subtests replace readResetDataTarget, so none of
+// these runs in parallel.
+func TestClassifyResetDataRemoteNonDirectoryTarget(t *testing.T) {
+	const fileBytes = "not a directory\n"
+	ownedFile := func(t *testing.T) string {
+		path := filepath.Join(t.TempDir(), "remote")
+		if err := os.WriteFile(path, []byte(fileBytes), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	requireFileKept := func(t *testing.T, path string) {
+		t.Helper()
+		got, err := os.ReadFile(path)
+		if err != nil || string(got) != fileBytes {
+			t.Fatalf("target file %s changed: %q, %v", path, got, err)
+		}
+	}
+	requireInspectError := func(t *testing.T, path string, kind resetDataKind, err error) {
+		t.Helper()
+		if err == nil {
+			t.Fatalf("classifyResetDataRemote(%q) = %v, want an error", path, kind)
+		}
+		if want := "inspecting remote target " + path + ":"; !strings.HasPrefix(err.Error(), want) {
+			t.Fatalf("classifyResetDataRemote(%q) error = %q, want prefix %q", path, err, want)
+		}
+	}
+	stubRead := func(t *testing.T, readErr error) {
+		t.Helper()
+		orig := readResetDataTarget
+		readResetDataTarget = func(string) ([]os.DirEntry, error) { return nil, readErr }
+		t.Cleanup(func() { readResetDataTarget = orig })
+	}
+
+	t.Run("ordinary file", func(t *testing.T) {
+		path := ownedFile(t)
+		kind, err := classifyResetDataRemote(path)
+		requireInspectError(t, path, kind, err)
+		requireFileKept(t, path)
+	})
+	t.Run("not-exist read error for a present file", func(t *testing.T) {
+		path := ownedFile(t)
+		readErr := &fs.PathError{Op: "open", Path: path, Err: fs.ErrNotExist}
+		stubRead(t, readErr)
+		kind, err := classifyResetDataRemote(path)
+		requireInspectError(t, path, kind, err)
+		if !errors.Is(err, readErr) {
+			t.Fatalf("classifyResetDataRemote(%q) error = %v, want it to wrap the read error", path, err)
+		}
+		requireFileKept(t, path)
+	})
+	t.Run("other read error for a present file", func(t *testing.T) {
+		path := ownedFile(t)
+		readErr := &fs.PathError{Op: "open", Path: path, Err: fs.ErrPermission}
+		stubRead(t, readErr)
+		kind, err := classifyResetDataRemote(path)
+		requireInspectError(t, path, kind, err)
+		if !errors.Is(err, readErr) {
+			t.Fatalf("classifyResetDataRemote(%q) error = %v, want it to wrap the read error", path, err)
+		}
+		requireFileKept(t, path)
+	})
 }
 
 // TestResetDataGitURL pins the URL reset-data gives git for a remote as Dolt

@@ -83,9 +83,14 @@ func classifyResetDataRemote(url string) (resetDataKind, error) {
 	if !isFile {
 		return resetDataUnsupported, nil
 	}
-	entries, err := os.ReadDir(path)
+	entries, err := readResetDataTarget(path)
 	if os.IsNotExist(err) {
-		return resetDataFileAbsent, nil
+		// On Windows, reading an ordinary file as a directory can fail with
+		// an error os.IsNotExist accepts; only a target Stat cannot find is
+		// missing, and anything else keeps the read error.
+		if _, statErr := os.Stat(path); os.IsNotExist(statErr) {
+			return resetDataFileAbsent, nil
+		}
 	}
 	if err != nil {
 		return 0, fmt.Errorf("inspecting remote target %s: %w", path, err)
@@ -101,6 +106,10 @@ func classifyResetDataRemote(url string) (resetDataKind, error) {
 	}
 	return 0, fmt.Errorf("remote target %s is non-empty but is neither a git repository nor a Dolt file store (no manifest); refusing to clear it", path)
 }
+
+// readResetDataTarget reads a file remote's target directory; tests replace
+// it to return a read error.
+var readResetDataTarget = os.ReadDir
 
 // resetDataFilePath extracts the local filesystem path from a file:// URL or
 // a bare absolute path, reporting whether url is file-backed at all.
