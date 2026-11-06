@@ -2,8 +2,8 @@
 //
 // The parsing follows a layered architecture (ADR-001):
 //  1. Compact duration (+6h, -1d, +2w)
-//  2. Natural language (tomorrow, next monday)
-//  3. Absolute timestamp (RFC3339, date-only)
+//  2. Absolute timestamp (RFC3339, date-only, zone-less datetime)
+//  3. Natural language (tomorrow, next monday)
 package timeparsing
 
 import (
@@ -145,7 +145,9 @@ var dateOnlyRe = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
 //
 // Parsing order:
 //  1. Compact duration (+6h, -1d, +2w)
-//  2. Absolute formats (date-only, RFC3339) - checked before NLP to avoid misinterpretation
+//  2. Absolute formats - checked before NLP to avoid misinterpretation:
+//     date-only (2025-01-15), RFC3339 (2025-01-15T10:00:00Z), and zone-less
+//     YYYY-MM-DD[T| ]HH:MM[:SS] (2025-01-15 10:00, 2025-01-15T10:00:00)
 //  3. Natural language (tomorrow, next monday)
 //
 // Timezone-less inputs are interpreted in now's location. Returns the parsed
@@ -180,6 +182,16 @@ func ParseRelativeTime(s string, now time.Time) (time.Time, error) {
 
 	// Try datetime with space (2025-01-15 10:00:00)
 	if t, err := time.ParseInLocation("2006-01-02 15:04:05", s, location); err == nil {
+		return t.UTC(), nil
+	}
+
+	// Try ISO 8601 datetime without timezone or seconds (2025-01-15T10:00)
+	if t, err := time.ParseInLocation("2006-01-02T15:04", s, location); err == nil {
+		return t.UTC(), nil
+	}
+
+	// Try datetime with space and no seconds (2025-01-15 10:00)
+	if t, err := time.ParseInLocation("2006-01-02 15:04", s, location); err == nil {
 		return t.UTC(), nil
 	}
 

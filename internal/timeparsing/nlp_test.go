@@ -287,32 +287,73 @@ func TestParseRelativeTime_LayerPrecedence(t *testing.T) {
 }
 
 func TestParseRelativeTimeNormalizesToUTC(t *testing.T) {
+	type testCase struct {
+		input string
+		want  time.Time
+	}
+	run := func(t *testing.T, now time.Time, tests []testCase) {
+		for _, tt := range tests {
+			t.Run(tt.input, func(t *testing.T) {
+				got, err := ParseRelativeTime(tt.input, now)
+				if err != nil {
+					t.Fatalf("ParseRelativeTime(%q) failed: %v", tt.input, err)
+				}
+				if !got.Equal(tt.want) {
+					t.Errorf("ParseRelativeTime(%q) = %v, want %v", tt.input, got, tt.want)
+				}
+				if got.Location() != time.UTC {
+					t.Errorf("ParseRelativeTime(%q) location = %v, want UTC", tt.input, got.Location())
+				}
+			})
+		}
+	}
+
 	loc := time.FixedZone("UTC-6", -6*60*60)
 	now := time.Date(2026, 7, 31, 21, 40, 15, 0, loc)
 
-	tests := []struct {
-		input string
-		want  time.Time
-	}{
+	run(t, now, []testCase{
 		{input: "+1h", want: time.Date(2026, 8, 1, 4, 40, 15, 0, time.UTC)},
 		{input: "2026-08-01", want: time.Date(2026, 8, 1, 6, 0, 0, 0, time.UTC)},
 		{input: "2026-08-01T09:00:00", want: time.Date(2026, 8, 1, 15, 0, 0, 0, time.UTC)},
 		{input: "2026-08-01 09:00:00", want: time.Date(2026, 8, 1, 15, 0, 0, 0, time.UTC)},
 		{input: "2026-08-01T09:00:00-06:00", want: time.Date(2026, 8, 1, 15, 0, 0, 0, time.UTC)},
 		{input: "tomorrow at 9am", want: time.Date(2026, 8, 1, 15, 0, 0, 0, time.UTC)},
-	}
+		// GH#8167: a zone-less datetime without seconds, with either
+		// separator, must parse as that date and time in now's location
+		// instead of falling through to the NLP layer.
+		{input: "2026-08-01 09:00", want: time.Date(2026, 8, 1, 15, 0, 0, 0, time.UTC)},
+		{input: "2026-08-01T09:00", want: time.Date(2026, 8, 1, 15, 0, 0, 0, time.UTC)},
+		// Layout "15" accepts a one-digit hour, like the seconds layouts.
+		{input: "2026-08-01 9:00", want: time.Date(2026, 8, 1, 15, 0, 0, 0, time.UTC)},
+		{input: "2026-08-01T9:00", want: time.Date(2026, 8, 1, 15, 0, 0, 0, time.UTC)},
+	})
 
-	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			got, err := ParseRelativeTime(tt.input, now)
+	// The exact inputs from the GH#8167 report under a UTC reference.
+	t.Run("UTC reference", func(t *testing.T) {
+		utcNow := time.Date(2026, 11, 6, 18, 0, 0, 0, time.UTC)
+		run(t, utcNow, []testCase{
+			{input: "2026-11-07 08:30", want: time.Date(2026, 11, 7, 8, 30, 0, 0, time.UTC)},
+			{input: "2026-11-07T08:30", want: time.Date(2026, 11, 7, 8, 30, 0, 0, time.UTC)},
+		})
+	})
+}
+
+// TestParseRelativeTimeDatetimeWithoutSeconds covers GH#8167: a datetime
+// without seconds must parse as that date and time in now's location, for
+// both the space and the T separator, never fall through to the NLP layer.
+func TestParseRelativeTimeDatetimeWithoutSeconds(t *testing.T) {
+	loc := time.FixedZone("UTC-5", -5*60*60)
+	now := time.Date(2026, 11, 6, 6, 7, 0, 0, loc)
+	want := time.Date(2026, 11, 7, 13, 30, 0, 0, time.UTC)
+
+	for _, input := range []string{"2026-11-07 08:30", "2026-11-07T08:30"} {
+		t.Run(input, func(t *testing.T) {
+			got, err := ParseRelativeTime(input, now)
 			if err != nil {
-				t.Fatalf("ParseRelativeTime(%q) failed: %v", tt.input, err)
+				t.Fatalf("ParseRelativeTime(%q) failed: %v", input, err)
 			}
-			if !got.Equal(tt.want) {
-				t.Errorf("ParseRelativeTime(%q) = %v, want %v", tt.input, got, tt.want)
-			}
-			if got.Location() != time.UTC {
-				t.Errorf("ParseRelativeTime(%q) location = %v, want UTC", tt.input, got.Location())
+			if !got.Equal(want) {
+				t.Errorf("ParseRelativeTime(%q) = %v, want %v", input, got, want)
 			}
 		})
 	}
