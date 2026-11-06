@@ -540,6 +540,66 @@ func TestVersionBump_DirtyTablesKeepsMarkerAndRetries(t *testing.T) {
 	}
 }
 
+// TestVersionBump_DeferralsSettle pins that a writable-open refusal which IS
+// the operator's decision — the remote-migrate gate or the migration-consent
+// refusal — settles the one-shot bump instead of retrying: the remedy
+// commands open the store on their own, so re-opening and re-noticing on
+// every following command would only nag about a decision only the operator
+// can change. The gate's per-decision notice must keep firing exactly once.
+func TestVersionBump_DeferralsSettle(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		err        error
+		wantNotice string
+	}{
+		{
+			name:       "remote gate refusal",
+			err:        &schema.RemoteMigrateGateError{CurrentVersion: 72, LatestVersion: 74, Pending: 2, Decision: "shared-no-remote"},
+			wantNotice: "not auto-applying",
+		},
+		{
+			name: "wrapped gate refusal",
+			err: fmt.Errorf("open store: %w", &schema.RemoteMigrateGateError{
+				CurrentVersion: 72, LatestVersion: 74, Pending: 1, Decision: "adopt",
+			}),
+			wantNotice: "bd bootstrap",
+		},
+		{
+			name: "migration consent refusal",
+			err:  &schema.MigrateConsentError{CurrentVersion: 72, LatestVersion: 74, Pending: 2},
+			// No pre-run notice for this refusal: the command's own open
+			// reports it with its full options block.
+			wantNotice: "",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			beadsDir, markerPath := newVersionBumpWorkspace(t, "1.1.0", "1.3.0")
+			stubVersionBumpTail(t, func(int) (bool, error) { return false, tt.err })
+
+			first := captureNoticeStderr(t, func() { runVersionBumpInvocation(t, beadsDir) })
+			if got := readLocalVersion(markerPath); got != "1.3.0" {
+				t.Fatalf("after the deferred invocation: .local_version = %q, want %q — a deliberate deferral settles the bump", got, "1.3.0")
+			}
+			if tt.wantNotice != "" && !strings.Contains(first, tt.wantNotice) {
+				t.Errorf("the per-decision gate diagnostic changed or went missing:\n%s", first)
+			}
+			if tt.wantNotice == "" && first != "" {
+				t.Errorf("this deferral must rely on the command's own diagnostics, got a pre-run notice:\n%s", first)
+			}
+
+			// A settled bump makes the second invocation attempt nothing and
+			// notice nothing.
+			second := captureNoticeStderr(t, func() { runVersionBumpInvocation(t, beadsDir) })
+			if versionBumpTailAttempts != 1 {
+				t.Fatalf("maintenance attempts after a settled deferral = %d, want 1", versionBumpTailAttempts)
+			}
+			if strings.Contains(second, "not auto-applying") {
+				t.Errorf("the gate notice repeated after the bump settled:\n%s", second)
+			}
+		})
+	}
+}
+
 // TestNoticeDirtyTablesRefusal covers the human recovery path for a
 // dirty-table stop of the version-bump reconciliation (#6929): name the dirty
 // tables, the workspace whose working set must be committed, and the

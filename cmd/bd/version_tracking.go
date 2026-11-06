@@ -299,6 +299,9 @@ func autoMigrateOnVersionBump(beadsDir string) bool {
 
 	settled, openErr := runVersionBumpReconciliation(ctx, beadsDir)
 	if openErr != nil {
+		// A writable-open failure that IS the operator's decision settles the
+		// bump; any other open failure keeps the signal for the next command.
+		settled = defersVersionBumpMaintenance(openErr)
 		noticeSharedMigrateRefusal(openErr)
 		noticeDirtyTablesRefusal(openErr, beadsDir)
 	}
@@ -445,6 +448,22 @@ func recoverPreV56IfNeeded(previousVersion, dbPath string) {
 // optional "v") and then given one.
 func isGoPseudoVersion(version string) bool {
 	return module.IsPseudoVersion("v" + strings.TrimPrefix(strings.TrimSpace(version), "v"))
+}
+
+// defersVersionBumpMaintenance reports whether a writable-open refusal of the
+// version-bump reconciliation is a deliberate operator decision rather than
+// an ordinary failure. The remote-migrate gate and the migration-consent
+// refusal both stop pending migrations on purpose, with per-decision
+// diagnostics of their own, and their remedy commands open the store
+// independently — so such a deferral settles the bump: retrying would re-open
+// and re-notice on every following command about a decision only the operator
+// can change.
+func defersVersionBumpMaintenance(err error) bool {
+	var gateErr *schema.RemoteMigrateGateError
+	if errors.As(err, &gateErr) {
+		return true
+	}
+	return schema.IsMigrateConsentError(err)
 }
 
 // noticeDirtyTablesRefusal reports the other failure autoMigrateOnVersionBump
