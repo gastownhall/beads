@@ -327,3 +327,74 @@ func TestEmbeddedMigration0075WispOnlyRepairWithoutKey(t *testing.T) {
 		t.Errorf("ignored cursor = %d, want %d", got, schema.LatestIgnoredVersion())
 	}
 }
+
+// healthyFlags returns rows seeded with the flags their graph implies.
+func healthyFlags(rows []repairRow) []repairRow {
+	out := make([]repairRow, len(rows))
+	for i, r := range rows {
+		out[i] = r
+		out[i].stale = r.wantBlocked
+	}
+	return out
+}
+
+func repairCommitCount(t *testing.T, ctx context.Context, conn *sql.Conn) int {
+	t.Helper()
+	return scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM dolt_log WHERE message = ?",
+		"schema: repair is_blocked flags left by 0059 (gastownhall/beads#7037)")
+}
+
+// TestEmbeddedMigration0075HealthyStoreIsUnchanged is AC-3: upgrading a 74/31
+// store whose flags already match its graph changes no flag, timestamp or
+// journal row, consumes the owed key in exactly one repair commit, and a
+// reopen finds nothing owed and commits nothing.
+func TestEmbeddedMigration0075HealthyStoreIsUnchanged(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+	_, conn, closeConn := seedRewoundStore(t, ctx, 74, 31)
+	defer closeConn()
+	issues, wisps := healthyFlags(repairGraph), healthyFlags(wispRepairGraph)
+	insertRepairRows(t, ctx, conn, "issues", issues)
+	insertCanonicalEdges(t, ctx, conn, "dependencies", "depends_on_issue_id", repairEdges)
+	insertRepairRows(t, ctx, conn, "wisps", wisps)
+	insertCanonicalEdges(t, ctx, conn, "wisp_dependencies", "depends_on_wisp_id", wispRepairEdges)
+	seedJournal(t, ctx, conn)
+	commitFixture(t, ctx, conn, "test: healthy v74 store")
+	journalBefore := journalDump(t, ctx, conn)
+
+	if _, err := schema.MigrateUp(ctx, conn); err != nil {
+		t.Fatalf("MigrateUp: %v", err)
+	}
+	requireFlags(t, ctx, conn, "issues", issues)
+	requireFlags(t, ctx, conn, "wisps", wisps)
+	requireStamps(t, ctx, conn, "issues", issues)
+	requireStamps(t, ctx, conn, "wisps", wisps)
+	if got := journalDump(t, ctx, conn); got != journalBefore {
+		t.Errorf("journal changed on a healthy store:\n got %s\nwant %s", got, journalBefore)
+	}
+	if n := repairKeyCount(t, ctx, conn, ""); n != 0 {
+		t.Errorf("repair key present after the upgrade (%d row(s))", n)
+	}
+	if n := repairKeyCount(t, ctx, conn, " AS OF 'HEAD'"); n != 0 {
+		t.Errorf("repair key committed at HEAD after the upgrade (%d row(s))", n)
+	}
+	if n := repairCommitCount(t, ctx, conn); n != 1 {
+		t.Fatalf("repair commits after the upgrade = %d, want 1 (the one that consumes the owed key)", n)
+	}
+
+	headBefore := scalarString(t, ctx, conn, "SELECT HASHOF('HEAD')")
+	if _, err := schema.MigrateUp(ctx, conn); err != nil {
+		t.Fatalf("reopen MigrateUp: %v", err)
+	}
+	if got := scalarString(t, ctx, conn, "SELECT HASHOF('HEAD')"); got != headBefore {
+		t.Errorf("reopen moved HEAD from %s to %s; want no commit", headBefore, got)
+	}
+	if n := repairCommitCount(t, ctx, conn); n != 1 {
+		t.Errorf("repair commits after reopen = %d, want 1", n)
+	}
+	requireFlags(t, ctx, conn, "issues", issues)
+	requireStamps(t, ctx, conn, "issues", issues)
+	if got := journalDump(t, ctx, conn); got != journalBefore {
+		t.Errorf("journal changed on reopen:\n got %s\nwant %s", got, journalBefore)
+	}
+}
