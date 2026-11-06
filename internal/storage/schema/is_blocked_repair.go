@@ -1,0 +1,110 @@
+package schema
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/steveyegge/beads/internal/storage/issueops"
+)
+
+// The is_blocked repair for gastownhall/beads#7037. Frozen migration 0059 and
+// its ignored twin 0015 recompute is_blocked with a recursive join that
+// dolthub/dolt#11886 mis-evaluates on engines before go-mysql-server#3899, so
+// stores that crossed them there hold flags their graph does not imply. Main
+// 0075 and ignored 0032 are inert markers; the hooks below do the work.
+//
+// The owed-repair key is the hand-off between them. Main 0075 records it in
+// the step that records 0075 itself, so it is committed before any flag
+// changes. Ignored 0032 trusts only the copy committed at HEAD: a working-set
+// key is not yet part of any history a peer can see, and the commit that
+// carries the repaired flags must also be the one that removes it.
+
+// isBlockedRepairOwedKey is the metadata key main 0075 records when the store
+// holds issues whose flags a full recompute must check.
+const isBlockedRepairOwedKey = "is_blocked_repair_owed_0075"
+
+// isBlockedRepairIgnoredVersion is the ignored marker that performs the repair.
+const isBlockedRepairIgnoredVersion = 32
+
+// isBlockedRepairCommitMessage labels the commit carrying the repaired flags.
+const isBlockedRepairCommitMessage = "schema: repair is_blocked flags left by 0059 (gastownhall/beads#7037)"
+
+// recordIsBlockedRepairOwed is the pre-0075 repair. It records the owed key
+// when the store holds issues and re-arms ignored 0032 on this clone, so the
+// ignored pass later in the same MigrateUp performs the repair.
+func recordIsBlockedRepairOwed(ctx context.Context, db DBConn) error {
+	var hasIssues int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM (SELECT 1 FROM issues LIMIT 1) AS any_issue").Scan(&hasIssues); err != nil {
+		return fmt.Errorf("checking for issues to repair: %w", err)
+	}
+	if hasIssues > 0 {
+		if _, err := db.ExecContext(ctx,
+			"INSERT INTO metadata (`key`, value) VALUES (?, 'full') ON DUPLICATE KEY UPDATE value = 'full'",
+			isBlockedRepairOwedKey); err != nil {
+			return fmt.Errorf("recording owed is_blocked repair: %w", err)
+		}
+	}
+	return rearmIgnoredIsBlockedRepair(ctx, db)
+}
+
+// rearmIgnoredIsBlockedRepair deletes this clone's ignored cursor rows from
+// 0032 up, so the ignored pass runs 0032 (and replays every later ignored
+// step) again. Rows below 0032 are kept. A clone whose ignored cursor table
+// does not exist yet runs the whole ignored series anyway.
+func rearmIgnoredIsBlockedRepair(ctx context.Context, db DBConn) error {
+	exists, err := schemaTableExists(ctx, db, ignoredSource.cursorTable)
+	if err != nil {
+		return fmt.Errorf("checking %s: %w", ignoredSource.cursorTable, err)
+	}
+	if !exists {
+		return nil
+	}
+	//nolint:gosec // G202: the cursor table name is a package constant.
+	if _, err := db.ExecContext(ctx,
+		"DELETE FROM "+ignoredSource.cursorTable+" WHERE version >= ?", isBlockedRepairIgnoredVersion); err != nil {
+		return fmt.Errorf("re-arming ignored migration %04d: %w", isBlockedRepairIgnoredVersion, err)
+	}
+	return nil
+}
+
+// isBlockedRepairOwedAtHead reports whether the owed key is committed at HEAD.
+// It lists HEAD before selecting from it so the probe cannot fail on a store
+// whose HEAD predates the metadata table (be-bv7x, see tableTrackedAtHead).
+func isBlockedRepairOwedAtHead(ctx context.Context, db DBConn) (bool, error) {
+	tracked, err := tableTrackedAtHead(ctx, db, "", "metadata")
+	if err != nil || !tracked {
+		return false, err
+	}
+	var n int
+	if err := db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM metadata AS OF 'HEAD' WHERE `key` = ?", isBlockedRepairOwedKey).Scan(&n); err != nil {
+		return false, fmt.Errorf("reading owed is_blocked repair at HEAD: %w", err)
+	}
+	return n > 0, nil
+}
+
+// repairIsBlockedFlags is the pre-ignored-0032 repair. With the owed key
+// committed it recomputes both planes, removes the key, and commits the
+// tracked tables together, returning only after that commit succeeded.
+func repairIsBlockedFlags(ctx context.Context, db DBConn) error {
+	owed, err := isBlockedRepairOwedAtHead(ctx, db)
+	if err != nil {
+		return err
+	}
+	if !owed {
+		return nil
+	}
+	fmt.Fprintln(stderr, "Recomputing is_blocked for every issue and wisp (gastownhall/beads#7037)…")
+	corrected, err := issueops.RecomputeAllIsBlockedInTx(ctx, db)
+	if err != nil {
+		return fmt.Errorf("recomputing is_blocked: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, "DELETE FROM metadata WHERE `key` = ?", isBlockedRepairOwedKey); err != nil {
+		return fmt.Errorf("clearing owed is_blocked repair: %w", err)
+	}
+	if err := commitScopedTablesChange(ctx, db, isBlockedRepairCommitMessage, "issues", "metadata"); err != nil {
+		return fmt.Errorf("committing is_blocked repair: %w", err)
+	}
+	fmt.Fprintf(stderr, "  flipped %d is_blocked flag(s)\n", corrected)
+	return nil
+}

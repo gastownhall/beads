@@ -36,9 +36,11 @@ var preMigrationRepairs = map[repairKey]func(context.Context, DBConn) error{
 	{"schema_migrations", 47}:         ensureWispTablesForMixedBlockedRecompute,
 	{"schema_migrations", 53}:         repairV53RigAndSplitTargets,
 	{"schema_migrations", 58}:         repairWispDependenciesForwardShape,
+	{"schema_migrations", 75}:         recordIsBlockedRepairOwed,
 	{"ignored_schema_migrations", 7}:  ensureWispIsBlockedForRecompute,
 	{"ignored_schema_migrations", 15}: ensureWispIsBlockedForRecompute,
 	{"ignored_schema_migrations", 31}: seedEventsFromPreflipHistory,
+	{"ignored_schema_migrations", 32}: repairIsBlockedFlags,
 }
 
 // preMigrationRepair dispatches any repair registered for (source, version).
@@ -100,7 +102,14 @@ func commitNonlocalRepair(ctx context.Context, db DBConn, message string) error 
 // matches a seeded dolt_ignore pattern; such a caller must use
 // commitScopedIgnoredTableChange instead.
 func commitScopedTableChange(ctx context.Context, db DBConn, table, message string) error {
-	return stageAndCommitScoped(ctx, db, "CALL DOLT_ADD(?)", table, message)
+	return stageAndCommitScoped(ctx, db, "CALL DOLT_ADD(?)", message, table)
+}
+
+// commitScopedTablesChange is commitScopedTableChange for a repair whose change
+// spans several tables that must land in one commit: it stages each named
+// table, unforced, and commits them together.
+func commitScopedTablesChange(ctx context.Context, db DBConn, message string, tables ...string) error {
+	return stageAndCommitScoped(ctx, db, "CALL DOLT_ADD(?)", message, tables...)
 }
 
 // commitScopedIgnoredTableChange is commitScopedTableChange for the one caller
@@ -120,14 +129,16 @@ func commitScopedTableChange(ctx context.Context, db DBConn, table, message stri
 // so this stages exactly the one table named. Like its unforced twin it does not
 // clear the staging area.
 func commitScopedIgnoredTableChange(ctx context.Context, db DBConn, table, message string) error {
-	return stageAndCommitScoped(ctx, db, "CALL DOLT_ADD('-f', ?)", table, message)
+	return stageAndCommitScoped(ctx, db, "CALL DOLT_ADD('-f', ?)", message, table)
 }
 
-// stageAndCommitScoped is the shared body of the two scoped-commit helpers.
+// stageAndCommitScoped is the shared body of the scoped-commit helpers.
 // They differ only in whether stageSQL forces past the dolt_ignore filter.
-func stageAndCommitScoped(ctx context.Context, db DBConn, stageSQL, table, message string) error {
-	if err := DrainCall(ctx, db, stageSQL, table); err != nil {
-		return fmt.Errorf("staging %s: %w", table, err)
+func stageAndCommitScoped(ctx context.Context, db DBConn, stageSQL, message string, tables ...string) error {
+	for _, table := range tables {
+		if err := DrainCall(ctx, db, stageSQL, table); err != nil {
+			return fmt.Errorf("staging %s: %w", table, err)
+		}
 	}
 	return DrainCall(ctx, db, "CALL DOLT_COMMIT('-m', ?, '--skip-empty')", message)
 }

@@ -440,6 +440,12 @@ func expectOnePendingMigrationAtSetting(t *testing.T, mock sqlmock.Sqlmock, tran
 	// Per-step commit (#4566) snapshots the working set before the migration
 	// runs so it can force-stage only the tables this step newly dirties.
 	expectDoltStatusRows(mock)
+	if latest == 75 {
+		// The v75 pre-repair asks whether the store holds issues (this mocked
+		// world has none, so no owed key is recorded) and re-arms ignored 0032
+		// when the ignored cursor table exists (here it does not).
+		expectIsBlockedRepairOwedProbe(mock, false)
+	}
 	// The pending (latest) migration is 0063_create_provenance_events, a
 	// plain CREATE TABLE body with no bare CALL — execMigrationBody routes
 	// such bodies through ExecContext, not DrainCall.
@@ -500,6 +506,27 @@ func expectOnePendingMigrationAtSetting(t *testing.T, mock sqlmock.Sqlmock, tran
 	if transactionCommit != 0 {
 		// The deferred restoration is the pass's last statement (#4470).
 		expectTransactionCommitRestore(mock, transactionCommit, restoreErr)
+	}
+}
+
+// expectIsBlockedRepairOwedProbe mocks recordIsBlockedRepairOwed, the v75
+// pre-repair, on a store with no issues: the issue probe, then the ignored
+// cursor table's existence probe (cursorTablePresent decides whether the
+// re-arm DELETE follows).
+func expectIsBlockedRepairOwedProbe(mock sqlmock.Sqlmock, cursorTablePresent bool) {
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM (SELECT 1 FROM issues LIMIT 1) AS any_issue")).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+	present := 0
+	if cursorTablePresent {
+		present = 1
+	}
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.TABLES`).
+		WithArgs("ignored_schema_migrations").
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(present))
+	if cursorTablePresent {
+		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM ignored_schema_migrations WHERE version >= ?")).
+			WithArgs(32).
+			WillReturnResult(sqlmock.NewResult(0, 0))
 	}
 }
 
