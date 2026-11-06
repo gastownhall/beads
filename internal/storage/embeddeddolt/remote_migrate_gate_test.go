@@ -503,3 +503,133 @@ func TestEmbeddedOpenForReadOnlyCommand_LenientGateRefusesUnreadableOverlay(t *t
 		})
 	}
 }
+
+// TestEmbeddedOpenForReadOnlyCommand_LenientGateReadsIntactOverlay is the
+// positive control for the #6572 guard's fixture family: the same behind,
+// remote-backed database with every hydration relation intact must keep
+// serving the read-through the gate promises. The refusal the guard adds for
+// unreadable overlays must not widen into refusing the degraded window the
+// gate exists to serve (bd-578h9.5, #5920), and the open must not quietly
+// migrate or heal anything to get there.
+func TestEmbeddedOpenForReadOnlyCommand_LenientGateReadsIntactOverlay(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt tests")
+	}
+	t.Setenv(schema.AllowRemoteMigrateEnv, "0")
+	t.Setenv(schema.SmartGateEnv, "0")
+	t.Setenv("BD_IGNORE_SCHEMA_SKEW", "")
+
+	ctx := t.Context()
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	dataDir := filepath.Join(beadsDir, "embeddeddolt")
+
+	store, err := embeddeddolt.Open(ctx, beadsDir, "testdb", "main")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := store.SetConfig(ctx, "issue_prefix", "lgi"); err != nil {
+		store.Close()
+		t.Fatalf("SetConfig: %v", err)
+	}
+	if err := store.CreateIssue(ctx, &types.Issue{
+		ID: "probe1", Title: "probe", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
+	}, "tester"); err != nil {
+		store.Close()
+		t.Fatalf("CreateIssue: %v", err)
+	}
+	store.Close()
+
+	db, cleanup, err := embeddeddolt.OpenSQL(ctx, dataDir, "testdb", "main")
+	if err != nil {
+		t.Fatalf("OpenSQL: %v", err)
+	}
+	for _, stmt := range []string{
+		fmt.Sprintf("DELETE FROM schema_migrations WHERE version = %d", schema.LatestVersion()),
+		fmt.Sprintf("CALL DOLT_REMOTE('add', 'origin', 'file://%s')", filepath.Join(t.TempDir(), "remote")),
+	} {
+		if _, err := db.ExecContext(ctx, stmt); err != nil {
+			_ = cleanup()
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	_ = cleanup()
+
+	var ro *embeddeddolt.EmbeddedDoltStore
+	var openErr error
+	stderr := captureEmbeddedStderr(t, func() {
+		ro, openErr = embeddeddolt.OpenForReadOnlyCommand(ctx, beadsDir, "testdb", "main")
+	})
+	if openErr != nil {
+		t.Fatalf("OpenForReadOnlyCommand = %v, want the promised read-through on an intact behind schema", openErr)
+	}
+	defer ro.Close()
+	for _, want := range []string{"Read-only command: continuing on schema v", "without migrating"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("continuation warning missing %q:\n%s", want, stderr)
+		}
+	}
+
+	// The read commands the gate's promise covers, against the seeded issue.
+	issues, err := ro.SearchIssues(ctx, "", types.IssueFilter{})
+	if err != nil {
+		t.Fatalf("SearchIssues: %v", err)
+	}
+	if len(issues) != 1 || issues[0].ID != "probe1" {
+		t.Fatalf("SearchIssues = %d issues (first %v), want the seeded probe1", len(issues), firstID(issues))
+	}
+	count, err := ro.CountIssues(ctx, "", types.IssueFilter{})
+	if err != nil {
+		t.Fatalf("CountIssues: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("CountIssues = %d, want 1", count)
+	}
+	ready, err := ro.GetReadyWork(ctx, types.WorkFilter{})
+	if err != nil {
+		t.Fatalf("GetReadyWork: %v", err)
+	}
+	if len(ready) != 1 || ready[0].ID != "probe1" {
+		t.Fatalf("GetReadyWork = %d issues (first %v), want the seeded probe1", len(ready), firstID(ready))
+	}
+	got, err := ro.GetIssue(ctx, "probe1")
+	if err != nil || got == nil || got.Title != "probe" {
+		t.Fatalf("GetIssue(probe1) = %v, %v; want the seeded issue", got, err)
+	}
+	// An id absent from issues exercises the wisp fallback's projection too:
+	// on the intact schema it is a clean not-found, not a query failure.
+	if missing, err := ro.GetIssue(ctx, "no-such-id"); err == nil || missing != nil {
+		t.Fatalf("GetIssue(no-such-id) = %v, %v; want a wrapped not-found", missing, err)
+	}
+
+	// The read-through migrated and healed nothing.
+	db2, cleanup2, err := embeddeddolt.OpenSQL(ctx, dataDir, "testdb", "main")
+	if err != nil {
+		t.Fatalf("OpenSQL (verify): %v", err)
+	}
+	defer func() { _ = cleanup2() }()
+	var applied int
+	if err := db2.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM schema_migrations WHERE version = ?", schema.LatestVersion()).Scan(&applied); err != nil {
+		t.Fatalf("read schema_migrations: %v", err)
+	}
+	if applied != 0 {
+		t.Fatalf("the read-through applied migration %d; a read-only command must not migrate", schema.LatestVersion())
+	}
+	var leases int
+	if err := db2.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'leases'").Scan(&leases); err != nil {
+		t.Fatalf("probe leases: %v", err)
+	}
+	if leases != 1 {
+		t.Fatal("the leases overlay did not survive the read-through intact")
+	}
+}
+
+// firstID returns the first issue's id, or "" for an empty slice, for
+// failure messages that stay readable.
+func firstID(issues []*types.Issue) string {
+	if len(issues) == 0 {
+		return ""
+	}
+	return issues[0].ID
+}
