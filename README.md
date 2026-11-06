@@ -349,7 +349,8 @@ multi-tenant case. This surface is EXPERIMENTAL: pin an exact beads version.
 ## 🧹 Compacting Claude Rules
 
 `bd rules audit` scans `.claude/rules/*.md` for contradictions and
-near-duplicates; `bd rules compact` merges related rules into one composite.
+near-duplicates; `bd rules compact` merges related rules into one composite. A
+missing rules directory audits as empty; a path that is a file is an error.
 
 ```bash
 bd rules compact --auto           # Preview: composite, dropped lines, backups, deletes

@@ -1208,6 +1208,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- On Windows, `bd dolt remote reset-data` on a `file://` remote whose target is
+  an ordinary file, and `bd rules audit --path` naming an ordinary file, now
+  fail with their existing errors (`inspecting remote target <path>: ...`,
+  `read rules directory: ...`) instead of treating the file as missing: Windows
+  can report reading a file as a directory as "not found", so bd now checks
+  that the path really is missing first. reset-data no longer reports such a
+  target as empty, and the audit no longer reports zero rules for it.
 - `bd config get` for a config.yaml, git-config or user-global key no longer
   opens the database just because one exists, so it answers from those files
   while the Dolt server is down instead of failing the open (GH#5108). In

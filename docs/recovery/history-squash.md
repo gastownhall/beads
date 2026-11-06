@@ -129,9 +129,10 @@ storage is the git repository itself, and its manifest lists every
 historical table file as current, so the full old store stays reachable
 even after the force-push. reset-data replaces the remote's Dolt data refs
 with the fresh store; code branches are untouched. On a native `file://`
-remote it clears the store directory and pushes again. It refuses a cloud
-or hosted remote (`aws://`, `gs://`, `dolthub://`, ...): replace that one as
-above.
+remote it clears the store directory and pushes again. A missing or empty
+target has nothing to reset; a target that is a file, not a directory, is
+an error. It refuses a cloud or hosted remote (`aws://`, `gs://`,
+`dolthub://`, ...): replace that one as above.
 
 <Warning>
 A `file://` remote whose URL does not end in `.git` (`bd dolt remote list`
