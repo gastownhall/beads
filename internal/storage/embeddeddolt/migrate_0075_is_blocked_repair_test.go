@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -397,4 +398,103 @@ func TestEmbeddedMigration0075HealthyStoreIsUnchanged(t *testing.T) {
 	if got := journalDump(t, ctx, conn); got != journalBefore {
 		t.Errorf("journal changed on reopen:\n got %s\nwant %s", got, journalBefore)
 	}
+}
+
+// depGraphAt renders the dependencies table at rev ("" for the working set).
+func depGraphAt(t *testing.T, ctx context.Context, conn *sql.Conn, rev string) []string {
+	t.Helper()
+	asOf := ""
+	if rev != "" {
+		asOf = " AS OF '" + rev + "'"
+	}
+	rows, err := conn.QueryContext(ctx, "SELECT id, issue_id, COALESCE(depends_on_issue_id, ''), COALESCE(depends_on_external, ''), type FROM dependencies"+asOf+" ORDER BY issue_id, id")
+	if err != nil {
+		t.Fatalf("read dependencies%s: %v", asOf, err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id, issueID, target, external, typ string
+		if err := rows.Scan(&id, &issueID, &target, &external, &typ); err != nil {
+			t.Fatalf("scan dependencies: %v", err)
+		}
+		out = append(out, strings.Join([]string{id, issueID, target, external, typ}, " "))
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("dependencies rows: %v", err)
+	}
+	return out
+}
+
+// TestEmbeddedMigration0075RepairCommitCarriesItsGraph is AC-4: the dependency
+// rekey of the same pass rewrites random ids and collapses a cross-column
+// duplicate, and the repair commit publishes that graph together with the
+// flags derived from it, changing nothing else but the owed key.
+func TestEmbeddedMigration0075RepairCommitCarriesItsGraph(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+	_, conn, closeConn := seedRewoundStore(t, ctx, 74, 31)
+	defer closeConn()
+	insertRepairRows(t, ctx, conn, "issues", repairGraph)
+	// Random UUID ids: the rekey must rewrite every one of them.
+	insertIssueEdges(t, ctx, conn, repairEdges)
+	// The external twin of rp-blocked -blocks-> rp-blocker, already sitting on
+	// the deterministic id: the rekey drops it and moves the issue ref there.
+	seedDependency(t, ctx, conn, depid.New("rp-blocked", "rp-blocker"), "rp-blocked", nil, nil, strptr("rp-blocker"))
+	commitFixture(t, ctx, conn, "test: v74 store with stale flags and a pre-rekey graph")
+
+	if _, err := schema.MigrateUp(ctx, conn); err != nil {
+		t.Fatalf("MigrateUp: %v", err)
+	}
+
+	var repair string
+	if err := conn.QueryRowContext(ctx, "SELECT commit_hash FROM dolt_log WHERE message = ?",
+		"schema: repair is_blocked flags left by 0059 (gastownhall/beads#7037)").Scan(&repair); err != nil {
+		t.Fatalf("find the repair commit: %v", err)
+	}
+	final := depGraphAt(t, ctx, conn, "")
+	if len(final) != len(repairEdges) {
+		t.Fatalf("dependencies after the pass = %v, want %d deduplicated edges", final, len(repairEdges))
+	}
+	if got := depGraphAt(t, ctx, conn, repair); !slices.Equal(got, final) {
+		t.Errorf("dependencies at the repair commit:\n got %v\nwant the graph its flags were derived from %v", got, final)
+	}
+	for _, r := range repairGraph {
+		var got bool
+		if err := conn.QueryRowContext(ctx, "SELECT is_blocked FROM issues AS OF '"+repair+"' WHERE id = ?", r.id).Scan(&got); err != nil {
+			t.Fatalf("read %s at the repair commit: %v", r.id, err)
+		}
+		if got != r.wantBlocked {
+			t.Errorf("issues %s at the repair commit: is_blocked = %v, want %v", r.id, got, r.wantBlocked)
+		}
+	}
+	requireStamps(t, ctx, conn, "issues", repairGraph)
+
+	parent := repair + "~1"
+	rows, err := conn.QueryContext(ctx, "SELECT to_table_name FROM dolt_diff_summary(?, ?)", parent, repair)
+	if err != nil {
+		t.Fatalf("diff summary of the repair commit: %v", err)
+	}
+	var changed []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatalf("scan diff summary: %v", err)
+		}
+		changed = append(changed, name)
+	}
+	rows.Close()
+	sort.Strings(changed)
+	if want := []string{"dependencies", "issues", "metadata"}; !slices.Equal(changed, want) {
+		t.Errorf("repair commit changed tables %v, want %v", changed, want)
+	}
+	// dolt_diff takes no bind parameters; both revisions are commit hashes.
+	diffOf := "dolt_diff('" + parent + "', '" + repair + "', "
+	if n := scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM "+diffOf+"'issues') WHERE diff_type <> 'modified' OR from_updated_at <> to_updated_at"); n != 0 {
+		t.Errorf("repair commit added, removed or re-stamped %d issue row(s); want flag updates only", n)
+	}
+	if n := scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM "+diffOf+"'metadata') WHERE COALESCE(to_key, from_key) <> ?", isBlockedRepairOwedKey); n != 0 {
+		t.Errorf("repair commit changed %d metadata row(s) other than the owed key", n)
+	}
+	requireFullRecomputeCorrectsNothing(t, ctx, conn)
 }

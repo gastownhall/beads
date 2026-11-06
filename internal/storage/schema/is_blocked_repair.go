@@ -84,8 +84,8 @@ func isBlockedRepairOwedAtHead(ctx context.Context, db DBConn) (bool, error) {
 }
 
 // repairIsBlockedFlags is the pre-ignored-0032 repair. With the owed key
-// committed it recomputes both planes, removes the key, and commits the
-// tracked tables together, returning only after that commit succeeded.
+// committed it recomputes both planes, removes the key, and commits issues,
+// dependencies and metadata together, returning only after that commit succeeded.
 // Without the key the tracked half is already repaired (or was never owed),
 // so it recomputes only this clone's wisps, which are never committed.
 func repairIsBlockedFlags(ctx context.Context, db DBConn) error {
@@ -111,7 +111,9 @@ func repairIsBlockedFlags(ctx context.Context, db DBConn) error {
 	if _, err := db.ExecContext(ctx, "DELETE FROM metadata WHERE `key` = ?", isBlockedRepairOwedKey); err != nil {
 		return fmt.Errorf("clearing owed is_blocked repair: %w", err)
 	}
-	if err := commitScopedTablesChange(ctx, db, isBlockedRepairCommitMessage, "issues", "metadata"); err != nil {
+	// dependencies rides along: the same pass's rekey may have rewritten or
+	// collapsed edges, and the flags above were derived from that graph.
+	if err := commitScopedTablesChange(ctx, db, isBlockedRepairCommitMessage, "issues", "dependencies", "metadata"); err != nil {
 		return fmt.Errorf("committing is_blocked repair: %w", err)
 	}
 	fmt.Fprintf(stderr, "  flipped %d is_blocked flag(s)\n", corrected)
