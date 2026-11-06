@@ -32,6 +32,7 @@ func TestPreviousExternalRefsMatchesPerIssueLookup(t *testing.T) {
 
 	testutil.AssertPreviousExternalRefsParity(t, ctx, store, scenario, "perh")
 	testutil.AssertExternalRefHistoryDiscriminator(t, ctx, store, scenario, "perh")
+	testutil.AssertExternalRefHistoryOutOfOrderMerge(t, ctx, store, scenario, "perh")
 }
 
 // TestPreviousExternalRefsUsesDedicatedLongTimeoutConnection: the batch read

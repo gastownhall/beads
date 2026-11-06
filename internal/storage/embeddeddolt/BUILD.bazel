@@ -160,6 +160,7 @@ go_test(
         "events_since_test.go",
         "expected_revision_contract_test.go",
         "external_dependencies_test.go",
+        "external_ref_history_contract_test.go",
         "federation_credentials_test.go",
         "get_issue_test.go",
         "git_ref_pin_test.go",

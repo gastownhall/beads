@@ -29,8 +29,9 @@ func externalRefHistoryAt(days float64) time.Time {
 // external_ref values change in every way the batch history read has to
 // agree with the per-issue read on: relinks, NULL and empty refs, a delete
 // and recreate, an issue created late, two commits sharing the latest date
-// with different refs, and a side branch dated between the local line's
-// commits and merged after every cutoff.
+// with different refs, a side branch dated between the local line's
+// commits and merged after every cutoff, and a side commit dated before its
+// own parent and merged by fast-forward.
 type ExternalRefHistoryScenario struct {
 	// IDs are the scenario's issue ids, keyed by role.
 	IDs map[string]string
@@ -49,6 +50,12 @@ type ExternalRefHistoryScenario struct {
 	// TieCutoff is the date two local-line commits share; at it, the tied
 	// issue's latest qualifying rows disagree.
 	TieCutoff time.Time
+	// OutOfOrderBefore, OutOfOrderChild and OutOfOrderPast straddle the
+	// out-of-order issue's two rows: before both, at the side commit dated a
+	// day before its parent, and past the parent.
+	OutOfOrderBefore time.Time
+	OutOfOrderChild  time.Time
+	OutOfOrderPast   time.Time
 }
 
 // BuildExternalRefHistoryScenario commits the scenario on conn's current
@@ -95,7 +102,7 @@ func BuildExternalRefHistoryScenario(t *testing.T, ctx context.Context, conn *sq
 	}
 
 	ids := map[string]string{}
-	for _, role := range []string{"merged", "steady", "relinked", "nullref", "emptyref", "unlinked", "deleted", "tied", "late"} {
+	for _, role := range []string{"merged", "steady", "relinked", "nullref", "emptyref", "unlinked", "deleted", "tied", "late", "outoforder"} {
 		ids[role] = prefix + "-" + role
 	}
 	ref := func(s string) string { return "https://tracker.test/" + prefix + "/" + s }
@@ -151,6 +158,20 @@ func BuildExternalRefHistoryScenario(t *testing.T, ctx context.Context, conn *sq
 	exec("SET @@dolt_force_transaction_commit = 0")
 	exec("CALL DOLT_BRANCH('-D', ?)", side)
 
+	// The out-of-order issue's history is two rows: its parent commit at day
+	// 15 and a side commit dated day 14 on top of it, merged by fast-forward,
+	// so HEAD's ancestry holds a row dated before its graph position.
+	outOfOrderSide := home + "-side2"
+	insert(ids["outoforder"], ref("RN-base"))
+	commit(15, "history: out-of-order parent")
+	exec("CALL DOLT_BRANCH(?, 'HEAD')", outOfOrderSide)
+	exec("CALL DOLT_CHECKOUT(?)", outOfOrderSide)
+	setRef(ids["outoforder"], ref("RN"))
+	commit(14, "history: side commit dated before its parent")
+	exec("CALL DOLT_CHECKOUT(?)", home)
+	exec("CALL DOLT_MERGE(?)", outOfOrderSide)
+	exec("CALL DOLT_BRANCH('-D', ?)", outOfOrderSide)
+
 	// The scenario must actually hold the shapes its cutoffs name, or a
 	// parity check against it would pass without exercising them.
 	for _, snapshot := range []string{discriminatorSnapshot, lateUnrelated} {
@@ -161,6 +182,9 @@ func BuildExternalRefHistoryScenario(t *testing.T, ctx context.Context, conn *sq
 	if n := scalar("SELECT CAST(COUNT(*) AS CHAR) FROM (SELECT id, commit_date FROM dolt_history_issues) h WHERE h.id = ? AND h.commit_date = ?",
 		ids["tied"], externalRefHistoryAt(7)); n != "2" {
 		t.Fatalf("external_ref history scenario: %s has %s history rows dated day 7, want 2 (a latest-date tie)", ids["tied"], n)
+	}
+	if got := scalar("SELECT COALESCE(external_ref, '') FROM issues WHERE id = ?", ids["outoforder"]); got != ref("RN") {
+		t.Fatalf("external_ref history scenario: %s at HEAD = %q, want %q (the fast-forward merge of the side commit)", ids["outoforder"], got, ref("RN"))
 	}
 
 	cutoffs := []time.Time{
@@ -174,6 +198,8 @@ func BuildExternalRefHistoryScenario(t *testing.T, ctx context.Context, conn *sq
 		externalRefHistoryAt(10),
 		externalRefHistoryAt(11),
 		externalRefHistoryAt(13),
+		externalRefHistoryAt(14),
+		externalRefHistoryAt(16),
 	}
 	return &ExternalRefHistoryScenario{
 		IDs:                   ids,
@@ -183,6 +209,9 @@ func BuildExternalRefHistoryScenario(t *testing.T, ctx context.Context, conn *sq
 		LateUnrelatedCommit:   lateUnrelated,
 		LateCutoff:            externalRefHistoryAt(10),
 		TieCutoff:             externalRefHistoryAt(7),
+		OutOfOrderBefore:      externalRefHistoryAt(13),
+		OutOfOrderChild:       externalRefHistoryAt(14),
+		OutOfOrderPast:        externalRefHistoryAt(16),
 	}
 }
 
@@ -242,7 +271,10 @@ func AssertPreviousExternalRefsParity(t *testing.T, ctx context.Context, store P
 // commit carries the merged issue's row (dolt_history_issues has one row per
 // commit per id, changed or not), so the latest qualifying row is day 8's RA,
 // the same value the day-8 snapshot holds. BuildExternalRefHistoryScenario
-// has already checked both snapshots hold RA.
+// has already checked both snapshots hold RA. This corrects the approved
+// design's discriminator, which expected RB at the day-10 cutoff: the day-8
+// commit's RA row makes RA the right answer there, so the late-merge case
+// is checked at day 5.5, where RB is the latest qualifying row.
 func AssertExternalRefHistoryDiscriminator(t *testing.T, ctx context.Context, store PreviousExternalRefsStore, scenario *ExternalRefHistoryScenario, prefix string) {
 	t.Helper()
 	id := scenario.IDs["merged"]
@@ -264,6 +296,41 @@ func AssertExternalRefHistoryDiscriminator(t *testing.T, ctx context.Context, st
 		}
 		if got, ok := batch[id]; !ok || got != single {
 			t.Errorf("%s: PreviousExternalRefs[%s] = (%q, %t), want the per-issue answer %q", check.name, id, got, ok, single)
+		}
+	}
+}
+
+// AssertExternalRefHistoryOutOfOrderMerge pins the out-of-order merge on
+// store: before both of the issue's rows nothing qualifies, at the side
+// commit's date (a day before its parent) its RN row is the latest
+// qualifying one, and past the parent's date the parent's RN-base row wins
+// back, though HEAD holds RN. Both reads must agree at every step.
+func AssertExternalRefHistoryOutOfOrderMerge(t *testing.T, ctx context.Context, store PreviousExternalRefsStore, scenario *ExternalRefHistoryScenario, prefix string) {
+	t.Helper()
+	id := scenario.IDs["outoforder"]
+	for _, check := range []struct {
+		name    string
+		cutoff  time.Time
+		wantRef string // "" means not found
+	}{
+		{"before both rows", scenario.OutOfOrderBefore, ""},
+		{"at the side commit dated before its parent", scenario.OutOfOrderChild, "RN"},
+		{"past the parent", scenario.OutOfOrderPast, "RN-base"},
+	} {
+		want := ""
+		if check.wantRef != "" {
+			want = scenario.Ref(prefix, check.wantRef)
+		}
+		single, found, err := store.PreviousExternalRef(ctx, id, check.cutoff)
+		if err != nil || found != (want != "") || single != want {
+			t.Fatalf("%s: PreviousExternalRef = (%q, %t, %v), want (%q, %t, nil)", check.name, single, found, err, want, want != "")
+		}
+		batch, err := store.PreviousExternalRefs(ctx, []string{id}, check.cutoff)
+		if err != nil {
+			t.Fatalf("%s: PreviousExternalRefs: %v", check.name, err)
+		}
+		if got, ok := batch[id]; ok != found || got != single {
+			t.Errorf("%s: PreviousExternalRefs[%s] = (%q, %t), want the per-issue answer (%q, %t)", check.name, id, got, ok, single, found)
 		}
 	}
 }

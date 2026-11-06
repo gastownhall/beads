@@ -41,4 +41,5 @@ func TestPreviousExternalRefsMatchesPerIssueLookup(t *testing.T) {
 
 	testutil.AssertPreviousExternalRefsParity(t, ctx, te.store, scenario, "perh")
 	testutil.AssertExternalRefHistoryDiscriminator(t, ctx, te.store, scenario, "perh")
+	testutil.AssertExternalRefHistoryOutOfOrderMerge(t, ctx, te.store, scenario, "perh")
 }
