@@ -625,3 +625,122 @@ func TestRemoteMigrateGateAdoptAgentDirective(t *testing.T) {
 		}
 	}
 }
+
+// TestRemoteMigrateGateNonAdoptGuidanceUnchanged guards the refusals the
+// adopt-recipe change (bd-bt60zz, #6687) must not touch: the data-behind stop
+// keeps its single pull remedy (plus the shared consent step), shared-no-remote
+// keeps its verb consent, and the blunt stop keeps its designated-migrator
+// branch, option ids, escape hint and closing note.
+func TestRemoteMigrateGateNonAdoptGuidanceUnchanged(t *testing.T) {
+	ids := func(opts []GateOption) []string {
+		var out []string
+		for _, o := range opts {
+			out = append(out, o.ID)
+		}
+		return out
+	}
+	noAdoptRecipe := func(t *testing.T, e *RemoteMigrateGateError) {
+		t.Helper()
+		all := e.UserMessage() + e.AgentDirective()
+		for _, o := range e.Options() {
+			all += o.When + o.Risk + strings.Join(o.Commands, "\n")
+		}
+		for _, banned := range []string{"embeddeddolt.pre-adopt", "mkdir -p .beads/backup", "data_dir"} {
+			if strings.Contains(all, banned) {
+				t.Errorf("non-adopt refusal gained adopt-recipe text %q:\n%s", banned, all)
+			}
+		}
+	}
+
+	t.Run("data-behind", func(t *testing.T) {
+		for _, tc := range []struct {
+			name             string
+			shared, proxied  bool
+			wantIDs          []string
+			wantFirstCommand string
+		}{
+			{"plain", false, false, []string{"pull-first"}, DataBehindRemedyCommand},
+			{"shared", true, false, []string{"pull-first", "migrate-shared-after-pulling"}, DataBehindRemedyCommand},
+			{"proxied", true, true, []string{"pull-first-on-server-host", "migrate-shared-after-pulling"}, DataBehindRemedyCommand},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				e := &RemoteMigrateGateError{CurrentVersion: 66, LatestVersion: 67, Pending: 1,
+					FallbackReason: fallbackReasonDataBehind, Shared: tc.shared, Proxied: tc.proxied, ServerMode: tc.shared && !tc.proxied}
+				if !e.IsDataBehind() {
+					t.Fatal("fixture is not the data-behind stop")
+				}
+				opts := e.Options()
+				if got := ids(opts); !slices.Equal(got, tc.wantIDs) {
+					t.Errorf("option ids = %q, want %q", got, tc.wantIDs)
+				}
+				if !slices.Equal(opts[0].Commands, []string{tc.wantFirstCommand}) {
+					t.Errorf("pull option commands = %q", opts[0].Commands)
+				}
+				if tc.shared && !slices.Equal(opts[1].Commands, []string{SharedConsentCommandForced}) {
+					t.Errorf("consent option commands = %q, want %q", opts[1].Commands, SharedConsentCommandForced)
+				}
+				if e.EscapeHint() != "bd migrate --force" {
+					t.Errorf("EscapeHint = %q", e.EscapeHint())
+				}
+				if !strings.Contains(e.UserMessage(), "Pull first — that is the whole remedy:") {
+					t.Errorf("data-behind body lost its pull-first remedy:\n%s", e.UserMessage())
+				}
+				noAdoptRecipe(t, e)
+			})
+		}
+	})
+
+	t.Run("shared-no-remote", func(t *testing.T) {
+		e := &RemoteMigrateGateError{CurrentVersion: 66, LatestVersion: 67, Pending: 1, Decision: gateDecisionSharedNoRemote, Shared: true, ServerMode: true}
+		opts := e.Options()
+		if got := ids(opts); !slices.Equal(got, []string{"migrate-shared"}) {
+			t.Errorf("option ids = %q", got)
+		}
+		if !slices.Equal(opts[0].Commands, []string{SharedConsentCommand}) {
+			t.Errorf("commands = %q", opts[0].Commands)
+		}
+		if e.EscapeHint() != SharedConsentCommand {
+			t.Errorf("EscapeHint = %q, want %q", e.EscapeHint(), SharedConsentCommand)
+		}
+		if !strings.Contains(e.AgentDirective(), "do NOT auto-run the migration") {
+			t.Errorf("directive lost its consent requirement: %s", e.AgentDirective())
+		}
+		noAdoptRecipe(t, e)
+	})
+
+	t.Run("blunt designated migrator", func(t *testing.T) {
+		e := &RemoteMigrateGateError{CurrentVersion: 53, LatestVersion: 67, Pending: 14, FallbackReason: fallbackReasonOptedOut}
+		opts := e.Options()
+		if got := ids(opts); !slices.Equal(got, []string{"migrate", "adopt"}) {
+			t.Errorf("option ids = %q", got)
+		}
+		if !slices.Equal(opts[0].Commands, []string{"bd migrate --force", "bd dolt push"}) {
+			t.Errorf("migrate commands = %q", opts[0].Commands)
+		}
+		if opts[0].When != "you are the single designated migrator (only ONE machine, confirmed with the operator) and no other clone has migrated yet" {
+			t.Errorf("migrate precondition changed: %q", opts[0].When)
+		}
+		if e.EscapeHint() != "bd migrate --force" {
+			t.Errorf("EscapeHint = %q", e.EscapeHint())
+		}
+		if e.AgentDirective() != "Coordination decision required: only ONE clone may migrate a shared remote; "+
+			"a second clone migrating independently forks the schema unrecoverably (#4259). "+
+			"Do NOT auto-run a migration — surface remote_migrate_gate.options to the operator and let them choose." {
+			t.Errorf("blunt directive changed: %s", e.AgentDirective())
+		}
+		msg := e.UserMessage()
+		for _, want := range []string{
+			"    • You are the designated migrator (only ONE machine should be): migrate,\n" +
+				"      then publish the migrated database to the remote:\n" +
+				"        bd migrate --force\n" +
+				"        (or " + AllowRemoteMigrateEnv + "=1 bd migrate in scripted/CI use)\n" +
+				"        bd dolt push\n",
+			"  Several machines on one remote? Only ONE migrates. Get every other clone\n",
+			"  Smart gate (#4516): it is disabled (" + SmartGateEnv + "=0).\n",
+		} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("blunt message lost %q:\n%s", want, msg)
+			}
+		}
+	})
+}
