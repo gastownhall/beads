@@ -38,7 +38,9 @@ Every command that writes a title applies the same limit: `bd create`,
 `bd import`, `bd update`, `bd edit`, `bd batch` and `bd rename`. This keeps
 every stored title importable from an export. It does not shorten titles
 already stored over the limit by an older bd; an export holding one fails
-`bd import` until you shorten that title with `bd update <id> --title`.
+`bd import` until you shorten that title with `bd update <id> --title`. Until
+then the issue's other fields stay editable, with the title left out or
+restated exactly as stored.
 
 ## Issue Types
 
