@@ -126,6 +126,28 @@ hooks {
 }
 ```
 
+### Chained Hooks When bd Is Unavailable
+
+`bd hooks run` normally chains to your original hook itself (the
+`<hook>.old` sidecar left beside the managed hook). When `bd` is not on
+`PATH` — a GUI git client, cron, or a stripped-down shell — the installed
+section runs a foreign sidecar directly instead of skipping it, passes the
+hook's arguments and stdin through, and honors its verdict: a chained
+pre-commit or pre-push gate that refuses still blocks the commit or push
+([#6751](https://github.com/gastownhall/beads/issues/6751)). A sidecar that
+is itself bd-owned or delegates back to `bd hooks run` is recognized and
+skipped, so it does not run twice.
+
+Two verdicts are never ambiguous:
+
+- `bd` exiting 3 (database not initialized) is no longer swallowed into a
+  warning-and-continue: the status propagates, so an uninitialized
+  workspace fails the hook visibly instead of silently passing gates.
+- A sidecar exiting 3, 124 or 142 — statuses the hook wrapper reserves for
+  its own "not initialized" and timeout outcomes — is remapped by
+  `bd hooks run` to a plain failure (exit 1) naming the sidecar and its
+  original status, so a reserved status cannot be misread as "continue".
+
 ### Hook Timeout
 
 The hook shim applies a soft deadline to `bd hooks run` when a compatible
@@ -165,13 +187,19 @@ the hook itself returns.
 Already-installed hook sections are not refreshed automatically. After upgrading
 to a release that changed the generated timeout probe — the name-only check,
 the uutils coreutils banner, or the Perl fallback that could not stop `bd`
-([#7753](https://github.com/gastownhall/beads/issues/7753)) — run
+([#7753](https://github.com/gastownhall/beads/issues/7753)) — or the
+chained-sidecar handling and reserved-status behavior from
+[#6751](https://github.com/gastownhall/beads/issues/6751), run
 `bd hooks install` once to refresh
 already-installed canonical hook sections. Automatic generated-policy adoption is
 tracked separately.
 
 When the timeout is reached, beads prints a warning and lets the git
-operation proceed — the commit or push is not blocked.
+operation proceed — with one exception: a gate hook (`pre-commit`,
+`pre-push`) that has a chained `<hook>.old` sidecar refuses with exit 1
+(`outcome of chained <hook>.old is unknown, refusing`), because `bd` was
+stopped mid-run and whether the chained gate passed is unknown
+([#6751](https://github.com/gastownhall/beads/issues/6751)).
 
 ## Conflict Resolution
 

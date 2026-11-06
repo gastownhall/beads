@@ -1208,6 +1208,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Git hooks fail closed when `bd` is unavailable or killed mid-run** —
+  chained gate hooks are no longer skipped or waved through (#6751). The
+  generated hook section wrapped its work in `if command -v bd`, so with bd
+  absent (GUI git clients, cron, stripped-down PATHs) a chained
+  `<hook>.old` gate never ran and its refusal silently passed the commit or
+  push. The section now runs a foreign sidecar itself, with the hook's
+  arguments and stdin forwarded and its verdict honored, while bd-owned or
+  `bd hooks run`-delegating sidecars are recognized and skipped so they
+  cannot run twice or recurse. Two verdict ambiguities are also gone: `bd`
+  exiting 3 (database not initialized) propagates to git instead of being
+  swallowed into a warning-and-continue, and a sidecar exiting 3, 124 or
+  142 — statuses the hook wrapper reserves for its own outcomes — is
+  remapped by `bd hooks run` to a plain failure (exit 1) naming the sidecar
+  and its original status. A gate hook (`pre-commit`, `pre-push`) whose
+  deadline stops `bd` while a chained sidecar exists now refuses (exit 1,
+  `outcome of chained <hook>.old is unknown, refusing`) instead of
+  continuing without beads. Already-installed sections pick up the new
+  policy with one `bd hooks install`.
 - `bd config get` for a config.yaml, git-config or user-global key no longer
   opens the database just because one exists, so it answers from those files
   while the Dolt server is down instead of failing the open (GH#5108). In

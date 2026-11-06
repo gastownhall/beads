@@ -895,6 +895,7 @@ go_test(
         "hooks_export_worktree_test.go",
         "hooks_guard_test.go",
         "hooks_husky_test.go",
+        "hooks_marker_compat_test.go",
         "hooks_marker_skip_test.go",
         "hooks_post_merge_import_test.go",
         "hooks_timeout_process_test.go",

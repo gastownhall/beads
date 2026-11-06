@@ -579,10 +579,22 @@ A process that ignores `TERM` can outlive the hook. Both helpers run `bd`
 outside the terminal's foreground process group, so a chained hook that reads
 from the terminal is stopped until the deadline ends it.
 
+When the deadline fires on a gate hook (`pre-commit`, `pre-push`) that has a
+chained `<hook>.old` sidecar, the hook now refuses with exit 1 —
+`beads: hook 'pre-commit' timed out after 300s — outcome of chained
+pre-commit.old is unknown, refusing` — instead of continuing, because `bd`
+was stopped mid-run and whether the chained gate passed is unknown
+([#6751](https://github.com/gastownhall/beads/issues/6751)). The fix is the
+same — raise `BEADS_HOOK_TIMEOUT`, or find what in the chained pipeline
+hangs — but the commit or push no longer proceeds past an unfinished gate.
+Without a chained sidecar the deadline keeps its warn-and-continue outcome.
+
 Already-installed hook sections are not refreshed automatically. After upgrading
 to a version that changed the timeout probe — the name-only check, the uutils
 coreutils banner, or the Perl fallback that could not stop `bd`
-([#7753](https://github.com/gastownhall/beads/issues/7753)) — run
+([#7753](https://github.com/gastownhall/beads/issues/7753)) — or the
+chained-sidecar handling and reserved-status behavior from
+[#6751](https://github.com/gastownhall/beads/issues/6751), run
 `bd hooks install` once to refresh existing canonical sections.
 
 ### Permission denied on git hooks
