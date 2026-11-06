@@ -1,12 +1,15 @@
 package routing
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/gitenv"
@@ -39,9 +42,20 @@ const (
 // 1. Check git config for beads.role setting (preferred source of truth)
 // 2. Fall back to URL heuristic with deprecation warning (graceful degradation)
 // 3. Default to maintainer for local projects (no remote configured)
+//
+// A beads.role read that fails (a malformed or unreadable config file, or any
+// other git diagnostic) is not absence: DetectUserRole returns an empty role
+// and the error before either fallback, because the URL heuristic would answer
+// a failed authority read with a guessed role, Maintainer included. Only an
+// unavailable probe (no git executable, or a repoPath that does not exist)
+// keeps the optional fallback, as it always has.
 func DetectUserRole(repoPath string) (UserRole, error) {
 	// First check for explicit role in git config (preferred source)
-	if role, ok := roleFromGitConfig(repoPath); ok {
+	role, ok, err := roleFromGitConfig(repoPath)
+	if err != nil {
+		return "", err
+	}
+	if ok {
 		return role, nil
 	}
 
@@ -53,7 +67,11 @@ func DetectUserRole(repoPath string) (UserRole, error) {
 	// consistent with the git-config lookup above. (GH#2950)
 	if _, isSecondary := git.JJSecondaryWorkspaceRootFrom(repoPath); isSecondary {
 		if primaryRoot, err := git.GetJJPrimaryWorkspaceRootFrom(repoPath); err == nil {
-			if role, ok := roleFromGitConfig(primaryRoot); ok {
+			role, ok, err := roleFromGitConfig(primaryRoot)
+			if err != nil {
+				return "", err
+			}
+			if ok {
 				return role, nil
 			}
 			repoPath = primaryRoot
@@ -69,20 +87,59 @@ func DetectUserRole(repoPath string) (UserRole, error) {
 }
 
 // roleFromGitConfig reads beads.role from the git config of repoPath.
-// Returns (role, true) only for a valid explicit value; (_, false) when the
-// config is unset, git is unavailable, or the value is not a recognized role.
-func roleFromGitConfig(repoPath string) (UserRole, bool) {
+// Returns (role, true, nil) only for a valid explicit value, and
+// (_, false, nil) when the config is unset, the probe is unavailable (see
+// roleProbeUnavailable), or the value is not a recognized role. Any other
+// failed read is returned as an error.
+func roleFromGitConfig(repoPath string) (UserRole, bool, error) {
 	output, err := gitCommandRunner(repoPath, "config", "--get", "beads.role")
-	if err != nil {
-		return "", false
+	value, present, readErr := git.ClassifyConfigGet(output, err)
+	if readErr != nil {
+		if roleProbeUnavailable(repoPath, err) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("read beads.role in %s: %w", displayRepoPath(repoPath), readErr)
 	}
-	switch UserRole(strings.TrimSpace(string(output))) {
+	if !present {
+		return "", false, nil
+	}
+	switch UserRole(value) {
 	case Maintainer:
-		return Maintainer, true
+		return Maintainer, true, nil
 	case Contributor:
-		return Contributor, true
+		return Contributor, true, nil
 	}
-	return "", false
+	return "", false, nil
+}
+
+// roleProbeUnavailable reports whether a failed beads.role read means the
+// probe could not run at all, which DetectUserRole documents as an optional
+// fallback rather than a failure: git is not installed, or repoPath does not
+// exist (or is not a directory). It stays narrow on purpose. Git's own exit
+// statuses, permission denial and cancellation are read failures.
+func roleProbeUnavailable(repoPath string, err error) bool {
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return false
+	}
+	if errors.Is(err, exec.ErrNotFound) {
+		return true
+	}
+	if repoPath == "" {
+		return false
+	}
+	info, statErr := os.Stat(repoPath)
+	if statErr != nil {
+		return errors.Is(statErr, fs.ErrNotExist) || errors.Is(statErr, syscall.ENOTDIR)
+	}
+	return !info.IsDir()
+}
+
+func displayRepoPath(repoPath string) string {
+	if repoPath == "" {
+		return "."
+	}
+	return repoPath
 }
 
 // detectFromURL uses remote URL patterns to infer user role.
