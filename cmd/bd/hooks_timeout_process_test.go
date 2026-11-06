@@ -204,6 +204,7 @@ func TestGeneratedHookTimeoutProcessBoundary(t *testing.T) {
 	t.Run("real Perl supervisor forwards signals to bd's process group", testHookProcessRealPerlForwardsSignals)
 	t.Run("real Perl supervisor preserves argv and status", testHookProcessRealPerlStatuses)
 	t.Run("deadline with a foreign gate refuses; without one it continues", testHookProcessDeadlineRefusal)
+	t.Run("bd present delegates and never runs the chain itself", testHookProcessBDPresentDelegates)
 	t.Run("Windows checkout rejects System32 timeout", testHookProcessWindowsSystemTimeoutCheckout)
 }
 
@@ -1097,8 +1098,10 @@ func TestGeneratedHookChainWhenBdMissingRealGit(t *testing.T) {
 }
 
 // hookChainFallbackCase drives the generated hook section as a real script
-// (the shell is handed the script file, so $0 is the hook path) with bd absent
-// from PATH — the GH#6751 environment. The chain, stdin and trailing-content
+// (the shell is handed the script file, so $0 is the hook path), by default
+// with bd absent from PATH — the GH#6751 environment. A non-empty bdBody
+// instead puts a scripted bd on PATH (exiting per bdExit), for the
+// bd-present delegation controls. The chain, stdin and trailing-content
 // fixtures report through CHAIN_LOG, CHAIN_STDIN and TRAILING_LOG.
 type hookChainFallbackCase struct {
 	usePOSIXSh  bool // run under the POSIX shell instead of bash
@@ -1106,6 +1109,8 @@ type hookChainFallbackCase struct {
 	hookName    string
 	hookDirName string // directory name under the temp dir; may contain spaces
 	invokeBase  bool   // invoke the hook by bare file name (slash-less $0)
+	bdBody      string // scripted bd on PATH; empty keeps bd absent
+	bdExit      int    // exported to the bd fixture as HOOK_TEST_BD_EXIT
 	chainBody   string // written to <hook>.old; absent when chainMode is 0
 	chainMode   os.FileMode
 	trailing    string
@@ -1175,6 +1180,10 @@ func runGeneratedHookChainFallback(t *testing.T, tc hookChainFallbackCase) hookC
 	shellArgs = append(shellArgs, script)
 	shellArgs = append(shellArgs, tc.args...)
 
+	pathDir := t.TempDir()
+	if tc.bdBody != "" {
+		writeHookProcessFixture(t, pathDir, "bd", tc.bdBody)
+	}
 	shellPath := hookProcessShell(t)
 	commandArgs := append([]string{"--noprofile", "--norc"}, shellArgs...)
 	if tc.usePOSIXSh {
@@ -1184,11 +1193,14 @@ func runGeneratedHookChainFallback(t *testing.T, tc hookChainFallbackCase) hookC
 	cmd := exec.Command(shellPath, commandArgs...)
 	cmd.Dir = hooksDir
 	cmd.Env = append(hookProcessEnv(),
-		"PATH="+t.TempDir(),
+		"PATH="+pathDir,
 		"CHAIN_LOG="+chainLog,
 		"CHAIN_STDIN="+chainStdin,
 		"TRAILING_LOG="+trailingLog,
 		"CHAIN_EXIT="+strconv.Itoa(tc.chainExit))
+	if tc.bdBody != "" {
+		cmd.Env = append(cmd.Env, "HOOK_TEST_BD_EXIT="+strconv.Itoa(tc.bdExit))
+	}
 	cmd.Stdin = strings.NewReader(tc.stdin)
 	started := time.Now()
 	output, err := cmd.CombinedOutput()
@@ -1691,5 +1703,62 @@ func testHookProcessDeadlineRefusal(t *testing.T) {
 				t.Errorf("the wrapper ran the chained gate itself\n%s", result.logs.chain)
 			}
 		})
+	}
+}
+
+// testHookProcessBDPresentDelegates pins the controls the GH#6751 rework must
+// not disturb: with bd on PATH the section delegates to bd — the hook's
+// arguments handed through to `bd hooks run`, bd's status propagated,
+// trailing user content gated on success — and never runs the chained gate
+// itself, even with a foreign chain sitting beside the hook. Chaining while
+// bd is present is bd's job (runChainedHook); a chain-log entry here would
+// mean the section had run the user's gate a second time.
+func testHookProcessBDPresentDelegates(t *testing.T) {
+	shells := []struct {
+		name       string
+		usePOSIXSh bool
+		setEu      bool
+	}{
+		{name: "bash"},
+		{name: "bash -eu", setEu: true},
+		{name: "POSIX sh", usePOSIXSh: true},
+	}
+	for _, shell := range shells {
+		for _, status := range []struct {
+			name   string
+			bdExit int
+		}{{name: "success", bdExit: 0}, {name: "failure", bdExit: 7}} {
+			t.Run(shell.name+" preserves delegation on "+status.name, func(t *testing.T) {
+				result := runGeneratedHookChainFallback(t, hookChainFallbackCase{
+					usePOSIXSh: shell.usePOSIXSh,
+					setEu:      shell.setEu,
+					hookName:   "pre-push",
+					bdBody:     hookProcessBDStub,
+					bdExit:     status.bdExit,
+					chainBody:  hookChainArgvChain,
+					chainMode:  0o755,
+					args:       []string{"main topic", "-- option with space"},
+				})
+				assertHookProcessBDInvocation(t, result.output, "pre-push", "main topic", "-- option with space")
+				if result.logs.chain != "" {
+					t.Errorf("section ran the chained gate itself while bd was present:\n%s", result.logs.chain)
+				}
+				if status.bdExit == 0 {
+					if result.exitCode != 0 {
+						t.Errorf("exit = %d, want 0 after bd success\n%s", result.exitCode, result.output)
+					}
+					if !strings.Contains(result.logs.trailing, "trailing-ran") {
+						t.Errorf("trailing user content did not run after bd success\n%s", result.output)
+					}
+				} else {
+					if result.exitCode != status.bdExit {
+						t.Errorf("exit = %d, want %d propagated from bd\n%s", result.exitCode, status.bdExit, result.output)
+					}
+					if result.logs.trailing != "" {
+						t.Errorf("trailing user content ran after bd failure\n%s", result.output)
+					}
+				}
+			})
+		}
 	}
 }
