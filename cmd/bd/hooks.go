@@ -1890,7 +1890,7 @@ func runChainedHook(hookName string, args []string) int {
 
 	if err := cmd.Run(); err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
-			return exitErr.ExitCode()
+			return chainedHookExitCode(hookName, exitErr.ExitCode())
 		}
 		// Other error - treat as failure
 		fmt.Fprintf(os.Stderr, "Warning: chained hook %s failed: %v\n", hookName, err)
@@ -1898,6 +1898,21 @@ func runChainedHook(hookName string, args []string) int {
 	}
 
 	return 0
+}
+
+// chainedHookExitCode maps a chained hook's exit status to the status bd hooks
+// run returns. The generated section reads 124 and 142 from bd as its own
+// deadline, and sections installed before GH#6751 read 3 as an uninitialized
+// database; either way a chained gate's failure would pass as a skip. Those
+// statuses become 1, with the original reported on stderr; every other status
+// is returned unchanged.
+func chainedHookExitCode(hookName string, code int) int {
+	switch code {
+	case 3, 124, 142:
+		fmt.Fprintf(os.Stderr, "Warning: chained hook %s.old exited %d, which the beads hook section reserves for a skip or timeout; failing with exit 1 instead\n", hookName, code)
+		return 1
+	}
+	return code
 }
 
 // runPreCommitHook runs chained hooks before commit.
