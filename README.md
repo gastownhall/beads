@@ -350,6 +350,9 @@ multi-tenant case. This surface is EXPERIMENTAL: pin an exact beads version.
 
 `bd rules audit` scans `.claude/rules/*.md` for contradictions and
 near-duplicates; `bd rules compact` merges related rules into one composite.
+A missing rules directory audits as empty; a path that is present but is not
+a directory — on Windows a file there can read to directory listings as
+missing — is an error, not an empty audit.
 
 ```bash
 bd rules compact --auto           # Preview: composite, dropped lines, backups, deletes

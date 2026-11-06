@@ -581,12 +581,21 @@ func CompactRules(rules []RuleFile, groupLabel string) (string, error) {
 	return sb.String(), nil
 }
 
+// readRulesDir is the directory read at RunAudit's boundary, os.ReadDir;
+// tests replace it to inject a read error there.
+var readRulesDir = os.ReadDir
+
 // RunAudit is the top-level orchestrator for `bd rules audit`.
 func RunAudit(rulesDir string, threshold float64) (*AuditResult, error) {
-	entries, err := os.ReadDir(rulesDir)
+	entries, err := readRulesDir(rulesDir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return &AuditResult{}, nil
+			// Windows classifies a ReadDir of an ordinary file as not-exist,
+			// so only a Stat that misses the directory too audits as empty;
+			// otherwise the read error below reports the unreadable path.
+			if _, statErr := os.Stat(rulesDir); os.IsNotExist(statErr) {
+				return &AuditResult{}, nil
+			}
 		}
 		return nil, fmt.Errorf("read rules directory: %w", err)
 	}

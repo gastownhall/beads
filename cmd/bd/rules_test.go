@@ -2,7 +2,9 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -553,6 +555,72 @@ func TestRulesRunAudit_Integration(t *testing.T) {
 	if len(result.MergeCandidates) == 0 {
 		t.Error("expected at least 1 merge group for agent rules")
 	}
+}
+
+// TestRulesRunAudit_NonDirectoryPath pins RunAudit's behavior for a rules
+// path that is present but is not a directory (GH#6972 site 2). Windows
+// classifies a ReadDir of an ordinary file as not-exist, so the native
+// subtest is the Windows falsifier: on Windows it fails without the Stat
+// confirmation — audit reported an empty success for a file — and passes
+// with it. On Linux, where ReadDir of a file is ENOTDIR, the injected
+// not-exist subtest carries that red/green pair.
+func TestRulesRunAudit_NonDirectoryPath(t *testing.T) {
+	const payload = "rules path payload"
+	writeRulesFile := func(t *testing.T) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "rules")
+		if err := os.WriteFile(path, []byte(payload), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	// requireReadError fails unless err is RunAudit's read error for path
+	// with a nil result, wrapping want when want is not nil, and the file
+	// still holds its bytes.
+	requireReadError := func(t *testing.T, path string, result *AuditResult, err error, want error) {
+		t.Helper()
+		if err == nil {
+			t.Fatalf("RunAudit(%q) = (%+v, nil), want the read error", path, result)
+		}
+		if result != nil {
+			t.Errorf("result = %+v, want nil with an error", result)
+		}
+		if !strings.Contains(err.Error(), "read rules directory:") {
+			t.Errorf("error = %q, want the read rules directory: prefix", err)
+		}
+		if want != nil && !errors.Is(err, want) {
+			t.Errorf("error = %v, want it to wrap the read error %v", err, want)
+		}
+		if got, readErr := os.ReadFile(path); readErr != nil || string(got) != payload {
+			t.Errorf("audit must not touch the file: read err = %v, bytes = %q", readErr, got)
+		}
+	}
+	injectRead := func(t *testing.T, path string, err error) {
+		t.Helper()
+		prev := readRulesDir
+		readRulesDir = func(string) ([]os.DirEntry, error) { return nil, err }
+		t.Cleanup(func() { readRulesDir = prev })
+	}
+
+	t.Run("ordinary file", func(t *testing.T) {
+		path := writeRulesFile(t)
+		result, err := RunAudit(path, 0.6)
+		requireReadError(t, path, result, err, nil)
+	})
+	t.Run("injected not-exist read error with the file present", func(t *testing.T) {
+		path := writeRulesFile(t)
+		injected := &fs.PathError{Op: "open", Path: path, Err: fs.ErrNotExist}
+		injectRead(t, path, injected)
+		result, err := RunAudit(path, 0.6)
+		requireReadError(t, path, result, err, injected)
+	})
+	t.Run("injected other read error still propagates", func(t *testing.T) {
+		path := writeRulesFile(t)
+		injected := &fs.PathError{Op: "open", Path: path, Err: fs.ErrPermission}
+		injectRead(t, path, injected)
+		result, err := RunAudit(path, 0.6)
+		requireReadError(t, path, result, err, injected)
+	})
 }
 
 func TestRulesRunAudit_NonexistentDir(t *testing.T) {
