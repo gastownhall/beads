@@ -584,3 +584,44 @@ func TestRemoteMigrateGateServerAdoptGuidance(t *testing.T) {
 		}
 	}
 }
+
+// TestRemoteMigrateGateAdoptAgentDirective pins the agent-facing directive of
+// the three adopting decisions (bd-bt60zz, #6687): it must say bootstrap alone
+// changes nothing on an existing database and the database is moved aside
+// first, keep the surface-to-the-operator / do-not-auto-run contract, and no
+// longer claim the automatic fast-forward has not landed (it has: the smart
+// gate runs it before ever returning adopt-ff).
+func TestRemoteMigrateGateAdoptAgentDirective(t *testing.T) {
+	for _, tc := range adoptRecoveryCases() {
+		if tc.name == "blunt" {
+			continue
+		}
+		for _, server := range []bool{false, true} {
+			name := tc.name + "/embedded"
+			if server {
+				name = tc.name + "/server"
+			}
+			t.Run(name, func(t *testing.T) {
+				e := *tc.err
+				e.ServerMode = server
+				d := e.AgentDirective()
+				for _, want := range []string{"never replaces an existing database", "moved aside first", "remote_migrate_gate.options", "operator", "do NOT auto-run"} {
+					if !strings.Contains(d, want) {
+						t.Errorf("directive is missing %q: %s", want, d)
+					}
+				}
+				for _, banned := range []string{"until an automatic fast-forward lands", "re-clones and replaces", "bd migrate --force"} {
+					if strings.Contains(d, banned) {
+						t.Errorf("directive still says %q: %s", banned, d)
+					}
+				}
+				if server && !strings.Contains(d, "serving host") {
+					t.Errorf("server directive does not place the move on the serving host: %s", d)
+				}
+				if !server && strings.Contains(d, "serving host") {
+					t.Errorf("embedded directive talks about a serving host: %s", d)
+				}
+			})
+		}
+	}
+}
