@@ -703,3 +703,128 @@ VALUES ('`+rgIssueKept+`', 'updated', 'clone', '2026-07-30 00:02:00', 'rg-evt-ne
 		})
 	})
 }
+
+// TestRecoveryGuideFinishRetrackRepairsOldOptionalState is AC-5: a source
+// and clone recovered with the old optional command carry the
+// tracked-but-ignored state; the guide's finish command, run on the source
+// first and on the clone before it pulls, removes the ignore rule from
+// HEAD, commits the pending events changes, and leaves subsequent writes
+// and merges clean.
+func TestRecoveryGuideFinishRetrackRepairsOldOptionalState(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+
+	// The old optional command, verbatim from the guide version that
+	// shipped with v1.2.2: it force-adds the re-created table and never
+	// stages the ignore-rule removal.
+	const oldOptionalRetrack = `DELETE FROM dolt_ignore WHERE pattern = 'events'; CALL DOLT_ADD('-f', 'events'); CALL DOLT_COMMIT('-m', 'recovery: re-track events table', '--author', 'bd recovery <recovery@beads.invalid>')`
+
+	src := rgSeedPreFlip(t)
+	rgFlip(t, src, rgEvtLocal)
+	src.withConn(t, func(conn *sql.Conn) {
+		if err := rgExecGuideSQL(t, ctx, conn, rgAnchorRollback); err != nil {
+			t.Fatalf("guide step 4 (cursor rollback): %v", err)
+		}
+		if _, err := conn.ExecContext(ctx, oldOptionalRetrack); err != nil {
+			t.Fatalf("old optional re-track command: %v", err)
+		}
+		// The step-5 restore must refuse this history (its guard excludes
+		// the old command's commit) and change nothing.
+		before := rgEventIDs(t, ctx, conn, "events")
+		if err := rgExecGuideSQL(t, ctx, conn, rgAnchorRestore); err == nil {
+			t.Fatal("the guide's step 5 ran on an old-optional-retracked store; its guard must refuse that history")
+		}
+		if after := rgEventIDs(t, ctx, conn, "events"); !equalStringSlices(after, before) {
+			t.Fatal("the refused step 5 changed the events rows")
+		}
+	})
+	remote := rgRemoteDir(t)
+	src.rgAddOriginPush(t, remote)
+
+	clone := rgClone(t, remote)
+	rgIssueWrite(t, clone, "rg-w1", "rg-evt-w1")
+	// A write on the source too: its pending events row is exactly what the
+	// finish command commits below, giving origin an events-touching commit
+	// for the wedged clone's pull to meet.
+	rgIssueWrite(t, src, "rg-s5", "rg-evt-s5")
+	clone.withConn(t, func(conn *sql.Conn) {
+		// The wedge, pinned: the write left the tracked table dirty, and
+		// the pull refuses until the finish command runs.
+		dirty, err := statusTables(ctx, conn)
+		if err != nil {
+			t.Fatalf("read dolt_status: %v", err)
+		}
+		if !containsString(dirty, "events") {
+			t.Fatalf("clone dolt_status = %v, want a pending events change (the tracked-but-ignored wedge)", dirty)
+		}
+	})
+
+	// The finish command: source first. It commits the pending events
+	// change and the ignore-rule removal together.
+	src.withConn(t, func(conn *sql.Conn) {
+		if err := rgExecGuideSQL(t, ctx, conn, rgAnchorFinishRetrk); err != nil {
+			t.Fatalf("guide finish command on the source: %v", err)
+		}
+		rgRequireNoEventsIgnoreRule(t, ctx, conn)
+		rgRequireCleanStatus(t, ctx, conn)
+		mustExecOn(t, ctx, conn, "CALL DOLT_PUSH('origin', 'main')")
+	})
+
+	// While the clone is still wedged, its pull refuses: the merge would
+	// overwrite its uncommitted events change.
+	clone.withConn(t, func(conn *sql.Conn) {
+		if err := versioncontrolops.Pull(ctx, conn, "origin", "main", ""); err == nil {
+			t.Fatal("the clone's pull succeeded while its events change was still pending; the wedge is not reproduced")
+		}
+		rgRequireNoOpenMerge(t, ctx, conn)
+	})
+
+	// The clone finishes, then pulls: both pending events changes are
+	// committed and the merge lands cleanly.
+	clone.withConn(t, func(conn *sql.Conn) {
+		if err := rgExecGuideSQL(t, ctx, conn, rgAnchorFinishRetrk); err != nil {
+			t.Fatalf("guide finish command on the clone: %v", err)
+		}
+		rgRequireNoEventsIgnoreRule(t, ctx, conn)
+		rgRequireCleanStatus(t, ctx, conn)
+		if err := versioncontrolops.Pull(ctx, conn, "origin", "main", ""); err != nil {
+			t.Fatalf("clone pull after both finish commands: %v", err)
+		}
+		rgRequireNoOpenMerge(t, ctx, conn)
+		rgRequireCleanStatus(t, ctx, conn)
+		rgRequireEventIDs(t, ctx, conn, "events", rgEvtDoomedA, rgEvtDoomedB, rgEvtKept, rgEvtLocal, "rg-evt-s5", "rg-evt-w1")
+	})
+
+	// The subsequent write and merge stay clean.
+	rgIssueWrite(t, clone, "rg-w2", "rg-evt-w2")
+	clone.rgAddOriginPush(t, remote)
+	src.withConn(t, func(conn *sql.Conn) {
+		if err := versioncontrolops.Pull(ctx, conn, "origin", "main", ""); err != nil {
+			t.Fatalf("source pull after the clone's subsequent write: %v", err)
+		}
+		rgRequireNoOpenMerge(t, ctx, conn)
+		rgRequireCleanStatus(t, ctx, conn)
+		rgRequireEventIDs(t, ctx, conn, "events", rgEvtDoomedA, rgEvtDoomedB, rgEvtKept, rgEvtLocal, "rg-evt-s5", "rg-evt-w1", "rg-evt-w2")
+	})
+}
+
+func containsString(list []string, want string) bool {
+	for _, s := range list {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}
+
+func equalStringSlices(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
