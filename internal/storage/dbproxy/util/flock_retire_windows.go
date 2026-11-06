@@ -39,11 +39,23 @@ func openLockHandle(lockPath string, access uint32, disposition uint32) (windows
 // openRetirable opens the lock file for TryRetirableLock. The lease handle
 // never deletes through itself (no DELETE access); it only shares delete so
 // that Retire's short-lived handle can, and OPEN_ALWAYS matches TryLock's
-// create-if-missing behavior.
+// create-if-missing behavior. Because the handle opens the reparse point
+// itself, its attributes identify a final symlink or junction: such a path
+// is refused rather than locked, so retirement can never be aimed through a
+// link at some other file.
 func openRetirable(lockPath string) (*os.File, error) {
 	h, err := openLockHandle(lockPath, windows.GENERIC_READ|windows.GENERIC_WRITE, windows.OPEN_ALWAYS)
 	if err != nil {
 		return nil, err
+	}
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(h, &info); err != nil {
+		_ = windows.CloseHandle(h)
+		return nil, fmt.Errorf("inspecting lock file: %w", err)
+	}
+	if info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+		_ = windows.CloseHandle(h)
+		return nil, errors.New("lock path is a reparse point (symlink or junction)")
 	}
 	return os.NewFile(uintptr(h), lockPath), nil
 }
