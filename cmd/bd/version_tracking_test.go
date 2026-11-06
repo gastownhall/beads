@@ -3,11 +3,15 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/git"
+	"github.com/steveyegge/beads/internal/storage/schema"
 )
 
 func TestGetVersionsSince(t *testing.T) {
@@ -272,10 +276,12 @@ func TestTrackBdVersion_UpgradeDetection(t *testing.T) {
 		t.Errorf("previousVersion = %q, want %q", previousVersion, "0.22.0")
 	}
 
-	// Should have updated .local_version to current version
+	// Should NOT have updated .local_version yet: the upgrade's marker write
+	// is deferred to the caller and settles only with the version-bump
+	// maintenance (#6929). See TestTrackBdVersion_UpgradeDefersMarkerPersist.
 	localVersion := readLocalVersion(localVersionPath)
-	if localVersion != Version {
-		t.Errorf(".local_version = %q, want %q", localVersion, Version)
+	if localVersion != "0.22.0" {
+		t.Errorf(".local_version = %q, want the stale %q kept until maintenance settles", localVersion, "0.22.0")
 	}
 }
 
@@ -407,8 +413,173 @@ func TestTrackBdVersion_HeadStampChangeDetectedAsUpgrade(t *testing.T) {
 			if previousVersion != wantPrevious {
 				t.Errorf("previousVersion = %q, want %q", previousVersion, wantPrevious)
 			}
-			if got := readLocalVersion(localVersionPath); got != tt.binVersion {
-				t.Errorf(".local_version = %q, want %q", got, tt.binVersion)
+			// An upgrade defers its marker write to the caller (#6929); every
+			// other change keeps the immediate write.
+			wantMarker := tt.binVersion
+			if tt.wantDetected {
+				wantMarker = tt.lastVersion
+			}
+			if got := readLocalVersion(localVersionPath); got != wantMarker {
+				t.Errorf(".local_version = %q, want %q", got, wantMarker)
+			}
+		})
+	}
+}
+
+// TestTrackBdVersion_UpgradeDefersMarkerPersist pins the #6929 sequencing:
+// detecting an upgrade must not itself consume the one-shot .local_version
+// signal. The marker may advance only when the caller settles the
+// version-bump maintenance; until then the stale marker is what makes the
+// next command retry the reconciliation instead of skipping it and hitting
+// raw table errors.
+func TestTrackBdVersion_UpgradeDefersMarkerPersist(t *testing.T) {
+	localVersionPath := newTrackingWorkspace(t, "1.1.0", "1.3.0")
+
+	trackBdVersion()
+
+	if !versionUpgradeDetected {
+		t.Fatal("an upgrade must still be detected")
+	}
+	if previousVersion != "1.1.0" {
+		t.Fatalf("previousVersion = %q, want %q", previousVersion, "1.1.0")
+	}
+	if got := readLocalVersion(localVersionPath); got != "1.1.0" {
+		t.Fatalf(".local_version = %q after detection, want the stale %q kept until maintenance settles",
+			got, "1.1.0")
+	}
+}
+
+// newVersionBumpWorkspace prepares the minimal .beads the version-bump
+// maintenance needs before its probe/open/reconcile tail: a loadable
+// metadata.json on the Dolt backend, a database path that exists, and a stale
+// marker. The tail itself is driven by the runVersionBumpReconciliation seam.
+func newVersionBumpWorkspace(t *testing.T, lastVersion, binVersion string) (beadsDir, markerPath string) {
+	t.Helper()
+	markerPath = newTrackingWorkspace(t, lastVersion, binVersion)
+	beadsDir = filepath.Dir(markerPath)
+	if err := os.MkdirAll(filepath.Join(beadsDir, "dolt"), 0o750); err != nil {
+		t.Fatalf("create database dir: %v", err)
+	}
+	return beadsDir, markerPath
+}
+
+// runVersionBumpInvocation replays one ordinary command's pre-run sequence
+// against the current workspace: reset the per-process detection globals,
+// detect, maintain, and persist the deferred marker only on settlement.
+func runVersionBumpInvocation(t *testing.T, beadsDir string) {
+	t.Helper()
+	versionUpgradeDetected = false
+	previousVersion = ""
+	pending := trackBdVersion()
+	if autoMigrateOnVersionBump(beadsDir) {
+		pending.persist()
+	}
+}
+
+// stubVersionBumpTail replaces the probe/open/reconcile seam for this test.
+// The stub receives the 1-based attempt number and reports the tail's
+// outcome; the installed counter starts at zero. Tests using it must not run
+// in parallel; the original is restored in cleanup.
+func stubVersionBumpTail(t *testing.T, stub func(attempt int) (settled bool, openErr error)) {
+	t.Helper()
+	orig := runVersionBumpReconciliation
+	t.Cleanup(func() { runVersionBumpReconciliation = orig })
+	versionBumpTailAttempts = 0
+	runVersionBumpReconciliation = func(ctx context.Context, beadsDir string) (bool, error) {
+		versionBumpTailAttempts++
+		return stub(versionBumpTailAttempts)
+	}
+}
+
+// versionBumpTailAttempts counts the attempts of the currently installed
+// stubVersionBumpTail override. A package-level counter keeps the stub
+// signature about outcomes only.
+var versionBumpTailAttempts int
+
+// TestVersionBump_DirtyTablesKeepsMarkerAndRetries proves the #6929 behavior
+// across invocations, not just classification: while the version-bump
+// reconciliation is refused, each command re-detects the upgrade, retries the
+// maintenance and keeps the stale marker; the first success advances the
+// marker, and the next command attempts no maintenance at all.
+func TestVersionBump_DirtyTablesKeepsMarkerAndRetries(t *testing.T) {
+	beadsDir, markerPath := newVersionBumpWorkspace(t, "1.1.0", "1.3.0")
+
+	stubVersionBumpTail(t, func(attempt int) (bool, error) {
+		if attempt <= 2 {
+			// Wrapped the way a real open failure arrives.
+			return false, fmt.Errorf("open %s: %w", beadsDir,
+				&schema.DirtyTablesError{Tables: []string{"issues", "wisps"}})
+		}
+		return true, nil
+	})
+
+	runVersionBumpInvocation(t, beadsDir)
+	runVersionBumpInvocation(t, beadsDir)
+	if got := readLocalVersion(markerPath); got != "1.1.0" {
+		t.Fatalf("after two refused invocations: .local_version = %q, want the stale %q so each command retries", got, "1.1.0")
+	}
+	if versionBumpTailAttempts != 2 {
+		t.Fatalf("maintenance attempts after two commands = %d, want 2 (one retry per command)", versionBumpTailAttempts)
+	}
+
+	runVersionBumpInvocation(t, beadsDir)
+	if got := readLocalVersion(markerPath); got != "1.3.0" {
+		t.Fatalf("after the successful invocation: .local_version = %q, want %q", got, "1.3.0")
+	}
+
+	runVersionBumpInvocation(t, beadsDir)
+	if versionBumpTailAttempts != 3 {
+		t.Fatalf("maintenance attempts after a settled bump = %d, want 3: a settled marker must not re-attempt maintenance", versionBumpTailAttempts)
+	}
+}
+
+// TestVersionBump_OrdinaryFailuresRetry pins that every ordinary failure —
+// not just the dirty-table refusal — keeps the one-shot signal for the next
+// command. Rows cover the writable open failing without a typed refusal, the
+// reconcile step failing after a successful open, and a workspace whose
+// metadata cannot even be loaded (no attempt is possible, none may count as
+// settled).
+func TestVersionBump_OrdinaryFailuresRetry(t *testing.T) {
+	for _, tt := range []struct {
+		name            string
+		corruptMetadata bool
+		stub            func(attempt int) (bool, error)
+		wantAttempts    int
+	}{
+		{
+			name:         "generic writable-open failure",
+			stub:         func(int) (bool, error) { return false, errors.New("dial tcp 127.0.0.1:3307: connection refused") },
+			wantAttempts: 2,
+		},
+		{
+			name:         "reconcile failure after a successful open",
+			stub:         func(int) (bool, error) { return false, nil },
+			wantAttempts: 2,
+		},
+		{
+			name:            "malformed metadata keeps the signal",
+			corruptMetadata: true,
+			stub:            func(int) (bool, error) { return true, nil },
+			wantAttempts:    0,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			beadsDir, markerPath := newVersionBumpWorkspace(t, "1.1.0", "1.3.0")
+			if tt.corruptMetadata {
+				if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte("not json"), 0o600); err != nil {
+					t.Fatalf("corrupt metadata.json: %v", err)
+				}
+			}
+			stubVersionBumpTail(t, tt.stub)
+
+			runVersionBumpInvocation(t, beadsDir)
+			runVersionBumpInvocation(t, beadsDir)
+
+			if got := readLocalVersion(markerPath); got != "1.1.0" {
+				t.Fatalf(".local_version = %q after failing invocations, want the stale %q", got, "1.1.0")
+			}
+			if versionBumpTailAttempts != tt.wantAttempts {
+				t.Fatalf("maintenance attempts = %d, want %d", versionBumpTailAttempts, tt.wantAttempts)
 			}
 		})
 	}

@@ -2000,7 +2000,8 @@ var rootCmd = &cobra.Command{
 
 		// dc-6jaq: consult the migration freeze marker here, before any of
 		// this hook's own store-touching side effects — trackBdVersion below
-		// (writes .local_version), autoMigrateOnVersionBump (opens its own
+		// (persists the deferred .local_version write once maintenance
+		// settles), autoMigrateOnVersionBump (opens its own
 		// store connection and can apply a schema migration), and
 		// maybeAutoImportJSONL (imports into the store when empty) all run
 		// before the command's RunE, where CheckReadonly would otherwise
@@ -2055,11 +2056,15 @@ var rootCmd = &cobra.Command{
 		// A preview detects the change but must not consume it: .local_version
 		// is the one-shot signal autoMigrateOnVersionBump reads, and a preview
 		// skips that reconciliation (see below). See trackBdVersionPreview.
+		// A non-preview upgrade defers its marker write (#6929) and settles it
+		// at the autoMigrateOnVersionBump call below, so a failed maintenance
+		// keeps the signal and the next command retries.
+		var pendingMarker *pendingVersionMarker
 		if policy.runMaintenance && !frozenForMaintenance {
 			if previewMode {
 				trackBdVersionPreview()
 			} else {
-				trackBdVersion()
+				pendingMarker = trackBdVersion()
 			}
 		}
 
@@ -2103,8 +2108,14 @@ var rootCmd = &cobra.Command{
 		// apply schema migrations before RunE validates arguments or renders a
 		// dry-run plan. frozenForMaintenance excludes it for the same reason
 		// as the trackBdVersion call above — see that comment.
+		//
+		// #6929: the deferred upgrade marker is persisted only when the
+		// reconciliation settles. An ordinary failure leaves the stale marker,
+		// so the next command re-runs the maintenance instead of skipping it.
 		if policy.runMaintenance && !previewMode && !frozenForMaintenance {
-			autoMigrateOnVersionBump(beadsDir)
+			if autoMigrateOnVersionBump(beadsDir) {
+				pendingMarker.persist()
+			}
 		}
 
 		// Initialize direct storage access

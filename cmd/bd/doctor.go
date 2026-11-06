@@ -615,18 +615,7 @@ func runDiagnostics(path string) doctorResult {
 	// absPath: these writes land in the doctor target, so a freeze on that tree
 	// must stop them even when bd was launched somewhere unfrozen.
 	if !readonlyMode && !migrationFreezeActiveFor(beadsDir) {
-		// Scope version tracking to the doctor target. Without this, `bd doctor <path>`
-		// can accidentally touch the caller's current repo .beads state.
-		origBeadsDir, hadBeadsDir := os.LookupEnv("BEADS_DIR")
-		_ = os.Setenv("BEADS_DIR", beadsDir)
-		trackBdVersion()
-		if hadBeadsDir {
-			_ = os.Setenv("BEADS_DIR", origBeadsDir)
-		} else {
-			_ = os.Unsetenv("BEADS_DIR")
-		}
-
-		autoMigrateOnVersionBump(beadsDir)
+		runDoctorVersionMaintenance(beadsDir)
 	}
 
 	// Check 1b: Dolt format compatibility (GH#2137)
