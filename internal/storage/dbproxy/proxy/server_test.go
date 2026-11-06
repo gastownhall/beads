@@ -1167,6 +1167,52 @@ func TestProxy_IdleTimeout_BlockedByShortLivedConns(t *testing.T) {
 	assertNoPidFile(t, root)
 }
 
+// The idle clock restarts when a connection finishes, not only when one
+// starts: a proxy that has just completed a long-lived connection must stay
+// up for a further idle window before expiring exactly once.
+func TestProxy_IdleTimeout_RestartsWhenLongConnCloses(t *testing.T) {
+	t.Parallel()
+
+	ts := server.New()
+	ts.Handler = server.DiscardHandler
+	stats := &proxy.Stats{}
+	port := freeTCPPort(t)
+	root := t.TempDir()
+
+	const idle = 2 * time.Second
+	h := runProxy(t, proxy.ProxyOpts{
+		RootDir: root, Port: port,
+		IdleTimeout: idle,
+		Server:      ts, Stats: stats,
+	})
+	waitListening(t, root, listenWait)
+
+	// Hold an authenticated connection past a full idle window, then close
+	// it. The client-side close precedes the handler's completion, so the
+	// survival bound measured from here is the conservative one.
+	conn := dialProxy(t, port)
+	time.Sleep(idle + idle/2)
+	require.NoError(t, conn.Close())
+	closedAt := time.Now()
+
+	// The connection's start is already older than the idle timeout, so a
+	// watcher that only restarts on connection starts would expire on the
+	// first tick after the close. Completion must restart the idle clock:
+	// the proxy outlives the connection by most of another idle window.
+	time.Sleep(3 * idle / 4)
+	select {
+	case <-h.exited:
+		t.Fatalf("proxy exited %s after a long-lived connection closed; idle clock was not restarted by its completion", time.Since(closedAt))
+	default:
+	}
+
+	require.NoError(t, h.waitErr(t, 3*idle))
+	s := stats.Snapshot()
+	assert.Equal(t, int64(1), s.IdleTimeouts)
+	assert.Equal(t, int64(1), s.BackendStopCalls)
+	assertNoPidFile(t, root)
+}
+
 func waitForRotation(t *testing.T, path, marker string) {
 	t.Helper()
 	deadline := time.Now().Add(listenWait)

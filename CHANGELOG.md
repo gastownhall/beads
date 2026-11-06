@@ -1208,6 +1208,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The proxied-server idle watcher no longer shuts a store down while it is
+  busy. It sampled the connection count once per tick and kept no record of
+  when the last connection ended, so connections that opened and closed
+  between two ticks — what every bd command produces — never reset the idle
+  clock, and a store under steady traffic was expired and restarted in a
+  loop. The watcher now records the time of each authenticated connection
+  start and completion and expires only when no connection is active and a
+  full idle timeout has passed since the latest one (#7191). Connections
+  that never authenticate still count for nothing.
 - `bd config get` for a config.yaml, git-config or user-global key no longer
   opens the database just because one exists, so it answers from those files
   while the Dolt server is down instead of failing the open (GH#5108). In

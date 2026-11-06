@@ -576,6 +576,14 @@ func (p *proxyServer) handleConn(ctx context.Context, client net.Conn) error {
 	p.markActivity()
 	p.activeConns.Add(1)
 	defer func() {
+		// Completion is activity too: expiry measures from the end of the
+		// latest authenticated connection, so a proxy that just finished
+		// serving stays up for a further idle timeout. Stamp before the
+		// decrement, matching the load order the watcher relies on: a tick
+		// that observes the count at zero also observes this stamp. This
+		// defer covers every completion path, including a failed backend
+		// dial below.
+		p.markActivity()
 		p.activeConns.Add(-1)
 		p.connTracef("handleConn(%s) end (active=%d)", addr, p.activeConns.Load())
 	}()
