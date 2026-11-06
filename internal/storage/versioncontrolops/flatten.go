@@ -2,7 +2,9 @@ package versioncontrolops
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"time"
 
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/schema"
@@ -24,9 +26,13 @@ import (
 // space from orphaned history — remote-tracking refs still anchor the
 // pre-flatten chain, and GC alone reclaims nothing while they exist (bd-agctw).
 //
+// If a step fails, or ctx is canceled, after Flatten created flatten-tmp,
+// it returns to main and deletes the branch (abandonFlatten), so the next
+// flatten is not blocked by it.
+//
 // conn must be a single database connection (not a pooled *sql.DB) since the
 // stored procedures rely on session-scoped state (current branch, working set).
-func Flatten(ctx context.Context, conn DBConn) error {
+func Flatten(ctx context.Context, conn DBConn) (retErr error) {
 	// Find the initial commit hash (oldest ancestor).
 	var initialHash string
 	if err := conn.QueryRowContext(ctx,
@@ -53,12 +59,25 @@ func Flatten(ctx context.Context, conn DBConn) error {
 		return nil
 	}
 
+	// A flatten-tmp that already exists is not this invocation's: creating
+	// it fails here, before cleanup is armed, so it is never removed.
+	if err := execSQL("create temp branch", "CALL DOLT_BRANCH('flatten-tmp')"); err != nil {
+		return err
+	}
+	// Armed until the final branch delete succeeds, so a failure or
+	// cancellation at any later step, that delete included, is cleaned up.
+	armed := true
+	defer func() {
+		if armed {
+			retErr = abandonFlatten(ctx, conn, retErr)
+		}
+	}()
+
 	steps := []struct {
 		name  string
 		query string
 		args  []interface{}
 	}{
-		{"create temp branch", "CALL DOLT_BRANCH('flatten-tmp')", nil},
 		{"checkout temp branch", "CALL DOLT_CHECKOUT('flatten-tmp')", nil},
 		{"soft reset to initial", "CALL DOLT_RESET('--soft', ?)", []interface{}{initialHash}},
 		{"commit flattened snapshot", "CALL DOLT_COMMIT('-Am', 'flatten: squash all history into single commit')", nil},
@@ -95,7 +114,35 @@ func Flatten(ctx context.Context, conn DBConn) error {
 		}
 	}
 
-	return execSQL("delete temp branch", "CALL DOLT_BRANCH('-D', 'flatten-tmp')")
+	if err := execSQL("delete temp branch", "CALL DOLT_BRANCH('-D', 'flatten-tmp')"); err != nil {
+		return err
+	}
+	armed = false
+	return nil
+}
+
+// flattenCleanupTimeout bounds abandonFlatten's statements.
+const flattenCleanupTimeout = 30 * time.Second
+
+// abandonFlatten is Flatten's cleanup once a step fails after flatten-tmp
+// exists: back to main, then the branch deleted. It runs on a context the
+// caller's cancellation does not reach, bounded by flattenCleanupTimeout,
+// so a canceled flatten still removes the branch that would block the next
+// one. The checkout is not forced: if the session cannot return to main,
+// flatten-tmp is kept, since it may still be the session's branch. It
+// returns cause, joined with any cleanup failure.
+func abandonFlatten(ctx context.Context, conn DBConn, cause error) error {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), flattenCleanupTimeout)
+	defer cancel()
+	if _, err := conn.ExecContext(cleanupCtx, "CALL DOLT_CHECKOUT('main')"); err != nil {
+		return errors.Join(cause, fmt.Errorf(
+			"flatten cleanup: return to main: %w; kept branch flatten-tmp, which blocks the next flatten until it is deleted from main with CALL DOLT_BRANCH('-D', 'flatten-tmp')", err))
+	}
+	if _, err := conn.ExecContext(cleanupCtx, "CALL DOLT_BRANCH('-D', 'flatten-tmp')"); err != nil {
+		return errors.Join(cause, fmt.Errorf(
+			"flatten cleanup: delete branch flatten-tmp: %w; it remains and blocks the next flatten until deleted with CALL DOLT_BRANCH('-D', 'flatten-tmp')", err))
+	}
+	return cause
 }
 
 // FlattenDryRun returns the commit count and initial hash without modifying anything.
