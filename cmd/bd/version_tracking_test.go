@@ -884,7 +884,7 @@ func TestAutoMigrateOnVersionBump_FailureIsReportedAndRetried(t *testing.T) {
 	notice := captureNoticeStderr(t, func() {
 		settleBdVersionStamp(autoMigrateOnVersionBump(beadsDir))
 	})
-	for _, want := range []string{"bd upgraded to v1.3.0", "loading config", "retry", "bd doctor"} {
+	for _, want := range []string{"bd upgraded to v1.3.0", "loading config", "next eligible non-preview command retries", "bd doctor"} {
 		if !strings.Contains(notice, want) {
 			t.Errorf("failure notice is missing %q:\n%s", want, notice)
 		}
