@@ -170,6 +170,7 @@ if [ "$_bd_missing" -eq 1 ]; then
     *) _bd_chain="./pre-push.old" ;;
   esac
   if [ -x "$_bd_chain" ]; then
+    export BD_GIT_HOOK=1
     if "$_bd_chain" "$@"; then
       _bd_exit=0
     else

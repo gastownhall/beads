@@ -79,9 +79,10 @@ const hookTimeoutKillAfterSeconds = 2
 //
 // Missing bd (GH#6751): bd hooks run is what runs the chained <hook>.old
 // (runChainedHook), so with bd off PATH (a GUI client, cron, a minimal shell)
-// the section runs that chain itself, found beside the hook through $0, and
-// fails only when the chain fails. It uses shell builtins alone and no shell
-// function, since zsh rebinds $0 inside one.
+// the section runs that chain itself, found beside the hook through $0, with
+// the hook's own argv and stdin and BD_GIT_HOOK=1, as runChainedHook would,
+// and fails only when the chain fails. It uses shell builtins alone and no
+// shell function, since zsh rebinds $0 inside one.
 //
 // Resilience (GH#2453, GH#2449):
 //   - A compatible timeout helper applies a best-effort soft deadline.
@@ -185,6 +186,7 @@ func generateHookSection(hookName string) string {
 		"    *) _bd_chain=\"./" + hookName + ".old\" ;;\n" +
 		"  esac\n" +
 		"  if [ -x \"$_bd_chain\" ]; then\n" +
+		"    export BD_GIT_HOOK=1\n" +
 		"    if \"$_bd_chain\" \"$@\"; then\n" +
 		"      _bd_exit=0\n" +
 		"    else\n" +

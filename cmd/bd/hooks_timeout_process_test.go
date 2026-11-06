@@ -1081,3 +1081,246 @@ func TestGeneratedHookChainWhenBdMissingRealGit(t *testing.T) {
 		}
 	})
 }
+
+// hookProcessChainRecorderBody is a builtin-only <hook>.old that reports what
+// it was given: its argv, BD_GIT_HOOK and stdin. It appends one line to
+// HOOK_TEST_CHAIN_COUNT per run and exits HOOK_TEST_CHAIN_EXIT.
+const hookProcessChainRecorderBody = `#!/bin/sh
+printf 'chain-argc=%s\n' "$#"
+_chain_test_index=0
+for _chain_test_arg
+do
+  printf 'chain-arg-%s=<%s>\n' "$_chain_test_index" "$_chain_test_arg"
+  _chain_test_index=$((_chain_test_index + 1))
+done
+printf 'chain-bd-git-hook=<%s>\n' "${BD_GIT_HOOK-unset}"
+while IFS= read -r _chain_test_line; do
+  printf 'chain-stdin=<%s>\n' "$_chain_test_line"
+done
+printf 'run\n' >> "${HOOK_TEST_CHAIN_COUNT:?}"
+exit "${HOOK_TEST_CHAIN_EXIT:-0}"
+`
+
+type hookChainProcessCase struct {
+	hookName    string
+	chainBody   string // empty: no <hook>.old
+	chainMode   os.FileMode
+	chainIsDir  bool
+	shellOption string
+	usePOSIXSh  bool
+	slashless   bool   // run the hook as ./<hook> from its own directory, so $0 has no slash
+	dirName     string // hooks directory name, to exercise paths with spaces
+	args        []string
+	stdin       string
+	chainExit   int
+}
+
+type hookChainProcessResult struct {
+	output      string
+	exitCode    int
+	chainRuns   int
+	trailingRan bool
+}
+
+// runGeneratedHookChainProcess runs the generated section for tc.hookName with
+// bd absent from PATH, so the section's own fallback must decide whether to run
+// <hook>.old. Unlike runGeneratedHookProcess it hands the shell the hook's real
+// path as $0, which is how the section finds the chain beside it, and the
+// PATH it runs under is an empty directory. Trailing user content after the
+// section prints "trailing-ran".
+func runGeneratedHookChainProcess(t *testing.T, tc hookChainProcessCase) hookChainProcessResult {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell process test")
+	}
+	hookName := tc.hookName
+	if hookName == "" {
+		hookName = "pre-push"
+	}
+	dirName := tc.dirName
+	if dirName == "" {
+		dirName = "hooks"
+	}
+	hooksDir := filepath.Join(t.TempDir(), dirName)
+	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+		t.Fatalf("create hooks directory: %v", err)
+	}
+	writeHookProcessFixture(t, hooksDir, hookName, "#!/bin/sh\n"+generateHookSection(hookName)+"printf 'trailing-ran\\n'\n")
+	chainPath := filepath.Join(hooksDir, hookName+".old")
+	switch {
+	case tc.chainIsDir:
+		if err := os.Mkdir(chainPath, 0o755); err != nil {
+			t.Fatalf("create directory chain: %v", err)
+		}
+	case tc.chainBody != "":
+		writeHookProcessFixture(t, hooksDir, hookName+".old", tc.chainBody)
+		if tc.chainMode != 0 {
+			if err := os.Chmod(chainPath, tc.chainMode); err != nil {
+				t.Fatalf("chmod chain: %v", err)
+			}
+		}
+	}
+	countPath := filepath.Join(t.TempDir(), "chain-count")
+
+	hookArg := filepath.Join(hooksDir, hookName)
+	source := `. "$0"`
+	if tc.slashless {
+		hookArg = hookName
+		source = `. "./$0"`
+	}
+	script := source + "\n"
+	if tc.shellOption != "" {
+		script = "set -" + tc.shellOption + "\n" + script
+	}
+	shellPath := hookProcessShell(t)
+	commandArgs := []string{"--noprofile", "--norc", "-c", script, hookArg}
+	if tc.usePOSIXSh {
+		shellPath = hookProcessPOSIXShell(t)
+		commandArgs = []string{"-c", script, hookArg}
+	}
+	commandArgs = append(commandArgs, tc.args...)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	t.Cleanup(cancel)
+	cmd := exec.CommandContext(ctx, shellPath, commandArgs...)
+	cmd.WaitDelay = time.Second
+	cmd.Dir = hooksDir
+	cmd.Stdin = strings.NewReader(tc.stdin)
+	env := make([]string, 0, len(hookProcessEnv())+3)
+	for _, entry := range hookProcessEnv() {
+		if key, _, _ := strings.Cut(entry, "="); key == "PATH" || key == "BD_GIT_HOOK" {
+			continue
+		}
+		env = append(env, entry)
+	}
+	cmd.Env = append(env,
+		"PATH="+t.TempDir(),
+		"HOOK_TEST_CHAIN_COUNT="+countPath,
+		"HOOK_TEST_CHAIN_EXIT="+strconv.Itoa(tc.chainExit),
+	)
+	output, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("generated hook exceeded process-test deadline: %v\n%s", ctx.Err(), string(output))
+	}
+	exitCode := 0
+	if err != nil {
+		exitErr, ok := err.(*exec.ExitError)
+		if !ok {
+			t.Fatalf("run generated hook: %v\n%s", err, string(output))
+		}
+		exitCode = exitErr.ExitCode()
+	}
+	runs := 0
+	if counted, err := os.ReadFile(countPath); err == nil {
+		runs = strings.Count(string(counted), "run\n")
+	}
+	return hookChainProcessResult{
+		output:      string(output),
+		exitCode:    exitCode,
+		chainRuns:   runs,
+		trailingRan: strings.Contains(string(output), "trailing-ran"),
+	}
+}
+
+func assertHookChainInvocation(t *testing.T, output string, args ...string) {
+	t.Helper()
+	if marker := fmt.Sprintf("chain-argc=%d", len(args)); !strings.Contains(output, marker) {
+		t.Errorf("output missing %q\n%s", marker, output)
+	}
+	for index, arg := range args {
+		if marker := fmt.Sprintf("chain-arg-%d=<%s>", index, arg); !strings.Contains(output, marker) {
+			t.Errorf("output missing chain argument marker %q\n%s", marker, output)
+		}
+	}
+}
+
+// TestGeneratedHookChainFallbackProcess drives the bd-missing fallback: the
+// section runs <hook>.old exactly once with the hook's own argv, stdin and
+// BD_GIT_HOOK=1 (what runChainedHook would have handed it), falls through to
+// trailing content on success, and fails with the chain's status otherwise.
+func TestGeneratedHookChainFallbackProcess(t *testing.T) {
+	args := []string{"argument with space", "", "second-argument"}
+	stdin := "refs/heads/main 1111 refs/heads/main 0000\nsecond line\n"
+	shells := []struct {
+		name       string
+		option     string
+		usePOSIXSh bool
+	}{
+		{name: "bash"},
+		{name: "bash set -eu", option: "eu"},
+		{name: "sh", usePOSIXSh: true},
+		{name: "sh set -eu", option: "eu", usePOSIXSh: true},
+	}
+	for _, shell := range shells {
+		for _, status := range []int{0, 1, 3, 37} {
+			t.Run(fmt.Sprintf("%s/exit %d", shell.name, status), func(t *testing.T) {
+				result := runGeneratedHookChainProcess(t, hookChainProcessCase{
+					chainBody:   hookProcessChainRecorderBody,
+					shellOption: shell.option,
+					usePOSIXSh:  shell.usePOSIXSh,
+					args:        args,
+					stdin:       stdin,
+					chainExit:   status,
+				})
+				if result.exitCode != status {
+					t.Errorf("hook exit = %d, want the chain's %d\n%s", result.exitCode, status, result.output)
+				}
+				if result.chainRuns != 1 {
+					t.Errorf("chain ran %d times, want exactly once\n%s", result.chainRuns, result.output)
+				}
+				if result.trailingRan != (status == 0) {
+					t.Errorf("trailing content ran = %v, want %v\n%s", result.trailingRan, status == 0, result.output)
+				}
+				assertHookChainInvocation(t, result.output, args...)
+				for _, want := range []string{
+					"chain-bd-git-hook=<1>",
+					"chain-stdin=<refs/heads/main 1111 refs/heads/main 0000>",
+					"chain-stdin=<second line>",
+				} {
+					if !strings.Contains(result.output, want) {
+						t.Errorf("output missing %q\n%s", want, result.output)
+					}
+				}
+			})
+		}
+	}
+
+	t.Run("hook path with spaces", func(t *testing.T) {
+		result := runGeneratedHookChainProcess(t, hookChainProcessCase{
+			chainBody: hookProcessChainRecorderBody,
+			dirName:   "hooks dir with spaces",
+			args:      args,
+			chainExit: 5,
+		})
+		if result.exitCode != 5 || result.chainRuns != 1 {
+			t.Fatalf("hook exit = %d with %d chain runs, want 5 and one run\n%s", result.exitCode, result.chainRuns, result.output)
+		}
+		assertHookChainInvocation(t, result.output, args...)
+	})
+
+	t.Run("slash-less $0 finds the chain beside the hook", func(t *testing.T) {
+		result := runGeneratedHookChainProcess(t, hookChainProcessCase{
+			chainBody:  hookProcessChainRecorderBody,
+			usePOSIXSh: true,
+			slashless:  true,
+			chainExit:  6,
+		})
+		if result.exitCode != 6 || result.chainRuns != 1 {
+			t.Fatalf("hook exit = %d with %d chain runs, want 6 and one run\n%s", result.exitCode, result.chainRuns, result.output)
+		}
+	})
+
+	t.Run("each managed hook chains its own .old", func(t *testing.T) {
+		for _, hookName := range managedHookNames {
+			result := runGeneratedHookChainProcess(t, hookChainProcessCase{
+				hookName:  hookName,
+				chainBody: hookProcessChainRecorderBody,
+				args:      []string{"only-arg"},
+				chainExit: 9,
+			})
+			if result.exitCode != 9 || result.chainRuns != 1 {
+				t.Errorf("%s: hook exit = %d with %d chain runs, want 9 and one run\n%s", hookName, result.exitCode, result.chainRuns, result.output)
+			}
+			assertHookChainInvocation(t, result.output, "only-arg")
+		}
+	})
+}
