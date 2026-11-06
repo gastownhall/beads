@@ -2010,6 +2010,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   symlinked `config.yaml` is written through to its target, the file keeps
   its own permissions, and a read-only `config.yaml` is still refused. The
   user-global `config.yaml` gets the same treatment.
+- `bd create --dry-run` refuses an issue type the real create refuses
+  (`invalid issue type: <type>`) instead of previewing it, on both the
+  embedded and the proxied-server route, for the local target. A missing
+  title whose `--type` holds a value that is not a built-in type now also
+  says that `-t` is the short flag for `--type`, not `--title`, so
+  `bd create --type=bug -t "a title"` no longer points only at the title
+  (GH#5787).
 - `bd config get` for a config.yaml, git-config or user-global key no longer
   opens the database just because one exists, so it answers from those files
   while the Dolt server is down instead of failing the open (GH#5108). In
