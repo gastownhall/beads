@@ -246,4 +246,56 @@ func TestMapUpdateTitleValidation(t *testing.T) {
 			}
 		})
 	}
+
+	// The admission edge: a changed title of exactly 500 bytes, ASCII or
+	// multibyte, is stored byte-identically and passes the validation create
+	// and import run, so an export of it imports back. One byte more is
+	// refused with the stored title untouched.
+	for _, tc := range []struct {
+		name  string
+		id    string
+		title string
+	}{
+		{"500 ASCII bytes are stored byte-identically", "tl-at-limit-ascii", strings.Repeat("t", 500)},
+		{"500-byte multibyte title is stored byte-identically", "tl-at-limit", strings.Repeat("é", 250)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			create(t, tc.id, false)
+			if err := store.UpdateIssue(ctx, tc.id, map[string]interface{}{"title": tc.title}, "tester"); err != nil {
+				t.Fatalf("UpdateIssue with a 500-byte title: %v", err)
+			}
+			got, err := store.GetIssue(ctx, tc.id)
+			if err != nil || got == nil {
+				t.Fatalf("GetIssue: %v", err)
+			}
+			if got.Title != tc.title {
+				t.Fatalf("stored title is %d bytes, want the 500-byte title byte-identical", len(got.Title))
+			}
+			if err := got.ValidateWithCustom(nil, nil); err != nil {
+				t.Fatalf("stored issue fails create/import validation: %v", err)
+			}
+		})
+	}
+	for _, tc := range []struct {
+		name  string
+		id    string
+		title string
+	}{
+		{"501 ASCII bytes are refused", "tl-over-ascii", strings.Repeat("t", 501)},
+		{"502 multibyte bytes are refused", "tl-over-multibyte", strings.Repeat("é", 251)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			before := create(t, tc.id, false)
+			if err := store.UpdateIssue(ctx, tc.id, map[string]interface{}{"title": tc.title}, "tester"); !errors.Is(err, storage.ErrValidation) {
+				t.Fatalf("UpdateIssue with a %d-byte title: err = %v, want errors.Is(ErrValidation)", len(tc.title), err)
+			}
+			got, err := store.GetIssue(ctx, tc.id)
+			if err != nil || got == nil {
+				t.Fatalf("GetIssue after refused update: %v", err)
+			}
+			if got.Title != before.Title {
+				t.Errorf("refused update changed the title to %d bytes, want %q", len(got.Title), before.Title)
+			}
+		})
+	}
 }
