@@ -191,6 +191,7 @@ go_test(
         "//internal/storage/depid",
         "//internal/storage/issueops",
         "//internal/storage/rowid",
+        "//internal/storage/sqlbuild",
         "//internal/testutil",
         "@com_github_data_dog_go_sqlmock//:go-sqlmock",
         "@com_github_go_sql_driver_mysql//:mysql",

@@ -508,7 +508,7 @@ func readThroughRefusedMigration(ctx context.Context, conn *sql.Conn, database s
 	// selects would answer every one of them with an unknown-column error, so
 	// it is refused here as server mode's read-only open refuses it
 	// (dolt.Config.RequireReadableSchema).
-	if err := schema.CheckReadableDrift(ctx, conn, "issues", sqlbuild.ColumnNames(sqlbuild.IssueBaseColumns)); err != nil {
+	if err := schema.CheckReadableDrift(ctx, conn, schema.IssueReadableRequirements(sqlbuild.ColumnNames(sqlbuild.IssueBaseColumns))); err != nil {
 		if isSerializationError(err) {
 			return err
 		}

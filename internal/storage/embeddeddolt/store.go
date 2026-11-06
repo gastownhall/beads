@@ -246,7 +246,7 @@ func (s *EmbeddedDoltStore) requireReadableSchema(ctx context.Context, conn *sql
 	if s.intent != openReadOnlyCommand {
 		return nil
 	}
-	return schema.CheckReadableDrift(ctx, conn, "issues", sqlbuild.ColumnNames(sqlbuild.IssueBaseColumns))
+	return schema.CheckReadableDrift(ctx, conn, schema.IssueReadableRequirements(sqlbuild.ColumnNames(sqlbuild.IssueBaseColumns)))
 }
 
 // toleratesGateRefusal reports whether this open's intent may warn and

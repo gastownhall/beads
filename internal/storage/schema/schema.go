@@ -323,20 +323,52 @@ func behindDriftError(currentVersion int) error {
 	return &SchemaBehindError{DBVersion: currentVersion, BinaryVersion: LatestVersion()}
 }
 
+// ReadableRequirement is one table a caller's reads query and the columns
+// they select from it. CheckReadableDrift probes each behind database for
+// every requirement; a missing table counts as every column missing.
+type ReadableRequirement struct {
+	Table   string
+	Columns []string
+}
+
+// leaseReadableColumns is what the shared issue projection's leases overlay
+// touches: the join column and the columns LeaseSelectColumns selects. A
+// database behind by its issues table alone (v53-era shapes, the #6929 read
+// gap) has no leases table at all, and one materialized out of band can have
+// lost it — either way the overlay join fails every issue read with a raw
+// `table not found: leases`, so the readable check must cover it.
+var leaseReadableColumns = []string{"issue_id", "lease_expires_at", "heartbeat_at", "granted_node"}
+
+// IssueReadableRequirements builds the readable-schema requirements for a
+// caller that reads issues through the shared projection: the issue columns
+// it names, plus the leases overlay that projection joins
+// (sqlbuild.LeaseJoin/LeaseSelectColumns — pinned against those constants by
+// TestIssueReadableRequirementsMatchSQLBuild, which lives in the test so this
+// package stays free of the sqlbuild import).
+func IssueReadableRequirements(issueColumns []string) []ReadableRequirement {
+	return []ReadableRequirement{
+		{Table: "issues", Columns: issueColumns},
+		{Table: "leases", Columns: leaseReadableColumns},
+	}
+}
+
 // CheckReadableDrift is the drift check for an open that reads a database at
 // its current schema instead of migrating it: a read-only open, or one through
 // a gateway server, which owns its schema. From one version read it refuses
 // forward drift as CheckForwardDrift does, and a database BEHIND the binary
-// only when table lacks one of columns, the columns the caller's reads
-// select, with CheckBehindDrift's *SchemaBehindError and escape hatch.
+// only when some requirement's table lacks one of its columns — the columns
+// the caller's reads select — with CheckBehindDrift's *SchemaBehindError and
+// escape hatch.
 //
 // A behind database that has all of them stays open: it keeps serving reads
 // at its current schema until its operator consents to the migration
 // (bd-578h9.5, gastownhall/beads#5920). One that lacks any of them cannot
 // answer a single such read, and without this check it would open fine and
-// then fail every read with an unknown-column error. A database at the
-// binary's version costs only the version read CheckForwardDrift makes.
-func CheckReadableDrift(ctx context.Context, db DBConn, table string, columns []string) error {
+// then fail every read with an unknown-column or table-not-found error. A
+// database at the binary's version costs only the version read
+// CheckForwardDrift makes. Requirements probe in order and stop at the first
+// gap, so the requirement whose absence is most reportable should come first.
+func CheckReadableDrift(ctx context.Context, db DBConn, requirements []ReadableRequirement) error {
 	currentVersion, err := CurrentVersion(ctx, db)
 	if err != nil {
 		return fmt.Errorf("schema drift check: %w", err)
@@ -344,14 +376,16 @@ func CheckReadableDrift(ctx context.Context, db DBConn, table string, columns []
 	if currentVersion >= LatestVersion() {
 		return forwardDriftError(currentVersion)
 	}
-	missing, err := missingColumns(ctx, db, table, columns)
-	if err != nil {
-		return fmt.Errorf("schema drift check: %w", err)
+	for _, req := range requirements {
+		missing, err := missingColumns(ctx, db, req.Table, req.Columns)
+		if err != nil {
+			return fmt.Errorf("schema drift check: %w", err)
+		}
+		if len(missing) > 0 {
+			return behindDriftError(currentVersion)
+		}
 	}
-	if len(missing) == 0 {
-		return nil
-	}
-	return behindDriftError(currentVersion)
+	return nil
 }
 
 // missingColumns returns the entries of columns that table lacks, all of them

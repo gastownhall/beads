@@ -2140,11 +2140,13 @@ var stopRejectedAutoStartedServer = doltserver.Stop
 // failure, such as a sandbox refusing the connection, without a live server.
 var dialServer = net.DialTimeout
 
-// issueProjectionColumns are the columns every issue read selects from the
-// row (sqlbuild.IssueBaseColumns, shared by both planes). checkOpenSchemaDrift
-// requires them on issues, the replicated table whose shape the schema cursor
-// describes.
-var issueProjectionColumns = sqlbuild.ColumnNames(sqlbuild.IssueBaseColumns)
+// issueProjectionRequirements are the tables and columns every issue read
+// touches: the shared projection's issue columns (sqlbuild.IssueBaseColumns,
+// both planes) and the leases overlay it joins. checkOpenSchemaDrift requires
+// them, so a behind database that cannot answer one issue read is refused at
+// open — including the #6929 shape whose issues table is complete but whose
+// leases table is missing.
+var issueProjectionRequirements = schema.IssueReadableRequirements(sqlbuild.ColumnNames(sqlbuild.IssueBaseColumns))
 
 // checkOpenSchemaDrift is newServerMode's schema drift check. Every open
 // refuses a database ahead of this binary (schema.CheckForwardDrift). An open
@@ -2156,7 +2158,7 @@ func checkOpenSchemaDrift(ctx context.Context, db *sql.DB, cfg *Config) error {
 	if !cfg.RequireReadableSchema || (!cfg.ReadOnly && !cfg.Gateway) {
 		return schema.CheckForwardDrift(ctx, db)
 	}
-	err := schema.CheckReadableDrift(ctx, db, "issues", issueProjectionColumns)
+	err := schema.CheckReadableDrift(ctx, db, issueProjectionRequirements)
 	var behind *schema.SchemaBehindError
 	if cfg.Gateway && errors.As(err, &behind) {
 		behind.Gateway = true

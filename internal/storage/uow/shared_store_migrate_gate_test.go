@@ -76,6 +76,18 @@ func expectIssuesProjection(mock sqlmock.Sqlmock, version int, omit string) {
 		}
 	}
 	mock.ExpectQuery(`^SHOW COLUMNS FROM issues$`).WillReturnRows(rows)
+	// The readable check also probes the leases overlay the shared projection
+	// joins — but only when the issues requirement was satisfied: it stops at
+	// the first gap. omit simulates that gap, so the leases probe is expected
+	// only without one.
+	if omit == "" {
+		expectCursorProbe(mock, "leases", true)
+		leaseRows := sqlmock.NewRows([]string{"Field", "Type", "Null", "Key", "Default", "Extra"})
+		for _, column := range []string{"issue_id", "lease_expires_at", "heartbeat_at", "granted_node"} {
+			leaseRows.AddRow(column, "text", "YES", "", nil, "")
+		}
+		mock.ExpectQuery(`^SHOW COLUMNS FROM leases$`).WillReturnRows(leaseRows)
+	}
 }
 
 // TestInitSchemaSharedStoreGate covers the proxied/`bd serve` open path's half

@@ -7,11 +7,14 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
+
+	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 )
 
 // -- checkSchemaSkew unit tests (mock DB) --
@@ -346,11 +349,33 @@ func expectIssuesColumns(mock sqlmock.Sqlmock, columns ...string) {
 	mock.ExpectQuery(`^SHOW COLUMNS FROM issues$`).WillReturnRows(rows)
 }
 
+// expectLeasesColumns mocks the leases probe with exactly these columns
+// present (the table itself always exists in this mock).
+func expectLeasesColumns(mock sqlmock.Sqlmock, columns ...string) {
+	expectCursorProbe(mock, "leases", true)
+	rows := sqlmock.NewRows([]string{"Field", "Type", "Null", "Key", "Default", "Extra"})
+	for _, column := range columns {
+		rows.AddRow(column, "bigint", "YES", "", nil, "")
+	}
+	mock.ExpectQuery(`^SHOW COLUMNS FROM leases$`).WillReturnRows(rows)
+}
+
+// issueOnlyRequirements is the single-requirement shape the table tests
+// below use; the shared projection's full shape is
+// IssueReadableRequirements, covered by its own cases and the sqlbuild
+// parity test.
+func issueOnlyRequirements(columns []string) []ReadableRequirement {
+	return []ReadableRequirement{{Table: "issues", Columns: columns}}
+}
+
 func TestCheckReadableDrift(t *testing.T) {
 	behind := LatestVersion() - 1
 	for _, tc := range []struct {
 		name   string
 		expect func(sqlmock.Sqlmock)
+		// fullProjection selects IssueReadableRequirements' two-table shape
+		// over the single-issue-requirement stand-in.
+		fullProjection bool
 		// check judges the returned error.
 		check func(t *testing.T, err error)
 	}{
@@ -403,6 +428,67 @@ func TestCheckReadableDrift(t *testing.T) {
 			},
 			check: requireBehindError(behind),
 		},
+		{
+			// The #6929 read-path gap: issues complete, leases overlay
+			// missing a column. The full projection's requirements refuse at
+			// open instead of failing every read at query time.
+			name:           "behind with a complete issues table but a short leases overlay is refused",
+			fullProjection: true,
+			expect: func(mock sqlmock.Sqlmock) {
+				expectMainCursor(mock, behind)
+				expectIssuesColumns(mock, "id", "arrival_seq")
+				expectLeasesColumns(mock, "issue_id", "lease_expires_at", "heartbeat_at")
+			},
+			check: requireBehindError(behind),
+		},
+		{
+			// A dropped leases table — the out-of-band materialization shape
+			// the migration replay heals — reads as every column missing.
+			name:           "behind without a leases table is refused, not a raw table-not-found",
+			fullProjection: true,
+			expect: func(mock sqlmock.Sqlmock) {
+				expectMainCursor(mock, behind)
+				expectIssuesColumns(mock, "id", "arrival_seq")
+				expectCursorProbe(mock, "leases", false)
+			},
+			check: requireBehindError(behind),
+		},
+		{
+			// The first requirement's gap is terminal: the second table is
+			// never probed. sqlmock's strict ordering proves it — no leases
+			// expectations exist to consume.
+			name:           "a first-requirement gap stops the probes",
+			fullProjection: true,
+			expect: func(mock sqlmock.Sqlmock) {
+				expectMainCursor(mock, behind)
+				expectIssuesColumns(mock, "id")
+			},
+			check: requireBehindError(behind),
+		},
+		{
+			// Both requirements satisfied: the behind database keeps serving.
+			name:           "behind with both requirements complete stays readable",
+			fullProjection: true,
+			expect: func(mock sqlmock.Sqlmock) {
+				expectMainCursor(mock, behind)
+				expectIssuesColumns(mock, "id", "arrival_seq")
+				expectLeasesColumns(mock, "issue_id", "lease_expires_at", "heartbeat_at", "granted_node")
+			},
+			check: requireNoDriftError,
+		},
+		{
+			name: "a probe failure is wrapped, not mistaken for drift",
+			expect: func(mock sqlmock.Sqlmock) {
+				expectMainCursor(mock, behind)
+				expectCursorProbe(mock, "issues", true)
+				mock.ExpectQuery(`^SHOW COLUMNS FROM issues$`).WillReturnError(fmt.Errorf("boom"))
+			},
+			check: func(t *testing.T, err error) {
+				if err == nil || !strings.Contains(err.Error(), "schema drift check:") {
+					t.Fatalf("CheckReadableDrift = %v, want a wrapped probe error", err)
+				}
+			},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			db, mock, err := sqlmock.New()
@@ -411,11 +497,43 @@ func TestCheckReadableDrift(t *testing.T) {
 			}
 			defer db.Close()
 			tc.expect(mock)
-			tc.check(t, CheckReadableDrift(context.Background(), db, "issues", readableColumns))
+			reqs := issueOnlyRequirements(readableColumns)
+			if tc.fullProjection {
+				reqs = IssueReadableRequirements(readableColumns)
+			}
+			tc.check(t, CheckReadableDrift(context.Background(), db, reqs))
 			if err := mock.ExpectationsWereMet(); err != nil {
 				t.Fatalf("unmet sql expectations: %v", err)
 			}
 		})
+	}
+}
+
+// TestIssueReadableRequirementsMatchSQLBuild pins the readable requirements
+// against the SQL the shared projection actually issues — the join column and
+// the columns LeaseSelectColumns selects — so a new lease column in a SELECT
+// or JOIN fails here rather than as an unknown-column error at runtime. The
+// sqlbuild import lives in this test only: the schema package itself stays
+// unaware of query construction.
+func TestIssueReadableRequirementsMatchSQLBuild(t *testing.T) {
+	reqs := IssueReadableRequirements(sqlbuild.ColumnNames(sqlbuild.IssueBaseColumns))
+	if len(reqs) != 2 || reqs[0].Table != "issues" || reqs[1].Table != "leases" {
+		t.Fatalf("requirements = %+v, want exactly issues then leases", reqs)
+	}
+	if !reflect.DeepEqual(reqs[0].Columns, sqlbuild.ColumnNames(sqlbuild.IssueBaseColumns)) {
+		t.Errorf("issues requirement = %v, want the shared projection's columns %v",
+			reqs[0].Columns, sqlbuild.ColumnNames(sqlbuild.IssueBaseColumns))
+	}
+	join := sqlbuild.LeaseJoin("i")
+	if !strings.Contains(join, "leases.issue_id") {
+		t.Errorf("LeaseJoin = %q, expected it to reference leases.issue_id", join)
+	}
+	want := []string{"issue_id"}
+	for _, col := range strings.Split(sqlbuild.LeaseSelectColumns, ", ") {
+		want = append(want, strings.TrimPrefix(col, "leases."))
+	}
+	if !reflect.DeepEqual(reqs[1].Columns, want) {
+		t.Errorf("leases requirement = %v, want the join column plus LeaseSelectColumns %v", reqs[1].Columns, want)
 	}
 }
 
@@ -436,7 +554,7 @@ func TestCheckReadableDrift_EscapeHatchReadsAnyway(t *testing.T) {
 		t.Fatal(pipeErr)
 	}
 	os.Stderr = w
-	gotErr := CheckReadableDrift(context.Background(), db, "issues", readableColumns)
+	gotErr := CheckReadableDrift(context.Background(), db, issueOnlyRequirements(readableColumns))
 	_ = w.Close()
 	os.Stderr = origStderr
 	var buf bytes.Buffer

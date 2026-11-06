@@ -617,10 +617,13 @@ refused with the gate's guidance. Nothing is silently promoted, so there is no
 deadline — but the window is a degraded one, so keep it short.
 
 If the server's schema is v53 or older (1.1.x, or 1.2.2, the re-release of
-the 1.1 line), reads can fail too until step 2: `bd list` stops with
-`table not found: leases`
-([#6929](https://github.com/gastownhall/beads/issues/6929)). Run step 2 as
-soon as the clients are upgraded.
+the 1.1 line), reads can fail too until step 2: those databases have no
+leases table, which every issue read joins. The read refuses at open with
+the schema-version mismatch and its `bd migrate schema` remedy
+([#6929](https://github.com/gastownhall/beads/issues/6929)) — the same
+refusal a missing projected column produces, rather than a raw
+table-not-found error from the query. Run step 2 as soon as the clients
+are upgraded.
 
 **If a version-bump migration is refused, it retries by itself.** The first
 upgraded command that finds the shared database behind attempts the migration
