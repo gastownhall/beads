@@ -10,16 +10,20 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 )
 
 func TestResolveDoltBackupURL(t *testing.T) {
 	t.Parallel()
 
-	// Build the absolute-path fixture with platform-native semantics.
-	// A hard-coded POSIX literal like "/mnt/usb/beads-backup" is not absolute
-	// on Windows (no volume name), so resolveDoltBackupURL would resolve it
-	// against the current drive and return "file://C:\\mnt\\usb\\...".
-	// t.TempDir() is absolute and already cleaned on every platform.
+	// Build the absolute-path fixture with platform-native semantics, and
+	// spell its expectation through PathToFileURL. A hard-coded POSIX literal
+	// like "/mnt/usb/beads-backup" is not absolute on Windows (no volume
+	// name), so resolveDoltBackupURL would resolve it against the current
+	// drive; and a hard-coded "file://" + absBackup expectation would be the
+	// wrong spelling there, where the URL must be file:///C:/... for Dolt to
+	// read the drive. t.TempDir() is absolute and already cleaned on every
+	// platform, and PathToFileURL spells it right on every platform.
 	absBackup := filepath.Join(t.TempDir(), "beads-backup")
 
 	tests := []struct {
@@ -54,9 +58,9 @@ func TestResolveDoltBackupURL(t *testing.T) {
 			wantExact: "gs://bucket/path",
 		},
 		{
-			name:      "absolute path gets file:// prefix",
+			name:      "absolute path gets the PathToFileURL spelling",
 			input:     absBackup,
-			wantExact: "file://" + absBackup,
+			wantExact: versioncontrolops.PathToFileURL(absBackup),
 		},
 		{
 			name:    "relative path gets resolved and prefixed",
@@ -86,7 +90,7 @@ func TestResolveDoltBackupURL_HomeTilde(t *testing.T) {
 	t.Parallel()
 	got := resolveDoltBackupURL("~/backups/beads")
 	home, _ := os.UserHomeDir()
-	want := "file://" + filepath.Join(home, "backups/beads")
+	want := versioncontrolops.PathToFileURL(filepath.Join(home, "backups/beads"))
 	if got != want {
 		t.Errorf("resolveDoltBackupURL(~/backups/beads) = %q, want %q", got, want)
 	}

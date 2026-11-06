@@ -40,6 +40,18 @@ func TestDirToFileURLRejectsSchemes(t *testing.T) {
 	if !strings.HasPrefix(got, "file://") || strings.Contains(got, "://backups") {
 		t.Fatalf("DirToFileURL(%q) = %q", "backups/nightly", got)
 	}
+
+	// The resolved absolute path goes through the shared spelling, so on
+	// Windows, where t.TempDir() is a drive path, the URL is the
+	// file:///C:/... form instead of the concatenation POSIX would take.
+	dir := t.TempDir()
+	absURL, err := DirToFileURL(dir)
+	if err != nil {
+		t.Fatalf("DirToFileURL on an absolute dir: %v", err)
+	}
+	if want := PathToFileURL(dir); absURL != want {
+		t.Fatalf("DirToFileURL(%q) = %q, want %q", dir, absURL, want)
+	}
 }
 
 // TestPathToFileURL pins the file:// URL spelling Dolt's parser reads back as

@@ -231,7 +231,9 @@ func driveShaped(abs string) bool {
 		((abs[0] >= 'a' && abs[0] <= 'z') || (abs[0] >= 'A' && abs[0] <= 'Z'))
 }
 
-// DirToFileURL resolves dir to an absolute path and returns a file:// URL.
+// DirToFileURL resolves dir to an absolute path and returns it as the
+// file:// URL Dolt reads back as that directory: file:///C:/... for a
+// drive path, file://<path> for anything else (see PathToFileURL).
 //
 // An input that already carries a scheme is rejected rather than prefixed.
 // filepath.Abs would happily turn "https://doltremoteapi.dolthub.com/u/r" into
@@ -250,7 +252,7 @@ func DirToFileURL(dir string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolve absolute path: %w", err)
 	}
-	return "file://" + abs, nil
+	return PathToFileURL(abs), nil
 }
 
 // ExtractAddressConflictName parses the conflicting remote name from a Dolt

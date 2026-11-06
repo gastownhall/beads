@@ -1208,6 +1208,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Local backup destinations on Windows are now written as `file:///C:/...`
+  URLs. A lower-case drive from PowerShell (`bd backup init
+  c:\Users\me\backup`) used to become `file://c:\Users\me\backup`, which
+  Dolt's URL parser reads as the host `c` with an invalid port, so
+  `bd backup init`, `bd backup restore` and the automatic backup to a local
+  directory all failed with `invalid port ... after host`. Drive paths are
+  now spelled the way Dolt's own file-URL builder spells them — upper-case
+  drive letter, forward slashes — and POSIX paths are unchanged (#6019).
 - `bd config get` for a config.yaml, git-config or user-global key no longer
   opens the database just because one exists, so it answers from those files
   while the Dolt server is down instead of failing the open (GH#5108). In
