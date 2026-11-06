@@ -63,6 +63,12 @@ func TestClassify(t *testing.T) {
 		{"table-less cte union into outfile", "WITH t AS (SELECT 1 AS n) SELECT n FROM t UNION SELECT n FROM t INTO OUTFILE '/p'", Write},
 		{"intersect into outfile", "(SELECT 1) INTERSECT (SELECT 1) INTO OUTFILE '/p'", Write},
 		{"except into variable", "SELECT id FROM issues EXCEPT SELECT id FROM issues INTO @x", Write},
+		{"unparenthesized left into outfile", "SELECT 1 UNION (SELECT 2) INTO OUTFILE '/p'", Write},
+		{"union distinct into dumpfile", "SELECT 1 UNION DISTINCT SELECT id FROM issues INTO DUMPFILE '/p'", Write},
+		{"three-operand union order limit into outfile", "SELECT 1 UNION SELECT 2 UNION (SELECT 3) ORDER BY 1 LIMIT 1 INTO OUTFILE '/p'", Write},
+		// The INTO check answers before the Dolt-function upgrade, so an
+		// export whose operand calls a writing function stays Write.
+		{"dolt function union export", "SELECT 1 UNION SELECT DOLT_COMMIT('-Am','x') FROM dual INTO OUTFILE '/p'", Write},
 		// The grammar attaches INTO to a table-less last operand, or to an
 		// operand inside parentheses, and rejects it there: Mixed, which
 		// --readonly already refuses.
@@ -129,5 +135,20 @@ func TestClassify(t *testing.T) {
 				t.Errorf("Classify(%q) = %v, want %v", tc.query, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestClassifySetOpExportIsWrite pins GH#7033: a set operation that exports
+// its rows with INTO OUTFILE/DUMPFILE writes a file and must not run as a
+// rolled-back read.
+func TestClassifySetOpExportIsWrite(t *testing.T) {
+	for _, query := range []string{
+		"(SELECT id FROM issues) UNION ALL (SELECT id FROM issues) INTO OUTFILE '/tmp/bd-7033.txt'",
+		"(SELECT 1) UNION (SELECT 2) INTO DUMPFILE '/tmp/bd-7033.bin'",
+		"WITH t AS (SELECT 1 AS n) (SELECT n FROM t) UNION (SELECT 2) INTO OUTFILE '/tmp/bd-7033.txt'",
+	} {
+		if got := Classify(query); got != Write {
+			t.Errorf("Classify(%q) = %v, want %v", query, got, Write)
+		}
 	}
 }
