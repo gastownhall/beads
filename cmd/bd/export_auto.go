@@ -85,6 +85,35 @@ type exportAutoState struct {
 const exportAutoStateFile = "export-state.json"
 const gitAddTimeout = 5 * time.Second
 
+// autoExportPath is the JSONL file auto-export writes in beadsDir.
+func autoExportPath(beadsDir string) string {
+	exportPath := config.GetString("export.path")
+	if exportPath == "" {
+		if globalFlag {
+			exportPath = "global-issues.jsonl"
+		} else {
+			exportPath = "issues.jsonl"
+		}
+	}
+	return filepath.Join(beadsDir, exportPath)
+}
+
+// noteAutoExportDefaultOff explains, on stderr, why a workspace that
+// auto-exported before v1.0.5 no longer refreshes its JSONL: #4063 made
+// export.auto opt-in, and a workspace that never set the key went silent
+// (GH#4887). It only reads; it never writes state, config or the JSONL.
+func noteAutoExportDefaultOff() {
+	beadsDir := beads.FindBeadsDir()
+	if beadsDir == "" {
+		return
+	}
+	fmt.Fprintf(os.Stderr,
+		"Info: auto-export is off by default since bd v1.0.5; %s is no longer refreshed automatically.\n"+
+			"      Re-enable: bd config set export.auto true\n"+
+			"      Keep off:  bd config set export.auto false  (silences this note)\n",
+		autoExportPath(beadsDir))
+}
+
 // maybeAutoExport writes a git-tracked JSONL file if enabled and due.
 // Called from PersistentPostRun after auto-backup.
 //
@@ -99,13 +128,17 @@ func maybeAutoExport(ctx context.Context, allowEmptyOverwrite bool) error {
 		return nil
 	}
 
-	if !config.GetBool("export.auto") {
-		return nil
-	}
+	// The store guards come before the export.auto check so the default-off
+	// notice below only reaches commands that opened a store.
 	if store == nil {
 		return nil
 	}
 	if lm, ok := storage.UnwrapStore(store).(storage.LifecycleManager); ok && lm.IsClosed() {
+		return nil
+	}
+
+	if !config.GetBool("export.auto") {
+		noteAutoExportDefaultOff()
 		return nil
 	}
 
@@ -116,15 +149,7 @@ func maybeAutoExport(ctx context.Context, allowEmptyOverwrite bool) error {
 
 	// Resolve the export path before throttle/check detection so all decisions
 	// refer to the path that would actually be written.
-	exportPath := config.GetString("export.path")
-	if exportPath == "" {
-		if globalFlag {
-			exportPath = "global-issues.jsonl"
-		} else {
-			exportPath = "issues.jsonl"
-		}
-	}
-	fullPath := filepath.Join(beadsDir, exportPath)
+	fullPath := autoExportPath(beadsDir)
 
 	// Load state + interval.
 	state := loadExportAutoState(beadsDir)
