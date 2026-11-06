@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -746,4 +747,156 @@ func requireRepairCommitScope(t *testing.T, ctx context.Context, conn *sql.Conn,
 	if n := scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM "+diffOf+"'metadata') WHERE COALESCE(to_key, from_key) <> ?", isBlockedRepairOwedKey); n != 0 {
 		t.Errorf("repair commit changed %d metadata row(s) other than the owed key", n)
 	}
+}
+
+// seedCanonicalCorruptStore is seedCorruptStore with canonically keyed edges
+// and no wisps, so the pass has no rekey of its own and only the repair's
+// guards decide what happens to a dirty working set.
+func seedCanonicalCorruptStore(t *testing.T, ctx context.Context) (*sql.Conn, func()) {
+	t.Helper()
+	_, conn, closeConn := seedRewoundStore(t, ctx, 74, 31)
+	insertRepairRows(t, ctx, conn, "issues", repairGraph)
+	insertCanonicalEdges(t, ctx, conn, "dependencies", "depends_on_issue_id", repairEdges)
+	commitFixture(t, ctx, conn, "test: v74 store with flags left by dolt#11886")
+	return conn, closeConn
+}
+
+// refusalShape is a store an owed repair would run on, with where its main
+// cursor and committed key stand before the pass.
+type refusalShape struct {
+	name      string
+	seed      func(t *testing.T, ctx context.Context) (*sql.Conn, func())
+	mainAt    int
+	keyAtHead int
+}
+
+// requireNothingRepaired asserts a refused pass left the store as it was: the
+// main cursor and the key (working set and HEAD) where they started, stale
+// flags, HEAD where it started.
+func requireNothingRepaired(t *testing.T, ctx context.Context, conn *sql.Conn, headBefore string, shape refusalShape) {
+	t.Helper()
+	if got := scalarInt(t, ctx, conn, "SELECT MAX(version) FROM schema_migrations"); got != shape.mainAt {
+		t.Errorf("main cursor = %d after the refusal, want %d", got, shape.mainAt)
+	}
+	if n := repairKeyCount(t, ctx, conn, ""); n != shape.keyAtHead {
+		t.Errorf("repair key rows = %d after the refusal, want %d", n, shape.keyAtHead)
+	}
+	if n := repairKeyCount(t, ctx, conn, " AS OF 'HEAD'"); n != shape.keyAtHead {
+		t.Errorf("repair key rows at HEAD = %d after the refusal, want %d", n, shape.keyAtHead)
+	}
+	if got := scalarString(t, ctx, conn, "SELECT HASHOF('HEAD')"); got != headBefore {
+		t.Errorf("HEAD moved from %s to %s before the refusal", headBefore, got)
+	}
+	if n := repairCommitCount(t, ctx, conn); n != 0 {
+		t.Errorf("refused pass minted %d repair commit(s)", n)
+	}
+	requireFlags(t, ctx, conn, "issues", staleFlags(repairGraph))
+}
+
+// crossingShape is the 74/31 store whose pass crosses main 0075.
+var crossingShape = refusalShape{name: "crossing", seed: seedCanonicalCorruptStore, mainAt: 74}
+
+// TestEmbeddedMigration0075RefusesBeforeRepairWrites is AC-5: without main
+// consent the pass refuses with the typed consent error, and with consent an
+// uncommitted change to any repair input (issues, dependencies, metadata)
+// refuses with the typed dirty-table error naming exactly that table, both
+// before the key, a flag or a cursor is written. Dirt in a table the repair
+// never commits does not refuse.
+func TestEmbeddedMigration0075RefusesBeforeRepairWrites(t *testing.T) {
+	requireEmbedded(t)
+
+	t.Run("no main consent", func(t *testing.T) {
+		ctx := t.Context()
+		conn, closeConn := seedCanonicalCorruptStore(t, ctx)
+		defer closeConn()
+		headBefore := scalarString(t, ctx, conn, "SELECT HASHOF('HEAD')")
+		dirtyBefore := dirtyTableNames(t, ctx, conn)
+		schema.SetLocalMigrateConsent(false)
+		schema.SetForceAllowRemoteMigrate(false)
+		t.Cleanup(func() { schema.SetLocalMigrateConsent(true) })
+		t.Setenv(schema.AllowMigrateEnv, "")
+		t.Setenv(schema.AllowRemoteMigrateEnv, "")
+
+		_, err := schema.MigrateUp(ctx, conn)
+		var consentErr *schema.MigrateConsentError
+		if !errors.As(err, &consentErr) {
+			t.Fatalf("MigrateUp without consent: err = %v, want *schema.MigrateConsentError", err)
+		}
+		requireNothingRepaired(t, ctx, conn, headBefore, crossingShape)
+		if dirty := dirtyTableNames(t, ctx, conn); !slices.Equal(dirty, dirtyBefore) {
+			t.Errorf("refused pass changed the dirty tables from %v to %v; consent precedes every write", dirtyBefore, dirty)
+		}
+	})
+
+	// Each edit is paired with a probe that reads 1 while the user's value is
+	// still in the working set.
+	dirtyEdits := map[string][2]string{
+		"issues": {
+			"UPDATE issues SET title = 'edited by hand' WHERE id = 'rp-free'",
+			"SELECT COUNT(*) FROM issues WHERE id = 'rp-free' AND title = 'edited by hand'",
+		},
+		"dependencies": {
+			"INSERT INTO dependencies (id, issue_id, depends_on_issue_id, type, created_at, created_by, metadata) VALUES ('" + depid.New("rp-free", "rp-blocker") + "', 'rp-free', 'rp-blocker', 'relates-to', NOW(), 'fixture', JSON_OBJECT())",
+			"SELECT COUNT(*) FROM dependencies WHERE issue_id = 'rp-free' AND depends_on_issue_id = 'rp-blocker' AND type = 'relates-to'",
+		},
+		"metadata": {
+			"INSERT INTO metadata (`key`, value) VALUES ('fixture_note', 'uncommitted')",
+			"SELECT COUNT(*) FROM metadata WHERE `key` = 'fixture_note' AND value = 'uncommitted'",
+		},
+	}
+	for _, shape := range []refusalShape{crossingShape} {
+		for _, table := range []string{"issues", "dependencies", "metadata"} {
+			t.Run(shape.name+"/dirty "+table, func(t *testing.T) {
+				ctx := t.Context()
+				conn, closeConn := shape.seed(t, ctx)
+				defer closeConn()
+				headBefore := scalarString(t, ctx, conn, "SELECT HASHOF('HEAD')")
+				ignoredHad32 := ignoredCursorHas(t, ctx, conn, 32)
+				mustExecOn(t, ctx, conn, dirtyEdits[table][0])
+
+				_, err := schema.MigrateUp(ctx, conn)
+				var dirtyErr *schema.DirtyTablesError
+				if !errors.As(err, &dirtyErr) {
+					t.Fatalf("MigrateUp over dirty %s: err = %v, want *schema.DirtyTablesError", table, err)
+				}
+				if !slices.Equal(dirtyErr.Tables, []string{table}) {
+					t.Errorf("DirtyTablesError names %v, want exactly [%s]", dirtyErr.Tables, table)
+				}
+				requireNothingRepaired(t, ctx, conn, headBefore, shape)
+				if got := ignoredCursorHas(t, ctx, conn, 32); got != ignoredHad32 {
+					t.Errorf("ignored cursor row 32 present = %v after the refusal, want %v", got, ignoredHad32)
+				}
+				if got := scalarInt(t, ctx, conn, dirtyEdits[table][1]); got != 1 {
+					t.Errorf("user edit to %s lost by the refused pass", table)
+				}
+				if !contains(dirtyTableNames(t, ctx, conn), table) {
+					t.Errorf("user edit to %s no longer uncommitted after the refused pass", table)
+				}
+			})
+		}
+	}
+
+	t.Run("unrelated dirt does not refuse", func(t *testing.T) {
+		ctx := t.Context()
+		conn, closeConn := seedCanonicalCorruptStore(t, ctx)
+		defer closeConn()
+		mustExecOn(t, ctx, conn, "INSERT INTO custom_statuses (name, category) VALUES ('user-hold', 'unspecified')")
+
+		if _, err := schema.MigrateUp(ctx, conn); err != nil {
+			t.Fatalf("MigrateUp with only custom_statuses dirty: %v", err)
+		}
+		requireFlags(t, ctx, conn, "issues", healthyFlags(repairGraph))
+		if n := repairKeyCount(t, ctx, conn, ""); n != 0 {
+			t.Errorf("repair key rows = %d after the repair, want 0", n)
+		}
+		if n := repairCommitCount(t, ctx, conn); n != 1 {
+			t.Errorf("repair commits = %d, want 1", n)
+		}
+		if got := scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM custom_statuses WHERE name = 'user-hold'"); got != 1 {
+			t.Errorf("unrelated user edit lost by the pass (%d rows)", got)
+		}
+		if !contains(dirtyTableNames(t, ctx, conn), "custom_statuses") {
+			t.Error("unrelated user edit was committed by the pass; it must stay uncommitted")
+		}
+	})
 }

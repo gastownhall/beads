@@ -37,6 +37,44 @@ const isBlockedRepairOwedKey = "is_blocked_repair_owed_0075"
 // isBlockedRepairIgnoredVersion is the ignored marker that performs the repair.
 const isBlockedRepairIgnoredVersion = 32
 
+// isBlockedRepairMainVersion is the main marker that records the owed key.
+const isBlockedRepairMainVersion = 75
+
+// isBlockedRepairInputTables are the tracked tables the repair reads and
+// commits: the flags, the graph they derive from, and the owed key.
+var isBlockedRepairInputTables = []string{"issues", "dependencies", "metadata"}
+
+// refuseDirtyIsBlockedRepairInputs refuses a pass that may perform the owed
+// repair (main 0075 pending, or its key committed at HEAD) while a repair
+// input carries uncommitted changes the repair commit would otherwise sweep
+// in. It runs before any write of the pass, and its error is the typed one
+// the main pending-migration guard uses, with the same `bd dolt commit`
+// recovery. The raw-text guard already covers issues and metadata through
+// 0075's header; dependencies is only read by the recompute, so only this
+// guard sees it. No probe runs unless an input table is dirty.
+func refuseDirtyIsBlockedRepairInputs(ctx context.Context, db DBConn, mainVersionBefore int, dirtyBefore map[string]dirtyTableState) error {
+	var dirty []string
+	for _, table := range isBlockedRepairInputTables {
+		if _, ok := dirtyBefore[table]; ok {
+			dirty = append(dirty, table)
+		}
+	}
+	if len(dirty) == 0 {
+		return nil
+	}
+	owed := mainVersionBefore < isBlockedRepairMainVersion
+	if !owed {
+		var err error
+		if owed, err = isBlockedRepairOwedAtHead(ctx, db); err != nil {
+			return err
+		}
+	}
+	if !owed {
+		return nil
+	}
+	return &DirtyTablesError{Tables: dirty}
+}
+
 // isBlockedRepairCommitMessage labels the commit carrying the repaired flags.
 const isBlockedRepairCommitMessage = "schema: repair is_blocked flags left by 0059 (gastownhall/beads#7037)"
 
