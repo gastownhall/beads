@@ -504,15 +504,24 @@ func readThroughRefusedMigration(ctx context.Context, conn *sql.Conn, database s
 		return backoff.Permanent(gateErr)
 	}
 	// Reading on at the current schema works only while this binary's issue
-	// reads can query it. A schema that lacks a column the shared projection
-	// selects would answer every one of them with an unknown-column error, so
-	// it is refused here as server mode's read-only open refuses it
-	// (dolt.Config.RequireReadableSchema).
-	if err := schema.CheckReadableDrift(ctx, conn, []sqlbuild.ReadRelation{
-		{Table: "issues", Columns: sqlbuild.ColumnNames(sqlbuild.IssueBaseColumns)},
-	}); err != nil {
+	// reads can query it. A schema that lacks any relation those reads touch —
+	// a column the shared projection selects, the wisp fallback, or the
+	// clone-local lease overlay joined by every hydrated read (#6572) —
+	// would answer every one of them with an unknown-column or table error,
+	// so it is refused here as server mode's read-only open refuses it
+	// (dolt.Config.RequireReadableSchema). The refusal is the SAME gate error
+	// the caller already shaped, with the behind cause attached as
+	// ReadsRefused: the gate's remedy is what reconciles the schema, and a
+	// bare behind error would prescribe the very local migration the gate
+	// just refused to make.
+	if err := schema.CheckReadableDrift(ctx, conn, sqlbuild.IssueReadRelations()); err != nil {
 		if isSerializationError(err) {
 			return err
+		}
+		var behindErr *schema.SchemaBehindError
+		if errors.As(err, &behindErr) {
+			gateErr.ReadsRefused = behindErr
+			return backoff.Permanent(gateErr)
 		}
 		return backoff.Permanent(err)
 	}

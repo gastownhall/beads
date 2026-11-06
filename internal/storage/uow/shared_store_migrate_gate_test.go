@@ -62,20 +62,64 @@ func expectLockRelease(mock sqlmock.Sqlmock, lockName string) {
 		WillReturnRows(sqlmock.NewRows([]string{"released"}).AddRow(1))
 }
 
-// expectIssuesProjection mocks the read-through's schema.CheckReadableDrift on
-// a database at version, behind the binary: the cursor read, then the listing
-// of issues, which carries every column the shared projection selects except
-// omit (none when omit is empty).
-func expectIssuesProjection(mock sqlmock.Sqlmock, version int, omit string) {
-	expectVersionQuery(mock, version)
-	expectCursorProbe(mock, "issues", true)
-	rows := sqlmock.NewRows([]string{"Field", "Type", "Null", "Key", "Default", "Extra"})
-	for _, column := range sqlbuild.ColumnNames(sqlbuild.IssueBaseColumns) {
-		if column != omit {
-			rows.AddRow(column, "text", "YES", "", nil, "")
+// expectRelationProbe mocks one relation probe of the read-through's drift
+// check: the table-existence read, then — when the table exists — the SHOW
+// COLUMNS listing carrying columns.
+func expectRelationProbe(mock sqlmock.Sqlmock, table string, exists bool, columns []string) {
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = DATABASE()")).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	rows := sqlmock.NewRows([]string{"Tables_in_beads"}).AddRow("issues")
+	if exists && table != "issues" {
+		rows.AddRow(table)
+	}
+	mock.ExpectQuery("^SHOW TABLES$").WillReturnRows(rows)
+	if !exists {
+		return
+	}
+	listing := sqlmock.NewRows([]string{"Field", "Type", "Null", "Key", "Default", "Extra"})
+	for _, column := range columns {
+		listing.AddRow(column, "text", "YES", "", nil, "")
+	}
+	mock.ExpectQuery("^SHOW COLUMNS FROM " + table + "$").WillReturnRows(listing)
+}
+
+// withoutColumn returns columns minus one entry, for mocking a table that
+// lacks exactly one projected column.
+func withoutColumn(columns []string, drop string) []string {
+	out := make([]string, 0, len(columns))
+	for _, column := range columns {
+		if column != drop {
+			out = append(out, column)
 		}
 	}
-	mock.ExpectQuery(`^SHOW COLUMNS FROM issues$`).WillReturnRows(rows)
+	return out
+}
+
+// expectIssuesProjection mocks the read-through's schema.CheckReadableDrift on
+// a database at version, behind the binary: the version read, then the probe
+// of every issue-read relation (issues, wisps, leases), each carrying its
+// full projection except omitColumn, which drops that one column from the
+// issues listing (the missing-column fixture).
+func expectIssuesProjection(mock sqlmock.Sqlmock, version int, omitColumn string) {
+	expectVersionQuery(mock, version)
+	for _, rel := range sqlbuild.IssueReadRelations() {
+		columns := rel.Columns
+		if rel.Table == "issues" && omitColumn != "" {
+			columns = withoutColumn(columns, omitColumn)
+		}
+		expectRelationProbe(mock, rel.Table, true, columns)
+	}
+}
+
+// expectLeaseOverlayUnreadable mocks the drift check on a behind database
+// whose issues projection is intact but whose leases overlay is absent
+// entirely — the #6572 shape: the gate tolerates the refusal, the reads
+// cannot query the overlay they join.
+func expectLeaseOverlayUnreadable(mock sqlmock.Sqlmock, version int) {
+	expectVersionQuery(mock, version)
+	for _, rel := range sqlbuild.IssueReadRelations() {
+		expectRelationProbe(mock, rel.Table, rel.Table != "leases", rel.Columns)
+	}
 }
 
 // TestInitSchemaSharedStoreGate covers the proxied/`bd serve` open path's half
@@ -393,47 +437,91 @@ func TestReadThroughRefusedMigrationWarning(t *testing.T) {
 
 // TestReadThroughRefusesASchemaItsReadsCannotQuery pins the read-through's
 // limit. It serves reads at the current schema only while this binary's issue
-// reads can query it; on a database that lacks a column the shared projection
-// selects (arrival_seq, on one the previous release migrated) every read would
-// fail on the unknown column. So the open refuses, permanently, with
-// SchemaBehindError, and never prints that the read carries on.
+// reads can query it — the row projection, the wisp fallback, the lease
+// overlay; on a database that lacks any of them (a column the shared
+// projection selects, or the clone-local leases table itself, #6572) every
+// read would fail on the unknown column or table. So the open refuses,
+// permanently, as the SAME gate decision the operator already met, carrying
+// the schema-behind cause with its missing-relation evidence, and never
+// prints that the read carries on.
 func TestReadThroughRefusesASchemaItsReadsCannotQuery(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatalf("create sql mock: %v", err)
-	}
-	defer db.Close()
-	ctx := context.Background()
-	conn, err := db.Conn(ctx)
-	if err != nil {
-		t.Fatalf("pin connection: %v", err)
-	}
-	defer conn.Close()
 	behind := schema.LatestVersion() - 1
-	mock.ExpectExec(regexp.QuoteMeta("USE `beads`")).
-		WillReturnResult(sqlmock.NewResult(0, 0))
-	expectIssuesProjection(mock, behind, "arrival_seq")
+	for _, tc := range []struct {
+		name    string
+		expect  func(sqlmock.Sqlmock)
+		missing []string
+	}{
+		{
+			name: "missing a projected row column",
+			expect: func(mock sqlmock.Sqlmock) {
+				expectIssuesProjection(mock, behind, "arrival_seq")
+			},
+			missing: []string{"issues.arrival_seq"},
+		},
+		{
+			name: "missing the lease overlay",
+			expect: func(mock sqlmock.Sqlmock) {
+				expectLeaseOverlayUnreadable(mock, behind)
+			},
+			missing: []string{"leases"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("create sql mock: %v", err)
+			}
+			defer db.Close()
+			ctx := context.Background()
+			conn, err := db.Conn(ctx)
+			if err != nil {
+				t.Fatalf("pin connection: %v", err)
+			}
+			defer conn.Close()
+			mock.ExpectExec(regexp.QuoteMeta("USE `beads`")).
+				WillReturnResult(sqlmock.NewResult(0, 0))
+			tc.expect(mock)
 
-	gateErr := &schema.RemoteMigrateGateError{
-		CurrentVersion: behind, LatestVersion: schema.LatestVersion(), Pending: 1,
-		Decision: "shared-no-remote", Shared: true, Proxied: true,
-	}
-	var readErr error
-	stderr := captureStderr(t, func() {
-		readErr = readThroughRefusedMigration(ctx, conn, "beads", gateErr)
-	})
-	var permanent *backoff.PermanentError
-	if !errors.As(readErr, &permanent) {
-		t.Fatalf("readThroughRefusedMigration() = %T (%v), want a permanent refusal: a retry reads the same schema", readErr, readErr)
-	}
-	var behindErr *schema.SchemaBehindError
-	if !errors.As(readErr, &behindErr) || behindErr.DBVersion != behind {
-		t.Fatalf("readThroughRefusedMigration() = %v, want *schema.SchemaBehindError at v%d", readErr, behind)
-	}
-	if strings.Contains(stderr, "continuing on schema") {
-		t.Errorf("the refused read-through still announced that the read carries on:\n%s", stderr)
-	}
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Fatalf("unmet SQL expectations: %v", err)
+			gateErr := &schema.RemoteMigrateGateError{
+				CurrentVersion: behind, LatestVersion: schema.LatestVersion(), Pending: 1,
+				Decision: "shared-no-remote", Shared: true, Proxied: true,
+			}
+			var readErr error
+			stderr := captureStderr(t, func() {
+				readErr = readThroughRefusedMigration(ctx, conn, "beads", gateErr)
+			})
+			var permanent *backoff.PermanentError
+			if !errors.As(readErr, &permanent) {
+				t.Fatalf("readThroughRefusedMigration() = %T (%v), want a permanent refusal: a retry reads the same schema", readErr, readErr)
+			}
+			// The refusal preserves the original gate decision, with the
+			// schema-behind cause attached rather than replacing it: the
+			// gate's remedy is what reconciles the schema, and a bare
+			// behind-error would prescribe the local migration the gate
+			// just refused to make (#6572).
+			var gateOut *schema.RemoteMigrateGateError
+			if !errors.As(readErr, &gateOut) || gateOut != gateErr {
+				t.Fatalf("readThroughRefusedMigration() = %T (%v), want the original *schema.RemoteMigrateGateError preserved", readErr, readErr)
+			}
+			if gateOut.Decision != "shared-no-remote" || !gateOut.Shared || !gateOut.Proxied {
+				t.Errorf("the preserved gate lost its decision fields: %+v", gateOut)
+			}
+			var behindErr *schema.SchemaBehindError
+			if !errors.As(readErr, &behindErr) || behindErr.DBVersion != behind {
+				t.Fatalf("readThroughRefusedMigration() = %v, want *schema.SchemaBehindError at v%d through the gate error", readErr, behind)
+			}
+			if gateOut.ReadsRefused != behindErr {
+				t.Errorf("the gate's ReadsRefused = %v, want the same behind error found through the chain", gateOut.ReadsRefused)
+			}
+			if got, want := strings.Join(behindErr.Missing, ", "), strings.Join(tc.missing, ", "); got != want {
+				t.Errorf("refusal names %q, want %q", got, want)
+			}
+			if strings.Contains(stderr, "continuing on schema") {
+				t.Errorf("the refused read-through still announced that the read carries on:\n%s", stderr)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("unmet SQL expectations: %v", err)
+			}
+		})
 	}
 }
