@@ -168,10 +168,11 @@ func TestIsRunningKeepsStateForProcessItMayNotSignal(t *testing.T) {
 	assertStateFilesKept(t, dir, 14567)
 }
 
-// With no port recorded or configured, IsRunning stops a listed dolt
-// sql-server for a restart, but not one this user may not signal (EPERM): no
-// signal would reach it. It reports the server not running and keeps the pid
-// file, which a start replaces.
+// With no port recorded or configured, IsRunning reports a listed dolt
+// sql-server as running with an unresolved port — except one this user may
+// not signal (EPERM): no signal would reach it, and no caller could stop it
+// either, so it is reported not running and its pid file kept for a start to
+// replace.
 func TestIsRunningDoesNotStopProcessItMayNotSignalWithoutPort(t *testing.T) {
 	dir := t.TempDir()
 	exited := startStaleServerFiles(t, dir)
@@ -306,5 +307,44 @@ func TestParseDoltProcessPIDs(t *testing.T) {
 				t.Fatalf("parseDoltProcessPIDs() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// GH#6614: IsRunning backs `bd dolt status`. A confirmed dolt sql-server whose
+// port cannot be resolved (no port file, no configured port) is uncertain
+// tracking, not proof the server is safe to stop: observing it must neither
+// signal the process nor delete its pid file.
+func TestIsRunningDoesNotStopConfirmedServerWithUnknownPort(t *testing.T) {
+	dir := t.TempDir()
+	exited := startStaleServerFiles(t, dir)
+	if err := os.Remove(portPath(dir)); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	t.Setenv("BEADS_SHARED_SERVER_DIR", t.TempDir())
+	if got := DefaultConfig(dir).Port; got != 0 {
+		t.Fatalf("precondition: DefaultConfig resolved port %d, want 0", got)
+	}
+	data, err := os.ReadFile(pidPath(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The process list confirms the tracked PID is a dolt sql-server.
+	stubProcessList(t, func() ([]int, error) { return []int{pid}, nil })
+
+	state, err := IsRunning(dir)
+	if err != nil {
+		t.Fatalf("IsRunning error: %v", err)
+	}
+	if !state.Running || state.PID != pid || state.Port != 0 {
+		t.Errorf("IsRunning = %+v, want Running with PID %d and Port 0", state, pid)
+	}
+	expectNotSignaled(t, exited)
+	if _, err := os.Stat(pidPath(dir)); err != nil {
+		t.Errorf("expected the pid file to be kept: %v", err)
 	}
 }

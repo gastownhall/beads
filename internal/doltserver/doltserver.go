@@ -399,6 +399,11 @@ type Config struct {
 type State struct {
 	Running        bool   `json:"running"`
 	PID            int    `json:"pid"`
+	// Port is the port the tracked server listens on, or 0 when unresolved:
+	// the port file is missing or unreadable and no port is configured
+	// (GH#6614). Running reports process presence, not endpoint availability,
+	// so a live server with an unresolved port is Running=true with Port=0 —
+	// consumers must not adopt or dial Port=0.
 	Port           int    `json:"port"`
 	RemotesAPIPort int    `json:"remotesapi_port,omitempty"`
 	DataDir        string `json:"data_dir"`
@@ -717,7 +722,8 @@ func ManagesLiveServerOnPort(beadsDir string, port int) bool {
 // (GH#7214), while this answers false, the refusing direction for its caller.
 //
 // Read-only, unlike IsRunning, which deletes the state files of a PID that is
-// dead or not dolt and can stop a server whose port it cannot determine.
+// dead or not dolt (it no longer stops a server whose port it cannot
+// determine, GH#6614).
 // Unlike ManagesLiveServerOnPort it rejects a recycled PID, at the cost of a
 // `ps` call (PowerShell on Windows), so keep it off the every-open path.
 func IsTrackedServerRunning(beadsDir string) bool {
@@ -1345,7 +1351,15 @@ func defaultConfigForMode(beadsDir string, sharedMode bool, resolvePort serverPo
 // IsRunning checks if a managed server is running for this beadsDir.
 // Returns a State with Running=true if the PID file names a live dolt process,
 // or a live process the process list could not be read to verify, provided the
-// port file records its port (GH#7214).
+// port file records its port (GH#7214). Running reports process presence, not
+// endpoint availability: a confirmed dolt sql-server whose port cannot be
+// resolved (the port file is missing or unreadable and no port is configured)
+// is reported Running=true with Port=0 (GH#6614).
+//
+// IsRunning is safe to call from observation paths: it never signals the
+// tracked process. It still cleans up tracking that provably names no live
+// dolt server of its own — a corrupt PID file, a dead PID, or a PID the
+// process list shows was reused — so it is not a filesystem-read-only check.
 func IsRunning(beadsDir string) (*State, error) {
 	data, err := os.ReadFile(pidPath(beadsDir))
 	if err != nil {
@@ -1405,31 +1419,31 @@ func IsRunning(beadsDir string) (*State, error) {
 		// signaling the PID.
 		return &State{Running: false}, nil
 	}
+	cfg := DefaultConfig(beadsDir)
 	if port == 0 {
-		cfg := DefaultConfig(beadsDir)
 		port = cfg.Port
 	}
 	if port == 0 {
 		// Server is running but we can't determine its port (port file
-		// missing, no explicit config). Stop the orphan so that callers
-		// (EnsureRunning) trigger a fresh Start() with a new port file.
+		// missing, no explicit config). Uncertain tracking is not proof the
+		// process is safe to stop (GH#6614): observation neither signals it
+		// nor deletes its files. Report it Running with Port=0 and leave
+		// recovery to the start paths, which decide replacement under the
+		// lifecycle lock and workspace policy.
 		if !isSignalableProcess(pid) {
 			// Signal 0 answered EPERM: the process is alive, but no signal
 			// from this user reaches it. Leave its pid file, as for an
 			// unverified PID above: a start replaces it.
 			return &State{Running: false}, nil
 		}
-		fmt.Fprintf(os.Stderr, "Dolt server (PID %d) running but port unknown; stopping for restart\n", pid)
-		if err := gracefulStop(pid, 5*time.Second); err != nil {
-			// Best-effort kill
-			if proc, findErr := os.FindProcess(pid); findErr == nil {
-				_ = proc.Kill()
-			}
-		}
-		_ = os.Remove(pidPath(beadsDir))
-		return &State{Running: false}, nil
+		return &State{
+			Running:        true,
+			PID:            pid,
+			Port:           0,
+			RemotesAPIPort: cfg.RemotesAPIPort,
+			DataDir:        ResolveDoltDir(beadsDir),
+		}, nil
 	}
-	cfg := DefaultConfig(beadsDir)
 	return &State{
 		Running:        true,
 		PID:            pid,
@@ -2104,8 +2118,10 @@ func startLocked(beadsDir string) (*State, error) {
 			// Record the server before waiting on it, as soon as it exists:
 			// if bd is interrupted during the wait, the next bd (or bd dolt
 			// stop / killall) must still find the dolt that holds the
-			// database lock. Both files, with the real port: IsRunning stops
-			// a tracked server whose port it cannot determine.
+			// database lock. Both files, with the real port: a reader in the
+			// gap between the two writes sees a live server whose port is
+			// unresolved, which IsRunning reports without touching it
+			// (GH#6614), and every later reader needs the port.
 			if werr := writeServerStateFiles(beadsDir, srv.pid, actualPort); werr != nil {
 				srv.killAndWait()
 				removeServerStateFiles(beadsDir)
