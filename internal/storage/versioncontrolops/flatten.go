@@ -12,7 +12,7 @@ import (
 //  3. Soft-reset to the initial (oldest) commit, collapsing all history
 //  4. Stage all + commit as a single snapshot
 //  5. Checkout main
-//  6. Hard-reset main to the flattened branch
+//  6. Soft-reset main to the flattened branch (keeps main's working set)
 //  7. Delete temp branch
 //
 // Callers should run PruneRemoteRefs and then DoltGC afterward to reclaim disk
@@ -58,7 +58,11 @@ func Flatten(ctx context.Context, conn DBConn) error {
 		{"soft reset to initial", "CALL DOLT_RESET('--soft', ?)", []interface{}{initialHash}},
 		{"commit flattened snapshot", "CALL DOLT_COMMIT('-Am', 'flatten: squash all history into single commit')", nil},
 		{"checkout main", "CALL DOLT_CHECKOUT('main')", nil},
-		{"reset main to flattened", "CALL DOLT_RESET('--hard', 'flatten-tmp')", nil},
+		// --soft moves main's HEAD and keeps its staged and working sets.
+		// --hard replaced the working set with the snapshot's tree, which
+		// dropped every foreign key on the dolt_ignored (clone-local) tables
+		// that live only there (bd-7bpkd).
+		{"reset main to flattened", "CALL DOLT_RESET('--soft', 'flatten-tmp')", nil},
 		{"delete temp branch", "CALL DOLT_BRANCH('-D', 'flatten-tmp')", nil},
 	}
 
