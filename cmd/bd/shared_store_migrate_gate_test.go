@@ -178,6 +178,27 @@ func TestSharedServerVersionBumpDoesNotPromoteCursor(t *testing.T) {
 		t.Errorf("expected the one-shot shared-store notice on stderr, got:\n%s", stderr)
 	}
 
+	// The consent deferral settles the upgrade witness (#6929): an operator
+	// decision is not a failure, so the one-shot signal is consumed —
+	// unlike the dirty-tables failure, which keeps the witness for the retry.
+	if raw, err := os.ReadFile(filepath.Join(beadsDir, localVersionFile)); err != nil {
+		t.Fatalf("read %s after the refused bump: %v", localVersionFile, err)
+	} else if got := strings.TrimSpace(string(raw)); got != Version {
+		t.Errorf("witness = %q after the gate refusal, want %q — a consent deferral must settle", got, Version)
+	}
+	// And the next command does not repeat the gate notice: no stale witness,
+	// no second upgrade attempt. Reads keep working throughout.
+	stdout, stderr, code = run("list")
+	if code != 0 {
+		t.Fatalf("second bd list exit = %d, want 0\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	if !strings.Contains(stdout, "shr-1") {
+		t.Errorf("second bd list did not render the issue:\n%s", stdout)
+	}
+	if strings.Contains(stderr, "not auto-applying") {
+		t.Errorf("the settled deferral must not repeat the gate notice on the next command; got:\n%s", stderr)
+	}
+
 	// A write is refused outright, with the full guidance block rather than a
 	// bare error.
 	stdout, stderr, code = run("create", "Should be refused", "-p", "2")

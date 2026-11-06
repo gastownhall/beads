@@ -671,6 +671,23 @@ func TestTrackBdVersion_UpgradeDefersStamp(t *testing.T) {
 		{name: "settled", outcome: versionBumpSettled, wantStamp: true},
 		{name: "deferred", outcome: versionBumpDeferred, wantStamp: true},
 		{name: "failed", outcome: versionBumpFailed, wantStamp: false},
+		// The same settlements reached the way autoMigrateOnVersionBump
+		// reaches them: through the classification of the attempt's error.
+		{
+			name:      "remote-migration gate refusal via classification",
+			outcome:   versionBumpOutcomeForError(fmt.Errorf("open: %w", &schema.RemoteMigrateGateError{CurrentVersion: 72, LatestVersion: 74, Pending: 2})),
+			wantStamp: true,
+		},
+		{
+			name:      "migration consent refusal via classification",
+			outcome:   versionBumpOutcomeForError(fmt.Errorf("recording the database version: %w", &schema.MigrateConsentError{CurrentVersion: 72, LatestVersion: 74, Pending: 2})),
+			wantStamp: true,
+		},
+		{
+			name:      "dirty tables via classification",
+			outcome:   versionBumpOutcomeForError(&schema.DirtyTablesError{Tables: []string{"issues"}}),
+			wantStamp: false,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -916,11 +933,12 @@ func TestNoticeVersionBumpFailure(t *testing.T) {
 	}
 }
 
-// TestVersionBumpOpenFailed classifies the writable open's errors as they
-// arrive, wrapped, from the store open: both consent refusals defer the
-// upgrade (stamped, so the next command does not repeat the attempt) with
-// their existing notices, everything else fails it with the failure notice.
-func TestVersionBumpOpenFailed(t *testing.T) {
+// TestVersionBumpAttemptFailed classifies the attempt's errors as they arrive,
+// wrapped, from the writable store open or from ReconcileVersion: both consent
+// refusals defer the upgrade (stamped, so the next command does not repeat the
+// attempt) with their existing notices, everything else fails it with the
+// failure notice.
+func TestVersionBumpAttemptFailed(t *testing.T) {
 	pinJSONOutput(t, false)
 	tests := []struct {
 		name        string
@@ -955,29 +973,35 @@ func TestVersionBumpOpenFailed(t *testing.T) {
 			wantNotice: "connection refused",
 		},
 	}
+	wraps := map[string]string{
+		"open":      "failed to initialize schema: schema migration: %w",
+		"reconcile": "recording the database version: %w",
+	}
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			origFailed := versionBumpFailedThisRun
-			t.Cleanup(func() { versionBumpFailedThisRun = origFailed })
-			wrapped := fmt.Errorf("failed to initialize schema: schema migration: %w", tt.err)
-			if got := versionBumpOutcomeForOpenError(wrapped); got != tt.want {
-				t.Errorf("versionBumpOutcomeForOpenError = %v, want %v", got, tt.want)
-			}
-			var got versionBumpOutcome
-			out := captureNoticeStderr(t, func() { got = versionBumpOpenFailed(wrapped) })
-			if got != tt.want {
-				t.Errorf("versionBumpOpenFailed = %v, want %v", got, tt.want)
-			}
-			if tt.wantNotice == "" && out != "" {
-				t.Errorf("expected no notice, got:\n%s", out)
-			}
-			if tt.wantNotice != "" && !strings.Contains(out, tt.wantNotice) {
-				t.Errorf("notice is missing %q:\n%s", tt.wantNotice, out)
-			}
-			if tt.forbidSubst != "" && strings.Contains(out, tt.forbidSubst) {
-				t.Errorf("a deliberate deferral was reported as a failure:\n%s", out)
-			}
-		})
+		for via, format := range wraps {
+			t.Run(tt.name+"/"+via, func(t *testing.T) {
+				origFailed := versionBumpFailedThisRun
+				t.Cleanup(func() { versionBumpFailedThisRun = origFailed })
+				wrapped := fmt.Errorf(format, tt.err)
+				if got := versionBumpOutcomeForError(wrapped); got != tt.want {
+					t.Errorf("versionBumpOutcomeForError = %v, want %v", got, tt.want)
+				}
+				var got versionBumpOutcome
+				out := captureNoticeStderr(t, func() { got = versionBumpAttemptFailed(wrapped) })
+				if got != tt.want {
+					t.Errorf("versionBumpAttemptFailed = %v, want %v", got, tt.want)
+				}
+				if tt.wantNotice == "" && out != "" {
+					t.Errorf("expected no notice, got:\n%s", out)
+				}
+				if tt.wantNotice != "" && !strings.Contains(out, tt.wantNotice) {
+					t.Errorf("notice is missing %q:\n%s", tt.wantNotice, out)
+				}
+				if tt.forbidSubst != "" && strings.Contains(out, tt.forbidSubst) {
+					t.Errorf("a deliberate deferral was reported as a failure:\n%s", out)
+				}
+			})
+		}
 	}
 }
 
