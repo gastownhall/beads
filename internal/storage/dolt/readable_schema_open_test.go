@@ -110,6 +110,52 @@ func TestDoltNew_RequireReadableSchema(t *testing.T) {
 		}
 	})
 
+	// The same refusal for the lease overlay, the #6572 shape: leases is
+	// clone-local (dolt_ignored), so a fresh clone that has not replayed the
+	// ignored series — or one whose overlay a co-resident older client left
+	// mid-series — can be behind on granted_node while the shared issues
+	// plane is fully current. Restore 0073's columns (the up file is guarded
+	// and adds no cursor row, so the database stays one behind) and break the
+	// overlay instead.
+	runMigrationSQL(t, ctx, store, "../schema/migrations/0073_add_arrival_seq.up.sql")
+	if _, err := store.db.ExecContext(ctx, "ALTER TABLE leases DROP COLUMN granted_node"); err != nil {
+		t.Fatalf("drop leases.granted_node: %v", err)
+	}
+
+	t.Run("read-only open refuses a broken lease overlay", func(t *testing.T) {
+		err := openWith(&Config{ReadOnly: true, RequireReadableSchema: true})
+		var behindErr *schema.SchemaBehindError
+		if !errors.As(err, &behindErr) {
+			t.Fatalf("New (read-only, leases missing granted_node) = %T (%v), want *schema.SchemaBehindError: every hydrated read joins leases (#6572)", err, err)
+		}
+		if got, want := strings.Join(behindErr.Missing, ", "), "leases.granted_node"; got != want {
+			t.Errorf("SchemaBehindError.Missing = %q, want %q", got, want)
+		}
+		if behindErr.DBVersion != behind || behindErr.Gateway {
+			t.Errorf("SchemaBehindError = %+v, want v%d behind, not a gateway's", *behindErr, behind)
+		}
+	})
+
+	t.Run("gateway open names the server administrator for the overlay too", func(t *testing.T) {
+		err := openWith(&Config{Gateway: true, RequireReadableSchema: true})
+		var behindErr *schema.SchemaBehindError
+		if !errors.As(err, &behindErr) || !behindErr.Gateway {
+			t.Fatalf("New (gateway, leases missing granted_node) = %T (%v), want a gateway *schema.SchemaBehindError", err, err)
+		}
+		if got, want := strings.Join(behindErr.Missing, ", "), "leases.granted_node"; got != want {
+			t.Errorf("SchemaBehindError.Missing = %q, want %q", got, want)
+		}
+		if strings.Contains(err.Error(), "bd migrate schema") {
+			t.Errorf("gateway refusal %q prescribes `bd migrate schema`", err)
+		}
+	})
+
+	t.Run("an open that does not ask still opens on the broken overlay", func(t *testing.T) {
+		if err := openWith(&Config{ReadOnly: true}); err != nil {
+			t.Fatalf("New (read-only, no RequireReadableSchema, leases missing granted_node) = %v, want success", err)
+		}
+	})
+
 	t.Run("the escape hatch reads anyway", func(t *testing.T) {
 		t.Setenv("BD_IGNORE_SCHEMA_SKEW", "1")
 		if err := openWith(&Config{ReadOnly: true, RequireReadableSchema: true}); err != nil {

@@ -2140,25 +2140,20 @@ var stopRejectedAutoStartedServer = doltserver.Stop
 // failure, such as a sandbox refusing the connection, without a live server.
 var dialServer = net.DialTimeout
 
-// issueProjectionRelations is the relation slice checkOpenSchemaDrift
-// requires today: the issues row projection (sqlbuild.IssueBaseColumns, shared
-// by both planes) on issues, the replicated table whose shape the schema
-// cursor describes.
-var issueProjectionRelations = []sqlbuild.ReadRelation{
-	{Table: "issues", Columns: sqlbuild.ColumnNames(sqlbuild.IssueBaseColumns)},
-}
-
 // checkOpenSchemaDrift is newServerMode's schema drift check. Every open
 // refuses a database ahead of this binary (schema.CheckForwardDrift). An open
 // that will not migrate and sets Config.RequireReadableSchema also refuses,
-// from the same version read, one behind it that lacks a projected column
-// (schema.CheckReadableDrift). Through a gateway that refusal names the
-// server administrator's remedy, since bd never migrates a gateway's schema.
+// from the same version read, one behind it that lacks a relation this
+// binary's issue reads touch (schema.CheckReadableDrift over
+// sqlbuild.IssueReadRelations: the issues row projection, the wisp fallback,
+// and the clone-local lease overlay every hydrated read joins, #6572).
+// Through a gateway that refusal names the server administrator's remedy,
+// since bd never migrates a gateway's schema.
 func checkOpenSchemaDrift(ctx context.Context, db *sql.DB, cfg *Config) error {
 	if !cfg.RequireReadableSchema || (!cfg.ReadOnly && !cfg.Gateway) {
 		return schema.CheckForwardDrift(ctx, db)
 	}
-	err := schema.CheckReadableDrift(ctx, db, issueProjectionRelations)
+	err := schema.CheckReadableDrift(ctx, db, sqlbuild.IssueReadRelations())
 	var behind *schema.SchemaBehindError
 	if cfg.Gateway && errors.As(err, &behind) {
 		behind.Gateway = true
