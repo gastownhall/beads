@@ -1086,6 +1086,11 @@ func migrateUpAfterReconcile(ctx context.Context, db DBConn, seedChanged bool) (
 	if len(touchedDirtyTables) > 0 {
 		return 0, &DirtyTablesError{Tables: touchedDirtyTables}
 	}
+	// gastownhall/beads#7037: the is_blocked repair commits issues,
+	// dependencies and metadata, so none may carry user changes into it.
+	if err := refuseDirtyIsBlockedRepairInputs(ctx, db, mainVersionBefore, dirtyBefore); err != nil {
+		return 0, err
+	}
 	dirtyBeforeSignatures, err := dirtyTableSignatures(ctx, db, dirtyBefore)
 	if err != nil {
 		return 0, fmt.Errorf("reading pre-migration dirty table diffs: %w", err)

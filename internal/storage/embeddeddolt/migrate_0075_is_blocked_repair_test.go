@@ -5,6 +5,7 @@ package embeddeddolt_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"slices"
 	"sort"
@@ -497,4 +498,85 @@ func TestEmbeddedMigration0075RepairCommitCarriesItsGraph(t *testing.T) {
 		t.Errorf("repair commit changed %d metadata row(s) other than the owed key", n)
 	}
 	requireFullRecomputeCorrectsNothing(t, ctx, conn)
+}
+
+// seedCanonicalCorruptStore is seedCorruptStore with canonically keyed edges
+// and no wisps, so the pass has no rekey of its own and only the repair's
+// guards decide what happens to a dirty working set.
+func seedCanonicalCorruptStore(t *testing.T, ctx context.Context) (*sql.Conn, func()) {
+	t.Helper()
+	_, conn, closeConn := seedRewoundStore(t, ctx, 74, 31)
+	insertRepairRows(t, ctx, conn, "issues", repairGraph)
+	insertCanonicalEdges(t, ctx, conn, "dependencies", "depends_on_issue_id", repairEdges)
+	commitFixture(t, ctx, conn, "test: v74 store with flags left by dolt#11886")
+	return conn, closeConn
+}
+
+// requireNothingRepaired asserts a refused pass left the 74/31 store as it
+// was: no key, no main 75, stale flags, HEAD where it started.
+func requireNothingRepaired(t *testing.T, ctx context.Context, conn *sql.Conn, headBefore string) {
+	t.Helper()
+	if got := scalarInt(t, ctx, conn, "SELECT MAX(version) FROM schema_migrations"); got != 74 {
+		t.Errorf("main cursor = %d after the refusal, want 74", got)
+	}
+	if n := repairKeyCount(t, ctx, conn, ""); n != 0 {
+		t.Errorf("repair key written before the refusal (%d row(s))", n)
+	}
+	if got := scalarString(t, ctx, conn, "SELECT HASHOF('HEAD')"); got != headBefore {
+		t.Errorf("HEAD moved from %s to %s before the refusal", headBefore, got)
+	}
+	requireFlags(t, ctx, conn, "issues", staleFlags(repairGraph))
+}
+
+// TestEmbeddedMigration0075RefusesBeforeRepairWrites is AC-5: without main
+// consent the pass refuses with the typed consent error, and with consent an
+// uncommitted change to any repair input (issues, dependencies, metadata)
+// refuses with the typed dirty-table error, both before the key, a flag or
+// the main 75 marker is written.
+func TestEmbeddedMigration0075RefusesBeforeRepairWrites(t *testing.T) {
+	requireEmbedded(t)
+
+	t.Run("no main consent", func(t *testing.T) {
+		ctx := t.Context()
+		conn, closeConn := seedCanonicalCorruptStore(t, ctx)
+		defer closeConn()
+		headBefore := scalarString(t, ctx, conn, "SELECT HASHOF('HEAD')")
+		schema.SetLocalMigrateConsent(false)
+		schema.SetForceAllowRemoteMigrate(false)
+		t.Cleanup(func() { schema.SetLocalMigrateConsent(true) })
+		t.Setenv(schema.AllowMigrateEnv, "")
+		t.Setenv(schema.AllowRemoteMigrateEnv, "")
+
+		_, err := schema.MigrateUp(ctx, conn)
+		var consentErr *schema.MigrateConsentError
+		if !errors.As(err, &consentErr) {
+			t.Fatalf("MigrateUp without consent: err = %v, want *schema.MigrateConsentError", err)
+		}
+		requireNothingRepaired(t, ctx, conn, headBefore)
+	})
+
+	dirtyEdits := map[string]string{
+		"issues":       "UPDATE issues SET title = 'edited by hand' WHERE id = 'rp-free'",
+		"dependencies": "INSERT INTO dependencies (id, issue_id, depends_on_issue_id, type, created_at, created_by, metadata) VALUES ('" + depid.New("rp-free", "rp-blocker") + "', 'rp-free', 'rp-blocker', 'relates-to', NOW(), 'fixture', JSON_OBJECT())",
+		"metadata":     "INSERT INTO metadata (`key`, value) VALUES ('fixture_note', 'uncommitted')",
+	}
+	for _, table := range []string{"issues", "dependencies", "metadata"} {
+		t.Run("dirty "+table, func(t *testing.T) {
+			ctx := t.Context()
+			conn, closeConn := seedCanonicalCorruptStore(t, ctx)
+			defer closeConn()
+			headBefore := scalarString(t, ctx, conn, "SELECT HASHOF('HEAD')")
+			mustExecOn(t, ctx, conn, dirtyEdits[table])
+
+			_, err := schema.MigrateUp(ctx, conn)
+			var dirtyErr *schema.DirtyTablesError
+			if !errors.As(err, &dirtyErr) {
+				t.Fatalf("MigrateUp over dirty %s: err = %v, want *schema.DirtyTablesError", table, err)
+			}
+			if !contains(dirtyErr.Tables, table) {
+				t.Errorf("DirtyTablesError names %v, want %s among them", dirtyErr.Tables, table)
+			}
+			requireNothingRepaired(t, ctx, conn, headBefore)
+		})
+	}
 }
