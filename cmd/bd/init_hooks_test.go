@@ -344,22 +344,20 @@ func TestTrackedManagedHookSectionsMatchGenerator(t *testing.T) {
 	}
 }
 
-// TestGenerateHookSection_DBNotInitialized verifies exit code 3 handling (GH#2449).
-func TestGenerateHookSection_DBNotInitialized(t *testing.T) {
-	section := generateHookSection("pre-commit")
-
-	// Exit code 3 = beads database not initialized; hook must continue gracefully
-	if !strings.Contains(section, `"$_bd_exit" -eq 3`) {
-		t.Error("section missing exit code 3 (DB not initialized) handling")
-	}
-	if !strings.Contains(section, "database not initialized") {
-		t.Error("section missing DB-not-initialized warning message")
-	}
-
-	// After handling exit code 3, the effective exit must be 0 (success)
-	// Verify the pattern: set _bd_exit=0 after detecting code 3
-	if !strings.Contains(section, `if [ "$_bd_exit" -eq 3 ]; then`) {
-		t.Error("section missing exit code 3 conditional")
+// TestGenerateHookSection_NoExitCodeThreeSpecialCase verifies GH#2449's
+// exit-code-3 special case is gone (GH#6751, from PR #6840). "hooks" is a
+// no-database command, so bd hooks run never opens a store and cannot itself
+// report "database not initialized"; swallowing a 3 swallowed a chained
+// <name>.old hook's real verdict.
+func TestGenerateHookSection_NoExitCodeThreeSpecialCase(t *testing.T) {
+	for _, hookName := range managedHookNames {
+		section := generateHookSection(hookName)
+		if strings.Contains(section, `"$_bd_exit" -eq 3`) {
+			t.Errorf("%s: section still special-cases exit code 3", hookName)
+		}
+		if strings.Contains(section, "database not initialized") {
+			t.Errorf("%s: section still contains the stale DB-not-initialized warning", hookName)
+		}
 	}
 }
 
