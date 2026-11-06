@@ -281,3 +281,31 @@ func TestRetireRefusesReplacedPath(t *testing.T) {
 	require.NoError(t, err, "the replacement must survive the lease's release")
 	require.Equal(t, "replacement", string(got), "releasing the lease must not delete the replacement")
 }
+
+// TestTryLockPathRemoveStillFailsWhileHeld pins that ordinary leases did not
+// gain delete sharing: a retirable contender still meets lock contention,
+// and removing a held TryLock file still fails with a sharing violation.
+// Once released, the file is still there and removes normally.
+func TestTryLockPathRemoveStillFailsWhileHeld(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "life.lock")
+	lease, err := TryLock(path)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		if lease != nil {
+			lease.Unlock()
+		}
+	})
+
+	other, err := TryRetirableLock(path)
+	if other != nil {
+		other.Unlock()
+	}
+	require.True(t, lockfile.IsLocked(err), "existing lifecycle holder refusal = %v", err)
+	require.ErrorIs(t, os.Remove(path), windows.ERROR_SHARING_VIOLATION, "removing a held ordinary lease")
+	require.FileExists(t, path)
+
+	lease.Unlock()
+	lease = nil
+	require.FileExists(t, path, "Unlock closes the handle without removing the file")
+	require.NoError(t, os.Remove(path), "a released ordinary path removes normally")
+}
