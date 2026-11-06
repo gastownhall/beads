@@ -1208,6 +1208,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **bd no longer probes the native user-config location on every launch when
+  `~/.config/bd/config.yaml` exists (GH#8113).** Startup stat'ed
+  `os.UserConfigDir()/bd/config.yaml` — `~/Library/Application Support/bd/config.yaml`
+  on macOS — even when the documented file was present, and on macOS 26 that
+  stat raises the "would like to access data from other apps" privacy prompt
+  on every launch, so anything that runs bd often (hooks, launchd jobs,
+  agents) saw it repeatedly. The documented file now shadows the native one
+  outright, the way direct config operations already treated it: only one of
+  the two is read, and the native location is consulted only when
+  `~/.config/bd/config.yaml` is absent (it is never stat'ed otherwise). If
+  you kept settings only in the native file, copy them into
+  `~/.config/bd/config.yaml`; keys that lived there — including private
+  confirmations such as a trusted endpoint — no longer apply while the
+  documented file exists. The legacy `~/.beads/config.yaml` layer still
+  merges as before.
 - `bd config get` for a config.yaml, git-config or user-global key no longer
   opens the database just because one exists, so it answers from those files
   while the Dolt server is down instead of failing the open (GH#5108). In
