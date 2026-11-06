@@ -900,3 +900,222 @@ func TestEmbeddedMigration0075RefusesBeforeRepairWrites(t *testing.T) {
 		}
 	})
 }
+
+// commitTrackedIgnoredTables commits the tables HEAD tracks although
+// dolt_ignore names them, which only a forced DOLT_ADD stages. seedMainSchemaAt's
+// baseline commit tracks leases (main creates it before the pattern exists)
+// and the seed's ignored pass then alters it, so without this the ignored
+// pass's dirty guard refuses any replay that touches it.
+func commitTrackedIgnoredTables(t *testing.T, ctx context.Context, conn *sql.Conn) {
+	t.Helper()
+	var dirty []string
+	queryEach(t, ctx, conn, "SELECT table_name FROM dolt_status", 1, func(r []string) { dirty = append(dirty, r[0]) })
+	if len(dirty) == 0 {
+		return
+	}
+	for _, name := range dirty {
+		mustExecOn(t, ctx, conn, "CALL DOLT_ADD('--force', ?)", name)
+	}
+	mustExecOn(t, ctx, conn, "CALL DOLT_COMMIT('-m', 'test: commit tracked tables dolt_ignore names')")
+}
+
+// dropUntrackedTables drops every table HEAD does not track, the shape a
+// fresh clone has before its first open.
+func dropUntrackedTables(t *testing.T, ctx context.Context, conn *sql.Conn) {
+	t.Helper()
+	rows, err := conn.QueryContext(ctx, "SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE() AND table_type = 'BASE TABLE' ORDER BY table_name")
+	if err != nil {
+		t.Fatalf("list tables: %v", err)
+	}
+	var all []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatalf("scan table: %v", err)
+		}
+		all = append(all, name)
+	}
+	rows.Close()
+	tracked := map[string]bool{}
+	head, err := conn.QueryContext(ctx, "SHOW TABLES AS OF 'HEAD'")
+	if err != nil {
+		t.Fatalf("list HEAD tables: %v", err)
+	}
+	for head.Next() {
+		var name string
+		if err := head.Scan(&name); err != nil {
+			t.Fatalf("scan HEAD table: %v", err)
+		}
+		tracked[name] = true
+	}
+	head.Close()
+	mustExecOn(t, ctx, conn, "SET FOREIGN_KEY_CHECKS = 0")
+	for _, name := range all {
+		if !tracked[name] && !strings.HasPrefix(name, "dolt_") {
+			mustExecOn(t, ctx, conn, "DROP TABLE `"+name+"`")
+		}
+	}
+	mustExecOn(t, ctx, conn, "SET FOREIGN_KEY_CHECKS = 1")
+}
+
+// requireIgnoredCursorContiguous asserts the ignored cursor records every
+// step 1..latest, so 0032 cannot have run ahead of a prerequisite.
+func requireIgnoredCursorContiguous(t *testing.T, ctx context.Context, conn *sql.Conn) {
+	t.Helper()
+	var versions []int
+	queryEach(t, ctx, conn, "SELECT version FROM ignored_schema_migrations ORDER BY version", 1, func(r []string) {
+		var v int
+		if _, err := fmt.Sscan(r[0], &v); err != nil {
+			t.Fatalf("parse ignored cursor row %q: %v", r[0], err)
+		}
+		versions = append(versions, v)
+	})
+	if len(versions) != schema.LatestIgnoredVersion() {
+		t.Fatalf("ignored cursor holds %d row(s), want %d (%v)", len(versions), schema.LatestIgnoredVersion(), versions)
+	}
+	for i, v := range versions {
+		if v != i+1 {
+			t.Fatalf("ignored cursor rows are not contiguous: position %d holds %d (%v)", i, v, versions)
+		}
+	}
+}
+
+// TestEmbeddedMigration0075RepairRunsAfterItsPrerequisites is AC-6: whatever
+// the pass still has to build first (the whole ignored series on a fresh
+// clone, which has no wisp tables; or a low ignored cursor that replays the
+// frozen wisp recompute and the rekey markers) runs before ignored 0032, and
+// the store ends where a full recompute agrees.
+func TestEmbeddedMigration0075RepairRunsAfterItsPrerequisites(t *testing.T) {
+	requireEmbedded(t)
+
+	t.Run("wisp tables absent", func(t *testing.T) {
+		ctx := t.Context()
+		// A fresh clone of a v74 lineage: every dolt-ignored table, the wisp
+		// plane and the ignored cursor included, exists only where it was
+		// created, so the clone has none of them.
+		_, conn, closeConn := seedRewoundStore(t, ctx, 74, 31)
+		defer closeConn()
+		dropUntrackedTables(t, ctx, conn)
+		if n := scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name IN ('wisps', 'ignored_schema_migrations')"); n != 0 {
+			t.Fatalf("fixture: %d clone-local table(s) survived the drop", n)
+		}
+		insertRepairRows(t, ctx, conn, "issues", repairGraph)
+		insertIssueEdges(t, ctx, conn, repairEdges)
+		commitFixture(t, ctx, conn, "test: v74 store that never ran the ignored series")
+		commitTrackedIgnoredTables(t, ctx, conn)
+
+		if _, err := schema.MigrateUp(ctx, conn); err != nil {
+			t.Fatalf("MigrateUp: %v", err)
+		}
+		requireFlags(t, ctx, conn, "issues", repairGraph)
+		requireStamps(t, ctx, conn, "issues", repairGraph)
+		requireIgnoredCursorContiguous(t, ctx, conn)
+		if n := repairKeyCount(t, ctx, conn, " AS OF 'HEAD'"); n != 0 {
+			t.Errorf("repair key still committed at HEAD (%d row(s))", n)
+		}
+		requireFullRecomputeCorrectsNothing(t, ctx, conn)
+	})
+
+	t.Run("low ignored cursor replays the wisp prerequisites", func(t *testing.T) {
+		ctx := t.Context()
+		// Ignored 0014: below the frozen wisp recompute 0015 and the rekey
+		// markers 0018 and 0026.
+		_, conn, closeConn := seedRewoundStore(t, ctx, 74, 14)
+		defer closeConn()
+		insertRepairRows(t, ctx, conn, "issues", repairGraph)
+		insertIssueEdges(t, ctx, conn, repairEdges)
+		insertRepairRows(t, ctx, conn, "wisps", wispRepairGraph)
+		insertWispEdges(t, ctx, conn, wispRepairEdges)
+		commitFixture(t, ctx, conn, "test: v74 store with a low ignored cursor")
+		commitTrackedIgnoredTables(t, ctx, conn)
+
+		if _, err := schema.MigrateUp(ctx, conn); err != nil {
+			t.Fatalf("MigrateUp: %v", err)
+		}
+		requireFlags(t, ctx, conn, "issues", repairGraph)
+		requireFlags(t, ctx, conn, "wisps", wispRepairGraph)
+		requireStamps(t, ctx, conn, "issues", repairGraph)
+		for _, table := range []string{"dependencies", "wisp_dependencies"} {
+			if n := scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM "+table); n == 0 {
+				t.Errorf("%s emptied by the replay", table)
+			}
+		}
+		requireIgnoredCursorContiguous(t, ctx, conn)
+		requireFullRecomputeCorrectsNothing(t, ctx, conn)
+	})
+
+	t.Run("ignored 18 with a pending dedup that changes blockedness", func(t *testing.T) {
+		ctx := t.Context()
+		// Ignored 0018: the whole frozen block 0019..0031 is pending, and the
+		// tracked plane holds a #5268 duplicate edge the pass's rekey must
+		// collapse before 0032 derives flags from the graph.
+		_, conn, closeConn := seedRewoundStore(t, ctx, 74, 18)
+		defer closeConn()
+		insertStampedIssues(t, ctx, conn, "issues", []stampedIssue{
+			{id: "pr-blocker", status: "open", stamp: historicalStamp(1)},
+			{id: "pr-blocked", status: "open", stamp: historicalStamp(2), wantBlocked: true},
+			// Stale: a 0059-era over-set.
+			{id: "pr-related", status: "open", stamp: historicalStamp(3), wantBlocked: true},
+			{id: "pr-twin", status: "open", stamp: historicalStamp(4)},
+			// Correct for the pre-dedup graph, wrong once the duplicate collapses.
+			{id: "pr-dup", status: "open", stamp: historicalStamp(5), wantBlocked: true},
+		}, true)
+		insertIssueEdges(t, ctx, conn, [][3]string{
+			{"pr-blocked", "pr-blocker", "blocks"},
+			{"pr-related", "pr-blocked", "relates-to"},
+		})
+		mustExecOn(t, ctx, conn, `
+INSERT INTO dependencies (id, issue_id, depends_on_issue_id, depends_on_wisp_id, type, created_at, created_by, metadata) VALUES
+  (UUID(), 'pr-dup', 'pr-twin', NULL, 'relates-to', NOW(), 'fixture', JSON_OBJECT()),
+  (UUID(), 'pr-dup', NULL, 'pr-twin', 'blocks', NOW(), 'fixture', JSON_OBJECT())`)
+		// Clone-local wisps with stale flags that must survive the frozen
+		// block's replay and be repaired by 0032.
+		mustExecOn(t, ctx, conn, `
+INSERT INTO wisps (id, title, status, is_blocked, updated_at) VALUES
+  ('pr-twin', 'open wisp twin of the issue id', 'open', 0, ?),
+  ('wf-free', 'no edges', 'open', 1, ?),
+  ('wf-waited', 'waits on pr-blocker', 'open', 0, ?)`,
+			historicalStamp(6), historicalStamp(7), historicalStamp(8))
+		mustExecOn(t, ctx, conn,
+			"INSERT INTO wisp_dependencies (id, issue_id, depends_on_issue_id, type, created_at, created_by, metadata) VALUES (?, 'wf-waited', 'pr-blocker', 'blocks', NOW(), 'fixture', JSON_OBJECT())",
+			depid.New("wf-waited", "pr-blocker"))
+		commitFixture(t, ctx, conn, "test: v74 store at ignored 18 with a duplicate edge and stale flags")
+		commitTrackedIgnoredTables(t, ctx, conn)
+
+		if _, err := schema.MigrateUp(ctx, conn); err != nil {
+			t.Fatalf("MigrateUp: %v", err)
+		}
+
+		requireIgnoredCursorContiguous(t, ctx, conn)
+
+		// The rekey collapsed the duplicate to its issue-typed survivor
+		// before the repair computed, which is why pr-dup ends unblocked.
+		var dupEdges, dupIssueTyped int
+		if err := conn.QueryRowContext(ctx,
+			"SELECT COUNT(*), COALESCE(SUM(depends_on_issue_id IS NOT NULL), 0) FROM dependencies WHERE issue_id = 'pr-dup'").Scan(&dupEdges, &dupIssueTyped); err != nil {
+			t.Fatalf("count pr-dup edges: %v", err)
+		}
+		if dupEdges != 1 || dupIssueTyped != 1 {
+			t.Errorf("pr-dup holds %d edge(s) (%d issue-typed), want exactly the one issue-typed survivor", dupEdges, dupIssueTyped)
+		}
+		for table, flags := range map[string]map[string]bool{
+			"issues": {"pr-blocker": false, "pr-blocked": true, "pr-related": false, "pr-twin": false, "pr-dup": false},
+			"wisps":  {"pr-twin": false, "wf-free": false, "wf-waited": true},
+		} {
+			for id, want := range flags {
+				if got := readIsBlocked(t, ctx, conn, table, id); got != want {
+					t.Errorf("%s %s: is_blocked = %v, want %v", table, id, got, want)
+				}
+			}
+		}
+		if n := scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM wisps WHERE id IN ('pr-twin', 'wf-free', 'wf-waited')"); n != 3 {
+			t.Errorf("%d of 3 local wisps survived the replay", n)
+		}
+		if n := repairKeyCount(t, ctx, conn, " AS OF 'HEAD'"); n != 0 {
+			t.Errorf("repair key still committed at HEAD (%d row(s))", n)
+		}
+		requireStamp(t, ctx, conn, "issues", "pr-related", historicalStamp(3))
+		requireStamp(t, ctx, conn, "issues", "pr-dup", historicalStamp(5))
+		requireFullRecomputeCorrectsNothing(t, ctx, conn)
+	})
+}
