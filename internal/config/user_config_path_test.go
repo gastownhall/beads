@@ -523,3 +523,30 @@ func TestExistingUserConfigYamlPath(t *testing.T) {
 		}
 	})
 }
+
+// GH#8113: with both modern user config files present, only the documented
+// file applies. A key set only in the shadowed native file reaches neither
+// the effective config nor the private (user-confirmed) values, while the
+// legacy file still merges beneath the documented one.
+func TestInitializeIgnoresNativeUserConfigWhenDocumentedExists(t *testing.T) {
+	candidates, _ := isolateUserConfigRoots(t)
+	writeConfigBody(t, candidates.documented, "actor: documented\n")
+	writeConfigBody(t, candidates.native, "actor: native\ngit.author: native-only\n")
+	writeConfigBody(t, candidates.legacy, "git.no-gpg-sign: true\n")
+
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+	if got := GetString("actor"); got != "documented" {
+		t.Fatalf("actor = %q, want %q", got, "documented")
+	}
+	if got := GetString("git.author"); got != "" {
+		t.Fatalf("git.author = %q: native %s was merged although documented %s exists", got, candidates.native, candidates.documented)
+	}
+	if got := PrivateConfigValue("git.author"); got != "" {
+		t.Fatalf("PrivateConfigValue(git.author) = %q: shadowed native file still confirms private values", got)
+	}
+	if !GetBool("git.no-gpg-sign") {
+		t.Fatalf("git.no-gpg-sign = false, want the legacy %s value to still merge", candidates.legacy)
+	}
+}
