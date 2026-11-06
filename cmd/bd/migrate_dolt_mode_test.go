@@ -913,6 +913,17 @@ func TestMigrateJournal_SaveRoundTrip(t *testing.T) {
 	require.False(t, entries[0].IsDir())
 }
 
+func TestMigrateJournal_Remove(t *testing.T) {
+	beadsDir := t.TempDir()
+	path := migrateJournalPath(beadsDir)
+	// Seed directly so removal exercises its own directory flush independently.
+	require.NoError(t, os.WriteFile(path, []byte("{}"), 0o600))
+	require.NoError(t, removeMigrateJournal(beadsDir))
+	_, err := os.Stat(path)
+	require.ErrorIs(t, err, os.ErrNotExist)
+	require.NoError(t, removeMigrateJournal(beadsDir), "missing journal is a no-op")
+}
+
 func TestMigrateJournal_UnknownPhaseFailsClosed(t *testing.T) {
 	beadsDir := migrateModeWorkspace(t, configfile.DoltModeServer)
 	path := migrateJournalPath(beadsDir)
