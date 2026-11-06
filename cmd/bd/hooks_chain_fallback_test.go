@@ -464,3 +464,38 @@ exec ./pre-push "$@"
 		}
 	})
 }
+
+// TestGeneratedHookSectionPropagatesBDExitThree pins that a newly generated
+// section returns bd's exit 3 instead of reading it as an uninitialized
+// database: bd hooks run never opens a database, so a 3 can only be a chained
+// hook's own verdict.
+func TestGeneratedHookSectionPropagatesBDExitThree(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fixtures are POSIX shell scripts")
+	}
+	backends := map[string][]hookProcessFixture{
+		"coreutils": {{name: "timeout", body: hookProcessGNUTimeoutStub}},
+		"perl": {
+			{name: "timeout", body: hookProcessIncompatibleTimeoutStub},
+			{name: "gtimeout", body: hookProcessIncompatibleGtimeoutStub},
+			{name: "perl", body: hookProcessPerlStub},
+		},
+		"direct": {
+			{name: "timeout", body: hookProcessIncompatibleTimeoutStub},
+			{name: "gtimeout", body: hookProcessIncompatibleGtimeoutStub},
+		},
+	}
+	for name, fixtures := range backends {
+		for _, hookName := range managedHookNames {
+			t.Run(name+"/"+hookName, func(t *testing.T) {
+				result := runGeneratedHookProcess(t, hookProcessCase{hookName: hookName, fixtures: fixtures, bdExit: 3})
+				if result.exitCode != 3 {
+					t.Errorf("hook exit = %d, want bd's 3\n%s", result.exitCode, result.output)
+				}
+				if strings.Contains(result.output, "database not initialized") {
+					t.Errorf("hook still reports bd's exit 3 as an uninitialized database\n%s", result.output)
+				}
+			})
+		}
+	}
+}

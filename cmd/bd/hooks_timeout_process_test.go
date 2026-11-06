@@ -394,7 +394,9 @@ func testHookProcessReservedStatuses(t *testing.T) {
 		wantWarning   bool
 		wantDBWarning bool
 	}{
-		{name: "database-not-initialized is skipped", fixtures: gnu, bdExit: 3, wantDBWarning: true},
+		// GH#6751: bd hooks run never opens a database, so its 3 is a chained
+		// hook's verdict and is returned, not read as "not initialized".
+		{name: "exit 3 propagates", fixtures: gnu, bdExit: 3, wantExit: 3},
 		{name: "GNU owns 124", fixtures: gnu, bdExit: 124, wantWarning: true},
 		{name: "GNU preserves 137", fixtures: gnu, bdExit: 137, wantExit: 137},
 		{name: "GNU preserves 142", fixtures: gnu, bdExit: 142, wantExit: 142},
@@ -531,7 +533,8 @@ func testHookProcessRealPerlStatuses(t *testing.T) {
 		wantDBWarning bool
 	}{
 		{name: "success continues", bdExit: 0},
-		{name: "database-not-initialized is skipped", bdExit: 3, wantDBWarning: true},
+		// GH#6751: a 3 from bd hooks run is a chained hook's verdict, not a skip.
+		{name: "exit 3 propagates", bdExit: 3, wantExit: 3},
 		{name: "other status is preserved", bdExit: 37, wantExit: 37},
 		{name: "124 is preserved", bdExit: 124, wantExit: 124},
 		{name: "142 is reported as a timeout", bdExit: 142, wantWarning: true},

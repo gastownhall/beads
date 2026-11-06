@@ -99,8 +99,6 @@ const hookTimeoutKillAfterSeconds = 2
 //     status. SIGHUP, SIGINT and SIGTERM that reach the supervisor are passed
 //     on to the group: a Ctrl-C signals the terminal's process group, which no
 //     longer holds bd.
-//   - If the beads database is not initialized (exit code 3), the hook exits
-//     successfully with a warning so that git operations are not blocked.
 //
 // Chained hooks (GH#6751, building on PR #6840 by vishnujayvel): bd hooks run
 // runs <hookName>.old, a foreign tool's hook, before its own work, so the
@@ -121,6 +119,9 @@ const hookTimeoutKillAfterSeconds = 2
 //     falls through to the content after the section on success. The run
 //     sets BD_HOOK_CHAIN_ACTIVE to the hook name, so a chained hook that
 //     re-enters its parent hook is not chained again.
+//   - bd's exit 3 is returned as is. bd hooks run never opens a database
+//     (hooks is a no-database command), so the old "database not initialized"
+//     skip only ever swallowed a chained hook's own exit 3.
 func generateHookSection(hookName string) string {
 	return hookSectionBeginLine() + "\n" +
 		"# This section is managed by beads. Do not remove these markers.\n" +
@@ -226,10 +227,6 @@ func generateHookSection(hookName string) string {
 		"  fi\n" +
 		"  if { [ \"$_bd_timeout_backend\" = coreutils ] && [ \"$_bd_exit\" -eq 124 ]; } || { [ \"$_bd_timeout_backend\" = perl ] && [ \"$_bd_exit\" -eq 142 ]; }; then\n" +
 		"    echo >&2 \"beads: hook '" + hookName + "' timed out after ${_bd_timeout}s — continuing without beads\"\n" +
-		"    _bd_exit=0\n" +
-		"  fi\n" +
-		"  if [ \"$_bd_exit\" -eq 3 ]; then\n" +
-		"    echo >&2 \"beads: database not initialized — skipping hook '" + hookName + "'\"\n" +
 		"    _bd_exit=0\n" +
 		"  fi\n" +
 		"  if [ \"$_bd_exit\" -ne 0 ]; then exit \"$_bd_exit\"; fi\n" +
