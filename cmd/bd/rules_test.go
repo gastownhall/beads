@@ -632,6 +632,47 @@ func TestRulesRunAudit_NonDirectoryPath(t *testing.T) {
 		}
 		requireFileKept(t, path)
 	})
+	requireMissing := func(t *testing.T, result *AuditResult, err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("RunAudit: %v", err)
+		}
+		if result == nil || result.TotalRules != 0 || result.TokenEstimate != 0 ||
+			result.Contradictions != nil || result.MergeCandidates != nil || result.Rules != nil {
+			t.Fatalf("RunAudit = %+v, want the empty result for a missing directory", result)
+		}
+	}
+	t.Run("absent path", func(t *testing.T) {
+		result, err := RunAudit(filepath.Join(t.TempDir(), "rules"), 0.6)
+		requireMissing(t, result, err)
+	})
+	t.Run("not-exist read error for an absent path", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "rules")
+		stubRead(t, &fs.PathError{Op: "open", Path: path, Err: fs.ErrNotExist})
+		result, err := RunAudit(path, 0.6)
+		requireMissing(t, result, err)
+	})
+	t.Run("empty directory", func(t *testing.T) {
+		result, err := RunAudit(t.TempDir(), 0.6)
+		if err != nil {
+			t.Fatalf("RunAudit: %v", err)
+		}
+		if result.TotalRules != 0 || result.Contradictions == nil || result.MergeCandidates == nil {
+			t.Fatalf("RunAudit = %+v, want zero rules with empty, non-nil reports", result)
+		}
+	})
+	t.Run("populated directory", func(t *testing.T) {
+		dir := t.TempDir()
+		writeRule(t, dir, "first", "# First\n**Do:** Check context first.\n")
+		writeRule(t, dir, "second", "# Second\n**Do:** Run the tests.\n")
+		result, err := RunAudit(dir, 0.6)
+		if err != nil {
+			t.Fatalf("RunAudit: %v", err)
+		}
+		if result.TotalRules != 2 {
+			t.Fatalf("total rules = %d, want 2", result.TotalRules)
+		}
+	})
 }
 
 func TestRulesRunAudit_SkipsNonMarkdown(t *testing.T) {

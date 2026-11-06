@@ -214,6 +214,46 @@ func TestClassifyResetDataRemoteNonDirectoryTarget(t *testing.T) {
 		}
 		requireFileKept(t, path)
 	})
+	requireKind := func(t *testing.T, path string, want resetDataKind) {
+		t.Helper()
+		got, err := classifyResetDataRemote(path)
+		if err != nil {
+			t.Fatalf("classifyResetDataRemote(%q): %v", path, err)
+		}
+		if got != want {
+			t.Fatalf("classifyResetDataRemote(%q) = %v, want %v", path, got, want)
+		}
+	}
+	t.Run("absent path", func(t *testing.T) {
+		requireKind(t, filepath.Join(t.TempDir(), "remote"), resetDataFileAbsent)
+	})
+	t.Run("not-exist read error for an absent path", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "remote")
+		stubRead(t, &fs.PathError{Op: "open", Path: path, Err: fs.ErrNotExist})
+		requireKind(t, path, resetDataFileAbsent)
+	})
+	t.Run("empty directory", func(t *testing.T) {
+		requireKind(t, t.TempDir(), resetDataFileAbsent)
+	})
+	t.Run("directory holding a manifest", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "manifest"), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		requireKind(t, dir, resetDataFileStore)
+	})
+	t.Run("unrecognized populated directory", func(t *testing.T) {
+		dir := t.TempDir()
+		keep := filepath.Join(dir, "keep")
+		if err := os.WriteFile(keep, []byte(fileBytes), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		kind, err := classifyResetDataRemote(dir)
+		if err == nil || !strings.Contains(err.Error(), "refusing to clear it") {
+			t.Fatalf("classifyResetDataRemote(%q) = %v, %v; want the refusal error", dir, kind, err)
+		}
+		requireFileKept(t, keep)
+	})
 }
 
 // TestResetDataGitURL pins the URL reset-data gives git for a remote as Dolt
