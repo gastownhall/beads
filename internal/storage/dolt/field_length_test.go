@@ -266,4 +266,42 @@ func TestMapUpdateTitleValidation(t *testing.T) {
 			t.Fatalf("stored issue fails create/import validation: %v", err)
 		}
 	})
+
+	t.Run("legacy oversized title stays editable when not changed", func(t *testing.T) {
+		// Seed the row an older bd could write: the store refuses this title
+		// now, so it goes in by raw SQL, in this test's isolated database only.
+		create(t, "tl-legacy", false)
+		if _, err := store.db.ExecContext(ctx, "UPDATE issues SET title = ? WHERE id = ?", reporter, "tl-legacy"); err != nil {
+			t.Fatalf("seed legacy title: %v", err)
+		}
+		for _, step := range []struct {
+			name    string
+			updates map[string]interface{}
+		}{
+			{"title omitted", map[string]interface{}{"description": "edited with title omitted"}},
+			{"title restated", map[string]interface{}{"title": reporter, "description": "edited with title restated"}},
+		} {
+			if err := store.UpdateIssue(ctx, "tl-legacy", step.updates, "tester"); err != nil {
+				t.Fatalf("%s: UpdateIssue on a legacy row: %v", step.name, err)
+			}
+			got, err := store.GetIssue(ctx, "tl-legacy")
+			if err != nil || got == nil {
+				t.Fatalf("%s: GetIssue: %v", step.name, err)
+			}
+			if got.Title != reporter || got.Description != step.updates["description"] {
+				t.Fatalf("%s: got title %d bytes / description %q, want the legacy title kept and description %q",
+					step.name, len(got.Title), got.Description, step.updates["description"])
+			}
+		}
+		// A changed title still answers to the rule, and a valid one repairs the row.
+		if err := store.UpdateIssue(ctx, "tl-legacy", map[string]interface{}{"title": reporter + "x"}, "tester"); !errors.Is(err, storage.ErrValidation) {
+			t.Fatalf("changing a legacy title to another oversized title: err = %v, want errors.Is(ErrValidation)", err)
+		}
+		if err := store.UpdateIssue(ctx, "tl-legacy", map[string]interface{}{"title": "repaired title"}, "tester"); err != nil {
+			t.Fatalf("repairing the legacy title: %v", err)
+		}
+		if got, err := store.GetIssue(ctx, "tl-legacy"); err != nil || got == nil || got.Title != "repaired title" {
+			t.Fatalf("after repair: got %+v, err %v; want title %q", got, err, "repaired title")
+		}
+	})
 }
