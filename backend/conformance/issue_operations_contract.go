@@ -46,8 +46,10 @@ import (
 //     patch carries no closed_at at all.
 //   - RunIssueOperationsUpdateRejectsATitleOverTheLengthLimit drives UpdateRaw
 //     too, and that IS its subject: the typed Update already refused an
-//     over-length title, so only the raw funnel `bd edit`, `bd batch` and
-//     `bd rename` take could store one (beads#8150).
+//     over-length title, so of the two update funnels only the raw one
+//     `bd edit`, `bd batch` and `bd rename` take could store one
+//     (beads#8150). UpdateIssueID, which stores the titles `bd rename-prefix`
+//     rewrites, checks none; that command checks them before its first write.
 //   - RunIssueOperationsUpdateMetadataReplaceClearsAndValidates ends on
 //     `SELECT metadata IS NULL`. A hydrated issue reads a NULL column and the
 //     empty document back as the same nil bytes (issueops/scan.go), so the
