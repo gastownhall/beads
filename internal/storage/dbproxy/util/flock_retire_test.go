@@ -50,3 +50,13 @@ func TestRetirableLockKeepsLockViolationForOthers(t *testing.T) {
 		}
 	}
 }
+
+func TestRetireRefusesOrdinaryLease(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "life.lock")
+	lease, err := TryLock(path)
+	require.NoError(t, err)
+	defer lease.Unlock()
+
+	require.Error(t, lease.Retire(), "an ordinary lease is not retirable")
+	require.FileExists(t, path)
+}

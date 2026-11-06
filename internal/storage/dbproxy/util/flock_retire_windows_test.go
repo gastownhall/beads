@@ -195,3 +195,15 @@ func TestRetireRefusesReplacedPath(t *testing.T) {
 	require.NoError(t, err, "the replacement must survive")
 	require.Equal(t, "replacement", string(got))
 }
+
+// TestTryLockPathRemoveStillFailsWhileHeld pins that ordinary leases did not
+// gain delete sharing: removing a held TryLock file still fails on Windows.
+func TestTryLockPathRemoveStillFailsWhileHeld(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "life.lock")
+	lease, err := TryLock(path)
+	require.NoError(t, err)
+	defer lease.Unlock()
+
+	require.Error(t, os.Remove(path), "removing a held ordinary lease")
+	require.FileExists(t, path)
+}
