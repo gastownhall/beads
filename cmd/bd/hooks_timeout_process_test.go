@@ -1094,3 +1094,308 @@ func TestGeneratedHookChainWhenBdMissingRealGit(t *testing.T) {
 		}
 	})
 }
+
+// hookChainFallbackCase drives the generated hook section as a real script
+// (the shell is handed the script file, so $0 is the hook path) with bd absent
+// from PATH — the GH#6751 environment. The chain, stdin and trailing-content
+// fixtures report through CHAIN_LOG, CHAIN_STDIN and TRAILING_LOG.
+type hookChainFallbackCase struct {
+	usePOSIXSh  bool // run under the POSIX shell instead of bash
+	setEu       bool // run the shell with -e -u
+	hookName    string
+	hookDirName string // directory name under the temp dir; may contain spaces
+	invokeBase  bool   // invoke the hook by bare file name (slash-less $0)
+	chainBody   string // written to <hook>.old; absent when chainMode is 0
+	chainMode   os.FileMode
+	trailing    string
+	args        []string
+	stdin       string
+	chainExit   int // exported to the chain fixture as CHAIN_EXIT
+}
+
+const hookChainArgvChain = `#!/bin/sh
+printf 'chain-ran\n' >> "$CHAIN_LOG"
+printf 'argc=%s\n' "$#" >> "$CHAIN_LOG"
+for _bd_chain_arg in "$@"; do printf 'arg=<%s>\n' "$_bd_chain_arg" >> "$CHAIN_LOG"; done
+printf 'bd-git-hook=%s\n' "${BD_GIT_HOOK:-unset}" >> "$CHAIN_LOG"
+while IFS= read -r _bd_chain_line || [ -n "$_bd_chain_line" ]; do printf '%s\n' "$_bd_chain_line" >> "$CHAIN_STDIN"; done
+exit "${CHAIN_EXIT:-0}"
+`
+
+// runGeneratedHookChainFallback writes the hook and chain fixtures, then
+// executes the hook script with bd missing from PATH.
+func runGeneratedHookChainFallback(t *testing.T, tc hookChainFallbackCase) hookChainResult {
+	t.Helper()
+	if tc.hookName == "" {
+		tc.hookName = "pre-commit"
+	}
+	if tc.hookDirName == "" {
+		tc.hookDirName = "hooks"
+	}
+	hooksDir := filepath.Join(t.TempDir(), tc.hookDirName)
+	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+		t.Fatalf("create hooks directory: %v", err)
+	}
+	trailing := tc.trailing
+	if trailing == "" {
+		trailing = "printf 'trailing-ran\\n' >> \"$TRAILING_LOG\"\n"
+	}
+	hookPath := filepath.Join(hooksDir, tc.hookName)
+	writeHookProcessFixture(t, hooksDir, tc.hookName, "#!/bin/sh\n"+generateHookSection(tc.hookName)+trailing)
+	if tc.chainMode != 0 {
+		chainPath := hookPath + ".old"
+		if err := os.WriteFile(chainPath, []byte(tc.chainBody), tc.chainMode); err != nil {
+			t.Fatalf("write chained hook fixture: %v", err)
+		}
+	}
+
+	logDir := t.TempDir()
+	chainLog := filepath.Join(logDir, "chain.log")
+	chainStdin := filepath.Join(logDir, "chain-stdin.log")
+	trailingLog := filepath.Join(logDir, "trailing.log")
+	if err := os.WriteFile(chainLog, nil, 0o644); err != nil {
+		t.Fatalf("create chain log: %v", err)
+	}
+	if err := os.WriteFile(chainStdin, nil, 0o644); err != nil {
+		t.Fatalf("create chain stdin log: %v", err)
+	}
+	if err := os.WriteFile(trailingLog, nil, 0o644); err != nil {
+		t.Fatalf("create trailing log: %v", err)
+	}
+
+	script := tc.hookName
+	if !tc.invokeBase {
+		script = hookProcessShellPath(t, hookPath)
+	}
+	shellArgs := []string{}
+	if tc.setEu {
+		shellArgs = append(shellArgs, "-eu")
+	}
+	shellArgs = append(shellArgs, script)
+	shellArgs = append(shellArgs, tc.args...)
+
+	shellPath := hookProcessShell(t)
+	commandArgs := append([]string{"--noprofile", "--norc"}, shellArgs...)
+	if tc.usePOSIXSh {
+		shellPath = hookProcessPOSIXShell(t)
+		commandArgs = shellArgs
+	}
+	cmd := exec.Command(shellPath, commandArgs...)
+	cmd.Dir = hooksDir
+	cmd.Env = append(hookProcessEnv(),
+		"PATH="+t.TempDir(),
+		"CHAIN_LOG="+chainLog,
+		"CHAIN_STDIN="+chainStdin,
+		"TRAILING_LOG="+trailingLog,
+		"CHAIN_EXIT="+strconv.Itoa(tc.chainExit))
+	cmd.Stdin = strings.NewReader(tc.stdin)
+	started := time.Now()
+	output, err := cmd.CombinedOutput()
+	elapsed := time.Since(started)
+	exitCode := 0
+	if err != nil {
+		exitErr, ok := err.(*exec.ExitError)
+		if !ok {
+			t.Fatalf("run generated hook: %v\n%s", err, string(output))
+		}
+		exitCode = exitErr.ExitCode()
+	}
+	return hookChainResult{
+		hookProcessResult: hookProcessResult{
+			output:   string(output) + readHookChainFile(t, chainLog) + readHookChainFile(t, chainStdin) + readHookChainFile(t, trailingLog),
+			exitCode: exitCode,
+			elapsed:  elapsed,
+		},
+		logs: hookChainLogs{
+			chain:     readHookChainFile(t, chainLog),
+			stdin:     readHookChainFile(t, chainStdin),
+			trailing:  readHookChainFile(t, trailingLog),
+			chainPath: hookPath + ".old",
+		},
+	}
+}
+
+// hookChainResult is the hookProcessResult of a fallback run plus the fixture
+// logs the chain and trailing content wrote.
+type hookChainResult struct {
+	hookProcessResult
+	logs hookChainLogs
+}
+
+type hookChainLogs struct {
+	chain     string
+	stdin     string
+	trailing  string
+	chainPath string
+}
+
+func readHookChainFile(t *testing.T, path string) string {
+	t.Helper()
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return string(content)
+}
+
+// TestGeneratedHookChainFallbackProcess pins the bd-missing chain fallback
+// (GH#6751): the chained hook runs exactly once with the original arguments,
+// stdin and BD_GIT_HOOK=1, a failing chain's status propagates without running
+// trailing user content, a passing chain falls through to it, and absent or
+// non-executable chains stay silent no-ops.
+func TestGeneratedHookChainFallbackProcess(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell process test")
+	}
+
+	shellModes := []struct {
+		name       string
+		usePOSIXSh bool
+		setEu      bool
+	}{
+		{name: "bash -eu"},
+		{name: "POSIX sh -eu", usePOSIXSh: true, setEu: true},
+		{name: "POSIX sh", usePOSIXSh: true},
+	}
+
+	t.Run("chain statuses propagate and gate trailing content", func(t *testing.T) {
+		for _, mode := range shellModes {
+			for _, chainExit := range []int{0, 1, 3, 7} {
+				t.Run(fmt.Sprintf("%s exit %d", mode.name, chainExit), func(t *testing.T) {
+					result := runGeneratedHookChainFallback(t, hookChainFallbackCase{
+						usePOSIXSh: mode.usePOSIXSh,
+						setEu:      mode.setEu,
+						chainBody:  hookChainArgvChain,
+						chainMode:  0o755,
+						chainExit:  chainExit,
+					})
+					if result.exitCode != chainExit {
+						t.Fatalf("generated hook exit = %d, want the chain's status %d\n%s", result.exitCode, chainExit, result.output)
+					}
+					if !strings.Contains(result.logs.chain, "chain-ran\n") {
+						t.Fatalf("chained hook never ran\n%s", result.output)
+					}
+					trailingRan := strings.Contains(result.logs.trailing, "trailing-ran")
+					if chainExit == 0 && !trailingRan {
+						t.Fatalf("trailing user content did not run after a passing chain\n%s", result.output)
+					}
+					if chainExit != 0 && trailingRan {
+						t.Fatalf("trailing user content ran after a failing chain\n%s", result.output)
+					}
+				})
+			}
+		}
+	})
+
+	t.Run("chain receives arguments, stdin and BD_GIT_HOOK", func(t *testing.T) {
+		args := []string{"argument with space", "second-argument"}
+		stdin := "refs/heads/main 0d0f4e1c2b3a4956970f6a5b4c3d2e1f0a9b8c7d refs/heads/main 1112131415161718191a1b1c1d1e1f2021222324\n"
+		result := runGeneratedHookChainFallback(t, hookChainFallbackCase{
+			usePOSIXSh: true,
+			setEu:      true,
+			hookName:   "pre-push",
+			chainBody:  hookChainArgvChain,
+			chainMode:  0o755,
+			args:       args,
+			stdin:      stdin,
+		})
+		if result.exitCode != 0 {
+			t.Fatalf("generated hook exit = %d, want 0\n%s", result.exitCode, result.output)
+		}
+		for _, want := range append([]string{"argc=2\n", "arg=<argument with space>\n", "arg=<second-argument>\n", "bd-git-hook=1\n"}, "chain-ran\n") {
+			if !strings.Contains(result.logs.chain, want) {
+				t.Fatalf("chain log missing %q\nchain log:\n%s", want, result.logs.chain)
+			}
+		}
+		if result.logs.stdin != stdin {
+			t.Fatalf("chain stdin = %q, want the hook's stdin passed through", result.logs.stdin)
+		}
+	})
+
+	t.Run("chain runs exactly once", func(t *testing.T) {
+		result := runGeneratedHookChainFallback(t, hookChainFallbackCase{
+			chainBody: hookChainArgvChain,
+			chainMode: 0o755,
+		})
+		if result.exitCode != 0 {
+			t.Fatalf("generated hook exit = %d, want 0\n%s", result.exitCode, result.output)
+		}
+		if got := strings.Count(result.logs.chain, "chain-ran\n"); got != 1 {
+			t.Fatalf("chain ran %d times, want exactly once\n%s", got, result.output)
+		}
+	})
+
+	t.Run("absent chain is a silent no-op", func(t *testing.T) {
+		result := runGeneratedHookChainFallback(t, hookChainFallbackCase{
+			usePOSIXSh: true,
+			setEu:      true,
+		})
+		if result.exitCode != 0 {
+			t.Fatalf("generated hook exit = %d, want silent success\n%s", result.exitCode, result.output)
+		}
+		if result.logs.chain != "" {
+			t.Fatalf("no chain exists, but the chain log is not empty:\n%s", result.logs.chain)
+		}
+		if !strings.Contains(result.logs.trailing, "trailing-ran") {
+			t.Fatalf("trailing user content did not run without a chain\n%s", result.output)
+		}
+	})
+
+	t.Run("non-executable chain is a silent no-op", func(t *testing.T) {
+		result := runGeneratedHookChainFallback(t, hookChainFallbackCase{
+			chainBody: hookChainArgvChain,
+			chainMode: 0o644,
+		})
+		if result.exitCode != 0 {
+			t.Fatalf("generated hook exit = %d, want silent success\n%s", result.exitCode, result.output)
+		}
+		if result.logs.chain != "" {
+			t.Fatalf("non-executable chain ran:\n%s", result.logs.chain)
+		}
+	})
+
+	t.Run("hooks directory with spaces", func(t *testing.T) {
+		result := runGeneratedHookChainFallback(t, hookChainFallbackCase{
+			hookDirName: "hooks dir with space",
+			chainBody:   hookChainArgvChain,
+			chainMode:   0o755,
+			args:        []string{"arg with space"},
+		})
+		if result.exitCode != 0 {
+			t.Fatalf("generated hook exit = %d, want 0\n%s", result.exitCode, result.output)
+		}
+		if !strings.Contains(result.logs.chain, "arg=<arg with space>\n") {
+			t.Fatalf("chain log missing the argument\n%s", result.logs.chain)
+		}
+	})
+
+	t.Run("slash-less $0 resolves the sibling chain", func(t *testing.T) {
+		result := runGeneratedHookChainFallback(t, hookChainFallbackCase{
+			invokeBase: true,
+			chainBody:  hookChainArgvChain,
+			chainMode:  0o755,
+		})
+		if result.exitCode != 0 {
+			t.Fatalf("generated hook exit = %d, want 0\n%s", result.exitCode, result.output)
+		}
+		if !strings.Contains(result.logs.chain, "chain-ran\n") {
+			t.Fatalf("chained hook never ran via ./%s.old\n%s", "pre-commit", result.output)
+		}
+	})
+
+	t.Run("unreadable executable chain is attempted, not skipped", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("running as root reads through the permissions being tested")
+		}
+		result := runGeneratedHookChainFallback(t, hookChainFallbackCase{
+			chainBody: hookChainArgvChain,
+			chainMode: 0o111,
+		})
+		if result.exitCode == 0 || result.logs.chain != "" {
+			t.Fatalf("unreadable executable chain was silently skipped or succeeded: exit %d\n%s", result.exitCode, result.output)
+		}
+		if !strings.Contains(result.output, "cannot open") && !strings.Contains(result.output, "Permission denied") {
+			t.Fatalf("hook output shows no attempt to run the chain\n%s", result.output)
+		}
+	})
+}

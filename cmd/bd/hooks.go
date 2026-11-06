@@ -185,6 +185,7 @@ func generateHookSection(hookName string) string {
 		"    *) _bd_chain=\"./" + hookName + ".old\" ;;\n" +
 		"  esac\n" +
 		"  if [ -f \"$_bd_chain\" ] && [ -x \"$_bd_chain\" ]; then\n" +
+		"    export BD_GIT_HOOK=1\n" +
 		"    if \"$_bd_chain\" \"$@\"; then\n" +
 		"      :\n" +
 		"    else\n" +

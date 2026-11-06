@@ -105,6 +105,7 @@ else
     *) _bd_chain="./pre-commit.old" ;;
   esac
   if [ -f "$_bd_chain" ] && [ -x "$_bd_chain" ]; then
+    export BD_GIT_HOOK=1
     if "$_bd_chain" "$@"; then
       :
     else
