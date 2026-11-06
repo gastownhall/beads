@@ -778,7 +778,7 @@ func TestRole_ExplicitConfig(t *testing.T) {
 				t.Fatalf("GetRepoContextForWorkspace failed: %v", err)
 			}
 
-			role, ok := rc.Role()
+			role, ok, _ := rc.Role()
 			if !ok {
 				t.Error("Role() returned ok=false, expected ok=true")
 			}
@@ -815,7 +815,7 @@ func TestRole_NoConfig(t *testing.T) {
 		t.Fatalf("GetRepoContextForWorkspace failed: %v", err)
 	}
 
-	role, ok := rc.Role()
+	role, ok, _ := rc.Role()
 	if ok {
 		t.Errorf("Role() returned ok=true with role=%q, expected ok=false", role)
 	}
@@ -962,7 +962,7 @@ func TestRole_BEADS_DIR_ImpliesContributor(t *testing.T) {
 	}
 
 	// Role should implicitly return Contributor
-	role, ok := rc.Role()
+	role, ok, _ := rc.Role()
 	if !ok {
 		t.Error("Role() returned ok=false, expected ok=true for redirected context")
 	}
@@ -1344,7 +1344,7 @@ func TestRoleIgnoresInheritedGitRouting(t *testing.T) {
 			for key, value := range poison {
 				t.Setenv(key, value)
 			}
-			if role, ok := rc.Role(); !ok || role != Maintainer {
+			if role, ok, _ := rc.Role(); !ok || role != Maintainer {
 				t.Errorf("Role() = %q, %v; want maintainer, true", role, ok)
 			}
 			if out, err := rc.GitOutput(t.Context(), "config", "--get", "beads.role"); err != nil || strings.TrimSpace(out) != generic {
@@ -1361,7 +1361,7 @@ func TestRoleIgnoresInheritedGitRouting(t *testing.T) {
 		commonDir := filepath.Join(decoy, ".git")
 		t.Setenv("GIT_COMMON_DIR", commonDir)
 		// Unlike GIT_DIR, this key is not overridden by the generic repository pins.
-		if role, ok := rc.Role(); !ok || role != Maintainer {
+		if role, ok, _ := rc.Role(); !ok || role != Maintainer {
 			t.Errorf("Role() = %q, %v; want maintainer, true", role, ok)
 		}
 		if out, err := rc.GitOutput(t.Context(), "config", "--get", "beads.role"); err != nil || strings.TrimSpace(out) != string(Contributor) {
@@ -1374,26 +1374,26 @@ func TestRoleIgnoresInheritedGitRouting(t *testing.T) {
 	t.Run("live_values", func(t *testing.T) {
 		for _, value := range []string{"contributor", "invalid", ""} {
 			runGit(t, "-C", target, "config", "beads.role", value)
-			if role, ok := rc.Role(); !ok || role != UserRole(value) {
+			if role, ok, _ := rc.Role(); !ok || role != UserRole(value) {
 				t.Errorf("fresh Role() = %q, %v; want %q, true", role, ok, value)
 			}
 		}
 	})
 	t.Run("absent_and_global", func(t *testing.T) {
 		runGit(t, "-C", target, "config", "--unset", "beads.role")
-		if role, ok := rc.Role(); ok || role != "" {
+		if role, ok, _ := rc.Role(); ok || role != "" {
 			t.Errorf("absent Role() = %q, %v", role, ok)
 		}
 		if err := os.WriteFile(filepath.Join(home, ".gitconfig"), []byte("[beads]\nrole = contributor\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if role, ok := rc.Role(); !ok || role != Contributor {
+		if role, ok, _ := rc.Role(); !ok || role != Contributor {
 			t.Errorf("global Role() = %q, %v", role, ok)
 		}
 	})
 	t.Run("redirected", func(t *testing.T) {
 		redirected := &RepoContext{RepoRoot: t.TempDir(), IsRedirected: true}
-		if role, ok := redirected.Role(); !ok || role != Contributor {
+		if role, ok, _ := redirected.Role(); !ok || role != Contributor {
 			t.Errorf("redirected Role() = %q, %v", role, ok)
 		}
 	})
@@ -1556,7 +1556,7 @@ func TestRole_NonGitBeadsDirFromGitCWD_ImpliesContributor(t *testing.T) {
 	if !rc.IsRedirected {
 		t.Error("IsRedirected = false, want true: the named .beads is in no repository while the CWD is in one")
 	}
-	role, ok := rc.Role()
+	role, ok, _ := rc.Role()
 	if !ok || role != Contributor {
 		t.Errorf("Role() = (%q, %v), want (%q, true), not the caller repo's beads.role", role, ok, Contributor)
 	}
@@ -1753,7 +1753,7 @@ func TestGetRepoContext_RefusesRepositoryGitDoesNotOpen(t *testing.T) {
 			t.Errorf("recovered context = (RepoRoot %q, CWDRepoRoot %q, IsRedirected %v), want (%q, %q, true)",
 				rc.RepoRoot, rc.CWDRepoRoot, rc.IsRedirected, target, callerRepo)
 		}
-		if role, ok := rc.Role(); !ok || role != Contributor {
+		if role, ok, _ := rc.Role(); !ok || role != Contributor {
 			t.Errorf("Role() = (%q, %v), want (%q, true)", role, ok, Contributor)
 		}
 		if _, err := os.Stat(marker); err == nil {
@@ -1785,8 +1785,55 @@ func TestGetRepoContext_RefusesRepositoryGitDoesNotOpen(t *testing.T) {
 		if !rc.IsRedirected {
 			t.Error("recovered context IsRedirected = false for a redirect into a refused repository")
 		}
-		if role, ok := rc.Role(); !ok || role != Contributor {
+		if role, ok, _ := rc.Role(); !ok || role != Contributor {
 			t.Errorf("Role() = (%q, %v), want (%q, true)", role, ok, Contributor)
 		}
 	})
+}
+
+// TestRepoContextRoleReadFailureIsAnError pins bd-a2qnf4 (GH#6765): a
+// beads.role read git fails is an error from Role and RequireRole, not "not
+// configured", and the optional predicates answer false.
+func TestRepoContextRoleReadFailureIsAnError(t *testing.T) {
+	for _, entry := range os.Environ() {
+		key := gitenv.EntryKey(entry)
+		if gitenv.IsRoutingKeyForOS(key, runtime.GOOS) {
+			t.Setenv(key, "")
+			if err := os.Unsetenv(key); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	home := t.TempDir()
+	for _, key := range []string{"HOME", "USERPROFILE", "XDG_CONFIG_HOME"} {
+		t.Setenv(key, home)
+	}
+	repo := t.TempDir()
+	if out, err := exec.Command("git", "-C", repo, "init", "--quiet").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	configPath := filepath.Join(repo, ".git", "config")
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, append(data, "\n[beads\n\trole = maintainer\n"...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rc := &RepoContext{RepoRoot: repo}
+
+	role, ok, err := rc.Role()
+	if err == nil || ok || role != "" || !strings.Contains(err.Error(), "bad config") {
+		t.Errorf("Role() = %q, %v, %v; want a read error carrying git's diagnostic", role, ok, err)
+	}
+	if err := rc.RequireRole(); err == nil || errors.Is(err, ErrRoleNotConfigured) || !strings.Contains(err.Error(), "bad config") {
+		t.Errorf("RequireRole() = %v; want the read error, not ErrRoleNotConfigured", err)
+	}
+	if rc.IsContributor() || rc.IsMaintainer() {
+		t.Error("an unreadable role answered a role predicate")
+	}
+	redirected := &RepoContext{RepoRoot: repo, IsRedirected: true}
+	if role, ok, err := redirected.Role(); err != nil || !ok || role != Contributor {
+		t.Errorf("redirected Role() = %q, %v, %v; want contributor without reading git", role, ok, err)
+	}
 }

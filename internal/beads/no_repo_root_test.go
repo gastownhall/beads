@@ -304,7 +304,7 @@ func TestRecoverNoGit_RedirectProvenance(t *testing.T) {
 		if !rc.IsRedirected {
 			t.Error("IsRedirected = false for a workspace the working directory cannot discover")
 		}
-		if role, ok := rc.Role(); !ok || role != Contributor {
+		if role, ok, _ := rc.Role(); !ok || role != Contributor {
 			t.Errorf("Role() = (%q, %v), want (%q, true) — a redirect implies contributor", role, ok, Contributor)
 		}
 	})

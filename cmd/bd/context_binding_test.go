@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -1033,5 +1034,50 @@ func TestPrepareSelectedCommandContext_DoesNotMergeCallerConfigForUnsetKeys(t *t
 	}
 	if actor != "target-actor" {
 		t.Fatalf("actor = %q, want %q", actor, "target-actor")
+	}
+}
+
+// TestContextReportsRoleReadFailure pins bd-a2qnf4 (GH#6765) for bd context:
+// when git cannot read beads.role, both routes still answer successfully in
+// both output modes, omit the role, and print git's diagnostic on stderr.
+func TestContextReportsRoleReadFailure(t *testing.T) {
+	repo := malformedRoleRepoForConfigTest(t)
+	t.Setenv("BEADS_DIR", "")
+	if err := os.Unsetenv("BEADS_DIR"); err != nil {
+		t.Fatal(err)
+	}
+	setBeadsDirStartupProvenanceForTest(t, false)
+	beadsDir := filepath.Join(repo, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := configfile.DefaultConfig().Save(beadsDir); err != nil {
+		t.Fatal(err)
+	}
+	resetRepoContextCachesForTest(t)
+
+	routes := map[string]func() error{
+		"direct":  func() error { return contextCmd.RunE(contextCmd, nil) },
+		"proxied": func() error { return runContextProxiedServer(contextCmd, context.Background()) },
+	}
+	for name, run := range routes {
+		for _, asJSON := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/json=%v", name, asJSON), func(t *testing.T) {
+				pinJSONOutput(t, asJSON)
+				stdout, stderr, err := captureStdoutAndStderr(t, run)
+				if err != nil {
+					t.Fatalf("bd context = %v, want success", err)
+				}
+				if !strings.Contains(stdout, beadsDir) {
+					t.Errorf("stdout %q lost the workspace snapshot", stdout)
+				}
+				if strings.Contains(stdout, "role") {
+					t.Errorf("stdout %q reports a role git could not read", stdout)
+				}
+				if got := strings.Count(stderr, "bad config"); got != 1 {
+					t.Errorf("stderr %q: diagnostic printed %d times, want 1", stderr, got)
+				}
+			})
+		}
 	}
 }
