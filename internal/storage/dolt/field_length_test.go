@@ -355,3 +355,106 @@ func TestMapUpdateTitleBoundary(t *testing.T) {
 		})
 	}
 }
+
+// TestMapUpdateTitleLegacyRow covers rows whose stored title predates update
+// validation (GH#8150): a map update may still change other fields while the
+// invalid title is omitted or restated verbatim — the no-op filter drops an
+// unchanged title before validation runs — while any newly applied invalid
+// title stays refused and a changed valid title repairs the row.
+func TestMapUpdateTitleLegacyRow(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	seed := func(t *testing.T) string {
+		t.Helper()
+		iss := titleTestIssue("tl-legacy")
+		if err := store.CreateIssue(ctx, iss, "tester"); err != nil {
+			t.Fatalf("CreateIssue: %v", err)
+		}
+		// Seed the legacy invalid title directly in the database, the way
+		// rows written by bd 1.1.x update paths look: no beads validation
+		// runs on a raw column write.
+		if _, err := store.db.ExecContext(ctx, "UPDATE issues SET title = ? WHERE id = ?", reporterTitle(), iss.ID); err != nil {
+			t.Fatalf("seed legacy title: %v", err)
+		}
+		got, err := store.GetIssue(ctx, iss.ID)
+		if err != nil {
+			t.Fatalf("GetIssue: %v", err)
+		}
+		if got == nil || got.Title != reporterTitle() {
+			t.Fatalf("legacy seed failed: title = %+v", got)
+		}
+		return iss.ID
+	}
+
+	t.Run("description update with the title omitted succeeds", func(t *testing.T) {
+		id := seed(t)
+		if err := store.UpdateIssue(ctx, id, map[string]interface{}{"description": "legacy-safe edit"}, "tester"); err != nil {
+			t.Fatalf("UpdateIssue changing only the description of a legacy row: %v", err)
+		}
+		got, err := store.GetIssue(ctx, id)
+		if err != nil {
+			t.Fatalf("GetIssue: %v", err)
+		}
+		if got.Title != reporterTitle() {
+			t.Errorf("legacy title changed by a description-only update: got %d bytes, want unchanged", len(got.Title))
+		}
+		if got.Description != "legacy-safe edit" {
+			t.Errorf("description not applied: %q", got.Description)
+		}
+	})
+
+	t.Run("verbatim title restatement with another edit succeeds", func(t *testing.T) {
+		id := seed(t)
+		if err := store.UpdateIssue(ctx, id, map[string]interface{}{
+			"title":       reporterTitle(),
+			"description": "restated edit",
+		}, "tester"); err != nil {
+			t.Fatalf("UpdateIssue restating the legacy title verbatim: %v", err)
+		}
+		got, err := store.GetIssue(ctx, id)
+		if err != nil {
+			t.Fatalf("GetIssue: %v", err)
+		}
+		if got.Title != reporterTitle() {
+			t.Errorf("restated legacy title changed: got %d bytes, want unchanged", len(got.Title))
+		}
+		if got.Description != "restated edit" {
+			t.Errorf("companion edit not applied: %q", got.Description)
+		}
+	})
+
+	t.Run("a newly applied invalid title stays refused", func(t *testing.T) {
+		id := seed(t)
+		changed := reporterTitle() + "x"
+		if err := store.UpdateIssue(ctx, id, map[string]interface{}{"title": changed}, "tester"); !errors.Is(err, storage.ErrValidation) {
+			t.Fatalf("UpdateIssue applying a different 515-byte title to a legacy row: err = %v, want ErrValidation", err)
+		}
+		got, err := store.GetIssue(ctx, id)
+		if err != nil {
+			t.Fatalf("GetIssue: %v", err)
+		}
+		if got == nil || got.Title != reporterTitle() {
+			t.Errorf("legacy title changed by a refused update, got %+v", got)
+		}
+	})
+
+	t.Run("a changed valid title repairs the row", func(t *testing.T) {
+		id := seed(t)
+		if err := store.UpdateIssue(ctx, id, map[string]interface{}{"title": "repaired title"}, "tester"); err != nil {
+			t.Fatalf("UpdateIssue repairing the legacy title: %v", err)
+		}
+		got, err := store.GetIssue(ctx, id)
+		if err != nil {
+			t.Fatalf("GetIssue: %v", err)
+		}
+		if got == nil || got.Title != "repaired title" {
+			t.Fatalf("repaired title not stored, got %+v", got)
+		}
+		if err := got.ValidateWithCustom(nil, nil); err != nil {
+			t.Errorf("repaired row fails canonical validation: %v", err)
+		}
+	})
+}
