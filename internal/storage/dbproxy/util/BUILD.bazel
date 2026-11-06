@@ -25,9 +25,21 @@ go_library(
 
 go_test(
     name = "util_test",
-    srcs = ["dsn_test.go"],
+    srcs = [
+        "dsn_test.go",
+        "flock_retire_windows_test.go",
+    ],
     embed = [":util"],
-    deps = ["@com_github_go_sql_driver_mysql//:mysql"],
+    deps = [
+        "@com_github_go_sql_driver_mysql//:mysql",
+    ] + select({
+        "@rules_go//go/platform:windows": [
+            "@com_github_stretchr_testify//assert",
+            "@com_github_stretchr_testify//require",
+            "@org_golang_x_sys//windows",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 # --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
