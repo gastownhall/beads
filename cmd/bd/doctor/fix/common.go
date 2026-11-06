@@ -28,6 +28,15 @@ func newBdCmd(bdBinary string, args ...string) *exec.Cmd {
 // getBdBinary returns the path to the bd binary to use for fix operations.
 // It prefers the current executable to avoid command injection attacks.
 // Returns ErrTestBinary if running as a test binary to prevent fork bombs.
+// BdBinary exposes getBdBinary outside the fix package. Doctor's prime
+// checks use the same resolver so a diagnostic run exercises the binary that
+// is running doctor rather than whichever `bd` comes first on PATH, which
+// could be a different version (GH#8130). Returns ErrTestBinary under Go and
+// Bazel test binaries so callers can skip instead of re-executing the test.
+func BdBinary() (string, error) {
+	return getBdBinary()
+}
+
 func getBdBinary() (string, error) {
 	// Prefer current executable for security
 	exe, err := os.Executable()

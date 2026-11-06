@@ -1033,3 +1033,98 @@ func TestCheckClaude_ClaudeCodeWithoutClaude(t *testing.T) {
 		t.Errorf("Expected message %q, got %q", "CLI-only mode", check.Message)
 	}
 }
+
+// TestVerifyPrimeOutputDoesNotRunPathBd pins GH#8130: the "bd prime" check
+// must verify the running binary against repoPath, never execute whichever
+// `bd` comes first on PATH (a different version could migrate the store).
+func TestVerifyPrimeOutputDoesNotRunPathBd(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake bd is a shell script")
+	}
+	fakeDir := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "fake-bd.log")
+	script := "#!/bin/sh\n{ echo \"argv: $*\"; echo \"cwd: $(pwd)\"; } >> " + logPath + "\necho 'bd ready'\n"
+	if err := os.WriteFile(filepath.Join(fakeDir, "bd"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	repoPath := t.TempDir()
+	t.Chdir(t.TempDir()) // caller's cwd differs from the diagnosed workspace
+
+	_ = VerifyPrimeOutput(repoPath)
+
+	if data, err := os.ReadFile(logPath); err == nil {
+		t.Fatalf("VerifyPrimeOutput executed the PATH bd instead of the running binary:\n%s", data)
+	}
+}
+
+// TestPrimeChecksDoNotExecPathBd covers both prime checks from GH#8130: with
+// a decoy `bd` first on PATH, and with no PATH at all, neither check may
+// execute the PATH binary, and their results must not depend on PATH
+// availability. What the checks report under a test binary is pinned
+// separately by TestPrimeChecksTestBinaryNA.
+func TestPrimeChecksDoNotExecPathBd(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake bd is a shell script")
+	}
+
+	run := func(t *testing.T, decoyOnPath bool) (prime DoctorCheck, docs DoctorCheck) {
+		t.Helper()
+		repoPath := t.TempDir()
+		if err := os.WriteFile(filepath.Join(repoPath, "CLAUDE.md"), []byte("Run `bd prime` for workflow context.\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		fakeDir := t.TempDir()
+		logPath := filepath.Join(t.TempDir(), "path-bd.log")
+		if err := os.WriteFile(filepath.Join(fakeDir, "bd"), []byte(fakeBdRecorderScript(logPath)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if decoyOnPath {
+			t.Setenv("PATH", fakeDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+		} else {
+			t.Setenv("PATH", "")
+		}
+		t.Setenv("HOME", t.TempDir())
+		t.Setenv("USERPROFILE", t.TempDir())
+		t.Chdir(t.TempDir()) // caller's cwd differs from the diagnosed workspace
+
+		prime = VerifyPrimeOutput(repoPath)
+		docs = CheckDocumentationBdPrimeReference(repoPath)
+		if data, err := os.ReadFile(logPath); err == nil {
+			t.Fatalf("prime checks executed the PATH bd instead of the running binary:\n%s", data)
+		}
+		return prime, docs
+	}
+
+	outcomes := map[string][2]DoctorCheck{}
+	for _, tc := range []struct {
+		name        string
+		decoyOnPath bool
+	}{
+		{"decoy bd first on PATH", true},
+		{"no bd on PATH", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			prime, docs := run(t, tc.decoyOnPath)
+			outcomes[tc.name] = [2]DoctorCheck{prime, docs}
+		})
+	}
+
+	decoy := outcomes["decoy bd first on PATH"]
+	empty := outcomes["no bd on PATH"]
+	if decoy[0] != empty[0] {
+		t.Errorf("VerifyPrimeOutput result depends on PATH:\ndecoy: %+v\nempty: %+v", decoy[0], empty[0])
+	}
+	if decoy[1] != empty[1] {
+		t.Errorf("CheckDocumentationBdPrimeReference result depends on PATH:\ndecoy: %+v\nempty: %+v", decoy[1], empty[1])
+	}
+}
+
+// fakeBdRecorderScript returns a shell script that records how it was called
+// (argv, physical cwd, effective BEADS_DIR) into logPath and prints the
+// output VerifyPrimeOutput classifies as CLI mode.
+func fakeBdRecorderScript(logPath string) string {
+	return "#!/bin/sh\n{ echo \"argv: $*\"; echo \"cwd: $(pwd -P)\"; echo \"beads_dir: ${BEADS_DIR:-}\"; } >> " + logPath + "\necho 'bd ready'\n"
+}

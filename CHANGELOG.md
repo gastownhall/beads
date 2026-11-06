@@ -1208,6 +1208,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd doctor` runs its `bd prime` checks with the binary that is running
+  doctor, in the workspace being diagnosed, instead of executing whichever
+  `bd` comes first on PATH in the caller's working directory (GH#8130). The
+  "bd prime Output" and "Prime Documentation" checks could therefore run a
+  different bd version against the diagnosed database — a newer PATH binary
+  opens the store writable and applies its own schema migrations — and `bd
+  doctor <path>` checked the caller's workspace rather than `path`. Both
+  checks now resolve the running executable, run it with `BEADS_DIR` pinned
+  to doctor's resolution for the diagnosed workspace, and report N/A instead
+  of executing anything when running as a test binary. Whether a `bd` is on
+  PATH stays the separate "CLI Availability" check's concern.
 - `bd config get` for a config.yaml, git-config or user-global key no longer
   opens the database just because one exists, so it answers from those files
   while the Dolt server is down instead of failing the open (GH#5108). In

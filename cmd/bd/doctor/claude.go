@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/beads/cmd/bd/doctor/fix"
 	"github.com/steveyegge/beads/cmd/bd/setup"
 )
 
@@ -228,10 +229,41 @@ func hasBeadsHooks(settingsPath string) bool {
 	return false
 }
 
+// primeCheckBinary resolves the bd executable the doctor prime checks
+// execute. It is a variable so tests can substitute a recording executable.
+var primeCheckBinary = fix.BdBinary
+
+// primeCheckCommand builds the child command for the doctor prime checks so
+// they verify the bd binary that is running doctor. A PATH lookup could pick
+// up a different bd version and run it against the diagnosed store (GH#8130),
+// and `bd doctor <path>` must check the workspace it was given, not the
+// caller's cwd.
+func primeCheckCommand(repoPath string, args ...string) (*exec.Cmd, error) {
+	exe, err := primeCheckBinary()
+	if err != nil {
+		return nil, err
+	}
+	absRepoPath, err := filepath.Abs(repoPath)
+	if err != nil {
+		return nil, fmt.Errorf("resolving %q to an absolute path: %w", repoPath, err)
+	}
+	cmd := exec.Command(exe, args...)
+	cmd.Dir = absRepoPath
+	return cmd, nil
+}
+
 // VerifyPrimeOutput checks if bd prime command works and adapts correctly.
 // repoPath is the project root directory.
 func VerifyPrimeOutput(repoPath string) DoctorCheck {
-	cmd := exec.Command("bd", "prime")
+	cmd, err := primeCheckCommand(repoPath, "prime")
+	if err != nil {
+		return DoctorCheck{
+			Name:    "bd prime Command",
+			Status:  "error",
+			Message: "Command failed to execute",
+			Fix:     "Ensure bd is installed and in PATH",
+		}
+	}
 	output, err := cmd.CombinedOutput()
 
 	if err != nil {
@@ -332,7 +364,19 @@ func CheckDocumentationBdPrimeReference(repoPath string) DoctorCheck {
 	}
 
 	// Docs reference bd prime - verify the command works
-	cmd := exec.Command("bd", "prime", "--help")
+	cmd, err := primeCheckCommand(repoPath, "prime", "--help")
+	if err != nil {
+		return DoctorCheck{
+			Name:    "Prime Documentation",
+			Status:  "warning",
+			Message: "Documentation references 'bd prime' but command not found",
+			Detail:  "Files: " + strings.Join(filesWithBdPrime, ", "),
+			Fix: "Upgrade bd to get the 'bd prime' command:\n" +
+				"  • Homebrew: brew upgrade beads\n" +
+				"  • Script: " + installScriptCommand + "\n" +
+				"  Or remove 'bd prime' references from documentation if using older version",
+		}
+	}
 	if err := cmd.Run(); err != nil {
 		return DoctorCheck{
 			Name:    "Prime Documentation",
