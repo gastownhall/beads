@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
+	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 )
 
 // -- checkSchemaSkew unit tests (mock DB) --
@@ -326,8 +327,14 @@ func TestCheckBehindDrift_FreshDB_ReturnsSchemaBehindError(t *testing.T) {
 
 // -- CheckReadableDrift unit tests (mock DB) --
 
-// readableColumns stands in for the projection a caller passes.
-var readableColumns = []string{"id", "arrival_seq"}
+// readableRelations stands in for the relation set a caller passes: a
+// required row table, an optional one a database may lack, and a required
+// overlay whose columns include a join key.
+var readableRelations = []sqlbuild.ReadRelation{
+	{Table: "issues", Columns: []string{"id", "arrival_seq"}},
+	{Table: "wisps", Columns: []string{"id", "arrival_seq"}, Optional: true},
+	{Table: "leases", Columns: []string{"issue_id", "granted_node"}},
+}
 
 func expectMainCursor(mock sqlmock.Sqlmock, version int) {
 	expectCursorProbe(mock, "schema_migrations", true)
@@ -335,15 +342,30 @@ func expectMainCursor(mock sqlmock.Sqlmock, version int) {
 		WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(version))
 }
 
-// expectIssuesColumns mocks missingColumns' read of issues: the table probe,
-// then the SHOW COLUMNS listing with these names in its Field column.
-func expectIssuesColumns(mock sqlmock.Sqlmock, columns ...string) {
-	expectCursorProbe(mock, "issues", true)
-	rows := sqlmock.NewRows([]string{"Field", "Type", "Null", "Key", "Default", "Extra"})
-	for _, column := range columns {
-		rows.AddRow(column, "bigint", "YES", "", nil, "")
+// expectRelationColumns mocks relationColumns' read of one table: the table
+// probe, then — when the table exists — the SHOW COLUMNS listing with these
+// names in its Field column. The SHOW TABLES answer always lists some other
+// table so the probed table's presence or absence is the only variable.
+func expectRelationColumns(mock sqlmock.Sqlmock, table string, exists bool, columns ...string) {
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = DATABASE()")).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	baseline := "issues"
+	if table == "issues" {
+		baseline = "schema_migrations"
 	}
-	mock.ExpectQuery(`^SHOW COLUMNS FROM issues$`).WillReturnRows(rows)
+	rows := sqlmock.NewRows([]string{"Tables_in_testdb"}).AddRow(baseline)
+	if exists {
+		rows.AddRow(table)
+	}
+	mock.ExpectQuery("^SHOW TABLES$").WillReturnRows(rows)
+	if !exists {
+		return
+	}
+	cols := sqlmock.NewRows([]string{"Field", "Type", "Null", "Key", "Default", "Extra"})
+	for _, column := range columns {
+		cols.AddRow(column, "bigint", "YES", "", nil, "")
+	}
+	mock.ExpectQuery("^SHOW COLUMNS FROM " + table + "$").WillReturnRows(cols)
 }
 
 func TestCheckReadableDrift(t *testing.T) {
@@ -356,12 +378,14 @@ func TestCheckReadableDrift(t *testing.T) {
 	}{
 		{
 			// A database at the binary's version costs nothing beyond the
-			// version read: no column listing is expected.
+			// version read: no relation probe is expected.
 			name:   "at latest",
 			expect: func(mock sqlmock.Sqlmock) { expectMainCursor(mock, LatestVersion()) },
 			check:  requireNoDriftError,
 		},
 		{
+			// Same single read for a database ahead of the binary: the
+			// forward-skew refusal needs no relation evidence.
 			name:   "ahead is refused as forward drift",
 			expect: func(mock sqlmock.Sqlmock) { expectMainCursor(mock, LatestVersion()+1) },
 			check: func(t *testing.T, err error) {
@@ -371,37 +395,119 @@ func TestCheckReadableDrift(t *testing.T) {
 			},
 		},
 		{
-			// bd-578h9.5 / #5920: a behind database that still has every
-			// column the reads select keeps serving them. Column names
-			// compare case-insensitively.
-			name: "behind with every column stays readable",
+			// bd-578h9.5 / #5920: a behind database whose relations are all
+			// readable keeps serving reads. Column names compare
+			// case-insensitively.
+			name: "behind with every relation readable stays open",
 			expect: func(mock sqlmock.Sqlmock) {
 				expectMainCursor(mock, behind)
-				expectIssuesColumns(mock, "id", "title", "ARRIVAL_SEQ")
+				expectRelationColumns(mock, "issues", true, "id", "ARRIVAL_SEQ")
+				expectRelationColumns(mock, "wisps", true, "ID", "arrival_seq")
+				expectRelationColumns(mock, "leases", true, "issue_id", "GRANTED_NODE")
 			},
 			check: requireNoDriftError,
 		},
 		{
-			name: "behind and missing a column is refused",
+			name: "behind and missing a row column is refused",
 			expect: func(mock sqlmock.Sqlmock) {
 				expectMainCursor(mock, behind)
-				expectIssuesColumns(mock, "id", "title")
+				expectRelationColumns(mock, "issues", true, "id")
+				expectRelationColumns(mock, "wisps", true, "id", "arrival_seq")
+				expectRelationColumns(mock, "leases", true, "issue_id", "granted_node")
 			},
-			check: requireBehindError(behind),
+			check: requireBehindError(behind, "issues.arrival_seq"),
 		},
 		{
-			// No issues table at all: every column is missing. The listing
-			// is never sent, since SHOW COLUMNS on a missing table fails and
-			// pins the session (be-bv7x).
-			name: "behind without an issues table is refused",
+			// No issues table at all: the whole required relation is
+			// missing. The listing is never sent, since SHOW COLUMNS on a
+			// missing table fails and pins the session (be-bv7x).
+			name: "behind without the required row table is refused",
 			expect: func(mock sqlmock.Sqlmock) {
 				expectMainCursor(mock, behind)
+				expectRelationColumns(mock, "issues", false)
+				expectRelationColumns(mock, "wisps", true, "id", "arrival_seq")
+				expectRelationColumns(mock, "leases", true, "issue_id", "granted_node")
+			},
+			check: requireBehindError(behind, "issues"),
+		},
+		{
+			// #6572: the leases overlay is clone-local (dolt_ignored), so a
+			// behind clone can lack it entirely while the versioned rows are
+			// intact. The refusal names the bare relation.
+			name: "behind without the leases overlay is refused",
+			expect: func(mock sqlmock.Sqlmock) {
+				expectMainCursor(mock, behind)
+				expectRelationColumns(mock, "issues", true, "id", "arrival_seq")
+				expectRelationColumns(mock, "wisps", true, "id", "arrival_seq")
+				expectRelationColumns(mock, "leases", false)
+			},
+			check: requireBehindError(behind, "leases"),
+		},
+		{
+			name: "behind with a lease column missing is refused",
+			expect: func(mock sqlmock.Sqlmock) {
+				expectMainCursor(mock, behind)
+				expectRelationColumns(mock, "issues", true, "id", "arrival_seq")
+				expectRelationColumns(mock, "wisps", true, "id", "arrival_seq")
+				expectRelationColumns(mock, "leases", true, "issue_id")
+			},
+			check: requireBehindError(behind, "leases.granted_node"),
+		},
+		{
+			// An optional relation a database may lack (the wisp plane)
+			// reads as absent-and-fine, not as unreadable schema.
+			name: "behind without the optional wisp table stays open",
+			expect: func(mock sqlmock.Sqlmock) {
+				expectMainCursor(mock, behind)
+				expectRelationColumns(mock, "issues", true, "id", "arrival_seq")
+				expectRelationColumns(mock, "wisps", false)
+				expectRelationColumns(mock, "leases", true, "issue_id", "granted_node")
+			},
+			check: requireNoDriftError,
+		},
+		{
+			// A wisp table that exists but lacks a projected column still
+			// breaks the get-by-id fallback, which selects the same
+			// projection from it.
+			name: "behind wisp table missing a column is refused",
+			expect: func(mock sqlmock.Sqlmock) {
+				expectMainCursor(mock, behind)
+				expectRelationColumns(mock, "issues", true, "id", "arrival_seq")
+				expectRelationColumns(mock, "wisps", true, "id")
+				expectRelationColumns(mock, "leases", true, "issue_id", "granted_node")
+			},
+			check: requireBehindError(behind, "wisps.arrival_seq"),
+		},
+		{
+			// The evidence accumulates across relations in the descriptor's
+			// order, deterministically, so the refusal names everything at
+			// once.
+			name: "missing identifiers aggregate in relation order",
+			expect: func(mock sqlmock.Sqlmock) {
+				expectMainCursor(mock, behind)
+				expectRelationColumns(mock, "issues", true, "id")
+				expectRelationColumns(mock, "wisps", true, "id")
+				expectRelationColumns(mock, "leases", false)
+			},
+			check: requireBehindError(behind, "issues.arrival_seq", "wisps.arrival_seq", "leases"),
+		},
+		{
+			// A probe that fails mid-way is the caller's error to report,
+			// not a false verdict about the schema.
+			name: "probe failure propagates",
+			expect: func(mock sqlmock.Sqlmock) {
+				expectMainCursor(mock, behind)
+				expectRelationColumns(mock, "issues", true, "id", "arrival_seq")
 				mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = DATABASE()")).
 					WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 				mock.ExpectQuery("^SHOW TABLES$").
-					WillReturnRows(sqlmock.NewRows([]string{"Tables_in_testdb"}).AddRow("schema_migrations"))
+					WillReturnError(errors.New("catalog gone"))
 			},
-			check: requireBehindError(behind),
+			check: func(t *testing.T, err error) {
+				if err == nil || !strings.Contains(err.Error(), "catalog gone") {
+					t.Fatalf("CheckReadableDrift = %v, want the wrapped probe failure", err)
+				}
+			},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -411,7 +517,7 @@ func TestCheckReadableDrift(t *testing.T) {
 			}
 			defer db.Close()
 			tc.expect(mock)
-			tc.check(t, CheckReadableDrift(context.Background(), db, "issues", readableColumns))
+			tc.check(t, CheckReadableDrift(context.Background(), db, readableRelations))
 			if err := mock.ExpectationsWereMet(); err != nil {
 				t.Fatalf("unmet sql expectations: %v", err)
 			}
@@ -428,7 +534,9 @@ func TestCheckReadableDrift_EscapeHatchReadsAnyway(t *testing.T) {
 	defer db.Close()
 	behind := LatestVersion() - 1
 	expectMainCursor(mock, behind)
-	expectIssuesColumns(mock, "id")
+	expectRelationColumns(mock, "issues", true, "id")
+	expectRelationColumns(mock, "wisps", true, "id", "arrival_seq")
+	expectRelationColumns(mock, "leases", false)
 
 	origStderr := os.Stderr
 	r, w, pipeErr := os.Pipe()
@@ -436,7 +544,7 @@ func TestCheckReadableDrift_EscapeHatchReadsAnyway(t *testing.T) {
 		t.Fatal(pipeErr)
 	}
 	os.Stderr = w
-	gotErr := CheckReadableDrift(context.Background(), db, "issues", readableColumns)
+	gotErr := CheckReadableDrift(context.Background(), db, readableRelations)
 	_ = w.Close()
 	os.Stderr = origStderr
 	var buf bytes.Buffer
@@ -452,8 +560,34 @@ func TestCheckReadableDrift_EscapeHatchReadsAnyway(t *testing.T) {
 	if !strings.Contains(buf.String(), wantWarning) {
 		t.Errorf("stderr = %q, want a warning containing %q", buf.String(), wantWarning)
 	}
+	if !strings.Contains(buf.String(), "some queries may fail") {
+		t.Errorf("stderr = %q, want the escape hatch to say queries may fail", buf.String())
+	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+// TestSchemaBehindError_Missing pins the evidence-bearing arm of the behind
+// refusal: it names what the reads cannot find, in both the plain and gateway
+// remedies, while a version-only refusal (no evidence) keeps its message.
+func TestSchemaBehindError_Missing(t *testing.T) {
+	withEvidence := &SchemaBehindError{DBVersion: 72, BinaryVersion: 73, Missing: []string{"leases", "leases.granted_node"}}
+	msg := withEvidence.Error()
+	for _, want := range []string{"v72", "v73", "leases", "leases.granted_node"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("refusal %q is missing %q", msg, want)
+		}
+	}
+	gateway := &SchemaBehindError{DBVersion: 72, BinaryVersion: 73, Gateway: true, Missing: []string{"leases.granted_node"}}
+	if got := gateway.Error(); !strings.Contains(got, "leases.granted_node") || !strings.Contains(got, "server administrator") {
+		t.Errorf("gateway refusal %q lost its evidence or its remedy", got)
+	}
+	// No evidence, no naming: the strict version-only checks keep the
+	// message operators match on.
+	plain := &SchemaBehindError{DBVersion: 72, BinaryVersion: 73}
+	if got := plain.Error(); strings.Contains(got, "lacks") {
+		t.Errorf("version-only refusal %q claims missing identifiers it never collected", got)
 	}
 }
 
@@ -483,7 +617,7 @@ func requireNoDriftError(t *testing.T, err error) {
 	}
 }
 
-func requireBehindError(dbVersion int) func(t *testing.T, err error) {
+func requireBehindError(dbVersion int, missing ...string) func(t *testing.T, err error) {
 	return func(t *testing.T, err error) {
 		t.Helper()
 		var behindErr *SchemaBehindError
@@ -495,6 +629,9 @@ func requireBehindError(dbVersion int) func(t *testing.T, err error) {
 		}
 		if behindErr.Gateway {
 			t.Error("CheckReadableDrift set Gateway; only the gateway open path may")
+		}
+		if got := strings.Join(behindErr.Missing, ", "); got != strings.Join(missing, ", ") {
+			t.Errorf("SchemaBehindError.Missing = %q, want %q", got, strings.Join(missing, ", "))
 		}
 	}
 }

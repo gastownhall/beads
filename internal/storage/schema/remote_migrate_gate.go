@@ -141,6 +141,26 @@ type RemoteMigrateGateError struct {
 	// plumbed into the gate: the topology is the caller's fact, and every
 	// other injection site would have to pass a constant false.
 	Proxied bool
+
+	// ReadsRefused carries the schema-behind error an open that tolerated
+	// this refusal then collected from the readability guard
+	// (CheckReadableDrift): the gate stopped the migration as designed, but
+	// the schema behind it cannot answer this binary's reads either, so the
+	// "writes blocked, reads continue" contract is false for this database
+	// (gastownhall/beads#6572). Set only by the lenient open paths, at the
+	// moment they learn it — the gate itself never probes readability — and
+	// nil on every refusal whose reads were never checked (strict opens,
+	// write paths), which is why the read-continuation wording keyed on it
+	// must stay qualified rather than unconditional.
+	ReadsRefused *SchemaBehindError
+}
+
+// Unwrap keeps a gate error that carries a read refusal discoverable as both
+// classifications: IsRemoteMigrateGateError for the decision-specific
+// rendering, IsSchemaBehindError for the schema verdict and its Missing
+// evidence.
+func (e *RemoteMigrateGateError) Unwrap() error {
+	return e.ReadsRefused
 }
 
 const (

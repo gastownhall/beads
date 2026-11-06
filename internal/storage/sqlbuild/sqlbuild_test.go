@@ -750,3 +750,67 @@ func TestColumnNames(t *testing.T) {
 		t.Errorf("QualifyColumns = %q, want %q", got, want)
 	}
 }
+
+// TestIssueReadRelations pins the descriptor schema.CheckReadableDrift
+// consumes (IssueReadRelations) to the projection constants the queries
+// actually render. It is the drift tripwire for #6572: a future join or
+// projection change that leaves this list behind re-opens the gap where a
+// behind database passes the open-time check and fails every read at query
+// time, so the descriptor must be derived from the same constants and any
+// new relation or column must be added here with the query that uses it.
+func TestIssueReadRelations(t *testing.T) {
+	t.Parallel()
+
+	relations := IssueReadRelations()
+	if len(relations) != 3 {
+		t.Fatalf("IssueReadRelations = %d relations, want 3 (issues, wisps, leases)", len(relations))
+	}
+	issues, wisps, leases := relations[0], relations[1], relations[2]
+
+	if issues.Table != "issues" || issues.Optional {
+		t.Errorf("issues relation = %+v, want a required issues relation", issues)
+	}
+	if got := issues.Columns; !slices.Equal(got, ColumnNames(IssueBaseColumns)) {
+		t.Errorf("issues columns = %v, want ColumnNames(IssueBaseColumns) = %v", got, ColumnNames(IssueBaseColumns))
+	}
+	// The lite list is what the lighter reads select; requiring the full list
+	// covers it only while lite stays a subset.
+	for _, column := range ColumnNames(IssueBaseColumnsLite) {
+		if !slices.Contains(issues.Columns, column) {
+			t.Errorf("lite column %q is absent from the required issues projection", column)
+		}
+	}
+
+	if wisps.Table != "wisps" {
+		t.Errorf("second relation = %+v, want the wisps fallback", wisps)
+	}
+	// The get-by-id fallback selects the same row projection from wisps, and
+	// only the existing wisp-absence policy may mark a table optional.
+	if wisps.Optional != OptionalWispTable("wisps") || !wisps.Optional {
+		t.Errorf("wisps optionality = %v, want the OptionalWispTable policy (true)", wisps.Optional)
+	}
+	if !slices.Equal(wisps.Columns, issues.Columns) {
+		t.Errorf("wisps columns = %v, want the same row projection as issues: %v", wisps.Columns, issues.Columns)
+	}
+
+	if leases.Table != "leases" || leases.Optional {
+		t.Errorf("leases relation = %+v, want a required leases relation", leases)
+	}
+	// Every column the overlay select names, unqualified, plus the join key
+	// LeaseJoin constrains. Derived from LeaseSelectColumns so a column added
+	// to the overlay follows automatically.
+	for _, column := range UnqualifiedColumnNames(LeaseSelectColumns) {
+		if !slices.Contains(leases.Columns, column) {
+			t.Errorf("leases columns %v lack the overlay column %q", leases.Columns, column)
+		}
+	}
+	if !slices.Contains(leases.Columns, "issue_id") {
+		t.Errorf("leases columns %v lack the LeaseJoin key \"issue_id\"", leases.Columns)
+	}
+	// The join key is pinned against LeaseJoin's own text, not assumed: a
+	// join rewritten onto another key must carry the descriptor with it.
+	join := LeaseJoin("i")
+	if !strings.Contains(join, "leases.issue_id = i.id") {
+		t.Errorf("LeaseJoin = %q, want it to constrain leases.issue_id = <table>.id", join)
+	}
+}

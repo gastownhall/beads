@@ -100,6 +100,49 @@ func LeaseJoin(tableRef string) string {
 	return "LEFT JOIN leases ON leases.issue_id = " + tableRef + ".id"
 }
 
+// ReadRelation describes one relation this binary's issue reads touch: the
+// columns their queries select from Table (or join through), and whether a
+// database may legitimately lack the table altogether. It is the descriptor
+// schema.CheckReadableDrift consumes to refuse, at open, a behind database
+// whose reads would fail on an unknown table or column (#6572).
+type ReadRelation struct {
+	Table    string
+	Columns  []string
+	Optional bool
+}
+
+// IssueReadRelations is the full relation set a hydrated issue read of this
+// binary can touch: the issues row projection (IssueBaseColumns, which also
+// covers the lite list, a subset), the wisps row the get-by-id fallback reads
+// (same projection; absent on databases that never materialized the wisp
+// plane, which a wisp query treats as "no wisps" — OptionalWispTable), and
+// the leases overlay every hydrated read joins through LeaseJoin
+// (LeaseSelectColumns plus the join's issue_id). It describes the shared
+// hydration projection, not every command's SQL: a future query that touches
+// another relation or column must extend this list with the query, which
+// TestIssueReadRelations pins against the constants so the descriptor cannot
+// silently drift behind them.
+func IssueReadRelations() []ReadRelation {
+	return []ReadRelation{
+		{Table: "issues", Columns: ColumnNames(IssueBaseColumns)},
+		{Table: "wisps", Columns: ColumnNames(IssueBaseColumns), Optional: OptionalWispTable("wisps")},
+		{Table: "leases", Columns: append([]string{"issue_id"}, UnqualifiedColumnNames(LeaseSelectColumns)...)},
+	}
+}
+
+// UnqualifiedColumnNames is ColumnNames with any table qualifiers stripped
+// ("leases.granted_node" -> "granted_node"), for asking whether a table
+// carries the columns a qualified select names.
+func UnqualifiedColumnNames(columns string) []string {
+	names := ColumnNames(columns)
+	for i, name := range names {
+		if dot := strings.LastIndex(name, "."); dot >= 0 {
+			names[i] = name[dot+1:]
+		}
+	}
+	return names
+}
+
 // QueryBatchSize bounds IN-clause sizes when long ID lists are folded into
 // WHERE fragments.
 const QueryBatchSize = 200

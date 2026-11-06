@@ -236,17 +236,18 @@ func lenientGateWarning(intent openIntent, gateErr *schema.RemoteMigrateGateErro
 
 // requireReadableSchema bounds a read-only command's read-through. Having
 // tolerated a migration refusal, the open goes on at the current schema, which
-// this binary's issue reads can query only while it has every column the
-// shared projection selects (schema.CheckReadableDrift). One that lacks any is
-// refused here, as server mode's read-only open refuses it
-// (dolt.Config.RequireReadableSchema), instead of opening and then failing
-// every read on an unknown column. The other intents read no issues through
-// this open and are left alone.
+// this binary's issue reads can query only while every relation they touch is
+// readable (sqlbuild.IssueReadRelations: the row projection, the wisp
+// fallback, the lease overlay). One that lacks any is refused here, as server
+// mode's read-only open refuses it (dolt.Config.RequireReadableSchema),
+// instead of opening and then failing every read on an unknown column or
+// table (#6572). The other intents read no issues through this open and are
+// left alone.
 func (s *EmbeddedDoltStore) requireReadableSchema(ctx context.Context, conn *sql.Conn) error {
 	if s.intent != openReadOnlyCommand {
 		return nil
 	}
-	return schema.CheckReadableDrift(ctx, conn, "issues", sqlbuild.ColumnNames(sqlbuild.IssueBaseColumns))
+	return schema.CheckReadableDrift(ctx, conn, sqlbuild.IssueReadRelations())
 }
 
 // toleratesGateRefusal reports whether this open's intent may warn and
@@ -762,6 +763,18 @@ func (s *EmbeddedDoltStore) initSchema(ctx context.Context) error {
 			// lenientGateWarning owns the rendering (and the rationale for
 			// preferring gateErr's shaped body over the blunt bullets).
 			if err := s.requireReadableSchema(ctx, conn); err != nil {
+				// A schema the reads cannot query makes the continuation this
+				// arm is about to promise false (#6572). Keep refusing as the
+				// gate — with the refusal attached so both classifications and
+				// the missing-relation evidence stay reachable — rather than
+				// printing "reads keep working" and failing every query after
+				// it. Only the schema-behind verdict attaches: the guard's own
+				// probe errors still fail the open bare, as before.
+				var behindErr *schema.SchemaBehindError
+				if errors.As(err, &behindErr) {
+					gateErr.ReadsRefused = behindErr
+					return gateErr
+				}
 				return err
 			}
 			fmt.Fprint(os.Stderr, lenientGateWarning(s.intent, gateErr))

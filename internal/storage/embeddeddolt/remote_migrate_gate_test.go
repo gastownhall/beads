@@ -3,6 +3,9 @@
 package embeddeddolt_test
 
 import (
+	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,7 +13,30 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 	"github.com/steveyegge/beads/internal/storage/schema"
+	"github.com/steveyegge/beads/internal/types"
 )
+
+// captureEmbeddedStderr runs fn with os.Stderr redirected and returns what it
+// wrote, so a test can assert which warnings an open printed (and which it did
+// not get to print).
+func captureEmbeddedStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	orig := os.Stderr
+	r, w, pipeErr := os.Pipe()
+	if pipeErr != nil {
+		t.Fatal(pipeErr)
+	}
+	os.Stderr = w
+	fn()
+	_ = w.Close()
+	os.Stderr = orig
+	var buf strings.Builder
+	if _, err := io.Copy(&buf, r); err != nil {
+		t.Fatal(err)
+	}
+	_ = r.Close()
+	return buf.String()
+}
 
 // TestEmbeddedRemoteMigrateGate_BlocksReopen verifies that the #4259
 // remote-migrate gate also protects embedded mode (the mode the original report
@@ -330,5 +356,150 @@ func TestEmbeddedOpenForReadOnlyCommand_LenientGate(t *testing.T) {
 		t.Fatal("OpenForReadOnlyCommand past a dirty-table refusal of a schema without arrival_seq = nil error, want *schema.SchemaBehindError")
 	} else if !schema.IsSchemaBehindError(err) {
 		t.Fatalf("OpenForReadOnlyCommand past a dirty-table refusal: error = %T (%v), want *schema.SchemaBehindError", err, err)
+	}
+}
+
+// TestEmbeddedOpenForReadOnlyCommand_LenientGateRefusesUnreadableOverlay is
+// the #6572 regression for the guard's remaining gap. The lenient gate
+// promises "writes blocked, reads fine", and requireReadableSchema makes that
+// promise true for the issues projection (#7912) — but a hydrated issue read
+// also joins the clone-local leases overlay and falls back to wisps, so a
+// behind, remote-backed database whose issues rows are intact but whose
+// overlay is absent or short a column still cannot answer a single read. The
+// open must refuse that database up front, naming what is missing, with both
+// the gate and the schema-behind classification reachable from the error —
+// not print the continuation warning and fail every query after it.
+//
+// Each case regresses ONLY the main migration cursor (the ignored series,
+// which owns leases and the wisp plane, stays at its latest), registers a
+// file remote so the gate fires, and breaks one overlay relation while the
+// issues rows stay complete.
+func TestEmbeddedOpenForReadOnlyCommand_LenientGateRefusesUnreadableOverlay(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt tests")
+	}
+	t.Setenv(schema.AllowRemoteMigrateEnv, "0")
+	// Blunt-gate coverage: pin the (default-on) smart router off.
+	t.Setenv(schema.SmartGateEnv, "0")
+	// The skew escape hatch must not mute the refusal under test.
+	t.Setenv("BD_IGNORE_SCHEMA_SKEW", "")
+
+	for _, tc := range []struct {
+		name         string
+		breakOverlay []string
+		missing      []string
+	}{
+		{
+			// A fresh clone materializes leases only through the ignored
+			// series' replay, which a read-only open never runs (0055):
+			// behind on main and never written to, it has no leases table.
+			name:         "no leases table",
+			breakOverlay: []string{"DROP TABLE leases"},
+			missing:      []string{"leases"},
+		},
+		{
+			name:         "leases missing granted_node",
+			breakOverlay: []string{"ALTER TABLE leases DROP COLUMN granted_node"},
+			missing:      []string{"leases.granted_node"},
+		},
+		{
+			name:         "wisps missing storage_class",
+			breakOverlay: []string{"ALTER TABLE wisps DROP COLUMN storage_class"},
+			missing:      []string{"wisps.storage_class"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			beadsDir := filepath.Join(t.TempDir(), ".beads")
+			dataDir := filepath.Join(beadsDir, "embeddeddolt")
+
+			// A fully migrated store with one seeded issue.
+			store, err := embeddeddolt.Open(ctx, beadsDir, "testdb", "main")
+			if err != nil {
+				t.Fatalf("Open: %v", err)
+			}
+			if err := store.SetConfig(ctx, "issue_prefix", "lgr"); err != nil {
+				store.Close()
+				t.Fatalf("SetConfig: %v", err)
+			}
+			if err := store.CreateIssue(ctx, &types.Issue{
+				ID: "probe1", Title: "probe", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
+			}, "tester"); err != nil {
+				store.Close()
+				t.Fatalf("CreateIssue: %v", err)
+			}
+			store.Close()
+
+			db, cleanup, err := embeddeddolt.OpenSQL(ctx, dataDir, "testdb", "main")
+			if err != nil {
+				t.Fatalf("OpenSQL: %v", err)
+			}
+			exec := func(query string, args ...any) {
+				t.Helper()
+				if _, err := db.ExecContext(ctx, query, args...); err != nil {
+					_ = cleanup()
+					t.Fatalf("%s: %v", query, err)
+				}
+			}
+			exec(fmt.Sprintf("DELETE FROM schema_migrations WHERE version = %d", schema.LatestVersion()))
+			exec("CALL DOLT_REMOTE('add', 'origin', ?)", "file://"+filepath.Join(t.TempDir(), "remote"))
+			for _, stmt := range tc.breakOverlay {
+				exec(stmt)
+			}
+			_ = cleanup()
+
+			var openErr error
+			stderr := captureEmbeddedStderr(t, func() {
+				var ro *embeddeddolt.EmbeddedDoltStore
+				ro, openErr = embeddeddolt.OpenForReadOnlyCommand(ctx, beadsDir, "testdb", "main")
+				if openErr == nil {
+					ro.Close()
+				}
+			})
+			if openErr == nil {
+				t.Fatal("OpenForReadOnlyCommand = nil error, want refusal: the lenient gate's continuation promise is false for a database whose hydration overlay is unreadable")
+			}
+			if !schema.IsRemoteMigrateGateError(openErr) {
+				t.Fatalf("OpenForReadOnlyCommand error = %T (%v), want it to keep the *schema.RemoteMigrateGateError classification", openErr, openErr)
+			}
+			if !schema.IsSchemaBehindError(openErr) {
+				t.Fatalf("OpenForReadOnlyCommand error = %T (%v), want a *schema.SchemaBehindError reachable through the gate error", openErr, openErr)
+			}
+			var behind *schema.SchemaBehindError
+			if errors.As(openErr, &behind) {
+				if got, want := strings.Join(behind.Missing, ", "), strings.Join(tc.missing, ", "); got != want {
+					t.Errorf("refusal names %q, want %q", got, want)
+				}
+			}
+			if strings.Contains(stderr, "Read-only command: continuing") {
+				t.Errorf("the refusal still printed the continuation warning first:\n%s", stderr)
+			}
+
+			// The refusal must not have healed anything: the cursor stays
+			// behind and the broken relation stays broken.
+			db2, cleanup2, err := embeddeddolt.OpenSQL(ctx, dataDir, "testdb", "main")
+			if err != nil {
+				t.Fatalf("OpenSQL (verify): %v", err)
+			}
+			defer func() { _ = cleanup2() }()
+			var applied int
+			if err := db2.QueryRowContext(ctx,
+				"SELECT COUNT(*) FROM schema_migrations WHERE version = ?", schema.LatestVersion()).Scan(&applied); err != nil {
+				t.Fatalf("read schema_migrations: %v", err)
+			}
+			if applied != 0 {
+				t.Fatalf("the refused open applied migration %d; a read-only command must not migrate", schema.LatestVersion())
+			}
+			if tc.name == "no leases table" {
+				var leases int
+				if err := db2.QueryRowContext(ctx,
+					"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'leases'").Scan(&leases); err != nil {
+					t.Fatalf("probe leases: %v", err)
+				}
+				if leases != 0 {
+					t.Fatal("the refused open re-created the leases table; a read-only command must not write schema")
+				}
+			}
+		})
 	}
 }
