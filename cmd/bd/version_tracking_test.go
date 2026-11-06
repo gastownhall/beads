@@ -972,3 +972,34 @@ func TestAutoMigrateOnVersionBump_FailureUnderJSON(t *testing.T) {
 		t.Errorf(".local_version = %q after a failed upgrade under --json, want the previous %q", got, "1.1.0")
 	}
 }
+
+// TestNoticeVersionBumpFailure_DirtyTables pins the dirty-table notice: the
+// tables, and the commit-then-migrate sequence in that order, carrying
+// --global into both commands when the invocation did.
+func TestNoticeVersionBumpFailure_DirtyTables(t *testing.T) {
+	pinJSONOutput(t, false)
+	dirty := fmt.Errorf("failed to initialize schema: %w", &schema.DirtyTablesError{Tables: []string{"issues", "wisps"}})
+	for _, global := range []bool{false, true} {
+		t.Run(fmt.Sprintf("global=%v", global), func(t *testing.T) {
+			orig := globalFlag
+			globalFlag = global
+			t.Cleanup(func() { globalFlag = orig })
+
+			out := captureNoticeStderr(t, func() { noticeVersionBumpFailure(dirty) })
+			wantCommit, wantMigrate := "'bd dolt commit'", "'bd migrate schema'"
+			if global {
+				wantCommit, wantMigrate = "'bd dolt commit --global'", "'bd migrate schema --global'"
+			}
+			if !strings.Contains(out, "issues, wisps") {
+				t.Errorf("notice does not name the dirty tables:\n%s", out)
+			}
+			commit, migrate := strings.Index(out, wantCommit), strings.Index(out, wantMigrate)
+			if commit < 0 || migrate < 0 || commit > migrate {
+				t.Errorf("notice does not give %s then %s:\n%s", wantCommit, wantMigrate, out)
+			}
+			if !strings.Contains(out, "retry") {
+				t.Errorf("notice does not say the next command retries:\n%s", out)
+			}
+		})
+	}
+}

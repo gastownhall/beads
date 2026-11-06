@@ -529,6 +529,22 @@ func noticeVersionBumpFailure(err error) {
 	if jsonOutput {
 		return
 	}
+	var dirtyErr *schema.DirtyTablesError
+	if errors.As(err, &dirtyErr) {
+		// The guard's own message says "re-run the migration", which names
+		// no command, and the consent may already have printed "applying".
+		// Committing is not gated (the working-set reconcile open passes the
+		// dirty, consent and migrate gates), so the plain sequence converges.
+		commit, migrate := "bd dolt commit", schema.SharedConsentCommand
+		if globalFlag {
+			commit, migrate = commit+" --global", schema.SharedConsentCommandGlobal
+		}
+		fmt.Fprintf(os.Stderr,
+			"bd upgraded to %s, but its pending schema migrations were not applied: they alter tables with uncommitted changes (%s).\n"+
+				"Run '%s' to commit the working set, then '%s'. Until then the next bd command will retry the upgrade.\n",
+			displayVersion(Version), strings.Join(dirtyErr.Tables, ", "), commit, migrate)
+		return
+	}
 	fmt.Fprintf(os.Stderr,
 		"bd upgraded to %s, but finishing the upgrade failed: %v\n"+
 			"The next bd command will retry it; run 'bd doctor' to diagnose.\n",
