@@ -1,6 +1,7 @@
 package routing
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -39,21 +40,37 @@ const (
 // 1. Check git config for beads.role setting (preferred source of truth)
 // 2. Fall back to URL heuristic with deprecation warning (graceful degradation)
 // 3. Default to maintainer for local projects (no remote configured)
+//
+// A read that genuinely fails — a malformed or unreadable config, a permission
+// denial, a cancellation — returns ("", err) before any fallback: an
+// unreadable authority source must not be reported as an unconfigured role and
+// answered by heuristic. Two narrow cases keep the documented unavailable-probe
+// fallback (gitProbeUnavailable): git itself is missing, or the working path
+// names no directory. A missing or unrecognized value still falls through to
+// the notice and heuristic below.
 func DetectUserRole(repoPath string) (UserRole, error) {
 	// First check for explicit role in git config (preferred source)
-	if role, ok := roleFromGitConfig(repoPath); ok {
+	if role, ok, err := roleFromGitConfig(repoPath); err != nil {
+		if !gitProbeUnavailable(repoPath, err) {
+			return "", err
+		}
+	} else if ok {
 		return role, nil
 	}
 
 	// jj secondary workspaces have no .git of their own, so the lookup above
-	// fails even when the primary workspace has beads.role set. Resolve the
+	// misses even when the primary workspace has beads.role set. Resolve the
 	// primary workspace and retry there, then run the remaining fallbacks
 	// against the primary's git repo since the secondary has no usable git
 	// context. The resolution is anchored at repoPath (not cwd) so it stays
 	// consistent with the git-config lookup above. (GH#2950)
 	if _, isSecondary := git.JJSecondaryWorkspaceRootFrom(repoPath); isSecondary {
 		if primaryRoot, err := git.GetJJPrimaryWorkspaceRootFrom(repoPath); err == nil {
-			if role, ok := roleFromGitConfig(primaryRoot); ok {
+			if role, ok, err := roleFromGitConfig(primaryRoot); err != nil {
+				if !gitProbeUnavailable(primaryRoot, err) {
+					return "", err
+				}
+			} else if ok {
 				return role, nil
 			}
 			repoPath = primaryRoot
@@ -68,21 +85,49 @@ func DetectUserRole(repoPath string) (UserRole, error) {
 	return detectFromURL(repoPath), nil
 }
 
+// gitProbeUnavailable reports whether a failed role read means the optional
+// probe could not run at all, rather than a selected repository answering with
+// a failure. Only two cases qualify: the git executable is missing
+// (exec.ErrNotFound through exec.Error), and the working path naming no
+// directory to run in (a chdir failure). Every other failure — a permission
+// denial, a cancellation, a malformed config — is a real answer from a real
+// probe and stays an error. This is routing's compatibility exception for its
+// documented unavailable-git fallback (TestDetectUserRole_Fallback); the
+// shared classifier and the domain adapter remain strict.
+func gitProbeUnavailable(repoPath string, err error) bool {
+	if errors.Is(err, exec.ErrNotFound) {
+		return true
+	}
+	if repoPath == "" {
+		return false
+	}
+	info, statErr := os.Stat(repoPath)
+	return errors.Is(statErr, os.ErrNotExist) || (statErr == nil && !info.IsDir())
+}
+
 // roleFromGitConfig reads beads.role from the git config of repoPath.
-// Returns (role, true) only for a valid explicit value; (_, false) when the
-// config is unset, git is unavailable, or the value is not a recognized role.
-func roleFromGitConfig(repoPath string) (UserRole, bool) {
+// Returns (role, true, nil) only for a valid explicit value; ("", false, nil)
+// when the config is unset or the value is not a recognized role; and
+// ("", false, err) when the read itself failed, classified by the shared rule
+// every beads.role reader uses. Whether a read failure is fatal or an
+// optional-probe miss is DetectUserRole's decision (gitProbeUnavailable), not
+// this reader's.
+func roleFromGitConfig(repoPath string) (UserRole, bool, error) {
 	output, err := gitCommandRunner(repoPath, "config", "--get", "beads.role")
-	if err != nil {
-		return "", false
+	value, present, readErr := git.ClassifyConfigGet(output, err)
+	if readErr != nil {
+		return "", false, readErr
 	}
-	switch UserRole(strings.TrimSpace(string(output))) {
+	if !present {
+		return "", false, nil
+	}
+	switch UserRole(value) {
 	case Maintainer:
-		return Maintainer, true
+		return Maintainer, true, nil
 	case Contributor:
-		return Contributor, true
+		return Contributor, true, nil
 	}
-	return "", false
+	return "", false, nil
 }
 
 // detectFromURL uses remote URL patterns to infer user role.

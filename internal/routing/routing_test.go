@@ -1,6 +1,7 @@
 package routing
 
 import (
+	"bytes"
 	"errors"
 	"io"
 	"os"
@@ -378,6 +379,124 @@ func captureStderr(t *testing.T, fn func()) string {
 // secondary workspace (which has no .git of its own), beads.role is resolved
 // from the primary workspace's git config rather than falling through to the
 // deprecation warning + URL heuristic. (GH#2950)
+// harvestRoleReadError runs the real `git config --get beads.role` probe in a
+// fixture repository whose local config is configContent, with the global and
+// system scopes closed off, and returns the error the probe produced. Tests
+// replay that genuine *exec.ExitError — a real exit code with real stderr —
+// through gitCommandRunner, because an *exec.ExitError cannot be synthesized
+// (its ProcessState is opaque) and a plain error is indistinguishable from an
+// execution failure the classifier must report.
+func harvestRoleReadError(t *testing.T, configContent string) error {
+	t.Helper()
+	dir, home := t.TempDir(), t.TempDir()
+	if err := os.WriteFile(filepath.Join(home, ".gitconfig"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env := append(os.Environ(),
+		"HOME="+home, "USERPROFILE="+home,
+		"XDG_CONFIG_HOME="+filepath.Join(home, ".config"),
+		"GIT_CONFIG_NOSYSTEM=1")
+	run := func(args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir, cmd.Env = dir, env
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("fixture git %v: %v: %s", args, err, out)
+		}
+	}
+	run("init", "--quiet")
+	if err := os.WriteFile(filepath.Join(dir, ".git", "config"), []byte(configContent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	probe := exec.Command("git", "config", "--get", "beads.role")
+	probe.Dir, probe.Env = dir, env
+	_, err := probe.Output()
+	return err
+}
+
+// TestDetectUserRole_ReadFailureIsDiagnosticError pins bd-a2qnf4 (GH#6765):
+// a repository whose git config cannot be parsed must fail role detection
+// with git's diagnostic instead of falling through to the jj retry, the
+// "beads.role not configured" notice, or the deprecated URL heuristic.
+// Absence (silent exit 1) and an unavailable probe stay benign:
+// TestDetectUserRole_AbsenceKeepsFallback and TestDetectUserRole_Fallback pin
+// those halves.
+func TestDetectUserRole_ReadFailureIsDiagnosticError(t *testing.T) {
+	harvested := harvestRoleReadError(t, "[beads\n\trole = maintainer\n")
+	var exitErr *exec.ExitError
+	if !errors.As(harvested, &exitErr) || exitErr.ExitCode() == 0 || len(bytes.TrimSpace(exitErr.Stderr)) == 0 {
+		t.Fatalf("fixture did not produce a diagnostic exit error: %v", harvested)
+	}
+
+	// An existing directory, so the narrow unavailable-probe path exception
+	// cannot absorb the failure.
+	repo := t.TempDir()
+	orig := gitCommandRunner
+	stub := &gitStub{t: t, responses: []gitResponse{
+		{expect: gitCall{repo, []string{"config", "--get", "beads.role"}}, err: harvested},
+	}}
+	gitCommandRunner = stub.run
+	t.Cleanup(func() {
+		gitCommandRunner = orig
+		// Any jj-primary retry or remote probe would need a second response
+		// and fail here.
+		stub.verify()
+	})
+
+	var role UserRole
+	var err error
+	stderr := captureStderr(t, func() { role, err = DetectUserRole(repo) })
+
+	if err == nil {
+		t.Fatalf("DetectUserRole() = %q, nil; want a diagnostic error for a malformed config", role)
+	}
+	if role != "" {
+		t.Errorf("role = %q, want empty alongside the error", role)
+	}
+	if !strings.Contains(err.Error(), "bad config") {
+		t.Errorf("error %q does not carry git's diagnostic", err)
+	}
+	if strings.Contains(stderr, "not configured") {
+		t.Errorf("missing-role notice printed for a failed read:\n%s", stderr)
+	}
+}
+
+// TestDetectUserRole_AbsenceKeepsFallback pins the benign half of the same
+// boundary: a silent exit 1 (the key is absent) still reaches the missing-role
+// notice and URL heuristic rather than surfacing as an error.
+func TestDetectUserRole_AbsenceKeepsFallback(t *testing.T) {
+	absent := harvestRoleReadError(t, "")
+	var exitErr *exec.ExitError
+	if !errors.As(absent, &exitErr) || exitErr.ExitCode() != 1 || len(exitErr.Stderr) != 0 {
+		t.Fatalf("fixture did not produce a silent absent-key exit: %v", absent)
+	}
+
+	repo := t.TempDir()
+	orig := gitCommandRunner
+	stub := &gitStub{t: t, responses: []gitResponse{
+		{expect: gitCall{repo, []string{"config", "--get", "beads.role"}}, err: absent},
+		{expect: gitCall{repo, []string{"remote", "get-url", "--push", "origin"}}, err: errors.New("no remote")},
+		{expect: gitCall{repo, []string{"remote", "get-url", "origin"}}, err: errors.New("no remote")},
+	}}
+	gitCommandRunner = stub.run
+	t.Cleanup(func() {
+		gitCommandRunner = orig
+		stub.verify()
+	})
+
+	var role UserRole
+	var err error
+	stderr := captureStderr(t, func() { role, err = DetectUserRole(repo) })
+	if err != nil {
+		t.Fatalf("DetectUserRole() error = %v, want nil for an absent key", err)
+	}
+	if role != Maintainer {
+		t.Errorf("role = %q, want %q (no-remote fallback)", role, Maintainer)
+	}
+	if !strings.Contains(stderr, "not configured") {
+		t.Errorf("absent key lost its missing-role notice:\n%s", stderr)
+	}
+}
+
 func TestDetectUserRole_JJSecondaryWorkspace(t *testing.T) {
 	origDir, err := os.Getwd()
 	if err != nil {
@@ -410,15 +529,20 @@ func TestDetectUserRole_JJSecondaryWorkspace(t *testing.T) {
 	})
 	git.ResetCaches()
 
-	// Path-aware mock: the secondary has no usable git config (error), but the
-	// primary returns maintainer. Match the primary loosely by suffix so we
-	// don't depend on symlink/case canonicalization of the resolved path.
+	// Path-aware mock: the secondary's own probe answers absence (a silent
+	// exit 1 — the real signal from a workspace with no git config of its
+	// own), and the primary returns maintainer. Match the primary loosely by
+	// suffix so we don't depend on symlink/case canonicalization of the
+	// resolved path. Since GH#6765 a genuine read error no longer falls
+	// through to the primary retry, so the replayed error must be the
+	// realistic absent-key exit rather than a plain execution failure.
+	absent := harvestRoleReadError(t, "")
 	orig := gitCommandRunner
 	gitCommandRunner = func(repo string, args ...string) ([]byte, error) {
 		if strings.HasSuffix(repo, "primary") {
 			return []byte("maintainer\n"), nil
 		}
-		return nil, errors.New("not a git repository")
+		return nil, absent
 	}
 	t.Cleanup(func() { gitCommandRunner = orig })
 
@@ -480,12 +604,16 @@ func TestDetectUserRole_JJSecondaryWorkspace_NonCwdRepoPath(t *testing.T) {
 	})
 	git.ResetCaches()
 
+	// Same replay shape as TestDetectUserRole_JJSecondaryWorkspace: the
+	// secondary's probe answers absence (silent exit 1), the primary answers
+	// maintainer.
+	absent := harvestRoleReadError(t, "")
 	orig := gitCommandRunner
 	gitCommandRunner = func(repo string, args ...string) ([]byte, error) {
 		if strings.HasSuffix(repo, "primary") {
 			return []byte("maintainer\n"), nil
 		}
-		return nil, errors.New("not a git repository")
+		return nil, absent
 	}
 	t.Cleanup(func() { gitCommandRunner = orig })
 

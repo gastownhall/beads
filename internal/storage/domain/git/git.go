@@ -139,22 +139,20 @@ func (r *gitRepositoryImpl) GetConfig(ctx context.Context, key string) (string, 
 		cmd.Env = r.roleAuthorityEnv()
 	}
 	out, err := cmd.Output()
-	if err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			// Git also uses exit 1 for invalid keys, with a diagnostic.
-			if exitErr.ExitCode() == 1 && len(bytes.TrimSpace(exitErr.Stderr)) == 0 {
-				return "", false, nil
-			}
-			return "", false, fmt.Errorf("git: GetConfig %s: %w: %s", key, err, bytes.TrimSpace(exitErr.Stderr))
-		}
-		return "", false, fmt.Errorf("git: GetConfig %s: %w", key, err)
+	// Classification is shared with every other beads.role reader
+	// (internal/git.ClassifyConfigGet); this adapter keeps only its own
+	// outer prefix and its found semantics on top of it.
+	value, present, readErr := internalgit.ClassifyConfigGet(out, err)
+	if readErr != nil {
+		return "", false, fmt.Errorf("git: GetConfig %s: %w", key, readErr)
 	}
-	value := strings.TrimSpace(string(out))
 	if value == "" {
+		// An explicitly empty successful value resolves as absent here, the
+		// same as a missing key; callers that must distinguish the two read
+		// the raw result through the classifier instead.
 		return "", false, nil
 	}
-	return value, true, nil
+	return value, present, nil
 }
 
 func (r *gitRepositoryImpl) SetConfig(ctx context.Context, key, value string) error {

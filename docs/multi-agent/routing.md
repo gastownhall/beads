@@ -85,6 +85,18 @@ over SSH. Set `beads.role` explicitly and the heuristic (and its warning)
 never runs.
 </Note>
 
+Role detection distinguishes three outcomes:
+
+| Outcome | Behavior |
+|---|---|
+| `beads.role` set to a recognized value | Used as-is |
+| Key absent, value unrecognized, or git itself unavailable | Warning + heuristic fallback (above) |
+| The read genuinely failed (malformed or unreadable config, permission denied) | Routing reports the failure and uses the default route; no heuristic answer is trusted |
+
+The unavailable-git case stays benign on purpose: a machine without a git
+executable, or a working path that names no directory, is a probe that never
+ran — not a repository that answered.
+
 ## Setup
 
 ### Contributors
