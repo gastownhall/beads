@@ -36,7 +36,10 @@ const accidentalReleaseGuide = "docs/recovery/accidental-1-2-1-release.md"
 // The guide's sections whose commands the tests run. A section ends at the
 // next heading of any level, so the numbered procedure under
 // guideRequiredSection does not pick up a subsection's commands.
-const guideRequiredSection = "## Recommended fix: roll the schema cursor back"
+const (
+	guideRequiredSection = "## Recommended fix: roll the schema cursor back"
+	guideMissingSection  = "### If `events` is missing or empty"
+)
 
 // guideCursorRollback is the guide's step 4, which is all an earlier version
 // of the guide required: a database recovered with it alone keeps events
@@ -468,5 +471,84 @@ func TestEmbeddedAccidentalReleaseRecoveryDivergentPeers(t *testing.T) {
 		if v := currentMainVersion(t, ctx, conn); v != 53 {
 			t.Fatalf("schema cursor = %d after the pull, want 53", v)
 		}
+	})
+}
+
+// TestEmbeddedAccidentalReleaseMissingEventsClone is AC-4: a clone of a
+// database published after the cursor rollback alone has no events table.
+// Either documented repair, pulling a recovered source or the history-only
+// batch, makes its next issue-plus-event write commit cleanly.
+func TestEmbeddedAccidentalReleaseMissingEventsClone(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+	guide := readAccidentalReleaseGuide(t)
+
+	publishedWithoutEvents := func(t *testing.T) (source, clone string) {
+		t.Helper()
+		source = seedMigratedMachine(t, ctx)
+		mustOK(t, "cursor rollback alone", runGuideBatch(t, source, guideCursorRollback))
+		remoteURL := publishToNewRemote(t, ctx, source)
+		_, clone = cloneLineage(t, ctx, remoteURL)
+		withRawConn(t, clone, preflipDatabase, func(conn *sql.Conn) {
+			if eventsTablePresent(t, ctx, conn) {
+				t.Fatal("the clone has an events table; the reported shape is not reproduced")
+			}
+		})
+		return source, clone
+	}
+
+	t.Run("pull from a recovered source", func(t *testing.T) {
+		source, clone := publishedWithoutEvents(t)
+		// Step 5 on the clone stops early: there is no local table.
+		if err := runGuideSection(t, clone, guide, guideRequiredSection); err == nil || !strings.Contains(err.Error(), "table not found") {
+			t.Fatalf("required steps on the clone: err = %v, want table not found", err)
+		}
+		mustOK(t, "source: the guide's required steps", runGuideSection(t, source, guide, guideRequiredSection))
+		withRawConn(t, source, preflipDatabase, func(conn *sql.Conn) {
+			mustExecOn(t, ctx, conn, "CALL DOLT_PUSH('origin', 'main')")
+		})
+		withRawConn(t, clone, preflipDatabase, func(conn *sql.Conn) {
+			mustOK(t, "clone: pull", oldLinePull(ctx, conn))
+			requireCleanMerge(t, ctx, conn)
+			requireWritableLikeOldLine(t, ctx, conn, "clone-1", "clone-create")
+			requireEventTags(t, ctx, conn, "HEAD", "clone-create", "post-keep", "pre-keep")
+		})
+	})
+
+	t.Run("history-only batch", func(t *testing.T) {
+		_, clone := publishedWithoutEvents(t)
+		mustOK(t, "the history-only batch", runGuideSection(t, clone, guide, guideMissingSection))
+		withRawConn(t, clone, preflipDatabase, func(conn *sql.Conn) {
+			// Pre-upgrade rows of surviving issues; post-keep never reached
+			// history and gone-1 was deleted.
+			requireEventTags(t, ctx, conn, "HEAD", "pre-keep")
+			if eventsIgnoreRuleAtHead(t, ctx, conn) {
+				t.Fatal("the events ignore rule is still in HEAD")
+			}
+			requireWritableLikeOldLine(t, ctx, conn, "clone-1", "clone-create")
+		})
+	})
+
+	t.Run("history-only batch over an empty hand-made table", func(t *testing.T) {
+		_, clone := publishedWithoutEvents(t)
+		withRawConn(t, clone, preflipDatabase, func(conn *sql.Conn) {
+			mustExecOn(t, ctx, conn, `
+CREATE TABLE events (
+    issue_id VARCHAR(255) NOT NULL,
+    event_type VARCHAR(32) NOT NULL,
+    actor VARCHAR(255) NOT NULL,
+    old_value LONGTEXT,
+    new_value LONGTEXT,
+    comment TEXT,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    id CHAR(36) NOT NULL,
+    PRIMARY KEY (id)
+)`)
+		})
+		mustOK(t, "the history-only batch", runGuideSection(t, clone, guide, guideMissingSection))
+		withRawConn(t, clone, preflipDatabase, func(conn *sql.Conn) {
+			requireEventTags(t, ctx, conn, "HEAD", "pre-keep")
+			requireWritableLikeOldLine(t, ctx, conn, "clone-1", "clone-create")
+		})
 	})
 }

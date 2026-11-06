@@ -30,6 +30,15 @@ error above with v1.2.2 (or any 1.1.x binary). Users who upgraded but never
 ran `bd`, and users whose workspace has a Dolt remote configured (the
 remote-migrate gate blocked silent migration), are typically not affected.
 
+You are also affected if a clone fails its first issue write with:
+
+```
+Error: failed to record event for <id>: record event in events: Error 1146: table not found: events
+```
+
+That clone came from a database that was recovered without restoring
+`events`; see [If `events` is missing or empty](#if-events-is-missing-or-empty).
+
 ## Recommended fix: roll the schema cursor back
 
 The v1.2.x migrations were written to be replay-safe after a cursor
@@ -176,6 +185,65 @@ machines:
 
 A machine that got the migration only by pulling it has no local `events`
 table; follow [If `events` is missing or empty](#if-events-is-missing-or-empty).
+
+### If `events` is missing or empty
+
+A clone of a database pushed after v1.2.1 has no `events` table: the remote
+does not have one, and v1.2.2 does not create it. Step 5 stops on such a
+machine with `table not found: events`, which is expected; do not write
+issues to it until it is fixed. There are two ways:
+
+- **Another machine still has the audit rows.** Recover that machine first
+  (steps 2 to 7) and push. On this machine, take the backup (step 3), run
+  step 4 if `bd` still reports a schema mismatch, then `bd dolt pull`
+  before any issue write.
+- **No machine has them** (every copy lacks the table, or has an empty one,
+  such as the empty table the issue report's workaround creates). Restore
+  the table from history on **one** machine with this batch, from the
+  database directory after steps 2 to 4, then push; every other machine
+  pulls.
+
+  ```sh
+  dolt sql <<'SQL'
+  SET @flip = (SELECT commit_hash FROM dolt_log
+    WHERE message = 'schema: drop versioned events table for ignored-plane flip (bd-red8u)'
+      AND EXISTS (SELECT 1 FROM dolt_ignore WHERE pattern = 'events')
+      AND NOT EXISTS (SELECT 1 FROM dolt_log WHERE message = 'recovery: re-track events table')
+    ORDER BY date LIMIT 1);
+  SET @preflip = CONCAT(@flip, '~1');
+  -- Checks. Each one stops the batch before anything changes.
+  CREATE TEMPORARY TABLE recovery_check_history (events_history_found VARCHAR(64) NOT NULL);
+  INSERT INTO recovery_check_history VALUES (@flip);
+  CREATE TEMPORARY TABLE recovery_check_staged (nothing_else_staged INT NOT NULL);
+  INSERT INTO recovery_check_staged SELECT IF(COUNT(*) = 0, 1, NULL) FROM dolt_status WHERE staged = 1;
+  SET @present = (SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'events');
+  SET @probe = IF(@present = 0, 'SET @local_rows = 0', 'SET @local_rows = (SELECT COUNT(*) FROM events)');
+  PREPARE probe FROM @probe;
+  EXECUTE probe;
+  DEALLOCATE PREPARE probe;
+  CREATE TEMPORARY TABLE recovery_check_local (local_events_absent_or_empty INT NOT NULL);
+  INSERT INTO recovery_check_local VALUES (IF(@local_rows = 0, 1, NULL));
+  -- Restore the historical table, minus the events of deleted issues.
+  DROP TABLE IF EXISTS events;
+  DELETE FROM dolt_ignore WHERE pattern = 'events';
+  CALL DOLT_ADD('dolt_ignore');
+  CALL DOLT_CHECKOUT(@preflip, '--', 'events');
+  DELETE FROM events WHERE issue_id NOT IN (SELECT id FROM issues);
+  CALL DOLT_ADD('events');
+  CALL DOLT_COMMIT('-m', 'recovery: restore versioned events table from history', '--author', 'bd recovery <recovery@beads.invalid>');
+  SQL
+  ```
+
+  The table comes back with the audit rows from before the upgrade, for
+  every issue that still exists. Audit rows written after the upgrade that
+  no machine or backup still holds are not in the history and cannot be
+  reconstructed. The batch refuses (`local_events_absent_or_empty`) a
+  machine whose `events` table has rows; use step 5 there instead. Then run
+  step 6 to verify.
+
+Newer bd releases recreate a missing `events` table on their own. Do not
+run one briefly to fix a clone and then go back to v1.2.2: it migrates the
+database again.
 
 ## Stopgap: keep working before you recover
 
