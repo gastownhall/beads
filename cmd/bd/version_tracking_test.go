@@ -1094,8 +1094,8 @@ func TestNoticeVersionBumpFailure_DirtyTables(t *testing.T) {
 			if commit < 0 || migrate < 0 || commit > migrate {
 				t.Errorf("notice does not give %s then %s:\n%s", wantCommit, wantMigrate, out)
 			}
-			if !strings.Contains(out, "retry") {
-				t.Errorf("notice does not say the next command retries:\n%s", out)
+			if !strings.Contains(out, "next eligible non-preview command retries") {
+				t.Errorf("notice does not say the next eligible non-preview command retries:\n%s", out)
 			}
 		})
 	}
