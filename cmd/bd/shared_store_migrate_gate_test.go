@@ -702,3 +702,65 @@ func TestServerVersionBumpFailureNoticeSuppressedUnderJSON(t *testing.T) {
 // version-bump calls: a doctor target whose upgrade is refused on dirty
 // tables reports the failure, retains the TARGET's witness, and leaves the
 // caller workspace's witness untouched.
+func TestDoctorReportsDirtyVersionBumpRefusalInTarget(t *testing.T) {
+	repo, _, _, targetWitness := dirtyServerBumpFixture(t, "drt2")
+
+	caller := t.TempDir()
+	callerBeads := filepath.Join(caller, ".beads")
+	if err := os.MkdirAll(callerBeads, 0o755); err != nil {
+		t.Fatalf("create caller .beads: %v", err)
+	}
+	// The caller is itself a server-mode client of the same server (its own,
+	// never-opened database): doctor's embedded-mode gate consults the
+	// INVOKING workspace, and an empty .beads would stub doctor out before it
+	// ever reaches the target.
+	if err := (&configfile.Config{
+		Backend:        configfile.BackendDolt,
+		DoltMode:       configfile.DoltModeServer,
+		DoltServerHost: "127.0.0.1",
+		DoltServerPort: testDoltServerPort,
+		DoltDatabase:   uniqueTestDBName(t),
+	}).Save(callerBeads); err != nil {
+		t.Fatalf("save caller metadata: %v", err)
+	}
+	callerWitness := filepath.Join(callerBeads, localVersionFile)
+	if err := os.WriteFile(callerWitness, []byte("9.9.9\n"), 0o600); err != nil {
+		t.Fatalf("seed caller witness: %v", err)
+	}
+
+	bd := buildBDForInitTests(t)
+	cmd := exec.Command(bd, "doctor", repo)
+	cmd.Dir = caller
+	cmd.Env = append(filteredEnvForContextBinding("BEADS_DIR", "BEADS_DB", "BD_DB",
+		"BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_SERVER_DATABASE", schema.AllowRemoteMigrateEnv),
+		"HOME="+t.TempDir(),
+		"XDG_CONFIG_HOME="+t.TempDir(),
+		"BEADS_TEST_MODE=1",
+		"BEADS_TEST_SERVER=1",
+		"BEADS_DIR="+callerBeads,
+		schema.AllowRemoteMigrateEnv+"=1",
+	)
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	_ = cmd.Run() // exit code is doctor's own verdict on the behind schema; not under test
+	t.Logf("bd doctor: stdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
+
+	if !strings.Contains(stderr.String(), "bd dolt commit") {
+		t.Errorf("doctor did not report the target's dirty-table version-bump refusal:\n%s", stderr.String())
+	}
+	if got := readLocalVersion(targetWitness); got != "1.0.0" {
+		t.Errorf("target witness = %q after a refused doctor reconciliation, want the retained 1.0.0", got)
+	}
+	if got := readLocalVersion(callerWitness); got != "9.9.9" {
+		t.Errorf("caller witness = %q, want untouched 9.9.9 (doctor must scope its version writes to the target)", got)
+	}
+}
+
+// TestServerModeReadRefusesAMissingLeaseOverlay is the read-path half of
+// #6929: a behind database whose `issues` projection is complete but whose
+// leases overlay is missing used to open fine and fail every list with a raw
+// `Error 1146: table not found: leases`. The readable-schema check covers the
+// lease columns the shared projection joins, so the open refuses with the
+// schema-version gap and its remedy — and `bd migrate schema` recreates the
+// overlay (the ignored-series sentinel heals a dropped leases table).
