@@ -369,3 +369,195 @@ func noteTestFileHash(t *testing.T, path string) string {
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
 }
+
+// noteTestRunQuiet runs maybeAutoExport in workspace f and asserts it stays
+// quiet: nil error, empty stderr, empty stdout.
+func noteTestRunQuiet(t *testing.T, f *defaultOffNoteFixture) {
+	t.Helper()
+	var runErr error
+	stdout, stderr := captureNoteOutput(t, func() {
+		runErr = maybeAutoExport(context.Background(), false)
+	})
+	if runErr != nil {
+		t.Fatalf("maybeAutoExport error = %v, want nil", runErr)
+	}
+	if stderr != "" {
+		t.Fatalf("stderr = %q, want no default-off notice", stderr)
+	}
+	if stdout != "" {
+		t.Fatalf("stdout = %q, want empty", stdout)
+	}
+}
+
+// TestMaybeAutoExportDefaultOffNoteStaysQuiet pins AC-3 through AC-5: every
+// workspace, configuration or output context that already answers the
+// export.auto question — or is not the notice's audience — gets no notice.
+// The control subtest first proves the shared fixture does produce one, so
+// the quiet rows can never pass vacuously while the notice is broken.
+func TestMaybeAutoExportDefaultOffNoteStaysQuiet(t *testing.T) {
+	t.Run("control notice fires in the affected workspace", func(t *testing.T) {
+		f := newDefaultOffNoteFixture(t)
+		var runErr error
+		stdout, stderr := captureNoteOutput(t, func() {
+			runErr = maybeAutoExport(context.Background(), false)
+		})
+		if runErr != nil {
+			t.Fatalf("maybeAutoExport error = %v, want nil", runErr)
+		}
+		if stderr != noteAutoExportDefaultOffText(filepath.Join(f.beadsDir, "issues.jsonl")) {
+			t.Fatalf("control: stderr = %q, want the notice (the quiet rows below are only meaningful while it fires)", stderr)
+		}
+		if stdout != "" {
+			t.Fatalf("control: stdout = %q, want empty", stdout)
+		}
+	})
+
+	rows := []struct {
+		name  string
+		setup func(t *testing.T) *defaultOffNoteFixture
+	}{
+		{
+			name: "explicit false in project config",
+			setup: func(t *testing.T) *defaultOffNoteFixture {
+				return newDefaultOffNoteFixtureWithConfig(t, "export:\n  auto: false\n", "issues.jsonl")
+			},
+		},
+		{
+			name: "explicit false in local config",
+			setup: func(t *testing.T) *defaultOffNoteFixture {
+				f := newDefaultOffNoteFixture(t)
+				if err := os.WriteFile(filepath.Join(f.beadsDir, "config.local.yaml"), []byte("export:\n  auto: false\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				initConfigForTest(t) // re-merge the local layer into viper
+				return f
+			},
+		},
+		{
+			name: "explicit false in user config",
+			setup: func(t *testing.T) *defaultOffNoteFixture {
+				f := newDefaultOffNoteFixture(t)
+				userCfgDir := filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "bd")
+				if err := os.MkdirAll(userCfgDir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(userCfgDir, "config.yaml"), []byte("export:\n  auto: false\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				initConfigForTest(t) // re-merge the user layer into viper
+				return f
+			},
+		},
+		{
+			name: "explicit false via runtime Set",
+			setup: func(t *testing.T) *defaultOffNoteFixture {
+				f := newDefaultOffNoteFixture(t)
+				config.Set("export.auto", false)
+				return f
+			},
+		},
+		{
+			name: "explicit false via BD_EXPORT_AUTO",
+			setup: func(t *testing.T) *defaultOffNoteFixture {
+				f := newDefaultOffNoteFixture(t)
+				t.Setenv("BD_EXPORT_AUTO", "false")
+				return f
+			},
+		},
+		{
+			name: "explicit false via BEADS_EXPORT_AUTO",
+			setup: func(t *testing.T) *defaultOffNoteFixture {
+				f := newDefaultOffNoteFixture(t)
+				t.Setenv("BEADS_EXPORT_AUTO", "false")
+				return f
+			},
+		},
+		{
+			// LookupEnv semantics: an exported-but-empty variable still counts
+			// as the user answering, so it must not fall through to the
+			// default the notice describes.
+			name: "set-but-empty BD_EXPORT_AUTO",
+			setup: func(t *testing.T) *defaultOffNoteFixture {
+				f := newDefaultOffNoteFixture(t)
+				t.Setenv("BD_EXPORT_AUTO", "")
+				return f
+			},
+		},
+		{
+			name: "set-but-empty BEADS_EXPORT_AUTO",
+			setup: func(t *testing.T) *defaultOffNoteFixture {
+				f := newDefaultOffNoteFixture(t)
+				t.Setenv("BEADS_EXPORT_AUTO", "")
+				return f
+			},
+		},
+		{
+			// Explicit true runs the real enabled flow (change detection says
+			// "no changes since last export" against the stub state hash and
+			// returns before any store work): no notice, no error — the
+			// explicit-enabled path is unchanged by the notice change.
+			name: "explicit true keeps the enabled export flow quiet",
+			setup: func(t *testing.T) *defaultOffNoteFixture {
+				f := newDefaultOffNoteFixture(t)
+				config.Set("export.auto", true)
+				return f
+			},
+		},
+		{
+			name: "no export-state.json",
+			setup: func(t *testing.T) *defaultOffNoteFixture {
+				f := newDefaultOffNoteFixture(t)
+				noteTestRemove(t, filepath.Join(f.beadsDir, exportAutoStateFile))
+				return f
+			},
+		},
+		{
+			name: "no export JSONL",
+			setup: func(t *testing.T) *defaultOffNoteFixture {
+				f := newDefaultOffNoteFixture(t)
+				noteTestRemove(t, filepath.Join(f.beadsDir, "issues.jsonl"))
+				return f
+			},
+		},
+		{
+			name: "export-state.json is a directory",
+			setup: func(t *testing.T) *defaultOffNoteFixture {
+				f := newDefaultOffNoteFixture(t)
+				p := filepath.Join(f.beadsDir, exportAutoStateFile)
+				noteTestRemove(t, p)
+				noteTestMkdir(t, p)
+				return f
+			},
+		},
+		{
+			name: "export JSONL is a directory",
+			setup: func(t *testing.T) *defaultOffNoteFixture {
+				f := newDefaultOffNoteFixture(t)
+				p := filepath.Join(f.beadsDir, "issues.jsonl")
+				noteTestRemove(t, p)
+				noteTestMkdir(t, p)
+				return f
+			},
+		},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			f := row.setup(t)
+			noteTestRunQuiet(t, f)
+		})
+	}
+}
+
+func noteTestRemove(t *testing.T, path string) {
+	t.Helper()
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func noteTestMkdir(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
