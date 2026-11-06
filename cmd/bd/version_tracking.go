@@ -295,7 +295,7 @@ func autoMigrateOnVersionBump(beadsDir string) bool {
 		return true
 	}
 
-	recoverPreV56IfNeeded(previousVersion, dbPath)
+	recovered := recoverPreV56IfNeeded(previousVersion, dbPath)
 
 	// Open database using factory (respects backend config from metadata.json)
 	// Use rootCtx if available and not canceled, otherwise use Background
@@ -311,7 +311,13 @@ func autoMigrateOnVersionBump(beadsDir string) bool {
 		noticeSharedMigrateRefusal(err)
 		noticeDirtyTablesRefusal(err, beadsDir)
 	}
-	return versionBumpSettled(err)
+	// A performed pre-0.56 recovery settles the bump whatever followed it:
+	// it deleted .dolt, and the compatibility witness that would stop it
+	// happening again is best-effort, so retrying could repeat the deletion.
+	if recovered && !versionBumpSettled(err) {
+		debug.Logf("auto-migrate: pre-v56 recovery ran; not retrying the version bump")
+	}
+	return recovered || versionBumpSettled(err)
 }
 
 // versionBumpSettled classifies the outcome of reconcileVersionBump: nil (the
@@ -417,12 +423,16 @@ func reconcileVersionBumpStore(ctx context.Context, beadsDir string) error {
 // recovers. The .bd-dolt-ok marker RecoverPreV56DoltDir checks is the last
 // gate, but only bd 0.58.0 and later write it: a database that only 0.56.x or
 // 0.57.x has served has none, so for it these refusals are the only gate.
-func recoverPreV56IfNeeded(previousVersion, dbPath string) {
+//
+// It reports whether the recovery was performed — .dolt was removed — even
+// when the re-initialization after it failed; autoMigrateOnVersionBump settles
+// the bump on it.
+func recoverPreV56IfNeeded(previousVersion, dbPath string) bool {
 	if !doctor.IsValidSemver(previousVersion) || isGoPseudoVersion(previousVersion) {
-		return
+		return false
 	}
 	if doctor.CompareVersions(previousVersion, "0.56.0") >= 0 {
-		return
+		return false
 	}
 
 	recovered, recErr := doltserver.RecoverPreV56DoltDir(dbPath)
@@ -432,6 +442,7 @@ func recoverPreV56IfNeeded(previousVersion, dbPath string) {
 	if recovered {
 		debug.Logf("auto-migrate: rebuilt pre-v56 dolt database at %s", dbPath)
 	}
+	return recovered
 }
 
 // isGoPseudoVersion reports whether a version stamp is a Go pseudo-version,

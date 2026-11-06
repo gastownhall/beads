@@ -919,3 +919,97 @@ func TestVersionBump_DeferralSettlesMarker(t *testing.T) {
 		})
 	}
 }
+
+// TestVersionBump_SettledOutcomesAdvanceMarker covers the outcomes that settle
+// a version bump even though nothing was migrated: a reconciliation that ran
+// (success, already current and a refused downgrade all return nil from the
+// store tail), the existing not-applicable paths, and a performed pre-0.56
+// recovery. That recovery deletes .dolt, and its compatibility witness is
+// best-effort, so keeping the old marker after it could repeat the
+// destruction on the next command. An unperformed recovery settles nothing.
+// A preview detects the bump but neither writes nor reaches the maintenance.
+func TestVersionBump_SettledOutcomesAdvanceMarker(t *testing.T) {
+	pinJSONOutput(t, true)
+	failed := fmt.Errorf("failed to open database: %w", errors.New("connection refused"))
+
+	for _, tt := range []struct {
+		name         string
+		lastVersion  string
+		metadata     string
+		noDatabase   bool
+		preV56Dolt   bool // a .dolt with no .bd-dolt-ok marker
+		markedDolt   bool // a .dolt the 0.58+ marker vouches for
+		tailErr      error
+		wantVersion  string
+		wantAttempts int
+	}{
+		{name: "reconciled", lastVersion: "1.1.0", wantVersion: "1.3.0", wantAttempts: 1},
+		{name: "non-Dolt backend", lastVersion: "1.1.0", metadata: `{"backend":"sqlite","database":"beads.db"}`, wantVersion: "1.3.0"},
+		{name: "proxied server", lastVersion: "1.1.0", metadata: `{"backend":"dolt","dolt_mode":"proxied-server"}`, wantVersion: "1.3.0"},
+		{name: "no database", lastVersion: "1.1.0", noDatabase: true, wantVersion: "1.3.0"},
+		{name: "performed pre-0.56 recovery, then failure", lastVersion: "0.55.4", preV56Dolt: true, tailErr: failed, wantVersion: "1.3.0", wantAttempts: 1},
+		{name: "no pre-0.56 recovery, then failure", lastVersion: "0.55.4", markedDolt: true, tailErr: failed, wantVersion: "0.55.4", wantAttempts: 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			beadsDir, localVersionPath := newVersionBumpWorkspace(t, tt.lastVersion, "1.3.0")
+			attempts := stubReconcileVersionBump(t, tt.tailErr)
+			doltDir := filepath.Join(beadsDir, "dolt")
+			if tt.metadata != "" {
+				if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(tt.metadata), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tt.noDatabase {
+				if err := os.RemoveAll(doltDir); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tt.preV56Dolt || tt.markedDolt {
+				if err := os.MkdirAll(filepath.Join(doltDir, ".dolt"), 0o750); err != nil {
+					t.Fatal(err)
+				}
+				// No dolt on PATH: the recovery's re-init fails after the
+				// removal, the true-plus-error outcome, and never touches a
+				// real dolt.
+				t.Setenv("PATH", "")
+			}
+			if tt.markedDolt {
+				if err := os.WriteFile(filepath.Join(doltDir, ".bd-dolt-ok"), nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			invokeVersionBump(beadsDir)
+
+			if got := readLocalVersion(localVersionPath); got != tt.wantVersion {
+				t.Errorf(".local_version = %q, want %q", got, tt.wantVersion)
+			}
+			if *attempts != tt.wantAttempts {
+				t.Errorf("%d store attempts, want %d", *attempts, tt.wantAttempts)
+			}
+			if tt.preV56Dolt {
+				if _, err := os.Stat(filepath.Join(doltDir, ".dolt")); !os.IsNotExist(err) {
+					t.Errorf("fixture precondition: the pre-0.56 recovery did not run (.dolt survived: %v)", err)
+				}
+			}
+		})
+	}
+
+	t.Run("preview", func(t *testing.T) {
+		_, localVersionPath := newVersionBumpWorkspace(t, "1.1.0", "1.3.0")
+		attempts := stubReconcileVersionBump(t, nil)
+
+		// The pre-run's preview arm: detection only, and no maintenance call.
+		trackBdVersionPreview()
+
+		if !versionUpgradeDetected {
+			t.Error("a preview should still detect the upgrade")
+		}
+		if got := readLocalVersion(localVersionPath); got != "1.1.0" {
+			t.Errorf(".local_version = %q after a preview, want the old %q", got, "1.1.0")
+		}
+		if *attempts != 0 {
+			t.Errorf("%d store attempts during a preview, want 0", *attempts)
+		}
+	})
+}
