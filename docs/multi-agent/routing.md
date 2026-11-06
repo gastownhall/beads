@@ -90,7 +90,9 @@ fails the read (a malformed or unreadable config file, for example), `bd`
 does not guess: it warns once per command that role-based routing was
 skipped, shows git's diagnostic, and routes as if no role applied, which
 means `routing.default` when set and the current repository otherwise. The
-command still runs. Fix the config file git names (`git config --list
+command still runs. `bd init` likewise reports the failure and, without
+`--role`, neither prompts for a role nor writes a default one. Fix the config
+file git names (`git config --list
 --show-origin` shows where each value comes from) to restore role routing.
 If git is not installed, or the repository path does not exist, the read is
 treated as unset and the heuristic above applies.
