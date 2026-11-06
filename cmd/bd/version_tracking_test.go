@@ -4,12 +4,14 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/git"
+	"github.com/steveyegge/beads/internal/storage/schema"
 )
 
 func TestGetVersionsSince(t *testing.T) {
@@ -875,5 +877,70 @@ func TestNoticeVersionBumpFailure(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("notice is missing %q:\n%s", want, out)
 		}
+	}
+}
+
+// TestVersionBumpOpenFailed classifies the writable open's errors as they
+// arrive, wrapped, from the store open: both consent refusals defer the
+// upgrade (stamped, so the next command does not repeat the attempt) with
+// their existing notices, everything else fails it with the failure notice.
+func TestVersionBumpOpenFailed(t *testing.T) {
+	pinJSONOutput(t, false)
+	tests := []struct {
+		name        string
+		err         error
+		want        versionBumpOutcome
+		wantNotice  string
+		forbidSubst string
+	}{
+		{
+			name:        "remote-migration gate",
+			err:         &schema.RemoteMigrateGateError{CurrentVersion: 72, LatestVersion: 74, Pending: 2, Decision: "shared-no-remote"},
+			want:        versionBumpDeferred,
+			wantNotice:  "not auto-applying (#5920)",
+			forbidSubst: "finishing the upgrade failed",
+		},
+		{
+			name:        "ordinary migration consent",
+			err:         &schema.MigrateConsentError{CurrentVersion: 72, LatestVersion: 74, Pending: 2},
+			want:        versionBumpDeferred,
+			forbidSubst: "finishing the upgrade failed",
+		},
+		{
+			name:       "dirty tables",
+			err:        &schema.DirtyTablesError{Tables: []string{"issues"}},
+			want:       versionBumpFailed,
+			wantNotice: "issues",
+		},
+		{
+			name:       "anything else",
+			err:        errors.New("connection refused"),
+			want:       versionBumpFailed,
+			wantNotice: "connection refused",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			origFailed := versionBumpFailedThisRun
+			t.Cleanup(func() { versionBumpFailedThisRun = origFailed })
+			wrapped := fmt.Errorf("failed to initialize schema: schema migration: %w", tt.err)
+			if got := versionBumpOutcomeForOpenError(wrapped); got != tt.want {
+				t.Errorf("versionBumpOutcomeForOpenError = %v, want %v", got, tt.want)
+			}
+			var got versionBumpOutcome
+			out := captureNoticeStderr(t, func() { got = versionBumpOpenFailed(wrapped) })
+			if got != tt.want {
+				t.Errorf("versionBumpOpenFailed = %v, want %v", got, tt.want)
+			}
+			if tt.wantNotice == "" && out != "" {
+				t.Errorf("expected no notice, got:\n%s", out)
+			}
+			if tt.wantNotice != "" && !strings.Contains(out, tt.wantNotice) {
+				t.Errorf("notice is missing %q:\n%s", tt.wantNotice, out)
+			}
+			if tt.forbidSubst != "" && strings.Contains(out, tt.forbidSubst) {
+				t.Errorf("a deliberate deferral was reported as a failure:\n%s", out)
+			}
+		})
 	}
 }
