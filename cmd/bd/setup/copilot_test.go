@@ -440,3 +440,225 @@ func TestCheckCopilotRefusesUnusableFile(t *testing.T) {
 		})
 	}
 }
+
+// TestRemoveCopilotKeepsUserText pins the removal half of GH#7431: after an
+// install appended a section to a user file, --remove gives the user's bytes
+// back exactly (the shared helper's round trip of its own append), the
+// manifest goes, and the .github directory stays.
+func TestRemoveCopilotKeepsUserText(t *testing.T) {
+	const userContent = "# Team rules\n\nKeep these rules.\n"
+	env, _, _ := newCopilotTestEnv(t)
+	writeCopilotInstructions(t, env, userContent)
+	if err := installCopilot(env); err != nil {
+		t.Fatalf("installCopilot: %v", err)
+	}
+
+	if err := removeCopilot(env); err != nil {
+		t.Fatalf("removeCopilot: %v", err)
+	}
+
+	if got := readCopilotInstructions(t, env); got != userContent {
+		t.Fatalf("--remove changed the user's text:\ngot:  %q\nwant: %q", got, userContent)
+	}
+	if _, err := os.Stat(env.manifestPath); !os.IsNotExist(err) {
+		t.Fatalf("plugin manifest still present: %v", err)
+	}
+	if _, err := os.Stat(filepath.Dir(env.manifestPath)); !os.IsNotExist(err) {
+		t.Fatalf("the emptied .copilot-plugin directory still present: %v", err)
+	}
+	if info, err := os.Stat(filepath.Dir(env.instructionsPath)); err != nil || !info.IsDir() {
+		t.Fatalf("the .github directory was removed: %v", err)
+	}
+}
+
+// TestRemoveCopilotAdjacentBreakNormalization pins that removing the section
+// from a user file keeps its text while normalizing the blank lines that set
+// the section off, as the shared helper documents: a file with extra final
+// blank lines comes back with one final line break, and a CRLF file keeps
+// its CRLF terminator.
+func TestRemoveCopilotAdjacentBreakNormalization(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		user string
+		want string
+	}{
+		{
+			name: "extra final blank lines collapse to one",
+			user: "# Team rules\n\nKeep these rules.\n\n\n",
+			want: "# Team rules\n\nKeep these rules.\n",
+		},
+		{
+			name: "crlf terminator kept",
+			user: "# Team rules\r\n\r\nKeep these rules.\r\n",
+			want: "# Team rules\r\n\r\nKeep these rules.\r\n",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			env, _, _ := newCopilotTestEnv(t)
+			writeCopilotInstructions(t, env, tt.user)
+			if err := installCopilot(env); err != nil {
+				t.Fatalf("installCopilot: %v", err)
+			}
+
+			if err := removeCopilot(env); err != nil {
+				t.Fatalf("removeCopilot: %v", err)
+			}
+
+			if got := readCopilotInstructions(t, env); got != tt.want {
+				t.Fatalf("user text after --remove:\ngot:  %q\nwant: %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestRemoveCopilotDeletesSectionOnlyFile pins the section-only lifecycle:
+// what a fresh install of a missing instructions file created, --remove
+// deletes along with the manifest, directories included when that left them
+// empty.
+func TestRemoveCopilotDeletesSectionOnlyFile(t *testing.T) {
+	env, _, _ := newCopilotTestEnv(t)
+	if err := installCopilot(env); err != nil {
+		t.Fatalf("installCopilot: %v", err)
+	}
+
+	if err := removeCopilot(env); err != nil {
+		t.Fatalf("removeCopilot: %v", err)
+	}
+
+	for _, path := range []string{env.instructionsPath, env.manifestPath} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("%s still present: %v", path, err)
+		}
+	}
+	for _, dir := range []string{filepath.Dir(env.instructionsPath), filepath.Dir(env.manifestPath)} {
+		if _, err := os.Stat(dir); !os.IsNotExist(err) {
+			t.Fatalf("the emptied %s directory still present: %v", dir, err)
+		}
+	}
+}
+
+// TestRemoveCopilotLeavesUserFilesAlone pins that --remove never takes a
+// file that holds no beads section: unmarked instructions keep their bytes,
+// a blank unmarked file is not deleted as if it were an emptied one, and a
+// missing instructions file is only reported.
+func TestRemoveCopilotLeavesUserFilesAlone(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		content string
+	}{
+		{name: "unmarked user file", content: "# Team rules\n\nKeep these rules.\n"},
+		{name: "blank unmarked file", content: "\n"},
+		{name: "empty unmarked file", content: ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			env, _, _ := newCopilotTestEnv(t)
+			writeCopilotInstructions(t, env, tt.content)
+
+			if err := removeCopilot(env); err != nil {
+				t.Fatalf("removeCopilot: %v", err)
+			}
+			if got := readCopilotInstructions(t, env); got != tt.content {
+				t.Fatalf("the unmarked file changed:\ngot:  %q\nwant: %q", got, tt.content)
+			}
+		})
+	}
+
+	t.Run("missing instructions file", func(t *testing.T) {
+		env, out, _ := newCopilotTestEnv(t)
+		writeCopilotManifest(t, env)
+
+		if err := removeCopilot(env); err != nil {
+			t.Fatalf("removeCopilot: %v", err)
+		}
+		if _, err := os.Stat(env.instructionsPath); !os.IsNotExist(err) {
+			t.Fatalf("removeCopilot created %s", env.instructionsPath)
+		}
+		if _, err := os.Stat(env.manifestPath); !os.IsNotExist(err) {
+			t.Fatalf("plugin manifest still present: %v", err)
+		}
+		if !strings.Contains(out.String(), "No copilot-instructions.md file found") {
+			t.Fatalf("the missing instructions file was not reported:\n%s", out)
+		}
+	})
+}
+
+// TestRemoveCopilotNothingInstalled pins the nothing-to-do case.
+func TestRemoveCopilotNothingInstalled(t *testing.T) {
+	env, out, _ := newCopilotTestEnv(t)
+
+	if err := removeCopilot(env); err != nil {
+		t.Fatalf("removeCopilot: %v", err)
+	}
+	if !strings.Contains(out.String(), "No integration files found") {
+		t.Fatalf("remove with nothing installed does not say so:\n%s", out)
+	}
+}
+
+// TestRemoveCopilotSymlinkUntouched pins that --remove leaves a destination
+// symlink and its target alone while still taking the manifest bd owns.
+func TestRemoveCopilotSymlinkUntouched(t *testing.T) {
+	env, out, _ := newCopilotTestEnv(t)
+	writeCopilotManifest(t, env)
+	if err := os.MkdirAll("elsewhere", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join("elsewhere", "real.md"), []byte("target\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(env.instructionsPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("../elsewhere/real.md", env.instructionsPath); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+
+	if err := removeCopilot(env); err != nil {
+		t.Fatalf("removeCopilot: %v", err)
+	}
+
+	if info, err := os.Lstat(env.instructionsPath); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("the instructions symlink did not survive: %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join("elsewhere", "real.md")); err != nil || string(got) != "target\n" {
+		t.Fatalf("the symlink target changed: %q, %v", got, err)
+	}
+	if _, err := os.Stat(env.manifestPath); !os.IsNotExist(err) {
+		t.Fatalf("plugin manifest still present: %v", err)
+	}
+	if !strings.Contains(out.String(), "symbolic link") {
+		t.Fatalf("the symlink note is missing:\n%s", out)
+	}
+}
+
+// TestRemoveCopilotMalformedMarkersRefused pins that markers that are
+// incomplete or reversed are an error that leaves the file unchanged.
+func TestRemoveCopilotMalformedMarkersRefused(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		content string
+	}{
+		{
+			name:    "end marker missing",
+			content: "before\n<!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:00000000 -->\nbody\n",
+		},
+		{
+			name:    "end marker before begin",
+			content: "before\n<!-- END BEADS INTEGRATION -->\n<!-- BEGIN BEADS INTEGRATION -->\nbody\n<!-- END BEADS INTEGRATION -->\n",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			env, out, _ := newCopilotTestEnv(t)
+			writeCopilotInstructions(t, env, tt.content)
+
+			if err := removeCopilot(env); err == nil {
+				t.Fatal("removeCopilot succeeded on malformed markers; want an error")
+			}
+			if got := readCopilotInstructions(t, env); got != tt.content {
+				t.Fatalf("--remove changed the instructions despite the error:\ngot:  %q\nwant: %q", got, tt.content)
+			}
+			if !strings.Contains(out.String(), "malformed") {
+				t.Fatalf("the refusal does not name the problem:\n%s", out)
+			}
+		})
+	}
+}

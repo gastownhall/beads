@@ -202,3 +202,97 @@ func copilotMarkersMalformed(content string) bool {
 	end := strings.Index(content, agentsEndMarker)
 	return end == -1 || end < begin
 }
+
+func RemoveCopilot() error {
+	return removeCopilot(copilotEnvProvider())
+}
+
+// removeCopilot takes the recipe's two files apart by ownership: the plugin
+// manifest bd owns goes whole (with its directory, when that left it empty;
+// setup.RemoveEmptyDir keeps a symlinked one and one holding anything else),
+// and from the shared instructions file only the marked beads section is
+// taken, leaving every other byte of the user's file alone.
+func removeCopilot(env copilotEnv) error {
+	removed := false
+
+	if err := env.removeFile(env.manifestPath); err == nil {
+		removed = true
+		_, _ = fmt.Fprintf(env.stdout, "✓ Removed %s\n", env.manifestPath)
+		_ = RemoveEmptyDir(filepath.Dir(env.manifestPath))
+	} else if !os.IsNotExist(err) {
+		_, _ = fmt.Fprintf(env.stderr, "Error: failed to remove %s: %v\n", env.manifestPath, err)
+		return err
+	}
+
+	sectionRemoved, err := copilotRemoveInstructions(env)
+	if err != nil {
+		return err
+	}
+
+	if !removed && !sectionRemoved {
+		_, _ = fmt.Fprintln(env.stdout, "No integration files found")
+		return nil
+	}
+	_, _ = fmt.Fprintf(env.stdout, "✓ Removed %s integration\n", copilotIntegration.name)
+	return nil
+}
+
+// copilotRemoveInstructions takes the beads section out of
+// .github/copilot-instructions.md and reports whether it took anything out.
+// A missing file and an unmarked one are the user's: removeAgents reports
+// them and touches nothing. A destination symlink is left alone, since
+// removing through it would unlink or rewrite its target, and markers that
+// are incomplete or reversed are an error that changes nothing. For a valid
+// section removeAgents keeps the text around it, with its documented
+// normalization of the line breaks that set the section off; a file the
+// section was the whole of is deleted, since a Copilot install of a missing
+// file created it to hold only the section.
+func copilotRemoveInstructions(env copilotEnv) (bool, error) {
+	path := env.instructionsPath
+
+	info, err := os.Lstat(path)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			_, _ = fmt.Fprintf(env.stderr, "Error: failed to inspect %s: %v\n", path, err)
+			return false, err
+		}
+		return false, removeAgents(env.agentsEnv(), copilotIntegration)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		_, _ = fmt.Fprintf(env.stdout, "Leaving %s alone: it is a symbolic link; take the beads section out of the file it points to\n", path)
+		return false, nil
+	}
+	data, err := env.readFile(path)
+	if err != nil {
+		_, _ = fmt.Fprintf(env.stderr, "Error: failed to read %s: %v\n", path, err)
+		return false, err
+	}
+	content := string(data)
+	if !containsBeadsMarker(content) {
+		return false, removeAgents(env.agentsEnv(), copilotIntegration)
+	}
+	if copilotMarkersMalformed(content) {
+		_, _ = fmt.Fprintf(env.stdout, "⚠ %s has malformed beads section markers; nothing removed\n", path)
+		_, _ = fmt.Fprintf(env.stdout, "  Fix or remove the BEGIN/END BEADS INTEGRATION markers, then re-run '%s --remove'.\n", copilotIntegration.setupCommand)
+		return false, errCopilotMarkersMalformed
+	}
+
+	if err := removeAgents(env.agentsEnv(), copilotIntegration); err != nil {
+		return false, err
+	}
+
+	// The shared helper leaves the emptied file in place (a Gemini or Claude
+	// section-only file stays); a Copilot install created this file to hold
+	// only the section, so deleting it restores that lifecycle. Only a
+	// directory this deletion emptied goes (RemoveEmptyDir keeps a
+	// symlinked one, and one holding anything else).
+	if data, err := env.readFile(path); err == nil && strings.TrimSpace(string(data)) == "" {
+		if err := env.removeFile(path); err != nil && !os.IsNotExist(err) {
+			_, _ = fmt.Fprintf(env.stderr, "Error: failed to remove %s: %v\n", path, err)
+			return true, err
+		}
+		_ = RemoveEmptyDir(filepath.Dir(path))
+		_, _ = fmt.Fprintf(env.stdout, "✓ Deleted the emptied %s\n", agentsFileName(path))
+	}
+	return true, nil
+}

@@ -1106,6 +1106,34 @@ func TestRunRecipe_CopilotManagedSection(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("remove keeps the user's text and the .github directory", func(t *testing.T) {
+		tmpDir := chdirFresh(t)
+		writeInstructions(t, tmpDir, userContent)
+		if _, _, err := run(t); err != nil {
+			t.Fatalf("bd setup copilot: %v", err)
+		}
+
+		resetSetupGlobals(t)
+		setupRemove = true
+		if _, _, err := run(t); err != nil {
+			t.Fatalf("bd setup copilot --remove: %v", err)
+		}
+
+		got, err := os.ReadFile(filepath.Join(tmpDir, ".github", "copilot-instructions.md"))
+		if err != nil {
+			t.Fatalf("instructions file removed entirely: %v", err)
+		}
+		if string(got) != userContent {
+			t.Fatalf("--remove changed the user's text:\ngot:  %q\nwant: %q", got, userContent)
+		}
+		if _, err := os.Stat(filepath.Join(tmpDir, ".copilot-plugin", "plugin.json")); !os.IsNotExist(err) {
+			t.Fatalf("plugin manifest still present: %v", err)
+		}
+		if info, err := os.Stat(filepath.Join(tmpDir, ".github")); err != nil || !info.IsDir() {
+			t.Fatalf("the .github directory was removed: %v", err)
+		}
+	})
 }
 
 // TestRunRecipe_CopilotWorkspaceOverrideUsesGenericPath pins that a workspace
