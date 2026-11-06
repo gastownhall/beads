@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -180,4 +181,321 @@ func TestFlattenKeepsCloneLocalFKs(t *testing.T) {
 	if n := f.count("SELECT COUNT(*) FROM wisp_labels WHERE issue_id = 10"); n != 0 {
 		f.t.Errorf("wisp_labels for deleted wisp 10 = %d, want 0 (fk_wisp_labels_issue must still cascade)", n)
 	}
+}
+
+// flattenHookConn is the DBConn Flatten runs on. It forwards every statement
+// to its pinned connection, after letting a test act at a chosen point, fail
+// a chosen statement without forwarding it, or cancel just before the
+// temp-branch delete. It records every ExecContext with the context it ran
+// under, so tests can check which context later (cleanup) statements got.
+type flattenHookConn struct {
+	*sql.Conn
+
+	// beforeExec runs before each ExecContext is forwarded.
+	beforeExec func(query string)
+	// failExec, when set, can fail an ExecContext without forwarding it: a
+	// non-nil error is returned for that statement.
+	failExec func(query string, args []any) error
+	// failStagedCheck makes the post-reset dolt_status read fail.
+	failStagedCheck bool
+	// failFollowupCommit, when set, is returned for a DOLT_COMMIT issued
+	// through QueryContext after the final reset, without forwarding it.
+	failFollowupCommit error
+	// beforeFollowUp runs after the staged check, just before the
+	// preservation commit is forwarded.
+	beforeFollowUp func()
+	// cancelBeforeDelete, when set, runs just before the temp-branch delete
+	// is forwarded.
+	cancelBeforeDelete func()
+
+	resetDone atomic.Bool
+	followUps int // preservation commit CALLs seen (forwarded or failed)
+
+	// execs records every ExecContext Flatten issued, in order, with the
+	// context it ran under; failed marks the ones that errored.
+	execs []flattenExecRecord
+}
+
+// flattenExecRecord is one ExecContext as the hook saw it.
+type flattenExecRecord struct {
+	query       string
+	ctxErr      error
+	deadline    time.Time
+	hasDeadline bool
+	failed      bool
+}
+
+func isFlattenFinalReset(query string) bool {
+	return strings.Contains(query, "DOLT_RESET(") && strings.Contains(query, "flatten-tmp")
+}
+
+func (c *flattenHookConn) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	if c.failExec != nil {
+		if err := c.failExec(query, args); err != nil {
+			deadline, hasDeadline := ctx.Deadline()
+			c.execs = append(c.execs, flattenExecRecord{query: query, ctxErr: ctx.Err(), deadline: deadline, hasDeadline: hasDeadline, failed: true})
+			return nil, err
+		}
+	}
+	if c.beforeExec != nil {
+		c.beforeExec(query)
+	}
+	if c.cancelBeforeDelete != nil && strings.Contains(query, "DOLT_BRANCH('-D'") {
+		c.cancelBeforeDelete()
+	}
+	if isFlattenFinalReset(query) {
+		c.resetDone.Store(true)
+	}
+	deadline, hasDeadline := ctx.Deadline()
+	res, err := c.Conn.ExecContext(ctx, query, args...)
+	c.execs = append(c.execs, flattenExecRecord{query: query, ctxErr: ctx.Err(), deadline: deadline, hasDeadline: hasDeadline, failed: err != nil})
+	return res, err
+}
+
+func (c *flattenHookConn) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+	if c.resetDone.Load() && strings.Contains(query, "DOLT_COMMIT") {
+		c.followUps++
+		if c.failFollowupCommit != nil {
+			return nil, c.failFollowupCommit
+		}
+		if c.beforeFollowUp != nil {
+			c.beforeFollowUp()
+		}
+	}
+	return c.Conn.QueryContext(ctx, query, args...)
+}
+
+func (c *flattenHookConn) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
+	if c.resetDone.Load() && c.failStagedCheck && strings.Contains(query, "dolt_status") {
+		return c.Conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM flatten_injected_missing_table")
+	}
+	return c.Conn.QueryRowContext(ctx, query, args...)
+}
+
+// onceBeforeFlattenFinalReset returns a beforeExec hook that runs fn once,
+// just before the final soft reset of main onto flatten-tmp is forwarded.
+func onceBeforeFlattenFinalReset(fn func()) func(string) {
+	var done bool
+	return func(query string) {
+		if !done && isFlattenFinalReset(query) {
+			done = true
+			fn()
+		}
+	}
+}
+
+// afterFirstFailure returns the exec records issued after the first failed
+// one: a failed flatten's cleanup statements.
+func (c *flattenHookConn) afterFirstFailure() []flattenExecRecord {
+	for i, r := range c.execs {
+		if r.failed {
+			return c.execs[i+1:]
+		}
+	}
+	return nil
+}
+
+// flattenedLog is the compact fixture's history after a quiet flatten,
+// newest first.
+var flattenedLog = []string{flattenSnapshotMsg, "Initialize data repository"}
+
+// flatten runs Flatten on hook (whose Conn it pins if unset) on the compact
+// fixture's database.
+func (f *compactFixture) flatten(hook *flattenHookConn) error {
+	f.t.Helper()
+	if hook.Conn == nil {
+		hook.Conn = f.conn()
+	}
+	return Flatten(f.ctx, hook)
+}
+
+// AC-2: SQL-committed but unstaged changes in main's working set survive
+// Flatten, stay out of HEAD and stay pending.
+func TestFlattenKeepsUncommittedChanges(t *testing.T) {
+	port := startCompactTestServer(t)
+
+	t.Run("written before flatten", func(t *testing.T) {
+		f := newCompactFixture(t, port)
+		f.writePending(f.db)
+
+		if err := f.flatten(&flattenHookConn{}); err != nil {
+			t.Fatalf("Flatten: %v", err)
+		}
+		f.wantPendingKept()
+		f.wantLog(flattenedLog)
+		f.wantHeadTree(f.head)
+		f.wantStatus("config:false", "u:false")
+		f.wantNoTempBranch()
+	})
+
+	t.Run("written just before the final reset", func(t *testing.T) {
+		f := newCompactFixture(t, port)
+		writer := f.conn()
+
+		hook := &flattenHookConn{beforeExec: onceBeforeFlattenFinalReset(func() { f.writePending(writer) })}
+		if err := f.flatten(hook); err != nil {
+			t.Fatalf("Flatten: %v", err)
+		}
+		f.wantPendingKept()
+		f.wantLog(flattenedLog)
+		f.wantHeadTree(f.head)
+		f.wantStatus("config:false", "u:false")
+		f.wantNoTempBranch()
+	})
+}
+
+// AC-2: a commit that reaches main after the temporary snapshot is built is
+// preserved through one preservation commit — its row values committed, its
+// original hash and message not retained — while working-only edits stay
+// pending.
+func TestFlattenKeepsCommitLandingBeforeMainMoves(t *testing.T) {
+	port := startCompactTestServer(t)
+
+	// Lands between the snapshot commit and the final reset: only the soft
+	// reset plus the preservation commit keep it.
+	t.Run("landing just before the final reset", func(t *testing.T) {
+		f := newCompactFixture(t, port)
+		f.writePending(f.db)
+		writer := f.conn()
+
+		var landed string
+		hook := &flattenHookConn{beforeExec: onceBeforeFlattenFinalReset(func() { landed = f.landRow(writer) })}
+		if err := f.flatten(hook); err != nil {
+			t.Fatalf("Flatten: %v", err)
+		}
+
+		if n := f.count("SELECT COUNT(*) FROM t AS OF 'HEAD' WHERE id = 600"); n != 1 {
+			t.Fatalf("landed t row 600 in main's HEAD: present=false, want present=true")
+		}
+		if n := f.count("SELECT COUNT(*) FROM dolt_log WHERE commit_hash = ?", landed); n != 0 {
+			t.Fatalf("the landed commit's hash survived the flatten, want it replaced by the preservation commit")
+		}
+		f.wantLog(append([]string{flattenPreserveMsg}, flattenedLog...))
+		f.wantHeadTree(landed)
+		f.wantPendingKept()
+		f.wantStatus("config:false", "u:false")
+		f.wantNoTempBranch()
+	})
+
+	// Lands while the temp branch is checked out, before its snapshot commit.
+	t.Run("landing while the snapshot is built", func(t *testing.T) {
+		f := newCompactFixture(t, port)
+		f.writePending(f.db)
+		writer := f.conn()
+
+		var done bool
+		var landed string
+		hook := &flattenHookConn{beforeExec: func(query string) {
+			if !done && strings.Contains(query, "DOLT_CHECKOUT('flatten-tmp')") {
+				done = true
+				landed = f.landRow(writer)
+			}
+		}}
+		if err := f.flatten(hook); err != nil {
+			t.Fatalf("Flatten: %v", err)
+		}
+
+		if n := f.count("SELECT COUNT(*) FROM t AS OF 'HEAD' WHERE id = 600"); n != 1 {
+			t.Fatalf("landed t row 600 in main's HEAD: present=false, want present=true")
+		}
+		if n := f.count("SELECT COUNT(*) FROM dolt_log WHERE commit_hash = ?", landed); n != 0 {
+			t.Fatalf("the landed commit's hash survived the flatten, want it replaced by the preservation commit")
+		}
+		f.wantLog(append([]string{flattenPreserveMsg}, flattenedLog...))
+		f.wantHeadTree(landed)
+		f.wantPendingKept()
+		f.wantStatus("config:false", "u:false")
+		f.wantNoTempBranch()
+	})
+
+	t.Run("another writer commits the staged rows first", func(t *testing.T) {
+		f := newCompactFixture(t, port)
+		f.writePending(f.db)
+		writer := f.conn()
+
+		hook := &flattenHookConn{
+			beforeExec:   onceBeforeFlattenFinalReset(func() { _ = f.landRow(writer) }),
+			beforeFollowUp: func() {
+				f.exec(writer, "CALL DOLT_COMMIT('-m', 'writer took staging')")
+			},
+		}
+		if err := f.flatten(hook); err != nil {
+			t.Fatalf("Flatten: %v (a nothing-to-commit preservation must be benign)", err)
+		}
+		if hook.followUps != 1 {
+			t.Fatalf("Flatten issued %d preservation commits, want 1", hook.followUps)
+		}
+		f.wantLog(append([]string{"writer took staging"}, flattenedLog...))
+		if n := f.count("SELECT COUNT(*) FROM t AS OF 'HEAD' WHERE id = 600"); n != 1 {
+			t.Fatalf("landed t row 600 in main's HEAD: present=false, want present=true")
+		}
+		var one int
+		if err := hook.Conn.QueryRowContext(f.ctx, "SELECT 1").Scan(&one); err != nil {
+			t.Fatalf("Flatten's connection is unusable after a benign nothing-to-commit: %v", err)
+		}
+		f.wantPendingKept()
+		f.wantStatus("config:false", "u:false")
+		f.wantNoTempBranch()
+	})
+
+	t.Run("pre-staged row joins the preservation commit", func(t *testing.T) {
+		f := newCompactFixture(t, port)
+		f.exec(f.db,
+			"INSERT INTO u VALUES (800, 'staged')",
+			"CALL DOLT_ADD('u')",
+			"UPDATE u SET v = 'edited' WHERE id = 1",
+		)
+
+		if err := f.flatten(&flattenHookConn{}); err != nil {
+			t.Fatalf("Flatten: %v", err)
+		}
+		if n := f.count("SELECT COUNT(*) FROM u AS OF 'HEAD' WHERE id = 800"); n != 1 {
+			t.Fatalf("pre-staged u row 800 in main's HEAD: present=false, want present=true")
+		}
+		if v := f.value("SELECT v FROM u AS OF 'HEAD' WHERE id = 1"); v != "recent" {
+			t.Fatalf("u row 1 in main's HEAD = %q, want the unstaged edit left out", v)
+		}
+		if v := f.value("SELECT v FROM u WHERE id = 1"); v != "edited" {
+			t.Fatalf("u row 1 on main = %q, want the unstaged edit kept", v)
+		}
+		f.wantLog(append([]string{flattenPreserveMsg}, flattenedLog...))
+		f.wantStatus("u:false")
+		f.wantNoTempBranch()
+	})
+}
+
+// AC-2: a quiet flatten adds no preservation commit: the initial commit plus
+// the flattened snapshot, nothing else.
+func TestFlattenQuietRunAddsNoCommit(t *testing.T) {
+	port := startCompactTestServer(t)
+
+	t.Run("clean working set", func(t *testing.T) {
+		f := newCompactFixture(t, port)
+		if err := f.flatten(&flattenHookConn{}); err != nil {
+			t.Fatalf("Flatten: %v", err)
+		}
+		f.wantLog(flattenedLog)
+		f.wantHeadTree(f.head)
+		f.wantStatus()
+		if n := f.count("SELECT COUNT(*) FROM dolt_status"); n != 0 {
+			t.Fatalf("dolt_status has %d rows after a quiet Flatten, want none", n)
+		}
+		f.wantNoTempBranch()
+	})
+
+	t.Run("only ignored tables dirty", func(t *testing.T) {
+		f := newCompactFixture(t, port)
+		f.exec(f.db, "CREATE TABLE scratch_x (id INT PRIMARY KEY)", "INSERT INTO scratch_x VALUES (1)")
+
+		if err := f.flatten(&flattenHookConn{}); err != nil {
+			t.Fatalf("Flatten: %v", err)
+		}
+		f.wantLog(flattenedLog)
+		f.wantHeadTree(f.head)
+		f.wantStatus()
+		if n := f.count("SELECT COUNT(*) FROM scratch_x"); n != 1 {
+			t.Fatalf("ignored scratch_x row on main: present=false, want present=true")
+		}
+		f.wantNoTempBranch()
+	})
 }
