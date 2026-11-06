@@ -623,3 +623,83 @@ VALUES ('rg-c4', 'created', 'peer-c', '2026-07-30 00:00:05', 'rg-evt-c4');
 		}
 	})
 }
+
+// TestRecoveryGuideCloneMissingEventsRepair is AC-4: a clone of an already
+// published database with no events table follows the documented repairs —
+// the history-only variant on the clone itself, and the recovered source
+// followed by a pull — and its next issue-plus-event write commits without
+// a pending events change.
+func TestRecoveryGuideCloneMissingEventsRepair(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+
+	// The published bug: migrated, rolled back, restoration skipped, pushed.
+	src := rgSeedPreFlip(t)
+	rgFlip(t, src, rgEvtLocal)
+	src.withConn(t, func(conn *sql.Conn) {
+		if err := rgExecGuideSQL(t, ctx, conn, rgAnchorRollback); err != nil {
+			t.Fatalf("guide step 4 (cursor rollback) on the source: %v", err)
+		}
+	})
+	remote := rgRemoteDir(t)
+	src.rgAddOriginPush(t, remote)
+
+	// The reported repro, pinned: the clone reads fine and its first
+	// issue write dies with the exact reported error.
+	broken := rgClone(t, remote)
+	broken.withConn(t, func(conn *sql.Conn) {
+		if tablePresent(t, ctx, conn, "events") {
+			t.Fatal("fixture: the clone received an events table; the published state is not the reported one")
+		}
+		if _, err := conn.ExecContext(ctx, rgEventsInsertPrefix+`
+VALUES ('`+rgIssueKept+`', 'updated', 'clone', '2026-07-30 00:02:00', 'rg-evt-never');`); err == nil {
+			t.Fatal("the clone's event write succeeded without any events table; the reported bug is not reproduced")
+		} else if !strings.Contains(err.Error(), "table not found: events") {
+			t.Fatalf("the clone's event write error = %v, want the reported 'table not found: events'", err)
+		}
+	})
+
+	t.Run("history-only variant on the clone", func(t *testing.T) {
+		clone := rgClone(t, remote)
+		clone.withConn(t, func(conn *sql.Conn) {
+			if err := rgExecGuideSQL(t, ctx, conn, rgAnchorHistoryOnly); err != nil {
+				t.Fatalf("guide history-only variant on the clone: %v", err)
+			}
+			if !trackedAtHead(t, ctx, conn, "events") {
+				t.Fatal("the history-only variant left events untracked at HEAD")
+			}
+			rgRequireNoEventsIgnoreRule(t, ctx, conn)
+			rgRequireCleanStatus(t, ctx, conn)
+			rgRequireCursor(t, ctx, conn, 53)
+			// Historical rows for issues that still exist — not an empty
+			// table, and no post-flip rows (they were never versioned).
+			rgRequireEventIDs(t, ctx, conn, "events AS OF 'HEAD'", rgEvtDoomedA, rgEvtDoomedB, rgEvtKept)
+		})
+		rgIssueWrite(t, clone, "rg-h1", "rg-evt-h1")
+		clone.withConn(t, func(conn *sql.Conn) {
+			rgRequireCleanStatus(t, ctx, conn)
+			rgRequireEventIDs(t, ctx, conn, "events AS OF 'HEAD'", rgEvtDoomedA, rgEvtDoomedB, "rg-evt-h1", rgEvtKept)
+		})
+	})
+
+	t.Run("repaired source then pull", func(t *testing.T) {
+		src.withConn(t, func(conn *sql.Conn) {
+			if err := rgExecGuideSQL(t, ctx, conn, rgAnchorRestore); err != nil {
+				t.Fatalf("guide step 5 (restore) completing the source's recovery: %v", err)
+			}
+			mustExecOn(t, ctx, conn, "CALL DOLT_PUSH('origin', 'main')")
+		})
+		clone := rgClone(t, remote)
+		// A clone made after the repair has the table outright; a clone
+		// made before it obtains it by pulling before its first write.
+		clone.withConn(t, func(conn *sql.Conn) {
+			if !trackedAtHead(t, ctx, conn, "events") {
+				t.Fatal("the clone did not receive the restored table")
+			}
+		})
+		rgIssueWrite(t, clone, "rg-r1", "rg-evt-r1")
+		clone.withConn(t, func(conn *sql.Conn) {
+			rgRequireCleanStatus(t, ctx, conn)
+		})
+	})
+}
