@@ -441,6 +441,36 @@ func TestGenerateHookSectionHasNoForeignMarkers(t *testing.T) {
 	}
 }
 
+// TestInjectRemoveHookSectionRoundTrip pins user-content survival across the
+// inject → re-inject → remove cycle on composed content: injecting the
+// current section over user content keeps the user content, a second
+// injection over content that already carries the current section is a
+// byte-identical no-op, and removing the section restores the original user
+// content exactly.
+func TestInjectRemoveHookSectionRoundTrip(t *testing.T) {
+	for _, hookName := range managedHookNames {
+		hookName := hookName
+		t.Run(hookName, func(t *testing.T) {
+			section := generateHookSection(hookName)
+			original := "#!/bin/sh\n# team lint gate\n./run-linters.sh \"$@\"\n"
+			composed := injectHookSection(original, section)
+			if !strings.Contains(composed, "./run-linters.sh \"$@\"") {
+				t.Fatalf("composed hook lost user content:\n%s", composed)
+			}
+			if again := injectHookSection(composed, section); again != composed {
+				t.Errorf("re-injecting the current section is not a no-op")
+			}
+			content, found := removeHookSection(composed)
+			if !found {
+				t.Fatalf("removeHookSection did not find the section:\n%s", composed)
+			}
+			if content != original {
+				t.Errorf("remove did not restore the original user content:\ngot:\n%s\nwant:\n%s", content, original)
+			}
+		})
+	}
+}
+
 func TestInjectHookSection(t *testing.T) {
 	section := generateHookSection("pre-commit")
 
