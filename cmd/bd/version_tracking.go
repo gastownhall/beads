@@ -50,7 +50,23 @@ func trackBdVersionPreview() {
 	trackBdVersionFile(false)
 }
 
+// pendingVersionStampPath is the resolved .local_version path whose write the
+// most recent upgrade detection deferred. Writing the witness at detection
+// made the one-shot signal single-shot in the wrong direction too: a
+// reconciliation that failed — most reportably schema.DirtyTablesError,
+// refused because the working set was dirty — could never be retried, because
+// no later command saw an upgrade anymore (gastownhall/beads#6929). The write
+// now happens at settlement (settleBdVersionStamp), after
+// autoMigrateOnVersionBump reports its outcome. Empty when nothing is
+// pending; cleared at detection entry and by settlement, and reset alongside
+// the other tracking globals in tests.
+var pendingVersionStampPath string
+
 func trackBdVersionFile(persist bool) {
+	// Detection entry: whatever an earlier call in this process deferred is no
+	// longer pending — the file on disk is the truth this call re-reads.
+	pendingVersionStampPath = ""
+
 	// Find the beads directory
 	beadsDir := beads.FindBeadsDir()
 	if beadsDir == "" {
@@ -74,21 +90,60 @@ func trackBdVersionFile(persist bool) {
 	// predecessor, and the workspace's own version markers still refuse a
 	// genuine downgrade. (Those markers cannot arbitrate direction here: they
 	// compare with the same dotted scan and read HEAD stamps as 0.0.0 too.)
+	//
+	// upgraded is this call's own local comparison, deliberately not the
+	// sticky versionUpgradeDetected flag: the flag survives this function, the
+	// write decision must not depend on state from an earlier detection.
+	upgraded := false
 	if lastVersion != "" && lastVersion != Version {
 		if doctor.CompareVersions(Version, lastVersion) > 0 ||
 			doctor.IsBrewHeadVersion(Version) || doctor.IsBrewHeadVersion(lastVersion) {
 			// Version upgrade detected!
+			upgraded = true
 			versionUpgradeDetected = true
 			previousVersion = lastVersion
 		}
 	}
 
-	// Update local version file (best effort)
-	// Only write if version actually changed to minimize I/O
-	if persist && lastVersion != Version {
+	// The witness write, by shape:
+	//   - an upgrade (persisting callers only): deferred to settlement, so a
+	//     failed reconciliation leaves the signal for the next command;
+	//   - a first run or a downgrade (persisting callers only): written now,
+	//     as before — neither shape triggers a reconciliation;
+	//   - a preview or an unchanged version: no write. A preview must never
+	//     create a pending write either, for the same one-shot reason it must
+	//     not write the file (see trackBdVersionPreview).
+	switch {
+	case !persist:
+	case upgraded:
+		pendingVersionStampPath = localVersionPath
+	case lastVersion != Version:
 		_ = writeLocalVersion(localVersionPath, Version) // Best effort: version tracking is advisory
 	}
+}
 
+// settleBdVersionStamp completes the witness write an upgrade detection
+// deferred once the version-bump reconciliation reported its outcome.
+// skipped, settled and deferred all consumed the one-shot upgrade signal
+// honestly — the reconciliation was not eligible, completed (including by
+// refusing a downgrade), or was deliberately not consented to — so the exact
+// witness path read during detection is stamped with the running version.
+// failed leaves the previous witness in place: the next eligible command
+// re-detects the upgrade and retries the reconciliation. The pending path is
+// cleared either way, and the write stays best effort, as it always was at
+// detection time.
+//
+// Settlement writes the CAPTURED path, not a re-resolved one, which is what
+// keeps `bd doctor <path>` scoped to its target: detection ran with
+// BEADS_DIR pointing there, and a settle after the caller restored its own
+// BEADS_DIR still lands in the target workspace.
+func settleBdVersionStamp(outcome versionBumpOutcome) {
+	path := pendingVersionStampPath
+	pendingVersionStampPath = ""
+	if path == "" || outcome == bumpFailed {
+		return
+	}
+	_ = writeLocalVersion(path, Version)
 }
 
 // readLocalVersion reads the last bd version from the local version file.
@@ -194,42 +249,75 @@ func maybeShowUpgradeNotification() {
 	fmt.Println()
 }
 
+// versionBumpOutcome is what autoMigrateOnVersionBump did with the upgrade
+// trackBdVersion detected, and therefore what settleBdVersionStamp may do
+// with the deferred witness write: every outcome except bumpFailed consumed
+// the one-shot upgrade signal honestly, and only a failure must leave it for
+// the next eligible command to retry with.
+type versionBumpOutcome int
+
+const (
+	// bumpSkipped: no reconciliation was eligible — no upgrade detected, no
+	// beads directory, a non-Dolt backend, a proxied-server workspace, or no
+	// local database to migrate.
+	bumpSkipped versionBumpOutcome = iota
+	// bumpSettled: the read-only probe found the database already at this
+	// binary's version, or the reconciliation ran to a conclusion, including
+	// its explicit downgrade refusal.
+	bumpSettled
+	// bumpDeferred: the operator did not consent — the #5920 remote-migration
+	// gate or the ordinary migration-consent refusal (schema.MigrateConsentError).
+	// A deliberate deferral, not a failure.
+	bumpDeferred
+	// bumpFailed: the reconciliation wanted to finish the upgrade and could
+	// not — config load, writable open, reconciler acquisition, or the
+	// reconciliation itself failed for a non-consent reason.
+	bumpFailed
+)
+
 // autoMigrateOnVersionBump automatically migrates the database when CLI version changes.
-// This function is best-effort - failures are silent to avoid disrupting commands.
+// This function is best-effort - failures do not fail the command, whose own
+// store open and query determine its exit status; they are reported (see
+// noticeVersionBumpFailure) and reflected in the returned outcome instead.
 // Called from PersistentPreRun before opening DB for main operation.
 //
 // IMPORTANT: This must be called BEFORE opening the database to avoid opening DB twice.
 //
+// The returned outcome settles the witness write the upgrade detection
+// deferred (settleBdVersionStamp): callers wrap the call as
+// settleBdVersionStamp(autoMigrateOnVersionBump(beadsDir)).
+//
 // beadsDir is the path to the .beads directory.
-func autoMigrateOnVersionBump(beadsDir string) {
+func autoMigrateOnVersionBump(beadsDir string) versionBumpOutcome {
 	// Only migrate if version upgrade was detected
 	if !versionUpgradeDetected {
-		return
+		return bumpSkipped
 	}
 
 	// Validate beadsDir
 	if beadsDir == "" {
 		debug.Logf("auto-migrate: skipping migration, no beads directory")
-		return
+		return bumpSkipped
 	}
 
 	// Load config to determine the correct database path for this backend
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil {
 		debug.Logf("auto-migrate: failed to load config: %v", err)
-		return
+		noticeVersionBumpFailure(err)
+		return bumpFailed
 	}
 	if cfg == nil {
 		cfg = configfile.DefaultConfig()
 	}
 	if cfg.GetBackend() != configfile.BackendDolt {
 		debug.Logf("auto-migrate: skipping Dolt migration for backend %q", cfg.GetBackend())
-		return
+		return bumpSkipped
 	}
 
 	if cfg.IsDoltProxiedServerMode() {
 		debug.Logf("auto-migrate: skipping embedded migration, proxied-server handled after UOW provider init")
-		return
+		return bumpSkipped
 	}
 
 	// Check if database exists at the backend-appropriate path
@@ -237,7 +325,7 @@ func autoMigrateOnVersionBump(beadsDir string) {
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
 		// No database - nothing to migrate
 		debug.Logf("auto-migrate: skipping migration, database does not exist: %s", dbPath)
-		return
+		return bumpSkipped
 	}
 
 	recoverPreV56IfNeeded(previousVersion, dbPath)
@@ -258,13 +346,15 @@ func autoMigrateOnVersionBump(beadsDir string) {
 	// needed. (be-1he)
 	//
 	// The probe asks the ROLE for the marker rather than reading the metadata
-	// key itself: a store opened read-only can answer it.
+	// key itself: a store opened read-only can answer it. A probe that fails
+	// decides nothing on its own — it falls through to the writable attempt,
+	// whose outcome is the one that settles.
 	if roStore, roErr := dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true}); roErr == nil {
 		recorded, probeErr := recordedWorkspaceVersion(ctx, roStore)
 		_ = roStore.Close()
 		if probeErr == nil && recorded == Version {
 			debug.Logf("auto-migrate: database already at version %s (ro probe)", Version)
-			return
+			return bumpSettled
 		}
 	}
 
@@ -272,8 +362,7 @@ func autoMigrateOnVersionBump(beadsDir string) {
 	if err != nil {
 		// Failed to open database - skip migration
 		debug.Logf("auto-migrate: failed to open database: %v", err)
-		noticeSharedMigrateRefusal(err)
-		return
+		return reportVersionBumpRefusal(err)
 	}
 	defer func() {
 		if err := store.Close(); err != nil {
@@ -290,12 +379,13 @@ func autoMigrateOnVersionBump(beadsDir string) {
 	reconciler, err := store.VersionReconciler()
 	if err != nil {
 		debug.Logf("auto-migrate: version markers unavailable: %v", err)
-		return
+		noticeVersionBumpFailure(err)
+		return bumpFailed
 	}
 	result, err := reconciler.ReconcileVersion(ctx, issueops.VersionReconcileRequest{CLIVersion: Version})
 	if err != nil {
 		debug.Logf("auto-migrate: failed to reconcile database version: %v", err)
-		return
+		return reportVersionBumpRefusal(err)
 	}
 
 	switch {
@@ -305,6 +395,69 @@ func autoMigrateOnVersionBump(beadsDir string) {
 		debug.Logf("auto-migrate: successfully migrated database from %s to version %s", result.Previous, result.Current)
 	default:
 		debug.Logf("auto-migrate: database already at version %s", Version)
+	}
+	return bumpSettled
+}
+
+// classifyVersionBumpError maps a terminal error from the version-bump
+// reconciliation to its outcome. The two consent decisions — the #5920
+// remote-migration gate and the ordinary migration-consent refusal — are
+// deliberate deferrals: the operator (or the absence of their consent) chose
+// not to migrate now, so the upgrade witness settles and the existing
+// per-decision notice behavior is kept. Anything else failed.
+func classifyVersionBumpError(err error) versionBumpOutcome {
+	var gateErr *schema.RemoteMigrateGateError
+	var consentErr *schema.MigrateConsentError
+	if errors.As(err, &gateErr) || errors.As(err, &consentErr) {
+		return bumpDeferred
+	}
+	return bumpFailed
+}
+
+// reportVersionBumpRefusal reports a terminal error from the reconciliation's
+// writable path under the notice its classification calls for — the gate's
+// per-decision line for a consent deferral, the failure notice for anything
+// else — and returns the outcome settleBdVersionStamp needs.
+func reportVersionBumpRefusal(err error) versionBumpOutcome {
+	outcome := classifyVersionBumpError(err)
+	if outcome == bumpDeferred {
+		// noticeSharedMigrateRefusal prints the gate's own per-decision
+		// remedy; an ordinary MigrateConsentError has no bump-path notice
+		// today and keeps that silence.
+		noticeSharedMigrateRefusal(err)
+	} else {
+		noticeVersionBumpFailure(err)
+	}
+	return outcome
+}
+
+// noticeVersionBumpFailure is the sibling failure notice for a version-bump
+// reconciliation that ended without either consent decision. The gate refusal
+// (noticeSharedMigrateRefusal) is the operator declining to migrate; this is
+// the upgrade's own reconciliation wanting to finish and failing — most
+// reportably schema.DirtyTablesError, refused because the working set has
+// uncommitted changes in a table a pending migration alters. Because the
+// .local_version signal is NOT consumed on failure (settleBdVersionStamp),
+// the next eligible non-preview command retries the attempt; the notice says
+// so and names the remedy.
+//
+// --json keeps the same silence noticeSharedMigrateRefusal keeps: prose on
+// this stream breaks the machine-readable output contract.
+func noticeVersionBumpFailure(err error) {
+	if jsonOutput {
+		return
+	}
+	var dirtyErr *schema.DirtyTablesError
+	if errors.As(err, &dirtyErr) {
+		commit, migrate := "bd dolt commit", schema.SharedConsentCommand
+		if globalFlag {
+			commit, migrate = "bd dolt commit --global", schema.SharedConsentCommandGlobal
+		}
+		fmt.Fprintf(os.Stderr,
+			"bd upgraded to %s: the pending schema migration(s) were NOT applied — they alter tables with uncommitted changes (%s).\n"+
+				"Run '%s' to commit the working set at the current schema, then '%s'.\n"+
+				"The next eligible non-preview command retries the migration.\n",
+			displayVersion(Version), strings.Join(dirtyErr.Tables, ", "), commit, migrate)
 	}
 }
 

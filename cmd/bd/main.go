@@ -2103,8 +2103,13 @@ var rootCmd = &cobra.Command{
 		// apply schema migrations before RunE validates arguments or renders a
 		// dry-run plan. frozenForMaintenance excludes it for the same reason
 		// as the trackBdVersion call above — see that comment.
+		//
+		// Settlement (settleBdVersionStamp) pairs the deferred witness write
+		// with the reconciliation's outcome: an upgrade that failed — refused,
+		// not consented away — keeps the one-shot .local_version signal so the
+		// next eligible command retries (gastownhall/beads#6929).
 		if policy.runMaintenance && !previewMode && !frozenForMaintenance {
-			autoMigrateOnVersionBump(beadsDir)
+			settleBdVersionStamp(autoMigrateOnVersionBump(beadsDir))
 		}
 
 		// Initialize direct storage access

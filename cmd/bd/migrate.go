@@ -638,16 +638,15 @@ func handleSchemaMigrate() error {
 		}
 		var dirtyErr *schema.DirtyTablesError
 		if errors.As(err, &dirtyErr) {
-			// The dirty guard's own remedy is `bd dolt commit`, which on a
-			// shared server opens writably, hits the migrate gate, and is told
-			// to run this command — the two messages point at each other and
-			// the operator loops (gastownhall/beads#5920 review). Name the
-			// sequence that actually terminates.
+			// The dirty guard's own remedy is `bd dolt commit`, and it
+			// terminates: the commit commands open through the
+			// working-set-reconcile intent (dolt.Config.LenientOpen,
+			// embeddeddolt's openWorkingSetReconcile), which passes this very
+			// refusal so the commit can clear the working set at the current
+			// schema. Name the plain commit-then-migrate sequence.
 			return HandleErrorWithHint(
 				fmt.Sprintf("schema migration failed: %v", err),
-				"in server mode `bd dolt commit` is itself gated, so commit the working set on the server first "+
-					"(`CALL DOLT_COMMIT('-Am', 'pre-migration working set')` over the sql-server, or "+
-					schema.AllowRemoteMigrateEnv+"=1 bd dolt commit), then re-run this command")
+				"run 'bd dolt commit' to commit the working set at the current schema, then re-run this command")
 		}
 		return HandleError("schema migration failed: %v", err)
 	}
@@ -661,9 +660,10 @@ func handleSchemaMigrate() error {
 		// could not (gastownhall/beads#5920 review). autoMigrateOnVersionBump
 		// is the only automatic writer of bd_version, it was refused by the
 		// gate this command just satisfied, and its one-shot .local_version
-		// signal is already consumed — so without this, `bd doctor` and the
-		// git-hook health check keep reporting a version mismatch after the
-		// operator has done everything the refusal told them to.
+		// signal has been settled by that same refusal (settleBdVersionStamp)
+		// — so without this, `bd doctor` and the git-hook health check keep
+		// reporting a version mismatch after the operator has done everything
+		// the refusal told them to.
 		stampWorkspaceVersionAfterMigrate(store)
 	}
 

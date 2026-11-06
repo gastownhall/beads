@@ -626,7 +626,11 @@ func runDiagnostics(path string) doctorResult {
 			_ = os.Unsetenv("BEADS_DIR")
 		}
 
-		autoMigrateOnVersionBump(beadsDir)
+		// Settlement writes the witness path captured during the scoped
+		// trackBdVersion call above, so it lands in the doctor target even
+		// though BEADS_DIR is restored between the two; a failed
+		// reconciliation leaves the target's signal for its next command.
+		settleBdVersionStamp(autoMigrateOnVersionBump(beadsDir))
 	}
 
 	// Check 1b: Dolt format compatibility (GH#2137)

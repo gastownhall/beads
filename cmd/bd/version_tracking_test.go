@@ -272,6 +272,14 @@ func TestTrackBdVersion_UpgradeDetection(t *testing.T) {
 		t.Errorf("previousVersion = %q, want %q", previousVersion, "0.22.0")
 	}
 
+	// Detection no longer consumes the witness itself: the write is deferred
+	// to settlement, so a failed reconciliation keeps the one-shot signal
+	// (gastownhall/beads#6929). A settled outcome then stamps it.
+	if got := readLocalVersion(localVersionPath); got != "0.22.0" {
+		t.Errorf(".local_version = %q immediately after detection, want the stale %q until settlement", got, "0.22.0")
+	}
+	settleBdVersionStamp(bumpSettled)
+
 	// Should have updated .local_version to current version
 	localVersion := readLocalVersion(localVersionPath)
 	if localVersion != Version {
@@ -365,10 +373,12 @@ func newTrackingWorkspace(t *testing.T, lastVersion, binVersion string) string {
 	origVersion, origDetected, origPrevious := Version, versionUpgradeDetected, previousVersion
 	t.Cleanup(func() {
 		Version, versionUpgradeDetected, previousVersion = origVersion, origDetected, origPrevious
+		pendingVersionStampPath = ""
 	})
 	Version = binVersion
 	versionUpgradeDetected = false
 	previousVersion = ""
+	pendingVersionStampPath = ""
 
 	return localVersionPath
 }
@@ -406,6 +416,13 @@ func TestTrackBdVersion_HeadStampChangeDetectedAsUpgrade(t *testing.T) {
 			}
 			if previousVersion != wantPrevious {
 				t.Errorf("previousVersion = %q, want %q", previousVersion, wantPrevious)
+			}
+			if tt.wantDetected {
+				// An upgrade defers the witness write to settlement.
+				if got := readLocalVersion(localVersionPath); got != tt.lastVersion {
+					t.Errorf(".local_version = %q immediately after detection, want stale %q", got, tt.lastVersion)
+				}
+				settleBdVersionStamp(bumpSettled)
 			}
 			if got := readLocalVersion(localVersionPath); got != tt.binVersion {
 				t.Errorf(".local_version = %q, want %q", got, tt.binVersion)
