@@ -557,6 +557,12 @@ prettier, ruff, etc.) stop running, with:
 Since `bd hooks run` chains to your original hook internally, the timeout
 covers both beads' own work and your entire hook pipeline.
 
+Since the deadline may stop the chained check before it decides, a
+`pre-commit` or `pre-push` hook with a chained `<hook>.old` refuses the commit
+or push instead, with `the gate outcome is unknown, refusing`. Other hooks
+continue. Hook sections installed before this behavior continue in both
+cases until `bd hooks install` refreshes them.
+
 **Fix:** Increase the timeout (default 300 seconds):
 
 ```bash

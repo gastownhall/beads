@@ -1218,6 +1218,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A status 3 from `bd hooks run` now fails the hook instead of printing
   `database not initialized` and continuing; `bd hooks run` never opens the
   database, so that 3 was the chained hook's verdict.
+  When the hook deadline ends a `pre-commit` or `pre-push` hook that has a
+  chained `<hook>.old`, the hook refuses the commit or push and says the
+  outcome is unknown instead of continuing.
   Run `bd hooks install` once to refresh installed hook sections.
 - `bd config get` for a config.yaml, git-config or user-global key no longer
   opens the database just because one exists, so it answers from those files

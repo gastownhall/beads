@@ -185,7 +185,10 @@ already-installed canonical hook sections. Automatic generated-policy adoption i
 tracked separately.
 
 When the timeout is reached, beads prints a warning and lets the git
-operation proceed — the commit or push is not blocked.
+operation proceed, with one exception: if a `pre-commit` or `pre-push` hook
+has a chained `<hook>.old`, the deadline may have stopped that check before it
+decided, so beads refuses the commit or push and says the outcome is unknown.
+Raise `BEADS_HOOK_TIMEOUT` to give the chained hook more time.
 
 ## Conflict Resolution
 
