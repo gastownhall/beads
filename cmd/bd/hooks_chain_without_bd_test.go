@@ -437,3 +437,101 @@ func TestGeneratedHookPrePushForwardsArgsAndStdinWithoutBD(t *testing.T) {
 		t.Errorf("push reached the remote despite the chained gate refusing:\n%s", out)
 	}
 }
+
+// TestGeneratedHookChainRunsOnceAndFallsThrough covers GH#6751's success
+// path: without bd on PATH a successful foreign sidecar runs exactly once,
+// the section then falls through to user content placed after the END
+// marker, and with bd present the shell does not run the sidecar a second
+// time next to bd's own chain.
+func TestGeneratedHookChainRunsOnceAndFallsThrough(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("PATH-only fixtures are POSIX-specific")
+	}
+
+	build := func(t *testing.T) (hooksDir string, env []string) {
+		t.Helper()
+		hooksDir = t.TempDir()
+		sidecar := "#!/bin/sh\n" +
+			"printf 'GATE_OK\\n'\n" +
+			"printf 'run\\n' >> \"$HOOK_RUNS\"\n" +
+			"exit 0\n"
+		if err := os.WriteFile(filepath.Join(hooksDir, "pre-commit.old"), []byte(sidecar), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		hook := "#!/bin/sh\n" + generateHookSection("pre-commit") + "echo TRAILING_USER_CONTENT\n"
+		if err := os.WriteFile(filepath.Join(hooksDir, "pre-commit"), []byte(hook), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return hooksDir, []string{"HOOK_RUNS=" + filepath.Join(t.TempDir(), "runs")}
+	}
+	runHook := func(env []string, hooksDir string) (string, int) {
+		t.Helper()
+		cmd := exec.Command("/bin/sh", filepath.Join(hooksDir, "pre-commit"))
+		cmd.Dir = hooksDir
+		cmd.Env = env
+		out, err := cmd.CombinedOutput()
+		code := 0
+		if err != nil {
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) {
+				t.Fatalf("run hook: %v\n%s", err, out)
+			}
+			code = exitErr.ExitCode()
+		}
+		return string(out), code
+	}
+	runsCount := func(t *testing.T, env []string) (string, int) {
+		t.Helper()
+		path := ""
+		for _, entry := range env {
+			if strings.HasPrefix(entry, "HOOK_RUNS=") {
+				path = strings.TrimPrefix(entry, "HOOK_RUNS=")
+			}
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return "", 0
+			}
+			t.Fatal(err)
+		}
+		return string(data), strings.Count(string(data), "run\n")
+	}
+
+	t.Run("bd absent: sidecar once, trailing content still runs", func(t *testing.T) {
+		hooksDir, env := build(t)
+		emptyPath := t.TempDir() // no bd here
+		env = append([]string{"PATH=" + emptyPath, "HOME=" + hooksDir}, env...)
+
+		out, code := runHook(env, hooksDir)
+		if code != 0 {
+			t.Fatalf("hook exit = %d, want 0 (successful gate, trailing content)\n%s", code, out)
+		}
+		if !strings.Contains(out, "GATE_OK") {
+			t.Errorf("output missing the sidecar's marker, so it did not run:\n%s", out)
+		}
+		if !strings.Contains(out, "TRAILING_USER_CONTENT") {
+			t.Errorf("output missing content after the managed section — a successful chain must fall through, not exit:\n%s", out)
+		}
+		if _, count := runsCount(t, env); count != 1 {
+			t.Errorf("sidecar ran %d times, want exactly 1", count)
+		}
+	})
+
+	t.Run("bd present: the section leaves chaining to bd", func(t *testing.T) {
+		hooksDir, env := build(t)
+		binDir := t.TempDir()
+		writeHookProcessFixture(t, binDir, "bd", hookProcessBDStub)
+		env = append([]string{"PATH=" + binDir, "HOME=" + hooksDir}, env...)
+
+		out, code := runHook(env, hooksDir)
+		if code != 0 {
+			t.Fatalf("hook exit = %d, want 0\n%s", code, out)
+		}
+		// bd was invoked (the stub reports its argv) and did the chaining.
+		assertHookProcessBDInvocation(t, out, "pre-commit")
+		if _, count := runsCount(t, env); count != 0 {
+			t.Errorf("sidecar ran %d times with bd on PATH; the shell must not execute it next to bd's own chain", count)
+		}
+	})
+}
