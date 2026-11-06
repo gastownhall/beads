@@ -3,6 +3,7 @@ package issueops
 import (
 	"context"
 	"errors"
+	"reflect"
 	"regexp"
 	"testing"
 
@@ -380,6 +381,177 @@ func TestCustomTypesYAMLFallback(t *testing.T) {
 				if got[i] != tt.wantTypes[i] {
 					t.Errorf("index %d: got %q, want %q", i, got[i], tt.wantTypes[i])
 				}
+			}
+		})
+	}
+}
+
+// TestResolveCustomConfigInTxReturnsReadErrors pins GH#5581's resolver half:
+// a read error on any vocabulary query must surface as an error preserving
+// the injected cause, not degrade into a successful (often empty) resolution
+// that the store-side cache would then pin as loaded. Suppression is
+// reserved for missing normalized tables (1146), which the fallback test
+// below covers.
+func TestResolveCustomConfigInTxReturnsReadErrors(t *testing.T) {
+	statusesQuery := regexp.QuoteMeta("SELECT name, category FROM custom_statuses ORDER BY name")
+	typesQuery := regexp.QuoteMeta("SELECT name FROM custom_types ORDER BY name")
+	configQuery := regexp.QuoteMeta("SELECT `key`, value FROM config WHERE `key` IN (?,?)")
+	const cause = errSentinel("vocabulary read failed")
+
+	cases := []struct {
+		name string
+		arm  func(mock sqlmock.Sqlmock)
+	}{
+		{
+			name: "statuses select fails",
+			arm: func(mock sqlmock.Sqlmock) {
+				mock.ExpectQuery(statusesQuery).WillReturnError(cause)
+			},
+		},
+		{
+			name: "types select fails after statuses read",
+			arm: func(mock sqlmock.Sqlmock) {
+				mock.ExpectQuery(statusesQuery).
+					WillReturnRows(sqlmock.NewRows([]string{"name", "category"}).AddRow("review", "wip"))
+				mock.ExpectQuery(typesQuery).WillReturnError(cause)
+			},
+		},
+		{
+			name: "legacy config select fails after empty normalized tables",
+			arm: func(mock sqlmock.Sqlmock) {
+				mock.ExpectQuery(statusesQuery).WillReturnRows(sqlmock.NewRows([]string{"name", "category"}))
+				mock.ExpectQuery(typesQuery).WillReturnRows(sqlmock.NewRows([]string{"name"}))
+				mock.ExpectQuery(configQuery).WithArgs("status.custom", "types.custom").WillReturnError(cause)
+			},
+		},
+		{
+			// The deliberate degraded-result change: statuses resolved from
+			// the table, the types table empty, and the legacy config read
+			// failing used to return the partial database result with a nil
+			// error. The partial result is now discarded along with the error
+			// so an incomplete resolution cannot be certified as loaded.
+			name: "legacy config select fails after partial normalized success",
+			arm: func(mock sqlmock.Sqlmock) {
+				mock.ExpectQuery(statusesQuery).
+					WillReturnRows(sqlmock.NewRows([]string{"name", "category"}).AddRow("review", "wip"))
+				mock.ExpectQuery(typesQuery).WillReturnRows(sqlmock.NewRows([]string{"name"}))
+				mock.ExpectQuery(configQuery).WithArgs("status.custom", "types.custom").WillReturnError(cause)
+			},
+		},
+		{
+			name: "statuses rows fail mid-iteration",
+			arm: func(mock sqlmock.Sqlmock) {
+				rows := sqlmock.NewRows([]string{"name", "category"}).AddRow("review", "wip")
+				rows.RowError(0, cause)
+				mock.ExpectQuery(statusesQuery).WillReturnRows(rows)
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock, tx := beginMockTx(t)
+			defer db.Close()
+			tc.arm(mock)
+			mock.ExpectRollback()
+
+			statuses, customTypes, err := ResolveCustomConfigInTx(context.Background(), tx)
+			if err == nil || !errors.Is(err, cause) {
+				t.Fatalf("ResolveCustomConfigInTx err = %v, want the injected read failure", err)
+			}
+			if statuses != nil || customTypes != nil {
+				t.Errorf("ResolveCustomConfigInTx = (%v, %v) alongside the error, want nil results", statuses, customTypes)
+			}
+			if err := tx.Rollback(); err != nil {
+				t.Fatalf("rollback: %v", err)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("unmet SQL expectations: %v", err)
+			}
+		})
+	}
+}
+
+// TestResolveCustomConfigInTxFallsBackOnMissingTables pins the pre-migration
+// compatibility that bd-dpn4op keeps: a missing normalized table (1146) is not
+// a read error, so the legacy config rows supply the vocabulary, still
+// unioned with config.yaml custom types. Per-row scan leniency is unchanged.
+func TestResolveCustomConfigInTxFallsBackOnMissingTables(t *testing.T) {
+	statusQuery := regexp.QuoteMeta("SELECT name, category FROM custom_statuses ORDER BY name")
+	typeQuery := regexp.QuoteMeta("SELECT name FROM custom_types ORDER BY name")
+	configQuery := regexp.QuoteMeta("SELECT `key`, value FROM config WHERE `key` IN (?,?)")
+	missing := func(table string) error {
+		return errors.New("Error 1146 (42S02): Table 'beads." + table + "' doesn't exist")
+	}
+	legacyRows := func() *sqlmock.Rows {
+		return sqlmock.NewRows([]string{"key", "value"}).
+			AddRow("status.custom", "review:wip").
+			AddRow("types.custom", "molecule")
+	}
+	review := []types.CustomStatus{{Name: "review", Category: types.CategoryWIP}}
+
+	cases := []struct {
+		name         string
+		yaml         string
+		arm          func(mock sqlmock.Sqlmock)
+		wantStatuses []types.CustomStatus
+		wantTypes    []string
+	}{
+		{"both tables missing", "", func(mock sqlmock.Sqlmock) {
+			mock.ExpectQuery(statusQuery).WillReturnError(missing("custom_statuses"))
+			mock.ExpectQuery(typeQuery).WillReturnError(missing("custom_types"))
+			mock.ExpectQuery(configQuery).WithArgs("status.custom", "types.custom").WillReturnRows(legacyRows())
+		}, review, []string{"molecule"}},
+		{"both tables missing with yaml types", "gizmo,molecule", func(mock sqlmock.Sqlmock) {
+			mock.ExpectQuery(statusQuery).WillReturnError(missing("custom_statuses"))
+			mock.ExpectQuery(typeQuery).WillReturnError(missing("custom_types"))
+			mock.ExpectQuery(configQuery).WithArgs("status.custom", "types.custom").WillReturnRows(legacyRows())
+		}, review, []string{"molecule", "gizmo"}},
+		{"statuses table missing, types table populated", "", func(mock sqlmock.Sqlmock) {
+			mock.ExpectQuery(statusQuery).WillReturnError(missing("custom_statuses"))
+			mock.ExpectQuery(typeQuery).WillReturnRows(sqlmock.NewRows([]string{"name"}).AddRow("convoy"))
+			mock.ExpectQuery(configQuery).WithArgs("status.custom", "types.custom").WillReturnRows(legacyRows())
+		}, review, []string{"convoy"}},
+		{"types table missing, statuses table populated", "", func(mock sqlmock.Sqlmock) {
+			mock.ExpectQuery(statusQuery).WillReturnRows(sqlmock.NewRows([]string{"name", "category"}).AddRow("triage", "active"))
+			mock.ExpectQuery(typeQuery).WillReturnError(missing("custom_types"))
+			mock.ExpectQuery(configQuery).WithArgs("status.custom", "types.custom").WillReturnRows(legacyRows())
+		}, []types.CustomStatus{{Name: "triage", Category: types.CategoryActive}}, []string{"molecule"}},
+		{"both tables empty", "", func(mock sqlmock.Sqlmock) {
+			mock.ExpectQuery(statusQuery).WillReturnRows(sqlmock.NewRows([]string{"name", "category"}))
+			mock.ExpectQuery(typeQuery).WillReturnRows(sqlmock.NewRows([]string{"name"}))
+			mock.ExpectQuery(configQuery).WithArgs("status.custom", "types.custom").WillReturnRows(legacyRows())
+		}, review, []string{"molecule"}},
+		// A bad row is still skipped, not a read error: the statuses table
+		// reads as empty and the legacy row supplies the status.
+		{"unscannable status row falls back leniently", "", func(mock sqlmock.Sqlmock) {
+			mock.ExpectQuery(statusQuery).WillReturnRows(sqlmock.NewRows([]string{"name", "category"}).AddRow("triage", nil))
+			mock.ExpectQuery(typeQuery).WillReturnRows(sqlmock.NewRows([]string{"name"}).AddRow("convoy"))
+			mock.ExpectQuery(configQuery).WithArgs("status.custom", "types.custom").WillReturnRows(legacyRows())
+		}, review, []string{"convoy"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			withYAMLCustomTypes(t, tc.yaml)
+			db, mock, tx := beginMockTx(t)
+			defer db.Close()
+			tc.arm(mock)
+			mock.ExpectRollback()
+
+			statuses, customTypes, err := ResolveCustomConfigInTx(context.Background(), tx)
+			if err != nil {
+				t.Fatalf("ResolveCustomConfigInTx: %v", err)
+			}
+			if !reflect.DeepEqual(statuses, tc.wantStatuses) {
+				t.Errorf("statuses = %#v, want %#v", statuses, tc.wantStatuses)
+			}
+			if !reflect.DeepEqual(customTypes, tc.wantTypes) {
+				t.Errorf("custom types = %#v, want %#v", customTypes, tc.wantTypes)
+			}
+			if err := tx.Rollback(); err != nil {
+				t.Fatalf("rollback: %v", err)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Errorf("unmet SQL expectations: %v", err)
 			}
 		})
 	}
