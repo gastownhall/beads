@@ -4,7 +4,9 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -174,4 +176,74 @@ func TestFieldLengthValidation(t *testing.T) {
 			t.Errorf("expected the 255-char assignee stored intact, got %+v", got)
 		}
 	})
+}
+
+// TestMapUpdateTitleValidation drives the GH#8150 title rule through the real
+// DoltStore's map-update path, the one bd edit, bd batch and bd rename take. A
+// newly applied title must pass the same canonical check create and import
+// run, or the store holds a row that its own export cannot import. The
+// reporter's title (499 runes, 514 bytes) fits the VARCHAR(500) column, so
+// only that check can refuse it.
+func TestMapUpdateTitleValidation(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	reporter := strings.Repeat("t", 489) + "—––·····′′"
+	if runes, size := utf8.RuneCountInString(reporter), len(reporter); runes != 499 || size != 514 {
+		t.Fatalf("reporter fixture is %d runes / %d bytes, want 499 / 514", runes, size)
+	}
+
+	create := func(t *testing.T, id string, ephemeral bool) *types.Issue {
+		t.Helper()
+		iss := &types.Issue{
+			ID:          id,
+			Title:       "title " + id,
+			Description: "original description",
+			Status:      types.StatusOpen,
+			Priority:    2,
+			IssueType:   types.TypeTask,
+			Ephemeral:   ephemeral,
+		}
+		if err := store.CreateIssue(ctx, iss, "tester"); err != nil {
+			t.Fatalf("CreateIssue %s: %v", id, err)
+		}
+		got, err := store.GetIssue(ctx, id)
+		if err != nil || got == nil {
+			t.Fatalf("GetIssue %s: %v", id, err)
+		}
+		return got
+	}
+
+	for _, tc := range []struct {
+		name      string
+		title     interface{}
+		ephemeral bool
+	}{
+		{"reporter title is refused", reporter, false},
+		{"reporter title is refused on a wisp", reporter, true},
+		{"empty title is refused", "", false},
+		{"non-string title is refused", 7, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			id := "tl-" + strings.ReplaceAll(tc.name, " ", "-")
+			before := create(t, id, tc.ephemeral)
+			err := store.UpdateIssue(ctx, id, map[string]interface{}{
+				"title":       tc.title,
+				"description": "companion description",
+			}, "tester")
+			if !errors.Is(err, storage.ErrValidation) {
+				t.Fatalf("UpdateIssue title=%T: err = %v, want errors.Is(ErrValidation)", tc.title, err)
+			}
+			after, err := store.GetIssue(ctx, id)
+			if err != nil || after == nil {
+				t.Fatalf("GetIssue after refused update: %v", err)
+			}
+			if after.Title != before.Title || after.Description != before.Description || after.RowVersion != before.RowVersion {
+				t.Errorf("refused update persisted: title %q->%q, description %q->%q, RowVersion %d->%d",
+					before.Title, after.Title, before.Description, after.Description, before.RowVersion, after.RowVersion)
+			}
+		})
+	}
 }
