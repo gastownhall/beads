@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -83,7 +84,7 @@ func TestAllMigrationsSQLRecordsContentHashes(t *testing.T) {
 	}
 
 	for _, mf := range mainSource.list() {
-		data, err := mainSource.files.ReadFile(mainSource.dir + "/" + mf.name)
+		data, err := fs.ReadFile(mainSource.files, mainSource.dir+"/"+mf.name)
 		if err != nil {
 			t.Fatalf("read migration %s: %v", mf.name, err)
 		}
@@ -153,6 +154,7 @@ func TestMigrationWorkNotNeededWhenContentHashColumnsPresent(t *testing.T) {
 	// No backfill pending (custom tables already populated).
 	expectScalar(mock, "SELECT COUNT(*) FROM custom_types", "count", 1)
 	expectScalar(mock, "SELECT COUNT(*) FROM custom_statuses", "count", 1)
+	expectIsBlockedRepairNotOwed(mock)
 
 	needed, err := migrationWorkNeeded(context.Background(), db)
 	if err != nil {

@@ -75,6 +75,32 @@ func refuseDirtyIsBlockedRepairInputs(ctx context.Context, db DBConn, mainVersio
 	return &DirtyTablesError{Tables: dirty}
 }
 
+// isBlockedRepairFaultForTest, when non-nil, runs at the owed repair's
+// durability boundaries: "after-recompute" (flags changed in the working set,
+// key still present), "after-key-deletion" (flags and the key's removal
+// uncommitted, HEAD still owes the repair) and "after-commit" (the repair is
+// committed, the 0032 cursor row not yet recorded). An error aborts the pass
+// there, emulating a crash. Production leaves it nil.
+var isBlockedRepairFaultForTest func(window string) error
+
+// SetIsBlockedRepairFaultHookForTest installs fn as the is_blocked repair's
+// fault hook and returns a function that restores the previous one. Test-only.
+func SetIsBlockedRepairFaultHookForTest(fn func(window string) error) func() {
+	prev := isBlockedRepairFaultForTest
+	isBlockedRepairFaultForTest = fn
+	return func() { isBlockedRepairFaultForTest = prev }
+}
+
+func fireIsBlockedRepairFault(window string) error {
+	if isBlockedRepairFaultForTest == nil {
+		return nil
+	}
+	if err := isBlockedRepairFaultForTest(window); err != nil {
+		return fmt.Errorf("is_blocked repair interrupted %s: %w", window, err)
+	}
+	return nil
+}
+
 // isBlockedRepairCommitMessage labels the commit carrying the repaired flags.
 const isBlockedRepairCommitMessage = "schema: repair is_blocked flags left by 0059 (gastownhall/beads#7037)"
 
@@ -114,6 +140,20 @@ func rearmIgnoredIsBlockedRepair(ctx context.Context, db DBConn) error {
 		return fmt.Errorf("re-arming ignored migration %04d: %w", isBlockedRepairIgnoredVersion, err)
 	}
 	return nil
+}
+
+// rearmOwedIsBlockedRepair re-arms ignored 0032 when the owed key is committed
+// at HEAD, so the ignored pass about to run finishes a repair this clone's
+// cursor already records: a key pulled from a peer whose main 0075 step
+// landed without its repair commit, or a cursor recorded on another branch.
+// It runs inside the guarded pass, before the ignored runner selects its
+// pending steps; with the key absent it changes nothing.
+func rearmOwedIsBlockedRepair(ctx context.Context, db DBConn) error {
+	owed, err := isBlockedRepairOwedAtHead(ctx, db)
+	if err != nil || !owed {
+		return err
+	}
+	return rearmIgnoredIsBlockedRepair(ctx, db)
 }
 
 // isBlockedRepairOwedAtHead reports whether the owed key is committed at HEAD.
@@ -157,13 +197,22 @@ func repairIsBlockedFlags(ctx context.Context, db DBConn) error {
 	if err != nil {
 		return fmt.Errorf("recomputing is_blocked: %w", err)
 	}
+	if err := fireIsBlockedRepairFault("after-recompute"); err != nil {
+		return err
+	}
 	if _, err := db.ExecContext(ctx, "DELETE FROM metadata WHERE `key` = ?", isBlockedRepairOwedKey); err != nil {
 		return fmt.Errorf("clearing owed is_blocked repair: %w", err)
+	}
+	if err := fireIsBlockedRepairFault("after-key-deletion"); err != nil {
+		return err
 	}
 	// dependencies rides along: the same pass's rekey may have rewritten or
 	// collapsed edges, and the flags above were derived from that graph.
 	if err := commitScopedTablesChange(ctx, db, isBlockedRepairCommitMessage, "issues", "dependencies", "metadata"); err != nil {
 		return fmt.Errorf("committing is_blocked repair: %w", err)
+	}
+	if err := fireIsBlockedRepairFault("after-commit"); err != nil {
+		return err
 	}
 	fmt.Fprintf(stderr, "  flipped %d is_blocked flag(s)\n", corrected)
 	return nil

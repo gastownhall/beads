@@ -1,8 +1,12 @@
 package schema
 
 import (
+	"context"
+	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/DATA-DOG/go-sqlmock"
 )
 
 // TestLatestVersionIncludesMigration0075 pins the main slot the is_blocked
@@ -73,5 +77,39 @@ func TestMigration0032MarkerTouchesNoTrackedTable(t *testing.T) {
 	}
 	if !strings.Contains(upSQL, "SELECT 1;") {
 		t.Errorf("%s body is not the inert marker", name)
+	}
+}
+
+// TestRearmIgnoredIsBlockedRepairDeletesTheCursorSuffix pins the re-arm's
+// shape: one DELETE of every ignored cursor row from 0032 up, so a later
+// ignored step cannot hide 0032 behind a higher MAX(version) and every step
+// above it replays; rows below 0032 are kept, so a lower floor stays where
+// it is; and a clone without the cursor table is left alone, since its
+// pass runs the whole series anyway.
+func TestRearmIgnoredIsBlockedRepairDeletesTheCursorSuffix(t *testing.T) {
+	tableProbe := regexp.QuoteMeta("SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES")
+	for _, exists := range []bool{true, false} {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("sqlmock.New: %v", err)
+		}
+		count := 0
+		if exists {
+			count = 1
+		}
+		mock.ExpectQuery(tableProbe).WithArgs(ignoredSource.cursorTable).
+			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(count))
+		if exists {
+			mock.ExpectExec(regexp.QuoteMeta("DELETE FROM ignored_schema_migrations WHERE version >= ?")).
+				WithArgs(isBlockedRepairIgnoredVersion).
+				WillReturnResult(sqlmock.NewResult(0, 2))
+		}
+		if err := rearmIgnoredIsBlockedRepair(context.Background(), db); err != nil {
+			t.Fatalf("cursor table present=%v: rearmIgnoredIsBlockedRepair: %v", exists, err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("cursor table present=%v: %v", exists, err)
+		}
+		_ = db.Close()
 	}
 }

@@ -83,7 +83,7 @@ func expectSessionPutOnDatabase(mock sqlmock.Sqlmock, name string) {
 
 // expectNoMigrationWorkNeeded mocks migrationWorkNeeded on a fully upgraded
 // database: both cursors at latest, both content_hash columns present, no
-// custom-status/type backfill pending.
+// custom-status/type backfill pending, no is_blocked repair owed at HEAD.
 func expectNoMigrationWorkNeeded(mock sqlmock.Sqlmock) {
 	expectNoMigrationWorkNeededAtVersion(mock, LatestVersion())
 }
@@ -100,6 +100,7 @@ func expectNoMigrationWorkNeededAtVersion(mock sqlmock.Sqlmock, mainVersion int)
 	expectContentHashColumnExists(mock)
 	expectScalar(mock, "SELECT COUNT(*) FROM custom_types", "count", 1)
 	expectScalar(mock, "SELECT COUNT(*) FROM custom_statuses", "count", 1)
+	expectIsBlockedRepairNotOwed(mock)
 }
 
 // expectDoltIgnoreRead mocks the read-only dolt_ignore probe, returning

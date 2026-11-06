@@ -8,12 +8,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
 	"testing"
+	"testing/fstest"
 
 	"github.com/steveyegge/beads/internal/storage/depid"
 	"github.com/steveyegge/beads/internal/storage/issueops"
@@ -844,7 +847,7 @@ func TestEmbeddedMigration0075RefusesBeforeRepairWrites(t *testing.T) {
 			"SELECT COUNT(*) FROM metadata WHERE `key` = 'fixture_note' AND value = 'uncommitted'",
 		},
 	}
-	for _, shape := range []refusalShape{crossingShape} {
+	for _, shape := range []refusalShape{crossingShape, receivedKeyShape} {
 		for _, table := range []string{"issues", "dependencies", "metadata"} {
 			t.Run(shape.name+"/dirty "+table, func(t *testing.T) {
 				ctx := t.Context()
@@ -1118,4 +1121,491 @@ INSERT INTO wisps (id, title, status, is_blocked, updated_at) VALUES
 		requireStamp(t, ctx, conn, "issues", "pr-dup", historicalStamp(5))
 		requireFullRecomputeCorrectsNothing(t, ctx, conn)
 	})
+}
+
+// withoutMigrateConsent clears every consent source for the rest of t, the
+// state of an ordinary (read) open.
+func withoutMigrateConsent(t *testing.T) {
+	t.Helper()
+	schema.SetLocalMigrateConsent(false)
+	schema.SetForceAllowRemoteMigrate(false)
+	t.Cleanup(func() { schema.SetLocalMigrateConsent(true) })
+	t.Setenv(schema.AllowMigrateEnv, "")
+	t.Setenv(schema.AllowRemoteMigrateEnv, "")
+}
+
+// requireRepairedAndSettled asserts the issue plane is repaired, the key is
+// gone at HEAD, the ignored cursor is back at latest, and a reopen commits
+// nothing.
+func requireRepairedAndSettled(t *testing.T, ctx context.Context, conn *sql.Conn) {
+	t.Helper()
+	requireFlags(t, ctx, conn, "issues", repairGraph)
+	requireStamps(t, ctx, conn, "issues", repairGraph)
+	if n := repairKeyCount(t, ctx, conn, " AS OF 'HEAD'"); n != 0 {
+		t.Errorf("repair key still committed at HEAD (%d row(s))", n)
+	}
+	if n := scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM ignored_schema_migrations WHERE version = 32"); n != 1 {
+		t.Errorf("ignored 0032 recorded %d time(s), want 1", n)
+	}
+	if got := scalarInt(t, ctx, conn, "SELECT MAX(version) FROM ignored_schema_migrations"); got != schema.LatestIgnoredVersion() {
+		t.Errorf("ignored cursor = %d, want %d", got, schema.LatestIgnoredVersion())
+	}
+	headBefore := scalarString(t, ctx, conn, "SELECT HASHOF('HEAD')")
+	if _, err := schema.MigrateUp(ctx, conn); err != nil {
+		t.Fatalf("reopen MigrateUp: %v", err)
+	}
+	if got := scalarString(t, ctx, conn, "SELECT HASHOF('HEAD')"); got != headBefore {
+		t.Errorf("reopen moved HEAD from %s to %s; want no tracked repair", headBefore, got)
+	}
+	requireFullRecomputeCorrectsNothing(t, ctx, conn)
+}
+
+// seedReceivedKeyStore is the received-obligation shape: main 75 with the
+// owed key committed at HEAD (a peer's 0075 step pulled before its repair
+// commit, or an origin that crashed after it) and this clone's ignored cursor
+// at ignoredAt, which at 32 or above leaves only the key to say work remains.
+func seedReceivedKeyStore(t *testing.T, ctx context.Context, ignoredAt int) (string, *sql.Conn, func()) {
+	t.Helper()
+	dataDir, conn, closeConn := seedRewoundStore(t, ctx, 75, ignoredAt)
+	insertRepairRows(t, ctx, conn, "issues", repairGraph)
+	insertCanonicalEdges(t, ctx, conn, "dependencies", "depends_on_issue_id", repairEdges)
+	mustExecOn(t, ctx, conn, "INSERT INTO metadata (`key`, value) VALUES (?, 'full')", isBlockedRepairOwedKey)
+	commitFixture(t, ctx, conn, "test: peer's main 0075 step, pulled before its repair commit")
+	commitTrackedIgnoredTables(t, ctx, conn)
+	return dataDir, conn, closeConn
+}
+
+// receivedKeyShape is the received-obligation store at current cursors.
+var receivedKeyShape = refusalShape{
+	name: "received key",
+	seed: func(t *testing.T, ctx context.Context) (*sql.Conn, func()) {
+		_, conn, closeConn := seedReceivedKeyStore(t, ctx, 32)
+		return conn, closeConn
+	},
+	mainAt:    75,
+	keyAtHead: 1,
+}
+
+// migrationCursorRows reads a migration cursor table as version:content_hash rows.
+func migrationCursorRows(t *testing.T, ctx context.Context, conn *sql.Conn, table string) []string {
+	t.Helper()
+	var rows []string
+	queryEach(t, ctx, conn, "SELECT version, IFNULL(content_hash, '') FROM "+table+" ORDER BY version", 2, func(r []string) {
+		rows = append(rows, r[0]+":"+r[1])
+	})
+	return rows
+}
+
+// requireCursorRows asserts both cursor tables still hold want's rows, every
+// content hash included.
+func requireCursorRows(t *testing.T, ctx context.Context, conn *sql.Conn, want map[string][]string) {
+	t.Helper()
+	for table, rows := range want {
+		if got := migrationCursorRows(t, ctx, conn, table); !slices.Equal(got, rows) {
+			t.Errorf("%s rows changed:\n got %v\nwant %v", table, got, rows)
+		}
+	}
+}
+
+// snapshotCursorRows captures both cursor tables for requireCursorRows.
+func snapshotCursorRows(t *testing.T, ctx context.Context, conn *sql.Conn) map[string][]string {
+	t.Helper()
+	return map[string][]string{
+		"schema_migrations":         migrationCursorRows(t, ctx, conn, "schema_migrations"),
+		"ignored_schema_migrations": migrationCursorRows(t, ctx, conn, "ignored_schema_migrations"),
+	}
+}
+
+// requireIdleReopen opens dataDir on a fresh engine handle and asserts the
+// pass there applies nothing and leaves HEAD and both cursors as they are.
+func requireIdleReopen(t *testing.T, dataDir string) {
+	t.Helper()
+	withRawConn(t, dataDir, preflipDatabase, func(conn *sql.Conn) {
+		ctx := t.Context()
+		headBefore := scalarString(t, ctx, conn, "SELECT HASHOF('HEAD')")
+		cursors := snapshotCursorRows(t, ctx, conn)
+		applied, err := schema.MigrateUp(ctx, conn)
+		if err != nil {
+			t.Fatalf("reopen MigrateUp: %v", err)
+		}
+		if applied != 0 {
+			t.Errorf("reopen applied %d step(s), want 0", applied)
+		}
+		if got := scalarString(t, ctx, conn, "SELECT HASHOF('HEAD')"); got != headBefore {
+			t.Errorf("reopen moved HEAD from %s to %s", headBefore, got)
+		}
+		requireCursorRows(t, ctx, conn, cursors)
+		if n := repairKeyCount(t, ctx, conn, " AS OF 'HEAD'"); n != 0 {
+			t.Errorf("repair key committed at HEAD after the reopen (%d row(s))", n)
+		}
+	})
+}
+
+// recordAppliedSteps records the version of every step the passes apply for
+// the rest of t.
+func recordAppliedSteps(t *testing.T) *[]int {
+	t.Helper()
+	var applied []int
+	restore := schema.SetMigrateStepFaultHookForTest(func(_ context.Context, _ schema.DBConn, version int) error {
+		applied = append(applied, version)
+		return nil
+	})
+	t.Cleanup(restore)
+	return &applied
+}
+
+// withIgnoredStep returns a SetIgnoredMigrationFilesForTest wrapper that adds
+// one synthetic step beside the shipped ignored files.
+func withIgnoredStep(t *testing.T, name, body string) func(fs.FS) fs.FS {
+	return func(base fs.FS) fs.FS {
+		out := fstest.MapFS{}
+		dir := ""
+		err := fs.WalkDir(base, ".", func(p string, d fs.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
+				return err
+			}
+			data, err := fs.ReadFile(base, p)
+			if err != nil {
+				return err
+			}
+			out[p] = &fstest.MapFile{Data: data}
+			dir = path.Dir(p)
+			return nil
+		})
+		if err != nil || dir == "" {
+			t.Fatalf("copy the shipped ignored series (dir %q): %v", dir, err)
+		}
+		out[dir+"/"+name] = &fstest.MapFile{Data: []byte(body)}
+		return out
+	}
+}
+
+// syntheticIgnored0033 is a replay-safe later ignored step. Its probe row shows
+// each run; the table is clone-local (dolt_ignore's wisp_% pattern), like
+// every table the ignored series owns.
+const syntheticIgnored0033 = `-- Synthetic ignored 0033 (test only): replay-safe, its row shows each run.
+CREATE TABLE IF NOT EXISTS wisp_syn_replay_probe (id INT PRIMARY KEY);
+INSERT IGNORE INTO wisp_syn_replay_probe (id) VALUES (1);
+`
+
+// TestEmbeddedMigration0075ResumesOwedRepair is AC-7: an owed repair that did
+// not finish where it was recorded finishes on a later open. A key received
+// with both cursors current resumes without fresh consent (it continues an
+// already-consented upgrade), re-arms ignored 0032 and replays every ignored
+// step above it, returning each cursor row with its content hash; a lower
+// ignored floor or missing clone-local tables keep their own replay; a pass
+// interrupted inside the repair leaves a state the next opens converge from;
+// and a branch rewound below main 75 re-arms 0032 through main 0075 itself.
+func TestEmbeddedMigration0075ResumesOwedRepair(t *testing.T) {
+	requireEmbedded(t)
+
+	t.Run("received key with current cursors", func(t *testing.T) {
+		ctx := t.Context()
+		dataDir, conn, closeConn := seedReceivedKeyStore(t, ctx, 32)
+		closed := false
+		defer func() {
+			if !closed {
+				closeConn()
+			}
+		}()
+		insertRepairRows(t, ctx, conn, "wisps", wispRepairGraph)
+		insertWispEdges(t, ctx, conn, wispRepairEdges)
+		cursors := snapshotCursorRows(t, ctx, conn)
+		withoutMigrateConsent(t)
+		applied := recordAppliedSteps(t)
+
+		if _, err := schema.MigrateUp(ctx, conn); err != nil {
+			t.Fatalf("MigrateUp over received debt (no consent, read open): %v", err)
+		}
+		if !slices.Equal(*applied, []int{32}) {
+			t.Errorf("pass applied steps %v, want [32] (the re-armed suffix)", *applied)
+		}
+		if n := repairCommitCount(t, ctx, conn); n != 1 {
+			t.Errorf("repair commits = %d, want 1", n)
+		}
+		requireCursorRows(t, ctx, conn, cursors)
+		requireFlags(t, ctx, conn, "wisps", wispRepairGraph)
+		requireStamps(t, ctx, conn, "wisps", wispRepairGraph)
+		if n := scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM wisp_dependencies"); n != len(wispRepairEdges) {
+			t.Errorf("wisp_dependencies holds %d row(s) after the replay, want %d", n, len(wispRepairEdges))
+		}
+		requireRepairedAndSettled(t, ctx, conn)
+		closeConn()
+		closed = true
+		*applied = nil
+		requireIdleReopen(t, dataDir)
+		if len(*applied) != 0 {
+			t.Errorf("idle reopen applied steps %v", *applied)
+		}
+	})
+
+	t.Run("received key replays a later ignored step", func(t *testing.T) {
+		ctx := t.Context()
+		t.Cleanup(schema.SetIgnoredMigrationFilesForTest(withIgnoredStep(t, "0033_synthetic_replay_probe.up.sql", syntheticIgnored0033)))
+		dataDir, conn, closeConn := seedReceivedKeyStore(t, ctx, 33)
+		closed := false
+		defer func() {
+			if !closed {
+				closeConn()
+			}
+		}()
+		insertRepairRows(t, ctx, conn, "wisps", wispRepairGraph)
+		insertWispEdges(t, ctx, conn, wispRepairEdges)
+		if got := scalarInt(t, ctx, conn, "SELECT MAX(version) FROM ignored_schema_migrations"); got != 33 {
+			t.Fatalf("fixture: ignored cursor = %d, want 33", got)
+		}
+		cursors := snapshotCursorRows(t, ctx, conn)
+		// Clear the probe so only a replay of 0033 can restore it.
+		mustExecOn(t, ctx, conn, "DELETE FROM wisp_syn_replay_probe")
+		withoutMigrateConsent(t)
+		applied := recordAppliedSteps(t)
+
+		if _, err := schema.MigrateUp(ctx, conn); err != nil {
+			t.Fatalf("MigrateUp over received debt with a later ignored step: %v", err)
+		}
+		if !slices.Equal(*applied, []int{32, 33}) {
+			t.Errorf("pass applied steps %v, want [32 33]", *applied)
+		}
+		if n := scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM wisp_syn_replay_probe"); n != 1 {
+			t.Errorf("0033's probe row count = %d after the replay, want 1", n)
+		}
+		if n := repairCommitCount(t, ctx, conn); n != 1 {
+			t.Errorf("repair commits = %d, want 1", n)
+		}
+		requireCursorRows(t, ctx, conn, cursors)
+		requireFlags(t, ctx, conn, "issues", repairGraph)
+		requireStamps(t, ctx, conn, "issues", repairGraph)
+		requireFlags(t, ctx, conn, "wisps", wispRepairGraph)
+		if n := repairKeyCount(t, ctx, conn, " AS OF 'HEAD'"); n != 0 {
+			t.Errorf("repair key still committed at HEAD (%d row(s))", n)
+		}
+		requireFullRecomputeCorrectsNothing(t, ctx, conn)
+		closeConn()
+		closed = true
+		*applied = nil
+		requireIdleReopen(t, dataDir)
+		if len(*applied) != 0 {
+			t.Errorf("idle reopen applied steps %v", *applied)
+		}
+	})
+
+	t.Run("received key with clone-local tables absent", func(t *testing.T) {
+		ctx := t.Context()
+		// A fresh clone of the peer's lineage: no ignored cursor table and no
+		// wisp plane, so the re-arm has nothing to delete and the whole
+		// ignored series runs before 0032 repairs.
+		_, conn, closeConn := seedRewoundStore(t, ctx, 75, 32)
+		defer closeConn()
+		dropUntrackedTables(t, ctx, conn)
+		insertRepairRows(t, ctx, conn, "issues", repairGraph)
+		insertCanonicalEdges(t, ctx, conn, "dependencies", "depends_on_issue_id", repairEdges)
+		mustExecOn(t, ctx, conn, "INSERT INTO metadata (`key`, value) VALUES (?, 'full')", isBlockedRepairOwedKey)
+		commitFixture(t, ctx, conn, "test: fresh clone of a lineage that owes the repair")
+		commitTrackedIgnoredTables(t, ctx, conn)
+		withoutMigrateConsent(t)
+
+		if _, err := schema.MigrateUp(ctx, conn); err != nil {
+			t.Fatalf("MigrateUp: %v", err)
+		}
+		requireIgnoredCursorContiguous(t, ctx, conn)
+		if n := repairCommitCount(t, ctx, conn); n != 1 {
+			t.Errorf("repair commits = %d, want 1", n)
+		}
+		requireRepairedAndSettled(t, ctx, conn)
+	})
+
+	t.Run("received key over a low ignored floor", func(t *testing.T) {
+		ctx := t.Context()
+		// Ignored 14: the received key must not lift the floor to 31; the
+		// pass replays 15 through 31 (frozen 0015 included) before 0032.
+		_, conn, closeConn := seedReceivedKeyStore(t, ctx, 14)
+		defer closeConn()
+		insertRepairRows(t, ctx, conn, "wisps", wispRepairGraph)
+		insertWispEdges(t, ctx, conn, wispRepairEdges)
+		applied := recordAppliedSteps(t)
+
+		if _, err := schema.MigrateUp(ctx, conn); err != nil {
+			t.Fatalf("MigrateUp: %v", err)
+		}
+		want := make([]int, 0, 18)
+		for v := 15; v <= 32; v++ {
+			want = append(want, v)
+		}
+		if !slices.Equal(*applied, want) {
+			t.Errorf("pass applied steps %v, want %v", *applied, want)
+		}
+		requireIgnoredCursorContiguous(t, ctx, conn)
+		requireFlags(t, ctx, conn, "wisps", wispRepairGraph)
+		if n := repairCommitCount(t, ctx, conn); n != 1 {
+			t.Errorf("repair commits = %d, want 1", n)
+		}
+		requireRepairedAndSettled(t, ctx, conn)
+	})
+
+	t.Run("working-set key is not owed", func(t *testing.T) {
+		ctx := t.Context()
+		_, conn, closeConn := seedRewoundStore(t, ctx, 75, 32)
+		defer closeConn()
+		insertRepairRows(t, ctx, conn, "issues", repairGraph)
+		insertCanonicalEdges(t, ctx, conn, "dependencies", "depends_on_issue_id", repairEdges)
+		commitFixture(t, ctx, conn, "test: converged v75 store")
+		mustExecOn(t, ctx, conn, "INSERT INTO metadata (`key`, value) VALUES (?, 'full')", isBlockedRepairOwedKey)
+		headBefore := scalarString(t, ctx, conn, "SELECT HASHOF('HEAD')")
+
+		if _, err := schema.MigrateUp(ctx, conn); err != nil {
+			t.Fatalf("MigrateUp: %v", err)
+		}
+		if got := scalarString(t, ctx, conn, "SELECT HASHOF('HEAD')"); got != headBefore {
+			t.Errorf("an uncommitted key moved HEAD from %s to %s", headBefore, got)
+		}
+		requireFlags(t, ctx, conn, "issues", staleFlags(repairGraph))
+	})
+
+	for _, window := range []string{"after-recompute", "after-key-deletion", "after-commit"} {
+		t.Run("interrupted "+window, func(t *testing.T) {
+			requireInterruptedRepairConverges(t, window)
+		})
+	}
+
+	t.Run("rewound branch", func(t *testing.T) {
+		ctx := t.Context()
+		// The clone-local ignored cursor already records 0032 from another
+		// branch; this branch's main cursor is still at 74.
+		_, conn, closeConn := seedRewoundStore(t, ctx, 74, 32)
+		defer closeConn()
+		insertRepairRows(t, ctx, conn, "issues", repairGraph)
+		insertCanonicalEdges(t, ctx, conn, "dependencies", "depends_on_issue_id", repairEdges)
+		commitFixture(t, ctx, conn, "test: branch still at v74")
+
+		if _, err := schema.MigrateUp(ctx, conn); err != nil {
+			t.Fatalf("MigrateUp: %v", err)
+		}
+		if n := repairCommitCount(t, ctx, conn); n != 1 {
+			t.Errorf("repair commits = %d, want 1", n)
+		}
+		requireRepairedAndSettled(t, ctx, conn)
+	})
+}
+
+// requireInterruptedRepairConverges crashes the owed repair of a 74/31 store
+// at window, then reopens on fresh engine handles: a crash before the repair
+// commit leaves HEAD owing it and the next open refuses over the working-set
+// debris until the operator commits it (`bd dolt commit`); a crash after it
+// leaves only 0032's cursor row to record. Either way the store converges with
+// exactly the repair commits the window implies and an idle reopen after.
+func requireInterruptedRepairConverges(t *testing.T, window string) {
+	ctx := t.Context()
+	dataDir, conn, closeConn := seedRewoundStore(t, ctx, 74, 31)
+	closed := false
+	defer func() {
+		if !closed {
+			closeConn()
+		}
+	}()
+	insertRepairRows(t, ctx, conn, "issues", repairGraph)
+	insertCanonicalEdges(t, ctx, conn, "dependencies", "depends_on_issue_id", repairEdges)
+	commitFixture(t, ctx, conn, "test: v74 store with flags left by dolt#11886")
+	txCommit := scalarInt(t, ctx, conn, "SELECT @@SESSION.dolt_transaction_commit")
+
+	errCrash := errors.New("simulated crash")
+	restore := schema.SetIsBlockedRepairFaultHookForTest(func(w string) error {
+		if w == window {
+			return errCrash
+		}
+		return nil
+	})
+	_, err := schema.MigrateUp(ctx, conn)
+	restore()
+	if !errors.Is(err, errCrash) {
+		t.Fatalf("MigrateUp with a crash %s: err = %v, want the injected crash", window, err)
+	}
+	if got := scalarInt(t, ctx, conn, "SELECT @@SESSION.dolt_transaction_commit"); got != txCommit {
+		t.Errorf("@@dolt_transaction_commit = %d after the crashed pass, want %d restored", got, txCommit)
+	}
+	if got := scalarInt(t, ctx, conn, "SELECT MAX(version) FROM schema_migrations"); got != 75 {
+		t.Errorf("main cursor = %d after the crash, want 75 (0075 commits before 0032 runs)", got)
+	}
+	if ignoredCursorHas(t, ctx, conn, 32) {
+		t.Error("ignored 0032 recorded despite the crash")
+	}
+	committed := window == "after-commit"
+	wantKeyAtHead, wantKeyWorking, wantRepairCommits := 1, 1, 0
+	switch window {
+	case "after-key-deletion":
+		wantKeyWorking = 0
+	case "after-commit":
+		wantKeyAtHead, wantKeyWorking, wantRepairCommits = 0, 0, 1
+	}
+	if n := repairKeyCount(t, ctx, conn, " AS OF 'HEAD'"); n != wantKeyAtHead {
+		t.Errorf("repair key rows at HEAD = %d after the crash, want %d", n, wantKeyAtHead)
+	}
+	if n := repairKeyCount(t, ctx, conn, ""); n != wantKeyWorking {
+		t.Errorf("repair key rows in the working set = %d after the crash, want %d", n, wantKeyWorking)
+	}
+	if n := repairCommitCount(t, ctx, conn); n != wantRepairCommits {
+		t.Errorf("repair commits = %d after the crash, want %d", n, wantRepairCommits)
+	}
+	if got := isBlockedAt(t, ctx, conn, "HEAD", "rp-related"); got == committed {
+		t.Errorf("rp-related at HEAD is_blocked = %v after the crash, want %v", got, !committed)
+	}
+	requireFlags(t, ctx, conn, "issues", repairGraph)
+	closeConn()
+	closed = true
+
+	withRawConn(t, dataDir, preflipDatabase, func(conn *sql.Conn) {
+		if committed {
+			commits := scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM dolt_log")
+			if _, err := schema.MigrateUp(ctx, conn); err != nil {
+				t.Fatalf("MigrateUp after the crash: %v", err)
+			}
+			if got := scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM dolt_log"); got != commits {
+				t.Errorf("retry minted %d commit(s); only 0032's cursor row was left", got-commits)
+			}
+			return
+		}
+		_, err := schema.MigrateUp(ctx, conn)
+		var dirtyErr *schema.DirtyTablesError
+		if !errors.As(err, &dirtyErr) {
+			t.Fatalf("MigrateUp over the crashed repair: err = %v, want *schema.DirtyTablesError", err)
+		}
+		if !contains(dirtyErr.Tables, "issues") {
+			t.Errorf("DirtyTablesError names %v, want issues among them", dirtyErr.Tables)
+		}
+		for _, table := range dirtyErr.Tables {
+			if !contains([]string{"dependencies", "issues", "metadata"}, table) {
+				t.Errorf("DirtyTablesError names %s, which the repair never writes", table)
+			}
+		}
+		if ignoredCursorHas(t, ctx, conn, 32) {
+			t.Error("ignored 0032 recorded by the refused pass")
+		}
+		// The operator's documented recovery: `bd dolt commit`.
+		commitFixture(t, ctx, conn, "test: bd dolt commit")
+	})
+
+	if !committed {
+		withRawConn(t, dataDir, preflipDatabase, func(conn *sql.Conn) {
+			if _, err := schema.MigrateUp(ctx, conn); err != nil {
+				t.Fatalf("MigrateUp after the reconciliation: %v", err)
+			}
+			// The key survived a crash after the recompute, so the retry
+			// owes, recomputes nothing new and commits the key's removal; a
+			// crash after the key deletion left nothing owed.
+			want := 0
+			if window == "after-recompute" {
+				want = 1
+			}
+			if n := repairCommitCount(t, ctx, conn); n != want {
+				t.Errorf("repair commits = %d after the retry, want %d", n, want)
+			}
+		})
+	}
+
+	withRawConn(t, dataDir, preflipDatabase, func(conn *sql.Conn) {
+		if n := repairCommitCount(t, ctx, conn); n > 1 {
+			t.Errorf("repair commits = %d, want at most 1", n)
+		}
+		requireRepairedAndSettled(t, ctx, conn)
+	})
+	requireIdleReopen(t, dataDir)
 }

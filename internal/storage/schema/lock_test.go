@@ -255,6 +255,7 @@ func TestMigrateUpSeedsIgnorePatternsWhenNoWorkNeeded(t *testing.T) {
 	expectContentHashColumnExists(mock)
 	expectScalar(mock, "SELECT COUNT(*) FROM custom_types", "count", 1)
 	expectScalar(mock, "SELECT COUNT(*) FROM custom_statuses", "count", 1)
+	expectIsBlockedRepairNotOwed(mock)
 	// The seed inserted rows and no migration pass follows to commit them, so
 	// MigrateUp must commit the heal itself, scoped and labeled.
 	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_ADD('dolt_ignore')")).
@@ -301,6 +302,7 @@ func TestMigrateUpSkipsSeedCommitWhenNothingChanged(t *testing.T) {
 	expectContentHashColumnExists(mock)
 	expectScalar(mock, "SELECT COUNT(*) FROM custom_types", "count", 1)
 	expectScalar(mock, "SELECT COUNT(*) FROM custom_statuses", "count", 1)
+	expectIsBlockedRepairNotOwed(mock)
 
 	applied, err := MigrateUp(context.Background(), db)
 	if err != nil {
@@ -483,6 +485,9 @@ func expectOnePendingMigrationAtSetting(t *testing.T, mock sqlmock.Sqlmock, tran
 		mock.ExpectQuery(`SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.TABLES`).
 			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
 	}
+	// gastownhall/beads#7037: no owed is_blocked repair at HEAD, so ignored
+	// 0032 is not re-armed.
+	expectIsBlockedRepairNotOwed(mock)
 	mock.ExpectExec("(?s)^CREATE TABLE IF NOT EXISTS ignored_schema_migrations").
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	expectContentHashColumnExists(mock)
@@ -528,6 +533,18 @@ func expectIsBlockedRepairOwedProbe(mock sqlmock.Sqlmock, cursorTablePresent boo
 			WithArgs(32).
 			WillReturnResult(sqlmock.NewResult(0, 0))
 	}
+}
+
+// expectIsBlockedRepairNotOwed mocks isBlockedRepairOwedAtHead on a store
+// with no owed is_blocked repair: metadata is tracked at HEAD and holds no
+// owed key. migrationWorkNeeded asks it last on a converged store, and the
+// guarded pass asks it again before the ignored runner selects its steps.
+func expectIsBlockedRepairNotOwed(mock sqlmock.Sqlmock) {
+	mock.ExpectQuery(regexp.QuoteMeta("SHOW TABLES AS OF 'HEAD' LIKE 'metadata'")).
+		WillReturnRows(sqlmock.NewRows([]string{"Tables_in_beads"}).AddRow("metadata"))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM metadata AS OF 'HEAD' WHERE `key` = ?")).
+		WithArgs("is_blocked_repair_owed_0075").
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
 }
 
 // expectTransactionCommitSuspend mocks the session-setting read at the top of
