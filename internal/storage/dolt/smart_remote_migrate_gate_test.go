@@ -103,6 +103,18 @@ func TestDoltNew_SmartRemoteMigrateGate_RealDolt(t *testing.T) {
 		if gateErr.Decision != "adopt" {
 			t.Errorf("adopt case: Decision = %q, want %q", gateErr.Decision, "adopt")
 		}
+
+		// bd-bt60zz (#6687): the store's own gate, the one initSchema runs,
+		// must mark its refusal as server storage, so the adopt guidance
+		// directs the move to the serving host instead of an embedded path.
+		err = store.remoteMigrateGate(nil)(ctx, db)
+		gateErr = nil
+		if !errors.As(err, &gateErr) {
+			t.Fatalf("adopt case via the store gate: expected gate error, got %v", err)
+		}
+		if gateErr.Decision != "adopt" || !gateErr.ServerMode {
+			t.Errorf("adopt case via the store gate: Decision = %q, ServerMode = %v; want adopt, true", gateErr.Decision, gateErr.ServerMode)
+		}
 	}
 
 	// --- fork-skew: diverge a SHARED version's local content hash. ---

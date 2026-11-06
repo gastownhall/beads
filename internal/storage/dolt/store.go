@@ -3697,20 +3697,35 @@ func (s *DoltStore) initSchema(ctx context.Context, bootstrapHeal *schema.FreshB
 		// depend on that external guard alone.
 		ReadOnly: s.readOnly,
 	}
-	// #5920: on a database served to OTHER workspaces' bd clients, migrating
-	// promotes the schema for all of them at once, so this open must not do it
-	// unprompted. On a server whose lifecycle bd owns for this one workspace,
-	// the pre-existing contract stands and the open migrates (see
-	// sharedServerDatabase).
-	gate := func(ctx context.Context, db *sql.DB) error {
-		if !sharedServerDatabase(s.cfg) {
-			return schema.CheckRemoteMigrateGateForRemoteWithRemoteCheckAndAdopt(
-				ctx, db, s.remote, s.hasPersistedCLIRemote, adopt)
-		}
-		return schema.CheckSharedStoreMigrateGate(ctx, db, s.remote, s.hasPersistedCLIRemote, adopt)
-	}
-	applied, err := initSchemaOnDBWithRetryAndGateBootstrapHeal(ctx, migDB, gate, bootstrapHeal, s.serverEndpoint)
+	applied, err := initSchemaOnDBWithRetryAndGateBootstrapHeal(ctx, migDB, s.remoteMigrateGate(adopt), bootstrapHeal, s.serverEndpoint)
 	return applied, err
+}
+
+// remoteMigrateGate is the gate initSchema runs before each migration
+// attempt. #5920: on a database served to OTHER workspaces' bd clients,
+// migrating promotes the schema for all of them at once, so this open must not
+// do it unprompted. On a server whose lifecycle bd owns for this one workspace,
+// the pre-existing contract stands and the open migrates (see
+// sharedServerDatabase).
+//
+// Either way the database lives under a dolt sql-server's data_dir, so a
+// refusal is marked ServerMode: its adopt guidance then moves the database on
+// the serving host instead of printing the embedded move (bd-bt60zz, #6687).
+func (s *DoltStore) remoteMigrateGate(adopt *schema.FastForwardAdopter) func(context.Context, *sql.DB) error {
+	return func(ctx context.Context, db *sql.DB) error {
+		var err error
+		if !sharedServerDatabase(s.cfg) {
+			err = schema.CheckRemoteMigrateGateForRemoteWithRemoteCheckAndAdopt(
+				ctx, db, s.remote, s.hasPersistedCLIRemote, adopt)
+		} else {
+			err = schema.CheckSharedStoreMigrateGate(ctx, db, s.remote, s.hasPersistedCLIRemote, adopt)
+		}
+		var gateErr *schema.RemoteMigrateGateError
+		if errors.As(err, &gateErr) {
+			gateErr.ServerMode = true
+		}
+		return err
+	}
 }
 
 // ApplySchemaMigrations runs idempotent schema migrations under the
