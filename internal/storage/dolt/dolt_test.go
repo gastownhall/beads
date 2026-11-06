@@ -2554,3 +2554,48 @@ func TestCreateMultipleEphemeralAutoIDs(t *testing.T) {
 		ids[issue.ID] = true
 	}
 }
+
+// TestCustomConfigCacheRetriesAfterFailedRead pins bd-dpn4op (GH#5581): one
+// failed custom-config read must not pin the YAML fallback as the store's
+// custom status/type vocabulary; the next call has to read the database again.
+func TestCustomConfigCacheRetriesAfterFailedRead(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	if err := store.SetConfig(ctx, "status.custom", "review"); err != nil {
+		t.Fatalf("SetConfig(status.custom): %v", err)
+	}
+	if err := store.SetConfig(ctx, "types.custom", "molecule"); err != nil {
+		t.Fatalf("SetConfig(types.custom): %v", err)
+	}
+
+	// One read with a dead context fails inside loadCustomConfigCache.
+	deadCtx, deadCancel := context.WithCancel(ctx)
+	deadCancel()
+	_, _ = store.GetCustomStatuses(deadCtx)
+
+	statuses, err := store.GetCustomStatuses(ctx)
+	if err != nil {
+		t.Fatalf("GetCustomStatuses: %v", err)
+	}
+	if len(statuses) != 1 || statuses[0] != "review" {
+		t.Errorf("GetCustomStatuses after a failed read = %v, want [review]", statuses)
+	}
+	detailed, err := store.GetCustomStatusesDetailed(ctx)
+	if err != nil {
+		t.Fatalf("GetCustomStatusesDetailed: %v", err)
+	}
+	if len(detailed) != 1 || detailed[0].Name != "review" {
+		t.Errorf("GetCustomStatusesDetailed after a failed read = %v, want [review]", detailed)
+	}
+	customTypes, err := store.GetCustomTypes(ctx)
+	if err != nil {
+		t.Fatalf("GetCustomTypes: %v", err)
+	}
+	if len(customTypes) != 1 || customTypes[0] != "molecule" {
+		t.Errorf("GetCustomTypes after a failed read = %v, want [molecule]", customTypes)
+	}
+}

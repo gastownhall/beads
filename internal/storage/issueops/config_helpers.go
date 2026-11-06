@@ -74,7 +74,10 @@ func ResolveCustomConfigInTx(ctx context.Context, tx DBTX) (statuses []types.Cus
 func resolveCustomStatusesFromTableInTx(ctx context.Context, tx DBTX) ([]types.CustomStatus, bool, error) {
 	rows, err := tx.QueryContext(ctx, "SELECT name, category FROM custom_statuses ORDER BY name")
 	if err != nil {
-		return nil, false, nil
+		if isTableNotExistError(err) {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("query custom_statuses: %w", err)
 	}
 	defer rows.Close()
 	var result []types.CustomStatus

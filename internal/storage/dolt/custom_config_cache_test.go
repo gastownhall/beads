@@ -158,3 +158,163 @@ func TestCustomConfigCacheFailedReadServesFallbackUnloaded(t *testing.T) {
 		}
 	}
 }
+
+// ccStatusRow is one custom_statuses row.
+type ccStatusRow struct{ name, category string }
+
+// expectVocabularyRead arms one read transaction that resolves both
+// normalized tables. When either table is empty the resolver also reads the
+// legacy config rows, which configRows supplies (key, value pairs).
+func expectVocabularyRead(mock sqlmock.Sqlmock, statuses []ccStatusRow, typeNames []string, configRows ...[2]string) {
+	mock.ExpectBegin()
+	statusRows := sqlmock.NewRows([]string{"name", "category"})
+	for _, st := range statuses {
+		statusRows.AddRow(st.name, st.category)
+	}
+	mock.ExpectQuery(ccStatusesQuery).WillReturnRows(statusRows)
+	typeRows := sqlmock.NewRows([]string{"name"})
+	for _, n := range typeNames {
+		typeRows.AddRow(n)
+	}
+	mock.ExpectQuery(ccTypesQuery).WillReturnRows(typeRows)
+	if len(statuses) == 0 || len(typeNames) == 0 {
+		cfgRows := sqlmock.NewRows([]string{"key", "value"})
+		for _, kv := range configRows {
+			cfgRows.AddRow(kv[0], kv[1])
+		}
+		mock.ExpectQuery(ccConfigQuery).WithArgs("status.custom", "types.custom").WillReturnRows(cfgRows)
+	}
+	mock.ExpectRollback()
+}
+
+// ccAssertVocabulary calls all three getters with a live context and checks
+// the names each reports.
+func ccAssertVocabulary(t *testing.T, store *DoltStore, want map[string][]string) {
+	t.Helper()
+	for _, getter := range ccGetters {
+		got, err := getter.get(context.Background(), store)
+		if err != nil {
+			t.Fatalf("%s: %v", getter.name, err)
+		}
+		ccAssertNames(t, getter.name, got, want[getter.name])
+	}
+}
+
+var ccStatusSelectFails = ccFailure{"custom_statuses select fails", func(_ *testing.T, mock sqlmock.Sqlmock) context.Context {
+	mock.ExpectBegin()
+	mock.ExpectQuery(ccStatusesQuery).WillReturnError(errCustomConfigInjected)
+	mock.ExpectRollback()
+	return context.Background()
+}}
+
+var ccDatabaseVocabulary = map[string][]string{
+	"GetCustomStatuses":         {"review"},
+	"GetCustomStatusesDetailed": {"review:wip"},
+	"GetCustomTypes":            {"molecule"},
+}
+
+// TestCustomConfigCacheRereadsAfterFailedRead pins AC-2: after a failed
+// vocabulary read, the next getter reads the database again and all three
+// getters report the database vocabulary, with no store recreation or config
+// write in between.
+func TestCustomConfigCacheRereadsAfterFailedRead(t *testing.T) {
+	failures := append(append([]ccFailure{}, ccReadFailures...), ccStatusSelectFails)
+	for _, failure := range failures {
+		for _, getter := range ccGetters {
+			t.Run(failure.name+"/"+getter.name, func(t *testing.T) {
+				withCustomVocabularyYAML(t, "", "")
+				store, mock, _ := vhCountedStore(t)
+				ctx := failure.arm(t, mock)
+				if _, err := getter.get(ctx, store); err != nil {
+					t.Fatalf("%s after a failed read: error %v, want nil", getter.name, err)
+				}
+				if statusLoaded, typeLoaded := ccFlags(store); statusLoaded || typeLoaded {
+					t.Fatalf("cache flags after a failed read = (status %v, type %v), want both false", statusLoaded, typeLoaded)
+				}
+
+				expectVocabularyRead(mock, []ccStatusRow{{"review", "wip"}}, []string{"molecule"})
+				ccAssertVocabulary(t, store, ccDatabaseVocabulary)
+				if err := mock.ExpectationsWereMet(); err != nil {
+					t.Errorf("the read after a failure was not made: %v", err)
+				}
+				if statusLoaded, typeLoaded := ccFlags(store); !statusLoaded || !typeLoaded {
+					t.Errorf("cache flags after a successful read = (status %v, type %v), want both true", statusLoaded, typeLoaded)
+				}
+			})
+		}
+	}
+
+	// config.yaml distinct from the database: the failed call serves YAML,
+	// recovery replaces the status fallback and unions types with YAML as
+	// before.
+	t.Run("yaml distinct from database", func(t *testing.T) {
+		withCustomVocabularyYAML(t, "triage:wip", "gizmo")
+		store, mock, _ := vhCountedStore(t)
+		ccStatusSelectFails.arm(t, mock)
+		got, err := store.GetCustomTypes(context.Background())
+		if err != nil {
+			t.Fatalf("GetCustomTypes after a failed read: %v", err)
+		}
+		ccAssertNames(t, "GetCustomTypes after a failed read", got, []string{"gizmo"})
+
+		expectVocabularyRead(mock, []ccStatusRow{{"review", "wip"}}, []string{"molecule"})
+		ccAssertVocabulary(t, store, map[string][]string{
+			"GetCustomStatuses":         {"review"},
+			"GetCustomStatusesDetailed": {"review:wip"},
+			"GetCustomTypes":            {"molecule", "gizmo"},
+		})
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("unmet SQL expectations: %v", err)
+		}
+	})
+
+	// The existing read wrapper retries a transient error within the call;
+	// nothing new is added on top of it.
+	t.Run("retryable select error recovers within the call", func(t *testing.T) {
+		withCustomVocabularyYAML(t, "", "")
+		store, mock, _ := vhCountedStore(t)
+		mock.ExpectBegin()
+		mock.ExpectQuery(ccStatusesQuery).WillReturnError(errors.New("write: broken pipe"))
+		mock.ExpectRollback()
+		expectVocabularyRead(mock, []ccStatusRow{{"review", "wip"}}, []string{"molecule"})
+		ccAssertVocabulary(t, store, ccDatabaseVocabulary)
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("unmet SQL expectations: %v", err)
+		}
+	})
+
+	// One cache invalidated alone: a failed reload leaves the other cache
+	// loaded and intact, and the next read restores the invalidated one.
+	for _, key := range []string{"types.custom", "status.custom"} {
+		t.Run("partial invalidation of "+key, func(t *testing.T) {
+			withCustomVocabularyYAML(t, "", "")
+			store, mock, _ := vhCountedStore(t)
+			expectVocabularyRead(mock, []ccStatusRow{{"review", "wip"}}, []string{"molecule"})
+			ccAssertVocabulary(t, store, ccDatabaseVocabulary)
+
+			store.invalidateConfigCaches(key)
+			mock.ExpectBegin().WillReturnError(errCustomConfigInjected)
+			if _, err := store.GetCustomTypes(context.Background()); err != nil {
+				t.Fatalf("GetCustomTypes after a failed reload: %v", err)
+			}
+			statusLoaded, typeLoaded := ccFlags(store)
+			if key == "types.custom" {
+				if !statusLoaded || typeLoaded {
+					t.Errorf("flags after a failed type reload = (status %v, type %v), want (true, false)", statusLoaded, typeLoaded)
+				}
+				got, _ := store.GetCustomStatusesDetailed(context.Background())
+				if len(got) != 1 || got[0] != (types.CustomStatus{Name: "review", Category: types.CategoryWIP}) {
+					t.Errorf("status cache after a failed type reload = %#v, want [review:wip]", got)
+				}
+			} else if statusLoaded || !typeLoaded {
+				t.Errorf("flags after a failed status reload = (status %v, type %v), want (false, true)", statusLoaded, typeLoaded)
+			}
+
+			expectVocabularyRead(mock, []ccStatusRow{{"review", "wip"}}, []string{"molecule"})
+			ccAssertVocabulary(t, store, ccDatabaseVocabulary)
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Errorf("unmet SQL expectations: %v", err)
+			}
+		})
+	}
+}
