@@ -1208,6 +1208,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A failed custom status/type read no longer pins config.yaml's vocabulary
+  for the store's lifetime (GH#5581). `GetCustomStatuses`,
+  `GetCustomStatusesDetailed` and `GetCustomTypes` cache their result only
+  when the database read succeeded; a read that fails — a dropped
+  connection, a cancelled context — answers that one call from config.yaml
+  as before, and the next call reads the database again instead of serving
+  the fallback (often empty) until the next config write or a restart. Read
+  errors inside the resolver, which used to be indistinguishable from an
+  unconfigured vocabulary, now surface to that read instead of masquerading
+  as a successful empty one; pre-migration databases whose normalized tables
+  are missing keep falling back to the legacy `status.custom`/`types.custom`
+  config rows.
 - `bd config get` for a config.yaml, git-config or user-global key no longer
   opens the database just because one exists, so it answers from those files
   while the Dolt server is down instead of failing the open (GH#5108). In

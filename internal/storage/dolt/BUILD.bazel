@@ -194,6 +194,7 @@ go_test(
         "cross_record_invariant_contract_test.go",
         "cross_upgrade_merge_test.go",
         "crosstier_dep_test.go",
+        "custom_config_cache_test.go",
         "custom_status_test.go",
         "cycle_detector_contract_test.go",
         "deleter_contract_test.go",

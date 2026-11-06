@@ -164,14 +164,20 @@ func (s *DoltStore) loadCustomConfigCache(ctx context.Context) {
 	}
 
 	s.cacheMu.Lock()
+	// A failed read answers from the fallback fields written above but must
+	// not certify them as loaded: marking an unreadable vocabulary cached
+	// pins the config.yaml fallback (often empty) until the next config
+	// write, even after the database recovers (GH#5581). The !cached guards
+	// keep a still-valid cache from a partial invalidation, and stop a racing
+	// failure from overwriting a success that already published.
 	if !s.customStatusCached {
 		s.customStatusDetailedCache = statuses
 		s.customStatusCache = types.CustomStatusNames(statuses)
-		s.customStatusCached = true
+		s.customStatusCached = err == nil
 	}
 	if !s.customTypeCached {
 		s.customTypeCache = customTypes
-		s.customTypeCached = true
+		s.customTypeCached = err == nil
 	}
 	s.cacheMu.Unlock()
 }
@@ -194,7 +200,9 @@ func (s *DoltStore) GetCustomStatusesDetailed(ctx context.Context) ([]types.Cust
 // If the database doesn't have custom types configured, falls back to config.yaml.
 // Returns an empty slice if no custom types are configured.
 // Results are cached per DoltStore lifetime and invalidated when SetConfig
-// updates the "types.custom" key.
+// updates the "types.custom" key. A read that ultimately fails is answered
+// from config.yaml for that call but left uncached, so the next call reads
+// the database again (GH#5581).
 func (s *DoltStore) GetCustomTypes(ctx context.Context) ([]string, error) {
 	s.loadCustomConfigCache(ctx)
 	s.cacheMu.Lock()
