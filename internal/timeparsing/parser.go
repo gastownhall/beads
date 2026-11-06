@@ -2,8 +2,8 @@
 //
 // The parsing follows a layered architecture (ADR-001):
 //  1. Compact duration (+6h, -1d, +2w)
-//  2. Natural language (tomorrow, next monday)
-//  3. Absolute timestamp (RFC3339, date-only)
+//  2. Absolute timestamp (date-only, RFC3339, zone-less datetime)
+//  3. Natural language (tomorrow, next monday)
 package timeparsing
 
 import (
@@ -141,15 +141,28 @@ func parseNaturalLanguage(s string, now time.Time) (time.Time, error) {
 // dateOnlyRe matches date-only format YYYY-MM-DD to avoid NLP misinterpretation.
 var dateOnlyRe = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
 
+// datePrefixRe matches input that starts like a dashed date: digits, a dash,
+// digits, a dash and a digit, after optional leading whitespace. Besides
+// YYYY-MM-DD that covers a missing or extra digit (2025-1-5, 2025-011-05,
+// 20255-01-05) and other field orders (05-01-2025). It is not end-anchored:
+// any such input is meant as an absolute time.
+var datePrefixRe = regexp.MustCompile(`^\s*\d+-\d+-\d`)
+
 // ParseRelativeTime parses a time expression using the layered architecture (ADR-001).
 //
 // Parsing order:
 //  1. Compact duration (+6h, -1d, +2w)
-//  2. Absolute formats (date-only, RFC3339) - checked before NLP to avoid misinterpretation
+//  2. Absolute formats - checked before NLP to avoid misinterpretation:
+//     date-only (2025-01-15), RFC3339 (2025-01-15T10:00:00Z), and zone-less
+//     YYYY-MM-DD[T| ]HH:MM[:SS] (2025-01-15 10:00, 2025-01-15T10:00:00)
 //  3. Natural language (tomorrow, next monday)
 //
-// Timezone-less inputs are interpreted in now's location. Returns the parsed
-// time in UTC or an error if no layer could parse the input.
+// Timezone-less inputs are interpreted in now's location. Input that starts
+// like a dashed date but matches no absolute format (an invalid date, a
+// missing or extra digit, another field order, leading whitespace, a 12-hour
+// or zoned minute suffix, trailing text) is rejected rather than passed to
+// natural language parsing. Returns the parsed time in UTC or an error if no
+// layer could parse the input.
 func ParseRelativeTime(s string, now time.Time) (time.Time, error) {
 	location := now.Location()
 
@@ -181,6 +194,23 @@ func ParseRelativeTime(s string, now time.Time) (time.Time, error) {
 	// Try datetime with space (2025-01-15 10:00:00)
 	if t, err := time.ParseInLocation("2006-01-02 15:04:05", s, location); err == nil {
 		return t.UTC(), nil
+	}
+
+	// Try ISO 8601 datetime without seconds or timezone (2025-01-15T10:00)
+	if t, err := time.ParseInLocation("2006-01-02T15:04", s, location); err == nil {
+		return t.UTC(), nil
+	}
+
+	// Try datetime with space, without seconds (2025-01-15 10:00)
+	if t, err := time.ParseInLocation("2006-01-02 15:04", s, location); err == nil {
+		return t.UTC(), nil
+	}
+
+	// A leading dashed date that no absolute layout accepted is a typo or an
+	// unsupported form. NLP has no rule for dashed dates: it would pick up a
+	// clock-like fragment of one ("11-07" as 11:07) and drop the date.
+	if datePrefixRe.MatchString(s) {
+		return time.Time{}, fmt.Errorf("cannot parse time expression: %q (absolute forms: YYYY-MM-DD, YYYY-MM-DD[T| ]HH:MM, YYYY-MM-DD[T| ]HH:MM:SS[.fff], RFC3339 such as 2025-01-15T10:00:00Z or 2025-01-15T10:00:00-05:00)", s)
 	}
 
 	// Layer 3: Natural language (after absolute formats to avoid misinterpretation)

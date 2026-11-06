@@ -1,6 +1,8 @@
 package timeparsing
 
 import (
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -300,11 +302,168 @@ func TestParseRelativeTimeNormalizesToUTC(t *testing.T) {
 		{input: "2026-08-01 09:00:00", want: time.Date(2026, 8, 1, 15, 0, 0, 0, time.UTC)},
 		{input: "2026-08-01T09:00:00-06:00", want: time.Date(2026, 8, 1, 15, 0, 0, 0, time.UTC)},
 		{input: "tomorrow at 9am", want: time.Date(2026, 8, 1, 15, 0, 0, 0, time.UTC)},
+		// GH#8167: zone-less datetimes without seconds, both separators.
+		{input: "2026-08-01 09:00", want: time.Date(2026, 8, 1, 15, 0, 0, 0, time.UTC)},
+		{input: "2026-08-01T09:00", want: time.Date(2026, 8, 1, 15, 0, 0, 0, time.UTC)},
+		{input: "2026-08-01 9:00", want: time.Date(2026, 8, 1, 15, 0, 0, 0, time.UTC)},
+		{input: "2026-08-01T9:00", want: time.Date(2026, 8, 1, 15, 0, 0, 0, time.UTC)},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
 			got, err := ParseRelativeTime(tt.input, now)
+			if err != nil {
+				t.Fatalf("ParseRelativeTime(%q) failed: %v", tt.input, err)
+			}
+			if !got.Equal(tt.want) {
+				t.Errorf("ParseRelativeTime(%q) = %v, want %v", tt.input, got, tt.want)
+			}
+			if got.Location() != time.UTC {
+				t.Errorf("ParseRelativeTime(%q) location = %v, want UTC", tt.input, got.Location())
+			}
+		})
+	}
+}
+
+// TestParseRelativeTimeDatetimeWithoutSeconds covers GH#8167: a datetime
+// without seconds must parse as that date and time in now's location, for
+// both the space and the T separator, never fall through to the NLP layer.
+func TestParseRelativeTimeDatetimeWithoutSeconds(t *testing.T) {
+	cases := []struct {
+		name string
+		now  time.Time
+		want time.Time
+	}{
+		{
+			name: "UTC-5",
+			now:  time.Date(2026, 11, 6, 6, 7, 0, 0, time.FixedZone("UTC-5", -5*60*60)),
+			want: time.Date(2026, 11, 7, 13, 30, 0, 0, time.UTC),
+		},
+		{
+			// The reported case: host in UTC, the day before the target date.
+			name: "UTC",
+			now:  time.Date(2026, 11, 6, 18, 0, 0, 0, time.UTC),
+			want: time.Date(2026, 11, 7, 8, 30, 0, 0, time.UTC),
+		},
+	}
+
+	for _, tc := range cases {
+		for _, input := range []string{"2026-11-07 08:30", "2026-11-07T08:30"} {
+			t.Run(tc.name+"/"+input, func(t *testing.T) {
+				got, err := ParseRelativeTime(input, tc.now)
+				if err != nil {
+					t.Fatalf("ParseRelativeTime(%q) failed: %v", input, err)
+				}
+				if !got.Equal(tc.want) {
+					t.Errorf("ParseRelativeTime(%q) = %v, want %v", input, got, tc.want)
+				}
+				if got.Location() != time.UTC {
+					t.Errorf("ParseRelativeTime(%q) location = %v, want UTC", input, got.Location())
+				}
+			})
+		}
+	}
+}
+
+// TestParseRelativeTimeRejectsMalformedDatePrefix pins that input starting
+// like a dashed date which no absolute layout accepts is an error, never
+// handed to the NLP layer, which would keep a clock-like fragment of it and
+// drop the date (GH#8167). The error must be the leading-date guard's, which
+// lists the absolute forms: an NLP miss would also say it cannot parse.
+func TestParseRelativeTimeRejectsMalformedDatePrefix(t *testing.T) {
+	now := time.Date(2026, 11, 6, 18, 0, 0, 0, time.UTC)
+
+	inputs := []string{
+		// Invalid calendar dates.
+		"2026-02-30",
+		"2026-11-31",
+		"2026-13-01",
+		// Unpadded month or day, and leading whitespace, which NLP also reads
+		// as a time today ("2026-1-15" as 01:15, " 2026-11-07" as 11:07).
+		"2026-1-15",
+		"2026-1-15 08:30",
+		"2026-11-7 08:30",
+		"2026-01-7 08:30",
+		"2026-12-1 09:00",
+		" 2026-11-07 08:30",
+		"\t2026-11-07",
+		// An extra or missing digit in the year or month, and other field
+		// orders, which NLP also reads as a time today ("2026-011-07 20:30"
+		// as 20:30, "11-07-2026 08:30" as 11:07).
+		"2026-011-07 20:30",
+		"2026-111-07 08:30",
+		"20266-11-07 20:30",
+		"206-11-07 08:30",
+		"07-11-2026",
+		"11-07-2026 08:30",
+		// Invalid or unsupported time suffixes.
+		"2026-11-07 24:00",
+		"2026-11-07 08:60",
+		"2026-11-07 8.30",
+		"2026-11-07 08:30 PM",
+		"2026-11-07 at 9am",
+		"2026-11-07 08:30Z",
+		// T separator and trailing junk.
+		"2026-11-07T24:00",
+		"2026-11-07T08:30 PM",
+		"2026-11-07T08:30:00 tomorrow",
+		"2026-11-07 08:30xyz",
+		"2026-11-07x",
+	}
+
+	for _, input := range inputs {
+		t.Run(input, func(t *testing.T) {
+			got, err := ParseRelativeTime(input, now)
+			if err == nil {
+				t.Fatalf("ParseRelativeTime(%q) = %v, want an error", input, got)
+			}
+			if !got.IsZero() {
+				t.Errorf("ParseRelativeTime(%q) time = %v, want zero", input, got)
+			}
+			if want := "cannot parse time expression: " + strconv.Quote(input) + " (absolute forms:"; !strings.Contains(err.Error(), want) {
+				t.Errorf("ParseRelativeTime(%q) error = %q, want it to contain %q", input, err, want)
+			}
+		})
+	}
+}
+
+// TestParseRelativeTimeKeepsAcceptedForms pins forms that parsed before the
+// minute layouts and the leading-ISO-date guard (GH#8167) so they keep their
+// exact instants: the guard runs only after every absolute layout fails.
+func TestParseRelativeTimeKeepsAcceptedForms(t *testing.T) {
+	utcNow := time.Date(2026, 11, 6, 18, 0, 0, 0, time.UTC)
+	loc := time.FixedZone("UTC-6", -6*60*60)
+	zonedNow := time.Date(2026, 7, 31, 21, 40, 15, 0, loc)
+
+	tests := []struct {
+		input string
+		now   time.Time
+		want  time.Time
+	}{
+		// Compact durations.
+		{input: "+30min", now: utcNow, want: time.Date(2026, 11, 6, 18, 30, 0, 0, time.UTC)},
+		{input: "-1d", now: utcNow, want: time.Date(2026, 11, 5, 18, 0, 0, 0, time.UTC)},
+		{input: "+2w", now: zonedNow, want: time.Date(2026, 8, 15, 3, 40, 15, 0, time.UTC)},
+		// Valid date-only.
+		{input: "2026-11-07", now: utcNow, want: time.Date(2026, 11, 7, 0, 0, 0, 0, time.UTC)},
+		{input: "2026-08-01", now: zonedNow, want: time.Date(2026, 8, 1, 6, 0, 0, 0, time.UTC)},
+		// Zone-less forms with seconds.
+		{input: "2026-11-07 08:30:00", now: utcNow, want: time.Date(2026, 11, 7, 8, 30, 0, 0, time.UTC)},
+		{input: "2026-11-07T08:30:00", now: zonedNow, want: time.Date(2026, 11, 7, 14, 30, 0, 0, time.UTC)},
+		// Fractional seconds, accepted by the seconds layouts.
+		{input: "2026-11-07 08:30:00.5", now: utcNow, want: time.Date(2026, 11, 7, 8, 30, 0, 500_000_000, time.UTC)},
+		{input: "2026-11-07T08:30:00.5", now: utcNow, want: time.Date(2026, 11, 7, 8, 30, 0, 500_000_000, time.UTC)},
+		// RFC3339 with an offset or Z.
+		{input: "2026-11-07T13:30:00Z", now: utcNow, want: time.Date(2026, 11, 7, 13, 30, 0, 0, time.UTC)},
+		{input: "2026-11-07T08:30:00-05:00", now: utcNow, want: time.Date(2026, 11, 7, 13, 30, 0, 0, time.UTC)},
+		// Natural language.
+		{input: "tomorrow at 9am", now: utcNow, want: time.Date(2026, 11, 7, 9, 0, 0, 0, time.UTC)},
+		{input: "tomorrow at 9am", now: zonedNow, want: time.Date(2026, 8, 1, 15, 0, 0, 0, time.UTC)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.now.Location().String()+"/"+tt.input, func(t *testing.T) {
+			got, err := ParseRelativeTime(tt.input, tt.now)
 			if err != nil {
 				t.Fatalf("ParseRelativeTime(%q) failed: %v", tt.input, err)
 			}

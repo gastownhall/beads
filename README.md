@@ -78,6 +78,17 @@ This project uses bd (beads) for issue tracking.
 | `bd prime` | Print agent workflow context and persistent memories. |
 | `bd remember "insight"` | Store project memory that `bd prime` injects later. |
 
+Date flags such as `--defer`, `--due`, `bd defer --until` and `--created-after`
+take compact durations from now (`+6h`, `-1d`), natural language (`tomorrow`,
+`next monday`) or an absolute time: `YYYY-MM-DD`, `YYYY-MM-DD[T| ]HH:MM`,
+`YYYY-MM-DD[T| ]HH:MM:SS[.fff]` (a space or a `T` before the time; optional
+fractional seconds), or RFC3339 with `Z` or an offset (`2025-01-15T10:00:00Z`,
+`2025-01-15T10:00:00-05:00`). Only the RFC3339 form takes a zone; times
+without one are local. `bd query` date filters take the same forms, except
+that a duration is unsigned and counts back from now (`updated>7d` means
+updated in the last 7 days). Any other input that starts with a dashed date
+(`2025-1-15`, `01-15-2025`, `2025-01-15 10:00 PM`) is rejected.
+
 ## 🔗 Hierarchy & Workflow
 
 Beads supports hierarchical IDs for epics:
