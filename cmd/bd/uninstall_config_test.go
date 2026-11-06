@@ -382,3 +382,31 @@ func TestResetRolePreservesSelectedGitContext(t *testing.T) {
 		})
 	}
 }
+
+// TestResetRoleProbeExitOneWithDiagnosticIsAFailure pins bd-a2qnf4
+// (GH#6765): git exits 1 for some failed reads too, but with a diagnostic.
+// Uninstall must report that failure and leave the role alone, not treat the
+// exit status alone as "absent" and report a clean uninstall.
+func TestResetRoleProbeExitOneWithDiagnosticIsAFailure(t *testing.T) {
+	configPath := roleReadFailureRepoForTest(t)
+	repo := filepath.Dir(filepath.Dir(configPath))
+	runGit := func(args ...string) {
+		t.Helper()
+		cmd := gitCommand(args...)
+		cmd.Dir, cmd.Env = repo, gitenv.ScrubRouting(os.Environ())
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("fixture git %v: %v: %s", args, err, out)
+		}
+	}
+	runGit("config", "--local", "beads.role", "maintainer")
+	installRoleReadFailingGitForTest(t, 1)
+	before := readFileForTest(t, configPath)
+
+	err := resetHooksPathAt(repo, filepath.Join(repo, ".git"), filepath.Join(repo, ".beads", "hooks"), gitenv.ScrubRouting(os.Environ()))
+	if err == nil || !strings.Contains(err.Error(), "read beads.role") || !strings.Contains(err.Error(), "bad config") {
+		t.Errorf("reset = %v; want the role read failure with git's diagnostic", err)
+	}
+	if after := readFileForTest(t, configPath); after != before {
+		t.Errorf("reset changed config after a failed role read:\n%s", after)
+	}
+}

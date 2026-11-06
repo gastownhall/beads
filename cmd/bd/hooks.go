@@ -1755,15 +1755,18 @@ func resetHooksPathAt(repoRoot, commonDir, storageHooksDir string, configEnv []s
 	getRoleCmd := exec.Command("git", "--git-dir", commonDir, "config", "--local", "--get", "beads.role")
 	getRoleCmd.Dir = repoRoot
 	getRoleCmd.Env = roleConfigEnv
-	if out, err := getRoleCmd.CombinedOutput(); err == nil {
+	// Absence is exit 1 with nothing on stderr (internal/git.ClassifyConfigGet);
+	// git also exits 1, with a diagnostic, for a read it failed, and that must
+	// be reported rather than taken as a clean uninstall.
+	if _, present, err := git.ClassifyConfigGet(getRoleCmd.Output()); err != nil {
+		failures = append(failures, fmt.Sprintf("read beads.role: %v", err))
+	} else if present {
 		roleCmd := exec.Command("git", "--git-dir", commonDir, "config", "--local", "--unset", "beads.role")
 		roleCmd.Dir = repoRoot
 		roleCmd.Env = roleConfigEnv
 		if output, err := roleCmd.CombinedOutput(); err != nil {
 			failures = append(failures, fmt.Sprintf("beads.role: %v (output: %s)", err, strings.TrimSpace(string(output))))
 		}
-	} else if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != 1 {
-		failures = append(failures, fmt.Sprintf("read beads.role: %v (output: %s)", err, strings.TrimSpace(string(out))))
 	}
 
 	if len(failures) > 0 {
