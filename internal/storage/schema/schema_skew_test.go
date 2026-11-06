@@ -439,6 +439,24 @@ func TestCheckReadableDrift(t *testing.T) {
 			},
 			check: requireBehindError(behind),
 		},
+		{
+			// A column listing that fails is an error to report, not a gap
+			// that refuses the open as a schema-version mismatch.
+			name: "a probe failure is wrapped, not mistaken for drift",
+			expect: func(mock sqlmock.Sqlmock) {
+				expectMainCursor(mock, behind)
+				expectCursorProbe(mock, "issues", true)
+				mock.ExpectQuery(`^SHOW COLUMNS FROM issues$`).WillReturnError(fmt.Errorf("boom"))
+			},
+			check: func(t *testing.T, err error) {
+				if err == nil || !strings.Contains(err.Error(), "schema drift check:") || !strings.Contains(err.Error(), "boom") {
+					t.Fatalf("CheckReadableDrift = %v, want the probe error wrapped", err)
+				}
+				if IsSchemaSkewError(err) {
+					t.Fatalf("CheckReadableDrift = %v, a probe failure must not read as schema drift", err)
+				}
+			},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			db, mock, err := sqlmock.New()
