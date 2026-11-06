@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/storage/depid"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/types"
@@ -252,4 +253,77 @@ func TestEmbeddedMigration0075HealsHistoricalBlockedFlags(t *testing.T) {
 		}
 	}
 	requireFullRecomputeCorrectsNothing(t, ctx, conn)
+}
+
+// insertCanonicalEdges seeds edges keyed by depid.New, the id the dependency
+// rekey converges every edge to, so the migration pass has no rekey of its own
+// to commit and anything it commits is the repair's.
+func insertCanonicalEdges(t *testing.T, ctx context.Context, conn *sql.Conn, table, targetColumn string, edges [][3]string) {
+	t.Helper()
+	for _, e := range edges {
+		//nolint:gosec // G202: table and column are test constants.
+		mustExecOn(t, ctx, conn,
+			"INSERT INTO "+table+" (id, issue_id, "+targetColumn+", type, created_at, created_by, metadata) VALUES (?, ?, ?, ?, NOW(), 'fixture', JSON_OBJECT())",
+			depid.New(e[0], e[1]), e[0], e[1], e[2])
+	}
+}
+
+// staleFlags returns rows with wantBlocked set to the seeded (stale) flag, for
+// asserting a plane the repair must not touch.
+func staleFlags(rows []repairRow) []repairRow {
+	out := make([]repairRow, len(rows))
+	for i, r := range rows {
+		out[i] = r
+		out[i].wantBlocked = r.stale
+	}
+	return out
+}
+
+// TestEmbeddedMigration0075WispOnlyRepairWithoutKey is AC-2: a clone that
+// adopted main 75 by pull (no owed key at HEAD) still runs ignored 0032, which
+// repairs its clone-local wisps and writes nothing tracked: issue flags,
+// dependencies, metadata and HEAD stay as they were, and no journal row is
+// written for the wisp flips.
+func TestEmbeddedMigration0075WispOnlyRepairWithoutKey(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+	_, conn, closeConn := seedRewoundStore(t, ctx, 75, 31)
+	defer closeConn()
+	insertRepairRows(t, ctx, conn, "issues", repairGraph)
+	insertCanonicalEdges(t, ctx, conn, "dependencies", "depends_on_issue_id", repairEdges)
+	insertRepairRows(t, ctx, conn, "wisps", wispRepairGraph)
+	insertCanonicalEdges(t, ctx, conn, "wisp_dependencies", "depends_on_wisp_id", wispRepairEdges)
+	seedJournal(t, ctx, conn)
+	commitFixture(t, ctx, conn, "test: pull-adopted v75 clone with stale local wisps")
+	if n := repairKeyCount(t, ctx, conn, " AS OF 'HEAD'"); n != 0 {
+		t.Fatalf("fixture: repair key committed at HEAD (%d row(s)); want a key-free clone", n)
+	}
+	headBefore := scalarString(t, ctx, conn, "SELECT HASHOF('HEAD')")
+	journalBefore := journalDump(t, ctx, conn)
+
+	if _, err := schema.MigrateUp(ctx, conn); err != nil {
+		t.Fatalf("MigrateUp: %v", err)
+	}
+
+	requireFlags(t, ctx, conn, "wisps", wispRepairGraph)
+	requireStamps(t, ctx, conn, "wisps", wispRepairGraph)
+	requireFlags(t, ctx, conn, "issues", staleFlags(repairGraph))
+	requireStamps(t, ctx, conn, "issues", repairGraph)
+	if got := scalarString(t, ctx, conn, "SELECT HASHOF('HEAD')"); got != headBefore {
+		t.Errorf("HEAD moved from %s to %s; the key-free repair must not commit", headBefore, got)
+	}
+	for _, table := range dirtyTableNames(t, ctx, conn) {
+		if table == "issues" || table == "metadata" || table == "dependencies" {
+			t.Errorf("%s dirty after the key-free repair; want it untouched", table)
+		}
+	}
+	if n := repairKeyCount(t, ctx, conn, ""); n != 0 {
+		t.Errorf("key-free repair wrote the repair key (%d row(s))", n)
+	}
+	if got := journalDump(t, ctx, conn); got != journalBefore {
+		t.Errorf("journal changed during the wisp-only repair:\n got %s\nwant %s", got, journalBefore)
+	}
+	if got := scalarInt(t, ctx, conn, "SELECT MAX(version) FROM ignored_schema_migrations"); got != schema.LatestIgnoredVersion() {
+		t.Errorf("ignored cursor = %d, want %d", got, schema.LatestIgnoredVersion())
+	}
 }

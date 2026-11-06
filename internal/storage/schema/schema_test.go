@@ -2582,10 +2582,13 @@ func newWispsAbsentDB(t *testing.T) *wispsAbsentDB {
 	mock.ExpectQuery(`SELECT commit_hash FROM dolt_log WHERE message = \?`).
 		WithArgs(eventsFlipDropCommitMessage).
 		WillReturnRows(sqlmock.NewRows([]string{"commit_hash"}))
-	// The {ignored_schema_migrations, 32} repair's owed-key probe: no metadata
-	// table at HEAD, so no repair is owed.
+	// The {ignored_schema_migrations, 32} repair's owed-key probe (no metadata
+	// table at HEAD, so no repair is owed) and its wisp-only recompute, which
+	// finds no wisps table.
 	mock.ExpectQuery(`SHOW TABLES AS OF 'HEAD' LIKE 'metadata'`).
 		WillReturnRows(sqlmock.NewRows([]string{"Tables_in_beads"}))
+	mock.ExpectQuery(`SELECT id FROM wisps`).
+		WillReturnError(errors.New("Error 1146: table not found: wisps"))
 	t.Cleanup(func() {
 		if err := mock.ExpectationsWereMet(); err != nil {
 			t.Errorf("wispsAbsentDB: unmet sql expectations: %v", err)

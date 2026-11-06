@@ -86,12 +86,21 @@ func isBlockedRepairOwedAtHead(ctx context.Context, db DBConn) (bool, error) {
 // repairIsBlockedFlags is the pre-ignored-0032 repair. With the owed key
 // committed it recomputes both planes, removes the key, and commits the
 // tracked tables together, returning only after that commit succeeded.
+// Without the key the tracked half is already repaired (or was never owed),
+// so it recomputes only this clone's wisps, which are never committed.
 func repairIsBlockedFlags(ctx context.Context, db DBConn) error {
 	owed, err := isBlockedRepairOwedAtHead(ctx, db)
 	if err != nil {
 		return err
 	}
 	if !owed {
+		corrected, err := issueops.RecomputeAllWispIsBlockedInTx(ctx, db)
+		if err != nil {
+			return fmt.Errorf("recomputing wisp is_blocked: %w", err)
+		}
+		if corrected > 0 {
+			fmt.Fprintf(stderr, "Recomputed is_blocked for local wisps (gastownhall/beads#7037): flipped %d flag(s)\n", corrected)
+		}
 		return nil
 	}
 	fmt.Fprintln(stderr, "Recomputing is_blocked for every issue and wisp (gastownhall/beads#7037)…")
