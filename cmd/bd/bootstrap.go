@@ -1603,10 +1603,11 @@ func printInitJoinGuidance(w io.Writer, e *schema.RemoteMigrateGateError) {
 }
 
 // printBootstrapRemoteBehindGuidance explains a remote-migrate gate refusal in
-// bootstrap terms. The gate's generic remedy ("adopt the migrated database:
-// bd bootstrap") is wrong from inside a bootstrap-style clone — the database
-// was just cloned from the remote, so the REMOTE is what is behind this binary
-// and re-cloning can never help. The way out is exactly one designated machine
+// bootstrap terms. The gate's generic adopt remedy is wrong from inside a
+// bootstrap-style clone — the database was just cloned from the remote, so
+// the REMOTE is what is behind this binary and re-cloning can never help.
+// Once the remote IS migrated, the clone still holds that database, so the
+// adopt needs the move-aside the gate's own refusal then prints (bd-bt60zz). The way out is exactly one designated machine
 // migrating and pushing. rerunCmd is the command the operator just ran ("bd
 // bootstrap", "bd init") so the don't-bother-retrying line names it.
 func printBootstrapRemoteBehindGuidance(w io.Writer, e *schema.RemoteMigrateGateError, syncRemote, rerunCmd string) {
@@ -1625,9 +1626,15 @@ func printBootstrapRemoteBehindGuidance(w io.Writer, e *schema.RemoteMigrateGate
 			"    • This machine is the designated migrator (exactly ONE machine should be):\n"+
 			"        bd migrate --force\n"+
 			"        bd dolt push\n"+
-			"      then other machines re-run `bd bootstrap` to adopt the migrated database.\n"+
+			"      then other machines adopt the migrated database: a fresh clone runs\n"+
+			"      `bd bootstrap`; a clone that already has a database must move it aside\n"+
+			"      first (bootstrap alone changes nothing there) — run `bd migrate` on it\n"+
+			"      for the adopt steps.\n"+
 			"    • Another machine is the designated migrator: wait for it to push, then\n"+
-			"      re-run `bd bootstrap`, or keep using a bd version that matches the remote.\n\n")
+			"      adopt its database. This clone keeps the database it just cloned, so\n"+
+			"      `bd bootstrap` alone changes nothing even then: move it aside first —\n"+
+			"      run `bd migrate` once the remote is migrated for the adopt steps — or\n"+
+			"      keep using a bd version that matches the remote.\n\n")
 }
 
 // doctorEnsureGitignoreForBeadsDir is the seam tests use to make the

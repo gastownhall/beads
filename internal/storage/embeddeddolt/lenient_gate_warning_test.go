@@ -100,6 +100,30 @@ func TestLenientGateWarningBody_BluntRefusalKeepsSharedGuidance(t *testing.T) {
 	}
 }
 
+// TestLenientGateWarningBody_BluntAdoptBulletMovesAside pins the adopt bullet
+// of the blunt lenient warning (bd-bt60zz, #6687): `bd bootstrap` alone never
+// replaces an existing embedded database, so the bullet must say so and give
+// the gate's own move-aside recipe, in order, ending in bootstrap.
+func TestLenientGateWarningBody_BluntAdoptBulletMovesAside(t *testing.T) {
+	warning := lenientGateWarningBody(&schema.RemoteMigrateGateError{CurrentVersion: 53, LatestVersion: 67, Pending: 14})
+	if strings.Contains(warning, "another already migrated): bd bootstrap") {
+		t.Errorf("adopt bullet still presents bare bd bootstrap as sufficient:\n%s", warning)
+	}
+	for _, want := range []string{"changes nothing on an existing database", "unused", "keep the moved"} {
+		if !strings.Contains(warning, want) {
+			t.Errorf("adopt bullet is missing %q:\n%s", want, warning)
+		}
+	}
+	at := 0
+	for _, c := range schema.EmbeddedAdoptCommands() {
+		i := strings.Index(warning[at:], "        "+c+"\n")
+		if i < 0 {
+			t.Fatalf("adopt bullet lacks %q after offset %d (recipe out of order or missing):\n%s", c, at, warning)
+		}
+		at += i + len(c)
+	}
+}
+
 // TestLenientGateWarning_ComposedOutput pins the COMPOSED warning — body plus
 // mode line — for every intent that can reach it, against each gate shape.
 //

@@ -397,8 +397,11 @@ func noticeSharedMigrateRefusal(err error) {
 		remedy = fmt.Sprintf("Run '%s' once every client of this server is upgraded; reads keep working meanwhile.", consent)
 	case "adopt", "adopt-ff":
 		// The remote is already migrated: migrating here would fork it, and
-		// the verb consent deliberately does not unlock this arm.
-		remedy = "Another clone has already migrated this database — adopt it with 'bd bootstrap' rather than migrating here; reads keep working meanwhile."
+		// the verb consent deliberately does not unlock this arm. Bootstrap
+		// alone never replaces the existing database this notice is printed
+		// for (bd-bt60zz, #6687), and the move it needs depends on the storage
+		// mode, so the steps are left to the full refusal.
+		remedy = "Another clone has already migrated this database — adopt it rather than migrating here. 'bd bootstrap' alone changes nothing on an existing database: it has to be moved aside first — run 'bd migrate' for the full refusal and the adopt steps; reads keep working meanwhile."
 	case "fork-skew":
 		remedy = "This database and its remote already applied different content for the same migration (#4259) — run 'bd doctor' and follow its migration-content-skew guidance; do not migrate."
 	default:
