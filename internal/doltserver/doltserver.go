@@ -397,8 +397,13 @@ type Config struct {
 
 // State holds runtime information about a managed server.
 type State struct {
-	Running        bool   `json:"running"`
-	PID            int    `json:"pid"`
+	Running bool `json:"running"`
+	PID     int  `json:"pid"`
+	// Port is the port the tracked server listens on, or 0 when unresolved:
+	// no port file or configuration resolves it (the port file may be
+	// missing or malformed) (GH#6614). Running reports process presence, not
+	// endpoint availability, so a live server with an unresolved port is
+	// Running=true with Port=0 — consumers must not adopt or dial Port=0.
 	Port           int    `json:"port"`
 	RemotesAPIPort int    `json:"remotesapi_port,omitempty"`
 	DataDir        string `json:"data_dir"`
@@ -626,10 +631,10 @@ func ReadPortFile(beadsDir string) int {
 // sql-server on port N".
 //
 // Read-only, deliberately. IsRunning answers a similar question but repairs as
-// it goes: it deletes stale PID and port files, and will stop an orphaned
-// server whose port it cannot determine. Callers that are merely classifying a
-// connection must not mutate a workspace's server state as a side effect, so
-// this duplicates the two cheap checks rather than reusing IsRunning.
+// it goes: it deletes stale PID and port files. Callers that are merely
+// classifying a connection must not mutate a workspace's server state as a
+// side effect, so this duplicates the two cheap checks rather than reusing
+// IsRunning.
 //
 // Two residual gaps remain, both of which answer "owned" for a server bd did
 // not launch. Both are narrower than what trusting the port file alone — or
@@ -717,7 +722,7 @@ func ManagesLiveServerOnPort(beadsDir string, port int) bool {
 // (GH#7214), while this answers false, the refusing direction for its caller.
 //
 // Read-only, unlike IsRunning, which deletes the state files of a PID that is
-// dead or not dolt and can stop a server whose port it cannot determine.
+// dead or not dolt.
 // Unlike ManagesLiveServerOnPort it rejects a recycled PID, at the cost of a
 // `ps` call (PowerShell on Windows), so keep it off the every-open path.
 func IsTrackedServerRunning(beadsDir string) bool {
@@ -1346,6 +1351,11 @@ func defaultConfigForMode(beadsDir string, sharedMode bool, resolvePort serverPo
 // Returns a State with Running=true if the PID file names a live dolt process,
 // or a live process the process list could not be read to verify, provided the
 // port file records its port (GH#7214).
+//
+// Running reports process presence, not endpoint availability: a confirmed
+// dolt server whose port cannot be resolved is Running with Port 0 (GH#6614).
+// IsRunning never signals a process. It still removes the state files of a
+// PID that is corrupt, dead or reused.
 func IsRunning(beadsDir string) (*State, error) {
 	data, err := os.ReadFile(pidPath(beadsDir))
 	if err != nil {
@@ -1405,31 +1415,32 @@ func IsRunning(beadsDir string) (*State, error) {
 		// signaling the PID.
 		return &State{Running: false}, nil
 	}
+	cfg := DefaultConfig(beadsDir)
 	if port == 0 {
-		cfg := DefaultConfig(beadsDir)
 		port = cfg.Port
 	}
-	if port == 0 {
-		// Server is running but we can't determine its port (port file
-		// missing, no explicit config). Stop the orphan so that callers
-		// (EnsureRunning) trigger a fresh Start() with a new port file.
-		if !isSignalableProcess(pid) {
-			// Signal 0 answered EPERM: the process is alive, but no signal
-			// from this user reaches it. Leave its pid file, as for an
-			// unverified PID above: a start replaces it.
-			return &State{Running: false}, nil
-		}
-		fmt.Fprintf(os.Stderr, "Dolt server (PID %d) running but port unknown; stopping for restart\n", pid)
-		if err := gracefulStop(pid, 5*time.Second); err != nil {
-			// Best-effort kill
-			if proc, findErr := os.FindProcess(pid); findErr == nil {
-				_ = proc.Kill()
-			}
-		}
-		_ = os.Remove(pidPath(beadsDir))
+	if port == 0 && !isSignalableProcess(pid) {
+		// Signal 0 answered EPERM: the process is alive, but no signal from
+		// this user reaches it. Leave its pid file, as for an unverified PID
+		// above: a start replaces it.
 		return &State{Running: false}, nil
 	}
-	cfg := DefaultConfig(beadsDir)
+	if port == 0 {
+		// A confirmed dolt server whose port no source resolves (port file
+		// missing or malformed, no explicit config). Missing tracking is
+		// uncertainty, not proof the server is safe to stop, and this is an
+		// observation that `bd dolt status` makes (GH#6614): report the live
+		// PID with port zero and leave the process and its files alone.
+		// Callers that need an endpoint must not adopt port zero; replacing
+		// the server is startLocked's decision, under the lifecycle lock.
+		return &State{
+			Running:        true,
+			PID:            pid,
+			Port:           0,
+			RemotesAPIPort: cfg.RemotesAPIPort,
+			DataDir:        ResolveDoltDir(beadsDir),
+		}, nil
+	}
 	return &State{
 		Running:        true,
 		PID:            pid,
@@ -1472,11 +1483,13 @@ func EnsureRunningDetailed(beadsDir string) (port int, startedByUs bool, err err
 	// printed. Racing a concurrent start is safe: the slow path below
 	// re-checks under the lock and startLocked re-checks again, so the worst
 	// case for a stale "not running" read is one wasted acquire.
+	// A live server whose port is unresolved (Port 0) has no endpoint to
+	// adopt: take the slow path, which decides under the lock (GH#6614).
 	state, err := IsRunning(serverDir)
 	if err != nil {
 		return 0, false, err
 	}
-	if state.Running {
+	if state.Running && state.Port > 0 {
 		return adoptRunningServer(serverDir, state), false, nil
 	}
 
@@ -1497,7 +1510,7 @@ func EnsureRunningDetailed(beadsDir string) (port int, startedByUs bool, err err
 	if err != nil {
 		return 0, false, err
 	}
-	if state.Running {
+	if state.Running && state.Port > 0 {
 		// Release before adopting. adoptRunningServer dials the remotesapi
 		// listener, and a per-waiter 500ms probe inside the exclusive region
 		// is precisely the serialization the fast path above exists to avoid.
@@ -1511,6 +1524,10 @@ func EnsureRunningDetailed(beadsDir string) (port int, startedByUs bool, err err
 	// it would conflict with the external one.
 	mode := ResolveServerMode(beadsDir)
 	if mode == ServerModeExternal {
+		if state.Running {
+			return 0, false, &externallyManagedError{unknownPortRefusal(serverDir, state,
+				"the server is externally managed")}
+		}
 		cfg := DialConfig(beadsDir)
 		if host, ok := externalNonLocalhostHost(beadsDir); ok {
 			// Configured for a non-localhost external server:
@@ -1540,6 +1557,9 @@ func EnsureRunningDetailed(beadsDir string) (port int, startedByUs bool, err err
 	// config.yaml or env, never spawn a server even if the caller
 	// somehow reached this point (e.g. stale AutoStart=true in config).
 	if IsAutoStartDisabled() {
+		if state.Running {
+			return 0, false, errors.New(unknownPortRefusal(serverDir, state, autoStartDisabledReason))
+		}
 		cfg := DefaultConfig(beadsDir)
 		if host, ok := externalNonLocalhostHost(beadsDir); ok {
 			return 0, false, fmt.Errorf("Configured Dolt server at %s is unreachable, and auto-start "+
@@ -1846,6 +1866,23 @@ func validateDistinctServerPorts(sqlPort, remotesAPIPort int) error {
 	return nil
 }
 
+// autoStartDisabledReason is unknownPortRefusal's reason under
+// dolt.auto-start: false.
+const autoStartDisabledReason = "auto-start is disabled (dolt.auto-start: false in config.yaml or BEADS_DOLT_AUTO_START=0)"
+
+// unknownPortRefusal explains why bd neither adopts nor replaces a live dolt
+// server whose port no source resolves (GH#6614), and how to recover.
+func unknownPortRefusal(serverDir string, state *State, reason string) string {
+	return fmt.Sprintf("Dolt server (PID %d) is running but its port is unknown: it cannot be "+
+		"resolved from tracking (%s) or configuration.\n"+
+		"bd will not replace it because %s.\n\n"+
+		"If you know the port it listens on, point bd at it:\n"+
+		"  export BEADS_DOLT_SERVER_PORT=<port>   # or dolt.port in config.yaml, or write it to %s\n"+
+		"Otherwise replace the server explicitly:\n"+
+		"  bd dolt stop && bd dolt start",
+		state.PID, portPath(serverDir), reason, portPath(serverDir))
+}
+
 func verifyRemotesAPIState(cfg *Config, state *State) (*State, error) {
 	state.RemotesAPIPort = cfg.RemotesAPIPort
 	if err := validateDistinctServerPorts(state.Port, cfg.RemotesAPIPort); err != nil {
@@ -1878,8 +1915,34 @@ func startLocked(beadsDir string) (*State, error) {
 
 	// Re-check after acquiring the lifecycle lock. A tracked process is only a
 	// successful start when every configured listener is ready.
-	if state, _ := IsRunning(beadsDir); state != nil && state.Running {
+	state, err := IsRunning(beadsDir)
+	if err != nil {
+		return nil, err
+	}
+	if state.Running && state.Port > 0 {
 		return verifyRemotesAPIState(cfg, state)
+	}
+	if state.Running {
+		// A live dolt server whose port no source resolves (GH#6614). Where
+		// bd does not manage the server's lifecycle, replacing it is not
+		// bd's call: refuse without signaling it or touching its files.
+		if ResolveServerMode(beadsDir) == ServerModeExternal {
+			return nil, &externallyManagedError{unknownPortRefusal(beadsDir, state,
+				"the server is externally managed")}
+		}
+		if IsAutoStartDisabled() {
+			return nil, errors.New(unknownPortRefusal(beadsDir, state, autoStartDisabledReason))
+		}
+		// bd manages this server and may start one: replace it. Holding the
+		// lifecycle lock, no other bd is mid-start here, and the re-check
+		// above adopts a port its starter published while we waited. Any
+		// stop or cleanup error ends the start, a joined ErrServerNotRunning
+		// included: a launch beside a server we failed to stop would compete
+		// for its data directory.
+		fmt.Fprintf(os.Stderr, "Dolt server (PID %d) is running but its port is unknown; stopping it to start a replacement\n", state.PID)
+		if err := stopLocked(beadsDir); err != nil {
+			return nil, fmt.Errorf("stopping Dolt server (PID %d) whose port is unknown: %w", state.PID, err)
+		}
 	}
 
 	// Clean up orphaned dolt sql-server processes INSIDE the lock.
@@ -2104,8 +2167,10 @@ func startLocked(beadsDir string) (*State, error) {
 			// Record the server before waiting on it, as soon as it exists:
 			// if bd is interrupted during the wait, the next bd (or bd dolt
 			// stop / killall) must still find the dolt that holds the
-			// database lock. Both files, with the real port: IsRunning stops
-			// a tracked server whose port it cannot determine.
+			// database lock. Both files, with the real port: a reader in the
+			// gap between the two writes sees a live server whose port is
+			// unresolved, which IsRunning reports without touching it
+			// (GH#6614), and every later reader needs the port.
 			if werr := writeServerStateFiles(beadsDir, srv.pid, actualPort); werr != nil {
 				srv.killAndWait()
 				removeServerStateFiles(beadsDir)
@@ -2439,10 +2504,16 @@ func stopLocked(beadsDir string) error {
 	}
 
 	// Flush uncommitted working set changes before stopping the server.
-	// This prevents data loss when changes have been written but not yet committed.
-	cfg := DefaultConfig(beadsDir)
-	if flushErr := FlushWorkingSet(cfg.Host, state.Port); flushErr != nil {
-		fmt.Fprintf(os.Stderr, "Warning: could not flush working set before stop: %v\n", flushErr)
+	// This prevents data loss when changes have been written but not yet
+	// committed. A server whose port is unknown (GH#6614) cannot be reached
+	// to flush; stopping it is still an explicit request.
+	if state.Port > 0 {
+		cfg := DefaultConfig(beadsDir)
+		if flushErr := FlushWorkingSet(cfg.Host, state.Port); flushErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not flush working set before stop: %v\n", flushErr)
+		}
+	} else {
+		fmt.Fprintf(os.Stderr, "Warning: Dolt server (PID %d) port is unknown; not flushing its working set before stop\n", state.PID)
 	}
 
 	if err := gracefulStop(state.PID, 5*time.Second); err != nil {

@@ -394,6 +394,31 @@ bd dolt stop
 bd dolt start
 ```
 
+### `bd dolt status` shows "Port: unknown"
+
+**Symptom:** `bd dolt status` reports the server as running with a PID but
+`Port: unknown (no resolved port)`; `bd dolt status --json` reports
+`"running": true` with `"port": 0`.
+
+**Cause:** `.beads/dolt-server.pid` names a live dolt sql-server, but
+`.beads/dolt-server.port` is missing or malformed and no setting names a
+port. bd cannot connect to a server without its port, and it does not guess:
+status reports what it found and leaves the server running.
+
+**Fix:** if you know the port the server listens on, point bd at it:
+
+```bash
+export BEADS_DOLT_SERVER_PORT=<port>   # or set dolt.port in config.yaml
+bd dolt status
+```
+
+Otherwise replace the server:
+
+```bash
+bd dolt stop
+bd dolt start
+```
+
 ### Version mismatch
 
 After upgrading bd:
