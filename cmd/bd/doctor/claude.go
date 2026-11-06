@@ -273,8 +273,9 @@ func VerifyPrimeOutput(repoPath string) DoctorCheck {
 		return DoctorCheck{
 			Name:    "bd prime Command",
 			Status:  "error",
-			Message: "Command failed to execute",
-			Fix:     "Ensure bd is installed and in PATH",
+			Message: "Could not determine the bd binary to check",
+			Detail:  err.Error(),
+			Fix:     "Run bd doctor from the bd binary you want to diagnose",
 		}
 	}
 	output, err := cmd.CombinedOutput()
@@ -284,7 +285,8 @@ func VerifyPrimeOutput(repoPath string) DoctorCheck {
 			Name:    "bd prime Command",
 			Status:  "error",
 			Message: "Command failed to execute",
-			Fix:     "Ensure bd is installed and in PATH",
+			Detail:  fmt.Sprintf("%s: %v", cmd.Path, err),
+			Fix:     "Check the 'bd prime' command of the bd binary that ran doctor (" + cmd.Path + ")",
 		}
 	}
 
@@ -390,24 +392,20 @@ func CheckDocumentationBdPrimeReference(repoPath string) DoctorCheck {
 		return DoctorCheck{
 			Name:    "Prime Documentation",
 			Status:  "warning",
-			Message: "Documentation references 'bd prime' but command not found",
-			Detail:  "Files: " + strings.Join(filesWithBdPrime, ", "),
-			Fix: "Upgrade bd to get the 'bd prime' command:\n" +
-				"  • Homebrew: brew upgrade beads\n" +
-				"  • Script: " + installScriptCommand + "\n" +
-				"  Or remove 'bd prime' references from documentation if using older version",
+			Message: "Could not verify 'bd prime' with the running bd binary",
+			Detail:  fmt.Sprintf("Files: %s (%v)", strings.Join(filesWithBdPrime, ", "), err),
+			Fix:     "Run bd doctor from the bd binary you want to diagnose",
 		}
 	}
 	if err := cmd.Run(); err != nil {
 		return DoctorCheck{
 			Name:    "Prime Documentation",
 			Status:  "warning",
-			Message: "Documentation references 'bd prime' but command not found",
-			Detail:  "Files: " + strings.Join(filesWithBdPrime, ", "),
-			Fix: "Upgrade bd to get the 'bd prime' command:\n" +
-				"  • Homebrew: brew upgrade beads\n" +
-				"  • Script: " + installScriptCommand + "\n" +
-				"  Or remove 'bd prime' references from documentation if using older version",
+			Message: "Documentation references 'bd prime' but the command failed",
+			Detail: fmt.Sprintf("Files: %s (%s: %v)", strings.Join(filesWithBdPrime, ", "),
+				cmd.Path, err),
+			Fix: "Check the 'bd prime' command of the bd binary that ran doctor (" +
+				cmd.Path + ")",
 		}
 	}
 

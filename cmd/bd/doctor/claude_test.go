@@ -1415,3 +1415,106 @@ func TestPrimeChecksTestBinaryNA(t *testing.T) {
 		t.Fatalf("prime checks started a subprocess under a test binary:\n%s", data)
 	}
 }
+
+// TestPrimeChecksReportResolvedBinaryFailure pins how the prime checks report
+// a resolver failure or a failing child: the command check stays an error and
+// the documentation check stays a warning, both carry the underlying error
+// and the resolved executable when one was resolved, the documentation check
+// keeps naming the referencing files, and neither recommends installing,
+// upgrading or adding bd to PATH — the failure is about the binary being
+// diagnosed, not about PATH.
+func TestPrimeChecksReportResolvedBinaryFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("failing child is a shell script")
+	}
+
+	repoPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repoPath, "CLAUDE.md"), []byte("Run `bd prime` for workflow context.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USERPROFILE", t.TempDir())
+
+	assertNoInstallAdvice := func(t *testing.T, check DoctorCheck) {
+		t.Helper()
+		fix := strings.ToLower(check.Fix)
+		for _, bad := range []string{"path", "install", "upgrade", "brew"} {
+			if strings.Contains(fix, bad) {
+				t.Errorf("%s recommends %q (%q); the failure is about the diagnosed binary, not PATH or installation",
+					check.Name, bad, check.Fix)
+			}
+		}
+	}
+
+	t.Run("resolver failure", func(t *testing.T) {
+		stubPrimeCheckBinary(t, func() (string, error) { return "", errors.New("bd binary not found: boom") })
+
+		prime := VerifyPrimeOutput(repoPath)
+		if prime.Status != "error" {
+			t.Errorf("VerifyPrimeOutput resolver failure status = %q, want error", prime.Status)
+		}
+		if !strings.Contains(prime.Message+" "+prime.Detail, "boom") {
+			t.Errorf("VerifyPrimeOutput resolver failure lost the underlying error: %q / %q", prime.Message, prime.Detail)
+		}
+		assertNoInstallAdvice(t, prime)
+
+		docs := CheckDocumentationBdPrimeReference(repoPath)
+		if docs.Status != "warning" {
+			t.Errorf("documentation check resolver failure status = %q, want warning", docs.Status)
+		}
+		if !strings.Contains(docs.Message+" "+docs.Detail, "boom") {
+			t.Errorf("documentation check resolver failure lost the underlying error: %q / %q", docs.Message, docs.Detail)
+		}
+		if !strings.Contains(docs.Detail, "CLAUDE.md") {
+			t.Errorf("documentation check lost its referencing filenames: Detail = %q", docs.Detail)
+		}
+		assertNoInstallAdvice(t, docs)
+	})
+
+	t.Run("child exits nonzero", func(t *testing.T) {
+		exeDir := t.TempDir()
+		exe := filepath.Join(exeDir, "bd")
+		if err := os.WriteFile(exe, []byte("#!/bin/sh\necho 'kaboom' >&2\nexit 3\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		stubPrimeCheckBinary(t, func() (string, error) { return exe, nil })
+
+		prime := VerifyPrimeOutput(repoPath)
+		if prime.Status != "error" {
+			t.Errorf("VerifyPrimeOutput exit failure status = %q, want error", prime.Status)
+		}
+		if !strings.Contains(prime.Message+" "+prime.Detail, "exit status 3") {
+			t.Errorf("VerifyPrimeOutput exit failure lost the exit error: %q / %q", prime.Message, prime.Detail)
+		}
+		if !strings.Contains(prime.Message+" "+prime.Detail+" "+prime.Fix, exe) {
+			t.Errorf("VerifyPrimeOutput exit failure does not name the resolved executable %q: %+v", exe, prime)
+		}
+		assertNoInstallAdvice(t, prime)
+
+		docs := CheckDocumentationBdPrimeReference(repoPath)
+		if docs.Status != "warning" {
+			t.Errorf("documentation check exit failure status = %q, want warning", docs.Status)
+		}
+		if !strings.Contains(docs.Message+" "+docs.Detail, "exit status 3") {
+			t.Errorf("documentation check exit failure lost the exit error: %q / %q", docs.Message, docs.Detail)
+		}
+		if !strings.Contains(docs.Detail, "CLAUDE.md") {
+			t.Errorf("documentation check lost its referencing filenames: Detail = %q", docs.Detail)
+		}
+		assertNoInstallAdvice(t, docs)
+	})
+
+	t.Run("child produces no output", func(t *testing.T) {
+		exeDir := t.TempDir()
+		exe := filepath.Join(exeDir, "bd")
+		if err := os.WriteFile(exe, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		stubPrimeCheckBinary(t, func() (string, error) { return exe, nil })
+
+		prime := VerifyPrimeOutput(repoPath)
+		if prime.Status != "error" || prime.Message != "No output produced" {
+			t.Errorf("VerifyPrimeOutput empty output = %q/%q, want error/%q", prime.Status, prime.Message, "No output produced")
+		}
+	})
+}
