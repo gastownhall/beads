@@ -6,6 +6,8 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/storage/domain/db"
+	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -56,6 +58,30 @@ func deferUndated(t *testing.T, te *testEnv, id string) {
 	}
 	if got.Status != types.StatusDeferred || got.DeferUntil != nil {
 		t.Fatalf("%s: status=%s defer_until=%v, want deferred with no defer_until", id, got.Status, got.DeferUntil)
+	}
+}
+
+// readyIDsByStack reads the ready IDs for filter through each storage stack:
+// the classic store and the domain/db repository over an embedded connection.
+func readyIDsByStack(t *testing.T, te *testEnv, filter types.WorkFilter) map[string][]string {
+	t.Helper()
+	ctx := t.Context()
+	classic, err := te.store.GetReadyWork(ctx, filter)
+	if err != nil {
+		t.Fatalf("classic GetReadyWork: %v", err)
+	}
+	raw, cleanup, err := embeddeddolt.OpenSQL(ctx, te.dataDir, te.database, "main")
+	if err != nil {
+		t.Fatalf("OpenSQL: %v", err)
+	}
+	defer func() { _ = cleanup() }()
+	page, err := db.NewIssueSQLRepository(raw).GetReadyWork(ctx, filter)
+	if err != nil {
+		t.Fatalf("repository GetReadyWork: %v", err)
+	}
+	return map[string][]string{
+		"classic":    issueIDsOf(classic),
+		"repository": issueIDsOf(page.Items),
 	}
 }
 
@@ -179,6 +205,27 @@ func TestReadyWorkHidesChildrenOfUndatedDeferredParent(t *testing.T) {
 		}
 		if n != len(want) {
 			t.Fatalf("CountReadyWork = %d, want %d", n, len(want))
+		}
+	})
+
+	// IncludeDeferred lifts the parent exclusion on both stacks. The default
+	// read of the same database is the control: it proves the child was being
+	// withheld, so the bypass is what lists it. The bypass lists held-back
+	// children, not the deferred parent itself: the status filter still
+	// leaves it out.
+	t.Run("include_deferred", func(t *testing.T) {
+		te := newTestEnv(t, "udi")
+		seedUndatedDeferredParent(t, te, "udi")
+
+		for stack, ids := range readyIDsByStack(t, te, types.WorkFilter{}) {
+			if got, want := sortedIDs(ids), []string{"udi-free"}; !slices.Equal(got, want) {
+				t.Errorf("%s: default ready = %v, want %v (the child withheld)", stack, got, want)
+			}
+		}
+		for stack, ids := range readyIDsByStack(t, te, types.WorkFilter{IncludeDeferred: true}) {
+			if got, want := sortedIDs(ids), []string{"udi-child", "udi-free"}; !slices.Equal(got, want) {
+				t.Errorf("%s: IncludeDeferred ready = %v, want %v (the child listed, the deferred parent still not)", stack, got, want)
+			}
 		}
 	})
 }
