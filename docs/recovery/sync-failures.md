@@ -205,10 +205,13 @@ themselves may merge with no conflicts at all.
 ignore plane: it deleted the versioned table in a commit and recreated it as a
 working table that is never committed. Dolt refuses to merge a commit that
 still has the versioned table into a clone that holds the ignored one, and it
-refuses before it checks whether there is anything to merge. So the first
-error also appears when the remote is only behind this clone, still at a
-commit from before this clone migrated, with no new work in it. `bd sync`
-then fails on every run, because it pulls before it pushes.
+refuses before it checks whether there is anything to merge. In server mode,
+and in embedded mode with v1.3.3 or earlier, the first error therefore also
+appears when the remote is only behind this clone, still at a commit from
+before this clone migrated, with no new work in it. `bd sync` then fails on
+every run, because it pulls before it pushes. In embedded mode, bd v1.4.0 and
+later skip the merge when the remote has no commits this clone lacks, so that
+pull succeeds and `bd sync` goes on to push.
 
 When the remote does have new work from a peer that has not migrated (or
 whose history predates the migration, such as unpushed work on a laptop), that
