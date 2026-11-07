@@ -2055,7 +2055,7 @@ func TestEmbeddedInitForkRoutingDisclosedNonInteractive(t *testing.T) {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt init tests")
 	}
 	bd := buildEmbeddedBD(t)
-	for _, name := range []string{"disclosed"} {
+	for _, name := range []string{"disclosed", "quiet"} {
 		t.Run(name, func(t *testing.T) {
 			target, decoy, home := newInitRoleFixture(t)
 			initRoleFixtureGit(t, target, "remote", "add", "upstream", filepath.Join(home, "upstream.git"))
@@ -2098,6 +2098,13 @@ func TestEmbeddedInitForkRoutingDisclosedNonInteractive(t *testing.T) {
 				}
 				if strings.Contains(stdout.String(), "bd init --role=maintainer") {
 					t.Errorf("stdout points at the post-init-unusable bd init --role=maintainer:\n%s", stdout.String())
+				}
+			} else {
+				combined := stdout.String() + stderr.String()
+				for _, banned := range []string{"Fork detected", "Planning repo", "contributor routing", "git config beads.role maintainer"} {
+					if strings.Contains(combined, banned) {
+						t.Errorf("--quiet leaked fork-routing notice %q:\nstdout:\n%s\nstderr:\n%s", banned, stdout.String(), stderr.String())
+					}
 				}
 			}
 		})
