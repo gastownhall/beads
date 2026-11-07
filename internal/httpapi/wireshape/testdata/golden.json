@@ -2221,6 +2221,13 @@
     },
     {
       "schema": "DeleteIssuesResult",
+      "member": "deleted_ids",
+      "type": "array",
+      "required": false,
+      "item_type": "string"
+    },
+    {
+      "schema": "DeleteIssuesResult",
       "member": "dependencies",
       "type": "integer",
       "required": true
@@ -5040,6 +5047,12 @@
     },
     {
       "schema": "SweepSkips",
+      "member": "retention_required",
+      "type": "integer",
+      "required": false
+    },
+    {
+      "schema": "SweepSkips",
       "member": "unknown_closed_at",
       "type": "integer",
       "required": true
@@ -5150,6 +5163,12 @@
       "schema": "TreeNode",
       "member": "created_by",
       "type": "string",
+      "required": false
+    },
+    {
+      "schema": "TreeNode",
+      "member": "deduped",
+      "type": "boolean",
       "required": false
     },
     {
@@ -7193,6 +7212,7 @@
     "DeleteIssuesRequest": "request",
     "DeleteIssuesRequest.ids[]": "request",
     "DeleteIssuesResult": "response",
+    "DeleteIssuesResult.deleted_ids[]": "response",
     "DeleteIssuesResult.orphaned[]": "response",
     "Dependency": "response",
     "DependencyEdge": "both",

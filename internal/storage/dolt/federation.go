@@ -224,7 +224,8 @@ func (s *DoltStore) hasPersistedCLIRemote() bool {
 // HasPersistedRemote is the exported on-disk probe for callers that must not
 // trust an empty dolt_remotes table at cold start: the push/pull "no remote
 // configured" exit-0 skip (bd-578h9.10). Like PersistedRemoteInfos, it counts
-// only remotes that can be the store's server's.
+// only remotes recorded where the workspace's Dolt root is proven served by
+// the server bd dials.
 func (s *DoltStore) HasPersistedRemote() bool {
 	return len(s.PersistedRemoteInfos()) > 0
 }
@@ -238,18 +239,27 @@ func (s *DoltStore) HasPersistedRemote() bool {
 // Callers in the GH#2118 cold-start window use this to RECOVER the invisible
 // remote rather than merely detect it: a freshly (auto-)started sql-server
 // can report an empty dolt_remotes even though the remote is persisted on
-// disk, so an empty listing is a reporting artifact, not an unconfigured rig
-// (wy-6k7f7). Read/parse failures are logged and skipped, matching the old
-// HasPersistedRemote behavior — callers only consult this after a SUCCESSFUL
-// (empty) ListRemotes, so a read failure here never masquerades as evidence.
+// disk (wy-6k7f7). That listing, not the state file, is the set of remotes
+// the server pushes and pulls with: the server reads the file only when it
+// loads the database, so a remote recorded only there stays out of every
+// SQL operation until a restart or a SQL add. `bd dolt remote add` makes
+// that add for a recorded remote whose URL matches, with its recorded URL
+// and git ref, unless the record carries parameters SQL cannot set
+// (RemoteInfo.CLIOnlyParams), and still asks before replacing a differing
+// one. Other callers, `bd config apply` among them, take the recorded
+// remote as configured without registering it. Read/parse failures are
+// logged and skipped, matching the old HasPersistedRemote behavior — callers
+// only consult this after a SUCCESSFUL (empty) ListRemotes, so a read
+// failure here never masquerades as evidence.
 //
-// Those are the server's remotes only where the workspace's Dolt root can be
-// its data (cliDirServesServer). For a server bd does not run, or one it
-// cannot tell from such a server, a database there is at best a copy whose
-// remotes say nothing about the server's, so none are returned: a copy that
-// lists origin must not make `bd dolt remote add` or `bd config apply` take
-// the remote as already configured on a server that lists none. LeftoverRemotes
-// returns such a copy's remotes instead.
+// Those are the server's remotes only where the workspace's Dolt root is
+// proven served by the server bd dials (cliDirServesServer). Elsewhere, as
+// for a server bd does not run or a copy no live server on the dialed port
+// serves, a database there is at best a copy whose remotes say nothing about
+// the server's, so none are returned: a copy that lists origin must not make
+// `bd dolt remote add` or `bd config apply` take the remote as already
+// configured on a server that lists none. LeftoverRemotes returns such a
+// copy's remotes instead.
 func (s *DoltStore) PersistedRemoteInfos() []storage.RemoteInfo {
 	if !s.cliDirServesServer() {
 		return nil
@@ -259,14 +269,14 @@ func (s *DoltStore) PersistedRemoteInfos() []storage.RemoteInfo {
 }
 
 // LeftoverRemotes returns the remotes PersistedRemoteInfos leaves out, those
-// recorded where the workspace's Dolt root cannot be the server's data
-// (cliDirServesServer), and the directory that records them; none where it
-// can be. They are not the server's remotes, but they are the remotes the
-// operator set up, such as the origin of the clone bd init --server --remote
-// leaves for a gateway: a server that lists no remote beside them is not a
-// workspace without one, so the push/pull no-remote decision
-// (hasConfiguredRemote in cmd/bd) names them and the command that adds each
-// on the server instead of reporting that no remote is configured.
+// recorded where the workspace's Dolt root is not proven served by the
+// server bd dials (cliDirServesServer), and the directory that records them;
+// none where it is. They are not the server's remotes, but they are the
+// remotes the operator set up, such as the origin of the clone bd init
+// --server --remote leaves for a gateway: a server that lists no remote
+// beside them is not a workspace without one, so the push/pull no-remote
+// decision (hasConfiguredRemote in cmd/bd) names them and the command that
+// adds each on the server instead of reporting that no remote is configured.
 func (s *DoltStore) LeftoverRemotes() (string, []storage.RemoteInfo) {
 	if s.cliDirServesServer() {
 		return "", nil

@@ -741,3 +741,17 @@ func TestNewNotionClientUnsetBoundKeepsDefault(t *testing.T) {
 		t.Fatalf("client paginates at %d, want the unchanged default 50", client.maxQueryPages())
 	}
 }
+
+// TestMatchesFetchSinceUsesSinceGranularity pins SinceGranularity to the
+// fetch filter: a fetch from Since returns a page stamped at Since truncated
+// to SinceGranularity, and none stamped before that.
+func TestMatchesFetchSinceUsesSinceGranularity(t *testing.T) {
+	since := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
+	floor := since.Truncate((&Tracker{}).SinceGranularity())
+	if !matchesFetchSince(&itracker.TrackerIssue{UpdatedAt: floor}, &since) {
+		t.Fatalf("a page stamped %s is not fetched from %s", floor, since)
+	}
+	if matchesFetchSince(&itracker.TrackerIssue{UpdatedAt: floor.Add(-time.Nanosecond)}, &since) {
+		t.Fatalf("a page stamped just before %s is fetched from %s", floor, since)
+	}
+}

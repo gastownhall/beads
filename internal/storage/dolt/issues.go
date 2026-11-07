@@ -106,16 +106,25 @@ func (s *DoltStore) createIssuesWithFullOptions(ctx context.Context, issues []*t
 
 	// All-wisps fast path: one SQL transaction, no Dolt versioning.
 	// Covers both ephemeral issues and no-history issues (both skip DOLT_COMMIT).
+	// A create-time edge can still flip a durable row's is_blocked (a waiter
+	// on a wisp's durable spawner), and that row is committed (GH#6647).
 	if issueops.AllWisps(issues) {
 		for _, issue := range issues {
 			if !issue.NoHistory {
 				issue.Ephemeral = true
 			}
 		}
-		return s.withRetryTx(ctx, func(tx *sql.Tx) error {
-			_, err := issueops.CreateIssuesInTxWithResult(ctx, tx, issues, actor, opts)
+		var result issueops.CreateIssuesResult
+		if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
+			var err error
+			result, err = issueops.CreateIssuesInTxWithResult(ctx, tx, issues, actor, opts)
 			return err
-		})
+		}); err != nil {
+			return err
+		}
+		s.commitWispDurable(ctx, wispDurable{issues: result.ChangedTables["issues"]},
+			fmt.Sprintf("bd: create %d issue(s)", len(issues)))
+		return nil
 	}
 
 	var result issueops.CreateIssuesResult
@@ -700,7 +709,8 @@ func (s *DoltStore) deleteIssue(ctx context.Context, id string) error {
 }
 
 // DeleteIssues deletes multiple issues in a single transaction.
-// If cascade is true, recursively deletes dependents.
+// If cascade is true, also deletes their parent-child descendants and orphans
+// every other dependent.
 // If cascade is false but force is true, deletes issues and orphans dependents.
 // If both are false, returns an error if any issue has dependents.
 // If dryRun is true, only computes statistics without deleting.
@@ -738,8 +748,8 @@ func (s *DoltStore) deleteIssues(ctx context.Context, ids []string, cascade bool
 	// to avoid write timeout on large sets — see bd-2ehd, ff-tqm).
 	ephIDs, regularIDs := s.partitionByWispStatus(ctx, ids)
 	wispDeleteCount := 0
+	var activeWispIDs []string
 	if len(ephIDs) > 0 {
-		var activeWispIDs []string
 		for _, eid := range ephIDs {
 			if s.isActiveWisp(ctx, eid) {
 				activeWispIDs = append(activeWispIDs, eid)
@@ -762,7 +772,9 @@ func (s *DoltStore) deleteIssues(ctx context.Context, ids []string, cascade bool
 	var result *types.DeleteIssuesResult
 	if err := s.withWriteTx(ctx, func(tx *sql.Tx) error {
 		// storage.DeleteIssues carries no actor, so the journal rows record none.
-		r, err := issueops.DeleteIssuesInTx(ctx, tx, ids, cascade, force, dryRun, "")
+		// The wisps peeled off above stay part of the request for the
+		// dependents guard, in a dry run too, where they are not deleted first.
+		r, err := issueops.DeleteIssuesBesideWispsInTx(ctx, tx, ids, activeWispIDs, cascade, force, dryRun, "")
 		if err != nil {
 			result = r
 			return err

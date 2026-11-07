@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/steveyegge/beads/internal/storage/schema"
 )
 
 // DirtyTableTracker records which tables were modified during a transaction.
@@ -64,9 +65,10 @@ func (t *DirtyTableTracker) DirtyTables() map[string]bool {
 // commit helpers already skip an empty staged set, so the false-positive side
 // is free; tracking real mints would mean threading state back out of the seam
 // for no behavioral gain. The one thing it does widen is `issues` on the
-// dependency paths, which stage only {dependencies, events} today -- and that
-// widening is exactly what the current_revision advance requires, gated on
-// history being on, so no flag-off commit changes shape.
+// dependency paths, which stage it only when the edge flipped a durable
+// is_blocked (GH#6647) -- and that widening is exactly what the
+// current_revision advance requires, gated on history being on, so no
+// flag-off commit changes shape.
 func (t *DirtyTableTracker) MarkVersionedHistoryDirty(enabled bool) {
 	if !enabled || len(t.tables) == 0 {
 		return
@@ -82,6 +84,12 @@ func (t *DirtyTableTracker) MarkVersionedHistoryDirty(enabled bool) {
 //
 // If commitMsg is empty, no commit is created. "Nothing to commit" errors
 // are treated as benign (e.g., all writes were to dolt-ignored tables).
+//
+// DOLT_ADD and DOLT_COMMIT go through schema.DrainCall: callers such as
+// finishDoltTransaction and MergeWithStrategy pin conn and keep using it, or
+// hand it back to the pool, after this returns, so a CALL that fails,
+// including the tolerated "nothing to commit", must not leave its result sets
+// unread on it (GH#5556).
 //
 // An empty author omits --author entirely, leaving attribution to the connected
 // session. That is not a fallback for a missing identity but the proxied-server
@@ -116,7 +124,7 @@ func StageAndCommit(ctx context.Context, conn DBConn, dirtyTables map[string]boo
 	}
 
 	for table := range dirtyTables {
-		if _, err := conn.ExecContext(ctx, "CALL DOLT_ADD(?)", table); err != nil {
+		if err := schema.DrainCall(ctx, conn, "CALL DOLT_ADD(?)", table); err != nil {
 			return fmt.Errorf("dolt add %s: %w", table, err)
 		}
 	}
@@ -135,9 +143,9 @@ func StageAndCommit(ctx context.Context, conn DBConn, dirtyTables map[string]boo
 		return nil
 	}
 	if author == "" {
-		_, err = conn.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?)", commitMsg)
+		err = schema.DrainCall(ctx, conn, "CALL DOLT_COMMIT('-m', ?)", commitMsg)
 	} else {
-		_, err = conn.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)", commitMsg, author)
+		err = schema.DrainCall(ctx, conn, "CALL DOLT_COMMIT('-m', ?, '--author', ?)", commitMsg, author)
 	}
 	if err != nil && !issueops.IsNothingToCommitError(err) {
 		return fmt.Errorf("dolt commit: %w", err)

@@ -145,6 +145,13 @@ func (l *migratePersonalServerLeg) requireRefused(dir, want string) {
 //     never committed leaves a duplicate, not a loss.
 //   - A server-mode project moves issues into an embedded planning repo, which
 //     opens in its own mode and gets the copy committed.
+//   - A move that takes an issue someone else's bead depends on is refused
+//     before anything is copied, by the server store's dry run of the delete
+//     (refuseDependentsLeftBehind).
+//   - A move that takes an issue with its ephemeral and no-history children
+//     goes ahead: that dry run counts the children, which live in the wisps
+//     table, as part of the request, as the delete does, and the planning repo
+//     keeps their parent-child edges.
 func TestMigratePersonalServerMode(t *testing.T) {
 	skipIfNoDolt(t)
 	t.Parallel()
@@ -227,5 +234,31 @@ func TestMigratePersonalServerMode(t *testing.T) {
 	}
 	if dirty := l.dirty(project); len(dirty) != 0 {
 		t.Errorf("project has uncommitted changes after migrate-personal into an embedded planning repo: %v", dirty)
+	}
+
+	setContributor(planning)
+	const parentTitle = "Server-mode personal issue a team issue depends on"
+	parent := l.create(project, parentTitle)
+	team := l.create(project, "Server-mode team issue", "--actor", "other-person")
+	l.run(project, nil, "dep", "add", team, parent)
+	l.requireRefused(project, "issue "+parent+" has dependents that would stay in the project database ("+team+")")
+	requireTitles(parent, parentTitle, "")
+
+	l.run(project, nil, "dep", "remove", team, parent)
+	children := []string{
+		l.create(project, "Server-mode ephemeral child", "--ephemeral", "--parent", parent),
+		l.create(project, "Server-mode no-history child", "--no-history", "--parent", parent),
+	}
+	slices.Sort(children)
+	if out, err := l.migrate(project, nil); err != nil || !strings.Contains(out, "Moved 3 issues") {
+		t.Fatalf("bd migrate-personal --yes with a parent and its wisp children: err = %v, want it to move 3 issues:\n%s", err, out)
+	}
+	requireTitles(parent, "", parentTitle)
+	childEdges := "SELECT issue_id FROM wisp_dependencies WHERE type = 'parent-child' AND COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) = '" + parent + "' ORDER BY issue_id"
+	if got := l.rows(planning, childEdges); !slices.Equal(got, children) {
+		t.Errorf("planning repo parent-child edges to %s = %v, want %v", parent, got, children)
+	}
+	if got := l.rows(project, "SELECT id FROM wisps WHERE id IN ('"+children[0]+"', '"+children[1]+"')"); len(got) != 0 {
+		t.Errorf("project still holds %v after migrate-personal moved them", got)
 	}
 }

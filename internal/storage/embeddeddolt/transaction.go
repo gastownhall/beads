@@ -121,6 +121,10 @@ func (t *embeddedTransaction) UpdateIssue(ctx context.Context, id string, update
 	}
 	t.dirty.MarkDirty(issueTable)
 	t.dirty.MarkDirty(eventTable)
+	// A wisp's status change can recompute a durable dependent.
+	if result.IssueRowsChanged {
+		t.dirty.MarkDirty("issues")
+	}
 	return nil
 }
 
@@ -164,7 +168,16 @@ func (t *embeddedTransaction) DeleteIssue(ctx context.Context, id string) error 
 		t.dirty.MarkDirty(cascaded)
 	}
 	// storage.Tx.DeleteIssue carries no actor, so the journal rows record none.
-	return issueops.DeleteIssueInTx(ctx, t.tx, id, "")
+	result, err := issueops.DeleteIssueInTxWithResult(ctx, t.tx, id, "")
+	if err != nil {
+		return err
+	}
+	// Deleting a wisp can unblock a durable dependent; that row is committed
+	// with the delete (GH#6647).
+	if result.IssueRowsChanged {
+		t.dirty.MarkDirty("issues")
+	}
+	return nil
 }
 
 func (t *embeddedTransaction) GetIssue(ctx context.Context, id string) (*types.Issue, error) {
@@ -186,7 +199,7 @@ func (t *embeddedTransaction) AddDependency(ctx context.Context, dep *types.Depe
 
 func (t *embeddedTransaction) AddDependencyWithOptions(ctx context.Context, dep *types.Dependency, actor string, addOpts storage.DependencyAddOptions) error {
 	_, _, eventTable, depTable := issueops.WispTableRouting(issueops.IsActiveWispInTx(ctx, t.tx, dep.IssueID))
-	eventWritten, err := issueops.AddDependencyInTx(ctx, t.tx, dep, actor, issueops.AddDependencyOpts{
+	written, err := issueops.AddDependencyInTxWithResult(ctx, t.tx, dep, actor, issueops.AddDependencyOpts{
 		IsCrossPrefix:  types.ExtractPrefix(dep.IssueID) != types.ExtractPrefix(dep.DependsOnID),
 		SkipCycleCheck: addOpts.SkipCycleCheck,
 		EmitEvent:      addOpts.EmitEvent,
@@ -198,8 +211,13 @@ func (t *embeddedTransaction) AddDependencyWithOptions(ctx context.Context, dep 
 	// AddDependencyInTx records a dependency_added event on the source's event
 	// table only for a genuine emit (explicit verb + new edge); stage it so the
 	// event commits with the edge. A structural or idempotent add writes no event.
-	if eventWritten {
+	if written.EventWritten {
 		t.dirty.MarkDirty(eventTable)
+	}
+	// A blocking edge flips the source's or a descendant's is_blocked; a
+	// durable row it flipped is committed with the edge (GH#6647).
+	if written.Blocked.IssueRowsChanged {
+		t.dirty.MarkDirty("issues")
 	}
 	return nil
 }
@@ -223,7 +241,7 @@ func (t *embeddedTransaction) RemoveDependencyWithOptions(ctx context.Context, i
 	// Route dirty marking on the source's wisp status: a wisp-source remove
 	// stages wisp_dependencies/wisp_events, a permanent one dependencies/events.
 	_, _, eventTable, depTable := issueops.WispTableRouting(issueops.IsActiveWispInTx(ctx, t.tx, issueID))
-	eventWritten, err := issueops.RemoveDependencyInTx(ctx, t.tx, issueID, dependsOnID, actor, rmOpts.EmitEvent)
+	written, err := issueops.RemoveDependencyInTxWithResult(ctx, t.tx, issueID, dependsOnID, actor, rmOpts.EmitEvent)
 	if err != nil {
 		return err
 	}
@@ -232,8 +250,13 @@ func (t *embeddedTransaction) RemoveDependencyWithOptions(ctx context.Context, i
 	// event table only for a genuine emit (explicit verb + edge removal); stage
 	// it so it commits with the edge. A structural or missing-edge remove writes
 	// no event.
-	if eventWritten {
+	if written.EventWritten {
 		t.dirty.MarkDirty(eventTable)
+	}
+	// The removal's recompute can clear the source's or a descendant's
+	// is_blocked; that unblock is committed with the removal (GH#6647).
+	if written.Blocked.IssueRowsChanged {
+		t.dirty.MarkDirty("issues")
 	}
 	return nil
 }
