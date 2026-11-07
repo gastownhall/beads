@@ -1208,6 +1208,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd rename` now rewrites the old ID in `close_reason` and in the renamed
+  issue's own text, and reports the references it leaves.** It rewrote
+  references only in other issues' title, description, design, notes and
+  acceptance criteria, so a closed issue's "duplicate of <old>" reason and the
+  renamed issue's self-references kept the dead ID. It also matched the old ID
+  on word boundaries, so renaming a parent rewrote a dotted child ID such as
+  `<old>.1`, and renaming `bd-auth` rewrote `bd-auth-v2`; only the old ID on
+  its own is rewritten now. Comment text and short forms of a child ID
+  (`12x.39` for `abc-12x.39`) are still not rewritten, since either may name
+  another bead, for example after a collision repair: `bd rename` now lists
+  them, with each issue and field it rewrote. A failed reference update no
+  longer stops the rest; it is reported as possibly landed, and the rename
+  still succeeds (#7040).
+
 - `bd config get` for a config.yaml, git-config or user-global key no longer
   opens the database just because one exists, so it answers from those files
   while the Dolt server is down instead of failing the open (GH#5108). In

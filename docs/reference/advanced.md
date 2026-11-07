@@ -11,13 +11,24 @@ Rename issues while preserving references:
 
 ```bash
 bd rename bd-42 bd-new-id
-bd rename bd-42 bd-new-id --dry-run  # Preview
 ```
 
 Updates:
 - All dependencies pointing to old ID
-- All references in other issues
-- Comments and descriptions
+- Labels, comments and events, which move to the new ID
+- Mentions of the old ID in other issues' title, description, design, notes
+  and acceptance criteria
+
+In releases after v1.3.4, the rename also rewrites mentions in every issue's
+close reason and in the renamed issue's own text. A mention is the old ID on
+its own: a longer ID that starts or ends with it, such as the child
+`bd-42.1`, names a different issue and is left alone. Comment text is never
+rewritten, and neither is a possible short form of a child ID (`12x.39` for
+`abc-12x.39`), since either may mean another issue. After the `Renamed` line,
+`bd rename` lists each issue and field it rewrote, each comment or field it
+left naming the old ID or a possible short form, any update that failed (it
+may still have landed), and anything it could not check. A failed reference
+update does not undo the rename.
 
 ## Prefix Rename
 
