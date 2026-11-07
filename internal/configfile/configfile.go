@@ -468,6 +468,11 @@ func (c *Config) IsDoltServerMode() bool {
 //   - An explicit config.yaml dolt.mode disables inference from the
 //     config.yaml dolt.host.
 //
+// The central server config (server.json) is deliberately not consulted: it
+// supplies connection fields for a workspace already in server mode (see
+// GetDoltServerHost) but never selects the storage mode, so a machine-wide
+// file cannot move an embedded or mode-less workspace onto a server.
+//
 // "Localhost" here is IsLocalHostString, the machine-locality question, not
 // the ownership one (BdRunsServerAt): the IPv6 loopback in any spelling is
 // this machine and infers nothing, while another loopback address such as
@@ -573,21 +578,38 @@ func (c *Config) GetDoltMode() string {
 
 // GetDoltServerHost returns the Dolt server host.
 // Priority: BEADS_DOLT_SERVER_HOST env var > metadata.json dolt_server_host
-// > config.yaml / global config dolt.host > DefaultDoltServerHost.
+// > config.yaml / global config dolt.host > central server config
+// (server.json, GH#3895) > DefaultDoltServerHost.
 // The config.yaml layer mirrors the dolt.port fix (GH#2073) so a shared
 // team / user-level Dolt server can be configured once without per-clone
 // metadata.json edits.
 func (c *Config) GetDoltServerHost() string {
+	if h := c.hostAboveCentralConfig(); h != "" {
+		return h
+	}
+	if h := CentralServerHost(); h != "" {
+		return h
+	}
+	return DefaultDoltServerHost
+}
+
+// hostAboveCentralConfig is the host a setting above the central server
+// config names (env, metadata.json, config.yaml dolt.host), or "".
+func (c *Config) hostAboveCentralConfig() string {
 	if h := os.Getenv("BEADS_DOLT_SERVER_HOST"); h != "" {
 		return h
 	}
 	if c.DoltServerHost != "" {
 		return c.DoltServerHost
 	}
-	if h := config.GetYamlConfig("dolt.host"); h != "" {
-		return h
-	}
-	return DefaultDoltServerHost
+	return config.GetYamlConfig("dolt.host")
+}
+
+// CentralConfigSuppliesHost reports whether the effective server host
+// (GetDoltServerHost) comes from the central server config: it names one and
+// no setting above it does.
+func (c *Config) CentralConfigSuppliesHost() bool {
+	return c.hostAboveCentralConfig() == "" && CentralServerHost() != ""
 }
 
 // Deprecated: Use doltserver.DefaultConfig(beadsDir).Port instead.
@@ -625,13 +647,17 @@ func (c *Config) GetDoltServerSocket() string {
 }
 
 // GetDoltServerUser returns the Dolt server MySQL user.
-// Checks BEADS_DOLT_SERVER_USER env var first, then config, then default.
+// Checks BEADS_DOLT_SERVER_USER env var first, then config, then the central
+// server config (server.json, GH#3895), then default.
 func (c *Config) GetDoltServerUser() string {
 	if u := os.Getenv("BEADS_DOLT_SERVER_USER"); u != "" {
 		return u
 	}
 	if c.DoltServerUser != "" {
 		return c.DoltServerUser
+	}
+	if central := CentralConfig(); central != nil && central.DoltServerUser != "" {
+		return central.DoltServerUser
 	}
 	return DefaultDoltServerUser
 }
@@ -708,12 +734,18 @@ func ServerPasswordFor(host string, port int) string {
 
 // GetDoltServerTLS returns whether TLS is enabled for server connections.
 // Required for Hosted Dolt instances.
-// Checks BEADS_DOLT_SERVER_TLS env var first ("1" or "true"), then config.
+// Checks BEADS_DOLT_SERVER_TLS env var first ("1" or "true"; any other
+// non-empty value disables), then config, then the central server config
+// (server.json, GH#3895).
 func (c *Config) GetDoltServerTLS() bool {
 	if t := os.Getenv("BEADS_DOLT_SERVER_TLS"); t != "" {
 		return t == "1" || strings.ToLower(t) == "true"
 	}
-	return c.DoltServerTLS
+	if c.DoltServerTLS {
+		return true
+	}
+	central := CentralConfig()
+	return central != nil && central.DoltServerTLS
 }
 
 // GetDoltDataDir returns the custom dolt data directory path.

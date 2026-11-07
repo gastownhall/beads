@@ -949,6 +949,12 @@ const (
 	// PortSourceMetadataJSON is the deprecated metadata.json dolt_server_port
 	// fallback. Still an explicit user/tooling assertion, not bd bookkeeping.
 	PortSourceMetadataJSON PortSource = "metadata_json"
+	// PortSourceCentralConfig is the central server config's
+	// dolt_server_port (~/.config/beads/server.json, or the file
+	// BEADS_CENTRAL_CONFIG names), the last step of the chain (GH#3895). A
+	// user assertion like dolt.port: auto-start must not retarget it, and
+	// the legacy BEADS_DOLT_PORT does not replace it.
+	PortSourceCentralConfig PortSource = "central_config"
 	// PortSourceExternalHostDefault is the documented default port (3307)
 	// assumed for a host-inferred external server when no port source
 	// resolved (GH#3545): the user asserted a remote host, so bd fills in
@@ -979,7 +985,8 @@ const (
 // authoritative one (GH#4052).
 func (s PortSource) IsAuthoritative() bool {
 	switch s {
-	case PortSourceEnv, PortSourceDoltConfigYaml, PortSourceConfigYaml, PortSourceMetadataJSON, PortSourceCallerExplicit:
+	case PortSourceEnv, PortSourceDoltConfigYaml, PortSourceConfigYaml, PortSourceMetadataJSON,
+		PortSourceCentralConfig, PortSourceCallerExplicit:
 		return true
 	default:
 		return false
@@ -1064,6 +1071,21 @@ var portSources = []portSource{
 			return metaCfg.DoltServerPort, true
 		},
 	},
+	{
+		// Machine-wide, shared by every workspace (GH#3895), so it ranks
+		// below every per-workspace source. Shared-server mode skips it: that
+		// server has its own default port, which a hosted server's port must
+		// not hijack.
+		label:   "Central server config (server.json dolt_server_port, or the file BEADS_CENTRAL_CONFIG names)",
+		source:  PortSourceCentralConfig,
+		resolve: centralConfigPort,
+	},
+}
+
+// centralConfigPort is portSources' central server config step.
+func centralConfigPort(string) (int, bool) {
+	p := configfile.CentralServerPort()
+	return p, p > 0
 }
 
 // PortSourceLabels returns the operator-facing description of each step in
@@ -1120,6 +1142,11 @@ func resolveServerPortForMode(workspaceBeadsDir, serverDir string, sharedMode, s
 	if cfg, err := configfile.LoadForDiscovery(metadataDir); err == nil && cfg != nil && cfg.DoltServerPort > 0 {
 		return cfg.DoltServerPort, PortSourceMetadataJSON
 	}
+	if !sharedMode {
+		if port, ok := centralConfigPort(workspaceBeadsDir); ok {
+			return port, PortSourceCentralConfig
+		}
+	}
 	return 0, PortSourceUnset
 }
 
@@ -1128,6 +1155,9 @@ type serverPortResolver func(workspaceBeadsDir, serverDir string, sharedMode, sk
 func resolveServerPortFromActiveSources(_ string, serverDir string, sharedMode, skipPortFile bool) (int, PortSource) {
 	for _, src := range portSources {
 		if skipPortFile && src.source == PortSourcePortFile {
+			continue
+		}
+		if sharedMode && src.source == PortSourceCentralConfig {
 			continue
 		}
 		if port, ok := src.resolve(serverDir); ok {
@@ -1242,7 +1272,8 @@ func DialConfig(beadsDir string) *Config {
 // portSources, by the store's applyConfigDefaults rule: when
 // BEADS_DOLT_SERVER_PORT is unset, a valid BEADS_DOLT_PORT, parsed untrimmed,
 // replaces a port that is not authoritative. A port from config.yaml
-// dolt.port, listener.port or metadata.json dolt_server_port stays.
+// dolt.port, listener.port, metadata.json dolt_server_port or the central
+// server config stays.
 func applyLegacyPortEnv(cfg *Config) {
 	if os.Getenv("BEADS_DOLT_SERVER_PORT") != "" || cfg.PortSource.IsAuthoritative() {
 		return
@@ -1257,7 +1288,7 @@ func applyLegacyPortEnv(cfg *Config) {
 // step of that order: it replaces only the ports some steps resolve, so the
 // list names it beside them rather than by a rank.
 const LegacyPortEnvLabel = "Legacy environment variable (BEADS_DOLT_PORT): when BEADS_DOLT_SERVER_PORT is unset, " +
-	"it overrides the port file and the default ports, not listener.port, dolt.port or dolt_server_port"
+	"it overrides the port file and the default ports, not listener.port, dolt.port, dolt_server_port or server.json"
 
 // DefaultConfigForMode resolves server configuration for an already-classified
 // target. Diagnostics use this when inspecting a workspace other than the
