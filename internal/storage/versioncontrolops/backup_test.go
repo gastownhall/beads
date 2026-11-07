@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/dolthub/dolt/go/libraries/utils/earl"
 )
 
 // TestDirToFileURLRejectsSchemes pins the guard that stops a URL being turned
@@ -272,11 +274,22 @@ func TestBackupRestorePassesURLVerbatim(t *testing.T) {
 func TestFileURLForOS(t *testing.T) {
 	for _, tc := range []struct {
 		name, goos, abs, want string
-		parses                bool // net/url.Parse must succeed with Host+Path == want's path
+		parses                bool   // net/url.Parse must succeed with Host+Path == want's path
+		earlPath              string // the path Dolt's earl.Parse must read back, host-free; "" skips it
 	}{
 		{name: "AC-1 reported path", goos: "windows",
 			abs:  `c:\Users\alxta\atl-logs-parser\.beads\backup`,
 			want: "file://C:/Users/alxta/atl-logs-parser/.beads/backup", parses: true},
+
+		{name: "AC-2 lowercase backslash", goos: "windows", abs: `c:\Users\me\b`, want: "file://C:/Users/me/b", parses: true, earlPath: "C:/Users/me/b"},
+		{name: "AC-2 uppercase backslash", goos: "windows", abs: `C:\Users\me\b`, want: "file://C:/Users/me/b", parses: true, earlPath: "C:/Users/me/b"},
+		{name: "AC-2 lowercase slash", goos: "windows", abs: `c:/Users/me/b`, want: "file://C:/Users/me/b", parses: true, earlPath: "C:/Users/me/b"},
+		{name: "AC-2 uppercase slash", goos: "windows", abs: `C:/Users/me/b`, want: "file://C:/Users/me/b", parses: true, earlPath: "C:/Users/me/b"},
+		{name: "AC-2 drive root", goos: "windows", abs: `z:\`, want: "file://Z:/", parses: true, earlPath: "Z:/"},
+		{name: "AC-2 UNC share", goos: "windows", abs: `\\nas\share\beads`, want: "file:////nas/share/beads"},
+		{name: "AC-2 space and percent", goos: "windows", abs: `C:\Users\my dir\100%done`, want: "file://C:/Users/my dir/100%done"},
+		{name: "AC-2 space, percent and hash stay literal", goos: "windows",
+			abs: `c:\Users\John Doe\100%\a#b`, want: "file://C:/Users/John Doe/100%/a#b", earlPath: "C:/Users/John Doe/100%/a#b"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := fileURLForOS(tc.abs, tc.goos)
@@ -285,6 +298,18 @@ func TestFileURLForOS(t *testing.T) {
 			}
 			if tc.goos == "windows" && strings.Contains(got, `\`) {
 				t.Errorf("fileURLForOS(%q, windows) = %q, which still holds a backslash", tc.abs, got)
+			}
+			if tc.earlPath != "" {
+				// Dolt's own parser, which DOLT_BACKUP('add') uses, must read
+				// the drive path back. This pins parsing only, not that a
+				// backup into such a directory succeeds.
+				e, err := earl.Parse(got)
+				if err != nil {
+					t.Fatalf("earl.Parse(%q): %v", got, err)
+				}
+				if e.Host != "" || e.Path != tc.earlPath {
+					t.Errorf("earl.Parse(%q) = host %q, path %q, want host \"\", path %q", got, e.Host, e.Path, tc.earlPath)
+				}
 			}
 			if !tc.parses {
 				return
@@ -297,5 +322,19 @@ func TestFileURLForOS(t *testing.T) {
 				t.Errorf("net/url.Parse(%q) Host+Path = %q, want %q", got, u.Host+u.Path, path)
 			}
 		})
+	}
+
+	// Registrations written by earlier releases spelled an uppercase drive
+	// "file://C:\work\..."; earl reads that legacy spelling and the one bd
+	// builds now as the same host-free drive path, so those stored backup
+	// addresses need no migration.
+	legacy, legacyErr := earl.Parse(`file://C:\work\.beads\backup`)
+	current, currentErr := earl.Parse("file://C:/work/.beads/backup")
+	if legacyErr != nil || currentErr != nil {
+		t.Fatalf("earl.Parse: legacy %v, current %v", legacyErr, currentErr)
+	}
+	if legacy.Host != current.Host || legacy.Path != current.Path {
+		t.Fatalf("legacy spelling parses as host %q path %q; current as host %q path %q",
+			legacy.Host, legacy.Path, current.Host, current.Path)
 	}
 }
