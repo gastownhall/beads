@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/steveyegge/beads/internal/atomicfile"
 	"golang.org/x/sys/windows"
 )
 
@@ -68,7 +69,9 @@ type syncLockWindowsOps struct {
 }
 
 var defaultSyncLockWindowsOps = syncLockWindowsOps{
-	openFile:   os.OpenFile,
+	// A symlinked sidecar is refused like the primary lock; the sidecar is
+	// advisory, so the refusal only degrades contention diagnostics.
+	openFile:   atomicfile.OpenNoFollow,
 	readRandom: rand.Read,
 	writeAt: func(f *os.File, data []byte, offset int64) (int, error) {
 		return f.WriteAt(data, offset)

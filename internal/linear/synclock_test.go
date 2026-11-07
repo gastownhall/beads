@@ -1,10 +1,68 @@
 package linear
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/atomicfile"
 )
+
+// TestSyncLockRejectsSymlink plants a symlink at the primary lock path (for
+// example committed to .beads/): acquisition must fail without truncating,
+// writing or creating the link target.
+func TestSyncLockRejectsSymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating symlinks needs privileges on windows")
+	}
+	for _, tc := range []struct {
+		name     string
+		dangling bool
+		wait     bool
+	}{
+		{"live", false, false},
+		{"live-wait", false, true},
+		{"dangling", true, false},
+		{"dangling-wait", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			sentinel := filepath.Join(t.TempDir(), "sentinel")
+			if !tc.dangling {
+				if err := os.WriteFile(sentinel, []byte("sentinel"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			lockPath := filepath.Join(dir, syncLockFilename)
+			if err := os.Symlink(sentinel, lockPath); err != nil {
+				t.Fatal(err)
+			}
+
+			lock, err := AcquireSyncLock(dir, tc.wait)
+			if err == nil {
+				_ = lock.Release()
+				t.Fatal("lock accepted a symlinked lock file")
+			}
+			if !errors.Is(err, atomicfile.ErrSymlink) || !strings.Contains(err.Error(), lockPath) {
+				t.Errorf("error %v does not refuse the symlink at %s", err, lockPath)
+			}
+			data, readErr := os.ReadFile(sentinel)
+			if tc.dangling {
+				if !os.IsNotExist(readErr) {
+					t.Errorf("dangling target created: %q, %v", data, readErr)
+				}
+			} else if readErr != nil || string(data) != "sentinel" {
+				t.Errorf("sentinel changed: %q, %v", data, readErr)
+			}
+			if info, lerr := os.Lstat(lockPath); lerr != nil || info.Mode()&os.ModeSymlink == 0 {
+				t.Errorf("planted link changed: %v, %v", info, lerr)
+			}
+		})
+	}
+}
 
 func TestAcquireSyncLock(t *testing.T) {
 	t.Run("acquire and release", func(t *testing.T) {

@@ -20,6 +20,7 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/execenv"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
@@ -124,7 +125,11 @@ func maybeAutoExport(ctx context.Context, allowEmptyOverwrite bool) error {
 			exportPath = "issues.jsonl"
 		}
 	}
-	fullPath := filepath.Join(beadsDir, exportPath)
+	fullPath, err := resolveExportPath(beadsDir, exportPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: auto-export skipped: export.path %s: %v\n", remedy.PrintedValue(exportPath), err)
+		return nil
+	}
 
 	// Load state + interval.
 	state := loadExportAutoState(beadsDir)

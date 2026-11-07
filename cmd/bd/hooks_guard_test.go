@@ -513,6 +513,36 @@ func TestApplyHookMigrationRefusesSymlink(t *testing.T) {
 	}
 }
 
+// A hook that does not exist yet passes the leaf check, so the guard's
+// parent-directory check alone keeps a migrated write out of a symlinked
+// hooks directory's target.
+func TestApplyHookMigrationRefusesSymlinkedHooksDir(t *testing.T) {
+	repoDir := setupGuardTestRepo(t)
+
+	outside := t.TempDir()
+	hooksDir := filepath.Join(repoDir, "linked-hooks")
+	if err := os.Symlink(outside, hooksDir); err != nil {
+		t.Skipf("cannot create symlink: %v", err)
+	}
+
+	plan := hookMigrationExecutionPlan{
+		WriteOps: []hookMigrationWriteOp{
+			{
+				HookName:   "pre-commit",
+				HookPath:   filepath.Join(hooksDir, "pre-commit"),
+				State:      "missing_no_artifacts",
+				SourceKind: hookMigrationWriteFromTemplate,
+			},
+		},
+	}
+	if _, err := applyHookMigrationExecution(plan); err == nil || !strings.Contains(err.Error(), "symlinked directory") {
+		t.Fatalf("expected a symlinked-directory refusal, got: %v", err)
+	}
+	if entries, err := os.ReadDir(outside); err != nil || len(entries) != 0 {
+		t.Fatalf("migration wrote through the symlinked hooks dir: entries=%v err=%v", entries, err)
+	}
+}
+
 func TestGuardHookWritePathHonorsInheritedRepository(t *testing.T) {
 	// Isolate configuration and restore every inherited routing entry afterwards.
 	for _, entry := range os.Environ() {

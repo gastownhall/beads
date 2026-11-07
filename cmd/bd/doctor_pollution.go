@@ -123,25 +123,38 @@ func runPollutionCheck(_ string, clean bool, yes bool) error {
 	}
 
 	backupPath := ".beads/pollution-backup.jsonl"
-	if err := backupPollutedIssues(polluted, backupPath); err != nil {
+	deleted, err := cleanPollutedIssues(polluted, backupPath, func(id string) error {
+		return deleteIssue(ctx, id)
+	})
+	if err != nil {
 		return HandleError("backing up issues: %v", err)
-	}
-	fmt.Printf("Backed up %d issues to %s\n", len(polluted), backupPath)
-
-	fmt.Printf("\nDeleting %d issues...\n", len(polluted))
-	deleted := 0
-	for _, p := range polluted {
-		if err := deleteIssue(ctx, p.issue.ID); err != nil {
-			fmt.Fprintf(os.Stderr, "Error deleting %s: %v\n", p.issue.ID, err)
-			continue
-		}
-		deleted++
 	}
 
 	fmt.Printf("%s Deleted %d test issues\n", ui.RenderPass("✓"), deleted)
 	arg, note := remedy.CommandArg(runtime.GOOS, backupPath, "<backup>")
 	fmt.Printf("\nCleanup complete. To restore, run: bd init --from-jsonl %s%s\n", arg, note)
 	return nil
+}
+
+// cleanPollutedIssues backs polluted issues up to backupPath and only then
+// deletes them with deleteFn, returning how many were deleted. A backup
+// failure (including a refused symlink) deletes nothing.
+func cleanPollutedIssues(polluted []pollutionResult, backupPath string, deleteFn func(id string) error) (int, error) {
+	if err := backupPollutedIssues(polluted, backupPath); err != nil {
+		return 0, err
+	}
+	fmt.Printf("Backed up %d issues to %s\n", len(polluted), backupPath)
+
+	fmt.Printf("\nDeleting %d issues...\n", len(polluted))
+	deleted := 0
+	for _, p := range polluted {
+		if err := deleteFn(p.issue.ID); err != nil {
+			fmt.Fprintf(os.Stderr, "Error deleting %s: %v\n", p.issue.ID, err)
+			continue
+		}
+		deleted++
+	}
+	return deleted, nil
 }
 
 func init() {

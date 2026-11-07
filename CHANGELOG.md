@@ -5484,6 +5484,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for it, so upgrade every bd that shares the workspace, or run `bd dolt stop`
   before going back to an older one.
 
+- bd no longer writes through a planted symlink, or to a path a committed
+  config or a migration journal leads out of the place it belongs (#7889,
+  #8070).
+  Automatic exports (`export.auto` and the pre-commit hook's export) skip,
+  with a warning naming `export.path`, a path that leaves the repository
+  holding `.beads` (or the parent of a `.beads` outside any repository),
+  enters Git metadata, or is a symlink; a `.beads` kept inside a bare
+  repository exports only inside that `.beads`. A `dolt_database` that is
+  not a single directory name is refused before an embedded open, the
+  hyphenated-name migration or `bd bootstrap` joins it into a path.
+  `bd doctor --check=pollution --clean` refuses a symlinked
+  `.beads/pollution-backup.jsonl` and then deletes nothing. The `bd doctor`
+  write probe and `bd doctor --perf` create their files exclusively under
+  unique names (the profile is now `beads-dolt-perf-<time>-<random>.prof`).
+  `bd hooks install --beads` or `--shared` refuses a symlinked managed hook
+  before it preserves existing hooks, and preservation and the husky v9
+  rewrite skip a symlinked destination with a warning. `bd hooks install`
+  also refuses a hooks directory that is a symlink (a symlinked
+  `.git/hooks` or `core.hooksPath` directory included), that `--beads`
+  reaches through a symlinked `.beads`, or that lies inside the repository
+  but resolves outside it. `bd hooks uninstall` refuses a symlinked hooks
+  directory, leaves a symlinked hook alone and restores a hook's `.backup`
+  only when that is not a symlink, and `bd migrate hooks --apply` refuses
+  to write through a symlinked hooks directory. `bd doctor --fix`'s
+  integrity recovery and the repo-fingerprint "Reinitialize database"
+  choice refuse a database that is a symlink, sits in a symlinked `.beads`
+  or lies outside `.beads`; an absolute `dolt_data_dir` lies outside too,
+  so those two repairs now refuse that layout. The Linear sync lock
+  refuses a symlinked lock file, and
+  `bd migrate from-proxied-server-to-server` (or `-to-shared-server`)
+  removes only the server root's own `server.log` and `server.log.1`,
+  whatever its journal lists.
+
 ## [1.3.4] - 2026-11-04
 
 First stable release of the 1.3.4 patch line. It ships the same code as

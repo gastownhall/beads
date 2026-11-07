@@ -195,6 +195,42 @@ func TestSyncLockWindowsValidOwnerLifecycle(t *testing.T) {
 	}
 }
 
+// TestSyncLockWindowsSidecarSymlinkIsAdvisory plants a symlink at the
+// diagnostic sidecar: acquisition still owns the primary lock, publishes no
+// metadata and leaves the link target unchanged.
+func TestSyncLockWindowsSidecarSymlinkIsAdvisory(t *testing.T) {
+	dir := t.TempDir()
+	sentinel := filepath.Join(t.TempDir(), "sentinel")
+	if err := os.WriteFile(sentinel, []byte("sentinel"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	infoPath := filepath.Join(dir, syncLockInfoFilename)
+	if err := os.Symlink(sentinel, infoPath); err != nil {
+		t.Skipf("creating symlinks needs privileges: %v", err)
+	}
+
+	lock, err := AcquireSyncLock(dir, false)
+	if err != nil {
+		t.Fatalf("acquire lock with symlinked sidecar: %v", err)
+	}
+	if lock.metadata.file != nil || lock.metadata.leaseHeld {
+		t.Fatal("published metadata through a symlinked sidecar")
+	}
+	held := contendForSyncLock(t, dir)
+	if held.Info != nil {
+		t.Fatalf("contender read diagnostics %+v through a symlinked sidecar", held.Info)
+	}
+	if err := lock.Release(); err != nil {
+		t.Fatalf("release lock: %v", err)
+	}
+	if data, err := os.ReadFile(sentinel); err != nil || string(data) != "sentinel" {
+		t.Fatalf("sentinel changed: %q, %v", data, err)
+	}
+	if info, err := os.Lstat(infoPath); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("planted sidecar link changed: %v, %v", info, err)
+	}
+}
+
 func TestSyncLockMetadataReaderDoesNotBlockLifecycle(t *testing.T) {
 	dir := t.TempDir()
 	seed, err := AcquireSyncLock(dir, false)

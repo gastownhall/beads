@@ -18,6 +18,7 @@ import (
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/lockfile"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/server"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/util"
@@ -1126,7 +1127,7 @@ func runMigrateFromProxiedServer(dryRun bool, shared bool) error {
 		for _, p := range proxy.ControlFilePaths(rootDir) {
 			fmt.Printf("Would remove %s\n", p)
 		}
-		for _, p := range logAssets {
+		for _, p := range confinedMigrateLogAssets(rootDir, logAssets) {
 			fmt.Printf("Would remove %s\n", p)
 		}
 		return nil
@@ -1207,7 +1208,7 @@ func runMigrateFromProxiedServer(dryRun bool, shared bool) error {
 		if errs := proxy.PurgeControlFiles(rootDir); len(errs) > 0 {
 			return HandleError("failed to retire proxy controls: %v", errs[0])
 		}
-		if errs := removeMigrateAssets(logAssets); len(errs) > 0 {
+		if errs := removeMigrateAssets(rootDir, confinedMigrateLogAssets(rootDir, logAssets)); len(errs) > 0 {
 			return HandleError("failed to retire proxy logs: %v", errs[0])
 		}
 		if err := checkpointMigration(beadsDir, j, migrateOldControlsRetired); err != nil {
@@ -1283,10 +1284,81 @@ func proxiedLogAssets(beadsDir string) ([]string, error) {
 	return []string{logPath, logPath + ".1"}, nil
 }
 
-func removeMigrateAssets(paths []string) []error {
-	var errs []error
+// confinedMigrateLogAssets keeps the journal's log entries that name rootDir's
+// own server.log or its rotated .1 slot. The journal sits in .beads, so any
+// other entry, a log under a symlinked root and a log that is not a regular
+// file are warned about and skipped. An absent log stays listed: its removal
+// is tolerated.
+func confinedMigrateLogAssets(rootDir string, paths []string) []string {
+	if len(paths) == 0 {
+		return nil
+	}
+	root, err := filepath.Abs(rootDir)
+	rootIsDir := err == nil
+	if rootIsDir {
+		info, statErr := os.Lstat(root)
+		rootIsDir = statErr == nil && info.IsDir()
+	}
+	eligible := map[string]bool{
+		filepath.Join(root, proxiedServerLogName):      true,
+		filepath.Join(root, proxiedServerLogName+".1"): true,
+	}
+	var kept []string
 	for _, p := range paths {
-		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+		abs, absErr := filepath.Abs(p)
+		var reason string
+		switch {
+		case absErr != nil || !eligible[abs]:
+			reason = "it is not a proxied-server log of " + rootDir
+		case !rootIsDir:
+			reason = rootDir + " is not a directory"
+		default:
+			if info, statErr := os.Lstat(abs); statErr == nil && !info.Mode().IsRegular() {
+				reason = "it is not a regular file"
+			}
+		}
+		if reason != "" {
+			fmt.Fprintf(os.Stderr, "Warning: not removing migration log asset %s: %s\n", remedy.PrintedValue(p), remedy.PrintedValue(reason))
+			continue
+		}
+		kept = append(kept, abs)
+	}
+	return kept
+}
+
+// removeMigrateAssets removes logDir's own server.log and server.log.1 among
+// paths. It enforces the confinement itself rather than trusting its caller:
+// under a logDir that is not a real directory, any other entry and a log that
+// is not a regular file are warned about and skipped. Absent logs are
+// tolerated; other inspection and removal errors are returned.
+func removeMigrateAssets(logDir string, paths []string) []error {
+	var errs []error
+	root, rootErr := filepath.Abs(logDir)
+	rootIsDir := rootErr == nil
+	if rootIsDir {
+		info, statErr := os.Lstat(root)
+		rootIsDir = statErr == nil && info.IsDir()
+	}
+	for _, p := range paths {
+		path, pathErr := filepath.Abs(p)
+		if !rootIsDir || pathErr != nil ||
+			(path != filepath.Join(root, proxiedServerLogName) && path != filepath.Join(root, proxiedServerLogName+".1")) {
+			fmt.Fprintf(os.Stderr, "Warning: skipping untrusted migration log asset %s\n", remedy.PrintedValue(p))
+			continue
+		}
+		info, err := os.Lstat(path)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if !info.Mode().IsRegular() {
+			fmt.Fprintf(os.Stderr, "Warning: skipping non-regular migration log asset %s\n", remedy.PrintedValue(p))
+			continue
+		}
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			errs = append(errs, err)
 		}
 	}
