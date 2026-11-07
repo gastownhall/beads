@@ -1217,6 +1217,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   refused outright once the configured server was unreachable. Keys that
   live in the database (`storage.backend`, …) still open the store, and
   every other `config` verb keeps its routing.
+- `bd context`, and the other commands that resolve the repository context
+  (such as `bd prime` and `bd worktree`), now accept a `.beads` inside the
+  current non-root account's own home when that home sits under a protected
+  system prefix, such as a service account homed at `/var/lib/<service>`. The
+  home must be a directory the account owns, and the path must not leave it
+  through a symlink; other paths under `/var`, `/root` and the rest stay
+  rejected. The home comes from the account database with no `$HOME`
+  fallback, though a CGO-free build can report `$HOME` for an account with
+  no `/etc/passwd` entry; the ownership check is what a forged `$HOME`
+  cannot pass (#6323, reported by @swedeinasia-flow, building on their
+  #6326).
 - The android_arm64 release, which npm `@beads/bd` installs on Termux, is
   now built with cgo, so embedded Dolt works there: `bd init` no longer fails
   with "embedded Dolt requires a CGO build" (#3538). The binary is
