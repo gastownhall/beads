@@ -112,14 +112,18 @@ func codexHookMarkNeedsRefresh(input codexHookInput) error {
 
 func codexHookMaybeRefresh(ctx context.Context, input codexHookInput, stdout io.Writer) error {
 	path := codexHookRefreshMarkerPath(input)
-	if _, err := os.Stat(path); err != nil {
+	// Consume the marker before attempting the refresh: a prime that fails or
+	// is killed by the hook deadline must not leave every later prompt
+	// re-running it (gh#6039), and removing up front cannot delete a marker a
+	// concurrent PostCompact writes while prime runs. A marker that cannot be
+	// removed never starts prime; the next PostCompact re-arms the attempt.
+	if err := os.Remove(path); err != nil {
 		return nil
 	}
 	out, err := codexHookExecPrime(ctx, false)
 	if err != nil {
 		return writeCodexHookSystemMessage(stdout, fmt.Sprintf("Beads context refresh after compaction failed: %v", err))
 	}
-	_ = os.Remove(path)
 	if strings.TrimSpace(out) == "" {
 		return nil
 	}

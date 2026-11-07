@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func stubCodexHookPrime(t *testing.T, fn func(memoriesOnly bool) (string, error)) {
@@ -175,6 +176,177 @@ func TestCodexHookPostCompactMarksAndUserPromptRefreshesOnce(t *testing.T) {
 	if out.Len() != 0 {
 		t.Fatalf("expected no second refresh output, got %s", out.String())
 	}
+}
+
+func TestCodexHookUserPromptRefreshFailureEmitsValidOutputAndDoesNotRetry(t *testing.T) {
+	dir := t.TempDir()
+	codexHookMarkerDirOverride = dir
+	t.Cleanup(func() { codexHookMarkerDirOverride = "" })
+
+	calls := 0
+	stubCodexHookPrime(t, func(memoriesOnly bool) (string, error) {
+		calls++
+		return "", context.DeadlineExceeded
+	})
+
+	input := codexHookInput{SessionID: "s1", CWD: "repo", HookEventName: codexHookPostCompact}
+	postJSON, _ := json.Marshal(input)
+	if err := runCodexHook(context.Background(), codexHookPostCompact, bytes.NewReader(postJSON), ioDiscard{}); err != nil {
+		t.Fatalf("PostCompact hook: %v", err)
+	}
+
+	input.HookEventName = codexHookUserPromptSubmit
+	promptJSON, _ := json.Marshal(input)
+	var out bytes.Buffer
+	if err := runCodexHook(context.Background(), codexHookUserPromptSubmit, bytes.NewReader(promptJSON), &out); err != nil {
+		t.Fatalf("UserPromptSubmit hook: %v", err)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(out.Bytes(), &raw); err != nil {
+		t.Fatalf("parse output: %v\n%s", err, out.String())
+	}
+	if hso, ok := raw["hookSpecificOutput"]; ok {
+		t.Errorf("system-message response must omit hookSpecificOutput (Codex requires hookEventName), got %s", hso)
+	}
+
+	out.Reset()
+	if err := runCodexHook(context.Background(), codexHookUserPromptSubmit, bytes.NewReader(promptJSON), &out); err != nil {
+		t.Fatalf("second UserPromptSubmit hook: %v", err)
+	}
+	if calls != 1 {
+		t.Errorf("failed refresh retried on every prompt: prime calls = %d, want 1", calls)
+	}
+}
+
+func TestCodexHookUserPromptRefreshTimeoutIsNotRetried(t *testing.T) {
+	dir := t.TempDir()
+	codexHookMarkerDirOverride = dir
+	t.Cleanup(func() { codexHookMarkerDirOverride = "" })
+
+	input := codexHookInput{SessionID: "s1", CWD: "repo", HookEventName: codexHookPostCompact}
+	postJSON, _ := json.Marshal(input)
+	if err := runCodexHook(context.Background(), codexHookPostCompact, bytes.NewReader(postJSON), ioDiscard{}); err != nil {
+		t.Fatalf("PostCompact hook: %v", err)
+	}
+	marker := codexHookRefreshMarkerPath(input)
+
+	calls := 0
+	orig := codexHookExecPrime
+	codexHookExecPrime = func(ctx context.Context, memoriesOnly bool) (string, error) {
+		calls++
+		if memoriesOnly {
+			t.Error("UserPromptSubmit refresh should request full prime output")
+		}
+		if _, err := os.Stat(marker); !os.IsNotExist(err) {
+			t.Errorf("refresh marker must be consumed before prime runs, stat err=%v", err)
+		}
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
+	t.Cleanup(func() { codexHookExecPrime = orig })
+
+	// An already-expired parent deadline exercises the real cancellation path
+	// without waiting out the hook's own 30-second timeout.
+	expired, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+
+	input.HookEventName = codexHookUserPromptSubmit
+	promptJSON, _ := json.Marshal(input)
+	var out bytes.Buffer
+	if err := runCodexHook(expired, codexHookUserPromptSubmit, bytes.NewReader(promptJSON), &out); err != nil {
+		t.Fatalf("UserPromptSubmit hook: %v", err)
+	}
+	raw := decodeCodexHookObject(t, out.Bytes())
+	assertCodexHookOmitsHookSpecificOutput(t, raw)
+
+	out.Reset()
+	if err := runCodexHook(expired, codexHookUserPromptSubmit, bytes.NewReader(promptJSON), &out); err != nil {
+		t.Fatalf("second UserPromptSubmit hook: %v", err)
+	}
+	if calls != 1 {
+		t.Errorf("timed-out refresh retried on every prompt: prime calls = %d, want 1", calls)
+	}
+	if out.Len() != 0 {
+		t.Errorf("later prompts must stay silent, got %s", out.String())
+	}
+}
+
+func TestCodexHookRefreshMarkerEdgeCases(t *testing.T) {
+	input := codexHookInput{SessionID: "s1", CWD: "repo", HookEventName: codexHookUserPromptSubmit}
+	promptJSON, _ := json.Marshal(input)
+
+	t.Run("absent marker never runs prime", func(t *testing.T) {
+		codexHookMarkerDirOverride = t.TempDir()
+		t.Cleanup(func() { codexHookMarkerDirOverride = "" })
+
+		stubCodexHookPrime(t, func(memoriesOnly bool) (string, error) {
+			t.Error("prime must not run without a refresh marker")
+			return "", nil
+		})
+
+		var out bytes.Buffer
+		if err := runCodexHook(context.Background(), codexHookUserPromptSubmit, bytes.NewReader(promptJSON), &out); err != nil {
+			t.Fatalf("UserPromptSubmit hook: %v", err)
+		}
+		if out.Len() != 0 {
+			t.Fatalf("expected no output without a marker, got %s", out.String())
+		}
+	})
+
+	t.Run("legacy marker content still refreshes", func(t *testing.T) {
+		codexHookMarkerDirOverride = t.TempDir()
+		t.Cleanup(func() { codexHookMarkerDirOverride = "" })
+
+		calls := 0
+		stubCodexHookPrime(t, func(memoriesOnly bool) (string, error) {
+			calls++
+			return "REFRESHED\n", nil
+		})
+		// Only marker presence matters; arbitrary legacy bytes must not block
+		// the refresh.
+		marker := codexHookRefreshMarkerPath(input)
+		if err := os.MkdirAll(filepath.Dir(marker), 0o700); err != nil {
+			t.Fatalf("mkdir marker dir: %v", err)
+		}
+		if err := os.WriteFile(marker, []byte("legacy-bytes"), 0o600); err != nil {
+			t.Fatalf("seed marker: %v", err)
+		}
+
+		var out bytes.Buffer
+		if err := runCodexHook(context.Background(), codexHookUserPromptSubmit, bytes.NewReader(promptJSON), &out); err != nil {
+			t.Fatalf("UserPromptSubmit hook: %v", err)
+		}
+		if calls != 1 || !strings.Contains(out.String(), "REFRESHED") {
+			t.Fatalf("expected one refresh with injected context, calls=%d out=%s", calls, out.String())
+		}
+	})
+
+	t.Run("unremovable marker is a silent no-op", func(t *testing.T) {
+		codexHookMarkerDirOverride = t.TempDir()
+		t.Cleanup(func() { codexHookMarkerDirOverride = "" })
+
+		stubCodexHookPrime(t, func(memoriesOnly bool) (string, error) {
+			t.Error("prime must not run when the marker cannot be consumed")
+			return "", nil
+		})
+		// A nonempty directory at the marker path makes removal fail without
+		// depending on root-level permissions.
+		marker := codexHookRefreshMarkerPath(input)
+		if err := os.MkdirAll(marker, 0o700); err != nil {
+			t.Fatalf("mkdir marker dir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(marker, "child"), []byte("x"), 0o600); err != nil {
+			t.Fatalf("seed marker dir child: %v", err)
+		}
+
+		var out bytes.Buffer
+		if err := runCodexHook(context.Background(), codexHookUserPromptSubmit, bytes.NewReader(promptJSON), &out); err != nil {
+			t.Fatalf("UserPromptSubmit hook: %v", err)
+		}
+		if out.Len() != 0 {
+			t.Fatalf("unremovable marker must be a silent no-op, got %s", out.String())
+		}
+	})
 }
 
 type ioDiscard struct{}
