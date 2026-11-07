@@ -1208,6 +1208,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd doctor` no longer fails "Repo Fingerprint" forever on clones that
+  reach one repository through different SSH host aliases, and no longer
+  advises `rm -rf .beads && bd init` on a fingerprint mismatch (GH#5990).
+  The fingerprint now hashes the `HostName` that `ssh -G` resolves a bare
+  alias (or a subdomain alias such as `work.github.com`) to, so
+  `git@alias-a:org/repo.git` and `git@alias-b:org/repo.git` match
+  `git@github.com:org/repo.git` and HTTPS; a database this checkout stamped
+  before the upgrade still verifies. Canonical hosts such as `github.com`,
+  custom SSH transports and failed lookups keep the previous fingerprint. A
+  mismatch is still an error, now reported as "Database fingerprint does not
+  match this repository's remote", with the shared-ledger sequence: upgrade
+  every clone, then run `bd migrate --update-repo-id` once. See
+  troubleshooting.
 - `bd config get` for a config.yaml, git-config or user-global key no longer
   opens the database just because one exists, so it answers from those files
   while the Dolt server is down instead of failing the open (GH#5108). In
