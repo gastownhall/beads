@@ -4,7 +4,7 @@ Usage:
   bd list [flags]
 
 Flags:
-      --all                          Show all issues including closed (overrides default filter)
+      --all                          Show all issues including closed by lifting default status and pinned exclusions and the default limit (type and plane suppressions still apply; see --include-all-types)
   -a, --assignee string              Filter by assignee
       --brief                        Omit the free-form text (description, design, acceptance criteria, notes, payload, waiters) from each row. Filters that read those fields, such as --desc-contains, still select on them. An omitted field is indistinguishable from an empty one in --json; fetch a whole issue with bd show.
       --closed-after string          Filter issues closed after date (YYYY-MM-DD or RFC3339)
@@ -28,6 +28,7 @@ Flags:
       --has-metadata-key string      Filter issues that have this metadata key set
   -h, --help                         help for list
       --id string                    Filter by specific issue IDs (comma-separated or repeated, e.g., bd-1,bd-5,bd-10)
+      --include-all-types            Include all issue types and the ephemeral wisp plane (default status and pinned exclusions still apply; see --all)
       --include-comments             Populate each row's comments field with full comment bodies in JSON output (--json only; costs one query per row that has comments). Without it, a row with comments carries comments_omitted=true, so an absent comments field is never mistaken for having none. Text output is unaffected either way.
       --include-ephemeral            Include ephemeral wisp-plane rows in output (normally hidden)
       --include-gates                Include gate issues in output (normally hidden)

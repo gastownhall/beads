@@ -4369,7 +4369,7 @@ bd list
   group: "issues"
   hidden: false
   runnable: true
-  flag --all type=bool default="false" usage="Show all issues including closed (overrides default filter)"
+  flag --all type=bool default="false" usage="Show all issues including closed by lifting default status and pinned exclusions and the default limit (type and plane suppressions still apply; see --include-all-types)"
   flag --assignee -a type=string default="" usage="Filter by assignee"
   flag --brief type=bool default="false" usage="Omit the free-form text (description, design, acceptance criteria, notes, payload, waiters) from each row. Filters that read those fields, such as --desc-contains, still select on them. An omitted field is indistinguishable from an empty one in --json; fetch a whole issue with bd show."
   flag --closed-after type=string default="" usage="Filter issues closed after date (YYYY-MM-DD or RFC3339)"
@@ -4393,6 +4393,7 @@ bd list
   flag --format type=string default="" usage="Export the dependency graph of the listed issues: 'digraph' (edge list for golang.org/x/tools/cmd/digraph), 'dot' (Graphviz), or a Go template rendered once per edge over .IssueID, .DependsOnID, .Type, .Issue, .Dependency. 'json' is the exception and does not export the graph: it is equivalent to --json, which also wins when both flags are given. 'digraph' and templates print nothing when no listed issue depends on another; 'dot' still prints the nodes"
   flag --has-metadata-key type=string default="" usage="Filter issues that have this metadata key set"
   flag --id type=string default="" usage="Filter by specific issue IDs (comma-separated or repeated, e.g., bd-1,bd-5,bd-10)"
+  flag --include-all-types type=bool default="false" usage="Include all issue types and the ephemeral wisp plane (default status and pinned exclusions still apply; see --all)"
   flag --include-comments type=bool default="false" usage="Populate each row's comments field with full comment bodies in JSON output (--json only; costs one query per row that has comments). Without it, a row with comments carries comments_omitted=true, so an absent comments field is never mistaken for having none. Text output is unaffected either way."
   flag --include-ephemeral type=bool default="false" usage="Include ephemeral wisp-plane rows in output (normally hidden)"
   flag --include-gates type=bool default="false" usage="Include gate issues in output (normally hidden)"
