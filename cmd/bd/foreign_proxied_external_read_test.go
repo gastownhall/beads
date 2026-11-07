@@ -164,6 +164,89 @@ func TestForeignProxiedExternalReadUsesTargetEndpoint(t *testing.T) {
 	}
 }
 
+// TestForeignProxiedExternalReadGateStaysUnconfirmed is AC-5's unit half: a
+// route into an external proxied-server rig that cannot be read leaves a bead
+// gate's target unconfirmed with the real cause, never the generic refusal,
+// and the read tries no other endpoint.
+func TestForeignProxiedExternalReadGateStaysUnconfirmed(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup func(t *testing.T) (want string)
+	}{
+		{
+			name: "unreachable_server",
+			setup: func(t *testing.T) string {
+				externalReadTown(t, &configfile.ExternalDoltConfig{Host: "127.0.0.1", Port: closedTCPPort(t)})
+				return "unreachable"
+			},
+		},
+		{
+			name: "server_drops_the_session",
+			setup: func(t *testing.T) string {
+				srv := newFakeMySQLLogin(t)
+				externalReadTown(t, &configfile.ExternalDoltConfig{Host: "127.0.0.1", Port: srv.port()})
+				t.Cleanup(func() {
+					if srv.Conns() == 0 {
+						t.Error("the read never dialed the rig's external server")
+					}
+				})
+				return ""
+			},
+		},
+		{
+			name: "malformed_sidecar",
+			setup: func(t *testing.T) string {
+				rig := externalReadTown(t, nil)
+				if err := os.WriteFile(configfile.ProxiedServerClientInfoPath(rig), []byte("{not json"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return configfile.ProxiedServerClientInfoFileName
+			},
+		},
+		{
+			name: "invalid_external_endpoint",
+			setup: func(t *testing.T) string {
+				externalReadTown(t, &configfile.ExternalDoltConfig{Host: "127.0.0.1"})
+				return "Host requires Port"
+			},
+		},
+		{
+			name: "no_dolt_database",
+			setup: func(t *testing.T) string {
+				rig := externalReadTown(t, &configfile.ExternalDoltConfig{Host: "127.0.0.1", Port: closedTCPPort(t)})
+				cfg, err := configfile.Load(rig)
+				if err != nil {
+					t.Fatal(err)
+				}
+				cfg.DoltDatabase = ""
+				if err := cfg.Save(rig); err != nil {
+					t.Fatal(err)
+				}
+				t.Setenv("BEADS_DOLT_SERVER_DATABASE", "launcher_db")
+				return "no dolt_database"
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			want := tc.setup(t)
+			issue, err := prefixRoutedBeadGateTarget(context.Background(), "gt-target1")
+			if issue != nil {
+				t.Fatalf("got bead %s from a rig that cannot be read", issue.ID)
+			}
+			if !errors.Is(err, errBeadGateTargetUnconfirmed) {
+				t.Fatalf("err = %v, want errBeadGateTargetUnconfirmed", err)
+			}
+			if isProxiedStoreUnrouted(err) {
+				t.Fatalf("gate target refused as unrouted instead of read: %v", err)
+			}
+			if want != "" && !strings.Contains(err.Error(), want) {
+				t.Errorf("err = %v, want it to name %q", err, want)
+			}
+		})
+	}
+}
+
 // TestForeignProxiedExternalReadWritesNothingInTarget is AC-4's unit half: a
 // foreign read that reaches the rig's external server, and one that cannot,
 // leave every file in the rig's workspace as it was (no dolt directory,

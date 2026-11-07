@@ -280,4 +280,27 @@ func TestProxiedServerGateRoutedExternalTarget(t *testing.T) {
 			t.Errorf("gate should close once its external target is closed, got %q", got)
 		}
 	})
+
+	// AC-5: an awaited bead B does not hold leaves the gate pending as
+	// unconfirmed, not resolved as gone.
+	t.Run("absent_target_stays_unconfirmed", func(t *testing.T) {
+		t.Parallel()
+		a := newSharedProxiedProject(t, bd, "rua")
+		b := newSharedProxiedProject(t, bd, "rub")
+		routeExternalRig(t, a.dir, b.dir, "rub")
+		gate := bdProxiedCreate(t, bd, a.dir, "Cross-rig bead gate", "--type", "gate")
+		db := openProxiedDB(t, a)
+		seedGateAwait(t, db, gate.ID, "bead", "rub-nosuchbead", time.Now().UTC(), 0)
+
+		out, stderr, err := bdProxiedRunBuffers(t, bd, a.dir, "gate", "check", "--type", "bead")
+		if err != nil {
+			t.Fatalf("gate check failed: %v\nstderr:\n%s", err, stderr)
+		}
+		if got := readStatus(t, db, gate.ID); got == types.StatusClosed {
+			t.Fatal("gate resolved on an awaited bead its rig does not hold")
+		}
+		if combined := out + stderr; !strings.Contains(combined, `cannot confirm the awaited bead is gone: bead rub-nosuchbead routes to`) {
+			t.Errorf("expected the routed miss reported unconfirmed, got:\n%s", combined)
+		}
+	})
 }
