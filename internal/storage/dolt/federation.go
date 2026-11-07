@@ -48,7 +48,7 @@ func (s *DoltStore) pushRefToPeer(ctx context.Context, peer string, refspec stri
 		})
 	}
 	return s.withPeerCredentials(ctx, peer, func(creds *remoteCredentials) error {
-		if useCLI, err := s.prepareCLIRouteForPeerCredentials(ctx, peer, creds); err != nil {
+		if useCLI, err := s.prepareCLIRouteForPeer(ctx, peer, creds); err != nil {
 			return err
 		} else if useCLI {
 			return s.doltCLIPushRefToPeer(ctx, peer, refspec, creds)
@@ -115,8 +115,8 @@ func (s *DoltStore) pullFromPeer(ctx context.Context, peer string) ([]storage.Co
 		return s.finishPeerPull(ctx, conflicts, err, preHead)
 	}
 	err = s.withPeerCredentials(ctx, peer, func(creds *remoteCredentials) error {
-		// Credential CLI routing: mirrors git-protocol peer pull path.
-		if useCLI, err := s.prepareCLIRouteForPeerCredentials(ctx, peer, creds); err != nil {
+		// Credential and cloud-auth CLI routing: mirrors git-protocol peer pull path.
+		if useCLI, err := s.prepareCLIRouteForPeer(ctx, peer, creds); err != nil {
 			return err
 		} else if useCLI {
 			pullErr := s.finishCLIPull(ctx, s.doltCLIPullFromPeer(ctx, peer, creds))
@@ -179,8 +179,8 @@ func (s *DoltStore) Fetch(ctx context.Context, peer string) error {
 		})
 	}
 	return s.withPeerCredentials(ctx, peer, func(creds *remoteCredentials) error {
-		// Credential CLI routing: route fetch through CLI subprocess.
-		if useCLI, err := s.prepareCLIRouteForPeerCredentials(ctx, peer, creds); err != nil {
+		// Credential and cloud-auth CLI routing: route fetch through CLI subprocess.
+		if useCLI, err := s.prepareCLIRouteForPeer(ctx, peer, creds); err != nil {
 			return err
 		} else if useCLI {
 			return s.doltCLIFetchFromPeer(ctx, peer, creds)
