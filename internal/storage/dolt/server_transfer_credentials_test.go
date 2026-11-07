@@ -521,3 +521,77 @@ func TestPullFallbackFetchPassesTheUserBdHolds(t *testing.T) {
 		t.Fatalf("error = %v, want the fallback fetch refused for the user bd passes (%q)", err, missingPasswordRefusal)
 	}
 }
+
+// scriptedDoltOnPath puts a dolt on PATH that runs arms, shell case arms
+// over its first argument, answers `dolt remote -v` with remotes ("name
+// url" lines) and exits 0 for anything else.
+func scriptedDoltOnPath(t *testing.T, arms string, remotes ...string) {
+	t.Helper()
+	binDir := t.TempDir()
+	var list strings.Builder
+	for _, r := range remotes {
+		fmt.Fprintf(&list, "echo '%s'\n", r)
+	}
+	script := fmt.Sprintf("#!/bin/sh\ncase \"$1\" in\nremote)\n\tif [ \"$2\" = \"-v\" ]; then\n%s\tfi\n\t;;\n%s\nesac\nexit 0\n", list.String(), arms)
+	if err := os.WriteFile(filepath.Join(binDir, "dolt"), []byte(script), 0o755); err != nil { // #nosec G306 -- test fixture must be executable
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// TestServerRunTransferFailureAddsNoNoteOutsideTransport pins where the note
+// stays out (AC-6): a failure that is not the transfer's own (a refused dolt
+// binary, the pre-push fsck, a timeout, a canceled context), a remote that
+// takes no server credentials (git protocol, file), a store with no user and
+// no cloud variables or a password alone, and embedded mode keep the error
+// they had, with no note.
+func TestServerRunTransferFailureAddsNoNoteOutsideTransport(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell fake")
+	}
+	clearPredicateEnv(t)
+	clearCloudAuthEnv(t)
+	const hostedURL = "https://doltremoteapi.dolthub.com/org/repo"
+	const refusedArm = "push|pull|fetch)\n\techo 'could not access dolt url: connection refused' >&2\n\texit 1\n\t;;"
+
+	for _, tc := range []struct {
+		name       string
+		url        string
+		arms       string
+		served     bool
+		embedded   bool
+		user, pass string
+		timeout    string
+		canceled   bool
+		cause      string
+	}{
+		{name: "no user and no cloud variables", url: hostedURL, arms: refusedArm, served: true, cause: "connection refused"},
+		{name: "a password alone", url: hostedURL, arms: refusedArm, served: true, pass: "client-secret", cause: "connection refused"},
+		{name: "git-protocol remote", url: "git+https://example.com/org/repo.git", arms: refusedArm, served: true, user: "admin", pass: "client-secret", cause: "connection refused"},
+		{name: "file remote", url: "file:///nonexistent/remote", arms: refusedArm, served: true, user: "admin", pass: "client-secret", cause: "connection refused"},
+		{name: "refused dolt binary", url: hostedURL, arms: "version)\n\techo 'dolt version 1.0.0'\n\t;;\n" + refusedArm, served: true, user: "admin", pass: "client-secret", cause: "but bd requires dolt 2.6.0"},
+		{name: "pre-push fsck finds a dangling reference", url: hostedURL, arms: "fsck)\n\techo 'dangling reference to chunk abc'\n\texit 1\n\t;;\n" + refusedArm, served: true, user: "admin", pass: "client-secret", cause: ErrDanglingReference.Error()},
+		{name: "CLI transfer timeout", url: hostedURL, arms: "push)\n\texec sleep 30\n\t;;", served: true, user: "admin", pass: "client-secret", timeout: "1", cause: "timed out after"},
+		{name: "canceled context", url: hostedURL, arms: refusedArm, served: true, user: "admin", pass: "client-secret", canceled: true, cause: "context canceled"},
+		{name: "embedded mode", url: hostedURL, arms: refusedArm, embedded: true, user: "admin", pass: "client-secret", cause: "push"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			scriptedDoltOnPath(t, tc.arms, "origin "+tc.url)
+			if tc.timeout != "" {
+				t.Setenv(cliExecTimeoutEnv, tc.timeout)
+			}
+			store, _ := serverTransferStore(t, unmanagedWorkspace(t), 3310, tc.served, tc.user, tc.pass, [2]string{"origin", tc.url})
+			store.serverMode = !tc.embedded
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if tc.canceled {
+				cancel()
+			}
+			err := store.Push(ctx)
+			requireNoServerNote(t, err)
+			if !strings.Contains(err.Error(), tc.cause) {
+				t.Fatalf("error %q lost its own cause %q", err, tc.cause)
+			}
+		})
+	}
+}
