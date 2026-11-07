@@ -893,9 +893,7 @@ func TestAlreadyConvergedDeclinesOnALegacyTrackedCursor(t *testing.T) {
 // missing. The reconcile also cleans up after an interrupted run, and in that
 // state the cursor table itself reads perfectly healthy — so a fast path that
 // mirrored only the legacy-shape term would return "converged" forever and the
-// cleanup branch would be unreachable in server mode. The scratch is
-// deliberately NOT dolt_ignore'd, so the next pull's auto-commit puts it in
-// HEAD and push replicates it fleet-wide.
+// cleanup branch would be unreachable in server mode.
 func TestAlreadyConvergedDeclinesOnASurvivingScratchTable(t *testing.T) {
 	db, mock := newMockDB(t)
 
@@ -911,6 +909,81 @@ func TestAlreadyConvergedDeclinesOnASurvivingScratchTable(t *testing.T) {
 	}
 	if converged {
 		t.Fatal("alreadyConverged() = true with an interrupted reconcile to finish, want false: server mode would never clean it up")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}
+
+// TestAlreadyConvergedDeclinesOnAScratchPendingDeletionAtHead is bd-fgdx42's
+// server-mode half. A scratch committed at HEAD and gone from the working set
+// is the only residue here, and every other predicate says converged; the
+// fast path must ask HEAD about the scratch under the same qualifier the
+// cursor probe used and decline before IS_FREE_LOCK, or the locked sweep never
+// runs and the pending deletion keeps refusing `bd dolt pull`.
+func TestAlreadyConvergedDeclinesOnAScratchPendingDeletionAtHead(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		qualifier string
+		selector  DatabaseSelector
+		prime     func(sqlmock.Sqlmock)
+		ignore    string
+	}{
+		{
+			name:   "session already on the database",
+			prime:  func(mock sqlmock.Sqlmock) { expectCurrentDatabase(mock, "testdb") },
+			ignore: unqualifiedDoltIgnore,
+		},
+		{
+			name:      "database selected for us",
+			qualifier: "`testdb`",
+			selector:  testDatabaseSelector,
+			prime:     func(mock sqlmock.Sqlmock) { expectSessionPutOnDatabase(mock, "testdb") },
+			ignore:    qualifiedDoltIgnore("testdb"),
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			db, mock := newMockDB(t)
+
+			tt.prime(mock)
+			expectNoMigrationWorkNeeded(mock)
+			expectDoltIgnoreRead(mock, tt.ignore, seededIgnorePatterns(LatestVersion()))
+			expectHeadTableProbe(mock, tt.qualifier, ignoredSource.cursorTable, false)
+			expectScratchProbes(mock, tt.qualifier, false, true)
+
+			converged, err := alreadyConverged(context.Background(), db, "testdb", tt.selector)
+			if err != nil {
+				t.Fatalf("alreadyConverged() error = %v", err)
+			}
+			if converged {
+				t.Fatal("alreadyConverged() = true with a scratch deletion pending at HEAD, want false: server mode would never sweep it")
+			}
+			// The lock probe must never be reached — the mock is not primed for it.
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("unmet SQL expectations: %v", err)
+			}
+		})
+	}
+}
+
+// The scratch's HEAD listing fails closed like every other fast-path probe.
+func TestAlreadyConvergedFailsClosedOnAnUnreadableScratchHeadProbe(t *testing.T) {
+	db, mock := newMockDB(t)
+
+	expectCurrentDatabase(mock, "testdb")
+	expectNoMigrationWorkNeeded(mock)
+	expectDoltIgnoreRead(mock, unqualifiedDoltIgnore, seededIgnorePatterns(LatestVersion()))
+	expectHeadTableProbe(mock, "", ignoredSource.cursorTable, false)
+	expectShowTable(mock, ignoredCursorUntrackTempTable, false)
+	mock.ExpectQuery(regexp.QuoteMeta("SHOW TABLES AS OF 'HEAD' LIKE '" + ignoredCursorUntrackTempTable + "'")).
+		WillReturnError(sql.ErrConnDone)
+
+	converged, err := alreadyConverged(context.Background(), db, "testdb", nil)
+	if err == nil {
+		t.Fatal("alreadyConverged() error = nil, want the scratch HEAD listing failure")
+	}
+	if converged {
+		t.Fatal("alreadyConverged() = true on an unreadable scratch HEAD listing, want false")
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet SQL expectations: %v", err)
