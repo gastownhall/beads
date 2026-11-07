@@ -36,16 +36,17 @@ var metadataFactories = map[string]bool{
 // metadataFactoryReferences are the functions outside the factories' own files
 // allowed to reference one, each with the workspace it opens.
 var metadataFactoryReferences = map[string]string{
-	"foreign_workspace.go:openForeignStore":            "the foreign opener: admits the workspace first (admitForeignWorkspace)",
-	"main.go:var rootCmd":                              "own workspace: the root pre-run's identity preview of the workspace admission admitted",
-	"direct_mode.go:ensureStoreActiveWithContext":      "own workspace: the discovered workspace, after admission",
-	"store_reopen.go:openReadOnlyStoreForDBPath":       "own workspace: reopens the command's own database path",
-	"init.go:countExistingIssues":                      "own workspace: the workspace bd init runs in",
-	"init_contributor.go:autoConfigureForkContributor": "a planning .beads bd init just created, empty",
-	"bootstrap.go:var openSyncedWarmupStore":           "own workspace: the workspace bd bootstrap just synced",
-	"repo.go:var repoSyncCmd":                          "bd-managed remote cache clone, never a user .beads",
-	"create.go:var createCmd":                          "bd-managed remote cache clone (the local target opens through openForeignStore)",
-	"create.go:openDryRunTargetStore":                  "bd-managed remote cache clone (the local target opens through openForeignStore)",
+	"foreign_workspace.go:openForeignStore":               "the foreign opener: admits the workspace first (admitForeignWorkspace)",
+	"main.go:var rootCmd":                                 "own workspace: the root pre-run's identity preview of the workspace admission admitted",
+	"direct_mode.go:ensureStoreActiveWithContext":         "own workspace: the discovered workspace, after admission",
+	"direct_mode.go:ensureReadOnlyStoreActiveWithContext": "own workspace: the selected/discovered workspace, through the non-mutating read-only factory",
+	"store_reopen.go:openReadOnlyStoreForDBPath":          "own workspace: reopens the command's own database path",
+	"init.go:countExistingIssues":                         "own workspace: the workspace bd init runs in",
+	"init_contributor.go:autoConfigureForkContributor":    "a planning .beads bd init just created, empty",
+	"bootstrap.go:var openSyncedWarmupStore":              "own workspace: the workspace bd bootstrap just synced",
+	"repo.go:var repoSyncCmd":                             "bd-managed remote cache clone, never a user .beads",
+	"create.go:var createCmd":                             "bd-managed remote cache clone (the local target opens through openForeignStore)",
+	"create.go:openDryRunTargetStore":                     "bd-managed remote cache clone (the local target opens through openForeignStore)",
 }
 
 // TestForeignOpensGoThroughOpenForeignStore pins that the metadata factories
