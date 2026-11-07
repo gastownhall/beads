@@ -26,6 +26,7 @@ var derivedReadinessEmitters = map[string]bool{
 	"RecomputeIsBlockedForWispIDsInTx": true,
 	"RecomputeIsBlockedAfterMergeInTx": true,
 	"RecomputeAllIsBlockedInTx":        true,
+	"RecomputeAllWispIsBlockedInTx":    true,
 	// The unexported members of the same family — listed so the intra-family
 	// chain stays connected AND so a mutator cannot inherit emission by calling
 	// one of them either.
@@ -131,6 +132,7 @@ var mutationEntryPoints = []string{
 	"MarkIsBlockedInTx",
 	"MarkIsBlockedInTxWithResult",
 	"RecomputeAllIsBlockedInTx",
+	"RecomputeAllWispIsBlockedInTx",
 	"WakeExpiredDefersInTx",
 	"SweepInTx",
 	// the public lifecycle surface (roles/facade wave). These delegate to the
