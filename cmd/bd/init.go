@@ -560,6 +560,8 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
   Skips all interactive prompts, using sensible defaults:
   • Role defaults to "maintainer" (override with --role)
   • Fork exclude auto-configured when fork detected
+  • On a fresh fork (upstream remote, no routing yet), contributor routing to
+    ~/.beads-planning is configured and reported (silence it with --quiet)
   • Auto-export left at default (disabled)
   • --contributor and --team flags are rejected (wizards require interaction)
   Also auto-detected when stdin is not a terminal or CI=true is set.`,
@@ -2289,7 +2291,10 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// and routing.contributor is not already set.
 		// This gate also enables planning-repository creation and config.yaml updates.
 		if !contributor && projectRoleRepo() {
-			if err := autoConfigureForkContributor(ctx, store, quiet || nonInteractive, roleFlag); err != nil && !quiet {
+			// Only --quiet silences the setup report: --non-interactive skips
+			// prompts, not the notice that writes will now route to the
+			// planning repo (GH#5957).
+			if err := autoConfigureForkContributor(ctx, store, quiet, roleFlag); err != nil && !quiet {
 				fmt.Fprintf(os.Stderr, "Warning: failed to auto-configure fork contributor routing: %v\n", err)
 			}
 		}
