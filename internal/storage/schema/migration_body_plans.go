@@ -91,6 +91,22 @@ var migrationBodyPlans = map[repairKey]migrationBodyPlan{
 		indexDDL:        main59StandInIndexes(),
 		replacementCTEs: migrationBlockedRecomputeCTEs("__bd_0059_recompute_wisps", "__bd_0059_recompute_wisp_deps"),
 	},
+	// gastownhall/beads#6520's ignored twin: the identical recompute over the
+	// real wisp tables (ignored/0015). The same frozen predicate runs here
+	// against wisp_dependencies; the real table's indexes make the correlated
+	// body survivable at 1/8 scale (measured 22.4s) but not at the report's
+	// own 14k-row workload (killed by the failing control at 45s, unfinished),
+	// so the twin ships in the same change: same replacement CTEs, real table
+	// names, and no index DDL -- 0021's shipped indexes already cover every
+	// probe shape the CTEs use, and unlike 0059's stand-ins these tables
+	// persist, so the plan must not leave new indexes behind.
+	{ignoredSource.cursorTable, 15}: {
+		dir:             ignoredSource.dir,
+		name:            "0015_recompute_null_gate_wisp_is_blocked.up.sql",
+		expectedSHA256:  "e761d5c3ceb9610edbb2e1d153e82d235cc7d7f0b87f28a45bec43835e6a4e19",
+		finalUpdate:     "\nUPDATE wisps\n",
+		replacementCTEs: migrationBlockedRecomputeCTEs("wisps", "wisp_dependencies"),
+	},
 }
 
 // main59StandInIndexes returns the three deterministic stand-in indexes of

@@ -130,6 +130,81 @@ func TestMigrationBodyPlanScaledGraph(t *testing.T) {
 			t.Errorf("main 59 cursor hash %s, want the frozen file's %s", hash, planFrozenMain59Hash)
 		}
 	})
+
+	t.Run("wisp_plane_ignored_15", func(t *testing.T) {
+		skipIfNoDolt(t)
+		acquireTestSlot()
+		t.Cleanup(releaseTestSlot)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+		t.Cleanup(cancel)
+
+		admin, conn := planScaledDB(t, ctx, fixture)
+
+		var connID int64
+		if err := conn.QueryRowContext(ctx, "SELECT CONNECTION_ID()").Scan(&connID); err != nil {
+			t.Fatalf("read pinned connection id: %v", err)
+		}
+		done := make(chan struct{})
+		defer close(done)
+		go func() {
+			select {
+			case <-time.After(planKillGrace):
+				_, _ = admin.ExecContext(context.Background(), fmt.Sprintf("KILL QUERY %d", connID))
+			case <-done:
+			}
+		}()
+
+		start := time.Now()
+		_, err := schema.MigrateIgnoredUpTo(ctx, conn, 15)
+		elapsed := time.Since(start)
+		t.Logf("ignored 0015 over %d issues / %d dependencies / %d wisps / %d wisp dependencies: %s",
+			planFixtureIssues, planFixtureDeps, planFixtureWisps, planFixtureWispDeps, elapsed.Round(time.Millisecond))
+		if err != nil {
+			t.Fatalf("ignored 0015 failed after %s (the failing control kills the step at %s; the AC bound is %s): %v",
+				elapsed.Round(time.Millisecond), planKillGrace, planStepBound, err)
+		}
+		if elapsed > planStepBound {
+			t.Fatalf("ignored 0015 took %s, want <= %s over the scaled graph (#6520)", elapsed.Round(time.Millisecond), planStepBound)
+		}
+
+		// The step's wisp blocked state must match the frozen-predicate
+		// reference model (the ignored twin recomputes wisps against the
+		// real wisp tables; no stand-ins, no index DDL in its plan).
+		rows, err := conn.QueryContext(ctx, "SELECT id, is_blocked FROM wisps")
+		if err != nil {
+			t.Fatalf("read wisps: %v", err)
+		}
+		defer rows.Close()
+		mismatches := 0
+		for rows.Next() {
+			var id string
+			var blocked bool
+			if err := rows.Scan(&id, &blocked); err != nil {
+				t.Fatalf("scan wisp: %v", err)
+			}
+			if blocked != model.wispBlocked[id] {
+				mismatches++
+				if mismatches <= 5 {
+					t.Errorf("wisp %s is_blocked=%v, want %v (frozen-predicate model)", id, blocked, model.wispBlocked[id])
+				}
+			}
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatalf("iterate wisps: %v", err)
+		}
+		if mismatches > 0 {
+			t.Fatalf("%d of %d wisps disagree with the frozen-predicate model", mismatches, planFixtureWisps)
+		}
+
+		var hash string
+		if err := conn.QueryRowContext(ctx, "SELECT content_hash FROM ignored_schema_migrations WHERE version = 15").Scan(&hash); err != nil {
+			t.Fatalf("read ignored 15 cursor row: %v", err)
+		}
+		if hash != planFrozenIgnored15 {
+			t.Errorf("ignored 15 cursor hash %s, want the frozen file's %s", hash, planFrozenIgnored15)
+		}
+	})
 }
 
 // planScaledDB creates an isolated database at main v58 / ignored v14 with

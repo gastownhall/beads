@@ -802,7 +802,7 @@ const (
 // unregistered repair never issues the three INFORMATION_SCHEMA probes
 // below and would otherwise report a second, unrelated "unmet
 // expectations" failure on top of the real one.
-func newWispIsBlockedDriftDB(t *testing.T, migrationFile string, wantCursorVersion int) *wispIsBlockedDriftDB {
+func newWispIsBlockedDriftDB(t *testing.T, migrationName string, wantCursorVersion int) *wispIsBlockedDriftDB {
 	t.Helper()
 	failOnSwallowedAdvisory(t)
 	db, mock, err := sqlmock.New()
@@ -821,9 +821,19 @@ func newWispIsBlockedDriftDB(t *testing.T, migrationFile string, wantCursorVersi
 	mock.ExpectQuery(indexQuery).WithArgs("wisps", "idx_wisps_is_blocked").
 		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
 
-	body, err := IgnoredMigrationSQL(migrationFile)
+	bodyBytes, err := IgnoredMigrationSQL(migrationName)
 	if err != nil {
-		t.Fatalf("IgnoredMigrationSQL(%s): %v", migrationFile, err)
+		t.Fatalf("IgnoredMigrationSQL(%s): %v", migrationName, err)
+	}
+	// Resolve the body exactly as runMigrations does, so the drift DB matches
+	// byte-for-byte what the runner executes for this step: the frozen bytes
+	// verbatim for unregistered steps (ignored/0007 below), or the registered
+	// plan's replacement body for registered ones (ignored/0015's execution
+	// plan, gastownhall/beads#6520). A plan that changed what runs without the
+	// drift DB noticing would surface here as a phantom "unexpected query".
+	body, err := resolveMigrationBody(ignoredSource, migrationFile{version: wantCursorVersion, name: migrationName}, []byte(bodyBytes))
+	if err != nil {
+		t.Fatalf("resolveMigrationBody(%s): %v", migrationName, err)
 	}
 
 	return &wispIsBlockedDriftDB{
@@ -854,11 +864,14 @@ func (d *wispIsBlockedDriftDB) ExecContext(_ context.Context, query string, args
 		d.hasIsBlockedIndex = true
 		return execOK{}, nil
 	case d.migrationBody:
-		// The pending migration's real embedded body, byte-for-byte. A wisps
-		// table still missing is_blocked fails on its first statement with
-		// the same error a real engine gives; once the column exists (the
-		// repair ran first) it succeeds -- matching runMigrations' real
-		// ordering (preMigrationRepair before execMigrationBody).
+		// The body the runner executes for this step, byte-for-byte: the
+		// frozen bytes verbatim when unregistered, the plan's replacement
+		// body when registered (resolved in newWispIsBlockedDriftDB the same
+		// way runMigrations resolves it). A wisps table still missing
+		// is_blocked fails on its first statement with the same error a real
+		// engine gives; once the column exists (the repair ran first) it
+		// succeeds -- matching runMigrations' real ordering (preMigrationRepair
+		// before execMigrationBody).
 		if !d.hasIsBlockedColumn {
 			return nil, errors.New("column 'is_blocked' could not be found in any table in scope")
 		}
