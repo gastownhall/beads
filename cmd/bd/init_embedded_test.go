@@ -1662,6 +1662,8 @@ func TestEmbeddedInitRoleRoutingExplicitDefault(t *testing.T) {
 	testEmbeddedInitRoleRouting(t, "explicit", "default")
 }
 
+// The fork case also pins that --quiet keeps the fork report off stdout and
+// stderr while still configuring routing (GH#5957).
 func TestEmbeddedInitRoleRoutingRetainedFork(t *testing.T) {
 	testEmbeddedInitRoleRouting(t, "retained", "fork")
 }
@@ -1773,6 +1775,14 @@ func testEmbeddedInitRoleRouting(t *testing.T, names ...string) {
 				}
 				if strings.Contains(stdout, "bd init --role=maintainer") {
 					t.Errorf("stdout still suggests the re-init opt-out the existing-workspace guard refuses:\n%s", stdout)
+				}
+			}
+			// --quiet still silences the fork report on both streams.
+			if routed && !tc.loud {
+				for _, notice := range []string{"Fork detected", "contributor routing", "Planning repo", "routing.mode", "beads.role"} {
+					if strings.Contains(stdout, notice) || strings.Contains(stderr, notice) {
+						t.Errorf("--quiet init printed fork notice %q:\nstdout:\n%s\nstderr:\n%s", notice, stdout, stderr)
+					}
 				}
 			}
 		})
