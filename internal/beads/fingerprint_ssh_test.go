@@ -502,6 +502,117 @@ func shortenSSHGLookupTimeout(t *testing.T, d time.Duration) {
 	t.Cleanup(func() { sshGLookupTimeout = old })
 }
 
+// TestComputeRepoFingerprint_FQDNHostPolicy covers the conservative policy
+// for dotted written hosts (GH#5990): a two-label domain such as github.com
+// is never looked up, so no ssh config HostName override can change its
+// fingerprint; a multi-label domain such as work.github.com is looked up but
+// adopts only a strict superdomain; dotted spellings whose final label is
+// not TLD-shaped keep the any-result alias behavior pinned by the other
+// tests (github.com-work, covered via the real-ssh suite).
+func TestComputeRepoFingerprint_FQDNHostPolicy(t *testing.T) {
+	cases := []struct {
+		name         string
+		remote       string
+		resolveTo    string
+		wantID       string
+		wantLegacy   string
+		wantAlias    string
+		wantHostName string
+		wantCalled   bool
+	}{
+		{
+			name:       "two-label domain is never looked up; a HostName override cannot change the fingerprint",
+			remote:     "git@github.com:org/repo.git",
+			resolveTo:  "ssh.github.com",
+			wantID:     "github.com/org/repo",
+			wantLegacy: "github.com/org/repo",
+			wantCalled: false,
+		},
+		{
+			name:         "multi-label domain adopts its superdomain",
+			remote:       "git@work.github.com:org/repo.git",
+			resolveTo:    "github.com",
+			wantID:       "github.com/org/repo",
+			wantLegacy:   "work.github.com/org/repo",
+			wantAlias:    "work.github.com",
+			wantHostName: "github.com",
+			wantCalled:   true,
+		},
+		{
+			name:       "multi-label domain rejects a sibling HostName",
+			remote:     "git@work.github.com:org/repo.git",
+			resolveTo:  "ssh.github.com",
+			wantID:     "work.github.com/org/repo",
+			wantLegacy: "work.github.com/org/repo",
+			wantCalled: true,
+		},
+		{
+			name:         "deeper multi-label domain adopts its superdomain",
+			remote:       "git@sub.work.example.com:org/repo.git",
+			resolveTo:    "example.com",
+			wantID:       "example.com/org/repo",
+			wantLegacy:   "sub.work.example.com/org/repo",
+			wantAlias:    "sub.work.example.com",
+			wantHostName: "example.com",
+			wantCalled:   true,
+		},
+		{
+			name:       "multi-label domain rejects an unrelated HostName",
+			remote:     "git@a.b.evil.com:org/repo.git",
+			resolveTo:  "github.com",
+			wantID:     "a.b.evil.com/org/repo",
+			wantLegacy: "a.b.evil.com/org/repo",
+			wantCalled: true,
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			called := false
+			injectSSHResolver(t, func(user, host, port string) (string, error) {
+				called = true
+				return tt.resolveTo, nil
+			})
+			fp, err := ComputeRepoFingerprintForPath(fingerprintRepoForRemote(t, tt.remote))
+			if err != nil {
+				t.Fatalf("ComputeRepoFingerprintForPath: %v", err)
+			}
+			if called != tt.wantCalled {
+				t.Fatalf("resolver called = %v, want %v", called, tt.wantCalled)
+			}
+			if fp.ID != repoIDHash(tt.wantID) {
+				t.Errorf("ID = %s, want hash of %q", fp.ID, tt.wantID)
+			}
+			if fp.LegacyID != repoIDHash(tt.wantLegacy) {
+				t.Errorf("LegacyID = %s, want hash of %q", fp.LegacyID, tt.wantLegacy)
+			}
+			if fp.SSHAlias != tt.wantAlias {
+				t.Errorf("SSHAlias = %q, want %q", fp.SSHAlias, tt.wantAlias)
+			}
+			if fp.SSHHostName != tt.wantHostName {
+				t.Errorf("SSHHostName = %q, want %q", fp.SSHHostName, tt.wantHostName)
+			}
+		})
+	}
+
+	// The preserved github.com spelling must fingerprint identically to the
+	// HTTPS URL of the same repository even under a config that overrides
+	// HostName — the core GH#5990 invariant, held against a hostile config.
+	injectSSHResolver(t, func(user, host, port string) (string, error) {
+		return "ssh.github.com", nil
+	})
+	scp, err := ComputeRepoFingerprintForPath(fingerprintRepoForRemote(t, "git@github.com:org/repo.git"))
+	if err != nil {
+		t.Fatalf("scp fingerprint: %v", err)
+	}
+	viaHTTPS, err := ComputeRepoFingerprintForPath(fingerprintRepoForRemote(t, "https://github.com/org/repo.git"))
+	if err != nil {
+		t.Fatalf("https fingerprint: %v", err)
+	}
+	if scp.ID != viaHTTPS.ID {
+		t.Errorf("github.com scp ID = %s, want the https ID %s", scp.ID, viaHTTPS.ID)
+	}
+}
+
 // TestSplitSSHRemoteMatchesCanonicalize guards the parity the resolution
 // depends on: for every SSH-family remote, rebuilding the canonical string
 // from the split (lowercased host + port suffix + tail) must equal what

@@ -102,11 +102,16 @@ type sshHostLookupPolicy int
 
 const (
 	// sshLookupNone never consults SSH config: the written host is unsafe to
-	// pass to a subprocess, or an IP literal with no alias semantics.
+	// pass to a subprocess, an IP literal with no alias semantics, or a
+	// two-label domain (github.com) that is already canonical.
 	sshLookupNone sshHostLookupPolicy = iota
 	// sshLookupAnyResult resolves bare aliases and adopts any valid changed
 	// HostName.
 	sshLookupAnyResult
+	// sshLookupStrictSubdomain resolves a multi-label domain but adopts only
+	// a HostName that is a strict superdomain of the written host
+	// (work.github.com -> github.com), never a sibling or unrelated host.
+	sshLookupStrictSubdomain
 )
 
 // safeSSHHostToken is the shape a written host or username must have to be
@@ -114,7 +119,19 @@ const (
 // no leading dash (option injection).
 var safeSSHHostToken = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 
+// tldShapedLabel matches the alphabetic final label of a registrable domain
+// (com, org, dev). A final label with digits or hyphens (com-work, 123)
+// marks an intranet alias spelling, not a domain.
+var tldShapedLabel = regexp.MustCompile(`^[a-z]{2,}$`)
+
 // sshHostLookupPolicyFor classifies a written SSH host for alias lookup.
+// Bare aliases — and dotted spellings whose final label is not TLD-shaped,
+// like github.com-work — resolve with any result adopted, since alias
+// conventions own those shapes. A two-label domain (github.com) is never
+// looked up: it is already canonical, and a HostName override for such a
+// host is more likely a misconfiguration than an alias. A deeper domain
+// (work.github.com) resolves but adopts only a strict superdomain, so a
+// config cannot retarget it at an unrelated host.
 func sshHostLookupPolicyFor(host string) sshHostLookupPolicy {
 	if !safeSSHHostToken.MatchString(host) {
 		return sshLookupNone
@@ -122,7 +139,15 @@ func sshHostLookupPolicyFor(host string) sshHostLookupPolicy {
 	if net.ParseIP(host) != nil {
 		return sshLookupNone
 	}
-	return sshLookupAnyResult
+	lower := strings.ToLower(host)
+	finalLabel := lower[strings.LastIndexByte(lower, '.')+1:]
+	if !strings.Contains(lower, ".") || !tldShapedLabel.MatchString(finalLabel) {
+		return sshLookupAnyResult
+	}
+	if strings.Count(lower, ".") == 1 {
+		return sshLookupNone
+	}
+	return sshLookupStrictSubdomain
 }
 
 // sshGLookupTimeout bounds each ssh -G evaluation. Var, not const, so tests
@@ -253,10 +278,21 @@ func normalizeResolvedHost(raw string) (string, bool) {
 // HostName and reports the host the fingerprint should hash. A HostName
 // equal to the written host (case-insensitively) is not an adoption.
 func adoptResolvedHost(written, resolved string, policy sshHostLookupPolicy) (string, bool) {
-	if resolved == strings.ToLower(written) {
+	writtenLower := strings.ToLower(written)
+	if resolved == writtenLower {
 		return "", false
 	}
 	if policy == sshLookupAnyResult {
+		return resolved, true
+	}
+	if policy == sshLookupStrictSubdomain &&
+		strings.Contains(resolved, ".") &&
+		len(writtenLower) > len(resolved)+1 &&
+		strings.HasSuffix(writtenLower, "."+resolved) {
+		// The written host must be a strict subdomain of the resolved one
+		// (work.github.com -> github.com): the resolved host is itself
+		// dotted, and the written host ends in ".<resolved>" with at least
+		// one label of its own.
 		return resolved, true
 	}
 	return "", false
