@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "git",
     srcs = [
+        "configget.go",
         "discover_linux.go",
         "discover_other.go",
         "gitconfig_linux.go",
@@ -15,6 +16,7 @@ go_library(
 go_test(
     name = "git_test",
     srcs = [
+        "configget_test.go",
         "discover_linux_test.go",
         "gitdir_test.go",
         "inherited_location_test.go",

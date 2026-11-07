@@ -601,8 +601,14 @@ func runInitProxiedServerTail(cmd *cobra.Command, ctx context.Context, in initPr
 		if role == "" {
 			role = "maintainer"
 		}
-		_, hasRole, _ := gitUC.BeadsRole(ctx)
-		if !hasRole || in.roleFlag != "" {
+		// A read git fails is not "unset": without --role the tail leaves the
+		// role alone and reports the failure, as direct init does.
+		_, hasRole, readErr := gitUC.BeadsRole(ctx)
+		if readErr != nil && in.roleFlag == "" {
+			if !in.quiet {
+				warnInitRoleReadFailure(readErr)
+			}
+		} else if !hasRole || in.roleFlag != "" {
 			if err := gitUC.SetBeadsRole(ctx, role); err != nil && !in.quiet {
 				fmt.Fprintf(os.Stderr, "Warning: failed to set beads.role: %v\n", err)
 			}
