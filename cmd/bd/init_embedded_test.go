@@ -1675,6 +1675,18 @@ func TestEmbeddedInitForkRoutingDisclosedNonInteractive(t *testing.T) {
 	testEmbeddedInitRoleRouting(t, "fork_disclosed")
 }
 
+// TestEmbeddedInitRoleRoutingRetainedMaintainerFork pins GH#5957: a
+// beads.role=maintainer set before init keeps a fork unrouted (no routing
+// keys, no planning repo), while a pre-existing contributor still routes.
+func TestEmbeddedInitRoleRoutingRetainedMaintainerFork(t *testing.T) {
+	testEmbeddedInitRoleRouting(t, "maintainer_fork", "contributor_fork")
+}
+
+// An explicit --role still decides a fork's routing over any existing role.
+func TestEmbeddedInitRoleRoutingExplicitFork(t *testing.T) {
+	testEmbeddedInitRoleRouting(t, "explicit_contributor_fork", "explicit_maintainer_fork")
+}
+
 func testEmbeddedInitRoleRouting(t *testing.T, names ...string) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt init tests")
@@ -1691,6 +1703,10 @@ func testEmbeddedInitRoleRouting(t *testing.T, names ...string) {
 		{name: "retained", initial: "contributor", want: "contributor"},
 		{name: "fork", want: "contributor", fork: true},
 		{name: "fork_disclosed", want: "contributor", fork: true, loud: true},
+		{name: "maintainer_fork", initial: "maintainer", want: "maintainer", fork: true, loud: true},
+		{name: "contributor_fork", initial: "contributor", want: "contributor", fork: true},
+		{name: "explicit_contributor_fork", initial: "maintainer", flag: "contributor", want: "contributor", fork: true},
+		{name: "explicit_maintainer_fork", flag: "maintainer", want: "maintainer", fork: true},
 	} {
 		if !slices.Contains(names, tc.name) {
 			continue
@@ -1775,6 +1791,19 @@ func testEmbeddedInitRoleRouting(t *testing.T, names ...string) {
 				}
 				if strings.Contains(stdout, "bd init --role=maintainer") {
 					t.Errorf("stdout still suggests the re-init opt-out the existing-workspace guard refuses:\n%s", stdout)
+				}
+			}
+			if tc.fork && !routed {
+				for _, key := range []string{"routing.mode", "routing.contributor", "sync.remote"} {
+					if got := readBack(t, beadsDir, "rolefixture", key, false); got != "" {
+						t.Errorf("maintainer fork init wrote %s = %q", key, got)
+					}
+				}
+				if _, err := os.Stat(planning); !os.IsNotExist(err) {
+					t.Errorf("maintainer fork init created the planning repo %s: %v", planning, err)
+				}
+				if tc.loud && (!strings.Contains(stdout, "Contributor routing skipped (beads.role=maintainer).") || strings.Contains(stdout, "bd init --contributor")) {
+					t.Errorf("maintainer fork stdout lacks the role skip or keeps the wizard hint:\n%s", stdout)
 				}
 			}
 			// --quiet still silences the fork report on both streams.
