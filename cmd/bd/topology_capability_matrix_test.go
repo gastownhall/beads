@@ -244,11 +244,6 @@ var capabilityProbes = []probe{
 			outcome: outcomeRefusedTyped, code: "proxy.dolt_start.conflict",
 			substr: "dolt start is not supported in proxied-server mode",
 			reason: reasonDesign,
-			// dolt_proxied_lifecycle.go builds this refusal by hand rather
-			// than through the capability registry, so its JSON has the code
-			// but no `reason` — a consumer cannot tell design from gap here.
-			reasonMissing: true,
-			knownBad:      "proxied `dolt start` refusal (proxy.dolt_start.conflict) omits the `reason` field every registry refusal carries",
 		},
 		override: map[string]expectation{
 			topoEmbedded: {
