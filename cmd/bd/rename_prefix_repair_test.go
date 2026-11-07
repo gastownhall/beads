@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage"
@@ -295,4 +296,256 @@ func TestRenameFailureLeavesBeadGatesPending(t *testing.T) {
 			})
 		}
 	}
+}
+
+func TestRenameRewritesCloseReasonAndOwnText(t *testing.T) {
+	// GH#7040: bd rename left other issues' close_reason and the renamed
+	// issue's own text naming the old ID, and rewrote a dotted child's ID that
+	// starts with it. Rewriting a close_reason must leave the closed issue
+	// closed, at its old closed_at.
+	ctx := context.Background()
+	testStore := newTestStore(t, filepath.Join(t.TempDir(), "test.db"))
+
+	for _, issue := range []*types.Issue{
+		{ID: "test-a", Title: "A (test-a)", Description: "test-a tracks test-a.1; test-a,test-a; see test-a.", Design: "test-a design",
+			Notes: "notes on test-a", AcceptanceCriteria: "test-a done", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+		{ID: "test-b", Title: "B", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+	} {
+		if err := testStore.CreateIssue(ctx, issue, "test"); err != nil {
+			t.Fatalf("failed to create issue %s: %v", issue.ID, err)
+		}
+	}
+	if err := testStore.CloseIssue(ctx, "test-b", "duplicate of test-a", "test", ""); err != nil {
+		t.Fatalf("failed to close test-b: %v", err)
+	}
+	if err := testStore.CloseIssue(ctx, "test-a", "test-a is done", "test", ""); err != nil {
+		t.Fatalf("failed to close test-a: %v", err)
+	}
+	closedB, err := testStore.GetIssue(ctx, "test-b")
+	if err != nil || closedB.ClosedAt == nil {
+		t.Fatalf("test-b after close: %+v, %v; want a closed_at", closedB, err)
+	}
+
+	a, err := testStore.GetIssue(ctx, "test-a")
+	if err != nil || a.ClosedAt == nil {
+		t.Fatalf("test-a after close: %+v, %v; want a closed_at", a, err)
+	}
+	if err := renameIssueKeepingBeadGates(ctx, testStore, a, "test-z", nil, "test"); err != nil {
+		t.Fatalf("rename failed: %v", err)
+	}
+	if report := updateReferencesInAllIssues(ctx, testStore, "test-a", "test-z", "", "test"); len(report.failed)+len(report.unchecked) > 0 {
+		t.Fatalf("reference update failed: %+v", report)
+	}
+
+	z, err := testStore.GetIssue(ctx, "test-z")
+	if err != nil {
+		t.Fatalf("failed to get test-z: %v", err)
+	}
+	for _, f := range []struct{ field, got, want string }{
+		{"title", z.Title, "A (test-z)"},
+		{"description", z.Description, "test-z tracks test-a.1; test-z,test-z; see test-z."},
+		{"design", z.Design, "test-z design"},
+		{"notes", z.Notes, "notes on test-z"},
+		{"acceptance_criteria", z.AcceptanceCriteria, "test-z done"},
+		{"close_reason", z.CloseReason, "test-z is done"},
+	} {
+		if f.got != f.want {
+			t.Errorf("renamed issue %s = %q, want %q", f.field, f.got, f.want)
+		}
+	}
+	if z.Status != types.StatusClosed {
+		t.Errorf("renamed issue status = %q, want closed", z.Status)
+	}
+	if z.ClosedAt == nil || !z.ClosedAt.Equal(*a.ClosedAt) {
+		t.Errorf("renamed issue closed_at = %v, want it unchanged at %v", z.ClosedAt, *a.ClosedAt)
+	}
+	b, err := testStore.GetIssue(ctx, "test-b")
+	if err != nil {
+		t.Fatalf("failed to get test-b: %v", err)
+	}
+	if want := "duplicate of test-z"; b.CloseReason != want {
+		t.Errorf("test-b close_reason = %q, want %q", b.CloseReason, want)
+	}
+	if b.Status != types.StatusClosed {
+		t.Errorf("test-b status = %q, want closed", b.Status)
+	}
+	if b.ClosedAt == nil || !b.ClosedAt.Equal(*closedB.ClosedAt) {
+		t.Errorf("test-b closed_at = %v, want it unchanged at %v", b.ClosedAt, *closedB.ClosedAt)
+	}
+}
+
+// failingUpdateStore applies the UpdateIssue of failID and then fails it, like
+// a commit whose response was lost.
+type failingUpdateStore struct {
+	storage.DoltStorage
+	failID string
+}
+
+func (s *failingUpdateStore) UpdateIssue(ctx context.Context, id string, updates map[string]interface{}, actor string) error {
+	if err := s.DoltStorage.UpdateIssue(ctx, id, updates, actor); err != nil || id != s.failID {
+		return err
+	}
+	return errors.New("injected UpdateIssue failure")
+}
+
+// runRenameOutput runs bd rename old new against st and returns the lines it
+// printed after its "Renamed old -> new" line.
+func runRenameOutput(t *testing.T, st storage.DoltStorage, oldID, newID string) []string {
+	t.Helper()
+	oldRootCtx, oldWrote := rootCtx, commandDidWrite.Load()
+	rootCtx = context.Background()
+	defer func() { rootCtx = oldRootCtx; commandDidWrite.Store(oldWrote) }()
+	out, err := captureStdoutWithError(t, func() error {
+		return withRenameStore(st, func() error { return runRename(renameCmd, []string{oldID, newID}) })
+	})
+	if err != nil {
+		t.Fatalf("bd rename %s %s: %v\n%s", oldID, newID, err, out)
+	}
+	lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
+	if !strings.HasPrefix(lines[0], "Renamed ") {
+		t.Fatalf("bd rename %s %s printed %q first, want its Renamed line", oldID, newID, lines[0])
+	}
+	return lines[1:]
+}
+
+func TestRenameReportsReferencesItLeft(t *testing.T) {
+	// GH#7040: bd rename rewrote references without saying where, so nothing
+	// told the user which issues it had changed.
+	ctx := context.Background()
+	newStore := func(t *testing.T, issues ...*types.Issue) storage.DoltStorage {
+		t.Helper()
+		testStore := newTestStore(t, filepath.Join(t.TempDir(), "test.db"))
+		for _, issue := range issues {
+			issue.Status, issue.Priority, issue.IssueType = types.StatusOpen, 2, types.TypeTask
+			if err := testStore.CreateIssue(ctx, issue, "test"); err != nil {
+				t.Fatalf("failed to create issue %s: %v", issue.ID, err)
+			}
+		}
+		return testStore
+	}
+	wantLines := func(t *testing.T, got, want []string) {
+		t.Helper()
+		if strings.Join(got, "\n") != strings.Join(want, "\n") {
+			t.Errorf("bd rename report:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+		}
+	}
+
+	t.Run("rewritten fields", func(t *testing.T) {
+		st := newStore(t,
+			&types.Issue{ID: "test-a", Title: "A", Notes: "see test-a"},
+			&types.Issue{ID: "test-b", Title: "test-a follow-up", Description: "after test-a"},
+			&types.Issue{ID: "test-c", Title: "C", Description: "unrelated test-a.1"},
+		)
+		wantLines(t, runRenameOutput(t, st, "test-a", "test-z"), []string{
+			"Rewrote test-a to test-z in:",
+			"  test-b: title, description",
+			"  test-z: notes",
+		})
+	})
+
+	t.Run("failed update", func(t *testing.T) {
+		// The update of test-b lands but reports an error. bd rename still
+		// succeeds, rewrites test-c after it, and does not count test-b as
+		// rewritten.
+		st := &failingUpdateStore{DoltStorage: newStore(t,
+			&types.Issue{ID: "test-a", Title: "A"},
+			&types.Issue{ID: "test-b", Title: "B", Description: "after test-a"},
+			&types.Issue{ID: "test-c", Title: "C", Notes: "see test-a"},
+		), failID: "test-b"}
+		wantLines(t, runRenameOutput(t, st, "test-a", "test-z"), []string{
+			"Rewrote test-a to test-z in:",
+			"  test-c: notes",
+			"Warning: failed to update references in test-b (description); the update may or may not have landed: injected UpdateIssue failure",
+		})
+		if _, err := st.GetIssue(ctx, "test-z"); err != nil {
+			t.Errorf("renamed issue after a failed reference update: %v, want it kept", err)
+		}
+	})
+
+	t.Run("comments", func(t *testing.T) {
+		// Comments keep their text, author, ID and time; each one mentioning
+		// test-a is listed, wherever it is attached. The renamed issue's
+		// comments move to test-z with it.
+		st := newStore(t,
+			&types.Issue{ID: "test-a", Title: "A"},
+			&types.Issue{ID: "test-b", Title: "B"},
+			&types.Issue{ID: "test-wisp-w1", Title: "W", Ephemeral: true},
+		)
+		var before []*types.Comment
+		for _, c := range []struct{ issueID, text string }{
+			{"test-b", "blocked on test-a"},
+			{"test-b", "see test-a.1"},
+			{"test-a", "test-a, test-a"},
+			{"test-wisp-w1", "spawned by test-a"},
+		} {
+			comment, err := st.AddIssueComment(ctx, c.issueID, "alice", c.text)
+			if err != nil {
+				t.Fatalf("failed to comment on %s: %v", c.issueID, err)
+			}
+			before = append(before, comment)
+		}
+		wantLines(t, runRenameOutput(t, st, "test-a", "test-z"), []string{
+			"References left unchanged:",
+			"  test-b comment " + before[0].ID + ": test-a (comment text is not rewritten)",
+			"  test-wisp-w1 comment " + before[3].ID + ": test-a (comment text is not rewritten)",
+			"  test-z comment " + before[2].ID + ": test-a (comment text is not rewritten)",
+		})
+
+		after, err := st.GetCommentsForIssues(ctx, []string{"test-b", "test-wisp-w1", "test-z"})
+		if err != nil {
+			t.Fatalf("failed to get comments: %v", err)
+		}
+		byID := map[string]*types.Comment{}
+		for _, comments := range after {
+			for _, c := range comments {
+				byID[c.ID] = c
+			}
+		}
+		for _, want := range before {
+			if want.IssueID == "test-a" {
+				want.IssueID = "test-z"
+			}
+			got := byID[want.ID]
+			if got == nil || got.IssueID != want.IssueID || got.Author != want.Author || got.Text != want.Text || !got.CreatedAt.Equal(want.CreatedAt) {
+				t.Errorf("comment %s after the rename = %+v, want %+v", want.ID, got, want)
+			}
+		}
+	})
+
+	t.Run("short forms", func(t *testing.T) {
+		// GH#7040: renumbering test-12x.39 leaves "12x.39", how siblings
+		// under an epic are often written, naming whatever bead takes that
+		// number. It is listed, never rewritten: it may mean another bead.
+		st := newStore(t,
+			&types.Issue{ID: "test-12x", Title: "Epic"},
+			&types.Issue{ID: "test-12x.39", Title: "Child"},
+			&types.Issue{ID: "test-b", Title: "B", Notes: "after 12x.39 and test-12x.39; not 12x.390"},
+		)
+		comment, err := st.AddIssueComment(ctx, "test-12x", "alice", "12x.39 is next")
+		if err != nil {
+			t.Fatalf("failed to comment on test-12x: %v", err)
+		}
+		wantLines(t, runRenameOutput(t, st, "test-12x.39", "test-12x.47"), []string{
+			"Rewrote test-12x.39 to test-12x.47 in:",
+			"  test-b: notes",
+			"References left unchanged:",
+			"  test-12x comment " + comment.ID + ": 12x.39 (possible short form of test-12x.39)",
+			"  test-b notes: 12x.39 (possible short form of test-12x.39)",
+		})
+		b, err := st.GetIssue(ctx, "test-b")
+		if err != nil {
+			t.Fatalf("failed to get test-b: %v", err)
+		}
+		if want := "after 12x.39 and test-12x.47; not 12x.390"; b.Notes != want {
+			t.Errorf("test-b notes = %q, want %q", b.Notes, want)
+		}
+	})
+
+	t.Run("quiet", func(t *testing.T) {
+		st := newStore(t,
+			&types.Issue{ID: "test-a", Title: "A"},
+			&types.Issue{ID: "test-b", Title: "B", Description: "about test-a.1"},
+		)
+		wantLines(t, runRenameOutput(t, st, "test-a", "test-z"), nil)
+	})
 }
