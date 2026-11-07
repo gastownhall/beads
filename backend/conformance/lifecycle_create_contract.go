@@ -333,6 +333,162 @@ func RunLifecycleCreateRefusesAForeignIDPrefix(t *testing.T, ctx context.Context
 			}
 		})
 	}
+
+	// The guard stays the CALLER-NAMED ID's even when the ID names a child of
+	// a foreign-prefix parent that is itself admitted: the mint exemption
+	// (MintsAChildUnderAForeignPrefixParent) is the mint's, not the parent's,
+	// so an explicit foreign ID under such a parent is still refused without
+	// force and still overridable with it. This arm is what proves the mint
+	// fix did not widen the exemption to every create that can name a parent.
+	foreignParent := "lccforeign-" + fixture.IssuePrefix + "-refuse-parent"
+	if _, err := fixture.Lifecycle.Create(ctx, publicops.CreateRequest{
+		Actor: "writer", ForceIDPrefix: true,
+		Issue: lifecycleCreateIssue(foreignParent),
+	}); err != nil {
+		t.Fatalf("seed the foreign-prefix parent %s: %v", foreignParent, err)
+	}
+	named := "lccforeign-" + fixture.IssuePrefix + "-named"
+	_, err := fixture.Lifecycle.Create(ctx, publicops.CreateRequest{
+		Actor:    "writer",
+		ParentID: foreignParent,
+		Issue: &types.Issue{
+			ID: named, Title: "caller-named child", Status: types.StatusOpen,
+			Priority: 2, IssueType: types.TypeTask,
+		},
+	})
+	if !errors.Is(err, storage.ErrPrefixMismatch) {
+		t.Fatalf("unforced create at the caller-named foreign ID %q: err = %v, want ErrPrefixMismatch", named, err)
+	}
+	assertLifecycleCreateAbsent(t, ctx, fixture, named, "after the unforced caller-named foreign-prefix create")
+
+	// The override half, same as every arm above.
+	if _, err := fixture.Lifecycle.Create(ctx, publicops.CreateRequest{
+		Actor: "writer", ForceIDPrefix: true,
+		ParentID: foreignParent,
+		Issue: &types.Issue{
+			ID: named, Title: "caller-named child", Status: types.StatusOpen,
+			Priority: 2, IssueType: types.TypeTask,
+		},
+	}); err != nil {
+		t.Fatalf("forced create at the caller-named foreign ID %q: %v", named, err)
+	}
+	if stored := lifecycleCreateRow(t, ctx, fixture, named); stored.Title != "caller-named child" {
+		t.Errorf("stored %s title = %q, want %q", named, stored.Title, "caller-named child")
+	}
+}
+
+// RunLifecycleCreateMintsAChildUnderAForeignPrefixParent pins what the prefix
+// guard is FOR: an ID the caller names. Once a foreign-prefix parent exists
+// (admitted with ForceIDPrefix), a create that names only ParentID asks the
+// backend to mint `<parent>.<n>`, an ID the caller could not have chosen, so it
+// lands without the flag (GH#7965: `bd create --parent export-work` refused
+// with "prefix mismatch" in a workspace prefixed `walkthrough`).
+//
+// The unit-of-work backend already minted such children; the shared create body
+// re-applied the explicit-ID guard to the minted one. The refusal half stays
+// pinned beside it: an explicit foreign Issue.ID is still refused even when it
+// names a ParentID, and a missing foreign parent still leaves nothing behind.
+// Each arm seeds its own parent so the child ordinals it asserts are its own.
+func RunLifecycleCreateMintsAChildUnderAForeignPrefixParent(t *testing.T, ctx context.Context, fixture LifecycleCreateFixture) {
+	t.Helper()
+
+	// A prefix no fixture configures, so the parent is foreign whatever this
+	// workspace calls itself.
+	foreignParent := func(t *testing.T, name string) string {
+		t.Helper()
+		id := "lccexport-" + fixture.IssuePrefix + "-" + name
+		if _, err := fixture.Lifecycle.Create(ctx, publicops.CreateRequest{
+			Actor: "writer", ForceIDPrefix: true,
+			Issue: &types.Issue{
+				ID: id, Title: name, Status: types.StatusOpen,
+				Priority: 2, IssueType: types.TypeTask,
+			},
+		}); err != nil {
+			t.Fatalf("forced create of the foreign parent %q: %v", id, err)
+		}
+		return id
+	}
+	createChild := func(parent, title string, ephemeral bool) (publicops.CreateResult, error) {
+		return fixture.Lifecycle.Create(ctx, publicops.CreateRequest{
+			Actor: "writer", ParentID: parent,
+			Issue: &types.Issue{
+				Title: title, Status: types.StatusOpen,
+				Priority: 2, IssueType: types.TypeTask, Ephemeral: ephemeral,
+			},
+		})
+	}
+	assertMinted := func(t *testing.T, result publicops.CreateResult, err error, parent, want string) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("unforced child create under the foreign parent %q: %v", parent, err)
+		}
+		if result.Issue.ID != want {
+			t.Fatalf("child result ID = %q, want the minted %q", result.Issue.ID, want)
+		}
+		stored := lifecycleCreateRow(t, ctx, fixture, want)
+		if stored.ID != want {
+			t.Errorf("child row ID = %q, want %q", stored.ID, want)
+		}
+	}
+
+	t.Run("durable child and grandchild", func(t *testing.T) {
+		parent := foreignParent(t, "work")
+		child, err := createChild(parent, "first child", false)
+		assertMinted(t, child, err, parent, parent+".1")
+		second, err := createChild(parent, "second child", false)
+		assertMinted(t, second, err, parent, parent+".2")
+		grandchild, err := createChild(child.Issue.ID, "grandchild", false)
+		assertMinted(t, grandchild, err, child.Issue.ID, parent+".1.1")
+	})
+
+	t.Run("ephemeral child", func(t *testing.T) {
+		parent := foreignParent(t, "wisp-work")
+		child, err := createChild(parent, "ephemeral child", true)
+		assertMinted(t, child, err, parent, parent+".1")
+		if stored := lifecycleCreateRow(t, ctx, fixture, child.Issue.ID); !stored.Ephemeral && !stored.NoHistory {
+			t.Errorf("ephemeral child %q landed in the durable plane", child.Issue.ID)
+		}
+	})
+
+	t.Run("explicit foreign ID under a parent is still refused", func(t *testing.T) {
+		parent := foreignParent(t, "named-work")
+		named := "lccnamed-" + fixture.IssuePrefix + "-1"
+		_, err := fixture.Lifecycle.Create(ctx, publicops.CreateRequest{
+			Actor: "writer", ParentID: parent,
+			Issue: &types.Issue{
+				ID: named, Title: "named child", Status: types.StatusOpen,
+				Priority: 2, IssueType: types.TypeTask,
+			},
+		})
+		// Refused, not typed: a served leg answers this with the wire's
+		// invalid_argument/id pair (L-create-prefix), and the forced retry
+		// below is what says the refusal was the prefix guard.
+		if err == nil {
+			t.Fatalf("unforced create at the explicit foreign ID %q under %q succeeded, want a refusal", named, parent)
+		}
+		assertLifecycleCreateAbsent(t, ctx, fixture, named, "after the refused explicit child")
+		forced, err := fixture.Lifecycle.Create(ctx, publicops.CreateRequest{
+			Actor: "writer", ParentID: parent, ForceIDPrefix: true,
+			Issue: &types.Issue{
+				ID: named, Title: "named child", Status: types.StatusOpen,
+				Priority: 2, IssueType: types.TypeTask,
+			},
+		})
+		if err != nil {
+			t.Fatalf("forced create at the explicit foreign ID %q under %q: %v", named, parent, err)
+		}
+		if forced.Issue.ID != named {
+			t.Errorf("forced explicit child result ID = %q, want the requested %q", forced.Issue.ID, named)
+		}
+	})
+
+	t.Run("missing foreign parent leaves nothing", func(t *testing.T) {
+		missing := "lccexport-" + fixture.IssuePrefix + "-absent"
+		if _, err := createChild(missing, "orphan", false); err == nil {
+			t.Fatalf("child create under the missing parent %q succeeded, want a refusal", missing)
+		}
+		assertLifecycleCreateAbsent(t, ctx, fixture, missing+".1", "after the refused orphan create")
+	})
 }
 
 // RunLifecycleCreateInheritsParentLabels pins

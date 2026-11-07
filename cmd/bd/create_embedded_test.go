@@ -1051,6 +1051,34 @@ func TestEmbeddedCreateCrossRepoWithParent(t *testing.T) {
 	assertDepExists(t, targetBeadsDir, "tgt", child.ID, parent.ID)
 }
 
+// TestEmbeddedCreateChildOfAForeignPrefixParent is GH#7965's `--parent` step:
+// once `--id export-work --force` admits a parent outside the workspace prefix,
+// `--parent export-work` mints export-work.1 without a second --force, since
+// the caller never named the child's ID.
+func TestEmbeddedCreateChildOfAForeignPrefixParent(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt create tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "walkthrough")
+
+	parent := bdCreate(t, bd, dir, "Parent", "--id", "export-work", "--force")
+	if parent.ID != "export-work" {
+		t.Fatalf("forced parent ID = %q, want export-work", parent.ID)
+	}
+
+	child := bdCreate(t, bd, dir, "Child", "--parent", "export-work")
+	if child.ID != "export-work.1" {
+		t.Fatalf("child ID = %q, want export-work.1", child.ID)
+	}
+	if stored := bdShow(t, bd, dir, "export-work.1"); stored.Title != "Child" {
+		t.Fatalf("stored child title = %q, want Child", stored.Title)
+	}
+	assertDepExists(t, beadsDir, "walkthrough", child.ID, parent.ID)
+}
+
 func TestEmbeddedCreateDryRunRepoDoesNotInitializeTarget(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt create tests")
