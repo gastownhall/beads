@@ -26,9 +26,21 @@ var renameCmd = &cobra.Command{
 
 This updates:
 - The issue's primary ID
-- All references in other issues (descriptions, titles, notes, etc.)
 - Dependencies pointing to/from this issue
-- Labels, comments, and events
+- Labels, comments, and events, which move to the new ID
+- Mentions of the old ID in the title, description, design, notes,
+  acceptance criteria and close reason of every issue, the renamed one
+  included
+
+A mention is the old ID on its own. A longer ID that starts or ends with the
+old ID, such as a child <old-id>.1, is a different issue and is left alone.
+
+Comment text is not rewritten, and neither is a possible short form of a
+child ID, such as 12x.39 for abc-12x.39: either may mean another issue.
+After the rename, bd rename lists each issue and field it rewrote, each
+comment or field it left naming the old ID or a possible short form of it,
+an update that failed (it may still have landed), and anything it could not
+check. A failed reference update does not undo the rename.
 
 Examples:
   bd rename bd-w382l bd-dolt     # Rename to memorable ID

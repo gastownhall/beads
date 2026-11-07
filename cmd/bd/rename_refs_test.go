@@ -284,3 +284,27 @@ func TestRenameShortForm(t *testing.T) {
 		}
 	}
 }
+
+func TestRenameReferenceHelp(t *testing.T) {
+	t.Parallel()
+	// GH#7040: bd rename's help said it updated "all references", while it
+	// leaves comment text and short forms alone; it must say which text it
+	// rewrites and what it only reports.
+	help := strings.Join(strings.Fields(renameCmd.Long), " ")
+	for _, want := range []string{
+		"title, description, design, notes, acceptance criteria and close reason of every issue, the renamed one included",
+		"A longer ID that starts or ends with the old ID",
+		"Comment text is not rewritten",
+		"possible short form",
+		"lists each issue and field it rewrote",
+		"an update that failed",
+		"anything it could not check",
+	} {
+		if !strings.Contains(help, want) {
+			t.Errorf("bd rename help lacks %q:\n%s", want, renameCmd.Long)
+		}
+	}
+	if strings.Contains(help, "All references in other issues") {
+		t.Errorf("bd rename help still claims it rewrites all references:\n%s", renameCmd.Long)
+	}
+}
