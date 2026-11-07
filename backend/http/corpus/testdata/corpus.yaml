@@ -756,6 +756,7 @@ shapes:
     args: [delete, e2e-t-dc, --cascade, --force]
     compare: exit
     verify: [[show, --json, e2e-t-dc.1]]
+    pending: {slice: "SRV-1", reason: "bd delete --cascade needs issues.delete.containmentCascade (GH#6301: an older server's cascade follows every dependency type, not just parent-child), which the reference server does not advertise, so the client refuses before dialing (pinned passing against the current server by internal/httpclient TestServedDeleterCascadeDeletesTheClosure); remove the mark when reference_server.json is upgraded"}
   - id: mc-delete-from-file
     source: mc session_cleanup.py / core reaper (delete --from-file)
     args: [delete, --from-file, "{file:delete-list.txt}", --force]

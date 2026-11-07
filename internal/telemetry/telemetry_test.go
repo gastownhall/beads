@@ -371,3 +371,45 @@ func containsSubstr(haystack []string, needle string) bool {
 	}
 	return false
 }
+
+// TestBuildResource_NeverCarriesCommandLine pins the privacy contract of the
+// process resource: it is attached to every exported metric and span, so it
+// must not carry the raw command line (which can hold secrets, search text
+// and issue titles that scrubArgsForTelemetry exists to keep out), nor the
+// executable path or OS user name, which identify the person running bd.
+func TestBuildResource_NeverCarriesCommandLine(t *testing.T) {
+	clearAllEnv(t)
+	const secret = "s3cr3t-telemetry-argv-canary"
+	origArgs := os.Args
+	os.Args = []string{origArgs[0], "create", "--title", "deploy key " + secret, "--password=" + secret}
+	t.Cleanup(func() { os.Args = origArgs })
+
+	res, err := buildResource(context.Background(), "bd", "1.0.0")
+	if err != nil {
+		t.Fatalf("buildResource: %v", err)
+	}
+
+	for _, banned := range []string{
+		"process.command_args",
+		"process.command",
+		"process.command_line",
+		"process.executable.path",
+		"process.owner",
+	} {
+		if v, ok := lookupAttr(res.Attributes(), banned); ok {
+			t.Errorf("resource carries %s = %q; it must not", banned, v.Emit())
+		}
+	}
+	for _, kv := range res.Attributes() {
+		if strings.Contains(kv.Value.Emit(), secret) {
+			t.Errorf("resource attribute %s = %q holds argv text", kv.Key, kv.Value.Emit())
+		}
+	}
+
+	// The non-identifying process attributes stay.
+	for _, kept := range []string{"process.pid", "process.executable.name", "process.runtime.name", "process.runtime.version", "host.name"} {
+		if _, ok := lookupAttr(res.Attributes(), kept); !ok {
+			t.Errorf("resource lost %s", kept)
+		}
+	}
+}

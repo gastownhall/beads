@@ -376,6 +376,11 @@ func applyResolvedConfig(ctx context.Context, beadsDir string, fileCfg *configfi
 	if cfg.ServerHost == "" {
 		cfg.ServerHost = fileCfg.GetDoltServerHost()
 	}
+	// Caller, then BEADS_DOLT_SERVER_SOCKET, then metadata.json, as on the CLI
+	// path. Still a preference: ResolveSocketTransport may fall back to TCP.
+	if cfg.ServerSocket == "" {
+		cfg.ServerSocket = fileCfg.GetDoltServerSocket()
+	}
 	// The port and the password come from the endpoint New will dial
 	// (FillServerEndpoint): the store's port rule, the legacy BEADS_DOLT_PORT
 	// included, and the credentials-file entry for that host and port. The
@@ -395,6 +400,15 @@ func applyResolvedConfig(ctx context.Context, beadsDir string, fileCfg *configfi
 		cfg.ServerPort = ep.Port
 		cfg.ServerPortSource = ep.PortSource
 		cfg.ServerPortSharedServer = ep.PortSharedServer
+	}
+	if os.Getenv("BEADS_DOLT_PASSWORD") != "" {
+		socket := cfg.ServerSocket
+		if socket == "" {
+			socket = ep.Socket
+		}
+		if err := CheckServerEndpointTrust(beadsDir, fileCfg, cfg.ServerHost, cfg.ServerPort, socket); err != nil {
+			return err
+		}
 	}
 	// Resolve the server-mode credential (the connection username). In server mode a
 	// configured credential command takes precedence over the static user; it fails
