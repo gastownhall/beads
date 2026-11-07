@@ -468,6 +468,11 @@ func normalizeRepoPathForStorage(repoPath string) (string, error) {
 // spelling bd repo add stores for it. Exact matches win so entries written
 // verbatim by older versions, relative ones included, stay removable.
 func findConfiguredRepo(additional []string, arg string) (string, error) {
+	// Issues of the primary repository have an empty source_repo, so an empty
+	// argument must never reach DeleteIssuesBySourceRepo.
+	if arg == "" {
+		return "", fmt.Errorf("repository path must not be empty")
+	}
 	for _, existing := range additional {
 		if existing == arg {
 			return existing, nil

@@ -445,3 +445,75 @@ func TestRepoPathAddThenRemoveByAddSpelling(t *testing.T) {
 		t.Fatalf("json path = %v, want %q", result["path"], w.other)
 	}
 }
+
+// TestRepoPathRemovalRejectsBeforeDeleting pins that every failed lookup
+// returns before bd repo remove deletes issues or clears the sync cache.
+func TestRepoPathRemovalRejectsBeforeDeleting(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, w repoPathWorkspace)
+		arg   string
+	}{
+		{
+			name: "missing config",
+			setup: func(t *testing.T, w repoPathWorkspace) {
+				if err := os.Remove(w.configPath); err != nil {
+					t.Fatal(err)
+				}
+			},
+			arg: "../other",
+		},
+		{
+			name: "unparseable config",
+			setup: func(t *testing.T, w repoPathWorkspace) {
+				if err := os.WriteFile(w.configPath, []byte("repos: [unterminated\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+			arg: "../other",
+		},
+		{
+			name: "repos section is not a map",
+			setup: func(t *testing.T, w repoPathWorkspace) {
+				if err := os.WriteFile(w.configPath, []byte("repos: ../other\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+			arg: "../other",
+		},
+		{
+			name:  "empty argument",
+			setup: func(t *testing.T, w repoPathWorkspace) { w.writeAdditional(t, w.other) },
+			arg:   "",
+		},
+		{
+			name:  "empty argument with an empty configured entry",
+			setup: func(t *testing.T, w repoPathWorkspace) { w.writeAdditional(t, "", w.other) },
+			arg:   "",
+		},
+		{
+			name:  "no configured match",
+			setup: func(t *testing.T, w repoPathWorkspace) { w.writeAdditional(t, w.other) },
+			arg:   "../no-such-repo",
+		},
+		{
+			name:  "no configured entries",
+			setup: func(*testing.T, repoPathWorkspace) {},
+			arg:   "../other",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := newRepoPathWorkspace(t)
+			fake := installRepoRemoveStore(t)
+			tc.setup(t, w)
+			t.Chdir(w.primary)
+
+			if _, err := runRepoRemove(t, tc.arg); err == nil {
+				t.Fatalf("repo remove %q succeeded, want an error", tc.arg)
+			}
+			if len(fake.deleted) != 0 || len(fake.cleared) != 0 {
+				t.Fatalf("failed remove deleted issues for %q and cleared mtime keys %q, want neither", fake.deleted, fake.cleared)
+			}
+		})
+	}
+}
