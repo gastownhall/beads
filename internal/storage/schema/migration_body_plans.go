@@ -241,6 +241,14 @@ var migrationBodyPlans = map[repairKey]migrationBodyPlan{
 		},
 		cte: recomputeBlockedCTE("__bd_0059_recompute_wisp_deps", "__bd_0059_recompute_wisps"),
 	},
+	{"ignored_schema_migrations", 15}: {
+		dir:         "migrations/ignored",
+		name:        "0015_recompute_null_gate_wisp_is_blocked.up.sql",
+		sha256:      "e761d5c3ceb9610edbb2e1d153e82d235cc7d7f0b87f28a45bec43835e6a4e19",
+		head:        migrationPlanHead,
+		finalUpdate: "\nUPDATE wisps\n",
+		cte:         recomputeBlockedCTE("wisp_dependencies", "wisps"),
+	},
 }
 
 // plannedMigrationBody returns the SQL the runner executes for one migration
