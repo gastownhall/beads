@@ -6878,6 +6878,15 @@ bd statuses
     |
     | Statuses without a category (legacy format) are valid but excluded from 'bd ready'.
     |
+    | The blocked status is set by hand ('bd update <id> --status blocked') and
+    | holds an issue on purpose. Dependency blocking is separate: an issue with an
+    | open blocker is listed by 'bd blocked' and left out of 'bd ready', whatever
+    | its status. Closing an issue's last blocker leaves the status as it is
+    | ('bd close --suggest-next' flags it); after review, release the issue with
+    | 'bd update <id> --status open'. 'bd doctor' (Blocked Status) and
+    | 'bd doctor --check=conventions' (conventions.blocked-status) list issues held
+    | in status blocked that nothing blocks.
+    |
     | Examples:
     |   bd statuses            # List all statuses with icons and categories
     |   bd statuses --json     # Output as JSON

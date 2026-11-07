@@ -116,6 +116,34 @@ bd blocked
 Shows every blocked issue and what blocks it. Use after closing an issue
 to see what just unblocked.
 
+### Blocked status vs. dependency blocking
+
+"Blocked" names two different things:
+
+| | Dependency blocking | Status `blocked` |
+|---|---|---|
+| Set by | an open blocker (`bd dep add`) | you (`bd update <id> --status blocked`) |
+| Cleared by | closing the last blocker | you, after review |
+| Shown by | `bd blocked` | `bd list --status blocked` |
+
+Dependency blocking follows the graph: when the last blocker closes, the issue
+appears in `bd ready`. Status `blocked` is a hold set on purpose (waiting on a
+person, a decision, or another tracker), so closing a blocker leaves it as it
+is. `bd close --suggest-next` flags each newly unblocked issue still in status
+`blocked`; when nothing holds it any more, release it:
+
+```bash
+bd update <id> --status open
+```
+
+An issue in status `blocked` that nothing blocks appears in neither
+`bd ready` nor `bd blocked`. `bd doctor` lists these issues in its Blocked
+Status check, and `bd doctor --check=conventions` lists them as
+`conventions.blocked-status` (the form embedded workspaces support). Both are
+advisory and change no status. They read the stored dependency-blocked flag,
+so if `bd doctor` also reports stale Blocked State flags, run
+`bd recompute-blocked` first, then rerun the check.
+
 ## Visualizing Dependencies
 
 ### Dependency Tree
