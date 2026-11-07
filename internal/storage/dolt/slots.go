@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 )
 
@@ -97,8 +98,11 @@ func (s *DoltStore) SlotGet(ctx context.Context, issueID, key string) (string, e
 		return "", fmt.Errorf("no slot %q on %s: no metadata", key, issueID)
 	}
 
-	metadata := make(map[string]interface{})
-	if err := json.Unmarshal(issue.Metadata, &metadata); err != nil {
+	// DecodeMetadataObject keeps numbers as json.Number, so a re-marshal of a
+	// non-string slot returns an integer past 2^53 with its stored digits
+	// (GH#6330); a float64 decode would round 1546130668394913822 to ...800.
+	metadata, err := storage.DecodeMetadataObject(issue.Metadata)
+	if err != nil {
 		return "", fmt.Errorf("parsing metadata for %s: %w", issueID, err)
 	}
 
