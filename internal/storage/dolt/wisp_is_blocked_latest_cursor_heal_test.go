@@ -2,6 +2,7 @@ package dolt
 
 import (
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -364,5 +365,86 @@ func TestDoltNew_WispHealHealthyCloneRecordsOnce_RealDolt(t *testing.T) {
 		if err := again.Close(); err != nil {
 			t.Fatalf("close converged reopen %d: %v", i, err)
 		}
+	}
+}
+
+// TestDoltNew_WispHealKeepsTimestampsAndHistory_RealDolt covers AC-5: the heal
+// is a no-op on everything except the drifted shape. Wisp timestamps survive
+// the repair's recompute (its mark/unmark self-assigns updated_at, so nothing
+// reads as freshly touched), the durable issues row is not rewritten, HEAD
+// does not move (the repair writes only the ignored wisps plane -- nothing is
+// staged or committed), and dolt_status reports no table the drift did not
+// already report.
+func TestDoltNew_WispHealKeepsTimestampsAndHistory_RealDolt(t *testing.T) {
+	env := newWispHealEnv(t)
+
+	store, err := env.open()
+	if err != nil {
+		t.Fatalf("New (fresh): %v", err)
+	}
+	seedWispBlockedGraph(t, store)
+	ctx, cancel := testContext(t)
+	defer cancel()
+	const fixedTime = "2026-01-02 03:04:05"
+	if _, err := store.db.ExecContext(ctx,
+		"UPDATE wisps SET created_at = ?, updated_at = ?", fixedTime, fixedTime); err != nil {
+		store.Close()
+		t.Fatalf("pin wisp timestamps: %v", err)
+	}
+	headBefore := env.scalarStrings(store, "SELECT HASHOF('HEAD')")
+	if len(headBefore) != 1 {
+		store.Close()
+		t.Fatalf("HASHOF('HEAD') = %v, want exactly one hash", headBefore)
+	}
+	durableBefore := env.scalarStrings(store,
+		"SELECT CONCAT(id, '|', is_blocked, '|', DATE_FORMAT(updated_at, '%Y-%m-%d %H:%i:%s')) FROM issues WHERE id = 'wh-a'")
+	statusBefore := env.scalarStrings(store, "SELECT table_name FROM dolt_status ORDER BY table_name")
+	driftWispIsBlockedForHeal(t, store)
+	rewindIgnoredCursor(t, store, 32)
+	if err := store.Close(); err != nil {
+		t.Fatalf("close drifted store: %v", err)
+	}
+
+	healed, err := env.open()
+	if err != nil {
+		t.Fatalf("New on the drifted clone: %v", err)
+	}
+	defer func() { _ = healed.Close() }()
+	env.requireWispIsBlockedShape(healed)
+
+	rows, err := healed.db.QueryContext(ctx,
+		"SELECT id, DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s'), DATE_FORMAT(updated_at, '%Y-%m-%d %H:%i:%s') FROM wisps")
+	if err != nil {
+		t.Fatalf("read wisp timestamps: %v", err)
+	}
+	defer rows.Close()
+	times := map[string][2]string{}
+	for rows.Next() {
+		var id string
+		var ts [2]string
+		if err := rows.Scan(&id, &ts[0], &ts[1]); err != nil {
+			t.Fatalf("scan wisp timestamp: %v", err)
+		}
+		times[id] = ts
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read wisp timestamps: %v", err)
+	}
+	for _, id := range []string{"wh-b", "wh-c", "wh-d"} {
+		ts, ok := times[id]
+		if !ok || ts != [2]string{fixedTime, fixedTime} {
+			t.Fatalf("timestamps for %s = %v (present=%v), want both %s: the recompute must not touch them", id, ts, ok, fixedTime)
+		}
+	}
+
+	if durableAfter := env.scalarStrings(healed,
+		"SELECT CONCAT(id, '|', is_blocked, '|', DATE_FORMAT(updated_at, '%Y-%m-%d %H:%i:%s')) FROM issues WHERE id = 'wh-a'"); !slices.Equal(durableAfter, durableBefore) {
+		t.Fatalf("durable blocker row changed through the heal: %v, want %v", durableAfter, durableBefore)
+	}
+	if headAfter := env.scalarStrings(healed, "SELECT HASHOF('HEAD')"); !slices.Equal(headAfter, headBefore) {
+		t.Fatalf("HEAD moved through the heal: %v, want %v", headAfter, headBefore)
+	}
+	if statusAfter := env.scalarStrings(healed, "SELECT table_name FROM dolt_status ORDER BY table_name"); !slices.Equal(statusAfter, statusBefore) {
+		t.Fatalf("dolt_status gained tables through the heal: %v, want %v", statusAfter, statusBefore)
 	}
 }
