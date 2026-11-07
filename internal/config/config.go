@@ -131,9 +131,13 @@ func initialize(beadsDirSetting string) error {
 	// subsequent file so higher-priority values overwrite lower-priority ones.
 	//
 	// Precedence (highest to lowest):
-	//   BEADS_DIR/config.yaml > project .beads/config.yaml > documented
-	//   <home>/.config/bd/config.yaml > native os.UserConfigDir()/bd/config.yaml
+	//   BEADS_DIR/config.yaml > project .beads/config.yaml > modern user config
 	//   > legacy <home>/.beads/config.yaml
+	//
+	// The modern user config is the documented <home>/.config/bd/config.yaml
+	// when it exists, otherwise the native os.UserConfigDir()/bd/config.yaml.
+	// The two are never merged, and native is not probed while documented
+	// exists (GH#8113: on macOS that probe raises a privacy prompt).
 	//
 	// Previously, only ONE config file was loaded (the highest-priority match),
 	// which meant user-level config was silently ignored when project-level
@@ -147,8 +151,8 @@ func initialize(beadsDirSetting string) error {
 	// here because Initialize is an implicit read path: absent user config is a
 	// supported state, while a relative root must never reach os.Stat.
 	userConfigPaths := currentUserConfigYamlCandidates()
-	appendExistingUserConfig := func(path string) {
-		if !userConfigPathExists(path) {
+	appendUserConfig := func(path string) {
+		if path == "" {
 			return
 		}
 		for _, existing := range configPaths {
@@ -159,10 +163,11 @@ func initialize(beadsDirSetting string) error {
 		configPaths = append(configPaths, path)
 	}
 
-	// Lowest to highest user-level precedence: legacy, native, documented.
-	appendExistingUserConfig(userConfigPaths.legacy)
-	appendExistingUserConfig(userConfigPaths.native)
-	appendExistingUserConfig(userConfigPaths.documented)
+	// Lowest to highest user-level precedence: legacy, then modern.
+	if userConfigPathExists(userConfigPaths.legacy) {
+		appendUserConfig(userConfigPaths.legacy)
+	}
+	appendUserConfig(existingUserConfigYamlPath(userConfigPaths))
 	userConfigPathCount := len(configPaths)
 
 	// 1. Project: walk up from CWD to find .beads/config.yaml
