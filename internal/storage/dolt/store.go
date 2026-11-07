@@ -336,6 +336,8 @@ type DoltStore struct {
 	// journal is disabled or the probe produced no shape; transactions then get
 	// the canonical column list — see journalActivationErr.
 	journalShape atomic.Pointer[issueops.JournalShape]
+	// autocommit caches what serverAutocommits learned: 0 unknown, 1 on, 2 off.
+	autocommit atomic.Int32
 	// journalActivationErr holds the probe's *issueops.JournalShapeError when
 	// SetEventsJournalEnabled(true) found a table shape the journal cannot run
 	// against (a missing required column, or a missing table). Nil otherwise,
@@ -1154,6 +1156,51 @@ func (s *DoltStore) withReadTx(ctx context.Context, fn func(tx *sql.Tx) error) e
 		defer clearShape()
 		return fn(tx)
 	})
+}
+
+// withSingleRead runs one read statement under the store's read-lock and
+// connection retry, with no transaction where the server allows it. With
+// autocommit on, each statement sees the latest committed state on its own, so
+// START TRANSACTION and ROLLBACK would add two round trips and no consistency.
+// With it off (dolt sql-server --no-auto-commit) a bare SELECT holds its session
+// on that snapshot until a later BEGIN, so the read keeps its transaction. A read
+// of more than one statement that must agree with itself takes withReadTx.
+func (s *DoltStore) withSingleRead(ctx context.Context, fn func(q issueops.DBTX) error) error {
+	if s.closed.Load() {
+		return ErrStoreClosed
+	}
+	if !s.serverAutocommits(ctx) {
+		return s.withReadTx(ctx, func(tx *sql.Tx) error { return fn(tx) })
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.withRetry(ctx, func() error {
+		return fn(s.db)
+	})
+}
+
+// serverAutocommits reports whether the server's sessions run with autocommit on,
+// asking once per store. A failed read reports false, the safe answer, and is
+// asked again next time.
+func (s *DoltStore) serverAutocommits(ctx context.Context) bool {
+	switch s.autocommit.Load() {
+	case 1:
+		return true
+	case 2:
+		return false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var on sql.NullInt64
+	if err := s.db.QueryRowContext(ctx, "SELECT @@autocommit").Scan(&on); err != nil {
+		return false
+	}
+	if on.Valid && on.Int64 == 1 {
+		s.autocommit.Store(1)
+		return true
+	}
+	s.autocommit.Store(2)
+	return false
 }
 
 // execer is satisfied by both *sql.DB and *sql.Conn, letting pinStoreBranch

@@ -477,10 +477,21 @@ func ConfigProjectionTables() []string {
 // Returns a map[string]bool for O(1) lookups.
 // Does not cache — callers layer caching on top.
 func ResolveInfraTypesInTx(ctx context.Context, tx DBTX) map[string]bool {
-	var typeList []string
+	value, err := GetConfigInTx(ctx, tx, InfraTypesConfigKey)
+	if err != nil {
+		value = ""
+	}
+	return ResolveInfraTypes(value)
+}
 
-	value, err := GetConfigInTx(ctx, tx, "types.infra")
-	if err == nil && value != "" {
+// InfraTypesConfigKey is the config row ResolveInfraTypes takes its value from.
+const InfraTypesConfigKey = "types.infra"
+
+// ResolveInfraTypes is ResolveInfraTypesInTx for a caller that read the config
+// value itself: empty falls back to config.yaml, then to the hardcoded defaults.
+func ResolveInfraTypes(value string) map[string]bool {
+	var typeList []string
+	if value != "" {
 		typeList = ParseCommaSeparatedList(value)
 	}
 
