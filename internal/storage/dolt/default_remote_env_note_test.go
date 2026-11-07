@@ -16,7 +16,8 @@ import (
 // transfer gets one note naming the variables bd holds that the server reads
 // from its own environment instead, and the remedy. The error stays usable:
 // its context is kept and the CLI's exit status is still reachable. A
-// failure before the transfer (fsck) gets no note.
+// failure before the transfer (fsck, or a SQL connection that never reached
+// the server) gets no note.
 func TestDefaultRemoteTransferFailureNamesServerEnvironment(t *testing.T) {
 	const s3URL = "s3://bucket/beads"
 	const hosted = "https://doltremoteapi.dolthub.com/org/repo"
@@ -44,6 +45,27 @@ func TestDefaultRemoteTransferFailureNamesServerEnvironment(t *testing.T) {
 			name: "SQL force push", url: s3URL, env: aws,
 			run:         func(ctx context.Context, s *DoltStore) error { return s.ForcePush(ctx) },
 			wantContext: "failed to force push to origin/main", procedure: "DOLT_PUSH", vars: "AWS_*",
+		},
+		{
+			name: "SQL push the server never took", url: s3URL, env: aws, o: envNoteOpts{unreachable: true},
+			run:         func(ctx context.Context, s *DoltStore) error { return s.Push(ctx) },
+			wantContext: "failed to push to origin/main",
+		},
+		{
+			name: "SQL force push the server never took", url: s3URL, env: aws, o: envNoteOpts{unreachable: true},
+			run:         func(ctx context.Context, s *DoltStore) error { return s.ForcePush(ctx) },
+			wantContext: "failed to force push to origin/main",
+		},
+		{
+			name: "SQL pull", url: s3URL, env: aws, o: envNoteOpts{readOnly: true},
+			run:         func(ctx context.Context, s *DoltStore) error { return s.Pull(ctx) },
+			wantContext: "failed to pull from origin/main: Error 1105 (HY000): " + refusedCallMessage,
+			procedure:   "DOLT_PULL", vars: "AWS_*",
+		},
+		{
+			name: "SQL pull the server never took", url: s3URL, env: aws, o: envNoteOpts{readOnly: true, unreachable: true},
+			run:         func(ctx context.Context, s *DoltStore) error { return s.Pull(ctx) },
+			wantContext: "failed to pull from origin/main",
 		},
 		{
 			name: "CLI cloud-auth push", url: s3URL, env: aws, o: envNoteOpts{cli: true},
