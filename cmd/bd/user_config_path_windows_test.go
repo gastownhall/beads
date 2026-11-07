@@ -82,6 +82,9 @@ func TestMetricsOffRejectsUnsafeUserRootsInNativeProcess(t *testing.T) {
 				!strings.Contains(string(out), "cannot find home directory") {
 				t.Fatalf("metrics off did not report path resolution failure: %v\n%s", err, out)
 			}
+			if !strings.Contains(string(out), "user home directory (USERPROFILE)") {
+				t.Errorf("metrics off did not identify USERPROFILE as the home source:\n%s", out)
+			}
 
 			for _, relativeRoot := range []string{"~", "relative-appdata"} {
 				if _, statErr := os.Stat(filepath.Join(sentinel, relativeRoot)); !os.IsNotExist(statErr) {
