@@ -468,3 +468,115 @@ func TestTrackerFullFetchAfterTargetedOperations(t *testing.T) {
 		}
 	})
 }
+
+func wantSinceFilter(cutoff string) string {
+	return `{"last_edited_time":{"on_or_after":"` + cutoff + `"},"timestamp":"last_edited_time"}`
+}
+
+func filterJSON(t *testing.T, filter map[string]interface{}) string {
+	t.Helper()
+	encoded, err := json.Marshal(filter)
+	if err != nil {
+		t.Fatalf("marshal filter: %v", err)
+	}
+	return string(encoded)
+}
+
+// #6004: a source too large to enumerate within the bound still pulls
+// incrementally, because the edited window is filtered server-side on every
+// page of the query rather than after enumerating everything.
+func TestTrackerIncrementalBeyondQueryBound(t *testing.T) {
+	t.Parallel()
+
+	since := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	f := newFakeNotion(t)
+	f.hugeSource = true
+	f.chunk = 1
+	f.addPages(fakeRow(1, "bd-r1", since.Add(time.Minute)), fakeRow(2, "bd-r2", since.Add(2*time.Minute)))
+
+	issues, err := f.tracker().FetchIssues(context.Background(), itracker.FetchOptions{Since: &since})
+	if err != nil {
+		t.Fatalf("incremental FetchIssues on a source beyond the bound: %v", err)
+	}
+	if got := strings.Join(beadsIDs(issues), ","); got != "bd-r1,bd-r2" {
+		t.Fatalf("incremental pull returned %q, want bd-r1,bd-r2", got)
+	}
+	reqs := f.requests()
+	if reqs.unfilteredQueries != 0 {
+		t.Fatalf("incremental pull sent %d unfiltered queries, want none", reqs.unfilteredQueries)
+	}
+	if len(reqs.filters) != 2 {
+		t.Fatalf("filtered requests = %d, want 2 (one per response page)", len(reqs.filters))
+	}
+	for i, filter := range reqs.filters {
+		if got, want := filterJSON(t, filter), wantSinceFilter("2026-11-01T12:00:00Z"); got != want {
+			t.Fatalf("request %d filter = %s, want %s", i, got, want)
+		}
+	}
+}
+
+// The server-side cutoff is Since in UTC truncated to the minute, the same
+// boundary matchesFetchSince applies, and state, archived/trashed exclusion and
+// limit still select from the rows that query returned.
+func TestTrackerIncrementalBoundary(t *testing.T) {
+	t.Parallel()
+
+	since := time.Date(2026, 11, 1, 7, 4, 37, 0, time.FixedZone("UTC-5", -5*60*60))
+	cutoff := time.Date(2026, 11, 1, 12, 4, 0, 0, time.UTC)
+	f := newFakeNotion(t)
+	f.hugeSource = true
+	closed := fakeRow(4, "bd-closed", cutoff.Add(2*time.Minute))
+	closed.Properties[PropertyStatus] = PageProperty{Select: &SelectOption{Name: "Closed"}}
+	archived := fakeRow(5, "bd-archived", cutoff.Add(2*time.Minute))
+	archived.Archived = true
+	trashed := fakeRow(6, "bd-trashed", cutoff.Add(2*time.Minute))
+	trashed.InTrash = true
+	f.addPages(
+		fakeRow(1, "bd-before", cutoff.Add(-time.Second)),
+		fakeRow(2, "bd-at", cutoff),
+		fakeRow(3, "bd-after", cutoff.Add(time.Minute)),
+		closed, archived, trashed,
+	)
+	tr := f.tracker()
+	ctx := context.Background()
+
+	all, err := tr.FetchIssues(ctx, itracker.FetchOptions{Since: &since})
+	if err != nil {
+		t.Fatalf("incremental FetchIssues: %v", err)
+	}
+	if got := strings.Join(beadsIDs(all), ","); got != "bd-after,bd-at,bd-closed" {
+		t.Fatalf("incremental pull returned %q, want bd-after,bd-at,bd-closed", got)
+	}
+	if queried, candidates := tr.LastPullStats(); queried != 3 || candidates != 3 {
+		t.Fatalf("LastPullStats = (%d, %d), want (3, 3)", queried, candidates)
+	}
+	reqs := f.requests()
+	if len(reqs.filters) != 1 || reqs.unfilteredQueries != 0 {
+		t.Fatalf("requests: %d filtered, %d unfiltered, want 1 filtered only", len(reqs.filters), reqs.unfilteredQueries)
+	}
+	if got, want := filterJSON(t, reqs.filters[0]), wantSinceFilter("2026-11-01T12:04:00Z"); got != want {
+		t.Fatalf("filter = %s, want %s", got, want)
+	}
+
+	open, err := tr.FetchIssues(ctx, itracker.FetchOptions{Since: &since, State: "open"})
+	if err != nil {
+		t.Fatalf("incremental open FetchIssues: %v", err)
+	}
+	if got := strings.Join(beadsIDs(open), ","); got != "bd-after,bd-at" {
+		t.Fatalf("incremental open pull returned %q, want bd-after,bd-at", got)
+	}
+	if queried, candidates := tr.LastPullStats(); queried != 3 || candidates != 2 {
+		t.Fatalf("LastPullStats = (%d, %d), want (3, 2)", queried, candidates)
+	}
+
+	limited, err := tr.FetchIssues(ctx, itracker.FetchOptions{Since: &since, State: "open", Limit: 1})
+	if err != nil {
+		t.Fatalf("incremental limited FetchIssues: %v", err)
+	}
+	if got := strings.Join(beadsIDs(limited), ","); got != "bd-at" {
+		t.Fatalf("incremental pull with limit 1 returned %q, want the first open row bd-at", got)
+	}
+	if queried, candidates := tr.LastPullStats(); queried != 3 || candidates != 1 {
+		t.Fatalf("LastPullStats = (%d, %d), want (3, 1)", queried, candidates)
+	}
+}

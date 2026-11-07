@@ -30,7 +30,7 @@ type pushOutcome struct {
 type notionAPI interface {
 	GetCurrentUser(ctx context.Context) (*User, error)
 	RetrieveDataSource(ctx context.Context, dataSourceID string) (*DataSource, error)
-	QueryDataSource(ctx context.Context, dataSourceID string) ([]Page, error)
+	QueryDataSource(ctx context.Context, dataSourceID string, filter map[string]interface{}) ([]Page, error)
 	CreatePage(ctx context.Context, dataSourceID string, properties map[string]interface{}) (*Page, error)
 	UpdatePage(ctx context.Context, pageID string, properties map[string]interface{}) (*Page, error)
 	ArchivePage(ctx context.Context, pageID string, inTrash bool) (*Page, error)
@@ -138,8 +138,17 @@ var _ itracker.SinceGranularityProvider = (*Tracker)(nil)
 // SinceGranularity reports that FetchIssues matches Since to the minute.
 func (t *Tracker) SinceGranularity() time.Duration { return fetchSinceGranularity }
 
+// FetchIssues runs one query per call. With Since set it asks Notion only for
+// rows edited at or after Since's minute (lastEditedSinceFilter), so an
+// incremental pull costs the size of the edited window rather than of the data
+// source. A pull without Since enumerates the whole source, bounded by
+// notion.max_query_pages.
 func (t *Tracker) FetchIssues(ctx context.Context, opts itracker.FetchOptions) ([]itracker.TrackerIssue, error) {
-	pages, err := t.client.QueryDataSource(ctx, t.dataSourceID)
+	var filter map[string]interface{}
+	if opts.Since != nil {
+		filter = lastEditedSinceFilter(*opts.Since)
+	}
+	pages, err := t.client.QueryDataSource(ctx, t.dataSourceID, filter)
 	if err != nil {
 		return nil, err
 	}
@@ -445,7 +454,7 @@ func (t *Tracker) ensureRemoteIndex(ctx context.Context) error {
 		return nil
 	}
 
-	pages, err := t.client.QueryDataSource(ctx, t.dataSourceID)
+	pages, err := t.client.QueryDataSource(ctx, t.dataSourceID, nil)
 	if err != nil {
 		return err
 	}
@@ -648,6 +657,18 @@ func cloneTrackerIssue(issue itracker.TrackerIssue) itracker.TrackerIssue {
 		cloned.Labels = append([]string(nil), issue.Labels...)
 	}
 	return cloned
+}
+
+// lastEditedSinceFilter is the server-side form of matchesFetchSince: rows
+// whose last_edited_time is at or after since, in UTC, truncated to Notion's
+// minute precision.
+func lastEditedSinceFilter(since time.Time) map[string]interface{} {
+	return map[string]interface{}{
+		"timestamp": "last_edited_time",
+		"last_edited_time": map[string]interface{}{
+			"on_or_after": since.UTC().Truncate(fetchSinceGranularity).Format(time.RFC3339),
+		},
+	}
 }
 
 func matchesFetchSince(issue *itracker.TrackerIssue, since *time.Time) bool {
