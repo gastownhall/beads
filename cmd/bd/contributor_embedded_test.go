@@ -160,6 +160,100 @@ func TestEmbeddedContributorRoutedWritesCommitInPlanning(t *testing.T) {
 	assertIssueNotInStore(t, filepath.Join(dir, ".beads"), "cw", issue.ID)
 }
 
+// TestEmbeddedContributorRoutingMissingPlanningRepo runs the contributor
+// fork flow into its failure mode: the planning repository routing selected
+// is deleted (or never cloned to this machine), and every command that needs
+// it — update, close, list, ready — must fail naming the target and how to
+// recover, without recreating it. A later bd create initializes an empty
+// planning store there and succeeds: recovery for new issues, not a
+// restoration of the lost ones (GH#5957).
+func TestEmbeddedContributorRoutingMissingPlanningRepo(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt contributor tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir := t.TempDir()
+	initGitRepoAt(t, dir)
+	for _, name := range []string{"origin", "upstream"} {
+		bare := filepath.Join(t.TempDir(), name+".git")
+		if out, err := gitCommand("init", "--bare", bare).CombinedOutput(); err != nil {
+			t.Fatalf("git init --bare %s: %v\n%s", bare, err, out)
+		}
+		cmd := gitCommand("remote", "add", name, bare)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git remote add %s: %v\n%s", name, err, out)
+		}
+	}
+	// Fork setup: routing.contributor is ~/.beads-planning (HOME is dir).
+	runBDInit(t, bd, dir, "--prefix", "mp")
+	planningDir := filepath.Join(dir, ".beads-planning")
+	planningBeadsDir := filepath.Join(planningDir, ".beads")
+
+	issue := bdCreate(t, bd, dir, "Planning issue that will be lost")
+	assertIssueInStore(t, planningBeadsDir, "beads", issue.ID)
+
+	// The planning repository is gone.
+	if err := os.RemoveAll(planningDir); err != nil {
+		t.Fatalf("RemoveAll(planningDir): %v", err)
+	}
+
+	guidance := []string{
+		planningDir,
+		"contributor routing selected this planning repository",
+		"restore the planning repository",
+		"git config beads.role maintainer",
+	}
+	assertGuidance := func(command, out string) {
+		t.Helper()
+		for _, want := range guidance {
+			if !strings.Contains(out, want) {
+				t.Errorf("bd %s after the planning repo was lost does not name %q:\n%s", command, want, out)
+			}
+		}
+	}
+
+	assertGuidance("update", bdUpdateFail(t, bd, dir, issue.ID, "--claim"))
+	assertGuidance("close", bdCloseFail(t, bd, dir, issue.ID, "--reason", "done"))
+	assertGuidance("list", bdListFail(t, bd, dir))
+
+	// bd ready has no dedicated failure helper: run it inline the same way.
+	readyCmd := exec.Command(bd, "ready")
+	readyCmd.Dir = dir
+	readyCmd.Env = bdEnv(dir)
+	readyOut, err := readyCmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("bd ready succeeded after the planning repo was lost:\n%s", readyOut)
+	}
+	assertGuidance("ready", string(readyOut))
+
+	// The failed commands must not have recreated the planning repository.
+	if _, statErr := os.Stat(planningDir); !os.IsNotExist(statErr) {
+		t.Fatalf("planning repo at %s was recreated by the failed commands (stat err = %v)", planningDir, statErr)
+	}
+
+	// A later create initializes an empty planning store there and succeeds;
+	// the lost issue is not restored. The fresh store's database carries the
+	// source prefix (T010/T012 prefix inheritance), not the deleted fork
+	// setup's "beads".
+	fresh := bdCreate(t, bd, dir, "Created after the planning repo was lost")
+	if fresh.ID == "" {
+		t.Fatal("expected an issue ID from bd create after the planning repo was lost")
+	}
+	assertIssueInStore(t, planningBeadsDir, "mp", fresh.ID)
+	assertIssueNotInStore(t, planningBeadsDir, "mp", issue.ID)
+
+	listOut := bdCommand(t, bd, dir, "list", "--json")
+	if !strings.Contains(listOut, fresh.ID) {
+		t.Errorf("bd list --json does not report the new issue %s:\n%s", fresh.ID, listOut)
+	}
+	if strings.Contains(listOut, issue.ID) {
+		t.Errorf("bd list --json still reports the lost issue %s:\n%s", issue.ID, listOut)
+	}
+}
+
 // initContributor sets up a project with contributor mode enabled and returns
 // the project dir and planning dir paths. The contributor wizard runs via
 // subprocess with stdin piped to answer the interactive prompts.
