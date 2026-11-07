@@ -1910,6 +1910,38 @@ func TestIsPathInSafeBoundary_OwnServiceHomeStaysNarrow(t *testing.T) {
 	}
 }
 
+// TestIsPathInSafeBoundary_ServiceHomeNeedsQualifyingAccount proves the
+// service-home exception fails closed when the account does not qualify: no
+// home, uid 0, a home the effective uid does not own, a home missing from
+// disk, or a home outside the service root keeps a path inside that home
+// rejected.
+func TestIsPathInSafeBoundary_ServiceHomeNeedsQualifyingAccount(t *testing.T) {
+	var account func() (string, int)
+	f := useServiceHomeFixture(t, func() (string, int) { return account() })
+	path := filepath.Join(f.home, "releases", "r1", ".beads")
+	missingHome := filepath.Join(f.root, "no-such-service")
+
+	for name, tc := range map[string]struct {
+		acct func() (string, int)
+		path string
+	}{
+		"no home":    {func() (string, int) { return "", f.uid }, path},
+		"uid 0":      {func() (string, int) { return f.home, 0 }, path},
+		"wrong uid":  {func() (string, int) { return f.home, f.uid + 1 }, path},
+		"root home":  {func() (string, int) { return f.root, f.uid }, path},
+		"no account": {func() (string, int) { return "", -1 }, path},
+		// The request names the missing home too, so only the missing home
+		// can reject it.
+		"missing home":          {func() (string, int) { return missingHome, f.uid }, filepath.Join(missingHome, ".beads")},
+		"home outside the root": {func() (string, int) { return filepath.Dir(f.root), f.uid }, path},
+	} {
+		account = tc.acct
+		if isPathInSafeBoundary(tc.path) {
+			t.Errorf("%s: isPathInSafeBoundary(%q) = true, want false (account does not qualify)", name, tc.path)
+		}
+	}
+}
+
 // TestInOwnServiceHome table-tests the service-home exception helper against
 // real temporary directories and symlinks.
 func TestInOwnServiceHome(t *testing.T) {
@@ -1945,6 +1977,19 @@ func TestInOwnServiceHome(t *testing.T) {
 	mustSymlink(t, filepath.Join(root, "other-service"), filepath.Join(home, "to-sibling"))
 	mustSymlink(t, filepath.Join(base, "outside"), filepath.Join(home, "to-outside"))
 	mustSymlink(t, home, filepath.Join(base, "into-home"))
+	// homeFile is a regular file below the root, owned by the current euid.
+	homeFile := filepath.Join(root, "file-home")
+	if err := os.WriteFile(homeFile, nil, 0o600); err != nil {
+		t.Fatalf("write file home: %v", err)
+	}
+	if os.Geteuid() == 0 {
+		if err := os.Lchown(homeFile, uid, uid); err != nil {
+			t.Fatalf("chown %s: %v", homeFile, err)
+		}
+	}
+	// rootAlias is a home spelling that resolves to the service root itself.
+	rootAlias := filepath.Join(base, "rootalias")
+	mustSymlink(t, root, rootAlias)
 
 	tests := []struct {
 		name string
@@ -1971,6 +2016,18 @@ func TestInOwnServiceHome(t *testing.T) {
 		{"link out of home within root", filepath.Join(home, "to-sibling", ".beads"), root, home, uid, false},
 		{"link out of root", filepath.Join(home, "to-outside", ".beads"), root, home, uid, false},
 		{"link outside root into home", filepath.Join(base, "into-home", ".beads"), root, home, uid, false},
+
+		{"uid 0", home, root, home, 0, false},
+		{"negative uid", home, root, home, -1, false},
+		{"wrong owner", home, root, home, uid + 1, false},
+		{"empty home", home, root, "", uid, false},
+		{"relative home", home, root, filepath.Join("varlib", "flow-estate"), uid, false},
+		{"missing home", filepath.Join(root, "gone", ".beads"), root, filepath.Join(root, "gone"), uid, false},
+		{"non-directory home", homeFile, root, homeFile, uid, false},
+		{"home is the root", filepath.Join(root, "flow-estate"), root, root, uid, false},
+		{"home alias to the root", filepath.Join(root, "flow-estate"), root, rootAlias, uid, false},
+		{"home outside the root", filepath.Join(base, "outside"), root, filepath.Join(base, "outside"), uid, false},
+		{"missing root", filepath.Join(base, "noroot", "svc"), filepath.Join(base, "noroot"), filepath.Join(base, "noroot", "svc"), uid, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

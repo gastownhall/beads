@@ -700,13 +700,15 @@ var serviceHomeAccount = func() (home string, euid int) {
 }
 
 // inOwnServiceHome reports whether path lies inside home, an account home
-// strictly below root (production: /var/lib), for a non-root euid. Both home and path are compared
+// strictly below root (production: /var/lib) that is a directory owned by
+// euid, a non-root effective uid. Both home and path are compared
 // after symlink resolution, so a link out of the home or the root never
 // qualifies, while a path that does not exist yet still can. The request must
 // also be spelled under root, lexically or physically.
 func inOwnServiceHome(path, root, home string, euid int) bool {
-	if euid <= 0 {
-		// Root never qualifies, and a negative uid means none is known.
+	if euid <= 0 || home == "" || !filepath.IsAbs(home) {
+		// Root never qualifies, a negative uid means none is known, and only
+		// an absolute home names a directory.
 		return false
 	}
 	physRoot, err := filepath.EvalSymlinks(root)
@@ -717,7 +719,9 @@ func inOwnServiceHome(path, root, home string, euid int) bool {
 	if err != nil {
 		return false
 	}
-	if !pathBelow(physHome, physRoot) {
+	// Location alone is not enough: the account database lookup falls back to
+	// $HOME, so require the home to be a directory the effective uid owns.
+	if !pathBelow(physHome, physRoot) || !dirOwnedBy(physHome, euid) {
 		return false
 	}
 	// The request itself must be spelled under the root (either spelling), so

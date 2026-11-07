@@ -224,6 +224,20 @@ system directories:
 Temporary directories (e.g., `/var/folders` on macOS) are explicitly allowed
 for test environments.
 
+A service account homed below `/var/lib` (for example `/var/lib/<service>`)
+may point `BEADS_DIR` inside its own home. The exception applies only when the
+effective uid is not 0, the account's home (from the account database, else
+`$HOME`) is an existing directory strictly below the physical `/var/lib` and
+owned by the effective uid, and the requested path is spelled under
+`/var/lib`, lexically or in its physical form, and resolves inside that home
+after symlink resolution. `/var/lib` itself, sibling services, and homes owned
+by another uid (even when group permissions or ACLs grant access) stay
+rejected. The ownership gate is the trust basis: in pure-Go builds `os/user`
+may fall back to `$HOME` for the home lookup, so location alone is not
+evidence the directory is this account's own. The ownership and
+containment checks run at validation time; they do not make later filesystem
+access race-free. Non-Unix platforms never apply the exception.
+
 ## Server Mode Handling
 
 ### CLI vs Server Context
