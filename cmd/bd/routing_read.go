@@ -2,12 +2,13 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/remedy"
@@ -218,20 +219,37 @@ func openAutoRoutedStore(ctx context.Context, store storage.DoltStorage, writabl
 
 // routedOpenError reports a failed open of the auto-routed target at
 // targetRepoPath, detail being the stage-specific prefix of err. A
-// contributor route also says that contributor routing chose the target and
-// how to turn it off, and, when the target holds no workspace at all (a
-// deleted planning repo), that restoring it is what recovers its issues:
-// otherwise the error names a path the user may never have chosen (GH#5957).
-// Other rules keep their plain error. err stays wrapped, so
-// ErrNoBeadsDatabase still matches.
+// contributor route also says that contributor routing chose the target,
+// what a missing planning store means (planningStoreAdvice) and how to turn
+// routing off: otherwise the error names a path the user may never have
+// chosen (GH#5957). Other rules keep their plain error. err stays wrapped,
+// so ErrNoBeadsDatabase still matches.
 func routedOpenError(rule routing.RoutingRule, targetRepoPath, detail string, err error) error {
 	err = fmt.Errorf("failed to open routed store at %s: %s%w", remedy.PrintedValue(targetRepoPath), detail, err)
 	if rule != routing.RuleContributor {
 		return err
 	}
-	guidance := "contributor routing (beads.role=contributor, or inferred from the origin URL) selected this planning repo"
-	if !beads.HasProjectFiles(filepath.Join(targetRepoPath, ".beads")) {
-		guidance += "; restore the planning repo to recover its issues (a later bd create initializes an empty planning store, which does not restore them)"
+	return fmt.Errorf("%w; contributor routing (beads.role=contributor, or inferred from the origin URL) selected this planning repo%s; to disable contributor-role routing: git config beads.role maintainer", err, planningStoreAdvice(targetRepoPath))
+}
+
+// planningStoreAdvice is routedOpenError's advice for a planning repo whose
+// store the open did not find. With no .beads at all, the repo may have been
+// deleted, and only restoring it recovers its issues; a directory that never
+// held a store looks the same (bd init --contributor pointed at an existing
+// directory, or fork setup over an existing ~/.beads-planning, creates no
+// .beads), so the advice is conditional on a deletion. An empty .beads is a
+// store not initialized yet: bd init --contributor leaves it so until the
+// first routed create. Anything else gets no advice, since the wrapped error
+// says what failed: a .beads that holds files (a store, or a legacy layout a
+// routed create refuses) or cannot be listed. It is not HasProjectFiles,
+// which is false for those last two as well.
+func planningStoreAdvice(targetRepoPath string) string {
+	beadsDir := filepath.Join(targetRepoPath, ".beads")
+	if _, err := os.Stat(beadsDir); errors.Is(err, fs.ErrNotExist) {
+		return "; if it was deleted, restore the planning repo to recover its issues (a later bd create initializes an empty planning store, which does not restore them)"
 	}
-	return fmt.Errorf("%w; %s; to disable contributor-role routing: git config beads.role maintainer", err, guidance)
+	if entries, err := os.ReadDir(beadsDir); err != nil || len(entries) > 0 {
+		return ""
+	}
+	return "; its store is not initialized yet (the first bd create routed there initializes it)"
 }

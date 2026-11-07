@@ -295,7 +295,7 @@ func autoConfigureForkContributor(ctx context.Context, store storage.DoltStorage
 		if !quiet {
 			fmt.Printf("\n  %s Fork detected (upstream: %s)\n", ui.RenderWarn("⚠"), upstreamURL)
 			fmt.Printf("    Contributor routing already configured → %s\n", remedy.PrintedValue(existing))
-			fmt.Printf("    Skipping auto-setup. To reconfigure: bd init --contributor\n")
+			fmt.Printf("    Skipping auto-setup. To reconfigure: bd config set routing.contributor <path>\n")
 		}
 		return nil
 	}
@@ -304,7 +304,7 @@ func autoConfigureForkContributor(ctx context.Context, store storage.DoltStorage
 			if !quiet {
 				fmt.Printf("\n  %s Fork detected (upstream: %s)\n", ui.RenderWarn("⚠"), upstreamURL)
 				fmt.Printf("    Contributor routing configured via config.yaml → %s\n", remedy.PrintedValue(yamlVal))
-				fmt.Printf("    Skipping auto-setup. To reconfigure: bd init --contributor\n")
+				fmt.Printf("    Skipping auto-setup. To reconfigure: bd config set routing.contributor <path>\n")
 			}
 			return nil
 		}

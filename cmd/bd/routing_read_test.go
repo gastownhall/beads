@@ -327,7 +327,7 @@ func checkMissingPlanningRepoError(t *testing.T, writable bool) {
 	for _, want := range []string{
 		planningDir,
 		"contributor routing",
-		"restore the planning repo to recover its issues",
+		"if it was deleted, restore the planning repo to recover its issues",
 		"does not restore them",
 		"to disable contributor-role routing: git config beads.role maintainer",
 	} {
@@ -368,7 +368,8 @@ func TestOpenAutoRoutedStoreMissingPlanningRepoNamesRouting(t *testing.T) {
 		})
 	}
 	// A planning repo that is present but fails to open keeps its own cause
-	// and the routing explanation, without the restore advice.
+	// and the routing explanation, without the restore or not-initialized
+	// advice.
 	t.Run("contributor_unreadable_metadata", func(t *testing.T) {
 		store, planningDir := missingPlanningRouteFixture(t, "contributor", "routing.contributor")
 		beadsDir := filepath.Join(planningDir, ".beads")
@@ -383,8 +384,71 @@ func TestOpenAutoRoutedStoreMissingPlanningRepoNamesRouting(t *testing.T) {
 		if !errors.As(err, &syntaxErr) {
 			t.Fatalf("error lost the metadata parse failure: %v", err)
 		}
-		if !strings.Contains(err.Error(), "git config beads.role maintainer") || strings.Contains(err.Error(), "restore the planning repo") {
-			t.Errorf("error = %v, want the routing opt-out without the restore advice", err)
+		if !strings.Contains(err.Error(), "git config beads.role maintainer") || strings.Contains(err.Error(), "restore the planning repo") || strings.Contains(err.Error(), "not initialized") {
+			t.Errorf("error = %v, want the routing opt-out without the restore or not-initialized advice", err)
+		}
+	})
+	// bd init --contributor leaves the planning repo's .beads empty until the
+	// first routed create. That store is not initialized yet, not lost:
+	// telling the user to restore it would report a loss that never happened.
+	t.Run("contributor_uninitialized_planning_repo", func(t *testing.T) {
+		for _, writable := range []bool{false, true} {
+			t.Run(map[bool]string{false: "read", true: "write"}[writable], func(t *testing.T) {
+				store, planningDir := missingPlanningRouteFixture(t, "contributor", "routing.contributor")
+				beadsDir := filepath.Join(planningDir, ".beads")
+				if err := os.MkdirAll(beadsDir, 0750); err != nil {
+					t.Fatal(err)
+				}
+				_, _, _, err := openAutoRoutedStore(t.Context(), store, writable)
+				if !errors.Is(err, ErrNoBeadsDatabase) {
+					t.Fatalf("error = %v, want ErrNoBeadsDatabase", err)
+				}
+				if !strings.Contains(err.Error(), "its store is not initialized yet (the first bd create routed there initializes it)") || !strings.Contains(err.Error(), "git config beads.role maintainer") {
+					t.Errorf("error = %v, want the not-initialized advice and the routing opt-out", err)
+				}
+				if strings.Contains(err.Error(), "restore the planning repo") || strings.Contains(err.Error(), "recover its issues") {
+					t.Errorf("error = %v, reports a never-initialized planning store as lost", err)
+				}
+				if entries, readErr := os.ReadDir(beadsDir); readErr != nil || len(entries) != 0 {
+					t.Errorf("routed open wrote into the uninitialized planning store: %v, %v", entries, readErr)
+				}
+			})
+		}
+	})
+	// The restore advice keys on the planning repo's .beads, not the repo:
+	// with the repo there and its .beads gone, the store may still have been
+	// deleted.
+	t.Run("contributor_planning_repo_without_beads", func(t *testing.T) {
+		store, planningDir := missingPlanningRouteFixture(t, "contributor", "routing.contributor")
+		if err := os.MkdirAll(planningDir, 0750); err != nil {
+			t.Fatal(err)
+		}
+		_, _, _, err := openAutoRoutedStore(t.Context(), store, true)
+		if !errors.Is(err, ErrNoBeadsDatabase) || !strings.Contains(err.Error(), "if it was deleted, restore the planning repo to recover its issues") || strings.Contains(err.Error(), "not initialized") {
+			t.Errorf("error = %v, want ErrNoBeadsDatabase with the restore advice", err)
+		}
+		if _, statErr := os.Stat(filepath.Join(planningDir, ".beads")); !os.IsNotExist(statErr) {
+			t.Errorf("routed open created the planning repo's .beads: %v", statErr)
+		}
+	})
+	// A .beads holding files the open does not take for a store (here a
+	// SQLite-era config.json, which a routed create refuses to initialize)
+	// is neither lost nor waiting for its first create: no advice.
+	t.Run("contributor_legacy_planning_store", func(t *testing.T) {
+		store, planningDir := missingPlanningRouteFixture(t, "contributor", "routing.contributor")
+		beadsDir := filepath.Join(planningDir, ".beads")
+		if err := os.MkdirAll(beadsDir, 0750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(beadsDir, "config.json"), []byte(`{"database": "beads.db"}`), 0600); err != nil {
+			t.Fatal(err)
+		}
+		_, _, _, err := openAutoRoutedStore(t.Context(), store, true)
+		if err == nil {
+			t.Fatal("open of a legacy planning store succeeded")
+		}
+		if !strings.Contains(err.Error(), "git config beads.role maintainer") || strings.Contains(err.Error(), "restore the planning repo") || strings.Contains(err.Error(), "not initialized") {
+			t.Errorf("error = %v, want the routing opt-out without the restore or not-initialized advice", err)
 		}
 	})
 }

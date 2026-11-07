@@ -1208,6 +1208,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd init` on a fork no longer sets up contributor routing silently, or
+  over a maintainer role (GH#5957).** On a fork (an `upstream` remote) with no
+  routing yet, a non-interactive `bd init` (`--non-interactive`, no terminal,
+  or `CI=true`) routed new issues to `~/.beads-planning` without saying so. It
+  now prints the setup report an interactive run prints: the planning repo,
+  `routing.mode=auto` and how to turn it off (`--quiet` still silences it). A
+  `beads.role=maintainer` set before `bd init`, in the repository or
+  globally, now keeps a fork unrouted, as `--role=maintainer` does; init used
+  to route the fork anyway and set the repository's role to `contributor`.
+  `--role` still decides. The setup report's opt-out is now
+  `git config beads.role maintainer`, and the "already configured" notes say
+  `bd config set routing.contributor <path>`: the `bd init --role=maintainer`
+  and `bd init --contributor` they suggested are refused once the workspace
+  exists. When the planning repo's store is missing, routed `bd update`,
+  `bd close`, `bd list` and `bd ready` errors now also say that contributor
+  routing chose that repo and how to turn routing off. With the repo's
+  `.beads` gone they add that restoring a deleted planning repo is what
+  recovers its issues (a later `bd create` starts an empty planning store);
+  with an empty `.beads`, that the store is not initialized yet.
 - `bd config set`, `bd config unset`, `bd repo add` and `bd repo remove` now
   replace an existing `config.yaml` in one step (temp file in the same
   directory, fsync, rename) instead of truncating and rewriting it in place.

@@ -158,7 +158,7 @@ func (s *initRoleConfigSpy) SetConfig(_ context.Context, key, value string) erro
 }
 
 func TestAutoConfigureForkContributorIgnoresInheritedGitRouting(t *testing.T) {
-	for _, name := range []string{"configure", "configured", "maintainer", "not_fork", "config_lock", "config_lock_quiet"} {
+	for _, name := range []string{"configure", "configured", "configured_yaml", "maintainer", "not_fork", "config_lock", "config_lock_quiet"} {
 		t.Run(name, func(t *testing.T) {
 			target, decoy, home := newInitRoleFixture(t)
 			if name != "not_fork" {
@@ -169,8 +169,17 @@ func TestAutoConfigureForkContributorIgnoresInheritedGitRouting(t *testing.T) {
 			if err := os.Mkdir(planning, 0750); err != nil {
 				t.Fatal(err)
 			}
-			// Pin absent YAML under this fixture; the auto path must not create a DB.
+			// Pin absent YAML under this fixture (configured_yaml writes its
+			// own); the auto path must not create a DB.
 			t.Setenv("BEADS_DIR", filepath.Join(target, ".beads"))
+			if name == "configured_yaml" {
+				if err := os.Mkdir(filepath.Join(target, ".beads"), 0750); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(target, ".beads", "config.yaml"), []byte("routing:\n  contributor: yaml-planning\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
 			for _, key := range []string{"BD_ROUTING_CONTRIBUTOR", "BEADS_ROUTING_CONTRIBUTOR"} {
 				t.Setenv(key, "")
 				if err := os.Unsetenv(key); err != nil {
@@ -235,6 +244,14 @@ func TestAutoConfigureForkContributorIgnoresInheritedGitRouting(t *testing.T) {
 				}
 				if name == "maintainer" && (!strings.Contains(string(stdout), "Contributor routing skipped (beads.role=maintainer).\n") || strings.Contains(string(stdout), "bd init --contributor")) {
 					t.Errorf("call %d: stdout = %q, want the beads.role=maintainer skip without the wizard hint", call+1, stdout)
+				}
+				// The reconfigure hint must work after init too: bd config set
+				// writes config.yaml, which outranks a stored routing.contributor.
+				if strings.HasPrefix(name, "configured") && (!strings.Contains(string(stdout), "Skipping auto-setup. To reconfigure: bd config set routing.contributor <path>\n") || strings.Contains(string(stdout), "bd init --contributor")) {
+					t.Errorf("call %d: stdout = %q, want the config set reconfigure hint without the wizard hint", call+1, stdout)
+				}
+				if name == "configured_yaml" && !strings.Contains(string(stdout), "Contributor routing configured via config.yaml → yaml-planning\n") {
+					t.Errorf("call %d: stdout = %q, want the config.yaml skip", call+1, stdout)
 				}
 				wantWarning := name == "config_lock" && call == 0
 				if got := strings.Contains(stderr, "Warning: failed to set beads.role=contributor:"); got != wantWarning {
