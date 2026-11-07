@@ -333,7 +333,7 @@ func TestRenameRewritesCloseReasonAndOwnText(t *testing.T) {
 	if err := renameIssueKeepingBeadGates(ctx, testStore, a, "test-z", nil, "test"); err != nil {
 		t.Fatalf("rename failed: %v", err)
 	}
-	if report := updateReferencesInAllIssues(ctx, testStore, "test-a", "test-z", "test"); len(report.failed)+len(report.unchecked) > 0 {
+	if report := updateReferencesInAllIssues(ctx, testStore, "test-a", "test-z", "", "test"); len(report.failed)+len(report.unchecked) > 0 {
 		t.Fatalf("reference update failed: %+v", report)
 	}
 
@@ -503,6 +503,35 @@ func TestRenameReportsReferencesItLeft(t *testing.T) {
 			if got == nil || got.IssueID != want.IssueID || got.Author != want.Author || got.Text != want.Text || !got.CreatedAt.Equal(want.CreatedAt) {
 				t.Errorf("comment %s after the rename = %+v, want %+v", want.ID, got, want)
 			}
+		}
+	})
+
+	t.Run("short forms", func(t *testing.T) {
+		// GH#7040: renumbering test-12x.39 leaves "12x.39", how siblings
+		// under an epic are often written, naming whatever bead takes that
+		// number. It is listed, never rewritten: it may mean another bead.
+		st := newStore(t,
+			&types.Issue{ID: "test-12x", Title: "Epic"},
+			&types.Issue{ID: "test-12x.39", Title: "Child"},
+			&types.Issue{ID: "test-b", Title: "B", Notes: "after 12x.39 and test-12x.39; not 12x.390"},
+		)
+		comment, err := st.AddIssueComment(ctx, "test-12x", "alice", "12x.39 is next")
+		if err != nil {
+			t.Fatalf("failed to comment on test-12x: %v", err)
+		}
+		wantLines(t, runRenameOutput(t, st, "test-12x.39", "test-12x.47"), []string{
+			"Rewrote test-12x.39 to test-12x.47 in:",
+			"  test-b: notes",
+			"References left unchanged:",
+			"  test-12x comment " + comment.ID + ": 12x.39 (possible short form of test-12x.39)",
+			"  test-b notes: 12x.39 (possible short form of test-12x.39)",
+		})
+		b, err := st.GetIssue(ctx, "test-b")
+		if err != nil {
+			t.Fatalf("failed to get test-b: %v", err)
+		}
+		if want := "after 12x.39 and test-12x.47; not 12x.390"; b.Notes != want {
+			t.Errorf("test-b notes = %q, want %q", b.Notes, want)
 		}
 	})
 
