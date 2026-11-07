@@ -362,6 +362,20 @@ func TestIgnored32StrayIndexWithoutColumnIsDroppedFirst(t *testing.T) {
 	d.requireSteps(wispRestoreStepRecompute, wispIsBlockedIndexDDL, wispRestoreStepBody, wispRestoreStepCursor)
 }
 
+// TestIgnored32StrayIndexWithoutColumnIsRecreatedInOnePass takes the same
+// shape through a pass that succeeds: the dropped index is created again
+// after the recompute. Without that, the pass would record 32 with no
+// idx_wisps_is_blocked, and 32 never runs again to add it.
+func TestIgnored32StrayIndexWithoutColumnIsRecreatedInOnePass(t *testing.T) {
+	d := newWispRestoreDB(t)
+	d.expectProbes(true, false, true)
+	if _, err := d.migrate(); err != nil {
+		t.Fatalf("runMigrations(ignored 31..32): %v", err)
+	}
+	d.requireSteps(wispDropIndexDDL, wispIsBlockedColumnDDL, wispRestoreStepRecompute, wispIsBlockedIndexDDL,
+		wispRestoreStepBody, wispRestoreStepCursor)
+}
+
 func TestIgnored32FailedStrayIndexDropStaysPending(t *testing.T) {
 	d := newWispRestoreDB(t)
 	cause := errors.New("drop fault")
