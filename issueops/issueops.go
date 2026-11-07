@@ -289,13 +289,14 @@ type UpdateRequest struct {
 	// maps that flag to all three fields, conditioning this one on a
 	// Patch.Notes edit.
 	ForceNotesOverwrite bool
-	// ForceClosePolicy bypasses only close policy — the open-children refusal
-	// and the live-direct-blocker refusal — for a Patch.Status that crosses into
-	// the done category. The zero value enforces the policy. It has no effect
-	// without such a status change, and never bypasses validation,
-	// ExpectedVersion, ExpectedAssignee, ExpectedStatus, or the assignee fence.
-	// It is the update-side spelling of CloseRequest.Force; a command adapter
-	// that maps one flag to both spells both.
+	// ForceClosePolicy bypasses the two blocked-graph refusals: close policy —
+	// the open-children refusal and the live-direct-blocker refusal — for a
+	// Patch.Status that crosses into the done category, and the blocked-issue
+	// refusal (ErrClaimBlocked) for a Claim. The zero value enforces both. It
+	// has no effect without such a status change or a Claim, and never bypasses
+	// validation, ExpectedVersion, ExpectedAssignee, ExpectedStatus, or the
+	// assignee fence. It is the update-side spelling of CloseRequest.Force; a
+	// command adapter that maps one flag to both spells both.
 	ForceClosePolicy bool
 	// AllowTemplate says the caller edits a template deliberately, so the
 	// template read-only refusal (*TemplateReadOnlyError) stands down for this
@@ -562,8 +563,9 @@ type Lifecycle interface {
 	// mutation. A Patch.Status that crosses from outside the configured done
 	// category into it answers to close policy: an unforced crossing with open
 	// children returns CloseOpenChildrenError and one with a live direct blocker
-	// returns ErrCloseBlocked, both without mutation. ForceClosePolicy bypasses
-	// those two refusals and nothing else. A Claim that loses its
+	// returns ErrCloseBlocked, both without mutation. A Claim of a blocked issue
+	// returns ErrClaimBlocked, also without mutation. ForceClosePolicy bypasses
+	// those three refusals and nothing else. A Claim that loses its
 	// compare-and-set returns *ClaimConflictError carrying the state that beat
 	// it. An update of a template returns *TemplateReadOnlyError whatever its
 	// patch and force flags, unless it sets AllowTemplate — templates are
