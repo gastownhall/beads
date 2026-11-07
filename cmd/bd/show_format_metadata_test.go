@@ -290,6 +290,50 @@ func TestFormatIssueCustomMetadata_NestedObject(t *testing.T) {
 	}
 }
 
+// TestFormatIssueCustomMetadata_LargeInteger (bd-emny2t, GH#6330): an integer
+// past 2^53 must render with the digits it was stored with, not float64-rounded
+// ones, at the top level and nested inside objects or arrays. The decode that
+// feeds the formatter has to keep json.Number (storage.DecodeMetadataObject);
+// a plain interface{} unmarshal turns 1546130668394913822 into 1546130668394913792.
+func TestFormatIssueCustomMetadata_LargeInteger(t *testing.T) {
+	t.Parallel()
+	const big = "1546130668394913822"
+	const justOver = "9007199254740993" // 2^53+1: first integer float64 cannot represent
+	issue := &types.Issue{Metadata: json.RawMessage(
+		`{"big":` + big + `,"just_over":` + justOver +
+			`,"nested":{"thread_id":` + big + `},"arr":[` + justOver + `]}`)}
+	result := formatIssueCustomMetadata(issue)
+	for _, want := range []string{
+		"big: " + big,
+		"just_over: " + justOver,
+		`nested: {"thread_id":` + big + `}`,
+		`arr: [` + justOver + `]`,
+	} {
+		if !strings.Contains(result, want) {
+			t.Errorf("expected %q in output (stored digits intact), got:\n%s", want, result)
+		}
+	}
+}
+
+// TestFormatIssueCustomMetadata_NumberLiteralSpellings: with json.Number kept,
+// display renders the stored literal — 0.0000001 as written, not %g's 1e-07.
+func TestFormatIssueCustomMetadata_NumberLiteralSpellings(t *testing.T) {
+	t.Parallel()
+	issue := &types.Issue{Metadata: json.RawMessage(`{"small":5,"pi":3.14,"tiny":0.0000001,"int64min":-9223372036854775808,"uint64max":18446744073709551615}`)}
+	result := formatIssueCustomMetadata(issue)
+	for _, want := range []string{
+		"small: 5",
+		"pi: 3.14",
+		"tiny: 0.0000001",
+		"int64min: -9223372036854775808",
+		"uint64max: 18446744073709551615",
+	} {
+		if !strings.Contains(result, want) {
+			t.Errorf("expected %q in output, got:\n%s", want, result)
+		}
+	}
+}
+
 func TestFormatIssueCustomMetadata_InvalidJSON(t *testing.T) {
 	t.Parallel()
 	issue := &types.Issue{Metadata: json.RawMessage(`not-json`)}

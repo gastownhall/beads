@@ -35,6 +35,31 @@ func NormalizeMetadataValue(value interface{}) (string, error) {
 	return jsonStr, nil
 }
 
+// DecodeMetadataObject decodes a metadata JSON object into a Go map keeping
+// every number as json.Number, so integer literals beyond float64's exact
+// range (magnitude above 2^53) survive callers that re-encode or format the
+// value — the decode behind bd show rendering, SlotGet and the Linear
+// milestone merge (GH#6330). The whole document must be one valid JSON value
+// (json.Valid rejects trailing content) and its root must be an object. Empty
+// and null documents decode to a nil map, matching how the callers treat
+// absent metadata.
+func DecodeMetadataObject(raw []byte) (map[string]any, error) {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		return nil, nil
+	}
+	if !json.Valid(raw) {
+		return nil, fmt.Errorf("metadata is not valid JSON")
+	}
+	dec := json.NewDecoder(strings.NewReader(trimmed))
+	dec.UseNumber()
+	var data map[string]any
+	if err := dec.Decode(&data); err != nil {
+		return nil, fmt.Errorf("metadata is not a JSON object: %w", err)
+	}
+	return data, nil
+}
+
 // MetadataFieldType defines the type of a metadata field for schema validation.
 type MetadataFieldType string
 
