@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/steveyegge/beads/internal/storage/depid"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 )
 
 // Pre-migration repairs run immediately before a specific pending migration
@@ -355,6 +356,12 @@ func ensureWispIsBlockedIndex(ctx context.Context, db DBConn) error {
 // pending, and a low cursor row going missing never re-pends one. A sentinel
 // column cannot either (see schemaSentinelColumn's floor rules).
 //
+// A restored column holds its DEFAULT 0 on every row, and ready work reads
+// around stale 1s, never around stale 0s, so a blocked wisp would show as
+// ready: the repair derives the real flags through the live wisp recompute
+// before it creates the index. It never writes durable issues rows; a durable
+// is_blocked drift stays with the explicit full repair.
+//
 // A healthy clone pays the three probes and nothing else. An absent wisps
 // table is left to ignored/0001 and the cursor-reality repair, as at 7/15.
 func restoreWispIsBlocked(ctx context.Context, db DBConn) error {
@@ -381,12 +388,22 @@ func restoreWispIsBlocked(ctx context.Context, db DBConn) error {
 			return fmt.Errorf("adding wisps.is_blocked: %w", err)
 		}
 	}
+	if err := recomputeWispIsBlocked(ctx, db); err != nil {
+		return fmt.Errorf("recomputing wisps.is_blocked: %w", err)
+	}
 	if !hasIndex {
 		if _, err := db.ExecContext(ctx, "CREATE INDEX idx_wisps_is_blocked ON wisps(is_blocked, status)"); err != nil {
 			return fmt.Errorf("creating idx_wisps_is_blocked: %w", err)
 		}
 	}
 	return nil
+}
+
+// recomputeWispIsBlocked is restoreWispIsBlocked's recompute step, a
+// variable so schema tests can observe it and inject its failure.
+var recomputeWispIsBlocked = func(ctx context.Context, db DBConn) error {
+	_, err := issueops.RecomputeAllWispIsBlockedInTx(ctx, db)
+	return err
 }
 
 // wispsTableDDLForMigration0047 is 0020_create_wisps.up.sql's shape plus every
