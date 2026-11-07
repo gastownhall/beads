@@ -1,4 +1,4 @@
--- Ignored migration 0031: widen the clone-local event comment columns on
+-- Ignored migration 0032: widen the clone-local event comment columns on
 -- every clone.
 --
 -- The twin of synced migration 0075, and required by check D of

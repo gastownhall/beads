@@ -161,7 +161,7 @@ func (f *residualFixture) read(c residualContentColumn, id string) ([]byte, bool
 
 // TestEmbeddedMigration0075WidensResidualContentColumns upgrades a database
 // sitting at main version 74, with rows already in the four affected tables,
-// through MigrateUp, and pins migration 0075 (+ ignored/0031) on a real engine:
+// through MigrateUp, and pins migration 0075 (+ ignored/0032) on a real engine:
 //
 //   - before the upgrade every one of the five columns refuses a value past
 //     the 65,535-byte TEXT/BLOB cap;
@@ -181,9 +181,9 @@ func TestEmbeddedMigration0075WidensResidualContentColumns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read 0075: %v", err)
 	}
-	ignoredSQL, err := schema.IgnoredMigrationSQL("0031_widen_event_comment_columns.up.sql")
+	ignoredSQL, err := schema.IgnoredMigrationSQL("0032_widen_event_comment_columns.up.sql")
 	if err != nil {
-		t.Fatalf("read ignored 0031: %v", err)
+		t.Fatalf("read ignored 0032: %v", err)
 	}
 
 	dataDir := seedMainSchemaAt(t, ctx, 74)
@@ -285,7 +285,7 @@ func TestEmbeddedMigration0075WidensResidualContentColumns(t *testing.T) {
 	execFrozenGuard(t, ctx, conn, ignoredSQL)
 	for _, table := range tables {
 		if got := showCreateTable(t, ctx, conn, table); got != definitions[table] {
-			t.Errorf("%s definition changed on a 0075/ignored-0031 replay:\nbefore: %s\nafter:  %s", table, definitions[table], got)
+			t.Errorf("%s definition changed on a 0075/ignored-0032 replay:\nbefore: %s\nafter:  %s", table, definitions[table], got)
 		}
 		//nolint:gosec // G202: table is a test-local literal.
 		if got := scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM "+table); got != rowCounts[table] {
@@ -308,9 +308,9 @@ func TestEmbeddedMigration0075ConvergesFromPartialWidening(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read 0075: %v", err)
 	}
-	ignoredSQL, err := schema.IgnoredMigrationSQL("0031_widen_event_comment_columns.up.sql")
+	ignoredSQL, err := schema.IgnoredMigrationSQL("0032_widen_event_comment_columns.up.sql")
 	if err != nil {
-		t.Fatalf("read ignored 0031: %v", err)
+		t.Fatalf("read ignored 0032: %v", err)
 	}
 	open := func(t *testing.T) (*sql.Conn, *residualFixture) {
 		dataDir := seedMainSchemaAt(t, ctx, 74)

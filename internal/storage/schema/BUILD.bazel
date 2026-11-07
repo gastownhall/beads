@@ -131,7 +131,7 @@ go_library(
         "migrations/ignored/0030_create_wisp_id_tombstones.up.sql",
         "migrations/ignored/0031_restore_preflip_events.up.sql",
         "migrations/0075_widen_residual_content_columns.up.sql",
-        "migrations/ignored/0031_widen_event_comment_columns.up.sql",
+        "migrations/ignored/0032_widen_event_comment_columns.up.sql",
     ],
     importpath = "github.com/steveyegge/beads/internal/storage/schema",
     visibility = ["//:__subpackages__"],

@@ -52,7 +52,7 @@
 -- exactly as created.
 --
 -- events and wisp_events are clone-local (dolt_ignored; events since 0062),
--- so this ships with an ignored-series twin, ignored/0031: a fresh clone
+-- so this ships with an ignored-series twin, ignored/0032: a fresh clone
 -- materializes them from ignored/0019 and ignored/0001 with the main cursor
 -- already at-latest and never runs this file (check D of
 -- scripts/check-migration-hygiene.sh). issue_snapshots and

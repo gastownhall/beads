@@ -1367,7 +1367,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   limited to 255 characters, as before. Schema migration 0075 widens
   `events.comment`, `wisp_events.comment` and `issue_snapshots`' two content
   columns to LONGTEXT and `compaction_snapshots.snapshot_json` to LONGBLOB,
-  keeping each column's nullability and default; ignored migration 0031
+  keeping each column's nullability and default; ignored migration 0032
   widens both event comment columns on fresh clones, so a fresh clone accepts
   the same large comments an in-place-upgraded workspace does (GH#3925).
   **Upgrading:** on a clone whose `wisp_events` or `events` table is

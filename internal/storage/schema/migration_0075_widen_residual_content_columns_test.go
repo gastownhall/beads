@@ -13,11 +13,13 @@ import (
 const (
 	migration0075Up        = "0075_widen_residual_content_columns.up.sql"
 	migration0075Down      = "0075_widen_residual_content_columns.down.sql"
-	ignoredMigration0031Up = "0031_widen_event_comment_columns.up.sql"
+	ignoredMigration0032Up = "0032_widen_event_comment_columns.up.sql"
 )
 
 // TestLatestVersionIncludesMigration0075 pins the slots this migration claims,
-// main 0075 and ignored 0031, superseding 0074's own version of this test.
+// main 0075 and ignored 0032, superseding 0074's own version of this test and
+// the ignored pin of TestMigration0031RegistersItsRepair (ignored 0031, the
+// pre-upgrade events restore, sits directly below the twin).
 // A hardcoded literal for the reason the earlier ones were: a drift to 75 for
 // the wrong reason is caught by the column tests below failing to explain why
 // 75 widens the residual content columns.
@@ -26,7 +28,7 @@ func TestLatestVersionIncludesMigration0075(t *testing.T) {
 	if got := LatestVersion(); got != want {
 		t.Fatalf("LatestVersion() = %d, want %d (residual content column widening)", got, want)
 	}
-	const wantIgnored = 31
+	const wantIgnored = 32
 	if got := LatestIgnoredVersion(); got != wantIgnored {
 		t.Fatalf("LatestIgnoredVersion() = %d, want %d (event comment widening on fresh clones)", got, wantIgnored)
 	}
@@ -127,7 +129,7 @@ WHERE TABLE_SCHEMA = DATABASE()
 }
 
 // TestMigration0075NoopsWithoutWispEventsThroughDoltCLI replays the frozen
-// 0075 and ignored/0031 texts through the dolt CLI on a database without the
+// 0075 and ignored/0032 texts through the dolt CLI on a database without the
 // two clone-local event tables: their NULL probes take the SELECT 1 branch,
 // so the replay succeeds and creates nothing. It is the CLI's missing-table
 // compatibility control only; the embedded engine tests prove the prepared
@@ -151,9 +153,9 @@ DELETE FROM schema_migrations WHERE version = %d;
 	if err != nil {
 		t.Fatalf("read 0075 migration: %v", err)
 	}
-	ignoredSQL, err := IgnoredMigrationSQL(ignoredMigration0031Up)
+	ignoredSQL, err := IgnoredMigrationSQL(ignoredMigration0032Up)
 	if err != nil {
-		t.Fatalf("read ignored 0031 migration: %v", err)
+		t.Fatalf("read ignored 0032 migration: %v", err)
 	}
 	runDoltSQL(t, dir, seedSQL+"\n"+string(migrationSQL)+"\n"+ignoredSQL)
 

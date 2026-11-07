@@ -98,24 +98,24 @@ func TestEmbeddedIgnoredSeriesConvergesWithFreshInitShape(t *testing.T) {
 	}
 
 	// Two equally narrow doors would pass the diff above, so the event
-	// comment columns migration 0075 and its twin ignored/0031 widen are
+	// comment columns migration 0075 and its twin ignored/0032 widen are
 	// pinned outright, on the main-first door (init: 0075, then the ignored
-	// series) and on the ignored-first door (clone: ignored/0031 only), and
-	// again after each door replays the other door's text: ignored/0031 over
+	// series) and on the ignored-first door (clone: ignored/0032 only), and
+	// again after each door replays the other door's text: ignored/0032 over
 	// the init door, 0075 over the clone door. Neither replay may change a
 	// definition (#4353's re-MODIFY hazard is what the guards avoid).
 	requireWidenedEventComments(t, ctx, initConn, "fresh-init")
 	requireWidenedEventComments(t, ctx, cloneConn, "fresh-clone")
-	ignoredSQL, err := schema.IgnoredMigrationSQL("0031_widen_event_comment_columns.up.sql")
+	ignoredSQL, err := schema.IgnoredMigrationSQL("0032_widen_event_comment_columns.up.sql")
 	if err != nil {
-		t.Fatalf("read ignored/0031: %v", err)
+		t.Fatalf("read ignored/0032: %v", err)
 	}
 	initEvents := clonePlaneTableShape(t, ctx, initConn, "events")
 	initWispEvents := clonePlaneTableShape(t, ctx, initConn, "wisp_events")
 	execFrozenGuard(t, ctx, initConn, ignoredSQL)
 	diffClonePlaneShapes(t, "events", initEvents, clonePlaneTableShape(t, ctx, initConn, "events"))
 	diffClonePlaneShapes(t, "wisp_events", initWispEvents, clonePlaneTableShape(t, ctx, initConn, "wisp_events"))
-	requireWidenedEventComments(t, ctx, initConn, "fresh-init after an ignored/0031 replay")
+	requireWidenedEventComments(t, ctx, initConn, "fresh-init after an ignored/0032 replay")
 
 	mainSQL, err := schema.MigrationSQL("0075_widen_residual_content_columns.up.sql")
 	if err != nil {
