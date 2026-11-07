@@ -266,11 +266,11 @@ The gate is **state-aware by default**
   `bd dolt push` afterwards. This applies to embedded mode only: a shared
   server always stops for consent, because migrating it changes the schema
   every connected client sees (see [Shared servers](#shared-servers) below).
-- **stops and directs you to adopt** (`bd bootstrap`) when the remote has
-  already been migrated by another clone. On a clone that already has a local
-  database, `bd bootstrap` by itself reports `Nothing to do.` and changes
-  nothing; adopt with the steps under *Multiple clones sharing one remote*
-  below.
+- **stops and directs you to adopt** the remote's database when the remote
+  has already been migrated by another clone. On a clone that already has a
+  local database, `bd bootstrap` by itself reports `Nothing to do.` and
+  changes nothing: move the local database aside first, with the steps under
+  *Multiple clones sharing one remote* below.
 - **stops for a human decision** when this clone and the remote applied
   different content for the same migration (a genuine fork), or when the
   remote's schema state cannot be read from the cached ref.
@@ -377,23 +377,90 @@ gate refuses `bd dolt pull` while the clone has pending migrations. Adopt the
 migrated database by re-cloning it. `bd bootstrap` never replaces an existing
 database — run against one, it prints `Database already exists` and
 `Nothing to do.` and leaves the clone on the old schema — so move the local
-database aside first, then re-apply the step 1 backup:
+database aside first.
 
-```bash
-mv .beads/embeddeddolt .beads/backup/embeddeddolt.pre-adopt   # embedded mode (the default)
-bd bootstrap                                 # clones the migrated database from the remote
-bd import .beads/backup/pre-migrate.jsonl    # restores what a re-clone cannot bring
+Bootstrap does not read the remote from the database you move aside: it clones
+from `sync.remote` in `.beads/config.yaml` or, when that is unset, from Dolt
+data on git origin (`refs/dolt/data`). So before the move, check that
+`bd config get sync.remote` prints the remote to adopt (`bd dolt remote list`
+shows this clone's remotes). If it does not, set it by hand in the
+`config.yaml` of the `.beads` that `bd where` reports: `bd config set` is
+refused while the database has pending migrations. Put `remote:` under the
+file's `sync:` section, and add the section if the file has none:
+
+```yaml
+sync:
+  remote: <url>
 ```
 
-The re-clone brings only what the remote has, so the import restores this
-clone's clone-local beads (wisps, for example) and anything step 1 did not
-push; rows the remote already holds in a newer version are skipped as stale.
-The backup has to come from the old binary, as in step 1: on a clone with
-pending migrations the new binary's `bd export` fails. Keep the moved-aside
-directory until you have checked the result — the old binary can still open
-it. In server mode the database lives under `.beads/dolt/` instead; stop the
-server and move the database outside `.beads/dolt/` (see
-[re-clone-gotchas](/recovery/init-safety#re-clone-gotchas)).
+Then stop every `bd` process that uses this database, and start none until
+bootstrap has finished. That includes agent sessions whose hooks run
+`bd prime`, and `bd` in the repository's other git worktrees. `bd prime`
+creates a fresh database where it finds none: run here while the database is
+moved aside, it leaves bootstrap an existing database to keep; run in another
+worktree, it gives that worktree a database of its own. Run the steps from the
+directory that contains the `.beads` that `bd where` reports (embedded mode,
+the default):
+
+```bash
+mkdir -p .beads/backup                                          # the backup parent
+mv -f .beads/embeddeddolt .beads/backup/embeddeddolt.pre-adopt  # set the old store aside
+bd bootstrap                                                    # clones the migrated database from the remote
+```
+
+Let bootstrap go ahead only if its plan reads
+`Bootstrap plan: clone from remote` with that remote as its `Remote:`.
+Bootstrap shows a git URL in its `git+https://` or `git+ssh://` form, without
+credentials. It asks before it acts only in a terminal, and only when none of
+`--yes`, `BD_NON_INTERACTIVE` or `CI` is set; otherwise run
+`bd bootstrap --dry-run` first. A plan to restore from a backup, import a JSONL
+file or create a fresh database means bootstrap did not find the remote:
+decline it, fix `sync.remote`, and run it again. If bootstrap reports
+`Database already exists` instead, a `bd` process created a new database after
+the move: stop it, move that database aside too (to another unused name), and
+run bootstrap again.
+
+The destination must be unused: if `.beads/backup/embeddeddolt.pre-adopt`
+already exists (from an earlier adopt), pick another unused name, since `mv`
+would otherwise move the database inside it. Keep the moved-aside directory
+until you have checked the result — the old binary can still open it, and it
+holds anything this clone never pushed. When auto-backup writes to
+`.beads/backup/` (the default), the moved-aside directory counts toward
+`backup.size-cap-mb`, the size at which auto-backup pauses.
+
+After the adopt, run `bd where` in each of the repository's other git worktrees
+(`git worktree list` names them). Each must report the `.beads` you adopted in,
+unless it had a database of its own before the move. A worktree that reports
+its own `.beads` instead gained a database during the move, and it keeps
+using that one, not the adopted database: move that worktree's
+`.beads/embeddeddolt` aside the same way.
+
+`bd bootstrap` is the whole adopt. The re-clone brings only what the remote
+has, so this clone's clone-local beads (wisps, for example) and anything step
+1 did not push are not in it. Only if you exported them with the old binary
+before upgrading (step 1's backup) can you restore them afterwards:
+
+```bash
+bd import .beads/backup/pre-migrate.jsonl    # only if step 1's old-release backup exists
+```
+
+Rows the remote already holds in a newer version are skipped as stale. The
+backup has to come from the old binary, as in step 1: on a clone with
+pending migrations the new binary's `bd export` fails, so without that backup
+the moved-aside directory is the only copy of the unpushed work.
+
+On server storage (server mode, a shared server, or a proxied workspace) the
+database is not in `.beads/embeddeddolt` but in the `data_dir` of the server
+that serves it, so the adopt is done on that host, in the numbered steps the
+refusal prints on server storage. Check `sync.remote` as above, in the
+workspace that will run bootstrap. Coordinate downtime with every client of
+the server and stop the server. On its host, move only this database's
+directory out of the server's actual `data_dir`, which for a shared or custom
+server is wherever that server is configured to keep it (see
+[re-clone-gotchas](/recovery/init-safety#re-clone-gotchas)), and keep the moved
+copy. Then restart the server and run `bd bootstrap` from a workspace
+connected directly to it, not through a proxy, accepting only a clone plan as
+above.
 
 A clone that adopts the migrated database this way, by the pull in step 3 or
 by `bd bootstrap`, can start with an empty `events` audit table; see

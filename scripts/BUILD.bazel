@@ -91,6 +91,7 @@ go_test(
         "//internal/configfile",
         "//internal/doltversion",
         "//internal/formula",
+        "//internal/storage/schema",
         "//internal/testutil/bazeltest",
         "//scripts/internal/testbash",
         "@in_gopkg_yaml_v3//:yaml_v3",
@@ -334,6 +335,24 @@ go_test(
         "//cmd/bd:store_factory_server_mode.go",
     ],
     deps = ["//internal/testutil/bazeltest"],
+)
+
+# The upgrading guide's adopt recipe, held to the gate's own commands
+# (bd-bt60zz, #6687), and the changelog entry for it.
+go_test(
+    name = "upgrading_adopt_docs_test",
+    srcs = [
+        "repo_helpers_test.go",
+        "upgrading_adopt_docs_test.go",
+    ],
+    data = [
+        "//:CHANGELOG.md",
+        "//:docs/getting-started/upgrading.md",
+    ],
+    deps = [
+        "//internal/storage/schema",
+        "//internal/testutil/bazeltest",
+    ],
 )
 
 # pr.yml's check-doc-freshness-platforms Linux leg: `go test

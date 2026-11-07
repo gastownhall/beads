@@ -104,7 +104,7 @@ func handleRemoteMigrateGateJSON(e *schema.RemoteMigrateGateError) {
 		// human/text path (printGlobalDatabaseConsentHint,
 		// noticeSharedMigrateRefusal) and name the --global verb when this
 		// invocation targeted the global database. Only shared-no-remote is
-		// retargeted; the remote-backed arms coordinate through bd bootstrap /
+		// retargeted; the remote-backed arms coordinate through a re-clone or
 		// bd migrate --force, which --global does not rewrite.
 		sharedConsent := schema.SharedConsentCommand
 		if globalFlag {
@@ -188,12 +188,12 @@ func handleRemoteMigrateGateJSON(e *schema.RemoteMigrateGateError) {
 			// "exactly one designated clone migrates and publishes", which
 			// contradicts the adopt-only options this decision carries.
 			gate["decision"] = "adopt-ff"
-			gate["observed"] = "the remote is already migrated and this clone can fast-forward to it losslessly (no unpushed commits, clean working set)"
-			gate["expected"] = "adopt the remote's migrated database; nothing local is discarded"
+			gate["observed"] = "the remote is already migrated and this clone's Dolt history can fast-forward without losing local commits (strict ancestor, clean working set)"
+			gate["expected"] = "adopt the remote's migrated database by moving the local one aside first (see options); keep the old store, which holds the clone-local data that a re-clone does not retain"
 		case "fork-skew":
 			gate["decision"] = "fork-skew"
 			gate["observed"] = fmt.Sprintf("this clone and the remote applied different content for migration(s) %s — already forked", schema.FormatMigrationVersions(e.SkewVersions))
-			gate["expected"] = "pick one canonical clone and re-bootstrap the others (data-loss decision)"
+			gate["expected"] = "pick one canonical clone, make sure the intended remote holds its database, then adopt it on every other clone by moving that clone's database aside first (data-loss decision)"
 			gate["skew_versions"] = e.SkewVersions
 		default:
 			// Blunt #4515 stop — name WHY the smart gate (#4516) could not do

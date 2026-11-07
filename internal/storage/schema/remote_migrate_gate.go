@@ -86,12 +86,11 @@ type RemoteMigrateGateError struct {
 
 	// Decision records why the smart gate (#4516) stopped, when it is enabled.
 	// Empty is the default blunt #4515 stop (also used for the smart gate's
-	// "undetermined"/"below-floor" fallbacks); the messaging below is then
-	// byte-identical to #4515. "adopt", "adopt-ff", and "fork-skew" tailor
-	// the guidance. "adopt-ff" (mybd-ae1i piece 2) is a strict refinement of
-	// "adopt": the remote is ahead with no skew AND this clone's local
-	// history is a strict ancestor of the remote's with a clean working set,
-	// so adopting is provably loss-free (unlike a plain "adopt").
+	// "undetermined"/"below-floor" fallbacks). "adopt", "adopt-ff", and
+	// "fork-skew" tailor the guidance. "adopt-ff" (mybd-ae1i piece 2) is a
+	// strict refinement of "adopt": the remote is ahead with no skew AND this
+	// clone's local history is a strict ancestor of the remote's with a clean
+	// working set, so a fast-forward to it is provably loss-free.
 	Decision string
 	// SkewVersions lists the migration versions whose content diverged between
 	// this clone and the remote (Decision == "fork-skew").
@@ -141,6 +140,16 @@ type RemoteMigrateGateError struct {
 	// plumbed into the gate: the topology is the caller's fact, and every
 	// other injection site would have to pass a constant false.
 	Proxied bool
+
+	// ServerMode marks a refusal raised on a dolt sql-server store
+	// (internal/storage/dolt), owned by this workspace or not (bd-bt60zz,
+	// #6687). Presentation only, like Proxied, and set by that store after the
+	// gate returns for the same reason: the adopt recipe moves the database
+	// aside first, and on a server the database is a directory under the
+	// serving host's data_dir, not .beads/embeddeddolt — but an owned server
+	// is not Shared, so neither of those flags tells the renderer which move
+	// to print.
+	ServerMode bool
 }
 
 const (
@@ -148,7 +157,7 @@ const (
 	// gateDecisionAdoptFastForward (mybd-ae1i piece 2): a strict refinement of
 	// gateDecisionAdopt. Set only when the smart router additionally proved
 	// local HEAD a strict ancestor of the cached remote ref with a clean
-	// working set — adopting is loss-free, unlike a plain adopt.
+	// working set — a fast-forward to it is loss-free, unlike a plain adopt.
 	gateDecisionAdoptFastForward = "adopt-ff"
 	gateDecisionForkSkew         = "fork-skew"
 	// gateDecisionSharedNoRemote (gastownhall/beads#5920): the database is
@@ -448,8 +457,145 @@ func (e *RemoteMigrateGateError) dataBehindBody() string {
 	return body
 }
 
-// userBody returns the decision-specific guidance block. The default (blunt
-// #4515) body is byte-identical to before the smart gate existed.
+// EmbeddedAdoptCommands is the ordered recipe that adopts a remote's migrated
+// database on a clone whose default embedded database already exists
+// (bd-bt60zz, #6687). `bd bootstrap` never replaces an existing database: run
+// against one it plans Action "none", prints "Nothing to do." and leaves the
+// clone on the old schema, which the gate then refuses again. Moving the local
+// database aside first is what lets bootstrap re-clone. It is the single source
+// for every surface that prints the recipe (the gate's bodies and options,
+// embeddeddolt's lenient-open warning), so they cannot drift apart. Paths are
+// relative to the directory that contains the .beads `bd where` reports: the
+// embedded database is always that .beads's embeddeddolt/, and in a git
+// worktree or a BEADS_DIR session it is not under the current directory.
+func EmbeddedAdoptCommands() []string {
+	return []string{
+		"mkdir -p .beads/backup",
+		"mv -f .beads/embeddeddolt .beads/backup/embeddeddolt.pre-adopt",
+		"bd bootstrap",
+	}
+}
+
+// adoptRecipe renders the adopt steps for userBody, each prose line prefixed
+// with indent and each command at the body's usual command indent.
+//
+// Bootstrap finds the remote only through sync.remote or, when that is unset,
+// Dolt data on git origin; it never reads the remotes recorded in the database
+// the recipe moves aside. The gate fires on any Dolt remote, so the recipe
+// checks sync.remote before the move and accepts only a clone plan after it:
+// without that, a remote recorded only in the database leaves bootstrap to
+// restore, import or create a fresh database instead (#6687 review). Only
+// `bd config get` of a config.yaml key skips the store open (GH#5108):
+// `bd config set` opens it like any write, and this gate refuses it on this
+// very database, so the recipe has the operator set sync.remote by hand in the
+// config.yaml of the .beads that `bd where` reports, the one bootstrap reads.
+//
+// Between the move and the clone the workspace has no database, and a bd that
+// opens lazily (`bd prime`, which agent session hooks run) creates a fresh one
+// there; run in another git worktree, it creates one in that worktree's own
+// .beads, which then keeps it rather than the shared database. So the recipe
+// names those processes among the ones to stop, says what bootstrap's report
+// of an existing database means after the move, and ends with a per-worktree
+// `bd where` check.
+func (e *RemoteMigrateGateError) adoptRecipe(indent string) string {
+	if e.serverStorage() {
+		return serverAdoptRecipe(indent)
+	}
+	body := indent + "`bd bootstrap` alone does NOT adopt it: bootstrap never replaces an existing\n" +
+		indent + "database, so run against this clone it prints \"Nothing to do.\" and leaves\n" +
+		indent + "it on the old schema. Nor does it read the remote from the database you\n" +
+		indent + "move aside: it clones from sync.remote (or, if that is unset, from Dolt\n" +
+		indent + "data on git origin). So first check that `bd config get sync.remote`\n" +
+		indent + "prints the remote to adopt (`bd dolt remote list` shows this clone's\n" +
+		indent + "remotes). If it does not, set `remote: <url>` under `sync:` in the\n" +
+		indent + "config.yaml of the .beads that `bd where` reports, by hand: `bd config set`\n" +
+		indent + "is refused while this database has pending migrations. Then stop every bd\n" +
+		indent + "process that uses this database, and start none until bootstrap has\n" +
+		indent + "finished, including agent sessions whose hooks run `bd prime` and bd in\n" +
+		indent + "this repository's other git worktrees: `bd prime` creates a fresh database\n" +
+		indent + "where it finds none. Move the database aside from the directory that\n" +
+		indent + "contains the .beads that `bd where` reports:\n"
+	for _, c := range EmbeddedAdoptCommands() {
+		body += "        " + c + "\n"
+	}
+	return body + adoptPlanCheck(indent) +
+		indent + "If it reports instead that the database already exists, a bd process\n" +
+		indent + "created a new one after the move: stop it, move that one aside too (to\n" +
+		indent + "another unused name) and run bootstrap again.\n" +
+		indent + "If .beads/backup/embeddeddolt.pre-adopt already exists, pick another unused\n" +
+		indent + "name. Keep the moved-aside copy until you have checked the result.\n" +
+		indent + "Afterwards, run `bd where` in each of the repository's other git worktrees:\n" +
+		indent + "each must report this .beads unless it had a database of its own before the\n" +
+		indent + "move. A worktree that reports its own .beads instead gained a database during\n" +
+		indent + "the move: move that worktree's .beads/embeddeddolt aside the same way.\n"
+}
+
+// adoptPlanCheck is the check both recipes end with: bootstrap prints its plan
+// before it acts, and only a clone from the remote just checked is the adopt.
+// Bootstrap prints a git-forge sync.remote in the git+ form it clones from,
+// without credentials, so the check names the remote rather than the string
+// `bd config get sync.remote` printed. Bootstrap asks before acting only on a
+// terminal with no --yes, BD_NON_INTERACTIVE or CI (cmd/bd's
+// isNonInteractiveBootstrap).
+func adoptPlanCheck(indent string) string {
+	return indent + "Let bootstrap go ahead only if its plan is \"clone from remote\" for that\n" +
+		indent + "remote (it shows a git URL in its git+https:// or git+ssh:// form, without\n" +
+		indent + "credentials). It asks first only in a terminal without --yes,\n" +
+		indent + "BD_NON_INTERACTIVE or CI set; otherwise run `bd bootstrap --dry-run`\n" +
+		indent + "before it. Any other plan (restore, import, a fresh database) means it\n" +
+		indent + "did not find the remote: decline it, fix sync.remote and run it again.\n"
+}
+
+// serverAdoptRecipe is adoptRecipe for server storage: the database lives
+// under the serving host's data_dir, which the gate cannot see, so the move is
+// stated as host-side steps rather than commands with a fabricated path.
+func serverAdoptRecipe(indent string) string {
+	return indent + "`bd bootstrap` alone does NOT adopt it: bootstrap never replaces an existing\n" +
+		indent + "database, so run against this one it reports that the database already exists\n" +
+		indent + "and leaves it on the old schema. This database is on server storage (a dolt\n" +
+		indent + "sql-server), so adopting is done on the host that serves it:\n" +
+		indent + "  1. In the workspace that will run bootstrap (step 4), check that\n" +
+		indent + "     `bd config get sync.remote` prints the remote to adopt. If it does not,\n" +
+		indent + "     set `remote: <url>` under `sync:` in the config.yaml of that workspace's\n" +
+		indent + "     .beads, by hand (`bd config set` is refused while this database has\n" +
+		indent + "     pending migrations): bootstrap clones from sync.remote (or, if that is\n" +
+		indent + "     unset, from Dolt data on git origin), never from the database you move.\n" +
+		indent + "  2. Coordinate downtime with every client of the server, then stop the\n" +
+		indent + "     process serving this database.\n" +
+		indent + "  3. On that host, move ONLY this database's directory out of the server's\n" +
+		indent + "     actual data_dir (.beads/dolt/ only for a server bd runs for this workspace;\n" +
+		indent + "     a shared or custom server's data_dir is wherever it is configured — see\n" +
+		indent + "     re-clone gotchas in docs/recovery/init-safety.md). Keep the moved copy.\n" +
+		indent + "  4. Restart the server as required, then run, from a workspace connected\n" +
+		indent + "     directly to it (not through a proxy):\n" +
+		"        bd bootstrap\n" +
+		adoptPlanCheck(indent+"     ")
+}
+
+// adoptPreservationNote says where a plain adopt's unpushed work survives. The
+// gate cannot know whether an old-release export exists, so the import is
+// conditional; this binary's own export can fail while migrations are pending
+// and the push is refused, so neither is prescribed as a prerequisite.
+func adoptPreservationNote(indent string) string {
+	return indent + "The re-clone brings only what the remote has: local issues you never pushed\n" +
+		indent + "stay in the moved-aside copy, which a compatible older bd can still open.\n" +
+		indent + "If you exported them with the OLD bd before upgrading, restore them\n" +
+		indent + "afterwards with `bd import <backup-file>`.\n"
+}
+
+// adoptFastForwardPreservationNote is adoptPreservationNote for adopt-ff: no
+// local commit is lost, but the re-clone still omits clone-local data such as
+// wisps, which survives only in the moved-aside copy.
+func adoptFastForwardPreservationNote(indent string) string {
+	return indent + "The re-clone brings only what the remote has: clone-local data such as wisps\n" +
+		indent + "stays in the moved-aside copy, which a compatible older bd can still open.\n" +
+		indent + "If you exported it with the OLD bd before upgrading, restore it afterwards\n" +
+		indent + "with `bd import <backup-file>`.\n"
+}
+
+// userBody returns the decision-specific guidance block. The blunt #4515
+// body's designated-migrator branch and closing note are unchanged since the
+// smart gate existed; its adopt branch carries the move-aside recipe.
 func (e *RemoteMigrateGateError) userBody() string {
 	// The #6575 stop is a blunt stop (empty Decision) with a remedy the blunt
 	// body contradicts, so it is keyed on the fallback reason instead.
@@ -460,19 +606,16 @@ func (e *RemoteMigrateGateError) userBody() string {
 	case gateDecisionAdopt:
 		return "\n" +
 			"  The remote has already been migrated by another clone. Do NOT migrate here —\n" +
-			"  adopt the remote's migrated database instead:\n" +
-			"        bd bootstrap\n" +
-			"  Re-cloning replaces your local database: any local issues you have not pushed\n" +
-			"  are LOST. Push first (`bd dolt push`) or save a copy\n" +
-			"  (`bd export --all -o backup.jsonl`) before re-cloning.\n"
+			"  adopt the remote's migrated database instead.\n" +
+			e.adoptRecipe("  ") + adoptPreservationNote("  ")
 	case gateDecisionAdoptFastForward:
 		return "\n" +
-			"  The remote has already been migrated by another clone, and this clone's local\n" +
-			"  history is a strict ancestor of the remote's with a clean working set — nothing\n" +
-			"  local would be lost by adopting it (unlike a typical adopt):\n" +
-			"        bd bootstrap\n" +
-			"  Unlike the usual re-clone, this clone has no unpushed commits and no\n" +
-			"  uncommitted local changes to discard.\n"
+			"  The remote has already been migrated by another clone, and this clone's Dolt\n" +
+			"  history is a strict ancestor of the remote's with a clean working set, so\n" +
+			"  no local commit would be lost by fast-forwarding to it. That fast-forward\n" +
+			"  did not run on this open, and a re-clone still omits clone-local data such\n" +
+			"  as wisps. Do NOT migrate here — adopt the remote's database instead.\n" +
+			e.adoptRecipe("  ") + adoptFastForwardPreservationNote("  ")
 	case gateDecisionSharedNoRemote:
 		return "\n" +
 			"  This database is served to multiple clients (dolt sql-server /\n" +
@@ -501,10 +644,11 @@ func (e *RemoteMigrateGateError) userBody() string {
 			FormatMigrationVersions(e.SkewVersions) + ".\n" +
 			"  The schema has forked (#4259); `bd dolt pull` can no longer merge. Migrating\n" +
 			"  cannot un-fork it. This is a data-loss decision, not an auto-fix:\n" +
-			"    • Pick ONE clone as canonical, then re-bootstrap every other clone from it —\n" +
-			"      unpushed work on the discarded clones is LOST. Export it first\n" +
-			"      (`bd export --all -o backup.jsonl`) if you need it.\n" +
-			"        bd bootstrap\n"
+			"    • Pick ONE clone as canonical, and make sure the remote holds ITS database\n" +
+			"      before any other clone adopts. Then, on every OTHER clone, adopt the\n" +
+			"      remote's database; work those clones never pushed survives only in\n" +
+			"      their moved-aside copies.\n" +
+			e.adoptRecipe("      ") + adoptPreservationNote("      ")
 	default:
 		return "\n" +
 			"  This database syncs with a remote. Applying schema migrations on more than\n" +
@@ -519,11 +663,8 @@ func (e *RemoteMigrateGateError) userBody() string {
 			"        bd dolt push\n" +
 			"    • Another machine has already migrated: adopt its database instead of\n" +
 			"      migrating here — re-clone from the remote so you receive the migrated\n" +
-			"      schema:\n" +
-			"        bd bootstrap\n" +
-			"      Re-cloning replaces your local database: any local issues you have not\n" +
-			"      pushed are LOST. Push first (`bd dolt push`) or save a copy\n" +
-			"      (`bd export --all -o backup.jsonl`) before re-cloning.\n" +
+			"      schema.\n" +
+			e.adoptRecipe("      ") + adoptPreservationNote("      ") +
 			"\n" +
 			"  Several machines on one remote? Only ONE migrates. Get every other clone\n" +
 			"  fully in sync on its current binary, then after the migrator pushes run\n" +
@@ -589,19 +730,23 @@ func (e *RemoteMigrateGateError) AgentDirective() string {
 	switch e.Decision {
 	case gateDecisionAdopt:
 		return "Adopt, do NOT migrate: the remote is already migrated, so migrating here would fork it (#4259). " +
-			"Adoption re-clones and replaces the local database (unpushed local work is lost), so it is a destructive " +
-			"operator decision — surface remote_migrate_gate.options to the operator, do NOT auto-run bd bootstrap."
+			e.adoptDirectivePrereq() + " The re-clone brings only what the remote has, so unpushed local work " +
+			"survives only in the moved-aside copy: a destructive operator decision — surface " +
+			"remote_migrate_gate.options to the operator, do NOT auto-run the move or bd bootstrap."
 	case gateDecisionAdoptFastForward:
-		return "Adopt, do NOT migrate: the remote is already migrated, and this clone's local history is a strict " +
-			"ancestor of the remote's with a clean working set, so adopting is loss-free (no unpushed commits, no " +
-			"uncommitted changes discarded) — unlike a typical adopt. Still surface remote_migrate_gate.options to " +
-			"the operator rather than auto-running bd bootstrap; the current adopt mechanism is unchanged until an " +
-			"automatic fast-forward lands (#4259 follow-up)."
+		return "Adopt, do NOT migrate: the remote is already migrated, and this clone's Dolt history is a strict " +
+			"ancestor of the remote's with a clean working set, so no local commit would be lost by fast-forwarding " +
+			"to it. That fast-forward did not run on this open, and a re-clone still omits clone-local data such as " +
+			"wisps, which then survives only in the moved-aside copy, so adoption here is operator-directed: " +
+			e.adoptDirectivePrereq() + " Surface remote_migrate_gate.options to the operator; do NOT auto-run the " +
+			"move or bd bootstrap."
 	case gateDecisionForkSkew:
 		return "Do NOT migrate: this clone and the remote already applied different content for migration(s) " +
 			FormatMigrationVersions(e.SkewVersions) + " — the schema has forked (#4259) and migrating cannot un-fork it. " +
-			"Resolving requires picking a canonical clone and re-bootstrapping the others, discarding their unpushed " +
-			"work — a data-loss decision. Surface remote_migrate_gate.options to the operator; do NOT auto-run anything."
+			"Resolving requires picking a canonical clone, making sure the remote holds its database, and adopting it " +
+			"on every other clone, whose unpushed work then survives only in its moved-aside copy — a data-loss " +
+			"decision. " + e.adoptDirectivePrereq() + " Surface remote_migrate_gate.options to the operator; do NOT " +
+			"auto-run anything."
 	case gateDecisionSharedNoRemote:
 		return "Coordination decision required: this database is shared with co-resident bd clients, and migrating " +
 			"promotes the schema for all of them at once — every client still on an older bd refuses the database " +
@@ -614,6 +759,25 @@ func (e *RemoteMigrateGateError) AgentDirective() string {
 			"Do NOT auto-run a migration — surface remote_migrate_gate.options to the operator and let them choose."
 	}
 }
+
+// adoptDirectivePrereq is the move-aside prerequisite the adopting directives
+// share (bd-bt60zz, #6687), worded for where the database lives.
+func (e *RemoteMigrateGateError) adoptDirectivePrereq() string {
+	if e.serverStorage() {
+		return "bd bootstrap never replaces an existing database (it reports that the database already exists and " +
+			"changes nothing), so the database has to be moved aside first — on the serving host, out of the server's " +
+			"data_dir, with the server stopped and its clients' downtime coordinated. " + adoptDirectiveRemote
+	}
+	return "bd bootstrap never replaces an existing database (it reports Nothing to do and changes nothing), so the " +
+		"local database has to be moved aside first, in the order remote_migrate_gate.options lists. " + adoptDirectiveRemote
+}
+
+// adoptDirectiveRemote is the directives' form of the recipes' remote check
+// (see adoptRecipe).
+const adoptDirectiveRemote = "Bootstrap clones from sync.remote (or, when that is unset, Dolt data on git origin), " +
+	"never from the database moved aside, so before the move bd config get sync.remote must print the remote to adopt, " +
+	"and only a bootstrap plan that clones from it may be accepted (bootstrap shows a git URL in its git+https:// or " +
+	"git+ssh:// form, without credentials)."
 
 // GateOption is one conditional remediation path for the remote-migrate gate
 // (and the migration-consent gate, MigrateConsentError.Options).
@@ -641,11 +805,19 @@ func (e *RemoteMigrateGateError) Options() []GateOption {
 	if e.Shared {
 		sharedRisk = "; on this shared server it also promotes the schema for every co-resident client, and clients still on an older bd will refuse the database until upgraded"
 	}
+	// bd-bt60zz (#6687): bootstrap never replaces an existing database, so
+	// every adopt path below carries what has to happen before it. On server
+	// storage the database is not a directory in this workspace: the move is a
+	// host operation the commands cannot express, so it is a precondition.
+	adoptCommands, adoptPrereq, adoptNoOp := EmbeddedAdoptCommands(), embeddedAdoptPrereq, embeddedAdoptNoOpRisk
+	if e.serverStorage() {
+		adoptCommands, adoptPrereq, adoptNoOp = []string{"bd bootstrap"}, serverAdoptPrereq, serverAdoptNoOpRisk
+	}
 	adopt := GateOption{
 		ID:       "adopt",
-		When:     "another machine has already migrated and pushed",
-		Commands: []string{"bd bootstrap"},
-		Risk:     "re-clones and replaces the local database; push or export unpushed work first or it is lost" + sharedRisk,
+		When:     "another machine has already migrated and pushed; " + adoptPrereq,
+		Commands: adoptCommands,
+		Risk:     adoptNoOp + "; the re-clone brings only what the remote has, so unpushed local work survives only in the moved-aside copy (keep it; restore an old-release export with bd import <backup-file> if one exists)" + sharedRisk,
 	}
 	// #6575: exactly ONE option, and it is the pull. The blunt pair below is
 	// actively wrong in this state — `bd migrate --force` is the bug, its
@@ -712,32 +884,28 @@ func (e *RemoteMigrateGateError) Options() []GateOption {
 	switch e.Decision {
 	case gateDecisionAdopt:
 		// Remote is confirmed ahead: migrate is not a valid path, only adopt.
-		adopt.When = "the remote is already migrated (confirmed by the gate) — adopt it"
+		adopt.When = "the remote is already migrated (confirmed by the gate) — adopt it; " + adoptPrereq
 		return []GateOption{adopt}
 	case gateDecisionAdoptFastForward:
 		// Remote is confirmed ahead AND this clone is a strict ancestor with a
-		// clean working set: adopting is loss-free, unlike the plain-adopt case.
-		// "Risk: none" is a statement about LOCAL data, and it stays true —
-		// but on a shared store it is not the whole risk, and an agent reading
-		// only this field would treat the adopt as free.
-		ffRisk := "none — this clone's local history is a strict ancestor of the remote's, so nothing local is discarded"
-		if e.Shared {
-			ffRisk = "nothing local is discarded (this clone's history is a strict ancestor of the remote's), but on this shared server the adopted schema is promoted for every co-resident client, and clients still on an older bd will refuse the database until upgraded"
-		}
+		// clean working set: a fast-forward loses no local commit, but adopting
+		// still means a re-clone, which omits clone-local data. The Risk never
+		// reads "none": an agent reading only this field would treat the adopt
+		// as free.
 		return []GateOption{{
 			ID:       "adopt-fast-forward",
-			When:     "the remote is already migrated and this clone can fast-forward to it losslessly (no unpushed commits, clean working set)",
-			Commands: []string{"bd bootstrap"},
-			Risk:     ffRisk,
+			When:     "the remote is already migrated and this clone's Dolt history is a strict ancestor of the remote's with a clean working set (a fast-forward would lose no local commit); " + adoptPrereq,
+			Commands: adoptCommands,
+			Risk:     "a fast-forward would lose no local commit, but the re-clone brings only what the remote has, so clone-local data such as wisps survives only in the moved-aside copy (keep it; restore an old-release export with bd import <backup-file> if one exists); " + adoptNoOp + sharedRisk,
 		}}
 	case gateDecisionForkSkew:
 		// Already forked: neither migrate nor a plain adopt is unconditionally
 		// safe; the operator must choose a canonical clone first.
 		return []GateOption{{
 			ID:       "reconcile-fork",
-			When:     "the schema has already forked (different content for migration(s) " + FormatMigrationVersions(e.SkewVersions) + "); choose ONE clone as canonical",
-			Commands: []string{"bd export --all -o backup.jsonl", "bd bootstrap"},
-			Risk:     "re-bootstrapping the non-canonical clones discards their unpushed work; export it first",
+			When:     "the schema has already forked (different content for migration(s) " + FormatMigrationVersions(e.SkewVersions) + "); choose ONE clone as canonical, make sure the remote holds its database, then on each OTHER clone: " + adoptPrereq,
+			Commands: adoptCommands,
+			Risk:     "re-adopting a non-canonical clone takes its unpushed work out of the live database: it survives only in that clone's moved-aside copy (export it with a compatible older bd first if you need it as JSONL; this binary's export can fail while migrations are pending); " + adoptNoOp + sharedRisk,
 		}}
 	case gateDecisionSharedNoRemote:
 		// No remote means no adopt path — the database is the single copy every
@@ -759,6 +927,53 @@ func (e *RemoteMigrateGateError) Options() []GateOption {
 			adopt,
 		}
 	}
+}
+
+// The adopt options' shared preconditions and no-op risk, per storage layout
+// (bd-bt60zz, #6687). The server form names no path: a shared or custom
+// server's data_dir is its own configuration, which the gate cannot see. Both
+// carry the recipes' remote check before the move and plan check after it,
+// and the embedded form the processes to stop and the checks for a database
+// one of them created during the move (see adoptRecipe).
+const (
+	adoptRemotePrereq = "bd config get sync.remote prints the remote to adopt (else first set remote: <url> under sync: " +
+		"in the workspace's .beads/config.yaml by hand, since bd config set is refused while this database has pending " +
+		"migrations; bd dolt remote list shows the database's remotes): bootstrap clones from sync.remote, or from Dolt " +
+		"data on git origin when that is unset, never from the database moved aside"
+	adoptPlanRisk = "let bootstrap go ahead only if its plan is clone from remote for that remote (it shows a git URL " +
+		"in its git+https:// or git+ssh:// form, without credentials; it asks first only in a terminal without --yes, " +
+		"BD_NON_INTERACTIVE or CI set, so otherwise run bd bootstrap --dry-run first): a restore, import or " +
+		"fresh-database plan means it did not find the remote"
+	embeddedAdoptPrereq = adoptRemotePrereq + "; run from the directory that contains the .beads that bd where " +
+		"reports, with every bd process that uses this database stopped and none started until bootstrap has finished, " +
+		"including agent sessions whose hooks run bd prime and bd in the repository's other git worktrees (bd prime " +
+		"creates a fresh database where it finds none); choose an unused destination if " +
+		".beads/backup/embeddeddolt.pre-adopt already exists"
+	embeddedAdoptNoOpRisk = "bd bootstrap alone never replaces an existing database (it reports Nothing to do and changes " +
+		"nothing), so the local database is moved aside first; " + adoptPlanRisk + "; if it reports instead that the " +
+		"database already exists, a bd process created a new one after the move: stop it, move that one aside too " +
+		"and run bootstrap again; afterwards bd where in each of the repository's other git worktrees must report " +
+		"this .beads unless it had a database of its own before the move (a worktree that reports its own .beads " +
+		"instead gained a database during the move: move that worktree's .beads/embeddeddolt aside the same way); " +
+		"keep the moved-aside copy until you have checked the result (it counts toward backup.size-cap-mb while " +
+		"auto-backup writes to .beads/backup, the default)"
+	serverAdoptPrereq = "ONLY after, in the workspace that will run bootstrap, " + adoptRemotePrereq + "; and after, " +
+		"on the host serving this database: downtime coordinated with every client of the server, the serving process " +
+		"stopped, ONLY this database's directory moved out of the server's actual data_dir (.beads/dolt/ only for a " +
+		"server bd runs for this workspace; a shared or custom server's data_dir is wherever it is configured — see " +
+		"docs/recovery/init-safety.md#re-clone-gotchas), and the server restarted as required; then run from a " +
+		"workspace connected directly to that server, not through a proxy"
+	serverAdoptNoOpRisk = "bd bootstrap alone never replaces an existing database (it reports that the database already " +
+		"exists and changes nothing), so the database is moved out of the server's data_dir first; every client of the " +
+		"server loses access during the downtime; " + adoptPlanRisk + "; keep the moved copy until you have checked " +
+		"the result"
+)
+
+// serverStorage reports whether this refusal came from a database a dolt
+// sql-server serves rather than this workspace's embedded directory, which
+// decides what an adopt has to move and where.
+func (e *RemoteMigrateGateError) serverStorage() bool {
+	return e.ServerMode || e.Shared || e.Proxied
 }
 
 // IsRemoteMigrateGateError reports whether err (or any error it wraps) is a
@@ -969,9 +1184,9 @@ func checkRemoteMigrateGate(ctx context.Context, db DBConn, remoteName string, e
 			// FastForward callback wired, or the fast-forward would not
 			// land exactly at latest — but routeSmartGate already proved
 			// this clone a strict ancestor of ref with a clean working set,
-			// so adopting is still loss-free. Give the operator the
-			// accurate adopt-ff directive instead of the generic
-			// destructive-adopt text.
+			// so fast-forwarding that Dolt history still loses no local
+			// commit. Give the operator the accurate adopt-ff directive
+			// instead of the generic destructive-adopt text.
 			return &RemoteMigrateGateError{
 				CurrentVersion:  current,
 				LatestVersion:   latest,

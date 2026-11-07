@@ -144,7 +144,8 @@ Bootstrap auto-detects the right action:
   • If no database exists: creates a fresh one — unless the workspace was already
     initialized (metadata.json has a project_id) and its server-mode database is
     missing, in which case bootstrap refuses rather than strand the existing data
-  • If database already exists: validates and reports status
+  • If database already exists: validates and reports status, and
+    leaves it unchanged (never replaced or re-cloned)
 
 If sync.remote points at a git repository, bootstrap verifies refs/dolt/data
 before cloning. Bootstrap exits non-zero when it cannot set up a database.
@@ -985,6 +986,10 @@ func printBootstrapPlan(plan BootstrapPlan) {
 		} else {
 			fmt.Printf("  Nothing to do. Use 'bd doctor' to check health.\n")
 		}
+		// bd-bt60zz (#6687): exit 0 here is the non-destructive contract, but
+		// on a clone a remote-migrate gate just told to adopt it reads as if
+		// the adopt happened. Say outright that it did not.
+		fmt.Printf("  The existing database was left unchanged: bootstrap never replaces or re-clones it.\n")
 	case "sync":
 		fmt.Printf("Bootstrap plan: clone from remote\n")
 		fmt.Printf("  Remote: %s\n", remedy.PrintedValue(redactRemoteURL(plan.SyncRemote)))
@@ -1603,10 +1608,11 @@ func printInitJoinGuidance(w io.Writer, e *schema.RemoteMigrateGateError) {
 }
 
 // printBootstrapRemoteBehindGuidance explains a remote-migrate gate refusal in
-// bootstrap terms. The gate's generic remedy ("adopt the migrated database:
-// bd bootstrap") is wrong from inside a bootstrap-style clone — the database
-// was just cloned from the remote, so the REMOTE is what is behind this binary
-// and re-cloning can never help. The way out is exactly one designated machine
+// bootstrap terms. The gate's generic adopt remedy is wrong from inside a
+// bootstrap-style clone — the database was just cloned from the remote, so
+// the REMOTE is what is behind this binary and re-cloning can never help.
+// Once the remote IS migrated, the clone still holds that database, so the
+// adopt needs the move-aside the gate's own refusal then prints (bd-bt60zz). The way out is exactly one designated machine
 // migrating and pushing. rerunCmd is the command the operator just ran ("bd
 // bootstrap", "bd init") so the don't-bother-retrying line names it.
 func printBootstrapRemoteBehindGuidance(w io.Writer, e *schema.RemoteMigrateGateError, syncRemote, rerunCmd string) {
@@ -1625,9 +1631,15 @@ func printBootstrapRemoteBehindGuidance(w io.Writer, e *schema.RemoteMigrateGate
 			"    • This machine is the designated migrator (exactly ONE machine should be):\n"+
 			"        bd migrate --force\n"+
 			"        bd dolt push\n"+
-			"      then other machines re-run `bd bootstrap` to adopt the migrated database.\n"+
+			"      then other machines adopt the migrated database: a fresh clone runs\n"+
+			"      `bd bootstrap`; a clone that already has a database must move it aside\n"+
+			"      first (bootstrap alone changes nothing there) — run `bd migrate` on it\n"+
+			"      for the adopt steps.\n"+
 			"    • Another machine is the designated migrator: wait for it to push, then\n"+
-			"      re-run `bd bootstrap`, or keep using a bd version that matches the remote.\n\n")
+			"      adopt its database. This clone keeps the database it just cloned, so\n"+
+			"      `bd bootstrap` alone changes nothing even then: move it aside first —\n"+
+			"      run `bd migrate` once the remote is migrated for the adopt steps — or\n"+
+			"      keep using a bd version that matches the remote.\n\n")
 }
 
 // doctorEnsureGitignoreForBeadsDir is the seam tests use to make the

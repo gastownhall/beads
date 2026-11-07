@@ -13,6 +13,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/storage/schema"
 )
 
 // TestIsGitCodeRepoURL verifies the URL classifier that guards sync.remote
@@ -572,6 +573,17 @@ func TestPrintBootstrapPlan_NoneWithoutDB_NoSuccessTick(t *testing.T) {
 		if !strings.Contains(out, "Nothing to do") {
 			t.Errorf("existing database lost its 'Nothing to do' line:\n%s", out)
 		}
+		// bd-bt60zz (#6687): exit 0 and "Nothing to do." on a clone the gate
+		// just refused read as success; say outright that nothing was replaced.
+		if !strings.Contains(out, "  The existing database was left unchanged: bootstrap never replaces or re-clones it.\n") {
+			t.Errorf("existing database no-op does not say the database was left unchanged:\n%s", out)
+		}
+	})
+
+	t.Run("help says an existing database is left unchanged", func(t *testing.T) {
+		if !strings.Contains(bootstrapCmd.Long, "If database already exists: validates and reports status, and\n    leaves it unchanged (never replaced or re-cloned)") {
+			t.Errorf("bootstrap help does not say an existing database is left unchanged:\n%s", bootstrapCmd.Long)
+		}
 	})
 
 	t.Run("sync plan does not print credentials", func(t *testing.T) {
@@ -880,5 +892,164 @@ func TestDetectBootstrapAction_OptionSyncRemoteStillRestoresBackup(t *testing.T)
 	}
 	if plan.SyncRemote != "" {
 		t.Errorf("SyncRemote=%q, want empty: a rejected remote must not be wired", plan.SyncRemote)
+	}
+}
+
+// TestPrintBootstrapPlan_NoneNamesNoReplace pins the #6687 clarification on
+// bootstrap's own no-op output. Every gate surface now tells an
+// existing-database clone that `bd bootstrap` reports "Nothing to do." and
+// changes nothing — and this command's own output is where that sentence is
+// either confirmed or contradicted. Both storage modes must say the database
+// was left unchanged, without touching the ✓ line, the "Nothing to do."
+// line, the server health hint, or the exit-0 contract (a plan print, not an
+// error).
+func TestPrintBootstrapPlan_NoneNamesNoReplace(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		server  bool
+		nothing string
+	}{
+		{name: "embedded", server: false, nothing: "  Nothing to do.\n"},
+		{name: "server", server: true, nothing: "  Nothing to do. Use 'bd doctor' to check health.\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pinStorageMode(t, tc.server)
+			plan := BootstrapPlan{
+				Action:      "none",
+				HasExisting: true,
+				BeadsDir:    "/workspace/.beads",
+				Reason:      "Database already exists at /workspace/.beads/embeddeddolt",
+			}
+
+			out := captureStdout(t, func() error { printBootstrapPlan(plan); return nil })
+
+			for _, want := range []string{
+				"✓ Database already exists: /workspace/.beads\n",
+				tc.nothing,
+				"The existing database was left unchanged: bootstrap never replaces or re-clones it.",
+			} {
+				if !strings.Contains(out, want) {
+					t.Errorf("no-op output missing %q:\n%s", want, out)
+				}
+			}
+			// The unchanged line follows the "Nothing to do." line it
+			// explains, and the plan stays a success print on stdout (exit 0
+			// is the caller's contract for action "none").
+			existsAt := strings.Index(out, "✓ Database already exists")
+			nothingAt := strings.Index(out, "Nothing to do")
+			unchangedAt := strings.Index(out, "left unchanged")
+			if existsAt < 0 || nothingAt < existsAt || unchangedAt < nothingAt {
+				t.Errorf("want the ✓ line, then Nothing to do, then the unchanged note:\n%s", out)
+			}
+		})
+	}
+}
+
+// TestDetectBootstrapAction_AdoptFindsRemoteOnlyThroughSyncRemote pins the
+// premise of the gate's adopt recipe (bd-bt60zz, #6687 review). Once the store
+// sits at .beads/backup/embeddeddolt.pre-adopt, bootstrap no longer counts it
+// as an existing database, and it never reads the Dolt remote recorded in it:
+// with no sync.remote (and no git origin carrying Dolt data) it plans a
+// restore, an import or a fresh database instead of the clone the recipe is
+// for. That is why the recipe checks sync.remote before the move and lets
+// bootstrap go ahead only on a "clone from remote" plan, which these other
+// plans never print. With sync.remote set, the plan clones from it even with
+// the local recovery files present.
+//
+// A git-forge sync.remote is printed in the routed git+ form bootstrap clones
+// from, with its credentials stripped, not as `bd config get sync.remote`
+// prints it, so the recipe names the remote and that display form rather than
+// asking for the configured string.
+func TestDetectBootstrapAction_AdoptFindsRemoteOnlyThroughSyncRemote(t *testing.T) {
+	const remote = "http://myserver:7007/mydb"
+	for _, tc := range []struct {
+		name       string
+		syncRemote string
+		files      []string // recovery files, relative to .beads
+		wantAction string
+		wantShown  string // a clone plan's printed Remote:
+	}{
+		{name: "no sync.remote", wantAction: "init"},
+		{name: "no sync.remote, backup jsonl", files: []string{"backup/issues.jsonl"}, wantAction: "restore"},
+		{name: "no sync.remote, tracked jsonl", files: []string{"issues.jsonl"}, wantAction: "jsonl-import"},
+		{name: "sync.remote set", syncRemote: remote, files: []string{"backup/issues.jsonl", "issues.jsonl"}, wantAction: "sync", wantShown: remote},
+		{name: "forge https sync.remote with a token", syncRemote: "https://x-access-token:secret@github.com/org/repo.git",
+			files: []string{"backup/issues.jsonl", "issues.jsonl"}, wantAction: "sync", wantShown: "git+https://github.com/org/repo.git"},
+		{name: "forge scp-style sync.remote", syncRemote: "git@github.com:org/repo.git",
+			files: []string{"backup/issues.jsonl", "issues.jsonl"}, wantAction: "sync", wantShown: "git+ssh://git@github.com/org/repo.git"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			snapshotBootstrapEnv(t)
+			config.ResetForTesting()
+			t.Cleanup(config.ResetForTesting)
+			// A forge remote is probed for refs/dolt/data before it is
+			// cloned; the remote has the migrated database.
+			stubProbeGitRemoteDoltData(t, func(string) (bool, error) { return true, nil })
+
+			tmpDir := t.TempDir()
+			beadsDir := filepath.Join(tmpDir, ".beads")
+			// The recipe's end state: the store, whose remote is recorded only
+			// in its own Dolt repo state, moved under the backup directory.
+			movedRepo := filepath.Join(beadsDir, "backup", "embeddeddolt.pre-adopt", "beads", ".dolt")
+			if err := os.MkdirAll(movedRepo, 0o750); err != nil {
+				t.Fatal(err)
+			}
+			repoState := `{"remotes":{"origin":{"name":"origin","url":"` + remote + `","fetch_specs":["refs/heads/*:refs/remotes/origin/*"],"params":{}}}}`
+			if err := os.WriteFile(filepath.Join(movedRepo, "repo_state.json"), []byte(repoState), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			for _, f := range tc.files {
+				if err := os.WriteFile(filepath.Join(beadsDir, filepath.FromSlash(f)), []byte("{}\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.syncRemote != "" {
+				seedSyncRemote(t, beadsDir, tc.syncRemote)
+			}
+			t.Setenv("BEADS_DIR", beadsDir)
+			t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "1")
+			if err := config.Initialize(); err != nil {
+				t.Fatalf("config.Initialize: %v", err)
+			}
+			// Not a git repository, so git origin cannot supply the remote.
+			t.Chdir(tmpDir)
+
+			plan := detectBootstrapAction(beadsDir, configfile.DefaultConfig())
+			if plan.Action != tc.wantAction {
+				t.Fatalf("action = %q (reason %q), want %q", plan.Action, plan.Reason, tc.wantAction)
+			}
+			if plan.HasExisting {
+				t.Error("the moved-aside store counted as an existing database")
+			}
+			if got := redactRemoteURL(plan.SyncRemote); got != tc.wantShown {
+				t.Errorf("SyncRemote = %q (shown as %q), want it shown as %q", plan.SyncRemote, got, tc.wantShown)
+			}
+
+			// The plan check the operator is told to make is decidable from
+			// what bootstrap prints: only the clone plan names the remote,
+			// and a forge remote under its display form, not as configured.
+			out := captureStdout(t, func() error { printBootstrapPlan(plan); return nil })
+			cloned := strings.Contains(out, "Bootstrap plan: clone from remote\n") && tc.wantShown != "" &&
+				strings.Contains(out, "  Remote: "+tc.wantShown+"\n")
+			if cloned != (tc.wantAction == "sync") {
+				t.Errorf("printed plan names the clone from %q = %v, want %v:\n%s", tc.wantShown, cloned, tc.wantAction == "sync", out)
+			}
+			if tc.wantShown != tc.syncRemote && tc.syncRemote != "" && strings.Contains(out, tc.syncRemote) {
+				t.Errorf("printed plan shows the configured %q, not its display form %q:\n%s", tc.syncRemote, tc.wantShown, out)
+			}
+		})
+	}
+
+	// The gate's recipe asks for exactly the plan bootstrap prints, and for
+	// the remote in the form bootstrap prints it.
+	gate := &schema.RemoteMigrateGateError{CurrentVersion: 53, LatestVersion: 67, Pending: 14, Decision: "adopt"}
+	msg := strings.Join(strings.Fields(gate.UserMessage()), " ")
+	for _, want := range []string{
+		`its plan is "clone from remote" for that remote`,
+		"it shows a git URL in its git+https:// or git+ssh:// form, without credentials",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("the adopt recipe does not check bootstrap's printed plan with %q:\n%s", want, gate.UserMessage())
+		}
 	}
 }
