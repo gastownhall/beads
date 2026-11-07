@@ -171,3 +171,103 @@ func TestNormalizeRepoPathForStorageReportsUnresolvableCwd(t *testing.T) {
 		t.Fatalf("normalizeRepoPathForStorage from a removed cwd = %q, want an error", got)
 	}
 }
+
+func TestRepoPathOutputPreservesVerbatimArguments(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		arg  func(w repoPathWorkspace) string
+		home func(w repoPathWorkspace) string
+	}{
+		{name: "absolute", arg: func(w repoPathWorkspace) string { return w.other }},
+		{name: "absolute trailing separator", arg: func(w repoPathWorkspace) string { return w.other + string(filepath.Separator) }},
+		{name: "absolute uncleaned", arg: func(w repoPathWorkspace) string {
+			return filepath.Join(w.root, "elsewhere") + string(filepath.Separator) + ".." + string(filepath.Separator) + "other"
+		}},
+		{name: "https url", arg: func(repoPathWorkspace) string { return "https://github.com/example/planning.git" }},
+		{name: "ssh url", arg: func(repoPathWorkspace) string { return "git@github.com:example/planning.git" }},
+		{name: "home relative", arg: func(repoPathWorkspace) string { return "~/other" },
+			home: func(w repoPathWorkspace) string { return w.root }},
+		{name: "bare tilde", arg: func(repoPathWorkspace) string { return "~" },
+			home: func(w repoPathWorkspace) string { return w.other }},
+	} {
+		for _, asJSON := range []bool{false, true} {
+			name := tc.name + "/text"
+			if asJSON {
+				name = tc.name + "/json"
+			}
+			t.Run(name, func(t *testing.T) {
+				w := newRepoPathWorkspace(t)
+				if tc.home != nil {
+					t.Setenv("HOME", tc.home(w))
+				}
+				jsonOutput = asJSON
+				t.Chdir(filepath.Join(w.primary, "nested"))
+				arg := tc.arg(w)
+
+				out, err := runRepoAdd(t, arg)
+				if err != nil {
+					t.Fatalf("repo add %q: %v", arg, err)
+				}
+				if got := w.additional(t); len(got) != 1 || got[0] != arg {
+					t.Fatalf("repos.additional = %q, want [%q] verbatim", got, arg)
+				}
+				if asJSON {
+					var result map[string]interface{}
+					if err := json.Unmarshal([]byte(out), &result); err != nil {
+						t.Fatalf("decode %q: %v", out, err)
+					}
+					if result["path"] != arg {
+						t.Fatalf("json path = %v, want %q verbatim", result["path"], arg)
+					}
+				} else if !strings.Contains(out, "Added repository: "+arg+"\n") {
+					t.Fatalf("output %q does not report %q verbatim", out, arg)
+				}
+			})
+		}
+	}
+}
+
+func TestExpandRepoTilde(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	for _, tc := range []struct{ in, want string }{
+		{"~", home},
+		{"~/planning", filepath.Join(home, "planning")},
+		{"planning", "planning"},
+		{"/abs/planning", "/abs/planning"},
+	} {
+		if got := expandRepoTilde(tc.in); got != tc.want {
+			t.Errorf("expandRepoTilde(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestExpandRepoTildeWithoutHomeLeavesEntryUnchanged(t *testing.T) {
+	if runtime.GOOS == "windows" || runtime.GOOS == "plan9" {
+		t.Skip("os.UserHomeDir reads HOME only on Unix")
+	}
+	t.Setenv("HOME", "")
+	if got := expandRepoTilde("~/planning"); got != "~/planning" {
+		t.Fatalf("expandRepoTilde without a home directory = %q, want the entry unchanged", got)
+	}
+}
+
+func TestNormalizeRepoPathForStorageVerbatim(t *testing.T) {
+	t.Chdir(t.TempDir())
+	abs := filepath.Join(t.TempDir(), "planning") + string(filepath.Separator)
+	for _, in := range []string{
+		abs,
+		"https://github.com/example/planning.git",
+		"git@github.com:example/planning.git",
+		"~/planning",
+		"~",
+	} {
+		got, err := normalizeRepoPathForStorage(in)
+		if err != nil {
+			t.Fatalf("normalizeRepoPathForStorage(%q): %v", in, err)
+		}
+		if got != in {
+			t.Errorf("normalizeRepoPathForStorage(%q) = %q, want it verbatim", in, got)
+		}
+	}
+}
